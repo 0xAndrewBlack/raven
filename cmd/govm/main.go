@@ -19,7 +19,7 @@ func main() {
 	memMB := flag.Int("mem", 256, "guest memory limit in MiB (advisory)")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: techvm [flags] <elf-binary> [args...]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: govm [flags] <elf-binary> [args...]\n\n")
 		fmt.Fprintf(os.Stderr, "Tech VM - in-process RISC-V Library OS\n\n")
 		flag.PrintDefaults()
 	}
@@ -59,7 +59,7 @@ func main() {
 	// Load ELF
 	result, err := loader.LoadELF(elfPath, mem, guestArgv, guestEnvp)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "techvm: load error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "govm: load error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -83,7 +83,7 @@ func main() {
 		if exitErr, ok := err.(*cpu.ExitError); ok {
 			os.Exit(exitErr.Code)
 		}
-		fmt.Fprintf(os.Stderr, "techvm: runtime error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "govm: runtime error: %v\n", err)
 		os.Exit(1)
 	}
 

@@ -570,7 +570,7 @@ func (v *VFS) Readlinkat(dirfd int, path string) (string, error) {
 		if v.ElfPath != "" {
 			return v.ElfPath, nil
 		}
-		return "/techvm", nil
+		return "/govm", nil
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()

@@ -86,7 +86,7 @@ func (m *Manager) Clone(parentCPU *cpu.CPU, childPC, childSP uint64) (int, error
 	go func() {
 		defer m.wg.Done()
 		if err := c.Run(); err != nil {
-			fmt.Printf("[techvm] thread %d exited: %v\n", tid, err)
+			fmt.Printf("[govm] thread %d exited: %v\n", tid, err)
 		}
 	}()
 

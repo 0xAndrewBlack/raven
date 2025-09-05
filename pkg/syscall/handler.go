@@ -413,7 +413,7 @@ func (h *Handler) Handle(c *cpu.CPU) {
 		h.sysSetitimer(c, a0, a1, a2)
 
 	default:
-		fmt.Fprintf(os.Stderr, "[techvm] unhandled syscall %d (a0=0x%x a1=0x%x a2=0x%x)\n", num, a0, a1, a2)
+		fmt.Fprintf(os.Stderr, "[govm] unhandled syscall %d (a0=0x%x a1=0x%x a2=0x%x)\n", num, a0, a1, a2)
 		c.X[10] = negErrno(ENOSYS)
 	}
 }
@@ -798,7 +798,7 @@ func (h *Handler) sysUname(c *cpu.CPU, buf uint64) {
 	const fieldLen = 65
 	fields := []string{
 		"Linux",         // sysname
-		"techvm",        // nodename
+		"govm",        // nodename
 		"6.1.0",         // release
 		"#1 SMP",        // version
 		"riscv64",       // machine
@@ -1040,7 +1040,7 @@ func (h *Handler) sysPrctl(c *cpu.CPU, option, arg uint64) {
 	case 15: // PR_SET_NAME
 		c.X[10] = 0
 	case 16: // PR_GET_NAME
-		h.Mem.WriteBytes(arg, append([]byte("techvm"), 0))
+		h.Mem.WriteBytes(arg, append([]byte("govm"), 0))
 		c.X[10] = 0
 	default:
 		c.X[10] = 0
