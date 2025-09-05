@@ -3,6 +3,7 @@ package cpu
 import (
 	"testing"
 
+	"github.com/mirkobrombin/go-vm/pkg/arch"
 	"github.com/mirkobrombin/go-vm/pkg/mmu"
 )
 
@@ -101,7 +102,7 @@ func TestECALL(t *testing.T) {
 	c := New(m)
 
 	called := false
-	c.Syscall = func(cpu *CPU) {
+	c.Syscall = func(cpu arch.CPU) {
 		called = true
 	}
 

@@ -3,21 +3,9 @@ package cpu
 import (
 	"fmt"
 
+	"github.com/mirkobrombin/go-vm/pkg/arch"
 	"github.com/mirkobrombin/go-vm/pkg/mmu"
 )
-
-// ExitError signals a guest exit(2) syscall.
-type ExitError struct {
-	Code int
-}
-
-func (e *ExitError) Error() string {
-	return fmt.Sprintf("guest exit(%d)", e.Code)
-}
-
-// SyscallHandler is called when the guest executes ECALL.
-// It receives the CPU state and must fill the return register (a0).
-type SyscallHandler func(cpu *CPU)
 
 // CPU represents a single RISC-V RV64GC hardware thread.
 type CPU struct {
@@ -25,7 +13,7 @@ type CPU struct {
 	PC uint64
 
 	Mem     *mmu.MMU
-	Syscall SyscallHandler
+	Syscall arch.SyscallHandler
 
 	// Floating-point unit (F+D extensions)
 	fpu FPU
@@ -43,6 +31,9 @@ type CPU struct {
 	running bool
 }
 
+// Verify interface compliance.
+var _ arch.CPU = (*CPU)(nil)
+
 // New creates a CPU bound to the given MMU.
 func New(mem *mmu.MMU) *CPU {
 	return &CPU{
@@ -53,11 +44,33 @@ func New(mem *mmu.MMU) *CPU {
 // FPUState returns a pointer to the FPU for external access (e.g. thread cloning).
 func (c *CPU) FPUState() *FPU { return &c.fpu }
 
-// SetPC sets the program counter.
+func (c *CPU) GetPC() uint64    { return c.PC }
 func (c *CPU) SetPC(addr uint64) { c.PC = addr }
-
-// SetSP sets the stack pointer (x2).
+func (c *CPU) GetSP() uint64    { return c.X[2] }
 func (c *CPU) SetSP(addr uint64) { c.X[2] = addr }
+func (c *CPU) GetTLS() uint64   { return c.X[4] }
+func (c *CPU) SetTLS(v uint64)  { c.X[4] = v }
+
+func (c *CPU) SyscallNum() uint64       { return c.X[17] }
+func (c *CPU) SyscallArgs() [6]uint64   { return [6]uint64{c.X[10], c.X[11], c.X[12], c.X[13], c.X[14], c.X[15]} }
+func (c *CPU) SetSyscallReturn(v uint64) { c.X[10] = v }
+func (c *CPU) SyscallReturnPC() uint64  { return c.PC + 4 }
+
+func (c *CPU) GetMem() *mmu.MMU    { return c.Mem }
+func (c *CPU) GetInstret() uint64  { return c.Instret }
+func (c *CPU) GetArch() arch.Arch  { return arch.ArchRISCV64 }
+
+func (c *CPU) SetSyscallHandler(h arch.SyscallHandler) { c.Syscall = h }
+
+// CloneForThread creates a copy of this CPU sharing the same MMU,
+// with register and FPU state duplicated.
+func (c *CPU) CloneForThread() arch.CPU {
+	n := New(c.Mem)
+	n.X = c.X
+	n.fpu.F = c.fpu.F
+	n.fpu.FCSR = c.fpu.FCSR
+	return n
+}
 
 // readReg reads a register, enforcing x0 == 0.
 func (c *CPU) readReg(r uint32) uint64 {

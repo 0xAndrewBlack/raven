@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/mirkobrombin/go-vm/pkg/arch"
 	"github.com/mirkobrombin/go-vm/pkg/mmu"
 )
 
@@ -21,7 +22,8 @@ type LoadResult struct {
 	EntryPoint uint64
 	StackPtr   uint64
 	BrkAddr    uint64
-	TLSAddr    uint64 // Thread-Local Storage base (0 if none)
+	TLSAddr    uint64    // Thread-Local Storage base (0 if none)
+	Arch       arch.Arch // detected architecture
 }
 
 // LoadELF parses an ELF file and maps it into the given MMU.
@@ -38,8 +40,14 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 	}
 	defer ef.Close()
 
-	if ef.Machine != elf.EM_RISCV {
-		return nil, fmt.Errorf("unsupported machine: %v (only RISC-V supported)", ef.Machine)
+	var guestArch arch.Arch
+	switch ef.Machine {
+	case elf.EM_RISCV:
+		guestArch = arch.ArchRISCV64
+	case elf.EM_X86_64:
+		guestArch = arch.ArchAMD64
+	default:
+		return nil, fmt.Errorf("unsupported machine: %v (RISC-V and x86_64 supported)", ef.Machine)
 	}
 	if ef.Class != elf.ELFCLASS64 {
 		return nil, fmt.Errorf("only 64-bit ELFs supported")
@@ -118,8 +126,9 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 	// Allocate TLS area if PT_TLS was found
 	var tlsBase uint64
 	if tlsMemsz > 0 {
-		// RISC-V TLS layout: TP points to the beginning of the TLS block.
-		// Allocate tlsMemsz + alignment
+		// TLS layout: allocate tlsMemsz + alignment + TCB space.
+		// RISC-V: TP points to beginning of TLS block.
+		// x86_64: FS base points to end of TLS block (TCB at TP+0).
 		tlsSize := (tlsMemsz + tlsAlign - 1) & ^(tlsAlign - 1)
 		tlsBase = mem.Mmap(0, tlsSize+256, mmu.PermRead|mmu.PermWrite) // +256 for TCB
 		// Copy initialized TLS data from the image
@@ -159,7 +168,7 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 		random:   randomAddr,
 	}
 
-	sp, err := initStack(mem, StackTop, argv, envp, auxvData)
+	sp, err := initStack(mem, StackTop, argv, envp, auxvData, guestArch)
 	if err != nil {
 		return nil, fmt.Errorf("init stack: %w", err)
 	}
@@ -169,6 +178,7 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 		StackPtr:   sp,
 		BrkAddr:    brkAddr,
 		TLSAddr:    tlsBase,
+		Arch:       guestArch,
 	}, nil
 }
 
@@ -182,7 +192,7 @@ type auxvInfo struct {
 }
 
 // initStack writes argc, argv pointers, envp pointers, and auxv to the stack.
-func initStack(mem *mmu.MMU, stackTop uint64, argv []string, envp []string, aux auxvInfo) (uint64, error) {
+func initStack(mem *mmu.MMU, stackTop uint64, argv []string, envp []string, aux auxvInfo, guestArch arch.Arch) (uint64, error) {
 	strArea := stackTop - 4096
 	cursor := strArea
 	argvPtrs := make([]uint64, len(argv))
@@ -203,11 +213,17 @@ func initStack(mem *mmu.MMU, stackTop uint64, argv []string, envp []string, aux 
 	}
 
 	// Platform string
+	var platform string
+	if guestArch == arch.ArchAMD64 {
+		platform = "x86_64"
+	} else {
+		platform = "riscv"
+	}
 	platformStr := cursor
-	if err := mem.WriteBytes(cursor, append([]byte("riscv"), 0)); err != nil {
+	if err := mem.WriteBytes(cursor, append([]byte(platform), 0)); err != nil {
 		return 0, err
 	}
-	cursor += 6
+	cursor += uint64(len(platform)) + 1
 
 	type auxEntry struct{ tag, val uint64 }
 	auxv := []auxEntry{
