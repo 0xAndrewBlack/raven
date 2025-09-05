@@ -135,6 +135,7 @@ const (
 	SysGetpeername    = 205
 	SysMemfdCreate    = 279
 	SysRiscvHwprobe   = 258
+	SysArchPrctl      = 259 // internal, mapped from x86-64 arch_prctl
 )
 
 // Handler holds the synthetic kernel state.
@@ -338,6 +339,8 @@ func (h *Handler) Handle(c arch.CPU) {
 	// --- Misc ---
 	case SysPrctl:
 		h.sysPrctl(c, a0, a1)
+	case SysArchPrctl:
+		h.sysArchPrctl(c, a0, a1)
 	case SysSyslog:
 		c.SetSyscallReturn(negErrno(EPERM))
 	case SysMembarrier:
@@ -1070,6 +1073,24 @@ func (h *Handler) sysPrctl(c arch.CPU, option, arg uint64) {
 		c.SetSyscallReturn(0)
 	default:
 		c.SetSyscallReturn(0)
+	}
+}
+
+func (h *Handler) sysArchPrctl(c arch.CPU, code, addr uint64) {
+	switch code {
+	case 0x1001: // ARCH_SET_GS
+		c.SetSyscallReturn(0)
+	case 0x1002: // ARCH_SET_FS
+		c.SetTLS(addr)
+		c.SetSyscallReturn(0)
+	case 0x1003: // ARCH_GET_FS
+		h.Mem.Write64(addr, c.GetTLS())
+		c.SetSyscallReturn(0)
+	case 0x1004: // ARCH_GET_GS
+		h.Mem.Write64(addr, 0)
+		c.SetSyscallReturn(0)
+	default:
+		c.SetSyscallReturn(negErrno(EINVAL))
 	}
 }
 
@@ -2191,7 +2212,7 @@ var x64Map = map[uint64]uint64{
 	137: SysStatx,      // statfs → stub
 	155: SysPrctl,      // pivot_root → stub
 	157: SysPrctl,
-	158: SysSchedGetaffinity,  // arch_prctl → stub
+	158: SysArchPrctl,
 	160: SysSchedSetaffinity,  // setrlimit → stub
 	186: SysGettid,
 	202: SysFutex,
@@ -2231,6 +2252,7 @@ var x64Map = map[uint64]uint64{
 	289: SysPipe2,
 	290: SysEpollCreate1,
 	291: SysStatx,      // real statx
+	273: SysSetRobustList,
 	293: SysPrlimit64,
 	302: SysRenameat2,
 	303: SysMemfdCreate,
