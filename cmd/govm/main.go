@@ -478,6 +478,75 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		return string(utf16Decode(chars))
 	}
 
+	// --- GDI rendering state ---
+	type dcState struct {
+		textColor uint32 // COLORREF
+		bkColor   uint32
+		bkMode    int32 // 1=TRANSPARENT, 2=OPAQUE
+		curBrush  uint64
+	}
+	dcMap := make(map[uint64]*dcState)
+	brushColors := make(map[uint64]uint32) // brush handle → COLORREF
+
+	// Windows 10 system colors (COLORREF = 0x00BBGGRR)
+	sysColors := [31]uint32{
+		0x00C8C8C8, // 0  COLOR_SCROLLBAR
+		0x00A56E3A, // 1  COLOR_BACKGROUND/DESKTOP
+		0x00B99D7F, // 2  COLOR_ACTIVECAPTION
+		0x00D4D0C8, // 3  COLOR_INACTIVECAPTION
+		0x00F0F0F0, // 4  COLOR_MENU
+		0x00FFFFFF, // 5  COLOR_WINDOW
+		0x00646464, // 6  COLOR_WINDOWFRAME
+		0x00000000, // 7  COLOR_MENUTEXT
+		0x00000000, // 8  COLOR_WINDOWTEXT
+		0x00FFFFFF, // 9  COLOR_CAPTIONTEXT
+		0x00D4D0C8, // 10 COLOR_ACTIVEBORDER
+		0x00D4D0C8, // 11 COLOR_INACTIVEBORDER
+		0x00808080, // 12 COLOR_APPWORKSPACE
+		0x00D77800, // 13 COLOR_HIGHLIGHT
+		0x00FFFFFF, // 14 COLOR_HIGHLIGHTTEXT
+		0x00F0F0F0, // 15 COLOR_BTNFACE / 3DFACE
+		0x00A0A0A0, // 16 COLOR_BTNSHADOW
+		0x006D6D6D, // 17 COLOR_GRAYTEXT
+		0x00000000, // 18 COLOR_BTNTEXT
+		0x00D4D0C8, // 19 COLOR_INACTIVECAPTIONTEXT
+		0x00FFFFFF, // 20 COLOR_BTNHIGHLIGHT
+		0x00696969, // 21 COLOR_3DDKSHADOW
+		0x00E3E3E3, // 22 COLOR_3DLIGHT
+		0x00000000, // 23 COLOR_INFOTEXT
+		0x00E1FFFF, // 24 COLOR_INFOBK
+		0x00000000, // 25 (reserved)
+		0x00CC6600, // 26 COLOR_HOTLIGHT
+		0x00D77800, // 27 COLOR_GRADIENTACTIVECAPTION
+		0x00DBD1C9, // 28 COLOR_GRADIENTINACTIVECAPTION
+		0x00D77800, // 29 COLOR_MENUHILIGHT
+		0x00F0F0F0, // 30 COLOR_MENUBAR
+	}
+
+	screenDC := func() *dcState {
+		return &dcState{
+			textColor: 0x000000,
+			bkColor:   0xFFFFFF,
+			bkMode:    2, // OPAQUE
+		}
+	}
+
+	getDC := func(h uint64) *dcState {
+		if dc, ok := dcMap[h]; ok {
+			return dc
+		}
+		dc := screenDC()
+		dcMap[h] = dc
+		return dc
+	}
+
+	getSysColor := func(idx uint32) uint32 {
+		if int(idx) < len(sysColors) {
+			return sysColors[idx]
+		}
+		return 0x00C0C0C0
+	}
+
 	// --- msvcrt.dll ---
 	if msvcrt, ok := synthByName["msvcrt.dll"]; ok {
 		// _initterm: void _initterm(void (**begin)(void), void (**end)(void))
@@ -2806,10 +2875,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetDC", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(gdiAlloc()) // return a valid-looking DC handle
+			h := gdiAlloc()
+			dcMap[h] = screenDC()
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "ReleaseDC", func(ctx *ntapi.TrapContext) uint32 {
+			delete(dcMap, ctx.Arg(1))
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -2882,41 +2954,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetSysColor", func(ctx *ntapi.TrapContext) uint32 {
-			idx := ctx.Arg(0)
-			// Return standard Windows 10 system colors (COLORREF = 0x00BBGGRR)
-			colors := map[uint64]uint64{
-				0:  0x00D4D0C8, // COLOR_SCROLLBAR
-				1:  0x00A56E3A, // COLOR_BACKGROUND/DESKTOP
-				2:  0x00B99D7F, // COLOR_ACTIVECAPTION
-				3:  0x00D4D0C8, // COLOR_INACTIVECAPTION
-				4:  0x00F0F0F0, // COLOR_MENU
-				5:  0x00FFFFFF, // COLOR_WINDOW
-				6:  0x00000000, // COLOR_WINDOWFRAME
-				7:  0x00000000, // COLOR_MENUTEXT
-				8:  0x00000000, // COLOR_WINDOWTEXT
-				9:  0x00FFFFFF, // COLOR_CAPTIONTEXT
-				10: 0x00D4D0C8, // COLOR_ACTIVEBORDER
-				11: 0x00D4D0C8, // COLOR_INACTIVEBORDER
-				12: 0x00808080, // COLOR_APPWORKSPACE
-				13: 0x00B99D7F, // COLOR_HIGHLIGHT
-				14: 0x00FFFFFF, // COLOR_HIGHLIGHTTEXT
-				15: 0x00F0F0F0, // COLOR_BTNFACE / 3DFACE
-				16: 0x00A0A0A0, // COLOR_BTNSHADOW / 3DSHADOW
-				17: 0x006D6D6D, // COLOR_GRAYTEXT
-				18: 0x00000000, // COLOR_BTNTEXT
-				19: 0x00D4D0C8, // COLOR_INACTIVECAPTIONTEXT
-				20: 0x00FFFFFF, // COLOR_BTNHIGHLIGHT
-				21: 0x00696969, // COLOR_3DDKSHADOW
-				22: 0x00E3E3E3, // COLOR_3DLIGHT
-				23: 0x00000000, // COLOR_INFOTEXT
-				24: 0x00E1FFFF, // COLOR_INFOBK
-				26: 0x00CC6600, // COLOR_HOTLIGHT
-			}
-			c, ok := colors[idx]
-			if !ok {
-				c = 0x00C0C0C0 // fallback gray
-			}
-			ctx.SetReturn(c)
+			ctx.SetReturn(uint64(getSysColor(uint32(ctx.Arg(0)))))
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "LoadCursorW", func(ctx *ntapi.TrapContext) uint32 {
@@ -2961,11 +2999,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "GetClientRect", func(ctx *ntapi.TrapContext) uint32 {
 			pRect := ctx.Arg(1)
+			var w, h uint32 = 800, 600
+			if wlWindow != nil {
+				w, h = uint32(wlWindow.Width), uint32(wlWindow.Height)
+			}
 			if pRect != 0 {
-				ctx.Mem.Write32(pRect, 0)      // left
-				ctx.Mem.Write32(pRect+4, 0)    // top
-				ctx.Mem.Write32(pRect+8, 800)  // right
-				ctx.Mem.Write32(pRect+12, 600) // bottom
+				ctx.Mem.Write32(pRect, 0)   // left
+				ctx.Mem.Write32(pRect+4, 0) // top
+				ctx.Mem.Write32(pRect+8, w) // right
+				ctx.Mem.Write32(pRect+12, h) // bottom
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -3108,13 +3150,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "BeginPaint", func(ctx *ntapi.TrapContext) uint32 {
 			pPaint := ctx.Arg(1)
 			hdc := gdiAlloc()
+			dcMap[hdc] = screenDC()
+			var w, h int32 = 800, 600
+			if wlWindow != nil {
+				w, h = wlWindow.Width, wlWindow.Height
+			}
 			if pPaint != 0 {
-				ctx.Mem.Write64(pPaint, hdc)      // hdc
-				ctx.Mem.Write32(pPaint+8, 1)      // fErase
-				ctx.Mem.Write32(pPaint+12, 0)     // rcPaint.left
-				ctx.Mem.Write32(pPaint+16, 0)     // rcPaint.top
-				ctx.Mem.Write32(pPaint+20, 800)   // rcPaint.right
-				ctx.Mem.Write32(pPaint+24, 600)   // rcPaint.bottom
+				ctx.Mem.Write64(pPaint, hdc)           // hdc
+				ctx.Mem.Write32(pPaint+8, 1)           // fErase
+				ctx.Mem.Write32(pPaint+12, 0)          // rcPaint.left
+				ctx.Mem.Write32(pPaint+16, 0)          // rcPaint.top
+				ctx.Mem.Write32(pPaint+20, uint32(w))  // rcPaint.right
+				ctx.Mem.Write32(pPaint+24, uint32(h))  // rcPaint.bottom
 			}
 			ctx.SetReturn(hdc)
 			return 0
@@ -3275,7 +3322,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- gdi32.dll ---
 	if gdi32, ok := synthByName["gdi32.dll"]; ok {
 		d.RegisterAutoStubHandler(gdi32, "CreateSolidBrush", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(gdiAlloc())
+			h := gdiAlloc()
+			brushColors[h] = uint32(ctx.Arg(0)) // COLORREF
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "CreatePen", func(ctx *ntapi.TrapContext) uint32 {
@@ -3291,7 +3340,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "CreateCompatibleDC", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(gdiAlloc())
+			h := gdiAlloc()
+			dcMap[h] = screenDC()
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "CreateCompatibleBitmap", func(ctx *ntapi.TrapContext) uint32 {
@@ -3303,15 +3354,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "DeleteDC", func(ctx *ntapi.TrapContext) uint32 {
+			delete(dcMap, ctx.Arg(0))
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "DeleteObject", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			h := ctx.Arg(0)
+			delete(brushColors, h)
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "SelectObject", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(gdiAlloc()) // return "previous" object
+			hdc := ctx.Arg(0)
+			hObj := ctx.Arg(1)
+			dc := getDC(hdc)
+			prev := dc.curBrush
+			// If it's a known brush, select it
+			if _, ok := brushColors[hObj]; ok {
+				dc.curBrush = hObj
+			}
+			if prev == 0 {
+				prev = gdiAlloc()
+			}
+			ctx.SetReturn(prev)
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "GetStockObject", func(ctx *ntapi.TrapContext) uint32 {
@@ -3373,22 +3438,68 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "SetBkMode", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // previous mode
+			hdc := ctx.Arg(0)
+			mode := int32(ctx.Arg(1))
+			dc := getDC(hdc)
+			prev := dc.bkMode
+			dc.bkMode = mode
+			ctx.SetReturn(uint64(prev))
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "SetBkColor", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x00FFFFFF) // previous color
+			hdc := ctx.Arg(0)
+			color := uint32(ctx.Arg(1))
+			dc := getDC(hdc)
+			prev := dc.bkColor
+			dc.bkColor = color
+			ctx.SetReturn(uint64(prev))
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "SetTextColor", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x00000000) // previous color
+			hdc := ctx.Arg(0)
+			color := uint32(ctx.Arg(1))
+			dc := getDC(hdc)
+			prev := dc.textColor
+			dc.textColor = color
+			ctx.SetReturn(uint64(prev))
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "TextOutW", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil {
+				ctx.SetReturn(1)
+				return 0
+			}
+			hdc := ctx.Arg(0)
+			x := int32(ctx.Arg(1))
+			y := int32(ctx.Arg(2))
+			lpStr := ctx.Arg(3)
+			nLen := int(ctx.Arg(4))
+			dc := getDC(hdc)
+			text := readGuestUTF16(lpStr)
+			if nLen > 0 && nLen < len(text) {
+				text = text[:nLen]
+			}
+			wlWindow.DrawText(x, y, text, dc.textColor, dc.bkColor, dc.bkMode == 2)
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "ExtTextOutW", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil {
+				ctx.SetReturn(1)
+				return 0
+			}
+			hdc := ctx.Arg(0)
+			x := int32(ctx.Arg(1))
+			y := int32(ctx.Arg(2))
+			// arg3 = options, arg4 = lpRect (skip for now)
+			lpStr := ctx.Arg(4 + 1) // 5th arg: lpString (stack arg after rect)
+			nLen := int(ctx.Arg(4 + 2)) // 6th arg: cbCount
+			dc := getDC(hdc)
+			text := readGuestUTF16(lpStr)
+			if nLen > 0 && nLen < len(text) {
+				text = text[:nLen]
+			}
+			wlWindow.DrawText(x, y, text, dc.textColor, dc.bkColor, dc.bkMode == 2)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -3397,6 +3508,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "PatBlt", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil {
+				ctx.SetReturn(1)
+				return 0
+			}
+			hdc := ctx.Arg(0)
+			x := int32(ctx.Arg(1))
+			y := int32(ctx.Arg(2))
+			w := int32(ctx.Arg(3))
+			h := int32(ctx.Arg(4 + 0)) // 5th arg on stack
+			dc := getDC(hdc)
+			color := uint32(0xF0F0F0)
+			if c, ok := brushColors[dc.curBrush]; ok {
+				color = c
+			}
+			wlWindow.DrawRect(x, y, x+w, y+h, color)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -3405,6 +3531,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "FillRect", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil {
+				ctx.SetReturn(1)
+				return 0
+			}
+			lpRect := ctx.Arg(1)
+			hBrush := ctx.Arg(2)
+			if lpRect == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+			left, _ := mem.Read32(lpRect)
+			top, _ := mem.Read32(lpRect + 4)
+			right, _ := mem.Read32(lpRect + 8)
+			bottom, _ := mem.Read32(lpRect + 12)
+
+			var color uint32
+			if c, ok := brushColors[hBrush]; ok {
+				color = c
+			} else if hBrush >= 1 && hBrush <= 31 {
+				color = getSysColor(uint32(hBrush - 1))
+			} else {
+				color = 0xF0F0F0
+			}
+			wlWindow.DrawRect(int32(left), int32(top), int32(right), int32(bottom), color)
 			ctx.SetReturn(1)
 			return 0
 		})
