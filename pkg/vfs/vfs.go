@@ -380,6 +380,63 @@ func (v *VFS) Read(fd int, buf []byte) (int, error) {
 	return 0, nil
 }
 
+// Pread reads from fd at the given offset without changing the file position.
+func (v *VFS) Pread(fd int, buf []byte, offset int64) (int, error) {
+	v.mu.Lock()
+	f, ok := v.fds[fd]
+	if !ok {
+		v.mu.Unlock()
+		return -1, fmt.Errorf("bad fd %d", fd)
+	}
+	v.mu.Unlock()
+
+	// Host file pread
+	if f.HostFile != nil {
+		return f.HostFile.ReadAt(buf, offset)
+	}
+
+	// VFS regular file
+	if f.Node != nil && f.Node.Data != nil {
+		if offset >= int64(len(f.Node.Data)) {
+			return 0, nil
+		}
+		n := copy(buf, f.Node.Data[offset:])
+		return n, nil
+	}
+
+	return 0, nil
+}
+
+// Pwrite writes to fd at the given offset without changing the file position.
+func (v *VFS) Pwrite(fd int, data []byte, offset int64) (int, error) {
+	v.mu.Lock()
+	f, ok := v.fds[fd]
+	if !ok {
+		v.mu.Unlock()
+		return -1, fmt.Errorf("bad fd %d", fd)
+	}
+	v.mu.Unlock()
+
+	// Host file pwrite
+	if f.HostFile != nil {
+		return f.HostFile.WriteAt(data, offset)
+	}
+
+	// VFS regular file
+	if f.Node != nil {
+		end := offset + int64(len(data))
+		if end > int64(len(f.Node.Data)) {
+			f.Node.Data = append(f.Node.Data, make([]byte, end-int64(len(f.Node.Data)))...)
+		}
+		copy(f.Node.Data[offset:], data)
+		f.Node.Size = int64(len(f.Node.Data))
+		f.Node.Mtime = time.Now()
+		return len(data), nil
+	}
+
+	return -1, fmt.Errorf("cannot pwrite to fd %d", fd)
+}
+
 // Write writes data to fd. For fd 1/2, routes to host output.
 func (v *VFS) Write(fd int, data []byte) (int, error) {
 	v.mu.Lock()

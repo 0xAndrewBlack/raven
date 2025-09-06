@@ -45,6 +45,8 @@ const (
 	SysWrite          = 64
 	SysReadv          = 65
 	SysWritev         = 66
+	SysPread64        = 67
+	SysPwrite64       = 68
 	SysPselect6       = 72
 	SysPpoll          = 73
 	SysReadlinkat     = 78
@@ -182,6 +184,10 @@ func (h *Handler) Handle(c arch.CPU) {
 		h.sysReadv(c, a0, a1, a2)
 	case SysRead:
 		h.sysRead(c, a0, a1, a2)
+	case SysPread64:
+		h.sysPread64(c, a0, a1, a2, a3)
+	case SysPwrite64:
+		h.sysPwrite64(c, a0, a1, a2, a3)
 
 	// --- Process lifecycle ---
 	case SysExit, SysExitGroup:
@@ -1240,6 +1246,33 @@ func (h *Handler) sysRead(c arch.CPU, fdNum, bufAddr, count uint64) {
 	c.SetSyscallReturn(uint64(n))
 }
 
+func (h *Handler) sysPread64(c arch.CPU, fdNum, bufAddr, count, offset uint64) {
+	buf := make([]byte, count)
+	n, err := h.FS.Pread(int(fdNum), buf, int64(offset))
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EBADF))
+		return
+	}
+	if n > 0 {
+		h.Mem.WriteBytes(bufAddr, buf[:n])
+	}
+	c.SetSyscallReturn(uint64(n))
+}
+
+func (h *Handler) sysPwrite64(c arch.CPU, fdNum, bufAddr, count, offset uint64) {
+	data, err := h.Mem.ReadBytes(bufAddr, int(count))
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	n, err := h.FS.Pwrite(int(fdNum), data, int64(offset))
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EBADF))
+		return
+	}
+	c.SetSyscallReturn(uint64(n))
+}
+
 func (h *Handler) sysSendfile(c arch.CPU, outFd, inFd, offsetAddr, count uint64) {
 	buf := make([]byte, count)
 	n, err := h.FS.Read(int(inFd), buf)
@@ -2292,6 +2325,7 @@ var x64Map = map[uint64]uint64{
 	4:   SysFstatat,    // stat → fstatat
 	5:   SysFstat,
 	6:   SysFstatat,    // lstat → fstatat
+	7:   SysPpoll,      // poll → ppoll
 	8:   SysLseek,
 	9:   SysMmap,
 	10:  SysMprotect,
@@ -2301,7 +2335,8 @@ var x64Map = map[uint64]uint64{
 	14:  SysRtSigprocmask,
 	15:  SysRtSigreturn,
 	16:  SysIoctl,
-	17:  SysPselect6,   // pread64 → stub
+	17:  SysPread64,     // pread64
+	18:  SysPwrite64,    // pwrite64
 	19:  SysReadv,
 	20:  SysWritev,
 	21:  SysFaccessat,  // access → faccessat
@@ -2413,19 +2448,22 @@ var x64Map = map[uint64]uint64{
 	286: SysTimerfdSettime,
 	287: SysTimerfdGettime,
 	288: SysAccept4,
-	289: SysPipe2,         // signalfd4 → stub as pipe2
+	289: SysPipe2,         // signalfd4 → pipe2 stub
 	290: SysEventfd2,
 	291: SysEpollCreate1,
 	273: SysSetRobustList,
-	293: SysPrlimit64,
-	302: SysRenameat2,
+	292: SysDup3,
+	293: SysPipe2,         // pipe2
+	302: SysPrlimit64,
 	303: SysMemfdCreate,
 	310: SysSetRobustList, // process_vm_readv → stub
 	318: SysGetrandom,
+	316: SysRenameat2,
 	319: SysMemfdCreate,
 	320: SysMembarrier,   // kexec_file_load → stub
 	334: SysRseq,
 	322: SysTimerfdCreate, // timerfd_create (new number)
+	332: SysStatx,         // statx
 	435: SysClone,       // clone3
 }
 
