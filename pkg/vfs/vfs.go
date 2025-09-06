@@ -678,10 +678,19 @@ func (v *VFS) Getdents64(fd int) []*VNode {
 	if !f.Node.IsDir {
 		return nil
 	}
-	var entries []*VNode
-	for _, child := range f.Node.Children {
-		entries = append(entries, child)
+	start := int(f.Offset)
+	if start >= len(f.Node.Children) {
+		return nil // EOF - all entries already returned
 	}
+	var entries []*VNode
+	i := 0
+	for _, child := range f.Node.Children {
+		if i >= start {
+			entries = append(entries, child)
+		}
+		i++
+	}
+	f.Offset = int64(i)
 	return entries
 }
 

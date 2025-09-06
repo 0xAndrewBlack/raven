@@ -140,6 +140,18 @@ const (
 	SysRiscvHwprobe   = 258
 	SysArchPrctl      = 259 // internal, mapped from x86-64 arch_prctl
 	SysSendfile       = 262 // internal, mapped from x86-64 sendfile
+
+	// Legacy x64 syscalls that need arg remapping to their *at variants.
+	// These use high numbers to avoid collisions with RISC-V generic numbers.
+	sysX64Open     = 10002
+	sysX64Stat     = 10004
+	sysX64Lstat    = 10006
+	sysX64Access   = 10021
+	sysX64Rename   = 10082
+	sysX64Mkdir    = 10083
+	sysX64Unlink   = 10087
+	sysX64Symlink  = 10088
+	sysX64Readlink = 10089
 )
 
 // Handler holds the synthetic kernel state.
@@ -215,6 +227,8 @@ func (h *Handler) Handle(c arch.CPU) {
 	// --- Filesystem ---
 	case SysOpenat:
 		h.sysOpenat(c, a0, a1, a2, a3)
+	case sysX64Open: // x64 open(pathname, flags, mode) → openat(AT_FDCWD, ...)
+		h.sysOpenat(c, atFDCWD, a0, a1, a2)
 	case SysClose:
 		if err := h.FS.Close(int(a0)); err != nil {
 			c.SetSyscallReturn(negErrno(EBADF))
@@ -225,6 +239,10 @@ func (h *Handler) Handle(c arch.CPU) {
 		h.sysFstat(c, a0, a1)
 	case SysFstatat:
 		h.sysFstatat(c, a0, a1, a2)
+	case sysX64Stat: // x64 stat(pathname, statbuf) → fstatat(AT_FDCWD, ...)
+		h.sysFstatat(c, atFDCWD, a0, a1)
+	case sysX64Lstat: // x64 lstat(pathname, statbuf) → fstatat(AT_FDCWD, ...)
+		h.sysFstatat(c, atFDCWD, a0, a1)
 	case SysStatx:
 		h.sysStatx(c, a0, a1, a2, a3, a4)
 	case SysLseek:
@@ -243,14 +261,22 @@ func (h *Handler) Handle(c arch.CPU) {
 		h.sysGetdents64(c, a0, a1, a2)
 	case SysReadlinkat:
 		h.sysReadlinkat(c, a0, a1, a2, a3)
+	case sysX64Readlink: // x64 readlink(pathname, buf, bufsiz) → readlinkat(AT_FDCWD, ...)
+		h.sysReadlinkat(c, atFDCWD, a0, a1, a2)
 	case SysFaccessat:
 		h.sysFaccessat(c, a0, a1)
+	case sysX64Access: // x64 access(pathname, mode) → faccessat(AT_FDCWD, ...)
+		h.sysFaccessat(c, atFDCWD, a0)
 	case SysGetcwd:
 		h.sysGetcwd(c, a0, a1)
 	case SysMkdirat:
 		h.sysMkdirat(c, a0, a1, a2)
+	case sysX64Mkdir: // x64 mkdir(pathname, mode) → mkdirat(AT_FDCWD, ...)
+		h.sysMkdirat(c, atFDCWD, a0, a1)
 	case SysUnlinkat:
 		h.sysUnlinkat(c, a0, a1, a2)
+	case sysX64Unlink: // x64 unlink(pathname) → unlinkat(AT_FDCWD, pathname, 0)
+		h.sysUnlinkat(c, atFDCWD, a0, 0)
 	case SysChdir:
 		h.sysChdir(c, a0)
 	case SysFchmod, SysFchmodat, SysFchownat, SysFchown:
@@ -267,10 +293,14 @@ func (h *Handler) Handle(c arch.CPU) {
 		c.SetSyscallReturn(0)
 	case SysSymlinkat:
 		h.sysSymlinkat(c, a0, a1, a2)
+	case sysX64Symlink: // x64 symlink(target, linkpath) → symlinkat(target, AT_FDCWD, linkpath)
+		h.sysSymlinkat(c, a0, atFDCWD, a1)
 	case SysLinkat:
 		c.SetSyscallReturn(negErrno(ENOSYS))
 	case SysRenameat2:
 		h.sysRenameat(c, a0, a1, a2, a3)
+	case sysX64Rename: // x64 rename(oldpath, newpath) → renameat(AT_FDCWD, old, AT_FDCWD, new)
+		h.sysRenameat(c, atFDCWD, a0, atFDCWD, a1)
 
 	// --- Process/Thread info ---
 	case SysGetuid, SysGeteuid, SysGetgid, SysGetegid:
@@ -500,6 +530,9 @@ const (
 	ECONNREFUSED = 111
 	EINPROGRESS  = 115
 )
+
+// AT_FDCWD is the "current working directory" sentinel for *at() syscalls.
+const atFDCWD = uint64(0xFFFFFFFFFFFFFF9C) // -100 as uint64
 
 func negErrno(e uint64) uint64 {
 	return ^(e - 1) // -e in two's complement
@@ -2320,11 +2353,11 @@ func x64SyscallToRV(num uint64) uint64 {
 var x64Map = map[uint64]uint64{
 	0:   SysRead,
 	1:   SysWrite,
-	2:   SysOpenat,     // open → openat
+	2:   sysX64Open,     // open → openat (needs AT_FDCWD)
 	3:   SysClose,
-	4:   SysFstatat,    // stat → fstatat
+	4:   sysX64Stat,    // stat → fstatat (needs AT_FDCWD)
 	5:   SysFstat,
-	6:   SysFstatat,    // lstat → fstatat
+	6:   sysX64Lstat,   // lstat → fstatat (needs AT_FDCWD)
 	7:   SysPpoll,      // poll → ppoll
 	8:   SysLseek,
 	9:   SysMmap,
@@ -2339,7 +2372,7 @@ var x64Map = map[uint64]uint64{
 	18:  SysPwrite64,    // pwrite64
 	19:  SysReadv,
 	20:  SysWritev,
-	21:  SysFaccessat,  // access → faccessat
+	21:  sysX64Access,  // access → faccessat (needs AT_FDCWD)
 	22:  SysPipe2,      // pipe → pipe2
 	23:  SysPselect6,   // select → pselect6
 	24:  SysSchedYield,
@@ -2383,11 +2416,11 @@ var x64Map = map[uint64]uint64{
 	78:  SysGetdents64,
 	79:  SysGetcwd,
 	80:  SysChdir,
-	82:  SysRenameat2,  // rename → renameat2
-	83:  SysMkdirat,    // mkdir → mkdirat
-	87:  SysUnlinkat,   // unlink → unlinkat
-	88:  SysSymlinkat,  // symlink → symlinkat
-	89:  SysReadlinkat, // readlink → readlinkat
+	82:  sysX64Rename,  // rename → renameat2 (needs 2x AT_FDCWD)
+	83:  sysX64Mkdir,   // mkdir → mkdirat (needs AT_FDCWD)
+	87:  sysX64Unlink,  // unlink → unlinkat (needs AT_FDCWD)
+	88:  sysX64Symlink, // symlink → symlinkat (needs AT_FDCWD)
+	89:  sysX64Readlink, // readlink → readlinkat (needs AT_FDCWD)
 	90:  SysFchmod,     // chmod → fchmod
 	91:  SysFchown,     // fchown
 	95:  SysUmask,
@@ -2400,7 +2433,7 @@ var x64Map = map[uint64]uint64{
 	103: SysSyslog,
 	104: SysGetgid,
 	105: SysSetTidAddress, // setuid → stub
-	106: SysFstatat,       // stat → fstatat
+	106: sysX64Stat,       // stat → fstatat (needs AT_FDCWD)
 	107: SysGeteuid,
 	108: SysGetegid,
 	110: SysGetppid,
