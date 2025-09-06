@@ -1,13 +1,28 @@
 package mmu
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sync"
 )
 
 const (
-	PageSize = 4096
-	PageMask = ^uint64(PageSize - 1)
+	PageSize  = 4096
+	PageMask  = ^uint64(PageSize - 1)
+	PageShift = 12
+
+	// Two-level page table: L1 covers top bits, L2 covers remaining bits.
+	// We support addresses up to 48 bits (256 TB virtual address space).
+	// L1 index = bits [47:27] → 2^21 = 2M entries
+	// L2 index = bits [26:12] → 2^15 = 32K entries per L2 table
+	l2Bits = 15
+	l1Bits = 21
+	l2Size = 1 << l2Bits // 32768
+	l1Size = 1 << l1Bits // 2097152
+
+	// TLB size (must be power of 2)
+	tlbSize = 1024
+	tlbMask = tlbSize - 1
 )
 
 // Permission flags for memory pages.
@@ -46,20 +61,70 @@ type PageEntry struct {
 	Perms uint8
 }
 
+// tlbEntry caches a recent page lookup.
+type tlbEntry struct {
+	tag  uint64     // page-aligned virtual address
+	page *PageEntry // nil means empty slot
+}
+
 // MMU is a software memory management unit with page-level permissions.
-// It is safe for concurrent use when protected externally or via its own mutex.
+// The hot path (Read/Write/Fetch) uses a two-level page table (slice of
+// slices) and a small direct-mapped TLB - no locks, no hash maps.
 type MMU struct {
-	mu       sync.RWMutex
-	pages    map[uint64]*PageEntry // keyed by page-aligned virtual address
+	mu       sync.RWMutex            // only for structural mutations (Map/Mmap/Munmap)
+	l1       [l1Size]*[l2Size]*PageEntry // two-level page table
+	pages    map[uint64]*PageEntry   // fallback for MapHostSlice (external Data)
+	tlb      [tlbSize]tlbEntry       // direct-mapped TLB
 	brkAddr  uint64
 	heapBase uint64
 }
 
 // New creates an MMU with no mapped pages.
 func New() *MMU {
-	return &MMU{
+	m := &MMU{
 		pages: make(map[uint64]*PageEntry),
 	}
+	return m
+}
+
+// pageIndices splits a page-aligned address into L1 and L2 indices.
+func pageIndices(vaddr uint64) (int, int) {
+	vpn := vaddr >> PageShift
+	return int(vpn >> l2Bits) & (l1Size - 1), int(vpn) & (l2Size - 1)
+}
+
+// storePage inserts a page into the two-level table.
+func (m *MMU) storePage(vaddr uint64, pe *PageEntry) {
+	i1, i2 := pageIndices(vaddr)
+	if m.l1[i1] == nil {
+		l2 := new([l2Size]*PageEntry)
+		m.l1[i1] = l2
+	}
+	m.l1[i1][i2] = pe
+	// Also invalidate TLB for this address
+	slot := (vaddr >> PageShift) & tlbMask
+	m.tlb[slot] = tlbEntry{} // clear
+}
+
+// getPage retrieves a page from the two-level table (no locks).
+func (m *MMU) getPage(vaddr uint64) *PageEntry {
+	i1, i2 := pageIndices(vaddr)
+	l2 := m.l1[i1]
+	if l2 == nil {
+		return nil
+	}
+	return l2[i2]
+}
+
+// removePage removes a page from the two-level table.
+func (m *MMU) removePage(vaddr uint64) {
+	i1, i2 := pageIndices(vaddr)
+	l2 := m.l1[i1]
+	if l2 != nil {
+		l2[i2] = nil
+	}
+	slot := (vaddr >> PageShift) & tlbMask
+	m.tlb[slot] = tlbEntry{}
 }
 
 // MapPage allocates a page at the given page-aligned virtual address.
@@ -67,15 +132,15 @@ func (m *MMU) MapPage(vaddr uint64, perms uint8) error {
 	vaddr &= PageMask
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.pages[vaddr]; ok {
-		// already mapped - update permissions
-		m.pages[vaddr].Perms = perms
+	if pe := m.getPage(vaddr); pe != nil {
+		pe.Perms = perms
 		return nil
 	}
-	m.pages[vaddr] = &PageEntry{
+	pe := &PageEntry{
 		Data:  make([]byte, PageSize),
 		Perms: perms,
 	}
+	m.storePage(vaddr, pe)
 	return nil
 }
 
@@ -87,19 +152,41 @@ func (m *MMU) MapRange(start, size uint64, perms uint8) {
 	}
 }
 
+// LookupRead is the public version of lookupPage, for use by the CPU
+// instruction fetch cache.
+func (m *MMU) LookupRead(vaddr uint64, requiredPerms uint8) (*PageEntry, uint64, error) {
+	return m.lookupPage(vaddr, requiredPerms)
+}
+
 // lookupPage returns the page entry for vaddr or a Fault.
+// lookupPage resolves a virtual address to its backing PageEntry + offset.
+// Uses a direct-mapped TLB for the fast path (no locks, no maps).
 func (m *MMU) lookupPage(vaddr uint64, requiredPerms uint8) (*PageEntry, uint64, error) {
 	base := vaddr & PageMask
-	offset := vaddr - base
-	m.mu.RLock()
-	pe, ok := m.pages[base]
-	m.mu.RUnlock()
-	if !ok {
+	offset := vaddr & (PageSize - 1)
+
+	// TLB lookup
+	slot := (base >> PageShift) & tlbMask
+	te := &m.tlb[slot]
+	if te.page != nil && te.tag == base {
+		if te.page.Perms&requiredPerms != requiredPerms {
+			return nil, 0, &Fault{Addr: vaddr, Type: FaultPermission, Perms: te.page.Perms}
+		}
+		return te.page, offset, nil
+	}
+
+	// TLB miss → page table lookup
+	pe := m.getPage(base)
+	if pe == nil {
 		return nil, 0, &Fault{Addr: vaddr, Type: FaultUnmapped, Perms: requiredPerms}
 	}
 	if pe.Perms&requiredPerms != requiredPerms {
 		return nil, 0, &Fault{Addr: vaddr, Type: FaultPermission, Perms: pe.Perms}
 	}
+
+	// Fill TLB
+	te.tag = base
+	te.page = pe
 	return pe, offset, nil
 }
 
@@ -114,41 +201,64 @@ func (m *MMU) Read8(vaddr uint64) (uint8, error) {
 
 // Read16 reads a 16-bit little-endian value.
 func (m *MMU) Read16(vaddr uint64) (uint16, error) {
-	b0, err := m.Read8(vaddr)
+	pe, off, err := m.lookupPage(vaddr, PermRead)
 	if err != nil {
 		return 0, err
 	}
-	b1, err := m.Read8(vaddr + 1)
+	if off <= PageSize-2 {
+		return binary.LittleEndian.Uint16(pe.Data[off:]), nil
+	}
+	// Cross-page boundary
+	b0 := pe.Data[off]
+	pe1, off1, err := m.lookupPage(vaddr+1, PermRead)
 	if err != nil {
 		return 0, err
 	}
-	return uint16(b0) | uint16(b1)<<8, nil
+	return uint16(b0) | uint16(pe1.Data[off1])<<8, nil
 }
 
 // Read32 reads a 32-bit little-endian value.
 func (m *MMU) Read32(vaddr uint64) (uint32, error) {
-	lo, err := m.Read16(vaddr)
+	pe, off, err := m.lookupPage(vaddr, PermRead)
 	if err != nil {
 		return 0, err
 	}
-	hi, err := m.Read16(vaddr + 2)
-	if err != nil {
-		return 0, err
+	if off <= PageSize-4 {
+		return binary.LittleEndian.Uint32(pe.Data[off:]), nil
 	}
-	return uint32(lo) | uint32(hi)<<16, nil
+	// Cross-page boundary - read byte by byte
+	var val uint32
+	val = uint32(pe.Data[off])
+	for i := uint64(1); i < 4; i++ {
+		b, err := m.Read8(vaddr + i)
+		if err != nil {
+			return 0, err
+		}
+		val |= uint32(b) << (i * 8)
+	}
+	return val, nil
 }
 
 // Read64 reads a 64-bit little-endian value.
 func (m *MMU) Read64(vaddr uint64) (uint64, error) {
-	lo, err := m.Read32(vaddr)
+	pe, off, err := m.lookupPage(vaddr, PermRead)
 	if err != nil {
 		return 0, err
 	}
-	hi, err := m.Read32(vaddr + 4)
-	if err != nil {
-		return 0, err
+	if off <= PageSize-8 {
+		return binary.LittleEndian.Uint64(pe.Data[off:]), nil
 	}
-	return uint64(lo) | uint64(hi)<<32, nil
+	// Cross-page boundary - read byte by byte
+	var val uint64
+	val = uint64(pe.Data[off])
+	for i := uint64(1); i < 8; i++ {
+		b, err := m.Read8(vaddr + i)
+		if err != nil {
+			return 0, err
+		}
+		val |= uint64(b) << (i * 8)
+	}
+	return val, nil
 }
 
 // Write8 writes a single byte.
@@ -163,34 +273,66 @@ func (m *MMU) Write8(vaddr uint64, val uint8) error {
 
 // Write16 writes a 16-bit little-endian value.
 func (m *MMU) Write16(vaddr uint64, val uint16) error {
-	if err := m.Write8(vaddr, uint8(val)); err != nil {
+	pe, off, err := m.lookupPage(vaddr, PermWrite)
+	if err != nil {
 		return err
 	}
+	if off <= PageSize-2 {
+		binary.LittleEndian.PutUint16(pe.Data[off:], val)
+		return nil
+	}
+	pe.Data[off] = uint8(val)
 	return m.Write8(vaddr+1, uint8(val>>8))
 }
 
 // Write32 writes a 32-bit little-endian value.
 func (m *MMU) Write32(vaddr uint64, val uint32) error {
-	if err := m.Write16(vaddr, uint16(val)); err != nil {
+	pe, off, err := m.lookupPage(vaddr, PermWrite)
+	if err != nil {
 		return err
 	}
-	return m.Write16(vaddr+2, uint16(val>>16))
+	if off <= PageSize-4 {
+		binary.LittleEndian.PutUint32(pe.Data[off:], val)
+		return nil
+	}
+	pe.Data[off] = uint8(val)
+	for i := uint64(1); i < 4; i++ {
+		if err := m.Write8(vaddr+i, uint8(val>>(i*8))); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Write64 writes a 64-bit little-endian value.
 func (m *MMU) Write64(vaddr uint64, val uint64) error {
-	if err := m.Write32(vaddr, uint32(val)); err != nil {
+	pe, off, err := m.lookupPage(vaddr, PermWrite)
+	if err != nil {
 		return err
 	}
-	return m.Write32(vaddr+4, uint32(val>>32))
+	if off <= PageSize-8 {
+		binary.LittleEndian.PutUint64(pe.Data[off:], val)
+		return nil
+	}
+	pe.Data[off] = uint8(val)
+	for i := uint64(1); i < 8; i++ {
+		if err := m.Write8(vaddr+i, uint8(val>>(i*8))); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // WriteBytes copies a byte slice into guest memory (requires write permission).
 func (m *MMU) WriteBytes(vaddr uint64, data []byte) error {
-	for i, b := range data {
-		if err := m.Write8(vaddr+uint64(i), b); err != nil {
+	for len(data) > 0 {
+		pe, off, err := m.lookupPage(vaddr, PermWrite)
+		if err != nil {
 			return err
 		}
+		n := copy(pe.Data[off:], data)
+		data = data[n:]
+		vaddr += uint64(n)
 	}
 	return nil
 }
@@ -198,12 +340,15 @@ func (m *MMU) WriteBytes(vaddr uint64, data []byte) error {
 // ReadBytes reads n bytes from guest memory.
 func (m *MMU) ReadBytes(vaddr uint64, n int) ([]byte, error) {
 	buf := make([]byte, n)
-	for i := 0; i < n; i++ {
-		b, err := m.Read8(vaddr + uint64(i))
+	pos := 0
+	for pos < n {
+		pe, off, err := m.lookupPage(vaddr, PermRead)
 		if err != nil {
 			return nil, err
 		}
-		buf[i] = b
+		copied := copy(buf[pos:], pe.Data[off:])
+		pos += copied
+		vaddr += uint64(copied)
 	}
 	return buf, nil
 }
@@ -214,14 +359,15 @@ func (m *MMU) Fetch16(vaddr uint64) (uint16, error) {
 	if err != nil {
 		return 0, err
 	}
-	if off+2 > PageSize {
-		pe1, off1, err1 := m.lookupPage(vaddr+1, PermExecute)
-		if err1 != nil {
-			return 0, err1
-		}
-		return uint16(pe.Data[off]) | uint16(pe1.Data[off1])<<8, nil
+	if off <= PageSize-2 {
+		return binary.LittleEndian.Uint16(pe.Data[off:]), nil
 	}
-	return uint16(pe.Data[off]) | uint16(pe.Data[off+1])<<8, nil
+	b0 := pe.Data[off]
+	pe1, off1, err1 := m.lookupPage(vaddr+1, PermExecute)
+	if err1 != nil {
+		return 0, err1
+	}
+	return uint16(b0) | uint16(pe1.Data[off1])<<8, nil
 }
 
 // Fetch32 reads a 32-bit instruction (requires execute permission).
@@ -230,22 +376,21 @@ func (m *MMU) Fetch32(vaddr uint64) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	if off+4 > PageSize {
-		// crosses page boundary - read byte-by-byte with execute check
-		var val uint32
-		for i := uint64(0); i < 4; i++ {
-			pe2, off2, err2 := m.lookupPage(vaddr+i, PermExecute)
-			if err2 != nil {
-				return 0, err2
-			}
-			val |= uint32(pe2.Data[off2]) << (i * 8)
-		}
-		return val, nil
+	if off <= PageSize-4 {
+		return binary.LittleEndian.Uint32(pe.Data[off:]), nil
 	}
-	return uint32(pe.Data[off]) |
-		uint32(pe.Data[off+1])<<8 |
-		uint32(pe.Data[off+2])<<16 |
-		uint32(pe.Data[off+3])<<24, nil
+	// crosses page boundary
+	var val uint32
+	val = uint32(pe.Data[off])
+	for i := uint64(1); i < 4; i++ {
+		addr := vaddr + i
+		pe2, off2, err2 := m.lookupPage(addr, PermExecute)
+		if err2 != nil {
+			return 0, err2
+		}
+		val |= uint32(pe2.Data[off2]) << (i * 8)
+	}
+	return val, nil
 }
 
 // SetBrk sets the program break address.
@@ -263,14 +408,14 @@ func (m *MMU) Brk(addr uint64) uint64 {
 	if addr == 0 || addr < m.heapBase {
 		return m.brkAddr
 	}
-	// map any new pages between old brk and new brk
 	oldEnd := m.brkAddr
 	for pg := oldEnd & PageMask; pg < addr; pg += PageSize {
-		if _, ok := m.pages[pg]; !ok {
-			m.pages[pg] = &PageEntry{
+		if m.getPage(pg) == nil {
+			pe := &PageEntry{
 				Data:  make([]byte, PageSize),
 				Perms: PermRead | PermWrite,
 			}
+			m.storePage(pg, pe)
 		}
 	}
 	m.brkAddr = addr
@@ -281,14 +426,13 @@ func (m *MMU) Brk(addr uint64) uint64 {
 func (m *MMU) Mmap(addr, length uint64, perms uint8) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	length = (length + PageSize - 1) & PageMask // round up
+	length = (length + PageSize - 1) & PageMask
 	if addr == 0 {
-		// find a free region above 0x4000_0000_0000
 		addr = 0x400000000000
 		for {
 			conflict := false
 			for pg := addr & PageMask; pg < addr+length; pg += PageSize {
-				if _, ok := m.pages[pg]; ok {
+				if m.getPage(pg) != nil {
 					conflict = true
 					break
 				}
@@ -301,10 +445,11 @@ func (m *MMU) Mmap(addr, length uint64, perms uint8) uint64 {
 		}
 	}
 	for pg := addr & PageMask; pg < addr+length; pg += PageSize {
-		m.pages[pg] = &PageEntry{
+		pe := &PageEntry{
 			Data:  make([]byte, PageSize),
 			Perms: perms,
 		}
+		m.storePage(pg, pe)
 	}
 	return addr
 }
@@ -315,7 +460,7 @@ func (m *MMU) Munmap(addr, length uint64) {
 	defer m.mu.Unlock()
 	end := addr + length
 	for pg := addr & PageMask; pg < end; pg += PageSize {
-		delete(m.pages, pg)
+		m.removePage(pg)
 	}
 }
 
@@ -325,18 +470,30 @@ func (m *MMU) Mprotect(addr, length uint64, perms uint8) error {
 	defer m.mu.Unlock()
 	end := addr + length
 	for pg := addr & PageMask; pg < end; pg += PageSize {
-		pe, ok := m.pages[pg]
-		if !ok {
-			// Silently skip unmapped - Linux does this
+		pe := m.getPage(pg)
+		if pe == nil {
 			continue
 		}
 		pe.Perms = perms
+		// Invalidate TLB for permission change
+		slot := (pg >> PageShift) & tlbMask
+		m.tlb[slot] = tlbEntry{}
 	}
 	return nil
 }
 
 // Write32Raw writes a 32-bit value bypassing permission checks.
 func (m *MMU) Write32Raw(vaddr uint64, val uint32) error {
+	base := vaddr & PageMask
+	offset := vaddr & (PageSize - 1)
+	pe := m.getPage(base)
+	if pe == nil {
+		return &Fault{Addr: vaddr, Type: FaultUnmapped, Perms: PermWrite}
+	}
+	if offset <= PageSize-4 {
+		binary.LittleEndian.PutUint32(pe.Data[offset:], val)
+		return nil
+	}
 	var buf [4]byte
 	buf[0] = byte(val)
 	buf[1] = byte(val >> 8)
@@ -347,6 +504,16 @@ func (m *MMU) Write32Raw(vaddr uint64, val uint32) error {
 
 // Write64Raw writes a 64-bit value bypassing permission checks.
 func (m *MMU) Write64Raw(vaddr uint64, val uint64) error {
+	base := vaddr & PageMask
+	offset := vaddr & (PageSize - 1)
+	pe := m.getPage(base)
+	if pe == nil {
+		return &Fault{Addr: vaddr, Type: FaultUnmapped, Perms: PermWrite}
+	}
+	if offset <= PageSize-8 {
+		binary.LittleEndian.PutUint64(pe.Data[offset:], val)
+		return nil
+	}
 	var buf [8]byte
 	buf[0] = byte(val)
 	buf[1] = byte(val >> 8)
@@ -359,49 +526,39 @@ func (m *MMU) Write64Raw(vaddr uint64, val uint64) error {
 	return m.WriteBytesRaw(vaddr, buf[:])
 }
 
-// WriteBytesRaw copies data into guest memory, temporarily allowing writes.
-// Used by the loader and syscall layer for placing data.
+// WriteBytesRaw copies data into guest memory, bypassing permission checks.
 func (m *MMU) WriteBytesRaw(vaddr uint64, data []byte) error {
-	for i, b := range data {
-		addr := vaddr + uint64(i)
-		base := addr & PageMask
-		offset := addr - base
-		m.mu.RLock()
-		pe, ok := m.pages[base]
-		m.mu.RUnlock()
-		if !ok {
-			return &Fault{Addr: addr, Type: FaultUnmapped, Perms: PermWrite}
+	for len(data) > 0 {
+		base := vaddr & PageMask
+		offset := vaddr & (PageSize - 1)
+		pe := m.getPage(base)
+		if pe == nil {
+			return &Fault{Addr: vaddr, Type: FaultUnmapped, Perms: PermWrite}
 		}
-		pe.Data[offset] = b
+		n := copy(pe.Data[offset:], data)
+		data = data[n:]
+		vaddr += uint64(n)
 	}
 	return nil
 }
 
 // IsMapped checks if an address has a backing page.
 func (m *MMU) IsMapped(vaddr uint64) bool {
-	base := vaddr & PageMask
-	m.mu.RLock()
-	_, ok := m.pages[base]
-	m.mu.RUnlock()
-	return ok
+	return m.getPage(vaddr&PageMask) != nil
 }
 
 // MapHostSlice aliases host memory into the guest address space.
-// Instead of allocating new pages, each page's Data slice points directly
-// at sub-slices of hostSlice. This enables zero-copy shared memory:
-// guest CPU writes go directly to the host-visible buffer.
 func (m *MMU) MapHostSlice(guestAddr uint64, hostSlice []byte, perms uint8) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	length := uint64(len(hostSlice))
 	if guestAddr == 0 {
-		// Find a free region
 		guestAddr = 0x500000000000
 		for {
 			conflict := false
 			for pg := guestAddr & PageMask; pg < guestAddr+length; pg += PageSize {
-				if _, ok := m.pages[pg]; ok {
+				if m.getPage(pg) != nil {
 					conflict = true
 					break
 				}
@@ -419,28 +576,25 @@ func (m *MMU) MapHostSlice(guestAddr uint64, hostSlice []byte, perms uint8) uint
 		remaining := length - offset
 		pageOff := (guestAddr + offset) - pgAddr
 
-		// How much of this page to cover
 		sliceLen := PageSize - pageOff
 		if sliceLen > remaining {
 			sliceLen = remaining
 		}
 
 		if pageOff == 0 && sliceLen == PageSize {
-			// Full page alias - point directly at host memory
-			m.pages[pgAddr] = &PageEntry{
+			pe := &PageEntry{
 				Data:  hostSlice[offset : offset+PageSize],
 				Perms: perms,
 			}
+			m.storePage(pgAddr, pe)
 		} else {
-			// Partial page - need a full page buffer, copy partial
-			// This handles the last page if hostSlice isn't page-aligned
-			pe, exists := m.pages[pgAddr]
-			if !exists {
+			pe := m.getPage(pgAddr)
+			if pe == nil {
 				pe = &PageEntry{
 					Data:  make([]byte, PageSize),
 					Perms: perms,
 				}
-				m.pages[pgAddr] = pe
+				m.storePage(pgAddr, pe)
 			}
 			copy(pe.Data[pageOff:], hostSlice[offset:offset+sliceLen])
 			pe.Perms = perms

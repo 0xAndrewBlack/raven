@@ -52,11 +52,12 @@ func TestWriteToReadOnly(t *testing.T) {
 func TestFetch32(t *testing.T) {
 	m := New()
 	m.MapPage(0x1000, PermRead|PermExecute)
-	// write raw bytes (we need write permission temporarily)
-	m.pages[0x1000].Data[0] = 0x13 // addi x0, x0, 0  (NOP in RISC-V)
-	m.pages[0x1000].Data[1] = 0x00
-	m.pages[0x1000].Data[2] = 0x00
-	m.pages[0x1000].Data[3] = 0x00
+	// write raw bytes using getPage (bypasses permission checks)
+	pe := m.getPage(0x1000)
+	pe.Data[0] = 0x13 // addi x0, x0, 0  (NOP in RISC-V)
+	pe.Data[1] = 0x00
+	pe.Data[2] = 0x00
+	pe.Data[3] = 0x00
 
 	instr, err := m.Fetch32(0x1000)
 	if err != nil {

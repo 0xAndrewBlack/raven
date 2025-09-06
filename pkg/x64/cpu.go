@@ -54,6 +54,10 @@ gsBase  uint64
 
 // SSE/AVX registers (128-bit XMM0-XMM15, stored as two uint64).
 xmm [16][2]uint64
+
+// Instruction fetch cache: avoids MMU lookup on sequential fetches.
+fetchPage     []byte  // current code page Data slice
+fetchPageBase uint64  // page-aligned base address of cached page
 }
 
 var _ arch.CPU = (*CPU)(nil)
@@ -63,7 +67,7 @@ func New(mem *mmu.MMU) *CPU { return &CPU{mem: mem} }
 
 func (c *CPU) Stop()                            { c.running = false }
 func (c *CPU) GetPC() uint64                    { return c.RIP }
-func (c *CPU) SetPC(v uint64)                   { c.RIP = v }
+func (c *CPU) SetPC(v uint64)                   { c.RIP = v; c.fetchPage = nil }
 func (c *CPU) GetSP() uint64                    { return c.Regs[RSP] }
 func (c *CPU) SetSP(v uint64)                   { c.Regs[RSP] = v }
 func (c *CPU) GetTLS() uint64                   { return c.fsBase }
@@ -114,6 +118,16 @@ func (c *CPU) Run() error {
 c.running = true
 for c.running {
 	if err := c.step(); err != nil {
+		// Null function call recovery: if RIP is in the null page,
+		// simulate a function that returns 0 (pop retaddr, set RAX=0).
+		if c.RIP < 0x10000 {
+			retAddr, rerr := c.pop64()
+			if rerr == nil {
+				c.Regs[RAX] = 0
+				c.RIP = retAddr
+				continue
+			}
+		}
 		return fmt.Errorf("at RIP=0x%x: %w", c.RIP, err)
 	}
 	c.instret++
@@ -142,33 +156,67 @@ func (p *prefixState) rexX() bool { return p.hasREX && p.rex&0x02 != 0 }
 func (p *prefixState) rexB() bool { return p.hasREX && p.rex&0x01 != 0 }
 
 func (c *CPU) fetch8() (byte, error) {
-b, err := c.mem.Read8(c.RIP)
-if err != nil {
-return 0, err
+pageBase := c.RIP &^ (mmu.PageSize - 1)
+off := c.RIP - pageBase
+if c.fetchPage != nil && pageBase == c.fetchPageBase {
+	b := c.fetchPage[off]
+	c.RIP++
+	return b, nil
 }
+pe, offset, err := c.mem.LookupRead(c.RIP, mmu.PermExecute)
+if err != nil {
+	return 0, err
+}
+c.fetchPage = pe.Data
+c.fetchPageBase = pageBase
+b := pe.Data[offset]
 c.RIP++
 return b, nil
 }
 
 func (c *CPU) fetch16() (uint16, error) {
-v, err := c.mem.Read16(c.RIP)
+pageBase := c.RIP &^ (mmu.PageSize - 1)
+off := c.RIP - pageBase
+if c.fetchPage != nil && pageBase == c.fetchPageBase && off <= mmu.PageSize-2 {
+	v := uint16(c.fetchPage[off]) | uint16(c.fetchPage[off+1])<<8
+	c.RIP += 2
+	return v, nil
+}
+v, err := c.mem.Fetch16(c.RIP)
 if err != nil {
-return 0, err
+	return 0, err
 }
 c.RIP += 2
 return v, nil
 }
 
 func (c *CPU) fetch32() (uint32, error) {
-v, err := c.mem.Read32(c.RIP)
+pageBase := c.RIP &^ (mmu.PageSize - 1)
+off := c.RIP - pageBase
+if c.fetchPage != nil && pageBase == c.fetchPageBase && off <= mmu.PageSize-4 {
+	d := c.fetchPage[off:]
+	v := uint32(d[0]) | uint32(d[1])<<8 | uint32(d[2])<<16 | uint32(d[3])<<24
+	c.RIP += 4
+	return v, nil
+}
+v, err := c.mem.Fetch32(c.RIP)
 if err != nil {
-return 0, err
+	return 0, err
 }
 c.RIP += 4
 return v, nil
 }
 
 func (c *CPU) fetch64() (uint64, error) {
+pageBase := c.RIP &^ (mmu.PageSize - 1)
+off := c.RIP - pageBase
+if c.fetchPage != nil && pageBase == c.fetchPageBase && off <= mmu.PageSize-8 {
+	d := c.fetchPage[off:]
+	v := uint64(d[0]) | uint64(d[1])<<8 | uint64(d[2])<<16 | uint64(d[3])<<24 |
+		uint64(d[4])<<32 | uint64(d[5])<<40 | uint64(d[6])<<48 | uint64(d[7])<<56
+	c.RIP += 8
+	return v, nil
+}
 v, err := c.mem.Read64(c.RIP)
 if err != nil {
 return 0, err
@@ -293,18 +341,13 @@ return m, nil
 // resolveRMAddr returns the value for the rm operand. If mod==3 it's a register,
 // otherwise it's a memory address (and the caller reads/writes through mem).
 // The result is cached so that repeated calls do not re-consume instruction bytes.
-func (c *CPU) resolveRMAddr(m *modrm, pfx *prefixState) (addr uint64, isReg bool, err error) {
+func (c *CPU) resolveRMAddr(m *modrm, pfx *prefixState) (uint64, bool, error) {
 if m.resolved {
 return m.cachedAddr, m.cachedIsReg, nil
 }
-defer func() {
-if err == nil {
-m.resolved = true
-m.cachedAddr = addr
-m.cachedIsReg = isReg
-}
-}()
 if m.mod == 3 {
+m.resolved = true
+m.cachedIsReg = true
 return 0, true, nil
 }
 rmField := m.raw & 7
@@ -328,6 +371,8 @@ base += c.fsBase
 base += c.gsBase
 }
 m.ripRelative = true
+m.resolved = true
+m.cachedAddr = base
 return base, false, nil
 default:
 idx := regIndex(rmField, pfx.rexB())
@@ -353,6 +398,8 @@ base += c.fsBase
 } else if pfx.segOver == 0x65 {
 base += c.gsBase
 }
+m.resolved = true
+m.cachedAddr = base
 return base, false, nil
 }
 
