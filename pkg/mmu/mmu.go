@@ -335,6 +335,30 @@ func (m *MMU) Mprotect(addr, length uint64, perms uint8) error {
 	return nil
 }
 
+// Write32Raw writes a 32-bit value bypassing permission checks.
+func (m *MMU) Write32Raw(vaddr uint64, val uint32) error {
+	var buf [4]byte
+	buf[0] = byte(val)
+	buf[1] = byte(val >> 8)
+	buf[2] = byte(val >> 16)
+	buf[3] = byte(val >> 24)
+	return m.WriteBytesRaw(vaddr, buf[:])
+}
+
+// Write64Raw writes a 64-bit value bypassing permission checks.
+func (m *MMU) Write64Raw(vaddr uint64, val uint64) error {
+	var buf [8]byte
+	buf[0] = byte(val)
+	buf[1] = byte(val >> 8)
+	buf[2] = byte(val >> 16)
+	buf[3] = byte(val >> 24)
+	buf[4] = byte(val >> 32)
+	buf[5] = byte(val >> 40)
+	buf[6] = byte(val >> 48)
+	buf[7] = byte(val >> 56)
+	return m.WriteBytesRaw(vaddr, buf[:])
+}
+
 // WriteBytesRaw copies data into guest memory, temporarily allowing writes.
 // Used by the loader and syscall layer for placing data.
 func (m *MMU) WriteBytesRaw(vaddr uint64, data []byte) error {

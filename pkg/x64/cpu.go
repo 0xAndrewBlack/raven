@@ -113,11 +113,10 @@ return n
 func (c *CPU) Run() error {
 c.running = true
 for c.running {
-rip := c.RIP
-if err := c.step(); err != nil {
-return fmt.Errorf("at RIP=0x%x: %w", rip, err)
-}
-c.instret++
+	if err := c.step(); err != nil {
+		return fmt.Errorf("at RIP=0x%x: %w", c.RIP, err)
+	}
+	c.instret++
 }
 return nil
 }
@@ -2497,8 +2496,8 @@ return nil
 // LDMXCSR / STMXCSR - ignore
 return nil
 
-// --- PREFETCH (0x18) ---
-case 0x18:
+// --- PREFETCH (0x18) / PREFETCHW (0x0D) ---
+case 0x18, 0x0d:
 m, _ := c.decodeModRM(pfx)
 if m.mod != 3 {
 c.resolveRMAddr(m, pfx) // consume displacement

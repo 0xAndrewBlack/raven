@@ -525,9 +525,9 @@ func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) e
 
 		if addr != 0 {
 			if mod.Is64 {
-				mem.Write64(imp.IATSlot, addr)
+				mem.Write64Raw(imp.IATSlot, addr)
 			} else {
-				mem.Write32(imp.IATSlot, uint32(addr))
+				mem.Write32Raw(imp.IATSlot, uint32(addr))
 			}
 		}
 	}
