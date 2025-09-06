@@ -58,6 +58,12 @@ os.Stderr.Write(data)
 }
 }
 
+// Route stdin from host
+fs.HostIn = func(fd int, buf []byte) int {
+n, _ := os.Stdin.Read(buf)
+return n
+}
+
 // Load ELF
 result, err := loader.LoadELF(elfPath, mem, guestArgv, guestEnvp)
 if err != nil {

@@ -136,6 +136,7 @@ const (
 	SysMemfdCreate    = 279
 	SysRiscvHwprobe   = 258
 	SysArchPrctl      = 259 // internal, mapped from x86-64 arch_prctl
+	SysSendfile       = 262 // internal, mapped from x86-64 sendfile
 )
 
 // Handler holds the synthetic kernel state.
@@ -353,6 +354,8 @@ func (h *Handler) Handle(c arch.CPU) {
 		c.SetSyscallReturn(0)
 	case SysTimes:
 		c.SetSyscallReturn(0)
+	case SysSendfile:
+		h.sysSendfile(c, a0, a1, a2, a3)
 
 	// --- Networking ---
 	case SysSocket:
@@ -1211,6 +1214,26 @@ func (h *Handler) sysRead(c arch.CPU, fdNum, bufAddr, count uint64) {
 		h.Mem.WriteBytes(bufAddr, buf[:n])
 	}
 	c.SetSyscallReturn(uint64(n))
+}
+
+func (h *Handler) sysSendfile(c arch.CPU, outFd, inFd, offsetAddr, count uint64) {
+	buf := make([]byte, count)
+	n, err := h.FS.Read(int(inFd), buf)
+	if err != nil || n == 0 {
+		c.SetSyscallReturn(negErrno(EBADF))
+		return
+	}
+	wn, err := h.FS.Write(int(outFd), buf[:n])
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EBADF))
+		return
+	}
+	if offsetAddr != 0 {
+		off, _ := h.Mem.Read64(offsetAddr)
+		off += uint64(n)
+		h.Mem.Write64(offsetAddr, off)
+	}
+	c.SetSyscallReturn(uint64(wn))
 }
 
 func (h *Handler) sysReadv(c arch.CPU, fdNum, iovAddr, iovcnt uint64) {
@@ -2131,8 +2154,11 @@ func x64SyscallToRV(num uint64) uint64 {
 var x64Map = map[uint64]uint64{
 	0:   SysRead,
 	1:   SysWrite,
+	2:   SysOpenat,     // open → openat
 	3:   SysClose,
+	4:   SysFstatat,    // stat → fstatat
 	5:   SysFstat,
+	6:   SysFstatat,    // lstat → fstatat
 	8:   SysLseek,
 	9:   SysMmap,
 	10:  SysMprotect,
@@ -2158,6 +2184,7 @@ var x64Map = map[uint64]uint64{
 	36:  SysGetitimer,
 	38:  SysSetitimer,
 	39:  SysGetpid,
+	40:  SysSendfile,
 	41:  SysSocket,
 	42:  SysConnect,
 	43:  SysAccept,
@@ -2205,6 +2232,7 @@ var x64Map = map[uint64]uint64{
 	103: SysSyslog,
 	104: SysGetgid,
 	105: SysSetTidAddress, // setuid → stub
+	106: SysFstatat,       // stat → fstatat
 	107: SysGeteuid,
 	108: SysGetegid,
 	110: SysGetppid,
@@ -2215,6 +2243,7 @@ var x64Map = map[uint64]uint64{
 	158: SysArchPrctl,
 	160: SysSchedSetaffinity,  // setrlimit → stub
 	186: SysGettid,
+	201: SysClockGettime, // time → clock_gettime stub
 	202: SysFutex,
 	203: SysSchedSetaffinity,
 	204: SysSchedGetaffinity,

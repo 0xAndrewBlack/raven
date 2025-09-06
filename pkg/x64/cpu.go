@@ -514,6 +514,60 @@ c.Rflags |= flagOF
 }
 }
 
+func (c *CPU) setFlagsSHLD16(dst, src uint16, count uint64) {
+result := uint16((uint32(dst)<<uint(count) | uint32(src)>>(16-uint(count))))
+c.setArithFlags(uint64(result), 2)
+c.Rflags &^= flagCF
+if (dst>>(16-uint(count)))&1 != 0 {
+c.Rflags |= flagCF
+}
+}
+
+func (c *CPU) setFlagsSHLD32(dst, src uint32, count uint64) {
+result := uint32((uint64(dst)<<uint(count) | uint64(src)>>(32-uint(count))))
+c.setArithFlags(uint64(result), 4)
+c.Rflags &^= flagCF
+if (dst>>(32-uint(count)))&1 != 0 {
+c.Rflags |= flagCF
+}
+}
+
+func (c *CPU) setFlagsSHLD64(dst, src uint64, count uint64) {
+result := dst<<uint(count) | src>>(64-uint(count))
+c.setArithFlags(result, 8)
+c.Rflags &^= flagCF
+if (dst>>(64-uint(count)))&1 != 0 {
+c.Rflags |= flagCF
+}
+}
+
+func (c *CPU) setFlagsSHRD16(dst, src uint16, count uint64) {
+result := uint16(dst>>uint(count) | src<<(16-uint(count)))
+c.setArithFlags(uint64(result), 2)
+c.Rflags &^= flagCF
+if (dst>>(uint(count)-1))&1 != 0 {
+c.Rflags |= flagCF
+}
+}
+
+func (c *CPU) setFlagsSHRD32(dst, src uint32, count uint64) {
+result := uint32(dst>>uint(count) | src<<(32-uint(count)))
+c.setArithFlags(uint64(result), 4)
+c.Rflags &^= flagCF
+if (dst>>(uint(count)-1))&1 != 0 {
+c.Rflags |= flagCF
+}
+}
+
+func (c *CPU) setFlagsSHRD64(dst, src uint64, count uint64) {
+result := dst>>uint(count) | src<<(64-uint(count))
+c.setArithFlags(result, 8)
+c.Rflags &^= flagCF
+if (dst>>(uint(count)-1))&1 != 0 {
+c.Rflags |= flagCF
+}
+}
+
 func (c *CPU) flagCond(cond byte) bool {
 switch cond {
 case 0x0: // O
@@ -1021,6 +1075,24 @@ return c.execShift(pfx, 1, -2)
 case 0xD3:
 return c.execShift(pfx, size, -2)
 
+// --- x87 FPU stubs (0xD8-0xDF) ---
+// Minimally decode the ModRM to skip the instruction bytes.
+// busybox uses FLDCW/FNSTCW for FP rounding control; we
+// just swallow these silently.
+case 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+if m.mod != 3 {
+// Memory operand: consume displacement via resolveRMAddr
+_, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+}
+return nil
+
 // --- MOVSXD (0x63) ---
 case 0x63:
 m, err := c.decodeModRM(pfx)
@@ -1408,6 +1480,74 @@ c.writeRegSized(m.reg, size, uint64(63-bits.LeadingZeros64(val)))
 }
 return nil
 
+// --- BT r/m, r (0xA3) ---
+case 0xA3:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+val, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
+}
+bitpos := c.Regs[m.reg] & uint64(size*8-1)
+c.Rflags &^= flagCF
+if val&(1<<bitpos) != 0 {
+c.Rflags |= flagCF
+}
+return nil
+
+// --- BTS r/m, r (0xAB) ---
+case 0xAB:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+val, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
+}
+bitpos := c.Regs[m.reg] & uint64(size*8-1)
+c.Rflags &^= flagCF
+if val&(1<<bitpos) != 0 {
+c.Rflags |= flagCF
+}
+return c.writeRM(m, pfx, size, val|(1<<bitpos))
+
+// --- BTR r/m, r (0xB3) ---
+case 0xB3:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+val, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
+}
+bitpos := c.Regs[m.reg] & uint64(size*8-1)
+c.Rflags &^= flagCF
+if val&(1<<bitpos) != 0 {
+c.Rflags |= flagCF
+}
+return c.writeRM(m, pfx, size, val&^(1<<bitpos))
+
+// --- BTC r/m, r (0xBB) ---
+case 0xBB:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+val, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
+}
+bitpos := c.Regs[m.reg] & uint64(size*8-1)
+c.Rflags &^= flagCF
+if val&(1<<bitpos) != 0 {
+c.Rflags |= flagCF
+}
+return c.writeRM(m, pfx, size, val^(1<<bitpos))
+
 // --- BT/BTS/BTR/BTC (0xBA group) ---
 case 0xBA:
 m, err := c.decodeModRM(pfx)
@@ -1506,6 +1646,88 @@ c.Regs[RDX] = 0
 }
 return nil
 
+// --- SHLD r/m, r, imm8 (0xA4) / SHLD r/m, r, CL (0xA5) ---
+case 0xA4, 0xA5:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var count uint64
+if op2 == 0xA4 {
+imm, err := c.fetch8()
+if err != nil {
+return err
+}
+count = uint64(imm)
+} else {
+count = c.Regs[RCX] & 0x3f
+}
+if count == 0 {
+return nil
+}
+dst, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
+}
+src := c.Regs[m.reg]
+if size == 2 {
+count &= 0x1f
+result := uint16((uint32(uint16(dst))<<uint(count) | uint32(uint16(src))>>(16-uint(count))))
+c.writeRM(m, pfx, size, uint64(result))
+c.setFlagsSHLD16(uint16(dst), uint16(src), count)
+} else if size == 4 {
+count &= 0x1f
+result := uint32((uint64(uint32(dst))<<uint(count) | uint64(uint32(src))>>(32-uint(count))))
+c.writeRM(m, pfx, size, uint64(result))
+c.setFlagsSHLD32(uint32(dst), uint32(src), count)
+} else {
+result := dst<<uint(count) | src>>(64-uint(count))
+c.writeRM(m, pfx, size, result)
+c.setFlagsSHLD64(dst, src, count)
+}
+return nil
+
+// --- SHRD r/m, r, imm8 (0xAC) / SHRD r/m, r, CL (0xAD) ---
+case 0xAC, 0xAD:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var count uint64
+if op2 == 0xAC {
+imm, err := c.fetch8()
+if err != nil {
+return err
+}
+count = uint64(imm)
+} else {
+count = c.Regs[RCX] & 0x3f
+}
+if count == 0 {
+return nil
+}
+dst, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
+}
+src := c.Regs[m.reg]
+if size == 2 {
+count &= 0x1f
+result := uint16(uint16(dst)>>uint(count) | uint16(src)<<(16-uint(count)))
+c.writeRM(m, pfx, size, uint64(result))
+c.setFlagsSHRD16(uint16(dst), uint16(src), count)
+} else if size == 4 {
+count &= 0x1f
+result := uint32(uint32(dst)>>uint(count) | uint32(src)<<(32-uint(count)))
+c.writeRM(m, pfx, size, uint64(result))
+c.setFlagsSHRD32(uint32(dst), uint32(src), count)
+} else {
+result := dst>>uint(count) | src<<(64-uint(count))
+c.writeRM(m, pfx, size, result)
+c.setFlagsSHRD64(dst, src, count)
+}
+return nil
+
 // --- MOVD/MOVQ xmm ↔ r/m (0x6E, 0x7E) ---
 case 0x6E:
 m, err := c.decodeModRM(pfx)
@@ -1573,12 +1795,37 @@ c.mem.Write64(addr+8, c.xmm[m.reg][1])
 }
 return nil
 
-// --- MOVAPS/MOVUPS xmm, xmm/m128 (0x10, 0x28) ---
+// --- MOVAPS/MOVUPS/MOVSD/MOVSS xmm, xmm/m (0x10, 0x28) ---
 case 0x10, 0x28:
 m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
+if pfx.repne { // F2: MOVSD (scalar double)
+if m.mod == 3 {
+c.xmm[m.reg][0] = c.xmm[m.rm][0]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+lo, _ := c.mem.Read64(addr)
+c.xmm[m.reg][0] = lo
+c.xmm[m.reg][1] = 0
+}
+} else if pfx.repe { // F3: MOVSS (scalar single)
+if m.mod == 3 {
+c.xmm[m.reg][0] = (c.xmm[m.reg][0] & 0xFFFFFFFF00000000) | (c.xmm[m.rm][0] & 0xFFFFFFFF)
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+v, _ := c.mem.Read32(addr)
+c.xmm[m.reg][0] = uint64(v)
+c.xmm[m.reg][1] = 0
+}
+} else { // packed 128-bit
 if m.mod == 3 {
 c.xmm[m.reg] = c.xmm[m.rm]
 } else {
@@ -1589,6 +1836,7 @@ return err
 lo, _ := c.mem.Read64(addr)
 hi, _ := c.mem.Read64(addr + 8)
 c.xmm[m.reg] = [2]uint64{lo, hi}
+}
 }
 return nil
 
@@ -1650,12 +1898,33 @@ return err
 }
 return c.mem.Write64(addr, c.xmm[m.reg][1])
 
-// --- MOVAPS/MOVUPS xmm/m128, xmm (0x11, 0x29) ---
+// --- MOVAPS/MOVUPS/MOVSD/MOVSS store (0x11, 0x29) ---
 case 0x11, 0x29:
 m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
+if pfx.repne { // F2: MOVSD store
+if m.mod == 3 {
+c.xmm[m.rm][0] = c.xmm[m.reg][0]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+c.mem.Write64(addr, c.xmm[m.reg][0])
+}
+} else if pfx.repe { // F3: MOVSS store
+if m.mod == 3 {
+c.xmm[m.rm][0] = (c.xmm[m.rm][0] & 0xFFFFFFFF00000000) | (c.xmm[m.reg][0] & 0xFFFFFFFF)
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+c.mem.Write32(addr, uint32(c.xmm[m.reg][0]))
+}
+} else { // packed 128-bit
 if m.mod == 3 {
 c.xmm[m.rm] = c.xmm[m.reg]
 } else {
@@ -1665,6 +1934,7 @@ return err
 }
 c.mem.Write64(addr, c.xmm[m.reg][0])
 c.mem.Write64(addr+8, c.xmm[m.reg][1])
+}
 }
 return nil
 
@@ -1687,6 +1957,379 @@ src[1], _ = c.mem.Read64(addr + 8)
 }
 c.xmm[m.reg][0] ^= src[0]
 c.xmm[m.reg][1] ^= src[1]
+return nil
+
+// --- Scalar SSE arithmetic (0x58-0x5E) ---
+// ADDPS/ADDPD/ADDSS/ADDSD (0x58), MULPS/.../MULSD (0x59),
+// CVTPS2PD/.../CVTSD2SS (0x5A),
+// SUBPS/SUBPD/SUBSS/SUBSD (0x5C), MINPS/.../MINSD (0x5D),
+// DIVPS/DIVPD/DIVSS/DIVSD (0x5E), MAXPS/.../MAXSD (0x5F)
+case 0x58, 0x59, 0x5A, 0x5C, 0x5D, 0x5E, 0x5F:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+if pfx.repne { // F2 prefix: scalar double
+var srcBits uint64
+if m.mod == 3 {
+srcBits = c.xmm[m.rm][0]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+srcBits, _ = c.mem.Read64(addr)
+}
+dstBits := c.xmm[m.reg][0]
+src := math.Float64frombits(srcBits)
+dst := math.Float64frombits(dstBits)
+var result float64
+switch op2 {
+case 0x58: result = dst + src
+case 0x59: result = dst * src
+case 0x5A: // CVTSD2SS - convert double to single, store in low 32 bits
+c.xmm[m.reg][0] = (c.xmm[m.reg][0] &^ 0xFFFFFFFF) | uint64(math.Float32bits(float32(src)))
+return nil
+case 0x5C: result = dst - src
+case 0x5D: result = math.Min(dst, src)
+case 0x5E: result = dst / src
+case 0x5F: result = math.Max(dst, src)
+default:
+return fmt.Errorf("unhandled F2 0F %02X", op2)
+}
+c.xmm[m.reg][0] = math.Float64bits(result)
+return nil
+} else if pfx.repe { // F3 prefix: scalar single
+var srcBits uint32
+if m.mod == 3 {
+srcBits = uint32(c.xmm[m.rm][0])
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+v, _ := c.mem.Read32(addr)
+srcBits = uint32(v)
+}
+dstBits := uint32(c.xmm[m.reg][0])
+src := math.Float32frombits(srcBits)
+dst := math.Float32frombits(dstBits)
+var result float32
+switch op2 {
+case 0x58: result = dst + src
+case 0x59: result = dst * src
+case 0x5A: // CVTSS2SD - convert single to double
+c.xmm[m.reg][0] = math.Float64bits(float64(src))
+return nil
+case 0x5C: result = dst - src
+case 0x5D: result = float32(math.Min(float64(dst), float64(src)))
+case 0x5E: result = dst / src
+case 0x5F: result = float32(math.Max(float64(dst), float64(src)))
+default:
+return fmt.Errorf("unhandled F3 0F %02X", op2)
+}
+c.xmm[m.reg][0] = (c.xmm[m.reg][0] &^ 0xFFFFFFFF) | uint64(math.Float32bits(result))
+return nil
+} else if pfx.op66 { // 66 prefix: packed double
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+d := c.xmm[m.reg]
+for i := 0; i < 2; i++ {
+sv := math.Float64frombits(src[i])
+dv := math.Float64frombits(d[i])
+var r float64
+switch op2 {
+case 0x58: r = dv + sv
+case 0x59: r = dv * sv
+case 0x5C: r = dv - sv
+case 0x5D: r = math.Min(dv, sv)
+case 0x5E: r = dv / sv
+case 0x5F: r = math.Max(dv, sv)
+default:
+return fmt.Errorf("unhandled 66 0F %02X", op2)
+}
+c.xmm[m.reg][i] = math.Float64bits(r)
+}
+return nil
+} else { // no prefix: packed single
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+d := c.xmm[m.reg]
+for q := 0; q < 2; q++ {
+var rq uint64
+for i := 0; i < 2; i++ {
+shift := uint(i * 32)
+sv := math.Float32frombits(uint32(src[q] >> shift))
+dv := math.Float32frombits(uint32(d[q] >> shift))
+var r float32
+switch op2 {
+case 0x58: r = dv + sv
+case 0x59: r = dv * sv
+case 0x5C: r = dv - sv
+case 0x5D: r = float32(math.Min(float64(dv), float64(sv)))
+case 0x5E: r = dv / sv
+case 0x5F: r = float32(math.Max(float64(dv), float64(sv)))
+default:
+return fmt.Errorf("unhandled NP 0F %02X", op2)
+}
+rq |= uint64(math.Float32bits(r)) << shift
+}
+c.xmm[m.reg][q] = rq
+}
+return nil
+}
+
+// --- CVTSI2SD / CVTSI2SS (0x2A) ---
+case 0x2A:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+val, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
+}
+if pfx.repne { // F2: CVTSI2SD
+var f float64
+if size == 8 {
+f = float64(int64(val))
+} else {
+f = float64(int32(val))
+}
+c.xmm[m.reg][0] = math.Float64bits(f)
+} else { // F3: CVTSI2SS
+var f float32
+if size == 8 {
+f = float32(int64(val))
+} else {
+f = float32(int32(val))
+}
+c.xmm[m.reg][0] = (c.xmm[m.reg][0] &^ 0xFFFFFFFF) | uint64(math.Float32bits(f))
+}
+return nil
+
+// --- CVTTSD2SI / CVTTSS2SI (0x2C) ---
+case 0x2C:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+if pfx.repne { // F2: CVTTSD2SI
+var srcBits uint64
+if m.mod == 3 {
+srcBits = c.xmm[m.rm][0]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+srcBits, _ = c.mem.Read64(addr)
+}
+f := math.Float64frombits(srcBits)
+if size == 8 {
+c.Regs[m.reg] = uint64(int64(f))
+} else {
+c.Regs[m.reg] = uint64(uint32(int32(f)))
+}
+} else { // F3: CVTTSS2SI
+var srcBits uint32
+if m.mod == 3 {
+srcBits = uint32(c.xmm[m.rm][0])
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+v, _ := c.mem.Read32(addr)
+srcBits = uint32(v)
+}
+f := math.Float32frombits(srcBits)
+if size == 8 {
+c.Regs[m.reg] = uint64(int64(f))
+} else {
+c.Regs[m.reg] = uint64(uint32(int32(f)))
+}
+}
+return nil
+
+// --- CVTSD2SI / CVTSS2SI (0x2D) --- (rounded, not truncated)
+case 0x2D:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+if pfx.repne { // F2: CVTSD2SI
+var srcBits uint64
+if m.mod == 3 {
+srcBits = c.xmm[m.rm][0]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+srcBits, _ = c.mem.Read64(addr)
+}
+f := math.Float64frombits(srcBits)
+r := math.RoundToEven(f)
+if size == 8 {
+c.Regs[m.reg] = uint64(int64(r))
+} else {
+c.Regs[m.reg] = uint64(uint32(int32(r)))
+}
+} else { // F3: CVTSS2SI
+var srcBits uint32
+if m.mod == 3 {
+srcBits = uint32(c.xmm[m.rm][0])
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+v, _ := c.mem.Read32(addr)
+srcBits = uint32(v)
+}
+f := math.Float32frombits(srcBits)
+r := math.RoundToEven(float64(f))
+if size == 8 {
+c.Regs[m.reg] = uint64(int64(r))
+} else {
+c.Regs[m.reg] = uint64(uint32(int32(r)))
+}
+}
+return nil
+
+// --- COMISS/COMISD (0x2F) / UCOMISS/UCOMISD (0x2E) ---
+case 0x2E, 0x2F:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+c.Rflags &^= flagCF | flagZF | flagPF | flagOF | flagSF
+if pfx.op66 || pfx.repne { // COMISD/UCOMISD (66 or F2 prefix)
+var srcBits uint64
+if m.mod == 3 {
+srcBits = c.xmm[m.rm][0]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+srcBits, _ = c.mem.Read64(addr)
+}
+a := math.Float64frombits(c.xmm[m.reg][0])
+b := math.Float64frombits(srcBits)
+if math.IsNaN(a) || math.IsNaN(b) {
+c.Rflags |= flagZF | flagPF | flagCF
+} else if a < b {
+c.Rflags |= flagCF
+} else if a == b {
+c.Rflags |= flagZF
+}
+} else { // COMISS/UCOMISS (no prefix or F3)
+var srcBits uint32
+if m.mod == 3 {
+srcBits = uint32(c.xmm[m.rm][0])
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+v, _ := c.mem.Read32(addr)
+srcBits = uint32(v)
+}
+a := math.Float32frombits(uint32(c.xmm[m.reg][0]))
+b := math.Float32frombits(srcBits)
+if a != a || b != b { // NaN check
+c.Rflags |= flagZF | flagPF | flagCF
+} else if a < b {
+c.Rflags |= flagCF
+} else if a == b {
+c.Rflags |= flagZF
+}
+}
+return nil
+
+// --- SQRTSD/SQRTSS/SQRTPS/SQRTPD (0x51) ---
+case 0x51:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+if pfx.repne { // F2: SQRTSD
+var srcBits uint64
+if m.mod == 3 {
+srcBits = c.xmm[m.rm][0]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+srcBits, _ = c.mem.Read64(addr)
+}
+c.xmm[m.reg][0] = math.Float64bits(math.Sqrt(math.Float64frombits(srcBits)))
+} else if pfx.repe { // F3: SQRTSS
+var srcBits uint32
+if m.mod == 3 {
+srcBits = uint32(c.xmm[m.rm][0])
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+v, _ := c.mem.Read32(addr)
+srcBits = uint32(v)
+}
+r := float32(math.Sqrt(float64(math.Float32frombits(srcBits))))
+c.xmm[m.reg][0] = (c.xmm[m.reg][0] &^ 0xFFFFFFFF) | uint64(math.Float32bits(r))
+}
+return nil
+
+// --- ANDPS/ANDPD (0x54), ANDNPS/ANDNPD (0x55), ORPS/ORPD (0x56) ---
+case 0x54, 0x55, 0x56:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+switch op2 {
+case 0x54: // ANDPS/ANDPD
+c.xmm[m.reg][0] &= src[0]
+c.xmm[m.reg][1] &= src[1]
+case 0x55: // ANDNPS/ANDNPD
+c.xmm[m.reg][0] = ^c.xmm[m.reg][0] & src[0]
+c.xmm[m.reg][1] = ^c.xmm[m.reg][1] & src[1]
+case 0x56: // ORPS/ORPD
+c.xmm[m.reg][0] |= src[0]
+c.xmm[m.reg][1] |= src[1]
+}
 return nil
 
 // --- PXOR (0xEF) ---
@@ -2484,6 +3127,261 @@ r0 |= uint64(uint32(d[0]>>shift)+uint32(src[0]>>shift)) << shift
 r1 |= uint64(uint32(d[1]>>shift)+uint32(src[1]>>shift)) << shift
 }
 c.xmm[m.reg] = [2]uint64{r0, r1}
+return nil
+
+// --- PSUBB xmm, xmm/m128 (0xF8) ---
+case 0xF8:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+d := c.xmm[m.reg]
+var r0, r1 uint64
+for i := 0; i < 8; i++ {
+shift := uint(i * 8)
+r0 |= uint64(byte(d[0]>>shift)-byte(src[0]>>shift)) << shift
+r1 |= uint64(byte(d[1]>>shift)-byte(src[1]>>shift)) << shift
+}
+c.xmm[m.reg] = [2]uint64{r0, r1}
+return nil
+
+// --- PSUBW xmm, xmm/m128 (0xF9) ---
+case 0xF9:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+d := c.xmm[m.reg]
+var r0, r1 uint64
+for i := 0; i < 4; i++ {
+shift := uint(i * 16)
+r0 |= uint64(uint16(d[0]>>shift)-uint16(src[0]>>shift)) << shift
+r1 |= uint64(uint16(d[1]>>shift)-uint16(src[1]>>shift)) << shift
+}
+c.xmm[m.reg] = [2]uint64{r0, r1}
+return nil
+
+// --- PADDB xmm, xmm/m128 (0xFC) ---
+case 0xFC:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+d := c.xmm[m.reg]
+var r0, r1 uint64
+for i := 0; i < 8; i++ {
+shift := uint(i * 8)
+r0 |= uint64(byte(d[0]>>shift)+byte(src[0]>>shift)) << shift
+r1 |= uint64(byte(d[1]>>shift)+byte(src[1]>>shift)) << shift
+}
+c.xmm[m.reg] = [2]uint64{r0, r1}
+return nil
+
+// --- PADDW xmm, xmm/m128 (0xFD) ---
+case 0xFD:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+d := c.xmm[m.reg]
+var r0, r1 uint64
+for i := 0; i < 4; i++ {
+shift := uint(i * 16)
+r0 |= uint64(uint16(d[0]>>shift)+uint16(src[0]>>shift)) << shift
+r1 |= uint64(uint16(d[1]>>shift)+uint16(src[1]>>shift)) << shift
+}
+c.xmm[m.reg] = [2]uint64{r0, r1}
+return nil
+
+// --- UNPCKLPS/UNPCKLPD (0x14), UNPCKHPS/UNPCKHPD (0x15) ---
+case 0x14:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+if pfx.op66 { // UNPCKLPD
+c.xmm[m.reg] = [2]uint64{c.xmm[m.reg][0], src[0]}
+} else { // UNPCKLPS
+d := c.xmm[m.reg]
+lo0 := (d[0] & 0xFFFFFFFF) | (src[0]&0xFFFFFFFF)<<32
+lo1 := (d[0] >> 32) | (src[0]&0xFFFFFFFF00000000)
+c.xmm[m.reg] = [2]uint64{lo0, lo1}
+}
+return nil
+
+case 0x15:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+if pfx.op66 { // UNPCKHPD
+c.xmm[m.reg] = [2]uint64{c.xmm[m.reg][1], src[1]}
+} else { // UNPCKHPS
+d := c.xmm[m.reg]
+hi0 := (d[1] & 0xFFFFFFFF) | (src[1]&0xFFFFFFFF)<<32
+hi1 := (d[1] >> 32) | (src[1]&0xFFFFFFFF00000000)
+c.xmm[m.reg] = [2]uint64{hi0, hi1}
+}
+return nil
+
+// --- SHUFPS/SHUFPD (0xC6) ---
+case 0xC6:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+imm, err := c.fetch8()
+if err != nil {
+return err
+}
+if pfx.op66 { // SHUFPD
+d := c.xmm[m.reg]
+var r [2]uint64
+if imm&1 == 0 {
+r[0] = d[0]
+} else {
+r[0] = d[1]
+}
+if imm&2 == 0 {
+r[1] = src[0]
+} else {
+r[1] = src[1]
+}
+c.xmm[m.reg] = r
+} else { // SHUFPS
+d := c.xmm[m.reg]
+getFloat := func(v [2]uint64, idx byte) uint32 {
+switch idx & 3 {
+case 0:
+return uint32(v[0])
+case 1:
+return uint32(v[0] >> 32)
+case 2:
+return uint32(v[1])
+default:
+return uint32(v[1] >> 32)
+}
+}
+r0 := uint64(getFloat(d, imm)) | uint64(getFloat(d, imm>>2))<<32
+r1 := uint64(getFloat(src, imm>>4)) | uint64(getFloat(src, imm>>6))<<32
+c.xmm[m.reg] = [2]uint64{r0, r1}
+}
+return nil
+
+// --- PSHUFD (66 0F 70) / PSHUFHW (F3 0F 70) / PSHUFLW (F2 0F 70) ---
+// (already handled 0x70 above, adding missing shuffle variants)
+
+// --- CVTDQ2PS (0F 5B) / CVTPS2DQ (66 0F 5B) / CVTTPS2DQ (F3 0F 5B) ---
+case 0x5B:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+if pfx.op66 { // CVTPS2DQ
+var r [2]uint64
+for i := 0; i < 2; i++ {
+lo := math.Float32frombits(uint32(src[i]))
+hi := math.Float32frombits(uint32(src[i] >> 32))
+r[i] = uint64(uint32(int32(lo))) | uint64(uint32(int32(hi)))<<32
+}
+c.xmm[m.reg] = r
+} else { // CVTDQ2PS
+var r [2]uint64
+for i := 0; i < 2; i++ {
+lo := float32(int32(src[i]))
+hi := float32(int32(src[i] >> 32))
+r[i] = uint64(math.Float32bits(lo)) | uint64(math.Float32bits(hi))<<32
+}
+c.xmm[m.reg] = r
+}
 return nil
 
 default:
