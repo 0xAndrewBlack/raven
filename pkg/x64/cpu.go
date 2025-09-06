@@ -4055,6 +4055,10 @@ return nil
 // =========================================================================
 
 func (c *CPU) execMOVS(pfx *prefixState, size int) error {
+hasRep := pfx.repe || pfx.repne
+if hasRep && c.Regs[RCX] == 0 {
+return nil
+}
 for {
 v, err := c.readMem(c.Regs[RSI], size)
 if err != nil {
@@ -4071,7 +4075,7 @@ c.Regs[RDI] -= delta
 c.Regs[RSI] += delta
 c.Regs[RDI] += delta
 }
-if !pfx.repe && !pfx.repne {
+if !hasRep {
 return nil
 }
 c.Regs[RCX]--
@@ -4082,6 +4086,10 @@ return nil
 }
 
 func (c *CPU) execSTOS(pfx *prefixState, size int) error {
+hasRep := pfx.repe || pfx.repne
+if hasRep && c.Regs[RCX] == 0 {
+return nil
+}
 for {
 if err := c.writeMem(c.Regs[RDI], size, c.readRegSized(RAX, size)); err != nil {
 return err
@@ -4092,7 +4100,7 @@ c.Regs[RDI] -= delta
 } else {
 c.Regs[RDI] += delta
 }
-if !pfx.repe && !pfx.repne {
+if !hasRep {
 return nil
 }
 c.Regs[RCX]--
@@ -4103,6 +4111,11 @@ return nil
 }
 
 func (c *CPU) execLODS(pfx *prefixState, size int) error {
+hasRep := pfx.repe || pfx.repne
+if hasRep && c.Regs[RCX] == 0 {
+return nil
+}
+for {
 v, err := c.readMem(c.Regs[RSI], size)
 if err != nil {
 return err
@@ -4114,10 +4127,21 @@ c.Regs[RSI] -= delta
 } else {
 c.Regs[RSI] += delta
 }
+if !hasRep {
 return nil
+}
+c.Regs[RCX]--
+if c.Regs[RCX] == 0 {
+return nil
+}
+}
 }
 
 func (c *CPU) execCMPS(pfx *prefixState, size int) error {
+hasRep := pfx.repe || pfx.repne
+if hasRep && c.Regs[RCX] == 0 {
+return nil
+}
 for {
 a, err := c.readMem(c.Regs[RSI], size)
 if err != nil {
@@ -4155,6 +4179,10 @@ return nil
 }
 
 func (c *CPU) execSCAS(pfx *prefixState, size int) error {
+hasRep := pfx.repe || pfx.repne
+if hasRep && c.Regs[RCX] == 0 {
+return nil
+}
 for {
 b, err := c.readMem(c.Regs[RDI], size)
 if err != nil {
