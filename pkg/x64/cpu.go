@@ -1292,12 +1292,15 @@ result := int64(val) * imm
 c.writeRegSized(m.reg, size, uint64(result))
 return nil
 
-// --- CLC/STC/CLD/STD ---
+// --- CLC/STC/CMC/CLD/STD ---
 case 0xF8: // CLC
 c.Rflags &^= flagCF
 return nil
 case 0xF9: // STC
 c.Rflags |= flagCF
+return nil
+case 0xF5: // CMC (Complement Carry Flag)
+c.Rflags ^= flagCF
 return nil
 case 0xFC: // CLD
 c.Rflags &^= flagDF

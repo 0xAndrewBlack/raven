@@ -1285,6 +1285,516 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(uint64(n))
 			return 0
 		})
+
+		// __stdio_common_vsprintf: narrow printf with va_list
+		d.RegisterAutoStubHandler(ucrt, "__stdio_common_vsprintf", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(1)
+			bufCount := ctx.Arg(2)
+			fmtAddr := ctx.Arg(3)
+			vaList := ctx.Arg(5)
+
+			if fmtAddr == 0 || buf == 0 || bufCount == 0 {
+				if buf != 0 && bufCount > 0 {
+					mem.Write8(buf, 0)
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			// Read narrow format string
+			var fmtBytes []byte
+			for i := 0; i < 4096; i++ {
+				b, err := mem.Read8(fmtAddr + uint64(i))
+				if err != nil || b == 0 {
+					break
+				}
+				fmtBytes = append(fmtBytes, b)
+			}
+			fmtStr := string(fmtBytes)
+			var args []uint64
+			for i := 0; i < 16; i++ {
+				v, _ := mem.Read64(vaList + uint64(i)*8)
+				args = append(args, v)
+			}
+			// Reuse wideprintf for formatting (works for narrow too)
+			result := wideprintf(fmtStr, args)
+
+			n := len(result)
+			if bufCount > 0 && uint64(n) >= bufCount {
+				n = int(bufCount) - 1
+			}
+			for i := 0; i < n; i++ {
+				mem.Write8(buf+uint64(i), result[i])
+			}
+			mem.Write8(buf+uint64(n), 0)
+			ctx.SetReturn(uint64(n))
+			return 0
+		})
+
+		// Wide-char CRT init stubs (same as narrow counterparts)
+		d.RegisterAutoStubHandler(ucrt, "_configure_wide_argv", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_initialize_wide_environment", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_get_initial_wide_environment", func(ctx *ntapi.TrapContext) uint32 {
+			envBlock := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+			mem.Write16(envBlock, 0) // empty wide env (double-null terminated)
+			mem.Write16(envBlock+2, 0)
+			ctx.SetReturn(envBlock)
+			return 0
+		})
+
+		// __p___wargv: returns pointer to wide argv (WCHAR** pointer-to-pointer)
+		var wargvSlot uint64
+		d.RegisterAutoStubHandler(ucrt, "__p___wargv", func(ctx *ntapi.TrapContext) uint32 {
+			if wargvSlot == 0 {
+				page := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+				wargvArrayAddr := page + 8
+				strOff := wargvArrayAddr + uint64((len(argv)+1)*8)
+				for i, a := range argv {
+					mem.Write64(wargvArrayAddr+uint64(i)*8, strOff)
+					runes := []rune(a)
+					for _, r := range runes {
+						mem.Write16(strOff, uint16(r))
+						strOff += 2
+					}
+					mem.Write16(strOff, 0) // null-terminate
+					strOff += 2
+				}
+				mem.Write64(wargvArrayAddr+uint64(len(argv))*8, 0)
+				mem.Write64(page, wargvArrayAddr)
+				wargvSlot = page
+			}
+			ctx.SetReturn(wargvSlot)
+			return 0
+		})
+
+		// wcslen: return length of wide string (in WCHARs)
+		d.RegisterAutoStubHandler(ucrt, "wcslen", func(ctx *ntapi.TrapContext) uint32 {
+			addr := ctx.Arg(0)
+			n := uint64(0)
+			for {
+				w, err := mem.Read16(addr + n*2)
+				if err != nil || w == 0 {
+					break
+				}
+				n++
+				if n > 0x100000 {
+					break
+				}
+			}
+			ctx.SetReturn(n)
+			return 0
+		})
+
+		// strlen: return length of narrow string
+		d.RegisterAutoStubHandler(ucrt, "strlen", func(ctx *ntapi.TrapContext) uint32 {
+			addr := ctx.Arg(0)
+			n := uint64(0)
+			for {
+				b, err := mem.Read8(addr + n)
+				if err != nil || b == 0 {
+					break
+				}
+				n++
+				if n > 0x100000 {
+					break
+				}
+			}
+			ctx.SetReturn(n)
+			return 0
+		})
+
+		// getenv: return NULL (no environment variables)
+		d.RegisterAutoStubHandler(ucrt, "getenv", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL = not found
+			return 0
+		})
+
+		// __acrt_iob_func: returns pointer to CRT FILE* for stdin/stdout/stderr
+		var crtIOBBase uint64
+		d.RegisterAutoStubHandler(ucrt, "__acrt_iob_func", func(ctx *ntapi.TrapContext) uint32 {
+			idx := ctx.Arg(0)
+			if crtIOBBase == 0 {
+				// Allocate fake FILE structs (each 0x30 bytes = 48, typical UCRT _iobuf)
+				crtIOBBase = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+			}
+			ctx.SetReturn(crtIOBBase + idx*0x30)
+			return 0
+		})
+
+		// fwrite: write to FILE* - for stderr/stdout we print to host, otherwise discard
+		d.RegisterAutoStubHandler(ucrt, "fwrite", func(ctx *ntapi.TrapContext) uint32 {
+			ptr := ctx.Arg(0)
+			size := ctx.Arg(1)
+			count := ctx.Arg(2)
+			total := size * count
+			if total > 0 && total < 0x100000 {
+				buf := make([]byte, total)
+				for i := uint64(0); i < total; i++ {
+					b, _ := mem.Read8(ptr + i)
+					buf[i] = b
+				}
+				os.Stderr.Write(buf)
+			}
+			ctx.SetReturn(count)
+			return 0
+		})
+
+		// fprintf/printf: handled via __stdio_common_vsprintf at lower level, but stub direct calls
+		d.RegisterAutoStubHandler(ucrt, "_set_new_mode", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_crt_atexit", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_register_onexit_function", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_initialize_onexit_table", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_register_thread_local_exe_atexit_callback", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+
+		// Memory functions
+		d.RegisterAutoStubHandler(ucrt, "malloc", func(ctx *ntapi.TrapContext) uint32 {
+			size := ctx.Arg(0)
+			if size == 0 {
+				size = 1
+			}
+			size = (size + 15) &^ 15
+			addr := mem.Mmap(0, size+16, mmu.PermRead|mmu.PermWrite)
+			mem.Write64(addr, size+16) // header: block size
+			ctx.SetReturn(addr + 16)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "calloc", func(ctx *ntapi.TrapContext) uint32 {
+			count := ctx.Arg(0)
+			size := ctx.Arg(1)
+			total := count * size
+			if total == 0 {
+				total = 1
+			}
+			total = (total + 15) &^ 15
+			addr := mem.Mmap(0, total+16, mmu.PermRead|mmu.PermWrite)
+			mem.Write64(addr, total+16)
+			// mmap returns zeroed memory
+			ctx.SetReturn(addr + 16)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "free", func(ctx *ntapi.TrapContext) uint32 {
+			// no-op for bump allocator
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "realloc", func(ctx *ntapi.TrapContext) uint32 {
+			ptr := ctx.Arg(0)
+			newSize := ctx.Arg(1)
+			if ptr == 0 {
+				// realloc(NULL, size) == malloc(size)
+				if newSize == 0 {
+					newSize = 1
+				}
+				newSize = (newSize + 15) &^ 15
+				addr := mem.Mmap(0, newSize+16, mmu.PermRead|mmu.PermWrite)
+				mem.Write64(addr, newSize+16)
+				ctx.SetReturn(addr + 16)
+				return 0
+			}
+			// Read old block size
+			oldBlockSize, _ := mem.Read64(ptr - 16)
+			oldDataSize := oldBlockSize - 16
+			if newSize <= oldDataSize {
+				ctx.SetReturn(ptr)
+				return 0
+			}
+			// Allocate new block and copy
+			newSize = (newSize + 15) &^ 15
+			newAddr := mem.Mmap(0, newSize+16, mmu.PermRead|mmu.PermWrite)
+			mem.Write64(newAddr, newSize+16)
+			for i := uint64(0); i < oldDataSize; i++ {
+				b, _ := mem.Read8(ptr + i)
+				mem.Write8(newAddr+16+i, b)
+			}
+			ctx.SetReturn(newAddr + 16)
+			return 0
+		})
+
+		// String functions
+		d.RegisterAutoStubHandler(ucrt, "memset", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			val := byte(ctx.Arg(1))
+			count := ctx.Arg(2)
+			for i := uint64(0); i < count && i < 0x1000000; i++ {
+				mem.Write8(dst+i, val)
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "memcpy", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			count := ctx.Arg(2)
+			for i := uint64(0); i < count && i < 0x1000000; i++ {
+				b, _ := mem.Read8(src + i)
+				mem.Write8(dst+i, b)
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "memmove", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			count := ctx.Arg(2)
+			if count > 0x1000000 {
+				count = 0x1000000
+			}
+			tmp := make([]byte, count)
+			for i := uint64(0); i < count; i++ {
+				tmp[i], _ = mem.Read8(src + i)
+			}
+			for i := uint64(0); i < count; i++ {
+				mem.Write8(dst+i, tmp[i])
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "memcmp", func(ctx *ntapi.TrapContext) uint32 {
+			s1 := ctx.Arg(0)
+			s2 := ctx.Arg(1)
+			count := ctx.Arg(2)
+			for i := uint64(0); i < count && i < 0x1000000; i++ {
+				a, _ := mem.Read8(s1 + i)
+				b, _ := mem.Read8(s2 + i)
+				if a < b {
+					ctx.SetReturn(^uint64(0)) // -1
+					return 0
+				}
+				if a > b {
+					ctx.SetReturn(1)
+					return 0
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "strcpy", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			i := uint64(0)
+			for {
+				b, _ := mem.Read8(src + i)
+				mem.Write8(dst+i, b)
+				if b == 0 {
+					break
+				}
+				i++
+				if i > 0x100000 {
+					break
+				}
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "strncpy", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			count := ctx.Arg(2)
+			i := uint64(0)
+			for i < count {
+				b, _ := mem.Read8(src + i)
+				mem.Write8(dst+i, b)
+				if b == 0 {
+					// zero-fill remaining
+					for i++; i < count; i++ {
+						mem.Write8(dst+i, 0)
+					}
+					break
+				}
+				i++
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "strcmp", func(ctx *ntapi.TrapContext) uint32 {
+			s1 := ctx.Arg(0)
+			s2 := ctx.Arg(1)
+			for i := uint64(0); i < 0x100000; i++ {
+				a, _ := mem.Read8(s1 + i)
+				b, _ := mem.Read8(s2 + i)
+				if a < b {
+					ctx.SetReturn(^uint64(0))
+					return 0
+				}
+				if a > b {
+					ctx.SetReturn(1)
+					return 0
+				}
+				if a == 0 {
+					break
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "wcscpy", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			i := uint64(0)
+			for {
+				w, _ := mem.Read16(src + i*2)
+				mem.Write16(dst+i*2, w)
+				if w == 0 {
+					break
+				}
+				i++
+				if i > 0x100000 {
+					break
+				}
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "wcsncpy", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			count := ctx.Arg(2)
+			i := uint64(0)
+			for i < count {
+				w, _ := mem.Read16(src + i*2)
+				mem.Write16(dst+i*2, w)
+				if w == 0 {
+					for i++; i < count; i++ {
+						mem.Write16(dst+i*2, 0)
+					}
+					break
+				}
+				i++
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "wcscmp", func(ctx *ntapi.TrapContext) uint32 {
+			s1 := ctx.Arg(0)
+			s2 := ctx.Arg(1)
+			for i := uint64(0); i < 0x100000; i++ {
+				a, _ := mem.Read16(s1 + i*2)
+				b, _ := mem.Read16(s2 + i*2)
+				if a < b {
+					ctx.SetReturn(^uint64(0))
+					return 0
+				}
+				if a > b {
+					ctx.SetReturn(1)
+					return 0
+				}
+				if a == 0 {
+					break
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "wcscat", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			// Find end of dst
+			end := dst
+			for {
+				w, _ := mem.Read16(end)
+				if w == 0 {
+					break
+				}
+				end += 2
+			}
+			// Copy src
+			for {
+				w, _ := mem.Read16(src)
+				mem.Write16(end, w)
+				if w == 0 {
+					break
+				}
+				src += 2
+				end += 2
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "wcschr", func(ctx *ntapi.TrapContext) uint32 {
+			s := ctx.Arg(0)
+			c := uint16(ctx.Arg(1))
+			for i := uint64(0); i < 0x100000; i++ {
+				w, _ := mem.Read16(s + i*2)
+				if w == c {
+					ctx.SetReturn(s + i*2)
+					return 0
+				}
+				if w == 0 {
+					break
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "wcsrchr", func(ctx *ntapi.TrapContext) uint32 {
+			s := ctx.Arg(0)
+			c := uint16(ctx.Arg(1))
+			last := uint64(0)
+			for i := uint64(0); i < 0x100000; i++ {
+				w, _ := mem.Read16(s + i*2)
+				if w == c {
+					last = s + i*2
+				}
+				if w == 0 {
+					break
+				}
+			}
+			ctx.SetReturn(last)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_wcsicmp", func(ctx *ntapi.TrapContext) uint32 {
+			s1 := ctx.Arg(0)
+			s2 := ctx.Arg(1)
+			toLower := func(c uint16) uint16 {
+				if c >= 'A' && c <= 'Z' {
+					return c + 32
+				}
+				return c
+			}
+			for i := uint64(0); i < 0x100000; i++ {
+				a, _ := mem.Read16(s1 + i*2)
+				b, _ := mem.Read16(s2 + i*2)
+				la, lb := toLower(a), toLower(b)
+				if la < lb {
+					ctx.SetReturn(^uint64(0))
+					return 0
+				}
+				if la > lb {
+					ctx.SetReturn(1)
+					return 0
+				}
+				if a == 0 {
+					break
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+
+		d.RegisterAutoStubHandler(ucrt, "abort", ucrtExit)
+		d.RegisterAutoStubHandler(ucrt, "_c_exit", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
 	}
 
 	// --- kernel32.dll ---
@@ -2919,6 +3429,39 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(kernel32, "ExitThread", func(ctx *ntapi.TrapContext) uint32 {
 			return 0
 		})
+
+		// IsWow64Process: always return FALSE (native 64-bit)
+		d.RegisterAutoStubHandler(kernel32, "IsWow64Process", func(ctx *ntapi.TrapContext) uint32 {
+			lpIsWow64 := ctx.Arg(1)
+			if lpIsWow64 != 0 {
+				mem.Write32(lpIsWow64, 0) // FALSE
+			}
+			ctx.SetReturn(1) // success
+			return 0
+		})
+
+		// ResolveDelayLoadedAPI: stub that returns a dummy function pointer
+		// In real Windows this resolves delay-loaded imports. We allocate a small
+		// RET stub so calls to the resolved address just return 0.
+		var delayLoadRet uint64
+		d.RegisterAutoStubHandler(kernel32, "ResolveDelayLoadedAPI", func(ctx *ntapi.TrapContext) uint32 {
+			if delayLoadRet == 0 {
+				delayLoadRet = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+				// xor eax, eax; ret
+				mem.Write8(delayLoadRet, 0x31)
+				mem.Write8(delayLoadRet+1, 0xC0)
+				mem.Write8(delayLoadRet+2, 0xC3)
+			}
+			ctx.SetReturn(delayLoadRet)
+			return 0
+		})
+
+		// GetEnvironmentVariableA: return 0 (not found)
+		d.RegisterAutoStubHandler(kernel32, "GetEnvironmentVariableA", func(ctx *ntapi.TrapContext) uint32 {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 203) // ERROR_ENVVAR_NOT_FOUND
+			ctx.SetReturn(0)
+			return 0
+		})
 	}
 
 	// --- shlwapi.dll ---
@@ -2991,6 +3534,52 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(shell32, "DragAcceptFiles", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+	}
+
+	// --- shcore.dll ---
+	if shcore, ok := synthByName["shcore.dll"]; ok {
+		d.RegisterAutoStubHandler(shcore, "CommandLineToArgvW", func(ctx *ntapi.TrapContext) uint32 {
+			pNumArgs := ctx.Arg(1)
+			// Allocate a minimal wide argv: just the program name
+			page := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+			// argv[0] = pointer to wide string at page+16, argv[1] = NULL
+			strAddr := page + 16
+			for i, r := range imagePath {
+				mem.Write16(strAddr+uint64(i)*2, uint16(r))
+			}
+			mem.Write16(strAddr+uint64(len(imagePath))*2, 0)
+			mem.Write64(page, strAddr)     // argv[0]
+			mem.Write64(page+8, 0)         // NULL terminator
+			if pNumArgs != 0 {
+				mem.Write32(pNumArgs, 1)
+			}
+			ctx.SetReturn(page)
+			return 0
+		})
+		d.RegisterAutoStubHandler(shcore, "GetDpiForMonitor", func(ctx *ntapi.TrapContext) uint32 {
+			dpiX := ctx.Arg(2)
+			dpiY := ctx.Arg(3)
+			if dpiX != 0 {
+				mem.Write32(dpiX, 96)
+			}
+			if dpiY != 0 {
+				mem.Write32(dpiY, 96)
+			}
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(shcore, "SetProcessDpiAwareness", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+	}
+
+	// --- rpcrt4.dll ---
+	if rpcrt4, ok := synthByName["rpcrt4.dll"]; ok {
+		d.RegisterAutoStubHandler(rpcrt4, "RpcStringFreeW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // RPC_S_OK
 			return 0
 		})
 	}
@@ -4914,6 +5503,62 @@ func patchHotStubs(mem *mmu.MMU, dlls []*ntapi.SynthPE, flsDataArray uint64) {
 			0x4C, 0x89, 0x00,                                     // mov [rax], r8 (header = block size)
 			0x48, 0x83, 0xC0, 0x10,                               // add rax, 16 (return user ptr)
 			0xC3,                                                  // ret
+		})
+
+		break
+	}
+
+	// Patch hot ucrtbase stubs with inline x64 code
+	for _, synth := range dlls {
+		if strings.ToLower(synth.Name) != "ucrtbase.dll" {
+			continue
+		}
+
+		// wcslen(RCX): scan for 0 WORD, return count in RAX
+		// xor eax, eax; .loop: cmp word [rcx+rax*2], 0; je .done; inc rax; jmp .loop; .done: ret
+		synth.PatchStub(mem, "wcslen", []byte{
+			0x48, 0x31, 0xC0,                   // xor rax, rax
+			0x66, 0x83, 0x3C, 0x41, 0x00,       // cmp word [rcx+rax*2], 0
+			0x74, 0x04,                           // je +4 (.done)
+			0x48, 0xFF, 0xC0,                     // inc rax
+			0xEB, 0xF5,                           // jmp -11 (.loop)
+			0xC3,                                 // ret
+		})
+
+		// strlen(RCX): scan for 0 byte, return count in RAX
+		synth.PatchStub(mem, "strlen", []byte{
+			0x48, 0x31, 0xC0,                   // xor rax, rax
+			0x80, 0x3C, 0x01, 0x00,             // cmp byte [rcx+rax], 0
+			0x74, 0x04,                           // je +4 (.done)
+			0x48, 0xFF, 0xC0,                     // inc rax
+			0xEB, 0xF6,                           // jmp -10 (.loop)
+			0xC3,                                 // ret
+		})
+
+		// memset(RCX=dst, EDX=val, R8=count): fill and return dst in RAX
+		synth.PatchStub(mem, "memset", []byte{
+			0x48, 0x89, 0xC8,       // mov rax, rcx  (save dst for return)
+			0x4D, 0x85, 0xC0,       // test r8, r8
+			0x74, 0x07,             // je .done
+			0x88, 0x11,             // mov [rcx], dl
+			0x48, 0xFF, 0xC1,       // inc rcx
+			0x49, 0xFF, 0xC8,       // dec r8
+			0xEB, 0xF5,             // jmp .loop
+			0xC3,                   // ret
+		})
+
+		// memcpy(RCX=dst, RDX=src, R8=count): copy and return dst in RAX
+		synth.PatchStub(mem, "memcpy", []byte{
+			0x48, 0x89, 0xC8,       // mov rax, rcx
+			0x4D, 0x85, 0xC0,       // test r8, r8
+			0x74, 0x09,             // je .done
+			0x44, 0x8A, 0x0A,       // mov r9b, [rdx]
+			0x44, 0x88, 0x09,       // mov [rcx], r9b
+			0x48, 0xFF, 0xC1,       // inc rcx
+			0x48, 0xFF, 0xC2,       // inc rdx
+			0x49, 0xFF, 0xC8,       // dec r8
+			0xEB, 0xF1,             // jmp .loop
+			0xC3,                   // ret
 		})
 
 		break
