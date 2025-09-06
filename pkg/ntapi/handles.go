@@ -160,3 +160,16 @@ func (ht *HandleTable) GetHeap(h Handle) *HeapHandle {
 	}
 	return hh
 }
+
+// GetSection returns the SectionHandle for a handle, or nil.
+func (ht *HandleTable) GetSection(h Handle) *SectionHandle {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	sh, ok := obj.(*SectionHandle)
+	if !ok {
+		return nil
+	}
+	return sh
+}

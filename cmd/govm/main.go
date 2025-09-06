@@ -220,8 +220,9 @@ loadedModules := make(map[string]*loader.PEModule)
 loadedModules["ntdll.dll"] = ntapi.SynthToModule(synthNtdll)
 loadedModules["win32u.dll"] = ntapi.SynthToModule(synthWin32u)
 
+var dllLoadOrder []*loader.PEModule
 if sysroot != "" {
-modules, loadedModules = loadBYODLLs(mem, sysroot, result.MainModule, modules, loadedModules)
+modules, loadedModules, dllLoadOrder = loadBYODLLs(mem, sysroot, result.MainModule, modules, loadedModules)
 }
 
 // Resolve imports for the main module
@@ -298,6 +299,25 @@ fmt.Fprintf(os.Stderr, "[pe] ntdll=0x%x win32u=0x%x\n",
 synthNtdll.BaseAddr, synthWin32u.BaseAddr)
 }
 
+// Call DllMain(DLL_PROCESS_ATTACH) for each loaded BYODLL in dependency order
+if len(dllLoadOrder) > 0 {
+trampoline := ntapi.AllocTrampoline(mem)
+for _, dll := range dllLoadOrder {
+if dll.IsDLL && dll.EntryPoint != 0 && dll.EntryPoint != dll.BaseAddr {
+if err := ntapi.CallDllMain(c, mem, trampoline, dll.BaseAddr, dll.EntryPoint, trace); err != nil {
+if _, isExit := err.(*arch.ExitError); isExit {
+fmt.Fprintf(os.Stderr, "govm: DllMain(%s) terminated process\n", dll.Name)
+os.Exit(1)
+}
+fmt.Fprintf(os.Stderr, "govm: warning: DllMain(%s) failed: %v\n", dll.Name, err)
+}
+}
+}
+// Restore CPU state for main entry
+c.SetPC(result.EntryPoint)
+c.SetSP(result.StackPtr)
+}
+
 // Run the PE
 if err := mainThread.CPU.Run(); err != nil {
 if exitErr, ok := err.(*arch.ExitError); ok {
@@ -321,8 +341,11 @@ tm.Wait()
 }
 
 // loadBYODLLs loads real Windows DLLs from the sysroot directory.
+// Returns updated module info, loaded modules map, and DLL load order (for DllMain).
 func loadBYODLLs(mem *mmu.MMU, sysroot string, mainMod *loader.PEModule,
-modules []ntapi.ModuleInfo, loaded map[string]*loader.PEModule) ([]ntapi.ModuleInfo, map[string]*loader.PEModule) {
+modules []ntapi.ModuleInfo, loaded map[string]*loader.PEModule) ([]ntapi.ModuleInfo, map[string]*loader.PEModule, []*loader.PEModule) {
+
+var loadOrder []*loader.PEModule
 
 queue := make([]string, 0)
 for _, imp := range mainMod.Imports {
@@ -371,6 +394,7 @@ continue
 }
 
 loaded[strings.ToLower(mod.Name)] = mod
+loadOrder = append(loadOrder, mod)
 modules = append(modules, ntapi.ModuleInfo{
 Name:      mod.Name,
 FullPath:  `C:\Windows\System32\` + mod.Name,
@@ -390,7 +414,7 @@ queue = append(queue, depName)
 }
 }
 
-return modules, loaded
+return modules, loaded, loadOrder
 }
 
 // findDLL searches for a DLL file in the sysroot.

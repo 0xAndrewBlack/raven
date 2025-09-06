@@ -25,6 +25,10 @@ type PEModule struct {
 	Forwards   map[string]string // export name → "DLL.Function" forward
 	Imports    []PEImportEntry   // unresolved imports
 	Is64       bool
+	IsDLL      bool     // true if IMAGE_FILE_DLL flag is set
+	TLSDataAddr uint64  // guest address of allocated TLS template data (0 if none)
+	TLSDataSize uint64  // size of TLS initial data
+	TLSIndexAddr uint64 // guest address of the TLS index slot
 }
 
 // PEImportEntry describes a single import that needs resolution.
@@ -122,6 +126,10 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 
 	var imageBase, sizeOfImage, entryRVA uint64
 	var relocDirRVA, relocDirSize uint32
+	var tlsDirRVA, tlsDirSize uint32
+
+	// Check DLL flag in COFF header characteristics
+	mod.IsDLL = pf.Characteristics&0x2000 != 0 // IMAGE_FILE_DLL
 
 	switch oh := pf.OptionalHeader.(type) {
 	case *pe.OptionalHeader64:
@@ -133,6 +141,10 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 			relocDirRVA = oh.DataDirectory[5].VirtualAddress
 			relocDirSize = oh.DataDirectory[5].Size
 		}
+		if len(oh.DataDirectory) > 9 {
+			tlsDirRVA = oh.DataDirectory[9].VirtualAddress
+			tlsDirSize = oh.DataDirectory[9].Size
+		}
 	case *pe.OptionalHeader32:
 		mod.Is64 = false
 		imageBase = uint64(oh.ImageBase)
@@ -141,6 +153,10 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 		if len(oh.DataDirectory) > 5 {
 			relocDirRVA = oh.DataDirectory[5].VirtualAddress
 			relocDirSize = oh.DataDirectory[5].Size
+		}
+		if len(oh.DataDirectory) > 9 {
+			tlsDirRVA = oh.DataDirectory[9].VirtualAddress
+			tlsDirSize = oh.DataDirectory[9].Size
 		}
 	default:
 		return nil, fmt.Errorf("no optional header in %s", path)
@@ -227,6 +243,11 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 
 	// Parse imports
 	parseImports(pf, f, mod)
+
+	// Parse TLS Directory
+	if tlsDirRVA != 0 && tlsDirSize > 0 {
+		parseTLSDirectory(mem, base, pf, f, tlsDirRVA, mod)
+	}
 
 	return mod, nil
 }
@@ -525,6 +546,105 @@ func resolveForward(fwd string, modules map[string]*PEModule) uint64 {
 		return 0
 	}
 	return target.Exports[parts[1]]
+}
+
+// parseTLSDirectory reads the IMAGE_TLS_DIRECTORY and allocates TLS storage.
+//
+// IMAGE_TLS_DIRECTORY64 layout:
+//
+//	+0x00 StartAddressOfRawData  (VA)
+//	+0x08 EndAddressOfRawData    (VA)
+//	+0x10 AddressOfIndex         (VA) - pointer to TLS index slot
+//	+0x18 AddressOfCallBacks     (VA) - pointer to null-terminated callback array
+//	+0x20 SizeOfZeroFill         (DWORD)
+//	+0x24 Characteristics        (DWORD)
+func parseTLSDirectory(mem *mmu.MMU, base uint64, pf *pe.File, f *os.File, tlsRVA uint32, mod *PEModule) {
+	if mod.Is64 {
+		// Read from guest memory (already mapped)
+		tlsAddr := base + uint64(tlsRVA)
+		startVA, err := mem.Read64(tlsAddr + 0x00)
+		if err != nil {
+			return
+		}
+		endVA, err := mem.Read64(tlsAddr + 0x08)
+		if err != nil {
+			return
+		}
+		indexVA, err := mem.Read64(tlsAddr + 0x10)
+		if err != nil {
+			return
+		}
+		zeroFill, _ := mem.Read32(tlsAddr + 0x20)
+
+		rawSize := uint64(0)
+		if endVA > startVA {
+			rawSize = endVA - startVA
+		}
+		totalSize := rawSize + uint64(zeroFill)
+		if totalSize == 0 {
+			totalSize = 64 // minimum TLS area
+		}
+
+		// Allocate TLS template data
+		tlsData := mem.Mmap(0, totalSize, mmu.PermRead|mmu.PermWrite)
+		mod.TLSDataAddr = tlsData
+		mod.TLSDataSize = totalSize
+
+		// Copy initial TLS data from the image
+		if rawSize > 0 && startVA != 0 {
+			data, err := mem.ReadBytes(startVA, int(rawSize))
+			if err == nil {
+				mem.WriteBytes(tlsData, data)
+			}
+		}
+
+		// Write TLS index (0 for the main module)
+		if indexVA != 0 {
+			mod.TLSIndexAddr = indexVA
+			mem.Write32(indexVA, 0)
+		}
+	} else {
+		// 32-bit TLS directory (smaller pointers)
+		tlsAddr := base + uint64(tlsRVA)
+		startVA32, err := mem.Read32(tlsAddr + 0x00)
+		if err != nil {
+			return
+		}
+		endVA32, err := mem.Read32(tlsAddr + 0x04)
+		if err != nil {
+			return
+		}
+		indexVA32, err := mem.Read32(tlsAddr + 0x08)
+		if err != nil {
+			return
+		}
+		zeroFill, _ := mem.Read32(tlsAddr + 0x10)
+
+		rawSize := uint64(0)
+		if endVA32 > startVA32 {
+			rawSize = uint64(endVA32 - startVA32)
+		}
+		totalSize := rawSize + uint64(zeroFill)
+		if totalSize == 0 {
+			totalSize = 64
+		}
+
+		tlsData := mem.Mmap(0, totalSize, mmu.PermRead|mmu.PermWrite)
+		mod.TLSDataAddr = tlsData
+		mod.TLSDataSize = totalSize
+
+		if rawSize > 0 && startVA32 != 0 {
+			data, err := mem.ReadBytes(uint64(startVA32), int(rawSize))
+			if err == nil {
+				mem.WriteBytes(tlsData, data)
+			}
+		}
+
+		if indexVA32 != 0 {
+			mod.TLSIndexAddr = uint64(indexVA32)
+			mem.Write32(uint64(indexVA32), 0)
+		}
+	}
 }
 
 // --- Helpers ---

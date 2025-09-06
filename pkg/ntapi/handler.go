@@ -340,6 +340,107 @@ func handleNtFlushBuffersFile(ctx *TrapContext) uint32 {
 	return StatusSuccess
 }
 
+func handleNtDeviceIoControlFile(ctx *TrapContext) uint32 {
+	fileHandle := Handle(ctx.Arg(0))
+	_ = ctx.Arg(1) // Event
+	ioStatus := ctx.Arg(3)
+
+	// Read IOCTL code from stack (arg 4)
+	ioctlCode := uint32(ctx.Arg(4))
+
+	_ = fileHandle
+
+	if ctx.Trace {
+		fmt.Printf("  NtDeviceIoControlFile: handle=0x%x ioctl=0x%08x\n", fileHandle, ioctlCode)
+	}
+
+	// Console IOCTLs
+	const (
+		ctlCodeGetMode = 0x500000 // pseudo: GetConsoleMode
+		ctlCodeSetMode = 0x500004 // pseudo: SetConsoleMode
+	)
+
+	switch ioctlCode {
+	case ctlCodeGetMode:
+		// Return a default console mode
+		outBuf := ctx.Arg(6) // stack arg
+		if outBuf != 0 {
+			ctx.Mem.Write32(outBuf, 0x0007) // ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT
+		}
+	case ctlCodeSetMode:
+		// Accept silently
+	default:
+		// Unknown IOCTL - succeed silently to avoid blocking apps
+	}
+
+	if ioStatus != 0 {
+		ctx.Mem.Write32(ioStatus, StatusSuccess)
+		ctx.Mem.Write64(ioStatus+8, 0)
+	}
+
+	return StatusSuccess
+}
+
+func handleNtCreateSection(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	_ = ctx.Arg(1) // DesiredAccess
+	_ = ctx.Arg(2) // ObjectAttributes
+	maxSizePtr := ctx.Arg(3)
+
+	var maxSize uint64
+	if maxSizePtr != 0 {
+		maxSize, _ = ctx.Mem.Read64(maxSizePtr)
+	}
+	if maxSize == 0 {
+		maxSize = mmu.PageSize
+	}
+
+	sec := &SectionHandle{
+		Size:  maxSize,
+		Perms: mmu.PermRead | mmu.PermWrite,
+	}
+
+	h := ctx.Handles.Alloc(sec)
+	ctx.Mem.Write64(handlePtr, uint64(h))
+
+	return StatusSuccess
+}
+
+func handleNtMapViewOfSection(ctx *TrapContext) uint32 {
+	sectionHandle := Handle(ctx.Arg(0))
+	_ = ctx.Arg(1) // ProcessHandle
+	baseAddrPtr := ctx.Arg(2)
+	_ = ctx.Arg(3) // ZeroBits
+
+	sec := ctx.Handles.GetSection(sectionHandle)
+	if sec == nil {
+		return StatusInvalidHandle
+	}
+
+	size := sec.Size
+	if size == 0 {
+		size = mmu.PageSize
+	}
+	size = (size + mmu.PageSize - 1) & mmu.PageMask
+
+	addr := ctx.Mem.Mmap(0, size, sec.Perms)
+	if baseAddrPtr != 0 {
+		ctx.Mem.Write64(baseAddrPtr, addr)
+	}
+
+	return StatusSuccess
+}
+
+func handleNtUnmapViewOfSection(ctx *TrapContext) uint32 {
+	_ = ctx.Arg(0) // ProcessHandle
+	baseAddr := ctx.Arg(1)
+
+	if baseAddr != 0 {
+		ctx.Mem.Munmap(baseAddr, mmu.PageSize)
+	}
+	return StatusSuccess
+}
+
 // ======================== REGISTRY ========================
 
 func handleNtOpenKey(ctx *TrapContext) uint32 {

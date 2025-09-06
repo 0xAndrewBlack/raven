@@ -139,6 +139,12 @@ func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *Registr
 	d.registerNtapiHandlers()
 	d.registerWin32kHandlers()
 
+	// Register the DllMain return sentinel
+	d.register(DllMainReturnID, "_DllMainReturn", func(ctx *TrapContext) uint32 {
+		ctx.CPU.Stop()
+		return StatusSuccess
+	})
+
 	return d
 }
 
@@ -200,6 +206,10 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("NtQueryVolumeInformationFile"), "NtQueryVolumeInformationFile", handleNtQueryVolumeInformationFile)
 	d.register(idOf("NtDeleteFile"), "NtDeleteFile", handleNtDeleteFile)
 	d.register(idOf("NtFlushBuffersFile"), "NtFlushBuffersFile", handleNtFlushBuffersFile)
+	d.register(idOf("NtDeviceIoControlFile"), "NtDeviceIoControlFile", handleNtDeviceIoControlFile)
+	d.register(idOf("NtCreateSection"), "NtCreateSection", handleNtCreateSection)
+	d.register(idOf("NtMapViewOfSection"), "NtMapViewOfSection", handleNtMapViewOfSection)
+	d.register(idOf("NtUnmapViewOfSection"), "NtUnmapViewOfSection", handleNtUnmapViewOfSection)
 
 	// Registry
 	d.register(idOf("NtOpenKey"), "NtOpenKey", handleNtOpenKey)
