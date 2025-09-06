@@ -17,6 +17,7 @@ import (
 gosyscall "github.com/mirkobrombin/go-vm/pkg/syscall"
 "github.com/mirkobrombin/go-vm/pkg/thread"
 "github.com/mirkobrombin/go-vm/pkg/vfs"
+"github.com/mirkobrombin/go-vm/pkg/wl"
 "github.com/mirkobrombin/go-vm/pkg/win32k"
 "github.com/mirkobrombin/go-vm/pkg/x64"
 )
@@ -449,6 +450,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	synthByName := make(map[string]*ntapi.SynthPE)
 	for _, s := range dlls {
 		synthByName[strings.ToLower(s.Name)] = s
+	}
+
+	// Wayland connection for window display (used by user32 handlers below)
+	var wlDisplay *wl.Display
+	var wlWindow *wl.Window
+	if wld, err := wl.Connect(); err == nil {
+		wlDisplay = wld
+		fmt.Fprintf(os.Stderr, "[wl] connected to Wayland compositor\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "[wl] no Wayland: %v (window display disabled)\n", err)
+	}
+
+	readGuestUTF16 := func(addr uint64) string {
+		if addr == 0 {
+			return ""
+		}
+		var chars []uint16
+		for i := 0; i < 1024; i++ {
+			w, err := mem.Read16(addr)
+			if err != nil || w == 0 {
+				break
+			}
+			chars = append(chars, w)
+			addr += 2
+		}
+		return string(utf16Decode(chars))
 	}
 
 	// --- msvcrt.dll ---
@@ -1436,6 +1463,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// ExitProcess: cleanly terminate emulation
 		d.RegisterAutoStubHandler(kernel32, "ExitProcess", func(ctx *ntapi.TrapContext) uint32 {
 			code := ctx.Arg(0)
+			if wlDisplay != nil {
+				wlDisplay.Close()
+			}
 			pprof.StopCPUProfile()
 			os.Exit(int(code))
 			return 0
@@ -2724,6 +2754,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "CreateWindowExW", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := hwndAlloc()
+			// Create a real Wayland window for the first top-level window
+			if wlDisplay != nil && wlWindow == nil {
+				style := uint32(ctx.Arg(3))
+				const wsChild = 0x40000000
+				if style&wsChild == 0 {
+					title := readGuestUTF16(ctx.Arg(2))
+					if title == "" {
+						title = "govm"
+					}
+					var w, h int32 = 800, 600
+					if nw := int32(ctx.Arg(6)); nw > 0 && nw < 0x7FFF {
+						w = nw
+					}
+					if nh := int32(ctx.Arg(7)); nh > 0 && nh < 0x7FFF {
+						h = nh
+					}
+					if win, err := wlDisplay.CreateWindow(title, w, h); err == nil {
+						wlWindow = win
+						fmt.Fprintf(os.Stderr, "[wl] window created: %q %dx%d\n", title, w, h)
+					} else {
+						fmt.Fprintf(os.Stderr, "[wl] CreateWindow failed: %v\n", err)
+					}
+				}
+			}
 			ctx.SetReturn(hwnd)
 			return 0
 		})
@@ -2737,6 +2791,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "UpdateWindow", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "IsChild", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "FindWindowW", func(ctx *ntapi.TrapContext) uint32 {
@@ -2935,22 +2993,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0)
 			return 0
 		})
-		// GetMessageW: return 0 = WM_QUIT for now (single iteration)
-		// TODO: implement proper message loop with Wayland events
+		// GetMessageW: block on Wayland events if connected, else WM_QUIT
 		d.RegisterAutoStubHandler(user32, "GetMessageW", func(ctx *ntapi.TrapContext) uint32 {
 			pMsg := ctx.Arg(0)
-			if pMsg != 0 {
-				// MSG struct: hwnd(8) message(4) wParam(8) lParam(8) time(4) pt.x(4) pt.y(4)
-				// Write WM_QUIT (0x0012) message
-				ctx.Mem.Write64(pMsg, 0)       // hwnd = NULL
-				ctx.Mem.Write32(pMsg+8, 0x12)  // message = WM_QUIT
-				ctx.Mem.Write64(pMsg+12, 0)    // wParam
-				ctx.Mem.Write64(pMsg+20, 0)    // lParam
-				ctx.Mem.Write32(pMsg+28, 0)    // time
-				ctx.Mem.Write32(pMsg+32, 0)    // pt.x
-				ctx.Mem.Write32(pMsg+36, 0)    // pt.y
+			if wlDisplay != nil && wlWindow != nil {
+				evt, err := wlDisplay.Dispatch()
+				if err != nil || evt == wl.EventClose {
+					if pMsg != 0 {
+						ctx.Mem.Write64(pMsg, 0)
+						ctx.Mem.Write32(pMsg+8, 0x12) // WM_QUIT
+						ctx.Mem.Write64(pMsg+12, 0)
+						ctx.Mem.Write64(pMsg+20, 0)
+						ctx.Mem.Write32(pMsg+28, 0)
+						ctx.Mem.Write32(pMsg+32, 0)
+						ctx.Mem.Write32(pMsg+36, 0)
+					}
+					ctx.SetReturn(0) // 0 = WM_QUIT
+					return 0
+				}
+				// Non-close event (configure, etc.) → send WM_PAINT
+				if pMsg != 0 {
+					ctx.Mem.Write64(pMsg, 0)
+					ctx.Mem.Write32(pMsg+8, 0x000F) // WM_PAINT
+					ctx.Mem.Write64(pMsg+12, 0)
+					ctx.Mem.Write64(pMsg+20, 0)
+					ctx.Mem.Write32(pMsg+28, 0)
+					ctx.Mem.Write32(pMsg+32, 0)
+					ctx.Mem.Write32(pMsg+36, 0)
+				}
+				ctx.SetReturn(1)
+				return 0
 			}
-			ctx.SetReturn(0) // 0 = WM_QUIT received
+			// No Wayland - return WM_QUIT immediately
+			if pMsg != 0 {
+				ctx.Mem.Write64(pMsg, 0)
+				ctx.Mem.Write32(pMsg+8, 0x12)
+				ctx.Mem.Write64(pMsg+12, 0)
+				ctx.Mem.Write64(pMsg+20, 0)
+				ctx.Mem.Write32(pMsg+28, 0)
+				ctx.Mem.Write32(pMsg+32, 0)
+				ctx.Mem.Write32(pMsg+36, 0)
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "PeekMessageW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3036,6 +3120,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "EndPaint", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow != nil {
+				wlWindow.Commit()
+			}
 			ctx.SetReturn(1)
 			return 0
 		})

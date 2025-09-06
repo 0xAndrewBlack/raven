@@ -29,6 +29,8 @@ type PEModule struct {
 	TLSDataAddr uint64  // guest address of allocated TLS template data (0 if none)
 	TLSDataSize uint64  // size of TLS initial data
 	TLSIndexAddr uint64 // guest address of the TLS index slot
+	ExceptionDirRVA  uint32 // RVA of .pdata (exception directory)
+	ExceptionDirSize uint32 // size of .pdata
 }
 
 // PEImportEntry describes a single import that needs resolution.
@@ -127,6 +129,7 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	var imageBase, sizeOfImage, entryRVA uint64
 	var relocDirRVA, relocDirSize uint32
 	var tlsDirRVA, tlsDirSize uint32
+	var excDirRVA, excDirSize uint32
 
 	// Check DLL flag in COFF header characteristics
 	mod.IsDLL = pf.Characteristics&0x2000 != 0 // IMAGE_FILE_DLL
@@ -145,6 +148,10 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 			tlsDirRVA = oh.DataDirectory[9].VirtualAddress
 			tlsDirSize = oh.DataDirectory[9].Size
 		}
+		if len(oh.DataDirectory) > 3 {
+			excDirRVA = oh.DataDirectory[3].VirtualAddress
+			excDirSize = oh.DataDirectory[3].Size
+		}
 	case *pe.OptionalHeader32:
 		mod.Is64 = false
 		imageBase = uint64(oh.ImageBase)
@@ -157,6 +164,10 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 		if len(oh.DataDirectory) > 9 {
 			tlsDirRVA = oh.DataDirectory[9].VirtualAddress
 			tlsDirSize = oh.DataDirectory[9].Size
+		}
+		if len(oh.DataDirectory) > 3 {
+			excDirRVA = oh.DataDirectory[3].VirtualAddress
+			excDirSize = oh.DataDirectory[3].Size
 		}
 	default:
 		return nil, fmt.Errorf("no optional header in %s", path)
@@ -180,6 +191,8 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	mod.BaseAddr = base
 	mod.ImageSize = sizeOfImage
 	mod.EntryPoint = base + entryRVA
+	mod.ExceptionDirRVA = excDirRVA
+	mod.ExceptionDirSize = excDirSize
 
 	// Map PE headers (first page(s))
 	if len(pf.Sections) == 0 {

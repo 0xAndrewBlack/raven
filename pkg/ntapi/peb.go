@@ -34,6 +34,9 @@ const (
 	TebStaticUnicodeString  = 0x0120  // UNICODE_STRING (Buffer at +0x0128)
 	TebTlsSlots             = 0x1480  // 64 TLS slots (64 × 8 bytes = 0x200)
 	TebTlsExpansionSlots    = 0x1780  // pointer to expanded TLS
+	TebFlsData              = 0x17c8  // pointer to FLS slot array
+	TebHeapBase             = 0x1800  // inline HeapAlloc: heap base address
+	TebHeapOffset           = 0x1808  // inline HeapAlloc: current bump offset
 )
 
 // PEB offsets (x64).
@@ -145,6 +148,7 @@ type ProcessState struct {
 	ProcessParamsAddr uint64
 	EnvironmentAddr   uint64
 	ModuleListAddr    uint64 // base of LDR_DATA_TABLE_ENTRY array
+	LastError         uint32
 }
 
 // InitProcess allocates and populates PEB, TEB, and supporting structures.

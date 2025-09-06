@@ -2,6 +2,7 @@ package ntapi
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/mirkobrombin/go-vm/pkg/arch"
 	"github.com/mirkobrombin/go-vm/pkg/mmu"
@@ -198,13 +199,11 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 
 	handler, ok := d.handlers[syscallID]
 	if !ok {
-		if d.ctx.Trace {
-			name := d.names[syscallID]
-			if name == "" {
-				name = fmt.Sprintf("unknown_0x%04X", syscallID)
-			}
-			fmt.Printf("[ntapi] UNIMPLEMENTED: %s (id=0x%04X)\n", name, syscallID)
+		name := d.names[syscallID]
+		if name == "" {
+			name = fmt.Sprintf("unknown_0x%04X", syscallID)
 		}
+		fmt.Fprintf(os.Stderr, "[ntapi] UNIMPLEMENTED: %s (id=0x%04X)\n", name, syscallID)
 		// For auto-synth user-mode DLL stubs, return 0 (NULL/FALSE).
 		// For NT syscalls, return STATUS_NOT_IMPLEMENTED.
 		if syscallID >= AutoSynthIDBase {

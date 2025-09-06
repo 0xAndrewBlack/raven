@@ -28,6 +28,28 @@ type SynthPE struct {
 	StubIDs   map[uint64]uint32 // guest address → syscall ID
 }
 
+// PatchStub replaces a function's stub with custom x64 machine code.
+// The code must fit within stubSize bytes. Returns false if the function
+// is not found or the code is too large.
+func (s *SynthPE) PatchStub(mem *mmu.MMU, funcName string, code []byte) bool {
+	addr, ok := s.Exports[funcName]
+	if !ok {
+		return false
+	}
+	if len(code) > int(stubSize) {
+		return false
+	}
+	// Write the custom code
+	mem.WriteBytes(addr, code)
+	// Fill remaining bytes with INT3 (0xCC) for safety
+	for i := len(code); i < int(stubSize); i++ {
+		mem.Write8(addr+uint64(i), 0xCC)
+	}
+	// Remove from StubIDs so the dispatcher doesn't try to handle it
+	delete(s.StubIDs, addr)
+	return true
+}
+
 // ntapiExports lists the core NTAPI functions to stub in synthetic ntdll.dll.
 // These are ordered by frequency of use in typical Windows applications.
 var ntapiExports = []string{
@@ -268,8 +290,9 @@ const (
 	DllMainReturnID = 0xFFDE
 )
 
-// stubSize is the size of each trap stub: mov eax,imm32 + vmcall + ret
-const stubSize = 5 + 3 + 1 // 9 bytes
+// stubSize is the padded size of each trap stub.
+// We use 32 bytes to allow fast inline replacements for hot functions.
+const stubSize = 64
 
 // GenerateSynthDLL creates a minimal PE image in guest memory with trap stubs.
 func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32) *SynthPE {

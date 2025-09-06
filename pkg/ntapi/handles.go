@@ -65,6 +65,11 @@ type HeapHandle struct {
 
 func (h *HeapHandle) handleType() string { return "heap" }
 
+// ThreadHandle represents a dummy thread handle (single-threaded emulation).
+type ThreadHandle struct{}
+
+func (h *ThreadHandle) handleType() string { return "thread" }
+
 // HandleTable maps guest HANDLE values to Go objects.
 type HandleTable struct {
 	mu       sync.RWMutex
