@@ -182,6 +182,9 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	mod.EntryPoint = base + entryRVA
 
 	// Map PE headers (first page(s))
+	if len(pf.Sections) == 0 {
+		return nil, fmt.Errorf("PE has no sections in %s", path)
+	}
 	headerData := make([]byte, pf.Sections[0].Offset)
 	f.Seek(0, io.SeekStart)
 	io.ReadFull(f, headerData)

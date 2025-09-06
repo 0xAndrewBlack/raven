@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -148,6 +149,9 @@ type Handler struct {
 	Umask   uint32    // current umask
 	Trace   bool      // trace syscalls to stderr
 	Arch    arch.Arch // guest architecture
+
+	clearChildTidMu sync.Mutex
+	clearChildTid   map[int]uint64 // TID → clear_child_tid address
 }
 
 // NewHandler creates a syscall handler wired to the given MMU and VFS.
@@ -268,9 +272,17 @@ func (h *Handler) Handle(c arch.CPU) {
 	case SysGetpid, SysGetppid:
 		c.SetSyscallReturn(1)
 	case SysGettid:
-		c.SetSyscallReturn(1)
+		tid := h.getTID(c)
+		c.SetSyscallReturn(uint64(tid))
 	case SysSetTidAddress:
-		c.SetSyscallReturn(1)
+		tid := h.getTID(c)
+		h.clearChildTidMu.Lock()
+		if h.clearChildTid == nil {
+			h.clearChildTid = make(map[int]uint64)
+		}
+		h.clearChildTid[tid] = a0
+		h.clearChildTidMu.Unlock()
+		c.SetSyscallReturn(uint64(tid))
 	case SysUmask:
 		old := h.Umask
 		h.Umask = uint32(a0) & 0777
@@ -397,9 +409,13 @@ func (h *Handler) Handle(c arch.CPU) {
 	case SysEpollPwait:
 		h.sysEpollPwait(c, a0, a1, a2, a3)
 	case SysEventfd2:
-		c.SetSyscallReturn(negErrno(ENOSYS))
-	case SysTimerfdCreate, SysTimerfdSettime, SysTimerfdGettime:
-		c.SetSyscallReturn(negErrno(ENOSYS))
+		h.sysEventfd2(c, a0, a1)
+	case SysTimerfdCreate:
+		h.sysTimerfdCreate(c, a0, a1)
+	case SysTimerfdSettime:
+		h.sysTimerfdSettime(c, a0, a1, a2, a3)
+	case SysTimerfdGettime:
+		h.sysTimerfdGettime(c, a0, a1)
 
 	// --- memfd ---
 	case SysMemfdCreate:
@@ -481,6 +497,14 @@ const (
 
 func negErrno(e uint64) uint64 {
 	return ^(e - 1) // -e in two's complement
+}
+
+// getTID returns the guest thread ID for the calling CPU.
+func (h *Handler) getTID(c arch.CPU) int {
+	if h.ThreadM != nil {
+		return h.ThreadM.GetTID(c)
+	}
+	return 1
 }
 
 // --- Helpers ---
@@ -1959,6 +1983,36 @@ func (h *Handler) sysEpollPwait(c arch.CPU, epfd, eventsPtr, maxevents, timeout 
 		return
 	}
 
+	// Check eventfds and pipes first (VFS-only FDs without host backing)
+	nReady := uint64(0)
+	for _, e := range entries {
+		if nReady >= maxevents {
+			break
+		}
+		efd := h.FS.GetEventFD(e.GuestFD)
+		if efd != nil && efd.Ready() {
+			var events uint32
+			if e.Events&vfs.EPOLLIN != 0 {
+				events |= vfs.EPOLLIN
+			}
+			// eventfd is always writable
+			if e.Events&vfs.EPOLLOUT != 0 {
+				events |= vfs.EPOLLOUT
+			}
+			if events != 0 {
+				var evBuf [12]byte
+				binary.LittleEndian.PutUint32(evBuf[0:], events)
+				binary.LittleEndian.PutUint64(evBuf[4:], e.Data)
+				h.Mem.WriteBytes(eventsPtr+nReady*12, evBuf[:])
+				nReady++
+			}
+		}
+	}
+	if nReady > 0 {
+		c.SetSyscallReturn(nReady)
+		return
+	}
+
 	// Build poll set from monitored entries that have host FDs
 	type pollEntry struct {
 		entry  *vfs.EpollEntry
@@ -2003,7 +2057,6 @@ func (h *Handler) sysEpollPwait(c arch.CPU, epfd, eventsPtr, maxevents, timeout 
 	_, _ = unix.Poll(pollFDs, timeoutMs)
 
 	// Translate results back into guest epoll_event structs
-	nReady := uint64(0)
 	for i, pfd := range pollFDs {
 		if pfd.Revents == 0 || nReady >= maxevents {
 			continue
@@ -2033,6 +2086,86 @@ func (h *Handler) sysEpollPwait(c arch.CPU, epfd, eventsPtr, maxevents, timeout 
 		nReady++
 	}
 	c.SetSyscallReturn(nReady)
+}
+
+// ===================================================================
+// eventfd2
+// ===================================================================
+
+func (h *Handler) sysEventfd2(c arch.CPU, initval, flags uint64) {
+	fd := h.FS.AllocEventFD(initval, int(flags))
+	c.SetSyscallReturn(uint64(fd))
+}
+
+// ===================================================================
+// timerfd
+// ===================================================================
+
+func (h *Handler) sysTimerfdCreate(c arch.CPU, clockid, flags uint64) {
+	hostFD, err := unix.TimerfdCreate(int(clockid), int(flags))
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EINVAL))
+		return
+	}
+	f := os.NewFile(uintptr(hostFD), "timerfd")
+	gfd := h.FS.AllocHostFile(f)
+	c.SetSyscallReturn(uint64(gfd))
+}
+
+func (h *Handler) sysTimerfdSettime(c arch.CPU, fdNum, flags, newValue, oldValue uint64) {
+	hostFD := h.FS.GetHostFDNum(int(fdNum))
+	if hostFD < 0 {
+		c.SetSyscallReturn(negErrno(EBADF))
+		return
+	}
+	// Read itimerspec from guest (two timespec = 32 bytes)
+	buf := h.readBytes(newValue, 32)
+	if len(buf) < 32 {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	var newSpec unix.ItimerSpec
+	newSpec.Interval.Sec = int64(binary.LittleEndian.Uint64(buf[0:]))
+	newSpec.Interval.Nsec = int64(binary.LittleEndian.Uint64(buf[8:]))
+	newSpec.Value.Sec = int64(binary.LittleEndian.Uint64(buf[16:]))
+	newSpec.Value.Nsec = int64(binary.LittleEndian.Uint64(buf[24:]))
+
+	var oldSpec unix.ItimerSpec
+	err := unix.TimerfdSettime(hostFD, int(flags), &newSpec, &oldSpec)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EINVAL))
+		return
+	}
+	if oldValue != 0 {
+		var out [32]byte
+		binary.LittleEndian.PutUint64(out[0:], uint64(oldSpec.Interval.Sec))
+		binary.LittleEndian.PutUint64(out[8:], uint64(oldSpec.Interval.Nsec))
+		binary.LittleEndian.PutUint64(out[16:], uint64(oldSpec.Value.Sec))
+		binary.LittleEndian.PutUint64(out[24:], uint64(oldSpec.Value.Nsec))
+		h.Mem.WriteBytes(oldValue, out[:])
+	}
+	c.SetSyscallReturn(0)
+}
+
+func (h *Handler) sysTimerfdGettime(c arch.CPU, fdNum, currValue uint64) {
+	hostFD := h.FS.GetHostFDNum(int(fdNum))
+	if hostFD < 0 {
+		c.SetSyscallReturn(negErrno(EBADF))
+		return
+	}
+	var spec unix.ItimerSpec
+	err := unix.TimerfdGettime(hostFD, &spec)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EINVAL))
+		return
+	}
+	var out [32]byte
+	binary.LittleEndian.PutUint64(out[0:], uint64(spec.Interval.Sec))
+	binary.LittleEndian.PutUint64(out[8:], uint64(spec.Interval.Nsec))
+	binary.LittleEndian.PutUint64(out[16:], uint64(spec.Value.Sec))
+	binary.LittleEndian.PutUint64(out[24:], uint64(spec.Value.Nsec))
+	h.Mem.WriteBytes(currValue, out[:])
+	c.SetSyscallReturn(0)
 }
 
 // ===================================================================
@@ -2274,13 +2407,15 @@ var x64Map = map[uint64]uint64{
 	279: SysStatx,      // move_pages → stub
 	281: SysEpollPwait, // epoll_pwait
 	282: SysEpollCreate1, // via 291
-	284: SysTimerfdCreate,
-	285: SysEventfd2,
-	286: SysFallocate,
+	283: SysTimerfdCreate,  // timerfd_create (obsolete, see 322)
+	284: SysEventfd2,      // eventfd (old), treat as eventfd2
+	285: SysFallocate,
+	286: SysTimerfdSettime,
+	287: SysTimerfdGettime,
 	288: SysAccept4,
-	289: SysPipe2,
-	290: SysEpollCreate1,
-	291: SysStatx,      // real statx
+	289: SysPipe2,         // signalfd4 → stub as pipe2
+	290: SysEventfd2,
+	291: SysEpollCreate1,
 	273: SysSetRobustList,
 	293: SysPrlimit64,
 	302: SysRenameat2,
@@ -2290,6 +2425,7 @@ var x64Map = map[uint64]uint64{
 	319: SysMemfdCreate,
 	320: SysMembarrier,   // kexec_file_load → stub
 	334: SysRseq,
+	322: SysTimerfdCreate, // timerfd_create (new number)
 	435: SysClone,       // clone3
 }
 

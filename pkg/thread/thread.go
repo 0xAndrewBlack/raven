@@ -39,14 +39,14 @@ func NewManager(mem *mmu.MMU, handler arch.SyscallHandler) *Manager {
 return &Manager{
 mem:     mem,
 handler: handler,
-nextID:  1,
+nextID:  2,
 }
 }
 
-// MainThread registers an existing CPU as the initial thread (tid=0).
+// MainThread registers an existing CPU as the initial thread (tid=1, matching PID).
 func (m *Manager) MainThread(c arch.CPU) *Thread {
 c.SetSyscallHandler(m.handler)
-t := &Thread{ID: 0, CPU: c}
+t := &Thread{ID: 1, CPU: c}
 m.threads = append(m.threads, t)
 return t
 }
@@ -119,6 +119,18 @@ t.CPU.SetTLS(tls)
 return
 }
 }
+}
+
+// GetTID returns the thread ID for the given CPU, or 1 if not found.
+func (m *Manager) GetTID(c arch.CPU) int {
+m.mu.Lock()
+defer m.mu.Unlock()
+for _, t := range m.threads {
+if t.CPU == c {
+return t.ID
+}
+}
+return 1 // default to main thread TID
 }
 
 // Wait blocks until all spawned threads finish.

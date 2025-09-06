@@ -104,6 +104,7 @@ type FD struct {
 	Socket   *SocketFD       // non-nil for AF_UNIX sockets
 	HostFile *os.File        // non-nil when backed by a real host FD (memfd, etc.)
 	Epoll    *EpollInstance  // non-nil for epoll instances
+	EventFD  *EventFD        // non-nil for eventfd descriptors
 }
 
 // PipeEnd is one end of a virtual pipe.
@@ -329,6 +330,11 @@ func (v *VFS) Read(fd int, buf []byte) (int, error) {
 		return v.HostIn(fd, buf), nil
 	}
 
+	// EventFD read
+	if f.EventFD != nil {
+		return f.EventFD.Read(buf)
+	}
+
 	// Socket read
 	if f.Socket != nil {
 		return f.Socket.Read(buf)
@@ -389,6 +395,11 @@ func (v *VFS) Write(fd int, data []byte) (int, error) {
 		return len(data), nil
 	}
 
+	// EventFD write
+	if f.EventFD != nil {
+		return f.EventFD.Write(data)
+	}
+
 	// Socket write
 	if f.Socket != nil {
 		return f.Socket.Write(data)
@@ -444,6 +455,9 @@ func (v *VFS) Close(fd int) error {
 	}
 	if f.Socket != nil {
 		f.Socket.Close()
+	}
+	if f.EventFD != nil {
+		f.EventFD.Close()
 	}
 	if f.HostFile != nil {
 		f.HostFile.Close()
