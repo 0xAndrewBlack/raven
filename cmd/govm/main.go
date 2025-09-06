@@ -455,6 +455,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// Wayland connection for window display (used by user32 handlers below)
 	var wlDisplay *wl.Display
 	var wlWindow *wl.Window
+	var mainHWND uint64   // first top-level window HWND (for message routing)
+	var mainTitle string  // title of the main window
+	_ = mainTitle
 	if wld, err := wl.Connect(); err == nil {
 		wlDisplay = wld
 		fmt.Fprintf(os.Stderr, "[wl] connected to Wayland compositor\n")
@@ -990,6 +993,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			msg := []byte("Unknown error\x00")
 			ctx.Mem.WriteBytes(buf, msg)
 			ctx.SetReturn(buf)
+			return 0
+		})
+	}
+
+	// --- ucrtbase.dll ---
+	if ucrt, ok := synthByName["ucrtbase.dll"]; ok {
+		ucrtExit := func(ctx *ntapi.TrapContext) uint32 {
+			code := ctx.Arg(0)
+			if wlDisplay != nil {
+				wlDisplay.Close()
+			}
+			os.Exit(int(code))
+			return 0
+		}
+		d.RegisterAutoStubHandler(ucrt, "exit", ucrtExit)
+		d.RegisterAutoStubHandler(ucrt, "_exit", ucrtExit)
+		d.RegisterAutoStubHandler(ucrt, "_cexit", func(ctx *ntapi.TrapContext) uint32 {
 			return 0
 		})
 	}
@@ -2800,18 +2820,300 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	nextMsgID := uint32(0xC000) // RegisterWindowMessage range
 	nextAtom := uint16(0xC001)  // RegisterClass atom range
 
+	// WndProc dispatch tables
+	atomWndProc := make(map[uint16]uint64)   // class atom → WndProc address
+	hwndWndProc := make(map[uint64]uint64)   // HWND → WndProc address
+	classNameAtom := make(map[string]uint16) // class name → atom (for lpClassName string lookups)
+
+	// Built-in window class tracking for Edit, Static, Button, etc.
+	type controlState struct {
+		className    string
+		parentHWND   uint64
+		x, y, w, h  int32
+		text         string   // WM_SETTEXT / WM_GETTEXT
+		visible      bool
+		// StatusBar parts
+		sbParts      []int32  // right edges
+		sbTexts      []string // per-part text
+		// Edit state
+		editModified bool
+	}
+	hwndChildren := make(map[uint64]*controlState)
+
+	// builtinWndProc handles messages for built-in window classes (Edit, StatusBar, etc.)
+	// Returns (result, handled).
+	var builtinWndProc func(hwnd uint64, msg uint32, wParam, lParam uint64) (uint64, bool)
+	builtinWndProc = func(hwnd uint64, msg uint32, wParam, lParam uint64) (uint64, bool) {
+		cs, ok := hwndChildren[hwnd]
+		if !ok {
+			return 0, false
+		}
+
+		switch msg {
+		case 0x000F: // WM_PAINT
+			if wlWindow == nil {
+				return 0, true
+			}
+			switch cs.className {
+			case "edit":
+				// 3D sunken border
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])   // top shadow
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])   // left shadow
+				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+2, 0x404040)  // inner top
+				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+2, cs.y+cs.h-1, 0x404040)  // inner left
+				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20]) // right highlight
+				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20]) // bottom highlight
+				// White client area
+				wlWindow.DrawRect(cs.x+2, cs.y+2, cs.x+cs.w-2, cs.y+cs.h-2, sysColors[5])
+				// Draw text content
+				if cs.text != "" {
+					wlWindow.DrawText(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[5], true)
+				}
+			case "msctls_statusbar32":
+				// Top edge line
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])
+				// Face
+				wlWindow.DrawRect(cs.x, cs.y+1, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				// Draw parts text
+				if len(cs.sbParts) > 0 {
+					left := cs.x + 2
+					for i, rightEdge := range cs.sbParts {
+						right := cs.x + rightEdge
+						if rightEdge < 0 { right = cs.x + cs.w }
+						if i < len(cs.sbTexts) && cs.sbTexts[i] != "" {
+							wlWindow.DrawText(left+2, cs.y+3, cs.sbTexts[i], 0x000000, sysColors[15], true)
+						}
+						// Part separator
+						if i < len(cs.sbParts)-1 {
+							wlWindow.DrawRect(right-1, cs.y+2, right, cs.y+cs.h-2, sysColors[16])
+						}
+						left = right
+					}
+				} else if cs.text != "" {
+					wlWindow.DrawText(cs.x+4, cs.y+3, cs.text, 0x000000, sysColors[15], true)
+				}
+			case "static":
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				if cs.text != "" {
+					wlWindow.DrawText(cs.x+2, cs.y+2, cs.text, 0x000000, sysColors[15], true)
+				}
+			case "button":
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16])
+				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[16])
+				if cs.text != "" {
+					tx := cs.x + (cs.w-int32(len(cs.text)*8))/2
+					ty := cs.y + (cs.h-16)/2
+					wlWindow.DrawText(tx, ty, cs.text, 0x000000, sysColors[15], true)
+				}
+			}
+			return 0, true
+
+		case 0x000C: // WM_SETTEXT
+			if lParam != 0 {
+				cs.text = readGuestUTF16(lParam)
+			}
+			return 1, true
+
+		case 0x000D: // WM_GETTEXT
+			return 0, true // TODO: copy text to buffer
+
+		case 0x0005: // WM_SIZE
+			// StatusBar auto-sizes to parent width
+			if cs.className == "msctls_statusbar32" && wlWindow != nil {
+				const sbHeight int32 = 20
+				cs.x = 0
+				cs.y = wlWindow.Height - sbHeight
+				cs.w = wlWindow.Width
+				cs.h = sbHeight
+			}
+			return 0, true
+
+		case 0x0001: // WM_CREATE
+			cs.visible = true
+			return 0, true
+
+		case 0x0007: // WM_SETFOCUS
+			return 0, true
+		case 0x0008: // WM_KILLFOCUS
+			return 0, true
+		case 0x0030: // WM_SETFONT
+			return 0, true
+		}
+
+		// Edit-specific messages
+		if cs.className == "edit" {
+			switch msg {
+			case 0x00B7: // EM_SETMODIFY
+				cs.editModified = wParam != 0
+				return 0, true
+			case 0x00B8: // EM_GETMODIFY
+				if cs.editModified { return 1, true }
+				return 0, true
+			case 0x00B1: // EM_SETSEL
+				return 0, true
+			case 0x00B0: // EM_GETSEL
+				// wParam = *DWORD start, lParam = *DWORD end
+				if wParam != 0 { mem.Write32(wParam, 0) }
+				if lParam != 0 { mem.Write32(lParam, 0) }
+				return 0, true
+			case 0x00C5: // EM_SETLIMITTEXT
+				return 0, true
+			case 0x00D3: // EM_SETMARGINS
+				return 0, true
+			case 0x00C9: // EM_SETREADONLY
+				return 1, true
+			case 0x00BB: // EM_GETTHUMB
+				return 0, true
+			case 0x00B2: // EM_GETRECT
+				if lParam != 0 {
+					mem.Write32(lParam, 0)
+					mem.Write32(lParam+4, 0)
+					mem.Write32(lParam+8, uint32(cs.w))
+					mem.Write32(lParam+12, uint32(cs.h))
+				}
+				return 0, true
+			case 0x00B3: // EM_SETRECT
+				return 0, true
+			case 0x00CF: // EM_POSFROMCHAR
+				return 0, true
+			case 0x00D7: // EM_CHARFROMPOS
+				return 0, true
+			case 0x00BE: // EM_GETLINECOUNT
+				return 1, true
+			case 0x00C1: // EM_GETLINE
+				return 0, true
+			case 0x00B6: // EM_LINEFROMCHAR
+				return 0, true
+			case 0x00B9: // EM_LINEINDEX
+				return 0, true
+			case 0x00C4: // EM_LINELENGTH
+				return uint64(len(cs.text)), true
+			}
+		}
+
+		// StatusBar-specific messages (SB_xxx: WM_USER+x)
+		if cs.className == "msctls_statusbar32" {
+			const wmUser = 0x0400
+			switch msg {
+			case wmUser + 4: // SB_SETPARTS
+				nParts := int(wParam)
+				if nParts > 0 && nParts < 256 && lParam != 0 {
+					cs.sbParts = make([]int32, nParts)
+					cs.sbTexts = make([]string, nParts)
+					for i := 0; i < nParts; i++ {
+						v, _ := mem.Read32(lParam + uint64(i*4))
+						cs.sbParts[i] = int32(v)
+					}
+				}
+				return 1, true
+			case wmUser + 11: // SB_SETTEXTW (unicode)
+				part := int(wParam & 0xFF)
+				if part >= 0 && part < len(cs.sbTexts) && lParam != 0 {
+					cs.sbTexts[part] = readGuestUTF16(lParam)
+				}
+				return 1, true
+			case wmUser + 1: // SB_SETTEXTA
+				part := int(wParam & 0xFF)
+				if part >= 0 && part < len(cs.sbTexts) && lParam != 0 {
+					// Read ASCII string
+					var buf []byte
+					for i := uint64(0); i < 256; i++ {
+						b, err := mem.Read8(lParam + i)
+						if err != nil || b == 0 { break }
+						buf = append(buf, b)
+					}
+					cs.sbTexts[part] = string(buf)
+				}
+				return 1, true
+			case wmUser + 5: // SB_GETPARTS
+				return uint64(len(cs.sbParts)), true
+			case wmUser + 3: // SB_GETTEXTLENGTHW
+				part := int(wParam)
+				if part >= 0 && part < len(cs.sbTexts) {
+					return uint64(len(cs.sbTexts[part])), true
+				}
+				return 0, true
+			case wmUser + 13: // SB_GETTEXTW
+				return 0, true
+			case wmUser + 9: // SB_ISSIMPLE
+				return 0, true
+			case wmUser + 6: // SB_GETBORDERS
+				return 0, true
+			}
+		}
+
+		return 0, false
+	}
+
+	// Per-window storage: SetWindowLongPtrW / GetWindowLongPtrW
+	windowLongPtr := make(map[uint64]map[int32]uint64) // HWND → index → value
+	// Per-window properties: SetPropW / GetPropW
+	windowProps := make(map[uint64]map[string]uint64) // HWND → prop name → value
+
+	// Scratch page for CREATESTRUCT and similar temporary guest-side structs
+	scratchPage := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+	scratchOff := uint64(0)
+	scratchAlloc := func(n uint64) uint64 {
+		n = (n + 7) &^ 7 // 8-byte align
+		if scratchOff+n > 4096 {
+			scratchOff = 0 // wrap
+		}
+		addr := scratchPage + scratchOff
+		scratchOff += n
+		return addr
+	}
+
+	// Message queue for synthetic messages (WM_CREATE, WM_SIZE, etc.)
+	type queuedMsg struct {
+		hwnd    uint64
+		message uint32
+		wParam  uint64
+		lParam  uint64
+	}
+	var msgQueue []queuedMsg
+
 	// --- user32.dll ---
 	if user32, ok := synthByName["user32.dll"]; ok {
 		d.RegisterAutoStubHandler(user32, "RegisterClassW", func(ctx *ntapi.TrapContext) uint32 {
-			// WNDCLASSW* in RCX - return a unique atom
+			pClass := ctx.Arg(0)
 			a := nextAtom
 			nextAtom++
+			if pClass != 0 {
+				wndProc, _ := mem.Read64(pClass + 8)
+				atomWndProc[a] = wndProc
+				lpName, _ := mem.Read64(pClass + 64)
+				name := readGuestUTF16(lpName)
+				if name != "" {
+					classNameAtom[name] = a
+				}
+				fmt.Fprintf(os.Stderr, "[wndclass] RegisterClassW %q atom=0x%x wndProc=0x%x\n", name, a, wndProc)
+			}
 			ctx.SetReturn(uint64(a))
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "RegisterClassExW", func(ctx *ntapi.TrapContext) uint32 {
+			pClass := ctx.Arg(0)
 			a := nextAtom
 			nextAtom++
+			if pClass != 0 {
+				wndProc, _ := mem.Read64(pClass + 8)
+				atomWndProc[a] = wndProc
+				lpName, _ := mem.Read64(pClass + 64)
+				var name string
+				if lpName != 0 && lpName < 0x10000 {
+					// Integer atom, not a string pointer
+					name = fmt.Sprintf("atom:0x%x", lpName)
+				} else {
+					name = readGuestUTF16(lpName)
+				}
+				if name != "" {
+					classNameAtom[name] = a
+				}
+				fmt.Fprintf(os.Stderr, "[wndclass] RegisterClassExW name=%q lpName=0x%x atom=0x%x wndProc=0x%x\n", name, lpName, a, wndProc)
+			}
 			ctx.SetReturn(uint64(a))
 			return 0
 		})
@@ -2823,10 +3125,60 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "CreateWindowExW", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := hwndAlloc()
+			lpClassName := ctx.Arg(1)
+			style := uint32(ctx.Arg(3))
+
+			// Associate HWND with WndProc via class name or atom
+			var className string
+			if lpClassName != 0 && lpClassName < 0x10000 {
+				// Integer atom
+				if wp, ok := atomWndProc[uint16(lpClassName)]; ok {
+					hwndWndProc[hwnd] = wp
+				}
+				className = fmt.Sprintf("atom:0x%x", lpClassName)
+			} else if lpClassName != 0 {
+				className = readGuestUTF16(lpClassName)
+				if a, ok := classNameAtom[className]; ok {
+					if wp, ok2 := atomWndProc[a]; ok2 {
+						hwndWndProc[hwnd] = wp
+					}
+				}
+			}
+			wp := hwndWndProc[hwnd]
+			fmt.Fprintf(os.Stderr, "[wndclass] CreateWindowExW class=%q hwnd=0x%x wndProc=0x%x style=0x%x\n", className, hwnd, wp, style)
+
+			const wsChild = 0x40000000
+			// Track child windows (built-in classes like Edit, Static, Button)
+			if style&wsChild != 0 {
+				cx := int32(ctx.Arg(4))
+				cy := int32(ctx.Arg(5))
+				cw := int32(ctx.Arg(6))
+				ch := int32(ctx.Arg(7))
+				if cx < 0 || cx > 0x7FFF { cx = 0 }
+				if cy < 0 || cy > 0x7FFF { cy = 0 }
+				var defW, defH int32 = 800, 600
+				if wlWindow != nil { defW, defH = wlWindow.Width, wlWindow.Height }
+				if cw <= 0 || cw > 0x7FFF { cw = defW }
+				if ch <= 0 || ch > 0x7FFF { ch = defH }
+				lClassName := strings.ToLower(className)
+				// Statusbar: auto-position at bottom of parent
+				if lClassName == "msctls_statusbar32" {
+					const sbHeight int32 = 20
+					cx, cy = 0, defH-sbHeight
+					cw, ch = defW, sbHeight
+				}
+				windowName := readGuestUTF16(ctx.Arg(2))
+				hwndChildren[hwnd] = &controlState{
+					className:  lClassName,
+					parentHWND: mainHWND,
+					x: cx, y: cy, w: cw, h: ch,
+					text:    windowName,
+					visible: style&0x10000000 != 0, // WS_VISIBLE
+				}
+			}
+
 			// Create a real Wayland window for the first top-level window
 			if wlDisplay != nil && wlWindow == nil {
-				style := uint32(ctx.Arg(3))
-				const wsChild = 0x40000000
 				if style&wsChild == 0 {
 					title := readGuestUTF16(ctx.Arg(2))
 					if title == "" {
@@ -2841,12 +3193,40 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 					if win, err := wlDisplay.CreateWindow(title, w, h); err == nil {
 						wlWindow = win
-						fmt.Fprintf(os.Stderr, "[wl] window created: %q %dx%d\n", title, w, h)
+						mainHWND = hwnd
+						mainTitle = title
+						fmt.Fprintf(os.Stderr, "[wl] window created: %q %dx%d hwnd=0x%x\n", title, w, h, hwnd)
 					} else {
 						fmt.Fprintf(os.Stderr, "[wl] CreateWindow failed: %v\n", err)
 					}
 				}
 			}
+			// Queue WM_NCCREATE + WM_CREATE for windows with a WndProc
+			if _, hasWP := hwndWndProc[hwnd]; hasWP {
+				// Build CREATESTRUCT in guest memory (80 bytes, x64 layout):
+				//   0: lpCreateParams(8) 8: hInstance(8) 16: hMenu(8) 24: hwndParent(8)
+				//  32: cy(4) 36: cx(4) 40: y(4) 44: x(4)
+				//  48: style(4) 52: pad(4) 56: lpszName(8) 64: lpszClass(8) 72: dwExStyle(4)
+				cs := scratchAlloc(80)
+				mem.Write64(cs+0, ctx.Arg(11))          // lpCreateParams
+				mem.Write64(cs+8, ctx.Arg(10))          // hInstance
+				mem.Write64(cs+16, ctx.Arg(9))          // hMenu
+				mem.Write64(cs+24, ctx.Arg(8))          // hwndParent
+				mem.Write32(cs+32, uint32(ctx.Arg(7)))  // cy (nHeight)
+				mem.Write32(cs+36, uint32(ctx.Arg(6)))  // cx (nWidth)
+				mem.Write32(cs+40, uint32(ctx.Arg(5)))  // y
+				mem.Write32(cs+44, uint32(ctx.Arg(4)))  // x
+				mem.Write32(cs+48, style)                // style
+				mem.Write32(cs+52, 0)                    // padding
+				mem.Write64(cs+56, ctx.Arg(2))          // lpszName
+				mem.Write64(cs+64, ctx.Arg(1))          // lpszClass
+				mem.Write32(cs+72, uint32(ctx.Arg(0)))  // dwExStyle
+				msgQueue = append(msgQueue,
+					queuedMsg{hwnd, 0x0081, 0, cs}, // WM_NCCREATE
+					queuedMsg{hwnd, 0x0001, 0, cs}, // WM_CREATE
+				)
+			}
+
 			ctx.SetReturn(hwnd)
 			return 0
 		})
@@ -2855,15 +3235,36 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "ShowWindow", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // was previously visible
+			hwnd := ctx.Arg(0)
+			nCmdShow := ctx.Arg(1)
+			if hwnd == mainHWND && wlWindow != nil {
+				w, h := uint64(wlWindow.Width), uint64(wlWindow.Height)
+				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, (h << 16) | w})
+				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+			}
+			if cs, ok := hwndChildren[hwnd]; ok {
+				cs.visible = nCmdShow != 0 // SW_HIDE = 0
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "UpdateWindow", func(ctx *ntapi.TrapContext) uint32 {
+			// Trigger immediate paint for main window
+			hwnd := ctx.Arg(0)
+			if hwnd == mainHWND && wlWindow != nil {
+				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+			}
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "IsChild", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			parent := ctx.Arg(0)
+			child := ctx.Arg(1)
+			if cs, ok := hwndChildren[child]; ok && cs.parentHWND == parent {
+				ctx.SetReturn(1) // TRUE
+			} else {
+				ctx.SetReturn(0)
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "FindWindowW", func(ctx *ntapi.TrapContext) uint32 {
@@ -2970,60 +3371,200 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetWindowPos", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			hwnd := ctx.Arg(0)
+			if ci, ok := hwndChildren[hwnd]; ok {
+				x := int32(ctx.Arg(2))
+				y := int32(ctx.Arg(3))
+				w := int32(ctx.Arg(4))
+				h := int32(ctx.Arg(5))
+				if x >= 0 && x < 0x7FFF { ci.x = x }
+				if y >= 0 && y < 0x7FFF { ci.y = y }
+				if w > 0 && w < 0x7FFF { ci.w = w }
+				if h > 0 && h < 0x7FFF { ci.h = h }
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "MoveWindow", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			if ci, ok := hwndChildren[hwnd]; ok {
+				ci.x = int32(ctx.Arg(1))
+				ci.y = int32(ctx.Arg(2))
+				ci.w = int32(ctx.Arg(3))
+				ci.h = int32(ctx.Arg(4))
+			}
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetWindowTextW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			text := readGuestUTF16(ctx.Arg(1))
+			if hwnd == mainHWND && text != "" {
+				mainTitle = text
+			}
+			if cs, ok := hwndChildren[hwnd]; ok {
+				cs.text = text
+			}
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetWindowLongPtrW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hwnd := ctx.Arg(0)
+			index := int32(ctx.Arg(1))
+			newVal := ctx.Arg(2)
+			m := windowLongPtr[hwnd]
+			if m == nil {
+				m = make(map[int32]uint64)
+				windowLongPtr[hwnd] = m
+			}
+			old := m[index]
+			m[index] = newVal
+			ctx.SetReturn(old)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetWindowLongPtrW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hwnd := ctx.Arg(0)
+			index := int32(ctx.Arg(1))
+			if m, ok := windowLongPtr[hwnd]; ok {
+				ctx.SetReturn(m[index])
+			} else {
+				ctx.SetReturn(0)
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetWindowLongW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hwnd := ctx.Arg(0)
+			index := int32(ctx.Arg(1))
+			newVal := ctx.Arg(2)
+			m := windowLongPtr[hwnd]
+			if m == nil {
+				m = make(map[int32]uint64)
+				windowLongPtr[hwnd] = m
+			}
+			old := m[index]
+			m[index] = newVal
+			ctx.SetReturn(old)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetWindowLongW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hwnd := ctx.Arg(0)
+			index := int32(ctx.Arg(1))
+			if m, ok := windowLongPtr[hwnd]; ok {
+				ctx.SetReturn(m[index])
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetPropW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			lpString := ctx.Arg(1)
+			hData := ctx.Arg(2)
+			var name string
+			if lpString < 0x10000 {
+				name = fmt.Sprintf("atom:%d", lpString)
+			} else {
+				name = readGuestUTF16(lpString)
+			}
+			m := windowProps[hwnd]
+			if m == nil {
+				m = make(map[string]uint64)
+				windowProps[hwnd] = m
+			}
+			m[name] = hData
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetPropW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			lpString := ctx.Arg(1)
+			var name string
+			if lpString < 0x10000 {
+				name = fmt.Sprintf("atom:%d", lpString)
+			} else {
+				name = readGuestUTF16(lpString)
+			}
+			if m, ok := windowProps[hwnd]; ok {
+				ctx.SetReturn(m[name])
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "RemovePropW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			lpString := ctx.Arg(1)
+			var name string
+			if lpString < 0x10000 {
+				name = fmt.Sprintf("atom:%d", lpString)
+			} else {
+				name = readGuestUTF16(lpString)
+			}
+			if m, ok := windowProps[hwnd]; ok {
+				old := m[name]
+				delete(m, name)
+				ctx.SetReturn(old)
+			} else {
+				ctx.SetReturn(0)
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetClientRect", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
 			pRect := ctx.Arg(1)
-			var w, h uint32 = 800, 600
-			if wlWindow != nil {
-				w, h = uint32(wlWindow.Width), uint32(wlWindow.Height)
-			}
 			if pRect != 0 {
-				ctx.Mem.Write32(pRect, 0)   // left
-				ctx.Mem.Write32(pRect+4, 0) // top
-				ctx.Mem.Write32(pRect+8, w) // right
-				ctx.Mem.Write32(pRect+12, h) // bottom
+				if ci, ok := hwndChildren[hwnd]; ok {
+					ctx.Mem.Write32(pRect, 0)
+					ctx.Mem.Write32(pRect+4, 0)
+					ctx.Mem.Write32(pRect+8, uint32(ci.w))
+					ctx.Mem.Write32(pRect+12, uint32(ci.h))
+				} else {
+					var w, h uint32 = 800, 600
+					if wlWindow != nil {
+						w, h = uint32(wlWindow.Width), uint32(wlWindow.Height)
+					}
+					ctx.Mem.Write32(pRect, 0)
+					ctx.Mem.Write32(pRect+4, 0)
+					ctx.Mem.Write32(pRect+8, w)
+					ctx.Mem.Write32(pRect+12, h)
+				}
 			}
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetWindowRect", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
 			pRect := ctx.Arg(1)
 			if pRect != 0 {
-				ctx.Mem.Write32(pRect, 100)    // left
-				ctx.Mem.Write32(pRect+4, 100)  // top
-				ctx.Mem.Write32(pRect+8, 900)  // right
-				ctx.Mem.Write32(pRect+12, 700) // bottom
+				if ci, ok := hwndChildren[hwnd]; ok {
+					ctx.Mem.Write32(pRect, uint32(ci.x))
+					ctx.Mem.Write32(pRect+4, uint32(ci.y))
+					ctx.Mem.Write32(pRect+8, uint32(ci.x+ci.w))
+					ctx.Mem.Write32(pRect+12, uint32(ci.y+ci.h))
+				} else if hwnd == mainHWND && wlWindow != nil {
+					ctx.Mem.Write32(pRect, 0)
+					ctx.Mem.Write32(pRect+4, 0)
+					ctx.Mem.Write32(pRect+8, uint32(wlWindow.Width))
+					ctx.Mem.Write32(pRect+12, uint32(wlWindow.Height))
+				} else {
+					ctx.Mem.Write32(pRect, 0)
+					ctx.Mem.Write32(pRect+4, 0)
+					ctx.Mem.Write32(pRect+8, 800)
+					ctx.Mem.Write32(pRect+12, 600)
+				}
 			}
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SendMessageW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			msg := uint32(ctx.Arg(1))
+			wParam := ctx.Arg(2)
+			lParam := ctx.Arg(3)
+			if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+				ctx.SetReturn(result)
+				return 0
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -3032,49 +3573,80 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "DefWindowProcW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			msg := uint32(ctx.Arg(1))
+
+			// WM_PAINT: fill background, then let children paint themselves
+			if msg == 0x000F && wlWindow != nil {
+				w, h := wlWindow.Width, wlWindow.Height
+				// Fill client area with COLOR_WINDOW (white)
+				wlWindow.DrawRect(0, 0, w, h, sysColors[5])
+				// Dispatch WM_PAINT to all visible children
+				for childHwnd, cs := range hwndChildren {
+					if cs.parentHWND == hwnd && cs.visible {
+						builtinWndProc(childHwnd, 0x000F, 0, 0)
+					}
+				}
+				wlWindow.Commit()
+			}
+			// WM_NCCREATE: must return TRUE for window creation to proceed
+			if msg == 0x0081 {
+				ctx.SetReturn(1)
+				return 0
+			}
+			// WM_ERASEBKGND: return 1 (background erased)
+			if msg == 0x0014 {
+				ctx.SetReturn(1)
+				return 0
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
-		// GetMessageW: block on Wayland events if connected, else WM_QUIT
+		// writeMsg writes a Win32 MSG struct to guest memory (correct x64 layout).
+		// MSG: HWND(8) message(4) pad(4) WPARAM(8) LPARAM(8) time(4) POINT(8)
+		writeMsg := func(pMsg, hwnd uint64, message uint32, wParam, lParam uint64) {
+			mem.Write64(pMsg, hwnd)
+			mem.Write32(pMsg+8, message)
+			mem.Write32(pMsg+12, 0) // padding
+			mem.Write64(pMsg+16, wParam)
+			mem.Write64(pMsg+24, lParam)
+			mem.Write32(pMsg+32, 0) // time
+			mem.Write32(pMsg+36, 0) // pt.x
+			mem.Write32(pMsg+40, 0) // pt.y
+		}
+		// GetMessageW: drain message queue first, then block on Wayland events
 		d.RegisterAutoStubHandler(user32, "GetMessageW", func(ctx *ntapi.TrapContext) uint32 {
 			pMsg := ctx.Arg(0)
+
+			// Drain queued messages first (WM_CREATE, WM_SIZE, etc.)
+			if len(msgQueue) > 0 {
+				m := msgQueue[0]
+				msgQueue = msgQueue[1:]
+				if pMsg != 0 {
+					writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
+				}
+				ctx.SetReturn(1)
+				return 0
+			}
+
 			if wlDisplay != nil && wlWindow != nil {
 				evt, err := wlDisplay.Dispatch()
 				if err != nil || evt == wl.EventClose {
 					if pMsg != 0 {
-						ctx.Mem.Write64(pMsg, 0)
-						ctx.Mem.Write32(pMsg+8, 0x12) // WM_QUIT
-						ctx.Mem.Write64(pMsg+12, 0)
-						ctx.Mem.Write64(pMsg+20, 0)
-						ctx.Mem.Write32(pMsg+28, 0)
-						ctx.Mem.Write32(pMsg+32, 0)
-						ctx.Mem.Write32(pMsg+36, 0)
+						writeMsg(pMsg, mainHWND, 0x12, 0, 0) // WM_QUIT
 					}
-					ctx.SetReturn(0) // 0 = WM_QUIT
+					ctx.SetReturn(0)
 					return 0
 				}
-				// Non-close event (configure, etc.) → send WM_PAINT
 				if pMsg != 0 {
-					ctx.Mem.Write64(pMsg, 0)
-					ctx.Mem.Write32(pMsg+8, 0x000F) // WM_PAINT
-					ctx.Mem.Write64(pMsg+12, 0)
-					ctx.Mem.Write64(pMsg+20, 0)
-					ctx.Mem.Write32(pMsg+28, 0)
-					ctx.Mem.Write32(pMsg+32, 0)
-					ctx.Mem.Write32(pMsg+36, 0)
+					writeMsg(pMsg, mainHWND, 0x000F, 0, 0) // WM_PAINT
 				}
 				ctx.SetReturn(1)
 				return 0
 			}
 			// No Wayland - return WM_QUIT immediately
 			if pMsg != 0 {
-				ctx.Mem.Write64(pMsg, 0)
-				ctx.Mem.Write32(pMsg+8, 0x12)
-				ctx.Mem.Write64(pMsg+12, 0)
-				ctx.Mem.Write64(pMsg+20, 0)
-				ctx.Mem.Write32(pMsg+28, 0)
-				ctx.Mem.Write32(pMsg+32, 0)
-				ctx.Mem.Write32(pMsg+36, 0)
+				writeMsg(pMsg, mainHWND, 0x12, 0, 0) // WM_QUIT
 			}
 			ctx.SetReturn(0)
 			return 0
@@ -3088,7 +3660,41 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "DispatchMessageW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			pMsg := ctx.Arg(0)
+			if pMsg == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// MSG layout (x64): HWND(8) message(4) pad(4) WPARAM(8) LPARAM(8) ...
+			hwnd, _ := mem.Read64(pMsg)
+			message, _ := mem.Read32(pMsg + 8)
+			wParam, _ := mem.Read64(pMsg + 16)
+			lParam, _ := mem.Read64(pMsg + 24)
+
+			wndProc, ok := hwndWndProc[hwnd]
+			if !ok || wndProc == 0 {
+				fmt.Fprintf(os.Stderr, "[dispatch] no WndProc for hwnd=0x%x msg=0x%x\n", hwnd, message)
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			fmt.Fprintf(os.Stderr, "[dispatch] hwnd=0x%x msg=0x%x → WndProc=0x%x\n", hwnd, message, wndProc)
+
+			// Stack is already correct: [RSP] = caller's return address,
+			// [RSP+8..RSP+0x28] = shadow space. WndProc will RET to caller.
+			rw.WriteReg(1, hwnd)            // RCX
+			rw.WriteReg(2, uint64(message)) // RDX
+			rw.WriteReg(8, wParam)          // R8
+			rw.WriteReg(9, lParam)          // R9
+
+			ctx.CPU.SetPC(wndProc)
+			ctx.ReturnOverridden = true
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "TranslateAcceleratorW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3144,6 +3750,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "InvalidateRect", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			if hwnd == 0 || hwnd == mainHWND {
+				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+			}
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -3314,7 +3924,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "RedrawWindow", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			hwnd := ctx.Arg(0)
+			if hwnd == 0 || hwnd == mainHWND {
+				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 	}

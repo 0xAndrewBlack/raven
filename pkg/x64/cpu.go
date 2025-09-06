@@ -118,11 +118,20 @@ func (c *CPU) Run() error {
 c.running = true
 for c.running {
 	if err := c.step(); err != nil {
-		// Null function call recovery: if RIP is in the null page,
+		// Unmapped function call recovery: if RIP points to unmapped memory,
 		// simulate a function that returns 0 (pop retaddr, set RAX=0).
-		if c.RIP < 0x10000 {
+		if c.RIP < 0x10000 || c.RIP > 0x7FFFFFFFFFFF {
 			retAddr, rerr := c.pop64()
 			if rerr == nil {
+				c.Regs[RAX] = 0
+				c.RIP = retAddr
+				continue
+			}
+		}
+		// Also recover from any fetch segfault at unmapped addresses
+		if _, rerr := c.mem.Read8(c.RIP); rerr != nil {
+			retAddr, rerr2 := c.pop64()
+			if rerr2 == nil {
 				c.Regs[RAX] = 0
 				c.RIP = retAddr
 				continue
