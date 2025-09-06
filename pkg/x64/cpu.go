@@ -46,9 +46,11 @@ RIP     uint64
 Rflags  uint64
 mem     *mmu.MMU
 syscall arch.SyscallHandler
+vmcall  arch.SyscallHandler // handler for vmcall (0x0F 0x01 0xC1) - NT trap
 running bool
 instret uint64
 fsBase  uint64
+gsBase  uint64
 
 // SSE/AVX registers (128-bit XMM0-XMM15, stored as two uint64).
 xmm [16][2]uint64
@@ -76,12 +78,33 @@ func (c *CPU) GetMem() *mmu.MMU                  { return c.mem }
 func (c *CPU) GetInstret() uint64                { return c.instret }
 func (c *CPU) GetArch() arch.Arch                { return arch.ArchAMD64 }
 func (c *CPU) SetSyscallHandler(h arch.SyscallHandler) { c.syscall = h }
+func (c *CPU) SetVmcallHandler(h arch.SyscallHandler)  { c.vmcall = h }
+func (c *CPU) GetGSBase() uint64                        { return c.gsBase }
+func (c *CPU) SetGSBase(v uint64)                       { c.gsBase = v }
+
+// ReadReg reads a general-purpose register by index (RAX=0 .. R15=15).
+func (c *CPU) ReadReg(idx int) uint64 {
+	if idx >= 0 && idx < 16 {
+		return c.Regs[idx]
+	}
+	return 0
+}
+
+// WriteReg writes a general-purpose register by index.
+func (c *CPU) WriteReg(idx int, val uint64) {
+	if idx >= 0 && idx < 16 {
+		c.Regs[idx] = val
+	}
+}
+
 func (c *CPU) CloneForThread() arch.CPU {
 n := New(c.mem)
 n.Regs = c.Regs
 n.RIP = c.RIP
 n.Rflags = c.Rflags
 n.fsBase = c.fsBase
+n.gsBase = c.gsBase
+n.vmcall = c.vmcall
 n.xmm = c.xmm
 return n
 }
@@ -290,6 +313,8 @@ return 0, false, err2
 base = uint64(int64(c.RIP) + int64(int32(disp32)))
 if pfx.segOver == 0x64 {
 base += c.fsBase
+} else if pfx.segOver == 0x65 {
+base += c.gsBase
 }
 return base, false, nil
 default:
@@ -313,6 +338,8 @@ base = uint64(int64(base) + int64(int32(disp32)))
 }
 if pfx.segOver == 0x64 {
 base += c.fsBase
+} else if pfx.segOver == 0x65 {
+base += c.gsBase
 }
 return base, false, nil
 }
@@ -1338,6 +1365,22 @@ if c.syscall != nil {
 c.syscall(c)
 }
 return nil
+
+// --- 0F 01 xx: privileged/system instructions ---
+case 0x01:
+modrm, err := c.fetch8()
+if err != nil {
+return err
+}
+switch modrm {
+case 0xC1: // vmcall
+if c.vmcall != nil {
+c.vmcall(c)
+}
+return nil
+default:
+return fmt.Errorf("unimplemented 0F 01 /%02X at RIP=0x%x", modrm, startRIP)
+}
 
 // --- Jcc rel32 (0x80-0x8F) ---
 case 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
