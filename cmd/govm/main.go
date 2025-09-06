@@ -333,7 +333,7 @@ for _, synth := range autoSynthDLLs {
 // Register handlers for critical CRT/Win32 functions
 peBasename := filepath.Base(filepath.Dir(absPath))
 winImagePath := `C:\` + peBasename + `\` + filepath.Base(absPath)
-registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable)
+registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule)
 
 // Set up Win32k subsystem
 w32k := win32k.New(mem, handles)
@@ -446,7 +446,7 @@ tm.Wait()
 
 // registerAutoSynthHandlers registers vmcall handlers for critical
 // CRT and Win32 functions in auto-generated synthetic DLLs.
-func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable) {
+func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule) {
 	synthByName := make(map[string]*ntapi.SynthPE)
 	for _, s := range dlls {
 		synthByName[strings.ToLower(s.Name)] = s
@@ -479,6 +479,193 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			addr += 2
 		}
 		return string(utf16Decode(chars))
+	}
+
+	// peLoadStringW loads a string from the PE resource section.
+	// RT_STRING resources are grouped in blocks of 16 strings.
+	// Block ID = (uID / 16) + 1, index within block = uID % 16.
+	// Each entry in a block is: WORD length, WCHAR[length].
+	peLoadStringW := func(uID uint32) (string, uint64, int) {
+		if mainModule == nil || mainModule.ResourceDirRVA == 0 {
+			return "", 0, 0
+		}
+		rsrcBase := mainModule.BaseAddr + uint64(mainModule.ResourceDirRVA)
+
+		// Navigate resource directory: Type (RT_STRING=6) → Block ID → Language
+		// IMAGE_RESOURCE_DIRECTORY: Characteristics(4) + TimeDateStamp(4) + MajorVersion(2) +
+		//   MinorVersion(2) + NumberOfNamedEntries(2) + NumberOfIdEntries(2) = 16 bytes
+		// IMAGE_RESOURCE_DIRECTORY_ENTRY: Name/ID(4) + OffsetToData(4) = 8 bytes
+
+		readDir := func(addr uint64) (numNamed, numID uint16) {
+			nn, _ := mem.Read16(addr + 12)
+			ni, _ := mem.Read16(addr + 14)
+			return nn, ni
+		}
+
+		findEntry := func(dirAddr uint64, id uint32) (uint64, bool) {
+			numNamed, numID := readDir(dirAddr)
+			total := int(numNamed) + int(numID)
+			entryAddr := dirAddr + 16
+			for i := 0; i < total; i++ {
+				eid, _ := mem.Read32(entryAddr)
+				off, _ := mem.Read32(entryAddr + 4)
+				if eid == id {
+					if off&0x80000000 != 0 {
+						return rsrcBase + uint64(off&0x7FFFFFFF), true
+					}
+					return rsrcBase + uint64(off), true
+				}
+				entryAddr += 8
+			}
+			return 0, false
+		}
+
+		// Find RT_STRING (type 6)
+		typeDir, ok := findEntry(rsrcBase, 6)
+		if !ok {
+			return "", 0, 0
+		}
+		// Find block (uID/16 + 1)
+		blockID := uID/16 + 1
+		blockDir, ok := findEntry(typeDir, blockID)
+		if !ok {
+			return "", 0, 0
+		}
+		// Get first language entry
+		numNamed, numID := readDir(blockDir)
+		if int(numNamed)+int(numID) == 0 {
+			return "", 0, 0
+		}
+		// Read first entry's offset (any language)
+		leafOff, _ := mem.Read32(blockDir + 16 + 4)
+		// IMAGE_RESOURCE_DATA_ENTRY: OffsetToData(4) + Size(4) + CodePage(4) + Reserved(4)
+		leafAddr := rsrcBase + uint64(leafOff&0x7FFFFFFF)
+		dataRVA, _ := mem.Read32(leafAddr)
+		dataAddr := mainModule.BaseAddr + uint64(dataRVA)
+
+		// Parse string table: 16 entries, each is WORD length + WCHAR[length]
+		idx := uID % 16
+		pos := dataAddr
+		for i := uint32(0); i <= idx; i++ {
+			slen, _ := mem.Read16(pos)
+			pos += 2
+			if i == idx {
+				if slen == 0 {
+					return "", 0, 0
+				}
+				chars := make([]uint16, slen)
+				for j := uint16(0); j < slen; j++ {
+					chars[j], _ = mem.Read16(pos + uint64(j)*2)
+				}
+				return string(utf16Decode(chars)), pos, int(slen)
+			}
+			pos += uint64(slen) * 2
+		}
+		return "", 0, 0
+	}
+
+	// wideprintf formats a wide format string with arguments read from guest memory.
+	// args are the uint64 values to substitute (already read from registers/stack).
+	wideprintf := func(format string, args []uint64) string {
+		var result []rune
+		argIdx := 0
+		nextArg := func() int64 {
+			if argIdx < len(args) {
+				v := args[argIdx]
+				argIdx++
+				return int64(v)
+			}
+			return 0
+		}
+		nextPtr := func() uint64 {
+			if argIdx < len(args) {
+				v := args[argIdx]
+				argIdx++
+				return v
+			}
+			return 0
+		}
+
+		i := 0
+		for i < len(format) {
+			if format[i] != '%' {
+				result = append(result, rune(format[i]))
+				i++
+				continue
+			}
+			i++ // skip '%'
+			if i >= len(format) {
+				break
+			}
+			// Flags
+			for i < len(format) && (format[i] == '-' || format[i] == '+' || format[i] == '0' || format[i] == ' ' || format[i] == '#') {
+				i++
+			}
+			// Width
+			for i < len(format) && format[i] >= '0' && format[i] <= '9' {
+				i++
+			}
+			// Precision
+			if i < len(format) && format[i] == '.' {
+				i++
+				for i < len(format) && format[i] >= '0' && format[i] <= '9' {
+					i++
+				}
+			}
+			// Length modifier
+			if i < len(format) && format[i] == 'l' {
+				i++
+				if i < len(format) && format[i] == 'l' {
+					i++
+				}
+			} else if i < len(format) && format[i] == 'h' {
+				i++
+			} else if i < len(format) && format[i] == 'I' {
+				i++
+				if i+1 < len(format) && format[i] == '6' && format[i+1] == '4' {
+					i += 2
+				}
+			}
+			if i >= len(format) {
+				break
+			}
+			switch format[i] {
+			case 'd', 'i':
+				v := nextArg()
+				for _, r := range fmt.Sprintf("%d", int32(v)) {
+					result = append(result, r)
+				}
+			case 'u':
+				v := nextArg()
+				for _, r := range fmt.Sprintf("%d", uint32(v)) {
+					result = append(result, r)
+				}
+			case 'x':
+				v := nextArg()
+				for _, r := range fmt.Sprintf("%x", uint32(v)) {
+					result = append(result, r)
+				}
+			case 'X':
+				v := nextArg()
+				for _, r := range fmt.Sprintf("%X", uint32(v)) {
+					result = append(result, r)
+				}
+			case 's':
+				p := nextPtr()
+				for _, r := range readGuestUTF16(p) {
+					result = append(result, r)
+				}
+			case 'c':
+				v := nextArg()
+				result = append(result, rune(v))
+			case '%':
+				result = append(result, '%')
+			default:
+				result = append(result, '%', rune(format[i]))
+			}
+			i++
+		}
+		return string(result)
 	}
 
 	// --- GDI rendering state ---
@@ -1010,6 +1197,92 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(ucrt, "exit", ucrtExit)
 		d.RegisterAutoStubHandler(ucrt, "_exit", ucrtExit)
 		d.RegisterAutoStubHandler(ucrt, "_cexit", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_configure_narrow_argv", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_initialize_narrow_environment", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_set_app_type", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_get_initial_narrow_environment", func(ctx *ntapi.TrapContext) uint32 {
+			// Return pointer to an empty environment (a NULL pointer)
+			envBlock := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+			mem.Write64(envBlock, 0) // NULL terminator
+			ctx.SetReturn(envBlock)
+			return 0
+		})
+		// __p___argc: returns pointer to argc
+		var argcSlot uint64
+		d.RegisterAutoStubHandler(ucrt, "__p___argc", func(ctx *ntapi.TrapContext) uint32 {
+			if argcSlot == 0 {
+				argcSlot = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+				mem.Write32(argcSlot, uint32(len(argv)))
+			}
+			ctx.SetReturn(argcSlot)
+			return 0
+		})
+		// __p___argv: returns pointer to argv (array of char*)
+		var argvSlot uint64
+		d.RegisterAutoStubHandler(ucrt, "__p___argv", func(ctx *ntapi.TrapContext) uint32 {
+			if argvSlot == 0 {
+				page := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+				// Layout: [ptr to argv array] then [argv[0], argv[1], ..., NULL] then string data
+				argvArrayAddr := page + 8
+				strOff := argvArrayAddr + uint64((len(argv)+1)*8)
+				for i, a := range argv {
+					mem.Write64(argvArrayAddr+uint64(i)*8, strOff)
+					mem.WriteBytes(strOff, append([]byte(a), 0))
+					strOff += uint64(len(a)) + 1
+				}
+				mem.Write64(argvArrayAddr+uint64(len(argv))*8, 0) // NULL terminator
+				mem.Write64(page, argvArrayAddr)
+				argvSlot = page
+			}
+			ctx.SetReturn(argvSlot)
+			return 0
+		})
+
+		// __stdio_common_vswprintf: wide printf with va_list
+		d.RegisterAutoStubHandler(ucrt, "__stdio_common_vswprintf", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(1)
+			bufCount := ctx.Arg(2)
+			fmtAddr := ctx.Arg(3)
+			vaList := ctx.Arg(5)
+
+			if fmtAddr == 0 || buf == 0 || bufCount == 0 {
+				if buf != 0 && bufCount > 0 {
+					mem.Write16(buf, 0)
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			fmtStr := readGuestUTF16(fmtAddr)
+			// Read va_list args (each 8 bytes)
+			var args []uint64
+			for i := 0; i < 16; i++ {
+				v, _ := mem.Read64(vaList + uint64(i)*8)
+				args = append(args, v)
+			}
+			result := wideprintf(fmtStr, args)
+
+			// Write result as UTF-16 to buffer
+			runes := []rune(result)
+			n := len(runes)
+			if bufCount > 0 && uint64(n) >= bufCount {
+				n = int(bufCount) - 1
+			}
+			for i := 0; i < n; i++ {
+				mem.Write16(buf+uint64(i)*2, uint16(runes[i]))
+			}
+			mem.Write16(buf+uint64(n)*2, 0)
+			ctx.SetReturn(uint64(n))
 			return 0
 		})
 	}
@@ -2671,9 +2944,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			return 0
 		})
+		// wnsprintfW(lpOut, cchLimitIn, lpFmt, ...) - like snprintf for wide strings
+		d.RegisterAutoStubHandler(shlwapi, "wnsprintfW", func(ctx *ntapi.TrapContext) uint32 {
+			lpOut := ctx.Arg(0)
+			cchLimit := int(int32(ctx.Arg(1)))
+			lpFmt := ctx.Arg(2)
+			fmtStr := readGuestUTF16(lpFmt)
+			var args []uint64
+			for i := 3; i < 10; i++ {
+				args = append(args, ctx.Arg(i))
+			}
+			result := wideprintf(fmtStr, args)
+			runes := []rune(result)
+			n := len(runes)
+			if cchLimit > 0 && n >= cchLimit {
+				n = cchLimit - 1
+			}
+			for i := 0; i < n; i++ {
+				mem.Write16(lpOut+uint64(i)*2, uint16(runes[i]))
+			}
+			mem.Write16(lpOut+uint64(n)*2, 0)
+			ctx.SetReturn(uint64(n))
+			return 0
+		})
 	}
-
-	// --- shell32.dll ---
 	if shell32, ok := synthByName["shell32.dll"]; ok {
 		d.RegisterAutoStubHandler(shell32, "SHGetFolderPathW", func(ctx *ntapi.TrapContext) uint32 {
 			buf := ctx.Arg(3)
@@ -2696,11 +2990,31 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0) // S_OK
 			return 0
 		})
+		d.RegisterAutoStubHandler(shell32, "DragAcceptFiles", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+	}
+
+	// --- comdlg32.dll ---
+	if comdlg32, ok := synthByName["comdlg32.dll"]; ok {
+		d.RegisterAutoStubHandler(comdlg32, "GetFileTitleW", func(ctx *ntapi.TrapContext) uint32 {
+			lpBuffer := ctx.Arg(1)
+			cbBuf := ctx.Arg(2)
+			if lpBuffer != 0 && cbBuf > 0 {
+				mem.Write16(lpBuffer, 0)
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
 	}
 
 	// --- advapi32.dll ---
 	if advapi32, ok := synthByName["advapi32.dll"]; ok {
 		d.RegisterAutoStubHandler(advapi32, "RegOpenKeyExW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "RegOpenKeyW", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 			return 0
 		})
@@ -2748,6 +3062,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			ctx.Mem.Write16(buf+uint64(len(name)*2), 0)
 			ctx.SetReturn(1)
+			return 0
+		})
+	}
+
+	// --- comctl32.dll ---
+	if comctl32, ok := synthByName["comctl32.dll"]; ok {
+		d.RegisterAutoStubHandler(comctl32, "InitCommonControls", func(ctx *ntapi.TrapContext) uint32 {
+			return 0 // void function
+		})
+		d.RegisterAutoStubHandler(comctl32, "InitCommonControlsEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 	}
@@ -3011,13 +3336,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 1, true
 			case wmUser + 11: // SB_SETTEXTW (unicode)
 				part := int(wParam & 0xFF)
-				if part >= 0 && part < len(cs.sbTexts) && lParam != 0 {
+				// Auto-grow parts array if needed
+				for len(cs.sbTexts) <= part {
+					cs.sbTexts = append(cs.sbTexts, "")
+				}
+				for len(cs.sbParts) <= part {
+					cs.sbParts = append(cs.sbParts, -1)
+				}
+				if lParam != 0 {
 					cs.sbTexts[part] = readGuestUTF16(lParam)
 				}
 				return 1, true
 			case wmUser + 1: // SB_SETTEXTA
 				part := int(wParam & 0xFF)
-				if part >= 0 && part < len(cs.sbTexts) && lParam != 0 {
+				for len(cs.sbTexts) <= part {
+					cs.sbTexts = append(cs.sbTexts, "")
+				}
+				for len(cs.sbParts) <= part {
+					cs.sbParts = append(cs.sbParts, -1)
+				}
+				if lParam != 0 {
 					// Read ASCII string
 					var buf []byte
 					for i := uint64(0); i < 256; i++ {
@@ -3077,6 +3415,74 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// --- user32.dll ---
 	if user32, ok := synthByName["user32.dll"]; ok {
+		// LoadStringW: load string resource from PE
+		d.RegisterAutoStubHandler(user32, "LoadStringW", func(ctx *ntapi.TrapContext) uint32 {
+			uID := uint32(ctx.Arg(1))
+			lpBuffer := ctx.Arg(2)
+			cchBufferMax := int(int32(ctx.Arg(3)))
+			s, guestAddr, slen := peLoadStringW(uID)
+			if s == "" || lpBuffer == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// When cchBufferMax == 0, return a read-only pointer to the resource string
+			if cchBufferMax == 0 {
+				mem.Write64(lpBuffer, guestAddr)
+				ctx.SetReturn(uint64(slen))
+				return 0
+			}
+			runes := []rune(s)
+			n := len(runes)
+			if n >= cchBufferMax {
+				n = cchBufferMax - 1
+			}
+			for i := 0; i < n; i++ {
+				mem.Write16(lpBuffer+uint64(i)*2, uint16(runes[i]))
+			}
+			mem.Write16(lpBuffer+uint64(n)*2, 0)
+			ctx.SetReturn(uint64(n))
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "IsDialogMessageW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - not a dialog message
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetWindowTextLengthW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			if cs, ok := hwndChildren[hwnd]; ok && cs.text != "" {
+				ctx.SetReturn(uint64(len([]rune(cs.text))))
+			} else if hwnd == mainHWND && mainTitle != "" {
+				ctx.SetReturn(uint64(len([]rune(mainTitle))))
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "MonitorFromRect", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0xD0000001) // fake monitor handle
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "LoadAcceleratorsW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0xA0000001) // fake accelerator table handle
+			return 0
+		})
+		// wsprintfW(lpOut, lpFmt, ...) - varargs format, returns char count
+		d.RegisterAutoStubHandler(user32, "wsprintfW", func(ctx *ntapi.TrapContext) uint32 {
+			lpOut := ctx.Arg(0)
+			lpFmt := ctx.Arg(1)
+			fmtStr := readGuestUTF16(lpFmt)
+			var args []uint64
+			for i := 2; i < 10; i++ {
+				args = append(args, ctx.Arg(i))
+			}
+			result := wideprintf(fmtStr, args)
+			for i, r := range result {
+				mem.Write16(lpOut+uint64(i)*2, uint16(r))
+			}
+			mem.Write16(lpOut+uint64(len([]rune(result)))*2, 0)
+			ctx.SetReturn(uint64(len([]rune(result))))
+			return 0
+		})
 		d.RegisterAutoStubHandler(user32, "RegisterClassW", func(ctx *ntapi.TrapContext) uint32 {
 			pClass := ctx.Arg(0)
 			a := nextAtom
@@ -3373,14 +3779,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "SetWindowPos", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			if ci, ok := hwndChildren[hwnd]; ok {
-				x := int32(ctx.Arg(2))
-				y := int32(ctx.Arg(3))
-				w := int32(ctx.Arg(4))
-				h := int32(ctx.Arg(5))
-				if x >= 0 && x < 0x7FFF { ci.x = x }
-				if y >= 0 && y < 0x7FFF { ci.y = y }
-				if w > 0 && w < 0x7FFF { ci.w = w }
-				if h > 0 && h < 0x7FFF { ci.h = h }
+				flags := uint32(ctx.Arg(6))
+				const swpNoMove = 0x0002
+				const swpNoSize = 0x0001
+				if flags&swpNoMove == 0 {
+					x := int32(ctx.Arg(2))
+					y := int32(ctx.Arg(3))
+					if x >= 0 && x < 0x7FFF { ci.x = x }
+					if y >= 0 && y < 0x7FFF { ci.y = y }
+				}
+				if flags&swpNoSize == 0 {
+					w := int32(ctx.Arg(4))
+					h := int32(ctx.Arg(5))
+					if w > 0 && w < 0x7FFF { ci.w = w }
+					if h > 0 && h < 0x7FFF { ci.h = h }
+				}
 			}
 			ctx.SetReturn(1)
 			return 0
