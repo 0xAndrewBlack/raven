@@ -21,6 +21,9 @@ type TrapContext struct {
 	Reg     *RegistryHive
 	State   *ProcessState
 	Trace   bool
+	// ReturnOverridden is set by handlers that manage RAX directly,
+	// preventing the dispatcher from overwriting it with the handler's return.
+	ReturnOverridden bool
 }
 
 // Arg reads a Windows x64 calling convention argument (RCX, RDX, R8, R9, stack).
@@ -50,6 +53,13 @@ func (ctx *TrapContext) Arg(n int) uint64 {
 		_ = args
 		return val
 	}
+}
+
+// SetReturn sets the return value (RAX) and prevents the dispatcher
+// from overwriting it with the handler's return code.
+func (ctx *TrapContext) SetReturn(val uint64) {
+	ctx.CPU.SetSyscallReturn(val)
+	ctx.ReturnOverridden = true
 }
 
 // Register constants for direct access.
@@ -153,6 +163,34 @@ func (d *Dispatcher) SetTrace(trace bool) {
 	d.ctx.Trace = trace
 }
 
+// RegisterAutoStubNames registers display names for auto-generated stub DLL
+// trap IDs so they appear in trace output. The synth DLL's StubIDs maps
+// stub guest addresses to trap IDs.
+func (d *Dispatcher) RegisterAutoStubNames(synth *SynthPE) {
+	for _, id := range synth.StubIDs {
+		for name, addr := range synth.Exports {
+			if synth.StubIDs[addr] == id {
+				d.names[id] = synth.Name + "!" + name
+				break
+			}
+		}
+	}
+}
+
+// RegisterAutoStubHandler registers a handler for a specific function in a
+// synthetic DLL by looking up its trap ID.
+func (d *Dispatcher) RegisterAutoStubHandler(synth *SynthPE, funcName string, h TrapHandler) {
+	addr, ok := synth.Exports[funcName]
+	if !ok {
+		return
+	}
+	id, ok := synth.StubIDs[addr]
+	if !ok {
+		return
+	}
+	d.handlers[id] = h
+}
+
 // Handle is the vmcall trap entry point, called by the CPU emulator.
 func (d *Dispatcher) Handle(cpu arch.CPU) {
 	d.ctx.CPU = cpu
@@ -167,8 +205,13 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 			}
 			fmt.Printf("[ntapi] UNIMPLEMENTED: %s (id=0x%04X)\n", name, syscallID)
 		}
-		// Return STATUS_NOT_IMPLEMENTED
-		cpu.SetSyscallReturn(0xC0000002)
+		// For auto-synth user-mode DLL stubs, return 0 (NULL/FALSE).
+		// For NT syscalls, return STATUS_NOT_IMPLEMENTED.
+		if syscallID >= AutoSynthIDBase {
+			cpu.SetSyscallReturn(0)
+		} else {
+			cpu.SetSyscallReturn(0xC0000002)
+		}
 		return
 	}
 
@@ -177,8 +220,11 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		fmt.Printf("[ntapi] %s (id=0x%04X)\n", name, syscallID)
 	}
 
+	d.ctx.ReturnOverridden = false
 	status := handler(d.ctx)
-	cpu.SetSyscallReturn(uint64(status))
+	if !d.ctx.ReturnOverridden {
+		cpu.SetSyscallReturn(uint64(status))
+	}
 }
 
 // register adds a handler for a given syscall ID.

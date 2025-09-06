@@ -261,6 +261,7 @@ const (
 	// Syscall ID ranges
 	ntapiIDBase  = 0x0000 // NtXxx/RtlXxx syscalls: 0x0000-0x0FFF
 	win32uIDBase = 0x1000 // NtUser*/NtGdi* syscalls: 0x1000-0x1FFF
+	AutoSynthIDBase = 0x2000 // auto-generated stub DLLs: 0x2000-0xFFDD
 
 	// DllMainReturnID is a sentinel syscall ID used by the DllMain return
 	// trampoline. When the CPU hits this, the dispatcher stops execution.

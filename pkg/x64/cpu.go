@@ -260,9 +260,21 @@ reg  int // with REX.R applied
 rm   int // with REX.B applied
 raw  byte
 // cached resolution result
-resolved bool
+resolved    bool
 cachedAddr  uint64
 cachedIsReg bool
+ripRelative bool // RIP-relative addressing was used
+}
+
+// adjustRIPRelative fixes the cached address for instructions whose
+// immediate bytes follow the ModRM/SIB/displacement.  x86-64 defines
+// RIP-relative as "RIP of the *next* instruction + disp32", but when
+// resolveRMAddr runs, the immediate hasn't been fetched yet, so c.RIP
+// still points at the immediate.  Call this *after* fetching the imm.
+func (m *modrm) adjustRIPRelative(immBytes int) {
+	if m.ripRelative && m.resolved {
+		m.cachedAddr += uint64(immBytes)
+	}
 }
 
 func (c *CPU) decodeModRM(pfx *prefixState) (*modrm, error) {
@@ -316,6 +328,7 @@ base += c.fsBase
 } else if pfx.segOver == 0x65 {
 base += c.gsBase
 }
+m.ripRelative = true
 return base, false, nil
 default:
 idx := regIndex(rmField, pfx.rexB())
@@ -1057,10 +1070,10 @@ m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
-// Resolve address before fetching immediate (displacement precedes imm in encoding)
 if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
 return err
 }
+m.adjustRIPRelative(1)
 imm, err := c.fetch8()
 if err != nil {
 return err
@@ -1071,7 +1084,6 @@ m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
-// Resolve address before fetching immediate (displacement precedes imm in encoding)
 if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
 return err
 }
@@ -1079,6 +1091,7 @@ immSz := size
 if immSz == 8 {
 immSz = 4
 }
+m.adjustRIPRelative(immSz)
 imm, err := c.fetchImm(immSz)
 if err != nil {
 return err
@@ -1182,6 +1195,10 @@ m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
+if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
+return err
+}
+m.adjustRIPRelative(1)
 val, err := c.readRM(m, pfx, size)
 if err != nil {
 return err
@@ -1200,13 +1217,17 @@ m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
-val, err := c.readRM(m, pfx, size)
-if err != nil {
-return err
-}
 immSz := size
 if immSz == 8 {
 immSz = 4
+}
+if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
+return err
+}
+m.adjustRIPRelative(immSz)
+val, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
 }
 imm, err := c.fetchImm(immSz)
 if err != nil {
@@ -1597,6 +1618,10 @@ m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
+if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
+return err
+}
+m.adjustRIPRelative(1)
 imm, err := c.fetch8()
 if err != nil {
 return err
@@ -2635,6 +2660,8 @@ addr, _, err := c.resolveRMAddr(m, pfx)
 if err != nil {
 return err
 }
+m.adjustRIPRelative(1) // imm8 follows
+addr = m.cachedAddr
 src[0], _ = c.mem.Read64(addr)
 src[1], _ = c.mem.Read64(addr + 8)
 }
@@ -3347,6 +3374,8 @@ addr, _, err := c.resolveRMAddr(m, pfx)
 if err != nil {
 return err
 }
+m.adjustRIPRelative(1) // imm8 follows
+addr = m.cachedAddr
 src[0], _ = c.mem.Read64(addr)
 src[1], _ = c.mem.Read64(addr + 8)
 }
@@ -3550,10 +3579,6 @@ m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
-dst, err := c.readRM(m, pfx, s)
-if err != nil {
-return err
-}
 
 var immSize int
 switch op {
@@ -3567,6 +3592,18 @@ immSize = 4
 case 0x83:
 immSize = 1
 }
+
+// Pre-resolve and adjust for RIP-relative addressing
+if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
+return err
+}
+m.adjustRIPRelative(immSize)
+
+dst, err := c.readRM(m, pfx, s)
+if err != nil {
+return err
+}
+
 imm, err := c.fetchImm(immSize)
 if err != nil {
 return err
@@ -3661,6 +3698,15 @@ m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
+
+// For imm8 shift count, fix up RIP-relative address before reading operand
+if countMode == -1 {
+if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
+return err
+}
+m.adjustRIPRelative(1) // 1 byte imm8 follows
+}
+
 val, err := c.readRM(m, pfx, size)
 if err != nil {
 return err
@@ -3739,6 +3785,23 @@ m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
+
+// reg=0,1 (TEST) has an immediate following the ModRM/SIB/disp.
+// Pre-resolve and fixup RIP-relative address for those cases.
+if m.reg == 0 || m.reg == 1 {
+if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
+return err
+}
+immSz := size
+if immSz == 8 {
+immSz = 4
+}
+if size == 1 {
+immSz = 1
+}
+m.adjustRIPRelative(immSz)
+}
+
 val, err := c.readRM(m, pfx, size)
 if err != nil {
 return err
