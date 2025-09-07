@@ -76,8 +76,9 @@ type Window struct {
 	Pix    []byte // mmap'd XRGB8888 pixels (B, G, R, X per pixel)
 	fd     int    // memfd backing Pix
 
-	configured bool
-	Closed     bool
+	configured  bool
+	needsResize bool
+	Closed      bool
 }
 
 // --- wire helpers ---
@@ -226,9 +227,10 @@ func (d *Display) dispatchOne() (EventType, error) {
 			if len(payload) >= 8 && d.win != nil {
 				w := int32(gu32(payload[0:]))
 				h := int32(gu32(payload[4:]))
-				if w > 0 && h > 0 {
+				if w > 0 && h > 0 && (w != d.win.Width || h != d.win.Height) {
 					d.win.Width = w
 					d.win.Height = h
+					d.win.needsResize = true
 				}
 			}
 		} else if op == 1 { // close
@@ -474,6 +476,26 @@ func (w *Window) Commit() {
 	d.send(w.surfaceID, 1, pu32(w.bufferID), pi32(0), pi32(0))                    // attach
 	d.send(w.surfaceID, 9, pi32(0), pi32(0), pi32(w.Width), pi32(w.Height)) // damage_buffer
 	d.send(w.surfaceID, 6)                                                          // commit
+}
+
+// ResizeIfNeeded recreates the shm buffer if the compositor changed the window size.
+// Returns true if the buffer was resized (all pixels are zeroed).
+func (w *Window) ResizeIfNeeded() bool {
+	if !w.needsResize {
+		return false
+	}
+	w.needsResize = false
+	if w.Pix != nil {
+		unix.Munmap(w.Pix)
+		w.Pix = nil
+	}
+	if w.fd > 0 {
+		unix.Close(w.fd)
+		w.fd = 0
+	}
+	w.disp.send(w.bufferID, 0) // wl_buffer.destroy
+	w.createBuffer()
+	return true
 }
 
 // Dispatch blocks until a user-facing event occurs (configure or close).

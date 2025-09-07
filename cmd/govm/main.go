@@ -453,6 +453,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		synthByName[strings.ToLower(s.Name)] = s
 	}
 
+	// delayHandlerRegistrars: re-runnable closures that register handlers for each DLL.
+	// After delay-load synthesizes a new DLL, we re-run all registrars so the
+	// new DLL's handlers get registered.
+	var delayHandlerRegistrars []func()
+
 	// Wayland connection for window display (used by user32 handlers below)
 	var wlDisplay *wl.Display
 	var wlWindow *wl.Window
@@ -3571,19 +3576,114 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// ResolveDelayLoadedAPI: stub that returns a dummy function pointer
-		// In real Windows this resolves delay-loaded imports. We allocate a small
-		// RET stub so calls to the resolved address just return 0.
-		var delayLoadRet uint64
-		d.RegisterAutoStubHandler(kernel32, "ResolveDelayLoadedAPI", func(ctx *ntapi.TrapContext) uint32 {
-			if delayLoadRet == 0 {
-				delayLoadRet = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-				// xor eax, eax; ret
-				mem.Write8(delayLoadRet, 0x31)
-				mem.Write8(delayLoadRet+1, 0xC0)
-				mem.Write8(delayLoadRet+2, 0xC3)
+		// ResolveDelayLoadedAPI: resolve delay-loaded imports to our synth stubs
+		var delayLoadFallback uint64
+		// Compute next available auto-synth ID
+		nextDelayID := uint32(ntapi.AutoSynthIDBase)
+		for _, s := range dlls {
+			for _, id := range s.StubIDs {
+				if id+1 > nextDelayID {
+					nextDelayID = id + 1
+				}
 			}
-			ctx.SetReturn(delayLoadRet)
+		}
+		d.RegisterAutoStubHandler(kernel32, "ResolveDelayLoadedAPI", func(ctx *ntapi.TrapContext) uint32 {
+			callerBase := ctx.Arg(0)
+			pDescriptor := ctx.Arg(1)
+			pThunkAddr := ctx.Arg(4)
+
+			dllNameRVA, _ := mem.Read32(pDescriptor + 4)
+			iatRVA, _ := mem.Read32(pDescriptor + 0x0C)
+			intRVA, _ := mem.Read32(pDescriptor + 0x10)
+
+			// Read DLL name
+			var dllName string
+			if dllNameRVA != 0 {
+				nameAddr := callerBase + uint64(dllNameRVA)
+				var buf []byte
+				for i := uint64(0); i < 260; i++ {
+					b, _ := mem.Read8(nameAddr + i)
+					if b == 0 { break }
+					buf = append(buf, b)
+				}
+				dllName = strings.ToLower(string(buf))
+			}
+
+			// Find function name from thunk
+			iatBase := callerBase + uint64(iatRVA)
+			intBase := callerBase + uint64(intRVA)
+			var funcName string
+			if pThunkAddr >= iatBase {
+				idx := (pThunkAddr - iatBase) / 8
+				intEntry, _ := mem.Read64(intBase + idx*8)
+				if intEntry != 0 && intEntry&(1<<63) == 0 {
+					nameAddr := callerBase + intEntry + 2
+					var buf []byte
+					for i := uint64(0); i < 260; i++ {
+						b, _ := mem.Read8(nameAddr + i)
+						if b == 0 { break }
+						buf = append(buf, b)
+					}
+					funcName = string(buf)
+				}
+			}
+
+			if dllName == "" || funcName == "" {
+				goto fallback
+			}
+
+			// If synth DLL doesn't exist yet, create it from all INT entries
+			if _, ok := synthByName[dllName]; !ok {
+				var allFuncs []string
+				for i := uint64(0); ; i++ {
+					entry, _ := mem.Read64(intBase + i*8)
+					if entry == 0 { break }
+					if entry&(1<<63) != 0 { continue } // ordinal
+					addr := callerBase + entry + 2
+					var buf []byte
+					for j := uint64(0); j < 260; j++ {
+						b, _ := mem.Read8(addr + j)
+						if b == 0 { break }
+						buf = append(buf, b)
+					}
+					if len(buf) > 0 {
+						allFuncs = append(allFuncs, string(buf))
+					}
+				}
+				if len(allFuncs) > 0 {
+					synth := ntapi.GenerateSynthDLL(mem, dllName, allFuncs, nextDelayID)
+					synthByName[dllName] = synth
+					d.RegisterAutoStubNames(synth)
+					fmt.Fprintf(os.Stderr, "[pe] delay-synth %s: %d stubs (id base 0x%X)\n",
+						dllName, len(allFuncs), nextDelayID)
+					nextDelayID += uint32(len(allFuncs))
+					// Re-run all handler registrars so newly synthesized DLL gets handlers
+					for _, reg := range delayHandlerRegistrars {
+						reg()
+					}
+				}
+			}
+
+			if synth, ok := synthByName[dllName]; ok {
+				if addr, ok2 := synth.Exports[funcName]; ok2 {
+					mem.Write64(pThunkAddr, addr)
+					ctx.SetReturn(addr)
+					return 0
+				}
+			}
+			fmt.Fprintf(os.Stderr, "[delay] unresolved: %s!%s\n", dllName, funcName)
+
+		fallback:
+			if delayLoadFallback == 0 {
+				delayLoadFallback = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+				mem.Write8(delayLoadFallback, 0x31)
+				mem.Write8(delayLoadFallback+1, 0xC0)
+				mem.Write8(delayLoadFallback+2, 0xC3)
+			}
+			if pThunkAddr != 0 {
+				mem.Write64(pThunkAddr, delayLoadFallback)
+			}
+			ctx.SetReturn(delayLoadFallback)
 			return 0
 		})
 
@@ -3593,9 +3693,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0)
 			return 0
 		})
+
+		// GetComputerNameW
+		d.RegisterAutoStubHandler(kernel32, "GetComputerNameW", func(ctx *ntapi.TrapContext) uint32 {
+			lpBuffer := ctx.Arg(0)
+			nSize := ctx.Arg(1)
+			name := "GOVM"
+			if lpBuffer != 0 && nSize != 0 {
+				maxLen, _ := mem.Read32(nSize)
+				for i, ch := range name {
+					if uint32(i) >= maxLen {
+						break
+					}
+					mem.Write16(lpBuffer+uint64(i)*2, uint16(ch))
+				}
+				mem.Write16(lpBuffer+uint64(len(name))*2, 0)
+				mem.Write32(nSize, uint32(len(name)))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
 	}
 
 	// --- shlwapi.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if shlwapi, ok := synthByName["shlwapi.dll"]; ok {
 		d.RegisterAutoStubHandler(shlwapi, "PathRemoveFileSpecW", func(ctx *ntapi.TrapContext) uint32 {
 			path := ctx.Arg(0)
@@ -3642,6 +3763,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if shell32, ok := synthByName["shell32.dll"]; ok {
 		d.RegisterAutoStubHandler(shell32, "SHGetFolderPathW", func(ctx *ntapi.TrapContext) uint32 {
 			buf := ctx.Arg(3)
@@ -3668,8 +3792,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- shcore.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if shcore, ok := synthByName["shcore.dll"]; ok {
 		d.RegisterAutoStubHandler(shcore, "CommandLineToArgvW", func(ctx *ntapi.TrapContext) uint32 {
 			pNumArgs := ctx.Arg(1)
@@ -3706,16 +3833,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- rpcrt4.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if rpcrt4, ok := synthByName["rpcrt4.dll"]; ok {
 		d.RegisterAutoStubHandler(rpcrt4, "RpcStringFreeW", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // RPC_S_OK
 			return 0
 		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- comdlg32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if comdlg32, ok := synthByName["comdlg32.dll"]; ok {
 		d.RegisterAutoStubHandler(comdlg32, "GetFileTitleW", func(ctx *ntapi.TrapContext) uint32 {
 			lpBuffer := ctx.Arg(1)
@@ -3727,8 +3860,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- advapi32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if advapi32, ok := synthByName["advapi32.dll"]; ok {
 		d.RegisterAutoStubHandler(advapi32, "RegOpenKeyExW", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
@@ -3785,69 +3921,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 	}
-
-	// --- comctl32.dll ---
-	if comctl32, ok := synthByName["comctl32.dll"]; ok {
-		d.RegisterAutoStubHandler(comctl32, "InitCommonControls", func(ctx *ntapi.TrapContext) uint32 {
-			return 0 // void function
-		})
-		d.RegisterAutoStubHandler(comctl32, "InitCommonControlsEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
-			return 0
-		})
-	}
-
-	// --- ole32.dll ---
-	if ole32, ok := synthByName["ole32.dll"]; ok {
-		d.RegisterAutoStubHandler(ole32, "CoInitializeEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // S_OK
-			return 0
-		})
-		d.RegisterAutoStubHandler(ole32, "CoInitializeSecurity", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // S_OK
-			return 0
-		})
-		d.RegisterAutoStubHandler(ole32, "CoCreateInstance", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x80004005) // E_FAIL - COM not available
-			return 0
-		})
-		d.RegisterAutoStubHandler(ole32, "CoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
-			return 0
-		})
-	}
-
-	// --- oleaut32.dll ---
-	if oleaut32, ok := synthByName["oleaut32.dll"]; ok {
-		d.RegisterAutoStubHandler(oleaut32, "SysAllocString", func(ctx *ntapi.TrapContext) uint32 {
-			// Allocate a copy of the BSTR in guest memory
-			src := ctx.Arg(0)
-			if src == 0 {
-				ctx.SetReturn(0)
-				return 0
-			}
-			// Count wchar_t length
-			n := uint64(0)
-			for {
-				w, _ := ctx.Mem.Read16(src + n*2)
-				if w == 0 {
-					break
-				}
-				n++
-			}
-			// BSTR layout: 4-byte length prefix + wchar data + null terminator
-			buf := mem.Mmap(0, 4+n*2+2, mmu.PermRead|mmu.PermWrite)
-			ctx.Mem.Write32(buf, uint32(n*2))
-			for i := uint64(0); i < n; i++ {
-				w, _ := ctx.Mem.Read16(src + i*2)
-				ctx.Mem.Write16(buf+4+i*2, w)
-			}
-			ctx.SetReturn(buf + 4) // BSTR points past length prefix
-			return 0
-		})
-		d.RegisterAutoStubHandler(oleaut32, "SysFreeString", func(ctx *ntapi.TrapContext) uint32 {
-			return 0
-		})
-	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// Simple handle generator for GDI objects, windows, etc.
 	nextGDIHandle := uint64(0xD0010001) // GDI handle space
@@ -3900,6 +3975,131 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		editModified bool
 	}
 	hwndChildren := make(map[uint64]*controlState)
+
+	// --- comctl32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if comctl32, ok := synthByName["comctl32.dll"]; ok {
+		d.RegisterAutoStubHandler(comctl32, "InitCommonControls", func(ctx *ntapi.TrapContext) uint32 {
+			return 0 // void function
+		})
+		d.RegisterAutoStubHandler(comctl32, "InitCommonControlsEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+
+		// CreateStatusWindowW: creates a status bar child window
+		d.RegisterAutoStubHandler(comctl32, "CreateStatusWindowW", func(ctx *ntapi.TrapContext) uint32 {
+			style := uint32(ctx.Arg(0))
+			_ = ctx.Arg(1) // lpszText
+			hwndParent := ctx.Arg(2)
+			_ = ctx.Arg(3) // wID
+			hwnd := hwndAlloc()
+			var defW, defH int32 = 800, 600
+			if wlWindow != nil { defW, defH = wlWindow.Width, wlWindow.Height }
+			const sbHeight int32 = 20
+			hwndChildren[hwnd] = &controlState{
+				className:  "msctls_statusbar32",
+				parentHWND: hwndParent,
+				x: 0, y: defH - sbHeight, w: defW, h: sbHeight,
+				visible: style&0x10000000 != 0,
+			}
+			fmt.Fprintf(os.Stderr, "[comctl32] CreateStatusWindowW hwnd=0x%x parent=0x%x\n", hwnd, hwndParent)
+			ctx.SetReturn(hwnd)
+			return 0
+		})
+
+		// ImageList_Create: return a fake handle
+		var nextImageList uint64 = 0x90000
+		d.RegisterAutoStubHandler(comctl32, "ImageList_Create", func(ctx *ntapi.TrapContext) uint32 {
+			nextImageList++
+			ctx.SetReturn(nextImageList)
+			return 0
+		})
+
+		// ImageList_AddIcon / ImageList_ReplaceIcon
+		d.RegisterAutoStubHandler(comctl32, "ImageList_ReplaceIcon", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // index 0
+			return 0
+		})
+
+		// ImageList_SetImageCount
+		d.RegisterAutoStubHandler(comctl32, "ImageList_SetImageCount", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// ImageList_GetImageCount
+		d.RegisterAutoStubHandler(comctl32, "ImageList_GetImageCount", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+
+		// ImageList_Destroy
+		d.RegisterAutoStubHandler(comctl32, "ImageList_Destroy", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- ole32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if ole32, ok := synthByName["ole32.dll"]; ok {
+		d.RegisterAutoStubHandler(ole32, "CoInitializeEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "CoInitializeSecurity", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "CoCreateInstance", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004005) // E_FAIL - COM not available
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "CoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- oleaut32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if oleaut32, ok := synthByName["oleaut32.dll"]; ok {
+		d.RegisterAutoStubHandler(oleaut32, "SysAllocString", func(ctx *ntapi.TrapContext) uint32 {
+			// Allocate a copy of the BSTR in guest memory
+			src := ctx.Arg(0)
+			if src == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Count wchar_t length
+			n := uint64(0)
+			for {
+				w, _ := ctx.Mem.Read16(src + n*2)
+				if w == 0 {
+					break
+				}
+				n++
+			}
+			// BSTR layout: 4-byte length prefix + wchar data + null terminator
+			buf := mem.Mmap(0, 4+n*2+2, mmu.PermRead|mmu.PermWrite)
+			ctx.Mem.Write32(buf, uint32(n*2))
+			for i := uint64(0); i < n; i++ {
+				w, _ := ctx.Mem.Read16(src + i*2)
+				ctx.Mem.Write16(buf+4+i*2, w)
+			}
+			ctx.SetReturn(buf + 4) // BSTR points past length prefix
+			return 0
+		})
+		d.RegisterAutoStubHandler(oleaut32, "SysFreeString", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// builtinWndProc handles messages for built-in window classes (Edit, StatusBar, etc.)
 	// Returns (result, handled).
@@ -4169,6 +4369,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	var msgQueue []queuedMsg
 
 	// --- user32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if user32, ok := synthByName["user32.dll"]; ok {
 		// LoadStringW: load string resource from PE
 		d.RegisterAutoStubHandler(user32, "LoadStringW", func(ctx *ntapi.TrapContext) uint32 {
@@ -4798,9 +4999,43 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			msg := uint32(ctx.Arg(1))
 
 			// WM_PAINT: draw menu bar, fill background, then let children paint
-			// (This is the fallback path; BeginPaint also draws menu bar)
 			if msg == 0x000F && wlWindow != nil && hwnd == mainHWND {
-				// Already handled by BeginPaint/EndPaint flow; just return
+				wlWindow.ResizeIfNeeded()
+				w, h := wlWindow.Width, wlWindow.Height
+				clientTop := int32(0)
+
+				// Draw menu bar if the window has one
+				if menuH, ok := hwndMenuBar[hwnd]; ok {
+					if md, ok2 := menus[menuH]; ok2 && len(md.items) > 0 {
+						clientTop = menuBarHeight
+						wlWindow.DrawRect(0, 0, w, clientTop, sysColors[15])
+						wlWindow.DrawRect(0, clientTop-1, w, clientTop, sysColors[16])
+						x := int32(4)
+						for _, item := range md.items {
+							if item.flags&0x0800 != 0 {
+								continue
+							}
+							label := menuStripAmpersand(item.text)
+							if label == "" {
+								continue
+							}
+							tw := int32(len([]rune(label))) * 8
+							wlWindow.DrawText(x+4, 3, label, 0x000000, sysColors[15], true)
+							x += tw + 12
+						}
+					}
+				}
+
+				// Fill client area with COLOR_WINDOW
+				wlWindow.DrawRect(0, clientTop, w, h, sysColors[5])
+
+				// Dispatch WM_PAINT to all visible children
+				for childHwnd, cs := range hwndChildren {
+					if cs.parentHWND == hwnd && cs.visible {
+						builtinWndProc(childHwnd, 0x000F, 0, 0)
+					}
+				}
+				wlWindow.Commit()
 			}
 			// WM_NCCREATE: must return TRUE for window creation to proceed
 			if msg == 0x0081 {
@@ -4982,6 +5217,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			clientTop := int32(0)
 			// Draw menu bar in BeginPaint so it's always rendered
 			if wlWindow != nil && hwnd == mainHWND {
+				wlWindow.ResizeIfNeeded()
+				w, h = wlWindow.Width, wlWindow.Height
 				if menuH, ok := hwndMenuBar[hwnd]; ok {
 					if md, ok2 := menus[menuH]; ok2 && len(md.items) > 0 {
 						clientTop = menuBarHeight
@@ -5019,7 +5256,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "EndPaint", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			if wlWindow != nil && hwnd == mainHWND {
-				// Dispatch WM_PAINT to all visible children
 				for childHwnd, cs := range hwndChildren {
 					if cs.parentHWND == hwnd && cs.visible {
 						builtinWndProc(childHwnd, 0x000F, 0, 0)
@@ -5256,9 +5492,157 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1)
 			return 0
 		})
+
+		// LoadMenuW: load menu from PE resources (same as LoadMenuIndirectW essentially)
+		d.RegisterAutoStubHandler(user32, "LoadMenuW", func(ctx *ntapi.TrapContext) uint32 {
+			menuName := ctx.Arg(1)
+			if menuName == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// menuName can be an integer resource ID (MAKEINTRESOURCE) or string pointer
+			var resID uint32
+			if menuName < 0x10000 {
+				resID = uint32(menuName)
+			} else {
+				// It's a string - try reading it as an integer name
+				ctx.SetReturn(0)
+				return 0
+			}
+			menu := peLoadMenuResource(resID)
+			if menu == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			hmenu := uint64(0x60000 + resID)
+			menus[hmenu] = menu
+			ctx.SetReturn(hmenu)
+			return 0
+		})
+
+		// RegisterClipboardFormatW: return a unique atom
+		var nextClipFmt uint64 = 0xC100
+		d.RegisterAutoStubHandler(user32, "RegisterClipboardFormatW", func(ctx *ntapi.TrapContext) uint32 {
+			nextClipFmt++
+			ctx.SetReturn(nextClipFmt)
+			return 0
+		})
+
+		// DestroyMenu
+		d.RegisterAutoStubHandler(user32, "DestroyMenu", func(ctx *ntapi.TrapContext) uint32 {
+			hmenu := ctx.Arg(0)
+			delete(menus, hmenu)
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// EnableMenuItem
+		d.RegisterAutoStubHandler(user32, "EnableMenuItem", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // previous state
+			return 0
+		})
+
+		// DrawMenuBar
+		d.RegisterAutoStubHandler(user32, "DrawMenuBar", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// GetMenu / SetMenu
+		d.RegisterAutoStubHandler(user32, "GetMenu", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			if hm, ok := hwndMenuBar[hwnd]; ok {
+				ctx.SetReturn(hm)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetMenu", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			hmenu := ctx.Arg(1)
+			if hmenu != 0 {
+				hwndMenuBar[hwnd] = hmenu
+			} else {
+				delete(hwndMenuBar, hwnd)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// GetSubMenu
+		d.RegisterAutoStubHandler(user32, "GetSubMenu", func(ctx *ntapi.TrapContext) uint32 {
+			hmenu := ctx.Arg(0)
+			pos := int(ctx.Arg(1))
+			if m, ok := menus[hmenu]; ok && pos < len(m.items) {
+				// Create a handle for the sub-menu position
+				subH := uint64(0x70000 + uint64(pos)<<8 + hmenu&0xFF)
+				if _, exists := menus[subH]; !exists {
+					menus[subH] = &menuData{}
+				}
+				ctx.SetReturn(subH)
+				return 0
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+
+		// InsertMenuW / AppendMenuW / ModifyMenuW / DeleteMenu
+		d.RegisterAutoStubHandler(user32, "InsertMenuW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "AppendMenuW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ModifyMenuW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DeleteMenu", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// GetMenuItemCount
+		d.RegisterAutoStubHandler(user32, "GetMenuItemCount", func(ctx *ntapi.TrapContext) uint32 {
+			hmenu := ctx.Arg(0)
+			if m, ok := menus[hmenu]; ok {
+				ctx.SetReturn(uint64(len(m.items)))
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+
+		// GetMenuItemInfoW - stub with minimal info
+		d.RegisterAutoStubHandler(user32, "GetMenuItemInfoW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// SetMenuItemInfoW
+		d.RegisterAutoStubHandler(user32, "SetMenuItemInfoW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// GetSystemMenu
+		d.RegisterAutoStubHandler(user32, "GetSystemMenu", func(ctx *ntapi.TrapContext) uint32 {
+			sysMenu := uint64(0x80000)
+			if _, ok := menus[sysMenu]; !ok {
+				menus[sysMenu] = &menuData{}
+			}
+			ctx.SetReturn(sysMenu)
+			return 0
+		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- gdi32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if gdi32, ok := synthByName["gdi32.dll"]; ok {
 		d.RegisterAutoStubHandler(gdi32, "CreateSolidBrush", func(ctx *ntapi.TrapContext) uint32 {
 			h := gdiAlloc()
@@ -5539,16 +5923,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- crypt32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if crypt32, ok := synthByName["crypt32.dll"]; ok {
 		d.RegisterAutoStubHandler(crypt32, "CryptQueryObject", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // FALSE - no crypto
 			return 0
 		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- advapi32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if advapi32, ok := synthByName["advapi32.dll"]; ok {
 		d.RegisterAutoStubHandler(advapi32, "AllocateAndInitializeSid", func(ctx *ntapi.TrapContext) uint32 {
 			// Allocate a minimal SID in guest memory
@@ -5573,6 +5963,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 }
 
 // autoSynthUnresolved generates synthetic stub DLLs for any DLLs referenced
