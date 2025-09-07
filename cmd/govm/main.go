@@ -6,6 +6,7 @@ import (
 "os"
 "path/filepath"
 "runtime/pprof"
+"strconv"
 "strings"
 "time"
 
@@ -481,6 +482,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		return string(utf16Decode(chars))
 	}
 
+	// Menu data structures
+	const menuBarHeight int32 = 20
+	type menuItem struct {
+		flags   uint32
+		id      uint64
+		text    string
+	}
+	type menuData struct {
+		items []menuItem
+	}
+
 	// peLoadStringW loads a string from the PE resource section.
 	// RT_STRING resources are grouped in blocks of 16 strings.
 	// Block ID = (uID / 16) + 1, index within block = uID % 16.
@@ -562,6 +574,125 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			pos += uint64(slen) * 2
 		}
 		return "", 0, 0
+	}
+
+	// peLoadMenuResource loads a menu resource (RT_MENU=4) from the PE.
+	// Returns a menuData with the top-level popup items (for the menu bar).
+	peLoadMenuResource := func(menuID uint32) *menuData {
+		if mainModule == nil || mainModule.ResourceDirRVA == 0 {
+			return nil
+		}
+		rsrcBase := mainModule.BaseAddr + uint64(mainModule.ResourceDirRVA)
+
+		// Helper to parse IMAGE_RESOURCE_DIRECTORY and find an entry by ID
+		findEntry := func(dirAddr uint64, id uint32) (uint64, bool) {
+			namedCount, _ := mem.Read16(dirAddr + 12)
+			idCount, _ := mem.Read16(dirAddr + 14)
+			entryAddr := dirAddr + 16 + uint64(namedCount)*8
+			for i := uint16(0); i < idCount; i++ {
+				eID, _ := mem.Read32(entryAddr)
+				eOff, _ := mem.Read32(entryAddr + 4)
+				if eID == id {
+					isDir := eOff&0x80000000 != 0
+					offset := eOff & 0x7FFFFFFF
+					if isDir {
+						return rsrcBase + uint64(offset), true
+					}
+					return rsrcBase + uint64(offset), false
+				}
+				entryAddr += 8
+			}
+			return 0, false
+		}
+
+		// Navigate: Type(4=MENU) → ID(menuID) → first language
+		typeDir, isDir := findEntry(rsrcBase, 4) // RT_MENU
+		if !isDir || typeDir == 0 {
+			return nil
+		}
+		idDir, isDir2 := findEntry(typeDir, menuID)
+		if idDir == 0 {
+			return nil
+		}
+		// If it's a directory (language level), pick the first entry
+		var dataEntryAddr uint64
+		if isDir2 {
+			namedCount, _ := mem.Read16(idDir + 12)
+			idCount, _ := mem.Read16(idDir + 14)
+			if namedCount+idCount == 0 {
+				return nil
+			}
+			entryAddr := idDir + 16
+			_, _ = mem.Read32(entryAddr) // lang ID
+			eOff, _ := mem.Read32(entryAddr + 4)
+			dataEntryAddr = rsrcBase + uint64(eOff&0x7FFFFFFF)
+		} else {
+			dataEntryAddr = idDir
+		}
+
+		// Read IMAGE_RESOURCE_DATA_ENTRY
+		dataRVA, _ := mem.Read32(dataEntryAddr)
+		dataSize, _ := mem.Read32(dataEntryAddr + 4)
+		if dataRVA == 0 || dataSize == 0 {
+			return nil
+		}
+		dataAddr := mainModule.BaseAddr + uint64(dataRVA)
+
+		// Parse menu template
+		// Standard menu: WORD version (0), WORD header_offset, then items
+		ver, _ := mem.Read16(dataAddr)
+		hdrOff, _ := mem.Read16(dataAddr + 2)
+		if ver != 0 {
+			return nil // Only support standard (non-extended) menus
+		}
+
+		md := &menuData{}
+		pos := dataAddr + 4 + uint64(hdrOff)
+		end := dataAddr + uint64(dataSize)
+
+		// Parse top-level items (recurse into popups)
+		var parseItems func(maxItems int) []menuItem
+		parseItems = func(maxItems int) []menuItem {
+			var items []menuItem
+			for len(items) < maxItems && pos < end {
+				flags, _ := mem.Read16(pos)
+				pos += 2
+
+				item := menuItem{flags: uint32(flags)}
+				const mfPopup = 0x0010
+				if flags&mfPopup == 0 {
+					// Regular item: has a 16-bit ID
+					id, _ := mem.Read16(pos)
+					pos += 2
+					item.id = uint64(id)
+				}
+				// Read null-terminated UTF-16 string
+				var chars []uint16
+				for pos < end {
+					ch, _ := mem.Read16(pos)
+					pos += 2
+					if ch == 0 {
+						break
+					}
+					chars = append(chars, ch)
+				}
+				item.text = string(utf16Decode(chars))
+
+				if flags&mfPopup != 0 {
+					// Popup: recursively parse child items (skip them for bar display)
+					parseItems(64) // consume child items
+				}
+
+				items = append(items, item)
+				if flags&0x0080 != 0 { // MF_END
+					break
+				}
+			}
+			return items
+		}
+
+		md.items = parseItems(32)
+		return md
 	}
 
 	// wideprintf formats a wide format string with arguments read from guest memory.
@@ -3725,6 +3856,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		nextGDIHandle++
 		return h
 	}
+
+	// Menu data structures (types defined earlier near peLoadMenuResource)
+	menus := make(map[uint64]*menuData)          // menu handle → menu data
+	hwndMenuBar := make(map[uint64]uint64)       // HWND → menu bar handle
+	menuStripAmpersand := func(s string) string {
+		out := make([]byte, 0, len(s))
+		for i := 0; i < len(s); i++ {
+			if s[i] == '&' && i+1 < len(s) {
+				continue
+			}
+			out = append(out, s[i])
+		}
+		return string(out)
+	}
+
 	nextHWND := uint64(0x00050001) // window handle space
 	hwndAlloc := func() uint64 {
 		h := nextHWND
@@ -3738,6 +3884,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	atomWndProc := make(map[uint16]uint64)   // class atom → WndProc address
 	hwndWndProc := make(map[uint64]uint64)   // HWND → WndProc address
 	classNameAtom := make(map[string]uint16) // class name → atom (for lpClassName string lookups)
+	classMenuHandle := make(map[uint16]uint64) // class atom → loaded menu handle
 
 	// Built-in window class tracking for Edit, Static, Button, etc.
 	type controlState struct {
@@ -3777,34 +3924,53 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+2, cs.y+cs.h-1, 0x404040)  // inner left
 				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20]) // right highlight
 				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20]) // bottom highlight
+				wlWindow.DrawRect(cs.x+cs.w-2, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, 0xDFDFDF) // inner right
+				wlWindow.DrawRect(cs.x+1, cs.y+cs.h-2, cs.x+cs.w-1, cs.y+cs.h-1, 0xDFDFDF) // inner bottom
 				// White client area
 				wlWindow.DrawRect(cs.x+2, cs.y+2, cs.x+cs.w-2, cs.y+cs.h-2, sysColors[5])
 				// Draw text content
 				if cs.text != "" {
 					wlWindow.DrawText(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[5], true)
 				}
+				// Text cursor (blinking caret)
+				cursorX := cs.x + 4
+				if cs.text != "" {
+					cursorX += int32(len(cs.text)) * 8
+				}
+				wlWindow.DrawRect(cursorX, cs.y+4, cursorX+1, cs.y+4+16, 0x000000)
 			case "msctls_statusbar32":
-				// Top edge line
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])
+				// Top edge: etched line (shadow + highlight)
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])   // shadow
+				wlWindow.DrawRect(cs.x, cs.y+1, cs.x+cs.w, cs.y+2, sysColors[20]) // highlight
 				// Face
-				wlWindow.DrawRect(cs.x, cs.y+1, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				wlWindow.DrawRect(cs.x, cs.y+2, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				// Draw parts text
 				if len(cs.sbParts) > 0 {
 					left := cs.x + 2
 					for i, rightEdge := range cs.sbParts {
 						right := cs.x + rightEdge
 						if rightEdge < 0 { right = cs.x + cs.w }
+						// Sunken part area
+						wlWindow.DrawRect(left, cs.y+3, right-1, cs.y+4, sysColors[16])     // top shadow
+						wlWindow.DrawRect(left, cs.y+3, left+1, cs.y+cs.h-2, sysColors[16]) // left shadow
+						wlWindow.DrawRect(left, cs.y+cs.h-2, right-1, cs.y+cs.h-1, sysColors[20]) // bottom highlight
+						wlWindow.DrawRect(right-2, cs.y+3, right-1, cs.y+cs.h-1, sysColors[20])   // right highlight
 						if i < len(cs.sbTexts) && cs.sbTexts[i] != "" {
-							wlWindow.DrawText(left+2, cs.y+3, cs.sbTexts[i], 0x000000, sysColors[15], true)
-						}
-						// Part separator
-						if i < len(cs.sbParts)-1 {
-							wlWindow.DrawRect(right-1, cs.y+2, right, cs.y+cs.h-2, sysColors[16])
+							wlWindow.DrawText(left+4, cs.y+4, cs.sbTexts[i], 0x000000, sysColors[15], true)
 						}
 						left = right
 					}
 				} else if cs.text != "" {
-					wlWindow.DrawText(cs.x+4, cs.y+3, cs.text, 0x000000, sysColors[15], true)
+					wlWindow.DrawText(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[15], true)
+				}
+				// Sizing grip (small triangular area in bottom-right)
+				gripX := cs.x + cs.w - 14
+				gripY := cs.y + cs.h - 14
+				for i := int32(0); i < 3; i++ {
+					ox := gripX + i*4 + 2
+					oy := gripY + (2-i)*4 + 2
+					wlWindow.DrawRect(ox, oy, ox+2, oy+2, sysColors[20])
+					wlWindow.DrawRect(ox+1, oy+1, ox+3, oy+3, sysColors[16])
 				}
 			case "static":
 				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
@@ -4099,13 +4265,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				lpName, _ := mem.Read64(pClass + 64)
 				var name string
 				if lpName != 0 && lpName < 0x10000 {
-					// Integer atom, not a string pointer
 					name = fmt.Sprintf("atom:0x%x", lpName)
 				} else {
 					name = readGuestUTF16(lpName)
 				}
 				if name != "" {
 					classNameAtom[name] = a
+				}
+				// Read lpszMenuName and load menu from PE resources
+				lpszMenuName, _ := mem.Read64(pClass + 56)
+				if lpszMenuName != 0 && mainModule != nil {
+					var menuID uint32
+					if lpszMenuName < 0x10000 {
+						menuID = uint32(lpszMenuName)
+					} else {
+						menuName := readGuestUTF16(lpszMenuName)
+						if id, err := strconv.ParseUint(menuName, 10, 32); err == nil {
+							menuID = uint32(id)
+						}
+					}
+					if menuID != 0 {
+						if md := peLoadMenuResource(menuID); md != nil {
+							h := gdiAlloc()
+							menus[h] = md
+							classMenuHandle[a] = h
+						}
+					}
 				}
 				fmt.Fprintf(os.Stderr, "[wndclass] RegisterClassExW name=%q lpName=0x%x atom=0x%x wndProc=0x%x\n", name, lpName, a, wndProc)
 			}
@@ -4155,12 +4340,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if wlWindow != nil { defW, defH = wlWindow.Width, wlWindow.Height }
 				if cw <= 0 || cw > 0x7FFF { cw = defW }
 				if ch <= 0 || ch > 0x7FFF { ch = defH }
+				// Offset child Y by menu bar height of parent
+				menuOff := int32(0)
+				if _, hasMenu := hwndMenuBar[mainHWND]; hasMenu {
+					menuOff = menuBarHeight
+				}
 				lClassName := strings.ToLower(className)
 				// Statusbar: auto-position at bottom of parent
 				if lClassName == "msctls_statusbar32" {
 					const sbHeight int32 = 20
 					cx, cy = 0, defH-sbHeight
 					cw, ch = defW, sbHeight
+				} else {
+					cy += menuOff
 				}
 				windowName := readGuestUTF16(ctx.Arg(2))
 				hwndChildren[hwnd] = &controlState{
@@ -4191,6 +4383,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						mainHWND = hwnd
 						mainTitle = title
 						fmt.Fprintf(os.Stderr, "[wl] window created: %q %dx%d hwnd=0x%x\n", title, w, h, hwnd)
+						// Attach class menu bar if the class has one
+						if lpClassName != 0 {
+							var classAtom uint16
+							if lpClassName < 0x10000 {
+								classAtom = uint16(lpClassName)
+							} else {
+								cn := readGuestUTF16(lpClassName)
+								classAtom = classNameAtom[cn]
+							}
+							if mh, ok := classMenuHandle[classAtom]; ok {
+								hwndMenuBar[hwnd] = mh
+							}
+						}
 					} else {
 						fmt.Fprintf(os.Stderr, "[wl] CreateWindow failed: %v\n", err)
 					}
@@ -4371,11 +4576,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				flags := uint32(ctx.Arg(6))
 				const swpNoMove = 0x0002
 				const swpNoSize = 0x0001
+				// Offset child Y by menu bar height of parent
+				menuOff := int32(0)
+				if _, hasMenu := hwndMenuBar[ci.parentHWND]; hasMenu {
+					menuOff = menuBarHeight
+				}
 				if flags&swpNoMove == 0 {
 					x := int32(ctx.Arg(2))
 					y := int32(ctx.Arg(3))
 					if x >= 0 && x < 0x7FFF { ci.x = x }
-					if y >= 0 && y < 0x7FFF { ci.y = y }
+					if y >= 0 && y < 0x7FFF { ci.y = y + menuOff }
 				}
 				if flags&swpNoSize == 0 {
 					w := int32(ctx.Arg(4))
@@ -4390,8 +4600,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "MoveWindow", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			if ci, ok := hwndChildren[hwnd]; ok {
+				menuOff := int32(0)
+				if _, hasMenu := hwndMenuBar[ci.parentHWND]; hasMenu {
+					menuOff = menuBarHeight
+				}
 				ci.x = int32(ctx.Arg(1))
-				ci.y = int32(ctx.Arg(2))
+				ci.y = int32(ctx.Arg(2)) + menuOff
 				ci.w = int32(ctx.Arg(3))
 				ci.h = int32(ctx.Arg(4))
 			}
@@ -4521,14 +4735,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ctx.Mem.Write32(pRect+8, uint32(ci.w))
 					ctx.Mem.Write32(pRect+12, uint32(ci.h))
 				} else {
-					var w, h uint32 = 800, 600
+					var w, h int32 = 800, 600
 					if wlWindow != nil {
-						w, h = uint32(wlWindow.Width), uint32(wlWindow.Height)
+						w, h = wlWindow.Width, wlWindow.Height
+					}
+					// Subtract menu bar from client area
+					clientTop := int32(0)
+					if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
+						clientTop = menuBarHeight
 					}
 					ctx.Mem.Write32(pRect, 0)
 					ctx.Mem.Write32(pRect+4, 0)
-					ctx.Mem.Write32(pRect+8, w)
-					ctx.Mem.Write32(pRect+12, h)
+					ctx.Mem.Write32(pRect+8, uint32(w))
+					ctx.Mem.Write32(pRect+12, uint32(h-clientTop))
 				}
 			}
 			ctx.SetReturn(1)
@@ -4578,18 +4797,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hwnd := ctx.Arg(0)
 			msg := uint32(ctx.Arg(1))
 
-			// WM_PAINT: fill background, then let children paint themselves
-			if msg == 0x000F && wlWindow != nil {
-				w, h := wlWindow.Width, wlWindow.Height
-				// Fill client area with COLOR_WINDOW (white)
-				wlWindow.DrawRect(0, 0, w, h, sysColors[5])
-				// Dispatch WM_PAINT to all visible children
-				for childHwnd, cs := range hwndChildren {
-					if cs.parentHWND == hwnd && cs.visible {
-						builtinWndProc(childHwnd, 0x000F, 0, 0)
-					}
-				}
-				wlWindow.Commit()
+			// WM_PAINT: draw menu bar, fill background, then let children paint
+			// (This is the fallback path; BeginPaint also draws menu bar)
+			if msg == 0x000F && wlWindow != nil && hwnd == mainHWND {
+				// Already handled by BeginPaint/EndPaint flow; just return
 			}
 			// WM_NCCREATE: must return TRUE for window creation to proceed
 			if msg == 0x0081 {
@@ -4760,6 +4971,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "BeginPaint", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
 			pPaint := ctx.Arg(1)
 			hdc := gdiAlloc()
 			dcMap[hdc] = screenDC()
@@ -4767,11 +4979,37 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if wlWindow != nil {
 				w, h = wlWindow.Width, wlWindow.Height
 			}
+			clientTop := int32(0)
+			// Draw menu bar in BeginPaint so it's always rendered
+			if wlWindow != nil && hwnd == mainHWND {
+				if menuH, ok := hwndMenuBar[hwnd]; ok {
+					if md, ok2 := menus[menuH]; ok2 && len(md.items) > 0 {
+						clientTop = menuBarHeight
+						wlWindow.DrawRect(0, 0, w, clientTop, sysColors[15])
+						wlWindow.DrawRect(0, clientTop-1, w, clientTop, sysColors[16])
+						x := int32(4)
+						for _, item := range md.items {
+							if item.flags&0x0800 != 0 {
+								continue
+							}
+							label := menuStripAmpersand(item.text)
+							if label == "" {
+								continue
+							}
+							tw := int32(len([]rune(label))) * 8
+							wlWindow.DrawText(x+4, 3, label, 0x000000, sysColors[15], true)
+							x += tw + 12
+						}
+					}
+				}
+				// Fill client area background
+				wlWindow.DrawRect(0, clientTop, w, h, sysColors[5])
+			}
 			if pPaint != 0 {
 				ctx.Mem.Write64(pPaint, hdc)           // hdc
 				ctx.Mem.Write32(pPaint+8, 1)           // fErase
 				ctx.Mem.Write32(pPaint+12, 0)          // rcPaint.left
-				ctx.Mem.Write32(pPaint+16, 0)          // rcPaint.top
+				ctx.Mem.Write32(pPaint+16, uint32(clientTop)) // rcPaint.top
 				ctx.Mem.Write32(pPaint+20, uint32(w))  // rcPaint.right
 				ctx.Mem.Write32(pPaint+24, uint32(h))  // rcPaint.bottom
 			}
@@ -4779,7 +5017,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "EndPaint", func(ctx *ntapi.TrapContext) uint32 {
-			if wlWindow != nil {
+			hwnd := ctx.Arg(0)
+			if wlWindow != nil && hwnd == mainHWND {
+				// Dispatch WM_PAINT to all visible children
+				for childHwnd, cs := range hwndChildren {
+					if cs.parentHWND == hwnd && cs.visible {
+						builtinWndProc(childHwnd, 0x000F, 0, 0)
+					}
+				}
 				wlWindow.Commit()
 			}
 			ctx.SetReturn(1)
@@ -4798,30 +5043,108 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetMenu", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no menu
+			hwnd := ctx.Arg(0)
+			if h, ok := hwndMenuBar[hwnd]; ok {
+				ctx.SetReturn(h)
+			} else {
+				ctx.SetReturn(0)
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetMenu", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			hMenu := ctx.Arg(1)
+			if hMenu == 0 {
+				delete(hwndMenuBar, hwnd)
+			} else {
+				hwndMenuBar[hwnd] = hMenu
+			}
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "CreateMenu", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(gdiAlloc())
+			h := gdiAlloc()
+			menus[h] = &menuData{}
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "CreatePopupMenu", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(gdiAlloc())
+			h := gdiAlloc()
+			menus[h] = &menuData{}
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "AppendMenuW", func(ctx *ntapi.TrapContext) uint32 {
+			hMenu := ctx.Arg(0)
+			flags := uint32(ctx.Arg(1))
+			idOrSubmenu := ctx.Arg(2)
+			lpNewItem := ctx.Arg(3)
+			m, ok := menus[hMenu]
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			item := menuItem{flags: flags, id: idOrSubmenu}
+			const mfString = 0x0000
+			const mfSeparator = 0x0800
+			if flags&mfSeparator == 0 && lpNewItem != 0 {
+				item.text = readGuestUTF16(lpNewItem)
+			}
+			m.items = append(m.items, item)
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "InsertMenuW", func(ctx *ntapi.TrapContext) uint32 {
+			hMenu := ctx.Arg(0)
+			flags := uint32(ctx.Arg(2))
+			idOrSubmenu := ctx.Arg(3)
+			lpNewItem := ctx.Arg(4)
+			m, ok := menus[hMenu]
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			item := menuItem{flags: flags, id: idOrSubmenu}
+			const mfSeparator = 0x0800
+			if flags&mfSeparator == 0 && lpNewItem != 0 {
+				item.text = readGuestUTF16(lpNewItem)
+			}
+			m.items = append(m.items, item)
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "InsertMenuItemW", func(ctx *ntapi.TrapContext) uint32 {
+			hMenu := ctx.Arg(0)
+			lpmii := ctx.Arg(3) // MENUITEMINFOW*
+			m, ok := menus[hMenu]
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			item := menuItem{}
+			if lpmii != 0 {
+				// MENUITEMINFOW: cbSize(4) fMask(4) fType(4) fState(4) wID(4) hSubMenu(8@16) ...
+				// dwTypeData at offset 40 (x64), cch at offset 48
+				fMask, _ := mem.Read32(lpmii + 4)
+				fType, _ := mem.Read32(lpmii + 8)
+				item.flags = fType
+				if fMask&0x40 != 0 { // MIIM_STRING
+					dwTypeData, _ := mem.Read64(lpmii + 40)
+					if dwTypeData != 0 {
+						item.text = readGuestUTF16(dwTypeData)
+					}
+				}
+				if fMask&0x02 != 0 { // MIIM_ID
+					wID, _ := mem.Read32(lpmii + 12)
+					item.id = uint64(wID)
+				}
+				if fMask&0x04 != 0 { // MIIM_SUBMENU
+					hSub, _ := mem.Read64(lpmii + 16)
+					item.id = hSub
+					item.flags |= 0x10 // MF_POPUP
+				}
+			}
+			m.items = append(m.items, item)
 			ctx.SetReturn(1)
 			return 0
 		})
