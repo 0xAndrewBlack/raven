@@ -498,6 +498,31 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		items []menuItem
 	}
 
+	// pickBestLangEntry selects the best language entry from a resource language directory.
+	// Prefers: English (0x0409, 0x0809, etc.) or neutral (0x0000), else last resort = first entry.
+	pickBestLangEntry := func(langDirAddr, rsrcBase uint64) (dataEntryAddr uint64, ok bool) {
+		namedCount, _ := mem.Read16(langDirAddr + 12)
+		idCount, _ := mem.Read16(langDirAddr + 14)
+		total := int(namedCount) + int(idCount)
+		if total == 0 {
+			return 0, false
+		}
+		entryBase := langDirAddr + 16
+		var fallback uint64
+		for i := 0; i < total; i++ {
+			langID, _ := mem.Read32(entryBase + uint64(i)*8)
+			eOff, _ := mem.Read32(entryBase + uint64(i)*8 + 4)
+			addr := rsrcBase + uint64(eOff&0x7FFFFFFF)
+			if i == 0 {
+				fallback = addr
+			}
+			if langID == 0x0000 || langID&0xFF == 0x09 { // neutral or English
+				return addr, true
+			}
+		}
+		return fallback, true
+	}
+
 	// peLoadStringW loads a string from the PE resource section.
 	// RT_STRING resources are grouped in blocks of 16 strings.
 	// Block ID = (uID / 16) + 1, index within block = uID % 16.
@@ -548,15 +573,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if !ok {
 			return "", 0, 0
 		}
-		// Get first language entry
-		numNamed, numID := readDir(blockDir)
-		if int(numNamed)+int(numID) == 0 {
+		// Pick best language (prefer English/neutral over Arabic etc.)
+		leafAddr, ok := pickBestLangEntry(blockDir, rsrcBase)
+		if !ok {
 			return "", 0, 0
 		}
-		// Read first entry's offset (any language)
-		leafOff, _ := mem.Read32(blockDir + 16 + 4)
 		// IMAGE_RESOURCE_DATA_ENTRY: OffsetToData(4) + Size(4) + CodePage(4) + Reserved(4)
-		leafAddr := rsrcBase + uint64(leafOff&0x7FFFFFFF)
 		dataRVA, _ := mem.Read32(leafAddr)
 		dataAddr := mainModule.BaseAddr + uint64(dataRVA)
 
@@ -619,18 +641,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if idDir == 0 {
 			return nil
 		}
-		// If it's a directory (language level), pick the first entry
+		// Pick best language (prefer English/neutral)
 		var dataEntryAddr uint64
 		if isDir2 {
-			namedCount, _ := mem.Read16(idDir + 12)
-			idCount, _ := mem.Read16(idDir + 14)
-			if namedCount+idCount == 0 {
+			addr, ok := pickBestLangEntry(idDir, rsrcBase)
+			if !ok {
 				return nil
 			}
-			entryAddr := idDir + 16
-			_, _ = mem.Read32(entryAddr) // lang ID
-			eOff, _ := mem.Read32(entryAddr + 4)
-			dataEntryAddr = rsrcBase + uint64(eOff&0x7FFFFFFF)
+			dataEntryAddr = addr
 		} else {
 			dataEntryAddr = idDir
 		}
@@ -4511,6 +4529,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			lpBuffer := ctx.Arg(2)
 			cchBufferMax := int(int32(ctx.Arg(3)))
 			s, guestAddr, slen := peLoadStringW(uID)
+			if s != "" {
+				fmt.Fprintf(os.Stderr, "[loadstr] id=%d → %q\n", uID, s)
+			}
 			if s == "" || lpBuffer == 0 {
 				ctx.SetReturn(0)
 				return 0
