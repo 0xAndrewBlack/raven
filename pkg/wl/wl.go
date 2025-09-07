@@ -29,6 +29,8 @@ const (
 	kindXdgWmBase
 	kindXdgSurface
 	kindXdgToplevel
+	kindSeat
+	kindKeyboard
 )
 
 // EventType returned by Dispatch.
@@ -38,7 +40,16 @@ const (
 	EventNone      EventType = iota
 	EventConfigure           // window was resized by compositor
 	EventClose               // close requested
+	EventKey                 // keyboard input
 )
+
+// KeyEvent holds a keyboard event from Wayland.
+type KeyEvent struct {
+	Keycode  uint32 // Linux evdev keycode
+	Pressed  bool   // true=press, false=release
+	Char     rune   // mapped character (0 if non-printable)
+	VK       uint32 // Win32 virtual key code
+}
 
 const shmFmtXRGB8888 = 1
 
@@ -57,6 +68,17 @@ type Display struct {
 	compositorGlobal, compositorVer uint32
 	shmGlobal, shmVer               uint32
 	wmBaseGlobal, wmBaseVer         uint32
+	seatGlobal, seatVer             uint32
+
+	seatID     uint32
+	keyboardID uint32
+
+	// keyboard state
+	shiftDown bool
+	ctrlDown  bool
+	altDown   bool
+	keyEvents []KeyEvent
+	readBuf   []byte // buffered data from oversized reads
 
 	win *Window
 }
@@ -150,35 +172,94 @@ func (d *Display) sendFD(obj uint32, op uint16, fd int, args ...[]byte) error {
 
 // --- receiving ---
 
-func (d *Display) readEvent() (uint32, uint16, []byte, error) {
-	var hdr [8]byte
-	if _, err := io.ReadFull(d.conn, hdr[:]); err != nil {
-		return 0, 0, nil, fmt.Errorf("wayland recv: %w", err)
+func (d *Display) readEvent() (uint32, uint16, []byte, []int, error) {
+	// If we have buffered data from a previous oversized read, use it
+	if len(d.readBuf) >= 8 {
+		objID := gu32(d.readBuf[0:])
+		sizeOp := gu32(d.readBuf[4:])
+		sz := int(sizeOp >> 16)
+		op := uint16(sizeOp & 0xFFFF)
+		if sz < 8 {
+			d.readBuf = nil
+			return 0, 0, nil, nil, fmt.Errorf("wayland: bad msg size %d", sz)
+		}
+		if len(d.readBuf) >= sz {
+			payload := make([]byte, sz-8)
+			copy(payload, d.readBuf[8:sz])
+			d.readBuf = append([]byte{}, d.readBuf[sz:]...)
+			return objID, op, payload, nil, nil
+		}
+		// Not enough buffered data - need more from network (fall through)
 	}
-	objID := gu32(hdr[0:])
-	sizeOp := gu32(hdr[4:])
+
+	// Read from network with ancillary data support
+	hdrBuf := make([]byte, 4096)
+	oobBuf := make([]byte, 64)
+	// Prepend any leftover buffered data
+	prefixLen := copy(hdrBuf, d.readBuf)
+	d.readBuf = nil
+
+	n, oobn, _, _, err := d.conn.ReadMsgUnix(hdrBuf[prefixLen:], oobBuf)
+	if err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("wayland recv: %w", err)
+	}
+	n += prefixLen
+	if n < 8 {
+		return 0, 0, nil, nil, fmt.Errorf("wayland: short read %d", n)
+	}
+
+	var fds []int
+	if oobn > 0 {
+		scms, err := unix.ParseSocketControlMessage(oobBuf[:oobn])
+		if err == nil {
+			for _, scm := range scms {
+				if gotFDs, err := unix.ParseUnixRights(&scm); err == nil {
+					fds = append(fds, gotFDs...)
+				}
+			}
+		}
+	}
+
+	objID := gu32(hdrBuf[0:])
+	sizeOp := gu32(hdrBuf[4:])
 	sz := int(sizeOp >> 16)
 	op := uint16(sizeOp & 0xFFFF)
 	if sz < 8 {
-		return 0, 0, nil, fmt.Errorf("wayland: bad msg size %d", sz)
+		return 0, 0, nil, fds, fmt.Errorf("wayland: bad msg size %d", sz)
 	}
+
+	if n >= sz {
+		payload := make([]byte, sz-8)
+		copy(payload, hdrBuf[8:sz])
+		if n > sz {
+			d.readBuf = append(d.readBuf, hdrBuf[sz:n]...)
+		}
+		return objID, op, payload, fds, nil
+	}
+
+	// Partial message - read the rest
 	payload := make([]byte, sz-8)
-	if len(payload) > 0 {
-		if _, err := io.ReadFull(d.conn, payload); err != nil {
-			return 0, 0, nil, fmt.Errorf("wayland recv payload: %w", err)
+	copied := copy(payload, hdrBuf[8:n])
+	if copied < len(payload) {
+		if _, err := io.ReadFull(d.conn, payload[copied:]); err != nil {
+			return 0, 0, nil, fds, fmt.Errorf("wayland recv payload: %w", err)
 		}
 	}
-	return objID, op, payload, nil
+	return objID, op, payload, fds, nil
 }
 
 // dispatchOne reads and handles one event.
 func (d *Display) dispatchOne() (EventType, error) {
-	objID, op, payload, err := d.readEvent()
+	objID, op, payload, fds, err := d.readEvent()
 	if err != nil {
 		return EventNone, err
 	}
+	// Close any FDs we don't use (except for keymap which is handled below)
 	kind, ok := d.objects[objID]
 	if !ok {
+		for _, fd := range fds {
+			unix.Close(fd)
+		}
 		return EventNone, nil
 	}
 
@@ -239,6 +320,52 @@ func (d *Display) dispatchOne() (EventType, error) {
 			}
 			return EventClose, nil
 		}
+
+	case kindSeat:
+		if op == 0 { // capabilities
+			caps := gu32(payload)
+			const seatCapKeyboard = 2
+			if caps&seatCapKeyboard != 0 && d.keyboardID == 0 {
+				// wl_seat.get_keyboard (opcode 1)
+				d.keyboardID = d.alloc(kindKeyboard)
+				d.send(d.seatID, 1, pu32(d.keyboardID))
+			}
+		}
+
+	case kindKeyboard:
+		switch op {
+		case 0: // keymap (format, size) - fd comes via ancillary data
+			for _, fd := range fds {
+				unix.Close(fd)
+			}
+			fds = nil // mark as consumed
+		case 1: // enter - keyboard focus gained
+		case 2: // leave - keyboard focus lost
+		case 3: // key (serial, time, key, state)
+			if len(payload) >= 16 {
+				keycode := gu32(payload[8:])
+				state := gu32(payload[12:])
+				vk, ch := evdevToWin32(keycode, d.shiftDown)
+				d.keyEvents = append(d.keyEvents, KeyEvent{
+					Keycode: keycode,
+					Pressed: state == 1,
+					Char:    ch,
+					VK:      vk,
+				})
+				return EventKey, nil
+			}
+		case 4: // modifiers (serial, mods_depressed, mods_latched, mods_locked, group)
+			if len(payload) >= 16 {
+				depressed := gu32(payload[4:])
+				d.shiftDown = depressed&1 != 0 // MOD_SHIFT
+				d.ctrlDown = depressed&4 != 0   // MOD_CONTROL
+				d.altDown = depressed&8 != 0     // MOD_ALT
+			}
+		}
+	}
+	// Close any unconsumed FDs
+	for _, fd := range fds {
+		unix.Close(fd)
 	}
 	return EventNone, nil
 }
@@ -251,15 +378,20 @@ func (d *Display) handleGlobal(name uint32, iface string, ver uint32) {
 		d.shmGlobal, d.shmVer = name, ver
 	case "xdg_wm_base":
 		d.wmBaseGlobal, d.wmBaseVer = name, ver
+	case "wl_seat":
+		d.seatGlobal, d.seatVer = name, ver
 	}
 }
 
 // roundtrip reads events until the given callback fires.
 func (d *Display) roundtrip(callbackID uint32) error {
 	for {
-		objID, op, payload, err := d.readEvent()
+		objID, op, payload, fds, err := d.readEvent()
 		if err != nil {
 			return err
+		}
+		for _, fd := range fds {
+			unix.Close(fd)
 		}
 		kind, ok := d.objects[objID]
 		if !ok {
@@ -282,6 +414,15 @@ func (d *Display) roundtrip(callbackID uint32) error {
 			if op == 0 {
 				serial := gu32(payload)
 				d.send(d.wmBaseID, 3, pu32(serial))
+			}
+		case kindSeat:
+			if op == 0 { // capabilities during roundtrip
+				caps := gu32(payload)
+				const seatCapKeyboard = 2
+				if caps&seatCapKeyboard != 0 && d.keyboardID == 0 {
+					d.keyboardID = d.alloc(kindKeyboard)
+					d.send(d.seatID, 1, pu32(d.keyboardID))
+				}
 			}
 		case kindDisplay:
 			if op == 0 && len(payload) >= 12 {
@@ -362,6 +503,13 @@ func Connect() (*Display, error) {
 	d.wmBaseID = d.alloc(kindXdgWmBase)
 	d.send(d.registryID, 0, pu32(d.wmBaseGlobal), pstr("xdg_wm_base"),
 		pu32(min32(d.wmBaseVer, 2)), pu32(d.wmBaseID))
+
+	// bind wl_seat for keyboard input
+	if d.seatGlobal != 0 {
+		d.seatID = d.alloc(kindSeat)
+		d.send(d.registryID, 0, pu32(d.seatGlobal), pstr("wl_seat"),
+			pu32(min32(d.seatVer, 5)), pu32(d.seatID))
+	}
 
 	// second roundtrip for shm formats etc
 	cb = d.alloc(kindCallback)
@@ -498,7 +646,7 @@ func (w *Window) ResizeIfNeeded() bool {
 	return true
 }
 
-// Dispatch blocks until a user-facing event occurs (configure or close).
+// Dispatch blocks until a user-facing event occurs (configure, close, or key).
 func (d *Display) Dispatch() (EventType, error) {
 	for {
 		evt, err := d.dispatchOne()
@@ -511,6 +659,22 @@ func (d *Display) Dispatch() (EventType, error) {
 	}
 }
 
+// PollKey returns the next queued key event, if any.
+func (d *Display) PollKey() (KeyEvent, bool) {
+	if len(d.keyEvents) == 0 {
+		return KeyEvent{}, false
+	}
+	ev := d.keyEvents[0]
+	d.keyEvents = d.keyEvents[1:]
+	return ev, true
+}
+
+// ShiftDown returns the current shift key state.
+func (d *Display) ShiftDown() bool { return d.shiftDown }
+
+// CtrlDown returns the current control key state.
+func (d *Display) CtrlDown() bool { return d.ctrlDown }
+
 // Close tears down the Wayland connection.
 func (d *Display) Close() {
 	if d.win != nil {
@@ -522,4 +686,102 @@ func (d *Display) Close() {
 		}
 	}
 	d.conn.Close()
+}
+
+// evdevToWin32 maps a Linux evdev keycode to a Win32 VK code and character.
+func evdevToWin32(keycode uint32, shift bool) (vk uint32, ch rune) {
+type keyMap struct {
+vk      uint32
+lower   rune
+upper   rune
+}
+
+// Common evdev keycodes (KEY_* from input-event-codes.h)
+table := map[uint32]keyMap{
+1:  {0x1B, 0x1B, 0x1B},     // ESC
+2:  {0x31, '1', '!'},        // 1
+3:  {0x32, '2', '@'},        // 2
+4:  {0x33, '3', '#'},        // 3
+5:  {0x34, '4', '$'},        // 4
+6:  {0x35, '5', '%'},        // 5
+7:  {0x36, '6', '^'},        // 6
+8:  {0x37, '7', '&'},        // 7
+9:  {0x38, '8', '*'},        // 8
+10: {0x39, '9', '('},        // 9
+11: {0x30, '0', ')'},        // 0
+12: {0xBD, '-', '_'},        // minus
+13: {0xBB, '=', '+'},        // equal
+14: {0x08, '\b', '\b'},      // backspace
+15: {0x09, '\t', '\t'},      // tab
+16: {0x51, 'q', 'Q'},
+17: {0x57, 'w', 'W'},
+18: {0x45, 'e', 'E'},
+19: {0x52, 'r', 'R'},
+20: {0x54, 't', 'T'},
+21: {0x59, 'y', 'Y'},
+22: {0x55, 'u', 'U'},
+23: {0x49, 'i', 'I'},
+24: {0x4F, 'o', 'O'},
+25: {0x50, 'p', 'P'},
+26: {0xDB, '[', '{'},
+27: {0xDD, ']', '}'},
+28: {0x0D, '\r', '\r'},      // enter
+30: {0x41, 'a', 'A'},
+31: {0x53, 's', 'S'},
+32: {0x44, 'd', 'D'},
+33: {0x46, 'f', 'F'},
+34: {0x47, 'g', 'G'},
+35: {0x48, 'h', 'H'},
+36: {0x4A, 'j', 'J'},
+37: {0x4B, 'k', 'K'},
+38: {0x4C, 'l', 'L'},
+39: {0xBA, ';', ':'},
+40: {0xDE, '\'', '"'},
+41: {0xC0, '`', '~'},
+43: {0xDC, '\\', '|'},
+44: {0x5A, 'z', 'Z'},
+45: {0x58, 'x', 'X'},
+46: {0x43, 'c', 'C'},
+47: {0x56, 'v', 'V'},
+48: {0x42, 'b', 'B'},
+49: {0x4E, 'n', 'N'},
+50: {0x4D, 'm', 'M'},
+51: {0xBC, ',', '<'},
+52: {0xBE, '.', '>'},
+53: {0xBF, '/', '?'},
+57: {0x20, ' ', ' '},        // space
+// Function keys
+59: {0x70, 0, 0}, // F1
+60: {0x71, 0, 0}, // F2
+61: {0x72, 0, 0}, // F3
+62: {0x73, 0, 0}, // F4
+63: {0x74, 0, 0}, // F5
+64: {0x75, 0, 0}, // F6
+65: {0x76, 0, 0}, // F7
+66: {0x77, 0, 0}, // F8
+67: {0x78, 0, 0}, // F9
+68: {0x79, 0, 0}, // F10
+87: {0x7A, 0, 0}, // F11
+88: {0x7B, 0, 0}, // F12
+// Navigation
+102: {0x24, 0, 0}, // Home
+103: {0x26, 0, 0}, // Up
+104: {0x21, 0, 0}, // PageUp
+105: {0x25, 0, 0}, // Left
+106: {0x27, 0, 0}, // Right
+107: {0x23, 0, 0}, // End
+108: {0x28, 0, 0}, // Down
+109: {0x22, 0, 0}, // PageDown
+110: {0x2D, 0, 0}, // Insert
+111: {0x2E, 0, 0}, // Delete
+}
+
+if km, ok := table[keycode]; ok {
+ch := km.lower
+if shift {
+ch = km.upper
+}
+return km.vk, ch
+}
+return 0, 0
 }

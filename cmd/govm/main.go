@@ -3954,6 +3954,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 	nextMsgID := uint32(0xC000) // RegisterWindowMessage range
 	nextAtom := uint16(0xC001)  // RegisterClass atom range
+	var focusHwnd uint64 // currently focused window (receives keyboard input)
 
 	// WndProc dispatch tables
 	atomWndProc := make(map[uint16]uint64)   // class atom → WndProc address
@@ -4061,6 +4062,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(ole32, "CoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
 			return 0
 		})
+		d.RegisterAutoStubHandler(ole32, "OleInitialize", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "OleUninitialize", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -4100,6 +4108,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// Message queue for synthetic messages (WM_CREATE, WM_SIZE, etc.)
+	type queuedMsg struct {
+		hwnd    uint64
+		message uint32
+		wParam  uint64
+		lParam  uint64
+	}
+	var msgQueue []queuedMsg
 
 	// builtinWndProc handles messages for built-in window classes (Edit, StatusBar, etc.)
 	// Returns (result, handled).
@@ -4188,6 +4205,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ty := cs.y + (cs.h-16)/2
 					wlWindow.DrawText(tx, ty, cs.text, 0x000000, sysColors[15], true)
 				}
+			case "systreeview32":
+				// 3D sunken border + white area
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])
+				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, sysColors[5])
+			case "syslistview32":
+				// 3D sunken border + white area with column header
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])
+				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, sysColors[5])
+				// Header area
+				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+21, sysColors[15])
+				wlWindow.DrawRect(cs.x+1, cs.y+21, cs.x+cs.w-1, cs.y+22, sysColors[16])
+			case "systabcontrol32":
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				wlWindow.DrawRect(cs.x, cs.y+24, cs.x+cs.w, cs.y+25, sysColors[16])
+			default:
+				// Generic control: just fill background
+				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 			}
 			return 0, true
 
@@ -4216,6 +4256,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0, true
 
 		case 0x0007: // WM_SETFOCUS
+			focusHwnd = hwnd
 			return 0, true
 		case 0x0008: // WM_KILLFOCUS
 			return 0, true
@@ -4226,6 +4267,34 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// Edit-specific messages
 		if cs.className == "edit" {
 			switch msg {
+			case 0x0102: // WM_CHAR
+				ch := rune(wParam)
+				if ch == '\b' {
+					// Backspace
+					if len(cs.text) > 0 {
+						runes := []rune(cs.text)
+						cs.text = string(runes[:len(runes)-1])
+					}
+				} else if ch >= 0x20 || ch == '\r' || ch == '\n' || ch == '\t' {
+					cs.text += string(ch)
+				}
+				cs.editModified = true
+				// Queue repaint
+				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+				return 0, true
+			case 0x0100: // WM_KEYDOWN
+				return 0, true
+			case 0x0101: // WM_KEYUP
+				return 0, true
+			case 0x000C: // WM_SETTEXT
+				if lParam != 0 {
+					cs.text = readGuestUTF16(lParam)
+				}
+				return 1, true
+			case 0x000D: // WM_GETTEXT
+				return uint64(len(cs.text)), true
+			case 0x000E: // WM_GETTEXTLENGTH
+				return uint64(len(cs.text)), true
 			case 0x00B7: // EM_SETMODIFY
 				cs.editModified = wParam != 0
 				return 0, true
@@ -4338,6 +4407,80 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 		}
 
+		// TreeView messages (TVM_xxx = TV_FIRST + x, TV_FIRST = 0x1100)
+		if cs.className == "systreeview32" {
+			const tvFirst = 0x1100
+			switch msg {
+			case tvFirst + 0:  // TVM_INSERTITEMA
+				return 0x10001, true // fake HTREEITEM
+			case tvFirst + 50: // TVM_INSERTITEMW
+				return 0x10001, true
+			case tvFirst + 2:  // TVM_DELETEITEM
+				return 1, true
+			case tvFirst + 1:  // TVM_EXPAND
+				return 1, true
+			case tvFirst + 9:  // TVM_SETIMAGELIST
+				return 0, true
+			case tvFirst + 8:  // TVM_GETIMAGELIST
+				return 0, true
+			case tvFirst + 11: // TVM_SELECTITEM
+				return 1, true
+			case tvFirst + 13: // TVM_GETITEMW
+				return 0, true
+			case tvFirst + 63: // TVM_SETITEMW
+				return 1, true
+			case tvFirst + 14: // TVM_EDITLABELW
+				return 0, true
+			case tvFirst + 26: // TVM_GETCOUNT
+				return 0, true
+			default:
+				if msg >= tvFirst && msg < tvFirst+100 {
+					return 0, true
+				}
+			}
+		}
+
+		// ListView messages (LVM_xxx = LV_FIRST + x, LV_FIRST = 0x1000)
+		if cs.className == "syslistview32" {
+			const lvFirst = 0x1000
+			switch msg {
+			case lvFirst + 0:  // LVM_GETBKCOLOR
+				return 0xFFFFFF, true
+			case lvFirst + 1:  // LVM_SETBKCOLOR
+				return 1, true
+			case lvFirst + 2:  // LVM_GETIMAGELIST
+				return 0, true
+			case lvFirst + 3:  // LVM_SETIMAGELIST
+				return 0, true
+			case lvFirst + 4:  // LVM_GETITEMCOUNT
+				return 0, true
+			case lvFirst + 7:  // LVM_INSERTITEMA
+				return 0, true
+			case lvFirst + 77: // LVM_INSERTITEMW
+				return 0, true
+			case lvFirst + 8:  // LVM_DELETEITEM
+				return 1, true
+			case lvFirst + 9:  // LVM_DELETEALLITEMS
+				return 1, true
+			case lvFirst + 27: // LVM_INSERTCOLUMNA
+				return 0, true
+			case lvFirst + 97: // LVM_INSERTCOLUMNW
+				return 0, true
+			case lvFirst + 30: // LVM_SETCOLUMNWIDTH
+				return 1, true
+			case lvFirst + 31: // LVM_CREATEDRAGIMAGE
+				return 0, true
+			case lvFirst + 54: // LVM_SETEXTENDEDLISTVIEWSTYLE
+				return 0, true
+			case lvFirst + 55: // LVM_GETEXTENDEDLISTVIEWSTYLE
+				return 0, true
+			default:
+				if msg >= lvFirst && msg < lvFirst+200 {
+					return 0, true
+				}
+			}
+		}
+
 		return 0, false
 	}
 
@@ -4358,15 +4501,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		scratchOff += n
 		return addr
 	}
-
-	// Message queue for synthetic messages (WM_CREATE, WM_SIZE, etc.)
-	type queuedMsg struct {
-		hwnd    uint64
-		message uint32
-		wParam  uint64
-		lParam  uint64
-	}
-	var msgQueue []queuedMsg
 
 	// --- user32.dll ---
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
@@ -4563,6 +4697,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					text:    windowName,
 					visible: style&0x10000000 != 0, // WS_VISIBLE
 				}
+				// Auto-focus first edit control
+				if lClassName == "edit" && focusHwnd == 0 {
+					focusHwnd = hwnd
+				}
 			}
 
 			// Create a real Wayland window for the first top-level window
@@ -4584,8 +4722,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						mainHWND = hwnd
 						mainTitle = title
 						fmt.Fprintf(os.Stderr, "[wl] window created: %q %dx%d hwnd=0x%x\n", title, w, h, hwnd)
-						// Attach class menu bar if the class has one
-						if lpClassName != 0 {
+						// Attach menu bar: first check hMenu parameter, then class menu
+						hMenu := ctx.Arg(9)
+						if hMenu != 0 {
+							if _, ok := menus[hMenu]; ok {
+								hwndMenuBar[hwnd] = hMenu
+							}
+						}
+						if _, hasMenu := hwndMenuBar[hwnd]; !hasMenu && lpClassName != 0 {
 							var classAtom uint16
 							if lpClassName < 0x10000 {
 								classAtom = uint16(lpClassName)
@@ -5086,6 +5230,38 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ctx.SetReturn(0)
 					return 0
 				}
+				// Convert keyboard events to Win32 messages
+				if evt == wl.EventKey {
+					for {
+						ke, ok := wlDisplay.PollKey()
+						if !ok {
+							break
+						}
+						// Route to focused window, fallback to main
+						target := focusHwnd
+						if target == 0 {
+							target = mainHWND
+						}
+						if ke.Pressed {
+							msgQueue = append(msgQueue, queuedMsg{target, 0x0100, uint64(ke.VK), 0})
+							if ke.Char >= 0x20 || ke.Char == '\r' || ke.Char == '\b' || ke.Char == '\t' {
+								msgQueue = append(msgQueue, queuedMsg{target, 0x0102, uint64(ke.Char), 0})
+							}
+						} else {
+							msgQueue = append(msgQueue, queuedMsg{target, 0x0101, uint64(ke.VK), 0})
+						}
+					}
+				}
+				// Drain newly queued messages
+				if len(msgQueue) > 0 {
+					m := msgQueue[0]
+					msgQueue = msgQueue[1:]
+					if pMsg != 0 {
+						writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
+					}
+					ctx.SetReturn(1)
+					return 0
+				}
 				if pMsg != 0 {
 					writeMsg(pMsg, mainHWND, 0x000F, 0, 0) // WM_PAINT
 				}
@@ -5118,6 +5294,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			message, _ := mem.Read32(pMsg + 8)
 			wParam, _ := mem.Read64(pMsg + 16)
 			lParam, _ := mem.Read64(pMsg + 24)
+
+			// Try built-in control first
+			if _, isChild := hwndChildren[hwnd]; isChild {
+				result, handled := builtinWndProc(hwnd, message, wParam, lParam)
+				if handled {
+					ctx.SetReturn(result)
+					return 0
+				}
+			}
 
 			wndProc, ok := hwndWndProc[hwnd]
 			if !ok || wndProc == 0 {
@@ -5166,11 +5351,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetFocus", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(ctx.Arg(0)) // return previous focus (same hwnd)
+			prev := focusHwnd
+			focusHwnd = ctx.Arg(0)
+			ctx.SetReturn(prev)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetFocus", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ctx.SetReturn(focusHwnd)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetCapture", func(ctx *ntapi.TrapContext) uint32 {
