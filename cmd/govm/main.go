@@ -37,6 +37,19 @@ func utf16Decode(s []uint16) []byte {
 	return out
 }
 
+func utf16Encode(s string) []uint16 {
+	var out []uint16
+	for _, r := range s {
+		if r <= 0xFFFF {
+			out = append(out, uint16(r))
+		} else {
+			r -= 0x10000
+			out = append(out, uint16(0xD800+(r>>10)), uint16(0xDC00+(r&0x3FF)))
+		}
+	}
+	return out
+}
+
 func main() {
 trace := flag.Bool("trace", false, "enable instruction trace to stderr")
 memMB := flag.Int("mem", 256, "guest memory limit in MiB (advisory)")
@@ -486,6 +499,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		return string(utf16Decode(chars))
 	}
+	readGuestString := func(addr uint64) string {
+		if addr == 0 {
+			return ""
+		}
+		var out []byte
+		for i := 0; i < 1024; i++ {
+			b, err := mem.Read8(addr)
+			if err != nil || b == 0 {
+				break
+			}
+			out = append(out, b)
+			addr++
+		}
+		return string(out)
+	}
 
 	// Menu data structures
 	const menuBarHeight int32 = 20
@@ -493,6 +521,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		flags   uint32
 		id      uint64
 		text    string
+		submenu []menuItem // for popup items (MF_POPUP)
 	}
 	type menuData struct {
 		items []menuItem
@@ -702,8 +731,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				item.text = string(utf16Decode(chars))
 
 				if flags&mfPopup != 0 {
-					// Popup: recursively parse child items (skip them for bar display)
-					parseItems(64) // consume child items
+					// Popup: recursively parse child items
+					item.submenu = parseItems(64)
 				}
 
 				items = append(items, item)
@@ -2008,7 +2037,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				imageBase, _ := ctx.Mem.Read64(ctx.State.PEBAddr + 0x10)
 				ctx.SetReturn(imageBase)
 			} else {
-				ctx.SetReturn(0)
+				modName := strings.ToLower(readGuestUTF16(name))
+				// Return fake handle for known DLLs
+				switch modName {
+				case "shell32.dll":
+					ctx.SetReturn(0xDEAD0001)
+				case "comctl32.dll":
+					ctx.SetReturn(0xDEAD0002)
+				case "user32.dll":
+					ctx.SetReturn(0xDEAD0003)
+				case "kernel32.dll":
+					ctx.SetReturn(0xDEAD0004)
+				case "gdi32.dll":
+					ctx.SetReturn(0xDEAD0005)
+				default:
+					ctx.SetReturn(0)
+				}
 			}
 			return 0
 		})
@@ -3672,8 +3716,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					synth := ntapi.GenerateSynthDLL(mem, dllName, allFuncs, nextDelayID)
 					synthByName[dllName] = synth
 					d.RegisterAutoStubNames(synth)
-					fmt.Fprintf(os.Stderr, "[pe] delay-synth %s: %d stubs (id base 0x%X)\n",
-						dllName, len(allFuncs), nextDelayID)
+					fmt.Fprintf(os.Stderr, "[pe] delay-synth %s: %d stubs (id base 0x%X) funcs=%v\n",
+						dllName, len(allFuncs), nextDelayID, allFuncs)
 					nextDelayID += uint32(len(allFuncs))
 					// Re-run all handler registrars so newly synthesized DLL gets handlers
 					for _, reg := range delayHandlerRegistrars {
@@ -3882,14 +3926,119 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- advapi32.dll ---
+	// Minimal in-memory registry
+	type regKey struct {
+		name     string
+		subkeys  []uint64 // handles of children
+		values   map[string][]byte
+	}
+	regStore := map[uint64]*regKey{
+		0x80000000: {name: "HKEY_CLASSES_ROOT"},
+		0x80000001: {name: "HKEY_CURRENT_USER"},
+		0x80000002: {name: "HKEY_LOCAL_MACHINE"},
+		0x80000003: {name: "HKEY_USERS"},
+		0x80000005: {name: "HKEY_CURRENT_CONFIG"},
+	}
+	var regNextHandle uint64 = 0xBEEF0100
+	regAllocHandle := func() uint64 {
+		h := regNextHandle
+		regNextHandle++
+		return h
+	}
+	// Pre-populate common subkeys
+	populateSubkeys := func(parent uint64, names []string) {
+		pk := regStore[parent]
+		for _, n := range names {
+			h := regAllocHandle()
+			regStore[h] = &regKey{name: n}
+			pk.subkeys = append(pk.subkeys, h)
+		}
+	}
+	populateSubkeys(0x80000002, []string{"SOFTWARE", "SYSTEM", "HARDWARE"}) // HKLM
+	populateSubkeys(0x80000001, []string{"SOFTWARE", "Environment"})        // HKCU
+	populateSubkeys(0x80000005, []string{"Software"})                       // HKCC
+
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if advapi32, ok := synthByName["advapi32.dll"]; ok {
 		d.RegisterAutoStubHandler(advapi32, "RegOpenKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			hKey := ctx.Arg(0)
+			lpSubKey := ctx.Arg(1)
+			phkResult := ctx.Arg(4)
+
+			subKeyName := readGuestUTF16(lpSubKey)
+
+			// Look up parent
+			pk, ok := regStore[hKey]
+			if !ok {
+				ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+				return 0
+			}
+
+			// If subkey is empty, return same handle
+			if subKeyName == "" {
+				if phkResult != 0 {
+					mem.Write64(phkResult, hKey)
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			// Search children by name (case-insensitive)
+			lowerName := strings.ToLower(subKeyName)
+			for _, ch := range pk.subkeys {
+				if ck, ok := regStore[ch]; ok && strings.ToLower(ck.name) == lowerName {
+					if phkResult != 0 {
+						mem.Write64(phkResult, ch)
+					}
+					ctx.SetReturn(0) // ERROR_SUCCESS
+					return 0
+				}
+			}
+
+			// Auto-create if opening under a known parent
+			h := regAllocHandle()
+			regStore[h] = &regKey{name: subKeyName}
+			pk.subkeys = append(pk.subkeys, h)
+			if phkResult != 0 {
+				mem.Write64(phkResult, h)
+			}
+			ctx.SetReturn(0) // ERROR_SUCCESS
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegOpenKeyW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			hKey := ctx.Arg(0)
+			lpSubKey := ctx.Arg(1)
+			phkResult := ctx.Arg(2)
+			subKeyName := readGuestUTF16(lpSubKey)
+			pk, ok := regStore[hKey]
+			if !ok {
+				ctx.SetReturn(2)
+				return 0
+			}
+			if subKeyName == "" {
+				if phkResult != 0 {
+					mem.Write64(phkResult, hKey)
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
+			lowerName := strings.ToLower(subKeyName)
+			for _, ch := range pk.subkeys {
+				if ck, ok := regStore[ch]; ok && strings.ToLower(ck.name) == lowerName {
+					if phkResult != 0 {
+						mem.Write64(phkResult, ch)
+					}
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+			h := regAllocHandle()
+			regStore[h] = &regKey{name: subKeyName}
+			pk.subkeys = append(pk.subkeys, h)
+			if phkResult != 0 {
+				mem.Write64(phkResult, h)
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegCloseKey", func(ctx *ntapi.TrapContext) uint32 {
@@ -3905,19 +4054,98 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegCreateKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			hkResult := ctx.Arg(6)
-			if hkResult != 0 {
-				ctx.Mem.Write64(hkResult, 0xBEEF0100) // fake key handle
+			hKey := ctx.Arg(0)
+			lpSubKey := ctx.Arg(1)
+			phkResult := ctx.Arg(6)
+			lpDisposition := ctx.Arg(7)
+
+			subKeyName := readGuestUTF16(lpSubKey)
+			pk, ok := regStore[hKey]
+			if !ok {
+				ctx.SetReturn(2)
+				return 0
 			}
-			ctx.SetReturn(0) // ERROR_SUCCESS
+			// Check existing
+			lowerName := strings.ToLower(subKeyName)
+			for _, ch := range pk.subkeys {
+				if ck, ok := regStore[ch]; ok && strings.ToLower(ck.name) == lowerName {
+					if phkResult != 0 {
+						mem.Write64(phkResult, ch)
+					}
+					if lpDisposition != 0 {
+						mem.Write32(lpDisposition, 2) // REG_OPENED_EXISTING_KEY
+					}
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+			// Create new
+			h := regAllocHandle()
+			regStore[h] = &regKey{name: subKeyName}
+			pk.subkeys = append(pk.subkeys, h)
+			if phkResult != 0 {
+				mem.Write64(phkResult, h)
+			}
+			if lpDisposition != 0 {
+				mem.Write32(lpDisposition, 1) // REG_CREATED_NEW_KEY
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegEnumKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
+			hKey := ctx.Arg(0)
+			dwIndex := ctx.Arg(1)
+			lpName := ctx.Arg(2)
+			lpcchName := ctx.Arg(3)
+
+			pk, ok := regStore[hKey]
+			if !ok || int(dwIndex) >= len(pk.subkeys) {
+				ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
+				return 0
+			}
+			childH := pk.subkeys[dwIndex]
+			ck, ok := regStore[childH]
+			if !ok {
+				ctx.SetReturn(259)
+				return 0
+			}
+			// Write name as UTF-16
+			nameU16 := utf16Encode(ck.name)
+			if lpName != 0 {
+				for i, ch := range nameU16 {
+					mem.Write16(lpName+uint64(i)*2, ch)
+				}
+				mem.Write16(lpName+uint64(len(nameU16))*2, 0) // null terminator
+			}
+			if lpcchName != 0 {
+				mem.Write32(lpcchName, uint32(len(nameU16)))
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegEnumValueW", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "RegQueryInfoKeyW", func(ctx *ntapi.TrapContext) uint32 {
+			// RegQueryInfoKeyW(hKey, lpClass, lpcchClass, lpReserved, lpcSubKeys,
+			//   lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues, lpcbMaxValueNameLen,
+			//   lpcbMaxValueLen, lpcbSecurityDescriptor, lpftLastWriteTime)
+			hKey := ctx.Arg(0)
+			lpcSubKeys := ctx.Arg(4)
+			lpcValues := ctx.Arg(8) // stack arg
+			// Count subkeys from our registry
+			var subkeyCount uint32
+			if rk, ok := regStore[hKey]; ok {
+				subkeyCount = uint32(len(rk.subkeys))
+			}
+			if lpcSubKeys != 0 {
+				ctx.Mem.Write32(lpcSubKeys, subkeyCount)
+			}
+			if lpcValues != 0 {
+				ctx.Mem.Write32(lpcValues, 0)
+			}
+			ctx.SetReturn(0) // ERROR_SUCCESS
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegDeleteValueW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3953,6 +4181,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// Menu data structures (types defined earlier near peLoadMenuResource)
 	menus := make(map[uint64]*menuData)          // menu handle → menu data
 	hwndMenuBar := make(map[uint64]uint64)       // HWND → menu bar handle
+	// Menu bar interaction state
+	var openMenuIdx int = -1  // which top-level menu is open (-1 = none)
+	var openMenuHwnd uint64   // which window's menu is open
 	menuStripAmpersand := func(s string) string {
 		out := make([]byte, 0, len(s))
 		for i := 0; i < len(s); i++ {
@@ -3981,6 +4212,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	classMenuHandle := make(map[uint16]uint64) // class atom → loaded menu handle
 
 	// Built-in window class tracking for Edit, Static, Button, etc.
+	type treeItem struct {
+		handle   uint64
+		parent   uint64 // parent HTREEITEM (0 = root, TVI_ROOT = 0xFFFF0000)
+		text     string
+		children []uint64
+		expanded bool
+		lParam   uint64
+	}
+	type listColumn struct {
+		text  string
+		width int32
+	}
 	type controlState struct {
 		className    string
 		parentHWND   uint64
@@ -3992,6 +4235,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		sbTexts      []string // per-part text
 		// Edit state
 		editModified bool
+		// TreeView state
+		tvItems      map[uint64]*treeItem
+		tvNextHandle uint64
+		tvRoots      []uint64 // root-level items
+		// ListView state
+		lvColumns    []listColumn
 	}
 	hwndChildren := make(map[uint64]*controlState)
 
@@ -4029,15 +4278,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// ImageList_Create: return a fake handle
 		var nextImageList uint64 = 0x90000
+		imageListCount := map[uint64]uint64{} // handle → count
 		d.RegisterAutoStubHandler(comctl32, "ImageList_Create", func(ctx *ntapi.TrapContext) uint32 {
 			nextImageList++
+			imageListCount[nextImageList] = 0
 			ctx.SetReturn(nextImageList)
 			return 0
 		})
 
 		// ImageList_AddIcon / ImageList_ReplaceIcon
 		d.RegisterAutoStubHandler(comctl32, "ImageList_ReplaceIcon", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // index 0
+			himl := ctx.Arg(0)
+			idx := imageListCount[himl]
+			imageListCount[himl]++
+			ctx.SetReturn(idx)
 			return 0
 		})
 
@@ -4049,7 +4303,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// ImageList_GetImageCount
 		d.RegisterAutoStubHandler(comctl32, "ImageList_GetImageCount", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			himl := ctx.Arg(0)
+			count := imageListCount[himl]
+			ctx.SetReturn(count)
 			return 0
 		})
 
@@ -4230,6 +4486,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
 				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
 				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, sysColors[5])
+				// Render tree items
+				if cs.tvItems != nil {
+					ty := cs.y + 2
+					const itemHeight int32 = 18
+					var renderTree func(items []uint64, indent int32)
+					renderTree = func(items []uint64, indent int32) {
+						for _, h := range items {
+							ti, ok := cs.tvItems[h]
+							if !ok || ty > cs.y+cs.h-2 {
+								continue
+							}
+							tx := cs.x + 4 + indent*16
+							// Draw expand/collapse marker if has children
+							if len(ti.children) > 0 {
+								mx := tx - 10
+								my := ty + 4
+								// Small box with +/-
+								wlWindow.DrawRect(mx-4, my-4, mx+5, my+5, sysColors[5])
+								wlWindow.DrawRect(mx-4, my-4, mx+5, my-5+1, sysColors[16])
+								wlWindow.DrawRect(mx-4, my-4, mx-4+1, my+5, sysColors[16])
+								wlWindow.DrawRect(mx+4, my-4, mx+5, my+5, sysColors[16])
+								wlWindow.DrawRect(mx-4, my+4, mx+5, my+5, sysColors[16])
+								// Horizontal line (always)
+								wlWindow.DrawRect(mx-2, my, mx+3, my+1, 0x000000)
+								if !ti.expanded {
+									// Vertical line (plus sign)
+									wlWindow.DrawRect(mx, my-2, mx+1, my+3, 0x000000)
+								}
+							}
+							// Draw item text
+							if ti.text != "" {
+								wlWindow.DrawText(tx, ty+1, ti.text, 0x000000, sysColors[5], true)
+							}
+							ty += itemHeight
+							if ti.expanded {
+								renderTree(ti.children, indent+1)
+							}
+						}
+					}
+					renderTree(cs.tvRoots, 1)
+				}
 			case "syslistview32":
 				// 3D sunken border + white area with column header
 				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
@@ -4237,13 +4534,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
 				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
 				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, sysColors[5])
-				// Header area
+				// Header area with column names
 				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+21, sysColors[15])
 				wlWindow.DrawRect(cs.x+1, cs.y+21, cs.x+cs.w-1, cs.y+22, sysColors[16])
+				if len(cs.lvColumns) > 0 {
+					colX := cs.x + 2
+					for _, col := range cs.lvColumns {
+						if col.text != "" {
+							wlWindow.DrawText(colX+4, cs.y+3, col.text, 0x000000, sysColors[15], true)
+						}
+						colX += col.width
+						// Column separator
+						wlWindow.DrawRect(colX-1, cs.y+1, colX, cs.y+21, sysColors[16])
+					}
+				}
 			case "systabcontrol32":
 				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				wlWindow.DrawRect(cs.x, cs.y+24, cs.x+cs.w, cs.y+25, sysColors[16])
 			default:
+				// For app-defined child windows with a guest WndProc, let it handle WM_PAINT
+				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
+					// Fill background then let guest paint
+					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					return 0, false
+				}
 				// Generic control: just fill background
 				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 			}
@@ -4267,10 +4581,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				cs.w = wlWindow.Width
 				cs.h = sbHeight
 			}
+			// If there's a guest WndProc, let it handle WM_SIZE too
+			if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
+				return 0, false
+			}
 			return 0, true
 
 		case 0x0001: // WM_CREATE
 			cs.visible = true
+			// If there's a guest WndProc, let it handle WM_CREATE too
+			if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
+				return 0, false
+			}
 			return 0, true
 
 		case 0x0007: // WM_SETFOCUS
@@ -4428,11 +4750,50 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// TreeView messages (TVM_xxx = TV_FIRST + x, TV_FIRST = 0x1100)
 		if cs.className == "systreeview32" {
 			const tvFirst = 0x1100
+			if cs.tvItems == nil {
+				cs.tvItems = make(map[uint64]*treeItem)
+				cs.tvNextHandle = 0x10001
+			}
 			switch msg {
-			case tvFirst + 0:  // TVM_INSERTITEMA
-				return 0x10001, true // fake HTREEITEM
-			case tvFirst + 50: // TVM_INSERTITEMW
-				return 0x10001, true
+			case tvFirst + 0, tvFirst + 50: // TVM_INSERTITEMA, TVM_INSERTITEMW
+				// lParam → TVINSERTSTRUCTW
+				if lParam == 0 {
+					return 0, true
+				}
+				hParent, _ := mem.Read64(lParam)
+				// hInsertAfter at lParam+8 (ignored for now)
+				// TVITEMEXW starts at lParam+16
+				itemBase := lParam + 16
+				mask, _ := mem.Read32(itemBase)
+				// x64 TVITEMEXW layout: mask(4)+pad(4), hItem(8), state(4)+stateMask(4), pszText(8), cchTextMax(4)+iImage(4), iSelectedImage(4)+cChildren(4), lParam(8)
+				pszText, _ := mem.Read64(itemBase + 24)
+				itemLParam, _ := mem.Read64(itemBase + 48)
+
+				text := ""
+				const tvifText = 0x0001
+				const lpstrTextcallback = 0xFFFFFFFFFFFFFFFF
+				if mask&tvifText != 0 && pszText != 0 && pszText != lpstrTextcallback {
+					if msg == tvFirst+50 { // wide
+						text = readGuestUTF16(pszText)
+					} else { // ansi
+						text = readGuestString(pszText)
+					}
+				}
+
+				h := cs.tvNextHandle
+				cs.tvNextHandle++
+				ti := &treeItem{handle: h, parent: hParent, text: text, lParam: itemLParam, expanded: true}
+				cs.tvItems[h] = ti
+
+				const tviRoot uint64 = 0xFFFFFFFFFFFF0000
+				if hParent == 0 || hParent == tviRoot || hParent == 0xFFFF0000 {
+					cs.tvRoots = append(cs.tvRoots, h)
+				} else if pt, ok := cs.tvItems[hParent]; ok {
+					pt.children = append(pt.children, h)
+				} else {
+					cs.tvRoots = append(cs.tvRoots, h)
+				}
+				return h, true
 			case tvFirst + 2:  // TVM_DELETEITEM
 				return 1, true
 			case tvFirst + 1:  // TVM_EXPAND
@@ -4444,13 +4805,37 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case tvFirst + 11: // TVM_SELECTITEM
 				return 1, true
 			case tvFirst + 13: // TVM_GETITEMW
+				// lParam → TVITEMEXW, read hItem from offset 8
+				if lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					hItem, _ := mem.Read64(lParam + 8)
+					if ti, ok := cs.tvItems[hItem]; ok {
+						const tvifText = 0x0001
+						if mask&tvifText != 0 {
+							pszText, _ := mem.Read64(lParam + 24)
+							cchMax, _ := mem.Read32(lParam + 32)
+							if pszText != 0 && cchMax > 0 {
+								nameU16 := utf16Encode(ti.text)
+								limit := int(cchMax) - 1
+								if len(nameU16) > limit {
+									nameU16 = nameU16[:limit]
+								}
+								for i, ch := range nameU16 {
+									mem.Write16(pszText+uint64(i)*2, ch)
+								}
+								mem.Write16(pszText+uint64(len(nameU16))*2, 0)
+							}
+						}
+						return 1, true
+					}
+				}
 				return 0, true
 			case tvFirst + 63: // TVM_SETITEMW
 				return 1, true
 			case tvFirst + 14: // TVM_EDITLABELW
 				return 0, true
 			case tvFirst + 26: // TVM_GETCOUNT
-				return 0, true
+				return uint64(len(cs.tvItems)), true
 			default:
 				if msg >= tvFirst && msg < tvFirst+100 {
 					return 0, true
@@ -4481,9 +4866,38 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case lvFirst + 9:  // LVM_DELETEALLITEMS
 				return 1, true
 			case lvFirst + 27: // LVM_INSERTCOLUMNA
-				return 0, true
+				if lParam != 0 {
+					// LVCOLUMNA: mask(4) pad(4) fmt(4) cx(4) pszText(8) ...
+					mask, _ := mem.Read32(lParam)
+					cx, _ := mem.Read32(lParam + 8)
+					pszText, _ := mem.Read64(lParam + 16)
+					text := ""
+					if mask&0x0004 != 0 && pszText != 0 { // LVCF_TEXT
+						text = readGuestString(pszText)
+					}
+					width := int32(cx)
+					if width == 0 {
+						width = 100
+					}
+					cs.lvColumns = append(cs.lvColumns, listColumn{text: text, width: width})
+				}
+				return uint64(len(cs.lvColumns) - 1), true
 			case lvFirst + 97: // LVM_INSERTCOLUMNW
-				return 0, true
+				if lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					cx, _ := mem.Read32(lParam + 8)
+					pszText, _ := mem.Read64(lParam + 16)
+					text := ""
+					if mask&0x0004 != 0 && pszText != 0 { // LVCF_TEXT
+						text = readGuestUTF16(pszText)
+					}
+					width := int32(cx)
+					if width == 0 {
+						width = 100
+					}
+					cs.lvColumns = append(cs.lvColumns, listColumn{text: text, width: width})
+				}
+				return uint64(len(cs.lvColumns) - 1), true
 			case lvFirst + 30: // LVM_SETCOLUMNWIDTH
 				return 1, true
 			case lvFirst + 31: // LVM_CREATEDRAGIMAGE
@@ -4519,6 +4933,81 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		scratchOff += n
 		return addr
 	}
+
+	// Synchronous WndProc dispatch for CreateWindowExW.
+	// In real Win32, CreateWindowExW sends WM_NCCREATE/WM_CREATE synchronously
+	// before returning the HWND. We implement this with a trampoline vmcall.
+	type syncDispatch struct {
+		wndProc uint64
+		hwnd    uint64
+		msg     uint32
+		wParam  uint64
+		lParam  uint64
+	}
+	type syncDispatchFrame struct {
+		queue   []syncDispatch
+		retAddr uint64
+		hwnd    uint64
+	}
+	var syncStack []syncDispatchFrame
+
+	const syncTrampolineID = 0x3FFE
+	// Allocate a trampoline: MOV EAX, syncTrampolineID; vmcall; ret
+	syncTrampoline := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	mem.Write8(syncTrampoline, 0xB8)                          // MOV EAX, imm32
+	mem.Write32(syncTrampoline+1, syncTrampolineID)
+	mem.Write8(syncTrampoline+5, 0x0F)                        // vmcall
+	mem.Write8(syncTrampoline+6, 0x01)
+	mem.Write8(syncTrampoline+7, 0xC1)
+	mem.Write8(syncTrampoline+8, 0xC3)                        // ret
+
+	d.RegisterHandler(syncTrampolineID, "syncDispatchTrampoline", func(ctx *ntapi.TrapContext) uint32 {
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		if !ok {
+			return 0
+		}
+		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+		if !ok2 {
+			return 0
+		}
+		if len(syncStack) == 0 {
+			return 0
+		}
+		frame := &syncStack[len(syncStack)-1]
+
+		if len(frame.queue) > 0 {
+			sd := frame.queue[0]
+			frame.queue = frame.queue[1:]
+
+			// Push trampoline as return address
+			rsp := rr.ReadReg(4) // RSP
+			rsp -= 8
+			mem.Write64(rsp, syncTrampoline)
+			rw.WriteReg(4, rsp) // update RSP
+
+			// Set up WndProc args (x64 calling convention)
+			rw.WriteReg(1, sd.hwnd)          // RCX = hwnd
+			rw.WriteReg(2, uint64(sd.msg))   // RDX = msg
+			rw.WriteReg(8, sd.wParam)        // R8 = wParam
+			rw.WriteReg(9, sd.lParam)        // R9 = lParam
+
+			ctx.CPU.SetPC(sd.wndProc)
+			ctx.ReturnOverridden = true
+			return 0
+		}
+
+		// Queue empty: all sync dispatches done. Pop frame and return HWND.
+		retAddr := frame.retAddr
+		hwnd := frame.hwnd
+		syncStack = syncStack[:len(syncStack)-1]
+
+		rsp := rr.ReadReg(4) // RSP
+		rsp -= 8
+		mem.Write64(rsp, retAddr)
+		rw.WriteReg(4, rsp)
+		ctx.SetReturn(hwnd)
+		return 0
+	})
 
 	// --- user32.dll ---
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
@@ -4767,8 +5256,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 			}
-			// Queue WM_NCCREATE + WM_CREATE for windows with a WndProc
-			if _, hasWP := hwndWndProc[hwnd]; hasWP {
+			// Dispatch WM_NCCREATE + WM_CREATE synchronously for windows with a WndProc
+			if wp, hasWP := hwndWndProc[hwnd]; hasWP && wp != 0 {
 				// Build CREATESTRUCT in guest memory (80 bytes, x64 layout):
 				//   0: lpCreateParams(8) 8: hInstance(8) 16: hMenu(8) 24: hwndParent(8)
 				//  32: cy(4) 36: cx(4) 40: y(4) 44: x(4)
@@ -4787,6 +5276,33 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				mem.Write64(cs+56, ctx.Arg(2))          // lpszName
 				mem.Write64(cs+64, ctx.Arg(1))          // lpszClass
 				mem.Write32(cs+72, uint32(ctx.Arg(0)))  // dwExStyle
+
+				// Synchronous dispatch via trampoline:
+				// Queue WM_CREATE (dispatched second), then set up WM_NCCREATE (dispatched first).
+				rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+				rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+				if ok && ok2 {
+					// Save original return address and push a new sync frame
+					rsp := rr.ReadReg(4) // RSP
+					retAddr, _ := mem.Read64(rsp)
+					syncStack = append(syncStack, syncDispatchFrame{
+						queue:   []syncDispatch{{wndProc: wp, hwnd: hwnd, msg: 0x0001, wParam: 0, lParam: cs}},
+						retAddr: retAddr,
+						hwnd:    hwnd,
+					})
+					mem.Write64(rsp, syncTrampoline) // WndProc RET → trampoline
+
+					// Set up WM_NCCREATE call
+					rw.WriteReg(1, hwnd)          // RCX = hwnd
+					rw.WriteReg(2, 0x0081)        // RDX = WM_NCCREATE
+					rw.WriteReg(8, 0)             // R8 = wParam
+					rw.WriteReg(9, cs)            // R9 = lParam (CREATESTRUCT)
+
+					ctx.CPU.SetPC(wp)
+					ctx.ReturnOverridden = true
+					return 0
+				}
+				// Fallback: queue messages if register access unavailable
 				msgQueue = append(msgQueue,
 					queuedMsg{hwnd, 0x0081, 0, cs}, // WM_NCCREATE
 					queuedMsg{hwnd, 0x0001, 0, cs}, // WM_CREATE
@@ -4797,6 +5313,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "DestroyWindow", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			fmt.Fprintf(os.Stderr, "[destroy] hwnd=0x%x\n", hwnd)
+			delete(hwndChildren, hwnd)
+			delete(hwndWndProc, hwnd)
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -4959,10 +5479,73 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if w > 0 && w < 0x7FFF { ci.w = w }
 					if h > 0 && h < 0x7FFF { ci.h = h }
 				}
+				fmt.Fprintf(os.Stderr, "[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d\n", hwnd, ci.className, flags, ci.x, ci.y, ci.w, ci.h)
+				// Queue WM_SIZE for windows with a guest WndProc
+				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
+					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+				}
 			}
 			ctx.SetReturn(1)
 			return 0
 		})
+
+		// DeferWindowPos batch positioning
+		type deferredPos struct {
+			hwnd  uint64
+			x, y  int32
+			w, h  int32
+			flags uint32
+		}
+		var deferredPositions []deferredPos
+		var nextDWPHandle uint64 = 0xDEF00000
+
+		d.RegisterAutoStubHandler(user32, "BeginDeferWindowPos", func(ctx *ntapi.TrapContext) uint32 {
+			deferredPositions = deferredPositions[:0]
+			nextDWPHandle++
+			ctx.SetReturn(nextDWPHandle)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DeferWindowPos", func(ctx *ntapi.TrapContext) uint32 {
+			hdwp := ctx.Arg(0)
+			hwnd := ctx.Arg(1)
+			// arg2 = hWndInsertAfter (ignored)
+			x := int32(ctx.Arg(3))
+			y := int32(ctx.Arg(4))
+			cx := int32(ctx.Arg(5))
+			cy := int32(ctx.Arg(6))
+			flags := uint32(ctx.Arg(7))
+			deferredPositions = append(deferredPositions, deferredPos{hwnd: hwnd, x: x, y: y, w: cx, h: cy, flags: flags})
+			ctx.SetReturn(hdwp)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "EndDeferWindowPos", func(ctx *ntapi.TrapContext) uint32 {
+			const swpNoMove = 0x0002
+			const swpNoSize = 0x0001
+			for _, dp := range deferredPositions {
+				ci, ok := hwndChildren[dp.hwnd]
+				if !ok {
+					continue
+				}
+				menuOff := int32(0)
+				if _, hasMenu := hwndMenuBar[ci.parentHWND]; hasMenu {
+					menuOff = menuBarHeight
+				}
+				if dp.flags&swpNoMove == 0 {
+					ci.x = dp.x
+					ci.y = dp.y + menuOff
+				}
+				if dp.flags&swpNoSize == 0 {
+					if dp.w > 0 { ci.w = dp.w }
+					if dp.h > 0 { ci.h = dp.h }
+				}
+				fmt.Fprintf(os.Stderr, "[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d\n", dp.hwnd, ci.className, dp.flags, ci.x, ci.y, ci.w, ci.h)
+			}
+			deferredPositions = deferredPositions[:0]
+			ctx.SetReturn(1)
+			return 0
+		})
+
 		d.RegisterAutoStubHandler(user32, "MoveWindow", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			if ci, ok := hwndChildren[hwnd]; ok {
@@ -4974,6 +5557,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ci.y = int32(ctx.Arg(2)) + menuOff
 				ci.w = int32(ctx.Arg(3))
 				ci.h = int32(ctx.Arg(4))
+				// Queue WM_SIZE for windows with a guest WndProc
+				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
+					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+				}
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -5162,8 +5750,96 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "DefWindowProcW", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			msg := uint32(ctx.Arg(1))
+			wParam := ctx.Arg(2)
+			lParam := ctx.Arg(3)
 
-			// WM_PAINT: draw menu bar, fill background, then let children paint
+			// WM_LBUTTONDOWN: check menu bar click
+			if msg == 0x0201 && hwnd == mainHWND && wlWindow != nil {
+				my := int32(lParam >> 16)
+				mx := int32(lParam & 0xFFFF)
+				if menuH, ok := hwndMenuBar[hwnd]; ok {
+					if md, ok2 := menus[menuH]; ok2 && my < menuBarHeight {
+						x := int32(4)
+						for i, item := range md.items {
+							if item.flags&0x0800 != 0 {
+								continue
+							}
+							label := menuStripAmpersand(item.text)
+							if label == "" {
+								continue
+							}
+							tw := int32(len([]rune(label)))*8 + 12
+							if mx >= x && mx < x+tw {
+								if openMenuIdx == i && openMenuHwnd == hwnd {
+									openMenuIdx = -1 // toggle off
+								} else {
+									openMenuIdx = i
+									openMenuHwnd = hwnd
+								}
+								_ = md
+								msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+								ctx.SetReturn(0)
+								return 0
+							}
+							x += tw
+						}
+						// Clicked menu bar but not on any item → close
+						openMenuIdx = -1
+						msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+						ctx.SetReturn(0)
+						return 0
+					}
+				}
+			}
+
+			// WM_LBUTTONDOWN: check dropdown menu item click
+			if msg == 0x0201 && hwnd == mainHWND && openMenuIdx >= 0 && wlWindow != nil {
+				my := int32(lParam >> 16)
+				mx := int32(lParam & 0xFFFF)
+				if menuH, ok := hwndMenuBar[hwnd]; ok {
+					if md, ok2 := menus[menuH]; ok2 {
+						// Find the open popup's position and items
+						x := int32(4)
+						for i, item := range md.items {
+							if item.flags&0x0800 != 0 {
+								continue
+							}
+							label := menuStripAmpersand(item.text)
+							if label == "" {
+								continue
+							}
+							tw := int32(len([]rune(label)))*8 + 12
+							if i == openMenuIdx && len(item.submenu) > 0 {
+								// Check if click is inside dropdown area
+								dropX := x
+								dropY := menuBarHeight
+								dropW := int32(200)
+								dropH := int32(len(item.submenu)) * 20
+								if mx >= dropX && mx < dropX+dropW && my >= dropY && my < dropY+dropH {
+									itemIdx := int(my-dropY) / 20
+									if itemIdx >= 0 && itemIdx < len(item.submenu) {
+										si := item.submenu[itemIdx]
+										if si.flags&0x0800 == 0 { // not separator
+											// Send WM_COMMAND with menu item ID
+											msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0111, si.id, 0})
+											openMenuIdx = -1
+											msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+										}
+									}
+									ctx.SetReturn(0)
+									return 0
+								}
+							}
+							x += tw
+						}
+						// Click outside dropdown → close
+						openMenuIdx = -1
+						msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+					}
+				}
+			}
+
+			// WM_PAINT: draw menu bar, dropdown, fill background, children
 			if msg == 0x000F && wlWindow != nil && hwnd == mainHWND {
 				wlWindow.ResizeIfNeeded()
 				w, h := wlWindow.Width, wlWindow.Height
@@ -5176,7 +5852,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRect(0, 0, w, clientTop, sysColors[15])
 						wlWindow.DrawRect(0, clientTop-1, w, clientTop, sysColors[16])
 						x := int32(4)
-						for _, item := range md.items {
+						for i, item := range md.items {
 							if item.flags&0x0800 != 0 {
 								continue
 							}
@@ -5184,9 +5860,67 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							if label == "" {
 								continue
 							}
-							tw := int32(len([]rune(label))) * 8
-							wlWindow.DrawText(x+4, 3, label, 0x000000, sysColors[15], true)
-							x += tw + 12
+							tw := int32(len([]rune(label)))*8 + 12
+							// Highlight selected menu item
+							if openMenuIdx == i && openMenuHwnd == hwnd {
+								wlWindow.DrawRect(x, 0, x+tw, clientTop-1, sysColors[20])
+								wlWindow.DrawText(x+4, 3, label, 0x000000, sysColors[20], true)
+							} else {
+								wlWindow.DrawText(x+4, 3, label, 0x000000, sysColors[15], true)
+							}
+							x += tw
+						}
+
+						// Draw dropdown if open
+						if openMenuIdx >= 0 && openMenuHwnd == hwnd {
+							x = int32(4)
+							for i, item := range md.items {
+								if item.flags&0x0800 != 0 {
+									continue
+								}
+								label := menuStripAmpersand(item.text)
+								if label == "" {
+									continue
+								}
+								tw := int32(len([]rune(label)))*8 + 12
+								if i == openMenuIdx && len(item.submenu) > 0 {
+									dropX := x
+									dropY := clientTop
+									dropW := int32(200)
+									dropH := int32(len(item.submenu)) * 20
+									// Shadow
+									wlWindow.DrawRect(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
+									wlWindow.DrawRect(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
+									// Background
+									wlWindow.DrawRect(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
+									// Border
+									wlWindow.DrawRect(dropX, dropY, dropX+dropW, dropY+1, sysColors[16])
+									wlWindow.DrawRect(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
+									wlWindow.DrawRect(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
+									wlWindow.DrawRect(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
+									// Items
+									for j, si := range item.submenu {
+										iy := dropY + int32(j)*20
+										if si.flags&0x0800 != 0 { // separator
+											wlWindow.DrawRect(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
+											wlWindow.DrawRect(dropX+2, iy+10, dropX+dropW-2, iy+11, sysColors[20])
+										} else {
+											sl := menuStripAmpersand(si.text)
+											// Strip tab-separated accelerator
+											if idx := 0; idx < len(sl) {
+												for k := 0; k < len(sl); k++ {
+													if sl[k] == '\t' {
+														sl = sl[:k]
+														break
+													}
+												}
+											}
+											wlWindow.DrawText(dropX+20, iy+3, sl, 0x000000, sysColors[15], true)
+										}
+									}
+								}
+								x += tw
+							}
 						}
 					}
 				}
@@ -5212,6 +5946,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(1)
 				return 0
 			}
+			_ = wParam
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -5258,7 +5993,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if !ok {
 							break
 						}
-						// Route to focused window, fallback to main
 						target := focusHwnd
 						if target == 0 {
 							target = mainHWND
@@ -5270,6 +6004,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							}
 						} else {
 							msgQueue = append(msgQueue, queuedMsg{target, 0x0101, uint64(ke.VK), 0})
+						}
+					}
+				}
+				// Convert mouse events to Win32 messages
+				if evt == wl.EventMouse {
+					for {
+						me, ok := wlDisplay.PollMouse()
+						if !ok {
+							break
+						}
+						lParam := uint64(uint16(me.X)) | (uint64(uint16(me.Y)) << 16)
+						switch me.Kind {
+						case 0: // motion → WM_MOUSEMOVE
+							msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0200, 0, lParam})
+						case 1: // button
+							const btnLeft = 272
+							const btnRight = 273
+							const btnMiddle = 274
+							switch me.Button {
+							case btnLeft:
+								if me.Pressed {
+									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0201, 0x0001, lParam}) // WM_LBUTTONDOWN, MK_LBUTTON
+								} else {
+									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0202, 0, lParam}) // WM_LBUTTONUP
+								}
+							case btnRight:
+								if me.Pressed {
+									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0204, 0x0002, lParam})
+								} else {
+									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0205, 0, lParam})
+								}
+							case btnMiddle:
+								if me.Pressed {
+									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0207, 0x0010, lParam})
+								} else {
+									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0208, 0, lParam})
+								}
+							}
+						case 2: // axis → WM_MOUSEWHEEL
+							wParam := uint64(int16(me.AxisVal*-120)) << 16
+							msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x020A, wParam, lParam})
 						}
 					}
 				}

@@ -31,6 +31,7 @@ const (
 	kindXdgToplevel
 	kindSeat
 	kindKeyboard
+	kindPointer
 )
 
 // EventType returned by Dispatch.
@@ -41,6 +42,7 @@ const (
 	EventConfigure           // window was resized by compositor
 	EventClose               // close requested
 	EventKey                 // keyboard input
+	EventMouse               // mouse button/motion
 )
 
 // KeyEvent holds a keyboard event from Wayland.
@@ -49,6 +51,15 @@ type KeyEvent struct {
 	Pressed  bool   // true=press, false=release
 	Char     rune   // mapped character (0 if non-printable)
 	VK       uint32 // Win32 virtual key code
+}
+
+// MouseEvent holds a mouse event from Wayland.
+type MouseEvent struct {
+	X, Y    int32  // surface-local coordinates
+	Button  uint32 // Linux button code (BTN_LEFT=272, BTN_RIGHT=273, BTN_MIDDLE=274)
+	Pressed bool   // true=press, false=release
+	Kind    int    // 0=motion, 1=button, 2=axis(scroll)
+	AxisVal int32  // scroll delta (for Kind==2)
 }
 
 const shmFmtXRGB8888 = 1
@@ -72,13 +83,19 @@ type Display struct {
 
 	seatID     uint32
 	keyboardID uint32
+	pointerID  uint32
 
 	// keyboard state
 	shiftDown bool
 	ctrlDown  bool
 	altDown   bool
 	keyEvents []KeyEvent
-	readBuf   []byte // buffered data from oversized reads
+
+	// mouse state
+	mouseX, mouseY int32 // current surface-local position (fixed-point → int)
+	mouseEvents    []MouseEvent
+
+	readBuf []byte // buffered data from oversized reads
 
 	win *Window
 }
@@ -324,12 +341,55 @@ func (d *Display) dispatchOne() (EventType, error) {
 	case kindSeat:
 		if op == 0 { // capabilities
 			caps := gu32(payload)
+			const seatCapPointer = 1
 			const seatCapKeyboard = 2
+			if caps&seatCapPointer != 0 && d.pointerID == 0 {
+				d.pointerID = d.alloc(kindPointer)
+				d.send(d.seatID, 0, pu32(d.pointerID)) // wl_seat.get_pointer
+			}
 			if caps&seatCapKeyboard != 0 && d.keyboardID == 0 {
-				// wl_seat.get_keyboard (opcode 1)
 				d.keyboardID = d.alloc(kindKeyboard)
 				d.send(d.seatID, 1, pu32(d.keyboardID))
 			}
+		}
+
+	case kindPointer:
+		switch op {
+		case 0: // enter (serial, surface, sx, sy) - fixed-point 24.8
+			if len(payload) >= 16 {
+				d.mouseX = int32(gu32(payload[8:])) >> 8
+				d.mouseY = int32(gu32(payload[12:])) >> 8
+			}
+		case 1: // leave
+		case 2: // motion (time, sx, sy)
+			if len(payload) >= 12 {
+				d.mouseX = int32(gu32(payload[4:])) >> 8
+				d.mouseY = int32(gu32(payload[8:])) >> 8
+				d.mouseEvents = append(d.mouseEvents, MouseEvent{
+					X: d.mouseX, Y: d.mouseY, Kind: 0,
+				})
+				return EventMouse, nil
+			}
+		case 3: // button (serial, time, button, state)
+			if len(payload) >= 16 {
+				button := gu32(payload[8:])
+				state := gu32(payload[12:])
+				d.mouseEvents = append(d.mouseEvents, MouseEvent{
+					X: d.mouseX, Y: d.mouseY,
+					Button: button, Pressed: state == 1, Kind: 1,
+				})
+				return EventMouse, nil
+			}
+		case 4: // axis (time, axis, value)
+			if len(payload) >= 12 {
+				val := int32(gu32(payload[8:])) >> 8
+				d.mouseEvents = append(d.mouseEvents, MouseEvent{
+					X: d.mouseX, Y: d.mouseY,
+					Kind: 2, AxisVal: val,
+				})
+				return EventMouse, nil
+			}
+		case 5: // frame - end of a group of events
 		}
 
 	case kindKeyboard:
@@ -674,6 +734,19 @@ func (d *Display) ShiftDown() bool { return d.shiftDown }
 
 // CtrlDown returns the current control key state.
 func (d *Display) CtrlDown() bool { return d.ctrlDown }
+
+// PollMouse returns the next queued mouse event, if any.
+func (d *Display) PollMouse() (MouseEvent, bool) {
+	if len(d.mouseEvents) == 0 {
+		return MouseEvent{}, false
+	}
+	ev := d.mouseEvents[0]
+	d.mouseEvents = d.mouseEvents[1:]
+	return ev, true
+}
+
+// MousePos returns the current mouse position on the surface.
+func (d *Display) MousePos() (int32, int32) { return d.mouseX, d.mouseY }
 
 // Close tears down the Wayland connection.
 func (d *Display) Close() {

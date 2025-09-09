@@ -216,7 +216,7 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 
 	if d.ctx.Trace {
 		name := d.names[syscallID]
-		fmt.Printf("[ntapi] %s (id=0x%04X)\n", name, syscallID)
+		fmt.Fprintf(os.Stderr, "[trace] → %s (id=0x%04X)\n", name, syscallID)
 	}
 
 	d.ctx.ReturnOverridden = false
@@ -228,6 +228,12 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 
 // register adds a handler for a given syscall ID.
 func (d *Dispatcher) register(id uint32, name string, h TrapHandler) {
+	d.handlers[id] = h
+	d.names[id] = name
+}
+
+// RegisterHandler registers a handler for a specific syscall ID.
+func (d *Dispatcher) RegisterHandler(id uint32, name string, h TrapHandler) {
 	d.handlers[id] = h
 	d.names[id] = name
 }
