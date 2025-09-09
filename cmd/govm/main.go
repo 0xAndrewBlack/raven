@@ -6,6 +6,7 @@ import (
 "os"
 "path/filepath"
 "runtime/pprof"
+"sort"
 "strconv"
 "strings"
 "time"
@@ -4244,6 +4245,27 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 	hwndChildren := make(map[uint64]*controlState)
 
+	// clientAreaOrigin returns the absolute (surface) coordinates of a
+	// window's client-area top-left. For mainHWND with a menu bar the
+	// client area starts below the menu; for child windows it's their
+	// stored (absolute) position.
+	clientAreaOrigin := func(hwnd uint64) (int32, int32) {
+		if cs, ok := hwndChildren[hwnd]; ok {
+			return cs.x, cs.y
+		}
+		if hwnd == mainHWND {
+			if _, hasMenu := hwndMenuBar[mainHWND]; hasMenu {
+				return 0, menuBarHeight
+			}
+		}
+		return 0, 0
+	}
+
+	// paintTree recursively paints a window's child tree in creation
+	// order (sorted by HWND) so that containers are filled before their
+	// contents are drawn on top. Assigned after builtinWndProc.
+	var paintTree func(parentHwnd uint64)
+
 	// --- comctl32.dll ---
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if comctl32, ok := synthByName["comctl32.dll"]; ok {
@@ -4916,7 +4938,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		return 0, false
 	}
 
-	// Per-window storage: SetWindowLongPtrW / GetWindowLongPtrW
+	// Assign paintTree now that builtinWndProc is defined
+	paintTree = func(parentHwnd uint64) {
+		var children []uint64
+		for h, cs := range hwndChildren {
+			if cs.parentHWND == parentHwnd && cs.visible {
+				children = append(children, h)
+			}
+		}
+		sort.Slice(children, func(i, j int) bool { return children[i] < children[j] })
+		for _, h := range children {
+			builtinWndProc(h, 0x000F, 0, 0)
+			paintTree(h)
+		}
+	}
 	windowLongPtr := make(map[uint64]map[int32]uint64) // HWND → index → value
 	// Per-window properties: SetPropW / GetPropW
 	windowProps := make(map[uint64]map[string]uint64) // HWND → prop name → value
@@ -5179,30 +5214,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				cy := int32(ctx.Arg(5))
 				cw := int32(ctx.Arg(6))
 				ch := int32(ctx.Arg(7))
+				parentHwnd := ctx.Arg(8) // hWndParent
 				if cx < 0 || cx > 0x7FFF { cx = 0 }
 				if cy < 0 || cy > 0x7FFF { cy = 0 }
 				var defW, defH int32 = 800, 600
 				if wlWindow != nil { defW, defH = wlWindow.Width, wlWindow.Height }
 				if cw <= 0 || cw > 0x7FFF { cw = defW }
 				if ch <= 0 || ch > 0x7FFF { ch = defH }
-				// Offset child Y by menu bar height of parent
-				menuOff := int32(0)
-				if _, hasMenu := hwndMenuBar[mainHWND]; hasMenu {
-					menuOff = menuBarHeight
-				}
 				lClassName := strings.ToLower(className)
-				// Statusbar: auto-position at bottom of parent
+				// Statusbar: auto-position at bottom of parent (absolute)
 				if lClassName == "msctls_statusbar32" {
 					const sbHeight int32 = 20
 					cx, cy = 0, defH-sbHeight
 					cw, ch = defW, sbHeight
 				} else {
-					cy += menuOff
+					// Convert from parent-relative to absolute coordinates
+					ox, oy := clientAreaOrigin(parentHwnd)
+					cx += ox
+					cy += oy
 				}
 				windowName := readGuestUTF16(ctx.Arg(2))
 				hwndChildren[hwnd] = &controlState{
 					className:  lClassName,
-					parentHWND: mainHWND,
+					parentHWND: parentHwnd,
 					x: cx, y: cy, w: cw, h: ch,
 					text:    windowName,
 					visible: style&0x10000000 != 0, // WS_VISIBLE
@@ -5462,16 +5496,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				flags := uint32(ctx.Arg(6))
 				const swpNoMove = 0x0002
 				const swpNoSize = 0x0001
-				// Offset child Y by menu bar height of parent
-				menuOff := int32(0)
-				if _, hasMenu := hwndMenuBar[ci.parentHWND]; hasMenu {
-					menuOff = menuBarHeight
-				}
+				ox, oy := clientAreaOrigin(ci.parentHWND)
 				if flags&swpNoMove == 0 {
 					x := int32(ctx.Arg(2))
 					y := int32(ctx.Arg(3))
-					if x >= 0 && x < 0x7FFF { ci.x = x }
-					if y >= 0 && y < 0x7FFF { ci.y = y + menuOff }
+					if x >= 0 && x < 0x7FFF { ci.x = x + ox }
+					if y >= 0 && y < 0x7FFF { ci.y = y + oy }
 				}
 				if flags&swpNoSize == 0 {
 					w := int32(ctx.Arg(4))
@@ -5527,13 +5557,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if !ok {
 					continue
 				}
-				menuOff := int32(0)
-				if _, hasMenu := hwndMenuBar[ci.parentHWND]; hasMenu {
-					menuOff = menuBarHeight
-				}
+				ox, oy := clientAreaOrigin(ci.parentHWND)
 				if dp.flags&swpNoMove == 0 {
-					ci.x = dp.x
-					ci.y = dp.y + menuOff
+					ci.x = dp.x + ox
+					ci.y = dp.y + oy
 				}
 				if dp.flags&swpNoSize == 0 {
 					if dp.w > 0 { ci.w = dp.w }
@@ -5549,12 +5576,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "MoveWindow", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			if ci, ok := hwndChildren[hwnd]; ok {
-				menuOff := int32(0)
-				if _, hasMenu := hwndMenuBar[ci.parentHWND]; hasMenu {
-					menuOff = menuBarHeight
-				}
-				ci.x = int32(ctx.Arg(1))
-				ci.y = int32(ctx.Arg(2)) + menuOff
+				ox, oy := clientAreaOrigin(ci.parentHWND)
+				ci.x = int32(ctx.Arg(1)) + ox
+				ci.y = int32(ctx.Arg(2)) + oy
 				ci.w = int32(ctx.Arg(3))
 				ci.h = int32(ctx.Arg(4))
 				// Queue WM_SIZE for windows with a guest WndProc
@@ -5928,12 +5952,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// Fill client area with COLOR_WINDOW
 				wlWindow.DrawRect(0, clientTop, w, h, sysColors[5])
 
-				// Dispatch WM_PAINT to all visible children
-				for childHwnd, cs := range hwndChildren {
-					if cs.parentHWND == hwnd && cs.visible {
-						builtinWndProc(childHwnd, 0x000F, 0, 0)
-					}
-				}
+				// Recursively paint all descendant windows
+				paintTree(hwnd)
 				wlWindow.Commit()
 			}
 			// WM_NCCREATE: must return TRUE for window creation to proceed
@@ -6238,13 +6258,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "EndPaint", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
-			if wlWindow != nil && hwnd == mainHWND {
-				for childHwnd, cs := range hwndChildren {
-					if cs.parentHWND == hwnd && cs.visible {
-						builtinWndProc(childHwnd, 0x000F, 0, 0)
-					}
+			if wlWindow != nil {
+				paintTree(hwnd)
+				if hwnd == mainHWND {
+					wlWindow.Commit()
 				}
-				wlWindow.Commit()
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -6254,7 +6272,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetParent", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hwnd := ctx.Arg(0)
+			if cs, ok := hwndChildren[hwnd]; ok {
+				ctx.SetReturn(cs.parentHWND)
+			} else {
+				ctx.SetReturn(0)
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetParent", func(ctx *ntapi.TrapContext) uint32 {
