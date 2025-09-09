@@ -75,6 +75,8 @@ const (
 	PebFlsBitmapBits          = 0x0260  // 4 × uint32 (bitmask for 128 FLS slots)
 	PebFlsListHead            = 0x0270  // LIST_ENTRY
 	PebFlsCallback            = 0x0280  // PVOID*
+	PebGdiSharedHandleTable   = 0x00F8  // PVOID → GDI shared handle table
+	PebGdiHandleBuffer        = 0x00D4  // 34 × ULONG (starting offset)
 )
 
 // LDR_DATA offsets.
@@ -159,6 +161,7 @@ type ProcessState struct {
 	ProcessParamsAddr uint64
 	EnvironmentAddr   uint64
 	ModuleListAddr    uint64 // base of LDR_DATA_TABLE_ENTRY array
+	GdiTableAddr      uint64 // GDI shared handle table base
 	LastError         uint32
 }
 
@@ -235,6 +238,20 @@ func InitProcess(mem *mmu.MMU, init *ProcessInit, modules []ModuleInfo) (*Proces
 	// FlsListHead: circular doubly-linked list pointing to itself
 	mem.Write64(pebAddr+PebFlsListHead, pebAddr+PebFlsListHead)
 	mem.Write64(pebAddr+PebFlsListHead+8, pebAddr+PebFlsListHead)
+
+	// GDI shared handle table: 0x4000 entries × 24 bytes each.
+	// gdi32 indexes this by handle & 0xFFFF; entry size = 24 (8+4+2+1+1+8).
+	// Type byte at entry+0x0E: 0 = unused slot.
+	gdiTableSize := uint64(0x4000 * 24) // 393216 bytes
+	gdiTable := mem.Mmap(0, gdiTableSize, mmu.PermRead|mmu.PermWrite)
+	mem.Write64(pebAddr+PebGdiSharedHandleTable, gdiTable)
+	state.GdiTableAddr = gdiTable
+
+	// Pre-populate stock screen DC at index 52 - gdi32 looks up this fixed
+	// entry when CreateCompatibleDC(NULL) is called.
+	const gdiEntrySize = 24
+	stockDCEntry := gdiTable + 52*gdiEntrySize
+	mem.Write8(stockDCEntry+0x0E, 0x01) // type = OBJ_DC
 
 	mem.Write32(pebAddr+PebNumberOfProcessors, 4)
 	mem.Write32(pebAddr+PebNtGlobalFlag, 0)

@@ -720,6 +720,9 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("wcsspn"), "wcsspn", handleWcsspn)
 	d.register(idOf("wcsstr"), "wcsstr", handleWcsstr)
 	d.register(idOf("LdrDisableThreadCalloutsForDll"), "LdrDisableThreadCalloutsForDll", handleLdrDisableThreadCalloutsForDll)
+	d.register(idOf("LdrFindResource_U"), "LdrFindResource_U", handleLdrFindResource_U)
+	d.register(idOf("LdrFindResourceDirectory_U"), "LdrFindResourceDirectory_U", handleLdrFindResource_U) // same logic
+	d.register(idOf("LdrAccessResource"), "LdrAccessResource", handleLdrAccessResource)
 	d.register(idOf("RtlFindClearBitsAndSet"), "RtlFindClearBitsAndSet", handleRtlFindClearBitsAndSet)
 	d.register(idOf("LdrQueryImageFileExecutionOptions"), "LdrQueryImageFileExecutionOptions", handleLdrQueryImageFileExecutionOptions)
 	d.register(idOf("RtlReleasePath"), "RtlReleasePath", handleRtlReleasePath)

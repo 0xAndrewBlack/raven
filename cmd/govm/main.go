@@ -330,7 +330,7 @@ if ucrt, ok := loadedModules["ucrtbase.dll"]; ok {
 	)
 	for i := 0; i < numChannels; i++ {
 		entryAddr := ucrt.BaseAddr + channelTableRVA + uint64(i)*entrySize
-		mem.Write32(entryAddr, 1)               // flags = 1 (initialized)
+		mem.Write32(entryAddr, 0x80)            // flags = 0x80 (initialized, no debug output)
 		mem.Write64(entryAddr+8, 0)             // CS.DebugInfo = NULL
 		mem.Write32(entryAddr+16, 0xFFFFFFFF)   // CS.LockCount = -1 (unlocked)
 		mem.Write32(entryAddr+20, 0)            // CS.RecursionCount = 0

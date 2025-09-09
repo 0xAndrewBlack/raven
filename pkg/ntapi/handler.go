@@ -992,11 +992,18 @@ func handleNtQuerySystemTime(ctx *TrapContext) uint32 {
 // ======================== CRITICAL SECTIONS ========================
 
 func handleRtlInitCritSec(ctx *TrapContext) uint32 {
-	// Just zero-init the RTL_CRITICAL_SECTION structure in guest memory
 	csAddr := ctx.Arg(0)
 	if csAddr != 0 {
-		// DebugInfo(8) + LockCount(-1=4) + RecursionCount(4) + OwningThread(8) + LockSemaphore(8) + SpinCount(8)
-		ctx.Mem.Write64(csAddr+0, 0)            // DebugInfo
+		// Allocate RTL_CRITICAL_SECTION_DEBUG structure (48 bytes)
+		dbgInfo := ctx.Mem.Mmap(0, 48, mmu.PermRead|mmu.PermWrite)
+		// DebugInfo: Type=0, CreatorBackTraceIndex=0, CriticalSection pointer at +8
+		ctx.Mem.Write64(dbgInfo+8, csAddr) // CriticalSection pointer
+		// ProcessLocksList (+16): point to self (empty list)
+		ctx.Mem.Write64(dbgInfo+16, dbgInfo+16) // Flink = &self
+		ctx.Mem.Write64(dbgInfo+24, dbgInfo+16) // Blink = &self
+
+		// Initialize CRITICAL_SECTION
+		ctx.Mem.Write64(csAddr+0, dbgInfo)      // DebugInfo pointer
 		ctx.Mem.Write32(csAddr+8, 0xFFFFFFFF)   // LockCount = -1 (unlocked)
 		ctx.Mem.Write32(csAddr+12, 0)           // RecursionCount
 		ctx.Mem.Write64(csAddr+16, 0)           // OwningThread
@@ -2410,7 +2417,8 @@ func handleWineDbgGetChannelFlags(ctx *TrapContext) uint32 {
 }
 
 func handleWineDbgHeader(ctx *TrapContext) uint32 {
-	ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // -1 = suppress output
+	// Return pointer to an empty string (the NUL at PEB+0x100 which is always 0)
+	ctx.SetReturn(ctx.State.PEBAddr + 0x100)
 	return StatusSuccess
 }
 func handleWineDbgOutput(ctx *TrapContext) uint32 {
@@ -3076,6 +3084,198 @@ func handleLdrDisableThreadCalloutsForDll(ctx *TrapContext) uint32 {
 	return StatusSuccess
 }
 
+// handleLdrFindResource_U navigates the PE resource directory tree.
+// LdrFindResource_U(HMODULE hModule, LDR_RESOURCE_INFO *info, ULONG level, IMAGE_RESOURCE_DATA_ENTRY **entry)
+func handleLdrFindResource_U(ctx *TrapContext) uint32 {
+	hModule := ctx.Arg(0) // module base address
+	infoPtr := ctx.Arg(1) // LDR_RESOURCE_INFO*
+	level := ctx.Arg(2)   // number of levels (typically 3)
+	entryPtr := ctx.Arg(3) // output IMAGE_RESOURCE_DATA_ENTRY**
+
+	if hModule == 0 || entryPtr == 0 {
+		return 0xC0000135 // STATUS_DLL_NOT_FOUND
+	}
+
+	// Read resource directory RVA from PE headers in guest memory
+	rsrcRVA, rsrcSize := peResourceDir(ctx.Mem, hModule)
+	if rsrcRVA == 0 || rsrcSize == 0 {
+		return 0xC0000135 // STATUS_RESOURCE_TYPE_NOT_FOUND
+	}
+	rsrcBase := hModule + uint64(rsrcRVA)
+
+	// LDR_RESOURCE_INFO: Type (+0), Name (+8), Language (+16) - all ULONG_PTR (8 bytes on x64)
+	var resType, resName, resLang uint64
+	if infoPtr != 0 {
+		resType, _ = ctx.Mem.Read64(infoPtr)
+		if level >= 2 {
+			resName, _ = ctx.Mem.Read64(infoPtr + 8)
+		}
+		if level >= 3 {
+			resLang, _ = ctx.Mem.Read64(infoPtr + 16)
+		}
+	}
+
+	// Navigate resource directory tree
+	dirAddr := rsrcBase
+
+	// Level 1: find type
+	if level >= 1 {
+		found, isDir := findResourceEntry(ctx.Mem, dirAddr, rsrcBase, uint32(resType))
+		if found == 0 {
+			return 0xC0000135 // STATUS_RESOURCE_TYPE_NOT_FOUND
+		}
+		if !isDir {
+			// Leaf at level 1 - unlikely but handle it
+			ctx.Mem.Write64(entryPtr, found)
+			return StatusSuccess
+		}
+		dirAddr = found
+	}
+
+	// Level 2: find name/ID
+	if level >= 2 {
+		found, isDir := findResourceEntry(ctx.Mem, dirAddr, rsrcBase, uint32(resName))
+		if found == 0 {
+			// If name lookup fails and name is a string pointer, try first entry
+			found, isDir = findResourceFirstEntry(ctx.Mem, dirAddr, rsrcBase)
+			if found == 0 {
+				return 0xC0000089 // STATUS_RESOURCE_NAME_NOT_FOUND
+			}
+		}
+		if !isDir {
+			ctx.Mem.Write64(entryPtr, found)
+			return StatusSuccess
+		}
+		dirAddr = found
+	}
+
+	// Level 3: find language (pick best match or first)
+	if level >= 3 {
+		var found uint64
+		if resLang != 0 {
+			found, _ = findResourceEntry(ctx.Mem, dirAddr, rsrcBase, uint32(resLang))
+		}
+		if found == 0 {
+			// Try neutral (0x0000) or English
+			found = pickBestResourceLang(ctx.Mem, dirAddr, rsrcBase)
+		}
+		if found == 0 {
+			return 0xC000008A // STATUS_RESOURCE_LANG_NOT_FOUND
+		}
+		ctx.Mem.Write64(entryPtr, found)
+		return StatusSuccess
+	}
+
+	return 0xC000008A
+}
+
+// handleLdrAccessResource returns the address and size of a resource data entry.
+// LdrAccessResource(HMODULE hModule, IMAGE_RESOURCE_DATA_ENTRY *entry, void **ptr, ULONG *size)
+func handleLdrAccessResource(ctx *TrapContext) uint32 {
+	hModule := ctx.Arg(0)
+	entryAddr := ctx.Arg(1)
+	ptrOut := ctx.Arg(2)
+	sizeOut := ctx.Arg(3)
+
+	if hModule == 0 || entryAddr == 0 {
+		return 0xC0000135
+	}
+
+	// IMAGE_RESOURCE_DATA_ENTRY: OffsetToData(4), Size(4), CodePage(4), Reserved(4)
+	dataRVA, _ := ctx.Mem.Read32(entryAddr)
+	dataSize, _ := ctx.Mem.Read32(entryAddr + 4)
+
+	dataAddr := hModule + uint64(dataRVA)
+
+	if ptrOut != 0 {
+		ctx.Mem.Write64(ptrOut, dataAddr)
+	}
+	if sizeOut != 0 {
+		ctx.Mem.Write32(sizeOut, dataSize)
+	}
+
+	return StatusSuccess
+}
+
+// peResourceDir reads the resource directory RVA and size from PE headers in guest memory.
+func peResourceDir(mem *mmu.MMU, baseAddr uint64) (rva, size uint32) {
+	// Check MZ signature
+	mz, _ := mem.Read16(baseAddr)
+	if mz != 0x5A4D {
+		return 0, 0
+	}
+	// e_lfanew at offset 0x3C
+	lfanew, _ := mem.Read32(baseAddr + 0x3C)
+	peAddr := baseAddr + uint64(lfanew)
+	// Check PE signature
+	peSig, _ := mem.Read32(peAddr)
+	if peSig != 0x00004550 {
+		return 0, 0
+	}
+	// Optional header starts at PE+24
+	// For PE32+ (64-bit), data directories start at optional header + 0x70
+	// Resource table is directory entry 2 (each entry = 8 bytes)
+	optHdr := peAddr + 24
+	rva, _ = mem.Read32(optHdr + 0x70 + 2*8)     // resource dir RVA
+	size, _ = mem.Read32(optHdr + 0x70 + 2*8 + 4) // resource dir size
+	return rva, size
+}
+
+// findResourceEntry searches a resource directory for an entry with the given ID.
+func findResourceEntry(mem *mmu.MMU, dirAddr, rsrcBase uint64, id uint32) (addr uint64, isDir bool) {
+	numNamed, _ := mem.Read16(dirAddr + 12)
+	numID, _ := mem.Read16(dirAddr + 14)
+	total := int(numNamed) + int(numID)
+	entryBase := dirAddr + 16
+
+	for i := 0; i < total; i++ {
+		eid, _ := mem.Read32(entryBase + uint64(i)*8)
+		off, _ := mem.Read32(entryBase + uint64(i)*8 + 4)
+		if eid == id {
+			isSubDir := off&0x80000000 != 0
+			return rsrcBase + uint64(off&0x7FFFFFFF), isSubDir
+		}
+	}
+	return 0, false
+}
+
+// findResourceFirstEntry returns the first entry in a resource directory.
+func findResourceFirstEntry(mem *mmu.MMU, dirAddr, rsrcBase uint64) (addr uint64, isDir bool) {
+	numNamed, _ := mem.Read16(dirAddr + 12)
+	numID, _ := mem.Read16(dirAddr + 14)
+	total := int(numNamed) + int(numID)
+	if total == 0 {
+		return 0, false
+	}
+	off, _ := mem.Read32(dirAddr + 16 + 4) // first entry's offset
+	isSubDir := off&0x80000000 != 0
+	return rsrcBase + uint64(off&0x7FFFFFFF), isSubDir
+}
+
+// pickBestResourceLang picks the best language entry: neutral (0), English (0x09), or first.
+func pickBestResourceLang(mem *mmu.MMU, dirAddr, rsrcBase uint64) uint64 {
+	numNamed, _ := mem.Read16(dirAddr + 12)
+	numID, _ := mem.Read16(dirAddr + 14)
+	total := int(numNamed) + int(numID)
+	if total == 0 {
+		return 0
+	}
+	entryBase := dirAddr + 16
+	var fallback uint64
+	for i := 0; i < total; i++ {
+		langID, _ := mem.Read32(entryBase + uint64(i)*8)
+		off, _ := mem.Read32(entryBase + uint64(i)*8 + 4)
+		addr := rsrcBase + uint64(off&0x7FFFFFFF)
+		if i == 0 {
+			fallback = addr
+		}
+		if langID == 0x0000 || langID&0xFF == 0x09 {
+			return addr
+		}
+	}
+	return fallback
+}
+
 // handleVsnprintf implements _vsnprintf(buf, count, fmt, args).
 // We do a minimal implementation that reads the format string and copies it without formatting.
 func handleVsnprintf(ctx *TrapContext) uint32 {
@@ -3599,6 +3799,31 @@ func handleWineGetHostVersion(ctx *TrapContext) uint32 {
 
 // ======================== NtGdi* - GDI Object Stubs ========================
 
+// GDI object type codes (for GdiSharedHandleTable entry+0x0E).
+const (
+	gdiObjDC     = 0x01
+	gdiObjBrush  = 0x02
+	gdiObjPen    = 0x03
+	gdiObjPal    = 0x05
+	gdiObjFont   = 0x06
+	gdiObjBitmap = 0x07
+	gdiObjRegion = 0x08
+)
+
+const gdiEntrySize = 24
+
+// allocGdiHandle allocates a handle and writes a corresponding entry in the
+// GDI shared handle table so gdi32 user-mode code can validate it.
+func allocGdiHandle(ctx *TrapContext, kind string, objType byte) Handle {
+	h := ctx.Handles.Alloc(&GenericHandle{Kind: kind})
+	idx := uint64(h) & 0xFFFF
+	if ctx.State.GdiTableAddr != 0 && idx < 0x4000 {
+		entry := ctx.State.GdiTableAddr + idx*gdiEntrySize
+		ctx.Mem.Write8(entry+0x0E, objType)
+	}
+	return h
+}
+
 func handleNtGdiCreateBitmap(ctx *TrapContext) uint32 {
 	// NtGdiCreateBitmap(width, height, planes, bpp, bits)
 	w := ctx.Arg(0)
@@ -3606,7 +3831,7 @@ func handleNtGdiCreateBitmap(ctx *TrapContext) uint32 {
 	if ctx.Trace {
 		fmt.Printf("  NtGdiCreateBitmap: %dx%d planes=%d bpp=%d\n", w, h, ctx.Arg(2), ctx.Arg(3))
 	}
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "bitmap"})
+	handle := allocGdiHandle(ctx, "bitmap", gdiObjBitmap)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }
@@ -3616,13 +3841,19 @@ func handleNtGdiCreatePatternBrushInternal(ctx *TrapContext) uint32 {
 	if ctx.Trace {
 		fmt.Printf("  NtGdiCreatePatternBrushInternal: bitmap=0x%x\n", bitmapHandle)
 	}
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "brush"})
+	handle := allocGdiHandle(ctx, "brush", gdiObjBrush)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }
 
 func handleNtGdiDeleteObjectApp(ctx *TrapContext) uint32 {
 	h := Handle(ctx.Arg(0))
+	// Clear GDI table entry
+	idx := uint64(h) & 0xFFFF
+	if ctx.State.GdiTableAddr != 0 && idx < 0x4000 {
+		entry := ctx.State.GdiTableAddr + idx*gdiEntrySize
+		ctx.Mem.Write8(entry+0x0E, 0)
+	}
 	ctx.Handles.Close(h)
 	ctx.SetReturn(1) // TRUE
 	return StatusSuccess
@@ -3650,37 +3881,37 @@ func handleNtGdiSelectFont(ctx *TrapContext) uint32 {
 }
 
 func handleNtGdiCreateSolidBrush(ctx *TrapContext) uint32 {
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "brush"})
+	handle := allocGdiHandle(ctx, "brush", gdiObjBrush)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }
 
 func handleNtGdiCreatePen(ctx *TrapContext) uint32 {
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "pen"})
+	handle := allocGdiHandle(ctx, "pen", gdiObjPen)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }
 
 func handleNtGdiCreateRectRgn(ctx *TrapContext) uint32 {
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "region"})
+	handle := allocGdiHandle(ctx, "region", gdiObjRegion)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }
 
 func handleNtGdiCreateCompatibleDC(ctx *TrapContext) uint32 {
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "dc"})
+	handle := allocGdiHandle(ctx, "dc", gdiObjDC)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }
 
 func handleNtGdiCreateCompatibleBitmap(ctx *TrapContext) uint32 {
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "bitmap"})
+	handle := allocGdiHandle(ctx, "bitmap", gdiObjBitmap)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }
 
 func handleNtGdiHfontCreate(ctx *TrapContext) uint32 {
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "font"})
+	handle := allocGdiHandle(ctx, "font", gdiObjFont)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }
@@ -3775,7 +4006,7 @@ func handleNtGdiBitBlt(ctx *TrapContext) uint32 {
 }
 
 func handleNtGdiOpenDCW(ctx *TrapContext) uint32 {
-	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "dc"})
+	handle := allocGdiHandle(ctx, "dc", gdiObjDC)
 	ctx.SetReturn(uint64(handle))
 	return StatusSuccess
 }

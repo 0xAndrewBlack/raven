@@ -389,4 +389,33 @@ func PatchCRTFunctions(synth *SynthPE, mem *mmu.MMU) {
 	})
 
 	// strtol and wcstol are too complex for 64 bytes, keep as handlers
+
+	// Wine debug functions - inline stubs to avoid vmcall overhead and
+	// prevent infinite recursion when Wine DLLs use TRACE/WARN/ERR macros.
+
+	// __wine_dbg_get_channel_flags(channel) → 0 (all debug output disabled)
+	synth.PatchStub(mem, "__wine_dbg_get_channel_flags", []byte{
+		0x31, 0xC0, // xor eax, eax
+		0xC3,       // ret
+	})
+
+	// __wine_dbg_header(cls, channel, func) → pointer to empty string
+	// lea rax, [rip+1] makes RAX point to the 0x00 byte after ret
+	synth.PatchStub(mem, "__wine_dbg_header", []byte{
+		0x48, 0x8D, 0x05, 0x01, 0x00, 0x00, 0x00, // lea rax, [rip+1]
+		0xC3, // ret
+		// 0x00 padding byte serves as the empty string's null terminator
+	})
+
+	// __wine_dbg_output(str) → 0 (chars written)
+	synth.PatchStub(mem, "__wine_dbg_output", []byte{
+		0x31, 0xC0, // xor eax, eax
+		0xC3,       // ret
+	})
+
+	// __wine_dbg_strdup(str) → same pointer (identity)
+	synth.PatchStub(mem, "__wine_dbg_strdup", []byte{
+		0x48, 0x89, 0xC8, // mov rax, rcx
+		0xC3,             // ret
+	})
 }
