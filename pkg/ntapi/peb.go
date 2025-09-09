@@ -52,8 +52,14 @@ const (
 	PebProcessHeap            = 0x0030
 	PebFastPebLock            = 0x0038
 	PebAtlThunkSListPtr       = 0x0040
+	PebKernelCallbackTable    = 0x0058
 	PebApiSetMap              = 0x0068
-	PebTlsBitmapBits          = 0x0070  // 2 × uint32 (bitmask for first 64 slots)
+	PebTlsExpansionCounter    = 0x0070
+	PebTlsBitmap              = 0x0078  // PVOID → RTL_BITMAP*
+	PebTlsBitmapBits          = 0x0080  // 2 × uint32 (bitmask for first 64 slots)
+	PebAnsiCodePageData       = 0x00A0  // USHORT* to NLS code page data
+	PebOemCodePageData        = 0x00A8  // USHORT* to NLS code page data
+	PebUnicodeCaseTableData   = 0x00B0  // USHORT* to Unicode case mapping
 	PebNumberOfProcessors     = 0x00B8
 	PebNtGlobalFlag           = 0x00BC
 	PebSessionId              = 0x02C0
@@ -64,6 +70,11 @@ const (
 	PebImageSubsystem         = 0x0128
 	PebImageSubsystemMajor    = 0x012C
 	PebImageSubsystemMinor    = 0x0130
+
+	PebFlsBitmap              = 0x0258  // PVOID → RTL_BITMAP*
+	PebFlsBitmapBits          = 0x0260  // 4 × uint32 (bitmask for 128 FLS slots)
+	PebFlsListHead            = 0x0270  // LIST_ENTRY
+	PebFlsCallback            = 0x0280  // PVOID*
 )
 
 // LDR_DATA offsets.
@@ -193,7 +204,38 @@ func InitProcess(mem *mmu.MMU, init *ProcessInit, modules []ModuleInfo) (*Proces
 	mem.Write64(pebAddr+PebImageBaseAddress, init.ImageBase)
 	mem.Write64(pebAddr+PebLdr, ldrAddr)
 	mem.Write64(pebAddr+PebProcessParameters, paramsAddr)
-	mem.Write64(pebAddr+PebProcessHeap, 0) // we allocate on demand
+
+	// Allocate process heap - Wine DLLs read PEB.ProcessHeap directly
+	processHeap := mem.Mmap(0, 0x1000, mmu.PermRead|mmu.PermWrite)
+	mem.Write64(pebAddr+PebProcessHeap, processHeap)
+
+	// Initialize FastPebLock (RTL_CRITICAL_SECTION at PEB+0x38)
+	// RTL_CRITICAL_SECTION: DebugInfo(8) + LockCount(4) + RecursionCount(4) + OwningThread(8) + LockSemaphore(8) + SpinCount(8) = 40 bytes
+	// Wine's RtlAcquirePebLock uses PEB->FastPebLock which is a pointer to a critical section
+	fastPebLock := mem.Mmap(0, 64, mmu.PermRead|mmu.PermWrite)
+	mem.Write64(pebAddr+PebFastPebLock, fastPebLock)
+	mem.Write32(fastPebLock+4, 0xFFFFFFFF) // LockCount = -1 (unlocked)
+
+	// Initialize TlsBitmap - RTL_BITMAP { SizeOfBitMap: ULONG, Buffer: PULONG }
+	// Wine's TlsAlloc reads PEB->TlsBitmap via RtlFindClearBitsAndSet.
+	// TlsBitmapBits is inline in PEB at offset 0x080 (2 × ULONG = 64 bits for 64 TLS slots).
+	tlsBitmap := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+	mem.Write32(tlsBitmap, 64)                          // SizeOfBitMap = 64
+	mem.Write64(tlsBitmap+8, pebAddr+PebTlsBitmapBits)  // Buffer → PEB.TlsBitmapBits
+	mem.Write64(pebAddr+PebTlsBitmap, tlsBitmap)
+	// TlsBitmapBits starts as all-zero (all slots free)
+
+	// Initialize FlsBitmap - same RTL_BITMAP for FLS (128 slots, 4 × ULONG)
+	flsBitmap := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+	mem.Write32(flsBitmap, 128)                          // SizeOfBitMap = 128
+	mem.Write64(flsBitmap+8, pebAddr+PebFlsBitmapBits)   // Buffer → PEB.FlsBitmapBits
+	mem.Write64(pebAddr+PebFlsBitmap, flsBitmap)
+	// Reserve FLS index 0 (it's always reserved)
+	mem.Write32(pebAddr+PebFlsBitmapBits, 1) // bit 0 set = index 0 reserved
+	// FlsListHead: circular doubly-linked list pointing to itself
+	mem.Write64(pebAddr+PebFlsListHead, pebAddr+PebFlsListHead)
+	mem.Write64(pebAddr+PebFlsListHead+8, pebAddr+PebFlsListHead)
+
 	mem.Write32(pebAddr+PebNumberOfProcessors, 4)
 	mem.Write32(pebAddr+PebNtGlobalFlag, 0)
 	// Spoof Windows 10 22H2

@@ -14,7 +14,7 @@ import (
 
 const (
 	DefaultStackSize = 8 * 1024 * 1024    // 8 MiB
-	StackTop         = uint64(0x7FFF0000)  // top of guest stack
+	StackTop         = uint64(0x700000000000)  // top of guest stack
 )
 
 // LoadResult holds the state produced by loading an ELF.
@@ -56,12 +56,30 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 	var maxAddr uint64
 	var phdrAddr uint64
 	var tlsVaddr, tlsFilesz, tlsMemsz, tlsAlign uint64
+	var interpPath string
+
+	elfBase := uint64(0)
+	if ef.Type == elf.ET_DYN {
+		elfBase = 0x555555554000 // typical PIE base
+	}
 
 	for _, phdr := range ef.Progs {
 		switch phdr.Type {
+		case elf.PT_INTERP:
+			data := make([]byte, phdr.Filesz)
+			if _, err := f.Seek(int64(phdr.Off), io.SeekStart); err == nil {
+				if _, err := io.ReadFull(f, data); err == nil {
+					// Remove null terminator
+					if len(data) > 0 && data[len(data)-1] == 0 {
+						interpPath = string(data[:len(data)-1])
+					} else {
+						interpPath = string(data)
+					}
+				}
+			}
 		case elf.PT_LOAD:
 			// Map PT_LOAD segment
-			vaddr := phdr.Vaddr
+			vaddr := phdr.Vaddr + elfBase
 			memsz := phdr.Memsz
 			filesz := phdr.Filesz
 
@@ -109,7 +127,7 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 			}
 
 		case elf.PT_TLS:
-			tlsVaddr = phdr.Vaddr
+			tlsVaddr = phdr.Vaddr + elfBase
 			tlsFilesz = phdr.Filesz
 			tlsMemsz = phdr.Memsz
 			tlsAlign = phdr.Align
@@ -119,9 +137,69 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 		}
 	}
 
-	// Align brk to page boundary
-	brkAddr := (maxAddr + mmu.PageSize - 1) & mmu.PageMask
+	// Set brk to exact end of loaded segments (not page-aligned)
+	brkAddr := maxAddr
+	fmt.Fprintf(os.Stderr, "[loader] ELF Type: %v, elfBase: 0x%x, maxAddr: 0x%x, brkAddr: 0x%x\n", ef.Type, elfBase, maxAddr, brkAddr)
 	mem.SetBrk(brkAddr)
+
+	var interpBase uint64
+	entryPoint := ef.Entry + elfBase
+
+	if interpPath != "" {
+		interpF, err := os.Open(interpPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open interpreter %s: %w", interpPath, err)
+		}
+		defer interpF.Close()
+		interpEf, err := elf.NewFile(interpF)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse interpreter %s: %w", interpPath, err)
+		}
+		defer interpEf.Close()
+
+		interpBase = 0x400000000000 // typical base for interpreter
+		var interpMax uint64
+
+		for _, phdr := range interpEf.Progs {
+			if phdr.Type == elf.PT_LOAD {
+				vaddr := phdr.Vaddr + interpBase
+				memsz := phdr.Memsz
+				filesz := phdr.Filesz
+
+				alignedStart := vaddr & mmu.PageMask
+				alignedEnd := (vaddr + memsz + mmu.PageSize - 1) & mmu.PageMask
+				alignedSize := alignedEnd - alignedStart
+
+				var perms uint8
+				if phdr.Flags&elf.PF_R != 0 {
+					perms |= mmu.PermRead
+				}
+				if phdr.Flags&elf.PF_W != 0 {
+					perms |= mmu.PermWrite
+				}
+				if phdr.Flags&elf.PF_X != 0 {
+					perms |= mmu.PermExecute
+				}
+
+				mem.MapRange(alignedStart, alignedSize, perms|mmu.PermWrite)
+
+				if filesz > 0 {
+					data := make([]byte, filesz)
+					interpF.Seek(int64(phdr.Off), io.SeekStart)
+					io.ReadFull(interpF, data)
+					mem.WriteBytes(vaddr, data)
+				}
+
+				mem.MapRange(alignedStart, alignedSize, perms)
+
+				end := vaddr + memsz
+				if end > interpMax {
+					interpMax = end
+				}
+			}
+		}
+		entryPoint = interpEf.Entry + interpBase
+	}
 
 	// Allocate TLS area if PT_TLS was found
 	var tlsBase uint64
@@ -160,12 +238,13 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 	mem.WriteBytes(randomAddr, randomBytes)
 
 	auxvData := auxvInfo{
-		entry:    ef.Entry,
+		entry:    ef.Entry + elfBase,
 		phdr:     phdrAddr,
 		phent:    56,
 		phnum:    uint64(len(ef.Progs)),
 		pageSize: mmu.PageSize,
 		random:   randomAddr,
+		base:     interpBase,
 	}
 
 	sp, err := initStack(mem, StackTop, argv, envp, auxvData, guestArch)
@@ -174,7 +253,7 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 	}
 
 	return &LoadResult{
-		EntryPoint: ef.Entry,
+		EntryPoint: entryPoint,
 		StackPtr:   sp,
 		BrkAddr:    brkAddr,
 		TLSAddr:    tlsBase,
@@ -189,6 +268,7 @@ type auxvInfo struct {
 	phnum    uint64
 	pageSize uint64
 	random   uint64
+	base     uint64
 }
 
 // initStack writes argc, argv pointers, envp pointers, and auxv to the stack.
@@ -231,7 +311,7 @@ func initStack(mem *mmu.MMU, stackTop uint64, argv []string, envp []string, aux 
 		{4, aux.phent},      // AT_PHENT
 		{5, aux.phnum},      // AT_PHNUM
 		{6, aux.pageSize},   // AT_PAGESZ
-		{7, 0},              // AT_BASE (no interpreter)
+		{7, aux.base},       // AT_BASE
 		{8, 0},              // AT_FLAGS
 		{9, aux.entry},      // AT_ENTRY
 		{11, 1000},          // AT_UID

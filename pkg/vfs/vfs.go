@@ -207,11 +207,13 @@ func (v *VFS) initDevFS() {
 	urandom := newVNode("urandom", false)
 	urandom.FileMode = S_IFCHR | 0666
 	v.root.Children["dev"].Children["urandom"] = urandom
+	// /dev/shm
+	v.MkdirAll("/dev/shm")
 }
 
 // MkdirAll creates a directory path and all parents.
 func (v *VFS) MkdirAll(path string) {
-	parts := splitAll(path)
+	parts := SplitAll(path)
 	cur := v.root
 	for _, p := range parts {
 		if child, ok := cur.Children[p]; ok {
@@ -228,8 +230,8 @@ func (v *VFS) MkdirAll(path string) {
 func (v *VFS) CreateFile(path string, data []byte, mode FileMode) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	dir, name := splitPath(path)
-	parent, err := v.resolve(dir)
+	dir, name := SplitPath(path)
+	parent, err := v.Resolve(dir)
 	if err != nil {
 		return err
 	}
@@ -248,8 +250,8 @@ func (v *VFS) CreateFile(path string, data []byte, mode FileMode) error {
 func (v *VFS) Mkdir(path string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	dir, name := splitPath(path)
-	parent, err := v.resolve(dir)
+	dir, name := SplitPath(path)
+	parent, err := v.Resolve(dir)
 	if err != nil {
 		return err
 	}
@@ -265,11 +267,11 @@ func (v *VFS) OpenAt(dirfd int, path string, flags int, mode uint32) (int, error
 	defer v.mu.Unlock()
 
 	// Resolve path
-	absPath := v.resolvePath(dirfd, path)
+	absPath := v.ResolvePath(dirfd, path)
 
 	// Check for special device paths
 	if absPath == "/dev/null" || absPath == "/dev/zero" || absPath == "/dev/urandom" {
-		node, err := v.resolve(absPath)
+		node, err := v.Resolve(absPath)
 		if err != nil {
 			return -1, err
 		}
@@ -279,12 +281,28 @@ func (v *VFS) OpenAt(dirfd int, path string, flags int, mode uint32) (int, error
 		return fd, nil
 	}
 
-	node, err := v.resolve(absPath)
+	node, err := v.Resolve(absPath)
 	if err != nil {
-		// If O_CREAT, create it
+		// Host passthrough for system libraries and config
+		if strings.HasPrefix(absPath, "/lib") || strings.HasPrefix(absPath, "/usr") || strings.HasPrefix(absPath, "/etc") {
+			hostFlags := os.O_RDONLY
+			if flags&O_WRONLY != 0 {
+				hostFlags = os.O_WRONLY
+			} else if flags&O_RDWR != 0 {
+				hostFlags = os.O_RDWR
+			}
+			if f, oerr := os.OpenFile(absPath, hostFlags, os.FileMode(mode)); oerr == nil {
+				fd := v.nextFD
+				v.nextFD++
+				v.fds[fd] = &FD{HostFile: f, Flags: flags}
+				return fd, nil
+			}
+		}
+
+		// If O_CREAT, create it in VFS
 		if flags&O_CREAT != 0 {
-			dir, name := splitPath(absPath)
-			parent, perr := v.resolve(dir)
+			dir, name := SplitPath(absPath)
+			parent, perr := v.Resolve(dir)
 			if perr != nil {
 				return -1, perr
 			}
@@ -393,6 +411,18 @@ func (v *VFS) Pread(fd int, buf []byte, offset int64) (int, error) {
 	// Host file pread
 	if f.HostFile != nil {
 		return f.HostFile.ReadAt(buf, offset)
+	}
+
+	if f.Node.Name == "urandom" {
+		rand.Read(buf)
+		return len(buf), nil
+	}
+
+	if f.Node.Name == "zero" {
+		for i := range buf {
+			buf[i] = 0
+		}
+		return len(buf), nil
 	}
 
 	// VFS regular file
@@ -623,6 +653,12 @@ func (v *VFS) Stat(fd int) *VNode {
 	if !ok {
 		return nil
 	}
+	if f.HostFile != nil {
+		if stat, err := f.HostFile.Stat(); err == nil {
+			return hostStatToVNode(f.HostFile.Name(), stat)
+		}
+		return nil
+	}
 	return f.Node
 }
 
@@ -630,13 +666,48 @@ func (v *VFS) Stat(fd int) *VNode {
 func (v *VFS) StatPath(dirfd int, path string) (*VNode, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	absPath := v.resolvePath(dirfd, path)
-	return v.resolve(absPath)
+	absPath := v.ResolvePath(dirfd, path)
+	node, err := v.Resolve(absPath)
+	if err == nil {
+		return node, nil
+	}
+	if strings.HasPrefix(absPath, "/lib") || strings.HasPrefix(absPath, "/usr") || strings.HasPrefix(absPath, "/etc") {
+		if stat, oerr := os.Stat(absPath); oerr == nil {
+			return hostStatToVNode(absPath, stat), nil
+		}
+	}
+	return nil, err
+}
+
+func hostStatToVNode(name string, stat os.FileInfo) *VNode {
+	mode := stat.Mode()
+	isDir := mode.IsDir()
+	var fileMode uint32 = uint32(mode.Perm())
+	if isDir {
+		fileMode |= S_IFDIR
+	} else if mode&os.ModeSymlink != 0 {
+		fileMode |= S_IFLNK
+	} else {
+		fileMode |= S_IFREG
+	}
+	return &VNode{
+		Name:     name,
+		IsDir:    isDir,
+		Size:     stat.Size(),
+		FileMode: fileMode,
+		Ino:      nextInode(),
+		Nlink:    1,
+		Uid:      1000,
+		Gid:      1000,
+		Atime:    stat.ModTime(),
+		Mtime:    stat.ModTime(),
+		Ctime:    stat.ModTime(),
+	}
 }
 
 // Readlinkat reads a symlink. Handles /proc/self/exe specially.
 func (v *VFS) Readlinkat(dirfd int, path string) (string, error) {
-	absPath := v.resolvePath(dirfd, path)
+	absPath := v.ResolvePath(dirfd, path)
 	if absPath == "/proc/self/exe" {
 		if v.ElfPath != "" {
 			return v.ElfPath, nil
@@ -645,8 +716,13 @@ func (v *VFS) Readlinkat(dirfd int, path string) (string, error) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	node, err := v.resolve(absPath)
+	node, err := v.Resolve(absPath)
 	if err != nil {
+		if strings.HasPrefix(absPath, "/lib") || strings.HasPrefix(absPath, "/usr") || strings.HasPrefix(absPath, "/etc") {
+			if target, oerr := os.Readlink(absPath); oerr == nil {
+				return target, nil
+			}
+		}
 		return "", err
 	}
 	if node.LinkTarget != "" {
@@ -694,8 +770,8 @@ func (v *VFS) Getdents64(fd int) []*VNode {
 	return entries
 }
 
-// resolvePath resolves a path relative to dirfd.
-func (v *VFS) resolvePath(dirfd int, path string) string {
+// ResolvePath resolves a path relative to dirfd.
+func (v *VFS) ResolvePath(dirfd int, path string) string {
 	if len(path) > 0 && path[0] == '/' {
 		return path
 	}
@@ -709,12 +785,12 @@ func (v *VFS) resolvePath(dirfd int, path string) string {
 	return "/" + path
 }
 
-// resolve walks the VFS tree to find a node by path.
-func (v *VFS) resolve(path string) (*VNode, error) {
+// Resolve walks the VFS tree to find a node by path.
+func (v *VFS) Resolve(path string) (*VNode, error) {
 	if path == "/" || path == "" {
 		return v.root, nil
 	}
-	parts := splitAll(path)
+	parts := SplitAll(path)
 	cur := v.root
 	for _, p := range parts {
 		if p == "." {
@@ -736,7 +812,7 @@ func (v *VFS) resolve(path string) (*VNode, error) {
 	return cur, nil
 }
 
-func splitPath(path string) (string, string) {
+func SplitPath(path string) (string, string) {
 	// Remove trailing slashes
 	path = strings.TrimRight(path, "/")
 	for i := len(path) - 1; i >= 0; i-- {
@@ -867,9 +943,9 @@ func (v *VFS) WrapHostFD(hostFDnum int, name string) int {
 func (v *VFS) Unlinkat(dirfd int, path string, flags int) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	absPath := v.resolvePath(dirfd, path)
-	dir, name := splitPath(absPath)
-	parent, err := v.resolve(dir)
+	absPath := v.ResolvePath(dirfd, path)
+	dir, name := SplitPath(absPath)
+	parent, err := v.Resolve(dir)
 	if err != nil {
 		return err
 	}
@@ -898,13 +974,13 @@ func (v *VFS) Unlinkat(dirfd int, path string, flags int) error {
 func (v *VFS) Renameat(olddirfd int, oldpath string, newdirfd int, newpath string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	absOld := v.resolvePath(olddirfd, oldpath)
-	absNew := v.resolvePath(newdirfd, newpath)
+	absOld := v.ResolvePath(olddirfd, oldpath)
+	absNew := v.ResolvePath(newdirfd, newpath)
 
-	oldDir, oldName := splitPath(absOld)
-	newDir, newName := splitPath(absNew)
+	oldDir, oldName := SplitPath(absOld)
+	newDir, newName := SplitPath(absNew)
 
-	oldParent, err := v.resolve(oldDir)
+	oldParent, err := v.Resolve(oldDir)
 	if err != nil {
 		return err
 	}
@@ -913,7 +989,7 @@ func (v *VFS) Renameat(olddirfd int, oldpath string, newdirfd int, newpath strin
 		return fmt.Errorf("not found: %s", absOld)
 	}
 
-	newParent, err := v.resolve(newDir)
+	newParent, err := v.Resolve(newDir)
 	if err != nil {
 		return err
 	}
@@ -949,8 +1025,8 @@ func (v *VFS) Ftruncate(fd int, length int64) error {
 func (v *VFS) Chdir(path string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	absPath := v.resolvePath(-100, path)
-	node, err := v.resolve(absPath)
+	absPath := v.ResolvePath(-100, path)
+	node, err := v.Resolve(absPath)
 	if err != nil {
 		return err
 	}
@@ -965,9 +1041,9 @@ func (v *VFS) Chdir(path string) error {
 func (v *VFS) Symlinkat(target string, dirfd int, linkpath string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	absPath := v.resolvePath(dirfd, linkpath)
-	dir, name := splitPath(absPath)
-	parent, err := v.resolve(dir)
+	absPath := v.ResolvePath(dirfd, linkpath)
+	dir, name := SplitPath(absPath)
+	parent, err := v.Resolve(dir)
 	if err != nil {
 		return err
 	}
@@ -978,7 +1054,7 @@ func (v *VFS) Symlinkat(target string, dirfd int, linkpath string) error {
 	return nil
 }
 
-func splitAll(path string) []string {
+func SplitAll(path string) []string {
 	var parts []string
 	for _, p := range strings.Split(path, "/") {
 		if p != "" {

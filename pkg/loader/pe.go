@@ -23,6 +23,7 @@ type PEModule struct {
 	Exports    map[string]uint64 // export name → guest address
 	ExportOrds map[uint16]uint64 // export ordinal → guest address
 	Forwards   map[string]string // export name → "DLL.Function" forward
+	ForwardOrds map[uint16]string // export ordinal → "DLL.Function" forward
 	Imports    []PEImportEntry   // unresolved imports
 	Is64       bool
 	IsDLL      bool     // true if IMAGE_FILE_DLL flag is set
@@ -75,19 +76,19 @@ func LoadPE(path string, mem *mmu.MMU, argv []string, envp []string) (*PELoadRes
 		return nil, fmt.Errorf("pe load: %w", err)
 	}
 
-	// Set up a minimal Windows-style stack (8 MiB, top at 0x7FFE0000).
-	stackTop := uint64(0x7FFE0000)
-	stackSize := uint64(8 * 1024 * 1024)
+	// Set up a minimal Windows-style stack (64 MiB, below KUSER_SHARED_DATA at 0x7FFE0000).
+	stackTop := uint64(0x7FFD0000)
+	stackSize := uint64(64 * 1024 * 1024)
 	stackBottom := stackTop - stackSize
 	mem.MapRange(stackBottom, stackSize, mmu.PermRead|mmu.PermWrite)
 
-	// Initialize the stack with a return address of 0 (process exit sentinel).
-	sp := stackTop - 8
-	write64(mem, sp, 0)
-
-	// Windows x64 calling convention: 32 bytes shadow space + alignment.
-	sp -= 32
-	sp &= ^uint64(0xF) // 16-byte align
+	// Simulate a CALL to the entry point.
+	// Caller's RSP is 16-byte aligned. Allocate 32-byte shadow space,
+	// then push return address (0 = process exit sentinel).
+	sp := stackTop       // 16-byte aligned
+	sp -= 32             // shadow space (32 bytes for 4 register args)
+	sp -= 8              // CALL pushes return address
+	write64(mem, sp, 0)  // exit sentinel (ret to 0 → process exit)
 
 	// Set brk after the image
 	brkAddr := (mod.BaseAddr + mod.ImageSize + mmu.PageSize - 1) & mmu.PageMask
@@ -121,11 +122,12 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	defer pf.Close()
 
 	mod := &PEModule{
-		Name:       strings.ToLower(filepath.Base(path)),
-		Path:       path,
-		Exports:    make(map[string]uint64),
-		ExportOrds: make(map[uint16]uint64),
-		Forwards:   make(map[string]string),
+		Name:        strings.ToLower(filepath.Base(path)),
+		Path:        path,
+		Exports:     make(map[string]uint64),
+		ExportOrds:  make(map[uint16]uint64),
+		Forwards:    make(map[string]string),
+		ForwardOrds: make(map[uint16]string),
 	}
 
 	var imageBase, sizeOfImage, entryRVA uint64
@@ -216,6 +218,12 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	io.ReadFull(f, headerData)
 	mem.WriteBytes(base, headerData)
 
+	// For DLLs, add execute permission to the PE header pages (DEP-off).
+	if mod.IsDLL && len(headerData) > 0 {
+		hdrSize := (uint64(len(headerData)) + mmu.PageSize - 1) & mmu.PageMask
+		mem.Mprotect(base, hdrSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	}
+
 	// Map each section
 	for _, sec := range pf.Sections {
 		rva := uint64(sec.VirtualAddress)
@@ -240,6 +248,11 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 		}
 		if perms == 0 {
 			perms = mmu.PermRead // default
+		}
+		// Wine DLLs expect DEP disabled - add execute to all sections
+		// to allow dynamic thunks and function pointer tables.
+		if mod.IsDLL {
+			perms |= mmu.PermExecute
 		}
 
 		// Read raw data
@@ -396,6 +409,8 @@ func parseExports(pf *pe.File, f *os.File, mod *PEModule) {
 
 	exportEnd := exportDirRVA + exportDirSize
 
+	// Build a set of ordinal indices that have names (from the name table)
+	namedOrdIdx := make(map[uint16]bool, numNames)
 	for i := uint32(0); i < numNames; i++ {
 		nameOff := nameTable[i] - secRVA
 		if int(nameOff) >= len(secData) {
@@ -403,6 +418,7 @@ func parseExports(pf *pe.File, f *os.File, mod *PEModule) {
 		}
 		name := readCString(secData, nameOff)
 		ordIdx := ordTable[i]
+		namedOrdIdx[ordIdx] = true
 		if uint32(ordIdx) >= numFuncs {
 			continue
 		}
@@ -414,10 +430,32 @@ func parseExports(pf *pe.File, f *os.File, mod *PEModule) {
 			if int(fwdOff) < len(secData) {
 				fwdStr := readCString(secData, fwdOff)
 				mod.Forwards[name] = fwdStr
+				mod.ForwardOrds[uint16(uint32(ordIdx)+ordBase)] = fwdStr
 			}
 		} else {
 			mod.Exports[name] = mod.BaseAddr + uint64(funcAddr)
 			mod.ExportOrds[uint16(uint32(ordIdx)+ordBase)] = mod.BaseAddr + uint64(funcAddr)
+		}
+	}
+
+	// Also iterate ordinal-only exports (no name in name table)
+	for ordIdx := uint32(0); ordIdx < numFuncs; ordIdx++ {
+		if namedOrdIdx[uint16(ordIdx)] {
+			continue // already processed via name table
+		}
+		funcAddr := funcTable[ordIdx]
+		if funcAddr == 0 {
+			continue
+		}
+		ord := uint16(ordIdx + ordBase)
+		if funcAddr >= exportDirRVA && funcAddr < exportEnd {
+			fwdOff := funcAddr - secRVA
+			if int(fwdOff) < len(secData) {
+				fwdStr := readCString(secData, fwdOff)
+				mod.ForwardOrds[ord] = fwdStr
+			}
+		} else {
+			mod.ExportOrds[ord] = mod.BaseAddr + uint64(funcAddr)
 		}
 	}
 }
@@ -524,6 +562,8 @@ func parseImports(pf *pe.File, f *os.File, mod *PEModule) {
 
 // ResolveImports patches IAT slots using the given loaded modules.
 func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) error {
+	resolved := 0
+	unresolved := 0
 	for _, imp := range mod.Imports {
 		dllKey := strings.ToLower(imp.DLLName)
 		target, ok := modules[dllKey]
@@ -533,6 +573,7 @@ func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) e
 			target, ok = modules[dllKey]
 		}
 		if !ok {
+			fmt.Fprintf(os.Stderr, "[resolve] DLL NOT FOUND: %s (for %s)\n", imp.DLLName, mod.Name)
 			continue // unresolved - leave stub (will trap if called)
 		}
 
@@ -547,6 +588,11 @@ func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) e
 			}
 		} else {
 			addr = target.ExportOrds[imp.Ordinal]
+			if addr == 0 {
+				if fwd, ok := target.ForwardOrds[imp.Ordinal]; ok {
+					addr = resolveForward(fwd, modules)
+				}
+			}
 		}
 
 		if addr != 0 {
@@ -555,13 +601,36 @@ func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) e
 			} else {
 				mem.Write32Raw(imp.IATSlot, uint32(addr))
 			}
+			resolved++
+		} else {
+			fmt.Fprintf(os.Stderr, "[resolve] UNRESOLVED: %s!%s (ord=%d) for %s IAT=0x%x\n",
+				imp.DLLName, imp.FuncName, imp.Ordinal, mod.Name, imp.IATSlot)
+			// Write a sentinel address outside crash-recovery range (> 0x10000)
+			// to prevent silent recovery; will cause a clear "unmapped" fault.
+			const unresolvedSentinel = 0xDEAD_DEAD_0001_0000
+			if mod.Is64 {
+				mem.Write64Raw(imp.IATSlot, unresolvedSentinel)
+			} else {
+				mem.Write32Raw(imp.IATSlot, 0xDEAD0000)
+			}
+			unresolved++
 		}
 	}
+	fmt.Fprintf(os.Stderr, "[resolve] %s: %d imports, %d resolved, %d unresolved, exports=%d\n",
+		mod.Name, len(mod.Imports), resolved, unresolved, len(modules))
 	return nil
 }
 
 // resolveForward handles forwarded exports like "ntdll.RtlAllocateHeap".
+// Supports recursive forwarding chains and ordinal-based forwards (e.g., "shlwapi.#24").
 func resolveForward(fwd string, modules map[string]*PEModule) uint64 {
+	return resolveForwardDepth(fwd, modules, 0)
+}
+
+func resolveForwardDepth(fwd string, modules map[string]*PEModule, depth int) uint64 {
+	if depth > 8 {
+		return 0 // prevent infinite loops
+	}
 	parts := strings.SplitN(fwd, ".", 2)
 	if len(parts) != 2 {
 		return 0
@@ -574,7 +643,32 @@ func resolveForward(fwd string, modules map[string]*PEModule) uint64 {
 	if !ok {
 		return 0
 	}
-	return target.Exports[parts[1]]
+	funcName := parts[1]
+
+	// Handle ordinal-based forwards like "#24"
+	if len(funcName) > 0 && funcName[0] == '#' {
+		var ord uint16
+		for _, c := range funcName[1:] {
+			ord = ord*10 + uint16(c-'0')
+		}
+		if addr, ok := target.ExportOrds[ord]; ok {
+			return addr
+		}
+		if chainFwd, ok := target.ForwardOrds[ord]; ok {
+			return resolveForwardDepth(chainFwd, modules, depth+1)
+		}
+		return 0
+	}
+
+	// Named export
+	if addr, ok := target.Exports[funcName]; ok {
+		return addr
+	}
+	// Check if the target itself forwards this name
+	if chainFwd, ok := target.Forwards[funcName]; ok {
+		return resolveForwardDepth(chainFwd, modules, depth+1)
+	}
+	return 0
 }
 
 // parseTLSDirectory reads the IMAGE_TLS_DIRECTORY and allocates TLS storage.

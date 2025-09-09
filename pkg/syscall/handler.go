@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"syscall"
@@ -218,9 +219,9 @@ func (h *Handler) Handle(c arch.CPU) {
 	case SysMprotect:
 		h.sysMprotect(c, a0, a1, a2)
 	case SysMremap:
-		c.SetSyscallReturn(negErrno(ENOMEM))
+		h.sysMremap(c, a0, a1, a2, a3, a4)
 	case SysMadvise:
-		c.SetSyscallReturn(0)
+		h.sysMadvise(c, a0, a1, a2)
 	case SysMsync, SysMlock, SysMunlock:
 		c.SetSyscallReturn(0)
 
@@ -333,9 +334,11 @@ func (h *Handler) Handle(c arch.CPU) {
 		h.sysSigaltstack(c, a0, a1)
 	case SysRtSigreturn:
 		c.SetSyscallReturn(0) // TODO: restore saved signal frame
-	case SysKill, SysTkill, SysTgkill:
-		// For self-signals, just record as pending
+	case SysKill, SysTkill:
 		h.Signals.Raise(int(a1))
+		c.SetSyscallReturn(0)
+	case SysTgkill:
+		h.Signals.Raise(int(a2))
 		c.SetSyscallReturn(0)
 
 	// --- Time ---
@@ -554,7 +557,10 @@ func (h *Handler) readBytes(addr, n uint64) []byte {
 	return data
 }
 
-func (h *Handler) readGuestString(addr uint64) string {
+func (h *Handler) readGuestString(addr uint64) (string, error) {
+	if addr == 0 {
+		return "", syscall.EFAULT
+	}
 	var buf []byte
 	for {
 		b, err := h.Mem.Read8(addr)
@@ -564,13 +570,21 @@ func (h *Handler) readGuestString(addr uint64) string {
 		buf = append(buf, b)
 		addr++
 	}
-	return string(buf)
+	return string(buf), nil
 }
 
 // --- Syscall implementations ---
 
 func (h *Handler) sysOpenat(c arch.CPU, dirfd, pathAddr, flags, mode uint64) {
-	path := h.readGuestString(pathAddr)
+	path, err := h.readGuestString(pathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	if path == "" {
+		c.SetSyscallReturn(negErrno(ENOENT))
+		return
+	}
 	fd, err := h.FS.OpenAt(int(int32(dirfd)), path, int(flags), uint32(mode))
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
@@ -590,7 +604,23 @@ func (h *Handler) sysMprotect(c arch.CPU, addr, length, prot uint64) {
 	if prot&0x4 != 0 {
 		perms |= mmu.PermExecute
 	}
-	h.Mem.Mprotect(addr, length, perms)
+
+	length = (length + mmu.PageSize - 1) & mmu.PageMask
+	addr = addr & mmu.PageMask
+
+	// Verify all pages are already mapped
+	for pg := addr; pg < addr+length; pg += mmu.PageSize {
+		if !h.Mem.IsMapped(pg) {
+			c.SetSyscallReturn(negErrno(ENOMEM))
+			return
+		}
+	}
+
+	// Change permissions
+	for pg := addr; pg < addr+length; pg += mmu.PageSize {
+		h.Mem.MapPage(pg, perms)
+	}
+
 	c.SetSyscallReturn(0)
 }
 
@@ -620,7 +650,15 @@ func (h *Handler) sysFstat(c arch.CPU, fd, statAddr uint64) {
 }
 
 func (h *Handler) sysFstatat(c arch.CPU, dirfd, pathAddr, statAddr uint64) {
-	path := h.readGuestString(pathAddr)
+	path, err := h.readGuestString(pathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	if path == "" {
+		c.SetSyscallReturn(negErrno(ENOENT))
+		return
+	}
 	node, err := h.FS.StatPath(int(int32(dirfd)), path)
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
@@ -631,7 +669,15 @@ func (h *Handler) sysFstatat(c arch.CPU, dirfd, pathAddr, statAddr uint64) {
 }
 
 func (h *Handler) sysStatx(c arch.CPU, dirfd, pathAddr, flags, mask, statxAddr uint64) {
-	path := h.readGuestString(pathAddr)
+	path, err := h.readGuestString(pathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	if path == "" && flags&0x1000 == 0 { // AT_EMPTY_PATH = 0x1000
+		c.SetSyscallReturn(negErrno(ENOENT))
+		return
+	}
 	node, err := h.FS.StatPath(int(int32(dirfd)), path)
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
@@ -758,7 +804,11 @@ func (h *Handler) sysGetdents64(c arch.CPU, fd, buf, count uint64) {
 }
 
 func (h *Handler) sysReadlinkat(c arch.CPU, dirfd, pathAddr, buf, bufsiz uint64) {
-	path := h.readGuestString(pathAddr)
+	path, err := h.readGuestString(pathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
 	target, err := h.FS.Readlinkat(int(int32(dirfd)), path)
 	if err != nil {
 		c.SetSyscallReturn(negErrno(EINVAL))
@@ -773,8 +823,12 @@ func (h *Handler) sysReadlinkat(c arch.CPU, dirfd, pathAddr, buf, bufsiz uint64)
 }
 
 func (h *Handler) sysFaccessat(c arch.CPU, dirfd, pathAddr uint64) {
-	path := h.readGuestString(pathAddr)
-	_, err := h.FS.StatPath(int(int32(dirfd)), path)
+	path, err := h.readGuestString(pathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	_, err = h.FS.StatPath(int(int32(dirfd)), path)
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
@@ -790,20 +844,32 @@ func (h *Handler) sysGetcwd(c arch.CPU, buf, size uint64) {
 		return
 	}
 	h.Mem.WriteBytes(buf, data)
-	c.SetSyscallReturn(buf)
+	c.SetSyscallReturn(uint64(len(data)))
 }
 
 func (h *Handler) sysMkdirat(c arch.CPU, dirfd, pathAddr, mode uint64) {
-	path := h.readGuestString(pathAddr)
+	path, err := h.readGuestString(pathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
 	if path == "" {
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
 	}
-	// Simple: resolve and create
-	if path[0] != '/' {
-		path = h.FS.Getcwd() + "/" + path
+	absPath := h.FS.ResolvePath(int(int32(dirfd)), path)
+	// Check if already exists
+	if _, err := h.FS.Resolve(absPath); err == nil {
+		c.SetSyscallReturn(negErrno(EEXIST))
+		return
 	}
-	h.FS.MkdirAll(path)
+	// Check if parent exists
+	dir, _ := vfs.SplitPath(absPath)
+	if _, err := h.FS.Resolve(dir); err != nil {
+		c.SetSyscallReturn(negErrno(ENOENT))
+		return
+	}
+	h.FS.MkdirAll(absPath)
 	c.SetSyscallReturn(0)
 }
 
@@ -918,7 +984,7 @@ func (h *Handler) sysSysinfo(c arch.CPU, buf uint64) {
 	binary.LittleEndian.PutUint64(data[64:], 0)                        // totalswap
 	binary.LittleEndian.PutUint64(data[72:], 0)                        // freeswap
 	binary.LittleEndian.PutUint16(data[80:], 1)                        // procs
-	binary.LittleEndian.PutUint32(data[108:], 1)                       // mem_unit
+	binary.LittleEndian.PutUint32(data[104:], 1)                       // mem_unit
 	h.Mem.WriteBytes(buf, data)
 	c.SetSyscallReturn(0)
 }
@@ -998,8 +1064,12 @@ func (h *Handler) sysSigaltstack(c arch.CPU, ssAddr, oldssAddr uint64) {
 // --- Filesystem operations ---
 
 func (h *Handler) sysUnlinkat(c arch.CPU, dirfd, pathAddr, flags uint64) {
-	path := h.readGuestString(pathAddr)
-	err := h.FS.Unlinkat(int(int32(dirfd)), path, int(flags))
+	path, err := h.readGuestString(pathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	err = h.FS.Unlinkat(int(int32(dirfd)), path, int(flags))
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
@@ -1008,8 +1078,12 @@ func (h *Handler) sysUnlinkat(c arch.CPU, dirfd, pathAddr, flags uint64) {
 }
 
 func (h *Handler) sysChdir(c arch.CPU, pathAddr uint64) {
-	path := h.readGuestString(pathAddr)
-	err := h.FS.Chdir(path)
+	path, err := h.readGuestString(pathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	err = h.FS.Chdir(path)
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
@@ -1047,9 +1121,17 @@ func (h *Handler) sysFallocate(c arch.CPU, fd, mode, offset, length uint64) {
 }
 
 func (h *Handler) sysSymlinkat(c arch.CPU, targetAddr, dirfd, linkpathAddr uint64) {
-	target := h.readGuestString(targetAddr)
-	linkpath := h.readGuestString(linkpathAddr)
-	err := h.FS.Symlinkat(target, int(int32(dirfd)), linkpath)
+	target, err := h.readGuestString(targetAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	linkpath, err := h.readGuestString(linkpathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	err = h.FS.Symlinkat(target, int(int32(dirfd)), linkpath)
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
@@ -1058,9 +1140,17 @@ func (h *Handler) sysSymlinkat(c arch.CPU, targetAddr, dirfd, linkpathAddr uint6
 }
 
 func (h *Handler) sysRenameat(c arch.CPU, olddirfd, oldpathAddr, newdirfd, newpathAddr uint64) {
-	oldpath := h.readGuestString(oldpathAddr)
-	newpath := h.readGuestString(newpathAddr)
-	err := h.FS.Renameat(int(int32(olddirfd)), oldpath, int(int32(newdirfd)), newpath)
+	oldpath, err := h.readGuestString(oldpathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	newpath, err := h.readGuestString(newpathAddr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	err = h.FS.Renameat(int(int32(olddirfd)), oldpath, int(int32(newdirfd)), newpath)
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
@@ -1193,7 +1283,15 @@ func (h *Handler) sysFutex(c arch.CPU, uaddr, op, val, timeout uint64) {
 	}
 }
 
-func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, tls, childTid uint64) {
+func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint64) {
+	tls := a3
+	childTid := a4
+	if c.GetArch() == arch.ArchAMD64 {
+		// x86_64: flags, stack, parent_tid, child_tid, tls
+		childTid = a3
+		tls = a4
+	}
+
 	// If this is a thread creation (CLONE_VM|CLONE_FS|CLONE_THREAD)
 	if h.ThreadM != nil && flags&0x100 != 0 { // CLONE_VM
 		childPC := c.SyscallReturnPC()
@@ -1232,7 +1330,7 @@ func (h *Handler) sysWrite(c arch.CPU, fdNum, bufAddr, count uint64) {
 	}
 	n, err := h.FS.Write(int(fdNum), data)
 	if err != nil {
-		c.SetSyscallReturn(negErrno(EBADF))
+		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
 	}
 	c.SetSyscallReturn(uint64(n))
@@ -1256,6 +1354,9 @@ func (h *Handler) sysWritev(c arch.CPU, fdNum, iovAddr, iovcnt uint64) {
 			c.SetSyscallReturn(negErrno(EFAULT))
 			return
 		}
+		if fdNum == 2 {
+			fmt.Fprintf(os.Stderr, "[stderr] %s", string(data))
+		}
 		n, err := h.FS.Write(int(fdNum), data)
 		if err != nil {
 			c.SetSyscallReturn(negErrno(EBADF))
@@ -1269,12 +1370,15 @@ func (h *Handler) sysWritev(c arch.CPU, fdNum, iovAddr, iovcnt uint64) {
 func (h *Handler) sysRead(c arch.CPU, fdNum, bufAddr, count uint64) {
 	buf := make([]byte, count)
 	n, err := h.FS.Read(int(fdNum), buf)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		c.SetSyscallReturn(negErrno(EBADF))
 		return
 	}
 	if n > 0 {
-		h.Mem.WriteBytes(bufAddr, buf[:n])
+		if err := h.Mem.WriteBytes(bufAddr, buf[:n]); err != nil {
+			c.SetSyscallReturn(negErrno(EFAULT))
+			return
+		}
 	}
 	c.SetSyscallReturn(uint64(n))
 }
@@ -1282,12 +1386,15 @@ func (h *Handler) sysRead(c arch.CPU, fdNum, bufAddr, count uint64) {
 func (h *Handler) sysPread64(c arch.CPU, fdNum, bufAddr, count, offset uint64) {
 	buf := make([]byte, count)
 	n, err := h.FS.Pread(int(fdNum), buf, int64(offset))
-	if err != nil {
+	if err != nil && err != io.EOF {
 		c.SetSyscallReturn(negErrno(EBADF))
 		return
 	}
 	if n > 0 {
-		h.Mem.WriteBytes(bufAddr, buf[:n])
+		if err := h.Mem.WriteBytes(bufAddr, buf[:n]); err != nil {
+			c.SetSyscallReturn(negErrno(EFAULT))
+			return
+		}
 	}
 	c.SetSyscallReturn(uint64(n))
 }
@@ -1300,7 +1407,7 @@ func (h *Handler) sysPwrite64(c arch.CPU, fdNum, bufAddr, count, offset uint64) 
 	}
 	n, err := h.FS.Pwrite(int(fdNum), data, int64(offset))
 	if err != nil {
-		c.SetSyscallReturn(negErrno(EBADF))
+		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
 	}
 	c.SetSyscallReturn(uint64(n))
@@ -1341,15 +1448,21 @@ func (h *Handler) sysReadv(c arch.CPU, fdNum, iovAddr, iovcnt uint64) {
 		}
 		buf := make([]byte, length)
 		n, err := h.FS.Read(int(fdNum), buf)
-		if err != nil {
+		if err != nil && err != io.EOF {
+			if total > 0 {
+				break
+			}
 			c.SetSyscallReturn(negErrno(EBADF))
 			return
 		}
 		if n > 0 {
-			h.Mem.WriteBytes(base, buf[:n])
+			if err := h.Mem.WriteBytes(base, buf[:n]); err != nil {
+				c.SetSyscallReturn(negErrno(EFAULT))
+				return
+			}
 		}
 		total += uint64(n)
-		if uint64(n) < length {
+		if n < int(length) || err == io.EOF {
 			break
 		}
 	}
@@ -2019,10 +2132,20 @@ func (h *Handler) sysEpollCtl(c arch.CPU, epfd, op, fd, eventPtr uint64) {
 	var events uint32
 	var data uint64
 	if op != uint64(vfs.EPOLL_CTL_DEL) && eventPtr != 0 {
-		evBuf := h.readBytes(eventPtr, 12)
-		if len(evBuf) >= 12 {
-			events = binary.LittleEndian.Uint32(evBuf[0:])
-			data = binary.LittleEndian.Uint64(evBuf[4:])
+		if c.GetArch() == arch.ArchAMD64 {
+			// On x86_64, struct epoll_event is packed (12 bytes)
+			evBuf := h.readBytes(eventPtr, 12)
+			if len(evBuf) >= 12 {
+				events = binary.LittleEndian.Uint32(evBuf[0:])
+				data = binary.LittleEndian.Uint64(evBuf[4:])
+			}
+		} else {
+			// On others (like riscv64), it's 16 bytes
+			evBuf := h.readBytes(eventPtr, 16)
+			if len(evBuf) >= 16 {
+				events = binary.LittleEndian.Uint32(evBuf[0:])
+				data = binary.LittleEndian.Uint64(evBuf[8:])
+			}
 		}
 	}
 	if err := ep.Ctl(int(op), int(fd), events, data); err != nil {
@@ -2066,10 +2189,17 @@ func (h *Handler) sysEpollPwait(c arch.CPU, epfd, eventsPtr, maxevents, timeout 
 				events |= vfs.EPOLLOUT
 			}
 			if events != 0 {
-				var evBuf [12]byte
-				binary.LittleEndian.PutUint32(evBuf[0:], events)
-				binary.LittleEndian.PutUint64(evBuf[4:], e.Data)
-				h.Mem.WriteBytes(eventsPtr+nReady*12, evBuf[:])
+				if c.GetArch() == arch.ArchAMD64 {
+					var evBuf [12]byte
+					binary.LittleEndian.PutUint32(evBuf[0:], events)
+					binary.LittleEndian.PutUint64(evBuf[4:], e.Data)
+					h.Mem.WriteBytes(eventsPtr+nReady*12, evBuf[:])
+				} else {
+					var evBuf [16]byte
+					binary.LittleEndian.PutUint32(evBuf[0:], events)
+					binary.LittleEndian.PutUint64(evBuf[8:], e.Data)
+					h.Mem.WriteBytes(eventsPtr+nReady*16, evBuf[:])
+				}
 				nReady++
 			}
 		}
@@ -2144,13 +2274,14 @@ func (h *Handler) sysEpollPwait(c arch.CPU, epfd, eventsPtr, maxevents, timeout 
 			events |= vfs.EPOLLRDHUP
 		}
 
-		// Write epoll_event: events(4) + data(8) = 12 bytes
-		var evBuf [12]byte
+		// struct epoll_event: events(4) + padding(4) + data(8) = 16 bytes
+		var evBuf [16]byte
 		binary.LittleEndian.PutUint32(evBuf[0:], events)
-		binary.LittleEndian.PutUint64(evBuf[4:], polls[i].entry.Data)
-		h.Mem.WriteBytes(eventsPtr+nReady*12, evBuf[:])
+		binary.LittleEndian.PutUint64(evBuf[8:], polls[i].entry.Data)
+		h.Mem.WriteBytes(eventsPtr+nReady*16, evBuf[:])
 		nReady++
 	}
+
 	c.SetSyscallReturn(nReady)
 }
 
@@ -2239,7 +2370,11 @@ func (h *Handler) sysTimerfdGettime(c arch.CPU, fdNum, currValue uint64) {
 // ===================================================================
 
 func (h *Handler) sysMemfdCreate(c arch.CPU, namePtr, flags uint64) {
-	name := h.readGuestString(namePtr)
+	name, err := h.readGuestString(namePtr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
 	if name == "" {
 		name = "memfd"
 	}
@@ -2268,6 +2403,11 @@ func (h *Handler) sysMmap(c arch.CPU) {
 	fd := args[4]
 	offset := args[5]
 
+	if length == 0 {
+		c.SetSyscallReturn(negErrno(EINVAL))
+		return
+	}
+
 	var perms uint8
 	if prot&0x1 != 0 {
 		perms |= mmu.PermRead
@@ -2283,10 +2423,15 @@ func (h *Handler) sysMmap(c arch.CPU) {
 	mapAnon := flags&0x20 != 0   // MAP_ANONYMOUS
 	mapFixed := flags&0x10 != 0   // MAP_FIXED
 
+	if mapFixed && addr&mmu.PageMask != addr {
+		c.SetSyscallReturn(negErrno(EINVAL))
+		return
+	}
+
 	// If MAP_ANONYMOUS or fd == -1, use normal anonymous mmap
 	if mapAnon || fd == ^uint64(0) || int64(fd) == -1 {
 		if mapFixed && addr != 0 {
-			h.Mem.MapRange(addr, length, perms)
+			h.Mem.MapRangeZero(addr, length, perms)
 			c.SetSyscallReturn(addr)
 		} else {
 			result := h.Mem.Mmap(addr, length, perms)
@@ -2300,22 +2445,46 @@ func (h *Handler) sysMmap(c arch.CPU) {
 	if hostFile == nil {
 		// VFS-only file - allocate anonymous pages and copy data
 		if mapFixed && addr != 0 {
-			h.Mem.MapRange(addr, length, perms)
+			h.Mem.MapRangeZero(addr, length, perms)
 		} else {
 			addr = h.Mem.Mmap(addr, length, perms)
 		}
-		// Read file data into the mapped region
+		// Read file data into the mapped region without advancing offset
 		buf := make([]byte, length)
-		n, _ := h.FS.Read(int(fd), buf)
+		n, _ := h.FS.Pread(int(fd), buf, int64(offset))
 		if n > 0 {
-			h.Mem.WriteBytes(addr, buf[:n])
+			h.Mem.WriteBytesRaw(addr, buf[:n])
 		}
 		c.SetSyscallReturn(addr)
 		return
 	}
 
-	// Real host file (memfd) - mmap for zero-copy
+	// Real host file (memfd or host passthrough)
 	_ = offset
+	
+	if !mapShared {
+		// MAP_PRIVATE: just allocate memory and read the file. This avoids SIGBUS
+		// if the requested length exceeds the file size (common in ELF loaders).
+		if mapFixed && addr != 0 {
+			h.Mem.MapRangeZero(addr, length, perms)
+		} else {
+			addr = h.Mem.Mmap(addr, length, perms)
+			// Mmap for anonymous already creates fresh (zeroed) pages if they are new,
+			// but just to be absolutely sure for file-backed we could zero it.
+			// Actually, Mmap on an unmapped region creates zeroed pages, so it's fine.
+		}
+		// Read data at offset
+		buf := make([]byte, length)
+		n, _ := hostFile.ReadAt(buf, int64(offset))
+		if n > 0 {
+			// Bypass permission checks because the requested perms might be PROT_READ
+			h.Mem.WriteBytesRaw(addr, buf[:n])
+		}
+		c.SetSyscallReturn(addr)
+		return
+	}
+
+	// MAP_SHARED (like Wayland shm or memfd): mmap for zero-copy
 	hostFDnum := int(hostFile.Fd())
 	mmapProt := 0
 	if prot&0x1 != 0 {
@@ -2326,8 +2495,19 @@ func (h *Handler) sysMmap(c arch.CPU) {
 	}
 
 	mmapFlags := syscall.MAP_SHARED
-	if !mapShared {
-		mmapFlags = syscall.MAP_PRIVATE
+
+	if addr != 0 && !mapFixed {
+		// Check if hint address is available
+		conflict := false
+		for pg := addr & mmu.PageMask; pg < addr+length; pg += mmu.PageSize {
+			if h.Mem.IsMapped(pg) {
+				conflict = true
+				break
+			}
+		}
+		if conflict {
+			addr = 0
+		}
 	}
 
 	hostSlice, err := syscall.Mmap(hostFDnum, int64(offset), int(length), mmapProt, mmapFlags)
@@ -2339,6 +2519,85 @@ func (h *Handler) sysMmap(c arch.CPU) {
 	// Alias the host mmap'd region into the guest MMU
 	guestAddr := h.Mem.MapHostSlice(addr, hostSlice, perms)
 	c.SetSyscallReturn(guestAddr)
+}
+
+func (h *Handler) sysMadvise(c arch.CPU, addr, length, advice uint64) {
+	// MADV_DONTNEED = 4
+	if advice == 4 {
+		h.Mem.MapRangeZero(addr, length, mmu.PermRead|mmu.PermWrite) // should keep current perms, but this is a stub
+	}
+	c.SetSyscallReturn(0)
+}
+
+func (h *Handler) sysMremap(c arch.CPU, oldAddr, oldLen, newLen, flags, newAddr uint64) {
+	// flags: 1 = MREMAP_MAYMOVE, 2 = MREMAP_FIXED, 3 = both
+	mayMove := flags&1 != 0
+	isFixed := flags&2 != 0
+
+	oldLen = (oldLen + mmu.PageSize - 1) & mmu.PageMask
+	newLen = (newLen + mmu.PageSize - 1) & mmu.PageMask
+
+	if newLen <= oldLen {
+		if oldLen > newLen {
+			h.Mem.Munmap(oldAddr+newLen, oldLen-newLen)
+		}
+		if isFixed {
+			// Move to newAddr
+			data, _ := h.Mem.ReadBytesRaw(oldAddr, int(newLen))
+			h.Mem.MapRangeZero(newAddr, newLen, mmu.PermRead|mmu.PermWrite|mmu.PermExecute) // simplified perms
+			h.Mem.WriteBytesRaw(newAddr, data)
+			if oldAddr != newAddr {
+				h.Mem.Munmap(oldAddr, oldLen)
+			}
+			c.SetSyscallReturn(newAddr)
+			return
+		}
+		c.SetSyscallReturn(oldAddr)
+		return
+	}
+
+	if isFixed {
+		// MREMAP_FIXED requires MREMAP_MAYMOVE
+		if !mayMove {
+			c.SetSyscallReturn(negErrno(EINVAL))
+			return
+		}
+		data, _ := h.Mem.ReadBytesRaw(oldAddr, int(oldLen))
+		h.Mem.MapRangeZero(newAddr, newLen, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+		h.Mem.WriteBytesRaw(newAddr, data)
+		if oldAddr != newAddr {
+			h.Mem.Munmap(oldAddr, oldLen)
+		}
+		c.SetSyscallReturn(newAddr)
+		return
+	}
+
+	// Try expanding in place if the following pages are unmapped
+	canExpand := true
+	for pg := oldAddr + oldLen; pg < oldAddr+newLen; pg += mmu.PageSize {
+		if h.Mem.IsMapped(pg) {
+			canExpand = false
+			break
+		}
+	}
+
+	if canExpand {
+		h.Mem.MapRangeZero(oldAddr+oldLen, newLen-oldLen, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+		c.SetSyscallReturn(oldAddr)
+		return
+	}
+
+	if !mayMove {
+		c.SetSyscallReturn(negErrno(ENOMEM))
+		return
+	}
+
+	// Move the allocation
+	targetAddr := h.Mem.Mmap(0, newLen, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	data, _ := h.Mem.ReadBytesRaw(oldAddr, int(oldLen))
+	h.Mem.WriteBytesRaw(targetAddr, data)
+	h.Mem.Munmap(oldAddr, oldLen)
+	c.SetSyscallReturn(targetAddr)
 }
 
 // x64SyscallToRV translates an x86_64 Linux syscall number to the RISC-V

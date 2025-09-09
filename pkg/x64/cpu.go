@@ -4,6 +4,7 @@ import (
 "fmt"
 "math"
 "math/bits"
+"os"
 
 "github.com/mirkobrombin/go-vm/pkg/arch"
 "github.com/mirkobrombin/go-vm/pkg/mmu"
@@ -116,25 +117,65 @@ return n
 // Run executes the fetch-decode-execute loop.
 func (c *CPU) Run() error {
 c.running = true
+var recoverCount int
 for c.running {
 	if err := c.step(); err != nil {
 		// Unmapped function call recovery: if RIP points to unmapped memory,
 		// simulate a function that returns 0 (pop retaddr, set RAX=0).
+		// Only recover if the return address itself is valid (mapped).
 		if c.RIP < 0x10000 || c.RIP > 0x7FFFFFFFFFFF {
 			retAddr, rerr := c.pop64()
-			if rerr == nil {
-				c.Regs[RAX] = 0
-				c.RIP = retAddr
-				continue
+			if rerr == nil && retAddr >= 0x10000 && retAddr <= 0x7FFFFFFFFFFF {
+				if _, verr := c.mem.Read8(retAddr); verr == nil {
+					recoverCount++
+					if recoverCount <= 20 {
+						fmt.Fprintf(os.Stderr, "[cpu-recover] #%d call to unmapped 0x%x, returning to 0x%x RBX=0x%x RSP=0x%x\n", recoverCount, c.RIP, retAddr, c.Regs[RBX], c.GetSP())
+						if recoverCount == 1 {
+							// Print full register state and stack
+							fmt.Fprintf(os.Stderr, "  RAX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
+								c.Regs[RAX], c.Regs[RCX], c.Regs[RDX], c.Regs[RSI], c.Regs[RDI])
+							fmt.Fprintf(os.Stderr, "  R8=0x%x R9=0x%x R10=0x%x R11=0x%x RBP=0x%x\n",
+								c.Regs[R8], c.Regs[R9], c.Regs[R10], c.Regs[R11], c.Regs[RBP])
+							// Print stack frames
+							sp := c.GetSP()
+							for i := 0; i < 16; i++ {
+								v, _ := c.mem.Read64(sp + uint64(i*8))
+								fmt.Fprintf(os.Stderr, "  [RSP+0x%02x] = 0x%x\n", i*8, v)
+							}
+						}
+					}
+					if recoverCount > 100 {
+						return fmt.Errorf("at RIP=0x%x: too many crash recoveries (%d), last return to 0x%x", c.RIP, recoverCount, retAddr)
+					}
+					c.Regs[RAX] = 0
+					c.RIP = retAddr
+					continue
+				}
 			}
 		}
 		// Also recover from any fetch segfault at unmapped addresses
 		if _, rerr := c.mem.Read8(c.RIP); rerr != nil {
 			retAddr, rerr2 := c.pop64()
-			if rerr2 == nil {
-				c.Regs[RAX] = 0
-				c.RIP = retAddr
-				continue
+			if rerr2 == nil && retAddr >= 0x10000 && retAddr <= 0x7FFFFFFFFFFF {
+				if _, verr := c.mem.Read8(retAddr); verr == nil {
+					recoverCount++
+					if recoverCount <= 20 {
+						// Read the 6 bytes before retAddr to show the call instruction
+						var callBytes [6]byte
+						for bi := 0; bi < 6; bi++ {
+							callBytes[bi], _ = c.mem.Read8(retAddr - 6 + uint64(bi))
+						}
+						fmt.Fprintf(os.Stderr, "[cpu-recover] #%d fetch fault at 0x%x, returning to 0x%x RBX=0x%x callsite=[%02x %02x %02x %02x %02x %02x]\n",
+							recoverCount, c.RIP, retAddr, c.Regs[RBX],
+							callBytes[0], callBytes[1], callBytes[2], callBytes[3], callBytes[4], callBytes[5])
+					}
+					if recoverCount > 100 {
+						return fmt.Errorf("at RIP=0x%x: too many crash recoveries (%d), last return to 0x%x", c.RIP, recoverCount, retAddr)
+					}
+					c.Regs[RAX] = 0
+					c.RIP = retAddr
+					continue
+				}
 			}
 		}
 		return fmt.Errorf("at RIP=0x%x: %w", c.RIP, err)
@@ -815,10 +856,14 @@ rel, err := c.fetch32()
 if err != nil {
 return err
 }
+target := uint64(int64(c.RIP) + int64(int32(rel)))
+if target == 0x120011 {
+	fmt.Fprintf(os.Stderr, "[DBG] call rel32 to 0x120011 from RIP=0x%x\n", c.RIP)
+}
 if err := c.push64(c.RIP); err != nil {
 return err
 }
-c.RIP = uint64(int64(c.RIP) + int64(int32(rel)))
+c.RIP = target
 return nil
 
 // --- JMP rel32 (0xE9) ---
@@ -2552,7 +2597,10 @@ if m.mod == 3 {
 // MFENCE (reg=6), LFENCE (reg=5), SFENCE (reg=7) - all no-ops
 return nil
 }
-// LDMXCSR / STMXCSR - ignore
+// LDMXCSR / STMXCSR - must consume displacement bytes even though we ignore the value
+if _, _, err := c.resolveRMAddr(m, pfx); err != nil {
+return err
+}
 return nil
 
 // --- PREFETCH (0x18) / PREFETCHW (0x0D) ---
@@ -4031,6 +4079,16 @@ val, err := c.readRM(m, pfx, 8)
 if err != nil {
 return err
 }
+if val == 0x120011 {
+	addr2, _, _ := c.resolveRMAddr(m, pfx)
+	raw, _ := c.mem.Read64(addr2)
+	fmt.Fprintf(os.Stderr, "[DBG] call to 0x120011 from RIP=0x%x addr=0x%x raw_read=0x%x\n",
+		c.RIP, addr2, raw)
+}
+if val == 0 {
+	fmt.Fprintf(os.Stderr, "[DBG] call to 0x0 from retAddr=0x%x RSP=0x%x RBX=0x%x RCX=0x%x\n",
+		c.RIP, c.Regs[RSP], c.Regs[RBX], c.Regs[RCX])
+}
 if err := c.push64(c.RIP); err != nil {
 return err
 }
@@ -4041,6 +4099,14 @@ case 4: // JMP r/m64
 val, err := c.readRM(m, pfx, 8)
 if err != nil {
 return err
+}
+if val == 0x120011 {
+	addr2, _, _ := c.resolveRMAddr(m, pfx)
+	fmt.Fprintf(os.Stderr, "[DBG] jmp to 0x120011 from RIP=0x%x addr=0x%x\n", c.RIP, addr2)
+}
+if val == 0 {
+	fmt.Fprintf(os.Stderr, "[DBG] jmp to 0x0 from retAddr=0x%x RSP=0x%x RBX=0x%x\n",
+		c.RIP, c.Regs[RSP], c.Regs[RBX])
 }
 c.RIP = val
 return nil

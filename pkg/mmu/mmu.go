@@ -152,6 +152,20 @@ func (m *MMU) MapRange(start, size uint64, perms uint8) {
 	}
 }
 
+// MapRangeZero maps contiguous pages covering [start, start+size) and zeroes them.
+func (m *MMU) MapRangeZero(start, size uint64, perms uint8) {
+	end := start + size
+	for addr := start & PageMask; addr < end; addr += PageSize {
+		m.MapPage(addr, perms)
+		pe := m.getPage(addr)
+		if pe != nil {
+			for i := range pe.Data {
+				pe.Data[i] = 0
+			}
+		}
+	}
+}
+
 // LookupRead is the public version of lookupPage, for use by the CPU
 // instruction fetch cache.
 func (m *MMU) LookupRead(vaddr uint64, requiredPerms uint8) (*PageEntry, uint64, error) {
@@ -337,6 +351,41 @@ func (m *MMU) WriteBytes(vaddr uint64, data []byte) error {
 	return nil
 }
 
+// ReadCString reads a null-terminated string from memory.
+func (m *MMU) ReadCString(vaddr uint64, maxLen int) string {
+	var res []byte
+	for i := 0; i < maxLen; i++ {
+		b, err := m.Read8(vaddr + uint64(i))
+		if err != nil || b == 0 {
+			break
+		}
+		res = append(res, b)
+	}
+	return string(res)
+}
+
+// ReadBytesRaw reads data from guest memory, bypassing permission checks.
+func (m *MMU) ReadBytesRaw(vaddr uint64, n int) ([]byte, error) {
+	buf := make([]byte, n)
+	pos := 0
+	for pos < n {
+		base := vaddr & PageMask
+		offset := vaddr & (PageSize - 1)
+		pe := m.getPage(base)
+		if pe == nil {
+			return nil, &Fault{Addr: vaddr, Type: FaultUnmapped, Perms: PermRead}
+		}
+		chunk := int(PageSize - offset)
+		if chunk > n-pos {
+			chunk = n - pos
+		}
+		copy(buf[pos:], pe.Data[offset:offset+uint64(chunk)])
+		pos += chunk
+		vaddr += uint64(chunk)
+	}
+	return buf, nil
+}
+
 // ReadBytes reads n bytes from guest memory.
 func (m *MMU) ReadBytes(vaddr uint64, n int) ([]byte, error) {
 	buf := make([]byte, n)
@@ -409,6 +458,31 @@ func (m *MMU) Brk(addr uint64) uint64 {
 		return m.brkAddr
 	}
 	oldEnd := m.brkAddr
+	if addr < oldEnd {
+		// Shrink heap
+		startUnmap := (addr + PageSize - 1) & PageMask
+		for pg := startUnmap; pg < oldEnd; pg += PageSize {
+			m.storePage(pg, nil)
+		}
+		m.brkAddr = addr
+		return addr
+	}
+	
+	if addr > oldEnd {
+		// Zero the partial page from oldEnd to min(addr, page boundary)
+		pe := m.getPage(oldEnd & PageMask)
+		if pe != nil {
+			pageOff := oldEnd & (PageSize - 1)
+			endOff := uint64(PageSize)
+			if (addr & PageMask) == (oldEnd & PageMask) {
+				endOff = addr & (PageSize - 1)
+			}
+			for i := pageOff; i < endOff; i++ {
+				pe.Data[i] = 0
+			}
+		}
+	}
+
 	for pg := oldEnd & PageMask; pg < addr; pg += PageSize {
 		if m.getPage(pg) == nil {
 			pe := &PageEntry{
@@ -427,11 +501,27 @@ func (m *MMU) Mmap(addr, length uint64, perms uint8) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	length = (length + PageSize - 1) & PageMask
+	
+	// If a hint address is provided, check if it's available.
+	if addr != 0 {
+		addr = addr & PageMask // MUST be page-aligned
+		conflict := false
+		for pg := addr; pg < addr+length; pg += PageSize {
+			if m.getPage(pg) != nil {
+				conflict = true
+				break
+			}
+		}
+		if conflict {
+			addr = 0 // Hint failed, fallback to finding a free region
+		}
+	}
+
 	if addr == 0 {
 		addr = 0x400000000000
 		for {
 			conflict := false
-			for pg := addr & PageMask; pg < addr+length; pg += PageSize {
+			for pg := addr; pg < addr+length; pg += PageSize {
 				if m.getPage(pg) != nil {
 					conflict = true
 					break
@@ -444,7 +534,7 @@ func (m *MMU) Mmap(addr, length uint64, perms uint8) uint64 {
 			addr = (addr + PageSize - 1) & PageMask
 		}
 	}
-	for pg := addr & PageMask; pg < addr+length; pg += PageSize {
+	for pg := addr; pg < addr+length; pg += PageSize {
 		pe := &PageEntry{
 			Data:  make([]byte, PageSize),
 			Perms: perms,
@@ -581,24 +671,29 @@ func (m *MMU) MapHostSlice(guestAddr uint64, hostSlice []byte, perms uint8) uint
 			sliceLen = remaining
 		}
 
-		if pageOff == 0 && sliceLen == PageSize {
-			pe := &PageEntry{
-				Data:  hostSlice[offset : offset+PageSize],
+		pe := m.getPage(pgAddr)
+		if pe == nil {
+			// Create a new page entry. Data initially points to a fresh page,
+			// but we'll override parts of it with the hostSlice.
+			pe = &PageEntry{
+				Data:  make([]byte, PageSize),
 				Perms: perms,
 			}
 			m.storePage(pgAddr, pe)
-		} else {
-			pe := m.getPage(pgAddr)
-			if pe == nil {
-				pe = &PageEntry{
-					Data:  make([]byte, PageSize),
-					Perms: perms,
-				}
-				m.storePage(pgAddr, pe)
-			}
-			copy(pe.Data[pageOff:], hostSlice[offset:offset+sliceLen])
-			pe.Perms = perms
 		}
+
+		// To maintain zero-copy, we must alias. If we are covering the full page,
+		// we can just swap the Data slice. If it's a partial page, we have a problem
+		// with the current PageEntry.Data design which assumes a 4KB slice.
+		// For Wayland/shm, it's almost always page-aligned and full-page.
+		if pageOff == 0 && sliceLen == PageSize {
+			pe.Data = hostSlice[offset : offset+PageSize]
+		} else {
+			// Partial page: we copy for now to maintain the 4KB invariant,
+			// but this is sub-optimal.
+			copy(pe.Data[pageOff:], hostSlice[offset:offset+sliceLen])
+		}
+		pe.Perms = perms
 
 		offset += sliceLen
 	}

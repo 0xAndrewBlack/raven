@@ -21,7 +21,10 @@ type TrapContext struct {
 	Handles *HandleTable
 	Reg     *RegistryHive
 	State   *ProcessState
+	Disp    *Dispatcher
 	Trace   bool
+	flsSlots   map[uint32]uint64
+	flsNextIdx uint32
 	// ReturnOverridden is set by handlers that manage RAX directly,
 	// preventing the dispatcher from overwriting it with the handler's return.
 	ReturnOverridden bool
@@ -124,28 +127,36 @@ type RegisterWriter interface {
 
 // Dispatcher routes vmcall traps to the appropriate handler based on syscall ID.
 type Dispatcher struct {
-	handlers map[uint32]TrapHandler
-	names    map[uint32]string // for trace logging
-	ntdll    *SynthPE
-	win32u   *SynthPE
-	ctx      *TrapContext
+	handlers      map[uint32]TrapHandler
+	names         map[uint32]string // for trace logging
+	ntdll         *SynthPE
+	win32u        *SynthPE
+	ctx           *TrapContext
+	moduleExports map[uint64]map[string]uint64 // baseAddr → name → addr
+	moduleOrdExports map[uint64]map[uint16]uint64 // baseAddr → ordinal → addr
+	sysRoot       string // path to Windows system DLL directory
+	nlsCache      map[uint32][]byte // cached NLS file data by code page
 }
 
 // NewDispatcher creates a trap dispatcher with all registered handlers.
 func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *RegistryHive, state *ProcessState, ntdll, win32u *SynthPE) *Dispatcher {
 	d := &Dispatcher{
-		handlers: make(map[uint32]TrapHandler),
-		names:    make(map[uint32]string),
-		ntdll:    ntdll,
-		win32u:   win32u,
+		handlers:         make(map[uint32]TrapHandler),
+		names:            make(map[uint32]string),
+		ntdll:            ntdll,
+		win32u:           win32u,
+		moduleExports:    make(map[uint64]map[string]uint64),
+		moduleOrdExports: make(map[uint64]map[uint16]uint64),
+		nlsCache:         make(map[uint32][]byte),
 		ctx: &TrapContext{
-			Mem:     mem,
-			FS:      fs,
-			Handles: handles,
-			Reg:     reg,
-			State:   state,
+			Mem:        mem,
+			FS:         fs,
+			Handles:    handles,
+			Reg:        reg,
+			State:      state,
 		},
 	}
+	d.ctx.Disp = d
 
 	d.registerNtapiHandlers()
 	d.registerWin32kHandlers()
@@ -162,6 +173,75 @@ func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *Registr
 // SetTrace enables/disables trace logging.
 func (d *Dispatcher) SetTrace(trace bool) {
 	d.ctx.Trace = trace
+}
+
+// SetSysRoot sets the path to the Windows system DLL directory for NLS file loading.
+func (d *Dispatcher) SetSysRoot(path string) {
+	d.sysRoot = path
+}
+
+// loadNlsFile loads an NLS code page file from the sysroot.
+func (d *Dispatcher) loadNlsFile(codePage uint32) ([]byte, error) {
+	if data, ok := d.nlsCache[codePage]; ok {
+		return data, nil
+	}
+	if d.sysRoot == "" {
+		return nil, fmt.Errorf("no sysroot configured")
+	}
+	filename := fmt.Sprintf("c_%d.nls", codePage)
+	path := d.sysRoot + "/" + filename
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	d.nlsCache[codePage] = data
+	return data, nil
+}
+
+// RegisterModuleExports registers a loaded module's exports for LdrGetProcedureAddress.
+func (d *Dispatcher) RegisterModuleExports(baseAddr uint64, exports map[string]uint64, ordExports map[uint16]uint64) {
+	if len(exports) > 0 {
+		d.moduleExports[baseAddr] = exports
+	}
+	if len(ordExports) > 0 {
+		d.moduleOrdExports[baseAddr] = ordExports
+	}
+}
+
+// LookupExportByModule resolves a function address from a module's export table.
+func (d *Dispatcher) LookupExportByModule(moduleBase uint64, funcName string, ordinal uint16) uint64 {
+	// Check synthetic ntdll/win32u first
+	if d.ntdll != nil && moduleBase == d.ntdll.BaseAddr {
+		if funcName != "" {
+			if addr, ok := d.ntdll.Exports[funcName]; ok {
+				return addr
+			}
+		}
+	}
+	if d.win32u != nil && moduleBase == d.win32u.BaseAddr {
+		if funcName != "" {
+			if addr, ok := d.win32u.Exports[funcName]; ok {
+				return addr
+			}
+		}
+	}
+
+	// Check registered module exports
+	if funcName != "" {
+		if exports, ok := d.moduleExports[moduleBase]; ok {
+			if addr, ok := exports[funcName]; ok {
+				return addr
+			}
+		}
+	}
+	if ordinal != 0 {
+		if ordExports, ok := d.moduleOrdExports[moduleBase]; ok {
+			if addr, ok := ordExports[ordinal]; ok {
+				return addr
+			}
+		}
+	}
+	return 0
 }
 
 // RegisterAutoStubNames registers display names for auto-generated stub DLL
@@ -216,7 +296,11 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 
 	if d.ctx.Trace {
 		name := d.names[syscallID]
-		fmt.Fprintf(os.Stderr, "[trace] → %s (id=0x%04X)\n", name, syscallID)
+		sp := cpu.GetSP()
+		if name != "__wine_dbg_header" || sp < 0x7C000000 {
+			retAddr, _ := d.ctx.Mem.Read64(sp)
+			fmt.Fprintf(os.Stderr, "[trace] → %s (id=0x%04X) sp=0x%x ret=0x%x\n", name, syscallID, sp, retAddr)
+		}
 	}
 
 	d.ctx.ReturnOverridden = false
@@ -346,6 +430,358 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	// DLL loading
 	d.register(idOf("LdrGetDllHandle"), "LdrGetDllHandle", handleLdrGetDllHandle)
 	d.register(idOf("LdrGetProcedureAddress"), "LdrGetProcedureAddress", handleLdrGetProcedureAddress)
+	d.register(idOf("LdrLoadDll"), "LdrLoadDll", handleLdrLoadDll)
+	d.register(idOf("LdrGetDllHandleEx"), "LdrGetDllHandleEx", handleLdrGetDllHandleEx)
+	d.register(idOf("LdrAddRefDll"), "LdrAddRefDll", handleLdrAddRefDll)
+	d.register(idOf("LdrGetDllPath"), "LdrGetDllPath", handleLdrGetDllPath)
+	d.register(idOf("LdrGetDllFullName"), "LdrGetDllFullName", handleLdrGetDllFullName)
+
+	// PEB/TEB
+	d.register(idOf("RtlGetCurrentPeb"), "RtlGetCurrentPeb", handleRtlGetCurrentPeb)
+	d.register(idOf("RtlAcquirePebLock"), "RtlAcquirePebLock", handleRtlAcquirePebLock)
+	d.register(idOf("RtlReleasePebLock"), "RtlReleasePebLock", handleRtlReleasePebLock)
+
+	// String conversions
+	d.register(idOf("RtlInitAnsiString"), "RtlInitAnsiString", handleRtlInitAnsiString)
+	d.register(idOf("RtlInitUnicodeStringEx"), "RtlInitUnicodeStringEx", handleRtlInitUnicodeStringEx)
+	d.register(idOf("RtlMultiByteToUnicodeN"), "RtlMultiByteToUnicodeN", handleRtlMultiByteToUnicodeN)
+	d.register(idOf("RtlMultiByteToUnicodeSize"), "RtlMultiByteToUnicodeSize", handleRtlMultiByteToUnicodeSize)
+	d.register(idOf("RtlUnicodeToMultiByteN"), "RtlUnicodeToMultiByteN", handleRtlUnicodeToMultiByteN)
+	d.register(idOf("RtlUnicodeToMultiByteSize"), "RtlUnicodeToMultiByteSize", handleRtlUnicodeToMultiByteSize)
+	d.register(idOf("RtlAnsiStringToUnicodeString"), "RtlAnsiStringToUnicodeString", handleRtlAnsiStringToUnicodeString)
+	d.register(idOf("RtlUnicodeStringToAnsiString"), "RtlUnicodeStringToAnsiString", handleRtlUnicodeStringToAnsiString)
+	d.register(idOf("RtlUnicodeStringToAnsiSize"), "RtlUnicodeStringToAnsiSize", handleNoop)
+	d.register(idOf("RtlFreeAnsiString"), "RtlFreeAnsiString", handleRtlFreeAnsiString)
+	d.register(idOf("RtlCreateUnicodeString"), "RtlCreateUnicodeString", handleRtlCreateUnicodeString)
+	d.register(idOf("RtlCompareUnicodeStrings"), "RtlCompareUnicodeStrings", handleRtlCompareUnicodeStrings)
+	d.register(idOf("RtlUTF8ToUnicodeN"), "RtlUTF8ToUnicodeN", handleRtlUTF8ToUnicodeN)
+	d.register(idOf("RtlUnicodeToUTF8N"), "RtlUnicodeToUTF8N", handleRtlUnicodeToUTF8N)
+	d.register(idOf("RtlIsNormalizedString"), "RtlIsNormalizedString", handleRtlIsNormalizedString)
+	d.register(idOf("RtlNormalizeString"), "RtlNormalizeString", handleRtlNormalizeString)
+	d.register(idOf("RtlDuplicateUnicodeString"), "RtlDuplicateUnicodeString", handleNoop)
+
+	// PE image helpers
+	d.register(idOf("RtlImageNtHeader"), "RtlImageNtHeader", handleRtlImageNtHeader)
+	d.register(idOf("RtlImageDirectoryEntryToData"), "RtlImageDirectoryEntryToData", handleRtlImageDirectoryEntryToData)
+
+	// System info
+	d.register(idOf("RtlGetNativeSystemInformation"), "RtlGetNativeSystemInformation", handleRtlGetNativeSystemInformation)
+	d.register(idOf("NtGetTickCount"), "NtGetTickCount", handleNtGetTickCount)
+	d.register(idOf("NtFlushInstructionCache"), "NtFlushInstructionCache", handleNtFlushInstructionCache)
+	d.register(idOf("NtQueryDefaultLocale"), "NtQueryDefaultLocale", handleNtQueryDefaultLocale)
+	d.register(idOf("NtQueryDefaultUILanguage"), "NtQueryDefaultUILanguage", handleNtQueryDefaultUILanguage)
+	d.register(idOf("NtQueryInstallUILanguage"), "NtQueryInstallUILanguage", handleNtQueryInstallUILanguage)
+
+	// Thread context
+	d.register(idOf("NtGetContextThread"), "NtGetContextThread", handleNtGetContextThread)
+	d.register(idOf("NtSetContextThread"), "NtSetContextThread", handleNtSetContextThread)
+	d.register(idOf("NtResumeThread"), "NtResumeThread", handleNtResumeThread)
+	d.register(idOf("NtSuspendThread"), "NtSuspendThread", handleNtSuspendThread)
+
+	// Token / Security
+	d.register(idOf("NtOpenProcessToken"), "NtOpenProcessToken", handleNtOpenProcessToken)
+	d.register(idOf("NtOpenThreadToken"), "NtOpenThreadToken", handleNtOpenThreadToken)
+	d.register(idOf("NtQueryInformationToken"), "NtQueryInformationToken", handleNtQueryInformationToken)
+	d.register(idOf("NtSetInformationToken"), "NtSetInformationToken", handleNtSetInformationToken)
+	d.register(idOf("NtAdjustPrivilegesToken"), "NtAdjustPrivilegesToken", handleNtAdjustPrivilegesToken)
+	d.register(idOf("NtPrivilegeCheck"), "NtPrivilegeCheck", handleNtPrivilegeCheck)
+	d.register(idOf("NtAllocateLocallyUniqueId"), "NtAllocateLocallyUniqueId", handleNtAllocateLocallyUniqueId)
+	d.register(idOf("NtSetSecurityObject"), "NtSetSecurityObject", handleNtSetSecurityObject)
+	d.register(idOf("NtQuerySecurityObject"), "NtQuerySecurityObject", handleNtQuerySecurityObject)
+
+	// Heap extended
+	d.register(idOf("RtlGetProcessHeaps"), "RtlGetProcessHeaps", handleRtlGetProcessHeaps)
+	d.register(idOf("RtlLockHeap"), "RtlLockHeap", handleRtlLockHeap)
+	d.register(idOf("RtlUnlockHeap"), "RtlUnlockHeap", handleRtlUnlockHeap)
+	d.register(idOf("RtlValidateHeap"), "RtlValidateHeap", handleRtlValidateHeap)
+	d.register(idOf("RtlSetHeapInformation"), "RtlSetHeapInformation", handleRtlSetHeapInformation)
+	d.register(idOf("RtlQueryHeapInformation"), "RtlQueryHeapInformation", handleRtlQueryHeapInformation)
+	d.register(idOf("RtlGetUserInfoHeap"), "RtlGetUserInfoHeap", handleRtlGetUserInfoHeap)
+	d.register(idOf("RtlSetUserValueHeap"), "RtlSetUserValueHeap", handleRtlSetUserValueHeap)
+	d.register(idOf("RtlCompactHeap"), "RtlCompactHeap", handleRtlCompactHeap)
+	d.register(idOf("RtlWalkHeap"), "RtlWalkHeap", handleRtlWalkHeap)
+
+	// Code page / locale
+	d.register(idOf("RtlInitCodePageTable"), "RtlInitCodePageTable", handleRtlInitCodePageTable)
+	d.register(idOf("RtlInitNlsTables"), "RtlInitNlsTables", handleRtlInitNlsTables)
+	d.register(idOf("RtlResetRtlTranslations"), "RtlResetRtlTranslations", handleRtlResetRtlTranslations)
+
+	// FLS
+	d.register(idOf("RtlFlsAlloc"), "RtlFlsAlloc", handleRtlFlsAlloc)
+	d.register(idOf("RtlFlsFree"), "RtlFlsFree", handleRtlFlsFree)
+	d.register(idOf("RtlFlsGetValue"), "RtlFlsGetValue", handleRtlFlsGetValue)
+	d.register(idOf("RtlFlsSetValue"), "RtlFlsSetValue", handleRtlFlsSetValue)
+	d.register(idOf("RtlProcessFlsData"), "RtlProcessFlsData", handleRtlProcessFlsData)
+
+	// Process/Thread lifecycle
+	d.register(idOf("RtlExitUserProcess"), "RtlExitUserProcess", handleRtlExitUserProcess)
+	d.register(idOf("RtlExitUserThread"), "RtlExitUserThread", handleRtlExitUserThread)
+	d.register(idOf("RtlNormalizeProcessParams"), "RtlNormalizeProcessParams", handleRtlNormalizeProcessParams)
+	d.register(idOf("RtlIsProcessorFeaturePresent"), "RtlIsProcessorFeaturePresent", handleRtlIsProcessorFeaturePresent)
+	d.register(idOf("NtOpenProcess"), "NtOpenProcess", handleNtOpenProcess)
+	d.register(idOf("NtSetInformationProcess"), "NtSetInformationProcess", handleNtSetInformationProcess)
+	d.register(idOf("NtSetInformationThread"), "NtSetInformationThread", handleNtSetInformationThread)
+
+	// Exception handling
+	d.register(idOf("RtlCaptureContext"), "RtlCaptureContext", handleRtlCaptureContext)
+	d.register(idOf("RtlUnwind"), "RtlUnwind", handleRtlUnwind)
+	d.register(idOf("RtlUnwindEx"), "RtlUnwindEx", handleRtlUnwindEx)
+	d.register(idOf("RtlLookupFunctionEntry"), "RtlLookupFunctionEntry", handleRtlLookupFunctionEntry)
+	d.register(idOf("RtlRestoreContext"), "RtlRestoreContext", handleRtlRestoreContext)
+	d.register(idOf("RtlRaiseException"), "RtlRaiseException", handleRtlRaiseException)
+	d.register(idOf("RtlRaiseStatus"), "RtlRaiseStatus", handleRtlRaiseStatus)
+	d.register(idOf("RtlPcToFileHeader"), "RtlPcToFileHeader", handleRtlPcToFileHeader)
+	d.register(idOf("RtlGetEnabledExtendedFeatures"), "RtlGetEnabledExtendedFeatures", handleRtlGetEnabledExtendedFeatures)
+	d.register(idOf("RtlSetUnhandledExceptionFilter"), "RtlSetUnhandledExceptionFilter", handleRtlSetUnhandledExceptionFilter)
+
+	// Synchronization extended
+	d.register(idOf("NtCreateSemaphore"), "NtCreateSemaphore", handleNtCreateSemaphore)
+	d.register(idOf("NtReleaseSemaphore"), "NtReleaseSemaphore", handleNtReleaseSemaphore)
+	d.register(idOf("NtOpenEvent"), "NtOpenEvent", handleNtOpenEvent)
+	d.register(idOf("NtOpenMutant"), "NtOpenMutant", handleNtOpenMutant)
+	d.register(idOf("NtOpenSemaphore"), "NtOpenSemaphore", handleNtOpenSemaphore)
+	d.register(idOf("NtOpenSection"), "NtOpenSection", handleNtOpenSection)
+	d.register(idOf("NtCreateTimer"), "NtCreateTimer", handleNtCreateTimer)
+	d.register(idOf("NtSetTimer"), "NtSetTimer", handleNtSetTimer)
+	d.register(idOf("NtCancelTimer"), "NtCancelTimer", handleNtCancelTimer)
+	d.register(idOf("RtlSleepConditionVariableCS"), "RtlSleepConditionVariableCS", handleRtlSleepConditionVariableCS)
+	d.register(idOf("RtlSleepConditionVariableSRW"), "RtlSleepConditionVariableSRW", handleRtlSleepConditionVariableSRW)
+	d.register(idOf("RtlWaitOnAddress"), "RtlWaitOnAddress", handleRtlWaitOnAddress)
+
+	// I/O Completion
+	d.register(idOf("NtCreateIoCompletion"), "NtCreateIoCompletion", handleNtCreateIoCompletion)
+	d.register(idOf("NtSetIoCompletion"), "NtSetIoCompletion", handleNtSetIoCompletion)
+	d.register(idOf("NtRemoveIoCompletion"), "NtRemoveIoCompletion", handleNtRemoveIoCompletion)
+	d.register(idOf("NtRemoveIoCompletionEx"), "NtRemoveIoCompletionEx", handleNtRemoveIoCompletionEx)
+	d.register(idOf("NtCancelIoFile"), "NtCancelIoFile", handleNtCancelIoFile)
+	d.register(idOf("NtCancelIoFileEx"), "NtCancelIoFileEx", handleNtCancelIoFileEx)
+
+	// Object manager
+	d.register(idOf("NtCreateDirectoryObject"), "NtCreateDirectoryObject", handleNtCreateDirectoryObject)
+	d.register(idOf("NtOpenDirectoryObject"), "NtOpenDirectoryObject", handleNtOpenDirectoryObject)
+	d.register(idOf("NtCreateSymbolicLinkObject"), "NtCreateSymbolicLinkObject", handleNtCreateSymbolicLinkObject)
+	d.register(idOf("NtOpenSymbolicLinkObject"), "NtOpenSymbolicLinkObject", handleNtOpenSymbolicLinkObject)
+	d.register(idOf("NtQuerySymbolicLinkObject"), "NtQuerySymbolicLinkObject", handleNtQuerySymbolicLinkObject)
+	d.register(idOf("NtSetInformationObject"), "NtSetInformationObject", handleNtSetInformationObject)
+	d.register(idOf("NtCompareObjects"), "NtCompareObjects", handleNtCompareObjects)
+
+	// File I/O extended
+	d.register(idOf("NtQueryAttributesFile"), "NtQueryAttributesFile", handleNtQueryAttributesFile)
+	d.register(idOf("NtQueryFullAttributesFile"), "NtQueryFullAttributesFile", handleNtQueryFullAttributesFile)
+	d.register(idOf("NtLockFile"), "NtLockFile", handleNtLockFile)
+	d.register(idOf("NtUnlockFile"), "NtUnlockFile", handleNtUnlockFile)
+	d.register(idOf("NtCreateMailslotFile"), "NtCreateMailslotFile", handleNtCreateMailslotFile)
+	d.register(idOf("NtCreateNamedPipeFile"), "NtCreateNamedPipeFile", handleNtCreateNamedPipeFile)
+	d.register(idOf("NtFsControlFile"), "NtFsControlFile", handleNtFsControlFile)
+	d.register(idOf("NtNotifyChangeKey"), "NtNotifyChangeKey", handleNtNotifyChangeKey)
+	d.register(idOf("NtNotifyChangeDirectoryFile"), "NtNotifyChangeDirectoryFile", handleNtNotifyChangeDirectoryFile)
+
+	// Path functions
+	d.register(idOf("RtlDosPathNameToNtPathName_U"), "RtlDosPathNameToNtPathName_U", handleRtlDosPathNameToNtPathName_U)
+	d.register(idOf("RtlDosPathNameToNtPathName_U_WithStatus"), "RtlDosPathNameToNtPathName_U_WithStatus", handleRtlDosPathNameToNtPathName_U_WithStatus)
+	d.register(idOf("RtlGetCurrentDirectory_U"), "RtlGetCurrentDirectory_U", handleRtlGetCurrentDirectory_U)
+	d.register(idOf("RtlSetCurrentDirectory_U"), "RtlSetCurrentDirectory_U", handleRtlSetCurrentDirectory_U)
+	d.register(idOf("RtlGetFullPathName_U"), "RtlGetFullPathName_U", handleRtlGetFullPathName_U)
+	d.register(idOf("RtlDetermineDosPathNameType_U"), "RtlDetermineDosPathNameType_U", handleRtlDetermineDosPathNameType_U)
+
+	// Bitmap
+	d.register(idOf("RtlInitializeBitMap"), "RtlInitializeBitMap", handleRtlInitializeBitMap)
+	d.register(idOf("RtlSetBits"), "RtlSetBits", handleRtlSetBits)
+	d.register(idOf("RtlClearBits"), "RtlClearBits", handleRtlClearBits)
+	d.register(idOf("RtlAreBitsSet"), "RtlAreBitsSet", handleRtlAreBitsSet)
+	d.register(idOf("RtlAreBitsClear"), "RtlAreBitsClear", handleRtlAreBitsClear)
+
+	// Error mode
+	d.register(idOf("RtlGetThreadErrorMode"), "RtlGetThreadErrorMode", handleRtlGetThreadErrorMode)
+	d.register(idOf("RtlSetThreadErrorMode"), "RtlSetThreadErrorMode", handleRtlSetThreadErrorMode)
+
+	// Environment
+	d.register(idOf("RtlCreateEnvironment"), "RtlCreateEnvironment", handleRtlCreateEnvironment)
+	d.register(idOf("RtlDestroyEnvironment"), "RtlDestroyEnvironment", handleRtlDestroyEnvironment)
+	d.register(idOf("RtlSetEnvironmentVariable"), "RtlSetEnvironmentVariable", handleRtlSetEnvironmentVariable)
+	d.register(idOf("RtlQueryEnvironmentVariable_U"), "RtlQueryEnvironmentVariable_U", handleRtlQueryEnvironmentVariable_U)
+	d.register(idOf("RtlExpandEnvironmentStrings_U"), "RtlExpandEnvironmentStrings_U", handleRtlExpandEnvironmentStrings_U)
+	d.register(idOf("RtlCreateProcessParametersEx"), "RtlCreateProcessParametersEx", handleRtlCreateProcessParametersEx)
+	d.register(idOf("RtlDestroyProcessParameters"), "RtlDestroyProcessParameters", handleRtlDestroyProcessParameters)
+
+	// RunOnce
+	d.register(idOf("RtlRunOnceBeginInitialize"), "RtlRunOnceBeginInitialize", handleRtlRunOnceBeginInitialize)
+	d.register(idOf("RtlRunOnceComplete"), "RtlRunOnceComplete", handleRtlRunOnceComplete)
+	d.register(idOf("RtlRunOnceExecuteOnce"), "RtlRunOnceExecuteOnce", handleRtlRunOnceExecuteOnce)
+
+	// Misc system
+	d.register(idOf("NtPowerInformation"), "NtPowerInformation", handleNtPowerInformation)
+	d.register(idOf("NtQueueApcThread"), "NtQueueApcThread", handleNtQueueApcThread)
+	d.register(idOf("NtGetNlsSectionPtr"), "NtGetNlsSectionPtr", handleNtGetNlsSectionPtr)
+	d.register(idOf("NtSetSystemInformation"), "NtSetSystemInformation", handleNtSetSystemInformation)
+	d.register(idOf("NtSetSystemTime"), "NtSetSystemTime", handleNtSetSystemTime)
+
+	// Security descriptors / SIDs
+	d.register(idOf("RtlCreateSecurityDescriptor"), "RtlCreateSecurityDescriptor", handleRtlCreateSecurityDescriptor)
+	d.register(idOf("RtlSetDaclSecurityDescriptor"), "RtlSetDaclSecurityDescriptor", handleRtlSetDaclSecurityDescriptor)
+	d.register(idOf("RtlCreateAcl"), "RtlCreateAcl", handleRtlCreateAcl)
+	d.register(idOf("RtlAddAccessAllowedAce"), "RtlAddAccessAllowedAce", handleRtlAddAccessAllowedAce)
+	d.register(idOf("RtlAddAccessAllowedAceEx"), "RtlAddAccessAllowedAceEx", handleRtlAddAccessAllowedAceEx)
+	d.register(idOf("RtlAllocateAndInitializeSid"), "RtlAllocateAndInitializeSid", handleRtlAllocateAndInitializeSid)
+	d.register(idOf("RtlFreeSid"), "RtlFreeSid", handleRtlFreeSid)
+	d.register(idOf("RtlCopySid"), "RtlCopySid", handleRtlCopySid)
+	d.register(idOf("RtlEqualSid"), "RtlEqualSid", handleRtlEqualSid)
+	d.register(idOf("RtlLengthSid"), "RtlLengthSid", handleRtlLengthSid)
+	d.register(idOf("RtlInitializeSid"), "RtlInitializeSid", handleRtlInitializeSid)
+	d.register(idOf("RtlValidSid"), "RtlValidSid", handleRtlValidSid)
+	d.register(idOf("RtlSubAuthorityCountSid"), "RtlSubAuthorityCountSid", handleRtlSubAuthorityCountSid)
+	d.register(idOf("RtlSubAuthoritySid"), "RtlSubAuthoritySid", handleRtlSubAuthoritySid)
+	d.register(idOf("RtlIdentifierAuthoritySid"), "RtlIdentifierAuthoritySid", handleRtlIdentifierAuthoritySid)
+
+	// Activation context
+	d.register(idOf("RtlActivateActivationContext"), "RtlActivateActivationContext", handleRtlActivateActivationContext)
+	d.register(idOf("RtlDeactivateActivationContext"), "RtlDeactivateActivationContext", handleRtlDeactivateActivationContext)
+	d.register(idOf("RtlGetActiveActivationContext"), "RtlGetActiveActivationContext", handleRtlGetActiveActivationContext)
+	d.register(idOf("RtlAddRefActivationContext"), "RtlAddRefActivationContext", handleRtlAddRefActivationContext)
+	d.register(idOf("RtlReleaseActivationContext"), "RtlReleaseActivationContext", handleRtlReleaseActivationContext)
+	d.register(idOf("RtlCreateActivationContext"), "RtlCreateActivationContext", handleRtlCreateActivationContext)
+	d.register(idOf("RtlQueryActivationContextApplicationSettings"), "RtlQueryActivationContextApplicationSettings", handleRtlQueryActivationContextApplicationSettings)
+	d.register(idOf("RtlFindActivationContextSectionString"), "RtlFindActivationContextSectionString", handleRtlFindActivationContextSectionString)
+	d.register(idOf("RtlFindActivationContextSectionGuid"), "RtlFindActivationContextSectionGuid", handleRtlFindActivationContextSectionGuid)
+	d.register(idOf("RtlZombifyActivationContext"), "RtlZombifyActivationContext", handleRtlZombifyActivationContext)
+	d.register(idOf("RtlFreeActivationContextStack"), "RtlFreeActivationContextStack", handleRtlFreeActivationContextStack)
+	d.register(idOf("RtlQueryInformationActivationContext"), "RtlQueryInformationActivationContext", handleRtlQueryInformationActivationContext)
+
+	// Thread pool
+	d.register(idOf("RtlQueueWorkItem"), "RtlQueueWorkItem", handleRtlQueueWorkItem)
+	d.register(idOf("RtlCreateTimer"), "RtlCreateTimer", handleRtlCreateTimer)
+	d.register(idOf("RtlDeleteTimer"), "RtlDeleteTimer", handleRtlDeleteTimer)
+	d.register(idOf("RtlUpdateTimer"), "RtlUpdateTimer", handleRtlUpdateTimer)
+	d.register(idOf("RtlCreateTimerQueue"), "RtlCreateTimerQueue", handleRtlCreateTimerQueue)
+	d.register(idOf("RtlDeleteTimerQueueEx"), "RtlDeleteTimerQueueEx", handleRtlDeleteTimerQueueEx)
+	d.register(idOf("RtlRegisterWait"), "RtlRegisterWait", handleRtlRegisterWait)
+	d.register(idOf("RtlDeregisterWait"), "RtlDeregisterWait", handleRtlDeregisterWait)
+	d.register(idOf("RtlDeregisterWaitEx"), "RtlDeregisterWaitEx", handleRtlDeregisterWaitEx)
+	d.register(idOf("RtlSetIoCompletionCallback"), "RtlSetIoCompletionCallback", handleRtlSetIoCompletionCallback)
+
+	// GUID / message
+	d.register(idOf("RtlGUIDFromString"), "RtlGUIDFromString", handleRtlGUIDFromString)
+	d.register(idOf("RtlFindMessage"), "RtlFindMessage", handleRtlFindMessage)
+	d.register(idOf("RtlFormatMessage"), "RtlFormatMessage", handleRtlFormatMessage)
+
+	// Locale / language preferences
+	d.register(idOf("RtlGetLocaleFileMappingAddress"), "RtlGetLocaleFileMappingAddress", handleRtlGetLocaleFileMappingAddress)
+	d.register(idOf("RtlGetProductInfo"), "RtlGetProductInfo", handleRtlGetProductInfo)
+	d.register(idOf("RtlGetSystemPreferredUILanguages"), "RtlGetSystemPreferredUILanguages", handleRtlGetSystemPreferredUILanguages)
+	d.register(idOf("RtlGetUserPreferredUILanguages"), "RtlGetUserPreferredUILanguages", handleRtlGetUserPreferredUILanguages)
+	d.register(idOf("RtlGetProcessPreferredUILanguages"), "RtlGetProcessPreferredUILanguages", handleRtlGetProcessPreferredUILanguages)
+	d.register(idOf("RtlGetThreadPreferredUILanguages"), "RtlGetThreadPreferredUILanguages", handleRtlGetThreadPreferredUILanguages)
+	d.register(idOf("RtlGetSystemTimePrecise"), "RtlGetSystemTimePrecise", handleRtlGetSystemTimePrecise)
+	d.register(idOf("RtlTimeFieldsToTime"), "RtlTimeFieldsToTime", handleRtlTimeFieldsToTime)
+	d.register(idOf("RtlTimeToTimeFields"), "RtlTimeToTimeFields", handleRtlTimeToTimeFields)
+	d.register(idOf("RtlQueryUnbiasedInterruptTime"), "RtlQueryUnbiasedInterruptTime", handleRtlQueryUnbiasedInterruptTime)
+
+	// WoW64
+	d.register(idOf("RtlWow64GetProcessMachines"), "RtlWow64GetProcessMachines", handleRtlWow64GetProcessMachines)
+	d.register(idOf("RtlWow64EnableFsRedirection"), "RtlWow64EnableFsRedirection", handleRtlWow64EnableFsRedirection)
+	d.register(idOf("RtlWow64EnableFsRedirectionEx"), "RtlWow64EnableFsRedirectionEx", handleRtlWow64EnableFsRedirectionEx)
+
+	// Wine-specific stubs
+	d.register(idOf("wine_get_version"), "wine_get_version", handleWineGetVersion)
+	d.register(idOf("wine_server_call"), "wine_server_call", handleWineServerCall)
+	d.register(idOf("__wine_dbg_get_channel_flags"), "__wine_dbg_get_channel_flags", handleWineDbgGetChannelFlags)
+	d.register(idOf("__wine_dbg_header"), "__wine_dbg_header", handleWineDbgHeader)
+	d.register(idOf("__wine_dbg_output"), "__wine_dbg_output", handleWineDbgOutput)
+	d.register(idOf("__wine_dbg_strdup"), "__wine_dbg_strdup", handleWineDbgStrdup)
+	d.register(idOf("wine_nt_to_unix_file_name"), "wine_nt_to_unix_file_name", handleWineNtToUnixFileName)
+	d.register(idOf("wine_unix_to_nt_file_name"), "wine_unix_to_nt_file_name", handleWineUnixToNtFileName)
+
+	// ETW stubs
+	d.register(idOf("EtwEventRegister"), "EtwEventRegister", handleEtwEventRegister)
+	d.register(idOf("EtwEventUnregister"), "EtwEventUnregister", handleEtwEventUnregister)
+	d.register(idOf("EtwEventWrite"), "EtwEventWrite", handleEtwEventWrite)
+	d.register(idOf("EtwEventEnabled"), "EtwEventEnabled", handleEtwEventEnabled)
+
+	// Debug
+	d.register(idOf("DbgBreakPoint"), "DbgBreakPoint", handleDbgBreakPoint)
+
+	// C-runtime stubs in ntdll
+	d.register(idOf("_vsnprintf"), "_vsnprintf", handleVsnprintf)
+	d.register(idOf("_vsnwprintf"), "_vsnwprintf", handleVsnwprintf)
+
+	// CRT handlers for functions too complex for x64 inline patches
+	d.register(idOf("strtol"), "strtol", handleStrtol)
+	d.register(idOf("wcstol"), "wcstol", handleWcstol)
+	d.register(idOf("wcstoul"), "wcstoul", handleWcstoul)
+	d.register(idOf("_strnicmp"), "_strnicmp", handleStrnicmp)
+	d.register(idOf("_wcsicmp"), "_wcsicmp", handleWcsicmp)
+	d.register(idOf("_wcsnicmp"), "_wcsnicmp", handleWcsnicmp)
+	d.register(idOf("isalpha"), "isalpha", handleIsalpha)
+	d.register(idOf("islower"), "islower", handleIslower)
+	d.register(idOf("isxdigit"), "isxdigit", handleIsxdigit)
+	d.register(idOf("strpbrk"), "strpbrk", handleStrpbrk)
+	d.register(idOf("wcspbrk"), "wcspbrk", handleWcspbrk)
+	d.register(idOf("wcscspn"), "wcscspn", handleWcscspn)
+	d.register(idOf("wcsspn"), "wcsspn", handleWcsspn)
+	d.register(idOf("wcsstr"), "wcsstr", handleWcsstr)
+	d.register(idOf("LdrDisableThreadCalloutsForDll"), "LdrDisableThreadCalloutsForDll", handleLdrDisableThreadCalloutsForDll)
+	d.register(idOf("RtlFindClearBitsAndSet"), "RtlFindClearBitsAndSet", handleRtlFindClearBitsAndSet)
+	d.register(idOf("LdrQueryImageFileExecutionOptions"), "LdrQueryImageFileExecutionOptions", handleLdrQueryImageFileExecutionOptions)
+	d.register(idOf("RtlReleasePath"), "RtlReleasePath", handleRtlReleasePath)
+
+	// SList operations
+	d.register(idOf("RtlInitializeSListHead"), "RtlInitializeSListHead", handleRtlInitializeSListHead)
+	d.register(idOf("RtlInterlockedFlushSList"), "RtlInterlockedFlushSList", handleRtlInterlockedFlushSList)
+	d.register(idOf("RtlInterlockedPopEntrySList"), "RtlInterlockedPopEntrySList", handleRtlInterlockedPopEntrySList)
+	d.register(idOf("RtlInterlockedPushEntrySList"), "RtlInterlockedPushEntrySList", handleRtlInterlockedPushEntrySList)
+	d.register(idOf("RtlQueryDepthSList"), "RtlQueryDepthSList", handleRtlQueryDepthSList)
+
+	// Performance counter
+	d.register(idOf("RtlQueryPerformanceCounter"), "RtlQueryPerformanceCounter", handleRtlQueryPerformanceCounter)
+	d.register(idOf("RtlQueryPerformanceFrequency"), "RtlQueryPerformanceFrequency", handleRtlQueryPerformanceFrequency)
+
+	// Misc
+	d.register(idOf("RtlRandom"), "RtlRandom", handleRtlRandom)
+	d.register(idOf("RtlOpenCurrentUser"), "RtlOpenCurrentUser", handleRtlOpenCurrentUser)
+	d.register(idOf("RtlQueryDynamicTimeZoneInformation"), "RtlQueryDynamicTimeZoneInformation", handleRtlQueryDynamicTimeZoneInformation)
+	d.register(idOf("wine_get_host_version"), "wine_get_host_version", handleWineGetHostVersion)
+
+	d.register(idOf("NtUserInitializeClientPfnArrays"), "NtUserInitializeClientPfnArrays", handleNtUserInitializeClientPfnArrays)
+	d.register(idOf("NtUserGetSystemDpiForProcess"), "NtUserGetSystemDpiForProcess", handleNtUserGetSystemDpiForProcess)
+
+	// Atom table
+	d.register(idOf("NtAddAtom"), "NtAddAtom", handleNtAddAtom)
+	d.register(idOf("NtDeleteAtom"), "NtDeleteAtom", handleNtDeleteAtom)
+	d.register(idOf("NtFindAtom"), "NtFindAtom", handleNtFindAtom)
+	d.register(idOf("NtQueryInformationAtom"), "NtQueryInformationAtom", handleNtQueryInformationAtom)
+
+	// NtUserCallOneParam / NtUserCallTwoParam
+	d.register(idOf("NtUserCallOneParam"), "NtUserCallOneParam", handleNtUserCallOneParam)
+	d.register(idOf("NtUserCallTwoParam"), "NtUserCallTwoParam", handleNtUserCallTwoParam)
+
+	// NtGdi* - GDI object stubs
+	d.register(idOf("NtGdiCreateBitmap"), "NtGdiCreateBitmap", handleNtGdiCreateBitmap)
+	d.register(idOf("NtGdiCreatePatternBrushInternal"), "NtGdiCreatePatternBrushInternal", handleNtGdiCreatePatternBrushInternal)
+	d.register(idOf("NtGdiDeleteObjectApp"), "NtGdiDeleteObjectApp", handleNtGdiDeleteObjectApp)
+	d.register(idOf("NtGdiSelectBitmap"), "NtGdiSelectBitmap", handleNtGdiSelectBitmap)
+	d.register(idOf("NtGdiSelectBrush"), "NtGdiSelectBrush", handleNtGdiSelectBrush)
+	d.register(idOf("NtGdiSelectPen"), "NtGdiSelectPen", handleNtGdiSelectPen)
+	d.register(idOf("NtGdiSelectFont"), "NtGdiSelectFont", handleNtGdiSelectFont)
+	d.register(idOf("NtGdiCreateSolidBrush"), "NtGdiCreateSolidBrush", handleNtGdiCreateSolidBrush)
+	d.register(idOf("NtGdiCreatePen"), "NtGdiCreatePen", handleNtGdiCreatePen)
+	d.register(idOf("NtGdiCreateRectRgn"), "NtGdiCreateRectRgn", handleNtGdiCreateRectRgn)
+	d.register(idOf("NtGdiCreateCompatibleDC"), "NtGdiCreateCompatibleDC", handleNtGdiCreateCompatibleDC)
+	d.register(idOf("NtGdiCreateCompatibleBitmap"), "NtGdiCreateCompatibleBitmap", handleNtGdiCreateCompatibleBitmap)
+	d.register(idOf("NtGdiHfontCreate"), "NtGdiHfontCreate", handleNtGdiHfontCreate)
+	d.register(idOf("NtGdiExtGetObjectW"), "NtGdiExtGetObjectW", handleNtGdiExtGetObjectW)
+	d.register(idOf("NtGdiGetDeviceCaps"), "NtGdiGetDeviceCaps", handleNtGdiGetDeviceCaps)
+	d.register(idOf("NtGdiGetAndSetDCDword"), "NtGdiGetAndSetDCDword", handleNtGdiGetAndSetDCDword)
+	d.register(idOf("NtGdiSaveDC"), "NtGdiSaveDC", handleNtGdiSaveDC)
+	d.register(idOf("NtGdiRestoreDC"), "NtGdiRestoreDC", handleNtGdiRestoreDC)
+	d.register(idOf("NtGdiCombineRgn"), "NtGdiCombineRgn", handleNtGdiCombineRgn)
+	d.register(idOf("NtGdiGetRgnBox"), "NtGdiGetRgnBox", handleNtGdiGetRgnBox)
+	d.register(idOf("NtGdiSetRectRgn"), "NtGdiSetRectRgn", handleNtGdiSetRectRgn)
+	d.register(idOf("NtGdiOffsetRgn"), "NtGdiOffsetRgn", handleNtGdiOffsetRgn)
+	d.register(idOf("NtGdiPatBlt"), "NtGdiPatBlt", handleNtGdiPatBlt)
+	d.register(idOf("NtGdiBitBlt"), "NtGdiBitBlt", handleNtGdiBitBlt)
+	d.register(idOf("NtGdiOpenDCW"), "NtGdiOpenDCW", handleNtGdiOpenDCW)
+	d.register(idOf("NtGdiGetTextMetricsW"), "NtGdiGetTextMetricsW", handleNtGdiGetTextMetricsW)
+	d.register(idOf("NtGdiFlush"), "NtGdiFlush", handleNtGdiFlush)
 }
 
 // registerWin32kHandlers registers placeholder Win32k handlers.

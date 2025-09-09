@@ -70,6 +70,13 @@ type ThreadHandle struct{}
 
 func (h *ThreadHandle) handleType() string { return "thread" }
 
+// GenericHandle is a catch-all handle for objects that don't need special behavior.
+type GenericHandle struct {
+	Kind string
+}
+
+func (h *GenericHandle) handleType() string { return h.Kind }
+
 // HandleTable maps guest HANDLE values to Go objects.
 type HandleTable struct {
 	mu       sync.RWMutex

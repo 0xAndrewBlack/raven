@@ -57,9 +57,9 @@ memMB := flag.Int("mem", 256, "guest memory limit in MiB (advisory)")
 sysroot := flag.String("sysroot", "", "path to Windows system DLL directory (for PE mode)")
 regFile := flag.String("registry", "", "path to registry hive JSON file (for PE mode)")
 cpuprof := flag.String("cpuprofile", "", "write CPU profile to file")
+wayland := flag.Bool("wayland", false, "enable Wayland passthrough")
 
-flag.Usage = func() {
-fmt.Fprintf(os.Stderr, "Usage: govm [flags] <binary> [args...]\n\n")
+flag.Usage = func() {fmt.Fprintf(os.Stderr, "Usage: govm [flags] <binary> [args...]\n\n")
 fmt.Fprintf(os.Stderr, "go-vm - in-process RISC-V / x86_64 / Windows PE Library OS\n\n")
 fmt.Fprintf(os.Stderr, "Supports ELF (Linux) and PE (Windows) executables.\n")
 fmt.Fprintf(os.Stderr, "PE mode is auto-detected from the file header (.exe/.dll or MZ magic).\n\n")
@@ -93,12 +93,11 @@ guestArgv := args
 isPE := detectPE(binPath)
 
 if isPE {
-runPE(absPath, guestArgv, *sysroot, *regFile, *trace)
+	runPE(absPath, guestArgv, *sysroot, *regFile, *trace, *wayland)
 } else {
-runELF(absPath, guestArgv, *trace)
+	runELF(absPath, guestArgv, *trace, *wayland)
 }
 }
-
 // detectPE checks if a file is a PE binary (MZ magic or .exe/.dll extension).
 func detectPE(path string) bool {
 ext := strings.ToLower(filepath.Ext(path))
@@ -118,17 +117,42 @@ return magic[0] == 'M' && magic[1] == 'Z'
 }
 
 // runELF runs a Linux ELF binary (original code path).
-func runELF(absPath string, guestArgv []string, trace bool) {
-guestEnvp := []string{
-"PATH=/usr/bin:/bin",
-"HOME=/",
-"TERM=dumb",
-}
+func runELF(absPath string, guestArgv []string, trace bool, enableWayland bool) {
+	guestEnvp := []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=/",
+		"TERM=dumb",
+	}
 
-mem := mmu.New()
-fs := vfs.New()
-fs.ElfPath = absPath
+	if enableWayland {
+		xdg := os.Getenv("XDG_RUNTIME_DIR")
+		if xdg != "" {
+			guestEnvp = append(guestEnvp, "XDG_RUNTIME_DIR="+xdg)
+		}
+		waylandDisp := os.Getenv("WAYLAND_DISPLAY")
+		if waylandDisp == "" {
+			waylandDisp = "wayland-0"
+		}
+		guestEnvp = append(guestEnvp, "WAYLAND_DISPLAY="+waylandDisp)
+	}
 
+	mem := mmu.New()
+	fs := vfs.New()
+	fs.ElfPath = absPath
+
+	if enableWayland {
+		xdg := os.Getenv("XDG_RUNTIME_DIR")
+		if xdg != "" {
+			fs.MkdirAll(xdg)
+			waylandDisp := os.Getenv("WAYLAND_DISPLAY")
+			if waylandDisp == "" {
+				waylandDisp = "wayland-0"
+			}
+			// Create a dummy file in the VFS so that the guest can stat it,
+			// even if the actual connection is handled by the syscall proxy.
+			fs.CreateFile(filepath.Join(xdg, waylandDisp), nil, 0666)
+		}
+	}
 fs.HostOut = func(fd int, data []byte) {
 if fd == 1 {
 os.Stdout.Write(data)
@@ -188,7 +212,7 @@ tm.Wait()
 }
 
 // runPE runs a Windows PE binary with the NT subsystem.
-func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bool) {
+func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bool, enableWayland bool) {
 mem := mmu.New()
 fs := vfs.New()
 fs.ElfPath = absPath
@@ -236,7 +260,28 @@ fmt.Fprintf(os.Stderr, "govm: warning: failed to load registry: %v\n", err)
 
 // Generate synthetic ntdll.dll and win32u.dll
 synthNtdll := ntapi.GenerateNtdll(mem)
+ntapi.PatchCRTFunctions(synthNtdll, mem)
 synthWin32u := ntapi.GenerateWin32u(mem)
+
+// Map KUSER_SHARED_DATA at 0x7FFE0000 (required by Wine DLLs)
+// Wine's ntdll syscall stubs check byte at +0x308 to decide syscall vs indirect.
+// We keep it 0 so stubs use real syscall instruction (which our CPU intercepts).
+kuserAddr := uint64(0x7FFE0000)
+kuserSize := uint64(0x1000)
+mem.Mmap(kuserAddr, kuserSize, mmu.PermRead|mmu.PermWrite)
+// NtMajorVersion (+0x026C) = 10, NtMinorVersion (+0x0270) = 0
+mem.Write32(kuserAddr+0x026C, 10)
+mem.Write32(kuserAddr+0x0270, 0)
+// NtBuildNumber (+0x0260) = 19041 (Windows 10 2004)
+mem.Write32(kuserAddr+0x0260, 19041)
+// SystemCall byte at +0x0308 = 0 (use syscall instruction, not indirect)
+mem.Write8(kuserAddr+0x0308, 0)
+
+// Map the gap between stack top (0x7FFD0000) and KUSER_SHARED_DATA (0x7FFE0000).
+// Some DLLs (kernelbase) access memory in this range.
+gapAddr := uint64(0x7FFD0000)
+gapSize := kuserAddr - gapAddr
+mem.MapRange(gapAddr, gapSize, mmu.PermRead|mmu.PermWrite)
 
 // Build module list for PEB_LDR_DATA
 modules := []ntapi.ModuleInfo{
@@ -271,6 +316,29 @@ loadedModules["win32u.dll"] = ntapi.SynthToModule(synthWin32u)
 var dllLoadOrder []*loader.PEModule
 if sysroot != "" {
 modules, loadedModules, dllLoadOrder = loadBYODLLs(mem, sysroot, result.MainModule, modules, loadedModules)
+// Pre-initialize ucrtbase's internal debug channel table to prevent
+// infinite recursion in __wine_dbg_get_channel_flags. The function at
+// ucrtbase+0x3d680 checks a table of 48-byte entries in .bss; entry 17
+// is the "default" channel. If its flags DWORD is 0, the function calls
+// itself recursively for entry 17, creating infinite recursion.
+if ucrt, ok := loadedModules["ucrtbase.dll"]; ok {
+	const (
+		channelTableRVA = 0xba5a0 // ucrtbase .bss: debug channel table base
+		entrySize       = 48      // each channel entry is 48 bytes
+		defaultChannel  = 17      // the "default" channel index
+		numChannels     = 48      // approximate number of channels
+	)
+	for i := 0; i < numChannels; i++ {
+		entryAddr := ucrt.BaseAddr + channelTableRVA + uint64(i)*entrySize
+		mem.Write32(entryAddr, 1)               // flags = 1 (initialized)
+		mem.Write64(entryAddr+8, 0)             // CS.DebugInfo = NULL
+		mem.Write32(entryAddr+16, 0xFFFFFFFF)   // CS.LockCount = -1 (unlocked)
+		mem.Write32(entryAddr+20, 0)            // CS.RecursionCount = 0
+	}
+	if trace {
+		fmt.Fprintf(os.Stderr, "[pe] initialized ucrtbase debug channel table (%d entries)\n", numChannels)
+	}
+}
 }
 
 // Auto-generate synthetic stub DLLs for any unresolved import DLLs
@@ -305,9 +373,9 @@ patchCRTDataExports(mem, result.MainModule, guestArgv)
 // Build command line
 cmdLine := strings.Join(guestArgv, " ")
 
-// Stack layout
-stackTop := uint64(0x7FFE0000)
-stackSize := uint64(8 * 1024 * 1024)
+// Stack layout - below KUSER_SHARED_DATA (0x7FFE0000)
+stackTop := uint64(0x7FFD0000)
+stackSize := uint64(64 * 1024 * 1024)
 
 // Initialize PEB/TEB
 procState, err := ntapi.InitProcess(mem, &ntapi.ProcessInit{
@@ -336,9 +404,13 @@ fmt.Fprintf(os.Stderr, "govm: PEB/TEB init error: %v\n", err)
 os.Exit(1)
 }
 
+// Initialize NLS code page data in PEB before DllMain
+ntapi.InitNlsData(mem, procState.PEBAddr, sysroot)
+
 // Create the trap dispatcher
 dispatcher := ntapi.NewDispatcher(mem, fs, handles, registry, procState, synthNtdll, synthWin32u)
 dispatcher.SetTrace(trace)
+dispatcher.SetSysRoot(sysroot)
 
 // Register auto-synth stub names with the dispatcher for trace output
 for _, synth := range autoSynthDLLs {
@@ -418,6 +490,11 @@ synthNtdll.BaseAddr, synthWin32u.BaseAddr)
 
 // Call DllMain(DLL_PROCESS_ATTACH) for each loaded BYODLL in dependency order
 if len(dllLoadOrder) > 0 {
+// Register module exports for LdrGetProcedureAddress
+for _, dll := range dllLoadOrder {
+	dispatcher.RegisterModuleExports(dll.BaseAddr, dll.Exports, dll.ExportOrds)
+}
+
 trampoline := ntapi.AllocTrampoline(mem)
 for _, dll := range dllLoadOrder {
 if dll.IsDLL && dll.EntryPoint != 0 && dll.EntryPoint != dll.BaseAddr {
@@ -433,6 +510,7 @@ fmt.Fprintf(os.Stderr, "govm: warning: DllMain(%s) failed: %v\n", dll.Name, err)
 // Restore CPU state for main entry
 c.SetPC(result.EntryPoint)
 c.SetSP(result.StackPtr)
+fmt.Fprintf(os.Stderr, "[pe] DllMain phase complete, starting main entry at 0x%x\n", result.EntryPoint)
 }
 
 // Run the PE
@@ -445,6 +523,20 @@ pprof.StopCPUProfile()
 os.Exit(exitErr.Code)
 }
 fmt.Fprintf(os.Stderr, "govm: PE runtime error: %v\n", err)
+		// Dump registers and stack for debugging
+		sp := c.GetSP()
+		fmt.Fprintf(os.Stderr, "  RIP=0x%x RSP=0x%x\n", c.GetPC(), sp)
+		regNames := []string{"RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI",
+			"R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15"}
+		for i, name := range regNames {
+			fmt.Fprintf(os.Stderr, "  %s=0x%x", name, c.ReadReg(i))
+			if i%4 == 3 { fmt.Fprintln(os.Stderr) }
+		}
+		fmt.Fprintln(os.Stderr)
+		for i := 0; i < 16; i++ {
+			val, _ := mem.Read64(sp + uint64(i*8))
+			fmt.Fprintf(os.Stderr, "  [RSP+0x%02x] = 0x%x\n", i*8, val)
+		}
 if regFile != "" {
 registry.Save(regFile)
 }
@@ -7607,6 +7699,8 @@ func patchCRTDataExports(mem *mmu.MMU, mainMod *loader.PEModule, argv []string) 
 
 // loadBYODLLs loads real Windows DLLs from the sysroot directory.
 // Returns updated module info, loaded modules map, and DLL load order (for DllMain).
+// Uses two-pass loading: first map all DLLs into memory, then resolve imports.
+// This handles circular dependencies (e.g. user32 ↔ gdi32).
 func loadBYODLLs(mem *mmu.MMU, sysroot string, mainMod *loader.PEModule,
 modules []ntapi.ModuleInfo, loaded map[string]*loader.PEModule) ([]ntapi.ModuleInfo, map[string]*loader.PEModule, []*loader.PEModule) {
 
@@ -7625,6 +7719,7 @@ for _, name := range queue {
 seen[name] = true
 }
 
+// Pass 1: Load all DLLs into memory (MapPEFile) without resolving imports
 for len(queue) > 0 {
 dllName := queue[0]
 queue = queue[1:]
@@ -7658,6 +7753,7 @@ fmt.Fprintf(os.Stderr, "govm: warning: failed to load %s: %v\n", dllName, err)
 continue
 }
 
+fmt.Fprintf(os.Stderr, "[pe] BYODLL %s: base=0x%x size=0x%x entry=0x%x\n", mod.Name, mod.BaseAddr, mod.ImageSize, mod.EntryPoint)
 loaded[strings.ToLower(mod.Name)] = mod
 loadOrder = append(loadOrder, mod)
 modules = append(modules, ntapi.ModuleInfo{
@@ -7668,8 +7764,7 @@ ImageSize: mod.ImageSize,
 Entry:     mod.EntryPoint,
 })
 
-loader.ResolveImports(mem, mod, loaded)
-
+// Enqueue transitive deps
 for _, imp := range mod.Imports {
 depName := strings.ToLower(imp.DLLName)
 if !seen[depName] {
@@ -7679,7 +7774,45 @@ queue = append(queue, depName)
 }
 }
 
-return modules, loaded, loadOrder
+// Pass 2: Resolve imports for all loaded DLLs (handles circular deps)
+for _, mod := range loadOrder {
+loader.ResolveImports(mem, mod, loaded)
+}
+
+// Topological sort: DllMain must call dependencies before dependants
+sorted := topoSortDLLs(loadOrder, loaded)
+
+return modules, loaded, sorted
+}
+
+// topoSortDLLs returns DLLs in dependency-first order for DllMain calling.
+func topoSortDLLs(dlls []*loader.PEModule, loaded map[string]*loader.PEModule) []*loader.PEModule {
+	byName := make(map[string]*loader.PEModule)
+	for _, d := range dlls {
+		byName[strings.ToLower(d.Name)] = d
+	}
+
+	visited := make(map[string]bool)
+	var result []*loader.PEModule
+	var visit func(mod *loader.PEModule)
+	visit = func(mod *loader.PEModule) {
+		name := strings.ToLower(mod.Name)
+		if visited[name] {
+			return
+		}
+		visited[name] = true
+		for _, imp := range mod.Imports {
+			depName := strings.ToLower(imp.DLLName)
+			if dep, ok := byName[depName]; ok {
+				visit(dep)
+			}
+		}
+		result = append(result, mod)
+	}
+	for _, d := range dlls {
+		visit(d)
+	}
+	return result
 }
 
 // findDLL searches for a DLL file in the sysroot.

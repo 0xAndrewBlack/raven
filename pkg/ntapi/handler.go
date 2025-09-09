@@ -3,6 +3,7 @@ package ntapi
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -342,35 +343,64 @@ func handleNtFlushBuffersFile(ctx *TrapContext) uint32 {
 
 func handleNtDeviceIoControlFile(ctx *TrapContext) uint32 {
 	fileHandle := Handle(ctx.Arg(0))
-	_ = ctx.Arg(1) // Event
-	ioStatus := ctx.Arg(3)
-
-	// Read IOCTL code from stack (arg 4)
-	ioctlCode := uint32(ctx.Arg(4))
-
-	_ = fileHandle
+	_ = ctx.Arg(1)  // Event
+	_ = ctx.Arg(2)  // ApcRoutine
+	_ = ctx.Arg(3)  // ApcContext
+	ioStatus := ctx.Arg(4)
+	ioctlCode := uint32(ctx.Arg(5))
 
 	if ctx.Trace {
 		fmt.Printf("  NtDeviceIoControlFile: handle=0x%x ioctl=0x%08x\n", fileHandle, ioctlCode)
 	}
 
-	// Console IOCTLs
+	// Decode device type from IOCTL code
+	deviceType := (ioctlCode >> 16) & 0xFFFF
+
+	// Console device IOCTLs (FILE_DEVICE_CONSOLE = 0x50) - succeed silently
+	// even for invalid handles, as Wine uses these for debug output via condrv
+	if deviceType == 0x50 {
+		if ctx.Trace {
+			inputBuf := ctx.Arg(6)
+			inputLen := uint32(ctx.Arg(7)) // ULONG - 32-bit
+			if inputBuf != 0 && inputLen > 0 && inputLen < 4096 {
+				data, err := ctx.Mem.ReadBytes(inputBuf, int(inputLen))
+				if err == nil {
+					fmt.Printf("  [wine] %s", string(data))
+				}
+			}
+		}
+		if ioStatus != 0 {
+			ctx.Mem.Write32(ioStatus, StatusSuccess)
+			ctx.Mem.Write64(ioStatus+8, 0)
+		}
+		return StatusSuccess
+	}
+
+	// Reject truly invalid handles for non-console IOCTLs
+	if fileHandle == 0xFFFFFFFFFFFFFFFF || fileHandle == 0 {
+		if ioStatus != 0 {
+			ctx.Mem.Write32(ioStatus, StatusInvalidHandle)
+			ctx.Mem.Write64(ioStatus+8, 0)
+		}
+		return StatusInvalidHandle
+	}
+
+	// Console mode IOCTLs (legacy path)
 	const (
-		ctlCodeGetMode = 0x500000 // pseudo: GetConsoleMode
-		ctlCodeSetMode = 0x500004 // pseudo: SetConsoleMode
+		ctlCodeGetMode = 0x500000
+		ctlCodeSetMode = 0x500004
 	)
 
 	switch ioctlCode {
 	case ctlCodeGetMode:
-		// Return a default console mode
-		outBuf := ctx.Arg(6) // stack arg
+		outBuf := ctx.Arg(8)
 		if outBuf != 0 {
-			ctx.Mem.Write32(outBuf, 0x0007) // ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT
+			ctx.Mem.Write32(outBuf, 0x0007)
 		}
 	case ctlCodeSetMode:
 		// Accept silently
 	default:
-		// Unknown IOCTL - succeed silently to avoid blocking apps
+		// Unknown IOCTL - succeed silently
 	}
 
 	if ioStatus != 0 {
@@ -742,6 +772,9 @@ func handleNtAllocateVirtualMemory(ctx *TrapContext) uint32 {
 
 	perms := mmu.PermRead | mmu.PermWrite
 	addr := ctx.Mem.Mmap(baseAddr, size, perms)
+	if addr < 0x1000 {
+		fmt.Fprintf(os.Stderr, "[WARN] NtAllocateVirtualMemory mapped addr=0x%x size=0x%x baseAddr=0x%x\n", addr, size, baseAddr)
+	}
 
 	ctx.Mem.Write64(basePtr, addr)
 	ctx.Mem.Write64(sizePtr, size)
@@ -1047,7 +1080,8 @@ func handleRtlCreateHeap(ctx *TrapContext) uint32 {
 	}
 	h := ctx.Handles.Alloc(heap)
 	ctx.CPU.SetSyscallReturn(uint64(h))
-	return uint32(h) // return heap handle as PVOID
+	ctx.ReturnOverridden = true
+	return 0
 }
 
 func handleRtlDestroyHeap(ctx *TrapContext) uint32 {
@@ -1055,8 +1089,8 @@ func handleRtlDestroyHeap(ctx *TrapContext) uint32 {
 }
 
 func handleRtlAllocateHeap(ctx *TrapContext) uint32 {
-	_ = ctx.Arg(0)  // HeapHandle
-	_ = ctx.Arg(1)  // Flags
+	_ = ctx.Arg(0) // HeapHandle
+	flags := ctx.Arg(1)
 	size := ctx.Arg(2)
 
 	if size == 0 {
@@ -1064,8 +1098,11 @@ func handleRtlAllocateHeap(ctx *TrapContext) uint32 {
 	}
 
 	addr := ctx.Mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+	// HEAP_ZERO_MEMORY (0x8) - mmap already zeroes pages, so no extra work needed
+	_ = flags
 	ctx.CPU.SetSyscallReturn(addr)
-	return uint32(addr) // return pointer, not NTSTATUS
+	ctx.ReturnOverridden = true
+	return 0
 }
 
 func handleRtlFreeHeap(ctx *TrapContext) uint32 {
@@ -1077,7 +1114,8 @@ func handleRtlFreeHeap(ctx *TrapContext) uint32 {
 		ctx.Mem.Munmap(addr, mmu.PageSize)
 	}
 	ctx.CPU.SetSyscallReturn(1) // TRUE
-	return 1
+	ctx.ReturnOverridden = true
+	return 0
 }
 
 func handleRtlReAllocateHeap(ctx *TrapContext) uint32 {
@@ -1101,13 +1139,15 @@ func handleRtlReAllocateHeap(ctx *TrapContext) uint32 {
 	}
 
 	ctx.CPU.SetSyscallReturn(newAddr)
-	return uint32(newAddr)
+	ctx.ReturnOverridden = true
+	return 0
 }
 
 func handleRtlSizeHeap(ctx *TrapContext) uint32 {
 	// Return a dummy size
 	ctx.CPU.SetSyscallReturn(mmu.PageSize)
-	return uint32(mmu.PageSize)
+	ctx.ReturnOverridden = true
+	return 0
 }
 
 // ======================== STRING / UNICODE ========================
@@ -1179,7 +1219,12 @@ func handleRtlNtStatusToDosError(ctx *TrapContext) uint32 {
 	case StatusInvalidParameter:
 		dosError = 87 // ERROR_INVALID_PARAMETER
 	default:
-		dosError = 317 // ERROR_MR_MID_NOT_FOUND
+		// SXS/activation-context errors → ERROR_SXS_KEY_NOT_FOUND (14007)
+		if status >= 0xC0150000 && status <= 0xC015FFFF {
+			dosError = 14007
+		} else {
+			dosError = 317 // ERROR_MR_MID_NOT_FOUND
+		}
 	}
 
 	ctx.CPU.SetSyscallReturn(uint64(dosError))
@@ -1230,12 +1275,75 @@ func handleNtQueryObject(ctx *TrapContext) uint32 {
 
 func handleLdrGetDllHandle(ctx *TrapContext) uint32 {
 	// LdrGetDllHandle(PathToFile, Unused, ModuleName*, ModuleHandle*)
-	return StatusNotImplemented
+	// ModuleName is UNICODE_STRING*, ModuleHandle is HMODULE*
+	moduleNamePtr := ctx.Arg(2) // UNICODE_STRING*
+	handlePtr := ctx.Arg(3)     // HMODULE*
+
+	if moduleNamePtr == 0 || handlePtr == 0 {
+		return StatusNotImplemented
+	}
+
+	nameStr := readGuestUnicodeString(ctx.Mem, moduleNamePtr)
+	nameStr = strings.ToLower(nameStr)
+	// Strip path, keep only filename
+	if idx := strings.LastIndexAny(nameStr, "\\/"); idx >= 0 {
+		nameStr = nameStr[idx+1:]
+	}
+	if !strings.HasSuffix(nameStr, ".dll") {
+		nameStr += ".dll"
+	}
+
+	base := findModuleByName(ctx, nameStr)
+	if base == 0 {
+		ctx.Mem.Write64(handlePtr, 0)
+		return 0xC0000135 // STATUS_DLL_NOT_FOUND
+	}
+	ctx.Mem.Write64(handlePtr, base)
+	return StatusSuccess
 }
 
 func handleLdrGetProcedureAddress(ctx *TrapContext) uint32 {
 	// LdrGetProcedureAddress(ModuleHandle, FunctionName*, Ordinal, FunctionAddress*)
-	return StatusNotImplemented
+	moduleHandle := ctx.Arg(0) // HMODULE (base address)
+	funcNamePtr := ctx.Arg(1)  // ANSI_STRING*
+	ordinal := uint16(ctx.Arg(2))
+	funcAddrPtr := ctx.Arg(3) // PVOID*
+
+	if funcAddrPtr != 0 {
+		ctx.Mem.Write64(funcAddrPtr, 0) // Clear output on failure
+	}
+
+	if moduleHandle == 0 {
+		return StatusNotImplemented
+	}
+
+	var funcName string
+	if funcNamePtr != 0 {
+		// ANSI_STRING: Length(2), MaxLength(2), pad(4), Buffer*(8)
+		nameLen, _ := ctx.Mem.Read16(funcNamePtr)
+		bufPtr, _ := ctx.Mem.Read64(funcNamePtr + 8)
+		if bufPtr != 0 && nameLen > 0 {
+			buf := make([]byte, nameLen)
+			for i := uint16(0); i < nameLen; i++ {
+				b, _ := ctx.Mem.Read8(bufPtr + uint64(i))
+				buf[i] = b
+			}
+			funcName = string(buf)
+		}
+	}
+
+	// Look up in the Dispatcher's synthetic export table
+	addr := ctx.Disp.LookupExportByModule(moduleHandle, funcName, ordinal)
+	if ctx.Trace {
+		fmt.Printf("  LdrGetProcedureAddress: module=0x%x name=%q ordinal=%d → addr=0x%x\n",
+			moduleHandle, funcName, ordinal, addr)
+	}
+	if addr != 0 && funcAddrPtr != 0 {
+		ctx.Mem.Write64(funcAddrPtr, addr)
+		return StatusSuccess
+	}
+
+	return 0xC0000139 // STATUS_ENTRYPOINT_NOT_FOUND
 }
 
 // ======================== Helpers ========================
@@ -1267,6 +1375,44 @@ func readGuestStringUTF16(mem *mmu.MMU, addr uint64, maxBytes int) string {
 	return decodeUTF16LE(data)
 }
 
+// readGuestUnicodeString reads a UNICODE_STRING structure from guest memory.
+func readGuestUnicodeString(mem *mmu.MMU, addr uint64) string {
+	if addr == 0 {
+		return ""
+	}
+	length, _ := mem.Read16(addr + UnicodeStringLength)
+	bufPtr, _ := mem.Read64(addr + UnicodeStringBuffer)
+	if bufPtr == 0 || length == 0 {
+		return ""
+	}
+	return readGuestStringUTF16(mem, bufPtr, int(length))
+}
+
+// findModuleByName searches PEB_LDR_DATA InLoadOrderModuleList for a DLL by name.
+func findModuleByName(ctx *TrapContext, name string) uint64 {
+	pebAddr := ctx.State.PEBAddr
+	ldrAddr, _ := ctx.Mem.Read64(pebAddr + PebLdr)
+	if ldrAddr == 0 {
+		return 0
+	}
+	// InLoadOrderModuleList is a LIST_ENTRY at LdrData + 0x10
+	listHead := ldrAddr + LdrInLoadOrderModuleList
+	flink, _ := ctx.Mem.Read64(listHead)
+
+	for flink != 0 && flink != listHead {
+		// LDR_DATA_TABLE_ENTRY starts at InLoadOrderLinks
+		entry := flink
+		// BaseDllName is UNICODE_STRING at offset 0x58
+		baseName := readGuestUnicodeString(ctx.Mem, entry+LdrEntryBaseDllName)
+		if strings.EqualFold(baseName, name) {
+			base, _ := ctx.Mem.Read64(entry + LdrEntryDllBase)
+			return base
+		}
+		flink, _ = ctx.Mem.Read64(flink) // next Flink
+	}
+	return 0
+}
+
 // writeGuestUTF16 writes a string as UTF-16LE with null terminator to guest memory.
 func writeGuestUTF16(mem *mmu.MMU, addr uint64, s string) int {
 	utf16 := encodeUTF16LE(s)
@@ -1280,4 +1426,2781 @@ func encode32LE(val uint32) []byte {
 	b := make([]byte, 4)
 	binary.LittleEndian.PutUint32(b, val)
 	return b
+}
+
+// ======================== Additional handlers for Wine DLL init ========================
+
+func handleRtlGetCurrentPeb(ctx *TrapContext) uint32 {
+	ctx.SetReturn(ctx.State.PEBAddr)
+	return StatusSuccess
+}
+
+func handleRtlAcquirePebLock(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlReleasePebLock(ctx *TrapContext) uint32  { return StatusSuccess }
+
+func handleRtlInitAnsiString(ctx *TrapContext) uint32 {
+	// RtlInitAnsiString(PANSI_STRING dest, PCSZ source)
+	dest := ctx.Arg(0)
+	src := ctx.Arg(1)
+	if dest == 0 {
+		return StatusSuccess
+	}
+	if src == 0 {
+		ctx.Mem.Write16(dest+0, 0) // Length
+		ctx.Mem.Write16(dest+2, 0) // MaximumLength
+		ctx.Mem.Write64(dest+8, 0) // Buffer
+		return StatusSuccess
+	}
+	// Measure string length
+	length := uint16(0)
+	for {
+		b, err := ctx.Mem.Read8(src + uint64(length))
+		if err != nil || b == 0 {
+			break
+		}
+		length++
+	}
+	ctx.Mem.Write16(dest+0, length)
+	ctx.Mem.Write16(dest+2, length+1)
+	ctx.Mem.Write64(dest+8, src)
+	return StatusSuccess
+}
+
+func handleRtlInitUnicodeStringEx(ctx *TrapContext) uint32 {
+	// Same as RtlInitUnicodeString but returns NTSTATUS
+	handleRtlInitUnicodeString(ctx)
+	return StatusSuccess
+}
+
+func handleRtlMultiByteToUnicodeN(ctx *TrapContext) uint32 {
+	// RtlMultiByteToUnicodeN(wchar* dst, ULONG dstMax, ULONG* resultLen, char* src, ULONG srcLen)
+	dst := ctx.Arg(0)
+	dstMax := uint32(ctx.Arg(1))
+	resultLenPtr := ctx.Arg(2)
+	src := ctx.Arg(3)
+	srcLen := uint32(ctx.Arg(4))
+
+	written := uint32(0)
+	for i := uint32(0); i < srcLen && written+2 <= dstMax; i++ {
+		b, err := ctx.Mem.Read8(src + uint64(i))
+		if err != nil {
+			break
+		}
+		ctx.Mem.Write16(dst+uint64(written), uint16(b))
+		written += 2
+	}
+	if resultLenPtr != 0 {
+		ctx.Mem.Write32(resultLenPtr, written)
+	}
+	return StatusSuccess
+}
+
+func handleRtlMultiByteToUnicodeSize(ctx *TrapContext) uint32 {
+	// RtlMultiByteToUnicodeSize(ULONG* resultSize, char* src, ULONG srcLen)
+	resultPtr := ctx.Arg(0)
+	srcLen := uint32(ctx.Arg(2))
+	if resultPtr != 0 {
+		ctx.Mem.Write32(resultPtr, srcLen*2)
+	}
+	return StatusSuccess
+}
+
+func handleRtlUnicodeToMultiByteN(ctx *TrapContext) uint32 {
+	// RtlUnicodeToMultiByteN(char* dst, ULONG dstMax, ULONG* resultLen, wchar* src, ULONG srcLen)
+	dst := ctx.Arg(0)
+	dstMax := uint32(ctx.Arg(1))
+	resultLenPtr := ctx.Arg(2)
+	src := ctx.Arg(3)
+	srcLen := uint32(ctx.Arg(4))
+
+	written := uint32(0)
+	for i := uint32(0); i+2 <= srcLen && written < dstMax; i += 2 {
+		ch, err := ctx.Mem.Read16(src + uint64(i))
+		if err != nil {
+			break
+		}
+		if ch > 127 {
+			ch = '?'
+		}
+		ctx.Mem.Write8(dst+uint64(written), uint8(ch))
+		written++
+	}
+	if resultLenPtr != 0 {
+		ctx.Mem.Write32(resultLenPtr, written)
+	}
+	return StatusSuccess
+}
+
+func handleRtlUnicodeToMultiByteSize(ctx *TrapContext) uint32 {
+	resultPtr := ctx.Arg(0)
+	srcLen := uint32(ctx.Arg(2))
+	if resultPtr != 0 {
+		ctx.Mem.Write32(resultPtr, srcLen/2)
+	}
+	return StatusSuccess
+}
+
+func handleRtlAnsiStringToUnicodeString(ctx *TrapContext) uint32 {
+	// RtlAnsiStringToUnicodeString(PUNICODE_STRING dest, PANSI_STRING src, BOOLEAN alloc)
+	dest := ctx.Arg(0)
+	src := ctx.Arg(1)
+	allocate := ctx.Arg(2) != 0
+
+	if dest == 0 || src == 0 {
+		return StatusInvalidParameter
+	}
+
+	srcLen, _ := ctx.Mem.Read16(src + 0)
+	srcBuf, _ := ctx.Mem.Read64(src + 8)
+	uniLen := uint16(srcLen) * 2
+	uniMaxLen := uniLen + 2
+
+	var uniBuf uint64
+	if allocate {
+		uniBuf = ctx.Mem.Mmap(0, uint64(uniMaxLen), mmu.PermRead|mmu.PermWrite)
+	} else {
+		uniBuf, _ = ctx.Mem.Read64(dest + 8)
+	}
+
+	for i := uint16(0); i < srcLen; i++ {
+		b, _ := ctx.Mem.Read8(srcBuf + uint64(i))
+		ctx.Mem.Write16(uniBuf+uint64(i)*2, uint16(b))
+	}
+	ctx.Mem.Write16(uniBuf+uint64(srcLen)*2, 0) // null terminator
+
+	ctx.Mem.Write16(dest+0, uniLen)
+	ctx.Mem.Write16(dest+2, uniMaxLen)
+	ctx.Mem.Write64(dest+8, uniBuf)
+	return StatusSuccess
+}
+
+func handleRtlUnicodeStringToAnsiString(ctx *TrapContext) uint32 {
+	dest := ctx.Arg(0)
+	src := ctx.Arg(1)
+	allocate := ctx.Arg(2) != 0
+
+	if dest == 0 || src == 0 {
+		return StatusInvalidParameter
+	}
+
+	srcLen, _ := ctx.Mem.Read16(src + 0)
+	srcBuf, _ := ctx.Mem.Read64(src + 8)
+	ansiLen := srcLen / 2
+	ansiMaxLen := ansiLen + 1
+
+	var ansiBuf uint64
+	if allocate {
+		ansiBuf = ctx.Mem.Mmap(0, uint64(ansiMaxLen), mmu.PermRead|mmu.PermWrite)
+	} else {
+		ansiBuf, _ = ctx.Mem.Read64(dest + 8)
+	}
+
+	for i := uint16(0); i < ansiLen; i++ {
+		ch, _ := ctx.Mem.Read16(srcBuf + uint64(i)*2)
+		if ch > 127 {
+			ch = '?'
+		}
+		ctx.Mem.Write8(ansiBuf+uint64(i), uint8(ch))
+	}
+	ctx.Mem.Write8(ansiBuf+uint64(ansiLen), 0)
+
+	ctx.Mem.Write16(dest+0, ansiLen)
+	ctx.Mem.Write16(dest+2, ansiMaxLen)
+	ctx.Mem.Write64(dest+8, ansiBuf)
+	return StatusSuccess
+}
+
+func handleRtlFreeAnsiString(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlCreateUnicodeString(ctx *TrapContext) uint32 {
+	// RtlCreateUnicodeString(PUNICODE_STRING dest, PCWSTR src)
+	dest := ctx.Arg(0)
+	src := ctx.Arg(1)
+	if dest == 0 || src == 0 {
+		ctx.SetReturn(0) // FALSE
+		return StatusSuccess
+	}
+	// Measure wide string
+	length := uint64(0)
+	for {
+		ch, err := ctx.Mem.Read16(src + length*2)
+		if err != nil || ch == 0 {
+			break
+		}
+		length++
+	}
+	byteLen := uint16(length * 2)
+	bufSize := uint64(byteLen + 2)
+	buf := ctx.Mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
+
+	// Copy
+	for i := uint64(0); i < length; i++ {
+		ch, _ := ctx.Mem.Read16(src + i*2)
+		ctx.Mem.Write16(buf+i*2, ch)
+	}
+	ctx.Mem.Write16(buf+length*2, 0) // null terminator
+
+	ctx.Mem.Write16(dest+0, byteLen)
+	ctx.Mem.Write16(dest+2, byteLen+2)
+	ctx.Mem.Write64(dest+8, buf)
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleRtlCompareUnicodeStrings(ctx *TrapContext) uint32 {
+	s1 := ctx.Arg(0)
+	l1 := uint32(ctx.Arg(1))
+	s2 := ctx.Arg(2)
+	l2 := uint32(ctx.Arg(3))
+	caseInsensitive := ctx.Arg(4) != 0
+
+	minLen := l1
+	if l2 < minLen {
+		minLen = l2
+	}
+	for i := uint32(0); i < minLen; i++ {
+		c1, _ := ctx.Mem.Read16(s1 + uint64(i)*2)
+		c2, _ := ctx.Mem.Read16(s2 + uint64(i)*2)
+		if caseInsensitive {
+			if c1 >= 'A' && c1 <= 'Z' {
+				c1 += 32
+			}
+			if c2 >= 'A' && c2 <= 'Z' {
+				c2 += 32
+			}
+		}
+		if c1 != c2 {
+			if c1 < c2 {
+				ctx.SetReturn(^uint64(0)) // -1
+			} else {
+				ctx.SetReturn(1)
+			}
+			return StatusSuccess
+		}
+	}
+	if l1 == l2 {
+		ctx.SetReturn(0)
+	} else if l1 < l2 {
+		ctx.SetReturn(^uint64(0))
+	} else {
+		ctx.SetReturn(1)
+	}
+	return StatusSuccess
+}
+
+func handleRtlImageNtHeader(ctx *TrapContext) uint32 {
+	base := ctx.Arg(0)
+	if base == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	// Read e_lfanew
+	lfanew, err := ctx.Mem.Read32(base + 0x3C)
+	if err != nil {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	ntHeader := base + uint64(lfanew)
+	sig, err := ctx.Mem.Read32(ntHeader)
+	if err != nil || sig != 0x00004550 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	ctx.SetReturn(ntHeader)
+	return StatusSuccess
+}
+
+func handleRtlImageDirectoryEntryToData(ctx *TrapContext) uint32 {
+	base := ctx.Arg(0)
+	_ = ctx.Arg(1)     // MappedAsImage
+	dirIdx := ctx.Arg(2)
+	sizePtr := ctx.Arg(3)
+
+	if base == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	lfanew, err := ctx.Mem.Read32(base + 0x3C)
+	if err != nil {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	optHdr := base + uint64(lfanew) + 4 + 20
+	magic, _ := ctx.Mem.Read16(optHdr)
+	var dataDirOff uint64
+	if magic == 0x20B { // PE32+
+		dataDirOff = optHdr + 112
+	} else {
+		dataDirOff = optHdr + 96
+	}
+	entryOff := dataDirOff + dirIdx*8
+	rva, _ := ctx.Mem.Read32(entryOff)
+	size, _ := ctx.Mem.Read32(entryOff + 4)
+	if rva == 0 || size == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	if sizePtr != 0 {
+		ctx.Mem.Write32(sizePtr, size)
+	}
+	ctx.SetReturn(base + uint64(rva))
+	return StatusSuccess
+}
+
+func handleRtlGetNativeSystemInformation(ctx *TrapContext) uint32 {
+	return handleNtQuerySystemInformation(ctx)
+}
+
+func handleNtGetTickCount(ctx *TrapContext) uint32 {
+	ctx.SetReturn(uint64(time.Now().UnixMilli()) & 0xFFFFFFFF)
+	return StatusSuccess
+}
+
+func handleNtFlushInstructionCache(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleNtGetContextThread(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleNtSetContextThread(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleNtResumeThread(ctx *TrapContext) uint32 {
+	prevCount := ctx.Arg(1)
+	if prevCount != 0 {
+		ctx.Mem.Write32(prevCount, 1)
+	}
+	return StatusSuccess
+}
+
+func handleNtSuspendThread(ctx *TrapContext) uint32 {
+	prevCount := ctx.Arg(1)
+	if prevCount != 0 {
+		ctx.Mem.Write32(prevCount, 0)
+	}
+	return StatusSuccess
+}
+
+func handleNtOpenProcessToken(ctx *TrapContext) uint32 {
+	tokenHandle := ctx.Arg(2)
+	if tokenHandle != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "ProcessToken"})
+		ctx.Mem.Write64(tokenHandle, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtOpenThreadToken(ctx *TrapContext) uint32 {
+	return StatusNotImplemented // usually means "no token"
+}
+
+func handleNtQueryInformationToken(ctx *TrapContext) uint32 {
+	infoClass := uint32(ctx.Arg(1))
+	outBuf := ctx.Arg(2)
+	outLen := uint32(ctx.Arg(3))
+	retLen := ctx.Arg(4)
+
+	switch infoClass {
+	case 1: // TokenUser - write a minimal SID
+		needed := uint32(32)
+		if retLen != 0 {
+			ctx.Mem.Write32(retLen, needed)
+		}
+		if outLen < needed {
+			return 0xC0000023 // STATUS_BUFFER_TOO_SMALL
+		}
+		if outBuf != 0 {
+			// TOKEN_USER: SID_AND_ATTRIBUTES (pointer + attributes)
+			sidAddr := outBuf + 16
+			ctx.Mem.Write64(outBuf, sidAddr)    // SID pointer
+			ctx.Mem.Write32(outBuf+8, 0)        // Attributes
+			// Minimal SID: Revision=1, SubAuthorityCount=1, Authority={0,0,0,0,0,5}, SubAuth={18} (SYSTEM)
+			ctx.Mem.Write8(sidAddr+0, 1)    // Revision
+			ctx.Mem.Write8(sidAddr+1, 1)    // SubAuthorityCount
+			ctx.Mem.Write8(sidAddr+7, 5)    // IdentifierAuthority[5]
+			ctx.Mem.Write32(sidAddr+8, 18)  // SubAuthority[0] = SYSTEM
+		}
+		return StatusSuccess
+	case 25: // TokenElevation
+		if retLen != 0 {
+			ctx.Mem.Write32(retLen, 4)
+		}
+		if outLen >= 4 && outBuf != 0 {
+			ctx.Mem.Write32(outBuf, 1) // elevated
+		}
+		return StatusSuccess
+	default:
+		if retLen != 0 {
+			ctx.Mem.Write32(retLen, 0)
+		}
+		return StatusNotImplemented
+	}
+}
+
+func handleNtAllocateLocallyUniqueId(ctx *TrapContext) uint32 {
+	luid := ctx.Arg(0)
+	if luid != 0 {
+		id := uint64(time.Now().UnixNano() & 0xFFFFFFFF)
+		ctx.Mem.Write32(luid, uint32(id))   // LowPart
+		ctx.Mem.Write32(luid+4, 0)          // HighPart
+	}
+	return StatusSuccess
+}
+
+func handleNtQueryDefaultLocale(ctx *TrapContext) uint32 {
+	localePtr := ctx.Arg(1)
+	if localePtr != 0 {
+		ctx.Mem.Write32(localePtr, 0x0409) // en-US
+	}
+	return StatusSuccess
+}
+
+func handleNtQueryDefaultUILanguage(ctx *TrapContext) uint32 {
+	langPtr := ctx.Arg(0)
+	if langPtr != 0 {
+		ctx.Mem.Write16(langPtr, 0x0409) // en-US
+	}
+	return StatusSuccess
+}
+
+func handleNtQueryInstallUILanguage(ctx *TrapContext) uint32 {
+	langPtr := ctx.Arg(0)
+	if langPtr != 0 {
+		ctx.Mem.Write16(langPtr, 0x0409)
+	}
+	return StatusSuccess
+}
+
+func handleRtlGetProcessHeaps(ctx *TrapContext) uint32 {
+	// RtlGetProcessHeaps(ULONG count, PVOID* heaps)
+	count := uint32(ctx.Arg(0))
+	heaps := ctx.Arg(1)
+	// Read process heap from PEB
+	processHeap, _ := ctx.Mem.Read64(ctx.State.PEBAddr + PebProcessHeap)
+	if count > 0 && heaps != 0 && processHeap != 0 {
+		ctx.Mem.Write64(heaps, processHeap)
+	}
+	ctx.SetReturn(1) // 1 heap
+	return StatusSuccess
+}
+
+func handleRtlLockHeap(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleRtlUnlockHeap(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleRtlValidateHeap(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleRtlSetHeapInformation(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlQueryHeapInformation(ctx *TrapContext) uint32 {
+	retLen := ctx.Arg(4)
+	if retLen != 0 {
+		ctx.Mem.Write32(retLen, 0)
+	}
+	return StatusSuccess
+}
+
+func handleRtlGetUserInfoHeap(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlSetUserValueHeap(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlCompactHeap(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0)
+	return StatusSuccess
+}
+func handleRtlWalkHeap(ctx *TrapContext) uint32 {
+	return 0xC0000225 // STATUS_NO_MORE_ENTRIES
+}
+
+func handleRtlInitCodePageTable(ctx *TrapContext) uint32 {
+	nlsPtr := ctx.Arg(0)  // USHORT* - pointer to raw NLS data
+	infoPtr := ctx.Arg(1) // CPTABLEINFO* - output struct
+
+	if nlsPtr == 0 || infoPtr == 0 {
+		return StatusSuccess
+	}
+
+	initCodePageTableAt(ctx, nlsPtr, infoPtr)
+	return StatusSuccess
+}
+
+// handleRtlInitNlsTables initializes NLSTABLEINFO from raw NLS data pointers.
+// VOID RtlInitNlsTables(PUSHORT AnsiNlsBase, PUSHORT OemNlsBase, PUSHORT CaseTableNlsBase, PNLSTABLEINFO TableInfo)
+func handleRtlInitNlsTables(ctx *TrapContext) uint32 {
+	ansiPtr := ctx.Arg(0)
+	oemPtr := ctx.Arg(1)
+	casePtr := ctx.Arg(2)
+	infoPtr := ctx.Arg(3)
+
+	if infoPtr == 0 {
+		return StatusSuccess
+	}
+
+	// NLSTABLEINFO layout (x64):
+	// +0x00 CPTABLEINFO OemTableInfo  (0x40 bytes)
+	// +0x40 CPTABLEINFO AnsiTableInfo (0x40 bytes)
+	// +0x80 PUSHORT UpperCaseTable
+	// +0x88 PUSHORT LowerCaseTable
+
+	if ansiPtr != 0 {
+		initCodePageTableAt(ctx, ansiPtr, infoPtr+0x40)
+	}
+	if oemPtr != 0 {
+		initCodePageTableAt(ctx, oemPtr, infoPtr)
+	}
+	if casePtr != 0 {
+		ctx.Mem.Write64(infoPtr+0x80, casePtr)
+		ctx.Mem.Write64(infoPtr+0x88, casePtr) // LowerCaseTable same as Upper for now
+	}
+
+	return StatusSuccess
+}
+
+// initCodePageTableAt is the core logic of RtlInitCodePageTable.
+func initCodePageTableAt(ctx *TrapContext, nlsPtr, infoPtr uint64) {
+	read16 := func(off uint64) uint16 {
+		v, _ := ctx.Mem.Read16(nlsPtr + off*2)
+		return v
+	}
+
+	cp := read16(1)
+	ctx.Mem.Write16(infoPtr+0x00, cp)
+	ctx.Mem.Write16(infoPtr+0x02, read16(2))
+	ctx.Mem.Write16(infoPtr+0x04, read16(3))
+	ctx.Mem.Write16(infoPtr+0x06, read16(4))
+	ctx.Mem.Write16(infoPtr+0x08, read16(5))
+	ctx.Mem.Write16(infoPtr+0x0A, read16(6))
+	ctx.Mem.Write16(infoPtr+0x0C, 0)
+
+	for i := uint64(0); i < 12; i++ {
+		b, _ := ctx.Mem.Read8(nlsPtr + 7*2 + i)
+		ctx.Mem.Write8(infoPtr+0x0E+i, b)
+	}
+
+	headerSize := read16(0)
+	mbTableAddr := nlsPtr + uint64(headerSize+1)*2
+	ctx.Mem.Write64(infoPtr+0x20, mbTableAddr)
+
+	glyphSizeAddr := mbTableAddr + 256*2
+	glyphSize, _ := ctx.Mem.Read16(glyphSizeAddr)
+	glyphEndAddr := glyphSizeAddr + uint64(glyphSize+1)*2
+
+	ctx.Mem.Write64(infoPtr+0x30, glyphEndAddr)
+
+	dbcsMarker, _ := ctx.Mem.Read16(glyphEndAddr)
+	if dbcsMarker != 0 {
+		ctx.Mem.Write16(infoPtr+0x0C, cp)
+	}
+
+	wcTableAddr := glyphEndAddr + 2
+	ctx.Mem.Write64(infoPtr+0x28, wcTableAddr)
+	ctx.Mem.Write64(infoPtr+0x38, 0)
+}
+
+// handleRtlResetRtlTranslations sets PEB NLS fields from NLSTABLEINFO.
+// VOID RtlResetRtlTranslations(PNLSTABLEINFO TableInfo)
+func handleRtlResetRtlTranslations(ctx *TrapContext) uint32 {
+	infoPtr := ctx.Arg(0)
+	if infoPtr == 0 || ctx.State == nil {
+		return StatusSuccess
+	}
+
+	peb := ctx.State.PEBAddr
+
+	// AnsiTableInfo.MultiByteTable is at infoPtr+0x40+0x20
+	// PEB.AnsiCodePageData = MultiByteTable - 1 (pointer to USHORT before table)
+	ansiMBTable, _ := ctx.Mem.Read64(infoPtr + 0x40 + 0x20)
+	if ansiMBTable > 2 {
+		ctx.Mem.Write64(peb+PebAnsiCodePageData, ansiMBTable-2)
+	}
+
+	// OemTableInfo.MultiByteTable is at infoPtr+0x00+0x20
+	oemMBTable, _ := ctx.Mem.Read64(infoPtr + 0x20)
+	if oemMBTable > 2 {
+		ctx.Mem.Write64(peb+PebOemCodePageData, oemMBTable-2)
+	}
+
+	// UpperCaseTable is at infoPtr+0x80
+	ucTable, _ := ctx.Mem.Read64(infoPtr + 0x80)
+	if ucTable != 0 {
+		ctx.Mem.Write64(peb+PebUnicodeCaseTableData, ucTable)
+	}
+
+	return StatusSuccess
+}
+
+func handleRtlFlsAlloc(ctx *TrapContext) uint32 {
+	// RtlFlsAlloc(callback, *index_out)
+	// RCX = callback (ignored), RDX = pointer to output index
+	indexPtr := ctx.Arg(1)
+
+	// Use PEB FlsBitmap to allocate an index
+	pebAddr := ctx.State.PEBAddr
+	flsBitmapPtr, _ := ctx.Mem.Read64(pebAddr + PebFlsBitmap)
+	if flsBitmapPtr == 0 {
+		if indexPtr != 0 {
+			ctx.Mem.Write32(indexPtr, 0xFFFFFFFF)
+		}
+		return 0xC0000017 // STATUS_NO_MEMORY
+	}
+
+	// RtlFindClearBitsAndSet on the FLS bitmap
+	sizeOfBitMap, _ := ctx.Mem.Read32(flsBitmapPtr)
+	bufferAddr, _ := ctx.Mem.Read64(flsBitmapPtr + 8)
+	idx := uint32(0xFFFFFFFF)
+	for i := uint32(0); i < sizeOfBitMap; i++ {
+		wordIdx := i / 32
+		bitIdx := i % 32
+		word, _ := ctx.Mem.Read32(bufferAddr + uint64(wordIdx)*4)
+		if word&(1<<bitIdx) == 0 {
+			word |= 1 << bitIdx
+			ctx.Mem.Write32(bufferAddr+uint64(wordIdx)*4, word)
+			idx = i
+			break
+		}
+	}
+	if idx == 0xFFFFFFFF {
+		if indexPtr != 0 {
+			ctx.Mem.Write32(indexPtr, 0xFFFFFFFF)
+		}
+		return 0xC0000017 // STATUS_NO_MEMORY
+	}
+
+	ensureFlsData(ctx)
+
+	if indexPtr != 0 {
+		ctx.Mem.Write32(indexPtr, idx)
+	}
+	if ctx.Trace {
+		fmt.Fprintf(os.Stderr, "  RtlFlsAlloc → index=%d\n", idx)
+	}
+	return StatusSuccess
+}
+
+func handleRtlFlsFree(ctx *TrapContext) uint32 {
+	idx := uint32(ctx.Arg(0))
+	flsDataPtr, _ := ctx.Mem.Read64(ctx.State.TEBAddr + TebFlsData)
+	if flsDataPtr != 0 && idx < 256 {
+		ctx.Mem.Write64(flsDataPtr+8+uint64(idx)*8, 0)
+	}
+	// Clear bit in PEB FlsBitmap
+	pebAddr := ctx.State.PEBAddr
+	flsBitmapPtr, _ := ctx.Mem.Read64(pebAddr + PebFlsBitmap)
+	if flsBitmapPtr != 0 {
+		bufferAddr, _ := ctx.Mem.Read64(flsBitmapPtr + 8)
+		if bufferAddr != 0 {
+			wordIdx := idx / 32
+			bitIdx := idx % 32
+			word, _ := ctx.Mem.Read32(bufferAddr + uint64(wordIdx)*4)
+			word &^= 1 << bitIdx
+			ctx.Mem.Write32(bufferAddr+uint64(wordIdx)*4, word)
+		}
+	}
+	return StatusSuccess
+}
+func handleRtlFlsGetValue(ctx *TrapContext) uint32 {
+	// RtlFlsGetValue(index, *value_out)
+	// RCX = index, RDX = pointer to output value
+	idx := uint32(ctx.Arg(0))
+	outPtr := ctx.Arg(1)
+	flsDataPtr, _ := ctx.Mem.Read64(ctx.State.TEBAddr + TebFlsData)
+	var val uint64
+	if flsDataPtr != 0 && idx < 256 {
+		val, _ = ctx.Mem.Read64(flsDataPtr + 8 + uint64(idx)*8)
+	}
+	if outPtr != 0 {
+		ctx.Mem.Write64(outPtr, val)
+	}
+	return StatusSuccess
+}
+func handleRtlFlsSetValue(ctx *TrapContext) uint32 {
+	// RtlFlsSetValue(index, value)
+	// RCX = index, RDX = value
+	idx := uint32(ctx.Arg(0))
+	val := ctx.Arg(1)
+
+	ensureFlsData(ctx)
+
+	flsDataPtr, _ := ctx.Mem.Read64(ctx.State.TEBAddr + TebFlsData)
+	if flsDataPtr != 0 && idx < 256 {
+		ctx.Mem.Write64(flsDataPtr+8+uint64(idx)*8, val)
+	}
+	return StatusSuccess
+}
+
+// ensureFlsData allocates the FLS data array in guest memory if not yet created.
+func ensureFlsData(ctx *TrapContext) {
+	flsDataPtr, _ := ctx.Mem.Read64(ctx.State.TEBAddr + TebFlsData)
+	if flsDataPtr != 0 {
+		return
+	}
+	// Allocate 256 slots + 8 bytes header = 2056 bytes
+	const flsArraySize = 8 + 256*8
+	addr := ctx.Mem.Mmap(0, flsArraySize, 0x3) // RW
+	if addr == 0 {
+		return
+	}
+	// Clear to zero
+	for i := uint64(0); i < flsArraySize; i += 8 {
+		ctx.Mem.Write64(addr+i, 0)
+	}
+	// Store in TEB
+	ctx.Mem.Write64(ctx.State.TEBAddr+TebFlsData, addr)
+}
+func handleRtlProcessFlsData(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlExitUserProcess(ctx *TrapContext) uint32 {
+	code := uint32(ctx.Arg(0))
+	os.Exit(int(code))
+	return StatusSuccess
+}
+
+func handleRtlExitUserThread(ctx *TrapContext) uint32 {
+	ctx.CPU.Stop()
+	return StatusSuccess
+}
+
+func handleRtlNormalizeProcessParams(ctx *TrapContext) uint32 {
+	params := ctx.Arg(0)
+	ctx.SetReturn(params)
+	return StatusSuccess
+}
+
+func handleRtlIsProcessorFeaturePresent(ctx *TrapContext) uint32 {
+	feature := uint32(ctx.Arg(0))
+	switch feature {
+	case 10: // PF_COMPARE_EXCHANGE_DOUBLE
+		ctx.SetReturn(1)
+	case 23: // PF_FASTFAIL_AVAILABLE
+		ctx.SetReturn(1)
+	default:
+		ctx.SetReturn(0)
+	}
+	return StatusSuccess
+}
+
+func handleRtlCaptureContext(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlUnwind(ctx *TrapContext) uint32         { return StatusSuccess }
+func handleRtlUnwindEx(ctx *TrapContext) uint32        { return StatusSuccess }
+func handleRtlLookupFunctionEntry(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0)
+	return StatusSuccess
+}
+func handleRtlRestoreContext(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlRaiseException(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlRaiseStatus(ctx *TrapContext) uint32    { return StatusSuccess }
+func handleRtlPcToFileHeader(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0)
+	return StatusSuccess
+}
+
+func handleRtlGetEnabledExtendedFeatures(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0) // no extended features
+	return StatusSuccess
+}
+
+func handleRtlSetUnhandledExceptionFilter(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleNtCreateSemaphore(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	if handlePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Semaphore"})
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtReleaseSemaphore(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleNtOpenEvent(ctx *TrapContext) uint32 {
+	return 0xC0000034 // STATUS_OBJECT_NAME_NOT_FOUND
+}
+
+func handleNtOpenMutant(ctx *TrapContext) uint32 {
+	return 0xC0000034 // STATUS_OBJECT_NAME_NOT_FOUND
+}
+
+func handleNtOpenSemaphore(ctx *TrapContext) uint32 {
+	return 0xC0000034
+}
+
+func handleNtOpenSection(ctx *TrapContext) uint32 {
+	return 0xC0000034
+}
+
+func handleNtQueryAttributesFile(ctx *TrapContext) uint32 {
+	return 0xC0000034 // not found
+}
+
+func handleNtOpenProcess(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	if handlePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Process"})
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtSetInformationProcess(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleNtSetInformationThread(ctx *TrapContext) uint32  { return StatusSuccess }
+
+func handleNtCreateTimer(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	if handlePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Timer"})
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtSetTimer(ctx *TrapContext) uint32    { return StatusSuccess }
+func handleNtCancelTimer(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleLdrLoadDll(ctx *TrapContext) uint32 {
+	// LdrLoadDll(path, flags, moduleName*, handle*)
+	handlePtr := ctx.Arg(3)
+	if handlePtr != 0 {
+		ctx.Mem.Write64(handlePtr, 0) // NULL = not found
+	}
+	return StatusNotImplemented
+}
+
+func handleLdrGetDllHandleEx(ctx *TrapContext) uint32 {
+	// LdrGetDllHandleEx(flags, path, unused, moduleName*, handle*)
+	_ = ctx.Arg(0) // flags
+	moduleNamePtr := ctx.Arg(3) // UNICODE_STRING*
+	handlePtr := ctx.Arg(4)
+
+	if handlePtr != 0 {
+		ctx.Mem.Write64(handlePtr, 0)
+	}
+
+	if moduleNamePtr == 0 {
+		return 0xC0000135 // STATUS_DLL_NOT_FOUND
+	}
+
+	nameStr := readGuestUnicodeString(ctx.Mem, moduleNamePtr)
+	nameStr = strings.ToLower(nameStr)
+	if idx := strings.LastIndexAny(nameStr, "\\/"); idx >= 0 {
+		nameStr = nameStr[idx+1:]
+	}
+	if !strings.HasSuffix(nameStr, ".dll") {
+		nameStr += ".dll"
+	}
+
+	base := findModuleByName(ctx, nameStr)
+	if base == 0 {
+		return 0xC0000135 // STATUS_DLL_NOT_FOUND
+	}
+	if handlePtr != 0 {
+		ctx.Mem.Write64(handlePtr, base)
+	}
+	return StatusSuccess
+}
+
+func handleLdrAddRefDll(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleLdrGetDllPath(ctx *TrapContext) uint32 {
+	pathPtr := ctx.Arg(1)
+	if pathPtr != 0 {
+		ctx.Mem.Write64(pathPtr, 0)
+	}
+	return StatusSuccess
+}
+
+func handleLdrGetDllFullName(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleRtlDosPathNameToNtPathName_U(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE (but won't fill in the path properly)
+	return StatusSuccess
+}
+
+func handleRtlDosPathNameToNtPathName_U_WithStatus(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleRtlGetCurrentDirectory_U(ctx *TrapContext) uint32 {
+	bufLen := uint32(ctx.Arg(0))
+	buf := ctx.Arg(1)
+	cwd := `C:\`
+	if buf != 0 && bufLen >= uint32(len(cwd)*2+2) {
+		for i, ch := range cwd {
+			ctx.Mem.Write16(buf+uint64(i)*2, uint16(ch))
+		}
+		ctx.Mem.Write16(buf+uint64(len(cwd))*2, 0)
+	}
+	ctx.SetReturn(uint64(len(cwd) * 2))
+	return StatusSuccess
+}
+
+func handleRtlSetCurrentDirectory_U(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlGetFullPathName_U(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0)
+	return StatusSuccess
+}
+
+func handleRtlDetermineDosPathNameType_U(ctx *TrapContext) uint32 {
+	ctx.SetReturn(5) // RtlPathTypeRootLocalDevice
+	return StatusSuccess
+}
+
+func handleRtlInitializeBitMap(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlSetBits(ctx *TrapContext) uint32          { return StatusSuccess }
+func handleRtlClearBits(ctx *TrapContext) uint32        { return StatusSuccess }
+func handleRtlAreBitsSet(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1)
+	return StatusSuccess
+}
+func handleRtlAreBitsClear(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1)
+	return StatusSuccess
+}
+
+func handleRtlGetThreadErrorMode(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0)
+	return StatusSuccess
+}
+
+func handleRtlSetThreadErrorMode(ctx *TrapContext) uint32 {
+	oldMode := ctx.Arg(1)
+	if oldMode != 0 {
+		ctx.Mem.Write32(oldMode, 0)
+	}
+	return StatusSuccess
+}
+
+func handleRtlWow64GetProcessMachines(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+// Wine-specific stubs
+func handleWineGetVersion(ctx *TrapContext) uint32 {
+	// wine_get_version() returns pointer to version string
+	ver := "9.0"
+	buf := ctx.Mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+	for i, b := range []byte(ver) {
+		ctx.Mem.Write8(buf+uint64(i), b)
+	}
+	ctx.Mem.Write8(buf+uint64(len(ver)), 0)
+	ctx.SetReturn(buf)
+	return StatusSuccess
+}
+
+func handleWineServerCall(ctx *TrapContext) uint32 {
+	// wine_server_call(req) - return STATUS_NOT_IMPLEMENTED
+	ctx.SetReturn(0xC0000002)
+	return StatusSuccess
+}
+
+func handleWineDbgGetChannelFlags(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0) // no debug channels
+	return StatusSuccess
+}
+
+func handleWineDbgHeader(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // -1 = suppress output
+	return StatusSuccess
+}
+func handleWineDbgOutput(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0) // 0 chars written
+	return StatusSuccess
+}
+func handleWineDbgStrdup(ctx *TrapContext) uint32 {
+	ctx.SetReturn(ctx.Arg(0)) // return same pointer
+	return StatusSuccess
+}
+
+func handleRtlOpenCurrentUser(ctx *TrapContext) uint32 {
+	// RtlOpenCurrentUser(ACCESS_MASK access, PHANDLE result)
+	// Opens \\Registry\\User\\.Default
+	_ = ctx.Arg(0) // access
+	handlePtr := ctx.Arg(1)
+
+	key := ctx.Reg.OpenKey("\\Registry\\User\\.Default")
+	if key == nil {
+		// Create a stub key so callers get something valid
+		ctx.Reg.CreateKey("\\Registry\\User\\.Default")
+		key = ctx.Reg.OpenKey("\\Registry\\User\\.Default")
+	}
+	if key != nil {
+		h := ctx.Handles.Alloc(&RegistryKeyHandle{Key: key})
+		if handlePtr != 0 {
+			ctx.Mem.Write64(handlePtr, uint64(h))
+		}
+		return StatusSuccess
+	}
+	return StatusObjectNameNotFound
+}
+
+func handleRtlQueryDynamicTimeZoneInformation(ctx *TrapContext) uint32 {
+	// RTL_DYNAMIC_TIME_ZONE_INFORMATION is 0x80 (128) bytes
+	infoPtr := ctx.Arg(0)
+	if infoPtr != 0 {
+		// Zero out the structure (UTC timezone)
+		for i := uint64(0); i < 128; i++ {
+			ctx.Mem.Write8(infoPtr+i, 0)
+		}
+	}
+	return StatusSuccess
+}
+
+func handleWineNtToUnixFileName(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleWineUnixToNtFileName(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleRtlCreateEnvironment(ctx *TrapContext) uint32 {
+	envPtr := ctx.Arg(1)
+	if envPtr != 0 {
+		// Allocate a minimal environment block: just null terminator
+		envBuf := ctx.Mem.Mmap(0, 4, mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.Write16(envBuf, 0)
+		ctx.Mem.Write64(envPtr, envBuf)
+	}
+	return StatusSuccess
+}
+
+func handleRtlDestroyEnvironment(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlSetEnvironmentVariable(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlQueryEnvironmentVariable_U(ctx *TrapContext) uint32 {
+	return 0xC0000100 // STATUS_VARIABLE_NOT_FOUND
+}
+
+func handleRtlExpandEnvironmentStrings_U(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleRtlCreateProcessParametersEx(ctx *TrapContext) uint32 {
+	paramsPtr := ctx.Arg(0)
+	if paramsPtr != 0 {
+		params := ctx.Mem.Mmap(0, 1024, mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.Write32(params, 1024) // MaximumLength
+		ctx.Mem.Write32(params+4, 512) // Length
+		ctx.Mem.Write64(paramsPtr, params)
+	}
+	return StatusSuccess
+}
+
+func handleRtlDestroyProcessParameters(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlRunOnceBeginInitialize(ctx *TrapContext) uint32 {
+	return StatusSuccess // proceed with initialization
+}
+
+func handleRtlRunOnceComplete(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlRunOnceExecuteOnce(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleNtCreateIoCompletion(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	if handlePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "IoCompletion"})
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtSetIoCompletion(ctx *TrapContext) uint32     { return StatusSuccess }
+func handleNtRemoveIoCompletion(ctx *TrapContext) uint32  { return StatusSuccess }
+func handleNtRemoveIoCompletionEx(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleNtCancelIoFile(ctx *TrapContext) uint32        { return StatusSuccess }
+func handleNtCancelIoFileEx(ctx *TrapContext) uint32      { return StatusSuccess }
+
+func handleNtCreateDirectoryObject(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	if handlePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Directory"})
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtOpenDirectoryObject(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	if handlePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Directory"})
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtCreateSymbolicLinkObject(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	if handlePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "SymLink"})
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtOpenSymbolicLinkObject(ctx *TrapContext) uint32 {
+	return 0xC0000034
+}
+
+func handleNtQuerySymbolicLinkObject(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleNtSetSecurityObject(ctx *TrapContext) uint32     { return StatusSuccess }
+func handleNtQuerySecurityObject(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleNtSetInformationObject(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleNtLockFile(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleNtUnlockFile(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleNtCreateMailslotFile(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleNtCreateNamedPipeFile(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleNtFsControlFile(ctx *TrapContext) uint32 {
+	ioStatus := ctx.Arg(3)
+	if ioStatus != 0 {
+		writeIOStatus(ctx.Mem, ioStatus, StatusNotImplemented, 0)
+	}
+	return StatusNotImplemented
+}
+
+func handleNtPowerInformation(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleNtQueueApcThread(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleNtGetNlsSectionPtr(ctx *TrapContext) uint32 {
+	nlsType := ctx.Arg(0)
+	nlsID := ctx.Arg(1)
+	ptrOut := ctx.Arg(3)
+	sizeOut := ctx.Arg(4)
+
+	fmt.Fprintf(os.Stderr, "[ntapi] NtGetNlsSectionPtr type=%d id=%d ptrOut=0x%x sizeOut=0x%x\n",
+		nlsType, nlsID, ptrOut, sizeOut)
+
+	if ctx.Disp == nil || ctx.Disp.sysRoot == "" {
+		return StatusNotImplemented
+	}
+
+	var data []byte
+	var err error
+
+	switch nlsType {
+	case 11: // NLS_SECTION_CODEPAGE - c_XXXX.nls
+		data, err = ctx.Disp.loadNlsFile(uint32(nlsID))
+	case 9: // NLS_SECTION_SORTKEYS - build minimal valid sort key table
+		data = BuildSortKeyData()
+		err = nil
+	case 12: // NLS_SECTION_NORMALIZE - normNFC/NFD/NFKC/NFKD/IDNA
+		nameMap := map[uint64]string{
+			1: "normnfc.nls", 2: "normnfd.nls",
+			5: "normnfkc.nls", 6: "normnfkd.nls",
+			13: "normidna.nls",
+		}
+		if fname, ok := nameMap[nlsID]; ok {
+			path := ctx.Disp.sysRoot + "/" + fname
+			data, err = os.ReadFile(path)
+		} else {
+			return StatusNotImplemented
+		}
+	default:
+		return StatusNotImplemented
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ntapi] NtGetNlsSectionPtr: failed to load NLS type=%d id=%d: %v\n", nlsType, nlsID, err)
+		return StatusNotImplemented
+	}
+
+	// Map the NLS data into guest memory with a page of padding before
+	// the data so that Wine's negative-offset accesses (ptr[-n]) work.
+	size := uint64(len(data))
+	pad := uint64(mmu.PageSize)
+	allocSize := (size + pad + mmu.PageSize - 1) & mmu.PageMask
+	base := ctx.Mem.Mmap(0, allocSize, mmu.PermRead|mmu.PermWrite)
+	dataAddr := base + pad
+	ctx.Mem.WriteBytes(dataAddr, data)
+
+	if ptrOut != 0 {
+		ctx.Mem.Write64(ptrOut, dataAddr)
+	}
+	if sizeOut != 0 {
+		ctx.Mem.Write64(sizeOut, size)
+	}
+
+	fmt.Fprintf(os.Stderr, "[ntapi] NtGetNlsSectionPtr: mapped type=%d id=%d at 0x%x size=0x%x\n", nlsType, nlsID, dataAddr, size)
+	return StatusSuccess
+}
+
+func handleRtlGetLocaleFileMappingAddress(ctx *TrapContext) uint32 {
+	// NTSTATUS RtlGetLocaleFileMappingAddress(
+	//   PVOID *BaseAddress,           // RCX - OUT
+	//   PULONG DefaultLocaleId,       // RDX - OUT (LCID)
+	//   PLARGE_INTEGER DefaultCasingTableSize // R8 - OUT
+	// )
+	baseAddrPtr := ctx.Arg(0)
+	localeIdPtr := ctx.Arg(1)
+	casingSizePtr := ctx.Arg(2)
+
+	// Load locale.nls from sysroot (Wine uses locale.nls, not l_intl.nls)
+	var data []byte
+	if ctx.Disp != nil && ctx.Disp.sysRoot != "" {
+		path := ctx.Disp.sysRoot + "/locale.nls"
+		if d, err := os.ReadFile(path); err == nil {
+			data = d
+		}
+	}
+	if data == nil {
+		// Minimal locale data: just a zeroed page
+		data = make([]byte, 4096)
+	}
+
+	// Allocate with one extra page of padding before the data so that
+	// small negative offsets from the returned pointer read valid memory
+	// (Wine's kernelbase accesses ptr[-n] for header fields).
+	pad := mmu.PageSize
+	size := (uint64(len(data)) + uint64(pad) + mmu.PageSize - 1) & mmu.PageMask
+	base := ctx.Mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+	dataAddr := base + uint64(pad)
+	ctx.Mem.WriteBytes(dataAddr, data)
+
+	fmt.Fprintf(os.Stderr, "[ntapi] RtlGetLocaleFileMappingAddress: mapped locale.nls at 0x%x size=0x%x\n", dataAddr, len(data))
+
+	if baseAddrPtr != 0 {
+		ctx.Mem.Write64(baseAddrPtr, dataAddr)
+	}
+	if localeIdPtr != 0 {
+		ctx.Mem.Write32(localeIdPtr, 0x0409) // en-US
+	}
+	if casingSizePtr != 0 {
+		ctx.Mem.Write64(casingSizePtr, uint64(len(data)))
+	}
+
+	return StatusSuccess
+}
+
+func handleRtlGetProductInfo(ctx *TrapContext) uint32 {
+	retPtr := ctx.Arg(4)
+	if retPtr != 0 {
+		ctx.Mem.Write32(retPtr, 0x65) // PRODUCT_CORE = Windows 10 Home
+	}
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleRtlGetSystemPreferredUILanguages(ctx *TrapContext) uint32 {
+	numLangs := ctx.Arg(1)
+	buf := ctx.Arg(2)
+	bufLen := ctx.Arg(3)
+	if numLangs != 0 {
+		ctx.Mem.Write32(numLangs, 1)
+	}
+	if buf != 0 && bufLen != 0 {
+		lang := "en-US"
+		maxLen, _ := ctx.Mem.Read32(bufLen)
+		if maxLen >= uint32((len(lang)+2)*2) {
+			for i, ch := range lang {
+				ctx.Mem.Write16(buf+uint64(i)*2, uint16(ch))
+			}
+			ctx.Mem.Write16(buf+uint64(len(lang))*2, 0)
+			ctx.Mem.Write16(buf+uint64(len(lang)+1)*2, 0)
+		}
+		ctx.Mem.Write32(bufLen, uint32((len(lang)+2)*2))
+	}
+	return StatusSuccess
+}
+
+func handleRtlGetUserPreferredUILanguages(ctx *TrapContext) uint32 {
+	return handleRtlGetSystemPreferredUILanguages(ctx)
+}
+
+func handleRtlGetProcessPreferredUILanguages(ctx *TrapContext) uint32 {
+	return handleRtlGetSystemPreferredUILanguages(ctx)
+}
+
+func handleRtlGetThreadPreferredUILanguages(ctx *TrapContext) uint32 {
+	return handleRtlGetSystemPreferredUILanguages(ctx)
+}
+
+func handleRtlGetSystemTimePrecise(ctx *TrapContext) uint32 {
+	// Returns 100ns intervals since 1601-01-01
+	now := time.Now()
+	epoch := time.Date(1601, 1, 1, 0, 0, 0, 0, time.UTC)
+	intervals := now.Sub(epoch).Nanoseconds() / 100
+	ctx.SetReturn(uint64(intervals))
+	return StatusSuccess
+}
+
+func handleRtlTimeFieldsToTime(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleRtlTimeToTimeFields(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleRtlQueryUnbiasedInterruptTime(ctx *TrapContext) uint32 {
+	ptr := ctx.Arg(0)
+	if ptr != 0 {
+		ctx.Mem.Write64(ptr, uint64(time.Now().UnixNano()/100))
+	}
+	return StatusSuccess
+}
+
+func handleNtSetInformationToken(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlCreateSecurityDescriptor(ctx *TrapContext) uint32 {
+	sd := ctx.Arg(0)
+	if sd != 0 {
+		ctx.Mem.Write8(sd, 1) // Revision
+	}
+	return StatusSuccess
+}
+
+func handleRtlSetDaclSecurityDescriptor(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlCreateAcl(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlAddAccessAllowedAce(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlAddAccessAllowedAceEx(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlAllocateAndInitializeSid(ctx *TrapContext) uint32 {
+	sidPtr := ctx.Arg(0)
+	if sidPtr != 0 {
+		sid := ctx.Mem.Mmap(0, 28, mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.Write8(sid, 1) // Revision
+		ctx.Mem.Write8(sid+1, 1) // SubAuthorityCount
+		ctx.Mem.Write64(sidPtr, sid)
+	}
+	return StatusSuccess
+}
+
+func handleRtlFreeSid(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlCopySid(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlEqualSid(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+func handleRtlLengthSid(ctx *TrapContext) uint32 {
+	ctx.SetReturn(12)
+	return StatusSuccess
+}
+func handleRtlInitializeSid(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlValidSid(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+func handleRtlSubAuthorityCountSid(ctx *TrapContext) uint32 {
+	sid := ctx.Arg(0)
+	if sid != 0 {
+		ctx.SetReturn(sid + 1) // pointer to SubAuthorityCount byte
+	}
+	return StatusSuccess
+}
+func handleRtlSubAuthoritySid(ctx *TrapContext) uint32 {
+	sid := ctx.Arg(0)
+	idx := ctx.Arg(1)
+	if sid != 0 {
+		ctx.SetReturn(sid + 8 + idx*4)
+	}
+	return StatusSuccess
+}
+func handleRtlIdentifierAuthoritySid(ctx *TrapContext) uint32 {
+	sid := ctx.Arg(0)
+	if sid != 0 {
+		ctx.SetReturn(sid + 2) // pointer to IdentifierAuthority
+	}
+	return StatusSuccess
+}
+
+func handleNtPrivilegeCheck(ctx *TrapContext) uint32 {
+	result := ctx.Arg(2)
+	if result != 0 {
+		ctx.Mem.Write8(result, 1) // privileges held
+	}
+	return StatusSuccess
+}
+
+func handleNtAdjustPrivilegesToken(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlQueryActivationContextApplicationSettings(ctx *TrapContext) uint32 {
+	return 0xC015000F // STATUS_SXS_KEY_NOT_FOUND
+}
+func handleRtlFindActivationContextSectionString(ctx *TrapContext) uint32 {
+	return 0xC000008B // STATUS_SXS_SECTION_NOT_FOUND
+}
+func handleRtlFindActivationContextSectionGuid(ctx *TrapContext) uint32 {
+	return 0xC000008B
+}
+func handleRtlActivateActivationContext(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlDeactivateActivationContext(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlGetActiveActivationContext(ctx *TrapContext) uint32 {
+	cookie := ctx.Arg(0)
+	if cookie != 0 {
+		ctx.Mem.Write64(cookie, 0)
+	}
+	return StatusSuccess
+}
+func handleRtlAddRefActivationContext(ctx *TrapContext) uint32     { return StatusSuccess }
+func handleRtlReleaseActivationContext(ctx *TrapContext) uint32    { return StatusSuccess }
+func handleRtlCreateActivationContext(ctx *TrapContext) uint32     { return StatusSuccess }
+func handleRtlZombifyActivationContext(ctx *TrapContext) uint32    { return StatusSuccess }
+func handleRtlFreeActivationContextStack(ctx *TrapContext) uint32  { return StatusSuccess }
+func handleRtlQueryInformationActivationContext(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleRtlQueueWorkItem(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlCreateTimer(ctx *TrapContext) uint32 {
+	timerPtr := ctx.Arg(1)
+	if timerPtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "RtlTimer"})
+		ctx.Mem.Write64(timerPtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleRtlDeleteTimer(ctx *TrapContext) uint32         { return StatusSuccess }
+func handleRtlUpdateTimer(ctx *TrapContext) uint32         { return StatusSuccess }
+func handleRtlCreateTimerQueue(ctx *TrapContext) uint32 {
+	queuePtr := ctx.Arg(0)
+	if queuePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "TimerQueue"})
+		ctx.Mem.Write64(queuePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+func handleRtlDeleteTimerQueueEx(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlRegisterWait(ctx *TrapContext) uint32 {
+	waitPtr := ctx.Arg(0)
+	if waitPtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Wait"})
+		ctx.Mem.Write64(waitPtr, uint64(h))
+	}
+	return StatusSuccess
+}
+func handleRtlDeregisterWait(ctx *TrapContext) uint32    { return StatusSuccess }
+func handleRtlDeregisterWaitEx(ctx *TrapContext) uint32  { return StatusSuccess }
+
+func handleRtlSetIoCompletionCallback(ctx *TrapContext) uint32 { return StatusSuccess }
+
+func handleRtlGUIDFromString(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleRtlFindMessage(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleRtlFormatMessage(ctx *TrapContext) uint32 {
+	return StatusNotImplemented
+}
+
+func handleRtlUTF8ToUnicodeN(ctx *TrapContext) uint32 {
+	dst := ctx.Arg(0)
+	dstMax := uint32(ctx.Arg(1))
+	resultLenPtr := ctx.Arg(2)
+	src := ctx.Arg(3)
+	srcLen := uint32(ctx.Arg(4))
+
+	written := uint32(0)
+	i := uint32(0)
+	for i < srcLen && written+2 <= dstMax {
+		b, err := ctx.Mem.Read8(src + uint64(i))
+		if err != nil {
+			break
+		}
+		if b < 0x80 {
+			if dst != 0 {
+				ctx.Mem.Write16(dst+uint64(written), uint16(b))
+			}
+			written += 2
+			i++
+		} else if b < 0xE0 && i+1 < srcLen {
+			b2, _ := ctx.Mem.Read8(src + uint64(i+1))
+			ch := uint16(b&0x1F)<<6 | uint16(b2&0x3F)
+			if dst != 0 {
+				ctx.Mem.Write16(dst+uint64(written), ch)
+			}
+			written += 2
+			i += 2
+		} else if b < 0xF0 && i+2 < srcLen {
+			b2, _ := ctx.Mem.Read8(src + uint64(i+1))
+			b3, _ := ctx.Mem.Read8(src + uint64(i+2))
+			ch := uint16(b&0x0F)<<12 | uint16(b2&0x3F)<<6 | uint16(b3&0x3F)
+			if dst != 0 {
+				ctx.Mem.Write16(dst+uint64(written), ch)
+			}
+			written += 2
+			i += 3
+		} else {
+			if dst != 0 {
+				ctx.Mem.Write16(dst+uint64(written), '?')
+			}
+			written += 2
+			i++
+		}
+	}
+	if resultLenPtr != 0 {
+		ctx.Mem.Write32(resultLenPtr, written)
+	}
+	return StatusSuccess
+}
+
+func handleRtlUnicodeToUTF8N(ctx *TrapContext) uint32 {
+	dst := ctx.Arg(0)
+	dstMax := uint32(ctx.Arg(1))
+	resultLenPtr := ctx.Arg(2)
+	src := ctx.Arg(3)
+	srcLen := uint32(ctx.Arg(4))
+
+	written := uint32(0)
+	for i := uint32(0); i+2 <= srcLen && written < dstMax; i += 2 {
+		ch, _ := ctx.Mem.Read16(src + uint64(i))
+		if ch < 0x80 {
+			if dst != 0 {
+				ctx.Mem.Write8(dst+uint64(written), uint8(ch))
+			}
+			written++
+		} else if ch < 0x800 {
+			if written+2 > dstMax {
+				break
+			}
+			if dst != 0 {
+				ctx.Mem.Write8(dst+uint64(written), uint8(0xC0|(ch>>6)))
+				ctx.Mem.Write8(dst+uint64(written+1), uint8(0x80|(ch&0x3F)))
+			}
+			written += 2
+		} else {
+			if written+3 > dstMax {
+				break
+			}
+			if dst != 0 {
+				ctx.Mem.Write8(dst+uint64(written), uint8(0xE0|(ch>>12)))
+				ctx.Mem.Write8(dst+uint64(written+1), uint8(0x80|((ch>>6)&0x3F)))
+				ctx.Mem.Write8(dst+uint64(written+2), uint8(0x80|(ch&0x3F)))
+			}
+			written += 3
+		}
+	}
+	if resultLenPtr != 0 {
+		ctx.Mem.Write32(resultLenPtr, written)
+	}
+	return StatusSuccess
+}
+
+func handleRtlIsNormalizedString(ctx *TrapContext) uint32 {
+	resultPtr := ctx.Arg(2)
+	if resultPtr != 0 {
+		ctx.Mem.Write8(resultPtr, 1) // already normalized
+	}
+	return StatusSuccess
+}
+
+func handleRtlNormalizeString(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleRtlSleepConditionVariableCS(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleRtlSleepConditionVariableSRW(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleRtlWaitOnAddress(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+func handleDbgBreakPoint(ctx *TrapContext) uint32 {
+	return StatusSuccess // ignore breakpoints
+}
+
+func handleNtNotifyChangeKey(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleNtNotifyChangeDirectoryFile(ctx *TrapContext) uint32 { return StatusSuccess }
+
+// Etw stubs
+func handleEtwEventRegister(ctx *TrapContext) uint32     { return StatusSuccess }
+func handleEtwEventUnregister(ctx *TrapContext) uint32   { return StatusSuccess }
+func handleEtwEventWrite(ctx *TrapContext) uint32        { return StatusSuccess }
+func handleEtwEventEnabled(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0) // not enabled
+	return StatusSuccess
+}
+
+func handleNtQueryFullAttributesFile(ctx *TrapContext) uint32 {
+	return 0xC0000034 // STATUS_OBJECT_NAME_NOT_FOUND
+}
+
+func handleNtCompareObjects(ctx *TrapContext) uint32 {
+	h1 := ctx.Arg(0)
+	h2 := ctx.Arg(1)
+	if h1 == h2 {
+		return StatusSuccess
+	}
+	return StatusNotImplemented
+}
+
+func handleNtSetSystemInformation(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleNtSetSystemTime(ctx *TrapContext) uint32        { return StatusSuccess }
+
+func handleRtlWow64EnableFsRedirection(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlWow64EnableFsRedirectionEx(ctx *TrapContext) uint32 { return StatusSuccess }
+
+// handleLdrDisableThreadCalloutsForDll disables DLL_THREAD_ATTACH/DETACH notifications.
+func handleLdrDisableThreadCalloutsForDll(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0) // STATUS_SUCCESS
+	return StatusSuccess
+}
+
+// handleVsnprintf implements _vsnprintf(buf, count, fmt, args).
+// We do a minimal implementation that reads the format string and copies it without formatting.
+func handleVsnprintf(ctx *TrapContext) uint32 {
+	buf := ctx.Arg(0)
+	count := ctx.Arg(1)
+	fmtAddr := ctx.Arg(2)
+
+	if buf == 0 || count == 0 || fmtAddr == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+
+	// Read format string
+	var fmtBytes []byte
+	for i := uint64(0); i < 4096; i++ {
+		b, _ := ctx.Mem.Read8(fmtAddr + i)
+		if b == 0 {
+			break
+		}
+		fmtBytes = append(fmtBytes, b)
+	}
+
+	// Simple: just copy format string as-is (no substitution)
+	// This is enough for Wine debug output which uses it for logging
+	n := uint64(len(fmtBytes))
+	if n >= count {
+		n = count - 1
+	}
+	for i := uint64(0); i < n; i++ {
+		ctx.Mem.Write8(buf+i, fmtBytes[i])
+	}
+	ctx.Mem.Write8(buf+n, 0)
+	ctx.SetReturn(n)
+	return StatusSuccess
+}
+
+// handleVsnwprintf implements _vsnwprintf(buf, count, fmt, args).
+func handleVsnwprintf(ctx *TrapContext) uint32 {
+	buf := ctx.Arg(0)
+	count := ctx.Arg(1)
+	fmtAddr := ctx.Arg(2)
+
+	if buf == 0 || count == 0 || fmtAddr == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+
+	// Read wide format string
+	var fmtChars []uint16
+	for i := uint64(0); i < 4096; i++ {
+		ch, _ := ctx.Mem.Read16(fmtAddr + i*2)
+		if ch == 0 {
+			break
+		}
+		fmtChars = append(fmtChars, ch)
+	}
+
+	n := uint64(len(fmtChars))
+	if n >= count {
+		n = count - 1
+	}
+	for i := uint64(0); i < n; i++ {
+		ctx.Mem.Write16(buf+i*2, fmtChars[i])
+	}
+	ctx.Mem.Write16(buf+n*2, 0)
+	ctx.SetReturn(n)
+	return StatusSuccess
+}
+
+// handleRtlFindClearBitsAndSet finds 'count' contiguous clear bits in a bitmap,
+// sets them, and returns the starting index (or 0xFFFFFFFF if not found).
+func handleRtlFindClearBitsAndSet(ctx *TrapContext) uint32 {
+	bitmapAddr := ctx.Arg(0)
+	numBits := uint32(ctx.Arg(1))
+	hintIdx := uint32(ctx.Arg(2))
+
+	if bitmapAddr == 0 || numBits == 0 {
+		ctx.SetReturn(0xFFFFFFFF)
+		return StatusSuccess
+	}
+
+	// RTL_BITMAP: { ULONG SizeOfBitMap; PULONG Buffer; }
+	sizeOfBitMap, _ := ctx.Mem.Read32(bitmapAddr)
+	bufferAddr, _ := ctx.Mem.Read64(bitmapAddr + 8)
+
+	if bufferAddr == 0 || sizeOfBitMap == 0 {
+		ctx.SetReturn(0xFFFFFFFF)
+		return StatusSuccess
+	}
+
+	// Search for numBits contiguous clear bits starting from hintIdx
+	for start := hintIdx; start+numBits <= sizeOfBitMap; start++ {
+		found := true
+		for bit := uint32(0); bit < numBits; bit++ {
+			idx := start + bit
+			wordIdx := idx / 32
+			bitIdx := idx % 32
+			word, _ := ctx.Mem.Read32(bufferAddr + uint64(wordIdx)*4)
+			if word&(1<<bitIdx) != 0 {
+				found = false
+				start = start + bit // skip ahead
+				break
+			}
+		}
+		if found {
+			// Set the bits
+			for bit := uint32(0); bit < numBits; bit++ {
+				idx := start + bit
+				wordIdx := idx / 32
+				bitIdx := idx % 32
+				addr := bufferAddr + uint64(wordIdx)*4
+				word, _ := ctx.Mem.Read32(addr)
+				word |= 1 << bitIdx
+				ctx.Mem.Write32(addr, word)
+			}
+			ctx.SetReturn(uint64(start))
+			return StatusSuccess
+		}
+	}
+	// Wrap around from 0 if hint was > 0
+	if hintIdx > 0 {
+		for start := uint32(0); start+numBits <= hintIdx; start++ {
+			found := true
+			for bit := uint32(0); bit < numBits; bit++ {
+				idx := start + bit
+				wordIdx := idx / 32
+				bitIdx := idx % 32
+				word, _ := ctx.Mem.Read32(bufferAddr + uint64(wordIdx)*4)
+				if word&(1<<bitIdx) != 0 {
+					found = false
+					start = start + bit
+					break
+				}
+			}
+			if found {
+				for bit := uint32(0); bit < numBits; bit++ {
+					idx := start + bit
+					wordIdx := idx / 32
+					bitIdx := idx % 32
+					addr := bufferAddr + uint64(wordIdx)*4
+					word, _ := ctx.Mem.Read32(addr)
+					word |= 1 << bitIdx
+					ctx.Mem.Write32(addr, word)
+				}
+				ctx.SetReturn(uint64(start))
+				return StatusSuccess
+			}
+		}
+	}
+
+	ctx.SetReturn(0xFFFFFFFF)
+	return StatusSuccess
+}
+
+// handleLdrQueryImageFileExecutionOptions is a stub - returns not found.
+func handleLdrQueryImageFileExecutionOptions(ctx *TrapContext) uint32 {
+	ctx.SetReturn(uint64(StatusObjectNameNotFound))
+	return StatusObjectNameNotFound
+}
+
+// handleRtlReleasePath frees a path returned by LdrGetDllPath.
+func handleRtlReleasePath(ctx *TrapContext) uint32 {
+	return StatusSuccess
+}
+
+// handleNtUserInitializeClientPfnArrays registers user32's client-side callback table.
+func handleNtUserInitializeClientPfnArrays(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0)
+	return StatusSuccess
+}
+
+// handleNtUserGetSystemDpiForProcess returns the system DPI.
+func handleNtUserGetSystemDpiForProcess(ctx *TrapContext) uint32 {
+	ctx.SetReturn(96) // standard DPI
+	return StatusSuccess
+}
+
+// ======================== ATOM TABLE ========================
+
+var atomCounter uint32 = 0xC000 // Start from 0xC000 (application atoms)
+var atomTable = map[string]uint32{}
+
+func handleNtAddAtom(ctx *TrapContext) uint32 {
+namePtr := ctx.Arg(0)
+nameLen := ctx.Arg(1) // length in bytes
+atomPtr := ctx.Arg(2) // output RTL_ATOM*
+
+name := ""
+if namePtr != 0 && nameLen > 0 {
+name = readGuestStringUTF16(ctx.Mem, namePtr, int(nameLen))
+}
+
+atom, ok := atomTable[name]
+if !ok {
+atom = atomCounter
+atomCounter++
+atomTable[name] = atom
+}
+
+if atomPtr != 0 {
+ctx.Mem.Write16(atomPtr, uint16(atom))
+}
+return StatusSuccess
+}
+
+func handleNtDeleteAtom(ctx *TrapContext) uint32 {
+return StatusSuccess
+}
+
+func handleNtFindAtom(ctx *TrapContext) uint32 {
+namePtr := ctx.Arg(0)
+nameLen := ctx.Arg(1)
+atomPtr := ctx.Arg(2)
+
+name := ""
+if namePtr != 0 && nameLen > 0 {
+name = readGuestStringUTF16(ctx.Mem, namePtr, int(nameLen))
+}
+
+atom, ok := atomTable[name]
+if !ok {
+return StatusObjectNameNotFound
+}
+
+if atomPtr != 0 {
+ctx.Mem.Write16(atomPtr, uint16(atom))
+}
+return StatusSuccess
+}
+
+func handleNtQueryInformationAtom(ctx *TrapContext) uint32 {
+return StatusNotImplemented
+}
+
+// ======================== NtUserCallOneParam / NtUserCallTwoParam ========================
+
+func handleNtUserCallOneParam(ctx *TrapContext) uint32 {
+param := ctx.Arg(0)
+code := ctx.Arg(1) // function code
+
+if ctx.Trace {
+	fmt.Printf("  NtUserCallOneParam: code=%d param=0x%x\n", code, param)
+}
+
+switch code {
+case 11: // ONEPARAM_ROUTINE_GETSYSTEMMETRICS
+	ctx.SetReturn(getSystemMetric(uint32(param)))
+case 21: // ONEPARAM_ROUTINE_SETCARETBLINKTIME
+	ctx.SetReturn(1) // TRUE
+case 26: // ONEPARAM_ROUTINE_SETPROCESSDEFAULTLAYOUT
+	ctx.SetReturn(1)
+case 28: // ONEPARAM_ROUTINE_CREATEEMPTYCURSOROBJECT
+	h := ctx.Handles.Alloc(&GenericHandle{Kind: "cursor"})
+	ctx.SetReturn(uint64(h))
+case 37: // ONEPARAM_ROUTINE_GETDPIFORMONITOR
+	ctx.SetReturn(96) // 96 DPI
+case 73: // ONEPARAM_ROUTINE_RELEASEDC
+	ctx.SetReturn(1)
+default:
+	ctx.SetReturn(0)
+}
+return StatusSuccess
+}
+
+func getSystemMetric(index uint32) uint64 {
+	switch index {
+	case 0: // SM_CXSCREEN
+		return 1920
+	case 1: // SM_CYSCREEN
+		return 1080
+	case 2: // SM_CXVSCROLL
+		return 17
+	case 3: // SM_CYHSCROLL
+		return 17
+	case 4: // SM_CYCAPTION
+		return 23
+	case 5: // SM_CXBORDER
+		return 1
+	case 6: // SM_CYBORDER
+		return 1
+	case 7: // SM_CXDLGFRAME / SM_CXFIXEDFRAME
+		return 3
+	case 8: // SM_CYDLGFRAME / SM_CYFIXEDFRAME
+		return 3
+	case 11: // SM_CXHTHUMB
+		return 17
+	case 12: // SM_CYICON
+		return 32
+	case 13: // SM_CXCURSOR (also SM_CXICON)
+		return 32
+	case 14: // SM_CYCURSOR
+		return 32
+	case 15: // SM_CYMENU
+		return 20
+	case 16: // SM_CXFULLSCREEN
+		return 1920
+	case 17: // SM_CYFULLSCREEN
+		return 1017 // 1080 - caption - menu
+	case 18: // SM_CYKANJIWINDOW
+		return 0
+	case 20: // SM_CXHSCROLL
+		return 17
+	case 21: // SM_CYVSCROLL
+		return 17
+	case 22: // SM_CXMIN
+		return 136
+	case 23: // SM_CYMIN
+		return 39
+	case 24: // SM_CXSIZE
+		return 36
+	case 25: // SM_CYSIZE
+		return 36
+	case 26: // SM_CXFRAME / SM_CXSIZEFRAME
+		return 4
+	case 27: // SM_CYFRAME / SM_CYSIZEFRAME
+		return 4
+	case 28: // SM_CXMINTRACK
+		return 136
+	case 29: // SM_CYMINTRACK
+		return 39
+	case 30: // SM_CXDOUBLECLK
+		return 4
+	case 31: // SM_CYDOUBLECLK
+		return 4
+	case 32: // SM_CXICONSPACING
+		return 75
+	case 33: // SM_CYICONSPACING
+		return 75
+	case 34: // SM_MENUDROPALIGNMENT
+		return 0
+	case 36: // SM_CXDRAG
+		return 4
+	case 37: // SM_CYDRAG
+		return 4
+	case 43: // SM_SWAPBUTTON
+		return 0
+	case 45: // SM_CXEDGE (SM_CXBORDER*2)
+		return 2
+	case 46: // SM_CYEDGE (SM_CYBORDER*2)
+		return 2
+	case 47: // SM_CXMINSPACING
+		return 160
+	case 48: // SM_CYMINSPACING
+		return 24
+	case 49: // SM_CXSMICON
+		return 16
+	case 50: // SM_CYSMICON
+		return 16
+	case 51: // SM_CYSMCAPTION
+		return 23
+	case 52: // SM_CXSMSIZE
+		return 12
+	case 53: // SM_CYSMSIZE
+		return 14
+	case 54: // SM_CXMENUSIZE
+		return 18
+	case 55: // SM_CYMENUSIZE
+		return 18
+	case 67: // SM_IMMENABLED
+		return 0
+	case 70: // SM_CMETRICS
+		return 76
+	case 75: // SM_CXFOCUSBORDER
+		return 1
+	case 76: // SM_CYFOCUSBORDER
+		return 1
+	case 78: // SM_CXPADDEDBORDER
+		return 4
+	case 80: // SM_DIGITIZER
+		return 0
+	default:
+		return 0
+	}
+}
+
+func handleNtUserCallTwoParam(ctx *TrapContext) uint32 {
+//param1 := ctx.Arg(0)
+//param2 := ctx.Arg(1)
+//code := ctx.Arg(2)
+ctx.SetReturn(0) // generic success
+return StatusSuccess
+}
+
+// ---- SList (Singly-Linked List) operations ----
+// SLIST_HEADER is 16 bytes: { NextEntry uint64; Depth uint16; CpuId uint16; pad uint32 }
+
+func handleRtlInitializeSListHead(ctx *TrapContext) uint32 {
+	head := ctx.Arg(0)
+	if head != 0 {
+		ctx.Mem.Write64(head, 0)   // NextEntry = NULL
+		ctx.Mem.Write64(head+8, 0) // Depth=0, CpuId=0
+	}
+	return StatusSuccess
+}
+
+func handleRtlInterlockedFlushSList(ctx *TrapContext) uint32 {
+	head := ctx.Arg(0)
+	if head == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	first, _ := ctx.Mem.Read64(head)
+	ctx.Mem.Write64(head, 0)   // clear list
+	ctx.Mem.Write64(head+8, 0) // depth=0
+	ctx.SetReturn(first)
+	return StatusSuccess
+}
+
+func handleRtlInterlockedPopEntrySList(ctx *TrapContext) uint32 {
+	head := ctx.Arg(0)
+	if head == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	first, _ := ctx.Mem.Read64(head)
+	if first == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	next, _ := ctx.Mem.Read64(first) // SLIST_ENTRY.Next
+	ctx.Mem.Write64(head, next)
+	// Decrement depth
+	depthWord, _ := ctx.Mem.Read16(head + 8)
+	if depthWord > 0 {
+		ctx.Mem.Write16(head+8, depthWord-1)
+	}
+	ctx.SetReturn(first)
+	return StatusSuccess
+}
+
+func handleRtlInterlockedPushEntrySList(ctx *TrapContext) uint32 {
+	head := ctx.Arg(0)
+	entry := ctx.Arg(1)
+	if head == 0 || entry == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	oldFirst, _ := ctx.Mem.Read64(head)
+	ctx.Mem.Write64(entry, oldFirst) // entry->Next = old first
+	ctx.Mem.Write64(head, entry)     // head->NextEntry = entry
+	// Increment depth
+	depthWord, _ := ctx.Mem.Read16(head + 8)
+	ctx.Mem.Write16(head+8, depthWord+1)
+	ctx.SetReturn(oldFirst)
+	return StatusSuccess
+}
+
+func handleRtlQueryDepthSList(ctx *TrapContext) uint32 {
+	head := ctx.Arg(0)
+	if head == 0 {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	depth, _ := ctx.Mem.Read16(head + 8)
+	ctx.SetReturn(uint64(depth))
+	return StatusSuccess
+}
+
+// ---- Performance Counter ----
+
+var perfFreq uint64 = 1_000_000_000 // 1GHz (nanosecond resolution)
+
+func handleRtlQueryPerformanceCounter(ctx *TrapContext) uint32 {
+	out := ctx.Arg(0) // LARGE_INTEGER*
+	if out != 0 {
+		ctx.Mem.Write64(out, uint64(time.Now().UnixNano()))
+	}
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleRtlQueryPerformanceFrequency(ctx *TrapContext) uint32 {
+	out := ctx.Arg(0) // LARGE_INTEGER*
+	if out != 0 {
+		ctx.Mem.Write64(out, perfFreq)
+	}
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+// ---- Misc ----
+
+func handleRtlRandom(ctx *TrapContext) uint32 {
+	seedPtr := ctx.Arg(0) // ULONG*
+	var seed uint32
+	if seedPtr != 0 {
+		v, _ := ctx.Mem.Read32(seedPtr)
+		seed = v
+	}
+	// Simple LCG
+	seed = seed*214013 + 2531011
+	if seedPtr != 0 {
+		ctx.Mem.Write32(seedPtr, seed)
+	}
+	ctx.SetReturn(uint64(seed >> 16 & 0x7FFF))
+	return StatusSuccess
+}
+
+func handleWineGetHostVersion(ctx *TrapContext) uint32 {
+	// wine_get_host_version(const char **sysname, const char **release)
+	sysname := ctx.Arg(0)
+	release := ctx.Arg(1)
+	if sysname != 0 {
+		buf := ctx.Mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+		for i, b := range []byte("Linux") {
+			ctx.Mem.Write8(buf+uint64(i), b)
+		}
+		ctx.Mem.Write8(buf+5, 0)
+		ctx.Mem.Write64(sysname, buf)
+	}
+	if release != 0 {
+		buf := ctx.Mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+		for i, b := range []byte("6.1.0") {
+			ctx.Mem.Write8(buf+uint64(i), b)
+		}
+		ctx.Mem.Write8(buf+5, 0)
+		ctx.Mem.Write64(release, buf)
+	}
+	return StatusSuccess
+}
+
+// ======================== NtGdi* - GDI Object Stubs ========================
+
+func handleNtGdiCreateBitmap(ctx *TrapContext) uint32 {
+	// NtGdiCreateBitmap(width, height, planes, bpp, bits)
+	w := ctx.Arg(0)
+	h := ctx.Arg(1)
+	if ctx.Trace {
+		fmt.Printf("  NtGdiCreateBitmap: %dx%d planes=%d bpp=%d\n", w, h, ctx.Arg(2), ctx.Arg(3))
+	}
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "bitmap"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiCreatePatternBrushInternal(ctx *TrapContext) uint32 {
+	bitmapHandle := ctx.Arg(0)
+	if ctx.Trace {
+		fmt.Printf("  NtGdiCreatePatternBrushInternal: bitmap=0x%x\n", bitmapHandle)
+	}
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "brush"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiDeleteObjectApp(ctx *TrapContext) uint32 {
+	h := Handle(ctx.Arg(0))
+	ctx.Handles.Close(h)
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleNtGdiSelectBitmap(ctx *TrapContext) uint32 {
+	// Returns previous bitmap handle (fake)
+	ctx.SetReturn(ctx.Arg(1)) // return the bitmap being selected
+	return StatusSuccess
+}
+
+func handleNtGdiSelectBrush(ctx *TrapContext) uint32 {
+	ctx.SetReturn(ctx.Arg(1))
+	return StatusSuccess
+}
+
+func handleNtGdiSelectPen(ctx *TrapContext) uint32 {
+	ctx.SetReturn(ctx.Arg(1))
+	return StatusSuccess
+}
+
+func handleNtGdiSelectFont(ctx *TrapContext) uint32 {
+	ctx.SetReturn(ctx.Arg(1))
+	return StatusSuccess
+}
+
+func handleNtGdiCreateSolidBrush(ctx *TrapContext) uint32 {
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "brush"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiCreatePen(ctx *TrapContext) uint32 {
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "pen"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiCreateRectRgn(ctx *TrapContext) uint32 {
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "region"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiCreateCompatibleDC(ctx *TrapContext) uint32 {
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "dc"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiCreateCompatibleBitmap(ctx *TrapContext) uint32 {
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "bitmap"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiHfontCreate(ctx *TrapContext) uint32 {
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "font"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiExtGetObjectW(ctx *TrapContext) uint32 {
+	// Returns the size of data written (0 = error, but return 1 for basic compat)
+	ctx.SetReturn(0)
+	return StatusSuccess
+}
+
+func handleNtGdiGetDeviceCaps(ctx *TrapContext) uint32 {
+	index := ctx.Arg(1)
+	var val uint64
+	switch index {
+	case 8: // HORZRES
+		val = 1920
+	case 10: // VERTRES
+		val = 1080
+	case 12: // BITSPIXEL
+		val = 32
+	case 14: // PLANES
+		val = 1
+	case 88: // LOGPIXELSX
+		val = 96
+	case 90: // LOGPIXELSY
+		val = 96
+	case 118: // DESKTOPHORZRES
+		val = 1920
+	case 117: // DESKTOPVERTRES
+		val = 1080
+	default:
+		val = 0
+	}
+	ctx.SetReturn(val)
+	return StatusSuccess
+}
+
+func handleNtGdiGetAndSetDCDword(ctx *TrapContext) uint32 {
+	resultPtr := ctx.Arg(3)
+	if resultPtr != 0 {
+		ctx.Mem.Write32(resultPtr, 0)
+	}
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleNtGdiSaveDC(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // Save level 1
+	return StatusSuccess
+}
+
+func handleNtGdiRestoreDC(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1)
+	return StatusSuccess
+}
+
+func handleNtGdiCombineRgn(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // NULLREGION
+	return StatusSuccess
+}
+
+func handleNtGdiGetRgnBox(ctx *TrapContext) uint32 {
+	rectPtr := ctx.Arg(1)
+	if rectPtr != 0 {
+		ctx.Mem.Write32(rectPtr, 0)    // left
+		ctx.Mem.Write32(rectPtr+4, 0)  // top
+		ctx.Mem.Write32(rectPtr+8, 0)  // right
+		ctx.Mem.Write32(rectPtr+12, 0) // bottom
+	}
+	ctx.SetReturn(1) // NULLREGION
+	return StatusSuccess
+}
+
+func handleNtGdiSetRectRgn(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleNtGdiOffsetRgn(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // NULLREGION
+	return StatusSuccess
+}
+
+func handleNtGdiPatBlt(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleNtGdiBitBlt(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleNtGdiOpenDCW(ctx *TrapContext) uint32 {
+	handle := ctx.Handles.Alloc(&GenericHandle{Kind: "dc"})
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
+func handleNtGdiGetTextMetricsW(ctx *TrapContext) uint32 {
+	tmPtr := ctx.Arg(1)
+	if tmPtr != 0 {
+		// Fill TEXTMETRICW with reasonable defaults (60 bytes)
+		for i := uint64(0); i < 60; i += 4 {
+			ctx.Mem.Write32(tmPtr+i, 0)
+		}
+		ctx.Mem.Write32(tmPtr+0, 16)  // tmHeight
+		ctx.Mem.Write32(tmPtr+4, 12)  // tmAscent
+		ctx.Mem.Write32(tmPtr+8, 4)   // tmDescent
+		ctx.Mem.Write32(tmPtr+20, 8)  // tmAveCharWidth
+		ctx.Mem.Write32(tmPtr+24, 16) // tmMaxCharWidth
+	}
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+func handleNtGdiFlush(ctx *TrapContext) uint32 {
+	ctx.SetReturn(1) // TRUE
+	return StatusSuccess
+}
+
+// ======================== CRT HANDLERS (complex, trap-based) ========================
+
+func handleStrtol(ctx *TrapContext) uint32 {
+	strAddr := ctx.Arg(0)
+	endptrAddr := ctx.Arg(1)
+	base := ctx.Arg(2)
+
+	s := readCString(ctx.Mem, strAddr, 64)
+	val, _ := strconvParseInt(s, int(base))
+	ctx.CPU.SetSyscallReturn(uint64(val))
+	ctx.ReturnOverridden = true
+	if endptrAddr != 0 {
+		ctx.Mem.Write64(endptrAddr, strAddr+uint64(len(s)))
+	}
+	return 0
+}
+
+func handleWcstol(ctx *TrapContext) uint32 {
+	strAddr := ctx.Arg(0)
+	endptrAddr := ctx.Arg(1)
+	base := ctx.Arg(2)
+
+	s := readWideString(ctx.Mem, strAddr, 64)
+	val, _ := strconvParseInt(s, int(base))
+	ctx.CPU.SetSyscallReturn(uint64(val))
+	ctx.ReturnOverridden = true
+	if endptrAddr != 0 {
+		ctx.Mem.Write64(endptrAddr, strAddr+uint64(len(s)*2))
+	}
+	return 0
+}
+
+func handleWcstoul(ctx *TrapContext) uint32 {
+	strAddr := ctx.Arg(0)
+	endptrAddr := ctx.Arg(1)
+	base := ctx.Arg(2)
+
+	s := readWideString(ctx.Mem, strAddr, 64)
+	val, _ := strconvParseUint(s, int(base))
+	ctx.CPU.SetSyscallReturn(val)
+	ctx.ReturnOverridden = true
+	if endptrAddr != 0 {
+		ctx.Mem.Write64(endptrAddr, strAddr+uint64(len(s)*2))
+	}
+	return 0
+}
+
+func handleStrnicmp(ctx *TrapContext) uint32 {
+	s1Addr := ctx.Arg(0)
+	s2Addr := ctx.Arg(1)
+	n := ctx.Arg(2)
+
+	for i := uint64(0); i < n; i++ {
+		c1, _ := ctx.Mem.Read8(s1Addr + i)
+		c2, _ := ctx.Mem.Read8(s2Addr + i)
+		if c1 == 0 && c2 == 0 {
+			return 0
+		}
+		l1, l2 := toLowerByte(c1), toLowerByte(c2)
+		if l1 != l2 {
+			if l1 < l2 {
+				ctx.CPU.SetSyscallReturn(^uint64(0)) // -1
+			} else {
+				ctx.CPU.SetSyscallReturn(1)
+			}
+			ctx.ReturnOverridden = true
+			return 0
+		}
+		if c1 == 0 {
+			return 0
+		}
+	}
+	return 0
+}
+
+func handleWcsicmp(ctx *TrapContext) uint32 {
+	s1Addr := ctx.Arg(0)
+	s2Addr := ctx.Arg(1)
+
+	for i := uint64(0); ; i += 2 {
+		c1, _ := ctx.Mem.Read16(s1Addr + i)
+		c2, _ := ctx.Mem.Read16(s2Addr + i)
+		l1, l2 := toLowerWide(c1), toLowerWide(c2)
+		if l1 != l2 {
+			if l1 < l2 {
+				ctx.CPU.SetSyscallReturn(^uint64(0))
+			} else {
+				ctx.CPU.SetSyscallReturn(1)
+			}
+			ctx.ReturnOverridden = true
+			return 0
+		}
+		if c1 == 0 {
+			return 0
+		}
+	}
+}
+
+func handleWcsnicmp(ctx *TrapContext) uint32 {
+	s1Addr := ctx.Arg(0)
+	s2Addr := ctx.Arg(1)
+	n := ctx.Arg(2)
+
+	for i := uint64(0); i < n; i++ {
+		c1, _ := ctx.Mem.Read16(s1Addr + i*2)
+		c2, _ := ctx.Mem.Read16(s2Addr + i*2)
+		l1, l2 := toLowerWide(c1), toLowerWide(c2)
+		if l1 != l2 {
+			if l1 < l2 {
+				ctx.CPU.SetSyscallReturn(^uint64(0))
+			} else {
+				ctx.CPU.SetSyscallReturn(1)
+			}
+			ctx.ReturnOverridden = true
+			return 0
+		}
+		if c1 == 0 {
+			return 0
+		}
+	}
+	return 0
+}
+
+func handleIsalpha(ctx *TrapContext) uint32 {
+	c := byte(ctx.Arg(0))
+	if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+		ctx.CPU.SetSyscallReturn(1)
+		ctx.ReturnOverridden = true
+	}
+	return 0
+}
+
+func handleIslower(ctx *TrapContext) uint32 {
+	c := byte(ctx.Arg(0))
+	if c >= 'a' && c <= 'z' {
+		ctx.CPU.SetSyscallReturn(1)
+		ctx.ReturnOverridden = true
+	}
+	return 0
+}
+
+func handleIsxdigit(ctx *TrapContext) uint32 {
+	c := byte(ctx.Arg(0))
+	if (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f') {
+		ctx.CPU.SetSyscallReturn(1)
+		ctx.ReturnOverridden = true
+	}
+	return 0
+}
+
+func handleStrpbrk(ctx *TrapContext) uint32 {
+	strAddr := ctx.Arg(0)
+	charsAddr := ctx.Arg(1)
+
+	accept := readCString(ctx.Mem, charsAddr, 256)
+	acceptSet := make(map[byte]bool)
+	for _, c := range []byte(accept) {
+		acceptSet[c] = true
+	}
+
+	for i := uint64(0); ; i++ {
+		c, _ := ctx.Mem.Read8(strAddr + i)
+		if c == 0 {
+			break
+		}
+		if acceptSet[c] {
+			ctx.CPU.SetSyscallReturn(strAddr + i)
+			ctx.ReturnOverridden = true
+			return 0
+		}
+	}
+	ctx.CPU.SetSyscallReturn(0)
+	ctx.ReturnOverridden = true
+	return 0
+}
+
+func handleWcspbrk(ctx *TrapContext) uint32 {
+	strAddr := ctx.Arg(0)
+	charsAddr := ctx.Arg(1)
+
+	acceptSet := make(map[uint16]bool)
+	for i := uint64(0); ; i += 2 {
+		c, _ := ctx.Mem.Read16(charsAddr + i)
+		if c == 0 {
+			break
+		}
+		acceptSet[c] = true
+	}
+
+	for i := uint64(0); ; i += 2 {
+		c, _ := ctx.Mem.Read16(strAddr + i)
+		if c == 0 {
+			break
+		}
+		if acceptSet[c] {
+			ctx.CPU.SetSyscallReturn(strAddr + i)
+			ctx.ReturnOverridden = true
+			return 0
+		}
+	}
+	ctx.CPU.SetSyscallReturn(0)
+	ctx.ReturnOverridden = true
+	return 0
+}
+
+func handleWcscspn(ctx *TrapContext) uint32 {
+	strAddr := ctx.Arg(0)
+	rejectAddr := ctx.Arg(1)
+
+	rejectSet := make(map[uint16]bool)
+	for i := uint64(0); ; i += 2 {
+		c, _ := ctx.Mem.Read16(rejectAddr + i)
+		if c == 0 {
+			break
+		}
+		rejectSet[c] = true
+	}
+
+	count := uint64(0)
+	for i := uint64(0); ; i += 2 {
+		c, _ := ctx.Mem.Read16(strAddr + i)
+		if c == 0 || rejectSet[c] {
+			break
+		}
+		count++
+	}
+	ctx.CPU.SetSyscallReturn(count)
+	ctx.ReturnOverridden = true
+	return 0
+}
+
+func handleWcsspn(ctx *TrapContext) uint32 {
+	strAddr := ctx.Arg(0)
+	acceptAddr := ctx.Arg(1)
+
+	acceptSet := make(map[uint16]bool)
+	for i := uint64(0); ; i += 2 {
+		c, _ := ctx.Mem.Read16(acceptAddr + i)
+		if c == 0 {
+			break
+		}
+		acceptSet[c] = true
+	}
+
+	count := uint64(0)
+	for i := uint64(0); ; i += 2 {
+		c, _ := ctx.Mem.Read16(strAddr + i)
+		if c == 0 || !acceptSet[c] {
+			break
+		}
+		count++
+	}
+	ctx.CPU.SetSyscallReturn(count)
+	ctx.ReturnOverridden = true
+	return 0
+}
+
+func handleWcsstr(ctx *TrapContext) uint32 {
+	haystackAddr := ctx.Arg(0)
+	needleAddr := ctx.Arg(1)
+
+	needle := readWideChars(ctx.Mem, needleAddr, 256)
+	if len(needle) == 0 {
+		ctx.CPU.SetSyscallReturn(haystackAddr)
+		ctx.ReturnOverridden = true
+		return 0
+	}
+
+	for i := uint64(0); ; i += 2 {
+		c, _ := ctx.Mem.Read16(haystackAddr + i)
+		if c == 0 {
+			break
+		}
+		if c == needle[0] {
+			match := true
+			for j := 1; j < len(needle); j++ {
+				h, _ := ctx.Mem.Read16(haystackAddr + i + uint64(j*2))
+				if h != needle[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				ctx.CPU.SetSyscallReturn(haystackAddr + i)
+				ctx.ReturnOverridden = true
+				return 0
+			}
+		}
+	}
+	ctx.CPU.SetSyscallReturn(0)
+	ctx.ReturnOverridden = true
+	return 0
+}
+
+// helpers
+
+func toLowerByte(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + 0x20
+	}
+	return c
+}
+
+func toLowerWide(c uint16) uint16 {
+	if c >= 'A' && c <= 'Z' {
+		return c + 0x20
+	}
+	return c
+}
+
+func readWideChars(mem *mmu.MMU, addr uint64, maxChars int) []uint16 {
+	var result []uint16
+	for i := 0; i < maxChars; i++ {
+		c, err := mem.Read16(addr + uint64(i*2))
+		if err != nil || c == 0 {
+			break
+		}
+		result = append(result, c)
+	}
+	return result
+}
+
+func readWideString(mem *mmu.MMU, addr uint64, maxChars int) string {
+	chars := readWideChars(mem, addr, maxChars)
+	buf := make([]byte, 0, len(chars))
+	for _, c := range chars {
+		if c < 128 {
+			buf = append(buf, byte(c))
+		} else {
+			buf = append(buf, '?')
+		}
+	}
+	return string(buf)
+}
+
+func readCString(mem *mmu.MMU, addr uint64, maxLen int) string {
+	var buf []byte
+	for i := 0; i < maxLen; i++ {
+		b, err := mem.Read8(addr + uint64(i))
+		if err != nil || b == 0 {
+			break
+		}
+		buf = append(buf, b)
+	}
+	return string(buf)
+}
+
+func strconvParseInt(s string, base int) (int64, error) {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	if i >= len(s) {
+		return 0, nil
+	}
+	neg := false
+	if s[i] == '-' {
+		neg = true
+		i++
+	} else if s[i] == '+' {
+		i++
+	}
+	if base == 0 {
+		if i+1 < len(s) && s[i] == '0' && (s[i+1] == 'x' || s[i+1] == 'X') {
+			base = 16
+			i += 2
+		} else if i < len(s) && s[i] == '0' {
+			base = 8
+			i++
+		} else {
+			base = 10
+		}
+	}
+	var val int64
+	for i < len(s) {
+		c := s[i]
+		var digit int64
+		if c >= '0' && c <= '9' {
+			digit = int64(c - '0')
+		} else if c >= 'a' && c <= 'f' {
+			digit = int64(c-'a') + 10
+		} else if c >= 'A' && c <= 'F' {
+			digit = int64(c-'A') + 10
+		} else {
+			break
+		}
+		if digit >= int64(base) {
+			break
+		}
+		val = val*int64(base) + digit
+		i++
+	}
+	if neg {
+		val = -val
+	}
+	return val, nil
+}
+
+func strconvParseUint(s string, base int) (uint64, error) {
+	v, err := strconvParseInt(s, base)
+	return uint64(v), err
 }
