@@ -1,3 +1,11 @@
 
 govm
 *.plan
+epoll_dump
+epoll_dump.c
+mmap_trace.log
+out.log
+stat_dump
+stat_dump.c
+trace.log
+testdata/busybox
