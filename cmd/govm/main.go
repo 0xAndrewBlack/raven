@@ -7404,13 +7404,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ctx.SetReturn(1)
 					return 0
 				}
-				// Synthetic WM_PAINT frame: mainHWND + all visible (or sized) children with guest WndProcs
-				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+				// Synthetic WM_PAINT frame: children FIRST then mainHWND.
+				// Children (Scintilla etc.) must paint before the parent so that
+				// mainHWND EndPaint (which commits the frame) captures their content.
+				var childPaints []queuedMsg
 				for h, cs := range hwndChildren {
 					if hwndWndProc[h] != 0 && (cs.visible || (cs.w > 0 && cs.h > 0)) {
-						msgQueue = append(msgQueue, queuedMsg{h, 0x000F, 0, 0})
+						childPaints = append(childPaints, queuedMsg{h, 0x000F, 0, 0})
 					}
 				}
+				sort.Slice(childPaints, func(i, j int) bool { return childPaints[i].hwnd < childPaints[j].hwnd })
+				msgQueue = append(msgQueue, childPaints...)
+				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
 				m := msgQueue[0]
 				msgQueue = msgQueue[1:]
 				if pMsg != 0 {
@@ -8048,15 +8053,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 
-				// WM_ERASEBKGND: fill client area with class brush
-				bgColor := sysColors[5] // default COLOR_WINDOW
-				if a, ok := hwndClassAtom[hwnd]; ok {
-					if brushIdx, ok2 := classBrush[a]; ok2 && brushIdx > 0 && int(brushIdx-1) < len(sysColors) {
-						bgColor = sysColors[brushIdx-1]
-					}
-				}
-				wlWindow.DrawRect(0, clientTop, w, h, bgColor)
-
+				// Do NOT fill the full client area - child windows cover it entirely.
+				// Filling here wipes Scintilla/children that painted first in the message queue.
+				// ReactOS WM_ERASEBKGND only fills uncovered (non-child) regions.
 				rcLeft, rcTop = 0, clientTop
 				rcRight, rcBottom = w, h
 				dc.SetClipRect(0, clientTop, w, h)
@@ -8095,7 +8094,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hwnd := ctx.Arg(0)
 			if wlWindow != nil {
 				paintTree(hwnd)
-				wlWindow.Commit()
+				// Only commit after the main window paints - it is always last in the
+				// synthetic paint queue (children come first), so committing here
+				// captures a complete frame including Scintilla and all other children.
+				if hwnd == mainHWND {
+					wlWindow.Commit()
+				}
 			}
 			ctx.SetReturn(1)
 			return 0
