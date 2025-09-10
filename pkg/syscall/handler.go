@@ -26,130 +26,130 @@ import (
 
 // Linux RISC-V syscall numbers (from asm-generic/unistd.h)
 const (
-	SysGetcwd         = 17
-	SysDup            = 23
-	SysDup3           = 24
-	SysFcntl          = 25
-	SysIoctl          = 29
-	SysMkdirat        = 34
-	SysUnlinkat       = 35
-	SysSymlinkat      = 36
-	SysLinkat         = 37
-	SysFaccessat      = 48
-	SysChdir          = 49
-	SysFchmod         = 52
-	SysFchmodat       = 53
-	SysFchownat       = 54
-	SysFchown         = 55
-	SysOpenat         = 56
-	SysClose          = 57
-	SysPipe2          = 59
-	SysGetdents64     = 61
-	SysLseek          = 62
-	SysRead           = 63
-	SysWrite          = 64
-	SysReadv          = 65
-	SysWritev         = 66
-	SysPread64        = 67
-	SysPwrite64       = 68
-	SysPselect6       = 72
-	SysPpoll          = 73
-	sysPoll           = 10025 // internal: x64 poll(fds, nfds, timeout_ms)
-	SysReadlinkat     = 78
-	SysFstatat        = 79
-	SysFstat          = 80
-	SysFsync          = 82
-	SysFdatasync      = 83
-	SysFtruncate      = 46
-	SysFallocate      = 47
-	SysUtimensat      = 88
-	SysExit           = 93
-	SysExitGroup      = 94
-	SysSetTidAddress  = 96
-	SysFutex          = 98
-	SysSetRobustList  = 99
-	SysNanosleep      = 101
-	SysGetitimer      = 102
-	SysSetitimer      = 103
-	SysClockGettime   = 113
-	SysClockGetres    = 114
-	SysClockNanosleep = 115
-	SysSyslog         = 116
+	SysGetcwd           = 17
+	SysDup              = 23
+	SysDup3             = 24
+	SysFcntl            = 25
+	SysIoctl            = 29
+	SysMkdirat          = 34
+	SysUnlinkat         = 35
+	SysSymlinkat        = 36
+	SysLinkat           = 37
+	SysFaccessat        = 48
+	SysChdir            = 49
+	SysFchmod           = 52
+	SysFchmodat         = 53
+	SysFchownat         = 54
+	SysFchown           = 55
+	SysOpenat           = 56
+	SysClose            = 57
+	SysPipe2            = 59
+	SysGetdents64       = 61
+	SysLseek            = 62
+	SysRead             = 63
+	SysWrite            = 64
+	SysReadv            = 65
+	SysWritev           = 66
+	SysPread64          = 67
+	SysPwrite64         = 68
+	SysPselect6         = 72
+	SysPpoll            = 73
+	sysPoll             = 10025 // internal: x64 poll(fds, nfds, timeout_ms)
+	SysReadlinkat       = 78
+	SysFstatat          = 79
+	SysFstat            = 80
+	SysFsync            = 82
+	SysFdatasync        = 83
+	SysFtruncate        = 46
+	SysFallocate        = 47
+	SysUtimensat        = 88
+	SysExit             = 93
+	SysExitGroup        = 94
+	SysSetTidAddress    = 96
+	SysFutex            = 98
+	SysSetRobustList    = 99
+	SysNanosleep        = 101
+	SysGetitimer        = 102
+	SysSetitimer        = 103
+	SysClockGettime     = 113
+	SysClockGetres      = 114
+	SysClockNanosleep   = 115
+	SysSyslog           = 116
 	SysSchedSetaffinity = 122
 	SysSchedGetaffinity = 123
-	SysSchedYield     = 124
-	SysKill           = 129
-	SysTkill          = 130
-	SysTgkill         = 131
-	SysSigaltstack    = 132
-	SysRtSigaction    = 134
-	SysRtSigprocmask  = 135
-	SysRtSigreturn    = 139
-	SysTimes          = 153
-	SysUname          = 160
-	SysSync           = 162
-	SysUmask          = 166
-	SysPrctl          = 167
-	SysGetrusage      = 165
-	SysGetpid         = 172
-	SysGetppid        = 173
-	SysGetuid         = 174
-	SysGeteuid        = 175
-	SysGetgid         = 176
-	SysGetegid        = 177
-	SysGetresuid      = 10095
-	SysGetresgid      = 10096
-	SysMincore        = 10097
-	SysGettid         = 178
-	SysSysinfo        = 179
-	SysSocket         = 198
-	SysBind           = 200
-	SysListen         = 201
-	SysAccept         = 202
-	SysConnect        = 203
-	SysSendto         = 206
-	SysRecvfrom       = 207
-	SysSetsockopt     = 208
-	SysGetsockopt     = 209
-	SysShutdown       = 210
-	SysSendmsg        = 211
-	SysRecvmsg        = 212
-	SysBrk            = 214
-	SysMunmap         = 215
-	SysMremap         = 216
-	SysClone          = 220
-	SysExecve         = 221
-	SysMmap           = 222
-	SysFadvise64      = 223
-	SysSwapon         = 224
-	SysMprotect       = 226
-	SysMsync          = 227
-	SysMlock          = 228
-	SysMunlock        = 229
-	SysMadvise        = 233
-	SysAccept4        = 242
-	SysWait4          = 260
-	SysPrlimit64      = 261
-	SysRenameat2      = 276
-	SysGetrandom      = 278
-	SysMembarrier     = 283
-	SysStatx          = 291
-	SysRseq           = 293
-	SysEpollCreate1   = 20
-	SysEpollCtl       = 21
-	SysEpollPwait     = 22
-	SysEventfd2       = 19
-	SysTimerfdCreate  = 85
-	SysTimerfdSettime = 86
-	SysTimerfdGettime = 87
-	SysSocketpair     = 199
-	SysGetsockname    = 204
-	SysGetpeername    = 205
-	SysMemfdCreate    = 279
-	SysKcmp           = 10091 // internal, mapped from x86-64 kcmp (SYS 253)
-	SysRiscvHwprobe   = 258
-	SysArchPrctl      = 259 // internal, mapped from x86-64 arch_prctl
-	SysSendfile       = 262 // internal, mapped from x86-64 sendfile
+	SysSchedYield       = 124
+	SysKill             = 129
+	SysTkill            = 130
+	SysTgkill           = 131
+	SysSigaltstack      = 132
+	SysRtSigaction      = 134
+	SysRtSigprocmask    = 135
+	SysRtSigreturn      = 139
+	SysTimes            = 153
+	SysUname            = 160
+	SysSync             = 162
+	SysUmask            = 166
+	SysPrctl            = 167
+	SysGetrusage        = 165
+	SysGetpid           = 172
+	SysGetppid          = 173
+	SysGetuid           = 174
+	SysGeteuid          = 175
+	SysGetgid           = 176
+	SysGetegid          = 177
+	SysGetresuid        = 10095
+	SysGetresgid        = 10096
+	SysMincore          = 10097
+	SysGettid           = 178
+	SysSysinfo          = 179
+	SysSocket           = 198
+	SysBind             = 200
+	SysListen           = 201
+	SysAccept           = 202
+	SysConnect          = 203
+	SysSendto           = 206
+	SysRecvfrom         = 207
+	SysSetsockopt       = 208
+	SysGetsockopt       = 209
+	SysShutdown         = 210
+	SysSendmsg          = 211
+	SysRecvmsg          = 212
+	SysBrk              = 214
+	SysMunmap           = 215
+	SysMremap           = 216
+	SysClone            = 220
+	SysExecve           = 221
+	SysMmap             = 222
+	SysFadvise64        = 223
+	SysSwapon           = 224
+	SysMprotect         = 226
+	SysMsync            = 227
+	SysMlock            = 228
+	SysMunlock          = 229
+	SysMadvise          = 233
+	SysAccept4          = 242
+	SysWait4            = 260
+	SysPrlimit64        = 261
+	SysRenameat2        = 276
+	SysGetrandom        = 278
+	SysMembarrier       = 283
+	SysStatx            = 291
+	SysRseq             = 293
+	SysEpollCreate1     = 20
+	SysEpollCtl         = 21
+	SysEpollPwait       = 22
+	SysEventfd2         = 19
+	SysTimerfdCreate    = 85
+	SysTimerfdSettime   = 86
+	SysTimerfdGettime   = 87
+	SysSocketpair       = 199
+	SysGetsockname      = 204
+	SysGetpeername      = 205
+	SysMemfdCreate      = 279
+	SysKcmp             = 10091 // internal, mapped from x86-64 kcmp (SYS 253)
+	SysRiscvHwprobe     = 258
+	SysArchPrctl        = 259 // internal, mapped from x86-64 arch_prctl
+	SysSendfile         = 262 // internal, mapped from x86-64 sendfile
 
 	SysClone3 = 10090 // internal, mapped from x86-64 clone3 (SYS 435)
 
@@ -168,14 +168,14 @@ const (
 
 // Handler holds the synthetic kernel state.
 type Handler struct {
-	Mem     *mmu.MMU
-	FS      *vfs.VFS
-	ThreadM *thread.Manager
-	Signals *signal.SignalState
-	Umask   uint32    // current umask
-	Trace   bool      // trace syscalls to stderr
-	Arch    arch.Arch // guest architecture
-	debugX11 bool     // trace all syscalls (for X11 debugging)
+	Mem      *mmu.MMU
+	FS       *vfs.VFS
+	ThreadM  *thread.Manager
+	Signals  *signal.SignalState
+	Umask    uint32    // current umask
+	Trace    bool      // trace syscalls to stderr
+	Arch     arch.Arch // guest architecture
+	debugX11 bool      // trace all syscalls (for X11 debugging)
 
 	clearChildTidMu sync.Mutex
 	clearChildTid   map[int]uint64 // TID → clear_child_tid address
@@ -187,9 +187,9 @@ type Handler struct {
 	// calls execve (which launches a real host process) or exit, then
 	// unblocks the parent via vforkDone.
 	vforkMu       sync.Mutex
-	vforkPending  bool            // true while a vfork child is running
-	vforkDone     chan int         // child sends guest PID after execve/exit
-	vforkSnapshot vfs.FDSnapshot  // parent FD table saved before vfork child runs
+	vforkPending  bool           // true while a vfork child is running
+	vforkDone     chan int       // child sends guest PID after execve/exit
+	vforkSnapshot vfs.FDSnapshot // parent FD table saved before vfork child runs
 
 	// host child processes spawned via execve-in-vfork-child, keyed by guest PID.
 	childMu    sync.Mutex
@@ -671,12 +671,12 @@ func (h *Handler) sysExecve(c arch.CPU, pathPtr, argvPtr, envpPtr uint64) {
 		}
 		return fallback, false
 	}
-	stdinF,  stdinDup  := dupOrFallback(childHFD[0], os.Stdin)
+	stdinF, stdinDup := dupOrFallback(childHFD[0], os.Stdin)
 	stdoutF, stdoutDup := dupOrFallback(childHFD[1], os.Stdout)
 	stderrF, stderrDup := dupOrFallback(childHFD[2], os.Stderr)
 	cmd := exec.Command(path, argv[1:]...)
 	cmd.Env = envp
-	cmd.Stdin  = stdinF
+	cmd.Stdin = stdinF
 	cmd.Stdout = stdoutF
 	cmd.Stderr = stderrF
 	if err := cmd.Start(); err != nil {
@@ -688,9 +688,15 @@ func (h *Handler) sysExecve(c arch.CPU, pathPtr, argvPtr, envpPtr uint64) {
 	// Close our dup'd copies now that the child process owns them.
 	// This is critical for any pipe write-end: once we close our copy,
 	// the reader sees EOF when the child process exits.
-	if stdinDup  { stdinF.Close()  }
-	if stdoutDup { stdoutF.Close() }
-	if stderrDup { stderrF.Close() }
+	if stdinDup {
+		stdinF.Close()
+	}
+	if stdoutDup {
+		stdoutF.Close()
+	}
+	if stderrDup {
+		stderrF.Close()
+	}
 	// Also close the original child host fds that are now owned by the subprocess.
 	// These were in the child's FD table (e.g. dup2'd pipe write-end on fd 1)
 	// and must not stay open in our process.
@@ -816,50 +822,50 @@ func (h *Handler) readGuestStringArray(ptr uint64) []string {
 // --- Errno constants ---
 
 const (
-	EPERM   = 1
-	ENOENT  = 2
-	ESRCH   = 3
-	EINTR   = 4
-	EIO     = 5
-	ENXIO   = 6
-	EBADF   = 9
-	ECHILD  = 10
-	EAGAIN  = 11
-	ENOMEM  = 12
-	EACCES  = 13
-	EFAULT  = 14
-	EEXIST  = 17
-	ENODEV  = 19
-	ENOTDIR = 20
-	EISDIR  = 21
-	EINVAL  = 22
-	ENFILE  = 23
-	EMFILE  = 24
-	ENOTTY  = 25
-	ENOSPC  = 28
-	ESPIPE  = 29
-	EPIPE   = 32
-	ERANGE  = 34
-	ENOSYS  = 38
-	ENOTEMPTY    = 39
-	ENOTSOCK     = 88
-	EMSGSIZE     = 90
-	EPROTOTYPE   = 91
-	ENOPROTOOPT  = 92
+	EPERM           = 1
+	ENOENT          = 2
+	ESRCH           = 3
+	EINTR           = 4
+	EIO             = 5
+	ENXIO           = 6
+	EBADF           = 9
+	ECHILD          = 10
+	EAGAIN          = 11
+	ENOMEM          = 12
+	EACCES          = 13
+	EFAULT          = 14
+	EEXIST          = 17
+	ENODEV          = 19
+	ENOTDIR         = 20
+	EISDIR          = 21
+	EINVAL          = 22
+	ENFILE          = 23
+	EMFILE          = 24
+	ENOTTY          = 25
+	ENOSPC          = 28
+	ESPIPE          = 29
+	EPIPE           = 32
+	ERANGE          = 34
+	ENOSYS          = 38
+	ENOTEMPTY       = 39
+	ENOTSOCK        = 88
+	EMSGSIZE        = 90
+	EPROTOTYPE      = 91
+	ENOPROTOOPT     = 92
 	EPROTONOSUPPORT = 93
-	EOPNOTSUPP   = 95
-	EAFNOSUPPORT = 97
-	EADDRINUSE   = 98
-	EADDRNOTAVAIL = 99
-	ENETUNREACH  = 101
-	ECONNABORTED = 103
-	ECONNRESET   = 104
-	ENOBUFS      = 105
-	EISCONN      = 106
-	ENOTCONN     = 107
-	ETIMEDOUT    = 110
-	ECONNREFUSED = 111
-	EINPROGRESS  = 115
+	EOPNOTSUPP      = 95
+	EAFNOSUPPORT    = 97
+	EADDRINUSE      = 98
+	EADDRNOTAVAIL   = 99
+	ENETUNREACH     = 101
+	ECONNABORTED    = 103
+	ECONNRESET      = 104
+	ENOBUFS         = 105
+	EISCONN         = 106
+	ENOTCONN        = 107
+	ETIMEDOUT       = 110
+	ECONNREFUSED    = 111
+	EINPROGRESS     = 115
 )
 
 // AT_FDCWD is the "current working directory" sentinel for *at() syscalls.
@@ -1134,15 +1140,15 @@ func (h *Handler) sysStatx(c arch.CPU, dirfd, pathAddr, flags, mask, statxAddr u
 	}
 	// struct statx = 256 bytes
 	buf := make([]byte, 256)
-	binary.LittleEndian.PutUint32(buf[0:], 0x7FF)            // stx_mask
-	binary.LittleEndian.PutUint32(buf[4:], 4096)             // stx_blksize
-	binary.LittleEndian.PutUint64(buf[8:], 0)                // stx_attributes
-	binary.LittleEndian.PutUint32(buf[16:], node.Nlink)       // stx_nlink
-	binary.LittleEndian.PutUint32(buf[20:], node.Uid)         // stx_uid
-	binary.LittleEndian.PutUint32(buf[24:], node.Gid)         // stx_gid
+	binary.LittleEndian.PutUint32(buf[0:], 0x7FF)                  // stx_mask
+	binary.LittleEndian.PutUint32(buf[4:], 4096)                   // stx_blksize
+	binary.LittleEndian.PutUint64(buf[8:], 0)                      // stx_attributes
+	binary.LittleEndian.PutUint32(buf[16:], node.Nlink)            // stx_nlink
+	binary.LittleEndian.PutUint32(buf[20:], node.Uid)              // stx_uid
+	binary.LittleEndian.PutUint32(buf[24:], node.Gid)              // stx_gid
 	binary.LittleEndian.PutUint16(buf[28:], uint16(node.FileMode)) // stx_mode
-	binary.LittleEndian.PutUint64(buf[32:], node.Ino)         // stx_ino
-	binary.LittleEndian.PutUint64(buf[40:], uint64(node.Size)) // stx_size
+	binary.LittleEndian.PutUint64(buf[32:], node.Ino)              // stx_ino
+	binary.LittleEndian.PutUint64(buf[40:], uint64(node.Size))     // stx_size
 	h.Mem.WriteBytes(statxAddr, buf)
 	c.SetSyscallReturn(0)
 }
@@ -1156,7 +1162,7 @@ func (h *Handler) writeStatBufArch(addr uint64, node *vfs.VNode, a arch.Arch) {
 	if a == arch.ArchAMD64 {
 		// x86_64 struct stat: 144 bytes
 		buf := make([]byte, 144)
-		binary.LittleEndian.PutUint64(buf[0:], 1)                  // st_dev
+		binary.LittleEndian.PutUint64(buf[0:], 1)                   // st_dev
 		binary.LittleEndian.PutUint64(buf[8:], node.Ino)            // st_ino
 		binary.LittleEndian.PutUint64(buf[16:], uint64(node.Nlink)) // st_nlink (8 bytes)
 		binary.LittleEndian.PutUint32(buf[24:], node.FileMode)      // st_mode
@@ -1172,13 +1178,13 @@ func (h *Handler) writeStatBufArch(addr uint64, node *vfs.VNode, a arch.Arch) {
 		// RISC-V struct stat: 128 bytes
 		buf := make([]byte, 128)
 		binary.LittleEndian.PutUint64(buf[0:], 1)                  // st_dev
-		binary.LittleEndian.PutUint64(buf[8:], node.Ino)            // st_ino
-		binary.LittleEndian.PutUint32(buf[16:], node.FileMode)      // st_mode
-		binary.LittleEndian.PutUint32(buf[20:], node.Nlink)         // st_nlink
-		binary.LittleEndian.PutUint32(buf[24:], node.Uid)           // st_uid
-		binary.LittleEndian.PutUint32(buf[28:], node.Gid)           // st_gid
-		binary.LittleEndian.PutUint64(buf[48:], uint64(node.Size))  // st_size
-		binary.LittleEndian.PutUint32(buf[56:], 4096)               // st_blksize
+		binary.LittleEndian.PutUint64(buf[8:], node.Ino)           // st_ino
+		binary.LittleEndian.PutUint32(buf[16:], node.FileMode)     // st_mode
+		binary.LittleEndian.PutUint32(buf[20:], node.Nlink)        // st_nlink
+		binary.LittleEndian.PutUint32(buf[24:], node.Uid)          // st_uid
+		binary.LittleEndian.PutUint32(buf[28:], node.Gid)          // st_gid
+		binary.LittleEndian.PutUint64(buf[48:], uint64(node.Size)) // st_size
+		binary.LittleEndian.PutUint32(buf[56:], 4096)              // st_blksize
 		binary.LittleEndian.PutUint64(buf[72:], uint64(node.Atime.Unix()))
 		binary.LittleEndian.PutUint64(buf[88:], uint64(node.Mtime.Unix()))
 		binary.LittleEndian.PutUint64(buf[104:], uint64(node.Ctime.Unix()))
@@ -1262,7 +1268,7 @@ func (h *Handler) sysGetdents64(c arch.CPU, fd, buf, count uint64) {
 	// Each dirent64: d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + name + padding
 	offset := uint64(0)
 	for _, e := range entries {
-		nameLen := len(e.Name) + 1 // +1 for null terminator
+		nameLen := len(e.Name) + 1                             // +1 for null terminator
 		recLen := uint16(((8 + 8 + 2 + 1 + nameLen) + 7) & ^7) // 8-byte aligned
 		if offset+uint64(recLen) > count {
 			break
@@ -1464,11 +1470,11 @@ func (h *Handler) sysUname(c arch.CPU, buf uint64) {
 		machine = "x86_64"
 	}
 	fields := []string{
-		"Linux",         // sysname
-		"govm",          // nodename
-		"6.1.0",         // release
-		"#1 SMP",        // version
-		machine,         // machine
+		"Linux",  // sysname
+		"Raven",  // nodename
+		"1.0.0",  // release
+		"#1 SMP", // version
+		machine,  // machine
 	}
 	for i, s := range fields {
 		offset := uint64(i) * fieldLen
@@ -3288,7 +3294,7 @@ func (h *Handler) sysMmap(c arch.CPU) {
 
 	mapShared := flags&0x01 != 0 // MAP_SHARED
 	mapAnon := flags&0x20 != 0   // MAP_ANONYMOUS
-	mapFixed := flags&0x10 != 0   // MAP_FIXED
+	mapFixed := flags&0x10 != 0  // MAP_FIXED
 
 	if mapFixed && addr&mmu.PageMask != addr {
 		c.SetSyscallReturn(negErrno(EINVAL))
@@ -3483,12 +3489,12 @@ func x64SyscallToRV(num uint64) uint64 {
 var x64Map = map[uint64]uint64{
 	0:   SysRead,
 	1:   SysWrite,
-	2:   sysX64Open,     // open → openat (needs AT_FDCWD)
+	2:   sysX64Open, // open → openat (needs AT_FDCWD)
 	3:   SysClose,
-	4:   sysX64Stat,    // stat → fstatat (needs AT_FDCWD)
+	4:   sysX64Stat, // stat → fstatat (needs AT_FDCWD)
 	5:   SysFstat,
-	6:   sysX64Lstat,   // lstat → fstatat (needs AT_FDCWD)
-	7:   sysPoll,        // poll(fds, nfds, timeout_ms) - timeout is int, not *timespec
+	6:   sysX64Lstat, // lstat → fstatat (needs AT_FDCWD)
+	7:   sysPoll,     // poll(fds, nfds, timeout_ms) - timeout is int, not *timespec
 	8:   SysLseek,
 	9:   SysMmap,
 	10:  SysMprotect,
@@ -3498,20 +3504,20 @@ var x64Map = map[uint64]uint64{
 	14:  SysRtSigprocmask,
 	15:  SysRtSigreturn,
 	16:  SysIoctl,
-	17:  SysPread64,     // pread64
-	18:  SysPwrite64,    // pwrite64
+	17:  SysPread64,  // pread64
+	18:  SysPwrite64, // pwrite64
 	19:  SysReadv,
 	20:  SysWritev,
-	21:  sysX64Access,  // access → faccessat (needs AT_FDCWD)
-	22:  SysPipe2,      // pipe → pipe2
-	23:  SysPselect6,   // select → pselect6
+	21:  sysX64Access, // access → faccessat (needs AT_FDCWD)
+	22:  SysPipe2,     // pipe → pipe2
+	23:  SysPselect6,  // select → pselect6
 	24:  SysSchedYield,
 	25:  SysMremap,
 	26:  SysMsync,
 	27:  SysMincore,
 	28:  SysMadvise,
 	32:  SysDup,
-	33:  SysDup3,       // dup2 → dup3
+	33:  SysDup3, // dup2 → dup3
 	35:  SysNanosleep,
 	36:  SysGetitimer,
 	38:  SysSetitimer,
@@ -3539,24 +3545,24 @@ var x64Map = map[uint64]uint64{
 	62:  SysKill,
 	63:  SysUname,
 	72:  SysFcntl,
-	73:  SysFlock,      // flock → stub
+	73:  SysFlock, // flock → stub
 	74:  SysFsync,
 	75:  SysFdatasync,
-	76:  SysFtruncate,  // truncate → stub
+	76:  SysFtruncate, // truncate → stub
 	77:  SysFtruncate,
 	78:  SysGetdents64,
 	79:  SysGetcwd,
 	80:  SysChdir,
-	82:  sysX64Rename,  // rename → renameat2 (needs 2x AT_FDCWD)
-	83:  sysX64Mkdir,   // mkdir → mkdirat (needs AT_FDCWD)
-	87:  sysX64Unlink,  // unlink → unlinkat (needs AT_FDCWD)
-	88:  sysX64Symlink, // symlink → symlinkat (needs AT_FDCWD)
+	82:  sysX64Rename,   // rename → renameat2 (needs 2x AT_FDCWD)
+	83:  sysX64Mkdir,    // mkdir → mkdirat (needs AT_FDCWD)
+	87:  sysX64Unlink,   // unlink → unlinkat (needs AT_FDCWD)
+	88:  sysX64Symlink,  // symlink → symlinkat (needs AT_FDCWD)
 	89:  sysX64Readlink, // readlink → readlinkat (needs AT_FDCWD)
-	90:  SysFchmod,     // chmod → fchmod
-	91:  SysFchown,     // fchown
+	90:  SysFchmod,      // chmod → fchmod
+	91:  SysFchown,      // fchown
 	95:  SysUmask,
 	96:  SysTimes,
-	97:  SysGetrusage,  // getrlimit → stub
+	97:  SysGetrusage, // getrlimit → stub
 	98:  SysGetrusage,
 	99:  SysSysinfo,
 	100: SysTimes,
@@ -3571,17 +3577,17 @@ var x64Map = map[uint64]uint64{
 	120: SysGetresgid,
 	110: SysGetppid,
 	131: SysSigaltstack,
-	137: SysStatx,      // statfs → stub
-	155: SysPrctl,      // pivot_root → stub
+	137: SysStatx, // statfs → stub
+	155: SysPrctl, // pivot_root → stub
 	157: SysPrctl,
 	158: SysArchPrctl,
-	160: SysSchedSetaffinity,  // setrlimit → stub
+	160: SysSchedSetaffinity, // setrlimit → stub
 	186: SysGettid,
 	201: SysClockGettime, // time → clock_gettime stub
 	202: SysFutex,
 	203: SysSchedSetaffinity,
 	204: SysSchedGetaffinity,
-	206: SysStatx,      // io_setup → stub
+	206: SysStatx, // io_setup → stub
 	217: SysGetdents64,
 	218: SysSetTidAddress,
 	228: SysClockGettime,
@@ -3592,9 +3598,9 @@ var x64Map = map[uint64]uint64{
 	233: SysEpollCtl,
 	234: SysTgkill,
 	257: SysOpenat,
-	258: SysMkdirat,    // mkdirat
+	258: SysMkdirat, // mkdirat
 	260: SysFchownat,
-	262: SysFstatat,    // newfstatat
+	262: SysFstatat, // newfstatat
 	263: SysUnlinkat,
 	264: SysRenameat2,
 	265: SysLinkat,
@@ -3604,34 +3610,34 @@ var x64Map = map[uint64]uint64{
 	269: SysFaccessat,
 	270: SysPselect6,
 	271: SysPpoll,
-	276: SysSplice,     // splice → will hit default
-	279: SysStatx,      // move_pages → stub
-	281: SysEpollPwait, // epoll_pwait
-	282: SysEpollCreate1, // via 291
-	283: SysTimerfdCreate,  // timerfd_create (obsolete, see 322)
+	276: SysSplice,        // splice → will hit default
+	279: SysStatx,         // move_pages → stub
+	281: SysEpollPwait,    // epoll_pwait
+	282: SysEpollCreate1,  // via 291
+	283: SysTimerfdCreate, // timerfd_create (obsolete, see 322)
 	284: SysEventfd2,      // eventfd (old), treat as eventfd2
 	285: SysFallocate,
 	286: SysTimerfdSettime,
 	287: SysTimerfdGettime,
 	288: SysAccept4,
-	289: SysPipe2,         // signalfd4 → pipe2 stub
+	289: SysPipe2, // signalfd4 → pipe2 stub
 	290: SysEventfd2,
 	291: SysEpollCreate1,
 	273: SysSetRobustList,
 	292: SysDup3,
-	293: SysPipe2,         // pipe2
+	293: SysPipe2, // pipe2
 	302: SysPrlimit64,
 	303: SysMemfdCreate,
 	310: SysSetRobustList, // process_vm_readv → stub
 	318: SysGetrandom,
 	316: SysRenameat2,
-	253: SysKcmp,          // kcmp - compare kernel resources of two processes
+	253: SysKcmp, // kcmp - compare kernel resources of two processes
 	319: SysMemfdCreate,
-	320: SysMembarrier,   // kexec_file_load → stub
+	320: SysMembarrier, // kexec_file_load → stub
 	334: SysRseq,
 	322: SysTimerfdCreate, // timerfd_create (new number)
 	332: SysStatx,         // statx
-	435: SysClone3,      // clone3
+	435: SysClone3,        // clone3
 }
 
 // SysFlock/SysSplice: handled as unknown → ENOSYS
