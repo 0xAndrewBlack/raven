@@ -4976,6 +4976,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// Tab control state
 		tabCount     int
 		tabCurSel    int
+		tabTitles    []string
 	}
 	hwndChildren := make(map[uint64]*controlState)
 	hwndTitle := make(map[uint64]string)
@@ -5771,6 +5772,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		case "rebarwindow32":
 			const rbFirst = 0x0400
 			switch msg {
+			case 0x000F: // WM_PAINT
+				if wlWindow != nil {
+					// Draw rebar background as gradient-like gray
+					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					// Draw 3D-style band borders
+					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])   // top highlight
+					wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16]) // bottom shadow
+				}
+				return 0, true
 			case 0x0005: // WM_SIZE
 				cs.w = int32(lParam & 0xFFFF)
 				cs.h = int32(lParam >> 16)
@@ -5816,6 +5826,24 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			const tbFirst = 0x0400
 			const wmUser = 0x0400
 			switch msg {
+			case 0x000F: // WM_PAINT
+				if wlWindow != nil {
+					// Draw toolbar background
+					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					// Draw some placeholder tool buttons (24x22px each)
+					const btnW, btnH = int32(24), int32(22)
+					const padding = int32(2)
+					x := cs.x + padding
+					for x+btnW < cs.x+cs.w {
+						wlWindow.DrawRect(x, cs.y+padding, x+btnW, cs.y+padding+btnH, sysColors[15])
+						wlWindow.DrawRect(x, cs.y+padding, x+btnW, cs.y+padding+1, sysColors[20])   // top highlight
+						wlWindow.DrawRect(x, cs.y+padding, x+1, cs.y+padding+btnH, sysColors[20])   // left highlight
+						wlWindow.DrawRect(x+btnW-1, cs.y+padding, x+btnW, cs.y+padding+btnH, sysColors[16]) // right shadow
+						wlWindow.DrawRect(x, cs.y+padding+btnH-1, x+btnW, cs.y+padding+btnH, sysColors[16]) // bottom shadow
+						x += btnW + padding
+					}
+				}
+				return 0, true
 			case 0x0005: // WM_SIZE
 				cs.w = int32(lParam & 0xFFFF)
 				cs.h = 26 // standard toolbar height
@@ -5901,8 +5929,37 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			const tcmFirst = 0x1300
 			switch msg {
 			case tcmFirst + 7: // TCM_INSERTITEMA
-				return uint64(cs.tabCount), true
+				// TCITEMA: mask(4), dwState(4), dwStateMask(4), [pad4], pszText(8 ptr)
+				if lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					if mask&0x1 != 0 { // TCIF_TEXT
+						pText, _ := mem.Read64(lParam + 16)
+						if pText != 0 {
+							text := readGuestString(pText)
+							cs.tabTitles = append(cs.tabTitles, text)
+						}
+					} else {
+						cs.tabTitles = append(cs.tabTitles, "")
+					}
+				}
+				cs.tabCount++
+				return uint64(cs.tabCount - 1), true
 			case tcmFirst + 62: // TCM_INSERTITEMW
+				// TCITEMW: mask(4), dwState(4), dwStateMask(4), [pad4], pszText(8 ptr)
+				if lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					if mask&0x1 != 0 { // TCIF_TEXT
+						pText, _ := mem.Read64(lParam + 16)
+						if pText != 0 {
+							text := readGuestUTF16(pText)
+							cs.tabTitles = append(cs.tabTitles, text)
+						}
+					} else {
+						cs.tabTitles = append(cs.tabTitles, "")
+					}
+				} else {
+					cs.tabTitles = append(cs.tabTitles, "")
+				}
 				cs.tabCount++
 				return uint64(cs.tabCount - 1), true
 			case tcmFirst + 8: // TCM_DELETEITEM
@@ -5972,6 +6029,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRect(x, cs.y, x+1, cs.y+cs.h, sysColors[16])
 						wlWindow.DrawRect(x+tabW-1, cs.y, x+tabW, cs.y+cs.h, sysColors[16])
 						wlWindow.DrawRect(x, cs.y, x+tabW, cs.y+1, sysColors[16])
+						// tab title
+						if i < len(cs.tabTitles) && cs.tabTitles[i] != "" {
+							textColor := uint32(0x000000)
+							wlWindow.DrawText(x+4, cs.y+4, cs.tabTitles[i], textColor, bgCol, false)
+						}
 						x += tabW
 					}
 				}
@@ -6625,6 +6687,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "SetWindowPos", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
+			// Handle main (top-level) window resize - updates the Wayland window
+			if hwnd == mainHWND && wlWindow != nil {
+				flags := uint32(ctx.Arg(6))
+				const swpNoSize = 0x0001
+				if flags&swpNoSize == 0 {
+					w := int32(ctx.Arg(4))
+					h := int32(ctx.Arg(5))
+					if w > 0 && w < 0x7FFF && h > 0 && h < 0x7FFF {
+						if wlWindow.Resize(w, h) {
+							syncScreenSurface()
+							ravelog.Logf("[setpos] mainHWND resize → %dx%d\n", w, h)
+						}
+						lParam := uint64(uint16(w)) | (uint64(uint16(h)) << 16)
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+					}
+				}
+				ctx.SetReturn(1)
+				return 0
+			}
 			if ci, ok := hwndChildren[hwnd]; ok {
 				flags := uint32(ctx.Arg(6))
 				const swpNoMove       = 0x0002
@@ -6741,6 +6823,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			newX, newY := int32(ctx.Arg(1)), int32(ctx.Arg(2))
 			newW, newH := int32(ctx.Arg(3)), int32(ctx.Arg(4))
 			ravelog.Logf("[move] MoveWindow hwnd=0x%x x=%d y=%d w=%d h=%d\n", hwnd, newX, newY, newW, newH)
+			// Handle main window resize
+			if hwnd == mainHWND && wlWindow != nil {
+				if newW > 0 && newW < 0x7FFF && newH > 0 && newH < 0x7FFF {
+					if wlWindow.Resize(newW, newH) {
+						syncScreenSurface()
+					}
+					lParam := uint64(uint16(newW)) | (uint64(uint16(newH)) << 16)
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+				}
+				ctx.SetReturn(1)
+				return 0
+			}
 			if ci, ok := hwndChildren[hwnd]; ok {
 				ox, oy := clientAreaOrigin(ci.parentHWND)
 				ci.x = newX + ox
@@ -8229,6 +8324,41 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetWindowPlacement", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			lpwndpl := ctx.Arg(1)
+			if lpwndpl != 0 && wlWindow != nil {
+				// WINDOWPLACEMENT layout (all int32):
+				// offset 0: length (uint32)
+				// offset 4: flags (uint32)
+				// offset 8: showCmd (uint32)
+				// offset 12: ptMinPosition.x, offset 16: ptMinPosition.y
+				// offset 20: ptMaxPosition.x, offset 24: ptMaxPosition.y
+				// offset 28: rcNormalPosition.left, offset 32: top, offset 36: right, offset 40: bottom
+				readI32 := func(off uint64) int32 {
+					v, _ := mem.Read32(lpwndpl + off)
+					return int32(v)
+				}
+				left   := readI32(28)
+				top    := readI32(32)
+				right  := readI32(36)
+				bottom := readI32(40)
+				w := right - left
+				h := bottom - top
+				if w > 0 && w < 0x7FFF && h > 0 && h < 0x7FFF {
+					ravelog.Logf("[placement] SetWindowPlacement hwnd=0x%x → %d,%d %dx%d\n", hwnd, left, top, w, h)
+					if hwnd == mainHWND {
+						if wlWindow.Resize(w, h) {
+							syncScreenSurface()
+						}
+						lParam := uint64(uint16(w)) | (uint64(uint16(h)) << 16)
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+					} else if ci, ok := hwndChildren[hwnd]; ok {
+						ci.w = w
+						ci.h = h
+					}
+				}
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})

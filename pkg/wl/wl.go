@@ -686,6 +686,18 @@ func (w *Window) Commit() {
 	d.send(w.surfaceID, 6)                                                          // commit
 }
 
+// Resize requests a window resize to the given dimensions.
+// The buffer is recreated immediately if the size changed.
+func (w *Window) Resize(width, height int32) bool {
+	if width == w.Width && height == w.Height {
+		return false
+	}
+	w.Width = width
+	w.Height = height
+	w.needsResize = true
+	return w.ResizeIfNeeded()
+}
+
 // ResizeIfNeeded recreates the shm buffer if the compositor changed the window size.
 // Returns true if the buffer was resized (all pixels are zeroed).
 func (w *Window) ResizeIfNeeded() bool {
