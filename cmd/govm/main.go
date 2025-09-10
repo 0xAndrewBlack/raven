@@ -129,36 +129,22 @@ func runELF(absPath string, guestArgv []string, trace bool, enableWayland bool) 
 
 	if enableWayland {
 		xdg := os.Getenv("XDG_RUNTIME_DIR")
-		if xdg != "" {
-			guestEnvp = append(guestEnvp, "XDG_RUNTIME_DIR="+xdg)
+		if xdg == "" {
+			xdg = "/run/user/1000"
 		}
+		guestEnvp = append(guestEnvp, "XDG_RUNTIME_DIR="+xdg)
 		waylandDisp := os.Getenv("WAYLAND_DISPLAY")
 		if waylandDisp == "" {
 			waylandDisp = "wayland-0"
 		}
-		// Use X11/XWayland backend: swrast_dri.so has no LLVM dependency,
-		// so startup is dramatically faster than EGL+llvmpipe in the emulator.
-		display := os.Getenv("DISPLAY")
-		if display == "" {
-			display = ":0"
-		}
-		guestEnvp = append(guestEnvp, "DISPLAY="+display)
-		guestEnvp = append(guestEnvp, "SDL_VIDEODRIVER=x11")
-		guestEnvp = append(guestEnvp, "LIBGL_ALWAYS_SOFTWARE=1")
-		guestEnvp = append(guestEnvp, "SDL_RENDER_DRIVER=software")
-		guestEnvp = append(guestEnvp, "GALLIUM_DRIVER=softpipe")
-		// X11 auth: forward real user's Xauthority file
-		xauth := os.Getenv("XAUTHORITY")
-		if xauth == "" {
-			if home, err := os.UserHomeDir(); err == nil {
-				xauth = filepath.Join(home, ".Xauthority")
-			}
-		}
-		if xauth != "" {
-			guestEnvp = append(guestEnvp, "XAUTHORITY="+xauth)
-		}
-		// Keep Wayland available too (some libs probe it)
 		guestEnvp = append(guestEnvp, "WAYLAND_DISPLAY="+waylandDisp)
+		// Software GL via Mesa/Gallium - no GPU device needed.
+		guestEnvp = append(guestEnvp, "LIBGL_ALWAYS_SOFTWARE=1")
+		guestEnvp = append(guestEnvp, "GALLIUM_DRIVER=softpipe")
+		// Also expose DISPLAY for apps that fall back to X11 for font/cursor etc.
+		if display := os.Getenv("DISPLAY"); display != "" {
+			guestEnvp = append(guestEnvp, "DISPLAY="+display)
+		}
 	}
 
 	mem := mmu.New()
@@ -167,28 +153,26 @@ func runELF(absPath string, guestArgv []string, trace bool, enableWayland bool) 
 
 	if enableWayland {
 		xdg := os.Getenv("XDG_RUNTIME_DIR")
-		if xdg != "" {
-			fs.MkdirAll(xdg)
-			waylandDisp := os.Getenv("WAYLAND_DISPLAY")
-			if waylandDisp == "" {
-				waylandDisp = "wayland-0"
+		if xdg == "" {
+			xdg = "/run/user/1000"
+		}
+		fs.MkdirAll(xdg)
+		waylandDisp := os.Getenv("WAYLAND_DISPLAY")
+		if waylandDisp == "" {
+			waylandDisp = "wayland-0"
+		}
+		// Dummy VFS entry so guest can stat/access the socket path.
+		fs.CreateFile(filepath.Join(xdg, waylandDisp), nil, 0666)
+		// Also expose X11 for libs that probe DISPLAY (fontconfig, cursors, etc.)
+		if display := os.Getenv("DISPLAY"); display != "" {
+			dispNum := strings.TrimPrefix(display, ":")
+			if dot := strings.Index(dispNum, "."); dot >= 0 {
+				dispNum = dispNum[:dot]
 			}
-			// Create a dummy file in the VFS so that the guest can stat it,
-			// even if the actual connection is handled by the syscall proxy.
-			fs.CreateFile(filepath.Join(xdg, waylandDisp), nil, 0666)
+			x11Dir := "/tmp/.X11-unix"
+			fs.MkdirAll(x11Dir)
+			fs.CreateFile(filepath.Join(x11Dir, "X"+dispNum), nil, 0666)
 		}
-		// Forward X11 sockets for XWayland (swrast_dri.so path, no LLVM)
-		display := os.Getenv("DISPLAY")
-		if display == "" {
-			display = ":0"
-		}
-		dispNum := strings.TrimPrefix(display, ":")
-		if dot := strings.Index(dispNum, "."); dot >= 0 {
-			dispNum = dispNum[:dot]
-		}
-		x11Dir := "/tmp/.X11-unix"
-		fs.MkdirAll(x11Dir)
-		fs.CreateFile(filepath.Join(x11Dir, "X"+dispNum), nil, 0666)
 	}
 fs.HostOut = func(fd int, data []byte) {
 if fd == 1 {

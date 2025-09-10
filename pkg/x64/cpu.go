@@ -188,6 +188,17 @@ for c.running {
 				}
 			}
 		}
+		fmt.Fprintf(os.Stderr, "[crash-regs] RIP=0x%x TLS=0x%x err=%v\n", c.RIP, c.GetTLS(), err)
+		fmt.Fprintf(os.Stderr, "[crash-regs] RAX=0x%x RBX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
+			c.Regs[RAX], c.Regs[RBX], c.Regs[RCX], c.Regs[RDX], c.Regs[RSI], c.Regs[RDI])
+		fmt.Fprintf(os.Stderr, "[crash-regs] R8=0x%x R9=0x%x R10=0x%x R11=0x%x R12=0x%x R13=0x%x R14=0x%x R15=0x%x RBP=0x%x RSP=0x%x\n",
+			c.Regs[R8], c.Regs[R9], c.Regs[R10], c.Regs[R11], c.Regs[R12], c.Regs[R13], c.Regs[R14], c.Regs[R15], c.Regs[RBP], c.GetSP())
+		// Print stack
+		sp := c.GetSP()
+		for i := 0; i < 8; i++ {
+			v, _ := c.mem.Read64(sp + uint64(i*8))
+			fmt.Fprintf(os.Stderr, "[crash-regs] [RSP+0x%02x]=0x%x\n", i*8, v)
+		}
 		return fmt.Errorf("at RIP=0x%x: %w", c.RIP, err)
 	}
 	c.instret++
@@ -307,19 +318,6 @@ return 0, fmt.Errorf("bad imm width %d", width)
 // step decodes and executes a single instruction.
 func (c *CPU) step() error {
 startRIP := c.RIP
-
-
-// DEBUG: validate heap chunk chain at each instruction in the window
-if c.traceHeap && (c.instret >= c.traceStart && c.instret <= c.traceEnd ||
-	startRIP >= c.traceRIPLo && startRIP <= c.traceRIPHi) {
-	var ops [10]byte
-	for j := 0; j < 10; j++ {
-		ops[j], _ = c.mem.Read8(startRIP + uint64(j))
-	}
-	fmt.Fprintf(os.Stderr, "[itrace] #%d RIP=0x%x ops=[%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x] RAX=0x%x RBX=0x%x RDI=0x%x RSI=0x%x RDX=0x%x R15=0x%x RSP=0x%x\n",
-		c.instret, startRIP, ops[0], ops[1], ops[2], ops[3], ops[4], ops[5], ops[6], ops[7], ops[8], ops[9],
-		c.Regs[RAX], c.Regs[RBX], c.Regs[RDI], c.Regs[RSI], c.Regs[RDX], c.Regs[R15], c.Regs[RSP])
-}
 
 // --- Collect prefixes ---
 var pfx prefixState
@@ -4666,6 +4664,11 @@ if val != 0 {
 c.Rflags |= flagCF
 }
 c.setArithFlags(result, size)
+// NEG sets OF=1 if operand is the minimum signed value (−INT_MIN overflows).
+nbits := size * 8
+if val&(uint64(1)<<nbits-1) == uint64(1)<<(nbits-1) {
+c.Rflags |= flagOF
+}
 return c.writeRM(m, pfx, size, result)
 
 case 4: // MUL (unsigned)

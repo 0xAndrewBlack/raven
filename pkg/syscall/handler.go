@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
@@ -176,11 +177,35 @@ type Handler struct {
 
 	clearChildTidMu sync.Mutex
 	clearChildTid   map[int]uint64 // TID → clear_child_tid address
+
+	// temporary debug: count syscalls by number
+	// vfork / posix_spawn subprocess support.
+	// When the guest calls clone(CLONE_VFORK) or clone3(CLONE_VFORK),
+	// we record a pending vfork state. The child goroutine runs until it
+	// calls execve (which launches a real host process) or exit, then
+	// unblocks the parent via vforkDone.
+	vforkMu       sync.Mutex
+	vforkPending  bool            // true while a vfork child is running
+	vforkDone     chan int         // child sends guest PID after execve/exit
+	vforkSnapshot vfs.FDSnapshot  // parent FD table saved before vfork child runs
+
+	// host child processes spawned via execve-in-vfork-child, keyed by guest PID.
+	childMu    sync.Mutex
+	childProcs map[int]*os.Process // guest pid → host *os.Process
+	nextGPID   int                 // monotonic guest PID counter (starts at 2)
 }
 
 // NewHandler creates a syscall handler wired to the given MMU and VFS.
 func NewHandler(mem *mmu.MMU, fs *vfs.VFS) *Handler {
-	return &Handler{Mem: mem, FS: fs, Signals: signal.New(), Umask: 0022}
+	h := &Handler{
+		Mem:        mem,
+		FS:         fs,
+		Signals:    signal.New(),
+		Umask:      0022,
+		childProcs: make(map[int]*os.Process),
+		nextGPID:   2,
+	}
+	return h
 }
 
 // Handle is the SyscallHandler callback for the CPU.
@@ -258,6 +283,14 @@ func (h *Handler) Handle(c arch.CPU) {
 	case SysMmap:
 		h.sysMmap(c)
 	case SysMunmap:
+		if h.ThreadM != nil && h.ThreadM.IsThreadStack(a0, a1) {
+			// The parent is trying to munmap a live thread's stack (common in
+			// Rust/glibc clone3 patterns where the parent frees the stack
+			// allocation immediately after clone3). Skip the unmap so the child
+			// goroutine can execute; the stack is unregistered when the thread exits.
+			c.SetSyscallReturn(0)
+			break
+		}
 		h.Mem.Munmap(a0, a1)
 		c.SetSyscallReturn(0)
 	case SysMprotect:
@@ -470,10 +503,16 @@ func (h *Handler) Handle(c arch.CPU) {
 	case SysKcmp:
 		c.SetSyscallReturn(negErrno(ENOSYS))
 	case SysMincore:
-		// mincore(addr, length, vec) - report pages in memory; stub: all in core
+		// mincore(addr, length, vec) - report pages in memory.
+		// Linux returns -ENOMEM if any page in [addr, addr+length) is not mapped.
 		pageSize := uint64(4096)
 		nPages := (a1 + pageSize - 1) / pageSize
 		for i := uint64(0); i < nPages; i++ {
+			pageAddr := a0 + i*pageSize
+			if _, _, err := h.Mem.LookupRead(pageAddr, mmu.PermRead); err != nil {
+				c.SetSyscallReturn(negErrno(ENOMEM))
+				return
+			}
 			h.Mem.Write8(a2+i, 1) // bit 0 set = page in RAM
 		}
 		c.SetSyscallReturn(0)
@@ -544,14 +583,11 @@ func (h *Handler) Handle(c arch.CPU) {
 
 	// --- Wait ---
 	case SysWait4:
-		c.SetSyscallReturn(negErrno(ECHILD))
+		h.sysWait4(c, a0, a1, a2, a3)
 
 	// --- Exec ---
 	case SysExecve:
-		if path, err2 := h.readGuestString(a0); err2 == nil {
-			fmt.Fprintf(os.Stderr, "[govm] execve(%q) → ENOSYS\n", path)
-		}
-		c.SetSyscallReturn(negErrno(ENOSYS))
+		h.sysExecve(c, a0, a1, a2)
 
 	// --- Timers ---
 	case SysGetitimer:
@@ -568,6 +604,211 @@ func (h *Handler) Handle(c arch.CPU) {
 		fmt.Fprintf(os.Stderr, "[govm] unhandled syscall %d (a0=0x%x a1=0x%x a2=0x%x)\n", num, a0, a1, a2)
 		c.SetSyscallReturn(negErrno(ENOSYS))
 	}
+}
+
+// allocGuestPID returns a monotonically increasing guest PID for a new child process.
+func (h *Handler) allocGuestPID() int {
+	h.childMu.Lock()
+	defer h.childMu.Unlock()
+	pid := h.nextGPID
+	h.nextGPID++
+	return pid
+}
+
+// sysExecve: if we're inside a vfork-child goroutine, launch the real host
+// binary and unblock the parent.  Otherwise return ENOSYS (we don't support
+// exec-as-replace-image for the main guest process).
+func (h *Handler) sysExecve(c arch.CPU, pathPtr, argvPtr, envpPtr uint64) {
+	path, err := h.readGuestString(pathPtr)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+
+	// Build argv
+	argv := h.readGuestStringArray(argvPtr)
+	// Build envp
+	envp := h.readGuestStringArray(envpPtr)
+
+	fmt.Fprintf(os.Stderr, "[govm] execve(%q, %v)\n", path, argv)
+
+	h.vforkMu.Lock()
+	pending := h.vforkPending
+	ch := h.vforkDone
+	snap := h.vforkSnapshot
+	if pending {
+		h.vforkPending = false
+	}
+	h.vforkMu.Unlock()
+
+	if !pending {
+		// Not inside a vfork child - can't replace main guest image.
+		fmt.Fprintf(os.Stderr, "[govm] execve outside vfork → ENOSYS\n")
+		c.SetSyscallReturn(negErrno(ENOSYS))
+		return
+	}
+
+	// Capture the child's current host FDs for 0/1/2 BEFORE restoring the
+	// parent's FD table.  The child may have dup2'd a pipe write-end onto fd 1.
+	childHFD := [3]int{-1, -1, -1}
+	for i := 0; i < 3; i++ {
+		childHFD[i] = h.FS.GetHostFDNum(i)
+	}
+
+	// Restore the parent's FD table immediately - this undoes any dup2/close
+	// file actions the child performed on the shared FD table.
+	h.FS.RestoreFDs(snap)
+
+	// Launch the real host process using dup'd copies of the child's stdio fds.
+	dupOrFallback := func(hfd int, fallback *os.File) (*os.File, bool) {
+		if hfd >= 0 {
+			dupFD, err := syscall.Dup(hfd)
+			if err == nil {
+				return os.NewFile(uintptr(dupFD), fmt.Sprintf("hfd%d-dup", hfd)), true
+			}
+		}
+		return fallback, false
+	}
+	stdinF,  stdinDup  := dupOrFallback(childHFD[0], os.Stdin)
+	stdoutF, stdoutDup := dupOrFallback(childHFD[1], os.Stdout)
+	stderrF, stderrDup := dupOrFallback(childHFD[2], os.Stderr)
+	cmd := exec.Command(path, argv[1:]...)
+	cmd.Env = envp
+	cmd.Stdin  = stdinF
+	cmd.Stdout = stdoutF
+	cmd.Stderr = stderrF
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "[govm] execve host start error: %v\n", err)
+		ch <- -1
+		c.Stop()
+		return
+	}
+	// Close our dup'd copies now that the child process owns them.
+	// This is critical for any pipe write-end: once we close our copy,
+	// the reader sees EOF when the child process exits.
+	if stdinDup  { stdinF.Close()  }
+	if stdoutDup { stdoutF.Close() }
+	if stderrDup { stderrF.Close() }
+	// Also close the original child host fds that are now owned by the subprocess.
+	// These were in the child's FD table (e.g. dup2'd pipe write-end on fd 1)
+	// and must not stay open in our process.
+	for i := 0; i < 3; i++ {
+		hfd := childHFD[i]
+		if hfd < 0 {
+			continue
+		}
+		// Don't close if it's the same as the parent's restored fd for that slot
+		// (i.e. child didn't change it) - GetHostFDNum after RestoreFDs reflects parent.
+		parentHFD := h.FS.GetHostFDNum(i)
+		if hfd != parentHFD {
+			syscall.Close(hfd)
+		}
+	}
+
+	gpid := h.allocGuestPID()
+	h.childMu.Lock()
+	h.childProcs[gpid] = cmd.Process
+	h.childMu.Unlock()
+
+	fmt.Fprintf(os.Stderr, "[govm] execve launched pid=%d (guest=%d)\n", cmd.Process.Pid, gpid)
+	ch <- gpid
+	// Stop this child CPU - it has been replaced by the host process.
+	c.Stop()
+}
+
+// sysWait4 waits for a child host process, populating the wstatus word.
+func (h *Handler) sysWait4(c arch.CPU, gpidArg, wstatusPtr, options, rusagePtr uint64) {
+	gpid := int(int32(gpidArg)) // signed: -1 = any child
+	h.childMu.Lock()
+	if len(h.childProcs) == 0 {
+		h.childMu.Unlock()
+		fmt.Fprintf(os.Stderr, "[govm] wait4(pid=%d) → ECHILD (no children)\n", gpid)
+		c.SetSyscallReturn(negErrno(ECHILD))
+		return
+	}
+	// Find matching pid
+	var proc *os.Process
+	var foundPID int
+	for pid, p := range h.childProcs {
+		if gpid == -1 || gpid == pid {
+			proc = p
+			foundPID = pid
+			break
+		}
+	}
+	if proc == nil {
+		h.childMu.Unlock()
+		fmt.Fprintf(os.Stderr, "[govm] wait4(pid=%d) → ECHILD (not found)\n", gpid)
+		c.SetSyscallReturn(negErrno(ECHILD))
+		return
+	}
+	h.childMu.Unlock()
+
+	const WNOHANG = 1
+	fmt.Fprintf(os.Stderr, "[govm] wait4(guest=%d host=%d options=0x%x)\n", gpid, proc.Pid, options)
+
+	if options&WNOHANG != 0 {
+		// Non-blocking: use unix.Wait4 with WNOHANG.
+		var wstatus unix.WaitStatus
+		wpid, err := unix.Wait4(proc.Pid, &wstatus, unix.WNOHANG, nil)
+		if err != nil || wpid == 0 {
+			// Child not yet done.
+			c.SetSyscallReturn(0)
+			return
+		}
+		h.childMu.Lock()
+		delete(h.childProcs, foundPID)
+		h.childMu.Unlock()
+		ws := uint32(wstatus)
+		if wstatusPtr != 0 {
+			h.Mem.Write32(wstatusPtr, ws)
+		}
+		fmt.Fprintf(os.Stderr, "[govm] wait4 WNOHANG → pid=%d wstatus=0x%x\n", foundPID, ws)
+		c.SetSyscallReturn(uint64(foundPID))
+		return
+	}
+
+	// Blocking wait.
+	var wstatus unix.WaitStatus
+	_, err := unix.Wait4(proc.Pid, &wstatus, 0, nil)
+	h.childMu.Lock()
+	delete(h.childProcs, foundPID)
+	h.childMu.Unlock()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[govm] wait4 error: %v\n", err)
+		c.SetSyscallReturn(negErrno(ECHILD))
+		return
+	}
+	ws := uint32(wstatus)
+	if wstatusPtr != 0 {
+		h.Mem.Write32(wstatusPtr, ws)
+	}
+	fmt.Fprintf(os.Stderr, "[govm] wait4 → pid=%d wstatus=0x%x exitCode=%d\n", foundPID, ws, wstatus.ExitStatus())
+	c.SetSyscallReturn(uint64(foundPID))
+}
+
+// readGuestStringArray reads a NULL-terminated array of guest string pointers.
+func (h *Handler) readGuestStringArray(ptr uint64) []string {
+	if ptr == 0 {
+		return nil
+	}
+	var result []string
+	for i := uint64(0); ; i++ {
+		addrBytes, err := h.Mem.ReadBytes(ptr+i*8, 8)
+		if err != nil {
+			break
+		}
+		strPtr := binary.LittleEndian.Uint64(addrBytes)
+		if strPtr == 0 {
+			break
+		}
+		s, err := h.readGuestString(strPtr)
+		if err != nil {
+			break
+		}
+		result = append(result, s)
+	}
+	return result
 }
 
 // --- Errno constants ---
@@ -971,11 +1212,20 @@ func (h *Handler) sysDup3(c arch.CPU, oldfd, newfd uint64) {
 }
 
 func (h *Handler) sysPipe2(c arch.CPU, pipefdAddr, flags uint64) {
-	rfd, wfd, err := h.FS.Pipe2(int(flags))
-	if err != nil {
-		c.SetSyscallReturn(negErrno(ENFILE))
+	// Strip O_NONBLOCK from the host pipe: Go's os.File doesn't use the
+	// network poller for pipes, so a non-blocking pipe causes EAGAIN on read
+	// instead of blocking.  The guest's O_NONBLOCK semantics are honoured at
+	// the syscall level (our sysRead returns EAGAIN when appropriate).
+	hostFlags := int(flags) &^ unix.O_NONBLOCK
+	hostFDs := make([]int, 2)
+	if err := unix.Pipe2(hostFDs, hostFlags); err != nil {
+		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
 	}
+	rf := os.NewFile(uintptr(hostFDs[0]), "pipe:r")
+	wf := os.NewFile(uintptr(hostFDs[1]), "pipe:w")
+	rfd := h.FS.AllocHostFile(rf)
+	wfd := h.FS.AllocHostFile(wf)
 	h.Mem.Write32(pipefdAddr, uint32(rfd))
 	h.Mem.Write32(pipefdAddr+4, uint32(wfd))
 	if h.Trace {
@@ -1620,8 +1870,14 @@ func (h *Handler) sysPollInt(c arch.CPU, fdsAddr, nfds uint64, timeoutMs int32) 
 	if len(hostFDs) > 0 {
 		n, err = unix.Poll(hostFDs, int(timeoutMs))
 	} else {
-		if timeoutMs > 0 {
+		// All polled FDs are emulated (no host backing). Sleep to avoid spinning.
+		switch {
+		case timeoutMs == 0:
+			// non-blocking poll: just return 0
+		case timeoutMs > 0:
 			time.Sleep(time.Duration(timeoutMs) * time.Millisecond)
+		default: // -1 (infinite)
+			time.Sleep(10 * time.Millisecond)
 		}
 		c.SetSyscallReturn(0)
 		return
@@ -1651,8 +1907,10 @@ func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint
 		tls = a4
 	}
 
-	// If this is a thread creation (CLONE_VM|CLONE_FS|CLONE_THREAD)
-	if h.ThreadM != nil && flags&0x100 != 0 { // CLONE_VM
+	// If this is a thread creation (CLONE_THREAD is the definitive flag for pthreads).
+	// posix_spawn and vfork use CLONE_VM|CLONE_VFORK but NOT CLONE_THREAD; those
+	// should fall through to the fork-like path and fail gracefully.
+	if h.ThreadM != nil && flags&0x10000 != 0 { // CLONE_THREAD
 		childPC := c.SyscallReturnPC()
 		if childStack == 0 {
 			childStack = c.GetSP()
@@ -1661,7 +1919,7 @@ func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint
 		if flags&0x00080000 != 0 { // CLONE_SETTLS
 			childTLS = tls
 		}
-		tid, err := h.ThreadM.Clone(c, childPC, childStack, childTLS)
+		tid, err := h.ThreadM.Clone(c, childPC, childStack, childTLS, 0, 0)
 		if err != nil {
 			c.SetSyscallReturn(negErrno(ENOMEM))
 			return
@@ -1676,8 +1934,48 @@ func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint
 		}
 		c.SetSyscallReturn(uint64(tid))
 	} else {
-		// fork-like: return 0 (pretend we're child)
-		c.SetSyscallReturn(negErrno(EAGAIN))
+		// fork-like (posix_spawn, vfork): if CLONE_VFORK, run the child as a
+		// goroutine that can call execve to launch a real host process, then
+		// unblocks the parent.  Without CLONE_VFORK just fail immediately.
+		const CLONE_VFORK = 0x4000
+		if flags&CLONE_VFORK != 0 {
+			gpid := h.allocGuestPID()
+			ch := make(chan int, 1)
+			snap := h.FS.SnapshotFDs() // save parent FD table before child modifies it
+			h.vforkMu.Lock()
+			h.vforkPending = true
+			h.vforkDone = ch
+			h.vforkSnapshot = snap
+			h.vforkMu.Unlock()
+			// Child goroutine: clone the CPU state and run until execve/exit.
+			childCPU := c.CloneForThread()
+			childCPU.SetSyscallReturn(0) // child sees pid 0
+			if childStack != 0 {
+				childCPU.SetSP(childStack)
+			}
+			childCPU.SetSyscallHandler(h.Handle)
+			go func() {
+				if err2 := childCPU.Run(); err2 != nil {
+					fmt.Fprintf(os.Stderr, "[govm] vfork-child exited: %v\n", err2)
+				}
+				// If child exited without execve, restore FD table and unblock parent.
+				h.vforkMu.Lock()
+				pending := h.vforkPending
+				h.vforkPending = false
+				savedSnap := h.vforkSnapshot
+				h.vforkMu.Unlock()
+				if pending {
+					h.FS.RestoreFDs(savedSnap)
+					ch <- gpid
+				}
+			}()
+			// Parent blocks until child calls execve (or exits).
+			guestPID := <-ch
+			c.SetSyscallReturn(uint64(guestPID))
+		} else {
+			fmt.Fprintf(os.Stderr, "[govm] clone fork-like flags=0x%x → ENOSYS\n", flags)
+			c.SetSyscallReturn(negErrno(ENOSYS))
+		}
 	}
 }
 
@@ -1708,7 +2006,7 @@ func (h *Handler) sysClone3(c arch.CPU, uargsPtr, size uint64) {
 	stackSize := binary.LittleEndian.Uint64(buf[48:56])
 	tls := binary.LittleEndian.Uint64(buf[56:64])
 
-	if h.ThreadM != nil && flags&0x100 != 0 { // CLONE_VM → thread creation
+	if h.ThreadM != nil && flags&0x10000 != 0 { // CLONE_THREAD → pthread creation
 		childPC := c.SyscallReturnPC()
 		childStack := stack + stackSize // stack grows down: top = base + size
 		if childStack == 0 {
@@ -1718,7 +2016,8 @@ func (h *Handler) sysClone3(c arch.CPU, uargsPtr, size uint64) {
 		if flags&0x00080000 != 0 { // CLONE_SETTLS
 			childTLS = tls
 		}
-		tid, err := h.ThreadM.Clone(c, childPC, childStack, childTLS)
+
+		tid, err := h.ThreadM.Clone(c, childPC, childStack, childTLS, stack, stackSize)
 		if err != nil {
 			c.SetSyscallReturn(negErrno(ENOMEM))
 			return
@@ -1736,10 +2035,49 @@ func (h *Handler) sysClone3(c arch.CPU, uargsPtr, size uint64) {
 		}
 		c.SetSyscallReturn(uint64(tid))
 	} else {
-		// Process-creation (fork-like): signal that the resource is temporarily
-		// unavailable so that glibc/Rust falls back to posix_spawn / vfork.
-		fmt.Fprintf(os.Stderr, "[govm] clone3 fork-like flags=0x%x → EAGAIN\n", flags)
-		c.SetSyscallReturn(negErrno(EAGAIN))
+		// Process-creation (fork-like, posix_spawn, vfork).
+		const CLONE_VFORK = 0x4000
+		if flags&CLONE_VFORK != 0 {
+			gpid := h.allocGuestPID()
+			ch := make(chan int, 1)
+			snap := h.FS.SnapshotFDs()
+			h.vforkMu.Lock()
+			h.vforkPending = true
+			h.vforkDone = ch
+			h.vforkSnapshot = snap
+			h.vforkMu.Unlock()
+			childCPU := c.CloneForThread()
+			childCPU.SetSyscallReturn(0)
+			if stack != 0 {
+				childCPU.SetSP(stack + stackSize)
+			}
+			childCPU.SetSyscallHandler(h.Handle)
+			if flags&0x00080000 != 0 && tls != 0 { // CLONE_SETTLS
+				childCPU.SetTLS(tls)
+			}
+			go func() {
+				if err2 := childCPU.Run(); err2 != nil {
+					fmt.Fprintf(os.Stderr, "[govm] vfork-child exited: %v\n", err2)
+				}
+				h.vforkMu.Lock()
+				pending := h.vforkPending
+				h.vforkPending = false
+				savedSnap := h.vforkSnapshot
+				h.vforkMu.Unlock()
+				if pending {
+					h.FS.RestoreFDs(savedSnap)
+					ch <- gpid
+				}
+			}()
+			guestPID := <-ch
+			if flags&0x1000 != 0 && pidfdPtr != 0 { // CLONE_PIDFD
+				h.Mem.Write32(pidfdPtr, ^uint32(0))
+			}
+			c.SetSyscallReturn(uint64(guestPID))
+		} else {
+			fmt.Fprintf(os.Stderr, "[govm] clone3 fork-like flags=0x%x → ENOSYS\n", flags)
+			c.SetSyscallReturn(negErrno(ENOSYS))
+		}
 	}
 }
 
@@ -1973,14 +2311,9 @@ func (h *Handler) sysConnect(c arch.CPU, fd, addrPtr, addrLen uint64) {
 			c.SetSyscallReturn(negErrno(EINVAL))
 			return
 		}
-		if h.Trace {
-			fmt.Fprintf(os.Stderr, "[govm] connect(fd=%d→hostFD=%d, sa=%+v)\n", fd, hostFD, sa)
-		}
 		err := syscall.Connect(hostFD, sa)
 		if err != nil {
-			if h.Trace {
-				fmt.Fprintf(os.Stderr, "[govm] connect ERROR: %v\n", err)
-			}
+			fmt.Fprintf(os.Stderr, "[govm] connect ERROR: %v\n", err)
 			c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 			return
 		}
@@ -2800,8 +3133,14 @@ func (h *Handler) sysEpollPwait(c arch.CPU, epfd, eventsPtr, maxevents, timeout 
 // ===================================================================
 
 func (h *Handler) sysEventfd2(c arch.CPU, initval, flags uint64) {
-	fd := h.FS.AllocEventFD(initval, int(flags))
-	c.SetSyscallReturn(uint64(fd))
+	hostFD, err := unix.Eventfd(uint(initval), int(flags))
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EINVAL))
+		return
+	}
+	f := os.NewFile(uintptr(hostFD), "eventfd")
+	gfd := h.FS.AllocHostFile(f)
+	c.SetSyscallReturn(uint64(gfd))
 }
 
 // ===================================================================
@@ -2990,7 +3329,6 @@ func (h *Handler) sysMmap(c arch.CPU) {
 
 	// Real host file (memfd or host passthrough)
 	_ = offset
-	
 	if !mapShared {
 		// MAP_PRIVATE: just allocate memory and read the file. This avoids SIGBUS
 		// if the requested length exceeds the file size (common in ELF loaders).

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -570,13 +571,31 @@ func (v *VFS) Dup(oldfd int) (int, error) {
 	}
 	newfd := v.nextFD
 	v.nextFD++
-	v.fds[newfd] = &FD{
+	newFD := &FD{
 		Node:   f.Node,
 		Offset: f.Offset,
 		Flags:  f.Flags,
 		PipeR:  f.PipeR,
 		PipeW:  f.PipeW,
 	}
+	// Duplicate host-backed resources so each guest FD has its own host FD.
+	if f.HostFile != nil {
+		dupFD, err := syscall.Dup(int(f.HostFile.Fd()))
+		if err != nil {
+			return -1, err
+		}
+		newFD.HostFile = os.NewFile(uintptr(dupFD), f.HostFile.Name())
+	} else if f.Socket != nil {
+		hfd := f.Socket.HostFD()
+		if hfd >= 0 {
+			dupFD, err := syscall.Dup(hfd)
+			if err != nil {
+				return -1, err
+			}
+			newFD.HostFile = os.NewFile(uintptr(dupFD), "dup-socket")
+		}
+	}
+	v.fds[newfd] = newFD
 	return newfd, nil
 }
 
@@ -591,13 +610,31 @@ func (v *VFS) Dup3(oldfd, newfd int) error {
 	if _, ok := v.fds[newfd]; ok {
 		delete(v.fds, newfd)
 	}
-	v.fds[newfd] = &FD{
+	newFD := &FD{
 		Node:   f.Node,
 		Offset: f.Offset,
 		Flags:  f.Flags,
 		PipeR:  f.PipeR,
 		PipeW:  f.PipeW,
 	}
+	// Duplicate host-backed resources so each guest FD has its own host FD.
+	if f.HostFile != nil {
+		dupFD, err := syscall.Dup(int(f.HostFile.Fd()))
+		if err != nil {
+			return err
+		}
+		newFD.HostFile = os.NewFile(uintptr(dupFD), f.HostFile.Name())
+	} else if f.Socket != nil {
+		hfd := f.Socket.HostFD()
+		if hfd >= 0 {
+			dupFD, err := syscall.Dup(hfd)
+			if err != nil {
+				return err
+			}
+			newFD.HostFile = os.NewFile(uintptr(dupFD), "dup-socket")
+		}
+	}
+	v.fds[newfd] = newFD
 	if newfd >= v.nextFD {
 		v.nextFD = newfd + 1
 	}
@@ -1083,4 +1120,37 @@ func SplitAll(path string) []string {
 		}
 	}
 	return parts
+}
+
+// FDSnapshot is a shallow copy of the FD table used for vfork/posix_spawn.
+type FDSnapshot struct {
+fds    map[int]*FD
+nextFD int
+}
+
+// SnapshotFDs returns a shallow copy of the current FD table.
+// Used before a vfork child goroutine runs so we can restore the parent's
+// FD table after the child calls execve (which modifies the shared table
+// via dup2/close file actions).
+func (v *VFS) SnapshotFDs() FDSnapshot {
+v.mu.Lock()
+defer v.mu.Unlock()
+snap := FDSnapshot{
+fds:    make(map[int]*FD, len(v.fds)),
+nextFD: v.nextFD,
+}
+for k, fd := range v.fds {
+snap.fds[k] = fd
+}
+return snap
+}
+
+// RestoreFDs replaces the FD table with a previously-saved snapshot.
+// Called after the vfork-child's execve to undo any dup2/close modifications
+// that the child made to the shared FD table.
+func (v *VFS) RestoreFDs(snap FDSnapshot) {
+v.mu.Lock()
+defer v.mu.Unlock()
+v.fds = snap.fds
+v.nextFD = snap.nextFD
 }
