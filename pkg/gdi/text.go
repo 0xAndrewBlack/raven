@@ -62,6 +62,27 @@ func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
 	if f == nil {
 		f = defaultFont()
 	}
+
+	// Apply TextAlign - ReactOS: DC_ATTR.lTextAlign
+	// Horizontal: TA_LEFT=0, TA_RIGHT=2, TA_CENTER=6
+	// Vertical:   TA_TOP=0, TA_BOTTOM=8, TA_BASELINE=24
+	runes := []rune(text)
+	textW := int32(len(runes)) * f.AveCharWidth
+	hAlign := dc.TextAlign & 0x06
+	vAlign := dc.TextAlign & 0x18
+	switch hAlign {
+	case 2: // TA_RIGHT
+		x -= textW
+	case 6: // TA_CENTER
+		x -= textW / 2
+	}
+	switch vAlign {
+	case 24: // TA_BASELINE
+		y -= f.Ascent
+	case 8: // TA_BOTTOM
+		y -= f.CellHeight
+	}
+
 	fgColor := dc.TextColor
 	bgColor := dc.BkColor
 	bkOpaque := opaque || dc.BkMode == 2 // OPAQUE
@@ -126,7 +147,7 @@ func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
 				off += 4
 			}
 		}
-		cx += fontCharW
+		cx += fontCharW + dc.CharExtra
 	}
 }
 

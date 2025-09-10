@@ -34,6 +34,33 @@ type DC struct {
 	// BkMode: TRANSPARENT=1, OPAQUE=2
 	BkMode int32
 
+	// TextAlign: combination of TA_LEFT=0, TA_RIGHT=2, TA_CENTER=6,
+	// TA_TOP=0, TA_BOTTOM=8, TA_BASELINE=24, TA_NOUPDATECP=0, TA_UPDATECP=1.
+	// ReactOS: DC_ATTR.lTextAlign
+	TextAlign int32
+
+	// MapMode: MM_TEXT=1 (default), MM_LOMETRIC=2, MM_HIMETRIC=3, MM_LOENGLISH=4,
+	// MM_HIENGLISH=5, MM_TWIPS=6, MM_ISOTROPIC=7, MM_ANISOTROPIC=8.
+	MapMode int32
+
+	// Window and viewport origins / extents (SetWindowOrgEx, SetViewportExtEx etc.)
+	// ReactOS: DC_ATTR.ptlWindowOrg / szlWindowExt / ptlViewportOrg / szlViewportExt
+	WindowOrgX, WindowOrgY     int32
+	WindowExtX, WindowExtY     int32
+	ViewportExtX, ViewportExtY int32
+
+	// CharExtra: extra spacing between characters (SetTextCharacterExtra).
+	CharExtra int32
+
+	// StretchBltMode: BLACKONWHITE=1, WHITEONBLACK=2, COLORONCOLOR=3, HALFTONE=4.
+	StretchBltMode int32
+
+	// ClipRgnHandle: HRGN selected via SelectClipRgn.
+	ClipRgnHandle uint64
+
+	// ArcDir: 1=COUNTERCLOCKWISE (default), 2=CLOCKWISE.
+	ArcDir int32
+
 	// Current drawing position (MoveToEx / LineTo).
 	CurX, CurY int32
 
@@ -56,6 +83,15 @@ type dcSave struct {
 	Bitmap                 *Bitmap
 	TextColor, BkColor     uint32
 	BkMode                 int32
+	TextAlign              int32
+	MapMode                int32
+	WindowOrgX, WindowOrgY int32
+	WindowExtX, WindowExtY int32
+	ViewportExtX, ViewportExtY int32
+	CharExtra              int32
+	StretchBltMode         int32
+	ClipRgnHandle          uint64
+	ArcDir                 int32
 	CurX, CurY             int32
 	ROP2                   int32
 }
@@ -63,15 +99,20 @@ type dcSave struct {
 // NewScreenDC creates a DC that targets the given Surface (the Wayland framebuffer).
 func NewScreenDC(s *Surface) *DC {
 	return &DC{
-		Target:    s,
-		IsScreen:  true,
-		TextColor: 0x000000,
-		BkColor:   0xFFFFFF,
-		BkMode:    2, // OPAQUE
-		ROP2:      13,
-		Brush:     stockBrushes[StockWhiteBrush],
-		Pen:       stockPens[StockBlackPen],
-		Font:      defaultFont(),
+		Target:       s,
+		IsScreen:     true,
+		TextColor:    0x000000,
+		BkColor:      0xFFFFFF,
+		BkMode:       2, // OPAQUE
+		ROP2:         13,
+		MapMode:      1, // MM_TEXT
+		WindowExtX:   1, WindowExtY: 1,
+		ViewportExtX: 1, ViewportExtY: 1,
+		StretchBltMode: 1, // BLACKONWHITE
+		ArcDir:       1,  // COUNTERCLOCKWISE
+		Brush:        stockBrushes[StockWhiteBrush],
+		Pen:          stockPens[StockBlackPen],
+		Font:         defaultFont(),
 	}
 }
 
@@ -79,14 +120,19 @@ func NewScreenDC(s *Surface) *DC {
 // A bitmap must be selected via SelectBitmap before drawing.
 func NewMemoryDC() *DC {
 	return &DC{
-		IsScreen:  false,
-		TextColor: 0x000000,
-		BkColor:   0xFFFFFF,
-		BkMode:    2,
-		ROP2:      13,
-		Brush:     stockBrushes[StockWhiteBrush],
-		Pen:       stockPens[StockBlackPen],
-		Font:      defaultFont(),
+		IsScreen:       false,
+		TextColor:      0x000000,
+		BkColor:        0xFFFFFF,
+		BkMode:         2,
+		ROP2:           13,
+		MapMode:        1,
+		WindowExtX:     1, WindowExtY: 1,
+		ViewportExtX:   1, ViewportExtY: 1,
+		StretchBltMode: 1,
+		ArcDir:         1,
+		Brush:          stockBrushes[StockWhiteBrush],
+		Pen:            stockPens[StockBlackPen],
+		Font:           defaultFont(),
 	}
 }
 
@@ -102,6 +148,18 @@ func (dc *DC) InheritFrom(src *DC) {
 	dc.TextColor = src.TextColor
 	dc.BkColor = src.BkColor
 	dc.BkMode = src.BkMode
+	dc.TextAlign = src.TextAlign
+	dc.MapMode = src.MapMode
+	dc.WindowOrgX = src.WindowOrgX
+	dc.WindowOrgY = src.WindowOrgY
+	dc.WindowExtX = src.WindowExtX
+	dc.WindowExtY = src.WindowExtY
+	dc.ViewportExtX = src.ViewportExtX
+	dc.ViewportExtY = src.ViewportExtY
+	dc.CharExtra = src.CharExtra
+	dc.StretchBltMode = src.StretchBltMode
+	dc.ArcDir = src.ArcDir
+	dc.ROP2 = src.ROP2
 	dc.Brush = src.Brush
 	dc.Pen = src.Pen
 	dc.Font = src.Font
@@ -121,6 +179,12 @@ func (dc *DC) Save() int {
 		ClipX1: dc.ClipX1, ClipY1: dc.ClipY1,
 		Brush: dc.Brush, Pen: dc.Pen, Font: dc.Font, Bitmap: dc.Bitmap,
 		TextColor: dc.TextColor, BkColor: dc.BkColor, BkMode: dc.BkMode,
+		TextAlign: dc.TextAlign, MapMode: dc.MapMode,
+		WindowOrgX: dc.WindowOrgX, WindowOrgY: dc.WindowOrgY,
+		WindowExtX: dc.WindowExtX, WindowExtY: dc.WindowExtY,
+		ViewportExtX: dc.ViewportExtX, ViewportExtY: dc.ViewportExtY,
+		CharExtra: dc.CharExtra, StretchBltMode: dc.StretchBltMode,
+		ClipRgnHandle: dc.ClipRgnHandle, ArcDir: dc.ArcDir,
 		CurX: dc.CurX, CurY: dc.CurY, ROP2: dc.ROP2,
 	}
 	dc.saved = append(dc.saved, snap)
@@ -145,6 +209,15 @@ func (dc *DC) Restore(level int) bool {
 	dc.ClipX1, dc.ClipY1 = s.ClipX1, s.ClipY1
 	dc.Brush, dc.Pen, dc.Font, dc.Bitmap = s.Brush, s.Pen, s.Font, s.Bitmap
 	dc.TextColor, dc.BkColor, dc.BkMode = s.TextColor, s.BkColor, s.BkMode
+	dc.TextAlign = s.TextAlign
+	dc.MapMode = s.MapMode
+	dc.WindowOrgX, dc.WindowOrgY = s.WindowOrgX, s.WindowOrgY
+	dc.WindowExtX, dc.WindowExtY = s.WindowExtX, s.WindowExtY
+	dc.ViewportExtX, dc.ViewportExtY = s.ViewportExtX, s.ViewportExtY
+	dc.CharExtra = s.CharExtra
+	dc.StretchBltMode = s.StretchBltMode
+	dc.ClipRgnHandle = s.ClipRgnHandle
+	dc.ArcDir = s.ArcDir
 	dc.CurX, dc.CurY = s.CurX, s.CurY
 	dc.ROP2 = s.ROP2
 	return true

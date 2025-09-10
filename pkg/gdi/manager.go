@@ -183,6 +183,175 @@ func (m *Manager) GetObject(h uint64) *Object {
 	return m.objects[h]
 }
 
+// --- Region management ---
+// ReactOS: win32ss/gdi/ntgdi/region.c
+
+// Region result codes (Win32 standard).
+const (
+	RgnError       = 0
+	RgnNull        = 1
+	RgnSimple      = 2
+	RgnComplex     = 3
+)
+
+// Region combine modes (CombineRgn).
+const (
+	RgnAnd  = 1
+	RgnOr   = 2
+	RgnXor  = 3
+	RgnDiff = 4
+	RgnCopy = 5
+)
+
+// CreateRectRgn creates a rectangular region.
+// ReactOS: NtGdiCreateRectRgn
+func (m *Manager) CreateRectRgn(x0, y0, x1, y1 int32) uint64 {
+	h := m.alloc()
+	m.objects[h] = &Object{Type: ObjRegion, Region: &Region{X0: x0, Y0: y0, X1: x1, Y1: y1}}
+	return h
+}
+
+// CreateEllipticRgn creates an elliptic region (approximated as bounding rect).
+// ReactOS: NtGdiCreateEllipticRgn
+func (m *Manager) CreateEllipticRgn(x0, y0, x1, y1 int32) uint64 {
+	return m.CreateRectRgn(x0, y0, x1, y1)
+}
+
+// CreateRoundRectRgn creates a rounded-rectangle region (approximated as rect).
+func (m *Manager) CreateRoundRectRgn(x0, y0, x1, y1, xr, yr int32) uint64 {
+	return m.CreateRectRgn(x0, y0, x1, y1)
+}
+
+// GetRegion returns the Region object for a handle, or nil.
+func (m *Manager) GetRegion(h uint64) *Region {
+	obj := m.objects[h]
+	if obj != nil && obj.Type == ObjRegion {
+		return obj.Region
+	}
+	return nil
+}
+
+// SetRectRgn changes the bounds of an existing region.
+// ReactOS: NtGdiSetRectRgn
+func (m *Manager) SetRectRgn(h uint64, x0, y0, x1, y1 int32) bool {
+	rgn := m.GetRegion(h)
+	if rgn == nil {
+		return false
+	}
+	rgn.X0, rgn.Y0, rgn.X1, rgn.Y1 = x0, y0, x1, y1
+	rgn.IsEmpty = false
+	rgn.IsInfinite = false
+	return true
+}
+
+// GetRgnBox fills the bounding rect of a region and returns the region type.
+// ReactOS: NtGdiGetRgnBox
+func (m *Manager) GetRgnBox(h uint64, pRect *[4]int32) int {
+	rgn := m.GetRegion(h)
+	if rgn == nil {
+		return RgnError
+	}
+	if rgn.IsEmpty || (rgn.X0 == rgn.X1 && rgn.Y0 == rgn.Y1) {
+		if pRect != nil {
+			*pRect = [4]int32{}
+		}
+		return RgnNull
+	}
+	if pRect != nil {
+		pRect[0] = rgn.X0
+		pRect[1] = rgn.Y0
+		pRect[2] = rgn.X1
+		pRect[3] = rgn.Y1
+	}
+	return RgnSimple
+}
+
+// CombineRgn combines two regions into a destination region.
+// ReactOS: NtGdiCombineRgn
+func (m *Manager) CombineRgn(dst, src1, src2 uint64, mode int) int {
+	dstRgn := m.GetRegion(dst)
+	if dstRgn == nil {
+		return RgnError
+	}
+	r1 := m.GetRegion(src1)
+	r2 := m.GetRegion(src2)
+	if r1 == nil {
+		return RgnError
+	}
+
+	var x0, y0, x1, y1 int32
+	switch mode {
+	case RgnCopy:
+		x0, y0, x1, y1 = r1.X0, r1.Y0, r1.X1, r1.Y1
+	case RgnAnd:
+		if r2 == nil { return RgnError }
+		x0 = max32(r1.X0, r2.X0)
+		y0 = max32(r1.Y0, r2.Y0)
+		x1 = min32(r1.X1, r2.X1)
+		y1 = min32(r1.Y1, r2.Y1)
+		if x0 > x1 || y0 > y1 {
+			dstRgn.IsEmpty = true
+			return RgnNull
+		}
+	case RgnOr:
+		if r2 == nil { return RgnError }
+		x0 = min32(r1.X0, r2.X0)
+		y0 = min32(r1.Y0, r2.Y0)
+		x1 = max32(r1.X1, r2.X1)
+		y1 = max32(r1.Y1, r2.Y1)
+	case RgnXor:
+		// Simplified: use union for XOR (approximation)
+		if r2 == nil { return RgnError }
+		x0 = min32(r1.X0, r2.X0)
+		y0 = min32(r1.Y0, r2.Y0)
+		x1 = max32(r1.X1, r2.X1)
+		y1 = max32(r1.Y1, r2.Y1)
+	case RgnDiff:
+		// src1 minus src2 - simplified: keep src1 unchanged
+		x0, y0, x1, y1 = r1.X0, r1.Y0, r1.X1, r1.Y1
+	default:
+		return RgnError
+	}
+	dstRgn.X0, dstRgn.Y0, dstRgn.X1, dstRgn.Y1 = x0, y0, x1, y1
+	dstRgn.IsEmpty = false
+	if x0 == 0 && y0 == 0 && x1 == 0 && y1 == 0 {
+		return RgnNull
+	}
+	return RgnSimple
+}
+
+// SelectClipRgn sets the clipping region for a DC.
+// ReactOS: NtGdiExtSelectClipRgn
+func (m *Manager) SelectClipRgn(dcH, rgnH uint64) int {
+	dc := m.GetDC(dcH)
+	if dc == nil {
+		return RgnError
+	}
+	if rgnH == 0 {
+		// Remove clip region
+		dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = 0, 0, 0, 0
+		dc.ClipRgnHandle = 0
+		return RgnSimple
+	}
+	rgn := m.GetRegion(rgnH)
+	if rgn == nil {
+		return RgnError
+	}
+	dc.ClipRgnHandle = rgnH
+	// Translate region bounds to absolute screen coords using DC origin
+	dc.ClipX0 = rgn.X0 + dc.OriginX
+	dc.ClipY0 = rgn.Y0 + dc.OriginY
+	dc.ClipX1 = rgn.X1 + dc.OriginX
+	dc.ClipY1 = rgn.Y1 + dc.OriginY
+	if rgn.IsEmpty {
+		return RgnNull
+	}
+	return RgnSimple
+}
+
+func min32(a, b int32) int32 { if a < b { return a }; return b }
+func max32(a, b int32) int32 { if a > b { return a }; return b }
+
 // GetStockObject returns the handle of a stock GDI object.
 // ReactOS: NtGdiGetStockObject
 func (m *Manager) GetStockObject(idx int) uint64 {
@@ -234,6 +403,22 @@ func (m *Manager) SelectObject(dcH, objH uint64) uint64 {
 
 // FindHandle reverses a pointer lookup to a handle.
 // These are O(n) but GDI object counts are small in practice.
+func (m *Manager) FindBrushHandle(b *Brush) uint64 {
+	return m.findBrushHandle(b)
+}
+
+func (m *Manager) FindPenHandle(p *Pen) uint64 {
+	return m.findPenHandle(p)
+}
+
+func (m *Manager) FindFontHandle(f *Font) uint64 {
+	return m.findFontHandle(f)
+}
+
+func (m *Manager) FindBitmapHandle(bm *Bitmap) uint64 {
+	return m.findBitmapHandle(bm)
+}
+
 func (m *Manager) findBrushHandle(b *Brush) uint64 {
 	for h, obj := range m.objects {
 		if obj.Type == ObjBrush && obj.Brush == b {

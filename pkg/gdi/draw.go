@@ -199,3 +199,350 @@ func (dc *DC) StretchBlt(dx, dy, dw, dh int32, src *DC, sx, sy, sw, sh int32, ro
 	asy := sy + src.OriginY
 	dc.Target.StretchBlt(adx, ady, dw, dh, src.Target, asx, asy, sw, sh)
 }
+
+// SetPixel sets a single pixel. ReactOS: NtGdiSetPixel
+func (dc *DC) SetPixel(x, y int32, color uint32) {
+	px := x + dc.OriginX
+	py := y + dc.OriginY
+	if px < 0 || py < 0 || px >= dc.target().Width || py >= dc.target().Height {
+		return
+	}
+	dc.target().SetPixel(px, py, color)
+}
+
+// GetPixel returns the color of a single pixel. ReactOS: NtGdiGetPixel
+func (dc *DC) GetPixel(x, y int32) uint32 {
+	px := x + dc.OriginX
+	py := y + dc.OriginY
+	s := dc.target()
+	if px < 0 || py < 0 || px >= s.Width || py >= s.Height {
+		return 0xFFFFFFFF // CLR_INVALID
+	}
+	return s.GetPixel(px, py)
+}
+
+// RoundRect draws a rounded rectangle. ReactOS: NtGdiRoundRect
+func (dc *DC) RoundRect(x0, y0, x1, y1, xr, yr int32) {
+	// Simplified: draw as regular rectangle
+	dc.Rectangle(x0, y0, x1, y1)
+}
+
+// Polygon draws a filled polygon. ReactOS: NtGdiPolygon
+func (dc *DC) Polygon(pts [][2]int32) {
+	if len(pts) < 2 {
+		return
+	}
+	// Fill with brush using scanline algorithm (simplified bounding box fill)
+	if dc.Brush != nil && dc.Brush.Style != 1 {
+		minX, maxX := pts[0][0], pts[0][0]
+		minY, maxY := pts[0][1], pts[0][1]
+		for _, p := range pts[1:] {
+			if p[0] < minX { minX = p[0] }
+			if p[0] > maxX { maxX = p[0] }
+			if p[1] < minY { minY = p[1] }
+			if p[1] > maxY { maxY = p[1] }
+		}
+		dc.FillRectBrush(minX, minY, maxX+1, maxY+1)
+	}
+	// Draw border
+	for i := range pts {
+		next := (i + 1) % len(pts)
+		dc.MoveTo(pts[i][0], pts[i][1])
+		dc.LineTo(pts[next][0], pts[next][1])
+	}
+}
+
+// Polyline draws connected lines (no fill). ReactOS: NtGdiPolyPolyline
+func (dc *DC) PolylinePoints(pts [][2]int32) {
+	for i := 1; i < len(pts); i++ {
+		dc.MoveTo(pts[i-1][0], pts[i-1][1])
+		dc.LineTo(pts[i][0], pts[i][1])
+	}
+}
+
+// InvertRect inverts the colors in a rectangle. ReactOS: NtGdiInvertRgn
+func (dc *DC) InvertRect(left, top, right, bottom int32) {
+	x0 := left + dc.OriginX
+	y0 := top + dc.OriginY
+	x1 := right + dc.OriginX
+	y1 := bottom + dc.OriginY
+	x0, y0, x1, y1, ok := dc.clipRect(x0, y0, x1, y1)
+	if !ok { return }
+	s := dc.target()
+	for py := y0; py < y1; py++ {
+		for px := x0; px < x1; px++ {
+			if px < 0 || py < 0 || px >= s.Width || py >= s.Height { continue }
+			off := int(py)*int(s.Stride) + int(px)*4
+			s.Pix[off+0] ^= 0xFF
+			s.Pix[off+1] ^= 0xFF
+			s.Pix[off+2] ^= 0xFF
+		}
+	}
+}
+
+// DrawFocusRect draws a dotted focus rectangle (XOR mode). ReactOS: NtGdiDrawFocusRect
+func (dc *DC) DrawFocusRect(left, top, right, bottom int32) {
+	x0 := left + dc.OriginX
+	y0 := top + dc.OriginY
+	x1 := right + dc.OriginX
+	y1 := bottom + dc.OriginY
+	s := dc.target()
+	dotColor := uint32(0x000000)
+	drawDot := func(px, py int32) {
+		if px < 0 || py < 0 || px >= s.Width || py >= s.Height { return }
+		off := int(py)*int(s.Stride) + int(px)*4
+		// XOR with existing pixel
+		existing := uint32(s.Pix[off+2])<<16 | uint32(s.Pix[off+1])<<8 | uint32(s.Pix[off+0])
+		c := existing ^ dotColor ^ 0xFFFFFF
+		s.Pix[off+0] = byte(c)
+		s.Pix[off+1] = byte(c >> 8)
+		s.Pix[off+2] = byte(c >> 16)
+		s.Pix[off+3] = 0xFF
+	}
+	for px := x0; px < x1; px++ {
+		if (px - x0) % 2 == 0 {
+			drawDot(px, y0)
+			drawDot(px, y1-1)
+		}
+	}
+	for py := y0; py < y1; py++ {
+		if (py - y0) % 2 == 0 {
+			drawDot(x0, py)
+			drawDot(x1-1, py)
+		}
+	}
+}
+
+// DrawEdge draws a 3D edge rectangle.
+// ReactOS: UserDrawEdge in win32ss/user/user32/windows/draw.c
+// edge: combination of BDR_RAISEDOUTER=1, BDR_SUNKENOUTER=2, BDR_RAISEDINNER=4, BDR_SUNKENINNER=8
+//       shortcuts: EDGE_RAISED=5, EDGE_SUNKEN=10, EDGE_ETCHED=6, EDGE_BUMP=9
+// grfFlags: BF_LEFT=1, BF_TOP=2, BF_RIGHT=4, BF_BOTTOM=8, BF_RECT=15, BF_MIDDLE=0x800, BF_SOFT=0x1000
+//
+// System colors used (Win32 COLOR_* indices):
+//   COLOR_3DDKSHADOW=21, COLOR_3DSHADOW=16, COLOR_3DFACE=15, COLOR_3DHILIGHT=20, COLOR_3DLIGHT=22
+func (dc *DC) DrawEdge(left, top, right, bottom int32, edge, grfFlags uint32, sysColors [31]uint32) {
+	// Color mappings from Win32 system palette
+	hiLight := uint32(0xFFFFFF)
+	shadow := uint32(0x808080)
+	dkShadow := uint32(0x404040)
+	face := uint32(0xD4D0C8)
+	if len(sysColors) > 22 {
+		hiLight = sysColors[20]  // COLOR_3DHILIGHT
+		shadow = sysColors[16]   // COLOR_3DSHADOW
+		dkShadow = sysColors[21] // COLOR_3DDKSHADOW
+		face = sysColors[15]     // COLOR_3DFACE
+	}
+	_ = dkShadow
+
+	// Determine outer/inner edge colors based on edge type
+	var outerTopLeft, outerBotRight uint32
+	var innerTopLeft, innerBotRight uint32
+
+	const (
+		BDR_RAISEDOUTER = 0x0001
+		BDR_SUNKENOUTER = 0x0002
+		BDR_RAISEDINNER = 0x0004
+		BDR_SUNKENINNER = 0x0008
+	)
+	const (
+		BF_LEFT   = 0x0001
+		BF_TOP    = 0x0002
+		BF_RIGHT  = 0x0004
+		BF_BOTTOM = 0x0008
+		BF_MIDDLE = 0x0800
+		BF_SOFT   = 0x1000
+		BF_FLAT   = 0x4000
+	)
+
+	if edge & BDR_RAISEDOUTER != 0 {
+		outerTopLeft = hiLight
+		outerBotRight = dkShadow
+	} else if edge & BDR_SUNKENOUTER != 0 {
+		outerTopLeft = dkShadow
+		outerBotRight = hiLight
+	}
+
+	if edge & BDR_RAISEDINNER != 0 {
+		innerTopLeft = hiLight
+		innerBotRight = shadow
+	} else if edge & BDR_SUNKENINNER != 0 {
+		innerTopLeft = shadow
+		innerBotRight = hiLight
+	}
+
+	hasOuter := (edge & (BDR_RAISEDOUTER | BDR_SUNKENOUTER)) != 0
+	hasInner := (edge & (BDR_RAISEDINNER | BDR_SUNKENINNER)) != 0
+
+	drawLine := func(x0, y0, x1, y1 int32, color uint32) {
+		if grfFlags & BF_FLAT != 0 { color = shadow }
+		ax0 := x0 + dc.OriginX
+		ay0 := y0 + dc.OriginY
+		ax1 := x1 + dc.OriginX
+		ay1 := y1 + dc.OriginY
+		ax0, ay0, ax1, ay1, ok := dc.clipRect(ax0, ay0, ax1, ay1)
+		if ok { dc.target().FillRect(ax0, ay0, ax1, ay1, color) }
+	}
+
+	if hasOuter {
+		// Outer edge (1px)
+		if grfFlags & BF_TOP    != 0 { drawLine(left, top, right, top+1, outerTopLeft) }
+		if grfFlags & BF_LEFT   != 0 { drawLine(left, top, left+1, bottom, outerTopLeft) }
+		if grfFlags & BF_RIGHT  != 0 { drawLine(right-1, top, right, bottom, outerBotRight) }
+		if grfFlags & BF_BOTTOM != 0 { drawLine(left, bottom-1, right, bottom, outerBotRight) }
+		left++; top++; right--; bottom--
+	}
+
+	if hasInner {
+		// Inner edge (1px)
+		if grfFlags & BF_TOP    != 0 { drawLine(left, top, right, top+1, innerTopLeft) }
+		if grfFlags & BF_LEFT   != 0 { drawLine(left, top, left+1, bottom, innerTopLeft) }
+		if grfFlags & BF_RIGHT  != 0 { drawLine(right-1, top, right, bottom, innerBotRight) }
+		if grfFlags & BF_BOTTOM != 0 { drawLine(left, bottom-1, right, bottom, innerBotRight) }
+		left++; top++; right--; bottom--
+	}
+
+	if grfFlags & BF_MIDDLE != 0 && left < right && top < bottom {
+		dc.FillRect(left, top, right, bottom, face)
+	}
+}
+
+// DrawFrameControl draws a frame control (checkbox, radio, button, arrow, etc.)
+// ReactOS: UserDrawFrameControl in win32ss/user/user32/windows/draw.c
+// uType: DFC_CAPTION=1, DFC_MENU=2, DFC_SCROLL=3, DFC_BUTTON=4
+// uState: DFCS_CAPTIONCLOSE=0, DFCS_CAPTIONMIN=1, DFCS_CAPTIONMAX=2, DFCS_CAPTIONRESTORE=3
+//         DFCS_BUTTONCHECK=0, DFCS_BUTTONRADIOIMAGE=1, DFCS_BUTTONRADIOMASK=2, DFCS_BUTTONRADIO=4
+//         DFCS_BUTTON3STATE=8, DFCS_BUTTONPUSH=16
+//         DFCS_INACTIVE=0x100, DFCS_PUSHED=0x200, DFCS_CHECKED=0x400, DFCS_FLAT=0x4000
+func (dc *DC) DrawFrameControl(left, top, right, bottom int32, uType, uState uint32, sysColors [31]uint32) {
+	face := uint32(0xD4D0C8)
+	hiLight := uint32(0xFFFFFF)
+	shadow := uint32(0x808080)
+	dkShadow := uint32(0x404040)
+	if len(sysColors) > 21 {
+		face = sysColors[15]
+		hiLight = sysColors[20]
+		shadow = sysColors[16]
+		dkShadow = sysColors[21]
+	}
+	_ = dkShadow
+
+	const (
+		DFC_CAPTION = 1
+		DFC_MENU    = 2
+		DFC_SCROLL  = 3
+		DFC_BUTTON  = 4
+	)
+	const (
+		DFCS_BUTTONPUSH = 0x0010
+		DFCS_BUTTONCHECK = 0x0000
+		DFCS_BUTTONRADIO = 0x0004
+		DFCS_PUSHED     = 0x0200
+		DFCS_CHECKED    = 0x0400
+		DFCS_FLAT       = 0x4000
+	)
+
+	w := right - left
+	h := bottom - top
+	cx := left + w/2
+	cy := top + h/2
+
+	switch uType {
+	case DFC_BUTTON:
+		if uState & DFCS_BUTTONPUSH != 0 {
+			// Push button
+			if uState & DFCS_PUSHED != 0 {
+				dc.DrawEdge(left, top, right, bottom, 0x000A, 0x000F, sysColors) // EDGE_SUNKEN|BF_RECT
+			} else {
+				dc.DrawEdge(left, top, right, bottom, 0x0005, 0x000F, sysColors) // EDGE_RAISED|BF_RECT
+			}
+		} else if uState & DFCS_BUTTONRADIO != 0 {
+			// Radio button: draw circle approximation
+			dc.FillRect(left+1, top+1, right-1, bottom-1, face)
+			dc.DrawBorder(left, top, right, bottom, shadow)
+			if uState & DFCS_CHECKED != 0 {
+				dc.FillRect(cx-2, cy-2, cx+2, cy+2, 0x000000)
+			}
+		} else {
+			// Checkbox
+			dc.FillRect(left, top, right, bottom, 0xFFFFFF)
+			dc.DrawBorder(left, top, right, bottom, shadow)
+			if uState & DFCS_CHECKED != 0 {
+				// Draw checkmark
+				for i := int32(0); i < h-4; i++ {
+					dc.FillRect(left+2+i/2, top+2+i, left+3+i/2, top+3+i, 0x000000)
+					dc.FillRect(right-3-i/2, top+2+i, right-2-i/2, top+3+i, 0x000000)
+				}
+			}
+		}
+
+	case DFC_CAPTION:
+		// Caption buttons (close/min/max) - draw simple button appearance
+		if uState & DFCS_PUSHED != 0 {
+			dc.DrawEdge(left, top, right, bottom, 0x000A, 0x000F, sysColors)
+		} else {
+			dc.DrawEdge(left, top, right, bottom, 0x0005, 0x000F, sysColors)
+		}
+		dc.FillRect(left+2, top+2, right-2, bottom-2, face)
+		// Draw X for close, - for min, box for max based on state
+		switch uState & 0x0F {
+		case 0: // DFCS_CAPTIONCLOSE - X
+			for i := int32(2); i < w-2; i++ {
+				dc.FillRect(left+i, top+i, left+i+1, top+i+1, 0x000000)
+				dc.FillRect(right-i-1, top+i, right-i, top+i+1, 0x000000)
+			}
+		case 1: // DFCS_CAPTIONMIN - underscore
+			dc.FillRect(cx-w/4, bottom-3, cx+w/4, bottom-2, 0x000000)
+		case 2: // DFCS_CAPTIONMAX - box
+			dc.DrawBorder(left+2, top+2, right-2, bottom-2, 0x000000)
+		case 3: // DFCS_CAPTIONRESTORE - two overlapping boxes
+			dc.DrawBorder(left+3, top+2, right-2, bottom-3, 0x000000)
+			dc.DrawBorder(left+2, top+3, right-3, bottom-2, 0x000000)
+		}
+
+	case DFC_SCROLL:
+		// Scrollbar arrows
+		dc.FillRect(left, top, right, bottom, face)
+		if uState & DFCS_PUSHED != 0 {
+			dc.DrawBorder(left, top, right, bottom, dkShadow)
+		} else {
+			dc.DrawEdge(left, top, right, bottom, 0x0005, 0x000F, sysColors)
+		}
+		// Draw arrow
+		_ = cx; _ = cy
+		_ = hiLight
+
+	case DFC_MENU:
+		dc.FillRect(left, top, right, bottom, face)
+	}
+}
+
+// GradientFill fills a rect with a gradient (simplified: use top color for whole rect).
+// ReactOS: NtGdiGradientFill
+func (dc *DC) GradientFill(left, top, right, bottom int32, colorTop, colorBottom uint32, horiz bool) {
+	if !horiz {
+		// Vertical gradient (top to bottom)
+		h := int(bottom - top)
+		if h <= 0 { return }
+		for y := top; y < bottom; y++ {
+			t := int(y - top)
+			rr := (int(colorTop>>16)*(h-t) + int(colorBottom>>16)*t) / h
+			gg := (int((colorTop>>8)&0xFF)*(h-t) + int((colorBottom>>8)&0xFF)*t) / h
+			bb := (int(colorTop&0xFF)*(h-t) + int(colorBottom&0xFF)*t) / h
+			c := uint32(rr<<16 | gg<<8 | bb)
+			dc.FillRect(left, y, right, y+1, c)
+		}
+	} else {
+		// Horizontal gradient (left to right)
+		w := int(right - left)
+		if w <= 0 { return }
+		for x := left; x < right; x++ {
+			t := int(x - left)
+			rr := (int(colorTop>>16)*(w-t) + int(colorBottom>>16)*t) / w
+			gg := (int((colorTop>>8)&0xFF)*(w-t) + int((colorBottom>>8)&0xFF)*t) / w
+			bb := (int(colorTop&0xFF)*(w-t) + int(colorBottom&0xFF)*t) / w
+			c := uint32(rr<<16 | gg<<8 | bb)
+			dc.FillRect(x, top, x+1, bottom, c)
+		}
+	}
+}

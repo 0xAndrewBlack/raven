@@ -40,8 +40,17 @@ func (s *Surface) SetPixel(x, y int32, c uint32) {
 	s.Pix[off+3] = 0xFF
 }
 
-// FillRect fills [x0,x1) × [y0,y1) with color, clipped to the surface bounds.
-// ReactOS: SURFACE_bSolidFill in win32ss/gdi/ntgdi/surface.c
+// GetPixel reads a COLORREF (0x00RRGGBB) from (x, y). No bounds check.
+// ReactOS: NtGdiGetPixel
+func (s *Surface) GetPixel(x, y int32) uint32 {
+	off := int(y)*int(s.Stride) + int(x)*4
+	b := uint32(s.Pix[off+0])
+	g := uint32(s.Pix[off+1])
+	r := uint32(s.Pix[off+2])
+	return r<<16 | g<<8 | b
+}
+
+
 func (s *Surface) FillRect(x0, y0, x1, y1 int32, color uint32) {
 	if x0 < 0 {
 		x0 = 0

@@ -2673,12 +2673,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 
 		d.RegisterAutoStubHandler(kernel32, "GetStartupInfoA", func(ctx *ntapi.TrapContext) uint32 {
-			// Zero-fill the STARTUPINFOA structure (68 bytes)
 			addr := ctx.Arg(0)
-			for i := uint64(0); i < 68; i++ {
+			for i := uint64(0); i < 104; i++ {
 				ctx.Mem.Write8(addr+i, 0)
 			}
-			ctx.Mem.Write32(addr, 68) // cb = sizeof(STARTUPINFOA)
+			ctx.Mem.Write32(addr, 104)       // cb = sizeof(STARTUPINFOA) on x64
+			ctx.Mem.Write32(addr+60, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
+			ctx.Mem.Write16(addr+64, 0x0001) // wShowWindow = SW_SHOWNORMAL
 			return 0
 		})
 
@@ -3175,7 +3176,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			for i := uint64(0); i < 104; i++ {
 				ctx.Mem.Write8(addr+i, 0)
 			}
-			ctx.Mem.Write32(addr, 104) // cb
+			ctx.Mem.Write32(addr, 104)       // cb
+			ctx.Mem.Write32(addr+60, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
+			ctx.Mem.Write16(addr+64, 0x0001) // wShowWindow = SW_SHOWNORMAL
 			return 0
 		})
 
@@ -4970,8 +4973,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		tvRoots      []uint64 // root-level items
 		// ListView state
 		lvColumns    []listColumn
+		// Tab control state
+		tabCount     int
+		tabCurSel    int
 	}
 	hwndChildren := make(map[uint64]*controlState)
+	hwndTitle := make(map[uint64]string)
 
 	// clientAreaOrigin returns the absolute (surface) coordinates of a
 	// window's client-area top-left. For mainHWND with a menu bar the
@@ -5064,6 +5071,74 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1)
 			return 0
 		})
+
+		// ImageList_AddMasked - adds bitmap with mask colour; return index
+		d.RegisterAutoStubHandler(comctl32, "ImageList_AddMasked", func(ctx *ntapi.TrapContext) uint32 {
+			himl := ctx.Arg(0)
+			idx := imageListCount[himl]
+			imageListCount[himl]++
+			ctx.SetReturn(idx)
+			return 0
+		})
+
+		// ImageList_Add - adds bitmap without mask; return index
+		d.RegisterAutoStubHandler(comctl32, "ImageList_Add", func(ctx *ntapi.TrapContext) uint32 {
+			himl := ctx.Arg(0)
+			idx := imageListCount[himl]
+			imageListCount[himl]++
+			ctx.SetReturn(idx)
+			return 0
+		})
+
+		// ImageList_Remove - remove image at index (-1 = all)
+		d.RegisterAutoStubHandler(comctl32, "ImageList_Remove", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// ImageList_SetIconSize - set icon size for image list
+		d.RegisterAutoStubHandler(comctl32, "ImageList_SetIconSize", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// ImageList_Draw - draw image from list to HDC (no-op stub)
+		d.RegisterAutoStubHandler(comctl32, "ImageList_Draw", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// ImageList_DrawEx - extended draw (no-op stub)
+		d.RegisterAutoStubHandler(comctl32, "ImageList_DrawEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// ImageList_GetIconSize - return icon dimensions
+		d.RegisterAutoStubHandler(comctl32, "ImageList_GetIconSize", func(ctx *ntapi.TrapContext) uint32 {
+			pCx := ctx.Arg(1)
+			pCy := ctx.Arg(2)
+			if pCx != 0 {
+				ctx.Mem.Write32(pCx, 16)
+			}
+			if pCy != 0 {
+				ctx.Mem.Write32(pCy, 16)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+
+		// ImageList_SetBkColor
+		d.RegisterAutoStubHandler(comctl32, "ImageList_SetBkColor", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0xFFFFFFFF) // CLR_NONE
+			return 0
+		})
+
+		// ImageList_Copy
+		d.RegisterAutoStubHandler(comctl32, "ImageList_Copy", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -5071,6 +5146,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- ole32.dll ---
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if ole32, ok := synthByName["ole32.dll"]; ok {
+		d.RegisterAutoStubHandler(ole32, "CoInitialize", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
 		d.RegisterAutoStubHandler(ole32, "CoInitializeEx", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // S_OK
 			return 0
@@ -5091,6 +5170,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(ole32, "OleUninitialize", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "RegisterDragDrop", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK (drag-drop not actually supported)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "RevokeDragDrop", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "DoDragDrop", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004004) // DRAGDROP_S_DROP cancel
 			return 0
 		})
 	}
@@ -5666,7 +5757,235 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		return 0, false
 	}
 
-	// Assign paintTree now that builtinWndProc is defined
+	// rebarBandCounts tracks how many bands have been inserted into each ReBar
+	rebarBandCounts := make(map[uint64]int)
+
+	// Wrap builtinWndProc to add ReBar/Toolbar/SysTab handling
+	innerBuiltin := builtinWndProc
+	builtinWndProc = func(hwnd uint64, msg uint32, wParam, lParam uint64) (uint64, bool) {
+		cs, ok := hwndChildren[hwnd]
+		if !ok {
+			return innerBuiltin(hwnd, msg, wParam, lParam)
+		}
+		switch cs.className {
+		case "rebarwindow32":
+			const rbFirst = 0x0400
+			switch msg {
+			case 0x0005: // WM_SIZE
+				cs.w = int32(lParam & 0xFFFF)
+				cs.h = int32(lParam >> 16)
+				return 0, true
+			case rbFirst + 1: // RB_INSERTBANDA
+				rebarBandCounts[hwnd]++
+				// Update rebar height: each band is 26px
+				cs.h = int32(rebarBandCounts[hwnd]) * 26
+				return 1, true
+			case rbFirst + 10: // RB_INSERTBANDW
+				rebarBandCounts[hwnd]++
+				cs.h = int32(rebarBandCounts[hwnd]) * 26
+				return 1, true
+			case rbFirst + 12: // RB_GETBANDCOUNT
+				return uint64(rebarBandCounts[hwnd]), true
+			case rbFirst + 14: // RB_GETBANDINFO / RB_GETBANDINFOA
+				return 1, true
+			case rbFirst + 4: // RB_DELETEBAND
+				if rebarBandCounts[hwnd] > 0 {
+					rebarBandCounts[hwnd]--
+					cs.h = int32(rebarBandCounts[hwnd]) * 26
+				}
+				return 1, true
+			case rbFirst + 6: // RB_GETBARHEIGHT
+				return uint64(cs.h), true
+			case rbFirst + 9: // RB_GETBARINFO
+				return 1, true
+			case rbFirst + 19: // RB_SETBARINFO
+				return 1, true
+			case rbFirst + 25: // RB_GETBANDINFOW
+				return 1, true
+			case rbFirst + 31: // RB_SETBANDINFOW
+				return 1, true
+			case rbFirst + 22: // RB_SIZETORECT
+				return 1, true
+			case rbFirst + 17: // RB_HITTEST
+				return uint64(0xFFFFFFFF), true // RBHT_NOWHERE
+			default:
+				return 0, true
+			}
+
+		case "toolbarwindow32":
+			const tbFirst = 0x0400
+			const wmUser = 0x0400
+			switch msg {
+			case 0x0005: // WM_SIZE
+				cs.w = int32(lParam & 0xFFFF)
+				cs.h = 26 // standard toolbar height
+				return 0, true
+			case wmUser + 3: // TB_ENABLEBUTTON
+				return 1, true
+			case wmUser + 4: // TB_CHECKBUTTON
+				return 1, true
+			case wmUser + 8: // TB_PRESSBUTTON
+				return 1, true
+			case wmUser + 9: // TB_HIDEBUTTON
+				return 1, true
+			case wmUser + 6: // TB_GETSTATE
+				return 0, true
+			case wmUser + 11: // TB_ISBUTTONCHECKED
+				return 0, true
+			case wmUser + 10: // TB_ISBUTTONENABLED
+				return 1, true
+			case wmUser + 19: // TB_ADDBITMAP
+				return 0, true
+			case wmUser + 20: // TB_ADDBUTTONSA
+				return 1, true
+			case wmUser + 68: // TB_ADDBUTTONSW
+				return 1, true
+			case wmUser + 44: // TB_BUTTONSTRUCTSIZE
+				return 0, true
+			case wmUser + 45: // TB_SETBITMAPSIZE
+				return 1, true
+			case wmUser + 48: // TB_AUTOSIZE
+				cs.h = 26
+				return 0, true
+			case wmUser + 46: // TB_SETBUTTONSIZE
+				return 1, true
+			case wmUser + 55: // TB_GETROWS
+				return 1, true
+			case wmUser + 77: // TB_GETROWCOUNT
+				return 1, true
+			case wmUser + 56: // TB_GETBUTTONSIZE
+				return (uint64(26)<<16) | 24, true // height=26, width=24
+			case wmUser + 22: // TB_BUTTONCOUNT
+				return 0, true
+			case wmUser + 21: // TB_DELETEBUTTON
+				return 1, true
+			case wmUser + 71: // TB_SETTOOLTIPS
+				return 0, true
+			case wmUser + 36: // TB_SETMAXTEXTROWS
+				return 1, true
+			case wmUser + 70: // TB_SETIMAGELIST
+				return 0, true
+			case wmUser + 69: // TB_GETIMAGELIST
+				return 0, true
+			case wmUser + 41: // TB_GETITEMRECT
+				if lParam != 0 {
+					btnIdx := int32(wParam)
+					x := btnIdx * 24
+					mem.Write32(lParam, uint32(x))
+					mem.Write32(lParam+4, 0)
+					mem.Write32(lParam+8, uint32(x+24))
+					mem.Write32(lParam+12, 26)
+				}
+				return 1, true
+			case wmUser + 27: // TB_GETBUTTONA
+				return 0, true
+			case wmUser + 111: // TB_GETBUTTONW
+				return 0, true
+			case wmUser + 39: // TB_SETPARENT
+				return 0, true
+			case wmUser + 93: // TB_SETBUTTONINFOW
+				return 1, true
+			case wmUser + 63: // TB_GETEXTENDEDSTYLE
+				return 0, true
+			case wmUser + 64: // TB_SETEXTENDEDSTYLE
+				return 0, true
+			case wmUser + 28: // TB_LOADIMAGES
+				return 0, true
+			case wmUser + 5: // TB_GETBUTTON
+				return 0, true
+			default:
+				return 0, true
+			}
+
+		case "systabcontrol32":
+			const tcmFirst = 0x1300
+			switch msg {
+			case tcmFirst + 7: // TCM_INSERTITEMA
+				return uint64(cs.tabCount), true
+			case tcmFirst + 62: // TCM_INSERTITEMW
+				cs.tabCount++
+				return uint64(cs.tabCount - 1), true
+			case tcmFirst + 8: // TCM_DELETEITEM
+				if cs.tabCount > 0 { cs.tabCount-- }
+				return 1, true
+			case tcmFirst + 5: // TCM_GETITEMCOUNT
+				return uint64(cs.tabCount), true
+			case tcmFirst + 11: // TCM_GETCURSEL
+				return uint64(cs.tabCurSel), true
+			case tcmFirst + 12: // TCM_SETCURSEL
+				cs.tabCurSel = int(wParam)
+				return 0, true
+			case tcmFirst + 13: // TCM_HITTEST
+				return uint64(0xFFFFFFFF), true // no tab hit
+			case tcmFirst + 10: // TCM_GETITEMRECT
+				if lParam != 0 {
+					mem.Write32(lParam, uint32(int32(wParam)*80))
+					mem.Write32(lParam+4, 0)
+					mem.Write32(lParam+8, uint32(int32(wParam)*80+80))
+					mem.Write32(lParam+12, 22)
+				}
+				return 1, true
+			case tcmFirst + 61: // TCM_GETITEMA
+				return 1, true
+			case tcmFirst + 60: // TCM_GETITEMW
+				return 1, true
+			case tcmFirst + 48: // TCM_ADJUSTRECT
+				// Shrinks or expands rect by tab bar height
+				if lParam != 0 {
+					l, _ := mem.Read32(lParam)
+					t, _ := mem.Read32(lParam + 4)
+					r, _ := mem.Read32(lParam + 8)
+					b, _ := mem.Read32(lParam + 12)
+					if wParam != 0 { // expand from display area
+						mem.Write32(lParam, l)
+						mem.Write32(lParam+4, t)
+						mem.Write32(lParam+8, r)
+						mem.Write32(lParam+12, b+22)
+					} else { // shrink to display area
+						mem.Write32(lParam, l)
+						mem.Write32(lParam+4, t+22)
+						mem.Write32(lParam+8, r)
+						mem.Write32(lParam+12, b)
+					}
+				}
+				return 0, true
+			case tcmFirst + 26: // TCM_SETITEMSIZE
+				return 1, true
+			case 0x0030: // WM_SETFONT
+				return 0, true
+			case 0x0005: // WM_SIZE
+				cs.w = int32(lParam & 0xFFFF)
+				cs.h = int32(lParam >> 16)
+				return 0, true
+			case 0x000F: // WM_PAINT - draw tab bar background
+				if wlWindow != nil {
+					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					// Draw tabs
+					x := cs.x
+					for i := 0; i < cs.tabCount; i++ {
+						sel := i == cs.tabCurSel
+						bgCol := sysColors[15]
+						if sel { bgCol = sysColors[5] }
+						tabW := int32(80)
+						wlWindow.DrawRect(x, cs.y, x+tabW, cs.y+cs.h, bgCol)
+						// tab border
+						wlWindow.DrawRect(x, cs.y, x+1, cs.y+cs.h, sysColors[16])
+						wlWindow.DrawRect(x+tabW-1, cs.y, x+tabW, cs.y+cs.h, sysColors[16])
+						wlWindow.DrawRect(x, cs.y, x+tabW, cs.y+1, sysColors[16])
+						x += tabW
+					}
+				}
+				return 0, true
+			default:
+				return 0, true
+			}
+
+		case "tooltips_class32":
+			// Tooltips: just return success for all messages
+			return 0, true
+		}
+		return innerBuiltin(hwnd, msg, wParam, lParam)
+	}
 	paintTree = func(parentHwnd uint64) {
 		var children []uint64
 		for h, cs := range hwndChildren {
@@ -6331,11 +6650,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if flags&swpHideWindow != 0 {
 					ci.visible = false
 				}
+				// Auto-show: if window is sized non-zero, treat as implicitly visible.
+				// (Win32 WM_SHOWWINDOW from parent's ShowWindow may not fire in our HLE)
+				if ci.w > 0 && ci.h > 0 && hwndWndProc[hwnd] != 0 {
+					ci.visible = true
+				}
 				ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d visible=%v\n", hwnd, ci.className, flags, ci.x, ci.y, ci.w, ci.h, ci.visible)
 				// Queue WM_SIZE for windows with a guest WndProc
 				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
 					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
 					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+					// Also queue WM_PAINT so the child redraws after resize
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
 				}
 			}
 			ctx.SetReturn(1)
@@ -6394,10 +6720,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d\n", dp.hwnd, ci.className, dp.flags, ci.x, ci.y, ci.w, ci.h)
+				// Auto-show: sized non-zero → implicitly visible
+				if ci.w > 0 && ci.h > 0 && hwndWndProc[dp.hwnd] != 0 {
+					ci.visible = true
+				}
 				// Dispatch WM_SIZE to children with guest WndProcs
 				if wp, ok2 := hwndWndProc[dp.hwnd]; ok2 && wp != 0 {
 					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
 					msgQueue = append(msgQueue, queuedMsg{dp.hwnd, 0x0005, 0, lParam})
+					msgQueue = append(msgQueue, queuedMsg{dp.hwnd, 0x000F, 0, 0})
 				}
 			}
 			deferredPositions = deferredPositions[:0]
@@ -6416,10 +6747,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ci.y = newY + oy
 				if newW > 0 { ci.w = newW }
 				if newH > 0 { ci.h = newH }
+				// Auto-show: sized non-zero → implicitly visible
+				if ci.w > 0 && ci.h > 0 && hwndWndProc[hwnd] != 0 {
+					ci.visible = true
+				}
 				// Queue WM_SIZE for windows with a guest WndProc
 				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
 					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
 					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
 				}
 			}
 			ctx.SetReturn(1)
@@ -6434,6 +6770,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if cs, ok := hwndChildren[hwnd]; ok {
 				cs.text = text
 			}
+			hwndTitle[hwnd] = text
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -6972,10 +7309,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ctx.SetReturn(1)
 					return 0
 				}
-				// Synthetic WM_PAINT frame: mainHWND + all visible children with guest WndProcs
+				// Synthetic WM_PAINT frame: mainHWND + all visible (or sized) children with guest WndProcs
 				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
 				for h, cs := range hwndChildren {
-					if cs.visible && hwndWndProc[h] != 0 {
+					if hwndWndProc[h] != 0 && (cs.visible || (cs.w > 0 && cs.h > 0)) {
 						msgQueue = append(msgQueue, queuedMsg{h, 0x000F, 0, 0})
 					}
 				}
@@ -7053,6 +7390,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0) // not translated
 			return 0
 		})
+		// CreateAcceleratorTableW - create accelerator table (stub handle)
+		var nextAccelTable uint64 = 0xac000
+		d.RegisterAutoStubHandler(user32, "CreateAcceleratorTableW", func(ctx *ntapi.TrapContext) uint32 {
+			nextAccelTable++
+			ctx.SetReturn(nextAccelTable)
+			return 0
+		})
+		// DestroyAcceleratorTable
+		d.RegisterAutoStubHandler(user32, "DestroyAcceleratorTable", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		// IsClipboardFormatAvailable
+		d.RegisterAutoStubHandler(user32, "IsClipboardFormatAvailable", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - clipboard not implemented
+			return 0
+		})
+		// LoadBitmapW - load bitmap from resource (return NULL)
+		d.RegisterAutoStubHandler(user32, "LoadBitmapW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL
+			return 0
+		})
 		d.RegisterAutoStubHandler(user32, "GetForegroundWindow", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0)
 			return 0
@@ -7107,6 +7466,455 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// Any InvalidateRect triggers a full repaint of mainHWND (which repaints all children)
 			msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
 			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "InvalidateRgn", func(ctx *ntapi.TrapContext) uint32 {
+			msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ValidateRect", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ValidateRgn", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetUpdateRgn", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			hrgn := ctx.Arg(1)
+			// Fill the region with the window's client rect and return SIMPLEREGION
+			if hrgn != 0 {
+				if cs, ok := hwndChildren[hwnd]; ok {
+					gdiMgr.SetRectRgn(hrgn, 0, 0, cs.w, cs.h)
+				} else if hwnd == mainHWND && wlWindow != nil {
+					gdiMgr.SetRectRgn(hrgn, 0, 0, wlWindow.Width, wlWindow.Height)
+				} else {
+					gdiMgr.SetRectRgn(hrgn, 0, 0, 800, 600)
+				}
+			}
+			ctx.SetReturn(2) // SIMPLEREGION
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetUpdateRect", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			pRect := ctx.Arg(1)
+			if pRect != 0 {
+				var w, h int32 = 800, 600
+				if cs, ok := hwndChildren[hwnd]; ok {
+					w, h = cs.w, cs.h
+				} else if wlWindow != nil {
+					w, h = wlWindow.Width, wlWindow.Height
+				}
+				ctx.Mem.Write32(pRect,    0)
+				ctx.Mem.Write32(pRect+4,  0)
+				ctx.Mem.Write32(pRect+8,  uint32(w))
+				ctx.Mem.Write32(pRect+12, uint32(h))
+			}
+			ctx.SetReturn(1) // update region is non-empty
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "RedrawWindow", func(ctx *ntapi.TrapContext) uint32 {
+			msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "PrintWindow", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		// DrawEdge/DrawFrameControl/DrawFocusRect in user32
+		d.RegisterAutoStubHandler(user32, "DrawEdge", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			edge := uint32(ctx.Arg(2))
+			flags := uint32(ctx.Arg(3))
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.DrawEdge(int32(l), int32(t), int32(r), int32(b), edge, flags, sysColors)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DrawFrameControl", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			uType := uint32(ctx.Arg(2))
+			uState := uint32(ctx.Arg(3))
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.DrawFrameControl(int32(l), int32(t), int32(r), int32(b), uType, uState, sysColors)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DrawFocusRect", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.DrawFocusRect(int32(l), int32(t), int32(r), int32(b))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "InvertRect", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.InvertRect(int32(l), int32(t), int32(r), int32(b))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		// DrawText/DrawTextEx
+		d.RegisterAutoStubHandler(user32, "DrawTextW", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			hdc := ctx.Arg(0)
+			lpStr := ctx.Arg(1)
+			nCount := int(int32(ctx.Arg(2)))
+			lpRect := ctx.Arg(3)
+			uFormat := uint32(ctx.Arg(4))
+			dc := getDC(hdc)
+			text := readGuestUTF16(lpStr)
+			if nCount >= 0 && nCount < len(text) { text = text[:nCount] }
+			if lpRect != 0 {
+				l, _ := mem.Read32(lpRect);  t, _ := mem.Read32(lpRect+4)
+				r, _ := mem.Read32(lpRect+8); b, _ := mem.Read32(lpRect+12)
+				// DT_CALCRECT=0x400 - just return text height
+				if uFormat & 0x400 != 0 {
+					f := dc.Font; if f == nil { f = gdi.DefaultFont() }
+					ctx.Mem.Write32(lpRect+12, uint32(int32(t)+f.CellHeight))
+					ctx.SetReturn(uint64(f.CellHeight))
+					return 0
+				}
+				// Center horizontally (DT_CENTER=1) or right (DT_RIGHT=2)
+				x := int32(l) + 2
+				y := int32(t)
+				f := dc.Font; if f == nil { f = gdi.DefaultFont() }
+				w := int32(r) - int32(l)
+				tw := int32(len([]rune(text))) * f.AveCharWidth
+				if uFormat & 0x1 != 0 { x = int32(l) + (w - tw) / 2 }
+				if uFormat & 0x2 != 0 { x = int32(r) - tw - 2 }
+				// DT_VCENTER=4: vertically center
+				if uFormat & 0x4 != 0 {
+					h := int32(b) - int32(t)
+					y = int32(t) + (h - f.CellHeight) / 2
+				}
+				// ETO_CLIPPED on the rect
+				oldClip := [4]int32{dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1}
+				dc.ClipX0 = int32(l) + dc.OriginX
+				dc.ClipY0 = int32(t) + dc.OriginY
+				dc.ClipX1 = int32(r) + dc.OriginX
+				dc.ClipY1 = int32(b) + dc.OriginY
+				dc.TextOut(x, y, text, false)
+				dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = oldClip[0], oldClip[1], oldClip[2], oldClip[3]
+				ctx.SetReturn(uint64(f.CellHeight))
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DrawTextExW", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			// Delegate to DrawTextW implementation (same first 4 args + format)
+			hdc := ctx.Arg(0)
+			lpStr := ctx.Arg(1)
+			nCount := int(int32(ctx.Arg(2)))
+			lpRect := ctx.Arg(3)
+			uFormat := uint32(ctx.Arg(4))
+			dc := getDC(hdc)
+			text := readGuestUTF16(lpStr)
+			if nCount >= 0 && nCount < len(text) { text = text[:nCount] }
+			f := dc.Font; if f == nil { f = gdi.DefaultFont() }
+			if lpRect != 0 {
+				l, _ := mem.Read32(lpRect); t, _ := mem.Read32(lpRect+4)
+				r, _ := mem.Read32(lpRect+8)
+				x := int32(l) + 2
+				y := int32(t)
+				tw := int32(len([]rune(text))) * f.AveCharWidth
+				w := int32(r) - int32(l)
+				if uFormat & 0x1 != 0 { x = int32(l) + (w - tw) / 2 }
+				if uFormat & 0x2 != 0 { x = int32(r) - tw - 2 }
+				dc.TextOut(x, y, text, false)
+				ctx.SetReturn(uint64(f.CellHeight))
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "TabbedTextOutW", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(0); return 0 }
+			dc := getDC(ctx.Arg(0))
+			x := int32(ctx.Arg(1))
+			y := int32(ctx.Arg(2))
+			lpStr := ctx.Arg(3)
+			nCount := int(ctx.Arg(4))
+			text := readGuestUTF16(lpStr)
+			if nCount > 0 && nCount < len(text) { text = text[:nCount] }
+			dc.TextOut(x, y, text, false)
+			f := dc.Font; if f == nil { f = gdi.DefaultFont() }
+			w := int32(len([]rune(text))) * f.AveCharWidth
+			ctx.SetReturn(uint64(uint32(f.CellHeight)<<16 | uint32(w)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GrayStringW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		// Scroll bars
+		d.RegisterAutoStubHandler(user32, "GetScrollInfo", func(ctx *ntapi.TrapContext) uint32 {
+			psi := ctx.Arg(2)
+			if psi != 0 {
+				cbSize, _ := mem.Read32(psi)
+				if cbSize >= 28 {
+					fMask, _ := mem.Read32(psi+4)
+					if fMask & 0x10 != 0 { // SIF_TRACKPOS
+						ctx.Mem.Write32(psi+24, 0)
+					}
+				}
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetScrollInfo", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // scroll pos
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetScrollPos", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetScrollPos", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(ctx.Arg(2))
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetScrollRange", func(ctx *ntapi.TrapContext) uint32 {
+			pMin := ctx.Arg(2); pMax := ctx.Arg(3)
+			if pMin != 0 { ctx.Mem.Write32(pMin, 0) }
+			if pMax != 0 { ctx.Mem.Write32(pMax, 0) }
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetScrollRange", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ShowScrollBar", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "EnableScrollBar", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ScrollWindow", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ScrollWindowEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ScrollDC", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		// Window region
+		d.RegisterAutoStubHandler(user32, "SetWindowRgn", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetWindowRgn", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0 // ERROR - no window region set
+		})
+		d.RegisterAutoStubHandler(user32, "GetWindowRgnBox", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		// Caret
+		d.RegisterAutoStubHandler(user32, "CreateCaret", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DestroyCaret", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ShowCaret", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "HideCaret", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetCaretPos", func(ctx *ntapi.TrapContext) uint32 {
+			p := ctx.Arg(0)
+			if p != 0 { ctx.Mem.Write32(p, 0); ctx.Mem.Write32(p+4, 0) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetCaretPos", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetCaretBlinkTime", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(530); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetCaretBlinkTime", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		// Window geometry helpers
+		d.RegisterAutoStubHandler(user32, "AdjustWindowRect", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "AdjustWindowRectEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "WindowFromPoint", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(mainHWND); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ChildWindowFromPoint", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(ctx.Arg(0)); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "ChildWindowFromPointEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(ctx.Arg(0)); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "RealChildWindowFromPoint", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(ctx.Arg(0)); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetNextWindow", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetTopWindow", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(mainHWND); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetWindow", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "EnumChildWindows", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "EnumWindows", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "LockWindowUpdate", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		// Dialog functions
+		d.RegisterAutoStubHandler(user32, "DialogBoxParamW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0 // IDCANCEL
+		})
+		d.RegisterAutoStubHandler(user32, "DialogBoxIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "CreateDialogParamW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "EndDialog", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetDlgItem", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetDlgCtrlID", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SendDlgItemMessageW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "MapDialogRect", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetDlgItemTextW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetDlgItemTextW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetDlgItemInt", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "SetDlgItemInt", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "IsDlgButtonChecked", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "CheckDlgButton", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "CheckRadioButton", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		// Icons/cursors
+		d.RegisterAutoStubHandler(user32, "DrawIconEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DrawIcon", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DestroyIcon", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "DestroyCursor", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "CopyIcon", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(ctx.Arg(0)); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetIconInfo", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "CreateIconIndirect", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x8001); return 0
+		})
+		// Misc UI
+		d.RegisterAutoStubHandler(user32, "DrawStateW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetSysColorBrush", func(ctx *ntapi.TrapContext) uint32 {
+			idx := int(ctx.Arg(0))
+			color := uint32(0xD4D0C8)
+			if idx >= 0 && idx < len(sysColors) { color = sysColors[idx] }
+			ctx.SetReturn(gdiMgr.CreateSolidBrush(color))
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "FrameRect", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			hbr := ctx.Arg(2)
+			color := gdiMgr.BrushColor(hbr, sysColors)
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.DrawBorder(int32(l), int32(t), int32(r), int32(b), color)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "PaintDesktop", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetSystemColorBrush", func(ctx *ntapi.TrapContext) uint32 {
+			idx := int(ctx.Arg(0))
+			color := uint32(0xD4D0C8)
+			if idx >= 0 && idx < len(sysColors) { color = sysColors[idx] }
+			ctx.SetReturn(gdiMgr.CreateSolidBrush(color))
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "GetWindowTextW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			pBuf := ctx.Arg(1)
+			nMax := int(ctx.Arg(2))
+			title := ""
+			if t, ok := hwndTitle[hwnd]; ok { title = t }
+			if pBuf != 0 && nMax > 0 {
+				runes := []rune(title)
+				n := len(runes)
+				if n >= nMax { n = nMax - 1 }
+				for i := 0; i < n; i++ { ctx.Mem.Write16(pBuf+uint64(i)*2, uint16(runes[i])) }
+				ctx.Mem.Write16(pBuf+uint64(n)*2, 0)
+				ctx.SetReturn(uint64(n))
+			} else {
+				ctx.SetReturn(uint64(len([]rune(title))))
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "BeginPaint", func(ctx *ntapi.TrapContext) uint32 {
@@ -7567,6 +8375,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
+		// GetMenuState returns flags for menu item (by position or ID)
+		d.RegisterAutoStubHandler(user32, "GetMenuState", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // no flags
+			return 0
+		})
+
+		// GetMenuItemCount returns number of items in a menu
+		d.RegisterAutoStubHandler(user32, "GetMenuItemCount", func(ctx *ntapi.TrapContext) uint32 {
+			hmenu := ctx.Arg(0)
+			if m, ok := menus[hmenu]; ok {
+				ctx.SetReturn(uint64(len(m.items)))
+			} else {
+				ctx.SetReturn(0xffffffffffffffff) // -1 on error
+			}
+			return 0
+		})
+
 		// SetMenuItemInfoW
 		d.RegisterAutoStubHandler(user32, "SetMenuItemInfoW", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(1)
@@ -7673,6 +8498,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- gdi32.dll ---
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if gdi32, ok := synthByName["gdi32.dll"]; ok {
+		ravelog.Logf("[gdi] registrar running: %d exports\n", len(gdi32.Exports))
 		d.RegisterAutoStubHandler(gdi32, "CreateSolidBrush", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(gdiMgr.CreateSolidBrush(uint32(ctx.Arg(0))))
 			return 0
@@ -7698,7 +8524,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// FaceName at offset 28 (LF_FACESIZE=32 UTF-16LE chars)
 				f.FaceName = readGuestUTF16(lf + 28)
 			}
-			ctx.SetReturn(gdiMgr.CreateFont(f))
+			h := gdiMgr.CreateFont(f)
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "CreateFontW", func(ctx *ntapi.TrapContext) uint32 {
@@ -7819,21 +8646,50 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				f = gdi.DefaultFont()
 			}
 			if pTM != 0 {
-				ctx.Mem.Write32(pTM,    uint32(f.CellHeight))   // tmHeight
-				ctx.Mem.Write32(pTM+4,  uint32(f.Ascent))       // tmAscent
-				ctx.Mem.Write32(pTM+8,  uint32(f.Descent))      // tmDescent
-				ctx.Mem.Write32(pTM+12, 0)                       // tmInternalLeading
-				ctx.Mem.Write32(pTM+16, 0)                       // tmExternalLeading
-				ctx.Mem.Write32(pTM+20, uint32(f.AveCharWidth)) // tmAveCharWidth
-				ctx.Mem.Write32(pTM+24, uint32(f.MaxCharWidth)) // tmMaxCharWidth
-				ctx.Mem.Write32(pTM+28, 0)                       // tmWeight (simplified)
+				// TEXTMETRICW layout (Win32 x64, all int32 unless noted):
+				// +0  tmHeight           = CellHeight
+				// +4  tmAscent           = Ascent
+				// +8  tmDescent          = Descent
+				// +12 tmInternalLeading  = 0
+				// +16 tmExternalLeading  = 0
+				// +20 tmAveCharWidth     = AveCharWidth
+				// +24 tmMaxCharWidth     = MaxCharWidth
+				// +28 tmWeight           = FW_NORMAL=400
+				// +32 tmOverhang         = 0
+				// +36 tmDigitizedAspectX = 96 (DPI)
+				// +40 tmDigitizedAspectY = 96 (DPI)
+				// +44 tmFirstChar        WCHAR = 0x0020
+				// +46 tmLastChar         WCHAR = 0x00FF
+				// +48 tmDefaultChar      WCHAR = 0x003F ('?')
+				// +50 tmBreakChar        WCHAR = 0x0020 (' ')
+				// +52 tmItalic           BYTE
+				// +53 tmUnderlined       BYTE
+				// +54 tmStruckOut        BYTE
+				// +55 tmPitchAndFamily   BYTE  = TMPF_FIXED_PITCH|FF_MODERN = 0x21
+				// +56 tmCharSet          BYTE  = ANSI_CHARSET = 0
+				weight := f.Weight; if weight == 0 { weight = 400 }
+				italic := byte(0); if f.Italic { italic = 1 }
+				underline := byte(0); if f.Underline { underline = 1 }
+				ctx.Mem.Write32(pTM,    uint32(f.CellHeight))
+				ctx.Mem.Write32(pTM+4,  uint32(f.Ascent))
+				ctx.Mem.Write32(pTM+8,  uint32(f.Descent))
+				ctx.Mem.Write32(pTM+12, 0)
+				ctx.Mem.Write32(pTM+16, 0)
+				ctx.Mem.Write32(pTM+20, uint32(f.AveCharWidth))
+				ctx.Mem.Write32(pTM+24, uint32(f.MaxCharWidth))
+				ctx.Mem.Write32(pTM+28, uint32(weight))
 				ctx.Mem.Write32(pTM+32, 0)
-				ctx.Mem.Write32(pTM+36, uint32(f.Weight))
-				ctx.Mem.Write8(pTM+40, 0)   // tmItalic
-				ctx.Mem.Write8(pTM+41, 0)   // tmUnderlined
-				ctx.Mem.Write8(pTM+42, 0)   // tmStruckOut
-				ctx.Mem.Write8(pTM+43, 0)   // tmPitchAndFamily
-				ctx.Mem.Write8(pTM+44, 0)   // tmCharSet
+				ctx.Mem.Write32(pTM+36, 96)
+				ctx.Mem.Write32(pTM+40, 96)
+				ctx.Mem.Write16(pTM+44, 0x0020) // tmFirstChar
+				ctx.Mem.Write16(pTM+46, 0x00FF) // tmLastChar
+				ctx.Mem.Write16(pTM+48, 0x003F) // tmDefaultChar '?'
+				ctx.Mem.Write16(pTM+50, 0x0020) // tmBreakChar ' '
+				ctx.Mem.Write8(pTM+52,  italic)
+				ctx.Mem.Write8(pTM+53,  underline)
+				ctx.Mem.Write8(pTM+54,  0)
+				ctx.Mem.Write8(pTM+55,  0x01) // TMPF_FIXED_PITCH
+				ctx.Mem.Write8(pTM+56,  0)    // ANSI_CHARSET
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -7951,13 +8807,43 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			dc := getDC(ctx.Arg(0))
 			x := int32(ctx.Arg(1))
 			y := int32(ctx.Arg(2))
-			// opts := ctx.Arg(3)  // ETO_OPAQUE etc
-			// lprc := ctx.Arg(4)  // optional clip/bk rect
+			opts := uint32(ctx.Arg(3))
+			lprc := ctx.Arg(4)
 			lpStr := ctx.Arg(5)
 			nLen := int(ctx.Arg(6))
 			text := readGuestUTF16(lpStr)
 			if nLen > 0 && nLen < len(text) { text = text[:nLen] }
-			dc.TextOut(x, y, text, false)
+			if lprc != 0 {
+				rL, _ := mem.Read32(lprc); rT, _ := mem.Read32(lprc+4); rR, _ := mem.Read32(lprc+8); rB, _ := mem.Read32(lprc+12)
+				// ETO_OPAQUE (0x2): fill background rect
+				if opts & 0x2 != 0 {
+					dc.FillRect(int32(rL), int32(rT), int32(rR), int32(rB), dc.BkColor)
+				}
+				// ETO_CLIPPED (0x4): clip to rect
+				if opts & 0x4 != 0 {
+					// Temporarily tighten clip to rect (absolute coords)
+					x0 := int32(rL) + dc.OriginX
+					y0 := int32(rT) + dc.OriginY
+					x1 := int32(rR) + dc.OriginX
+					y1 := int32(rB) + dc.OriginY
+					oldX0, oldY0, oldX1, oldY1 := dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1
+					// Intersect with existing clip
+					if oldX1 > oldX0 {
+						if x0 < oldX0 { x0 = oldX0 }
+						if y0 < oldY0 { y0 = oldY0 }
+						if x1 > oldX1 { x1 = oldX1 }
+						if y1 > oldY1 { y1 = oldY1 }
+					}
+					dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = x0, y0, x1, y1
+					if len(text) > 0 { dc.TextOut(x, y, text, false) }
+					dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = oldX0, oldY0, oldX1, oldY1
+					ctx.SetReturn(1)
+					return 0
+				}
+			}
+			if len(text) > 0 {
+				dc.TextOut(x, y, text, false)
+			}
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -8058,14 +8944,1062 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "SetMapMode", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // previous mode
+			dc := getDC(ctx.Arg(0))
+			prev := dc.MapMode
+			if prev == 0 { prev = 1 }
+			dc.MapMode = int32(ctx.Arg(1))
+			if dc.MapMode == 0 { dc.MapMode = 1 }
+			ctx.SetReturn(uint64(prev))
 			return 0
 		})
-		d.RegisterAutoStubHandler(gdi32, "GetCurrentPositionEx", func(ctx *ntapi.TrapContext) uint32 {
+		d.RegisterAutoStubHandler(gdi32, "GetMapMode", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			mm := dc.MapMode
+			if mm == 0 { mm = 1 }
+			ctx.SetReturn(uint64(mm))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetTextAlign", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			prev := dc.TextAlign
+			dc.TextAlign = int32(ctx.Arg(1))
+			ctx.SetReturn(uint64(uint32(prev)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetTextAlign", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(uint64(uint32(getDC(ctx.Arg(0)).TextAlign)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetTextCharacterExtra", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			prev := dc.CharExtra
+			dc.CharExtra = int32(ctx.Arg(1))
+			ctx.SetReturn(uint64(uint32(prev)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetTextCharacterExtra", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(uint64(uint32(getDC(ctx.Arg(0)).CharExtra)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetStretchBltMode", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			prev := dc.StretchBltMode
+			if prev == 0 { prev = 1 }
+			dc.StretchBltMode = int32(ctx.Arg(1))
+			ctx.SetReturn(uint64(uint32(prev)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetStretchBltMode", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			m := dc.StretchBltMode
+			if m == 0 { m = 1 }
+			ctx.SetReturn(uint64(uint32(m)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetROP2", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			prev := dc.ROP2
+			if prev == 0 { prev = 13 }
+			dc.ROP2 = int32(ctx.Arg(1))
+			ctx.SetReturn(uint64(uint32(prev)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetROP2", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			r := dc.ROP2
+			if r == 0 { r = 13 }
+			ctx.SetReturn(uint64(uint32(r)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetArcDirection", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			prev := dc.ArcDir
+			if prev == 0 { prev = 1 }
+			dc.ArcDir = int32(ctx.Arg(1))
+			ctx.SetReturn(uint64(uint32(prev)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetArcDirection", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			d2 := dc.ArcDir
+			if d2 == 0 { d2 = 1 }
+			ctx.SetReturn(uint64(uint32(d2)))
+			return 0
+		})
+		// --- Region functions ---
+		d.RegisterAutoStubHandler(gdi32, "CreateRectRgn", func(ctx *ntapi.TrapContext) uint32 {
+			h := gdiMgr.CreateRectRgn(int32(ctx.Arg(0)), int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)))
+			ctx.SetReturn(h)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CreateRectRgnIndirect", func(ctx *ntapi.TrapContext) uint32 {
+			p := ctx.Arg(0)
+			var l, t, r, b int32
+			if p != 0 {
+				v, _ := mem.Read32(p);   l = int32(v)
+				v, _ = mem.Read32(p+4);  t = int32(v)
+				v, _ = mem.Read32(p+8);  r = int32(v)
+				v, _ = mem.Read32(p+12); b = int32(v)
+			}
+			ctx.SetReturn(gdiMgr.CreateRectRgn(l, t, r, b))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CreateEllipticRgn", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(gdiMgr.CreateEllipticRgn(int32(ctx.Arg(0)), int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CreateEllipticRgnIndirect", func(ctx *ntapi.TrapContext) uint32 {
+			p := ctx.Arg(0)
+			var l, t, r, b int32
+			if p != 0 {
+				v, _ := mem.Read32(p);   l = int32(v)
+				v, _ = mem.Read32(p+4);  t = int32(v)
+				v, _ = mem.Read32(p+8);  r = int32(v)
+				v, _ = mem.Read32(p+12); b = int32(v)
+			}
+			ctx.SetReturn(gdiMgr.CreateEllipticRgn(l, t, r, b))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CreateRoundRectRgn", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(gdiMgr.CreateRoundRectRgn(int32(ctx.Arg(0)), int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)), int32(ctx.Arg(5))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetRectRgn", func(ctx *ntapi.TrapContext) uint32 {
+			ok := gdiMgr.SetRectRgn(ctx.Arg(0), int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)))
+			if ok { ctx.SetReturn(1) } else { ctx.SetReturn(0) }
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CombineRgn", func(ctx *ntapi.TrapContext) uint32 {
+			result := gdiMgr.CombineRgn(ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), int(ctx.Arg(3)))
+			ctx.SetReturn(uint64(result))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetRgnBox", func(ctx *ntapi.TrapContext) uint32 {
 			p := ctx.Arg(1)
+			var bounds [4]int32
+			result := gdiMgr.GetRgnBox(ctx.Arg(0), &bounds)
+			if p != 0 {
+				ctx.Mem.Write32(p,    uint32(bounds[0]))
+				ctx.Mem.Write32(p+4,  uint32(bounds[1]))
+				ctx.Mem.Write32(p+8,  uint32(bounds[2]))
+				ctx.Mem.Write32(p+12, uint32(bounds[3]))
+			}
+			ctx.SetReturn(uint64(result))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SelectClipRgn", func(ctx *ntapi.TrapContext) uint32 {
+			result := gdiMgr.SelectClipRgn(ctx.Arg(0), ctx.Arg(1))
+			ctx.SetReturn(uint64(result))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ExtSelectClipRgn", func(ctx *ntapi.TrapContext) uint32 {
+			// mode arg(2): RGN_AND=1, RGN_OR=2, RGN_XOR=3, RGN_DIFF=4, RGN_COPY=5
+			result := gdiMgr.SelectClipRgn(ctx.Arg(0), ctx.Arg(1))
+			ctx.SetReturn(uint64(result))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetClipRgn", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			hrgn := ctx.Arg(1)
+			if dc.ClipRgnHandle != 0 && hrgn != 0 {
+				// Copy clip region bounds to the destination hrgn
+				if src := gdiMgr.GetRegion(dc.ClipRgnHandle); src != nil {
+					gdiMgr.SetRectRgn(hrgn, src.X0, src.Y0, src.X1, src.Y1)
+				}
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetClipBox", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			p := ctx.Arg(1)
+			if p != 0 {
+				// Return clip rect in client (non-origin-offset) coords
+				l := dc.ClipX0 - dc.OriginX
+				t := dc.ClipY0 - dc.OriginY
+				r := dc.ClipX1 - dc.OriginX
+				b := dc.ClipY1 - dc.OriginY
+				if dc.ClipX1 == 0 && dc.ClipY1 == 0 {
+					// No clip set - return DC extents
+					if dc.Target != nil {
+						r, b = dc.Target.Width, dc.Target.Height
+					}
+				}
+				ctx.Mem.Write32(p,    uint32(l))
+				ctx.Mem.Write32(p+4,  uint32(t))
+				ctx.Mem.Write32(p+8,  uint32(r))
+				ctx.Mem.Write32(p+12, uint32(b))
+			}
+			ctx.SetReturn(2) // SIMPLEREGION
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "IntersectClipRect", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			l := int32(ctx.Arg(1)) + dc.OriginX
+			t := int32(ctx.Arg(2)) + dc.OriginY
+			r := int32(ctx.Arg(3)) + dc.OriginX
+			b := int32(ctx.Arg(4)) + dc.OriginY
+			if dc.ClipX1 > dc.ClipX0 {
+				if l < dc.ClipX0 { l = dc.ClipX0 }
+				if t < dc.ClipY0 { t = dc.ClipY0 }
+				if r > dc.ClipX1 { r = dc.ClipX1 }
+				if b > dc.ClipY1 { b = dc.ClipY1 }
+			}
+			dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = l, t, r, b
+			if l >= r || t >= b {
+				ctx.SetReturn(1) // NULLREGION
+			} else {
+				ctx.SetReturn(2) // SIMPLEREGION
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ExcludeClipRect", func(ctx *ntapi.TrapContext) uint32 {
+			// Simplified: just return SIMPLEREGION
+			ctx.SetReturn(2)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "OffsetClipRgn", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(2) // SIMPLEREGION
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PtInRegion", func(ctx *ntapi.TrapContext) uint32 {
+			rgn := gdiMgr.GetRegion(ctx.Arg(0))
+			x, y := int32(ctx.Arg(1)), int32(ctx.Arg(2))
+			if rgn != nil && x >= rgn.X0 && x < rgn.X1 && y >= rgn.Y0 && y < rgn.Y1 {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "RectInRegion", func(ctx *ntapi.TrapContext) uint32 {
+			rgn := gdiMgr.GetRegion(ctx.Arg(0))
+			p := ctx.Arg(1)
+			if rgn != nil && p != 0 {
+				l, _ := mem.Read32(p); t, _ := mem.Read32(p+4); r, _ := mem.Read32(p+8); b, _ := mem.Read32(p+12)
+				if int32(r) > rgn.X0 && int32(l) < rgn.X1 && int32(b) > rgn.Y0 && int32(t) < rgn.Y1 {
+					ctx.SetReturn(1); return 0
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "FillRgn", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			rgn := gdiMgr.GetRegion(ctx.Arg(1))
+			hbr := ctx.Arg(2)
+			color := gdiMgr.BrushColor(hbr, sysColors)
+			if rgn != nil {
+				dc.FillRect(rgn.X0, rgn.Y0, rgn.X1, rgn.Y1, color)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "FrameRgn", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			rgn := gdiMgr.GetRegion(ctx.Arg(1))
+			hbr := ctx.Arg(2)
+			color := gdiMgr.BrushColor(hbr, sysColors)
+			if rgn != nil {
+				dc.DrawBorder(rgn.X0, rgn.Y0, rgn.X1, rgn.Y1, color)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "InvertRgn", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			rgn := gdiMgr.GetRegion(ctx.Arg(1))
+			if rgn != nil {
+				dc.InvertRect(rgn.X0, rgn.Y0, rgn.X1, rgn.Y1)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PaintRgn", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			rgn := gdiMgr.GetRegion(ctx.Arg(1))
+			if rgn != nil {
+				dc.FillRectBrush(rgn.X0, rgn.Y0, rgn.X1, rgn.Y1)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PathToRegion", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(gdiMgr.CreateRectRgn(0, 0, 0, 0))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "EqualRgn", func(ctx *ntapi.TrapContext) uint32 {
+			r1 := gdiMgr.GetRegion(ctx.Arg(0))
+			r2 := gdiMgr.GetRegion(ctx.Arg(1))
+			if r1 != nil && r2 != nil && r1.X0 == r2.X0 && r1.Y0 == r2.Y0 && r1.X1 == r2.X1 && r1.Y1 == r2.Y1 {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		// --- Window coord mapping ---
+		d.RegisterAutoStubHandler(gdi32, "SetWindowOrgEx", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			p := ctx.Arg(3)
+			if p != 0 {
+				ctx.Mem.Write32(p,   uint32(dc.WindowOrgX))
+				ctx.Mem.Write32(p+4, uint32(dc.WindowOrgY))
+			}
+			dc.WindowOrgX = int32(ctx.Arg(1))
+			dc.WindowOrgY = int32(ctx.Arg(2))
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetWindowOrgEx", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			p := ctx.Arg(1)
+			if p != 0 {
+				ctx.Mem.Write32(p,   uint32(dc.WindowOrgX))
+				ctx.Mem.Write32(p+4, uint32(dc.WindowOrgY))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetWindowExtEx", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			p := ctx.Arg(3)
+			if p != 0 {
+				ctx.Mem.Write32(p,   uint32(dc.WindowExtX))
+				ctx.Mem.Write32(p+4, uint32(dc.WindowExtY))
+			}
+			dc.WindowExtX = int32(ctx.Arg(1))
+			dc.WindowExtY = int32(ctx.Arg(2))
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetWindowExtEx", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			p := ctx.Arg(1)
+			if p != 0 {
+				ex := dc.WindowExtX; if ex == 0 { ex = 1 }
+				ey := dc.WindowExtY; if ey == 0 { ey = 1 }
+				ctx.Mem.Write32(p,   uint32(ex))
+				ctx.Mem.Write32(p+4, uint32(ey))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetViewportExtEx", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			p := ctx.Arg(3)
+			if p != 0 {
+				ctx.Mem.Write32(p,   uint32(dc.ViewportExtX))
+				ctx.Mem.Write32(p+4, uint32(dc.ViewportExtY))
+			}
+			dc.ViewportExtX = int32(ctx.Arg(1))
+			dc.ViewportExtY = int32(ctx.Arg(2))
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetViewportExtEx", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			p := ctx.Arg(1)
+			if p != 0 {
+				ex := dc.ViewportExtX; if ex == 0 { ex = 1 }
+				ey := dc.ViewportExtY; if ey == 0 { ey = 1 }
+				ctx.Mem.Write32(p,   uint32(ex))
+				ctx.Mem.Write32(p+4, uint32(ey))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "LPtoDP", func(ctx *ntapi.TrapContext) uint32 {
+			// In MM_TEXT mode, logical == device, so no-op
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "DPtoLP", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ScaleWindowExtEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ScaleViewportExtEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetGraphicsMode", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // GM_COMPATIBLE
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetGraphicsMode", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // GM_COMPATIBLE
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetWorldTransform", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetWorldTransform", func(ctx *ntapi.TrapContext) uint32 {
+			// Return identity XFORM
+			p := ctx.Arg(1)
+			if p != 0 {
+				// XFORM: eM11=1.0, eM12=0, eM21=0, eM22=1.0, eDx=0, eDy=0 (6 floats)
+				one := uint32(0x3F800000) // 1.0f
+				ctx.Mem.Write32(p,    one)
+				ctx.Mem.Write32(p+4,  0)
+				ctx.Mem.Write32(p+8,  0)
+				ctx.Mem.Write32(p+12, one)
+				ctx.Mem.Write32(p+16, 0)
+				ctx.Mem.Write32(p+20, 0)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ModifyWorldTransform", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CombineTransform", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		// --- Text/font queries ---
+		d.RegisterAutoStubHandler(gdi32, "GetTextFaceW", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			nCount := int(ctx.Arg(1))
+			pFace := ctx.Arg(2)
+			faceName := "Courier New"
+			if dc.Font != nil && dc.Font.FaceName != "" {
+				faceName = dc.Font.FaceName
+			}
+			if pFace != 0 && nCount > 0 {
+				runes := []rune(faceName)
+				n := len(runes)
+				if n >= nCount { n = nCount - 1 }
+				for i := 0; i < n; i++ {
+					ctx.Mem.Write16(pFace+uint64(i)*2, uint16(runes[i]))
+				}
+				ctx.Mem.Write16(pFace+uint64(n)*2, 0)
+				ctx.SetReturn(uint64(n))
+			} else {
+				ctx.SetReturn(uint64(len([]rune(faceName)) + 1))
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetCharWidth32W", func(ctx *ntapi.TrapContext) uint32 {
+			hdc := ctx.Arg(0)
+			first := int(ctx.Arg(1))
+			last := int(ctx.Arg(2))
+			pBuf := ctx.Arg(3)
+			dc := getDC(hdc)
+			f := dc.Font
+			if f == nil { f = gdi.DefaultFont() }
+			charW := f.AveCharWidth
+			if pBuf != 0 {
+				for i := first; i <= last; i++ {
+					ctx.Mem.Write32(pBuf+uint64(i-first)*4, uint32(charW))
+				}
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetCharWidthW", func(ctx *ntapi.TrapContext) uint32 {
+			hdc := ctx.Arg(0)
+			first := int(ctx.Arg(1))
+			last := int(ctx.Arg(2))
+			pBuf := ctx.Arg(3)
+			dc := getDC(hdc)
+			f := dc.Font
+			if f == nil { f = gdi.DefaultFont() }
+			charW := f.AveCharWidth
+			if pBuf != 0 {
+				for i := first; i <= last; i++ {
+					ctx.Mem.Write32(pBuf+uint64(i-first)*4, uint32(charW))
+				}
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetCharABCWidthsW", func(ctx *ntapi.TrapContext) uint32 {
+			hdc := ctx.Arg(0)
+			first := int(ctx.Arg(1))
+			last := int(ctx.Arg(2))
+			pBuf := ctx.Arg(3)
+			dc := getDC(hdc)
+			f := dc.Font
+			if f == nil { f = gdi.DefaultFont() }
+			charW := f.AveCharWidth
+			if pBuf != 0 {
+				for i := first; i <= last; i++ {
+					off := pBuf + uint64(i-first)*12
+					ctx.Mem.Write32(off,   0)                // abcA
+					ctx.Mem.Write32(off+4, uint32(charW))    // abcB
+					ctx.Mem.Write32(off+8, 0)                // abcC
+				}
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetCharABCWidthsFloatW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetCharWidthFloatW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetGlyphIndicesW", func(ctx *ntapi.TrapContext) uint32 {
+			// Copy input wchar indices as-is (identity mapping)
+			pStr := ctx.Arg(1)
+			n := int(ctx.Arg(2))
+			pGI := ctx.Arg(3)
+			flags := ctx.Arg(4)
+			if pStr != 0 && pGI != 0 {
+				for i := 0; i < n; i++ {
+					ch, _ := mem.Read16(pStr + uint64(i)*2)
+					gi := ch
+					if flags == 1 && (ch < 0x20 || ch > 0x7E) { gi = 0xFFFF }
+					ctx.Mem.Write16(pGI+uint64(i)*2, gi)
+				}
+			}
+			ctx.SetReturn(uint64(n))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetKerningPairsW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // no kerning pairs
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetOutlineTextMetricsW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // not a TrueType font in our emulation
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetFontData", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0xFFFFFFFF) // GDI_ERROR - no font data
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetGlyphOutlineW", func(ctx *ntapi.TrapContext) uint32 {
+			// Return 1 for GGO_METRICS, fill GLYPHMETRICS if provided
+			pGM := ctx.Arg(5)
+			if pGM != 0 {
+				dc := getDC(ctx.Arg(0))
+				f := dc.Font
+				if f == nil { f = gdi.DefaultFont() }
+				ctx.Mem.Write32(pGM,    uint32(f.AveCharWidth))  // gmBlackBoxX
+				ctx.Mem.Write32(pGM+4,  uint32(f.CellHeight))    // gmBlackBoxY
+				ctx.Mem.Write32(pGM+8,  0)                       // gmptGlyphOrigin.x
+				ctx.Mem.Write32(pGM+12, uint32(f.Ascent))        // gmptGlyphOrigin.y
+				ctx.Mem.Write16(pGM+16, uint16(f.AveCharWidth))  // gmCellIncX
+				ctx.Mem.Write16(pGM+18, 0)                       // gmCellIncY
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "EnumFontFamiliesExW", func(ctx *ntapi.TrapContext) uint32 {
+			// We don't attempt to call the callback synchronously - the app will use defaults.
+			// Returning 1 indicates enumeration completed without the callback stopping it.
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "EnumFontsW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "AddFontMemResourceEx", func(ctx *ntapi.TrapContext) uint32 {
+			pNumFonts := ctx.Arg(3)
+			if pNumFonts != 0 { ctx.Mem.Write32(pNumFonts, 1) }
+			ctx.SetReturn(0x12340001) // fake handle
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "RemoveFontMemResourceEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "AddFontResourceW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "AddFontResourceExW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "RemoveFontResourceW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "RemoveFontResourceExW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CreateFontIndirectExW", func(ctx *ntapi.TrapContext) uint32 {
+			// ENUMLOGFONTEXDVW - first field is ENUMLOGFONTEXW, which starts with LOGFONTW
+			lf := ctx.Arg(0)
+			f := &gdi.Font{}
+			if lf != 0 {
+				v32, _ := mem.Read32(lf);     f.Height = int32(v32)
+				v32, _ = mem.Read32(lf+4);    f.Width = int32(v32)
+				v32, _ = mem.Read32(lf+16);   f.Weight = int32(v32)
+				v8, _ := mem.Read8(lf+20);    f.Italic = v8 != 0
+				v8, _ = mem.Read8(lf+21);     f.Underline = v8 != 0
+				v8, _ = mem.Read8(lf+23);     f.CharSet = v8
+				f.FaceName = readGuestUTF16(lf+28)
+			}
+			ctx.SetReturn(gdiMgr.CreateFont(f))
+			return 0
+		})
+		// --- Pen/Brush extras ---
+		d.RegisterAutoStubHandler(gdi32, "CreatePenIndirect", func(ctx *ntapi.TrapContext) uint32 {
+			p := ctx.Arg(0)
+			style, width, color := int32(0), int32(1), uint32(0)
+			if p != 0 {
+				v, _ := mem.Read32(p);   style = int32(v)
+				v, _ = mem.Read32(p+4);  width = int32(v)
+				v, _ = mem.Read32(p+8);  color = v
+			}
+			ctx.SetReturn(gdiMgr.CreatePen(style, width, color))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ExtCreatePen", func(ctx *ntapi.TrapContext) uint32 {
+			style := uint32(ctx.Arg(0))
+			width := int32(ctx.Arg(1))
+			pLB := ctx.Arg(2)
+			color := uint32(0)
+			if pLB != 0 {
+				v, _ := mem.Read32(pLB+4); color = v
+			}
+			penStyle := int32(style & 0x0F)
+			ctx.SetReturn(gdiMgr.CreatePen(penStyle, width, color))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CreateBrushIndirect", func(ctx *ntapi.TrapContext) uint32 {
+			p := ctx.Arg(0)
+			style, color := int32(0), uint32(0)
+			if p != 0 {
+				v, _ := mem.Read32(p);   style = int32(v)
+				v, _ = mem.Read32(p+4);  color = v
+			}
+			if style == 1 { // BS_HOLLOW/BS_NULL
+				ctx.SetReturn(gdiMgr.GetStockObject(gdi.StockNullBrush))
+			} else {
+				ctx.SetReturn(gdiMgr.CreateSolidBrush(color))
+			}
+			return 0
+		})
+		// --- Bitmap extras ---
+		d.RegisterAutoStubHandler(gdi32, "CreateBitmap", func(ctx *ntapi.TrapContext) uint32 {
+			w := int32(ctx.Arg(0))
+			h := int32(ctx.Arg(1))
+			ctx.SetReturn(gdiMgr.CreateCompatibleBitmap(w, h))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CreateBitmapIndirect", func(ctx *ntapi.TrapContext) uint32 {
+			p := ctx.Arg(0)
+			w, h := int32(0), int32(0)
+			if p != 0 {
+				v, _ := mem.Read32(p+4); w = int32(v)
+				v, _ = mem.Read32(p+8); h = int32(v)
+			}
+			ctx.SetReturn(gdiMgr.CreateCompatibleBitmap(w, h))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetBitmapBits", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetBitmapBits", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetBitmapDimensionEx", func(ctx *ntapi.TrapContext) uint32 {
+			p := ctx.Arg(2)
 			if p != 0 {
 				ctx.Mem.Write32(p, 0)
 				ctx.Mem.Write32(p+4, 0)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetBitmapDimensionEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		// --- Drawing extras ---
+		d.RegisterAutoStubHandler(gdi32, "RoundRect", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			dc.RoundRect(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)), int32(ctx.Arg(5)), int32(ctx.Arg(6)))
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetPixel", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(0); return 0 }
+			dc := getDC(ctx.Arg(0))
+			dc.SetPixel(int32(ctx.Arg(1)), int32(ctx.Arg(2)), uint32(ctx.Arg(3)))
+			ctx.SetReturn(ctx.Arg(3))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetPixel", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(0xFFFFFFFF); return 0 }
+			dc := getDC(ctx.Arg(0))
+			c := dc.GetPixel(int32(ctx.Arg(1)), int32(ctx.Arg(2)))
+			ctx.SetReturn(uint64(c))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "DrawEdge", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			edge := uint32(ctx.Arg(2))
+			flags := uint32(ctx.Arg(3))
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.DrawEdge(int32(l), int32(t), int32(r), int32(b), edge, flags, sysColors)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "DrawFrameControl", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			uType := uint32(ctx.Arg(2))
+			uState := uint32(ctx.Arg(3))
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.DrawFrameControl(int32(l), int32(t), int32(r), int32(b), uType, uState, sysColors)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "DrawFocusRect", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.DrawFocusRect(int32(l), int32(t), int32(r), int32(b))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "InvertRect", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pRect := ctx.Arg(1)
+			if pRect != 0 {
+				l, _ := mem.Read32(pRect);  t, _ := mem.Read32(pRect+4)
+				r, _ := mem.Read32(pRect+8); b, _ := mem.Read32(pRect+12)
+				dc.InvertRect(int32(l), int32(t), int32(r), int32(b))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "Polygon", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pPts := ctx.Arg(1)
+			n := int(ctx.Arg(2))
+			pts := make([][2]int32, n)
+			for i := 0; i < n; i++ {
+				x, _ := mem.Read32(pPts + uint64(i)*8)
+				y, _ := mem.Read32(pPts + uint64(i)*8 + 4)
+				pts[i] = [2]int32{int32(x), int32(y)}
+			}
+			dc.Polygon(pts)
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "Polyline", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pPts := ctx.Arg(1)
+			n := int(ctx.Arg(2))
+			pts := make([][2]int32, n)
+			for i := 0; i < n; i++ {
+				x, _ := mem.Read32(pPts + uint64(i)*8)
+				y, _ := mem.Read32(pPts + uint64(i)*8 + 4)
+				pts[i] = [2]int32{int32(x), int32(y)}
+			}
+			dc.PolylinePoints(pts)
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PolylineTo", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			pPts := ctx.Arg(1)
+			n := int(ctx.Arg(2))
+			for i := 0; i < n; i++ {
+				x, _ := mem.Read32(pPts + uint64(i)*8)
+				y, _ := mem.Read32(pPts + uint64(i)*8 + 4)
+				dc.LineTo(int32(x), int32(y))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PolyBezier", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			// Approximate bezier as polyline
+			dc := getDC(ctx.Arg(0))
+			pPts := ctx.Arg(1)
+			n := int(ctx.Arg(2))
+			pts := make([][2]int32, n)
+			for i := 0; i < n; i++ {
+				x, _ := mem.Read32(pPts + uint64(i)*8)
+				y, _ := mem.Read32(pPts + uint64(i)*8 + 4)
+				pts[i] = [2]int32{int32(x), int32(y)}
+			}
+			dc.PolylinePoints(pts)
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PolyBezierto", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PolyPolyline", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PolyPolygon", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "Arc", func(ctx *ntapi.TrapContext) uint32 {
+			// Arc: draw ellipse approximation
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			dc.Ellipse(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)))
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ArcTo", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "AngleArc", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "Chord", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			dc.Ellipse(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)))
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "Pie", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			dc := getDC(ctx.Arg(0))
+			dc.Ellipse(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)))
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "FloodFill", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ExtFloodFill", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GradientFill", func(ctx *ntapi.TrapContext) uint32 {
+			// Simplified: just return 1
+			ctx.SetReturn(1); return 0
+		})
+		// --- Palettes (stubbed) ---
+		d.RegisterAutoStubHandler(gdi32, "CreatePalette", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x9000 + 1) // fake palette handle
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SelectPalette", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(gdiMgr.GetStockObject(gdi.StockDefaultPalette))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "RealizePalette", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetSystemPaletteEntries", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetPaletteEntries", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SetPaletteEntries", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "AnimatePalette", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "UpdateColors", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetNearestColor", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(ctx.Arg(1)); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetNearestPaletteIndex", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		// --- Paths ---
+		d.RegisterAutoStubHandler(gdi32, "BeginPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "EndPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "StrokePath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "FillPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "StrokeAndFillPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CloseFigure", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "AbortPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "SelectClipPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "FlattenPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "WidenPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetPath", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		// --- Metafiles (stubbed as no-op) ---
+		d.RegisterAutoStubHandler(gdi32, "CreateMetaFileW", func(ctx *ntapi.TrapContext) uint32 {
+			h, _ := gdiMgr.AllocMemDC()
+			ctx.SetReturn(h); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CloseMetaFile", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "DeleteMetaFile", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CreateEnhMetaFileW", func(ctx *ntapi.TrapContext) uint32 {
+			h, _ := gdiMgr.AllocMemDC()
+			ctx.SetReturn(h); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CloseEnhMetaFile", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "DeleteEnhMetaFile", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PlayMetaFile", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "PlayEnhMetaFile", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		// --- GDI flush/batch ---
+		d.RegisterAutoStubHandler(gdi32, "GdiFlush", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GdiGetBatchLimit", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GdiSetBatchLimit", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GdiAlphaBlend", func(ctx *ntapi.TrapContext) uint32 {
+			// Simplified: just do a regular BitBlt (ignore alpha)
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			hdcDst := ctx.Arg(0)
+			dx := int32(ctx.Arg(1)); dy := int32(ctx.Arg(2))
+			dw := int32(ctx.Arg(3)); dh := int32(ctx.Arg(4))
+			hdcSrc := ctx.Arg(5)
+			sx := int32(ctx.Arg(6)); sy := int32(ctx.Arg(7))
+			sw := int32(ctx.Arg(8)); sh := int32(ctx.Arg(9))
+			dst := getDC(hdcDst)
+			src := gdiMgr.GetDC(hdcSrc)
+			dst.StretchBlt(dx, dy, dw, dh, src, sx, sy, sw, sh, 0xCC0020)
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "AlphaBlend", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			hdcDst := ctx.Arg(0)
+			dx := int32(ctx.Arg(1)); dy := int32(ctx.Arg(2))
+			dw := int32(ctx.Arg(3)); dh := int32(ctx.Arg(4))
+			hdcSrc := ctx.Arg(5)
+			sx := int32(ctx.Arg(6)); sy := int32(ctx.Arg(7))
+			sw := int32(ctx.Arg(8)); sh := int32(ctx.Arg(9))
+			dst := getDC(hdcDst)
+			src := gdiMgr.GetDC(hdcSrc)
+			dst.StretchBlt(dx, dy, dw, dh, src, sx, sy, sw, sh, 0xCC0020)
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "TransparentBlt", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil { ctx.SetReturn(1); return 0 }
+			hdcDst := ctx.Arg(0)
+			dx := int32(ctx.Arg(1)); dy := int32(ctx.Arg(2))
+			dw := int32(ctx.Arg(3)); dh := int32(ctx.Arg(4))
+			hdcSrc := ctx.Arg(5)
+			sx := int32(ctx.Arg(6)); sy := int32(ctx.Arg(7))
+			sw := int32(ctx.Arg(8)); sh := int32(ctx.Arg(9))
+			dst := getDC(hdcDst)
+			src := gdiMgr.GetDC(hdcSrc)
+			dst.StretchBlt(dx, dy, dw, dh, src, sx, sy, sw, sh, 0xCC0020)
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetCurrentObject", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			objType := ctx.Arg(1)
+			switch objType {
+			case 2: // OBJ_BRUSH
+				if dc.Brush != nil { ctx.SetReturn(gdiMgr.FindBrushHandle(dc.Brush)) } else { ctx.SetReturn(gdiMgr.GetStockObject(gdi.StockWhiteBrush)) }
+			case 1: // OBJ_PEN
+				if dc.Pen != nil { ctx.SetReturn(gdiMgr.FindPenHandle(dc.Pen)) } else { ctx.SetReturn(gdiMgr.GetStockObject(gdi.StockBlackPen)) }
+			case 6: // OBJ_FONT
+				if dc.Font != nil { ctx.SetReturn(gdiMgr.FindFontHandle(dc.Font)) } else { ctx.SetReturn(gdiMgr.GetStockObject(gdi.StockSystemFont)) }
+			case 7: // OBJ_BITMAP
+				ctx.SetReturn(gdiMgr.FindBitmapHandle(dc.Bitmap))
+			default:
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetObjectType", func(ctx *ntapi.TrapContext) uint32 {
+			obj := gdiMgr.GetObject(ctx.Arg(0))
+			if obj == nil { ctx.SetReturn(0); return 0 }
+			switch obj.Type {
+			case gdi.ObjBrush:  ctx.SetReturn(2)
+			case gdi.ObjPen:    ctx.SetReturn(1)
+			case gdi.ObjFont:   ctx.SetReturn(6)
+			case gdi.ObjBitmap: ctx.SetReturn(7)
+			case gdi.ObjRegion: ctx.SetReturn(8)
+			default:            ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "CancelDC", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "ResetDCW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(ctx.Arg(0)); return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetCurrentPositionEx", func(ctx *ntapi.TrapContext) uint32 {
+			dc := getDC(ctx.Arg(0))
+			p := ctx.Arg(1)
+			if p != 0 {
+				ctx.Mem.Write32(p,   uint32(dc.CurX))
+				ctx.Mem.Write32(p+4, uint32(dc.CurY))
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -8076,6 +10010,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 	}
 	})
+	ravelog.Logf("[gdi] calling gdi32 registrar\n")
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- crypt32.dll ---
@@ -8112,6 +10047,81 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(advapi32, "FreeSid", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // NULL on success
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- uxtheme.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if uxtheme, ok := synthByName["uxtheme.dll"]; ok {
+		d.RegisterAutoStubHandler(uxtheme, "SetWindowTheme", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK - we don't support visual themes
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "OpenThemeData", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL - no theme data
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "CloseThemeData", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "DrawThemeBackground", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "DrawThemeText", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "GetThemeColor", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "GetThemeInt", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "GetThemeFont", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "GetThemeRect", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "GetThemePartSize", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "GetThemeTextExtent", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "IsThemeActive", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - themes disabled
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "IsAppThemed", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "IsThemeBackgroundPartiallyTransparent", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "DrawThemeParentBackground", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "BufferedPaintInit", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "BufferedPaintUnInit", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
 			return 0
 		})
 	}
