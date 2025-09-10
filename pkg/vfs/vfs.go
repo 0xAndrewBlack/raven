@@ -283,8 +283,15 @@ func (v *VFS) OpenAt(dirfd int, path string, flags int, mode uint32) (int, error
 
 	node, err := v.Resolve(absPath)
 	if err != nil {
-		// Host passthrough for system libraries and config
-		if strings.HasPrefix(absPath, "/lib") || strings.HasPrefix(absPath, "/usr") || strings.HasPrefix(absPath, "/etc") {
+		// Host passthrough for system libraries, config, and runtime files
+		hostPassthrough := strings.HasPrefix(absPath, "/lib") ||
+			strings.HasPrefix(absPath, "/usr") ||
+			strings.HasPrefix(absPath, "/etc") ||
+			strings.HasPrefix(absPath, "/run/") ||
+			strings.HasPrefix(absPath, "/home/") ||
+			strings.HasPrefix(absPath, "/sys/") ||
+			strings.HasPrefix(absPath, "/proc/")
+		if hostPassthrough {
 			hostFlags := os.O_RDONLY
 			if flags&O_WRONLY != 0 {
 				hostFlags = os.O_WRONLY
@@ -605,6 +612,18 @@ func (v *VFS) Lseek(fd int, offset int64, whence int) (int64, error) {
 	if !ok {
 		return -1, fmt.Errorf("bad fd %d", fd)
 	}
+	// Host files: delegate to real lseek
+	if f.Node == nil {
+		if f.HostFile != nil {
+			off, err := f.HostFile.Seek(offset, whence)
+			if err != nil {
+				return -1, err
+			}
+			f.Offset = off
+			return off, nil
+		}
+		return -1, fmt.Errorf("bad fd (no host file)")
+	}
 	// Character devices can't seek
 	if f.Node.FileMode&S_IFMT == S_IFCHR {
 		return -1, fmt.Errorf("ESPIPE")
@@ -671,7 +690,9 @@ func (v *VFS) StatPath(dirfd int, path string) (*VNode, error) {
 	if err == nil {
 		return node, nil
 	}
-	if strings.HasPrefix(absPath, "/lib") || strings.HasPrefix(absPath, "/usr") || strings.HasPrefix(absPath, "/etc") {
+	if strings.HasPrefix(absPath, "/lib") || strings.HasPrefix(absPath, "/usr") || strings.HasPrefix(absPath, "/etc") ||
+		strings.HasPrefix(absPath, "/run/") || strings.HasPrefix(absPath, "/home/") ||
+		strings.HasPrefix(absPath, "/sys/") || strings.HasPrefix(absPath, "/proc/") {
 		if stat, oerr := os.Stat(absPath); oerr == nil {
 			return hostStatToVNode(absPath, stat), nil
 		}
@@ -751,7 +772,7 @@ func (v *VFS) Getdents64(fd int) []*VNode {
 	if !ok {
 		return nil
 	}
-	if !f.Node.IsDir {
+	if f.Node == nil || !f.Node.IsDir {
 		return nil
 	}
 	start := int(f.Offset)

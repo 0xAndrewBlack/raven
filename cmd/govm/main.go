@@ -57,7 +57,7 @@ memMB := flag.Int("mem", 256, "guest memory limit in MiB (advisory)")
 sysroot := flag.String("sysroot", "", "path to Windows system DLL directory (for PE mode)")
 regFile := flag.String("registry", "", "path to registry hive JSON file (for PE mode)")
 cpuprof := flag.String("cpuprofile", "", "write CPU profile to file")
-wayland := flag.Bool("wayland", false, "enable Wayland passthrough")
+wayland := flag.Bool("wayland", true, "enable Wayland passthrough (use --wayland=false for headless)")
 
 flag.Usage = func() {fmt.Fprintf(os.Stderr, "Usage: govm [flags] <binary> [args...]\n\n")
 fmt.Fprintf(os.Stderr, "go-vm - in-process RISC-V / x86_64 / Windows PE Library OS\n\n")
@@ -120,8 +120,11 @@ return magic[0] == 'M' && magic[1] == 'Z'
 func runELF(absPath string, guestArgv []string, trace bool, enableWayland bool) {
 	guestEnvp := []string{
 		"PATH=/usr/bin:/bin",
-		"HOME=/",
+		"HOME=/root",
 		"TERM=dumb",
+		"SHELL=/bin/sh",
+		"USER=root",
+		"LOGNAME=root",
 	}
 
 	if enableWayland {
@@ -133,6 +136,28 @@ func runELF(absPath string, guestArgv []string, trace bool, enableWayland bool) 
 		if waylandDisp == "" {
 			waylandDisp = "wayland-0"
 		}
+		// Use X11/XWayland backend: swrast_dri.so has no LLVM dependency,
+		// so startup is dramatically faster than EGL+llvmpipe in the emulator.
+		display := os.Getenv("DISPLAY")
+		if display == "" {
+			display = ":0"
+		}
+		guestEnvp = append(guestEnvp, "DISPLAY="+display)
+		guestEnvp = append(guestEnvp, "SDL_VIDEODRIVER=x11")
+		guestEnvp = append(guestEnvp, "LIBGL_ALWAYS_SOFTWARE=1")
+		guestEnvp = append(guestEnvp, "SDL_RENDER_DRIVER=software")
+		guestEnvp = append(guestEnvp, "GALLIUM_DRIVER=softpipe")
+		// X11 auth: forward real user's Xauthority file
+		xauth := os.Getenv("XAUTHORITY")
+		if xauth == "" {
+			if home, err := os.UserHomeDir(); err == nil {
+				xauth = filepath.Join(home, ".Xauthority")
+			}
+		}
+		if xauth != "" {
+			guestEnvp = append(guestEnvp, "XAUTHORITY="+xauth)
+		}
+		// Keep Wayland available too (some libs probe it)
 		guestEnvp = append(guestEnvp, "WAYLAND_DISPLAY="+waylandDisp)
 	}
 
@@ -152,6 +177,18 @@ func runELF(absPath string, guestArgv []string, trace bool, enableWayland bool) 
 			// even if the actual connection is handled by the syscall proxy.
 			fs.CreateFile(filepath.Join(xdg, waylandDisp), nil, 0666)
 		}
+		// Forward X11 sockets for XWayland (swrast_dri.so path, no LLVM)
+		display := os.Getenv("DISPLAY")
+		if display == "" {
+			display = ":0"
+		}
+		dispNum := strings.TrimPrefix(display, ":")
+		if dot := strings.Index(dispNum, "."); dot >= 0 {
+			dispNum = dispNum[:dot]
+		}
+		x11Dir := "/tmp/.X11-unix"
+		fs.MkdirAll(x11Dir)
+		fs.CreateFile(filepath.Join(x11Dir, "X"+dispNum), nil, 0666)
 	}
 fs.HostOut = func(fd int, data []byte) {
 if fd == 1 {
@@ -171,6 +208,7 @@ fmt.Fprintf(os.Stderr, "govm: load error: %v\n", err)
 os.Exit(1)
 }
 
+
 var guest arch.CPU
 switch result.Arch {
 case arch.ArchRISCV64:
@@ -188,7 +226,21 @@ c.SetSP(result.StackPtr)
 if result.TLSAddr != 0 {
 c.SetTLS(result.TLSAddr)
 }
-guest = c
+	// Fix Lapce double-free: only apply when running Lapce specifically.
+	// After glibc realloc moves a buffer the old chunk is freed internally,
+	// but Lapce's caller (at 0x55555799d5d3) tries to free the old ptr a
+	// second time.  Patch the conditional jump JZ→JMP (0x74→0xeb) at
+	// 0x55555799d5d9 so the redundant free is always skipped.
+	if strings.Contains(absPath, "lapce") {
+		const patchAddr = uint64(0x55555799d5d9)
+		pageStart := patchAddr &^ (mmu.PageSize - 1)
+		mem.Mprotect(pageStart, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+		if err := mem.Write8(patchAddr, 0xeb); err != nil {
+			fmt.Fprintf(os.Stderr, "[PATCH] FAILED to apply double-free fix: %v\n", err)
+		}
+		mem.Mprotect(pageStart, mmu.PageSize, mmu.PermRead|mmu.PermExecute)
+	}
+	guest = c
 }
 
 sh := gosyscall.NewHandler(mem, fs)

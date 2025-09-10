@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultStackSize = 8 * 1024 * 1024    // 8 MiB
+	DefaultStackSize = 64 * 1024 * 1024   // 64 MiB - generous for UI apps like Lapce
 	StackTop         = uint64(0x700000000000)  // top of guest stack
 )
 
@@ -137,8 +137,8 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 		}
 	}
 
-	// Set brk to exact end of loaded segments (not page-aligned)
-	brkAddr := maxAddr
+	// brk must be page-aligned, just like real Linux.
+	brkAddr := (maxAddr + mmu.PageSize - 1) & mmu.PageMask
 	fmt.Fprintf(os.Stderr, "[loader] ELF Type: %v, elfBase: 0x%x, maxAddr: 0x%x, brkAddr: 0x%x\n", ef.Type, elfBase, maxAddr, brkAddr)
 	mem.SetBrk(brkAddr)
 

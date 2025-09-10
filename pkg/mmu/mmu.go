@@ -77,6 +77,10 @@ type MMU struct {
 	tlb      [tlbSize]tlbEntry       // direct-mapped TLB
 	brkAddr  uint64
 	heapBase uint64
+	// Debug: write watchpoint
+	WatchAddr  uint64
+	WatchSize  uint64
+	WatchCB    func(addr, val uint64, size int)
 }
 
 // New creates an MMU with no mapped pages.
@@ -276,7 +280,18 @@ func (m *MMU) Read64(vaddr uint64) (uint64, error) {
 }
 
 // Write8 writes a single byte.
+func (m *MMU) checkWatch(addr, val uint64, size int) {
+	if m.WatchCB != nil && m.WatchSize > 0 {
+		end := addr + uint64(size)
+		watchEnd := m.WatchAddr + m.WatchSize
+		if addr < watchEnd && end > m.WatchAddr {
+			m.WatchCB(addr, val, size)
+		}
+	}
+}
+
 func (m *MMU) Write8(vaddr uint64, val uint8) error {
+	m.checkWatch(vaddr, uint64(val), 1)
 	pe, off, err := m.lookupPage(vaddr, PermWrite)
 	if err != nil {
 		return err
@@ -287,6 +302,7 @@ func (m *MMU) Write8(vaddr uint64, val uint8) error {
 
 // Write16 writes a 16-bit little-endian value.
 func (m *MMU) Write16(vaddr uint64, val uint16) error {
+	m.checkWatch(vaddr, uint64(val), 2)
 	pe, off, err := m.lookupPage(vaddr, PermWrite)
 	if err != nil {
 		return err
@@ -301,6 +317,7 @@ func (m *MMU) Write16(vaddr uint64, val uint16) error {
 
 // Write32 writes a 32-bit little-endian value.
 func (m *MMU) Write32(vaddr uint64, val uint32) error {
+	m.checkWatch(vaddr, uint64(val), 4)
 	pe, off, err := m.lookupPage(vaddr, PermWrite)
 	if err != nil {
 		return err
@@ -320,6 +337,7 @@ func (m *MMU) Write32(vaddr uint64, val uint32) error {
 
 // Write64 writes a 64-bit little-endian value.
 func (m *MMU) Write64(vaddr uint64, val uint64) error {
+	m.checkWatch(vaddr, val, 8)
 	pe, off, err := m.lookupPage(vaddr, PermWrite)
 	if err != nil {
 		return err
@@ -339,6 +357,8 @@ func (m *MMU) Write64(vaddr uint64, val uint64) error {
 
 // WriteBytes copies a byte slice into guest memory (requires write permission).
 func (m *MMU) WriteBytes(vaddr uint64, data []byte) error {
+	startVaddr := vaddr
+	origData := data
 	for len(data) > 0 {
 		pe, off, err := m.lookupPage(vaddr, PermWrite)
 		if err != nil {
@@ -347,6 +367,23 @@ func (m *MMU) WriteBytes(vaddr uint64, data []byte) error {
 		n := copy(pe.Data[off:], data)
 		data = data[n:]
 		vaddr += uint64(n)
+	}
+	if m.WatchCB != nil && m.WatchSize > 0 {
+		end := startVaddr + uint64(len(origData))
+		watchEnd := m.WatchAddr + m.WatchSize
+		if startVaddr < watchEnd && end > m.WatchAddr {
+			// Fire callback for each 8-byte window so corruption in the second
+			// half of a 16-byte XMM store is also detected.
+			for i := 0; i+8 <= len(origData); i += 8 {
+				chunkAddr := startVaddr + uint64(i)
+				val := uint64(origData[i]) | uint64(origData[i+1])<<8 | uint64(origData[i+2])<<16 | uint64(origData[i+3])<<24 |
+					uint64(origData[i+4])<<32 | uint64(origData[i+5])<<40 | uint64(origData[i+6])<<48 | uint64(origData[i+7])<<56
+				m.WatchCB(chunkAddr, val, 8)
+			}
+			if len(origData)%8 != 0 {
+				m.WatchCB(startVaddr+uint64(len(origData)&^7), 0, len(origData)%8)
+			}
+		}
 	}
 	return nil
 }
@@ -448,6 +485,11 @@ func (m *MMU) SetBrk(addr uint64) {
 	defer m.mu.Unlock()
 	m.brkAddr = addr
 	m.heapBase = addr
+}
+
+// GetBrkBase returns the initial program break (heap base).
+func (m *MMU) GetBrkBase() uint64 {
+	return m.heapBase
 }
 
 // Brk adjusts the program break, mapping new pages as needed.

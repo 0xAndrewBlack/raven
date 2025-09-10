@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +51,7 @@ const (
 	SysPwrite64       = 68
 	SysPselect6       = 72
 	SysPpoll          = 73
+	sysPoll           = 10025 // internal: x64 poll(fds, nfds, timeout_ms)
 	SysReadlinkat     = 78
 	SysFstatat        = 79
 	SysFstat          = 80
@@ -92,6 +94,9 @@ const (
 	SysGeteuid        = 175
 	SysGetgid         = 176
 	SysGetegid        = 177
+	SysGetresuid      = 10095
+	SysGetresgid      = 10096
+	SysMincore        = 10097
 	SysGettid         = 178
 	SysSysinfo        = 179
 	SysSocket         = 198
@@ -138,9 +143,12 @@ const (
 	SysGetsockname    = 204
 	SysGetpeername    = 205
 	SysMemfdCreate    = 279
+	SysKcmp           = 10091 // internal, mapped from x86-64 kcmp (SYS 253)
 	SysRiscvHwprobe   = 258
 	SysArchPrctl      = 259 // internal, mapped from x86-64 arch_prctl
 	SysSendfile       = 262 // internal, mapped from x86-64 sendfile
+
+	SysClone3 = 10090 // internal, mapped from x86-64 clone3 (SYS 435)
 
 	// Legacy x64 syscalls that need arg remapping to their *at variants.
 	// These use high numbers to avoid collisions with RISC-V generic numbers.
@@ -164,6 +172,7 @@ type Handler struct {
 	Umask   uint32    // current umask
 	Trace   bool      // trace syscalls to stderr
 	Arch    arch.Arch // guest architecture
+	debugX11 bool     // trace all syscalls (for X11 debugging)
 
 	clearChildTidMu sync.Mutex
 	clearChildTid   map[int]uint64 // TID → clear_child_tid address
@@ -183,9 +192,34 @@ func (h *Handler) Handle(c arch.CPU) {
 	args := c.SyscallArgs()
 	a0, a1, a2, a3, a4, a5 := args[0], args[1], args[2], args[3], args[4], args[5]
 
-	if h.Trace {
-		fmt.Fprintf(os.Stderr, "[trace] syscall %d (a0=0x%x a1=0x%x a2=0x%x a3=0x%x)\n", num, a0, a1, a2, a3)
+	if h.debugX11 {
+		fmt.Fprintf(os.Stderr, "[x11-trace] syscall %d (a0=0x%x a1=0x%x a2=0x%x)\n", num, a0, a1, a2)
 	}
+
+	if h.Trace {
+		fmt.Fprintf(os.Stderr, "[trace] syscall %d (a0=0x%x a1=0x%x a2=0x%x a3=0x%x) instret=%d\n", num, a0, a1, a2, a3, c.GetInstret())
+	}
+
+	// DEBUG: heap integrity check before/after each syscall
+	var heapSigBefore uint64
+	if h.Trace {
+		heapSigBefore = h.heapSignature()
+		if heapSigBefore != 0 {
+			fmt.Fprintf(os.Stderr, "[heap-sig] before syscall %d: 0x%x\n", num, heapSigBefore)
+		}
+	}
+	defer func() {
+		if h.Trace {
+			after := h.heapSignature()
+			if after != 0 {
+				fmt.Fprintf(os.Stderr, "[heap-sig] after syscall %d: 0x%x\n", num, after)
+			}
+			if heapSigBefore != 0 && after != 0 && heapSigBefore != after {
+				fmt.Fprintf(os.Stderr, "[HEAP-CORRUPT] syscall %d (a0=0x%x a1=0x%x a2=0x%x) changed heap sig 0x%x→0x%x instret=%d\n",
+					num, a0, a1, a2, heapSigBefore, after, c.GetInstret())
+			}
+		}
+	}()
 
 	switch num {
 	// --- I/O ---
@@ -210,6 +244,16 @@ func (h *Handler) Handle(c arch.CPU) {
 	// --- Memory management ---
 	case SysBrk:
 		result := h.Mem.Brk(a0)
+		if h.Trace {
+			fmt.Fprintf(os.Stderr, "[brk] req=0x%x → 0x%x\n", a0, result)
+			if a0 != 0 && result == a0 {
+				// Dump first 128 bytes of the heap region
+				heapBase := h.Mem.GetBrkBase()
+				if data, err := h.Mem.ReadBytes(heapBase, 128); err == nil {
+					fmt.Fprintf(os.Stderr, "[brk] heap@0x%x: %x\n", heapBase, data)
+				}
+			}
+		}
 		c.SetSyscallReturn(result)
 	case SysMmap:
 		h.sysMmap(c)
@@ -306,6 +350,30 @@ func (h *Handler) Handle(c arch.CPU) {
 	// --- Process/Thread info ---
 	case SysGetuid, SysGeteuid, SysGetgid, SysGetegid:
 		c.SetSyscallReturn(1000)
+	case SysGetresuid:
+		// getresuid(ruid, euid, suid) - stub: all UIDs = 1000
+		if a0 != 0 {
+			h.Mem.Write32(a0, 1000)
+		}
+		if a1 != 0 {
+			h.Mem.Write32(a1, 1000)
+		}
+		if a2 != 0 {
+			h.Mem.Write32(a2, 1000)
+		}
+		c.SetSyscallReturn(0)
+	case SysGetresgid:
+		// getresgid(rgid, egid, sgid) - stub: all GIDs = 1000
+		if a0 != 0 {
+			h.Mem.Write32(a0, 1000)
+		}
+		if a1 != 0 {
+			h.Mem.Write32(a1, 1000)
+		}
+		if a2 != 0 {
+			h.Mem.Write32(a2, 1000)
+		}
+		c.SetSyscallReturn(0)
 	case SysGetpid, SysGetppid:
 		c.SetSyscallReturn(1)
 	case SysGettid:
@@ -374,6 +442,8 @@ func (h *Handler) Handle(c arch.CPU) {
 		c.SetSyscallReturn(0)
 	case SysClone:
 		h.sysClone(c, a0, a1, a2, a3, a4)
+	case SysClone3:
+		h.sysClone3(c, a0, a1)
 
 	// --- Scheduling ---
 	case SysSchedYield:
@@ -397,10 +467,22 @@ func (h *Handler) Handle(c arch.CPU) {
 		c.SetSyscallReturn(negErrno(EPERM))
 	case SysMembarrier:
 		c.SetSyscallReturn(0)
+	case SysKcmp:
+		c.SetSyscallReturn(negErrno(ENOSYS))
+	case SysMincore:
+		// mincore(addr, length, vec) - report pages in memory; stub: all in core
+		pageSize := uint64(4096)
+		nPages := (a1 + pageSize - 1) / pageSize
+		for i := uint64(0); i < nPages; i++ {
+			h.Mem.Write8(a2+i, 1) // bit 0 set = page in RAM
+		}
+		c.SetSyscallReturn(0)
 	case SysRseq:
 		c.SetSyscallReturn(negErrno(ENOSYS))
 	case SysPpoll:
 		h.sysPpoll(c, a0, a1, a2, a3)
+	case sysPoll:
+		h.sysPollInt(c, a0, a1, int32(a2))
 	case SysPselect6:
 		c.SetSyscallReturn(0)
 	case SysTimes:
@@ -466,6 +548,9 @@ func (h *Handler) Handle(c arch.CPU) {
 
 	// --- Exec ---
 	case SysExecve:
+		if path, err2 := h.readGuestString(a0); err2 == nil {
+			fmt.Fprintf(os.Stderr, "[govm] execve(%q) → ENOSYS\n", path)
+		}
 		c.SetSyscallReturn(negErrno(ENOSYS))
 
 	// --- Timers ---
@@ -575,6 +660,34 @@ func (h *Handler) readGuestString(addr uint64) (string, error) {
 
 // --- Syscall implementations ---
 
+// heapSignature computes a fast hash of the glibc heap chunk headers.
+// We walk the chunk chain from aligned heap base and hash the size fields.
+func (h *Handler) heapSignature() uint64 {
+	heapBase := h.Mem.GetBrkBase()
+	if heapBase == 0 {
+		return 0
+	}
+	// Aligned heap start (glibc aligns to 16)
+	aligned := (heapBase + 15) &^ 15
+	var sig uint64
+	addr := aligned
+	brkCur := h.Mem.Brk(0)
+	for i := 0; i < 64 && addr < brkCur; i++ {
+		// Read size field at addr+8
+		sz, err := h.Mem.Read64(addr + 8)
+		if err != nil {
+			break
+		}
+		chunkSz := sz &^ 7 // mask out flags
+		if chunkSz == 0 || chunkSz > (brkCur-heapBase) {
+			break // top chunk or invalid
+		}
+		sig = sig*31 + sz // include flags in sig
+		addr += chunkSz
+	}
+	return sig
+}
+
 func (h *Handler) sysOpenat(c arch.CPU, dirfd, pathAddr, flags, mode uint64) {
 	path, err := h.readGuestString(pathAddr)
 	if err != nil {
@@ -587,8 +700,14 @@ func (h *Handler) sysOpenat(c arch.CPU, dirfd, pathAddr, flags, mode uint64) {
 	}
 	fd, err := h.FS.OpenAt(int(int32(dirfd)), path, int(flags), uint32(mode))
 	if err != nil {
+		if h.Trace {
+			fmt.Fprintf(os.Stderr, "[govm] openat(%q) → ENOENT\n", path)
+		}
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
+	}
+	if h.Trace {
+		fmt.Fprintf(os.Stderr, "[govm] openat(%q) → fd=%d\n", path, fd)
 	}
 	c.SetSyscallReturn(uint64(fd))
 }
@@ -611,12 +730,24 @@ func (h *Handler) sysMprotect(c arch.CPU, addr, length, prot uint64) {
 	// Verify all pages are already mapped
 	for pg := addr; pg < addr+length; pg += mmu.PageSize {
 		if !h.Mem.IsMapped(pg) {
+			if h.Trace {
+				fmt.Fprintf(os.Stderr, "[mprotect] ENOMEM: addr=0x%x len=0x%x prot=%d unmapped_page=0x%x\n", addr, length, prot, pg)
+			}
 			c.SetSyscallReturn(negErrno(ENOMEM))
 			return
 		}
 	}
 
 	// Change permissions
+	if h.Trace {
+		fmt.Fprintf(os.Stderr, "[mprotect] OK: addr=0x%x len=0x%x end=0x%x prot=%d perms=0x%x pages=%d\n", addr, length, addr+length, prot, perms, length/mmu.PageSize)
+		brkBase := h.Mem.GetBrkBase()
+		brkCur := h.Mem.Brk(0)
+		if brkBase != 0 && addr+length > brkBase {
+			fmt.Fprintf(os.Stderr, "[mprotect] WARNING: overlaps heap! heap=0x%x-0x%x mprotect=0x%x-0x%x prot=%d\n",
+				brkBase, brkCur, addr, addr+length, prot)
+		}
+	}
 	for pg := addr; pg < addr+length; pg += mmu.PageSize {
 		h.Mem.MapPage(pg, perms)
 	}
@@ -625,17 +756,92 @@ func (h *Handler) sysMprotect(c arch.CPU, addr, length, prot uint64) {
 }
 
 func (h *Handler) sysIoctl(c arch.CPU, fd, cmd uint64) {
-	if fd <= 2 {
-		switch cmd {
-		case 0x5401: // TCGETS
-			c.SetSyscallReturn(negErrno(ENOTTY))
-		case 0x5413: // TIOCGWINSZ
-			c.SetSyscallReturn(negErrno(ENOTTY))
-		default:
-			c.SetSyscallReturn(negErrno(ENOTTY))
+	if h.Trace {
+		fmt.Fprintf(os.Stderr, "[govm] ioctl(fd=%d, cmd=0x%x)\n", fd, cmd)
+	}
+	const FIONREAD = 0x541B
+	const FIONBIO = 0x5421
+	switch cmd {
+	case 0x5401: // TCGETS
+		if fd <= 2 {
+			h.dumpGuestEnviron()
 		}
+		c.SetSyscallReturn(negErrno(ENOTTY))
+		return
+	case 0x5413: // TIOCGWINSZ
+		c.SetSyscallReturn(negErrno(ENOTTY))
+		return
+	case FIONREAD:
+		arg := c.SyscallArgs()[2]
+		hostFD := h.FS.GetHostFDNum(int(fd))
+		if hostFD >= 0 {
+			avail, err := unix.IoctlRetInt(hostFD, FIONREAD)
+			if err == nil {
+				h.Mem.Write32(arg, uint32(avail))
+				if h.Trace {
+					fmt.Fprintf(os.Stderr, "[govm] ioctl FIONREAD fd=%d→hfd=%d avail=%d\n", fd, hostFD, avail)
+				}
+				c.SetSyscallReturn(0)
+				return
+			}
+		}
+		h.Mem.Write32(arg, 0)
+		c.SetSyscallReturn(0)
+		return
+	case FIONBIO:
+		hostFD := h.FS.GetHostFDNum(int(fd))
+		if hostFD >= 0 {
+			arg := c.SyscallArgs()[2]
+			val, _ := h.Mem.Read32(arg)
+			if val != 0 {
+				unix.SetNonblock(hostFD, true)
+			} else {
+				unix.SetNonblock(hostFD, false)
+			}
+		}
+		c.SetSyscallReturn(0)
+		return
+	}
+	if fd <= 2 {
+		c.SetSyscallReturn(negErrno(ENOTTY))
 	} else {
 		c.SetSyscallReturn(negErrno(ENOTTY))
+	}
+}
+
+// dumpGuestEnviron reads the guest's environ pointer and dumps each entry.
+// This is a temporary debug helper.
+func (h *Handler) dumpGuestEnviron() {
+	// Scan memory for the environ pointer pattern.
+	// The environ global is typically near the BSS of libc.
+	// As an approximation, we search for a sequence of guest pointers
+	// that form consecutive nul-terminated KEY=VALUE strings.
+	// More reliably: the env strings are at strArea = 0x6ffffffff000
+	// and the environ array is pointed to by glibc's __environ.
+	// We can compute the environ array address from the stack layout:
+	//   - argc at sp
+	//   - argv[0..n] at sp+8 .. sp+8*(argc+1)
+	//   - env[0..m] at sp+8*(argc+2) ..
+	// Read sp from the initial stack pointer minus a bit.
+	// For now, use a known layout: stackTop=0x700000000000, strArea=stackTop-4096.
+	const stackTop = uint64(0x700000000000)
+	const strArea = stackTop - 4096
+	// Read argc first - it's at sp which we approximate from strArea.
+	// The actual sp is below strArea by nWords*8. We can scan from strArea upward
+	// to find the argc, but that's complex. Instead, just dump the strings
+	// in strArea directly.
+	if data, err := h.Mem.ReadBytes(strArea, 512); err == nil {
+		fmt.Fprintf(os.Stderr, "[ENVIRON DUMP] strArea=0x%x:\n", strArea)
+		// Print as individual nul-terminated strings
+		start := 0
+		for i, b := range data {
+			if b == 0 {
+				if i > start {
+					fmt.Fprintf(os.Stderr, "  [%d..%d] %q\n", start, i, data[start:i])
+				}
+				start = i + 1
+			}
+		}
 	}
 }
 
@@ -772,10 +978,30 @@ func (h *Handler) sysPipe2(c arch.CPU, pipefdAddr, flags uint64) {
 	}
 	h.Mem.Write32(pipefdAddr, uint32(rfd))
 	h.Mem.Write32(pipefdAddr+4, uint32(wfd))
+	if h.Trace {
+		fmt.Fprintf(os.Stderr, "[govm] pipe2 → rfd=%d wfd=%d\n", rfd, wfd)
+	}
 	c.SetSyscallReturn(0)
 }
 
 func (h *Handler) sysGetdents64(c arch.CPU, fd, buf, count uint64) {
+	// For host-backed fds (real directories on the host filesystem) call the
+	// kernel directly and copy the result into guest memory.
+	hostFD := h.FS.GetHostFDNum(int(fd))
+	if hostFD >= 0 {
+		hostBuf := make([]byte, count)
+		n, err := unix.Getdents(hostFD, hostBuf)
+		if err != nil {
+			c.SetSyscallReturn(negErrno(errnoFromErr(err)))
+			return
+		}
+		if n > 0 {
+			h.Mem.WriteBytes(buf, hostBuf[:n])
+		}
+		c.SetSyscallReturn(uint64(n))
+		return
+	}
+
 	entries := h.FS.Getdents64(int(fd))
 	if entries == nil {
 		c.SetSyscallReturn(0) // EOF
@@ -818,6 +1044,9 @@ func (h *Handler) sysReadlinkat(c arch.CPU, dirfd, pathAddr, buf, bufsiz uint64)
 	if uint64(len(data)) > bufsiz {
 		data = data[:bufsiz]
 	}
+	if h.Trace {
+		fmt.Fprintf(os.Stderr, "[govm] readlinkat(%q) → %q (len=%d)\n", path, data, len(data))
+	}
 	h.Mem.WriteBytes(buf, data)
 	c.SetSyscallReturn(uint64(len(data)))
 }
@@ -829,6 +1058,11 @@ func (h *Handler) sysFaccessat(c arch.CPU, dirfd, pathAddr uint64) {
 		return
 	}
 	_, err = h.FS.StatPath(int(int32(dirfd)), path)
+	if strings.Contains(path, "Xauth") || strings.Contains(path, "xauth") || strings.Contains(path, ".X") || strings.Contains(path, "mutter") {
+		if h.Trace {
+			fmt.Fprintf(os.Stderr, "[govm] access(%q) → err=%v\n", path, err)
+		}
+	}
 	if err != nil {
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
@@ -916,6 +1150,16 @@ func (h *Handler) sysFcntl(c arch.CPU, fd, cmd, arg uint64) {
 	case 2: // F_SETFD
 		c.SetSyscallReturn(0)
 	case 3: // F_GETFL
+		hostFD := h.FS.GetHostFDNum(int(fd))
+		if hostFD >= 0 {
+			flags, err := unix.FcntlInt(uintptr(hostFD), 3, 0)
+			if err != nil {
+				c.SetSyscallReturn(negErrno(errnoFromErr(err)))
+				return
+			}
+			c.SetSyscallReturn(uint64(flags))
+			return
+		}
 		f := h.FS.GetFD(int(fd))
 		if f == nil {
 			c.SetSyscallReturn(negErrno(EBADF))
@@ -923,6 +1167,16 @@ func (h *Handler) sysFcntl(c arch.CPU, fd, cmd, arg uint64) {
 			c.SetSyscallReturn(uint64(f.Flags))
 		}
 	case 4: // F_SETFL
+		hostFD := h.FS.GetHostFDNum(int(fd))
+		if hostFD >= 0 {
+			_, err := unix.FcntlInt(uintptr(hostFD), 4, int(arg))
+			if err != nil {
+				c.SetSyscallReturn(negErrno(errnoFromErr(err)))
+				return
+			}
+			c.SetSyscallReturn(0)
+			return
+		}
 		c.SetSyscallReturn(0)
 	case 1024: // F_DUPFD_CLOEXEC
 		newfd, err := h.FS.Dup(int(fd))
@@ -1208,16 +1462,70 @@ func (h *Handler) sysSetitimer(c arch.CPU, which, newValue, oldValue uint64) {
 // --- ppoll ---
 
 func (h *Handler) sysPpoll(c arch.CPU, fdsAddr, nfds, timeoutAddr, sigmask uint64) {
-	// Simplified ppoll: if timeout is provided, sleep; otherwise return immediately
-	if timeoutAddr != 0 {
+	if nfds == 0 {
+		c.SetSyscallReturn(0)
+		return
+	}
+	// Build host pollfd array by translating guest fds → host fds.
+	// struct pollfd: fd(4) + events(2) + revents(2) = 8 bytes
+	const pollfdSize = 8
+	hostFDs := make([]unix.PollFd, 0, nfds)
+	guestFDIdx := make([]int, 0, nfds) // guest fd number for each hostFD entry
+	for i := uint64(0); i < nfds; i++ {
+		off := fdsAddr + i*pollfdSize
+		gfd32, _ := h.Mem.Read32(off)
+		events, _ := h.Mem.Read16(off + 4)
+		gfd := int(int32(gfd32))
+		hfd := h.FS.GetHostFDNum(gfd)
+		if hfd < 0 {
+			// Non-host fd (VFS file) - skip from real poll, mark no events
+			continue
+		}
+		hostFDs = append(hostFDs, unix.PollFd{Fd: int32(hfd), Events: int16(events)})
+		guestFDIdx = append(guestFDIdx, int(i))
+	}
+
+	// Build timeout
+	var timeoutMs int
+	if timeoutAddr == 0 {
+		timeoutMs = -1 // block indefinitely
+	} else {
 		sec, _ := h.Mem.Read64(timeoutAddr)
 		nsec, _ := h.Mem.Read64(timeoutAddr + 8)
-		d := time.Duration(sec)*time.Second + time.Duration(nsec)*time.Nanosecond
-		if d > 0 && d < 10*time.Second {
-			time.Sleep(d)
+		ms := int64(sec)*1000 + int64(nsec)/1_000_000
+		if ms < 0 {
+			ms = 0
 		}
+		timeoutMs = int(ms)
 	}
-	c.SetSyscallReturn(0) // no fds ready
+
+	var n int
+	var err error
+	if len(hostFDs) > 0 {
+		n, err = unix.Poll(hostFDs, timeoutMs)
+	} else {
+		// No host fds to poll - sleep for timeout and return 0
+		if timeoutMs > 0 {
+			time.Sleep(time.Duration(timeoutMs) * time.Millisecond)
+		}
+		c.SetSyscallReturn(0)
+		return
+	}
+	if err != nil {
+		if err == syscall.EINTR {
+			c.SetSyscallReturn(negErrno(EINTR))
+		} else {
+			c.SetSyscallReturn(negErrno(errnoFromErr(err)))
+		}
+		return
+	}
+
+	// Write revents back into guest pollfd structs
+	for j, idx := range guestFDIdx {
+		off := fdsAddr + uint64(idx)*pollfdSize
+		h.Mem.Write16(off+6, uint16(hostFDs[j].Revents))
+	}
+	c.SetSyscallReturn(uint64(n))
 }
 
 func (h *Handler) sysPrctl(c arch.CPU, option, arg uint64) {
@@ -1254,7 +1562,7 @@ func (h *Handler) sysFutex(c arch.CPU, uaddr, op, val, timeout uint64) {
 	futexOp := op & 0x7F // mask out FUTEX_PRIVATE_FLAG
 
 	switch futexOp {
-	case 0: // FUTEX_WAIT
+	case 0, 9: // FUTEX_WAIT / FUTEX_WAIT_BITSET
 		// Read current value at uaddr
 		cur, err := h.Mem.Read32(uaddr)
 		if err != nil {
@@ -1271,7 +1579,7 @@ func (h *Handler) sysFutex(c arch.CPU, uaddr, op, val, timeout uint64) {
 		}
 		c.SetSyscallReturn(0)
 
-	case 1: // FUTEX_WAKE
+	case 1, 10: // FUTEX_WAKE / FUTEX_WAKE_BITSET
 		woken := 0
 		if h.ThreadM != nil {
 			woken = h.ThreadM.FutexWake(uaddr, int(val))
@@ -1283,8 +1591,59 @@ func (h *Handler) sysFutex(c arch.CPU, uaddr, op, val, timeout uint64) {
 	}
 }
 
+// sysPollInt handles x64's poll(2) where timeout is int milliseconds (not *timespec).
+func (h *Handler) sysPollInt(c arch.CPU, fdsAddr, nfds uint64, timeoutMs int32) {
+	if nfds == 0 {
+		if timeoutMs > 0 {
+			time.Sleep(time.Duration(timeoutMs) * time.Millisecond)
+		}
+		c.SetSyscallReturn(0)
+		return
+	}
+	const pollfdSize = 8
+	hostFDs := make([]unix.PollFd, 0, nfds)
+	guestFDIdx := make([]int, 0, nfds)
+	for i := uint64(0); i < nfds; i++ {
+		off := fdsAddr + i*pollfdSize
+		gfd32, _ := h.Mem.Read32(off)
+		events, _ := h.Mem.Read16(off + 4)
+		gfd := int(int32(gfd32))
+		hfd := h.FS.GetHostFDNum(gfd)
+		if hfd < 0 {
+			continue
+		}
+		hostFDs = append(hostFDs, unix.PollFd{Fd: int32(hfd), Events: int16(events)})
+		guestFDIdx = append(guestFDIdx, int(i))
+	}
+	var n int
+	var err error
+	if len(hostFDs) > 0 {
+		n, err = unix.Poll(hostFDs, int(timeoutMs))
+	} else {
+		if timeoutMs > 0 {
+			time.Sleep(time.Duration(timeoutMs) * time.Millisecond)
+		}
+		c.SetSyscallReturn(0)
+		return
+	}
+	if err != nil {
+		if err == syscall.EINTR {
+			c.SetSyscallReturn(negErrno(EINTR))
+			return
+		}
+		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
+		return
+	}
+	// Write revents back
+	for j, idx := range guestFDIdx {
+		off := fdsAddr + uint64(idx)*pollfdSize
+		h.Mem.Write16(off+6, uint16(hostFDs[j].Revents))
+	}
+	c.SetSyscallReturn(uint64(n))
+}
+
 func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint64) {
-	tls := a3
+	tls := uint64(0)
 	childTid := a4
 	if c.GetArch() == arch.ArchAMD64 {
 		// x86_64: flags, stack, parent_tid, child_tid, tls
@@ -1298,7 +1657,11 @@ func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint
 		if childStack == 0 {
 			childStack = c.GetSP()
 		}
-		tid, err := h.ThreadM.Clone(c, childPC, childStack)
+		childTLS := uint64(0)
+		if flags&0x00080000 != 0 { // CLONE_SETTLS
+			childTLS = tls
+		}
+		tid, err := h.ThreadM.Clone(c, childPC, childStack, childTLS)
 		if err != nil {
 			c.SetSyscallReturn(negErrno(ENOMEM))
 			return
@@ -1311,14 +1674,72 @@ func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint
 		if flags&0x00100000 != 0 && parentTid != 0 {
 			h.Mem.Write32(parentTid, uint32(tid))
 		}
-		// Set TLS if CLONE_SETTLS (0x00080000)
-		if flags&0x00080000 != 0 {
-			h.ThreadM.SetChildTLS(tid, tls)
-		}
 		c.SetSyscallReturn(uint64(tid))
 	} else {
 		// fork-like: return 0 (pretend we're child)
-		c.SetSyscallReturn(0)
+		c.SetSyscallReturn(negErrno(EAGAIN))
+	}
+}
+
+// sysClone3 handles the clone3(2) syscall (x86-64 SYS 435).
+// Unlike clone(2), clone3 passes a pointer to struct clone_args rather than
+// individual register arguments.
+//
+// struct clone_args layout (CLONE_ARGS_SIZE_VER0 = 64 bytes):
+//
+//	u64 flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls
+func (h *Handler) sysClone3(c arch.CPU, uargsPtr, size uint64) {
+	if size < 64 {
+		c.SetSyscallReturn(negErrno(EINVAL))
+		return
+	}
+	// Read struct clone_args from guest memory.
+	buf, err := h.Mem.ReadBytes(uargsPtr, 64)
+	if err != nil {
+		c.SetSyscallReturn(negErrno(EFAULT))
+		return
+	}
+	flags := binary.LittleEndian.Uint64(buf[0:8])
+	pidfdPtr := binary.LittleEndian.Uint64(buf[8:16])
+	childTid := binary.LittleEndian.Uint64(buf[16:24])
+	parentTid := binary.LittleEndian.Uint64(buf[24:32])
+	// exit_signal at buf[32:40] - not used beyond SIGCHLD detection
+	stack := binary.LittleEndian.Uint64(buf[40:48])
+	stackSize := binary.LittleEndian.Uint64(buf[48:56])
+	tls := binary.LittleEndian.Uint64(buf[56:64])
+
+	if h.ThreadM != nil && flags&0x100 != 0 { // CLONE_VM → thread creation
+		childPC := c.SyscallReturnPC()
+		childStack := stack + stackSize // stack grows down: top = base + size
+		if childStack == 0 {
+			childStack = c.GetSP()
+		}
+		childTLS := uint64(0)
+		if flags&0x00080000 != 0 { // CLONE_SETTLS
+			childTLS = tls
+		}
+		tid, err := h.ThreadM.Clone(c, childPC, childStack, childTLS)
+		if err != nil {
+			c.SetSyscallReturn(negErrno(ENOMEM))
+			return
+		}
+		if flags&0x01000000 != 0 && childTid != 0 { // CLONE_CHILD_SETTID
+			h.Mem.Write32(childTid, uint32(tid))
+		}
+		if flags&0x00100000 != 0 && parentTid != 0 { // CLONE_PARENT_SETTID
+			h.Mem.Write32(parentTid, uint32(tid))
+		}
+		if flags&0x1000 != 0 && pidfdPtr != 0 { // CLONE_PIDFD
+			// Write a fake pidfd (-1) so callers that require a valid fd get
+			// a safe sentinel.  The real pidfd model isn't implemented.
+			h.Mem.Write32(pidfdPtr, ^uint32(0))
+		}
+		c.SetSyscallReturn(uint64(tid))
+	} else {
+		// Process-creation (fork-like): signal that the resource is temporarily
+		// unavailable so that glibc/Rust falls back to posix_spawn / vfork.
+		fmt.Fprintf(os.Stderr, "[govm] clone3 fork-like flags=0x%x → EAGAIN\n", flags)
+		c.SetSyscallReturn(negErrno(EAGAIN))
 	}
 }
 
@@ -1337,6 +1758,23 @@ func (h *Handler) sysWrite(c arch.CPU, fdNum, bufAddr, count uint64) {
 }
 
 func (h *Handler) sysWritev(c arch.CPU, fdNum, iovAddr, iovcnt uint64) {
+	// Debug: dump heap before error output
+	if h.Trace && fdNum == 2 {
+		heapBase := h.Mem.GetBrkBase()
+		if heapBase != 0 {
+			// Dump first 2048 bytes for better visibility
+			if data, err := h.Mem.ReadBytes(heapBase, 2048); err == nil {
+				fmt.Fprintf(os.Stderr, "[heap-dump] base=0x%x\n", heapBase)
+				// Print as 8-byte words for easier reading
+				for off := 0; off+8 <= len(data); off += 8 {
+					val := binary.LittleEndian.Uint64(data[off:])
+					if val != 0 || off < 64 || off > len(data)-64 {
+						fmt.Fprintf(os.Stderr, "  +0x%04x: 0x%016x\n", off, val)
+					}
+				}
+			}
+		}
+	}
 	var total uint64
 	for i := uint64(0); i < iovcnt; i++ {
 		base, err := h.Mem.Read64(iovAddr + i*16)
@@ -1354,8 +1792,14 @@ func (h *Handler) sysWritev(c arch.CPU, fdNum, iovAddr, iovcnt uint64) {
 			c.SetSyscallReturn(negErrno(EFAULT))
 			return
 		}
-		if fdNum == 2 {
-			fmt.Fprintf(os.Stderr, "[stderr] %s", string(data))
+		if h.Trace {
+			if hfd := h.FS.GetHostFDNum(int(fdNum)); hfd >= 0 {
+				disp := data
+				if len(disp) > 24 {
+					disp = disp[:24]
+				}
+				fmt.Fprintf(os.Stderr, "[govm] writev(fd=%d→hfd=%d, buf=%d, base=0x%x): %02x\n", fdNum, hfd, length, base, disp)
+			}
 		}
 		n, err := h.FS.Write(int(fdNum), data)
 		if err != nil {
@@ -1371,10 +1815,17 @@ func (h *Handler) sysRead(c arch.CPU, fdNum, bufAddr, count uint64) {
 	buf := make([]byte, count)
 	n, err := h.FS.Read(int(fdNum), buf)
 	if err != nil && err != io.EOF {
-		c.SetSyscallReturn(negErrno(EBADF))
+		hfd := h.FS.GetHostFDNum(int(fdNum))
+		fmt.Fprintf(os.Stderr, "[govm] read(fd=%d→hfd=%d) err=%v\n", fdNum, hfd, err)
+		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
 	}
 	if n > 0 {
+		if h.Trace {
+			if hfd := h.FS.GetHostFDNum(int(fdNum)); hfd >= 0 {
+				fmt.Fprintf(os.Stderr, "[govm] read(fd=%d→hfd=%d, n=%d): %02x\n", fdNum, hfd, n, buf[:min(8, n)])
+			}
+		}
 		if err := h.Mem.WriteBytes(bufAddr, buf[:n]); err != nil {
 			c.SetSyscallReturn(negErrno(EFAULT))
 			return
@@ -1481,18 +1932,21 @@ const (
 
 func (h *Handler) sysSocket(c arch.CPU, domain, sockType, protocol uint64) {
 	stype := int(sockType & 0xff) // strip SOCK_CLOEXEC/SOCK_NONBLOCK
+	if h.Trace {
+		fmt.Fprintf(os.Stderr, "[govm] socket(domain=%d, type=%d)\n", domain, stype)
+	}
 
 	if domain == vfs.AF_UNIX {
-		if stype != vfs.SOCK_STREAM && stype != vfs.SOCK_DGRAM && stype != vfs.SOCK_SEQPACKET {
-			c.SetSyscallReturn(negErrno(EPROTONOSUPPORT))
-			return
-		}
-		fd, err := h.FS.AllocSocket(int(domain), stype)
+		// Use a real host socket so the guest can connect to host AF_UNIX sockets
+		// (Wayland, D-Bus, X11, etc.). Preserve SOCK_CLOEXEC/SOCK_NONBLOCK flags.
+		hostFlags := int(sockType) | syscall.SOCK_CLOEXEC
+		hostFD, err := syscall.Socket(syscall.AF_UNIX, hostFlags, 0)
 		if err != nil {
-			c.SetSyscallReturn(negErrno(ENOMEM))
+			c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 			return
 		}
-		c.SetSyscallReturn(uint64(fd))
+		gfd := h.FS.WrapHostFD(hostFD, fmt.Sprintf("socket(AF_UNIX,%d)", stype))
+		c.SetSyscallReturn(uint64(gfd))
 		return
 	}
 
@@ -1519,8 +1973,14 @@ func (h *Handler) sysConnect(c arch.CPU, fd, addrPtr, addrLen uint64) {
 			c.SetSyscallReturn(negErrno(EINVAL))
 			return
 		}
+		if h.Trace {
+			fmt.Fprintf(os.Stderr, "[govm] connect(fd=%d→hostFD=%d, sa=%+v)\n", fd, hostFD, sa)
+		}
 		err := syscall.Connect(hostFD, sa)
 		if err != nil {
+			if h.Trace {
+				fmt.Fprintf(os.Stderr, "[govm] connect ERROR: %v\n", err)
+			}
 			c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 			return
 		}
@@ -1675,10 +2135,16 @@ func (h *Handler) sysRecvfrom(c arch.CPU, fd, bufAddr, bufLen, flags, srcAddr, s
 		buf := make([]byte, bufLen)
 		n, err := syscall.Read(hostFD, buf)
 		if err != nil {
+			if h.Trace {
+				fmt.Fprintf(os.Stderr, "[govm] recvfrom(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, bufLen, err)
+			}
 			c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 			return
 		}
 		if n > 0 {
+			if h.Trace {
+				fmt.Fprintf(os.Stderr, "[govm] recvfrom(fd=%d→hfd=%d, n=%d): %02x\n", fd, hostFD, n, buf[:min(64, n)])
+			}
 			h.Mem.WriteBytes(bufAddr, buf[:n])
 		}
 		c.SetSyscallReturn(uint64(n))
@@ -1911,13 +2377,23 @@ func (h *Handler) writeSockaddr(addrPtr, addrLenPtr uint64, sa syscall.Sockaddr)
 	}
 }
 
-// extractUnixPath extracts the null-terminated path from a sockaddr_un buffer.
-// Format: family(2 bytes LE) + path (up to 108 bytes, null-terminated)
+// extractUnixPath extracts the path from a sockaddr_un buffer.
+// Format: family(2 bytes LE) + path (up to 108 bytes).
+// Handles both concrete paths (null-terminated) and Linux abstract sockets
+// (first path byte is \0; the rest is the abstract name up to end of buf).
 func extractUnixPath(buf []byte) string {
 	if len(buf) <= 2 {
 		return ""
 	}
 	pathBytes := buf[2:]
+	if len(pathBytes) == 0 {
+		return ""
+	}
+	if pathBytes[0] == 0 {
+		// Abstract socket: leading null is NOT a terminator.
+		// The name spans from buf[2] to end of the trimmed buffer.
+		return string(pathBytes)
+	}
 	for i, b := range pathBytes {
 		if b == 0 {
 			return string(pathBytes[:i])
@@ -2007,9 +2483,11 @@ func (h *Handler) sysSendmsg(c arch.CPU, fd, msgPtr, flags uint64) {
 
 	err := syscall.Sendmsg(hostFD, payload, oob, nil, int(flags))
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[govm] sendmsg(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, len(payload), err)
 		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
 	}
+	fmt.Fprintf(os.Stderr, "[govm] sendmsg(fd=%d→hfd=%d, len=%d): %02x\n", fd, hostFD, len(payload), payload[:min(8, len(payload))])
 	c.SetSyscallReturn(uint64(len(payload)))
 }
 
@@ -2055,8 +2533,21 @@ func (h *Handler) sysRecvmsg(c arch.CPU, fd, msgPtr, flags uint64) {
 
 	n, oobn, _, _, err := syscall.Recvmsg(hostFD, buf, oob, int(flags))
 	if err != nil {
+		if h.debugX11 {
+			fmt.Fprintf(os.Stderr, "[govm] recvmsg(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, totalCap, err)
+		}
 		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
+	}
+	if h.debugX11 && n > 0 {
+		disp := buf[:n]
+		if len(disp) > 64 {
+			disp = disp[:64]
+		}
+		fmt.Fprintf(os.Stderr, "[govm] recvmsg(fd=%d→hfd=%d, n=%d, iovs=%d): %x\n", fd, hostFD, n, iovLen, disp)
+		for i, iov := range iovEntries {
+			fmt.Fprintf(os.Stderr, "[govm]   iov[%d]: base=0x%x len=%d\n", i, iov.base, iov.blen)
+		}
 	}
 
 	// Scatter received data into guest iov
@@ -2068,6 +2559,9 @@ func (h *Handler) sysRecvmsg(c arch.CPU, fd, msgPtr, flags uint64) {
 		chunk := n - off
 		if uint64(chunk) > iov.blen {
 			chunk = int(iov.blen)
+		}
+		if h.debugX11 {
+			fmt.Fprintf(os.Stderr, "[govm]   scatter %d bytes at 0x%x: %x\n", chunk, iov.base, buf[off:off+chunk])
 		}
 		h.Mem.WriteBytes(iov.base, buf[off:off+chunk])
 		off += chunk
@@ -2110,6 +2604,13 @@ func errnoFromErr(err error) uint64 {
 	}
 	if errno, ok := err.(syscall.Errno); ok {
 		return uint64(errno)
+	}
+	// os.File wraps syscall errors in *os.PathError or *os.LinkError
+	if pe, ok := err.(*os.PathError); ok {
+		return errnoFromErr(pe.Err)
+	}
+	if le, ok := err.(*os.LinkError); ok {
+		return errnoFromErr(le.Err)
 	}
 	return EINVAL
 }
@@ -2274,11 +2775,20 @@ func (h *Handler) sysEpollPwait(c arch.CPU, epfd, eventsPtr, maxevents, timeout 
 			events |= vfs.EPOLLRDHUP
 		}
 
-		// struct epoll_event: events(4) + padding(4) + data(8) = 16 bytes
-		var evBuf [16]byte
-		binary.LittleEndian.PutUint32(evBuf[0:], events)
-		binary.LittleEndian.PutUint64(evBuf[8:], polls[i].entry.Data)
-		h.Mem.WriteBytes(eventsPtr+nReady*16, evBuf[:])
+		// struct epoll_event layout is arch-dependent:
+		//   x86-64: packed { uint32 events; uint64 data } = 12 bytes, no padding
+		//   others: { uint32 events; pad[4]; uint64 data } = 16 bytes
+		if c.GetArch() == arch.ArchAMD64 {
+			var evBuf [12]byte
+			binary.LittleEndian.PutUint32(evBuf[0:], events)
+			binary.LittleEndian.PutUint64(evBuf[4:], polls[i].entry.Data)
+			h.Mem.WriteBytes(eventsPtr+nReady*12, evBuf[:])
+		} else {
+			var evBuf [16]byte
+			binary.LittleEndian.PutUint32(evBuf[0:], events)
+			binary.LittleEndian.PutUint64(evBuf[8:], polls[i].entry.Data)
+			h.Mem.WriteBytes(eventsPtr+nReady*16, evBuf[:])
+		}
 		nReady++
 	}
 
@@ -2408,6 +2918,22 @@ func (h *Handler) sysMmap(c arch.CPU) {
 		return
 	}
 
+	// Reject unreasonably large mappings that would cause integer overflow.
+	// Real Linux imposes a per-process memory limit; we conservatively cap at 1TB.
+	// The value 0x8000000000001000 is a known bad size from ld.so reservation arithmetic.
+	if length > 0x10000000000 { // > 1TB
+		c.SetSyscallReturn(negErrno(ENOMEM))
+		return
+	}
+
+	origAddr := addr
+	logMmap := func(result uint64) {
+		if h.Trace {
+			fmt.Fprintf(os.Stderr, "[mmap] req=0x%x len=0x%x prot=%d flags=0x%x fd=%d off=0x%x → 0x%x\n",
+				origAddr, length, prot, flags, int64(fd), offset, result)
+		}
+	}
+
 	var perms uint8
 	if prot&0x1 != 0 {
 		perms |= mmu.PermRead
@@ -2432,9 +2958,11 @@ func (h *Handler) sysMmap(c arch.CPU) {
 	if mapAnon || fd == ^uint64(0) || int64(fd) == -1 {
 		if mapFixed && addr != 0 {
 			h.Mem.MapRangeZero(addr, length, perms)
+			logMmap(addr)
 			c.SetSyscallReturn(addr)
 		} else {
 			result := h.Mem.Mmap(addr, length, perms)
+			logMmap(result)
 			c.SetSyscallReturn(result)
 		}
 		return
@@ -2455,6 +2983,7 @@ func (h *Handler) sysMmap(c arch.CPU) {
 		if n > 0 {
 			h.Mem.WriteBytesRaw(addr, buf[:n])
 		}
+		logMmap(addr)
 		c.SetSyscallReturn(addr)
 		return
 	}
@@ -2480,6 +3009,7 @@ func (h *Handler) sysMmap(c arch.CPU) {
 			// Bypass permission checks because the requested perms might be PROT_READ
 			h.Mem.WriteBytesRaw(addr, buf[:n])
 		}
+		logMmap(addr)
 		c.SetSyscallReturn(addr)
 		return
 	}
@@ -2518,6 +3048,7 @@ func (h *Handler) sysMmap(c arch.CPU) {
 
 	// Alias the host mmap'd region into the guest MMU
 	guestAddr := h.Mem.MapHostSlice(addr, hostSlice, perms)
+	logMmap(guestAddr)
 	c.SetSyscallReturn(guestAddr)
 }
 
@@ -2617,7 +3148,7 @@ var x64Map = map[uint64]uint64{
 	4:   sysX64Stat,    // stat → fstatat (needs AT_FDCWD)
 	5:   SysFstat,
 	6:   sysX64Lstat,   // lstat → fstatat (needs AT_FDCWD)
-	7:   SysPpoll,      // poll → ppoll
+	7:   sysPoll,        // poll(fds, nfds, timeout_ms) - timeout is int, not *timespec
 	8:   SysLseek,
 	9:   SysMmap,
 	10:  SysMprotect,
@@ -2637,6 +3168,7 @@ var x64Map = map[uint64]uint64{
 	24:  SysSchedYield,
 	25:  SysMremap,
 	26:  SysMsync,
+	27:  SysMincore,
 	28:  SysMadvise,
 	32:  SysDup,
 	33:  SysDup3,       // dup2 → dup3
@@ -2695,6 +3227,8 @@ var x64Map = map[uint64]uint64{
 	106: sysX64Stat,       // stat → fstatat (needs AT_FDCWD)
 	107: SysGeteuid,
 	108: SysGetegid,
+	118: SysGetresuid,
+	120: SysGetresgid,
 	110: SysGetppid,
 	131: SysSigaltstack,
 	137: SysStatx,      // statfs → stub
@@ -2751,12 +3285,13 @@ var x64Map = map[uint64]uint64{
 	310: SysSetRobustList, // process_vm_readv → stub
 	318: SysGetrandom,
 	316: SysRenameat2,
+	253: SysKcmp,          // kcmp - compare kernel resources of two processes
 	319: SysMemfdCreate,
 	320: SysMembarrier,   // kexec_file_load → stub
 	334: SysRseq,
 	322: SysTimerfdCreate, // timerfd_create (new number)
 	332: SysStatx,         // statx
-	435: SysClone,       // clone3
+	435: SysClone3,      // clone3
 }
 
 // SysFlock/SysSplice: handled as unknown → ENOSYS

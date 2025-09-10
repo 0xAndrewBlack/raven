@@ -53,7 +53,8 @@ return t
 
 // Clone creates a new thread (goroutine) starting at childPC with a new stack.
 // Shares the same MMU (as Linux clone with CLONE_VM).
-func (m *Manager) Clone(parentCPU arch.CPU, childPC, childSP uint64) (int, error) {
+// tls is the thread-local storage base address (0 = inherit parent's TLS).
+func (m *Manager) Clone(parentCPU arch.CPU, childPC, childSP, tls uint64) (int, error) {
 m.mu.Lock()
 tid := m.nextID
 m.nextID++
@@ -62,6 +63,9 @@ m.mu.Unlock()
 c := parentCPU.CloneForThread()
 c.SetPC(childPC)
 c.SetSP(childSP)
+if tls != 0 {
+	c.SetTLS(tls)
+}
 c.SetSyscallHandler(m.handler)
 c.SetSyscallReturn(0) // child returns 0
 
