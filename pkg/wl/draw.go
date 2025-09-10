@@ -19,9 +19,10 @@ func (w *Window) DrawRect(left, top, right, bottom int32, colorref uint32) {
 		return
 	}
 
-	B := byte((colorref >> 16) & 0xFF)
-	G := byte((colorref >> 8) & 0xFF)
-	R := byte(colorref & 0xFF)
+	// COLORREF: 0x00RRGGBB → Wayland XRGB8888 memory layout: [B][G][R][X]
+	B := byte(colorref)
+	G := byte(colorref >> 8)
+	R := byte(colorref >> 16)
 
 	stride := int(w.Stride)
 	for y := int(top); y < int(bottom); y++ {
@@ -39,12 +40,13 @@ func (w *Window) DrawRect(left, top, right, bottom int32, colorref uint32) {
 // DrawText renders a UTF-8 string at (x,y) using the embedded 8x16 bitmap font.
 // Only ASCII 32-126 are rendered; others are shown as '?'.
 func (w *Window) DrawText(x, y int32, text string, fgColor, bgColor uint32, opaque bool) {
-	fgB := byte((fgColor >> 16) & 0xFF)
-	fgG := byte((fgColor >> 8) & 0xFF)
-	fgR := byte(fgColor & 0xFF)
-	bgB := byte((bgColor >> 16) & 0xFF)
-	bgG := byte((bgColor >> 8) & 0xFF)
-	bgR := byte(bgColor & 0xFF)
+	// COLORREF: 0x00RRGGBB → Wayland XRGB8888: [B][G][R][X]
+	fgB := byte(fgColor)
+	fgG := byte(fgColor >> 8)
+	fgR := byte(fgColor >> 16)
+	bgB := byte(bgColor)
+	bgG := byte(bgColor >> 8)
+	bgR := byte(bgColor >> 16)
 
 	stride := int(w.Stride)
 	cx := int(x)

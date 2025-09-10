@@ -9020,11 +9020,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			y := int32(ctx.Arg(2))
 			w := int32(ctx.Arg(3))
 			h := int32(ctx.Arg(4))
-			brushColor := uint32(0xF0F0F0)
-			if dc.Brush != nil && dc.Brush.Style == 0 {
-				brushColor = dc.Brush.Color
+			rop := ctx.Arg(5)
+			switch rop & 0xFF0000 {
+			case 0x000000: // BLACKNESS
+				dc.FillRect(x, y, x+w, y+h, 0x000000)
+			case 0xFF0000: // WHITENESS
+				dc.FillRect(x, y, x+w, y+h, 0xFFFFFF)
+			case 0x5A0000: // PATINVERT - XOR; approximate as solid fill
+				brushColor := uint32(0xF0F0F0)
+				if dc.Brush != nil && dc.Brush.Style == 0 {
+					brushColor = dc.Brush.Color
+				}
+				dc.FillRect(x, y, x+w, y+h, brushColor^0xFFFFFF)
+			default: // PATCOPY and others - fill with brush
+				brushColor := uint32(0xF0F0F0)
+				if dc.Brush != nil && dc.Brush.Style == 0 {
+					brushColor = dc.Brush.Color
+				}
+				dc.FillRect(x, y, x+w, y+h, brushColor)
 			}
-			dc.FillRect(x, y, x+w, y+h, brushColor)
 			ctx.SetReturn(1)
 			return 0
 		})
