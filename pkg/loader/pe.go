@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mirkobrombin/go-vm/pkg/arch"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 // PEModule represents a loaded PE image in guest memory.
@@ -573,7 +575,7 @@ func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) e
 			target, ok = modules[dllKey]
 		}
 		if !ok {
-			fmt.Fprintf(os.Stderr, "[resolve] DLL NOT FOUND: %s (for %s)\n", imp.DLLName, mod.Name)
+			ravelog.Logf("[resolve] DLL NOT FOUND: %s (for %s)\n", imp.DLLName, mod.Name)
 			continue // unresolved - leave stub (will trap if called)
 		}
 
@@ -603,7 +605,7 @@ func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) e
 			}
 			resolved++
 		} else {
-			fmt.Fprintf(os.Stderr, "[resolve] UNRESOLVED: %s!%s (ord=%d) for %s IAT=0x%x\n",
+			ravelog.Logf("[resolve] UNRESOLVED: %s!%s (ord=%d) for %s IAT=0x%x\n",
 				imp.DLLName, imp.FuncName, imp.Ordinal, mod.Name, imp.IATSlot)
 			// Write a sentinel address outside crash-recovery range (> 0x10000)
 			// to prevent silent recovery; will cause a clear "unmapped" fault.
@@ -616,7 +618,7 @@ func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) e
 			unresolved++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "[resolve] %s: %d imports, %d resolved, %d unresolved, exports=%d\n",
+	ravelog.Logf("[resolve] %s: %d imports, %d resolved, %d unresolved, exports=%d\n",
 		mod.Name, len(mod.Imports), resolved, unresolved, len(modules))
 	return nil
 }

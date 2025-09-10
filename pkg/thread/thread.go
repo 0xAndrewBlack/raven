@@ -1,12 +1,12 @@
 package thread
 
 import (
-"fmt"
-"os"
 "sync"
 
-"github.com/mirkobrombin/go-vm/pkg/arch"
-"github.com/mirkobrombin/go-vm/pkg/mmu"
+"github.com/mirkobrombin/Raven/pkg/arch"
+"github.com/mirkobrombin/Raven/pkg/mmu"
+
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 // Thread represents a guest hardware thread (hart).
@@ -93,10 +93,10 @@ m.mu.Unlock()
 m.wg.Add(1)
 go func() {
 	defer m.wg.Done()
-	fmt.Fprintf(os.Stderr, "[govm] thread %d start: PC=0x%x SP=0x%x TLS=0x%x\n",
+	ravelog.Logf("[govm] thread %d start: PC=0x%x SP=0x%x TLS=0x%x\n",
 		tid, c.GetPC(), c.GetSP(), c.GetTLS())
 	if err := c.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "[govm] thread %d crashed: %v (PC=0x%x SP=0x%x TLS=0x%x)\n",
+		ravelog.Logf("[govm] thread %d crashed: %v (PC=0x%x SP=0x%x TLS=0x%x)\n",
 			tid, err, c.GetPC(), c.GetSP(), c.GetTLS())
 	}
 	// When the thread exits, unregister its stack so future munmaps succeed.

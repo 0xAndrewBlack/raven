@@ -3,8 +3,8 @@ package vulkan
 import (
 	"fmt"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
-	"github.com/mirkobrombin/go-vm/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
 // Passthrough manages Vulkan API call forwarding from guest to host.

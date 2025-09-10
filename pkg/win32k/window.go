@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
-	"github.com/mirkobrombin/go-vm/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
 // Window represents a guest window mapped to a Wayland surface.

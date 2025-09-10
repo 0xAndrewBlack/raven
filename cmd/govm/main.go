@@ -3,6 +3,7 @@ package main
 import (
 "flag"
 "fmt"
+"math"
 "os"
 "path/filepath"
 "runtime/pprof"
@@ -11,17 +12,18 @@ import (
 "strings"
 "time"
 
-"github.com/mirkobrombin/go-vm/pkg/arch"
-"github.com/mirkobrombin/go-vm/pkg/cpu"
-"github.com/mirkobrombin/go-vm/pkg/loader"
-"github.com/mirkobrombin/go-vm/pkg/mmu"
-"github.com/mirkobrombin/go-vm/pkg/ntapi"
-gosyscall "github.com/mirkobrombin/go-vm/pkg/syscall"
-"github.com/mirkobrombin/go-vm/pkg/thread"
-"github.com/mirkobrombin/go-vm/pkg/vfs"
-"github.com/mirkobrombin/go-vm/pkg/wl"
-"github.com/mirkobrombin/go-vm/pkg/win32k"
-"github.com/mirkobrombin/go-vm/pkg/x64"
+"github.com/mirkobrombin/Raven/pkg/arch"
+"github.com/mirkobrombin/Raven/pkg/cpu"
+"github.com/mirkobrombin/Raven/pkg/loader"
+"github.com/mirkobrombin/Raven/pkg/mmu"
+"github.com/mirkobrombin/Raven/pkg/ntapi"
+gosyscall "github.com/mirkobrombin/Raven/pkg/syscall"
+"github.com/mirkobrombin/Raven/pkg/thread"
+"github.com/mirkobrombin/Raven/pkg/vfs"
+"github.com/mirkobrombin/Raven/pkg/wl"
+"github.com/mirkobrombin/Raven/pkg/win32k"
+"github.com/mirkobrombin/Raven/pkg/x64"
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 func utf16Decode(s []uint16) []byte {
@@ -52,6 +54,8 @@ func utf16Encode(s string) []uint16 {
 }
 
 func main() {
+ravelog.Banner("v0.1.0")
+
 trace := flag.Bool("trace", false, "enable instruction trace to stderr")
 memMB := flag.Int("mem", 256, "guest memory limit in MiB (advisory)")
 sysroot := flag.String("sysroot", "", "path to Windows system DLL directory (for PE mode)")
@@ -59,11 +63,13 @@ regFile := flag.String("registry", "", "path to registry hive JSON file (for PE 
 cpuprof := flag.String("cpuprofile", "", "write CPU profile to file")
 wayland := flag.Bool("wayland", true, "enable Wayland passthrough (use --wayland=false for headless)")
 
-flag.Usage = func() {fmt.Fprintf(os.Stderr, "Usage: govm [flags] <binary> [args...]\n\n")
-fmt.Fprintf(os.Stderr, "go-vm - in-process RISC-V / x86_64 / Windows PE Library OS\n\n")
-fmt.Fprintf(os.Stderr, "Supports ELF (Linux) and PE (Windows) executables.\n")
-fmt.Fprintf(os.Stderr, "PE mode is auto-detected from the file header (.exe/.dll or MZ magic).\n\n")
-flag.PrintDefaults()
+flag.Usage = func() {
+	ravelog.Banner("v0.1.0")
+	fmt.Fprintf(os.Stderr, "Usage: raven [flags] <binary> [args...]\n\n")
+	fmt.Fprintf(os.Stderr, "Raven - in-process x86-64 Windows PE / ELF emulator\n\n")
+	fmt.Fprintf(os.Stderr, "Supports ELF (Linux) and PE (Windows) executables.\n")
+	fmt.Fprintf(os.Stderr, "PE mode is auto-detected from the file header (.exe/.dll or MZ magic).\n\n")
+	flag.PrintDefaults()
 }
 flag.Parse()
 
@@ -220,7 +226,7 @@ c.SetTLS(result.TLSAddr)
 		pageStart := patchAddr &^ (mmu.PageSize - 1)
 		mem.Mprotect(pageStart, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
 		if err := mem.Write8(patchAddr, 0xeb); err != nil {
-			fmt.Fprintf(os.Stderr, "[PATCH] FAILED to apply double-free fix: %v\n", err)
+			ravelog.Logf("[PATCH] FAILED to apply double-free fix: %v\n", err)
 		}
 		mem.Mprotect(pageStart, mmu.PageSize, mmu.PermRead|mmu.PermExecute)
 	}
@@ -372,7 +378,7 @@ if ucrt, ok := loadedModules["ucrtbase.dll"]; ok {
 		mem.Write32(entryAddr+20, 0)            // CS.RecursionCount = 0
 	}
 	if trace {
-		fmt.Fprintf(os.Stderr, "[pe] initialized ucrtbase debug channel table (%d entries)\n", numChannels)
+		ravelog.Logf("[pe] initialized ucrtbase debug channel table (%d entries)\n", numChannels)
 	}
 }
 }
@@ -448,6 +454,10 @@ dispatcher := ntapi.NewDispatcher(mem, fs, handles, registry, procState, synthNt
 dispatcher.SetTrace(trace)
 dispatcher.SetSysRoot(sysroot)
 
+// Register no-op stubs for any remaining unresolved ordinal imports so
+// cpu-recover never needs to handle them (they just return 0 quietly).
+patchUnresolvedOrdinals(mem, dispatcher, result.MainModule)
+
 // Register auto-synth stub names with the dispatcher for trace output
 for _, synth := range autoSynthDLLs {
 	dispatcher.RegisterAutoStubNames(synth)
@@ -492,22 +502,23 @@ mem.Write64(procState.TEBAddr+ntapi.TebHeapBase, heapRegion)
 mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
 
 // Map a zero-filled null page so that null-pointer dereferences with small
-// offsets (like [rcx+0x28] with rcx=0) read zero instead of segfaulting.
-// Many C++ vtable dispatch patterns null-check the loaded value after reading.
-mem.Mmap(1, 0x10000, mmu.PermRead) // addr≠0 so Mmap uses it as-is; page 0 gets mapped
+// offsets (like [rcx+0x28] with rcx=0) read/write zero instead of segfaulting.
+// Many C++ vtable dispatch patterns null-check the loaded value after reading,
+// and some code writes to null-derived pointers after a failed allocation.
+mem.MapRange(0, 0x10000, mmu.PermRead|mmu.PermWrite) // force-map pages 0-0xFFFF
 
 // Patch hot Win32 API stubs with inline x64 code to avoid vmcall overhead.
 patchHotStubs(mem, autoSynthDLLs, flsDataArray)
 
 if trace && exceptionTable != nil {
-	fmt.Fprintf(os.Stderr, "[seh] parsed %d RUNTIME_FUNCTION entries from .pdata\n", len(exceptionTable.Entries))
+	ravelog.Logf("[seh] parsed %d RUNTIME_FUNCTION entries from .pdata\n", len(exceptionTable.Entries))
 }
 
 // Set up handlers
 c.SetVmcallHandler(dispatcher.Handle) // NT trap handler
 c.SetSyscallHandler(func(cpu arch.CPU) {
 if trace {
-fmt.Fprintf(os.Stderr, "[pe] unexpected Linux syscall %d at RIP=0x%x\n",
+ravelog.Logf("[pe] unexpected Linux syscall %d at RIP=0x%x\n",
 cpu.SyscallNum(), cpu.GetPC())
 }
 cpu.SetSyscallReturn(0xC0000002) // STATUS_NOT_IMPLEMENTED
@@ -518,9 +529,9 @@ tm := thread.NewManager(mem, dispatcher.Handle)
 mainThread := tm.MainThread(c)
 
 if trace {
-fmt.Fprintf(os.Stderr, "[pe] entry=0x%x sp=0x%x teb=0x%x peb=0x%x\n",
+ravelog.Logf("[pe] entry=0x%x sp=0x%x teb=0x%x peb=0x%x\n",
 result.EntryPoint, result.StackPtr, procState.TEBAddr, procState.PEBAddr)
-fmt.Fprintf(os.Stderr, "[pe] ntdll=0x%x win32u=0x%x\n",
+ravelog.Logf("[pe] ntdll=0x%x win32u=0x%x\n",
 synthNtdll.BaseAddr, synthWin32u.BaseAddr)
 }
 
@@ -546,7 +557,7 @@ fmt.Fprintf(os.Stderr, "govm: warning: DllMain(%s) failed: %v\n", dll.Name, err)
 // Restore CPU state for main entry
 c.SetPC(result.EntryPoint)
 c.SetSP(result.StackPtr)
-fmt.Fprintf(os.Stderr, "[pe] DllMain phase complete, starting main entry at 0x%x\n", result.EntryPoint)
+ravelog.Logf("[pe] DllMain phase complete, starting main entry at 0x%x\n", result.EntryPoint)
 }
 
 // Run the PE
@@ -608,9 +619,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	_ = mainTitle
 	if wld, err := wl.Connect(); err == nil {
 		wlDisplay = wld
-		fmt.Fprintf(os.Stderr, "[wl] connected to Wayland compositor\n")
+		ravelog.Logf("[wl] connected to Wayland compositor\n")
 	} else {
-		fmt.Fprintf(os.Stderr, "[wl] no Wayland: %v (window display disabled)\n", err)
+		ravelog.Logf("[wl] no Wayland: %v (window display disabled)\n", err)
 	}
 
 	readGuestUTF16 := func(addr uint64) string {
@@ -986,6 +997,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		bkColor   uint32
 		bkMode    int32 // 1=TRANSPARENT, 2=OPAQUE
 		curBrush  uint64
+		isScreen bool  // true = renders to Wayland surface; false = memory/offscreen DC
+		originX  int32 // client-area origin in window coordinates (ReactOS: GreSetDCOrg)
+		originY  int32
 	}
 	dcMap := make(map[uint64]*dcState)
 	brushColors := make(map[uint64]uint32) // brush handle → COLORREF
@@ -1030,6 +1044,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			textColor: 0x000000,
 			bkColor:   0xFFFFFF,
 			bkMode:    2, // OPAQUE
+			isScreen:  true,
 		}
 	}
 
@@ -1500,6 +1515,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	if ucrt, ok := synthByName["ucrtbase.dll"]; ok {
 		ucrtExit := func(ctx *ntapi.TrapContext) uint32 {
 			code := ctx.Arg(0)
+			ravelog.Logf("[win32] exit(%d)\n", code)
 			if wlDisplay != nil {
 				wlDisplay.Close()
 			}
@@ -1847,9 +1863,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			dst := ctx.Arg(0)
 			val := byte(ctx.Arg(1))
 			count := ctx.Arg(2)
-			for i := uint64(0); i < count && i < 0x1000000; i++ {
-				mem.Write8(dst+i, val)
+			if count > 0x1000000 {
+				count = 0x1000000
 			}
+			buf := make([]byte, count)
+			for i := range buf {
+				buf[i] = val
+			}
+			ctx.Mem.WriteBytes(dst, buf)
 			ctx.SetReturn(dst)
 			return 0
 		})
@@ -1857,10 +1878,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			dst := ctx.Arg(0)
 			src := ctx.Arg(1)
 			count := ctx.Arg(2)
-			for i := uint64(0); i < count && i < 0x1000000; i++ {
-				b, _ := mem.Read8(src + i)
-				mem.Write8(dst+i, b)
+			if count > 0x1000000 {
+				count = 0x1000000
 			}
+			buf, _ := ctx.Mem.ReadBytes(src, int(count))
+			ctx.Mem.WriteBytes(dst, buf)
 			ctx.SetReturn(dst)
 			return 0
 		})
@@ -1871,13 +1893,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if count > 0x1000000 {
 				count = 0x1000000
 			}
-			tmp := make([]byte, count)
-			for i := uint64(0); i < count; i++ {
-				tmp[i], _ = mem.Read8(src + i)
-			}
-			for i := uint64(0); i < count; i++ {
-				mem.Write8(dst+i, tmp[i])
-			}
+			buf, _ := ctx.Mem.ReadBytes(src, int(count))
+			ctx.Mem.WriteBytes(dst, buf)
 			ctx.SetReturn(dst)
 			return 0
 		})
@@ -2104,6 +2121,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 
 		d.RegisterAutoStubHandler(ucrt, "abort", ucrtExit)
+		d.RegisterAutoStubHandler(ucrt, "terminate", func(ctx *ntapi.TrapContext) uint32 {
+			ravelog.Logf("[win32] terminate() called - ignoring\n")
+			return 0
+		})
 		d.RegisterAutoStubHandler(ucrt, "_c_exit", func(ctx *ntapi.TrapContext) uint32 {
 			return 0
 		})
@@ -3107,6 +3128,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// ExitProcess: cleanly terminate emulation
 		d.RegisterAutoStubHandler(kernel32, "ExitProcess", func(ctx *ntapi.TrapContext) uint32 {
 			code := ctx.Arg(0)
+			ravelog.Logf("[win32] ExitProcess(%d)\n", code)
 			if wlDisplay != nil {
 				wlDisplay.Close()
 			}
@@ -3627,7 +3649,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			name := string(utf16Decode(fname))
 			if ctx.Trace {
-				fmt.Fprintf(os.Stderr, "[win32] CreateFileW: %q access=0x%x disp=%d\n", name, desiredAccess, creationDisp)
+				ravelog.Logf("[win32] CreateFileW: %q access=0x%x disp=%d\n", name, desiredAccess, creationDisp)
 			}
 			// Convert Windows path to VFS path
 			vfsPath := winPathToVFS(name)
@@ -3673,7 +3695,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			if err != nil {
 				if ctx.Trace {
-					fmt.Fprintf(os.Stderr, "[win32] CreateFileW: %q → INVALID_HANDLE_VALUE (%v)\n", name, err)
+					ravelog.Logf("[win32] CreateFileW: %q → INVALID_HANDLE_VALUE (%v)\n", name, err)
 				}
 				ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
 				procState.LastError = 2 // ERROR_FILE_NOT_FOUND
@@ -3681,7 +3703,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
 			if ctx.Trace {
-				fmt.Fprintf(os.Stderr, "[win32] CreateFileW: %q → handle=0x%x (fd=%d)\n", name, uint64(h), fd)
+				ravelog.Logf("[win32] CreateFileW: %q → handle=0x%x (fd=%d)\n", name, uint64(h), fd)
 			}
 			ctx.SetReturn(uint64(h))
 			return 0
@@ -3702,9 +3724,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			buf := make([]byte, nBytesToRead)
 			n, _ := ctx.FS.Read(fh.FD, buf)
-			for i := 0; i < n; i++ {
-				ctx.Mem.Write8(bufAddr+uint64(i), buf[i])
-			}
+			ctx.Mem.WriteBytes(bufAddr, buf[:n])
 			if lpBytesRead != 0 {
 				ctx.Mem.Write32(lpBytesRead, uint32(n))
 			}
@@ -3994,7 +4014,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(kernel32, "RaiseException", func(ctx *ntapi.TrapContext) uint32 {
 			code := ctx.Arg(0)
 			flags := ctx.Arg(1)
-			fmt.Fprintf(os.Stderr, "[win32] RaiseException: code=0x%x flags=0x%x\n", code, flags)
+			ravelog.Logf("[win32] RaiseException: code=0x%x flags=0x%x\n", code, flags)
 			if code == 0x406D1388 {
 				return 0 // MS_VC_EXCEPTION (SetThreadName) - ignore
 			}
@@ -4011,7 +4031,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 					if handler.IsFallback {
 						// FH4 format: can't parse catch blocks, unwind past the handler frame
-						fmt.Fprintf(os.Stderr, "[seh] C++ exception → FH4 fallback unwind to RIP=0x%x RSP=0x%x\n",
+						ravelog.Logf("[seh] C++ exception → FH4 fallback unwind to RIP=0x%x RSP=0x%x\n",
 							handler.FallbackRIP, handler.FallbackRSP)
 						if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
 							rw.WriteReg(0, 0) // RAX = 0 (error return)
@@ -4027,7 +4047,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 					catchAddr := imageBase + uint64(handler.FuncletRVA)
 					if ctx.Trace {
-						fmt.Fprintf(os.Stderr, "[seh] C++ exception → catch funclet at 0x%x, RBP=0x%x\n",
+						ravelog.Logf("[seh] C++ exception → catch funclet at 0x%x, RBP=0x%x\n",
 							catchAddr, handler.EstablisherRBP)
 					}
 					// Set up the CPU to call the catch funclet:
@@ -4040,7 +4060,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return 0
 				}
 				// No handler found - log and continue (best effort)
-				fmt.Fprintf(os.Stderr, "[win32] RaiseException: C++ exception (0xe06d7363) - no SEH handler, continuing\n")
+				ravelog.Logf("[win32] RaiseException: C++ exception (0xe06d7363) - no SEH handler, continuing\n")
 				return 0
 			}
 			fmt.Fprintf(os.Stderr, "govm: RaiseException code=0x%x flags=0x%x - aborting\n", code, flags)
@@ -4290,7 +4310,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					synth := ntapi.GenerateSynthDLL(mem, dllName, allFuncs, nextDelayID)
 					synthByName[dllName] = synth
 					d.RegisterAutoStubNames(synth)
-					fmt.Fprintf(os.Stderr, "[pe] delay-synth %s: %d stubs (id base 0x%X) funcs=%v\n",
+					ravelog.Logf("[pe] delay-synth %s: %d stubs (id base 0x%X) funcs=%v\n",
 						dllName, len(allFuncs), nextDelayID, allFuncs)
 					nextDelayID += uint32(len(allFuncs))
 					// Re-run all handler registrars so newly synthesized DLL gets handlers
@@ -4307,7 +4327,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return 0
 				}
 			}
-			fmt.Fprintf(os.Stderr, "[delay] unresolved: %s!%s\n", dllName, funcName)
+			ravelog.Logf("[delay] unresolved: %s!%s\n", dllName, funcName)
 
 		fallback:
 			if delayLoadFallback == 0 {
@@ -4396,6 +4416,64 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			mem.Write16(lpOut+uint64(n)*2, 0)
 			ctx.SetReturn(uint64(n))
+			return 0
+		})
+		// ColorRGBToHLS: convert COLORREF to HLS - store results in out-params
+		d.RegisterAutoStubHandler(shlwapi, "ColorRGBToHLS", func(ctx *ntapi.TrapContext) uint32 {
+			clr := uint32(ctx.Arg(0))
+			pHue := ctx.Arg(1)
+			pLum := ctx.Arg(2)
+			pSat := ctx.Arg(3)
+			r := float64((clr) & 0xFF)
+			g := float64((clr >> 8) & 0xFF)
+			b := float64((clr >> 16) & 0xFF)
+			r /= 255; g /= 255; b /= 255
+			maxC := math.Max(math.Max(r, g), b)
+			minC := math.Min(math.Min(r, g), b)
+			l := (maxC + minC) / 2
+			var h, s float64
+			if maxC != minC {
+				d := maxC - minC
+				if l > 0.5 { s = d / (2 - maxC - minC) } else { s = d / (maxC + minC) }
+				switch maxC {
+				case r: h = (g - b) / d; if g < b { h += 6 }
+				case g: h = (b-r)/d + 2
+				case b: h = (r-g)/d + 4
+				}
+				h /= 6
+			}
+			// Windows HLS: Hue 0-240, Lum 0-240, Sat 0-240
+			if pHue != 0 { mem.Write16(pHue, uint16(h*240)) }
+			if pLum != 0 { mem.Write16(pLum, uint16(l*240)) }
+			if pSat != 0 { mem.Write16(pSat, uint16(s*240)) }
+			return 0
+		})
+		// ColorHLSToRGB: convert Windows HLS (0-240 range) to COLORREF
+		d.RegisterAutoStubHandler(shlwapi, "ColorHLSToRGB", func(ctx *ntapi.TrapContext) uint32 {
+			wH := float64(ctx.Arg(0)) / 240
+			wL := float64(ctx.Arg(1)) / 240
+			wS := float64(ctx.Arg(2)) / 240
+			hue2rgb := func(p, q, t float64) float64 {
+				if t < 0 { t++ }
+				if t > 1 { t-- }
+				if t < 1.0/6 { return p + (q-p)*6*t }
+				if t < 1.0/2 { return q }
+				if t < 2.0/3 { return p + (q-p)*(2.0/3-t)*6 }
+				return p
+			}
+			var r, g, b float64
+			if wS == 0 {
+				r, g, b = wL, wL, wL
+			} else {
+				var q float64
+				if wL < 0.5 { q = wL * (1 + wS) } else { q = wL + wS - wL*wS }
+				p := 2*wL - q
+				r = hue2rgb(p, q, wH+1.0/3)
+				g = hue2rgb(p, q, wH)
+				b = hue2rgb(p, q, wH-1.0/3)
+			}
+			clr := uint32(r*255) | uint32(g*255)<<8 | uint32(b*255)<<16
+			ctx.SetReturn(uint64(clr))
 			return 0
 		})
 	}
@@ -4868,7 +4946,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				x: 0, y: defH - sbHeight, w: defW, h: sbHeight,
 				visible: style&0x10000000 != 0,
 			}
-			fmt.Fprintf(os.Stderr, "[comctl32] CreateStatusWindowW hwnd=0x%x parent=0x%x\n", hwnd, hwndParent)
+			ravelog.Logf("[comctl32] CreateStatusWindowW hwnd=0x%x parent=0x%x\n", hwnd, hwndParent)
 			ctx.SetReturn(hwnd)
 			return 0
 		})
@@ -5629,7 +5707,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			cchBufferMax := int(int32(ctx.Arg(3)))
 			s, guestAddr, slen := peLoadStringW(uID)
 			if s != "" {
-				fmt.Fprintf(os.Stderr, "[loadstr] id=%d → %q\n", uID, s)
+				ravelog.Logf("[loadstr] id=%d → %q\n", uID, s)
 			}
 			if s == "" || lpBuffer == 0 {
 				ctx.SetReturn(0)
@@ -5732,7 +5810,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 					}
 				}
-				fmt.Fprintf(os.Stderr, "[wndclass] RegisterClassW %q atom=0x%x wndProc=0x%x brush=%d\n", name, a, wndProc, hBrush)
+				ravelog.Logf("[wndclass] RegisterClassW %q atom=0x%x wndProc=0x%x brush=%d\n", name, a, wndProc, hBrush)
 			}
 			ctx.SetReturn(uint64(a))
 			return 0
@@ -5781,7 +5859,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 					}
 				}
-				fmt.Fprintf(os.Stderr, "[wndclass] RegisterClassExW name=%q lpName=0x%x atom=0x%x wndProc=0x%x brush=%d\n", name, lpName, a, wndProc, hBrush)
+				ravelog.Logf("[wndclass] RegisterClassExW name=%q lpName=0x%x atom=0x%x wndProc=0x%x brush=%d\n", name, lpName, a, wndProc, hBrush)
 			}
 			ctx.SetReturn(uint64(a))
 			return 0
@@ -5820,7 +5898,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				hwndClassAtom[hwnd] = classAtomForHwnd
 			}
 			wp := hwndWndProc[hwnd]
-			fmt.Fprintf(os.Stderr, "[wndclass] CreateWindowExW class=%q hwnd=0x%x wndProc=0x%x style=0x%x\n", className, hwnd, wp, style)
+			ravelog.Logf("[wndclass] CreateWindowExW class=%q hwnd=0x%x wndProc=0x%x style=0x%x\n", className, hwnd, wp, style)
 
 			const wsChild = 0x40000000
 			// Track child windows (built-in classes like Edit, Static, Button)
@@ -5880,10 +5958,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow = win
 						mainHWND = hwnd
 						mainTitle = title
-						fmt.Fprintf(os.Stderr, "[wl] window created: %q %dx%d hwnd=0x%x\n", title, w, h, hwnd)
+						ravelog.Logf("[wl] window created: %q %dx%d hwnd=0x%x\n", title, w, h, hwnd)
 						// Attach menu bar: first check hMenu parameter, then class menu
 						hMenu := ctx.Arg(9)
-						fmt.Fprintf(os.Stderr, "[menu] CreateWindowExW hMenu=0x%x menus_has=%v\n", hMenu, menus[hMenu] != nil)
+						ravelog.Logf("[menu] CreateWindowExW hMenu=0x%x menus_has=%v\n", hMenu, menus[hMenu] != nil)
 						if hMenu != 0 {
 							if _, ok := menus[hMenu]; ok {
 								hwndMenuBar[hwnd] = hMenu
@@ -5902,7 +5980,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							}
 						}
 					} else {
-						fmt.Fprintf(os.Stderr, "[wl] CreateWindow failed: %v\n", err)
+						ravelog.Logf("[wl] CreateWindow failed: %v\n", err)
 					}
 				}
 			}
@@ -5964,7 +6042,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "DestroyWindow", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
-			fmt.Fprintf(os.Stderr, "[destroy] hwnd=0x%x\n", hwnd)
+			ravelog.Logf("[destroy] hwnd=0x%x\n", hwnd)
 			delete(hwndChildren, hwnd)
 			delete(hwndWndProc, hwnd)
 			ctx.SetReturn(1) // TRUE
@@ -6012,8 +6090,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetDC", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
 			h := gdiAlloc()
-			dcMap[h] = screenDC()
+			ox, oy := clientAreaOrigin(hwnd)
+			dcMap[h] = &dcState{textColor: 0x000000, bkColor: 0xFFFFFF, bkMode: 2, isScreen: true, originX: ox, originY: oy}
 			ctx.SetReturn(h)
 			return 0
 		})
@@ -6125,7 +6205,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if w > 0 && w < 0x7FFF { ci.w = w }
 					if h > 0 && h < 0x7FFF { ci.h = h }
 				}
-				fmt.Fprintf(os.Stderr, "[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d\n", hwnd, ci.className, flags, ci.x, ci.y, ci.w, ci.h)
+				ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d\n", hwnd, ci.className, flags, ci.x, ci.y, ci.w, ci.h)
 				// Queue WM_SIZE for windows with a guest WndProc
 				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
 					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
@@ -6182,7 +6262,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if dp.w > 0 { ci.w = dp.w }
 					if dp.h > 0 { ci.h = dp.h }
 				}
-				fmt.Fprintf(os.Stderr, "[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d\n", dp.hwnd, ci.className, dp.flags, ci.x, ci.y, ci.w, ci.h)
+				ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d\n", dp.hwnd, ci.className, dp.flags, ci.x, ci.y, ci.w, ci.h)
 			}
 			deferredPositions = deferredPositions[:0]
 			ctx.SetReturn(1)
@@ -6714,8 +6794,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ctx.SetReturn(1)
 					return 0
 				}
+				// Synthetic WM_PAINT frame: mainHWND + all visible children with guest WndProcs
+				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+				for h, cs := range hwndChildren {
+					if cs.visible && hwndWndProc[h] != 0 {
+						msgQueue = append(msgQueue, queuedMsg{h, 0x000F, 0, 0})
+					}
+				}
+				m := msgQueue[0]
+				msgQueue = msgQueue[1:]
 				if pMsg != 0 {
-					writeMsg(pMsg, mainHWND, 0x000F, 0, 0) // WM_PAINT
+					writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 				}
 				ctx.SetReturn(1)
 				return 0
@@ -6758,7 +6847,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 			wndProc, ok := hwndWndProc[hwnd]
 			if !ok || wndProc == 0 {
-				fmt.Fprintf(os.Stderr, "[dispatch] no WndProc for hwnd=0x%x msg=0x%x\n", hwnd, message)
+				ravelog.Logf("[dispatch] no WndProc for hwnd=0x%x msg=0x%x\n", hwnd, message)
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -6769,7 +6858,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 
-			fmt.Fprintf(os.Stderr, "[dispatch] hwnd=0x%x msg=0x%x → WndProc=0x%x\n", hwnd, message, wndProc)
+			ravelog.Logf("[dispatch] hwnd=0x%x msg=0x%x → WndProc=0x%x\n", hwnd, message, wndProc)
 
 			// Stack is already correct: [RSP] = caller's return address,
 			// [RSP+8..RSP+0x28] = shadow space. WndProc will RET to caller.
@@ -6846,7 +6935,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hwnd := ctx.Arg(0)
 			pPaint := ctx.Arg(1)
 			hdc := gdiAlloc()
-			dcMap[hdc] = screenDC()
+			ox, oy := clientAreaOrigin(hwnd)
+			dcMap[hdc] = &dcState{textColor: 0x000000, bkColor: 0xFFFFFF, bkMode: 2, isScreen: true, originX: ox, originY: oy}
 
 			var rcLeft, rcTop, rcRight, rcBottom int32
 
@@ -7055,6 +7145,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1)
 			return 0
 		})
+		d.RegisterAutoStubHandler(user32, "MessageBoxA", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // IDOK
+			return 0
+		})
 		d.RegisterAutoStubHandler(user32, "MessageBoxW", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(1) // IDOK
 			return 0
@@ -7178,15 +7272,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			menu := peLoadMenuResource(resID)
 			if menu == nil {
-				fmt.Fprintf(os.Stderr, "[menu] LoadMenuW resID=%d → nil\n", resID)
+				ravelog.Logf("[menu] LoadMenuW resID=%d → nil\n", resID)
 				ctx.SetReturn(0)
 				return 0
 			}
 			hmenu := uint64(0x60000 + resID)
 			menus[hmenu] = menu
-			fmt.Fprintf(os.Stderr, "[menu] LoadMenuW resID=%d → hmenu=0x%x items=%d\n", resID, hmenu, len(menu.items))
+			ravelog.Logf("[menu] LoadMenuW resID=%d → hmenu=0x%x items=%d\n", resID, hmenu, len(menu.items))
 			for i, item := range menu.items {
-				fmt.Fprintf(os.Stderr, "[menu]   [%d] %q flags=0x%x submenu=%d\n", i, item.text, item.flags, len(item.submenu))
+				ravelog.Logf("[menu]   [%d] %q flags=0x%x submenu=%d\n", i, item.text, item.flags, len(item.submenu))
 			}
 			ctx.SetReturn(hmenu)
 			return 0
@@ -7309,6 +7403,106 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(sysMenu)
 			return 0
 		})
+		// GetSysColorBrush: return a pseudo-handle encoding the index
+		d.RegisterAutoStubHandler(user32, "GetSysColorBrush", func(ctx *ntapi.TrapContext) uint32 {
+			idx := ctx.Arg(0)
+			h := uint64(0xBBBB_0000) | idx // pseudo-handle
+			brushColors[h] = getSysColor(uint32(idx))
+			ctx.SetReturn(h)
+			return 0
+		})
+		// FillRect (user32 export, same semantics as gdi32.FillRect)
+		d.RegisterAutoStubHandler(user32, "FillRect", func(ctx *ntapi.TrapContext) uint32 {
+			if wlWindow == nil {
+				ctx.SetReturn(1)
+				return 0
+			}
+			hDC := ctx.Arg(0)
+			lpRect := ctx.Arg(1)
+			hBrush := ctx.Arg(2)
+			if lpRect == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+			dc := dcMap[hDC]
+			if dc != nil && !dc.isScreen {
+				ctx.SetReturn(1)
+				return 0
+			}
+			var ox, oy int32
+			if dc != nil {
+				ox, oy = dc.originX, dc.originY
+			}
+			left, _ := mem.Read32(lpRect)
+			top, _ := mem.Read32(lpRect + 4)
+			right, _ := mem.Read32(lpRect + 8)
+			bottom, _ := mem.Read32(lpRect + 12)
+			var color uint32
+			if c, ok := brushColors[hBrush]; ok {
+				color = c
+			} else if hBrush >= 1 && hBrush <= 31 {
+				color = getSysColor(uint32(hBrush - 1))
+			} else {
+				color = 0xF0F0F0
+			}
+			wlWindow.DrawRect(int32(left)+ox, int32(top)+oy, int32(right)+ox, int32(bottom)+oy, color)
+			ctx.SetReturn(1)
+			return 0
+		})
+		// CreateDialogParamW: modeless dialog creation - return a fake HWND
+		d.RegisterAutoStubHandler(user32, "CreateDialogParamW", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := hwndAlloc()
+			ctx.SetReturn(hwnd)
+			return 0
+		})
+		// SetMenuItemBitmaps: associate bitmaps with menu items - no-op (no bitmap rendering)
+		d.RegisterAutoStubHandler(user32, "SetMenuItemBitmaps", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		// RemoveMenu: remove a menu item - no-op stub
+		d.RegisterAutoStubHandler(user32, "RemoveMenu", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		// GetDlgCtrlID: return control ID from HWND - return 0
+		d.RegisterAutoStubHandler(user32, "GetDlgCtrlID", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		// DestroyIcon: free an icon handle - no-op stub
+		d.RegisterAutoStubHandler(user32, "DestroyIcon", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		// GetMenuStringW: copy menu item text into caller's buffer
+		d.RegisterAutoStubHandler(user32, "GetMenuStringW", func(ctx *ntapi.TrapContext) uint32 {
+			hMenu := ctx.Arg(0)
+			idItem := ctx.Arg(1)
+			lpStr := ctx.Arg(2)
+			nMaxCount := int(ctx.Arg(3))
+			// flags := ctx.Arg(4)  // MF_BYPOSITION or MF_BYCOMMAND
+			md, ok := menus[hMenu]
+			if !ok || nMaxCount == 0 || lpStr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			for _, item := range md.items {
+				if item.id == idItem {
+					runes := []rune(item.text)
+					n := len(runes)
+					if n >= nMaxCount { n = nMaxCount - 1 }
+					for i := 0; i < n; i++ {
+						mem.Write16(lpStr+uint64(i)*2, uint16(runes[i]))
+					}
+					mem.Write16(lpStr+uint64(n)*2, 0)
+					ctx.SetReturn(uint64(n))
+					return 0
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -7336,7 +7530,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(gdi32, "CreateCompatibleDC", func(ctx *ntapi.TrapContext) uint32 {
 			h := gdiAlloc()
-			dcMap[h] = screenDC()
+			dcMap[h] = &dcState{textColor: 0x000000, bkColor: 0xFFFFFF, bkMode: 2, isScreen: false}
 			ctx.SetReturn(h)
 			return 0
 		})
@@ -7465,11 +7659,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 			hdc := ctx.Arg(0)
-			x := int32(ctx.Arg(1))
-			y := int32(ctx.Arg(2))
+			dc := getDC(hdc)
+			if !dc.isScreen {
+				ctx.SetReturn(1)
+				return 0
+			}
+			x := int32(ctx.Arg(1)) + dc.originX
+			y := int32(ctx.Arg(2)) + dc.originY
 			lpStr := ctx.Arg(3)
 			nLen := int(ctx.Arg(4))
-			dc := getDC(hdc)
 			text := readGuestUTF16(lpStr)
 			if nLen > 0 && nLen < len(text) {
 				text = text[:nLen]
@@ -7484,12 +7682,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 			hdc := ctx.Arg(0)
-			x := int32(ctx.Arg(1))
-			y := int32(ctx.Arg(2))
+			dc := getDC(hdc)
+			if !dc.isScreen {
+				ctx.SetReturn(1)
+				return 0
+			}
+			x := int32(ctx.Arg(1)) + dc.originX
+			y := int32(ctx.Arg(2)) + dc.originY
 			// arg3 = options, arg4 = lpRect (skip for now)
 			lpStr := ctx.Arg(4 + 1) // 5th arg: lpString (stack arg after rect)
 			nLen := int(ctx.Arg(4 + 2)) // 6th arg: cbCount
-			dc := getDC(hdc)
 			text := readGuestUTF16(lpStr)
 			if nLen > 0 && nLen < len(text) {
 				text = text[:nLen]
@@ -7508,11 +7710,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 			hdc := ctx.Arg(0)
-			x := int32(ctx.Arg(1))
-			y := int32(ctx.Arg(2))
+			dc := getDC(hdc)
+			if !dc.isScreen {
+				ctx.SetReturn(1)
+				return 0
+			}
+			x := int32(ctx.Arg(1)) + dc.originX
+			y := int32(ctx.Arg(2)) + dc.originY
 			w := int32(ctx.Arg(3))
 			h := int32(ctx.Arg(4 + 0)) // 5th arg on stack
-			dc := getDC(hdc)
 			color := uint32(0xF0F0F0)
 			if c, ok := brushColors[dc.curBrush]; ok {
 				color = c
@@ -7530,11 +7736,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(1)
 				return 0
 			}
+			hDC := ctx.Arg(0)
 			lpRect := ctx.Arg(1)
 			hBrush := ctx.Arg(2)
 			if lpRect == 0 {
 				ctx.SetReturn(1)
 				return 0
+			}
+			dc := dcMap[hDC]
+			if dc != nil && !dc.isScreen {
+				ctx.SetReturn(1)
+				return 0
+			}
+			var ox, oy int32
+			if dc != nil {
+				ox, oy = dc.originX, dc.originY
 			}
 			left, _ := mem.Read32(lpRect)
 			top, _ := mem.Read32(lpRect + 4)
@@ -7549,7 +7765,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			} else {
 				color = 0xF0F0F0
 			}
-			wlWindow.DrawRect(int32(left), int32(top), int32(right), int32(bottom), color)
+			wlWindow.DrawRect(int32(left)+ox, int32(top)+oy, int32(right)+ox, int32(bottom)+oy, color)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -7672,7 +7888,7 @@ func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[stri
 		synth := ntapi.GenerateSynthDLL(mem, dllName, unique, nextID)
 		result = append(result, synth)
 		nextID += uint32(len(unique))
-		fmt.Fprintf(os.Stderr, "[pe] auto-synth %s: %d stubs (id base 0x%X)\n",
+		ravelog.Logf("[pe] auto-synth %s: %d stubs (id base 0x%X)\n",
 			dllName, len(unique), nextID-uint32(len(unique)))
 	}
 	return result
@@ -7733,6 +7949,62 @@ func patchCRTDataExports(mem *mmu.MMU, mainMod *loader.PEModule, argv []string) 
 	}
 }
 
+// patchUnresolvedOrdinals finds imports that are still pointing at the
+// unresolved-sentinel address and replaces each IAT slot with a tiny vmcall
+// trampoline that logs the call and returns 0.  This covers ordinal-only
+// imports (e.g. COMCTL32 FlatSB ordinals) that no synthetic DLL exposes.
+func patchUnresolvedOrdinals(mem *mmu.MMU, d *ntapi.Dispatcher, mainMod *loader.PEModule) {
+	const unresolvedSentinel = 0xDEAD_DEAD_0001_0000
+	// ID range reserved for ordinal stubs - well above auto-synth (0x2000+)
+	const ordinalIDBase = uint32(0xF000)
+	const stubBytes = 9 // B8 xx xx xx xx | 0F 01 C1 | C3
+
+	// Collect unresolved entries
+	var unresolved []loader.PEImportEntry
+	for _, imp := range mainMod.Imports {
+		if !mainMod.Is64 {
+			continue
+		}
+		v, _ := mem.Read64(imp.IATSlot)
+		if v == unresolvedSentinel {
+			unresolved = append(unresolved, imp)
+		}
+	}
+	if len(unresolved) == 0 {
+		return
+	}
+
+	// Allocate one page for all stubs
+	trampolinePage := mem.Mmap(0, uint64(len(unresolved))*stubBytes+64, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+
+	for i, imp := range unresolved {
+		id := ordinalIDBase + uint32(i)
+		stubAddr := trampolinePage + uint64(i)*stubBytes
+
+		// mov eax, id  (B8 id_lo id_hi 00 00)
+		mem.Write8(stubAddr+0, 0xB8)
+		mem.Write32(stubAddr+1, id)
+		// vmcall  (0F 01 C1)
+		mem.Write8(stubAddr+5, 0x0F)
+		mem.Write8(stubAddr+6, 0x01)
+		mem.Write8(stubAddr+7, 0xC1)
+		// ret  (C3)
+		mem.Write8(stubAddr+8, 0xC3)
+
+		// Capture for closure
+		capturedImp := imp
+		d.RegisterHandler(id, fmt.Sprintf("%s!ord%d", capturedImp.DLLName, capturedImp.Ordinal),
+			func(ctx *ntapi.TrapContext) uint32 {
+				ravelog.Logf("[ordinal] %s!ord%d → 0\n", capturedImp.DLLName, capturedImp.Ordinal)
+				return 0
+			})
+
+		mem.Write64Raw(imp.IATSlot, stubAddr)
+		ravelog.Logf("[ordinal] patched %s!ord%d IAT=0x%x → stub=0x%x\n",
+			imp.DLLName, imp.Ordinal, imp.IATSlot, stubAddr)
+	}
+}
+
 // loadBYODLLs loads real Windows DLLs from the sysroot directory.
 // Returns updated module info, loaded modules map, and DLL load order (for DllMain).
 // Uses two-pass loading: first map all DLLs into memory, then resolve imports.
@@ -7789,7 +8061,7 @@ fmt.Fprintf(os.Stderr, "govm: warning: failed to load %s: %v\n", dllName, err)
 continue
 }
 
-fmt.Fprintf(os.Stderr, "[pe] BYODLL %s: base=0x%x size=0x%x entry=0x%x\n", mod.Name, mod.BaseAddr, mod.ImageSize, mod.EntryPoint)
+ravelog.Logf("[pe] BYODLL %s: base=0x%x size=0x%x entry=0x%x\n", mod.Name, mod.BaseAddr, mod.ImageSize, mod.EntryPoint)
 loaded[strings.ToLower(mod.Name)] = mod
 loadOrder = append(loadOrder, mod)
 modules = append(modules, ntapi.ModuleInfo{

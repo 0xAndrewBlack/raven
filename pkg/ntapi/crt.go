@@ -1,6 +1,6 @@
 package ntapi
 
-import "github.com/mirkobrombin/go-vm/pkg/mmu"
+import "github.com/mirkobrombin/Raven/pkg/mmu"
 
 // PatchCRTFunctions replaces synthetic ntdll CRT stubs with real x64 machine
 // code so they execute natively in the emulator instead of trapping.

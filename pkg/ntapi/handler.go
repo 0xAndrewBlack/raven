@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 // NTSTATUS codes.
@@ -773,7 +775,7 @@ func handleNtAllocateVirtualMemory(ctx *TrapContext) uint32 {
 	perms := mmu.PermRead | mmu.PermWrite
 	addr := ctx.Mem.Mmap(baseAddr, size, perms)
 	if addr < 0x1000 {
-		fmt.Fprintf(os.Stderr, "[WARN] NtAllocateVirtualMemory mapped addr=0x%x size=0x%x baseAddr=0x%x\n", addr, size, baseAddr)
+		ravelog.Logf("[WARN] NtAllocateVirtualMemory mapped addr=0x%x size=0x%x baseAddr=0x%x\n", addr, size, baseAddr)
 	}
 
 	ctx.Mem.Write64(basePtr, addr)
@@ -2602,7 +2604,7 @@ func handleNtGetNlsSectionPtr(ctx *TrapContext) uint32 {
 	ptrOut := ctx.Arg(3)
 	sizeOut := ctx.Arg(4)
 
-	fmt.Fprintf(os.Stderr, "[ntapi] NtGetNlsSectionPtr type=%d id=%d ptrOut=0x%x sizeOut=0x%x\n",
+	ravelog.Logf("[ntapi] NtGetNlsSectionPtr type=%d id=%d ptrOut=0x%x sizeOut=0x%x\n",
 		nlsType, nlsID, ptrOut, sizeOut)
 
 	if ctx.Disp == nil || ctx.Disp.sysRoot == "" {
@@ -2635,7 +2637,7 @@ func handleNtGetNlsSectionPtr(ctx *TrapContext) uint32 {
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ntapi] NtGetNlsSectionPtr: failed to load NLS type=%d id=%d: %v\n", nlsType, nlsID, err)
+		ravelog.Logf("[ntapi] NtGetNlsSectionPtr: failed to load NLS type=%d id=%d: %v\n", nlsType, nlsID, err)
 		return StatusNotImplemented
 	}
 
@@ -2655,7 +2657,7 @@ func handleNtGetNlsSectionPtr(ctx *TrapContext) uint32 {
 		ctx.Mem.Write64(sizeOut, size)
 	}
 
-	fmt.Fprintf(os.Stderr, "[ntapi] NtGetNlsSectionPtr: mapped type=%d id=%d at 0x%x size=0x%x\n", nlsType, nlsID, dataAddr, size)
+	ravelog.Logf("[ntapi] NtGetNlsSectionPtr: mapped type=%d id=%d at 0x%x size=0x%x\n", nlsType, nlsID, dataAddr, size)
 	return StatusSuccess
 }
 
@@ -2691,7 +2693,7 @@ func handleRtlGetLocaleFileMappingAddress(ctx *TrapContext) uint32 {
 	dataAddr := base + uint64(pad)
 	ctx.Mem.WriteBytes(dataAddr, data)
 
-	fmt.Fprintf(os.Stderr, "[ntapi] RtlGetLocaleFileMappingAddress: mapped locale.nls at 0x%x size=0x%x\n", dataAddr, len(data))
+	ravelog.Logf("[ntapi] RtlGetLocaleFileMappingAddress: mapped locale.nls at 0x%x size=0x%x\n", dataAddr, len(data))
 
 	if baseAddrPtr != 0 {
 		ctx.Mem.Write64(baseAddrPtr, dataAddr)

@@ -15,11 +15,13 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/mirkobrombin/go-vm/pkg/arch"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
-	"github.com/mirkobrombin/go-vm/pkg/signal"
-	"github.com/mirkobrombin/go-vm/pkg/thread"
-	"github.com/mirkobrombin/go-vm/pkg/vfs"
+	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/signal"
+	"github.com/mirkobrombin/Raven/pkg/thread"
+	"github.com/mirkobrombin/Raven/pkg/vfs"
+
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 // Linux RISC-V syscall numbers (from asm-generic/unistd.h)
@@ -218,11 +220,11 @@ func (h *Handler) Handle(c arch.CPU) {
 	a0, a1, a2, a3, a4, a5 := args[0], args[1], args[2], args[3], args[4], args[5]
 
 	if h.debugX11 {
-		fmt.Fprintf(os.Stderr, "[x11-trace] syscall %d (a0=0x%x a1=0x%x a2=0x%x)\n", num, a0, a1, a2)
+		ravelog.Logf("[x11-trace] syscall %d (a0=0x%x a1=0x%x a2=0x%x)\n", num, a0, a1, a2)
 	}
 
 	if h.Trace {
-		fmt.Fprintf(os.Stderr, "[trace] syscall %d (a0=0x%x a1=0x%x a2=0x%x a3=0x%x) instret=%d\n", num, a0, a1, a2, a3, c.GetInstret())
+		ravelog.Logf("[trace] syscall %d (a0=0x%x a1=0x%x a2=0x%x a3=0x%x) instret=%d\n", num, a0, a1, a2, a3, c.GetInstret())
 	}
 
 	// DEBUG: heap integrity check before/after each syscall
@@ -230,17 +232,17 @@ func (h *Handler) Handle(c arch.CPU) {
 	if h.Trace {
 		heapSigBefore = h.heapSignature()
 		if heapSigBefore != 0 {
-			fmt.Fprintf(os.Stderr, "[heap-sig] before syscall %d: 0x%x\n", num, heapSigBefore)
+			ravelog.Logf("[heap-sig] before syscall %d: 0x%x\n", num, heapSigBefore)
 		}
 	}
 	defer func() {
 		if h.Trace {
 			after := h.heapSignature()
 			if after != 0 {
-				fmt.Fprintf(os.Stderr, "[heap-sig] after syscall %d: 0x%x\n", num, after)
+				ravelog.Logf("[heap-sig] after syscall %d: 0x%x\n", num, after)
 			}
 			if heapSigBefore != 0 && after != 0 && heapSigBefore != after {
-				fmt.Fprintf(os.Stderr, "[HEAP-CORRUPT] syscall %d (a0=0x%x a1=0x%x a2=0x%x) changed heap sig 0x%x→0x%x instret=%d\n",
+				ravelog.Logf("[HEAP-CORRUPT] syscall %d (a0=0x%x a1=0x%x a2=0x%x) changed heap sig 0x%x→0x%x instret=%d\n",
 					num, a0, a1, a2, heapSigBefore, after, c.GetInstret())
 			}
 		}
@@ -270,12 +272,12 @@ func (h *Handler) Handle(c arch.CPU) {
 	case SysBrk:
 		result := h.Mem.Brk(a0)
 		if h.Trace {
-			fmt.Fprintf(os.Stderr, "[brk] req=0x%x → 0x%x\n", a0, result)
+			ravelog.Logf("[brk] req=0x%x → 0x%x\n", a0, result)
 			if a0 != 0 && result == a0 {
 				// Dump first 128 bytes of the heap region
 				heapBase := h.Mem.GetBrkBase()
 				if data, err := h.Mem.ReadBytes(heapBase, 128); err == nil {
-					fmt.Fprintf(os.Stderr, "[brk] heap@0x%x: %x\n", heapBase, data)
+					ravelog.Logf("[brk] heap@0x%x: %x\n", heapBase, data)
 				}
 			}
 		}
@@ -601,7 +603,7 @@ func (h *Handler) Handle(c arch.CPU) {
 		c.SetSyscallReturn(0)
 
 	default:
-		fmt.Fprintf(os.Stderr, "[govm] unhandled syscall %d (a0=0x%x a1=0x%x a2=0x%x)\n", num, a0, a1, a2)
+		ravelog.Logf("[govm] unhandled syscall %d (a0=0x%x a1=0x%x a2=0x%x)\n", num, a0, a1, a2)
 		c.SetSyscallReturn(negErrno(ENOSYS))
 	}
 }
@@ -630,7 +632,7 @@ func (h *Handler) sysExecve(c arch.CPU, pathPtr, argvPtr, envpPtr uint64) {
 	// Build envp
 	envp := h.readGuestStringArray(envpPtr)
 
-	fmt.Fprintf(os.Stderr, "[govm] execve(%q, %v)\n", path, argv)
+	ravelog.Logf("[govm] execve(%q, %v)\n", path, argv)
 
 	h.vforkMu.Lock()
 	pending := h.vforkPending
@@ -643,7 +645,7 @@ func (h *Handler) sysExecve(c arch.CPU, pathPtr, argvPtr, envpPtr uint64) {
 
 	if !pending {
 		// Not inside a vfork child - can't replace main guest image.
-		fmt.Fprintf(os.Stderr, "[govm] execve outside vfork → ENOSYS\n")
+		ravelog.Logf("[govm] execve outside vfork → ENOSYS\n")
 		c.SetSyscallReturn(negErrno(ENOSYS))
 		return
 	}
@@ -678,7 +680,7 @@ func (h *Handler) sysExecve(c arch.CPU, pathPtr, argvPtr, envpPtr uint64) {
 	cmd.Stdout = stdoutF
 	cmd.Stderr = stderrF
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "[govm] execve host start error: %v\n", err)
+		ravelog.Logf("[govm] execve host start error: %v\n", err)
 		ch <- -1
 		c.Stop()
 		return
@@ -710,7 +712,7 @@ func (h *Handler) sysExecve(c arch.CPU, pathPtr, argvPtr, envpPtr uint64) {
 	h.childProcs[gpid] = cmd.Process
 	h.childMu.Unlock()
 
-	fmt.Fprintf(os.Stderr, "[govm] execve launched pid=%d (guest=%d)\n", cmd.Process.Pid, gpid)
+	ravelog.Logf("[govm] execve launched pid=%d (guest=%d)\n", cmd.Process.Pid, gpid)
 	ch <- gpid
 	// Stop this child CPU - it has been replaced by the host process.
 	c.Stop()
@@ -722,7 +724,7 @@ func (h *Handler) sysWait4(c arch.CPU, gpidArg, wstatusPtr, options, rusagePtr u
 	h.childMu.Lock()
 	if len(h.childProcs) == 0 {
 		h.childMu.Unlock()
-		fmt.Fprintf(os.Stderr, "[govm] wait4(pid=%d) → ECHILD (no children)\n", gpid)
+		ravelog.Logf("[govm] wait4(pid=%d) → ECHILD (no children)\n", gpid)
 		c.SetSyscallReturn(negErrno(ECHILD))
 		return
 	}
@@ -738,14 +740,14 @@ func (h *Handler) sysWait4(c arch.CPU, gpidArg, wstatusPtr, options, rusagePtr u
 	}
 	if proc == nil {
 		h.childMu.Unlock()
-		fmt.Fprintf(os.Stderr, "[govm] wait4(pid=%d) → ECHILD (not found)\n", gpid)
+		ravelog.Logf("[govm] wait4(pid=%d) → ECHILD (not found)\n", gpid)
 		c.SetSyscallReturn(negErrno(ECHILD))
 		return
 	}
 	h.childMu.Unlock()
 
 	const WNOHANG = 1
-	fmt.Fprintf(os.Stderr, "[govm] wait4(guest=%d host=%d options=0x%x)\n", gpid, proc.Pid, options)
+	ravelog.Logf("[govm] wait4(guest=%d host=%d options=0x%x)\n", gpid, proc.Pid, options)
 
 	if options&WNOHANG != 0 {
 		// Non-blocking: use unix.Wait4 with WNOHANG.
@@ -763,7 +765,7 @@ func (h *Handler) sysWait4(c arch.CPU, gpidArg, wstatusPtr, options, rusagePtr u
 		if wstatusPtr != 0 {
 			h.Mem.Write32(wstatusPtr, ws)
 		}
-		fmt.Fprintf(os.Stderr, "[govm] wait4 WNOHANG → pid=%d wstatus=0x%x\n", foundPID, ws)
+		ravelog.Logf("[govm] wait4 WNOHANG → pid=%d wstatus=0x%x\n", foundPID, ws)
 		c.SetSyscallReturn(uint64(foundPID))
 		return
 	}
@@ -775,7 +777,7 @@ func (h *Handler) sysWait4(c arch.CPU, gpidArg, wstatusPtr, options, rusagePtr u
 	delete(h.childProcs, foundPID)
 	h.childMu.Unlock()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[govm] wait4 error: %v\n", err)
+		ravelog.Logf("[govm] wait4 error: %v\n", err)
 		c.SetSyscallReturn(negErrno(ECHILD))
 		return
 	}
@@ -783,7 +785,7 @@ func (h *Handler) sysWait4(c arch.CPU, gpidArg, wstatusPtr, options, rusagePtr u
 	if wstatusPtr != 0 {
 		h.Mem.Write32(wstatusPtr, ws)
 	}
-	fmt.Fprintf(os.Stderr, "[govm] wait4 → pid=%d wstatus=0x%x exitCode=%d\n", foundPID, ws, wstatus.ExitStatus())
+	ravelog.Logf("[govm] wait4 → pid=%d wstatus=0x%x exitCode=%d\n", foundPID, ws, wstatus.ExitStatus())
 	c.SetSyscallReturn(uint64(foundPID))
 }
 
@@ -942,13 +944,13 @@ func (h *Handler) sysOpenat(c arch.CPU, dirfd, pathAddr, flags, mode uint64) {
 	fd, err := h.FS.OpenAt(int(int32(dirfd)), path, int(flags), uint32(mode))
 	if err != nil {
 		if h.Trace {
-			fmt.Fprintf(os.Stderr, "[govm] openat(%q) → ENOENT\n", path)
+			ravelog.Logf("[govm] openat(%q) → ENOENT\n", path)
 		}
 		c.SetSyscallReturn(negErrno(ENOENT))
 		return
 	}
 	if h.Trace {
-		fmt.Fprintf(os.Stderr, "[govm] openat(%q) → fd=%d\n", path, fd)
+		ravelog.Logf("[govm] openat(%q) → fd=%d\n", path, fd)
 	}
 	c.SetSyscallReturn(uint64(fd))
 }
@@ -972,7 +974,7 @@ func (h *Handler) sysMprotect(c arch.CPU, addr, length, prot uint64) {
 	for pg := addr; pg < addr+length; pg += mmu.PageSize {
 		if !h.Mem.IsMapped(pg) {
 			if h.Trace {
-				fmt.Fprintf(os.Stderr, "[mprotect] ENOMEM: addr=0x%x len=0x%x prot=%d unmapped_page=0x%x\n", addr, length, prot, pg)
+				ravelog.Logf("[mprotect] ENOMEM: addr=0x%x len=0x%x prot=%d unmapped_page=0x%x\n", addr, length, prot, pg)
 			}
 			c.SetSyscallReturn(negErrno(ENOMEM))
 			return
@@ -981,11 +983,11 @@ func (h *Handler) sysMprotect(c arch.CPU, addr, length, prot uint64) {
 
 	// Change permissions
 	if h.Trace {
-		fmt.Fprintf(os.Stderr, "[mprotect] OK: addr=0x%x len=0x%x end=0x%x prot=%d perms=0x%x pages=%d\n", addr, length, addr+length, prot, perms, length/mmu.PageSize)
+		ravelog.Logf("[mprotect] OK: addr=0x%x len=0x%x end=0x%x prot=%d perms=0x%x pages=%d\n", addr, length, addr+length, prot, perms, length/mmu.PageSize)
 		brkBase := h.Mem.GetBrkBase()
 		brkCur := h.Mem.Brk(0)
 		if brkBase != 0 && addr+length > brkBase {
-			fmt.Fprintf(os.Stderr, "[mprotect] WARNING: overlaps heap! heap=0x%x-0x%x mprotect=0x%x-0x%x prot=%d\n",
+			ravelog.Logf("[mprotect] WARNING: overlaps heap! heap=0x%x-0x%x mprotect=0x%x-0x%x prot=%d\n",
 				brkBase, brkCur, addr, addr+length, prot)
 		}
 	}
@@ -998,7 +1000,7 @@ func (h *Handler) sysMprotect(c arch.CPU, addr, length, prot uint64) {
 
 func (h *Handler) sysIoctl(c arch.CPU, fd, cmd uint64) {
 	if h.Trace {
-		fmt.Fprintf(os.Stderr, "[govm] ioctl(fd=%d, cmd=0x%x)\n", fd, cmd)
+		ravelog.Logf("[govm] ioctl(fd=%d, cmd=0x%x)\n", fd, cmd)
 	}
 	const FIONREAD = 0x541B
 	const FIONBIO = 0x5421
@@ -1020,7 +1022,7 @@ func (h *Handler) sysIoctl(c arch.CPU, fd, cmd uint64) {
 			if err == nil {
 				h.Mem.Write32(arg, uint32(avail))
 				if h.Trace {
-					fmt.Fprintf(os.Stderr, "[govm] ioctl FIONREAD fd=%d→hfd=%d avail=%d\n", fd, hostFD, avail)
+					ravelog.Logf("[govm] ioctl FIONREAD fd=%d→hfd=%d avail=%d\n", fd, hostFD, avail)
 				}
 				c.SetSyscallReturn(0)
 				return
@@ -1072,7 +1074,7 @@ func (h *Handler) dumpGuestEnviron() {
 	// to find the argc, but that's complex. Instead, just dump the strings
 	// in strArea directly.
 	if data, err := h.Mem.ReadBytes(strArea, 512); err == nil {
-		fmt.Fprintf(os.Stderr, "[ENVIRON DUMP] strArea=0x%x:\n", strArea)
+		ravelog.Logf("[ENVIRON DUMP] strArea=0x%x:\n", strArea)
 		// Print as individual nul-terminated strings
 		start := 0
 		for i, b := range data {
@@ -1229,7 +1231,7 @@ func (h *Handler) sysPipe2(c arch.CPU, pipefdAddr, flags uint64) {
 	h.Mem.Write32(pipefdAddr, uint32(rfd))
 	h.Mem.Write32(pipefdAddr+4, uint32(wfd))
 	if h.Trace {
-		fmt.Fprintf(os.Stderr, "[govm] pipe2 → rfd=%d wfd=%d\n", rfd, wfd)
+		ravelog.Logf("[govm] pipe2 → rfd=%d wfd=%d\n", rfd, wfd)
 	}
 	c.SetSyscallReturn(0)
 }
@@ -1295,7 +1297,7 @@ func (h *Handler) sysReadlinkat(c arch.CPU, dirfd, pathAddr, buf, bufsiz uint64)
 		data = data[:bufsiz]
 	}
 	if h.Trace {
-		fmt.Fprintf(os.Stderr, "[govm] readlinkat(%q) → %q (len=%d)\n", path, data, len(data))
+		ravelog.Logf("[govm] readlinkat(%q) → %q (len=%d)\n", path, data, len(data))
 	}
 	h.Mem.WriteBytes(buf, data)
 	c.SetSyscallReturn(uint64(len(data)))
@@ -1310,7 +1312,7 @@ func (h *Handler) sysFaccessat(c arch.CPU, dirfd, pathAddr uint64) {
 	_, err = h.FS.StatPath(int(int32(dirfd)), path)
 	if strings.Contains(path, "Xauth") || strings.Contains(path, "xauth") || strings.Contains(path, ".X") || strings.Contains(path, "mutter") {
 		if h.Trace {
-			fmt.Fprintf(os.Stderr, "[govm] access(%q) → err=%v\n", path, err)
+			ravelog.Logf("[govm] access(%q) → err=%v\n", path, err)
 		}
 	}
 	if err != nil {
@@ -1956,7 +1958,7 @@ func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint
 			childCPU.SetSyscallHandler(h.Handle)
 			go func() {
 				if err2 := childCPU.Run(); err2 != nil {
-					fmt.Fprintf(os.Stderr, "[govm] vfork-child exited: %v\n", err2)
+					ravelog.Logf("[govm] vfork-child exited: %v\n", err2)
 				}
 				// If child exited without execve, restore FD table and unblock parent.
 				h.vforkMu.Lock()
@@ -1973,7 +1975,7 @@ func (h *Handler) sysClone(c arch.CPU, flags, childStack, parentTid, a3, a4 uint
 			guestPID := <-ch
 			c.SetSyscallReturn(uint64(guestPID))
 		} else {
-			fmt.Fprintf(os.Stderr, "[govm] clone fork-like flags=0x%x → ENOSYS\n", flags)
+			ravelog.Logf("[govm] clone fork-like flags=0x%x → ENOSYS\n", flags)
 			c.SetSyscallReturn(negErrno(ENOSYS))
 		}
 	}
@@ -2057,7 +2059,7 @@ func (h *Handler) sysClone3(c arch.CPU, uargsPtr, size uint64) {
 			}
 			go func() {
 				if err2 := childCPU.Run(); err2 != nil {
-					fmt.Fprintf(os.Stderr, "[govm] vfork-child exited: %v\n", err2)
+					ravelog.Logf("[govm] vfork-child exited: %v\n", err2)
 				}
 				h.vforkMu.Lock()
 				pending := h.vforkPending
@@ -2075,7 +2077,7 @@ func (h *Handler) sysClone3(c arch.CPU, uargsPtr, size uint64) {
 			}
 			c.SetSyscallReturn(uint64(guestPID))
 		} else {
-			fmt.Fprintf(os.Stderr, "[govm] clone3 fork-like flags=0x%x → ENOSYS\n", flags)
+			ravelog.Logf("[govm] clone3 fork-like flags=0x%x → ENOSYS\n", flags)
 			c.SetSyscallReturn(negErrno(ENOSYS))
 		}
 	}
@@ -2102,7 +2104,7 @@ func (h *Handler) sysWritev(c arch.CPU, fdNum, iovAddr, iovcnt uint64) {
 		if heapBase != 0 {
 			// Dump first 2048 bytes for better visibility
 			if data, err := h.Mem.ReadBytes(heapBase, 2048); err == nil {
-				fmt.Fprintf(os.Stderr, "[heap-dump] base=0x%x\n", heapBase)
+				ravelog.Logf("[heap-dump] base=0x%x\n", heapBase)
 				// Print as 8-byte words for easier reading
 				for off := 0; off+8 <= len(data); off += 8 {
 					val := binary.LittleEndian.Uint64(data[off:])
@@ -2136,7 +2138,7 @@ func (h *Handler) sysWritev(c arch.CPU, fdNum, iovAddr, iovcnt uint64) {
 				if len(disp) > 24 {
 					disp = disp[:24]
 				}
-				fmt.Fprintf(os.Stderr, "[govm] writev(fd=%d→hfd=%d, buf=%d, base=0x%x): %02x\n", fdNum, hfd, length, base, disp)
+				ravelog.Logf("[govm] writev(fd=%d→hfd=%d, buf=%d, base=0x%x): %02x\n", fdNum, hfd, length, base, disp)
 			}
 		}
 		n, err := h.FS.Write(int(fdNum), data)
@@ -2154,14 +2156,14 @@ func (h *Handler) sysRead(c arch.CPU, fdNum, bufAddr, count uint64) {
 	n, err := h.FS.Read(int(fdNum), buf)
 	if err != nil && err != io.EOF {
 		hfd := h.FS.GetHostFDNum(int(fdNum))
-		fmt.Fprintf(os.Stderr, "[govm] read(fd=%d→hfd=%d) err=%v\n", fdNum, hfd, err)
+		ravelog.Logf("[govm] read(fd=%d→hfd=%d) err=%v\n", fdNum, hfd, err)
 		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
 	}
 	if n > 0 {
 		if h.Trace {
 			if hfd := h.FS.GetHostFDNum(int(fdNum)); hfd >= 0 {
-				fmt.Fprintf(os.Stderr, "[govm] read(fd=%d→hfd=%d, n=%d): %02x\n", fdNum, hfd, n, buf[:min(8, n)])
+				ravelog.Logf("[govm] read(fd=%d→hfd=%d, n=%d): %02x\n", fdNum, hfd, n, buf[:min(8, n)])
 			}
 		}
 		if err := h.Mem.WriteBytes(bufAddr, buf[:n]); err != nil {
@@ -2271,7 +2273,7 @@ const (
 func (h *Handler) sysSocket(c arch.CPU, domain, sockType, protocol uint64) {
 	stype := int(sockType & 0xff) // strip SOCK_CLOEXEC/SOCK_NONBLOCK
 	if h.Trace {
-		fmt.Fprintf(os.Stderr, "[govm] socket(domain=%d, type=%d)\n", domain, stype)
+		ravelog.Logf("[govm] socket(domain=%d, type=%d)\n", domain, stype)
 	}
 
 	if domain == vfs.AF_UNIX {
@@ -2313,7 +2315,7 @@ func (h *Handler) sysConnect(c arch.CPU, fd, addrPtr, addrLen uint64) {
 		}
 		err := syscall.Connect(hostFD, sa)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[govm] connect ERROR: %v\n", err)
+			ravelog.Logf("[govm] connect ERROR: %v\n", err)
 			c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 			return
 		}
@@ -2469,14 +2471,14 @@ func (h *Handler) sysRecvfrom(c arch.CPU, fd, bufAddr, bufLen, flags, srcAddr, s
 		n, err := syscall.Read(hostFD, buf)
 		if err != nil {
 			if h.Trace {
-				fmt.Fprintf(os.Stderr, "[govm] recvfrom(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, bufLen, err)
+				ravelog.Logf("[govm] recvfrom(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, bufLen, err)
 			}
 			c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 			return
 		}
 		if n > 0 {
 			if h.Trace {
-				fmt.Fprintf(os.Stderr, "[govm] recvfrom(fd=%d→hfd=%d, n=%d): %02x\n", fd, hostFD, n, buf[:min(64, n)])
+				ravelog.Logf("[govm] recvfrom(fd=%d→hfd=%d, n=%d): %02x\n", fd, hostFD, n, buf[:min(64, n)])
 			}
 			h.Mem.WriteBytes(bufAddr, buf[:n])
 		}
@@ -2816,11 +2818,11 @@ func (h *Handler) sysSendmsg(c arch.CPU, fd, msgPtr, flags uint64) {
 
 	err := syscall.Sendmsg(hostFD, payload, oob, nil, int(flags))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[govm] sendmsg(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, len(payload), err)
+		ravelog.Logf("[govm] sendmsg(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, len(payload), err)
 		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[govm] sendmsg(fd=%d→hfd=%d, len=%d): %02x\n", fd, hostFD, len(payload), payload[:min(8, len(payload))])
+	ravelog.Logf("[govm] sendmsg(fd=%d→hfd=%d, len=%d): %02x\n", fd, hostFD, len(payload), payload[:min(8, len(payload))])
 	c.SetSyscallReturn(uint64(len(payload)))
 }
 
@@ -2867,7 +2869,7 @@ func (h *Handler) sysRecvmsg(c arch.CPU, fd, msgPtr, flags uint64) {
 	n, oobn, _, _, err := syscall.Recvmsg(hostFD, buf, oob, int(flags))
 	if err != nil {
 		if h.debugX11 {
-			fmt.Fprintf(os.Stderr, "[govm] recvmsg(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, totalCap, err)
+			ravelog.Logf("[govm] recvmsg(fd=%d→hfd=%d, len=%d) err=%v\n", fd, hostFD, totalCap, err)
 		}
 		c.SetSyscallReturn(negErrno(errnoFromErr(err)))
 		return
@@ -2877,9 +2879,9 @@ func (h *Handler) sysRecvmsg(c arch.CPU, fd, msgPtr, flags uint64) {
 		if len(disp) > 64 {
 			disp = disp[:64]
 		}
-		fmt.Fprintf(os.Stderr, "[govm] recvmsg(fd=%d→hfd=%d, n=%d, iovs=%d): %x\n", fd, hostFD, n, iovLen, disp)
+		ravelog.Logf("[govm] recvmsg(fd=%d→hfd=%d, n=%d, iovs=%d): %x\n", fd, hostFD, n, iovLen, disp)
 		for i, iov := range iovEntries {
-			fmt.Fprintf(os.Stderr, "[govm]   iov[%d]: base=0x%x len=%d\n", i, iov.base, iov.blen)
+			ravelog.Logf("[govm]   iov[%d]: base=0x%x len=%d\n", i, iov.base, iov.blen)
 		}
 	}
 
@@ -2894,7 +2896,7 @@ func (h *Handler) sysRecvmsg(c arch.CPU, fd, msgPtr, flags uint64) {
 			chunk = int(iov.blen)
 		}
 		if h.debugX11 {
-			fmt.Fprintf(os.Stderr, "[govm]   scatter %d bytes at 0x%x: %x\n", chunk, iov.base, buf[off:off+chunk])
+			ravelog.Logf("[govm]   scatter %d bytes at 0x%x: %x\n", chunk, iov.base, buf[off:off+chunk])
 		}
 		h.Mem.WriteBytes(iov.base, buf[off:off+chunk])
 		off += chunk
@@ -3268,7 +3270,7 @@ func (h *Handler) sysMmap(c arch.CPU) {
 	origAddr := addr
 	logMmap := func(result uint64) {
 		if h.Trace {
-			fmt.Fprintf(os.Stderr, "[mmap] req=0x%x len=0x%x prot=%d flags=0x%x fd=%d off=0x%x → 0x%x\n",
+			ravelog.Logf("[mmap] req=0x%x len=0x%x prot=%d flags=0x%x fd=%d off=0x%x → 0x%x\n",
 				origAddr, length, prot, flags, int64(fd), offset, result)
 		}
 	}

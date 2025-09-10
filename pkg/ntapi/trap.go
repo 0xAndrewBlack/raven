@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mirkobrombin/go-vm/pkg/arch"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
-	"github.com/mirkobrombin/go-vm/pkg/vfs"
+	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/vfs"
+
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 // TrapHandler is a function that handles a single NT syscall.
@@ -283,7 +285,7 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		if name == "" {
 			name = fmt.Sprintf("unknown_0x%04X", syscallID)
 		}
-		fmt.Fprintf(os.Stderr, "[ntapi] UNIMPLEMENTED: %s (id=0x%04X)\n", name, syscallID)
+		ravelog.Logf("[ntapi] UNIMPLEMENTED: %s (id=0x%04X)\n", name, syscallID)
 		// For auto-synth user-mode DLL stubs, return 0 (NULL/FALSE).
 		// For NT syscalls, return STATUS_NOT_IMPLEMENTED.
 		if syscallID >= AutoSynthIDBase {
@@ -299,7 +301,7 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		sp := cpu.GetSP()
 		if name != "__wine_dbg_header" || sp < 0x7C000000 {
 			retAddr, _ := d.ctx.Mem.Read64(sp)
-			fmt.Fprintf(os.Stderr, "[trace] → %s (id=0x%04X) sp=0x%x ret=0x%x\n", name, syscallID, sp, retAddr)
+			ravelog.Logf("[trace] → %s (id=0x%04X) sp=0x%x ret=0x%x\n", name, syscallID, sp, retAddr)
 		}
 	}
 

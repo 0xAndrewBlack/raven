@@ -1,8 +1,8 @@
 package win32k
 
 import (
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
-	"github.com/mirkobrombin/go-vm/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
 // GDISubsystem handles GDI rendering operations using MMU-backed pixel buffers.

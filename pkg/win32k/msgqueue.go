@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // MessageQueue translates host input events into Windows messages.

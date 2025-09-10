@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/mirkobrombin/go-vm/pkg/loader"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/loader"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // PE section characteristics (duplicated from loader for use in synth PE gen).

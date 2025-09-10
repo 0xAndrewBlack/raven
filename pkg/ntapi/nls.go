@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // buildNlsCodePageData generates a minimal NLS code page table in the Windows

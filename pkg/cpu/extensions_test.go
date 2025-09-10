@@ -3,7 +3,7 @@ package cpu
 import (
 	"testing"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 func TestCompressed_CADDI(t *testing.T) {

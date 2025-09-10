@@ -6,8 +6,10 @@ import (
 "math/bits"
 "os"
 
-"github.com/mirkobrombin/go-vm/pkg/arch"
-"github.com/mirkobrombin/go-vm/pkg/mmu"
+"github.com/mirkobrombin/Raven/pkg/arch"
+"github.com/mirkobrombin/Raven/pkg/mmu"
+
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 // Register indices (matching AMD64 encoding).
@@ -139,7 +141,7 @@ for c.running {
 				if _, verr := c.mem.Read8(retAddr); verr == nil {
 					recoverCount++
 					if recoverCount <= 20 {
-						fmt.Fprintf(os.Stderr, "[cpu-recover] #%d call to unmapped 0x%x, returning to 0x%x RBX=0x%x RSP=0x%x\n", recoverCount, c.RIP, retAddr, c.Regs[RBX], c.GetSP())
+						ravelog.Logf("[cpu-recover] #%d call to unmapped 0x%x, returning to 0x%x RBX=0x%x RSP=0x%x\n", recoverCount, c.RIP, retAddr, c.Regs[RBX], c.GetSP())
 						if recoverCount == 1 {
 							// Print full register state and stack
 							fmt.Fprintf(os.Stderr, "  RAX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
@@ -175,7 +177,7 @@ for c.running {
 						for bi := 0; bi < 6; bi++ {
 							callBytes[bi], _ = c.mem.Read8(retAddr - 6 + uint64(bi))
 						}
-						fmt.Fprintf(os.Stderr, "[cpu-recover] #%d fetch fault at 0x%x, returning to 0x%x RBX=0x%x callsite=[%02x %02x %02x %02x %02x %02x]\n",
+						ravelog.Logf("[cpu-recover] #%d fetch fault at 0x%x, returning to 0x%x RBX=0x%x callsite=[%02x %02x %02x %02x %02x %02x]\n",
 							recoverCount, c.RIP, retAddr, c.Regs[RBX],
 							callBytes[0], callBytes[1], callBytes[2], callBytes[3], callBytes[4], callBytes[5])
 					}
@@ -188,16 +190,16 @@ for c.running {
 				}
 			}
 		}
-		fmt.Fprintf(os.Stderr, "[crash-regs] RIP=0x%x TLS=0x%x err=%v\n", c.RIP, c.GetTLS(), err)
-		fmt.Fprintf(os.Stderr, "[crash-regs] RAX=0x%x RBX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
+		ravelog.Logf("[crash-regs] RIP=0x%x TLS=0x%x err=%v\n", c.RIP, c.GetTLS(), err)
+		ravelog.Logf("[crash-regs] RAX=0x%x RBX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
 			c.Regs[RAX], c.Regs[RBX], c.Regs[RCX], c.Regs[RDX], c.Regs[RSI], c.Regs[RDI])
-		fmt.Fprintf(os.Stderr, "[crash-regs] R8=0x%x R9=0x%x R10=0x%x R11=0x%x R12=0x%x R13=0x%x R14=0x%x R15=0x%x RBP=0x%x RSP=0x%x\n",
+		ravelog.Logf("[crash-regs] R8=0x%x R9=0x%x R10=0x%x R11=0x%x R12=0x%x R13=0x%x R14=0x%x R15=0x%x RBP=0x%x RSP=0x%x\n",
 			c.Regs[R8], c.Regs[R9], c.Regs[R10], c.Regs[R11], c.Regs[R12], c.Regs[R13], c.Regs[R14], c.Regs[R15], c.Regs[RBP], c.GetSP())
 		// Print stack
 		sp := c.GetSP()
 		for i := 0; i < 8; i++ {
 			v, _ := c.mem.Read64(sp + uint64(i*8))
-			fmt.Fprintf(os.Stderr, "[crash-regs] [RSP+0x%02x]=0x%x\n", i*8, v)
+			ravelog.Logf("[crash-regs] [RSP+0x%02x]=0x%x\n", i*8, v)
 		}
 		return fmt.Errorf("at RIP=0x%x: %w", c.RIP, err)
 	}
@@ -879,7 +881,7 @@ return err
 }
 target := uint64(int64(c.RIP) + int64(int32(rel)))
 if target == 0x120011 {
-	fmt.Fprintf(os.Stderr, "[DBG] call rel32 to 0x120011 from RIP=0x%x\n", c.RIP)
+	ravelog.Logf("[DBG] call rel32 to 0x120011 from RIP=0x%x\n", c.RIP)
 }
 if err := c.push64(c.RIP); err != nil {
 return err
@@ -2281,6 +2283,14 @@ return err
 src[0], _ = c.mem.Read64(addr)
 src[1], _ = c.mem.Read64(addr + 8)
 }
+// CVTPD2PS (66 0F 5A): two doubles → two singles in low 64 bits
+if op2 == 0x5A {
+f0 := float32(math.Float64frombits(src[0]))
+f1 := float32(math.Float64frombits(src[1]))
+c.xmm[m.reg][0] = uint64(math.Float32bits(f0)) | uint64(math.Float32bits(f1))<<32
+c.xmm[m.reg][1] = 0
+return nil
+}
 d := c.xmm[m.reg]
 for i := 0; i < 2; i++ {
 sv := math.Float64frombits(src[i])
@@ -2310,6 +2320,14 @@ return err
 }
 src[0], _ = c.mem.Read64(addr)
 src[1], _ = c.mem.Read64(addr + 8)
+}
+// CVTPS2PD (NP 0F 5A): two singles from low 64 bits → two doubles
+if op2 == 0x5A {
+f0 := math.Float32frombits(uint32(src[0]))
+f1 := math.Float32frombits(uint32(src[0] >> 32))
+c.xmm[m.reg][0] = math.Float64bits(float64(f0))
+c.xmm[m.reg][1] = math.Float64bits(float64(f1))
+return nil
 }
 d := c.xmm[m.reg]
 for q := 0; q < 2; q++ {
@@ -4277,7 +4295,40 @@ c.xmm[m.reg] = r
 }
 return nil
 
-// --- SSE4.1/4.2 3-byte escape: 0F 38 xx ---
+// --- CVTPD2DQ (F2 0F E6) / CVTTPD2DQ (66 0F E6) ---
+// Convert two packed double-precision FP values to two packed int32 values.
+// Result placed in low 64 bits of dst XMM; high 64 bits zeroed.
+case 0xE6:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.xmm[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+d0 := math.Float64frombits(src[0])
+d1 := math.Float64frombits(src[1])
+var i0, i1 int32
+if pfx.repne { // F2 0F E6: CVTPD2DQ - round to nearest even
+i0 = int32(math.RoundToEven(d0))
+i1 = int32(math.RoundToEven(d1))
+} else { // 66 0F E6: CVTTPD2DQ - truncate toward zero
+i0 = int32(d0)
+i1 = int32(d1)
+}
+var dst [2]uint64
+dst[0] = uint64(uint32(i0)) | uint64(uint32(i1))<<32
+dst[1] = 0
+c.xmm[m.reg] = dst
+return nil
 case 0x38:
 return c.dispatch0F38(pfx, startRIP)
 
@@ -4810,11 +4861,11 @@ return err
 if val == 0x120011 {
 	addr2, _, _ := c.resolveRMAddr(m, pfx)
 	raw, _ := c.mem.Read64(addr2)
-	fmt.Fprintf(os.Stderr, "[DBG] call to 0x120011 from RIP=0x%x addr=0x%x raw_read=0x%x\n",
+	ravelog.Logf("[DBG] call to 0x120011 from RIP=0x%x addr=0x%x raw_read=0x%x\n",
 		c.RIP, addr2, raw)
 }
 if val == 0 {
-	fmt.Fprintf(os.Stderr, "[DBG] call to 0x0 from retAddr=0x%x RSP=0x%x RBX=0x%x RCX=0x%x\n",
+	ravelog.Logf("[DBG] call to 0x0 from retAddr=0x%x RSP=0x%x RBX=0x%x RCX=0x%x\n",
 		c.RIP, c.Regs[RSP], c.Regs[RBX], c.Regs[RCX])
 }
 if err := c.push64(c.RIP); err != nil {
@@ -4830,10 +4881,10 @@ return err
 }
 if val == 0x120011 {
 	addr2, _, _ := c.resolveRMAddr(m, pfx)
-	fmt.Fprintf(os.Stderr, "[DBG] jmp to 0x120011 from RIP=0x%x addr=0x%x\n", c.RIP, addr2)
+	ravelog.Logf("[DBG] jmp to 0x120011 from RIP=0x%x addr=0x%x\n", c.RIP, addr2)
 }
 if val == 0 {
-	fmt.Fprintf(os.Stderr, "[DBG] jmp to 0x0 from retAddr=0x%x RSP=0x%x RBX=0x%x\n",
+	ravelog.Logf("[DBG] jmp to 0x0 from retAddr=0x%x RSP=0x%x RBX=0x%x\n",
 		c.RIP, c.Regs[RSP], c.Regs[RBX])
 }
 c.RIP = val

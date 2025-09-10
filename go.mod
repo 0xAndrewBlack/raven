@@ -1,4 +1,4 @@
-module github.com/mirkobrombin/go-vm
+module github.com/mirkobrombin/Raven
 
 go 1.25.7
 

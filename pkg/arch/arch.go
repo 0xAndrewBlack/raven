@@ -1,6 +1,6 @@
 package arch
 
-import "github.com/mirkobrombin/go-vm/pkg/mmu"
+import "github.com/mirkobrombin/Raven/pkg/mmu"
 
 // Arch identifies the guest architecture.
 type Arch int

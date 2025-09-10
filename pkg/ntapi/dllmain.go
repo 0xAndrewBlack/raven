@@ -3,8 +3,8 @@ package ntapi
 import (
 	"fmt"
 
-	"github.com/mirkobrombin/go-vm/pkg/arch"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // DllMain reason codes.

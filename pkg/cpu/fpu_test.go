@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // encodeR builds an R-type RISC-V instruction.

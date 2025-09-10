@@ -3,7 +3,7 @@ package ntapi
 import (
 	"encoding/binary"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // Windows 10 x64 structure offsets (verified against phnt/Vergilius Project).

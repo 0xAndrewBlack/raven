@@ -3,8 +3,8 @@ package cpu
 import (
 	"testing"
 
-	"github.com/mirkobrombin/go-vm/pkg/arch"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 func TestADDI(t *testing.T) {

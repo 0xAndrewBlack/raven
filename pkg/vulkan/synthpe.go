@@ -1,8 +1,8 @@
 package vulkan
 
 import (
-	"github.com/mirkobrombin/go-vm/pkg/ntapi"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // vulkanExports lists the Vulkan API entry points for the synthetic vulkan-1.dll.

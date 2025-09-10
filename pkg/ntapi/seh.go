@@ -3,10 +3,11 @@ package ntapi
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 	"sort"
 
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 // RUNTIME_FUNCTION represents an x64 exception handling entry from .pdata.
@@ -79,6 +80,8 @@ type UnwindInfo struct {
 	FrameOffset   uint8
 	HandlerRVA    uint32 // valid if Flags & (EHandler|UHandler)
 	HandlerData   uint64 // guest addr of handler-specific data
+	// Chained: valid if Flags & ChainInfo - points to parent function
+	ChainedRF *RuntimeFunction
 }
 
 // ParseUnwindInfo reads UNWIND_INFO from guest memory.
@@ -106,6 +109,17 @@ func ParseUnwindInfo(mem *mmu.MMU, imageBase uint64, unwindRVA uint32) *UnwindIn
 		handlerAddr := addr + 4 + codesSize
 		ui.HandlerRVA, _ = mem.Read32(handlerAddr)
 		ui.HandlerData = handlerAddr + 4
+	} else if ui.Flags&UnwFlagChainInfo != 0 {
+		// Chained: after unwind codes is a RUNTIME_FUNCTION (12 bytes)
+		codesSize := uint64(ui.CountOfCodes) * 2
+		if codesSize%4 != 0 {
+			codesSize += 2
+		}
+		chainAddr := addr + 4 + codesSize
+		begin, _ := mem.Read32(chainAddr)
+		end, _ := mem.Read32(chainAddr + 4)
+		unwindData, _ := mem.Read32(chainAddr + 8)
+		ui.ChainedRF = &RuntimeFunction{begin, end, unwindData}
 	}
 
 	return ui
@@ -135,12 +149,25 @@ func CxxDispatchException(mem *mmu.MMU, et *ExceptionTable, rsp, rip uint64, tra
 	currentRSP := rsp
 	currentRIP := rip
 
+	// Always trace on failure path - retry with trace enabled if first pass fails
+	result := cxxDispatch(mem, et, imageBase, imageEnd, rsp, rip, trace)
+	if result == nil && !trace {
+		ravelog.Logf("[seh] no handler found for RIP=0x%x RSP=0x%x - retrying with trace\n", rip, rsp)
+		cxxDispatch(mem, et, imageBase, imageEnd, currentRSP, currentRIP, true)
+	}
+	return result
+}
+
+func cxxDispatch(mem *mmu.MMU, et *ExceptionTable, imageBase, imageEnd uint64, rsp, rip uint64, trace bool) *CxxCatchHandler {
 	if trace {
-		fmt.Fprintf(os.Stderr, "[seh] dispatch: RSP=0x%x RIP=0x%x imageBase=0x%x\n", rsp, rip, imageBase)
+		ravelog.Logf("[seh] dispatch: RSP=0x%x RIP=0x%x imageBase=0x%x\n", rsp, rip, imageBase)
 	}
 
 	// Track saved registers across all frames for proper unwind
 	savedRegs := make(map[int]uint64)
+
+	currentRSP := rsp
+	currentRIP := rip
 
 	for depth := 0; depth < 64; depth++ {
 		// Check if RIP is in the PE image range
@@ -148,12 +175,12 @@ func CxxDispatchException(mem *mmu.MMU, et *ExceptionTable, rsp, rip uint64, tra
 			retAddr, err := mem.Read64(currentRSP)
 			if err != nil || retAddr == 0 {
 				if trace {
-					fmt.Fprintf(os.Stderr, "[seh] depth %d: RIP 0x%x out of range, retAddr read failed\n", depth, currentRIP)
+					ravelog.Logf("[seh] depth %d: RIP 0x%x out of range, retAddr read failed\n", depth, currentRIP)
 				}
 				return nil
 			}
 			if trace {
-				fmt.Fprintf(os.Stderr, "[seh] depth %d: RIP 0x%x out of range, following retAddr 0x%x\n", depth, currentRIP, retAddr)
+				ravelog.Logf("[seh] depth %d: RIP 0x%x out of range, following retAddr 0x%x\n", depth, currentRIP, retAddr)
 			}
 			currentRIP = retAddr
 			currentRSP += 8
@@ -168,7 +195,7 @@ func CxxDispatchException(mem *mmu.MMU, et *ExceptionTable, rsp, rip uint64, tra
 				return nil
 			}
 			if trace {
-				fmt.Fprintf(os.Stderr, "[seh] depth %d: RVA 0x%x no .pdata, following retAddr 0x%x\n", depth, rva, retAddr)
+				ravelog.Logf("[seh] depth %d: RVA 0x%x no .pdata, following retAddr 0x%x\n", depth, rva, retAddr)
 			}
 			currentRIP = retAddr
 			currentRSP += 8
@@ -185,8 +212,51 @@ func CxxDispatchException(mem *mmu.MMU, et *ExceptionTable, rsp, rip uint64, tra
 		parentRSP := currentRSP + frameSize
 
 		if trace {
-			fmt.Fprintf(os.Stderr, "[seh] depth %d: RVA 0x%x func [0x%x-0x%x] flags=0x%x frameSize=%d\n",
+			ravelog.Logf("[seh] depth %d: RVA 0x%x func [0x%x-0x%x] flags=0x%x frameSize=%d\n",
 				depth, rva, rf.BeginAddress, rf.EndAddress, ui.Flags, frameSize)
+		}
+
+		// Follow CHAININFO: accumulate frame size from chained parent.
+		// The secondary (chained) record covers part of the prolog but the return
+		// address (+8) is counted only by the primary (parent) record. So we
+		// subtract 8 from the secondary's frame size before handing off to the primary.
+		chainedUI := ui
+		chainedRSP := currentRSP + (frameSize - 8) // strip the virtual return-addr slot
+		for chainedUI.Flags&UnwFlagChainInfo != 0 && chainedUI.ChainedRF != nil {
+			parentUI := ParseUnwindInfo(mem, imageBase, chainedUI.ChainedRF.UnwindData)
+			if parentUI == nil {
+				break
+			}
+			parentFrameSize := unwindFrame(mem, imageBase+uint64(chainedUI.ChainedRF.UnwindData), parentUI, chainedRSP, savedRegs)
+			if trace {
+				ravelog.Logf("[seh] depth %d: chain → func [0x%x-0x%x] flags=0x%x parentFrameSize=%d chainedRSP=0x%x\n",
+					depth, chainedUI.ChainedRF.BeginAddress, chainedUI.ChainedRF.EndAddress, parentUI.Flags, parentFrameSize, chainedRSP)
+			}
+			chainedParentRSP := chainedRSP + parentFrameSize
+			if parentUI.Flags&UnwFlagEHandler != 0 {
+				// Found the exception handler in the chained parent
+				handler := findCxxCatchAll(mem, imageBase, parentUI, chainedRSP, currentRIP, chainedParentRSP, trace)
+				if handler != nil {
+					if handler.IsFallback {
+						handler.SavedRegs = make(map[int]uint64, len(savedRegs))
+						for k, v := range savedRegs {
+							handler.SavedRegs[k] = v
+						}
+					}
+					return handler
+				}
+			}
+			chainedUI = parentUI
+			if parentUI.Flags&UnwFlagChainInfo != 0 {
+				// Continue chain: strip return-addr slot again for next secondary
+				chainedRSP = chainedParentRSP - 8
+			} else {
+				chainedRSP = chainedParentRSP
+			}
+		}
+		// Update parentRSP to the resolved chained parent RSP if we followed a chain
+		if chainedRSP != currentRSP+(frameSize-8) {
+			parentRSP = chainedRSP
 		}
 
 		if ui.Flags&UnwFlagEHandler != 0 {
@@ -207,12 +277,12 @@ func CxxDispatchException(mem *mmu.MMU, et *ExceptionTable, rsp, rip uint64, tra
 		retAddr, err := mem.Read64(parentRSP - 8)
 		if err != nil || retAddr == 0 {
 			if trace {
-				fmt.Fprintf(os.Stderr, "[seh] depth %d: parentRSP 0x%x retAddr read failed\n", depth, parentRSP)
+				ravelog.Logf("[seh] depth %d: parentRSP 0x%x retAddr read failed\n", depth, parentRSP)
 			}
 			return nil
 		}
 		if trace {
-			fmt.Fprintf(os.Stderr, "[seh] depth %d: → parent retAddr 0x%x parentRSP 0x%x\n", depth, retAddr, parentRSP)
+			ravelog.Logf("[seh] depth %d: → parent retAddr 0x%x parentRSP 0x%x\n", depth, retAddr, parentRSP)
 		}
 		currentRIP = retAddr
 		currentRSP = parentRSP
@@ -363,7 +433,7 @@ func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, rsp, rip, p
 
 	magic, _ := mem.Read32(funcInfoAddr)
 	if trace {
-		fmt.Fprintf(os.Stderr, "[seh]   handlerRVA=0x%x handlerData=0x%x funcInfoRVA=0x%x funcInfoAddr=0x%x magic=0x%x countOfCodes=%d\n",
+		ravelog.Logf("[seh]   handlerRVA=0x%x handlerData=0x%x funcInfoRVA=0x%x funcInfoAddr=0x%x magic=0x%x countOfCodes=%d\n",
 			ui.HandlerRVA, ui.HandlerData, funcInfoRVA, funcInfoAddr, magic, ui.CountOfCodes)
 	}
 
@@ -375,12 +445,12 @@ func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, rsp, rip, p
 		retAddr, err := mem.Read64(parentRSP - 8)
 		if err != nil || retAddr == 0 {
 			if trace {
-				fmt.Fprintf(os.Stderr, "[seh]   FH4 magic 0x%x - can't read parent retAddr\n", magic)
+				ravelog.Logf("[seh]   FH4 magic 0x%x - can't read parent retAddr\n", magic)
 			}
 			return nil
 		}
 		if trace {
-			fmt.Fprintf(os.Stderr, "[seh]   FH4 magic 0x%x - fallback unwind to retAddr=0x%x RSP=0x%x\n",
+			ravelog.Logf("[seh]   FH4 magic 0x%x - fallback unwind to retAddr=0x%x RSP=0x%x\n",
 				magic, retAddr, parentRSP)
 		}
 		return &CxxCatchHandler{
@@ -417,7 +487,7 @@ func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, rsp, rip, p
 	}
 
 	if trace {
-		fmt.Fprintf(os.Stderr, "[seh]   nTryBlocks=%d throwState=%d\n", nTryBlocks, throwState)
+		ravelog.Logf("[seh]   nTryBlocks=%d throwState=%d\n", nTryBlocks, throwState)
 	}
 
 	// Walk try blocks
@@ -433,7 +503,7 @@ func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, rsp, rip, p
 		handlerArrayRVA, _ := mem.Read32(entryAddr + 16)
 
 		if trace {
-			fmt.Fprintf(os.Stderr, "[seh]   tryBlock[%d]: low=%d high=%d nCatches=%d handlerArrayRVA=0x%x\n",
+			ravelog.Logf("[seh]   tryBlock[%d]: low=%d high=%d nCatches=%d handlerArrayRVA=0x%x\n",
 				i, tryLow, tryHigh, nCatches, handlerArrayRVA)
 		}
 
@@ -455,7 +525,7 @@ func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, rsp, rip, p
 			handlerRVA, _ := mem.Read32(hAddr + 12)
 
 			if trace {
-				fmt.Fprintf(os.Stderr, "[seh]     catch[%d]: typeRVA=0x%x handlerRVA=0x%x\n", c, typeRVA, handlerRVA)
+				ravelog.Logf("[seh]     catch[%d]: typeRVA=0x%x handlerRVA=0x%x\n", c, typeRVA, handlerRVA)
 			}
 
 			// catch(...) has typeRVA == 0

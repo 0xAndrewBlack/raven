@@ -3,8 +3,8 @@ package cpu
 import (
 	"fmt"
 
-	"github.com/mirkobrombin/go-vm/pkg/arch"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // CPU represents a single RISC-V RV64GC hardware thread.

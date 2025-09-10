@@ -1,7 +1,7 @@
 package win32k
 
 import (
-	"github.com/mirkobrombin/go-vm/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
 // TrapDispatcher routes Win32k (Shadow SSDT) syscalls to the appropriate handler.

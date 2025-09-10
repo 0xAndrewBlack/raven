@@ -1,7 +1,7 @@
 package ntapi
 
 import (
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 )
 
 // ProcessManager handles NtAllocateVirtualMemory, NtProtectVirtualMemory,

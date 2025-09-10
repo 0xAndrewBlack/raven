@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 
-	"github.com/mirkobrombin/go-vm/pkg/arch"
-	"github.com/mirkobrombin/go-vm/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
+
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 const (
@@ -139,7 +141,7 @@ func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResu
 
 	// brk must be page-aligned, just like real Linux.
 	brkAddr := (maxAddr + mmu.PageSize - 1) & mmu.PageMask
-	fmt.Fprintf(os.Stderr, "[loader] ELF Type: %v, elfBase: 0x%x, maxAddr: 0x%x, brkAddr: 0x%x\n", ef.Type, elfBase, maxAddr, brkAddr)
+	ravelog.Logf("[loader] ELF Type: %v, elfBase: 0x%x, maxAddr: 0x%x, brkAddr: 0x%x\n", ef.Type, elfBase, maxAddr, brkAddr)
 	mem.SetBrk(brkAddr)
 
 	var interpBase uint64
