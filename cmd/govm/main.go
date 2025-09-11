@@ -2835,10 +2835,42 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LoadLibraryW", func(ctx *ntapi.TrapContext) uint32 {
+			namePtr := ctx.Arg(0)
+			if namePtr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			name := strings.ToLower(readGuestUTF16(namePtr))
+			// Strip path: use basename only
+			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
+				name = name[idx+1:]
+			}
+			// Check if already loaded as a synth
+			if synth, ok := synthByName[name]; ok {
+				ctx.SetReturn(synth.BaseAddr)
+				return 0
+			}
+			ravelog.Logf("[win32] LoadLibraryW: %q not found\n", name)
+			procState.LastError = 126 // ERROR_MOD_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LoadLibraryA", func(ctx *ntapi.TrapContext) uint32 {
+			namePtr := ctx.Arg(0)
+			if namePtr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			name := strings.ToLower(readGuestString(namePtr))
+			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
+				name = name[idx+1:]
+			}
+			if synth, ok := synthByName[name]; ok {
+				ctx.SetReturn(synth.BaseAddr)
+				return 0
+			}
+			ravelog.Logf("[win32] LoadLibraryA: %q not found\n", name)
+			procState.LastError = 126
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -2847,7 +2879,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetProcAddress", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // not found
+			hModule := ctx.Arg(0)
+			procNamePtr := ctx.Arg(1)
+			if hModule == 0 || procNamePtr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Read proc name (may be ordinal if high word is 0)
+			hi, _ := ctx.Mem.Read32(procNamePtr + 2)
+			var funcName string
+			if hi == 0 {
+				// ordinal import - not supported yet
+				ctx.SetReturn(0)
+				return 0
+			}
+			funcName = readGuestString(procNamePtr)
+			// Find the synth that has this base address
+			for _, s := range dlls {
+				if s.BaseAddr == hModule {
+					if addr, ok := s.Exports[funcName]; ok {
+						ctx.SetReturn(addr)
+						return 0
+					}
+				}
+			}
+			ravelog.Logf("[win32] GetProcAddress(0x%x, %q) → not found\n", hModule, funcName)
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UnhandledExceptionFilter", func(ctx *ntapi.TrapContext) uint32 {
@@ -4330,11 +4387,51 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateFileMappingW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // NULL = failure
+			hFile := ntapi.Handle(ctx.Arg(0))
+			// ctx.Arg(1) = lpFileMappingAttributes (ignored)
+			// ctx.Arg(2) = flProtect (ignored for now)
+			szHigh := uint32(ctx.Arg(3))
+			szLow := uint32(ctx.Arg(4))
+			size := uint64(szHigh)<<32 | uint64(szLow)
+
+			fd := -1
+			if hFile != 0xFFFFFFFFFFFFFFFF { // INVALID_HANDLE_VALUE
+				if fh := handles.GetFile(hFile); fh != nil {
+					fd = fh.FD
+				}
+			}
+			if size == 0 && fd >= 0 {
+				// size 0 = use file size
+				if node := ctx.FS.Stat(fd); node != nil {
+					size = uint64(node.Size)
+				}
+			}
+			if size == 0 {
+				size = 4096
+			}
+			// Round up to page boundary
+			size = (size + 4095) &^ 4095
+			baseAddr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+			if fd >= 0 {
+				// Preload file content into guest pages
+				buf := make([]byte, size)
+				ctx.FS.Read(fd, buf)
+				ctx.Mem.WriteBytes(baseAddr, buf)
+			}
+			h := handles.Alloc(&ntapi.FileMappingHandle{BaseAddr: baseAddr, Size: size, FileFD: fd})
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "MapViewOfFile", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hMapping := ntapi.Handle(ctx.Arg(0))
+			// ctx.Arg(1) = dwDesiredAccess, ctx.Arg(2/3) = offset, ctx.Arg(4) = size
+			obj := handles.Get(hMapping)
+			fm, ok := obj.(*ntapi.FileMappingHandle)
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			ctx.SetReturn(fm.BaseAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UnmapViewOfFile", func(ctx *ntapi.TrapContext) uint32 {

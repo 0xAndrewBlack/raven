@@ -58,6 +58,17 @@ type SectionHandle struct {
 
 func (h *SectionHandle) handleType() string { return "section" }
 
+// FileMappingHandle represents a Win32 file mapping (CreateFileMapping).
+// BaseAddr is the allocated guest memory; Size is the mapping size.
+// FileFD is -1 for anonymous mappings, otherwise a VFS file descriptor.
+type FileMappingHandle struct {
+	BaseAddr uint64
+	Size     uint64
+	FileFD   int
+}
+
+func (h *FileMappingHandle) handleType() string { return "filemapping" }
+
 // HeapHandle represents a Win32 heap.
 type HeapHandle struct {
 	Allocations map[uint64]uint64 // guest address → size
