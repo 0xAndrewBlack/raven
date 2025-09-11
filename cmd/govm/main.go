@@ -794,6 +794,128 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		items []menuItem
 	}
 
+	// viewMapping tracks an active MapViewOfFile view for sync-back.
+	type viewMapping struct {
+		GuestAddr uint64
+		HostBuf   []byte // sub-slice of FileMappingHandle.HostBuf at the mapped offset
+		Size      uint64
+		FileFD    int  // -1 for anonymous
+		Offset    uint64
+		Writable  bool
+		FM        *ntapi.FileMappingHandle
+	}
+	var viewMappings []viewMapping
+	namedMappings := map[string]*ntapi.FileMappingHandle{}
+
+	// doCreateFileMapping implements the core of CreateFileMappingW/A.
+	doCreateFileMapping := func(ctx *ntapi.TrapContext, hFile ntapi.Handle, flProtect uint32, szHigh, szLow uint32, name string) uint64 {
+		size := uint64(szHigh)<<32 | uint64(szLow)
+
+		fileFD := -1
+		if hFile != ntapi.InvalidHandle {
+			if fh := handles.GetFile(hFile); fh != nil {
+				fileFD = fh.FD
+			}
+		}
+
+		if size == 0 && fileFD >= 0 {
+			if node := ctx.FS.Stat(fileFD); node != nil {
+				size = uint64(node.Size)
+			}
+		}
+		if size == 0 {
+			size = 4096
+		}
+		// Round up to page boundary.
+		size = (size + 4095) &^ 4095
+
+		hostBuf := make([]byte, size)
+		if fileFD >= 0 {
+			ctx.FS.Pread(fileFD, hostBuf, 0)
+		}
+
+		fm := &ntapi.FileMappingHandle{
+			Name:    name,
+			HostBuf: hostBuf,
+			Size:    size,
+			FileFD:  fileFD,
+			Protect: flProtect,
+		}
+		if name != "" {
+			namedMappings[name] = fm
+		}
+		h := handles.Alloc(fm)
+		return uint64(h)
+	}
+
+	// doMapView implements MapViewOfFile / MapViewOfFileEx.
+	doMapView := func(ctx *ntapi.TrapContext, hMapping ntapi.Handle, dwDesiredAccess uint32, offHigh, offLow uint32, numBytes uint64) uint64 {
+		fm := handles.GetFileMapping(hMapping)
+		if fm == nil {
+			return 0
+		}
+		offset := uint64(offHigh)<<32 | uint64(offLow)
+		mapSize := numBytes
+		if mapSize == 0 {
+			if offset < fm.Size {
+				mapSize = fm.Size - offset
+			} else {
+				mapSize = fm.Size
+			}
+		}
+		mapSize = (mapSize + 4095) &^ 4095
+		if offset+mapSize > uint64(len(fm.HostBuf)) {
+			// Extend HostBuf if needed (e.g. file grew or size was rounded up).
+			needed := offset + mapSize
+			if needed > fm.Size {
+				extended := make([]byte, needed)
+				copy(extended, fm.HostBuf)
+				fm.HostBuf = extended
+				fm.Size = needed
+			}
+		}
+
+		guestAddr := mem.Mmap(0, mapSize, mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.WriteBytes(guestAddr, fm.HostBuf[offset:offset+mapSize])
+
+		const fileMapWrite = 0x0002
+		writable := (dwDesiredAccess&fileMapWrite) != 0 ||
+			fm.Protect == 0x04 || fm.Protect == 0x08 // PAGE_READWRITE / PAGE_WRITECOPY
+
+		viewMappings = append(viewMappings, viewMapping{
+			GuestAddr: guestAddr,
+			HostBuf:   fm.HostBuf[offset : offset+mapSize],
+			Size:      mapSize,
+			FileFD:    fm.FileFD,
+			Offset:    offset,
+			Writable:  writable,
+			FM:        fm,
+		})
+		return guestAddr
+	}
+
+	// doUnmapView syncs guest memory back to the host buffer and file, then removes the view.
+	doUnmapView := func(ctx *ntapi.TrapContext, lpBase uint64) bool {
+		for i, vm := range viewMappings {
+			if vm.GuestAddr != lpBase {
+				continue
+			}
+			if vm.Writable {
+				// Sync guest pages → HostBuf slice.
+				if guestData, err := ctx.Mem.ReadBytes(vm.GuestAddr, int(vm.Size)); err == nil {
+					copy(vm.HostBuf, guestData)
+					// Write back to the file if file-backed.
+					if vm.FileFD >= 0 {
+						ctx.FS.Pwrite(vm.FileFD, guestData, int64(vm.Offset))
+					}
+				}
+			}
+			viewMappings = append(viewMappings[:i], viewMappings[i+1:]...)
+			return true
+		}
+		return true // not found is a no-op on Windows
+	}
+
 	// pickBestLangEntry selects the best language entry from a resource language directory.
 	// Prefers: English (0x0409, 0x0809, etc.) or neutral (0x0000), else last resort = first entry.
 	pickBestLangEntry := func(langDirAddr, rsrcBase uint64) (dataEntryAddr uint64, ok bool) {
@@ -5162,54 +5284,27 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateFileMappingW", func(ctx *ntapi.TrapContext) uint32 {
 			hFile := ntapi.Handle(ctx.Arg(0))
-			// ctx.Arg(1) = lpFileMappingAttributes (ignored)
-			// ctx.Arg(2) = flProtect (ignored for now)
+			flProtect := uint32(ctx.Arg(2))
 			szHigh := uint32(ctx.Arg(3))
 			szLow := uint32(ctx.Arg(4))
-			size := uint64(szHigh)<<32 | uint64(szLow)
-
-			fd := -1
-			if hFile != 0xFFFFFFFFFFFFFFFF { // INVALID_HANDLE_VALUE
-				if fh := handles.GetFile(hFile); fh != nil {
-					fd = fh.FD
-				}
-			}
-			if size == 0 && fd >= 0 {
-				// size 0 = use file size
-				if node := ctx.FS.Stat(fd); node != nil {
-					size = uint64(node.Size)
-				}
-			}
-			if size == 0 {
-				size = 4096
-			}
-			// Round up to page boundary
-			size = (size + 4095) &^ 4095
-			baseAddr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
-			if fd >= 0 {
-				// Preload file content into guest pages
-				buf := make([]byte, size)
-				ctx.FS.Read(fd, buf)
-				ctx.Mem.WriteBytes(baseAddr, buf)
-			}
-			h := handles.Alloc(&ntapi.FileMappingHandle{BaseAddr: baseAddr, Size: size, FileFD: fd})
-			ctx.SetReturn(uint64(h))
+			name := readGuestUTF16(ctx.Arg(5))
+			h := doCreateFileMapping(ctx, hFile, flProtect, szHigh, szLow, name)
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "MapViewOfFile", func(ctx *ntapi.TrapContext) uint32 {
 			hMapping := ntapi.Handle(ctx.Arg(0))
-			// ctx.Arg(1) = dwDesiredAccess, ctx.Arg(2/3) = offset, ctx.Arg(4) = size
-			obj := handles.Get(hMapping)
-			fm, ok := obj.(*ntapi.FileMappingHandle)
-			if !ok {
-				ctx.SetReturn(0)
-				return 0
-			}
-			ctx.SetReturn(fm.BaseAddr)
+			dwDesiredAccess := uint32(ctx.Arg(1))
+			offHigh := uint32(ctx.Arg(2))
+			offLow := uint32(ctx.Arg(3))
+			numBytes := ctx.Arg(4)
+			guestAddr := doMapView(ctx, hMapping, dwDesiredAccess, offHigh, offLow, numBytes)
+			ctx.SetReturn(guestAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UnmapViewOfFile", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			doUnmapView(ctx, ctx.Arg(0))
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FreeLibraryAndExitThread", func(ctx *ntapi.TrapContext) uint32 {
@@ -5999,20 +6094,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateFileMappingA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x2002) // fake handle
+			hFile := ntapi.Handle(ctx.Arg(0))
+			flProtect := uint32(ctx.Arg(2))
+			szHigh := uint32(ctx.Arg(3))
+			szLow := uint32(ctx.Arg(4))
+			name := readGuestString(ctx.Arg(5))
+			h := doCreateFileMapping(ctx, hFile, flProtect, szHigh, szLow, name)
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateFileMappingFromApp", func(ctx *ntapi.TrapContext) uint32 {
+			hFile := ntapi.Handle(ctx.Arg(0))
+			flProtect := uint32(ctx.Arg(1))
 			size := ctx.Arg(2)
-			if size == 0 { size = 4096 }
-			size = (size + 4095) &^ 4095
-			baseAddr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
-			h := handles.Alloc(&ntapi.FileMappingHandle{BaseAddr: baseAddr, Size: size, FileFD: -1})
-			ctx.SetReturn(uint64(h))
+			name := readGuestUTF16(ctx.Arg(3))
+			szHigh := uint32(size >> 32)
+			szLow := uint32(size)
+			h := doCreateFileMapping(ctx, hFile, flProtect, szHigh, szLow, name)
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateFileMappingNumaW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x2002) // fake handle
+			hFile := ntapi.Handle(ctx.Arg(0))
+			flProtect := uint32(ctx.Arg(2))
+			szHigh := uint32(ctx.Arg(3))
+			szLow := uint32(ctx.Arg(4))
+			name := readGuestUTF16(ctx.Arg(5))
+			// ctx.Arg(6) = nndPreferred NUMA node (ignored)
+			h := doCreateFileMapping(ctx, hFile, flProtect, szHigh, szLow, name)
+			ctx.SetReturn(h)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateFileTransactedA", func(ctx *ntapi.TrapContext) uint32 {
@@ -6785,7 +6895,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FlushViewOfFile", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			lpBase := ctx.Arg(0)
+			flushSize := ctx.Arg(1)
+			for _, vm := range viewMappings {
+				if vm.GuestAddr != lpBase {
+					continue
+				}
+				sz := flushSize
+				if sz == 0 || sz > vm.Size {
+					sz = vm.Size
+				}
+				if guestData, err := ctx.Mem.ReadBytes(vm.GuestAddr, int(sz)); err == nil {
+					copy(vm.HostBuf[:sz], guestData)
+					if vm.FileFD >= 0 {
+						ctx.FS.Pwrite(vm.FileFD, guestData, int64(vm.Offset))
+					}
+				}
+				break
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FoldStringA", func(ctx *ntapi.TrapContext) uint32 {
@@ -8875,35 +9003,34 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(kernel32, "MapViewOfFileEx", func(ctx *ntapi.TrapContext) uint32 {
 			hMapping := ntapi.Handle(ctx.Arg(0))
-			obj := handles.Get(hMapping)
-			fm, ok := obj.(*ntapi.FileMappingHandle)
-			if !ok {
-				ctx.SetReturn(0)
-				return 0
-			}
-			ctx.SetReturn(fm.BaseAddr)
+			dwDesiredAccess := uint32(ctx.Arg(1))
+			offHigh := uint32(ctx.Arg(2))
+			offLow := uint32(ctx.Arg(3))
+			numBytes := ctx.Arg(4)
+			// ctx.Arg(5) = lpBaseAddress hint (ignored; we allocate freely)
+			guestAddr := doMapView(ctx, hMapping, dwDesiredAccess, offHigh, offLow, numBytes)
+			ctx.SetReturn(guestAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "MapViewOfFileExNuma", func(ctx *ntapi.TrapContext) uint32 {
 			hMapping := ntapi.Handle(ctx.Arg(0))
-			obj := handles.Get(hMapping)
-			fm, ok := obj.(*ntapi.FileMappingHandle)
-			if !ok {
-				ctx.SetReturn(0)
-				return 0
-			}
-			ctx.SetReturn(fm.BaseAddr)
+			dwDesiredAccess := uint32(ctx.Arg(1))
+			offHigh := uint32(ctx.Arg(2))
+			offLow := uint32(ctx.Arg(3))
+			numBytes := ctx.Arg(4)
+			// ctx.Arg(5) = lpBaseAddress hint, ctx.Arg(6) = nndPreferred (both ignored)
+			guestAddr := doMapView(ctx, hMapping, dwDesiredAccess, offHigh, offLow, numBytes)
+			ctx.SetReturn(guestAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "MapViewOfFileFromApp", func(ctx *ntapi.TrapContext) uint32 {
 			hMapping := ntapi.Handle(ctx.Arg(0))
-			obj := handles.Get(hMapping)
-			fm, ok := obj.(*ntapi.FileMappingHandle)
-			if !ok {
-				ctx.SetReturn(0)
-				return 0
-			}
-			ctx.SetReturn(fm.BaseAddr)
+			dwDesiredAccess := uint32(ctx.Arg(1))
+			offHigh := uint32(ctx.Arg(2))
+			offLow := uint32(ctx.Arg(3))
+			numBytes := ctx.Arg(4)
+			guestAddr := doMapView(ctx, hMapping, dwDesiredAccess, offHigh, offLow, numBytes)
+			ctx.SetReturn(guestAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "Module32First", func(ctx *ntapi.TrapContext) uint32 {
@@ -9260,11 +9387,44 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleA", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(1)
+			nCharsToRead := uint32(ctx.Arg(2))
+			charsRead := ctx.Arg(3)
+			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			if uint32(len(line)) > nCharsToRead {
+				line = line[:nCharsToRead]
+			}
+			for i := 0; i < len(line); i++ {
+				ctx.Mem.Write8(buf+uint64(i), line[i])
+			}
+			if charsRead != 0 {
+				ctx.Mem.Write32(charsRead, uint32(len(line)))
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
+		// ReadConsoleInput: synthesize a KEY_EVENT record for each character read from stdin.
+		// INPUT_RECORD layout: EventType(2) + pad(2) + KeyEvent(16): bKeyDown(4)+wRepeatCount(2)+wVirtualKeyCode(2)+wVirtualScanCode(2)+pad(2)+Char(2)+dwControlKeyState(4)
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleInputA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			buf := ctx.Arg(1)
+			// nLength := ctx.Arg(2) // max records to fill
+			lpEventsRead := ctx.Arg(3)
+			b := make([]byte, 1)
+			n, _ := os.Stdin.Read(b)
+			if n == 0 {
+				if lpEventsRead != 0 { ctx.Mem.Write32(lpEventsRead, 0) }
+				ctx.SetReturn(1)
+				return 0
+			}
+			ch := b[0]
+			// Write KEY_DOWN INPUT_RECORD (20 bytes) at buf
+			ctx.Mem.Write16(buf+0, 0x0001)    // EventType = KEY_EVENT
+			ctx.Mem.Write32(buf+4, 1)          // bKeyDown = TRUE
+			ctx.Mem.Write16(buf+8, 1)          // wRepeatCount
+			ctx.Mem.Write16(buf+10, uint16(ch)) // wVirtualKeyCode (approx)
+			ctx.Mem.Write8(buf+14, ch)          // AsciiChar
+			if lpEventsRead != 0 { ctx.Mem.Write32(lpEventsRead, 1) }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleInputExA", func(ctx *ntapi.TrapContext) uint32 {
@@ -9276,7 +9436,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleInputW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			buf := ctx.Arg(1)
+			lpEventsRead := ctx.Arg(3)
+			b := make([]byte, 1)
+			n, _ := os.Stdin.Read(b)
+			if n == 0 {
+				if lpEventsRead != 0 { ctx.Mem.Write32(lpEventsRead, 0) }
+				ctx.SetReturn(1)
+				return 0
+			}
+			ch := uint16(b[0])
+			ctx.Mem.Write16(buf+0, 0x0001)  // EventType = KEY_EVENT
+			ctx.Mem.Write32(buf+4, 1)        // bKeyDown = TRUE
+			ctx.Mem.Write16(buf+8, 1)        // wRepeatCount
+			ctx.Mem.Write16(buf+10, ch)      // wVirtualKeyCode
+			ctx.Mem.Write16(buf+14, ch)      // UnicodeChar
+			if lpEventsRead != 0 { ctx.Mem.Write32(lpEventsRead, 1) }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleOutputA", func(ctx *ntapi.TrapContext) uint32 {
@@ -10659,7 +10835,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UnmapViewOfFileEx", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			doUnmapView(ctx, ctx.Arg(0))
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UnregisterWait", func(ctx *ntapi.TrapContext) uint32 {
@@ -14716,6 +14893,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if hwnd == mainHWND && wlWindow != nil {
 				flags := uint32(ctx.Arg(6))
 				const swpNoSize = 0x0001
+				const swpNoMove = 0x0002
+				prevW, prevH := wlWindow.Width, wlWindow.Height
+				mainX, mainY := int32(0), int32(0)
 				if flags&swpNoSize == 0 {
 					w := int32(ctx.Arg(4))
 					h := int32(ctx.Arg(5))
@@ -14729,6 +14909,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
 					}
 				}
+				if flags&swpNoMove == 0 {
+					// Wayland top-level position is compositor-managed; track for GetWindowRect
+					mainX = int32(ctx.Arg(2))
+					mainY = int32(ctx.Arg(3))
+					if mainX < 0 || mainX >= 0x7FFF { mainX = 0 }
+					if mainY < 0 || mainY >= 0x7FFF { mainY = 0 }
+				}
+				// Keep win32.Global in sync for GetWindowRect/GetClientRect
+				if wnd := win32.Global.Get(hwnd); wnd != nil {
+					win32.Global.UpdatePos(wnd, mainX, mainY, wlWindow.Width, wlWindow.Height)
+				}
+				if wlWindow.Width != prevW || wlWindow.Height != prevH {
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0003, uint64(uint16(mainX)) | (uint64(uint16(mainY)) << 16), 0})
+				}
 				ctx.SetReturn(1)
 				return 0
 			}
@@ -14739,6 +14933,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				const swpShowWindow   = 0x0040
 				const swpHideWindow   = 0x0080
 				ox, oy := clientAreaOrigin(ci.parentHWND)
+				prevX, prevY := ci.x, ci.y
+				prevW, prevH := ci.w, ci.h
 				if flags&swpNoMove == 0 {
 					x := int32(ctx.Arg(2))
 					y := int32(ctx.Arg(3))
@@ -14766,10 +14962,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if wnd := win32.Global.Get(hwnd); wnd != nil {
 					win32.Global.UpdatePos(wnd, ci.x, ci.y, ci.w, ci.h)
 				}
-				// Queue WM_SIZE for windows with a guest WndProc
+				// Queue WM_SIZE / WM_MOVE for windows with a guest WndProc
 				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
-					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
-					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+					if ci.w != prevW || ci.h != prevH {
+						lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+					}
+					if ci.x != prevX || ci.y != prevY {
+						// WM_MOVE lParam = MAKELPARAM(x, y) in client-relative coords
+						relX := ci.x - ox
+						relY := ci.y - oy
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0003, 0, uint64(uint16(relX)) | (uint64(uint16(relY)) << 16)})
+					}
 				}
 			}
 			ctx.SetReturn(1)
@@ -14815,6 +15019,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					continue
 				}
 				ox, oy := clientAreaOrigin(ci.parentHWND)
+				prevX, prevY := ci.x, ci.y
+				prevW, prevH := ci.w, ci.h
 				if dp.flags&swpNoMove == 0 {
 					ci.x = dp.x + ox
 					ci.y = dp.y + oy
@@ -14832,10 +15038,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if ci.w > 0 && ci.h > 0 {
 					ci.visible = true
 				}
-				// Dispatch WM_SIZE to children with guest WndProcs
+				if wnd := win32.Global.Get(dp.hwnd); wnd != nil {
+					win32.Global.UpdatePos(wnd, ci.x, ci.y, ci.w, ci.h)
+				}
+				// Dispatch WM_SIZE / WM_MOVE to children with guest WndProcs
 				if wp, ok2 := hwndWndProc[dp.hwnd]; ok2 && wp != 0 {
-					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
-					msgQueue = append(msgQueue, queuedMsg{dp.hwnd, 0x0005, 0, lParam})
+					if ci.w != prevW || ci.h != prevH {
+						lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
+						msgQueue = append(msgQueue, queuedMsg{dp.hwnd, 0x0005, 0, lParam})
+					}
+					if ci.x != prevX || ci.y != prevY {
+						relX := ci.x - ox
+						relY := ci.y - oy
+						msgQueue = append(msgQueue, queuedMsg{dp.hwnd, 0x0003, 0, uint64(uint16(relX)) | (uint64(uint16(relY)) << 16)})
+					}
 				}
 			}
 			deferredPositions = deferredPositions[:0]
@@ -14847,22 +15063,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hwnd := ctx.Arg(0)
 			newX, newY := int32(ctx.Arg(1)), int32(ctx.Arg(2))
 			newW, newH := int32(ctx.Arg(3)), int32(ctx.Arg(4))
-			ravelog.Logf("[move] MoveWindow hwnd=0x%x x=%d y=%d w=%d h=%d\n", hwnd, newX, newY, newW, newH)
+			bRepaint := ctx.Arg(5)
+			ravelog.Logf("[move] MoveWindow hwnd=0x%x x=%d y=%d w=%d h=%d repaint=%d\n", hwnd, newX, newY, newW, newH, bRepaint)
 			// Handle main window resize
 			if hwnd == mainHWND && wlWindow != nil {
+				prevW, prevH := wlWindow.Width, wlWindow.Height
 				if newW > 0 && newW < 0x7FFF && newH > 0 && newH < 0x7FFF {
 					if wlWindow.Resize(newW, newH) {
 						syncScreenSurface()
 					}
 					lParam := uint64(uint16(newW)) | (uint64(uint16(newH)) << 16)
 					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
-					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+					if bRepaint != 0 {
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+					}
+				}
+				// Keep win32.Global in sync
+				if wnd := win32.Global.Get(hwnd); wnd != nil {
+					win32.Global.UpdatePos(wnd, 0, 0, wlWindow.Width, wlWindow.Height)
+				}
+				if wlWindow.Width != prevW || wlWindow.Height != prevH {
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0003, 0, 0})
 				}
 				ctx.SetReturn(1)
 				return 0
 			}
 			if ci, ok := hwndChildren[hwnd]; ok {
 				ox, oy := clientAreaOrigin(ci.parentHWND)
+				prevX, prevY := ci.x, ci.y
+				prevW, prevH := ci.w, ci.h
 				ci.x = newX + ox
 				ci.y = newY + oy
 				if newW > 0 { ci.w = newW }
@@ -14874,10 +15103,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if wnd := win32.Global.Get(hwnd); wnd != nil {
 					win32.Global.UpdatePos(wnd, ci.x, ci.y, ci.w, ci.h)
 				}
-				// Queue WM_SIZE for windows with a guest WndProc (not WM_PAINT - paintTree handles that)
+				// Queue WM_SIZE / WM_MOVE for windows with a guest WndProc
 				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
-					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
-					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+					if ci.w != prevW || ci.h != prevH {
+						lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
+					}
+					if ci.x != prevX || ci.y != prevY {
+						relX := ci.x - ox
+						relY := ci.y - oy
+						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0003, 0, uint64(uint16(relX)) | (uint64(uint16(relY)) << 16)})
+					}
+				}
+				if bRepaint != 0 {
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
 				}
 			}
 			ctx.SetReturn(1)
@@ -15006,21 +15245,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if pRect != 0 {
 				var left, top, right, bottom int32
 				if ci, ok := hwndChildren[hwnd]; ok {
+					// Child window: client area is the full window rect (origin at 0,0)
 					right, bottom = ci.w, ci.h
-					// Minimum size for controls not yet laid out by parent.
-					if right == 0 { right = 200 }
-					if bottom == 0 { bottom = 24 }
+				} else if hwnd == mainHWND {
+					// Top-level window: use Wayland dimensions, subtract menu bar height
+					right, bottom = 800, 600
+					if wlWindow != nil {
+						right, bottom = wlWindow.Width, wlWindow.Height
+					}
+					if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
+						bottom -= menuBarHeight
+					}
+				} else if wnd := win32.Global.Get(hwnd); wnd != nil {
+					// Window registered in global table but not yet in hwndChildren
+					right = wnd.RcClient.Width()
+					bottom = wnd.RcClient.Height()
 				} else {
 					right, bottom = 800, 600
 					if wlWindow != nil {
 						right, bottom = wlWindow.Width, wlWindow.Height
 					}
-					// Subtract menu bar from client area
-					clientTop := int32(0)
-					if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
-						clientTop = menuBarHeight
-					}
-					bottom -= clientTop
 				}
 				ravelog.Logf("[getrect] GetClientRect hwnd=0x%x → %d,%d,%d,%d\n", hwnd, left, top, right, bottom)
 				ctx.Mem.Write32(pRect, uint32(left))
@@ -15035,7 +15279,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hwnd := ctx.Arg(0)
 			pRect := ctx.Arg(1)
 			if pRect != 0 {
-				if ci, ok := hwndChildren[hwnd]; ok {
+				if wnd := win32.Global.Get(hwnd); wnd != nil {
+					// Use the pre-computed screen-absolute window rect from win32.Global
+					ctx.Mem.Write32(pRect, uint32(wnd.RcWindow.Left))
+					ctx.Mem.Write32(pRect+4, uint32(wnd.RcWindow.Top))
+					ctx.Mem.Write32(pRect+8, uint32(wnd.RcWindow.Right))
+					ctx.Mem.Write32(pRect+12, uint32(wnd.RcWindow.Bottom))
+				} else if ci, ok := hwndChildren[hwnd]; ok {
+					// Fallback: child window stored absolute coords
 					ctx.Mem.Write32(pRect, uint32(ci.x))
 					ctx.Mem.Write32(pRect+4, uint32(ci.y))
 					ctx.Mem.Write32(pRect+8, uint32(ci.x+ci.w))
