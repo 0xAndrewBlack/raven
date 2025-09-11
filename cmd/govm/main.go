@@ -783,6 +783,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// Menu data structures
 	const menuBarHeight int32 = 20
+	envVars := map[string]string{} // guest environment variables (SetEnvironmentVariableW/GetEnvironmentVariableW)
 	type menuItem struct {
 		flags   uint32
 		id      uint64
@@ -3985,10 +3986,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetEvent", func(ctx *ntapi.TrapContext) uint32 {
+			if eh := handles.GetEvent(ntapi.Handle(ctx.Arg(0))); eh != nil { eh.Set() }
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ResetEvent", func(ctx *ntapi.TrapContext) uint32 {
+			if eh := handles.GetEvent(ntapi.Handle(ctx.Arg(0))); eh != nil { eh.Reset() }
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -4486,14 +4489,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(uint64(n))
 			return 0
 		})
-		// Helper: write locale info string to ANSI or Unicode buffer
+		// Helper: write locale info string to Unicode buffer
 		writeLocaleInfoW := func(buf uint64, cchBuf uint64, val string) uint32 {
 			ws := utf16Encode(val)
 			if buf == 0 { return uint32(len(ws) + 1) }
 			n := uint64(len(ws) + 1)
 			if cchBuf > 0 && n > cchBuf { n = cchBuf }
-			for i := uint64(0); i < n-1 && i < uint64(len(ws)); i++ { ctx.Mem.Write16(buf+i*2, ws[i]) }
-			ctx.Mem.Write16(buf+(n-1)*2, 0)
+			for i := uint64(0); i < n-1 && i < uint64(len(ws)); i++ { mem.Write16(buf+i*2, ws[i]) }
+			mem.Write16(buf+(n-1)*2, 0)
 			return uint32(n)
 		}
 		getLocaleInfoValue := func(lctype uint32) string {
@@ -4849,11 +4852,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FormatMessageW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // 0 chars written
+			dwFlags := ctx.Arg(0)
+			dwMessageId := ctx.Arg(2)
+			lpBuffer := ctx.Arg(4)
+			nSize := ctx.Arg(5)
+			const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x100
+			msg := fmt.Sprintf("Error 0x%X", dwMessageId)
+			ws := utf16Encode(msg)
+			n := uint64(len(ws))
+			if dwFlags&FORMAT_MESSAGE_ALLOCATE_BUFFER != 0 {
+				// Allocate buffer and write pointer to *lpBuffer
+				bufSize := (n + 2) * 2
+				addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
+				for i, w := range ws { ctx.Mem.Write16(addr+uint64(i)*2, w) }
+				ctx.Mem.Write16(addr+n*2, 0)
+				if lpBuffer != 0 { ctx.Mem.Write64(lpBuffer, addr) }
+			} else if lpBuffer != 0 && nSize > 0 {
+				maxN := nSize - 1; if n > maxN { n = maxN }
+				for i := uint64(0); i < n; i++ { ctx.Mem.Write16(lpBuffer+i*2, ws[i]) }
+				ctx.Mem.Write16(lpBuffer+n*2, 0)
+			}
+			ctx.SetReturn(n)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FormatMessageA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			dwFlags := ctx.Arg(0)
+			dwMessageId := ctx.Arg(2)
+			lpBuffer := ctx.Arg(4)
+			nSize := ctx.Arg(5)
+			const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x100
+			msg := fmt.Sprintf("Error 0x%X", dwMessageId)
+			n := uint64(len(msg))
+			if dwFlags&FORMAT_MESSAGE_ALLOCATE_BUFFER != 0 {
+				addr := mem.Mmap(0, n+2, mmu.PermRead|mmu.PermWrite)
+				for i := range msg { ctx.Mem.Write8(addr+uint64(i), msg[i]) }
+				ctx.Mem.Write8(addr+n, 0)
+				if lpBuffer != 0 { ctx.Mem.Write64(lpBuffer, addr) }
+			} else if lpBuffer != 0 && nSize > 0 {
+				maxN := nSize - 1; if n > maxN { n = maxN }
+				for i := uint64(0); i < n; i++ { ctx.Mem.Write8(lpBuffer+i, msg[i]) }
+				ctx.Mem.Write8(lpBuffer+n, 0)
+			}
+			ctx.SetReturn(n)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LoadResource", func(ctx *ntapi.TrapContext) uint32 {
@@ -5089,10 +5129,24 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// GetEnvironmentVariableA: return 0 (not found)
+		// GetEnvironmentVariableA: look up in envVars, then os.Getenv
 		d.RegisterAutoStubHandler(kernel32, "GetEnvironmentVariableA", func(ctx *ntapi.TrapContext) uint32 {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 203) // ERROR_ENVVAR_NOT_FOUND
-			ctx.SetReturn(0)
+			name := readGuestString(ctx.Arg(0))
+			buf := ctx.Arg(1)
+			size := ctx.Arg(2)
+			var val string
+			if v, ok := envVars[name]; ok { val = v } else { val = os.Getenv(name) }
+			if val == "" {
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 203)
+				ctx.SetReturn(0)
+				return 0
+			}
+			needed := uint64(len(val) + 1)
+			if buf == 0 || size == 0 { ctx.SetReturn(needed); return 0 }
+			if needed > size { ctx.SetReturn(needed); return 0 }
+			for i := range val { ctx.Mem.Write8(buf+uint64(i), val[i]) }
+			ctx.Mem.Write8(buf+uint64(len(val)), 0)
+			ctx.SetReturn(uint64(len(val)))
 			return 0
 		})
 
@@ -5207,9 +5261,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// GetConsoleWindow: no real console window in emulator
+		// GetConsoleWindow: return mainHWND for apps that need a window handle
 		d.RegisterAutoStubHandler(kernel32, "GetConsoleWindow", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // NULL
+			ctx.SetReturn(mainHWND)
 			return 0
 		})
 
@@ -5593,7 +5647,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CompareFileTime", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ft1, _ := ctx.Mem.Read64(ctx.Arg(0))
+			ft2, _ := ctx.Mem.Read64(ctx.Arg(1))
+			if ft1 < ft2 { ctx.SetReturn(uint64(0xFFFFFFFF)) } else if ft1 > ft2 { ctx.SetReturn(1) } else { ctx.SetReturn(0) }
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CompareStringA", func(ctx *ntapi.TrapContext) uint32 {
@@ -6297,7 +6353,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FileTimeToLocalFileTime", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			src := ctx.Arg(0)
+			dst := ctx.Arg(1)
+			if src != 0 && dst != 0 { v, _ := ctx.Mem.Read64(src); ctx.Mem.Write64(dst, v) }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FillConsoleOutputAttribute", func(ctx *ntapi.TrapContext) uint32 {
@@ -6725,11 +6784,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCurrencyFormatEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			// lpLocaleName, dwFlags, lpValue, lpFormat, lpCurrencyStr, cchCurrency
+			lpValue := ctx.Arg(2)
+			lpOut := ctx.Arg(4)
+			cch := ctx.Arg(5)
+			if lpValue == 0 || lpOut == 0 || cch == 0 { ctx.SetReturn(0); return 0 }
+			s := readGuestUTF16(lpValue)
+			ws := utf16Encode(s)
+			n := uint64(len(ws) + 1); if n > cch { n = cch }
+			for i := uint64(0); i+1 < n; i++ { ctx.Mem.Write16(lpOut+i*2, ws[i]) }
+			ctx.Mem.Write16(lpOut+(n-1)*2, 0)
+			ctx.SetReturn(n)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCurrencyFormatW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			lpValue := ctx.Arg(2)
+			lpOut := ctx.Arg(4)
+			cch := ctx.Arg(5)
+			if lpValue == 0 || lpOut == 0 || cch == 0 { ctx.SetReturn(0); return 0 }
+			s := readGuestUTF16(lpValue)
+			ws := utf16Encode(s)
+			n := uint64(len(ws) + 1); if n > cch { n = cch }
+			for i := uint64(0); i+1 < n; i++ { ctx.Mem.Write16(lpOut+i*2, ws[i]) }
+			ctx.Mem.Write16(lpOut+(n-1)*2, 0)
+			ctx.SetReturn(n)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCurrentActCtx", func(ctx *ntapi.TrapContext) uint32 {
@@ -6904,8 +6982,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			lpExitCode := ctx.Arg(1)
 			if lpExitCode != 0 { ctx.Mem.Write32(lpExitCode, 259) } // STILL_ACTIVE
 			ctx.SetReturn(1)
-			return 0
-		})
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetExpandedNameA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7142,11 +7218,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetNumberFormatEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			lpValue := ctx.Arg(2)
+			lpOut := ctx.Arg(4)
+			cch := ctx.Arg(5)
+			if lpValue == 0 || lpOut == 0 || cch == 0 { ctx.SetReturn(0); return 0 }
+			s := readGuestUTF16(lpValue)
+			ws := utf16Encode(s)
+			n := uint64(len(ws) + 1); if n > cch { n = cch }
+			for i := uint64(0); i+1 < n; i++ { ctx.Mem.Write16(lpOut+i*2, ws[i]) }
+			ctx.Mem.Write16(lpOut+(n-1)*2, 0)
+			ctx.SetReturn(n)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetNumberFormatW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			lpValue := ctx.Arg(2)
+			lpOut := ctx.Arg(4)
+			cch := ctx.Arg(5)
+			if lpValue == 0 || lpOut == 0 || cch == 0 { ctx.SetReturn(0); return 0 }
+			s := readGuestUTF16(lpValue)
+			ws := utf16Encode(s)
+			n := uint64(len(ws) + 1); if n > cch { n = cch }
+			for i := uint64(0); i+1 < n; i++ { ctx.Mem.Write16(lpOut+i*2, ws[i]) }
+			ctx.Mem.Write16(lpOut+(n-1)*2, 0)
+			ctx.SetReturn(n)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetNumberOfConsoleFonts", func(ctx *ntapi.TrapContext) uint32 {
@@ -7234,7 +7328,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetProcessAffinityMask", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			lpProcessAffinityMask := ctx.Arg(1)
+			lpSystemAffinityMask := ctx.Arg(2)
+			if lpProcessAffinityMask != 0 { ctx.Mem.Write64(lpProcessAffinityMask, 0xF) }
+			if lpSystemAffinityMask != 0 { ctx.Mem.Write64(lpSystemAffinityMask, 0xF) }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetProcessDEPPolicy", func(ctx *ntapi.TrapContext) uint32 {
@@ -7354,7 +7452,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetStringTypeA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetSystemCpuSetInformation", func(ctx *ntapi.TrapContext) uint32 {
@@ -7482,7 +7580,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetTempFileNameW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // error
+			lpTempFileName := ctx.Arg(3)
+			uUnique := ctx.Arg(2)
+			prefix := readGuestUTF16(ctx.Arg(1))
+			if len(prefix) > 3 { prefix = prefix[:3] }
+			uniqueN := uUnique; if uniqueN == 0 { uniqueN = uint64(time.Now().UnixNano() & 0xFFFF) }
+			name := fmt.Sprintf("C:\\Windows\\Temp\\%s%04X.tmp", prefix, uniqueN)
+			if lpTempFileName != 0 {
+				ws := utf16Encode(name)
+				for i, w := range ws { ctx.Mem.Write16(lpTempFileName+uint64(i)*2, w) }
+				ctx.Mem.Write16(lpTempFileName+uint64(len(ws))*2, 0)
+			}
+			ctx.SetReturn(uniqueN)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetTempPath2A", func(ctx *ntapi.TrapContext) uint32 {
@@ -7490,11 +7599,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetTempPath2W", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			buf := ctx.Arg(1)
+			s := `C:\Windows\Temp\`
+			ws := utf16Encode(s)
+			if buf != 0 { for i, w := range ws { ctx.Mem.Write16(buf+uint64(i)*2, w) }; ctx.Mem.Write16(buf+uint64(len(ws))*2, 0) }
+			ctx.SetReturn(uint64(len(ws)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetTempPathA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // error
+			buf := ctx.Arg(1)
+			s := `C:\Windows\Temp\`
+			if buf != 0 { for i := 0; i < len(s); i++ { ctx.Mem.Write8(buf+uint64(i), s[i]) }; ctx.Mem.Write8(buf+uint64(len(s)), 0) }
+			ctx.SetReturn(uint64(len(s)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetThreadContext", func(ctx *ntapi.TrapContext) uint32 {
@@ -7578,7 +7694,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetUserDefaultLocaleName", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			buf := ctx.Arg(0)
+			cch := ctx.Arg(1)
+			ws := utf16Encode("en-US")
+			n := uint64(len(ws) + 1)
+			if buf != 0 && cch > 0 {
+				if n > cch { n = cch }
+				for i, w := range ws { if uint64(i) < n-1 { ctx.Mem.Write16(buf+uint64(i)*2, w) } }
+				ctx.Mem.Write16(buf+(n-1)*2, 0)
+			}
+			ctx.SetReturn(n)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetUserDefaultUILanguage", func(ctx *ntapi.TrapContext) uint32 {
@@ -7952,7 +8077,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "IsValidLocaleName", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ctx.SetReturn(1) // TRUE - always valid
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "IsValidNLSVersion", func(ctx *ntapi.TrapContext) uint32 {
@@ -8072,7 +8197,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LCIDToLocaleName", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			buf := ctx.Arg(1)
+			cch := ctx.Arg(2)
+			ws := utf16Encode("en-US")
+			n := uint64(len(ws) + 1)
+			if buf != 0 && cch > 0 {
+				if n > cch { n = cch }
+				for i, w := range ws { if uint64(i) < n-1 { ctx.Mem.Write16(buf+uint64(i)*2, w) } }
+				ctx.Mem.Write16(buf+(n-1)*2, 0)
+			}
+			ctx.SetReturn(n - 1) // returns char count without null
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LZClose", func(ctx *ntapi.TrapContext) uint32 {
@@ -8136,7 +8270,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalFileTimeToFileTime", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			src := ctx.Arg(0)
+			dst := ctx.Arg(1)
+			if src != 0 && dst != 0 { v, _ := ctx.Mem.Read64(src); ctx.Mem.Write64(dst, v) }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalFlags", func(ctx *ntapi.TrapContext) uint32 {
@@ -8148,11 +8285,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalLock", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ctx.SetReturn(ctx.Arg(0)) // return pointer itself (LMEM_FIXED)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalReAlloc", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			// hMem=Arg(0), uBytes=Arg(1), uFlags=Arg(2)
+			size := ctx.Arg(1)
+			if size == 0 { size = 1 }
+			addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+			ctx.SetReturn(addr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalShrink", func(ctx *ntapi.TrapContext) uint32 {
@@ -8168,7 +8309,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocaleNameToLCID", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			name := readGuestUTF16(ctx.Arg(0))
+			switch strings.ToLower(name) {
+			case "en-gb": ctx.SetReturn(0x0809)
+			case "": ctx.SetReturn(0x0409)
+			default: ctx.SetReturn(0x0409)
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocateXStateFeature", func(ctx *ntapi.TrapContext) uint32 {
@@ -8679,11 +8825,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegOpenKeyExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			phkResult := ctx.Arg(4)
+			if phkResult != 0 { ctx.Mem.Write64(phkResult, ctx.Arg(0)) }
+			ctx.SetReturn(0) // ERROR_SUCCESS
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegOpenKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			phkResult := ctx.Arg(4)
+			if phkResult != 0 { ctx.Mem.Write64(phkResult, ctx.Arg(0)) }
+			ctx.SetReturn(0) // ERROR_SUCCESS
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegOpenUserClassesRoot", func(ctx *ntapi.TrapContext) uint32 {
@@ -8699,11 +8849,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegQueryValueExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegQueryValueExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegRestoreKeyA", func(ctx *ntapi.TrapContext) uint32 {
@@ -9155,7 +9305,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetEnvironmentVariableA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			name := readGuestString(ctx.Arg(0))
+			valPtr := ctx.Arg(1)
+			if valPtr == 0 {
+				delete(envVars, name)
+			} else {
+				envVars[name] = readGuestString(valPtr)
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetErrorMode", func(ctx *ntapi.TrapContext) uint32 {
@@ -9357,7 +9514,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetThreadAffinityMask", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			ctx.SetReturn(ctx.Arg(1)) // return previous affinity mask
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetThreadContext", func(ctx *ntapi.TrapContext) uint32 {
@@ -9521,7 +9678,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SuspendThread", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xFFFFFFFF) // error - can't suspend
+			ctx.SetReturn(0) // previous suspend count = 0
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SwitchToFiber", func(ctx *ntapi.TrapContext) uint32 {
@@ -9533,7 +9690,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SystemTimeToFileTime", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			lpST := ctx.Arg(0)
+			lpFT := ctx.Arg(1)
+			if lpST == 0 || lpFT == 0 { ctx.SetReturn(0); return 0 }
+			year, _ := ctx.Mem.Read16(lpST)
+			month, _ := ctx.Mem.Read16(lpST + 2)
+			day, _ := ctx.Mem.Read16(lpST + 6)
+			hour, _ := ctx.Mem.Read16(lpST + 8)
+			min, _ := ctx.Mem.Read16(lpST + 10)
+			sec, _ := ctx.Mem.Read16(lpST + 12)
+			ms, _ := ctx.Mem.Read16(lpST + 14)
+			t := time.Date(int(year), time.Month(month), int(day), int(hour), int(min), int(sec), int(ms)*1e6, time.UTC)
+			epoch := time.Date(1601, 1, 1, 0, 0, 0, 0, time.UTC)
+			ft := uint64(t.Sub(epoch).Nanoseconds() / 100)
+			ctx.Mem.Write64(lpFT, ft)
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "TerminateJobObject", func(ctx *ntapi.TrapContext) uint32 {
@@ -9593,7 +9764,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "TzSpecificLocalTimeToSystemTime", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			src := ctx.Arg(1)
+			dst := ctx.Arg(2)
+			if src != 0 && dst != 0 {
+				for i := uint64(0); i < 16; i++ { b, _ := ctx.Mem.Read8(src + i); ctx.Mem.Write8(dst+i, b) }
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UmsThreadYield", func(ctx *ntapi.TrapContext) uint32 {
@@ -10709,24 +10885,57 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			buf := ctx.Arg(3)
 			folder := ctx.Arg(1)
 			var path string
-			switch int32(folder) {
-			case 0x1a: // CSIDL_APPDATA
-				path = `C:\Users\user\AppData\Roaming`
-			case 0x1c: // CSIDL_LOCAL_APPDATA
-				path = `C:\Users\user\AppData\Local`
-			case 0x0028: // CSIDL_PROFILE
-				path = `C:\Users\user`
-			default:
-				path = `C:\Users\user`
+			switch int32(folder) & 0xFF {
+			case 0x00: path = `C:\Users\user\Desktop`           // CSIDL_DESKTOP
+			case 0x05: path = `C:\Users\user\Documents`         // CSIDL_MYDOCUMENTS
+			case 0x08: path = `C:\Users\user\AppData\Roaming\Microsoft\Windows\Recent` // CSIDL_RECENT
+			case 0x09: path = `C:\Users\user\AppData\Roaming\Microsoft\Windows\SendTo` // CSIDL_SENDTO
+			case 0x0B: path = `C:\Users\user\AppData\Roaming\Microsoft\Windows\Start Menu` // CSIDL_STARTMENU
+			case 0x0D: path = `C:\Users\user\Music`             // CSIDL_MYMUSIC
+			case 0x0E: path = `C:\Users\user\Videos`            // CSIDL_MYVIDEO
+			case 0x10: path = `C:\Windows\Desktop`              // CSIDL_DESKTOPDIRECTORY
+			case 0x11: path = `C:\`                             // CSIDL_DRIVES
+			case 0x14: path = `C:\Users\user\Favorites`         // CSIDL_FAVORITES
+			case 0x1A: path = `C:\Users\user\AppData\Roaming`   // CSIDL_APPDATA
+			case 0x1C: path = `C:\Users\user\AppData\Local`     // CSIDL_LOCAL_APPDATA
+			case 0x1D: path = `C:\Windows\Temp`                 // CSIDL_INTERNET_CACHE
+			case 0x24: path = `C:\Windows`                      // CSIDL_WINDOWS
+			case 0x25: path = `C:\Windows\System32`             // CSIDL_SYSTEM
+			case 0x26: path = `C:\Program Files`                // CSIDL_PROGRAM_FILES
+			case 0x27: path = `C:\Users\user\Pictures`          // CSIDL_MYPICTURES
+			case 0x28: path = `C:\Users\user`                   // CSIDL_PROFILE
+			case 0x29: path = `C:\Windows\System32`             // CSIDL_SYSTEMX86
+			case 0x2A: path = `C:\Program Files`                // CSIDL_PROGRAM_FILESX86
+			case 0x2B: path = `C:\Program Files\Common Files`   // CSIDL_PROGRAM_FILES_COMMON
+			default:   path = `C:\Users\user`
 			}
-			for i, ch := range path {
-				ctx.Mem.Write16(buf+uint64(i*2), uint16(ch))
+			if buf != 0 {
+				for i, ch := range path {
+					ctx.Mem.Write16(buf+uint64(i*2), uint16(ch))
+				}
+				ctx.Mem.Write16(buf+uint64(len(path)*2), 0)
 			}
-			ctx.Mem.Write16(buf+uint64(len(path)*2), 0)
 			ctx.SetReturn(0) // S_OK
 			return 0
 		})
 		d.RegisterAutoStubHandler(shell32, "DragAcceptFiles", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "SHGetKnownFolderPath", func(ctx *ntapi.TrapContext) uint32 {
+			// rfid = Arg(0) pointer to KNOWNFOLDERID GUID, ppszPath = Arg(2)
+			ppszPath := ctx.Arg(2)
+			path := `C:\Users\user\AppData\Roaming`
+			ws := utf16Encode(path)
+			bufSize := uint64(len(ws)+1) * 2
+			addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
+			for i, w := range ws { mem.Write16(addr+uint64(i)*2, w) }
+			mem.Write16(addr+uint64(len(ws))*2, 0)
+			if ppszPath != 0 { ctx.Mem.Write64(ppszPath, addr) }
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "SHCreateDirectoryExW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
 			return 0
 		})
 		d.RegisterAutoStubHandler(shell32, "DragQueryFileW", func(ctx *ntapi.TrapContext) uint32 {
@@ -11158,30 +11367,39 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 			return 0
 		})
-		// CryptAcquireContextW: acquire a CSP handle - not supported
+		// CryptAcquireContextW: acquire a CSP handle
 		d.RegisterAutoStubHandler(advapi32, "CryptAcquireContextW", func(ctx *ntapi.TrapContext) uint32 {
 			phProv := ctx.Arg(0)
 			if phProv != 0 {
-				ctx.Mem.Write64(phProv, 0)
+				ctx.Mem.Write64(phProv, 0xC0DE1234)
 			}
-			ctx.SetReturn(0) // FALSE
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		// CryptCreateHash, CryptHashData, CryptGetHashParam, CryptDestroyHash, CryptReleaseContext
 		d.RegisterAutoStubHandler(advapi32, "CryptCreateHash", func(ctx *ntapi.TrapContext) uint32 {
 			phHash := ctx.Arg(3)
 			if phHash != 0 {
-				ctx.Mem.Write64(phHash, 0)
+				ctx.Mem.Write64(phHash, 0xC0DE5678) // fake hash handle
 			}
-			ctx.SetReturn(0) // FALSE
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "CryptHashData", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "CryptGetHashParam", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			pbData := ctx.Arg(3)
+			pdwDataLen := ctx.Arg(4)
+			if pdwDataLen != 0 {
+				n, _ := ctx.Mem.Read32(pdwDataLen)
+				if pbData != 0 && n > 0 {
+					// Write zeroed hash data
+					for i := uint32(0); i < n && i < 64; i++ { ctx.Mem.Write8(pbData+uint64(i), 0) }
+				}
+			}
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "CryptDestroyHash", func(ctx *ntapi.TrapContext) uint32 {
@@ -11190,6 +11408,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(advapi32, "CryptReleaseContext", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptGenRandom", func(ctx *ntapi.TrapContext) uint32 {
+			dwLen := ctx.Arg(1)
+			pbBuffer := ctx.Arg(2)
+			if pbBuffer != 0 && dwLen > 0 {
+				buf := make([]byte, dwLen)
+				_, _ = unix.Getrandom(buf, 0)
+				for i, b := range buf { ctx.Mem.Write8(pbBuffer+uint64(i), b) }
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptEncrypt", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptDecrypt", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
 			return 0
 		})
 	}
@@ -11972,6 +12209,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(ole32, "CoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
 			return 0
 		})
+		d.RegisterAutoStubHandler(ole32, "CoTaskMemAlloc", func(ctx *ntapi.TrapContext) uint32 {
+			size := ctx.Arg(0)
+			if size == 0 { size = 1 }
+			addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+			ctx.SetReturn(addr)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "CoTaskMemFree", func(ctx *ntapi.TrapContext) uint32 {
+			return 0 // No-op (guest GC handles cleanup)
+		})
+		d.RegisterAutoStubHandler(ole32, "CoTaskMemRealloc", func(ctx *ntapi.TrapContext) uint32 {
+			size := ctx.Arg(1)
+			if size == 0 { size = 1 }
+			addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+			ctx.SetReturn(addr)
+			return 0
+		})
 		d.RegisterAutoStubHandler(ole32, "OleInitialize", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // S_OK
 			return 0
@@ -12039,7 +12293,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		lParam  uint64
 	}
 	var msgQueue []queuedMsg
-	envVars := map[string]string{}
 
 	// win32Timer tracks active SetTimer timers.
 	type win32Timer struct {
@@ -13117,6 +13370,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			mem.Write16(lpOut+uint64(len([]rune(result)))*2, 0)
 			ctx.SetReturn(uint64(len([]rune(result))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(user32, "wsprintfA", func(ctx *ntapi.TrapContext) uint32 {
+			lpOut := ctx.Arg(0)
+			lpFmt := ctx.Arg(1)
+			fmtStr := readGuestString(lpFmt)
+			var args []uint64
+			for i := 2; i < 10; i++ {
+				args = append(args, ctx.Arg(i))
+			}
+			result := wideprintf(fmtStr, args)
+			for i := range result { mem.Write8(lpOut+uint64(i), result[i]) }
+			mem.Write8(lpOut+uint64(len(result)), 0)
+			ctx.SetReturn(uint64(len(result)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "RegisterClassW", func(ctx *ntapi.TrapContext) uint32 {
@@ -19668,6 +19935,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0) // 0 = no composition string / GCS_RESULTSTR not available
 			return 0
 		})
+		d.RegisterAutoStubHandler(imm32dll, "ImmGetDefaultIMEWnd", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL - no IME window
+			return 0
+		})
+		d.RegisterAutoStubHandler(imm32dll, "ImmAssociateContext", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL - no previous context
+			return 0
+		})
+		d.RegisterAutoStubHandler(imm32dll, "ImmAssociateContextEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(imm32dll, "ImmDisableIME", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(imm32dll, "ImmIsIME", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - no IME
+			return 0
+		})
 		for _, fname := range []string{
 			"ImmSetCandidateWindow", "ImmSetCompositionWindow",
 			"ImmSetCompositionFontW", "ImmSetCompositionStringW",
@@ -19689,9 +19976,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(sensapi, "IsNetworkAlive", func(ctx *ntapi.TrapContext) uint32 {
 			lpdwFlags := ctx.Arg(0)
 			if lpdwFlags != 0 {
-				ctx.Mem.Write32(lpdwFlags, 0)
+				ctx.Mem.Write32(lpdwFlags, 1) // NETWORK_ALIVE_LAN
 			}
-			ctx.SetReturn(0) // FALSE - no network in emulator
+			ctx.SetReturn(1) // TRUE - pretend connected
 			return 0
 		})
 		d.RegisterAutoStubHandler(sensapi, "IsDestinationReachableW", func(ctx *ntapi.TrapContext) uint32 {
@@ -19747,6 +20034,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	if wininet, ok := synthByName["wininet.dll"]; ok {
 		d.RegisterAutoStubHandler(wininet, "InternetCrackUrlW", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // FALSE - no URL parsing in emulator
+			return 0
+		})
+		d.RegisterAutoStubHandler(wininet, "InternetGetConnectedState", func(ctx *ntapi.TrapContext) uint32 {
+			lpdwFlags := ctx.Arg(0)
+			if lpdwFlags != 0 { ctx.Mem.Write32(lpdwFlags, 0x40) } // INTERNET_CONNECTION_LAN
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 	}

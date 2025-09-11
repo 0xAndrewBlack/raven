@@ -35,6 +35,34 @@ type EventHandle struct {
 
 func (h *EventHandle) handleType() string { return "event" }
 
+// Set signals the event (SetEvent).
+func (h *EventHandle) Set() {
+	h.mu.Lock()
+	h.signaled = true
+	h.mu.Unlock()
+}
+
+// Reset clears the event signal (ResetEvent).
+func (h *EventHandle) Reset() {
+	h.mu.Lock()
+	h.signaled = false
+	h.mu.Unlock()
+}
+
+// IsSignaled returns whether the event is signaled.
+// If autoReset is true, it clears the signal after returning true.
+func (h *EventHandle) IsSignaled() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.signaled {
+		if h.autoReset {
+			h.signaled = false
+		}
+		return true
+	}
+	return false
+}
+
 // MutantHandle is a Win32 mutex object.
 type MutantHandle struct {
 	mu       sync.Mutex
