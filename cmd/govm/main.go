@@ -560,7 +560,7 @@ for _, synth := range autoSynthDLLs {
 peBasename := filepath.Base(filepath.Dir(absPath))
 winImagePath := `C:\` + peBasename + `\` + filepath.Base(absPath)
 var tmPtr *thread.Manager
-registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime)
+registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry)
 
 // Set up Win32k subsystem
 w32k := win32k.New(mem, handles)
@@ -722,7 +722,7 @@ tm.Wait()
 
 // registerAutoSynthHandlers registers vmcall handlers for critical
 // CRT and Win32 functions in auto-generated synthetic DLLs.
-func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule, tmPtr **thread.Manager, bootTime time.Time) {
+func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule, tmPtr **thread.Manager, bootTime time.Time, regHive *ntapi.RegistryHive) {
 	synthByName := make(map[string]*ntapi.SynthPE)
 	for _, s := range dlls {
 		synthByName[strings.ToLower(s.Name)] = s
@@ -9179,7 +9179,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			existed := ctx.Reg.OpenKey(path) != nil
 			key := ctx.Reg.CreateKey(path)
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(6); phk != 0 {
 				ctx.Mem.Write64(phk, uint64(h))
 			}
@@ -9198,7 +9198,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			existed := ctx.Reg.OpenKey(path) != nil
 			key := ctx.Reg.CreateKey(path)
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(6); phk != 0 {
 				ctx.Mem.Write64(phk, uint64(h))
 			}
@@ -9368,7 +9368,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
 			if key == nil { ctx.SetReturn(2); return 0 }
-			tmpH := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			tmpH := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			defer handles.Close(ntapi.Handle(tmpH))
 			old0 := ctx.Arg(0); _ = old0
 			// reuse regQueryValue by temporarily patching args
@@ -9426,7 +9426,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := `HKEY_CURRENT_USER`
 			key := ctx.Reg.OpenKey(path)
 			if key == nil { key = ctx.Reg.CreateKey(path) }
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(1); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
@@ -9436,7 +9436,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
 			if key == nil { key = ctx.Reg.CreateKey(path) } // auto-create for compat
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
@@ -9446,7 +9446,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
 			if key == nil { key = ctx.Reg.CreateKey(path) } // auto-create for compat
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
@@ -9455,7 +9455,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := `HKEY_CLASSES_ROOT`
 			key := ctx.Reg.OpenKey(path)
 			if key == nil { key = ctx.Reg.CreateKey(path) }
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(1); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
@@ -11873,7 +11873,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
 			if key == nil { key = ctx.Reg.CreateKey(path) }
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
@@ -11883,7 +11883,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
 			if key == nil { key = ctx.Reg.CreateKey(path) }
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(2); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
@@ -11916,7 +11916,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			existed := ctx.Reg.OpenKey(path) != nil
 			key := ctx.Reg.CreateKey(path)
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(6); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			if disp := ctx.Arg(7); disp != 0 {
 				if existed { ctx.Mem.Write32(disp, 2) } else { ctx.Mem.Write32(disp, 1) }
@@ -12024,7 +12024,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
 			if key == nil { key = ctx.Reg.CreateKey(path) }
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
@@ -12043,7 +12043,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				path := regKeyPath(hKey, subKey)
 				key := ctx.Reg.OpenKey(path)
 				if key == nil { ctx.SetReturn(2); return 0 }
-				h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+				h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 				ctx.SetReturn(uint64(regQueryValue(ctx, uint64(h), valueName)))
 			} else {
 				ctx.SetReturn(uint64(regQueryValue(ctx, hKey, valueName)))
@@ -16726,38 +16726,104 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// InsertMenuW / AppendMenuW / ModifyMenuW / DeleteMenu
-		d.RegisterAutoStubHandler(user32, "InsertMenuW", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
-			return 0
-		})
-		d.RegisterAutoStubHandler(user32, "AppendMenuW", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
-			return 0
-		})
+		// ModifyMenuW: actually modify an existing menu item
 		d.RegisterAutoStubHandler(user32, "ModifyMenuW", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
-			return 0
-		})
-		d.RegisterAutoStubHandler(user32, "DeleteMenu", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
-			return 0
-		})
-
-		// GetMenuItemCount
-		d.RegisterAutoStubHandler(user32, "GetMenuItemCount", func(ctx *ntapi.TrapContext) uint32 {
-			hmenu := ctx.Arg(0)
-			if m, ok := menus[hmenu]; ok {
-				ctx.SetReturn(uint64(len(m.items)))
+			hMenu := ctx.Arg(0)
+			idPos := ctx.Arg(1)
+			flags := uint32(ctx.Arg(2))
+			idNewItem := ctx.Arg(3)
+			lpNewItem := ctx.Arg(4)
+			m, ok := menus[hMenu]
+			if !ok { ctx.SetReturn(0); return 0 }
+			const MF_BYPOSITION = 0x0400
+			const mfSeparator = 0x0800
+			if flags&MF_BYPOSITION != 0 {
+				idx := int(idPos)
+				if idx >= 0 && idx < len(m.items) {
+					m.items[idx].flags = flags
+					m.items[idx].id = idNewItem
+					if flags&mfSeparator == 0 && lpNewItem != 0 {
+						m.items[idx].text = readGuestUTF16(lpNewItem)
+					}
+				}
 			} else {
-				ctx.SetReturn(0)
+				for i := range m.items {
+					if m.items[i].id == idPos {
+						m.items[i].flags = flags
+						m.items[i].id = idNewItem
+						if flags&mfSeparator == 0 && lpNewItem != 0 {
+							m.items[i].text = readGuestUTF16(lpNewItem)
+						}
+						break
+					}
+				}
 			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		// DeleteMenu: remove a menu item by position or ID
+		d.RegisterAutoStubHandler(user32, "DeleteMenu", func(ctx *ntapi.TrapContext) uint32 {
+			hMenu := ctx.Arg(0)
+			idPos := ctx.Arg(1)
+			flags := uint32(ctx.Arg(2))
+			m, ok := menus[hMenu]
+			if !ok { ctx.SetReturn(0); return 0 }
+			const MF_BYPOSITION = 0x0400
+			if flags&MF_BYPOSITION != 0 {
+				idx := int(idPos)
+				if idx >= 0 && idx < len(m.items) {
+					m.items = append(m.items[:idx], m.items[idx+1:]...)
+				}
+			} else {
+				for i := range m.items {
+					if m.items[i].id == idPos {
+						m.items = append(m.items[:i], m.items[i+1:]...)
+						break
+					}
+				}
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 
-		// GetMenuItemInfoW - stub with minimal info
+		// GetMenuItemInfoW: fill MENUITEMINFOW for a valid item
 		d.RegisterAutoStubHandler(user32, "GetMenuItemInfoW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hMenu := ctx.Arg(0)
+			item := ctx.Arg(1)
+			byPos := ctx.Arg(2) != 0
+			lpmii := ctx.Arg(3)
+			if lpmii == 0 { ctx.SetReturn(0); return 0 }
+			m, ok := menus[hMenu]
+			if !ok { ctx.SetReturn(0); return 0 }
+			var found *menuItem
+			if byPos {
+				idx := int(item)
+				if idx >= 0 && idx < len(m.items) { found = &m.items[idx] }
+			} else {
+				for i := range m.items {
+					if m.items[i].id == item { found = &m.items[i]; break }
+				}
+			}
+			if found == nil { ctx.SetReturn(0); return 0 }
+			fMask, _ := ctx.Mem.Read32(lpmii + 4)
+			const MIIM_TYPE   = 0x00000010
+			const MIIM_ID     = 0x00000002
+			const MIIM_STRING = 0x00000040
+			if fMask&MIIM_ID != 0 { ctx.Mem.Write32(lpmii+16, uint32(found.id)) }
+			if fMask&(MIIM_TYPE|MIIM_STRING) != 0 {
+				// 32-bit MENUITEMINFOW: dwTypeData ptr at +36, cch at +40
+				dtPtr, _ := ctx.Mem.Read64(lpmii + 36)
+				cch, _ := ctx.Mem.Read32(lpmii + 40)
+				if dtPtr != 0 && cch > 0 {
+					ws := utf16Encode(found.text)
+					limit := int(cch) - 1
+					if limit > len(ws) { limit = len(ws) }
+					for i := 0; i < limit; i++ { ctx.Mem.Write16(dtPtr+uint64(i)*2, ws[i]) }
+					ctx.Mem.Write16(dtPtr+uint64(limit)*2, 0)
+				}
+				ctx.Mem.Write32(lpmii+40, uint32(len(utf16Encode(found.text))))
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 
@@ -16838,9 +16904,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						ctx.SetReturn(1)
 			return 0
 		})
-		// RemoveMenu: remove a menu item - no-op stub
+		// RemoveMenu: remove a menu item by position or ID
 		d.RegisterAutoStubHandler(user32, "RemoveMenu", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			hMenu := ctx.Arg(0)
+			idPos := ctx.Arg(1)
+			flags := uint32(ctx.Arg(2))
+			m, ok := menus[hMenu]
+			if !ok { ctx.SetReturn(0); return 0 }
+			const MF_BYPOSITION = 0x0400
+			if flags&MF_BYPOSITION != 0 {
+				idx := int(idPos)
+				if idx >= 0 && idx < len(m.items) {
+					m.items = append(m.items[:idx], m.items[idx+1:]...)
+				}
+			} else {
+				for i := range m.items {
+					if m.items[i].id == idPos {
+						m.items = append(m.items[:i], m.items[i+1:]...)
+						break
+					}
+				}
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		// GetDlgCtrlID: return control ID from HWND - return 0
@@ -17930,7 +18015,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetMenuItemID", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			hMenu := ctx.Arg(0)
+			nPos := int(ctx.Arg(1))
+			m, ok := menus[hMenu]
+			if !ok || nPos < 0 || nPos >= len(m.items) { ctx.SetReturn(0xFFFFFFFF); return 0 }
+			ctx.SetReturn(m.items[nPos].id)
+			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetMenuCheckMarkDimensions", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0x000D000D); return 0 // MAKELONG(13,13)
