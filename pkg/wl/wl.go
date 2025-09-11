@@ -67,6 +67,7 @@ const shmFmtXRGB8888 = 1
 // Display is a connection to a Wayland compositor.
 type Display struct {
 	conn    *net.UnixConn
+	fd      int    // raw socket fd for unix.Select/epoll use
 	nextID  uint32
 	objects map[uint32]objKind
 
@@ -533,6 +534,11 @@ func Connect() (*Display, error) {
 		objects: map[uint32]objKind{1: kindDisplay},
 	}
 
+	// extract raw fd for non-blocking Poll / unix.Select
+	if sc, err2 := conn.SyscallConn(); err2 == nil {
+		_ = sc.Control(func(f uintptr) { d.fd = int(f) })
+	}
+
 	// wl_display.get_registry
 	d.registryID = d.alloc(kindRegistry)
 	d.send(1, 1, pu32(d.registryID))
@@ -729,6 +735,25 @@ func (d *Display) Dispatch() (EventType, error) {
 			return evt, nil
 		}
 	}
+}
+
+// Fd returns the underlying socket file descriptor for use with select/epoll.
+func (d *Display) Fd() int { return d.fd }
+
+// Poll checks whether there is data to read on the Wayland socket without
+// blocking. If data is available it calls dispatchOne() and returns the event.
+// Returns EventNone immediately when no data is ready.
+func (d *Display) Poll() (EventType, error) {
+	if d.fd < 0 {
+		return EventNone, nil
+	}
+	var rfds unix.FdSet
+	rfds.Set(d.fd)
+	n, err := unix.Select(d.fd+1, &rfds, nil, nil, &unix.Timeval{Sec: 0, Usec: 0})
+	if err != nil || n == 0 {
+		return EventNone, nil
+	}
+	return d.dispatchOne()
 }
 
 // PollKey returns the next queued key event, if any.

@@ -1,6 +1,7 @@
 package ntapi
 
 import (
+	"os"
 	"sync"
 )
 
@@ -76,8 +77,19 @@ type HeapHandle struct {
 
 func (h *HeapHandle) handleType() string { return "heap" }
 
-// ThreadHandle represents a dummy thread handle (single-threaded emulation).
-type ThreadHandle struct{}
+// FindHandle is used by FindFirstFileW/FindNextFileW for directory enumeration.
+type FindHandle struct {
+	Entries []os.DirEntry
+	Idx     int
+	Dir     string
+}
+
+func (f *FindHandle) handleType() string { return "find" }
+
+// ThreadHandle represents a Win32 thread handle.
+type ThreadHandle struct {
+	TID int
+}
 
 func (h *ThreadHandle) handleType() string { return "thread" }
 

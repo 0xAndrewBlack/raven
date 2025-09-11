@@ -5,6 +5,7 @@ import (
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/x64"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
@@ -192,4 +193,48 @@ func (m *Manager) GetTID(c arch.CPU) int {
 // Wait blocks until all spawned threads finish.
 func (m *Manager) Wait() {
 	m.wg.Wait()
+}
+
+// CloneWin32Thread creates a new thread for Win32 CreateThread semantics.
+// It sets the first argument register (RCX on x64) to lpParam.
+func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stackBase, stackSize uint64) (int, error) {
+	m.mu.Lock()
+	tid := m.nextID
+	m.nextID++
+	m.mu.Unlock()
+
+	c := parentCPU.CloneForThread()
+	c.SetPC(startAddr)
+	sp := stackBase + stackSize - 16
+	c.SetSP(sp)
+	// Write null return address
+	m.mem.Write64Raw(sp, 0)
+	// Set RCX = lpParam (Win32 calling convention: first arg in RCX)
+	if xc, ok := c.(*x64.CPU); ok {
+		xc.WriteReg(x64.RCX, lpParam)
+	}
+	c.SetSyscallHandler(m.handler)
+
+	if stackBase != 0 && stackSize != 0 {
+		m.registerStack(stackBase, stackSize)
+	}
+
+	t := &Thread{ID: tid, CPU: c}
+	m.mu.Lock()
+	m.threads = append(m.threads, t)
+	m.mu.Unlock()
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		ravelog.Logf("[govm] win32-thread %d start: PC=0x%x SP=0x%x\n", tid, c.GetPC(), c.GetSP())
+		if err := c.Run(); err != nil {
+			ravelog.Logf("[govm] win32-thread %d exited: %v\n", tid, err)
+		}
+		if stackBase != 0 {
+			m.unregisterStack(stackBase)
+		}
+	}()
+
+	return tid, nil
 }
