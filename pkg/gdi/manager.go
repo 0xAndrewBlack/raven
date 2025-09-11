@@ -392,14 +392,13 @@ func (m *Manager) SelectObject(dcH, objH uint64) uint64 {
 		prev := m.findBitmapHandle(dc.Bitmap)
 		bm := obj.Bitmap
 		dc.Bitmap = bm
-		// Selecting a bitmap into a memory DC sets its rendering surface.
-		// Memory DCs work in bitmap-local coordinates (origin = 0,0).
-		// This matches ReactOS: NtGdiSelectBitmap resets DC origin for mem DCs.
-		if !dc.IsScreen && bm != nil && bm.Surf != nil {
+		// Selecting a bitmap into a DC makes it a memory DC targeting that bitmap.
+		// ReactOS: NtGdiSelectBitmap → GreSelectBitmap resets origin to (0,0).
+		if bm != nil && bm.Surf != nil {
 			dc.Target = bm.Surf
+			dc.IsScreen = false
 			dc.OriginX = 0
 			dc.OriginY = 0
-			// Clip rect must also be bitmap-local (not screen-absolute).
 			dc.ClipX0 = 0
 			dc.ClipY0 = 0
 			dc.ClipX1 = bm.Width

@@ -136,26 +136,18 @@ func NewMemoryDC() *DC {
 	}
 }
 
-// InheritFrom copies screen-DC properties to a newly created memory DC
-// so that CreateCompatibleDC inherits origin, clip and colours.
+// InheritFrom copies rendering state from src to a newly created memory DC.
+// ReactOS: NtGdiCreateCompatibleDC → DC_AllocDcWithContext
+// Win32 spec: CreateCompatibleDC inherits colour/mode attributes but NOT
+// origin, clip region, or the screen-vs-memory distinction.
+// Memory DCs always start with IsScreen=false and origin (0,0).
 func (dc *DC) InheritFrom(src *DC) {
-	dc.OriginX = src.OriginX
-	dc.OriginY = src.OriginY
-	dc.ClipX0 = src.ClipX0
-	dc.ClipY0 = src.ClipY0
-	dc.ClipX1 = src.ClipX1
-	dc.ClipY1 = src.ClipY1
+	// Inherit colour and mode attributes only.
 	dc.TextColor = src.TextColor
 	dc.BkColor = src.BkColor
 	dc.BkMode = src.BkMode
 	dc.TextAlign = src.TextAlign
 	dc.MapMode = src.MapMode
-	dc.WindowOrgX = src.WindowOrgX
-	dc.WindowOrgY = src.WindowOrgY
-	dc.WindowExtX = src.WindowExtX
-	dc.WindowExtY = src.WindowExtY
-	dc.ViewportExtX = src.ViewportExtX
-	dc.ViewportExtY = src.ViewportExtY
 	dc.CharExtra = src.CharExtra
 	dc.StretchBltMode = src.StretchBltMode
 	dc.ArcDir = src.ArcDir
@@ -163,11 +155,9 @@ func (dc *DC) InheritFrom(src *DC) {
 	dc.Brush = src.Brush
 	dc.Pen = src.Pen
 	dc.Font = src.Font
-	// Memory DCs created via CreateCompatibleDC share the screen target
-	// until a bitmap is selected. This lets FillRect/TextOut draw through
-	// even without an explicit BitBlt (transparent double-buffer mode).
-	dc.Target = src.Target
-	dc.IsScreen = src.IsScreen
+	// IsScreen, Target, Origin, Clip stay at their zero/false defaults.
+	// When a bitmap is selected via SelectObject, Target and Clip are set
+	// to the bitmap surface bounds (bitmap-local coords, origin 0,0).
 }
 
 // SaveDC pushes the current DC state onto the stack, returning the save count.

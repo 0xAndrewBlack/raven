@@ -162,12 +162,34 @@ func (dc *DC) BitBlt(dx, dy, w, h int32, src *DC, sx, sy int32, rop3 uint32) {
 	if dc.Target == nil {
 		return
 	}
-	// Map destination to absolute coords
+	// Map destination to absolute surface coords using DC origin.
 	adx := dx + dc.OriginX
 	ady := dy + dc.OriginY
-	// Map source to absolute coords then back to surface-local
+	// Map source to source-surface-local coords.
 	asx := sx + src.OriginX
 	asy := sy + src.OriginY
+	// Apply DC clip rect to destination region.
+	if dc.ClipX1 > dc.ClipX0 {
+		if adx < dc.ClipX0 {
+			asx += dc.ClipX0 - adx
+			w -= dc.ClipX0 - adx
+			adx = dc.ClipX0
+		}
+		if ady < dc.ClipY0 {
+			asy += dc.ClipY0 - ady
+			h -= dc.ClipY0 - ady
+			ady = dc.ClipY0
+		}
+		if adx+w > dc.ClipX1 {
+			w = dc.ClipX1 - adx
+		}
+		if ady+h > dc.ClipY1 {
+			h = dc.ClipY1 - ady
+		}
+	}
+	if w <= 0 || h <= 0 {
+		return
+	}
 	switch rop3 & 0xFF0000 {
 	case 0xCC0000: // SRCCOPY
 		dc.Target.BitBlt(adx, ady, src.Target, asx, asy, w, h)
