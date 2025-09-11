@@ -39,6 +39,7 @@ func (w *Window) DrawRect(left, top, right, bottom int32, colorref uint32) {
 
 // DrawText renders a UTF-8 string at (x,y) using the embedded 8x16 bitmap font.
 // Only ASCII 32-126 are rendered; others are shown as '?'.
+// '\n' starts a new line; '\r' is ignored.
 func (w *Window) DrawText(x, y int32, text string, fgColor, bgColor uint32, opaque bool) {
 	// COLORREF: 0x00RRGGBB → Wayland XRGB8888: [B][G][R][X]
 	fgB := byte(fgColor)
@@ -50,10 +51,22 @@ func (w *Window) DrawText(x, y int32, text string, fgColor, bgColor uint32, opaq
 
 	stride := int(w.Stride)
 	cx := int(x)
+	cy := int(y)
 
 	for _, ch := range []byte(text) {
-		if cx+8 > int(w.Width) {
+		if ch == '\n' {
+			cy += 16
+			cx = int(x)
+			continue
+		}
+		if ch == '\r' {
+			continue
+		}
+		if cy+16 > int(w.Height) {
 			break
+		}
+		if cx+8 > int(w.Width) {
+			continue
 		}
 
 		glyphIdx := int(ch) - 32
@@ -64,7 +77,7 @@ func (w *Window) DrawText(x, y int32, text string, fgColor, bgColor uint32, opaq
 		glyphData := font8x16[glyphIdx*16 : (glyphIdx+1)*16]
 
 		for row := 0; row < 16; row++ {
-			py := int(y) + row
+			py := cy + row
 			if py < 0 || py >= int(w.Height) {
 				continue
 			}

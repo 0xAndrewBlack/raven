@@ -63,6 +63,7 @@ var comctl32Exports = []string{
 	"FlatSB_ShowScrollBar",
 	"GetEffectiveClientRect",
 	"GetMUILanguage",
+	"GetWindowSubclass",
 	"HIMAGELIST_QueryInterface",
 	"ImageList_Add",
 	"ImageList_AddIcon",

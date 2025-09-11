@@ -1,6 +1,7 @@
 package main
 
 import (
+"bufio"
 "flag"
 "fmt"
 "image"
@@ -316,6 +317,7 @@ synthWin32u := ntapi.GenerateWin32u(mem)
 // any application (not just NPP) can resolve every function they export.
 synthKernel32 := ntapi.GenerateKernel32(mem)
 synthComctl32 := ntapi.GenerateComctl32(mem)
+synthOleaut32 := ntapi.GenerateOleaut32(mem)
 
 // Map KUSER_SHARED_DATA at 0x7FFE0000 (required by Wine DLLs)
 // Wine's ntdll syscall stubs check byte at +0x308 to decide syscall vs indirect.
@@ -368,6 +370,7 @@ loadedModules["ntdll.dll"] = ntapi.SynthToModule(synthNtdll)
 loadedModules["win32u.dll"] = ntapi.SynthToModule(synthWin32u)
 loadedModules["kernel32.dll"] = ntapi.SynthToModule(synthKernel32)
 loadedModules["comctl32.dll"] = ntapi.SynthToModule(synthComctl32)
+loadedModules["oleaut32.dll"] = ntapi.SynthToModule(synthOleaut32)
 
 var dllLoadOrder []*loader.PEModule
 if sysroot != "" {
@@ -400,7 +403,7 @@ if ucrt, ok := loadedModules["ucrtbase.dll"]; ok {
 // Auto-generate synthetic stub DLLs for any unresolved import DLLs
 autoSynthDLLs := autoSynthUnresolved(mem, result.MainModule, loadedModules)
 // Include pre-generated full DLLs so their handlers are wired in registerAutoSynthHandlers.
-autoSynthDLLs = append(autoSynthDLLs, synthKernel32, synthComctl32)
+autoSynthDLLs = append(autoSynthDLLs, synthKernel32, synthComctl32, synthOleaut32)
 for _, synth := range autoSynthDLLs {
 	dllKey := strings.ToLower(synth.Name)
 	if _, already := loadedModules[dllKey]; !already {
@@ -3811,6 +3814,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			bufAddr := ctx.Arg(1)
 			nBytesToRead := uint32(ctx.Arg(2))
 			lpBytesRead := ctx.Arg(3)
+			// stdin handle
+			if hFile == 0x100 {
+				buf := make([]byte, nBytesToRead)
+				n, err := os.Stdin.Read(buf)
+				ctx.Mem.WriteBytes(bufAddr, buf[:n])
+				if lpBytesRead != 0 {
+					ctx.Mem.Write32(lpBytesRead, uint32(n))
+				}
+				if err != nil {
+					ctx.SetReturn(0)
+				} else {
+					ctx.SetReturn(1)
+				}
+				return 0
+			}
 			obj := handles.Get(hFile)
 			fh, ok := obj.(*ntapi.FileHandle)
 			if !ok {
@@ -4294,9 +4312,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleW", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(1)
+			nCharsToRead := uint32(ctx.Arg(2))
 			charsRead := ctx.Arg(3)
+			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			runes := []rune(line)
+			if uint32(len(runes)) > nCharsToRead {
+				runes = runes[:nCharsToRead]
+			}
+			for i, r := range runes {
+				ctx.Mem.Write16(buf+uint64(i)*2, uint16(r))
+			}
 			if charsRead != 0 {
-				ctx.Mem.Write32(charsRead, 0)
+				ctx.Mem.Write32(charsRead, uint32(len(runes)))
 			}
 			ctx.SetReturn(1) // TRUE
 			return 0
@@ -11299,12 +11327,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if cs.text != "" {
 					wlWindow.DrawText(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[5], true)
 				}
-				// Text cursor (blinking caret)
+				// Text cursor (blinking caret) - tracks last line for multiline edits
 				cursorX := cs.x + 4
+				cursorY := cs.y + 4
 				if cs.text != "" {
-					cursorX += int32(len(cs.text)) * 8
+					lines := strings.Split(cs.text, "\n")
+					cursorY += int32((len(lines)-1) * 16)
+					cursorX += int32(len([]rune(lines[len(lines)-1]))) * 8
 				}
-				wlWindow.DrawRect(cursorX, cs.y+4, cursorX+1, cs.y+4+16, 0x000000)
+				wlWindow.DrawRect(cursorX, cursorY, cursorX+1, cursorY+16, 0x000000)
 			case "msctls_statusbar32":
 				// Snap statusbar to bottom of Wayland window (common control behavior: WM_SIZE repositions it)
 				if wlWindow != nil {
@@ -11509,7 +11540,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						runes := []rune(cs.text)
 						cs.text = string(runes[:len(runes)-1])
 					}
-				} else if ch >= 0x20 || ch == '\r' || ch == '\n' || ch == '\t' {
+				} else if ch == '\r' {
+					cs.text += "\n" // normalize CR to LF for storage
+				} else if ch >= 0x20 || ch == '\n' || ch == '\t' {
 					cs.text += string(ch)
 				}
 				cs.editModified = true
@@ -18751,6 +18784,10 @@ func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[stri
 		}
 		if imp.FuncName != "" {
 			needed[dllKey] = append(needed[dllKey], imp.FuncName)
+		} else {
+			// Ordinal-only import: use a generated placeholder so the DLL gets a synth
+			placeholder := fmt.Sprintf("ord_%d", imp.Ordinal)
+			needed[dllKey] = append(needed[dllKey], placeholder)
 		}
 	}
 
