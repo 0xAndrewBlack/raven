@@ -3,6 +3,7 @@ package ntapi
 import (
 	"os"
 	"sync"
+	"time"
 )
 
 // HANDLE type for Windows guest.
@@ -28,17 +29,27 @@ func (h *FileHandle) handleType() string { return "file" }
 // EventHandle is a Win32 event synchronization object.
 type EventHandle struct {
 	mu        sync.Mutex
+	cond      *sync.Cond
 	signaled  bool
 	autoReset bool
-	waiters   chan struct{}
 }
 
 func (h *EventHandle) handleType() string { return "event" }
+
+func (h *EventHandle) getCond() *sync.Cond {
+	if h.cond == nil {
+		h.cond = sync.NewCond(&h.mu)
+	}
+	return h.cond
+}
 
 // Set signals the event (SetEvent).
 func (h *EventHandle) Set() {
 	h.mu.Lock()
 	h.signaled = true
+	if h.cond != nil {
+		h.cond.Broadcast()
+	}
 	h.mu.Unlock()
 }
 
@@ -54,6 +65,50 @@ func (h *EventHandle) Reset() {
 func (h *EventHandle) IsSignaled() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.signaled {
+		if h.autoReset {
+			h.signaled = false
+		}
+		return true
+	}
+	return false
+}
+
+// WaitTimeout blocks until the event is signaled or the timeout expires.
+// Pass d < 0 for INFINITE wait. Returns true if signaled, false on timeout.
+func (h *EventHandle) WaitTimeout(d time.Duration) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.signaled {
+		if h.autoReset {
+			h.signaled = false
+		}
+		return true
+	}
+	if d == 0 {
+		return false
+	}
+	c := h.getCond()
+	if d < 0 {
+		for !h.signaled {
+			c.Wait()
+		}
+		if h.autoReset {
+			h.signaled = false
+		}
+		return true
+	}
+	// Timed wait: fire a broadcast after the timeout to unblock.
+	deadline := time.Now().Add(d)
+	go func() {
+		time.Sleep(d)
+		h.mu.Lock()
+		c.Broadcast()
+		h.mu.Unlock()
+	}()
+	for !h.signaled && time.Now().Before(deadline) {
+		c.Wait()
+	}
 	if h.signaled {
 		if h.autoReset {
 			h.signaled = false
@@ -118,7 +173,9 @@ func (f *FindHandle) handleType() string { return "find" }
 
 // ThreadHandle represents a Win32 thread handle.
 type ThreadHandle struct {
-	TID int
+	TID      int
+	Done     chan struct{} // closed when the thread exits
+	ExitCode uint32
 }
 
 func (h *ThreadHandle) handleType() string { return "thread" }
@@ -198,6 +255,19 @@ func (ht *HandleTable) GetEvent(h Handle) *EventHandle {
 		return nil
 	}
 	return eh
+}
+
+// GetThread returns the ThreadHandle for a handle, or nil.
+func (ht *HandleTable) GetThread(h Handle) *ThreadHandle {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	th, ok := obj.(*ThreadHandle)
+	if !ok {
+		return nil
+	}
+	return th
 }
 
 // GetRegKey returns the RegistryKeyHandle for a handle, or nil.

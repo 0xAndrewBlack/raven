@@ -197,7 +197,8 @@ func (m *Manager) Wait() {
 
 // CloneWin32Thread creates a new thread for Win32 CreateThread semantics.
 // It sets the first argument register (RCX on x64) to lpParam.
-func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stackBase, stackSize uint64) (int, error) {
+// The returned channel is closed when the thread exits.
+func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stackBase, stackSize uint64) (int, chan struct{}, error) {
 	m.mu.Lock()
 	tid := m.nextID
 	m.nextID++
@@ -224,9 +225,11 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 	m.threads = append(m.threads, t)
 	m.mu.Unlock()
 
+	done := make(chan struct{})
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer close(done)
 		ravelog.Logf("[govm] win32-thread %d start: PC=0x%x SP=0x%x\n", tid, c.GetPC(), c.GetSP())
 		if err := c.Run(); err != nil {
 			ravelog.Logf("[govm] win32-thread %d exited: %v\n", tid, err)
@@ -236,5 +239,5 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 		}
 	}()
 
-	return tid, nil
+	return tid, done, nil
 }

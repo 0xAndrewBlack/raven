@@ -840,7 +840,6 @@ func handleNtCreateEvent(ctx *TrapContext) uint32 {
 	evt := &EventHandle{
 		autoReset: autoReset,
 		signaled:  false,
-		waiters:   make(chan struct{}, 64),
 	}
 
 	h := ctx.Handles.Alloc(evt)
@@ -855,16 +854,7 @@ func handleNtSetEvent(ctx *TrapContext) uint32 {
 		return StatusInvalidHandle
 	}
 
-	evt.mu.Lock()
-	evt.signaled = true
-	evt.mu.Unlock()
-
-	// Wake one waiter
-	select {
-	case evt.waiters <- struct{}{}:
-	default:
-	}
-
+	evt.Set()
 	return StatusSuccess
 }
 
@@ -918,15 +908,13 @@ func handleNtWaitForSingleObject(ctx *TrapContext) uint32 {
 			timeout = 1 * time.Second // default
 		}
 	} else {
-		timeout = 30 * time.Second // max wait
+		timeout = -1 // infinite
 	}
 
-	select {
-	case <-evt.waiters:
+	if evt.WaitTimeout(timeout) {
 		return StatusWait0
-	case <-time.After(timeout):
-		return StatusTimeout
 	}
+	return StatusTimeout
 }
 
 func handleNtWaitForMultipleObjects(ctx *TrapContext) uint32 {

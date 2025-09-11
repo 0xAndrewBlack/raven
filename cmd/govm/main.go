@@ -3099,7 +3099,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LoadLibraryExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // NULL = failed
+			namePtr := ctx.Arg(0)
+			if namePtr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			name := strings.ToLower(readGuestUTF16(namePtr))
+			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
+				name = name[idx+1:]
+			}
+			if !strings.HasSuffix(name, ".dll") {
+				name += ".dll"
+			}
+			if synth, ok := synthByName[name]; ok {
+				ctx.SetReturn(synth.BaseAddr)
+				return 0
+			}
+			newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
+			synthByName[name] = newSynth
+			ravelog.Logf("[win32] LoadLibraryExW: auto-created stub for %q\n", name)
+			ctx.SetReturn(newSynth.BaseAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LoadLibraryW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3113,14 +3132,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
 				name = name[idx+1:]
 			}
+			if !strings.HasSuffix(name, ".dll") {
+				name += ".dll"
+			}
 			// Check if already loaded as a synth
 			if synth, ok := synthByName[name]; ok {
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
-			ravelog.Logf("[win32] LoadLibraryW: %q not found\n", name)
-			procState.LastError = 126 // ERROR_MOD_NOT_FOUND
-			ctx.SetReturn(0)
+			// Auto-create a stub synth for the unknown DLL
+			newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
+			synthByName[name] = newSynth
+			ravelog.Logf("[win32] LoadLibraryW: auto-created stub for %q\n", name)
+			ctx.SetReturn(newSynth.BaseAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LoadLibraryA", func(ctx *ntapi.TrapContext) uint32 {
@@ -3133,13 +3157,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
 				name = name[idx+1:]
 			}
+			if !strings.HasSuffix(name, ".dll") {
+				name += ".dll"
+			}
 			if synth, ok := synthByName[name]; ok {
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
-			ravelog.Logf("[win32] LoadLibraryA: %q not found\n", name)
-			procState.LastError = 126
-			ctx.SetReturn(0)
+			newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
+			synthByName[name] = newSynth
+			ravelog.Logf("[win32] LoadLibraryA: auto-created stub for %q\n", name)
+			ctx.SetReturn(newSynth.BaseAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FreeLibrary", func(ctx *ntapi.TrapContext) uint32 {
@@ -4011,10 +4039,101 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForSingleObject", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // WAIT_OBJECT_0
+			h := ntapi.Handle(ctx.Arg(0))
+			ms := ctx.Arg(1)
+			var timeout time.Duration
+			if ms == 0xFFFFFFFF {
+				timeout = -1 // INFINITE
+			} else if ms == 0 {
+				timeout = 0
+			} else {
+				timeout = time.Duration(ms) * time.Millisecond
+			}
+			const waitObject0 = uint64(0)
+			const waitTimeout = uint64(0x102)
+			// Thread handle: wait for goroutine to finish
+			if th := handles.GetThread(h); th != nil && th.Done != nil {
+				if timeout < 0 {
+					<-th.Done
+					ctx.SetReturn(waitObject0)
+				} else if timeout == 0 {
+					select {
+					case <-th.Done:
+						ctx.SetReturn(waitObject0)
+					default:
+						ctx.SetReturn(waitTimeout)
+					}
+				} else {
+					select {
+					case <-th.Done:
+						ctx.SetReturn(waitObject0)
+					case <-time.After(timeout):
+						ctx.SetReturn(waitTimeout)
+					}
+				}
+				return 0
+			}
+			// Event handle: wait until signaled
+			if eh := handles.GetEvent(h); eh != nil {
+				if eh.WaitTimeout(timeout) {
+					ctx.SetReturn(waitObject0)
+				} else {
+					ctx.SetReturn(waitTimeout)
+				}
+				return 0
+			}
+			// Unknown/process handle: return WAIT_OBJECT_0 immediately
+			ctx.SetReturn(waitObject0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForMultipleObjects", func(ctx *ntapi.TrapContext) uint32 {
+			nCount := ctx.Arg(0)
+			pHandles := ctx.Arg(1)
+			// waitAll := ctx.Arg(2) != 0
+			ms := ctx.Arg(3)
+			var timeout time.Duration
+			if ms == 0xFFFFFFFF {
+				timeout = -1
+			} else if ms == 0 {
+				timeout = 0
+			} else {
+				timeout = time.Duration(ms) * time.Millisecond
+			}
+			// Wait on the first signaled handle (waitAny semantics).
+			// For simplicity, iterate and wait on each in turn.
+			for i := uint64(0); i < nCount && i < 64; i++ {
+				hv, _ := ctx.Mem.Read64(pHandles + i*8)
+				h := ntapi.Handle(hv)
+				if th := handles.GetThread(h); th != nil && th.Done != nil {
+					if timeout < 0 {
+						<-th.Done
+					} else if timeout > 0 {
+						select {
+						case <-th.Done:
+						case <-time.After(timeout):
+							ctx.SetReturn(0x102) // WAIT_TIMEOUT
+							return 0
+						}
+					} else {
+						select {
+						case <-th.Done:
+						default:
+							ctx.SetReturn(0x102)
+							return 0
+						}
+					}
+					ctx.SetReturn(i)
+					return 0
+				}
+				if eh := handles.GetEvent(h); eh != nil {
+					if eh.WaitTimeout(timeout) {
+						ctx.SetReturn(i)
+						return 0
+					}
+					ctx.SetReturn(0x102)
+					return 0
+				}
+			}
 			ctx.SetReturn(0) // WAIT_OBJECT_0
 			return 0
 		})
@@ -4083,11 +4202,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			stackBase := mem.Mmap(0, stackSz, mmu.PermRead|mmu.PermWrite)
 			tm := *tmPtr
 			if tm == nil {
-				h := handles.Alloc(&ntapi.ThreadHandle{TID: 0})
+				th := &ntapi.ThreadHandle{TID: 0, Done: make(chan struct{})}
+				close(th.Done) // immediately done since no real thread runs
+				h := handles.Alloc(th)
 				ctx.SetReturn(uint64(h))
 				return 0
 			}
-			tid, err := tm.CloneWin32Thread(ctx.CPU, lpStartAddress, lpParameter, stackBase, stackSz)
+			tid, done, err := tm.CloneWin32Thread(ctx.CPU, lpStartAddress, lpParameter, stackBase, stackSz)
 			if err != nil {
 				ctx.SetReturn(0)
 				return 0
@@ -4095,7 +4216,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if lpThreadId != 0 {
 				ctx.Mem.Write32(lpThreadId, uint32(tid))
 			}
-			h := handles.Alloc(&ntapi.ThreadHandle{TID: tid})
+			h := handles.Alloc(&ntapi.ThreadHandle{TID: tid, Done: done})
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
@@ -8632,11 +8753,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			name := strings.ToLower(readGuestString(namePtr))
 			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 { name = name[idx+1:] }
+			if !strings.HasSuffix(name, ".dll") {
+				name += ".dll"
+			}
 			if synth, ok := synthByName[name]; ok {
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
-			ctx.SetReturn(0)
+			newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
+			synthByName[name] = newSynth
+			ravelog.Logf("[win32] LoadLibraryExA: auto-created stub for %q\n", name)
+			ctx.SetReturn(newSynth.BaseAddr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LoadModule", func(ctx *ntapi.TrapContext) uint32 {
@@ -10664,11 +10791,96 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForMultipleObjectsEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // WAIT_OBJECT_0
+			// Delegate to WaitForMultipleObjects logic (ignore alertable flag)
+			nCount := ctx.Arg(0)
+			pHandles := ctx.Arg(1)
+			ms := ctx.Arg(3)
+			var timeout time.Duration
+			if ms == 0xFFFFFFFF {
+				timeout = -1
+			} else if ms == 0 {
+				timeout = 0
+			} else {
+				timeout = time.Duration(ms) * time.Millisecond
+			}
+			for i := uint64(0); i < nCount && i < 64; i++ {
+				hv, _ := ctx.Mem.Read64(pHandles + i*8)
+				h := ntapi.Handle(hv)
+				if th := handles.GetThread(h); th != nil && th.Done != nil {
+					if timeout < 0 {
+						<-th.Done
+					} else if timeout > 0 {
+						select {
+						case <-th.Done:
+						case <-time.After(timeout):
+							ctx.SetReturn(0x102)
+							return 0
+						}
+					} else {
+						select {
+						case <-th.Done:
+						default:
+							ctx.SetReturn(0x102)
+							return 0
+						}
+					}
+					ctx.SetReturn(i)
+					return 0
+				}
+				if eh := handles.GetEvent(h); eh != nil {
+					if eh.WaitTimeout(timeout) {
+						ctx.SetReturn(i)
+						return 0
+					}
+					ctx.SetReturn(0x102)
+					return 0
+				}
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForSingleObjectEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // WAIT_OBJECT_0
+			// Delegate to WaitForSingleObject logic (ignore alertable flag)
+			h := ntapi.Handle(ctx.Arg(0))
+			ms := ctx.Arg(1)
+			var timeout time.Duration
+			if ms == 0xFFFFFFFF {
+				timeout = -1
+			} else if ms == 0 {
+				timeout = 0
+			} else {
+				timeout = time.Duration(ms) * time.Millisecond
+			}
+			if th := handles.GetThread(h); th != nil && th.Done != nil {
+				if timeout < 0 {
+					<-th.Done
+					ctx.SetReturn(0)
+				} else if timeout == 0 {
+					select {
+					case <-th.Done:
+						ctx.SetReturn(0)
+					default:
+						ctx.SetReturn(0x102)
+					}
+				} else {
+					select {
+					case <-th.Done:
+						ctx.SetReturn(0)
+					case <-time.After(timeout):
+						ctx.SetReturn(0x102)
+					}
+				}
+				return 0
+			}
+			if eh := handles.GetEvent(h); eh != nil {
+				if eh.WaitTimeout(timeout) {
+					ctx.SetReturn(0)
+				} else {
+					ctx.SetReturn(0x102)
+				}
+				return 0
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForThreadpoolIoCallbacks", func(ctx *ntapi.TrapContext) uint32 {
@@ -12183,6 +12395,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		className    string
 		parentHWND   uint64
 		x, y, w, h  int32
+		style        uint32   // WS_* window style
+		exStyle      uint32   // WS_EX_* extended style
 		text         string   // WM_SETTEXT / WM_GETTEXT
 		visible      bool
 		// StatusBar parts
@@ -14235,14 +14449,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					cy += oy
 				}
 				windowName := readGuestUTF16(ctx.Arg(2))
-				hwndChildren[hwnd] = &controlState{
-					className:  lClassName,
-					parentHWND: parentHwnd,
-					x: cx, y: cy, w: cw, h: ch,
-					text:    windowName,
-					visible: style&0x10000000 != 0, // WS_VISIBLE
-				}
-				win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, uint32(ctx.Arg(0)), parentHwnd)
+			dwExStyle := uint32(ctx.Arg(0))
+			hwndChildren[hwnd] = &controlState{
+				className:  lClassName,
+				parentHWND: parentHwnd,
+				x: cx, y: cy, w: cw, h: ch,
+				style:   style,
+				exStyle: dwExStyle,
+				text:    windowName,
+				visible: style&0x10000000 != 0, // WS_VISIBLE
+			}
+			// Initialise GWL_STYLE / GWL_EXSTYLE so GetWindowLong returns correct values.
+			windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
+			win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
 				// Auto-focus first edit control
 				if lClassName == "edit" && focusHwnd == 0 {
 					focusHwnd = hwnd
@@ -16520,10 +16739,58 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if pvParam != 0 { ctx.Mem.Write32(pvParam, 1) }
 			case 0x0067: // SPI_GETMOUSETRAILS
 				if pvParam != 0 { ctx.Mem.Write32(pvParam, 0) }
-			case 0x0024: // SPI_GETNONCLIENTMETRICS
-				if pvParam != 0 { ctx.Mem.Write32(pvParam, 504) } // cbSize
+			case 0x0024: // SPI_GETNONCLIENTMETRICS - fill NONCLIENTMETRICSW
+				if pvParam != 0 {
+					// NONCLIENTMETRICSW (504 bytes on Vista+):
+					// +0   cbSize        = 504
+					// +4   iBorderWidth  = 1
+					// +8   iScrollWidth  = 17
+					// +12  iScrollHeight = 17
+					// +16  iCaptionWidth  = 23
+					// +20  iCaptionHeight = 23
+					// +24  lfCaptionFont  (LOGFONTW = 92 bytes, all zero except lfHeight=−11, lfCharSet=1, name="Segoe UI")
+					// +116 iSmCaptionWidth  = 12
+					// +120 iSmCaptionHeight = 15
+					// +124 lfSmCaptionFont  (92 bytes)
+					// +216 iMenuWidth  = 18
+					// +220 iMenuHeight = 19
+					// +224 lfMenuFont  (92 bytes)
+					// +316 lfStatusFont (92 bytes)
+					// +408 lfMessageFont (92 bytes)
+					// +500 iPaddedBorderWidth = 4
+					ctx.Mem.Write32(pvParam+0, 504)   // cbSize
+					ctx.Mem.Write32(pvParam+4, 1)     // iBorderWidth
+					ctx.Mem.Write32(pvParam+8, 17)    // iScrollWidth
+					ctx.Mem.Write32(pvParam+12, 17)   // iScrollHeight
+					ctx.Mem.Write32(pvParam+16, 23)   // iCaptionWidth
+					ctx.Mem.Write32(pvParam+20, 23)   // iCaptionHeight
+					ctx.Mem.Write32(pvParam+116, 12)  // iSmCaptionWidth
+					ctx.Mem.Write32(pvParam+120, 15)  // iSmCaptionHeight
+					ctx.Mem.Write32(pvParam+216, 18)  // iMenuWidth
+					ctx.Mem.Write32(pvParam+220, 19)  // iMenuHeight
+					ctx.Mem.Write32(pvParam+500, 4)   // iPaddedBorderWidth
+					// Write "Segoe UI" into lfCaptionFont.lfFaceName (offset 24+28=52 from pvParam)
+					writeLogFontName := func(off uint64, name string, height int32) {
+						ctx.Mem.Write32(pvParam+off, uint32(height)) // lfHeight
+						ctx.Mem.Write32(pvParam+off+16, 400)         // lfWeight = FW_NORMAL
+						ctx.Mem.Write8(pvParam+off+17, 0)            // lfItalic
+						ws := utf16Encode(name)
+						for i, w := range ws { ctx.Mem.Write16(pvParam+off+28+uint64(i)*2, w) }
+					}
+					writeLogFontName(24, "Segoe UI", -11)
+					writeLogFontName(124, "Segoe UI", -11)
+					writeLogFontName(224, "Segoe UI", -11)
+					writeLogFontName(316, "Segoe UI", -11)
+					writeLogFontName(408, "Segoe UI", -11)
+				}
 			case 0x001A: // SPI_GETDESKWALLPAPER
 				if pvParam != 0 { ctx.Mem.Write16(pvParam, 0) }
+			case 0x0059: // SPI_GETANIMATION - ANIMATIONINFO cbSize+iMinAnimate
+				if pvParam != 0 { ctx.Mem.Write32(pvParam, 8); ctx.Mem.Write32(pvParam+4, 0) }
+			case 0x0068: // SPI_GETFONTSMOOTHINGGAMMA
+				if pvParam != 0 { ctx.Mem.Write32(pvParam, 2200) }
+			case 0x006A: // SPI_GETFONTSMOOTHINGORIENTATIONTYPE
+				if pvParam != 0 { ctx.Mem.Write32(pvParam, 0) } // FE_FONTSMOOTHINGORIENTATIONRGB
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -17543,6 +17810,31 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SendMessageA", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			msg := uint32(ctx.Arg(1))
+			wParam := ctx.Arg(2)
+			lParam := ctx.Arg(3)
+			if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+				ctx.SetReturn(result); return 0
+			}
+			wp, hasWP := hwndWndProc[hwnd]
+			if !hasWP || wp == 0 { ctx.SetReturn(0); return 0 }
+			rw, okW := ctx.CPU.(ntapi.RegisterWriter)
+			rr, okR := ctx.CPU.(ntapi.RegisterReader)
+			if okW && okR {
+				rsp := rr.ReadReg(4)
+				retAddr, _ := mem.Read64(rsp)
+				syncStack = append(syncStack, syncDispatchFrame{
+					queue: []syncDispatch{}, retAddr: retAddr,
+					hwnd: hwnd, returnWndProcResult: true,
+				})
+				mem.Write64(rsp, syncTrampoline)
+				rw.WriteReg(1, hwnd); rw.WriteReg(2, uint64(msg))
+				rw.WriteReg(8, wParam); rw.WriteReg(9, lParam)
+				ctx.CPU.SetPC(wp); ctx.ReturnOverridden = true
+				return 0
+			}
+			msgQueue = append(msgQueue, queuedMsg{hwnd, msg, wParam, lParam})
 			ctx.SetReturn(0); return 0
 		})
 		for _, fn := range []string{"SendMessageTimeoutA", "SendMessageTimeoutW",
