@@ -3181,16 +3181,34 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(0)
 				return 0
 			}
-			// Read proc name (may be ordinal if high word is 0)
+			// Detect ordinal import (high word of pointer is 0 → low word is ordinal)
 			hi, _ := ctx.Mem.Read32(procNamePtr + 2)
 			var funcName string
-			if hi == 0 {
-				// ordinal import - not supported yet
+			isOrdinal := hi == 0
+			if isOrdinal {
+				ordinal := uint16(procNamePtr & 0xFFFF)
+				// Search all synths for this ordinal
+				for _, s := range dlls {
+					if s.BaseAddr == hModule {
+						if addr, ok := s.ExportOrds[ordinal]; ok {
+							ctx.SetReturn(addr)
+							return 0
+						}
+					}
+				}
+				for _, s := range synthByName {
+					if s.BaseAddr == hModule {
+						if addr, ok := s.ExportOrds[ordinal]; ok {
+							ctx.SetReturn(addr)
+							return 0
+						}
+					}
+				}
 				ctx.SetReturn(0)
 				return 0
 			}
 			funcName = readGuestString(procNamePtr)
-			// Find the synth that has this base address
+			// Search pre-loaded dlls slice first
 			for _, s := range dlls {
 				if s.BaseAddr == hModule {
 					if addr, ok := s.Exports[funcName]; ok {
@@ -3198,6 +3216,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						return 0
 					}
 				}
+			}
+			// Also search synthByName (covers DLLs loaded via LoadLibraryW at runtime)
+			for _, s := range synthByName {
+				if s.BaseAddr == hModule {
+					if addr, ok := s.Exports[funcName]; ok {
+						ctx.SetReturn(addr)
+						return 0
+					}
+					}
 			}
 			ravelog.Logf("[win32] GetProcAddress(0x%x, %q) → not found\n", hModule, funcName)
 			ctx.SetReturn(0)
@@ -14449,19 +14476,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					cy += oy
 				}
 				windowName := readGuestUTF16(ctx.Arg(2))
-			dwExStyle := uint32(ctx.Arg(0))
-			hwndChildren[hwnd] = &controlState{
-				className:  lClassName,
-				parentHWND: parentHwnd,
-				x: cx, y: cy, w: cw, h: ch,
-				style:   style,
-				exStyle: dwExStyle,
-				text:    windowName,
-				visible: style&0x10000000 != 0, // WS_VISIBLE
-			}
-			// Initialise GWL_STYLE / GWL_EXSTYLE so GetWindowLong returns correct values.
-			windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
-			win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
+				dwExStyle := uint32(ctx.Arg(0))
+				hwndChildren[hwnd] = &controlState{
+					className:  lClassName,
+					parentHWND: parentHwnd,
+					x: cx, y: cy, w: cw, h: ch,
+					style:   style,
+					exStyle: dwExStyle,
+					text:    windowName,
+					visible: style&0x10000000 != 0, // WS_VISIBLE
+				}
+				// Initialise GWL_STYLE / GWL_EXSTYLE so GetWindowLong returns correct values.
+				windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
+				win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
 				// Auto-focus first edit control
 				if lClassName == "edit" && focusHwnd == 0 {
 					focusHwnd = hwnd
@@ -14486,6 +14513,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow = win
 						mainHWND = hwnd
 						mainTitle = title
+						// Initialise GWL_STYLE / GWL_EXSTYLE for the main window.
+						windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(ctx.Arg(0))}
 						ravelog.Logf("[wl] window created: %q %dx%d hwnd=0x%x\n", title, w, h, hwnd)
 						// Attach menu bar: first check hMenu parameter, then class menu
 						hMenu := ctx.Arg(9)
@@ -14978,6 +15007,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				var left, top, right, bottom int32
 				if ci, ok := hwndChildren[hwnd]; ok {
 					right, bottom = ci.w, ci.h
+					// Minimum size for controls not yet laid out by parent.
+					if right == 0 { right = 200 }
+					if bottom == 0 { bottom = 24 }
 				} else {
 					right, bottom = 800, 600
 					if wlWindow != nil {
@@ -15014,10 +15046,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ctx.Mem.Write32(pRect+8, uint32(wlWindow.Width))
 					ctx.Mem.Write32(pRect+12, uint32(wlWindow.Height))
 				} else {
+					var fw, fh int32 = 800, 600
+					if wlWindow != nil { fw, fh = wlWindow.Width, wlWindow.Height }
 					ctx.Mem.Write32(pRect, 0)
 					ctx.Mem.Write32(pRect+4, 0)
-					ctx.Mem.Write32(pRect+8, 800)
-					ctx.Mem.Write32(pRect+12, 600)
+					ctx.Mem.Write32(pRect+8, uint32(fw))
+					ctx.Mem.Write32(pRect+12, uint32(fh))
 				}
 			}
 			ctx.SetReturn(1)
