@@ -4819,6 +4819,434 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			return 0
 		})
+		// PathStripPathW: remove directory component in-place, keep only filename
+		d.RegisterAutoStubHandler(shlwapi, "PathStripPathW", func(ctx *ntapi.TrapContext) uint32 {
+			path := ctx.Arg(0)
+			if path == 0 {
+				return 0
+			}
+			lastSep := uint64(0xFFFFFFFFFFFFFFFF)
+			for i := uint64(0); ; i += 2 {
+				w, _ := ctx.Mem.Read16(path + i)
+				if w == 0 {
+					break
+				}
+				if w == '\\' || w == '/' {
+					lastSep = i
+				}
+			}
+			if lastSep != 0xFFFFFFFFFFFFFFFF {
+				src := path + lastSep + 2
+				dst := path
+				for {
+					w, _ := ctx.Mem.Read16(src)
+					ctx.Mem.Write16(dst, w)
+					src += 2
+					dst += 2
+					if w == 0 {
+						break
+					}
+				}
+			}
+			return 0
+		})
+		// PathAddExtensionW: append extension to path if it has none
+		d.RegisterAutoStubHandler(shlwapi, "PathAddExtensionW", func(ctx *ntapi.TrapContext) uint32 {
+			path := ctx.Arg(0)
+			ext := ctx.Arg(1)
+			if path == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			hasDot := false
+			pathLen := uint64(0)
+			for i := uint64(0); ; i += 2 {
+				w, _ := ctx.Mem.Read16(path + i)
+				if w == 0 {
+					pathLen = i
+					break
+				}
+				if w == '\\' || w == '/' {
+					hasDot = false
+				} else if w == '.' {
+					hasDot = true
+				}
+			}
+			if hasDot {
+				ctx.SetReturn(0) // already has extension
+				return 0
+			}
+			if ext == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			end := path + pathLen
+			for i := uint64(0); ; i += 2 {
+				w, _ := ctx.Mem.Read16(ext + i)
+				ctx.Mem.Write16(end+i, w)
+				if w == 0 {
+					break
+				}
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		// PathAppendW: append pszMore to pszPath with backslash separator
+		d.RegisterAutoStubHandler(shlwapi, "PathAppendW", func(ctx *ntapi.TrapContext) uint32 {
+			pszPath := ctx.Arg(0)
+			pszMore := ctx.Arg(1)
+			if pszPath == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Find end of pszPath
+			end := uint64(0)
+			for i := uint64(0); ; i += 2 {
+				w, _ := ctx.Mem.Read16(pszPath + i)
+				if w == 0 {
+					end = pszPath + i
+					break
+				}
+			}
+			// Add separator if path doesn't end with one
+			if end > pszPath {
+				prev, _ := ctx.Mem.Read16(end - 2)
+				if prev != '\\' && prev != '/' {
+					ctx.Mem.Write16(end, '\\')
+					end += 2
+				}
+			}
+			// Copy pszMore
+			if pszMore != 0 {
+				// Skip leading separators in pszMore
+				moreStart := pszMore
+				for {
+					w, _ := ctx.Mem.Read16(moreStart)
+					if w != '\\' && w != '/' {
+						break
+					}
+					moreStart += 2
+				}
+				for i := uint64(0); ; i += 2 {
+					w, _ := ctx.Mem.Read16(moreStart + i)
+					ctx.Mem.Write16(end+i, w)
+					if w == 0 {
+						break
+					}
+				}
+			} else {
+				ctx.Mem.Write16(end, 0)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		// PathCombineW: combine directory + file into dest
+		d.RegisterAutoStubHandler(shlwapi, "PathCombineW", func(ctx *ntapi.TrapContext) uint32 {
+			lpszDest := ctx.Arg(0)
+			lpszDir := ctx.Arg(1)
+			lpszFile := ctx.Arg(2)
+			if lpszDest == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			writeWStr := func(dst uint64, s string) {
+				for i, r := range []rune(s) {
+					ctx.Mem.Write16(dst+uint64(i)*2, uint16(r))
+				}
+				ctx.Mem.Write16(dst+uint64(len([]rune(s)))*2, 0)
+			}
+			// If lpszFile is absolute, use it directly
+			if lpszFile != 0 {
+				w0, _ := ctx.Mem.Read16(lpszFile)
+				w1, _ := ctx.Mem.Read16(lpszFile + 2)
+				isAbsolute := (w1 == ':') || (w0 == '\\' || w0 == '/')
+				if isAbsolute {
+					for i := uint64(0); ; i += 2 {
+						w, _ := ctx.Mem.Read16(lpszFile + i)
+						ctx.Mem.Write16(lpszDest+i, w)
+						if w == 0 {
+							break
+						}
+					}
+					ctx.SetReturn(lpszDest)
+					return 0
+				}
+			}
+			// Build combined path
+			dir := ""
+			if lpszDir != 0 {
+				dir = readGuestUTF16(lpszDir)
+			}
+			file := ""
+			if lpszFile != 0 {
+				file = readGuestUTF16(lpszFile)
+			}
+			if dir == "" {
+				writeWStr(lpszDest, file)
+			} else if file == "" {
+				writeWStr(lpszDest, dir)
+			} else {
+				sep := ""
+				if len(dir) > 0 && dir[len(dir)-1] != '\\' && dir[len(dir)-1] != '/' {
+					sep = "\\"
+				}
+				writeWStr(lpszDest, dir+sep+file)
+			}
+			ctx.SetReturn(lpszDest)
+			return 0
+		})
+		// PathIsRelativeW: TRUE if path has no drive letter and doesn't start with \\
+		d.RegisterAutoStubHandler(shlwapi, "PathIsRelativeW", func(ctx *ntapi.TrapContext) uint32 {
+			path := ctx.Arg(0)
+			if path == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+			w0, _ := ctx.Mem.Read16(path)
+			w1, _ := ctx.Mem.Read16(path + 2)
+			if w1 == ':' || (w0 == '\\' && w1 == '\\') || (w0 == '/') {
+				ctx.SetReturn(0) // absolute
+			} else {
+				ctx.SetReturn(1) // relative
+			}
+			return 0
+		})
+		// PathRemoveExtensionW: strip the extension from path in-place
+		d.RegisterAutoStubHandler(shlwapi, "PathRemoveExtensionW", func(ctx *ntapi.TrapContext) uint32 {
+			path := ctx.Arg(0)
+			if path == 0 {
+				return 0
+			}
+			dotOff := uint64(0xFFFFFFFFFFFFFFFF)
+			for i := uint64(0); ; i += 2 {
+				w, _ := ctx.Mem.Read16(path + i)
+				if w == 0 {
+					break
+				}
+				if w == '\\' || w == '/' {
+					dotOff = 0xFFFFFFFFFFFFFFFF
+				} else if w == '.' {
+					dotOff = i
+				}
+			}
+			if dotOff != 0xFFFFFFFFFFFFFFFF {
+				ctx.Mem.Write16(path+dotOff, 0)
+			}
+			return 0
+		})
+		// PathCompactPathExW: truncate path to cchMax characters
+		d.RegisterAutoStubHandler(shlwapi, "PathCompactPathExW", func(ctx *ntapi.TrapContext) uint32 {
+			pszOut := ctx.Arg(0)
+			pszSrc := ctx.Arg(1)
+			cchMax := ctx.Arg(2)
+			if pszOut == 0 || pszSrc == 0 || cchMax == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Collect source characters
+			var runes []uint16
+			for i := uint64(0); ; i += 2 {
+				w, _ := ctx.Mem.Read16(pszSrc + i)
+				if w == 0 {
+					break
+				}
+				runes = append(runes, w)
+			}
+			limit := int(cchMax) - 1
+			if limit < 0 {
+				limit = 0
+			}
+			if len(runes) > limit {
+				// Replace middle with "..." if possible
+				if limit > 5 {
+					half := (limit - 3) / 2
+					var out []uint16
+					out = append(out, runes[:half]...)
+					out = append(out, '.', '.', '.')
+					out = append(out, runes[len(runes)-half:]...)
+					runes = out[:limit]
+				} else {
+					runes = runes[:limit]
+				}
+			}
+			for i, w := range runes {
+				ctx.Mem.Write16(pszOut+uint64(i)*2, w)
+			}
+			ctx.Mem.Write16(pszOut+uint64(len(runes))*2, 0)
+			ctx.SetReturn(1)
+			return 0
+		})
+		// PathGetDriveNumberW: return drive index (0='A') or -1 if none
+		d.RegisterAutoStubHandler(shlwapi, "PathGetDriveNumberW", func(ctx *ntapi.TrapContext) uint32 {
+			path := ctx.Arg(0)
+			if path == 0 {
+				ctx.SetReturn(0xFFFFFFFF) // (DWORD)-1
+				return 0
+			}
+			w0, _ := ctx.Mem.Read16(path)
+			w1, _ := ctx.Mem.Read16(path + 2)
+			if w1 == ':' {
+				var drv uint16
+				if w0 >= 'a' && w0 <= 'z' {
+					drv = w0 - 'a'
+				} else if w0 >= 'A' && w0 <= 'Z' {
+					drv = w0 - 'A'
+				} else {
+					ctx.SetReturn(0xFFFFFFFF)
+					return 0
+				}
+				ctx.SetReturn(uint64(drv))
+			} else {
+				ctx.SetReturn(0xFFFFFFFF)
+			}
+			return 0
+		})
+		// PathMatchSpecW: simple wildcard match (* and ?)
+		d.RegisterAutoStubHandler(shlwapi, "PathMatchSpecW", func(ctx *ntapi.TrapContext) uint32 {
+			pszFile := ctx.Arg(0)
+			pszSpec := ctx.Arg(1)
+			if pszFile == 0 || pszSpec == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			file := readGuestUTF16(pszFile)
+			spec := readGuestUTF16(pszSpec)
+			// Simple case-insensitive wildcard match
+			var matchFn func(f, s string) bool
+			matchFn = func(f, s string) bool {
+				for len(s) > 0 {
+					sc := rune(s[0])
+					s = s[1:]
+					switch sc {
+					case '*':
+						for i := 0; i <= len(f); i++ {
+							if matchFn(f[i:], s) {
+								return true
+							}
+						}
+						return false
+					case '?':
+						if len(f) == 0 {
+							return false
+						}
+						f = f[1:]
+					default:
+						if len(f) == 0 {
+							return false
+						}
+						fc := rune(f[0])
+						f = f[1:]
+						if fc >= 'A' && fc <= 'Z' {
+							fc += 32
+						}
+						if sc >= 'A' && sc <= 'Z' {
+							sc += 32
+						}
+						if fc != sc {
+							return false
+						}
+					}
+				}
+				return len(f) == 0
+			}
+			if matchFn(file, spec) {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		// AssocQueryStringW: file type association query - not supported in emulator
+		d.RegisterAutoStubHandler(shlwapi, "AssocQueryStringW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004005) // E_FAIL - no associations
+			return 0
+		})
+		// ColorAdjustLuma: adjust luminosity of a COLORREF by n/240
+		d.RegisterAutoStubHandler(shlwapi, "ColorAdjustLuma", func(ctx *ntapi.TrapContext) uint32 {
+			clr := uint32(ctx.Arg(0))
+			n := int32(ctx.Arg(1))
+			fScale := ctx.Arg(2) != 0
+			r := float64(clr&0xFF) / 255
+			g := float64((clr>>8)&0xFF) / 255
+			b := float64((clr>>16)&0xFF) / 255
+			maxC := math.Max(math.Max(r, g), b)
+			minC := math.Min(math.Min(r, g), b)
+			l := (maxC + minC) / 2
+			var h, s float64
+			if maxC != minC {
+				d2 := maxC - minC
+				if l > 0.5 {
+					s = d2 / (2 - maxC - minC)
+				} else {
+					s = d2 / (maxC + minC)
+				}
+				switch maxC {
+				case r:
+					h = (g - b) / d2
+					if g < b {
+						h += 6
+					}
+				case g:
+					h = (b-r)/d2 + 2
+				case b:
+					h = (r-g)/d2 + 4
+				}
+				h /= 6
+			}
+			// Adjust luma
+			delta := float64(n) / 240
+			if fScale {
+				if n > 0 {
+					l += (1 - l) * delta
+				} else {
+					l += l * delta
+				}
+			} else {
+				l += delta
+			}
+			if l < 0 {
+				l = 0
+			} else if l > 1 {
+				l = 1
+			}
+			// Convert back HLS→RGB
+			hue2rgb := func(p, q, t float64) float64 {
+				if t < 0 {
+					t++
+				}
+				if t > 1 {
+					t--
+				}
+				if t < 1.0/6 {
+					return p + (q-p)*6*t
+				}
+				if t < 1.0/2 {
+					return q
+				}
+				if t < 2.0/3 {
+					return p + (q-p)*(2.0/3-t)*6
+				}
+				return p
+			}
+			var nr, ng, nb float64
+			if s == 0 {
+				nr, ng, nb = l, l, l
+			} else {
+				var q float64
+				if l < 0.5 {
+					q = l * (1 + s)
+				} else {
+					q = l + s - l*s
+				}
+				p := 2*l - q
+				nr = hue2rgb(p, q, h+1.0/3)
+				ng = hue2rgb(p, q, h)
+				nb = hue2rgb(p, q, h-1.0/3)
+			}
+			result := uint32(nr*255) | uint32(ng*255)<<8 | uint32(nb*255)<<16
+			ctx.SetReturn(uint64(result))
+			return 0
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -4846,6 +5274,38 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(shell32, "DragAcceptFiles", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "DragQueryFileW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // 0 files in drop
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "DragQueryPoint", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - point is not in client area
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "DragFinish", func(ctx *ntapi.TrapContext) uint32 {
+			return 0 // no-op
+		})
+		d.RegisterAutoStubHandler(shell32, "ShellExecuteW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(33) // >32 means success (SE_ERR_NOASSOC=31, success=32+)
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "SHFileOperationW", func(ctx *ntapi.TrapContext) uint32 {
+			// Clear fAnyOperationsAborted in SHFILEOPSTRUCT (offset 36 = 0x24)
+			lpFileOp := ctx.Arg(0)
+			if lpFileOp != 0 {
+				ctx.Mem.Write32(lpFileOp+36, 0)
+			}
+			ctx.SetReturn(0) // success
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "SHCreateItemFromParsingName", func(ctx *ntapi.TrapContext) uint32 {
+			ppv := ctx.Arg(3)
+			if ppv != 0 {
+				ctx.Mem.Write64(ppv, 0)
+			}
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
 			return 0
 		})
 	}
@@ -4914,6 +5374,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				mem.Write16(lpBuffer, 0)
 			}
 			ctx.SetReturn(0)
+			return 0
+		})
+		// PrintDlgW: print dialog - return FALSE (user cancelled / not supported)
+		d.RegisterAutoStubHandler(comdlg32, "PrintDlgW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - user cancelled
+			return 0
+		})
+		// ChooseColorW: color picker dialog - return FALSE (user cancelled)
+		d.RegisterAutoStubHandler(comdlg32, "ChooseColorW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - user cancelled
 			return 0
 		})
 	}
@@ -5223,6 +5693,50 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// RegQueryValueExA: ANSI wrapper - return ERROR_FILE_NOT_FOUND (same as W version)
 		d.RegisterAutoStubHandler(advapi32, "RegQueryValueExA", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			return 0
+		})
+		// RegGetValueW: similar to RegQueryValueExW but with type filtering
+		d.RegisterAutoStubHandler(advapi32, "RegGetValueW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			return 0
+		})
+		// RegDeleteKeyW: delete a registry subkey
+		d.RegisterAutoStubHandler(advapi32, "RegDeleteKeyW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			return 0
+		})
+		// CryptAcquireContextW: acquire a CSP handle - not supported
+		d.RegisterAutoStubHandler(advapi32, "CryptAcquireContextW", func(ctx *ntapi.TrapContext) uint32 {
+			phProv := ctx.Arg(0)
+			if phProv != 0 {
+				ctx.Mem.Write64(phProv, 0)
+			}
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+		// CryptCreateHash, CryptHashData, CryptGetHashParam, CryptDestroyHash, CryptReleaseContext
+		d.RegisterAutoStubHandler(advapi32, "CryptCreateHash", func(ctx *ntapi.TrapContext) uint32 {
+			phHash := ctx.Arg(3)
+			if phHash != 0 {
+				ctx.Mem.Write64(phHash, 0)
+			}
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptHashData", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptGetHashParam", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptDestroyHash", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptReleaseContext", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 	}
@@ -13147,6 +13661,44 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0) // FALSE - no crypto
 			return 0
 		})
+		d.RegisterAutoStubHandler(crypt32, "CryptMsgClose", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(crypt32, "CryptMsgGetParam", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+		d.RegisterAutoStubHandler(crypt32, "CertCloseStore", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(crypt32, "CertFindCertificateInStore", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL - not found
+			return 0
+		})
+		d.RegisterAutoStubHandler(crypt32, "CertGetCertificateContextProperty", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+		d.RegisterAutoStubHandler(crypt32, "CertGetNameStringW", func(ctx *ntapi.TrapContext) uint32 {
+			pszNameString := ctx.Arg(4)
+			cchNameString := ctx.Arg(3)
+			if pszNameString != 0 && cchNameString > 0 {
+				ctx.Mem.Write16(pszNameString, 0)
+			}
+			ctx.SetReturn(1) // 1 char (empty string with NUL)
+			return 0
+		})
+		d.RegisterAutoStubHandler(crypt32, "CertNameToStrW", func(ctx *ntapi.TrapContext) uint32 {
+			psz := ctx.Arg(3)
+			csz := ctx.Arg(4)
+			if psz != 0 && csz > 0 {
+				ctx.Mem.Write16(psz, 0)
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -13174,6 +13726,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(advapi32, "FreeSid", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // NULL on success
+			return 0
+		})
+		// IsTextUnicode: heuristic check for Unicode text - return TRUE (assume Unicode)
+		d.RegisterAutoStubHandler(advapi32, "IsTextUnicode", func(ctx *ntapi.TrapContext) uint32 {
+			pResult := ctx.Arg(2)
+			if pResult != 0 {
+				ctx.Mem.Write32(pResult, 0x0001) // IS_TEXT_UNICODE_ASCII16
+			}
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 	}
@@ -13251,6 +13812,42 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0)
 			return 0
 		})
+		d.RegisterAutoStubHandler(uxtheme, "EndBufferedAnimation", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "GetThemeTransitionDuration", func(ctx *ntapi.TrapContext) uint32 {
+			pdwDuration := ctx.Arg(4)
+			if pdwDuration != 0 {
+				ctx.Mem.Write32(pdwDuration, 0)
+			}
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "GetThemeBackgroundContentRect", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "EnableThemeDialogTexture", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "DrawThemeTextEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004001) // E_NOTIMPL
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "BufferedPaintStopAllAnimations", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "BeginBufferedAnimation", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL - no animation handle
+			return 0
+		})
+		d.RegisterAutoStubHandler(uxtheme, "BufferedPaintRenderAnimation", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - no animation to render
+			return 0
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -13311,6 +13908,163 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// GetAdaptersAddresses: return ERROR_NO_DATA (no adapters to enumerate)
 		d.RegisterAutoStubHandler(iphlpapi, "GetAdaptersAddresses", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(232) // ERROR_NO_DATA
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- version.dll ---
+	versionBuf := mem.Mmap(0, 128, mmu.PermRead|mmu.PermWrite)
+	// VS_FIXEDFILEINFO at versionBuf
+	mem.Write32(versionBuf+0, 0xFEEF04BD)  // dwSignature
+	mem.Write32(versionBuf+4, 0x00010000)  // dwStrucVersion
+	mem.Write32(versionBuf+8, 0x00080007)  // dwFileVersionMS (8.7)
+	mem.Write32(versionBuf+12, 0x00060000) // dwFileVersionLS
+	mem.Write32(versionBuf+16, 0x00080007) // dwProductVersionMS
+	mem.Write32(versionBuf+20, 0x00060000) // dwProductVersionLS
+	mem.Write32(versionBuf+24, 0x0000003F) // dwFileFlagsMask
+	mem.Write32(versionBuf+28, 0)          // dwFileFlags
+	mem.Write32(versionBuf+32, 0x00040004) // dwFileOS (VOS_NT_WINDOWS32)
+	mem.Write32(versionBuf+36, 1)          // dwFileType (VFT_APP)
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if version, ok := synthByName["version.dll"]; ok {
+		d.RegisterAutoStubHandler(version, "GetFileVersionInfoSizeW", func(ctx *ntapi.TrapContext) uint32 {
+			pHandle := ctx.Arg(1)
+			if pHandle != 0 {
+				ctx.Mem.Write32(pHandle, 0)
+			}
+			ctx.SetReturn(128) // fake non-zero size
+			return 0
+		})
+		d.RegisterAutoStubHandler(version, "GetFileVersionInfoW", func(ctx *ntapi.TrapContext) uint32 {
+			lpData := ctx.Arg(3)
+			if lpData != 0 {
+				for i := uint64(0); i < 52; i += 4 {
+					v, _ := ctx.Mem.Read32(versionBuf + i)
+					ctx.Mem.Write32(lpData+i, v)
+				}
+			}
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(version, "VerQueryValueW", func(ctx *ntapi.TrapContext) uint32 {
+			pBlock := ctx.Arg(0)
+			lpSubBlock := ctx.Arg(1)
+			lplpBuffer := ctx.Arg(2)
+			puLen := ctx.Arg(3)
+			sub := readGuestUTF16(lpSubBlock)
+			if sub == "\\" {
+				if lplpBuffer != 0 {
+					ctx.Mem.Write64(lplpBuffer, pBlock)
+				}
+				if puLen != 0 {
+					ctx.Mem.Write32(puLen, 52)
+				}
+				ctx.SetReturn(1) // TRUE
+			} else {
+				ctx.SetReturn(0) // not found
+			}
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- imm32.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if imm32dll, ok := synthByName["imm32.dll"]; ok {
+		d.RegisterAutoStubHandler(imm32dll, "ImmGetContext", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL HIMC - no IME
+			return 0
+		})
+		d.RegisterAutoStubHandler(imm32dll, "ImmReleaseContext", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
+		d.RegisterAutoStubHandler(imm32dll, "ImmGetCompositionStringW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // 0 = no composition string / GCS_RESULTSTR not available
+			return 0
+		})
+		for _, fname := range []string{
+			"ImmSetCandidateWindow", "ImmSetCompositionWindow",
+			"ImmSetCompositionFontW", "ImmSetCompositionStringW",
+			"ImmNotifyIME", "ImmEscapeW",
+		} {
+			n := fname
+			d.RegisterAutoStubHandler(imm32dll, n, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetReturn(0) // FALSE / no-op
+				return 0
+			})
+		}
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- sensapi.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if sensapi, ok := synthByName["sensapi.dll"]; ok {
+		d.RegisterAutoStubHandler(sensapi, "IsNetworkAlive", func(ctx *ntapi.TrapContext) uint32 {
+			lpdwFlags := ctx.Arg(0)
+			if lpdwFlags != 0 {
+				ctx.Mem.Write32(lpdwFlags, 0)
+			}
+			ctx.SetReturn(0) // FALSE - no network in emulator
+			return 0
+		})
+		d.RegisterAutoStubHandler(sensapi, "IsDestinationReachableW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- dwmapi.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if dwmapi, ok := synthByName["dwmapi.dll"]; ok {
+		d.RegisterAutoStubHandler(dwmapi, "DwmSetWindowAttribute", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- dbghelp.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if dbghelp, ok := synthByName["dbghelp.dll"]; ok {
+		d.RegisterAutoStubHandler(dbghelp, "ImageNtHeader", func(ctx *ntapi.TrapContext) uint32 {
+			base := ctx.Arg(0)
+			if base == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// NT headers start at base + e_lfanew (DOS header offset 0x3C)
+			lfanew, _ := ctx.Mem.Read32(base + 0x3C)
+			ctx.SetReturn(base + uint64(lfanew))
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- wintrust.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if wintrust, ok := synthByName["wintrust.dll"]; ok {
+		d.RegisterAutoStubHandler(wintrust, "WinVerifyTrust", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // S_OK - trusted (skip signature check)
+			return 0
+		})
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
+	// --- wininet.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if wininet, ok := synthByName["wininet.dll"]; ok {
+		d.RegisterAutoStubHandler(wininet, "InternetCrackUrlW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // FALSE - no URL parsing in emulator
 			return 0
 		})
 	}
