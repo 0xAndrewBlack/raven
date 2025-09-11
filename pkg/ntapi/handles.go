@@ -74,7 +74,8 @@ func (h *MutantHandle) handleType() string { return "mutant" }
 
 // RegistryKeyHandle wraps a registry key reference.
 type RegistryKeyHandle struct {
-	Key *RegistryKey
+	Key  *RegistryKey
+	Path string // full normalized path e.g. HKEY_LOCAL_MACHINE\SOFTWARE\...
 }
 
 func (h *RegistryKeyHandle) handleType() string { return "regkey" }

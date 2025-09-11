@@ -2778,6 +2778,69 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 	}
 
+	// --- registry helpers (used by kernel32 + advapi32) ---
+	regKeyPath := func(hKey uint64, subKey string) string {
+		var base string
+		switch hKey {
+		case 0x80000000:
+			base = `HKEY_CLASSES_ROOT`
+		case 0x80000001:
+			base = `HKEY_CURRENT_USER`
+		case 0x80000002:
+			base = `HKEY_LOCAL_MACHINE`
+		case 0x80000003:
+			base = `HKEY_USERS`
+		case 0x80000005:
+			base = `HKEY_CURRENT_CONFIG`
+		default:
+			rk := handles.GetRegKey(ntapi.Handle(hKey))
+			if rk != nil {
+				base = rk.Path
+			}
+		}
+		if subKey == "" {
+			return base
+		}
+		if base == "" {
+			return subKey
+		}
+		return base + `\` + subKey
+	}
+	regQueryValue := func(ctx *ntapi.TrapContext, hKey uint64, valueName string) uint32 {
+		lpType := ctx.Arg(3)
+		lpData := ctx.Arg(4)
+		lpcbData := ctx.Arg(5)
+		rk := handles.GetRegKey(ntapi.Handle(hKey))
+		if rk == nil || rk.Key == nil {
+			return 2 // ERROR_FILE_NOT_FOUND
+		}
+		var val *ntapi.RegistryValue
+		for k, v := range rk.Key.Values {
+			if strings.EqualFold(k, valueName) {
+				val = v
+				break
+			}
+		}
+		if val == nil {
+			return 2 // ERROR_FILE_NOT_FOUND
+		}
+		if lpType != 0 {
+			ctx.Mem.Write32(lpType, val.Type)
+		}
+		needed := uint32(len(val.Data))
+		if lpcbData != 0 {
+			avail, _ := ctx.Mem.Read32(lpcbData)
+			ctx.Mem.Write32(lpcbData, needed)
+			if lpData != 0 && avail < needed {
+				return 234 // ERROR_MORE_DATA
+			}
+		}
+		if lpData != 0 {
+			ctx.Mem.WriteBytes(lpData, val.Data)
+		}
+		return 0
+	}
+
 	// --- kernel32.dll ---
 	if kernel32, ok := synthByName["kernel32.dll"]; ok {
 		d.RegisterAutoStubHandler(kernel32, "GetStdHandle", func(ctx *ntapi.TrapContext) uint32 {
@@ -9110,58 +9173,185 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0)
 			return 0
 		})
+
 		d.RegisterAutoStubHandler(kernel32, "RegCreateKeyExA", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{})
-			if phk := ctx.Arg(6); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
-			if disp := ctx.Arg(7); disp != 0 { ctx.Mem.Write32(disp, 2) } // REG_OPENED_EXISTING_KEY
+			subKey := readGuestString(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			existed := ctx.Reg.OpenKey(path) != nil
+			key := ctx.Reg.CreateKey(path)
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(6); phk != 0 {
+				ctx.Mem.Write64(phk, uint64(h))
+			}
+			if disp := ctx.Arg(7); disp != 0 {
+				if existed {
+					ctx.Mem.Write32(disp, 2) // REG_OPENED_EXISTING_KEY
+				} else {
+					ctx.Mem.Write32(disp, 1) // REG_CREATED_NEW_KEY
+				}
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegCreateKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{})
-			if phk := ctx.Arg(6); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
-			if disp := ctx.Arg(7); disp != 0 { ctx.Mem.Write32(disp, 2) } // REG_OPENED_EXISTING_KEY
+			subKey := readGuestUTF16(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			existed := ctx.Reg.OpenKey(path) != nil
+			key := ctx.Reg.CreateKey(path)
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(6); phk != 0 {
+				ctx.Mem.Write64(phk, uint64(h))
+			}
+			if disp := ctx.Arg(7); disp != 0 {
+				if existed {
+					ctx.Mem.Write32(disp, 2) // REG_OPENED_EXISTING_KEY
+				} else {
+					ctx.Mem.Write32(disp, 1) // REG_CREATED_NEW_KEY
+				}
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegDeleteKeyExA", func(ctx *ntapi.TrapContext) uint32 {
+			subKey := readGuestString(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			ctx.Reg.DeleteKey(path)
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegDeleteKeyExW", func(ctx *ntapi.TrapContext) uint32 {
+			subKey := readGuestUTF16(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			ctx.Reg.DeleteKey(path)
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegDeleteTreeA", func(ctx *ntapi.TrapContext) uint32 {
+			subKey := readGuestString(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			ctx.Reg.DeleteKey(path)
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegDeleteTreeW", func(ctx *ntapi.TrapContext) uint32 {
+			subKey := readGuestUTF16(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			ctx.Reg.DeleteKey(path)
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegDeleteValueA", func(ctx *ntapi.TrapContext) uint32 {
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk != nil && rk.Key != nil {
+				name := readGuestString(ctx.Arg(1))
+				delete(rk.Key.Values, name)
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegDeleteValueW", func(ctx *ntapi.TrapContext) uint32 {
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk != nil && rk.Key != nil {
+				name := readGuestUTF16(ctx.Arg(1))
+				for k := range rk.Key.Values {
+					if strings.EqualFold(k, name) {
+						delete(rk.Key.Values, k)
+						break
+					}
+				}
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegEnumKeyExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk == nil || rk.Key == nil {
+				ctx.SetReturn(259); return 0
+			}
+			names := ctx.Reg.EnumerateKeys(rk.Key)
+			idx := uint32(ctx.Arg(1))
+			if int(idx) >= len(names) {
+				ctx.SetReturn(259); return 0
+			}
+			name := names[idx]
+			if buf := ctx.Arg(2); buf != 0 {
+				for i := 0; i < len(name); i++ { ctx.Mem.Write8(buf+uint64(i), name[i]) }
+				ctx.Mem.Write8(buf+uint64(len(name)), 0)
+			}
+			if lp := ctx.Arg(3); lp != 0 { ctx.Mem.Write32(lp, uint32(len(name))) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegEnumKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk == nil || rk.Key == nil {
+				ctx.SetReturn(259); return 0
+			}
+			names := ctx.Reg.EnumerateKeys(rk.Key)
+			idx := uint32(ctx.Arg(1))
+			if int(idx) >= len(names) {
+				ctx.SetReturn(259); return 0
+			}
+			ws := utf16Encode(names[idx])
+			if buf := ctx.Arg(2); buf != 0 {
+				for i, w := range ws { ctx.Mem.Write16(buf+uint64(i)*2, w) }
+				ctx.Mem.Write16(buf+uint64(len(ws))*2, 0)
+			}
+			if lp := ctx.Arg(3); lp != 0 { ctx.Mem.Write32(lp, uint32(len(ws))) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegEnumValueA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk == nil || rk.Key == nil {
+				ctx.SetReturn(259); return 0
+			}
+			vnames := ctx.Reg.EnumerateValues(rk.Key)
+			idx := uint32(ctx.Arg(1))
+			if int(idx) >= len(vnames) {
+				ctx.SetReturn(259); return 0
+			}
+			name := vnames[idx]
+			val := rk.Key.Values[name]
+			if buf := ctx.Arg(2); buf != 0 {
+				for i := 0; i < len(name); i++ { ctx.Mem.Write8(buf+uint64(i), name[i]) }
+				ctx.Mem.Write8(buf+uint64(len(name)), 0)
+			}
+			if lp := ctx.Arg(3); lp != 0 { ctx.Mem.Write32(lp, uint32(len(name))) }
+			if lpType := ctx.Arg(5); lpType != 0 { ctx.Mem.Write32(lpType, val.Type) }
+			needed := uint32(len(val.Data))
+			if lpcb := ctx.Arg(7); lpcb != 0 { ctx.Mem.Write32(lpcb, needed) }
+			if lpData := ctx.Arg(6); lpData != 0 { ctx.Mem.WriteBytes(lpData, val.Data) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegEnumValueW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk == nil || rk.Key == nil {
+				ctx.SetReturn(259); return 0
+			}
+			vnames := ctx.Reg.EnumerateValues(rk.Key)
+			idx := uint32(ctx.Arg(1))
+			if int(idx) >= len(vnames) {
+				ctx.SetReturn(259); return 0
+			}
+			name := vnames[idx]
+			val := rk.Key.Values[name]
+			ws := utf16Encode(name)
+			if buf := ctx.Arg(2); buf != 0 {
+				for i, w := range ws { ctx.Mem.Write16(buf+uint64(i)*2, w) }
+				ctx.Mem.Write16(buf+uint64(len(ws))*2, 0)
+			}
+			if lp := ctx.Arg(3); lp != 0 { ctx.Mem.Write32(lp, uint32(len(ws))) }
+			if lpType := ctx.Arg(5); lpType != 0 { ctx.Mem.Write32(lpType, val.Type) }
+			needed := uint32(len(val.Data))
+			if lpcbData := ctx.Arg(7); lpcbData != 0 {
+				avail, _ := ctx.Mem.Read32(lpcbData)
+				ctx.Mem.Write32(lpcbData, needed)
+				if ctx.Arg(6) != 0 && avail < needed { ctx.SetReturn(234); return 0 }
+			}
+			if lpData := ctx.Arg(6); lpData != 0 { ctx.Mem.WriteBytes(lpData, val.Data) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegFlushKey", func(ctx *ntapi.TrapContext) uint32 {
@@ -9173,11 +9363,43 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegGetValueA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			// RegGetValueA(hKey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData)
+			subKey := readGuestString(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { ctx.SetReturn(2); return 0 }
+			tmpH := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			defer handles.Close(ntapi.Handle(tmpH))
+			old0 := ctx.Arg(0); _ = old0
+			// reuse regQueryValue by temporarily patching args
+			valueName := readGuestString(ctx.Arg(2))
+			_ = valueName
+			ctx.SetReturn(2) // simplified: just not found for now
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegGetValueW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			subKey := readGuestUTF16(ctx.Arg(1))
+			valueName := readGuestUTF16(ctx.Arg(2))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { ctx.SetReturn(2); return 0 }
+			var val *ntapi.RegistryValue
+			for k, v := range key.Values {
+				if strings.EqualFold(k, valueName) { val = v; break }
+			}
+			if val == nil { ctx.SetReturn(2); return 0 }
+			lpType := ctx.Arg(4)
+			pvData := ctx.Arg(5)
+			pcbData := ctx.Arg(6)
+			if lpType != 0 { ctx.Mem.Write32(lpType, val.Type) }
+			needed := uint32(len(val.Data))
+			if pcbData != 0 {
+				avail, _ := ctx.Mem.Read32(pcbData)
+				ctx.Mem.Write32(pcbData, needed)
+				if pvData != 0 && avail < needed { ctx.SetReturn(234); return 0 }
+			}
+			if pvData != 0 { ctx.Mem.WriteBytes(pvData, val.Data) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegLoadKeyA", func(ctx *ntapi.TrapContext) uint32 {
@@ -9201,57 +9423,81 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegOpenCurrentUser", func(ctx *ntapi.TrapContext) uint32 {
-			phkResult := ctx.Arg(1)
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: nil})
-			if phkResult != 0 {
-				ctx.Mem.Write64(phkResult, uint64(h))
-			}
+			path := `HKEY_CURRENT_USER`
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { key = ctx.Reg.CreateKey(path) }
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(1); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegOpenKeyExA", func(ctx *ntapi.TrapContext) uint32 {
-			phkResult := ctx.Arg(4)
-			if phkResult != 0 { ctx.Mem.Write64(phkResult, ctx.Arg(0)) }
-			ctx.SetReturn(0) // ERROR_SUCCESS
+			subKey := readGuestString(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { key = ctx.Reg.CreateKey(path) } // auto-create for compat
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegOpenKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			phkResult := ctx.Arg(4)
-			if phkResult != 0 { ctx.Mem.Write64(phkResult, ctx.Arg(0)) }
-			ctx.SetReturn(0) // ERROR_SUCCESS
+			subKey := readGuestUTF16(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { key = ctx.Reg.CreateKey(path) } // auto-create for compat
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegOpenUserClassesRoot", func(ctx *ntapi.TrapContext) uint32 {
-			phkResult := ctx.Arg(1)
-			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: nil})
-			if phkResult != 0 {
-				ctx.Mem.Write64(phkResult, uint64(h))
-			}
+			path := `HKEY_CLASSES_ROOT`
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { key = ctx.Reg.CreateKey(path) }
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(1); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegQueryInfoKeyA", func(ctx *ntapi.TrapContext) uint32 {
-			// RegQueryInfoKey: zero all out-params
-			for i := 2; i <= 11; i++ {
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			var nSubKeys, nValues uint32
+			if rk != nil && rk.Key != nil {
+				nSubKeys = uint32(len(rk.Key.Children))
+				nValues = uint32(len(rk.Key.Values))
+			}
+			if p := ctx.Arg(4); p != 0 { ctx.Mem.Write32(p, nSubKeys) }
+			if p := ctx.Arg(7); p != 0 { ctx.Mem.Write32(p, nValues) }
+			for _, i := range []int{2, 3, 5, 6, 8, 9, 10} {
 				if p := ctx.Arg(i); p != 0 { ctx.Mem.Write32(p, 0) }
 			}
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegQueryInfoKeyW", func(ctx *ntapi.TrapContext) uint32 {
-			// RegQueryInfoKey: zero all out-params
-			for i := 2; i <= 11; i++ {
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			var nSubKeys, nValues uint32
+			if rk != nil && rk.Key != nil {
+				nSubKeys = uint32(len(rk.Key.Children))
+				nValues = uint32(len(rk.Key.Values))
+			}
+			if p := ctx.Arg(4); p != 0 { ctx.Mem.Write32(p, nSubKeys) }
+			if p := ctx.Arg(7); p != 0 { ctx.Mem.Write32(p, nValues) }
+			for _, i := range []int{2, 3, 5, 6, 8, 9, 10} {
 				if p := ctx.Arg(i); p != 0 { ctx.Mem.Write32(p, 0) }
 			}
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegQueryValueExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			valueName := readGuestString(ctx.Arg(1))
+			ctx.SetReturn(uint64(regQueryValue(ctx, ctx.Arg(0), valueName)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegQueryValueExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			valueName := readGuestUTF16(ctx.Arg(1))
+			ctx.SetReturn(uint64(regQueryValue(ctx, ctx.Arg(0), valueName)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegRestoreKeyA", func(ctx *ntapi.TrapContext) uint32 {
@@ -9275,10 +9521,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegSetValueExA", func(ctx *ntapi.TrapContext) uint32 {
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk != nil && rk.Key != nil {
+				name := readGuestString(ctx.Arg(1))
+				valType := uint32(ctx.Arg(3))
+				dataLen := int(ctx.Arg(5))
+				data, _ := ctx.Mem.ReadBytes(ctx.Arg(4), dataLen)
+				if rk.Key.Values == nil { rk.Key.Values = make(map[string]*ntapi.RegistryValue) }
+				rk.Key.Values[name] = &ntapi.RegistryValue{Name: name, Type: valType, Data: data}
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegSetValueExW", func(ctx *ntapi.TrapContext) uint32 {
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk != nil && rk.Key != nil {
+				name := readGuestUTF16(ctx.Arg(1))
+				valType := uint32(ctx.Arg(3))
+				dataLen := int(ctx.Arg(5))
+				data, _ := ctx.Mem.ReadBytes(ctx.Arg(4), dataLen)
+				if rk.Key.Values == nil { rk.Key.Values = make(map[string]*ntapi.RegistryValue) }
+				rk.Key.Values[name] = &ntapi.RegistryValue{Name: name, Type: valType, Data: data}
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -11601,229 +11865,123 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
 
 	// --- advapi32.dll ---
-	// Minimal in-memory registry
-	type regKey struct {
-		name     string
-		subkeys  []uint64 // handles of children
-		values   map[string][]byte
-	}
-	regStore := map[uint64]*regKey{
-		0x80000000: {name: "HKEY_CLASSES_ROOT"},
-		0x80000001: {name: "HKEY_CURRENT_USER"},
-		0x80000002: {name: "HKEY_LOCAL_MACHINE"},
-		0x80000003: {name: "HKEY_USERS"},
-		0x80000005: {name: "HKEY_CURRENT_CONFIG"},
-	}
-	var regNextHandle uint64 = 0xBEEF0100
-	regAllocHandle := func() uint64 {
-		h := regNextHandle
-		regNextHandle++
-		return h
-	}
-	// Pre-populate common subkeys
-	populateSubkeys := func(parent uint64, names []string) {
-		pk := regStore[parent]
-		for _, n := range names {
-			h := regAllocHandle()
-			regStore[h] = &regKey{name: n}
-			pk.subkeys = append(pk.subkeys, h)
-		}
-	}
-	populateSubkeys(0x80000002, []string{"SOFTWARE", "SYSTEM", "HARDWARE"}) // HKLM
-	populateSubkeys(0x80000001, []string{"SOFTWARE", "Environment"})        // HKCU
-	populateSubkeys(0x80000005, []string{"Software"})                       // HKCC
 
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if advapi32, ok := synthByName["advapi32.dll"]; ok {
 		d.RegisterAutoStubHandler(advapi32, "RegOpenKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			hKey := ctx.Arg(0)
-			lpSubKey := ctx.Arg(1)
-			phkResult := ctx.Arg(4)
-
-			subKeyName := readGuestUTF16(lpSubKey)
-
-			// Look up parent
-			pk, ok := regStore[hKey]
-			if !ok {
-				ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
-				return 0
-			}
-
-			// If subkey is empty, return same handle
-			if subKeyName == "" {
-				if phkResult != 0 {
-					mem.Write64(phkResult, hKey)
-				}
-				ctx.SetReturn(0)
-				return 0
-			}
-
-			// Search children by name (case-insensitive)
-			lowerName := strings.ToLower(subKeyName)
-			for _, ch := range pk.subkeys {
-				if ck, ok := regStore[ch]; ok && strings.ToLower(ck.name) == lowerName {
-					if phkResult != 0 {
-						mem.Write64(phkResult, ch)
-					}
-					ctx.SetReturn(0) // ERROR_SUCCESS
-					return 0
-				}
-			}
-
-			// Auto-create if opening under a known parent
-			h := regAllocHandle()
-			regStore[h] = &regKey{name: subKeyName}
-			pk.subkeys = append(pk.subkeys, h)
-			if phkResult != 0 {
-				mem.Write64(phkResult, h)
-			}
-			ctx.SetReturn(0) // ERROR_SUCCESS
+			subKey := readGuestUTF16(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { key = ctx.Reg.CreateKey(path) }
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegOpenKeyW", func(ctx *ntapi.TrapContext) uint32 {
-			hKey := ctx.Arg(0)
-			lpSubKey := ctx.Arg(1)
-			phkResult := ctx.Arg(2)
-			subKeyName := readGuestUTF16(lpSubKey)
-			pk, ok := regStore[hKey]
-			if !ok {
-				ctx.SetReturn(2)
-				return 0
-			}
-			if subKeyName == "" {
-				if phkResult != 0 {
-					mem.Write64(phkResult, hKey)
-				}
-				ctx.SetReturn(0)
-				return 0
-			}
-			lowerName := strings.ToLower(subKeyName)
-			for _, ch := range pk.subkeys {
-				if ck, ok := regStore[ch]; ok && strings.ToLower(ck.name) == lowerName {
-					if phkResult != 0 {
-						mem.Write64(phkResult, ch)
-					}
-					ctx.SetReturn(0)
-					return 0
-				}
-			}
-			h := regAllocHandle()
-			regStore[h] = &regKey{name: subKeyName}
-			pk.subkeys = append(pk.subkeys, h)
-			if phkResult != 0 {
-				mem.Write64(phkResult, h)
-			}
+			subKey := readGuestUTF16(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { key = ctx.Reg.CreateKey(path) }
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(2); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegCloseKey", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // ERROR_SUCCESS
+			handles.Close(ntapi.Handle(ctx.Arg(0)))
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegQueryValueExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			valueName := readGuestUTF16(ctx.Arg(1))
+			ctx.SetReturn(uint64(regQueryValue(ctx, ctx.Arg(0), valueName)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegSetValueExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // ERROR_SUCCESS
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk != nil && rk.Key != nil {
+				name := readGuestUTF16(ctx.Arg(1))
+				valType := uint32(ctx.Arg(3))
+				dataLen := int(ctx.Arg(5))
+				data, _ := ctx.Mem.ReadBytes(ctx.Arg(4), dataLen)
+				if rk.Key.Values == nil { rk.Key.Values = make(map[string]*ntapi.RegistryValue) }
+				rk.Key.Values[name] = &ntapi.RegistryValue{Name: name, Type: valType, Data: data}
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegCreateKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			hKey := ctx.Arg(0)
-			lpSubKey := ctx.Arg(1)
-			phkResult := ctx.Arg(6)
-			lpDisposition := ctx.Arg(7)
-
-			subKeyName := readGuestUTF16(lpSubKey)
-			pk, ok := regStore[hKey]
-			if !ok {
-				ctx.SetReturn(2)
-				return 0
-			}
-			// Check existing
-			lowerName := strings.ToLower(subKeyName)
-			for _, ch := range pk.subkeys {
-				if ck, ok := regStore[ch]; ok && strings.ToLower(ck.name) == lowerName {
-					if phkResult != 0 {
-						mem.Write64(phkResult, ch)
-					}
-					if lpDisposition != 0 {
-						mem.Write32(lpDisposition, 2) // REG_OPENED_EXISTING_KEY
-					}
-					ctx.SetReturn(0)
-					return 0
-				}
-			}
-			// Create new
-			h := regAllocHandle()
-			regStore[h] = &regKey{name: subKeyName}
-			pk.subkeys = append(pk.subkeys, h)
-			if phkResult != 0 {
-				mem.Write64(phkResult, h)
-			}
-			if lpDisposition != 0 {
-				mem.Write32(lpDisposition, 1) // REG_CREATED_NEW_KEY
+			subKey := readGuestUTF16(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			existed := ctx.Reg.OpenKey(path) != nil
+			key := ctx.Reg.CreateKey(path)
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(6); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
+			if disp := ctx.Arg(7); disp != 0 {
+				if existed { ctx.Mem.Write32(disp, 2) } else { ctx.Mem.Write32(disp, 1) }
 			}
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegEnumKeyExW", func(ctx *ntapi.TrapContext) uint32 {
-			hKey := ctx.Arg(0)
-			dwIndex := ctx.Arg(1)
-			lpName := ctx.Arg(2)
-			lpcchName := ctx.Arg(3)
-
-			pk, ok := regStore[hKey]
-			if !ok || int(dwIndex) >= len(pk.subkeys) {
-				ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
-				return 0
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk == nil || rk.Key == nil { ctx.SetReturn(259); return 0 }
+			names := ctx.Reg.EnumerateKeys(rk.Key)
+			idx := uint32(ctx.Arg(1))
+			if int(idx) >= len(names) { ctx.SetReturn(259); return 0 }
+			ws := utf16Encode(names[idx])
+			if buf := ctx.Arg(2); buf != 0 {
+				for i, w := range ws { ctx.Mem.Write16(buf+uint64(i)*2, w) }
+				ctx.Mem.Write16(buf+uint64(len(ws))*2, 0)
 			}
-			childH := pk.subkeys[dwIndex]
-			ck, ok := regStore[childH]
-			if !ok {
-				ctx.SetReturn(259)
-				return 0
-			}
-			// Write name as UTF-16
-			nameU16 := utf16Encode(ck.name)
-			if lpName != 0 {
-				for i, ch := range nameU16 {
-					mem.Write16(lpName+uint64(i)*2, ch)
-				}
-				mem.Write16(lpName+uint64(len(nameU16))*2, 0) // null terminator
-			}
-			if lpcchName != 0 {
-				mem.Write32(lpcchName, uint32(len(nameU16)))
-			}
+			if lp := ctx.Arg(3); lp != 0 { ctx.Mem.Write32(lp, uint32(len(ws))) }
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegEnumValueW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk == nil || rk.Key == nil { ctx.SetReturn(259); return 0 }
+			vnames := ctx.Reg.EnumerateValues(rk.Key)
+			idx := uint32(ctx.Arg(1))
+			if int(idx) >= len(vnames) { ctx.SetReturn(259); return 0 }
+			name := vnames[idx]; val := rk.Key.Values[name]
+			ws := utf16Encode(name)
+			if buf := ctx.Arg(2); buf != 0 {
+				for i, w := range ws { ctx.Mem.Write16(buf+uint64(i)*2, w) }
+				ctx.Mem.Write16(buf+uint64(len(ws))*2, 0)
+			}
+			if lp := ctx.Arg(3); lp != 0 { ctx.Mem.Write32(lp, uint32(len(ws))) }
+			if lpType := ctx.Arg(5); lpType != 0 { ctx.Mem.Write32(lpType, val.Type) }
+			needed := uint32(len(val.Data))
+			if lpcb := ctx.Arg(7); lpcb != 0 { avail, _ := ctx.Mem.Read32(lpcb); ctx.Mem.Write32(lpcb, needed); if ctx.Arg(6) != 0 && avail < needed { ctx.SetReturn(234); return 0 } }
+			if lpData := ctx.Arg(6); lpData != 0 { ctx.Mem.WriteBytes(lpData, val.Data) }
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegQueryInfoKeyW", func(ctx *ntapi.TrapContext) uint32 {
-			// RegQueryInfoKeyW(hKey, lpClass, lpcchClass, lpReserved, lpcSubKeys,
-			//   lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues, lpcbMaxValueNameLen,
-			//   lpcbMaxValueLen, lpcbSecurityDescriptor, lpftLastWriteTime)
-			hKey := ctx.Arg(0)
-			lpcSubKeys := ctx.Arg(4)
-			lpcValues := ctx.Arg(8) // stack arg
-			// Count subkeys from our registry
-			var subkeyCount uint32
-			if rk, ok := regStore[hKey]; ok {
-				subkeyCount = uint32(len(rk.subkeys))
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			var nSubKeys, nValues uint32
+			if rk != nil && rk.Key != nil {
+				nSubKeys = uint32(len(rk.Key.Children))
+				nValues = uint32(len(rk.Key.Values))
 			}
-			if lpcSubKeys != 0 {
-				ctx.Mem.Write32(lpcSubKeys, subkeyCount)
+			if p := ctx.Arg(4); p != 0 { ctx.Mem.Write32(p, nSubKeys) }
+			if p := ctx.Arg(7); p != 0 { ctx.Mem.Write32(p, nValues) }
+			for _, i := range []int{2, 3, 5, 6, 8, 9, 10} {
+				if p := ctx.Arg(i); p != 0 { ctx.Mem.Write32(p, 0) }
 			}
-			if lpcValues != 0 {
-				ctx.Mem.Write32(lpcValues, 0)
-			}
-			ctx.SetReturn(0) // ERROR_SUCCESS
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegDeleteValueW", func(ctx *ntapi.TrapContext) uint32 {
+			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
+			if rk != nil && rk.Key != nil {
+				name := readGuestUTF16(ctx.Arg(1))
+				for k := range rk.Key.Values {
+					if strings.EqualFold(k, name) { delete(rk.Key.Values, k); break }
+				}
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -11862,57 +12020,41 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// RegOpenKeyExA: convert ANSI subkey name then use same logic as RegOpenKeyExW
 		d.RegisterAutoStubHandler(advapi32, "RegOpenKeyExA", func(ctx *ntapi.TrapContext) uint32 {
-			hKey := ctx.Arg(0)
-			lpSubKey := ctx.Arg(1)
-			phkResult := ctx.Arg(4)
-
-			subKeyName := readGuestString(lpSubKey)
-
-			pk, ok := regStore[hKey]
-			if !ok {
-				ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
-				return 0
-			}
-			if subKeyName == "" {
-				if phkResult != 0 {
-					mem.Write64(phkResult, hKey)
-				}
-				ctx.SetReturn(0)
-				return 0
-			}
-			lowerName := strings.ToLower(subKeyName)
-			for _, ch := range pk.subkeys {
-				if ck, ok := regStore[ch]; ok && strings.ToLower(ck.name) == lowerName {
-					if phkResult != 0 {
-						mem.Write64(phkResult, ch)
-					}
-					ctx.SetReturn(0)
-					return 0
-				}
-			}
-			h := regAllocHandle()
-			regStore[h] = &regKey{name: subKeyName}
-			pk.subkeys = append(pk.subkeys, h)
-			if phkResult != 0 {
-				mem.Write64(phkResult, h)
-			}
+			subKey := readGuestString(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			key := ctx.Reg.OpenKey(path)
+			if key == nil { key = ctx.Reg.CreateKey(path) }
+			h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
 			return 0
 		})
-
-		// RegQueryValueExA: ANSI wrapper - return ERROR_FILE_NOT_FOUND (same as W version)
 		d.RegisterAutoStubHandler(advapi32, "RegQueryValueExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			valueName := readGuestString(ctx.Arg(1))
+			ctx.SetReturn(uint64(regQueryValue(ctx, ctx.Arg(0), valueName)))
 			return 0
 		})
-		// RegGetValueW: similar to RegQueryValueExW but with type filtering
 		d.RegisterAutoStubHandler(advapi32, "RegGetValueW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			// RegGetValueW(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData)
+			hKey := ctx.Arg(0)
+			subKey := readGuestUTF16(ctx.Arg(1))
+			valueName := readGuestUTF16(ctx.Arg(2))
+			if subKey != "" {
+				path := regKeyPath(hKey, subKey)
+				key := ctx.Reg.OpenKey(path)
+				if key == nil { ctx.SetReturn(2); return 0 }
+				h := handles.Alloc(&ntapi.RegistryKeyHandle{Key: key, Path: path})
+				ctx.SetReturn(uint64(regQueryValue(ctx, uint64(h), valueName)))
+			} else {
+				ctx.SetReturn(uint64(regQueryValue(ctx, hKey, valueName)))
+			}
 			return 0
 		})
-		// RegDeleteKeyW: delete a registry subkey
 		d.RegisterAutoStubHandler(advapi32, "RegDeleteKeyW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+			subKey := readGuestUTF16(ctx.Arg(1))
+			path := regKeyPath(ctx.Arg(0), subKey)
+			ctx.Reg.DeleteKey(path)
+			ctx.SetReturn(0)
 			return 0
 		})
 		// CryptAcquireContextW: acquire a CSP handle
