@@ -145,12 +145,14 @@ type SectionHandle struct {
 func (h *SectionHandle) handleType() string { return "section" }
 
 // FileMappingHandle represents a Win32 file mapping (CreateFileMapping).
-// BaseAddr is the allocated guest memory; Size is the mapping size.
+// HostBuf holds the in-memory copy of the file or anonymous buffer.
 // FileFD is -1 for anonymous mappings, otherwise a VFS file descriptor.
 type FileMappingHandle struct {
-	BaseAddr uint64
-	Size     uint64
-	FileFD   int
+	Name    string
+	HostBuf []byte
+	Size    uint64
+	FileFD  int    // -1 for anonymous; VFS fd for file-backed
+	Protect uint32
 }
 
 func (h *FileMappingHandle) handleType() string { return "filemapping" }
@@ -307,4 +309,17 @@ func (ht *HandleTable) GetSection(h Handle) *SectionHandle {
 		return nil
 	}
 	return sh
+}
+
+// GetFileMapping returns the FileMappingHandle for a handle, or nil.
+func (ht *HandleTable) GetFileMapping(h Handle) *FileMappingHandle {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	fm, ok := obj.(*FileMappingHandle)
+	if !ok {
+		return nil
+	}
+	return fm
 }

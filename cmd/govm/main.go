@@ -13311,7 +13311,157 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(ole32, "CoCreateInstance", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x80004005) // E_FAIL - COM not available
+			// rclsid *CLSID, pUnkOuter, dwClsContext, riid *IID, ppv **void
+			ppv := ctx.Arg(4)
+			if ppv == 0 {
+				ctx.SetReturn(0x80004003) // E_POINTER
+				return 0
+			}
+			// Build a minimal IUnknown vtable in guest memory.
+			// vtable[0] = QueryInterface stub, [1] = AddRef stub, [2] = Release stub
+			// Each stub is a trap that returns S_OK / 1.
+			// We reuse a single shared IUnknown object for all CoCreateInstance calls.
+			// The guest object layout: [8-byte vtable ptr] → vtable[3 pointers]
+			const comObjSize = 8  // just the vtable pointer
+			const vtableSize = 24 // 3 × 8-byte pointers
+			// Allocate per-call so each object is independent.
+			objAddr := mem.Mmap(0, comObjSize+vtableSize+3*64, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+			vtableAddr := objAddr + comObjSize
+			// Write 3 stub functions right after vtable entries.
+			stubBase := vtableAddr + vtableSize
+			// Stub: mov eax, 0; ret (returns 0 / S_OK or 1 for AddRef/Release)
+			for i := uint64(0); i < 3; i++ {
+				sAddr := stubBase + i*64
+				// xor eax, eax; ret
+				ctx.Mem.Write8(sAddr+0, 0x31)
+				ctx.Mem.Write8(sAddr+1, 0xC0)
+				ctx.Mem.Write8(sAddr+2, 0xC3)
+				ctx.Mem.Write64(vtableAddr+i*8, sAddr)
+			}
+			// AddRef/Release return 1 not 0 - patch the ret value
+			// mov eax, 1; ret
+			for _, i := range []uint64{1, 2} {
+				sAddr := stubBase + i*64
+				ctx.Mem.Write8(sAddr+0, 0xB8)
+				ctx.Mem.Write32(sAddr+1, 1)
+				ctx.Mem.Write8(sAddr+5, 0xC3)
+			}
+			// Object: vtable pointer at offset 0
+			ctx.Mem.Write64(objAddr, vtableAddr)
+			// *ppv = objAddr
+			ctx.Mem.Write64(ppv, objAddr)
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "CoCreateInstanceEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004005) // E_FAIL
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "StringFromGUID2", func(ctx *ntapi.TrapContext) uint32 {
+			// rguid *GUID, lpsz *OLECHAR, cchMax int → returns chars written
+			guidPtr := ctx.Arg(0)
+			outPtr := ctx.Arg(1)
+			cchMax := int(ctx.Arg(2))
+			if guidPtr == 0 || outPtr == 0 || cchMax < 39 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Read 16 bytes of GUID
+			b := make([]byte, 16)
+			for i := range b {
+				v, _ := ctx.Mem.Read8(guidPtr + uint64(i))
+				b[i] = v
+			}
+			d1 := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+			d2 := uint16(b[4]) | uint16(b[5])<<8
+			d3 := uint16(b[6]) | uint16(b[7])<<8
+			s := fmt.Sprintf("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+				d1, d2, d3, b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
+			// Write as UTF-16LE
+			runes := []rune(s)
+			for i, r := range runes {
+				ctx.Mem.Write16(outPtr+uint64(i)*2, uint16(r))
+			}
+			ctx.Mem.Write16(outPtr+uint64(len(runes))*2, 0) // NUL
+			ctx.SetReturn(uint64(len(runes) + 1))
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "CLSIDFromString", func(ctx *ntapi.TrapContext) uint32 {
+			// Parse "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}" → GUID struct
+			strPtr := ctx.Arg(0)
+			clsidPtr := ctx.Arg(1)
+			if strPtr == 0 || clsidPtr == 0 {
+				ctx.SetReturn(0x80004003) // E_POINTER
+				return 0
+			}
+			s := readGuestUTF16(strPtr)
+			var d1 uint32; var d2, d3 uint16; var rest [8]byte
+			n, _ := fmt.Sscanf(s, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+				&d1, &d2, &d3,
+				&rest[0], &rest[1], &rest[2], &rest[3], &rest[4], &rest[5], &rest[6], &rest[7])
+			if n < 11 {
+				ctx.SetReturn(0x80070057) // E_INVALIDARG
+				return 0
+			}
+			ctx.Mem.Write8(clsidPtr+0, byte(d1))
+			ctx.Mem.Write8(clsidPtr+1, byte(d1>>8))
+			ctx.Mem.Write8(clsidPtr+2, byte(d1>>16))
+			ctx.Mem.Write8(clsidPtr+3, byte(d1>>24))
+			ctx.Mem.Write8(clsidPtr+4, byte(d2))
+			ctx.Mem.Write8(clsidPtr+5, byte(d2>>8))
+			ctx.Mem.Write8(clsidPtr+6, byte(d3))
+			ctx.Mem.Write8(clsidPtr+7, byte(d3>>8))
+			for i := 0; i < 8; i++ {
+				ctx.Mem.Write8(clsidPtr+8+uint64(i), rest[i])
+			}
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "CLSIDFromProgID", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x800401F3) // CO_E_CLASSSTRING
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "StringFromCLSID", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004005) // E_FAIL
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "IIDFromString", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0x80004005)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "IsEqualGUID", func(ctx *ntapi.TrapContext) uint32 {
+			// rguid1 *GUID, rguid2 *GUID → BOOL
+			g1 := ctx.Arg(0); g2 := ctx.Arg(1)
+			for i := uint64(0); i < 16; i++ {
+				b1, _ := ctx.Mem.Read8(g1 + i)
+				b2, _ := ctx.Mem.Read8(g2 + i)
+				if b1 != b2 { ctx.SetReturn(0); return 0 }
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ole32, "CreateStreamOnHGlobal", func(ctx *ntapi.TrapContext) uint32 {
+			// hGlobal, fDeleteOnRelease, ppstm
+			ppstm := ctx.Arg(2)
+			if ppstm == 0 { ctx.SetReturn(0x80004003); return 0 }
+			// Minimal IStream stub (same IUnknown pattern)
+			objAddr := mem.Mmap(0, 8+64+10*64, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+			vtAddr := objAddr + 8
+			stubBase := vtAddr + 80 // 10 vtable entries × 8
+			// Write xor eax,eax; ret for all 10 IStream methods
+			for i := uint64(0); i < 10; i++ {
+				s := stubBase + i*64
+				ctx.Mem.Write8(s+0, 0x31); ctx.Mem.Write8(s+1, 0xC0); ctx.Mem.Write8(s+2, 0xC3)
+				ctx.Mem.Write64(vtAddr+i*8, s)
+			}
+			// AddRef/Release (idx 1,2) → return 1
+			for _, i := range []uint64{1, 2} {
+				s := stubBase + i*64
+				ctx.Mem.Write8(s+0, 0xB8); ctx.Mem.Write32(s+1, 1); ctx.Mem.Write8(s+5, 0xC3)
+			}
+			ctx.Mem.Write64(objAddr, vtAddr)
+			ctx.Mem.Write64(ppstm, objAddr)
+			ctx.SetReturn(0) // S_OK
 			return 0
 		})
 		d.RegisterAutoStubHandler(ole32, "CoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
