@@ -21,11 +21,12 @@ var vmTrapBytes = []byte{0x0F, 0x01, 0xC1}
 // SynthPE builds a minimal PE image in guest memory with an export table
 // where every export is a trap stub: mov eax, <id>; vmcall; ret.
 type SynthPE struct {
-	Name      string
-	BaseAddr  uint64
-	ImageSize uint64
-	Exports   map[string]uint64 // name → guest address of stub
-	StubIDs   map[uint64]uint32 // guest address → syscall ID
+	Name       string
+	BaseAddr   uint64
+	ImageSize  uint64
+	Exports    map[string]uint64  // name → guest address of stub
+	StubIDs    map[uint64]uint32  // guest address → syscall ID
+	ExportOrds map[uint16]uint64  // export ordinal → guest address of stub
 }
 
 // PatchStub replaces a function's stub with custom x64 machine code.
@@ -1031,9 +1032,10 @@ const stubSize = 64
 // GenerateSynthDLL creates a minimal PE image in guest memory with trap stubs.
 func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32) *SynthPE {
 	synth := &SynthPE{
-		Name:    name,
-		Exports: make(map[string]uint64),
-		StubIDs: make(map[uint64]uint32),
+		Name:       name,
+		Exports:    make(map[string]uint64),
+		StubIDs:    make(map[uint64]uint32),
+		ExportOrds: make(map[uint16]uint64),
 	}
 
 	numExports := uint32(len(exports))
@@ -1136,6 +1138,7 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 
 		synth.Exports[exportName] = stubAddr
 		synth.StubIDs[stubAddr] = syscallID
+		synth.ExportOrds[uint16(i)] = stubAddr // identity ordinal mapping
 	}
 
 	// --- Write .edata section: export directory ---
@@ -1199,7 +1202,7 @@ func SynthToModule(s *SynthPE) *loader.PEModule {
 		ImageSize:  s.ImageSize,
 		EntryPoint: s.BaseAddr, // not used
 		Exports:    s.Exports,
-		ExportOrds: make(map[uint16]uint64),
+		ExportOrds: s.ExportOrds,
 		Forwards:   make(map[string]string),
 		Is64:       true,
 	}
