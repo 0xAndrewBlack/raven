@@ -1491,6 +1491,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0 // no-op (leak)
 		})
 
+		d.RegisterAutoStubHandler(msvcrt, "_strdup", func(ctx *ntapi.TrapContext) uint32 {
+			src := ctx.Arg(0)
+			if src == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			var buf []byte
+			for i := uint64(0); i < 0x100000; i++ {
+				b, _ := mem.Read8(src + i)
+				buf = append(buf, b)
+				if b == 0 {
+					break
+				}
+			}
+			dst := mem.Mmap(0, uint64(len(buf)+1), mmu.PermRead|mmu.PermWrite)
+			mem.WriteBytes(dst, buf)
+			ctx.SetReturn(dst)
+			return 0
+		})
+
 		// String functions that are safer to implement in Go
 		d.RegisterAutoStubHandler(msvcrt, "strlen", func(ctx *ntapi.TrapContext) uint32 {
 			s := ctx.Arg(0)
@@ -11006,15 +11026,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "VirtualAlloc", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // NULL - use HeapAlloc
+			lpAddress := ctx.Arg(0)
+			dwSize := ctx.Arg(1)
+			// flAllocationType := ctx.Arg(2) // MEM_COMMIT=0x1000, MEM_RESERVE=0x2000
+			// flProtect := ctx.Arg(3)        // PAGE_READWRITE=0x04, etc.
+			if dwSize == 0 {
+				dwSize = 0x1000
+			}
+			dwSize = (dwSize + 0xFFF) &^ 0xFFF // page-align
+			perms := mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+			addr := mem.Mmap(lpAddress, dwSize, perms)
+			if addr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			ravelog.Logf("[win32] VirtualAlloc(0x%x, 0x%x) → 0x%x\n", lpAddress, dwSize, addr)
+			ctx.SetReturn(addr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "VirtualAllocEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // NULL
+			// hProcess := ctx.Arg(0) // ignored - always current process
+			lpAddress := ctx.Arg(1)
+			dwSize := ctx.Arg(2)
+			if dwSize == 0 {
+				dwSize = 0x1000
+			}
+			dwSize = (dwSize + 0xFFF) &^ 0xFFF
+			perms := mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+			addr := mem.Mmap(lpAddress, dwSize, perms)
+			ctx.SetReturn(addr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "VirtualAllocExNuma", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // NULL
+			lpAddress := ctx.Arg(1)
+			dwSize := ctx.Arg(2)
+			if dwSize == 0 {
+				dwSize = 0x1000
+			}
+			dwSize = (dwSize + 0xFFF) &^ 0xFFF
+			perms := mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+			addr := mem.Mmap(lpAddress, dwSize, perms)
+			ctx.SetReturn(addr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "VirtualBufferExceptionHandler", func(ctx *ntapi.TrapContext) uint32 {
