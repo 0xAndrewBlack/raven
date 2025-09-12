@@ -34,6 +34,7 @@ comctl32pkg "github.com/mirkobrombin/Raven/pkg/comctl32"
 win32 "github.com/mirkobrombin/Raven/pkg/win32"
 "github.com/mirkobrombin/Raven/pkg/win32k"
 "github.com/mirkobrombin/Raven/pkg/x64"
+"github.com/mirkobrombin/Raven/pkg/jit"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
@@ -573,6 +574,30 @@ c := x64.New(mem)
 c.SetPC(result.EntryPoint)
 c.SetSP(result.StackPtr)
 c.SetGSBase(procState.TEBAddr) // GS points to TEB (x64 Windows convention)
+
+// Wire JIT compiler
+jitCache := jit.NewCache(mem)
+c.PreStep = func(cpu *x64.CPU) bool {
+	fn := jitCache.Lookup(cpu.RIP)
+	if fn == nil {
+		return false
+	}
+	s := &jit.State{
+		Regs:   &cpu.Regs,
+		RIP:    &cpu.RIP,
+		Rflags: &cpu.Rflags,
+		Mem:    mem,
+		XMM:    &cpu.XMM,
+	}
+	if err := fn(s); err != nil {
+		return false // fall back to interpreter on error
+	}
+	cpu.InvalidateFetchCache()
+	if s.Trap {
+		return false // need interpreter to handle syscall/vmcall
+	}
+	return true
+}
 
 // Wire up implicit TLS (__declspec(thread)) if the PE has a TLS directory.
 // TEB+0x58 (ThreadLocalStoragePointer) must point to an array of per-module

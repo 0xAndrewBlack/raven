@@ -17,7 +17,7 @@ func (c *CPU) loadXMM128(pfx *prefixState) (dst int, src [2]uint64, err error) {
 	}
 	dst = m.reg
 	if m.mod == 3 {
-		src = c.xmm[m.rm]
+		src = c.XMM[m.rm]
 	} else {
 		addr, _, err2 := c.resolveRMAddr(m, pfx)
 		if err2 != nil {
@@ -58,9 +58,9 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 				idx := b & 0x0f
 				var sb byte
 				if idx < 8 {
-					sb = byte(c.xmm[dst][0] >> (uint(idx) * 8))
+					sb = byte(c.XMM[dst][0] >> (uint(idx) * 8))
 				} else {
-					sb = byte(c.xmm[dst][1] >> (uint(idx-8) * 8))
+					sb = byte(c.XMM[dst][1] >> (uint(idx-8) * 8))
 				}
 				if i < 8 {
 					r[0] |= uint64(sb) << (uint(i) * 8)
@@ -69,7 +69,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 				}
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PBLENDVB xmm1, xmm2/m128 (0F 38 10) - mask = XMM0
@@ -78,14 +78,14 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		mask := c.xmm[0]
+		mask := c.XMM[0]
 		var r [2]uint64
 		for i := uint(0); i < 16; i++ {
 			half := i / 8
 			bit := i % 8
 			var mb, db, sb byte
 			mb = byte(mask[half] >> (bit * 8))
-			db = byte(c.xmm[dst][half] >> (bit * 8))
+			db = byte(c.XMM[dst][half] >> (bit * 8))
 			sb = byte(src[half] >> (bit * 8))
 			var out byte
 			if mb&0x80 != 0 {
@@ -95,7 +95,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(out) << (bit * 8)
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// BLENDVPS xmm1, xmm2/m128 (0F 38 14) - mask = XMM0
@@ -104,13 +104,13 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		mask := c.xmm[0]
+		mask := c.XMM[0]
 		var r [2]uint64
 		for i := uint(0); i < 4; i++ {
 			half := i / 2
 			shift := (i % 2) * 32
 			mb := uint32(mask[half] >> shift)
-			db := uint32(c.xmm[dst][half] >> shift)
+			db := uint32(c.XMM[dst][half] >> shift)
 			sb := uint32(src[half] >> shift)
 			var out uint32
 			if mb&0x80000000 != 0 {
@@ -120,7 +120,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(out) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// BLENDVPD xmm1, xmm2/m128 (0F 38 15) - mask = XMM0
@@ -129,11 +129,11 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		mask := c.xmm[0]
+		mask := c.XMM[0]
 		var r [2]uint64
 		for i := uint(0); i < 2; i++ {
 			mb := mask[i]
-			db := c.xmm[dst][i]
+			db := c.XMM[dst][i]
 			sb := src[i]
 			if mb>>63 != 0 {
 				r[i] = sb
@@ -141,7 +141,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 				r[i] = db
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PTEST xmm1, xmm2/m128 (0F 38 17) - sets ZF, CF
@@ -150,10 +150,10 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		and0 := c.xmm[dst][0] & src[0]
-		and1 := c.xmm[dst][1] & src[1]
-		andn0 := (^c.xmm[dst][0]) & src[0]
-		andn1 := (^c.xmm[dst][1]) & src[1]
+		and0 := c.XMM[dst][0] & src[0]
+		and1 := c.XMM[dst][1] & src[1]
+		andn0 := (^c.XMM[dst][0]) & src[0]
+		andn1 := (^c.XMM[dst][1]) & src[1]
 		zf := uint64(0)
 		if and0|and1 == 0 {
 			zf = flagZF
@@ -171,11 +171,11 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		a0 := int64(int32(c.xmm[dst][0]))
-		a1 := int64(int32(c.xmm[dst][1]))
+		a0 := int64(int32(c.XMM[dst][0]))
+		a1 := int64(int32(c.XMM[dst][1]))
 		b0 := int64(int32(src[0]))
 		b1 := int64(int32(src[1]))
-		c.xmm[dst] = [2]uint64{uint64(a0 * b0), uint64(a1 * b1)}
+		c.XMM[dst] = [2]uint64{uint64(a0 * b0), uint64(a1 * b1)}
 		return nil
 
 	// PCMPEQQ xmm1, xmm2/m128 (0F 38 29)
@@ -186,11 +186,11 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		}
 		var r [2]uint64
 		for i := 0; i < 2; i++ {
-			if c.xmm[dst][i] == src[i] {
+			if c.XMM[dst][i] == src[i] {
 				r[i] = 0xffffffffffffffff
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PACKUSDW xmm1, xmm2/m128 (0F 38 2B)
@@ -215,9 +215,9 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			return r
 		}
-		lo := pack(c.xmm[dst][0]) | (pack(c.xmm[dst][1]) << 32)
+		lo := pack(c.XMM[dst][0]) | (pack(c.XMM[dst][1]) << 32)
 		hi := pack(src[0]) | (pack(src[1]) << 32)
-		c.xmm[dst] = [2]uint64{lo, hi}
+		c.XMM[dst] = [2]uint64{lo, hi}
 		return nil
 
 	// PCMPGTQ xmm1, xmm2/m128 (0F 38 37)
@@ -228,11 +228,11 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		}
 		var r [2]uint64
 		for i := 0; i < 2; i++ {
-			if int64(c.xmm[dst][i]) > int64(src[i]) {
+			if int64(c.XMM[dst][i]) > int64(src[i]) {
 				r[i] = 0xffffffffffffffff
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMINSB xmm1, xmm2/m128 (0F 38 38) - min signed bytes
@@ -244,7 +244,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 16; i++ {
 			half, bit := i/8, i%8
-			a := int8(c.xmm[dst][half] >> (bit * 8))
+			a := int8(c.XMM[dst][half] >> (bit * 8))
 			b := int8(src[half] >> (bit * 8))
 			v := a
 			if b < v {
@@ -252,7 +252,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(uint8(v)) << (bit * 8)
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMINSD xmm1, xmm2/m128 (0F 38 39) - min signed dwords
@@ -264,7 +264,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 4; i++ {
 			half, shift := i/2, (i%2)*32
-			a := int32(c.xmm[dst][half] >> shift)
+			a := int32(c.XMM[dst][half] >> shift)
 			b := int32(src[half] >> shift)
 			v := a
 			if b < v {
@@ -272,7 +272,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(uint32(v)) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMINUW xmm1, xmm2/m128 (0F 38 3A) - min unsigned words
@@ -284,7 +284,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 8; i++ {
 			half, shift := i/4, (i%4)*16
-			a := uint16(c.xmm[dst][half] >> shift)
+			a := uint16(c.XMM[dst][half] >> shift)
 			b := uint16(src[half] >> shift)
 			v := a
 			if b < v {
@@ -292,7 +292,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(v) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMINUD xmm1, xmm2/m128 (0F 38 3B) - min unsigned dwords
@@ -304,7 +304,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 4; i++ {
 			half, shift := i/2, (i%2)*32
-			a := uint32(c.xmm[dst][half] >> shift)
+			a := uint32(c.XMM[dst][half] >> shift)
 			b := uint32(src[half] >> shift)
 			v := a
 			if b < v {
@@ -312,7 +312,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(v) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMAXSB xmm1, xmm2/m128 (0F 38 3C) - max signed bytes
@@ -324,7 +324,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 16; i++ {
 			half, bit := i/8, i%8
-			a := int8(c.xmm[dst][half] >> (bit * 8))
+			a := int8(c.XMM[dst][half] >> (bit * 8))
 			b := int8(src[half] >> (bit * 8))
 			v := a
 			if b > v {
@@ -332,7 +332,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(uint8(v)) << (bit * 8)
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMAXSD xmm1, xmm2/m128 (0F 38 3D) - max signed dwords
@@ -344,7 +344,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 4; i++ {
 			half, shift := i/2, (i%2)*32
-			a := int32(c.xmm[dst][half] >> shift)
+			a := int32(c.XMM[dst][half] >> shift)
 			b := int32(src[half] >> shift)
 			v := a
 			if b > v {
@@ -352,7 +352,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(uint32(v)) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMAXUW xmm1, xmm2/m128 (0F 38 3E) - max unsigned words
@@ -364,7 +364,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 8; i++ {
 			half, shift := i/4, (i%4)*16
-			a := uint16(c.xmm[dst][half] >> shift)
+			a := uint16(c.XMM[dst][half] >> shift)
 			b := uint16(src[half] >> shift)
 			v := a
 			if b > v {
@@ -372,7 +372,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(v) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMAXUD xmm1, xmm2/m128 (0F 38 3F) - max unsigned dwords
@@ -384,7 +384,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 4; i++ {
 			half, shift := i/2, (i%2)*32
-			a := uint32(c.xmm[dst][half] >> shift)
+			a := uint32(c.XMM[dst][half] >> shift)
 			b := uint32(src[half] >> shift)
 			v := a
 			if b > v {
@@ -392,7 +392,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 			r[half] |= uint64(v) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PMULLD xmm1, xmm2/m128 (0F 38 40) - multiply low dwords, store low 32 bits
@@ -404,11 +404,11 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		var r [2]uint64
 		for i := uint(0); i < 4; i++ {
 			half, shift := i/2, (i%2)*32
-			a := uint32(c.xmm[dst][half] >> shift)
+			a := uint32(c.XMM[dst][half] >> shift)
 			b := uint32(src[half] >> shift)
 			r[half] |= uint64(a*b) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PHMINPOSUW xmm1, xmm2/m128 (0F 38 41)
@@ -428,7 +428,7 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 				minIdx = uint16(i)
 			}
 		}
-		c.xmm[dst] = [2]uint64{uint64(minVal) | (uint64(minIdx) << 16), 0}
+		c.XMM[dst] = [2]uint64{uint64(minVal) | (uint64(minIdx) << 16), 0}
 		return nil
 
 	default:
@@ -460,7 +460,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			f := math.Float32frombits(uint32(src[half] >> shift))
 			r[half] |= uint64(math.Float32bits(roundFloat32(f, imm))) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// ROUNDPD xmm1, xmm2/m128, imm8 (0F 3A 09)
@@ -473,7 +473,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		c.xmm[dst] = [2]uint64{
+		c.XMM[dst] = [2]uint64{
 			math.Float64bits(roundFloat64(math.Float64frombits(src[0]), imm)),
 			math.Float64bits(roundFloat64(math.Float64frombits(src[1]), imm)),
 		}
@@ -487,7 +487,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		var srcBits uint32
 		if m.mod == 3 {
-			srcBits = uint32(c.xmm[m.rm][0])
+			srcBits = uint32(c.XMM[m.rm][0])
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
@@ -502,7 +502,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		f := math.Float32frombits(srcBits)
 		result := math.Float32bits(roundFloat32(f, imm))
-		c.xmm[m.reg][0] = (c.xmm[m.reg][0] & 0xffffffff00000000) | uint64(result)
+		c.XMM[m.reg][0] = (c.XMM[m.reg][0] & 0xffffffff00000000) | uint64(result)
 		return nil
 
 	// ROUNDSD xmm1, xmm2/m64, imm8 (0F 3A 0B)
@@ -513,7 +513,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		var srcBits uint64
 		if m.mod == 3 {
-			srcBits = c.xmm[m.rm][0]
+			srcBits = c.XMM[m.rm][0]
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
@@ -526,7 +526,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		f := math.Float64frombits(srcBits)
-		c.xmm[m.reg][0] = math.Float64bits(roundFloat64(f, imm))
+		c.XMM[m.reg][0] = math.Float64bits(roundFloat64(f, imm))
 		return nil
 
 	// BLENDPS xmm1, xmm2/m128, imm8 (0F 3A 0C)
@@ -545,10 +545,10 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			if (imm>>i)&1 != 0 {
 				r[half] |= uint64(uint32(src[half]>>shift)) << shift
 			} else {
-				r[half] |= uint64(uint32(c.xmm[dst][half]>>shift)) << shift
+				r[half] |= uint64(uint32(c.XMM[dst][half]>>shift)) << shift
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// BLENDPD xmm1, xmm2/m128, imm8 (0F 3A 0D)
@@ -566,10 +566,10 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			if (imm>>i)&1 != 0 {
 				r[i] = src[i]
 			} else {
-				r[i] = c.xmm[dst][i]
+				r[i] = c.XMM[dst][i]
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PBLENDW xmm1, xmm2/m128, imm8 (0F 3A 0E)
@@ -588,10 +588,10 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			if (imm>>i)&1 != 0 {
 				r[half] |= uint64(uint16(src[half]>>shift)) << shift
 			} else {
-				r[half] |= uint64(uint16(c.xmm[dst][half]>>shift)) << shift
+				r[half] |= uint64(uint16(c.XMM[dst][half]>>shift)) << shift
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PEXTRB r/m8, xmm2, imm8 (0F 3A 14)
@@ -606,7 +606,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		idx := uint(imm & 0x0f)
 		half, bit := idx/8, idx%8
-		val := uint64(byte(c.xmm[m.reg][half] >> (bit * 8)))
+		val := uint64(byte(c.XMM[m.reg][half] >> (bit * 8)))
 		if m.mod == 3 {
 			c.writeRegSized(m.rm, 4, val)
 		} else {
@@ -630,7 +630,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		idx := uint(imm & 0x07)
 		half, shift := idx/4, (idx%4)*16
-		val := uint64(uint16(c.xmm[m.reg][half] >> shift))
+		val := uint64(uint16(c.XMM[m.reg][half] >> shift))
 		if m.mod == 3 {
 			c.writeRegSized(m.rm, 4, val)
 		} else {
@@ -655,7 +655,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		if pfx.rexW() {
 			// PEXTRQ
 			idx := uint(imm & 0x01)
-			val := c.xmm[m.reg][idx]
+			val := c.XMM[m.reg][idx]
 			if m.mod == 3 {
 				c.writeRegSized(m.rm, 8, val)
 			} else {
@@ -669,7 +669,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			// PEXTRD
 			idx := uint(imm & 0x03)
 			half, shift := idx/2, (idx%2)*32
-			val := uint64(uint32(c.xmm[m.reg][half] >> shift))
+			val := uint64(uint32(c.XMM[m.reg][half] >> shift))
 			if m.mod == 3 {
 				c.writeRegSized(m.rm, 4, val)
 			} else {
@@ -694,7 +694,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		idx := uint(imm & 0x03)
 		half, shift := idx/2, (idx%2)*32
-		val := uint32(c.xmm[m.reg][half] >> shift)
+		val := uint32(c.XMM[m.reg][half] >> shift)
 		if m.mod == 3 {
 			c.writeRegSized(m.rm, 4, uint64(val))
 		} else {
@@ -729,7 +729,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		half, bit := idx/8, idx%8
 		mask := ^(uint64(0xff) << (bit * 8))
-		c.xmm[m.reg][half] = (c.xmm[m.reg][half] & mask) | (uint64(val) << (bit * 8))
+		c.XMM[m.reg][half] = (c.XMM[m.reg][half] & mask) | (uint64(val) << (bit * 8))
 		return nil
 
 	// INSERTPS xmm1, xmm2/m32, imm8 (0F 3A 21)
@@ -748,7 +748,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		if m.mod == 3 {
 			srcIdx := uint((imm >> 6) & 0x03)
 			half, shift := srcIdx/2, (srcIdx%2)*32
-			srcVal = uint32(c.xmm[m.rm][half] >> shift)
+			srcVal = uint32(c.XMM[m.rm][half] >> shift)
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
@@ -758,12 +758,12 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		half, shift := dstIdx/2, (dstIdx%2)*32
 		mask := ^(uint64(0xffffffff) << shift)
-		c.xmm[m.reg][half] = (c.xmm[m.reg][half] & mask) | (uint64(srcVal) << shift)
+		c.XMM[m.reg][half] = (c.XMM[m.reg][half] & mask) | (uint64(srcVal) << shift)
 		// zero elements as indicated by zmask
 		for i := uint(0); i < 4; i++ {
 			if (zmask>>i)&1 != 0 {
 				h, sh := i/2, (i%2)*32
-				c.xmm[m.reg][h] &^= 0xffffffff << sh
+				c.XMM[m.reg][h] &^= 0xffffffff << sh
 			}
 		}
 		return nil
@@ -791,7 +791,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 				}
 				val, _ = c.mem.Read64(addr)
 			}
-			c.xmm[m.reg][idx] = val
+			c.XMM[m.reg][idx] = val
 		} else {
 			// PINSRD
 			idx := uint(imm & 0x03)
@@ -807,7 +807,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			}
 			half, shift := idx/2, (idx%2)*32
 			mask := ^(uint64(0xffffffff) << shift)
-			c.xmm[m.reg][half] = (c.xmm[m.reg][half] & mask) | (uint64(val) << shift)
+			c.XMM[m.reg][half] = (c.XMM[m.reg][half] & mask) | (uint64(val) << shift)
 		}
 		return nil
 
@@ -825,7 +825,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		for i := uint(0); i < 4; i++ {
 			if (imm>>(i+4))&1 != 0 {
 				half, shift := i/2, (i%2)*32
-				a := math.Float32frombits(uint32(c.xmm[dst][half] >> shift))
+				a := math.Float32frombits(uint32(c.XMM[dst][half] >> shift))
 				b := math.Float32frombits(uint32(src[half] >> shift))
 				dp += a * b
 			}
@@ -837,7 +837,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 				r[half] |= uint64(math.Float32bits(dp)) << shift
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// DPPD xmm1, xmm2/m128, imm8 (0F 3A 41) - dot product of packed doubles
@@ -853,7 +853,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		var dp float64
 		for i := uint(0); i < 2; i++ {
 			if (imm>>(i+4))&1 != 0 {
-				a := math.Float64frombits(c.xmm[dst][i])
+				a := math.Float64frombits(c.XMM[dst][i])
 				b := math.Float64frombits(src[i])
 				dp += a * b
 			}
@@ -864,7 +864,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 				r[i] = math.Float64bits(dp)
 			}
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// MPSADBW xmm1, xmm2/m128, imm8 (0F 3A 42) - sum of absolute differences
@@ -888,7 +888,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 				// Simplified: treat as SADs
 				dh, db := di/8, di%8
 				sh, sb := si/8, si%8
-				av := byte(c.xmm[dst][dh] >> (db * 8))
+				av := byte(c.XMM[dst][dh] >> (db * 8))
 				if sh < 2 {
 					bv := byte(src[sh] >> (sb * 8))
 					d := int(av) - int(bv)
@@ -901,7 +901,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			half, shift := i/4, (i%4)*16
 			r[half] |= uint64(sad) << shift
 		}
-		c.xmm[dst] = r
+		c.XMM[dst] = r
 		return nil
 
 	// PCLMULQDQ xmm1, xmm2/m128, imm8 (0F 3A 44) - carry-less multiply
@@ -916,7 +916,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		var src [2]uint64
 		if m.mod == 3 {
-			src = c.xmm[m.rm]
+			src = c.XMM[m.rm]
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
@@ -926,10 +926,10 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 			hi, _ := c.mem.Read64(addr + 8)
 			src = [2]uint64{lo, hi}
 		}
-		a := c.xmm[m.reg][(imm)&1]
+		a := c.XMM[m.reg][(imm)&1]
 		b := src[(imm>>4)&1]
 		lo, hi := clmul64(a, b)
-		c.xmm[m.reg] = [2]uint64{lo, hi}
+		c.XMM[m.reg] = [2]uint64{lo, hi}
 		return nil
 
 	// PCMPESTRM xmm1, xmm2/m128, imm8 (0F 3A 60) - explicit-length string compare to mask
@@ -961,11 +961,11 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		shift := uint(imm)
 		if shift >= 32 {
-			c.xmm[dst] = [2]uint64{0, 0}
+			c.XMM[dst] = [2]uint64{0, 0}
 		} else if shift >= 16 {
 			// result comes entirely from dst (upper 128 bits of the concat)
 			s := (shift - 16) * 8
-			d := c.xmm[dst]
+			d := c.XMM[dst]
 			var r [2]uint64
 			if s == 0 {
 				r = d
@@ -976,7 +976,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 				r[0] = d[1] >> (s - 64)
 				r[1] = 0
 			}
-			c.xmm[dst] = r
+			c.XMM[dst] = r
 		} else {
 			// result spans src (bits 0-127) and dst (bits 128-255)
 			// concat = dst:src as little-endian 256-bit, shift right by shift bytes
@@ -986,16 +986,16 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 				r = src
 			} else if s < 64 {
 				r[0] = (src[0] >> s) | (src[1] << (64 - s))
-				r[1] = (src[1] >> s) | (c.xmm[dst][0] << (64 - s))
+				r[1] = (src[1] >> s) | (c.XMM[dst][0] << (64 - s))
 			} else if s == 64 {
 				r[0] = src[1]
-				r[1] = c.xmm[dst][0]
+				r[1] = c.XMM[dst][0]
 			} else {
 				s2 := s - 64
-				r[0] = (src[1] >> s2) | (c.xmm[dst][0] << (64 - s2))
-				r[1] = (c.xmm[dst][0] >> s2) | (c.xmm[dst][1] << (64 - s2))
+				r[0] = (src[1] >> s2) | (c.XMM[dst][0] << (64 - s2))
+				r[1] = (c.XMM[dst][0] >> s2) | (c.XMM[dst][1] << (64 - s2))
 			}
-			c.xmm[dst] = r
+			c.XMM[dst] = r
 		}
 		return nil
 
@@ -1064,7 +1064,7 @@ func (c *CPU) pcmpxstrx(pfx *prefixState, implicit bool, toIndex bool, startRIP 
 	}
 	var src2 [2]uint64
 	if m.mod == 3 {
-		src2 = c.xmm[m.rm]
+		src2 = c.XMM[m.rm]
 	} else {
 		addr, _, err2 := c.resolveRMAddr(m, pfx)
 		if err2 != nil {
@@ -1074,7 +1074,7 @@ func (c *CPU) pcmpxstrx(pfx *prefixState, implicit bool, toIndex bool, startRIP 
 		hi, _ := c.mem.Read64(addr + 8)
 		src2 = [2]uint64{lo, hi}
 	}
-	src1 := c.xmm[m.reg]
+	src1 := c.XMM[m.reg]
 
 	// Determine element size and signedness
 	elemBytes := 1
@@ -1173,7 +1173,7 @@ func (c *CPU) pcmpxstrx(pfx *prefixState, implicit bool, toIndex bool, startRIP 
 	} else {
 		// Return mask in XMM0
 		if nElems == 16 {
-			c.xmm[0] = [2]uint64{uint64(res), 0}
+			c.XMM[0] = [2]uint64{uint64(res), 0}
 		} else {
 			// 8 elements of 2 bytes each - expand each bit to a 16-bit mask
 			var lo, hi uint64
@@ -1186,7 +1186,7 @@ func (c *CPU) pcmpxstrx(pfx *prefixState, implicit bool, toIndex bool, startRIP 
 					}
 				}
 			}
-			c.xmm[0] = [2]uint64{lo, hi}
+			c.XMM[0] = [2]uint64{lo, hi}
 		}
 	}
 	return nil
