@@ -539,6 +539,96 @@ func (dc *DC) DrawFrameControl(left, top, right, bottom int32, uType, uState uin
 	}
 }
 
+// DrawCaption draws a window caption bar.
+// ReactOS: win32ss/user/ntuser/painting.c UserDrawCaption
+// Flags: DC_ACTIVE=0x0001, DC_SMALLCAP=0x0002, DC_ICON=0x0004,
+//        DC_TEXT=0x0008, DC_GRADIENT=0x0020, DC_NC=0x001F.
+func (dc *DC) DrawCaption(left, top, right, bottom int32, title string, flags uint32, sysColors [31]uint32) {
+	const (
+		DC_ACTIVE   = 0x0001
+		DC_SMALLCAP = 0x0002
+		DC_TEXT     = 0x0008
+		DC_GRADIENT = 0x0020
+	)
+
+	active := flags&DC_ACTIVE != 0
+	gradient := flags&DC_GRADIENT != 0
+
+	// Caption colours (ReactOS: IntGetSysColor)
+	var bgLeft, bgRight, textColor uint32
+	if active {
+		bgLeft = sysColors[2]  // COLOR_ACTIVECAPTION
+		bgRight = sysColors[27] // COLOR_GRADIENTACTIVECAPTION
+		textColor = sysColors[9] // COLOR_CAPTIONTEXT
+	} else {
+		bgLeft = sysColors[3]   // COLOR_INACTIVECAPTION
+		bgRight = sysColors[28] // COLOR_GRADIENTINACTIVECAPTION
+		textColor = sysColors[19] // COLOR_INACTIVECAPTIONTEXT
+	}
+
+	if gradient && bgLeft != bgRight {
+		dc.GradientFill(left, top, right, bottom, bgLeft, bgRight, true)
+	} else {
+		dc.FillRect(left, top, right, bottom, bgLeft)
+	}
+
+	if title != "" {
+		textLeft := left + 2
+		textTop := top + (bottom-top-16)/2
+		if textTop < top {
+			textTop = top
+		}
+		dc.drawTextSimple(textLeft, textTop, right-2, bottom, title, textColor)
+	}
+}
+
+// drawTextSimple renders ASCII text with the embedded 8x16 font.
+// Used internally by DrawCaption. Clips to (right, bottom).
+func (dc *DC) drawTextSimple(x, y, right, bottom int32, text string, color uint32) {
+	s := dc.target()
+	if s.Pix == nil {
+		return
+	}
+
+	ox, oy := dc.OriginX, dc.OriginY
+	cx := x + ox
+	cy := y + oy
+
+	for _, ch := range []byte(text) {
+		if cx+8 > right+ox || cy+16 > bottom+oy {
+			break
+		}
+		if ch < 32 || ch > 126 {
+			ch = '?'
+		}
+		glyphIdx := int(ch) - 32
+		glyphData := font8x16[glyphIdx*16 : (glyphIdx+1)*16]
+		for row := 0; row < 16; row++ {
+			py := cy + int32(row)
+			if py < 0 || py >= s.Height {
+				continue
+			}
+			bits := glyphData[row]
+			off := int(py)*int(s.Stride) + int(cx)*4
+			for col := 0; col < 8; col++ {
+				px := cx + int32(col)
+				if px < 0 || px >= s.Width {
+					off += 4
+					continue
+				}
+				if bits&(0x80>>uint(col)) != 0 {
+					s.Pix[off] = byte(color)
+					s.Pix[off+1] = byte(color >> 8)
+					s.Pix[off+2] = byte(color >> 16)
+					s.Pix[off+3] = 0xFF
+				}
+				off += 4
+			}
+		}
+		cx += 8
+	}
+}
+
 // GradientFill fills a rect with a gradient (simplified: use top color for whole rect).
 // ReactOS: NtGdiGradientFill
 func (dc *DC) GradientFill(left, top, right, bottom int32, colorTop, colorBottom uint32, horiz bool) {

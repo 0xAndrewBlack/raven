@@ -741,6 +741,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	var wlWindow *wl.Window
 	var mainHWND uint64   // first top-level window HWND (for message routing)
 	var mainTitle string  // title of the main window
+	var mainActive = true // whether the main window is focused (for active caption)
 	_ = mainTitle
 	if wld, err := wl.Connect(); err == nil {
 		wlDisplay = wld
@@ -1249,8 +1250,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// Windows 10 system colors (COLORREF = 0x00RRGGBB)
 	sysColors := [31]uint32{
 		0x00C8C8C8, // 0  COLOR_SCROLLBAR
-		0x00A56E3A, // 1  COLOR_BACKGROUND/DESKTOP
-		0x00B99D7F, // 2  COLOR_ACTIVECAPTION
+		0x003A6EA5, // 1  COLOR_BACKGROUND/DESKTOP
+		0x000078D7, // 2  COLOR_ACTIVECAPTION (Win10 accent blue)
 		0x00D4D0C8, // 3  COLOR_INACTIVECAPTION
 		0x00F0F0F0, // 4  COLOR_MENU
 		0x00FFFFFF, // 5  COLOR_WINDOW
@@ -1261,7 +1262,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		0x00D4D0C8, // 10 COLOR_ACTIVEBORDER
 		0x00D4D0C8, // 11 COLOR_INACTIVEBORDER
 		0x00808080, // 12 COLOR_APPWORKSPACE
-		0x00D77800, // 13 COLOR_HIGHLIGHT
+		0x000078D7, // 13 COLOR_HIGHLIGHT
 		0x00FFFFFF, // 14 COLOR_HIGHLIGHTTEXT
 		0x00F0F0F0, // 15 COLOR_BTNFACE / 3DFACE
 		0x00A0A0A0, // 16 COLOR_BTNSHADOW
@@ -1272,12 +1273,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		0x00696969, // 21 COLOR_3DDKSHADOW
 		0x00E3E3E3, // 22 COLOR_3DLIGHT
 		0x00000000, // 23 COLOR_INFOTEXT
-		0x00E1FFFF, // 24 COLOR_INFOBK
+		0x00FFFFE1, // 24 COLOR_INFOBK
 		0x00000000, // 25 (reserved)
-		0x00CC6600, // 26 COLOR_HOTLIGHT
-		0x00D77800, // 27 COLOR_GRADIENTACTIVECAPTION
+		0x000066CC, // 26 COLOR_HOTLIGHT
+		0x00B4D0E7, // 27 COLOR_GRADIENTACTIVECAPTION (lighter blue for gradient)
 		0x00DBD1C9, // 28 COLOR_GRADIENTINACTIVECAPTION
-		0x00D77800, // 29 COLOR_MENUHILIGHT
+		0x000078D7, // 29 COLOR_MENUHILIGHT
 		0x00F0F0F0, // 30 COLOR_MENUBAR
 	}
 
@@ -13686,7 +13687,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		wlWindow.Commit()
 		frameCount++
 		path := fmt.Sprintf("/tmp/npp_frame%d.png", frameCount)
-		saveScreenshot(wlWindow.Pix, int(wlWindow.Width), int(wlWindow.Height), path)
+		saveScreenshot(wlWindow.Pix, int(wlWindow.Width), int(wlWindow.Height+wlWindow.TitleBarH), path)
 	}
 
 	// builtinWndProc handles messages for built-in window classes (Edit, StatusBar, etc.)
@@ -14929,18 +14930,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						h = nh
 					}
 					const wsCaption = 0x00C00000
-					titleBarH := int32(0)
-					// Only enable CSD title bar if the compositor doesn't do SSD
-					// (checked at runtime: decorMgrID==0 means no SSD support).
-					if style&wsCaption != 0 && wlDisplay.HasNoSSD() {
-						titleBarH = 30
+					// Compute NC top height from window style (ported from ReactOS NCCALCSIZE).
+					// This replaces the hardcoded titleBarH=30 that was the old fake CSD.
+					ncTop := int32(0)
+					if wlDisplay.HasNoSSD() {
+						// Use AdjustWindowRectEx to compute borders: start with
+						// a zero client rect and see how much the top grows.
+						var r win32.Rect
+						exStyle := uint32(ctx.Arg(0))
+						hasMenu := false
+						if hm := ctx.Arg(9); hm != 0 {
+							if _, ok := menus[hm]; ok {
+								hasMenu = true
+							}
+						}
+						win32.AdjustWindowRectEx(&r, style, hasMenu, exStyle)
+						ncTop = -r.Top // r.Top is negative after AdjustWindowRectEx
+						if ncTop < 0 {
+							ncTop = 0
+						}
 					}
-					if win, err := wlDisplay.CreateWindow(title, w, h, titleBarH); err == nil {
+					if win, err := wlDisplay.CreateWindow(title, w, h, ncTop); err == nil {
 						wlWindow = win
 						mainHWND = hwnd
 						mainTitle = title
 						// Initialise GWL_STYLE / GWL_EXSTYLE for the main window.
-						windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(ctx.Arg(0))}
+						exStyle := uint32(ctx.Arg(0))
+						windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(exStyle)}
+						// Register the main window in win32.Global so NC paint and other lookups work.
+						win32.Global.Create(hwnd, strings.ToLower(readGuestUTF16(lpClassName)), 0, 0, w, h, style, exStyle, 0)
 						ravelog.Logf("[wl] window created: %q %dx%d hwnd=0x%x\n", title, w, h, hwnd)
 						// Attach menu bar: first check hMenu parameter, then class menu
 						hMenu := ctx.Arg(9)
@@ -15713,11 +15731,93 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 			}
 
-			// WM_PAINT: draw non-client area (menu bar), erase background, paint children
+			// WM_PAINT: draw non-client area (NC paint + menu bar), erase background, paint children
 			if msg == 0x000F && wlWindow != nil {
 				if hwnd == mainHWND {
 					wlWindow.ResizeIfNeeded()
 					w := wlWindow.Width
+
+					// Trigger NC paint first (draws frame + caption + client edge)
+					if wlWindow.TitleBarH > 0 {
+						ncPaintCtx := *ctx // shallow copy for re-entrant dispatch
+						_ = ncPaintCtx
+						// Directly invoke our WM_NCPAINT handler logic
+						wnd := win32.Global.Get(hwnd)
+						if wnd != nil {
+							ncStyle := wnd.Style
+							ncExStyle := wnd.ExStyle
+							winW := wlWindow.Width
+							winH := wlWindow.Height + wlWindow.TitleBarH
+							syncScreenSurface()
+							_, ncDC := gdiMgr.AllocScreenDC()
+							ncDC.OriginX = 0
+							ncDC.OriginY = 0
+							curL, curT, curR, curB := int32(0), int32(0), winW, winH
+
+							if win32.UserHasWindowEdge(ncStyle, ncExStyle) {
+								ncDC.DrawEdge(curL, curT, curR, curB, 0x0005, 0x000F, sysColors)
+								curL += 2; curT += 2; curR -= 2; curB -= 2
+							}
+							if ncStyle&0x00040000 != 0 && ncStyle&0x20000000 == 0 {
+								fW := (win32.GetSystemMetrics(win32.SM_CXFRAME) - win32.GetSystemMetrics(win32.SM_CXDLGFRAME)) *
+									win32.GetSystemMetrics(win32.SM_CXBORDER)
+								fH := (win32.GetSystemMetrics(win32.SM_CYFRAME) - win32.GetSystemMetrics(win32.SM_CYDLGFRAME)) *
+									win32.GetSystemMetrics(win32.SM_CYBORDER)
+								borderColor := sysColors[10]
+								if !mainActive { borderColor = sysColors[11] }
+								ncDC.FillRect(curL, curT, curR, curT+fH, borderColor)
+								ncDC.FillRect(curL, curT, curL+fW, curB, borderColor)
+								ncDC.FillRect(curL, curB-fH, curR, curB, borderColor)
+								ncDC.FillRect(curR-fW, curT, curR, curB, borderColor)
+								curL += fW; curT += fH; curR -= fW; curB -= fH
+							}
+							if ncStyle&(0x00400000|0x00800000) != 0 || ncExStyle&0x00000001 != 0 {
+								bW := win32.GetSystemMetrics(win32.SM_CXBORDER)
+								bH := win32.GetSystemMetrics(win32.SM_CYBORDER)
+								var brushColor uint32
+								if ncExStyle&(0x00000001|0x00000200) != 0 {
+									brushColor = sysColors[15]
+								} else if ncExStyle&0x00020000 != 0 {
+									brushColor = sysColors[6]
+								} else if ncStyle&(0x00400000|0x00040000) != 0 {
+									brushColor = sysColors[15]
+								} else {
+									brushColor = sysColors[6]
+								}
+								ncDC.FillRect(curL, curT, curR, curT+bH, brushColor)
+								ncDC.FillRect(curL, curT, curL+bW, curB, brushColor)
+								ncDC.FillRect(curL, curB-bH, curR, curB, brushColor)
+								ncDC.FillRect(curR-bW, curT, curR, curB, brushColor)
+								curL += bW; curT += bH; curR -= bW; curB -= bH
+							}
+							if ncStyle&0x00C00000 == 0x00C00000 {
+								captionH := win32.GetSystemMetrics(win32.SM_CYCAPTION)
+								if ncExStyle&0x00000080 != 0 {
+									captionH = win32.GetSystemMetrics(win32.SM_CYSMCAPTION)
+								}
+								captionBottom := curT + captionH
+								flags := uint32(0x0020 | 0x0008)
+								if mainActive { flags |= 0x0001 }
+								ncDC.DrawCaption(curL, curT, curR, captionBottom-1, mainTitle, flags, sysColors)
+								btnW := win32.GetSystemMetrics(win32.SM_CXSIZE)
+								btnH := captionH - 2
+								if ncStyle&0x00080000 != 0 {
+									ncDC.DrawFrameControl(curR-btnW, curT, curR, curT+btnH, 1, 0, sysColors)
+									if ncExStyle&0x00000080 == 0 && ncStyle&(0x00020000|0x00010000) != 0 {
+										ncDC.DrawFrameControl(curR-2*btnW, curT, curR-btnW, curT+btnH, 1, 2, sysColors)
+										ncDC.DrawFrameControl(curR-3*btnW, curT, curR-2*btnW, curT+btnH, 1, 1, sysColors)
+									}
+								}
+								lineColor := sysColors[15]
+								ncDC.FillRect(curL, captionBottom-1, curR, captionBottom, lineColor)
+								curT = captionBottom
+							}
+							if ncExStyle&0x00000200 != 0 {
+								ncDC.DrawEdge(curL, curT, curR, curB, 0x000A, 0x000F, sysColors)
+							}
+						}
+					}
+
 					clientTop := int32(0)
 					ravelog.Logf("[paint] DefWndProc WM_PAINT mainHWND w=%d h=%d\n", wlWindow.Width, wlWindow.Height)
 
@@ -15818,6 +15918,309 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// For non-mainHWND: ReactOS DefWindowProc just calls BeginPaint+EndPaint
 				// In our model, the child is painted by paintTree from the parent
 				ctx.SetReturn(0)
+				return 0
+			}
+			// WM_NCCALCSIZE (0x0083): compute client rect from window rect.
+			// Ported from ReactOS nonclient.c NC_HandleNCCalcSize.
+			if msg == 0x0083 && wlWindow != nil {
+				wnd := win32.Global.Get(hwnd)
+				if wnd != nil {
+					style := wnd.Style
+					exStyle := wnd.ExStyle
+					if style&0x20000000 == 0 { // !WS_MINIMIZE
+						// Read the proposed RECT from guest memory (lParam).
+						// For wParam==0 lParam → single RECT.
+						// For wParam==1 lParam → NCCALCSIZE_PARAMS (first RECT is the new window rect).
+						rAddr := lParam
+						rL, _ := mem.Read32(rAddr)
+						rT, _ := mem.Read32(rAddr + 4)
+						rR, _ := mem.Read32(rAddr + 8)
+						rBot, _ := mem.Read32(rAddr + 12)
+						left := int32(rL)
+						top := int32(rT)
+						right := int32(rR)
+						bottom := int32(rBot)
+
+						// Deflate by border
+						if win32.UserHasWindowEdge(style, exStyle) {
+							bx, by := win32.BorderSize(style, exStyle)
+							left += bx; top += by; right -= bx; bottom -= by
+						} else if exStyle&0x00020000 != 0 { // WS_EX_STATICEDGE
+							left++; top++; right--; bottom--
+						} else if style&0x00800000 != 0 { // WS_BORDER
+							left++; top++; right--; bottom--
+						}
+
+						// Subtract caption
+						if style&0x00C00000 == 0x00C00000 { // WS_CAPTION
+							if exStyle&0x00000080 != 0 { // WS_EX_TOOLWINDOW
+								top += win32.GetSystemMetrics(win32.SM_CYSMCAPTION)
+							} else {
+								top += win32.GetSystemMetrics(win32.SM_CYCAPTION)
+							}
+						}
+
+						// Subtract menu bar
+						if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
+							top += menuBarHeight
+						}
+
+						// Subtract client edge
+						if exStyle&0x00000200 != 0 { // WS_EX_CLIENTEDGE
+							bw := win32.GetSystemMetrics(win32.SM_CXBORDER)
+							bh := win32.GetSystemMetrics(win32.SM_CYBORDER)
+							left += 2 * bw; top += 2 * bh
+							right -= 2 * bw; bottom -= 2 * bh
+						}
+
+						if top > bottom { bottom = top }
+						if left > right { right = left }
+
+						// Write back
+						mem.Write32(rAddr, uint32(left))
+						mem.Write32(rAddr+4, uint32(top))
+						mem.Write32(rAddr+8, uint32(right))
+						mem.Write32(rAddr+12, uint32(bottom))
+					}
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
+			// WM_NCPAINT (0x0085): draw the non-client area.
+			// Ported from ReactOS nonclient.c NC_DoNCPaint.
+			if msg == 0x0085 && wlWindow != nil && hwnd == mainHWND {
+				wnd := win32.Global.Get(hwnd)
+				if wnd != nil {
+					style := wnd.Style
+					exStyle := wnd.ExStyle
+					winW := wlWindow.Width
+					winH := wlWindow.Height + wlWindow.TitleBarH
+					// Create a window DC (origin 0,0 covering full surface including NC)
+					syncScreenSurface()
+					hDC, dc := gdiMgr.AllocScreenDC()
+					dc.OriginX = 0
+					dc.OriginY = 0
+					// Current rect tracks the shrinking paint area
+					curL, curT, curR, curB := int32(0), int32(0), winW, winH
+
+					// 1. Draw outer edge (EDGE_RAISED)
+					if win32.UserHasWindowEdge(style, exStyle) {
+						dc.DrawEdge(curL, curT, curR, curB, 0x0005, 0x000F, sysColors) // EDGE_RAISED|BF_RECT
+						curL += 2; curT += 2; curR -= 2; curB -= 2 // BF_ADJUST
+					} else if exStyle&0x00020000 != 0 { // WS_EX_STATICEDGE
+						dc.FillRect(curL, curT, curR, curT+1, sysColors[16]) // top
+						dc.FillRect(curL, curT, curL+1, curB, sysColors[16]) // left
+						dc.FillRect(curL, curB-1, curR, curB, sysColors[20]) // bottom
+						dc.FillRect(curR-1, curT, curR, curB, sysColors[20]) // right
+						curL++; curT++; curR--; curB--
+					}
+
+					// 2. Draw frame (NC_DrawFrame from ReactOS)
+					if style&0x00040000 != 0 && style&0x20000000 == 0 { // WS_THICKFRAME && !WS_MINIMIZE
+						fW := (win32.GetSystemMetrics(win32.SM_CXFRAME) - win32.GetSystemMetrics(win32.SM_CXDLGFRAME)) *
+							win32.GetSystemMetrics(win32.SM_CXBORDER)
+						fH := (win32.GetSystemMetrics(win32.SM_CYFRAME) - win32.GetSystemMetrics(win32.SM_CYDLGFRAME)) *
+							win32.GetSystemMetrics(win32.SM_CYBORDER)
+						borderColor := sysColors[10] // COLOR_ACTIVEBORDER
+						if !mainActive {
+							borderColor = sysColors[11] // COLOR_INACTIVEBORDER
+						}
+						dc.FillRect(curL, curT, curR, curT+fH, borderColor)
+						dc.FillRect(curL, curT, curL+fW, curB, borderColor)
+						dc.FillRect(curL, curB-fH, curR, curB, borderColor)
+						dc.FillRect(curR-fW, curT, curR, curB, borderColor)
+						curL += fW; curT += fH; curR -= fW; curB -= fH
+					}
+					// Inner border
+					if style&(0x00400000|0x00800000) != 0 || exStyle&0x00000001 != 0 { // WS_DLGFRAME|WS_BORDER|WS_EX_DLGMODALFRAME
+						bW := win32.GetSystemMetrics(win32.SM_CXBORDER)
+						bH := win32.GetSystemMetrics(win32.SM_CYBORDER)
+						var brushColor uint32
+						if exStyle&(0x00000001|0x00000200) != 0 { // WS_EX_DLGMODALFRAME|WS_EX_CLIENTEDGE
+							brushColor = sysColors[15] // COLOR_3DFACE
+						} else if exStyle&0x00020000 != 0 { // WS_EX_STATICEDGE
+							brushColor = sysColors[6] // COLOR_WINDOWFRAME
+						} else if style&(0x00400000|0x00040000) != 0 { // WS_DLGFRAME|WS_THICKFRAME
+							brushColor = sysColors[15] // COLOR_3DFACE
+						} else {
+							brushColor = sysColors[6] // COLOR_WINDOWFRAME
+						}
+						dc.FillRect(curL, curT, curR, curT+bH, brushColor)
+						dc.FillRect(curL, curT, curL+bW, curB, brushColor)
+						dc.FillRect(curL, curB-bH, curR, curB, brushColor)
+						dc.FillRect(curR-bW, curT, curR, curB, brushColor)
+						curL += bW; curT += bH; curR -= bW; curB -= bH
+					}
+
+					// 3. Draw caption
+					if style&0x00C00000 == 0x00C00000 { // WS_CAPTION
+						captionH := win32.GetSystemMetrics(win32.SM_CYCAPTION)
+						if exStyle&0x00000080 != 0 { // WS_EX_TOOLWINDOW
+							captionH = win32.GetSystemMetrics(win32.SM_CYSMCAPTION)
+						}
+						captionBottom := curT + captionH
+						// Draw caption bar with gradient
+						flags := uint32(0x0020 | 0x0008) // DC_GRADIENT | DC_TEXT
+						if mainActive {
+							flags |= 0x0001 // DC_ACTIVE
+						}
+						dc.DrawCaption(curL, curT, curR, captionBottom-1, mainTitle, flags, sysColors)
+
+						// Draw caption buttons (ReactOS UserDrawCaptionButton)
+						btnW := win32.GetSystemMetrics(win32.SM_CXSIZE)
+						btnH := captionH - 2
+						if style&0x00080000 != 0 { // WS_SYSMENU
+							// Close button (rightmost)
+							dc.DrawFrameControl(curR-btnW, curT, curR, curT+btnH, 1, 0, sysColors) // DFC_CAPTION, DFCS_CAPTIONCLOSE
+							// Min/Max if not tool window
+							if exStyle&0x00000080 == 0 {
+								if style&(0x00020000|0x00010000) != 0 { // WS_MINIMIZEBOX|WS_MAXIMIZEBOX
+									dc.DrawFrameControl(curR-2*btnW, curT, curR-btnW, curT+btnH, 1, 2, sysColors) // DFCS_CAPTIONMAX
+									dc.DrawFrameControl(curR-3*btnW, curT, curR-2*btnW, curT+btnH, 1, 1, sysColors) // DFCS_CAPTIONMIN
+								}
+							}
+						}
+
+						// Line under caption (ReactOS: IntSetDCPenColor + LineTo)
+						lineColor := sysColors[15] // COLOR_3DFACE
+						if exStyle&(0x00020000|0x00000200|0x00000001) == 0x00020000 { // only WS_EX_STATICEDGE
+							lineColor = sysColors[6] // COLOR_WINDOWFRAME
+						}
+						dc.FillRect(curL, captionBottom-1, curR, captionBottom, lineColor)
+
+						curT = captionBottom
+					}
+
+					// 4. Menu bar (drawn in our existing menu paint, skip NC for now)
+					// The menu bar is drawn by WM_PAINT / menu paint handlers.
+
+					// 5. Client edge
+					if exStyle&0x00000200 != 0 { // WS_EX_CLIENTEDGE
+						dc.DrawEdge(curL, curT, curR, curB, 0x000A, 0x000F, sysColors) // EDGE_SUNKEN|BF_RECT
+					}
+
+					gdiMgr.DeleteDC(hDC)
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
+			// WM_NCACTIVATE (0x0086): redraw caption with active/inactive state.
+			if msg == 0x0086 && wlWindow != nil && hwnd == mainHWND {
+				mainActive = wParam != 0
+				// Trigger NC repaint
+				// (We directly call the NC paint logic by re-dispatching WM_NCPAINT)
+				ctx.SetReturn(1) // return TRUE = allow activation change
+				return 0
+			}
+			// WM_NCHITTEST (0x0084): hit-test the non-client area.
+			// Ported from ReactOS nonclient.c DefWndNCHitTest.
+			if msg == 0x0084 && wlWindow != nil && hwnd == mainHWND {
+				// lParam contains POINT: x = LOWORD, y = HIWORD (signed)
+				px := int32(int16(lParam & 0xFFFF))
+				py := int32(int16((lParam >> 16) & 0xFFFF))
+				wnd := win32.Global.Get(hwnd)
+				if wnd == nil {
+					ctx.SetReturn(1) // HTCLIENT
+					return 0
+				}
+				style := wnd.Style
+				exStyle := wnd.ExStyle
+				winW := wlWindow.Width
+				winH := wlWindow.Height + wlWindow.TitleBarH
+				// Window rect in screen coords (we use 0,0 origin for top-level)
+				wr := win32.Rect{Left: 0, Top: 0, Right: winW, Bottom: winH}
+				if !win32.PtInRect(&wr, px, py) {
+					ctx.SetReturn(0) // HTNOWHERE
+					return 0
+				}
+
+				// Deflate by border
+				if win32.UserHasWindowEdge(style, exStyle) {
+					bx, by := win32.BorderSize(style, exStyle)
+					win32.InflateRect(&wr, -bx, -by)
+					if !win32.PtInRect(&wr, px, py) {
+						// In the border area - determine which border
+						xSize := win32.GetSystemMetrics(win32.SM_CXSIZE) * win32.GetSystemMetrics(win32.SM_CXBORDER)
+						ySize := win32.GetSystemMetrics(win32.SM_CYSIZE) * win32.GetSystemMetrics(win32.SM_CYBORDER)
+						thickFrame := style&0x00040000 != 0 // WS_THICKFRAME
+						if py < wr.Top {
+							if !thickFrame { ctx.SetReturn(18); return 0 } // HTBORDER
+							if px < wr.Left+xSize { ctx.SetReturn(13); return 0 } // HTTOPLEFT
+							if px >= wr.Right-xSize { ctx.SetReturn(14); return 0 } // HTTOPRIGHT
+							ctx.SetReturn(12); return 0 // HTTOP
+						}
+						if py >= wr.Bottom {
+							if !thickFrame { ctx.SetReturn(18); return 0 }
+							if px < wr.Left+xSize { ctx.SetReturn(16); return 0 } // HTBOTTOMLEFT
+							if px >= wr.Right-xSize { ctx.SetReturn(17); return 0 } // HTBOTTOMRIGHT
+							ctx.SetReturn(15); return 0 // HTBOTTOM
+						}
+						if px < wr.Left {
+							if !thickFrame { ctx.SetReturn(18); return 0 }
+							if py < wr.Top+ySize { ctx.SetReturn(13); return 0 } // HTTOPLEFT
+							if py >= wr.Bottom-ySize { ctx.SetReturn(16); return 0 } // HTBOTTOMLEFT
+							ctx.SetReturn(10); return 0 // HTLEFT
+						}
+						if px >= wr.Right {
+							if !thickFrame { ctx.SetReturn(18); return 0 }
+							if py < wr.Top+ySize { ctx.SetReturn(14); return 0 } // HTTOPRIGHT
+							if py >= wr.Bottom-ySize { ctx.SetReturn(17); return 0 } // HTBOTTOMRIGHT
+							ctx.SetReturn(11); return 0 // HTRIGHT
+						}
+					}
+				} else {
+					if exStyle&0x00020000 != 0 { // WS_EX_STATICEDGE
+						win32.InflateRect(&wr, -1, -1)
+					}
+					if !win32.PtInRect(&wr, px, py) {
+						ctx.SetReturn(18) // HTBORDER
+						return 0
+					}
+				}
+				// Check caption area
+				if style&0x00C00000 == 0x00C00000 { // WS_CAPTION
+					captionH := win32.GetSystemMetrics(win32.SM_CYCAPTION)
+					if exStyle&0x00000080 != 0 { // WS_EX_TOOLWINDOW
+						captionH = win32.GetSystemMetrics(win32.SM_CYSMCAPTION)
+					}
+					wr.Top += captionH
+					if !win32.PtInRect(&wr, px, py) {
+						// In caption - check for sysmenu, close, min, max
+						if style&0x00080000 != 0 { // WS_SYSMENU
+							btnW := win32.GetSystemMetrics(win32.SM_CXSIZE)
+							if exStyle&0x00000080 == 0 { // not tool window
+								// System menu icon area
+								wr.Left += btnW
+							}
+							wr.Right -= btnW // close button
+						}
+						if px < wr.Left { ctx.SetReturn(3); return 0 } // HTSYSMENU
+						if px >= wr.Right+win32.GetSystemMetrics(win32.SM_CXSIZE)-win32.GetSystemMetrics(win32.SM_CXSIZE) {
+							// We already subtracted close button space
+						}
+						if px >= wr.Right { ctx.SetReturn(20); return 0 } // HTCLOSE
+						if style&(0x00020000|0x00010000) != 0 { // WS_MINIMIZEBOX|WS_MAXIMIZEBOX
+							btnW := win32.GetSystemMetrics(win32.SM_CXSIZE)
+							wr.Right -= btnW // max button
+							if px >= wr.Right { ctx.SetReturn(9); return 0 } // HTMAXBUTTON
+							if style&0x00020000 != 0 { // WS_MINIMIZEBOX
+								wr.Right -= btnW // min button
+								if px >= wr.Right { ctx.SetReturn(8); return 0 } // HTMINBUTTON
+							}
+						}
+						ctx.SetReturn(2) // HTCAPTION
+						return 0
+					}
+				}
+				// Check menu area
+				if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
+					wr.Top += menuBarHeight
+					if !win32.PtInRect(&wr, px, py) {
+						ctx.SetReturn(5) // HTMENU
+						return 0
+					}
+				}
+				ctx.SetReturn(1) // HTCLIENT
 				return 0
 			}
 			// WM_NCCREATE: must return TRUE for window creation to proceed

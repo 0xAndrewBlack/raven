@@ -333,6 +333,11 @@ func (d *Display) dispatchOne() (EventType, error) {
 			if len(payload) >= 8 && d.win != nil {
 				w := int32(gu32(payload[0:]))
 				h := int32(gu32(payload[4:]))
+				// The compositor reports the total surface size including
+				// the NC area (TitleBarH). Subtract it to get client height.
+				if d.win.TitleBarH > 0 && h > d.win.TitleBarH {
+					h -= d.win.TitleBarH
+				}
 				if w > 0 && h > 0 && (w != d.win.Width || h != d.win.Height) {
 					d.win.Width = w
 					d.win.Height = h
@@ -717,11 +722,8 @@ func (w *Window) createBuffer() error {
 }
 
 // Commit submits the current pixel buffer to the compositor.
-// If a title bar is configured it is always redrawn before the commit.
+// NC area painting is handled by WM_NCPAINT in DefWindowProcW, not here.
 func (w *Window) Commit() {
-	if w.TitleBarH > 0 {
-		w.DrawTitleBar(w.Title, true)
-	}
 	totalH := w.Height + w.TitleBarH
 	d := w.disp
 	d.send(w.surfaceID, 1, pu32(w.bufferID), pi32(0), pi32(0))                        // attach

@@ -67,6 +67,11 @@ type DC struct {
 	// ROP2 (binary raster operation). Default: R2_COPYPEN=13.
 	ROP2 int32
 
+	// DC_PEN / DC_BRUSH colours (SetDCPenColor / SetDCBrushColor).
+	// These are used when GetStockObject(DC_PEN) or GetStockObject(DC_BRUSH) is selected.
+	DCPenColor   uint32
+	DCBrushColor uint32
+
 	// Saved DC stack (SaveDC / RestoreDC).
 	saved []*dcSave
 }
@@ -94,6 +99,7 @@ type dcSave struct {
 	ArcDir                 int32
 	CurX, CurY             int32
 	ROP2                   int32
+	DCPenColor, DCBrushColor uint32
 }
 
 // NewScreenDC creates a DC that targets the given Surface (the Wayland framebuffer).
@@ -176,6 +182,7 @@ func (dc *DC) Save() int {
 		CharExtra: dc.CharExtra, StretchBltMode: dc.StretchBltMode,
 		ClipRgnHandle: dc.ClipRgnHandle, ArcDir: dc.ArcDir,
 		CurX: dc.CurX, CurY: dc.CurY, ROP2: dc.ROP2,
+		DCPenColor: dc.DCPenColor, DCBrushColor: dc.DCBrushColor,
 	}
 	dc.saved = append(dc.saved, snap)
 	return len(dc.saved)
@@ -210,6 +217,8 @@ func (dc *DC) Restore(level int) bool {
 	dc.ArcDir = s.ArcDir
 	dc.CurX, dc.CurY = s.CurX, s.CurY
 	dc.ROP2 = s.ROP2
+	dc.DCPenColor = s.DCPenColor
+	dc.DCBrushColor = s.DCBrushColor
 	return true
 }
 
