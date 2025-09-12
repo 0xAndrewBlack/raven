@@ -13757,19 +13757,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				wlWindow.DrawRect(cs.x, cs.y+24, cs.x+cs.w, cs.y+25, sysColors[16])
 			default:
-				// For app-defined child windows with a guest WndProc, fill their area
-				// with the window background color as a placeholder, then return false
-				// so DispatchMessageW still calls the guest WndProc (BeginPaint/EndPaint).
-				bgColor := sysColors[5]
-				if a, ok := hwndClassAtom[hwnd]; ok {
-					if brushIdx, ok2 := classBrush[a]; ok2 && brushIdx > 0 && int(brushIdx-1) < len(sysColors) {
-						bgColor = sysColors[brushIdx-1]
-					}
-				}
 				if _, hasGuest := hwndWndProc[hwnd]; hasGuest {
-					if cs.w > 0 && cs.h > 0 {
-						wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
-					}
+					// Do NOT pre-fill here: BeginPaint will fill the background when the
+					// guest processes WM_PAINT. Pre-filling from paintTree would erase
+					// content already drawn by the guest (e.g. Scintilla text).
 					return 0, false // let DispatchMessageW call the guest WndProc
 				}
 				// Generic builtin control with no guest WndProc: fill with face color
@@ -15688,10 +15679,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 					}
 
-					// Fill the full client area with background so the frame is clean
-					// before child windows (Scintilla etc.) paint themselves.
-					ravelog.Logf("[paint] DrawRect client fill 0..%d %dx%d color=0x%x\n", clientTop, w, wlWindow.Height, sysColors[5])
-					wlWindow.DrawRect(0, clientTop, w, wlWindow.Height, sysColors[5])
+					// Fill ONLY the strip from clientTop to the top of the topmost visible
+					// child window. Below that, child windows own their pixels - filling
+					// the full client area would overwrite guest-painted children (Scintilla).
+					lowestChildTop := wlWindow.Height
+					for _, cs2 := range hwndChildren {
+						if cs2.visible && cs2.w > 0 && cs2.h > 0 && cs2.y < lowestChildTop {
+							lowestChildTop = cs2.y
+						}
+					}
+					if lowestChildTop > clientTop {
+						ravelog.Logf("[paint] DefWndProc fill uncovered strip y=%d..%d\n", clientTop, lowestChildTop)
+						wlWindow.DrawRect(0, clientTop, w, lowestChildTop, sysColors[5])
+					}
 
 					// Recursively paint built-in descendant windows (builtinWndProc skips app-defined children)
 					paintTree(hwnd)
