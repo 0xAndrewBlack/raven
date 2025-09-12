@@ -15906,6 +15906,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 
 				// 6. Synthetic WM_PAINT frame.
+				// mainHWND paints first (fills background), children paint on top.
+				// This matches Win32 WS_CLIPCHILDREN ordering: parent → children.
 				var childPaints []queuedMsg
 				for h, cs := range hwndChildren {
 					if hwndWndProc[h] != 0 && (cs.visible || (cs.w > 0 && cs.h > 0)) {
@@ -15913,8 +15915,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				sort.Slice(childPaints, func(i, j int) bool { return childPaints[i].hwnd < childPaints[j].hwnd })
-				msgQueue = append(msgQueue, childPaints...)
 				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+				msgQueue = append(msgQueue, childPaints...)
 				if dequeueMsg() {
 					return 0
 				}
