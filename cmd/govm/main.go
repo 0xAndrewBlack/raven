@@ -1081,13 +1081,77 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// Parse menu template
 		// Standard menu: WORD version (0), WORD header_offset, then items
+		// Extended menu (MENUEX): WORD version (1), WORD wOffset, DWORD dwHelpId
 		ver, _ := mem.Read16(dataAddr)
 		hdrOff, _ := mem.Read16(dataAddr + 2)
-		if ver != 0 {
-			return nil // Only support standard (non-extended) menus
-		}
 
 		md := &menuData{}
+
+		if ver == 1 {
+			// MENUEX format
+			// Header: WORD version=1, WORD wOffset, DWORD dwHelpId
+			pos := dataAddr + 4 + uint64(hdrOff)
+			end := dataAddr + uint64(dataSize)
+
+			var parseMenuEx func(int) []menuItem
+			parseMenuEx = func(maxItems int) []menuItem {
+				var items []menuItem
+				for len(items) < maxItems && pos < end {
+					// Align to DWORD boundary
+					if pos%4 != 0 {
+						pos = (pos + 3) &^ 3
+					}
+					// MENUEX item: DWORD dwType, DWORD dwState, DWORD dwId, WORD resInfo
+					dwType, _ := mem.Read32(pos)
+					pos += 4
+					_, _ = mem.Read32(pos) // dwState
+					pos += 4
+					dwID, _ := mem.Read32(pos)
+					pos += 4
+					resInfo, _ := mem.Read16(pos)
+					pos += 2
+
+					item := menuItem{flags: dwType, id: uint64(dwID)}
+					// Read null-terminated UTF-16 string
+					var chars []uint16
+					for pos < end {
+						ch, _ := mem.Read16(pos)
+						pos += 2
+						if ch == 0 {
+							break
+						}
+						chars = append(chars, ch)
+					}
+					item.text = string(utf16Decode(chars))
+
+					const mfexPopup = 0x01 // resInfo bit 0 = has submenu
+					if resInfo&mfexPopup != 0 {
+						// Align before reading dwHelpId
+						if pos%4 != 0 {
+							pos = (pos + 3) &^ 3
+						}
+						// DWORD dwHelpId for popup
+						pos += 4
+						item.flags |= 0x0010 // set MF_POPUP for our internal use
+						item.submenu = parseMenuEx(256)
+					}
+
+					items = append(items, item)
+					if resInfo&0x80 != 0 { // last item in this level
+						break
+					}
+				}
+				return items
+			}
+
+			md.items = parseMenuEx(32)
+			return md
+		}
+
+		if ver != 0 {
+			return nil // Unknown menu version
+		}
+
 		pos := dataAddr + 4 + uint64(hdrOff)
 		end := dataAddr + uint64(dataSize)
 
@@ -3718,9 +3782,81 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// Heap emulation - uses the same region wired to TEB for inline HeapAlloc.
+		// Heap emulation - bump allocator with free-list recycling.
 		// Each allocation has a 16-byte header: [totalBlockSize:8][reserved:8][userData...]
 		const heapHandle = 0xBEEF0001
+
+		// Free list: map[size][]addr - addr points to the header (not user data)
+		type freeBlock struct {
+			addr      uint64
+			blockSize uint64
+		}
+		var heapFreeList []freeBlock
+		var heapMmapBlocks map[uint64]uint64 // user ptr → block size, for Mmap overflow blocks
+
+		heapMmapBlocks = make(map[uint64]uint64)
+
+		heapAlloc := func(ctx *ntapi.TrapContext, size uint64, zeroInit bool) uint64 {
+			if size == 0 {
+				size = 1
+			}
+			size = (size + 15) &^ 15 // align to 16
+			totalBlock := size + 16  // 16-byte header
+
+			// Search free list for best fit
+			bestIdx := -1
+			bestSize := uint64(0)
+			for i, fb := range heapFreeList {
+				if fb.blockSize >= totalBlock {
+					if bestIdx == -1 || fb.blockSize < bestSize {
+						bestIdx = i
+						bestSize = fb.blockSize
+					}
+					if fb.blockSize == totalBlock {
+						break // exact match
+					}
+				}
+			}
+			if bestIdx >= 0 {
+				fb := heapFreeList[bestIdx]
+				heapFreeList[bestIdx] = heapFreeList[len(heapFreeList)-1]
+				heapFreeList = heapFreeList[:len(heapFreeList)-1]
+				// Reuse this block - keep original blockSize in header
+				ctx.Mem.Write64(fb.addr, fb.blockSize)
+				userPtr := fb.addr + 16
+				if zeroInit {
+					for i := uint64(0); i < size; i++ {
+						ctx.Mem.Write8(userPtr+i, 0)
+					}
+				}
+				return userPtr
+			}
+
+			// Bump allocator
+			heapBase, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
+			heapOff, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
+			if heapOff+totalBlock <= 256*1024*1024 {
+				addr := heapBase + heapOff
+				ctx.Mem.Write64(addr, totalBlock) // header: total block size
+				heapOff += totalBlock
+				ctx.Mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, heapOff)
+				userPtr := addr + 16
+				if zeroInit {
+					// mmap pages are zero-initialized already on first use
+				}
+				return userPtr
+			}
+
+			// Heap region exhausted - fall back to Mmap
+			addr := mem.Mmap(0, totalBlock, mmu.PermRead|mmu.PermWrite)
+			if addr == 0 {
+				return 0
+			}
+			mem.Write64(addr, totalBlock)
+			userPtr := addr + 16
+			heapMmapBlocks[userPtr] = totalBlock
+			return userPtr
+		}
 
 		d.RegisterAutoStubHandler(kernel32, "GetProcessHeap", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(heapHandle)
@@ -3735,55 +3871,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapAlloc", func(ctx *ntapi.TrapContext) uint32 {
-			// Fallback Go handler (before inline stubs are patched, and for overflow checks)
 			size := ctx.Arg(2)
-			if size == 0 {
-				size = 1
-			}
-			size = (size + 15) &^ 15 // align to 16
-			totalBlock := size + 16  // 16-byte header
-			heapBase, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
-			heapOff, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
-			if heapOff+totalBlock > 256*1024*1024 {
-				// Heap region exhausted - fall back to Mmap
-				addr := mem.Mmap(0, totalBlock, mmu.PermRead|mmu.PermWrite)
-				if addr == 0 {
-					ctx.SetReturn(0)
-					return 0
-				}
-				mem.Write64(addr, totalBlock)
-				ctx.SetReturn(addr + 16)
-				return 0
-			}
-			addr := heapBase + heapOff
-			ctx.Mem.Write64(addr, totalBlock) // header: total block size
-			heapOff += totalBlock
-			ctx.Mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, heapOff)
-			ctx.SetReturn(addr + 16) // user pointer after header
+			flags := ctx.Arg(1)
+			zeroInit := flags&0x08 != 0 // HEAP_ZERO_MEMORY
+			ptr := heapAlloc(ctx, size, zeroInit)
+			ctx.SetReturn(ptr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapFree", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE (no-op for bump allocator)
+			ptr := ctx.Arg(2)
+			if ptr == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+			// Don't try to free Mmap overflow blocks (can't unmap easily)
+			if _, isMmap := heapMmapBlocks[ptr]; isMmap {
+				delete(heapMmapBlocks, ptr)
+				ctx.SetReturn(1)
+				return 0
+			}
+			// Read block size from header
+			headerAddr := ptr - 16
+			blockSize, _ := ctx.Mem.Read64(headerAddr)
+			if blockSize > 0 && blockSize < 1<<30 { // sanity check < 1GB
+				heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: blockSize})
+			}
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapReAlloc", func(ctx *ntapi.TrapContext) uint32 {
 			oldPtr := ctx.Arg(2)
 			newSize := ctx.Arg(3)
-			if newSize == 0 {
-				newSize = 1
-			}
-			newSize = (newSize + 15) &^ 15
-			totalBlock := newSize + 16
-			heapBase, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
-			heapOff, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
-			if heapOff+totalBlock > 64*1024*1024 {
+			flags := ctx.Arg(1)
+			zeroInit := flags&0x08 != 0
+
+			// Allocate new block
+			newPtr := heapAlloc(ctx, newSize, zeroInit)
+			if newPtr == 0 {
 				ctx.SetReturn(0)
 				return 0
 			}
-			newAddr := heapBase + heapOff
-			ctx.Mem.Write64(newAddr, totalBlock)
-			heapOff += totalBlock
-			ctx.Mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, heapOff)
+
 			// Copy old data
 			if oldPtr != 0 {
 				oldBlockSize, _ := ctx.Mem.Read64(oldPtr - 16)
@@ -3794,10 +3922,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				for i := uint64(0); i < copyLen; i++ {
 					b, _ := ctx.Mem.Read8(oldPtr + i)
-					ctx.Mem.Write8(newAddr+16+i, b)
+					ctx.Mem.Write8(newPtr+i, b)
+				}
+				// Free old block
+				headerAddr := oldPtr - 16
+				if _, isMmap := heapMmapBlocks[oldPtr]; isMmap {
+					delete(heapMmapBlocks, oldPtr)
+				} else if oldBlockSize > 0 && oldBlockSize < 1<<30 {
+					heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: oldBlockSize})
 				}
 			}
-			ctx.SetReturn(newAddr + 16)
+			ctx.SetReturn(newPtr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapSize", func(ctx *ntapi.TrapContext) uint32 {
@@ -16571,6 +16706,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x12, 0, 0})
 					return
 				}
+				if evt == wl.EventConfigure {
+					// Compositor resized the window - post WM_SIZE to guest
+					w := wlWindow.Width
+					h := wlWindow.Height
+					lParam := uint64(uint16(w)) | (uint64(uint16(h)) << 16)
+					msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0005, 0, lParam}) // WM_SIZE
+					return
+				}
 				if evt == wl.EventKey {
 					for {
 						ke, ok := wlDisplay.PollKey()
@@ -22569,26 +22712,8 @@ func patchHotStubs(mem *mmu.MMU, dlls []*ntapi.SynthPE, flsDataArray uint64) {
 		synth.PatchStub(mem, "EnterCriticalSection", []byte{0xC3})
 		synth.PatchStub(mem, "LeaveCriticalSection", []byte{0xC3})
 
-		// HeapFree: mov eax, 1; ret (no-op for bump allocator)
-		synth.PatchStub(mem, "HeapFree", []byte{
-			0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
-			0xC3, // ret
-		})
-
-		// HeapAlloc(hHeap=RCX, flags=RDX, size=R8) → bump allocator with 16-byte header
-		// Layout: [totalBlockSize:8][pad:8][userData...]
-		synth.PatchStub(mem, "HeapAlloc", []byte{
-			0x49, 0x83, 0xC0, 0x0F,                               // add r8, 15
-			0x49, 0x83, 0xE0, 0xF0,                               // and r8, -16
-			0x49, 0x83, 0xC0, 0x10,                               // add r8, 16 (header)
-			0x65, 0x48, 0x8B, 0x04, 0x25, 0x08, 0x18, 0x00, 0x00, // mov rax, gs:[0x1808] (offset)
-			0x4A, 0x8D, 0x0C, 0x00,                               // lea rcx, [rax+r8]
-			0x65, 0x48, 0x89, 0x0C, 0x25, 0x08, 0x18, 0x00, 0x00, // mov gs:[0x1808], rcx (store new offset)
-			0x65, 0x48, 0x03, 0x04, 0x25, 0x00, 0x18, 0x00, 0x00, // add rax, gs:[0x1800] (add base)
-			0x4C, 0x89, 0x00,                                     // mov [rax], r8 (header = block size)
-			0x48, 0x83, 0xC0, 0x10,                               // add rax, 16 (return user ptr)
-			0xC3,                                                  // ret
-		})
+		// HeapAlloc/HeapFree/HeapReAlloc: NOT patched inline -
+		// use Go vmcall handlers with free-list support.
 
 		break
 	}
