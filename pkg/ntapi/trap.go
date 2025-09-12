@@ -2,6 +2,7 @@ package ntapi
 
 import (
 	"fmt"
+	"math"
 	"os"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
@@ -68,6 +69,22 @@ func (ctx *TrapContext) SetReturn(val uint64) {
 	ctx.ReturnOverridden = true
 }
 
+// FloatArg reads a Windows x64 float argument from XMM0-XMM3.
+func (ctx *TrapContext) FloatArg(n int) float64 {
+	if xa, ok := ctx.CPU.(XMMAccess); ok && n >= 0 && n < 4 {
+		return math.Float64frombits(xa.ReadXMM(n))
+	}
+	return 0
+}
+
+// SetFloatReturn writes a float64 result to XMM0.
+func (ctx *TrapContext) SetFloatReturn(val float64) {
+	if xa, ok := ctx.CPU.(XMMAccess); ok {
+		xa.WriteXMM(0, math.Float64bits(val))
+	}
+	ctx.ReturnOverridden = true
+}
+
 // Register constants for direct access.
 const (
 	regRAX = 0
@@ -125,6 +142,12 @@ type RegisterReader interface {
 // RegisterWriter is an optional interface for CPUs that expose register writes.
 type RegisterWriter interface {
 	WriteReg(idx int, val uint64)
+}
+
+// XMMAccess is an optional interface for CPUs that expose XMM register access.
+type XMMAccess interface {
+	ReadXMM(idx int) uint64
+	WriteXMM(idx int, val uint64)
 }
 
 // Dispatcher routes vmcall traps to the appropriate handler based on syscall ID.

@@ -1965,9 +1965,355 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(uint64(n))
 			return 0
 		})
-	}
 
-	// --- ucrtbase.dll ---
+		// --- msvcrt math functions (float64 in XMM0/XMM1, return in XMM0) ---
+		mathUnary := func(name string, fn func(float64) float64) {
+			d.RegisterAutoStubHandler(msvcrt, name, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetFloatReturn(fn(ctx.FloatArg(0)))
+				return 0
+			})
+		}
+		mathBinary := func(name string, fn func(float64, float64) float64) {
+			d.RegisterAutoStubHandler(msvcrt, name, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetFloatReturn(fn(ctx.FloatArg(0), ctx.FloatArg(1)))
+				return 0
+			})
+		}
+		mathUnary("floor", math.Floor)
+		mathUnary("ceil", math.Ceil)
+		mathUnary("sqrt", math.Sqrt)
+		mathUnary("sin", math.Sin)
+		mathUnary("cos", math.Cos)
+		mathUnary("tan", math.Tan)
+		mathUnary("asin", math.Asin)
+		mathUnary("acos", math.Acos)
+		mathUnary("atan", math.Atan)
+		mathUnary("log", math.Log)
+		mathUnary("log10", math.Log10)
+		mathUnary("log2", math.Log2)
+		mathUnary("exp", math.Exp)
+		mathUnary("fabs", math.Abs)
+		mathUnary("round", math.Round)
+		mathUnary("trunc", math.Trunc)
+		mathBinary("pow", math.Pow)
+		mathBinary("fmod", math.Mod)
+		mathBinary("atan2", math.Atan2)
+		d.RegisterAutoStubHandler(msvcrt, "ldexp", func(ctx *ntapi.TrapContext) uint32 {
+			x := ctx.FloatArg(0)
+			exp := int(int32(ctx.Arg(1))) // second arg is int, passed in RDX
+			ctx.SetFloatReturn(math.Ldexp(x, exp))
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "frexp", func(ctx *ntapi.TrapContext) uint32 {
+			x := ctx.FloatArg(0)
+			expPtr := ctx.Arg(1) // int* passed in RDX
+			frac, exp := math.Frexp(x)
+			if expPtr != 0 {
+				mem.Write32(expPtr, uint32(int32(exp)))
+			}
+			ctx.SetFloatReturn(frac)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "modf", func(ctx *ntapi.TrapContext) uint32 {
+			x := ctx.FloatArg(0)
+			intPtr := ctx.Arg(1) // double* passed in RDX
+			intPart, frac := math.Modf(x)
+			if intPtr != 0 {
+				mem.Write64(intPtr, math.Float64bits(intPart))
+			}
+			ctx.SetFloatReturn(frac)
+			return 0
+		})
+		// Float versions (suffixed f)
+		mathUnary("floorf", math.Floor)
+		mathUnary("ceilf", math.Ceil)
+		mathUnary("sqrtf", math.Sqrt)
+		mathUnary("sinf", math.Sin)
+		mathUnary("cosf", math.Cos)
+		mathUnary("tanf", math.Tan)
+		mathUnary("logf", math.Log)
+		mathUnary("expf", math.Exp)
+		mathUnary("fabsf", math.Abs)
+		mathUnary("roundf", math.Round)
+		mathUnary("truncf", math.Trunc)
+		mathBinary("powf", math.Pow)
+		mathBinary("fmodf", math.Mod)
+
+		// Missing string/conversion functions in msvcrt
+		d.RegisterAutoStubHandler(msvcrt, "atoi", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			v, _ := strconv.Atoi(s)
+			ctx.SetReturn(uint64(int64(int32(v))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "atol", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			v, _ := strconv.Atoi(s)
+			ctx.SetReturn(uint64(int64(int32(v))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "atof", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			v, _ := strconv.ParseFloat(s, 64)
+			ctx.SetFloatReturn(v)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "strtod", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			endPtr := ctx.Arg(1)
+			v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			if endPtr != 0 {
+				// Write pointer past consumed chars (simplified: point to end of string)
+				mem.Write64(endPtr, ctx.Arg(0)+uint64(len(s)))
+			}
+			ctx.SetFloatReturn(v)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "strtol", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			base := int(ctx.Arg(2))
+			if base == 0 {
+				base = 10
+			}
+			v, _ := strconv.ParseInt(strings.TrimSpace(s), base, 32)
+			ctx.SetReturn(uint64(int64(int32(v))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "strtoul", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			base := int(ctx.Arg(2))
+			if base == 0 {
+				base = 10
+			}
+			v, _ := strconv.ParseUint(strings.TrimSpace(s), base, 32)
+			ctx.SetReturn(uint64(uint32(v)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "strcmp", func(ctx *ntapi.TrapContext) uint32 {
+			s1 := readGuestString(ctx.Arg(0))
+			s2 := readGuestString(ctx.Arg(1))
+			ctx.SetReturn(uint64(int64(int32(strings.Compare(s1, s2)))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "strcpy", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			s := readGuestString(src)
+			for i := 0; i <= len(s); i++ {
+				if i < len(s) {
+					mem.Write8(dst+uint64(i), s[i])
+				} else {
+					mem.Write8(dst+uint64(i), 0)
+				}
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "strcat", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			// Find end of dst
+			end := dst
+			for {
+				b, _ := mem.Read8(end)
+				if b == 0 {
+					break
+				}
+				end++
+			}
+			s := readGuestString(src)
+			for i := 0; i <= len(s); i++ {
+				if i < len(s) {
+					mem.Write8(end+uint64(i), s[i])
+				} else {
+					mem.Write8(end+uint64(i), 0)
+				}
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "strchr", func(ctx *ntapi.TrapContext) uint32 {
+			s := ctx.Arg(0)
+			ch := byte(ctx.Arg(1))
+			for {
+				b, _ := mem.Read8(s)
+				if b == ch {
+					ctx.SetReturn(s)
+					return 0
+				}
+				if b == 0 {
+					ctx.SetReturn(0)
+					return 0
+				}
+				s++
+			}
+		})
+		d.RegisterAutoStubHandler(msvcrt, "strrchr", func(ctx *ntapi.TrapContext) uint32 {
+			s := ctx.Arg(0)
+			ch := byte(ctx.Arg(1))
+			var last uint64
+			for {
+				b, _ := mem.Read8(s)
+				if b == ch {
+					last = s
+				}
+				if b == 0 {
+					ctx.SetReturn(last)
+					return 0
+				}
+				s++
+			}
+		})
+		d.RegisterAutoStubHandler(msvcrt, "memchr", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(0)
+			ch := byte(ctx.Arg(1))
+			n := ctx.Arg(2)
+			for i := uint64(0); i < n; i++ {
+				b, _ := mem.Read8(buf + i)
+				if b == ch {
+					ctx.SetReturn(buf + i)
+					return 0
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "memmove", func(ctx *ntapi.TrapContext) uint32 {
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			n := ctx.Arg(2)
+			if n == 0 {
+				ctx.SetReturn(dst)
+				return 0
+			}
+			tmp := make([]byte, n)
+			for i := uint64(0); i < n; i++ {
+				tmp[i], _ = mem.Read8(src + i)
+			}
+			for i := uint64(0); i < n; i++ {
+				mem.Write8(dst+i, tmp[i])
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "_stricmp", func(ctx *ntapi.TrapContext) uint32 {
+			s1 := readGuestString(ctx.Arg(0))
+			s2 := readGuestString(ctx.Arg(1))
+			ctx.SetReturn(uint64(int64(int32(strings.Compare(strings.ToLower(s1), strings.ToLower(s2))))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "_strnicmp", func(ctx *ntapi.TrapContext) uint32 {
+			s1 := readGuestString(ctx.Arg(0))
+			s2 := readGuestString(ctx.Arg(1))
+			n := int(ctx.Arg(2))
+			if n < len(s1) {
+				s1 = s1[:n]
+			}
+			if n < len(s2) {
+				s2 = s2[:n]
+			}
+			ctx.SetReturn(uint64(int64(int32(strings.Compare(strings.ToLower(s1), strings.ToLower(s2))))))
+			return 0
+		})
+
+		// ctype functions for msvcrt
+		d.RegisterAutoStubHandler(msvcrt, "isalpha", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "isdigit", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if c >= '0' && c <= '9' {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "isalnum", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "isspace", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "isupper", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if c >= 'A' && c <= 'Z' {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "islower", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if c >= 'a' && c <= 'z' {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "tolower", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if c >= 'A' && c <= 'Z' {
+				c += 32
+			}
+			ctx.SetReturn(uint64(c))
+			return 0
+		})
+
+		// File I/O for msvcrt - real implementations
+		d.RegisterAutoStubHandler(msvcrt, "fread", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // read nothing
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "fseek", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // success
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "ftell", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "fflush", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // success
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "feof", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // always EOF
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "ferror", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // no error
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "fgets", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL (EOF)
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "_wfopen", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL (fail)
+			return 0
+		})
+	}
 	if ucrt, ok := synthByName["ucrtbase.dll"]; ok {
 		ucrtExit := func(ctx *ntapi.TrapContext) uint32 {
 			code := ctx.Arg(0)
@@ -3224,6 +3570,332 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				mem.Write8(bufPtr+uint64(len(val)), 0)
 			}
 			ctx.SetReturn(0) // success
+			return 0
+		})
+
+		// --- ucrtbase math functions (float64 in XMM0/XMM1, return in XMM0) ---
+		ucrtMathUnary := func(name string, fn func(float64) float64) {
+			d.RegisterAutoStubHandler(ucrt, name, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetFloatReturn(fn(ctx.FloatArg(0)))
+				return 0
+			})
+		}
+		ucrtMathBinary := func(name string, fn func(float64, float64) float64) {
+			d.RegisterAutoStubHandler(ucrt, name, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetFloatReturn(fn(ctx.FloatArg(0), ctx.FloatArg(1)))
+				return 0
+			})
+		}
+		ucrtMathUnary("floor", math.Floor)
+		ucrtMathUnary("ceil", math.Ceil)
+		ucrtMathUnary("sqrt", math.Sqrt)
+		ucrtMathUnary("sin", math.Sin)
+		ucrtMathUnary("cos", math.Cos)
+		ucrtMathUnary("tan", math.Tan)
+		ucrtMathUnary("asin", math.Asin)
+		ucrtMathUnary("acos", math.Acos)
+		ucrtMathUnary("atan", math.Atan)
+		ucrtMathUnary("log", math.Log)
+		ucrtMathUnary("log10", math.Log10)
+		ucrtMathUnary("log2", math.Log2)
+		ucrtMathUnary("exp", math.Exp)
+		ucrtMathUnary("exp2", math.Exp2)
+		ucrtMathUnary("fabs", math.Abs)
+		ucrtMathUnary("round", math.Round)
+		ucrtMathUnary("trunc", math.Trunc)
+		ucrtMathUnary("cbrt", math.Cbrt)
+		ucrtMathBinary("pow", math.Pow)
+		ucrtMathBinary("fmod", math.Mod)
+		ucrtMathBinary("atan2", math.Atan2)
+		ucrtMathBinary("copysign", math.Copysign)
+		ucrtMathBinary("fmax", math.Max)
+		ucrtMathBinary("fmin", math.Min)
+		ucrtMathBinary("remainder", math.Remainder)
+		d.RegisterAutoStubHandler(ucrt, "ldexp", func(ctx *ntapi.TrapContext) uint32 {
+			x := ctx.FloatArg(0)
+			exp := int(int32(ctx.Arg(1)))
+			ctx.SetFloatReturn(math.Ldexp(x, exp))
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "frexp", func(ctx *ntapi.TrapContext) uint32 {
+			x := ctx.FloatArg(0)
+			expPtr := ctx.Arg(1)
+			frac, exp := math.Frexp(x)
+			if expPtr != 0 {
+				mem.Write32(expPtr, uint32(int32(exp)))
+			}
+			ctx.SetFloatReturn(frac)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "modf", func(ctx *ntapi.TrapContext) uint32 {
+			x := ctx.FloatArg(0)
+			intPtr := ctx.Arg(1)
+			intPart, frac := math.Modf(x)
+			if intPtr != 0 {
+				mem.Write64(intPtr, math.Float64bits(intPart))
+			}
+			ctx.SetFloatReturn(frac)
+			return 0
+		})
+		// Float versions (suffixed f)
+		ucrtMathUnary("floorf", math.Floor)
+		ucrtMathUnary("ceilf", math.Ceil)
+		ucrtMathUnary("sqrtf", math.Sqrt)
+		ucrtMathUnary("sinf", math.Sin)
+		ucrtMathUnary("cosf", math.Cos)
+		ucrtMathUnary("tanf", math.Tan)
+		ucrtMathUnary("logf", math.Log)
+		ucrtMathUnary("expf", math.Exp)
+		ucrtMathUnary("fabsf", math.Abs)
+		ucrtMathUnary("roundf", math.Round)
+		ucrtMathUnary("truncf", math.Trunc)
+		ucrtMathBinary("powf", math.Pow)
+		ucrtMathBinary("fmodf", math.Mod)
+		ucrtMathBinary("atan2f", math.Atan2)
+
+		// Missing ucrt string functions
+		d.RegisterAutoStubHandler(ucrt, "atof", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			ctx.SetFloatReturn(v)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "atol", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			v, _ := strconv.Atoi(strings.TrimSpace(s))
+			ctx.SetReturn(uint64(int64(int32(v))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "strtod", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			ctx.SetFloatReturn(v)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "strtof", func(ctx *ntapi.TrapContext) uint32 {
+			s := readGuestString(ctx.Arg(0))
+			v, _ := strconv.ParseFloat(strings.TrimSpace(s), 32)
+			ctx.SetFloatReturn(v)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "isalpha", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "isalnum", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "isupper", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if c >= 'A' && c <= 'Z' {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "islower", func(ctx *ntapi.TrapContext) uint32 {
+			c := byte(ctx.Arg(0))
+			if c >= 'a' && c <= 'z' {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "iswprint", func(ctx *ntapi.TrapContext) uint32 {
+			c := uint16(ctx.Arg(0))
+			if c >= 0x20 && c != 0x7F {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "memchr", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(0)
+			ch := byte(ctx.Arg(1))
+			n := ctx.Arg(2)
+			for i := uint64(0); i < n; i++ {
+				b, _ := mem.Read8(buf + i)
+				if b == ch {
+					ctx.SetReturn(buf + i)
+					return 0
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_strnicmp", func(ctx *ntapi.TrapContext) uint32 {
+			s1 := readGuestString(ctx.Arg(0))
+			s2 := readGuestString(ctx.Arg(1))
+			n := int(ctx.Arg(2))
+			if n < len(s1) {
+				s1 = s1[:n]
+			}
+			if n < len(s2) {
+				s2 = s2[:n]
+			}
+			ctx.SetReturn(uint64(int64(int32(strings.Compare(strings.ToLower(s1), strings.ToLower(s2))))))
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_strlwr", func(ctx *ntapi.TrapContext) uint32 {
+			ptr := ctx.Arg(0)
+			if ptr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			s := ptr
+			for {
+				b, _ := mem.Read8(s)
+				if b == 0 {
+					break
+				}
+				if b >= 'A' && b <= 'Z' {
+					mem.Write8(s, b+32)
+				}
+				s++
+			}
+			ctx.SetReturn(ptr)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_strupr", func(ctx *ntapi.TrapContext) uint32 {
+			ptr := ctx.Arg(0)
+			if ptr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			s := ptr
+			for {
+				b, _ := mem.Read8(s)
+				if b == 0 {
+					break
+				}
+				if b >= 'a' && b <= 'z' {
+					mem.Write8(s, b-32)
+				}
+				s++
+			}
+			ctx.SetReturn(ptr)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "wcsstr", func(ctx *ntapi.TrapContext) uint32 {
+			hay := ctx.Arg(0)
+			needle := ctx.Arg(1)
+			if hay == 0 || needle == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Read needle
+			var needleChars []uint16
+			for p := needle; ; p += 2 {
+				ch, _ := mem.Read16(p)
+				if ch == 0 {
+					break
+				}
+				needleChars = append(needleChars, ch)
+			}
+			if len(needleChars) == 0 {
+				ctx.SetReturn(hay)
+				return 0
+			}
+			for p := hay; ; p += 2 {
+				ch, _ := mem.Read16(p)
+				if ch == 0 {
+					break
+				}
+				if ch == needleChars[0] {
+					match := true
+					for j := 1; j < len(needleChars); j++ {
+						ch2, _ := mem.Read16(p + uint64(j)*2)
+						if ch2 != needleChars[j] {
+							match = false
+							break
+						}
+					}
+					if match {
+						ctx.SetReturn(p)
+						return 0
+					}
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+
+		// File I/O stubs for ucrtbase
+		d.RegisterAutoStubHandler(ucrt, "fopen", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_wfopen", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "fclose", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "fread", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "fseek", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "ftell", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "fflush", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "feof", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "ferror", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "fgets", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0) // NULL (EOF)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "fputs", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "fprintf", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "__stdio_common_vfprintf", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "__stdio_common_vfscanf", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "__p__commode", func(ctx *ntapi.TrapContext) uint32 {
+			// Return pointer to a static int (commit mode = _IOCOMMIT)
+			static := mem.Mmap(0, 8, mmu.PermRead|mmu.PermWrite)
+			mem.Write32(static, 0x4000) // _IOCOMMIT
+			ctx.SetReturn(static)
 			return 0
 		})
 	}

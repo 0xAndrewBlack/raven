@@ -114,6 +114,21 @@ func (c *CPU) WriteReg(idx int, val uint64) {
 	}
 }
 
+// ReadXMM reads the low 64 bits of XMM register (for float64 args/returns).
+func (c *CPU) ReadXMM(idx int) uint64 {
+	if idx >= 0 && idx < 16 {
+		return c.xmm[idx][0]
+	}
+	return 0
+}
+
+// WriteXMM writes the low 64 bits of XMM register (for float64 returns).
+func (c *CPU) WriteXMM(idx int, val uint64) {
+	if idx >= 0 && idx < 16 {
+		c.xmm[idx][0] = val
+	}
+}
+
 func (c *CPU) CloneForThread() arch.CPU {
 n := New(c.mem)
 n.Regs = c.Regs
