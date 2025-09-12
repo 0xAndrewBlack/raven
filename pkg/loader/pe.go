@@ -194,12 +194,13 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	}
 
 	// Check if preferred base is available; if not, pick a free region.
-	needReloc := false
-	if mem.IsMapped(base) || mem.IsMapped(base+sizeOfImage-1) {
-		// Find free space
+	// Also needs relocation if forceBase overrides the preferred base.
+	needReloc := base != imageBase
+	if !needReloc && (mem.IsMapped(base) || mem.IsMapped(base+sizeOfImage-1)) {
+		// Preferred base is occupied - pick a free region.
 		base = mem.Mmap(0, sizeOfImage, mmu.PermRead|mmu.PermWrite)
 		needReloc = true
-	} else {
+	} else if !needReloc {
 		mem.MapRange(base, sizeOfImage, mmu.PermRead|mmu.PermWrite)
 	}
 
@@ -335,28 +336,30 @@ func applyRelocations(mem *mmu.MMU, base, relocRVA, relocSize uint64, delta int6
 					continue
 				}
 				newVal := uint32(int64(val) + delta)
-				mem.Write32(target, newVal)
+				mem.Write32Raw(target, newVal)
 			case imageRelBasedDir64:
 				val, err := mem.Read64(target)
 				if err != nil {
 					continue
 				}
 				newVal := uint64(int64(val) + delta)
-				mem.Write64(target, newVal)
+				mem.Write64Raw(target, newVal)
 			case imageRelBasedHigh:
 				val, err := mem.Read16(target)
 				if err != nil {
 					continue
 				}
 				newVal := uint16(int64(val) + (delta >> 16))
-				mem.Write16(target, newVal)
+				b := []byte{byte(newVal), byte(newVal >> 8)}
+				mem.WriteBytesRaw(target, b)
 			case imageRelBasedLow:
 				val, err := mem.Read16(target)
 				if err != nil {
 					continue
 				}
 				newVal := uint16(int64(val) + delta)
-				mem.Write16(target, newVal)
+				b := []byte{byte(newVal), byte(newVal >> 8)}
+				mem.WriteBytesRaw(target, b)
 			}
 		}
 

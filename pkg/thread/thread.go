@@ -232,7 +232,13 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 		defer close(done)
 		ravelog.Logf("[govm] win32-thread %d start: PC=0x%x SP=0x%x\n", tid, c.GetPC(), c.GetSP())
 		if err := c.Run(); err != nil {
-			ravelog.Logf("[govm] win32-thread %d exited: %v\n", tid, err)
+			// A fetch fault at address 0x0 means the thread function returned
+			// through the null sentinel return address - treat as clean exit.
+			if f, ok := err.(*mmu.Fault); ok && f.Addr == 0 {
+				ravelog.Logf("[govm] win32-thread %d exited normally (returned)\n", tid)
+			} else {
+				ravelog.Logf("[govm] win32-thread %d exited: %v\n", tid, err)
+			}
 		}
 		if stackBase != 0 {
 			m.unregisterStack(stackBase)

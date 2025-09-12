@@ -32,6 +32,8 @@ const (
 	kindSeat
 	kindKeyboard
 	kindPointer
+	kindDecorationManager
+	kindDecoration
 )
 
 // EventType returned by Dispatch.
@@ -81,6 +83,9 @@ type Display struct {
 	shmGlobal, shmVer               uint32
 	wmBaseGlobal, wmBaseVer         uint32
 	seatGlobal, seatVer             uint32
+	decorMgrGlobal, decorMgrVer     uint32
+
+	decorMgrID uint32
 
 	seatID     uint32
 	keyboardID uint32
@@ -339,6 +344,10 @@ func (d *Display) dispatchOne() (EventType, error) {
 			return EventClose, nil
 		}
 
+	case kindDecoration:
+		// configure (opcode 0): compositor reports which decoration mode it chose.
+		// Accept silently - we requested server_side, compositor confirms.
+
 	case kindSeat:
 		if op == 0 { // capabilities
 			caps := gu32(payload)
@@ -441,6 +450,8 @@ func (d *Display) handleGlobal(name uint32, iface string, ver uint32) {
 		d.wmBaseGlobal, d.wmBaseVer = name, ver
 	case "wl_seat":
 		d.seatGlobal, d.seatVer = name, ver
+	case "zxdg_decoration_manager_v1":
+		d.decorMgrGlobal, d.decorMgrVer = name, ver
 	}
 }
 
@@ -577,6 +588,13 @@ func Connect() (*Display, error) {
 			pu32(min32(d.seatVer, 5)), pu32(d.seatID))
 	}
 
+	// bind zxdg_decoration_manager_v1 if compositor advertises it
+	if d.decorMgrGlobal != 0 {
+		d.decorMgrID = d.alloc(kindDecorationManager)
+		d.send(d.registryID, 0, pu32(d.decorMgrGlobal), pstr("zxdg_decoration_manager_v1"),
+			pu32(min32(d.decorMgrVer, 1)), pu32(d.decorMgrID))
+	}
+
 	// second roundtrip for shm formats etc
 	cb = d.alloc(kindCallback)
 	d.send(1, 0, pu32(cb))
@@ -608,6 +626,15 @@ func (d *Display) CreateWindow(title string, w, h int32) (*Window, error) {
 	d.send(win.toplevelID, 2, pstr(title))
 	// xdg_toplevel.set_app_id (opcode 3)
 	d.send(win.toplevelID, 3, pstr("govm"))
+
+	// Request server-side decorations (title bar + chrome) if supported.
+	// zxdg_decoration_manager_v1: get_toplevel_decoration (opcode 1) → new object id, toplevel id
+	// zxdg_toplevel_decoration_v1: set_mode (opcode 1) → mode=2 (server_side)
+	if d.decorMgrID != 0 {
+		decorID := d.alloc(kindDecoration)
+		d.send(d.decorMgrID, 1, pu32(decorID), pu32(win.toplevelID))
+		d.send(decorID, 1, pu32(2)) // set_mode(server_side=2)
+	}
 
 	// initial commit triggers configure
 	d.send(win.surfaceID, 6) // wl_surface.commit
