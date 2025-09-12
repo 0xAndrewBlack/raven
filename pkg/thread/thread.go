@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
@@ -234,7 +235,8 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 		if err := c.Run(); err != nil {
 			// A fetch fault at address 0x0 means the thread function returned
 			// through the null sentinel return address - treat as clean exit.
-			if f, ok := err.(*mmu.Fault); ok && f.Addr == 0 {
+			var f *mmu.Fault
+			if errors.As(err, &f) && f.Addr == 0 {
 				ravelog.Logf("[govm] win32-thread %d exited normally (returned)\n", tid)
 			} else {
 				ravelog.Logf("[govm] win32-thread %d exited: %v\n", tid, err)

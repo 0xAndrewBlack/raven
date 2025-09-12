@@ -190,16 +190,19 @@ for c.running {
 				}
 			}
 		}
-		ravelog.Logf("[crash-regs] RIP=0x%x TLS=0x%x err=%v\n", c.RIP, c.GetTLS(), err)
-		ravelog.Logf("[crash-regs] RAX=0x%x RBX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
-			c.Regs[RAX], c.Regs[RBX], c.Regs[RCX], c.Regs[RDX], c.Regs[RSI], c.Regs[RDI])
-		ravelog.Logf("[crash-regs] R8=0x%x R9=0x%x R10=0x%x R11=0x%x R12=0x%x R13=0x%x R14=0x%x R15=0x%x RBP=0x%x RSP=0x%x\n",
-			c.Regs[R8], c.Regs[R9], c.Regs[R10], c.Regs[R11], c.Regs[R12], c.Regs[R13], c.Regs[R14], c.Regs[R15], c.Regs[RBP], c.GetSP())
-		// Print stack
-		sp := c.GetSP()
-		for i := 0; i < 8; i++ {
-			v, _ := c.mem.Read64(sp + uint64(i*8))
-			ravelog.Logf("[crash-regs] [RSP+0x%02x]=0x%x\n", i*8, v)
+		// RIP=0 typically means a thread returned through a null sentinel - skip noisy dump.
+		if c.RIP != 0 {
+			ravelog.Logf("[crash-regs] RIP=0x%x TLS=0x%x err=%v\n", c.RIP, c.GetTLS(), err)
+			ravelog.Logf("[crash-regs] RAX=0x%x RBX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
+				c.Regs[RAX], c.Regs[RBX], c.Regs[RCX], c.Regs[RDX], c.Regs[RSI], c.Regs[RDI])
+			ravelog.Logf("[crash-regs] R8=0x%x R9=0x%x R10=0x%x R11=0x%x R12=0x%x R13=0x%x R14=0x%x R15=0x%x RBP=0x%x RSP=0x%x\n",
+				c.Regs[R8], c.Regs[R9], c.Regs[R10], c.Regs[R11], c.Regs[R12], c.Regs[R13], c.Regs[R14], c.Regs[R15], c.Regs[RBP], c.GetSP())
+			// Print stack
+			sp := c.GetSP()
+			for i := 0; i < 8; i++ {
+				v, _ := c.mem.Read64(sp + uint64(i*8))
+				ravelog.Logf("[crash-regs] [RSP+0x%02x]=0x%x\n", i*8, v)
+			}
 		}
 		return fmt.Errorf("at RIP=0x%x: %w", c.RIP, err)
 	}

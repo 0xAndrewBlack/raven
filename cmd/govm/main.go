@@ -590,7 +590,7 @@ flsDataArray := mem.Mmap(0, flsMaxSlots*8, mmu.PermRead|mmu.PermWrite)
 mem.Write64(procState.TEBAddr+ntapi.TebFlsData, flsDataArray)
 
 // Pre-allocate the heap region and wire to TEB for inline HeapAlloc.
-const heapInlineSize = 64 * 1024 * 1024 // 64MB
+const heapInlineSize = 256 * 1024 * 1024 // 256MB
 heapRegion := mem.Mmap(0, heapInlineSize, mmu.PermRead|mmu.PermWrite)
 mem.Write64(procState.TEBAddr+ntapi.TebHeapBase, heapRegion)
 mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
@@ -3577,8 +3577,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			totalBlock := size + 16  // 16-byte header
 			heapBase, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
 			heapOff, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
-			if heapOff+totalBlock > 64*1024*1024 {
-				ctx.SetReturn(0)
+			if heapOff+totalBlock > 256*1024*1024 {
+				// Heap region exhausted - fall back to Mmap
+				addr := mem.Mmap(0, totalBlock, mmu.PermRead|mmu.PermWrite)
+				if addr == 0 {
+					ctx.SetReturn(0)
+					return 0
+				}
+				mem.Write64(addr, totalBlock)
+				ctx.SetReturn(addr + 16)
 				return 0
 			}
 			addr := heapBase + heapOff
