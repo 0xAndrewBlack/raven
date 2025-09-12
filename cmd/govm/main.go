@@ -16228,6 +16228,78 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(1)
 				return 0
 			}
+			// WM_NCLBUTTONDOWN (0x00A1): handle clicks in non-client area.
+			// Ported from ReactOS nonclient.c NC_HandleNCLButtonDown.
+			if msg == 0x00A1 && wlWindow != nil && hwnd == mainHWND {
+				hitTest := wParam
+				switch hitTest {
+				case 2: // HTCAPTION - initiate window move via WM_SYSCOMMAND SC_MOVE
+					// Post WM_SYSCOMMAND SC_MOVE+HTCAPTION (0xF012)
+					msgQueue = append(msgQueue, queuedMsg{hwnd: mainHWND, message: 0x0112, wParam: 0xF012, lParam: lParam})
+				case 3: // HTSYSMENU - double-click closes, single opens system menu
+					msgQueue = append(msgQueue, queuedMsg{hwnd: mainHWND, message: 0x0112, wParam: 0xF060, lParam: lParam}) // SC_CLOSE
+				case 8: // HTMINBUTTON - SC_MINIMIZE (0xF020)
+					msgQueue = append(msgQueue, queuedMsg{hwnd: mainHWND, message: 0x0112, wParam: 0xF020, lParam: lParam})
+				case 9: // HTMAXBUTTON - SC_MAXIMIZE (0xF030)
+					msgQueue = append(msgQueue, queuedMsg{hwnd: mainHWND, message: 0x0112, wParam: 0xF030, lParam: lParam})
+				case 20: // HTCLOSE - SC_CLOSE (0xF060)
+					msgQueue = append(msgQueue, queuedMsg{hwnd: mainHWND, message: 0x0112, wParam: 0xF060, lParam: lParam})
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
+			// WM_SYSCOMMAND (0x0112): handle system commands (close, minimize, maximize, move).
+			// Ported from ReactOS defwnd.c DefWndHandleSysCommand.
+			if msg == 0x0112 && wlWindow != nil {
+				cmd := wParam & 0xFFF0
+				switch cmd {
+				case 0xF060: // SC_CLOSE
+					ravelog.Logf("[syscmd] SC_CLOSE hwnd=0x%x\n", hwnd)
+					// Send WM_CLOSE to the window
+					msgQueue = append(msgQueue, queuedMsg{hwnd: hwnd, message: 0x0010, wParam: 0, lParam: 0})
+				case 0xF020: // SC_MINIMIZE
+					ravelog.Logf("[syscmd] SC_MINIMIZE hwnd=0x%x\n", hwnd)
+					// Minimize via xdg_toplevel.set_minimized
+					if wlWindow != nil {
+						wlWindow.Minimize()
+					}
+				case 0xF030: // SC_MAXIMIZE
+					ravelog.Logf("[syscmd] SC_MAXIMIZE hwnd=0x%x\n", hwnd)
+					if wlWindow != nil {
+						wlWindow.Maximize()
+					}
+				case 0xF120: // SC_RESTORE
+					ravelog.Logf("[syscmd] SC_RESTORE hwnd=0x%x\n", hwnd)
+					if wlWindow != nil {
+						wlWindow.Restore()
+					}
+				case 0xF012: // SC_MOVE + HTCAPTION
+					ravelog.Logf("[syscmd] SC_MOVE hwnd=0x%x\n", hwnd)
+					if wlWindow != nil {
+						wlWindow.StartMove()
+					}
+				case 0xF000: // SC_SIZE
+					ravelog.Logf("[syscmd] SC_SIZE hwnd=0x%x\n", hwnd)
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
+			// WM_CLOSE (0x0010): destroy the window.
+			if msg == 0x0010 && wlWindow != nil {
+				ravelog.Logf("[wm] WM_CLOSE hwnd=0x%x\n", hwnd)
+				// Post WM_DESTROY + WM_QUIT
+				msgQueue = append(msgQueue, queuedMsg{hwnd: hwnd, message: 0x0002, wParam: 0, lParam: 0}) // WM_DESTROY
+				ctx.SetReturn(0)
+				return 0
+			}
+			// WM_DESTROY (0x0002): post quit message.
+			if msg == 0x0002 {
+				ravelog.Logf("[wm] WM_DESTROY hwnd=0x%x\n", hwnd)
+				// PostQuitMessage(0)
+				msgQueue = append(msgQueue, queuedMsg{hwnd: 0, message: 0x0012, wParam: 0, lParam: 0}) // WM_QUIT
+				ctx.SetReturn(0)
+				return 0
+			}
 			// WM_ERASEBKGND: fill with class background brush (ReactOS: defwnd.c)
 			if msg == 0x0014 && wlWindow != nil {
 				bgColor := sysColors[5] // default COLOR_WINDOW

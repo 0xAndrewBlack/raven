@@ -100,6 +100,7 @@ type Display struct {
 	// mouse state
 	mouseX, mouseY int32 // current surface-local position (fixed-point → int)
 	mouseEvents    []MouseEvent
+	lastSerial     uint32 // last input event serial (for interactive move/resize)
 
 	readBuf []byte // buffered data from oversized reads
 
@@ -374,6 +375,7 @@ func (d *Display) dispatchOne() (EventType, error) {
 		switch op {
 		case 0: // enter (serial, surface, sx, sy) - fixed-point 24.8
 			if len(payload) >= 16 {
+				d.lastSerial = gu32(payload[0:])
 				d.mouseX = int32(gu32(payload[8:])) >> 8
 				d.mouseY = int32(gu32(payload[12:])) >> 8
 			}
@@ -389,6 +391,7 @@ func (d *Display) dispatchOne() (EventType, error) {
 			}
 		case 3: // button (serial, time, button, state)
 			if len(payload) >= 16 {
+				d.lastSerial = gu32(payload[0:])
 				button := gu32(payload[8:])
 				state := gu32(payload[12:])
 				d.mouseEvents = append(d.mouseEvents, MouseEvent{
@@ -769,6 +772,26 @@ func (w *Window) ResizeIfNeeded() bool {
 	w.disp.send(w.bufferID, 0) // wl_buffer.destroy
 	w.createBuffer()
 	return true
+}
+
+// Minimize sends xdg_toplevel.set_minimized (opcode 9).
+func (w *Window) Minimize() {
+	w.disp.send(w.toplevelID, 9)
+}
+
+// Maximize sends xdg_toplevel.set_maximized (opcode 6).
+func (w *Window) Maximize() {
+	w.disp.send(w.toplevelID, 6)
+}
+
+// Restore sends xdg_toplevel.unset_maximized (opcode 7).
+func (w *Window) Restore() {
+	w.disp.send(w.toplevelID, 7)
+}
+
+// StartMove initiates an interactive move via xdg_toplevel.move (opcode 5).
+func (w *Window) StartMove() {
+	w.disp.send(w.toplevelID, 5, pu32(w.disp.seatID), pu32(w.disp.lastSerial))
 }
 
 // Dispatch blocks until a user-facing event occurs (configure, close, or key).
