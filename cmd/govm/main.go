@@ -737,6 +737,88 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// startTime aliases bootTime for handler closures that measure elapsed time.
 	startTime := bootTime
 
+	// Shared heap free-list (used by kernel32 HeapAlloc/HeapFree AND CRT malloc/free)
+	type freeBlock struct {
+		addr      uint64
+		blockSize uint64
+	}
+	var heapFreeList []freeBlock
+	heapMmapBlocks := make(map[uint64]uint64) // user ptr → block size
+
+	heapRegion, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
+
+	sharedHeapAlloc := func(size uint64, zeroInit bool) uint64 {
+		if size == 0 {
+			size = 1
+		}
+		size = (size + 15) &^ 15 // align to 16
+		totalBlock := size + 16  // 16-byte header
+
+		// Search free list for best fit
+		bestIdx := -1
+		bestSize := uint64(0)
+		for i, fb := range heapFreeList {
+			if fb.blockSize >= totalBlock {
+				if bestIdx == -1 || fb.blockSize < bestSize {
+					bestIdx = i
+					bestSize = fb.blockSize
+				}
+				if fb.blockSize == totalBlock {
+					break
+				}
+			}
+		}
+		if bestIdx >= 0 {
+			fb := heapFreeList[bestIdx]
+			heapFreeList[bestIdx] = heapFreeList[len(heapFreeList)-1]
+			heapFreeList = heapFreeList[:len(heapFreeList)-1]
+			mem.Write64(fb.addr, fb.blockSize)
+			userPtr := fb.addr + 16
+			if zeroInit {
+				for i := uint64(0); i < size; i++ {
+					mem.Write8(userPtr+i, 0)
+				}
+			}
+			return userPtr
+		}
+
+		// Bump allocator
+		heapOff, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
+		if heapOff+totalBlock <= 256*1024*1024 {
+			addr := heapRegion + heapOff
+			mem.Write64(addr, totalBlock)
+			heapOff += totalBlock
+			mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, heapOff)
+			return addr + 16
+		}
+
+		// Mmap overflow
+		addr := mem.Mmap(0, totalBlock, mmu.PermRead|mmu.PermWrite)
+		if addr == 0 {
+			return 0
+		}
+		mem.Write64(addr, totalBlock)
+		userPtr := addr + 16
+		heapMmapBlocks[userPtr] = totalBlock
+		return userPtr
+	}
+
+	sharedHeapFree := func(ptr uint64) {
+		if ptr == 0 {
+			return
+		}
+		if sz, isMmap := heapMmapBlocks[ptr]; isMmap {
+			delete(heapMmapBlocks, ptr)
+			heapFreeList = append(heapFreeList, freeBlock{addr: ptr - 16, blockSize: sz})
+			return
+		}
+		headerAddr := ptr - 16
+		blockSize, _ := mem.Read64(headerAddr)
+		if blockSize > 0 && blockSize < 1<<30 {
+			heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: blockSize})
+		}
+	}
+
 	// delayHandlerRegistrars: re-runnable closures that register handlers for each DLL.
 	// After delay-load synthesizes a new DLL, we re-run all registrars so the
 	// new DLL's handlers get registered.
@@ -1538,27 +1620,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// malloc / calloc / free / _onexit / _cexit / _amsg_exit / abort / exit
 		d.RegisterAutoStubHandler(msvcrt, "malloc", func(ctx *ntapi.TrapContext) uint32 {
-			size := ctx.Arg(0)
-			if size == 0 {
-				size = 1
-			}
-			buf := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
-			ctx.SetReturn(buf)
+			ctx.SetReturn(sharedHeapAlloc(ctx.Arg(0), false))
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "calloc", func(ctx *ntapi.TrapContext) uint32 {
-			count := ctx.Arg(0)
-			size := ctx.Arg(1)
-			total := count * size
-			if total == 0 {
-				total = 1
-			}
-			buf := mem.Mmap(0, total, mmu.PermRead|mmu.PermWrite)
-			ctx.SetReturn(buf)
+			ctx.SetReturn(sharedHeapAlloc(ctx.Arg(0)*ctx.Arg(1), true))
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "free", func(ctx *ntapi.TrapContext) uint32 {
-			return 0 // no-op (leak)
+			sharedHeapFree(ctx.Arg(0))
+			return 0
 		})
 
 		d.RegisterAutoStubHandler(msvcrt, "_strdup", func(ctx *ntapi.TrapContext) uint32 {
@@ -1575,7 +1646,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					break
 				}
 			}
-			dst := mem.Mmap(0, uint64(len(buf)+1), mmu.PermRead|mmu.PermWrite)
+			dst := sharedHeapAlloc(uint64(len(buf)+1), false)
 			mem.WriteBytes(dst, buf)
 			ctx.SetReturn(dst)
 			return 0
@@ -2731,64 +2802,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// Memory functions
 		d.RegisterAutoStubHandler(ucrt, "malloc", func(ctx *ntapi.TrapContext) uint32 {
-			size := ctx.Arg(0)
-			if size == 0 {
-				size = 1
-			}
-			size = (size + 15) &^ 15
-			addr := mem.Mmap(0, size+16, mmu.PermRead|mmu.PermWrite)
-			mem.Write64(addr, size+16) // header: block size
-			ctx.SetReturn(addr + 16)
+			ctx.SetReturn(sharedHeapAlloc(ctx.Arg(0), false))
 			return 0
 		})
 		d.RegisterAutoStubHandler(ucrt, "calloc", func(ctx *ntapi.TrapContext) uint32 {
-			count := ctx.Arg(0)
-			size := ctx.Arg(1)
-			total := count * size
-			if total == 0 {
-				total = 1
-			}
-			total = (total + 15) &^ 15
-			addr := mem.Mmap(0, total+16, mmu.PermRead|mmu.PermWrite)
-			mem.Write64(addr, total+16)
-			// mmap returns zeroed memory
-			ctx.SetReturn(addr + 16)
+			ctx.SetReturn(sharedHeapAlloc(ctx.Arg(0)*ctx.Arg(1), true))
 			return 0
 		})
 		d.RegisterAutoStubHandler(ucrt, "free", func(ctx *ntapi.TrapContext) uint32 {
-			// no-op for bump allocator
+			sharedHeapFree(ctx.Arg(0))
 			return 0
 		})
 		d.RegisterAutoStubHandler(ucrt, "realloc", func(ctx *ntapi.TrapContext) uint32 {
 			ptr := ctx.Arg(0)
 			newSize := ctx.Arg(1)
 			if ptr == 0 {
-				// realloc(NULL, size) == malloc(size)
-				if newSize == 0 {
-					newSize = 1
-				}
-				newSize = (newSize + 15) &^ 15
-				addr := mem.Mmap(0, newSize+16, mmu.PermRead|mmu.PermWrite)
-				mem.Write64(addr, newSize+16)
-				ctx.SetReturn(addr + 16)
+				ctx.SetReturn(sharedHeapAlloc(newSize, false))
 				return 0
 			}
-			// Read old block size
+			if newSize == 0 {
+				sharedHeapFree(ptr)
+				ctx.SetReturn(0)
+				return 0
+			}
 			oldBlockSize, _ := mem.Read64(ptr - 16)
 			oldDataSize := oldBlockSize - 16
 			if newSize <= oldDataSize {
 				ctx.SetReturn(ptr)
 				return 0
 			}
-			// Allocate new block and copy
-			newSize = (newSize + 15) &^ 15
-			newAddr := mem.Mmap(0, newSize+16, mmu.PermRead|mmu.PermWrite)
-			mem.Write64(newAddr, newSize+16)
-			for i := uint64(0); i < oldDataSize; i++ {
-				b, _ := mem.Read8(ptr + i)
-				mem.Write8(newAddr+16+i, b)
+			newPtr := sharedHeapAlloc(newSize, false)
+			if newPtr != 0 {
+				copyLen := oldDataSize
+				if newSize < copyLen {
+					copyLen = newSize
+				}
+				for i := uint64(0); i < copyLen; i++ {
+					b, _ := mem.Read8(ptr + i)
+					mem.Write8(newPtr+i, b)
+				}
 			}
-			ctx.SetReturn(newAddr + 16)
+			sharedHeapFree(ptr)
+			ctx.SetReturn(newPtr)
 			return 0
 		})
 
@@ -3523,7 +3578,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					break
 				}
 			}
-			dst := mem.Mmap(0, uint64(len(buf)+1), mmu.PermRead|mmu.PermWrite)
+			dst := sharedHeapAlloc(uint64(len(buf)+1), false)
 			mem.WriteBytes(dst, buf)
 			ctx.SetReturn(dst)
 			return 0
@@ -3542,7 +3597,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					break
 				}
 			}
-			dst := mem.Mmap(0, uint64(len(buf)*2+2), mmu.PermRead|mmu.PermWrite)
+			dst := sharedHeapAlloc(uint64(len(buf)*2+2), false)
 			for i, w := range buf {
 				mem.Write16(dst+uint64(i)*2, w)
 			}
@@ -4582,78 +4637,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// Each allocation has a 16-byte header: [totalBlockSize:8][reserved:8][userData...]
 		const heapHandle = 0xBEEF0001
 
-		// Free list: map[size][]addr - addr points to the header (not user data)
-		type freeBlock struct {
-			addr      uint64
-			blockSize uint64
-		}
-		var heapFreeList []freeBlock
-		var heapMmapBlocks map[uint64]uint64 // user ptr → block size, for Mmap overflow blocks
-
-		heapMmapBlocks = make(map[uint64]uint64)
-
-		heapAlloc := func(ctx *ntapi.TrapContext, size uint64, zeroInit bool) uint64 {
-			if size == 0 {
-				size = 1
-			}
-			size = (size + 15) &^ 15 // align to 16
-			totalBlock := size + 16  // 16-byte header
-
-			// Search free list for best fit
-			bestIdx := -1
-			bestSize := uint64(0)
-			for i, fb := range heapFreeList {
-				if fb.blockSize >= totalBlock {
-					if bestIdx == -1 || fb.blockSize < bestSize {
-						bestIdx = i
-						bestSize = fb.blockSize
-					}
-					if fb.blockSize == totalBlock {
-						break // exact match
-					}
-				}
-			}
-			if bestIdx >= 0 {
-				fb := heapFreeList[bestIdx]
-				heapFreeList[bestIdx] = heapFreeList[len(heapFreeList)-1]
-				heapFreeList = heapFreeList[:len(heapFreeList)-1]
-				// Reuse this block - keep original blockSize in header
-				ctx.Mem.Write64(fb.addr, fb.blockSize)
-				userPtr := fb.addr + 16
-				if zeroInit {
-					for i := uint64(0); i < size; i++ {
-						ctx.Mem.Write8(userPtr+i, 0)
-					}
-				}
-				return userPtr
-			}
-
-			// Bump allocator
-			heapBase, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
-			heapOff, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
-			if heapOff+totalBlock <= 256*1024*1024 {
-				addr := heapBase + heapOff
-				ctx.Mem.Write64(addr, totalBlock) // header: total block size
-				heapOff += totalBlock
-				ctx.Mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, heapOff)
-				userPtr := addr + 16
-				if zeroInit {
-					// mmap pages are zero-initialized already on first use
-				}
-				return userPtr
-			}
-
-			// Heap region exhausted - fall back to Mmap
-			addr := mem.Mmap(0, totalBlock, mmu.PermRead|mmu.PermWrite)
-			if addr == 0 {
-				return 0
-			}
-			mem.Write64(addr, totalBlock)
-			userPtr := addr + 16
-			heapMmapBlocks[userPtr] = totalBlock
-			return userPtr
-		}
-
 		d.RegisterAutoStubHandler(kernel32, "GetProcessHeap", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(heapHandle)
 			return 0
@@ -4670,29 +4653,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			size := ctx.Arg(2)
 			flags := ctx.Arg(1)
 			zeroInit := flags&0x08 != 0 // HEAP_ZERO_MEMORY
-			ptr := heapAlloc(ctx, size, zeroInit)
+			ptr := sharedHeapAlloc(size, zeroInit)
 			ctx.SetReturn(ptr)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapFree", func(ctx *ntapi.TrapContext) uint32 {
 			ptr := ctx.Arg(2)
-			if ptr == 0 {
-				ctx.SetReturn(1)
-				return 0
-			}
-			// Mmap overflow blocks - recycle into free list
-			if sz, isMmap := heapMmapBlocks[ptr]; isMmap {
-				delete(heapMmapBlocks, ptr)
-				heapFreeList = append(heapFreeList, freeBlock{addr: ptr - 16, blockSize: sz})
-				ctx.SetReturn(1)
-				return 0
-			}
-			// Bump-allocated block - read size from header
-			headerAddr := ptr - 16
-			blockSize, _ := ctx.Mem.Read64(headerAddr)
-			if blockSize > 0 && blockSize < 1<<30 {
-				heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: blockSize})
-			}
+			sharedHeapFree(ptr)
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -4702,14 +4669,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			flags := ctx.Arg(1)
 			zeroInit := flags&0x08 != 0
 
-			// Allocate new block
-			newPtr := heapAlloc(ctx, newSize, zeroInit)
+			newPtr := sharedHeapAlloc(newSize, zeroInit)
 			if newPtr == 0 {
 				ctx.SetReturn(0)
 				return 0
 			}
 
-			// Copy old data
 			if oldPtr != 0 {
 				oldBlockSize, _ := ctx.Mem.Read64(oldPtr - 16)
 				oldUserSize := oldBlockSize - 16
@@ -4721,14 +4686,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					b, _ := ctx.Mem.Read8(oldPtr + i)
 					ctx.Mem.Write8(newPtr+i, b)
 				}
-				// Free old block
-				headerAddr := oldPtr - 16
-				if sz, isMmap := heapMmapBlocks[oldPtr]; isMmap {
-					delete(heapMmapBlocks, oldPtr)
-					heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: sz})
-				} else if oldBlockSize > 0 && oldBlockSize < 1<<30 {
-					heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: oldBlockSize})
-				}
+				sharedHeapFree(oldPtr)
 			}
 			ctx.SetReturn(newPtr)
 			return 0
@@ -13885,6 +13843,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	type controlState struct {
 		className    string
 		parentHWND   uint64
+		ctrlID       uint64   // control ID (hMenu param for child windows)
 		x, y, w, h  int32
 		style        uint32   // WS_* window style
 		exStyle      uint32   // WS_EX_* extended style
@@ -16102,9 +16061,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				windowName := readGuestUTF16(ctx.Arg(2))
 				dwExStyle := uint32(ctx.Arg(0))
+				hMenu := ctx.Arg(9) // for child windows, this is the control ID
 				hwndChildren[hwnd] = &controlState{
 					className:  lClassName,
 					parentHWND: parentHwnd,
+					ctrlID:    hMenu,
 					x: cx, y: cy, w: cw, h: ch,
 					style:   style,
 					exStyle: dwExStyle,
@@ -18364,22 +18325,88 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetDlgItem", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			hDlg := ctx.Arg(0)
+			nIDDlgItem := ctx.Arg(1)
+			// Search child windows of hDlg for matching control ID
+			for h, cs := range hwndChildren {
+				if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+					ctx.SetReturn(h)
+					return 0
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetDlgCtrlID", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			hwnd := ctx.Arg(0)
+			if cs, ok := hwndChildren[hwnd]; ok {
+				ctx.SetReturn(cs.ctrlID)
+				return 0
+			}
+			ctx.SetReturn(0)
+			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SendDlgItemMessageW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			hDlg := ctx.Arg(0)
+			nIDDlgItem := ctx.Arg(1)
+			msg := uint32(ctx.Arg(2))
+			wParam := ctx.Arg(3)
+			lParam := ctx.Arg(4)
+			// Find child HWND by control ID, then SendMessage to it
+			for h, cs := range hwndChildren {
+				if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+					if result, handled := builtinWndProc(h, msg, wParam, lParam); handled {
+						ctx.SetReturn(result)
+						return 0
+					}
+					break
+				}
+			}
+			ctx.SetReturn(0)
+			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "MapDialogRect", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetDlgItemTextW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			hDlg := ctx.Arg(0)
+			nIDDlgItem := ctx.Arg(1)
+			lpString := ctx.Arg(2)
+			nMaxCount := ctx.Arg(3)
+			for h, cs := range hwndChildren {
+				if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+					text := cs.text
+					runes := []rune(text)
+					maxChars := int(nMaxCount) - 1
+					if maxChars < 0 { maxChars = 0 }
+					if len(runes) > maxChars { runes = runes[:maxChars] }
+					for i, r := range runes {
+						mem.Write16(lpString+uint64(i)*2, uint16(r))
+					}
+					mem.Write16(lpString+uint64(len(runes))*2, 0)
+					ctx.SetReturn(uint64(len(runes)))
+					_ = h
+					return 0
+				}
+			}
+			if lpString != 0 && nMaxCount > 0 { mem.Write16(lpString, 0) }
+			ctx.SetReturn(0)
+			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetDlgItemTextW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1); return 0
+			hDlg := ctx.Arg(0)
+			nIDDlgItem := ctx.Arg(1)
+			lpString := ctx.Arg(2)
+			text := readGuestUTF16(lpString)
+			for _, cs := range hwndChildren {
+				if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+					cs.text = text
+					ctx.SetReturn(1)
+					return 0
+				}
+			}
+			ctx.SetReturn(1)
+			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetDlgItemInt", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0); return 0
@@ -19348,11 +19375,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 			}
 			ctx.SetReturn(1)
-			return 0
-		})
-		// GetDlgCtrlID: return control ID from HWND - return 0
-		d.RegisterAutoStubHandler(user32, "GetDlgCtrlID", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
 			return 0
 		})
 		// DestroyIcon: free an icon handle - no-op stub
@@ -21017,6 +21039,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(gdiMgr.CreateDIBSection(w, h))
 			return 0
 		})
+		d.RegisterAutoStubHandler(gdi32, "CreateDIBitmap", func(ctx *ntapi.TrapContext) uint32 {
+			// hdc := ctx.Arg(0)
+			lpbmih := ctx.Arg(1)
+			// fdwInit := ctx.Arg(2)
+			// lpbInit := ctx.Arg(3)
+			// lpbmi := ctx.Arg(4)
+			// fuUsage := ctx.Arg(5)
+			var w, h int32
+			if lpbmih != 0 {
+				ww, _ := mem.Read32(lpbmih + 4)
+				hh, _ := mem.Read32(lpbmih + 8)
+				w = int32(ww)
+				h = int32(hh)
+				if h < 0 { h = -h }
+			}
+			if w <= 0 { w = 1 }
+			if h <= 0 { h = 1 }
+			ctx.SetReturn(gdiMgr.CreateDIBSection(w, h))
+			return 0
+		})
 		d.RegisterAutoStubHandler(gdi32, "DeleteDC", func(ctx *ntapi.TrapContext) uint32 {
 			gdiMgr.DeleteDC(ctx.Arg(0))
 			ctx.SetReturn(1)
@@ -21613,6 +21655,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// mode arg(2): RGN_AND=1, RGN_OR=2, RGN_XOR=3, RGN_DIFF=4, RGN_COPY=5
 			result := gdiMgr.SelectClipRgn(ctx.Arg(0), ctx.Arg(1))
 			ctx.SetReturn(uint64(result))
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "OffsetRgn", func(ctx *ntapi.TrapContext) uint32 {
+			hRgn := ctx.Arg(0)
+			xOffset := int32(ctx.Arg(1))
+			yOffset := int32(ctx.Arg(2))
+			rgn := gdiMgr.GetRegion(hRgn)
+			if rgn != nil {
+				rgn.X0 += xOffset; rgn.Y0 += yOffset
+				rgn.X1 += xOffset; rgn.Y1 += yOffset
+				ctx.SetReturn(1) // SIMPLEREGION
+			} else {
+				ctx.SetReturn(0) // ERROR
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "GetClipRgn", func(ctx *ntapi.TrapContext) uint32 {
