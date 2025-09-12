@@ -2897,6 +2897,103 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(val)
 			return 0
 		})
+
+		// _strdup / _wcsdup: duplicate a string into heap memory
+		d.RegisterAutoStubHandler(ucrt, "_strdup", func(ctx *ntapi.TrapContext) uint32 {
+			src := ctx.Arg(0)
+			if src == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			var buf []byte
+			for i := uint64(0); i < 0x100000; i++ {
+				b, _ := mem.Read8(src + i)
+				buf = append(buf, b)
+				if b == 0 {
+					break
+				}
+			}
+			dst := mem.Mmap(0, uint64(len(buf)+1), mmu.PermRead|mmu.PermWrite)
+			mem.WriteBytes(dst, buf)
+			ctx.SetReturn(dst)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_wcsdup", func(ctx *ntapi.TrapContext) uint32 {
+			src := ctx.Arg(0)
+			if src == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			var buf []uint16
+			for i := uint64(0); i < 0x100000; i++ {
+				w, _ := mem.Read16(src + i*2)
+				buf = append(buf, w)
+				if w == 0 {
+					break
+				}
+			}
+			dst := mem.Mmap(0, uint64(len(buf)*2+2), mmu.PermRead|mmu.PermWrite)
+			for i, w := range buf {
+				mem.Write16(dst+uint64(i)*2, w)
+			}
+			ctx.SetReturn(dst)
+			return 0
+		})
+
+		// time / _time64: return current Unix timestamp
+		d.RegisterAutoStubHandler(ucrt, "_time64", func(ctx *ntapi.TrapContext) uint32 {
+			t := uint64(1741600000) // fixed plausible timestamp
+			ptr := ctx.Arg(0)
+			if ptr != 0 {
+				mem.Write64(ptr, t)
+			}
+			ctx.SetReturn(t)
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "time", func(ctx *ntapi.TrapContext) uint32 {
+			t := uint64(1741600000)
+			ptr := ctx.Arg(0)
+			if ptr != 0 {
+				mem.Write64(ptr, t)
+			}
+			ctx.SetReturn(t)
+			return 0
+		})
+
+		// srand / rand
+		d.RegisterAutoStubHandler(ucrt, "srand", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "rand", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(42)
+			return 0
+		})
+
+		// _dupenv_s: duplicate an environment variable string
+		d.RegisterAutoStubHandler(ucrt, "_dupenv_s", func(ctx *ntapi.TrapContext) uint32 {
+			// _dupenv_s(char **buf, size_t *sizeInBytes, const char *name)
+			// On failure (not found): *buf=NULL, *sizeInBytes=0, return 0
+			buf := ctx.Arg(0)
+			sizePtr := ctx.Arg(1)
+			if buf != 0 {
+				mem.Write64(buf, 0)
+			}
+			if sizePtr != 0 {
+				mem.Write64(sizePtr, 0)
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+
+		// getenv_s
+		d.RegisterAutoStubHandler(ucrt, "getenv_s", func(ctx *ntapi.TrapContext) uint32 {
+			sizeRet := ctx.Arg(0)
+			if sizeRet != 0 {
+				mem.Write64(sizeRet, 0)
+			}
+			ctx.SetReturn(0xFFFFFFFF) // ENOENT
+			return 0
+		})
 	}
 
 	// --- registry helpers (used by kernel32 + advapi32) ---
