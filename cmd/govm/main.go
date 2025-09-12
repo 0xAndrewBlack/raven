@@ -595,7 +595,7 @@ flsDataArray := mem.Mmap(0, flsMaxSlots*8, mmu.PermRead|mmu.PermWrite)
 mem.Write64(procState.TEBAddr+ntapi.TebFlsData, flsDataArray)
 
 // Pre-allocate the heap region and wire to TEB for inline HeapAlloc.
-const heapInlineSize = 1024 * 1024 * 1024 // 1GB
+const heapInlineSize = 256 * 1024 * 1024 // 256MB
 heapRegion := mem.Mmap(0, heapInlineSize, mmu.PermRead|mmu.PermWrite)
 mem.Write64(procState.TEBAddr+ntapi.TebHeapBase, heapRegion)
 mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
@@ -4631,7 +4631,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// Bump allocator
 			heapBase, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
 			heapOff, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
-			if heapOff+totalBlock <= 1024*1024*1024 {
+			if heapOff+totalBlock <= 256*1024*1024 {
 				addr := heapBase + heapOff
 				ctx.Mem.Write64(addr, totalBlock) // header: total block size
 				heapOff += totalBlock
@@ -4680,16 +4680,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(1)
 				return 0
 			}
-			// Don't try to free Mmap overflow blocks (can't unmap easily)
-			if _, isMmap := heapMmapBlocks[ptr]; isMmap {
+			// Mmap overflow blocks - recycle into free list
+			if sz, isMmap := heapMmapBlocks[ptr]; isMmap {
 				delete(heapMmapBlocks, ptr)
+				heapFreeList = append(heapFreeList, freeBlock{addr: ptr - 16, blockSize: sz})
 				ctx.SetReturn(1)
 				return 0
 			}
-			// Read block size from header
+			// Bump-allocated block - read size from header
 			headerAddr := ptr - 16
 			blockSize, _ := ctx.Mem.Read64(headerAddr)
-			if blockSize > 0 && blockSize < 1<<30 { // sanity check < 1GB
+			if blockSize > 0 && blockSize < 1<<30 {
 				heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: blockSize})
 			}
 			ctx.SetReturn(1) // TRUE
@@ -4722,8 +4723,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				// Free old block
 				headerAddr := oldPtr - 16
-				if _, isMmap := heapMmapBlocks[oldPtr]; isMmap {
+				if sz, isMmap := heapMmapBlocks[oldPtr]; isMmap {
 					delete(heapMmapBlocks, oldPtr)
+					heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: sz})
 				} else if oldBlockSize > 0 && oldBlockSize < 1<<30 {
 					heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: oldBlockSize})
 				}
