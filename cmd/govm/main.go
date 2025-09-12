@@ -1854,6 +1854,53 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(buf)
 			return 0
 		})
+
+		// sprintf(buf, fmt, ...) - msvcrt uses cdecl with args on stack/registers
+		d.RegisterAutoStubHandler(msvcrt, "sprintf", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(0)
+			fmtAddr := ctx.Arg(1)
+			if fmtAddr == 0 || buf == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			fmtStr := readGuestString(fmtAddr)
+			var args []uint64
+			for i := 2; i < 10; i++ {
+				args = append(args, ctx.Arg(i))
+			}
+			result := wideprintf(fmtStr, args)
+			for i := 0; i < len(result); i++ {
+				mem.Write8(buf+uint64(i), result[i])
+			}
+			mem.Write8(buf+uint64(len(result)), 0)
+			ctx.SetReturn(uint64(len(result)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(msvcrt, "_snprintf", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(0)
+			count := ctx.Arg(1)
+			fmtAddr := ctx.Arg(2)
+			if fmtAddr == 0 || buf == 0 || count == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			fmtStr := readGuestString(fmtAddr)
+			var args []uint64
+			for i := 3; i < 11; i++ {
+				args = append(args, ctx.Arg(i))
+			}
+			result := wideprintf(fmtStr, args)
+			n := len(result)
+			if uint64(n) >= count {
+				n = int(count) - 1
+			}
+			for i := 0; i < n; i++ {
+				mem.Write8(buf+uint64(i), result[i])
+			}
+			mem.Write8(buf+uint64(n), 0)
+			ctx.SetReturn(uint64(n))
+			return 0
+		})
 	}
 
 	// --- ucrtbase.dll ---
@@ -2004,6 +2051,53 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
+		// sprintf / _snprintf for ucrtbase (direct, not via __stdio_common)
+		d.RegisterAutoStubHandler(ucrt, "sprintf", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(0)
+			fmtAddr := ctx.Arg(1)
+			if fmtAddr == 0 || buf == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			fmtStr := readGuestString(fmtAddr)
+			var args []uint64
+			for i := 2; i < 10; i++ {
+				args = append(args, ctx.Arg(i))
+			}
+			result := wideprintf(fmtStr, args)
+			for i := 0; i < len(result); i++ {
+				mem.Write8(buf+uint64(i), result[i])
+			}
+			mem.Write8(buf+uint64(len(result)), 0)
+			ctx.SetReturn(uint64(len(result)))
+			return 0
+		})
+		d.RegisterAutoStubHandler(ucrt, "_snprintf", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(0)
+			count := ctx.Arg(1)
+			fmtAddr := ctx.Arg(2)
+			if fmtAddr == 0 || buf == 0 || count == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			fmtStr := readGuestString(fmtAddr)
+			var args []uint64
+			for i := 3; i < 11; i++ {
+				args = append(args, ctx.Arg(i))
+			}
+			result := wideprintf(fmtStr, args)
+			n := len(result)
+			if uint64(n) >= count {
+				n = int(count) - 1
+			}
+			for i := 0; i < n; i++ {
+				mem.Write8(buf+uint64(i), result[i])
+			}
+			mem.Write8(buf+uint64(n), 0)
+			ctx.SetReturn(uint64(n))
+			return 0
+		})
+
 		// Wide-char CRT init stubs (same as narrow counterparts)
 		d.RegisterAutoStubHandler(ucrt, "_configure_wide_argv", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0)
@@ -2084,7 +2178,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// getenv: return NULL (no environment variables)
 		d.RegisterAutoStubHandler(ucrt, "getenv", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // NULL = not found
+			namePtr := ctx.Arg(0)
+			if namePtr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			name := readGuestString(namePtr)
+			var val string
+			if v, ok := envVars[name]; ok {
+				val = v
+			} else {
+				val = os.Getenv(name)
+			}
+			if val == "" {
+				ctx.SetReturn(0) // NULL = not found
+				return 0
+			}
+			// Allocate guest memory for the value string
+			buf := mem.Mmap(0, uint64(len(val)+1), mmu.PermRead|mmu.PermWrite)
+			for i := 0; i < len(val); i++ {
+				mem.Write8(buf+uint64(i), val[i])
+			}
+			mem.Write8(buf+uint64(len(val)), 0)
+			ctx.SetReturn(buf)
 			return 0
 		})
 
@@ -3006,13 +3122,44 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// getenv_s
+		// getenv_s(size_t *retsize, char *buf, size_t bufsize, const char *name)
 		d.RegisterAutoStubHandler(ucrt, "getenv_s", func(ctx *ntapi.TrapContext) uint32 {
 			sizeRet := ctx.Arg(0)
-			if sizeRet != 0 {
-				mem.Write64(sizeRet, 0)
+			bufPtr := ctx.Arg(1)
+			bufSize := ctx.Arg(2)
+			namePtr := ctx.Arg(3)
+			if namePtr == 0 {
+				if sizeRet != 0 {
+					mem.Write64(sizeRet, 0)
+				}
+				ctx.SetReturn(22) // EINVAL
+				return 0
 			}
-			ctx.SetReturn(0xFFFFFFFF) // ENOENT
+			name := readGuestString(namePtr)
+			var val string
+			if v, ok := envVars[name]; ok {
+				val = v
+			} else {
+				val = os.Getenv(name)
+			}
+			if val == "" {
+				if sizeRet != 0 {
+					mem.Write64(sizeRet, 0)
+				}
+				ctx.SetReturn(0) // success, but empty
+				return 0
+			}
+			needed := uint64(len(val) + 1)
+			if sizeRet != 0 {
+				mem.Write64(sizeRet, needed)
+			}
+			if bufPtr != 0 && bufSize >= needed {
+				for i := 0; i < len(val); i++ {
+					mem.Write8(bufPtr+uint64(i), val[i])
+				}
+				mem.Write8(bufPtr+uint64(len(val)), 0)
+			}
+			ctx.SetReturn(0) // success
 			return 0
 		})
 	}
