@@ -741,7 +741,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	var wlWindow *wl.Window
 	var mainHWND uint64   // first top-level window HWND (for message routing)
 	var mainTitle string  // title of the main window
-	var lastSciThis uint64 // sciThis from most recent Scintilla BeginPaint
 	_ = mainTitle
 	if wld, err := wl.Connect(); err == nil {
 		wlDisplay = wld
@@ -16731,101 +16730,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				rcRight, rcBottom = cs.w, cs.h
 				// Clip all GDI drawing to this child's screen rect
 				dc.SetClipRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h)
-				// For Scintilla windows: patch the cached client PRectangle (this+0x8d8)
-				// so that AllocatePixmaps (called from WM_PAINT) uses the correct size.
-				// Scintilla's WndProc thunk uses GWLP_USERDATA (-21) to retrieve 'this'.
+				// For Scintilla windows: record sciThis for diagnostics only.
+				// Do NOT patch Scintilla internal state - offsets are version-specific
+				// and writing wrong fields corrupts state (e.g. sets paintState=painting,
+				// making SetPaintState return abandoned and skip all rendering).
 				if strings.EqualFold(cs.className, "scintilla") {
 					if m, mok := windowLongPtr[hwnd]; mok {
-						// Prefer GWLP_USERDATA (-21); fall back to index 0 for older paths.
 						sciThis0 := m[-21]
 						if sciThis0 == 0 {
 							sciThis0 = m[0]
 						}
 						if sciThis := sciThis0; sciThis != 0 {
-							ctx.Mem.Write64(sciThis+0x8d8, math.Float64bits(0.0))
-							ctx.Mem.Write64(sciThis+0x8e0, math.Float64bits(0.0))
-							ctx.Mem.Write64(sciThis+0x8e8, math.Float64bits(float64(cs.w)))
-							ctx.Mem.Write64(sciThis+0x8f0, math.Float64bits(float64(cs.h)))
-							// Also patch sciThis+0x5f8: this is the actual rcPaint that
-							// paint_coordinator (0x14025c240) reads and passes to render.
-							// Scintilla's WM_PAINT does NOT write to 0x5f8 - it stays zero,
-							// causing ComputeLastVisibleLine to return 0 → DrawLines never called.
-							ctx.Mem.Write64(sciThis+0x5f8, math.Float64bits(0.0))
-							ctx.Mem.Write64(sciThis+0x600, math.Float64bits(0.0))
-							ctx.Mem.Write64(sciThis+0x608, math.Float64bits(float64(cs.w)))
-							ctx.Mem.Write64(sciThis+0x610, math.Float64bits(float64(cs.h)))
-							// Fix lineHeight (this+0x1f8) to match our default font CellHeight
-							ctx.Mem.Write32(sciThis+0x1f8, 16)
-							// Force SetPaintState result (this+0x618) = 1 so vtable[9]
-							// (NothingToPaint) doesn't abort the paint loop early.
-							// SetPaintState normally returns 0 when rcPaint doesn't intersect
-							// clientRect, but with our patched rects it should always be 1.
-							b618 := []byte{1}
-							ctx.Mem.WriteBytes(sciThis+0x618, b618)
-							// this+0x5e8 gates render at 0x14029f240: "if [this+0x5e8]==0: return 0"
-							// (render gate function skips entire render when field is zero).
-							v5e8, _ := ctx.Mem.Read32(sciThis + 0x5e8)
-							if v5e8 == 0 {
-								ctx.Mem.Write32(sciThis+0x5e8, 1)
-							}
-							ravelog.Logf("[sci] patched this=0x%x rect={0,0,%d,%d} lineHeight=16 5e8=%d\n", sciThis, cs.w, cs.h, v5e8)
-							// Diagnostic: log key fields for DrawLine analysis
-							docPtr, _ := ctx.Mem.Read64(sciThis + 0x128)
-							this1f8, _ := ctx.Mem.Read64(sciThis + 0x1f8)
-							this208, _ := ctx.Mem.Read64(sciThis + 0x208)
-							this238, _ := ctx.Mem.Read64(sciThis + 0x238)
-							this240, _ := ctx.Mem.Read64(sciThis + 0x240)
-							this288, _ := ctx.Mem.Read64(sciThis + 0x288)
-							this390, _ := ctx.Mem.Read32(sciThis + 0x390)
-							ravelog.Logf("[sci] diag this=0x%x: this+0x128=0x%x this+0x1f8=0x%x this+0x208=0x%x this+0x238=0x%x this+0x240=0x%x this+0x288=0x%x this+0x390=0x%x\n",
-								sciThis, docPtr, this1f8, this208, this238, this240, this288, this390)
-							if docPtr != 0 {
-								doc1f8, _ := ctx.Mem.Read64(docPtr + 0x1f8)
-								doc208, _ := ctx.Mem.Read64(docPtr + 0x208)
-								doc28, _ := ctx.Mem.Read8(docPtr + 0x28)
-								doc98, _ := ctx.Mem.Read64(docPtr + 0x98)
-								doc238, _ := ctx.Mem.Read64(docPtr + 0x238)
-								doc240, _ := ctx.Mem.Read64(docPtr + 0x240)
-								doc288, _ := ctx.Mem.Read64(docPtr + 0x288)
-								ravelog.Logf("[sci] diag docPtr=0x%x: +0x28=%d +0x98=%d +0x1f8=%d +0x208=%d +0x238=0x%x +0x240=0x%x +0x288=0x%x\n",
-									docPtr, doc28, doc98, int64(doc1f8), doc208, doc238, doc240, doc288)
-								if doc288 != 0 {
-									surf10, _ := ctx.Mem.Read64(doc288 + 0x10)
-									ravelog.Logf("[sci] surf=0x%x: +0x10=0x%x\n", doc288, surf10)
-								}
-								// doc+0x98 = LinesDisplayed() - render loop guard: "if LinesDisplayed()>0"
-								// With 0 lines the entire 0x1402a9c20 render fn returns early before draw_lines.
-								// An empty document always has 1 visible line (the empty line 0).
-								if doc98 == 0 {
-									ctx.Mem.Write64(docPtr+0x98, 1)
-									ravelog.Logf("[sci] patched docPtr+0x98: 0 -> 1 (LinesDisplayed)\n")
-								}
-								// DrawLine entry: "cmp lineNum, [docPtr+0x1f8]; jle exit"
-								// When doc+0x1f8=0 and lineNum=0: 0<=0 -> always exits.
-								// Patch to -1 so lineNum(0) <= -1 is false -> DrawLine proceeds.
-								if int64(doc1f8) >= 0 {
-									ctx.Mem.Write64(docPtr+0x1f8, 0xffffffffffffffff)
-									ravelog.Logf("[sci] patched docPtr+0x1f8: %d -> -1\n", int64(doc1f8))
-								}
-								// ComputeFirstLine (0x1402a9b10) uses [docPtr+0x2b0] as a float64 divisor.
-								// If 0 the division yields NaN => firstLine = INT_MIN. Set to 16.0.
-								doc2b0, _ := ctx.Mem.Read64(docPtr + 0x2b0)
-								if doc2b0 == 0 {
-									const lhDouble = 0x4030000000000000 // 16.0 as float64
-									ctx.Mem.Write64(docPtr+0x2b0, lhDouble)
-									ravelog.Logf("[sci] patched docPtr+0x2b0: 0 -> 16.0\n")
-								}
-							}
-							// this+0x630: wrapState=2 (WRAP_CHAR) makes ComputeFirstLine return
-							// lastLine immediately => firstLine==lastLine => DrawLines never called.
-							// Patch to 3 (WRAP_WHITESPACE): full computation => firstLine=0.
-							v630, _ := ctx.Mem.Read32(sciThis + 0x630)
-							ravelog.Logf("[sci] this+0x630=%d (wrapState)\n", v630)
-							if v630 == 2 {
-								ctx.Mem.Write32(sciThis+0x630, 3)
-								ravelog.Logf("[sci] patched this+0x630: 2->3 (enables DrawLines)\n")
-							}
-							lastSciThis = sciThis // track for AllocatePixmaps diagnostic
+							ravelog.Logf("[sci] BeginPaint hwnd=0x%x sciThis=0x%x size=(%d,%d)\n", hwnd, sciThis, cs.w, cs.h)
 						}
 					}
 				}
@@ -19249,43 +19165,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				memDC.Target = gdiMgr.Screen
 				memDC.IsScreen = true
 			}
-			// Log caller RIP for debugging NULL-parent calls
 			callerRIP := uint64(0)
-			caller2 := uint64(0)
 			if rr, ok := ctx.CPU.(ntapi.RegisterReader); ok {
 				rsp := rr.ReadReg(4) // RSP
 				callerRIP, _ = mem.Read64(rsp)
-				// AllocatePixMap frame: 5 pushes + sub 0x30 + call = 0x68 bytes below entry RSP
-				// Caller of AllocatePixMap return addr is at rsp+0x60
-				caller2, _ = mem.Read64(rsp + 0x60)
 			}
-			ravelog.Logf("[gdi] CreateCompatibleDC parent=0x%x → hdc=0x%x caller=0x%x from=0x%x\n", hdcParent, h, callerRIP, caller2)
-			// When called from AllocatePixmaps (0x14029bac0), WM_PAINT has already stored
-			// sciThis+0x5f8 = rcPaint as float64. Log it to confirm correct values reach render.
-			if caller2 == 0x14029bac0 && lastSciThis != 0 {
-				left, _ := mem.Read64(lastSciThis + 0x5f8)
-				top, _ := mem.Read64(lastSciThis + 0x600)
-				right, _ := mem.Read64(lastSciThis + 0x608)
-				bottom, _ := mem.Read64(lastSciThis + 0x610)
-				ravelog.Logf("[sci] rcPaint@0x5f8: left=%v top=%v right=%v bottom=%v\n",
-					math.Float64frombits(left), math.Float64frombits(top),
-					math.Float64frombits(right), math.Float64frombits(bottom))
-				// If rcPaint is all zeros (Scintilla didn't set it yet), patch it.
-				if right == 0 && bottom == 0 {
-					sci := lastSciThis
-					csw, csh := int32(1052), int32(566)
-					// Try to get actual window size from clip rect of parent DC
-					if parentDC := gdiMgr.GetDC(hdcParent); parentDC != nil {
-						if parentDC.ClipX1 > parentDC.ClipX0 { csw = parentDC.ClipX1 - parentDC.ClipX0 }
-						if parentDC.ClipY1 > parentDC.ClipY0 { csh = parentDC.ClipY1 - parentDC.ClipY0 }
-					}
-					mem.Write64(sci+0x5f8, math.Float64bits(0.0))
-					mem.Write64(sci+0x600, math.Float64bits(0.0))
-					mem.Write64(sci+0x608, math.Float64bits(float64(csw)))
-					mem.Write64(sci+0x610, math.Float64bits(float64(csh)))
-					ravelog.Logf("[sci] patched sciThis+0x5f8 rcPaint: {0,0,%d,%d}\n", csw, csh)
-				}
-			}
+			ravelog.Logf("[gdi] CreateCompatibleDC parent=0x%x → hdc=0x%x caller=0x%x\n", hdcParent, h, callerRIP)
 			ctx.SetReturn(h)
 			return 0
 		})
