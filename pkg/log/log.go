@@ -29,14 +29,18 @@ const (
 )
 
 // tagColor maps a log tag to its brand gradient color.
+// Rule: every [tag] used anywhere in the codebase must appear here.
 var tagColor = map[string]string{
-	// red end - low-level PE/load machinery
+	// red - crashes / warnings / low-level PE
 	"pe":           colorRed,
 	"resolve":      colorRed,
 	"PATCH":        colorRed,
 	"loader":       colorRed,
 	"HEAP-CORRUPT": colorRed,
-	// crimson - win32 surface / window management
+	"crash-regs":   colorRed,
+	"cpu-recover":  colorRed,
+	"WARN":         colorRed,
+	// crimson - win32 surface / window / DLL machinery
 	"win32":     colorCrimson,
 	"wl":        colorCrimson,
 	"wndclass":  colorCrimson,
@@ -47,6 +51,12 @@ var tagColor = map[string]string{
 	"wndlong":   colorCrimson,
 	"clipboard": colorCrimson,
 	"dde":       colorCrimson,
+	"getrect":   colorCrimson,
+	"move":      colorCrimson,
+	"placement": colorCrimson,
+	"dllmain":   colorCrimson,
+	"kernel32":  colorCrimson,
+	"user32":    colorCrimson,
 	// hot pink - high-level win32 subsystem
 	"menu":     colorPink,
 	"setpos":   colorPink,
@@ -59,13 +69,14 @@ var tagColor = map[string]string{
 	"font":     colorPink,
 	"cursor":   colorPink,
 	"accel":    colorPink,
-	// violet - system-level / SEH / registry
+	// violet - system-level / SEH / registry / wine compat
 	"seh":    colorViolet,
 	"reg":    colorViolet,
 	"regkey": colorViolet,
 	"ss":     colorViolet,
 	"atom":   colorViolet,
-	// purple end - ntapi / syscall / runtime / threading
+	"wine":   colorViolet,
+	// purple - ntapi / syscall / runtime / threading
 	"ntapi":     colorPurple,
 	"govm":      colorPurple,
 	"trace":     colorPurple,
@@ -79,9 +90,14 @@ var tagColor = map[string]string{
 	"thr":       colorPurple,
 	"thread":    colorPurple,
 	"timer":     colorPurple,
-	// dim - verbose diagnostic / muted
-	"heap": colorDim,
-	"mmap": colorDim,
+	"defer":     colorPurple,
+	"mprotect":  colorPurple,
+	// dim - verbose / diagnostic
+	"heap":      colorDim,
+	"mmap":      colorDim,
+	"heap-dump": colorDim,
+	"debug":     colorDim,
+	"DBG":       colorDim,
 }
 
 // Logf writes a formatted log line to stderr.
