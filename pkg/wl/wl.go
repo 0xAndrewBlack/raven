@@ -115,11 +115,13 @@ type Window struct {
 	poolID     uint32
 	bufferID   uint32
 
-	Width  int32
-	Height int32
-	Stride int32
-	Pix    []byte // mmap'd XRGB8888 pixels (B, G, R, X per pixel)
-	fd     int    // memfd backing Pix
+	Width     int32
+	Height    int32
+	TitleBarH int32  // extra pixels above client area for the title bar (0 = no title bar)
+	Title     string // window title shown in the title bar
+	Stride    int32
+	Pix       []byte // mmap'd XRGB8888 pixels (B, G, R, X per pixel)
+	fd        int    // memfd backing Pix
 
 	configured  bool
 	needsResize bool
@@ -607,8 +609,10 @@ func Connect() (*Display, error) {
 }
 
 // CreateWindow creates a toplevel window with a shared-memory pixel buffer.
-func (d *Display) CreateWindow(title string, w, h int32) (*Window, error) {
-	win := &Window{disp: d, Width: w, Height: h}
+// titleBarH is the height in pixels to reserve at the top for a client-side
+// title bar (0 = no CSD title bar, rely on compositor server-side decorations).
+func (d *Display) CreateWindow(title string, w, h, titleBarH int32) (*Window, error) {
+	win := &Window{disp: d, Width: w, Height: h, TitleBarH: titleBarH, Title: title}
 
 	// wl_compositor.create_surface (opcode 0)
 	win.surfaceID = d.alloc(kindSurface)
@@ -661,16 +665,17 @@ func (d *Display) CreateWindow(title string, w, h int32) (*Window, error) {
 	}
 
 	// attach + damage + commit
-	d.send(win.surfaceID, 1, pu32(win.bufferID), pi32(0), pi32(0))            // attach
-	d.send(win.surfaceID, 9, pi32(0), pi32(0), pi32(win.Width), pi32(win.Height)) // damage_buffer
-	d.send(win.surfaceID, 6)                                                       // commit
+	d.send(win.surfaceID, 1, pu32(win.bufferID), pi32(0), pi32(0))                                         // attach
+	d.send(win.surfaceID, 9, pi32(0), pi32(0), pi32(win.Width), pi32(win.Height+win.TitleBarH)) // damage_buffer
+	d.send(win.surfaceID, 6)                                                                                 // commit
 
 	return win, nil
 }
 
 func (w *Window) createBuffer() error {
 	w.Stride = w.Width * 4
-	size := int(w.Stride * w.Height)
+	totalH := w.Height + w.TitleBarH
+	size := int(w.Stride * totalH)
 
 	fd, err := unix.MemfdCreate("govm-shm", 0)
 	if err != nil {
@@ -700,7 +705,7 @@ func (w *Window) createBuffer() error {
 		pu32(w.bufferID),
 		pi32(0), // offset
 		pi32(w.Width),
-		pi32(w.Height),
+		pi32(totalH),
 		pi32(w.Stride),
 		pu32(shmFmtXRGB8888),
 	)
@@ -712,11 +717,24 @@ func (w *Window) createBuffer() error {
 }
 
 // Commit submits the current pixel buffer to the compositor.
+// If a title bar is configured it is always redrawn before the commit.
 func (w *Window) Commit() {
+	if w.TitleBarH > 0 {
+		w.DrawTitleBar(w.Title, true)
+	}
+	totalH := w.Height + w.TitleBarH
 	d := w.disp
-	d.send(w.surfaceID, 1, pu32(w.bufferID), pi32(0), pi32(0))                    // attach
-	d.send(w.surfaceID, 9, pi32(0), pi32(0), pi32(w.Width), pi32(w.Height)) // damage_buffer
-	d.send(w.surfaceID, 6)                                                          // commit
+	d.send(w.surfaceID, 1, pu32(w.bufferID), pi32(0), pi32(0))                        // attach
+	d.send(w.surfaceID, 9, pi32(0), pi32(0), pi32(w.Width), pi32(totalH)) // damage_buffer
+	d.send(w.surfaceID, 6)                                                              // commit
+}
+
+// SetTitleBar sets the title bar height and title, and marks the buffer for recreation.
+// Call this after CreateWindow to enable the client-side title bar decoration.
+func (w *Window) SetTitleBar(h int32, title string) {
+	w.TitleBarH = h
+	w.Title = title
+	w.needsResize = true
 }
 
 // Resize requests a window resize to the given dimensions.
@@ -795,6 +813,17 @@ func (d *Display) PollKey() (KeyEvent, bool) {
 
 // ShiftDown returns the current shift key state.
 func (d *Display) ShiftDown() bool { return d.shiftDown }
+
+// SetWindowTitle sends xdg_toplevel.set_title to update the compositor's title bar.
+func (d *Display) SetWindowTitle(win *Window, title string) {
+	d.send(win.toplevelID, 2, pstr(title))
+}
+
+// HasNoSSD reports whether the compositor did NOT advertise zxdg_decoration_manager_v1,
+// meaning we must draw client-side decorations ourselves.
+func (d *Display) HasNoSSD() bool {
+	return d.decorMgrGlobal == 0
+}
 
 // CtrlDown returns the current control key state.
 func (d *Display) CtrlDown() bool { return d.ctrlDown }

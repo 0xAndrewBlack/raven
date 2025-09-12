@@ -1292,7 +1292,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// Must be called after wlWindow.ResizeIfNeeded() and before any drawing.
 	syncScreenSurface := func() {
 		if wlWindow != nil {
-			gdiMgr.Screen = gdi.WrapPix(wlWindow.Pix, wlWindow.Width, wlWindow.Height, wlWindow.Stride)
+			gdiMgr.Screen = gdi.WrapPix(wlWindow.Pix, wlWindow.Width, wlWindow.Height+wlWindow.TitleBarH, wlWindow.Stride)
 		}
 	}
 
@@ -12624,17 +12624,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// clientAreaOrigin returns the absolute (surface) coordinates of a
 	// window's client-area top-left. For mainHWND with a menu bar the
 	// client area starts below the menu; for child windows it's their
-	// stored (absolute) position.
+	// stored (absolute) position. The title-bar height is added to all
+	// y values so that GDI drawing at app-y=0 lands below the title bar.
 	clientAreaOrigin := func(hwnd uint64) (int32, int32) {
+		tbH := int32(0)
+		if wlWindow != nil {
+			tbH = wlWindow.TitleBarH
+		}
 		if cs, ok := hwndChildren[hwnd]; ok {
-			return cs.x, cs.y
+			return cs.x, cs.y + tbH
 		}
 		if hwnd == mainHWND {
 			if _, hasMenu := hwndMenuBar[mainHWND]; hasMenu {
-				return 0, menuBarHeight
+				return 0, menuBarHeight + tbH
 			}
 		}
-		return 0, 0
+		return 0, tbH
 	}
 
 	// paintTree recursively paints a window's child tree in creation
@@ -14826,7 +14831,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if nh := int32(ctx.Arg(7)); nh > 0 && nh < 0x7FFF {
 						h = nh
 					}
-					if win, err := wlDisplay.CreateWindow(title, w, h); err == nil {
+					const wsCaption = 0x00C00000
+					titleBarH := int32(0)
+					// Only enable CSD title bar if the compositor doesn't do SSD
+					// (checked at runtime: decorMgrID==0 means no SSD support).
+					if style&wsCaption != 0 && wlDisplay.HasNoSSD() {
+						titleBarH = 30
+					}
+					if win, err := wlDisplay.CreateWindow(title, w, h, titleBarH); err == nil {
 						wlWindow = win
 						mainHWND = hwnd
 						mainTitle = title
@@ -15267,6 +15279,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			text := readGuestUTF16(ctx.Arg(1))
 			if hwnd == mainHWND && text != "" {
 				mainTitle = text
+				if wlWindow != nil {
+					wlWindow.Title = text
+					// Update the compositor title (xdg_toplevel.set_title opcode 2)
+					wlDisplay.SetWindowTitle(wlWindow, text)
+				}
 			}
 			if cs, ok := hwndChildren[hwnd]; ok {
 				cs.text = text
