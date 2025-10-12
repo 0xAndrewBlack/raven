@@ -34,8 +34,13 @@ func (w *Window) drawRectRaw(left, top, right, bottom int32, colorref uint32) {
 	R := byte(colorref >> 16)
 
 	stride := int(w.Stride)
+	pixLen := len(w.Pix)
 	for y := int(top); y < int(bottom); y++ {
 		off := y*stride + int(left)*4
+		endOff := off + (int(right)-int(left))*4
+		if endOff > pixLen {
+			break
+		}
 		for x := int(left); x < int(right); x++ {
 			w.Pix[off] = B
 			w.Pix[off+1] = G
@@ -99,6 +104,9 @@ func (w *Window) drawTextRaw(x, y int32, text string, fgColor, bgColor uint32, o
 			}
 			bits := glyphData[row]
 			off := py*stride + cx*4
+			if off+8*4 > len(w.Pix) {
+				continue
+			}
 			for col := 0; col < 8; col++ {
 				px := cx + col
 				if px < 0 || px >= int(w.Width) {

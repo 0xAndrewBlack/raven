@@ -561,6 +561,14 @@ for _, synth := range autoSynthDLLs {
 peBasename := filepath.Base(filepath.Dir(absPath))
 winImagePath := `C:\` + peBasename + `\` + filepath.Base(absPath)
 var tmPtr *thread.Manager
+
+// Pre-allocate the heap region and wire to TEB for inline HeapAlloc.
+// Must happen before registerAutoSynthHandlers so sharedHeapAlloc can read it.
+const heapInlineSize = 256 * 1024 * 1024 // 256MB
+heapRegion := mem.Mmap(0, heapInlineSize, mmu.PermRead|mmu.PermWrite)
+mem.Write64(procState.TEBAddr+ntapi.TebHeapBase, heapRegion)
+mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
+
 registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry)
 
 // Set up Win32k subsystem
@@ -593,12 +601,6 @@ if result.MainModule.TLSDataAddr != 0 {
 const flsMaxSlots = 128
 flsDataArray := mem.Mmap(0, flsMaxSlots*8, mmu.PermRead|mmu.PermWrite)
 mem.Write64(procState.TEBAddr+ntapi.TebFlsData, flsDataArray)
-
-// Pre-allocate the heap region and wire to TEB for inline HeapAlloc.
-const heapInlineSize = 256 * 1024 * 1024 // 256MB
-heapRegion := mem.Mmap(0, heapInlineSize, mmu.PermRead|mmu.PermWrite)
-mem.Write64(procState.TEBAddr+ntapi.TebHeapBase, heapRegion)
-mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
 
 // Map a zero-filled null page so that null-pointer dereferences with small
 // offsets (like [rcx+0x28] with rcx=0) read/write zero instead of segfaulting.
