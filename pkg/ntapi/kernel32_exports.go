@@ -1362,7 +1362,7 @@ var kernel32Exports = []string{
 	"timeGetSystemTime",
 	"timeGetTime",
 	"wine_get_dos_file_name",
-	"wine_get_unix_file_name",
+	// Removed: "wine_get_unix_file_name" - exposing this makes apps detect Wine
 }
 
 // GenerateKernel32 creates the synthetic kernel32.dll with all known exports.

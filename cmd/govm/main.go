@@ -4154,6 +4154,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		return base + `\` + subKey
 	}
+
+	// regIsProbeKey returns true for registry paths used by VM/sandbox detection
+	// tools (pafish, etc.). These keys should NOT be auto-created on open.
+	regIsProbeKey := func(path string) bool {
+		lp := strings.ToLower(path)
+		probes := []string{
+			`\wine`, `\oracle\virtualbox`, `\vmware`,
+			`\vbox`, `\qemu`, `\bochs`,
+			`\sandboxie`, `\cuckoo`,
+			`\services\vboxguest`, `\services\vboxmouse`,
+			`\services\vboxservice`, `\services\vboxsf`, `\services\vboxvideo`,
+			`\acpi\dsdt\vbox__`, `\acpi\fadt\vbox__`, `\acpi\rsdt\vbox__`,
+		}
+		for _, p := range probes {
+			if strings.Contains(lp, p) {
+				return true
+			}
+		}
+		return false
+	}
 	regQueryValue := func(ctx *ntapi.TrapContext, hKey uint64, valueName string) uint32 {
 		lpType := ctx.Arg(3)
 		lpData := ctx.Arg(4)
@@ -11213,7 +11233,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			subKey := readGuestString(ctx.Arg(1))
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
-			if key == nil { key = ctx.Reg.CreateKey(path) } // auto-create for compat
+			if key == nil {
+				if regIsProbeKey(path) {
+					ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+					return 0
+				}
+				key = ctx.Reg.CreateKey(path)
+			}
 			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
@@ -11223,7 +11249,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			subKey := readGuestUTF16(ctx.Arg(1))
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
-			if key == nil { key = ctx.Reg.CreateKey(path) } // auto-create for compat
+			if key == nil {
+				if regIsProbeKey(path) {
+					ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+					return 0
+				}
+				key = ctx.Reg.CreateKey(path)
+			}
 			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
@@ -13809,7 +13841,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			subKey := readGuestUTF16(ctx.Arg(1))
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
-			if key == nil { key = ctx.Reg.CreateKey(path) }
+			if key == nil {
+				if regIsProbeKey(path) {
+					ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+					return 0
+				}
+				key = ctx.Reg.CreateKey(path)
+			}
 			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
@@ -13819,7 +13857,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			subKey := readGuestUTF16(ctx.Arg(1))
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
-			if key == nil { key = ctx.Reg.CreateKey(path) }
+			if key == nil {
+				if regIsProbeKey(path) {
+					ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+					return 0
+				}
+				key = ctx.Reg.CreateKey(path)
+			}
 			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(2); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
@@ -13960,7 +14004,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			subKey := readGuestString(ctx.Arg(1))
 			path := regKeyPath(ctx.Arg(0), subKey)
 			key := ctx.Reg.OpenKey(path)
-			if key == nil { key = ctx.Reg.CreateKey(path) }
+			if key == nil {
+				if regIsProbeKey(path) {
+					ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
+					return 0
+				}
+				key = ctx.Reg.CreateKey(path)
+			}
 			h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
 			if phk := ctx.Arg(4); phk != 0 { ctx.Mem.Write64(phk, uint64(h)) }
 			ctx.SetReturn(0)
