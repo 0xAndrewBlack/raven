@@ -17266,143 +17266,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			wParam := ctx.Arg(2)
 			lParam := ctx.Arg(3)
 
-			// WM_LBUTTONDOWN: check menu bar click.
-			// lParam coords are buffer-absolute (surface-local from Wayland).
-			// The menu bar occupies y=[TitleBarH, TitleBarH+menuBarHeight).
-			if msg == 0x0201 && hwnd == mainHWND && wlWindow != nil {
-				my := int32(lParam >> 16)
-				mx := int32(lParam & 0xFFFF)
-				if menuH, ok := hwndMenuBar[hwnd]; ok {
-					menuTop := wlWindow.TitleBarH
-					menuBot := wlWindow.TitleBarH + menuBarHeight
-					if md, ok2 := menus[menuH]; ok2 && my >= menuTop && my < menuBot {
-						x := int32(4)
-						for i, item := range md.items {
-							if item.flags&0x0800 != 0 {
-								continue
-							}
-							label := menuStripAmpersand(item.text)
-							if label == "" {
-								continue
-							}
-							tw := int32(len([]rune(label)))*8 + 12
-							if mx >= x && mx < x+tw {
-								if openMenuIdx == i && openMenuHwnd == hwnd {
-									openMenuIdx = -1 // toggle off
-								} else {
-									openMenuIdx = i
-									openMenuHwnd = hwnd
-								}
-								_ = md
-								msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
-								ctx.SetReturn(0)
-								return 0
-							}
-							x += tw
-						}
-						// Clicked menu bar but not on any item → close
-						openMenuIdx = -1
-						msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
-						ctx.SetReturn(0)
-						return 0
-					}
-				}
-			}
-
-			// WM_LBUTTONDOWN: check dropdown menu item click
-			if msg == 0x0201 && hwnd == mainHWND && openMenuIdx >= 0 && wlWindow != nil {
-				my := int32(lParam >> 16)
-				mx := int32(lParam & 0xFFFF)
-				if menuH, ok := hwndMenuBar[hwnd]; ok {
-					if md, ok2 := menus[menuH]; ok2 {
-						// Find the open popup's position and items
-						x := int32(4)
-						for i, item := range md.items {
-							if item.flags&0x0800 != 0 {
-								continue
-							}
-							label := menuStripAmpersand(item.text)
-							if label == "" {
-								continue
-							}
-							tw := int32(len([]rune(label)))*8 + 12
-							// Skip non-renderable items (same filter as menu bar draw)
-							hasRenderable := false
-							for _, r := range label {
-								if r >= 32 && r <= 126 {
-									hasRenderable = true
-									break
-								}
-							}
-							if !hasRenderable {
-								continue
-							}
-							if i == openMenuIdx && len(item.submenu) > 0 {
-								// Check if click is inside dropdown area.
-								// Coordinates are buffer-absolute; dropdown starts below menu bar.
-								dropX := x
-								dropY := wlWindow.TitleBarH + menuBarHeight
-								dropW := int32(200)
-								dropH := int32(len(item.submenu)) * 20
-								if mx >= dropX && mx < dropX+dropW && my >= dropY && my < dropY+dropH {
-									itemIdx := int(my-dropY) / 20
-									if itemIdx >= 0 && itemIdx < len(item.submenu) {
-										si := item.submenu[itemIdx]
-										if si.flags&0x0800 == 0 { // not separator
-											// Send WM_COMMAND with menu item ID
-											msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0111, si.id, 0})
-											openMenuIdx = -1
-											msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
-										}
-									}
-									ctx.SetReturn(0)
-									return 0
-								}
-							}
-							x += tw
-						}
-						// Click outside dropdown → close
-						openMenuIdx = -1
-						msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
-					}
-				}
-			}
-
-			// WM_MOUSEMOVE (0x0200): while a menu is open, switch active item on hover.
-			if msg == 0x0200 && hwnd == mainHWND && openMenuIdx >= 0 && wlWindow != nil {
-				my := int32(lParam >> 16)
-				mx := int32(lParam & 0xFFFF)
-				if menuH, ok := hwndMenuBar[hwnd]; ok {
-					if md, ok2 := menus[menuH]; ok2 {
-						menuTop := wlWindow.TitleBarH
-						menuBot := wlWindow.TitleBarH + menuBarHeight
-						if my >= menuTop && my < menuBot {
-							// Hovering menu bar - switch to item under cursor
-							x := int32(4)
-							for i, item := range md.items {
-								if item.flags&0x0800 != 0 {
-									continue
-								}
-								label := menuStripAmpersand(item.text)
-								if label == "" {
-									continue
-								}
-								if item.flags&0x0010 == 0 {
-									continue
-								}
-								tw := int32(len([]rune(label)))*8 + 12
-								if mx >= x && mx < x+tw && i != openMenuIdx {
-									openMenuIdx = i
-									openMenuHwnd = hwnd
-									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
-								}
-								x += tw
-							}
-						}
-					}
-				}
-			}
-
 			// WM_PAINT: draw non-client area (NC paint + menu bar), erase background, paint children
 			if msg == 0x000F && wlWindow != nil {
 				if hwnd == mainHWND {
@@ -18033,6 +17896,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			mem.Write32(pMsg+40, 0) // pt.y
 		}
 		// GetMessageW: drain message queue first, then block on Wayland events
+		// dispatchWl is shared with PeekMessageW - defined as a package-level var so both can access it.
+		var dispatchWl func(evt wl.EventType)
 		d.RegisterAutoStubHandler(user32, "GetMessageW", func(ctx *ntapi.TrapContext) uint32 {
 			pMsg := ctx.Arg(0)
 
@@ -18055,7 +17920,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 
 			// Helper: convert a Wayland event into Win32 messages.
-			dispatchWl := func(evt wl.EventType) {
+			dispatchWl = func(evt wl.EventType) {
 				if evt == wl.EventClose {
 					msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x12, 0, 0})
 					return
@@ -18097,35 +17962,206 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if !ok {
 							break
 						}
-						lParam := uint64(uint16(me.X)) | (uint64(uint16(me.Y)) << 16)
+						// Surface-local coords: y=0 at top of our SHM buffer.
+						// Our custom title bar occupies y=[0, TitleBarH).
+						// Menu bar occupies y=[TitleBarH, TitleBarH+menuBarHeight).
+						// Client area starts at y=TitleBarH+menuBarHeight.
+						var (
+							ncTitleTop  = int32(0)
+							ncMenuTop   int32
+							clientTop   = int32(0)
+						)
+						if wlWindow != nil {
+							ncMenuTop  = wlWindow.TitleBarH
+							clientTop  = wlWindow.TitleBarH + menuBarHeight
+						}
+						// Client-relative coordinates for WM_LBUTTON* messages
+						clientX := me.X
+						clientY := me.Y - clientTop
+
 						switch me.Kind {
-						case 0:
-							msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0200, 0, lParam})
-						case 1:
+						case 0: // WM_MOUSEMOVE
+							if wlWindow != nil && me.Y >= ncMenuTop && me.Y < clientTop && openMenuIdx >= 0 {
+								// Hovering menu bar while a menu is open - switch item
+								if menuH, ok2 := hwndMenuBar[mainHWND]; ok2 {
+									if md, ok3 := menus[menuH]; ok3 {
+										x := int32(4)
+										for i, item := range md.items {
+											if item.flags&0x0800 != 0 || item.flags&0x0010 == 0 {
+												continue
+											}
+											label := menuStripAmpersand(item.text)
+											if label == "" {
+												continue
+											}
+											hasRenderable := false
+											for _, r := range label {
+												if r >= 32 && r <= 126 {
+													hasRenderable = true
+													break
+												}
+											}
+											if !hasRenderable {
+												continue
+											}
+											tw := int32(len([]rune(label)))*8 + 12
+											if me.X >= x && me.X < x+tw && i != openMenuIdx {
+												openMenuIdx = i
+												openMenuHwnd = mainHWND
+												msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+											}
+											x += tw
+										}
+									}
+								}
+							} else if me.Y >= clientTop {
+								// Client area mouse move - use client-relative coords
+								clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
+								msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0200, 0, clParam})
+							}
+						case 1: // button press/release
 							const btnLeft, btnRight, btnMiddle = 272, 273, 274
 							switch me.Button {
 							case btnLeft:
 								if me.Pressed {
-									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0201, 0x0001, lParam})
+									if wlWindow != nil && me.Y >= ncMenuTop && me.Y < clientTop {
+										// ── Menu bar click (non-client) ──
+										// Intercept here instead of routing via DefWindowProcW.
+										if menuH, ok2 := hwndMenuBar[mainHWND]; ok2 {
+											if md, ok3 := menus[menuH]; ok3 {
+												x := int32(4)
+												handled := false
+												for i, item := range md.items {
+													if item.flags&0x0800 != 0 || item.flags&0x0010 == 0 {
+														continue
+													}
+													label := menuStripAmpersand(item.text)
+													if label == "" {
+														continue
+													}
+													hasRenderable := false
+													for _, r := range label {
+														if r >= 32 && r <= 126 {
+															hasRenderable = true
+															break
+														}
+													}
+													if !hasRenderable {
+														continue
+													}
+													tw := int32(len([]rune(label)))*8 + 12
+													if me.X >= x && me.X < x+tw {
+														if openMenuIdx == i && openMenuHwnd == mainHWND {
+															openMenuIdx = -1
+														} else {
+															openMenuIdx = i
+															openMenuHwnd = mainHWND
+														}
+														msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+														handled = true
+														break
+													}
+													x += tw
+												}
+												_ = md
+												if !handled {
+													openMenuIdx = -1
+													msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+												}
+											}
+										}
+									} else if wlWindow != nil && me.Y >= ncTitleTop && me.Y < ncMenuTop {
+										// ── Title bar click (non-client) ── ignore or handle drag
+									} else {
+										// ── Client area click ──
+										clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
+										dropHit := false
+										if openMenuIdx >= 0 {
+											// Check if click is inside the open dropdown
+											if menuH, ok2 := hwndMenuBar[mainHWND]; ok2 {
+												if md, ok3 := menus[menuH]; ok3 {
+													x := int32(4)
+													for i, item := range md.items {
+														if item.flags&0x0800 != 0 || item.flags&0x0010 == 0 {
+															continue
+														}
+														label := menuStripAmpersand(item.text)
+														if label == "" {
+															continue
+														}
+														hasRenderable := false
+														for _, r := range label {
+															if r >= 32 && r <= 126 {
+																hasRenderable = true
+																break
+															}
+														}
+														if !hasRenderable {
+															continue
+														}
+														tw := int32(len([]rune(label)))*8 + 12
+														if i == openMenuIdx && len(item.submenu) > 0 {
+															dropX := x
+															dropY := clientTop
+															dropW := int32(200)
+															dropH := int32(len(item.submenu)) * 20
+															if me.X >= dropX && me.X < dropX+dropW && me.Y >= dropY && me.Y < dropY+dropH {
+																itemIdx := int(me.Y-dropY) / 20
+																if itemIdx >= 0 && itemIdx < len(item.submenu) {
+																	si := item.submenu[itemIdx]
+																	if si.flags&0x0800 == 0 {
+																		msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0111, si.id, 0})
+																	}
+																}
+																openMenuIdx = -1
+																msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+																dropHit = true
+																break
+															}
+														}
+														x += tw
+													}
+												}
+											}
+											if !dropHit {
+												openMenuIdx = -1
+												msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+											}
+										}
+										if !dropHit {
+											msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0201, 0x0001, clParam})
+										}
+									}
 								} else {
-									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0202, 0, lParam})
+									// Left button release - client-relative
+									if me.Y >= clientTop || (wlWindow == nil) {
+										clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
+										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0202, 0, clParam})
+									}
 								}
 							case btnRight:
-								if me.Pressed {
-									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0204, 0x0002, lParam})
-								} else {
-									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0205, 0, lParam})
+								if me.Y >= clientTop || wlWindow == nil {
+									clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
+									if me.Pressed {
+										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0204, 0x0002, clParam})
+									} else {
+										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0205, 0, clParam})
+									}
 								}
 							case btnMiddle:
-								if me.Pressed {
-									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0207, 0x0010, lParam})
-								} else {
-									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0208, 0, lParam})
+								if me.Y >= clientTop || wlWindow == nil {
+									clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
+									if me.Pressed {
+										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0207, 0x0010, clParam})
+									} else {
+										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0208, 0, clParam})
+									}
 								}
 							}
-						case 2:
+						case 2: // scroll wheel
 							wParam := uint64(int16(me.AxisVal*-120)) << 16
-							msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x020A, wParam, lParam})
+							clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
+							msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x020A, wParam, clParam})
 						}
 					}
 				}
@@ -18246,42 +18282,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 					}
 					if evt == wl.EventMouse {
-						for {
-							me, ok := wlDisplay.PollMouse()
-							if !ok {
-								break
-							}
-							lParam := uint64(uint16(me.X)) | (uint64(uint16(me.Y)) << 16)
-							switch me.Kind {
-							case 0:
-								msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0200, 0, lParam})
-							case 1:
-								const btnLeft, btnRight, btnMiddle = 272, 273, 274
-								switch me.Button {
-								case btnLeft:
-									if me.Pressed {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0201, 0x0001, lParam})
-									} else {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0202, 0, lParam})
-									}
-								case btnRight:
-									if me.Pressed {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0204, 0x0002, lParam})
-									} else {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0205, 0, lParam})
-									}
-								case btnMiddle:
-									if me.Pressed {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0207, 0x0010, lParam})
-									} else {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0208, 0, lParam})
-									}
-								}
-							case 2:
-								wParam := uint64(int16(me.AxisVal*-120)) << 16
-								msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x020A, wParam, lParam})
-							}
-						}
+						dispatchWl(evt)
 					}
 				}
 			}
