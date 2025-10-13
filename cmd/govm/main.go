@@ -1577,6 +1577,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		return buf
 	}
 
+	// crtStreamWriter returns the appropriate os writer for a CRT FILE* stream.
+	// stderr = base + stride*2, everything else → stdout.
+	crtStreamWriter := func(stream, base uint64, stride uint64) *os.File {
+		if base != 0 && stream == base+stride*2 {
+			return os.Stderr
+		}
+		return os.Stdout
+	}
+
 	// --- msvcrt.dll ---
 	if msvcrt, ok := synthByName["msvcrt.dll"]; ok {
 		// _initterm: void _initterm(void (**begin)(void), void (**end)(void))
@@ -1929,11 +1938,44 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "fprintf", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			stream := ctx.Arg(0)
+			fmtAddr := ctx.Arg(1)
+			if fmtAddr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			fmtStr := readGuestString(fmtAddr)
+			var args []uint64
+			for i := 2; i < 10; i++ {
+				args = append(args, ctx.Arg(i))
+			}
+			result := wideprintf(fmtStr, args)
+			w := crtStreamWriter(stream, iobBase, iobStride)
+			w.WriteString(result)
+			ctx.SetReturn(uint64(len(result)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "vfprintf", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			stream := ctx.Arg(0)
+			fmtAddr := ctx.Arg(1)
+			// va_list is a pointer to the args on guest stack
+			vaList := ctx.Arg(2)
+			if fmtAddr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			fmtStr := readGuestString(fmtAddr)
+			var args []uint64
+			if vaList != 0 {
+				for i := 0; i < 8; i++ {
+					v, _ := mem.Read64(vaList + uint64(i)*8)
+					args = append(args, v)
+				}
+			}
+			result := wideprintf(fmtStr, args)
+			w := crtStreamWriter(stream, iobBase, iobStride)
+			w.WriteString(result)
+			ctx.SetReturn(uint64(len(result)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "fwrite", func(ctx *ntapi.TrapContext) uint32 {
@@ -4073,7 +4115,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(ucrt, "__stdio_common_vfprintf", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			// options=Arg(0), stream=Arg(1), format=Arg(2), locale=Arg(3), arglist=Arg(4)
+			stream := ctx.Arg(1)
+			fmtAddr := ctx.Arg(2)
+			vaList := ctx.Arg(4)
+			if fmtAddr == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			fmtStr := readGuestString(fmtAddr)
+			var args []uint64
+			if vaList != 0 {
+				for i := 0; i < 8; i++ {
+					v, _ := mem.Read64(vaList + uint64(i)*8)
+					args = append(args, v)
+				}
+			}
+			result := wideprintf(fmtStr, args)
+			w := crtStreamWriter(stream, crtIOBBase, 0x30)
+			w.WriteString(result)
+			ctx.SetReturn(uint64(len(result)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(ucrt, "__stdio_common_vfscanf", func(ctx *ntapi.TrapContext) uint32 {
