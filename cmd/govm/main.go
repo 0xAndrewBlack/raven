@@ -14248,6 +14248,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		text  string
 		width int32
 	}
+	type tbButtonData struct {
+		iBitmap   int32
+		idCommand int32
+		fsState   uint8
+		fsStyle   uint8 // TBSTYLE_BUTTON=0, TBSTYLE_SEP=1, TBSTYLE_CHECK=2
+	}
 	type controlState struct {
 		className    string
 		parentHWND   uint64
@@ -14272,6 +14278,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		tabCount     int
 		tabCurSel    int
 		tabTitles    []string
+		// Toolbar state
+		tbButtons    []tbButtonData // stored via TB_ADDBUTTONSW
+		tbBtnW       int32         // button width (from TB_SETBUTTONSIZE)
+		tbBtnH       int32         // button height (from TB_SETBUTTONSIZE)
 	}
 	hwndChildren := make(map[uint64]*controlState)
 	hwndTitle := make(map[uint64]string)
@@ -15838,11 +15848,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			const rbFirst = 0x0400
 			switch msg {
 			case 0x000F: // WM_PAINT
+				// Rebar is a container for toolbars - do NOT fill background here.
+				// Child toolbars draw inside the same rect and we must not overwrite them.
+				// Only draw the 3D-edge lines.
 				if wlWindow != nil {
-					// Draw rebar background as gradient-like gray
-					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
-					// Draw 3D-style band borders
-					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])   // top highlight
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])       // top highlight
 					wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16]) // bottom shadow
 				}
 				return 0, true
@@ -15856,8 +15866,34 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				cs.h = int32(rebarBandCounts[hwnd]) * 26
 				return 1, true
 			case rbFirst + 10: // RB_INSERTBANDW
+				// Parse REBARBANDINFOW to extract and size the child window.
+				// 64-bit layout: cbSize(4), fMask(4), fStyle(4), clrFore(4), clrBack(4),
+				//   pad(4), lpText(8), cch(4), iImage(4), hwndChild(8), cxMinChild(4), cyMinChild(4), cx(4)
+				if lParam != 0 {
+					fMaskRB, _ := mem.Read32(lParam + 4)
+					const RBBIM_CHILD = 0x10
+					const RBBIM_CHILDSIZE = 0x20
+					if fMaskRB&RBBIM_CHILD != 0 {
+						childHWND, _ := mem.Read64(lParam + 40)
+						cyMinChild := int32(0)
+						if fMaskRB&RBBIM_CHILDSIZE != 0 {
+							cyV, _ := mem.Read32(lParam + 52)
+							cyMinChild = int32(cyV)
+						}
+						if cyMinChild <= 0 { cyMinChild = 26 }
+						if csc, ok2 := hwndChildren[childHWND]; ok2 {
+							csc.w = cs.w
+							if csc.w <= 0 && wlWindow != nil { csc.w = wlWindow.Width }
+							csc.h = cyMinChild
+							csc.x = cs.x
+							csc.y = cs.y
+						}
+					}
+				}
 				rebarBandCounts[hwnd]++
 				cs.h = int32(rebarBandCounts[hwnd]) * 26
+				// Queue repaint so the toolbar gets drawn after sizing
+				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
 				return 1, true
 			case rbFirst + 12: // RB_GETBANDCOUNT
 				return uint64(rebarBandCounts[hwnd]), true
@@ -15893,19 +15929,36 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			switch msg {
 			case 0x000F: // WM_PAINT
 				if wlWindow != nil {
-					// Draw toolbar background
-					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
-					// Draw some placeholder tool buttons (24x22px each)
-					const btnW, btnH = int32(24), int32(22)
-					const padding = int32(2)
-					x := cs.x + padding
-					for x+btnW < cs.x+cs.w {
-						wlWindow.DrawRectAbs(x, cs.y+padding, x+btnW, cs.y+padding+btnH, sysColors[15])
-						wlWindow.DrawRectAbs(x, cs.y+padding, x+btnW, cs.y+padding+1, sysColors[20])   // top highlight
-						wlWindow.DrawRectAbs(x, cs.y+padding, x+1, cs.y+padding+btnH, sysColors[20])   // left highlight
-						wlWindow.DrawRectAbs(x+btnW-1, cs.y+padding, x+btnW, cs.y+padding+btnH, sysColors[16]) // right shadow
-						wlWindow.DrawRectAbs(x, cs.y+padding+btnH-1, x+btnW, cs.y+padding+btnH, sysColors[16]) // bottom shadow
-						x += btnW + padding
+					// Draw toolbar background - slightly darker than button face for contrast
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, 0xD4D0C8)
+					btnW := cs.tbBtnW
+					if btnW <= 0 { btnW = 23 }
+					btnH := cs.tbBtnH
+					if btnH <= 0 { btnH = 22 }
+					if btnH > cs.h-2 { btnH = cs.h - 2 }
+					const padY = int32(2)
+					x := cs.x + 2
+					drawBtn := func(bx, by, bw, bh int32) {
+						// Windows classic raised button: face + 3D border
+						wlWindow.DrawRectAbs(bx, by, bx+bw, by+bh, 0xECE9D8)     // button face
+						wlWindow.DrawRectAbs(bx, by, bx+bw, by+1, 0xFFFFFF)      // top highlight
+						wlWindow.DrawRectAbs(bx, by, bx+1, by+bh, 0xFFFFFF)      // left highlight
+						wlWindow.DrawRectAbs(bx+bw-2, by+1, bx+bw-1, by+bh-1, 0xACA899) // inner right shadow
+						wlWindow.DrawRectAbs(bx+1, by+bh-2, bx+bw-1, by+bh-1, 0xACA899) // inner bottom shadow
+						wlWindow.DrawRectAbs(bx+bw-1, by, bx+bw, by+bh, 0x716F64) // outer right shadow
+						wlWindow.DrawRectAbs(bx, by+bh-1, bx+bw, by+bh, 0x716F64) // outer bottom shadow
+					}
+					for _, btn := range cs.tbButtons {
+						if x >= cs.x+cs.w { break }
+						if btn.fsStyle&0x01 != 0 { // TBSTYLE_SEP
+							mid := x + 3
+							wlWindow.DrawRectAbs(mid, cs.y+padY+2, mid+1, cs.y+padY+btnH-2, 0x716F64)
+							wlWindow.DrawRectAbs(mid+1, cs.y+padY+2, mid+2, cs.y+padY+btnH-2, 0xFFFFFF)
+							x += 8
+							continue
+						}
+						drawBtn(x, cs.y+padY, btnW, btnH)
+						x += btnW + 1
 					}
 				}
 				return 0, true
@@ -15932,6 +15985,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 20: // TB_ADDBUTTONSA
 				return 1, true
 			case wmUser + 68: // TB_ADDBUTTONSW
+				// TBBUTTON (64-bit layout): iBitmap(4), idCommand(4), fsState(1), fsStyle(1), bReserved(6), dwData(8), iString(8) = 32 bytes
+				nButtons := int(wParam)
+				btnStruct := lParam
+				const tbBtnSize = uint64(32)
+				for i := 0; i < nButtons; i++ {
+					base := btnStruct + uint64(i)*tbBtnSize
+					iBitmapV, _ := mem.Read32(base)
+					idCommandV, _ := mem.Read32(base + 4)
+					stateBytes, _ := mem.ReadBytes(base+8, 2)
+					fsState, fsStyle := byte(0), byte(0)
+					if len(stateBytes) >= 2 {
+						fsState = stateBytes[0]
+						fsStyle = stateBytes[1]
+					}
+					cs.tbButtons = append(cs.tbButtons, tbButtonData{int32(iBitmapV), int32(idCommandV), fsState, fsStyle})
+				}
 				return 1, true
 			case wmUser + 44: // TB_BUTTONSTRUCTSIZE
 				return 0, true
@@ -15947,6 +16016,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return 0, true
 			case wmUser + 46: // TB_SETBUTTONSIZE
+				cs.tbBtnW = int32(lParam & 0xFFFF)
+				cs.tbBtnH = int32((lParam >> 16) & 0xFFFF)
 				return 1, true
 			case wmUser + 55: // TB_GETROWS
 				return 1, true
@@ -15955,7 +16026,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 56: // TB_GETBUTTONSIZE
 				return (uint64(26)<<16) | 24, true // height=26, width=24
 			case wmUser + 22: // TB_BUTTONCOUNT
-				return 0, true
+				return uint64(len(cs.tbButtons)), true
 			case wmUser + 21: // TB_DELETEBUTTON
 				return 1, true
 			case wmUser + 71: // TB_SETTOOLTIPS
