@@ -302,8 +302,9 @@ fmt.Fprintf(os.Stderr, "govm: PE load error: %v\n", err)
 os.Exit(1)
 }
 
-// Record boot time for GetTickCount / KUSER_SHARED_DATA TickCount updates
-bootTime := time.Now()
+// Record boot time for GetTickCount / KUSER_SHARED_DATA TickCount updates.
+// Pretend the system booted 2 hours ago to avoid sandbox uptime detection.
+bootTime := time.Now().Add(-2 * time.Hour)
 
 // Create NT subsystem components
 handles := ntapi.NewHandleTable()
@@ -357,10 +358,15 @@ mem.Write64Raw(kuserAddr+0x020, 0)
 mem.Write32(kuserAddr+0x028, 0)
 
 // TickCount (+0x0320): KSYSTEM_TIME union with TickCountQuad.
-// Init to 0 (uptime=0); GetTickCount handler updates via API, but apps that inline-read this
-// will see 0 until we implement a background updater.
-mem.Write64Raw(kuserAddr+0x0320, 0)
-mem.Write32(kuserAddr+0x0328, 0) // TickCountPad
+// Init to 2h uptime (matches bootTime offset) so inline-reading apps see realistic value.
+{
+	uptickMs := uint64(2 * 60 * 60 * 1000) // 2 hours in ms
+	// TickCount.LowPart = uptickMs / tickInterval (15.625ms per tick)
+	ticks := uptickMs * 64 / 1000 // ~128000 ticks for 2h
+	mem.Write32(kuserAddr+0x0320, uint32(ticks))
+	mem.Write32(kuserAddr+0x0324, 0) // High1Time
+	mem.Write32(kuserAddr+0x0328, 0) // TickCountPad
+}
 
 // --- Version / Platform ---
 // NtBuildNumber (+0x0260) = 19045 (Windows 10 21H2)
@@ -4835,8 +4841,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.Mem.Write32(si+4, 4096)                    // dwPageSize
 			ctx.Mem.Write64(si+8, 0x10000)                 // lpMinimumApplicationAddress
 			ctx.Mem.Write64(si+16, 0x00007FFFFFFEFFFF)     // lpMaximumApplicationAddress
-			ctx.Mem.Write64(si+24, 1)                      // dwActiveProcessorMask
-			ctx.Mem.Write32(si+32, 1)                      // dwNumberOfProcessors
+			ctx.Mem.Write64(si+24, 0xF)                    // dwActiveProcessorMask (4 CPUs)
+			ctx.Mem.Write32(si+32, 4)                      // dwNumberOfProcessors
 			ctx.Mem.Write32(si+36, 8664)                   // dwProcessorType = AMD X86_64
 			ctx.Mem.Write32(si+40, 65536)                  // dwAllocationGranularity
 			ctx.Mem.Write16(si+44, 6)                      // wProcessorLevel
