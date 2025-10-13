@@ -1896,6 +1896,31 @@ c.Regs[RAX] = 0
 c.Regs[RBX] = 0x00000008 // BMI1 only (no AVX2, no BMI2)
 c.Regs[RCX] = 0
 c.Regs[RDX] = 0
+case 0x80000000: // max extended leaf
+c.Regs[RAX] = 0x80000004
+c.Regs[RBX] = 0
+c.Regs[RCX] = 0
+c.Regs[RDX] = 0
+case 0x80000001: // extended feature flags
+c.Regs[RAX] = 0
+c.Regs[RBX] = 0
+c.Regs[RCX] = 0x00000021 // LAHF/SAHF + LZCNT
+c.Regs[RDX] = 0x2c100800 // SYSCALL, NX, 1GBpage, RDTSCP, LM
+case 0x80000002: // brand string part 1: "Intel(R) Core(T"
+c.Regs[RAX] = 0x65746e49 // "Inte"
+c.Regs[RBX] = 0x2952286c // "l(R)"
+c.Regs[RCX] = 0x726f4320 // " Cor"
+c.Regs[RDX] = 0x4d542865 // "e(TM"
+case 0x80000003: // brand string part 2: ") i7-6700 CPU @"
+c.Regs[RAX] = 0x37692029 // ") i7"
+c.Regs[RBX] = 0x3037362d // "-670"
+c.Regs[RCX] = 0x50432030 // "0 CP"
+c.Regs[RDX] = 0x40202055 // "U @ "
+case 0x80000004: // brand string part 3: " 3.40GHz\0\0\0\0\0\0\0\0"
+c.Regs[RAX] = 0x30342e33 // "3.40"
+c.Regs[RBX] = 0x007a4847 // "GHz\0"
+c.Regs[RCX] = 0
+c.Regs[RDX] = 0
 default:
 c.Regs[RAX] = 0
 c.Regs[RBX] = 0
