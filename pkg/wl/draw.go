@@ -6,11 +6,11 @@ package wl
 func (w *Window) DrawRect(left, top, right, bottom int32, colorref uint32) {
 	top += w.TitleBarH
 	bottom += w.TitleBarH
-	w.drawRectRaw(left, top, right, bottom, colorref)
+	w.DrawRectAbs(left, top, right, bottom, colorref)
 }
 
-// drawRectRaw fills a rectangle using raw surface coordinates (no TitleBarH offset).
-func (w *Window) drawRectRaw(left, top, right, bottom int32, colorref uint32) {
+// DrawRectAbs fills a rectangle using absolute surface coordinates (no TitleBarH offset).
+func (w *Window) DrawRectAbs(left, top, right, bottom int32, colorref uint32) {
 	totalH := int(w.Height + w.TitleBarH)
 	if left < 0 {
 		left = 0
@@ -56,11 +56,11 @@ func (w *Window) drawRectRaw(left, top, right, bottom int32, colorref uint32) {
 // Only ASCII 32-126 are rendered; others are shown as '?'.
 // '\n' starts a new line; '\r' is ignored.
 func (w *Window) DrawText(x, y int32, text string, fgColor, bgColor uint32, opaque bool) {
-	w.drawTextRaw(x, y+w.TitleBarH, text, fgColor, bgColor, opaque)
+	w.DrawTextAbs(x, y+w.TitleBarH, text, fgColor, bgColor, opaque)
 }
 
-// drawTextRaw renders text at raw surface coordinates (no TitleBarH offset).
-func (w *Window) drawTextRaw(x, y int32, text string, fgColor, bgColor uint32, opaque bool) {
+// DrawTextAbs renders text at absolute surface coordinates (no TitleBarH offset).
+func (w *Window) DrawTextAbs(x, y int32, text string, fgColor, bgColor uint32, opaque bool) {
 	// COLORREF: 0x00RRGGBB → Wayland XRGB8888: [B][G][R][X]
 	fgB := byte(fgColor)
 	fgG := byte(fgColor >> 8)

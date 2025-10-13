@@ -124,9 +124,10 @@ type Window struct {
 	Pix       []byte // mmap'd XRGB8888 pixels (B, G, R, X per pixel)
 	fd        int    // memfd backing Pix
 
-	configured  bool
-	needsResize bool
-	Closed      bool
+	configured   bool
+	needsResize  bool
+	appResized   bool // set when app called Resize(); suppresses compositor shrink
+	Closed       bool
 }
 
 // --- wire helpers ---
@@ -340,9 +341,16 @@ func (d *Display) dispatchOne() (EventType, error) {
 					h -= d.win.TitleBarH
 				}
 				if w > 0 && h > 0 && (w != d.win.Width || h != d.win.Height) {
-					d.win.Width = w
-					d.win.Height = h
-					d.win.needsResize = true
+					// If the app explicitly resized and the compositor is trying to
+					// shrink us back, ignore it (the app's size takes priority).
+					if d.win.appResized && (w < d.win.Width || h < d.win.Height) {
+						d.win.appResized = false
+					} else {
+						d.win.Width = w
+						d.win.Height = h
+						d.win.needsResize = true
+						d.win.appResized = false
+					}
 				}
 			}
 		} else if op == 1 { // close
@@ -751,8 +759,12 @@ func (w *Window) Resize(width, height int32) bool {
 	w.Width = width
 	w.Height = height
 	w.needsResize = true
+	w.appResized = true
 	return w.ResizeIfNeeded()
 }
+
+// NeedsResize returns true if the compositor requested a resize that hasn't been applied.
+func (w *Window) NeedsResize() bool { return w.needsResize }
 
 // ResizeIfNeeded recreates the shm buffer if the compositor changed the window size.
 // Returns true if the buffer was resized (all pixels are zeroed).

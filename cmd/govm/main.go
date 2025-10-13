@@ -1217,8 +1217,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			pos := dataAddr + 4 + uint64(hdrOff)
 			end := dataAddr + uint64(dataSize)
 
-			var parseMenuEx func(int) []menuItem
-			parseMenuEx = func(maxItems int) []menuItem {
+			var parseMenuEx func(int, int) []menuItem
+			parseMenuEx = func(maxItems int, depth int) []menuItem {
 				var items []menuItem
 				for len(items) < maxItems && pos < end {
 					// Align to DWORD boundary
@@ -1248,6 +1248,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 					item.text = string(utf16Decode(chars))
 
+
 					const mfexPopup = 0x01 // resInfo bit 0 = has submenu
 					if resInfo&mfexPopup != 0 {
 						// Align before reading dwHelpId
@@ -1257,7 +1258,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						// DWORD dwHelpId for popup
 						pos += 4
 						item.flags |= 0x0010 // set MF_POPUP for our internal use
-						item.submenu = parseMenuEx(256)
+						item.submenu = parseMenuEx(256, depth+1)
 					}
 
 					items = append(items, item)
@@ -1268,7 +1269,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return items
 			}
 
-			md.items = parseMenuEx(32)
+			md.items = parseMenuEx(32, 0)
 			return md
 		}
 
@@ -1280,8 +1281,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		end := dataAddr + uint64(dataSize)
 
 		// Parse top-level items (recurse into popups)
-		var parseItems func(maxItems int) []menuItem
-		parseItems = func(maxItems int) []menuItem {
+		var parseItems func(maxItems int, depth int) []menuItem
+		parseItems = func(maxItems int, depth int) []menuItem {
 			var items []menuItem
 			for len(items) < maxItems && pos < end {
 				flags, _ := mem.Read16(pos)
@@ -1309,7 +1310,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 				if flags&mfPopup != 0 {
 					// Popup: recursively parse child items
-					item.submenu = parseItems(64)
+					item.submenu = parseItems(512, depth+1)
 				}
 
 				items = append(items, item)
@@ -1320,7 +1321,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return items
 		}
 
-		md.items = parseItems(32)
+		md.items = parseItems(32, 0)
 		return md
 	}
 
@@ -15282,19 +15283,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			switch cs.className {
 			case "edit":
 				// 3D sunken border
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])   // top shadow
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])   // left shadow
-				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+2, 0x404040)  // inner top
-				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+2, cs.y+cs.h-1, 0x404040)  // inner left
-				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20]) // right highlight
-				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20]) // bottom highlight
-				wlWindow.DrawRect(cs.x+cs.w-2, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, 0xDFDFDF) // inner right
-				wlWindow.DrawRect(cs.x+1, cs.y+cs.h-2, cs.x+cs.w-1, cs.y+cs.h-1, 0xDFDFDF) // inner bottom
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])   // top shadow
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])   // left shadow
+				wlWindow.DrawRectAbs(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+2, 0x404040)  // inner top
+				wlWindow.DrawRectAbs(cs.x+1, cs.y+1, cs.x+2, cs.y+cs.h-1, 0x404040)  // inner left
+				wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20]) // right highlight
+				wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20]) // bottom highlight
+				wlWindow.DrawRectAbs(cs.x+cs.w-2, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, 0xDFDFDF) // inner right
+				wlWindow.DrawRectAbs(cs.x+1, cs.y+cs.h-2, cs.x+cs.w-1, cs.y+cs.h-1, 0xDFDFDF) // inner bottom
 				// White client area
-				wlWindow.DrawRect(cs.x+2, cs.y+2, cs.x+cs.w-2, cs.y+cs.h-2, sysColors[5])
+				wlWindow.DrawRectAbs(cs.x+2, cs.y+2, cs.x+cs.w-2, cs.y+cs.h-2, sysColors[5])
 				// Draw text content
 				if cs.text != "" {
-					wlWindow.DrawText(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[5], true)
+					wlWindow.DrawTextAbs(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[5], true)
 				}
 				// Text cursor (blinking caret) - tracks last line for multiline edits
 				cursorX := cs.x + 4
@@ -15304,7 +15305,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					cursorY += int32((len(lines)-1) * 16)
 					cursorX += int32(len([]rune(lines[len(lines)-1]))) * 8
 				}
-				wlWindow.DrawRect(cursorX, cursorY, cursorX+1, cursorY+16, 0x000000)
+				wlWindow.DrawRectAbs(cursorX, cursorY, cursorX+1, cursorY+16, 0x000000)
 			case "msctls_statusbar32":
 				// Snap statusbar to bottom of Wayland window (common control behavior: WM_SIZE repositions it)
 				if wlWindow != nil {
@@ -15314,10 +15315,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					cs.w = wlWindow.Width
 				}
 				// Top edge: etched line (shadow + highlight)
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])   // shadow
-				wlWindow.DrawRect(cs.x, cs.y+1, cs.x+cs.w, cs.y+2, sysColors[20]) // highlight
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])   // shadow
+				wlWindow.DrawRectAbs(cs.x, cs.y+1, cs.x+cs.w, cs.y+2, sysColors[20]) // highlight
 				// Face
-				wlWindow.DrawRect(cs.x, cs.y+2, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				wlWindow.DrawRectAbs(cs.x, cs.y+2, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				// Draw parts text
 				if len(cs.sbParts) > 0 {
 					left := cs.x + 2
@@ -15325,17 +15326,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						right := cs.x + rightEdge
 						if rightEdge < 0 { right = cs.x + cs.w }
 						// Sunken part area
-						wlWindow.DrawRect(left, cs.y+3, right-1, cs.y+4, sysColors[16])     // top shadow
-						wlWindow.DrawRect(left, cs.y+3, left+1, cs.y+cs.h-2, sysColors[16]) // left shadow
-						wlWindow.DrawRect(left, cs.y+cs.h-2, right-1, cs.y+cs.h-1, sysColors[20]) // bottom highlight
-						wlWindow.DrawRect(right-2, cs.y+3, right-1, cs.y+cs.h-1, sysColors[20])   // right highlight
+						wlWindow.DrawRectAbs(left, cs.y+3, right-1, cs.y+4, sysColors[16])     // top shadow
+						wlWindow.DrawRectAbs(left, cs.y+3, left+1, cs.y+cs.h-2, sysColors[16]) // left shadow
+						wlWindow.DrawRectAbs(left, cs.y+cs.h-2, right-1, cs.y+cs.h-1, sysColors[20]) // bottom highlight
+						wlWindow.DrawRectAbs(right-2, cs.y+3, right-1, cs.y+cs.h-1, sysColors[20])   // right highlight
 						if i < len(cs.sbTexts) && cs.sbTexts[i] != "" {
-							wlWindow.DrawText(left+4, cs.y+4, cs.sbTexts[i], 0x000000, sysColors[15], true)
+							wlWindow.DrawTextAbs(left+4, cs.y+4, cs.sbTexts[i], 0x000000, sysColors[15], true)
 						}
 						left = right
 					}
 				} else if cs.text != "" {
-					wlWindow.DrawText(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[15], true)
+					wlWindow.DrawTextAbs(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[15], true)
 				}
 				// Sizing grip (small triangular area in bottom-right)
 				gripX := cs.x + cs.w - 14
@@ -15343,32 +15344,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				for i := int32(0); i < 3; i++ {
 					ox := gripX + i*4 + 2
 					oy := gripY + (2-i)*4 + 2
-					wlWindow.DrawRect(ox, oy, ox+2, oy+2, sysColors[20])
-					wlWindow.DrawRect(ox+1, oy+1, ox+3, oy+3, sysColors[16])
+					wlWindow.DrawRectAbs(ox, oy, ox+2, oy+2, sysColors[20])
+					wlWindow.DrawRectAbs(ox+1, oy+1, ox+3, oy+3, sysColors[16])
 				}
 			case "static":
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				if cs.text != "" {
-					wlWindow.DrawText(cs.x+2, cs.y+2, cs.text, 0x000000, sysColors[15], true)
+					wlWindow.DrawTextAbs(cs.x+2, cs.y+2, cs.text, 0x000000, sysColors[15], true)
 				}
 			case "button":
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[20])
-				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16])
-				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[16])
 				if cs.text != "" {
 					tx := cs.x + (cs.w-int32(len(cs.text)*8))/2
 					ty := cs.y + (cs.h-16)/2
-					wlWindow.DrawText(tx, ty, cs.text, 0x000000, sysColors[15], true)
+					wlWindow.DrawTextAbs(tx, ty, cs.text, 0x000000, sysColors[15], true)
 				}
 			case "systreeview32":
 				// 3D sunken border + white area
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])
-				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
-				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
-				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, sysColors[5])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, sysColors[5])
 				// Render tree items
 				if cs.tvItems != nil {
 					ty := cs.y + 2
@@ -15386,21 +15387,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								mx := tx - 10
 								my := ty + 4
 								// Small box with +/-
-								wlWindow.DrawRect(mx-4, my-4, mx+5, my+5, sysColors[5])
-								wlWindow.DrawRect(mx-4, my-4, mx+5, my-5+1, sysColors[16])
-								wlWindow.DrawRect(mx-4, my-4, mx-4+1, my+5, sysColors[16])
-								wlWindow.DrawRect(mx+4, my-4, mx+5, my+5, sysColors[16])
-								wlWindow.DrawRect(mx-4, my+4, mx+5, my+5, sysColors[16])
+								wlWindow.DrawRectAbs(mx-4, my-4, mx+5, my+5, sysColors[5])
+								wlWindow.DrawRectAbs(mx-4, my-4, mx+5, my-5+1, sysColors[16])
+								wlWindow.DrawRectAbs(mx-4, my-4, mx-4+1, my+5, sysColors[16])
+								wlWindow.DrawRectAbs(mx+4, my-4, mx+5, my+5, sysColors[16])
+								wlWindow.DrawRectAbs(mx-4, my+4, mx+5, my+5, sysColors[16])
 								// Horizontal line (always)
-								wlWindow.DrawRect(mx-2, my, mx+3, my+1, 0x000000)
+								wlWindow.DrawRectAbs(mx-2, my, mx+3, my+1, 0x000000)
 								if !ti.expanded {
 									// Vertical line (plus sign)
-									wlWindow.DrawRect(mx, my-2, mx+1, my+3, 0x000000)
+									wlWindow.DrawRectAbs(mx, my-2, mx+1, my+3, 0x000000)
 								}
 							}
 							// Draw item text
 							if ti.text != "" {
-								wlWindow.DrawText(tx, ty+1, ti.text, 0x000000, sysColors[5], true)
+								wlWindow.DrawTextAbs(tx, ty+1, ti.text, 0x000000, sysColors[5], true)
 							}
 							ty += itemHeight
 							if ti.expanded {
@@ -15412,28 +15413,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 			case "syslistview32":
 				// 3D sunken border + white area with column header
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])
-				wlWindow.DrawRect(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
-				wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
-				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, sysColors[5])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+cs.h-1, sysColors[5])
 				// Header area with column names
-				wlWindow.DrawRect(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+21, sysColors[15])
-				wlWindow.DrawRect(cs.x+1, cs.y+21, cs.x+cs.w-1, cs.y+22, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x+1, cs.y+1, cs.x+cs.w-1, cs.y+21, sysColors[15])
+				wlWindow.DrawRectAbs(cs.x+1, cs.y+21, cs.x+cs.w-1, cs.y+22, sysColors[16])
 				if len(cs.lvColumns) > 0 {
 					colX := cs.x + 2
 					for _, col := range cs.lvColumns {
 						if col.text != "" {
-							wlWindow.DrawText(colX+4, cs.y+3, col.text, 0x000000, sysColors[15], true)
+							wlWindow.DrawTextAbs(colX+4, cs.y+3, col.text, 0x000000, sysColors[15], true)
 						}
 						colX += col.width
 						// Column separator
-						wlWindow.DrawRect(colX-1, cs.y+1, colX, cs.y+21, sysColors[16])
+						wlWindow.DrawRectAbs(colX-1, cs.y+1, colX, cs.y+21, sysColors[16])
 					}
 				}
 			case "systabcontrol32":
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
-				wlWindow.DrawRect(cs.x, cs.y+24, cs.x+cs.w, cs.y+25, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				wlWindow.DrawRectAbs(cs.x, cs.y+24, cs.x+cs.w, cs.y+25, sysColors[16])
 			default:
 				if _, hasGuest := hwndWndProc[hwnd]; hasGuest {
 					// Do NOT pre-fill here: BeginPaint will fill the background when the
@@ -15443,7 +15444,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				// Generic builtin control with no guest WndProc: fill with face color
 				if cs.w > 0 && cs.h > 0 {
-					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				}
 			}
 			return 0, true
@@ -15462,7 +15463,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if cs.className == "msctls_statusbar32" && wlWindow != nil {
 				const sbHeight int32 = 20
 				cs.x = 0
-				cs.y = wlWindow.Height - sbHeight
+				cs.y = wlWindow.Height + wlWindow.TitleBarH - sbHeight
 				cs.w = wlWindow.Width
 				cs.h = sbHeight
 			}
@@ -15820,10 +15821,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case 0x000F: // WM_PAINT
 				if wlWindow != nil {
 					// Draw rebar background as gradient-like gray
-					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 					// Draw 3D-style band borders
-					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])   // top highlight
-					wlWindow.DrawRect(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16]) // bottom shadow
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])   // top highlight
+					wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16]) // bottom shadow
 				}
 				return 0, true
 			case 0x0005: // WM_SIZE
@@ -15874,17 +15875,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case 0x000F: // WM_PAINT
 				if wlWindow != nil {
 					// Draw toolbar background
-					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 					// Draw some placeholder tool buttons (24x22px each)
 					const btnW, btnH = int32(24), int32(22)
 					const padding = int32(2)
 					x := cs.x + padding
 					for x+btnW < cs.x+cs.w {
-						wlWindow.DrawRect(x, cs.y+padding, x+btnW, cs.y+padding+btnH, sysColors[15])
-						wlWindow.DrawRect(x, cs.y+padding, x+btnW, cs.y+padding+1, sysColors[20])   // top highlight
-						wlWindow.DrawRect(x, cs.y+padding, x+1, cs.y+padding+btnH, sysColors[20])   // left highlight
-						wlWindow.DrawRect(x+btnW-1, cs.y+padding, x+btnW, cs.y+padding+btnH, sysColors[16]) // right shadow
-						wlWindow.DrawRect(x, cs.y+padding+btnH-1, x+btnW, cs.y+padding+btnH, sysColors[16]) // bottom shadow
+						wlWindow.DrawRectAbs(x, cs.y+padding, x+btnW, cs.y+padding+btnH, sysColors[15])
+						wlWindow.DrawRectAbs(x, cs.y+padding, x+btnW, cs.y+padding+1, sysColors[20])   // top highlight
+						wlWindow.DrawRectAbs(x, cs.y+padding, x+1, cs.y+padding+btnH, sysColors[20])   // left highlight
+						wlWindow.DrawRectAbs(x+btnW-1, cs.y+padding, x+btnW, cs.y+padding+btnH, sysColors[16]) // right shadow
+						wlWindow.DrawRectAbs(x, cs.y+padding+btnH-1, x+btnW, cs.y+padding+btnH, sysColors[16]) // bottom shadow
 						x += btnW + padding
 					}
 				}
@@ -15919,6 +15920,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 1, true
 			case wmUser + 48: // TB_AUTOSIZE
 				cs.h = 26
+				// Set width to parent's client width
+				if parent, ok := hwndChildren[cs.parentHWND]; ok {
+					cs.w = parent.w
+				} else if cs.parentHWND == mainHWND && wlWindow != nil {
+					cs.w = wlWindow.Width
+				}
 				return 0, true
 			case wmUser + 46: // TB_SETBUTTONSIZE
 				return 1, true
@@ -16063,9 +16070,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if wlWindow != nil {
 					const tabH = int32(22) // height of tab header strip
 					// Only fill the tab strip area, not the entire control height
-					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+tabH, sysColors[15])
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+tabH, sysColors[15])
 					// Bottom border of tab strip
-					wlWindow.DrawRect(cs.x, cs.y+tabH-1, cs.x+cs.w, cs.y+tabH, sysColors[16])
+					wlWindow.DrawRectAbs(cs.x, cs.y+tabH-1, cs.x+cs.w, cs.y+tabH, sysColors[16])
 					// Draw tabs
 					x := cs.x
 					for i := 0; i < cs.tabCount; i++ {
@@ -16073,15 +16080,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						bgCol := sysColors[15]
 						if sel { bgCol = sysColors[5] }
 						tabW := int32(80)
-						wlWindow.DrawRect(x, cs.y, x+tabW, cs.y+tabH, bgCol)
+						wlWindow.DrawRectAbs(x, cs.y, x+tabW, cs.y+tabH, bgCol)
 						// tab border
-						wlWindow.DrawRect(x, cs.y, x+1, cs.y+tabH, sysColors[16])
-						wlWindow.DrawRect(x+tabW-1, cs.y, x+tabW, cs.y+tabH, sysColors[16])
-						wlWindow.DrawRect(x, cs.y, x+tabW, cs.y+1, sysColors[16])
+						wlWindow.DrawRectAbs(x, cs.y, x+1, cs.y+tabH, sysColors[16])
+						wlWindow.DrawRectAbs(x+tabW-1, cs.y, x+tabW, cs.y+tabH, sysColors[16])
+						wlWindow.DrawRectAbs(x, cs.y, x+tabW, cs.y+1, sysColors[16])
 						// tab title
 						if i < len(cs.tabTitles) && cs.tabTitles[i] != "" {
 							textColor := uint32(0x000000)
-							wlWindow.DrawText(x+4, cs.y+4, cs.tabTitles[i], textColor, bgCol, false)
+							wlWindow.DrawTextAbs(x+4, cs.y+4, cs.tabTitles[i], textColor, bgCol, false)
 						}
 						x += tabW
 					}
@@ -16412,6 +16419,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							h := gdiAlloc()
 							menus[h] = md
 							classMenuHandle[a] = h
+						} else {
 						}
 					}
 				}
@@ -16551,7 +16559,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(exStyle)}
 						// Register the main window in win32.Global so NC paint and other lookups work.
 						win32.Global.Create(hwnd, strings.ToLower(readGuestUTF16(lpClassName)), 0, 0, w, h, style, exStyle, 0)
-						ravelog.Logf("[wl] window created: %q %dx%d hwnd=0x%x\n", title, w, h, hwnd)
+						ravelog.Logf("[wl] window created: %q %dx%d hwnd=0x%x ncTop=%d\n", title, w, h, hwnd, ncTop)
 						// Attach menu bar: first check hMenu parameter, then class menu
 						hMenu := ctx.Arg(9)
 						ravelog.Logf("[menu] CreateWindowExW hMenu=0x%x menus_has=%v\n", hMenu, menus[hMenu] != nil)
@@ -16570,6 +16578,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							}
 							if mh, ok := classMenuHandle[classAtom]; ok {
 								hwndMenuBar[hwnd] = mh
+								ravelog.Logf("[menu] attached class menu hmenu=0x%x to hwnd=0x%x\n", mh, hwnd)
 							}
 						}
 					} else {
@@ -17116,6 +17125,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					right, bottom = 800, 600
 					if wlWindow != nil {
 						right, bottom = wlWindow.Width, wlWindow.Height
+						
 					}
 					if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
 						bottom -= menuBarHeight
@@ -17326,7 +17336,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// WM_PAINT: draw non-client area (NC paint + menu bar), erase background, paint children
 			if msg == 0x000F && wlWindow != nil {
 				if hwnd == mainHWND {
-					wlWindow.ResizeIfNeeded()
+					if wlWindow.ResizeIfNeeded() {
+						syncScreenSurface()
+					}
 					w := wlWindow.Width
 
 					// Trigger NC paint first (draws frame + caption + client edge)
@@ -17410,30 +17422,51 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 					}
 
-					clientTop := int32(0)
+					clientTop := wlWindow.TitleBarH
 					ravelog.Logf("[paint] DefWndProc WM_PAINT mainHWND w=%d h=%d\n", wlWindow.Width, wlWindow.Height)
 
 					// Non-client area: draw menu bar
-					if menuH, ok := hwndMenuBar[hwnd]; ok {
-						if md, ok2 := menus[menuH]; ok2 && len(md.items) > 0 {
-							clientTop = menuBarHeight
-							wlWindow.DrawRect(0, 0, w, clientTop, sysColors[15])
-							wlWindow.DrawRect(0, clientTop-1, w, clientTop, sysColors[16])
+					menuH, menuOk := hwndMenuBar[hwnd]
+					if menuOk {
+						md, ok2 := menus[menuH]
+						if ok2 && len(md.items) > 0 {
+							clientTop = wlWindow.TitleBarH + menuBarHeight
+							wlWindow.DrawRectAbs(0, wlWindow.TitleBarH, w, clientTop, sysColors[15])
+							wlWindow.DrawRectAbs(0, clientTop-1, w, clientTop, sysColors[16])
 							x := int32(4)
 							for i, item := range md.items {
 								if item.flags&0x0800 != 0 {
 									continue
 								}
+								// Only show popup items in menu bar (items with submenus)
+								if item.flags&0x0010 == 0 {
+									continue
+								}
 								label := menuStripAmpersand(item.text)
-								if label == "" {
+								// Strip accelerator text after tab
+								if idx := strings.IndexByte(label, '\t'); idx >= 0 {
+									label = label[:idx]
+								}
+								if label == "" || label == "-" {
+									continue
+								}
+								// Skip items with no ASCII-renderable characters
+								hasRenderable := false
+								for _, r := range label {
+									if r >= 32 && r <= 126 {
+										hasRenderable = true
+										break
+									}
+								}
+								if !hasRenderable {
 									continue
 								}
 								tw := int32(len([]rune(label)))*8 + 12
 								if openMenuIdx == i && openMenuHwnd == hwnd {
-									wlWindow.DrawRect(x, 0, x+tw, clientTop-1, sysColors[20])
-									wlWindow.DrawText(x+4, 3, label, 0x000000, sysColors[20], true)
+									wlWindow.DrawRectAbs(x, wlWindow.TitleBarH, x+tw, clientTop-1, sysColors[20])
+									wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[20], true)
 								} else {
-									wlWindow.DrawText(x+4, 3, label, 0x000000, sysColors[15], true)
+									wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[15], true)
 								}
 								x += tw
 							}
@@ -17445,8 +17478,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 									if item.flags&0x0800 != 0 {
 										continue
 									}
+									if item.flags&0x0010 == 0 {
+										continue
+									}
 									label := menuStripAmpersand(item.text)
-									if label == "" {
+									if idx := strings.IndexByte(label, '\t'); idx >= 0 {
+										label = label[:idx]
+									}
+									if label == "" || label == "-" {
 										continue
 									}
 									tw := int32(len([]rune(label)))*8 + 12
@@ -17455,18 +17494,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 										dropY := clientTop
 										dropW := int32(200)
 										dropH := int32(len(item.submenu)) * 20
-										wlWindow.DrawRect(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
-										wlWindow.DrawRect(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
-										wlWindow.DrawRect(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
-										wlWindow.DrawRect(dropX, dropY, dropX+dropW, dropY+1, sysColors[16])
-										wlWindow.DrawRect(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
-										wlWindow.DrawRect(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
-										wlWindow.DrawRect(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
+										wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
+										wlWindow.DrawRectAbs(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
+										wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
+										wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+1, sysColors[16])
+										wlWindow.DrawRectAbs(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
+										wlWindow.DrawRectAbs(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
+										wlWindow.DrawRectAbs(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
 										for j, si := range item.submenu {
 											iy := dropY + int32(j)*20
 											if si.flags&0x0800 != 0 {
-												wlWindow.DrawRect(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
-												wlWindow.DrawRect(dropX+2, iy+10, dropX+dropW-2, iy+11, sysColors[20])
+												wlWindow.DrawRectAbs(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
+												wlWindow.DrawRectAbs(dropX+2, iy+10, dropX+dropW-2, iy+11, sysColors[20])
 											} else {
 												sl := menuStripAmpersand(si.text)
 												for k := 0; k < len(sl); k++ {
@@ -17475,7 +17514,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 														break
 													}
 												}
-												wlWindow.DrawText(dropX+20, iy+3, sl, 0x000000, sysColors[15], true)
+												wlWindow.DrawTextAbs(dropX+20, iy+3, sl, 0x000000, sysColors[15], true)
 											}
 										}
 									}
@@ -17485,19 +17524,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 					}
 
-					// Fill ONLY the strip from clientTop to the top of the topmost visible
-					// child window. Below that, child windows own their pixels - filling
-					// the full client area would overwrite guest-painted children (Scintilla).
-					lowestChildTop := wlWindow.Height
-					for _, cs2 := range hwndChildren {
-						if cs2.visible && cs2.w > 0 && cs2.h > 0 && cs2.y < lowestChildTop {
-							lowestChildTop = cs2.y
-						}
-					}
-					if lowestChildTop > clientTop {
-						ravelog.Logf("[paint] DefWndProc fill uncovered strip y=%d..%d\n", clientTop, lowestChildTop)
-						wlWindow.DrawRect(0, clientTop, w, lowestChildTop, sysColors[5])
-					}
+					// Fill entire client area with background color.
+					// Builtin children will paint on top via paintTree.
+					// Guest-drawn children (Scintilla) repaint in their own
+					// WM_PAINT pass and trigger a re-commit.
+					totalH := wlWindow.Height + wlWindow.TitleBarH
+					wlWindow.DrawRectAbs(0, clientTop, w, totalH, sysColors[5])
 
 					// Recursively paint built-in descendant windows (builtinWndProc skips app-defined children)
 					paintTree(hwnd)
@@ -17901,14 +17933,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				if cs, ok := hwndChildren[hwnd]; ok {
-					wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
 				} else if hwnd == mainHWND {
-					clientTop := int32(0)
+					clientTop := wlWindow.TitleBarH
 					if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
-						clientTop = menuBarHeight
+						clientTop = wlWindow.TitleBarH + menuBarHeight
 					}
-					w, h := wlWindow.Width, wlWindow.Height
-					wlWindow.DrawRect(0, clientTop, w, h, bgColor)
+					w := wlWindow.Width
+					h := wlWindow.Height + wlWindow.TitleBarH
+					wlWindow.DrawRectAbs(0, clientTop, w, h, bgColor)
 				}
 				ctx.SetReturn(1)
 				return 0
@@ -17958,7 +17991,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return
 				}
 				if evt == wl.EventConfigure {
-					// Compositor resized the window - post WM_SIZE to guest
+					// Compositor resized the window - resize buffer and post WM_SIZE to guest
+					if wlWindow.ResizeIfNeeded() {
+						syncScreenSurface()
+					}
 					w := wlWindow.Width
 					h := wlWindow.Height
 					lParam := uint64(uint16(w)) | (uint64(uint16(h)) << 16)
@@ -18942,14 +18978,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wlWindow.ResizeIfNeeded()
 				syncScreenSurface()
 				w, h := wlWindow.Width, wlWindow.Height
-				clientTop := int32(0)
+				_ = h
+				clientTop := wlWindow.TitleBarH
 
 				// Non-client area: draw menu bar (ReactOS: WM_NCPAINT draws menu in NC area)
 				if menuH, ok := hwndMenuBar[hwnd]; ok {
 					if md, ok2 := menus[menuH]; ok2 && len(md.items) > 0 {
-						clientTop = menuBarHeight
-						wlWindow.DrawRect(0, 0, w, clientTop, sysColors[15])
-						wlWindow.DrawRect(0, clientTop-1, w, clientTop, sysColors[16])
+						clientTop = wlWindow.TitleBarH + menuBarHeight
+						wlWindow.DrawRectAbs(0, wlWindow.TitleBarH, w, clientTop, sysColors[15])
+						wlWindow.DrawRectAbs(0, clientTop-1, w, clientTop, sysColors[16])
 						x := int32(4)
 						for _, item := range md.items {
 							if item.flags&0x0800 != 0 {
@@ -18960,7 +18997,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								continue
 							}
 							tw := int32(len([]rune(label))) * 8
-							wlWindow.DrawText(x+4, 3, label, 0x000000, sysColors[15], true)
+							wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[15], true)
 							x += tw + 12
 						}
 					}
@@ -18969,9 +19006,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// Do NOT fill the full client area - child windows cover it entirely.
 				// Filling here wipes Scintilla/children that painted first in the message queue.
 				// ReactOS WM_ERASEBKGND only fills uncovered (non-child) regions.
-				rcLeft, rcTop = 0, clientTop
+				rcLeft, rcTop = 0, 0
 				rcRight, rcBottom = w, h
-				dc.SetClipRect(0, clientTop, w, h)
+				dc.SetClipRect(0, clientTop, w, h+wlWindow.TitleBarH)
 			} else if cs, ok := hwndChildren[hwnd]; ok && wlWindow != nil {
 				// Child window BeginPaint: fill with class brush
 				bgColor := sysColors[5]
@@ -18980,7 +19017,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						bgColor = sysColors[brushIdx-1]
 					}
 				}
-				wlWindow.DrawRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
 				rcLeft, rcTop = 0, 0
 				rcRight, rcBottom = cs.w, cs.h
 				// Clip all GDI drawing to this child's screen rect
@@ -19071,6 +19108,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			} else {
 				hwndMenuBar[hwnd] = hMenu
 			}
+			_ = menus[hMenu]
 			ctx.SetReturn(1)
 			return 0
 		})
