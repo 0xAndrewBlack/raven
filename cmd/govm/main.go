@@ -1628,7 +1628,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 
 		// __iob_func: returns pointer to FILE[3] (stdin, stdout, stderr)
+		// MSVC FILE struct is 48 bytes on x64
 		iobBuf := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+		iobBase := iobBuf
+		const iobStride = 48 // sizeof(FILE) on MSVC x64
 		d.RegisterAutoStubHandler(msvcrt, "__iob_func", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(iobBuf)
 			return 0
@@ -1882,12 +1885,27 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "fputs", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // success
+			str := readGuestString(ctx.Arg(0))
+			stream := ctx.Arg(1)
+			if stream == iobBase+iobStride*2 {
+				os.Stderr.WriteString(str)
+			} else {
+				os.Stdout.WriteString(str)
+			}
+			ctx.SetReturn(0) // success (non-negative = ok)
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "fputc", func(ctx *ntapi.TrapContext) uint32 {
-			c := ctx.Arg(0)
-			ctx.SetReturn(c) // returns the character written
+			c := byte(ctx.Arg(0))
+			stream := ctx.Arg(1)
+			// stdout = iobBase + 48, stderr = iobBase + 96
+			switch stream {
+			case iobBase + iobStride*2:
+				os.Stderr.Write([]byte{c})
+			default:
+				os.Stdout.Write([]byte{c})
+			}
+			ctx.SetReturn(uint64(c))
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "fprintf", func(ctx *ntapi.TrapContext) uint32 {
@@ -1899,8 +1917,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(msvcrt, "fwrite", func(ctx *ntapi.TrapContext) uint32 {
+			bufAddr := ctx.Arg(0)
+			size := ctx.Arg(1)
 			count := ctx.Arg(2)
-			ctx.SetReturn(count) // pretend all items written
+			stream := ctx.Arg(3)
+			totalBytes := size * count
+			if totalBytes > 0 && totalBytes < 0x100000 {
+				data := make([]byte, totalBytes)
+				for i := uint64(0); i < totalBytes; i++ {
+					data[i], _ = mem.Read8(bufAddr + i)
+				}
+				if stream == iobBase+iobStride*2 {
+					os.Stderr.Write(data)
+				} else if stream == iobBase+iobStride || stream == iobBase {
+					// stdin or unknown - skip
+				} else {
+					os.Stdout.Write(data)
+				}
+			}
+			ctx.SetReturn(count)
 			return 0
 		})
 
