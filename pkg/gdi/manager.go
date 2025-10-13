@@ -81,8 +81,13 @@ func (m *Manager) AllocMemDC() (uint64, *DC) {
 	return h, dc
 }
 
-// DeleteDC removes a DC from the table.
+// DeleteDC removes a DC from the table and releases its bitmap surface.
 func (m *Manager) DeleteDC(h uint64) {
+	if dc, ok := m.dcs[h]; ok {
+		if dc.Bitmap != nil {
+			dc.Bitmap.Surf = nil
+		}
+	}
 	delete(m.dcs, h)
 }
 
@@ -170,10 +175,13 @@ func (m *Manager) CreateDIBSection(w, h int32) uint64 {
 	return m.CreateCompatibleBitmap(w, h)
 }
 
-// DeleteObject frees a GDI object handle.
+// DeleteObject frees a GDI object handle and releases its bitmap surface.
 // ReactOS: NtGdiDeleteObjectApp
 func (m *Manager) DeleteObject(h uint64) bool {
-	_, ok := m.objects[h]
+	obj, ok := m.objects[h]
+	if ok && obj.Type == ObjBitmap && obj.Bitmap != nil {
+		obj.Bitmap.Surf = nil
+	}
 	delete(m.objects, h)
 	return ok
 }

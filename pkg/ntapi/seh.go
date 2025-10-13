@@ -127,9 +127,12 @@ func ParseUnwindInfo(mem *mmu.MMU, imageBase uint64, unwindRVA uint32) *UnwindIn
 
 // CxxCatchHandler holds the address of a catch funclet.
 type CxxCatchHandler struct {
-	FuncletRVA     uint32 // 0 if using fallback unwind
-	EstablisherRBP uint64
-	CatchObjOffset int32
+	FuncletRVA      uint32 // 0 if using fallback unwind
+	EstablisherRBP  uint64 // establisher frame (high end, for funclet RDX)
+	BodyRSP         uint64 // function body RSP (low end, for continuation)
+	CatchObjOffset  int32
+	ContinuationRVA uint32 // continuation address after try-catch (from IP-to-state map)
+	catchHigh       int32  // internal: catchHigh from try block, for continuation lookup
 	// Fallback: when we can't parse FH4, unwind to caller of handler frame
 	FallbackRSP uint64
 	FallbackRIP uint64
@@ -150,11 +153,9 @@ func CxxDispatchException(mem *mmu.MMU, et *ExceptionTable, rsp, rip uint64, tra
 	currentRIP := rip
 
 	// Always trace on failure path - retry with trace enabled if first pass fails
-	result := cxxDispatch(mem, et, imageBase, imageEnd, rsp, rip, trace)
-	if result == nil && !trace {
-		ravelog.Logf("[seh] no handler found for RIP=0x%x RSP=0x%x - retrying with trace\n", rip, rsp)
-		cxxDispatch(mem, et, imageBase, imageEnd, currentRSP, currentRIP, true)
-	}
+	result := cxxDispatch(mem, et, imageBase, imageEnd, rsp, rip, true)
+	_ = currentRSP
+	_ = currentRIP
 	return result
 }
 
@@ -235,13 +236,11 @@ func cxxDispatch(mem *mmu.MMU, et *ExceptionTable, imageBase, imageEnd uint64, r
 			chainedParentRSP := chainedRSP + parentFrameSize
 			if parentUI.Flags&UnwFlagEHandler != 0 {
 				// Found the exception handler in the chained parent
-				handler := findCxxCatchAll(mem, imageBase, parentUI, chainedRSP, currentRIP, chainedParentRSP, trace)
+				handler := findCxxCatchAll(mem, imageBase, parentUI, chainedUI.ChainedRF.BeginAddress, chainedRSP, currentRIP, chainedParentRSP, trace)
 				if handler != nil {
-					if handler.IsFallback {
-						handler.SavedRegs = make(map[int]uint64, len(savedRegs))
-						for k, v := range savedRegs {
-							handler.SavedRegs[k] = v
-						}
+					handler.SavedRegs = make(map[int]uint64, len(savedRegs))
+					for k, v := range savedRegs {
+						handler.SavedRegs[k] = v
 					}
 					return handler
 				}
@@ -260,14 +259,12 @@ func cxxDispatch(mem *mmu.MMU, et *ExceptionTable, imageBase, imageEnd uint64, r
 		}
 
 		if ui.Flags&UnwFlagEHandler != 0 {
-			handler := findCxxCatchAll(mem, imageBase, ui, currentRSP, currentRIP, parentRSP, trace)
+			handler := findCxxCatchAll(mem, imageBase, ui, rf.BeginAddress, currentRSP, currentRIP, parentRSP, trace)
 			if handler != nil {
-				if handler.IsFallback {
-					// Attach accumulated saved registers for proper unwind
-					handler.SavedRegs = make(map[int]uint64, len(savedRegs))
-					for k, v := range savedRegs {
-						handler.SavedRegs[k] = v
-					}
+				// Attach accumulated saved registers for proper unwind
+				handler.SavedRegs = make(map[int]uint64, len(savedRegs))
+				for k, v := range savedRegs {
+					handler.SavedRegs[k] = v
 				}
 				return handler
 			}
@@ -424,34 +421,48 @@ func unwindFrame(mem *mmu.MMU, unwindInfoAddr uint64, ui *UnwindInfo, rsp uint64
 
 // findCxxCatchAll parses MSVC FuncInfo to find a catch handler.
 // All offsets in FuncInfo/TryBlockMap/HandlerType are image-relative RVAs.
-func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, rsp, rip, parentRSP uint64, trace bool) *CxxCatchHandler {
+// funcBeginRVA is the start RVA of the function from RUNTIME_FUNCTION.
+func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, funcBeginRVA uint32, rsp, rip, parentRSP uint64, trace bool) *CxxCatchHandler {
 	funcInfoRVA, _ := mem.Read32(ui.HandlerData)
 	if funcInfoRVA == 0 {
 		return nil
 	}
 	funcInfoAddr := imageBase + uint64(funcInfoRVA)
 
-	magic, _ := mem.Read32(funcInfoAddr)
-	if trace {
-		ravelog.Logf("[seh]   handlerRVA=0x%x handlerData=0x%x funcInfoRVA=0x%x funcInfoAddr=0x%x magic=0x%x countOfCodes=%d\n",
-			ui.HandlerRVA, ui.HandlerData, funcInfoRVA, funcInfoAddr, magic, ui.CountOfCodes)
+	// Compute the establisher frame per RtlVirtualUnwind:
+	// - With frame register: RSP at handler depth (= FrameReg - FrameOffset*16)
+	// - Without: parentRSP (caller's RSP after unwind)
+	var establisher uint64
+	if ui.FrameRegister != 0 {
+		establisher = rsp
+	} else {
+		establisher = parentRSP
 	}
 
-	// Accept standard MSVC magic numbers
+	magic, _ := mem.Read32(funcInfoAddr)
+	if trace {
+		ravelog.Logf("[seh]   handlerRVA=0x%x funcInfoRVA=0x%x magic=0x%x establisher=0x%x frameReg=%d\n",
+			ui.HandlerRVA, funcInfoRVA, magic, establisher, ui.FrameRegister)
+	}
+
+	// Accept standard MSVC magic numbers (FH3: __CxxFrameHandler3)
 	baseMagic := magic & 0x1FFFFFFF
 	if baseMagic < 0x19930520 || baseMagic > 0x19930522 {
-		// FH4 or other format we can't parse - return a fallback that
-		// unwinds past this frame to its caller
+		// Try FH4 format (__CxxFrameHandler4)
+		handler := parseFH4CatchAll(mem, imageBase, funcInfoAddr, funcBeginRVA, rsp, rip, establisher, trace)
+		if handler != nil {
+			return handler
+		}
+		// FH4 parse found no matching catch - fallback: unwind past this frame
 		retAddr, err := mem.Read64(parentRSP - 8)
 		if err != nil || retAddr == 0 {
 			if trace {
-				ravelog.Logf("[seh]   FH4 magic 0x%x - can't read parent retAddr\n", magic)
+				ravelog.Logf("[seh]   FH4 no match, can't read parent retAddr\n")
 			}
 			return nil
 		}
 		if trace {
-			ravelog.Logf("[seh]   FH4 magic 0x%x - fallback unwind to retAddr=0x%x RSP=0x%x\n",
-				magic, retAddr, parentRSP)
+			ravelog.Logf("[seh]   FH4 no match - fallback unwind to retAddr=0x%x RSP=0x%x\n", retAddr, parentRSP)
 		}
 		return &CxxCatchHandler{
 			IsFallback:  true,
@@ -530,13 +541,10 @@ func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, rsp, rip, p
 
 			// catch(...) has typeRVA == 0
 			if typeRVA == 0 && handlerRVA != 0 {
-				// Estimate establisher frame: for functions with frame pointer,
-				// RBP was saved; approximate from parentRSP
-				rbp := parentRSP - 8
-
 				return &CxxCatchHandler{
 					FuncletRVA:     handlerRVA,
-					EstablisherRBP: rbp,
+					EstablisherRBP: establisher,
+					BodyRSP:        rsp,
 					CatchObjOffset: int32(catchObjDisp),
 				}
 			}
@@ -549,16 +557,411 @@ func findCxxCatchAll(mem *mmu.MMU, imageBase uint64, ui *UnwindInfo, rsp, rip, p
 			handlerRVA, _ := mem.Read32(lastH + 12)
 			catchObjDisp, _ := mem.Read32(lastH + 8)
 			if handlerRVA != 0 {
-				rbp := parentRSP - 8
 				return &CxxCatchHandler{
 					FuncletRVA:     handlerRVA,
-					EstablisherRBP: rbp,
+					EstablisherRBP: establisher,
+					BodyRSP:        rsp,
 					CatchObjOffset: int32(catchObjDisp),
 				}
 			}
 		}
 	}
 
+	return nil
+}
+
+// ─── FH4 (__CxxFrameHandler4) compressed format parsing ───
+
+// readFH4Uint reads an FH4 variable-length unsigned integer.
+// Returns the value and the number of bytes consumed.
+func readFH4Uint(mem *mmu.MMU, addr uint64) (uint32, uint64) {
+	b, err := mem.Read8(addr)
+	if err != nil {
+		return 0, 1
+	}
+	if (b & 1) == 0 {
+		return uint32(b) >> 1, 1
+	}
+	if (b & 3) == 1 {
+		b2, _ := mem.Read8(addr + 1)
+		return (uint32(b) >> 2) | (uint32(b2) << 6), 2
+	}
+	if (b & 7) == 3 {
+		b2, _ := mem.Read8(addr + 1)
+		b3, _ := mem.Read8(addr + 2)
+		return (uint32(b) >> 3) | (uint32(b2) << 5) | (uint32(b3) << 13), 3
+	}
+	if (b & 15) == 7 {
+		b2, _ := mem.Read8(addr + 1)
+		b3, _ := mem.Read8(addr + 2)
+		b4, _ := mem.Read8(addr + 3)
+		return (uint32(b) >> 4) | (uint32(b2) << 4) | (uint32(b3) << 12) | (uint32(b4) << 20), 4
+	}
+	// 5-byte form: marker byte then raw uint32
+	v, _ := mem.Read32(addr + 1)
+	return v, 5
+}
+
+// readFH4Int reads an FH4 variable-length signed integer (zigzag encoded).
+func readFH4Int(mem *mmu.MMU, addr uint64) (int32, uint64) {
+	u, n := readFH4Uint(mem, addr)
+	return int32(u>>1) ^ -int32(u&1), n
+}
+
+// parseFH4CatchAll parses an FH4 FuncInfo structure to find a catch handler.
+// FH4 FuncInfo contains a header byte followed by 4-byte image-relative RVAs.
+// Compressed integers (counts, states) live at the destination addresses.
+func parseFH4CatchAll(mem *mmu.MMU, imageBase uint64, funcInfoAddr uint64,
+	funcBeginRVA uint32, rsp, rip, parentRSP uint64, trace bool) *CxxCatchHandler {
+
+	header, _ := mem.Read8(funcInfoAddr)
+	offset := uint64(1)
+
+	if trace {
+		var hexDump string
+		for i := uint64(0); i < 16; i++ {
+			b, _ := mem.Read8(funcInfoAddr + i)
+			hexDump += fmt.Sprintf("%02x ", b)
+		}
+		ravelog.Logf("[seh-fh4] header=0x%x at 0x%x funcBeginRVA=0x%x\n  bytes: %s\n", header, funcInfoAddr, funcBeginRVA, hexDump)
+	}
+
+	// Header flags
+	isCatch := header&1 != 0
+	// isSeparated := header & 2 != 0
+	hasBBT := header&4 != 0
+	hasUnwindMap := header&8 != 0
+	hasTryBlockMap := header&0x10 != 0
+	// isEHs := header & 0x20 != 0
+	// hasNoExcept := header & 0x40 != 0
+
+	if isCatch {
+		if trace {
+			ravelog.Logf("[seh-fh4] isCatch set - skipping\n")
+		}
+		return nil
+	}
+
+	if hasBBT {
+		offset++
+	}
+
+	// FH4 FuncInfo layout: header then RVAs only (no inline counts)
+	if hasUnwindMap {
+		offset += 4 // skip unwindMapRVA
+	}
+
+	if !hasTryBlockMap {
+		if trace {
+			ravelog.Logf("[seh-fh4] no try block map\n")
+		}
+		return nil
+	}
+
+	tryBlockMapRVA, _ := mem.Read32(funcInfoAddr + offset)
+	offset += 4
+
+	ipToStateMapRVA, _ := mem.Read32(funcInfoAddr + offset)
+	offset += 4
+
+	if trace {
+		ravelog.Logf("[seh-fh4] tryBlockMapRVA=0x%x ipToStateMapRVA=0x%x\n", tryBlockMapRVA, ipToStateMapRVA)
+	}
+
+	// Sanity check RVAs
+	if tryBlockMapRVA == 0 || tryBlockMapRVA > 0x10000000 {
+		return nil
+	}
+	if ipToStateMapRVA > 0x10000000 {
+		ipToStateMapRVA = 0
+	}
+
+	// Read try block map: starts with numTryBlocks (compressed uint)
+	tryBlockMapAddr := imageBase + uint64(tryBlockMapRVA)
+	numTryBlocks, n := readFH4Uint(mem, tryBlockMapAddr)
+	tryBlockDataAddr := tryBlockMapAddr + n
+
+	if trace {
+		ravelog.Logf("[seh-fh4] numTryBlocks=%d\n", numTryBlocks)
+	}
+	if numTryBlocks == 0 || numTryBlocks > 1000 {
+		return nil
+	}
+
+	// Compute throw state from IP-to-state map
+	throwState := int32(-1)
+	var ipMapDataAddr uint64
+	var numIPMapEntries uint32
+	if ipToStateMapRVA != 0 {
+		ipMapAddr := imageBase + uint64(ipToStateMapRVA)
+		numIPMap, ipn := readFH4Uint(mem, ipMapAddr)
+		ipMapDataAddr = ipMapAddr + ipn
+		numIPMapEntries = numIPMap
+		if numIPMap > 0 && numIPMap < 100000 {
+			throwState = fh4ComputeThrowState(mem, ipMapDataAddr, imageBase, funcBeginRVA, rip, numIPMap, trace)
+		}
+		if trace {
+			ravelog.Logf("[seh-fh4] numIPMap=%d throwState=%d\n", numIPMap, throwState)
+		}
+	}
+
+	handler := fh4FindCatch(mem, imageBase, tryBlockDataAddr, numTryBlocks, throwState, parentRSP,
+		funcBeginRVA, ipMapDataAddr, numIPMapEntries, trace)
+	if handler != nil {
+		handler.BodyRSP = rsp // function body RSP (for continuation)
+		if handler.ContinuationRVA == 0 && ipMapDataAddr != 0 {
+			// Compute continuation RVA from IP-to-state map if not found in catch entries
+			handler.ContinuationRVA = fh4FindContinuation(mem, ipMapDataAddr, funcBeginRVA, numIPMapEntries, handler)
+			if trace {
+				ravelog.Logf("[seh-fh4] fallback continuation RVA=0x%x\n", handler.ContinuationRVA)
+			}
+		}
+	}
+	return handler
+}
+
+// fh4ComputeThrowState walks the FH4 IP-to-state map to find the state at the throw point.
+// dataAddr points to the first entry (after the numEntries count has been read).
+func fh4ComputeThrowState(mem *mmu.MMU, dataAddr uint64, imageBase uint64,
+	funcStartRVA uint32, rip uint64, numEntries uint32, trace bool) int32 {
+
+	addr := dataAddr
+	throwRVA := uint32(rip - imageBase)
+	state := int32(-1)
+	currentIP := funcStartRVA
+
+	for i := uint32(0); i < numEntries; i++ {
+		ipDelta, n := readFH4Uint(mem, addr)
+		addr += n
+		st, n := readFH4Int(mem, addr)
+		addr += n
+
+		currentIP += ipDelta
+		if currentIP <= throwRVA {
+			state = st
+		}
+		if trace && i < 20 {
+			ravelog.Logf("[seh-fh4]   ipMap[%d]: ip=0x%x (delta=%d) state=%d\n", i, currentIP, ipDelta, st)
+		}
+	}
+
+	return state
+}
+
+// fh4FindContinuation scans the IP-to-state map to find the continuation RVA.
+// The continuation is the first IP where state drops below the catch region
+// (state < catchHigh) after being in the catch region.
+func fh4FindContinuation(mem *mmu.MMU, dataAddr uint64, funcStartRVA uint32,
+	numEntries uint32, handler *CxxCatchHandler) uint32 {
+
+	addr := dataAddr
+	currentIP := funcStartRVA
+	inCatchRegion := false
+
+	for i := uint32(0); i < numEntries; i++ {
+		ipDelta, n := readFH4Uint(mem, addr)
+		addr += n
+		st, n := readFH4Int(mem, addr)
+		addr += n
+
+		currentIP += ipDelta
+
+		if st >= 0 && st <= handler.catchHigh {
+			inCatchRegion = true
+		}
+		if inCatchRegion && (st < 0 || st > handler.catchHigh) {
+			return currentIP
+		}
+	}
+	return 0
+}
+
+// fh4IPFromStateIndex looks up an IP from the IP-to-state map by entry index.
+func fh4IPFromStateIndex(mem *mmu.MMU, dataAddr uint64, funcStartRVA uint32,
+	numEntries uint32, index uint32) uint32 {
+
+	if index >= numEntries {
+		return 0
+	}
+	addr := dataAddr
+	currentIP := funcStartRVA
+
+	for i := uint32(0); i <= index; i++ {
+		ipDelta, n := readFH4Uint(mem, addr)
+		addr += n
+		_, n = readFH4Int(mem, addr) // skip state
+		addr += n
+		currentIP += ipDelta
+	}
+	return currentIP
+}
+
+// fh4FindCatch walks FH4 try block map to find a matching catch handler.
+// Try block entries: tryLow(compressed), tryHigh(compressed), catchHigh(compressed), catchHandlersRVA(int32).
+// The catch handler count is stored at the destination address, not inline.
+func fh4FindCatch(mem *mmu.MMU, imageBase uint64, tryBlockDataAddr uint64,
+	numTryBlocks uint32, throwState int32, parentRSP uint64,
+	funcBeginRVA uint32, ipMapDataAddr uint64, numIPMapEntries uint32, trace bool) *CxxCatchHandler {
+
+	addr := tryBlockDataAddr
+
+	for i := uint32(0); i < numTryBlocks; i++ {
+		tryLow, n := readFH4Uint(mem, addr)
+		addr += n
+		tryHigh, n := readFH4Uint(mem, addr)
+		addr += n
+		catchHigh, n := readFH4Uint(mem, addr)
+		addr += n
+		catchesRVA, _ := mem.Read32(addr)
+		addr += 4
+
+		if trace {
+			ravelog.Logf("[seh-fh4]   tryBlock[%d]: low=%d high=%d catchHigh=%d catchesRVA=0x%x\n",
+				i, tryLow, tryHigh, catchHigh, catchesRVA)
+		}
+
+		if throwState < int32(tryLow) || throwState > int32(tryHigh) {
+			continue
+		}
+		if catchesRVA == 0 || catchesRVA > 0x10000000 {
+			continue
+		}
+
+		// Read numCatches from the catch handlers destination
+		catchDestAddr := imageBase + uint64(catchesRVA)
+		numCatches, cn := readFH4Uint(mem, catchDestAddr)
+		catchDataAddr := catchDestAddr + cn
+
+		if trace {
+			ravelog.Logf("[seh-fh4]   numCatches=%d at 0x%x\n", numCatches, catchDestAddr)
+		}
+		if numCatches == 0 || numCatches > 100 {
+			continue
+		}
+
+		handler := fh4ParseCatches(mem, imageBase, catchDataAddr, numCatches, parentRSP,
+			funcBeginRVA, ipMapDataAddr, numIPMapEntries, trace)
+		if handler != nil {
+			handler.catchHigh = int32(catchHigh)
+			return handler
+		}
+	}
+
+	return nil
+}
+
+// fh4ParseCatches walks FH4 catch handler entries to find a matching handler.
+// Prefers catch(...) (no type descriptor), falls back to any typed handler.
+// Also extracts continuation addresses from entries with bit5 set.
+func fh4ParseCatches(mem *mmu.MMU, imageBase uint64, catchAddr uint64,
+	numCatches uint32, parentRSP uint64, funcBeginRVA uint32,
+	ipMapDataAddr uint64, numIPMapEntries uint32, trace bool) *CxxCatchHandler {
+
+	addr := catchAddr
+
+	type catchEntry struct {
+		hasTypeDesc bool
+		handlerRVA  uint32
+		catchObj    int32
+		contAddr    uint32 // continuation RVA (0 if not present)
+	}
+	entries := make([]catchEntry, 0, numCatches)
+
+	for c := uint32(0); c < numCatches; c++ {
+		hdr, _ := mem.Read8(addr)
+		addr++
+
+		hasAdjectives := hdr&1 != 0
+		hasTypeDesc := hdr&2 != 0
+		hasCatchObj := hdr&4 != 0
+		contIsRVA := hdr&8 != 0
+		hasHandler := hdr&0x10 != 0
+		hasContAddr := hdr&0x20 != 0
+
+		if hasAdjectives {
+			_, n := readFH4Uint(mem, addr)
+			addr += n
+		}
+
+		var typeDescRVA uint32
+		if hasTypeDesc {
+			typeDescRVA, _ = mem.Read32(addr)
+			addr += 4
+		}
+
+		var catchObjOffset int32
+		if hasCatchObj {
+			v, n := readFH4Uint(mem, addr)
+			addr += n
+			catchObjOffset = int32(v)
+		}
+
+		var handlerRVA uint32
+		if hasHandler {
+			handlerRVA, _ = mem.Read32(addr)
+			addr += 4
+		}
+
+		// Read continuation address (bit5)
+		var contRVA uint32
+		if hasContAddr {
+			if contIsRVA {
+				// Function-relative offset
+				off, n := readFH4Uint(mem, addr)
+				addr += n
+				contRVA = funcBeginRVA + off
+			} else {
+				// IP-to-state map index → look up the actual IP
+				idx, n := readFH4Uint(mem, addr)
+				addr += n
+				contRVA = fh4IPFromStateIndex(mem, ipMapDataAddr, funcBeginRVA, numIPMapEntries, idx)
+			}
+		}
+
+		if trace {
+			ravelog.Logf("[seh-fh4]     catch[%d]: hdr=0x%x typeDescRVA=0x%x handlerRVA=0x%x catchObj=%d contRVA=0x%x\n",
+				c, hdr, typeDescRVA, handlerRVA, catchObjOffset, contRVA)
+		}
+
+		entries = append(entries, catchEntry{
+			hasTypeDesc: hasTypeDesc,
+			handlerRVA:  handlerRVA,
+			catchObj:    catchObjOffset,
+			contAddr:    contRVA,
+		})
+	}
+
+	// Collect the best continuation address from all entries
+	var bestCont uint32
+	for _, e := range entries {
+		if e.contAddr != 0 {
+			bestCont = e.contAddr
+			break
+		}
+	}
+
+	// Prefer catch(...) - no type descriptor, with handler
+	for _, e := range entries {
+		if !e.hasTypeDesc && e.handlerRVA != 0 {
+			if trace {
+				ravelog.Logf("[seh-fh4]   → catch(...) funclet RVA=0x%x establisher=0x%x cont=0x%x\n", e.handlerRVA, parentRSP, bestCont)
+			}
+			cont := e.contAddr
+			if cont == 0 {
+				cont = bestCont
+			}
+			return &CxxCatchHandler{
+				FuncletRVA:      e.handlerRVA,
+				EstablisherRBP:  parentRSP,
+				CatchObjOffset:  e.catchObj,
+				ContinuationRVA: cont,
+			}
+		}
+	}
+
+	// Catch-all continuation without funclet = CRT terminate path.
+	// Don't dispatch - returning nil lets _CxxThrowException return
+	// to its caller, which often continues correctly.
 	return nil
 }
 

@@ -15,6 +15,7 @@ import (
 "sort"
 "strconv"
 "strings"
+"sync"
 "time"
 "unicode"
 
@@ -797,6 +798,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// Mmap overflow
 		addr := mem.Mmap(0, totalBlock, mmu.PermRead|mmu.PermWrite)
 		if addr == 0 {
+			heapOff, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
+			var freeTotal uint64
+			for _, fb := range heapFreeList {
+				freeTotal += fb.blockSize
+			}
+			ravelog.Logf("[heap] OOM: bump=%dMB/%dMB freeList=%d entries (%dKB) mmapBlocks=%d requested=%d\n",
+				heapOff/(1024*1024), 256, len(heapFreeList), freeTotal/1024, len(heapMmapBlocks), totalBlock)
 			return 0
 		}
 		mem.Write64(addr, totalBlock)
@@ -5503,6 +5511,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
+		// Thread stack pool for reuse (avoids Mmap leak)
+		type threadStack struct {
+			base uint64
+			size uint64
+		}
+		var freeStacks []threadStack
+		var stackMu sync.Mutex
+
 		d.RegisterAutoStubHandler(kernel32, "CreateThread", func(ctx *ntapi.TrapContext) uint32 {
 			dwStackSize := ctx.Arg(1)
 			lpStartAddress := ctx.Arg(2)
@@ -5512,11 +5528,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if stackSz == 0 {
 				stackSz = 1 << 20 // 1 MB default
 			}
-			stackBase := mem.Mmap(0, stackSz, mmu.PermRead|mmu.PermWrite)
+
+			// Try to reuse a freed stack of matching size
+			var stackBase uint64
+			stackMu.Lock()
+			for i, s := range freeStacks {
+				if s.size >= stackSz {
+					stackBase = s.base
+					stackSz = s.size
+					freeStacks[i] = freeStacks[len(freeStacks)-1]
+					freeStacks = freeStacks[:len(freeStacks)-1]
+					break
+				}
+			}
+			stackMu.Unlock()
+			if stackBase == 0 {
+				stackBase = mem.Mmap(0, stackSz, mmu.PermRead|mmu.PermWrite)
+			}
+
 			tm := *tmPtr
 			if tm == nil {
 				th := &ntapi.ThreadHandle{TID: 0, Done: make(chan struct{})}
-				close(th.Done) // immediately done since no real thread runs
+				close(th.Done)
 				h := handles.Alloc(th)
 				ctx.SetReturn(uint64(h))
 				return 0
@@ -5529,6 +5562,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if lpThreadId != 0 {
 				ctx.Mem.Write32(lpThreadId, uint32(tid))
 			}
+
+			// Recycle stack when thread exits
+			capturedBase := stackBase
+			capturedSize := stackSz
+			go func() {
+				<-done
+				stackMu.Lock()
+				freeStacks = append(freeStacks, threadStack{base: capturedBase, size: capturedSize})
+				stackMu.Unlock()
+			}()
+
 			h := handles.Alloc(&ntapi.ThreadHandle{TID: tid, Done: done})
 			ctx.SetReturn(uint64(h))
 			return 0
@@ -6219,6 +6263,63 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(imageBase)
 			return 0
 		})
+		// Allocate a vmcall trampoline for catch funclet returns.
+		// When a catch funclet does RET, it lands here.
+		// The trampoline saves RAX (funclet return) in RCX, then does vmcall.
+		catchReturnTrampoline := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+		off := catchReturnTrampoline
+		// mov rcx, rax    (48 89 C1) - save funclet return value
+		mem.Write8(off, 0x48); mem.Write8(off+1, 0x89); mem.Write8(off+2, 0xC1)
+		off += 3
+		// mov eax, CatchReturnID  (B8 xx xx xx xx)
+		mem.Write8(off, 0xB8)
+		mem.Write32(off+1, ntapi.CatchReturnID)
+		off += 5
+		// vmcall  (0F 01 C1)
+		mem.Write8(off, 0x0F); mem.Write8(off+1, 0x01); mem.Write8(off+2, 0xC1)
+		off += 3
+		// ret (C3) - shouldn't reach here
+		mem.Write8(off, 0xC3)
+
+		d.RegisterHandler(ntapi.CatchReturnID, "CatchReturn", func(ctx *ntapi.TrapContext) uint32 {
+			// RCX = funclet's return value (continuation address)
+			continuation := ctx.Arg(0) // Arg(0) = RCX in Win64 ABI
+			if continuation != 0 {
+				ravelog.Logf("[seh] catch funclet → continuation at 0x%x\n", continuation)
+				ctx.CPU.SetPC(continuation)
+			} else {
+				// RAX=0: funclet didn't provide a continuation.
+				// Use the pre-computed FH4 continuation from IP-to-state map.
+				savedCont, _ := mem.Read64(catchReturnTrampoline + 80)
+				bodyRSP, _ := mem.Read64(catchReturnTrampoline + 152)
+				if savedCont != 0 {
+					ravelog.Logf("[seh] catch funclet → RAX=0, using FH4 continuation at 0x%x bodyRSP=0x%x\n", savedCont, bodyRSP)
+					// Restore non-volatile registers from unwind context
+					if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
+						nonVolRegs := []int{3, 5, 6, 7, 12, 13, 14, 15}
+						for i, reg := range nonVolRegs {
+							val, _ := mem.Read64(catchReturnTrampoline + 88 + uint64(i*8))
+							rw.WriteReg(reg, val)
+						}
+						// Restore R11 = entry RSP (establisher - 8), used as frame pointer by some functions
+						establisher, _ := mem.Read64(catchReturnTrampoline + 160)
+						if establisher != 0 {
+							rw.WriteReg(11, establisher-8) // R11
+						}
+					}
+					ctx.CPU.SetPC(savedCont)
+					ctx.CPU.SetSP(bodyRSP)
+				} else {
+					// No continuation available - resume at RaiseException caller
+					savedRIP, _ := mem.Read64(catchReturnTrampoline + 64)
+					savedRSP, _ := mem.Read64(catchReturnTrampoline + 72)
+					ravelog.Logf("[seh] catch funclet → RAX=0, resuming at RIP=0x%x RSP=0x%x\n", savedRIP, savedRSP)
+					ctx.CPU.SetPC(savedRIP)
+					ctx.CPU.SetSP(savedRSP)
+				}
+			}
+			return 0
+		})
 		d.RegisterAutoStubHandler(kernel32, "RaiseException", func(ctx *ntapi.TrapContext) uint32 {
 			code := ctx.Arg(0)
 			flags := ctx.Arg(1)
@@ -6254,16 +6355,69 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 
 					catchAddr := imageBase + uint64(handler.FuncletRVA)
-					if ctx.Trace {
-						ravelog.Logf("[seh] C++ exception → catch funclet at 0x%x, RBP=0x%x\n",
-							catchAddr, handler.EstablisherRBP)
+					ravelog.Logf("[seh] C++ exception → catch funclet at 0x%x, establisher=0x%x contRVA=0x%x\n",
+						catchAddr, handler.EstablisherRBP, handler.ContinuationRVA)
+
+					// If no funclet but we have a continuation, jump directly there
+					if handler.FuncletRVA == 0 && handler.ContinuationRVA != 0 {
+						contAddr := imageBase + uint64(handler.ContinuationRVA)
+						ravelog.Logf("[seh] no funclet, jumping to continuation at 0x%x bodyRSP=0x%x\n", contAddr, handler.BodyRSP)
+						if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
+							if handler.SavedRegs != nil {
+								for reg, val := range handler.SavedRegs {
+									rw.WriteReg(reg, val)
+								}
+							}
+						}
+						// Resume at continuation with the function's body RSP
+						ctx.CPU.SetPC(contAddr)
+						ctx.CPU.SetSP(handler.BodyRSP)
+						return 0
 					}
-					// Set up the CPU to call the catch funclet:
-					// Win64 ABI: RCX = establisher frame pointer (RBP)
+
 					if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
-						rw.WriteReg(1, handler.EstablisherRBP) // RCX = establisher frame
+						// Restore saved non-volatile registers from unwind
+						if handler.SavedRegs != nil {
+							for reg, val := range handler.SavedRegs {
+								rw.WriteReg(reg, val)
+							}
+						}
+						rw.WriteReg(2, handler.EstablisherRBP) // RDX = establisher frame (funclet uses mov rbp, rdx)
 					}
-					// Jump to the catch funclet
+					// Save the current RSP/RIP so CatchReturn can resume here if RAX=0.
+					// The RaiseException stub's RET will pop the return address from rsp.
+					// We save that return address + the RSP after the pop.
+					raiseRetAddr, _ := mem.Read64(rsp)
+					mem.Write64(catchReturnTrampoline+64, raiseRetAddr)
+					mem.Write64(catchReturnTrampoline+72, rsp+8) // RSP after RaiseException RET
+					// Save FH4 continuation address (if available)
+					if handler.ContinuationRVA != 0 {
+						mem.Write64(catchReturnTrampoline+80, imageBase+uint64(handler.ContinuationRVA))
+					} else {
+						mem.Write64(catchReturnTrampoline+80, 0)
+					}
+					// Save body RSP for continuation (function's RSP after prologue)
+					mem.Write64(catchReturnTrampoline+152, handler.BodyRSP)
+					// Save establisher (for R11 restore: entry RSP = establisher - 8)
+					mem.Write64(catchReturnTrampoline+160, handler.EstablisherRBP)
+					// Save non-volatile registers for continuation restore
+					// Layout: [88]=RBX [96]=RBP [104]=RSI [112]=RDI [120]=R12 [128]=R13 [136]=R14 [144]=R15
+					nonVolRegs := []int{3, 5, 6, 7, 12, 13, 14, 15} // RBX,RBP,RSI,RDI,R12-R15
+					if handler.SavedRegs != nil {
+						for i, reg := range nonVolRegs {
+							if val, ok := handler.SavedRegs[reg]; ok {
+								mem.Write64(catchReturnTrampoline+88+uint64(i*8), val)
+							} else {
+								mem.Write64(catchReturnTrampoline+88+uint64(i*8), 0)
+							}
+						}
+					}
+					// Set up a proper call frame: push catch-return trampoline
+					// so funclet's RET lands on our vmcall trampoline.
+					sp := handler.EstablisherRBP
+					sp -= 8
+					mem.Write64(sp, catchReturnTrampoline)
+					ctx.CPU.SetSP(sp)
 					ctx.CPU.SetPC(catchAddr)
 					return 0
 				}
@@ -6283,7 +6437,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(kernel32, "TerminateProcess", func(ctx *ntapi.TrapContext) uint32 {
 			code := ctx.Arg(1)
-			fmt.Fprintf(os.Stderr, "govm: TerminateProcess code=%d\n", code)
+			// Log guest call stack
+			sp := ctx.CPU.GetSP()
+			fmt.Fprintf(os.Stderr, "govm: TerminateProcess code=%d (0x%x) RSP=0x%x\n", code, code, sp)
+			for i := uint64(0); i < 8; i++ {
+				ret, _ := ctx.Mem.Read64(sp + i*8)
+				fmt.Fprintf(os.Stderr, "  [RSP+0x%02x] = 0x%x\n", i*8, ret)
+			}
 			os.Exit(int(code))
 			return 0
 		})

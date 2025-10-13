@@ -1023,6 +1023,11 @@ const (
 	// DllMainReturnID is a sentinel syscall ID used by the DllMain return
 	// trampoline. When the CPU hits this, the dispatcher stops execution.
 	DllMainReturnID = 0xFFDE
+
+	// CatchReturnID is used by the C++ catch funclet return trampoline.
+	// When a catch funclet RETs, execution hits this vmcall; the handler
+	// checks RAX and either jumps to the continuation or handles re-throw.
+	CatchReturnID = 0xFFDF
 )
 
 // stubSize is the padded size of each trap stub.
