@@ -29,6 +29,30 @@ type SynthPE struct {
 	ExportOrds map[uint16]uint64  // export ordinal → guest address of stub
 }
 
+// AddDynamicExport allocates a new trap stub in guest memory and
+// registers it in the synth's export map. Returns the syscall ID
+// for handler registration, or 0 if the function already exists.
+func (s *SynthPE) AddDynamicExport(mem *mmu.MMU, funcName string, id uint32) uint32 {
+	if _, ok := s.Exports[funcName]; ok {
+		return 0 // already exists
+	}
+	// Allocate a new page for the stub (simple approach: each dynamic export gets its own mmap)
+	stubAddr := mem.Mmap(0, stubSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	// Write trap stub: mov eax, <id>; vmcall; ret
+	buf := make([]byte, stubSize)
+	buf[0] = 0xB8 // MOV EAX, imm32
+	binary.LittleEndian.PutUint32(buf[1:5], id)
+	copy(buf[5:8], vmTrapBytes)
+	buf[8] = 0xC3 // RET
+	for i := 9; i < int(stubSize); i++ {
+		buf[i] = 0xCC // INT3
+	}
+	mem.WriteBytes(stubAddr, buf)
+	s.Exports[funcName] = stubAddr
+	s.StubIDs[stubAddr] = id
+	return id
+}
+
 // PatchStub replaces a function's stub with custom x64 machine code.
 // The code must fit within stubSize bytes. Returns false if the function
 // is not found or the code is too large.
@@ -1019,6 +1043,10 @@ const (
 	ntapiIDBase  = 0x0000 // NtXxx/RtlXxx syscalls: 0x0000-0x0FFF
 	win32uIDBase = 0x1000 // NtUser*/NtGdi* syscalls: 0x1000-0x1FFF
 	AutoSynthIDBase = 0x2000 // auto-generated stub DLLs: 0x2000-0xFFDD
+
+	// DynExportIDBase is the starting ID for dynamically added exports
+	// (functions registered at runtime via RegisterDynamicHandler).
+	DynExportIDBase = 0xE000 // dynamic exports: 0xE000-0xFFDD
 
 	// DllMainReturnID is a sentinel syscall ID used by the DllMain return
 	// trampoline. When the CPU hits this, the dispatcher stops execution.

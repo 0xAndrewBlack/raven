@@ -297,6 +297,25 @@ func (d *Dispatcher) RegisterAutoStubHandler(synth *SynthPE, funcName string, h 
 	d.handlers[id] = h
 }
 
+// RegisterDynamicHandler adds a new export to a synthetic DLL and registers
+// a handler for it. Used for functions that apps look up via GetProcAddress
+// but aren't in the DLL's original import table.
+func (d *Dispatcher) RegisterDynamicHandler(mem *mmu.MMU, synth *SynthPE, funcName string, id uint32, h TrapHandler) {
+	// Check if already exists as a regular export
+	if addr, ok := synth.Exports[funcName]; ok {
+		if existingID, ok := synth.StubIDs[addr]; ok {
+			d.handlers[existingID] = h
+			return
+		}
+	}
+	allocID := synth.AddDynamicExport(mem, funcName, id)
+	if allocID == 0 {
+		return
+	}
+	d.handlers[id] = h
+	d.names[id] = synth.Name + "!" + funcName
+}
+
 // Handle is the vmcall trap entry point, called by the CPU emulator.
 func (d *Dispatcher) Handle(cpu arch.CPU) {
 	d.ctx.CPU = cpu

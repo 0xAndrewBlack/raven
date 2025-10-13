@@ -476,8 +476,10 @@ if ucrt, ok := loadedModules["ucrtbase.dll"]; ok {
 
 // Auto-generate synthetic stub DLLs for any unresolved import DLLs
 autoSynthDLLs := autoSynthUnresolved(mem, result.MainModule, loadedModules)
+// Pre-create shcore.dll so DPI functions are available via GetProcAddress
+synthShcore := ntapi.GenerateSynthDLL(mem, "shcore.dll", []string{}, 0)
 // Include pre-generated full DLLs so their handlers are wired in registerAutoSynthHandlers.
-autoSynthDLLs = append(autoSynthDLLs, synthKernel32, synthComctl32, synthOleaut32)
+autoSynthDLLs = append(autoSynthDLLs, synthKernel32, synthComctl32, synthOleaut32, synthShcore)
 for _, synth := range autoSynthDLLs {
 	dllKey := strings.ToLower(synth.Name)
 	if _, already := loadedModules[dllKey]; !already {
@@ -4409,6 +4411,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0) // feature not present
 			return 0
 		})
+		// resolveApiSetDLL maps Windows API set names to their host DLL.
+		// On real Windows, api-ms-win-core-* are virtual DLLs that redirect
+		// to kernel32, user32, etc. We replicate this so GetProcAddress
+		// finds the functions in the correct synth DLL.
+		resolveApiSetDLL := func(name string) string {
+			if !strings.HasPrefix(name, "api-ms-win-") && !strings.HasPrefix(name, "ext-ms-") {
+				return name
+			}
+			// Map common API sets to their implementing DLL
+			switch {
+			case strings.HasPrefix(name, "api-ms-win-core-"):
+				return "kernel32.dll"
+			case strings.HasPrefix(name, "api-ms-win-crt-"):
+				if _, ok := synthByName["ucrtbase.dll"]; ok {
+					return "ucrtbase.dll"
+				}
+				return "msvcrt.dll"
+			case strings.HasPrefix(name, "api-ms-win-security-"):
+				return "advapi32.dll"
+			case strings.HasPrefix(name, "api-ms-win-shcore-"):
+				return "shcore.dll"
+			default:
+				return "kernel32.dll"
+			}
+		}
+
 		d.RegisterAutoStubHandler(kernel32, "LoadLibraryExW", func(ctx *ntapi.TrapContext) uint32 {
 			namePtr := ctx.Arg(0)
 			if namePtr == 0 {
@@ -4421,6 +4449,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			if !strings.HasSuffix(name, ".dll") {
 				name += ".dll"
+			}
+			// Redirect API set DLLs to their real implementation
+			resolved := resolveApiSetDLL(name)
+			if resolved != name {
+				if synth, ok := synthByName[resolved]; ok {
+					synthByName[name] = synth // cache redirect
+					ctx.SetReturn(synth.BaseAddr)
+					return 0
+				}
 			}
 			if synth, ok := synthByName[name]; ok {
 				ctx.SetReturn(synth.BaseAddr)
@@ -4439,19 +4476,24 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 			name := strings.ToLower(readGuestUTF16(namePtr))
-			// Strip path: use basename only
 			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
 				name = name[idx+1:]
 			}
 			if !strings.HasSuffix(name, ".dll") {
 				name += ".dll"
 			}
-			// Check if already loaded as a synth
+			resolved := resolveApiSetDLL(name)
+			if resolved != name {
+				if synth, ok := synthByName[resolved]; ok {
+					synthByName[name] = synth
+					ctx.SetReturn(synth.BaseAddr)
+					return 0
+				}
+			}
 			if synth, ok := synthByName[name]; ok {
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
-			// Auto-create a stub synth for the unknown DLL
 			newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 			synthByName[name] = newSynth
 			ravelog.Logf("[win32] LoadLibraryW: auto-created stub for %q\n", name)
@@ -4470,6 +4512,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			if !strings.HasSuffix(name, ".dll") {
 				name += ".dll"
+			}
+			resolved := resolveApiSetDLL(name)
+			if resolved != name {
+				if synth, ok := synthByName[resolved]; ok {
+					synthByName[name] = synth
+					ctx.SetReturn(synth.BaseAddr)
+					return 0
+				}
 			}
 			if synth, ok := synthByName[name]; ok {
 				ctx.SetReturn(synth.BaseAddr)
@@ -12907,6 +12957,31 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	}
 
+	// --- shcore.dll ---
+	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
+	if shcore, ok := synthByName["shcore.dll"]; ok {
+		nextDynID := uint32(ntapi.DynExportIDBase + 0x100) // offset to avoid user32 collision
+		d.RegisterDynamicHandler(mem, shcore, "GetDpiForMonitor", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			// hMonitor, dpiType, *dpiX, *dpiY → S_OK
+			dpiX := ctx.Arg(2)
+			dpiY := ctx.Arg(3)
+			if dpiX != 0 { mem.Write32(dpiX, 96) }
+			if dpiY != 0 { mem.Write32(dpiY, 96) }
+			ctx.SetReturn(0) // S_OK
+			return 0
+		}); nextDynID++
+		d.RegisterDynamicHandler(mem, shcore, "GetScaleFactorForMonitor", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			// hMonitor, *pScale → S_OK
+			pScale := ctx.Arg(1)
+			if pScale != 0 { mem.Write32(pScale, 100) } // SCALE_100_PERCENT
+			ctx.SetReturn(0) // S_OK
+			return 0
+		}); nextDynID++
+		_ = nextDynID
+	}
+	})
+	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
+
 	// --- shlwapi.dll ---
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if shlwapi, ok := synthByName["shlwapi.dll"]; ok {
@@ -21105,6 +21180,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(1); return 0
 			})
 		}
+
+		// DPI-aware functions (Win10+) - apps resolve at runtime via GetProcAddress.
+		// Using RegisterDynamicHandler to make them discoverable.
+		nextDynID := uint32(ntapi.DynExportIDBase)
+		dpiStub96 := func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(96) // standard DPI
+			return 0
+		}
+		d.RegisterDynamicHandler(mem, user32, "GetDpiForSystem", nextDynID, dpiStub96); nextDynID++
+		d.RegisterDynamicHandler(mem, user32, "GetDpiForWindow", nextDynID, dpiStub96); nextDynID++
+		d.RegisterDynamicHandler(mem, user32, "GetSystemMetricsForDpi", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			// Fall through to GetSystemMetrics behavior with standard DPI
+			ctx.SetReturn(0)
+			return 0
+		}); nextDynID++
+		d.RegisterDynamicHandler(mem, user32, "AdjustWindowRectExForDpi", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		}); nextDynID++
+		d.RegisterDynamicHandler(mem, user32, "SetThreadDpiAwarenessContext", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(ctx.Arg(0)) // return previous context = same as requested
+			return 0
+		}); nextDynID++
+		d.RegisterDynamicHandler(mem, user32, "GetWindowDpiAwarenessContext", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFD) // DPI_AWARENESS_CONTEXT_SYSTEM_AWARE (-3)
+			return 0
+		}); nextDynID++
+		d.RegisterDynamicHandler(mem, user32, "AreDpiAwarenessContextsEqual", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			if ctx.Arg(0) == ctx.Arg(1) { ctx.SetReturn(1) } else { ctx.SetReturn(0) }
+			return 0
+		}); nextDynID++
+		d.RegisterDynamicHandler(mem, user32, "ChangeWindowMessageFilterEx", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1) // TRUE
+			return 0
+		}); nextDynID++
+		d.RegisterDynamicHandler(mem, user32, "SetCoalescableTimer", nextDynID, func(ctx *ntapi.TrapContext) uint32 {
+			// Delegate to SetTimer behavior - return a timer ID
+			ctx.SetReturn(ctx.Arg(1)) // nIDEvent
+			return 0
+		}); nextDynID++
+		_ = nextDynID
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
