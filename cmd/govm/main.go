@@ -19510,24 +19510,42 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				_ = h
 				clientTop := wlWindow.TitleBarH
 
-				// Non-client area: draw menu bar (ReactOS: WM_NCPAINT draws menu in NC area)
+				// Non-client area: draw menu bar (same filter/width as click-handler and drawMenuOverlay).
 				if menuH, ok := hwndMenuBar[hwnd]; ok {
 					if md, ok2 := menus[menuH]; ok2 && len(md.items) > 0 {
 						clientTop = wlWindow.TitleBarH + menuBarHeight
 						wlWindow.DrawRectAbs(0, wlWindow.TitleBarH, w, clientTop, sysColors[15])
 						wlWindow.DrawRectAbs(0, clientTop-1, w, clientTop, sysColors[16])
 						x := int32(4)
-						for _, item := range md.items {
-							if item.flags&0x0800 != 0 {
-								continue
+						for i, item := range md.items {
+							if item.flags&0x0800 != 0 || item.flags&0x0010 == 0 {
+								continue // separator or non-popup
 							}
 							label := menuStripAmpersand(item.text)
-							if label == "" {
+							if idx := strings.IndexByte(label, '\t'); idx >= 0 {
+								label = label[:idx]
+							}
+							if label == "" || label == "-" {
 								continue
 							}
-							tw := int32(len([]rune(label))) * 8
-							wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[15], true)
-							x += tw + 12
+							hasRenderable := false
+							for _, r := range label {
+								if r >= 32 && r <= 126 {
+									hasRenderable = true
+									break
+								}
+							}
+							if !hasRenderable {
+								continue
+							}
+							tw := int32(len([]rune(label)))*8 + 12
+							if openMenuIdx == i && openMenuHwnd == hwnd {
+								wlWindow.DrawRectAbs(x, wlWindow.TitleBarH, x+tw, clientTop-1, sysColors[20])
+								wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[20], true)
+							} else {
+								wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[15], true)
+							}
+							x += tw
 						}
 					}
 				}
