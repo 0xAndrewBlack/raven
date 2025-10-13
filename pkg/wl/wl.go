@@ -34,6 +34,27 @@ const (
 	kindPointer
 	kindDecorationManager
 	kindDecoration
+	kindCursorShapeManager
+	kindCursorShapeDevice
+)
+
+// CursorShape values for wp_cursor_shape_device_v1.set_shape.
+// Matches the wp-cursor-shape-v1 protocol enum.
+const (
+	CursorDefault    = uint32(1)
+	CursorText       = uint32(9)  // I-beam
+	CursorWait       = uint32(6)
+	CursorCrosshair  = uint32(8)
+	CursorPointer    = uint32(4)  // hand
+	CursorMove       = uint32(13)
+	CursorNotAllowed = uint32(15)
+	CursorResizeNS   = uint32(27) // NS_RESIZE
+	CursorResizeEW   = uint32(26) // EW_RESIZE
+	CursorResizeNWSE = uint32(29)
+	CursorResizeNESW = uint32(28)
+	CursorResizeAll  = uint32(32) // ALL_SCROLL
+	CursorHelp       = uint32(3)
+	CursorProgress   = uint32(5)
 )
 
 // EventType returned by Dispatch.
@@ -84,8 +105,12 @@ type Display struct {
 	wmBaseGlobal, wmBaseVer         uint32
 	seatGlobal, seatVer             uint32
 	decorMgrGlobal, decorMgrVer     uint32
+	cursorShapeMgrGlobal            uint32
 
-	decorMgrID uint32
+	decorMgrID        uint32
+	cursorShapeMgrID  uint32
+	cursorShapeDevID  uint32
+	pendingCursor     uint32 // shape to set on next enter, or 0
 
 	seatID     uint32
 	keyboardID uint32
@@ -372,6 +397,12 @@ func (d *Display) dispatchOne() (EventType, error) {
 			if caps&seatCapPointer != 0 && d.pointerID == 0 {
 				d.pointerID = d.alloc(kindPointer)
 				d.send(d.seatID, 0, pu32(d.pointerID)) // wl_seat.get_pointer
+				// create cursor shape device if the manager is available
+				if d.cursorShapeMgrID != 0 {
+					d.cursorShapeDevID = d.alloc(kindCursorShapeDevice)
+					// wp_cursor_shape_manager_v1.get_pointer(id, pointer)
+					d.send(d.cursorShapeMgrID, 1, pu32(d.cursorShapeDevID), pu32(d.pointerID))
+				}
 			}
 			if caps&seatCapKeyboard != 0 && d.keyboardID == 0 {
 				d.keyboardID = d.alloc(kindKeyboard)
@@ -386,6 +417,13 @@ func (d *Display) dispatchOne() (EventType, error) {
 				d.lastSerial = gu32(payload[0:])
 				d.mouseX = int32(gu32(payload[8:])) >> 8
 				d.mouseY = int32(gu32(payload[12:])) >> 8
+				// Apply pending cursor shape (set via SetCursorShape before enter)
+				// or reset to default arrow when entering our surface.
+				shape := d.pendingCursor
+				if shape == 0 {
+					shape = CursorDefault
+				}
+				d.setCursorShapeNow(shape)
 			}
 		case 1: // leave
 		case 2: // motion (time, sx, sy)
@@ -470,6 +508,8 @@ func (d *Display) handleGlobal(name uint32, iface string, ver uint32) {
 		d.seatGlobal, d.seatVer = name, ver
 	case "zxdg_decoration_manager_v1":
 		d.decorMgrGlobal, d.decorMgrVer = name, ver
+	case "wp_cursor_shape_manager_v1":
+		d.cursorShapeMgrGlobal = name
 	}
 }
 
@@ -611,6 +651,13 @@ func Connect() (*Display, error) {
 		d.decorMgrID = d.alloc(kindDecorationManager)
 		d.send(d.registryID, 0, pu32(d.decorMgrGlobal), pstr("zxdg_decoration_manager_v1"),
 			pu32(min32(d.decorMgrVer, 1)), pu32(d.decorMgrID))
+	}
+
+	// bind wp_cursor_shape_manager_v1 if compositor advertises it
+	if d.cursorShapeMgrGlobal != 0 {
+		d.cursorShapeMgrID = d.alloc(kindCursorShapeManager)
+		d.send(d.registryID, 0, pu32(d.cursorShapeMgrGlobal), pstr("wp_cursor_shape_manager_v1"),
+			pu32(1), pu32(d.cursorShapeMgrID))
 	}
 
 	// second roundtrip for shm formats etc
@@ -864,6 +911,23 @@ func (d *Display) HasNoSSD() bool {
 
 // CtrlDown returns the current control key state.
 func (d *Display) CtrlDown() bool { return d.ctrlDown }
+
+// SetCursorShape sets the Wayland pointer cursor shape.
+// Uses wp_cursor_shape_device_v1 if available; silently ignores otherwise.
+// Safe to call at any time; the shape is remembered and applied on next pointer enter.
+func (d *Display) SetCursorShape(shape uint32) {
+	d.pendingCursor = shape
+	d.setCursorShapeNow(shape)
+}
+
+// setCursorShapeNow sends set_shape immediately using the current serial.
+func (d *Display) setCursorShapeNow(shape uint32) {
+	if d.cursorShapeDevID == 0 || shape == 0 {
+		return
+	}
+	// wp_cursor_shape_device_v1.set_shape(serial, shape)
+	d.send(d.cursorShapeDevID, 1, pu32(d.lastSerial), pu32(shape))
+}
 
 // PollMouse returns the next queued mouse event, if any.
 func (d *Display) PollMouse() (MouseEvent, bool) {

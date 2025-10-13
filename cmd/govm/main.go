@@ -2,6 +2,7 @@ package main
 
 import (
 "bufio"
+"bytes"
 "flag"
 "fmt"
 "image"
@@ -1323,6 +1324,186 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		md.items = parseItems(32, 0)
 		return md
+	}
+
+	// peLoadRawResource loads a raw resource from a PE module given its base addr + rsrc RVA.
+	// typeID is the RT_* constant (e.g. 2=RT_BITMAP), resID is the resource ID.
+	// Returns the guest address of the resource data and its size in bytes.
+	peLoadRawResource := func(moduleBase uint64, rsrcDirRVA uint32, typeID, resID uint32) (dataAddr uint64, dataSize uint32, ok bool) {
+		if rsrcDirRVA == 0 {
+			return 0, 0, false
+		}
+		rsrcBase := moduleBase + uint64(rsrcDirRVA)
+		findEntry := func(dirAddr uint64, id uint32) (uint64, bool) {
+			namedCount, _ := mem.Read16(dirAddr + 12)
+			idCount, _ := mem.Read16(dirAddr + 14)
+			entryAddr := dirAddr + 16 + uint64(namedCount)*8
+			for i := uint16(0); i < idCount; i++ {
+				eID, _ := mem.Read32(entryAddr)
+				eOff, _ := mem.Read32(entryAddr + 4)
+				if eID == id {
+					isDir := eOff&0x80000000 != 0
+					offset := eOff & 0x7FFFFFFF
+					return rsrcBase + uint64(offset), isDir
+				}
+				entryAddr += 8
+			}
+			return 0, false
+		}
+		typeDir, isDir := findEntry(rsrcBase, typeID)
+		if !isDir || typeDir == 0 {
+			return 0, 0, false
+		}
+		idDir, isDir2 := findEntry(typeDir, resID)
+		if idDir == 0 {
+			return 0, 0, false
+		}
+		var dataEntry uint64
+		if isDir2 {
+			leafAddr, found := pickBestLangEntry(idDir, rsrcBase)
+			if !found {
+				return 0, 0, false
+			}
+			dataEntry = leafAddr
+		} else {
+			dataEntry = idDir
+		}
+		dataRVA, _ := mem.Read32(dataEntry)
+		sz, _ := mem.Read32(dataEntry + 4)
+		if dataRVA == 0 || sz == 0 {
+			return 0, 0, false
+		}
+		return moduleBase + uint64(dataRVA), sz, true
+	}
+
+	// decodeDIBSlots decodes a raw DIB (no BITMAPFILEHEADER) stored at guestAddr/guestSize
+	// and splits it into nSlots horizontal icon slots of iconW×iconH pixels.
+	// Returns per-slot []uint32 XRGB pixel slices.
+	decodeDIBSlots := func(guestAddr uint64, guestSize uint32, iconW, iconH int) [][]uint32 {
+		if guestAddr == 0 || guestSize < 40 {
+			return nil
+		}
+		biSize, _ := mem.Read32(guestAddr)
+		if biSize < 40 {
+			return nil
+		}
+		biWidthI, _ := mem.Read32(guestAddr + 4)
+		biHeightI, _ := mem.Read32(guestAddr + 8)
+		biBitCount, _ := mem.Read16(guestAddr + 14)
+		biCompression, _ := mem.Read32(guestAddr + 16)
+		if biCompression != 0 && biCompression != 3 { // only BI_RGB and BI_BITFIELDS
+			return nil
+		}
+		biWidth := int(int32(biWidthI))
+		biHeight := int(int32(biHeightI))
+		topDown := biHeight < 0
+		if topDown {
+			biHeight = -biHeight
+		}
+		if biWidth <= 0 || biHeight <= 0 {
+			return nil
+		}
+		// Palette size for indexed bitmaps
+		biClrUsed, _ := mem.Read32(guestAddr + 32)
+		palColors := int(biClrUsed)
+		if palColors == 0 && biBitCount <= 8 {
+			palColors = 1 << biBitCount
+		}
+		// Pixel data offset: header + palette
+		pixelOffset := uint64(biSize) + uint64(palColors)*4
+		var palette []uint32
+		if palColors > 0 {
+			for i := 0; i < palColors; i++ {
+				bgra, _ := mem.Read32(guestAddr + uint64(biSize) + uint64(i)*4)
+				b := (bgra) & 0xFF
+				g := (bgra >> 8) & 0xFF
+				r := (bgra >> 16) & 0xFF
+				palette = append(palette, (r<<16)|(g<<8)|b)
+			}
+		}
+		// stride in bytes, 4-byte aligned
+		var stride int
+		switch biBitCount {
+		case 32:
+			stride = biWidth * 4
+		case 24:
+			stride = (biWidth*3 + 3) &^ 3
+		case 8:
+			stride = (biWidth + 3) &^ 3
+		case 4:
+			stride = (biWidth/2 + 3) &^ 3
+		default:
+			return nil
+		}
+		// Read all rows into a flat XRGB array [biHeight rows, biWidth cols]
+		allPix := make([]uint32, biWidth*biHeight)
+		for row := 0; row < biHeight; row++ {
+			srcRow := row
+			if !topDown {
+				srcRow = biHeight - 1 - row
+			}
+			rowBase := guestAddr + pixelOffset + uint64(srcRow)*uint64(stride)
+			for col := 0; col < biWidth; col++ {
+				var pixel uint32
+				switch biBitCount {
+				case 32:
+					v, _ := mem.Read32(rowBase + uint64(col)*4)
+					b := v & 0xFF
+					g := (v >> 8) & 0xFF
+					r := (v >> 16) & 0xFF
+					pixel = (r << 16) | (g << 8) | b
+				case 24:
+					b0, _ := mem.ReadBytes(rowBase+uint64(col)*3, 3)
+					if len(b0) == 3 {
+						pixel = (uint32(b0[2]) << 16) | (uint32(b0[1]) << 8) | uint32(b0[0])
+					}
+				case 8:
+					idx, _ := mem.ReadBytes(rowBase+uint64(col), 1)
+					if len(idx) > 0 && int(idx[0]) < len(palette) {
+						pixel = palette[idx[0]]
+					}
+				case 4:
+					b0, _ := mem.ReadBytes(rowBase+uint64(col/2), 1)
+					if len(b0) > 0 {
+						var nibble byte
+						if col&1 == 0 {
+							nibble = b0[0] >> 4
+						} else {
+							nibble = b0[0] & 0xF
+						}
+						if int(nibble) < len(palette) {
+							pixel = palette[nibble]
+						}
+					}
+				}
+				allPix[row*biWidth+col] = pixel
+			}
+		}
+		// Split into icon slots: each slot is iconW wide, full height=iconH
+		if iconW <= 0 {
+			iconW = 16
+		}
+		if iconH <= 0 {
+			iconH = biHeight
+		}
+		nSlots := biWidth / iconW
+		if nSlots == 0 {
+			nSlots = 1
+		}
+		slots := make([][]uint32, nSlots)
+		for s := 0; s < nSlots; s++ {
+			slot := make([]uint32, iconW*iconH)
+			for row := 0; row < iconH && row < biHeight; row++ {
+				for col := 0; col < iconW; col++ {
+					src := row*biWidth + s*iconW + col
+					if src < len(allPix) {
+						slot[row*iconW+col] = allPix[src]
+					}
+				}
+			}
+			slots[s] = slot
+		}
+		return slots
 	}
 
 	// wideprintf formats a wide format string with arguments read from guest memory.
@@ -14206,6 +14387,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// Menu bar interaction state
 	var openMenuIdx int = -1  // which top-level menu is open (-1 = none)
 	var openMenuHwnd uint64   // which window's menu is open
+
+	// bitmapHandles maps an HBITMAP handle to its decoded pixel data.
+	// Used by LoadImageW/LoadBitmapW (store) and TB_ADDBITMAP (lookup).
+	type bitmapHandleData struct {
+		w, h  int
+		slots [][]uint32 // per-slot XRGB pixels (for toolbar strip bitmaps)
+		pix   []uint32   // flat XRGB pixels for single bitmap
+	}
+	bitmapHandles := make(map[uint64]*bitmapHandleData)
+	var nextBitmapHandle uint64 = 0x00030001 // start from known value so old callers still work
 	menuStripAmpersand := func(s string) string {
 		out := make([]byte, 0, len(s))
 		for i := 0; i < len(s); i++ {
@@ -14279,9 +14470,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		tabCurSel    int
 		tabTitles    []string
 		// Toolbar state
-		tbButtons    []tbButtonData // stored via TB_ADDBUTTONSW
-		tbBtnW       int32         // button width (from TB_SETBUTTONSIZE)
-		tbBtnH       int32         // button height (from TB_SETBUTTONSIZE)
+		tbButtons      []tbButtonData // stored via TB_ADDBUTTONSW
+		tbBtnW         int32         // button width (from TB_SETBUTTONSIZE)
+		tbBtnH         int32         // button height (from TB_SETBUTTONSIZE)
+		tbBitmapIconW  int32         // icon width (from TB_SETBITMAPSIZE low word)
+		tbBitmapIconH  int32         // icon height (from TB_SETBITMAPSIZE high word)
+		tbBitmapStore  [][]uint32    // per-slot XRGB pixels (size = iconW*iconH per slot)
 	}
 	hwndChildren := make(map[uint64]*controlState)
 	hwndTitle := make(map[uint64]string)
@@ -15255,6 +15449,69 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// repaintBuiltin: when true, commitIfDone calls paintTree (for initial frame compositing).
 	var frameReady, hasBaseFrame, repaintBuiltin bool
 
+	// drawMenuOverlay draws the open dropdown menu on top of everything else.
+	// Must be called AFTER paintTree so the toolbar/rebar don't overwrite it.
+	var drawMenuOverlay func()
+	drawMenuOverlay = func() {
+		if wlWindow == nil || openMenuIdx < 0 {
+			return
+		}
+		menuH, ok := hwndMenuBar[mainHWND]
+		if !ok {
+			return
+		}
+		md, ok2 := menus[menuH]
+		if !ok2 || openMenuHwnd != mainHWND {
+			return
+		}
+		clientTop := wlWindow.TitleBarH + menuBarHeight
+		x := int32(4)
+		for i, item := range md.items {
+			if item.flags&0x0800 != 0 || item.flags&0x0010 == 0 {
+				continue
+			}
+			label := menuStripAmpersand(item.text)
+			if idx := strings.IndexByte(label, '\t'); idx >= 0 {
+				label = label[:idx]
+			}
+			if label == "" || label == "-" {
+				continue
+			}
+			tw := int32(len([]rune(label)))*8 + 12
+			if i == openMenuIdx && len(item.submenu) > 0 {
+				dropX := x
+				dropY := clientTop
+				dropW := int32(200)
+				dropH := int32(len(item.submenu)) * 20
+				// Shadow
+				wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
+				wlWindow.DrawRectAbs(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
+				// Background
+				wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
+				// Border
+				wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+1, sysColors[16])
+				wlWindow.DrawRectAbs(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
+				wlWindow.DrawRectAbs(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
+				wlWindow.DrawRectAbs(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
+				for j, si := range item.submenu {
+					iy := dropY + int32(j)*20
+					if si.flags&0x0800 != 0 {
+						wlWindow.DrawRectAbs(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
+						wlWindow.DrawRectAbs(dropX+2, iy+10, dropX+dropW-2, iy+11, sysColors[20])
+					} else {
+						sl := menuStripAmpersand(si.text)
+						if k := strings.IndexByte(sl, '\t'); k >= 0 {
+							sl = sl[:k]
+						}
+						wlWindow.DrawTextAbs(dropX+20, iy+3, sl, 0x000000, sysColors[15], true)
+					}
+				}
+				break
+			}
+			x += tw
+		}
+	}
+
 	// commitIfDone commits the Wayland buffer whenever a paint pass has finished.
 	// Called after DefWindowProcW WM_PAINT and after each child EndPaint.
 	// Multiple commits are fine; each one produces a progressively more complete frame.
@@ -15269,6 +15526,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			repaintBuiltin = false
 			paintTree(mainHWND)
 		}
+		// Always draw dropdown menu overlay on top of everything (including toolbar).
+		drawMenuOverlay()
 		ravelog.Logf("[commit] Commit w=%d h=%d pixLen=%d\n", wlWindow.Width, wlWindow.Height, len(wlWindow.Pix))
 		wlWindow.Commit()
 		frameCount++
@@ -15958,6 +16217,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							continue
 						}
 						drawBtn(x, cs.y+padY, btnW, btnH)
+						// Draw icon if available
+						iconIdx := int(btn.iBitmap)
+						iconW := int(cs.tbBitmapIconW)
+						iconH := int(cs.tbBitmapIconH)
+						if iconW <= 0 { iconW = 16 }
+						if iconH <= 0 { iconH = 16 }
+						if iconIdx >= 0 && iconIdx < len(cs.tbBitmapStore) && len(cs.tbBitmapStore[iconIdx]) > 0 {
+							pix := cs.tbBitmapStore[iconIdx]
+							offX := x + (btnW-int32(iconW))/2
+							offY := cs.y + padY + (btnH-int32(iconH))/2
+							winW := int(wlWindow.Width)
+							winH := int(wlWindow.Height + wlWindow.TitleBarH)
+							maskColor := uint32(0x00FF00FF) // magenta = transparent
+							for py := 0; py < iconH; py++ {
+								for px := 0; px < iconW; px++ {
+									c := pix[py*iconW+px]
+									if c == maskColor { continue }
+									sx := int(offX) + px
+									sy := int(offY) + py
+									if sx >= 0 && sy >= 0 && sx < winW && sy < winH {
+										base := (sy*winW + sx) * 4
+										wlWindow.Pix[base+0] = byte(c & 0xFF)        // B
+										wlWindow.Pix[base+1] = byte((c >> 8) & 0xFF) // G
+										wlWindow.Pix[base+2] = byte((c >> 16) & 0xFF) // R
+										wlWindow.Pix[base+3] = 0xFF
+									}
+								}
+							}
+						}
 						x += btnW + 1
 					}
 				}
@@ -15980,8 +16268,54 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0, true
 			case wmUser + 10: // TB_ISBUTTONENABLED
 				return 1, true
-			case wmUser + 19: // TB_ADDBITMAP
-				return 0, true
+			case wmUser + 19: // TB_ADDBITMAP - load bitmap from PE resource, return start index
+				startIdx := len(cs.tbBitmapStore)
+				nBitmaps := int(wParam)
+				if lParam != 0 && mainModule != nil {
+					hInst, _ := mem.Read64(lParam)
+					nID, _ := mem.Read64(lParam + 8)
+					iconW := int(cs.tbBitmapIconW)
+					iconH := int(cs.tbBitmapIconH)
+					if iconW <= 0 { iconW = 16 }
+					if iconH <= 0 { iconH = 16 }
+					ravelog.Logf("[toolbar] TB_ADDBITMAP nBitmaps=%d hInst=0x%x nID=0x%x mainBase=0x%x iconW=%d iconH=%d\n",
+						nBitmaps, hInst, nID, mainModule.BaseAddr, iconW, iconH)
+
+					if hInst == 0 {
+						// nID is an HBITMAP handle from LoadImage/LoadBitmap
+						if bd, ok2 := bitmapHandles[nID]; ok2 && len(bd.slots) > 0 {
+							// re-slice icons using requested icon size
+							// bd.slots may have been decoded with wrong size, re-decode from scratch if needed
+							// For now use slots as-is if count matches or just use them
+							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP handle found, %d slots\n", len(bd.slots))
+							cs.tbBitmapStore = append(cs.tbBitmapStore, bd.slots...)
+						} else {
+							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP handle 0x%x not found or empty\n", nID)
+							for i := 0; i < nBitmaps; i++ {
+								cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
+							}
+						}
+					} else if hInst == mainModule.BaseAddr {
+						// nID is a resource ID in the main PE
+						addr, sz, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2 /*RT_BITMAP*/, uint32(nID))
+						ravelog.Logf("[toolbar] TB_ADDBITMAP peLoadRawResource ok=%v addr=0x%x sz=%d\n", ok2, addr, sz)
+						if ok2 {
+							slots := decodeDIBSlots(addr, sz, iconW, iconH)
+							ravelog.Logf("[toolbar] TB_ADDBITMAP decoded %d icon slots\n", len(slots))
+							cs.tbBitmapStore = append(cs.tbBitmapStore, slots...)
+						} else {
+							for i := 0; i < nBitmaps; i++ {
+								cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
+							}
+						}
+					} else {
+						ravelog.Logf("[toolbar] TB_ADDBITMAP hInst mismatch 0x%x, skipping\n", hInst)
+						for i := 0; i < nBitmaps; i++ {
+							cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
+						}
+					}
+				}
+				return uint64(startIdx), true
 			case wmUser + 20: // TB_ADDBUTTONSA
 				return 1, true
 			case wmUser + 68: // TB_ADDBUTTONSW
@@ -16000,11 +16334,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						fsStyle = stateBytes[1]
 					}
 					cs.tbButtons = append(cs.tbButtons, tbButtonData{int32(iBitmapV), int32(idCommandV), fsState, fsStyle})
+					if i < 5 { // log first few to avoid spam
+						ravelog.Logf("[toolbar] TB_ADDBUTTONSW[%d] iBitmap=%d idCmd=0x%x state=0x%x style=0x%x\n", i, iBitmapV, idCommandV, fsState, fsStyle)
+					}
 				}
 				return 1, true
 			case wmUser + 44: // TB_BUTTONSTRUCTSIZE
 				return 0, true
 			case wmUser + 45: // TB_SETBITMAPSIZE
+				cs.tbBitmapIconW = int32(lParam & 0xFFFF)
+				cs.tbBitmapIconH = int32((lParam >> 16) & 0xFFFF)
+				ravelog.Logf("[toolbar] TB_SETBITMAPSIZE iconW=%d iconH=%d\n", cs.tbBitmapIconW, cs.tbBitmapIconH)
 				return 1, true
 			case wmUser + 48: // TB_AUTOSIZE
 				cs.h = 26
@@ -16834,7 +17174,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "LoadCursorW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x00010001) // dummy cursor handle
+			// Return IDC_ value as handle so SetCursor can map it back.
+			// IDC_ARROW=32512, IDC_IBEAM=32513, etc.
+			lpCursorName := ctx.Arg(1)
+			if lpCursorName < 0x10000 && lpCursorName != 0 {
+				ctx.SetReturn(lpCursorName) // atom → return as-is
+			} else {
+				ctx.SetReturn(0x00010001) // default dummy
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "LoadIconW", func(ctx *ntapi.TrapContext) uint32 {
@@ -16842,7 +17189,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "LoadImageW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x00030001) // dummy handle
+			hInst := ctx.Arg(0)
+			nameArg := ctx.Arg(1)
+			imgType := ctx.Arg(2)
+			// IMAGE_BITMAP=0: try to load from PE resource
+			if imgType == 0 && nameArg < 0x10000 && mainModule != nil &&
+				(hInst == mainModule.BaseAddr || hInst == 0) {
+				resID := uint32(nameArg)
+				addr, sz, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2 /*RT_BITMAP*/, resID)
+				if ok2 {
+					slots := decodeDIBSlots(addr, sz, 0, 0)
+					h := nextBitmapHandle
+					nextBitmapHandle += 2
+					bd := &bitmapHandleData{slots: slots}
+					if len(slots) > 0 {
+						bd.w = len(slots[0])
+					}
+					bitmapHandles[h] = bd
+					ravelog.Logf("[loadimage] LoadImageW IMAGE_BITMAP resID=0x%x → handle=0x%x slots=%d\n", resID, h, len(slots))
+					ctx.SetReturn(h)
+					return 0
+				}
+			}
+			ctx.SetReturn(0x00030001) // fallback dummy handle
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetWindowPos", func(ctx *ntapi.TrapContext) uint32 {
@@ -17475,56 +17844,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								x += tw
 							}
 
-							// Draw dropdown if open
-							if openMenuIdx >= 0 && openMenuHwnd == hwnd {
-								x = int32(4)
-								for i, item := range md.items {
-									if item.flags&0x0800 != 0 {
-										continue
-									}
-									if item.flags&0x0010 == 0 {
-										continue
-									}
-									label := menuStripAmpersand(item.text)
-									if idx := strings.IndexByte(label, '\t'); idx >= 0 {
-										label = label[:idx]
-									}
-									if label == "" || label == "-" {
-										continue
-									}
-									tw := int32(len([]rune(label)))*8 + 12
-									if i == openMenuIdx && len(item.submenu) > 0 {
-										dropX := x
-										dropY := clientTop
-										dropW := int32(200)
-										dropH := int32(len(item.submenu)) * 20
-										wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
-										wlWindow.DrawRectAbs(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
-										wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
-										wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+1, sysColors[16])
-										wlWindow.DrawRectAbs(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
-										wlWindow.DrawRectAbs(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
-										wlWindow.DrawRectAbs(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
-										for j, si := range item.submenu {
-											iy := dropY + int32(j)*20
-											if si.flags&0x0800 != 0 {
-												wlWindow.DrawRectAbs(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
-												wlWindow.DrawRectAbs(dropX+2, iy+10, dropX+dropW-2, iy+11, sysColors[20])
-											} else {
-												sl := menuStripAmpersand(si.text)
-												for k := 0; k < len(sl); k++ {
-													if sl[k] == '\t' {
-														sl = sl[:k]
-														break
-													}
-												}
-												wlWindow.DrawTextAbs(dropX+20, iy+3, sl, 0x000000, sysColors[15], true)
-											}
-										}
-									}
-									x += tw
-								}
-							}
+							// Dropdown overlay drawn later in commitIfDone (after paintTree).
 						}
 					}
 
@@ -18095,9 +18415,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							switch me.Button {
 							case btnLeft:
 								if me.Pressed {
+									ravelog.Logf("[click] left press x=%d y=%d ncMenuTop=%d clientTop=%d\n", me.X, me.Y, ncMenuTop, clientTop)
 									if wlWindow != nil && me.Y >= ncMenuTop && me.Y < clientTop {
 										// ── Menu bar click (non-client) ──
 										// Intercept here instead of routing via DefWindowProcW.
+										ravelog.Logf("[click] menu bar hit, looking for item\n")
 										if menuH, ok2 := hwndMenuBar[mainHWND]; ok2 {
 											if md, ok3 := menus[menuH]; ok3 {
 												x := int32(4)
@@ -18121,6 +18443,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 														continue
 													}
 													tw := int32(len([]rune(label)))*8 + 12
+													ravelog.Logf("[click] item i=%d label=%q x=%d..%d\n", i, label, x, x+tw)
 													if me.X >= x && me.X < x+tw {
 														if openMenuIdx == i && openMenuHwnd == mainHWND {
 															openMenuIdx = -1
@@ -18128,7 +18451,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 															openMenuIdx = i
 															openMenuHwnd = mainHWND
 														}
-														msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+															// Force-render dropdown immediately without waiting for WM_PAINT.
+														if wlWindow != nil && hasBaseFrame {
+															frameReady = true
+															commitIfDone()
+														} else {
+															msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+														}
 														handled = true
 														break
 													}
@@ -18449,8 +18778,24 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0) // FALSE - clipboard not implemented
 			return 0
 		})
-		// LoadBitmapW - load bitmap from resource (return NULL)
+		// LoadBitmapW - load bitmap from PE resource, return HBITMAP
 		d.RegisterAutoStubHandler(user32, "LoadBitmapW", func(ctx *ntapi.TrapContext) uint32 {
+			hInst := ctx.Arg(0)
+			nameArg := ctx.Arg(1)
+			if nameArg < 0x10000 && mainModule != nil &&
+				(hInst == mainModule.BaseAddr || hInst == 0) {
+				resID := uint32(nameArg)
+				addr, sz, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2 /*RT_BITMAP*/, resID)
+				if ok2 {
+					slots := decodeDIBSlots(addr, sz, 0, 0)
+					h := nextBitmapHandle
+					nextBitmapHandle += 2
+					bitmapHandles[h] = &bitmapHandleData{slots: slots}
+					ravelog.Logf("[loadbitmap] LoadBitmapW resID=0x%x → handle=0x%x slots=%d\n", resID, h, len(slots))
+					ctx.SetReturn(h)
+					return 0
+				}
+			}
 			ctx.SetReturn(0) // NULL
 			return 0
 		})
@@ -19391,7 +19736,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetCursor", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(ctx.Arg(0))
+			hCursor := ctx.Arg(0)
+			// Map Windows IDC_ cursor IDs to wp_cursor_shape_v1 shapes.
+			if wlDisplay != nil {
+				var shape uint32
+				switch hCursor {
+				case 32512: shape = wl.CursorDefault    // IDC_ARROW
+				case 32513: shape = wl.CursorText       // IDC_IBEAM
+				case 32514: shape = wl.CursorProgress   // IDC_WAIT (spinner)
+				case 32515: shape = wl.CursorCrosshair  // IDC_CROSS
+				case 32642: shape = wl.CursorResizeNWSE // IDC_SIZENWSE
+				case 32643: shape = wl.CursorResizeNESW // IDC_SIZENESW
+				case 32644: shape = wl.CursorResizeEW   // IDC_SIZEWE
+				case 32645: shape = wl.CursorResizeNS   // IDC_SIZENS
+				case 32646: shape = wl.CursorMove       // IDC_SIZEALL
+				case 32648: shape = wl.CursorNotAllowed // IDC_NO
+				case 32649: shape = wl.CursorPointer    // IDC_HAND
+				case 32650: shape = wl.CursorProgress   // IDC_APPSTARTING
+				case 32651: shape = wl.CursorHelp       // IDC_HELP
+				default:    shape = wl.CursorDefault
+				}
+				wlDisplay.SetCursorShape(shape)
+			}
+			ctx.SetReturn(hCursor)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetCursorPos", func(ctx *ntapi.TrapContext) uint32 {
@@ -20051,9 +20418,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// LoadCursorA: ANSI wrapper - return same dummy cursor handle
+		// LoadCursorA: ANSI wrapper - same as LoadCursorW
 		d.RegisterAutoStubHandler(user32, "LoadCursorA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x00010001) // dummy cursor handle
+			lpCursorName := ctx.Arg(1)
+			if lpCursorName < 0x10000 && lpCursorName != 0 {
+				ctx.SetReturn(lpCursorName)
+			} else {
+				ctx.SetReturn(0x00010001)
+			}
 			return 0
 		})
 
@@ -24439,6 +24811,7 @@ func writeFindData(m *mmu.MMU, ptr uint64, dir string, e os.DirEntry) {
 }
 
 // saveScreenshot saves the XRGB8888 wl.Window pixel buffer as a PNG.
+// Encodes to a buffer first then writes atomically to avoid truncation on SIGTERM.
 func saveScreenshot(pix []byte, w, h int, path string) {
 ravelog.Logf("[ss] saveScreenshot w=%d h=%d pixLen=%d path=%s\n", w, h, len(pix), path)
 img := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -24452,9 +24825,9 @@ r := pix[off+2]
 img.SetRGBA(x, y, color.RGBA{R: r, G: g, B: b, A: 0xFF})
 }
 }
-f, err := os.Create(path)
-if err != nil { return }
-defer f.Close()
-err2 := png.Encode(f, img)
-ravelog.Logf("[ss] png.Encode err=%v\n", err2)
+var buf bytes.Buffer
+err2 := png.Encode(&buf, img)
+ravelog.Logf("[ss] png.Encode err=%v size=%d\n", err2, buf.Len())
+if err2 != nil { return }
+os.WriteFile(path, buf.Bytes(), 0644)
 }
