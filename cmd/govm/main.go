@@ -15433,8 +15433,27 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 			case "systabcontrol32":
+				const tabH = int32(22)
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
-				wlWindow.DrawRectAbs(cs.x, cs.y+24, cs.x+cs.w, cs.y+25, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x, cs.y+tabH-1, cs.x+cs.w, cs.y+tabH, sysColors[16])
+				// Draw each tab
+				tx := cs.x
+				for i := 0; i < cs.tabCount; i++ {
+					sel := i == cs.tabCurSel
+					bgCol := sysColors[15]
+					if sel {
+						bgCol = sysColors[5]
+					}
+					tabW := int32(80)
+					wlWindow.DrawRectAbs(tx, cs.y, tx+tabW, cs.y+tabH, bgCol)
+					wlWindow.DrawRectAbs(tx, cs.y, tx+1, cs.y+tabH, sysColors[16])
+					wlWindow.DrawRectAbs(tx+tabW-1, cs.y, tx+tabW, cs.y+tabH, sysColors[16])
+					wlWindow.DrawRectAbs(tx, cs.y, tx+tabW, cs.y+1, sysColors[16])
+					if i < len(cs.tabTitles) && cs.tabTitles[i] != "" {
+						wlWindow.DrawTextAbs(tx+4, cs.y+4, cs.tabTitles[i], 0x000000, bgCol, false)
+					}
+					tx += tabW
+				}
 			default:
 				if _, hasGuest := hwndWndProc[hwnd]; hasGuest {
 					// Do NOT pre-fill here: BeginPaint will fill the background when the
@@ -17247,12 +17266,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			wParam := ctx.Arg(2)
 			lParam := ctx.Arg(3)
 
-			// WM_LBUTTONDOWN: check menu bar click
+			// WM_LBUTTONDOWN: check menu bar click.
+			// lParam coords are buffer-absolute (surface-local from Wayland).
+			// The menu bar occupies y=[TitleBarH, TitleBarH+menuBarHeight).
 			if msg == 0x0201 && hwnd == mainHWND && wlWindow != nil {
 				my := int32(lParam >> 16)
 				mx := int32(lParam & 0xFFFF)
 				if menuH, ok := hwndMenuBar[hwnd]; ok {
-					if md, ok2 := menus[menuH]; ok2 && my < menuBarHeight {
+					menuTop := wlWindow.TitleBarH
+					menuBot := wlWindow.TitleBarH + menuBarHeight
+					if md, ok2 := menus[menuH]; ok2 && my >= menuTop && my < menuBot {
 						x := int32(4)
 						for i, item := range md.items {
 							if item.flags&0x0800 != 0 {
@@ -17303,10 +17326,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								continue
 							}
 							tw := int32(len([]rune(label)))*8 + 12
+							// Skip non-renderable items (same filter as menu bar draw)
+							hasRenderable := false
+							for _, r := range label {
+								if r >= 32 && r <= 126 {
+									hasRenderable = true
+									break
+								}
+							}
+							if !hasRenderable {
+								continue
+							}
 							if i == openMenuIdx && len(item.submenu) > 0 {
-								// Check if click is inside dropdown area
+								// Check if click is inside dropdown area.
+								// Coordinates are buffer-absolute; dropdown starts below menu bar.
 								dropX := x
-								dropY := menuBarHeight
+								dropY := wlWindow.TitleBarH + menuBarHeight
 								dropW := int32(200)
 								dropH := int32(len(item.submenu)) * 20
 								if mx >= dropX && mx < dropX+dropW && my >= dropY && my < dropY+dropH {
@@ -17329,6 +17364,41 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						// Click outside dropdown → close
 						openMenuIdx = -1
 						msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+					}
+				}
+			}
+
+			// WM_MOUSEMOVE (0x0200): while a menu is open, switch active item on hover.
+			if msg == 0x0200 && hwnd == mainHWND && openMenuIdx >= 0 && wlWindow != nil {
+				my := int32(lParam >> 16)
+				mx := int32(lParam & 0xFFFF)
+				if menuH, ok := hwndMenuBar[hwnd]; ok {
+					if md, ok2 := menus[menuH]; ok2 {
+						menuTop := wlWindow.TitleBarH
+						menuBot := wlWindow.TitleBarH + menuBarHeight
+						if my >= menuTop && my < menuBot {
+							// Hovering menu bar - switch to item under cursor
+							x := int32(4)
+							for i, item := range md.items {
+								if item.flags&0x0800 != 0 {
+									continue
+								}
+								label := menuStripAmpersand(item.text)
+								if label == "" {
+									continue
+								}
+								if item.flags&0x0010 == 0 {
+									continue
+								}
+								tw := int32(len([]rune(label)))*8 + 12
+								if mx >= x && mx < x+tw && i != openMenuIdx {
+									openMenuIdx = i
+									openMenuHwnd = hwnd
+									msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+								}
+								x += tw
+							}
+						}
 					}
 				}
 			}
@@ -19065,9 +19135,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if wlWindow != nil {
 				paintTree(hwnd)
 				// Re-commit after any EndPaint once the base frame is established.
-				// This shows GDI content (Scintilla text, toolbar icons) painted by guest WndProcs.
+				// Set repaintBuiltin so commitIfDone repaints builtin controls
+				// (tab strip, status bar) on top of guest-drawn content (Scintilla).
 				if hasBaseFrame {
 					frameReady = true
+					repaintBuiltin = true
 				}
 				commitIfDone()
 			}
