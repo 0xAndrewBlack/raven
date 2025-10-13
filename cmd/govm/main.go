@@ -6727,8 +6727,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 
 					catchAddr := imageBase + uint64(handler.FuncletRVA)
-					ravelog.Logf("[seh] C++ exception → catch funclet at 0x%x, establisher=0x%x contRVA=0x%x\n",
-						catchAddr, handler.EstablisherRBP, handler.ContinuationRVA)
+					ravelog.Logf("[seh] C++ exception → catch funclet at 0x%x, establisher=0x%x contRVA=0x%x catchObjOffset=%d\n",
+						catchAddr, handler.EstablisherRBP, handler.ContinuationRVA, handler.CatchObjOffset)
+
+					// Place the thrown object (or reference) at [EstablisherRBP + CatchObjOffset].
+					// RaiseException args layout for 0xe06d7363:
+					//   args[0] = magic (0x19930520 / 0x19930521)
+					//   args[1] = pointer to thrown object
+					//   args[2] = pointer to _ThrowInfo
+					nParams := ctx.Arg(2)
+					pArgs := ctx.Arg(3)
+					if handler.CatchObjOffset != 0 && nParams >= 2 && pArgs != 0 {
+						thrownObjPtr, _ := mem.Read64(pArgs + 8) // args[1]
+						dest := handler.EstablisherRBP + uint64(int64(handler.CatchObjOffset))
+						ravelog.Logf("[seh] placing thrown obj ptr=0x%x at [establisher+offset]=0x%x\n", thrownObjPtr, dest)
+						mem.Write64(dest, thrownObjPtr)
+					}
 
 					// If no funclet but we have a continuation, jump directly there
 					if handler.FuncletRVA == 0 && handler.ContinuationRVA != 0 {
@@ -6815,6 +6829,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			for i := uint64(0); i < 8; i++ {
 				ret, _ := ctx.Mem.Read64(sp + i*8)
 				fmt.Fprintf(os.Stderr, "  [RSP+0x%02x] = 0x%x\n", i*8, ret)
+			}
+			// STATUS_STACK_BUFFER_OVERRUN (GS cookie failure) - try to survive by
+			// rewinding the stack to the message loop if possible.
+			if code == 0xC0000417 {
+				fmt.Fprintf(os.Stderr, "govm: GS cookie failure - attempting to survive\n")
+				// Return 0 from TerminateProcess; caller (__report_gsfailure) will
+				// return as well. Execution continues from the instruction after CALL.
+				ctx.SetReturn(0)
+				return 0
 			}
 			os.Exit(int(code))
 			return 0
