@@ -742,6 +742,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// startTime aliases bootTime for handler closures that measure elapsed time.
 	startTime := bootTime
 
+	// Shared stdin reader for ReadConsoleW/ReadConsoleA (avoids data loss from
+	// creating a new bufio.Reader per call when input is piped).
+	stdinReader := bufio.NewReader(os.Stdin)
+
 	// Shared heap free-list (used by kernel32 HeapAlloc/HeapFree AND CRT malloc/free)
 	type freeBlock struct {
 		addr      uint64
@@ -6674,7 +6678,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			buf := ctx.Arg(1)
 			nCharsToRead := uint32(ctx.Arg(2))
 			charsRead := ctx.Arg(3)
-			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			line, _ := stdinReader.ReadString('\n')
 			runes := []rune(line)
 			if uint32(len(runes)) > nCharsToRead {
 				runes = runes[:nCharsToRead]
@@ -10799,7 +10803,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			buf := ctx.Arg(1)
 			nCharsToRead := uint32(ctx.Arg(2))
 			charsRead := ctx.Arg(3)
-			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			line, _ := stdinReader.ReadString('\n')
 			if uint32(len(line)) > nCharsToRead {
 				line = line[:nCharsToRead]
 			}
