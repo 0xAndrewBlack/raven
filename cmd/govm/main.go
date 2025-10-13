@@ -18356,6 +18356,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if !ok {
 							break
 						}
+						// ESC closes open menu dropdown
+						if ke.Pressed && ke.VK == 0x1B && openMenuIdx >= 0 {
+							openMenuIdx = -1
+							if wlWindow != nil && hasBaseFrame {
+								frameReady = true
+								commitIfDone()
+							} else {
+								msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+							}
+							continue
+						}
 						target := focusHwnd
 						if target == 0 {
 							target = mainHWND
@@ -18422,7 +18433,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 											if me.X >= x && me.X < x+tw && i != openMenuIdx {
 												openMenuIdx = i
 												openMenuHwnd = mainHWND
-												msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+												if wlWindow != nil && hasBaseFrame {
+													repaintBuiltin = true
+													frameReady = true
+													commitIfDone()
+												} else {
+													msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+												}
 											}
 											x += tw
 										}
@@ -18476,6 +18493,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 														}
 															// Force-render dropdown immediately without waiting for WM_PAINT.
 														if wlWindow != nil && hasBaseFrame {
+															// Force re-draw the menu bar to show highlight, then overlay dropdown.
+															repaintBuiltin = true
 															frameReady = true
 															commitIfDone()
 														} else {
