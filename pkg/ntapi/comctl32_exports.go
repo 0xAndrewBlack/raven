@@ -110,6 +110,8 @@ var comctl32Exports = []string{
 	"InitMUILanguage",
 	"InitializeFlatSB",
 	"LBItemFromPt",
+	"LoadIconMetric",
+	"LoadIconWithScaleDown",
 	"MakeDragList",
 	"MenuHelp",
 	"PropertySheet",
@@ -123,7 +125,44 @@ var comctl32Exports = []string{
 	"_TrackMouseEvent",
 }
 
+// comctl32OrdinalMap maps well-known Windows ordinals to named exports.
+// COMCTL32 uses ordinal imports heavily (subclass, FlatSB, etc.).
+var comctl32OrdinalMap = map[uint16]string{
+	381: "LoadIconWithScaleDown",
+	410: "SetWindowSubclass",
+	411: "GetWindowSubclass",
+	412: "RemoveWindowSubclass",
+	413: "DefSubclassProc",
+	// FlatSB ordinals
+	1:  "FlatSB_EnableScrollBar",
+	2:  "FlatSB_ShowScrollBar",
+	3:  "FlatSB_GetScrollRange",
+	4:  "FlatSB_GetScrollInfo",
+	5:  "FlatSB_GetScrollPos",
+	6:  "FlatSB_GetScrollProp",
+	7:  "FlatSB_SetScrollPos",
+	8:  "FlatSB_SetScrollInfo",
+	9:  "FlatSB_SetScrollRange",
+	10: "FlatSB_SetScrollProp",
+	11: "InitializeFlatSB",
+	12: "UninitializeFlatSB",
+	17: "DPA_Create",
+	18: "DPA_Destroy",
+	19: "DPA_GetPtr",
+	20: "DPA_GetPtrIndex",
+	21: "DPA_InsertPtr",
+	22: "DPA_DeletePtr",
+	23: "DPA_DeleteAllPtrs",
+}
+
 // GenerateComctl32 creates the synthetic comctl32.dll with all known exports.
 func GenerateComctl32(mem *mmu.MMU) *SynthPE {
-	return GenerateSynthDLL(mem, "comctl32.dll", comctl32Exports, comctl32IDBase)
+	synth := GenerateSynthDLL(mem, "comctl32.dll", comctl32Exports, comctl32IDBase)
+	// Add real Windows ordinal → address mappings
+	for ord, name := range comctl32OrdinalMap {
+		if addr, ok := synth.Exports[name]; ok {
+			synth.ExportOrds[ord] = addr
+		}
+	}
+	return synth
 }

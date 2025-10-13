@@ -500,6 +500,20 @@ for _, synth := range autoSynthDLLs {
 	})
 }
 
+// Add well-known ordinal aliases for auto-synth DLLs.
+for _, synth := range autoSynthDLLs {
+	switch strings.ToLower(synth.Name) {
+	case "shell32.dll":
+		// Map ordinal 165 → SHCreateDirectoryExW or its placeholder
+		for _, name := range []string{"SHCreateDirectoryExW", "ord_165"} {
+			if addr, ok := synth.Exports[name]; ok {
+				synth.ExportOrds[165] = addr
+				break
+			}
+		}
+	}
+}
+
 // Resolve imports for the main module
 loader.ResolveImports(mem, result.MainModule, loadedModules)
 
@@ -14499,6 +14513,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(comctl32, "HIMAGELIST_QueryInterface", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0x80004002) // E_NOINTERFACE
+			return 0
+		})
+
+		// ── Icon loading ────────────────────────────────────────────────────
+		d.RegisterAutoStubHandler(comctl32, "LoadIconWithScaleDown", func(ctx *ntapi.TrapContext) uint32 {
+			// LoadIconWithScaleDown(hInst, pszName, cx, cy, phico) → HRESULT
+			phico := ctx.Arg(4)
+			if phico != 0 {
+				ctx.Mem.Write64(phico, 0) // NULL icon
+			}
+			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(comctl32, "LoadIconMetric", func(ctx *ntapi.TrapContext) uint32 {
+			phico := ctx.Arg(3)
+			if phico != 0 {
+				ctx.Mem.Write64(phico, 0)
+			}
+			ctx.SetReturn(0) // S_OK
 			return 0
 		})
 
