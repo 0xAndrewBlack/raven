@@ -14774,6 +14774,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 	hwndChildren := make(map[uint64]*controlState)
 	hwndTitle := make(map[uint64]string)
+	// hwndExplicitlyHidden tracks HWNDs that the guest explicitly hid via
+	// ShowWindow(SW_HIDE). These must NOT be auto-shown when the parent is
+	// shown or when they receive a SetWindowPos/MoveWindow with non-zero size.
+	hwndExplicitlyHidden := make(map[uint64]bool)
 
 	// clientAreaOrigin returns the absolute (surface) coordinates of a
 	// window's client-area top-left. For mainHWND with a menu bar the
@@ -16134,7 +16138,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0, true
 
 		case 0x0001: // WM_CREATE
-			cs.visible = true
+			// Visibility is set in CreateWindowExW from WS_VISIBLE; do NOT override here.
 			// If there's a guest WndProc, let it handle WM_CREATE too
 			if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
 				return 0, false
@@ -17479,6 +17483,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "ShowWindow", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			nCmdShow := ctx.Arg(1)
+			ravelog.Logf("[show] ShowWindow hwnd=0x%x nCmdShow=%d\n", hwnd, nCmdShow)
 			if hwnd == mainHWND && wlWindow != nil {
 				// ReactOS co_WinPosSendSizeMove: WM_SIZE lParam = MAKELONG(clientW, clientH).
 				// Client height excludes the menu bar (which is NC area in Win32).
@@ -17493,12 +17498,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// WM_ACTIVATE(WA_ACTIVE=1): NPP's WndProc calls SetFocus(scintilla) here.
 				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0006, 1, 0}) // WM_ACTIVATE
 				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0}) // WM_PAINT
-				// Win32: ShowWindow on a parent sends WM_SHOWWINDOW (0x0018) to all children.
-				// DefWindowProc sets WS_VISIBLE on children. Simulate: mark all children visible.
+				// Win32: ShowWindow on a parent cascades visibility only to children that
+				// were created with WS_VISIBLE (0x10000000). Windows created without
+				// WS_VISIBLE are intentionally hidden and must be shown explicitly.
+				const wsVisible = uint32(0x10000000)
 				if nCmdShow != 0 {
 					for h, cs := range hwndChildren {
-						if !cs.visible {
-							cs.visible = true
+						if !cs.visible && !hwndExplicitlyHidden[h] && cs.style&wsVisible != 0 {
+								cs.visible = true
 							if wp, ok2 := hwndWndProc[h]; ok2 && wp != 0 {
 								msgQueue = append(msgQueue, queuedMsg{h, 0x000F, 0, 0})
 							}
@@ -17509,6 +17516,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if cs, ok := hwndChildren[hwnd]; ok {
 				wasVisible := cs.visible
 				cs.visible = nCmdShow != 0 // SW_HIDE = 0
+				if nCmdShow == 0 {
+					hwndExplicitlyHidden[hwnd] = true
+				} else {
+					delete(hwndExplicitlyHidden, hwnd)
+				}
 				// Queue WM_PAINT when a window with a guest WndProc becomes visible
 				if cs.visible && !wasVisible {
 					if wp, ok2 := hwndWndProc[hwnd]; ok2 && wp != 0 {
@@ -17733,15 +17745,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if w > 0 && w < 0x7FFF { ci.w = w }
 					if h > 0 && h < 0x7FFF { ci.h = h }
 				}
-				if flags&swpShowWindow != 0 {
+					if flags&swpShowWindow != 0 {
 					ci.visible = true
+					delete(hwndExplicitlyHidden, hwnd)
 				}
 				if flags&swpHideWindow != 0 {
 					ci.visible = false
+					hwndExplicitlyHidden[hwnd] = true
 				}
-				// Auto-show: if window is sized non-zero, treat as implicitly visible.
-				// (Win32 WM_SHOWWINDOW from parent's ShowWindow may not fire in our HLE)
-				if ci.w > 0 && ci.h > 0 {
+				// Auto-show only when the size was explicitly set in this call (SWP_NOSIZE not
+				// set) and the resulting size is non-zero, and the guest never hid the window.
+				if flags&swpNoSize == 0 && ci.w > 0 && ci.h > 0 && !hwndExplicitlyHidden[hwnd] {
 					ci.visible = true
 				}
 				ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x → %d,%d %dx%d visible=%v\n", hwnd, ci.className, flags, ci.x, ci.y, ci.w, ci.h, ci.visible)
@@ -17886,8 +17900,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ci.y = newY + oy
 				if newW > 0 { ci.w = newW }
 				if newH > 0 { ci.h = newH }
-				// Auto-show: sized non-zero → implicitly visible
-				if ci.w > 0 && ci.h > 0 {
+				sizeChanged := ci.w != prevW || ci.h != prevH
+				// Auto-show only if size actually changed to non-zero, and guest never hid it.
+				if sizeChanged && ci.w > 0 && ci.h > 0 && !hwndExplicitlyHidden[hwnd] {
 					ci.visible = true
 				}
 				if wnd := win32.Global.Get(hwnd); wnd != nil {
@@ -17895,7 +17910,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				// Queue WM_SIZE / WM_MOVE for windows with a guest WndProc
 				if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
-					if ci.w != prevW || ci.h != prevH {
+					if sizeChanged {
 						lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
 						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
 					}
@@ -17905,7 +17920,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0003, 0, uint64(uint16(relX)) | (uint64(uint16(relY)) << 16)})
 					}
 				}
-				if bRepaint != 0 {
+				// Only repaint if size changed to a valid value (not just a position update).
+				if bRepaint != 0 && sizeChanged && ci.w > 0 && ci.h > 0 {
 					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
 				}
 			}
@@ -18129,6 +18145,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if okW && okR {
 				rsp := rr.ReadReg(4)
 				retAddr, _ := mem.Read64(rsp)
+				// Validate retAddr: must be a plausible code address (>= 16MB).
+				// Values below 0x1000000 are HWNDs or other small handles stored on the
+				// stack (e.g., as shadow space), not valid return addresses. Using such a
+				// value as a return target after WndProc would crash the CPU.
+				if retAddr < 0x1000000 {
+					ravelog.Logf("[sendmsg] skipping sync dispatch: bad retAddr=0x%x hwnd=0x%x msg=0x%x\n",
+						retAddr, hwnd, msg)
+					ctx.SetReturn(0)
+					return 0
+				}
 				syncStack = append(syncStack, syncDispatchFrame{
 					queue:               []syncDispatch{},
 					retAddr:             retAddr,
@@ -19236,7 +19262,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// This matches Win32 WS_CLIPCHILDREN ordering: parent → children.
 				var childPaints []queuedMsg
 				for h, cs := range hwndChildren {
-					if hwndWndProc[h] != 0 && (cs.visible || (cs.w > 0 && cs.h > 0)) {
+					if hwndWndProc[h] != 0 && cs.visible {
 						childPaints = append(childPaints, queuedMsg{h, 0x000F, 0, 0})
 					}
 				}
@@ -19484,8 +19510,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// Scintilla calls InvalidateRect → mainHWND erases again → loop.
 			target := mainHWND
 			if hwnd != 0 && hwnd != mainHWND {
-				if _, ok := hwndChildren[hwnd]; ok {
+				if cs, ok := hwndChildren[hwnd]; ok && cs.visible {
 					target = hwnd
+				} else if _, ok := hwndChildren[hwnd]; ok {
+					// Child exists but is invisible: no paint needed.
+					ctx.SetReturn(1)
+					return 0
 				}
 			}
 			msgQueue = append(msgQueue, queuedMsg{target, 0x000F, 0, 0})
@@ -19496,8 +19526,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hwnd := ctx.Arg(0)
 			target := mainHWND
 			if hwnd != 0 && hwnd != mainHWND {
-				if _, ok := hwndChildren[hwnd]; ok {
+				if cs, ok := hwndChildren[hwnd]; ok && cs.visible {
 					target = hwnd
+				} else if _, ok := hwndChildren[hwnd]; ok {
+					ctx.SetReturn(1)
+					return 0
 				}
 			}
 			msgQueue = append(msgQueue, queuedMsg{target, 0x000F, 0, 0})
