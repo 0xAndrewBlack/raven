@@ -15618,6 +15618,67 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// drawMenuOverlay draws the open dropdown menu on top of everything else.
 	// Must be called AFTER paintTree so the toolbar/rebar don't overwrite it.
+
+	// ncTextFont is a lazily-created Font for NC area text rendering (menu bar, tabs, status bar).
+	// Uses TrueType if any faces are loaded; otherwise returns nil (bitmap fallback).
+	ncTextFont := func(size int32) *gdi.Font {
+		if !gdi.HasTTFFonts() {
+			return nil
+		}
+		faceID := gdi.ResolveFontFace("segoe ui")
+		if faceID < 0 {
+			faceID = gdi.ResolveFontFace("dejavu sans")
+		}
+		if faceID < 0 {
+			faceID = gdi.ResolveFontFace("liberation sans")
+		}
+		if faceID < 0 {
+			faces := gdi.ListFaces()
+			if len(faces) > 0 {
+				faceID = faces[0].ID
+			}
+		}
+		if faceID < 0 {
+			return nil
+		}
+		cellH, asc, desc, aveW := gdi.FaceMetrics(faceID, size)
+		return &gdi.Font{
+			FaceID:       faceID,
+			Height:       size,
+			CellHeight:   cellH,
+			Ascent:       asc,
+			Descent:      desc,
+			AveCharWidth: aveW,
+			MaxCharWidth: aveW * 2,
+			Weight:       400,
+		}
+	}
+
+	// ncDrawText draws text at absolute surface coordinates using GDI TrueType if available,
+	// otherwise falls back to the bitmap DrawTextAbs.
+	ncDrawText := func(x, y int32, text string, fg, bg uint32, opaque bool, size int32) {
+		f := ncTextFont(size)
+		if f == nil {
+			wlWindow.DrawTextAbs(x, y, text, fg, bg, opaque)
+			return
+		}
+		syncScreenSurface()
+		h, dc := gdiMgr.AllocScreenDC()
+		dc.OriginX = 0
+		dc.OriginY = 0
+		dc.Font = f
+		dc.TextColor = fg
+		dc.BkColor = bg
+		// Fill background if opaque
+		if opaque {
+			runes := []rune(text)
+			tw := int32(len(runes)) * f.AveCharWidth
+			dc.FillRect(x, y, x+tw, y+f.CellHeight, bg)
+		}
+		dc.TextOut(x, y, text, opaque)
+		gdiMgr.DeleteDC(h)
+	}
+
 	var drawMenuOverlay func()
 	drawMenuOverlay = func() {
 		if wlWindow == nil || openMenuIdx < 0 {
@@ -15680,7 +15741,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if k := strings.IndexByte(sl, '\t'); k >= 0 {
 							sl = sl[:k]
 						}
-						wlWindow.DrawTextAbs(dropX+20, iy+3, sl, 0x000000, sysColors[15], true)
+						ncDrawText(dropX+20, iy+3, sl, 0x000000, sysColors[15], true, 12)
 					}
 				}
 				break
@@ -15744,7 +15805,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wlWindow.DrawRectAbs(cs.x+2, cs.y+2, cs.x+cs.w-2, cs.y+cs.h-2, sysColors[5])
 				// Draw text content
 				if cs.text != "" {
-					wlWindow.DrawTextAbs(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[5], true)
+					ncDrawText(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[5], true, 12)
 				}
 				// Text cursor (blinking caret) - tracks last line for multiline edits
 				cursorX := cs.x + 4
@@ -15780,12 +15841,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRectAbs(left, cs.y+cs.h-2, right-1, cs.y+cs.h-1, sysColors[20]) // bottom highlight
 						wlWindow.DrawRectAbs(right-2, cs.y+3, right-1, cs.y+cs.h-1, sysColors[20])   // right highlight
 						if i < len(cs.sbTexts) && cs.sbTexts[i] != "" {
-							wlWindow.DrawTextAbs(left+4, cs.y+4, cs.sbTexts[i], 0x000000, sysColors[15], true)
+							ncDrawText(left+4, cs.y+4, cs.sbTexts[i], 0x000000, sysColors[15], true, 12)
 						}
 						left = right
 					}
 				} else if cs.text != "" {
-					wlWindow.DrawTextAbs(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[15], true)
+					ncDrawText(cs.x+4, cs.y+4, cs.text, 0x000000, sysColors[15], true, 12)
 				}
 				// Sizing grip (small triangular area in bottom-right)
 				gripX := cs.x + cs.w - 14
@@ -15799,7 +15860,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case "static":
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				if cs.text != "" {
-					wlWindow.DrawTextAbs(cs.x+2, cs.y+2, cs.text, 0x000000, sysColors[15], true)
+					ncDrawText(cs.x+2, cs.y+2, cs.text, 0x000000, sysColors[15], true, 12)
 				}
 			case "button":
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
@@ -15810,7 +15871,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if cs.text != "" {
 					tx := cs.x + (cs.w-int32(len(cs.text)*8))/2
 					ty := cs.y + (cs.h-16)/2
-					wlWindow.DrawTextAbs(tx, ty, cs.text, 0x000000, sysColors[15], true)
+					ncDrawText(tx, ty, cs.text, 0x000000, sysColors[15], true, 12)
 				}
 			case "systreeview32":
 				// 3D sunken border + white area
@@ -15850,7 +15911,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							}
 							// Draw item text
 							if ti.text != "" {
-								wlWindow.DrawTextAbs(tx, ty+1, ti.text, 0x000000, sysColors[5], true)
+								ncDrawText(tx, ty+1, ti.text, 0x000000, sysColors[5], true, 12)
 							}
 							ty += itemHeight
 							if ti.expanded {
@@ -15874,7 +15935,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					colX := cs.x + 2
 					for _, col := range cs.lvColumns {
 						if col.text != "" {
-							wlWindow.DrawTextAbs(colX+4, cs.y+3, col.text, 0x000000, sysColors[15], true)
+							ncDrawText(colX+4, cs.y+3, col.text, 0x000000, sysColors[15], true, 12)
 						}
 						colX += col.width
 						// Column separator
@@ -15899,7 +15960,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					wlWindow.DrawRectAbs(tx+tabW-1, cs.y, tx+tabW, cs.y+tabH, sysColors[16])
 					wlWindow.DrawRectAbs(tx, cs.y, tx+tabW, cs.y+1, sysColors[16])
 					if i < len(cs.tabTitles) && cs.tabTitles[i] != "" {
-						wlWindow.DrawTextAbs(tx+4, cs.y+4, cs.tabTitles[i], 0x000000, bgCol, false)
+						ncDrawText(tx+4, cs.y+4, cs.tabTitles[i], 0x000000, bgCol, false, 12)
 					}
 					tx += tabW
 				}
@@ -16719,7 +16780,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						// tab title
 						if i < len(cs.tabTitles) && cs.tabTitles[i] != "" {
 							textColor := uint32(0x000000)
-							wlWindow.DrawTextAbs(x+4, cs.y+4, cs.tabTitles[i], textColor, bgCol, false)
+							ncDrawText(x+4, cs.y+4, cs.tabTitles[i], textColor, bgCol, false, 12)
 						}
 						x += tabW
 					}
@@ -18032,9 +18093,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								tw := int32(len([]rune(label)))*8 + 12
 								if openMenuIdx == i && openMenuHwnd == hwnd {
 									wlWindow.DrawRectAbs(x, wlWindow.TitleBarH, x+tw, clientTop-1, sysColors[20])
-									wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[20], true)
+									ncDrawText(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[20], true, 12)
 								} else {
-									wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[15], true)
+									ncDrawText(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[15], true, 12)
 								}
 								x += tw
 							}
@@ -19790,9 +19851,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							tw := int32(len([]rune(label)))*8 + 12
 							if openMenuIdx == i && openMenuHwnd == hwnd {
 								wlWindow.DrawRectAbs(x, wlWindow.TitleBarH, x+tw, clientTop-1, sysColors[20])
-								wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[20], true)
+								ncDrawText(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[20], true, 12)
 							} else {
-								wlWindow.DrawTextAbs(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[15], true)
+								ncDrawText(x+4, wlWindow.TitleBarH+3, label, 0x000000, sysColors[15], true, 12)
 							}
 							x += tw
 						}
