@@ -16654,7 +16654,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						continue
 					}
 					if clickX >= x && clickX < x+btnW {
-						if btn.fsState&0x04 != 0 { // enabled (TBSTATE_ENABLED=0x04 means enabled)
+						if btn.fsState&0x08 == 0 { // dispatch unless TBSTATE_HIDDEN (0x08)
 							// WM_COMMAND: LOWORD=cmdID, HIWORD=1 (BN_CLICKED), lParam=toolbar HWND
 							msgQueue = append(msgQueue, queuedMsg{cs.parentHWND, 0x0111,
 								uint64(uint16(btn.idCommand)) | (1 << 16), hwnd})
@@ -19284,6 +19284,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 
+			var lastSyntheticFrameNs int64
 			for {
 				// 1. Drain already-queued messages.
 				checkTimers()
@@ -19331,9 +19332,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return 0
 				}
 
-				// 6. Synthetic WM_PAINT frame.
+				// 6. Synthetic WM_PAINT frame - rate-limited to ~60fps.
 				// mainHWND paints first (fills background), children paint on top.
 				// This matches Win32 WS_CLIPCHILDREN ordering: parent → children.
+				nowNs := time.Now().UnixNano()
+				if nowNs-lastSyntheticFrameNs < 16_000_000 {
+					continue
+				}
+				lastSyntheticFrameNs = nowNs
 				var childPaints []queuedMsg
 				for h, cs := range hwndChildren {
 					if hwndWndProc[h] != 0 && cs.visible {
@@ -22977,6 +22983,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ctx.Mem.Write16(pv+18, 32)                 // bmBitsPixel
 					ctx.Mem.Write32(pv+20, 0)                  // bmBits
 				}
+			case gdi.ObjFont:
+				ctx.SetReturn(92) // sizeof(LOGFONTW)
+				if pv != 0 && obj.Font != nil {
+					f := obj.Font
+					ctx.Mem.Write32(pv,    uint32(f.Height))
+					ctx.Mem.Write32(pv+4,  uint32(f.Width))
+					ctx.Mem.Write32(pv+8,  uint32(f.Escapement))
+					ctx.Mem.Write32(pv+12, uint32(f.Orientation))
+					w := f.Weight; if w == 0 { w = 400 }
+					ctx.Mem.Write32(pv+16, uint32(w))
+					italic := byte(0); if f.Italic { italic = 1 }
+					ctx.Mem.Write8(pv+20, italic)
+					underline := byte(0); if f.Underline { underline = 1 }
+					ctx.Mem.Write8(pv+21, underline)
+					strike := byte(0); if f.StrikeOut { strike = 1 }
+					ctx.Mem.Write8(pv+22, strike)
+					ctx.Mem.Write8(pv+23, f.CharSet)
+					ctx.Mem.Write8(pv+24, f.OutPrecision)
+					ctx.Mem.Write8(pv+25, f.ClipPrecision)
+					ctx.Mem.Write8(pv+26, f.Quality)
+					ctx.Mem.Write8(pv+27, f.PitchFamily)
+					// lfFaceName: WCHAR[32] at offset 28
+					face := []rune(f.FaceName)
+					if len(face) > 31 { face = face[:31] }
+					for i, ch := range face {
+						ctx.Mem.Write16(pv+28+uint64(i)*2, uint16(ch))
+					}
+					ctx.Mem.Write16(pv+28+uint64(len(face))*2, 0) // NUL terminator
+				}
 			default:
 				ctx.SetReturn(0)
 			}
@@ -24010,6 +24045,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			first := int(ctx.Arg(1))
 			last := int(ctx.Arg(2))
 			pBuf := ctx.Arg(3)
+			if last < first || last-first > 0xFFFF {
+				ctx.SetReturn(0)
+				return 0
+			}
 			dc := getDC(hdc)
 			f := dc.Font
 			if f == nil { f = gdi.DefaultFont() }
@@ -24027,6 +24066,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			first := int(ctx.Arg(1))
 			last := int(ctx.Arg(2))
 			pBuf := ctx.Arg(3)
+			if last < first || last-first > 0xFFFF {
+				ctx.SetReturn(0)
+				return 0
+			}
 			dc := getDC(hdc)
 			f := dc.Font
 			if f == nil { f = gdi.DefaultFont() }
@@ -24044,6 +24087,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			first := int(ctx.Arg(1))
 			last := int(ctx.Arg(2))
 			pBuf := ctx.Arg(3)
+			if last < first || last-first > 0xFFFF {
+				ctx.SetReturn(0)
+				return 0
+			}
 			dc := getDC(hdc)
 			f := dc.Font
 			if f == nil { f = gdi.DefaultFont() }
@@ -24117,26 +24164,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.Mem.Write32(tm+32, 0)                             // tmOverhang
 			ctx.Mem.Write32(tm+36, 96)                            // tmDigitizedAspectX
 			ctx.Mem.Write32(tm+40, 96)                            // tmDigitizedAspectY
-			ctx.Mem.Write32(tm+48, 0xFF)                          // tmLastChar
-			ctx.Mem.Write32(tm+52, uint32(' '))                   // tmDefaultChar
-			ctx.Mem.Write32(tm+56, uint32(' '))                   // tmBreakChar
-			ctx.Mem.Write8(tm+60, 0)                              // tmItalic
-			ctx.Mem.Write8(tm+61, 0)                              // tmUnderlined
-			ctx.Mem.Write8(tm+62, 0)                              // tmStruckOut
-			ctx.Mem.Write8(tm+63, 4|32)                           // tmPitchAndFamily=variable|TrueType
-			ctx.Mem.Write8(tm+64, 0)                              // tmCharSet=ANSI
-			// OUTLINETEXTMETRICW fields after TEXTMETRICW (offset 64)
-			otm := pOTM + 68
-			ctx.Mem.Write32(otm,   uint32(f.Ascent))  // otmAscent
-			ctx.Mem.Write32(otm+4, uint32(ch-f.Ascent)) // otmDescent
-			ctx.Mem.Write32(otm+8, 0)                  // otmLineGap
-			ctx.Mem.Write32(otm+12, uint32(f.Ascent)) // otmCapEmHeight (approx cap height)
-			ctx.Mem.Write32(otm+16, uint32(f.Ascent)) // otmXHeight
-			// RECT otmrcFontBox
-			ctx.Mem.Write32(otm+20, 0)
-			ctx.Mem.Write32(otm+24, uint32(-int32(ch-f.Ascent)))
-			ctx.Mem.Write32(otm+28, uint32(f.AveCharWidth))
-			ctx.Mem.Write32(otm+32, uint32(f.Ascent))
+			// TEXTMETRICW char fields (WCHAR, 2 bytes each) and BYTE fields
+			italic := byte(0); if f.Italic { italic = 1 }
+			ctx.Mem.Write16(tm+44, 0x0020) // tmFirstChar
+			ctx.Mem.Write16(tm+46, 0x00FF) // tmLastChar
+			ctx.Mem.Write16(tm+48, 0x003F) // tmDefaultChar '?'
+			ctx.Mem.Write16(tm+50, 0x0020) // tmBreakChar ' '
+			ctx.Mem.Write8(tm+52, italic)  // tmItalic
+			ctx.Mem.Write8(tm+53, 0)       // tmUnderlined
+			ctx.Mem.Write8(tm+54, 0)       // tmStruckOut
+			ctx.Mem.Write8(tm+55, 1|32)    // tmPitchAndFamily = TMPF_FIXED_PITCH|TMPF_TRUETYPE
+			ctx.Mem.Write8(tm+56, 0)       // tmCharSet = ANSI_CHARSET
+			// OUTLINETEXTMETRICW fields: pOTM+4(TEXTMETRICW,60)+otmFiller(1)+PANOSE(10)+pad(1)=pOTM+76
+			ctx.Mem.Write32(pOTM+96,  2048)                       // otmEMSquare
+			ctx.Mem.Write32(pOTM+100, uint32(f.Ascent))           // otmAscent
+			ctx.Mem.Write32(pOTM+104, uint32(-int32(f.Descent)))  // otmDescent (negative)
+			ctx.Mem.Write32(pOTM+108, 0)                          // otmLineGap
+			ctx.Mem.Write32(pOTM+112, uint32(f.Ascent))           // otmsCapEmHeight
+			ctx.Mem.Write32(pOTM+116, uint32(f.Ascent*2/3))       // otmsXHeight
+			// RECT otmrcFontBox at pOTM+120
+			ctx.Mem.Write32(pOTM+120, 0)
+			ctx.Mem.Write32(pOTM+124, uint32(-int32(f.Descent)))
+			ctx.Mem.Write32(pOTM+128, uint32(f.AveCharWidth))
+			ctx.Mem.Write32(pOTM+132, uint32(f.Ascent))
 			ctx.SetReturn(otmSize)
 			return 0
 		})
