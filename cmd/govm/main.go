@@ -17959,6 +17959,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			m[index] = newVal
 			win32.Global.SetLong(hwnd, index, newVal)
 			ravelog.Logf("[wndlong] SetWindowLongPtrW hwnd=0x%x index=%d val=0x%x\n", hwnd, index, newVal)
+			// GWL_STYLE (-16): sync cs.style and cs.visible from WS_VISIBLE bit.
+			if index == -16 {
+				if cs, ok := hwndChildren[hwnd]; ok {
+					const wsVisible = uint32(0x10000000)
+					cs.style = uint32(newVal)
+					nowVisible := cs.style&wsVisible != 0
+					if nowVisible && !cs.visible {
+						cs.visible = true
+						delete(hwndExplicitlyHidden, hwnd)
+					} else if !nowVisible && cs.visible {
+						cs.visible = false
+					}
+				}
+			}
 			ctx.SetReturn(old)
 			return 0
 		})
@@ -17984,6 +17998,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			old := m[index]
 			m[index] = newVal
+			if index == -16 {
+				if cs, ok := hwndChildren[hwnd]; ok {
+					const wsVisible = uint32(0x10000000)
+					cs.style = uint32(newVal)
+					nowVisible := cs.style&wsVisible != 0
+					if nowVisible && !cs.visible {
+						cs.visible = true
+						delete(hwndExplicitlyHidden, hwnd)
+					} else if !nowVisible && cs.visible {
+						cs.visible = false
+					}
+				}
+			}
 			ctx.SetReturn(old)
 			return 0
 		})
