@@ -11,6 +11,7 @@ import (
 "io"
 "math"
 "os"
+"os/exec"
 "path/filepath"
 "reflect"
 "runtime/pprof"
@@ -66,6 +67,36 @@ func utf16Encode(s string) []uint16 {
 		}
 	}
 	return out
+}
+
+// shellescape wraps a string in single quotes for safe use in shell commands.
+func shellescape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// clipFormatName returns the standard Windows name for a predefined clipboard format,
+// or empty string for unknown formats. Custom format names are tracked separately.
+func clipFormatName(format uint32) string {
+	switch format {
+	case 1:  return "CF_TEXT"
+	case 2:  return "CF_BITMAP"
+	case 3:  return "CF_METAFILEPICT"
+	case 4:  return "CF_SYLK"
+	case 5:  return "CF_DIF"
+	case 6:  return "CF_TIFF"
+	case 7:  return "CF_OEMTEXT"
+	case 8:  return "CF_DIB"
+	case 9:  return "CF_PALETTE"
+	case 10: return "CF_PENDATA"
+	case 11: return "CF_RIFF"
+	case 12: return "CF_WAVE"
+	case 13: return "CF_UNICODETEXT"
+	case 14: return "CF_ENHMETAFILE"
+	case 15: return "CF_HDROP"
+	case 16: return "CF_LOCALE"
+	case 17: return "CF_DIBV5"
+	}
+	return ""
 }
 
 func main() {
@@ -6427,7 +6458,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalSize", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // can't determine
+			hMem := ctx.Arg(0)
+			if hMem == 0 { ctx.SetReturn(0); return 0 }
+			_, size, mapped, _ := mem.QueryRegion(hMem)
+			if mapped { ctx.SetReturn(size) } else { ctx.SetReturn(0) }
 			return 0
 		})
 
@@ -10322,8 +10356,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalHandle", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
-			return 0
+			// GMEM_FIXED: handle == pointer, so GlobalHandle(ptr) == ptr
+			ctx.SetReturn(ctx.Arg(0)); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalMemoryStatus", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // no-op
@@ -14258,6 +14292,100 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(0) // FALSE - user cancelled
 			return 0
 		})
+
+		// GetOpenFileNameW / GetSaveFileNameW - use alacritty+fzf for file picking
+		// OPENFILENAMEW struct offsets (Win64):
+		//   +0  lStructSize(4)  +8  hwndOwner(8)  +16 hInstance(8)
+		//   +24 lpstrFilter(8)  +32 lpstrCustomFilter(8)  +40 nMaxCustFilter(4)  +44 nFilterIndex(4)
+		//   +48 lpstrFile(8)    +56 nMaxFile(4)   +64 lpstrFileTitle(8)  +72 nMaxFileTitle(4)
+		//   +80 lpstrInitialDir(8)  +88 lpstrTitle(8)  +96 Flags(4)
+		//   +100 nFileOffset(2)  +102 nFileExtension(2)  +104 lpstrDefExt(8)
+		showFileDialog := func(ctx *ntapi.TrapContext, saving bool) {
+			pOFN := ctx.Arg(0)
+			if pOFN == 0 { ctx.SetReturn(0); return }
+
+			lpstrFile, _ := ctx.Mem.Read64(pOFN + 48)
+			nMaxFile, _  := ctx.Mem.Read32(pOFN + 56)
+			lpstrInitDir, _ := ctx.Mem.Read64(pOFN + 80)
+			lpstrTitle, _   := ctx.Mem.Read64(pOFN + 88)
+			lpstrFilter, _  := ctx.Mem.Read64(pOFN + 24)
+			_ = lpstrFilter
+
+			initDir := "."
+			if lpstrInitDir != 0 {
+				initDir = readGuestUTF16(lpstrInitDir)
+			}
+			dialogTitle := "Open File"
+			if saving { dialogTitle = "Save As" }
+			if lpstrTitle != 0 {
+				if t := readGuestUTF16(lpstrTitle); t != "" { dialogTitle = t }
+			}
+
+			// Write result to a temp file
+			tmpFile := os.TempDir() + "/raven_filepick.txt"
+			os.Remove(tmpFile)
+
+			var cmd *exec.Cmd
+			if saving {
+				// For save: use a simple bash read prompt in alacritty
+				script := `cd ` + shellescape(initDir) + ` && read -e -p "Save as: " -i "" fn && echo "$fn" > ` + shellescape(tmpFile)
+				cmd = exec.Command("alacritty", "--title", dialogTitle, "-e", "bash", "-c", script)
+			} else {
+				// For open: use fzf for file selection
+				script := `cd ` + shellescape(initDir) + ` && find . -type f 2>/dev/null | sed 's|^./||' | sort | fzf --prompt="` + dialogTitle + `> " --height=80% > ` + shellescape(tmpFile)
+				cmd = exec.Command("alacritty", "--title", dialogTitle, "-e", "bash", "-c", script)
+			}
+
+			// Run synchronously - blocks until dialog closes
+			if err := cmd.Run(); err != nil {
+				ravelog.Logf("[comdlg32] %s: alacritty exit: %v\n", dialogTitle, err)
+				ctx.SetReturn(0); return
+			}
+
+			data, err := os.ReadFile(tmpFile)
+			os.Remove(tmpFile)
+			if err != nil || len(data) == 0 {
+				ctx.SetReturn(0); return
+			}
+			result := strings.TrimRight(string(data), "\r\n")
+			if result == "" { ctx.SetReturn(0); return }
+
+			// Make absolute
+			if !filepath.IsAbs(result) {
+				result = filepath.Join(initDir, result)
+			}
+
+			// Write UTF-16 result to lpstrFile
+			if lpstrFile == 0 || nMaxFile == 0 {
+				ctx.SetReturn(1); return
+			}
+			ws := utf16Encode(result)
+			maxW := int(nMaxFile) - 1
+			if len(ws) > maxW { ws = ws[:maxW] }
+			for i, w := range ws {
+				ctx.Mem.Write16(lpstrFile+uint64(i)*2, w)
+			}
+			ctx.Mem.Write16(lpstrFile+uint64(len(ws))*2, 0)
+
+			// nFileOffset = offset of filename part (after last backslash/slash)
+			slash := strings.LastIndexAny(result, `/\`)
+			nFileOffset := uint16(slash + 1) // chars, 0-based
+			// nFileExtension = offset of extension dot
+			dot := strings.LastIndex(result, ".")
+			nFileExt := uint16(0)
+			if dot > slash { nFileExt = uint16(dot) }
+			ctx.Mem.Write16(pOFN+100, nFileOffset)
+			ctx.Mem.Write16(pOFN+102, nFileExt)
+
+			ravelog.Logf("[comdlg32] %s → %q\n", dialogTitle, result)
+			ctx.SetReturn(1)
+		}
+		d.RegisterAutoStubHandler(comdlg32, "GetOpenFileNameW", func(ctx *ntapi.TrapContext) uint32 {
+			showFileDialog(ctx, false); return 0
+		})
+		d.RegisterAutoStubHandler(comdlg32, "GetSaveFileNameW", func(ctx *ntapi.TrapContext) uint32 {
+			showFileDialog(ctx, true); return 0
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -17389,16 +17517,64 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "FindWindowW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // not found
-			return 0
+			// FindWindowW(lpClassName, lpWindowName) - search all known HWNDs
+			wantClass := strings.ToLower(readGuestUTF16(ctx.Arg(0)))
+			wantTitle := readGuestUTF16(ctx.Arg(1))
+			for h, cs := range hwndChildren {
+				if wantClass != "" && strings.ToLower(cs.className) != wantClass { continue }
+				if wantTitle != "" {
+					title := cs.text
+					if t, ok := hwndTitle[h]; ok { title = t }
+					if title != wantTitle { continue }
+				}
+				ctx.SetReturn(h); return 0
+			}
+			// Check main window
+			if wantClass == "" || wantClass == "notepad++" {
+				if wantTitle == "" || hwndTitle[mainHWND] == wantTitle {
+					ctx.SetReturn(mainHWND); return 0
+				}
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "FindWindowExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
-			return 0
+			// FindWindowExW(hwndParent, hwndChildAfter, lpClassName, lpWindowName)
+			parent := ctx.Arg(0)
+			childAfter := ctx.Arg(1)
+			wantClass := strings.ToLower(readGuestUTF16(ctx.Arg(2)))
+			wantTitle := readGuestUTF16(ctx.Arg(3))
+			found := childAfter == 0 // if childAfter==0, match first; else skip until we see childAfter
+			for h, cs := range hwndChildren {
+				if parent != 0 && cs.parentHWND != parent { continue }
+				if !found { if h == childAfter { found = true }; continue }
+				if wantClass != "" && strings.ToLower(cs.className) != wantClass { continue }
+				if wantTitle != "" {
+					title := cs.text
+					if t, ok := hwndTitle[h]; ok { title = t }
+					if title != wantTitle { continue }
+				}
+				ctx.SetReturn(h); return 0
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "FindWindowExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
-			return 0
+			parent := ctx.Arg(0)
+			childAfter := ctx.Arg(1)
+			wantClass := strings.ToLower(readGuestString(ctx.Arg(2)))
+			wantTitle := readGuestString(ctx.Arg(3))
+			found := childAfter == 0
+			for h, cs := range hwndChildren {
+				if parent != 0 && cs.parentHWND != parent { continue }
+				if !found { if h == childAfter { found = true }; continue }
+				if wantClass != "" && strings.ToLower(cs.className) != wantClass { continue }
+				if wantTitle != "" {
+					title := cs.text
+					if t, ok := hwndTitle[h]; ok { title = t }
+					if title != wantTitle { continue }
+				}
+				ctx.SetReturn(h); return 0
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetDC", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
@@ -19122,11 +19298,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						ctx.SetReturn(1)
 			return 0
 		})
-		// IsClipboardFormatAvailable
-		d.RegisterAutoStubHandler(user32, "IsClipboardFormatAvailable", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE - clipboard not implemented
-			return 0
-		})
+		// IsClipboardFormatAvailable - duplicate registration handled later in the clipboard section
 		// LoadBitmapW - load bitmap from PE resource, return HBITMAP
 		d.RegisterAutoStubHandler(user32, "LoadBitmapW", func(ctx *ntapi.TrapContext) uint32 {
 			hInst := ctx.Arg(0)
@@ -20453,12 +20625,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// RegisterClipboardFormatW: return a unique atom
-		var nextClipFmt uint64 = 0xC100
+		// RegisterClipboardFormatW/A: maintain name→id map for consistent IDs
+		clipFmtByName := make(map[string]uint64)
+		var nextClipFmtID uint64 = 0xC000
+		registerClipFmt := func(name string) uint64 {
+			name = strings.ToLower(name)
+			if id, ok := clipFmtByName[name]; ok {
+				return id
+			}
+			nextClipFmtID++
+			clipFmtByName[name] = nextClipFmtID
+			return nextClipFmtID
+		}
 		d.RegisterAutoStubHandler(user32, "RegisterClipboardFormatW", func(ctx *ntapi.TrapContext) uint32 {
-			nextClipFmt++
-			ctx.SetReturn(nextClipFmt)
-			return 0
+			name := readGuestUTF16(ctx.Arg(0))
+			ctx.SetReturn(registerClipFmt(name)); return 0
 		})
 
 		// DestroyMenu
@@ -20758,8 +20939,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// FindWindowA: ANSI wrapper - convert strings, return NULL (not found)
 		d.RegisterAutoStubHandler(user32, "FindWindowA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // not found
-			return 0
+			wantClass := strings.ToLower(readGuestString(ctx.Arg(0)))
+			wantTitle := readGuestString(ctx.Arg(1))
+			for h, cs := range hwndChildren {
+				if wantClass != "" && strings.ToLower(cs.className) != wantClass { continue }
+				if wantTitle != "" {
+					title := cs.text
+					if t, ok := hwndTitle[h]; ok { title = t }
+					if title != wantTitle { continue }
+				}
+				ctx.SetReturn(h); return 0
+			}
+			ctx.SetReturn(0); return 0
 		})
 
 		// GetDoubleClickTime: standard Windows default of 500ms
@@ -21100,8 +21291,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 
 		// -------------------------------------------------------
-		// Clipboard
+		// Clipboard - guest-side store
+		// clipStore[format] = HGLOBAL (guest mmap address)
+		// clipFormats tracks insertion order for EnumClipboardFormats
 		// -------------------------------------------------------
+		clipStore := make(map[uint32]uint64) // format → HGLOBAL
+		var clipFormats []uint32             // ordered list of stored formats
+		clipSeq := uint32(1)
+
 		d.RegisterAutoStubHandler(user32, "OpenClipboard", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			if win32.OpenClipboard(hwnd) { ctx.SetReturn(1) } else { ctx.SetReturn(0) }
@@ -21112,21 +21309,46 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "EmptyClipboard", func(ctx *ntapi.TrapContext) uint32 {
-			if win32.EmptyClipboard() { ctx.SetReturn(1) } else { ctx.SetReturn(0) }
-			return 0
+			clipStore = make(map[uint32]uint64)
+			clipFormats = nil
+			clipSeq++
+			win32.EmptyClipboard()
+			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetClipboardData", func(ctx *ntapi.TrapContext) uint32 {
-			// hData is a global memory handle; we can't dereference it here - just track it
-			ctx.SetReturn(ctx.Arg(1)); return 0
+			format := uint32(ctx.Arg(0))
+			hMem := ctx.Arg(1)
+			if hMem != 0 {
+				if _, exists := clipStore[format]; !exists {
+					clipFormats = append(clipFormats, format)
+				}
+				clipStore[format] = hMem
+				clipSeq++
+			}
+			ctx.SetReturn(hMem); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetClipboardData", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			format := uint32(ctx.Arg(0))
+			if h, ok := clipStore[format]; ok {
+				ctx.SetReturn(h)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "CountClipboardFormats", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(uint64(win32.CountClipboardFormats())); return 0
+			n := len(clipStore)
+			if n == 0 { n = int(win32.CountClipboardFormats()) }
+			ctx.SetReturn(uint64(n)); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "IsClipboardFormatAvailable", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			format := uint32(ctx.Arg(0))
+			if _, ok := clipStore[format]; ok {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetClipboardOwner", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(win32.GetClipboardOwner()); return 0
@@ -21144,30 +21366,63 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "EnumClipboardFormats", func(ctx *ntapi.TrapContext) uint32 {
+			prev := uint32(ctx.Arg(0))
+			if len(clipFormats) == 0 {
+				ctx.SetReturn(0); return 0
+			}
+			if prev == 0 {
+				ctx.SetReturn(uint64(clipFormats[0])); return 0
+			}
+			for i, f := range clipFormats {
+				if f == prev && i+1 < len(clipFormats) {
+					ctx.SetReturn(uint64(clipFormats[i+1])); return 0
+				}
+			}
 			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetClipboardFormatNameA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			format := uint32(ctx.Arg(0))
+			buf := ctx.Arg(1)
+			cchMax := int(ctx.Arg(2))
+			name := clipFormatName(format)
+			if buf == 0 || cchMax <= 0 || name == "" { ctx.SetReturn(0); return 0 }
+			b := []byte(name)
+			if len(b) >= cchMax { b = b[:cchMax-1] }
+			for i, c := range b { ctx.Mem.Write8(buf+uint64(i), c) }
+			ctx.Mem.Write8(buf+uint64(len(b)), 0)
+			ctx.SetReturn(uint64(len(b))); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetClipboardFormatNameW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0); return 0
+			format := uint32(ctx.Arg(0))
+			buf := ctx.Arg(1)
+			cchMax := int(ctx.Arg(2))
+			name := clipFormatName(format)
+			if buf == 0 || cchMax <= 0 || name == "" { ctx.SetReturn(0); return 0 }
+			ws := utf16Encode(name)
+			n := len(ws)
+			if n >= cchMax { n = cchMax - 1 }
+			for i := 0; i < n; i++ { ctx.Mem.Write16(buf+uint64(i)*2, ws[i]) }
+			ctx.Mem.Write16(buf+uint64(n)*2, 0)
+			ctx.SetReturn(uint64(n)); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetClipboardSequenceNumber", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1); return 0
+			ctx.SetReturn(uint64(clipSeq)); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetPriorityClipboardFormat", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(uint64(0xFFFFFFFF)); return 0 // -1 = no format
+			// pPriorityList = arg0 array of UINT formats, cFormats = arg1
+			pList := ctx.Arg(0)
+			cFormats := int(ctx.Arg(1))
+			for i := 0; i < cFormats; i++ {
+				f, _ := ctx.Mem.Read32(pList + uint64(i)*4)
+				if _, ok := clipStore[uint32(f)]; ok {
+					ctx.SetReturn(uint64(f)); return 0
+				}
+			}
+			ctx.SetReturn(uint64(0xFFFFFFFF)); return 0 // -1 = no matching format
 		})
 		d.RegisterAutoStubHandler(user32, "RegisterClipboardFormatA", func(ctx *ntapi.TrapContext) uint32 {
-			// Return a fixed handle in the private format range 0xC000-0xFFFF
-			p := ctx.Arg(0)
-			hash := uint64(0xC000)
-			for i := uint64(0); i < 32; i++ {
-				b, _ := mem.Read8(p + i)
-				if b == 0 { break }
-				hash = hash*31 + uint64(b)
-			}
-			ctx.SetReturn((hash & 0x3FFF) + 0xC000); return 0
+			name := readGuestString(ctx.Arg(0))
+			ctx.SetReturn(registerClipFmt(name)); return 0
 		})
 
 		// -------------------------------------------------------
