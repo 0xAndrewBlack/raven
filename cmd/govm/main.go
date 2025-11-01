@@ -15509,6 +15509,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if label == "" || label == "-" {
 				continue
 			}
+			hasRenderable := false
+			for _, r := range label {
+				if r >= 32 && r <= 126 {
+					hasRenderable = true
+					break
+				}
+			}
+			if !hasRenderable {
+				continue
+			}
 			tw := int32(len([]rune(label)))*8 + 12
 			if i == openMenuIdx && len(item.submenu) > 0 {
 				dropX := x
@@ -18490,6 +18500,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 												continue
 											}
 											label := menuStripAmpersand(item.text)
+											if idx := strings.IndexByte(label, '\t'); idx >= 0 {
+												label = label[:idx]
+											}
 											if label == "" {
 												continue
 											}
@@ -18543,6 +18556,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 														continue
 													}
 													label := menuStripAmpersand(item.text)
+													if idx := strings.IndexByte(label, '\t'); idx >= 0 {
+														label = label[:idx]
+													}
 													if label == "" {
 														continue
 													}
@@ -18602,6 +18618,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 															continue
 														}
 														label := menuStripAmpersand(item.text)
+														if idx := strings.IndexByte(label, '\t'); idx >= 0 {
+															label = label[:idx]
+														}
 														if label == "" {
 															continue
 														}
