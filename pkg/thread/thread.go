@@ -198,8 +198,10 @@ func (m *Manager) Wait() {
 
 // CloneWin32Thread creates a new thread for Win32 CreateThread semantics.
 // It sets the first argument register (RCX on x64) to lpParam.
+// tebAddr, if non-zero, is the guest address of a per-thread TEB; the
+// thread's GS segment register is pointed there.
 // The returned channel is closed when the thread exits.
-func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stackBase, stackSize uint64) (int, chan struct{}, error) {
+func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stackBase, stackSize, tebAddr uint64) (int, chan struct{}, error) {
 	m.mu.Lock()
 	tid := m.nextID
 	m.nextID++
@@ -207,13 +209,19 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 
 	c := parentCPU.CloneForThread()
 	c.SetPC(startAddr)
-	sp := stackBase + stackSize - 16
+	// x64 ABI: at function entry RSP must be 8 mod 16 (as if arrived via CALL,
+	// which pushed an 8-byte return address onto a previously 16-aligned stack).
+	sp := stackBase + stackSize - 8
 	c.SetSP(sp)
-	// Write null return address
+	// Write null return address so a bare ret from the thread function faults at
+	// address 0x0 (which we treat as clean normal exit in the Run loop).
 	m.mem.Write64Raw(sp, 0)
 	// Set RCX = lpParam (Win32 calling convention: first arg in RCX)
 	if xc, ok := c.(*x64.CPU); ok {
 		xc.WriteReg(x64.RCX, lpParam)
+		if tebAddr != 0 {
+			xc.SetGSBase(tebAddr)
+		}
 	}
 	c.SetSyscallHandler(m.handler)
 

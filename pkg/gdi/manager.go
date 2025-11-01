@@ -137,21 +137,48 @@ func (m *Manager) CreatePen(style, width int32, color uint32) uint64 {
 // CreateFont allocates a logical font.
 // ReactOS: NtGdiHfontCreate
 func (m *Manager) CreateFont(f *Font) uint64 {
-	if f.AveCharWidth == 0 {
-		f.AveCharWidth = fontCharW
+	// Try to resolve a real TrueType face if one is available
+	f.FaceID = -1
+	if f.FaceName != "" {
+		f.FaceID = ResolveFontFace(f.FaceName)
 	}
-	if f.MaxCharWidth == 0 {
-		f.MaxCharWidth = fontCharW
+
+	// Compute actual pixel size: LOGFONT.lfHeight < 0 means "cell height in pixels"
+	pixSize := f.Height
+	if pixSize < 0 {
+		pixSize = -pixSize
 	}
-	if f.CellHeight == 0 {
-		f.CellHeight = fontCharH
+	if pixSize == 0 {
+		pixSize = 12
 	}
-	if f.Ascent == 0 {
-		f.Ascent = 13
+
+	if f.FaceID >= 0 {
+		// Use real TrueType metrics
+		cellH, asc, desc, aveW := FaceMetrics(f.FaceID, pixSize)
+		f.CellHeight = cellH
+		f.Ascent = asc
+		f.Descent = desc
+		f.AveCharWidth = aveW
+		f.MaxCharWidth = aveW * 2
+	} else {
+		// Fall back to bitmap font metrics
+		if f.AveCharWidth == 0 {
+			f.AveCharWidth = fontCharW
+		}
+		if f.MaxCharWidth == 0 {
+			f.MaxCharWidth = fontCharW
+		}
+		if f.CellHeight == 0 {
+			f.CellHeight = fontCharH
+		}
+		if f.Ascent == 0 {
+			f.Ascent = 13
+		}
+		if f.Descent == 0 {
+			f.Descent = 3
+		}
 	}
-	if f.Descent == 0 {
-		f.Descent = 3
-	}
+
 	h := m.alloc()
 	m.objects[h] = &Object{Type: ObjFont, Font: f}
 	return h

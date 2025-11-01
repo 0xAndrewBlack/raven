@@ -567,6 +567,12 @@ os.Exit(1)
 // Initialize NLS code page data in PEB before DllMain
 ntapi.InitNlsData(mem, procState.PEBAddr, sysroot)
 
+// Load TrueType fonts from sysroot for real font rendering
+if sysroot != "" {
+	fontsDir := sysroot + "/Windows/Fonts"
+	gdi.AddFontSearchDir(fontsDir)
+}
+
 // Create the trap dispatcher
 dispatcher := ntapi.NewDispatcher(mem, fs, handles, registry, procState, synthNtdll, synthWin32u)
 dispatcher.SetTrace(trace)
@@ -774,10 +780,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 	var heapFreeList []freeBlock
 	heapMmapBlocks := make(map[uint64]uint64) // user ptr → block size
+	var heapMu sync.Mutex                     // protects heapFreeList, heapMmapBlocks, and TEB bump counter
 
 	heapRegion, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
 
 	sharedHeapAlloc := func(size uint64, zeroInit bool) uint64 {
+		heapMu.Lock()
+		defer heapMu.Unlock()
 		if size == 0 {
 			size = 1
 		}
@@ -844,6 +853,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if ptr == 0 {
 			return
 		}
+		heapMu.Lock()
+		defer heapMu.Unlock()
 		if sz, isMmap := heapMmapBlocks[ptr]; isMmap {
 			delete(heapMmapBlocks, ptr)
 			heapFreeList = append(heapFreeList, freeBlock{addr: ptr - 16, blockSize: sz})
@@ -854,6 +865,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if blockSize > 0 && blockSize < 1<<30 {
 			heapFreeList = append(heapFreeList, freeBlock{addr: headerAddr, blockSize: blockSize})
 		}
+	}
+
+	// Wire shared heap into ProcessState so ntdll RtlAllocateHeap/Free/Size
+	// use the same bump-allocator as kernel32 HeapAlloc/HeapFree.
+	procState.HeapAlloc = sharedHeapAlloc
+	procState.HeapFree = sharedHeapFree
+	procState.HeapSize = func(ptr uint64) uint64 {
+		if ptr == 0 {
+			return 0
+		}
+		blockSize, _ := mem.Read64(ptr - 16)
+		if blockSize >= 16 {
+			return blockSize - 16
+		}
+		return 0
 	}
 
 	// delayHandlerRegistrars: re-runnable closures that register handlers for each DLL.
@@ -5376,20 +5402,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			buf := ctx.Arg(1)
 			nChars := ctx.Arg(2)
 			lpWritten := ctx.Arg(3)
-			data := make([]byte, 0, nChars)
+			// Decode UTF-16LE buffer to UTF-8
+			utf16Chars := make([]uint16, nChars)
 			for i := uint64(0); i < nChars; i++ {
-				w, _ := ctx.Mem.Read16(buf + i*2)
-				if w < 128 {
-					data = append(data, byte(w))
-				} else {
-					data = append(data, '?')
-				}
+				utf16Chars[i], _ = ctx.Mem.Read16(buf + i*2)
 			}
+			text := string(utf16Decode(utf16Chars))
 			switch handle {
 			case 0x101:
-				os.Stdout.Write(data)
+				os.Stdout.WriteString(text)
 			case 0x102:
-				os.Stderr.Write(data)
+				os.Stderr.WriteString(text)
+			default:
+				os.Stdout.WriteString(text)
 			}
 			if lpWritten != 0 {
 				ctx.Mem.Write32(lpWritten, uint32(nChars))
@@ -5934,10 +5959,39 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(uint64(h))
 				return 0
 			}
-			tid, done, err := tm.CloneWin32Thread(ctx.CPU, lpStartAddress, lpParameter, stackBase, stackSz)
+
+			// Allocate a per-thread TEB so each thread has its own GS-based
+			// storage (LastError, stack bounds, TLS slots, exception chain).
+			// We copy the invariant process-wide fields from the main TEB and
+			// fill in thread-specific ones (TID, stack bounds, self pointer).
+			threadTEB := mem.Mmap(0, uint64(ntapi.TebSize), mmu.PermRead|mmu.PermWrite)
+			if threadTEB != 0 {
+				// Copy TLS/FLS-related fields from main TEB
+				tlsPtr, _ := mem.Read64(procState.TEBAddr + ntapi.TebThreadLocalStorage)
+				mem.Write64(threadTEB+ntapi.TebThreadLocalStorage, tlsPtr)
+				flsPtr, _ := mem.Read64(procState.TEBAddr + ntapi.TebFlsData)
+				mem.Write64(threadTEB+ntapi.TebFlsData, flsPtr)
+				// Copy inline heap pointers so GS:[0x1800] reads work
+				heapBase, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
+				mem.Write64(threadTEB+ntapi.TebHeapBase, heapBase)
+				heapOff, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
+				mem.Write64(threadTEB+ntapi.TebHeapOffset, heapOff)
+				// Thread-specific fields
+				mem.Write64(threadTEB+ntapi.TebSelf, threadTEB)
+				mem.Write64(threadTEB+ntapi.TebPEB, procState.PEBAddr)
+				mem.Write64(threadTEB+ntapi.TebStackBase, stackBase+stackSz)
+				mem.Write64(threadTEB+ntapi.TebStackLimit, stackBase)
+				mem.Write32(threadTEB+ntapi.TebProcessId, uint32(procState.PEBAddr>>12))
+				mem.Write64(threadTEB+ntapi.TebExceptionList, 0xFFFFFFFFFFFFFFFF)
+			}
+
+			tid, done, err := tm.CloneWin32Thread(ctx.CPU, lpStartAddress, lpParameter, stackBase, stackSz, threadTEB)
 			if err != nil {
 				ctx.SetReturn(0)
 				return 0
+			}
+			if threadTEB != 0 {
+				mem.Write32(threadTEB+ntapi.TebThreadId, uint32(tid))
 			}
 			if lpThreadId != 0 {
 				ctx.Mem.Write32(lpThreadId, uint32(tid))
@@ -15623,7 +15677,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case "msctls_statusbar32":
 				// Snap statusbar to bottom of Wayland window (common control behavior: WM_SIZE repositions it)
 				if wlWindow != nil {
-					sbY := wlWindow.Height - cs.h
+					sbY := wlWindow.Height + wlWindow.TitleBarH - cs.h
 					if sbY > cs.y { cs.y = sbY } // only snap down, not up
 					cs.x = 0
 					cs.w = wlWindow.Width
@@ -17030,18 +17084,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					// This replaces the hardcoded titleBarH=30 that was the old fake CSD.
 					ncTop := int32(0)
 					if wlDisplay.HasNoSSD() {
-						// Use AdjustWindowRectEx to compute borders: start with
-						// a zero client rect and see how much the top grows.
+						// Compute NC top (borders + caption only, NO menu bar).
+						// Menu bar sits between TitleBarH and the client area via menuBarHeight.
 						var r win32.Rect
 						exStyle := uint32(ctx.Arg(0))
-						hasMenu := false
-						if hm := ctx.Arg(9); hm != 0 {
-							if _, ok := menus[hm]; ok {
-								hasMenu = true
-							}
-						}
-						win32.AdjustWindowRectEx(&r, style, hasMenu, exStyle)
-						ncTop = -r.Top // r.Top is negative after AdjustWindowRectEx
+						win32.AdjustWindowRectEx(&r, style, false, exStyle)
+						ncTop = -r.Top
 						if ncTop < 0 {
 							ncTop = 0
 						}
@@ -17054,7 +17102,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						exStyle := uint32(ctx.Arg(0))
 						windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(exStyle)}
 						// Register the main window in win32.Global so NC paint and other lookups work.
-						win32.Global.Create(hwnd, strings.ToLower(readGuestUTF16(lpClassName)), 0, 0, w, h, style, exStyle, 0)
+						win32.Global.Create(hwnd, strings.ToLower(readGuestUTF16(lpClassName)), 0, 0, w, h+ncTop, style, exStyle, 0)
 						ravelog.Logf("[wl] window created: %q %dx%d hwnd=0x%x ncTop=%d\n", title, w, h, hwnd, ncTop)
 						// Attach menu bar: first check hMenu parameter, then class menu
 						hMenu := ctx.Arg(9)
@@ -17311,7 +17359,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				// Keep win32.Global in sync for GetWindowRect/GetClientRect
 				if wnd := win32.Global.Get(hwnd); wnd != nil {
-					win32.Global.UpdatePos(wnd, mainX, mainY, wlWindow.Width, wlWindow.Height)
+					win32.Global.UpdatePos(wnd, mainX, mainY, wlWindow.Width, wlWindow.Height+wlWindow.TitleBarH)
 				}
 				if wlWindow.Width != prevW || wlWindow.Height != prevH {
 					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0003, uint64(uint16(mainX)) | (uint64(uint16(mainY)) << 16), 0})
@@ -17473,7 +17521,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				// Keep win32.Global in sync
 				if wnd := win32.Global.Get(hwnd); wnd != nil {
-					win32.Global.UpdatePos(wnd, 0, 0, wlWindow.Width, wlWindow.Height)
+					win32.Global.UpdatePos(wnd, 0, 0, wlWindow.Width, wlWindow.Height+wlWindow.TitleBarH)
 				}
 				if wlWindow.Width != prevW || wlWindow.Height != prevH {
 					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0003, 0, 0})
@@ -17694,10 +17742,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ctx.Mem.Write32(pRect, 0)
 					ctx.Mem.Write32(pRect+4, 0)
 					ctx.Mem.Write32(pRect+8, uint32(wlWindow.Width))
-					ctx.Mem.Write32(pRect+12, uint32(wlWindow.Height))
+					ctx.Mem.Write32(pRect+12, uint32(wlWindow.Height+wlWindow.TitleBarH))
 				} else {
 					var fw, fh int32 = 800, 600
-					if wlWindow != nil { fw, fh = wlWindow.Width, wlWindow.Height }
+					if wlWindow != nil { fw, fh = wlWindow.Width, wlWindow.Height+wlWindow.TitleBarH }
 					ctx.Mem.Write32(pRect, 0)
 					ctx.Mem.Write32(pRect+4, 0)
 					ctx.Mem.Write32(pRect+8, uint32(fw))
@@ -18121,8 +18169,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// WM_NCACTIVATE (0x0086): redraw caption with active/inactive state.
 			if msg == 0x0086 && wlWindow != nil && hwnd == mainHWND {
 				mainActive = wParam != 0
-				// Trigger NC repaint
-				// (We directly call the NC paint logic by re-dispatching WM_NCPAINT)
+				// Queue WM_NCPAINT so the caption redraws with correct active/inactive colours.
+				msgQueue = append(msgQueue, queuedMsg{hwnd: mainHWND, message: 0x0085, wParam: 1, lParam: 0})
 				ctx.SetReturn(1) // return TRUE = allow activation change
 				return 0
 			}
@@ -18389,6 +18437,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 					w := wlWindow.Width
 					h := wlWindow.Height
+					// Keep RcWindow/RcClient in sync so GetWindowRect returns correct values.
+					if wnd := win32.Global.Get(mainHWND); wnd != nil {
+						win32.Global.UpdatePos(wnd, 0, 0, w, h+wlWindow.TitleBarH)
+					}
 					lParam := uint64(uint16(w)) | (uint64(uint16(h)) << 16)
 					msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0005, 0, lParam}) // WM_SIZE
 					return
@@ -21384,11 +21436,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "GetWindowDC", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
-			ox, oy := clientAreaOrigin(hwnd)
-			h, dc := allocScreenDC(ox, oy)
+			// Window DC covers the full surface (NC + client), so origin is (0,0) for the main window.
+			var ox, oy int32
 			if cs, ok := hwndChildren[hwnd]; ok {
+				// Child window: origin at the child top-left (no extra NC offset)
+				ox, oy = cs.x, cs.y
+				h, dc := allocScreenDC(ox, oy)
 				dc.SetClipRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h)
+				ctx.SetReturn(h); return 0
 			}
+			// Main window: origin (0,0) covers full surface including NC area
+			h, _ := allocScreenDC(ox, oy)
 			ctx.SetReturn(h); return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetDCEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -22388,6 +22446,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(gdi32, "GetTextExtentPoint32W", func(ctx *ntapi.TrapContext) uint32 {
 			hdc := ctx.Arg(0)
+			lpString := ctx.Arg(1)
 			nLen := int32(ctx.Arg(2))
 			pSize := ctx.Arg(3)
 			dc := getDC(hdc)
@@ -22396,7 +22455,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				f = gdi.DefaultFont()
 			}
 			if pSize != 0 {
-				ctx.Mem.Write32(pSize,   uint32(nLen*f.AveCharWidth))
+				w := int32(0)
+				if f.FaceID >= 0 && lpString != 0 && nLen > 0 {
+					// Measure real TrueType glyph widths
+					pixSize := f.Height
+					if pixSize < 0 {
+						pixSize = -pixSize
+					}
+					if pixSize == 0 {
+						pixSize = 12
+					}
+					chars := make([]uint16, nLen)
+					for i := int32(0); i < nLen; i++ {
+						ch, _ := ctx.Mem.Read16(lpString + uint64(i)*2)
+						chars[i] = ch
+					}
+					for _, r := range gdi.UTF16ToRunes(chars) {
+						if g := gdi.GlyphFor(f.FaceID, pixSize, r); g != nil {
+							w += g.Advance
+						} else {
+							w += f.AveCharWidth
+						}
+					}
+				} else {
+					w = nLen * f.AveCharWidth
+				}
+				ctx.Mem.Write32(pSize, uint32(w))
 				ctx.Mem.Write32(pSize+4, uint32(f.CellHeight))
 			}
 			ctx.SetReturn(1)

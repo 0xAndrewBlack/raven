@@ -163,6 +163,12 @@ type ProcessState struct {
 	ModuleListAddr    uint64 // base of LDR_DATA_TABLE_ENTRY array
 	GdiTableAddr      uint64 // GDI shared handle table base
 	LastError         uint32
+
+	// HeapAlloc/HeapFree are set by registerAutoSynthHandlers to route
+	// RtlAllocateHeap / RtlFreeHeap through the shared bump-allocator.
+	HeapAlloc func(size uint64, zeroInit bool) uint64
+	HeapFree  func(ptr uint64)
+	HeapSize  func(ptr uint64) uint64
 }
 
 // InitProcess allocates and populates PEB, TEB, and supporting structures.

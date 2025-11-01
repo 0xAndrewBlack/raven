@@ -50,12 +50,14 @@ type Font struct {
 	Quality     uint8
 	PitchFamily uint8
 	FaceName    string
-	// Computed metrics (filled by selectFont)
+	// Computed metrics (filled by CreateFont / selectFont)
 	AveCharWidth int32
 	MaxCharWidth int32
 	CellHeight   int32 // tmHeight
 	Ascent       int32 // tmAscent
 	Descent      int32 // tmDescent
+	// TrueType face, -1 means use bitmap fallback
+	FaceID int
 }
 
 // Bitmap represents a GDI bitmap (HBITMAP).

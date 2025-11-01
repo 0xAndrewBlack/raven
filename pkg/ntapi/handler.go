@@ -775,7 +775,8 @@ func handleNtAllocateVirtualMemory(ctx *TrapContext) uint32 {
 	perms := mmu.PermRead | mmu.PermWrite
 	addr := ctx.Mem.Mmap(baseAddr, size, perms)
 	if addr < 0x1000 {
-		ravelog.Logf("[WARN] NtAllocateVirtualMemory mapped addr=0x%x size=0x%x baseAddr=0x%x\n", addr, size, baseAddr)
+		ravelog.Logf("[WARN] NtAllocateVirtualMemory failed addr=0x%x size=0x%x baseAddr=0x%x\n", addr, size, baseAddr)
+		return StatusNoMemory
 	}
 
 	ctx.Mem.Write64(basePtr, addr)
@@ -1094,9 +1095,13 @@ func handleRtlAllocateHeap(ctx *TrapContext) uint32 {
 		size = 16
 	}
 
-	addr := ctx.Mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
-	// HEAP_ZERO_MEMORY (0x8) - mmap already zeroes pages, so no extra work needed
-	_ = flags
+	var addr uint64
+	if ctx.State != nil && ctx.State.HeapAlloc != nil {
+		zeroInit := flags&0x08 != 0 // HEAP_ZERO_MEMORY
+		addr = ctx.State.HeapAlloc(size, zeroInit)
+	} else {
+		addr = ctx.Mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+	}
 	ctx.CPU.SetSyscallReturn(addr)
 	ctx.ReturnOverridden = true
 	return 0
@@ -1108,7 +1113,11 @@ func handleRtlFreeHeap(ctx *TrapContext) uint32 {
 	addr := ctx.Arg(2)
 
 	if addr != 0 {
-		ctx.Mem.Munmap(addr, mmu.PageSize)
+		if ctx.State != nil && ctx.State.HeapFree != nil {
+			ctx.State.HeapFree(addr)
+		} else {
+			ctx.Mem.Munmap(addr, mmu.PageSize)
+		}
 	}
 	ctx.CPU.SetSyscallReturn(1) // TRUE
 	ctx.ReturnOverridden = true
@@ -1117,7 +1126,7 @@ func handleRtlFreeHeap(ctx *TrapContext) uint32 {
 
 func handleRtlReAllocateHeap(ctx *TrapContext) uint32 {
 	_ = ctx.Arg(0)     // HeapHandle
-	_ = ctx.Arg(1)     // Flags
+	flags := ctx.Arg(1)
 	oldAddr := ctx.Arg(2)
 	newSize := ctx.Arg(3)
 
@@ -1125,13 +1134,28 @@ func handleRtlReAllocateHeap(ctx *TrapContext) uint32 {
 		newSize = 16
 	}
 
-	newAddr := ctx.Mem.Mmap(0, newSize, mmu.PermRead|mmu.PermWrite)
+	var newAddr uint64
+	if ctx.State != nil && ctx.State.HeapAlloc != nil {
+		zeroInit := flags&0x08 != 0 // HEAP_ZERO_MEMORY
+		newAddr = ctx.State.HeapAlloc(newSize, zeroInit)
+	} else {
+		newAddr = ctx.Mem.Mmap(0, newSize, mmu.PermRead|mmu.PermWrite)
+	}
 
 	// Copy old data (best effort)
-	if oldAddr != 0 {
-		oldData, err := ctx.Mem.ReadBytes(oldAddr, int(newSize))
+	if oldAddr != 0 && newAddr != 0 {
+		copyLen := newSize
+		if ctx.State != nil && ctx.State.HeapSize != nil {
+			if old := ctx.State.HeapSize(oldAddr); old < copyLen {
+				copyLen = old
+			}
+		}
+		oldData, err := ctx.Mem.ReadBytes(oldAddr, int(copyLen))
 		if err == nil {
 			ctx.Mem.WriteBytes(newAddr, oldData)
+		}
+		if ctx.State != nil && ctx.State.HeapFree != nil {
+			ctx.State.HeapFree(oldAddr)
 		}
 	}
 
@@ -1141,8 +1165,17 @@ func handleRtlReAllocateHeap(ctx *TrapContext) uint32 {
 }
 
 func handleRtlSizeHeap(ctx *TrapContext) uint32 {
-	// Return a dummy size
-	ctx.CPU.SetSyscallReturn(mmu.PageSize)
+	_ = ctx.Arg(0) // HeapHandle
+	_ = ctx.Arg(1) // Flags
+	ptr := ctx.Arg(2)
+
+	var sz uint64
+	if ctx.State != nil && ctx.State.HeapSize != nil && ptr != 0 {
+		sz = ctx.State.HeapSize(ptr)
+	} else {
+		sz = mmu.PageSize
+	}
+	ctx.CPU.SetSyscallReturn(sz)
 	ctx.ReturnOverridden = true
 	return 0
 }
