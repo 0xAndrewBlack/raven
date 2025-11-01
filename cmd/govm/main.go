@@ -14786,7 +14786,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			tbH = wlWindow.TitleBarH
 		}
 		if cs, ok := hwndChildren[hwnd]; ok {
-			return cs.x, cs.y + tbH
+			// cs.x/cs.y are already in surface (absolute) coordinates and include
+			// TitleBarH. Do NOT add tbH again - that would shift DC origins and
+			// grandchild positions by TitleBarH a second time.
+			return cs.x, cs.y
 		}
 		if hwnd == mainHWND {
 			if _, hasMenu := hwndMenuBar[mainHWND]; hasMenu {
@@ -16140,8 +16143,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		case 0x0007: // WM_SETFOCUS
 			focusHwnd = hwnd
+			// If the window has a guest WndProc (e.g. Scintilla), let it receive
+			// WM_SETFOCUS too so it can set up its caret / input state.
+			if _, hasGuest := hwndWndProc[hwnd]; hasGuest {
+				return 0, false
+			}
 			return 0, true
 		case 0x0008: // WM_KILLFOCUS
+			// Forward to guest WndProc if present (e.g. Scintilla needs to hide its caret).
+			if _, hasGuest := hwndWndProc[hwnd]; hasGuest {
+				return 0, false
+			}
 			return 0, true
 		case 0x0030: // WM_SETFONT
 			return 0, true
@@ -17468,9 +17480,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hwnd := ctx.Arg(0)
 			nCmdShow := ctx.Arg(1)
 			if hwnd == mainHWND && wlWindow != nil {
-				w, h := uint64(wlWindow.Width), uint64(wlWindow.Height)
-				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, (h << 16) | w})
-				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+				// ReactOS co_WinPosSendSizeMove: WM_SIZE lParam = MAKELONG(clientW, clientH).
+				// Client height excludes the menu bar (which is NC area in Win32).
+				sw := uint64(wlWindow.Width)
+				sh := uint64(wlWindow.Height)
+				if _, hasMenu := hwndMenuBar[mainHWND]; hasMenu {
+					if sh > uint64(menuBarHeight) {
+						sh -= uint64(menuBarHeight)
+					}
+				}
+				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, (sh << 16) | sw}) // WM_SIZE
+				// WM_ACTIVATE(WA_ACTIVE=1): NPP's WndProc calls SetFocus(scintilla) here.
+				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0006, 1, 0}) // WM_ACTIVATE
+				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0}) // WM_PAINT
 				// Win32: ShowWindow on a parent sends WM_SHOWWINDOW (0x0018) to all children.
 				// DefWindowProc sets WS_VISIBLE on children. Simulate: mark all children visible.
 				if nCmdShow != 0 {
@@ -17663,7 +17685,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							syncScreenSurface()
 							ravelog.Logf("[setpos] mainHWND resize → %dx%d\n", w, h)
 						}
-						lParam := uint64(uint16(w)) | (uint64(uint16(h)) << 16)
+						// ReactOS: WM_SIZE lParam = MAKELONG(clientW, clientH).
+						clientH := h
+						if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
+							if clientH > menuBarHeight { clientH -= menuBarHeight }
+						}
+						lParam := uint64(uint16(w)) | (uint64(uint16(clientH)) << 16)
 						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
 						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
 					}
@@ -17831,7 +17858,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if wlWindow.Resize(newW, newH) {
 						syncScreenSurface()
 					}
-					lParam := uint64(uint16(newW)) | (uint64(uint16(newH)) << 16)
+					clientH := newH
+					if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
+						if clientH > menuBarHeight { clientH -= menuBarHeight }
+					}
+					lParam := uint64(uint16(newW)) | (uint64(uint16(clientH)) << 16)
 					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
 					if bRepaint != 0 {
 						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
@@ -18292,8 +18323,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					// Signal that the base frame is ready; all subsequent EndPaints can trigger re-commits.
 					hasBaseFrame = true
 					repaintBuiltin = true
-					frameReady = true
-					commitIfDone()
+					// Check for visible guest-wndproc children (e.g. Scintilla) that need to
+					// paint themselves. If any exist, do NOT commit yet - wait for their
+					// EndPaint to trigger the commit. This avoids the "gray flash" where
+					// mainHWND's background fill would be committed before Scintilla draws.
+					hasGuestChildren := false
+					for h, cs := range hwndChildren {
+						if cs.parentHWND == mainHWND && cs.visible && cs.w > 0 && cs.h > 0 {
+							if _, hasGuest := hwndWndProc[h]; hasGuest {
+								hasGuestChildren = true
+								// Ensure the guest child has a WM_PAINT pending so it will call EndPaint.
+								msgQueue = append(msgQueue, queuedMsg{h, 0x000F, 0, 0})
+							}
+						}
+					}
+					if !hasGuestChildren {
+						frameReady = true
+						commitIfDone()
+					}
+					// If hasGuestChildren: EndPaint in each guest child will call commitIfDone().
 				}
 				// For non-mainHWND: ReactOS DefWindowProc just calls BeginPaint+EndPaint
 				// In our model, the child is painted by paintTree from the parent
@@ -18759,7 +18807,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if wnd := win32.Global.Get(mainHWND); wnd != nil {
 						win32.Global.UpdatePos(wnd, 0, 0, w, h+wlWindow.TitleBarH)
 					}
-					lParam := uint64(uint16(w)) | (uint64(uint16(h)) << 16)
+					// ReactOS co_WinPosSendSizeMove: WM_SIZE lParam = MAKELONG(clientW, clientH).
+					// Client height excludes the menu bar (NC area in Win32).
+					clientH := h
+					if _, hasMenu := hwndMenuBar[mainHWND]; hasMenu {
+						if clientH > menuBarHeight {
+							clientH -= menuBarHeight
+						}
+					}
+					lParam := uint64(uint16(w)) | (uint64(uint16(clientH)) << 16)
 					msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0005, 0, lParam}) // WM_SIZE
 					return
 				}
@@ -18817,8 +18873,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						clientX := me.X
 						clientY := me.Y - clientTop
 
-						// childAt returns the child window of mainHWND at surface position (sx, sy),
-						// or 0 if none. Returns child-relative coordinates via relParam.
+						// childAt returns the deepest visible window at surface position (sx, sy),
+						// or 0 if none. Returns window-relative coordinates via relParam.
+						// Searches direct children of mainHWND first, then their children
+						// (grandchildren), to handle containers like ReBarWindow32.
 						childAt := func(sx, sy int32) (child uint64, relParam uint64) {
 							// isContainerClass returns true for windows that are containers (delegate to their children).
 							isContainerClass := func(cn string) bool {
@@ -18834,6 +18892,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 										rx := uint64(uint16(sx - cs.x))
 										ry := uint64(uint16(sy - cs.y))
 										relParam = rx | (ry << 16)
+									}
+									// Also check grandchildren (containers like ReBarWindow32 hold child controls).
+									for gcWnd, gcs := range hwndChildren {
+										if gcs.parentHWND != chWnd || !gcs.visible {
+											continue
+										}
+										if sx >= gcs.x && sx < gcs.x+gcs.w && sy >= gcs.y && sy < gcs.y+gcs.h {
+											// Grandchild beats its container parent.
+											child = gcWnd
+											rx2 := uint64(uint16(sx - gcs.x))
+											ry2 := uint64(uint16(sy - gcs.y))
+											relParam = rx2 | (ry2 << 16)
+										}
 									}
 								}
 							}
@@ -19338,7 +19409,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "SetFocus", func(ctx *ntapi.TrapContext) uint32 {
 			prev := focusHwnd
-			focusHwnd = ctx.Arg(0)
+			newFocus := ctx.Arg(0)
+			if newFocus == prev {
+				ctx.SetReturn(prev)
+				return 0
+			}
+			// ReactOS co_UserSetFocus: send WM_KILLFOCUS to old window, WM_SETFOCUS to new.
+			if prev != 0 {
+				if _, hasGuest := hwndWndProc[prev]; hasGuest {
+					msgQueue = append(msgQueue, queuedMsg{prev, 0x0008, newFocus, 0}) // WM_KILLFOCUS
+				}
+			}
+			focusHwnd = newFocus
+			if newFocus != 0 {
+				if _, hasGuest := hwndWndProc[newFocus]; hasGuest {
+					msgQueue = append(msgQueue, queuedMsg{newFocus, 0x0007, prev, 0}) // WM_SETFOCUS
+				}
+			}
 			ctx.SetReturn(prev)
 			return 0
 		})
@@ -19390,13 +19477,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "InvalidateRect", func(ctx *ntapi.TrapContext) uint32 {
-			// Any InvalidateRect triggers a full repaint of mainHWND (which repaints all children)
-			msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+			hwnd := ctx.Arg(0)
+			// Route WM_PAINT to the actual window, not always mainHWND.
+			// Routing Scintilla's own InvalidateRect to mainHWND causes an infinite
+			// repaint loop: mainHWND erases Scintilla → Scintilla redraws →
+			// Scintilla calls InvalidateRect → mainHWND erases again → loop.
+			target := mainHWND
+			if hwnd != 0 && hwnd != mainHWND {
+				if _, ok := hwndChildren[hwnd]; ok {
+					target = hwnd
+				}
+			}
+			msgQueue = append(msgQueue, queuedMsg{target, 0x000F, 0, 0})
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "InvalidateRgn", func(ctx *ntapi.TrapContext) uint32 {
-			msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+			hwnd := ctx.Arg(0)
+			target := mainHWND
+			if hwnd != 0 && hwnd != mainHWND {
+				if _, ok := hwndChildren[hwnd]; ok {
+					target = hwnd
+				}
+			}
+			msgQueue = append(msgQueue, queuedMsg{target, 0x000F, 0, 0})
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -19440,11 +19544,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.Mem.Write32(pRect+12, uint32(h))
 			}
 			ctx.SetReturn(1) // update region is non-empty
-			return 0
-		})
-		d.RegisterAutoStubHandler(user32, "RedrawWindow", func(ctx *ntapi.TrapContext) uint32 {
-			msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
-			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "PrintWindow", func(ctx *ntapi.TrapContext) uint32 {
@@ -20319,8 +20418,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			rx, _ := mem.Read32(pPt); ry, _ := mem.Read32(pPt + 4)
 			x, y := int32(rx), int32(ry)
 			if cs, ok := hwndChildren[hwnd]; ok {
+				// cs.x/cs.y are surface (absolute) coordinates of the child's top-left.
 				x -= cs.x
 				y -= cs.y
+			} else if hwnd == mainHWND && wlWindow != nil {
+				// mainHWND client area starts below the NC area (TitleBarH + menuBar).
+				y -= wlWindow.TitleBarH + menuBarHeight
 			}
 			ctx.Mem.Write32(pPt, uint32(x))
 			ctx.Mem.Write32(pPt+4, uint32(y))
@@ -20336,6 +20439,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if cs, ok := hwndChildren[hwnd]; ok {
 				x += cs.x
 				y += cs.y
+			} else if hwnd == mainHWND && wlWindow != nil {
+				y += wlWindow.TitleBarH + menuBarHeight
 			}
 			ctx.Mem.Write32(pPt, uint32(x))
 			ctx.Mem.Write32(pPt+4, uint32(y))
@@ -20346,23 +20451,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// ReactOS: winpos.c MapWindowPoints
 			// Maps nCount points from fromHwnd's client coords to toHwnd's client coords.
 			// fromHwnd==0 → screen coords as source; toHwnd==0 → screen coords as dest.
+			// clientOrigin returns the surface (absolute) coordinate of a window's client top-left.
+			clientOrigin := func(h uint64) (int32, int32) {
+				if h == 0 { return 0, 0 }
+				if cs, ok := hwndChildren[h]; ok { return cs.x, cs.y }
+				if h == mainHWND && wlWindow != nil {
+					return 0, wlWindow.TitleBarH + menuBarHeight
+				}
+				return 0, 0
+			}
 			fromHwnd := ctx.Arg(0)
 			toHwnd := ctx.Arg(1)
 			pPts := ctx.Arg(2)
 			nPts := int(ctx.Arg(3))
 			if pPts == 0 || nPts == 0 { ctx.SetReturn(0); return 0 }
-			var fromX, fromY int32
-			if fromHwnd != 0 {
-				if cs, ok := hwndChildren[fromHwnd]; ok {
-					fromX, fromY = cs.x, cs.y
-				}
-			}
-			var toX, toY int32
-			if toHwnd != 0 {
-				if cs, ok := hwndChildren[toHwnd]; ok {
-					toX, toY = cs.x, cs.y
-				}
-			}
+			fromX, fromY := clientOrigin(fromHwnd)
+			toX, toY := clientOrigin(toHwnd)
 			dx := fromX - toX
 			dy := fromY - toY
 			for i := 0; i < nPts; i++ {
@@ -20586,8 +20690,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(user32, "RedrawWindow", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
+			// Route WM_PAINT to the actual window, not always mainHWND.
+			// Same reasoning as InvalidateRect: routing child RedrawWindow to mainHWND
+			// creates a paint loop when Scintilla redraws itself.
 			if hwnd == 0 || hwnd == mainHWND {
 				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+			} else if cs, ok := hwndChildren[hwnd]; ok && cs.visible {
+				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
 			}
 			ctx.SetReturn(1)
 			return 0
