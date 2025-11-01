@@ -16310,7 +16310,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						continue
 					}
 					if clickX >= x && clickX < x+btnW {
-						if btn.fsState&0x04 == 0 { // not disabled (TBSTATE_ENABLED=0x04 means enabled)
+						if btn.fsState&0x04 != 0 { // enabled (TBSTATE_ENABLED=0x04 means enabled)
 							// WM_COMMAND: LOWORD=cmdID, HIWORD=1 (BN_CLICKED), lParam=toolbar HWND
 							msgQueue = append(msgQueue, queuedMsg{cs.parentHWND, 0x0111,
 								uint64(uint16(btn.idCommand)) | (1 << 16), hwnd})
@@ -18450,17 +18450,24 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						// childAt returns the child window of mainHWND at surface position (sx, sy),
 						// or 0 if none. Returns child-relative coordinates via relParam.
 						childAt := func(sx, sy int32) (child uint64, relParam uint64) {
+							// isContainerClass returns true for windows that are containers (delegate to their children).
+							isContainerClass := func(cn string) bool {
+								return cn == "rebarwindow32"
+							}
 							for chWnd, cs := range hwndChildren {
 								if cs.parentHWND != mainHWND || !cs.visible {
 									continue
 								}
 								if sx >= cs.x && sx < cs.x+cs.w && sy >= cs.y && sy < cs.y+cs.h {
-									rx := uint64(uint16(sx - cs.x))
-									ry := uint64(uint16(sy - cs.y))
-									return chWnd, rx | (ry << 16)
+									if child == 0 || (!isContainerClass(cs.className) && isContainerClass(hwndChildren[child].className)) {
+										child = chWnd
+										rx := uint64(uint16(sx - cs.x))
+										ry := uint64(uint16(sy - cs.y))
+										relParam = rx | (ry << 16)
+									}
 								}
 							}
-							return 0, 0
+							return child, relParam
 						}
 						// routeMouseToChild routes a mouse message to child or mainHWND.
 						// Returns true if routed to a child builtin (no need to queue).
