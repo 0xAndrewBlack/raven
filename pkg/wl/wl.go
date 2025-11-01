@@ -863,6 +863,17 @@ func (d *Display) Dispatch() (EventType, error) {
 		if evt != EventNone {
 			return evt, nil
 		}
+		// Got EventNone (e.g. wl_pointer.frame) - only loop if more data is
+		// already buffered or immediately available on the socket. Otherwise
+		// return EventNone to avoid blocking indefinitely.
+		if len(d.readBuf) < 8 {
+			var rfds unix.FdSet
+			rfds.Set(d.fd)
+			n, _ := unix.Select(d.fd+1, &rfds, nil, nil, &unix.Timeval{Sec: 0, Usec: 0})
+			if n <= 0 {
+				return EventNone, nil
+			}
+		}
 	}
 }
 
@@ -870,11 +881,15 @@ func (d *Display) Dispatch() (EventType, error) {
 func (d *Display) Fd() int { return d.fd }
 
 // Poll checks whether there is data to read on the Wayland socket without
-// blocking. If data is available it calls dispatchOne() and returns the event.
+// blocking. Processes buffered data first, then checks the socket.
 // Returns EventNone immediately when no data is ready.
 func (d *Display) Poll() (EventType, error) {
 	if d.fd < 0 {
 		return EventNone, nil
+	}
+	// Process any previously buffered data before checking the socket.
+	if len(d.readBuf) >= 8 {
+		return d.dispatchOne()
 	}
 	var rfds unix.FdSet
 	rfds.Set(d.fd)
