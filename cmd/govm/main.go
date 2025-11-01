@@ -18418,6 +18418,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							break
 						}
 						ravelog.Logf("[mouse] kind=%d x=%d y=%d button=%d pressed=%v\n", me.Kind, me.X, me.Y, me.Button, me.Pressed)
+						fmt.Fprintf(os.Stderr, "[DBG] mouse kind=%d x=%d y=%d btn=%d pressed=%v\n", me.Kind, me.X, me.Y, me.Button, me.Pressed)
 						// Our custom title bar occupies y=[0, TitleBarH).
 						// Menu bar occupies y=[TitleBarH, TitleBarH+menuBarHeight).
 						// Client area starts at y=TitleBarH+menuBarHeight.
@@ -18528,6 +18529,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							case btnLeft:
 								if me.Pressed {
 									ravelog.Logf("[click] left press x=%d y=%d ncMenuTop=%d clientTop=%d\n", me.X, me.Y, ncMenuTop, clientTop)
+										fmt.Fprintf(os.Stderr, "[DBG] click left press x=%d y=%d ncMenuTop=%d clientTop=%d\n", me.X, me.Y, ncMenuTop, clientTop)
 									if wlWindow != nil && me.Y >= ncMenuTop && me.Y < clientTop {
 										// ── Menu bar click (non-client) ──
 										// Intercept here instead of routing via DefWindowProcW.
@@ -18808,7 +18810,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 					}
 					if evt == wl.EventMouse {
-						dispatchWl(evt)
+						if dispatchWl != nil { dispatchWl(evt) }
 					}
 				}
 			}
