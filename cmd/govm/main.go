@@ -15573,8 +15573,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		ravelog.Logf("[commit] Commit w=%d h=%d pixLen=%d\n", wlWindow.Width, wlWindow.Height, len(wlWindow.Pix))
 		wlWindow.Commit()
 		frameCount++
-		path := fmt.Sprintf("/tmp/npp_frame%d.png", frameCount)
-		saveScreenshot(wlWindow.Pix, int(wlWindow.Width), int(wlWindow.Height+wlWindow.TitleBarH), path)
+		// Save a debug screenshot only for the first 10 frames to avoid filling /tmp.
+		if frameCount <= 10 {
+			path := fmt.Sprintf("/tmp/npp_frame%d.png", frameCount)
+			saveScreenshot(wlWindow.Pix, int(wlWindow.Width), int(wlWindow.Height+wlWindow.TitleBarH), path)
+		}
 	}
 
 	// builtinWndProc handles messages for built-in window classes (Edit, StatusBar, etc.)
@@ -18428,7 +18431,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							break
 						}
 						ravelog.Logf("[mouse] kind=%d x=%d y=%d button=%d pressed=%v\n", me.Kind, me.X, me.Y, me.Button, me.Pressed)
-						fmt.Fprintf(os.Stderr, "[DBG] mouse kind=%d x=%d y=%d btn=%d pressed=%v\n", me.Kind, me.X, me.Y, me.Button, me.Pressed)
 						// Our custom title bar occupies y=[0, TitleBarH).
 						// Menu bar occupies y=[TitleBarH, TitleBarH+menuBarHeight).
 						// Client area starts at y=TitleBarH+menuBarHeight.
@@ -18542,7 +18544,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							case btnLeft:
 								if me.Pressed {
 									ravelog.Logf("[click] left press x=%d y=%d ncMenuTop=%d clientTop=%d\n", me.X, me.Y, ncMenuTop, clientTop)
-										fmt.Fprintf(os.Stderr, "[DBG] click left press x=%d y=%d ncMenuTop=%d clientTop=%d\n", me.X, me.Y, ncMenuTop, clientTop)
 									if wlWindow != nil && me.Y >= ncMenuTop && me.Y < clientTop {
 										// ── Menu bar click (non-client) ──
 										// Intercept here instead of routing via DefWindowProcW.
