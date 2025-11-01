@@ -105,6 +105,38 @@ func (h *RegistryHive) populateDefaults() {
 	// HKLM\SOFTWARE\Microsoft\Cryptography
 	crypto := h.createPath(`HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography`)
 	crypto.setString("MachineGuid", "12345678-1234-1234-1234-123456789012")
+
+	// HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts
+	// Provides font name → filename mappings used by GDI and font loading code.
+	fonts := h.createPath(`HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts`)
+	fonts.setString("Arial (TrueType)", "arial.ttf")
+	fonts.setString("Arial Bold (TrueType)", "arialbd.ttf")
+	fonts.setString("Courier New (TrueType)", "cour.ttf")
+	fonts.setString("Times New Roman (TrueType)", "times.ttf")
+	fonts.setString("Segoe UI (TrueType)", "segoeui.ttf")
+	fonts.setString("Tahoma (TrueType)", "tahoma.ttf")
+	fonts.setString("Verdana (TrueType)", "verdana.ttf")
+	fonts.setString("Calibri (TrueType)", "calibri.ttf")
+	fonts.setString("Consolas (TrueType)", "consolas.ttf")
+	fonts.setString("Lucida Console (TrueType)", "lucon.ttf")
+
+	// HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes
+	// Maps legacy font names to their replacements.
+	fontSubs := h.createPath(`HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes`)
+	fontSubs.setString("MS Shell Dlg", "Microsoft Sans Serif")
+	fontSubs.setString("MS Shell Dlg 2", "Tahoma")
+	fontSubs.setString("Helv", "Arial")
+	fontSubs.setString("Tms Rmn", "Times New Roman")
+
+	// HKCU\Control Panel\Desktop\WindowMetrics - font size/DPI preferences
+	wm := h.createPath(`HKEY_CURRENT_USER\Control Panel\Desktop\WindowMetrics`)
+	wm.setDWORD("AppliedDPI", 96)
+	wm.setString("Shell Icon Size", "32")
+
+	// HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\GRE_Initialize
+	// Controls font rasterizer settings.
+	gre := h.createPath(`HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\GRE_Initialize`)
+	gre.setDWORD("DisableMetaFiles", 0)
 }
 
 // OpenKey opens a registry key by path. Returns nil if not found.

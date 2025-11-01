@@ -118,6 +118,17 @@ func (h *EventHandle) WaitTimeout(d time.Duration) bool {
 	return false
 }
 
+// WaitChan returns a channel that receives once when the event is signaled.
+// Used by WaitForMultipleObjects to fan-in multiple handles with reflect.Select.
+func (h *EventHandle) WaitChan() <-chan struct{} {
+	ch := make(chan struct{}, 1)
+	go func() {
+		h.WaitTimeout(-1)
+		ch <- struct{}{}
+	}()
+	return ch
+}
+
 // MutantHandle is a Win32 mutex object.
 type MutantHandle struct {
 	mu       sync.Mutex

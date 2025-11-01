@@ -10,6 +10,7 @@ package gdi
 // ReactOS reference: win32ss/gdi/ntgdi/freetype.c (FreeType integration)
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"math"
@@ -20,6 +21,7 @@ import (
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 )
 
@@ -39,10 +41,17 @@ type GlyphImage struct {
 }
 
 // FontCache holds loaded font faces and glyph bitmaps.
+// FaceInfo holds the resolved metadata for a loaded font face.
+type FaceInfo struct {
+	ID         int
+	FamilyName string // canonical family name (as stored in the font or filename stem)
+}
+
 type FontCache struct {
 	mu         sync.Mutex
 	searchDirs []string                 // host directories to scan for TTF files
 	faceByName map[string]int           // family name (lower) → face ID
+	faceNames  []string                 // canonical family name indexed by face ID
 	faces      []*opentype.Font         // indexed by face ID
 	glyphs     map[GlyphKey]*GlyphImage // rasterized glyph cache
 }
@@ -80,19 +89,44 @@ func (fc *FontCache) scanDir(dir string) {
 		if err != nil {
 			continue
 		}
-		f, err := opentype.Parse(data)
-		if err != nil {
-			continue
-		}
-		family := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
-		fc.mu.Lock()
-		if _, exists := fc.faceByName[family]; !exists {
-			id := len(fc.faces)
-			fc.faces = append(fc.faces, f)
-			fc.faceByName[family] = id
-		}
-		fc.mu.Unlock()
+		stem := strings.TrimSuffix(name, filepath.Ext(name))
+		fc.addFaceData(data, stem)
 	}
+}
+
+// addFaceData parses font bytes and registers the face. stem is used as fallback name.
+// Returns the new face ID, or -1 on parse error. Caller must not hold fc.mu.
+func (fc *FontCache) addFaceData(data []byte, stem string) int {
+	f, err := opentype.Parse(data)
+	if err != nil {
+		return -1
+	}
+	// Try to extract the real family name from the name table.
+	canonical := stem
+	if sf, err2 := sfnt.Parse(data); err2 == nil {
+		var nameBuf sfnt.Buffer
+		if n, err3 := sf.Name(&nameBuf, sfnt.NameIDFamily); err3 == nil && n != "" {
+			canonical = n
+		}
+	}
+	key := strings.ToLower(strings.TrimSpace(canonical))
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if id, exists := fc.faceByName[key]; exists {
+		return id
+	}
+	id := len(fc.faces)
+	fc.faces = append(fc.faces, f)
+	fc.faceNames = append(fc.faceNames, canonical)
+	fc.faceByName[key] = id
+	// Also register the filename stem as an alias if different.
+	stemKey := strings.ToLower(strings.TrimSpace(stem))
+	if stemKey != key {
+		if _, exists := fc.faceByName[stemKey]; !exists {
+			fc.faceByName[stemKey] = id
+		}
+	}
+	return id
 }
 
 // findFace returns the face ID for a given logical font family name, or -1.
@@ -256,4 +290,30 @@ func FaceMetrics(faceID int, size int32) (cellH, asc, desc, aveW int32) {
 	adv, _ := fr.GlyphAdvance('x')
 	aveW32 := int32(math.Round(float64(adv) / 64.0))
 	return cellH32, asc32, desc32, aveW32
+}
+
+// ListFaces returns metadata for all loaded font faces.
+func ListFaces() []FaceInfo {
+	globalFontCache.mu.Lock()
+	defer globalFontCache.mu.Unlock()
+	seen := make(map[int]bool)
+	result := make([]FaceInfo, 0, len(globalFontCache.faces))
+	for _, id := range globalFontCache.faceByName {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		name := fmt.Sprintf("font-%d", id)
+		if id < len(globalFontCache.faceNames) {
+			name = globalFontCache.faceNames[id]
+		}
+		result = append(result, FaceInfo{ID: id, FamilyName: name})
+	}
+	return result
+}
+
+// AddFontFromBytes parses raw TTF/OTF bytes, registers the face, and returns its ID (-1 on error).
+// stem is a fallback name used only when the font's name table cannot be read.
+func AddFontFromBytes(stem string, data []byte) int {
+	return globalFontCache.addFaceData(data, stem)
 }

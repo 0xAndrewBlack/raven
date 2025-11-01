@@ -12,6 +12,7 @@ import (
 "math"
 "os"
 "path/filepath"
+"reflect"
 "runtime/pprof"
 "sort"
 "strconv"
@@ -4638,16 +4639,36 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 
 		// InitializeCriticalSection / DeleteCriticalSection / EnterCriticalSection / LeaveCriticalSection: no-ops
-		for _, name := range []string{"InitializeCriticalSection", "DeleteCriticalSection", "EnterCriticalSection", "LeaveCriticalSection"} {
+		for _, name := range []string{"DeleteCriticalSection", "EnterCriticalSection", "LeaveCriticalSection"} {
 			d.RegisterAutoStubHandler(kernel32, name, func(ctx *ntapi.TrapContext) uint32 {
 				return 0
 			})
 		}
 		d.RegisterAutoStubHandler(kernel32, "InitializeCriticalSectionAndSpinCount", func(ctx *ntapi.TrapContext) uint32 {
+			lp := ctx.Arg(0)
+			spinCount := ctx.Arg(1)
+			if lp != 0 {
+				ctx.Mem.Write64(lp, 0)
+				ctx.Mem.Write32(lp+8, 0xFFFFFFFF) // LockCount = -1
+				ctx.Mem.Write32(lp+12, 0)
+				ctx.Mem.Write64(lp+16, 0)
+				ctx.Mem.Write64(lp+24, 0)
+				ctx.Mem.Write64(lp+32, spinCount)
+			}
 			ctx.SetReturn(1) // TRUE = success
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "InitializeCriticalSectionEx", func(ctx *ntapi.TrapContext) uint32 {
+			lp := ctx.Arg(0)
+			spinCount := ctx.Arg(1)
+			if lp != 0 {
+				ctx.Mem.Write64(lp, 0)
+				ctx.Mem.Write32(lp+8, 0xFFFFFFFF) // LockCount = -1
+				ctx.Mem.Write32(lp+12, 0)
+				ctx.Mem.Write64(lp+16, 0)
+				ctx.Mem.Write64(lp+24, 0)
+				ctx.Mem.Write64(lp+32, spinCount)
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -5815,7 +5836,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(kernel32, "WaitForMultipleObjects", func(ctx *ntapi.TrapContext) uint32 {
 			nCount := ctx.Arg(0)
 			pHandles := ctx.Arg(1)
-			// waitAll := ctx.Arg(2) != 0
+			// waitAll := ctx.Arg(2) != 0 - we implement WaitAny semantics
 			ms := ctx.Arg(3)
 			var timeout time.Duration
 			if ms == 0xFFFFFFFF {
@@ -5825,42 +5846,55 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			} else {
 				timeout = time.Duration(ms) * time.Millisecond
 			}
-			// Wait on the first signaled handle (waitAny semantics).
-			// For simplicity, iterate and wait on each in turn.
+
+			// Build reflect.SelectCase entries: one per recognized handle + optional timer.
+			type idxChan struct {
+				idx int
+				ch  <-chan struct{}
+			}
+			var cases []idxChan
 			for i := uint64(0); i < nCount && i < 64; i++ {
 				hv, _ := ctx.Mem.Read64(pHandles + i*8)
 				h := ntapi.Handle(hv)
 				if th := handles.GetThread(h); th != nil && th.Done != nil {
-					if timeout < 0 {
-						<-th.Done
-					} else if timeout > 0 {
-						select {
-						case <-th.Done:
-						case <-time.After(timeout):
-							ctx.SetReturn(0x102) // WAIT_TIMEOUT
-							return 0
-						}
-					} else {
-						select {
-						case <-th.Done:
-						default:
-							ctx.SetReturn(0x102)
-							return 0
-						}
-					}
-					ctx.SetReturn(i)
-					return 0
-				}
-				if eh := handles.GetEvent(h); eh != nil {
-					if eh.WaitTimeout(timeout) {
-						ctx.SetReturn(i)
-						return 0
-					}
-					ctx.SetReturn(0x102)
-					return 0
+					cases = append(cases, idxChan{int(i), th.Done})
+				} else if eh := handles.GetEvent(h); eh != nil {
+					cases = append(cases, idxChan{int(i), eh.WaitChan()})
 				}
 			}
-			ctx.SetReturn(0) // WAIT_OBJECT_0
+
+			if len(cases) == 0 {
+				ctx.SetReturn(0) // WAIT_OBJECT_0 for unknown handles
+				return 0
+			}
+
+			// Build reflect cases.
+			selCases := make([]reflect.SelectCase, 0, len(cases)+1)
+			for _, ic := range cases {
+				selCases = append(selCases, reflect.SelectCase{
+					Dir:  reflect.SelectRecv,
+					Chan: reflect.ValueOf(ic.ch),
+				})
+			}
+			// Timer case (index = len(cases)) if timeout ≥ 0.
+			if timeout == 0 {
+				// Non-blocking poll
+				selCases = append(selCases, reflect.SelectCase{Dir: reflect.SelectDefault})
+			} else if timeout > 0 {
+				timer := time.After(timeout)
+				selCases = append(selCases, reflect.SelectCase{
+					Dir:  reflect.SelectRecv,
+					Chan: reflect.ValueOf(timer),
+				})
+			}
+			// timeout < 0 = INFINITE: no timer case, block until a handle fires.
+
+			chosen, _, _ := reflect.Select(selCases)
+			if chosen >= len(cases) {
+				ctx.SetReturn(0x102) // WAIT_TIMEOUT
+			} else {
+				ctx.SetReturn(uint64(cases[chosen].idx)) // WAIT_OBJECT_0 + i
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "AcquireSRWLockExclusive", func(ctx *ntapi.TrapContext) uint32 {
@@ -10429,7 +10463,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(kernel32, "InitializeCriticalSection", func(ctx *ntapi.TrapContext) uint32 {
 			lp := ctx.Arg(0)
-			ctx.Mem.Write64(lp, 0)
+			if lp != 0 {
+				// Win64 CRITICAL_SECTION: DebugInfo=0, LockCount=-1, RecursionCount=0, OwningThread=0, LockSemaphore=0, SpinCount=0
+				ctx.Mem.Write64(lp, 0)             // DebugInfo
+				ctx.Mem.Write32(lp+8, 0xFFFFFFFF)  // LockCount = -1 (unlocked)
+				ctx.Mem.Write32(lp+12, 0)          // RecursionCount
+				ctx.Mem.Write64(lp+16, 0)          // OwningThread
+				ctx.Mem.Write64(lp+24, 0)          // LockSemaphore
+				ctx.Mem.Write64(lp+32, 0)          // SpinCount
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "InitializeProcThreadAttributeList", func(ctx *ntapi.TrapContext) uint32 {
@@ -12814,20 +12856,40 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			addr := ctx.Arg(0)
 			bufPtr := ctx.Arg(1)
 			bufLen := ctx.Arg(2)
-			if bufPtr != 0 && bufLen >= 48 {
-				ctx.Mem.Write64Raw(bufPtr+0, addr&^uint64(0xFFF))
-				ctx.Mem.Write64Raw(bufPtr+8, 0)
-				ctx.Mem.Write32(bufPtr+16, 0x04) // PAGE_READWRITE
-				ctx.Mem.Write32(bufPtr+20, 0)
-				ctx.Mem.Write64Raw(bufPtr+24, 0x1000)
-				ctx.Mem.Write32(bufPtr+32, 0x1000) // MEM_COMMIT
-				ctx.Mem.Write32(bufPtr+36, 0x04)   // PAGE_READWRITE
-				ctx.Mem.Write32(bufPtr+40, 0x20000) // MEM_PRIVATE
-				ctx.Mem.Write32(bufPtr+44, 0)
-				ctx.SetReturn(48)
-			} else {
+			if bufPtr == 0 || bufLen < 48 {
 				ctx.SetReturn(0)
+				return 0
 			}
+			base, size, mapped, perms := mem.QueryRegion(addr)
+			var protect uint32
+			if !mapped {
+				protect = 0x01 // PAGE_NOACCESS
+			} else {
+				switch {
+				case perms&(mmu.PermRead|mmu.PermWrite|mmu.PermExecute) == mmu.PermRead|mmu.PermWrite|mmu.PermExecute:
+					protect = 0x40
+				case perms&(mmu.PermRead|mmu.PermExecute) == mmu.PermRead|mmu.PermExecute:
+					protect = 0x20
+				case perms&(mmu.PermRead|mmu.PermWrite) == mmu.PermRead|mmu.PermWrite:
+					protect = 0x04
+				default:
+					protect = 0x02
+				}
+			}
+			state, typ := uint32(0x1000), uint32(0x20000) // MEM_COMMIT, MEM_PRIVATE
+			if !mapped {
+				state, typ, protect = 0x10000, 0, 0x01 // MEM_FREE, PAGE_NOACCESS
+			}
+			ctx.Mem.Write64Raw(bufPtr+0, base)
+			ctx.Mem.Write64Raw(bufPtr+8, base)
+			ctx.Mem.Write32(bufPtr+16, protect)
+			ctx.Mem.Write32(bufPtr+20, 0)
+			ctx.Mem.Write64Raw(bufPtr+24, size)
+			ctx.Mem.Write32(bufPtr+32, state)
+			ctx.Mem.Write32(bufPtr+36, protect)
+			ctx.Mem.Write32(bufPtr+40, typ)
+			ctx.Mem.Write32(bufPtr+44, 0)
+			ctx.SetReturn(48)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "VirtualQueryEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -12837,15 +12899,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(0)
 				return 0
 			}
-			addr := ctx.Arg(1) &^ uint64(0xFFF)
-			ctx.Mem.Write64(lpBuffer+0, addr)    // BaseAddress
-			ctx.Mem.Write64(lpBuffer+8, addr)    // AllocationBase
-			ctx.Mem.Write32(lpBuffer+16, 0x04)  // AllocationProtect = PAGE_READWRITE
-			ctx.Mem.Write32(lpBuffer+20, 0)     // PartitionId
-			ctx.Mem.Write64(lpBuffer+24, 0x1000) // RegionSize
-			ctx.Mem.Write32(lpBuffer+32, 0x1000) // State = MEM_COMMIT
-			ctx.Mem.Write32(lpBuffer+36, 0x04)  // Protect = PAGE_READWRITE
-			ctx.Mem.Write32(lpBuffer+40, 0x20000) // Type = MEM_PRIVATE
+			addr := ctx.Arg(1)
+			base, size, mapped, perms := mem.QueryRegion(addr)
+			var protect uint32
+			if !mapped {
+				protect = 0x01
+			} else {
+				switch {
+				case perms&(mmu.PermRead|mmu.PermWrite|mmu.PermExecute) == mmu.PermRead|mmu.PermWrite|mmu.PermExecute:
+					protect = 0x40
+				case perms&(mmu.PermRead|mmu.PermExecute) == mmu.PermRead|mmu.PermExecute:
+					protect = 0x20
+				case perms&(mmu.PermRead|mmu.PermWrite) == mmu.PermRead|mmu.PermWrite:
+					protect = 0x04
+				default:
+					protect = 0x02
+				}
+			}
+			state, typ := uint32(0x1000), uint32(0x20000)
+			if !mapped {
+				state, typ, protect = 0x10000, 0, 0x01
+			}
+			ctx.Mem.Write64(lpBuffer+0, base)
+			ctx.Mem.Write64(lpBuffer+8, base)
+			ctx.Mem.Write32(lpBuffer+16, protect)
+			ctx.Mem.Write32(lpBuffer+20, 0)
+			ctx.Mem.Write64(lpBuffer+24, size)
+			ctx.Mem.Write32(lpBuffer+32, state)
+			ctx.Mem.Write32(lpBuffer+36, protect)
+			ctx.Mem.Write32(lpBuffer+40, typ)
 			ctx.Mem.Write32(lpBuffer+44, 0)
 			ctx.SetReturn(48)
 			return 0
@@ -12883,40 +12965,39 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			} else {
 				timeout = time.Duration(ms) * time.Millisecond
 			}
+			type idxChan2 struct {
+				idx int
+				ch  <-chan struct{}
+			}
+			var cases2 []idxChan2
 			for i := uint64(0); i < nCount && i < 64; i++ {
 				hv, _ := ctx.Mem.Read64(pHandles + i*8)
 				h := ntapi.Handle(hv)
 				if th := handles.GetThread(h); th != nil && th.Done != nil {
-					if timeout < 0 {
-						<-th.Done
-					} else if timeout > 0 {
-						select {
-						case <-th.Done:
-						case <-time.After(timeout):
-							ctx.SetReturn(0x102)
-							return 0
-						}
-					} else {
-						select {
-						case <-th.Done:
-						default:
-							ctx.SetReturn(0x102)
-							return 0
-						}
-					}
-					ctx.SetReturn(i)
-					return 0
-				}
-				if eh := handles.GetEvent(h); eh != nil {
-					if eh.WaitTimeout(timeout) {
-						ctx.SetReturn(i)
-						return 0
-					}
-					ctx.SetReturn(0x102)
-					return 0
+					cases2 = append(cases2, idxChan2{int(i), th.Done})
+				} else if eh := handles.GetEvent(h); eh != nil {
+					cases2 = append(cases2, idxChan2{int(i), eh.WaitChan()})
 				}
 			}
-			ctx.SetReturn(0)
+			if len(cases2) == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			selCases2 := make([]reflect.SelectCase, 0, len(cases2)+1)
+			for _, ic := range cases2 {
+				selCases2 = append(selCases2, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ic.ch)})
+			}
+			if timeout == 0 {
+				selCases2 = append(selCases2, reflect.SelectCase{Dir: reflect.SelectDefault})
+			} else if timeout > 0 {
+				selCases2 = append(selCases2, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(time.After(timeout))})
+			}
+			chosen2, _, _ := reflect.Select(selCases2)
+			if chosen2 >= len(cases2) {
+				ctx.SetReturn(0x102)
+			} else {
+				ctx.SetReturn(uint64(cases2[chosen2].idx))
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForSingleObjectEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -16692,7 +16773,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	type syncDispatch struct {
 		wndProc uint64
 		hwnd    uint64
-		msg     uint32
+		msg     uint64
 		wParam  uint64
 		lParam  uint64
 	}
@@ -20158,7 +20239,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					writeLogFontName := func(off uint64, name string, height int32) {
 						ctx.Mem.Write32(pvParam+off, uint32(height)) // lfHeight
 						ctx.Mem.Write32(pvParam+off+16, 400)         // lfWeight = FW_NORMAL
-						ctx.Mem.Write8(pvParam+off+17, 0)            // lfItalic
+						ctx.Mem.Write8(pvParam+off+20, 0)            // lfItalic
 						ws := utf16Encode(name)
 						for i, w := range ws { ctx.Mem.Write16(pvParam+off+28+uint64(i)*2, w) }
 					}
@@ -22372,16 +22453,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(gdi32, "GetDeviceCaps", func(ctx *ntapi.TrapContext) uint32 {
 			idx := ctx.Arg(1)
 			val := uint64(0)
+			w, h := uint64(1920), uint64(1080)
+			if wlWindow != nil {
+				w = uint64(wlWindow.Width)
+				h = uint64(wlWindow.Height)
+			}
 			switch idx {
-			case 2:   val = 4    // TECHNOLOGY: DT_RASDISPLAY
-			case 8:   val = 1920 // HORZRES
-			case 10:  val = 1080 // VERTRES
-			case 12:  val = 32   // BITSPIXEL
-			case 14:  val = 1    // PLANES
-			case 88:  val = 96   // LOGPIXELSX
-			case 90:  val = 96   // LOGPIXELSY
-			case 118: val = 1920 // DESKTOPHORZRES
-			case 117: val = 1080 // DESKTOPVERTRES
+			case 2:   val = 4   // TECHNOLOGY: DT_RASDISPLAY
+			case 8:   val = w   // HORZRES
+			case 10:  val = h   // VERTRES
+			case 12:  val = 32  // BITSPIXEL
+			case 14:  val = 1   // PLANES
+			case 88:  val = 96  // LOGPIXELSX
+			case 90:  val = 96  // LOGPIXELSY
+			case 118: val = w   // DESKTOPHORZRES
+			case 117: val = h   // DESKTOPVERTRES
 			}
 			ctx.SetReturn(val)
 			return 0
@@ -22444,6 +22530,42 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1)
 			return 0
 		})
+		d.RegisterAutoStubHandler(gdi32, "GetTextMetricsA", func(ctx *ntapi.TrapContext) uint32 {
+			// TEXTMETRICA is byte-char version; same layout as TEXTMETRICW but tmFirstChar/LastChar/DefaultChar/BreakChar are BYTE, not WCHAR.
+			// Offset differences: tmFirstChar(+44,1), tmLastChar(+45,1), tmDefaultChar(+46,1), tmBreakChar(+47,1) = total 48 bytes (vs 52 for W).
+			hdc := ctx.Arg(0)
+			pTM := ctx.Arg(1)
+			dc := getDC(hdc)
+			f := dc.Font
+			if f == nil { f = gdi.DefaultFont() }
+			weight := f.Weight; if weight == 0 { weight = 400 }
+			italic := byte(0); if f.Italic { italic = 1 }
+			underline := byte(0); if f.Underline { underline = 1 }
+			if pTM != 0 {
+				ctx.Mem.Write32(pTM+0,  uint32(f.CellHeight))
+				ctx.Mem.Write32(pTM+4,  uint32(f.Ascent))
+				ctx.Mem.Write32(pTM+8,  uint32(f.Descent))
+				ctx.Mem.Write32(pTM+12, 0)
+				ctx.Mem.Write32(pTM+16, 0)
+				ctx.Mem.Write32(pTM+20, uint32(f.AveCharWidth))
+				ctx.Mem.Write32(pTM+24, uint32(f.MaxCharWidth))
+				ctx.Mem.Write32(pTM+28, uint32(weight))
+				ctx.Mem.Write32(pTM+32, 0)
+				ctx.Mem.Write32(pTM+36, 96)
+				ctx.Mem.Write32(pTM+40, 96)
+				ctx.Mem.Write8(pTM+44,  0x20) // tmFirstChar
+				ctx.Mem.Write8(pTM+45,  0xFF) // tmLastChar
+				ctx.Mem.Write8(pTM+46,  0x3F) // tmDefaultChar '?'
+				ctx.Mem.Write8(pTM+47,  0x20) // tmBreakChar ' '
+				ctx.Mem.Write8(pTM+48,  italic)
+				ctx.Mem.Write8(pTM+49,  underline)
+				ctx.Mem.Write8(pTM+50,  0)
+				ctx.Mem.Write8(pTM+51,  0x01) // TMPF_FIXED_PITCH
+				ctx.Mem.Write8(pTM+52,  0)    // ANSI_CHARSET
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
 		d.RegisterAutoStubHandler(gdi32, "GetTextExtentPoint32W", func(ctx *ntapi.TrapContext) uint32 {
 			hdc := ctx.Arg(0)
 			lpString := ctx.Arg(1)
@@ -22472,6 +22594,37 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 					for _, r := range gdi.UTF16ToRunes(chars) {
 						if g := gdi.GlyphFor(f.FaceID, pixSize, r); g != nil {
+							w += g.Advance
+						} else {
+							w += f.AveCharWidth
+						}
+					}
+				} else {
+					w = nLen * f.AveCharWidth
+				}
+				ctx.Mem.Write32(pSize, uint32(w))
+				ctx.Mem.Write32(pSize+4, uint32(f.CellHeight))
+			}
+			ctx.SetReturn(1)
+			return 0
+		})
+		d.RegisterAutoStubHandler(gdi32, "GetTextExtentPoint32A", func(ctx *ntapi.TrapContext) uint32 {
+			hdc := ctx.Arg(0)
+			lpString := ctx.Arg(1)
+			nLen := int32(ctx.Arg(2))
+			pSize := ctx.Arg(3)
+			dc := getDC(hdc)
+			f := dc.Font
+			if f == nil { f = gdi.DefaultFont() }
+			if pSize != 0 {
+				w := int32(0)
+				if f.FaceID >= 0 && lpString != 0 && nLen > 0 {
+					pixSize := f.Height
+					if pixSize < 0 { pixSize = -pixSize }
+					if pixSize == 0 { pixSize = 12 }
+					for i := int32(0); i < nLen; i++ {
+						b, _ := ctx.Mem.Read8(lpString + uint64(i))
+						if g := gdi.GlyphFor(f.FaceID, pixSize, rune(b)); g != nil {
 							w += g.Advance
 						} else {
 							w += f.AveCharWidth
@@ -23477,19 +23630,308 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "EnumFontFamiliesExW", func(ctx *ntapi.TrapContext) uint32 {
-			// We don't attempt to call the callback synchronously - the app will use defaults.
-			// Returning 1 indicates enumeration completed without the callback stopping it.
-			ctx.SetReturn(1)
+			lpLogfont := ctx.Arg(1) // LOGFONTW* (0 = enumerate all)
+			lpProc := ctx.Arg(2)   // FONTENUMPROCW callback
+			enumLParam := ctx.Arg(3)
+
+			if lpProc == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+
+			// Optionally filter by requested face name (lfFaceName at LOGFONTW+28).
+			filterName := ""
+			if lpLogfont != 0 {
+				filterName = strings.ToLower(strings.TrimSpace(readGuestUTF16(lpLogfont + 28)))
+			}
+
+			faces := gdi.ListFaces()
+			if len(faces) == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+
+			if filterName != "" && filterName != "@" {
+				var filtered []gdi.FaceInfo
+				for _, f := range faces {
+					if strings.ToLower(f.FamilyName) == filterName {
+						filtered = append(filtered, f)
+					}
+				}
+				if len(filtered) > 0 {
+					faces = filtered
+				}
+			}
+
+			rw, okW := ctx.CPU.(ntapi.RegisterWriter)
+			rr, okR := ctx.CPU.(ntapi.RegisterReader)
+			if !okW || !okR {
+				ctx.SetReturn(1)
+				return 0
+			}
+
+			// ENUMLOGFONTEXW = 348 bytes (padded to 352), NEWTEXTMETRICEXW = 100 bytes (padded to 104).
+			const elfSize = uint64(352)
+			const ntmSize = uint64(104)
+			const perFace = elfSize + ntmSize
+
+			numFaces := uint64(len(faces))
+			buf := sharedHeapAlloc(numFaces*perFace, true)
+			if buf == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+
+			// writeUTF16 writes a null-padded UTF-16LE string to guest memory.
+			writeUTF16 := func(addr uint64, s string, maxWchars int) {
+				ws := utf16Encode(s)
+				for i := 0; i < maxWchars; i++ {
+					if i < len(ws) {
+						ctx.Mem.Write16(addr+uint64(i)*2, ws[i])
+					} else {
+						ctx.Mem.Write16(addr+uint64(i)*2, 0)
+					}
+				}
+			}
+
+			queue := make([]syncDispatch, 0, numFaces)
+			for i, fi := range faces {
+				elfePtr := buf + uint64(i)*perFace
+				ntmPtr := elfePtr + elfSize
+
+				cellH, asc, desc, aveW := gdi.FaceMetrics(fi.ID, 12)
+
+				// LOGFONTW (92 bytes) at elfePtr+0
+				ctx.Mem.Write32(elfePtr+0, uint32(cellH))
+				ctx.Mem.Write32(elfePtr+4, 0)
+				ctx.Mem.Write32(elfePtr+8, 0)
+				ctx.Mem.Write32(elfePtr+12, 0)
+				ctx.Mem.Write32(elfePtr+16, 400) // lfWeight = FW_NORMAL
+				ctx.Mem.Write8(elfePtr+20, 0)
+				ctx.Mem.Write8(elfePtr+21, 0)
+				ctx.Mem.Write8(elfePtr+22, 0)
+				ctx.Mem.Write8(elfePtr+23, 0)    // lfCharSet = ANSI_CHARSET
+				ctx.Mem.Write8(elfePtr+24, 4)    // lfOutPrecision = OUT_TT_PRECIS
+				ctx.Mem.Write8(elfePtr+25, 0)
+				ctx.Mem.Write8(elfePtr+26, 0)
+				ctx.Mem.Write8(elfePtr+27, 0x31) // lfPitchAndFamily = FIXED_PITCH|FF_MODERN
+				writeUTF16(elfePtr+28, fi.FamilyName, 32)  // lfFaceName
+				// elfFullName at +92, elfStyle at +220, elfScript at +284
+				writeUTF16(elfePtr+92, fi.FamilyName, 64)
+				writeUTF16(elfePtr+220, "Regular", 32)
+				writeUTF16(elfePtr+284, "Western", 32)
+
+				// NEWTEXTMETRICW (76 bytes) at ntmPtr
+				ctx.Mem.Write32(ntmPtr+0, uint32(cellH))
+				ctx.Mem.Write32(ntmPtr+4, uint32(asc))
+				ctx.Mem.Write32(ntmPtr+8, uint32(desc))
+				ctx.Mem.Write32(ntmPtr+12, 0)
+				ctx.Mem.Write32(ntmPtr+16, 0)
+				ctx.Mem.Write32(ntmPtr+20, uint32(aveW))
+				ctx.Mem.Write32(ntmPtr+24, uint32(aveW*2))
+				ctx.Mem.Write32(ntmPtr+28, 400) // tmWeight
+				ctx.Mem.Write32(ntmPtr+32, 0)
+				ctx.Mem.Write32(ntmPtr+36, 96) // tmDigitizedAspectX
+				ctx.Mem.Write32(ntmPtr+40, 96) // tmDigitizedAspectY
+				ctx.Mem.Write16(ntmPtr+44, 0x0020) // tmFirstChar
+				ctx.Mem.Write16(ntmPtr+46, 0x00FF) // tmLastChar
+				ctx.Mem.Write16(ntmPtr+48, 0x003F) // tmDefaultChar '?'
+				ctx.Mem.Write16(ntmPtr+50, 0x0020) // tmBreakChar ' '
+				ctx.Mem.Write8(ntmPtr+52, 0)
+				ctx.Mem.Write8(ntmPtr+53, 0)
+				ctx.Mem.Write8(ntmPtr+54, 0)
+				ctx.Mem.Write8(ntmPtr+55, 0x31) // tmPitchAndFamily
+				ctx.Mem.Write8(ntmPtr+56, 0)    // tmCharSet = ANSI_CHARSET
+				// ntmFlags/ntmSizeEM/ntmCellHeight/ntmAvgWidth at +60
+				ctx.Mem.Write32(ntmPtr+60, 0)
+				ctx.Mem.Write32(ntmPtr+64, 2048)           // ntmSizeEM
+				ctx.Mem.Write32(ntmPtr+68, uint32(cellH))  // ntmCellHeight
+				ctx.Mem.Write32(ntmPtr+72, uint32(aveW))   // ntmAvgWidth
+				// FONTSIGNATURE at +76 (24 bytes)
+				ctx.Mem.Write32(ntmPtr+76, 0x00000001) // fsUsb[0] Basic Latin
+				ctx.Mem.Write32(ntmPtr+80, 0)
+				ctx.Mem.Write32(ntmPtr+84, 0)
+				ctx.Mem.Write32(ntmPtr+88, 0)
+				ctx.Mem.Write32(ntmPtr+92, 0x00000001) // fsCsb[0] Latin1/ANSI
+				ctx.Mem.Write32(ntmPtr+96, 0)
+
+				queue = append(queue, syncDispatch{
+					wndProc: lpProc,
+					hwnd:    elfePtr,    // RCX = ENUMLOGFONTEXW*
+					msg:     ntmPtr,     // RDX = NEWTEXTMETRICEXW*
+					wParam:  4,          // R8 = TRUETYPE_FONTTYPE
+					lParam:  enumLParam, // R9 = caller's lParam
+				})
+				_ = asc
+				_ = desc
+			}
+
+			first := queue[0]
+			rest := queue[1:]
+
+			rsp := rr.ReadReg(4)
+			retAddr, _ := mem.Read64(rsp)
+			syncStack = append(syncStack, syncDispatchFrame{
+				queue:               rest,
+				retAddr:             retAddr,
+				hwnd:                1, // fallback return value
+				returnWndProcResult: true,
+			})
+			mem.Write64(rsp, syncTrampoline)
+
+			rw.WriteReg(1, first.hwnd)
+			rw.WriteReg(2, first.msg)
+			rw.WriteReg(8, first.wParam)
+			rw.WriteReg(9, first.lParam)
+			ctx.CPU.SetPC(first.wndProc)
+			ctx.ReturnOverridden = true
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "EnumFontsW", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			// EnumFontsW(hdc, lpFaceName, lpProc, lParam)
+			// Callback: int CALLBACK(LOGFONTW*, TEXTMETRICW*, DWORD fontType, LPARAM)
+			lpProc := ctx.Arg(2)
+			enumLParam := ctx.Arg(3)
+			if lpProc == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+			faces := gdi.ListFaces()
+			if len(faces) == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+
+			rw, okW := ctx.CPU.(ntapi.RegisterWriter)
+			rr, okR := ctx.CPU.(ntapi.RegisterReader)
+			if !okW || !okR {
+				ctx.SetReturn(1)
+				return 0
+			}
+
+			const lfSz = uint64(92)  // LOGFONTW
+			const tmSz = uint64(60)  // TEXTMETRICW
+			const perFace = lfSz + tmSz
+			numFaces := uint64(len(faces))
+			buf := sharedHeapAlloc(numFaces*perFace, true)
+			if buf == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+
+			writeUTF16 := func(addr uint64, s string, maxWchars int) {
+				ws := utf16Encode(s)
+				for i := 0; i < maxWchars; i++ {
+					if i < len(ws) {
+						ctx.Mem.Write16(addr+uint64(i)*2, ws[i])
+					} else {
+						ctx.Mem.Write16(addr+uint64(i)*2, 0)
+					}
+				}
+			}
+
+			queue := make([]syncDispatch, 0, numFaces)
+			for i, fi := range faces {
+				lfPtr := buf + uint64(i)*perFace
+				tmPtr := lfPtr + lfSz
+
+				cellH, asc, desc, aveW := gdi.FaceMetrics(fi.ID, 12)
+				if cellH == 0 { cellH = 16; asc = 13; desc = 3; aveW = 8 }
+
+				// LOGFONTW (92 bytes)
+				ctx.Mem.Write32(lfPtr+0,  uint32(cellH))
+				ctx.Mem.Write32(lfPtr+4,  0)
+				ctx.Mem.Write32(lfPtr+8,  0)
+				ctx.Mem.Write32(lfPtr+12, 0)
+				ctx.Mem.Write32(lfPtr+16, 400) // lfWeight = FW_NORMAL
+				ctx.Mem.Write8(lfPtr+20, 0)
+				ctx.Mem.Write8(lfPtr+21, 0)
+				ctx.Mem.Write8(lfPtr+22, 0)
+				ctx.Mem.Write8(lfPtr+23, 0)    // ANSI_CHARSET
+				ctx.Mem.Write8(lfPtr+24, 4)    // OUT_TT_PRECIS
+				ctx.Mem.Write8(lfPtr+25, 0)
+				ctx.Mem.Write8(lfPtr+26, 0)
+				ctx.Mem.Write8(lfPtr+27, 0x31) // FIXED_PITCH|FF_MODERN
+				writeUTF16(lfPtr+28, fi.FamilyName, 32)
+
+				// TEXTMETRICW (60 bytes)
+				ctx.Mem.Write32(tmPtr+0,  uint32(cellH))
+				ctx.Mem.Write32(tmPtr+4,  uint32(asc))
+				ctx.Mem.Write32(tmPtr+8,  uint32(desc))
+				ctx.Mem.Write32(tmPtr+12, 0)
+				ctx.Mem.Write32(tmPtr+16, 0)
+				ctx.Mem.Write32(tmPtr+20, uint32(aveW))
+				ctx.Mem.Write32(tmPtr+24, uint32(aveW*2))
+				ctx.Mem.Write32(tmPtr+28, 400) // tmWeight
+				ctx.Mem.Write32(tmPtr+32, 0)
+				ctx.Mem.Write32(tmPtr+36, 96)
+				ctx.Mem.Write32(tmPtr+40, 96)
+				ctx.Mem.Write16(tmPtr+44, 0x0020)
+				ctx.Mem.Write16(tmPtr+46, 0x00FF)
+				ctx.Mem.Write16(tmPtr+48, 0x003F)
+				ctx.Mem.Write16(tmPtr+50, 0x0020)
+				ctx.Mem.Write8(tmPtr+52,  0)
+				ctx.Mem.Write8(tmPtr+53,  0)
+				ctx.Mem.Write8(tmPtr+54,  0)
+				ctx.Mem.Write8(tmPtr+55,  0x31) // tmPitchAndFamily
+				ctx.Mem.Write8(tmPtr+56,  0)    // ANSI_CHARSET
+
+				queue = append(queue, syncDispatch{
+					wndProc: lpProc,
+					hwnd:    lfPtr,    // RCX = LOGFONTW*
+					msg:     tmPtr,    // RDX = TEXTMETRICW*
+					wParam:  4,        // R8 = TRUETYPE_FONTTYPE
+					lParam:  enumLParam,
+				})
+				_ = asc; _ = desc
+			}
+
+			first := queue[0]
+			rest := queue[1:]
+
+			rsp := rr.ReadReg(4)
+			retAddr, _ := mem.Read64(rsp)
+			syncStack = append(syncStack, syncDispatchFrame{
+				queue:               rest,
+				retAddr:             retAddr,
+				hwnd:                1,
+				returnWndProcResult: true,
+			})
+			mem.Write64(rsp, syncTrampoline)
+
+			rw.WriteReg(1, first.hwnd)
+			rw.WriteReg(2, first.msg)
+			rw.WriteReg(8, first.wParam)
+			rw.WriteReg(9, first.lParam)
+			ctx.CPU.SetPC(first.wndProc)
+			ctx.ReturnOverridden = true
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "AddFontMemResourceEx", func(ctx *ntapi.TrapContext) uint32 {
+			pbFont := ctx.Arg(0)
+			cbFont := ctx.Arg(1)
 			pNumFonts := ctx.Arg(3)
+
+			if pbFont == 0 || cbFont == 0 || cbFont > 64*1024*1024 {
+				if pNumFonts != 0 { ctx.Mem.Write32(pNumFonts, 0) }
+				ctx.SetReturn(0)
+				return 0
+			}
+			data, err := ctx.Mem.ReadBytes(pbFont, int(cbFont))
+			if err != nil {
+				if pNumFonts != 0 { ctx.Mem.Write32(pNumFonts, 0) }
+				ctx.SetReturn(0)
+				return 0
+			}
+			id := gdi.AddFontFromBytes("embedded-font", data)
+			if id < 0 {
+				if pNumFonts != 0 { ctx.Mem.Write32(pNumFonts, 0) }
+				ctx.SetReturn(0)
+				return 0
+			}
+			ravelog.Logf("[gdi] AddFontMemResourceEx loaded faceID=%d size=%d\n", id, cbFont)
 			if pNumFonts != 0 { ctx.Mem.Write32(pNumFonts, 1) }
-			ctx.SetReturn(0x12340001) // fake handle
+			ctx.SetReturn(uint64(0x12340000 + uint32(id+1)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(gdi32, "RemoveFontMemResourceEx", func(ctx *ntapi.TrapContext) uint32 {

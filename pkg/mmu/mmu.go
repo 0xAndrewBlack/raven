@@ -596,7 +596,53 @@ func (m *MMU) Munmap(addr, length uint64) {
 	}
 }
 
-// Mprotect changes permissions on pages covering [addr, addr+length).
+// QueryRegion returns information about the virtual memory region containing addr.
+// base is the start address of the contiguous region with the same permissions.
+// size is the total size of that contiguous region.
+// mapped is false if the address is not mapped (free region).
+// perms holds the page permissions (PermRead|PermWrite|PermExecute).
+func (m *MMU) QueryRegion(addr uint64) (base, size uint64, mapped bool, perms uint8) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	pg := addr & PageMask
+	pe := m.getPage(pg)
+	if pe == nil {
+		// Unmapped: scan forward to find next mapped page for the free-region size.
+		base = pg
+		perms = 0
+		mapped = false
+		end := pg + PageSize
+		for i := 0; i < 65536; i++ { // cap at 256 MB scan
+			if m.getPage(end) != nil {
+				break
+			}
+			end += PageSize
+		}
+		size = end - base
+		return
+	}
+	// Mapped: find the start of the contiguous region with identical permissions.
+	p := pe.Perms
+	start := pg
+	for start >= PageSize {
+		prev := start - PageSize
+		pp := m.getPage(prev)
+		if pp == nil || pp.Perms != p {
+			break
+		}
+		start = prev
+	}
+	// Find the end of the contiguous region.
+	end := pg + PageSize
+	for i := 0; i < 65536; i++ {
+		np := m.getPage(end)
+		if np == nil || np.Perms != p {
+			break
+		}
+		end += PageSize
+	}
+	return start, end - start, true, p
+}
 func (m *MMU) Mprotect(addr, length uint64, perms uint8) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

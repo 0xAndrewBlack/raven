@@ -814,17 +814,58 @@ func handleNtProtectVirtualMemory(ctx *TrapContext) uint32 {
 }
 
 func handleNtQueryVirtualMemory(ctx *TrapContext) uint32 {
-	buffer := ctx.Arg(2)
-	if buffer != 0 {
-		// MEMORY_BASIC_INFORMATION
-		ctx.Mem.Write64(buffer+0, 0)          // BaseAddress
-		ctx.Mem.Write64(buffer+8, 0)          // AllocationBase
-		ctx.Mem.Write32(buffer+16, 0x04)      // AllocationProtect = PAGE_READWRITE
-		ctx.Mem.Write64(buffer+24, mmu.PageSize) // RegionSize
-		ctx.Mem.Write32(buffer+32, 0x1000)    // State = MEM_COMMIT
-		ctx.Mem.Write32(buffer+36, 0x04)      // Protect = PAGE_READWRITE
-		ctx.Mem.Write32(buffer+40, 0x20000)   // Type = MEM_PRIVATE
+	addr := ctx.Arg(1)
+	buffer := ctx.Arg(3)
+	if buffer == 0 {
+		return StatusSuccess
 	}
+
+	base, size, mapped, perms := ctx.Mem.QueryRegion(addr)
+
+	// Convert MMU perms to Win32 PAGE_xxx constants.
+	var protect uint32
+	if !mapped {
+		protect = 0x01 // PAGE_NOACCESS
+	} else {
+		switch {
+		case perms&(mmu.PermRead|mmu.PermWrite|mmu.PermExecute) == mmu.PermRead|mmu.PermWrite|mmu.PermExecute:
+			protect = 0x40 // PAGE_EXECUTE_READWRITE
+		case perms&(mmu.PermRead|mmu.PermExecute) == mmu.PermRead|mmu.PermExecute:
+			protect = 0x20 // PAGE_EXECUTE_READ
+		case perms&(mmu.PermRead|mmu.PermWrite) == mmu.PermRead|mmu.PermWrite:
+			protect = 0x04 // PAGE_READWRITE
+		default:
+			protect = 0x02 // PAGE_READONLY
+		}
+	}
+
+	var state, typ uint32
+	if mapped {
+		state = 0x1000  // MEM_COMMIT
+		typ = 0x20000   // MEM_PRIVATE
+	} else {
+		state = 0x10000 // MEM_FREE
+		typ = 0
+		protect = 0x01  // PAGE_NOACCESS
+	}
+
+	// MEMORY_BASIC_INFORMATION layout (Win64):
+	// +0  BaseAddress        (PVOID, 8)
+	// +8  AllocationBase     (PVOID, 8)
+	// +16 AllocationProtect  (DWORD, 4) + padding (4)
+	// +24 RegionSize         (SIZE_T, 8)
+	// +32 State              (DWORD, 4)
+	// +36 Protect            (DWORD, 4)
+	// +40 Type               (DWORD, 4)
+	ctx.Mem.Write64(buffer+0, base)
+	ctx.Mem.Write64(buffer+8, base) // AllocationBase = BaseAddress (simplified)
+	ctx.Mem.Write32(buffer+16, protect)
+	ctx.Mem.Write32(buffer+20, 0) // PartitionId padding
+	ctx.Mem.Write64(buffer+24, size)
+	ctx.Mem.Write32(buffer+32, state)
+	ctx.Mem.Write32(buffer+36, protect)
+	ctx.Mem.Write32(buffer+40, typ)
+
 	return StatusSuccess
 }
 
