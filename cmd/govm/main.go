@@ -16480,6 +16480,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// rebarBandCounts tracks how many bands have been inserted into each ReBar
 	rebarBandCounts := make(map[uint64]int)
 
+	// Pre-declare scratchAlloc so the builtinWndProc closure below can reference it.
+	// The actual allocator is initialised later (after scratchPage is mapped).
+	var scratchAlloc func(uint64) uint64
+
 	// Wrap builtinWndProc to add ReBar/Toolbar/SysTab handling
 	innerBuiltin := builtinWndProc
 	builtinWndProc = func(hwnd uint64, msg uint32, wParam, lParam uint64) (uint64, bool) {
@@ -16930,8 +16934,33 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				return 0, true
-			default:
+			case 0x0201: // WM_LBUTTONDOWN - find which tab was hit and notify parent
+				clickX := int32(lParam & 0xFFFF)
+				const tabW2 = int32(80)
+				tx := int32(0)
+				hitTab := -1
+				for i := 0; i < cs.tabCount; i++ {
+					if clickX >= tx && clickX < tx+tabW2 {
+						hitTab = i
+						break
+					}
+					tx += tabW2
+				}
+				if hitTab >= 0 && hitTab != cs.tabCurSel {
+					cs.tabCurSel = hitTab
+					// Send WM_NOTIFY(TCN_SELCHANGE=-551) to parent so NPP switches document.
+					// NMHDR layout: hwndFrom(8), idFrom(8), code(4+4pad).
+					nmhdr := scratchAlloc(32)
+					mem.Write64(nmhdr, hwnd)
+					mem.Write64(nmhdr+8, uint64(cs.ctrlID))
+					mem.Write32(nmhdr+16, 0xFFFFFDE9) // TCN_SELCHANGE = -551
+					msgQueue = append(msgQueue, queuedMsg{cs.parentHWND, 0x004E, uint64(cs.ctrlID), nmhdr})
+					// Repaint tab strip to show new selection.
+					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+				}
 				return 0, true
+			default:
+				return 0, false // let guest WndProc handle unrecognised messages
 			}
 
 		case "tooltips_class32":
@@ -16962,7 +16991,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// Scratch page for CREATESTRUCT and similar temporary guest-side structs
 	scratchPage := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
 	scratchOff := uint64(0)
-	scratchAlloc := func(n uint64) uint64 {
+	scratchAlloc = func(n uint64) uint64 {
 		n = (n + 7) &^ 7 // 8-byte align
 		if scratchOff+n > 4096 {
 			scratchOff = 0 // wrap
@@ -17517,7 +17546,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wasVisible := cs.visible
 				cs.visible = nCmdShow != 0 // SW_HIDE = 0
 				if nCmdShow == 0 {
-					hwndExplicitlyHidden[hwnd] = true
+					// Only mark explicitly hidden if the window was actually visible.
+					// SW_HIDE on a never-shown window is a no-op for cascade/auto-show
+					// purposes: a subsequent MoveWindow should still be able to auto-show it.
+					if wasVisible {
+						hwndExplicitlyHidden[hwnd] = true
+					}
 				} else {
 					delete(hwndExplicitlyHidden, hwnd)
 				}
@@ -18928,37 +18962,50 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 						// childAt returns the deepest visible window at surface position (sx, sy),
 						// or 0 if none. Returns window-relative coordinates via relParam.
-						// Searches direct children of mainHWND first, then their children
-						// (grandchildren), to handle containers like ReBarWindow32.
+						//
+						// Priority rules (mimicking Win32 z-order / WM_NCHITTEST):
+						//   1. SysTabControl32 only claims clicks inside its tab-strip header
+						//      (top 22 px). Clicks in the content area fall through to siblings.
+						//   2. Among equal-priority candidates, prefer the window with the
+						//      smaller area (most specific / on top visually).
+						//   3. Grandchildren of containers (e.g. ReBarWindow32) beat their parent.
 						childAt := func(sx, sy int32) (child uint64, relParam uint64) {
-							// isContainerClass returns true for windows that are containers (delegate to their children).
+							const tabStripH = int32(22) // height of SysTabControl32 header strip
 							isContainerClass := func(cn string) bool {
 								return cn == "rebarwindow32"
 							}
+							area := func(c *controlState) int64 { return int64(c.w) * int64(c.h) }
 							for chWnd, cs := range hwndChildren {
 								if cs.parentHWND != mainHWND || !cs.visible {
 									continue
 								}
-								if sx >= cs.x && sx < cs.x+cs.w && sy >= cs.y && sy < cs.y+cs.h {
-									if child == 0 || (!isContainerClass(cs.className) && isContainerClass(hwndChildren[child].className)) {
-										child = chWnd
-										rx := uint64(uint16(sx - cs.x))
-										ry := uint64(uint16(sy - cs.y))
-										relParam = rx | (ry << 16)
-									}
-									// Also check grandchildren (containers like ReBarWindow32 hold child controls).
+								if sx < cs.x || sx >= cs.x+cs.w || sy < cs.y || sy >= cs.y+cs.h {
+									continue
+								}
+								// SysTabControl32: only claim the tab-strip header area.
+								// Content area is transparent - let siblings underneath handle it.
+								if cs.className == "systabcontrol32" && sy >= cs.y+tabStripH {
+									continue
+								}
+								// Grandchildren of container classes beat the container itself.
+								if isContainerClass(cs.className) {
 									for gcWnd, gcs := range hwndChildren {
 										if gcs.parentHWND != chWnd || !gcs.visible {
 											continue
 										}
 										if sx >= gcs.x && sx < gcs.x+gcs.w && sy >= gcs.y && sy < gcs.y+gcs.h {
-											// Grandchild beats its container parent.
-											child = gcWnd
-											rx2 := uint64(uint16(sx - gcs.x))
-											ry2 := uint64(uint16(sy - gcs.y))
-											relParam = rx2 | (ry2 << 16)
+											if child == 0 || area(gcs) < area(hwndChildren[child]) {
+												child = gcWnd
+												relParam = uint64(uint16(sx-gcs.x)) | (uint64(uint16(sy-gcs.y)) << 16)
+											}
 										}
 									}
+									continue
+								}
+								// Accept this child if it is more specific than the current winner.
+								if child == 0 || area(cs) < area(hwndChildren[child]) {
+									child = chWnd
+									relParam = uint64(uint16(sx-cs.x)) | (uint64(uint16(sy-cs.y)) << 16)
 								}
 							}
 							return child, relParam
