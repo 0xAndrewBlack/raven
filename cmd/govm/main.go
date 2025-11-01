@@ -1271,6 +1271,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 
 			md.items = parseMenuEx(32, 0)
+			ravelog.Logf("[menu] peLoadMenuResource(MENUEX) id=%d parsed %d top-level items\n", menuID, len(md.items))
+			for i, it := range md.items {
+				ravelog.Logf("[menu]   [%d] flags=0x%x id=%d text=%q submenu=%d\n", i, it.flags, it.id, it.text, len(it.submenu))
+			}
 			return md
 		}
 
@@ -1323,6 +1327,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 
 		md.items = parseItems(32, 0)
+		ravelog.Logf("[menu] peLoadMenuResource id=%d parsed %d top-level items\n", menuID, len(md.items))
+		for i, it := range md.items {
+			ravelog.Logf("[menu]   [%d] flags=0x%x id=%d text=%q submenu=%d\n", i, it.flags, it.id, it.text, len(it.submenu))
+		}
 		return md
 	}
 
@@ -14439,7 +14447,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 	nextMsgID := uint32(0xC000) // RegisterWindowMessage range
 	nextAtom := uint16(0xC001)  // RegisterClass atom range
-	var focusHwnd uint64 // currently focused window (receives keyboard input)
+	var focusHwnd uint64    // currently focused window (receives keyboard input)
+	var mouseCapture uint64 // window that has captured the mouse (SetCapture)
 
 	// WndProc dispatch tables
 	atomWndProc := make(map[uint16]uint64)   // class atom → WndProc address
@@ -16276,6 +16285,27 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case 0x0005: // WM_SIZE
 				cs.w = int32(lParam & 0xFFFF)
 				cs.h = 26 // standard toolbar height
+				return 0, true
+			case 0x0201: // WM_LBUTTONDOWN - toolbar button click
+				clickX := int32(lParam & 0xFFFF)
+				btnW := cs.tbBtnW
+				if btnW <= 0 { btnW = 23 }
+				x := int32(2)
+				for _, btn := range cs.tbButtons {
+					if btn.fsStyle&0x01 != 0 { // TBSTYLE_SEP
+						x += 8
+						continue
+					}
+					if clickX >= x && clickX < x+btnW {
+						if btn.fsState&0x04 == 0 { // not disabled (TBSTATE_ENABLED=0x04 means enabled)
+							// WM_COMMAND: LOWORD=cmdID, HIWORD=1 (BN_CLICKED), lParam=toolbar HWND
+							msgQueue = append(msgQueue, queuedMsg{cs.parentHWND, 0x0111,
+								uint64(uint16(btn.idCommand)) | (1 << 16), hwnd})
+						}
+						break
+					}
+					x += btnW + 1
+				}
 				return 0, true
 			case wmUser + 3: // TB_ENABLEBUTTON
 				return 1, true
@@ -18387,7 +18417,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if !ok {
 							break
 						}
-						// Surface-local coords: y=0 at top of our SHM buffer.
+						ravelog.Logf("[mouse] kind=%d x=%d y=%d button=%d pressed=%v\n", me.Kind, me.X, me.Y, me.Button, me.Pressed)
 						// Our custom title bar occupies y=[0, TitleBarH).
 						// Menu bar occupies y=[TitleBarH, TitleBarH+menuBarHeight).
 						// Client area starts at y=TitleBarH+menuBarHeight.
@@ -18403,6 +18433,49 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						// Client-relative coordinates for WM_LBUTTON* messages
 						clientX := me.X
 						clientY := me.Y - clientTop
+
+						// childAt returns the child window of mainHWND at surface position (sx, sy),
+						// or 0 if none. Returns child-relative coordinates via relParam.
+						childAt := func(sx, sy int32) (child uint64, relParam uint64) {
+							for chWnd, cs := range hwndChildren {
+								if cs.parentHWND != mainHWND || !cs.visible {
+									continue
+								}
+								if sx >= cs.x && sx < cs.x+cs.w && sy >= cs.y && sy < cs.y+cs.h {
+									rx := uint64(uint16(sx - cs.x))
+									ry := uint64(uint16(sy - cs.y))
+									return chWnd, rx | (ry << 16)
+								}
+							}
+							return 0, 0
+						}
+						// routeMouseToChild routes a mouse message to child or mainHWND.
+						// Returns true if routed to a child builtin (no need to queue).
+						routeMouseMsg := func(msg uint32, wp uint64, sx, sy int32) {
+							targetHWND := mouseCapture
+							var relParam uint64
+							if targetHWND == 0 {
+								targetHWND, relParam = childAt(sx, sy)
+							} else {
+								if cs, ok := hwndChildren[targetHWND]; ok {
+									rx := uint64(uint16(sx - cs.x))
+									ry := uint64(uint16(sy - cs.y))
+									relParam = rx | (ry << 16)
+								} else {
+									relParam = uint64(uint16(sx)) | (uint64(uint16(sy-clientTop)) << 16)
+								}
+							}
+							if targetHWND != 0 {
+								_, handled := builtinWndProc(targetHWND, msg, wp, relParam)
+								if !handled {
+									msgQueue = append(msgQueue, queuedMsg{targetHWND, msg, wp, relParam})
+								}
+							} else {
+								// Fall back to mainHWND with client-relative coords
+								mcp := uint64(uint16(sx)) | (uint64(uint16(sy-clientTop)) << 16)
+								msgQueue = append(msgQueue, queuedMsg{mainHWND, msg, wp, mcp})
+							}
+						}
 
 						switch me.Kind {
 						case 0: // WM_MOUSEMOVE
@@ -18446,9 +18519,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 									}
 								}
 							} else if me.Y >= clientTop {
-								// Client area mouse move - use client-relative coords
-								clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
-								msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0200, 0, clParam})
+								// Client area mouse move - route to captured/child/mainHWND
+								routeMouseMsg(0x0200, 0, me.X, me.Y)
 							}
 						case 1: // button press/release
 							const btnLeft, btnRight, btnMiddle = 272, 273, 274
@@ -18571,39 +18643,51 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 											}
 										}
 										if !dropHit {
-											msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0201, 0x0001, clParam})
+											// Route click to child under cursor or mainHWND
+											hitChild, hitRelParam := childAt(me.X, me.Y)
+											if hitChild != 0 {
+												// Update focus to clicked child
+												if focusHwnd != hitChild {
+													if focusHwnd != 0 {
+														msgQueue = append(msgQueue, queuedMsg{focusHwnd, 0x0008, uint64(hitChild), 0})
+													}
+													focusHwnd = hitChild
+													msgQueue = append(msgQueue, queuedMsg{hitChild, 0x0007, 0, 0})
+												}
+												_, handled := builtinWndProc(hitChild, 0x0201, 0x0001, hitRelParam)
+												if !handled {
+													msgQueue = append(msgQueue, queuedMsg{hitChild, 0x0201, 0x0001, hitRelParam})
+												}
+											} else {
+												msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0201, 0x0001, clParam})
+											}
 										}
 									}
 								} else {
-									// Left button release - client-relative
+									// Left button release - route to captured window or hit-test
 									if me.Y >= clientTop || (wlWindow == nil) {
-										clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0202, 0, clParam})
+										routeMouseMsg(0x0202, 0, me.X, me.Y)
 									}
 								}
 							case btnRight:
 								if me.Y >= clientTop || wlWindow == nil {
-									clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
 									if me.Pressed {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0204, 0x0002, clParam})
+										routeMouseMsg(0x0204, 0x0002, me.X, me.Y)
 									} else {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0205, 0, clParam})
+										routeMouseMsg(0x0205, 0, me.X, me.Y)
 									}
 								}
 							case btnMiddle:
 								if me.Y >= clientTop || wlWindow == nil {
-									clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
 									if me.Pressed {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0207, 0x0010, clParam})
+										routeMouseMsg(0x0207, 0x0010, me.X, me.Y)
 									} else {
-										msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x0208, 0, clParam})
+										routeMouseMsg(0x0208, 0, me.X, me.Y)
 									}
 								}
 							}
 						case 2: // scroll wheel
-							wParam := uint64(int16(me.AxisVal*-120)) << 16
-							clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
-							msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x020A, wParam, clParam})
+							routeMouseMsg(0x020A, uint64(int16(me.AxisVal*-120))<<16, me.X, me.Y)
 						}
 					}
 				}
@@ -18868,11 +18952,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "SetCapture", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			prev := mouseCapture
+			mouseCapture = ctx.Arg(0)
+			ctx.SetReturn(prev)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "ReleaseCapture", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			mouseCapture = 0
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "EnableWindow", func(ctx *ntapi.TrapContext) uint32 {
