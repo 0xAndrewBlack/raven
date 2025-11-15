@@ -5357,7 +5357,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 
 		d.RegisterAutoStubHandler(kernel32, "GetFileAttributesA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xFFFFFFFF) // INVALID_FILE_ATTRIBUTES = file not found
+			pathPtr := ctx.Arg(0)
+			if pathPtr == 0 { ctx.SetReturn(0xFFFFFFFF); return 0 }
+			path := winPathToVFS(readGuestString(pathPtr))
+			info, err := os.Stat(path)
+			if err != nil { ctx.SetReturn(0xFFFFFFFF); return 0 }
+			var attrs uint32 = 0x20 // FILE_ATTRIBUTE_NORMAL
+			if info.IsDir() { attrs = 0x10 } // FILE_ATTRIBUTE_DIRECTORY
+			ctx.SetReturn(uint64(attrs))
 			return 0
 		})
 
@@ -7899,11 +7906,37 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CopyFileA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			src := winPathToVFS(readGuestString(ctx.Arg(0)))
+			dst := winPathToVFS(readGuestString(ctx.Arg(1)))
+			failIfExists := ctx.Arg(2) != 0
+			if failIfExists {
+				if _, err := os.Stat(dst); err == nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5); ctx.SetReturn(0); return 0 }
+			}
+			in, err := os.Open(src)
+			if err != nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2); ctx.SetReturn(0); return 0 }
+			defer in.Close()
+			out, err := os.Create(dst)
+			if err != nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5); ctx.SetReturn(0); return 0 }
+			defer out.Close()
+			if _, err := io.Copy(out, in); err != nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5); ctx.SetReturn(0); return 0 }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CopyFileExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			src := winPathToVFS(readGuestString(ctx.Arg(0)))
+			dst := winPathToVFS(readGuestString(ctx.Arg(1)))
+			flags := ctx.Arg(5)
+			if flags&1 != 0 { // COPY_FILE_FAIL_IF_EXISTS
+				if _, err := os.Stat(dst); err == nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5); ctx.SetReturn(0); return 0 }
+			}
+			in, err := os.Open(src)
+			if err != nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2); ctx.SetReturn(0); return 0 }
+			defer in.Close()
+			out, err := os.Create(dst)
+			if err != nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5); ctx.SetReturn(0); return 0 }
+			defer out.Close()
+			if _, err := io.Copy(out, in); err != nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5); ctx.SetReturn(0); return 0 }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CopyLZFile", func(ctx *ntapi.TrapContext) uint32 {
@@ -10058,7 +10091,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetTempFileNameA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // error
+			pathArg := readGuestString(ctx.Arg(0))
+			if pathArg == "" { pathArg = `C:\Windows\Temp` }
+			prefix := readGuestString(ctx.Arg(1))
+			if len(prefix) > 3 { prefix = prefix[:3] }
+			uUnique := ctx.Arg(2)
+			lpTempFileName := ctx.Arg(3)
+			if uUnique == 0 {
+				for n := uint64(1); n <= 0xFFFF; n++ {
+					name := fmt.Sprintf("%s\\%s%04X.tmp", pathArg, prefix, n)
+					if _, err := os.Stat(winPathToVFS(name)); os.IsNotExist(err) { uUnique = n; break }
+				}
+				if uUnique == 0 { uUnique = 1 }
+			}
+			name := fmt.Sprintf("%s\\%s%04X.tmp", pathArg, prefix, uUnique)
+			if lpTempFileName != 0 {
+				for i := 0; i < len(name); i++ { mem.Write8(lpTempFileName+uint64(i), name[i]) }
+				mem.Write8(lpTempFileName+uint64(len(name)), 0)
+			}
+			ctx.SetReturn(uUnique)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetTempFileNameW", func(ctx *ntapi.TrapContext) uint32 {
@@ -10942,7 +10993,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "MoveFileA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			src := winPathToVFS(readGuestString(ctx.Arg(0)))
+			dst := winPathToVFS(readGuestString(ctx.Arg(1)))
+			if err := os.Rename(src, dst); err != nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5); ctx.SetReturn(0); return 0 }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "MoveFileExA", func(ctx *ntapi.TrapContext) uint32 {
@@ -10968,7 +11022,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "MoveFileWithProgressA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			src := winPathToVFS(readGuestString(ctx.Arg(0)))
+			dst := winPathToVFS(readGuestString(ctx.Arg(1)))
+			if err := os.Rename(src, dst); err != nil { mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5); ctx.SetReturn(0); return 0 }
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "MoveFileWithProgressW", func(ctx *ntapi.TrapContext) uint32 {
