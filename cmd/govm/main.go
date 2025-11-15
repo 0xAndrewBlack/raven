@@ -967,6 +967,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// Menu data structures
 	const menuBarHeight int32 = 20
 	envVars := map[string]string{} // guest environment variables (SetEnvironmentVariableW/GetEnvironmentVariableW)
+
+	// Atom tables
+	localAtomTable  := map[string]uint16{}
+	localAtomNames  := map[uint16]string{}
+	nextLocalAtom   := uint16(0xC100)
+	globalAtomTable := map[string]uint16{}
+	globalAtomNames := map[uint16]string{}
+	nextGlobalAtom  := uint16(0xC200)
+
+	addAtomLocal := func(name string) uint16 {
+		key := strings.ToLower(name)
+		if a, ok := localAtomTable[key]; ok { return a }
+		a := nextLocalAtom; nextLocalAtom++
+		localAtomTable[key] = a; localAtomNames[a] = name
+		return a
+	}
+	addAtomGlobal := func(name string) uint16 {
+		key := strings.ToLower(name)
+		if a, ok := globalAtomTable[key]; ok { return a }
+		a := nextGlobalAtom; nextGlobalAtom++
+		globalAtomTable[key] = a; globalAtomNames[a] = name
+		return a
+	}
+
 	type menuItem struct {
 		flags   uint32
 		id      uint64
@@ -7560,11 +7584,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "AddAtomA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xC000) // fake atom
+			name := readGuestString(ctx.Arg(0))
+			ctx.SetReturn(uint64(addAtomLocal(name)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "AddAtomW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xC000) // fake atom
+			name := readGuestUTF16(ctx.Arg(0))
+			ctx.SetReturn(uint64(addAtomLocal(name)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "AddConsoleAliasA", func(ctx *ntapi.TrapContext) uint32 {
@@ -8308,8 +8334,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "DeleteAtom", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // success
-			return 0
+			atom := uint16(ctx.Arg(0))
+			if name, ok := localAtomNames[atom]; ok {
+				delete(localAtomTable, strings.ToLower(name))
+				delete(localAtomNames, atom)
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "DeleteFiber", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // no-op
@@ -8680,12 +8710,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FindAtomA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xC000) // fake atom
-			return 0
+			key := strings.ToLower(readGuestString(ctx.Arg(0)))
+			if a, ok := localAtomTable[key]; ok { ctx.SetReturn(uint64(a)); return 0 }
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FindAtomW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xC000) // fake atom
-			return 0
+			key := strings.ToLower(readGuestUTF16(ctx.Arg(0)))
+			if a, ok := localAtomTable[key]; ok { ctx.SetReturn(uint64(a)); return 0 }
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FindCloseChangeNotification", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(1)
@@ -8892,12 +8924,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetAtomNameA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
-			return 0
+			atom := uint16(ctx.Arg(0)); buf := ctx.Arg(1); sz := ctx.Arg(2)
+			if name, ok := localAtomNames[atom]; ok && buf != 0 && sz > 0 {
+				b := append([]byte(name), 0)
+				if uint64(len(b)) > sz { b = b[:sz] }
+				for i, c := range b { mem.Write8(buf+uint64(i), c) }
+				ctx.SetReturn(uint64(len(b) - 1)); return 0
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetAtomNameW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
-			return 0
+			atom := uint16(ctx.Arg(0)); buf := ctx.Arg(1); sz := ctx.Arg(2)
+			if name, ok := localAtomNames[atom]; ok && buf != 0 && sz > 0 {
+				ws := utf16Encode(name)
+				maxW := uint64(sz) - 1
+				if uint64(len(ws)) > maxW { ws = ws[:maxW] }
+				for i, w := range ws { mem.Write16(buf+uint64(i)*2, w) }
+				mem.Write16(buf+uint64(len(ws))*2, 0)
+				ctx.SetReturn(uint64(len(ws))); return 0
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetBinaryType", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0)
@@ -10367,28 +10413,34 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalAddAtomA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xC001) // fake global atom
-			return 0
+			name := readGuestString(ctx.Arg(0))
+			ctx.SetReturn(uint64(addAtomGlobal(name))); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalAddAtomW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xC001) // fake global atom
-			return 0
+			name := readGuestUTF16(ctx.Arg(0))
+			ctx.SetReturn(uint64(addAtomGlobal(name))); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalCompact", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalDeleteAtom", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // success
-			return 0
+			atom := uint16(ctx.Arg(0))
+			if name, ok := globalAtomNames[atom]; ok {
+				delete(globalAtomTable, strings.ToLower(name))
+				delete(globalAtomNames, atom)
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalFindAtomA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xC001)
-			return 0
+			key := strings.ToLower(readGuestString(ctx.Arg(0)))
+			if a, ok := globalAtomTable[key]; ok { ctx.SetReturn(uint64(a)); return 0 }
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalFindAtomW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xC001)
-			return 0
+			key := strings.ToLower(readGuestUTF16(ctx.Arg(0)))
+			if a, ok := globalAtomTable[key]; ok { ctx.SetReturn(uint64(a)); return 0 }
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalFix", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0)
@@ -10399,12 +10451,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalGetAtomNameA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
-			return 0
+			atom := uint16(ctx.Arg(0)); buf := ctx.Arg(1); sz := ctx.Arg(2)
+			if name, ok := globalAtomNames[atom]; ok && buf != 0 && sz > 0 {
+				b := append([]byte(name), 0)
+				if uint64(len(b)) > sz { b = b[:sz] }
+				for i, c := range b { mem.Write8(buf+uint64(i), c) }
+				ctx.SetReturn(uint64(len(b) - 1)); return 0
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalGetAtomNameW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
-			return 0
+			atom := uint16(ctx.Arg(0)); buf := ctx.Arg(1); sz := ctx.Arg(2)
+			if name, ok := globalAtomNames[atom]; ok && buf != 0 && sz > 0 {
+				ws := utf16Encode(name)
+				maxW := uint64(sz) - 1
+				if uint64(len(ws)) > maxW { ws = ws[:maxW] }
+				for i, w := range ws { mem.Write16(buf+uint64(i)*2, w) }
+				mem.Write16(buf+uint64(len(ws))*2, 0)
+				ctx.SetReturn(uint64(len(ws))); return 0
+			}
+			ctx.SetReturn(0); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalHandle", func(ctx *ntapi.TrapContext) uint32 {
 			// GMEM_FIXED: handle == pointer, so GlobalHandle(ptr) == ptr
