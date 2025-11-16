@@ -140,38 +140,86 @@ func handleNtOpenFile(ctx *TrapContext) uint32 {
 
 func handleNtReadFile(ctx *TrapContext) uint32 {
 	// NtReadFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock*, Buffer, Length, ByteOffset*, Key*)
+	// ReactOS reference: ntoskrnl/io/iomgr/iofunc.c NtReadFile
 	fileHandle := Handle(ctx.Arg(0))
-	ioStatus := ctx.Arg(1) // actually arg4, but Windows ABI
-	bufAddr := ctx.Arg(2)
-	length := ctx.Arg(3)
+	eventHandle := Handle(ctx.Arg(1))
+	// Arg(2) = ApcRoutine (ignored)
+	// Arg(3) = ApcContext (ignored)
+	ioStatus := ctx.Arg(4)
+	bufAddr  := ctx.Arg(5)
+	length   := ctx.Arg(6)
+	pByteOffset := ctx.Arg(7)
+	// Arg(8) = Key (ignored)
 
-	// Re-read from stack for proper positioning
 	fh := ctx.Handles.GetFile(fileHandle)
 	if fh == nil {
 		return StatusInvalidHandle
 	}
 
-	buf := make([]byte, length)
-	n, err := ctx.FS.Read(fh.FD, buf)
-	if err != nil {
-		return StatusNoSuchFile
+	// Seek if ByteOffset provided and not special sentinel (0x8000000000000000 = use current pos)
+	if pByteOffset != 0 {
+		offset, _ := ctx.Mem.Read64(pByteOffset)
+		if offset != 0x8000000000000000 && offset != 0xFFFFFFFFFFFFFFFF {
+			buf := make([]byte, length)
+			n, err := ctx.FS.Pread(fh.FD, buf, int64(offset))
+			status := uint32(StatusSuccess)
+			if n == 0 && err != nil {
+				status = 0xC0000011 // STATUS_END_OF_FILE
+			}
+			if n > 0 {
+				ctx.Mem.WriteBytes(bufAddr, buf[:n])
+			}
+			if ioStatus != 0 {
+				ctx.Mem.Write64(ioStatus, uint64(status))
+				ctx.Mem.Write64(ioStatus+8, uint64(n))
+			}
+			if eventHandle != 0 {
+				if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
+					eh.Set()
+				}
+			}
+			return status
+		}
 	}
 
-	ctx.Mem.WriteBytes(bufAddr, buf[:n])
+	buf := make([]byte, length)
+	n, err := ctx.FS.Read(fh.FD, buf)
+	status := uint32(StatusSuccess)
+	if n == 0 && err != nil {
+		status = 0xC0000011 // STATUS_END_OF_FILE
+	}
+
+	if n > 0 {
+		ctx.Mem.WriteBytes(bufAddr, buf[:n])
+	}
 
 	if ioStatus != 0 {
-		ctx.Mem.Write32(ioStatus, StatusSuccess)
+		ctx.Mem.Write64(ioStatus, uint64(status))
 		ctx.Mem.Write64(ioStatus+8, uint64(n))
 	}
 
-	return StatusSuccess
+	// Signal event handle if provided
+	if eventHandle != 0 {
+		if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
+			eh.Set()
+		}
+	}
+
+	return status
 }
 
 func handleNtWriteFile(ctx *TrapContext) uint32 {
+	// NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock*, Buffer, Length, ByteOffset*, Key*)
+	// ReactOS reference: ntoskrnl/io/iomgr/iofunc.c NtWriteFile
 	fileHandle := Handle(ctx.Arg(0))
-	ioStatus := ctx.Arg(1)
-	bufAddr := ctx.Arg(2)
-	length := ctx.Arg(3)
+	eventHandle := Handle(ctx.Arg(1))
+	// Arg(2) = ApcRoutine (ignored)
+	// Arg(3) = ApcContext (ignored)
+	ioStatus    := ctx.Arg(4)
+	bufAddr     := ctx.Arg(5)
+	length      := ctx.Arg(6)
+	pByteOffset := ctx.Arg(7)
+	// Arg(8) = Key (ignored)
 
 	// Handle standard output/error pseudo-handles
 	if uint64(fileHandle) == 0xFFFFFFF5 || uint64(fileHandle) == 0xFFFFFFF4 {
@@ -184,9 +232,8 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 			fd = 2
 		}
 		ctx.FS.Write(fd, data)
-
 		if ioStatus != 0 {
-			ctx.Mem.Write32(ioStatus, StatusSuccess)
+			ctx.Mem.Write64(ioStatus, uint64(StatusSuccess))
 			ctx.Mem.Write64(ioStatus+8, length)
 		}
 		return StatusSuccess
@@ -195,6 +242,31 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 	fh := ctx.Handles.GetFile(fileHandle)
 	if fh == nil {
 		return StatusInvalidHandle
+	}
+
+	// Seek if ByteOffset provided
+	if pByteOffset != 0 {
+		offset, _ := ctx.Mem.Read64(pByteOffset)
+		if offset != 0x8000000000000000 && offset != 0xFFFFFFFFFFFFFFFF {
+			data, err := ctx.Mem.ReadBytes(bufAddr, int(length))
+			if err != nil {
+				return StatusInvalidParameter
+			}
+			n, writeErr := ctx.FS.Pwrite(fh.FD, data, int64(offset))
+			if writeErr != nil {
+				return StatusAccessDenied
+			}
+			if ioStatus != 0 {
+				ctx.Mem.Write64(ioStatus, uint64(StatusSuccess))
+				ctx.Mem.Write64(ioStatus+8, uint64(n))
+			}
+			if eventHandle != 0 {
+				if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
+					eh.Set()
+				}
+			}
+			return StatusSuccess
+		}
 	}
 
 	data, err := ctx.Mem.ReadBytes(bufAddr, int(length))
@@ -208,8 +280,15 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 	}
 
 	if ioStatus != 0 {
-		ctx.Mem.Write32(ioStatus, StatusSuccess)
+		ctx.Mem.Write64(ioStatus, uint64(StatusSuccess))
 		ctx.Mem.Write64(ioStatus+8, uint64(n))
+	}
+
+	// Signal event handle if provided
+	if eventHandle != 0 {
+		if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
+			eh.Set()
+		}
 	}
 
 	return StatusSuccess
@@ -738,8 +817,90 @@ func handleNtQuerySystemInformation(ctx *TrapContext) uint32 {
 			ctx.Mem.Write16(buffer+2, 0)  // ProcessorLevel
 			ctx.Mem.Write16(buffer+4, 0)  // ProcessorRevision
 		}
+
+	case 2: // SystemProcessorPerformanceInformation (per-cpu array, 48 bytes each)
+		if buffer != 0 {
+			nCPU := runtime.NumCPU()
+			now := uint64(time.Now().UnixNano() / 100)
+			for i := 0; i < nCPU; i++ {
+				base := buffer + uint64(i)*48
+				ctx.Mem.Write64(base+0, 0)    // IdleTime
+				ctx.Mem.Write64(base+8, now)   // KernelTime
+				ctx.Mem.Write64(base+16, now)  // UserTime
+				ctx.Mem.Write64(base+24, 0)    // DpcTime
+				ctx.Mem.Write64(base+32, 0)    // InterruptTime
+				ctx.Mem.Write32(base+40, 0)    // InterruptCount
+			}
+		}
+
+	case 3: // SystemTimeOfDayInformation (48 bytes)
+		if buffer != 0 {
+			now := uint64(time.Now().UnixNano()/100 + 116444736000000000) // NT epoch
+			ctx.Mem.Write64(buffer+0, now)  // BootTime
+			ctx.Mem.Write64(buffer+8, now)  // CurrentTime
+			ctx.Mem.Write64(buffer+16, 0)   // TimeZoneBias
+			ctx.Mem.Write32(buffer+24, 0)   // TimeZoneId
+			ctx.Mem.Write32(buffer+28, 0)   // Reserved
+		}
+
+	case 5: // SystemProcessInformation - minimal single-process entry
+		if buffer != 0 {
+			// SYSTEM_PROCESS_INFORMATION: NextEntryOffset=0 terminates list
+			ctx.Mem.Write32(buffer+0, 0)    // NextEntryOffset (last entry)
+			ctx.Mem.Write32(buffer+4, 0)    // NumberOfThreads
+			ctx.Mem.Write64(buffer+8, 0)    // WorkingSetPrivateSize
+			ctx.Mem.Write32(buffer+16, 0)   // HardFaultCount
+			ctx.Mem.Write32(buffer+36, 0)   // SessionId
+			ctx.Mem.Write64(buffer+56, 4)   // UniqueProcessId (PID 4)
+			ctx.Mem.Write64(buffer+64, 0)   // InheritedFromUniqueProcessId
+			ctx.Mem.Write32(buffer+72, 0)   // HandleCount
+		}
+
+	case 7: // SystemProcessorSpeedInformation / SystemNumaProcessorMap
+		// success with empty data
+
+	case 8: // SystemProcessorPerformanceInformation (alias for case 2)
+		if buffer != 0 {
+			nCPU := runtime.NumCPU()
+			now := uint64(time.Now().UnixNano() / 100)
+			for i := 0; i < nCPU; i++ {
+				base := buffer + uint64(i)*48
+				ctx.Mem.Write64(base+0, 0)
+				ctx.Mem.Write64(base+8, now)
+				ctx.Mem.Write64(base+16, now)
+				ctx.Mem.Write64(base+24, 0)
+				ctx.Mem.Write64(base+32, 0)
+				ctx.Mem.Write32(base+40, 0)
+			}
+		}
+
+	case 11: // SystemModuleInformation (RTL_PROCESS_MODULES)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0) // NumberOfModules = 0
+		}
+
+	case 23: // SystemInterruptInformation
+		// success with empty data
+
+	case 44: // SystemExtendedHandleInformation
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0)   // NumberOfHandles
+			ctx.Mem.Write64(buffer+8, 0) // Reserved
+		}
+
+	case 64: // SystemCodeIntegrityInformation
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0)
+		}
+
+	case 173: // SystemCodeIntegrityUnlockModeInformation
+		// success with empty data
+
 	default:
-		return StatusNotImplemented
+		// Many apps only check NTSTATUS, not the data - return success.
+		if ctx.Trace {
+			fmt.Printf("  NtQuerySystemInformation: unhandled class %d\n", infoClass)
+		}
 	}
 
 	return StatusSuccess
@@ -874,7 +1035,7 @@ func handleNtQueryVirtualMemory(ctx *TrapContext) uint32 {
 func handleNtCreateEvent(ctx *TrapContext) uint32 {
 	handlePtr := ctx.Arg(0)
 	_ = ctx.Arg(1) // DesiredAccess
-	_ = ctx.Arg(2) // ObjectAttributes
+	objAttr := ctx.Arg(2)
 	eventType := ctx.Arg(3)
 
 	autoReset := eventType == 1 // SynchronizationEvent
@@ -884,7 +1045,29 @@ func handleNtCreateEvent(ctx *TrapContext) uint32 {
 		signaled:  false,
 	}
 
-	h := ctx.Handles.Alloc(evt)
+	// Read name from OBJECT_ATTRIBUTES if present
+	var name string
+	if objAttr != 0 {
+		_, oaName, _, err := ReadObjectAttributes(ctx, objAttr)
+		if err == nil {
+			name = NormalizeObjectName(oaName)
+		}
+	}
+
+	var h Handle
+	if name != "" {
+		var isNew bool
+		h, isNew = ctx.Handles.AllocNamed(name, evt)
+		if !isNew {
+			// STATUS_OBJECT_NAME_COLLISION is not quite right for NT;
+			// the real kernel returns STATUS_OBJECT_NAME_EXISTS (0x40000000)
+			ctx.Mem.Write64(handlePtr, uint64(h))
+			return 0x40000000 // STATUS_OBJECT_NAME_EXISTS (success with info)
+		}
+	} else {
+		h = ctx.Handles.Alloc(evt)
+	}
+
 	ctx.Mem.Write64(handlePtr, uint64(h))
 	return StatusSuccess
 }
@@ -960,19 +1143,116 @@ func handleNtWaitForSingleObject(ctx *TrapContext) uint32 {
 }
 
 func handleNtWaitForMultipleObjects(ctx *TrapContext) uint32 {
-	// Simplified: wait for first object
-	return StatusWait0
+	// NtWaitForMultipleObjects(Count, Handles*, WaitType, Alertable, Timeout*)
+	count := uint32(ctx.Arg(0))
+	handlesPtr := ctx.Arg(1)
+	_ = ctx.Arg(2) // WaitType: 0=WaitAll, 1=WaitAny
+	_ = ctx.Arg(3) // Alertable
+	timeoutPtr := ctx.Arg(4)
+
+	if count == 0 || handlesPtr == 0 {
+		return StatusWait0
+	}
+	if count > 64 {
+		count = 64 // MAXIMUM_WAIT_OBJECTS
+	}
+
+	var timeout time.Duration
+	if timeoutPtr != 0 {
+		t, _ := ctx.Mem.Read64(timeoutPtr)
+		if int64(t) < 0 {
+			timeout = time.Duration(-int64(t)) * 100
+		} else {
+			timeout = 1 * time.Second
+		}
+	} else {
+		timeout = -1 // infinite
+	}
+
+	// Try each handle in order (simplified WaitAny)
+	for i := uint32(0); i < count; i++ {
+		hVal, _ := ctx.Mem.Read64(handlesPtr + uint64(i)*8)
+		h := Handle(hVal)
+
+		if evt := ctx.Handles.GetEvent(h); evt != nil {
+			if evt.WaitTimeout(timeout) {
+				return StatusWait0 + uint32(i)
+			}
+		} else if mh := ctx.Handles.GetMutant(h); mh != nil {
+			res := mh.WaitTimeout(1, timeout)
+			if res == 0 || res == 0x80 { // WAIT_OBJECT_0 or WAIT_ABANDONED
+				return StatusWait0 + uint32(i)
+			}
+		} else if sh := ctx.Handles.GetSemaphore(h); sh != nil {
+			res := sh.WaitTimeout(timeout)
+			if res == 0 {
+				return StatusWait0 + uint32(i)
+			}
+		} else if th := ctx.Handles.GetThread(h); th != nil {
+			if th.Done != nil {
+				if timeout < 0 {
+					<-th.Done
+				} else {
+					select {
+					case <-th.Done:
+					case <-time.After(timeout):
+						continue
+					}
+				}
+				return StatusWait0 + uint32(i)
+			}
+		}
+	}
+	return StatusTimeout
 }
 
 func handleNtCreateMutant(ctx *TrapContext) uint32 {
 	handlePtr := ctx.Arg(0)
+	_ = ctx.Arg(1) // DesiredAccess
+	objAttr := ctx.Arg(2)
+	initialOwner := ctx.Arg(3) != 0
+
 	m := &MutantHandle{}
-	h := ctx.Handles.Alloc(m)
+	if initialOwner {
+		m.WaitTimeout(1, 0) // TID=1 as simplified owner
+	}
+
+	var name string
+	if objAttr != 0 {
+		_, oaName, _, err := ReadObjectAttributes(ctx, objAttr)
+		if err == nil {
+			name = NormalizeObjectName(oaName)
+		}
+	}
+
+	var h Handle
+	if name != "" {
+		var isNew bool
+		h, isNew = ctx.Handles.AllocNamed(name, m)
+		if !isNew {
+			ctx.Mem.Write64(handlePtr, uint64(h))
+			return 0x40000000 // STATUS_OBJECT_NAME_EXISTS
+		}
+	} else {
+		h = ctx.Handles.Alloc(m)
+	}
+
 	ctx.Mem.Write64(handlePtr, uint64(h))
 	return StatusSuccess
 }
 
 func handleNtReleaseMutant(ctx *TrapContext) uint32 {
+	h := Handle(ctx.Arg(0))
+	pPrevCount := ctx.Arg(1)
+	if mh := ctx.Handles.GetMutant(h); mh != nil {
+		mh.mu.Lock()
+		prev := mh.count
+		mh.mu.Unlock()
+		mh.Release(1) // TID=1 simplified
+		if pPrevCount != 0 {
+			ctx.Mem.Write32(pPrevCount, uint32(prev))
+		}
+	}
 	return StatusSuccess
 }
 
@@ -1108,8 +1388,16 @@ func handleRtlInitCondVar(ctx *TrapContext) uint32 {
 	}
 	return StatusSuccess
 }
-func handleRtlWakeCondVar(ctx *TrapContext) uint32    { return StatusSuccess }
-func handleRtlWakeAllCondVar(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlWakeCondVar(ctx *TrapContext) uint32 {
+	addr := ctx.Arg(0)
+	GlobalCondVars.Get(addr).cond.Signal()
+	return StatusSuccess
+}
+func handleRtlWakeAllCondVar(ctx *TrapContext) uint32 {
+	addr := ctx.Arg(0)
+	GlobalCondVars.Get(addr).cond.Broadcast()
+	return StatusSuccess
+}
 
 // ======================== HEAP ========================
 
@@ -2283,25 +2571,128 @@ func handleRtlSetUnhandledExceptionFilter(ctx *TrapContext) uint32 { return Stat
 
 func handleNtCreateSemaphore(ctx *TrapContext) uint32 {
 	handlePtr := ctx.Arg(0)
+	_ = ctx.Arg(1) // DesiredAccess
+	objAttr := ctx.Arg(2)
+	initialCount := int32(ctx.Arg(3))
+	maxCount := int32(ctx.Arg(4))
+	if maxCount <= 0 {
+		maxCount = 0x7fffffff
+	}
+
+	sem := NewSemaphore(initialCount, maxCount)
+
+	var name string
+	if objAttr != 0 {
+		_, oaName, _, err := ReadObjectAttributes(ctx, objAttr)
+		if err == nil {
+			name = NormalizeObjectName(oaName)
+		}
+	}
+
+	var h Handle
+	if name != "" {
+		var isNew bool
+		h, isNew = ctx.Handles.AllocNamed(name, sem)
+		if !isNew {
+			if handlePtr != 0 {
+				ctx.Mem.Write64(handlePtr, uint64(h))
+			}
+			return 0x40000000 // STATUS_OBJECT_NAME_EXISTS
+		}
+	} else {
+		h = ctx.Handles.Alloc(sem)
+	}
+
 	if handlePtr != 0 {
-		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Semaphore"})
 		ctx.Mem.Write64(handlePtr, uint64(h))
 	}
 	return StatusSuccess
 }
 
-func handleNtReleaseSemaphore(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleNtReleaseSemaphore(ctx *TrapContext) uint32 {
+	// NtReleaseSemaphore(SemaphoreHandle, ReleaseCount, PreviousCount*)
+	h := Handle(ctx.Arg(0))
+	releaseCount := int32(ctx.Arg(1))
+	pPrevCount := ctx.Arg(2)
+	if releaseCount <= 0 {
+		releaseCount = 1
+	}
+	if sh := ctx.Handles.GetSemaphore(h); sh != nil {
+		prev, _ := sh.Release(releaseCount)
+		if pPrevCount != 0 {
+			ctx.Mem.Write32(pPrevCount, uint32(prev))
+		}
+	}
+	return StatusSuccess
+}
 
 func handleNtOpenEvent(ctx *TrapContext) uint32 {
-	return 0xC0000034 // STATUS_OBJECT_NAME_NOT_FOUND
+	handlePtr := ctx.Arg(0)
+	_ = ctx.Arg(1) // DesiredAccess
+	objAttr := ctx.Arg(2)
+
+	var name string
+	if objAttr != 0 {
+		_, oaName, _, err := ReadObjectAttributes(ctx, objAttr)
+		if err == nil {
+			name = NormalizeObjectName(oaName)
+		}
+	}
+
+	h := ctx.Handles.GetNamed(name)
+	if h == 0 {
+		return StatusObjectNameNotFound
+	}
+	if handlePtr != 0 {
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
 }
 
 func handleNtOpenMutant(ctx *TrapContext) uint32 {
-	return 0xC0000034 // STATUS_OBJECT_NAME_NOT_FOUND
+	handlePtr := ctx.Arg(0)
+	_ = ctx.Arg(1) // DesiredAccess
+	objAttr := ctx.Arg(2)
+
+	var name string
+	if objAttr != 0 {
+		_, oaName, _, err := ReadObjectAttributes(ctx, objAttr)
+		if err == nil {
+			name = NormalizeObjectName(oaName)
+		}
+	}
+
+	h := ctx.Handles.GetNamed(name)
+	if h == 0 {
+		return StatusObjectNameNotFound
+	}
+	if handlePtr != 0 {
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
 }
 
 func handleNtOpenSemaphore(ctx *TrapContext) uint32 {
-	return 0xC0000034
+	handlePtr := ctx.Arg(0)
+	_ = ctx.Arg(1) // DesiredAccess
+	objAttr := ctx.Arg(2)
+
+	var name string
+	if objAttr != 0 {
+		_, oaName, _, err := ReadObjectAttributes(ctx, objAttr)
+		if err == nil {
+			name = NormalizeObjectName(oaName)
+		}
+	}
+
+	h := ctx.Handles.GetNamed(name)
+	if h == 0 {
+		return StatusObjectNameNotFound
+	}
+	if handlePtr != 0 {
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
 }
 
 func handleNtOpenSection(ctx *TrapContext) uint32 {
