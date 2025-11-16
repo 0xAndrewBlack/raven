@@ -5494,7 +5494,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(kernel32, "GetFileType", func(ctx *ntapi.TrapContext) uint32 {
 			handle := ctx.Arg(0)
 			switch handle {
-			case 0x100, 0x101, 0x102: // stdin, stdout, stderr
+			case 0x100, 0x101, 0x102, 0x103: // stdin, stdout, stderr, and extra console handle
 				ctx.SetReturn(0x0002) // FILE_TYPE_CHAR
 			default:
 				ctx.SetReturn(0x0001) // FILE_TYPE_DISK
@@ -6502,7 +6502,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "FlushFileBuffers", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			hFile := ntapi.Handle(ctx.Arg(0))
+			fh := handles.GetFile(hFile)
+			if fh != nil {
+				unix.Fsync(fh.FD)
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFileAttributesW", func(ctx *ntapi.TrapContext) uint32 {
@@ -7669,10 +7674,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// DeviceIoControl: return FALSE with ERROR_NOT_SUPPORTED
 		d.RegisterAutoStubHandler(kernel32, "DeviceIoControl", func(ctx *ntapi.TrapContext) uint32 {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 50) // ERROR_NOT_SUPPORTED
-			ctx.SetReturn(0)                                            // FALSE
+			// hDevice := ctx.Arg(0)
+			ioctl := uint32(ctx.Arg(1))
+			// lpInBuffer := ctx.Arg(2)
+			// nInBufferSize := ctx.Arg(3)
+			lpOutBuffer := ctx.Arg(4)
+			nOutBufferSize := uint32(ctx.Arg(5))
+			lpBytesReturned := ctx.Arg(6)
+			// lpOverlapped := ctx.Arg(7)
+
+			switch ioctl {
+			case 0x00070000: // IOCTL_DISK_GET_DRIVE_GEOMETRY
+				if lpOutBuffer != 0 && nOutBufferSize >= 24 {
+					ctx.Mem.Write64(lpOutBuffer, 10000)   // Cylinders
+					ctx.Mem.Write32(lpOutBuffer+8, 3)     // MediaType (FixedMedia)
+					ctx.Mem.Write32(lpOutBuffer+12, 255)  // TracksPerCylinder
+					ctx.Mem.Write32(lpOutBuffer+16, 63)   // SectorsPerTrack
+					ctx.Mem.Write32(lpOutBuffer+20, 512)  // BytesPerSector
+					if lpBytesReturned != 0 { ctx.Mem.Write32(lpBytesReturned, 24) }
+					ctx.SetReturn(1)
+					return 0
+				}
+			case 0x002D1080: // IOCTL_STORAGE_GET_DEVICE_NUMBER
+				if lpOutBuffer != 0 && nOutBufferSize >= 12 {
+					ctx.Mem.Write32(lpOutBuffer, 7)   // DeviceType (FILE_DEVICE_DISK)
+					ctx.Mem.Write32(lpOutBuffer+4, 0) // DeviceNumber
+					ctx.Mem.Write32(lpOutBuffer+8, 1) // PartitionNumber
+					if lpBytesReturned != 0 { ctx.Mem.Write32(lpBytesReturned, 12) }
+					ctx.SetReturn(1)
+					return 0
+				}
+			case 0x000900A8: // FSCTL_GET_REPARSE_POINT
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 4390) // ERROR_NOT_A_REPARSE_POINT
+				if lpBytesReturned != 0 { ctx.Mem.Write32(lpBytesReturned, 0) }
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Default: unsupported IOCTL
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 1) // ERROR_INVALID_FUNCTION
+			if lpBytesReturned != 0 { ctx.Mem.Write32(lpBytesReturned, 0) }
+			ctx.SetReturn(0)
 			return 0
 		})
 
@@ -9892,6 +9934,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFileTime", func(ctx *ntapi.TrapContext) uint32 {
+			hFile := ntapi.Handle(ctx.Arg(0))
+			lpCreation := ctx.Arg(1)
+			lpLastAccess := ctx.Arg(2)
+			lpLastWrite := ctx.Arg(3)
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				ctx.SetReturn(0) // FALSE
+				return 0
+			}
+			node := ctx.FS.Stat(fh.FD)
+			if node == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			toFT := func(t time.Time) uint64 {
+				return uint64(t.UnixNano()/100) + 116444736000000000
+			}
+			if lpCreation != 0 {
+				ctx.Mem.Write64(lpCreation, toFT(node.Ctime))
+			}
+			if lpLastAccess != 0 {
+				ctx.Mem.Write64(lpLastAccess, toFT(node.Atime))
+			}
+			if lpLastWrite != 0 {
+				ctx.Mem.Write64(lpLastWrite, toFT(node.Mtime))
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -10318,6 +10386,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetProcessHeaps", func(ctx *ntapi.TrapContext) uint32 {
+			numHeaps := uint32(ctx.Arg(0))
+			heapsBuf := ctx.Arg(1)
+			if numHeaps >= 1 && heapsBuf != 0 {
+				ctx.Mem.Write64(heapsBuf, heapHandle)
+			}
 			ctx.SetReturn(1) // 1 heap
 			return 0
 		})
@@ -11085,7 +11158,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapSetInformation", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapSummary", func(ctx *ntapi.TrapContext) uint32 {
@@ -11105,7 +11178,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapWalk", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE - end of heap
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 259) // ERROR_NO_MORE_ITEMS
+			ctx.SetReturn(0)                                             // FALSE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "IdnToAscii", func(ctx *ntapi.TrapContext) uint32 {

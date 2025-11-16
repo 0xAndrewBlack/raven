@@ -63,6 +63,9 @@ func (h *EventHandle) Set() {
 	h.mu.Unlock()
 }
 
+// Signal is an alias for Set (used by NtFsControlFile pipe completion).
+func (h *EventHandle) Signal() { h.Set() }
+
 // Reset clears the event signal (ResetEvent).
 func (h *EventHandle) Reset() {
 	h.mu.Lock()
@@ -504,6 +507,49 @@ type ThreadHandle struct {
 
 func (h *ThreadHandle) handleType() string { return "thread" }
 
+// NamedPipeHandle represents one end of a named pipe.
+type NamedPipeHandle struct {
+	Name      string
+	Buf       chan []byte // buffered channel for pipe data
+	Connected bool
+	Server    bool
+	mu        sync.Mutex
+}
+
+func (h *NamedPipeHandle) handleType() string { return "named_pipe" }
+
+// namedPipeRegistry is a global registry of named pipe server endpoints.
+var namedPipeRegistry struct {
+	mu    sync.RWMutex
+	pipes map[string]*NamedPipeHandle // normalized name → server handle
+}
+
+func init() {
+	namedPipeRegistry.pipes = make(map[string]*NamedPipeHandle)
+}
+
+// RegisterNamedPipe registers a server pipe by normalized name.
+func RegisterNamedPipe(name string, h *NamedPipeHandle) {
+	namedPipeRegistry.mu.Lock()
+	namedPipeRegistry.pipes[strings.ToLower(name)] = h
+	namedPipeRegistry.mu.Unlock()
+}
+
+// LookupNamedPipe finds a server pipe by normalized name.
+func LookupNamedPipe(name string) *NamedPipeHandle {
+	namedPipeRegistry.mu.RLock()
+	h := namedPipeRegistry.pipes[strings.ToLower(name)]
+	namedPipeRegistry.mu.RUnlock()
+	return h
+}
+
+// UnregisterNamedPipe removes a pipe from the registry.
+func UnregisterNamedPipe(name string) {
+	namedPipeRegistry.mu.Lock()
+	delete(namedPipeRegistry.pipes, strings.ToLower(name))
+	namedPipeRegistry.mu.Unlock()
+}
+
 // GenericHandle is a catch-all handle for objects that don't need special behavior.
 type GenericHandle struct {
 	Kind string
@@ -719,6 +765,31 @@ func (ht *HandleTable) GetNamed(name string) Handle {
 		return h
 	}
 	return 0
+}
+
+// RLock acquires a read lock on the named objects table.
+func (ht *HandleTable) RLock() { ht.namedMu.RLock() }
+
+// RUnlock releases the read lock on the named objects table.
+func (ht *HandleTable) RUnlock() { ht.namedMu.RUnlock() }
+
+// NameOf returns the registered name for a handle, if any.
+func (ht *HandleTable) NameOf(h Handle) (string, bool) {
+	n, ok := ht.names[h]
+	return n, ok
+}
+
+// GetNamedPipe returns the NamedPipeHandle for a handle, or nil.
+func (ht *HandleTable) GetNamedPipe(h Handle) *NamedPipeHandle {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	np, ok := obj.(*NamedPipeHandle)
+	if !ok {
+		return nil
+	}
+	return np
 }
 
 // GetFile returns the FileHandle for a handle, or nil.

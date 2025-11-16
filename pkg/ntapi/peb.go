@@ -163,6 +163,9 @@ type ProcessState struct {
 	ModuleListAddr    uint64 // base of LDR_DATA_TABLE_ENTRY array
 	GdiTableAddr      uint64 // GDI shared handle table base
 	LastError         uint32
+	ImagePath         string // Win32 image path, e.g. "C:\app\program.exe"
+	ProcessId         uint32
+	ThreadId          uint32
 
 	// HeapAlloc/HeapFree are set by registerAutoSynthHandlers to route
 	// RtlAllocateHeap / RtlFreeHeap through the shared bump-allocator.

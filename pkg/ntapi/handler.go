@@ -349,7 +349,82 @@ func handleNtQueryInformationFile(ctx *TrapContext) uint32 {
 }
 
 func handleNtSetInformationFile(ctx *TrapContext) uint32 {
-	return StatusSuccess // stub
+	fileHandle := Handle(ctx.Arg(0))
+	ioStatus := ctx.Arg(1)
+	buffer := ctx.Arg(2)
+	_ = uint32(ctx.Arg(3)) // Length
+	class := uint32(ctx.Arg(4))
+
+	switch class {
+	case 13: // FileDispositionInformation
+		// DeleteFile flag at buffer+0 (BOOLEAN)
+		// Just acknowledge - actual deletion happens on close
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+		return StatusSuccess
+
+	case 14: // FilePositionInformation
+		fh := ctx.Handles.GetFile(fileHandle)
+		if fh == nil {
+			return StatusInvalidHandle
+		}
+		pos, _ := ctx.Mem.Read64(buffer)
+		ctx.FS.Lseek(fh.FD, int64(pos), 0) // SEEK_SET
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+		return StatusSuccess
+
+	case 20: // FileEndOfFileInformation
+		fh := ctx.Handles.GetFile(fileHandle)
+		if fh == nil {
+			return StatusInvalidHandle
+		}
+		eof, _ := ctx.Mem.Read64(buffer)
+		ctx.FS.Ftruncate(fh.FD, int64(eof))
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+		return StatusSuccess
+
+	case 10: // FileRenameInformation
+		fh := ctx.Handles.GetFile(fileHandle)
+		if fh == nil {
+			return StatusInvalidHandle
+		}
+		// FILE_RENAME_INFORMATION: {ReplaceIfExists:1, RootDirectory:8, FileNameLength:4, FileName:...}
+		nameLen, _ := ctx.Mem.Read32(buffer + 16)
+		if nameLen > 0 {
+			nameBytes, _ := ctx.Mem.ReadBytes(buffer+20, int(nameLen))
+			var chars []uint16
+			for i := 0; i+1 < len(nameBytes); i += 2 {
+				chars = append(chars, uint16(nameBytes[i])|uint16(nameBytes[i+1])<<8)
+			}
+			newName := string(decodeUTF16(chars))
+			newName = strings.TrimPrefix(newName, `\??\`)
+			newName = strings.ReplaceAll(newName, `\`, "/")
+			if len(newName) >= 2 && newName[1] == ':' {
+				newName = newName[2:]
+			}
+			ctx.FS.Renameat(-1, fh.Path, -1, newName)
+		}
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+		return StatusSuccess
+	}
+
+	// Default: success for unhandled classes
+	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+	return StatusSuccess
+}
+
+func decodeUTF16(chars []uint16) []rune {
+	var out []rune
+	for i := 0; i < len(chars); i++ {
+		if chars[i] >= 0xD800 && chars[i] <= 0xDBFF && i+1 < len(chars) {
+			hi := rune(chars[i]) - 0xD800
+			lo := rune(chars[i+1]) - 0xDC00
+			out = append(out, 0x10000+hi<<10+lo)
+			i++
+		} else {
+			out = append(out, rune(chars[i]))
+		}
+	}
+	return out
 }
 
 func handleNtQueryDirectoryFile(ctx *TrapContext) uint32 {
@@ -411,7 +486,76 @@ func handleNtQueryDirectoryFile(ctx *TrapContext) uint32 {
 }
 
 func handleNtQueryVolumeInformationFile(ctx *TrapContext) uint32 {
-	return StatusSuccess // stub
+	_ = Handle(ctx.Arg(0)) // FileHandle
+	ioStatus := ctx.Arg(1)
+	buffer := ctx.Arg(2)
+	length := uint32(ctx.Arg(3))
+	class := uint32(ctx.Arg(4))
+
+	switch class {
+	case 1: // FileFsVolumeInformation
+		label := "Raven"
+		labelUTF16 := encodeUTF16LE(label)
+		needed := uint32(18 + len(labelUTF16))
+		if length < needed {
+			writeIOStatus(ctx.Mem, ioStatus, StatusBufferOverflow, 0)
+			return StatusBufferOverflow
+		}
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0)                           // VolumeCreationTime
+			ctx.Mem.Write32(buffer+8, 0x12345678)                // VolumeSerialNumber
+			ctx.Mem.Write32(buffer+12, uint32(len(labelUTF16))) // VolumeLabelLength
+			ctx.Mem.Write8(buffer+16, 0)                         // SupportsObjects (BOOLEAN)
+			ctx.Mem.Write8(buffer+17, 0)                         // padding
+			ctx.Mem.WriteBytes(buffer+18, labelUTF16)            // VolumeLabel
+		}
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, uint64(needed))
+
+	case 3: // FileFsSizeInformation
+		if length < 24 {
+			writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 1000000)   // TotalAllocationUnits
+			ctx.Mem.Write64(buffer+8, 500000)  // AvailableAllocationUnits
+			ctx.Mem.Write32(buffer+16, 8)      // SectorsPerAllocationUnit
+			ctx.Mem.Write32(buffer+20, 512)    // BytesPerSector
+		}
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 24)
+
+	case 4: // FileFsDeviceInformation
+		if length < 8 {
+			writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 7)   // DeviceType (FILE_DEVICE_DISK)
+			ctx.Mem.Write32(buffer+4, 0) // Characteristics
+		}
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 8)
+
+	case 5: // FileFsAttributeInformation
+		fsName := "NTFS"
+		fsNameUTF16 := encodeUTF16LE(fsName)
+		needed := uint32(12 + len(fsNameUTF16))
+		if length < needed {
+			writeIOStatus(ctx.Mem, ioStatus, StatusBufferOverflow, 0)
+			return StatusBufferOverflow
+		}
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0x00000003)                 // FileSystemAttributes (CASE_PRESERVED|CASE_SENSITIVE)
+			ctx.Mem.Write32(buffer+4, 255)                      // MaximumComponentNameLength
+			ctx.Mem.Write32(buffer+8, uint32(len(fsNameUTF16))) // FileSystemNameLength
+			ctx.Mem.WriteBytes(buffer+12, fsNameUTF16)          // FileSystemName
+		}
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, uint64(needed))
+
+	default:
+		return StatusNotImplemented
+	}
+
+	return StatusSuccess
 }
 
 func handleNtDeleteFile(ctx *TrapContext) uint32 {
