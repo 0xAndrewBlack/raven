@@ -25896,6 +25896,91 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
+		// Token / privilege helpers - single-user emulator: always succeed, return safe values
+		for _, fn := range []string{"LookupPrivilegeValueA", "LookupPrivilegeValueW",
+			"LookupPrivilegeNameA", "LookupPrivilegeNameW",
+			"LookupPrivilegeDisplayNameA", "LookupPrivilegeDisplayNameW"} {
+			fn := fn; _ = fn
+			d.RegisterAutoStubHandler(advapi32, fn, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetReturn(1); return 0 // TRUE
+			})
+		}
+		d.RegisterAutoStubHandler(advapi32, "AdjustTokenPrivileges", func(ctx *ntapi.TrapContext) uint32 {
+			// Always succeed, no real security enforcement
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetTokenInformation", func(ctx *ntapi.TrapContext) uint32 {
+			// TokenClass=1 (TokenUser), TokenClass=9 (TokenType), etc. - return minimal safe data
+			tokenClass := ctx.Arg(1)
+			buf := ctx.Arg(2); bufLen := ctx.Arg(3); retLen := ctx.Arg(4)
+			var needed uint32 = 8
+			if retLen != 0 { mem.Write32(retLen, needed) }
+			if buf != 0 && bufLen >= uint64(needed) {
+				_ = tokenClass
+				mem.Write64(buf, 0) // zero SID pointer / value
+				ctx.SetReturn(1); return 0
+			}
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "OpenProcessToken", func(ctx *ntapi.TrapContext) uint32 {
+			phToken := ctx.Arg(2)
+			h := handles.Alloc(&ntapi.GenericHandle{Kind: "token"})
+			if phToken != 0 { mem.Write64(phToken, uint64(h)) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "OpenThreadToken", func(ctx *ntapi.TrapContext) uint32 {
+			phToken := ctx.Arg(2)
+			h := handles.Alloc(&ntapi.GenericHandle{Kind: "token"})
+			if phToken != 0 { mem.Write64(phToken, uint64(h)) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "DuplicateTokenEx", func(ctx *ntapi.TrapContext) uint32 {
+			phNewToken := ctx.Arg(5)
+			h := handles.Alloc(&ntapi.GenericHandle{Kind: "token"})
+			if phNewToken != 0 { mem.Write64(phNewToken, uint64(h)) }
+			ctx.SetReturn(1); return 0
+		})
+		for _, fn := range []string{"ImpersonateSelf", "RevertToSelf", "ImpersonateLoggedOnUser",
+			"SetThreadToken", "PrivilegeCheck"} {
+			fn := fn; _ = fn
+			d.RegisterAutoStubHandler(advapi32, fn, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetReturn(1); return 0
+			})
+		}
+		// SCM stubs - service manager not supported but apps probe for it
+		for _, fn := range []string{"OpenSCManagerA", "OpenSCManagerW",
+			"OpenServiceA", "OpenServiceW",
+			"CreateServiceA", "CreateServiceW",
+			"StartServiceA", "StartServiceW",
+			"ControlService", "DeleteService",
+			"CloseServiceHandle", "QueryServiceStatus",
+			"QueryServiceConfigA", "QueryServiceConfigW",
+			"ChangeServiceConfigA", "ChangeServiceConfigW"} {
+			fn := fn; _ = fn
+			d.RegisterAutoStubHandler(advapi32, fn, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetReturn(0); return 0 // return NULL/FALSE - not supported
+			})
+		}
+		// Event log stubs
+		for _, fn := range []string{"RegisterEventSourceA", "RegisterEventSourceW",
+			"DeregisterEventSource", "ReportEventA", "ReportEventW",
+			"OpenEventLogA", "OpenEventLogW", "CloseEventLog",
+			"ReadEventLogA", "ReadEventLogW"} {
+			fn := fn; _ = fn
+			d.RegisterAutoStubHandler(advapi32, fn, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetReturn(1); return 0
+			})
+		}
+		// SID helpers
+		for _, fn := range []string{"IsValidSid", "EqualSid", "CopySid", "GetLengthSid",
+			"GetSidSubAuthorityCount", "GetSidSubAuthority",
+			"GetSidIdentifierAuthority", "InitializeSid",
+			"CreateWellKnownSid", "IsWellKnownSid", "EqualPrefixSid"} {
+			fn := fn; _ = fn
+			d.RegisterAutoStubHandler(advapi32, fn, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetReturn(1); return 0
+			})
+		}
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
