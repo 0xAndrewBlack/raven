@@ -2,6 +2,7 @@ package ntapi
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -510,11 +511,91 @@ type GenericHandle struct {
 
 func (h *GenericHandle) handleType() string { return h.Kind }
 
+// CondVarEntry is a guest CONDITION_VARIABLE backed by a channel.
+// Since the guest CPU is single-threaded, Sleep always times out - callers recheck.
+type CondVarEntry struct {
+	mu      sync.Mutex
+	waiters int
+	ch      chan struct{}
+}
+
+func newCondVarEntry() *CondVarEntry {
+	return &CondVarEntry{ch: make(chan struct{}, 64)}
+}
+
+// Signal wakes one waiter.
+func (c *CondVarEntry) Signal() {
+	select {
+	case c.ch <- struct{}{}:
+	default:
+	}
+}
+
+// Broadcast wakes all current waiters.
+func (c *CondVarEntry) Broadcast() {
+	c.mu.Lock()
+	n := c.waiters
+	c.mu.Unlock()
+	for i := 0; i < n; i++ {
+		select {
+		case c.ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Sleep waits up to d for a signal and returns true (always - caller rechecks condition).
+func (c *CondVarEntry) Sleep(d time.Duration) bool {
+	c.mu.Lock()
+	c.waiters++
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.waiters--
+		c.mu.Unlock()
+	}()
+	if d <= 0 {
+		d = time.Millisecond
+	}
+	select {
+	case <-c.ch:
+	case <-time.After(d):
+	}
+	return true
+}
+
+// CondVarTable maps guest CONDITION_VARIABLE addresses to entries.
+type CondVarTable struct {
+	mu      sync.RWMutex
+	entries map[uint64]*CondVarEntry
+}
+
+func NewCondVarTable() *CondVarTable {
+	return &CondVarTable{entries: make(map[uint64]*CondVarEntry)}
+}
+
+// Get returns the entry for addr, creating it if necessary.
+func (t *CondVarTable) Get(addr uint64) *CondVarEntry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if e, ok := t.entries[addr]; ok {
+		return e
+	}
+	e := newCondVarEntry()
+	t.entries[addr] = e
+	return e
+}
+
 // HandleTable maps guest HANDLE values to Go objects.
 type HandleTable struct {
 	mu       sync.RWMutex
 	handles  map[Handle]HandleObject
 	nextID   Handle
+
+	// Named object namespace (global across all handles)
+	namedMu sync.RWMutex
+	named   map[string]Handle // normalized name → handle
+	names   map[Handle]string // handle → name (for cleanup on Close)
 }
 
 // NewHandleTable creates an empty handle table.
@@ -523,6 +604,8 @@ func NewHandleTable() *HandleTable {
 	return &HandleTable{
 		handles: make(map[Handle]HandleObject),
 		nextID:  0x100,
+		named:   make(map[string]Handle),
+		names:   make(map[Handle]string),
 	}
 }
 
@@ -543,15 +626,81 @@ func (ht *HandleTable) Get(h Handle) HandleObject {
 	return ht.handles[h]
 }
 
-// Close removes a handle from the table.
+// Close removes a handle from the table and cleans up any named mapping.
 func (ht *HandleTable) Close(h Handle) bool {
 	ht.mu.Lock()
-	defer ht.mu.Unlock()
 	if _, ok := ht.handles[h]; !ok {
+		ht.mu.Unlock()
 		return false
 	}
 	delete(ht.handles, h)
+	ht.mu.Unlock()
+
+	// Clean up named mapping if this handle was named.
+	ht.namedMu.Lock()
+	if name, ok := ht.names[h]; ok {
+		delete(ht.named, name)
+		delete(ht.names, h)
+	}
+	ht.namedMu.Unlock()
 	return true
+}
+
+// NormalizeObjectName strips NT object namespace prefixes and lowercases.
+func NormalizeObjectName(name string) string {
+	if name == "" {
+		return ""
+	}
+	for _, prefix := range []string{
+		`\BaseNamedObjects\`,
+		`BaseNamedObjects\`,
+		`Local\`,
+		`Global\`,
+	} {
+		if strings.HasPrefix(name, prefix) {
+			name = name[len(prefix):]
+			break
+		}
+	}
+	return strings.ToLower(name)
+}
+
+// AllocNamed registers obj under name, or returns the existing handle if name
+// already exists. Returns (handle, true) if newly created, (existing, false)
+// if already existed (caller should set ERROR_ALREADY_EXISTS).
+func (ht *HandleTable) AllocNamed(name string, obj HandleObject) (Handle, bool) {
+	norm := NormalizeObjectName(name)
+	if norm == "" {
+		return ht.Alloc(obj), true
+	}
+
+	ht.namedMu.Lock()
+	defer ht.namedMu.Unlock()
+
+	if existing, ok := ht.named[norm]; ok {
+		return existing, false
+	}
+
+	h := ht.Alloc(obj)
+	ht.named[norm] = h
+	ht.names[h] = norm
+	return h, true
+}
+
+// GetNamed returns the handle for a named object, or 0 if not found.
+func (ht *HandleTable) GetNamed(name string) Handle {
+	norm := NormalizeObjectName(name)
+	if norm == "" {
+		return 0
+	}
+
+	ht.namedMu.RLock()
+	defer ht.namedMu.RUnlock()
+
+	if h, ok := ht.named[norm]; ok {
+		return h
+	}
+	return 0
 }
 
 // GetFile returns the FileHandle for a handle, or nil.
@@ -682,4 +831,93 @@ func (ht *HandleTable) GetIoCompletion(h Handle) *IoCompletionPortHandle {
 		return nil
 	}
 	return ic
+}
+
+// GetTpPool returns the TpPool for a handle, or nil.
+func (ht *HandleTable) GetTpPool(h Handle) *TpPool {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	tp, ok := obj.(*TpPool)
+	if !ok {
+		return nil
+	}
+	return tp
+}
+
+// GetTpWork returns the TpWork for a handle, or nil.
+func (ht *HandleTable) GetTpWork(h Handle) *TpWork {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	tw, ok := obj.(*TpWork)
+	if !ok {
+		return nil
+	}
+	return tw
+}
+
+// GetTpTimer returns the TpTimer for a handle, or nil.
+func (ht *HandleTable) GetTpTimer(h Handle) *TpTimer {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	tt, ok := obj.(*TpTimer)
+	if !ok {
+		return nil
+	}
+	return tt
+}
+
+// GetTpWait returns the TpWait for a handle, or nil.
+func (ht *HandleTable) GetTpWait(h Handle) *TpWait {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	tw, ok := obj.(*TpWait)
+	if !ok {
+		return nil
+	}
+	return tw
+}
+
+// ======================== TIMER QUEUE TIMERS ========================
+
+// TimerQueueTimer represents a CreateTimerQueueTimer timer.
+type TimerQueueTimer struct {
+	Callback uint64 // WAITORTIMERCALLBACK guest address
+	Param    uint64 // lpParameter
+	Period   uint32 // dwPeriod (ms), 0 = one-shot
+	StopCh   chan struct{}
+	running  bool
+	mu       sync.Mutex
+}
+
+func (h *TimerQueueTimer) handleType() string { return "timerqueuetimer" }
+
+// Stop cancels the timer if running.
+func (h *TimerQueueTimer) Stop() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.running {
+		close(h.StopCh)
+		h.running = false
+	}
+}
+
+// GetTimerQueueTimer returns the TimerQueueTimer for a handle, or nil.
+func (ht *HandleTable) GetTimerQueueTimer(h Handle) *TimerQueueTimer {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	tqt, ok := obj.(*TimerQueueTimer)
+	if !ok {
+		return nil
+	}
+	return tqt
 }
