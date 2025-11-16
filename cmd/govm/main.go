@@ -5872,14 +5872,36 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// --- Sync primitives (single-threaded no-ops) ---
+		// --- Sync primitives ---
 		d.RegisterAutoStubHandler(kernel32, "CreateMutexW", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.MutantHandle{})
+			bInitialOwner := ctx.Arg(1) != 0
+			mh := &ntapi.MutantHandle{}
+			if bInitialOwner {
+				var tid uint32 = 1
+				if *tmPtr != nil {
+					tid = uint32((*tmPtr).GetTID(ctx.CPU))
+				}
+				mh.WaitTimeout(tid, 0)
+			}
+			h := handles.Alloc(mh)
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReleaseMutex", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			h := ntapi.Handle(ctx.Arg(0))
+			var tid uint32 = 1
+			if *tmPtr != nil {
+				tid = uint32((*tmPtr).GetTID(ctx.CPU))
+			}
+			if mh := handles.GetMutant(h); mh != nil {
+				if mh.Release(tid) {
+					ctx.SetReturn(1)
+				} else {
+					ctx.SetReturn(0)
+				}
+			} else {
+				ctx.SetReturn(1) // unknown handle: no-op success
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForSingleObject", func(ctx *ntapi.TrapContext) uint32 {
@@ -5892,6 +5914,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				timeout = 0
 			} else {
 				timeout = time.Duration(ms) * time.Millisecond
+			}
+			var tid uint32 = 1
+			if *tmPtr != nil {
+				tid = uint32((*tmPtr).GetTID(ctx.CPU))
 			}
 			const waitObject0 = uint64(0)
 			const waitTimeout = uint64(0x102)
@@ -5926,6 +5952,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return 0
 			}
+			// Mutex handle: acquire the mutant
+			if mh := handles.GetMutant(h); mh != nil {
+				ctx.SetReturn(uint64(mh.WaitTimeout(tid, timeout)))
+				return 0
+			}
+			// Semaphore handle: decrement count
+			if sh := handles.GetSemaphore(h); sh != nil {
+				ctx.SetReturn(uint64(sh.WaitTimeout(timeout)))
+				return 0
+			}
 			// Unknown/process handle: return WAIT_OBJECT_0 immediately
 			ctx.SetReturn(waitObject0)
 			return 0
@@ -5943,6 +5979,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			} else {
 				timeout = time.Duration(ms) * time.Millisecond
 			}
+			var tid uint32 = 1
+			if *tmPtr != nil {
+				tid = uint32((*tmPtr).GetTID(ctx.CPU))
+			}
 
 			// Build reflect.SelectCase entries: one per recognized handle + optional timer.
 			type idxChan struct {
@@ -5957,6 +5997,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					cases = append(cases, idxChan{int(i), th.Done})
 				} else if eh := handles.GetEvent(h); eh != nil {
 					cases = append(cases, idxChan{int(i), eh.WaitChan()})
+				} else if mh := handles.GetMutant(h); mh != nil {
+					cases = append(cases, idxChan{int(i), mh.WaitChan(tid)})
+				} else if sh := handles.GetSemaphore(h); sh != nil {
+					cases = append(cases, idxChan{int(i), sh.WaitChan()})
 				}
 			}
 
@@ -6020,7 +6064,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateEventW", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.EventHandle{})
+			// CreateEventW(lpAttr, bManualReset, bInitialState, lpName)
+			manualReset := ctx.Arg(1) != 0
+			initialState := ctx.Arg(2) != 0
+			h := handles.Alloc(ntapi.NewEvent(manualReset, initialState))
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
@@ -8045,17 +8092,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateEventA", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.EventHandle{})
+			// CreateEventA(lpAttr, bManualReset, bInitialState, lpName)
+			manualReset := ctx.Arg(1) != 0
+			initialState := ctx.Arg(2) != 0
+			h := handles.Alloc(ntapi.NewEvent(manualReset, initialState))
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateEventExA", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.EventHandle{})
+			// CreateEventExA(lpAttr, lpName, dwFlags, dwDesiredAccess)
+			// dwFlags: 1=CREATE_EVENT_INITIAL_SET, 2=CREATE_EVENT_MANUAL_RESET
+			dwFlags := ctx.Arg(2)
+			h := handles.Alloc(ntapi.NewEvent(dwFlags&2 != 0, dwFlags&1 != 0))
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateEventExW", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.EventHandle{})
+			// CreateEventExW(lpAttr, lpName, dwFlags, dwDesiredAccess)
+			dwFlags := ctx.Arg(2)
+			h := handles.Alloc(ntapi.NewEvent(dwFlags&2 != 0, dwFlags&1 != 0))
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
@@ -8128,7 +8183,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateIoCompletionPort", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x3001) // fake iocp handle
+			// CreateIoCompletionPort(FileHandle, ExistingCompletionPort, CompletionKey, NumberOfConcurrentThreads)
+			// INVALID_HANDLE_VALUE (-1) as FileHandle means "create a new IOCP".
+			fileHandle := ntapi.Handle(ctx.Arg(0))
+			existingPort := ntapi.Handle(ctx.Arg(1))
+
+			if existingPort != 0 {
+				// Associate file with existing port - just return the existing port handle.
+				ctx.SetReturn(uint64(existingPort))
+				return 0
+			}
+			if fileHandle == ntapi.InvalidHandle {
+				// Create a new IOCP.
+				h := handles.Alloc(&ntapi.IoCompletionPortHandle{})
+				ctx.SetReturn(uint64(h))
+				return 0
+			}
+			// Associate a file handle with a new IOCP (simplified: create new IOCP).
+			h := handles.Alloc(&ntapi.IoCompletionPortHandle{})
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateJobObjectA", func(ctx *ntapi.TrapContext) uint32 {
@@ -8157,15 +8230,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateMutexA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x1004) // fake handle
+			// CreateMutexA(lpAttr, bInitialOwner, lpName)
+			bInitialOwner := ctx.Arg(1) != 0
+			mh := &ntapi.MutantHandle{}
+			if bInitialOwner {
+				var tid uint32 = 1
+				if *tmPtr != nil {
+					tid = uint32((*tmPtr).GetTID(ctx.CPU))
+				}
+				mh.WaitTimeout(tid, 0)
+			}
+			h := handles.Alloc(mh)
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateMutexExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x1004)
+			// CreateMutexExA(lpAttr, lpName, dwFlags, dwDesiredAccess)
+			// dwFlags: 1 = CREATE_MUTEX_INITIAL_OWNER
+			dwFlags := ctx.Arg(2)
+			mh := &ntapi.MutantHandle{}
+			if dwFlags&1 != 0 {
+				var tid uint32 = 1
+				if *tmPtr != nil {
+					tid = uint32((*tmPtr).GetTID(ctx.CPU))
+				}
+				mh.WaitTimeout(tid, 0)
+			}
+			h := handles.Alloc(mh)
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateMutexExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x1004)
+			dwFlags := ctx.Arg(2)
+			mh := &ntapi.MutantHandle{}
+			if dwFlags&1 != 0 {
+				var tid uint32 = 1
+				if *tmPtr != nil {
+					tid = uint32((*tmPtr).GetTID(ctx.CPU))
+				}
+				mh.WaitTimeout(tid, 0)
+			}
+			h := handles.Alloc(mh)
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateNamedPipeA", func(ctx *ntapi.TrapContext) uint32 {
@@ -8228,19 +8334,37 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateSemaphoreA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x1002) // fake handle
+			// CreateSemaphoreA(lpAttr, lInitialCount, lMaximumCount, lpName)
+			initial := int32(ctx.Arg(1))
+			maxCount := int32(ctx.Arg(2))
+			if maxCount <= 0 { maxCount = 0x7fffffff }
+			h := handles.Alloc(ntapi.NewSemaphore(initial, maxCount))
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateSemaphoreExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x1002) // fake handle
+			// CreateSemaphoreExA(lpAttr, lInitialCount, lMaximumCount, lpName, dwFlags, dwDesiredAccess)
+			initial := int32(ctx.Arg(1))
+			maxCount := int32(ctx.Arg(2))
+			if maxCount <= 0 { maxCount = 0x7fffffff }
+			h := handles.Alloc(ntapi.NewSemaphore(initial, maxCount))
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateSemaphoreExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0x1002) // fake handle
+			initial := int32(ctx.Arg(1))
+			maxCount := int32(ctx.Arg(2))
+			if maxCount <= 0 { maxCount = 0x7fffffff }
+			h := handles.Alloc(ntapi.NewSemaphore(initial, maxCount))
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateSemaphoreW", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.GenericHandle{Kind: "semaphore"})
+			// CreateSemaphoreW(lpAttr, lInitialCount, lMaximumCount, lpName)
+			initial := int32(ctx.Arg(1))
+			maxCount := int32(ctx.Arg(2))
+			if maxCount <= 0 { maxCount = 0x7fffffff }
+			h := handles.Alloc(ntapi.NewSemaphore(initial, maxCount))
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
@@ -10027,11 +10151,71 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetQueuedCompletionStatus", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE - timeout
+			// GetQueuedCompletionStatus(CompletionPort, lpNumberOfBytesTransferred,
+			//   lpCompletionKey, lpOverlapped, dwMilliseconds)
+			iocpHandle := ntapi.Handle(ctx.Arg(0))
+			pBytes := ctx.Arg(1)
+			pKey := ctx.Arg(2)
+			pOverlapped := ctx.Arg(3)
+			ms := ctx.Arg(4)
+
+			var timeout time.Duration
+			if ms == 0xFFFFFFFF {
+				timeout = -1
+			} else {
+				timeout = time.Duration(ms) * time.Millisecond
+			}
+
+			if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
+				pkt, ok := ic.Remove(timeout)
+				if !ok {
+					ctx.SetReturn(0) // FALSE - timeout
+					return 0
+				}
+				ctx.Mem.Write32(pBytes, pkt.BytesTransferred)
+				ctx.Mem.Write64(pKey, pkt.CompletionKey)
+				ctx.Mem.Write64(pOverlapped, pkt.Overlapped)
+				ctx.SetReturn(1) // TRUE
+			} else {
+				ctx.SetReturn(0) // FALSE - unknown handle
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetQueuedCompletionStatusEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			// GetQueuedCompletionStatusEx(CompletionPort, lpCompletionPortEntries,
+			//   ulCount, ulNumEntriesRemoved, dwMilliseconds, fAlertable)
+			iocpHandle := ntapi.Handle(ctx.Arg(0))
+			pEntries := ctx.Arg(1)
+			// ulCount := ctx.Arg(2)
+			pRemoved := ctx.Arg(3)
+			ms := ctx.Arg(4)
+
+			var timeout time.Duration
+			if ms == 0xFFFFFFFF {
+				timeout = -1
+			} else {
+				timeout = time.Duration(ms) * time.Millisecond
+			}
+
+			if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
+				pkt, ok := ic.Remove(timeout)
+				if !ok {
+					ctx.SetReturn(0)
+					return 0
+				}
+				// OVERLAPPED_ENTRY: {key, overlapped*, internal, bytes}
+				// Write one entry: key(8) overlapped*(8) internal(8) bytes(4)
+				ctx.Mem.Write64(pEntries+0, pkt.CompletionKey)
+				ctx.Mem.Write64(pEntries+8, pkt.Overlapped)
+				ctx.Mem.Write64(pEntries+16, 0)
+				ctx.Mem.Write32(pEntries+24, pkt.BytesTransferred)
+				if pRemoved != 0 {
+					ctx.Mem.Write32(pRemoved, 1)
+				}
+				ctx.SetReturn(1) // TRUE
+			} else {
+				ctx.SetReturn(0)
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetShortPathNameA", func(ctx *ntapi.TrapContext) uint32 {
@@ -11299,6 +11483,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "PostQueuedCompletionStatus", func(ctx *ntapi.TrapContext) uint32 {
+			// PostQueuedCompletionStatus(CompletionPort, dwNumberOfBytesTransferred, dwCompletionKey, lpOverlapped)
+			iocpHandle := ntapi.Handle(ctx.Arg(0))
+			bytes := uint32(ctx.Arg(1))
+			key := ctx.Arg(2)
+			overlapped := ctx.Arg(3)
+			if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
+				ic.Post(key, overlapped, bytes, 0)
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -12200,7 +12392,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReleaseSemaphore", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			// ReleaseSemaphore(hSemaphore, lReleaseCount, lpPreviousCount)
+			h := ntapi.Handle(ctx.Arg(0))
+			releaseCount := int32(ctx.Arg(1))
+			pPrevious := ctx.Arg(2)
+			if sh := handles.GetSemaphore(h); sh != nil {
+				prev, ok := sh.Release(releaseCount)
+				if ok {
+					if pPrevious != 0 {
+						ctx.Mem.Write32(pPrevious, uint32(prev))
+					}
+					ctx.SetReturn(1)
+				} else {
+					ctx.SetReturn(0)
+				}
+			} else {
+				ctx.SetReturn(1) // unknown handle: no-op success
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReleaseSemaphoreWhenCallbackReturns", func(ctx *ntapi.TrapContext) uint32 {
@@ -13348,6 +13556,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			} else {
 				timeout = time.Duration(ms) * time.Millisecond
 			}
+			var tid uint32 = 1
+			if *tmPtr != nil {
+				tid = uint32((*tmPtr).GetTID(ctx.CPU))
+			}
 			type idxChan2 struct {
 				idx int
 				ch  <-chan struct{}
@@ -13360,6 +13572,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					cases2 = append(cases2, idxChan2{int(i), th.Done})
 				} else if eh := handles.GetEvent(h); eh != nil {
 					cases2 = append(cases2, idxChan2{int(i), eh.WaitChan()})
+				} else if mh := handles.GetMutant(h); mh != nil {
+					cases2 = append(cases2, idxChan2{int(i), mh.WaitChan(tid)})
+				} else if sh := handles.GetSemaphore(h); sh != nil {
+					cases2 = append(cases2, idxChan2{int(i), sh.WaitChan()})
 				}
 			}
 			if len(cases2) == 0 {
@@ -13395,6 +13611,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			} else {
 				timeout = time.Duration(ms) * time.Millisecond
 			}
+			var tid uint32 = 1
+			if *tmPtr != nil {
+				tid = uint32((*tmPtr).GetTID(ctx.CPU))
+			}
 			if th := handles.GetThread(h); th != nil && th.Done != nil {
 				if timeout < 0 {
 					<-th.Done
@@ -13422,6 +13642,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				} else {
 					ctx.SetReturn(0x102)
 				}
+				return 0
+			}
+			if mh := handles.GetMutant(h); mh != nil {
+				ctx.SetReturn(uint64(mh.WaitTimeout(tid, timeout)))
+				return 0
+			}
+			if sh := handles.GetSemaphore(h); sh != nil {
+				ctx.SetReturn(uint64(sh.WaitTimeout(timeout)))
 				return 0
 			}
 			ctx.SetReturn(0)
