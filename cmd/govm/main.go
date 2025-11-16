@@ -8844,15 +8844,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 			ph.Connected = false
-			// Drain any pending data
-			for {
-				select {
-				case <-ph.Buf:
-				default:
-					goto drained
-				}
-			}
-		drained:
+			ph.DrainAll()
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -26784,9 +26776,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(advapi32, "DuplicateTokenEx", func(ctx *ntapi.TrapContext) uint32 {
 			phNewToken := ctx.Arg(5)
-			h := handles.Alloc(&ntapi.GenericHandle{Kind: "token"})
+			h := handles.Alloc(&ntapi.TokenHandle{})
 			if phNewToken != 0 { mem.Write64(phNewToken, uint64(h)) }
 			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "DuplicateToken", func(ctx *ntapi.TrapContext) uint32 {
+			phNewToken := ctx.Arg(2)
+			h := handles.Alloc(&ntapi.TokenHandle{})
+			if phNewToken != 0 { mem.Write64(phNewToken, uint64(h)) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "IsTokenRestricted", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0 // FALSE = not restricted
 		})
 		for _, fn := range []string{"ImpersonateSelf", "RevertToSelf", "ImpersonateLoggedOnUser",
 			"SetThreadToken", "PrivilegeCheck"} {
@@ -26819,9 +26820,97 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(1); return 0
 			})
 		}
-		// SID helpers
-		for _, fn := range []string{"IsValidSid", "EqualSid", "CopySid", "GetLengthSid",
-			"GetSidSubAuthorityCount", "GetSidSubAuthority",
+		// SID helpers - real implementations
+		d.RegisterAutoStubHandler(advapi32, "IsValidSid", func(ctx *ntapi.TrapContext) uint32 {
+			pSid := ctx.Arg(0)
+			if pSid == 0 { ctx.SetReturn(0); return 0 }
+			rev, _ := ctx.Mem.Read8(pSid)
+			nSub, _ := ctx.Mem.Read8(pSid + 1)
+			if rev == 1 && nSub <= 8 { ctx.SetReturn(1) } else { ctx.SetReturn(0) }
+			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "EqualSid", func(ctx *ntapi.TrapContext) uint32 {
+			pSid1 := ctx.Arg(0)
+			pSid2 := ctx.Arg(1)
+			if pSid1 == 0 || pSid2 == 0 { ctx.SetReturn(0); return 0 }
+			nSub1, _ := ctx.Mem.Read8(pSid1 + 1)
+			nSub2, _ := ctx.Mem.Read8(pSid2 + 1)
+			if nSub1 != nSub2 { ctx.SetReturn(0); return 0 }
+			size := uint64(8 + uint64(nSub1)*4)
+			b1, _ := ctx.Mem.ReadBytes(pSid1, int(size))
+			b2, _ := ctx.Mem.ReadBytes(pSid2, int(size))
+			for i := range b1 {
+				if b1[i] != b2[i] { ctx.SetReturn(0); return 0 }
+			}
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetLengthSid", func(ctx *ntapi.TrapContext) uint32 {
+			pSid := ctx.Arg(0)
+			if pSid == 0 { ctx.SetReturn(0); return 0 }
+			nSub, _ := ctx.Mem.Read8(pSid + 1)
+			ctx.SetReturn(8 + uint64(nSub)*4); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CopySid", func(ctx *ntapi.TrapContext) uint32 {
+			nDestLen := uint32(ctx.Arg(0))
+			pDest := ctx.Arg(1)
+			pSrc := ctx.Arg(2)
+			if pSrc == 0 || pDest == 0 { ctx.SetReturn(0); return 0 }
+			nSub, _ := ctx.Mem.Read8(pSrc + 1)
+			sidLen := uint32(8 + uint32(nSub)*4)
+			if nDestLen < sidLen { ctx.SetReturn(0); return 0 }
+			data, _ := ctx.Mem.ReadBytes(pSrc, int(sidLen))
+			ctx.Mem.WriteBytes(pDest, data)
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "ConvertSidToStringSidW", func(ctx *ntapi.TrapContext) uint32 {
+			pSid := ctx.Arg(0)
+			ppStr := ctx.Arg(1)
+			if pSid == 0 || ppStr == 0 { ctx.SetReturn(0); return 0 }
+			nSub, _ := ctx.Mem.Read8(pSid + 1)
+			var auth uint64
+			for i := uint64(0); i < 6; i++ {
+				b, _ := ctx.Mem.Read8(pSid + 2 + i)
+				auth = (auth << 8) | uint64(b)
+			}
+			s := fmt.Sprintf("S-1-%d", auth)
+			for i := uint8(0); i < nSub; i++ {
+				sub, _ := ctx.Mem.Read32(pSid + 8 + uint64(i)*4)
+				s += fmt.Sprintf("-%d", sub)
+			}
+			ws := utf16Encode(s)
+			strBuf := mem.Mmap(0, uint64(len(ws)+1)*2, mmu.PermRead|mmu.PermWrite)
+			for i, w := range ws {
+				mem.Write16(strBuf+uint64(i)*2, w)
+			}
+			mem.Write16(strBuf+uint64(len(ws))*2, 0)
+			mem.Write64(ppStr, strBuf)
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "ConvertSidToStringSidA", func(ctx *ntapi.TrapContext) uint32 {
+			pSid := ctx.Arg(0)
+			ppStr := ctx.Arg(1)
+			if pSid == 0 || ppStr == 0 { ctx.SetReturn(0); return 0 }
+			nSub, _ := ctx.Mem.Read8(pSid + 1)
+			var auth uint64
+			for i := uint64(0); i < 6; i++ {
+				b, _ := ctx.Mem.Read8(pSid + 2 + i)
+				auth = (auth << 8) | uint64(b)
+			}
+			s := fmt.Sprintf("S-1-%d", auth)
+			for i := uint8(0); i < nSub; i++ {
+				sub, _ := ctx.Mem.Read32(pSid + 8 + uint64(i)*4)
+				s += fmt.Sprintf("-%d", sub)
+			}
+			strBuf := mem.Mmap(0, uint64(len(s)+1), mmu.PermRead|mmu.PermWrite)
+			for i := 0; i < len(s); i++ {
+				mem.Write8(strBuf+uint64(i), s[i])
+			}
+			mem.Write8(strBuf+uint64(len(s)), 0)
+			mem.Write64(ppStr, strBuf)
+			ctx.SetReturn(1); return 0
+		})
+		// Trivial SID helpers
+		for _, fn := range []string{"GetSidSubAuthorityCount", "GetSidSubAuthority",
 			"GetSidIdentifierAuthority", "InitializeSid",
 			"CreateWellKnownSid", "IsWellKnownSid", "EqualPrefixSid"} {
 			fn := fn; _ = fn
