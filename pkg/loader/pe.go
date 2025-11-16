@@ -252,9 +252,10 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 		if perms == 0 {
 			perms = mmu.PermRead // default
 		}
-		// Wine DLLs expect DEP disabled - add execute to all sections
-		// to allow dynamic thunks and function pointer tables.
-		if mod.IsDLL {
+		// Windows PE binaries expect DEP disabled - add execute to all sections
+		// that have code or are DLLs. This allows dynamic thunks and function
+		// pointer tables to work correctly.
+		if mod.IsDLL || sec.Name == ".text" || (ch&imageScnCntCode) != 0 {
 			perms |= mmu.PermExecute
 		}
 

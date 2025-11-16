@@ -327,6 +327,15 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		if name == "" {
 			name = fmt.Sprintf("unknown_0x%04X", syscallID)
 		}
+		// Log missing API to file for tracking
+		if syscallID >= AutoSynthIDBase {
+			// This is an auto-synth stub - log the missing API
+			missingFile, err := os.OpenFile("missing_api.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				fmt.Fprintf(missingFile, "[MISSING] auto-synth!%s (id=0x%04X)\n", name, syscallID)
+				missingFile.Close()
+			}
+		}
 		ravelog.Logf("[ntapi] UNIMPLEMENTED: %s (id=0x%04X)\n", name, syscallID)
 		// For auto-synth user-mode DLL stubs, return 0 (NULL/FALSE).
 		// For NT syscalls, return STATUS_NOT_IMPLEMENTED.
