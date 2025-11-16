@@ -919,6 +919,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// new DLL's handlers get registered.
 	var delayHandlerRegistrars []func()
 
+	// Shared delay-load state used by both ResolveDelayLoadedAPI and __delayLoadHelper2
+	var delayLoadFallback uint64
+	nextDelayID := uint32(ntapi.AutoSynthIDBase)
+	for _, s := range dlls {
+		for _, id := range s.StubIDs {
+			if id+1 > nextDelayID {
+				nextDelayID = id + 1
+			}
+		}
+	}
+
 	// Wayland connection for window display (used by user32 handlers below)
 	var wlDisplay *wl.Display
 	var wlWindow *wl.Window
@@ -7457,16 +7468,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 
 		// ResolveDelayLoadedAPI: resolve delay-loaded imports to our synth stubs
-		var delayLoadFallback uint64
-		// Compute next available auto-synth ID
-		nextDelayID := uint32(ntapi.AutoSynthIDBase)
-		for _, s := range dlls {
-			for _, id := range s.StubIDs {
-				if id+1 > nextDelayID {
-					nextDelayID = id + 1
-				}
-			}
-		}
 		d.RegisterAutoStubHandler(kernel32, "ResolveDelayLoadedAPI", func(ctx *ntapi.TrapContext) uint32 {
 			callerBase := ctx.Arg(0)
 			pDescriptor := ctx.Arg(1)
@@ -8120,7 +8121,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ConnectNamedPipe", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			hPipe := ntapi.Handle(ctx.Arg(0))
+			ph := handles.GetNamedPipe(hPipe)
+			if ph == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			ph.Connected = true
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ConsoleMenuControl", func(ctx *ntapi.TrapContext) uint32 {
@@ -8425,11 +8433,51 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateNamedPipeA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
+			name := readGuestString(ctx.Arg(0))
+			// dwOpenMode=Arg(1), dwPipeMode=Arg(2), nMaxInstances=Arg(3)
+			// nOutBufSize=Arg(4), nInBufSize=Arg(5), nDefaultTimeout=Arg(6), pSA=Arg(7)
+			pipeName := name
+			for _, prefix := range []string{`\\.\pipe\`, `\\.\Pipe\`, `\\.\PIPE\`} {
+				if strings.HasPrefix(pipeName, prefix) {
+					pipeName = pipeName[len(prefix):]
+					break
+				}
+			}
+			ph := &ntapi.NamedPipeHandle{
+				Name:      pipeName,
+				Buf:       make(chan []byte, 64),
+				Connected: false,
+				Server:    true,
+			}
+			ntapi.RegisterNamedPipe(pipeName, ph)
+			h := handles.Alloc(ph)
+			if ctx.Trace {
+				ravelog.Logf("[win32] CreateNamedPipeA: %q → handle=0x%x\n", name, uint64(h))
+			}
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateNamedPipeW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
+			name := readGuestUTF16(ctx.Arg(0))
+			pipeName := name
+			for _, prefix := range []string{`\\.\pipe\`, `\\.\Pipe\`, `\\.\PIPE\`} {
+				if strings.HasPrefix(pipeName, prefix) {
+					pipeName = pipeName[len(prefix):]
+					break
+				}
+			}
+			ph := &ntapi.NamedPipeHandle{
+				Name:      pipeName,
+				Buf:       make(chan []byte, 64),
+				Connected: false,
+				Server:    true,
+			}
+			ntapi.RegisterNamedPipe(pipeName, ph)
+			h := handles.Alloc(ph)
+			if ctx.Trace {
+				ravelog.Logf("[win32] CreateNamedPipeW: %q → handle=0x%x\n", name, uint64(h))
+			}
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreatePipe", func(ctx *ntapi.TrapContext) uint32 {
@@ -8747,7 +8795,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "DisconnectNamedPipe", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			hPipe := ntapi.Handle(ctx.Arg(0))
+			ph := handles.GetNamedPipe(hPipe)
+			if ph == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			ph.Connected = false
+			// Drain any pending data
+			for {
+				select {
+				case <-ph.Buf:
+				default:
+					goto drained
+				}
+			}
+		drained:
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "DnsHostnameToComputerNameA", func(ctx *ntapi.TrapContext) uint32 {
@@ -12221,6 +12285,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegGetKeySecurity", func(ctx *ntapi.TrapContext) uint32 {
+			// RegGetKeySecurity(hKey, SecurityInformation, pSecurityDescriptor, lpcbSecurityDescriptor)
+			pSD := ctx.Arg(2)
+			lpcb := ctx.Arg(3)
+			// Minimal self-relative security descriptor: 20 bytes header
+			var needed uint32 = 20
+			if lpcb != 0 {
+				avail, _ := ctx.Mem.Read32(lpcb)
+				ctx.Mem.Write32(lpcb, needed)
+				if pSD == 0 || avail < needed {
+					ctx.SetReturn(122) // ERROR_INSUFFICIENT_BUFFER
+					return 0
+				}
+			}
+			if pSD != 0 {
+				// SECURITY_DESCRIPTOR_RELATIVE: Revision=1, Sbz1=0, Control=SE_SELF_RELATIVE(0x8000)
+				ctx.Mem.Write8(pSD, 1)      // Revision
+				ctx.Mem.Write8(pSD+1, 0)    // Sbz1
+				ctx.Mem.Write16(pSD+2, 0x8000) // Control: SE_SELF_RELATIVE
+				ctx.Mem.Write32(pSD+4, 0)   // OffsetOwner
+				ctx.Mem.Write32(pSD+8, 0)   // OffsetGroup
+				ctx.Mem.Write32(pSD+12, 0)  // OffsetSacl
+				ctx.Mem.Write32(pSD+16, 0)  // OffsetDacl
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -12281,6 +12368,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "RegNotifyChangeKeyValue", func(ctx *ntapi.TrapContext) uint32 {
+			// RegNotifyChangeKeyValue(hKey, bWatchSubtree, dwNotifyFilter, hEvent, fAsynchronous)
+			hEvent := ntapi.Handle(ctx.Arg(3))
+			fAsync := ctx.Arg(4)
+			if hEvent != 0 && fAsync != 0 {
+				evt := handles.GetEvent(hEvent)
+				if evt != nil {
+					go func() {
+						time.Sleep(5 * time.Second)
+						evt.Signal()
+					}()
+				}
+			}
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -15630,16 +15729,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(advapi32, "RegQueryInfoKeyW", func(ctx *ntapi.TrapContext) uint32 {
 			rk := handles.GetRegKey(ntapi.Handle(ctx.Arg(0)))
-			var nSubKeys, nValues uint32
+			var nSubKeys, nValues, maxSubKeyLen, maxValueNameLen, maxValueLen uint32
 			if rk != nil && rk.Key != nil {
 				nSubKeys = uint32(len(rk.Key.Children))
 				nValues = uint32(len(rk.Key.Values))
+				for name := range rk.Key.Children {
+					if uint32(len(name)) > maxSubKeyLen { maxSubKeyLen = uint32(len(name)) }
+				}
+				for name, val := range rk.Key.Values {
+					if uint32(len(name)) > maxValueNameLen { maxValueNameLen = uint32(len(name)) }
+					if uint32(len(val.Data)) > maxValueLen { maxValueLen = uint32(len(val.Data)) }
+				}
 			}
+			if p := ctx.Arg(2); p != 0 { ctx.Mem.Write32(p, 0) }
 			if p := ctx.Arg(4); p != 0 { ctx.Mem.Write32(p, nSubKeys) }
+			if p := ctx.Arg(5); p != 0 { ctx.Mem.Write32(p, maxSubKeyLen) }
+			if p := ctx.Arg(6); p != 0 { ctx.Mem.Write32(p, 0) }
 			if p := ctx.Arg(7); p != 0 { ctx.Mem.Write32(p, nValues) }
-			for _, i := range []int{2, 3, 5, 6, 8, 9, 10} {
-				if p := ctx.Arg(i); p != 0 { ctx.Mem.Write32(p, 0) }
-			}
+			if p := ctx.Arg(8); p != 0 { ctx.Mem.Write32(p, maxValueNameLen) }
+			if p := ctx.Arg(9); p != 0 { ctx.Mem.Write32(p, maxValueLen) }
+			if p := ctx.Arg(10); p != 0 { ctx.Mem.Write32(p, 0) }
 			ctx.SetReturn(0)
 			return 0
 		})

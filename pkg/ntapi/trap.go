@@ -574,6 +574,10 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("NtOpenProcess"), "NtOpenProcess", handleNtOpenProcess)
 	d.register(idOf("NtSetInformationProcess"), "NtSetInformationProcess", handleNtSetInformationProcess)
 	d.register(idOf("NtSetInformationThread"), "NtSetInformationThread", handleNtSetInformationThread)
+	d.register(idOf("NtOpenThread"), "NtOpenThread", handleNtOpenThread)
+	d.register(idOf("NtAlertThread"), "NtAlertThread", handleNtAlertThread)
+	d.register(idOf("NtAlertResumeThread"), "NtAlertResumeThread", handleNtAlertResumeThread)
+	d.register(idOf("NtTestAlert"), "NtTestAlert", handleNtTestAlert)
 
 	// Exception handling
 	d.register(idOf("RtlCaptureContext"), "RtlCaptureContext", handleRtlCaptureContext)

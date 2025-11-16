@@ -1272,7 +1272,7 @@ func handleNtDelayExecution(ctx *TrapContext) uint32 {
 
 func handleNtYieldExecution(ctx *TrapContext) uint32 {
 	runtime.Gosched()
-	return StatusSuccess
+	return 0x40000024 // STATUS_NO_YIELD_PERFORMED
 }
 
 func handleNtQueryPerformanceCounter(ctx *TrapContext) uint32 {
@@ -1609,8 +1609,13 @@ func handleRtlGetLastWin32Error(ctx *TrapContext) uint32 {
 }
 
 func handleNtDuplicateObject(ctx *TrapContext) uint32 {
+	_ = Handle(ctx.Arg(0))       // SourceProcessHandle
+	_ = Handle(ctx.Arg(1))       // TargetProcessHandle  (not used for same-process)
 	srcHandle := Handle(ctx.Arg(2))
 	targetHandlePtr := ctx.Arg(3)
+	_ = ctx.Arg(4)               // DesiredAccess
+	_ = ctx.Arg(5)               // HandleAttributes
+	options := uint32(ctx.Arg(6))
 
 	obj := ctx.Handles.Get(srcHandle)
 	if obj == nil {
@@ -1621,6 +1626,12 @@ func handleNtDuplicateObject(ctx *TrapContext) uint32 {
 	if targetHandlePtr != 0 {
 		ctx.Mem.Write64(targetHandlePtr, uint64(newHandle))
 	}
+
+	// DUPLICATE_CLOSE_SOURCE = 0x01
+	if options&0x01 != 0 {
+		ctx.Handles.Close(srcHandle)
+	}
+
 	return StatusSuccess
 }
 
@@ -2713,6 +2724,19 @@ func handleNtOpenProcess(ctx *TrapContext) uint32 {
 func handleNtSetInformationProcess(ctx *TrapContext) uint32 { return StatusSuccess }
 func handleNtSetInformationThread(ctx *TrapContext) uint32  { return StatusSuccess }
 
+func handleNtOpenThread(ctx *TrapContext) uint32 {
+	handlePtr := ctx.Arg(0)
+	if handlePtr != 0 {
+		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Thread"})
+		ctx.Mem.Write64(handlePtr, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtAlertThread(ctx *TrapContext) uint32       { return StatusSuccess }
+func handleNtAlertResumeThread(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleNtTestAlert(ctx *TrapContext) uint32         { return StatusSuccess }
+
 func handleNtCreateTimer(ctx *TrapContext) uint32 {
 	handlePtr := ctx.Arg(0)
 	if handlePtr != 0 {
@@ -3035,12 +3059,64 @@ func handleNtCreateNamedPipeFile(ctx *TrapContext) uint32 {
 	return StatusNotImplemented
 }
 
-func handleNtFsControlFile(ctx *TrapContext) uint32 {
-	ioStatus := ctx.Arg(3)
-	if ioStatus != 0 {
-		writeIOStatus(ctx.Mem, ioStatus, StatusNotImplemented, 0)
+// signalEventHandle signals a guest event handle if non-zero.
+func signalEventHandle(ctx *TrapContext, handle uint64) {
+	if handle == 0 {
+		return
 	}
-	return StatusNotImplemented
+	if eh, ok := ctx.Handles.Get(Handle(handle)).(*EventHandle); ok {
+		eh.Set()
+	}
+}
+
+func handleNtFsControlFile(ctx *TrapContext) uint32 {
+	_ = Handle(ctx.Arg(0))  // FileHandle
+	eventHandle := ctx.Arg(1)
+	_ = ctx.Arg(2) // ApcRoutine
+	_ = ctx.Arg(3) // ApcContext
+	ioStatus := ctx.Arg(4)
+	fsctlCode := uint32(ctx.Arg(5))
+	_ = ctx.Arg(6) // InputBuffer
+	_ = ctx.Arg(7) // InputBufferLength
+	outputBuf := ctx.Arg(8)
+	outputLen := uint32(ctx.Arg(9))
+
+	if ctx.Trace {
+		fmt.Printf("  NtFsControlFile: fsctl=0x%08x outLen=%d\n", fsctlCode, outputLen)
+	}
+
+	var status uint32 = StatusSuccess
+	var info uint64
+
+	switch fsctlCode {
+	case 0x0009009C: // FSCTL_GET_COMPRESSION
+		if outputBuf != 0 && outputLen >= 2 {
+			ctx.Mem.Write16(outputBuf, 0) // COMPRESSION_FORMAT_NONE
+			info = 2
+		}
+
+	case 0x000900A8: // FSCTL_GET_REPARSE_POINT
+		status = 0xC0000275 // STATUS_NOT_A_REPARSE_POINT
+
+	case 0x004D0008: // FSCTL_GET_NTFS_VOLUME_DATA
+		status = 0xC0000010 // STATUS_INVALID_DEVICE_REQUEST
+
+	case 0x00090028: // FSCTL_SET_COMPRESSION
+		// Accept silently
+
+	case 0x000900C0: // FSCTL_SET_SPARSE
+		// Accept silently
+
+	default:
+		status = 0xC0000010 // STATUS_INVALID_DEVICE_REQUEST
+		if ctx.Trace {
+			fmt.Printf("  NtFsControlFile: unknown FSCTL 0x%08x\n", fsctlCode)
+		}
+	}
+
+	writeIOStatus(ctx.Mem, ioStatus, status, info)
+	signalEventHandle(ctx, eventHandle)
+	return status
 }
 
 func handleNtPowerInformation(ctx *TrapContext) uint32 {
