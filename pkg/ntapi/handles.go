@@ -523,6 +523,12 @@ func newCondVarEntry() *CondVarEntry {
 	return &CondVarEntry{ch: make(chan struct{}, 64)}
 }
 
+// Lock acquires the entry's mutex.
+func (c *CondVarEntry) Lock() { c.mu.Lock() }
+
+// Unlock releases the entry's mutex.
+func (c *CondVarEntry) Unlock() { c.mu.Unlock() }
+
 // Signal wakes one waiter.
 func (c *CondVarEntry) Signal() {
 	select {
@@ -542,6 +548,15 @@ func (c *CondVarEntry) Broadcast() {
 		default:
 		}
 	}
+}
+
+// Wait blocks until a signal is received. Must be called with Lock held.
+func (c *CondVarEntry) Wait() {
+	c.waiters++
+	c.mu.Unlock()
+	<-c.ch
+	c.mu.Lock()
+	c.waiters--
 }
 
 // Sleep waits up to d for a signal and returns true (always - caller rechecks condition).
@@ -585,6 +600,9 @@ func (t *CondVarTable) Get(addr uint64) *CondVarEntry {
 	t.entries[addr] = e
 	return e
 }
+
+// GlobalCondVars is the process-wide condition variable table.
+var GlobalCondVars = NewCondVarTable()
 
 // HandleTable maps guest HANDLE values to Go objects.
 type HandleTable struct {

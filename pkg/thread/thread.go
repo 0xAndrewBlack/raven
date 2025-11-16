@@ -257,3 +257,59 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 
 	return tid, done, nil
 }
+
+// CloneWin32ThreadEx is like CloneWin32Thread but accepts up to four
+// arguments that are mapped to x64 registers RCX, RDX, R8, R9 (Microsoft
+// x64 calling convention). Used for thread-pool callbacks with multiple params.
+func (m *Manager) CloneWin32ThreadEx(parentCPU arch.CPU, startAddr, stackBase, stackSize, tebAddr uint64, args ...uint64) (int, chan struct{}, error) {
+	m.mu.Lock()
+	tid := m.nextID
+	m.nextID++
+	m.mu.Unlock()
+
+	c := parentCPU.CloneForThread()
+	c.SetPC(startAddr)
+	sp := stackBase + stackSize - 8
+	c.SetSP(sp)
+	m.mem.Write64Raw(sp, 0)
+	if xc, ok := c.(*x64.CPU); ok {
+		regs := [4]int{x64.RCX, x64.RDX, x64.R8, x64.R9}
+		for i := 0; i < len(args) && i < 4; i++ {
+			xc.WriteReg(regs[i], args[i])
+		}
+		if tebAddr != 0 {
+			xc.SetGSBase(tebAddr)
+		}
+	}
+	c.SetSyscallHandler(m.handler)
+
+	if stackBase != 0 && stackSize != 0 {
+		m.registerStack(stackBase, stackSize)
+	}
+
+	t := &Thread{ID: tid, CPU: c}
+	m.mu.Lock()
+	m.threads = append(m.threads, t)
+	m.mu.Unlock()
+
+	done := make(chan struct{})
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		defer close(done)
+		ravelog.Logf("[govm] win32-thread %d start: PC=0x%x SP=0x%x\n", tid, c.GetPC(), c.GetSP())
+		if err := c.Run(); err != nil {
+			var f *mmu.Fault
+			if errors.As(err, &f) && f.Addr == 0 {
+				ravelog.Logf("[govm] win32-thread %d exited normally (returned)\n", tid)
+			} else {
+				ravelog.Logf("[govm] win32-thread %d exited: %v\n", tid, err)
+			}
+		}
+		if stackBase != 0 {
+			m.unregisterStack(stackBase)
+		}
+	}()
+
+	return tid, done, nil
+}

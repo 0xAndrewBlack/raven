@@ -5493,23 +5493,50 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// WriteFile: write to stdout/stderr for console handles
 		d.RegisterAutoStubHandler(kernel32, "WriteFile", func(ctx *ntapi.TrapContext) uint32 {
-			handle := ctx.Arg(0)
-			buf := ctx.Arg(1)
+			hFile := ntapi.Handle(ctx.Arg(0))
+			bufAddr := ctx.Arg(1)
 			nBytes := ctx.Arg(2)
 			lpWritten := ctx.Arg(3)
-			data := make([]byte, nBytes)
-			for i := uint64(0); i < nBytes; i++ {
-				b, _ := ctx.Mem.Read8(buf + i)
-				data[i] = b
-			}
-			switch handle {
+			lpOverlapped := ctx.Arg(4)
+			data, _ := ctx.Mem.ReadBytes(bufAddr, int(nBytes))
+			var written int
+			switch hFile {
 			case 0x101: // stdout
-				os.Stdout.Write(data)
+				written, _ = os.Stdout.Write(data)
 			case 0x102: // stderr
-				os.Stderr.Write(data)
+				written, _ = os.Stderr.Write(data)
+			default:
+				obj := handles.Get(hFile)
+				fh, ok := obj.(*ntapi.FileHandle)
+				if !ok {
+					ctx.SetReturn(0)
+					return 0
+				}
+				if lpOverlapped != 0 {
+					off32, _ := ctx.Mem.Read32(lpOverlapped + 16)
+					offHi, _ := ctx.Mem.Read32(lpOverlapped + 20)
+					offset := int64(off32) | (int64(offHi) << 32)
+					if off32 == 0xFFFFFFFF && offHi == 0xFFFFFFFF {
+						written, _ = ctx.FS.Write(fh.FD, data)
+					} else {
+						written, _ = ctx.FS.Pwrite(fh.FD, data, offset)
+					}
+					// Fill OVERLAPPED: Internal=STATUS_SUCCESS, InternalHigh=bytes
+					ctx.Mem.Write64(lpOverlapped, 0)
+					ctx.Mem.Write64(lpOverlapped+8, uint64(written))
+					// Signal hEvent if set
+					evHandle, _ := ctx.Mem.Read64(lpOverlapped + 24)
+					if evHandle != 0 {
+						if eh := handles.GetEvent(ntapi.Handle(evHandle)); eh != nil {
+							eh.Set()
+						}
+					}
+				} else {
+					written, _ = ctx.FS.Write(fh.FD, data)
+				}
 			}
 			if lpWritten != 0 {
-				ctx.Mem.Write32(lpWritten, uint32(nBytes))
+				ctx.Mem.Write32(lpWritten, uint32(written))
 			}
 			ctx.SetReturn(1) // TRUE
 			return 0
@@ -6049,9 +6076,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WakeAllConditionVariable", func(ctx *ntapi.TrapContext) uint32 {
+			ntapi.GlobalCondVars.Get(ctx.Arg(0)).Broadcast()
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SleepConditionVariableSRW", func(ctx *ntapi.TrapContext) uint32 {
+			// SleepConditionVariableSRW(CondVar, SRWLock, dwMilliseconds, Flags)
+			addr := ctx.Arg(0)
+			ms := ctx.Arg(2)
+			entry := ntapi.GlobalCondVars.Get(addr)
+			if ms == 0xFFFFFFFF { // INFINITE
+				entry.Sleep(10 * time.Second) // cap to avoid deadlocks
+			} else {
+				entry.Sleep(time.Duration(ms) * time.Millisecond)
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -6101,6 +6138,81 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		var freeStacks []threadStack
 		var stackMu sync.Mutex
+
+		// tpAllocStack allocates (or reuses) a stack for a threadpool callback thread.
+		tpAllocStack := func(sz uint64) (base, size uint64) {
+			if sz == 0 {
+				sz = 1 << 20
+			}
+			stackMu.Lock()
+			for i, s := range freeStacks {
+				if s.size >= sz {
+					base = s.base
+					size = s.size
+					freeStacks[i] = freeStacks[len(freeStacks)-1]
+					freeStacks = freeStacks[:len(freeStacks)-1]
+					stackMu.Unlock()
+					return
+				}
+			}
+			stackMu.Unlock()
+			base = mem.Mmap(0, sz, mmu.PermRead|mmu.PermWrite)
+			size = sz
+			return
+		}
+
+		// tpRecycleStack returns a stack to the free list when a threadpool thread exits.
+		tpRecycleStack := func(done <-chan struct{}, base, size uint64) {
+			go func() {
+				<-done
+				stackMu.Lock()
+				freeStacks = append(freeStacks, threadStack{base: base, size: size})
+				stackMu.Unlock()
+			}()
+		}
+
+		// tpAllocTEB creates a per-thread TEB for a threadpool callback thread.
+		tpAllocTEB := func(stackBase, stackSz uint64) uint64 {
+			teb := mem.Mmap(0, uint64(ntapi.TebSize), mmu.PermRead|mmu.PermWrite)
+			if teb != 0 {
+				tlsPtr, _ := mem.Read64(procState.TEBAddr + ntapi.TebThreadLocalStorage)
+				mem.Write64(teb+ntapi.TebThreadLocalStorage, tlsPtr)
+				flsPtr, _ := mem.Read64(procState.TEBAddr + ntapi.TebFlsData)
+				mem.Write64(teb+ntapi.TebFlsData, flsPtr)
+				heapBase, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
+				mem.Write64(teb+ntapi.TebHeapBase, heapBase)
+				heapOff, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
+				mem.Write64(teb+ntapi.TebHeapOffset, heapOff)
+				mem.Write64(teb+ntapi.TebSelf, teb)
+				mem.Write64(teb+ntapi.TebPEB, procState.PEBAddr)
+				mem.Write64(teb+ntapi.TebStackBase, stackBase+stackSz)
+				mem.Write64(teb+ntapi.TebStackLimit, stackBase)
+				mem.Write32(teb+ntapi.TebProcessId, uint32(procState.PEBAddr>>12))
+				mem.Write64(teb+ntapi.TebExceptionList, 0xFFFFFFFFFFFFFFFF)
+			}
+			return teb
+		}
+
+		// tpLaunchCallback launches a threadpool callback on a new guest thread.
+		// args are mapped to RCX, RDX, R8, R9 per the Microsoft x64 calling convention.
+		tpLaunchCallback := func(cpuTemplate arch.CPU, callbackAddr uint64, args ...uint64) <-chan struct{} {
+			tm := *tmPtr
+			if tm == nil {
+				return nil
+			}
+			stackBase, stackSz := tpAllocStack(0)
+			teb := tpAllocTEB(stackBase, stackSz)
+
+			_, done, err := tm.CloneWin32ThreadEx(cpuTemplate, callbackAddr, stackBase, stackSz, teb, args...)
+			if err != nil {
+				ravelog.Logf("[threadpool] failed to launch callback: %v\n", err)
+				return nil
+			}
+			tpRecycleStack(done, stackBase, stackSz)
+			return done
+		}
+		// Prevent unused-variable errors when no threadpool API is actually called.
+		_ = tpLaunchCallback
 
 		d.RegisterAutoStubHandler(kernel32, "CreateThread", func(ctx *ntapi.TrapContext) uint32 {
 			dwStackSize := ctx.Arg(1)
@@ -6269,6 +6381,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			bufAddr := ctx.Arg(1)
 			nBytesToRead := uint32(ctx.Arg(2))
 			lpBytesRead := ctx.Arg(3)
+			lpOverlapped := ctx.Arg(4)
 			// stdin handle
 			if hFile == 0x100 {
 				buf := make([]byte, nBytesToRead)
@@ -6294,7 +6407,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 			buf := make([]byte, nBytesToRead)
-			n, _ := ctx.FS.Read(fh.FD, buf)
+			var n int
+			if lpOverlapped != 0 {
+				off32, _ := ctx.Mem.Read32(lpOverlapped + 16)
+				offHi, _ := ctx.Mem.Read32(lpOverlapped + 20)
+				offset := int64(off32) | (int64(offHi) << 32)
+				if off32 == 0xFFFFFFFF && offHi == 0xFFFFFFFF {
+					n, _ = ctx.FS.Read(fh.FD, buf)
+				} else {
+					n, _ = ctx.FS.Pread(fh.FD, buf, offset)
+				}
+				// Fill OVERLAPPED: Internal=STATUS_SUCCESS, InternalHigh=bytes
+				ctx.Mem.Write64(lpOverlapped, 0)
+				ctx.Mem.Write64(lpOverlapped+8, uint64(n))
+				// Signal hEvent if set
+				evHandle, _ := ctx.Mem.Read64(lpOverlapped + 24)
+				if evHandle != 0 {
+					if eh := handles.GetEvent(ntapi.Handle(evHandle)); eh != nil {
+						eh.Set()
+					}
+				}
+			} else {
+				n, _ = ctx.FS.Read(fh.FD, buf)
+			}
 			ctx.Mem.WriteBytes(bufAddr, buf[:n])
 			if lpBytesRead != 0 {
 				ctx.Mem.Write32(lpBytesRead, uint32(n))
@@ -7932,14 +8067,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CloseThreadpoolTimer", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			h := ntapi.Handle(ctx.Arg(0))
+			if tt := handles.GetTpTimer(h); tt != nil {
+				tt.Shutdown()
+			}
+			handles.Close(h)
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CloseThreadpoolWait", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			h := ntapi.Handle(ctx.Arg(0))
+			if tw := handles.GetTpWait(h); tw != nil {
+				tw.Shutdown()
+			}
+			handles.Close(h)
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CloseThreadpoolWork", func(ctx *ntapi.TrapContext) uint32 {
+			h := ntapi.Handle(ctx.Arg(0))
+			if tw := handles.GetTpWork(h); tw != nil {
+				tw.Shutdown()
+			}
+			handles.Close(h)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8385,7 +8535,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateThreadpool", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.GenericHandle{Kind: "threadpool"})
+			h := handles.Alloc(&ntapi.TpPool{MinThreads: 1, MaxThreads: 500})
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
@@ -8399,15 +8549,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateThreadpoolTimer", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.GenericHandle{Kind: "tptimer"})
-			ctx.SetReturn(uint64(h)); return 0
+			callback := ctx.Arg(0)
+			context := ctx.Arg(1)
+			h := handles.Alloc(&ntapi.TpTimer{Callback: callback, Context: context})
+			ctx.SetReturn(uint64(h))
+			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateThreadpoolWait", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.GenericHandle{Kind: "tpwait"})
-			ctx.SetReturn(uint64(h)); return 0
+			callback := ctx.Arg(0)
+			context := ctx.Arg(1)
+			h := handles.Alloc(&ntapi.TpWait{Callback: callback, Context: context})
+			ctx.SetReturn(uint64(h))
+			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateThreadpoolWork", func(ctx *ntapi.TrapContext) uint32 {
-			h := handles.Alloc(&ntapi.GenericHandle{Kind: "threadpoolwork"})
+			callback := ctx.Arg(0)
+			context := ctx.Arg(1)
+			h := handles.Alloc(&ntapi.TpWork{Callback: callback, Context: context})
 			ctx.SetReturn(uint64(h))
 			return 0
 		})
@@ -8417,7 +8575,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateTimerQueueTimer", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			// CreateTimerQueueTimer(phNewTimer, TimerQueue, Callback, Parameter, DueTime, Period, Flags)
+			phTimer := ctx.Arg(0)
+			callback := ctx.Arg(2)
+			param := ctx.Arg(3)
+			period := uint32(ctx.Arg(5))
+			tqt := &ntapi.TimerQueueTimer{
+				Callback: callback,
+				Param:    param,
+				Period:   period,
+				StopCh:   make(chan struct{}),
+			}
+			h := handles.Alloc(tqt)
+			if phTimer != 0 {
+				ctx.Mem.Write64(phTimer, uint64(h))
+			}
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateUmsCompletionList", func(ctx *ntapi.TrapContext) uint32 {
@@ -8533,7 +8706,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "DeleteTimerQueueTimer", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			// DeleteTimerQueueTimer(TimerQueue, Timer, CompletionEvent)
+			timerH := ntapi.Handle(ctx.Arg(1))
+			if tqt := handles.GetTimerQueueTimer(timerH); tqt != nil {
+				tqt.Stop()
+			}
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "DeleteUmsCompletionList", func(ctx *ntapi.TrapContext) uint32 {
@@ -9880,11 +10058,45 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetOverlappedResult", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			// GetOverlappedResult(hFile, lpOverlapped, lpNumberOfBytesTransferred, bWait)
+			lpOverlapped := ctx.Arg(1)
+			lpBytes := ctx.Arg(2)
+			// bWait := ctx.Arg(3)  // we do sync I/O so always complete
+			if lpOverlapped == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Internal = NTSTATUS, InternalHigh = bytes transferred
+			status, _ := ctx.Mem.Read64(lpOverlapped)
+			nBytes, _ := ctx.Mem.Read64(lpOverlapped + 8)
+			if lpBytes != 0 {
+				ctx.Mem.Write32(lpBytes, uint32(nBytes))
+			}
+			if status == 0 { // STATUS_SUCCESS
+				ctx.SetReturn(1) // TRUE
+			} else {
+				ctx.SetReturn(0) // FALSE
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetOverlappedResultEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			// GetOverlappedResultEx(hFile, lpOverlapped, lpNumberOfBytesTransferred, dwMilliseconds, bAlertable)
+			lpOverlapped := ctx.Arg(1)
+			lpBytes := ctx.Arg(2)
+			if lpOverlapped == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			status, _ := ctx.Mem.Read64(lpOverlapped)
+			nBytes, _ := ctx.Mem.Read64(lpOverlapped + 8)
+			if lpBytes != 0 {
+				ctx.Mem.Write32(lpBytes, uint32(nBytes))
+			}
+			if status == 0 {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetPackageFamilyName", func(ctx *ntapi.TrapContext) uint32 {
@@ -10981,7 +11193,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "IsThreadpoolTimerSet", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			h := ntapi.Handle(ctx.Arg(0))
+			if tt := handles.GetTpTimer(h); tt != nil && tt.IsSet() {
+				ctx.SetReturn(1) // TRUE
+			} else {
+				ctx.SetReturn(0) // FALSE
+			}
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "IsValidLanguageGroup", func(ctx *ntapi.TrapContext) uint32 {
@@ -13099,19 +13316,182 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetThreadpoolThreadMaximum", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			h := ntapi.Handle(ctx.Arg(0))
+			max := ctx.Arg(1)
+			if tp := handles.GetTpPool(h); tp != nil {
+				tp.MaxThreads = int32(max)
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetThreadpoolThreadMinimum", func(ctx *ntapi.TrapContext) uint32 {
+			h := ntapi.Handle(ctx.Arg(0))
+			min := ctx.Arg(1)
+			if tp := handles.GetTpPool(h); tp != nil {
+				tp.MinThreads = int32(min)
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetThreadpoolTimer", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			h := ntapi.Handle(ctx.Arg(0))
+			pftDueTime := ctx.Arg(1) // PFILETIME (pointer, may be NULL)
+			msPeriod := ctx.Arg(2)   // DWORD milliseconds
+
+			tt := handles.GetTpTimer(h)
+			if tt == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			tt.Stop()
+
+			if pftDueTime == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			lo, _ := ctx.Mem.Read32(pftDueTime)
+			hi, _ := ctx.Mem.Read32(pftDueTime + 4)
+			dueTime := int64(uint64(hi)<<32 | uint64(lo))
+
+			var delay time.Duration
+			if dueTime < 0 {
+				delay = time.Duration(-dueTime) * 100
+			} else if dueTime == 0 {
+				delay = 0
+			} else {
+				now := time.Now()
+				const epochDiff = 11644473600
+				ftNow := (now.Unix()+epochDiff)*10000000 + int64(now.Nanosecond()/100)
+				rel := dueTime - ftNow
+				if rel <= 0 {
+					delay = 0
+				} else {
+					delay = time.Duration(rel) * 100
+				}
+			}
+
+			period := time.Duration(msPeriod) * time.Millisecond
+			cpuSnap := ctx.CPU
+			cb := tt.Callback
+			ctxVal := tt.Context
+
+			tt.Arm(delay, period, func() {
+				done := tpLaunchCallback(cpuSnap, cb, 0, ctxVal, uint64(h))
+				if done != nil {
+					<-done
+				}
+			})
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetThreadpoolWait", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			h := ntapi.Handle(ctx.Arg(0))
+			waitHandle := ntapi.Handle(ctx.Arg(1))
+			pftTimeout := ctx.Arg(2)
+
+			tw := handles.GetTpWait(h)
+			if tw == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			tw.Stop()
+
+			if waitHandle == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			var timeout time.Duration
+			infinite := true
+			if pftTimeout != 0 {
+				lo, _ := ctx.Mem.Read32(pftTimeout)
+				hi, _ := ctx.Mem.Read32(pftTimeout + 4)
+				ft := int64(uint64(hi)<<32 | uint64(lo))
+				if ft < 0 {
+					timeout = time.Duration(-ft) * 100
+					infinite = false
+				} else if ft == 0 {
+					timeout = 0
+					infinite = false
+				} else {
+					const epochDiff = 11644473600
+					now := time.Now()
+					ftNow := (now.Unix()+epochDiff)*10000000 + int64(now.Nanosecond()/100)
+					rel := ft - ftNow
+					if rel <= 0 {
+						timeout = 0
+					} else {
+						timeout = time.Duration(rel) * 100
+					}
+					infinite = false
+				}
+			}
+
+			stopCh := tw.ArmStopCh(waitHandle)
+			cb := tw.Callback
+			ctxVal := tw.Context
+			cpuSnap := ctx.CPU
+			markDone := tw.TrackCallback()
+
+			go func() {
+				defer markDone()
+				const WAIT_OBJECT_0 = 0
+				const WAIT_TIMEOUT = 0x102
+				var waitResult uint64 = WAIT_TIMEOUT
+
+				if eh := handles.GetEvent(waitHandle); eh != nil {
+					if infinite {
+						select {
+						case <-stopCh:
+							return
+						case <-eh.WaitChan():
+							waitResult = WAIT_OBJECT_0
+						}
+					} else if timeout == 0 {
+						if eh.IsSignaled() {
+							waitResult = WAIT_OBJECT_0
+						}
+					} else {
+						select {
+						case <-stopCh:
+							return
+						case <-eh.WaitChan():
+							waitResult = WAIT_OBJECT_0
+						case <-time.After(timeout):
+							waitResult = WAIT_TIMEOUT
+						}
+					}
+				} else if mh := handles.GetMutant(waitHandle); mh != nil {
+					if mh.WaitTimeout(0, timeout) == 0 {
+						waitResult = WAIT_OBJECT_0
+					}
+				} else if sh := handles.GetSemaphore(waitHandle); sh != nil {
+					if sh.WaitTimeout(timeout) == 0 {
+						waitResult = WAIT_OBJECT_0
+					}
+				} else {
+					if !infinite && timeout > 0 {
+						select {
+						case <-stopCh:
+							return
+						case <-time.After(timeout):
+						}
+					}
+				}
+
+				if tw.IsClosed() {
+					return
+				}
+				// WaitCallback(Instance=0, Context, PTP_WAIT=handle, WaitResult)
+				done := tpLaunchCallback(cpuSnap, cb, 0, ctxVal, uint64(h), waitResult)
+				if done != nil {
+					<-done
+				}
+			}()
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetTimeZoneInformation", func(ctx *ntapi.TrapContext) uint32 {
@@ -13179,15 +13559,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SleepConditionVariableCS", func(ctx *ntapi.TrapContext) uint32 {
-			timeout := ctx.Arg(2)
-			ms := timeout
-			if ms > 50 {
-				ms = 50
+			// SleepConditionVariableCS(CondVar, CriticalSection, dwMilliseconds)
+			addr := ctx.Arg(0)
+			ms := ctx.Arg(2)
+			entry := ntapi.GlobalCondVars.Get(addr)
+			if ms == 0xFFFFFFFF { // INFINITE
+				entry.Sleep(10 * time.Second) // cap to avoid deadlocks
+			} else {
+				entry.Sleep(time.Duration(ms) * time.Millisecond)
 			}
-			if ms > 0 {
-				time.Sleep(time.Duration(ms) * time.Millisecond)
-			}
-			ctx.SetReturn(1)
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "StartThreadpoolIo", func(ctx *ntapi.TrapContext) uint32 {
@@ -13195,7 +13576,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SubmitThreadpoolWork", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1)
+			h := ntapi.Handle(ctx.Arg(0))
+			tw := handles.GetTpWork(h)
+			if tw == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			done, ok := tw.Submit()
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			// WorkCallback(Instance=0, Context, PTP_WORK=handle)
+			cpuSnap := ctx.CPU
+			cb := tw.Callback
+			ctxVal := tw.Context
+			go func() {
+				defer done()
+				ch := tpLaunchCallback(cpuSnap, cb, 0, ctxVal, uint64(h))
+				if ch != nil {
+					<-ch
+				}
+			}()
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SuspendThread", func(ctx *ntapi.TrapContext) uint32 {
@@ -13283,6 +13686,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "TrySubmitThreadpoolCallback", func(ctx *ntapi.TrapContext) uint32 {
+			callback := ctx.Arg(0) // PTP_SIMPLE_CALLBACK
+			context := ctx.Arg(1)  // PVOID
+			// SimpleCallback(Instance=0, Context)
+			cpuSnap := ctx.CPU
+			go func() {
+				done := tpLaunchCallback(cpuSnap, callback, 0, context)
+				if done != nil {
+					<-done
+				}
+			}()
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -13660,15 +14073,39 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForThreadpoolTimerCallbacks", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			h := ntapi.Handle(ctx.Arg(0))
+			cancelPending := ctx.Arg(1) // fCancelPendingCallbacks
+			if tt := handles.GetTpTimer(h); tt != nil {
+				if cancelPending != 0 {
+					tt.Stop()
+				}
+				tt.WaitAll()
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForThreadpoolWaitCallbacks", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			h := ntapi.Handle(ctx.Arg(0))
+			cancelPending := ctx.Arg(1)
+			if tw := handles.GetTpWait(h); tw != nil {
+				if cancelPending != 0 {
+					tw.Stop()
+				}
+				tw.WaitAll()
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForThreadpoolWorkCallbacks", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			h := ntapi.Handle(ctx.Arg(0))
+			cancelPending := ctx.Arg(1)
+			if tw := handles.GetTpWork(h); tw != nil {
+				if cancelPending != 0 {
+					tw.Shutdown()
+				}
+				tw.WaitAll()
+			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitNamedPipeA", func(ctx *ntapi.TrapContext) uint32 {
@@ -13680,7 +14117,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WakeConditionVariable", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // no-op
+			ntapi.GlobalCondVars.Get(ctx.Arg(0)).Signal()
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WerGetFlags", func(ctx *ntapi.TrapContext) uint32 {

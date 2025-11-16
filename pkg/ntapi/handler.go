@@ -1389,13 +1389,11 @@ func handleRtlInitCondVar(ctx *TrapContext) uint32 {
 	return StatusSuccess
 }
 func handleRtlWakeCondVar(ctx *TrapContext) uint32 {
-	addr := ctx.Arg(0)
-	GlobalCondVars.Get(addr).cond.Signal()
+	GlobalCondVars.Get(ctx.Arg(0)).Signal()
 	return StatusSuccess
 }
 func handleRtlWakeAllCondVar(ctx *TrapContext) uint32 {
-	addr := ctx.Arg(0)
-	GlobalCondVars.Get(addr).cond.Broadcast()
+	GlobalCondVars.Get(ctx.Arg(0)).Broadcast()
 	return StatusSuccess
 }
 
