@@ -898,31 +898,233 @@ func handleNtQueryKey(ctx *TrapContext) uint32 {
 // ======================== PROCESS / THREAD ========================
 
 func handleNtQueryInformationProcess(ctx *TrapContext) uint32 {
-	// ProcessHandle, ProcessInformationClass, ProcessInformation, ProcessInformationLength, ReturnLength
-	_ = ctx.Arg(0) // handle (-1 = current process)
+	// NtQueryInformationProcess(ProcessHandle, ProcessInformationClass, ProcessInformation, ProcessInformationLength, ReturnLength)
 	infoClass := uint32(ctx.Arg(1))
 	buffer := ctx.Arg(2)
-	_ = ctx.Arg(3) // length
+	bufLen := uint32(ctx.Arg(3))
+	retLen := ctx.Arg(4)
+
+	writeRetLen := func(n uint32) {
+		if retLen != 0 {
+			ctx.Mem.Write32(retLen, n)
+		}
+	}
 
 	switch infoClass {
-	case 0: // ProcessBasicInformation
-		if buffer != 0 {
-			ctx.Mem.Write32(buffer+0, 0)           // ExitStatus
-			ctx.Mem.Write64(buffer+8, ctx.State.PEBAddr) // PebBaseAddress
-			ctx.Mem.Write64(buffer+16, 0)          // AffinityMask
-			ctx.Mem.Write32(buffer+24, 0)          // BasePriority
-			ctx.Mem.Write64(buffer+28, uint64(ctx.State.TEBAddr)) // UniqueProcessId
-			ctx.Mem.Write64(buffer+36, 0)          // InheritedFromUniqueProcessId
+	case 0: // ProcessBasicInformation - PROCESS_BASIC_INFORMATION (48 bytes on x64)
+		const needed = 48
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
 		}
-	case 36: // ProcessImageFileName
 		if buffer != 0 {
-			imgPath := `\Device\HarddiskVolume1\program.exe`
-			utf16 := encodeUTF16LE(imgPath)
-			// UNICODE_STRING
+			ctx.Mem.Write64(buffer+0, 0)                       // ExitStatus (NTSTATUS)
+			ctx.Mem.Write32(buffer+4, 0)                       // padding
+			ctx.Mem.Write64(buffer+8, ctx.State.PEBAddr)       // PebBaseAddress
+			ctx.Mem.Write64(buffer+16, 0xF)                    // AffinityMask
+			ctx.Mem.Write32(buffer+24, 8)                      // BasePriority (NORMAL)
+			ctx.Mem.Write32(buffer+28, 0)                      // padding
+			ctx.Mem.Write64(buffer+32, 4)                      // UniqueProcessId
+			ctx.Mem.Write64(buffer+40, 0)                      // InheritedFromUniqueProcessId
+		}
+	case 1: // ProcessQuotaLimits - QUOTA_LIMITS (48 bytes)
+		const needed = 48
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			for i := uint64(0); i < needed; i++ {
+				ctx.Mem.Write8(buffer+i, 0)
+			}
+			ctx.Mem.Write64(buffer+0, 0x80000)  // MinimumWorkingSetSize
+			ctx.Mem.Write64(buffer+8, 0x100000) // MaximumWorkingSetSize
+			ctx.Mem.Write64(buffer+16, ^uint64(0)) // PagedPoolLimit = unlimited
+			ctx.Mem.Write64(buffer+24, ^uint64(0)) // NonPagedPoolLimit
+			ctx.Mem.Write64(buffer+32, ^uint64(0)) // MinimumWorkingSetSize
+			ctx.Mem.Write64(buffer+40, ^uint64(0)) // PagefileLimit
+		}
+	case 2: // ProcessIoCounters - IO_COUNTERS (48 bytes)
+		const needed = 48
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			for i := uint64(0); i < needed; i++ {
+				ctx.Mem.Write8(buffer+i, 0)
+			}
+		}
+	case 3: // ProcessVmCounters - VM_COUNTERS_EX (80 bytes)
+		const needed = 80
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			for i := uint64(0); i < needed; i++ {
+				ctx.Mem.Write8(buffer+i, 0)
+			}
+			ctx.Mem.Write64(buffer+0, 0x10000)        // PeakVirtualSize
+			ctx.Mem.Write64(buffer+8, 0x10000)        // VirtualSize
+			ctx.Mem.Write64(buffer+24, 0x1000)        // PeakWorkingSetSize
+			ctx.Mem.Write64(buffer+32, 0x1000)        // WorkingSetSize
+		}
+	case 4: // ProcessTimes - KERNEL_USER_TIMES (32 bytes)
+		const needed = 32
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			now := uint64(time.Now().UnixNano()/100 + 116444736000000000) // FILETIME
+			ctx.Mem.Write64(buffer+0, now)  // CreateTime
+			ctx.Mem.Write64(buffer+8, 0)   // ExitTime
+			ctx.Mem.Write64(buffer+16, 0)  // KernelTime (100ns units)
+			ctx.Mem.Write64(buffer+24, 0)  // UserTime
+		}
+	case 5: // ProcessBasePriority
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 8) // NORMAL_PRIORITY_CLASS
+		}
+	case 7: // ProcessDebugPort - NULL = no debugger
+		writeRetLen(8)
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0)
+		}
+	case 9: // ProcessWow64Information - NULL = 64-bit process
+		writeRetLen(8)
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0) // not WOW64
+		}
+	case 11: // ProcessHandleCount
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, uint32(ctx.Handles.Count()))
+		}
+	case 12: // ProcessAffinityMask
+		writeRetLen(8)
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0xF) // 4 CPUs
+		}
+	case 17: // ProcessSessionInformation - PROCESS_SESSION_INFORMATION (4 bytes)
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0) // Session 0
+		}
+	case 18: // ProcessWx86Information (return 0 = no x86 emulation)
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0)
+		}
+	case 20: // ProcessDeviceMap
+		writeRetLen(8)
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0)
+		}
+	case 22: // ProcessPriorityClass - PROCESS_PRIORITY_CLASS (2 bytes)
+		writeRetLen(2)
+		if buffer != 0 {
+			ctx.Mem.Write8(buffer+0, 0) // Foreground = false
+			ctx.Mem.Write8(buffer+1, 2) // PriorityClass = NORMAL
+		}
+	case 27: // ProcessImageFileName - UNICODE_STRING + data
+		imgName := ctx.State.ImagePath
+		if imgName == "" {
+			imgName = "program.exe"
+		}
+		imgPath := `\Device\HarddiskVolume1\` + imgName
+		utf16 := encodeUTF16LE(imgPath)
+		needed := uint32(16 + len(utf16) + 2)
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			ctx.Mem.Write16(buffer+0, uint16(len(utf16)))   // Length
+			ctx.Mem.Write16(buffer+2, uint16(len(utf16)+2)) // MaximumLength
+			ctx.Mem.Write64(buffer+8, buffer+16)             // Buffer pointer
+			ctx.Mem.WriteBytes(buffer+16, utf16)
+			ctx.Mem.Write16(buffer+16+uint64(len(utf16)), 0) // null terminator
+		}
+	case 29: // ProcessBreakOnTermination
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0) // not a critical process
+		}
+	case 30: // ProcessDebugObjectHandle - STATUS_PORT_NOT_SET when no debugger
+		writeRetLen(8)
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0)
+		}
+		return 0xC0000353 // STATUS_PORT_NOT_SET
+	case 31: // ProcessDebugFlags
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 1) // PROCESS_NO_DEBUG_INHERIT
+		}
+	case 33: // ProcessDefaultHardErrorMode
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0)
+		}
+	case 34: // ProcessHandleTracing
+		return StatusNotImplemented
+	case 36: // ProcessImageFileName (Win32) - same as 27
+		imgName := ctx.State.ImagePath
+		if imgName == "" {
+			imgName = "program.exe"
+		}
+		imgPath := `\Device\HarddiskVolume1\` + imgName
+		utf16 := encodeUTF16LE(imgPath)
+		needed := uint32(16 + len(utf16) + 2)
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
 			ctx.Mem.Write16(buffer+0, uint16(len(utf16)))
 			ctx.Mem.Write16(buffer+2, uint16(len(utf16)+2))
 			ctx.Mem.Write64(buffer+8, buffer+16)
 			ctx.Mem.WriteBytes(buffer+16, utf16)
+			ctx.Mem.Write16(buffer+16+uint64(len(utf16)), 0)
+		}
+	case 40: // ProcessCookie - random cookie for stack canary
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0x12345678)
+		}
+	case 43: // ProcessImageInformation - SECTION_IMAGE_INFORMATION (48 bytes)
+		const needed = 48
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			imageBase, _ := ctx.Mem.Read64(ctx.State.PEBAddr + 0x10) // PEB.ImageBaseAddress
+			ctx.Mem.Write64(buffer+0, imageBase)  // TransferAddress
+			ctx.Mem.Write32(buffer+8, 0)                   // ZeroBits
+			ctx.Mem.Write64(buffer+16, 0x100000)           // MaximumStackSize
+			ctx.Mem.Write64(buffer+24, 0x1000)             // CommittedStackSize
+			ctx.Mem.Write32(buffer+32, 0)                  // SubSystemType (native=0)
+			ctx.Mem.Write16(buffer+36, 6)                  // MinorSubsystemVersion
+			ctx.Mem.Write16(buffer+38, 1)                  // MajorSubsystemVersion
+			ctx.Mem.Write32(buffer+40, 0)                  // GpValue
+			ctx.Mem.Write16(buffer+44, 0x100)              // ImageCharacteristics
+			ctx.Mem.Write16(buffer+46, 0x8664)             // DllCharacteristics (AMD64)
+		}
+	case 60: // ProcessProtectionInformation
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0) // no protection level
+		}
+	case 64: // ProcessMitigationPolicy
+		writeRetLen(0)
+	case 77: // ProcessConsoleHostProcess
+		writeRetLen(8)
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0) // no console host process
 		}
 	default:
 		return StatusNotImplemented
@@ -932,7 +1134,87 @@ func handleNtQueryInformationProcess(ctx *TrapContext) uint32 {
 }
 
 func handleNtQueryInformationThread(ctx *TrapContext) uint32 {
-	return StatusSuccess // stub
+	// NtQueryInformationThread(ThreadHandle, ThreadInformationClass, ThreadInformation, ThreadInformationLength, ReturnLength)
+	infoClass := uint32(ctx.Arg(1))
+	buffer := ctx.Arg(2)
+	bufLen := uint32(ctx.Arg(3))
+	retLen := ctx.Arg(4)
+
+	writeRetLen := func(n uint32) {
+		if retLen != 0 {
+			ctx.Mem.Write32(retLen, n)
+		}
+	}
+
+	switch infoClass {
+	case 0: // ThreadBasicInformation - THREAD_BASIC_INFORMATION (48 bytes)
+		const needed = 48
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer+0, 0)                       // ExitStatus
+			ctx.Mem.Write64(buffer+8, uint64(ctx.State.TEBAddr)) // TebBaseAddress
+			ctx.Mem.Write64(buffer+16, 4)                      // ClientId.UniqueProcess
+			ctx.Mem.Write64(buffer+24, 1)                      // ClientId.UniqueThread
+			ctx.Mem.Write64(buffer+32, 0xF)                    // AffinityMask
+			ctx.Mem.Write32(buffer+40, 8)                      // Priority (NORMAL)
+			ctx.Mem.Write32(buffer+44, 8)                      // BasePriority
+		}
+	case 1: // ThreadTimes - KERNEL_USER_TIMES (32 bytes)
+		const needed = 32
+		writeRetLen(needed)
+		if bufLen < needed {
+			return StatusBufferTooSmall
+		}
+		if buffer != 0 {
+			now := uint64(time.Now().UnixNano()/100 + 116444736000000000)
+			ctx.Mem.Write64(buffer+0, now)  // CreateTime
+			ctx.Mem.Write64(buffer+8, 0)   // ExitTime
+			ctx.Mem.Write64(buffer+16, 0)  // KernelTime
+			ctx.Mem.Write64(buffer+24, 0)  // UserTime
+		}
+	case 2: // ThreadPriority
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 8) // THREAD_PRIORITY_NORMAL
+		}
+	case 3: // ThreadBasePriority
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 8)
+		}
+	case 4: // ThreadAffinityMask
+		writeRetLen(8)
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0xF)
+		}
+	case 9: // ThreadQuerySetWin32StartAddress
+		writeRetLen(8)
+		if buffer != 0 {
+			ctx.Mem.Write64(buffer, 0) // not tracked
+		}
+	case 14: // ThreadHideFromDebugger (query: returns BOOLEAN)
+		writeRetLen(1)
+		if buffer != 0 {
+			ctx.Mem.Write8(buffer, 0) // not hidden
+		}
+	case 17: // ThreadIsTerminated
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0) // running
+		}
+	case 34: // ThreadSuspendCount
+		writeRetLen(4)
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0)
+		}
+	default:
+		return StatusNotImplemented
+	}
+
+	return StatusSuccess
 }
 
 func handleNtQuerySystemInformation(ctx *TrapContext) uint32 {
@@ -1250,104 +1532,122 @@ func handleNtWaitForSingleObject(ctx *TrapContext) uint32 {
 	_ = ctx.Arg(1) // Alertable
 	timeoutPtr := ctx.Arg(2)
 
-	evt := ctx.Handles.GetEvent(handle)
-	if evt == nil {
+	timeout := ntWaitDuration(ctx, timeoutPtr)
+
+	return ntWaitOne(ctx, handle, timeout)
+}
+
+// ntWaitDuration converts an optional NT timeout pointer to a Go duration.
+// Negative NT time = relative (100-ns units). Nil pointer = INFINITE.
+func ntWaitDuration(ctx *TrapContext, ptr uint64) time.Duration {
+	if ptr == 0 {
+		return -1 // INFINITE
+	}
+	t, _ := ctx.Mem.Read64(ptr)
+	if t == 0 {
+		return 0 // poll
+	}
+	if int64(t) < 0 {
+		return time.Duration(-int64(t)) * 100 * time.Nanosecond
+	}
+	// Absolute FILETIME: compute delta from now
+	nowFT := uint64(time.Now().UnixNano()/100 + 116444736000000000)
+	if t <= nowFT {
+		return 0
+	}
+	return time.Duration(t-nowFT) * 100 * time.Nanosecond
+}
+
+// ntWaitOne waits on a single handle; returns NTSTATUS.
+func ntWaitOne(ctx *TrapContext, h Handle, timeout time.Duration) uint32 {
+	obj := ctx.Handles.Get(h)
+	switch v := obj.(type) {
+	case *EventHandle:
+		if v.WaitTimeout(timeout) {
+			return StatusWait0
+		}
+		return StatusTimeout
+	case *MutantHandle:
+		res := v.WaitTimeout(1, timeout) // TID=1 (simplified)
+		if res == 0 {
+			return StatusWait0
+		}
+		if res == 0x80 {
+			return 0x00000080 // STATUS_ABANDONED_WAIT_0
+		}
+		return StatusTimeout
+	case *SemaphoreHandle:
+		res := v.WaitTimeout(timeout)
+		if res == 0 {
+			return StatusWait0
+		}
+		return StatusTimeout
+	case *WaitableTimerHandle:
+		res := v.WaitTimeout(timeout)
+		if res == 0 {
+			return StatusWait0
+		}
+		return StatusTimeout
+	case *ThreadHandle:
+		if v.Done == nil {
+			return StatusWait0
+		}
+		if timeout < 0 {
+			<-v.Done
+			return StatusWait0
+		}
+		select {
+		case <-v.Done:
+			return StatusWait0
+		case <-time.After(timeout):
+			return StatusTimeout
+		}
+	case nil:
 		return StatusInvalidHandle
-	}
-
-	// Check if already signaled
-	evt.mu.Lock()
-	if evt.signaled {
-		if evt.autoReset {
-			evt.signaled = false
-		}
-		evt.mu.Unlock()
+	default:
+		// Unknown handle type - treat as signaled
 		return StatusWait0
 	}
-	evt.mu.Unlock()
-
-	// Wait with optional timeout
-	var timeout time.Duration
-	if timeoutPtr != 0 {
-		t, _ := ctx.Mem.Read64(timeoutPtr)
-		// NT uses 100ns intervals, negative = relative
-		if int64(t) < 0 {
-			timeout = time.Duration(-int64(t)) * 100
-		} else {
-			timeout = 1 * time.Second // default
-		}
-	} else {
-		timeout = -1 // infinite
-	}
-
-	if evt.WaitTimeout(timeout) {
-		return StatusWait0
-	}
-	return StatusTimeout
 }
 
 func handleNtWaitForMultipleObjects(ctx *TrapContext) uint32 {
 	// NtWaitForMultipleObjects(Count, Handles*, WaitType, Alertable, Timeout*)
 	count := uint32(ctx.Arg(0))
 	handlesPtr := ctx.Arg(1)
-	_ = ctx.Arg(2) // WaitType: 0=WaitAll, 1=WaitAny
-	_ = ctx.Arg(3) // Alertable
+	waitAll := ctx.Arg(2) == 0 // 0=WaitAll, 1=WaitAny
+	_ = ctx.Arg(3)             // Alertable
 	timeoutPtr := ctx.Arg(4)
 
 	if count == 0 || handlesPtr == 0 {
 		return StatusWait0
 	}
 	if count > 64 {
-		count = 64 // MAXIMUM_WAIT_OBJECTS
+		count = 64
 	}
 
-	var timeout time.Duration
-	if timeoutPtr != 0 {
-		t, _ := ctx.Mem.Read64(timeoutPtr)
-		if int64(t) < 0 {
-			timeout = time.Duration(-int64(t)) * 100
-		} else {
-			timeout = 1 * time.Second
+	timeout := ntWaitDuration(ctx, timeoutPtr)
+
+	if !waitAll {
+		// WaitAny: try each handle, return first signaled
+		for i := uint32(0); i < count; i++ {
+			hVal, _ := ctx.Mem.Read64(handlesPtr + uint64(i)*8)
+			res := ntWaitOne(ctx, Handle(hVal), timeout)
+			if res == StatusWait0 || res == 0x80 {
+				return StatusWait0 + uint32(i)
+			}
 		}
-	} else {
-		timeout = -1 // infinite
+		return StatusTimeout
 	}
 
-	// Try each handle in order (simplified WaitAny)
+	// WaitAll: wait for each in sequence
 	for i := uint32(0); i < count; i++ {
 		hVal, _ := ctx.Mem.Read64(handlesPtr + uint64(i)*8)
-		h := Handle(hVal)
-
-		if evt := ctx.Handles.GetEvent(h); evt != nil {
-			if evt.WaitTimeout(timeout) {
-				return StatusWait0 + uint32(i)
-			}
-		} else if mh := ctx.Handles.GetMutant(h); mh != nil {
-			res := mh.WaitTimeout(1, timeout)
-			if res == 0 || res == 0x80 { // WAIT_OBJECT_0 or WAIT_ABANDONED
-				return StatusWait0 + uint32(i)
-			}
-		} else if sh := ctx.Handles.GetSemaphore(h); sh != nil {
-			res := sh.WaitTimeout(timeout)
-			if res == 0 {
-				return StatusWait0 + uint32(i)
-			}
-		} else if th := ctx.Handles.GetThread(h); th != nil {
-			if th.Done != nil {
-				if timeout < 0 {
-					<-th.Done
-				} else {
-					select {
-					case <-th.Done:
-					case <-time.After(timeout):
-						continue
-					}
-				}
-				return StatusWait0 + uint32(i)
-			}
+		res := ntWaitOne(ctx, Handle(hVal), timeout)
+		if res == StatusTimeout {
+			return StatusTimeout
 		}
 	}
-	return StatusTimeout
+	return StatusWait0
 }
 
 func handleNtCreateMutant(ctx *TrapContext) uint32 {
@@ -2882,16 +3182,129 @@ func handleNtAlertResumeThread(ctx *TrapContext) uint32 { return StatusSuccess }
 func handleNtTestAlert(ctx *TrapContext) uint32         { return StatusSuccess }
 
 func handleNtCreateTimer(ctx *TrapContext) uint32 {
+	// NtCreateTimer(TimerHandle*, DesiredAccess, ObjectAttributes*, TimerType)
 	handlePtr := ctx.Arg(0)
+	objAttr := ctx.Arg(2)
+	timerType := ctx.Arg(3) // 0=NotificationTimer(manual), 1=SynchronizationTimer(auto)
+	manualReset := timerType == 0
+
+	timer := NewWaitableTimer(manualReset)
+
+	var name string
+	if objAttr != 0 {
+		_, oaName, _, err := ReadObjectAttributes(ctx, objAttr)
+		if err == nil {
+			name = NormalizeObjectName(oaName)
+		}
+	}
+
+	var h Handle
+	if name != "" {
+		var isNew bool
+		h, isNew = ctx.Handles.AllocNamed(name, timer)
+		if !isNew {
+			if handlePtr != 0 {
+				ctx.Mem.Write64(handlePtr, uint64(h))
+			}
+			return 0x40000000
+		}
+	} else {
+		h = ctx.Handles.Alloc(timer)
+	}
 	if handlePtr != 0 {
-		h := ctx.Handles.Alloc(&GenericHandle{Kind: "Timer"})
 		ctx.Mem.Write64(handlePtr, uint64(h))
 	}
 	return StatusSuccess
 }
 
-func handleNtSetTimer(ctx *TrapContext) uint32    { return StatusSuccess }
-func handleNtCancelTimer(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleNtSetTimer(ctx *TrapContext) uint32 {
+	// NtSetTimer(TimerHandle, DueTime*, ApcRoutine, ApcContext, Resume, Period, PreviousState*)
+	h := Handle(ctx.Arg(0))
+	dueTimePtr := ctx.Arg(1)
+	period := int32(ctx.Arg(5)) // ms
+	prevStatePtr := ctx.Arg(6)
+
+	wt, ok := ctx.Handles.Get(h).(*WaitableTimerHandle)
+	if !ok {
+		return StatusInvalidHandle
+	}
+
+	if prevStatePtr != 0 {
+		ctx.Mem.Write8(prevStatePtr, boolToByte(wt.IsSignaled()))
+	}
+
+	var dueNs int64
+	if dueTimePtr != 0 {
+		dueRaw, _ := ctx.Mem.Read64(dueTimePtr)
+		dueInt := int64(dueRaw)
+		if dueInt < 0 {
+			// Relative time: negative 100-ns intervals
+			dueNs = (-dueInt) * 100
+		} else if dueInt > 0 {
+			// Absolute FILETIME: convert to duration from now
+			nowFT := uint64(time.Now().UnixNano()/100 + 116444736000000000)
+			if uint64(dueInt) > nowFT {
+				dueNs = int64(uint64(dueInt)-nowFT) * 100
+			} else {
+				dueNs = 0
+			}
+		}
+	}
+
+	due := time.Duration(dueNs)
+	if due < 0 {
+		due = 0
+	}
+	var periodDur time.Duration
+	if period > 0 {
+		periodDur = time.Duration(period) * time.Millisecond
+	}
+	wt.Set(due, periodDur)
+	return StatusSuccess
+}
+
+func handleNtCancelTimer(ctx *TrapContext) uint32 {
+	h := Handle(ctx.Arg(0))
+	prevStatePtr := ctx.Arg(1)
+	wt, ok := ctx.Handles.Get(h).(*WaitableTimerHandle)
+	if !ok {
+		return StatusInvalidHandle
+	}
+	if prevStatePtr != 0 {
+		ctx.Mem.Write8(prevStatePtr, boolToByte(wt.IsSignaled()))
+	}
+	wt.Cancel()
+	return StatusSuccess
+}
+
+func handleNtQueryTimer(ctx *TrapContext) uint32 {
+	// NtQueryTimer(TimerHandle, TimerInformationClass, TimerInformation*, Length, ReturnLength*)
+	h := Handle(ctx.Arg(0))
+	buffer := ctx.Arg(2)
+	retLen := ctx.Arg(4)
+
+	wt, ok := ctx.Handles.Get(h).(*WaitableTimerHandle)
+	const needed = 16 // TIMER_BASIC_INFORMATION: RemainingTime(8) + TimerState(4) + pad(4)
+	if retLen != 0 {
+		ctx.Mem.Write32(retLen, needed)
+	}
+	if buffer != 0 {
+		ctx.Mem.Write64(buffer+0, 0) // RemainingTime (unknown without real tracking)
+		if ok && wt.IsSignaled() {
+			ctx.Mem.Write32(buffer+8, 1)
+		} else {
+			ctx.Mem.Write32(buffer+8, 0)
+		}
+	}
+	return StatusSuccess
+}
+
+func boolToByte(b bool) uint8 {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 func handleLdrLoadDll(ctx *TrapContext) uint32 {
 	// LdrLoadDll(path, flags, moduleName*, handle*)

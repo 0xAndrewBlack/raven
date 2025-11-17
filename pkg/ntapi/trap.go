@@ -601,6 +601,7 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("NtCreateTimer"), "NtCreateTimer", handleNtCreateTimer)
 	d.register(idOf("NtSetTimer"), "NtSetTimer", handleNtSetTimer)
 	d.register(idOf("NtCancelTimer"), "NtCancelTimer", handleNtCancelTimer)
+	d.register(idOf("NtQueryTimer"), "NtQueryTimer", handleNtQueryTimer)
 	d.register(idOf("RtlSleepConditionVariableCS"), "RtlSleepConditionVariableCS", handleRtlSleepConditionVariableCS)
 	d.register(idOf("RtlSleepConditionVariableSRW"), "RtlSleepConditionVariableSRW", handleRtlSleepConditionVariableSRW)
 	d.register(idOf("RtlWaitOnAddress"), "RtlWaitOnAddress", handleRtlWaitOnAddress)

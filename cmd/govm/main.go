@@ -5518,6 +5518,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				written, _ = os.Stderr.Write(data)
 			default:
 				obj := handles.Get(hFile)
+				// Named pipe write
+				if ph, ok := obj.(*ntapi.NamedPipeHandle); ok {
+					if ph.PipeWrite(data) {
+						written = len(data)
+					}
+					break
+				}
 				fh, ok := obj.(*ntapi.FileHandle)
 				if !ok {
 					ctx.SetReturn(0)
@@ -5945,135 +5952,57 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(kernel32, "WaitForSingleObject", func(ctx *ntapi.TrapContext) uint32 {
 			h := ntapi.Handle(ctx.Arg(0))
 			ms := ctx.Arg(1)
-			var timeout time.Duration
-			if ms == 0xFFFFFFFF {
-				timeout = -1 // INFINITE
-			} else if ms == 0 {
-				timeout = 0
-			} else {
-				timeout = time.Duration(ms) * time.Millisecond
-			}
+			timeout := msToTimeout(ms)
 			var tid uint32 = 1
 			if *tmPtr != nil {
 				tid = uint32((*tmPtr).GetTID(ctx.CPU))
 			}
-			const waitObject0 = uint64(0)
-			const waitTimeout = uint64(0x102)
-			// Thread handle: wait for goroutine to finish
-			if th := handles.GetThread(h); th != nil && th.Done != nil {
-				if timeout < 0 {
-					<-th.Done
-					ctx.SetReturn(waitObject0)
-				} else if timeout == 0 {
-					select {
-					case <-th.Done:
-						ctx.SetReturn(waitObject0)
-					default:
-						ctx.SetReturn(waitTimeout)
-					}
-				} else {
-					select {
-					case <-th.Done:
-						ctx.SetReturn(waitObject0)
-					case <-time.After(timeout):
-						ctx.SetReturn(waitTimeout)
-					}
-				}
-				return 0
-			}
-			// Event handle: wait until signaled
-			if eh := handles.GetEvent(h); eh != nil {
-				if eh.WaitTimeout(timeout) {
-					ctx.SetReturn(waitObject0)
-				} else {
-					ctx.SetReturn(waitTimeout)
-				}
-				return 0
-			}
-			// Mutex handle: acquire the mutant
-			if mh := handles.GetMutant(h); mh != nil {
-				ctx.SetReturn(uint64(mh.WaitTimeout(tid, timeout)))
-				return 0
-			}
-			// Semaphore handle: decrement count
-			if sh := handles.GetSemaphore(h); sh != nil {
-				ctx.SetReturn(uint64(sh.WaitTimeout(timeout)))
-				return 0
-			}
-			// Unknown/process handle: return WAIT_OBJECT_0 immediately
-			ctx.SetReturn(waitObject0)
+			ctx.SetReturn(uint64(waitOneWin32(handles, h, tid, timeout)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "WaitForMultipleObjects", func(ctx *ntapi.TrapContext) uint32 {
 			nCount := ctx.Arg(0)
 			pHandles := ctx.Arg(1)
-			// waitAll := ctx.Arg(2) != 0 - we implement WaitAny semantics
+			waitAll := ctx.Arg(2) != 0
 			ms := ctx.Arg(3)
-			var timeout time.Duration
-			if ms == 0xFFFFFFFF {
-				timeout = -1
-			} else if ms == 0 {
-				timeout = 0
-			} else {
-				timeout = time.Duration(ms) * time.Millisecond
-			}
+			timeout := msToTimeout(ms)
 			var tid uint32 = 1
 			if *tmPtr != nil {
 				tid = uint32((*tmPtr).GetTID(ctx.CPU))
 			}
 
-			// Build reflect.SelectCase entries: one per recognized handle + optional timer.
-			type idxChan struct {
-				idx int
-				ch  <-chan struct{}
+			if nCount == 0 || pHandles == 0 {
+				ctx.SetReturn(0)
+				return 0
 			}
-			var cases []idxChan
-			for i := uint64(0); i < nCount && i < 64; i++ {
-				hv, _ := ctx.Mem.Read64(pHandles + i*8)
-				h := ntapi.Handle(hv)
-				if th := handles.GetThread(h); th != nil && th.Done != nil {
-					cases = append(cases, idxChan{int(i), th.Done})
-				} else if eh := handles.GetEvent(h); eh != nil {
-					cases = append(cases, idxChan{int(i), eh.WaitChan()})
-				} else if mh := handles.GetMutant(h); mh != nil {
-					cases = append(cases, idxChan{int(i), mh.WaitChan(tid)})
-				} else if sh := handles.GetSemaphore(h); sh != nil {
-					cases = append(cases, idxChan{int(i), sh.WaitChan()})
-				}
+			if nCount > 64 {
+				nCount = 64
 			}
 
-			if len(cases) == 0 {
-				ctx.SetReturn(0) // WAIT_OBJECT_0 for unknown handles
+			if !waitAll {
+				// WaitAny: return index of first signaled
+				for i := uint64(0); i < nCount; i++ {
+					hv, _ := ctx.Mem.Read64(pHandles + i*8)
+					res := waitOneWin32(handles, ntapi.Handle(hv), tid, timeout)
+					if res != 0x102 { // not WAIT_TIMEOUT
+						ctx.SetReturn(uint64(res))
+						return 0
+					}
+				}
+				ctx.SetReturn(0x102)
 				return 0
 			}
 
-			// Build reflect cases.
-			selCases := make([]reflect.SelectCase, 0, len(cases)+1)
-			for _, ic := range cases {
-				selCases = append(selCases, reflect.SelectCase{
-					Dir:  reflect.SelectRecv,
-					Chan: reflect.ValueOf(ic.ch),
-				})
+			// WaitAll: wait for all in sequence
+			for i := uint64(0); i < nCount; i++ {
+				hv, _ := ctx.Mem.Read64(pHandles + i*8)
+				res := waitOneWin32(handles, ntapi.Handle(hv), tid, timeout)
+				if res == 0x102 {
+					ctx.SetReturn(0x102)
+					return 0
+				}
 			}
-			// Timer case (index = len(cases)) if timeout ≥ 0.
-			if timeout == 0 {
-				// Non-blocking poll
-				selCases = append(selCases, reflect.SelectCase{Dir: reflect.SelectDefault})
-			} else if timeout > 0 {
-				timer := time.After(timeout)
-				selCases = append(selCases, reflect.SelectCase{
-					Dir:  reflect.SelectRecv,
-					Chan: reflect.ValueOf(timer),
-				})
-			}
-			// timeout < 0 = INFINITE: no timer case, block until a handle fires.
-
-			chosen, _, _ := reflect.Select(selCases)
-			if chosen >= len(cases) {
-				ctx.SetReturn(0x102) // WAIT_TIMEOUT
-			} else {
-				ctx.SetReturn(uint64(cases[chosen].idx)) // WAIT_OBJECT_0 + i
-			}
+			ctx.SetReturn(0)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "AcquireSRWLockExclusive", func(ctx *ntapi.TrapContext) uint32 {
@@ -6330,6 +6259,24 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			if ctx.Trace {
 				ravelog.Logf("[win32] CreateFileW: %q access=0x%x disp=%d\n", name, desiredAccess, creationDisp)
 			}
+			// Named pipe client connect: \\.\pipe\<name>
+			if isPipePath(name) {
+				pipeName := normalizePipeName(name)
+				server := ntapi.LookupNamedPipe(pipeName)
+				if server == nil {
+					ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+					procState.LastError = 2 // ERROR_FILE_NOT_FOUND
+					return 0
+				}
+				ch := ntapi.NewClientPipe(server)
+				h := handles.Alloc(ch)
+				server.Connected = true
+				if ctx.Trace {
+					ravelog.Logf("[win32] CreateFileW: pipe %q client → handle=0x%x\n", name, uint64(h))
+				}
+				ctx.SetReturn(uint64(h))
+				return 0
+			}
 			// Convert Windows path to VFS path
 			vfsPath := winPathToVFS(name)
 			// Fallback: if path like /AppName/file.xml doesn't exist,
@@ -6409,6 +6356,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0
 			}
 			obj := handles.Get(hFile)
+			// Named pipe read
+			if ph, ok := obj.(*ntapi.NamedPipeHandle); ok {
+				buf := make([]byte, nBytesToRead)
+				n := ph.PipeRead(buf)
+				ctx.Mem.WriteBytes(bufAddr, buf[:n])
+				if lpBytesRead != 0 {
+					ctx.Mem.Write32(lpBytesRead, uint32(n))
+				}
+				ctx.SetReturn(1)
+				return 0
+			}
 			fh, ok := obj.(*ntapi.FileHandle)
 			if !ok {
 				if lpBytesRead != 0 {
@@ -8476,21 +8434,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateNamedPipeA", func(ctx *ntapi.TrapContext) uint32 {
 			name := readGuestString(ctx.Arg(0))
-			// dwOpenMode=Arg(1), dwPipeMode=Arg(2), nMaxInstances=Arg(3)
-			// nOutBufSize=Arg(4), nInBufSize=Arg(5), nDefaultTimeout=Arg(6), pSA=Arg(7)
-			pipeName := name
-			for _, prefix := range []string{`\\.\pipe\`, `\\.\Pipe\`, `\\.\PIPE\`} {
-				if strings.HasPrefix(pipeName, prefix) {
-					pipeName = pipeName[len(prefix):]
-					break
-				}
-			}
-			ph := &ntapi.NamedPipeHandle{
-				Name:      pipeName,
-				Buf:       make(chan []byte, 64),
-				Connected: false,
-				Server:    true,
-			}
+			pipeName := normalizePipeName(name)
+			ph := ntapi.NewServerPipe(pipeName)
 			ntapi.RegisterNamedPipe(pipeName, ph)
 			h := handles.Alloc(ph)
 			if ctx.Trace {
@@ -8501,19 +8446,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateNamedPipeW", func(ctx *ntapi.TrapContext) uint32 {
 			name := readGuestUTF16(ctx.Arg(0))
-			pipeName := name
-			for _, prefix := range []string{`\\.\pipe\`, `\\.\Pipe\`, `\\.\PIPE\`} {
-				if strings.HasPrefix(pipeName, prefix) {
-					pipeName = pipeName[len(prefix):]
-					break
-				}
-			}
-			ph := &ntapi.NamedPipeHandle{
-				Name:      pipeName,
-				Buf:       make(chan []byte, 64),
-				Connected: false,
-				Server:    true,
-			}
+			pipeName := normalizePipeName(name)
+			ph := ntapi.NewServerPipe(pipeName)
 			ntapi.RegisterNamedPipe(pipeName, ph)
 			h := handles.Alloc(ph)
 			if ctx.Trace {
@@ -27713,6 +27647,99 @@ func winPathToVFS(winPath string) string {
 		p = "/" + p
 	}
 	return p
+}
+
+// normalizePipeName strips the \\.\pipe\ prefix (case-insensitive) from a pipe path.
+func normalizePipeName(name string) string {
+	norm := strings.ReplaceAll(name, `\`, "/")
+	for _, prefix := range []string{"//./pipe/", "//./Pipe/", "//./PIPE/"} {
+		if strings.HasPrefix(norm, prefix) {
+			return norm[len(prefix):]
+		}
+	}
+	// Also handle original backslash variants
+	for _, prefix := range []string{`\\.\pipe\`, `\\.\Pipe\`, `\\.\PIPE\`} {
+		if strings.HasPrefix(name, prefix) {
+			return name[len(prefix):]
+		}
+	}
+	return name
+}
+
+// isPipePath returns true if name is a Windows named pipe path.
+func isPipePath(name string) bool {
+	norm := strings.ToLower(strings.ReplaceAll(name, `\`, "/"))
+	return strings.HasPrefix(norm, "//./pipe/")
+}
+
+// msToTimeout converts a Win32 millisecond timeout to a Go duration.
+// 0xFFFFFFFF = INFINITE (-1), 0 = poll (0).
+func msToTimeout(ms uint64) time.Duration {
+	if ms == 0xFFFFFFFF {
+		return -1
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// waitOneWin32 waits on a single handle; returns Win32 WAIT_* value.
+func waitOneWin32(handles *ntapi.HandleTable, h ntapi.Handle, tid uint32, timeout time.Duration) uint64 {
+	const waitObject0 = uint64(0)
+	const waitTimeout = uint64(0x102)
+	const waitAbandoned = uint64(0x80)
+	obj := handles.Get(h)
+	switch v := obj.(type) {
+	case *ntapi.EventHandle:
+		if v.WaitTimeout(timeout) {
+			return waitObject0
+		}
+		return waitTimeout
+	case *ntapi.MutantHandle:
+		res := v.WaitTimeout(tid, timeout)
+		if res == 0x80 {
+			return waitAbandoned
+		}
+		if res == 0 {
+			return waitObject0
+		}
+		return waitTimeout
+	case *ntapi.SemaphoreHandle:
+		if v.WaitTimeout(timeout) == 0 {
+			return waitObject0
+		}
+		return waitTimeout
+	case *ntapi.WaitableTimerHandle:
+		if v.WaitTimeout(timeout) == 0 {
+			return waitObject0
+		}
+		return waitTimeout
+	case *ntapi.ThreadHandle:
+		if v.Done == nil {
+			return waitObject0
+		}
+		if timeout < 0 {
+			<-v.Done
+			return waitObject0
+		}
+		if timeout == 0 {
+			select {
+			case <-v.Done:
+				return waitObject0
+			default:
+				return waitTimeout
+			}
+		}
+		select {
+		case <-v.Done:
+			return waitObject0
+		case <-time.After(timeout):
+			return waitTimeout
+		}
+	case nil:
+		// Unknown or process handle - signal immediately
+		return waitObject0
+	default:
+		return waitObject0
+	}
 }
 
 // writeFindData fills a WIN32_FIND_DATAW structure in guest memory.

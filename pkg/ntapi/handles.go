@@ -508,15 +508,229 @@ type ThreadHandle struct {
 func (h *ThreadHandle) handleType() string { return "thread" }
 
 // NamedPipeHandle represents one end of a named pipe.
+// ToServer carries data client→server; ToClient carries data server→client.
 type NamedPipeHandle struct {
 	Name      string
-	Buf       chan []byte // buffered channel for pipe data
+	ToServer  chan []byte // client writes here, server reads
+	ToClient  chan []byte // server writes here, client reads
 	Connected bool
 	Server    bool
+	readBuf   []byte
 	mu        sync.Mutex
 }
 
 func (h *NamedPipeHandle) handleType() string { return "named_pipe" }
+
+// NewServerPipe creates a server-side NamedPipeHandle with bidirectional channels.
+func NewServerPipe(name string) *NamedPipeHandle {
+	return &NamedPipeHandle{
+		Name:     name,
+		ToServer: make(chan []byte, 64),
+		ToClient: make(chan []byte, 64),
+		Server:   true,
+	}
+}
+
+// NewClientPipe creates a client-side handle sharing a server's channels.
+func NewClientPipe(server *NamedPipeHandle) *NamedPipeHandle {
+	return &NamedPipeHandle{
+		Name:      server.Name,
+		ToServer:  server.ToServer,
+		ToClient:  server.ToClient,
+		Server:    false,
+		Connected: true,
+	}
+}
+
+// PipeRead reads up to len(p) bytes, blocking until data arrives.
+func (h *NamedPipeHandle) PipeRead(p []byte) int {
+	h.mu.Lock()
+	if len(h.readBuf) > 0 {
+		n := copy(p, h.readBuf)
+		h.readBuf = h.readBuf[n:]
+		h.mu.Unlock()
+		return n
+	}
+	h.mu.Unlock()
+	ch := h.ToServer
+	if !h.Server {
+		ch = h.ToClient
+	}
+	select {
+	case data, ok := <-ch:
+		if !ok {
+			return 0
+		}
+		n := copy(p, data)
+		if n < len(data) {
+			h.mu.Lock()
+			h.readBuf = append(h.readBuf, data[n:]...)
+			h.mu.Unlock()
+		}
+		return n
+	case <-time.After(5 * time.Second):
+		return 0
+	}
+}
+
+// PipeWrite sends a copy of data into the pipe. Returns false if channel is full.
+func (h *NamedPipeHandle) PipeWrite(data []byte) bool {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	ch := h.ToClient
+	if !h.Server {
+		ch = h.ToServer
+	}
+	select {
+	case ch <- cp:
+		return true
+	default:
+		return false
+	}
+}
+
+// DrainAll discards all buffered data in both directions.
+func (h *NamedPipeHandle) DrainAll() {
+	h.mu.Lock()
+	h.readBuf = nil
+	h.mu.Unlock()
+	for {
+		select {
+		case <-h.ToServer:
+		default:
+			goto dS
+		}
+	}
+dS:
+	for {
+		select {
+		case <-h.ToClient:
+		default:
+			return
+		}
+	}
+}
+
+// TokenHandle is an access token kernel object.
+type TokenHandle struct{}
+
+func (h *TokenHandle) handleType() string { return "token" }
+
+// WaitableTimerHandle is a Win32 waitable timer (manual or auto-reset).
+type WaitableTimerHandle struct {
+	mu        sync.Mutex
+	ch        chan struct{}
+	cancel    chan struct{}
+	manualReset bool
+	signaled  bool
+}
+
+func NewWaitableTimer(manualReset bool) *WaitableTimerHandle {
+	return &WaitableTimerHandle{
+		ch:          make(chan struct{}, 1),
+		cancel:      make(chan struct{}),
+		manualReset: manualReset,
+	}
+}
+
+func (t *WaitableTimerHandle) handleType() string { return "waitable_timer" }
+
+// Set arms the timer to fire after 'due' from now (or at absolute time if negative Windows FILETIME).
+// period is the recurring period in milliseconds (0 = one-shot).
+func (t *WaitableTimerHandle) Set(due time.Duration, period time.Duration) {
+	t.mu.Lock()
+	// Cancel any existing goroutine
+	select {
+	case t.cancel <- struct{}{}:
+	default:
+	}
+	t.signaled = false
+	t.mu.Unlock()
+
+	go func() {
+		select {
+		case <-time.After(due):
+		case <-t.cancel:
+			return
+		}
+		t.mu.Lock()
+		t.signaled = true
+		select {
+		case t.ch <- struct{}{}:
+		default:
+		}
+		t.mu.Unlock()
+		if period > 0 {
+			ticker := time.NewTicker(period)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					t.mu.Lock()
+					t.signaled = true
+					select {
+					case t.ch <- struct{}{}:
+					default:
+					}
+					t.mu.Unlock()
+				case <-t.cancel:
+					return
+				}
+			}
+		}
+	}()
+}
+
+// Cancel disarms the timer.
+func (t *WaitableTimerHandle) Cancel() {
+	select {
+	case t.cancel <- struct{}{}:
+	default:
+	}
+	t.mu.Lock()
+	t.signaled = false
+	t.mu.Unlock()
+}
+
+// IsSignaled returns whether the timer is currently signaled.
+func (t *WaitableTimerHandle) IsSignaled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.signaled
+}
+
+// WaitTimeout waits up to d for the timer to fire.
+// Returns WAIT_OBJECT_0=0 or WAIT_TIMEOUT=0x102.
+func (t *WaitableTimerHandle) WaitTimeout(d time.Duration) uint32 {
+	t.mu.Lock()
+	if t.signaled {
+		if !t.manualReset {
+			t.signaled = false
+		}
+		t.mu.Unlock()
+		return 0 // WAIT_OBJECT_0
+	}
+	t.mu.Unlock()
+
+	deadline := time.After(d)
+	for {
+		select {
+		case <-t.ch:
+			t.mu.Lock()
+			t.signaled = true // re-check under lock
+			sig := t.signaled
+			if !t.manualReset {
+				t.signaled = false
+			}
+			t.mu.Unlock()
+			if sig {
+				return 0
+			}
+		case <-deadline:
+			return 0x102 // WAIT_TIMEOUT
+		}
+	}
+}
 
 // namedPipeRegistry is a global registry of named pipe server endpoints.
 var namedPipeRegistry struct {
@@ -772,6 +986,13 @@ func (ht *HandleTable) RLock() { ht.namedMu.RLock() }
 
 // RUnlock releases the read lock on the named objects table.
 func (ht *HandleTable) RUnlock() { ht.namedMu.RUnlock() }
+
+// Count returns the number of open handles.
+func (ht *HandleTable) Count() int {
+	ht.mu.RLock()
+	defer ht.mu.RUnlock()
+	return len(ht.handles)
+}
 
 // NameOf returns the registered name for a handle, if any.
 func (ht *HandleTable) NameOf(h Handle) (string, bool) {
