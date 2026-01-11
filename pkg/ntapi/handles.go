@@ -1425,8 +1425,49 @@ func (h *TimerQueueTimer) Stop() {
 	defer h.mu.Unlock()
 	if h.running {
 		close(h.StopCh)
+		h.StopCh = make(chan struct{})
 		h.running = false
 	}
+}
+
+// Arm starts the timer goroutine that calls fn after dueTime, then every period.
+func (h *TimerQueueTimer) Arm(dueTime time.Duration, fn func()) {
+	h.mu.Lock()
+	if h.running {
+		close(h.StopCh)
+		h.StopCh = make(chan struct{})
+	}
+	h.running = true
+	stopCh := h.StopCh
+	period := time.Duration(h.Period) * time.Millisecond
+	h.mu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(dueTime)
+		defer timer.Stop()
+		select {
+		case <-stopCh:
+			return
+		case <-timer.C:
+		}
+		fn()
+		if period == 0 {
+			h.mu.Lock()
+			h.running = false
+			h.mu.Unlock()
+			return
+		}
+		ticker := time.NewTicker(period)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				fn()
+			}
+		}
+	}()
 }
 
 // GetTimerQueueTimer returns the TimerQueueTimer for a handle, or nil.

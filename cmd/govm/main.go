@@ -3,8 +3,13 @@ package main
 import (
 "bufio"
 "bytes"
+"crypto/hmac"
+"crypto/md5"
+"crypto/sha1"
+"crypto/sha256"
 "flag"
 "fmt"
+"hash"
 "image"
 "image/color"
 "image/png"
@@ -23,6 +28,7 @@ import (
 "syscall"
 "time"
 "unicode"
+"unicode/utf16"
 
 "golang.org/x/sys/unix"
 
@@ -6877,11 +6883,56 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CompareStringEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // CSTR_EQUAL
+			// CompareStringEx(Locale, dwCmpFlags, lpString1, cchCount1, lpString2, cchCount2, ...)
+			dwFlags := uint32(ctx.Arg(1))
+			s1Ptr := ctx.Arg(2)
+			cch1 := int32(ctx.Arg(3))
+			s2Ptr := ctx.Arg(4)
+			cch2 := int32(ctx.Arg(5))
+			readW := func(ptr uint64, cch int32) string {
+				if ptr == 0 { return "" }
+				if cch == -1 {
+					return readGuestUTF16(ptr)
+				}
+				data := make([]uint16, cch)
+				for i := 0; i < int(cch); i++ {
+					w, _ := mem.Read16(ptr + uint64(i)*2)
+					data[i] = w
+				}
+				return string(utf16.Decode(data))
+			}
+			s1 := readW(s1Ptr, cch1)
+			s2 := readW(s2Ptr, cch2)
+			if dwFlags&1 != 0 { // NORM_IGNORECASE
+				s1 = strings.ToLower(s1)
+				s2 = strings.ToLower(s2)
+			}
+			if s1 < s2 { ctx.SetReturn(1) } else if s1 > s2 { ctx.SetReturn(3) } else { ctx.SetReturn(2) }
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CompareStringW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // CSTR_EQUAL
+			dwFlags := uint32(ctx.Arg(1))
+			s1Ptr := ctx.Arg(2)
+			cch1 := int32(ctx.Arg(3))
+			s2Ptr := ctx.Arg(4)
+			cch2 := int32(ctx.Arg(5))
+			readW := func(ptr uint64, cch int32) string {
+				if ptr == 0 { return "" }
+				if cch == -1 { return readGuestUTF16(ptr) }
+				data := make([]uint16, cch)
+				for i := 0; i < int(cch); i++ {
+					w, _ := mem.Read16(ptr + uint64(i)*2)
+					data[i] = w
+				}
+				return string(utf16.Decode(data))
+			}
+			s1 := readW(s1Ptr, cch1)
+			s2 := readW(s2Ptr, cch2)
+			if dwFlags&1 != 0 {
+				s1 = strings.ToLower(s1)
+				s2 = strings.ToLower(s2)
+			}
+			if s1 < s2 { ctx.SetReturn(1) } else if s1 > s2 { ctx.SetReturn(3) } else { ctx.SetReturn(2) }
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetUserDefaultLCID", func(ctx *ntapi.TrapContext) uint32 {
@@ -7826,6 +7877,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ActivateActCtx", func(ctx *ntapi.TrapContext) uint32 {
+			// ActivateActCtx(hActCtx, lpCookie) - write a nonzero cookie
+			lpCookie := ctx.Arg(1)
+			if lpCookie != 0 { ctx.Mem.Write64(lpCookie, 1) }
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -8158,11 +8212,49 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CompareStringA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // CSTR_EQUAL
+			dwFlags := uint32(ctx.Arg(1))
+			s1Ptr := ctx.Arg(2)
+			cch1 := int32(ctx.Arg(3))
+			s2Ptr := ctx.Arg(4)
+			cch2 := int32(ctx.Arg(5))
+			readA := func(ptr uint64, cch int32) string {
+				if ptr == 0 { return "" }
+				if cch == -1 { return readGuestString(ptr) }
+				b, _ := mem.ReadBytes(ptr, int(cch))
+				return string(b)
+			}
+			s1 := readA(s1Ptr, cch1)
+			s2 := readA(s2Ptr, cch2)
+			if dwFlags&1 != 0 {
+				s1 = strings.ToLower(s1)
+				s2 = strings.ToLower(s2)
+			}
+			if s1 < s2 { ctx.SetReturn(1) } else if s1 > s2 { ctx.SetReturn(3) } else { ctx.SetReturn(2) }
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CompareStringOrdinal", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(2) // CSTR_EQUAL
+			s1Ptr := ctx.Arg(0)
+			cch1 := int32(ctx.Arg(1))
+			s2Ptr := ctx.Arg(2)
+			cch2 := int32(ctx.Arg(3))
+			bIgnoreCase := ctx.Arg(4) != 0
+			readW := func(ptr uint64, cch int32) string {
+				if ptr == 0 { return "" }
+				if cch == -1 { return readGuestUTF16(ptr) }
+				data := make([]uint16, cch)
+				for i := 0; i < int(cch); i++ {
+					w, _ := mem.Read16(ptr + uint64(i)*2)
+					data[i] = w
+				}
+				return string(utf16.Decode(data))
+			}
+			s1 := readW(s1Ptr, cch1)
+			s2 := readW(s2Ptr, cch2)
+			if bIgnoreCase {
+				s1 = strings.ToLower(s1)
+				s2 = strings.ToLower(s2)
+			}
+			if s1 < s2 { ctx.SetReturn(1) } else if s1 > s2 { ctx.SetReturn(3) } else { ctx.SetReturn(2) }
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ConnectNamedPipe", func(ctx *ntapi.TrapContext) uint32 {
@@ -8255,11 +8347,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateActCtxA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
+			// CreateActCtxA(ACTCTXA*) - return a fake valid handle
+			h := handles.Alloc(&ntapi.GenericHandle{Kind: "actctx"})
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateActCtxW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
+			h := handles.Alloc(&ntapi.GenericHandle{Kind: "actctx"})
+			ctx.SetReturn(uint64(h))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateBoundaryDescriptorA", func(ctx *ntapi.TrapContext) uint32 {
@@ -8275,16 +8370,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateDirectoryA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
-			return 0
+			pathPtr := ctx.Arg(0)
+			if pathPtr == 0 { ctx.SetReturn(0); return 0 }
+			path := winPathToVFS(readGuestString(pathPtr))
+			if err := os.MkdirAll(path, 0755); err != nil {
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183) // ERROR_ALREADY_EXISTS
+				ctx.SetReturn(0); return 0
+			}
+			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateDirectoryExA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
-			return 0
+			pathPtr := ctx.Arg(1)
+			if pathPtr == 0 { ctx.SetReturn(0); return 0 }
+			path := winPathToVFS(readGuestString(pathPtr))
+			if err := os.MkdirAll(path, 0755); err != nil {
+				ctx.SetReturn(0); return 0
+			}
+			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateDirectoryExW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
-			return 0
+			pathPtr := ctx.Arg(1)
+			if pathPtr == 0 { ctx.SetReturn(0); return 0 }
+			path := winPathToVFS(readGuestUTF16(pathPtr))
+			if err := os.MkdirAll(path, 0755); err != nil {
+				ctx.SetReturn(0); return 0
+			}
+			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "CreateDirectoryTransactedA", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // FALSE
@@ -8703,6 +8814,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			phTimer := ctx.Arg(0)
 			callback := ctx.Arg(2)
 			param := ctx.Arg(3)
+			dueTimeMs := uint32(ctx.Arg(4))
 			period := uint32(ctx.Arg(5))
 			tqt := &ntapi.TimerQueueTimer{
 				Callback: callback,
@@ -8713,6 +8825,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			h := handles.Alloc(tqt)
 			if phTimer != 0 {
 				ctx.Mem.Write64(phTimer, uint64(h))
+			}
+			if callback != 0 {
+				cpuSnap := ctx.CPU
+				due := time.Duration(dueTimeMs) * time.Millisecond
+				hCopy := h
+				tqt.Arm(due, func() {
+					done := tpLaunchCallback(cpuSnap, callback, param, 0 /*TimerOrWaitFired=FALSE*/)
+					if done != nil {
+						<-done
+					}
+					_ = hCopy
+				})
 			}
 			ctx.SetReturn(1) // TRUE
 			return 0
@@ -9508,15 +9632,68 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCalendarInfoA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			// GetCalendarInfoA(Locale, Calendar, CalType, lpCalData, cchData, lpValue)
+			calType := ctx.Arg(2)
+			lpCalData := ctx.Arg(3)
+			cchData := ctx.Arg(4)
+			now := time.Now()
+			var s string
+			switch calType & 0xFFFF {
+			case 0x0001: s = "1"                           // CAL_ICALINTVALUE
+			case 0x0002: s = "1"                           // CAL_SCALNAME (Gregorian)
+			case 0x0004: s = fmt.Sprintf("%d", now.Year()) // CAL_SYEAROFFSET
+			case 0x0005: s = "12"                          // CAL_ITWODIGITYEARMAX
+			default:     s = "1"
+			}
+			if lpCalData != 0 && cchData > 0 {
+				b := []byte(s)
+				if uint64(len(b)+1) > cchData { b = b[:cchData-1] }
+				ctx.Mem.WriteBytes(lpCalData, append(b, 0))
+			}
+			ctx.SetReturn(uint64(len(s) + 1))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCalendarInfoEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			calType := ctx.Arg(2)
+			lpCalData := ctx.Arg(3)
+			cchData := ctx.Arg(4)
+			now := time.Now()
+			var s string
+			switch calType & 0xFFFF {
+			case 0x0004: s = fmt.Sprintf("%d", now.Year())
+			default:     s = "1"
+			}
+			ws := utf16Encode(s)
+			if lpCalData != 0 && cchData > 0 {
+				n := uint64(len(ws)); if n+1 > cchData { n = cchData-1 }
+				for i := uint64(0); i < n; i++ { ctx.Mem.Write16(lpCalData+i*2, ws[i]) }
+				ctx.Mem.Write16(lpCalData+n*2, 0)
+			}
+			ctx.SetReturn(uint64(len(ws) + 1))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCalendarInfoW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			calType := ctx.Arg(2)
+			lpCalData := ctx.Arg(3)
+			cchData := ctx.Arg(4)
+			now := time.Now()
+			var s string
+			switch calType & 0xFFFF {
+			case 0x0001: s = "1"
+			case 0x0002: s = "Gregorian"
+			case 0x0004: s = fmt.Sprintf("%d", now.Year())
+			case 0x0005: s = "2029"
+			case 0x0006: s = "1" // CAL_SABBREVIATEDLOCALNAME
+			case 0x0007: s = "CAL" // CAL_SALTERNATESORTING
+			default:     s = ""
+			}
+			ws := utf16Encode(s)
+			if lpCalData != 0 && cchData > 0 {
+				n := uint64(len(ws)); if n+1 > cchData { n = cchData-1 }
+				for i := uint64(0); i < n; i++ { ctx.Mem.Write16(lpCalData+i*2, ws[i]) }
+				ctx.Mem.Write16(lpCalData+n*2, 0)
+			}
+			ctx.SetReturn(uint64(len(ws) + 1))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCommConfig", func(ctx *ntapi.TrapContext) uint32 {
@@ -16239,7 +16416,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(shell32, "SHCreateDirectoryExW", func(ctx *ntapi.TrapContext) uint32 {
+			pathPtr := ctx.Arg(1)
+			if pathPtr != 0 {
+				path := winPathToVFS(readGuestUTF16(pathPtr))
+				os.MkdirAll(path, 0755) // ignore errors
+			}
 			ctx.SetReturn(0) // S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "SHCreateDirectoryExA", func(ctx *ntapi.TrapContext) uint32 {
+			pathPtr := ctx.Arg(1)
+			if pathPtr != 0 {
+				path := winPathToVFS(readGuestString(pathPtr))
+				os.MkdirAll(path, 0755)
+			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(shell32, "SHFileOperationA", func(ctx *ntapi.TrapContext) uint32 {
+			lpFileOp := ctx.Arg(0)
+			if lpFileOp != 0 {
+				ctx.Mem.Write32(lpFileOp+36, 0) // fAnyOperationsAborted = FALSE
+			}
+			ctx.SetReturn(0) // success
 			return 0
 		})
 		d.RegisterAutoStubHandler(shell32, "DragQueryFileW", func(ctx *ntapi.TrapContext) uint32 {
@@ -16845,35 +17044,102 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
-		// CryptCreateHash, CryptHashData, CryptGetHashParam, CryptDestroyHash, CryptReleaseContext
-		d.RegisterAutoStubHandler(advapi32, "CryptCreateHash", func(ctx *ntapi.TrapContext) uint32 {
-			phHash := ctx.Arg(3)
-			if phHash != 0 {
-				ctx.Mem.Write64(phHash, 0xC0DE5678) // fake hash handle
+		d.RegisterAutoStubHandler(advapi32, "CryptAcquireContextA", func(ctx *ntapi.TrapContext) uint32 {
+			phProv := ctx.Arg(0)
+			if phProv != 0 {
+				ctx.Mem.Write64(phProv, 0xC0DE1234)
 			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
+		// CryptCreateHash, CryptHashData, CryptGetHashParam, CryptDestroyHash, CryptReleaseContext
+		// Real hash implementations using Go standard library
+		type cryptHashState struct {
+			h    hash.Hash
+			algID uint32
+		}
+		cryptHashes := map[uint64]*cryptHashState{}
+		cryptHashMu := sync.Mutex{}
+		nextCryptH := uint64(0xA0010001)
+		d.RegisterAutoStubHandler(advapi32, "CryptCreateHash", func(ctx *ntapi.TrapContext) uint32 {
+			algID := uint32(ctx.Arg(1))
+			phHash := ctx.Arg(3)
+			var h hash.Hash
+			switch algID {
+			case 0x8003: h = md5.New()    // CALG_MD5
+			case 0x8004: h = sha1.New()   // CALG_SHA1
+			case 0x800c: h = sha256.New() // CALG_SHA_256
+			case 0x800d: h = sha256.New() // CALG_SHA_384 (use sha256 as fallback)
+			case 0x800e: h = sha256.New() // CALG_SHA_512 (use sha256 as fallback)
+			case 0x8002: h = md5.New()    // CALG_MD2 (use md5)
+			default:     h = sha1.New()   // fallback
+			}
+			cryptHashMu.Lock()
+			handle := nextCryptH; nextCryptH++
+			cryptHashes[handle] = &cryptHashState{h: h, algID: algID}
+			cryptHashMu.Unlock()
+			if phHash != 0 { ctx.Mem.Write64(phHash, handle) }
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
 		d.RegisterAutoStubHandler(advapi32, "CryptHashData", func(ctx *ntapi.TrapContext) uint32 {
+			hHash := ctx.Arg(0)
+			pbData := ctx.Arg(1)
+			dwLen := ctx.Arg(2)
+			cryptHashMu.Lock()
+			hs := cryptHashes[hHash]
+			cryptHashMu.Unlock()
+			if hs != nil && pbData != 0 && dwLen > 0 {
+				data, _ := ctx.Mem.ReadBytes(pbData, int(dwLen))
+				hs.h.Write(data)
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "CryptGetHashParam", func(ctx *ntapi.TrapContext) uint32 {
-			pbData := ctx.Arg(3)
-			pdwDataLen := ctx.Arg(4)
-			if pdwDataLen != 0 {
-				n, _ := ctx.Mem.Read32(pdwDataLen)
-				if pbData != 0 && n > 0 {
-					// Write zeroed hash data
-					for i := uint32(0); i < n && i < 64; i++ { ctx.Mem.Write8(pbData+uint64(i), 0) }
+			hHash := ctx.Arg(0)
+			dwParam := ctx.Arg(1)
+			pbData := ctx.Arg(2)
+			pdwDataLen := ctx.Arg(3)
+			cryptHashMu.Lock()
+			hs := cryptHashes[hHash]
+			cryptHashMu.Unlock()
+			if hs == nil { ctx.SetReturn(0); return 0 }
+			const HP_HASHVAL = 2
+			const HP_HASHSIZE = 4
+			const HP_ALGID = 1
+			switch dwParam {
+			case HP_ALGID:
+				if pdwDataLen != 0 { ctx.Mem.Write32(pdwDataLen, 4) }
+				if pbData != 0 { ctx.Mem.Write32(pbData, hs.algID) }
+			case HP_HASHSIZE:
+				sz := uint32(hs.h.Size())
+				if pdwDataLen != 0 { ctx.Mem.Write32(pdwDataLen, 4) }
+				if pbData != 0 { ctx.Mem.Write32(pbData, sz) }
+			case HP_HASHVAL:
+				sum := hs.h.Sum(nil)
+				sz := uint32(len(sum))
+				if pdwDataLen != 0 {
+					avail, _ := ctx.Mem.Read32(pdwDataLen)
+					ctx.Mem.Write32(pdwDataLen, sz)
+					if pbData != 0 && avail >= sz {
+						ctx.Mem.WriteBytes(pbData, sum)
+					}
 				}
 			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "CryptDestroyHash", func(ctx *ntapi.TrapContext) uint32 {
+			hHash := ctx.Arg(0)
+			cryptHashMu.Lock()
+			delete(cryptHashes, hHash)
+			cryptHashMu.Unlock()
 			ctx.SetReturn(1) // TRUE
 			return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptHashSessionKey", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "CryptReleaseContext", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(1) // TRUE
@@ -16890,14 +17156,114 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1)
 			return 0
 		})
+		// CryptDeriveKey, CryptImportKey, CryptExportKey, CryptEncrypt, CryptDecrypt
+		// Store simple key handles
+		type cryptKeyState struct {
+			data []byte
+			algID uint32
+		}
+		cryptKeys := map[uint64]*cryptKeyState{}
+		cryptKeyMu := sync.Mutex{}
+		nextCryptKey := uint64(0xB0010001)
+		d.RegisterAutoStubHandler(advapi32, "CryptDeriveKey", func(ctx *ntapi.TrapContext) uint32 {
+			algID := uint32(ctx.Arg(1))
+			phKey := ctx.Arg(4)
+			cryptKeyMu.Lock()
+			kh := nextCryptKey; nextCryptKey++
+			cryptKeys[kh] = &cryptKeyState{algID: algID}
+			cryptKeyMu.Unlock()
+			if phKey != 0 { ctx.Mem.Write64(phKey, kh) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptImportKey", func(ctx *ntapi.TrapContext) uint32 {
+			pbData := ctx.Arg(1)
+			dwLen := ctx.Arg(2)
+			phKey := ctx.Arg(4)
+			var data []byte
+			if pbData != 0 && dwLen > 0 {
+				data, _ = ctx.Mem.ReadBytes(pbData, int(dwLen))
+			}
+			cryptKeyMu.Lock()
+			kh := nextCryptKey; nextCryptKey++
+			cryptKeys[kh] = &cryptKeyState{data: data}
+			cryptKeyMu.Unlock()
+			if phKey != 0 { ctx.Mem.Write64(phKey, kh) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptExportKey", func(ctx *ntapi.TrapContext) uint32 {
+			hKey := ctx.Arg(0)
+			pbData := ctx.Arg(4)
+			pdwLen := ctx.Arg(5)
+			cryptKeyMu.Lock()
+			ks := cryptKeys[hKey]
+			cryptKeyMu.Unlock()
+			if ks != nil && pdwLen != 0 {
+				if pbData != 0 {
+					ctx.Mem.WriteBytes(pbData, ks.data)
+				}
+				ctx.Mem.Write32(pdwLen, uint32(len(ks.data)))
+			}
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptDestroyKey", func(ctx *ntapi.TrapContext) uint32 {
+			hKey := ctx.Arg(0)
+			cryptKeyMu.Lock()
+			delete(cryptKeys, hKey)
+			cryptKeyMu.Unlock()
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptSetKeyParam", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptGetKeyParam", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptSignHashW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptSignHashA", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptVerifySignatureW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0 // always valid
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptVerifySignatureA", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
 		d.RegisterAutoStubHandler(advapi32, "CryptEncrypt", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
-			return 0
+			// Pass-through: data is "encrypted" as-is (no real key material)
+			ctx.SetReturn(1); return 0
 		})
 		d.RegisterAutoStubHandler(advapi32, "CryptDecrypt", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
-			return 0
+			ctx.SetReturn(1); return 0
 		})
+		d.RegisterAutoStubHandler(advapi32, "CryptGenKey", func(ctx *ntapi.TrapContext) uint32 {
+			algID := uint32(ctx.Arg(1))
+			phKey := ctx.Arg(3)
+			cryptKeyMu.Lock()
+			kh := nextCryptKey; nextCryptKey++
+			cryptKeys[kh] = &cryptKeyState{algID: algID}
+			cryptKeyMu.Unlock()
+			if phKey != 0 { ctx.Mem.Write64(phKey, kh) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "CryptSetHashParam", func(ctx *ntapi.TrapContext) uint32 {
+			// HP_HMAC_INFO (0x0005) - set HMAC key
+			hHash := ctx.Arg(0)
+			dwParam := ctx.Arg(1)
+			pbData := ctx.Arg(2)
+			cryptHashMu.Lock()
+			hs := cryptHashes[hHash]
+			cryptHashMu.Unlock()
+			const HP_HMAC_INFO = 5
+			if hs != nil && dwParam == HP_HMAC_INFO && pbData != 0 {
+				// HMAC_INFO: HashAlgid(4)+pad(4)+pbInnerString(8)+cbInnerString(4)+pad(4)+pbOuterString(8)+cbOuterString(4)
+				// Reinitialize as HMAC-SHA256 (simplified)
+				hs.h = hmac.New(sha256.New, nil)
+			}
+			ctx.SetReturn(1); return 0
+		})
+		_ = hmac.New // ensure import used
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -27555,6 +27921,83 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(1); return 0 // TRUE
 			})
 		}
+		// Real LookupPrivilegeValueW/A: write a LUID for the given privilege name
+		d.RegisterAutoStubHandler(advapi32, "LookupPrivilegeValueW", func(ctx *ntapi.TrapContext) uint32 {
+			namePtr := ctx.Arg(1)
+			luidPtr := ctx.Arg(2)
+			name := readGuestUTF16(namePtr)
+			// Map known privilege names to LUIDs (from ntddk.h / winnt.h)
+			luidMap := map[string]uint64{
+				"SeCreateTokenPrivilege":          2,
+				"SeAssignPrimaryTokenPrivilege":   3,
+				"SeLockMemoryPrivilege":           4,
+				"SeIncreaseQuotaPrivilege":        5,
+				"SeMachineAccountPrivilege":       6,
+				"SeTcbPrivilege":                  7,
+				"SeSecurityPrivilege":             8,
+				"SeTakeOwnershipPrivilege":        9,
+				"SeLoadDriverPrivilege":           10,
+				"SeSystemProfilePrivilege":        11,
+				"SeSystemtimePrivilege":           12,
+				"SeProfileSingleProcessPrivilege": 13,
+				"SeIncreaseBasePriorityPrivilege": 14,
+				"SeCreatePagefilePrivilege":       15,
+				"SeCreatePermanentPrivilege":      16,
+				"SeBackupPrivilege":               17,
+				"SeRestorePrivilege":              18,
+				"SeShutdownPrivilege":             19,
+				"SeDebugPrivilege":                20,
+				"SeAuditPrivilege":                21,
+				"SeSystemEnvironmentPrivilege":    22,
+				"SeChangeNotifyPrivilege":         23,
+				"SeRemoteShutdownPrivilege":       24,
+				"SeUndockPrivilege":               25,
+				"SeSyncAgentPrivilege":            26,
+				"SeEnableDelegationPrivilege":     27,
+				"SeManageVolumePrivilege":         28,
+				"SeImpersonatePrivilege":          29,
+				"SeCreateGlobalPrivilege":         30,
+				"SeTrustedCredManAccessPrivilege": 31,
+				"SeRelabelPrivilege":              32,
+				"SeIncreaseWorkingSetPrivilege":   33,
+				"SeTimeZonePrivilege":             34,
+				"SeCreateSymbolicLinkPrivilege":   35,
+			}
+			luid := uint64(0)
+			if v, ok := luidMap[name]; ok {
+				luid = v
+			} else {
+				luid = 0xFFFF // unknown but nonzero
+			}
+			if luidPtr != 0 {
+				mem.Write32(luidPtr, uint32(luid))   // LowPart
+				mem.Write32(luidPtr+4, 0)             // HighPart
+			}
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "LookupPrivilegeValueA", func(ctx *ntapi.TrapContext) uint32 {
+			namePtr := ctx.Arg(1)
+			luidPtr := ctx.Arg(2)
+			name := readGuestString(namePtr)
+			luidMap := map[string]uint32{
+				"SeDebugPrivilege": 20, "SeShutdownPrivilege": 19,
+				"SeBackupPrivilege": 17, "SeRestorePrivilege": 18,
+				"SeImpersonatePrivilege": 29, "SeCreateGlobalPrivilege": 30,
+				"SeChangeNotifyPrivilege": 23, "SeIncreaseQuotaPrivilege": 5,
+				"SeIncreaseBasePriorityPrivilege": 14, "SeLoadDriverPrivilege": 10,
+				"SeManageVolumePrivilege": 28, "SeSecurityPrivilege": 8,
+				"SeSystemEnvironmentPrivilege": 22, "SeSystemProfilePrivilege": 11,
+				"SeSystemtimePrivilege": 12, "SeTakeOwnershipPrivilege": 9,
+				"SeTcbPrivilege": 7, "SeUndockPrivilege": 25,
+			}
+			luid := uint32(0xFFFF)
+			if v, ok := luidMap[name]; ok { luid = v }
+			if luidPtr != 0 {
+				mem.Write32(luidPtr, luid)
+				mem.Write32(luidPtr+4, 0)
+			}
+			ctx.SetReturn(1); return 0
+		})
 		d.RegisterAutoStubHandler(advapi32, "AdjustTokenPrivileges", func(ctx *ntapi.TrapContext) uint32 {
 			// Always succeed, no real security enforcement
 			ctx.SetReturn(1); return 0

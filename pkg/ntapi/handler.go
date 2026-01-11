@@ -1244,19 +1244,70 @@ func handleNtQuerySystemInformation(ctx *TrapContext) uint32 {
 			ctx.Mem.Write16(buffer+4, 0)  // ProcessorRevision
 		}
 
-	case 2: // SystemProcessorPerformanceInformation (per-cpu array, 48 bytes each)
+	case 2: // SystemPerformanceInformation (256 bytes SYSTEM_PERFORMANCE_INFORMATION)
 		if buffer != 0 {
-			nCPU := runtime.NumCPU()
+			total := uint64(1 * 1024 * 1024 * 1024) // 1GB total virtual
 			now := uint64(time.Now().UnixNano() / 100)
-			for i := 0; i < nCPU; i++ {
-				base := buffer + uint64(i)*48
-				ctx.Mem.Write64(base+0, 0)    // IdleTime
-				ctx.Mem.Write64(base+8, now)   // KernelTime
-				ctx.Mem.Write64(base+16, now)  // UserTime
-				ctx.Mem.Write64(base+24, 0)    // DpcTime
-				ctx.Mem.Write64(base+32, 0)    // InterruptTime
-				ctx.Mem.Write32(base+40, 0)    // InterruptCount
-			}
+			ctx.Mem.Write64(buffer+0, now)   // IdleProcessTime
+			ctx.Mem.Write64(buffer+8, 0)     // IoReadTransferCount
+			ctx.Mem.Write64(buffer+16, 0)    // IoWriteTransferCount
+			ctx.Mem.Write64(buffer+24, 0)    // IoOtherTransferCount
+			ctx.Mem.Write32(buffer+32, 0)    // IoReadOperationCount
+			ctx.Mem.Write32(buffer+36, 0)    // IoWriteOperationCount
+			ctx.Mem.Write32(buffer+40, 0)    // IoOtherOperationCount
+			ctx.Mem.Write32(buffer+44, uint32(total/mmu.PageSize)) // AvailablePages
+			ctx.Mem.Write32(buffer+48, uint32(total/mmu.PageSize)) // CommittedPages
+			ctx.Mem.Write32(buffer+52, uint32(total*2/mmu.PageSize)) // CommitLimit
+			ctx.Mem.Write32(buffer+56, 0)    // PeakCommitment
+			ctx.Mem.Write32(buffer+60, 1024*1024) // PageFaultCount
+			ctx.Mem.Write32(buffer+64, 0)    // CopyOnWriteCount
+			ctx.Mem.Write32(buffer+68, 0)    // TransitionCount
+			ctx.Mem.Write32(buffer+72, 0)    // CacheTransitionCount
+			ctx.Mem.Write32(buffer+76, 0)    // DemandZeroCount
+			ctx.Mem.Write32(buffer+80, 0)    // PageReadCount
+			ctx.Mem.Write32(buffer+84, 0)    // PageReadIoCount
+			ctx.Mem.Write32(buffer+88, 0)    // CacheReadCount
+			ctx.Mem.Write32(buffer+92, 0)    // CacheIoCount
+			ctx.Mem.Write32(buffer+96, 0)    // DirtyPagesWriteCount
+			ctx.Mem.Write32(buffer+100, 0)   // DirtyWriteIoCount
+			ctx.Mem.Write32(buffer+104, 0)   // MappedPagesWriteCount
+			ctx.Mem.Write32(buffer+108, 0)   // MappedWriteIoCount
+			ctx.Mem.Write32(buffer+112, uint32(total/mmu.PageSize)) // PagedPoolPages
+			ctx.Mem.Write32(buffer+116, 1024) // NonPagedPoolPages
+			ctx.Mem.Write32(buffer+120, 0)   // PagedPoolAllocs
+			ctx.Mem.Write32(buffer+124, 0)   // PagedPoolFrees
+			ctx.Mem.Write32(buffer+128, 0)   // NonPagedPoolAllocs
+			ctx.Mem.Write32(buffer+132, 0)   // NonPagedPoolFrees
+			ctx.Mem.Write32(buffer+136, 4096) // FreeSystemPtes
+			ctx.Mem.Write32(buffer+140, 1024) // ResidentSystemCodePage
+			ctx.Mem.Write32(buffer+144, 0)   // TotalSystemDriverPages
+			ctx.Mem.Write32(buffer+148, 0)   // TotalSystemCodePages
+			ctx.Mem.Write32(buffer+152, 0)   // NonPagedPoolLookasideHits
+			ctx.Mem.Write32(buffer+156, 0)   // PagedPoolLookasideHits
+			ctx.Mem.Write32(buffer+160, 0)   // Spare3Count
+			ctx.Mem.Write32(buffer+164, 0)   // ResidentSystemCachePage
+			ctx.Mem.Write32(buffer+168, 0)   // ResidentPagedPoolPage
+			ctx.Mem.Write32(buffer+172, 0)   // ResidentSystemDriverPage
+			ctx.Mem.Write32(buffer+176, 0)   // CcFastReadNoWait
+			ctx.Mem.Write32(buffer+180, 0)   // CcFastReadWait
+			ctx.Mem.Write32(buffer+184, 0)   // CcFastReadResourceMiss
+			ctx.Mem.Write32(buffer+188, 0)   // CcFastReadNotPossible
+			ctx.Mem.Write32(buffer+192, 0)   // CcFastMdlReadNoWait
+			ctx.Mem.Write32(buffer+196, 0)   // CcFastMdlReadWait
+			ctx.Mem.Write32(buffer+200, 0)   // CcFastMdlReadResourceMiss
+			ctx.Mem.Write32(buffer+204, 0)   // CcFastMdlReadNotPossible
+			ctx.Mem.Write32(buffer+208, 0)   // CcMapDataNoWait
+			ctx.Mem.Write32(buffer+212, 0)   // CcMapDataWait
+			ctx.Mem.Write32(buffer+216, 0)   // CcMapDataNoWaitMiss
+			ctx.Mem.Write32(buffer+220, 0)   // CcMapDataWaitMiss
+			ctx.Mem.Write32(buffer+224, 0)   // CcPinMappedDataCount
+			ctx.Mem.Write32(buffer+228, 0)   // CcPinReadNoWait
+			ctx.Mem.Write32(buffer+232, 0)   // CcPinReadWait
+			ctx.Mem.Write32(buffer+236, 0)   // CcPinReadNoWaitMiss
+			ctx.Mem.Write32(buffer+240, 0)   // CcPinReadWaitMiss
+			ctx.Mem.Write32(buffer+244, 0)   // CcCopyReadNoWait
+			ctx.Mem.Write32(buffer+248, 0)   // CcCopyReadWait
+			ctx.Mem.Write32(buffer+252, 0)   // CcCopyReadNoWaitMiss
 		}
 
 	case 3: // SystemTimeOfDayInformation (48 bytes)
@@ -1283,6 +1334,54 @@ func handleNtQuerySystemInformation(ctx *TrapContext) uint32 {
 		}
 
 	case 7: // SystemProcessorSpeedInformation / SystemNumaProcessorMap
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0)  // HighestNodeNumber = 0
+			ctx.Mem.Write32(buffer+4, 0)
+		}
+
+	case 16: // SystemHandleInformation
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0)   // NumberOfHandles
+			ctx.Mem.Write32(buffer+4, 0) // Reserved
+		}
+
+	case 18: // SystemPagefileInformation
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 0) // NextEntryOffset
+			ctx.Mem.Write32(buffer+4, 512*1024) // TotalSize (in pages)
+			ctx.Mem.Write32(buffer+8, 0) // TotalInUse
+			ctx.Mem.Write32(buffer+12, 0) // PeakUsage
+			// PageFileName is empty UNICODE_STRING at +16
+		}
+
+	case 21: // SystemFileCacheInformation
+		if buffer != 0 {
+			total := uint64(256 * 1024 * 1024) // 256MB cache
+			ctx.Mem.Write64(buffer, total/mmu.PageSize)   // CurrentSize
+			ctx.Mem.Write64(buffer+8, total/mmu.PageSize) // PeakSize
+			ctx.Mem.Write32(buffer+16, 0)                  // PageFaultCount
+			ctx.Mem.Write64(buffer+24, total/mmu.PageSize) // MinimumWorkingSet
+			ctx.Mem.Write64(buffer+32, total/mmu.PageSize) // MaximumWorkingSet
+			ctx.Mem.Write64(buffer+40, total/mmu.PageSize) // CurrentSizeIncludingTransitionInPages
+			ctx.Mem.Write64(buffer+48, total/mmu.PageSize) // PeakSizeIncludingTransitionInPages
+			ctx.Mem.Write64(buffer+56, 0)                  // TransitionRePurposeCount
+			ctx.Mem.Write32(buffer+64, 0)                  // Flags
+		}
+
+	case 35: // SystemKernelDebuggerInformation
+		if buffer != 0 {
+			ctx.Mem.Write8(buffer, 0)   // KernelDebuggerEnabled = FALSE
+			ctx.Mem.Write8(buffer+1, 1) // KernelDebuggerNotPresent = TRUE
+		}
+
+	case 37: // SystemRegistryQuotaInformation
+		if buffer != 0 {
+			ctx.Mem.Write32(buffer, 128*1024*1024) // RegistryQuotaAllowed (128MB)
+			ctx.Mem.Write32(buffer+4, 0)           // RegistryQuotaUsed
+			ctx.Mem.Write64(buffer+8, 0)           // PagedPoolSize
+		}
+
+	case 45: // SystemLookasideInformation
 		// success with empty data
 
 	case 8: // SystemProcessorPerformanceInformation (alias for case 2)
@@ -1402,8 +1501,47 @@ func handleNtProtectVirtualMemory(ctx *TrapContext) uint32 {
 
 func handleNtQueryVirtualMemory(ctx *TrapContext) uint32 {
 	addr := ctx.Arg(1)
+	infoClass := ctx.Arg(2)
 	buffer := ctx.Arg(3)
+	bufLen := ctx.Arg(4)
+	retLen := ctx.Arg(5)
 	if buffer == 0 {
+		return StatusSuccess
+	}
+
+	switch infoClass {
+	case 2: // MemorySectionName (UNICODE_STRING with image path for mapped files)
+		// Find the PE module that contains this address
+		var imagePath string
+		if ctx.State != nil {
+			// Check if addr is within main image by reading PEB.ImageBaseAddress
+			pebBase, _ := ctx.Mem.Read64(ctx.State.PEBAddr + 0x10)
+			if pebBase != 0 && addr >= pebBase {
+				imagePath = ctx.State.ImagePath
+			}
+		}
+		if imagePath == "" {
+			imagePath = `\Device\HarddiskVolume1\Windows\System32\unknown.dll`
+		}
+		// Convert to NT path format
+		if strings.HasPrefix(imagePath, `C:\`) {
+			imagePath = `\Device\HarddiskVolume1\` + imagePath[3:]
+		} else if strings.HasPrefix(imagePath, `/`) {
+			imagePath = `\Device\HarddiskVolume1` + imagePath
+		}
+		// Write UNICODE_STRING followed by the path data
+		// UNICODE_STRING: Length(2) + MaxLength(2) + pad(4) + Buffer(8) = 16 bytes
+		wsBytes := encodeUTF16LE(imagePath)
+		needed := uint64(16 + len(wsBytes) + 2)
+		if retLen != 0 { ctx.Mem.Write64(retLen, needed) }
+		if bufLen < needed { return 0xC0000023 } // STATUS_BUFFER_TOO_SMALL
+		strData := buffer + 16
+		ctx.Mem.Write16(buffer, uint16(len(wsBytes)))     // Length
+		ctx.Mem.Write16(buffer+2, uint16(len(wsBytes)+2)) // MaxLength
+		ctx.Mem.Write32(buffer+4, 0)                      // padding
+		ctx.Mem.Write64(buffer+8, strData)                // Buffer
+		ctx.Mem.WriteBytes(strData, wsBytes)
+		ctx.Mem.Write16(strData+uint64(len(wsBytes)), 0)
 		return StatusSuccess
 	}
 
@@ -1525,6 +1663,104 @@ func handleNtResetEvent(ctx *TrapContext) uint32 {
 
 func handleNtClearEvent(ctx *TrapContext) uint32 {
 	return handleNtResetEvent(ctx)
+}
+
+func handleNtPulseEvent(ctx *TrapContext) uint32 {
+	// NtPulseEvent(EventHandle, PreviousState*) - signal then immediately reset
+	handle := Handle(ctx.Arg(0))
+	prevPtr := ctx.Arg(1)
+	evt := ctx.Handles.GetEvent(handle)
+	if evt == nil { return StatusInvalidHandle }
+	evt.mu.Lock()
+	prev := evt.signaled
+	evt.mu.Unlock()
+	if prevPtr != 0 {
+		if prev { ctx.Mem.Write32(prevPtr, 1) } else { ctx.Mem.Write32(prevPtr, 0) }
+	}
+	evt.Signal()
+	// Auto-reset: clear immediately after waking (best effort)
+	evt.mu.Lock()
+	evt.signaled = false
+	evt.mu.Unlock()
+	return StatusSuccess
+}
+
+func handleNtQueryEvent(ctx *TrapContext) uint32 {
+	// NtQueryEvent(EventHandle, EventInformationClass, EventInfo, Length, ReturnLength)
+	handle := Handle(ctx.Arg(0))
+	infoClass := ctx.Arg(1)
+	buffer := ctx.Arg(2)
+	bufLen := ctx.Arg(3)
+	retLen := ctx.Arg(4)
+	_ = infoClass // EventBasicInformation = 0
+	const needed = 8
+	if retLen != 0 { ctx.Mem.Write32(retLen, needed) }
+	if bufLen < needed { return 0xC0000023 }
+	evt := ctx.Handles.GetEvent(handle)
+	signaled := false
+	eventType := uint32(0) // NotificationEvent
+	if evt != nil {
+		evt.mu.Lock()
+		signaled = evt.signaled
+		if !evt.autoReset { eventType = 0 } else { eventType = 1 } // SynchronizationEvent
+		evt.mu.Unlock()
+	}
+	if buffer != 0 {
+		ctx.Mem.Write32(buffer, eventType)
+		if signaled { ctx.Mem.Write32(buffer+4, 1) } else { ctx.Mem.Write32(buffer+4, 0) }
+	}
+	return StatusSuccess
+}
+
+func handleNtQueryMutant(ctx *TrapContext) uint32 {
+	// NtQueryMutant(MutantHandle, MutantInformationClass, MutantInfo, Length, ReturnLength)
+	buffer := ctx.Arg(2)
+	bufLen := ctx.Arg(3)
+	retLen := ctx.Arg(4)
+	const needed = 12
+	if retLen != 0 { ctx.Mem.Write32(retLen, needed) }
+	if bufLen < needed { return 0xC0000023 }
+	if buffer != 0 {
+		ctx.Mem.Write32(buffer, 0)   // CurrentCount
+		ctx.Mem.Write32(buffer+4, 0) // OwnedByCaller
+		ctx.Mem.Write32(buffer+8, 0) // AbandonedState
+	}
+	return StatusSuccess
+}
+
+func handleNtQuerySemaphore(ctx *TrapContext) uint32 {
+	// NtQuerySemaphore(SemHandle, SemInfoClass, SemInfo, Length, ReturnLength)
+	handle := Handle(ctx.Arg(0))
+	buffer := ctx.Arg(2)
+	bufLen := ctx.Arg(3)
+	retLen := ctx.Arg(4)
+	const needed = 8
+	if retLen != 0 { ctx.Mem.Write32(retLen, needed) }
+	if bufLen < needed { return 0xC0000023 }
+	count, maxCount := int32(0), int32(1)
+	sem := ctx.Handles.GetSemaphore(handle)
+	if sem != nil {
+		sem.mu.Lock()
+		count = int32(sem.count)
+		maxCount = int32(sem.maxCount)
+		sem.mu.Unlock()
+	}
+	if buffer != 0 {
+		ctx.Mem.Write32(buffer, uint32(count))
+		ctx.Mem.Write32(buffer+4, uint32(maxCount))
+	}
+	return StatusSuccess
+}
+
+func handleNtQueryTimerResolution(ctx *TrapContext) uint32 {
+	// NtQueryTimerResolution(MinimumResolution*, MaximumResolution*, ActualResolution*)
+	minPtr := ctx.Arg(0)
+	maxPtr := ctx.Arg(1)
+	curPtr := ctx.Arg(2)
+	if minPtr != 0 { ctx.Mem.Write32(minPtr, 156250) } // 15.625ms in 100ns units
+	if maxPtr != 0 { ctx.Mem.Write32(maxPtr, 5000) }   // 0.5ms
+	if curPtr != 0 { ctx.Mem.Write32(curPtr, 156250) } // 15.625ms current
+	return StatusSuccess
 }
 
 func handleNtWaitForSingleObject(ctx *TrapContext) uint32 {
@@ -2080,6 +2316,70 @@ func handleNtDuplicateObject(ctx *TrapContext) uint32 {
 }
 
 func handleNtQueryObject(ctx *TrapContext) uint32 {
+	h := Handle(ctx.Arg(0))
+	infoClass := ctx.Arg(1)
+	buffer := ctx.Arg(2)
+	bufLen := ctx.Arg(3)
+	retLen := ctx.Arg(4)
+
+	obj := ctx.Handles.Get(h)
+	switch infoClass {
+	case 0: // ObjectBasicInformation (40 bytes)
+		if retLen != 0 { ctx.Mem.Write32(retLen, 40) }
+		if buffer == 0 || bufLen < 40 { return 0xC0000023 }
+		ctx.Mem.Write32(buffer, 0)     // Attributes
+		ctx.Mem.Write32(buffer+4, 0xF) // GrantedAccess
+		ctx.Mem.Write32(buffer+8, 1)   // HandleCount
+		ctx.Mem.Write32(buffer+12, 1)  // PointerCount
+		ctx.Mem.Write32(buffer+16, 0)  // PagedPoolCharge
+		ctx.Mem.Write32(buffer+20, 0)  // NonPagedPoolCharge
+		ctx.Mem.Write32(buffer+24, 0)  // Reserved[0]
+		ctx.Mem.Write32(buffer+28, 0)  // Reserved[1]
+		ctx.Mem.Write32(buffer+32, 0)  // Reserved[2]
+		ctx.Mem.Write64(buffer+36, 0)  // NameInformationLength + TypeInformationLength
+		return StatusSuccess
+	case 1: // ObjectNameInformation (UNICODE_STRING + name)
+		var name string
+		if obj != nil {
+			name = `\BaseNamedObjects\` + obj.handleType()
+		} else {
+			name = ""
+		}
+		wsBytes := encodeUTF16LE(name)
+		needed := uint64(16 + len(wsBytes) + 2)
+		if retLen != 0 { ctx.Mem.Write64(retLen, needed) }
+		if buffer == 0 { return StatusSuccess }
+		if bufLen < needed { return 0xC0000023 }
+		strData := buffer + 16
+		ctx.Mem.Write16(buffer, uint16(len(wsBytes)))
+		ctx.Mem.Write16(buffer+2, uint16(len(wsBytes)+2))
+		ctx.Mem.Write32(buffer+4, 0)
+		ctx.Mem.Write64(buffer+8, strData)
+		ctx.Mem.WriteBytes(strData, wsBytes)
+		ctx.Mem.Write16(strData+uint64(len(wsBytes)), 0)
+		return StatusSuccess
+	case 2: // ObjectTypeInformation
+		typeName := "Unknown"
+		if obj != nil { typeName = obj.handleType() }
+		wsBytes := encodeUTF16LE(typeName)
+		needed := uint64(72 + len(wsBytes) + 2) // OBJECT_TYPE_INFORMATION is 72 bytes + name
+		if retLen != 0 { ctx.Mem.Write64(retLen, needed) }
+		if buffer == 0 { return StatusSuccess }
+		if bufLen < needed { return 0xC0000023 }
+		// OBJECT_TYPE_INFORMATION starts with UNICODE_STRING for type name
+		strData := buffer + 16
+		ctx.Mem.Write16(buffer, uint16(len(wsBytes)))
+		ctx.Mem.Write16(buffer+2, uint16(len(wsBytes)+2))
+		ctx.Mem.Write32(buffer+4, 0)
+		ctx.Mem.Write64(buffer+8, strData)
+		ctx.Mem.WriteBytes(strData, wsBytes)
+		ctx.Mem.Write16(strData+uint64(len(wsBytes)), 0)
+		return StatusSuccess
+	case 3: // ObjectTypesInformation
+		if retLen != 0 { ctx.Mem.Write32(retLen, 4) }
+		if buffer != 0 { ctx.Mem.Write32(buffer, 0) } // 0 types
+		return StatusSuccess
+	}
 	return StatusNotImplemented
 }
 
@@ -3845,11 +4145,40 @@ func handleRtlGetSystemTimePrecise(ctx *TrapContext) uint32 {
 }
 
 func handleRtlTimeFieldsToTime(ctx *TrapContext) uint32 {
+	// RtlTimeFieldsToTime(TIME_FIELDS* tf, LARGE_INTEGER* time)
+	tf := ctx.Arg(0)
+	out := ctx.Arg(1)
+	if tf == 0 || out == 0 { ctx.SetReturn(0); return StatusSuccess }
+	yr, _ := ctx.Mem.Read16(tf + 0)
+	mo, _ := ctx.Mem.Read16(tf + 2)
+	dy, _ := ctx.Mem.Read16(tf + 4)
+	hr, _ := ctx.Mem.Read16(tf + 6)
+	mi, _ := ctx.Mem.Read16(tf + 8)
+	se, _ := ctx.Mem.Read16(tf + 10)
+	ms, _ := ctx.Mem.Read16(tf + 12)
+	t := time.Date(int(yr), time.Month(mo), int(dy), int(hr), int(mi), int(se), int(ms)*1e6, time.UTC)
+	ft := uint64(t.UnixNano()/100 + 116444736000000000)
+	ctx.Mem.Write64(out, ft)
 	ctx.SetReturn(1) // TRUE
 	return StatusSuccess
 }
 
 func handleRtlTimeToTimeFields(ctx *TrapContext) uint32 {
+	// RtlTimeToTimeFields(LARGE_INTEGER* time, TIME_FIELDS* tf)
+	timePtr := ctx.Arg(0)
+	tf := ctx.Arg(1)
+	if timePtr == 0 || tf == 0 { return StatusSuccess }
+	ft, _ := ctx.Mem.Read64(timePtr)
+	ns := (int64(ft) - 116444736000000000) * 100
+	t := time.Unix(0, ns).UTC()
+	ctx.Mem.Write16(tf+0, uint16(t.Year()))
+	ctx.Mem.Write16(tf+2, uint16(t.Month()))
+	ctx.Mem.Write16(tf+4, uint16(t.Day()))
+	ctx.Mem.Write16(tf+6, uint16(t.Hour()))
+	ctx.Mem.Write16(tf+8, uint16(t.Minute()))
+	ctx.Mem.Write16(tf+10, uint16(t.Second()))
+	ctx.Mem.Write16(tf+12, uint16(t.Nanosecond()/1e6))
+	ctx.Mem.Write16(tf+14, uint16(t.Weekday()))
 	return StatusSuccess
 }
 
