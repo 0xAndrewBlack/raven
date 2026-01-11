@@ -864,6 +864,159 @@ func (t *CondVarTable) Get(addr uint64) *CondVarEntry {
 // GlobalCondVars is the process-wide condition variable table.
 var GlobalCondVars = NewCondVarTable()
 
+// JobHandle represents a Win32 Job Object.
+type JobHandle struct {
+	mu      sync.Mutex
+	Name    string
+	PIDs    []uint32
+	Limits  JobLimits
+}
+
+// JobLimits holds the configurable limits for a job object.
+type JobLimits struct {
+	ActiveProcessLimit  uint32
+	PriorityClass       uint32
+	SchedulingClass     uint32
+	MaxWorkingSetSize   uint64
+	MinWorkingSetSize   uint64
+	PerProcessUserTime  int64
+	PerJobUserTime      int64
+	KillOnJobClose      bool
+	BreakawayOK         bool
+}
+
+func NewJobHandle(name string) *JobHandle {
+	return &JobHandle{Name: name}
+}
+
+func (j *JobHandle) handleType() string { return "job" }
+
+// AddProcess adds a process ID to the job.
+func (j *JobHandle) AddProcess(pid uint32) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.PIDs = append(j.PIDs, pid)
+}
+
+// MailslotHandle represents a Win32 mailslot.
+type MailslotHandle struct {
+	Name        string
+	MaxMsgSize  uint32
+	ReadTimeout uint32
+	mu          sync.Mutex
+	msgs        [][]byte
+}
+
+func NewMailslot(name string, maxMsg, readTimeout uint32) *MailslotHandle {
+	return &MailslotHandle{
+		Name:        name,
+		MaxMsgSize:  maxMsg,
+		ReadTimeout: readTimeout,
+	}
+}
+
+func (m *MailslotHandle) handleType() string { return "mailslot" }
+
+// Write adds a message to the mailslot.
+func (m *MailslotHandle) Write(msg []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.msgs = append(m.msgs, msg)
+}
+
+// Read removes and returns the next message, or nil.
+func (m *MailslotHandle) Read() []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.msgs) == 0 {
+		return nil
+	}
+	msg := m.msgs[0]
+	m.msgs = m.msgs[1:]
+	return msg
+}
+
+// Count returns pending message count.
+func (m *MailslotHandle) Count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.msgs)
+}
+
+// VEHHandler stores a vectored exception handler registered by the guest.
+type VEHHandler struct {
+	Addr  uint64 // guest function pointer
+	First bool   // first-chance (first=true) or last-chance
+}
+
+// VEHRegistry stores vectored exception handlers for a process.
+type VEHRegistry struct {
+	mu       sync.Mutex
+	handlers []*VEHHandler
+}
+
+var GlobalVEH = &VEHRegistry{}
+var GlobalVCH = &VEHRegistry{} // vectored continue handlers
+
+// Add registers a handler. first=true means "first in chain".
+func (v *VEHRegistry) Add(addr uint64, first bool) uint64 {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	h := &VEHHandler{Addr: addr, First: first}
+	if first {
+		v.handlers = append([]*VEHHandler{h}, v.handlers...)
+	} else {
+		v.handlers = append(v.handlers, h)
+	}
+	return uint64(uintptr(len(v.handlers))) // non-NULL handle
+}
+
+// Remove unregisters a handler by its registration address.
+func (v *VEHRegistry) Remove(addr uint64) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for i, h := range v.handlers {
+		if h.Addr == addr {
+			v.handlers = append(v.handlers[:i], v.handlers[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// GetAll returns all handlers in order.
+func (v *VEHRegistry) GetAll() []*VEHHandler {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]*VEHHandler, len(v.handlers))
+	copy(out, v.handlers)
+	return out
+}
+
+// globalMailslots maps name → mailslot.
+var globalMailslots struct {
+	mu    sync.RWMutex
+	slots map[string]*MailslotHandle
+}
+
+func init() {
+	globalMailslots.slots = make(map[string]*MailslotHandle)
+}
+
+// RegisterMailslot registers a named mailslot.
+func RegisterMailslot(name string, m *MailslotHandle) {
+	globalMailslots.mu.Lock()
+	globalMailslots.slots[strings.ToLower(name)] = m
+	globalMailslots.mu.Unlock()
+}
+
+// LookupMailslot finds a mailslot by name.
+func LookupMailslot(name string) *MailslotHandle {
+	globalMailslots.mu.RLock()
+	defer globalMailslots.mu.RUnlock()
+	return globalMailslots.slots[strings.ToLower(name)]
+}
+
 // HandleTable maps guest HANDLE values to Go objects.
 type HandleTable struct {
 	mu       sync.RWMutex
@@ -1230,4 +1383,147 @@ func (ht *HandleTable) GetTimerQueueTimer(h Handle) *TimerQueueTimer {
 		return nil
 	}
 	return tqt
+}
+
+// GetJob returns the JobHandle for a handle, or nil.
+func (ht *HandleTable) GetJob(h Handle) *JobHandle {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	j, ok := obj.(*JobHandle)
+	if !ok {
+		return nil
+	}
+	return j
+}
+
+// GetMailslot returns the MailslotHandle for a handle, or nil.
+func (ht *HandleTable) GetMailslot(h Handle) *MailslotHandle {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	m, ok := obj.(*MailslotHandle)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+// ======================== CONSOLE STATE ========================
+
+// ConsoleCellAttr is a character cell in the screen buffer.
+type ConsoleCellAttr struct {
+Char  uint16 // Unicode char
+Attr  uint16 // color attribute
+}
+
+// ConsoleState holds the emulated console screen buffer.
+type ConsoleState struct {
+mu        sync.Mutex
+Width     int
+Height    int
+CursorX   int
+CursorY   int
+Attr      uint16 // current text attribute
+Title     string
+Cells     []ConsoleCellAttr // [y*Width+x]
+CursorVisible bool
+CursorSize    uint32
+}
+
+// NewConsoleState creates a default 80x300 console state.
+func NewConsoleState() *ConsoleState {
+cs := &ConsoleState{
+Width:         80,
+Height:        300,
+Attr:          0x07, // grey on black
+Title:         "Raven Console",
+CursorVisible: true,
+CursorSize:    25,
+}
+cs.Cells = make([]ConsoleCellAttr, cs.Width*cs.Height)
+for i := range cs.Cells {
+cs.Cells[i] = ConsoleCellAttr{' ', 0x07}
+}
+return cs
+}
+
+// GlobalConsole is the process-wide console state.
+var GlobalConsole = NewConsoleState()
+
+// Cell returns the cell at (x,y), or nil if out of bounds.
+func (cs *ConsoleState) Cell(x, y int) *ConsoleCellAttr {
+if x < 0 || x >= cs.Width || y < 0 || y >= cs.Height {
+return nil
+}
+return &cs.Cells[y*cs.Width+x]
+}
+
+// FillAttr fills nCells cells starting at (x,y) with attribute attr.
+func (cs *ConsoleState) FillAttr(x, y, n int, attr uint16) int {
+cs.mu.Lock()
+defer cs.mu.Unlock()
+wrote := 0
+for i := 0; i < n; i++ {
+cx := x + i
+cy := y + cx/cs.Width
+cx = cx % cs.Width
+if c := cs.Cell(cx, cy); c != nil {
+c.Attr = attr
+wrote++
+}
+}
+return wrote
+}
+
+// FillChar fills nCells cells starting at (x,y) with character ch.
+func (cs *ConsoleState) FillChar(x, y, n int, ch uint16, attr uint16) int {
+cs.mu.Lock()
+defer cs.mu.Unlock()
+wrote := 0
+for i := 0; i < n; i++ {
+cx := (x + i) % cs.Width
+cy := y + (x+i)/cs.Width
+if c := cs.Cell(cx, cy); c != nil {
+c.Char = ch
+c.Attr = attr
+wrote++
+}
+}
+return wrote
+}
+
+// Scroll scrolls the rectangle [left,top,right,bottom] by dx,dy.
+// Vacated cells are filled with fillChar/fillAttr.
+func (cs *ConsoleState) Scroll(left, top, right, bottom, dx, dy int, fillCh uint16, fillAttr uint16) {
+cs.mu.Lock()
+defer cs.mu.Unlock()
+// Copy cells
+tmp := make([]ConsoleCellAttr, cs.Width*cs.Height)
+copy(tmp, cs.Cells)
+for y := top; y <= bottom; y++ {
+for x := left; x <= right; x++ {
+nx, ny := x+dx, y+dy
+if nx >= left && nx <= right && ny >= top && ny <= bottom {
+if src := cs.Cell(x, y); src != nil {
+if dst := cs.Cell(nx, ny); dst != nil {
+*dst = *src
+}
+}
+}
+}
+}
+// Fill vacated area
+for y := top; y <= bottom; y++ {
+for x := left; x <= right; x++ {
+ox, oy := x-dx, y-dy
+if ox < left || ox > right || oy < top || oy > bottom {
+if c := cs.Cell(x, y); c != nil {
+*c = ConsoleCellAttr{fillCh, fillAttr}
+}
+}
+}
+}
 }
