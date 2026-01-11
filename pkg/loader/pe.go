@@ -32,6 +32,7 @@ type PEModule struct {
 	TLSDataAddr uint64  // guest address of allocated TLS template data (0 if none)
 	TLSDataSize uint64  // size of TLS initial data
 	TLSIndexAddr uint64 // guest address of the TLS index slot
+	TLSCallbacks []uint64 // guest addresses of TLS callback functions
 	ExceptionDirRVA  uint32 // RVA of .pdata (exception directory)
 	ExceptionDirSize uint32 // size of .pdata
 	ResourceDirRVA   uint32 // RVA of .rsrc (resource directory)
@@ -732,6 +733,16 @@ func parseTLSDirectory(mem *mmu.MMU, base uint64, pf *pe.File, f *os.File, tlsRV
 			mod.TLSIndexAddr = indexVA
 			mem.Write32(indexVA, 0)
 		}
+
+		// Read TLS callbacks (AddressOfCallBacks at offset 0x18)
+		callbacksVA, _ := mem.Read64(tlsAddr + 0x18)
+		if callbacksVA != 0 {
+			for i := uint64(0); ; i++ {
+				cb, err := mem.Read64(callbacksVA + i*8)
+				if err != nil || cb == 0 { break }
+				mod.TLSCallbacks = append(mod.TLSCallbacks, cb)
+			}
+		}
 	} else {
 		// 32-bit TLS directory (smaller pointers)
 		tlsAddr := base + uint64(tlsRVA)
@@ -772,6 +783,15 @@ func parseTLSDirectory(mem *mmu.MMU, base uint64, pf *pe.File, f *os.File, tlsRV
 		if indexVA32 != 0 {
 			mod.TLSIndexAddr = uint64(indexVA32)
 			mem.Write32(uint64(indexVA32), 0)
+		}
+		// Read TLS callbacks for 32-bit (AddressOfCallBacks at offset 0x0C)
+		callbacksVA32, _ := mem.Read32(tlsAddr + 0x0C)
+		if callbacksVA32 != 0 {
+			for i := uint64(0); ; i++ {
+				cb, err := mem.Read32(uint64(callbacksVA32) + i*4)
+				if err != nil || cb == 0 { break }
+				mod.TLSCallbacks = append(mod.TLSCallbacks, uint64(cb))
+			}
 		}
 	}
 }

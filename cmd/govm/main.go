@@ -721,6 +721,33 @@ fmt.Fprintf(os.Stderr, "govm: warning: DllMain(%s) failed: %v\n", dll.Name, err)
 }
 }
 }
+
+// Call TLS callbacks for each DLL that has them (DLL_PROCESS_ATTACH)
+for _, dll := range dllLoadOrder {
+	for _, cb := range dll.TLSCallbacks {
+		if cb == 0 { continue }
+		ravelog.Logf("[pe] calling TLS callback for %s at 0x%x\n", dll.Name, cb)
+		if err := ntapi.CallDllMain(c, mem, trampoline, dll.BaseAddr, cb, trace); err != nil {
+			if _, isExit := err.(*arch.ExitError); isExit {
+				os.Exit(1)
+			}
+			ravelog.Logf("[pe] warning: TLS callback 0x%x for %s failed: %v\n", cb, dll.Name, err)
+		}
+	}
+}
+
+// Call TLS callbacks for the main EXE
+for _, cb := range result.MainModule.TLSCallbacks {
+	if cb == 0 { continue }
+	ravelog.Logf("[pe] calling EXE TLS callback at 0x%x\n", cb)
+	if err := ntapi.CallDllMain(c, mem, trampoline, result.MainModule.BaseAddr, cb, trace); err != nil {
+		if _, isExit := err.(*arch.ExitError); isExit {
+			os.Exit(1)
+		}
+		ravelog.Logf("[pe] warning: EXE TLS callback 0x%x failed: %v\n", cb, err)
+	}
+}
+
 // Restore CPU state for main entry
 c.SetPC(result.EntryPoint)
 c.SetSP(result.StackPtr)
