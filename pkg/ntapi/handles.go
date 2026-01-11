@@ -611,10 +611,67 @@ dS:
 	}
 }
 
+// ReadBuf returns a copy of the internal read buffer (for peeking).
+func (h *NamedPipeHandle) ReadBuf() []byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cp := make([]byte, len(h.readBuf))
+	copy(cp, h.readBuf)
+	return cp
+}
+
+// AvailableBytes returns the number of bytes available to read without blocking.
+func (h *NamedPipeHandle) AvailableBytes() int {
+	h.mu.Lock()
+	buffered := len(h.readBuf)
+	h.mu.Unlock()
+	ch := h.ToServer
+	if !h.Server {
+		ch = h.ToClient
+	}
+	for {
+		select {
+		case data := <-ch:
+			h.mu.Lock()
+			h.readBuf = append(h.readBuf, data...)
+			buffered = len(h.readBuf)
+			h.mu.Unlock()
+		default:
+			return buffered
+		}
+	}
+}
+
 // TokenHandle is an access token kernel object.
 type TokenHandle struct{}
 
 func (h *TokenHandle) handleType() string { return "token" }
+
+// SocketHandle wraps a raw OS socket file descriptor for Winsock emulation.
+type SocketHandle struct {
+	FD        int    // OS-level file descriptor
+	Family    int    // AF_INET, AF_INET6, etc.
+	SockType  int    // SOCK_STREAM, SOCK_DGRAM, etc.
+	Proto     int    // IPPROTO_TCP, etc.
+	mu        sync.Mutex
+	lastWSAErr int32
+}
+
+func NewSocketHandle(fd, family, sockType, proto int) *SocketHandle {
+	return &SocketHandle{FD: fd, Family: family, SockType: sockType, Proto: proto}
+}
+func (h *SocketHandle) handleType() string { return "socket" }
+
+// GetSocket returns the SocketHandle for a handle, or nil.
+func (ht *HandleTable) GetSocket(h Handle) *SocketHandle {
+	ht.mu.RLock()
+	defer ht.mu.RUnlock()
+	obj, ok := ht.handles[h]
+	if !ok { return nil }
+	s, ok := obj.(*SocketHandle)
+	if !ok { return nil }
+	return s
+}
 
 // WaitableTimerHandle is a Win32 waitable timer (manual or auto-reset).
 type WaitableTimerHandle struct {
