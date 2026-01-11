@@ -9697,18 +9697,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(kernel32, "GetConsoleScreenBufferInfoEx", func(ctx *ntapi.TrapContext) uint32 {
 			pInfo := ctx.Arg(1)
 			if pInfo != 0 {
-				ctx.Mem.Write32(pInfo+0, 96)  // cbSize = 96
-				ctx.Mem.Write16(pInfo+4, 80)  // dwSize.X
-				ctx.Mem.Write16(pInfo+6, 25)  // dwSize.Y
-				ctx.Mem.Write16(pInfo+8, 0)   // dwCursorPosition.X
-				ctx.Mem.Write16(pInfo+10, 0)  // dwCursorPosition.Y
-				ctx.Mem.Write16(pInfo+12, 7)  // wAttributes
-				ctx.Mem.Write16(pInfo+14, 0)  // srWindow.Left
-				ctx.Mem.Write16(pInfo+16, 0)  // srWindow.Top
-				ctx.Mem.Write16(pInfo+18, 79) // srWindow.Right
-				ctx.Mem.Write16(pInfo+20, 24) // srWindow.Bottom
-				ctx.Mem.Write16(pInfo+22, 80) // dwMaximumWindowSize.X
-				ctx.Mem.Write16(pInfo+24, 25) // dwMaximumWindowSize.Y
+				cs := ntapi.GlobalConsole
+				ctx.Mem.Write32(pInfo+0, 96)                   // cbSize = sizeof(CONSOLE_SCREEN_BUFFER_INFOEX)
+				ctx.Mem.Write16(pInfo+4, uint16(cs.Width))     // dwSize.X
+				ctx.Mem.Write16(pInfo+6, uint16(cs.Height))    // dwSize.Y
+				ctx.Mem.Write16(pInfo+8, uint16(cs.CursorX))   // dwCursorPosition.X
+				ctx.Mem.Write16(pInfo+10, uint16(cs.CursorY))  // dwCursorPosition.Y
+				ctx.Mem.Write16(pInfo+12, cs.Attr)             // wAttributes
+				ctx.Mem.Write16(pInfo+14, 0)                   // srWindow.Left
+				ctx.Mem.Write16(pInfo+16, 0)                   // srWindow.Top
+				ctx.Mem.Write16(pInfo+18, uint16(cs.Width-1))  // srWindow.Right
+				ctx.Mem.Write16(pInfo+20, 24)                  // srWindow.Bottom
+				ctx.Mem.Write16(pInfo+22, uint16(cs.Width))    // dwMaximumWindowSize.X
+				ctx.Mem.Write16(pInfo+24, 25)                  // dwMaximumWindowSize.Y
+				ctx.Mem.Write16(pInfo+26, 0)                   // wPopupAttributes
+				ctx.Mem.Write32(pInfo+28, 0)                   // bFullscreenSupported
+				// ColorTable[16] at offset 32: fill with default 16-color palette
+				palette := []uint32{
+					0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xC0C0C0,
+					0x808080, 0xFF0000, 0x00FF00, 0xFFFF00, 0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
+				}
+				for i, c := range palette {
+					ctx.Mem.Write32(pInfo+32+uint64(i)*4, c)
+				}
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -12329,23 +12340,142 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleOutputA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			// ReadConsoleOutputA(hConsole, lpBuffer, dwBufferSize, dwBufferCoord, lpReadRegion)
+			buf := ctx.Arg(1)
+			bufW := int(ctx.Arg(2) & 0xFFFF)
+			bufCoordX := int(ctx.Arg(3) & 0xFFFF)
+			bufCoordY := int((ctx.Arg(3) >> 16) & 0xFFFF)
+			readRgn := ctx.Arg(4)
+			if buf == 0 || readRgn == 0 {
+				ctx.SetReturn(1); return 0
+			}
+			left, _ := ctx.Mem.Read16(readRgn + 0)
+			top, _ := ctx.Mem.Read16(readRgn + 2)
+			right, _ := ctx.Mem.Read16(readRgn + 4)
+			bottom, _ := ctx.Mem.Read16(readRgn + 6)
+			for y := int(top); y <= int(bottom); y++ {
+				for x := int(left); x <= int(right); x++ {
+					bx := x - int(left) + bufCoordX
+					by := y - int(top) + bufCoordY
+					idx := uint64(by*bufW+bx) * 4
+					if c := ntapi.GlobalConsole.Cell(x, y); c != nil {
+						ctx.Mem.Write8(buf+idx, uint8(c.Char))
+						ctx.Mem.Write8(buf+idx+1, 0)
+						ctx.Mem.Write16(buf+idx+2, c.Attr)
+					}
+				}
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleOutputAttribute", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			lpAttr := ctx.Arg(1)
+			n := int(ctx.Arg(2))
+			coord := ctx.Arg(3)
+			numRead := ctx.Arg(4)
+			if lpAttr == 0 {
+				ctx.SetReturn(1); return 0
+			}
+			x := int(coord & 0xFFFF)
+			y := int((coord >> 16) & 0xFFFF)
+			read := 0
+			for i := 0; i < n; i++ {
+				cx := (x + i) % ntapi.GlobalConsole.Width
+				cy := y + (x+i)/ntapi.GlobalConsole.Width
+				attr := uint16(0x07)
+				if c := ntapi.GlobalConsole.Cell(cx, cy); c != nil {
+					attr = c.Attr
+				}
+				ctx.Mem.Write16(lpAttr+uint64(i)*2, attr)
+				read++
+			}
+			if numRead != 0 {
+				ctx.Mem.Write32(numRead, uint32(read))
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleOutputCharacterA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			lpChar := ctx.Arg(1)
+			n := int(ctx.Arg(2))
+			coord := ctx.Arg(3)
+			numRead := ctx.Arg(4)
+			if lpChar == 0 {
+				ctx.SetReturn(1); return 0
+			}
+			x := int(coord & 0xFFFF)
+			y := int((coord >> 16) & 0xFFFF)
+			read := 0
+			for i := 0; i < n; i++ {
+				cx := (x + i) % ntapi.GlobalConsole.Width
+				cy := y + (x+i)/ntapi.GlobalConsole.Width
+				ch := byte(' ')
+				if c := ntapi.GlobalConsole.Cell(cx, cy); c != nil {
+					if c.Char < 128 {
+						ch = byte(c.Char)
+					}
+				}
+				ctx.Mem.Write8(lpChar+uint64(i), ch)
+				read++
+			}
+			if numRead != 0 {
+				ctx.Mem.Write32(numRead, uint32(read))
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleOutputCharacterW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			lpChar := ctx.Arg(1)
+			n := int(ctx.Arg(2))
+			coord := ctx.Arg(3)
+			numRead := ctx.Arg(4)
+			if lpChar == 0 {
+				ctx.SetReturn(1); return 0
+			}
+			x := int(coord & 0xFFFF)
+			y := int((coord >> 16) & 0xFFFF)
+			read := 0
+			for i := 0; i < n; i++ {
+				cx := (x + i) % ntapi.GlobalConsole.Width
+				cy := y + (x+i)/ntapi.GlobalConsole.Width
+				ch := uint16(' ')
+				if c := ntapi.GlobalConsole.Cell(cx, cy); c != nil {
+					ch = c.Char
+				}
+				ctx.Mem.Write16(lpChar+uint64(i)*2, ch)
+				read++
+			}
+			if numRead != 0 {
+				ctx.Mem.Write32(numRead, uint32(read))
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadConsoleOutputW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			buf := ctx.Arg(1)
+			bufW := int(ctx.Arg(2) & 0xFFFF)
+			bufCoordX := int(ctx.Arg(3) & 0xFFFF)
+			bufCoordY := int((ctx.Arg(3) >> 16) & 0xFFFF)
+			readRgn := ctx.Arg(4)
+			if buf == 0 || readRgn == 0 {
+				ctx.SetReturn(1); return 0
+			}
+			left, _ := ctx.Mem.Read16(readRgn + 0)
+			top, _ := ctx.Mem.Read16(readRgn + 2)
+			right, _ := ctx.Mem.Read16(readRgn + 4)
+			bottom, _ := ctx.Mem.Read16(readRgn + 6)
+			for y := int(top); y <= int(bottom); y++ {
+				for x := int(left); x <= int(right); x++ {
+					bx := x - int(left) + bufCoordX
+					by := y - int(top) + bufCoordY
+					idx := uint64(by*bufW+bx) * 4
+					if c := ntapi.GlobalConsole.Cell(x, y); c != nil {
+						ctx.Mem.Write16(buf+idx, c.Char)
+						ctx.Mem.Write16(buf+idx+2, c.Attr)
+					}
+				}
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "ReadDirectoryChangesW", func(ctx *ntapi.TrapContext) uint32 {
@@ -27353,19 +27483,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// Always succeed, no real security enforcement
 			ctx.SetReturn(1); return 0
 		})
-		d.RegisterAutoStubHandler(advapi32, "GetTokenInformation", func(ctx *ntapi.TrapContext) uint32 {
-			// TokenClass=1 (TokenUser), TokenClass=9 (TokenType), etc. - return minimal safe data
-			tokenClass := ctx.Arg(1)
-			buf := ctx.Arg(2); bufLen := ctx.Arg(3); retLen := ctx.Arg(4)
-			var needed uint32 = 8
-			if retLen != 0 { mem.Write32(retLen, needed) }
-			if buf != 0 && bufLen >= uint64(needed) {
-				_ = tokenClass
-				mem.Write64(buf, 0) // zero SID pointer / value
-				ctx.SetReturn(1); return 0
-			}
-			ctx.SetReturn(0); return 0
-		})
 		d.RegisterAutoStubHandler(advapi32, "OpenProcessToken", func(ctx *ntapi.TrapContext) uint32 {
 			phToken := ctx.Arg(2)
 			h := handles.Alloc(&ntapi.GenericHandle{Kind: "token"})
@@ -27522,6 +27639,427 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				ctx.SetReturn(1); return 0
 			})
 		}
+
+		// ConvertStringSidToSidA/W - parse "S-1-5-21-xxx-yyy-zzz-500" into a binary SID
+		parseSidString := func(s string) []byte {
+			// Expected format: S-Revision-Authority-Sub1-Sub2-...
+			if len(s) < 4 || s[0] != 'S' || s[1] != '-' { return nil }
+			parts := []string{}
+			cur := ""
+			for _, c := range s[2:] {
+				if c == '-' { parts = append(parts, cur); cur = "" } else { cur += string(c) }
+			}
+			parts = append(parts, cur)
+			if len(parts) < 2 { return nil }
+			var rev uint8 = 1
+			if len(parts[0]) > 0 { fmt.Sscanf(parts[0], "%d", &rev) }
+			var auth uint64
+			fmt.Sscanf(parts[1], "%d", &auth)
+			nSub := len(parts) - 2
+			if nSub < 0 { nSub = 0 }
+			sid := make([]byte, 8+nSub*4)
+			sid[0] = rev
+			sid[1] = byte(nSub)
+			// Authority (6 bytes, big-endian)
+			sid[2] = byte(auth >> 40)
+			sid[3] = byte(auth >> 32)
+			sid[4] = byte(auth >> 24)
+			sid[5] = byte(auth >> 16)
+			sid[6] = byte(auth >> 8)
+			sid[7] = byte(auth)
+			for i := 0; i < nSub; i++ {
+				var v uint32
+				fmt.Sscanf(parts[2+i], "%d", &v)
+				sid[8+i*4+0] = byte(v)
+				sid[8+i*4+1] = byte(v >> 8)
+				sid[8+i*4+2] = byte(v >> 16)
+				sid[8+i*4+3] = byte(v >> 24)
+			}
+			return sid
+		}
+		d.RegisterAutoStubHandler(advapi32, "ConvertStringSidToSidA", func(ctx *ntapi.TrapContext) uint32 {
+			strPtr := ctx.Arg(0)
+			ppSid := ctx.Arg(1)
+			if strPtr == 0 || ppSid == 0 { ctx.SetReturn(0); return 0 }
+			s := readGuestString(strPtr)
+			sid := parseSidString(s)
+			if sid == nil { ctx.SetReturn(0); return 0 }
+			buf := mem.Mmap(0, uint64(len(sid)), mmu.PermRead|mmu.PermWrite)
+			mem.WriteBytes(buf, sid)
+			mem.Write64(ppSid, buf)
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "ConvertStringSidToSidW", func(ctx *ntapi.TrapContext) uint32 {
+			strPtr := ctx.Arg(0)
+			ppSid := ctx.Arg(1)
+			if strPtr == 0 || ppSid == 0 { ctx.SetReturn(0); return 0 }
+			s := readGuestUTF16(strPtr)
+			sid := parseSidString(s)
+			if sid == nil { ctx.SetReturn(0); return 0 }
+			buf := mem.Mmap(0, uint64(len(sid)), mmu.PermRead|mmu.PermWrite)
+			mem.WriteBytes(buf, sid)
+			mem.Write64(ppSid, buf)
+			ctx.SetReturn(1); return 0
+		})
+
+		// Security descriptor helpers
+		d.RegisterAutoStubHandler(advapi32, "InitializeSecurityDescriptor", func(ctx *ntapi.TrapContext) uint32 {
+			pSd := ctx.Arg(0)
+			// rev := ctx.Arg(1) // SECURITY_DESCRIPTOR_REVISION = 1
+			if pSd == 0 { ctx.SetReturn(0); return 0 }
+			// SECURITY_DESCRIPTOR (absolute): revision(1)+sbz(1)+control(2)+owner(8)+group(8)+sacl(8)+dacl(8)
+			for i := uint64(0); i < 40; i++ { mem.Write8(pSd+i, 0) }
+			mem.Write8(pSd, 1)   // Revision = 1
+			mem.Write16(pSd+2, 0x8000) // SE_SELF_RELATIVE flag off, no DACL by default
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "SetSecurityDescriptorDacl", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "SetSecurityDescriptorSacl", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "SetSecurityDescriptorOwner", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "SetSecurityDescriptorGroup", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorDacl", func(ctx *ntapi.TrapContext) uint32 {
+			pbPresent := ctx.Arg(1)
+			ppDacl := ctx.Arg(2)
+			pbDefaulted := ctx.Arg(3)
+			if pbPresent != 0 { mem.Write32(pbPresent, 0) } // no DACL
+			if ppDacl != 0 { mem.Write64(ppDacl, 0) }
+			if pbDefaulted != 0 { mem.Write32(pbDefaulted, 0) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorOwner", func(ctx *ntapi.TrapContext) uint32 {
+			ppOwner := ctx.Arg(1)
+			pbDefaulted := ctx.Arg(2)
+			if ppOwner != 0 { mem.Write64(ppOwner, 0) }
+			if pbDefaulted != 0 { mem.Write32(pbDefaulted, 0) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorGroup", func(ctx *ntapi.TrapContext) uint32 {
+			ppGroup := ctx.Arg(1)
+			pbDefaulted := ctx.Arg(2)
+			if ppGroup != 0 { mem.Write64(ppGroup, 0) }
+			if pbDefaulted != 0 { mem.Write32(pbDefaulted, 0) }
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "IsValidSecurityDescriptor", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "MakeSelfRelativeSD", func(ctx *ntapi.TrapContext) uint32 {
+			// Just copy as-is (pretend already self-relative)
+			pAbsSD := ctx.Arg(0)
+			pSelfSD := ctx.Arg(1)
+			pLen := ctx.Arg(2)
+			size := uint32(40)
+			if pLen != 0 {
+				needed, _ := mem.Read32(pLen)
+				if needed < size { mem.Write32(pLen, size); ctx.SetReturn(0); return 0 }
+			}
+			if pSelfSD != 0 && pAbsSD != 0 {
+				data, _ := mem.ReadBytes(pAbsSD, 40)
+				mem.WriteBytes(pSelfSD, data)
+				// Set SE_SELF_RELATIVE bit in Control
+				ctrl, _ := mem.Read16(pSelfSD + 2)
+				mem.Write16(pSelfSD+2, ctrl|0x8000)
+			}
+			ctx.SetReturn(1); return 0
+		})
+
+		// ACL helpers
+		d.RegisterAutoStubHandler(advapi32, "InitializeAcl", func(ctx *ntapi.TrapContext) uint32 {
+			pAcl := ctx.Arg(0)
+			nAclLen := ctx.Arg(1)
+			// aclRevision := ctx.Arg(2) // 2 = ACL_REVISION
+			if pAcl == 0 { ctx.SetReturn(0); return 0 }
+			// ACL header: AclRevision(1)+Sbz1(1)+AclSize(2)+AceCount(2)+Sbz2(2)
+			mem.Write8(pAcl, 2)                      // AclRevision
+			mem.Write8(pAcl+1, 0)
+			mem.Write16(pAcl+2, uint16(nAclLen))     // AclSize
+			mem.Write16(pAcl+4, 0)                   // AceCount = 0
+			mem.Write16(pAcl+6, 0)
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "AddAccessAllowedAce", func(ctx *ntapi.TrapContext) uint32 {
+			pAcl := ctx.Arg(0)
+			// dwAceRevision := ctx.Arg(1)
+			accessMask := uint32(ctx.Arg(2))
+			pSid := ctx.Arg(3)
+			if pAcl == 0 || pSid == 0 { ctx.SetReturn(0); return 0 }
+			// Read current AceCount
+			aceCount, _ := mem.Read16(pAcl + 4)
+			aclSize, _ := mem.Read16(pAcl + 2)
+			nSub, _ := mem.Read8(pSid + 1)
+			sidLen := uint32(8 + uint32(nSub)*4)
+			aceSize := uint16(4 + 4 + sidLen) // ACE_HEADER(4) + Mask(4) + SID
+			// Write ACE after ACL header + existing ACEs
+			// Find end: we track AclSize used in bytes (simple append)
+			aceOff := uint64(aclSize) // placed at end of current ACL
+			_ = aceOff
+			aceOff = pAcl + 8 + uint64(aceCount)*uint64(aceSize) // naive
+			mem.Write8(aceOff, 0)                              // ACCESS_ALLOWED_ACE_TYPE
+			mem.Write8(aceOff+1, 0)                            // Flags
+			mem.Write16(aceOff+2, aceSize)                     // AceSize
+			mem.Write32(aceOff+4, accessMask)
+			sidData, _ := mem.ReadBytes(pSid, int(sidLen))
+			mem.WriteBytes(aceOff+8, sidData)
+			mem.Write16(pAcl+4, aceCount+1)
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "AddAccessAllowedAceEx", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "AddAccessDeniedAce", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "AddAce", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetAce", func(ctx *ntapi.TrapContext) uint32 {
+			pAcl := ctx.Arg(0)
+			aceIndex := ctx.Arg(1)
+			ppAce := ctx.Arg(2)
+			aceCount, _ := mem.Read16(pAcl + 4)
+			if uint64(aceCount) <= aceIndex { ctx.SetReturn(0); return 0 }
+			if ppAce != 0 {
+				// Find ace at index (fixed-size: 12 bytes each for simple ACEs)
+				aceOff := pAcl + 8 + aceIndex*12
+				mem.Write64(ppAce, aceOff)
+			}
+			ctx.SetReturn(1); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetAclInformation", func(ctx *ntapi.TrapContext) uint32 {
+			pAcl := ctx.Arg(0)
+			pInfo := ctx.Arg(1)
+			// nInfoLen := ctx.Arg(2)
+			infoClass := ctx.Arg(3)
+			if pAcl == 0 || pInfo == 0 { ctx.SetReturn(0); return 0 }
+			switch infoClass {
+			case 1: // AclRevisionInformation: Revision(4)
+				rev, _ := mem.Read8(pAcl)
+				mem.Write32(pInfo, uint32(rev))
+			case 2: // AclSizeInformation: AceCount(4), AclBytesFree(4), AclBytesInUse(4)
+				aceCount, _ := mem.Read16(pAcl + 4)
+				aclSize, _ := mem.Read16(pAcl + 2)
+				mem.Write32(pInfo, uint32(aceCount))
+				mem.Write32(pInfo+4, 0)
+				mem.Write32(pInfo+8, uint32(aclSize))
+			}
+			ctx.SetReturn(1); return 0
+		})
+
+		// GetNamedSecurityInfo / SetNamedSecurityInfo
+		d.RegisterAutoStubHandler(advapi32, "GetNamedSecurityInfoA", func(ctx *ntapi.TrapContext) uint32 {
+			ppSecDesc := ctx.Arg(7)
+			if ppSecDesc != 0 { mem.Write64(ppSecDesc, 0) }
+			ctx.SetReturn(0); return 0 // ERROR_SUCCESS, no security info
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetNamedSecurityInfoW", func(ctx *ntapi.TrapContext) uint32 {
+			ppSecDesc := ctx.Arg(7)
+			if ppSecDesc != 0 { mem.Write64(ppSecDesc, 0) }
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "SetNamedSecurityInfoA", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0 // ERROR_SUCCESS
+		})
+		d.RegisterAutoStubHandler(advapi32, "SetNamedSecurityInfoW", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "GetSecurityInfo", func(ctx *ntapi.TrapContext) uint32 {
+			ppSecDesc := ctx.Arg(7)
+			if ppSecDesc != 0 { mem.Write64(ppSecDesc, 0) }
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(advapi32, "SetSecurityInfo", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0); return 0
+		})
+
+		// AllocateAndInitializeSid - builds a SID from authority + sub-auths
+		d.RegisterAutoStubHandler(advapi32, "AllocateAndInitializeSid", func(ctx *ntapi.TrapContext) uint32 {
+			pAuth := ctx.Arg(0)
+			nSub := uint8(ctx.Arg(1))
+			ppSid := ctx.Arg(8)
+			if pAuth == 0 || ppSid == 0 { ctx.SetReturn(0); return 0 }
+			sidLen := 8 + uint64(nSub)*4
+			buf := mem.Mmap(0, sidLen, mmu.PermRead|mmu.PermWrite)
+			mem.Write8(buf, 1)     // Revision
+			mem.Write8(buf+1, nSub)
+			// Copy 6-byte authority from SID_IDENTIFIER_AUTHORITY
+			for i := uint64(0); i < 6; i++ {
+				b, _ := mem.Read8(pAuth + i)
+				mem.Write8(buf+2+i, b)
+			}
+			// Sub-authorities: arg2..arg7 (RDX=1, R8=2, R9=3, then stack)
+			for i := uint8(0); i < nSub && i < 6; i++ {
+				v := uint32(ctx.Arg(int(2 + i)))
+				mem.Write32(buf+8+uint64(i)*4, v)
+			}
+			mem.Write64(ppSid, buf)
+			ctx.SetReturn(1); return 0
+		})
+
+		// GetTokenInformation - expanded classes
+		d.RegisterAutoStubHandler(advapi32, "GetTokenInformation", func(ctx *ntapi.TrapContext) uint32 {
+			tokenClass := ctx.Arg(1)
+			buf := ctx.Arg(2)
+			bufLen := ctx.Arg(3)
+			retLen := ctx.Arg(4)
+			switch tokenClass {
+			case 1: // TokenUser: TOKEN_USER = {SID_AND_ATTRIBUTES{pSid, Attributes}}
+				// We return a TOKEN_USER with a minimal local admin SID S-1-5-21-0-0-0-500
+				// SID S-1-5-21: 28 bytes (Revision+nSub+6auth+5*4sub)
+				sidBytes := []byte{
+					1, 5, // Revision=1, nSub=5
+					0, 0, 0, 0, 0, 5, // Authority=5 (NT)
+					21, 0, 0, 0,  // Sub 1 = 21
+					0, 0, 0, 0,   // Sub 2
+					0, 0, 0, 0,   // Sub 3
+					0, 0, 0, 0,   // Sub 4
+					0xF4, 1, 0, 0, // Sub 5 = 500 (Administrator RID)
+				}
+				needed := 16 + uint32(len(sidBytes)) // SID_AND_ATTRIBUTES(16) + SID
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					sidAddr := buf + 16
+					mem.WriteBytes(sidAddr, sidBytes)
+					mem.Write64(buf, sidAddr) // pSid
+					mem.Write32(buf+8, 0)     // Attributes
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 2: // TokenGroups
+				needed := uint32(4) // TOKEN_GROUPS.GroupCount=0 only
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write32(buf, 0) // GroupCount = 0
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 3: // TokenPrivileges
+				needed := uint32(4)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write32(buf, 0)
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 5: // TokenPrimaryGroup
+				needed := uint32(8)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write64(buf, 0)
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 6: // TokenDefaultDacl
+				needed := uint32(8)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write64(buf, 0)
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 7: // TokenSource
+				needed := uint32(16)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					// TOKEN_SOURCE: SourceName[8] + SourceIdentifier (LUID 8 bytes)
+					for i := uint64(0); i < 16; i++ { mem.Write8(buf+i, 0) }
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 8: // TokenType
+				needed := uint32(4)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write32(buf, 1) // TokenPrimary = 1
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 9: // TokenImpersonationLevel
+				needed := uint32(4)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write32(buf, 2) // SecurityImpersonation
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 10: // TokenStatistics: 48 bytes
+				needed := uint32(48)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					for i := uint64(0); i < 48; i++ { mem.Write8(buf+i, 0) }
+					mem.Write32(buf+16, 1) // TokenType = Primary
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 17: // TokenElevationType
+				needed := uint32(4)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write32(buf, 1) // TokenElevationTypeDefault
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 18: // TokenLinkedToken
+				needed := uint32(8)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write64(buf, 0)
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 19: // TokenElevation
+				needed := uint32(4)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write32(buf, 0) // TokenIsElevated = FALSE
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 20: // TokenHasRestrictions
+				needed := uint32(4)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write32(buf, 0) // FALSE
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			case 25: // TokenIntegrityLevel
+				needed := uint32(20) // SID_AND_ATTRIBUTES + minimal SID
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					// S-1-16-8192 (Medium integrity)
+					sidAddr := buf + 12
+					mem.Write8(sidAddr, 1)    // Revision
+					mem.Write8(sidAddr+1, 1)  // nSub = 1
+					mem.Write8(sidAddr+2, 0)
+					mem.Write8(sidAddr+3, 0)
+					mem.Write8(sidAddr+4, 0)
+					mem.Write8(sidAddr+5, 0)
+					mem.Write8(sidAddr+6, 0)
+					mem.Write8(sidAddr+7, 16) // Authority = 16 (mandatory)
+					mem.Write32(sidAddr+8, 8192) // Sub = 0x2000 = medium
+					mem.Write64(buf, sidAddr) // pSid
+					mem.Write32(buf+8, 0)     // Attributes
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			default:
+				needed := uint32(8)
+				if retLen != 0 { mem.Write32(retLen, needed) }
+				if buf != 0 && bufLen >= uint64(needed) {
+					mem.Write64(buf, 0)
+					ctx.SetReturn(1); return 0
+				}
+				ctx.SetReturn(0); return 0
+			}
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
