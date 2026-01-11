@@ -99,6 +99,10 @@ const (
 	regR9  = 9
 	regR10 = 10
 	regR11 = 11
+	regR12 = 12
+	regR13 = 13
+	regR14 = 14
+	regR15 = 15
 )
 
 // readReg reads a register by index from the x64 CPU.
@@ -441,6 +445,17 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("NtYieldExecution"), "NtYieldExecution", handleNtYieldExecution)
 	d.register(idOf("NtQueryPerformanceCounter"), "NtQueryPerformanceCounter", handleNtQueryPerformanceCounter)
 	d.register(idOf("NtQuerySystemTime"), "NtQuerySystemTime", handleNtQuerySystemTime)
+	// Keyed Events (used by SRW locks, condition variables, critical section fallback)
+	d.register(idOf("NtCreateKeyedEvent"), "NtCreateKeyedEvent", handleNtCreateKeyedEvent)
+	d.register(idOf("NtOpenKeyedEvent"), "NtOpenKeyedEvent", handleNtOpenKeyedEvent)
+	d.register(idOf("NtWaitForKeyedEvent"), "NtWaitForKeyedEvent", handleNtWaitForKeyedEvent)
+	d.register(idOf("NtReleaseKeyedEvent"), "NtReleaseKeyedEvent", handleNtReleaseKeyedEvent)
+	d.register(idOf("ZwCreateKeyedEvent"), "ZwCreateKeyedEvent", handleNtCreateKeyedEvent)
+	d.register(idOf("ZwWaitForKeyedEvent"), "ZwWaitForKeyedEvent", handleNtWaitForKeyedEvent)
+	d.register(idOf("ZwReleaseKeyedEvent"), "ZwReleaseKeyedEvent", handleNtReleaseKeyedEvent)
+	// UUID allocation
+	d.register(idOf("NtAllocateUuids"), "NtAllocateUuids", handleNtAllocateUuids)
+	d.register(idOf("ZwAllocateUuids"), "ZwAllocateUuids", handleNtAllocateUuids)
 
 	// Critical Sections (implemented in handler, not real kernel calls)
 	d.register(idOf("RtlInitializeCriticalSection"), "RtlInitializeCriticalSection", handleRtlInitCritSec)
@@ -848,6 +863,38 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("NtGdiOpenDCW"), "NtGdiOpenDCW", handleNtGdiOpenDCW)
 	d.register(idOf("NtGdiGetTextMetricsW"), "NtGdiGetTextMetricsW", handleNtGdiGetTextMetricsW)
 	d.register(idOf("NtGdiFlush"), "NtGdiFlush", handleNtGdiFlush)
+
+	// ── Wave 10: additional NT handlers ──────────────────────────
+	// RtlEncode/DecodePointer (used by CRT on Vista+)
+	d.register(idOf("RtlEncodePointer"), "RtlEncodePointer", handleRtlEncodePointer)
+	d.register(idOf("RtlDecodePointer"), "RtlDecodePointer", handleRtlDecodePointer)
+	d.register(idOf("RtlEncodeSystemPointer"), "RtlEncodeSystemPointer", handleRtlEncodeSystemPointer)
+	d.register(idOf("RtlDecodeSystemPointer"), "RtlDecodeSystemPointer", handleRtlDecodeSystemPointer)
+	// Thread management
+	d.register(idOf("NtTerminateThread"), "NtTerminateThread", handleNtTerminateThread)
+	d.register(idOf("ZwTerminateThread"), "ZwTerminateThread", handleNtTerminateThread)
+	d.register(idOf("NtCreateThread"), "NtCreateThread", handleNtCreateThread)
+	d.register(idOf("NtCreateThreadEx"), "NtCreateThreadEx", handleNtCreateThreadEx)
+	d.register(idOf("NtSetInformationThread"), "NtSetInformationThread", handleNtSetInformationThread)
+	d.register(idOf("NtQueryInformationThread"), "NtQueryInformationThread", handleNtQueryInformationThread)
+	// Job objects
+	d.register(idOf("NtCreateJobObject"), "NtCreateJobObject", handleNtCreateJobObject)
+	d.register(idOf("NtOpenJobObject"), "NtOpenJobObject", handleNtOpenJobObject)
+	d.register(idOf("NtAssignProcessToJobObject"), "NtAssignProcessToJobObject", handleNtAssignProcessToJobObject)
+	d.register(idOf("NtQueryInformationJobObject"), "NtQueryInformationJobObject", handleNtQueryInformationJobObject)
+	// SEH / exception unwind (x64)
+	d.register(idOf("RtlAddFunctionTable"), "RtlAddFunctionTable", handleRtlAddFunctionTable)
+	d.register(idOf("RtlInstallFunctionTableCallback"), "RtlInstallFunctionTableCallback", handleRtlInstallFunctionTableCallback)
+	d.register(idOf("RtlDeleteFunctionTable"), "RtlDeleteFunctionTable", handleRtlDeleteFunctionTable)
+	d.register(idOf("RtlAddGrowableFunctionTable"), "RtlAddGrowableFunctionTable", handleRtlAddGrowableFunctionTable)
+	d.register(idOf("RtlGrowFunctionTable"), "RtlGrowFunctionTable", handleRtlGrowFunctionTable)
+	d.register(idOf("RtlDeleteGrowableFunctionTable"), "RtlDeleteGrowableFunctionTable", handleRtlDeleteGrowableFunctionTable)
+	d.register(idOf("RtlLookupFunctionEntry"), "RtlLookupFunctionEntry", handleRtlLookupFunctionEntry)
+	d.register(idOf("RtlCaptureContext"), "RtlCaptureContext", handleRtlCaptureContext)
+	d.register(idOf("RtlVirtualUnwind"), "RtlVirtualUnwind", handleRtlVirtualUnwind)
+	// Misc NT
+	d.register(idOf("NtAreMappedFilesTheSame"), "NtAreMappedFilesTheSame", handleNtAreMappedFilesTheSame)
+	d.register(idOf("NtSetTimerEx"), "NtSetTimerEx", handleNtSetTimerEx)
 }
 
 // registerWin32kHandlers registers placeholder Win32k handlers.

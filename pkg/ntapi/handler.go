@@ -11,6 +11,7 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
+	"golang.org/x/sys/unix"
 )
 
 // NTSTATUS codes.
@@ -1763,6 +1764,105 @@ func handleNtQueryTimerResolution(ctx *TrapContext) uint32 {
 	return StatusSuccess
 }
 
+// ──────────────────────────────────────────────────────────
+// NtCreateKeyedEvent / NtOpenKeyedEvent / NtWaitForKeyedEvent / NtReleaseKeyedEvent
+// Reference: reactos/ntoskrnl/ex/keyedevt.c
+// Used by ntdll SRW locks, condition variables, critical section fallback
+// ──────────────────────────────────────────────────────────
+
+func handleNtCreateKeyedEvent(ctx *TrapContext) uint32 {
+	outHandle := ctx.Arg(0)
+	// arg1=DesiredAccess, arg2=ObjectAttributes, arg3=Flags - all ignored for now
+	name := ""
+	ke := NewKeyedEvent(name)
+	h := ctx.Handles.Alloc(ke)
+	if outHandle != 0 {
+		ctx.Mem.Write64(outHandle, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtOpenKeyedEvent(ctx *TrapContext) uint32 {
+	outHandle := ctx.Arg(0)
+	// For now always return the global fallback event handle
+	h := ctx.Handles.Alloc(GlobalKeyedEvent)
+	if outHandle != 0 {
+		ctx.Mem.Write64(outHandle, uint64(h))
+	}
+	return StatusSuccess
+}
+
+func handleNtWaitForKeyedEvent(ctx *TrapContext) uint32 {
+	// NtWaitForKeyedEvent(Handle, Key, Alertable, Timeout*)
+	hVal     := Handle(ctx.Arg(0))
+	key      := ctx.Arg(1) // guest address used as key
+	timeoutP := ctx.Arg(3)
+
+	var ke *KeyedEventHandle
+	if hVal == 0 || hVal == Handle(0xFFFFFFFFFFFFFFFF) {
+		ke = GlobalKeyedEvent
+	} else {
+		ke = ctx.Handles.GetKeyedEvent(hVal)
+		if ke == nil {
+			ke = GlobalKeyedEvent
+		}
+	}
+
+	d := ntWaitDuration(ctx, timeoutP)
+	status := ke.Wait(key, d)
+	return status
+}
+
+func handleNtReleaseKeyedEvent(ctx *TrapContext) uint32 {
+	// NtReleaseKeyedEvent(Handle, Key, Alertable, Timeout*)
+	hVal     := Handle(ctx.Arg(0))
+	key      := ctx.Arg(1)
+	timeoutP := ctx.Arg(3)
+
+	var ke *KeyedEventHandle
+	if hVal == 0 || hVal == Handle(0xFFFFFFFFFFFFFFFF) {
+		ke = GlobalKeyedEvent
+	} else {
+		ke = ctx.Handles.GetKeyedEvent(hVal)
+		if ke == nil {
+			ke = GlobalKeyedEvent
+		}
+	}
+
+	d := ntWaitDuration(ctx, timeoutP)
+	status := ke.Release(key, d)
+	return status
+}
+
+// ──────────────────────────────────────────────────────────
+// NtAllocateUuids - generates UUID components
+// Reference: reactos/ntoskrnl/ex/uuid.c
+// ──────────────────────────────────────────────────────────
+func handleNtAllocateUuids(ctx *TrapContext) uint32 {
+	// NtAllocateUuids(Time*, Range*, Sequence*, Seed*)
+	timePtr := ctx.Arg(0)
+	rangePtr := ctx.Arg(1)
+	seqPtr := ctx.Arg(2)
+	seedPtr := ctx.Arg(3)
+
+	// Use current time as the time component
+	now := uint64(time.Now().UnixNano()/100 + 116444736000000000) // FILETIME
+	if timePtr != 0 { ctx.Mem.Write64(timePtr, now) }
+	if rangePtr != 0 { ctx.Mem.Write32(rangePtr, 1) }
+
+	var seq [2]byte
+	unix.Getrandom(seq[:], 0)
+	if seqPtr != 0 { ctx.Mem.Write16(seqPtr, uint16(seq[0])|(uint16(seq[1])<<8)) }
+
+	var seed [8]byte
+	unix.Getrandom(seed[:], 0)
+	if seedPtr != 0 {
+		for i, b := range seed { ctx.Mem.Write8(seedPtr+uint64(i), b) }
+	}
+	return StatusSuccess
+}
+
+
 func handleNtWaitForSingleObject(ctx *TrapContext) uint32 {
 	handle := Handle(ctx.Arg(0))
 	_ = ctx.Arg(1) // Alertable
@@ -3300,10 +3400,43 @@ func handleRtlIsProcessorFeaturePresent(ctx *TrapContext) uint32 {
 	return StatusSuccess
 }
 
-func handleRtlCaptureContext(ctx *TrapContext) uint32 { return StatusSuccess }
+func handleRtlCaptureContext(ctx *TrapContext) uint32 {
+	// RtlCaptureContext(CONTEXT* pCtx)
+	// Write CONTEXT_AMD64 structure so callers (e.g. StackWalk) have valid register state.
+	// Layout: ContextFlags(0), ..., Rax(0x78), Rcx(0x80), ..., Rip(0xF8), Rsp(0x98)
+	pCtx := ctx.Arg(0)
+	if pCtx == 0 { return StatusSuccess }
+	ctx.Mem.Write32(pCtx+0, 0x10000B) // CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER
+	// Write registers via RegisterReader if available
+	if rr, ok := ctx.CPU.(RegisterReader); ok {
+		ctx.Mem.Write64(pCtx+0x78, rr.ReadReg(regRAX))
+		ctx.Mem.Write64(pCtx+0x80, rr.ReadReg(regRCX))
+		ctx.Mem.Write64(pCtx+0x88, rr.ReadReg(regRDX))
+		ctx.Mem.Write64(pCtx+0x90, rr.ReadReg(regRBX))
+		ctx.Mem.Write64(pCtx+0x98, rr.ReadReg(regRSP))
+		ctx.Mem.Write64(pCtx+0xA0, rr.ReadReg(regRBP))
+		ctx.Mem.Write64(pCtx+0xA8, rr.ReadReg(regRSI))
+		ctx.Mem.Write64(pCtx+0xB0, rr.ReadReg(regRDI))
+		ctx.Mem.Write64(pCtx+0xB8, rr.ReadReg(regR8))
+		ctx.Mem.Write64(pCtx+0xC0, rr.ReadReg(regR9))
+		ctx.Mem.Write64(pCtx+0xC8, rr.ReadReg(regR10))
+		ctx.Mem.Write64(pCtx+0xD0, rr.ReadReg(regR11))
+		ctx.Mem.Write64(pCtx+0xD8, rr.ReadReg(regR12))
+		ctx.Mem.Write64(pCtx+0xE0, rr.ReadReg(regR13))
+		ctx.Mem.Write64(pCtx+0xE8, rr.ReadReg(regR14))
+		ctx.Mem.Write64(pCtx+0xF0, rr.ReadReg(regR15))
+	}
+	ctx.Mem.Write64(pCtx+0xF8, ctx.CPU.GetPC()) // Rip
+	ctx.Mem.Write64(pCtx+0x98, ctx.CPU.GetSP()) // Rsp (overwrite)
+	return StatusSuccess
+}
 func handleRtlUnwind(ctx *TrapContext) uint32         { return StatusSuccess }
 func handleRtlUnwindEx(ctx *TrapContext) uint32        { return StatusSuccess }
 func handleRtlLookupFunctionEntry(ctx *TrapContext) uint32 {
+	// RtlLookupFunctionEntry(ControlPc, ImageBase*, HistoryTable*) → RUNTIME_FUNCTION*
+	// Return 0 (not found) - caller will use default unwind or frame pointer
+	imageBasePtr := ctx.Arg(1)
+	if imageBasePtr != 0 { ctx.Mem.Write64(imageBasePtr, 0) }
 	ctx.SetReturn(0)
 	return StatusSuccess
 }
@@ -5849,4 +5982,194 @@ func strconvParseInt(s string, base int) (int64, error) {
 func strconvParseUint(s string, base int) (uint64, error) {
 	v, err := strconvParseInt(s, base)
 	return uint64(v), err
+}
+
+// ──────────────────────────────────────────────────────────
+// Wave 10: RtlEncodePointer / RtlDecodePointer
+// Windows Vista+ uses a per-process cookie XOR to encode pointers
+// stored in function pointer tables (CRT uses this heavily).
+// Reference: wine/dlls/ntdll/misc.c, reactos/lib/rtl/process.c
+// ──────────────────────────────────────────────────────────
+
+// processCookie is a process-wide random value used for pointer encoding.
+// In Windows it is stored at PEB+0x700, but for HLE purposes we keep it here.
+var processCookie = func() uint64 {
+var b [8]byte
+unix.Getrandom(b[:], 0)
+v := uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+if v == 0 { v = 0xDEADBEEFCAFEBABE }
+return v
+}()
+
+func handleRtlEncodePointer(ctx *TrapContext) uint32 {
+ptr := ctx.Arg(0)
+ctx.SetReturn(ptr ^ processCookie)
+return StatusSuccess
+}
+
+func handleRtlDecodePointer(ctx *TrapContext) uint32 {
+ptr := ctx.Arg(0)
+ctx.SetReturn(ptr ^ processCookie)
+return StatusSuccess
+}
+
+func handleRtlEncodeSystemPointer(ctx *TrapContext) uint32 {
+ptr := ctx.Arg(0)
+ctx.SetReturn(ptr ^ processCookie)
+return StatusSuccess
+}
+
+func handleRtlDecodeSystemPointer(ctx *TrapContext) uint32 {
+ptr := ctx.Arg(0)
+ctx.SetReturn(ptr ^ processCookie)
+return StatusSuccess
+}
+
+// ──────────────────────────────────────────────────────────
+// NtTerminateThread - terminate a specific thread
+// Reference: reactos/ntoskrnl/ps/kill.c
+// ──────────────────────────────────────────────────────────
+func handleNtTerminateThread(ctx *TrapContext) uint32 {
+// NtTerminateThread(ThreadHandle, ExitStatus)
+// ThreadHandle == NULL or current thread → exit the process (single-threaded HLE)
+hThread := ctx.Arg(0)
+exitCode := uint32(ctx.Arg(1))
+_ = hThread
+// In single-threaded HLE, terminating any thread terminates the process
+os.Exit(int(exitCode))
+return StatusSuccess
+}
+
+// ──────────────────────────────────────────────────────────
+// NtCreateJobObject / NtOpenJobObject / NtAssignProcessToJobObject
+// Reference: reactos/ntoskrnl/ps/job.c
+// ──────────────────────────────────────────────────────────
+func handleNtCreateJobObject(ctx *TrapContext) uint32 {
+outHandle := ctx.Arg(0)
+// arg1=DesiredAccess, arg2=ObjectAttributes
+name := ""
+j := NewJobHandle(name)
+h := ctx.Handles.Alloc(j)
+if outHandle != 0 {
+ctx.Mem.Write64(outHandle, uint64(h))
+}
+return StatusSuccess
+}
+
+func handleNtOpenJobObject(ctx *TrapContext) uint32 {
+outHandle := ctx.Arg(0)
+j := NewJobHandle("")
+h := ctx.Handles.Alloc(j)
+if outHandle != 0 {
+ctx.Mem.Write64(outHandle, uint64(h))
+}
+return StatusSuccess
+}
+
+func handleNtAssignProcessToJobObject(ctx *TrapContext) uint32 {
+hJob := Handle(ctx.Arg(0))
+// hProcess := Handle(ctx.Arg(1))
+j := ctx.Handles.GetJob(hJob)
+if j != nil {
+j.AddProcess(ctx.State.ProcessId)
+}
+return StatusSuccess
+}
+
+func handleNtQueryInformationJobObject(ctx *TrapContext) uint32 {
+// NtQueryInformationJobObject(JobHandle, InfoClass, Info, InfoLen, ReturnLen*)
+// Class 1 = JobObjectBasicAccountingInformation - return zeros (no limits)
+infoPtr := ctx.Arg(2)
+infoLen := ctx.Arg(3)
+retLen := ctx.Arg(4)
+if infoPtr != 0 && infoLen > 0 {
+for i := uint64(0); i < infoLen; i++ {
+ctx.Mem.Write8(infoPtr+i, 0)
+}
+}
+if retLen != 0 { ctx.Mem.Write32(retLen, uint32(infoLen)) }
+return StatusSuccess
+}
+
+// ──────────────────────────────────────────────────────────
+// NtCreateThread / NtCreateThreadEx (stub - Raven is single-threaded for now)
+// Reference: reactos/ntoskrnl/ps/thread.c
+// ──────────────────────────────────────────────────────────
+func handleNtCreateThread(ctx *TrapContext) uint32 {
+// NtCreateThread(ThreadHandle*, Access, ObjAttr*, ProcessHandle,
+//                ClientId*, ThreadContext*, InitialTeb*, Suspended)
+// We don't support true multi-threaded guests; return a pseudo-handle.
+outHandle := ctx.Arg(0)
+h := ctx.Handles.Alloc(&pseudoThreadHandle{})
+if outHandle != 0 { ctx.Mem.Write64(outHandle, uint64(h)) }
+return StatusSuccess
+}
+
+func handleNtCreateThreadEx(ctx *TrapContext) uint32 {
+outHandle := ctx.Arg(0)
+h := ctx.Handles.Alloc(&pseudoThreadHandle{})
+if outHandle != 0 { ctx.Mem.Write64(outHandle, uint64(h)) }
+return StatusSuccess
+}
+
+// pseudoThreadHandle is a dummy kernel object for stubs.
+type pseudoThreadHandle struct{}
+func (p *pseudoThreadHandle) handleType() string { return "thread" }
+
+// ──────────────────────────────────────────────────────────
+// NtSetTimerEx - extended timer with flags
+// ──────────────────────────────────────────────────────────
+func handleNtSetTimerEx(ctx *TrapContext) uint32 {
+return handleNtSetTimer(ctx)
+}
+
+// ──────────────────────────────────────────────────────────
+// RtlAddFunctionTable / RtlInstallFunctionTableCallback / RtlDeleteFunctionTable
+// Used by MSVC for x64 exception handling (SEH) - we return TRUE (registered).
+// Reference: wine/dlls/ntdll/unwind.c
+// ──────────────────────────────────────────────────────────
+func handleRtlAddFunctionTable(ctx *TrapContext) uint32 {
+ctx.SetReturn(1) // TRUE
+return StatusSuccess
+}
+
+func handleRtlInstallFunctionTableCallback(ctx *TrapContext) uint32 {
+ctx.SetReturn(1)
+return StatusSuccess
+}
+
+func handleRtlDeleteFunctionTable(ctx *TrapContext) uint32 {
+ctx.SetReturn(1)
+return StatusSuccess
+}
+
+func handleRtlAddGrowableFunctionTable(ctx *TrapContext) uint32 {
+ctx.SetReturn(0) // STATUS_SUCCESS
+return StatusSuccess
+}
+
+func handleRtlGrowFunctionTable(ctx *TrapContext) uint32 {
+return StatusSuccess
+}
+
+func handleRtlDeleteGrowableFunctionTable(ctx *TrapContext) uint32 {
+return StatusSuccess
+}
+
+// ──────────────────────────────────────────────────────────
+// RtlVirtualUnwind - x64 SEH virtual unwind
+// Reference: wine/dlls/ntdll/signal_x86_64.c
+// ──────────────────────────────────────────────────────────
+func handleRtlVirtualUnwind(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0)
+	return StatusSuccess
+}
+
+// ──────────────────────────────────────────────────────────
+// NtAreMappedFilesTheSame
+// ──────────────────────────────────────────────────────────
+func handleNtAreMappedFilesTheSame(ctx *TrapContext) uint32 {
+	if ctx.Arg(0) == ctx.Arg(1) { return StatusSuccess }
+	return 0xC0000002 // STATUS_NOT_SAME_DEVICE
 }

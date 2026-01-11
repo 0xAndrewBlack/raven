@@ -16521,10 +16521,79 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- rpcrt4.dll ---
 	delayHandlerRegistrars = append(delayHandlerRegistrars, func() {
 	if rpcrt4, ok := synthByName["rpcrt4.dll"]; ok {
+		genGUIDrpc := func(ptr uint64) {
+			if ptr == 0 { return }
+			var b [16]byte
+			unix.Getrandom(b[:], 0)
+			b[6] = (b[6] & 0x0F) | 0x40
+			b[8] = (b[8] & 0x3F) | 0x80
+			mem.Write32(ptr, uint32(b[0])|uint32(b[1])<<8|uint32(b[2])<<16|uint32(b[3])<<24)
+			mem.Write16(ptr+4, uint16(b[4])|uint16(b[5])<<8)
+			mem.Write16(ptr+6, uint16(b[6])|uint16(b[7])<<8)
+			for i := 0; i < 8; i++ { mem.Write8(ptr+8+uint64(i), b[8+i]) }
+		}
+		d.RegisterAutoStubHandler(rpcrt4, "UuidCreate", func(ctx *ntapi.TrapContext) uint32 {
+			genGUIDrpc(ctx.Arg(0))
+			ctx.SetReturn(0) // RPC_S_OK
+			return 0
+		})
+		d.RegisterAutoStubHandler(rpcrt4, "UuidCreateSequential", func(ctx *ntapi.TrapContext) uint32 {
+			genGUIDrpc(ctx.Arg(0))
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(rpcrt4, "UuidToStringW", func(ctx *ntapi.TrapContext) uint32 {
+			// UuidToStringW(UUID* uuid, RPC_WSTR* StringUuid)
+			uuidPtr := ctx.Arg(0)
+			ppStr := ctx.Arg(1)
+			if uuidPtr == 0 || ppStr == 0 { ctx.SetReturn(10) /* RPC_S_INVALID_ARG */; return 0 }
+			a0, _ := mem.Read32(uuidPtr)
+			a1, _ := mem.Read16(uuidPtr+4)
+			a2, _ := mem.Read16(uuidPtr+6)
+			var b [8]byte
+			for i := 0; i < 8; i++ { b[i], _ = mem.Read8(uuidPtr+8+uint64(i)) }
+			s := fmt.Sprintf("%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+				a0, a1, a2, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7])
+			ws := utf16Encode(s)
+			addr := mem.Mmap(0, uint64(len(ws)+1)*2, mmu.PermRead|mmu.PermWrite)
+			for i, w := range ws { mem.Write16(addr+uint64(i)*2, w) }
+			mem.Write16(addr+uint64(len(ws))*2, 0)
+			mem.Write64(ppStr, addr)
+			ctx.SetReturn(0); return 0
+		})
+		d.RegisterAutoStubHandler(rpcrt4, "UuidToStringA", func(ctx *ntapi.TrapContext) uint32 {
+			uuidPtr := ctx.Arg(0)
+			ppStr := ctx.Arg(1)
+			if uuidPtr == 0 || ppStr == 0 { ctx.SetReturn(10); return 0 }
+			a0, _ := mem.Read32(uuidPtr)
+			a1, _ := mem.Read16(uuidPtr+4)
+			a2, _ := mem.Read16(uuidPtr+6)
+			var b [8]byte
+			for i := 0; i < 8; i++ { b[i], _ = mem.Read8(uuidPtr+8+uint64(i)) }
+			s := fmt.Sprintf("%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+				a0, a1, a2, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7])
+			addr := mem.Mmap(0, uint64(len(s)+1), mmu.PermRead|mmu.PermWrite)
+			mem.WriteBytes(addr, append([]byte(s), 0))
+			mem.Write64(ppStr, addr)
+			ctx.SetReturn(0); return 0
+		})
 		d.RegisterAutoStubHandler(rpcrt4, "RpcStringFreeW", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0) // RPC_S_OK
 			return 0
 		})
+		d.RegisterAutoStubHandler(rpcrt4, "RpcStringFreeA", func(ctx *ntapi.TrapContext) uint32 {
+			ctx.SetReturn(0)
+			return 0
+		})
+		for _, fn := range []string{"RpcBindingFree", "RpcBindingFromStringBindingW",
+			"RpcBindingFromStringBindingA", "RpcStringBindingComposeW", "RpcStringBindingComposeA",
+			"RpcServerRegisterIf", "RpcServerRegisterIf2", "RpcServerListen",
+			"NdrClientCall2", "NdrClientCall3"} {
+			fn := fn; _ = fn
+			d.RegisterAutoStubHandler(rpcrt4, fn, func(ctx *ntapi.TrapContext) uint32 {
+				ctx.SetReturn(0); return 0
+			})
+		}
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -17264,6 +17333,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			ctx.SetReturn(1); return 0
 		})
 		_ = hmac.New // ensure import used
+		// SystemFunction036 = RtlGenRandom (used by msvcrt, ucrt, etc.)
+		d.RegisterAutoStubHandler(advapi32, "SystemFunction036", func(ctx *ntapi.TrapContext) uint32 {
+			buf := ctx.Arg(0)
+			sz := ctx.Arg(1)
+			if buf != 0 && sz > 0 {
+				b := make([]byte, sz)
+				unix.Getrandom(b, 0)
+				for i, v := range b { ctx.Mem.Write8(buf+uint64(i), v) }
+			}
+			ctx.SetReturn(1) // TRUE
+			return 0
+		})
 	}
 	})
 	delayHandlerRegistrars[len(delayHandlerRegistrars)-1]()
@@ -18308,6 +18389,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 		d.RegisterAutoStubHandler(ole32, "DoDragDrop", func(ctx *ntapi.TrapContext) uint32 {
 			ctx.SetReturn(0x80004004) // DRAGDROP_S_DROP cancel
+			return 0
+		})
+		// UUID/GUID generation
+		genGUID := func(ptr uint64) {
+			if ptr == 0 { return }
+			var b [16]byte
+			unix.Getrandom(b[:], 0)
+			// Set version 4 and variant bits (RFC 4122)
+			b[6] = (b[6] & 0x0F) | 0x40
+			b[8] = (b[8] & 0x3F) | 0x80
+			ctx := ptr
+			mem.Write32(ctx, uint32(b[0])|uint32(b[1])<<8|uint32(b[2])<<16|uint32(b[3])<<24)
+			mem.Write16(ctx+4, uint16(b[4])|uint16(b[5])<<8)
+			mem.Write16(ctx+6, uint16(b[6])|uint16(b[7])<<8)
+			for i := 0; i < 8; i++ { mem.Write8(ctx+8+uint64(i), b[8+i]) }
+		}
+		d.RegisterAutoStubHandler(ole32, "CoCreateGuid", func(ctx *ntapi.TrapContext) uint32 {
+			genGUID(ctx.Arg(0))
+			ctx.SetReturn(0) // S_OK
 			return 0
 		})
 	}

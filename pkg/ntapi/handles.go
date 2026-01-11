@@ -921,6 +921,110 @@ func (t *CondVarTable) Get(addr uint64) *CondVarEntry {
 // GlobalCondVars is the process-wide condition variable table.
 var GlobalCondVars = NewCondVarTable()
 
+// ──────────────────────────────────────────────────────────
+// KeyedEventHandle - NtCreateKeyedEvent / NtWaitForKeyedEvent / NtReleaseKeyedEvent
+//
+// Semantics (ReactOS ntoskrnl/ex/keyedevt.c):
+//   Wait: if a pending release for [key] exists, consume it and return.
+//         Otherwise, block until a release arrives.
+//   Release: if a thread is waiting on [key], wake it and return.
+//            Otherwise, block until a waiter arrives.
+//   This is a rendezvous primitive - both sides must pair up.
+// ──────────────────────────────────────────────────────────
+type keyedSlot struct {
+	ch chan struct{} // buffered(1) channel used as the wake signal
+}
+
+// KeyedEventHandle is the NT keyed-event object.
+type KeyedEventHandle struct {
+	mu      sync.Mutex
+	Name    string
+	waiters map[uint64][]chan struct{} // key → list of blocked waiters
+	releasers map[uint64][]chan struct{} // key → list of blocked releasers
+}
+
+func NewKeyedEvent(name string) *KeyedEventHandle {
+	return &KeyedEventHandle{
+		Name:      name,
+		waiters:   make(map[uint64][]chan struct{}),
+		releasers: make(map[uint64][]chan struct{}),
+	}
+}
+
+func (k *KeyedEventHandle) handleType() string { return "keyed-event" }
+
+// Wait blocks until a matching Release for key is called (or timeout).
+func (k *KeyedEventHandle) Wait(key uint64, timeout time.Duration) uint32 {
+	k.mu.Lock()
+	// If there's a pending releaser waiting for a taker, consume it.
+	if list := k.releasers[key]; len(list) > 0 {
+		ch := list[0]
+		k.releasers[key] = list[1:]
+		k.mu.Unlock()
+		ch <- struct{}{} // wake the releaser
+		return 0         // STATUS_SUCCESS
+	}
+	// No releaser yet - enqueue ourselves and block.
+	ch := make(chan struct{}, 1)
+	k.waiters[key] = append(k.waiters[key], ch)
+	k.mu.Unlock()
+	if timeout == 0 {
+		timeout = 30 * time.Second // cap infinite
+	}
+	select {
+	case <-ch:
+		return 0 // STATUS_SUCCESS
+	case <-time.After(timeout):
+		k.mu.Lock()
+		list := k.waiters[key]
+		for i, c := range list {
+			if c == ch {
+				k.waiters[key] = append(list[:i], list[i+1:]...)
+				break
+			}
+		}
+		k.mu.Unlock()
+		return 0x00000102 // STATUS_TIMEOUT
+	}
+}
+
+// Release wakes a waiter for key, or blocks until one arrives.
+func (k *KeyedEventHandle) Release(key uint64, timeout time.Duration) uint32 {
+	k.mu.Lock()
+	if list := k.waiters[key]; len(list) > 0 {
+		ch := list[0]
+		k.waiters[key] = list[1:]
+		k.mu.Unlock()
+		ch <- struct{}{} // wake the waiter
+		return 0
+	}
+	// No waiter yet - enqueue ourselves.
+	ch := make(chan struct{}, 1)
+	k.releasers[key] = append(k.releasers[key], ch)
+	k.mu.Unlock()
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	select {
+	case <-ch:
+		return 0
+	case <-time.After(timeout):
+		k.mu.Lock()
+		list := k.releasers[key]
+		for i, c := range list {
+			if c == ch {
+				k.releasers[key] = append(list[:i], list[i+1:]...)
+				break
+			}
+		}
+		k.mu.Unlock()
+		return 0x00000102
+	}
+}
+
+// GlobalKeyedEvent is the fallback keyed event (Handle==NULL means use this).
+var GlobalKeyedEvent = NewKeyedEvent("CritSecOutOfMemoryEvent")
+
 // JobHandle represents a Win32 Job Object.
 type JobHandle struct {
 	mu      sync.Mutex
@@ -1495,6 +1599,20 @@ func (ht *HandleTable) GetJob(h Handle) *JobHandle {
 	}
 	return j
 }
+
+// GetKeyedEvent returns the KeyedEventHandle for h, or nil.
+func (ht *HandleTable) GetKeyedEvent(h Handle) *KeyedEventHandle {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	ke, ok := obj.(*KeyedEventHandle)
+	if !ok {
+		return nil
+	}
+	return ke
+}
+
 
 // GetMailslot returns the MailslotHandle for a handle, or nil.
 func (ht *HandleTable) GetMailslot(h Handle) *MailslotHandle {
