@@ -429,6 +429,9 @@ func registerDwmapiHandlers(hctx *HandlerCtx) {
 	_ = dwmapi
 
 	d.RegisterAutoStubHandler(dwmapi, "DwmSetWindowAttribute", func(ctx *ntapi.TrapContext) uint32 {
+		// hwnd := ctx.Arg(0), dwAttribute := ctx.Arg(1)
+		// pvAttribute := ctx.Arg(2), cbAttribute := ctx.Arg(3)
+		// Accept all attributes silently - we don't render DWM effects
 		ctx.SetReturn(0) // S_OK
 		return 0
 	})

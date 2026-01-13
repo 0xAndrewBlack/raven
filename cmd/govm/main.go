@@ -811,6 +811,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	}()
 
 	// Run the PE
+rerun:
 	if err := mainThread.CPU.Run(); err != nil {
 		if exitErr, ok := err.(*arch.ExitError); ok {
 			if regFile != "" {
@@ -818,6 +819,17 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 			}
 			pprof.StopCPUProfile()
 			os.Exit(exitErr.Code)
+		}
+		errMsg := err.Error()
+		// Handle __fastfail (INT 0x29) - typically GS cookie failure.
+		// Instead of terminating, rewind to the message loop entry.
+		if strings.Contains(errMsg, "__fastfail") {
+			fmt.Fprintf(os.Stderr, "govm: %s - attempting to survive\n", errMsg)
+			if msgLoopSP != 0 && msgLoopPC != 0 {
+				c.SetSP(msgLoopSP)
+				c.SetPC(msgLoopPC)
+				goto rerun
+			}
 		}
 		fmt.Fprintf(os.Stderr, "govm: PE runtime error: %v\n", err)
 		// Dump registers and stack for debugging

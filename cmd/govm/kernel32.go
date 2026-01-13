@@ -470,7 +470,29 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsProcessorFeaturePresent", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // feature not present
+		feature := uint32(ctx.Arg(0))
+		// Standard x86-64 features that are always present on any 64-bit CPU
+		supported := map[uint32]bool{
+			0:  true, // PF_FLOATING_POINT_PRECISION_ERRATA (no errata)
+			3:  true, // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
+			6:  true, // PF_PAE_ENABLED
+			7:  true, // PF_NX_ENABLED
+			8:  true, // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2 - required for x64)
+			9:  false, // PF_SSE3_INSTRUCTIONS_AVAILABLE
+			10: true, // PF_COMPARE_EXCHANGE128
+			12: true, // PF_CHANNELS_ENABLED
+			13: true, // PF_XSAVE_ENABLED
+			17: true, // PF_SSSE3_INSTRUCTIONS_AVAILABLE
+			20: true, // PF_FASTFAIL_AVAILABLE
+			23: true, // PF_RDTSC_INSTRUCTION_AVAILABLE
+			36: true, // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
+			37: true, // PF_SSE4_2_INSTRUCTIONS_AVAILABLE
+		}
+		if supported[feature] {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	// resolveApiSetDLL maps Windows API set names to their host DLL.
@@ -915,6 +937,8 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleMode", func(ctx *ntapi.TrapContext) uint32 {
+		// hConsoleHandle := ctx.Arg(0) - we accept any handle
+		// dwMode := ctx.Arg(1) - stored for GetConsoleMode if needed later
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -7921,7 +7945,28 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetModuleHandleExA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		modNamePtr := ctx.Arg(1)
+		phModule := ctx.Arg(2)
+		if modNamePtr == 0 {
+			imageBase, _ := mem.Read64(procState.PEBAddr + 0x10)
+			if phModule != 0 {
+				mem.Write64Raw(phModule, imageBase)
+			}
+			ctx.SetReturn(1)
+		} else {
+			modName := strings.ToLower(readGuestString(modNamePtr))
+			if !strings.HasSuffix(modName, ".dll") && !strings.HasSuffix(modName, ".exe") {
+				modName += ".dll"
+			}
+			if s, ok := synthByName[modName]; ok {
+				if phModule != 0 {
+					mem.Write64Raw(phModule, s.BaseAddr)
+				}
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetNLSVersion", func(ctx *ntapi.TrapContext) uint32 {
@@ -12444,7 +12489,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetFileInformationByHandle", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		// hFile := ctx.Arg(0), infoClass := ctx.Arg(1), lpInfo := ctx.Arg(2), bufSize := ctx.Arg(3)
+		// We accept the call but don't act on it (no underlying file metadata to set)
+		ctx.SetReturn(1) // TRUE - pretend success
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetFilePointer", func(ctx *ntapi.TrapContext) uint32 {

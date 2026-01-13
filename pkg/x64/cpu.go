@@ -1551,6 +1551,22 @@ case 0x9F: // LAHF
 c.Regs[RAX] = (c.Regs[RAX] & ^uint64(0xFF00)) | (uint64(c.Rflags&0xFF) << 8)
 return nil
 
+// --- INT n (0xCD) ---
+case 0xCD: // INT n
+intNum, err := c.fetch8()
+if err != nil {
+	return err
+}
+if intNum == 0x29 {
+	// __fastfail - RCX contains the fast-fail code
+	return fmt.Errorf("__fastfail(%d) at RIP=0x%x", c.Regs[RCX], startRIP)
+}
+if intNum == 0x2C {
+	// __raise_securityfailure (assertion)
+	return fmt.Errorf("security assertion at RIP=0x%x", startRIP)
+}
+return fmt.Errorf("INT 0x%02X at RIP=0x%x", intNum, startRIP)
+
 // --- ENDBR64 is encoded as F3 0F 1E FA - consumed via 0x0F path ---
 
 default:

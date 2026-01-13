@@ -13,6 +13,11 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/wl"
 )
 
+// ─── Package-level crash recovery state ─────────────────────────────────────
+
+// MsgLoopSP/PC are set in GetMessageW; used by __fastfail recovery in runPE.
+var msgLoopSP, msgLoopPC uint64
+
 // ─── Types formerly local to registerAutoSynthHandlers ──────────────────────
 
 type menuItem struct {

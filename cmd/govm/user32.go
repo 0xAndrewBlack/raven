@@ -2109,6 +2109,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "GetMessageW", func(ctx *ntapi.TrapContext) uint32 {
 		pMsg := ctx.Arg(0)
 
+		// Save message loop entry point for crash recovery
+		if msgLoopSP == 0 {
+			retAddr, _ := mem.Read64(ctx.CPU.GetSP())
+			msgLoopPC = retAddr
+			msgLoopSP = ctx.CPU.GetSP() + 8
+		}
+
 		// Helper: check expired timers, post WM_TIMER for each.
 		checkTimers := func() {
 			now := time.Now()
@@ -7115,6 +7122,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// Display / monitor
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "EnumDisplayMonitors", func(ctx *ntapi.TrapContext) uint32 {
+		// hdc := ctx.Arg(0), lprcClip := ctx.Arg(1), lpfnEnum := ctx.Arg(2), dwData := ctx.Arg(3)
+		// Would need callback trampoline to call lpfnEnum - return TRUE (no monitors enumerated)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7449,8 +7458,33 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// SystemParametersInfoA
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "SystemParametersInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		uiAction := ctx.Arg(0)
+		// uiParam := ctx.Arg(1)
+		pvParam := ctx.Arg(2)
+		w := int32(1920)
+		h := int32(1080)
+		if wlWindow != nil {
+			w = int32(wlWindow.Width)
+			h = int32(wlWindow.Height)
+		}
+		switch uiAction {
+		case 0x0030: // SPI_GETWORKAREA
+			if pvParam != 0 {
+				mem.Write32(pvParam+0, 0)
+				mem.Write32(pvParam+4, 0)
+				mem.Write32(pvParam+8, uint32(w))
+				mem.Write32(pvParam+12, uint32(h))
+			}
+		case 0x004A: // SPI_GETNONCLIENTMETRICS
+			if pvParam != 0 {
+				cbSize, _ := mem.Read32(pvParam)
+				zeros := make([]byte, cbSize)
+				mem.WriteBytes(pvParam, zeros)
+				mem.Write32(pvParam, cbSize)
+			}
+		}
 		ctx.SetReturn(1)
-		return 0 // most queries succeed with default values
+		return 0
 	})
 
 	// -------------------------------------------------------
@@ -7481,7 +7515,47 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DrawTextExA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(16)
+		if wlWindow == nil {
+			ctx.SetReturn(1)
+			return 0
+		}
+		hdc := ctx.Arg(0)
+		lpStr := ctx.Arg(1)
+		nCount := int(int32(ctx.Arg(2)))
+		lpRect := ctx.Arg(3)
+		uFormat := uint32(ctx.Arg(4))
+		dc := getDC(hdc)
+		text := readGuestString(lpStr)
+		if nCount >= 0 && nCount < len(text) {
+			text = text[:nCount]
+		}
+		f := dc.Font
+		if f == nil {
+			f = gdi.DefaultFont()
+		}
+		lineH := f.Height
+		if lineH == 0 {
+			lineH = 16
+		}
+		if lpRect != 0 {
+			l, _ := mem.Read32(lpRect)
+			t, _ := mem.Read32(lpRect + 4)
+			r, _ := mem.Read32(lpRect + 8)
+			x := int32(l) + 2
+			y := int32(t)
+			tw := int32(len([]rune(text))) * f.AveCharWidth
+			w := int32(r) - int32(l)
+			if uFormat&0x1 != 0 { // DT_CENTER
+				x = int32(l) + (w-tw)/2
+			}
+			if uFormat&0x4 != 0 { // DT_VCENTER
+				if b, err := mem.Read32(lpRect + 12); err == nil {
+					y = int32(t) + (int32(b)-int32(t)-lineH)/2
+				}
+			}
+			dc.TextOut(x, y, text, false)
+		}
+		ctx.SetReturn(uint64(lineH))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DrawStateA", func(ctx *ntapi.TrapContext) uint32 {
