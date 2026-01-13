@@ -3831,7 +3831,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetIconInfo", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// ICONINFO: fIcon(BOOL 4), xHotspot(DWORD 4), yHotspot(DWORD 4), hbmMask(HBITMAP 8), hbmColor(HBITMAP 8)
+		pInfo := ctx.Arg(1)
+		if pInfo != 0 {
+			mem.Write32(pInfo, 1)   // fIcon = TRUE
+			mem.Write32(pInfo+4, 0) // xHotspot
+			mem.Write32(pInfo+8, 0) // yHotspot
+			mem.Write64(pInfo+16, 0) // hbmMask (NULL)
+			mem.Write64(pInfo+24, 0) // hbmColor (NULL)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateIconIndirect", func(ctx *ntapi.TrapContext) uint32 {
@@ -4500,7 +4509,43 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "MapVirtualKeyW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		code := uint32(ctx.Arg(0))
+		mapType := uint32(ctx.Arg(1))
+		var result uint32
+		switch mapType {
+		case 0: // MAPVK_VK_TO_VSC
+			// Common VK → scan code mappings
+			vkToScan := map[uint32]uint32{
+				0x08: 0x0E, 0x09: 0x0F, 0x0D: 0x1C, 0x10: 0x2A, 0x11: 0x1D, 0x12: 0x38,
+				0x14: 0x3A, 0x1B: 0x01, 0x20: 0x39,
+				0x25: 0x4B, 0x26: 0x48, 0x27: 0x4D, 0x28: 0x50, // arrows
+				0x2D: 0x52, 0x2E: 0x53, 0x24: 0x47, 0x23: 0x4F, 0x21: 0x49, 0x22: 0x51,
+			}
+			// A-Z
+			for vk := uint32(0x41); vk <= 0x5A; vk++ {
+				aToZ := []uint32{0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C}
+				vkToScan[vk] = aToZ[vk-0x41]
+			}
+			// 0-9
+			for vk := uint32(0x30); vk <= 0x39; vk++ {
+				vkToScan[vk] = vk - 0x30 + 0x0B
+				if vk == 0x30 {
+					vkToScan[vk] = 0x0B
+				}
+			}
+			result = vkToScan[code]
+		case 1: // MAPVK_VSC_TO_VK
+			result = code // simplified
+		case 2: // MAPVK_VK_TO_CHAR
+			if code >= 0x41 && code <= 0x5A {
+				result = code // A-Z → 'A'-'Z'
+			} else if code >= 0x30 && code <= 0x39 {
+				result = code // 0-9
+			} else if code == 0x20 {
+				result = 0x20 // space
+			}
+		}
+		ctx.SetReturn(uint64(result))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetKeyState", func(ctx *ntapi.TrapContext) uint32 {
@@ -7193,7 +7238,23 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		})
 	}
-	for _, fn := range []string{"GetMenuBarInfo", "GetMenuInfo", "GetMenuItemInfoA", "GetMenuItemRect"} {
+	d.RegisterAutoStubHandler(user32, "GetMenuBarInfo", func(ctx *ntapi.TrapContext) uint32 {
+		pInfo := ctx.Arg(3) // MENUBARINFO
+		if pInfo != 0 {
+			// MENUBARINFO: cbSize(4)+rcBar(16)+hMenu(8)+hwndMenu(8)+fBarFocused:1+fFocused:1
+			mem.Write32(pInfo, 48)    // cbSize
+			mem.Write32(pInfo+4, 0)   // rcBar.left
+			mem.Write32(pInfo+8, 0)   // rcBar.top
+			mem.Write32(pInfo+12, 0)  // rcBar.right
+			mem.Write32(pInfo+16, 0)  // rcBar.bottom
+			mem.Write64(pInfo+24, 0)  // hMenu
+			mem.Write64(pInfo+32, 0)  // hwndMenu
+			mem.Write32(pInfo+40, 0)  // flags
+		}
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	for _, fn := range []string{"GetMenuInfo", "GetMenuItemInfoA", "GetMenuItemRect"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
@@ -7409,7 +7470,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0)
 		return 0
 	})
-	for _, fn := range []string{"GetComboBoxInfo", "GetListBoxInfo", "GetScrollBarInfo", "GetTitleBarInfo"} {
+	d.RegisterAutoStubHandler(user32, "GetComboBoxInfo", func(ctx *ntapi.TrapContext) uint32 {
+		pInfo := ctx.Arg(1) // COMBOBOXINFO
+		if pInfo != 0 {
+			// COMBOBOXINFO: cbSize(4)+rcItem(16)+rcButton(16)+stateButton(4)+hwndCombo(8)+hwndItem(8)+hwndList(8)
+			hwnd := ctx.Arg(0)
+			mem.Write32(pInfo, 64) // cbSize
+			mem.Write64(pInfo+44, hwnd) // hwndCombo
+			mem.Write64(pInfo+52, 0)    // hwndItem
+			mem.Write64(pInfo+60, 0)    // hwndList
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	for _, fn := range []string{"GetListBoxInfo", "GetScrollBarInfo", "GetTitleBarInfo"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
