@@ -8,6 +8,7 @@ import (
 
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 // csidlToPath maps a CSIDL folder ID to its fake Windows path.
@@ -931,6 +932,27 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "DragAcceptFiles", func(ctx *ntapi.TrapContext) uint32 {
+		return 0
+	})
+
+	// ShellAboutW: show the standard "About" dialog.
+	// Real Win32 creates a modal dialog with app icon, name, version, and OS info.
+	// We log the info and return TRUE (the dialog was "shown").
+	d.RegisterAutoStubHandler(shell32, "ShellAboutW", func(ctx *ntapi.TrapContext) uint32 {
+		// INT ShellAboutW(HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff, HICON hIcon)
+		szApp := ctx.Arg(1)
+		szOther := ctx.Arg(2)
+		appName := ""
+		otherStuff := ""
+		if szApp != 0 {
+			appName = readGuestUTF16(szApp)
+		}
+		if szOther != 0 {
+			otherStuff = readGuestUTF16(szOther)
+		}
+		ravelog.Logf("[shell] ShellAboutW: app=%q other=%q\n", appName, otherStuff)
+		// TODO: create a real dialog window once DialogBoxParamW is implemented
+		ctx.SetReturn(1) // TRUE = success
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetKnownFolderPath", func(ctx *ntapi.TrapContext) uint32 {

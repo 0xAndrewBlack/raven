@@ -1547,10 +1547,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 							if label == "" || label == "-" {
 								continue
 							}
-							// Skip items with no ASCII-renderable characters
+							// Skip items with no renderable characters
 							hasRenderable := false
 							for _, r := range label {
-								if r >= 32 && r <= 126 {
+								if r > 32 {
 									hasRenderable = true
 									break
 								}
@@ -2319,7 +2319,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 										}
 										hasRenderable := false
 										for _, r := range label {
-											if r >= 32 && r <= 126 {
+											if r > 32 {
 												hasRenderable = true
 												break
 											}
@@ -2374,7 +2374,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 												}
 												hasRenderable := false
 												for _, r := range label {
-													if r >= 32 && r <= 126 {
+													if r > 32 {
 														hasRenderable = true
 														break
 													}
@@ -2436,7 +2436,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 													}
 													hasRenderable := false
 													for _, r := range label {
-														if r >= 32 && r <= 126 {
+														if r > 32 {
 															hasRenderable = true
 															break
 														}
@@ -3644,9 +3644,67 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	// Dialog functions
+
+	// DialogBoxParamW: modal dialog.
+	// Full implementation would load the template, create controls, run a modal loop.
+	// For now: allocate an HWND, call dlgProc(WM_INITDIALOG) via syncDispatch,
+	// then return IDCANCEL (2). This lets dialog init code run.
 	d.RegisterAutoStubHandler(user32, "DialogBoxParamW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
-		return 0 // IDCANCEL
+		// hInstance := ctx.Arg(0)
+		lpTemplate := ctx.Arg(1)
+		hWndParent := ctx.Arg(2)
+		lpDialogFunc := ctx.Arg(3)
+		dwInitParam := ctx.Arg(4)
+
+		templateName := ""
+		if lpTemplate < 0x10000 {
+			templateName = fmt.Sprintf("#%d", lpTemplate)
+		} else {
+			templateName = readGuestUTF16(lpTemplate)
+		}
+		ravelog.Logf("[dialog] DialogBoxParamW template=%s parent=0x%x dlgProc=0x%x initParam=0x%x\n",
+			templateName, hWndParent, lpDialogFunc, dwInitParam)
+
+		if lpDialogFunc == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		// Allocate an HWND for the dialog
+		dlgHwnd := hwndAlloc()
+		hwndChildren[dlgHwnd] = &controlState{
+			className:  "DialogBox",
+			parentHWND: hWndParent,
+			visible:    true,
+		}
+
+		// Send WM_INITDIALOG synchronously via trampoline
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+		if ok && ok2 && lpDialogFunc != 0 {
+			rsp := rr.ReadReg(4) // RSP
+			retAddr, _ := mem.Read64(rsp)
+			hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+				queue:               nil,
+				retAddr:             retAddr,
+				hwnd:                2, // IDCANCEL
+				returnWndProcResult: false,
+			})
+			mem.Write64(rsp, hctx.SyncTrampoline)
+
+			// Set up WM_INITDIALOG call: dlgProc(hwnd, WM_INITDIALOG, wParam=focus, lParam=initParam)
+			rw.WriteReg(1, dlgHwnd)         // RCX = hDlg
+			rw.WriteReg(2, 0x0110)          // RDX = WM_INITDIALOG
+			rw.WriteReg(8, 0)               // R8 = wParam (focus control, 0 for now)
+			rw.WriteReg(9, dwInitParam)      // R9 = lParam (init param)
+			ctx.CPU.SetPC(lpDialogFunc)
+			ctx.ReturnOverridden = true
+			return 0
+		}
+
+		// Fallback: just return IDCANCEL
+		ctx.SetReturn(2) // IDCANCEL
+		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DialogBoxIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := hwndAlloc()
@@ -4016,7 +4074,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						}
 						hasRenderable := false
 						for _, r := range label {
-							if r >= 32 && r <= 126 {
+							if r > 32 {
 								hasRenderable = true
 								break
 							}

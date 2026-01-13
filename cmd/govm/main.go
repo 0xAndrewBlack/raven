@@ -2378,7 +2378,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			hasRenderable := false
 			for _, r := range label {
-				if r >= 32 && r <= 126 {
+				if r > 32 {
 					hasRenderable = true
 					break
 				}
