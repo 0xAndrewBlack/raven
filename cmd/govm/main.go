@@ -5529,14 +5529,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// GetFileType: FILE_TYPE_CHAR for std handles, FILE_TYPE_DISK otherwise
+		// GetFileType: FILE_TYPE_CHAR for std handles, FILE_TYPE_DISK for files, FILE_TYPE_PIPE for pipes
 		d.RegisterAutoStubHandler(kernel32, "GetFileType", func(ctx *ntapi.TrapContext) uint32 {
 			handle := ctx.Arg(0)
+			h := ntapi.Handle(handle)
 			switch handle {
 			case 0x100, 0x101, 0x102, 0x103: // stdin, stdout, stderr, and extra console handle
 				ctx.SetReturn(0x0002) // FILE_TYPE_CHAR
 			default:
-				ctx.SetReturn(0x0001) // FILE_TYPE_DISK
+				if handles.GetNamedPipe(h) != nil {
+					ctx.SetReturn(0x0003) // FILE_TYPE_PIPE
+				} else if handles.GetFile(h) != nil {
+					ctx.SetReturn(0x0001) // FILE_TYPE_DISK
+				} else {
+					ctx.SetReturn(0x0000) // FILE_TYPE_UNKNOWN
+				}
 			}
 			return 0
 		})
@@ -6682,7 +6689,32 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetFileAttributesW", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			lpFileName := ctx.Arg(0)
+			dwFileAttributes := uint32(ctx.Arg(1))
+			if lpFileName == 0 {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
+			}
+			path := winPathToVFS(readGuestUTF16(lpFileName))
+			info, err := os.Stat(path)
+			if err != nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+				ctx.SetReturn(0)
+				return 0
+			}
+			mode := info.Mode()
+			if dwFileAttributes&0x01 != 0 { // FILE_ATTRIBUTE_READONLY
+				mode &^= 0222 // remove write bits
+			} else {
+				mode |= 0200 // add owner write bit
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5) // ERROR_ACCESS_DENIED
+				ctx.SetReturn(0)
+				return 0
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "SetStdHandle", func(ctx *ntapi.TrapContext) uint32 {
@@ -7339,14 +7371,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			free := ctx.Arg(1)
 			total := ctx.Arg(2)
 			totalFree := ctx.Arg(3)
+			var st unix.Statfs_t
+			freeBytesAvail := uint64(50 * 1024 * 1024 * 1024)
+			totalBytes := uint64(100 * 1024 * 1024 * 1024)
+			totalFreeBytes := uint64(50 * 1024 * 1024 * 1024)
+			if unix.Statfs("/", &st) == nil {
+				totalBytes = st.Blocks * uint64(st.Bsize)
+				totalFreeBytes = st.Bfree * uint64(st.Bsize)
+				freeBytesAvail = st.Bavail * uint64(st.Bsize)
+			}
 			if free != 0 {
-				ctx.Mem.Write64(free, 50*1024*1024*1024) // 50 GB
+				ctx.Mem.Write64(free, freeBytesAvail)
 			}
 			if total != 0 {
-				ctx.Mem.Write64(total, 100*1024*1024*1024)
+				ctx.Mem.Write64(total, totalBytes)
 			}
 			if totalFree != 0 {
-				ctx.Mem.Write64(totalFree, 50*1024*1024*1024)
+				ctx.Mem.Write64(totalFree, totalFreeBytes)
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -7787,19 +7828,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// GetDiskFreeSpaceExA: convert ANSI path then return fake values
+		// GetDiskFreeSpaceExA: use real host disk space via statfs
 		d.RegisterAutoStubHandler(kernel32, "GetDiskFreeSpaceExA", func(ctx *ntapi.TrapContext) uint32 {
 			free := ctx.Arg(1)
 			total := ctx.Arg(2)
 			totalFree := ctx.Arg(3)
+			var st unix.Statfs_t
+			freeBytesAvail := uint64(50 * 1024 * 1024 * 1024)
+			totalBytes := uint64(100 * 1024 * 1024 * 1024)
+			totalFreeBytes := uint64(50 * 1024 * 1024 * 1024)
+			if unix.Statfs("/", &st) == nil {
+				totalBytes = st.Blocks * uint64(st.Bsize)
+				totalFreeBytes = st.Bfree * uint64(st.Bsize)
+				freeBytesAvail = st.Bavail * uint64(st.Bsize)
+			}
 			if free != 0 {
-				ctx.Mem.Write64(free, 100*1024*1024*1024) // 100 GB free
+				ctx.Mem.Write64(free, freeBytesAvail)
 			}
 			if total != 0 {
-				ctx.Mem.Write64(total, 500*1024*1024*1024) // 500 GB total
+				ctx.Mem.Write64(total, totalBytes)
 			}
 			if totalFree != 0 {
-				ctx.Mem.Write64(totalFree, 100*1024*1024*1024)
+				ctx.Mem.Write64(totalFree, totalFreeBytes)
 			}
 			ctx.SetReturn(1) // TRUE
 			return 0
@@ -10124,7 +10174,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetDriveTypeW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(3) // DRIVE_FIXED
+			lpRootPathName := ctx.Arg(0)
+			driveType := uint64(1) // DRIVE_NO_ROOT_DIR
+			if lpRootPathName != 0 {
+				path := readGuestUTF16(lpRootPathName)
+				if len(path) > 0 && (path[0] == 'C' || path[0] == 'c') {
+					driveType = 3 // DRIVE_FIXED
+				}
+			}
+			ctx.SetReturn(driveType)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetDynamicTimeZoneInformation", func(ctx *ntapi.TrapContext) uint32 {
@@ -10289,7 +10347,108 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFileInformationByHandleEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			hFile := ntapi.Handle(ctx.Arg(0))
+			infoClass := uint32(ctx.Arg(1))
+			lpInfo := ctx.Arg(2)
+			dwBufSize := uint32(ctx.Arg(3))
+
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+			node := ctx.FS.Stat(fh.FD)
+			if node == nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+				ctx.SetReturn(0)
+				return 0
+			}
+			toFT := func(t time.Time) uint64 {
+				return uint64(t.UnixNano()/100) + 116444736000000000
+			}
+			var attrs uint32 = 0x80 // FILE_ATTRIBUTE_NORMAL
+			if node.IsDir {
+				attrs = 0x10 // FILE_ATTRIBUTE_DIRECTORY
+			}
+			if len(node.Name) > 0 && node.Name[0] == '.' {
+				attrs |= 0x02 // FILE_ATTRIBUTE_HIDDEN
+			}
+			if node.FileMode&0200 == 0 {
+				attrs |= 0x01 // FILE_ATTRIBUTE_READONLY
+			}
+
+			switch infoClass {
+			case 0: // FileBasicInfo (40 bytes)
+				if dwBufSize < 40 {
+					ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122) // ERROR_INSUFFICIENT_BUFFER
+					ctx.SetReturn(0)
+					return 0
+				}
+				ctx.Mem.Write64(lpInfo+0, toFT(node.Ctime))   // CreationTime
+				ctx.Mem.Write64(lpInfo+8, toFT(node.Atime))   // LastAccessTime
+				ctx.Mem.Write64(lpInfo+16, toFT(node.Mtime))  // LastWriteTime
+				ctx.Mem.Write64(lpInfo+24, toFT(node.Mtime))  // ChangeTime
+				ctx.Mem.Write32(lpInfo+32, attrs)              // FileAttributes
+				ctx.Mem.Write32(lpInfo+36, 0)                  // padding
+			case 1: // FileStandardInfo (24 bytes)
+				if dwBufSize < 24 {
+					ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+					ctx.SetReturn(0)
+					return 0
+				}
+				allocSize := (node.Size + 4095) & ^int64(4095)
+				ctx.Mem.Write64(lpInfo+0, uint64(allocSize))   // AllocationSize
+				ctx.Mem.Write64(lpInfo+8, uint64(node.Size))   // EndOfFile
+				nlinks := node.Nlink
+				if nlinks == 0 { nlinks = 1 }
+				ctx.Mem.Write32(lpInfo+16, nlinks)             // NumberOfLinks
+				var deletePending uint8
+				var isDir uint8
+				if node.IsDir { isDir = 1 }
+				ctx.Mem.Write8(lpInfo+20, deletePending)       // DeletePending
+				ctx.Mem.Write8(lpInfo+21, isDir)               // Directory
+				ctx.Mem.Write16(lpInfo+22, 0)                  // padding
+			case 2: // FileNameInfo (4 + wchar[])
+				winPath := strings.ReplaceAll(fh.Path, "/", `\`)
+				if !strings.HasPrefix(winPath, `\`) {
+					winPath = `\` + winPath
+				}
+				nameUTF16 := utf16.Encode([]rune(winPath))
+				nameBytes := uint32(len(nameUTF16) * 2)
+				needed := 4 + nameBytes
+				if dwBufSize < needed {
+					ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+					ctx.SetReturn(0)
+					return 0
+				}
+				ctx.Mem.Write32(lpInfo+0, nameBytes) // FileNameLength in bytes
+				for i, ch := range nameUTF16 {
+					ctx.Mem.Write16(lpInfo+4+uint64(i)*2, ch)
+				}
+			case 9: // FileAttributeTagInfo (8 bytes)
+				if dwBufSize < 8 {
+					ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+					ctx.SetReturn(0)
+					return 0
+				}
+				ctx.Mem.Write32(lpInfo+0, attrs) // FileAttributes
+				ctx.Mem.Write32(lpInfo+4, 0)     // ReparseTag
+			case 18: // FileIdInfo (24 bytes)
+				if dwBufSize < 24 {
+					ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+					ctx.SetReturn(0)
+					return 0
+				}
+				ctx.Mem.Write64(lpInfo+0, 0x12345678)      // VolumeSerialNumber
+				ctx.Mem.Write64(lpInfo+8, node.Ino)         // FileId low 8 bytes
+				ctx.Mem.Write64(lpInfo+16, 0)               // FileId high 8 bytes
+			default:
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
+			}
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFileMUIInfo", func(ctx *ntapi.TrapContext) uint32 {
@@ -10344,11 +10503,79 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFinalPathNameByHandleA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // error
+			hFile := ntapi.Handle(ctx.Arg(0))
+			lpszFilePath := ctx.Arg(1)
+			cchFilePath := uint32(ctx.Arg(2))
+			dwFlags := uint32(ctx.Arg(3))
+
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			vfsPath := fh.Path
+			winPath := strings.ReplaceAll(vfsPath, "/", `\`)
+			if !strings.HasPrefix(winPath, `\`) {
+				winPath = `\` + winPath
+			}
+
+			var result string
+			if dwFlags&0x8 != 0 { // VOLUME_NAME_NONE
+				result = winPath
+			} else {
+				result = `\\?\C:` + winPath
+			}
+
+			if lpszFilePath != 0 && cchFilePath > 0 {
+				toWrite := result
+				if uint32(len(toWrite)) >= cchFilePath {
+					toWrite = toWrite[:cchFilePath-1]
+				}
+				ctx.Mem.WriteBytes(lpszFilePath, append([]byte(toWrite), 0))
+			}
+			ctx.SetReturn(uint64(len(result)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFinalPathNameByHandleW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hFile := ntapi.Handle(ctx.Arg(0))
+			lpszFilePath := ctx.Arg(1)
+			cchFilePath := uint32(ctx.Arg(2))
+			dwFlags := uint32(ctx.Arg(3))
+
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			vfsPath := fh.Path
+			winPath := strings.ReplaceAll(vfsPath, "/", `\`)
+			if !strings.HasPrefix(winPath, `\`) {
+				winPath = `\` + winPath
+			}
+
+			var result string
+			if dwFlags&0x8 != 0 { // VOLUME_NAME_NONE
+				result = winPath
+			} else {
+				result = `\\?\C:` + winPath
+			}
+
+			runes := utf16.Encode([]rune(result))
+			if lpszFilePath != 0 && cchFilePath > 0 {
+				n := len(runes)
+				if uint32(n) >= cchFilePath {
+					n = int(cchFilePath) - 1
+				}
+				for i := 0; i < n; i++ {
+					ctx.Mem.Write16(lpszFilePath+uint64(i)*2, runes[i])
+				}
+				ctx.Mem.Write16(lpszFilePath+uint64(n)*2, 0) // null terminator
+			}
+			ctx.SetReturn(uint64(len(runes)))
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFirmwareEnvironmentVariableA", func(ctx *ntapi.TrapContext) uint32 {
@@ -10400,7 +10627,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetLogicalDriveStringsW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(4) // 4 chars for C:\
+			nBuf := uint32(ctx.Arg(0))
+			lpBuf := ctx.Arg(1)
+			// "C:\\\0\0" in UTF-16: 'C' ':' '\\' '\0' '\0' = 5 wchars, but API returns 4 (char count without final NUL)
+			driveStr := []uint16{'C', ':', '\\', 0, 0}
+			if lpBuf != 0 && nBuf >= uint32(len(driveStr)) {
+				for i, ch := range driveStr {
+					ctx.Mem.Write16(lpBuf+uint64(i)*2, ch)
+				}
+			}
+			ctx.SetReturn(4) // 4 chars for "C:\\\0" (excluding final double-NUL)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetLogicalDrives", func(ctx *ntapi.TrapContext) uint32 {
@@ -11341,7 +11577,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetVolumeInformationA", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			// lpRootPathName=0, lpVolumeNameBuf=1, nVolNameSize=2,
+			// lpSerialNum=3, lpMaxComponentLen=4, lpFSFlags=5, lpFSNameBuf=6, nFSNameSize=7
+			volNameBuf := ctx.Arg(1)
+			volNameSize := ctx.Arg(2)
+			lpSerialNum := ctx.Arg(3)
+			lpMaxComponentLen := ctx.Arg(4)
+			lpFSFlags := ctx.Arg(5)
+			fsBuf := ctx.Arg(6)
+			fsBufSize := ctx.Arg(7)
+			if volNameBuf != 0 && volNameSize > 0 {
+				volName := "Windows"
+				toWrite := volName
+				if uint64(len(toWrite)) >= volNameSize {
+					toWrite = toWrite[:volNameSize-1]
+				}
+				ctx.Mem.WriteBytes(volNameBuf, append([]byte(toWrite), 0))
+			}
+			if lpSerialNum != 0 { ctx.Mem.Write32(lpSerialNum, 0xDEADBEEF) }
+			if lpMaxComponentLen != 0 { ctx.Mem.Write32(lpMaxComponentLen, 255) }
+			if lpFSFlags != 0 { ctx.Mem.Write32(lpFSFlags, 0x00020003) }
+			if fsBuf != 0 && fsBufSize > 0 {
+				fsName := "NTFS"
+				toWrite := fsName
+				if uint64(len(toWrite)) >= fsBufSize {
+					toWrite = toWrite[:fsBufSize-1]
+				}
+				ctx.Mem.WriteBytes(fsBuf, append([]byte(toWrite), 0))
+			}
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetVolumeInformationByHandleW", func(ctx *ntapi.TrapContext) uint32 {
@@ -11391,6 +11655,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetVolumePathNameW", func(ctx *ntapi.TrapContext) uint32 {
+			// lpszFileName=0, lpszVolumePathName=1, cchBufferLength=2
+			lpszVolumePathName := ctx.Arg(1)
+			cchBufferLength := ctx.Arg(2)
+			if lpszVolumePathName != 0 && cchBufferLength >= 4 {
+				// Write "C:\" in UTF-16
+				ctx.Mem.Write16(lpszVolumePathName+0, 'C')
+				ctx.Mem.Write16(lpszVolumePathName+2, ':')
+				ctx.Mem.Write16(lpszVolumePathName+4, '\\')
+				ctx.Mem.Write16(lpszVolumePathName+6, 0)
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -12031,10 +12305,55 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LockFile", func(ctx *ntapi.TrapContext) uint32 {
+			hFile := ntapi.Handle(ctx.Arg(0))
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				ctx.SetReturn(1) // best effort for non-file handles
+				return 0
+			}
+			err := unix.Flock(fh.FD, unix.LOCK_EX|unix.LOCK_NB)
+			if err != nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 33) // ERROR_LOCK_VIOLATION
+				ctx.SetReturn(0)
+				return 0
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LockFileEx", func(ctx *ntapi.TrapContext) uint32 {
+			hFile := ntapi.Handle(ctx.Arg(0))
+			dwFlags := uint32(ctx.Arg(1))
+			// arg2 = dwReserved
+			// arg3 = nNumberOfBytesToLockLow
+			// arg4 = nNumberOfBytesToLockHigh
+			lpOverlapped := ctx.Arg(5)
+
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				if lpOverlapped != 0 {
+					ctx.Mem.Write64(lpOverlapped, 0) // Internal = STATUS_SUCCESS
+				}
+				ctx.SetReturn(1)
+				return 0
+			}
+
+			lockType := unix.LOCK_SH // shared by default
+			if dwFlags&0x02 != 0 {   // LOCKFILE_EXCLUSIVE_LOCK
+				lockType = unix.LOCK_EX
+			}
+			if dwFlags&0x01 != 0 { // LOCKFILE_FAIL_IMMEDIATELY
+				lockType |= unix.LOCK_NB
+			}
+
+			err := unix.Flock(fh.FD, lockType)
+			if err != nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 33) // ERROR_LOCK_VIOLATION
+				ctx.SetReturn(0)
+				return 0
+			}
+			if lpOverlapped != 0 {
+				ctx.Mem.Write64(lpOverlapped, 0) // Internal = STATUS_SUCCESS
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -14788,11 +15107,45 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UnlockFile", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			hFile := ntapi.Handle(ctx.Arg(0))
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				ctx.SetReturn(1) // best effort
+				return 0
+			}
+			err := unix.Flock(fh.FD, unix.LOCK_UN)
+			if err != nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 158) // ERROR_NOT_LOCKED
+				ctx.SetReturn(0)
+				return 0
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UnlockFileEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			hFile := ntapi.Handle(ctx.Arg(0))
+			// arg1 = dwReserved, arg2 = nNumberOfBytesToUnlockLow
+			// arg3 = nNumberOfBytesToUnlockHigh, arg4 = lpOverlapped
+			lpOverlapped := ctx.Arg(4)
+
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				if lpOverlapped != 0 {
+					ctx.Mem.Write64(lpOverlapped, 0)
+				}
+				ctx.SetReturn(1)
+				return 0
+			}
+			err := unix.Flock(fh.FD, unix.LOCK_UN)
+			if err != nil {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 158) // ERROR_NOT_LOCKED
+				ctx.SetReturn(0)
+				return 0
+			}
+			if lpOverlapped != 0 {
+				ctx.Mem.Write64(lpOverlapped, 0)
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "UnmapViewOfFileEx", func(ctx *ntapi.TrapContext) uint32 {
