@@ -7,6 +7,7 @@ import (
 
 	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
@@ -160,8 +161,9 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateDIBSection", func(ctx *ntapi.TrapContext) uint32 {
-		// BITMAPINFO at arg1; width/height at offset 4 and 8 (BITMAPINFOHEADER)
+		// CreateDIBSection(hdc, pbmi, usage, ppvBits, hSection, offset)
 		pbi := ctx.Arg(1)
+		ppvBits := ctx.Arg(4)
 		w, h := int32(0), int32(0)
 		if pbi != 0 {
 			v32, _ := mem.Read32(pbi + 4)
@@ -172,7 +174,22 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 				h = -h
 			}
 		}
-		ctx.SetReturn(gdiMgr.CreateDIBSection(w, h))
+		if w <= 0 {
+			w = 1
+		}
+		if h <= 0 {
+			h = 1
+		}
+		// Allocate guest memory for the pixel data and write ppvBits
+		stride := int(w) * 4 // 32bpp BGRA
+		sz := uint64(stride * int(h))
+		bits := mem.Mmap(0, sz, mmu.PermRead|mmu.PermWrite)
+		if ppvBits != 0 {
+			mem.Write64(ppvBits, bits)
+		}
+		hBmp := gdiMgr.CreateDIBSection(w, h)
+		ravelog.Logf("[gdi] CreateDIBSection %dx%d → hbm=0x%x bits=0x%x (%d bytes)\n", w, h, hBmp, bits, sz)
+		ctx.SetReturn(hBmp)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateDIBitmap", func(ctx *ntapi.TrapContext) uint32 {
@@ -3099,14 +3116,15 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		bm := obj.Bitmap
-		srcW, srcH, bitCount, _, ct, _ := readDIBInfo(pBMI)
-		pixData := readDIBPixels(lpBits, srcW, srcH, bitCount)
+		srcW, _, bitCount, _, ct, _ := readDIBInfo(pBMI)
+		// lpBits contains numScans scan lines starting from startScan
+		pixData := readDIBPixels(lpBits, srcW, numScans, bitCount)
 		if pixData == nil {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// Blit DIB rows into bitmap surface (no scaling, 1:1)
-		bm.Surf.BlitDIB(0, startScan, bm.Width, numScans, pixData, srcW, srcH, bitCount, ct, 0, startScan, bm.Width, numScans)
+		// Blit DIB rows into bitmap surface at startScan offset
+		bm.Surf.BlitDIB(0, startScan, bm.Width, numScans, pixData, srcW, numScans, bitCount, ct, 0, 0, bm.Width, numScans)
 		ctx.SetReturn(uint64(numScans))
 		return 0
 	})
