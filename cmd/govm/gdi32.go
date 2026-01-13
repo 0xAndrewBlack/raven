@@ -20,7 +20,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	readDIBPixels := hctx.ReadDIBPixels
 	readGuestUTF16 := hctx.ReadGuestUTF16
 	sharedHeapAlloc := hctx.HeapAlloc
-	wlWindow := hctx.WlWindow
 
 	gdi32, ok := hctx.SynthByName["gdi32.dll"]
 	if !ok {
@@ -319,9 +318,9 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		idx := ctx.Arg(1)
 		val := uint64(0)
 		w, h := uint64(1920), uint64(1080)
-		if wlWindow != nil {
-			w = uint64(wlWindow.Width)
-			h = uint64(wlWindow.Height)
+		if hctx.WlWindow != nil {
+			w = uint64(hctx.WlWindow.Width)
+			h = uint64(hctx.WlWindow.Height)
 		}
 		switch idx {
 		case 2:
@@ -656,7 +655,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "TextOutW", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -674,7 +673,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ExtTextOutW", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -741,7 +740,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "BitBlt", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -770,7 +769,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "StretchBlt", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -792,7 +791,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PatBlt", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -825,7 +824,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "FillRect", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -846,7 +845,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Rectangle", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -868,7 +867,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "LineTo", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -878,7 +877,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Ellipse", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -888,7 +887,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "StretchDIBits", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(uint64(0xFFFFFFFF))
 			return 0
 		}
@@ -918,7 +917,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetDIBitsToDevice", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -1286,7 +1285,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "FillRgn", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -1301,7 +1300,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "FrameRgn", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -1316,7 +1315,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "InvertRgn", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -1329,7 +1328,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PaintRgn", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2373,7 +2372,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	// --- Drawing extras ---
 	d.RegisterAutoStubHandler(gdi32, "RoundRect", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2383,7 +2382,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetPixel", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -2393,7 +2392,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetPixel", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(0xFFFFFFFF)
 			return 0
 		}
@@ -2403,7 +2402,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "DrawEdge", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2422,7 +2421,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "DrawFrameControl", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2441,7 +2440,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "DrawFocusRect", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2458,7 +2457,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "InvertRect", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2475,7 +2474,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Polygon", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2493,7 +2492,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Polyline", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2511,7 +2510,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PolylineTo", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2527,7 +2526,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PolyBezier", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2548,7 +2547,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(gdi32, "PolyBezierTo", func(ctx *ntapi.TrapContext) uint32 {
 		// ReactOS: NtGdiPolyPolyDraw - bezier to current position
 		// Approximate as line segments through control points.
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2565,7 +2564,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(gdi32, "PolyPolyline", func(ctx *ntapi.TrapContext) uint32 {
 		// ReactOS: NtGdiPolyPolyDraw
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2595,7 +2594,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(gdi32, "PolyPolygon", func(ctx *ntapi.TrapContext) uint32 {
 		// ReactOS: NtGdiPolyPolyDraw
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2625,7 +2624,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(gdi32, "Arc", func(ctx *ntapi.TrapContext) uint32 {
 		// Arc: draw ellipse approximation
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2643,7 +2642,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Chord", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2653,7 +2652,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Pie", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2673,7 +2672,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(gdi32, "GradientFill", func(ctx *ntapi.TrapContext) uint32 {
 		// GradientFill(hdc, pVertex, nVertex, pMesh, nMesh, ulMode)
 		// TRIVERTEX: {x, y, Red, Green, Blue, Alpha} (each color is 16-bit, upper 8 used)
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2893,7 +2892,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GdiAlphaBlend", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2927,7 +2926,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "AlphaBlend", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -2960,7 +2959,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "TransparentBlt", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -3265,7 +3264,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	// --- SetPixelV ---
 	// ReactOS: NtGdiSetPixel (SetPixelV is SetPixel that returns BOOL not color)
 	d.RegisterAutoStubHandler(gdi32, "SetPixelV", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -3277,7 +3276,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	// --- TextOutA ---
 	// ReactOS: NtGdiExtTextOutW (ANSI → wide conversion in gdi32 client)
 	d.RegisterAutoStubHandler(gdi32, "TextOutA", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -3300,7 +3299,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	// --- ExtTextOutA ---
 	// ReactOS: NtGdiExtTextOutW (ANSI → wide in gdi32 client)
 	d.RegisterAutoStubHandler(gdi32, "ExtTextOutA", func(ctx *ntapi.TrapContext) uint32 {
-		if wlWindow == nil {
+		if hctx.WlWindow == nil {
 			ctx.SetReturn(1)
 			return 0
 		}

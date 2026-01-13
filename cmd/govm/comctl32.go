@@ -11,7 +11,6 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	hwndAlloc := hctx.HwndAlloc
 	hwndChildren := hctx.HwndChildren
 	readGuestUTF16 := hctx.ReadGuestUTF16
-	wlWindow := hctx.WlWindow
 
 	comctl32, ok := hctx.SynthByName["comctl32.dll"]
 	if !ok {
@@ -50,8 +49,8 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		_ = ctx.Arg(3) // wID
 		hwnd := hwndAlloc()
 		var defW, defH int32 = 800, 600
-		if wlWindow != nil {
-			defW, defH = wlWindow.Width, wlWindow.Height
+		if hctx.WlWindow != nil {
+			defW, defH = hctx.WlWindow.Width, hctx.WlWindow.Height
 		}
 		const sbHeight int32 = 20
 		hwndChildren[hwnd] = &controlState{
@@ -899,8 +898,8 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		hwndParent := ctx.Arg(2)
 		hwnd := hwndAlloc()
 		var defW, defH int32 = 800, 600
-		if wlWindow != nil {
-			defW, defH = wlWindow.Width, wlWindow.Height
+		if hctx.WlWindow != nil {
+			defW, defH = hctx.WlWindow.Width, hctx.WlWindow.Height
 		}
 		const sbHeight int32 = 20
 		hwndChildren[hwnd] = &controlState{
@@ -918,8 +917,8 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		hwndParent := ctx.Arg(2)
 		hwnd := hwndAlloc()
 		var defW, defH int32 = 800, 600
-		if wlWindow != nil {
-			defW, defH = wlWindow.Width, wlWindow.Height
+		if hctx.WlWindow != nil {
+			defW, defH = hctx.WlWindow.Width, hctx.WlWindow.Height
 		}
 		const sbHeight int32 = 20
 		hwndChildren[hwnd] = &controlState{
