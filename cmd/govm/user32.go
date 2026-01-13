@@ -2353,6 +2353,26 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						case btnLeft:
 							if me.Pressed {
 								ravelog.Logf("[click] left press x=%d y=%d ncMenuTop=%d clientTop=%d\n", me.X, me.Y, ncMenuTop, clientTop)
+
+								// Modal dialog intercept: all clicks go to dialog when active
+								if hctx.DialogActive {
+									bx, by := hctx.DialogBtnX, hctx.DialogBtnY
+									bw, bh := hctx.DialogBtnW, hctx.DialogBtnH
+									if me.X >= bx && me.X < bx+bw && me.Y >= by && me.Y < by+bh {
+										ravelog.Logf("[dialog] OK button clicked, dismissing dialog\n")
+										hctx.DialogActive = false
+										if wlWindow != nil && hctx.HasBaseFrame {
+											hctx.RepaintBuiltin = true
+											hctx.FrameReady = true
+											commitIfDone()
+										} else {
+											queuePaint(hctx.MainHWND)
+										}
+									}
+									// Swallow all clicks while dialog is active (modal)
+									break
+								}
+
 								if wlWindow != nil && me.Y >= ncMenuTop && me.Y < clientTop {
 									// ── Menu bar click (non-client) ──
 									// Intercept here instead of routing via DefWindowProcW.
@@ -2594,6 +2614,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 			// 5. Check timers again after sleep, then post WM_PAINT if queue still empty.
 			checkTimers()
+
+			// 5b. Drain any injected input events (from -auto script).
+			if wlDisplay.HasPendingInput() {
+				dispatchWl(wl.EventKey)
+				dispatchWl(wl.EventMouse)
+			}
+
 			if dequeueMsg() {
 				return 0
 			}

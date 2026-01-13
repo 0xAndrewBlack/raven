@@ -969,6 +969,39 @@ func (d *Display) PollMouse() (MouseEvent, bool) {
 // MousePos returns the current mouse position on the surface.
 func (d *Display) MousePos() (int32, int32) { return d.mouseX, d.mouseY }
 
+// HasPendingInput returns true if there are queued mouse or key events
+// (e.g. from InjectClick/InjectKey) that haven't been polled yet.
+func (d *Display) HasPendingInput() bool {
+	return len(d.mouseEvents) > 0 || len(d.keyEvents) > 0
+}
+
+// InjectClick queues a synthetic left-click at surface-absolute (x, y).
+// Generates motion → press → release events.
+func (d *Display) InjectClick(x, y int32) {
+	d.mouseX = x
+	d.mouseY = y
+	d.mouseEvents = append(d.mouseEvents,
+		MouseEvent{X: x, Y: y, Kind: 0},                                        // motion
+		MouseEvent{X: x, Y: y, Button: 272, Pressed: true, Kind: 1},            // press
+		MouseEvent{X: x, Y: y, Button: 272, Pressed: false, Kind: 1},           // release
+	)
+}
+
+// InjectMouseMove queues a synthetic mouse move at surface-absolute (x, y).
+func (d *Display) InjectMouseMove(x, y int32) {
+	d.mouseX = x
+	d.mouseY = y
+	d.mouseEvents = append(d.mouseEvents, MouseEvent{X: x, Y: y, Kind: 0})
+}
+
+// InjectKey queues a synthetic key press+release for a given Linux keycode.
+func (d *Display) InjectKey(keycode uint32) {
+	d.keyEvents = append(d.keyEvents,
+		KeyEvent{Keycode: keycode, Pressed: true},
+		KeyEvent{Keycode: keycode, Pressed: false},
+	)
+}
+
 // Close tears down the Wayland connection.
 func (d *Display) Close() {
 	if d.win != nil {

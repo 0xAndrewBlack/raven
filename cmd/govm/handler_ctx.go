@@ -215,6 +215,17 @@ type HandlerCtx struct {
 	ActiveHwnd        uint64
 	OpenMenuIdx       int
 	OpenMenuHwnd      uint64
+
+	// Modal dialog overlay state
+	DialogActive bool
+	DialogTitle  string
+	DialogText   string
+	DialogText2  string // secondary line (e.g. version info)
+	DialogHwnd   uint64 // owner window
+	DialogBtnX   int32  // OK button bounds (set by DrawDialogOverlay)
+	DialogBtnY   int32
+	DialogBtnW   int32
+	DialogBtnH   int32
 	NextHWND          uint64
 	NextMsgID         uint32
 	NextAtom          uint16
@@ -289,6 +300,7 @@ type HandlerCtx struct {
 	NcTextFont          func(int32) *gdi.Font
 	NcDrawText          func(int32, int32, string, uint32, uint32, bool, int32)
 	DrawMenuOverlay     func()
+	DrawDialogOverlay   func()
 	CommitIfDone        func()
 
 	CrtFiles   map[uint64]*os.File // guest FILE* → Go *os.File

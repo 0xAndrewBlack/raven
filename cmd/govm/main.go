@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime/pprof"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,11 @@ func main() {
 	regFile := flag.String("registry", "", "path to registry hive JSON file (for PE mode)")
 	cpuprof := flag.String("cpuprofile", "", "write CPU profile to file")
 	wayland := flag.Bool("wayland", true, "enable Wayland passthrough (use --wayland=false for headless)")
+	autoScript := flag.String("auto", "", "automation script: semicolon-separated commands\n"+
+		"  <delay>:screenshot:<path>    - save PNG screenshot\n"+
+		"  <delay>:click:<x>,<y>        - inject left click\n"+
+		"  <delay>:key:<linux_keycode>  - inject key press+release\n"+
+		"  Example: '2:screenshot:/tmp/s1.png;3:click:100,50;4:screenshot:/tmp/s2.png'")
 
 	flag.Usage = func() {
 		ravelog.Banner("v0.1.0")
@@ -152,7 +158,7 @@ func main() {
 	isPE := detectPE(binPath)
 
 	if isPE {
-		runPE(absPath, guestArgv, *sysroot, *regFile, *trace, *wayland)
+		runPE(absPath, guestArgv, *sysroot, *regFile, *trace, *wayland, *autoScript)
 	} else {
 		runELF(absPath, guestArgv, *trace, *wayland)
 	}
@@ -307,7 +313,7 @@ func runELF(absPath string, guestArgv []string, trace bool, enableWayland bool) 
 }
 
 // runPE runs a Windows PE binary with the NT subsystem.
-func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bool, enableWayland bool) {
+func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bool, enableWayland bool, autoScript string) {
 	mem := mmu.New()
 	fs := vfs.New()
 	fs.ElfPath = absPath
@@ -658,7 +664,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	mem.Write64(procState.TEBAddr+ntapi.TebHeapBase, heapRegion)
 	mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
 
-	registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry)
+	registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry, autoScript)
 
 	// Set up Win32k subsystem
 	w32k := win32k.New(mem, handles)
@@ -810,6 +816,8 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 		}
 	}()
 
+	// Automation goroutine is now started inside registerAutoSynthHandlers.
+
 	// Run the PE
 rerun:
 	if err := mainThread.CPU.Run(); err != nil {
@@ -862,9 +870,94 @@ rerun:
 	tm.Wait()
 }
 
+// runAutoScript parses and executes a semicolon-separated automation script.
+// Format: "<delay_sec>:<action>:<args>;..."
+// Actions: screenshot:<path>, click:<x>,<y>, key:<keycode>
+func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
+	start := time.Now()
+	type autoCmd struct {
+		delay  time.Duration
+		action string
+		args   string
+	}
+	var cmds []autoCmd
+	for _, part := range strings.Split(script, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		tokens := strings.SplitN(part, ":", 3)
+		if len(tokens) < 2 {
+			ravelog.Logf("[auto] bad command: %q\n", part)
+			continue
+		}
+		delaySec, err := strconv.ParseFloat(tokens[0], 64)
+		if err != nil {
+			ravelog.Logf("[auto] bad delay %q: %v\n", tokens[0], err)
+			continue
+		}
+		action := tokens[1]
+		args := ""
+		if len(tokens) == 3 {
+			args = tokens[2]
+		}
+		cmds = append(cmds, autoCmd{
+			delay:  time.Duration(delaySec * float64(time.Second)),
+			action: action,
+			args:   args,
+		})
+	}
+
+	for _, cmd := range cmds {
+		// Wait until the scheduled time
+		elapsed := time.Since(start)
+		if cmd.delay > elapsed {
+			time.Sleep(cmd.delay - elapsed)
+		}
+		switch cmd.action {
+		case "screenshot":
+			w := *winPtr
+			if w == nil {
+				ravelog.Logf("[auto] screenshot: no window yet\n")
+				continue
+			}
+			if err := w.Screenshot(cmd.args); err != nil {
+				ravelog.Logf("[auto] screenshot %q failed: %v\n", cmd.args, err)
+			} else {
+				ravelog.Logf("[auto] screenshot saved: %s\n", cmd.args)
+			}
+		case "click":
+			if disp == nil {
+				ravelog.Logf("[auto] click: no display\n")
+				continue
+			}
+			parts := strings.SplitN(cmd.args, ",", 2)
+			if len(parts) != 2 {
+				ravelog.Logf("[auto] click: bad args %q\n", cmd.args)
+				continue
+			}
+			x, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+			y, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			disp.InjectClick(int32(x), int32(y))
+			ravelog.Logf("[auto] click at (%d,%d)\n", x, y)
+		case "key":
+			if disp == nil {
+				ravelog.Logf("[auto] key: no display\n")
+				continue
+			}
+			code, _ := strconv.Atoi(cmd.args)
+			disp.InjectKey(uint32(code))
+			ravelog.Logf("[auto] key %d\n", code)
+		default:
+			ravelog.Logf("[auto] unknown action: %q\n", cmd.action)
+		}
+	}
+	ravelog.Logf("[auto] script complete\n")
+}
+
 // registerAutoSynthHandlers registers vmcall handlers for critical
 // CRT and Win32 functions in auto-generated synthetic DLLs.
-func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule, tmPtr **thread.Manager, bootTime time.Time, regHive *ntapi.RegistryHive) {
+func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule, tmPtr **thread.Manager, bootTime time.Time, regHive *ntapi.RegistryHive, autoScript string) {
 	synthByName := make(map[string]*ntapi.SynthPE)
 	for _, s := range dlls {
 		synthByName[strings.ToLower(s.Name)] = s
@@ -1008,6 +1101,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		ravelog.Logf("[wl] connected to Wayland compositor\n")
 	} else {
 		ravelog.Logf("[wl] no Wayland: %v (window display disabled)\n", err)
+	}
+
+	// Automation goroutine: parse -auto script and execute timed actions.
+	if autoScript != "" {
+		go runAutoScript(autoScript, wlDisplay, &wlWindow)
 	}
 
 	readGuestUTF16 := func(addr uint64) string {
@@ -2421,6 +2519,72 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 	}
 
+	// DrawDialogOverlay renders the modal dialog box on top of everything.
+	hctx.DrawDialogOverlay = func() {
+		if !hctx.DialogActive || wlWindow == nil {
+			return
+		}
+		ravelog.Logf("[dialog] DrawDialogOverlay title=%q\n", hctx.DialogTitle)
+		w := int32(wlWindow.Width)
+		h := wlWindow.Height + wlWindow.TitleBarH
+
+		// Dialog dimensions: centered, reasonable size
+		const dlgW, dlgH = int32(340), int32(180)
+		dx := (w - dlgW) / 2
+		dy := (h - dlgH) / 2
+		if dx < 0 {
+			dx = 0
+		}
+		if dy < 0 {
+			dy = 0
+		}
+
+		// Semi-transparent scrim (darken background by filling with gray overlay pattern)
+		// We can't do alpha blending easily, so just draw the dialog solid.
+
+		// Dialog background
+		wlWindow.DrawRectAbs(dx, dy, dx+dlgW, dy+dlgH, 0xF0F0F0)
+		// Outer border
+		wlWindow.DrawRectAbs(dx, dy, dx+dlgW, dy+1, 0x606060)
+		wlWindow.DrawRectAbs(dx, dy, dx+1, dy+dlgH, 0x606060)
+		wlWindow.DrawRectAbs(dx, dy+dlgH-1, dx+dlgW, dy+dlgH, 0x606060)
+		wlWindow.DrawRectAbs(dx+dlgW-1, dy, dx+dlgW, dy+dlgH, 0x606060)
+		// Title bar (blue)
+		wlWindow.DrawRectAbs(dx+1, dy+1, dx+dlgW-1, dy+24, 0x0078D7)
+		hctx.NcDrawText(dx+8, dy+5, hctx.DialogTitle, 0xFFFFFF, 0x0078D7, true, 12)
+
+		// Text body
+		if hctx.DialogText != "" {
+			hctx.NcDrawText(dx+20, dy+40, hctx.DialogText, 0x000000, 0xF0F0F0, true, 12)
+		}
+		if hctx.DialogText2 != "" {
+			hctx.NcDrawText(dx+20, dy+60, hctx.DialogText2, 0x444444, 0xF0F0F0, true, 12)
+		}
+		// "Raven VM" branding
+		hctx.NcDrawText(dx+20, dy+90, "Running on Raven VM", 0x888888, 0xF0F0F0, true, 12)
+
+		// OK button: centered at bottom
+		btnW, btnH := int32(80), int32(26)
+		btnX := dx + (dlgW-btnW)/2
+		btnY := dy + dlgH - 40
+		// Button background
+		wlWindow.DrawRectAbs(btnX, btnY, btnX+btnW, btnY+btnH, 0xE1E1E1)
+		// Button border
+		wlWindow.DrawRectAbs(btnX, btnY, btnX+btnW, btnY+1, 0xADADAD)
+		wlWindow.DrawRectAbs(btnX, btnY, btnX+1, btnY+btnH, 0xADADAD)
+		wlWindow.DrawRectAbs(btnX, btnY+btnH-1, btnX+btnW, btnY+btnH, 0xADADAD)
+		wlWindow.DrawRectAbs(btnX+btnW-1, btnY, btnX+btnW, btnY+btnH, 0xADADAD)
+		// Button text "OK"
+		hctx.NcDrawText(btnX+32, btnY+6, "OK", 0x000000, 0xE1E1E1, true, 12)
+
+		// Store button bounds for click detection
+		hctx.DialogBtnX = btnX
+		hctx.DialogBtnY = btnY
+		hctx.DialogBtnW = btnW
+		hctx.DialogBtnH = btnH
+		ravelog.Logf("[dialog] drawn at (%d,%d) size %dx%d btn at (%d,%d)\n", dx, dy, dlgW, dlgH, btnX, btnY)
+	}
+
 	// commitIfDone commits the Wayland buffer whenever a paint pass has finished.
 	// Called after DefWindowProcW WM_PAINT and after each child EndPaint.
 	// Multiple commits are fine; each one produces a progressively more complete frame.
@@ -2438,6 +2602,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		// Always draw dropdown menu overlay on top of everything (including toolbar).
 		hctx.DrawMenuOverlay()
+		// Draw modal dialog overlay on top of everything else.
+		hctx.DrawDialogOverlay()
 		ravelog.Logf("[commit] Commit w=%d h=%d pixLen=%d\n", w.Width, w.Height, len(w.Pix))
 		w.Commit()
 		frameCount++

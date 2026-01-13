@@ -940,6 +940,7 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 	// We log the info and return TRUE (the dialog was "shown").
 	d.RegisterAutoStubHandler(shell32, "ShellAboutW", func(ctx *ntapi.TrapContext) uint32 {
 		// INT ShellAboutW(HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff, HICON hIcon)
+		hwnd := ctx.Arg(0)
 		szApp := ctx.Arg(1)
 		szOther := ctx.Arg(2)
 		appName := ""
@@ -951,7 +952,22 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 			otherStuff = readGuestUTF16(szOther)
 		}
 		ravelog.Logf("[shell] ShellAboutW: app=%q other=%q\n", appName, otherStuff)
-		// TODO: create a real dialog window once DialogBoxParamW is implemented
+
+		// Show modal dialog overlay
+		hctx.DialogActive = true
+		hctx.DialogTitle = "About " + appName
+		hctx.DialogText = appName
+		hctx.DialogText2 = otherStuff
+		hctx.DialogHwnd = hwnd
+		hctx.OpenMenuIdx = -1 // close any open menu dropdown
+
+		// Trigger immediate repaint to show the dialog
+		if hctx.WlWindow != nil && hctx.HasBaseFrame {
+			hctx.RepaintBuiltin = true
+			hctx.FrameReady = true
+			hctx.CommitIfDone()
+		}
+
 		ctx.SetReturn(1) // TRUE = success
 		return 0
 	})
