@@ -224,6 +224,17 @@ type HandlerCtx struct {
 	LastPostedMainW   int32
 	LastPostedMainH   int32
 
+	// Caret state
+	CaretHwnd    uint64
+	CaretWidth   int32
+	CaretHeight  int32
+	CaretX       int32
+	CaretY       int32
+	CaretVisible bool
+
+	// Mouse tracking
+	TrackMouseHwnds map[uint64]uint32
+
 	// Mutable slices/arrays
 	ViewMappings           []viewMapping
 	MsgQueue               []queuedMsg

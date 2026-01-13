@@ -3310,11 +3310,32 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ScrollWindow", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		queuePaint(hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ScrollWindowEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// ReactOS: win32ss/user/ntuser/scrollex.c NtUserScrollWindowEx
+		hwnd := ctx.Arg(0)
+		// dx := int32(ctx.Arg(1))
+		// dy := int32(ctx.Arg(2))
+		// prcScroll := ctx.Arg(3) // nullable RECT
+		// prcClip := ctx.Arg(4)   // nullable RECT
+		// hrgnUpdate := ctx.Arg(5)
+		prcUpdate := ctx.Arg(6)
+		// flags := ctx.Arg(7) // SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE
+		// Write update rect if requested (full client area)
+		if prcUpdate != 0 {
+			if cs, ok := hwndChildren[hwnd]; ok {
+				mem.Write32(prcUpdate, 0)
+				mem.Write32(prcUpdate+4, 0)
+				mem.Write32(prcUpdate+8, uint32(cs.w))
+				mem.Write32(prcUpdate+12, uint32(cs.h))
+			}
+		}
+		queuePaint(hwnd)
+		ctx.SetReturn(1) // SIMPLEREGION
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ScrollDC", func(ctx *ntapi.TrapContext) uint32 {
@@ -3342,33 +3363,56 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0)
 		return 0
 	})
-	// Caret
+	// Caret - ReactOS: win32ss/user/ntuser/caret.c
 	d.RegisterAutoStubHandler(user32, "CreateCaret", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		hBitmap := ctx.Arg(1)
+		w := int32(ctx.Arg(2))
+		h := int32(ctx.Arg(3))
+		if w == 0 {
+			w = 1 // SM_CXBORDER
+		}
+		if h == 0 {
+			h = 20
+		}
+		_ = hBitmap
+		hctx.CaretHwnd = hwnd
+		hctx.CaretWidth = w
+		hctx.CaretHeight = h
+		hctx.CaretX = 0
+		hctx.CaretY = 0
+		hctx.CaretVisible = false
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DestroyCaret", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CaretHwnd = 0
+		hctx.CaretVisible = false
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ShowCaret", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CaretVisible = true
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "HideCaret", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CaretVisible = false
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetCaretPos", func(ctx *ntapi.TrapContext) uint32 {
 		p := ctx.Arg(0)
 		if p != 0 {
-			ctx.Mem.Write32(p, 0)
-			ctx.Mem.Write32(p+4, 0)
+			ctx.Mem.Write32(p, uint32(hctx.CaretX))
+			ctx.Mem.Write32(p+4, uint32(hctx.CaretY))
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetCaretPos", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CaretX = int32(ctx.Arg(0))
+		hctx.CaretY = int32(ctx.Arg(1))
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3577,6 +3621,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EnumChildWindows", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/window.c NtUserEnumChildWindows
+		// Ideally we'd call lpEnumFunc for each child via the sync trampoline,
+		// but the trampoline is SendMessage-oriented. For now, just return TRUE.
+		// The app will think no children were enumerated (callback was never FALSE).
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4275,8 +4323,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "GetCursorPos", func(ctx *ntapi.TrapContext) uint32 {
 		p := ctx.Arg(0)
 		if p != 0 {
-			ctx.Mem.Write32(p, 0)
-			ctx.Mem.Write32(p+4, 0)
+			var mx, my int32
+			if hctx.WlDisplay != nil {
+				mx, my = hctx.WlDisplay.MousePos()
+			}
+			ctx.Mem.Write32(p, uint32(mx))
+			ctx.Mem.Write32(p+4, uint32(my))
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -4549,11 +4601,60 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetKeyState", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// ReactOS: win32ss/user/ntuser/input.c NtUserGetKeyState
+		vk := ctx.Arg(0) & 0xFF
+		var state int16
+		switch vk {
+		case 0x10: // VK_SHIFT
+			if hctx.WlDisplay != nil && hctx.WlDisplay.ShiftDown() {
+				state = -128 // 0xFF80 - high bit = pressed
+			}
+		case 0x11: // VK_CONTROL
+			if hctx.WlDisplay != nil && hctx.WlDisplay.CtrlDown() {
+				state = -128
+			}
+		case 0x12: // VK_MENU (Alt)
+			if hctx.WlDisplay != nil && hctx.WlDisplay.AltDown() {
+				state = -128
+			}
+		case 0xA0: // VK_LSHIFT
+			if hctx.WlDisplay != nil && hctx.WlDisplay.ShiftDown() {
+				state = -128
+			}
+		case 0xA2: // VK_LCONTROL
+			if hctx.WlDisplay != nil && hctx.WlDisplay.CtrlDown() {
+				state = -128
+			}
+		case 0xA4: // VK_LMENU
+			if hctx.WlDisplay != nil && hctx.WlDisplay.AltDown() {
+				state = -128
+			}
+		case 0x14: // VK_CAPITAL - toggled state in low bit
+			// We don't track CapsLock yet
+		}
+		ctx.SetReturn(uint64(uint16(state)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetAsyncKeyState", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		vk := ctx.Arg(0) & 0xFF
+		var state int16
+		switch vk {
+		case 0x10, 0xA0, 0xA1: // VK_SHIFT, VK_LSHIFT, VK_RSHIFT
+			if hctx.WlDisplay != nil && hctx.WlDisplay.ShiftDown() {
+				state = -32768 // 0x8000 - currently held
+			}
+		case 0x11, 0xA2, 0xA3: // VK_CONTROL, VK_LCONTROL, VK_RCONTROL
+			if hctx.WlDisplay != nil && hctx.WlDisplay.CtrlDown() {
+				state = -32768
+			}
+		case 0x12, 0xA4, 0xA5: // VK_MENU, VK_LMENU, VK_RMENU
+			if hctx.WlDisplay != nil && hctx.WlDisplay.AltDown() {
+				state = -32768
+			}
+		case 0x01: // VK_LBUTTON
+			// TODO: track mouse button state
+		}
+		ctx.SetReturn(uint64(uint16(state)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetWindowsHookExW", func(ctx *ntapi.TrapContext) uint32 {
@@ -6968,6 +7069,27 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "TrackMouseEvent", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/mouse.c NtUserTrackMouseEvent
+		pTME := ctx.Arg(0)
+		if pTME == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		flags, _ := mem.Read32(pTME + 4)
+		hwnd, _ := mem.Read64(pTME + 8)
+		// TME_QUERY (0x40000000) - return current tracking info
+		if flags&0x40000000 != 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		// TME_CANCEL (0x80000000) - cancel tracking
+		if flags&0x80000000 != 0 {
+			delete(hctx.TrackMouseHwnds, hwnd)
+			ctx.SetReturn(1)
+			return 0
+		}
+		// TME_LEAVE (0x02) or TME_HOVER (0x01) - record for future delivery
+		hctx.TrackMouseHwnds[hwnd] = flags
 		ctx.SetReturn(1)
 		return 0
 	})

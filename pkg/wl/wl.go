@@ -927,6 +927,9 @@ func (d *Display) HasNoSSD() bool {
 // CtrlDown returns the current control key state.
 func (d *Display) CtrlDown() bool { return d.ctrlDown }
 
+// AltDown returns the current alt key state.
+func (d *Display) AltDown() bool { return d.altDown }
+
 // SetCursorShape sets the Wayland pointer cursor shape.
 // Uses wp_cursor_shape_device_v1 if available; silently ignores otherwise.
 // Safe to call at any time; the shape is remembered and applied on next pointer enter.
