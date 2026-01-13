@@ -861,7 +861,30 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(kernel32, "IsValidCodePage", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE - all code pages are "valid"
+		// ReactOS: dll/win32/kernel32/winnls/string/nls.c
+		cp := uint32(ctx.Arg(0))
+		switch cp {
+		case 437, 850, 852, 855, 857, 860, 861, 862, 863, 865, 866, 869: // OEM code pages
+			ctx.SetReturn(1)
+		case 874, 932, 936, 949, 950: // CJK/Thai code pages
+			ctx.SetReturn(1)
+		case 1250, 1251, 1252, 1253, 1254, 1255, 1256, 1257, 1258: // Windows ANSI
+			ctx.SetReturn(1)
+		case 10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007, 10008, 10010, 10017, 10029, 10079, 10081: // Mac
+			ctx.SetReturn(1)
+		case 20127: // US-ASCII
+			ctx.SetReturn(1)
+		case 20866, 21866: // KOI8-R, KOI8-U
+			ctx.SetReturn(1)
+		case 28591, 28592, 28593, 28594, 28595, 28596, 28597, 28598, 28599, 28603, 28605: // ISO-8859-*
+			ctx.SetReturn(1)
+		case 65000: // UTF-7
+			ctx.SetReturn(1)
+		case 65001: // UTF-8
+			ctx.SetReturn(1)
+		default:
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetConsoleMode", func(ctx *ntapi.TrapContext) uint32 {
@@ -2696,35 +2719,209 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return uint32(n)
 	}
 	getLocaleInfoValue := func(lctype uint32) string {
+		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
+		// LCTYPE constants from winnls.h for en-US locale
 		switch lctype & 0xFFFF {
-		case 0x02:
+		case 0x01: // LOCALE_ILANGUAGE
+			return "0409"
+		case 0x02: // LOCALE_SLANGUAGE
 			return "English (United States)"
-		case 0x72:
-			return "English (United States)"
-		case 0x59:
-			return "en"
-		case 0x5A:
-			return "US"
-		case 0x0E:
-			return "1252"
-		case 0x0B:
+		case 0x03: // LOCALE_SABBREVLANGNAME
+			return "ENU"
+		case 0x04: // LOCALE_SNATIVELANGNAME
+			return "English"
+		case 0x05: // LOCALE_ICOUNTRY
+			return "1"
+		case 0x06: // LOCALE_SCOUNTRY
+			return "United States"
+		case 0x07: // LOCALE_SABBREVCTRYNAME
+			return "USA"
+		case 0x08: // LOCALE_SNATIVECTRYNAME
+			return "United States"
+		case 0x09: // LOCALE_IDEFAULTLANGUAGE
+			return "0409"
+		case 0x0A: // LOCALE_IDEFAULTCOUNTRY
+			return "1"
+		case 0x0B: // LOCALE_IDEFAULTCODEPAGE (OEM)
 			return "437"
-		case 0x0F:
+		case 0x0C: // LOCALE_SLIST
 			return ","
-		case 0x13:
-			return "0123456789"
-		case 0x10:
+		case 0x0D: // LOCALE_IMEASURE (1=US/imperial)
+			return "1"
+		case 0x0E: // LOCALE_SDECIMAL
 			return "."
-		case 0x11:
+		case 0x0F: // LOCALE_STHOUSAND
+			return ","
+		case 0x10: // LOCALE_SGROUPING
+			return "3;0"
+		case 0x11: // LOCALE_IDIGITS
+			return "2"
+		case 0x12: // LOCALE_ILZERO
+			return "1"
+		case 0x13: // LOCALE_SNATIVEDIGITS
+			return "0123456789"
+		case 0x14: // LOCALE_SCURRENCY
+			return "$"
+		case 0x15: // LOCALE_SINTLSYMBOL
+			return "USD"
+		case 0x16: // LOCALE_SMONDECIMALSEP
+			return "."
+		case 0x17: // LOCALE_SMONTHOUSANDSEP
+			return ","
+		case 0x18: // LOCALE_SMONGROUPING
+			return "3;0"
+		case 0x19: // LOCALE_ICURRDIGITS
+			return "2"
+		case 0x1B: // LOCALE_ICURRENCY
+			return "0"
+		case 0x1C: // LOCALE_INEGCURR
+			return "0"
+		case 0x1D: // LOCALE_SDATE
+			return "/"
+		case 0x1E: // LOCALE_STIME
+			return ":"
+		case 0x1F: // LOCALE_SSHORTDATE
+			return "M/d/yyyy"
+		case 0x20: // LOCALE_SLONGDATE
+			return "dddd, MMMM d, yyyy"
+		case 0x21: // LOCALE_IDATE
+			return "0"
+		case 0x23: // LOCALE_ITIME
+			return "0"
+		case 0x25: // LOCALE_ITLZERO
+			return "0"
+		case 0x28: // LOCALE_S1159
+			return "AM"
+		case 0x29: // LOCALE_S2359
+			return "PM"
+		case 0x2A: // LOCALE_SDAYNAME1 (Monday)
+			return "Monday"
+		case 0x2B: // LOCALE_SDAYNAME2
+			return "Tuesday"
+		case 0x2C: // LOCALE_SDAYNAME3
+			return "Wednesday"
+		case 0x2D: // LOCALE_SDAYNAME4
+			return "Thursday"
+		case 0x2E: // LOCALE_SDAYNAME5
+			return "Friday"
+		case 0x2F: // LOCALE_SDAYNAME6
+			return "Saturday"
+		case 0x30: // LOCALE_SDAYNAME7
+			return "Sunday"
+		case 0x31: // LOCALE_SABBREVDAYNAME1
+			return "Mon"
+		case 0x32: // LOCALE_SABBREVDAYNAME2
+			return "Tue"
+		case 0x33: // LOCALE_SABBREVDAYNAME3
+			return "Wed"
+		case 0x34: // LOCALE_SABBREVDAYNAME4
+			return "Thu"
+		case 0x35: // LOCALE_SABBREVDAYNAME5
+			return "Fri"
+		case 0x36: // LOCALE_SABBREVDAYNAME6
+			return "Sat"
+		case 0x37: // LOCALE_SABBREVDAYNAME7
+			return "Sun"
+		case 0x38: // LOCALE_SMONTHNAME1
+			return "January"
+		case 0x39: // LOCALE_SMONTHNAME2
+			return "February"
+		case 0x3A: // LOCALE_SMONTHNAME3
+			return "March"
+		case 0x3B: // LOCALE_SMONTHNAME4
+			return "April"
+		case 0x3C: // LOCALE_SMONTHNAME5
+			return "May"
+		case 0x3D: // LOCALE_SMONTHNAME6
+			return "June"
+		case 0x3E: // LOCALE_SMONTHNAME7
+			return "July"
+		case 0x3F: // LOCALE_SMONTHNAME8
+			return "August"
+		case 0x40: // LOCALE_SMONTHNAME9
+			return "September"
+		case 0x41: // LOCALE_SMONTHNAME10
+			return "October"
+		case 0x42: // LOCALE_SMONTHNAME11
+			return "November"
+		case 0x43: // LOCALE_SMONTHNAME12
+			return "December"
+		case 0x44: // LOCALE_SABBREVMONTHNAME1
+			return "Jan"
+		case 0x45: // LOCALE_SABBREVMONTHNAME2
+			return "Feb"
+		case 0x46: // LOCALE_SABBREVMONTHNAME3
+			return "Mar"
+		case 0x47: // LOCALE_SABBREVMONTHNAME4
+			return "Apr"
+		case 0x48: // LOCALE_SABBREVMONTHNAME5
+			return "May"
+		case 0x49: // LOCALE_SABBREVMONTHNAME6
+			return "Jun"
+		case 0x4A: // LOCALE_SABBREVMONTHNAME7
+			return "Jul"
+		case 0x4B: // LOCALE_SABBREVMONTHNAME8
+			return "Aug"
+		case 0x4C: // LOCALE_SABBREVMONTHNAME9
+			return "Sep"
+		case 0x4D: // LOCALE_SABBREVMONTHNAME10
+			return "Oct"
+		case 0x4E: // LOCALE_SABBREVMONTHNAME11
+			return "Nov"
+		case 0x4F: // LOCALE_SABBREVMONTHNAME12
+			return "Dec"
+		case 0x50: // LOCALE_SPOSITIVESIGN
+			return ""
+		case 0x51: // LOCALE_SNEGATIVESIGN
 			return "-"
-		case 0x03:
-			return "English"
-		case 0x04:
-			return "English"
-		case 0x01:
-			return "English (United States)"
-		case 0x1004:
+		case 0x59: // LOCALE_SISO639LANGNAME
+			return "en"
+		case 0x5A: // LOCALE_SISO3166CTRYNAME
+			return "US"
+		case 0x5C: // LOCALE_SNAME (Vista+)
 			return "en-US"
+		case 0x5D: // LOCALE_SDURATION
+			return "h:mm:ss"
+		case 0x60: // LOCALE_SSHORTESTDAYNAME1
+			return "Mo"
+		case 0x61: // LOCALE_SSHORTESTDAYNAME2
+			return "Tu"
+		case 0x62: // LOCALE_SSHORTESTDAYNAME3
+			return "We"
+		case 0x63: // LOCALE_SSHORTESTDAYNAME4
+			return "Th"
+		case 0x64: // LOCALE_SSHORTESTDAYNAME5
+			return "Fr"
+		case 0x65: // LOCALE_SSHORTESTDAYNAME6
+			return "Sa"
+		case 0x66: // LOCALE_SSHORTESTDAYNAME7
+			return "Su"
+		case 0x6C: // LOCALE_SSCRIPTS
+			return "Latn;"
+		case 0x6D: // LOCALE_SPARENT
+			return "en"
+		case 0x72: // LOCALE_SENGLISHDISPLAYNAME
+			return "English (United States)"
+		case 0x73: // LOCALE_SNATIVEDISPLAYNAME
+			return "English (United States)"
+		case 0x76: // LOCALE_SPERCENT
+			return "%"
+		case 0x79: // LOCALE_SSHORTTIME
+			return "h:mm tt"
+		case 0x1001: // LOCALE_SENGLANGUAGE (alias)
+			return "English"
+		case 0x1002: // LOCALE_SENGCOUNTRY
+			return "United States"
+		case 0x1003: // LOCALE_STIMEFORMAT
+			return "h:mm:ss tt"
+		case 0x1004: // LOCALE_IDEFAULTANSICODEPAGE
+			return "1252"
+		case 0x100A: // LOCALE_IPAPERSIZE
+			return "1"
+		case 0x1011: // LOCALE_IDEFAULTMACCODEPAGE
+			return "10000"
+		case 0x1012: // LOCALE_IDEFAULTEBCDICCODEPAGE
+			return "037"
 		default:
 			return ""
 		}
@@ -2846,7 +3043,33 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsValidLocale", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
+		lcid := uint32(ctx.Arg(0))
+		switch lcid {
+		case 0x0409, // en-US
+			0x0809, // en-GB
+			0x0C09, // en-AU
+			0x1009, // en-CA
+			0x1409, // en-NZ
+			0x0009, // en (neutral)
+			0x0000, // LOCALE_NEUTRAL
+			0x0400, // LOCALE_USER_DEFAULT
+			0x0800, // LOCALE_SYSTEM_DEFAULT
+			0x007F, // LOCALE_INVARIANT
+			0x0407, // de-DE
+			0x040C, // fr-FR
+			0x0410, // it-IT
+			0x0411, // ja-JP
+			0x0412, // ko-KR
+			0x0804, // zh-CN
+			0x0404, // zh-TW
+			0x0416, // pt-BR
+			0x0C0A, // es-ES
+			0x0419: // ru-RU
+			ctx.SetReturn(1)
+		default:
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumSystemLocalesW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3327,11 +3550,127 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		lpBuffer := ctx.Arg(4)
 		nSize := ctx.Arg(5)
 		const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x100
-		msg := fmt.Sprintf("Error 0x%X", dwMessageId)
+		const FORMAT_MESSAGE_FROM_SYSTEM = 0x1000
+		// ReactOS: dll/win32/kernel32/client/except.c - FormatMessageW
+		// Map common Win32 error codes to human-readable messages
+		var msg string
+		if dwFlags&FORMAT_MESSAGE_FROM_SYSTEM != 0 {
+			switch uint32(dwMessageId) {
+			case 0:
+				msg = "The operation completed successfully."
+			case 1:
+				msg = "Incorrect function."
+			case 2:
+				msg = "The system cannot find the file specified."
+			case 3:
+				msg = "The system cannot find the path specified."
+			case 4:
+				msg = "The system cannot open the file."
+			case 5:
+				msg = "Access is denied."
+			case 6:
+				msg = "The handle is invalid."
+			case 8:
+				msg = "Not enough storage is available to process this command."
+			case 11:
+				msg = "An attempt was made to load a program with an incorrect format."
+			case 12:
+				msg = "The access code is invalid."
+			case 13:
+				msg = "The data is invalid."
+			case 14:
+				msg = "Not enough storage is available to complete this operation."
+			case 15:
+				msg = "The system cannot find the drive specified."
+			case 17:
+				msg = "The system cannot move the file to a different disk drive."
+			case 18:
+				msg = "There are no more files."
+			case 21:
+				msg = "The device is not ready."
+			case 29:
+				msg = "The system cannot write to the specified device."
+			case 30:
+				msg = "The system cannot read from the specified device."
+			case 32:
+				msg = "The process cannot access the file because it is being used by another process."
+			case 33:
+				msg = "The process cannot access the file because another process has locked a portion of the file."
+			case 36:
+				msg = "Too many files opened for sharing."
+			case 38:
+				msg = "Reached the end of the file."
+			case 50:
+				msg = "The request is not supported."
+			case 80:
+				msg = "The file exists."
+			case 87:
+				msg = "The parameter is incorrect."
+			case 109:
+				msg = "The pipe has been ended."
+			case 110:
+				msg = "The system cannot open the device or file specified."
+			case 111:
+				msg = "The file name is too long."
+			case 120:
+				msg = "This function is not supported on this system."
+			case 122:
+				msg = "The data area passed to a system call is too small."
+			case 123:
+				msg = "The filename, directory name, or volume label syntax is incorrect."
+			case 126:
+				msg = "The specified module could not be found."
+			case 127:
+				msg = "The specified procedure could not be found."
+			case 128:
+				msg = "There are no child processes to wait for."
+			case 183:
+				msg = "Cannot create a file when that file already exists."
+			case 203:
+				msg = "The system could not find the environment option that was entered."
+			case 230:
+				msg = "The pipe state is invalid."
+			case 231:
+				msg = "All pipe instances are busy."
+			case 232:
+				msg = "The pipe is being closed."
+			case 233:
+				msg = "No process is on the other end of the pipe."
+			case 234:
+				msg = "More data is available."
+			case 267:
+				msg = "The directory name is invalid."
+			case 534:
+				msg = "Arithmetic result exceeded 32 bits."
+			case 995:
+				msg = "The I/O operation has been aborted because of either a thread exit or an application request."
+			case 996:
+				msg = "Overlapped I/O event is not in a signaled state."
+			case 997:
+				msg = "Overlapped I/O operation is in progress."
+			case 998:
+				msg = "Invalid access to memory location."
+			case 1004:
+				msg = "Invalid flags."
+			case 1008:
+				msg = "An attempt was made to reference a token that does not exist."
+			case 1113:
+				msg = "No mapping for the Unicode character exists in the target multi-byte code page."
+			case 1114:
+				msg = "A dynamic link library (DLL) initialization routine failed."
+			case 1150:
+				msg = "The specified program requires a newer version of Windows."
+			case 1155:
+				msg = "No application is associated with the specified file for this operation."
+			default:
+				msg = fmt.Sprintf("Error 0x%X", dwMessageId)
+			}
+		} else {
+			msg = fmt.Sprintf("Error 0x%X", dwMessageId)
+		}
 		ws := utf16Encode(msg)
 		n := uint64(len(ws))
 		if dwFlags&FORMAT_MESSAGE_ALLOCATE_BUFFER != 0 {
-			// Allocate buffer and write pointer to *lpBuffer
 			bufSize := (n + 2) * 2
 			addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
 			for i, w := range ws {
@@ -3360,7 +3699,56 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		lpBuffer := ctx.Arg(4)
 		nSize := ctx.Arg(5)
 		const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x100
-		msg := fmt.Sprintf("Error 0x%X", dwMessageId)
+		const FORMAT_MESSAGE_FROM_SYSTEM = 0x1000
+		var msg string
+		if dwFlags&FORMAT_MESSAGE_FROM_SYSTEM != 0 {
+			switch uint32(dwMessageId) {
+			case 0:
+				msg = "The operation completed successfully."
+			case 2:
+				msg = "The system cannot find the file specified."
+			case 3:
+				msg = "The system cannot find the path specified."
+			case 5:
+				msg = "Access is denied."
+			case 6:
+				msg = "The handle is invalid."
+			case 8:
+				msg = "Not enough storage is available to process this command."
+			case 13:
+				msg = "The data is invalid."
+			case 14:
+				msg = "Not enough storage is available to complete this operation."
+			case 18:
+				msg = "There are no more files."
+			case 32:
+				msg = "The process cannot access the file because it is being used by another process."
+			case 87:
+				msg = "The parameter is incorrect."
+			case 109:
+				msg = "The pipe has been ended."
+			case 122:
+				msg = "The data area passed to a system call is too small."
+			case 126:
+				msg = "The specified module could not be found."
+			case 127:
+				msg = "The specified procedure could not be found."
+			case 183:
+				msg = "Cannot create a file when that file already exists."
+			case 234:
+				msg = "More data is available."
+			case 267:
+				msg = "The directory name is invalid."
+			case 997:
+				msg = "Overlapped I/O operation is in progress."
+			case 998:
+				msg = "Invalid access to memory location."
+			default:
+				msg = fmt.Sprintf("Error 0x%X", dwMessageId)
+			}
+		} else {
+			msg = fmt.Sprintf("Error 0x%X", dwMessageId)
+		}
 		n := uint64(len(msg))
 		if dwFlags&FORMAT_MESSAGE_ALLOCATE_BUFFER != 0 {
 			addr := mem.Mmap(0, n+2, mmu.PermRead|mmu.PermWrite)
@@ -5560,10 +5948,49 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumSystemLocalesEx", func(ctx *ntapi.TrapContext) uint32 {
-		// Calling back into guest code requires the syncDispatch trampoline
-		// which is set up for window procedures. Returning TRUE signals success
-		// without enumerating; callers typically fall back to defaults.
-		ctx.SetReturn(1)
+		// BOOL EnumSystemLocalesEx(LOCALE_ENUMPROCEX lpLocaleEnumProcEx, DWORD dwFlags, LPARAM lParam, LPVOID lpReserved)
+		// Callback: BOOL CALLBACK EnumLocalesProcEx(LPWSTR lpLocaleString, DWORD dwFlags, LPARAM lParam)
+		lpEnumFunc := ctx.Arg(0)
+		_ = ctx.Arg(1) // dwFlags
+		lParam := ctx.Arg(2)
+
+		if lpEnumFunc == 0 || hctx.SyncTrampoline == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		rw, okW := ctx.CPU.(ntapi.RegisterWriter)
+		rr, okR := ctx.CPU.(ntapi.RegisterReader)
+		if !okW || !okR {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		// Write "en-US\0" into guest memory for the callback argument
+		locStr := utf16Encode("en-US")
+		locBuf := mem.Mmap(0, uint64((len(locStr)+1)*2), mmu.PermRead|mmu.PermWrite)
+		for i, ch := range locStr {
+			mem.Write16(locBuf+uint64(i)*2, ch)
+		}
+		mem.Write16(locBuf+uint64(len(locStr))*2, 0)
+
+		// Set up syncDispatch: callback(lpLocaleString=RCX, dwFlags=RDX, lParam=R8)
+		rsp := rr.ReadReg(4)
+		retAddr, _ := mem.Read64(rsp)
+		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			queue:               nil,
+			retAddr:             retAddr,
+			hwnd:                1,
+			returnWndProcResult: true,
+		})
+		mem.Write64(rsp, hctx.SyncTrampoline)
+
+		rw.WriteReg(1, locBuf)  // RCX = lpLocaleString
+		rw.WriteReg(2, 0)       // RDX = dwFlags
+		rw.WriteReg(8, lParam)  // R8  = lParam
+		rw.WriteReg(9, 0)       // R9  = unused
+		ctx.CPU.SetPC(lpEnumFunc)
+		ctx.ReturnOverridden = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumTimeFormatsA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7523,6 +7950,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetNumberOfConsoleInputEvents", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: dll/win32/kernel32/client/console.c
+		// BOOL GetNumberOfConsoleInputEvents(HANDLE hConsoleInput, LPDWORD lpcNumberOfEvents)
+		lpNumEvents := ctx.Arg(1)
+		if lpNumEvents != 0 {
+			ctx.Mem.Write32(lpNumEvents, 0) // no pending input events
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -9270,9 +9703,48 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "LCIDToLocaleName", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
+		lcid := uint32(ctx.Arg(0))
 		buf := ctx.Arg(1)
 		cch := ctx.Arg(2)
-		ws := utf16Encode("en-US")
+		var name string
+		switch lcid {
+		case 0x0409, 0x0000, 0x0400, 0x0800: // en-US, NEUTRAL, USER_DEFAULT, SYSTEM_DEFAULT
+			name = "en-US"
+		case 0x0809:
+			name = "en-GB"
+		case 0x0C09:
+			name = "en-AU"
+		case 0x1009:
+			name = "en-CA"
+		case 0x0009:
+			name = "en"
+		case 0x007F: // LOCALE_INVARIANT
+			name = ""
+		case 0x0407:
+			name = "de-DE"
+		case 0x040C:
+			name = "fr-FR"
+		case 0x0410:
+			name = "it-IT"
+		case 0x0411:
+			name = "ja-JP"
+		case 0x0412:
+			name = "ko-KR"
+		case 0x0804:
+			name = "zh-CN"
+		case 0x0404:
+			name = "zh-TW"
+		case 0x0416:
+			name = "pt-BR"
+		case 0x0C0A:
+			name = "es-ES"
+		case 0x0419:
+			name = "ru-RU"
+		default:
+			name = "en-US"
+		}
+		ws := utf16Encode(name)
 		n := uint64(len(ws) + 1)
 		if buf != 0 && cch > 0 {
 			if n > cch {
@@ -9436,14 +9908,43 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "LocaleNameToLCID", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
 		name := readGuestUTF16(ctx.Arg(0))
 		switch strings.ToLower(name) {
+		case "en-us":
+			ctx.SetReturn(0x0409)
 		case "en-gb":
 			ctx.SetReturn(0x0809)
-		case "":
+		case "en-au":
+			ctx.SetReturn(0x0C09)
+		case "en-ca":
+			ctx.SetReturn(0x1009)
+		case "en":
+			ctx.SetReturn(0x0009)
+		case "de-de":
+			ctx.SetReturn(0x0407)
+		case "fr-fr":
+			ctx.SetReturn(0x040C)
+		case "it-it":
+			ctx.SetReturn(0x0410)
+		case "ja-jp":
+			ctx.SetReturn(0x0411)
+		case "ko-kr":
+			ctx.SetReturn(0x0412)
+		case "zh-cn":
+			ctx.SetReturn(0x0804)
+		case "zh-tw":
+			ctx.SetReturn(0x0404)
+		case "pt-br":
+			ctx.SetReturn(0x0416)
+		case "es-es":
+			ctx.SetReturn(0x0C0A)
+		case "ru-ru":
+			ctx.SetReturn(0x0419)
+		case "": // LOCALE_NAME_USER_DEFAULT
 			ctx.SetReturn(0x0409)
 		default:
-			ctx.SetReturn(0x0409)
+			ctx.SetReturn(0x0409) // fallback to en-US
 		}
 		return 0
 	})
@@ -9843,10 +10344,21 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "PeekConsoleInputA", func(ctx *ntapi.TrapContext) uint32 {
+		lpNumRead := ctx.Arg(3)
+		if lpNumRead != 0 {
+			ctx.Mem.Write32(lpNumRead, 0)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "PeekConsoleInputW", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: dll/win32/kernel32/client/console.c
+		// BOOL PeekConsoleInputW(HANDLE hConsoleInput, PINPUT_RECORD lpBuffer,
+		//     DWORD nLength, LPDWORD lpNumberOfEventsRead)
+		lpNumRead := ctx.Arg(3)
+		if lpNumRead != 0 {
+			ctx.Mem.Write32(lpNumRead, 0) // no events peeked
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -11220,10 +11732,21 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ResolveLocaleName", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
+		// Resolves a locale name to a valid one; unknown names resolve to "en-US"
 		name := readGuestUTF16(ctx.Arg(0))
 		buf := ctx.Arg(1)
 		cch := ctx.Arg(2)
-		ws := utf16Encode(name)
+		resolved := name
+		switch strings.ToLower(name) {
+		case "en-us", "en-gb", "en-au", "en-ca", "en",
+			"de-de", "fr-fr", "it-it", "ja-jp", "ko-kr",
+			"zh-cn", "zh-tw", "pt-br", "es-es", "ru-ru":
+			// keep as-is
+		default:
+			resolved = "en-US"
+		}
+		ws := utf16Encode(resolved)
 		if buf != 0 && cch > 0 {
 			n := uint64(len(ws))
 			if n >= cch {
@@ -11911,7 +12434,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetNamedPipeHandleState", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		// ReactOS: dll/win32/kernel32/client/file.c
+		// BOOL SetNamedPipeHandleState(HANDLE hNamedPipe, LPDWORD lpMode,
+		//     LPDWORD lpMaxCollectionCount, LPDWORD lpCollectDataTimeout)
+		// Accept all mode changes silently
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetPriorityClass", func(ctx *ntapi.TrapContext) uint32 {

@@ -172,7 +172,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetObjectW", func(ctx *ntapi.TrapContext) uint32 {
-		// Return LOGBRUSH or LOGFONT size for the object type
+		// ReactOS: NtGdiExtGetObjectW - return object info based on type
 		h := ctx.Arg(0)
 		obj := gdiMgr.GetObject(h)
 		if obj == nil {
@@ -181,6 +181,15 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		}
 		pv := ctx.Arg(2)
 		switch obj.Type {
+		case gdi.ObjPen:
+			// LOGPEN: {lopnStyle:UINT(+0), lopnWidth:POINT(+4,+8), lopnColor:COLORREF(+12)} = 16 bytes
+			ctx.SetReturn(16)
+			if pv != 0 && obj.Pen != nil {
+				ctx.Mem.Write32(pv, uint32(obj.Pen.Style))
+				ctx.Mem.Write32(pv+4, uint32(obj.Pen.Width)) // POINT.x
+				ctx.Mem.Write32(pv+8, 0)                     // POINT.y
+				ctx.Mem.Write32(pv+12, obj.Pen.Color)
+			}
 		case gdi.ObjBrush:
 			ctx.SetReturn(12) // sizeof(LOGBRUSH)
 			if pv != 0 && obj.Brush != nil {
@@ -555,12 +564,24 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetViewportOrgEx", func(ctx *ntapi.TrapContext) uint32 {
 		dc := getDC(ctx.Arg(0))
+		// ReactOS: NtGdiSetViewportOrgEx - write old origin to lpPoint (arg 3)
+		p := ctx.Arg(3)
+		if p != 0 {
+			ctx.Mem.Write32(p, uint32(dc.OriginX))
+			ctx.Mem.Write32(p+4, uint32(dc.OriginY))
+		}
 		dc.SetViewportOrg(int32(ctx.Arg(1)), int32(ctx.Arg(2)))
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "OffsetViewportOrgEx", func(ctx *ntapi.TrapContext) uint32 {
 		dc := getDC(ctx.Arg(0))
+		// ReactOS: NtGdiOffsetViewportOrgEx - write old origin to lpPoint (arg 3)
+		p := ctx.Arg(3)
+		if p != 0 {
+			ctx.Mem.Write32(p, uint32(dc.OriginX))
+			ctx.Mem.Write32(p+4, uint32(dc.OriginY))
+		}
 		dc.OffsetViewportOrg(int32(ctx.Arg(1)), int32(ctx.Arg(2)))
 		ctx.SetReturn(1)
 		return 0
@@ -777,6 +798,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(gdi32, "MoveToEx", func(ctx *ntapi.TrapContext) uint32 {
 		dc := getDC(ctx.Arg(0))
+		// ReactOS: NtGdiMoveToEx - write old position to lpPoint (arg 3)
+		p := ctx.Arg(3)
+		if p != 0 {
+			ctx.Mem.Write32(p, uint32(dc.CurX))
+			ctx.Mem.Write32(p+4, uint32(dc.CurY))
+		}
 		dc.MoveTo(int32(ctx.Arg(1)), int32(ctx.Arg(2)))
 		ctx.SetReturn(1)
 		return 0
@@ -2042,6 +2069,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	// --- Pen/Brush extras ---
 	d.RegisterAutoStubHandler(gdi32, "CreatePenIndirect", func(ctx *ntapi.TrapContext) uint32 {
+		// LOGPEN: {lopnStyle:UINT(+0), lopnWidth:POINT(+4,+8), lopnColor:COLORREF(+12)}
 		p := ctx.Arg(0)
 		style, width, color := int32(0), int32(1), uint32(0)
 		if p != 0 {
@@ -2049,7 +2077,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			style = int32(v)
 			v, _ = mem.Read32(p + 4)
 			width = int32(v)
-			v, _ = mem.Read32(p + 8)
+			v, _ = mem.Read32(p + 12)
 			color = v
 		}
 		ctx.SetReturn(gdiMgr.CreatePen(style, width, color))
@@ -2848,6 +2876,376 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write8(lpvBits+uint64(i), b)
 		}
 		ctx.SetReturn(uint64(numScans))
+		return 0
+	})
+	// --- CreatePatternBrush ---
+	// ReactOS: NtGdiCreatePatternBrushInternal in win32ss/gdi/ntgdi/brush.c
+	d.RegisterAutoStubHandler(gdi32, "CreatePatternBrush", func(ctx *ntapi.TrapContext) uint32 {
+		hbm := ctx.Arg(0)
+		ctx.SetReturn(gdiMgr.CreatePatternBrush(hbm))
+		return 0
+	})
+	// --- GetObjectA ---
+	// ReactOS: NtGdiExtGetObjectW (ANSI wrapper in gdi32)
+	// Same as GetObjectW but LOGFONTA uses char[32] (not WCHAR[32]) for lfFaceName.
+	d.RegisterAutoStubHandler(gdi32, "GetObjectA", func(ctx *ntapi.TrapContext) uint32 {
+		h := ctx.Arg(0)
+		obj := gdiMgr.GetObject(h)
+		if obj == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		pv := ctx.Arg(2)
+		switch obj.Type {
+		case gdi.ObjPen:
+			ctx.SetReturn(16) // sizeof(LOGPEN)
+			if pv != 0 && obj.Pen != nil {
+				ctx.Mem.Write32(pv, uint32(obj.Pen.Style))
+				ctx.Mem.Write32(pv+4, uint32(obj.Pen.Width))
+				ctx.Mem.Write32(pv+8, 0)
+				ctx.Mem.Write32(pv+12, obj.Pen.Color)
+			}
+		case gdi.ObjBrush:
+			ctx.SetReturn(12) // sizeof(LOGBRUSH)
+			if pv != 0 && obj.Brush != nil {
+				ctx.Mem.Write32(pv, uint32(obj.Brush.Style))
+				ctx.Mem.Write32(pv+4, obj.Brush.Color)
+				ctx.Mem.Write32(pv+8, uint32(obj.Brush.Hatch))
+			}
+		case gdi.ObjBitmap:
+			ctx.SetReturn(24) // sizeof(BITMAP)
+			if pv != 0 && obj.Bitmap != nil {
+				ctx.Mem.Write32(pv, 0)
+				ctx.Mem.Write32(pv+4, uint32(obj.Bitmap.Width))
+				ctx.Mem.Write32(pv+8, uint32(obj.Bitmap.Height))
+				ctx.Mem.Write32(pv+12, uint32(obj.Bitmap.Width*4))
+				ctx.Mem.Write16(pv+16, 1)
+				ctx.Mem.Write16(pv+18, 32)
+				ctx.Mem.Write32(pv+20, 0)
+			}
+		case gdi.ObjFont:
+			// LOGFONTA = 60 bytes (lfFaceName is char[32] at offset 28)
+			ctx.SetReturn(60)
+			if pv != 0 && obj.Font != nil {
+				f := obj.Font
+				ctx.Mem.Write32(pv, uint32(f.Height))
+				ctx.Mem.Write32(pv+4, uint32(f.Width))
+				ctx.Mem.Write32(pv+8, uint32(f.Escapement))
+				ctx.Mem.Write32(pv+12, uint32(f.Orientation))
+				w := f.Weight
+				if w == 0 {
+					w = 400
+				}
+				ctx.Mem.Write32(pv+16, uint32(w))
+				italic := byte(0)
+				if f.Italic {
+					italic = 1
+				}
+				underline := byte(0)
+				if f.Underline {
+					underline = 1
+				}
+				strike := byte(0)
+				if f.StrikeOut {
+					strike = 1
+				}
+				ctx.Mem.Write8(pv+20, italic)
+				ctx.Mem.Write8(pv+21, underline)
+				ctx.Mem.Write8(pv+22, strike)
+				ctx.Mem.Write8(pv+23, f.CharSet)
+				ctx.Mem.Write8(pv+24, f.OutPrecision)
+				ctx.Mem.Write8(pv+25, f.ClipPrecision)
+				ctx.Mem.Write8(pv+26, f.Quality)
+				ctx.Mem.Write8(pv+27, f.PitchFamily)
+				// lfFaceName: char[32] at offset 28
+				face := f.FaceName
+				if len(face) > 31 {
+					face = face[:31]
+				}
+				for i := 0; i < len(face); i++ {
+					ctx.Mem.Write8(pv+28+uint64(i), face[i])
+				}
+				ctx.Mem.Write8(pv+28+uint64(len(face)), 0)
+			}
+		default:
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
+	// --- GetBkMode ---
+	// ReactOS: NtGdiGetDCDword(hdc, GdiGetSetBkMode)
+	d.RegisterAutoStubHandler(gdi32, "GetBkMode", func(ctx *ntapi.TrapContext) uint32 {
+		dc := getDC(ctx.Arg(0))
+		m := dc.BkMode
+		if m == 0 {
+			m = 2 // OPAQUE default
+		}
+		ctx.SetReturn(uint64(m))
+		return 0
+	})
+	// --- DC_PEN / DC_BRUSH colour functions ---
+	// ReactOS: NtGdiGetDCDword / NtGdiSetDCDword for DC_PEN_COLOR / DC_BRUSH_COLOR
+	d.RegisterAutoStubHandler(gdi32, "SetDCPenColor", func(ctx *ntapi.TrapContext) uint32 {
+		dc := getDC(ctx.Arg(0))
+		prev := dc.DCPenColor
+		dc.DCPenColor = uint32(ctx.Arg(1))
+		ctx.SetReturn(uint64(prev))
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "GetDCPenColor", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(uint64(getDC(ctx.Arg(0)).DCPenColor))
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "SetDCBrushColor", func(ctx *ntapi.TrapContext) uint32 {
+		dc := getDC(ctx.Arg(0))
+		prev := dc.DCBrushColor
+		dc.DCBrushColor = uint32(ctx.Arg(1))
+		ctx.SetReturn(uint64(prev))
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "GetDCBrushColor", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(uint64(getDC(ctx.Arg(0)).DCBrushColor))
+		return 0
+	})
+	// --- SetPixelV ---
+	// ReactOS: NtGdiSetPixel (SetPixelV is SetPixel that returns BOOL not color)
+	d.RegisterAutoStubHandler(gdi32, "SetPixelV", func(ctx *ntapi.TrapContext) uint32 {
+		if wlWindow == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		dc := getDC(ctx.Arg(0))
+		dc.SetPixel(int32(ctx.Arg(1)), int32(ctx.Arg(2)), uint32(ctx.Arg(3)))
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	// --- TextOutA ---
+	// ReactOS: NtGdiExtTextOutW (ANSI → wide conversion in gdi32 client)
+	d.RegisterAutoStubHandler(gdi32, "TextOutA", func(ctx *ntapi.TrapContext) uint32 {
+		if wlWindow == nil {
+			ctx.SetReturn(1)
+			return 0
+		}
+		dc := getDC(ctx.Arg(0))
+		x := int32(ctx.Arg(1))
+		y := int32(ctx.Arg(2))
+		lpStr := ctx.Arg(3)
+		nLen := int(ctx.Arg(4))
+		if lpStr != 0 && nLen > 0 {
+			buf := make([]byte, nLen)
+			for i := 0; i < nLen; i++ {
+				b, _ := mem.Read8(lpStr + uint64(i))
+				buf[i] = b
+			}
+			dc.TextOut(x, y, string(buf), false)
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// --- ExtTextOutA ---
+	// ReactOS: NtGdiExtTextOutW (ANSI → wide in gdi32 client)
+	d.RegisterAutoStubHandler(gdi32, "ExtTextOutA", func(ctx *ntapi.TrapContext) uint32 {
+		if wlWindow == nil {
+			ctx.SetReturn(1)
+			return 0
+		}
+		dc := getDC(ctx.Arg(0))
+		x := int32(ctx.Arg(1))
+		y := int32(ctx.Arg(2))
+		opts := uint32(ctx.Arg(3))
+		lprc := ctx.Arg(4)
+		lpStr := ctx.Arg(5)
+		nLen := int(ctx.Arg(6))
+		text := ""
+		if lpStr != 0 && nLen > 0 {
+			buf := make([]byte, nLen)
+			for i := 0; i < nLen; i++ {
+				b, _ := mem.Read8(lpStr + uint64(i))
+				buf[i] = b
+			}
+			text = string(buf)
+		}
+		if lprc != 0 {
+			rL, _ := mem.Read32(lprc)
+			rT, _ := mem.Read32(lprc + 4)
+			rR, _ := mem.Read32(lprc + 8)
+			rB, _ := mem.Read32(lprc + 12)
+			if opts&0x2 != 0 { // ETO_OPAQUE
+				dc.FillRect(int32(rL), int32(rT), int32(rR), int32(rB), dc.BkColor)
+			}
+			if opts&0x4 != 0 { // ETO_CLIPPED
+				x0 := int32(rL) + dc.OriginX
+				y0 := int32(rT) + dc.OriginY
+				x1 := int32(rR) + dc.OriginX
+				y1 := int32(rB) + dc.OriginY
+				oldX0, oldY0, oldX1, oldY1 := dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1
+				if oldX1 > oldX0 {
+					if x0 < oldX0 {
+						x0 = oldX0
+					}
+					if y0 < oldY0 {
+						y0 = oldY0
+					}
+					if x1 > oldX1 {
+						x1 = oldX1
+					}
+					if y1 > oldY1 {
+						y1 = oldY1
+					}
+				}
+				dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = x0, y0, x1, y1
+				if len(text) > 0 {
+					dc.TextOut(x, y, text, false)
+				}
+				dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = oldX0, oldY0, oldX1, oldY1
+				ctx.SetReturn(1)
+				return 0
+			}
+		}
+		if len(text) > 0 {
+			dc.TextOut(x, y, text, false)
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// --- GetDCOrgEx ---
+	// ReactOS: NtGdiGetDCPoint(hdc, GdiGetDCOrg)
+	d.RegisterAutoStubHandler(gdi32, "GetDCOrgEx", func(ctx *ntapi.TrapContext) uint32 {
+		dc := getDC(ctx.Arg(0))
+		p := ctx.Arg(1)
+		if p != 0 {
+			ctx.Mem.Write32(p, uint32(dc.OriginX))
+			ctx.Mem.Write32(p+4, uint32(dc.OriginY))
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// --- GetTextExtentExPointA ---
+	// ReactOS: NtGdiGetTextExtentExW (ANSI wrapper in gdi32)
+	d.RegisterAutoStubHandler(gdi32, "GetTextExtentExPointA", func(ctx *ntapi.TrapContext) uint32 {
+		hdc := ctx.Arg(0)
+		nLen := int32(ctx.Arg(2))
+		pSize := ctx.Arg(5)
+		dc := getDC(hdc)
+		f := dc.Font
+		if f == nil {
+			f = gdi.DefaultFont()
+		}
+		if pSize != 0 {
+			ctx.Mem.Write32(pSize, uint32(nLen*f.AveCharWidth))
+			ctx.Mem.Write32(pSize+4, uint32(f.CellHeight))
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// --- GetCharWidth32A ---
+	// ReactOS: NtGdiGetCharWidthW (ANSI wrapper)
+	d.RegisterAutoStubHandler(gdi32, "GetCharWidth32A", func(ctx *ntapi.TrapContext) uint32 {
+		hdc := ctx.Arg(0)
+		first := int(ctx.Arg(1))
+		last := int(ctx.Arg(2))
+		pBuf := ctx.Arg(3)
+		if last < first || last-first > 0xFFFF {
+			ctx.SetReturn(0)
+			return 0
+		}
+		dc := getDC(hdc)
+		f := dc.Font
+		if f == nil {
+			f = gdi.DefaultFont()
+		}
+		charW := f.AveCharWidth
+		if pBuf != 0 {
+			for i := first; i <= last; i++ {
+				ctx.Mem.Write32(pBuf+uint64(i-first)*4, uint32(charW))
+			}
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// --- GetCharWidthA ---
+	// ReactOS: NtGdiGetCharWidthW (ANSI wrapper, same as GetCharWidth32A)
+	d.RegisterAutoStubHandler(gdi32, "GetCharWidthA", func(ctx *ntapi.TrapContext) uint32 {
+		hdc := ctx.Arg(0)
+		first := int(ctx.Arg(1))
+		last := int(ctx.Arg(2))
+		pBuf := ctx.Arg(3)
+		if last < first || last-first > 0xFFFF {
+			ctx.SetReturn(0)
+			return 0
+		}
+		dc := getDC(hdc)
+		f := dc.Font
+		if f == nil {
+			f = gdi.DefaultFont()
+		}
+		charW := f.AveCharWidth
+		if pBuf != 0 {
+			for i := first; i <= last; i++ {
+				ctx.Mem.Write32(pBuf+uint64(i-first)*4, uint32(charW))
+			}
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// --- GetLayout / SetLayout ---
+	// ReactOS: NtGdiGetLayout / NtGdiSetLayout
+	d.RegisterAutoStubHandler(gdi32, "GetLayout", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // LAYOUT_LTR (default left-to-right)
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "SetLayout", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // previous layout = LAYOUT_LTR
+		return 0
+	})
+	// --- CreateDCA / CreateDCW ---
+	// ReactOS: NtGdiOpenDCW - create DC for a display device
+	d.RegisterAutoStubHandler(gdi32, "CreateDCW", func(ctx *ntapi.TrapContext) uint32 {
+		// lpszDriver typically "DISPLAY"; allocate a screen DC
+		h, _ := gdiMgr.AllocScreenDC()
+		ctx.SetReturn(h)
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "CreateDCA", func(ctx *ntapi.TrapContext) uint32 {
+		h, _ := gdiMgr.AllocScreenDC()
+		ctx.SetReturn(h)
+		return 0
+	})
+	// --- CreateICA / CreateICW ---
+	// ReactOS: NtGdiOpenDCW - information context (same as DC but no drawing)
+	d.RegisterAutoStubHandler(gdi32, "CreateICW", func(ctx *ntapi.TrapContext) uint32 {
+		h, _ := gdiMgr.AllocMemDC()
+		ctx.SetReturn(h)
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "CreateICA", func(ctx *ntapi.TrapContext) uint32 {
+		h, _ := gdiMgr.AllocMemDC()
+		ctx.SetReturn(h)
+		return 0
+	})
+	// --- GetTextFaceA ---
+	// ReactOS: NtGdiGetTextFaceW (ANSI wrapper)
+	d.RegisterAutoStubHandler(gdi32, "GetTextFaceA", func(ctx *ntapi.TrapContext) uint32 {
+		dc := getDC(ctx.Arg(0))
+		nCount := int(ctx.Arg(1))
+		pFace := ctx.Arg(2)
+		faceName := "Courier New"
+		if dc.Font != nil && dc.Font.FaceName != "" {
+			faceName = dc.Font.FaceName
+		}
+		if pFace != 0 && nCount > 0 {
+			n := len(faceName)
+			if n >= nCount {
+				n = nCount - 1
+			}
+			for i := 0; i < n; i++ {
+				ctx.Mem.Write8(pFace+uint64(i), faceName[i])
+			}
+			ctx.Mem.Write8(pFace+uint64(n), 0)
+			ctx.SetReturn(uint64(n))
+		} else {
+			ctx.SetReturn(uint64(len(faceName) + 1))
+		}
 		return 0
 	})
 }
