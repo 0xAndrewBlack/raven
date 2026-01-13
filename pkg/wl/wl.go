@@ -548,7 +548,16 @@ func (d *Display) roundtrip(callbackID uint32) error {
 		case kindSeat:
 			if op == 0 { // capabilities during roundtrip
 				caps := gu32(payload)
+				const seatCapPointer = 1
 				const seatCapKeyboard = 2
+				if caps&seatCapPointer != 0 && d.pointerID == 0 {
+					d.pointerID = d.alloc(kindPointer)
+					d.send(d.seatID, 0, pu32(d.pointerID))
+					if d.cursorShapeMgrID != 0 {
+						d.cursorShapeDevID = d.alloc(kindCursorShapeDevice)
+						d.send(d.cursorShapeMgrID, 1, pu32(d.cursorShapeDevID), pu32(d.pointerID))
+					}
+				}
 				if caps&seatCapKeyboard != 0 && d.keyboardID == 0 {
 					d.keyboardID = d.alloc(kindKeyboard)
 					d.send(d.seatID, 1, pu32(d.keyboardID))
