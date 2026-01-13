@@ -4764,16 +4764,62 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 
-		// VirtualProtect: our memory is flat RWX, so always succeed
+		// Win32 protection ↔ MMU permission helpers
+		win32ProtToMMU := func(prot uint64) uint8 {
+			switch prot & 0xFF {
+			case 0x01: // PAGE_NOACCESS
+				return 0
+			case 0x02: // PAGE_READONLY
+				return mmu.PermRead
+			case 0x04: // PAGE_READWRITE
+				return mmu.PermRead | mmu.PermWrite
+			case 0x08: // PAGE_WRITECOPY → treat as RW
+				return mmu.PermRead | mmu.PermWrite
+			case 0x10: // PAGE_EXECUTE
+				return mmu.PermExecute
+			case 0x20: // PAGE_EXECUTE_READ
+				return mmu.PermRead | mmu.PermExecute
+			case 0x40: // PAGE_EXECUTE_READWRITE
+				return mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+			case 0x80: // PAGE_EXECUTE_WRITECOPY → treat as RWX
+				return mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+			default:
+				return mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+			}
+		}
+		mmuPermToWin32 := func(perms uint8) uint32 {
+			switch {
+			case perms&(mmu.PermRead|mmu.PermWrite|mmu.PermExecute) == mmu.PermRead|mmu.PermWrite|mmu.PermExecute:
+				return 0x40 // PAGE_EXECUTE_READWRITE
+			case perms&(mmu.PermRead|mmu.PermExecute) == mmu.PermRead|mmu.PermExecute:
+				return 0x20 // PAGE_EXECUTE_READ
+			case perms&(mmu.PermRead|mmu.PermWrite) == mmu.PermRead|mmu.PermWrite:
+				return 0x04 // PAGE_READWRITE
+			case perms&mmu.PermExecute != 0:
+				return 0x10 // PAGE_EXECUTE
+			case perms&mmu.PermRead != 0:
+				return 0x02 // PAGE_READONLY
+			default:
+				return 0x01 // PAGE_NOACCESS
+			}
+		}
+
 		d.RegisterAutoStubHandler(kernel32, "VirtualProtect", func(ctx *ntapi.TrapContext) uint32 {
 			lpAddress := ctx.Arg(0)
 			dwSize := ctx.Arg(1)
 			flNewProtect := ctx.Arg(2)
 			lpflOldProtect := ctx.Arg(3)
-			_ = lpAddress; _ = dwSize; _ = flNewProtect
+			// Query old permissions before changing
+			_, _, mapped, oldPerms := mem.QueryRegion(lpAddress)
 			if lpflOldProtect != 0 {
-				ctx.Mem.Write32(lpflOldProtect, 0x40) // PAGE_EXECUTE_READWRITE
+				if mapped {
+					ctx.Mem.Write32(lpflOldProtect, mmuPermToWin32(oldPerms))
+				} else {
+					ctx.Mem.Write32(lpflOldProtect, 0x01) // PAGE_NOACCESS
+				}
 			}
+			newPerms := win32ProtToMMU(flNewProtect)
+			mem.Mprotect(lpAddress, dwSize, newPerms)
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -5437,7 +5483,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalFree", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // NULL = success (no-op)
+			hMem := ctx.Arg(0)
+			if hMem != 0 {
+				_, size, mapped, _ := mem.QueryRegion(hMem)
+				if mapped && size > 0 {
+					mem.Munmap(hMem, size)
+				}
+			}
+			ctx.SetReturn(0) // NULL = success
 			return 0
 		})
 
@@ -6747,6 +6800,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GlobalFree", func(ctx *ntapi.TrapContext) uint32 {
+			hMem := ctx.Arg(0)
+			if hMem != 0 {
+				_, size, mapped, _ := mem.QueryRegion(hMem)
+				if mapped && size > 0 {
+					mem.Munmap(hMem, size)
+				}
+			}
 			ctx.SetReturn(0) // NULL = success
 			return 0
 		})
@@ -11776,10 +11836,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				dwBytes = 1
 			}
 			newPtr := mem.Mmap(0, dwBytes, mmu.PermRead|mmu.PermWrite)
-			if hMem != 0 {
-				old, _ := ctx.Mem.ReadBytes(hMem, int(dwBytes))
-				if len(old) > 0 {
-					ctx.Mem.WriteBytes(newPtr, old)
+			if hMem != 0 && newPtr != 0 {
+				_, oldSize, mapped, _ := mem.QueryRegion(hMem)
+				if mapped && oldSize > 0 {
+					copySize := oldSize
+					if dwBytes < copySize {
+						copySize = dwBytes
+					}
+					old, _ := ctx.Mem.ReadBytes(hMem, int(copySize))
+					if len(old) > 0 {
+						ctx.Mem.WriteBytes(newPtr, old)
+					}
+					mem.Munmap(hMem, oldSize)
 				}
 			}
 			ctx.SetReturn(newPtr)
@@ -11814,7 +11882,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapCompact", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // 0
+			ctx.SetReturn(0x10000) // report 64KB largest free block
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapCreateTagsW", func(ctx *ntapi.TrapContext) uint32 {
@@ -11858,6 +11926,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "HeapValidate", func(ctx *ntapi.TrapContext) uint32 {
+			// HeapValidate(hHeap, dwFlags, lpMem)
+			lpMem := ctx.Arg(2)
+			if lpMem != 0 {
+				// Check that the 16-byte header has a sane block size
+				blockSize, _ := mem.Read64(lpMem - 16)
+				if blockSize == 0 || blockSize >= 1<<30 {
+					ctx.SetReturn(0) // FALSE - invalid
+					return 0
+				}
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -12272,10 +12350,24 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalReAlloc", func(ctx *ntapi.TrapContext) uint32 {
-			// hMem=Arg(0), uBytes=Arg(1), uFlags=Arg(2)
+			hMem := ctx.Arg(0)
 			size := ctx.Arg(1)
 			if size == 0 { size = 1 }
 			addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+			if hMem != 0 && addr != 0 {
+				_, oldSize, mapped, _ := mem.QueryRegion(hMem)
+				if mapped && oldSize > 0 {
+					copySize := oldSize
+					if size < copySize {
+						copySize = size
+					}
+					old, _ := ctx.Mem.ReadBytes(hMem, int(copySize))
+					if len(old) > 0 {
+						ctx.Mem.WriteBytes(addr, old)
+					}
+					mem.Munmap(hMem, oldSize)
+				}
+			}
 			ctx.SetReturn(addr)
 			return 0
 		})
@@ -12284,7 +12376,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalSize", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(0) // size unknown in HLE
+			hMem := ctx.Arg(0)
+			if hMem == 0 { ctx.SetReturn(0); return 0 }
+			_, size, mapped, _ := mem.QueryRegion(hMem)
+			if mapped { ctx.SetReturn(size) } else { ctx.SetReturn(0) }
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LocalUnlock", func(ctx *ntapi.TrapContext) uint32 {
@@ -15238,11 +15333,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// hProcess := ctx.Arg(0) // ignored - always current process
 			lpAddress := ctx.Arg(1)
 			dwSize := ctx.Arg(2)
+			// flAllocationType := ctx.Arg(3)
+			flProtect := ctx.Arg(4)
 			if dwSize == 0 {
 				dwSize = 0x1000
 			}
 			dwSize = (dwSize + 0xFFF) &^ 0xFFF
-			perms := mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+			perms := win32ProtToMMU(flProtect)
+			if perms == 0 {
+				perms = mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+			}
 			addr := mem.Mmap(lpAddress, dwSize, perms)
 			ctx.SetReturn(addr)
 			return 0
@@ -15264,10 +15364,37 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "VirtualFree", func(ctx *ntapi.TrapContext) uint32 {
+			lpAddress := ctx.Arg(0)
+			dwSize := ctx.Arg(1)
+			dwFreeType := ctx.Arg(2)
+			if dwFreeType&0x8000 != 0 { // MEM_RELEASE
+				if lpAddress != 0 {
+					_, regionSize, mapped, _ := mem.QueryRegion(lpAddress)
+					if mapped && regionSize > 0 {
+						mem.Munmap(lpAddress, regionSize)
+					}
+				}
+			} else if dwFreeType&0x4000 != 0 && dwSize > 0 { // MEM_DECOMMIT
+				mem.Munmap(lpAddress, dwSize)
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "VirtualFreeEx", func(ctx *ntapi.TrapContext) uint32 {
+			// hProcess := ctx.Arg(0) // ignored - always current process
+			lpAddress := ctx.Arg(1)
+			dwSize := ctx.Arg(2)
+			dwFreeType := ctx.Arg(3)
+			if dwFreeType&0x8000 != 0 { // MEM_RELEASE
+				if lpAddress != 0 {
+					_, regionSize, mapped, _ := mem.QueryRegion(lpAddress)
+					if mapped && regionSize > 0 {
+						mem.Munmap(lpAddress, regionSize)
+					}
+				}
+			} else if dwFreeType&0x4000 != 0 && dwSize > 0 { // MEM_DECOMMIT
+				mem.Munmap(lpAddress, dwSize)
+			}
 			ctx.SetReturn(1) // TRUE
 			return 0
 		})
@@ -15276,7 +15403,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "VirtualProtectEx", func(ctx *ntapi.TrapContext) uint32 {
-			if lpOld := ctx.Arg(4); lpOld != 0 { ctx.Mem.Write32(lpOld, 0x20) } // PAGE_EXECUTE_READ
+			// hProcess := ctx.Arg(0) // ignored
+			lpAddress := ctx.Arg(1)
+			dwSize := ctx.Arg(2)
+			flNewProtect := ctx.Arg(3)
+			lpflOldProtect := ctx.Arg(4)
+			_, _, mapped, oldPerms := mem.QueryRegion(lpAddress)
+			if lpflOldProtect != 0 {
+				if mapped {
+					ctx.Mem.Write32(lpflOldProtect, mmuPermToWin32(oldPerms))
+				} else {
+					ctx.Mem.Write32(lpflOldProtect, 0x01) // PAGE_NOACCESS
+				}
+			}
+			newPerms := win32ProtToMMU(flNewProtect)
+			mem.Mprotect(lpAddress, dwSize, newPerms)
 			ctx.SetReturn(1)
 			return 0
 		})
