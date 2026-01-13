@@ -5217,6 +5217,10 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DisableThreadLibraryCalls", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL DisableThreadLibraryCalls(HMODULE hLibModule);
+		// ReactOS: dll/win32/kernel32/client/loader.c → NtSetInformationProcess
+		// Disables DLL_THREAD_ATTACH/DETACH notifications for hLibModule.
+		// We don't dispatch DllMain for threads, so this is always a no-op.
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -12107,6 +12111,19 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadPriority", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SetThreadPriority(HANDLE hThread, int nPriority);
+		// ReactOS: dll/win32/kernel32/client/thread.c → NtSetInformationThread
+		hThread := ctx.Arg(0)
+		nPriority := int32(ctx.Arg(1))
+		if hThread == 0xFFFFFFFFFFFFFFFE {
+			// Current thread pseudo-handle - accept silently
+			ctx.SetReturn(1) // TRUE
+			return 0
+		}
+		th := handles.GetThread(ntapi.Handle(hThread))
+		if th != nil {
+			th.Priority = nPriority
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -12497,11 +12514,30 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SuspendThread", func(ctx *ntapi.TrapContext) uint32 {
+		// DWORD SuspendThread(HANDLE hThread);
+		// ReactOS: dll/win32/kernel32/client/thread.c → NtSuspendThread
+		// Returns previous suspend count. We don't truly suspend threads.
+		hThread := ctx.Arg(0)
+		if hThread == 0xFFFFFFFFFFFFFFFE {
+			ctx.SetReturn(0) // current thread, suspend count was 0
+			return 0
+		}
+		th := handles.GetThread(ntapi.Handle(hThread))
+		if th == nil {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0xFFFFFFFF) // (DWORD)-1 on error
+			return 0
+		}
 		ctx.SetReturn(0) // previous suspend count = 0
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SwitchToFiber", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // no-op
+		// VOID SwitchToFiber(LPVOID lpFiber);
+		// ReactOS: dll/win32/kernel32/client/fiber.c
+		// True fiber switching requires full coroutine support. For now, log
+		// the attempt and no-op (the calling fiber continues).
+		lpFiber := ctx.Arg(0)
+		ravelog.Logf("[win32] SwitchToFiber(0x%x) → stub no-op\n", lpFiber)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SwitchToThread", func(ctx *ntapi.TrapContext) uint32 {
