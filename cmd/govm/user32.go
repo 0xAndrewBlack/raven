@@ -433,6 +433,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 				if win, err := wlDisplay.CreateWindow(title, w, h, ncTop); err == nil {
 					wlWindow = win
+					hctx.WlWindow = win
+					if hctx.OnWlWindowSet != nil {
+						hctx.OnWlWindowSet(win)
+					}
 					hctx.MainHWND = hwnd
 					hctx.MainTitle = title
 					// Initialise GWL_STYLE / GWL_EXSTYLE for the main window.
@@ -1580,25 +1584,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				// Signal that the base frame is ready; all subsequent EndPaints can trigger re-commits.
 				hctx.HasBaseFrame = true
 				hctx.RepaintBuiltin = true
-				// Check for visible guest-wndproc children (e.g. Scintilla) that need to
-				// paint themselves. If any exist, do NOT commit yet - wait for their
-				// EndPaint to trigger the commit. This avoids the "gray flash" where
-				// hctx.MainHWND's background fill would be committed before Scintilla draws.
-				hasGuestChildren := false
+				// Always commit the base frame immediately. Guest-wndproc children
+				// (e.g. Scintilla) will re-commit when their EndPaint fires.
+				// Previously we deferred waiting for their EndPaint, but child
+				// WM_PAINT sits behind WM_SIZE/WM_MOVE in the FIFO queue and
+				// under emulation the delay is unbounded → permanently gray window.
+				hctx.FrameReady = true
+				commitIfDone()
+				// Queue WM_PAINT for guest children so they repaint on top.
 				for h, cs := range hwndChildren {
 					if cs.parentHWND == hctx.MainHWND && cs.visible && cs.w > 0 && cs.h > 0 {
 						if _, hasGuest := hwndWndProc[h]; hasGuest {
-							hasGuestChildren = true
-							// Ensure the guest child has a WM_PAINT pending so it will call EndPaint.
 							queuePaint(h)
 						}
 					}
 				}
-				if !hasGuestChildren {
-					hctx.FrameReady = true
-					commitIfDone()
-				}
-				// If hasGuestChildren: EndPaint in each guest child will call commitIfDone().
 			}
 			// For non-hctx.MainHWND: ReactOS DefWindowProc just calls BeginPaint+EndPaint
 			// In our model, the child is painted by paintTree from the parent
@@ -8296,6 +8296,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 				if win, err := wlDisplay.CreateWindow(title, w, h, ncTop); err == nil {
 					wlWindow = win
+					hctx.WlWindow = win
+					if hctx.OnWlWindowSet != nil {
+						hctx.OnWlWindowSet(win)
+					}
 					hctx.MainHWND = hwnd
 					hctx.MainTitle = title
 					exStyle := uint32(ctx.Arg(0))

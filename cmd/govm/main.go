@@ -2038,6 +2038,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		NextGlobalAtom:    nextGlobalAtom,
 		FrameCount:        frameCount,
 	}
+	// Sync callback: when user32 creates the Wayland window, update local wlWindow
+	// so that all closures in this function (builtinWndProc, paintTree, etc.) see it.
+	hctx.OnWlWindowSet = func(w *wl.Window) { wlWindow = w }
 
 	delayReg := func(fn func()) {
 		hctx.DelayHandlerRegistrars = append(hctx.DelayHandlerRegistrars, fn)
@@ -2422,7 +2425,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// Called after DefWindowProcW WM_PAINT and after each child EndPaint.
 	// Multiple commits are fine; each one produces a progressively more complete frame.
 	hctx.CommitIfDone = func() {
-		if !hctx.FrameReady || wlWindow == nil {
+		w := hctx.WlWindow
+		if !hctx.FrameReady || w == nil {
 			return
 		}
 		hctx.FrameReady = false
@@ -2434,13 +2438,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		// Always draw dropdown menu overlay on top of everything (including toolbar).
 		hctx.DrawMenuOverlay()
-		ravelog.Logf("[commit] Commit w=%d h=%d pixLen=%d\n", wlWindow.Width, wlWindow.Height, len(wlWindow.Pix))
-		wlWindow.Commit()
+		ravelog.Logf("[commit] Commit w=%d h=%d pixLen=%d\n", w.Width, w.Height, len(w.Pix))
+		w.Commit()
 		frameCount++
 		// Save a debug screenshot only for the first 10 frames to avoid filling /tmp.
 		if frameCount <= 10 {
 			path := fmt.Sprintf("/tmp/npp_frame%d.png", frameCount)
-			saveScreenshot(wlWindow.Pix, int(wlWindow.Width), int(wlWindow.Height+wlWindow.TitleBarH), path)
+			saveScreenshot(w.Pix, int(w.Width), int(w.Height+w.TitleBarH), path)
 		}
 	}
 

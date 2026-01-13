@@ -170,9 +170,10 @@ type HandlerCtx struct {
 	Dlls        []*ntapi.SynthPE
 
 	// Wayland / GUI (pointers, safe to copy)
-	WlDisplay *wl.Display
-	WlWindow  *wl.Window
-	GdiMgr    *gdi.Manager
+	WlDisplay        *wl.Display
+	WlWindow         *wl.Window
+	OnWlWindowSet    func(*wl.Window) // callback to sync local wlWindow in main.go closures
+	GdiMgr           *gdi.Manager
 
 	// Maps (reference types, safe to copy)
 	EnvVars              map[string]string
