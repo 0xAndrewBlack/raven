@@ -4208,23 +4208,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		item := menuItem{}
 		if lpmii != 0 {
-			// MENUITEMINFOW: cbSize(4) fMask(4) fType(4) fState(4) wID(4) hSubMenu(8@16) ...
-			// dwTypeData at offset 40 (x64), cch at offset 48
+			// MENUITEMINFOW x64 layout:
+			// +0:cbSize(4) +4:fMask(4) +8:fType(4) +12:fState(4) +16:wID(4) +20:pad(4)
+			// +24:hSubMenu(8) +32:hbmpChecked(8) +40:hbmpUnchecked(8) +48:dwItemData(8)
+			// +56:dwTypeData(8) +64:cch(4) +68:pad(4) +72:hbmpItem(8) = 80 bytes
 			fMask, _ := mem.Read32(lpmii + 4)
 			fType, _ := mem.Read32(lpmii + 8)
 			item.flags = fType
 			if fMask&0x40 != 0 { // MIIM_STRING
-				dwTypeData, _ := mem.Read64(lpmii + 40)
+				dwTypeData, _ := mem.Read64(lpmii + 56)
 				if dwTypeData != 0 {
 					item.text = readGuestUTF16(dwTypeData)
 				}
 			}
 			if fMask&0x02 != 0 { // MIIM_ID
-				wID, _ := mem.Read32(lpmii + 12)
+				wID, _ := mem.Read32(lpmii + 16)
 				item.id = uint64(wID)
 			}
 			if fMask&0x04 != 0 { // MIIM_SUBMENU
-				hSub, _ := mem.Read64(lpmii + 16)
+				hSub, _ := mem.Read64(lpmii + 24)
 				item.id = hSub
 				item.flags |= 0x10 // MF_POPUP
 			}
@@ -5005,9 +5007,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write32(lpmii+16, uint32(found.id))
 		}
 		if fMask&(MIIM_TYPE|MIIM_STRING) != 0 {
-			// 32-bit MENUITEMINFOW: dwTypeData ptr at +36, cch at +40
-			dtPtr, _ := ctx.Mem.Read64(lpmii + 36)
-			cch, _ := ctx.Mem.Read32(lpmii + 40)
+			// x64 MENUITEMINFOW: dwTypeData at +56, cch at +64
+			dtPtr, _ := ctx.Mem.Read64(lpmii + 56)
+			cch, _ := ctx.Mem.Read32(lpmii + 64)
 			if dtPtr != 0 && cch > 0 {
 				ws := utf16Encode(found.text)
 				limit := int(cch) - 1
@@ -5019,7 +5021,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 				ctx.Mem.Write16(dtPtr+uint64(limit)*2, 0)
 			}
-			ctx.Mem.Write32(lpmii+40, uint32(len(utf16Encode(found.text))))
+			ctx.Mem.Write32(lpmii+64, uint32(len(utf16Encode(found.text))))
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -5052,12 +5054,117 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// SetMenuItemInfoW
+	// SetMenuItemInfoW - reads MENUITEMINFOW and updates menu item data
 	d.RegisterAutoStubHandler(user32, "SetMenuItemInfoW", func(ctx *ntapi.TrapContext) uint32 {
+		hMenu := ctx.Arg(0)
+		item := ctx.Arg(1)
+		byPos := ctx.Arg(2) != 0
+		lpmii := ctx.Arg(3)
+		if lpmii == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		m, ok := menus[hMenu]
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var found *menuItem
+		if byPos {
+			idx := int(item)
+			if idx >= 0 && idx < len(m.items) {
+				found = &m.items[idx]
+			}
+		} else {
+			for i := range m.items {
+				if m.items[i].id == item {
+					found = &m.items[i]
+					break
+				}
+			}
+		}
+		if found == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		fMask, _ := mem.Read32(lpmii + 4)
+		const (
+			MIIM_STATE  = 0x00000001
+			MIIM_ID     = 0x00000002
+			MIIM_TYPE   = 0x00000010
+			MIIM_STRING = 0x00000040
+		)
+		if fMask&MIIM_STATE != 0 {
+			fState, _ := mem.Read32(lpmii + 12)
+			// Update flags: clear state bits and apply new state
+			found.flags = (found.flags &^ 0x0F) | (fState & 0x0F)
+		}
+		if fMask&MIIM_ID != 0 {
+			wID, _ := mem.Read32(lpmii + 16)
+			found.id = uint64(wID)
+		}
+		if fMask&(MIIM_TYPE|MIIM_STRING) != 0 {
+			dwTypeData, _ := mem.Read64(lpmii + 56)
+			if dwTypeData != 0 {
+				found.text = readGuestUTF16(dwTypeData)
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetMenuItemInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		hMenu := ctx.Arg(0)
+		item := ctx.Arg(1)
+		byPos := ctx.Arg(2) != 0
+		lpmii := ctx.Arg(3)
+		if lpmii == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		m, ok := menus[hMenu]
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var found *menuItem
+		if byPos {
+			idx := int(item)
+			if idx >= 0 && idx < len(m.items) {
+				found = &m.items[idx]
+			}
+		} else {
+			for i := range m.items {
+				if m.items[i].id == item {
+					found = &m.items[i]
+					break
+				}
+			}
+		}
+		if found == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		fMask, _ := mem.Read32(lpmii + 4)
+		const (
+			MIIM_STATE  = 0x00000001
+			MIIM_ID     = 0x00000002
+			MIIM_TYPE   = 0x00000010
+			MIIM_STRING = 0x00000040
+		)
+		if fMask&MIIM_STATE != 0 {
+			fState, _ := mem.Read32(lpmii + 12)
+			found.flags = (found.flags &^ 0x0F) | (fState & 0x0F)
+		}
+		if fMask&MIIM_ID != 0 {
+			wID, _ := mem.Read32(lpmii + 16)
+			found.id = uint64(wID)
+		}
+		if fMask&(MIIM_TYPE|MIIM_STRING) != 0 {
+			dwTypeData, _ := mem.Read64(lpmii + 56)
+			if dwTypeData != 0 {
+				found.text = readGuestString(dwTypeData)
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -6010,6 +6117,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// Message / queue
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "PostQuitMessage", func(ctx *ntapi.TrapContext) uint32 {
+		exitCode := ctx.Arg(0)
+		hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd: 0, message: 0x0012, wParam: exitCode, lParam: 0}) // WM_QUIT
 		return 0
 	})
 	for _, fn := range []string{"GetInputState", "GetQueueStatus", "InSendMessage"} {
@@ -7325,8 +7434,76 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// -------------------------------------------------------
 	// Menu (A variants + extensions)
 	// -------------------------------------------------------
-	for _, fn := range []string{"AppendMenuA", "InsertMenuA", "InsertMenuItemA",
-		"ModifyMenuA", "ChangeMenuA", "ChangeMenuW"} {
+	d.RegisterAutoStubHandler(user32, "InsertMenuItemA", func(ctx *ntapi.TrapContext) uint32 {
+		hMenu := ctx.Arg(0)
+		lpmii := ctx.Arg(3)
+		m, ok := menus[hMenu]
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		item := menuItem{}
+		if lpmii != 0 {
+			fMask, _ := mem.Read32(lpmii + 4)
+			fType, _ := mem.Read32(lpmii + 8)
+			item.flags = fType
+			if fMask&0x40 != 0 { // MIIM_STRING
+				dwTypeData, _ := mem.Read64(lpmii + 56)
+				if dwTypeData != 0 {
+					item.text = readGuestString(dwTypeData)
+				}
+			}
+			if fMask&0x02 != 0 { // MIIM_ID
+				wID, _ := mem.Read32(lpmii + 16)
+				item.id = uint64(wID)
+			}
+			if fMask&0x04 != 0 { // MIIM_SUBMENU
+				hSub, _ := mem.Read64(lpmii + 24)
+				item.id = hSub
+				item.flags |= 0x10
+			}
+		}
+		m.items = append(m.items, item)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "AppendMenuA", func(ctx *ntapi.TrapContext) uint32 {
+		hMenu := ctx.Arg(0)
+		flags := uint32(ctx.Arg(1))
+		idOrSubmenu := ctx.Arg(2)
+		textPtr := ctx.Arg(3)
+		m, ok := menus[hMenu]
+		if !ok {
+			menus[hMenu] = &menuData{}
+			m = menus[hMenu]
+		}
+		item := menuItem{flags: flags, id: idOrSubmenu}
+		if textPtr != 0 && flags&0x800 == 0 { // not MF_SEPARATOR
+			item.text = readGuestString(textPtr)
+		}
+		m.items = append(m.items, item)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "InsertMenuA", func(ctx *ntapi.TrapContext) uint32 {
+		hMenu := ctx.Arg(0)
+		flags := uint32(ctx.Arg(2))
+		idOrSubmenu := ctx.Arg(3)
+		textPtr := ctx.Arg(4)
+		m, ok := menus[hMenu]
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		item := menuItem{flags: flags, id: idOrSubmenu}
+		if textPtr != 0 && flags&0x800 == 0 {
+			item.text = readGuestString(textPtr)
+		}
+		m.items = append(m.items, item)
+		ctx.SetReturn(1)
+		return 0
+	})
+	for _, fn := range []string{"ModifyMenuA", "ChangeMenuA", "ChangeMenuW"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
@@ -7385,7 +7562,65 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
-	for _, fn := range []string{"GetMenuInfo", "GetMenuItemInfoA", "GetMenuItemRect"} {
+	d.RegisterAutoStubHandler(user32, "GetMenuItemInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		hMenu := ctx.Arg(0)
+		item := ctx.Arg(1)
+		byPos := ctx.Arg(2) != 0
+		lpmii := ctx.Arg(3)
+		if lpmii == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		m, ok := menus[hMenu]
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var found *menuItem
+		if byPos {
+			idx := int(item)
+			if idx >= 0 && idx < len(m.items) {
+				found = &m.items[idx]
+			}
+		} else {
+			for i := range m.items {
+				if m.items[i].id == item {
+					found = &m.items[i]
+					break
+				}
+			}
+		}
+		if found == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		fMask, _ := mem.Read32(lpmii + 4)
+		const (
+			MIIM_ID     = 0x00000002
+			MIIM_TYPE   = 0x00000010
+			MIIM_STRING = 0x00000040
+		)
+		if fMask&MIIM_ID != 0 {
+			mem.Write32(lpmii+16, uint32(found.id))
+		}
+		if fMask&(MIIM_TYPE|MIIM_STRING) != 0 {
+			dtPtr, _ := mem.Read64(lpmii + 56)
+			cch, _ := mem.Read32(lpmii + 64)
+			if dtPtr != 0 && cch > 0 {
+				ansi := []byte(found.text)
+				limit := int(cch) - 1
+				if limit > len(ansi) {
+					limit = len(ansi)
+				}
+				mem.WriteBytes(dtPtr, ansi[:limit])
+				mem.Write8(dtPtr+uint64(limit), 0)
+			}
+			mem.Write32(lpmii+64, uint32(len(found.text)))
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	for _, fn := range []string{"GetMenuInfo", "GetMenuItemRect"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
@@ -7606,7 +7841,26 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "LoadStringA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		uID := uint32(ctx.Arg(1))
+		lpBuffer := ctx.Arg(2)
+		cchBufferMax := int(int32(ctx.Arg(3)))
+		s, _, _ := peLoadStringW(uID)
+		if s == "" || lpBuffer == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if cchBufferMax == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ansi := []byte(s)
+		n := len(ansi)
+		if n >= cchBufferMax {
+			n = cchBufferMax - 1
+		}
+		mem.WriteBytes(lpBuffer, ansi[:n])
+		mem.Write8(lpBuffer+uint64(n), 0)
+		ctx.SetReturn(uint64(n))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "RegisterWindowMessageA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7756,11 +8010,94 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// Window class (ANSI registration)
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "RegisterClassA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0xA001)
-		return 0 // dummy atom
+		// WNDCLASSA layout is identical to WNDCLASSW but lpszMenuName/lpszClassName are ANSI
+		pClass := ctx.Arg(0)
+		a := hctx.NextAtom
+		hctx.NextAtom++
+		if pClass != 0 {
+			style, _ := mem.Read32(pClass)
+			wndProc, _ := mem.Read64(pClass + 8)
+			cbClsExtra, _ := mem.Read32(pClass + 16)
+			cbWndExtra, _ := mem.Read32(pClass + 20)
+			hInst, _ := mem.Read64(pClass + 24)
+			hIcon, _ := mem.Read64(pClass + 32)
+			hCursor, _ := mem.Read64(pClass + 40)
+			hBrush, _ := mem.Read64(pClass + 48)
+			lpMenuName, _ := mem.Read64(pClass + 56)
+			lpName, _ := mem.Read64(pClass + 64)
+			hctx.AtomWndProc[a] = wndProc
+			if hBrush > 0 && hBrush <= 30 {
+				hctx.ClassBrush[a] = uint32(hBrush)
+			}
+			name := readGuestString(lpName)
+			if name != "" {
+				hctx.ClassNameAtom[name] = a
+			}
+			hctx.ClassInfo[a] = &registeredClassInfo{
+				Style: style, WndProc: wndProc,
+				ClsExtra: int32(cbClsExtra), WndExtra: int32(cbWndExtra),
+				HInstance: hInst, HIcon: hIcon, HCursor: hCursor,
+				HbrBG: hBrush, MenuName: lpMenuName, ClassName: name,
+				Atom: a,
+			}
+			if lpMenuName != 0 && mainModule != nil {
+				var menuID uint32
+				if lpMenuName < 0x10000 {
+					menuID = uint32(lpMenuName)
+				} else {
+					menuName := readGuestString(lpMenuName)
+					if id, err := strconv.ParseUint(menuName, 10, 32); err == nil {
+						menuID = uint32(id)
+					}
+				}
+				if menuID != 0 {
+					if md := peLoadMenuResource(menuID); md != nil {
+						h := gdiAlloc()
+						menus[h] = md
+						hctx.ClassMenuHandle[a] = h
+					}
+				}
+			}
+			ravelog.Logf("[wndclass] RegisterClassA %q atom=0x%x wndProc=0x%x\n", name, a, wndProc)
+		}
+		ctx.SetReturn(uint64(a))
+		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "RegisterClassExA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0xA001)
+		// WNDCLASSEXA has cbSize(4)+style(4) prefix and hIconSm(8) suffix
+		pClass := ctx.Arg(0)
+		a := hctx.NextAtom
+		hctx.NextAtom++
+		if pClass != 0 {
+			style, _ := mem.Read32(pClass + 4)
+			wndProc, _ := mem.Read64(pClass + 8)
+			cbClsExtra, _ := mem.Read32(pClass + 16)
+			cbWndExtra, _ := mem.Read32(pClass + 20)
+			hInst, _ := mem.Read64(pClass + 24)
+			hIcon, _ := mem.Read64(pClass + 32)
+			hCursor, _ := mem.Read64(pClass + 40)
+			hBrush, _ := mem.Read64(pClass + 48)
+			lpMenuName, _ := mem.Read64(pClass + 56)
+			lpName, _ := mem.Read64(pClass + 64)
+			hIconSm, _ := mem.Read64(pClass + 72)
+			hctx.AtomWndProc[a] = wndProc
+			if hBrush > 0 && hBrush <= 30 {
+				hctx.ClassBrush[a] = uint32(hBrush)
+			}
+			name := readGuestString(lpName)
+			if name != "" {
+				hctx.ClassNameAtom[name] = a
+			}
+			hctx.ClassInfo[a] = &registeredClassInfo{
+				Style: style, WndProc: wndProc,
+				ClsExtra: int32(cbClsExtra), WndExtra: int32(cbWndExtra),
+				HInstance: hInst, HIcon: hIcon, HCursor: hCursor,
+				HbrBG: hBrush, MenuName: lpMenuName, ClassName: name,
+				HIconSm: hIconSm, Atom: a,
+			}
+			ravelog.Logf("[wndclass] RegisterClassExA %q atom=0x%x wndProc=0x%x\n", name, a, wndProc)
+		}
+		ctx.SetReturn(uint64(a))
 		return 0
 	})
 	for _, fn := range []string{"UnregisterClassA", "UnregisterClassW"} {

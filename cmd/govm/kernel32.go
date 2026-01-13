@@ -1577,6 +1577,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetCurrentDirectoryW", func(ctx *ntapi.TrapContext) uint32 {
+		pathPtr := ctx.Arg(0)
+		dir := winPathToVFS(readGuestUTF16(pathPtr))
+		if err := os.Chdir(dir); err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -6331,7 +6337,34 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindFirstFileA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
+		pathPtr := ctx.Arg(0)
+		dataPtr := ctx.Arg(1)
+		pattern := readGuestString(pathPtr)
+		vfsPattern := winPathToVFS(pattern)
+		dir := filepath.Dir(vfsPattern)
+		glob := filepath.Base(vfsPattern)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+			return 0
+		}
+		var matched []os.DirEntry
+		for _, e := range entries {
+			ok, _ := filepath.Match(glob, e.Name())
+			if ok {
+				matched = append(matched, e)
+			}
+		}
+		if len(matched) == 0 {
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+			return 0
+		}
+		fh := &ntapi.FindHandle{Entries: matched, Idx: 1, Dir: dir}
+		if dataPtr != 0 {
+			writeFindDataA(mem, dataPtr, dir, matched[0])
+		}
+		h := handles.Alloc(fh)
+		ctx.SetReturn(uint64(h))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindFirstFileExA", func(ctx *ntapi.TrapContext) uint32 {
@@ -6440,7 +6473,19 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindNextFileA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		hFind := ctx.Arg(0)
+		dataPtr := ctx.Arg(1)
+		obj := handles.Get(ntapi.Handle(hFind))
+		fh, ok := obj.(*ntapi.FindHandle)
+		if !ok || fh.Idx >= len(fh.Entries) {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if dataPtr != 0 {
+			writeFindDataA(mem, dataPtr, fh.Dir, fh.Entries[fh.Idx])
+		}
+		fh.Idx++
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindNextStreamW", func(ctx *ntapi.TrapContext) uint32 {
@@ -7483,7 +7528,33 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetFileAttributesExA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		lpFileName := ctx.Arg(0)
+		lpFileInfo := ctx.Arg(2)
+		path := winPathToVFS(readGuestString(lpFileName))
+		info, err := os.Stat(path)
+		if err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var attrs uint32
+		if info.IsDir() {
+			attrs = 0x10
+		} else {
+			attrs = 0x80
+		}
+		mem.Write32(lpFileInfo, attrs)
+		const epochDiff = uint64(11644473600) * 10000000
+		ft := uint64(info.ModTime().UnixNano())/100 + epochDiff
+		mem.Write32(lpFileInfo+4, uint32(ft))
+		mem.Write32(lpFileInfo+8, uint32(ft>>32))
+		mem.Write32(lpFileInfo+12, uint32(ft))
+		mem.Write32(lpFileInfo+16, uint32(ft>>32))
+		mem.Write32(lpFileInfo+20, uint32(ft))
+		mem.Write32(lpFileInfo+24, uint32(ft>>32))
+		size := uint64(info.Size())
+		mem.Write32(lpFileInfo+28, uint32(size>>32))
+		mem.Write32(lpFileInfo+32, uint32(size))
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetFileAttributesTransactedA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7821,7 +7892,18 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetFullPathNameA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // error
+		fileNamePtr := ctx.Arg(0)
+		bufLen := ctx.Arg(1)
+		buf := ctx.Arg(2)
+		name := readGuestString(fileNamePtr)
+		needed := uint64(len(name) + 1) // include null
+		if bufLen < needed {
+			ctx.SetReturn(needed)
+			return 0
+		}
+		mem.WriteBytes(buf, []byte(name))
+		mem.Write8(buf+uint64(len(name)), 0)
+		ctx.SetReturn(uint64(len(name)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetGeoInfoA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7899,7 +7981,18 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetLongPathNameA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // error
+		shortPath := ctx.Arg(0)
+		buf := ctx.Arg(1)
+		bufLen := ctx.Arg(2)
+		name := readGuestString(shortPath)
+		needed := uint64(len(name) + 1)
+		if bufLen < needed {
+			ctx.SetReturn(needed)
+			return 0
+		}
+		mem.WriteBytes(buf, []byte(name))
+		mem.Write8(buf+uint64(len(name)), 0)
+		ctx.SetReturn(uint64(len(name)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetMailslotInfo", func(ctx *ntapi.TrapContext) uint32 {
@@ -12393,7 +12486,13 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetCurrentDirectoryA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		pathPtr := ctx.Arg(0)
+		dir := winPathToVFS(readGuestString(pathPtr))
+		if err := os.Chdir(dir); err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetDaylightFlag", func(ctx *ntapi.TrapContext) uint32 {
@@ -12553,7 +12652,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetHandleCount", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		ctx.SetReturn(ctx.Arg(0)) // return the requested count (legacy no-op since Win32)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetHandleInformation", func(ctx *ntapi.TrapContext) uint32 {

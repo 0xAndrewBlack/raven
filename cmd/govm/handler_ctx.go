@@ -289,6 +289,9 @@ type HandlerCtx struct {
 	NcDrawText          func(int32, int32, string, uint32, uint32, bool, int32)
 	DrawMenuOverlay     func()
 	CommitIfDone        func()
+
+	CrtFiles   map[uint64]*os.File // guest FILE* → Go *os.File
+	CrtNextFP  uint64              // next guest FILE* address to allocate
 }
 
 const menuBarHeight int32 = 20

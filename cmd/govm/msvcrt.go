@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	gorand "math/rand"
 	"os"
 	"strconv"
 	"strings"
@@ -27,9 +28,42 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 	}
 	_ = msvcrt
 
+	msvcrtRng := gorand.New(gorand.NewSource(1))
+
 	// _initterm: void _initterm(void (**begin)(void), void (**end)(void))
-	// No-op - CRT global constructors are skipped in the emulator.
+	// Walks an array of function pointers [begin, end) and calls each non-NULL one.
 	d.RegisterAutoStubHandler(msvcrt, "_initterm", func(ctx *ntapi.TrapContext) uint32 {
+		begin := ctx.Arg(0)
+		end := ctx.Arg(1)
+		var fns []uint64
+		for ptr := begin; ptr < end; ptr += 8 {
+			fp, _ := mem.Read64(ptr)
+			if fp != 0 {
+				fns = append(fns, fp)
+			}
+		}
+		if len(fns) == 0 {
+			return 0
+		}
+		_, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+		if !ok || !ok2 {
+			return 0
+		}
+		rsp := rr.ReadReg(4)
+		retAddr, _ := mem.Read64(rsp)
+		var queue []syncDispatch
+		for _, fp := range fns[1:] {
+			queue = append(queue, syncDispatch{wndProc: fp})
+		}
+		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			queue:   queue,
+			retAddr: retAddr,
+			hwnd:    0,
+		})
+		mem.Write64(rsp, hctx.SyncTrampoline)
+		ctx.CPU.SetPC(fns[0])
+		ctx.ReturnOverridden = true
 		return 0
 	})
 
@@ -345,11 +379,46 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 
 	// fopen / fclose / fputs / fputc / fprintf / fwrite / vfprintf
 	d.RegisterAutoStubHandler(msvcrt, "fopen", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL - file open fails
+		pathAddr := ctx.Arg(0)
+		modeAddr := ctx.Arg(1)
+		path := readGuestString(pathAddr)
+		mode := readGuestString(modeAddr)
+		hostPath := winPathToVFS(path)
+		var flag int
+		switch {
+		case strings.HasPrefix(mode, "r+") || strings.HasPrefix(mode, "rb+"):
+			flag = os.O_RDWR
+		case strings.HasPrefix(mode, "w+") || strings.HasPrefix(mode, "wb+"):
+			flag = os.O_RDWR | os.O_CREATE | os.O_TRUNC
+		case strings.HasPrefix(mode, "a+") || strings.HasPrefix(mode, "ab+"):
+			flag = os.O_RDWR | os.O_CREATE | os.O_APPEND
+		case strings.HasPrefix(mode, "r") || strings.HasPrefix(mode, "rb"):
+			flag = os.O_RDONLY
+		case strings.HasPrefix(mode, "w") || strings.HasPrefix(mode, "wb"):
+			flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		case strings.HasPrefix(mode, "a") || strings.HasPrefix(mode, "ab"):
+			flag = os.O_WRONLY | os.O_CREATE | os.O_APPEND
+		default:
+			flag = os.O_RDONLY
+		}
+		f, err := os.OpenFile(hostPath, flag, 0644)
+		if err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		fp := hctx.CrtNextFP
+		hctx.CrtNextFP += 64
+		hctx.CrtFiles[fp] = f
+		ctx.SetReturn(fp)
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "fclose", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // EOF on error, 0 on success
+		fp := ctx.Arg(0)
+		if f, ok := hctx.CrtFiles[fp]; ok {
+			f.Close()
+			delete(hctx.CrtFiles, fp)
+		}
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "fputs", func(ctx *ntapi.TrapContext) uint32 {
@@ -357,21 +426,30 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		stream := ctx.Arg(1)
 		if stream == iobBase+iobStride*2 {
 			os.Stderr.WriteString(str)
+		} else if stream == iobBase+iobStride {
+			os.Stdout.WriteString(str)
+		} else if f, ok := hctx.CrtFiles[stream]; ok {
+			f.WriteString(str)
 		} else {
 			os.Stdout.WriteString(str)
 		}
-		ctx.SetReturn(0) // success (non-negative = ok)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "fputc", func(ctx *ntapi.TrapContext) uint32 {
 		c := byte(ctx.Arg(0))
 		stream := ctx.Arg(1)
-		// stdout = iobBase + 48, stderr = iobBase + 96
-		switch stream {
-		case iobBase + iobStride*2:
+		switch {
+		case stream == iobBase+iobStride*2:
 			os.Stderr.Write([]byte{c})
-		default:
+		case stream == iobBase+iobStride:
 			os.Stdout.Write([]byte{c})
+		default:
+			if f, ok := hctx.CrtFiles[stream]; ok {
+				f.Write([]byte{c})
+			} else {
+				os.Stdout.Write([]byte{c})
+			}
 		}
 		ctx.SetReturn(uint64(c))
 		return 0
@@ -442,10 +520,12 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 
 	// rand / srand
 	d.RegisterAutoStubHandler(msvcrt, "rand", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(42) // deterministic
+		ctx.SetReturn(uint64(msvcrtRng.Int31n(0x7FFF + 1))) // RAND_MAX = 0x7FFF
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "srand", func(ctx *ntapi.TrapContext) uint32 {
+		seed := ctx.Arg(0)
+		msvcrtRng = gorand.New(gorand.NewSource(int64(seed)))
 		return 0
 	})
 
@@ -909,39 +989,157 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// File I/O for msvcrt - real implementations
+	// File I/O for msvcrt - real implementations using hctx.CrtFiles
 	d.RegisterAutoStubHandler(msvcrt, "fread", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // read nothing
+		buf := ctx.Arg(0)
+		size := ctx.Arg(1)
+		count := ctx.Arg(2)
+		fp := ctx.Arg(3)
+		total := size * count
+		if total == 0 || buf == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		f, ok := hctx.CrtFiles[fp]
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		tmp := make([]byte, total)
+		n, _ := f.Read(tmp)
+		if n > 0 {
+			mem.WriteBytes(buf, tmp[:n])
+		}
+		if size > 0 {
+			ctx.SetReturn(uint64(n) / size)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "fseek", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // success
-		return 0
-	})
-	d.RegisterAutoStubHandler(msvcrt, "ftell", func(ctx *ntapi.TrapContext) uint32 {
-		// ftell returns current file position; without real FILE* tracking
-		// return 0 (beginning of file) as a safe default
+		fp := ctx.Arg(0)
+		offset := int64(ctx.Arg(1))
+		whence := int(ctx.Arg(2))
+		f, ok := hctx.CrtFiles[fp]
+		if !ok {
+			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		_, err := f.Seek(offset, whence)
+		if err != nil {
+			ctx.SetReturn(^uint64(0))
+			return 0
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
+	d.RegisterAutoStubHandler(msvcrt, "ftell", func(ctx *ntapi.TrapContext) uint32 {
+		fp := ctx.Arg(0)
+		f, ok := hctx.CrtFiles[fp]
+		if !ok {
+			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		pos, _ := f.Seek(0, 1)
+		ctx.SetReturn(uint64(pos))
+		return 0
+	})
 	d.RegisterAutoStubHandler(msvcrt, "fflush", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // success
+		fp := ctx.Arg(0)
+		if f, ok := hctx.CrtFiles[fp]; ok {
+			f.Sync()
+		}
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "feof", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // always EOF
+		fp := ctx.Arg(0)
+		f, ok := hctx.CrtFiles[fp]
+		if !ok {
+			ctx.SetReturn(1)
+			return 0
+		}
+		cur, _ := f.Seek(0, 1)
+		end, _ := f.Seek(0, 2)
+		f.Seek(cur, 0)
+		if cur >= end {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "ferror", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // no error
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "fgets", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL (EOF)
+		buf := ctx.Arg(0)
+		n := int(ctx.Arg(1))
+		fp := ctx.Arg(2)
+		if buf == 0 || n <= 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		f, ok := hctx.CrtFiles[fp]
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		tmp := make([]byte, n-1)
+		read, _ := f.Read(tmp)
+		if read == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		end := read
+		for i := 0; i < read; i++ {
+			if tmp[i] == '\n' {
+				end = i + 1
+				break
+			}
+		}
+		if end < read {
+			f.Seek(int64(end-read), 1)
+		}
+		mem.WriteBytes(buf, tmp[:end])
+		mem.Write8(buf+uint64(end), 0)
+		ctx.SetReturn(buf)
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "_wfopen", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL (fail)
+		pathAddr := ctx.Arg(0)
+		modeAddr := ctx.Arg(1)
+		path := readGuestUTF16(pathAddr)
+		mode := readGuestUTF16(modeAddr)
+		hostPath := winPathToVFS(path)
+		var flag int
+		switch {
+		case strings.HasPrefix(mode, "r+") || strings.HasPrefix(mode, "rb+"):
+			flag = os.O_RDWR
+		case strings.HasPrefix(mode, "w+") || strings.HasPrefix(mode, "wb+"):
+			flag = os.O_RDWR | os.O_CREATE | os.O_TRUNC
+		case strings.HasPrefix(mode, "a+") || strings.HasPrefix(mode, "ab+"):
+			flag = os.O_RDWR | os.O_CREATE | os.O_APPEND
+		case strings.HasPrefix(mode, "r") || strings.HasPrefix(mode, "rb"):
+			flag = os.O_RDONLY
+		case strings.HasPrefix(mode, "w") || strings.HasPrefix(mode, "wb"):
+			flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		case strings.HasPrefix(mode, "a") || strings.HasPrefix(mode, "ab"):
+			flag = os.O_WRONLY | os.O_CREATE | os.O_APPEND
+		default:
+			flag = os.O_RDONLY
+		}
+		f, err := os.OpenFile(hostPath, flag, 0644)
+		if err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		fp := hctx.CrtNextFP
+		hctx.CrtNextFP += 64
+		hctx.CrtFiles[fp] = f
+		ctx.SetReturn(fp)
 		return 0
 	})
 	// setlocale - return pointer to "C" locale string

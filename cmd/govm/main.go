@@ -2027,6 +2027,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		AllocScreenDC: allocScreenDC, GetDCFn: getDC,
 		ReadDIBInfo: readDIBInfo, ReadDIBPixels: readDIBPixels,
 		SysColors: sysColors,
+		// CRT file I/O
+		CrtFiles:  make(map[uint64]*os.File),
+		CrtNextFP: mem.Mmap(0, 0x10000, mmu.PermRead|mmu.PermWrite),
 		// Mutable scalars (initial values)
 		MainActive:        true,
 		DelayLoadFallback: delayLoadFallback,
@@ -4278,6 +4281,36 @@ func writeFindData(m *mmu.MMU, ptr uint64, dir string, e os.DirEntry) {
 		m.Write16(ptr+44+uint64(i)*2, uint16(r))
 	}
 	m.Write16(ptr+44+uint64(len([]rune(name)))*2, 0) // null terminator
+}
+
+// writeFindDataA writes a WIN32_FIND_DATAA struct (ANSI filenames).
+func writeFindDataA(m *mmu.MMU, ptr uint64, dir string, e os.DirEntry) {
+	var attrs uint32 = 0x20 // FILE_ATTRIBUTE_NORMAL
+	if e.IsDir() {
+		attrs = 0x10
+	}
+	m.Write32(ptr+0, attrs)
+	info, err := e.Info()
+	if err == nil {
+		const epochDiff = int64(11644473600)
+		ft := uint64(info.ModTime().Unix()+epochDiff) * 10000000
+		m.Write64Raw(ptr+4, ft)
+		m.Write64Raw(ptr+12, ft)
+		m.Write64Raw(ptr+20, ft)
+		if !e.IsDir() {
+			sz := info.Size()
+			m.Write32(ptr+28, uint32(sz>>32))
+			m.Write32(ptr+32, uint32(sz))
+		}
+	}
+	// WIN32_FIND_DATAA: cFileName at +44 is char[260], cAlternateFileName at +304 is char[14]
+	name := e.Name()
+	for i := 0; i < len(name) && i < 259; i++ {
+		m.Write8(ptr+44+uint64(i), name[i])
+	}
+	if len(name) < 260 {
+		m.Write8(ptr+44+uint64(len(name)), 0)
+	}
 }
 
 // saveScreenshot saves the XRGB8888 wl.Window pixel buffer as a PNG.
