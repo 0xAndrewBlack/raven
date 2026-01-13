@@ -143,11 +143,15 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeColor", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x80004001) // E_NOTIMPL
+		ctx.SetReturn(0x80070006) // E_HANDLE - no theme handle
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeInt", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x80004001) // E_NOTIMPL
+		ctx.SetReturn(0x80070006) // E_HANDLE
+		return 0
+	})
+	d.RegisterAutoStubHandler(uxtheme, "GetThemeMetric", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0x80070006) // E_HANDLE
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeFont", func(ctx *ntapi.TrapContext) uint32 {
@@ -286,12 +290,19 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 	mem.Write32(versionBuf+32, 0x00040004) // dwFileOS (VOS_NT_WINDOWS32)
 	mem.Write32(versionBuf+36, 1)          // dwFileType (VFT_APP)
 
+	setLastError := func(ctx *ntapi.TrapContext, code uint32) {
+		if ctx.State != nil && ctx.State.TEBAddr != 0 {
+			ctx.Mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, code)
+		}
+	}
+
 	d.RegisterAutoStubHandler(version, "GetFileVersionInfoSizeW", func(ctx *ntapi.TrapContext) uint32 {
 		pHandle := ctx.Arg(1)
 		if pHandle != 0 {
 			ctx.Mem.Write32(pHandle, 0)
 		}
-		ctx.SetReturn(128) // fake non-zero size
+		setLastError(ctx, 0) // ERROR_SUCCESS
+		ctx.SetReturn(128)   // fake non-zero size
 		return 0
 	})
 	d.RegisterAutoStubHandler(version, "GetFileVersionInfoW", func(ctx *ntapi.TrapContext) uint32 {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"net"
-	"os"
 	"syscall"
 
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -35,13 +34,30 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(ws2, "freeaddrinfo", func(ctx *ntapi.TrapContext) uint32 {
 		return 0
 	})
-	// WSAStartup: pretend Winsock 2.2 is available
+	// WSAStartup: initialize Winsock 2.2
+	// WSADATA layout (x64): wVersion(2) + wHighVersion(2) + iMaxSockets(2) + iMaxUdpDg(2) +
+	//   lpVendorInfo(8) + szDescription(257) + szSystemStatus(129) = 400+ bytes
 	d.RegisterAutoStubHandler(ws2, "WSAStartup", func(ctx *ntapi.TrapContext) uint32 {
 		lpWSAData := ctx.Arg(1)
 		if lpWSAData != 0 {
-			// WSADATA: first two WORDs are wVersion and wHighVersion
-			ctx.Mem.Write16(lpWSAData+0, 0x0202) // version 2.2
-			ctx.Mem.Write16(lpWSAData+2, 0x0202) // high version 2.2
+			ctx.Mem.Write16(lpWSAData+0, 0x0202) // wVersion 2.2
+			ctx.Mem.Write16(lpWSAData+2, 0x0202) // wHighVersion 2.2
+			// iMaxSockets and iMaxUdpDg (legacy, ignored post-2.0)
+			ctx.Mem.Write16(lpWSAData+4, 0)
+			ctx.Mem.Write16(lpWSAData+6, 0)
+			ctx.Mem.Write64(lpWSAData+8, 0) // lpVendorInfo = NULL
+			// szDescription at offset 16 (257 bytes)
+			desc := []byte("WinSock 2.0")
+			for i, b := range desc {
+				ctx.Mem.Write8(lpWSAData+16+uint64(i), b)
+			}
+			ctx.Mem.Write8(lpWSAData+16+uint64(len(desc)), 0)
+			// szSystemStatus at offset 16+257 = 273 (129 bytes)
+			status := []byte("Running")
+			for i, b := range status {
+				ctx.Mem.Write8(lpWSAData+273+uint64(i), b)
+			}
+			ctx.Mem.Write8(lpWSAData+273+uint64(len(status)), 0)
 		}
 		ctx.SetReturn(0) // success
 		return 0
@@ -65,11 +81,11 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 			return int(af)
 		}
 	}
-	wsaSetErr := func(e int32) {
-		// Store WSALASTERROR in the fake TLS
-		_ = e
+	wsaSetErr := func(ctx *ntapi.TrapContext, e uint32) {
+		if ctx.State != nil && ctx.State.TEBAddr != 0 {
+			ctx.Mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, e)
+		}
 	}
-	_ = wsaSetErr
 
 	d.RegisterAutoStubHandler(ws2, "socket", func(ctx *ntapi.TrapContext) uint32 {
 		af := winAfToLinux(uint16(ctx.Arg(0)))
@@ -77,6 +93,7 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 		proto := int(ctx.Arg(2))
 		fd, err := syscall.Socket(af, sockType, proto)
 		if err != nil {
+			wsaSetErr(ctx, 10047) // WSAEAFNOSUPPORT
 			ctx.SetReturn(^uint64(0)) // INVALID_SOCKET
 			return 0
 		}
@@ -532,25 +549,36 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// WSAGetLastError
+	// WSAGetLastError - reads from TEB LastErrorValue (same as GetLastError per MSDN)
 	d.RegisterAutoStubHandler(ws2, "WSAGetLastError", func(ctx *ntapi.TrapContext) uint32 {
+		if ctx.State != nil && ctx.State.TEBAddr != 0 {
+			val, err := ctx.Mem.Read32(ctx.State.TEBAddr + ntapi.TebLastErrorValue)
+			if err == nil {
+				ctx.SetReturn(uint64(val))
+				return 0
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ws2, "WSASetLastError", func(ctx *ntapi.TrapContext) uint32 {
+		errCode := uint32(ctx.Arg(0))
+		if ctx.State != nil && ctx.State.TEBAddr != 0 {
+			ctx.Mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, errCode)
+		}
 		return 0
 	})
 
-	// gethostname
+	// gethostname - return "raven" as the hostname
 	d.RegisterAutoStubHandler(ws2, "gethostname", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(0)
 		n := int(ctx.Arg(1))
-		name, err := os.Hostname()
-		if err != nil || n == 0 {
-			ctx.SetReturn(^uint64(0))
+		const hostname = "raven"
+		if n == 0 || buf == 0 {
+			ctx.SetReturn(^uint64(0)) // SOCKET_ERROR
 			return 0
 		}
-		b := []byte(name)
+		b := []byte(hostname)
 		if len(b)+1 > n {
 			b = b[:n-1]
 		}

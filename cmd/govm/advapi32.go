@@ -783,6 +783,55 @@ func registerCrypt32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
+
+	// CryptProtectData / CryptUnprotectData - pass-through (no real encryption).
+	// CRYPT_DATA_BLOB: { cbData DWORD(4), padding(4), pbData BYTE*(8) } = 16 bytes on x64
+	d.RegisterAutoStubHandler(crypt32, "CryptProtectData", func(ctx *ntapi.TrapContext) uint32 {
+		pDataIn := ctx.Arg(0)  // DATA_BLOB *pDataIn
+		pDataOut := ctx.Arg(4) // DATA_BLOB *pDataOut
+		if pDataIn == 0 || pDataOut == 0 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		}
+		cbData, _ := ctx.Mem.Read32(pDataIn)
+		pbData, _ := ctx.Mem.Read64(pDataIn + 8)
+		if cbData == 0 || pbData == 0 {
+			ctx.Mem.Write32(pDataOut, 0)
+			ctx.Mem.Write64(pDataOut+8, 0)
+			ctx.SetReturn(1) // TRUE
+			return 0
+		}
+		src, _ := ctx.Mem.ReadBytes(pbData, int(cbData))
+		dst := ctx.Mem.Mmap(0, uint64(cbData), mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.WriteBytes(dst, src)
+		ctx.Mem.Write32(pDataOut, cbData)
+		ctx.Mem.Write64(pDataOut+8, dst)
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	d.RegisterAutoStubHandler(crypt32, "CryptUnprotectData", func(ctx *ntapi.TrapContext) uint32 {
+		pDataIn := ctx.Arg(0)
+		pDataOut := ctx.Arg(4)
+		if pDataIn == 0 || pDataOut == 0 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		}
+		cbData, _ := ctx.Mem.Read32(pDataIn)
+		pbData, _ := ctx.Mem.Read64(pDataIn + 8)
+		if cbData == 0 || pbData == 0 {
+			ctx.Mem.Write32(pDataOut, 0)
+			ctx.Mem.Write64(pDataOut+8, 0)
+			ctx.SetReturn(1)
+			return 0
+		}
+		src, _ := ctx.Mem.ReadBytes(pbData, int(cbData))
+		dst := ctx.Mem.Mmap(0, uint64(cbData), mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.WriteBytes(dst, src)
+		ctx.Mem.Write32(pDataOut, cbData)
+		ctx.Mem.Write64(pDataOut+8, dst)
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
 }
 
 func registerAdvapi32Handlers2(hctx *HandlerCtx) {

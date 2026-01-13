@@ -362,7 +362,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetCurrentProcessId", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(4000) // fake process ID
+		ctx.SetReturn(uint64(os.Getpid()))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "QueryPerformanceCounter", func(ctx *ntapi.TrapContext) uint32 {
@@ -7343,11 +7343,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetProcessId", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // PID=1
+		ctx.SetReturn(uint64(os.Getpid()))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetProcessIdOfThread", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		ctx.SetReturn(uint64(os.Getpid()))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetProcessInformation", func(ctx *ntapi.TrapContext) uint32 {
@@ -7535,7 +7535,27 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetShortPathNameW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // error
+		longPath := ctx.Arg(0)
+		buf := ctx.Arg(1)
+		bufLen := ctx.Arg(2)
+		// No 8.3 short names on Linux; copy input to output unchanged.
+		var chars []uint16
+		for i := uint64(0); ; i += 2 {
+			w, _ := ctx.Mem.Read16(longPath + i)
+			chars = append(chars, w)
+			if w == 0 {
+				break
+			}
+		}
+		needed := uint64(len(chars))
+		if buf == 0 || bufLen < needed {
+			ctx.SetReturn(needed)
+			return 0
+		}
+		for i, w := range chars {
+			ctx.Mem.Write16(buf+uint64(i*2), w)
+		}
+		ctx.SetReturn(needed - 1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetStringTypeA", func(ctx *ntapi.TrapContext) uint32 {
@@ -10632,6 +10652,22 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "RemoveDirectoryW", func(ctx *ntapi.TrapContext) uint32 {
+		pathPtr := ctx.Arg(0)
+		if pathPtr == 0 {
+			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		path := winPathToVFS(readGuestUTF16(pathPtr))
+		if err := os.Remove(path); err != nil {
+			if os.IsNotExist(err) {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+			} else {
+				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 145) // ERROR_DIR_NOT_EMPTY
+			}
+			ctx.SetReturn(0)
+			return 0
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -10839,7 +10875,97 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SearchPathW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // not found
+		// SearchPathW(lpPath, lpFileName, lpExtension, nBufferLength, lpBuffer, lpFilePart)
+		lpPath := ctx.Arg(0)
+		lpFileName := ctx.Arg(1)
+		lpExtension := ctx.Arg(2)
+		nBufLen := ctx.Arg(3)
+		lpBuffer := ctx.Arg(4)
+		lpFilePart := ctx.Arg(5)
+
+		fileName := readGuestUTF16(lpFileName)
+		if fileName == "" {
+			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		ext := ""
+		if lpExtension != 0 {
+			ext = readGuestUTF16(lpExtension)
+		}
+		// Append extension if the filename has no extension and one was supplied.
+		if ext != "" && !strings.Contains(filepath.Base(fileName), ".") {
+			fileName += ext
+		}
+
+		// Build list of directories to search.
+		var dirs []string
+		if lpPath != 0 {
+			searchDir := readGuestUTF16(lpPath)
+			if searchDir != "" {
+				dirs = append(dirs, winPathToVFS(searchDir))
+			}
+		}
+		if len(dirs) == 0 {
+			// Per ReactOS: search exe dir, current dir, system, windows, then PATH.
+			lastBS := strings.LastIndex(imagePath, `\`)
+			if lastBS >= 0 {
+				dirs = append(dirs, winPathToVFS(imagePath[:lastBS]))
+			}
+			dirs = append(dirs, winPathToVFS("."))
+		}
+
+		var found string
+		vfsName := winPathToVFS(fileName)
+		// If the filename is already an absolute path, check it directly.
+		if strings.ContainsAny(fileName, `/\`) && (len(fileName) >= 2 && fileName[1] == ':' || fileName[0] == '\\' || fileName[0] == '/') {
+			if _, err := os.Stat(vfsName); err == nil {
+				found = vfsName
+			}
+		}
+		if found == "" {
+			baseName := filepath.Base(vfsName)
+			for _, dir := range dirs {
+				candidate := filepath.Join(dir, baseName)
+				if _, err := os.Stat(candidate); err == nil {
+					found = candidate
+					break
+				}
+			}
+		}
+
+		if found == "" {
+			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		// Convert host path back to a Windows-style path for the guest.
+		winResult := strings.ReplaceAll(found, "/", `\`)
+		if !strings.HasPrefix(winResult, `\`) {
+			winResult = `\` + winResult
+		}
+		winResult = `C:` + winResult
+		ws := utf16Encode(winResult)
+		needed := uint64(len(ws)) + 1 // include null terminator
+		if lpBuffer == 0 || nBufLen < needed {
+			ctx.SetReturn(needed)
+			return 0
+		}
+		for i, w := range ws {
+			ctx.Mem.Write16(lpBuffer+uint64(i*2), w)
+		}
+		ctx.Mem.Write16(lpBuffer+uint64(len(ws))*2, 0) // null-terminate
+
+		// Set lpFilePart to point at the filename component.
+		if lpFilePart != 0 {
+			base := filepath.Base(winResult)
+			baseWs := utf16Encode(base)
+			offset := uint64(len(ws)-len(baseWs)) * 2
+			ctx.Mem.Write64(lpFilePart, lpBuffer+offset)
+		}
+		ctx.SetReturn(uint64(len(ws))) // return length without null
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetCPGlobal", func(ctx *ntapi.TrapContext) uint32 {

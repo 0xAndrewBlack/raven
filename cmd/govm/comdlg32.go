@@ -236,4 +236,52 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		showFileDialogA(ctx, true)
 		return 0
 	})
+
+	// ChooseFontW: font picker - return FALSE (user cancelled)
+	d.RegisterAutoStubHandler(comdlg32, "ChooseFontW", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // FALSE - user cancelled
+		return 0
+	})
+	d.RegisterAutoStubHandler(comdlg32, "ChooseFontA", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // FALSE - user cancelled
+		return 0
+	})
+	// PrintDlgExW: extended print dialog - return S_FALSE (1) meaning user cancelled
+	d.RegisterAutoStubHandler(comdlg32, "PrintDlgExW", func(ctx *ntapi.TrapContext) uint32 {
+		// Set dwResultAction = PD_RESULT_CANCEL (0) in the PRINTDLGEX struct
+		pPD := ctx.Arg(0)
+		if pPD != 0 {
+			// dwResultAction is at the end of PRINTDLGEX; offset varies but
+			// for our purposes returning S_FALSE is sufficient to indicate cancel
+		}
+		ctx.SetReturn(1) // S_FALSE - user cancelled
+		return 0
+	})
+	d.RegisterAutoStubHandler(comdlg32, "PrintDlgExA", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // S_FALSE - user cancelled
+		return 0
+	})
+	// PageSetupDlgW: page setup dialog - return FALSE (user cancelled)
+	d.RegisterAutoStubHandler(comdlg32, "PageSetupDlgW", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // FALSE - user cancelled
+		return 0
+	})
+	d.RegisterAutoStubHandler(comdlg32, "PageSetupDlgA", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // FALSE - user cancelled
+		return 0
+	})
+	// CommDlgExtendedError: return 0 (no error) after cancelled dialogs
+	d.RegisterAutoStubHandler(comdlg32, "CommDlgExtendedError", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // CDERR_OK - no error
+		return 0
+	})
+	// FindTextW / ReplaceTextW: find/replace dialogs - return NULL
+	d.RegisterAutoStubHandler(comdlg32, "FindTextW", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // NULL - dialog not created
+		return 0
+	})
+	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextW", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // NULL
+		return 0
+	})
 }
