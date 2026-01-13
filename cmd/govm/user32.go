@@ -2730,7 +2730,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		// ReactOS: win32ss/user/ntuser/window.c NtUserIsWindow
+		hwnd := ctx.Arg(0)
+		if hwnd == hctx.MainHWND || hwnd == 0x00050000 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		if _, ok := hwndChildren[hwnd]; ok {
+			ctx.SetReturn(1)
+			return 0
+		}
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetFocus", func(ctx *ntapi.TrapContext) uint32 {
@@ -3353,16 +3363,144 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(ctx.Arg(0))
 		return 0
 	})
+	// childrenOf returns HWND slice of children whose parent matches p, sorted ascending.
+	childrenOf := func(p uint64) []uint64 {
+		var out []uint64
+		for h, cs := range hwndChildren {
+			if cs.parentHWND == p {
+				out = append(out, h)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+		return out
+	}
+
 	d.RegisterAutoStubHandler(user32, "GetNextWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// ReactOS: GetNextWindow is GetWindow(hwnd, cmd)
+		// GW_HWNDNEXT=2, GW_HWNDPREV=3
+		hwnd := ctx.Arg(0)
+		cmd := ctx.Arg(1)
+		cs, ok := hwndChildren[hwnd]
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		siblings := childrenOf(cs.parentHWND)
+		idx := -1
+		for i, h := range siblings {
+			if h == hwnd {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		switch cmd {
+		case 2: // GW_HWNDNEXT
+			if idx+1 < len(siblings) {
+				ctx.SetReturn(siblings[idx+1])
+			} else {
+				ctx.SetReturn(0)
+			}
+		case 3: // GW_HWNDPREV
+			if idx > 0 {
+				ctx.SetReturn(siblings[idx-1])
+			} else {
+				ctx.SetReturn(0)
+			}
+		default:
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetTopWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hctx.MainHWND)
+		// ReactOS: win32ss/user/ntuser/window.c NtUserGetTopWindow
+		// Returns the first child window (top of Z-order) of the given parent.
+		// If hwnd==0, use the desktop window.
+		hwnd := ctx.Arg(0)
+		if hwnd == 0 {
+			hwnd = 0x00050000 // desktop
+		}
+		kids := childrenOf(hwnd)
+		// Also treat MainHWND's children as top-level for desktop queries.
+		if len(kids) == 0 && (hwnd == 0x00050000 || hwnd == hctx.MainHWND) {
+			kids = childrenOf(hctx.MainHWND)
+		}
+		if len(kids) > 0 {
+			ctx.SetReturn(kids[0])
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// ReactOS: win32ss/user/ntuser/window.c NtUserGetWindow
+		hwnd := ctx.Arg(0)
+		cmd := ctx.Arg(1)
+		const (
+			gwHWNDFIRST = 0
+			gwHWNDLAST  = 1
+			gwHWNDNEXT  = 2
+			gwHWNDPREV  = 3
+			gwOWNER     = 4
+			gwCHILD     = 5
+		)
+		switch cmd {
+		case gwCHILD:
+			kids := childrenOf(hwnd)
+			if len(kids) > 0 {
+				ctx.SetReturn(kids[0])
+			} else {
+				ctx.SetReturn(0)
+			}
+		case gwOWNER:
+			// For child windows, the owner is the parent. For top-level, 0.
+			if cs, ok := hwndChildren[hwnd]; ok {
+				ctx.SetReturn(cs.parentHWND)
+			} else {
+				ctx.SetReturn(0)
+			}
+		case gwHWNDNEXT, gwHWNDPREV, gwHWNDFIRST, gwHWNDLAST:
+			cs, ok := hwndChildren[hwnd]
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			siblings := childrenOf(cs.parentHWND)
+			idx := -1
+			for i, h := range siblings {
+				if h == hwnd {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			switch cmd {
+			case gwHWNDNEXT:
+				if idx+1 < len(siblings) {
+					ctx.SetReturn(siblings[idx+1])
+				} else {
+					ctx.SetReturn(0)
+				}
+			case gwHWNDPREV:
+				if idx > 0 {
+					ctx.SetReturn(siblings[idx-1])
+				} else {
+					ctx.SetReturn(0)
+				}
+			case gwHWNDFIRST:
+				ctx.SetReturn(siblings[0])
+			case gwHWNDLAST:
+				ctx.SetReturn(siblings[len(siblings)-1])
+			}
+		default:
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EnumChildWindows", func(ctx *ntapi.TrapContext) uint32 {
@@ -5654,7 +5792,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0)
 		return 0
 	})
-	for _, fn := range []string{"PostMessageA", "PostThreadMessageA", "PostThreadMessageW"} {
+	d.RegisterAutoStubHandler(user32, "PostMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/message.c NtUserPostMessage
+		hwnd := ctx.Arg(0)
+		msg := uint32(ctx.Arg(1))
+		wParam := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+		if hwnd == hctx.MainHWND || hwnd == 0xFFFF || hwnd == 0xFFFFFFFFFFFFFFFF {
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, msg, wParam, lParam})
+		} else if _, ok := hwndChildren[hwnd]; ok {
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd, msg, wParam, lParam})
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	for _, fn := range []string{"PostThreadMessageA", "PostThreadMessageW"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
@@ -5750,7 +5902,33 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0)
 		return 0
 	})
-	for _, fn := range []string{"SendMessageTimeoutA", "SendMessageTimeoutW",
+	// SendMessageTimeoutA/W - ReactOS: win32ss/user/ntuser/message.c co_IntSendMessageTimeout
+	// Signature: LRESULT SendMessageTimeoutW(HWND,UINT,WPARAM,LPARAM,UINT fuFlags,UINT uTimeout,PDWORD_PTR lpdwResult)
+	sendMsgTimeoutImpl := func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		msg := uint32(ctx.Arg(1))
+		wParam := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+		// Arg(4) = fuFlags, Arg(5) = uTimeout (ignored - we dispatch synchronously)
+		lpdwResult := ctx.Arg(6)
+
+		var result uint64
+		if res, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+			result = res
+		} else if hwnd == hctx.MainHWND || hwnd == 0xFFFF || hwnd == 0xFFFFFFFFFFFFFFFF {
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, msg, wParam, lParam})
+		} else if _, ok := hwndChildren[hwnd]; ok {
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd, msg, wParam, lParam})
+		}
+		if lpdwResult != 0 {
+			mem.Write64(lpdwResult, result)
+		}
+		ctx.SetReturn(1) // nonzero = success
+		return 0
+	}
+	d.RegisterAutoStubHandler(user32, "SendMessageTimeoutA", sendMsgTimeoutImpl)
+	d.RegisterAutoStubHandler(user32, "SendMessageTimeoutW", sendMsgTimeoutImpl)
+	for _, fn := range []string{
 		"SendMessageCallbackA", "SendMessageCallbackW",
 		"SendNotifyMessageA", "SendNotifyMessageW", "SendDlgItemMessageA"} {
 		fn := fn
@@ -5796,7 +5974,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWindowUnicode", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// ReactOS: win32ss/user/ntuser/window.c NtUserIsWindowUnicode
+		// We register all classes as Unicode, so return TRUE for any valid HWND.
+		hwnd := ctx.Arg(0)
+		if hwnd == hctx.MainHWND || hwnd == 0x00050000 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		if _, ok := hwndChildren[hwnd]; ok {
+			ctx.SetReturn(1)
+			return 0
+		}
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsMenu", func(ctx *ntapi.TrapContext) uint32 {

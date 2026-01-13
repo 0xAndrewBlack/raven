@@ -56,6 +56,73 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	tmPtr := hctx.TMPtr
 	wlDisplay := hctx.WlDisplay
 
+	mainModule := hctx.MainModule
+	peLoadRawResource := hctx.PeLoadRawResource
+
+	// HRSRC tracking: map from fake handle → {dataAddr, dataSize}
+	type hrsrcEntry struct {
+		dataAddr uint64
+		dataSize uint32
+	}
+	hrsrcTable := map[uint64]hrsrcEntry{}
+	var hrsrcNext uint64 = 0xF0000001
+
+	// Fiber tracking: map from fiber address → fiber data pointer.
+	// Each ConvertThreadToFiber/CreateFiber(Ex) allocates a unique guest
+	// page so callers that compare fiber addresses see distinct values.
+	var fiberMu sync.Mutex
+	fiberMap := map[uint64]uint64{} // fiberAddr → lpParameter
+	var nextFiberAddr uint64
+
+	// resolveResourceModule returns (baseAddr, rsrcDirRVA) for the given hModule.
+	// If hModule is 0 or matches the main module, use MainModule's fields.
+	resolveResourceModule := func(hModule uint64) (uint64, uint32) {
+		if mainModule == nil {
+			return 0, 0
+		}
+		if hModule == 0 || hModule == mainModule.BaseAddr {
+			return mainModule.BaseAddr, mainModule.ResourceDirRVA
+		}
+		// For other modules we don't have resource directory info; return zero.
+		return hModule, 0
+	}
+
+	// rsrcDirEntries reads the ID entries from a resource directory at dirAddr.
+	// Returns a slice of entry IDs (only ID entries, not named entries).
+	rsrcDirEntries := func(dirAddr uint64) []uint32 {
+		if dirAddr == 0 {
+			return nil
+		}
+		namedCount, _ := mem.Read16(dirAddr + 12)
+		idCount, _ := mem.Read16(dirAddr + 14)
+		entryBase := dirAddr + 16 + uint64(namedCount)*8
+		ids := make([]uint32, 0, idCount)
+		for i := uint16(0); i < idCount; i++ {
+			eID, _ := mem.Read32(entryBase + uint64(i)*8)
+			ids = append(ids, eID)
+		}
+		return ids
+	}
+
+	// rsrcFindSubdir finds a subdirectory entry by ID within a resource directory.
+	// Returns the subdirectory address, or 0 if not found.
+	rsrcFindSubdir := func(dirAddr, rsrcBase uint64, id uint32) uint64 {
+		if dirAddr == 0 {
+			return 0
+		}
+		namedCount, _ := mem.Read16(dirAddr + 12)
+		idCount, _ := mem.Read16(dirAddr + 14)
+		entryBase := dirAddr + 16 + uint64(namedCount)*8
+		for i := uint16(0); i < idCount; i++ {
+			eID, _ := mem.Read32(entryBase + uint64(i)*8)
+			eOff, _ := mem.Read32(entryBase + uint64(i)*8 + 4)
+			if eID == id && eOff&0x80000000 != 0 {
+				return rsrcBase + uint64(eOff&0x7FFFFFFF)
+			}
+		}
+		return 0
+	}
+
 	kernel32, ok := hctx.SynthByName["kernel32.dll"]
 	if !ok {
 		return
@@ -508,6 +575,15 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FreeLibrary", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL FreeLibrary(HMODULE hLibModule);
+		// ReactOS: dll/win32/kernel32/client/loader.c
+		// We use synthesized DLLs with no real ref-counting; always succeed.
+		hModule := ctx.Arg(0)
+		if hModule == 0 {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -568,7 +644,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "UnhandledExceptionFilter", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // EXCEPTION_CONTINUE_SEARCH
+		// LONG UnhandledExceptionFilter(EXCEPTION_POINTERS *ExceptionInfo);
+		// ReactOS: sdk/lib/rtl/except.c - RtlUnhandledExceptionFilter
+		// If an application-defined filter is set, delegate to it (not yet
+		// supported in the emulator). Otherwise return EXCEPTION_EXECUTE_HANDLER
+		// so the default handler terminates the process gracefully.
+		ctx.SetReturn(1) // EXCEPTION_EXECUTE_HANDLER
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "RtlCaptureContext", func(ctx *ntapi.TrapContext) uint32 {
@@ -591,7 +672,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(kernel32, "SetUnhandledExceptionFilter", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // return NULL (no previous filter)
+		// LPTOP_LEVEL_EXCEPTION_FILTER SetUnhandledExceptionFilter(
+		//   LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter);
+		// Store the new filter and return the previous one.
+		// ReactOS: sdk/lib/rtl/except.c - RtlSetUnhandledExceptionFilter
+		newFilter := ctx.Arg(0)
+		prev := procState.UnhandledExceptionFilter
+		procState.UnhandledExceptionFilter = newFilter
+		ctx.SetReturn(prev)
 		return 0
 	})
 
@@ -3297,19 +3385,67 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "LoadResource", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL
-		return 0
-	})
-	d.RegisterAutoStubHandler(kernel32, "FindResourceW", func(ctx *ntapi.TrapContext) uint32 {
+		// HGLOBAL LoadResource(HMODULE hModule, HRSRC hResInfo)
+		hResInfo := ctx.Arg(1)
+		if e, ok := hrsrcTable[hResInfo]; ok {
+			ctx.SetReturn(e.dataAddr)
+			return 0
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
+	d.RegisterAutoStubHandler(kernel32, "FindResourceW", func(ctx *ntapi.TrapContext) uint32 {
+		// HRSRC FindResourceW(HMODULE hModule, LPCWSTR lpName, LPCWSTR lpType)
+		hModule := ctx.Arg(0)
+		lpName := ctx.Arg(1)
+		lpType := ctx.Arg(2)
+
+		baseAddr, rsrcRVA := resolveResourceModule(hModule)
+		if rsrcRVA == 0 || peLoadRawResource == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		// IS_INTRESOURCE: if value < 0x10000, it's an integer resource ID
+		typeID := uint32(lpType)
+		if lpType > 0xFFFF {
+			typeID = 0 // named type - not supported yet
+		}
+		resID := uint32(lpName)
+		if lpName > 0xFFFF {
+			resID = 0 // named resource - not supported yet
+		}
+		if typeID == 0 || resID == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		dataAddr, dataSize, ok := peLoadRawResource(baseAddr, rsrcRVA, typeID, resID)
+		if !ok || dataAddr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		h := hrsrcNext
+		hrsrcNext++
+		hrsrcTable[h] = hrsrcEntry{dataAddr: dataAddr, dataSize: dataSize}
+		ctx.SetReturn(h)
+		return 0
+	})
 	d.RegisterAutoStubHandler(kernel32, "LockResource", func(ctx *ntapi.TrapContext) uint32 {
+		// LPVOID LockResource(HGLOBAL hResData)
+		// In Win32 LockResource just returns the pointer - hResData IS the pointer.
 		ctx.SetReturn(ctx.Arg(0))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SizeofResource", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // no resource tracking
+		// DWORD SizeofResource(HMODULE hModule, HRSRC hResInfo)
+		hResInfo := ctx.Arg(1)
+		if e, ok := hrsrcTable[hResInfo]; ok {
+			ctx.SetReturn(uint64(e.dataSize))
+			return 0
+		}
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetTempPathW", func(ctx *ntapi.TrapContext) uint32 {
@@ -4240,11 +4376,34 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ConvertThreadToFiber", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x10000) // fake fiber
+		// LPVOID ConvertThreadToFiber(LPVOID lpParameter);
+		// ReactOS: dll/win32/kernel32/client/fiber.c
+		lpParam := ctx.Arg(0)
+		fiberMu.Lock()
+		if nextFiberAddr == 0 {
+			nextFiberAddr = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+		} else {
+			nextFiberAddr = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+		}
+		addr := nextFiberAddr
+		fiberMap[addr] = lpParam
+		// Store lpParameter at the start of the fiber data block
+		mem.Write64(addr, lpParam)
+		fiberMu.Unlock()
+		ctx.SetReturn(addr)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ConvertThreadToFiberEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x10000) // fake fiber
+		// LPVOID ConvertThreadToFiberEx(LPVOID lpParameter, DWORD dwFlags);
+		// ReactOS: dll/win32/kernel32/client/fiber.c
+		lpParam := ctx.Arg(0)
+		fiberMu.Lock()
+		nextFiberAddr = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+		addr := nextFiberAddr
+		fiberMap[addr] = lpParam
+		mem.Write64(addr, lpParam)
+		fiberMu.Unlock()
+		ctx.SetReturn(addr)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ConvertToGlobalHandle", func(ctx *ntapi.TrapContext) uint32 {
@@ -4427,11 +4586,33 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateFiber", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x10000) // fake fiber
+		// LPVOID CreateFiber(SIZE_T dwStackSize, LPFIBER_START_ROUTINE lpStartAddress,
+		//                    LPVOID lpParameter);
+		// ReactOS: dll/win32/kernel32/client/fiber.c
+		lpParam := ctx.Arg(2)
+		fiberMu.Lock()
+		addr := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+		fiberMap[addr] = lpParam
+		mem.Write64(addr, lpParam)
+		// Store start address at offset 8 for potential future dispatch
+		mem.Write64(addr+8, ctx.Arg(1))
+		fiberMu.Unlock()
+		ctx.SetReturn(addr)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateFiberEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x10000) // fake fiber
+		// LPVOID CreateFiberEx(SIZE_T dwStackCommitSize, SIZE_T dwStackReserveSize,
+		//                      DWORD dwFlags, LPFIBER_START_ROUTINE lpStartAddress,
+		//                      LPVOID lpParameter);
+		// ReactOS: dll/win32/kernel32/client/fiber.c
+		lpParam := ctx.Arg(4)
+		fiberMu.Lock()
+		addr := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
+		fiberMap[addr] = lpParam
+		mem.Write64(addr, lpParam)
+		mem.Write64(addr+8, ctx.Arg(3)) // lpStartAddress
+		fiberMu.Unlock()
+		ctx.SetReturn(addr)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateFile2", func(ctx *ntapi.TrapContext) uint32 {
@@ -4970,7 +5151,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteFiber", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // no-op
+		// VOID DeleteFiber(LPVOID lpFiber);
+		// ReactOS: dll/win32/kernel32/client/fiber.c
+		lpFiber := ctx.Arg(0)
+		fiberMu.Lock()
+		delete(fiberMap, lpFiber)
+		fiberMu.Unlock()
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteFileA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5160,7 +5346,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumResourceLanguagesA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		ctx.SetReturn(1) // TRUE - no callback invocation
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumResourceLanguagesExA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5172,7 +5358,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumResourceLanguagesW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		ctx.SetReturn(1) // TRUE - no callback invocation
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumResourceNamesA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5188,7 +5374,80 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumResourceNamesW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		// BOOL EnumResourceNamesW(HMODULE hModule, LPCWSTR lpType, ENUMRESNAMEPROCW lpEnumFunc, LONG_PTR lParam)
+		// Callback: BOOL CALLBACK EnumResNameProcW(HMODULE hModule, LPCWSTR lpType, LPWSTR lpName, LONG_PTR lParam)
+		hModule := ctx.Arg(0)
+		lpType := ctx.Arg(1)
+		lpEnumFunc := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+
+		if lpEnumFunc == 0 || hctx.SyncTrampoline == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		baseAddr, rsrcRVA := resolveResourceModule(hModule)
+		if rsrcRVA == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		rsrcBase := baseAddr + uint64(rsrcRVA)
+
+		typeID := uint32(lpType)
+		if lpType > 0xFFFF {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		typeDir := rsrcFindSubdir(rsrcBase, rsrcBase, typeID)
+		if typeDir == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		nameIDs := rsrcDirEntries(typeDir)
+		if len(nameIDs) == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		rw, okW := ctx.CPU.(ntapi.RegisterWriter)
+		rr, okR := ctx.CPU.(ntapi.RegisterReader)
+		if !okW || !okR {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		queue := make([]syncDispatch, len(nameIDs))
+		for i, nid := range nameIDs {
+			queue[i] = syncDispatch{
+				wndProc: lpEnumFunc,
+				hwnd:    baseAddr,        // RCX = hModule
+				msg:     lpType,          // RDX = lpType (MAKEINTRESOURCE)
+				wParam:  uint64(nid),     // R8  = lpName (MAKEINTRESOURCE)
+				lParam:  lParam,          // R9  = lParam
+			}
+		}
+
+		first := queue[0]
+		rest := queue[1:]
+
+		rsp := rr.ReadReg(4)
+		retAddr, _ := mem.Read64(rsp)
+		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			queue:               rest,
+			retAddr:             retAddr,
+			hwnd:                1,
+			returnWndProcResult: true,
+		})
+		mem.Write64(rsp, hctx.SyncTrampoline)
+
+		rw.WriteReg(1, first.hwnd)
+		rw.WriteReg(2, first.msg)
+		rw.WriteReg(8, first.wParam)
+		rw.WriteReg(9, first.lParam)
+		ctx.CPU.SetPC(first.wndProc)
+		ctx.ReturnOverridden = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumResourceTypesA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5204,7 +5463,68 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumResourceTypesW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		// BOOL EnumResourceTypesW(HMODULE hModule, ENUMRESTYPEPROCW lpEnumFunc, LONG_PTR lParam)
+		// Callback: BOOL CALLBACK EnumResTypeProcW(HMODULE hModule, LPWSTR lpType, LONG_PTR lParam)
+		hModule := ctx.Arg(0)
+		lpEnumFunc := ctx.Arg(1)
+		lParam := ctx.Arg(2)
+
+		if lpEnumFunc == 0 || hctx.SyncTrampoline == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		baseAddr, rsrcRVA := resolveResourceModule(hModule)
+		if rsrcRVA == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		rsrcBase := baseAddr + uint64(rsrcRVA)
+
+		typeIDs := rsrcDirEntries(rsrcBase)
+		if len(typeIDs) == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		rw, okW := ctx.CPU.(ntapi.RegisterWriter)
+		rr, okR := ctx.CPU.(ntapi.RegisterReader)
+		if !okW || !okR {
+			ctx.SetReturn(1)
+			return 0
+		}
+
+		// Build syncDispatch queue: callback(hModule, MAKEINTRESOURCE(typeID), lParam)
+		queue := make([]syncDispatch, len(typeIDs))
+		for i, tid := range typeIDs {
+			queue[i] = syncDispatch{
+				wndProc: lpEnumFunc,
+				hwnd:    baseAddr,      // RCX = hModule
+				msg:     uint64(tid),   // RDX = lpType (MAKEINTRESOURCE)
+				wParam:  lParam,        // R8  = lParam
+				lParam:  0,             // R9  = unused
+			}
+		}
+
+		first := queue[0]
+		rest := queue[1:]
+
+		rsp := rr.ReadReg(4)
+		retAddr, _ := mem.Read64(rsp)
+		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			queue:               rest,
+			retAddr:             retAddr,
+			hwnd:                1,
+			returnWndProcResult: true,
+		})
+		mem.Write64(rsp, hctx.SyncTrampoline)
+
+		rw.WriteReg(1, first.hwnd)
+		rw.WriteReg(2, first.msg)
+		rw.WriteReg(8, first.wParam)
+		rw.WriteReg(9, first.lParam)
+		ctx.CPU.SetPC(first.wndProc)
+		ctx.ReturnOverridden = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "EnumSystemCodePagesA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5556,15 +5876,116 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindResourceA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL
+		// HRSRC FindResourceA(HMODULE hModule, LPCSTR lpName, LPCSTR lpType)
+		hModule := ctx.Arg(0)
+		lpName := ctx.Arg(1)
+		lpType := ctx.Arg(2)
+
+		baseAddr, rsrcRVA := resolveResourceModule(hModule)
+		if rsrcRVA == 0 || peLoadRawResource == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		typeID := uint32(lpType)
+		if lpType > 0xFFFF {
+			typeID = 0
+		}
+		resID := uint32(lpName)
+		if lpName > 0xFFFF {
+			resID = 0
+		}
+		if typeID == 0 || resID == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		dataAddr, dataSize, ok := peLoadRawResource(baseAddr, rsrcRVA, typeID, resID)
+		if !ok || dataAddr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		h := hrsrcNext
+		hrsrcNext++
+		hrsrcTable[h] = hrsrcEntry{dataAddr: dataAddr, dataSize: dataSize}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindResourceExA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL
+		// HRSRC FindResourceExA(HMODULE hModule, LPCSTR lpType, LPCSTR lpName, WORD wLanguage)
+		hModule := ctx.Arg(0)
+		lpType := ctx.Arg(1)
+		lpName := ctx.Arg(2)
+		// wLanguage := uint16(ctx.Arg(3)) - ignored, we pick best lang internally
+
+		baseAddr, rsrcRVA := resolveResourceModule(hModule)
+		if rsrcRVA == 0 || peLoadRawResource == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		typeID := uint32(lpType)
+		if lpType > 0xFFFF {
+			typeID = 0
+		}
+		resID := uint32(lpName)
+		if lpName > 0xFFFF {
+			resID = 0
+		}
+		if typeID == 0 || resID == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		dataAddr, dataSize, ok := peLoadRawResource(baseAddr, rsrcRVA, typeID, resID)
+		if !ok || dataAddr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		h := hrsrcNext
+		hrsrcNext++
+		hrsrcTable[h] = hrsrcEntry{dataAddr: dataAddr, dataSize: dataSize}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindResourceExW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL
+		// HRSRC FindResourceExW(HMODULE hModule, LPCWSTR lpType, LPCWSTR lpName, WORD wLanguage)
+		hModule := ctx.Arg(0)
+		lpType := ctx.Arg(1)
+		lpName := ctx.Arg(2)
+		// wLanguage := uint16(ctx.Arg(3)) - ignored, we pick best lang internally
+
+		baseAddr, rsrcRVA := resolveResourceModule(hModule)
+		if rsrcRVA == 0 || peLoadRawResource == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		typeID := uint32(lpType)
+		if lpType > 0xFFFF {
+			typeID = 0
+		}
+		resID := uint32(lpName)
+		if lpName > 0xFFFF {
+			resID = 0
+		}
+		if typeID == 0 || resID == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		dataAddr, dataSize, ok := peLoadRawResource(baseAddr, rsrcRVA, typeID, resID)
+		if !ok || dataAddr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		h := hrsrcNext
+		hrsrcNext++
+		hrsrcTable[h] = hrsrcEntry{dataAddr: dataAddr, dataSize: dataSize}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindStringOrdinal", func(ctx *ntapi.TrapContext) uint32 {
@@ -7849,7 +8270,62 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetThreadContext", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		// BOOL GetThreadContext(HANDLE hThread, LPCONTEXT lpContext);
+		// ReactOS: dll/win32/kernel32/client/except.c → NtGetContextThread
+		// For the current-thread pseudo-handle we can fill in registers from
+		// the calling CPU state. For other threads we return TRUE with zeroed
+		// context (the thread's CPU is running on another goroutine and we
+		// cannot safely snapshot it).
+		hThread := ctx.Arg(0)
+		lpContext := ctx.Arg(1)
+		if lpContext == 0 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		}
+		const contextSize = 1232
+		// Zero-fill the CONTEXT first
+		for i := uint64(0); i < contextSize; i += 8 {
+			ctx.Mem.Write64Raw(lpContext+i, 0)
+		}
+		// Current-thread pseudo-handle (0xFFFFFFFFFFFFFFFE) or main TID
+		isCurrent := hThread == 0xFFFFFFFFFFFFFFFE
+		if !isCurrent {
+			th := handles.GetThread(ntapi.Handle(hThread))
+			if th != nil {
+				tid, _ := ctx.Mem.Read32(procState.TEBAddr + ntapi.TebThreadId)
+				if th.TID == int(tid) {
+					isCurrent = true
+				}
+			}
+		}
+		if isCurrent {
+			// CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER
+			ctx.Mem.Write32(lpContext+0x30, 0x10000B)
+			if rr, ok := ctx.CPU.(ntapi.RegisterReader); ok {
+				ctx.Mem.Write64(lpContext+0x78, rr.ReadReg(0))  // Rax
+				ctx.Mem.Write64(lpContext+0x80, rr.ReadReg(1))  // Rcx
+				ctx.Mem.Write64(lpContext+0x88, rr.ReadReg(2))  // Rdx
+				ctx.Mem.Write64(lpContext+0x90, rr.ReadReg(3))  // Rbx
+				ctx.Mem.Write64(lpContext+0x98, rr.ReadReg(4))  // Rsp
+				ctx.Mem.Write64(lpContext+0xA0, rr.ReadReg(5))  // Rbp
+				ctx.Mem.Write64(lpContext+0xA8, rr.ReadReg(6))  // Rsi
+				ctx.Mem.Write64(lpContext+0xB0, rr.ReadReg(7))  // Rdi
+				ctx.Mem.Write64(lpContext+0xB8, rr.ReadReg(8))  // R8
+				ctx.Mem.Write64(lpContext+0xC0, rr.ReadReg(9))  // R9
+				ctx.Mem.Write64(lpContext+0xC8, rr.ReadReg(10)) // R10
+				ctx.Mem.Write64(lpContext+0xD0, rr.ReadReg(11)) // R11
+				ctx.Mem.Write64(lpContext+0xD8, rr.ReadReg(12)) // R12
+				ctx.Mem.Write64(lpContext+0xE0, rr.ReadReg(13)) // R13
+				ctx.Mem.Write64(lpContext+0xE8, rr.ReadReg(14)) // R14
+				ctx.Mem.Write64(lpContext+0xF0, rr.ReadReg(15)) // R15
+			}
+			ctx.Mem.Write64(lpContext+0xF8, ctx.CPU.GetPC()) // Rip
+			ctx.Mem.Write64(lpContext+0x98, ctx.CPU.GetSP()) // Rsp (overwrite with canonical)
+			// SegCs and SegSs for long mode
+			ctx.Mem.Write16(lpContext+0x38, 0x33) // SegCs
+			ctx.Mem.Write16(lpContext+0x42, 0x2B) // SegSs
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetThreadDescription", func(ctx *ntapi.TrapContext) uint32 {
@@ -7913,6 +8389,18 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetThreadPriority", func(ctx *ntapi.TrapContext) uint32 {
+		// int GetThreadPriority(HANDLE hThread);
+		// ReactOS: dll/win32/kernel32/client/thread.c
+		hThread := ctx.Arg(0)
+		if hThread == 0xFFFFFFFFFFFFFFFE {
+			ctx.SetReturn(0) // THREAD_PRIORITY_NORMAL for current thread
+			return 0
+		}
+		th := handles.GetThread(ntapi.Handle(hThread))
+		if th != nil {
+			ctx.SetReturn(uint64(int64(th.Priority)))
+			return 0
+		}
 		ctx.SetReturn(0) // THREAD_PRIORITY_NORMAL
 		return 0
 	})
@@ -9612,7 +10100,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "QueueUserAPC", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// DWORD QueueUserAPC(PAPCFUNC pfnAPC, HANDLE hThread, ULONG_PTR dwData);
+		// ReactOS: dll/win32/kernel32/client/thread.c → NtQueueApcThread
+		// We do not dispatch APCs yet, but return success so callers proceed.
+		pfnAPC := ctx.Arg(0)
+		hThread := ctx.Arg(1)
+		dwData := ctx.Arg(2)
+		ravelog.Logf("[win32] QueueUserAPC(func=0x%x, thread=0x%x, data=0x%x) → stub TRUE\n", pfnAPC, hThread, dwData)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "QueueUserAPC2", func(ctx *ntapi.TrapContext) uint32 {
@@ -9620,7 +10115,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "QueueUserWorkItem", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL QueueUserWorkItem(LPTHREAD_START_ROUTINE Function,
+		//                        PVOID Context, ULONG Flags);
+		// ReactOS: dll/win32/kernel32/client/thread.c → RtlQueueWorkItem
+		function := ctx.Arg(0)
+		context := ctx.Arg(1)
+		flags := ctx.Arg(2)
+		ravelog.Logf("[win32] QueueUserWorkItem(func=0x%x, ctx=0x%x, flags=0x%x) → stub TRUE\n", function, context, flags)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "RaiseFailFastException", func(ctx *ntapi.TrapContext) uint32 {
@@ -10739,7 +11241,23 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ResumeThread", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // prior suspend count
+		// DWORD ResumeThread(HANDLE hThread);
+		// ReactOS: dll/win32/kernel32/client/thread.c → NtResumeThread
+		// Returns previous suspend count. We don't track true suspension, so
+		// return 1 (was suspended, now resumed) for real handles, 0 for
+		// the current-thread pseudo-handle.
+		hThread := ctx.Arg(0)
+		if hThread == 0xFFFFFFFFFFFFFFFE {
+			ctx.SetReturn(0) // current thread was not suspended
+			return 0
+		}
+		th := handles.GetThread(ntapi.Handle(hThread))
+		if th == nil {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0xFFFFFFFF) // (DWORD)-1 on error
+			return 0
+		}
+		ctx.SetReturn(1) // prior suspend count = 1
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "RtlAddFunctionTable", func(ctx *ntapi.TrapContext) uint32 {
@@ -11481,7 +11999,75 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadContext", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		// BOOL SetThreadContext(HANDLE hThread, const CONTEXT *lpContext);
+		// ReactOS: dll/win32/kernel32/client/except.c → NtSetContextThread
+		// For the current-thread pseudo-handle, apply integer registers from
+		// the CONTEXT structure. For other threads we accept but don't apply
+		// (their CPU runs on another goroutine).
+		hThread := ctx.Arg(0)
+		lpContext := ctx.Arg(1)
+		if lpContext == 0 {
+			ctx.SetReturn(0) // FALSE
+			return 0
+		}
+		isCurrent := hThread == 0xFFFFFFFFFFFFFFFE
+		if !isCurrent {
+			th := handles.GetThread(ntapi.Handle(hThread))
+			if th != nil {
+				tid, _ := ctx.Mem.Read32(procState.TEBAddr + ntapi.TebThreadId)
+				if th.TID == int(tid) {
+					isCurrent = true
+				}
+			}
+		}
+		if isCurrent {
+			flags, _ := ctx.Mem.Read32(lpContext + 0x30)
+			if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok && flags&0x02 != 0 {
+				// CONTEXT_INTEGER - restore GPRs
+				rax, _ := ctx.Mem.Read64(lpContext + 0x78)
+				rw.WriteReg(0, rax)
+				rcx, _ := ctx.Mem.Read64(lpContext + 0x80)
+				rw.WriteReg(1, rcx)
+				rdx, _ := ctx.Mem.Read64(lpContext + 0x88)
+				rw.WriteReg(2, rdx)
+				rbx, _ := ctx.Mem.Read64(lpContext + 0x90)
+				rw.WriteReg(3, rbx)
+				rbp, _ := ctx.Mem.Read64(lpContext + 0xA0)
+				rw.WriteReg(5, rbp)
+				rsi, _ := ctx.Mem.Read64(lpContext + 0xA8)
+				rw.WriteReg(6, rsi)
+				rdi, _ := ctx.Mem.Read64(lpContext + 0xB0)
+				rw.WriteReg(7, rdi)
+				r8, _ := ctx.Mem.Read64(lpContext + 0xB8)
+				rw.WriteReg(8, r8)
+				r9, _ := ctx.Mem.Read64(lpContext + 0xC0)
+				rw.WriteReg(9, r9)
+				r10, _ := ctx.Mem.Read64(lpContext + 0xC8)
+				rw.WriteReg(10, r10)
+				r11, _ := ctx.Mem.Read64(lpContext + 0xD0)
+				rw.WriteReg(11, r11)
+				r12, _ := ctx.Mem.Read64(lpContext + 0xD8)
+				rw.WriteReg(12, r12)
+				r13, _ := ctx.Mem.Read64(lpContext + 0xE0)
+				rw.WriteReg(13, r13)
+				r14, _ := ctx.Mem.Read64(lpContext + 0xE8)
+				rw.WriteReg(14, r14)
+				r15, _ := ctx.Mem.Read64(lpContext + 0xF0)
+				rw.WriteReg(15, r15)
+			}
+			if flags&0x01 != 0 {
+				// CONTEXT_CONTROL - restore RIP, RSP
+				rip, _ := ctx.Mem.Read64(lpContext + 0xF8)
+				if rip != 0 {
+					ctx.CPU.SetPC(rip)
+				}
+				rsp, _ := ctx.Mem.Read64(lpContext + 0x98)
+				if rsp != 0 {
+					ctx.CPU.SetSP(rsp)
+				}
+			}
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadDescription", func(ctx *ntapi.TrapContext) uint32 {
