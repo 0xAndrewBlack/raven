@@ -2439,6 +2439,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 									clParam := uint64(uint16(clientX)) | (uint64(uint16(clientY)) << 16)
 									dropHit := false
 									if hctx.OpenMenuIdx >= 0 {
+										ravelog.Logf("[click] dropdown check: OpenMenuIdx=%d me.X=%d me.Y=%d clientTop=%d\n", hctx.OpenMenuIdx, me.X, me.Y, clientTop)
 										// Check if click is inside the open dropdown
 										if menuH, ok2 := hwndMenuBar[hctx.MainHWND]; ok2 {
 											if md, ok3 := menus[menuH]; ok3 {
@@ -2472,6 +2473,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 																subItems = sub.items
 															}
 														}
+														ravelog.Logf("[click] dropdown item i=%d subItems=%d dropX=%d dropY=%d\n", i, len(subItems), x, clientTop)
 														if len(subItems) > 0 {
 														dropX := x
 														dropY := clientTop
@@ -2481,9 +2483,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 															itemIdx := int(me.Y-dropY) / 20
 															if itemIdx >= 0 && itemIdx < len(subItems) {
 																si := subItems[itemIdx]
-																if si.flags&0x0800 == 0 {
-																	hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, 0x0111, si.id, 0})
+																if si.flags&0x0800 != 0 {
+																	// Separator - keep menu open
+																	dropHit = true
+																	break
 																}
+																hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, 0x0111, si.id, 0})
 															}
 															hctx.OpenMenuIdx = -1
 															queuePaint(hctx.MainHWND)
