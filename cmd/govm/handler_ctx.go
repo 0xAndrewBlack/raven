@@ -126,6 +126,21 @@ type freeBlock struct {
 	blockSize uint64
 }
 
+type registeredClassInfo struct {
+	Style      uint32
+	WndProc    uint64
+	ClsExtra   int32
+	WndExtra   int32
+	HInstance  uint64
+	HIcon      uint64
+	HCursor    uint64
+	HbrBG      uint64
+	MenuName   uint64
+	ClassName  string
+	HIconSm   uint64
+	Atom       uint16
+}
+
 // ─── HandlerCtx bridges closure-captured state to extracted DLL files ───────
 
 type HandlerCtx struct {
@@ -173,6 +188,7 @@ type HandlerCtx struct {
 	ClassNameAtom        map[string]uint16
 	ClassMenuHandle      map[uint16]uint64
 	ClassBrush           map[uint16]uint32
+	ClassInfo            map[uint16]*registeredClassInfo
 	HwndClassAtom        map[uint64]uint16
 	TimerMap             map[uint64]*win32Timer
 	WindowLongPtr        map[uint64]map[int32]uint64

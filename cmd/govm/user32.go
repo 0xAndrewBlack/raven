@@ -196,20 +196,31 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		a := hctx.NextAtom
 		hctx.NextAtom++
 		if pClass != 0 {
+			style, _ := mem.Read32(pClass)
 			wndProc, _ := mem.Read64(pClass + 8)
-			hctx.AtomWndProc[a] = wndProc
-			// hbrBackground at offset 48 (same as WNDCLASSEXW: style+pad and cbSize+style both = 8 bytes)
+			cbClsExtra, _ := mem.Read32(pClass + 16)
+			cbWndExtra, _ := mem.Read32(pClass + 20)
+			hInst, _ := mem.Read64(pClass + 24)
+			hIcon, _ := mem.Read64(pClass + 32)
+			hCursor, _ := mem.Read64(pClass + 40)
 			hBrush, _ := mem.Read64(pClass + 48)
+			lpMenuName, _ := mem.Read64(pClass + 56)
+			lpName, _ := mem.Read64(pClass + 64)
+			hctx.AtomWndProc[a] = wndProc
 			if hBrush > 0 && hBrush <= 30 {
 				hctx.ClassBrush[a] = uint32(hBrush)
 			}
-			lpMenuName, _ := mem.Read64(pClass + 56)
-			lpName, _ := mem.Read64(pClass + 64)
 			name := readGuestUTF16(lpName)
 			if name != "" {
 				hctx.ClassNameAtom[name] = a
 			}
-			// Load menu from lpszMenuName (same as RegisterClassExW)
+			hctx.ClassInfo[a] = &registeredClassInfo{
+				Style: style, WndProc: wndProc,
+				ClsExtra: int32(cbClsExtra), WndExtra: int32(cbWndExtra),
+				HInstance: hInst, HIcon: hIcon, HCursor: hCursor,
+				HbrBG: hBrush, MenuName: lpMenuName, ClassName: name,
+				Atom: a,
+			}
 			if lpMenuName != 0 && mainModule != nil {
 				var menuID uint32
 				if lpMenuName < 0x10000 {
@@ -240,15 +251,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		a := hctx.NextAtom
 		hctx.NextAtom++
 		if pClass != 0 {
+			style, _ := mem.Read32(pClass + 4)
 			wndProc, _ := mem.Read64(pClass + 8)
-			hctx.AtomWndProc[a] = wndProc
-			// hbrBackground at offset 48 (cbSize+style+wndProc+cbClsExtra+cbWndExtra+hInstance+hIcon+hCursor)
+			cbClsExtra, _ := mem.Read32(pClass + 16)
+			cbWndExtra, _ := mem.Read32(pClass + 20)
+			hInst, _ := mem.Read64(pClass + 24)
+			hIcon, _ := mem.Read64(pClass + 32)
+			hCursor, _ := mem.Read64(pClass + 40)
 			hBrush, _ := mem.Read64(pClass + 48)
+			lpszMenuName, _ := mem.Read64(pClass + 56)
+			lpName, _ := mem.Read64(pClass + 64)
+			hIconSm, _ := mem.Read64(pClass + 72)
+			hctx.AtomWndProc[a] = wndProc
 			if hBrush > 0 && hBrush <= 30 {
 				hctx.ClassBrush[a] = uint32(hBrush)
 			}
-			lpszMenuName, _ := mem.Read64(pClass + 56)
-			lpName, _ := mem.Read64(pClass + 64)
 			var name string
 			if lpName != 0 && lpName < 0x10000 {
 				name = fmt.Sprintf("atom:0x%x", lpName)
@@ -258,7 +275,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			if name != "" {
 				hctx.ClassNameAtom[name] = a
 			}
-			// Load menu from lpszMenuName
+			hctx.ClassInfo[a] = &registeredClassInfo{
+				Style: style, WndProc: wndProc,
+				ClsExtra: int32(cbClsExtra), WndExtra: int32(cbWndExtra),
+				HInstance: hInst, HIcon: hIcon, HCursor: hCursor,
+				HbrBG: hBrush, MenuName: lpszMenuName, ClassName: name,
+				HIconSm: hIconSm, Atom: a,
+			}
 			if lpszMenuName != 0 && mainModule != nil {
 				var menuID uint32
 				if lpszMenuName < 0x10000 {
@@ -274,7 +297,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						h := gdiAlloc()
 						menus[h] = md
 						hctx.ClassMenuHandle[a] = h
-					} else {
 					}
 				}
 			}
@@ -724,6 +746,19 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "LoadIconW", func(ctx *ntapi.TrapContext) uint32 {
+		hInst := ctx.Arg(0)
+		nameArg := ctx.Arg(1)
+		if hInst == 0 && nameArg >= 32512 && nameArg <= 32522 {
+			ctx.SetReturn(0x00020000 + nameArg) // system icon
+			return 0
+		}
+		if nameArg < 0x10000 && mainModule != nil && (hInst == mainModule.BaseAddr || hInst == 0) {
+			_, _, ok := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 14, uint32(nameArg))
+			if ok {
+				ctx.SetReturn(0x00020000 + nameArg)
+				return 0
+			}
+		}
 		ctx.SetReturn(0x00020001) // dummy icon handle
 		return 0
 	})
@@ -6440,9 +6475,36 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	for _, fn := range []string{"GetWindowModuleFileName", "GetWindowModuleFileNameA", "GetWindowModuleFileNameW"} {
 		fn := fn
-		_ = fn
+		isW := fn == "GetWindowModuleFileNameW"
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			pBuf := ctx.Arg(1)
+			nMax := int(ctx.Arg(2))
+			path := hctx.ImagePath
+			if pBuf != 0 && nMax > 0 {
+				if isW {
+					rs := []rune(path)
+					if len(rs) >= nMax {
+						rs = rs[:nMax-1]
+					}
+					for i, r := range rs {
+						mem.Write16(pBuf+uint64(i)*2, uint16(r))
+					}
+					mem.Write16(pBuf+uint64(len(rs))*2, 0)
+					ctx.SetReturn(uint64(len(rs)))
+				} else {
+					bs := []byte(path)
+					if len(bs) >= nMax {
+						bs = bs[:nMax-1]
+					}
+					for i, b := range bs {
+						mem.Write8(pBuf+uint64(i), b)
+					}
+					mem.Write8(pBuf+uint64(len(bs)), 0)
+					ctx.SetReturn(uint64(len(bs)))
+				}
+			} else {
+				ctx.SetReturn(0)
+			}
 			return 0
 		})
 	}
@@ -6469,15 +6531,327 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
-	for _, fn := range []string{"GetClassInfoA", "GetClassInfoW", "GetClassInfoExA", "GetClassInfoExW"} {
+	// ─── GetClassInfo/GetClassLong ─────────────────────────────────────
+	d.RegisterAutoStubHandler(user32, "GetClassInfoExW", func(ctx *ntapi.TrapContext) uint32 {
+		lpClassName := ctx.Arg(1)
+		pOut := ctx.Arg(2) // WNDCLASSEXW
+		var atom uint16
+		if lpClassName < 0x10000 {
+			atom = uint16(lpClassName)
+		} else {
+			name := readGuestUTF16(lpClassName)
+			atom = hctx.ClassNameAtom[name]
+		}
+		ci := hctx.ClassInfo[atom]
+		if ci == nil {
+			ctx.SetReturn(0) // class not found
+			return 0
+		}
+		if pOut != 0 {
+			mem.Write32(pOut, 80)                   // cbSize
+			mem.Write32(pOut+4, ci.Style)            // style
+			mem.Write64(pOut+8, ci.WndProc)          // lpfnWndProc
+			mem.Write32(pOut+16, uint32(ci.ClsExtra)) // cbClsExtra
+			mem.Write32(pOut+20, uint32(ci.WndExtra)) // cbWndExtra
+			mem.Write64(pOut+24, ci.HInstance)         // hInstance
+			mem.Write64(pOut+32, ci.HIcon)             // hIcon
+			mem.Write64(pOut+40, ci.HCursor)           // hCursor
+			mem.Write64(pOut+48, ci.HbrBG)             // hbrBackground
+			mem.Write64(pOut+56, ci.MenuName)          // lpszMenuName
+			mem.Write64(pOut+64, 0)                    // lpszClassName (pointer; set to 0)
+			mem.Write64(pOut+72, ci.HIconSm)           // hIconSm
+		}
+		ctx.SetReturn(uint64(atom))
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "GetClassInfoExA", func(ctx *ntapi.TrapContext) uint32 {
+		lpClassName := ctx.Arg(1)
+		pOut := ctx.Arg(2)
+		var atom uint16
+		if lpClassName < 0x10000 {
+			atom = uint16(lpClassName)
+		} else {
+			name := readGuestString(lpClassName)
+			atom = hctx.ClassNameAtom[name]
+		}
+		ci := hctx.ClassInfo[atom]
+		if ci == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if pOut != 0 {
+			mem.Write32(pOut, 80)
+			mem.Write32(pOut+4, ci.Style)
+			mem.Write64(pOut+8, ci.WndProc)
+			mem.Write32(pOut+16, uint32(ci.ClsExtra))
+			mem.Write32(pOut+20, uint32(ci.WndExtra))
+			mem.Write64(pOut+24, ci.HInstance)
+			mem.Write64(pOut+32, ci.HIcon)
+			mem.Write64(pOut+40, ci.HCursor)
+			mem.Write64(pOut+48, ci.HbrBG)
+			mem.Write64(pOut+56, ci.MenuName)
+			mem.Write64(pOut+64, 0)
+			mem.Write64(pOut+72, ci.HIconSm)
+		}
+		ctx.SetReturn(uint64(atom))
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "GetClassInfoW", func(ctx *ntapi.TrapContext) uint32 {
+		lpClassName := ctx.Arg(1)
+		pOut := ctx.Arg(2) // WNDCLASSW (no cbSize/hIconSm)
+		var atom uint16
+		if lpClassName < 0x10000 {
+			atom = uint16(lpClassName)
+		} else {
+			name := readGuestUTF16(lpClassName)
+			atom = hctx.ClassNameAtom[name]
+		}
+		ci := hctx.ClassInfo[atom]
+		if ci == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if pOut != 0 {
+			mem.Write32(pOut, ci.Style)               // style
+			mem.Write64(pOut+8, ci.WndProc)            // lpfnWndProc
+			mem.Write32(pOut+16, uint32(ci.ClsExtra))  // cbClsExtra
+			mem.Write32(pOut+20, uint32(ci.WndExtra))  // cbWndExtra
+			mem.Write64(pOut+24, ci.HInstance)
+			mem.Write64(pOut+32, ci.HIcon)
+			mem.Write64(pOut+40, ci.HCursor)
+			mem.Write64(pOut+48, ci.HbrBG)
+			mem.Write64(pOut+56, ci.MenuName)
+			mem.Write64(pOut+64, 0)
+		}
+		ctx.SetReturn(uint64(atom))
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "GetClassInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		lpClassName := ctx.Arg(1)
+		pOut := ctx.Arg(2)
+		var atom uint16
+		if lpClassName < 0x10000 {
+			atom = uint16(lpClassName)
+		} else {
+			name := readGuestString(lpClassName)
+			atom = hctx.ClassNameAtom[name]
+		}
+		ci := hctx.ClassInfo[atom]
+		if ci == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if pOut != 0 {
+			mem.Write32(pOut, ci.Style)
+			mem.Write64(pOut+8, ci.WndProc)
+			mem.Write32(pOut+16, uint32(ci.ClsExtra))
+			mem.Write32(pOut+20, uint32(ci.WndExtra))
+			mem.Write64(pOut+24, ci.HInstance)
+			mem.Write64(pOut+32, ci.HIcon)
+			mem.Write64(pOut+40, ci.HCursor)
+			mem.Write64(pOut+48, ci.HbrBG)
+			mem.Write64(pOut+56, ci.MenuName)
+			mem.Write64(pOut+64, 0)
+		}
+		ctx.SetReturn(uint64(atom))
+		return 0
+	})
+	// GetClassLongPtrW/A - ReactOS: NtUserGetClassLongPtr
+	d.RegisterAutoStubHandler(user32, "GetClassLongPtrW", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		idx := int32(ctx.Arg(1))
+		atom := hctx.HwndClassAtom[hwnd]
+		ci := hctx.ClassInfo[atom]
+		if ci == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var val uint64
+		switch idx {
+		case -26: // GCL_STYLE
+			val = uint64(ci.Style)
+		case -24: // GCL_WNDPROC / GCLP_WNDPROC
+			val = ci.WndProc
+		case -20: // GCL_CBCLSEXTRA
+			val = uint64(uint32(ci.ClsExtra))
+		case -18: // GCL_CBWNDEXTRA
+			val = uint64(uint32(ci.WndExtra))
+		case -16: // GCL_HMODULE / GCLP_HMODULE
+			val = ci.HInstance
+		case -14: // GCL_HICON / GCLP_HICON
+			val = ci.HIcon
+		case -12: // GCL_HCURSOR / GCLP_HCURSOR
+			val = ci.HCursor
+		case -10: // GCL_HBRBACKGROUND / GCLP_HBRBACKGROUND
+			val = ci.HbrBG
+		case -8: // GCL_MENUNAME / GCLP_MENUNAME
+			val = ci.MenuName
+		case -34: // GCL_HICONSM / GCLP_HICONSM
+			val = ci.HIconSm
+		}
+		ctx.SetReturn(val)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "GetClassLongPtrA", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		idx := int32(ctx.Arg(1))
+		atom := hctx.HwndClassAtom[hwnd]
+		ci := hctx.ClassInfo[atom]
+		if ci == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var val uint64
+		switch idx {
+		case -26:
+			val = uint64(ci.Style)
+		case -24:
+			val = ci.WndProc
+		case -20:
+			val = uint64(uint32(ci.ClsExtra))
+		case -18:
+			val = uint64(uint32(ci.WndExtra))
+		case -16:
+			val = ci.HInstance
+		case -14:
+			val = ci.HIcon
+		case -12:
+			val = ci.HCursor
+		case -10:
+			val = ci.HbrBG
+		case -8:
+			val = ci.MenuName
+		case -34:
+			val = ci.HIconSm
+		}
+		ctx.SetReturn(val)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "SetClassLongPtrW", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		idx := int32(ctx.Arg(1))
+		newVal := ctx.Arg(2)
+		atom := hctx.HwndClassAtom[hwnd]
+		ci := hctx.ClassInfo[atom]
+		if ci == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var old uint64
+		switch idx {
+		case -26:
+			old = uint64(ci.Style)
+			ci.Style = uint32(newVal)
+		case -24:
+			old = ci.WndProc
+			ci.WndProc = newVal
+			hctx.AtomWndProc[atom] = newVal
+		case -14:
+			old = ci.HIcon
+			ci.HIcon = newVal
+		case -12:
+			old = ci.HCursor
+			ci.HCursor = newVal
+		case -10:
+			old = ci.HbrBG
+			ci.HbrBG = newVal
+		case -34:
+			old = ci.HIconSm
+			ci.HIconSm = newVal
+		}
+		ctx.SetReturn(old)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "SetClassLongPtrA", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		idx := int32(ctx.Arg(1))
+		newVal := ctx.Arg(2)
+		atom := hctx.HwndClassAtom[hwnd]
+		ci := hctx.ClassInfo[atom]
+		if ci == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var old uint64
+		switch idx {
+		case -26:
+			old = uint64(ci.Style)
+			ci.Style = uint32(newVal)
+		case -24:
+			old = ci.WndProc
+			ci.WndProc = newVal
+			hctx.AtomWndProc[atom] = newVal
+		case -14:
+			old = ci.HIcon
+			ci.HIcon = newVal
+		case -12:
+			old = ci.HCursor
+			ci.HCursor = newVal
+		case -10:
+			old = ci.HbrBG
+			ci.HbrBG = newVal
+		case -34:
+			old = ci.HIconSm
+			ci.HIconSm = newVal
+		}
+		ctx.SetReturn(old)
+		return 0
+	})
+	for _, fn := range []string{"GetClassLongA", "GetClassLongW"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			hwnd := ctx.Arg(0)
+			idx := int32(ctx.Arg(1))
+			atom := hctx.HwndClassAtom[hwnd]
+			ci := hctx.ClassInfo[atom]
+			if ci == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			var val uint64
+			switch idx {
+			case -26:
+				val = uint64(ci.Style)
+			case -24:
+				val = ci.WndProc
+			case -20:
+				val = uint64(uint32(ci.ClsExtra))
+			case -18:
+				val = uint64(uint32(ci.WndExtra))
+			}
+			ctx.SetReturn(val)
 			return 0
 		})
 	}
-	for _, fn := range []string{"GetClassLongA", "GetClassLongW", "SetClassLongA", "SetClassLongW", "GetClassWord", "SetClassWord"} {
+	for _, fn := range []string{"SetClassLongA", "SetClassLongW"} {
+		fn := fn
+		_ = fn
+		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			idx := int32(ctx.Arg(1))
+			newVal := ctx.Arg(2)
+			atom := hctx.HwndClassAtom[hwnd]
+			ci := hctx.ClassInfo[atom]
+			if ci == nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			var old uint64
+			switch idx {
+			case -26:
+				old = uint64(ci.Style)
+				ci.Style = uint32(newVal)
+			case -24:
+				old = ci.WndProc
+				ci.WndProc = newVal
+				hctx.AtomWndProc[atom] = newVal
+			}
+			ctx.SetReturn(old)
+			return 0
+		})
+	}
+	for _, fn := range []string{"GetClassWord", "SetClassWord"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
@@ -6643,15 +7017,56 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// Properties
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "SetPropA", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		lpString := ctx.Arg(1)
+		hData := ctx.Arg(2)
+		var name string
+		if lpString < 0x10000 {
+			name = fmt.Sprintf("atom:%d", lpString)
+		} else {
+			name = readGuestString(lpString)
+		}
+		m := windowProps[hwnd]
+		if m == nil {
+			m = make(map[string]uint64)
+			windowProps[hwnd] = m
+		}
+		m[name] = hData
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetPropA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		lpString := ctx.Arg(1)
+		var name string
+		if lpString < 0x10000 {
+			name = fmt.Sprintf("atom:%d", lpString)
+		} else {
+			name = readGuestString(lpString)
+		}
+		if m, ok := windowProps[hwnd]; ok {
+			ctx.SetReturn(m[name])
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "RemovePropA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		lpString := ctx.Arg(1)
+		var name string
+		if lpString < 0x10000 {
+			name = fmt.Sprintf("atom:%d", lpString)
+		} else {
+			name = readGuestString(lpString)
+		}
+		if m, ok := windowProps[hwnd]; ok {
+			old := m[name]
+			delete(m, name)
+			ctx.SetReturn(old)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	for _, fn := range []string{"EnumPropsA", "EnumPropsW", "EnumPropsExA", "EnumPropsExW"} {
@@ -7183,15 +7598,129 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		})
 	}
-	for _, fn := range []string{"CreateCursor", "CreateIcon", "CreateIconFromResource",
-		"CreateIconFromResourceEx", "LoadBitmapA", "LoadIconA", "LoadImageA",
-		"CopyImage", "LookupIconIdFromDirectory", "LookupIconIdFromDirectoryEx",
-		"PrivateExtractIconExA", "PrivateExtractIconExW",
+	// ─── Icon/Image/Cursor loading ───────────────────────────────────────
+	d.RegisterAutoStubHandler(user32, "LoadIconA", func(ctx *ntapi.TrapContext) uint32 {
+		// Same logic as LoadIconW - return dummy icon handle
+		hInst := ctx.Arg(0)
+		nameArg := ctx.Arg(1)
+		if hInst == 0 && nameArg >= 32512 && nameArg <= 32522 {
+			// System icon (IDI_APPLICATION etc.)
+			ctx.SetReturn(0x00020000 + nameArg)
+			return 0
+		}
+		// App icon from PE resource
+		if nameArg < 0x10000 && mainModule != nil && (hInst == mainModule.BaseAddr || hInst == 0) {
+			_, _, ok := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 14 /*RT_GROUP_ICON*/, uint32(nameArg))
+			if ok {
+				ctx.SetReturn(0x00020000 + nameArg)
+				return 0
+			}
+		}
+		ctx.SetReturn(0x00020001) // dummy icon
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "LoadImageA", func(ctx *ntapi.TrapContext) uint32 {
+		hInst := ctx.Arg(0)
+		nameArg := ctx.Arg(1)
+		imgType := ctx.Arg(2)
+		// IMAGE_BITMAP=0: try to load from PE resource (same as LoadImageW)
+		if imgType == 0 && nameArg < 0x10000 && mainModule != nil &&
+			(hInst == mainModule.BaseAddr || hInst == 0) {
+			resID := uint32(nameArg)
+			addr, sz, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2 /*RT_BITMAP*/, resID)
+			if ok2 {
+				slots := decodeDIBSlots(addr, sz, 0, 0)
+				h := hctx.NextBitmapHandle
+				hctx.NextBitmapHandle += 2
+				bd := &bitmapHandleData{slots: slots}
+				if len(slots) > 0 {
+					bd.w = len(slots[0])
+				}
+				bitmapHandles[h] = bd
+				ravelog.Logf("[loadimage] LoadImageA IMAGE_BITMAP resID=0x%x → handle=0x%x\n", resID, h)
+				ctx.SetReturn(h)
+				return 0
+			}
+		}
+		// IMAGE_ICON=1: return dummy icon handle
+		if imgType == 1 {
+			if nameArg < 0x10000 {
+				ctx.SetReturn(0x00020000 + nameArg)
+			} else {
+				ctx.SetReturn(0x00020001)
+			}
+			return 0
+		}
+		// IMAGE_CURSOR=2: return dummy cursor handle
+		if imgType == 2 {
+			ctx.SetReturn(0x00010001)
+			return 0
+		}
+		ctx.SetReturn(0x00030001) // fallback dummy
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "LoadBitmapA", func(ctx *ntapi.TrapContext) uint32 {
+		hInst := ctx.Arg(0)
+		nameArg := ctx.Arg(1)
+		if nameArg < 0x10000 && mainModule != nil && (hInst == mainModule.BaseAddr || hInst == 0) {
+			resID := uint32(nameArg)
+			addr, sz, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2, resID)
+			if ok2 {
+				slots := decodeDIBSlots(addr, sz, 0, 0)
+				h := hctx.NextBitmapHandle
+				hctx.NextBitmapHandle += 2
+				bitmapHandles[h] = &bitmapHandleData{slots: slots, w: len(slots[0])}
+				ctx.SetReturn(h)
+				return 0
+			}
+		}
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "CopyImage", func(ctx *ntapi.TrapContext) uint32 {
+		h := ctx.Arg(0)
+		ctx.SetReturn(h) // return same handle (shallow copy)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "CreateIconFromResourceEx", func(ctx *ntapi.TrapContext) uint32 {
+		// Return dummy icon handle
+		ctx.SetReturn(0x00020002)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "CreateIconFromResource", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0x00020002)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "CreateCursor", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0x00010002) // dummy cursor
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "CreateIcon", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0x00020003) // dummy icon
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "LookupIconIdFromDirectory", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // return first icon entry
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "LookupIconIdFromDirectoryEx", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "DestroyIcon", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "DestroyCursor", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	for _, fn := range []string{"PrivateExtractIconExA", "PrivateExtractIconExW",
 		"PrivateExtractIconsA", "PrivateExtractIconsW"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			ctx.SetReturn(0) // no icons extracted
 			return 0
 		})
 	}

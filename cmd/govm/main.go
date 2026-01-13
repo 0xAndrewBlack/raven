@@ -2176,6 +2176,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	hctx.ClassNameAtom = make(map[string]uint16)   // class name → atom (for lpClassName string lookups)
 	hctx.ClassMenuHandle = make(map[uint16]uint64) // class atom → loaded menu handle
 	hctx.ClassBrush = make(map[uint16]uint32)      // class atom → hbrBackground (COLOR_xxx+1 index)
+	hctx.ClassInfo = make(map[uint16]*registeredClassInfo) // class atom → full class info
 	hctx.HwndClassAtom = make(map[uint64]uint16)   // HWND → class atom (for brush lookup)
 
 	// Built-in window class tracking for Edit, Static, Button, etc.
