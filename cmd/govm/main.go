@@ -2485,11 +2485,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				continue
 			}
 			tw := int32(len([]rune(label)))*8 + 12
-			if i == hctx.OpenMenuIdx && len(item.submenu) > 0 {
+			if i == hctx.OpenMenuIdx {
+				// Resolve submenu items dynamically (handles late-binding via MF_POPUP)
+				subItems := item.submenu
+				if len(subItems) == 0 && item.flags&0x10 != 0 {
+					if sub, ok3 := hctx.Menus[item.id]; ok3 {
+						subItems = sub.items
+					}
+				}
+				if len(subItems) > 0 {
 				dropX := x
 				dropY := clientTop
 				dropW := int32(200)
-				dropH := int32(len(item.submenu)) * 20
+				dropH := int32(len(subItems)) * 20
 				// Shadow
 				wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
 				wlWindow.DrawRectAbs(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
@@ -2500,7 +2508,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wlWindow.DrawRectAbs(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
 				wlWindow.DrawRectAbs(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
 				wlWindow.DrawRectAbs(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
-				for j, si := range item.submenu {
+				for j, si := range subItems {
 					iy := dropY + int32(j)*20
 					if si.flags&0x0800 != 0 {
 						wlWindow.DrawRectAbs(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
@@ -2514,6 +2522,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				break
+				}
 			}
 			x += tw
 		}

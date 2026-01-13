@@ -2465,15 +2465,22 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 														continue
 													}
 													tw := int32(len([]rune(label)))*8 + 12
-													if i == hctx.OpenMenuIdx && len(item.submenu) > 0 {
+													if i == hctx.OpenMenuIdx {
+														subItems := item.submenu
+														if len(subItems) == 0 && item.flags&0x10 != 0 {
+															if sub, ok4 := menus[item.id]; ok4 {
+																subItems = sub.items
+															}
+														}
+														if len(subItems) > 0 {
 														dropX := x
 														dropY := clientTop
 														dropW := int32(200)
-														dropH := int32(len(item.submenu)) * 20
+														dropH := int32(len(subItems)) * 20
 														if me.X >= dropX && me.X < dropX+dropW && me.Y >= dropY && me.Y < dropY+dropH {
 															itemIdx := int(me.Y-dropY) / 20
-															if itemIdx >= 0 && itemIdx < len(item.submenu) {
-																si := item.submenu[itemIdx]
+															if itemIdx >= 0 && itemIdx < len(subItems) {
+																si := subItems[itemIdx]
 																if si.flags&0x0800 == 0 {
 																	hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, 0x0111, si.id, 0})
 																}
@@ -2482,6 +2489,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 															queuePaint(hctx.MainHWND)
 															dropHit = true
 															break
+														}
 														}
 													}
 													x += tw
@@ -4244,10 +4252,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		item := menuItem{flags: flags, id: idOrSubmenu}
-		const mfString = 0x0000
 		const mfSeparator = 0x0800
+		const mfPopup = 0x0010
 		if flags&mfSeparator == 0 && lpNewItem != 0 {
 			item.text = readGuestUTF16(lpNewItem)
+		}
+		if flags&mfPopup != 0 {
+			if sub, ok2 := menus[idOrSubmenu]; ok2 {
+				item.submenu = sub.items
+			}
 		}
 		m.items = append(m.items, item)
 		ctx.SetReturn(1)
@@ -4265,8 +4278,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		item := menuItem{flags: flags, id: idOrSubmenu}
 		const mfSeparator = 0x0800
+		const mfPopup = 0x0010
 		if flags&mfSeparator == 0 && lpNewItem != 0 {
 			item.text = readGuestUTF16(lpNewItem)
+		}
+		if flags&mfPopup != 0 {
+			if sub, ok2 := menus[idOrSubmenu]; ok2 {
+				item.submenu = sub.items
+			}
 		}
 		m.items = append(m.items, item)
 		ctx.SetReturn(1)
@@ -4303,6 +4322,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				hSub, _ := mem.Read64(lpmii + 24)
 				item.id = hSub
 				item.flags |= 0x10 // MF_POPUP
+				if sub, ok2 := menus[hSub]; ok2 {
+					item.submenu = sub.items
+				}
 			}
 		}
 		m.items = append(m.items, item)
@@ -4325,8 +4347,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		uType := ctx.Arg(3)
 		text := readGuestString(textPtr)
 		caption := readGuestString(captionPtr)
-		ravelog.Logf("[user32] MessageBoxA: [%s] %s\n", caption, text)
+		ravelog.Logf("[user32] MessageBoxA: [%s] %s type=0x%x\n", caption, text, uType)
+
 		const (
+			MB_OK          = 0
 			MB_OKCANCEL    = 1
 			MB_YESNO       = 4
 			MB_YESNOCANCEL = 3
@@ -4334,6 +4358,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			IDYES          = 6
 			IDCANCEL       = 2
 		)
+
+		// Show visual overlay dialog
+		hctx.DialogActive = true
+		hctx.DialogTitle = caption
+		hctx.DialogText = text
+		hctx.DialogText2 = ""
+		hctx.DialogHwnd = ctx.Arg(0)
+		hctx.OpenMenuIdx = -1
+
+		if hctx.WlWindow != nil && hctx.HasBaseFrame {
+			hctx.RepaintBuiltin = true
+			hctx.FrameReady = true
+			hctx.CommitIfDone()
+		}
+
 		switch uType & 0xF {
 		case MB_YESNO, MB_YESNOCANCEL:
 			ctx.SetReturn(IDYES)
@@ -4350,8 +4389,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		uType := ctx.Arg(3)
 		text := readGuestUTF16(textPtr)
 		caption := readGuestUTF16(captionPtr)
-		ravelog.Logf("[user32] MessageBoxW: [%s] %s\n", caption, text)
+		ravelog.Logf("[user32] MessageBoxW: [%s] %s type=0x%x\n", caption, text, uType)
+
 		const (
+			MB_OK          = 0
 			MB_OKCANCEL    = 1
 			MB_YESNO       = 4
 			MB_YESNOCANCEL = 3
@@ -4359,6 +4400,22 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			IDYES          = 6
 			IDCANCEL       = 2
 		)
+
+		// Show visual overlay dialog
+		hctx.DialogActive = true
+		hctx.DialogTitle = caption
+		hctx.DialogText = text
+		hctx.DialogText2 = ""
+		hctx.DialogHwnd = ctx.Arg(0)
+		hctx.OpenMenuIdx = -1
+
+		if hctx.WlWindow != nil && hctx.HasBaseFrame {
+			hctx.RepaintBuiltin = true
+			hctx.FrameReady = true
+			hctx.CommitIfDone()
+		}
+
+		// Return appropriate button ID based on type
 		switch uType & 0xF {
 		case MB_YESNO, MB_YESNOCANCEL:
 			ctx.SetReturn(IDYES)
@@ -7613,6 +7670,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				hSub, _ := mem.Read64(lpmii + 24)
 				item.id = hSub
 				item.flags |= 0x10
+				if sub, ok2 := menus[hSub]; ok2 {
+					item.submenu = sub.items
+				}
 			}
 		}
 		m.items = append(m.items, item)
@@ -7633,6 +7693,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if textPtr != 0 && flags&0x800 == 0 { // not MF_SEPARATOR
 			item.text = readGuestString(textPtr)
 		}
+		if flags&0x10 != 0 { // MF_POPUP
+			if sub, ok2 := menus[idOrSubmenu]; ok2 {
+				item.submenu = sub.items
+			}
+		}
 		m.items = append(m.items, item)
 		ctx.SetReturn(1)
 		return 0
@@ -7650,6 +7715,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		item := menuItem{flags: flags, id: idOrSubmenu}
 		if textPtr != 0 && flags&0x800 == 0 {
 			item.text = readGuestString(textPtr)
+		}
+		if flags&0x10 != 0 { // MF_POPUP
+			if sub, ok2 := menus[idOrSubmenu]; ok2 {
+				item.submenu = sub.items
+			}
 		}
 		m.items = append(m.items, item)
 		ctx.SetReturn(1)
