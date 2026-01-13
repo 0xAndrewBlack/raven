@@ -6819,16 +6819,179 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		})
 
 		// --- Locale / string classification ---
+		classifyCharType := func(dwInfoType uint64, r rune) uint16 {
+			switch dwInfoType {
+			case 1: // CT_CTYPE1
+				var flags uint16
+				if unicode.IsUpper(r) {
+					flags |= 0x0001 // C1_UPPER
+				}
+				if unicode.IsLower(r) {
+					flags |= 0x0002 // C1_LOWER
+				}
+				if unicode.IsDigit(r) {
+					flags |= 0x0004 // C1_DIGIT
+				}
+				if unicode.IsSpace(r) {
+					flags |= 0x0008 // C1_SPACE
+				}
+				if unicode.IsPunct(r) {
+					flags |= 0x0010 // C1_PUNCT
+				}
+				if unicode.IsControl(r) {
+					flags |= 0x0020 // C1_CNTRL
+				}
+				if r == ' ' || r == '\t' {
+					flags |= 0x0040 // C1_BLANK
+				}
+				if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+					flags |= 0x0080 // C1_XDIGIT
+				}
+				if unicode.IsLetter(r) {
+					flags |= 0x0100 // C1_ALPHA
+				}
+				if r >= 0x20 {
+					flags |= 0x0200 // C1_DEFINED
+				}
+				return flags
+			case 2: // CT_CTYPE2
+				if unicode.IsDigit(r) {
+					return 3 // C2_EUROPENUMBER
+				}
+				if unicode.IsSpace(r) {
+					return 10 // C2_WHITESPACE
+				}
+				if unicode.Is(unicode.Arabic, r) || unicode.Is(unicode.Hebrew, r) {
+					return 2 // C2_RIGHTTOLEFT
+				}
+				return 1 // C2_LEFTTORIGHT
+			case 4: // CT_CTYPE3
+				var flags uint16
+				if unicode.Is(unicode.Mn, r) {
+					flags |= 0x0001 // C3_NONSPACING
+				}
+				if unicode.IsSymbol(r) || unicode.IsSpace(r) {
+					flags |= 0x0008 // C3_SYMBOL
+				}
+				if unicode.IsLetter(r) {
+					flags |= 0x8000 // C3_ALPHA
+				}
+				if r >= 0x30A0 && r <= 0x30FF {
+					flags |= 0x0010 // C3_KATAKANA
+				}
+				if r >= 0x3040 && r <= 0x309F {
+					flags |= 0x0020 // C3_HIRAGANA
+				}
+				if r >= 0x4E00 && r <= 0x9FAF {
+					flags |= 0x0080 // C3_IDEOGRAPH
+				}
+				if r >= 0xD800 && r <= 0xDBFF {
+					flags |= 0x0400 // C3_HIGHSURROGATE
+				}
+				if r >= 0xDC00 && r <= 0xDFFF {
+					flags |= 0x0800 // C3_LOWSURROGATE
+				}
+				if r >= 0xFF00 && r <= 0xFF60 {
+					flags |= 0x2000 // C3_FULLWIDTH
+				}
+				if r >= 0xFF61 && r <= 0xFFDC {
+					flags |= 0x1000 // C3_HALFWIDTH
+				}
+				return flags
+			}
+			return 0
+		}
+
 		d.RegisterAutoStubHandler(kernel32, "GetStringTypeW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			dwInfoType := ctx.Arg(0)
+			lpSrcStr := ctx.Arg(1)
+			cchSrc := int32(ctx.Arg(2))
+			lpCharType := ctx.Arg(3)
+
+			if lpSrcStr == 0 || lpCharType == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			if cchSrc == -1 {
+				cchSrc = 0
+				for i := uint64(0); i < 65536; i++ {
+					w, _ := ctx.Mem.Read16(lpSrcStr + i*2)
+					cchSrc++
+					if w == 0 {
+						break
+					}
+				}
+			}
+
+			for i := int32(0); i < cchSrc; i++ {
+				w, _ := ctx.Mem.Read16(lpSrcStr + uint64(i)*2)
+				ct := classifyCharType(dwInfoType, rune(w))
+				ctx.Mem.Write16(lpCharType+uint64(i)*2, ct)
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetStringTypeExA", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			// Locale = Arg(0) (ignored)
+			dwInfoType := ctx.Arg(1)
+			lpSrcStr := ctx.Arg(2)
+			cchSrc := int32(ctx.Arg(3))
+			lpCharType := ctx.Arg(4)
+
+			if lpSrcStr == 0 || lpCharType == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			if cchSrc == -1 {
+				cchSrc = 0
+				for i := uint64(0); i < 65536; i++ {
+					b, _ := ctx.Mem.Read8(lpSrcStr + i)
+					cchSrc++
+					if b == 0 {
+						break
+					}
+				}
+			}
+
+			for i := int32(0); i < cchSrc; i++ {
+				b, _ := ctx.Mem.Read8(lpSrcStr + uint64(i))
+				ct := classifyCharType(dwInfoType, rune(b))
+				ctx.Mem.Write16(lpCharType+uint64(i)*2, ct)
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetStringTypeExW", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			// Locale = Arg(0) (ignored)
+			dwInfoType := ctx.Arg(1)
+			lpSrcStr := ctx.Arg(2)
+			cchSrc := int32(ctx.Arg(3))
+			lpCharType := ctx.Arg(4)
+
+			if lpSrcStr == 0 || lpCharType == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+
+			if cchSrc == -1 {
+				cchSrc = 0
+				for i := uint64(0); i < 65536; i++ {
+					w, _ := ctx.Mem.Read16(lpSrcStr + i*2)
+					cchSrc++
+					if w == 0 {
+						break
+					}
+				}
+			}
+
+			for i := int32(0); i < cchSrc; i++ {
+				w, _ := ctx.Mem.Read16(lpSrcStr + uint64(i)*2)
+				ct := classifyCharType(dwInfoType, rune(w))
+				ctx.Mem.Write16(lpCharType+uint64(i)*2, ct)
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "LCMapStringW", func(ctx *ntapi.TrapContext) uint32 {
@@ -7040,7 +7203,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "EnumSystemLocalesW", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			// Calling back into guest code requires the syncDispatch trampoline
+			// which is set up for window procedures. Returning TRUE signals success
+			// without enumerating; callers typically fall back to defaults.
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetOEMCP", func(ctx *ntapi.TrapContext) uint32 {
@@ -9339,7 +9505,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "EnumSystemLocalesEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1) // TRUE
+			// Calling back into guest code requires the syncDispatch trampoline
+			// which is set up for window procedures. Returning TRUE signals success
+			// without enumerating; callers typically fall back to defaults.
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "EnumTimeFormatsA", func(ctx *ntapi.TrapContext) uint32 {
@@ -9742,7 +9911,49 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCPInfoExW", func(ctx *ntapi.TrapContext) uint32 {
-						ctx.SetReturn(1)
+			codePage := ctx.Arg(0)
+			// dwFlags = ctx.Arg(1) (ignored)
+			lpCPInfoEx := ctx.Arg(2)
+			if lpCPInfoEx == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			var maxCharSize uint32
+			var cpName string
+			var cp uint32
+			switch codePage {
+			case 65001: // CP_UTF8
+				maxCharSize = 4
+				cpName = "65001 (UTF-8)"
+				cp = 65001
+			case 1252:
+				maxCharSize = 1
+				cpName = "1252 (ANSI - Latin I)"
+				cp = 1252
+			default:
+				maxCharSize = 1
+				cpName = fmt.Sprintf("%d (Unknown)", codePage)
+				cp = uint32(codePage)
+			}
+			ctx.Mem.Write32(lpCPInfoEx, maxCharSize)   // MaxCharSize
+			ctx.Mem.Write8(lpCPInfoEx+4, 0x3F)         // DefaultChar[0] = '?'
+			ctx.Mem.Write8(lpCPInfoEx+5, 0)             // DefaultChar[1]
+			for i := uint64(0); i < 12; i++ {
+				ctx.Mem.Write8(lpCPInfoEx+6+i, 0)       // LeadByte = all zeros
+			}
+			ctx.Mem.Write16(lpCPInfoEx+18, 0x003F)      // UnicodeDefaultChar = '?'
+			ctx.Mem.Write32(lpCPInfoEx+20, cp)           // CodePage
+			nameW := utf16Encode(cpName)
+			for i, w := range nameW {
+				if i >= 260 {
+					break
+				}
+				ctx.Mem.Write16(lpCPInfoEx+24+uint64(i)*2, w)
+			}
+			if len(nameW) < 260 {
+				ctx.Mem.Write16(lpCPInfoEx+24+uint64(len(nameW))*2, 0) // null-terminate
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetCalendarInfoA", func(ctx *ntapi.TrapContext) uint32 {
@@ -10770,11 +10981,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetNLSVersion", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			// function = Arg(0), lpLocaleName = Arg(1)
+			lpVersionInfo := ctx.Arg(2)
+			if lpVersionInfo == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			ctx.Mem.Write32(lpVersionInfo+4, 0x00060201)  // dwNLSVersion
+			ctx.Mem.Write32(lpVersionInfo+8, 0x00060201)  // dwDefinedVersion
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetNLSVersionEx", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0)
+			// function = Arg(0), lpLocaleName = Arg(1)
+			lpVersionInfo := ctx.Arg(2)
+			if lpVersionInfo == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			ctx.Mem.Write32(lpVersionInfo+4, 0x00060201)   // dwNLSVersion
+			ctx.Mem.Write32(lpVersionInfo+8, 0x00060201)   // dwDefinedVersion
+			ctx.Mem.Write32(lpVersionInfo+12, 0x0409)       // dwEffectiveId (en-US)
+			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetNamedPipeClientProcessId", func(ctx *ntapi.TrapContext) uint32 {
@@ -16111,7 +16339,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "lstrcatW", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(ctx.Arg(0)) // lpString1
+			dst := ctx.Arg(0)
+			src := ctx.Arg(1)
+			// Find end of dst (null terminator)
+			dstEnd := dst
+			for i := uint64(0); i < 65536; i++ {
+				w, _ := ctx.Mem.Read16(dstEnd)
+				if w == 0 {
+					break
+				}
+				dstEnd += 2
+			}
+			// Copy src wide chars to end of dst
+			for i := uint64(0); i < 65536; i++ {
+				w, _ := ctx.Mem.Read16(src + i*2)
+				ctx.Mem.Write16(dstEnd+i*2, w)
+				if w == 0 {
+					break
+				}
+			}
+			ctx.SetReturn(dst)
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "lstrcmp", func(ctx *ntapi.TrapContext) uint32 {
