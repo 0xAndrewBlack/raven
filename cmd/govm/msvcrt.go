@@ -999,4 +999,116 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		ctx.SetReturn(uint64(len(runes)))
 		return 0
 	})
+
+	// realloc: resize heap allocation
+	d.RegisterAutoStubHandler(msvcrt, "realloc", func(ctx *ntapi.TrapContext) uint32 {
+		ptr := ctx.Arg(0)
+		newSize := ctx.Arg(1)
+		if ptr == 0 {
+			ctx.SetReturn(sharedHeapAlloc(newSize, false))
+			return 0
+		}
+		if newSize == 0 {
+			sharedHeapFree(ptr)
+			ctx.SetReturn(0)
+			return 0
+		}
+		oldBlockSize, _ := mem.Read64(ptr - 16)
+		oldDataSize := oldBlockSize - 16
+		if newSize <= oldDataSize {
+			ctx.SetReturn(ptr)
+			return 0
+		}
+		newPtr := sharedHeapAlloc(newSize, false)
+		if newPtr != 0 {
+			copyLen := oldDataSize
+			if newSize < copyLen {
+				copyLen = newSize
+			}
+			for i := uint64(0); i < copyLen; i++ {
+				b, _ := mem.Read8(ptr + i)
+				mem.Write8(newPtr+i, b)
+			}
+		}
+		sharedHeapFree(ptr)
+		ctx.SetReturn(newPtr)
+		return 0
+	})
+
+	// _initterm_e: like _initterm but functions return int; return 0 on success
+	d.RegisterAutoStubHandler(msvcrt, "_initterm_e", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	// _beginthread: create a new thread (stub - returns pseudo handle)
+	d.RegisterAutoStubHandler(msvcrt, "_beginthread", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0x1000)
+		return 0
+	})
+
+	// _beginthreadex: create a new thread (stub - returns pseudo handle)
+	d.RegisterAutoStubHandler(msvcrt, "_beginthreadex", func(ctx *ntapi.TrapContext) uint32 {
+		thrdaddr := ctx.Arg(5)
+		if thrdaddr != 0 {
+			mem.Write32(thrdaddr, 0x2000)
+		}
+		ctx.SetReturn(0x1000)
+		return 0
+	})
+
+	// _endthread / _endthreadex: end current thread (no-op in single-threaded emulator)
+	d.RegisterAutoStubHandler(msvcrt, "_endthread", func(ctx *ntapi.TrapContext) uint32 {
+		return 0
+	})
+	d.RegisterAutoStubHandler(msvcrt, "_endthreadex", func(ctx *ntapi.TrapContext) uint32 {
+		return 0
+	})
+
+	// _seh_filter_exe / _seh_filter_dll: SEH exception filters
+	d.RegisterAutoStubHandler(msvcrt, "_seh_filter_exe", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // EXCEPTION_EXECUTE_HANDLER
+		return 0
+	})
+	d.RegisterAutoStubHandler(msvcrt, "_seh_filter_dll", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // EXCEPTION_EXECUTE_HANDLER
+		return 0
+	})
+
+	// _controlfp_s: control floating-point precision and rounding
+	var msvcrtFpControl uint64 = 0x8001F // default: MCW_EM | _RC_NEAR
+	d.RegisterAutoStubHandler(msvcrt, "_controlfp_s", func(ctx *ntapi.TrapContext) uint32 {
+		currentControl := ctx.Arg(0)
+		newControl := ctx.Arg(1)
+		mask := ctx.Arg(2)
+		msvcrtFpControl = (msvcrtFpControl &^ mask) | (newControl & mask)
+		if currentControl != 0 {
+			mem.Write32(currentControl, uint32(msvcrtFpControl))
+		}
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	// _set_fmode: set default file translation mode
+	d.RegisterAutoStubHandler(msvcrt, "_set_fmode", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	// __p__fmode: return pointer to static _fmode variable
+	var msvcrtFmodeSlot uint64
+	d.RegisterAutoStubHandler(msvcrt, "__p__fmode", func(ctx *ntapi.TrapContext) uint32 {
+		if msvcrtFmodeSlot == 0 {
+			msvcrtFmodeSlot = mem.Mmap(0, 8, mmu.PermRead|mmu.PermWrite)
+			mem.Write32(msvcrtFmodeSlot, 0x8000) // _O_BINARY
+		}
+		ctx.SetReturn(msvcrtFmodeSlot)
+		return 0
+	})
+
+	// _register_thread_local_exe_atexit_callback: store but never call
+	d.RegisterAutoStubHandler(msvcrt, "_register_thread_local_exe_atexit_callback", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
 }

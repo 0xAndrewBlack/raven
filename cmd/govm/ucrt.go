@@ -1673,4 +1673,113 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		ctx.SetReturn(uint64(len(runes)))
 		return 0
 	})
+
+	// __stdio_common_vfwprintf: wide-char printf to stream
+	d.RegisterAutoStubHandler(ucrt, "__stdio_common_vfwprintf", func(ctx *ntapi.TrapContext) uint32 {
+		stream := ctx.Arg(1)
+		fmtAddr := ctx.Arg(2)
+		vaList := ctx.Arg(4)
+		if fmtAddr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		fmtStr := readGuestUTF16(fmtAddr)
+		var args []uint64
+		if vaList != 0 {
+			for i := 0; i < 8; i++ {
+				v, _ := mem.Read64(vaList + uint64(i)*8)
+				args = append(args, v)
+			}
+		}
+		result := wideprintf(fmtStr, args)
+		w := crtStreamWriter(stream, crtIOBBase, 0x30)
+		w.WriteString(result)
+		ctx.SetReturn(uint64(len(result)))
+		return 0
+	})
+
+	// __stdio_common_vsscanf: scan from narrow string - stub returns 0 items
+	d.RegisterAutoStubHandler(ucrt, "__stdio_common_vsscanf", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	// __stdio_common_vswscanf: scan from wide string - stub returns 0 items
+	d.RegisterAutoStubHandler(ucrt, "__stdio_common_vswscanf", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	// _controlfp_s: control floating-point precision and rounding
+	var ucrtFpControl uint64 = 0x8001F // default: MCW_EM | _RC_NEAR
+	d.RegisterAutoStubHandler(ucrt, "_controlfp_s", func(ctx *ntapi.TrapContext) uint32 {
+		currentControl := ctx.Arg(0)
+		newControl := ctx.Arg(1)
+		mask := ctx.Arg(2)
+		ucrtFpControl = (ucrtFpControl &^ mask) | (newControl & mask)
+		if currentControl != 0 {
+			mem.Write32(currentControl, uint32(ucrtFpControl))
+		}
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	// __setusermatherr: register math error callback (stored, never invoked)
+	d.RegisterAutoStubHandler(ucrt, "__setusermatherr", func(ctx *ntapi.TrapContext) uint32 {
+		return 0
+	})
+
+	// _set_fmode / __p__fmode: default file translation mode
+	var ucrtFmode uint32 = 0x8000 // _O_BINARY
+	var ucrtFmodeSlot uint64
+	d.RegisterAutoStubHandler(ucrt, "_set_fmode", func(ctx *ntapi.TrapContext) uint32 {
+		ucrtFmode = uint32(ctx.Arg(0))
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ucrt, "__p__fmode", func(ctx *ntapi.TrapContext) uint32 {
+		if ucrtFmodeSlot == 0 {
+			ucrtFmodeSlot = mem.Mmap(0, 8, mmu.PermRead|mmu.PermWrite)
+		}
+		mem.Write32(ucrtFmodeSlot, ucrtFmode)
+		ctx.SetReturn(ucrtFmodeSlot)
+		return 0
+	})
+
+	// _initterm: walk array of void(*)(void) between begin and end
+	d.RegisterAutoStubHandler(ucrt, "_initterm", func(ctx *ntapi.TrapContext) uint32 {
+		begin := ctx.Arg(0)
+		end := ctx.Arg(1)
+		for ptr := begin; ptr < end; ptr += 8 {
+			fnPtr, _ := mem.Read64(ptr)
+			if fnPtr != 0 {
+				ravelog.Logf("[ucrt] _initterm: constructor at %#x (skipped)\n", fnPtr)
+			}
+		}
+		return 0
+	})
+
+	// _initterm_e: like _initterm but functions return int; return 0 on success
+	d.RegisterAutoStubHandler(ucrt, "_initterm_e", func(ctx *ntapi.TrapContext) uint32 {
+		begin := ctx.Arg(0)
+		end := ctx.Arg(1)
+		for ptr := begin; ptr < end; ptr += 8 {
+			fnPtr, _ := mem.Read64(ptr)
+			if fnPtr != 0 {
+				ravelog.Logf("[ucrt] _initterm_e: initializer at %#x (skipped)\n", fnPtr)
+			}
+		}
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	// _seh_filter_exe / _seh_filter_dll: SEH exception filters
+	d.RegisterAutoStubHandler(ucrt, "_seh_filter_exe", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // EXCEPTION_EXECUTE_HANDLER
+		return 0
+	})
+	d.RegisterAutoStubHandler(ucrt, "_seh_filter_dll", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // EXCEPTION_EXECUTE_HANDLER
+		return 0
+	})
 }
