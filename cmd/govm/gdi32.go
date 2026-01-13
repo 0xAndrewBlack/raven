@@ -1513,11 +1513,25 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetGraphicsMode", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // GM_COMPATIBLE
+		dc := getDC(ctx.Arg(0))
+		prev := dc.GraphicsMode
+		if prev == 0 {
+			prev = 1 // GM_COMPATIBLE
+		}
+		mode := int32(ctx.Arg(1))
+		if mode == 1 || mode == 2 { // GM_COMPATIBLE or GM_ADVANCED
+			dc.GraphicsMode = mode
+		}
+		ctx.SetReturn(uint64(prev))
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetGraphicsMode", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // GM_COMPATIBLE
+		dc := getDC(ctx.Arg(0))
+		mode := dc.GraphicsMode
+		if mode == 0 {
+			mode = 1 // GM_COMPATIBLE
+		}
+		ctx.SetReturn(uint64(mode))
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetWorldTransform", func(ctx *ntapi.TrapContext) uint32 {

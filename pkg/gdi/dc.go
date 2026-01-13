@@ -72,6 +72,9 @@ type DC struct {
 	DCPenColor   uint32
 	DCBrushColor uint32
 
+	// GraphicsMode: GM_COMPATIBLE=1 (default), GM_ADVANCED=2.
+	GraphicsMode int32
+
 	// Saved DC stack (SaveDC / RestoreDC).
 	saved []*dcSave
 }
