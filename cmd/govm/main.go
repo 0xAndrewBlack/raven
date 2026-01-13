@@ -555,6 +555,22 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 					break
 				}
 			}
+		case "comctl32.dll":
+			// Map undocumented ordinals used by many Win32 apps
+			ordMap := map[uint16]string{
+				17:  "InitCommonControls",
+				345: "PropertySheetW",
+				381: "SetWindowSubclass",
+				410: "SetWindowSubclass",
+				411: "GetWindowSubclass",
+				412: "RemoveWindowSubclass",
+				413: "DefSubclassProc",
+			}
+			for ord, name := range ordMap {
+				if addr, ok := synth.Exports[name]; ok {
+					synth.ExportOrds[ord] = addr
+				}
+			}
 		}
 	}
 
