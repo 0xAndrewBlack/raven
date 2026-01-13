@@ -4059,17 +4059,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			// Do NOT patch Scintilla internal state - offsets are version-specific
 			// and writing wrong fields corrupts state (e.g. sets paintState=painting,
 			// making SetPaintState return abandoned and skip all rendering).
-			if strings.EqualFold(cs.className, "scintilla") {
-				if m, mok := windowLongPtr[hwnd]; mok {
-					sciThis0 := m[-21]
-					if sciThis0 == 0 {
-						sciThis0 = m[0]
-					}
-					if sciThis := sciThis0; sciThis != 0 {
-						ravelog.Logf("[sci] BeginPaint hwnd=0x%x sciThis=0x%x size=(%d,%d)\n", hwnd, sciThis, cs.w, cs.h)
-					}
-				}
-			}
 		} else {
 			rcRight, rcBottom = 800, 600
 			if wlWindow != nil {

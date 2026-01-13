@@ -4364,14 +4364,33 @@ c.XMM[m.reg] = r
 }
 return nil
 
-// --- CVTPD2DQ (F2 0F E6) / CVTTPD2DQ (66 0F E6) ---
-// Convert two packed double-precision FP values to two packed int32 values.
-// Result placed in low 64 bits of dst XMM; high 64 bits zeroed.
+// --- CVTDQ2PD (F3 0F E6) / CVTPD2DQ (F2 0F E6) / CVTTPD2DQ (66 0F E6) ---
 case 0xE6:
 m, err := c.decodeModRM(pfx)
 if err != nil {
 return err
 }
+if pfx.repe { // F3 0F E6: CVTDQ2PD - convert two packed int32 to two packed doubles
+// Source is low 64 bits (two int32s) from XMM or memory.
+var srcLo uint64
+if m.mod == 3 {
+srcLo = c.XMM[m.rm][0]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+srcLo, _ = c.mem.Read64(addr)
+}
+i0 := int32(uint32(srcLo))
+i1 := int32(uint32(srcLo >> 32))
+var dst [2]uint64
+dst[0] = math.Float64bits(float64(i0))
+dst[1] = math.Float64bits(float64(i1))
+c.XMM[m.reg] = dst
+return nil
+}
+// CVTPD2DQ / CVTTPD2DQ: two packed doubles → two packed int32s
 var src [2]uint64
 if m.mod == 3 {
 src = c.XMM[m.rm]
