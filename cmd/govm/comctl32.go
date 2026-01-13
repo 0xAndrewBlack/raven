@@ -567,15 +567,40 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DSA_GetItem", func(ctx *ntapi.TrapContext) uint32 {
-		// DSA_GetItem(hdsa, index, pDest) - copies into pDest; stub returns 1
-		ctx.SetReturn(1)
+		// DSA_GetItem(hdsa, index, pDest) - copies item into pDest
+		hdsa := ctx.Arg(0)
+		idx := int32(ctx.Arg(1))
+		pDest := ctx.Arg(2)
+		data, ok := comctl32pkg.DSAGetItem(hdsa, idx)
+		if ok && pDest != 0 {
+			ctx.Mem.WriteBytes(pDest, data)
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DSA_GetItemPtr", func(ctx *ntapi.TrapContext) uint32 {
+		// DSA_GetItemPtr(hdsa, index) - returns pointer to item
+		// We can't return a guest pointer to Go-side data, return NULL
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DSA_SetItem", func(ctx *ntapi.TrapContext) uint32 {
+		// DSA_SetItem(hdsa, index, pSrc)
+		hdsa := ctx.Arg(0)
+		idx := int32(ctx.Arg(1))
+		pSrc := ctx.Arg(2)
+		// Read item data from guest memory (need to know item size)
+		if comctl32pkg.DSAGetItemIndex(hdsa, idx) && pSrc != 0 {
+			if existing, ok := comctl32pkg.DSAGetItem(hdsa, idx); ok {
+				data := make([]byte, len(existing))
+				for i := range data {
+					data[i], _ = ctx.Mem.Read8(pSrc + uint64(i))
+				}
+				comctl32pkg.DSASetItem(hdsa, idx, data)
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -972,6 +997,19 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "_TrackMouseEvent", func(ctx *ntapi.TrapContext) uint32 {
+		// _TrackMouseEvent is the comctl32 version - same as user32!TrackMouseEvent
+		pTME := ctx.Arg(0)
+		if pTME == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		flags, _ := ctx.Mem.Read32(pTME + 4)
+		hwnd, _ := ctx.Mem.Read64(pTME + 8)
+		if flags&0x80000000 != 0 { // TME_CANCEL
+			delete(hctx.TrackMouseHwnds, hwnd)
+		} else {
+			hctx.TrackMouseHwnds[hwnd] = flags
+		}
 		ctx.SetReturn(1)
 		return 0
 	})

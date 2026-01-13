@@ -433,4 +433,42 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
+
+	// VariantInit: zero the 16-byte VARIANT struct
+	d.RegisterAutoStubHandler(oleaut32, "VariantInit", func(ctx *ntapi.TrapContext) uint32 {
+		pVar := ctx.Arg(0)
+		if pVar != 0 {
+			zeros := make([]byte, 16)
+			ctx.Mem.WriteBytes(pVar, zeros) // VT_EMPTY = 0
+		}
+		return 0
+	})
+	// VariantClear: reset VARIANT to VT_EMPTY
+	d.RegisterAutoStubHandler(oleaut32, "VariantClear", func(ctx *ntapi.TrapContext) uint32 {
+		pVar := ctx.Arg(0)
+		if pVar != 0 {
+			zeros := make([]byte, 16)
+			ctx.Mem.WriteBytes(pVar, zeros)
+		}
+		ctx.SetReturn(0) // S_OK
+		return 0
+	})
+	// VariantCopy
+	d.RegisterAutoStubHandler(oleaut32, "VariantCopy", func(ctx *ntapi.TrapContext) uint32 {
+		pDest := ctx.Arg(0)
+		pSrc := ctx.Arg(1)
+		if pDest != 0 && pSrc != 0 {
+			data, err := ctx.Mem.ReadBytes(pSrc, 16)
+			if err == nil {
+				ctx.Mem.WriteBytes(pDest, data)
+			}
+		}
+		ctx.SetReturn(0) // S_OK
+		return 0
+	})
+	// VariantChangeType
+	d.RegisterAutoStubHandler(oleaut32, "VariantChangeType", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0x80004002) // E_NOINTERFACE - can't convert
+		return 0
+	})
 }
