@@ -75,8 +75,31 @@ type DC struct {
 	// GraphicsMode: GM_COMPATIBLE=1 (default), GM_ADVANCED=2.
 	GraphicsMode int32
 
+	// World transform (SetWorldTransform / ModifyWorldTransform).
+	// Only used when GraphicsMode == GM_ADVANCED (2).
+	// ReactOS: DC_ATTR.mxWorldToDevice
+	WorldTransform XForm
+
+	// Path recording state (BeginPath / EndPath).
+	// nil when no path is active.
+	path *Path
+
+	// PolyFillMode: ALTERNATE=1 (default), WINDING=2.
+	PolyFillMode int32
+
 	// Saved DC stack (SaveDC / RestoreDC).
 	saved []*dcSave
+}
+
+// XForm represents a 2D affine transformation matrix (XFORM).
+// ReactOS: XFORM in wingdi.h
+//   | eM11  eM12  0 |
+//   | eM21  eM22  0 |
+//   | eDx   eDy   1 |
+type XForm struct {
+	EM11, EM12 float32
+	EM21, EM22 float32
+	EDx, EDy   float32
 }
 
 // dcSave is a snapshot of mutable DC state stored by SaveDC.
@@ -103,6 +126,9 @@ type dcSave struct {
 	CurX, CurY             int32
 	ROP2                   int32
 	DCPenColor, DCBrushColor uint32
+	GraphicsMode           int32
+	WorldTransform         XForm
+	PolyFillMode           int32
 }
 
 // NewScreenDC creates a DC that targets the given Surface (the Wayland framebuffer).
@@ -122,6 +148,9 @@ func NewScreenDC(s *Surface) *DC {
 		Brush:        stockBrushes[StockWhiteBrush],
 		Pen:          stockPens[StockBlackPen],
 		Font:         defaultFont(),
+		GraphicsMode: 1, // GM_COMPATIBLE
+		WorldTransform: XForm{EM11: 1, EM22: 1}, // identity
+		PolyFillMode: 1, // ALTERNATE
 	}
 }
 
@@ -142,6 +171,9 @@ func NewMemoryDC() *DC {
 		Brush:          stockBrushes[StockWhiteBrush],
 		Pen:            stockPens[StockBlackPen],
 		Font:           defaultFont(),
+		GraphicsMode:   1,
+		WorldTransform: XForm{EM11: 1, EM22: 1},
+		PolyFillMode:   1,
 	}
 }
 
@@ -164,6 +196,9 @@ func (dc *DC) InheritFrom(src *DC) {
 	dc.Brush = src.Brush
 	dc.Pen = src.Pen
 	dc.Font = src.Font
+	dc.GraphicsMode = src.GraphicsMode
+	dc.WorldTransform = src.WorldTransform
+	dc.PolyFillMode = src.PolyFillMode
 	// IsScreen, Target, Origin, Clip stay at their zero/false defaults.
 	// When a bitmap is selected via SelectObject, Target and Clip are set
 	// to the bitmap surface bounds (bitmap-local coords, origin 0,0).
@@ -186,6 +221,8 @@ func (dc *DC) Save() int {
 		ClipRgnHandle: dc.ClipRgnHandle, ArcDir: dc.ArcDir,
 		CurX: dc.CurX, CurY: dc.CurY, ROP2: dc.ROP2,
 		DCPenColor: dc.DCPenColor, DCBrushColor: dc.DCBrushColor,
+		GraphicsMode: dc.GraphicsMode, WorldTransform: dc.WorldTransform,
+		PolyFillMode: dc.PolyFillMode,
 	}
 	dc.saved = append(dc.saved, snap)
 	return len(dc.saved)
@@ -222,6 +259,9 @@ func (dc *DC) Restore(level int) bool {
 	dc.ROP2 = s.ROP2
 	dc.DCPenColor = s.DCPenColor
 	dc.DCBrushColor = s.DCBrushColor
+	dc.GraphicsMode = s.GraphicsMode
+	dc.WorldTransform = s.WorldTransform
+	dc.PolyFillMode = s.PolyFillMode
 	return true
 }
 

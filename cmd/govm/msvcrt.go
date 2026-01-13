@@ -1316,8 +1316,13 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// _register_thread_local_exe_atexit_callback: store but never call
+	// _register_thread_local_exe_atexit_callback: register a callback for thread-local
+	// cleanup at exe exit. We store it but never invoke it since we don't have
+	// a full CRT teardown sequence.
+	var tlsAtexitCallback uint64
 	d.RegisterAutoStubHandler(msvcrt, "_register_thread_local_exe_atexit_callback", func(ctx *ntapi.TrapContext) uint32 {
+		tlsAtexitCallback = ctx.Arg(0)
+		_ = tlsAtexitCallback // stored for potential future use
 		ctx.SetReturn(0)
 		return 0
 	})

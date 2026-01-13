@@ -14572,6 +14572,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "wine_get_unix_file_name", func(ctx *ntapi.TrapContext) uint32 {
+		// Wine internal: converts DOS path → Unix path. Return NULL since
+		// we don't have a Wine-style path mapping.
+		ravelog.Logf("[kernel32] wine_get_unix_file_name called (not supported)\n")
 		ctx.SetReturn(0)
 		return 0
 	})

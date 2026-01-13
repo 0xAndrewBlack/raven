@@ -2774,15 +2774,76 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.ReturnOverridden = true
 		return 0
 	})
+	// Accelerator table tracking
+	// ReactOS: NtUserCreateAcceleratorTable
+	type accelEntry struct {
+		fVirt byte
+		key   uint16
+		cmd   uint16
+	}
+	accelTables := map[uint64][]accelEntry{}
+	var nextAccelTable uint64 = 0xac000
+
 	d.RegisterAutoStubHandler(user32, "TranslateAcceleratorW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // not translated
+		// BOOL TranslateAcceleratorW(HWND, HACCEL, LPMSG)
+		// ReactOS: win32ss/user/ntuser/accelerator.c NtUserTranslateAccelerator
+		// Read MSG: {hwnd(8), message(4), wParam(8), lParam(8), time(4), pt.x(4), pt.y(4)}
+		hAccel := ctx.Arg(1)
+		pMsg := ctx.Arg(2)
+		if pMsg == 0 || hAccel == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		entries := accelTables[hAccel]
+		if len(entries) == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		msgID, _ := mem.Read32(pMsg + 8)
+		wParam, _ := mem.Read64(pMsg + 12)
+		key := uint16(wParam & 0xFFFF)
+		const (
+			WM_KEYDOWN   = 0x0100
+			WM_SYSKEYDOWN = 0x0104
+			FVIRTKEY     = 0x01
+			FCONTROL     = 0x08
+			FALT         = 0x10
+			FSHIFT       = 0x04
+		)
+		if msgID != WM_KEYDOWN && msgID != WM_SYSKEYDOWN {
+			ctx.SetReturn(0)
+			return 0
+		}
+		for _, ae := range entries {
+			if ae.fVirt&FVIRTKEY != 0 {
+				if ae.key == key {
+					// match (simplified: we don't check modifier state)
+					ctx.SetReturn(1)
+					return 0
+				}
+			} else if uint16(ae.key) == key {
+				ctx.SetReturn(1)
+				return 0
+			}
+		}
+		ctx.SetReturn(0)
 		return 0
 	})
-	// CreateAcceleratorTableW - create accelerator table (stub handle)
-	var nextAccelTable uint64 = 0xac000
 	d.RegisterAutoStubHandler(user32, "CreateAcceleratorTableW", func(ctx *ntapi.TrapContext) uint32 {
+		pAccel := ctx.Arg(0)
+		nEntries := int(ctx.Arg(1))
 		nextAccelTable++
-		ctx.SetReturn(nextAccelTable)
+		h := nextAccelTable
+		entries := make([]accelEntry, 0, nEntries)
+		for i := 0; i < nEntries; i++ {
+			base := pAccel + uint64(i)*6
+			fv, _ := mem.Read8(base)
+			k, _ := mem.Read16(base + 2)
+			c, _ := mem.Read16(base + 4)
+			entries = append(entries, accelEntry{fVirt: fv, key: k, cmd: c})
+		}
+		accelTables[h] = entries
+		ctx.SetReturn(h)
 		return 0
 	})
 	// DestroyAcceleratorTable
@@ -3668,15 +3729,110 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EnumChildWindows", func(ctx *ntapi.TrapContext) uint32 {
-		// ReactOS: win32ss/user/ntuser/window.c NtUserEnumChildWindows
-		// Ideally we'd call lpEnumFunc for each child via the sync trampoline,
-		// but the trampoline is SendMessage-oriented. For now, just return TRUE.
-		// The app will think no children were enumerated (callback was never FALSE).
-		ctx.SetReturn(1)
+		// BOOL EnumChildWindows(HWND hWndParent, WNDENUMPROC lpEnumFunc, LPARAM lParam)
+		// ReactOS: win32ss/user/ntuser/window.c NtUserBuildHwndList
+		// Callback: BOOL CALLBACK EnumChildProc(HWND, LPARAM) → RCX=hwnd, RDX=lParam
+		hWndParent := ctx.Arg(0)
+		lpEnumFunc := ctx.Arg(1)
+		lParam := ctx.Arg(2)
+		if lpEnumFunc == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		parent := hWndParent
+		if parent == 0 {
+			parent = hctx.MainHWND
+		}
+		kids := win32.Global.ChildrenOf(parent)
+		if len(kids) == 0 {
+			ctx.SetReturn(1) // no children = success
+			return 0
+		}
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+		if !ok || !ok2 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		rsp := rr.ReadReg(4)
+		retAddr, _ := mem.Read64(rsp)
+		// Build dispatch queue: each entry calls lpEnumFunc(child_hwnd, lParam)
+		queue := make([]syncDispatch, len(kids))
+		for i, kid := range kids {
+			queue[i] = syncDispatch{
+				wndProc: lpEnumFunc,
+				hwnd:    kid,
+				msg:     lParam,
+			}
+		}
+		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			queue:   queue,
+			retAddr: retAddr,
+			hwnd:    1, // return TRUE
+		})
+		mem.Write64(rsp, hctx.SyncTrampoline)
+		// Start first dispatch
+		sd := queue[0]
+		hctx.SyncStack[len(hctx.SyncStack)-1].queue = queue[1:]
+		rsp -= 8
+		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
+		rw.WriteReg(1, sd.hwnd)
+		rw.WriteReg(2, uint64(sd.msg))
+		rw.WriteReg(8, 0)
+		rw.WriteReg(9, 0)
+		ctx.CPU.SetPC(sd.wndProc)
+		ctx.ReturnOverridden = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EnumWindows", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL EnumWindows(WNDENUMPROC lpEnumFunc, LPARAM lParam)
+		// ReactOS: NtUserBuildHwndList (all top-level windows)
+		lpEnumFunc := ctx.Arg(0)
+		lParam := ctx.Arg(1)
+		if lpEnumFunc == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		all := win32.Global.AllWindows()
+		// Filter to top-level only (Parent == 0 or MainHWND)
+		var topLevel []uint64
+		for _, h := range all {
+			wnd := win32.Global.Get(h)
+			if wnd != nil && (wnd.Parent == 0 || h == hctx.MainHWND) {
+				topLevel = append(topLevel, h)
+			}
+		}
+		if len(topLevel) == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+		if !ok || !ok2 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		rsp := rr.ReadReg(4)
+		retAddr, _ := mem.Read64(rsp)
+		queue := make([]syncDispatch, len(topLevel))
+		for i, h := range topLevel {
+			queue[i] = syncDispatch{wndProc: lpEnumFunc, hwnd: h, msg: lParam}
+		}
+		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			queue:   queue[1:],
+			retAddr: retAddr,
+			hwnd:    1,
+		})
+		rsp -= 8
+		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
+		rw.WriteReg(1, queue[0].hwnd)
+		rw.WriteReg(2, uint64(queue[0].msg))
+		rw.WriteReg(8, 0)
+		rw.WriteReg(9, 0)
+		ctx.CPU.SetPC(queue[0].wndProc)
+		ctx.ReturnOverridden = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "LockWindowUpdate", func(ctx *ntapi.TrapContext) uint32 {
@@ -3964,6 +4120,24 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	// Icons/cursors
 	d.RegisterAutoStubHandler(user32, "DrawIconEx", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL DrawIconEx(HDC, int x, int y, HICON, int cxWidth, int cyWidth, UINT istepAnim, HBRUSH flicker, UINT flags)
+		// ReactOS: win32ss/user/ntuser/cursoricon.c NtUserDrawIconEx
+		// We don't have full icon pixel data, but draw a small filled rect as placeholder.
+		hdc := ctx.Arg(0)
+		x := int32(ctx.Arg(1))
+		y := int32(ctx.Arg(2))
+		cxWidth := int32(ctx.Arg(4))
+		cyWidth := int32(ctx.Arg(5))
+		if cxWidth == 0 {
+			cxWidth = 32 // SM_CXICON default
+		}
+		if cyWidth == 0 {
+			cyWidth = 32 // SM_CYICON default
+		}
+		dc := getDC(hdc)
+		if dc != nil && dc.Target != nil {
+			dc.Target.FillRect(x, y, x+cxWidth, y+cyWidth, 0x808080) // gray placeholder
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4431,8 +4605,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		return 0
 	})
+	var currentCursorHandle uint64 = 32512 // IDC_ARROW default
 	d.RegisterAutoStubHandler(user32, "SetCursor", func(ctx *ntapi.TrapContext) uint32 {
 		hCursor := ctx.Arg(0)
+		prevCursor := currentCursorHandle
+		currentCursorHandle = hCursor
 		// Map Windows IDC_ cursor IDs to wp_cursor_shape_v1 shapes.
 		if wlDisplay != nil {
 			var shape uint32
@@ -4468,7 +4645,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			wlDisplay.SetCursorShape(shape)
 		}
-		ctx.SetReturn(hCursor)
+		ctx.SetReturn(prevCursor)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetCursorPos", func(ctx *ntapi.TrapContext) uint32 {
@@ -6266,7 +6443,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "InSendMessageEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// DWORD InSendMessageEx(LPVOID lpReserved)
+		// ReactOS: NtUserGetSendMessageReceiver
+		// Returns ISMEX_NOSEND(0) when the calling thread is not processing a
+		// sent message. We execute everything synchronously in one thread, so
+		// cross-thread SendMessage never happens.
+		ctx.SetReturn(0) // ISMEX_NOSEND
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ReplyMessage", func(ctx *ntapi.TrapContext) uint32 {
@@ -6588,15 +6770,28 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsGUIThread", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL IsGUIThread(BOOL bConvert)
+		// ReactOS: NtUserGetThreadState(12)
+		// We always run in a GUI context.
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsHungAppWindow", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL IsHungAppWindow(HWND)
+		// ReactOS: NtUserQueryWindow → IsHungAppWindow
+		// Our app is never hung (single-threaded, synchronous execution).
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWindowInDestroy", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// Undocumented. Returns TRUE if the window is being destroyed.
+		// Check if the HWND still exists in the window manager.
+		hwnd := ctx.Arg(0)
+		if win32.Global.Get(hwnd) == nil && hwnd != 0 {
+			ctx.SetReturn(1) // window not in table → likely being destroyed
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsServerSideWindow", func(ctx *ntapi.TrapContext) uint32 {
@@ -6654,11 +6849,26 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CloseWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL CloseWindow(HWND) - minimizes the specified window.
+		// ReactOS: NtUserShowWindow(hwnd, SW_MINIMIZE)
+		// We don't implement minimization, but we can mark it as valid.
+		hwnd := ctx.Arg(0)
+		if win32.Global.Get(hwnd) != nil {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "OpenIcon", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL OpenIcon(HWND) - restores a minimized window.
+		// ReactOS: NtUserShowWindow(hwnd, SW_RESTORE)
+		hwnd := ctx.Arg(0)
+		if win32.Global.Get(hwnd) != nil {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "BringWindowToTop", func(ctx *ntapi.TrapContext) uint32 {
@@ -7383,7 +7593,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetCursor", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x00010001)
+		// HCURSOR GetCursor(void)
+		// ReactOS: NtUserGetCursor
+		ctx.SetReturn(currentCursorHandle)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetCursorFrameInfo", func(ctx *ntapi.TrapContext) uint32 {
@@ -7472,34 +7684,116 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// -------------------------------------------------------
 	// Hooks / WinEvents
 	// -------------------------------------------------------
+	// ReactOS: win32ss/user/ntuser/hook.c
+	// Hook chain: map from HHOOK → {hookType, proc, hMod, threadId}
+	type hookEntry struct {
+		hookType int32
+		proc     uint64
+		hMod     uint64
+		threadID uint64
+	}
+	hookTable := map[uint64]*hookEntry{}
+	var nextHookHandle uint64 = 0x00070000
+
+	type winEventEntry struct {
+		eventMin uint32
+		eventMax uint32
+		proc     uint64
+		hMod     uint64
+		threadID uint32
+		flags    uint32
+	}
+	winEventTable := map[uint64]*winEventEntry{}
+	var nextWinEventHandle uint64 = 0x00080000
+
 	d.RegisterAutoStubHandler(user32, "SetWindowsHookA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x00070001)
+		// HHOOK SetWindowsHookA(int idHook, HOOKPROC lpfn)
+		// Old-style: no hMod/threadId params (thread-local only)
+		idHook := int32(ctx.Arg(0))
+		lpfn := ctx.Arg(1)
+		nextHookHandle++
+		h := nextHookHandle
+		hookTable[h] = &hookEntry{hookType: idHook, proc: lpfn}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetWindowsHookW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x00070001)
+		idHook := int32(ctx.Arg(0))
+		lpfn := ctx.Arg(1)
+		nextHookHandle++
+		h := nextHookHandle
+		hookTable[h] = &hookEntry{hookType: idHook, proc: lpfn}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetWinEventHook", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x00080001)
+		// HWINEVENTHOOK SetWinEventHook(DWORD eventMin, DWORD eventMax,
+		//   HMODULE hmod, WINEVENTPROC pfn, DWORD pid, DWORD tid, DWORD flags)
+		eventMin := uint32(ctx.Arg(0))
+		eventMax := uint32(ctx.Arg(1))
+		hmod := ctx.Arg(2)
+		pfn := ctx.Arg(3)
+		tid := uint32(ctx.Arg(5))
+		flags := uint32(ctx.Arg(6))
+		nextWinEventHandle++
+		h := nextWinEventHandle
+		winEventTable[h] = &winEventEntry{
+			eventMin: eventMin, eventMax: eventMax,
+			proc: pfn, hMod: hmod, threadID: tid, flags: flags,
+		}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "NotifyWinEvent", func(ctx *ntapi.TrapContext) uint32 {
+		// void NotifyWinEvent(DWORD event, HWND, LONG idObject, LONG idChild)
+		// We don't invoke callbacks yet, but the API is void - nothing to return.
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "UnhookWinEvent", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		h := ctx.Arg(0)
+		if _, ok := winEventTable[h]; ok {
+			delete(winEventTable, h)
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "UnhookWindowsHook", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL UnhookWindowsHook(int nCode, HOOKPROC pfnFilterProc)
+		// Old-style unhook by type+proc. Find and remove.
+		nCode := int32(ctx.Arg(0))
+		pfn := ctx.Arg(1)
+		removed := false
+		for h, entry := range hookTable {
+			if entry.hookType == nCode && entry.proc == pfn {
+				delete(hookTable, h)
+				removed = true
+				break
+			}
+		}
+		if removed {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CallNextHookEx", func(ctx *ntapi.TrapContext) uint32 {
+		// LRESULT CallNextHookEx(HHOOK hhk, int nCode, WPARAM, LPARAM)
+		// We have only one hook per type, so "next" is the system default → return 0.
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWinEventHookInstalled", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL IsWinEventHookInstalled(DWORD event)
+		event := uint32(ctx.Arg(0))
+		for _, we := range winEventTable {
+			if event >= we.eventMin && event <= we.eventMax {
+				ctx.SetReturn(1)
+				return 0
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7589,10 +7883,43 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "IsDialogMessage", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// BOOL IsDialogMessageW(HWND hDlg, LPMSG lpMsg)
+		// ReactOS: win32ss/user/user32/windows/dialog.c IsDialogMessageW
+		// Checks if a message is for the dialog (Tab, Enter, Esc, arrow keys).
+		// We check for Tab (VK_TAB=0x09) and Esc (VK_ESCAPE=0x1B) in WM_KEYDOWN.
+		pMsg := ctx.Arg(1)
+		if pMsg == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		msgID, _ := mem.Read32(pMsg + 8) // message field at offset 8
+		if msgID == 0x0100 { // WM_KEYDOWN
+			wParam, _ := mem.Read64(pMsg + 12)
+			vk := uint32(wParam & 0xFF)
+			if vk == 0x09 || vk == 0x1B { // VK_TAB or VK_ESCAPE
+				ctx.SetReturn(1) // consumed by dialog
+				return 0
+			}
+		}
+		ctx.SetReturn(0) // not a dialog message
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsDialogMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		// Same logic as IsDialogMessageW (ANSI version)
+		pMsg := ctx.Arg(1)
+		if pMsg == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		msgID, _ := mem.Read32(pMsg + 8)
+		if msgID == 0x0100 {
+			wParam, _ := mem.Read64(pMsg + 12)
+			vk := uint32(wParam & 0xFF)
+			if vk == 0x09 || vk == 0x1B {
+				ctx.SetReturn(1)
+				return 0
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7856,6 +8183,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "SetMenuInfo", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SetMenuInfo(HMENU, LPCMENUINFO)
+		// ReactOS: NtUserThunkedMenuInfo
+		// MENUINFO: cbSize, fMask, dwStyle, cyMax, hbrBack, dwContextHelpID, dwMenuData
+		hMenu := ctx.Arg(0)
+		pInfo := ctx.Arg(1)
+		if hMenu == 0 || pInfo == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// Read fMask to know which fields to apply
+		fMask, _ := mem.Read32(pInfo + 4)
+		_ = fMask // We accept the call but don't change internal state yet
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8123,8 +8462,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
-	for _, fn := range []string{"SetLayeredWindowAttributes", "UpdateLayeredWindow",
-		"UpdateLayeredWindowIndirect"} {
+	// Layered window attributes tracking.
+	// ReactOS: win32ss/user/ntuser/layered.c
+	type layeredAttrs struct {
+		colorKey uint32
+		alpha    uint8
+		flags    uint32
+	}
+	layeredWindows := map[uint64]*layeredAttrs{}
+
+	d.RegisterAutoStubHandler(user32, "SetLayeredWindowAttributes", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		colorKey := uint32(ctx.Arg(1))
+		alpha := uint8(ctx.Arg(2))
+		flags := uint32(ctx.Arg(3))
+		layeredWindows[hwnd] = &layeredAttrs{colorKey: colorKey, alpha: alpha, flags: flags}
+		ctx.SetReturn(1)
+		return 0
+	})
+	for _, fn := range []string{"UpdateLayeredWindow", "UpdateLayeredWindowIndirect"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
@@ -8133,7 +8489,26 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "GetLayeredWindowAttributes", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// BOOL GetLayeredWindowAttributes(HWND, COLORREF*, BYTE*, DWORD*)
+		hwnd := ctx.Arg(0)
+		pColorKey := ctx.Arg(1)
+		pAlpha := ctx.Arg(2)
+		pFlags := ctx.Arg(3)
+		la, ok := layeredWindows[hwnd]
+		if !ok {
+			ctx.SetReturn(0) // not a layered window
+			return 0
+		}
+		if pColorKey != 0 {
+			mem.Write32(pColorKey, la.colorKey)
+		}
+		if pAlpha != 0 {
+			mem.Write8(pAlpha, la.alpha)
+		}
+		if pFlags != 0 {
+			mem.Write32(pFlags, la.flags)
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DisableProcessWindowsGhosting", func(ctx *ntapi.TrapContext) uint32 {
@@ -8217,11 +8592,23 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "AttachThreadInput", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL AttachThreadInput(DWORD idAttach, DWORD idAttachTo, BOOL fAttach)
+		// ReactOS: NtUserAttachThreadInput
+		// We run single-threaded, so all threads share one input queue already.
+		ctx.SetReturn(1) // success
 		return 0
 	})
+	var inputBlocked bool
 	d.RegisterAutoStubHandler(user32, "BlockInput", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL BlockInput(BOOL fBlockIt)
+		// ReactOS: NtUserBlockInput
+		fBlock := ctx.Arg(0) != 0
+		if fBlock == inputBlocked {
+			ctx.SetReturn(0) // already in requested state
+		} else {
+			inputBlocked = fBlock
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DragDetect", func(ctx *ntapi.TrapContext) uint32 {
@@ -8688,25 +9075,81 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(h) // return same handle (shallow copy)
 		return 0
 	})
+	// Icon/Cursor handle table - track created icons with unique handles.
+	// ReactOS: win32ss/user/ntuser/cursoricon.c
+	type iconEntry struct {
+		isIcon bool
+		cx, cy int32
+	}
+	iconTable := map[uint64]*iconEntry{}
+	var nextIconHandle uint64 = 0x00020010
+
 	d.RegisterAutoStubHandler(user32, "CreateIconFromResourceEx", func(ctx *ntapi.TrapContext) uint32 {
-		// Return dummy icon handle
-		ctx.SetReturn(0x00020002)
+		// HICON CreateIconFromResourceEx(PBYTE presbits, DWORD dwResSize, BOOL fIcon,
+		//   DWORD dwVer, int cxDesired, int cyDesired, UINT Flags)
+		fIcon := ctx.Arg(2) != 0
+		cxDesired := int32(ctx.Arg(4))
+		cyDesired := int32(ctx.Arg(5))
+		if cxDesired == 0 {
+			cxDesired = 32
+		}
+		if cyDesired == 0 {
+			cyDesired = 32
+		}
+		nextIconHandle++
+		h := nextIconHandle
+		iconTable[h] = &iconEntry{isIcon: fIcon, cx: cxDesired, cy: cyDesired}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateIconFromResource", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x00020002)
+		// HICON CreateIconFromResource(PBYTE presbits, DWORD dwResSize, BOOL fIcon, DWORD dwVer)
+		fIcon := ctx.Arg(2) != 0
+		nextIconHandle++
+		h := nextIconHandle
+		iconTable[h] = &iconEntry{isIcon: fIcon, cx: 32, cy: 32}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateCursor", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x00010002) // dummy cursor
+		// HCURSOR CreateCursor(HINSTANCE, int xHot, int yHot, int nWidth, int nHeight,
+		//   const VOID *pvANDPlane, const VOID *pvXORPlane)
+		nw := int32(ctx.Arg(3))
+		nh := int32(ctx.Arg(4))
+		nextIconHandle++
+		h := nextIconHandle
+		iconTable[h] = &iconEntry{isIcon: false, cx: nw, cy: nh}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateIcon", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x00020003) // dummy icon
+		// HICON CreateIcon(HINSTANCE, int nWidth, int nHeight, BYTE cPlanes, BYTE cBitsPixel,
+		//   const BYTE *lpbANDbits, const BYTE *lpbXORbits)
+		nw := int32(ctx.Arg(1))
+		nh := int32(ctx.Arg(2))
+		nextIconHandle++
+		h := nextIconHandle
+		iconTable[h] = &iconEntry{isIcon: true, cx: nw, cy: nh}
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "LookupIconIdFromDirectory", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // return first icon entry
+		// int LookupIconIdFromDirectory(PBYTE presbits, BOOL fIcon)
+		// ReactOS: LookupIconIdFromDirectoryEx with default sizes
+		// Parse GRPICONDIR: idReserved(2), idType(2), idCount(2), then GRPICONDIRENTRY[idCount]
+		presbits := ctx.Arg(0)
+		if presbits == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		idCount, _ := mem.Read16(presbits + 4)
+		if idCount == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// Return the nID of the first entry (offset 12 in GRPICONDIRENTRY, at presbits+6+0*14+12)
+		nID, _ := mem.Read16(presbits + 6 + 12)
+		ctx.SetReturn(uint64(nID))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "LookupIconIdFromDirectoryEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -8850,7 +9293,46 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "EnumThreadWindows", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL EnumThreadWindows(DWORD dwThreadId, WNDENUMPROC lpfn, LPARAM lParam)
+		// ReactOS: NtUserBuildHwndList
+		// Since we're single-threaded, enumerate all top-level windows.
+		lpEnumFunc := ctx.Arg(1)
+		lParam := ctx.Arg(2)
+		if lpEnumFunc == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		all := win32.Global.AllWindows()
+		if len(all) == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+		if !ok || !ok2 {
+			ctx.SetReturn(1)
+			return 0
+		}
+		rsp := rr.ReadReg(4)
+		retAddr, _ := mem.Read64(rsp)
+		queue := make([]syncDispatch, len(all))
+		for i, h := range all {
+			queue[i] = syncDispatch{wndProc: lpEnumFunc, hwnd: h, msg: lParam}
+		}
+		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			queue:   queue[1:],
+			retAddr: retAddr,
+			hwnd:    1,
+		})
+		rsp -= 8
+		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
+		rw.WriteReg(1, queue[0].hwnd)
+		rw.WriteReg(2, uint64(queue[0].msg))
+		rw.WriteReg(8, 0)
+		rw.WriteReg(9, 0)
+		ctx.CPU.SetPC(queue[0].wndProc)
+		ctx.ReturnOverridden = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SwitchToThisWindow", func(ctx *ntapi.TrapContext) uint32 {

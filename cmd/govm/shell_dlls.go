@@ -1199,7 +1199,16 @@ func registerShcoreHandlers2(hctx *HandlerCtx) {
 		ctx.SetReturn(0) // S_OK
 		return 0
 	})
+	var dpiAwareness uint32
 	d.RegisterAutoStubHandler(shcore, "SetProcessDpiAwareness", func(ctx *ntapi.TrapContext) uint32 {
+		// HRESULT SetProcessDpiAwareness(PROCESS_DPI_AWARENESS value)
+		// ReactOS/Wine: dll/win32/shcore/main.c
+		newVal := uint32(ctx.Arg(0))
+		if dpiAwareness != 0 && newVal != dpiAwareness {
+			ctx.SetReturn(0x80070005) // E_ACCESSDENIED - already set
+			return 0
+		}
+		dpiAwareness = newVal
 		ctx.SetReturn(0) // S_OK
 		return 0
 	})

@@ -466,9 +466,35 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0) // S_OK
 		return 0
 	})
-	// VariantChangeType
+	// VariantChangeType: Convert a VARIANT to a different type.
+	// ReactOS/Wine: dll/win32/oleaut32/variant.c
 	d.RegisterAutoStubHandler(oleaut32, "VariantChangeType", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x80004002) // E_NOINTERFACE - can't convert
+		// HRESULT VariantChangeType(VARIANTARG *pvargDest, const VARIANTARG *pvarSrc, USHORT wFlags, VARTYPE vt)
+		pvargDest := ctx.Arg(0)
+		pvarSrc := ctx.Arg(1)
+		vtTarget := uint16(ctx.Arg(3))
+		if pvargDest == 0 || pvarSrc == 0 {
+			ctx.SetReturn(0x80070057) // E_INVALIDARG
+			return 0
+		}
+		// VARIANT layout: vt(2), reserved(6), data(8..16)
+		vtSrc, _ := mem.Read16(pvarSrc)
+		const (
+			VT_EMPTY = 0
+			VT_I4    = 3
+			VT_BSTR  = 8
+		)
+		// Trivial same-type copy
+		if vtSrc == vtTarget {
+			for i := uint64(0); i < 24; i++ {
+				b, _ := mem.Read8(pvarSrc + i)
+				mem.Write8(pvargDest+i, b)
+			}
+			ctx.SetReturn(0) // S_OK
+			return 0
+		}
+		// Can't convert complex types - return DISP_E_TYPEMISMATCH
+		ctx.SetReturn(0x80020005)
 		return 0
 	})
 }

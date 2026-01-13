@@ -226,3 +226,79 @@ func (s *Surface) StretchBlt(dx, dy, dw, dh int32, src *Surface, sx, sy, sw, sh 
 func (s *Surface) PatBlt(x, y, w, h int32, color uint32) {
 	s.FillRect(x, y, x+w, y+h, color)
 }
+
+// FloodFill performs a scanline-based flood fill starting at (x, y).
+// If isBorder=true (FLOODFILLBORDER), fills until hitting borderColor.
+// If isBorder=false (FLOODFILLSURFACE), fills pixels matching targetColor.
+// ReactOS: NtGdiExtFloodFill → SURFACE_FloodFill
+func (s *Surface) FloodFill(x, y int32, refColor, fillColor uint32, isBorder bool) {
+	if s.Pix == nil || x < 0 || y < 0 || x >= s.Width || y >= s.Height {
+		return
+	}
+	seedColor := s.GetPixel(x, y)
+	if !isBorder && seedColor != refColor {
+		return // FLOODFILLSURFACE: seed must match target
+	}
+	if isBorder && seedColor == refColor {
+		return // FLOODFILLBORDER: seed is already the border
+	}
+	if seedColor == fillColor {
+		return // nothing to do
+	}
+
+	type span struct{ x, y int32 }
+	stack := []span{{x, y}}
+	visited := make([]bool, s.Width*s.Height)
+
+	shouldFill := func(px, py int32) bool {
+		if px < 0 || py < 0 || px >= s.Width || py >= s.Height {
+			return false
+		}
+		if visited[py*s.Width+px] {
+			return false
+		}
+		c := s.GetPixel(px, py)
+		if isBorder {
+			return c != refColor && c != fillColor
+		}
+		return c == seedColor
+	}
+
+	for len(stack) > 0 {
+		sp := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if sp.x < 0 || sp.y < 0 || sp.x >= s.Width || sp.y >= s.Height {
+			continue
+		}
+		if visited[sp.y*s.Width+sp.x] {
+			continue
+		}
+		if !shouldFill(sp.x, sp.y) {
+			continue
+		}
+		// Scan left
+		lx := sp.x
+		for lx > 0 && shouldFill(lx-1, sp.y) {
+			lx--
+		}
+		// Scan right
+		rx := sp.x
+		for rx < s.Width-1 && shouldFill(rx+1, sp.y) {
+			rx++
+		}
+		// Fill the span
+		for fx := lx; fx <= rx; fx++ {
+			s.SetPixel(fx, sp.y, fillColor)
+			visited[sp.y*s.Width+fx] = true
+		}
+		// Add spans above and below
+		for fx := lx; fx <= rx; fx++ {
+			if sp.y > 0 && shouldFill(fx, sp.y-1) {
+				stack = append(stack, span{fx, sp.y - 1})
+			}
+			if sp.y < s.Height-1 && shouldFill(fx, sp.y+1) {
+				stack = append(stack, span{fx, sp.y + 1})
+			}
+		}
+	}
+}

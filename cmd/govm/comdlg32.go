@@ -281,7 +281,15 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL
+		// HWND ReplaceTextW(LPFINDREPLACEW lpfr)
+		// ReactOS: dll/win32/comdlg32/finddlg.c
+		// Creates a modeless Find & Replace dialog. We can't fully implement
+		// the dialog yet, but we log the request and return NULL (dialog not created).
+		lpfr := ctx.Arg(0)
+		if lpfr != 0 {
+			ravelog.Logf("[comdlg32] ReplaceTextW called (lpfr=0x%X, not yet implemented)\n", lpfr)
+		}
+		ctx.SetReturn(0) // NULL - dialog not created
 		return 0
 	})
 }

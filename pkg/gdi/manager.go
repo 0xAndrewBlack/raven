@@ -18,6 +18,18 @@ type Manager struct {
 
 	// Screen surface - updated when the Wayland window resizes.
 	Screen *Surface
+
+	// Palette management - system palette + logical palettes.
+	SystemPalette *Palette
+	palettes      map[uint64]*Palette
+
+	// Metafile management.
+	Metafiles *MetafileManager
+
+	// Font resource tracking (AddFontResource/RemoveFontResource).
+	fontResources    map[string]int // path → refcount
+	fontMemResources map[uint64]bool
+	nextFontMemRes   uint64
 }
 
 var baseHandle = uint64(0x10000)
@@ -25,9 +37,15 @@ var baseHandle = uint64(0x10000)
 // NewManager creates an initialised GDI Manager with stock objects.
 func NewManager() *Manager {
 	m := &Manager{
-		next:    baseHandle,
-		objects: make(map[uint64]*Object),
-		dcs:     make(map[uint64]*DC),
+		next:             baseHandle,
+		objects:          make(map[uint64]*Object),
+		dcs:              make(map[uint64]*DC),
+		SystemPalette:    DefaultSystemPalette(),
+		palettes:         make(map[uint64]*Palette),
+		Metafiles:        NewMetafileManager(),
+		fontResources:    make(map[string]int),
+		fontMemResources: make(map[uint64]bool),
+		nextFontMemRes:   0xFD000001,
 	}
 	m.initStock()
 	return m
@@ -523,4 +541,67 @@ func (m *Manager) BrushColor(h uint64, sysColors [31]uint32) uint32 {
 		return obj.Brush.Color
 	}
 	return 0xF0F0F0 // fallback: light gray
+}
+
+// --- Palette management ---
+// ReactOS: win32ss/gdi/ntgdi/palette.c
+
+// CreatePalette registers a new logical palette and returns its handle.
+func (m *Manager) CreatePalette(entries []PaletteEntry) uint64 {
+	h := m.alloc()
+	m.palettes[h] = NewPalette(entries)
+	return h
+}
+
+// GetPalette returns the Palette for a handle, or nil.
+func (m *Manager) GetPalette(h uint64) *Palette {
+	return m.palettes[h]
+}
+
+// DeletePalette removes a palette handle.
+func (m *Manager) DeletePalette(h uint64) bool {
+	if _, ok := m.palettes[h]; ok {
+		delete(m.palettes, h)
+		return true
+	}
+	return false
+}
+
+// --- Font resource tracking ---
+// ReactOS: AddFontResourceW / RemoveFontResourceW in win32ss/gdi/ntgdi/freetype.c
+
+// AddFontResource registers a font file. Returns the number of fonts added (≥1 on success).
+func (m *Manager) AddFontResource(path string) int {
+	m.fontResources[path]++
+	return 1 // we report 1 font face per file
+}
+
+// RemoveFontResource decrements the refcount for a font file. Returns true if it was registered.
+func (m *Manager) RemoveFontResource(path string) bool {
+	if cnt, ok := m.fontResources[path]; ok {
+		if cnt <= 1 {
+			delete(m.fontResources, path)
+		} else {
+			m.fontResources[path] = cnt - 1
+		}
+		return true
+	}
+	return false
+}
+
+// AddFontMemResource registers a font from memory. Returns a handle.
+func (m *Manager) AddFontMemResource() uint64 {
+	h := m.nextFontMemRes
+	m.nextFontMemRes++
+	m.fontMemResources[h] = true
+	return h
+}
+
+// RemoveFontMemResource removes a memory font resource handle.
+func (m *Manager) RemoveFontMemResource(h uint64) bool {
+	if m.fontMemResources[h] {
+		delete(m.fontMemResources, h)
+		return true
+	}
+	return false
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 	"golang.org/x/sys/unix"
@@ -2185,6 +2186,13 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(advapi32, "RegNotifyChangeKeyValue", func(ctx *ntapi.TrapContext) uint32 {
 		// LSTATUS RegNotifyChangeKeyValue(HKEY hKey, BOOL bWatchSubtree,
 		//   DWORD dwNotifyFilter, HANDLE hEvent, BOOL fAsynchronous)
+		// ReactOS: NtNotifyChangeKey in ntoskrnl/config/cmapi.c
+		// We don't have a filesystem-backed registry, so we accept the request
+		// and return success. The event will never be signaled.
+		hEvent := ctx.Arg(3)
+		if hEvent != 0 {
+			ravelog.Logf("[advapi32] RegNotifyChangeKeyValue: event=0x%X (will never signal)\n", hEvent)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})

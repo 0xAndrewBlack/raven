@@ -235,3 +235,27 @@ func (m *Manager) GetUpdateRect(hwnd uint64) (Rect, bool) {
 	}
 	return Rect{}, false
 }
+
+// AllWindows returns a snapshot of all registered HWNDs.
+func (m *Manager) AllWindows() []uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]uint64, 0, len(m.windows))
+	for h := range m.windows {
+		out = append(out, h)
+	}
+	return out
+}
+
+// ChildrenOf returns all HWNDs whose parent matches the given handle.
+func (m *Manager) ChildrenOf(parent uint64) []uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []uint64
+	for h, wnd := range m.windows {
+		if wnd.Parent == parent {
+			out = append(out, h)
+		}
+	}
+	return out
+}

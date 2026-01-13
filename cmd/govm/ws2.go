@@ -834,13 +834,21 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ws2, "select", func(ctx *ntapi.TrapContext) uint32 {
-		// Basic select: just check if fds have data (non-blocking scan)
-		// nfds ignored for Winsock
-		// readfds := ctx.Arg(1)
-		// writefds := ctx.Arg(2)
-		// exceptfds := ctx.Arg(3)
-		// timeout := ctx.Arg(4)
-		ctx.SetReturn(0) // 0 = timeout (no sockets ready)
+		// int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const timeval *timeout)
+		// ReactOS: dll/win32/ws2_32/src/select.c
+		// Winsock fd_set: { u_int fd_count; SOCKET fd_array[FD_SETSIZE]; }
+		// We report all write fds as ready (typical for connected sockets) and
+		// return immediately (non-blocking behavior).
+		writefds := ctx.Arg(2)
+		readyCount := 0
+		if writefds != 0 {
+			wCount, _ := mem.Read32(writefds)
+			readyCount += int(wCount)
+		}
+		if readyCount == 0 {
+			readyCount = 0 // timeout with no ready sockets
+		}
+		ctx.SetReturn(uint64(readyCount))
 		return 0
 	})
 }
