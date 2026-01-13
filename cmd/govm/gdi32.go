@@ -260,22 +260,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 				ctx.Mem.Write32(pv+12, obj.Pen.Color)
 			}
 		case gdi.ObjBrush:
-			ctx.SetReturn(12) // sizeof(LOGBRUSH)
+			// LOGBRUSH on x64: {lbStyle:UINT(+0,4), lbColor:COLORREF(+4,4), lbHatch:ULONG_PTR(+8,8)} = 16
+			ctx.SetReturn(16)
 			if pv != 0 && obj.Brush != nil {
 				ctx.Mem.Write32(pv, uint32(obj.Brush.Style))
 				ctx.Mem.Write32(pv+4, obj.Brush.Color)
-				ctx.Mem.Write32(pv+8, uint32(obj.Brush.Hatch))
-			}
-		case gdi.ObjBitmap:
-			ctx.SetReturn(24) // sizeof(BITMAP)
-			if pv != 0 && obj.Bitmap != nil {
-				ctx.Mem.Write32(pv, 0) // bmType
-				ctx.Mem.Write32(pv+4, uint32(obj.Bitmap.Width))
-				ctx.Mem.Write32(pv+8, uint32(obj.Bitmap.Height))
-				ctx.Mem.Write32(pv+12, uint32(obj.Bitmap.Width*4)) // bmWidthBytes
-				ctx.Mem.Write16(pv+16, 1)                          // bmPlanes
-				ctx.Mem.Write16(pv+18, 32)                         // bmBitsPixel
-				ctx.Mem.Write32(pv+20, 0)                          // bmBits
+				ctx.Mem.Write64(pv+8, uint64(obj.Brush.Hatch))
 			}
 		case gdi.ObjFont:
 			ctx.SetReturn(92) // sizeof(LOGFONTW)
@@ -3156,14 +3146,14 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 				ctx.Mem.Write32(pv+12, obj.Pen.Color)
 			}
 		case gdi.ObjBrush:
-			ctx.SetReturn(12) // sizeof(LOGBRUSH)
+			ctx.SetReturn(16) // sizeof(LOGBRUSH) on x64
 			if pv != 0 && obj.Brush != nil {
 				ctx.Mem.Write32(pv, uint32(obj.Brush.Style))
 				ctx.Mem.Write32(pv+4, obj.Brush.Color)
-				ctx.Mem.Write32(pv+8, uint32(obj.Brush.Hatch))
+				ctx.Mem.Write64(pv+8, uint64(obj.Brush.Hatch))
 			}
 		case gdi.ObjBitmap:
-			ctx.SetReturn(24) // sizeof(BITMAP)
+			ctx.SetReturn(32) // sizeof(BITMAP) on x64
 			if pv != 0 && obj.Bitmap != nil {
 				ctx.Mem.Write32(pv, 0)
 				ctx.Mem.Write32(pv+4, uint32(obj.Bitmap.Width))
@@ -3171,7 +3161,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 				ctx.Mem.Write32(pv+12, uint32(obj.Bitmap.Width*4))
 				ctx.Mem.Write16(pv+16, 1)
 				ctx.Mem.Write16(pv+18, 32)
-				ctx.Mem.Write32(pv+20, 0)
+				ctx.Mem.Write32(pv+20, 0) // padding
+				ctx.Mem.Write64(pv+24, 0) // bmBits (8 bytes on x64)
 			}
 		case gdi.ObjFont:
 			// LOGFONTA = 60 bytes (lfFaceName is char[32] at offset 28)
