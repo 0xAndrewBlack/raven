@@ -18,14 +18,14 @@ type TrapHandler func(ctx *TrapContext) uint32
 
 // TrapContext provides access to guest CPU state and VM subsystems for handlers.
 type TrapContext struct {
-	CPU     arch.CPU
-	Mem     *mmu.MMU
-	FS      *vfs.VFS
-	Handles *HandleTable
-	Reg     *RegistryHive
-	State   *ProcessState
-	Disp    *Dispatcher
-	Trace   bool
+	CPU        arch.CPU
+	Mem        *mmu.MMU
+	FS         *vfs.VFS
+	Handles    *HandleTable
+	Reg        *RegistryHive
+	State      *ProcessState
+	Disp       *Dispatcher
+	Trace      bool
 	flsSlots   map[uint32]uint64
 	flsNextIdx uint32
 	// ReturnOverridden is set by handlers that manage RAX directly,
@@ -156,15 +156,15 @@ type XMMAccess interface {
 
 // Dispatcher routes vmcall traps to the appropriate handler based on syscall ID.
 type Dispatcher struct {
-	handlers      map[uint32]TrapHandler
-	names         map[uint32]string // for trace logging
-	ntdll         *SynthPE
-	win32u        *SynthPE
-	ctx           *TrapContext
-	moduleExports map[uint64]map[string]uint64 // baseAddr → name → addr
+	handlers         map[uint32]TrapHandler
+	names            map[uint32]string // for trace logging
+	ntdll            *SynthPE
+	win32u           *SynthPE
+	ctx              *TrapContext
+	moduleExports    map[uint64]map[string]uint64 // baseAddr → name → addr
 	moduleOrdExports map[uint64]map[uint16]uint64 // baseAddr → ordinal → addr
-	sysRoot       string // path to Windows system DLL directory
-	nlsCache      map[uint32][]byte // cached NLS file data by code page
+	sysRoot          string                       // path to Windows system DLL directory
+	nlsCache         map[uint32][]byte            // cached NLS file data by code page
 }
 
 // NewDispatcher creates a trap dispatcher with all registered handlers.
@@ -178,11 +178,11 @@ func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *Registr
 		moduleOrdExports: make(map[uint64]map[uint16]uint64),
 		nlsCache:         make(map[uint32][]byte),
 		ctx: &TrapContext{
-			Mem:        mem,
-			FS:         fs,
-			Handles:    handles,
-			Reg:        reg,
-			State:      state,
+			Mem:     mem,
+			FS:      fs,
+			Handles: handles,
+			Reg:     reg,
+			State:   state,
 		},
 	}
 	d.ctx.Disp = d
@@ -607,6 +607,8 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("RtlRestoreContext"), "RtlRestoreContext", handleRtlRestoreContext)
 	d.register(idOf("RtlRaiseException"), "RtlRaiseException", handleRtlRaiseException)
 	d.register(idOf("RtlRaiseStatus"), "RtlRaiseStatus", handleRtlRaiseStatus)
+	d.register(idOf("RtlAddVectoredExceptionHandler"), "RtlAddVectoredExceptionHandler", handleRtlAddVectoredExceptionHandler)
+	d.register(idOf("RtlRemoveVectoredExceptionHandler"), "RtlRemoveVectoredExceptionHandler", handleRtlRemoveVectoredExceptionHandler)
 	d.register(idOf("RtlPcToFileHeader"), "RtlPcToFileHeader", handleRtlPcToFileHeader)
 	d.register(idOf("RtlGetEnabledExtendedFeatures"), "RtlGetEnabledExtendedFeatures", handleRtlGetEnabledExtendedFeatures)
 	d.register(idOf("RtlSetUnhandledExceptionFilter"), "RtlSetUnhandledExceptionFilter", handleRtlSetUnhandledExceptionFilter)
@@ -660,6 +662,8 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("RtlGetCurrentDirectory_U"), "RtlGetCurrentDirectory_U", handleRtlGetCurrentDirectory_U)
 	d.register(idOf("RtlSetCurrentDirectory_U"), "RtlSetCurrentDirectory_U", handleRtlSetCurrentDirectory_U)
 	d.register(idOf("RtlGetFullPathName_U"), "RtlGetFullPathName_U", handleRtlGetFullPathName_U)
+	d.register(idOf("RtlGetNtGlobalFlags"), "RtlGetNtGlobalFlags", handleRtlGetNtGlobalFlags)
+	d.register(idOf("RtlGetNtProductType"), "RtlGetNtProductType", handleRtlGetNtProductType)
 	d.register(idOf("RtlDetermineDosPathNameType_U"), "RtlDetermineDosPathNameType_U", handleRtlDetermineDosPathNameType_U)
 
 	// Bitmap
@@ -697,6 +701,7 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	// Security descriptors / SIDs
 	d.register(idOf("RtlCreateSecurityDescriptor"), "RtlCreateSecurityDescriptor", handleRtlCreateSecurityDescriptor)
 	d.register(idOf("RtlSetDaclSecurityDescriptor"), "RtlSetDaclSecurityDescriptor", handleRtlSetDaclSecurityDescriptor)
+	d.register(idOf("RtlGetDaclSecurityDescriptor"), "RtlGetDaclSecurityDescriptor", handleRtlGetDaclSecurityDescriptor)
 	d.register(idOf("RtlCreateAcl"), "RtlCreateAcl", handleRtlCreateAcl)
 	d.register(idOf("RtlAddAccessAllowedAce"), "RtlAddAccessAllowedAce", handleRtlAddAccessAllowedAce)
 	d.register(idOf("RtlAddAccessAllowedAceEx"), "RtlAddAccessAllowedAceEx", handleRtlAddAccessAllowedAceEx)
@@ -875,8 +880,6 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("ZwTerminateThread"), "ZwTerminateThread", handleNtTerminateThread)
 	d.register(idOf("NtCreateThread"), "NtCreateThread", handleNtCreateThread)
 	d.register(idOf("NtCreateThreadEx"), "NtCreateThreadEx", handleNtCreateThreadEx)
-	d.register(idOf("NtSetInformationThread"), "NtSetInformationThread", handleNtSetInformationThread)
-	d.register(idOf("NtQueryInformationThread"), "NtQueryInformationThread", handleNtQueryInformationThread)
 	// Job objects
 	d.register(idOf("NtCreateJobObject"), "NtCreateJobObject", handleNtCreateJobObject)
 	d.register(idOf("NtOpenJobObject"), "NtOpenJobObject", handleNtOpenJobObject)

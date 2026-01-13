@@ -342,6 +342,10 @@ if err != nil {
 fmt.Fprintf(os.Stderr, "govm: PE load error: %v\n", err)
 os.Exit(1)
 }
+if !result.MainModule.Is64 {
+fmt.Fprintf(os.Stderr, "govm: PE32 (x86) binaries are not supported yet: %s\n", absPath)
+os.Exit(1)
+}
 
 // Record boot time for GetTickCount / KUSER_SHARED_DATA TickCount updates.
 // Pretend the system booted 2 hours ago to avoid sandbox uptime detection.
@@ -10217,7 +10221,71 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFileInformationByHandle", func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(0) // FALSE
+			// ReactOS: dll/win32/kernel32/client/file/fileinfo.c - GetFileInformationByHandle
+			// Queries FileBasicInformation, FileInternalInformation, FileStandardInformation
+			// and FileFsVolumeInformation, populates BY_HANDLE_FILE_INFORMATION.
+			hFile := ntapi.Handle(ctx.Arg(0))
+			lpInfo := ctx.Arg(1)
+			if lpInfo == 0 {
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+			fh := handles.GetFile(hFile)
+			if fh == nil {
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+			node := ctx.FS.Stat(fh.FD)
+			if node == nil {
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+				ctx.SetReturn(0)
+				return 0
+			}
+			toFT := func(t time.Time) uint64 {
+				return uint64(t.UnixNano()/100) + 116444736000000000
+			}
+			// BY_HANDLE_FILE_INFORMATION layout (52 bytes):
+			//  +0x00  DWORD  dwFileAttributes
+			//  +0x04  FILETIME ftCreationTime   (8)
+			//  +0x0C  FILETIME ftLastAccessTime  (8)
+			//  +0x14  FILETIME ftLastWriteTime   (8)
+			//  +0x1C  DWORD  dwVolumeSerialNumber
+			//  +0x20  DWORD  nFileSizeHigh
+			//  +0x24  DWORD  nFileSizeLow
+			//  +0x28  DWORD  nNumberOfLinks
+			//  +0x2C  DWORD  nFileIndexHigh
+			//  +0x30  DWORD  nFileIndexLow
+			var attrs uint32 = 0x80 // FILE_ATTRIBUTE_NORMAL
+			if node.IsDir {
+				attrs = 0x10 // FILE_ATTRIBUTE_DIRECTORY
+			}
+			if len(node.Name) > 0 && node.Name[0] == '.' {
+				attrs |= 0x02 // FILE_ATTRIBUTE_HIDDEN
+			}
+			if node.FileMode&0200 == 0 {
+				attrs |= 0x01 // FILE_ATTRIBUTE_READONLY
+			}
+			mem.Write32(lpInfo+0x00, attrs)
+			ct := toFT(node.Ctime)
+			mem.Write32(lpInfo+0x04, uint32(ct))
+			mem.Write32(lpInfo+0x08, uint32(ct>>32))
+			at := toFT(node.Atime)
+			mem.Write32(lpInfo+0x0C, uint32(at))
+			mem.Write32(lpInfo+0x10, uint32(at>>32))
+			wt := toFT(node.Mtime)
+			mem.Write32(lpInfo+0x14, uint32(wt))
+			mem.Write32(lpInfo+0x18, uint32(wt>>32))
+			mem.Write32(lpInfo+0x1C, 0x12345678) // dwVolumeSerialNumber (synthetic)
+			mem.Write32(lpInfo+0x20, uint32(node.Size>>32))
+			mem.Write32(lpInfo+0x24, uint32(node.Size))
+			nlinks := node.Nlink
+			if nlinks == 0 { nlinks = 1 }
+			mem.Write32(lpInfo+0x28, nlinks)
+			mem.Write32(lpInfo+0x2C, uint32(node.Ino>>32))
+			mem.Write32(lpInfo+0x30, uint32(node.Ino))
+			ctx.SetReturn(1) // TRUE
 			return 0
 		})
 		d.RegisterAutoStubHandler(kernel32, "GetFileInformationByHandleEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -18458,6 +18526,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		lParam  uint64
 	}
 	var msgQueue []queuedMsg
+	// Tracks non-empty update regions per HWND.
+	winInvalid := map[uint64]bool{}
+	var lastPostedMainW, lastPostedMainH int32
+	queuePaint := func(hwnd uint64) {
+		if hwnd == 0 {
+			hwnd = mainHWND
+		}
+		winInvalid[hwnd] = true
+		for _, qm := range msgQueue {
+			if qm.hwnd == hwnd && qm.message == 0x000F {
+				return
+			}
+		}
+		msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+	}
 
 	// win32Timer tracks active SetTimer timers.
 	type win32Timer struct {
@@ -18904,7 +18987,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				cs.editModified = true
 				// Queue repaint
-				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+				queuePaint(mainHWND)
 				return 0, true
 			case 0x0100: // WM_KEYDOWN
 				return 0, true
@@ -19264,7 +19347,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				rebarBandCounts[hwnd]++
 				cs.h = int32(rebarBandCounts[hwnd]) * 26
 				// Queue repaint so the toolbar gets drawn after sizing
-				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+				queuePaint(mainHWND)
 				return 1, true
 			case rbFirst + 12: // RB_GETBANDCOUNT
 				return uint64(rebarBandCounts[hwnd]), true
@@ -19679,7 +19762,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					mem.Write32(nmhdr+16, 0xFFFFFDE9) // TCN_SELCHANGE = -551
 					msgQueue = append(msgQueue, queuedMsg{cs.parentHWND, 0x004E, uint64(cs.ctrlID), nmhdr})
 					// Repaint tab strip to show new selection.
-					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+					queuePaint(hwnd)
 				}
 				return 0, true
 			default:
@@ -20249,7 +20332,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, (sh << 16) | sw}) // WM_SIZE
 				// WM_ACTIVATE(WA_ACTIVE=1): NPP's WndProc calls SetFocus(scintilla) here.
 				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0006, 1, 0}) // WM_ACTIVATE
-				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0}) // WM_PAINT
+				queuePaint(hwnd) // WM_PAINT
 				// Win32: ShowWindow on a parent cascades visibility only to children that
 				// were created with WS_VISIBLE (0x10000000). Windows created without
 				// WS_VISIBLE are intentionally hidden and must be shown explicitly.
@@ -20259,7 +20342,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if !cs.visible && !hwndExplicitlyHidden[h] && cs.style&wsVisible != 0 {
 								cs.visible = true
 							if wp, ok2 := hwndWndProc[h]; ok2 && wp != 0 {
-								msgQueue = append(msgQueue, queuedMsg{h, 0x000F, 0, 0})
+								queuePaint(h)
 							}
 						}
 					}
@@ -20281,7 +20364,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// Queue WM_PAINT when a window with a guest WndProc becomes visible
 				if cs.visible && !wasVisible {
 					if wp, ok2 := hwndWndProc[hwnd]; ok2 && wp != 0 {
-						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+						queuePaint(hwnd)
 					}
 				}
 			}
@@ -20292,7 +20375,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// Trigger immediate paint for main window
 			hwnd := ctx.Arg(0)
 			if hwnd == mainHWND && wlWindow != nil {
-				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+				queuePaint(hwnd)
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -20461,7 +20544,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 						lParam := uint64(uint16(w)) | (uint64(uint16(clientH)) << 16)
 						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
-						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+						queuePaint(hwnd)
 					}
 				}
 				if flags&swpNoMove == 0 {
@@ -20636,7 +20719,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					lParam := uint64(uint16(newW)) | (uint64(uint16(clientH)) << 16)
 					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
 					if bRepaint != 0 {
-						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+						queuePaint(hwnd)
 					}
 				}
 				// Keep win32.Global in sync
@@ -20679,7 +20762,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				// Only repaint if size changed to a valid value (not just a position update).
 				if bRepaint != 0 && sizeChanged && ci.w > 0 && ci.h > 0 {
-					msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+					queuePaint(hwnd)
 				}
 			}
 			ctx.SetReturn(1)
@@ -21143,7 +21226,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							if _, hasGuest := hwndWndProc[h]; hasGuest {
 								hasGuestChildren = true
 								// Ensure the guest child has a WM_PAINT pending so it will call EndPaint.
-								msgQueue = append(msgQueue, queuedMsg{h, 0x000F, 0, 0})
+								queuePaint(h)
 							}
 						}
 					}
@@ -21613,6 +21696,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 					w := wlWindow.Width
 					h := wlWindow.Height
+					if lastPostedMainW == w && lastPostedMainH == h {
+						return
+					}
+					lastPostedMainW, lastPostedMainH = w, h
 					// Keep RcWindow/RcClient in sync so GetWindowRect returns correct values.
 					if wnd := win32.Global.Get(mainHWND); wnd != nil {
 						win32.Global.UpdatePos(wnd, 0, 0, w, h+wlWindow.TitleBarH)
@@ -21642,7 +21729,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								frameReady = true
 								commitIfDone()
 							} else {
-								msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+								queuePaint(mainHWND)
 							}
 							continue
 						}
@@ -21798,7 +21885,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 													frameReady = true
 													commitIfDone()
 												} else {
-													msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+													queuePaint(mainHWND)
 												}
 											}
 											x += tw
@@ -21860,7 +21947,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 															frameReady = true
 															commitIfDone()
 														} else {
-															msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+															queuePaint(mainHWND)
 														}
 														handled = true
 														break
@@ -21870,7 +21957,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 												_ = md
 												if !handled {
 													openMenuIdx = -1
-													msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+													queuePaint(mainHWND)
 												}
 											}
 										}
@@ -21921,7 +22008,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 																	}
 																}
 																openMenuIdx = -1
-																msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+																queuePaint(mainHWND)
 																dropHit = true
 																break
 															}
@@ -21932,7 +22019,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 											}
 											if !dropHit {
 												openMenuIdx = -1
-												msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+												queuePaint(mainHWND)
 											}
 										}
 										if !dropHit {
@@ -21992,6 +22079,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				m := msgQueue[0]
 				msgQueue = msgQueue[1:]
+				if m.message == 0x000F && m.hwnd == mainHWND {
+					// Main update region is consumed once WM_PAINT is dequeued.
+					// This prevents synthetic repaint frames from re-posting forever.
+					winInvalid[mainHWND] = false
+				}
 				if pMsg != 0 {
 					writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 				}
@@ -22063,15 +22155,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					continue
 				}
 				lastSyntheticFrameNs = nowNs
-				var childPaints []queuedMsg
+				var childPaints []uint64
 				for h, cs := range hwndChildren {
-					if hwndWndProc[h] != 0 && cs.visible {
-						childPaints = append(childPaints, queuedMsg{h, 0x000F, 0, 0})
+					if hwndWndProc[h] != 0 && cs.visible && winInvalid[h] {
+						childPaints = append(childPaints, h)
 					}
 				}
-				sort.Slice(childPaints, func(i, j int) bool { return childPaints[i].hwnd < childPaints[j].hwnd })
-				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
-				msgQueue = append(msgQueue, childPaints...)
+				if !winInvalid[mainHWND] && len(childPaints) == 0 {
+					continue
+				}
+				sort.Slice(childPaints, func(i, j int) bool { return childPaints[i] < childPaints[j] })
+				if winInvalid[mainHWND] {
+					queuePaint(mainHWND)
+				}
+				for _, h := range childPaints {
+					queuePaint(h)
+				}
 				if dequeueMsg() {
 					return 0
 				}
@@ -22321,7 +22420,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return 0
 				}
 			}
-			msgQueue = append(msgQueue, queuedMsg{target, 0x000F, 0, 0})
+			queuePaint(target)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -22336,21 +22435,38 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return 0
 				}
 			}
-			msgQueue = append(msgQueue, queuedMsg{target, 0x000F, 0, 0})
+			queuePaint(target)
 			ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "ValidateRect", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			if hwnd == 0 {
+				hwnd = mainHWND
+			}
+			winInvalid[hwnd] = false
 						ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "ValidateRgn", func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			if hwnd == 0 {
+				hwnd = mainHWND
+			}
+			winInvalid[hwnd] = false
 						ctx.SetReturn(1)
 			return 0
 		})
 		d.RegisterAutoStubHandler(user32, "GetUpdateRgn", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			hrgn := ctx.Arg(1)
+			if hwnd == 0 {
+				hwnd = mainHWND
+			}
+			if !winInvalid[hwnd] {
+				ctx.SetReturn(0) // NULLREGION
+				return 0
+			}
 			// Fill the region with the window's client rect and return SIMPLEREGION
 			if hrgn != 0 {
 				if cs, ok := hwndChildren[hwnd]; ok {
@@ -22367,6 +22483,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "GetUpdateRect", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			pRect := ctx.Arg(1)
+			if hwnd == 0 {
+				hwnd = mainHWND
+			}
+			if !winInvalid[hwnd] {
+				if pRect != 0 {
+					ctx.Mem.Write32(pRect, 0)
+					ctx.Mem.Write32(pRect+4, 0)
+					ctx.Mem.Write32(pRect+8, 0)
+					ctx.Mem.Write32(pRect+12, 0)
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
 			if pRect != 0 {
 				var w, h int32 = 800, 600
 				if cs, ok := hwndChildren[hwnd]; ok {
@@ -22943,6 +23072,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		d.RegisterAutoStubHandler(user32, "BeginPaint", func(ctx *ntapi.TrapContext) uint32 {
 			hwnd := ctx.Arg(0)
 			pPaint := ctx.Arg(1)
+			if hwnd != 0 {
+				winInvalid[hwnd] = false
+			}
 			ox, oy := clientAreaOrigin(hwnd)
 			if cs, ok := hwndChildren[hwnd]; ok {
 				ravelog.Logf("[paint] BeginPaint hwnd=0x%x class=%q x=%d y=%d w=%d h=%d\n", hwnd, cs.className, cs.x, cs.y, cs.w, cs.h)
@@ -23548,7 +23680,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 						lParam := uint64(uint16(w)) | (uint64(uint16(h)) << 16)
 						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
-						msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+						queuePaint(hwnd)
 					} else if ci, ok := hwndChildren[hwnd]; ok {
 						ci.w = w
 						ci.h = h
@@ -23564,9 +23696,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// Same reasoning as InvalidateRect: routing child RedrawWindow to mainHWND
 			// creates a paint loop when Scintilla redraws itself.
 			if hwnd == 0 || hwnd == mainHWND {
-				msgQueue = append(msgQueue, queuedMsg{mainHWND, 0x000F, 0, 0})
+				queuePaint(mainHWND)
 			} else if cs, ok := hwndChildren[hwnd]; ok && cs.visible {
-				msgQueue = append(msgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+				queuePaint(hwnd)
 			}
 			ctx.SetReturn(1)
 			return 0

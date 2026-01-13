@@ -377,6 +377,8 @@ var ntapiExports = []string{
 	"RtlGetLastWin32Error",
 	"RtlGetLocaleFileMappingAddress",
 	"RtlGetNativeSystemInformation",
+	"RtlGetNtGlobalFlags",
+	"RtlGetNtProductType",
 	"RtlGetOwnerSecurityDescriptor",
 	"RtlGetProcessHeaps",
 	"RtlGetProcessPreferredUILanguages",

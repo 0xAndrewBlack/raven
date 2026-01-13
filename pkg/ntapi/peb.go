@@ -12,96 +12,96 @@ import (
 const (
 	TebSize = 0x1838
 
-	TebNtTib                = 0x0000  // NT_TIB (ExceptionList, StackBase, StackLimit, ...)
-	TebExceptionList        = 0x0000  // EXCEPTION_REGISTRATION_RECORD*
-	TebStackBase            = 0x0008
-	TebStackLimit           = 0x0010
-	TebSubSystemTib         = 0x0018
-	TebFiberData            = 0x0020
-	TebSelf                 = 0x0030  // pointer to TEB itself
-	TebEnvironmentPointer   = 0x0038
-	TebClientId             = 0x0040  // CLIENT_ID (ProcessId, ThreadId)
-	TebProcessId            = 0x0040
-	TebThreadId             = 0x0048
-	TebActiveRpcHandle      = 0x0050
-	TebThreadLocalStorage   = 0x0058  // pointer to TLS array
-	TebPEB                  = 0x0060  // pointer to PEB
-	TebLastErrorValue       = 0x0068
-	TebCountOfOwnedCritSec  = 0x006C
-	TebCsrClientThread      = 0x0070
-	TebWin32ThreadInfo      = 0x0078
-	TebCurrentLocale        = 0x0108
-	TebStaticUnicodeString  = 0x0120  // UNICODE_STRING (Buffer at +0x0128)
-	TebTlsSlots             = 0x1480  // 64 TLS slots (64 × 8 bytes = 0x200)
-	TebTlsExpansionSlots    = 0x1780  // pointer to expanded TLS
-	TebFlsData              = 0x17c8  // pointer to FLS slot array
-	TebHeapBase             = 0x1800  // inline HeapAlloc: heap base address
-	TebHeapOffset           = 0x1808  // inline HeapAlloc: current bump offset
+	TebNtTib               = 0x0000 // NT_TIB (ExceptionList, StackBase, StackLimit, ...)
+	TebExceptionList       = 0x0000 // EXCEPTION_REGISTRATION_RECORD*
+	TebStackBase           = 0x0008
+	TebStackLimit          = 0x0010
+	TebSubSystemTib        = 0x0018
+	TebFiberData           = 0x0020
+	TebSelf                = 0x0030 // pointer to TEB itself
+	TebEnvironmentPointer  = 0x0038
+	TebClientId            = 0x0040 // CLIENT_ID (ProcessId, ThreadId)
+	TebProcessId           = 0x0040
+	TebThreadId            = 0x0048
+	TebActiveRpcHandle     = 0x0050
+	TebThreadLocalStorage  = 0x0058 // pointer to TLS array
+	TebPEB                 = 0x0060 // pointer to PEB
+	TebLastErrorValue      = 0x0068
+	TebCountOfOwnedCritSec = 0x006C
+	TebCsrClientThread     = 0x0070
+	TebWin32ThreadInfo     = 0x0078
+	TebCurrentLocale       = 0x0108
+	TebStaticUnicodeString = 0x0120 // UNICODE_STRING (Buffer at +0x0128)
+	TebTlsSlots            = 0x1480 // 64 TLS slots (64 × 8 bytes = 0x200)
+	TebTlsExpansionSlots   = 0x1780 // pointer to expanded TLS
+	TebFlsData             = 0x17c8 // pointer to FLS slot array
+	TebHeapBase            = 0x1800 // inline HeapAlloc: heap base address
+	TebHeapOffset          = 0x1808 // inline HeapAlloc: current bump offset
 )
 
 // PEB offsets (x64).
 const (
 	PebSize = 0x7C8
 
-	PebInheritedAddressSpace  = 0x0000
-	PebBeingDebugged          = 0x0002
-	PebImageBaseAddress       = 0x0010
-	PebLdr                    = 0x0018  // PEB_LDR_DATA*
-	PebProcessParameters      = 0x0020  // RTL_USER_PROCESS_PARAMETERS*
-	PebSubSystemData          = 0x0028
-	PebProcessHeap            = 0x0030
-	PebFastPebLock            = 0x0038
-	PebAtlThunkSListPtr       = 0x0040
-	PebKernelCallbackTable    = 0x0058
-	PebApiSetMap              = 0x0068
-	PebTlsExpansionCounter    = 0x0070
-	PebTlsBitmap              = 0x0078  // PVOID → RTL_BITMAP*
-	PebTlsBitmapBits          = 0x0080  // 2 × uint32 (bitmask for first 64 slots)
-	PebAnsiCodePageData       = 0x00A0  // USHORT* to NLS code page data
-	PebOemCodePageData        = 0x00A8  // USHORT* to NLS code page data
-	PebUnicodeCaseTableData   = 0x00B0  // USHORT* to Unicode case mapping
-	PebNumberOfProcessors     = 0x00B8
-	PebNtGlobalFlag           = 0x00BC
-	PebSessionId              = 0x02C0
-	PebOSMajorVersion         = 0x0118
-	PebOSMinorVersion         = 0x011C
-	PebOSBuildNumber          = 0x0120
-	PebOSPlatformId           = 0x0124
-	PebImageSubsystem         = 0x0128
-	PebImageSubsystemMajor    = 0x012C
-	PebImageSubsystemMinor    = 0x0130
+	PebInheritedAddressSpace = 0x0000
+	PebBeingDebugged         = 0x0002
+	PebImageBaseAddress      = 0x0010
+	PebLdr                   = 0x0018 // PEB_LDR_DATA*
+	PebProcessParameters     = 0x0020 // RTL_USER_PROCESS_PARAMETERS*
+	PebSubSystemData         = 0x0028
+	PebProcessHeap           = 0x0030
+	PebFastPebLock           = 0x0038
+	PebAtlThunkSListPtr      = 0x0040
+	PebKernelCallbackTable   = 0x0058
+	PebApiSetMap             = 0x0068
+	PebTlsExpansionCounter   = 0x0070
+	PebTlsBitmap             = 0x0078 // PVOID → RTL_BITMAP*
+	PebTlsBitmapBits         = 0x0080 // 2 × uint32 (bitmask for first 64 slots)
+	PebAnsiCodePageData      = 0x00A0 // USHORT* to NLS code page data
+	PebOemCodePageData       = 0x00A8 // USHORT* to NLS code page data
+	PebUnicodeCaseTableData  = 0x00B0 // USHORT* to Unicode case mapping
+	PebNumberOfProcessors    = 0x00B8
+	PebNtGlobalFlag          = 0x00BC
+	PebSessionId             = 0x02C0
+	PebOSMajorVersion        = 0x0118
+	PebOSMinorVersion        = 0x011C
+	PebOSBuildNumber         = 0x0120
+	PebOSPlatformId          = 0x0124
+	PebImageSubsystem        = 0x0128
+	PebImageSubsystemMajor   = 0x012C
+	PebImageSubsystemMinor   = 0x0130
 
-	PebFlsBitmap              = 0x0258  // PVOID → RTL_BITMAP*
-	PebFlsBitmapBits          = 0x0260  // 4 × uint32 (bitmask for 128 FLS slots)
-	PebFlsListHead            = 0x0270  // LIST_ENTRY
-	PebFlsCallback            = 0x0280  // PVOID*
-	PebGdiSharedHandleTable   = 0x00F8  // PVOID → GDI shared handle table
-	PebGdiHandleBuffer        = 0x00D4  // 34 × ULONG (starting offset)
+	PebFlsBitmap            = 0x0258 // PVOID → RTL_BITMAP*
+	PebFlsBitmapBits        = 0x0260 // 4 × uint32 (bitmask for 128 FLS slots)
+	PebFlsListHead          = 0x0270 // LIST_ENTRY
+	PebFlsCallback          = 0x0280 // PVOID*
+	PebGdiSharedHandleTable = 0x00F8 // PVOID → GDI shared handle table
+	PebGdiHandleBuffer      = 0x00D4 // 34 × ULONG (starting offset)
 )
 
 // LDR_DATA offsets.
 const (
-	LdrDataSize               = 0x58
-	LdrLength                 = 0x0000
-	LdrInitialized            = 0x0004
-	LdrInLoadOrderModuleList  = 0x0010  // LIST_ENTRY (Flink, Blink)
+	LdrDataSize                = 0x58
+	LdrLength                  = 0x0000
+	LdrInitialized             = 0x0004
+	LdrInLoadOrderModuleList   = 0x0010 // LIST_ENTRY (Flink, Blink)
 	LdrInMemoryOrderModuleList = 0x0020
-	LdrInInitOrderModuleList  = 0x0030
+	LdrInInitOrderModuleList   = 0x0030
 )
 
 // LDR_DATA_TABLE_ENTRY offsets (x64).
 const (
-	LdrEntrySize                    = 0x120
-	LdrEntryInLoadOrderLinks        = 0x0000
-	LdrEntryInMemoryOrderLinks      = 0x0010
-	LdrEntryInInitOrderLinks        = 0x0020
-	LdrEntryDllBase                 = 0x0030
-	LdrEntryEntryPoint              = 0x0038
-	LdrEntrySizeOfImage             = 0x0040
-	LdrEntryFullDllName             = 0x0048  // UNICODE_STRING
-	LdrEntryBaseDllName             = 0x0058  // UNICODE_STRING
-	LdrEntryFlags                   = 0x0068
-	LdrEntryLoadCount               = 0x006C
+	LdrEntrySize               = 0x120
+	LdrEntryInLoadOrderLinks   = 0x0000
+	LdrEntryInMemoryOrderLinks = 0x0010
+	LdrEntryInInitOrderLinks   = 0x0020
+	LdrEntryDllBase            = 0x0030
+	LdrEntryEntryPoint         = 0x0038
+	LdrEntrySizeOfImage        = 0x0040
+	LdrEntryFullDllName        = 0x0048 // UNICODE_STRING
+	LdrEntryBaseDllName        = 0x0058 // UNICODE_STRING
+	LdrEntryFlags              = 0x0068
+	LdrEntryLoadCount          = 0x006C
 )
 
 // UNICODE_STRING layout.
@@ -114,19 +114,19 @@ const (
 
 // RTL_USER_PROCESS_PARAMETERS offsets.
 const (
-	ProcessParamsSize           = 0x400
-	ProcessParamsMaxLength      = 0x0000
-	ProcessParamsLength         = 0x0004
-	ProcessParamsFlags          = 0x0008
-	ProcessParamsConsoleHandle  = 0x0010
-	ProcessParamsConsoleFlags   = 0x0018
-	ProcessParamsStdInputHandle = 0x0020
-	ProcessParamsStdOutputHandle= 0x0028
-	ProcessParamsStdErrorHandle = 0x0030
-	ProcessParamsCurrentDir     = 0x0038 // CURDIR (UNICODE_STRING + HANDLE)
-	ProcessParamsImagePathName  = 0x0060 // UNICODE_STRING
-	ProcessParamsCommandLine    = 0x0070 // UNICODE_STRING
-	ProcessParamsEnvironment    = 0x0080 // pointer to environment block
+	ProcessParamsSize            = 0x400
+	ProcessParamsMaxLength       = 0x0000
+	ProcessParamsLength          = 0x0004
+	ProcessParamsFlags           = 0x0008
+	ProcessParamsConsoleHandle   = 0x0010
+	ProcessParamsConsoleFlags    = 0x0018
+	ProcessParamsStdInputHandle  = 0x0020
+	ProcessParamsStdOutputHandle = 0x0028
+	ProcessParamsStdErrorHandle  = 0x0030
+	ProcessParamsCurrentDir      = 0x0038 // CURDIR (UNICODE_STRING + HANDLE)
+	ProcessParamsImagePathName   = 0x0060 // UNICODE_STRING
+	ProcessParamsCommandLine     = 0x0070 // UNICODE_STRING
+	ProcessParamsEnvironment     = 0x0080 // pointer to environment block
 )
 
 // ProcessInit holds parameters for initializing PEB/TEB.
@@ -155,17 +155,18 @@ type ModuleInfo struct {
 
 // ProcessState holds allocated guest addresses for PEB/TEB structures.
 type ProcessState struct {
-	PEBAddr           uint64
-	TEBAddr           uint64
-	LdrDataAddr       uint64
-	ProcessParamsAddr uint64
-	EnvironmentAddr   uint64
-	ModuleListAddr    uint64 // base of LDR_DATA_TABLE_ENTRY array
-	GdiTableAddr      uint64 // GDI shared handle table base
-	LastError         uint32
-	ImagePath         string // Win32 image path, e.g. "C:\app\program.exe"
-	ProcessId         uint32
-	ThreadId          uint32
+	PEBAddr                  uint64
+	TEBAddr                  uint64
+	LdrDataAddr              uint64
+	ProcessParamsAddr        uint64
+	EnvironmentAddr          uint64
+	ModuleListAddr           uint64 // base of LDR_DATA_TABLE_ENTRY array
+	GdiTableAddr             uint64 // GDI shared handle table base
+	LastError                uint32
+	ImagePath                string // Win32 image path, e.g. "C:\app\program.exe"
+	ProcessId                uint32
+	ThreadId                 uint32
+	UnhandledExceptionFilter uint64
 
 	// HeapAlloc/HeapFree are set by registerAutoSynthHandlers to route
 	// RtlAllocateHeap / RtlFreeHeap through the shared bump-allocator.
@@ -232,15 +233,15 @@ func InitProcess(mem *mmu.MMU, init *ProcessInit, modules []ModuleInfo) (*Proces
 	// Wine's TlsAlloc reads PEB->TlsBitmap via RtlFindClearBitsAndSet.
 	// TlsBitmapBits is inline in PEB at offset 0x080 (2 × ULONG = 64 bits for 64 TLS slots).
 	tlsBitmap := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
-	mem.Write32(tlsBitmap, 64)                          // SizeOfBitMap = 64
-	mem.Write64(tlsBitmap+8, pebAddr+PebTlsBitmapBits)  // Buffer → PEB.TlsBitmapBits
+	mem.Write32(tlsBitmap, 64)                         // SizeOfBitMap = 64
+	mem.Write64(tlsBitmap+8, pebAddr+PebTlsBitmapBits) // Buffer → PEB.TlsBitmapBits
 	mem.Write64(pebAddr+PebTlsBitmap, tlsBitmap)
 	// TlsBitmapBits starts as all-zero (all slots free)
 
 	// Initialize FlsBitmap - same RTL_BITMAP for FLS (128 slots, 4 × ULONG)
 	flsBitmap := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
-	mem.Write32(flsBitmap, 128)                          // SizeOfBitMap = 128
-	mem.Write64(flsBitmap+8, pebAddr+PebFlsBitmapBits)   // Buffer → PEB.FlsBitmapBits
+	mem.Write32(flsBitmap, 128)                        // SizeOfBitMap = 128
+	mem.Write64(flsBitmap+8, pebAddr+PebFlsBitmapBits) // Buffer → PEB.FlsBitmapBits
 	mem.Write64(pebAddr+PebFlsBitmap, flsBitmap)
 	// Reserve FLS index 0 (it's always reserved)
 	mem.Write32(pebAddr+PebFlsBitmapBits, 1) // bit 0 set = index 0 reserved
@@ -268,7 +269,7 @@ func InitProcess(mem *mmu.MMU, init *ProcessInit, modules []ModuleInfo) (*Proces
 	mem.Write32(pebAddr+PebOSMajorVersion, 10)
 	mem.Write32(pebAddr+PebOSMinorVersion, 0)
 	mem.Write16(pebAddr+PebOSBuildNumber, 19045)
-	mem.Write32(pebAddr+PebOSPlatformId, 2) // VER_PLATFORM_WIN32_NT
+	mem.Write32(pebAddr+PebOSPlatformId, 2)   // VER_PLATFORM_WIN32_NT
 	mem.Write32(pebAddr+PebImageSubsystem, 3) // IMAGE_SUBSYSTEM_WINDOWS_CUI
 
 	// --- RTL_USER_PROCESS_PARAMETERS ---
@@ -355,8 +356,8 @@ func linkModuleList(mem *mmu.MMU, head, modBase uint64, count int, linkOff uint6
 	firstLink := modBase + linkOff
 	lastLink := modBase + uint64(count-1)*LdrEntrySize + linkOff
 
-	mem.Write64(head, firstLink)     // head.Flink = first
-	mem.Write64(head+8, lastLink)    // head.Blink = last
+	mem.Write64(head, firstLink)  // head.Flink = first
+	mem.Write64(head+8, lastLink) // head.Blink = last
 
 	for i := 0; i < count; i++ {
 		entryLink := modBase + uint64(i)*LdrEntrySize + linkOff

@@ -162,9 +162,13 @@ Name    string
 {151, "GetErrorInfo"},
 {152, "SysStringByteLen"},
 {153, "SysAllocStringByteLen"},
-{154, "CreateTypeLib2"},
-{155, "OaBuildVersion"},
-{156, "OaEnablePerUserTLibRegistration"},
+	{154, "CreateTypeLib2"},
+	{155, "OaBuildVersion"},
+	{156, "OaEnablePerUserTLibRegistration"},
+	// Ordinal-only imports seen in OfficeSetup.exe.
+	// Keep explicit placeholders so IAT resolution doesn't leave unresolved sentinels.
+	{200, "ord_200"},
+	{201, "ord_201"},
 }
 
 // GenerateOleaut32 creates the synthetic oleaut32.dll with correct ordinal exports.

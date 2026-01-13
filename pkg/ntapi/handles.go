@@ -145,11 +145,11 @@ func (h *EventHandle) WaitChan() <-chan struct{} {
 // MutantHandle is a Win32 mutex object (kernel mutant).
 // ReactOS reference: ntoskrnl/ke/mutex.c
 type MutantHandle struct {
-	mu         sync.Mutex
-	cond       *sync.Cond
-	ownerTID   uint32 // TID of the thread that owns the mutex (0 = unowned)
-	count      int32  // recursion count (>0 = locked)
-	abandoned  bool   // set when owning thread exits without releasing
+	mu        sync.Mutex
+	cond      *sync.Cond
+	ownerTID  uint32 // TID of the thread that owns the mutex (0 = unowned)
+	count     int32  // recursion count (>0 = locked)
+	abandoned bool   // set when owning thread exits without releasing
 }
 
 func (h *MutantHandle) handleType() string { return "mutant" }
@@ -476,7 +476,7 @@ type FileMappingHandle struct {
 	Name    string
 	HostBuf []byte
 	Size    uint64
-	FileFD  int    // -1 for anonymous; VFS fd for file-backed
+	FileFD  int // -1 for anonymous; VFS fd for file-backed
 	Protect uint32
 }
 
@@ -500,9 +500,11 @@ func (f *FindHandle) handleType() string { return "find" }
 
 // ThreadHandle represents a Win32 thread handle.
 type ThreadHandle struct {
-	TID      int
-	Done     chan struct{} // closed when the thread exits
-	ExitCode uint32
+	TID              int
+	Done             chan struct{} // closed when the thread exits
+	ExitCode         uint32
+	Priority         int32
+	HideFromDebugger bool
 }
 
 func (h *ThreadHandle) handleType() string { return "thread" }
@@ -643,17 +645,72 @@ func (h *NamedPipeHandle) AvailableBytes() int {
 }
 
 // TokenHandle is an access token kernel object.
-type TokenHandle struct{}
+type TokenHandle struct {
+	UserSID         []byte
+	PrimaryGroupSID []byte
+	Groups          [][]byte
+	Privileges      map[uint64]bool
+	Restricted      bool
+	Elevated        bool
+	IntegrityLevel  uint32
+}
 
 func (h *TokenHandle) handleType() string { return "token" }
 
+// NewDefaultTokenHandle creates the synthetic process token used by the emulator.
+func NewDefaultTokenHandle() *TokenHandle {
+	return &TokenHandle{
+		UserSID:         []byte{1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xF4, 0x01, 0x00, 0x00},
+		PrimaryGroupSID: []byte{1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0x00, 0x00},
+		Groups:          [][]byte{{1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0x00, 0x00}},
+		Privileges: map[uint64]bool{
+			23: true, // SeChangeNotifyPrivilege
+			33: true, // SeIncreaseWorkingSetPrivilege
+		},
+		Restricted:     false,
+		Elevated:       true,
+		IntegrityLevel: 12288, // high integrity
+	}
+}
+
+// Clone returns a deep copy of the token state.
+func (h *TokenHandle) Clone() *TokenHandle {
+	if h == nil {
+		return nil
+	}
+	cp := &TokenHandle{
+		Restricted:     h.Restricted,
+		Elevated:       h.Elevated,
+		IntegrityLevel: h.IntegrityLevel,
+	}
+	if len(h.UserSID) > 0 {
+		cp.UserSID = append([]byte(nil), h.UserSID...)
+	}
+	if len(h.PrimaryGroupSID) > 0 {
+		cp.PrimaryGroupSID = append([]byte(nil), h.PrimaryGroupSID...)
+	}
+	if len(h.Groups) > 0 {
+		cp.Groups = make([][]byte, len(h.Groups))
+		for i := range h.Groups {
+			cp.Groups[i] = append([]byte(nil), h.Groups[i]...)
+		}
+	}
+	if len(h.Privileges) > 0 {
+		cp.Privileges = make(map[uint64]bool, len(h.Privileges))
+		for k, v := range h.Privileges {
+			cp.Privileges[k] = v
+		}
+	}
+	return cp
+}
+
 // SocketHandle wraps a raw OS socket file descriptor for Winsock emulation.
 type SocketHandle struct {
-	FD        int    // OS-level file descriptor
-	Family    int    // AF_INET, AF_INET6, etc.
-	SockType  int    // SOCK_STREAM, SOCK_DGRAM, etc.
-	Proto     int    // IPPROTO_TCP, etc.
-	mu        sync.Mutex
+	FD         int // OS-level file descriptor
+	Family     int // AF_INET, AF_INET6, etc.
+	SockType   int // SOCK_STREAM, SOCK_DGRAM, etc.
+	Proto      int // IPPROTO_TCP, etc.
+	mu         sync.Mutex
 	lastWSAErr int32
 }
 
@@ -667,19 +724,23 @@ func (ht *HandleTable) GetSocket(h Handle) *SocketHandle {
 	ht.mu.RLock()
 	defer ht.mu.RUnlock()
 	obj, ok := ht.handles[h]
-	if !ok { return nil }
+	if !ok {
+		return nil
+	}
 	s, ok := obj.(*SocketHandle)
-	if !ok { return nil }
+	if !ok {
+		return nil
+	}
 	return s
 }
 
 // WaitableTimerHandle is a Win32 waitable timer (manual or auto-reset).
 type WaitableTimerHandle struct {
-	mu        sync.Mutex
-	ch        chan struct{}
-	cancel    chan struct{}
+	mu          sync.Mutex
+	ch          chan struct{}
+	cancel      chan struct{}
 	manualReset bool
-	signaled  bool
+	signaled    bool
 }
 
 func NewWaitableTimer(manualReset bool) *WaitableTimerHandle {
@@ -828,6 +889,14 @@ type GenericHandle struct {
 
 func (h *GenericHandle) handleType() string { return h.Kind }
 
+// SymbolicLinkHandle represents an object-manager symbolic link.
+type SymbolicLinkHandle struct {
+	Name   string
+	Target string
+}
+
+func (h *SymbolicLinkHandle) handleType() string { return "symbolic_link" }
+
 // CondVarEntry is a guest CONDITION_VARIABLE backed by a channel.
 // Since the guest CPU is single-threaded, Sleep always times out - callers recheck.
 type CondVarEntry struct {
@@ -925,11 +994,13 @@ var GlobalCondVars = NewCondVarTable()
 // KeyedEventHandle - NtCreateKeyedEvent / NtWaitForKeyedEvent / NtReleaseKeyedEvent
 //
 // Semantics (ReactOS ntoskrnl/ex/keyedevt.c):
-//   Wait: if a pending release for [key] exists, consume it and return.
-//         Otherwise, block until a release arrives.
-//   Release: if a thread is waiting on [key], wake it and return.
-//            Otherwise, block until a waiter arrives.
-//   This is a rendezvous primitive - both sides must pair up.
+//
+//	Wait: if a pending release for [key] exists, consume it and return.
+//	      Otherwise, block until a release arrives.
+//	Release: if a thread is waiting on [key], wake it and return.
+//	         Otherwise, block until a waiter arrives.
+//	This is a rendezvous primitive - both sides must pair up.
+//
 // ──────────────────────────────────────────────────────────
 type keyedSlot struct {
 	ch chan struct{} // buffered(1) channel used as the wake signal
@@ -937,9 +1008,9 @@ type keyedSlot struct {
 
 // KeyedEventHandle is the NT keyed-event object.
 type KeyedEventHandle struct {
-	mu      sync.Mutex
-	Name    string
-	waiters map[uint64][]chan struct{} // key → list of blocked waiters
+	mu        sync.Mutex
+	Name      string
+	waiters   map[uint64][]chan struct{} // key → list of blocked waiters
 	releasers map[uint64][]chan struct{} // key → list of blocked releasers
 }
 
@@ -1027,23 +1098,23 @@ var GlobalKeyedEvent = NewKeyedEvent("CritSecOutOfMemoryEvent")
 
 // JobHandle represents a Win32 Job Object.
 type JobHandle struct {
-	mu      sync.Mutex
-	Name    string
-	PIDs    []uint32
-	Limits  JobLimits
+	mu     sync.Mutex
+	Name   string
+	PIDs   []uint32
+	Limits JobLimits
 }
 
 // JobLimits holds the configurable limits for a job object.
 type JobLimits struct {
-	ActiveProcessLimit  uint32
-	PriorityClass       uint32
-	SchedulingClass     uint32
-	MaxWorkingSetSize   uint64
-	MinWorkingSetSize   uint64
-	PerProcessUserTime  int64
-	PerJobUserTime      int64
-	KillOnJobClose      bool
-	BreakawayOK         bool
+	ActiveProcessLimit uint32
+	PriorityClass      uint32
+	SchedulingClass    uint32
+	MaxWorkingSetSize  uint64
+	MinWorkingSetSize  uint64
+	PerProcessUserTime int64
+	PerJobUserTime     int64
+	KillOnJobClose     bool
+	BreakawayOK        bool
 }
 
 func NewJobHandle(name string) *JobHandle {
@@ -1106,6 +1177,7 @@ func (m *MailslotHandle) Count() int {
 
 // VEHHandler stores a vectored exception handler registered by the guest.
 type VEHHandler struct {
+	ID    uint64 // opaque registration handle returned to caller
 	Addr  uint64 // guest function pointer
 	First bool   // first-chance (first=true) or last-chance
 }
@@ -1114,6 +1186,7 @@ type VEHHandler struct {
 type VEHRegistry struct {
 	mu       sync.Mutex
 	handlers []*VEHHandler
+	nextID   uint64
 }
 
 var GlobalVEH = &VEHRegistry{}
@@ -1123,21 +1196,26 @@ var GlobalVCH = &VEHRegistry{} // vectored continue handlers
 func (v *VEHRegistry) Add(addr uint64, first bool) uint64 {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	h := &VEHHandler{Addr: addr, First: first}
+	v.nextID++
+	if v.nextID == 0 {
+		v.nextID = 1
+	}
+	h := &VEHHandler{ID: v.nextID, Addr: addr, First: first}
 	if first {
 		v.handlers = append([]*VEHHandler{h}, v.handlers...)
 	} else {
 		v.handlers = append(v.handlers, h)
 	}
-	return uint64(uintptr(len(v.handlers))) // non-NULL handle
+	return h.ID
 }
 
-// Remove unregisters a handler by its registration address.
-func (v *VEHRegistry) Remove(addr uint64) bool {
+// Remove unregisters a handler by its registration handle.
+// For compatibility we also accept the raw handler function address.
+func (v *VEHRegistry) Remove(handleOrAddr uint64) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for i, h := range v.handlers {
-		if h.Addr == addr {
+		if h.ID == handleOrAddr || h.Addr == handleOrAddr {
 			v.handlers = append(v.handlers[:i], v.handlers[i+1:]...)
 			return true
 		}
@@ -1180,9 +1258,9 @@ func LookupMailslot(name string) *MailslotHandle {
 
 // HandleTable maps guest HANDLE values to Go objects.
 type HandleTable struct {
-	mu       sync.RWMutex
-	handles  map[Handle]HandleObject
-	nextID   Handle
+	mu      sync.RWMutex
+	handles map[Handle]HandleObject
+	nextID  Handle
 
 	// Named object namespace (global across all handles)
 	namedMu sync.RWMutex
@@ -1444,6 +1522,19 @@ func (ht *HandleTable) GetSemaphore(h Handle) *SemaphoreHandle {
 	return sh
 }
 
+// GetToken returns the TokenHandle for a handle, or nil.
+func (ht *HandleTable) GetToken(h Handle) *TokenHandle {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	tok, ok := obj.(*TokenHandle)
+	if !ok {
+		return nil
+	}
+	return tok
+}
+
 // GetIoCompletion returns the IoCompletionPortHandle for a handle, or nil.
 func (ht *HandleTable) GetIoCompletion(h Handle) *IoCompletionPortHandle {
 	obj := ht.Get(h)
@@ -1613,7 +1704,6 @@ func (ht *HandleTable) GetKeyedEvent(h Handle) *KeyedEventHandle {
 	return ke
 }
 
-
 // GetMailslot returns the MailslotHandle for a handle, or nil.
 func (ht *HandleTable) GetMailslot(h Handle) *MailslotHandle {
 	obj := ht.Get(h)
@@ -1631,115 +1721,163 @@ func (ht *HandleTable) GetMailslot(h Handle) *MailslotHandle {
 
 // ConsoleCellAttr is a character cell in the screen buffer.
 type ConsoleCellAttr struct {
-Char  uint16 // Unicode char
-Attr  uint16 // color attribute
+	Char uint16 // Unicode char
+	Attr uint16 // color attribute
 }
 
 // ConsoleState holds the emulated console screen buffer.
 type ConsoleState struct {
-mu        sync.Mutex
-Width     int
-Height    int
-CursorX   int
-CursorY   int
-Attr      uint16 // current text attribute
-Title     string
-Cells     []ConsoleCellAttr // [y*Width+x]
-CursorVisible bool
-CursorSize    uint32
+	mu            sync.Mutex
+	Width         int
+	Height        int
+	CursorX       int
+	CursorY       int
+	Attr          uint16 // current text attribute
+	Mode          uint32
+	Title         string
+	Cells         []ConsoleCellAttr // [y*Width+x]
+	CursorVisible bool
+	CursorSize    uint32
 }
 
 // NewConsoleState creates a default 80x300 console state.
 func NewConsoleState() *ConsoleState {
-cs := &ConsoleState{
-Width:         80,
-Height:        300,
-Attr:          0x07, // grey on black
-Title:         "Raven Console",
-CursorVisible: true,
-CursorSize:    25,
+	cs := &ConsoleState{
+		Width:         80,
+		Height:        300,
+		Attr:          0x07, // grey on black
+		Mode:          0x0007,
+		Title:         "Raven Console",
+		CursorVisible: true,
+		CursorSize:    25,
+	}
+	cs.Cells = make([]ConsoleCellAttr, cs.Width*cs.Height)
+	for i := range cs.Cells {
+		cs.Cells[i] = ConsoleCellAttr{' ', 0x07}
+	}
+	return cs
 }
-cs.Cells = make([]ConsoleCellAttr, cs.Width*cs.Height)
-for i := range cs.Cells {
-cs.Cells[i] = ConsoleCellAttr{' ', 0x07}
+
+// Clone returns a deep copy of the console state.
+func (cs *ConsoleState) Clone() *ConsoleState {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cp := *cs
+	cp.Cells = append([]ConsoleCellAttr(nil), cs.Cells...)
+	return &cp
 }
-return cs
+
+// CopyFrom replaces the console contents and metadata with src.
+func (cs *ConsoleState) CopyFrom(src *ConsoleState) {
+	if src == nil {
+		return
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.Width = src.Width
+	cs.Height = src.Height
+	cs.CursorX = src.CursorX
+	cs.CursorY = src.CursorY
+	cs.Attr = src.Attr
+	cs.Mode = src.Mode
+	cs.Title = src.Title
+	cs.CursorVisible = src.CursorVisible
+	cs.CursorSize = src.CursorSize
+	cs.Cells = append(cs.Cells[:0], src.Cells...)
+	if len(cs.Cells) != src.Width*src.Height {
+		cs.Cells = make([]ConsoleCellAttr, len(src.Cells))
+		copy(cs.Cells, src.Cells)
+	}
 }
 
 // GlobalConsole is the process-wide console state.
 var GlobalConsole = NewConsoleState()
 
+// ConsoleScreenBufferHandle represents a separate console screen buffer.
+type ConsoleScreenBufferHandle struct {
+	State *ConsoleState
+}
+
+func (h *ConsoleScreenBufferHandle) handleType() string { return "console_screen_buffer" }
+
+// NewConsoleScreenBuffer creates a screen buffer backed by its own console state.
+func NewConsoleScreenBuffer() *ConsoleScreenBufferHandle {
+	return &ConsoleScreenBufferHandle{State: NewConsoleState()}
+}
+
 // Cell returns the cell at (x,y), or nil if out of bounds.
 func (cs *ConsoleState) Cell(x, y int) *ConsoleCellAttr {
-if x < 0 || x >= cs.Width || y < 0 || y >= cs.Height {
-return nil
-}
-return &cs.Cells[y*cs.Width+x]
+	if x < 0 || x >= cs.Width || y < 0 || y >= cs.Height {
+		return nil
+	}
+	return &cs.Cells[y*cs.Width+x]
 }
 
 // FillAttr fills nCells cells starting at (x,y) with attribute attr.
 func (cs *ConsoleState) FillAttr(x, y, n int, attr uint16) int {
-cs.mu.Lock()
-defer cs.mu.Unlock()
-wrote := 0
-for i := 0; i < n; i++ {
-cx := x + i
-cy := y + cx/cs.Width
-cx = cx % cs.Width
-if c := cs.Cell(cx, cy); c != nil {
-c.Attr = attr
-wrote++
-}
-}
-return wrote
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	wrote := 0
+	for i := 0; i < n; i++ {
+		cx := x + i
+		cy := y + cx/cs.Width
+		cx = cx % cs.Width
+		if c := cs.Cell(cx, cy); c != nil {
+			c.Attr = attr
+			wrote++
+		}
+	}
+	return wrote
 }
 
 // FillChar fills nCells cells starting at (x,y) with character ch.
 func (cs *ConsoleState) FillChar(x, y, n int, ch uint16, attr uint16) int {
-cs.mu.Lock()
-defer cs.mu.Unlock()
-wrote := 0
-for i := 0; i < n; i++ {
-cx := (x + i) % cs.Width
-cy := y + (x+i)/cs.Width
-if c := cs.Cell(cx, cy); c != nil {
-c.Char = ch
-c.Attr = attr
-wrote++
-}
-}
-return wrote
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	wrote := 0
+	for i := 0; i < n; i++ {
+		cx := (x + i) % cs.Width
+		cy := y + (x+i)/cs.Width
+		if c := cs.Cell(cx, cy); c != nil {
+			c.Char = ch
+			c.Attr = attr
+			wrote++
+		}
+	}
+	return wrote
 }
 
 // Scroll scrolls the rectangle [left,top,right,bottom] by dx,dy.
 // Vacated cells are filled with fillChar/fillAttr.
 func (cs *ConsoleState) Scroll(left, top, right, bottom, dx, dy int, fillCh uint16, fillAttr uint16) {
-cs.mu.Lock()
-defer cs.mu.Unlock()
-// Copy cells
-tmp := make([]ConsoleCellAttr, cs.Width*cs.Height)
-copy(tmp, cs.Cells)
-for y := top; y <= bottom; y++ {
-for x := left; x <= right; x++ {
-nx, ny := x+dx, y+dy
-if nx >= left && nx <= right && ny >= top && ny <= bottom {
-if src := cs.Cell(x, y); src != nil {
-if dst := cs.Cell(nx, ny); dst != nil {
-*dst = *src
-}
-}
-}
-}
-}
-// Fill vacated area
-for y := top; y <= bottom; y++ {
-for x := left; x <= right; x++ {
-ox, oy := x-dx, y-dy
-if ox < left || ox > right || oy < top || oy > bottom {
-if c := cs.Cell(x, y); c != nil {
-*c = ConsoleCellAttr{fillCh, fillAttr}
-}
-}
-}
-}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	// Copy cells
+	tmp := make([]ConsoleCellAttr, cs.Width*cs.Height)
+	copy(tmp, cs.Cells)
+	for y := top; y <= bottom; y++ {
+		for x := left; x <= right; x++ {
+			nx, ny := x+dx, y+dy
+			if nx >= left && nx <= right && ny >= top && ny <= bottom {
+				if src := cs.Cell(x, y); src != nil {
+					if dst := cs.Cell(nx, ny); dst != nil {
+						*dst = *src
+					}
+				}
+			}
+		}
+	}
+	// Fill vacated area
+	for y := top; y <= bottom; y++ {
+		for x := left; x <= right; x++ {
+			ox, oy := x-dx, y-dy
+			if ox < left || ox > right || oy < top || oy > bottom {
+				if c := cs.Cell(x, y); c != nil {
+					*c = ConsoleCellAttr{fillCh, fillAttr}
+				}
+			}
+		}
+	}
 }

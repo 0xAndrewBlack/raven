@@ -17,34 +17,43 @@ import (
 
 // PEModule represents a loaded PE image in guest memory.
 type PEModule struct {
-	Name       string   // DLL name or exe basename (lowercase)
-	Path       string   // host filesystem path
-	BaseAddr   uint64   // actual base address in guest MMU
-	ImageSize  uint64   // size of the mapped image
-	EntryPoint uint64   // AddressOfEntryPoint (RVA + BaseAddr)
-	Exports    map[string]uint64 // export name → guest address
-	ExportOrds map[uint16]uint64 // export ordinal → guest address
-	Forwards   map[string]string // export name → "DLL.Function" forward
-	ForwardOrds map[uint16]string // export ordinal → "DLL.Function" forward
-	Imports    []PEImportEntry   // unresolved imports
-	Is64       bool
-	IsDLL      bool     // true if IMAGE_FILE_DLL flag is set
-	TLSDataAddr uint64  // guest address of allocated TLS template data (0 if none)
-	TLSDataSize uint64  // size of TLS initial data
-	TLSIndexAddr uint64 // guest address of the TLS index slot
-	TLSCallbacks []uint64 // guest addresses of TLS callback functions
-	ExceptionDirRVA  uint32 // RVA of .pdata (exception directory)
-	ExceptionDirSize uint32 // size of .pdata
-	ResourceDirRVA   uint32 // RVA of .rsrc (resource directory)
-	ResourceDirSize  uint32 // size of .rsrc
+	Name             string            // DLL name or exe basename (lowercase)
+	Path             string            // host filesystem path
+	BaseAddr         uint64            // actual base address in guest MMU
+	ImageSize        uint64            // size of the mapped image
+	EntryPoint       uint64            // AddressOfEntryPoint (RVA + BaseAddr)
+	Exports          map[string]uint64 // export name → guest address
+	ExportOrds       map[uint16]uint64 // export ordinal → guest address
+	Forwards         map[string]string // export name → "DLL.Function" forward
+	ForwardOrds      map[uint16]string // export ordinal → "DLL.Function" forward
+	Imports          []PEImportEntry   // unresolved imports
+	Is64             bool
+	IsDLL            bool     // true if IMAGE_FILE_DLL flag is set
+	TLSDataAddr      uint64   // guest address of allocated TLS template data (0 if none)
+	TLSDataSize      uint64   // size of TLS initial data
+	TLSIndexAddr     uint64   // guest address of the TLS index slot
+	TLSCallbacks     []uint64 // guest addresses of TLS callback functions
+	ExceptionDirRVA  uint32   // RVA of .pdata (exception directory)
+	ExceptionDirSize uint32   // size of .pdata
+	ResourceDirRVA   uint32   // RVA of .rsrc (resource directory)
+	ResourceDirSize  uint32   // size of .rsrc
+	BoundImports     []BoundImportEntry
+}
+
+// BoundImportEntry captures one bound import descriptor from the PE image.
+type BoundImportEntry struct {
+	DLLName               string
+	TimeDateStamp         uint32
+	OffsetModuleName      uint16
+	NumberOfForwarderRefs uint16
 }
 
 // PEImportEntry describes a single import that needs resolution.
 type PEImportEntry struct {
 	DLLName  string
-	FuncName string   // empty if by ordinal
-	Ordinal  uint16   // valid only if FuncName == ""
-	IATSlot  uint64   // guest address of the IAT slot to patch
+	FuncName string // empty if by ordinal
+	Ordinal  uint16 // valid only if FuncName == ""
+	IATSlot  uint64 // guest address of the IAT slot to patch
 }
 
 // PELoadResult extends LoadResult with PE-specific data.
@@ -55,12 +64,12 @@ type PELoadResult struct {
 
 // PE image base relocation types.
 const (
-	imageRelBasedAbsolute       = 0
-	imageRelBasedHigh           = 1
-	imageRelBasedLow            = 2
-	imageRelBasedHighLow        = 3
-	imageRelBasedHighAdj        = 4
-	imageRelBasedDir64          = 10
+	imageRelBasedAbsolute = 0
+	imageRelBasedHigh     = 1
+	imageRelBasedLow      = 2
+	imageRelBasedHighLow  = 3
+	imageRelBasedHighAdj  = 4
+	imageRelBasedDir64    = 10
 )
 
 // PE section characteristics.
@@ -88,10 +97,10 @@ func LoadPE(path string, mem *mmu.MMU, argv []string, envp []string) (*PELoadRes
 	// Simulate a CALL to the entry point.
 	// Caller's RSP is 16-byte aligned. Allocate 32-byte shadow space,
 	// then push return address (0 = process exit sentinel).
-	sp := stackTop       // 16-byte aligned
-	sp -= 32             // shadow space (32 bytes for 4 register args)
-	sp -= 8              // CALL pushes return address
-	write64(mem, sp, 0)  // exit sentinel (ret to 0 → process exit)
+	sp := stackTop      // 16-byte aligned
+	sp -= 32            // shadow space (32 bytes for 4 register args)
+	sp -= 8             // CALL pushes return address
+	write64(mem, sp, 0) // exit sentinel (ret to 0 → process exit)
 
 	// Set brk after the image
 	brkAddr := (mod.BaseAddr + mod.ImageSize + mmu.PageSize - 1) & mmu.PageMask
@@ -136,6 +145,7 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	var imageBase, sizeOfImage, entryRVA uint64
 	var relocDirRVA, relocDirSize uint32
 	var tlsDirRVA, tlsDirSize uint32
+	var boundImportRVA, boundImportSize uint32
 	var excDirRVA, excDirSize uint32
 	var resDirRVA, resDirSize uint32
 
@@ -155,6 +165,10 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 		if len(oh.DataDirectory) > 9 {
 			tlsDirRVA = oh.DataDirectory[9].VirtualAddress
 			tlsDirSize = oh.DataDirectory[9].Size
+		}
+		if len(oh.DataDirectory) > 11 {
+			boundImportRVA = oh.DataDirectory[11].VirtualAddress
+			boundImportSize = oh.DataDirectory[11].Size
 		}
 		if len(oh.DataDirectory) > 3 {
 			excDirRVA = oh.DataDirectory[3].VirtualAddress
@@ -176,6 +190,10 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 		if len(oh.DataDirectory) > 9 {
 			tlsDirRVA = oh.DataDirectory[9].VirtualAddress
 			tlsDirSize = oh.DataDirectory[9].Size
+		}
+		if len(oh.DataDirectory) > 11 {
+			boundImportRVA = oh.DataDirectory[11].VirtualAddress
+			boundImportSize = oh.DataDirectory[11].Size
 		}
 		if len(oh.DataDirectory) > 3 {
 			excDirRVA = oh.DataDirectory[3].VirtualAddress
@@ -294,6 +312,9 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	// Parse TLS Directory
 	if tlsDirRVA != 0 && tlsDirSize > 0 {
 		parseTLSDirectory(mem, base, pf, f, tlsDirRVA, mod)
+	}
+	if boundImportRVA != 0 && boundImportSize > 0 {
+		parseBoundImports(pf, f, mod, boundImportRVA, boundImportSize)
 	}
 
 	return mod, nil
@@ -739,7 +760,9 @@ func parseTLSDirectory(mem *mmu.MMU, base uint64, pf *pe.File, f *os.File, tlsRV
 		if callbacksVA != 0 {
 			for i := uint64(0); ; i++ {
 				cb, err := mem.Read64(callbacksVA + i*8)
-				if err != nil || cb == 0 { break }
+				if err != nil || cb == 0 {
+					break
+				}
 				mod.TLSCallbacks = append(mod.TLSCallbacks, cb)
 			}
 		}
@@ -789,10 +812,57 @@ func parseTLSDirectory(mem *mmu.MMU, base uint64, pf *pe.File, f *os.File, tlsRV
 		if callbacksVA32 != 0 {
 			for i := uint64(0); ; i++ {
 				cb, err := mem.Read32(uint64(callbacksVA32) + i*4)
-				if err != nil || cb == 0 { break }
+				if err != nil || cb == 0 {
+					break
+				}
 				mod.TLSCallbacks = append(mod.TLSCallbacks, uint64(cb))
 			}
 		}
+	}
+}
+
+func parseBoundImports(pf *pe.File, f *os.File, mod *PEModule, boundRVA, boundSize uint32) {
+	secData, secRVA := sectionDataForRVA(pf, f, boundRVA)
+	if secData == nil {
+		return
+	}
+	baseOff := boundRVA - secRVA
+	if int(baseOff) >= len(secData) {
+		return
+	}
+	endOff := baseOff + boundSize
+	if endOff > uint32(len(secData)) {
+		endOff = uint32(len(secData))
+	}
+
+	off := baseOff
+	for off+8 <= endOff {
+		timeDateStamp := binary.LittleEndian.Uint32(secData[off:])
+		if timeDateStamp == 0 {
+			break
+		}
+		offsetModuleName := binary.LittleEndian.Uint16(secData[off+4:])
+		numForwarderRefs := binary.LittleEndian.Uint16(secData[off+6:])
+
+		nameOff := baseOff + uint32(offsetModuleName)
+		if nameOff >= uint32(len(secData)) {
+			break
+		}
+		dllName := readCString(secData, nameOff)
+		if dllName != "" {
+			mod.BoundImports = append(mod.BoundImports, BoundImportEntry{
+				DLLName:               dllName,
+				TimeDateStamp:         timeDateStamp,
+				OffsetModuleName:      offsetModuleName,
+				NumberOfForwarderRefs: numForwarderRefs,
+			})
+		}
+
+		skip := uint32(8) + uint32(numForwarderRefs)*8
+		if off+skip > endOff {
+			break
+		}
+		off += skip
 	}
 }
 

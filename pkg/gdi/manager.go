@@ -187,11 +187,15 @@ func (m *Manager) CreateFont(f *Font) uint64 {
 // CreateCompatibleBitmap allocates a bitmap of given dimensions.
 // ReactOS: NtGdiCreateCompatibleBitmap
 func (m *Manager) CreateCompatibleBitmap(w, h int32) uint64 {
+	if w <= 0 {
+		w = 1
+	}
+	if h <= 0 {
+		h = 1
+	}
 	handle := m.alloc()
 	bm := &Bitmap{Width: w, Height: h}
-	if w > 0 && h > 0 {
-		bm.Surf = NewSurface(w, h)
-	}
+	bm.Surf = NewSurface(w, h)
 	m.objects[handle] = &Object{Type: ObjBitmap, Bitmap: bm}
 	return handle
 }
