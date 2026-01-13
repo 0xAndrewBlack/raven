@@ -19,6 +19,9 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	}
 	_ = comctl32
 
+	// MUI language: stored per-process; default en-US (0x0409).
+	muiLanguage := uint32(0x0409)
+
 	d.RegisterAutoStubHandler(comctl32, "InitCommonControls", func(ctx *ntapi.TrapContext) uint32 {
 		return 0 // void function
 	})
@@ -211,6 +214,31 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetImageInfo", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: ImageList_GetImageInfo in dll/win32/comctl32/imagelist.c
+		// IMAGEINFO: { HBITMAP hbmImage, HBITMAP hbmMask, int Unused1, int Unused2, RECT rcImage }
+		// x64: 8+8+4+4+16 = 40 bytes
+		himl := ctx.Arg(0)
+		i := int32(ctx.Arg(1))
+		pInfo := ctx.Arg(2)
+		if pInfo == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himl)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// Zero the struct
+		for off := uint64(0); off < 40; off += 4 {
+			ctx.Mem.Write32(pInfo+off, 0)
+		}
+		// Fill rcImage with the image rect
+		x := i * cx
+		ctx.Mem.Write32(pInfo+24, uint32(x))       // rcImage.left
+		ctx.Mem.Write32(pInfo+28, 0)                // rcImage.top
+		ctx.Mem.Write32(pInfo+32, uint32(x+cx))     // rcImage.right
+		ctx.Mem.Write32(pInfo+36, uint32(cy))        // rcImage.bottom
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -234,7 +262,14 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetIcon", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// ReactOS: ImageList_GetIcon in dll/win32/comctl32/imagelist.c
+		// Return a fake non-zero HICON so callers don't treat it as error.
+		himl := ctx.Arg(0)
+		if comctl32pkg.ImageListGetImageCount(himl) == 0 {
+			ctx.SetReturn(0) // empty list → error
+			return 0
+		}
+		ctx.SetReturn(0xCC000001) // fake HICON
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetFlags", func(ctx *ntapi.TrapContext) uint32 {
@@ -633,6 +668,25 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_GetScrollInfo", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: FlatSB_GetScrollInfo - fill SCROLLINFO with defaults
+		// SCROLLINFO: cbSize(+0), fMask(+4), nMin(+8), nMax(+12), nPage(+16), nPos(+20), nTrackPos(+24)
+		psi := ctx.Arg(2)
+		if psi != 0 {
+			fMask, _ := ctx.Mem.Read32(psi + 4)
+			if fMask&0x01 != 0 { // SIF_RANGE
+				ctx.Mem.Write32(psi+8, 0)  // nMin
+				ctx.Mem.Write32(psi+12, 0) // nMax
+			}
+			if fMask&0x02 != 0 { // SIF_PAGE
+				ctx.Mem.Write32(psi+16, 0) // nPage
+			}
+			if fMask&0x04 != 0 { // SIF_POS
+				ctx.Mem.Write32(psi+20, 0) // nPos
+			}
+			if fMask&0x10 != 0 { // SIF_TRACKPOS
+				ctx.Mem.Write32(psi+24, 0) // nTrackPos
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -641,10 +695,32 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_GetScrollProp", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// ReactOS: FlatSB_GetScrollProp in dll/win32/comctl32/flatsb.c
+		hwnd := ctx.Arg(0)
+		propIdx := uint32(ctx.Arg(1))
+		pValue := ctx.Arg(2)
+		var val int32
+		ok := comctl32pkg.FlatSBGetScrollProp(hwnd, propIdx, &val)
+		if pValue != 0 {
+			ctx.Mem.Write32(pValue, uint32(val))
+		}
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_GetScrollRange", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: FlatSB_GetScrollRange - returns min=0, max=0 as default
+		pMinPos := ctx.Arg(2)
+		pMaxPos := ctx.Arg(3)
+		if pMinPos != 0 {
+			ctx.Mem.Write32(pMinPos, 0)
+		}
+		if pMaxPos != 0 {
+			ctx.Mem.Write32(pMaxPos, 0)
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -657,7 +733,16 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_SetScrollProp", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// ReactOS: FlatSB_SetScrollProp in dll/win32/comctl32/flatsb.c
+		hwnd := ctx.Arg(0)
+		index := uint32(ctx.Arg(1))
+		newValue := int32(ctx.Arg(2))
+		fRedraw := ctx.Arg(3) != 0
+		if comctl32pkg.FlatSBSetScrollProp(hwnd, index, newValue, fRedraw) {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_SetScrollRange", func(ctx *ntapi.TrapContext) uint32 {
@@ -854,10 +939,12 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "GetMUILanguage", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x0409)
-		return 0 // en-US
+		ctx.SetReturn(uint64(muiLanguage))
+		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "InitMUILanguage", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: InitMUILanguage in dll/win32/comctl32/commctrl.c
+		muiLanguage = uint32(ctx.Arg(0))
 		return 0
 	})
 	// TaskDialog / TaskDialogIndirect: modal dialogs; stub returns IDOK.
@@ -886,14 +973,6 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(comctl32, "_TrackMouseEvent", func(ctx *ntapi.TrapContext) uint32 {
 		ctx.SetReturn(1)
-		return 0
-	})
-	d.RegisterAutoStubHandler(comctl32, "FlatSB_EnableScrollBar", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - FlatSB not supported
-		return 0
-	})
-	d.RegisterAutoStubHandler(comctl32, "FlatSB_ShowScrollBar", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
 		return 0
 	})
 }

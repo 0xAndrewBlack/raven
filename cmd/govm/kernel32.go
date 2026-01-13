@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
@@ -74,6 +75,26 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	fiberMap := map[uint64]uint64{} // fiberAddr → lpParameter
 	var nextFiberAddr uint64
 
+	// Standard handle overrides for SetStdHandle/GetStdHandle.
+	stdHandleMap := map[uint32]uint64{
+		0xFFFFFFF6: 0x100, // STD_INPUT_HANDLE
+		0xFFFFFFF5: 0x101, // STD_OUTPUT_HANDLE
+		0xFFFFFFF4: 0x102, // STD_ERROR_HANDLE
+	}
+	var stdHandleMu sync.Mutex
+
+	// Process error mode for SetErrorMode/GetErrorMode.
+	var processErrorMode uint32
+	var errorModeMu sync.Mutex
+
+	// Per-thread error mode for SetThreadErrorMode.
+	var threadErrorMode uint32
+	var threadErrorModeMu sync.Mutex
+
+	// Handle flags for Set/GetHandleInformation.
+	handleFlagsMap := map[ntapi.Handle]uint32{}
+	var handleFlagsMu sync.Mutex
+
 	// resolveResourceModule returns (baseAddr, rsrcDirRVA) for the given hModule.
 	// If hModule is 0 or matches the main module, use MainModule's fields.
 	resolveResourceModule := func(hModule uint64) (uint64, uint32) {
@@ -130,15 +151,13 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	_ = kernel32
 
 	d.RegisterAutoStubHandler(kernel32, "GetStdHandle", func(ctx *ntapi.TrapContext) uint32 {
-		nStdHandle := ctx.Arg(0)
-		switch uint32(nStdHandle) {
-		case 0xFFFFFFF6: // STD_INPUT_HANDLE
-			ctx.SetReturn(0x100) // fake handle
-		case 0xFFFFFFF5: // STD_OUTPUT_HANDLE
-			ctx.SetReturn(0x101)
-		case 0xFFFFFFF4: // STD_ERROR_HANDLE
-			ctx.SetReturn(0x102)
-		default:
+		nStdHandle := uint32(ctx.Arg(0))
+		stdHandleMu.Lock()
+		h, ok := stdHandleMap[nStdHandle]
+		stdHandleMu.Unlock()
+		if ok {
+			ctx.SetReturn(h)
+		} else {
 			ctx.SetReturn(^uint64(0)) // INVALID_HANDLE_VALUE
 		}
 		return 0
@@ -933,13 +952,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(kernel32, "MultiByteToWideChar", func(ctx *ntapi.TrapContext) uint32 {
+		codePage := uint32(ctx.Arg(0))
+		// dwFlags := uint32(ctx.Arg(1))
 		srcStr := ctx.Arg(2)
 		srcLen := int64(int32(ctx.Arg(3)))
 		dstBuf := ctx.Arg(4)
 		dstLen := int64(int32(ctx.Arg(5)))
 
 		if srcLen == -1 {
-			// Calculate length including null terminator
 			srcLen = 0
 			for {
 				b, _ := ctx.Mem.Read8(srcStr + uint64(srcLen))
@@ -949,6 +969,36 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 				}
 			}
 		}
+
+		if codePage == 65001 { // CP_UTF8
+			raw := make([]byte, srcLen)
+			for i := int64(0); i < srcLen; i++ {
+				raw[i], _ = ctx.Mem.Read8(srcStr + uint64(i))
+			}
+			runes := make([]rune, 0, srcLen)
+			for len(raw) > 0 {
+				r, size := utf8.DecodeRune(raw)
+				runes = append(runes, r)
+				raw = raw[size:]
+			}
+			wchars := utf16.Encode(runes)
+			if dstLen == 0 {
+				ctx.SetReturn(uint64(len(wchars)))
+				return 0
+			}
+			n := int64(len(wchars))
+			if n > dstLen {
+				n = dstLen
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122) // ERROR_INSUFFICIENT_BUFFER
+			}
+			for i := int64(0); i < n; i++ {
+				ctx.Mem.Write16(dstBuf+uint64(i*2), wchars[i])
+			}
+			ctx.SetReturn(uint64(n))
+			return 0
+		}
+
+		// CP_ACP(0) / 1252 / other SBCS: Latin-1 → UTF-16 (1:1 mapping)
 		if dstLen == 0 {
 			ctx.SetReturn(uint64(srcLen))
 			return 0
@@ -956,6 +1006,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		n := srcLen
 		if n > dstLen {
 			n = dstLen
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
 		}
 		for i := int64(0); i < n; i++ {
 			b, _ := ctx.Mem.Read8(srcStr + uint64(i))
@@ -966,10 +1017,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(kernel32, "WideCharToMultiByte", func(ctx *ntapi.TrapContext) uint32 {
+		codePage := uint32(ctx.Arg(0))
+		// dwFlags := uint32(ctx.Arg(1))
 		srcStr := ctx.Arg(2)
 		srcLen := int64(int32(ctx.Arg(3)))
 		dstBuf := ctx.Arg(4)
 		dstLen := int64(int32(ctx.Arg(5)))
+		// lpDefaultChar := ctx.Arg(6)
+		lpUsedDefaultChar := ctx.Arg(7)
 
 		if srcLen == -1 {
 			srcLen = 0
@@ -981,6 +1036,36 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 				}
 			}
 		}
+
+		if codePage == 65001 { // CP_UTF8
+			wchars := make([]uint16, srcLen)
+			for i := int64(0); i < srcLen; i++ {
+				wchars[i], _ = ctx.Mem.Read16(srcStr + uint64(i*2))
+			}
+			runes := utf16.Decode(wchars)
+			var buf []byte
+			tmp := make([]byte, 4)
+			for _, r := range runes {
+				n := utf8.EncodeRune(tmp, r)
+				buf = append(buf, tmp[:n]...)
+			}
+			if dstLen == 0 {
+				ctx.SetReturn(uint64(len(buf)))
+				return 0
+			}
+			n := int64(len(buf))
+			if n > dstLen {
+				n = dstLen
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+			}
+			for i := int64(0); i < n; i++ {
+				ctx.Mem.Write8(dstBuf+uint64(i), buf[i])
+			}
+			ctx.SetReturn(uint64(n))
+			return 0
+		}
+
+		// CP_ACP(0) / 1252 / other SBCS: truncate UTF-16 to byte
 		if dstLen == 0 {
 			ctx.SetReturn(uint64(srcLen))
 			return 0
@@ -988,10 +1073,24 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		n := srcLen
 		if n > dstLen {
 			n = dstLen
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
 		}
+		usedDefault := false
 		for i := int64(0); i < n; i++ {
 			w, _ := ctx.Mem.Read16(srcStr + uint64(i*2))
-			ctx.Mem.Write8(dstBuf+uint64(i), byte(w))
+			if w > 0xFF {
+				ctx.Mem.Write8(dstBuf+uint64(i), '?')
+				usedDefault = true
+			} else {
+				ctx.Mem.Write8(dstBuf+uint64(i), byte(w))
+			}
+		}
+		if lpUsedDefaultChar != 0 {
+			if usedDefault {
+				ctx.Mem.Write32(lpUsedDefaultChar, 1)
+			} else {
+				ctx.Mem.Write32(lpUsedDefaultChar, 0)
+			}
 		}
 		ctx.SetReturn(uint64(n))
 		return 0
@@ -2338,7 +2437,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetStdHandle", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		nStdHandle := uint32(ctx.Arg(0))
+		hHandle := ctx.Arg(1)
+		stdHandleMu.Lock()
+		stdHandleMap[nStdHandle] = hHandle
+		stdHandleMu.Unlock()
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 
@@ -5568,11 +5672,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteTimerQueue", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// DeleteTimerQueue(TimerQueue) - deprecated, use DeleteTimerQueueEx
+		hQueue := ntapi.Handle(ctx.Arg(0))
+		handles.Close(hQueue)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteTimerQueueEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// DeleteTimerQueueEx(TimerQueue, CompletionEvent)
+		hQueue := ntapi.Handle(ctx.Arg(0))
+		handles.Close(hQueue)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteTimerQueueTimer", func(ctx *ntapi.TrapContext) uint32 {
@@ -5666,6 +5776,29 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DuplicateHandle", func(ctx *ntapi.TrapContext) uint32 {
+		// DuplicateHandle(hSourceProcess, hSource, hTargetProcess, lpTargetHandle,
+		//                 dwDesiredAccess, bInheritHandle, dwOptions)
+		hSource := ntapi.Handle(ctx.Arg(1))
+		lpTargetHandle := ctx.Arg(3)
+		dwOptions := uint32(ctx.Arg(6))
+		const DUPLICATE_CLOSE_SOURCE = 0x00000001
+
+		obj := handles.Get(hSource)
+		if obj == nil {
+			// Unknown handle - return the same numeric value (best effort)
+			if lpTargetHandle != 0 {
+				ctx.Mem.Write64(lpTargetHandle, uint64(hSource))
+			}
+			ctx.SetReturn(1)
+			return 0
+		}
+		newH := handles.Alloc(obj)
+		if lpTargetHandle != 0 {
+			ctx.Mem.Write64(lpTargetHandle, uint64(newH))
+		}
+		if dwOptions&DUPLICATE_CLOSE_SOURCE != 0 {
+			handles.Close(hSource)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -7684,6 +7817,15 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetHandleInformation", func(ctx *ntapi.TrapContext) uint32 {
+		// GetHandleInformation(hObject, lpdwFlags)
+		hObject := ntapi.Handle(ctx.Arg(0))
+		lpdwFlags := ctx.Arg(1)
+		handleFlagsMu.Lock()
+		flags := handleFlagsMap[hObject]
+		handleFlagsMu.Unlock()
+		if lpdwFlags != 0 {
+			ctx.Mem.Write32(lpdwFlags, flags)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -12273,7 +12415,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetErrorMode", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // return previous mode (0)
+		uMode := uint32(ctx.Arg(0))
+		errorModeMu.Lock()
+		prev := processErrorMode
+		processErrorMode = uMode
+		errorModeMu.Unlock()
+		ctx.SetReturn(uint64(prev))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetEventWhenCallbackReturns", func(ctx *ntapi.TrapContext) uint32 {
@@ -12363,6 +12510,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetHandleInformation", func(ctx *ntapi.TrapContext) uint32 {
+		// SetHandleInformation(hObject, dwMask, dwFlags)
+		hObject := ntapi.Handle(ctx.Arg(0))
+		dwMask := uint32(ctx.Arg(1))
+		dwFlags := uint32(ctx.Arg(2))
+		handleFlagsMu.Lock()
+		prev := handleFlagsMap[hObject]
+		handleFlagsMap[hObject] = (prev &^ dwMask) | (dwFlags & dwMask)
+		handleFlagsMu.Unlock()
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -12606,7 +12761,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadErrorMode", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// SetThreadErrorMode(dwNewMode, lpOldMode)
+		dwNewMode := uint32(ctx.Arg(0))
+		lpOldMode := ctx.Arg(1)
+		threadErrorModeMu.Lock()
+		prev := threadErrorMode
+		threadErrorMode = dwNewMode
+		threadErrorModeMu.Unlock()
+		if lpOldMode != 0 {
+			ctx.Mem.Write32(lpOldMode, prev)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadExecutionState", func(ctx *ntapi.TrapContext) uint32 {

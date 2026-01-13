@@ -676,11 +676,16 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptEncrypt", func(ctx *ntapi.TrapContext) uint32 {
-		// Pass-through: data is "encrypted" as-is (no real key material)
+		// BOOL CryptEncrypt(HCRYPTKEY hKey, HCRYPTHASH hHash, BOOL Final,
+		//   DWORD dwFlags, BYTE *pbData, DWORD *pdwDataLen, DWORD dwBufLen)
+		// Pass-through: data already in pbData, leave as-is (no-op encryption)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptDecrypt", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL CryptDecrypt(HCRYPTKEY hKey, HCRYPTHASH hHash, BOOL Final,
+		//   DWORD dwFlags, BYTE *pbData, DWORD *pdwDataLen)
+		// Pass-through: data already in pbData, leave as-is (no-op decryption)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -858,9 +863,10 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CheckTokenMembership", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL CheckTokenMembership(HANDLE TokenHandle, PSID SidToCheck, PBOOL IsMember)
 		pIsMember := ctx.Arg(2)
 		if pIsMember != 0 {
-			ctx.Mem.Write32(pIsMember, 0) // not a member (non-admin)
+			ctx.Mem.Write32(pIsMember, 1) // TRUE - claim membership
 		}
 		ctx.SetReturn(1) // TRUE (success)
 		return 0
@@ -971,8 +977,21 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "AdjustTokenPrivileges", func(ctx *ntapi.TrapContext) uint32 {
-		// Always succeed, no real security enforcement
-		ctx.SetReturn(1)
+		// BOOL AdjustTokenPrivileges(HANDLE, BOOL DisableAll, PTOKEN_PRIVILEGES NewState,
+		//   DWORD BufLen, PTOKEN_PRIVILEGES PrevState, PDWORD ReturnLen)
+		disableAll := ctx.Arg(1)
+		newState := ctx.Arg(2)
+		if disableAll == 0 && newState != 0 {
+			// Not all privileges assigned - set ERROR_NOT_ALL_ASSIGNED
+			if ctx.State != nil && ctx.State.TEBAddr != 0 {
+				mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, 1300)
+			}
+		} else {
+			if ctx.State != nil && ctx.State.TEBAddr != 0 {
+				mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, 0)
+			}
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "OpenProcessToken", func(ctx *ntapi.TrapContext) uint32 {
@@ -1647,6 +1666,27 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "SetSecurityDescriptorSacl", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SetSecurityDescriptorSacl(PSECURITY_DESCRIPTOR pSd, BOOL bSaclPresent,
+		//   PACL pSacl, BOOL bSaclDefaulted)
+		pSd := ctx.Arg(0)
+		bSaclPresent := ctx.Arg(1) != 0
+		pSacl := ctx.Arg(2)
+		bSaclDefaulted := ctx.Arg(3) != 0
+		if pSd != 0 {
+			const seSaclPresent = 0x0010
+			const seSaclDefaulted = 0x0020
+			ctrl, _ := mem.Read16(pSd + 2)
+			ctrl &^= seSaclPresent | seSaclDefaulted
+			if bSaclPresent {
+				ctrl |= seSaclPresent
+			}
+			if bSaclDefaulted {
+				ctrl |= seSaclDefaulted
+			}
+			mem.Write16(pSd+2, ctrl)
+			// SACL pointer at offset 20 in absolute SD
+			mem.Write64(pSd+20, pSacl)
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2114,5 +2154,38 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
+	})
+	// GetSecurityDescriptorControl: return default control flags
+	d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorControl", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL GetSecurityDescriptorControl(PSECURITY_DESCRIPTOR pSD,
+		//   PSECURITY_DESCRIPTOR_CONTROL pControl, LPDWORD lpdwRevision)
+		pSd := ctx.Arg(0)
+		pControl := ctx.Arg(1)
+		pRevision := ctx.Arg(2)
+		if pSd != 0 && pControl != 0 {
+			ctrl, _ := mem.Read16(pSd + 2)
+			mem.Write16(pControl, ctrl)
+		} else if pControl != 0 {
+			mem.Write16(pControl, 0)
+		}
+		if pRevision != 0 {
+			mem.Write32(pRevision, 1) // SECURITY_DESCRIPTOR_REVISION
+		}
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	// SetTokenInformation: no-op, always succeed
+	d.RegisterAutoStubHandler(advapi32, "SetTokenInformation", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SetTokenInformation(HANDLE TokenHandle, TOKEN_INFORMATION_CLASS,
+		//   LPVOID TokenInformation, DWORD TokenInformationLength)
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	// RegNotifyChangeKeyValue: registry change notification - no-op
+	d.RegisterAutoStubHandler(advapi32, "RegNotifyChangeKeyValue", func(ctx *ntapi.TrapContext) uint32 {
+		// LSTATUS RegNotifyChangeKeyValue(HKEY hKey, BOOL bWatchSubtree,
+		//   DWORD dwNotifyFilter, HANDLE hEvent, BOOL fAsynchronous)
+		ctx.SetReturn(0) // ERROR_SUCCESS
+		return 0
 	})
 }

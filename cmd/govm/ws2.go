@@ -788,7 +788,11 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ws2, "WSAEnumNetworkEvents", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// int WSAEnumNetworkEvents(SOCKET s, WSAEVENT hEventObject,
+		//   LPWSANETWORKEVENTS lpNetworkEvents)
+		// Return SOCKET_ERROR with WSAEINVAL - no real event tracking
+		wsaSetErr(ctx, 10022) // WSAEINVAL
+		ctx.SetReturn(^uint64(0)) // SOCKET_ERROR (-1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ws2, "WSAEventSelect", func(ctx *ntapi.TrapContext) uint32 {

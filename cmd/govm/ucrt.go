@@ -2,9 +2,11 @@ package main
 
 import (
 	"math"
+	gorand "math/rand"
 	"os"
 	"strconv"
 	"strings"
+	gotime "time"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -1188,7 +1190,7 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 
 	// time / _time64: return current Unix timestamp
 	d.RegisterAutoStubHandler(ucrt, "_time64", func(ctx *ntapi.TrapContext) uint32 {
-		t := uint64(1741600000) // fixed plausible timestamp
+		t := uint64(gotime.Now().Unix())
 		ptr := ctx.Arg(0)
 		if ptr != 0 {
 			mem.Write64(ptr, t)
@@ -1197,7 +1199,7 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "time", func(ctx *ntapi.TrapContext) uint32 {
-		t := uint64(1741600000)
+		t := uint64(gotime.Now().Unix())
 		ptr := ctx.Arg(0)
 		if ptr != 0 {
 			mem.Write64(ptr, t)
@@ -1207,11 +1209,14 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 	})
 
 	// srand / rand
+	ucrtRng := gorand.New(gorand.NewSource(1))
 	d.RegisterAutoStubHandler(ucrt, "srand", func(ctx *ntapi.TrapContext) uint32 {
+		seed := ctx.Arg(0)
+		ucrtRng = gorand.New(gorand.NewSource(int64(seed)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "rand", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(42)
+		ctx.SetReturn(uint64(ucrtRng.Int31n(0x7FFF + 1))) // RAND_MAX = 0x7FFF
 		return 0
 	})
 
@@ -1366,14 +1371,48 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "strtod", func(ctx *ntapi.TrapContext) uint32 {
-		s := readGuestString(ctx.Arg(0))
-		v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		nptr := ctx.Arg(0)
+		endptr := ctx.Arg(1)
+		s := readGuestString(nptr)
+		trimmed := strings.TrimSpace(s)
+		v, _ := strconv.ParseFloat(trimmed, 64)
+		if endptr != 0 {
+			// Advance past consumed characters
+			consumed := len(s) // default: consumed all
+			trimStart := len(s) - len(strings.TrimLeft(s, " \t\n\r\v\f"))
+			rest := s[trimStart:]
+			// Try to find how much was parsed
+			for i := len(rest); i >= 0; i-- {
+				_, err := strconv.ParseFloat(rest[:i], 64)
+				if err == nil && i > 0 {
+					consumed = trimStart + i
+					break
+				}
+			}
+			mem.Write64(endptr, nptr+uint64(consumed))
+		}
 		ctx.SetFloatReturn(v)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "strtof", func(ctx *ntapi.TrapContext) uint32 {
-		s := readGuestString(ctx.Arg(0))
-		v, _ := strconv.ParseFloat(strings.TrimSpace(s), 32)
+		nptr := ctx.Arg(0)
+		endptr := ctx.Arg(1)
+		s := readGuestString(nptr)
+		trimmed := strings.TrimSpace(s)
+		v, _ := strconv.ParseFloat(trimmed, 32)
+		if endptr != 0 {
+			consumed := len(s)
+			trimStart := len(s) - len(strings.TrimLeft(s, " \t\n\r\v\f"))
+			rest := s[trimStart:]
+			for i := len(rest); i >= 0; i-- {
+				_, err := strconv.ParseFloat(rest[:i], 32)
+				if err == nil && i > 0 {
+					consumed = trimStart + i
+					break
+				}
+			}
+			mem.Write64(endptr, nptr+uint64(consumed))
+		}
 		ctx.SetFloatReturn(v)
 		return 0
 	})
@@ -1780,6 +1819,61 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(ucrt, "_seh_filter_dll", func(ctx *ntapi.TrapContext) uint32 {
 		ctx.SetReturn(1) // EXCEPTION_EXECUTE_HANDLER
+		return 0
+	})
+
+	// abs / labs: return absolute value
+	d.RegisterAutoStubHandler(ucrt, "abs", func(ctx *ntapi.TrapContext) uint32 {
+		v := int32(ctx.Arg(0))
+		if v < 0 {
+			v = -v
+		}
+		ctx.SetReturn(uint64(uint32(v)))
+		return 0
+	})
+	d.RegisterAutoStubHandler(ucrt, "labs", func(ctx *ntapi.TrapContext) uint32 {
+		v := int64(ctx.Arg(0))
+		if v < 0 {
+			v = -v
+		}
+		ctx.SetReturn(uint64(v))
+		return 0
+	})
+
+	// clock: return processor time in CLOCKS_PER_SEC (1000 on Windows)
+	d.RegisterAutoStubHandler(ucrt, "clock", func(ctx *ntapi.TrapContext) uint32 {
+		ms := gotime.Since(hctx.BootTime).Milliseconds()
+		ctx.SetReturn(uint64(ms)) // CLOCKS_PER_SEC = 1000 on MSVC
+		return 0
+	})
+
+	// difftime: return difference between two time_t values as double
+	d.RegisterAutoStubHandler(ucrt, "difftime", func(ctx *ntapi.TrapContext) uint32 {
+		t1 := int64(ctx.Arg(0))
+		t0 := int64(ctx.Arg(1))
+		ctx.SetFloatReturn(float64(t1 - t0))
+		return 0
+	})
+
+	// _strtoi64: 64-bit strtol
+	d.RegisterAutoStubHandler(ucrt, "_strtoi64", func(ctx *ntapi.TrapContext) uint32 {
+		nptr := ctx.Arg(0)
+		endptr := ctx.Arg(1)
+		base := int(ctx.Arg(2))
+		var str []byte
+		for i := uint64(0); i < 64; i++ {
+			b, _ := mem.Read8(nptr + i)
+			if b == 0 {
+				break
+			}
+			str = append(str, b)
+		}
+		s := strings.TrimSpace(string(str))
+		val, _ := strconv.ParseInt(s, base, 64)
+		if endptr != 0 {
+			mem.Write64(endptr, nptr+uint64(len(str)))
+		}
+		ctx.SetReturn(uint64(val))
 		return 0
 	})
 }

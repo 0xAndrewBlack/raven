@@ -97,7 +97,12 @@ func registerRpcrt4Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(rpcrt4, "RpcStringFreeA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// RPC_STATUS RpcStringFreeA(RPC_CSTR *String)
+		ppStr := ctx.Arg(0)
+		if ppStr != 0 {
+			mem.Write64(ppStr, 0) // set *String = NULL
+		}
+		ctx.SetReturn(0) // RPC_S_OK
 		return 0
 	})
 	for _, fn := range []string{"RpcBindingFree", "RpcBindingFromStringBindingW",

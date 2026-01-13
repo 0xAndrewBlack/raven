@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
@@ -27,6 +28,57 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	_ = gdi32
 
 	ravelog.Logf("[gdi] registrar running: %d exports\n", len(gdi32.Exports))
+
+	// Per-DC auxiliary state not in gdi.DC (stored here to avoid modifying pkg/gdi).
+	// World transform: 6 IEEE-754 float32 values (eM11, eM12, eM21, eM22, eDx, eDy).
+	dcWorldXform := map[uint64][6]uint32{} // key=hdc handle
+	identityXform := [6]uint32{0x3F800000, 0, 0, 0x3F800000, 0, 0}
+	getXform := func(hdc uint64) [6]uint32 {
+		if xf, ok := dcWorldXform[hdc]; ok {
+			return xf
+		}
+		return identityXform
+	}
+	// PolyFillMode: ALTERNATE=1 (default), WINDING=2.
+	dcPolyFillMode := map[uint64]int32{} // key=hdc handle
+
+	// readXformMem reads an XFORM struct (6 float32s) from guest memory.
+	readXformMem := func(ctx *ntapi.TrapContext, addr uint64) [6]uint32 {
+		var xf [6]uint32
+		for i := 0; i < 6; i++ {
+			xf[i], _ = ctx.Mem.Read32(addr + uint64(i)*4)
+		}
+		return xf
+	}
+	// writeXformMem writes an XFORM struct (6 float32s) to guest memory.
+	writeXformMem := func(ctx *ntapi.TrapContext, addr uint64, xf [6]uint32) {
+		for i := 0; i < 6; i++ {
+			ctx.Mem.Write32(addr+uint64(i)*4, xf[i])
+		}
+	}
+	// xformMul multiplies two XFORM matrices: result = a * b.
+	// ReactOS: CombineTransform in win32ss/gdi/ntgdi/coord.c
+	xformMul := func(a, b [6]uint32) [6]uint32 {
+		af := [6]float32{}
+		bf := [6]float32{}
+		for i := 0; i < 6; i++ {
+			af[i] = math.Float32frombits(a[i])
+			bf[i] = math.Float32frombits(b[i])
+		}
+		var r [6]float32
+		r[0] = af[0]*bf[0] + af[1]*bf[2]          // eM11
+		r[1] = af[0]*bf[1] + af[1]*bf[3]          // eM12
+		r[2] = af[2]*bf[0] + af[3]*bf[2]          // eM21
+		r[3] = af[2]*bf[1] + af[3]*bf[3]          // eM22
+		r[4] = af[4]*bf[0] + af[5]*bf[2] + bf[4]  // eDx
+		r[5] = af[4]*bf[1] + af[5]*bf[3] + bf[5]  // eDy
+		var out [6]uint32
+		for i := 0; i < 6; i++ {
+			out[i] = math.Float32bits(r[i])
+		}
+		return out
+	}
+
 	d.RegisterAutoStubHandler(gdi32, "CreateSolidBrush", func(ctx *ntapi.TrapContext) uint32 {
 		ctx.SetReturn(gdiMgr.CreateSolidBrush(uint32(ctx.Arg(0))))
 		return 0
@@ -1482,11 +1534,99 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ModifyWorldTransform", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: NtGdiModifyWorldTransform in win32ss/gdi/ntgdi/coord.c
+		// iMode: MWT_IDENTITY=1, MWT_LEFTMULTIPLY=2, MWT_RIGHTMULTIPLY=3
+		hdc := ctx.Arg(0)
+		p := ctx.Arg(1)
+		mode := ctx.Arg(2)
+		switch mode {
+		case 1: // MWT_IDENTITY
+			dcWorldXform[hdc] = identityXform
+		case 2: // MWT_LEFTMULTIPLY: result = pXform * current
+			if p != 0 {
+				newXf := readXformMem(ctx, p)
+				dcWorldXform[hdc] = xformMul(newXf, getXform(hdc))
+			}
+		case 3: // MWT_RIGHTMULTIPLY: result = current * pXform
+			if p != 0 {
+				newXf := readXformMem(ctx, p)
+				dcWorldXform[hdc] = xformMul(getXform(hdc), newXf)
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CombineTransform", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: CombineTransform in win32ss/gdi/ntgdi/coord.c
+		// CombineTransform(lpxformResult, lpxform1, lpxform2) - result = xform1 * xform2
+		pOut := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		if pOut != 0 && p1 != 0 && p2 != 0 {
+			xf1 := readXformMem(ctx, p1)
+			xf2 := readXformMem(ctx, p2)
+			writeXformMem(ctx, pOut, xformMul(xf1, xf2))
+		}
 		ctx.SetReturn(1)
+		return 0
+	})
+	// --- CreatePolygonRgn ---
+	// ReactOS: NtGdiCreatePolygonRgn in win32ss/gdi/ntgdi/region.c
+	// Approximate as bounding-rect region (complex polygon clipping not needed).
+	d.RegisterAutoStubHandler(gdi32, "CreatePolygonRgn", func(ctx *ntapi.TrapContext) uint32 {
+		pPts := ctx.Arg(0)
+		n := int(ctx.Arg(1))
+		// arg2 = fill mode (ALTERNATE/WINDING) - ignored for bounding rect
+		if pPts == 0 || n < 1 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var minX, minY, maxX, maxY int32
+		for i := 0; i < n; i++ {
+			px, _ := mem.Read32(pPts + uint64(i)*8)
+			py, _ := mem.Read32(pPts + uint64(i)*8 + 4)
+			x, y := int32(px), int32(py)
+			if i == 0 {
+				minX, minY, maxX, maxY = x, y, x, y
+			} else {
+				if x < minX {
+					minX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if x > maxX {
+					maxX = x
+				}
+				if y > maxY {
+					maxY = y
+				}
+			}
+		}
+		ctx.SetReturn(gdiMgr.CreateRectRgn(minX, minY, maxX, maxY))
+		return 0
+	})
+	// --- SetPolyFillMode / GetPolyFillMode ---
+	// ReactOS: NtGdiSetPolyFillMode / NtGdiGetPolyFillMode
+	// ALTERNATE=1 (default), WINDING=2.
+	d.RegisterAutoStubHandler(gdi32, "SetPolyFillMode", func(ctx *ntapi.TrapContext) uint32 {
+		hdc := ctx.Arg(0)
+		mode := int32(ctx.Arg(1))
+		prev, ok := dcPolyFillMode[hdc]
+		if !ok {
+			prev = 1 // ALTERNATE default
+		}
+		dcPolyFillMode[hdc] = mode
+		ctx.SetReturn(uint64(uint32(prev)))
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "GetPolyFillMode", func(ctx *ntapi.TrapContext) uint32 {
+		hdc := ctx.Arg(0)
+		mode, ok := dcPolyFillMode[hdc]
+		if !ok {
+			mode = 1 // ALTERNATE default
+		}
+		ctx.SetReturn(uint64(uint32(mode)))
 		return 0
 	})
 	// --- Text/font queries ---
@@ -2384,15 +2524,81 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
-	d.RegisterAutoStubHandler(gdi32, "PolyBezierto", func(ctx *ntapi.TrapContext) uint32 {
+	d.RegisterAutoStubHandler(gdi32, "PolyBezierTo", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: NtGdiPolyPolyDraw - bezier to current position
+		// Approximate as line segments through control points.
+		if wlWindow == nil {
+			ctx.SetReturn(1)
+			return 0
+		}
+		dc := getDC(ctx.Arg(0))
+		pPts := ctx.Arg(1)
+		n := int(ctx.Arg(2))
+		for i := 0; i < n; i++ {
+			x, _ := mem.Read32(pPts + uint64(i)*8)
+			y, _ := mem.Read32(pPts + uint64(i)*8 + 4)
+			dc.LineTo(int32(x), int32(y))
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PolyPolyline", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: NtGdiPolyPolyDraw
+		if wlWindow == nil {
+			ctx.SetReturn(1)
+			return 0
+		}
+		dc := getDC(ctx.Arg(0))
+		pPts := ctx.Arg(1)
+		pCounts := ctx.Arg(2)
+		nPolys := int(ctx.Arg(3))
+		off := uint64(0)
+		for p := 0; p < nPolys; p++ {
+			cnt, _ := mem.Read32(pCounts + uint64(p)*4)
+			n := int(cnt)
+			if n < 2 {
+				off += uint64(n) * 8
+				continue
+			}
+			pts := make([][2]int32, n)
+			for i := 0; i < n; i++ {
+				x, _ := mem.Read32(pPts + (off+uint64(i)*8))
+				y, _ := mem.Read32(pPts + (off + uint64(i)*8 + 4))
+				pts[i] = [2]int32{int32(x), int32(y)}
+			}
+			dc.PolylinePoints(pts)
+			off += uint64(n) * 8
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PolyPolygon", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: NtGdiPolyPolyDraw
+		if wlWindow == nil {
+			ctx.SetReturn(1)
+			return 0
+		}
+		dc := getDC(ctx.Arg(0))
+		pPts := ctx.Arg(1)
+		pCounts := ctx.Arg(2)
+		nPolys := int(ctx.Arg(3))
+		off := uint64(0)
+		for p := 0; p < nPolys; p++ {
+			cnt, _ := mem.Read32(pCounts + uint64(p)*4)
+			n := int(cnt)
+			if n < 3 {
+				off += uint64(n) * 8
+				continue
+			}
+			pts := make([][2]int32, n)
+			for i := 0; i < n; i++ {
+				x, _ := mem.Read32(pPts + (off+uint64(i)*8))
+				y, _ := mem.Read32(pPts + (off + uint64(i)*8 + 4))
+				pts[i] = [2]int32{int32(x), int32(y)}
+			}
+			dc.Polygon(pts)
+			off += uint64(n) * 8
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2875,6 +3081,32 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		for i, b := range buf {
 			ctx.Mem.Write8(lpvBits+uint64(i), b)
 		}
+		ctx.SetReturn(uint64(numScans))
+		return 0
+	})
+	// --- SetDIBits ---
+	// ReactOS: NtGdiSetDIBitsToDeviceInternal / GreSetDIBits
+	d.RegisterAutoStubHandler(gdi32, "SetDIBits", func(ctx *ntapi.TrapContext) uint32 {
+		// SetDIBits(hdc, hbm, startScan, numScans, lpBits, lpbmi, usage)
+		hbm := ctx.Arg(1)
+		startScan := int32(ctx.Arg(2))
+		numScans := int32(ctx.Arg(3))
+		lpBits := ctx.Arg(4)
+		pBMI := ctx.Arg(5)
+		obj := gdiMgr.GetObject(hbm)
+		if obj == nil || obj.Bitmap == nil || obj.Bitmap.Surf == nil || lpBits == 0 || pBMI == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		bm := obj.Bitmap
+		srcW, srcH, bitCount, _, ct, _ := readDIBInfo(pBMI)
+		pixData := readDIBPixels(lpBits, srcW, srcH, bitCount)
+		if pixData == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// Blit DIB rows into bitmap surface (no scaling, 1:1)
+		bm.Surf.BlitDIB(0, startScan, bm.Width, numScans, pixData, srcW, srcH, bitCount, ct, 0, startScan, bm.Width, numScans)
 		ctx.SetReturn(uint64(numScans))
 		return 0
 	})

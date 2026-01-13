@@ -919,6 +919,8 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "ftell", func(ctx *ntapi.TrapContext) uint32 {
+		// ftell returns current file position; without real FILE* tracking
+		// return 0 (beginning of file) as a safe default
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1037,6 +1039,14 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 
 	// _initterm_e: like _initterm but functions return int; return 0 on success
 	d.RegisterAutoStubHandler(msvcrt, "_initterm_e", func(ctx *ntapi.TrapContext) uint32 {
+		begin := ctx.Arg(0)
+		end := ctx.Arg(1)
+		for ptr := begin; ptr < end; ptr += 8 {
+			fnPtr, _ := mem.Read64(ptr)
+			if fnPtr != 0 {
+				// Skip calling - assume all initializers succeed
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1090,7 +1100,9 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 	})
 
 	// _set_fmode: set default file translation mode
+	var msvcrtFmode uint32 = 0x8000 // _O_BINARY
 	d.RegisterAutoStubHandler(msvcrt, "_set_fmode", func(ctx *ntapi.TrapContext) uint32 {
+		msvcrtFmode = uint32(ctx.Arg(0))
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1100,8 +1112,8 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(msvcrt, "__p__fmode", func(ctx *ntapi.TrapContext) uint32 {
 		if msvcrtFmodeSlot == 0 {
 			msvcrtFmodeSlot = mem.Mmap(0, 8, mmu.PermRead|mmu.PermWrite)
-			mem.Write32(msvcrtFmodeSlot, 0x8000) // _O_BINARY
 		}
+		mem.Write32(msvcrtFmodeSlot, msvcrtFmode)
 		ctx.SetReturn(msvcrtFmodeSlot)
 		return 0
 	})

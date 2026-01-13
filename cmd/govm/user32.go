@@ -57,6 +57,29 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	wlWindow := hctx.WlWindow
 
 	hwndDisabled := make(map[uint64]bool)
+	hwndWindowRgn := make(map[uint64]uint64)
+
+	// findMenuItem locates a menu item by position or command ID.
+	findMenuItem := func(hMenu uint64, uID uint64, uFlags uint32) *menuItem {
+		const mfByPosition = 0x0400
+		m, ok := menus[hMenu]
+		if !ok {
+			return nil
+		}
+		if uFlags&mfByPosition != 0 {
+			pos := int(uID)
+			if pos >= 0 && pos < len(m.items) {
+				return &m.items[pos]
+			}
+			return nil
+		}
+		for i := range m.items {
+			if m.items[i].id == uID {
+				return &m.items[i]
+			}
+		}
+		return nil
+	}
 
 	user32, ok := hctx.SynthByName["user32.dll"]
 	if !ok {
@@ -2708,10 +2731,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetForegroundWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hctx.MainHWND)
+		// ReactOS: win32ss/user/ntuser/focus.c IntGetForegroundWindow
+		if hctx.FocusHwnd != 0 {
+			ctx.SetReturn(hctx.FocusHwnd)
+		} else {
+			ctx.SetReturn(hctx.MainHWND)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetForegroundWindow", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/focus.c co_IntSetForegroundWindow
+		hctx.FocusHwnd = ctx.Arg(0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3258,6 +3288,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	// Window region
 	d.RegisterAutoStubHandler(user32, "SetWindowRgn", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/winpos.c co_WinPosSetWindowRgn
+		hwnd := ctx.Arg(0)
+		hRgn := ctx.Arg(1)
+		if hRgn != 0 {
+			hwndWindowRgn[hwnd] = hRgn
+		} else {
+			delete(hwndWindowRgn, hwnd)
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4410,9 +4448,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				ctx.Mem.Write32(pvParam, 8)
 				ctx.Mem.Write32(pvParam+4, 0)
 			}
-		case 0x0068: // SPI_GETFONTSMOOTHINGGAMMA
+		case 0x0068: // SPI_GETWHEELSCROLLLINES
 			if pvParam != 0 {
-				ctx.Mem.Write32(pvParam, 2200)
+				ctx.Mem.Write32(pvParam, 3)
 			}
 		case 0x006A: // SPI_GETFONTSMOOTHINGORIENTATIONTYPE
 			if pvParam != 0 {
@@ -4475,7 +4513,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CheckMenuItem", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // MF_UNCHECKED (previous state)
+		// ReactOS: win32ss/user/ntuser/menu.c IntCheckMenuItem
+		const mfChecked = 0x0008
+		item := findMenuItem(ctx.Arg(0), ctx.Arg(1), uint32(ctx.Arg(2)))
+		if item == nil {
+			ctx.SetReturn(0xFFFFFFFF)
+			return 0
+		}
+		prev := item.flags & mfChecked
+		if uint32(ctx.Arg(2))&mfChecked != 0 {
+			item.flags |= mfChecked
+		} else {
+			item.flags &^= mfChecked
+		}
+		ctx.SetReturn(uint64(prev))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetWindowPlacement", func(ctx *ntapi.TrapContext) uint32 {
@@ -4591,7 +4642,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 	// EnableMenuItem
 	d.RegisterAutoStubHandler(user32, "EnableMenuItem", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // previous state
+		// ReactOS: win32ss/user/ntuser/menu.c IntEnableMenuItem
+		const (
+			mfGrayed   = 0x0001
+			mfDisabled = 0x0002
+		)
+		item := findMenuItem(ctx.Arg(0), ctx.Arg(1), uint32(ctx.Arg(2)))
+		if item == nil {
+			ctx.SetReturn(0xFFFFFFFF)
+			return 0
+		}
+		prev := item.flags & (mfGrayed | mfDisabled)
+		item.flags &^= (mfGrayed | mfDisabled)
+		item.flags |= uint32(ctx.Arg(2)) & (mfGrayed | mfDisabled)
+		ctx.SetReturn(uint64(prev))
 		return 0
 	})
 
@@ -4625,18 +4689,24 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 	// GetSubMenu
 	d.RegisterAutoStubHandler(user32, "GetSubMenu", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/menu.c IntGetSubMenu
 		hmenu := ctx.Arg(0)
 		pos := int(ctx.Arg(1))
-		if m, ok := menus[hmenu]; ok && pos < len(m.items) {
-			// Create a handle for the sub-menu position
-			subH := uint64(0x70000 + uint64(pos)<<8 + hmenu&0xFF)
-			if _, exists := menus[subH]; !exists {
-				menus[subH] = &menuData{}
-			}
-			ctx.SetReturn(subH)
+		m, ok := menus[hmenu]
+		if !ok || pos < 0 || pos >= len(m.items) {
+			ctx.SetReturn(0)
 			return 0
 		}
-		ctx.SetReturn(0)
+		item := &m.items[pos]
+		if len(item.submenu) == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		subH := uint64(0x70000 + uint64(pos)<<8 + hmenu&0xFF)
+		if _, exists := menus[subH]; !exists {
+			menus[subH] = &menuData{items: item.submenu}
+		}
+		ctx.SetReturn(subH)
 		return 0
 	})
 
@@ -4769,7 +4839,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 	// GetMenuState returns flags for menu item (by position or ID)
 	d.RegisterAutoStubHandler(user32, "GetMenuState", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // no flags
+		// ReactOS: win32ss/user/ntuser/menu.c IntGetMenuState
+		item := findMenuItem(ctx.Arg(0), ctx.Arg(1), uint32(ctx.Arg(2)))
+		if item == nil {
+			ctx.SetReturn(0xFFFFFFFF)
+			return 0
+		}
+		flags := item.flags
+		if len(item.submenu) > 0 {
+			flags |= uint32(len(item.submenu)) << 8
+		}
+		ctx.SetReturn(uint64(flags))
 		return 0
 	})
 
@@ -6021,15 +6101,27 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetActiveWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hctx.MainHWND)
+		// ReactOS: win32ss/user/ntuser/focus.c IntGetActiveWindow
+		if hctx.ActiveHwnd != 0 {
+			ctx.SetReturn(hctx.ActiveHwnd)
+		} else {
+			ctx.SetReturn(hctx.MainHWND)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetActiveWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hctx.MainHWND)
+		// ReactOS: win32ss/user/ntuser/focus.c co_IntSetActiveWindow
+		prev := hctx.ActiveHwnd
+		if prev == 0 {
+			prev = hctx.MainHWND
+		}
+		hctx.ActiveHwnd = ctx.Arg(0)
+		ctx.SetReturn(prev)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetCapture", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// ReactOS: win32ss/user/ntuser/msgqueue.c IntGetCapture
+		ctx.SetReturn(hctx.MouseCapture)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetLastActivePopup", func(ctx *ntapi.TrapContext) uint32 {
@@ -6255,31 +6347,59 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetWindowInfo", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/window.c NtUserGetWindowInfo
 		hwnd, pWI := ctx.Arg(0), ctx.Arg(1)
 		if pWI == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// WINDOWINFO: cbSize(4)+rcWindow(16)+rcClient(16)+dwStyle(4)+dwExStyle(4)+dwWindowStatus(4)+cxWindowBorders(4)+cyWindowBorders(4)+atomWindowType(2)+wCreatorVersion(2)
+		// WINDOWINFO: cbSize(4)+rcWindow(16)+rcClient(16)+dwStyle(4)+dwExStyle(4)+
+		//   dwWindowStatus(4)+cxWindowBorders(4)+cyWindowBorders(4)+atomWindowType(2)+wCreatorVersion(2)
 		cbSize, _ := mem.Read32(pWI)
 		if cbSize < 60 {
 			ctx.SetReturn(0)
 			return 0
 		}
 		var x, y, w, h int32
+		var style, exStyle uint32
 		if cs, ok := hwndChildren[hwnd]; ok {
 			x, y, w, h = cs.x, cs.y, cs.w, cs.h
+			style, exStyle = cs.style, cs.exStyle
 		} else if wlWindow != nil {
 			w, h = wlWindow.Width, wlWindow.Height
+			style = 0x00CF0000 // WS_OVERLAPPEDWINDOW
 		}
+		// rcWindow
 		ctx.Mem.Write32(pWI+4, uint32(x))
 		ctx.Mem.Write32(pWI+8, uint32(y))
 		ctx.Mem.Write32(pWI+12, uint32(x+w))
 		ctx.Mem.Write32(pWI+16, uint32(y+h))
+		// rcClient
 		ctx.Mem.Write32(pWI+20, uint32(x))
 		ctx.Mem.Write32(pWI+24, uint32(y))
 		ctx.Mem.Write32(pWI+28, uint32(x+w))
 		ctx.Mem.Write32(pWI+32, uint32(y+h))
+		// dwStyle
+		ctx.Mem.Write32(pWI+36, style)
+		// dwExStyle
+		ctx.Mem.Write32(pWI+40, exStyle)
+		// dwWindowStatus: WS_ACTIVECAPTION (1) if foreground
+		var winStatus uint32
+		if hwnd == hctx.MainHWND || hwnd == hctx.FocusHwnd {
+			winStatus = 1
+		}
+		ctx.Mem.Write32(pWI+44, winStatus)
+		// cxWindowBorders, cyWindowBorders
+		ctx.Mem.Write32(pWI+48, 1)
+		ctx.Mem.Write32(pWI+52, 1)
+		// atomWindowType
+		var atom uint16
+		if a, ok := hctx.HwndClassAtom[hwnd]; ok {
+			atom = a
+		}
+		ctx.Mem.Write16(pWI+56, atom)
+		// wCreatorVersion (Windows Vista = 0x0600)
+		ctx.Mem.Write16(pWI+58, 0x0600)
 		ctx.SetReturn(1)
 		return 0
 	})

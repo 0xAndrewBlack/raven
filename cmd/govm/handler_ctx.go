@@ -190,6 +190,7 @@ type HandlerCtx struct {
 	NextDelayID       uint32
 	FocusHwnd         uint64
 	MouseCapture      uint64
+	ActiveHwnd        uint64
 	OpenMenuIdx       int
 	OpenMenuHwnd      uint64
 	NextHWND          uint64
