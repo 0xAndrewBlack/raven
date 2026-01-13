@@ -2290,6 +2290,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// ncDrawText draws text at absolute surface coordinates using GDI TrueType if available,
 	// otherwise falls back to the bitmap DrawTextAbs.
 	hctx.NcDrawText = func(x, y int32, text string, fg, bg uint32, opaque bool, size int32) {
+		if wlWindow == nil {
+			return
+		}
 		f := hctx.NcTextFont(size)
 		if f == nil {
 			wlWindow.DrawTextAbs(x, y, text, fg, bg, opaque)
