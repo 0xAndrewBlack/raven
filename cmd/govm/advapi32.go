@@ -1128,17 +1128,251 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
-	// Trivial SID helpers
-	for _, fn := range []string{"GetSidSubAuthorityCount", "GetSidSubAuthority",
-		"GetSidIdentifierAuthority", "InitializeSid",
-		"CreateWellKnownSid", "IsWellKnownSid", "EqualPrefixSid"} {
-		fn := fn
-		_ = fn
-		d.RegisterAutoStubHandler(advapi32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(1)
-			return 0
-		})
+	// SID helpers - real implementations per ReactOS
+	// buildSID constructs a binary SID from authority and sub-authorities
+	buildSID := func(authority uint64, subAuths ...uint32) []byte {
+		nSub := len(subAuths)
+		sid := make([]byte, 8+nSub*4)
+		sid[0] = 1 // Revision
+		sid[1] = byte(nSub)
+		sid[2] = byte(authority >> 40)
+		sid[3] = byte(authority >> 32)
+		sid[4] = byte(authority >> 24)
+		sid[5] = byte(authority >> 16)
+		sid[6] = byte(authority >> 8)
+		sid[7] = byte(authority)
+		for i, v := range subAuths {
+			sid[8+i*4+0] = byte(v)
+			sid[8+i*4+1] = byte(v >> 8)
+			sid[8+i*4+2] = byte(v >> 16)
+			sid[8+i*4+3] = byte(v >> 24)
+		}
+		return sid
 	}
+
+	// GetSidSubAuthorityCount returns pointer to SubAuthorityCount byte in SID
+	d.RegisterAutoStubHandler(advapi32, "GetSidSubAuthorityCount", func(ctx *ntapi.TrapContext) uint32 {
+		pSid := ctx.Arg(0)
+		if pSid == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(pSid + 1) // SubAuthorityCount at offset 1
+		return 0
+	})
+	// GetSidSubAuthority returns pointer to SubAuthority[nSubAuthority]
+	d.RegisterAutoStubHandler(advapi32, "GetSidSubAuthority", func(ctx *ntapi.TrapContext) uint32 {
+		pSid := ctx.Arg(0)
+		nSubAuth := ctx.Arg(1)
+		if pSid == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(pSid + 8 + nSubAuth*4) // SubAuthority array at offset 8
+		return 0
+	})
+	// GetSidIdentifierAuthority returns pointer to IdentifierAuthority (6 bytes at offset 2)
+	d.RegisterAutoStubHandler(advapi32, "GetSidIdentifierAuthority", func(ctx *ntapi.TrapContext) uint32 {
+		pSid := ctx.Arg(0)
+		if pSid == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(pSid + 2)
+		return 0
+	})
+	// InitializeSid writes revision, authority, and zeroed sub-authorities
+	d.RegisterAutoStubHandler(advapi32, "InitializeSid", func(ctx *ntapi.TrapContext) uint32 {
+		pSid := ctx.Arg(0)
+		pAuth := ctx.Arg(1)
+		nSub := uint8(ctx.Arg(2))
+		if pSid == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		mem.Write8(pSid, 1)      // Revision = SID_REVISION
+		mem.Write8(pSid+1, nSub) // SubAuthorityCount
+		if pAuth != 0 {
+			for i := uint64(0); i < 6; i++ {
+				b, _ := mem.Read8(pAuth + i)
+				mem.Write8(pSid+2+i, b)
+			}
+		}
+		for i := uint8(0); i < nSub; i++ {
+			mem.Write32(pSid+8+uint64(i)*4, 0)
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// CreateWellKnownSid builds a well-known SID by type
+	d.RegisterAutoStubHandler(advapi32, "CreateWellKnownSid", func(ctx *ntapi.TrapContext) uint32 {
+		sidType := uint32(ctx.Arg(0))
+		pSid := ctx.Arg(2)
+		pcbSid := ctx.Arg(3)
+		var sid []byte
+		switch sidType {
+		case 0: // WinNullSid: S-1-0-0
+			sid = buildSID(0, 0)
+		case 1: // WinWorldSid: S-1-1-0
+			sid = buildSID(1, 0)
+		case 2: // WinLocalSid: S-1-2-0
+			sid = buildSID(2, 0)
+		case 3: // WinCreatorOwnerSid: S-1-3-0
+			sid = buildSID(3, 0)
+		case 4: // WinCreatorGroupSid: S-1-3-1
+			sid = buildSID(3, 1)
+		case 7: // WinNtAuthoritySid: S-1-5
+			sid = buildSID(5)
+		case 8: // WinDialupSid: S-1-5-1
+			sid = buildSID(5, 1)
+		case 9: // WinNetworkSid: S-1-5-2
+			sid = buildSID(5, 2)
+		case 10: // WinBatchSid: S-1-5-3
+			sid = buildSID(5, 3)
+		case 11: // WinInteractiveSid: S-1-5-4
+			sid = buildSID(5, 4)
+		case 12: // WinServiceSid: S-1-5-6
+			sid = buildSID(5, 6)
+		case 13: // WinAnonymousSid: S-1-5-7
+			sid = buildSID(5, 7)
+		case 22: // WinLocalSystemSid: S-1-5-18
+			sid = buildSID(5, 18)
+		case 23: // WinLocalServiceSid: S-1-5-19
+			sid = buildSID(5, 19)
+		case 24: // WinNetworkServiceSid: S-1-5-20
+			sid = buildSID(5, 20)
+		case 25: // WinBuiltinDomainSid: S-1-5-32
+			sid = buildSID(5, 32)
+		case 26: // WinBuiltinAdministratorsSid: S-1-5-32-544
+			sid = buildSID(5, 32, 544)
+		case 27: // WinBuiltinUsersSid: S-1-5-32-545
+			sid = buildSID(5, 32, 545)
+		case 28: // WinBuiltinGuestsSid: S-1-5-32-546
+			sid = buildSID(5, 32, 546)
+		case 29: // WinBuiltinPowerUsersSid: S-1-5-32-547
+			sid = buildSID(5, 32, 547)
+		case 36: // WinAuthenticatedUserSid: S-1-5-11
+			sid = buildSID(5, 11)
+		case 66: // WinLowLabelSid: S-1-16-4096
+			sid = buildSID(16, 4096)
+		case 67: // WinMediumLabelSid: S-1-16-8192
+			sid = buildSID(16, 8192)
+		case 68: // WinHighLabelSid: S-1-16-12288
+			sid = buildSID(16, 12288)
+		case 69: // WinSystemLabelSid: S-1-16-16384
+			sid = buildSID(16, 16384)
+		default:
+			sid = buildSID(0, 0) // fallback: null SID
+		}
+		needed := uint32(len(sid))
+		if pcbSid != 0 {
+			avail, _ := mem.Read32(pcbSid)
+			mem.Write32(pcbSid, needed)
+			if avail < needed {
+				ctx.SetReturn(0) // ERROR_INSUFFICIENT_BUFFER
+				return 0
+			}
+		}
+		if pSid != 0 {
+			mem.WriteBytes(pSid, sid)
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// IsWellKnownSid checks if a SID matches a well-known SID type
+	d.RegisterAutoStubHandler(advapi32, "IsWellKnownSid", func(ctx *ntapi.TrapContext) uint32 {
+		pSid := ctx.Arg(0)
+		sidType := uint32(ctx.Arg(1))
+		if pSid == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		var expected []byte
+		switch sidType {
+		case 0:
+			expected = buildSID(0, 0)
+		case 1:
+			expected = buildSID(1, 0)
+		case 2:
+			expected = buildSID(2, 0)
+		case 3:
+			expected = buildSID(3, 0)
+		case 4:
+			expected = buildSID(3, 1)
+		case 22:
+			expected = buildSID(5, 18)
+		case 23:
+			expected = buildSID(5, 19)
+		case 24:
+			expected = buildSID(5, 20)
+		case 25:
+			expected = buildSID(5, 32)
+		case 26:
+			expected = buildSID(5, 32, 544)
+		case 27:
+			expected = buildSID(5, 32, 545)
+		case 36:
+			expected = buildSID(5, 11)
+		case 66:
+			expected = buildSID(16, 4096)
+		case 67:
+			expected = buildSID(16, 8192)
+		case 68:
+			expected = buildSID(16, 12288)
+		case 69:
+			expected = buildSID(16, 16384)
+		default:
+			ctx.SetReturn(0)
+			return 0
+		}
+		actual, _ := mem.ReadBytes(pSid, len(expected))
+		for i := range expected {
+			if i >= len(actual) || actual[i] != expected[i] {
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// EqualPrefixSid compares SID prefix (all sub-authorities except the last)
+	d.RegisterAutoStubHandler(advapi32, "EqualPrefixSid", func(ctx *ntapi.TrapContext) uint32 {
+		pSid1 := ctx.Arg(0)
+		pSid2 := ctx.Arg(1)
+		if pSid1 == 0 || pSid2 == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		nSub1, _ := mem.Read8(pSid1 + 1)
+		nSub2, _ := mem.Read8(pSid2 + 1)
+		if nSub1 != nSub2 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// Compare authority (6 bytes at offset 2)
+		for i := uint64(0); i < 6; i++ {
+			b1, _ := mem.Read8(pSid1 + 2 + i)
+			b2, _ := mem.Read8(pSid2 + 2 + i)
+			if b1 != b2 {
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		// Compare sub-authorities except the last (the RID)
+		if nSub1 > 1 {
+			for i := uint8(0); i < nSub1-1; i++ {
+				off := 8 + uint64(i)*4
+				s1, _ := mem.Read32(pSid1 + off)
+				s2, _ := mem.Read32(pSid2 + off)
+				if s1 != s2 {
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
 
 	// ConvertStringSidToSidA/W - parse "S-1-5-21-xxx-yyy-zzz-500" into a binary SID
 	parseSidString := func(s string) []byte {
@@ -1229,6 +1463,97 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 
+	// LookupAccountSidW: return "User" / "RAVEN" for any SID
+	d.RegisterAutoStubHandler(advapi32, "LookupAccountSidW", func(ctx *ntapi.TrapContext) uint32 {
+		// (lpSystemName, Sid, Name, cchName, ReferencedDomainName, cchReferencedDomainName, peUse)
+		lpName := ctx.Arg(2)
+		lpcchName := ctx.Arg(3)
+		lpDomain := ctx.Arg(4)
+		lpcchDomain := ctx.Arg(5)
+		peUse := ctx.Arg(6)
+
+		nameWs := utf16Encode("User")
+		domainWs := utf16Encode("RAVEN")
+		nameNeeded := uint32(len(nameWs) + 1)
+		domainNeeded := uint32(len(domainWs) + 1)
+
+		nameAvail := uint32(0)
+		domainAvail := uint32(0)
+		if lpcchName != 0 {
+			nameAvail, _ = mem.Read32(lpcchName)
+			mem.Write32(lpcchName, nameNeeded)
+		}
+		if lpcchDomain != 0 {
+			domainAvail, _ = mem.Read32(lpcchDomain)
+			mem.Write32(lpcchDomain, domainNeeded)
+		}
+		if (lpName != 0 && nameAvail < nameNeeded) || (lpDomain != 0 && domainAvail < domainNeeded) {
+			ctx.SetReturn(0) // ERROR_INSUFFICIENT_BUFFER
+			return 0
+		}
+		if lpName != 0 {
+			for i, w := range nameWs {
+				mem.Write16(lpName+uint64(i)*2, w)
+			}
+			mem.Write16(lpName+uint64(len(nameWs))*2, 0)
+		}
+		if lpDomain != 0 {
+			for i, w := range domainWs {
+				mem.Write16(lpDomain+uint64(i)*2, w)
+			}
+			mem.Write16(lpDomain+uint64(len(domainWs))*2, 0)
+		}
+		if peUse != 0 {
+			mem.Write32(peUse, 1) // SidTypeUser
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	// LookupAccountSidA: ANSI variant
+	d.RegisterAutoStubHandler(advapi32, "LookupAccountSidA", func(ctx *ntapi.TrapContext) uint32 {
+		lpName := ctx.Arg(2)
+		lpcchName := ctx.Arg(3)
+		lpDomain := ctx.Arg(4)
+		lpcchDomain := ctx.Arg(5)
+		peUse := ctx.Arg(6)
+
+		name := "User"
+		domain := "RAVEN"
+		nameNeeded := uint32(len(name) + 1)
+		domainNeeded := uint32(len(domain) + 1)
+
+		nameAvail := uint32(0)
+		domainAvail := uint32(0)
+		if lpcchName != 0 {
+			nameAvail, _ = mem.Read32(lpcchName)
+			mem.Write32(lpcchName, nameNeeded)
+		}
+		if lpcchDomain != 0 {
+			domainAvail, _ = mem.Read32(lpcchDomain)
+			mem.Write32(lpcchDomain, domainNeeded)
+		}
+		if (lpName != 0 && nameAvail < nameNeeded) || (lpDomain != 0 && domainAvail < domainNeeded) {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if lpName != 0 {
+			for i := 0; i < len(name); i++ {
+				mem.Write8(lpName+uint64(i), name[i])
+			}
+			mem.Write8(lpName+uint64(len(name)), 0)
+		}
+		if lpDomain != 0 {
+			for i := 0; i < len(domain); i++ {
+				mem.Write8(lpDomain+uint64(i), domain[i])
+			}
+			mem.Write8(lpDomain+uint64(len(domain)), 0)
+		}
+		if peUse != 0 {
+			mem.Write32(peUse, 1) // SidTypeUser
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
 	// Security descriptor helpers
 	d.RegisterAutoStubHandler(advapi32, "InitializeSecurityDescriptor", func(ctx *ntapi.TrapContext) uint32 {
 		pSd := ctx.Arg(0)
@@ -1247,6 +1572,28 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "SetSecurityDescriptorDacl", func(ctx *ntapi.TrapContext) uint32 {
+		pSd := ctx.Arg(0)
+		bDaclPresent := ctx.Arg(1) != 0
+		pDacl := ctx.Arg(2)
+		bDaclDefaulted := ctx.Arg(3) != 0
+		if pSd == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// Modify Control flags at offset 2
+		ctrl, _ := mem.Read16(pSd + 2)
+		const seDaclPresent = 0x0004
+		const seDaclDefaulted = 0x0008
+		ctrl &^= seDaclPresent | seDaclDefaulted
+		if bDaclPresent {
+			ctrl |= seDaclPresent
+		}
+		if bDaclDefaulted {
+			ctrl |= seDaclDefaulted
+		}
+		mem.Write16(pSd+2, ctrl)
+		// DACL pointer at offset 28 in absolute SD
+		mem.Write64(pSd+28, pDacl)
 		ctx.SetReturn(1)
 		return 0
 	})

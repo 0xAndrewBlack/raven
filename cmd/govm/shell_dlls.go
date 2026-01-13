@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -8,6 +9,104 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
+
+// csidlToPath maps a CSIDL folder ID to its fake Windows path.
+func csidlToPath(csidl int32) string {
+	switch csidl & 0xFF {
+	case 0x00:
+		return `C:\Users\user\Desktop`
+	case 0x05:
+		return `C:\Users\user\Documents`
+	case 0x06:
+		return `C:\Users\user\Favorites`
+	case 0x08:
+		return `C:\Users\user\AppData\Roaming\Microsoft\Windows\Recent`
+	case 0x09:
+		return `C:\Users\user\AppData\Roaming\Microsoft\Windows\SendTo`
+	case 0x0B:
+		return `C:\Users\user\AppData\Roaming\Microsoft\Windows\Start Menu`
+	case 0x0D:
+		return `C:\Users\user\Music`
+	case 0x0E:
+		return `C:\Users\user\Videos`
+	case 0x10:
+		return `C:\Windows\Desktop`
+	case 0x11:
+		return `C:\`
+	case 0x14:
+		return `C:\Windows\Fonts`
+	case 0x1A:
+		return `C:\Users\user\AppData\Roaming`
+	case 0x1C:
+		return `C:\Users\user\AppData\Local`
+	case 0x1D:
+		return `C:\Windows\Temp`
+	case 0x23:
+		return `C:\ProgramData`
+	case 0x24:
+		return `C:\Windows`
+	case 0x25:
+		return `C:\Windows\System32`
+	case 0x26:
+		return `C:\Program Files`
+	case 0x27:
+		return `C:\Users\user\Pictures`
+	case 0x28:
+		return `C:\Users\user`
+	case 0x29:
+		return `C:\Windows\System32`
+	case 0x2A:
+		return `C:\Program Files`
+	case 0x2B:
+		return `C:\Program Files\Common Files`
+	default:
+		return `C:\Users\user`
+	}
+}
+
+// parseCommandLine splits a Windows command line string respecting double-quotes.
+func parseCommandLine(cmd string) []string {
+	var args []string
+	var cur strings.Builder
+	inQ := false
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+		switch {
+		case ch == '"':
+			inQ = !inQ
+		case ch == '\\' && inQ && i+1 < len(cmd) && cmd[i+1] == '"':
+			cur.WriteByte('"')
+			i++
+		case (ch == ' ' || ch == '\t') && !inQ:
+			if cur.Len() > 0 {
+				args = append(args, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if cur.Len() > 0 {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
+// readGUIDString reads a 16-byte GUID from guest memory and formats it.
+func readGUIDString(mem interface {
+	Read8(uint64) (byte, error)
+}, addr uint64) string {
+	b := make([]byte, 16)
+	for i := range b {
+		v, _ := mem.Read8(addr + uint64(i))
+		b[i] = v
+	}
+	d1 := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+	d2 := uint16(b[4]) | uint16(b[5])<<8
+	d3 := uint16(b[6]) | uint16(b[7])<<8
+	return fmt.Sprintf("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+		d1, d2, d3, b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
+}
 
 func registerShcoreHandlers1(hctx *HandlerCtx) {
 	d := hctx.Disp
@@ -818,55 +917,10 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 	_ = shell32
 
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathW", func(ctx *ntapi.TrapContext) uint32 {
-		buf := ctx.Arg(3)
+		// HRESULT SHGetFolderPathW(HWND hwnd, int nFolder, HANDLE hToken, DWORD dwFlags, LPWSTR pszPath)
 		folder := ctx.Arg(1)
-		var path string
-		switch int32(folder) & 0xFF {
-		case 0x00:
-			path = `C:\Users\user\Desktop` // CSIDL_DESKTOP
-		case 0x05:
-			path = `C:\Users\user\Documents` // CSIDL_MYDOCUMENTS
-		case 0x08:
-			path = `C:\Users\user\AppData\Roaming\Microsoft\Windows\Recent` // CSIDL_RECENT
-		case 0x09:
-			path = `C:\Users\user\AppData\Roaming\Microsoft\Windows\SendTo` // CSIDL_SENDTO
-		case 0x0B:
-			path = `C:\Users\user\AppData\Roaming\Microsoft\Windows\Start Menu` // CSIDL_STARTMENU
-		case 0x0D:
-			path = `C:\Users\user\Music` // CSIDL_MYMUSIC
-		case 0x0E:
-			path = `C:\Users\user\Videos` // CSIDL_MYVIDEO
-		case 0x10:
-			path = `C:\Windows\Desktop` // CSIDL_DESKTOPDIRECTORY
-		case 0x11:
-			path = `C:\` // CSIDL_DRIVES
-		case 0x14:
-			path = `C:\Users\user\Favorites` // CSIDL_FAVORITES
-		case 0x1A:
-			path = `C:\Users\user\AppData\Roaming` // CSIDL_APPDATA
-		case 0x1C:
-			path = `C:\Users\user\AppData\Local` // CSIDL_LOCAL_APPDATA
-		case 0x1D:
-			path = `C:\Windows\Temp` // CSIDL_INTERNET_CACHE
-		case 0x24:
-			path = `C:\Windows` // CSIDL_WINDOWS
-		case 0x25:
-			path = `C:\Windows\System32` // CSIDL_SYSTEM
-		case 0x26:
-			path = `C:\Program Files` // CSIDL_PROGRAM_FILES
-		case 0x27:
-			path = `C:\Users\user\Pictures` // CSIDL_MYPICTURES
-		case 0x28:
-			path = `C:\Users\user` // CSIDL_PROFILE
-		case 0x29:
-			path = `C:\Windows\System32` // CSIDL_SYSTEMX86
-		case 0x2A:
-			path = `C:\Program Files` // CSIDL_PROGRAM_FILESX86
-		case 0x2B:
-			path = `C:\Program Files\Common Files` // CSIDL_PROGRAM_FILES_COMMON
-		default:
-			path = `C:\Users\user`
-		}
+		buf := ctx.Arg(3)
+		path := csidlToPath(int32(folder))
 		if buf != 0 {
 			for i, ch := range path {
 				ctx.Mem.Write16(buf+uint64(i*2), uint16(ch))
@@ -880,9 +934,32 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetKnownFolderPath", func(ctx *ntapi.TrapContext) uint32 {
-		// rfid = Arg(0) pointer to KNOWNFOLDERID GUID, ppszPath = Arg(2)
-		ppszPath := ctx.Arg(2)
-		path := `C:\Users\user\AppData\Roaming`
+		// HRESULT SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PWSTR *ppszPath)
+		rfid := ctx.Arg(0)
+		ppszPath := ctx.Arg(3)
+		path := `C:\Users\user\AppData\Roaming` // default fallback
+		if rfid != 0 {
+			guidStr := readGUIDString(ctx.Mem, rfid)
+			knownFolders := map[string]string{
+				"{374DE290-123F-4565-9164-39C4925E467B}": `C:\Users\user\Downloads`,
+				"{FDD39AD0-238F-46AF-ADB4-6C85480369C7}": `C:\Users\user\Documents`,
+				"{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}": `C:\Users\user\AppData\Roaming`,
+				"{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}": `C:\Users\user\AppData\Local`,
+				"{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}": `C:\Users\user\Desktop`,
+				"{5E6C858F-0E22-4760-9AFE-EA3317B67173}": `C:\Users\user`,
+				"{905E63B6-C1BF-494E-B29C-65B732D3D21A}": `C:\Program Files`,
+				"{F38BF404-1D43-42F2-9305-67DE0B28FC23}": `C:\Windows`,
+				"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}": `C:\Windows\System32`,
+				"{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}": `C:\ProgramData`,
+				"{FD228CB7-AE11-4AE3-864C-16F3910AB8FE}": `C:\Windows\Fonts`,
+				"{33E28130-4E1E-4676-835A-98395C3BC3BB}": `C:\Users\user\Pictures`,
+				"{4BD8D571-6D19-48D3-BE97-422220080E43}": `C:\Users\user\Music`,
+				"{18989B1D-99B5-455B-841C-AB7C74E4DDFC}": `C:\Users\user\Videos`,
+			}
+			if p, ok := knownFolders[guidStr]; ok {
+				path = p
+			}
+		}
 		ws := utf16Encode(path)
 		bufSize := uint64(len(ws)+1) * 2
 		addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
@@ -934,7 +1011,11 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0 // no-op
 	})
 	d.RegisterAutoStubHandler(shell32, "ShellExecuteW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(33) // >32 means success (SE_ERR_NOASSOC=31, success=32+)
+		ctx.SetReturn(42) // >32 means success
+		return 0
+	})
+	d.RegisterAutoStubHandler(shell32, "ShellExecuteA", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(42) // >32 means success
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHFileOperationW", func(ctx *ntapi.TrapContext) uint32 {
@@ -954,12 +1035,68 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0x80004001) // E_NOTIMPL
 		return 0
 	})
+	d.RegisterAutoStubHandler(shell32, "SHGetSpecialFolderPathW", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SHGetSpecialFolderPathW(HWND hwnd, LPWSTR pszPath, int csidl, BOOL fCreate)
+		pszPath := ctx.Arg(1)
+		csidl := ctx.Arg(2)
+		path := csidlToPath(int32(csidl))
+		if pszPath != 0 {
+			for i, ch := range path {
+				ctx.Mem.Write16(pszPath+uint64(i*2), uint16(ch))
+			}
+			ctx.Mem.Write16(pszPath+uint64(len(path)*2), 0)
+		}
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	d.RegisterAutoStubHandler(shell32, "SHGetSpecialFolderPathA", func(ctx *ntapi.TrapContext) uint32 {
+		pszPath := ctx.Arg(1)
+		csidl := ctx.Arg(2)
+		path := csidlToPath(int32(csidl))
+		if pszPath != 0 {
+			for i := 0; i < len(path); i++ {
+				ctx.Mem.Write8(pszPath+uint64(i), path[i])
+			}
+			ctx.Mem.Write8(pszPath+uint64(len(path)), 0)
+		}
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+	d.RegisterAutoStubHandler(shell32, "SHGetFileInfoW", func(ctx *ntapi.TrapContext) uint32 {
+		// DWORD_PTR SHGetFileInfoW(LPCWSTR pszPath, DWORD dwFileAttributes,
+		//   SHFILEINFOW *psfi, UINT cbFileInfo, UINT uFlags)
+		psfi := ctx.Arg(2)
+		cbFileInfo := ctx.Arg(3)
+		if psfi != 0 && cbFileInfo >= 4 {
+			// Zero the SHFILEINFOW struct (up to cbFileInfo bytes)
+			for i := uint64(0); i < cbFileInfo && i < 692; i++ {
+				ctx.Mem.Write8(psfi+i, 0)
+			}
+		}
+		ctx.SetReturn(1) // non-zero = success
+		return 0
+	})
+	d.RegisterAutoStubHandler(shell32, "SHGetFileInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(shell32, "ExtractIconExW", func(ctx *ntapi.TrapContext) uint32 {
+		// UINT ExtractIconExW(LPCWSTR lpszFile, int nIconIndex,
+		//   HICON *phiconLarge, HICON *phiconSmall, UINT nIcons)
+		ctx.SetReturn(0) // 0 icons extracted
+		return 0
+	})
+	d.RegisterAutoStubHandler(shell32, "ExtractIconExA", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
 }
 
 func registerShcoreHandlers2(hctx *HandlerCtx) {
 	d := hctx.Disp
 	imagePath := hctx.ImagePath
 	mem := hctx.Mem
+	readGuestUTF16 := hctx.ReadGuestUTF16
 
 	shcore, ok := hctx.SynthByName["shcore.dll"]
 	if !ok {
@@ -968,19 +1105,46 @@ func registerShcoreHandlers2(hctx *HandlerCtx) {
 	_ = shcore
 
 	d.RegisterAutoStubHandler(shcore, "CommandLineToArgvW", func(ctx *ntapi.TrapContext) uint32 {
+		// LPWSTR* CommandLineToArgvW(LPCWSTR lpCmdLine, int *pNumArgs)
+		lpCmdLine := ctx.Arg(0)
 		pNumArgs := ctx.Arg(1)
-		// Allocate a minimal wide argv: just the program name
-		page := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
-		// argv[0] = pointer to wide string at page+16, argv[1] = NULL
-		strAddr := page + 16
-		for i, r := range imagePath {
-			mem.Write16(strAddr+uint64(i)*2, uint16(r))
+
+		cmdLine := ""
+		if lpCmdLine != 0 {
+			cmdLine = readGuestUTF16(lpCmdLine)
 		}
-		mem.Write16(strAddr+uint64(len(imagePath))*2, 0)
-		mem.Write64(page, strAddr) // argv[0]
-		mem.Write64(page+8, 0)     // NULL terminator
+
+		args := parseCommandLine(cmdLine)
+		if len(args) == 0 {
+			args = []string{imagePath}
+		}
+
+		// Layout: [N+1 pointers (NULL-terminated)] [string data]
+		ptrAreaSize := uint64(len(args)+1) * 8
+		strAreaSize := uint64(0)
+		for _, a := range args {
+			strAreaSize += (uint64(len([]rune(a))) + 1) * 2
+		}
+		totalSize := ptrAreaSize + strAreaSize
+		if totalSize < 4096 {
+			totalSize = 4096
+		}
+
+		page := mem.Mmap(0, totalSize, mmu.PermRead|mmu.PermWrite)
+		strOff := page + ptrAreaSize
+		for i, arg := range args {
+			mem.Write64(page+uint64(i)*8, strOff)
+			for _, r := range arg {
+				mem.Write16(strOff, uint16(r))
+				strOff += 2
+			}
+			mem.Write16(strOff, 0)
+			strOff += 2
+		}
+		mem.Write64(page+uint64(len(args))*8, 0) // NULL terminator
+
 		if pNumArgs != 0 {
-			mem.Write32(pNumArgs, 1)
+			mem.Write32(pNumArgs, uint32(len(args)))
 		}
 		ctx.SetReturn(page)
 		return 0

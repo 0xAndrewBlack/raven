@@ -19,12 +19,24 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 	}
 	_ = ole32
 
+	comInitCount := 0
+
 	d.RegisterAutoStubHandler(ole32, "CoInitialize", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // S_OK
+		comInitCount++
+		if comInitCount > 1 {
+			ctx.SetReturn(1) // S_FALSE - already initialized
+		} else {
+			ctx.SetReturn(0) // S_OK
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoInitializeEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // S_OK
+		comInitCount++
+		if comInitCount > 1 {
+			ctx.SetReturn(1) // S_FALSE
+		} else {
+			ctx.SetReturn(0) // S_OK
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoInitializeSecurity", func(ctx *ntapi.TrapContext) uint32 {
@@ -145,11 +157,56 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StringFromCLSID", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x80004005) // E_FAIL
+		// HRESULT StringFromCLSID(REFCLSID rclsid, LPOLESTR *lplpsz)
+		guidPtr := ctx.Arg(0)
+		ppszOut := ctx.Arg(1)
+		if guidPtr == 0 || ppszOut == 0 {
+			ctx.SetReturn(0x80004003) // E_POINTER
+			return 0
+		}
+		s := readGUIDString(ctx.Mem, guidPtr)
+		ws := utf16Encode(s)
+		bufSize := uint64(len(ws)+1) * 2
+		addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
+		for i, w := range ws {
+			mem.Write16(addr+uint64(i)*2, w)
+		}
+		mem.Write16(addr+uint64(len(ws))*2, 0)
+		ctx.Mem.Write64(ppszOut, addr)
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "IIDFromString", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x80004005)
+		// HRESULT IIDFromString(LPCOLESTR lpsz, LPIID lpiid)
+		strPtr := ctx.Arg(0)
+		iidPtr := ctx.Arg(1)
+		if strPtr == 0 || iidPtr == 0 {
+			ctx.SetReturn(0x80004003) // E_POINTER
+			return 0
+		}
+		s := readGuestUTF16(strPtr)
+		var d1 uint32
+		var d2, d3 uint16
+		var rest [8]byte
+		n, _ := fmt.Sscanf(s, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+			&d1, &d2, &d3,
+			&rest[0], &rest[1], &rest[2], &rest[3], &rest[4], &rest[5], &rest[6], &rest[7])
+		if n < 11 {
+			ctx.SetReturn(0x80070057) // E_INVALIDARG
+			return 0
+		}
+		ctx.Mem.Write8(iidPtr+0, byte(d1))
+		ctx.Mem.Write8(iidPtr+1, byte(d1>>8))
+		ctx.Mem.Write8(iidPtr+2, byte(d1>>16))
+		ctx.Mem.Write8(iidPtr+3, byte(d1>>24))
+		ctx.Mem.Write8(iidPtr+4, byte(d2))
+		ctx.Mem.Write8(iidPtr+5, byte(d2>>8))
+		ctx.Mem.Write8(iidPtr+6, byte(d3))
+		ctx.Mem.Write8(iidPtr+7, byte(d3>>8))
+		for i := 0; i < 8; i++ {
+			ctx.Mem.Write8(iidPtr+8+uint64(i), rest[i])
+		}
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "IsEqualGUID", func(ctx *ntapi.TrapContext) uint32 {
@@ -199,6 +256,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
+		if comInitCount > 0 {
+			comInitCount--
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoTaskMemAlloc", func(ctx *ntapi.TrapContext) uint32 {
@@ -214,19 +274,36 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0 // No-op (guest GC handles cleanup)
 	})
 	d.RegisterAutoStubHandler(ole32, "CoTaskMemRealloc", func(ctx *ntapi.TrapContext) uint32 {
+		oldPtr := ctx.Arg(0)
 		size := ctx.Arg(1)
 		if size == 0 {
-			size = 1
+			ctx.SetReturn(0) // realloc(ptr, 0) = free
+			return 0
 		}
 		addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+		if oldPtr != 0 {
+			// Copy old data (we don't track alloc sizes, so copy up to new size)
+			old, err := ctx.Mem.ReadBytes(oldPtr, int(size))
+			if err == nil {
+				ctx.Mem.WriteBytes(addr, old)
+			}
+		}
 		ctx.SetReturn(addr)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleInitialize", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // S_OK
+		comInitCount++
+		if comInitCount > 1 {
+			ctx.SetReturn(1) // S_FALSE
+		} else {
+			ctx.SetReturn(0) // S_OK
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleUninitialize", func(ctx *ntapi.TrapContext) uint32 {
+		if comInitCount > 0 {
+			comInitCount--
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "RegisterDragDrop", func(ctx *ntapi.TrapContext) uint32 {
@@ -303,6 +380,57 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SysFreeString", func(ctx *ntapi.TrapContext) uint32 {
+		return 0
+	})
+	d.RegisterAutoStubHandler(oleaut32, "SysStringLen", func(ctx *ntapi.TrapContext) uint32 {
+		// UINT SysStringLen(BSTR bstr) - returns character count
+		bstr := ctx.Arg(0)
+		if bstr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// BSTR length prefix is 4 bytes before the string pointer, in bytes
+		byteLen, _ := ctx.Mem.Read32(bstr - 4)
+		ctx.SetReturn(uint64(byteLen / 2))
+		return 0
+	})
+	d.RegisterAutoStubHandler(oleaut32, "SysAllocStringLen", func(ctx *ntapi.TrapContext) uint32 {
+		// BSTR SysAllocStringLen(const OLECHAR *strIn, UINT ui)
+		src := ctx.Arg(0)
+		cch := ctx.Arg(1) // character count
+		byteLen := cch * 2
+		// BSTR layout: 4-byte length prefix + wchar data + null terminator
+		buf := mem.Mmap(0, 4+byteLen+2, mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.Write32(buf, uint32(byteLen))
+		if src != 0 && cch > 0 {
+			for i := uint64(0); i < cch; i++ {
+				w, _ := ctx.Mem.Read16(src + i*2)
+				ctx.Mem.Write16(buf+4+i*2, w)
+			}
+		}
+		ctx.Mem.Write16(buf+4+byteLen, 0) // null terminator
+		ctx.SetReturn(buf + 4)             // BSTR points past length prefix
+		return 0
+	})
+	d.RegisterAutoStubHandler(oleaut32, "SysReAllocStringLen", func(ctx *ntapi.TrapContext) uint32 {
+		// INT SysReAllocStringLen(BSTR *pbstr, const OLECHAR *psz, UINT len)
+		pbstr := ctx.Arg(0)
+		psz := ctx.Arg(1)
+		cch := ctx.Arg(2)
+		byteLen := cch * 2
+		buf := mem.Mmap(0, 4+byteLen+2, mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.Write32(buf, uint32(byteLen))
+		if psz != 0 && cch > 0 {
+			for i := uint64(0); i < cch; i++ {
+				w, _ := ctx.Mem.Read16(psz + i*2)
+				ctx.Mem.Write16(buf+4+i*2, w)
+			}
+		}
+		ctx.Mem.Write16(buf+4+byteLen, 0)
+		if pbstr != 0 {
+			ctx.Mem.Write64(pbstr, buf+4)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 }

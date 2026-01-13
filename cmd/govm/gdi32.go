@@ -257,7 +257,11 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		}
 		switch idx {
 		case 2:
-			val = 4 // TECHNOLOGY: DT_RASDISPLAY
+			val = 1 // TECHNOLOGY: DT_RASDISPLAY
+		case 4:
+			val = 508 // HORZSIZE (mm)
+		case 6:
+			val = 285 // VERTSIZE (mm)
 		case 8:
 			val = w // HORZRES
 		case 10:
@@ -270,6 +274,22 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			val = 96 // LOGPIXELSX
 		case 90:
 			val = 96 // LOGPIXELSY
+		case 24:
+			val = 0xFFFFFF // NUMCOLORS
+		case 34:
+			val = 0x6A04 // TEXTCAPS
+		case 38:
+			val = 0x7E99 // RASTERCAPS
+		case 36:
+			val = 0x0001FF // CURVECAPS
+		case 32:
+			val = 0x0000FF // LINECAPS
+		case 30:
+			val = 0x0001FF // POLYGONALCAPS
+		case 26:
+			val = 0x0001 // CLIPCAPS
+		case 116:
+			val = 60 // VREFRESH
 		case 118:
 			val = w // DESKTOPHORZRES
 		case 117:

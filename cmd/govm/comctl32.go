@@ -22,8 +22,20 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(comctl32, "InitCommonControls", func(ctx *ntapi.TrapContext) uint32 {
 		return 0 // void function
 	})
+	// ICC flags that have been registered via InitCommonControlsEx
+	var registeredICC uint32
 	d.RegisterAutoStubHandler(comctl32, "InitCommonControlsEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		// INITCOMMONCONTROLSEX: DWORD dwSize (+0), DWORD dwICC (+4)
+		pInitCtrls := ctx.Arg(0)
+		if pInitCtrls != 0 {
+			dwSize, _ := ctx.Mem.Read32(pInitCtrls)
+			dwICC, _ := ctx.Mem.Read32(pInitCtrls + 4)
+			if dwSize >= 8 {
+				registeredICC |= dwICC
+				ravelog.Logf("[comctl32] InitCommonControlsEx ICC=0x%08x (cumulative=0x%08x)\n", dwICC, registeredICC)
+			}
+		}
+		ctx.SetReturn(1) // TRUE - always succeed
 		return 0
 	})
 
@@ -50,72 +62,88 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ImageList_Create: return a fake handle
-	var nextImageList uint64 = 0x90000
-	imageListCount := map[uint64]uint64{} // handle → count
+	// ImageList_Create - allocate image list with dimensions and flags
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Create", func(ctx *ntapi.TrapContext) uint32 {
-		nextImageList++
-		imageListCount[nextImageList] = 0
-		ctx.SetReturn(nextImageList)
+		cx := int32(ctx.Arg(0))
+		cy := int32(ctx.Arg(1))
+		flags := uint32(ctx.Arg(2))
+		cInitial := int32(ctx.Arg(3))
+		cGrow := int32(ctx.Arg(4))
+		h := comctl32pkg.ImageListCreate(cx, cy, flags, cInitial, cGrow)
+		ravelog.Logf("[comctl32] ImageList_Create cx=%d cy=%d flags=0x%x → 0x%x\n", cx, cy, flags, h)
+		ctx.SetReturn(h)
 		return 0
 	})
 
-	// ImageList_AddIcon / ImageList_ReplaceIcon
+	// ImageList_ReplaceIcon - replace or append icon; return index
 	d.RegisterAutoStubHandler(comctl32, "ImageList_ReplaceIcon", func(ctx *ntapi.TrapContext) uint32 {
 		himl := ctx.Arg(0)
-		idx := imageListCount[himl]
-		imageListCount[himl]++
-		ctx.SetReturn(idx)
+		i := int32(ctx.Arg(1))
+		idx := comctl32pkg.ImageListReplaceIcon(himl, i)
+		ctx.SetReturn(uint64(int64(idx)))
 		return 0
 	})
 
-	// ImageList_SetImageCount
+	// ImageList_SetImageCount - resize image array
 	d.RegisterAutoStubHandler(comctl32, "ImageList_SetImageCount", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		uNewCount := uint32(ctx.Arg(1))
+		if comctl32pkg.ImageListSetImageCount(himl, uNewCount) {
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 
-	// ImageList_GetImageCount
+	// ImageList_GetImageCount - return stored count
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetImageCount", func(ctx *ntapi.TrapContext) uint32 {
 		himl := ctx.Arg(0)
-		count := imageListCount[himl]
-		ctx.SetReturn(count)
+		ctx.SetReturn(uint64(comctl32pkg.ImageListGetImageCount(himl)))
 		return 0
 	})
 
-	// ImageList_Destroy
+	// ImageList_Destroy - free image list handle
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Destroy", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		if comctl32pkg.ImageListDestroy(himl) {
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 
 	// ImageList_AddMasked - adds bitmap with mask colour; return index
 	d.RegisterAutoStubHandler(comctl32, "ImageList_AddMasked", func(ctx *ntapi.TrapContext) uint32 {
 		himl := ctx.Arg(0)
-		idx := imageListCount[himl]
-		imageListCount[himl]++
-		ctx.SetReturn(idx)
+		idx := comctl32pkg.ImageListAddMasked(himl)
+		ctx.SetReturn(uint64(int64(idx)))
 		return 0
 	})
 
 	// ImageList_Add - adds bitmap without mask; return index
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Add", func(ctx *ntapi.TrapContext) uint32 {
 		himl := ctx.Arg(0)
-		idx := imageListCount[himl]
-		imageListCount[himl]++
-		ctx.SetReturn(idx)
+		idx := comctl32pkg.ImageListAdd(himl)
+		ctx.SetReturn(uint64(int64(idx)))
 		return 0
 	})
 
 	// ImageList_Remove - remove image at index (-1 = all)
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Remove", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		i := int32(ctx.Arg(1))
+		if comctl32pkg.ImageListRemove(himl, i) {
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 
-	// ImageList_SetIconSize - set icon size for image list
+	// ImageList_SetIconSize - set icon size, clears all images
 	d.RegisterAutoStubHandler(comctl32, "ImageList_SetIconSize", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		cx := int32(ctx.Arg(1))
+		cy := int32(ctx.Arg(2))
+		if comctl32pkg.ImageListSetIconSize(himl, cx, cy) {
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 
@@ -131,29 +159,42 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ImageList_GetIconSize - return icon dimensions
+	// ImageList_GetIconSize - return icon dimensions from tracked state
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetIconSize", func(ctx *ntapi.TrapContext) uint32 {
+		himl := ctx.Arg(0)
 		pCx := ctx.Arg(1)
 		pCy := ctx.Arg(2)
-		if pCx != 0 {
-			ctx.Mem.Write32(pCx, 16)
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himl)
+		if ok {
+			if pCx != 0 {
+				ctx.Mem.Write32(pCx, uint32(cx))
+			}
+			if pCy != 0 {
+				ctx.Mem.Write32(pCy, uint32(cy))
+			}
+			ctx.SetReturn(1)
 		}
-		if pCy != 0 {
-			ctx.Mem.Write32(pCy, 16)
-		}
-		ctx.SetReturn(1)
 		return 0
 	})
 
-	// ImageList_SetBkColor
+	// ImageList_SetBkColor - set background colour, return previous
 	d.RegisterAutoStubHandler(comctl32, "ImageList_SetBkColor", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0xFFFFFFFF) // CLR_NONE
+		h := ctx.Arg(0)
+		clr := uint32(ctx.Arg(1))
+		ctx.SetReturn(uint64(comctl32pkg.ImageListSetBkColor(h, clr)))
 		return 0
 	})
 
-	// ImageList_Copy
+	// ImageList_Copy - copy image between slots/lists
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Copy", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		hDst := ctx.Arg(0)
+		iDst := int32(ctx.Arg(1))
+		hSrc := ctx.Arg(2)
+		iSrc := int32(ctx.Arg(3))
+		uFlags := uint32(ctx.Arg(4))
+		if comctl32pkg.ImageListCopy(hDst, iDst, hSrc, iSrc, uFlags) {
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 
@@ -167,12 +208,6 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetBkColor", func(ctx *ntapi.TrapContext) uint32 {
 		h := ctx.Arg(0)
 		ctx.SetReturn(uint64(comctl32pkg.ImageListGetBkColor(h)))
-		return 0
-	})
-	d.RegisterAutoStubHandler(comctl32, "ImageList_SetBkColor", func(ctx *ntapi.TrapContext) uint32 {
-		h := ctx.Arg(0)
-		clr := uint32(ctx.Arg(1))
-		ctx.SetReturn(uint64(comctl32pkg.ImageListSetBkColor(h, clr)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetImageInfo", func(ctx *ntapi.TrapContext) uint32 {
@@ -360,8 +395,19 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	})
 	// ord=413: DefSubclassProc - call next subclass in chain, then default
 	d.RegisterAutoStubHandler(comctl32, "DefSubclassProc", func(ctx *ntapi.TrapContext) uint32 {
-		// We can't call guest subclass procs without a full call-chain,
-		// so fall through to DefWindowProcW (return 0 is safe for most messages)
+		hwnd := ctx.Arg(0)
+		uMsg := uint32(ctx.Arg(1))
+		wParam := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+		// We can't call guest subclass procs without a full call-chain.
+		// Try built-in window procedure first (handles builtin controls),
+		// then fall back to 0 (DefWindowProcW default for most messages).
+		if hctx.BuiltinWndProc != nil {
+			if res, handled := hctx.BuiltinWndProc(hwnd, uMsg, wParam, lParam); handled {
+				ctx.SetReturn(res)
+				return 0
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -522,15 +568,47 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "PropertySheet", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(uint64(int64(comctl32pkg.PropertySheet(""))))
+		// PROPSHEETHEADER (x64): dwFlags +4, pszCaption +32, nPages +40
+		pHdr := ctx.Arg(0)
+		var caption string
+		var nPages uint32
+		if pHdr != 0 {
+			dwFlags, _ := ctx.Mem.Read32(pHdr + 4)
+			nPages, _ = ctx.Mem.Read32(pHdr + 40)
+			pszCaption, _ := ctx.Mem.Read64(pHdr + 32)
+			if pszCaption != 0 && dwFlags&0x00000002 == 0 {
+				caption = readGuestUTF16(pszCaption)
+			}
+		}
+		ravelog.Logf("[comctl32] PropertySheet nPages=%d caption=%q\n", nPages, caption)
+		ctx.SetReturn(uint64(int64(comctl32pkg.PropertySheet(caption))))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "PropertySheetA", func(ctx *ntapi.TrapContext) uint32 {
+		pHdr := ctx.Arg(0)
+		var nPages uint32
+		if pHdr != 0 {
+			nPages, _ = ctx.Mem.Read32(pHdr + 40)
+		}
+		ravelog.Logf("[comctl32] PropertySheetA nPages=%d\n", nPages)
 		ctx.SetReturn(uint64(int64(comctl32pkg.PropertySheet(""))))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "PropertySheetW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(uint64(int64(comctl32pkg.PropertySheet(""))))
+		// PROPSHEETHEADERW (x64): dwFlags +4, pszCaption +32, nPages +40
+		pHdr := ctx.Arg(0)
+		var caption string
+		var nPages uint32
+		if pHdr != 0 {
+			dwFlags, _ := ctx.Mem.Read32(pHdr + 4)
+			nPages, _ = ctx.Mem.Read32(pHdr + 40)
+			pszCaption, _ := ctx.Mem.Read64(pHdr + 32)
+			if pszCaption != 0 && dwFlags&0x00000002 == 0 {
+				caption = readGuestUTF16(pszCaption)
+			}
+		}
+		ravelog.Logf("[comctl32] PropertySheetW nPages=%d caption=%q\n", nPages, caption)
+		ctx.SetReturn(uint64(int64(comctl32pkg.PropertySheet(caption))))
 		return 0
 	})
 
@@ -657,23 +735,91 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateToolbar", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hwndAlloc()) // fake toolbar HWND
+		hwndParent := ctx.Arg(0)
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className:  "ToolbarWindow32",
+			parentHWND: hwndParent,
+			visible:    true,
+		}
+		ravelog.Logf("[comctl32] CreateToolbar hwnd=0x%x parent=0x%x\n", hwnd, hwndParent)
+		ctx.SetReturn(hwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateToolbarEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hwndAlloc()) // fake toolbar HWND
+		// CreateToolbarEx(hwndP, ws, wID, nBitmaps, hBMInst, wBMID,
+		//   lpButtons, iNumButtons, dxButton, dyButton, dxBitmap, dyBitmap, uStructSize)
+		hwndParent := ctx.Arg(0)
+		ws := uint32(ctx.Arg(1))
+		wID := ctx.Arg(2)
+		iNumButtons := int32(ctx.Arg(7))
+		dxButton := int32(ctx.Arg(8))
+		dyButton := int32(ctx.Arg(9))
+		dxBitmap := int32(ctx.Arg(10))
+		dyBitmap := int32(ctx.Arg(11))
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className:     "ToolbarWindow32",
+			parentHWND:    hwndParent,
+			ctrlID:        wID,
+			style:         ws,
+			visible:       ws&0x10000000 != 0, // WS_VISIBLE
+			tbBtnW:        dxButton,
+			tbBtnH:        dyButton,
+			tbBitmapIconW: dxBitmap,
+			tbBitmapIconH: dyBitmap,
+			tbButtons:     make([]tbButtonData, 0, iNumButtons),
+		}
+		ravelog.Logf("[comctl32] CreateToolbarEx hwnd=0x%x parent=0x%x buttons=%d btn=%dx%d bmp=%dx%d\n",
+			hwnd, hwndParent, iNumButtons, dxButton, dyButton, dxBitmap, dyBitmap)
+		ctx.SetReturn(hwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateUpDownControl", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hwndAlloc()) // fake updown HWND
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className: "msctls_updown32",
+			visible:   true,
+		}
+		ctx.SetReturn(hwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateStatusWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hwndAlloc()) // fake status HWND
+		style := uint32(ctx.Arg(0))
+		hwndParent := ctx.Arg(2)
+		hwnd := hwndAlloc()
+		var defW, defH int32 = 800, 600
+		if wlWindow != nil {
+			defW, defH = wlWindow.Width, wlWindow.Height
+		}
+		const sbHeight int32 = 20
+		hwndChildren[hwnd] = &controlState{
+			className:  "msctls_statusbar32",
+			parentHWND: hwndParent,
+			x:          0, y: defH - sbHeight, w: defW, h: sbHeight,
+			visible: style&0x10000000 != 0,
+		}
+		ravelog.Logf("[comctl32] CreateStatusWindow hwnd=0x%x parent=0x%x\n", hwnd, hwndParent)
+		ctx.SetReturn(hwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateStatusWindowA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(hwndAlloc()) // fake status HWND
+		style := uint32(ctx.Arg(0))
+		hwndParent := ctx.Arg(2)
+		hwnd := hwndAlloc()
+		var defW, defH int32 = 800, 600
+		if wlWindow != nil {
+			defW, defH = wlWindow.Width, wlWindow.Height
+		}
+		const sbHeight int32 = 20
+		hwndChildren[hwnd] = &controlState{
+			className:  "msctls_statusbar32",
+			parentHWND: hwndParent,
+			x:          0, y: defH - sbHeight, w: defW, h: sbHeight,
+			visible: style&0x10000000 != 0,
+		}
+		ravelog.Logf("[comctl32] CreateStatusWindowA hwnd=0x%x parent=0x%x\n", hwnd, hwndParent)
+		ctx.SetReturn(hwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DrawStatusText", func(ctx *ntapi.TrapContext) uint32 {

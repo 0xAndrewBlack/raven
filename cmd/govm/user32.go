@@ -56,6 +56,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	wlDisplay := hctx.WlDisplay
 	wlWindow := hctx.WlWindow
 
+	hwndDisabled := make(map[uint64]bool)
+
 	user32, ok := hctx.SynthByName["user32.dll"]
 	if !ok {
 		return
@@ -1025,6 +1027,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		old := m[index]
 		m[index] = newVal
+		// GWLP_WNDPROC (-4): sync with hwndWndProc dispatch map
+		if index == -4 {
+			if old == 0 {
+				old = hwndWndProc[hwnd]
+			}
+			hwndWndProc[hwnd] = newVal
+		}
 		win32.Global.SetLong(hwnd, index, newVal)
 		ravelog.Logf("[wndlong] SetWindowLongPtrW hwnd=0x%x index=%d val=0x%x\n", hwnd, index, newVal)
 		// GWL_STYLE (-16): sync cs.style and cs.visible from WS_VISIBLE bit.
@@ -1051,7 +1060,61 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if m, ok := windowLongPtr[hwnd]; ok {
 			val = m[index]
 		}
+		// GWLP_WNDPROC (-4): fall back to hwndWndProc dispatch map
+		if index == -4 && val == 0 {
+			val = hwndWndProc[hwnd]
+		}
 		ravelog.Logf("[wndlong] GetWindowLongPtrW hwnd=0x%x index=%d → 0x%x\n", hwnd, index, val)
+		ctx.SetReturn(val)
+		return 0
+	})
+	// SetWindowLongPtrA: ANSI version mirrors SetWindowLongPtrW
+	d.RegisterAutoStubHandler(user32, "SetWindowLongPtrA", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		index := int32(ctx.Arg(1))
+		newVal := ctx.Arg(2)
+		m := windowLongPtr[hwnd]
+		if m == nil {
+			m = make(map[int32]uint64)
+			windowLongPtr[hwnd] = m
+		}
+		old := m[index]
+		m[index] = newVal
+		if index == -4 {
+			if old == 0 {
+				old = hwndWndProc[hwnd]
+			}
+			hwndWndProc[hwnd] = newVal
+		}
+		if index == -16 {
+			if cs, ok := hwndChildren[hwnd]; ok {
+				const wsVisible = uint32(0x10000000)
+				cs.style = uint32(newVal)
+				nowVisible := cs.style&wsVisible != 0
+				if nowVisible && !cs.visible {
+					cs.visible = true
+					delete(hwndExplicitlyHidden, hwnd)
+				} else if !nowVisible && cs.visible {
+					cs.visible = false
+				}
+			}
+		}
+		ravelog.Logf("[wndlong] SetWindowLongPtrA hwnd=0x%x index=%d val=0x%x\n", hwnd, index, newVal)
+		ctx.SetReturn(old)
+		return 0
+	})
+	// GetWindowLongPtrA: ANSI version mirrors GetWindowLongPtrW
+	d.RegisterAutoStubHandler(user32, "GetWindowLongPtrA", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		index := int32(ctx.Arg(1))
+		var val uint64
+		if m, ok := windowLongPtr[hwnd]; ok {
+			val = m[index]
+		}
+		if index == -4 && val == 0 {
+			val = hwndWndProc[hwnd]
+		}
+		ravelog.Logf("[wndlong] GetWindowLongPtrA hwnd=0x%x index=%d → 0x%x\n", hwnd, index, val)
 		ctx.SetReturn(val)
 		return 0
 	})
@@ -1286,7 +1349,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
-	d.RegisterAutoStubHandler(user32, "DefWindowProcW", func(ctx *ntapi.TrapContext) uint32 {
+	defWindowProcFn := func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		msg := uint32(ctx.Arg(1))
 		wParam := ctx.Arg(2)
@@ -1968,7 +2031,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		_ = wParam
 		ctx.SetReturn(0)
 		return 0
-	})
+	}
+	d.RegisterAutoStubHandler(user32, "DefWindowProcW", defWindowProcFn)
 	// writeMsg writes a Win32 MSG struct to guest memory (correct x64 layout).
 	// MSG: HWND(8) message(4) pad(4) WPARAM(8) LPARAM(8) time(4) POINT(8)
 	writeMsg := func(pMsg, hwnd uint64, message uint32, wParam, lParam uint64) {
@@ -2652,7 +2716,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWindowVisible", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		hwnd := ctx.Arg(0)
+		if cs, ok := hwndChildren[hwnd]; ok {
+			if cs.visible {
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		}
+		// Main window or unknown: assume visible
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWindow", func(ctx *ntapi.TrapContext) uint32 {
@@ -2697,7 +2771,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EnableWindow", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // was enabled
+		hwnd := ctx.Arg(0)
+		bEnable := ctx.Arg(1)
+		wasDisabled := hwndDisabled[hwnd]
+		if bEnable == 0 {
+			hwndDisabled[hwnd] = true
+		} else {
+			delete(hwndDisabled, hwnd)
+		}
+		// Return TRUE if the window was previously disabled
+		if wasDisabled {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetTimer", func(ctx *ntapi.TrapContext) uint32 {
@@ -3296,7 +3383,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0 // IDCANCEL
 	})
 	d.RegisterAutoStubHandler(user32, "DialogBoxIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className: "DialogBox",
+			visible:   true,
+		}
+		ravelog.Logf("[dialog] DialogBoxIndirectParamW → hwnd=0x%x\n", hwnd)
+		ctx.SetReturn(hwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateDialogParamW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3304,7 +3397,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className: "DialogBox",
+			visible:   true,
+		}
+		ravelog.Logf("[dialog] CreateDialogIndirectParamW → hwnd=0x%x\n", hwnd)
+		ctx.SetReturn(hwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EndDialog", func(ctx *ntapi.TrapContext) uint32 {
@@ -5568,7 +5667,51 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DispatchMessageA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		pMsg := ctx.Arg(0)
+		if pMsg == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// MSG layout (x64): HWND(8) message(4) pad(4) WPARAM(8) LPARAM(8) ...
+		hwnd, _ := mem.Read64(pMsg)
+		message, _ := mem.Read32(pMsg + 8)
+		wParam, _ := mem.Read64(pMsg + 16)
+		lParam, _ := mem.Read64(pMsg + 24)
+
+		// Try built-in control first
+		if _, isChild := hwndChildren[hwnd]; isChild {
+			result, handled := builtinWndProc(hwnd, message, wParam, lParam)
+			if handled {
+				if message == 0x000F {
+					commitIfDone()
+				}
+				ctx.SetReturn(result)
+				return 0
+			}
+		}
+
+		wndProc, ok := hwndWndProc[hwnd]
+		if !ok || wndProc == 0 {
+			ravelog.Logf("[dispatch] DispatchMessageA: no WndProc for hwnd=0x%x msg=0x%x\n", hwnd, message)
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		ravelog.Logf("[dispatch] DispatchMessageA: hwnd=0x%x msg=0x%x → WndProc=0x%x\n", hwnd, message, wndProc)
+
+		rw.WriteReg(1, hwnd)            // RCX
+		rw.WriteReg(2, uint64(message)) // RDX
+		rw.WriteReg(8, wParam)          // R8
+		rw.WriteReg(9, lParam)          // R9
+
+		ctx.CPU.SetPC(wndProc)
+		ctx.ReturnOverridden = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SendMessageA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5644,7 +5787,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWindowEnabled", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		hwnd := ctx.Arg(0)
+		if hwndDisabled[hwnd] {
+			ctx.SetReturn(0)
+		} else {
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWindowUnicode", func(ctx *ntapi.TrapContext) uint32 {
@@ -6760,15 +6908,92 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		})
 	}
-	d.RegisterAutoStubHandler(user32, "DefWindowProcA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
-		return 0
-	})
+	d.RegisterAutoStubHandler(user32, "DefWindowProcA", defWindowProcFn)
 	d.RegisterAutoStubHandler(user32, "CallWindowProcA", func(ctx *ntapi.TrapContext) uint32 {
+		lpPrevWndFunc := ctx.Arg(0)
+		hwnd := ctx.Arg(1)
+		msg := uint32(ctx.Arg(2))
+		wParam := ctx.Arg(3)
+		lParam := ctx.Arg(4)
+
+		ravelog.Logf("[callwndproc] CallWindowProcA prev=0x%x hwnd=0x%x msg=0x%x\n", lpPrevWndFunc, hwnd, msg)
+
+		// Try built-in control handler first
+		if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+			ctx.SetReturn(result)
+			return 0
+		}
+
+		// Dispatch synchronously to the specified WndProc (same as SendMessageW pattern)
+		if lpPrevWndFunc != 0 {
+			rw, okW := ctx.CPU.(ntapi.RegisterWriter)
+			rr, okR := ctx.CPU.(ntapi.RegisterReader)
+			if okW && okR {
+				rsp := rr.ReadReg(4) // RSP
+				retAddr, _ := mem.Read64(rsp)
+				if retAddr >= 0x1000000 {
+					hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+						queue:               []syncDispatch{},
+						retAddr:             retAddr,
+						hwnd:                hwnd,
+						returnWndProcResult: true,
+					})
+					mem.Write64(rsp, hctx.SyncTrampoline)
+					rw.WriteReg(1, hwnd)
+					rw.WriteReg(2, uint64(msg))
+					rw.WriteReg(8, wParam)
+					rw.WriteReg(9, lParam)
+					ctx.CPU.SetPC(lpPrevWndFunc)
+					ctx.ReturnOverridden = true
+					return 0
+				}
+			}
+		}
+
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CallWindowProcW", func(ctx *ntapi.TrapContext) uint32 {
+		lpPrevWndFunc := ctx.Arg(0)
+		hwnd := ctx.Arg(1)
+		msg := uint32(ctx.Arg(2))
+		wParam := ctx.Arg(3)
+		lParam := ctx.Arg(4)
+
+		ravelog.Logf("[callwndproc] CallWindowProcW prev=0x%x hwnd=0x%x msg=0x%x\n", lpPrevWndFunc, hwnd, msg)
+
+		// Try built-in control handler first
+		if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+			ctx.SetReturn(result)
+			return 0
+		}
+
+		// Dispatch synchronously to the specified WndProc (same as SendMessageW pattern)
+		if lpPrevWndFunc != 0 {
+			rw, okW := ctx.CPU.(ntapi.RegisterWriter)
+			rr, okR := ctx.CPU.(ntapi.RegisterReader)
+			if okW && okR {
+				rsp := rr.ReadReg(4) // RSP
+				retAddr, _ := mem.Read64(rsp)
+				if retAddr >= 0x1000000 {
+					hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+						queue:               []syncDispatch{},
+						retAddr:             retAddr,
+						hwnd:                hwnd,
+						returnWndProcResult: true,
+					})
+					mem.Write64(rsp, hctx.SyncTrampoline)
+					rw.WriteReg(1, hwnd)
+					rw.WriteReg(2, uint64(msg))
+					rw.WriteReg(8, wParam)
+					rw.WriteReg(9, lParam)
+					ctx.CPU.SetPC(lpPrevWndFunc)
+					ctx.ReturnOverridden = true
+					return 0
+				}
+			}
+		}
+
 		ctx.SetReturn(0)
 		return 0
 	})
