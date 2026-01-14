@@ -323,6 +323,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			h = uint64(hctx.WlWindow.Height)
 		}
 		switch idx {
+		case 0:
+			val = 0 // DRIVERVERSION
 		case 2:
 			val = 1 // TECHNOLOGY: DT_RASDISPLAY
 		case 4:
@@ -337,30 +339,72 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			val = 32 // BITSPIXEL
 		case 14:
 			val = 1 // PLANES
+		case 16:
+			val = 0 // NUMBRUSHES
+		case 18:
+			val = 0 // NUMPENS
+		case 20:
+			val = 0 // NUMMARKERS
+		case 22:
+			val = 0 // NUMFONTS
+		case 24:
+			val = 0xFFFFFF // NUMCOLORS
+		case 26:
+			val = 0x0001 // CLIPCAPS
+		case 28:
+			val = 0x7F // SIZEPALETTE
+		case 30:
+			val = 0x0001FF // POLYGONALCAPS
+		case 32:
+			val = 0x0000FF // LINECAPS
+		case 34:
+			val = 0x6A04 // TEXTCAPS
+		case 36:
+			val = 0x0001FF // CURVECAPS
+		case 38:
+			val = 0x7E99 // RASTERCAPS (RC_BITBLT|RC_SCALING|RC_BITMAP64|RC_DI_BITMAP|RC_PALETTE|RC_DIBTODEV|RC_STRETCHBLT|RC_STRETCHDIB)
+		case 40:
+			val = w // ASPECTX
+		case 42:
+			val = h // ASPECTY
+		case 44:
+			val = w // ASPECTXY (diagonal)
+		case 86:
+			val = 8 // COLORRES (bits per primary)
 		case 88:
 			val = 96 // LOGPIXELSX
 		case 90:
 			val = 96 // LOGPIXELSY
-		case 24:
-			val = 0xFFFFFF // NUMCOLORS
-		case 34:
-			val = 0x6A04 // TEXTCAPS
-		case 38:
-			val = 0x7E99 // RASTERCAPS
-		case 36:
-			val = 0x0001FF // CURVECAPS
-		case 32:
-			val = 0x0000FF // LINECAPS
-		case 30:
-			val = 0x0001FF // POLYGONALCAPS
-		case 26:
-			val = 0x0001 // CLIPCAPS
+		case 104:
+			val = 256 // SIZEPALETTE
+		case 106:
+			val = 20 // NUMRESERVED
+		case 108:
+			val = 24 // COLORRES (bits of color resolution)
+		case 110:
+			val = w // PHYSICALWIDTH
+		case 111:
+			val = h // PHYSICALHEIGHT
+		case 112:
+			val = 0 // PHYSICALOFFSETX
+		case 113:
+			val = 0 // PHYSICALOFFSETY
+		case 114:
+			val = 0 // SCALINGFACTORX
+		case 115:
+			val = 0 // SCALINGFACTORY
 		case 116:
 			val = 60 // VREFRESH
-		case 118:
-			val = w // DESKTOPHORZRES
 		case 117:
 			val = h // DESKTOPVERTRES
+		case 118:
+			val = w // DESKTOPHORZRES
+		case 119:
+			val = 0 // BLTALIGNMENT
+		case 120:
+			val = 0x0002 // SHADEBLENDCAPS (SB_CONST_ALPHA | SB_PIXEL_ALPHA)
+		case 121:
+			val = 0x0003 // COLORMGMTCAPS (CM_GAMMA_RAMP | CM_CMYK_COLOR)
 		}
 		ctx.SetReturn(val)
 		return 0
