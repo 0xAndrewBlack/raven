@@ -140,6 +140,102 @@ func (c *CPU) WriteReg(idx int, val uint64) {
 	}
 }
 
+// SaveContext writes the key Windows x64 CONTEXT fields to guest memory.
+// The layout matches the offsets used by the emulator's NT handlers.
+func (c *CPU) SaveContext(mem *mmu.MMU, ctxAddr uint64) error {
+	if ctxAddr == 0 {
+		return fmt.Errorf("nil CONTEXT address")
+	}
+	// CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER
+	mem.Write32(ctxAddr+0x00, 0x10000B)
+	mem.Write64(ctxAddr+0x30, c.Rflags)
+	mem.Write64(ctxAddr+0x78, c.Regs[RAX])
+	mem.Write64(ctxAddr+0x80, c.Regs[RCX])
+	mem.Write64(ctxAddr+0x88, c.Regs[RDX])
+	mem.Write64(ctxAddr+0x90, c.Regs[RBX])
+	mem.Write64(ctxAddr+0x98, c.Regs[RSP])
+	mem.Write64(ctxAddr+0xA0, c.Regs[RBP])
+	mem.Write64(ctxAddr+0xA8, c.Regs[RSI])
+	mem.Write64(ctxAddr+0xB0, c.Regs[RDI])
+	mem.Write64(ctxAddr+0xB8, c.Regs[R8])
+	mem.Write64(ctxAddr+0xC0, c.Regs[R9])
+	mem.Write64(ctxAddr+0xC8, c.Regs[R10])
+	mem.Write64(ctxAddr+0xD0, c.Regs[R11])
+	mem.Write64(ctxAddr+0xD8, c.Regs[R12])
+	mem.Write64(ctxAddr+0xE0, c.Regs[R13])
+	mem.Write64(ctxAddr+0xE8, c.Regs[R14])
+	mem.Write64(ctxAddr+0xF0, c.Regs[R15])
+	mem.Write64(ctxAddr+0xF8, c.RIP)
+	return nil
+}
+
+// RestoreContext restores the key Windows x64 CONTEXT fields from guest memory.
+func (c *CPU) RestoreContext(mem *mmu.MMU, ctxAddr uint64) error {
+	if ctxAddr == 0 {
+		return fmt.Errorf("nil CONTEXT address")
+	}
+	read64 := func(off uint64) (uint64, error) {
+		return mem.Read64(ctxAddr + off)
+	}
+	var err error
+	if c.Rflags, err = read64(0x30); err != nil {
+		return err
+	}
+	if c.Regs[RAX], err = read64(0x78); err != nil {
+		return err
+	}
+	if c.Regs[RCX], err = read64(0x80); err != nil {
+		return err
+	}
+	if c.Regs[RDX], err = read64(0x88); err != nil {
+		return err
+	}
+	if c.Regs[RBX], err = read64(0x90); err != nil {
+		return err
+	}
+	if c.Regs[RSP], err = read64(0x98); err != nil {
+		return err
+	}
+	if c.Regs[RBP], err = read64(0xA0); err != nil {
+		return err
+	}
+	if c.Regs[RSI], err = read64(0xA8); err != nil {
+		return err
+	}
+	if c.Regs[RDI], err = read64(0xB0); err != nil {
+		return err
+	}
+	if c.Regs[R8], err = read64(0xB8); err != nil {
+		return err
+	}
+	if c.Regs[R9], err = read64(0xC0); err != nil {
+		return err
+	}
+	if c.Regs[R10], err = read64(0xC8); err != nil {
+		return err
+	}
+	if c.Regs[R11], err = read64(0xD0); err != nil {
+		return err
+	}
+	if c.Regs[R12], err = read64(0xD8); err != nil {
+		return err
+	}
+	if c.Regs[R13], err = read64(0xE0); err != nil {
+		return err
+	}
+	if c.Regs[R14], err = read64(0xE8); err != nil {
+		return err
+	}
+	if c.Regs[R15], err = read64(0xF0); err != nil {
+		return err
+	}
+	if c.RIP, err = read64(0xF8); err != nil {
+		return err
+	}
+	c.fetchPage = nil
+	return nil
+}
+
 // ReadXMM reads the low 64 bits of XMM register (for float64 args/returns).
 func (c *CPU) ReadXMM(idx int) uint64 {
 	if idx >= 0 && idx < 16 {

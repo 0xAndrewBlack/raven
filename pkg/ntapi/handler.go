@@ -3886,35 +3886,11 @@ func handleRtlIsProcessorFeaturePresent(ctx *TrapContext) uint32 {
 }
 
 func handleRtlCaptureContext(ctx *TrapContext) uint32 {
-	// RtlCaptureContext(CONTEXT* pCtx)
-	// Write CONTEXT_AMD64 structure so callers (e.g. StackWalk) have valid register state.
-	// Layout: ContextFlags(0), ..., Rax(0x78), Rcx(0x80), ..., Rip(0xF8), Rsp(0x98)
 	pCtx := ctx.Arg(0)
 	if pCtx == 0 {
 		return StatusSuccess
 	}
-	ctx.Mem.Write32(pCtx+0, 0x10000B) // CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER
-	// Write registers via RegisterReader if available
-	if rr, ok := ctx.CPU.(RegisterReader); ok {
-		ctx.Mem.Write64(pCtx+0x78, rr.ReadReg(regRAX))
-		ctx.Mem.Write64(pCtx+0x80, rr.ReadReg(regRCX))
-		ctx.Mem.Write64(pCtx+0x88, rr.ReadReg(regRDX))
-		ctx.Mem.Write64(pCtx+0x90, rr.ReadReg(regRBX))
-		ctx.Mem.Write64(pCtx+0x98, rr.ReadReg(regRSP))
-		ctx.Mem.Write64(pCtx+0xA0, rr.ReadReg(regRBP))
-		ctx.Mem.Write64(pCtx+0xA8, rr.ReadReg(regRSI))
-		ctx.Mem.Write64(pCtx+0xB0, rr.ReadReg(regRDI))
-		ctx.Mem.Write64(pCtx+0xB8, rr.ReadReg(regR8))
-		ctx.Mem.Write64(pCtx+0xC0, rr.ReadReg(regR9))
-		ctx.Mem.Write64(pCtx+0xC8, rr.ReadReg(regR10))
-		ctx.Mem.Write64(pCtx+0xD0, rr.ReadReg(regR11))
-		ctx.Mem.Write64(pCtx+0xD8, rr.ReadReg(regR12))
-		ctx.Mem.Write64(pCtx+0xE0, rr.ReadReg(regR13))
-		ctx.Mem.Write64(pCtx+0xE8, rr.ReadReg(regR14))
-		ctx.Mem.Write64(pCtx+0xF0, rr.ReadReg(regR15))
-	}
-	ctx.Mem.Write64(pCtx+0xF8, ctx.CPU.GetPC()) // Rip
-	ctx.Mem.Write64(pCtx+0x98, ctx.CPU.GetSP()) // Rsp (overwrite)
+	_ = saveCPUContextToGuest(ctx.CPU, ctx.Mem, pCtx)
 	return StatusSuccess
 }
 
@@ -3922,31 +3898,7 @@ func restoreContextFromGuest(ctx *TrapContext, pCtx uint64) bool {
 	if pCtx == 0 {
 		return false
 	}
-	read64 := func(addr uint64) uint64 {
-		v, _ := ctx.Mem.Read64(addr)
-		return v
-	}
-	if rw, ok := ctx.CPU.(RegisterWriter); ok {
-		rw.WriteReg(regRAX, read64(pCtx+0x78))
-		rw.WriteReg(regRCX, read64(pCtx+0x80))
-		rw.WriteReg(regRDX, read64(pCtx+0x88))
-		rw.WriteReg(regRBX, read64(pCtx+0x90))
-		rw.WriteReg(regRSP, read64(pCtx+0x98))
-		rw.WriteReg(regRBP, read64(pCtx+0xA0))
-		rw.WriteReg(regRSI, read64(pCtx+0xA8))
-		rw.WriteReg(regRDI, read64(pCtx+0xB0))
-		rw.WriteReg(regR8, read64(pCtx+0xB8))
-		rw.WriteReg(regR9, read64(pCtx+0xC0))
-		rw.WriteReg(regR10, read64(pCtx+0xC8))
-		rw.WriteReg(regR11, read64(pCtx+0xD0))
-		rw.WriteReg(regR12, read64(pCtx+0xD8))
-		rw.WriteReg(regR13, read64(pCtx+0xE0))
-		rw.WriteReg(regR14, read64(pCtx+0xE8))
-		rw.WriteReg(regR15, read64(pCtx+0xF0))
-	}
-	ctx.CPU.SetPC(read64(pCtx + 0xF8))
-	ctx.CPU.SetSP(read64(pCtx + 0x98))
-	return true
+	return restoreCPUContextFromGuest(ctx.CPU, ctx.Mem, pCtx) == nil
 }
 
 func handleRtlUnwind(ctx *TrapContext) uint32 {
@@ -3961,13 +3913,16 @@ func handleRtlUnwindEx(ctx *TrapContext) uint32 {
 	return StatusSuccess
 }
 func handleRtlLookupFunctionEntry(ctx *TrapContext) uint32 {
-	// RtlLookupFunctionEntry(ControlPc, ImageBase*, HistoryTable*) → RUNTIME_FUNCTION*
-	// Return 0 (not found) - caller will use default unwind or frame pointer
+	trampoline := AllocTrampoline(ctx.Mem)
+	guestCall := func(addr uint64, args []uint64) (uint64, error) {
+		return CallGuestFunction(ctx.CPU, ctx.Mem, trampoline, addr, args, ctx.Trace)
+	}
+	_, imageBase, entryAddr := LookupFunctionEntry(ctx.Mem, ctx.Arg(0), guestCall)
 	imageBasePtr := ctx.Arg(1)
 	if imageBasePtr != 0 {
-		ctx.Mem.Write64(imageBasePtr, 0)
+		ctx.Mem.Write64(imageBasePtr, imageBase)
 	}
-	ctx.SetReturn(0)
+	ctx.SetReturn(entryAddr)
 	return StatusSuccess
 }
 func handleRtlRestoreContext(ctx *TrapContext) uint32 {
@@ -7703,17 +7658,29 @@ func handleNtSetTimerEx(ctx *TrapContext) uint32 {
 // Reference: wine/dlls/ntdll/unwind.c
 // ──────────────────────────────────────────────────────────
 func handleRtlAddFunctionTable(ctx *TrapContext) uint32 {
-	ctx.SetReturn(1) // TRUE
+	if AddDynamicFunctionTable(ctx.Mem, ctx.Arg(0), uint32(ctx.Arg(1)), ctx.Arg(2)) {
+		ctx.SetReturn(1)
+	} else {
+		ctx.SetReturn(0)
+	}
 	return StatusSuccess
 }
 
 func handleRtlInstallFunctionTableCallback(ctx *TrapContext) uint32 {
-	ctx.SetReturn(1)
+	if InstallDynamicFunctionTableCallback(ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)) {
+		ctx.SetReturn(1)
+	} else {
+		ctx.SetReturn(0)
+	}
 	return StatusSuccess
 }
 
 func handleRtlDeleteFunctionTable(ctx *TrapContext) uint32 {
-	ctx.SetReturn(1)
+	if DeleteDynamicFunctionTable(ctx.Arg(0)) {
+		ctx.SetReturn(1)
+	} else {
+		ctx.SetReturn(0)
+	}
 	return StatusSuccess
 }
 
@@ -7735,7 +7702,37 @@ func handleRtlDeleteGrowableFunctionTable(ctx *TrapContext) uint32 {
 // Reference: wine/dlls/ntdll/signal_x86_64.c
 // ──────────────────────────────────────────────────────────
 func handleRtlVirtualUnwind(ctx *TrapContext) uint32 {
-	ctx.SetReturn(0)
+	contextRecord, err := ReadAMD64Context(ctx.Mem, ctx.Arg(4))
+	if err != nil {
+		ctx.SetReturn(0)
+		return StatusSuccess
+	}
+	functionEntry := ReadRuntimeFunctionEntry(ctx.Mem, ctx.Arg(3))
+	if functionEntry == nil {
+		trampoline := AllocTrampoline(ctx.Mem)
+		guestCall := func(addr uint64, args []uint64) (uint64, error) {
+			return CallGuestFunction(ctx.CPU, ctx.Mem, trampoline, addr, args, ctx.Trace)
+		}
+		functionEntry, _, _ = LookupFunctionEntry(ctx.Mem, ctx.Arg(2), guestCall)
+	}
+	handlerAddr, handlerData, establisherFrame, err := VirtualUnwind(
+		ctx.Mem,
+		uint32(ctx.Arg(0)),
+		ctx.Arg(1),
+		ctx.Arg(2),
+		functionEntry,
+		contextRecord,
+	)
+	if err == nil {
+		_ = WriteAMD64Context(ctx.Mem, ctx.Arg(4), contextRecord)
+		if ctx.Arg(5) != 0 {
+			ctx.Mem.Write64(ctx.Arg(5), handlerData)
+		}
+		if ctx.Arg(6) != 0 {
+			ctx.Mem.Write64(ctx.Arg(6), establisherFrame)
+		}
+	}
+	ctx.SetReturn(handlerAddr)
 	return StatusSuccess
 }
 

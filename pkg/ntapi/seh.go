@@ -15,6 +15,7 @@ type RuntimeFunction struct {
 	BeginAddress uint32
 	EndAddress   uint32
 	UnwindData   uint32
+	EntryAddr    uint64
 }
 
 // ExceptionTable is a sorted table of RUNTIME_FUNCTION entries for one PE module.
@@ -40,7 +41,12 @@ func ParseExceptionDirectory(mem *mmu.MMU, imageBase uint64, rva, size uint32) *
 		end, _ := mem.Read32(off + 4)
 		unwind, _ := mem.Read32(off + 8)
 		if begin != 0 {
-			et.Entries = append(et.Entries, RuntimeFunction{begin, end, unwind})
+			et.Entries = append(et.Entries, RuntimeFunction{
+				BeginAddress: begin,
+				EndAddress:   end,
+				UnwindData:   unwind,
+				EntryAddr:    off,
+			})
 		}
 	}
 	sort.Slice(et.Entries, func(i, j int) bool {
@@ -119,7 +125,11 @@ func ParseUnwindInfo(mem *mmu.MMU, imageBase uint64, unwindRVA uint32) *UnwindIn
 		begin, _ := mem.Read32(chainAddr)
 		end, _ := mem.Read32(chainAddr + 4)
 		unwindData, _ := mem.Read32(chainAddr + 8)
-		ui.ChainedRF = &RuntimeFunction{begin, end, unwindData}
+		ui.ChainedRF = &RuntimeFunction{
+			BeginAddress: begin,
+			EndAddress:   end,
+			UnwindData:   unwindData,
+		}
 	}
 
 	return ui
@@ -975,4 +985,3 @@ func FormatCxxException(handler *CxxCatchHandler, imageBase uint64) string {
 }
 
 var _ = binary.LittleEndian
-

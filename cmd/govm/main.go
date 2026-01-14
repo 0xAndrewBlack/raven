@@ -590,6 +590,17 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 			result.MainModule.BaseAddr,
 			result.MainModule.ExceptionDirRVA,
 			result.MainModule.ExceptionDirSize)
+		ntapi.RegisterExceptionTable(result.MainModule.BaseAddr, result.MainModule.ImageSize, exceptionTable)
+	}
+	for _, mod := range loadedModules {
+		if mod == nil || mod.BaseAddr == 0 || mod.ExceptionDirRVA == 0 || mod.BaseAddr == result.MainModule.BaseAddr {
+			continue
+		}
+		ntapi.RegisterExceptionTable(
+			mod.BaseAddr,
+			mod.ImageSize,
+			ntapi.ParseExceptionDirectory(mem, mod.BaseAddr, mod.ExceptionDirRVA, mod.ExceptionDirSize),
+		)
 	}
 
 	// Patch CRT data exports (variables like _acmdln, _commode, etc.)
@@ -1235,7 +1246,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		_ = os.WriteFile(hostPath, []byte(sb.String()), 0644)
 	}
-
 
 	// viewMapping tracks an active MapViewOfFile view for sync-back.
 	var viewMappings []viewMapping
@@ -2303,14 +2313,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// hctx.MouseCapture: hctx.MouseCapture already zero-valued
 
 	// WndProc dispatch tables
-	hctx.AtomWndProc = make(map[uint16]uint64)     // class atom → WndProc address
-	hctx.HwndWndProc = make(map[uint64]uint64)     // HWND → WndProc address
-	hctx.ClassNameAtom = make(map[string]uint16)   // class name → atom (for lpClassName string lookups)
-	hctx.ClassMenuHandle = make(map[uint16]uint64) // class atom → loaded menu handle
-	hctx.ClassBrush = make(map[uint16]uint32)      // class atom → hbrBackground (COLOR_xxx+1 index)
+	hctx.AtomWndProc = make(map[uint16]uint64)             // class atom → WndProc address
+	hctx.HwndWndProc = make(map[uint64]uint64)             // HWND → WndProc address
+	hctx.ClassNameAtom = make(map[string]uint16)           // class name → atom (for lpClassName string lookups)
+	hctx.ClassMenuHandle = make(map[uint16]uint64)         // class atom → loaded menu handle
+	hctx.ClassBrush = make(map[uint16]uint32)              // class atom → hbrBackground (COLOR_xxx+1 index)
 	hctx.ClassInfo = make(map[uint16]*registeredClassInfo) // class atom → full class info
-	hctx.HwndClassAtom = make(map[uint64]uint16)   // HWND → class atom (for brush lookup)
-	hctx.TrackMouseHwnds = make(map[uint64]uint32)  // HWND → TME flags
+	hctx.HwndClassAtom = make(map[uint64]uint16)           // HWND → class atom (for brush lookup)
+	hctx.TrackMouseHwnds = make(map[uint64]uint32)         // HWND → TME flags
 
 	// Built-in window class tracking for Edit, Static, Button, etc.
 	hctx.HwndChildren = make(map[uint64]*controlState)
@@ -2494,34 +2504,34 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				if len(subItems) > 0 {
-				dropX := x
-				dropY := clientTop
-				dropW := int32(200)
-				dropH := int32(len(subItems)) * 20
-				// Shadow
-				wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
-				wlWindow.DrawRectAbs(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
-				// Background
-				wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
-				// Border
-				wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+1, sysColors[16])
-				wlWindow.DrawRectAbs(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
-				wlWindow.DrawRectAbs(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
-				wlWindow.DrawRectAbs(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
-				for j, si := range subItems {
-					iy := dropY + int32(j)*20
-					if si.flags&0x0800 != 0 {
-						wlWindow.DrawRectAbs(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
-						wlWindow.DrawRectAbs(dropX+2, iy+10, dropX+dropW-2, iy+11, sysColors[20])
-					} else {
-						sl := hctx.MenuStripAmpersand(si.text)
-						if k := strings.IndexByte(sl, '\t'); k >= 0 {
-							sl = sl[:k]
+					dropX := x
+					dropY := clientTop
+					dropW := int32(200)
+					dropH := int32(len(subItems)) * 20
+					// Shadow
+					wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
+					wlWindow.DrawRectAbs(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
+					// Background
+					wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
+					// Border
+					wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+1, sysColors[16])
+					wlWindow.DrawRectAbs(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
+					wlWindow.DrawRectAbs(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
+					wlWindow.DrawRectAbs(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
+					for j, si := range subItems {
+						iy := dropY + int32(j)*20
+						if si.flags&0x0800 != 0 {
+							wlWindow.DrawRectAbs(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
+							wlWindow.DrawRectAbs(dropX+2, iy+10, dropX+dropW-2, iy+11, sysColors[20])
+						} else {
+							sl := hctx.MenuStripAmpersand(si.text)
+							if k := strings.IndexByte(sl, '\t'); k >= 0 {
+								sl = sl[:k]
+							}
+							hctx.NcDrawText(dropX+20, iy+3, sl, 0x000000, sysColors[15], true, 12)
 						}
-						hctx.NcDrawText(dropX+20, iy+3, sl, 0x000000, sysColors[15], true, 12)
 					}
-				}
-				break
+					break
 				}
 			}
 			x += tw
@@ -3994,7 +4004,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	delayReg(func() { registerD3d11Handlers(hctx) })
 	// --- opengl32.dll ---
 	delayReg(func() { registerOpengl32Handlers(hctx) })
-	}
+}
+
 // autoSynthUnresolved generates synthetic stub DLLs for any DLLs referenced
 // in the main module's imports that aren't already in loadedModules.
 func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[string]*loader.PEModule) []*ntapi.SynthPE {

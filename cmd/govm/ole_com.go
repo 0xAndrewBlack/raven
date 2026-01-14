@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
+	"strings"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -9,10 +11,582 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const (
+	S_OK                      = 0x00000000
+	S_FALSE                   = 0x00000001
+	E_NOTIMPL                 = 0x80004001
+	E_NOINTERFACE             = 0x80004002
+	E_POINTER                 = 0x80004003
+	E_FAIL                    = 0x80004005
+	E_OUTOFMEMORY             = 0x8007000E
+	E_INVALIDARG              = 0x80070057
+	CLASS_E_NOAGGREGATION     = 0x80040110
+	CLASS_E_CLASSNOTAVAILABLE = 0x80040111
+	REGDB_E_CLASSNOTREG       = 0x80040154
+	CO_E_CLASSSTRING          = 0x800401F3
+	RPC_E_CHANGED_MODE        = 0x80010106
+
+	COINIT_MULTITHREADED     = 0x0
+	COINIT_APARTMENTTHREADED = 0x2
+
+	comTrapIDBase = 0x10000000
+)
+
+type GUID struct {
+	Data1 uint32
+	Data2 uint16
+	Data3 uint16
+	Data4 [8]byte
+}
+
+var (
+	IID_IUnknown      = GUID{0x00000000, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IClassFactory = GUID{0x00000001, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IDispatch     = GUID{0x00020400, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IMalloc       = GUID{0x00000002, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IStream       = GUID{0x0000000C, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+
+	CLSID_StdComponentCategoriesMgr = GUID{0x0002E005, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+)
+
+type hresultError uint32
+
+func (e hresultError) Error() string {
+	return fmt.Sprintf("HRESULT 0x%08X", uint32(e))
+}
+
+type comObject struct {
+	clsid         GUID
+	primaryIID    GUID
+	refCount      int32
+	vtableAddr    uint64
+	objectAddr    uint64
+	kind          string
+	supportedIIDs map[GUID]bool
+	data          interface{}
+}
+
+type classFactory struct {
+	clsid  GUID
+	create func(iid GUID) (*comObject, error)
+}
+
+type registeredClassObject struct {
+	clsid        GUID
+	unkPtr       uint64
+	dwClsContext uint32
+	flags        uint32
+}
+
+type comState struct {
+	initialized   bool
+	initCount     int32
+	apartmentType uint32
+
+	classFactories      map[GUID]*classFactory
+	registeredFactories map[uint32]*registeredClassObject
+	objects             map[uint64]*comObject
+	nextHandle          uint64
+	nextTrapID          uint32
+	taskAllocs          map[uint64]uint64
+	bstrAllocs          map[uint64]uint64
+	mem                 *mmu.MMU
+	disp                *ntapi.Dispatcher
+	heapAlloc           func(uint64, bool) uint64
+	heapFree            func(uint64)
+	regHive             *ntapi.RegistryHive
+	progIDs             map[string]GUID
+}
+
+func newCOMState(hctx *HandlerCtx) *comState {
+	cs := &comState{
+		apartmentType:       COINIT_APARTMENTTHREADED,
+		classFactories:      make(map[GUID]*classFactory),
+		registeredFactories: make(map[uint32]*registeredClassObject),
+		objects:             make(map[uint64]*comObject),
+		nextHandle:          1,
+		nextTrapID:          comTrapIDBase,
+		taskAllocs:          make(map[uint64]uint64),
+		bstrAllocs:          make(map[uint64]uint64),
+		mem:                 hctx.Mem,
+		disp:                hctx.Disp,
+		heapAlloc:           hctx.HeapAlloc,
+		heapFree:            hctx.HeapFree,
+		regHive:             hctx.RegHive,
+		progIDs:             make(map[string]GUID),
+	}
+	cs.classFactories[CLSID_StdComponentCategoriesMgr] = &classFactory{
+		clsid: CLSID_StdComponentCategoriesMgr,
+		create: func(iid GUID) (*comObject, error) {
+			var methods int
+			switch {
+			case guidEqual(iid, IID_IUnknown):
+				methods = 3
+			case guidEqual(iid, IID_IDispatch):
+				methods = 7
+			default:
+				return nil, hresultError(E_NOINTERFACE)
+			}
+			obj, err := cs.createGuestObject(cs.mem, iid, methods)
+			if err != nil {
+				return nil, err
+			}
+			obj.clsid = CLSID_StdComponentCategoriesMgr
+			if guidEqual(iid, IID_IDispatch) {
+				obj.kind = "idispatch"
+				obj.supportedIIDs[IID_IDispatch] = true
+			}
+			return obj, nil
+		},
+	}
+	return cs
+}
+
+func readGUID(mem *mmu.MMU, addr uint64) GUID {
+	data, err := mem.ReadBytes(addr, 16)
+	if err != nil || len(data) < 16 {
+		var tmp [16]byte
+		copy(tmp[:], data)
+		data = tmp[:]
+	}
+	return GUID{
+		Data1: binary.LittleEndian.Uint32(data[0:4]),
+		Data2: binary.LittleEndian.Uint16(data[4:6]),
+		Data3: binary.LittleEndian.Uint16(data[6:8]),
+		Data4: [8]byte(data[8:16]),
+	}
+}
+
+func writeGUID(mem *mmu.MMU, addr uint64, g GUID) {
+	var data [16]byte
+	binary.LittleEndian.PutUint32(data[0:4], g.Data1)
+	binary.LittleEndian.PutUint16(data[4:6], g.Data2)
+	binary.LittleEndian.PutUint16(data[6:8], g.Data3)
+	copy(data[8:16], g.Data4[:])
+	mem.WriteBytes(addr, data[:])
+}
+
+func guidEqual(a, b GUID) bool {
+	return a == b
+}
+
+func guidString(g GUID) string {
+	return fmt.Sprintf("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+		g.Data1, g.Data2, g.Data3, g.Data4[0], g.Data4[1],
+		g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7])
+}
+
+func parseGUIDString(s string) (GUID, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return GUID{}, false
+	}
+	if !strings.HasPrefix(s, "{") {
+		s = "{" + s
+	}
+	if !strings.HasSuffix(s, "}") {
+		s = s + "}"
+	}
+	var g GUID
+	n, _ := fmt.Sscanf(s, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+		&g.Data1, &g.Data2, &g.Data3,
+		&g.Data4[0], &g.Data4[1], &g.Data4[2], &g.Data4[3],
+		&g.Data4[4], &g.Data4[5], &g.Data4[6], &g.Data4[7])
+	return g, n == 11
+}
+
+func decodeUTF16LEString(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i := 0; i+1 < len(data); i += 2 {
+		w := binary.LittleEndian.Uint16(data[i : i+2])
+		if w == 0 {
+			break
+		}
+		sb.WriteRune(rune(w))
+	}
+	return sb.String()
+}
+
+func hresultFromError(err error) uint32 {
+	if err == nil {
+		return S_OK
+	}
+	if hr, ok := err.(hresultError); ok {
+		return uint32(hr)
+	}
+	return E_FAIL
+}
+
+func minU64(a, b uint64) uint64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (cs *comState) initialize(apartmentType uint32) uint32 {
+	if cs.initialized {
+		if cs.apartmentType != apartmentType {
+			return RPC_E_CHANGED_MODE
+		}
+		cs.initCount++
+		return S_FALSE
+	}
+	cs.initialized = true
+	cs.initCount = 1
+	cs.apartmentType = apartmentType
+	return S_OK
+}
+
+func (cs *comState) uninitialize() {
+	if cs.initCount > 0 {
+		cs.initCount--
+	}
+	if cs.initCount == 0 {
+		cs.initialized = false
+		cs.apartmentType = COINIT_APARTMENTTHREADED
+	}
+}
+
+func (cs *comState) allocTaskMem(size uint64, zeroInit bool) uint64 {
+	if size == 0 {
+		size = 1
+	}
+	ptr := cs.heapAlloc(size, zeroInit)
+	if ptr != 0 {
+		cs.taskAllocs[ptr] = size
+	}
+	return ptr
+}
+
+func (cs *comState) freeTaskMem(ptr uint64) {
+	if ptr == 0 {
+		return
+	}
+	delete(cs.taskAllocs, ptr)
+	cs.heapFree(ptr)
+}
+
+func (cs *comState) reallocTaskMem(ptr, size uint64) uint64 {
+	if ptr == 0 {
+		return cs.allocTaskMem(size, false)
+	}
+	if size == 0 {
+		cs.freeTaskMem(ptr)
+		return 0
+	}
+	newPtr := cs.allocTaskMem(size, false)
+	if newPtr == 0 {
+		return 0
+	}
+	oldSize := cs.taskAllocs[ptr]
+	if oldSize == 0 {
+		oldSize = size
+	}
+	if oldSize > 0 {
+		if data, err := cs.mem.ReadBytes(ptr, int(minU64(size, oldSize))); err == nil {
+			cs.mem.WriteBytes(newPtr, data)
+		}
+	}
+	cs.freeTaskMem(ptr)
+	return newPtr
+}
+
+func (cs *comState) allocBSTRChars(src uint64, chars uint64) uint64 {
+	base := cs.heapAlloc(4+chars*2+2, true)
+	if base == 0 {
+		return 0
+	}
+	cs.mem.Write32(base, uint32(chars*2))
+	for i := uint64(0); i < chars; i++ {
+		w, _ := cs.mem.Read16(src + i*2)
+		cs.mem.Write16(base+4+i*2, w)
+	}
+	cs.mem.Write16(base+4+chars*2, 0)
+	bstr := base + 4
+	cs.bstrAllocs[bstr] = base
+	return bstr
+}
+
+func (cs *comState) allocBSTRByteLen(src uint64, byteLen uint64) uint64 {
+	base := cs.heapAlloc(4+byteLen+2, true)
+	if base == 0 {
+		return 0
+	}
+	cs.mem.Write32(base, uint32(byteLen))
+	for i := uint64(0); i < byteLen; i++ {
+		b, _ := cs.mem.Read8(src + i)
+		cs.mem.Write8(base+4+i, b)
+	}
+	bstr := base + 4
+	cs.bstrAllocs[bstr] = base
+	return bstr
+}
+
+func (cs *comState) freeBSTR(bstr uint64) {
+	if bstr == 0 {
+		return
+	}
+	if base, ok := cs.bstrAllocs[bstr]; ok {
+		delete(cs.bstrAllocs, bstr)
+		cs.heapFree(base)
+	}
+}
+
+func (cs *comState) createGuestObject(mem *mmu.MMU, iid GUID, methods int) (*comObject, error) {
+	if methods < 3 {
+		methods = 3
+	}
+	totalSize := uint64(8 + methods*8 + methods*16)
+	objAddr := mem.Mmap(0, totalSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	if objAddr == 0 {
+		return nil, hresultError(E_OUTOFMEMORY)
+	}
+	vtableAddr := objAddr + 8
+	stubBase := vtableAddr + uint64(methods*8)
+	obj := &comObject{
+		primaryIID:    iid,
+		refCount:      1,
+		vtableAddr:    vtableAddr,
+		objectAddr:    objAddr,
+		kind:          "iunknown",
+		supportedIIDs: map[GUID]bool{IID_IUnknown: true, iid: true},
+	}
+	cs.objects[objAddr] = obj
+	for i := 0; i < methods; i++ {
+		trapID := cs.nextTrapID
+		cs.nextTrapID++
+		methodIndex := i
+		cs.disp.RegisterHandler(trapID, fmt.Sprintf("com!%s[%d]", guidString(iid), methodIndex), func(ctx *ntapi.TrapContext) uint32 {
+			return cs.dispatchObjectMethod(ctx, methodIndex)
+		})
+		stubAddr := stubBase + uint64(i*16)
+		code := make([]byte, 16)
+		code[0] = 0xB8
+		binary.LittleEndian.PutUint32(code[1:5], trapID)
+		code[5] = 0x0F
+		code[6] = 0x01
+		code[7] = 0xC1
+		code[8] = 0xC3
+		for j := 9; j < len(code); j++ {
+			code[j] = 0xCC
+		}
+		mem.WriteBytes(stubAddr, code)
+		mem.Write64(vtableAddr+uint64(i*8), stubAddr)
+	}
+	mem.Write64(objAddr, vtableAddr)
+	return obj, nil
+}
+
+func (cs *comState) createClassFactoryObject(cf *classFactory) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IClassFactory, 5)
+	if err != nil {
+		return nil, err
+	}
+	obj.clsid = cf.clsid
+	obj.kind = "class-factory"
+	obj.data = cf
+	obj.supportedIIDs[IID_IClassFactory] = true
+	return obj, nil
+}
+
+func (cs *comState) createIMallocObject() (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IMalloc, 9)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "imalloc"
+	obj.supportedIIDs[IID_IMalloc] = true
+	return obj, nil
+}
+
+func (cs *comState) addRef(obj *comObject) uint32 {
+	obj.refCount++
+	return uint32(obj.refCount)
+}
+
+func (cs *comState) release(obj *comObject) uint32 {
+	if obj.refCount > 0 {
+		obj.refCount--
+	}
+	if obj.refCount == 0 {
+		delete(cs.objects, obj.objectAddr)
+	}
+	return uint32(obj.refCount)
+}
+
+func (cs *comState) queryInterface(ctx *ntapi.TrapContext, obj *comObject) uint32 {
+	riidPtr := ctx.Arg(1)
+	ppv := ctx.Arg(2)
+	if ppv == 0 {
+		return E_POINTER
+	}
+	ctx.Mem.Write64(ppv, 0)
+	if riidPtr == 0 {
+		return E_POINTER
+	}
+	iid := readGUID(ctx.Mem, riidPtr)
+	if obj.supportedIIDs[iid] || guidEqual(iid, IID_IUnknown) {
+		ctx.Mem.Write64(ppv, obj.objectAddr)
+		cs.addRef(obj)
+		return S_OK
+	}
+	return E_NOINTERFACE
+}
+
+func (cs *comState) dispatchIDispatch(ctx *ntapi.TrapContext, method int) uint32 {
+	switch method {
+	case 3:
+		pctinfo := ctx.Arg(1)
+		if pctinfo != 0 {
+			ctx.Mem.Write32(pctinfo, 0)
+		}
+		return S_OK
+	case 4, 5, 6:
+		return E_NOTIMPL
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchClassFactory(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	switch method {
+	case 3:
+		pUnkOuter := ctx.Arg(1)
+		riidPtr := ctx.Arg(2)
+		ppv := ctx.Arg(3)
+		if ppv == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppv, 0)
+		if riidPtr == 0 {
+			return E_POINTER
+		}
+		if pUnkOuter != 0 {
+			return CLASS_E_NOAGGREGATION
+		}
+		cf, _ := obj.data.(*classFactory)
+		if cf == nil {
+			return E_FAIL
+		}
+		newObj, err := cf.create(readGUID(ctx.Mem, riidPtr))
+		if err != nil {
+			return hresultFromError(err)
+		}
+		ctx.Mem.Write64(ppv, newObj.objectAddr)
+		return S_OK
+	case 4:
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchIMalloc(ctx *ntapi.TrapContext, method int) uint32 {
+	switch method {
+	case 3:
+		ctx.SetReturn(cs.allocTaskMem(ctx.Arg(1), false))
+		return 0
+	case 4:
+		ctx.SetReturn(cs.reallocTaskMem(ctx.Arg(1), ctx.Arg(2)))
+		return 0
+	case 5:
+		cs.freeTaskMem(ctx.Arg(1))
+		return 0
+	case 6:
+		ctx.SetReturn(cs.taskAllocs[ctx.Arg(1)])
+		return 0
+	case 7:
+		if _, ok := cs.taskAllocs[ctx.Arg(1)]; ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	case 8:
+		return 0
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uint32 {
+	obj := cs.objects[ctx.Arg(0)]
+	if obj == nil {
+		return E_POINTER
+	}
+	switch method {
+	case 0:
+		return cs.queryInterface(ctx, obj)
+	case 1:
+		ctx.SetReturn(uint64(cs.addRef(obj)))
+		return 0
+	case 2:
+		ctx.SetReturn(uint64(cs.release(obj)))
+		return 0
+	}
+	switch obj.kind {
+	case "class-factory":
+		return cs.dispatchClassFactory(ctx, obj, method)
+	case "imalloc":
+		return cs.dispatchIMalloc(ctx, method)
+	case "idispatch":
+		return cs.dispatchIDispatch(ctx, method)
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) instantiate(clsid, iid GUID) (*comObject, uint32) {
+	cf, ok := cs.classFactories[clsid]
+	if !ok {
+		return nil, CLASS_E_CLASSNOTAVAILABLE
+	}
+	obj, err := cf.create(iid)
+	if err != nil {
+		return nil, hresultFromError(err)
+	}
+	return obj, S_OK
+}
+
+func (cs *comState) findRegisteredFactory(clsid GUID) *registeredClassObject {
+	for _, reg := range cs.registeredFactories {
+		if guidEqual(reg.clsid, clsid) {
+			return reg
+		}
+	}
+	return nil
+}
+
+func (cs *comState) lookupProgID(progID string) (GUID, bool) {
+	if g, ok := cs.progIDs[strings.ToLower(strings.TrimSpace(progID))]; ok {
+		return g, true
+	}
+	if cs.regHive == nil {
+		return GUID{}, false
+	}
+	key := cs.regHive.OpenKey(`HKEY_CLASSES_ROOT\` + progID + `\CLSID`)
+	if key == nil || key.Values == nil {
+		return GUID{}, false
+	}
+	if val, ok := key.Values[""]; ok {
+		return parseGUIDString(decodeUTF16LEString(val.Data))
+	}
+	return GUID{}, false
+}
+
 func registerOle32Handlers(hctx *HandlerCtx) {
 	d := hctx.Disp
 	mem := hctx.Mem
 	readGuestUTF16 := hctx.ReadGuestUTF16
+	cs := hctx.Com
+	if cs == nil {
+		cs = newCOMState(hctx)
+		hctx.Com = cs
+	}
 
 	ole32, ok := hctx.SynthByName["ole32.dll"]
 	if !ok {
@@ -20,212 +594,207 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 	}
 	sharedHeapAlloc := hctx.HeapAlloc
 	var nextLuid uint32 = 2000
+	_ = sharedHeapAlloc
 	_ = nextLuid
 	_ = ole32
 
-	comInitCount := 0
-
 	d.RegisterAutoStubHandler(ole32, "CoInitialize", func(ctx *ntapi.TrapContext) uint32 {
-		comInitCount++
-		if comInitCount > 1 {
-			ctx.SetReturn(1) // S_FALSE - already initialized
-		} else {
-			ctx.SetReturn(0) // S_OK
-		}
+		ctx.SetReturn(uint64(cs.initialize(COINIT_APARTMENTTHREADED)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoInitializeEx", func(ctx *ntapi.TrapContext) uint32 {
-		comInitCount++
-		if comInitCount > 1 {
-			ctx.SetReturn(1) // S_FALSE
-		} else {
-			ctx.SetReturn(0) // S_OK
-		}
+		ctx.SetReturn(uint64(cs.initialize(uint32(ctx.Arg(1)))))
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoInitializeSecurity", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // S_OK
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoCreateInstance", func(ctx *ntapi.TrapContext) uint32 {
-		// rclsid *CLSID, pUnkOuter, dwClsContext, riid *IID, ppv **void
+		rclsid := ctx.Arg(0)
+		pUnkOuter := ctx.Arg(1)
+		_ = ctx.Arg(2) // dwClsContext
+		riid := ctx.Arg(3)
 		ppv := ctx.Arg(4)
 		if ppv == 0 {
-			ctx.SetReturn(0x80004003) // E_POINTER
+			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		// Build a minimal IUnknown vtable in guest memory.
-		// vtable[0] = QueryInterface stub, [1] = AddRef stub, [2] = Release stub
-		// Each stub is a trap that returns S_OK / 1.
-		// We reuse a single shared IUnknown object for all CoCreateInstance calls.
-		// The guest object layout: [8-byte vtable ptr] → vtable[3 pointers]
-		const comObjSize = 8  // just the vtable pointer
-		const vtableSize = 24 // 3 × 8-byte pointers
-		// Allocate per-call so each object is independent.
-		objAddr := mem.Mmap(0, comObjSize+vtableSize+3*64, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-		vtableAddr := objAddr + comObjSize
-		// Write 3 stub functions right after vtable entries.
-		stubBase := vtableAddr + vtableSize
-		// Stub: mov eax, 0; ret (returns 0 / S_OK or 1 for AddRef/Release)
-		for i := uint64(0); i < 3; i++ {
-			sAddr := stubBase + i*64
-			// xor eax, eax; ret
-			ctx.Mem.Write8(sAddr+0, 0x31)
-			ctx.Mem.Write8(sAddr+1, 0xC0)
-			ctx.Mem.Write8(sAddr+2, 0xC3)
-			ctx.Mem.Write64(vtableAddr+i*8, sAddr)
+		ctx.Mem.Write64(ppv, 0)
+		if rclsid == 0 || riid == 0 {
+			ctx.SetReturn(E_POINTER)
+			return 0
 		}
-		// AddRef/Release return 1 not 0 - patch the ret value
-		// mov eax, 1; ret
-		for _, i := range []uint64{1, 2} {
-			sAddr := stubBase + i*64
-			ctx.Mem.Write8(sAddr+0, 0xB8)
-			ctx.Mem.Write32(sAddr+1, 1)
-			ctx.Mem.Write8(sAddr+5, 0xC3)
+		if pUnkOuter != 0 {
+			ctx.SetReturn(CLASS_E_NOAGGREGATION)
+			return 0
 		}
-		// Object: vtable pointer at offset 0
-		ctx.Mem.Write64(objAddr, vtableAddr)
-		// *ppv = objAddr
-		ctx.Mem.Write64(ppv, objAddr)
-		ctx.SetReturn(0) // S_OK
+		obj, hr := cs.instantiate(readGUID(ctx.Mem, rclsid), readGUID(ctx.Mem, riid))
+		if hr != S_OK {
+			ctx.SetReturn(uint64(hr))
+			return 0
+		}
+		ctx.Mem.Write64(ppv, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoCreateInstanceEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x80004005) // E_FAIL
+		rclsid := ctx.Arg(0)
+		pUnkOuter := ctx.Arg(1)
+		_ = ctx.Arg(2) // dwClsContext
+		_ = ctx.Arg(3) // pServerInfo
+		cmq := ctx.Arg(4)
+		pResults := ctx.Arg(5)
+		if pResults == 0 || cmq == 0 {
+			ctx.SetReturn(E_POINTER)
+			return 0
+		}
+		var overall uint32 = S_OK
+		for i := uint64(0); i < cmq; i++ {
+			entry := pResults + i*24
+			pIID, _ := ctx.Mem.Read64(entry)
+			ctx.Mem.Write64(entry+8, 0)
+			ctx.Mem.Write32(entry+16, E_NOINTERFACE)
+			if pIID == 0 {
+				overall = E_POINTER
+				continue
+			}
+			var hr uint32
+			if pUnkOuter != 0 {
+				hr = CLASS_E_NOAGGREGATION
+			} else {
+				obj, createHR := cs.instantiate(readGUID(ctx.Mem, rclsid), readGUID(ctx.Mem, pIID))
+				hr = createHR
+				if createHR == S_OK {
+					ctx.Mem.Write64(entry+8, obj.objectAddr)
+				}
+			}
+			ctx.Mem.Write32(entry+16, hr)
+			if hr != S_OK && overall == S_OK {
+				overall = hr
+			}
+		}
+		ctx.SetReturn(uint64(overall))
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StringFromGUID2", func(ctx *ntapi.TrapContext) uint32 {
-		// rguid *GUID, lpsz *OLECHAR, cchMax int → returns chars written
 		guidPtr := ctx.Arg(0)
 		outPtr := ctx.Arg(1)
 		cchMax := int(ctx.Arg(2))
-		if guidPtr == 0 || outPtr == 0 || cchMax < 39 {
+		if guidPtr == 0 || outPtr == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// Read 16 bytes of GUID
-		b := make([]byte, 16)
-		for i := range b {
-			v, _ := ctx.Mem.Read8(guidPtr + uint64(i))
-			b[i] = v
+		guidText := guidString(readGUID(ctx.Mem, guidPtr))
+		ws := utf16Encode(guidText)
+		if cchMax < len(ws)+1 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		d1 := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
-		d2 := uint16(b[4]) | uint16(b[5])<<8
-		d3 := uint16(b[6]) | uint16(b[7])<<8
-		s := fmt.Sprintf("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-			d1, d2, d3, b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
-		// Write as UTF-16LE
-		runes := []rune(s)
-		for i, r := range runes {
-			ctx.Mem.Write16(outPtr+uint64(i)*2, uint16(r))
+		for i, w := range ws {
+			ctx.Mem.Write16(outPtr+uint64(i)*2, w)
 		}
-		ctx.Mem.Write16(outPtr+uint64(len(runes))*2, 0) // NUL
-		ctx.SetReturn(uint64(len(runes) + 1))
+		ctx.Mem.Write16(outPtr+uint64(len(ws))*2, 0)
+		ctx.SetReturn(uint64(len(ws) + 1))
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CLSIDFromString", func(ctx *ntapi.TrapContext) uint32 {
-		// Parse "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}" → GUID struct
 		strPtr := ctx.Arg(0)
 		clsidPtr := ctx.Arg(1)
-		if strPtr == 0 || clsidPtr == 0 {
-			ctx.SetReturn(0x80004003) // E_POINTER
+		if clsidPtr == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
 			return 0
 		}
-		s := readGuestUTF16(strPtr)
-		var d1 uint32
-		var d2, d3 uint16
-		var rest [8]byte
-		n, _ := fmt.Sscanf(s, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-			&d1, &d2, &d3,
-			&rest[0], &rest[1], &rest[2], &rest[3], &rest[4], &rest[5], &rest[6], &rest[7])
-		if n < 11 {
-			ctx.SetReturn(0x80070057) // E_INVALIDARG
+		if strPtr == 0 {
+			writeGUID(ctx.Mem, clsidPtr, GUID{})
+			ctx.SetReturn(S_OK)
 			return 0
 		}
-		ctx.Mem.Write8(clsidPtr+0, byte(d1))
-		ctx.Mem.Write8(clsidPtr+1, byte(d1>>8))
-		ctx.Mem.Write8(clsidPtr+2, byte(d1>>16))
-		ctx.Mem.Write8(clsidPtr+3, byte(d1>>24))
-		ctx.Mem.Write8(clsidPtr+4, byte(d2))
-		ctx.Mem.Write8(clsidPtr+5, byte(d2>>8))
-		ctx.Mem.Write8(clsidPtr+6, byte(d3))
-		ctx.Mem.Write8(clsidPtr+7, byte(d3>>8))
-		for i := 0; i < 8; i++ {
-			ctx.Mem.Write8(clsidPtr+8+uint64(i), rest[i])
+		g, ok := parseGUIDString(readGuestUTF16(strPtr))
+		if !ok {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
 		}
-		ctx.SetReturn(0) // S_OK
+		writeGUID(ctx.Mem, clsidPtr, g)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CLSIDFromProgID", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0x800401F3) // CO_E_CLASSSTRING
+		progIDPtr := ctx.Arg(0)
+		clsidPtr := ctx.Arg(1)
+		if clsidPtr == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		if progIDPtr == 0 {
+			writeGUID(ctx.Mem, clsidPtr, GUID{})
+			ctx.SetReturn(uint64(CO_E_CLASSSTRING))
+			return 0
+		}
+		g, ok := cs.lookupProgID(readGuestUTF16(progIDPtr))
+		if !ok {
+			writeGUID(ctx.Mem, clsidPtr, GUID{})
+			ctx.SetReturn(uint64(CO_E_CLASSSTRING))
+			return 0
+		}
+		writeGUID(ctx.Mem, clsidPtr, g)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StringFromCLSID", func(ctx *ntapi.TrapContext) uint32 {
-		// HRESULT StringFromCLSID(REFCLSID rclsid, LPOLESTR *lplpsz)
 		guidPtr := ctx.Arg(0)
 		ppszOut := ctx.Arg(1)
 		if guidPtr == 0 || ppszOut == 0 {
-			ctx.SetReturn(0x80004003) // E_POINTER
+			ctx.SetReturn(uint64(E_POINTER))
 			return 0
 		}
-		s := readGUIDString(ctx.Mem, guidPtr)
-		ws := utf16Encode(s)
-		bufSize := uint64(len(ws)+1) * 2
-		addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
+		ws := utf16Encode(guidString(readGUID(ctx.Mem, guidPtr)))
+		addr := cs.allocTaskMem(uint64(len(ws)+1)*2, true)
+		if addr == 0 {
+			ctx.SetReturn(uint64(E_OUTOFMEMORY))
+			return 0
+		}
 		for i, w := range ws {
 			mem.Write16(addr+uint64(i)*2, w)
 		}
 		mem.Write16(addr+uint64(len(ws))*2, 0)
 		ctx.Mem.Write64(ppszOut, addr)
-		ctx.SetReturn(0) // S_OK
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "IIDFromString", func(ctx *ntapi.TrapContext) uint32 {
-		// HRESULT IIDFromString(LPCOLESTR lpsz, LPIID lpiid)
 		strPtr := ctx.Arg(0)
 		iidPtr := ctx.Arg(1)
-		if strPtr == 0 || iidPtr == 0 {
-			ctx.SetReturn(0x80004003) // E_POINTER
+		if iidPtr == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
 			return 0
 		}
-		s := readGuestUTF16(strPtr)
-		var d1 uint32
-		var d2, d3 uint16
-		var rest [8]byte
-		n, _ := fmt.Sscanf(s, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-			&d1, &d2, &d3,
-			&rest[0], &rest[1], &rest[2], &rest[3], &rest[4], &rest[5], &rest[6], &rest[7])
-		if n < 11 {
-			ctx.SetReturn(0x80070057) // E_INVALIDARG
+		if strPtr == 0 {
+			writeGUID(ctx.Mem, iidPtr, GUID{})
+			ctx.SetReturn(S_OK)
 			return 0
 		}
-		ctx.Mem.Write8(iidPtr+0, byte(d1))
-		ctx.Mem.Write8(iidPtr+1, byte(d1>>8))
-		ctx.Mem.Write8(iidPtr+2, byte(d1>>16))
-		ctx.Mem.Write8(iidPtr+3, byte(d1>>24))
-		ctx.Mem.Write8(iidPtr+4, byte(d2))
-		ctx.Mem.Write8(iidPtr+5, byte(d2>>8))
-		ctx.Mem.Write8(iidPtr+6, byte(d3))
-		ctx.Mem.Write8(iidPtr+7, byte(d3>>8))
-		for i := 0; i < 8; i++ {
-			ctx.Mem.Write8(iidPtr+8+uint64(i), rest[i])
+		g, ok := parseGUIDString(readGuestUTF16(strPtr))
+		if !ok {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
 		}
-		ctx.SetReturn(0) // S_OK
+		writeGUID(ctx.Mem, iidPtr, g)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "IsEqualGUID", func(ctx *ntapi.TrapContext) uint32 {
-		// rguid1 *GUID, rguid2 *GUID → BOOL
 		g1 := ctx.Arg(0)
 		g2 := ctx.Arg(1)
-		for i := uint64(0); i < 16; i++ {
-			b1, _ := ctx.Mem.Read8(g1 + i)
-			b2, _ := ctx.Mem.Read8(g2 + i)
-			if b1 != b2 {
-				ctx.SetReturn(0)
-				return 0
-			}
+		if g1 == 0 || g2 == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(1)
+		if guidEqual(readGUID(ctx.Mem, g1), readGUID(ctx.Mem, g2)) {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateStreamOnHGlobal", func(ctx *ntapi.TrapContext) uint32 {
@@ -260,54 +829,27 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
-		if comInitCount > 0 {
-			comInitCount--
-		}
+		cs.uninitialize()
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoTaskMemAlloc", func(ctx *ntapi.TrapContext) uint32 {
-		size := ctx.Arg(0)
-		if size == 0 {
-			size = 1
-		}
-		addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
-		ctx.SetReturn(addr)
+		ctx.SetReturn(cs.allocTaskMem(ctx.Arg(0), true))
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoTaskMemFree", func(ctx *ntapi.TrapContext) uint32 {
-		return 0 // No-op (guest GC handles cleanup)
+		cs.freeTaskMem(ctx.Arg(0))
+		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoTaskMemRealloc", func(ctx *ntapi.TrapContext) uint32 {
-		oldPtr := ctx.Arg(0)
-		size := ctx.Arg(1)
-		if size == 0 {
-			ctx.SetReturn(0) // realloc(ptr, 0) = free
-			return 0
-		}
-		addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
-		if oldPtr != 0 {
-			// Copy old data (we don't track alloc sizes, so copy up to new size)
-			old, err := ctx.Mem.ReadBytes(oldPtr, int(size))
-			if err == nil {
-				ctx.Mem.WriteBytes(addr, old)
-			}
-		}
-		ctx.SetReturn(addr)
+		ctx.SetReturn(cs.reallocTaskMem(ctx.Arg(0), ctx.Arg(1)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleInitialize", func(ctx *ntapi.TrapContext) uint32 {
-		comInitCount++
-		if comInitCount > 1 {
-			ctx.SetReturn(1) // S_FALSE
-		} else {
-			ctx.SetReturn(0) // S_OK
-		}
+		ctx.SetReturn(uint64(cs.initialize(COINIT_APARTMENTTHREADED)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleUninitialize", func(ctx *ntapi.TrapContext) uint32 {
-		if comInitCount > 0 {
-			comInitCount--
-		}
+		cs.uninitialize()
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "RegisterDragDrop", func(ctx *ntapi.TrapContext) uint32 {
@@ -391,10 +933,26 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CLSIDFromProgIDEx", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[ole32] CLSIDFromProgIDEx p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		progIDPtr := ctx.Arg(0)
+		clsidPtr := ctx.Arg(1)
+		ravelog.Logf("[ole32] CLSIDFromProgIDEx p0=0x%x, p1=0x%x\n", progIDPtr, clsidPtr)
+		if clsidPtr == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		if progIDPtr == 0 {
+			writeGUID(ctx.Mem, clsidPtr, GUID{})
+			ctx.SetReturn(uint64(CO_E_CLASSSTRING))
+			return 0
+		}
+		g, ok := cs.lookupProgID(readGuestUTF16(progIDPtr))
+		if !ok {
+			writeGUID(ctx.Mem, clsidPtr, GUID{})
+			ctx.SetReturn(uint64(CO_E_CLASSSTRING))
+			return 0
+		}
+		writeGUID(ctx.Mem, clsidPtr, g)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoAddRefServerProcess", func(ctx *ntapi.TrapContext) uint32 {
@@ -443,7 +1001,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoCreateInstanceFromApp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -526,8 +1086,12 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		pAptType := ctx.Arg(0)
 		pAptQualifier := ctx.Arg(1)
 		ravelog.Logf("[ole32] CoGetApartmentType\n")
-		if pAptType != 0 { ctx.Mem.Write32(pAptType, 0) }       // APTTYPE_STA
-		if pAptQualifier != 0 { ctx.Mem.Write32(pAptQualifier, 0) } // APTTYPEQUALIFIER_NONE
+		if pAptType != 0 {
+			ctx.Mem.Write32(pAptType, 0)
+		} // APTTYPE_STA
+		if pAptQualifier != 0 {
+			ctx.Mem.Write32(pAptQualifier, 0)
+		} // APTTYPEQUALIFIER_NONE
 		ctx.SetReturn(0) // S_OK
 		return 0
 	})
@@ -566,9 +1130,40 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		riid := ctx.Arg(3)
 		ppv := ctx.Arg(4)
 		_ = pvReserved
-		ravelog.Logf("[ole32] CoGetClassObject clsid=0x%x ctx=0x%x iid=0x%x\n", rclsid, dwClsContext, riid)
-		if ppv != 0 { ctx.Mem.Write64(ppv, 0) }
-		ctx.SetReturn(0x80040154) // REGDB_E_CLASSNOTREG
+		ravelog.Logf("[ole32] CoGetClassObject clsid=%s ctx=0x%x iid=%s\n",
+			readGUIDString(ctx.Mem, rclsid), dwClsContext, readGUIDString(ctx.Mem, riid))
+		if ppv == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppv, 0)
+		if riid == 0 || rclsid == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		iid := readGUID(ctx.Mem, riid)
+		if !guidEqual(iid, IID_IClassFactory) && !guidEqual(iid, IID_IUnknown) {
+			ctx.SetReturn(uint64(E_NOINTERFACE))
+			return 0
+		}
+		clsid := readGUID(ctx.Mem, rclsid)
+		if reg := cs.findRegisteredFactory(clsid); reg != nil {
+			ctx.Mem.Write64(ppv, reg.unkPtr)
+			ctx.SetReturn(S_OK)
+			return 0
+		}
+		cf, ok := cs.classFactories[clsid]
+		if !ok {
+			ctx.SetReturn(uint64(REGDB_E_CLASSNOTREG))
+			return 0
+		}
+		obj, err := cs.createClassFactoryObject(cf)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppv, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetContextToken", func(ctx *ntapi.TrapContext) uint32 {
@@ -604,7 +1199,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoGetInstanceFromFile p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -616,7 +1213,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoGetInstanceFromIStorage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -632,8 +1231,18 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		dwMemContext := ctx.Arg(0)
 		ppMalloc := ctx.Arg(1)
 		ravelog.Logf("[ole32] CoGetMalloc ctx=%d out=0x%x\n", dwMemContext, ppMalloc)
-		if ppMalloc != 0 { ctx.Mem.Write64(ppMalloc, 0) } // NULL - not supported
-		ctx.SetReturn(0) // S_OK
+		if ppMalloc == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppMalloc, 0)
+		obj, err := cs.createIMallocObject()
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppMalloc, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetMarshalSizeMax", func(ctx *ntapi.TrapContext) uint32 {
@@ -644,7 +1253,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoGetMarshalSizeMax p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -680,7 +1291,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoGetStandardMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -765,7 +1378,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoMarshalInterface p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -777,7 +1392,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoQueryClientBlanket p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -789,7 +1406,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoQueryProxyBlanket p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -801,9 +1420,27 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterClassObject", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoRegisterClassObject p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		rclsid := ctx.Arg(0)
+		pUnk := ctx.Arg(1)
+		dwClsContext := uint32(ctx.Arg(2))
+		flags := uint32(ctx.Arg(3))
+		lpdwRegister := ctx.Arg(4)
+		ravelog.Logf("[ole32] CoRegisterClassObject clsid=%s unk=0x%x ctx=0x%x flags=0x%x\n",
+			readGUIDString(ctx.Mem, rclsid), pUnk, dwClsContext, flags)
+		if rclsid == 0 || lpdwRegister == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		cookie := uint32(cs.nextHandle)
+		cs.nextHandle++
+		cs.registeredFactories[cookie] = &registeredClassObject{
+			clsid:        readGUID(ctx.Mem, rclsid),
+			unkPtr:       pUnk,
+			dwClsContext: dwClsContext,
+			flags:        flags,
+		}
+		ctx.Mem.Write32(lpdwRegister, cookie)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterInitializeSpy", func(ctx *ntapi.TrapContext) uint32 {
@@ -823,7 +1460,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		lpMessageFilter := ctx.Arg(0)
 		lplpMessageFilter := ctx.Arg(1)
 		ravelog.Logf("[ole32] CoRegisterMessageFilter new=0x%x old=0x%x\n", lpMessageFilter, lplpMessageFilter)
-		if lplpMessageFilter != 0 { ctx.Mem.Write64(lplpMessageFilter, 0) }
+		if lplpMessageFilter != 0 {
+			ctx.Mem.Write64(lplpMessageFilter, 0)
+		}
 		ctx.SetReturn(0) // S_OK
 		return 0
 	})
@@ -869,9 +1508,10 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRevokeClassObject", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoRevokeClassObject p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		cookie := uint32(ctx.Arg(0))
+		ravelog.Logf("[ole32] CoRevokeClassObject p0=0x%x\n", cookie)
+		delete(cs.registeredFactories, cookie)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRevokeInitializeSpy", func(ctx *ntapi.TrapContext) uint32 {
@@ -893,7 +1533,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] CoSetProxyBlanket p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -926,7 +1568,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		pstm := ctx.Arg(0)
 		phrresult := ctx.Arg(1)
 		ravelog.Logf("[ole32] CoUnmarshalHresult stm=0x%x out=0x%x\n", pstm, phrresult)
-		if phrresult != 0 { ctx.Mem.Write32(phrresult, 0) } // S_OK
+		if phrresult != 0 {
+			ctx.Mem.Write32(phrresult, 0)
+		} // S_OK
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -945,7 +1589,8 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[ole32] CoWaitForMultipleHandles p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1561,7 +2206,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleConvertIStorageToOLESTREAMEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1581,7 +2228,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreate p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1603,7 +2252,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateEmbeddingHelper p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1615,7 +2266,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateFromData p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1627,7 +2280,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateFromDataEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1639,7 +2294,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateFromFile p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1651,7 +2308,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateFromFileEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1663,7 +2322,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateLink p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1675,7 +2336,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateLinkFromData p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1687,7 +2350,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateLinkToFile p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1706,7 +2371,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] OleCreateStaticFromData p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1927,7 +2594,8 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[ole32] OleSetMenuDescriptor p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1943,7 +2611,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		clsid := ctx.Arg(0)
 		lplpszProgID := ctx.Arg(1)
 		ravelog.Logf("[ole32] ProgIDFromCLSID clsid=0x%x out=0x%x\n", clsid, lplpszProgID)
-		if lplpszProgID != 0 { ctx.Mem.Write64(lplpszProgID, 0) }
+		if lplpszProgID != 0 {
+			ctx.Mem.Write64(lplpszProgID, 0)
+		}
 		ctx.SetReturn(0x800401F3) // CO_E_CLASSSTRING
 		return 0
 	})
@@ -2111,7 +2781,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] StgConvertVariantToProperty p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2151,7 +2823,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] StgCreatePropStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2163,7 +2837,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] StgCreateStorageEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2186,7 +2862,8 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[ole32] StgOpenPropStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2198,7 +2875,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] StgOpenStorage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2210,7 +2889,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] StgOpenStorageEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2222,7 +2903,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[ole32] StgOpenStorageOnILockBytes p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2240,26 +2923,22 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		riid := ctx.Arg(0)
 		lplpsz := ctx.Arg(1)
 		ravelog.Logf("[ole32] StringFromIID iid=0x%x out=0x%x\n", riid, lplpsz)
-		// Same as StringFromCLSID
-		if riid != 0 && lplpsz != 0 {
-			d1, _ := ctx.Mem.Read32(riid)
-			d2, _ := ctx.Mem.Read16(riid + 4)
-			d3, _ := ctx.Mem.Read16(riid + 6)
-			b8, _ := ctx.Mem.Read8(riid + 8); b9, _ := ctx.Mem.Read8(riid + 9)
-			guidStr := fmt.Sprintf("{%08X-%04X-%04X-%02X%02X-", d1, d2, d3, b8, b9)
-			for i := uint64(0); i < 6; i++ {
-				b, _ := ctx.Mem.Read8(riid + 10 + i)
-				guidStr += fmt.Sprintf("%02X", b)
-			}
-			guidStr += "}"
-			buf := sharedHeapAlloc(uint64(len(guidStr)+1)*2, true)
-			for i, ch := range guidStr { ctx.Mem.Write16(buf+uint64(i*2), uint16(ch)) }
-			ctx.Mem.Write16(buf+uint64(len(guidStr)*2), 0)
-			ctx.Mem.Write64(lplpsz, buf)
-			ctx.SetReturn(0) // S_OK
-		} else {
-			ctx.SetReturn(0x80070057)
+		if riid == 0 || lplpsz == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
 		}
+		guidStr := guidString(readGUID(ctx.Mem, riid))
+		buf := cs.allocTaskMem(uint64(len(guidStr)+1)*2, true)
+		if buf == 0 {
+			ctx.SetReturn(uint64(E_OUTOFMEMORY))
+			return 0
+		}
+		for i, ch := range guidStr {
+			ctx.Mem.Write16(buf+uint64(i*2), uint16(ch))
+		}
+		ctx.Mem.Write16(buf+uint64(len(guidStr)*2), 0)
+		ctx.Mem.Write64(lplpsz, buf)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "WdtpInterfacePointer_UserFree", func(ctx *ntapi.TrapContext) uint32 {
@@ -2275,7 +2954,8 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[ole32] WdtpInterfacePointer_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2286,7 +2966,8 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[ole32] WdtpInterfacePointer_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2327,6 +3008,11 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 func registerOleaut32Handlers(hctx *HandlerCtx) {
 	d := hctx.Disp
 	mem := hctx.Mem
+	cs := hctx.Com
+	if cs == nil {
+		cs = newCOMState(hctx)
+		hctx.Com = cs
+	}
 
 	oleaut32, ok := hctx.SynthByName["oleaut32.dll"]
 	if !ok {
@@ -2336,13 +3022,11 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 	_ = oleaut32
 
 	d.RegisterAutoStubHandler(oleaut32, "SysAllocString", func(ctx *ntapi.TrapContext) uint32 {
-		// Allocate a copy of the BSTR in guest memory
 		src := ctx.Arg(0)
 		if src == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// Count wchar_t length
 		n := uint64(0)
 		for {
 			w, _ := ctx.Mem.Read16(src + n*2)
@@ -2351,17 +3035,11 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 			}
 			n++
 		}
-		// BSTR layout: 4-byte length prefix + wchar data + null terminator
-		buf := mem.Mmap(0, 4+n*2+2, mmu.PermRead|mmu.PermWrite)
-		ctx.Mem.Write32(buf, uint32(n*2))
-		for i := uint64(0); i < n; i++ {
-			w, _ := ctx.Mem.Read16(src + i*2)
-			ctx.Mem.Write16(buf+4+i*2, w)
-		}
-		ctx.SetReturn(buf + 4) // BSTR points past length prefix
+		ctx.SetReturn(cs.allocBSTRChars(src, n))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SysFreeString", func(ctx *ntapi.TrapContext) uint32 {
+		cs.freeBSTR(ctx.Arg(0))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SysStringLen", func(ctx *ntapi.TrapContext) uint32 {
@@ -2377,42 +3055,27 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SysAllocStringLen", func(ctx *ntapi.TrapContext) uint32 {
-		// BSTR SysAllocStringLen(const OLECHAR *strIn, UINT ui)
 		src := ctx.Arg(0)
 		cch := ctx.Arg(1) // character count
-		byteLen := cch * 2
-		// BSTR layout: 4-byte length prefix + wchar data + null terminator
-		buf := mem.Mmap(0, 4+byteLen+2, mmu.PermRead|mmu.PermWrite)
-		ctx.Mem.Write32(buf, uint32(byteLen))
-		if src != 0 && cch > 0 {
-			for i := uint64(0); i < cch; i++ {
-				w, _ := ctx.Mem.Read16(src + i*2)
-				ctx.Mem.Write16(buf+4+i*2, w)
-			}
+		if src == 0 && cch == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.Mem.Write16(buf+4+byteLen, 0) // null terminator
-		ctx.SetReturn(buf + 4)             // BSTR points past length prefix
+		ctx.SetReturn(cs.allocBSTRChars(src, cch))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SysReAllocStringLen", func(ctx *ntapi.TrapContext) uint32 {
-		// INT SysReAllocStringLen(BSTR *pbstr, const OLECHAR *psz, UINT len)
 		pbstr := ctx.Arg(0)
 		psz := ctx.Arg(1)
 		cch := ctx.Arg(2)
-		byteLen := cch * 2
-		buf := mem.Mmap(0, 4+byteLen+2, mmu.PermRead|mmu.PermWrite)
-		ctx.Mem.Write32(buf, uint32(byteLen))
-		if psz != 0 && cch > 0 {
-			for i := uint64(0); i < cch; i++ {
-				w, _ := ctx.Mem.Read16(psz + i*2)
-				ctx.Mem.Write16(buf+4+i*2, w)
-			}
+		if pbstr == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.Mem.Write16(buf+4+byteLen, 0)
-		if pbstr != 0 {
-			ctx.Mem.Write64(pbstr, buf+4)
-		}
-		ctx.SetReturn(1) // TRUE
+		oldBstr, _ := ctx.Mem.Read64(pbstr)
+		cs.freeBSTR(oldBstr)
+		ctx.Mem.Write64(pbstr, cs.allocBSTRChars(psz, cch))
+		ctx.SetReturn(1)
 		return 0
 	})
 
@@ -2538,7 +3201,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(oleaut32, "CreateErrorInfo", func(ctx *ntapi.TrapContext) uint32 {
 		pperrinfo := ctx.Arg(0)
 		ravelog.Logf("[oleaut32] CreateErrorInfo out=0x%x\n", pperrinfo)
-		if pperrinfo != 0 { ctx.Mem.Write64(pperrinfo, 0) }
+		if pperrinfo != 0 {
+			ctx.Mem.Write64(pperrinfo, 0)
+		}
 		ctx.SetReturn(0x80004005) // E_FAIL
 		return 0
 	})
@@ -2576,7 +3241,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] DispCallFunc p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2597,7 +3264,8 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[oleaut32] DispGetParam p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2609,7 +3277,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] DispInvoke p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2663,7 +3333,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		dwReserved := ctx.Arg(0)
 		pperrinfo := ctx.Arg(1)
 		ravelog.Logf("[oleaut32] GetErrorInfo reserved=%d out=0x%x\n", dwReserved, pperrinfo)
-		if pperrinfo != 0 { ctx.Mem.Write64(pperrinfo, 0) } // no error info
+		if pperrinfo != 0 {
+			ctx.Mem.Write64(pperrinfo, 0)
+		} // no error info
 		ctx.SetReturn(1) // S_FALSE - no error info available
 		return 0
 	})
@@ -2675,7 +3347,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] GetRecordInfoFromGuids p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2764,7 +3438,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] OleCreatePropertyFrame p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2788,7 +3464,8 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[oleaut32] OleLoadPicture p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2800,7 +3477,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] OleLoadPictureEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2819,7 +3498,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] OleLoadPicturePath p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2845,7 +3526,8 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[oleaut32] QueryPathOfRegTypeLib p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2929,9 +3611,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		ravelog.Logf("[oleaut32] SafeArrayCreate vt=%d dims=%d\n", vt, cDims)
 		// Return minimal fake SAFEARRAY
 		buf := sharedHeapAlloc(64, true)
-		ctx.Mem.Write16(buf, uint16(cDims))      // cDims
-		ctx.Mem.Write16(buf+2, 0)                 // fFeatures
-		ctx.Mem.Write32(buf+4, 0)                 // cbElements
+		ctx.Mem.Write16(buf, uint16(cDims)) // cDims
+		ctx.Mem.Write16(buf+2, 0)           // fFeatures
+		ctx.Mem.Write32(buf+4, 0)           // cbElements
 		_ = rgsabound
 		ctx.SetReturn(buf)
 		return 0
@@ -3109,35 +3791,42 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(oleaut32, "SysAllocStringByteLen", func(ctx *ntapi.TrapContext) uint32 {
 		psz := ctx.Arg(0)
 		len_ := ctx.Arg(1)
-		buf := sharedHeapAlloc(4+len_+2, true)
-		ctx.Mem.Write32(buf, uint32(len_))
-		if psz != 0 {
-			for i := uint64(0); i < len_; i++ {
-				b, _ := ctx.Mem.Read8(psz + i)
-				ctx.Mem.Write8(buf+4+i, b)
-			}
+		if psz == 0 && len_ == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(buf + 4)
+		ctx.SetReturn(cs.allocBSTRByteLen(psz, len_))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SysReAllocString", func(ctx *ntapi.TrapContext) uint32 {
 		pbstr := ctx.Arg(0)
 		psz := ctx.Arg(1)
-		if pbstr == 0 { ctx.SetReturn(0); return 0 }
-		len_ := uint64(0)
-		if psz != 0 { for { ch, _ := ctx.Mem.Read16(psz + len_*2); if ch == 0 { break }; len_++ } }
-		buf := sharedHeapAlloc(4+(len_+1)*2, true)
-		ctx.Mem.Write32(buf, uint32(len_*2))
-		if psz != 0 {
-			for i := uint64(0); i <= len_; i++ { ch, _ := ctx.Mem.Read16(psz + i*2); ctx.Mem.Write16(buf+4+i*2, ch) }
+		if pbstr == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.Mem.Write64(pbstr, buf+4)
+		len_ := uint64(0)
+		if psz != 0 {
+			for {
+				ch, _ := ctx.Mem.Read16(psz + len_*2)
+				if ch == 0 {
+					break
+				}
+				len_++
+			}
+		}
+		oldBstr, _ := ctx.Mem.Read64(pbstr)
+		cs.freeBSTR(oldBstr)
+		ctx.Mem.Write64(pbstr, cs.allocBSTRChars(psz, len_))
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SysStringByteLen", func(ctx *ntapi.TrapContext) uint32 {
 		bstr := ctx.Arg(0)
-		if bstr == 0 { ctx.SetReturn(0); return 0 }
+		if bstr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		byteLen, _ := ctx.Mem.Read32(bstr - 4)
 		ctx.SetReturn(uint64(byteLen))
 		return 0
@@ -3156,7 +3845,8 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[oleaut32] UnRegisterTypeLibForUser p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4057,7 +4747,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] VarFormat p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4069,7 +4761,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] VarFormatCurrency p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4091,7 +4785,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] VarFormatNumber p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4103,7 +4799,9 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[oleaut32] VarFormatPercent p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4624,7 +5322,8 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[oleaut32] VarParseNumFromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5337,7 +6036,8 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[oleaut32] VarWeekdayName p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5355,7 +6055,10 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		ravelog.Logf("[oleaut32] VariantChangeTypeEx dest=0x%x src=0x%x\n", pvargDest, pvarSrc)
 		// Just copy for now
 		if pvargDest != 0 && pvarSrc != 0 {
-			for i := uint64(0); i < 24; i++ { b, _ := ctx.Mem.Read8(pvarSrc + i); ctx.Mem.Write8(pvargDest+i, b) }
+			for i := uint64(0); i < 24; i++ {
+				b, _ := ctx.Mem.Read8(pvarSrc + i)
+				ctx.Mem.Write8(pvargDest+i, b)
+			}
 		}
 		ctx.SetReturn(0) // S_OK
 		return 0

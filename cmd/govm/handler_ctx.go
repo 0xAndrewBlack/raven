@@ -132,18 +132,18 @@ type freeBlock struct {
 }
 
 type registeredClassInfo struct {
-	Style      uint32
-	WndProc    uint64
-	ClsExtra   int32
-	WndExtra   int32
-	HInstance  uint64
-	HIcon      uint64
-	HCursor    uint64
-	HbrBG      uint64
-	MenuName   uint64
-	ClassName  string
+	Style     uint32
+	WndProc   uint64
+	ClsExtra  int32
+	WndExtra  int32
+	HInstance uint64
+	HIcon     uint64
+	HCursor   uint64
+	HbrBG     uint64
+	MenuName  uint64
+	ClassName string
 	HIconSm   uint64
-	Atom       uint16
+	Atom      uint16
 }
 
 // ─── HandlerCtx bridges closure-captured state to extracted DLL files ───────
@@ -159,6 +159,7 @@ type HandlerCtx struct {
 	TMPtr       **thread.Manager
 	RegHive     *ntapi.RegistryHive
 	SynthByName map[string]*ntapi.SynthPE
+	Com         *comState
 
 	// Config
 	Argv        []string
@@ -170,10 +171,10 @@ type HandlerCtx struct {
 	Dlls        []*ntapi.SynthPE
 
 	// Wayland / GUI (pointers, safe to copy)
-	WlDisplay        *wl.Display
-	WlWindow         *wl.Window
-	OnWlWindowSet    func(*wl.Window) // callback to sync local wlWindow in main.go closures
-	GdiMgr           *gdi.Manager
+	WlDisplay     *wl.Display
+	WlWindow      *wl.Window
+	OnWlWindowSet func(*wl.Window) // callback to sync local wlWindow in main.go closures
+	GdiMgr        *gdi.Manager
 
 	// Maps (reference types, safe to copy)
 	EnvVars              map[string]string
@@ -217,29 +218,29 @@ type HandlerCtx struct {
 	OpenMenuHwnd      uint64
 
 	// Modal dialog overlay state
-	DialogActive bool
-	DialogTitle  string
-	DialogText   string
-	DialogText2  string // secondary line (e.g. version info)
-	DialogHwnd   uint64 // owner window
-	DialogBtnX   int32  // OK button bounds (set by DrawDialogOverlay)
-	DialogBtnY   int32
-	DialogBtnW   int32
-	DialogBtnH   int32
-	NextHWND          uint64
-	NextMsgID         uint32
-	NextAtom          uint16
-	NextGDIHandle     uint64
-	NextBitmapHandle  uint64
-	NextTimerID       uint64
-	FrameReady        bool
-	HasBaseFrame      bool
-	RepaintBuiltin    bool
-	ScratchOff        uint64
-	ScratchPage       uint64
-	SyncTrampoline    uint64
-	LastPostedMainW   int32
-	LastPostedMainH   int32
+	DialogActive     bool
+	DialogTitle      string
+	DialogText       string
+	DialogText2      string // secondary line (e.g. version info)
+	DialogHwnd       uint64 // owner window
+	DialogBtnX       int32  // OK button bounds (set by DrawDialogOverlay)
+	DialogBtnY       int32
+	DialogBtnW       int32
+	DialogBtnH       int32
+	NextHWND         uint64
+	NextMsgID        uint32
+	NextAtom         uint16
+	NextGDIHandle    uint64
+	NextBitmapHandle uint64
+	NextTimerID      uint64
+	FrameReady       bool
+	HasBaseFrame     bool
+	RepaintBuiltin   bool
+	ScratchOff       uint64
+	ScratchPage      uint64
+	SyncTrampoline   uint64
+	LastPostedMainW  int32
+	LastPostedMainH  int32
 
 	// Caret state
 	CaretHwnd    uint64
@@ -303,8 +304,8 @@ type HandlerCtx struct {
 	DrawDialogOverlay   func()
 	CommitIfDone        func()
 
-	CrtFiles   map[uint64]*os.File // guest FILE* → Go *os.File
-	CrtNextFP  uint64              // next guest FILE* address to allocate
+	CrtFiles  map[uint64]*os.File // guest FILE* → Go *os.File
+	CrtNextFP uint64              // next guest FILE* address to allocate
 }
 
 const menuBarHeight int32 = 20

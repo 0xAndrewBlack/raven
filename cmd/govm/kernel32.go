@@ -135,6 +135,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 
 	var preferredUILanguagesMu sync.Mutex
 	processPreferredUILanguages := "en-US"
+	const defaultLocaleLCID uint32 = 0x0409
+	const defaultLocaleName = "en-US"
+	const defaultAnsiCodePage uint32 = 1252
+	const defaultOEMCodePage uint32 = 437
+	var threadLocaleMu sync.Mutex
+	threadLocale := defaultLocaleLCID
 	stateScalars := map[string]uint64{
 		"activeConsoleSessionID": 1,
 		"daylightFlag":           0,
@@ -162,9 +168,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	werMetadata := map[string]string{}
 	werFiles := map[string]uint32{}
 	werRuntimeModules := map[string]uint64{}
-	var rtlFunctionTableMu sync.Mutex
-	rtlFunctionTables := map[uint64]uint64{}
-	rtlFunctionTableCallbacks := map[uint64]uint64{}
+	guestCallTrampoline := ntapi.AllocTrampoline(mem)
 
 	setLastErrorValue := func(code uint32) {
 		mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, code)
@@ -181,6 +185,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			args[i] = ctx.Arg(i)
 		}
 		return args
+	}
+	callGuest := func(ctx *ntapi.TrapContext, addr uint64, args []uint64) (uint64, error) {
+		return ntapi.CallGuestFunction(ctx.CPU, mem, guestCallTrampoline, addr, args, ctx.Trace)
 	}
 	formatKernel32Args := func(args []uint64) string {
 		if len(args) == 0 {
@@ -235,6 +242,338 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		}
 		mem.Write16(addr+limit*2, 0)
 		return required
+	}
+	writeANSIStringCount := func(addr uint64, s string, cch uint64) uint64 {
+		required := uint64(len(s) + 1)
+		if addr == 0 || cch == 0 {
+			return required
+		}
+		written := required
+		if written > cch {
+			written = cch
+		}
+		limit := uint64(len(s))
+		if limit+1 > written {
+			limit = written - 1
+		}
+		for i := uint64(0); i < limit; i++ {
+			mem.Write8(addr+i, s[i])
+		}
+		mem.Write8(addr+limit, 0)
+		return written
+	}
+	writeUTF16StringCount := func(addr uint64, s string, cch uint64) uint64 {
+		ws := utf16Encode(s)
+		required := uint64(len(ws) + 1)
+		if addr == 0 || cch == 0 {
+			return required
+		}
+		written := required
+		if written > cch {
+			written = cch
+		}
+		limit := uint64(len(ws))
+		if limit+1 > written {
+			limit = written - 1
+		}
+		for i := uint64(0); i < limit; i++ {
+			mem.Write16(addr+i*2, ws[i])
+		}
+		mem.Write16(addr+limit*2, 0)
+		return written
+	}
+	readANSIBytesArg := func(ptr uint64, cb int32) []byte {
+		if ptr == 0 {
+			return nil
+		}
+		if cb == -1 {
+			var out []byte
+			for i := uint64(0); ; i++ {
+				b, _ := mem.Read8(ptr + i)
+				out = append(out, b)
+				if b == 0 {
+					break
+				}
+			}
+			return out
+		}
+		if cb <= 0 {
+			return nil
+		}
+		out := make([]byte, cb)
+		for i := int32(0); i < cb; i++ {
+			out[i], _ = mem.Read8(ptr + uint64(i))
+		}
+		return out
+	}
+	readUTF16UnitsArg := func(ptr uint64, cch int32) []uint16 {
+		if ptr == 0 {
+			return nil
+		}
+		if cch == -1 {
+			var out []uint16
+			for i := uint64(0); ; i++ {
+				w, _ := mem.Read16(ptr + i*2)
+				out = append(out, w)
+				if w == 0 {
+					break
+				}
+			}
+			return out
+		}
+		if cch <= 0 {
+			return nil
+		}
+		out := make([]uint16, cch)
+		for i := int32(0); i < cch; i++ {
+			out[i], _ = mem.Read16(ptr + uint64(i)*2)
+		}
+		return out
+	}
+	readWideStringArg := func(ptr uint64, cch int32) string {
+		units := readUTF16UnitsArg(ptr, cch)
+		if len(units) == 0 {
+			return ""
+		}
+		if cch == -1 && units[len(units)-1] == 0 {
+			units = units[:len(units)-1]
+		}
+		return string(utf16.Decode(units))
+	}
+	normalizeLocaleName := func(name string) string {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "", "!x-sys-default-locale", "!x-user-default-locale":
+			return defaultLocaleName
+		case "en":
+			return "en"
+		case "en-us":
+			return defaultLocaleName
+		case "en-gb":
+			return "en-GB"
+		case "en-au":
+			return "en-AU"
+		case "en-ca":
+			return "en-CA"
+		case "de-de":
+			return "de-DE"
+		case "fr-fr":
+			return "fr-FR"
+		case "it-it":
+			return "it-IT"
+		case "ja-jp":
+			return "ja-JP"
+		case "ko-kr":
+			return "ko-KR"
+		case "zh-cn":
+			return "zh-CN"
+		case "zh-tw":
+			return "zh-TW"
+		case "pt-br":
+			return "pt-BR"
+		case "es-es":
+			return "es-ES"
+		case "ru-ru":
+			return "ru-RU"
+		default:
+			return defaultLocaleName
+		}
+	}
+	resolveLocaleNameValue := func(name string) string {
+		normalized := normalizeLocaleName(name)
+		if normalized == "en" {
+			return defaultLocaleName
+		}
+		return normalized
+	}
+	lcidToLocaleNameValue := func(lcid uint32) string {
+		switch lcid {
+		case 0x0409, 0x0000, 0x0400, 0x0800:
+			return defaultLocaleName
+		case 0x0809:
+			return "en-GB"
+		case 0x0C09:
+			return "en-AU"
+		case 0x1009:
+			return "en-CA"
+		case 0x0009:
+			return "en"
+		case 0x0407:
+			return "de-DE"
+		case 0x040C:
+			return "fr-FR"
+		case 0x0410:
+			return "it-IT"
+		case 0x0411:
+			return "ja-JP"
+		case 0x0412:
+			return "ko-KR"
+		case 0x0804:
+			return "zh-CN"
+		case 0x0404:
+			return "zh-TW"
+		case 0x0416:
+			return "pt-BR"
+		case 0x0C0A:
+			return "es-ES"
+		case 0x0419:
+			return "ru-RU"
+		default:
+			return defaultLocaleName
+		}
+	}
+	localeNameToLCIDValue := func(name string) uint32 {
+		switch normalizeLocaleName(name) {
+		case "en":
+			return 0x0009
+		case "en-GB":
+			return 0x0809
+		case "en-AU":
+			return 0x0C09
+		case "en-CA":
+			return 0x1009
+		case "de-DE":
+			return 0x0407
+		case "fr-FR":
+			return 0x040C
+		case "it-IT":
+			return 0x0410
+		case "ja-JP":
+			return 0x0411
+		case "ko-KR":
+			return 0x0412
+		case "zh-CN":
+			return 0x0804
+		case "zh-TW":
+			return 0x0404
+		case "pt-BR":
+			return 0x0416
+		case "es-ES":
+			return 0x0C0A
+		case "ru-RU":
+			return 0x0419
+		default:
+			return defaultLocaleLCID
+		}
+	}
+	codePageInfo := func(codePage uint32) (uint32, string, uint32, bool) {
+		switch codePage {
+		case 0, defaultAnsiCodePage:
+			return 1, "1252 (ANSI - Latin I)", defaultAnsiCodePage, true
+		case defaultOEMCodePage:
+			return 1, "437 (OEM - United States)", defaultOEMCodePage, true
+		case 850:
+			return 1, "850 (OEM - Multilingual Latin I)", 850, true
+		case 1200:
+			return 2, "1200 (UTF-16LE)", 1200, true
+		case 65001:
+			return 4, "65001 (UTF-8)", 65001, true
+		default:
+			return 0, "", codePage, false
+		}
+	}
+	writeCPInfoData := func(addr uint64, codePage uint32) bool {
+		maxCharSize, _, cp, ok := codePageInfo(codePage)
+		if !ok || addr == 0 {
+			return false
+		}
+		mem.Write32(addr, maxCharSize)
+		mem.Write8(addr+4, 0x3F)
+		mem.Write8(addr+5, 0)
+		for i := uint64(0); i < 12; i++ {
+			mem.Write8(addr+6+i, 0)
+		}
+		if cp == 1200 {
+			mem.Write8(addr+4, 0)
+			mem.Write8(addr+5, 0)
+		}
+		return true
+	}
+	writeCPInfoExAData := func(addr uint64, codePage uint32) bool {
+		maxCharSize, cpName, cp, ok := codePageInfo(codePage)
+		if !ok || addr == 0 {
+			return false
+		}
+		mem.Write32(addr, maxCharSize)
+		mem.Write8(addr+4, 0x3F)
+		mem.Write8(addr+5, 0)
+		for i := uint64(0); i < 12; i++ {
+			mem.Write8(addr+6+i, 0)
+		}
+		mem.Write16(addr+18, 0x003F)
+		mem.Write32(addr+20, cp)
+		for i := 0; i < len(cpName) && i < 260; i++ {
+			mem.Write8(addr+24+uint64(i), cpName[i])
+		}
+		if len(cpName) < 260 {
+			mem.Write8(addr+24+uint64(len(cpName)), 0)
+		}
+		return true
+	}
+	writeCPInfoExWData := func(addr uint64, codePage uint32) bool {
+		maxCharSize, cpName, cp, ok := codePageInfo(codePage)
+		if !ok || addr == 0 {
+			return false
+		}
+		mem.Write32(addr, maxCharSize)
+		mem.Write8(addr+4, 0x3F)
+		mem.Write8(addr+5, 0)
+		for i := uint64(0); i < 12; i++ {
+			mem.Write8(addr+6+i, 0)
+		}
+		mem.Write16(addr+18, 0x003F)
+		mem.Write32(addr+20, cp)
+		nameW := utf16Encode(cpName)
+		for i, w := range nameW {
+			if i >= 260 {
+				break
+			}
+			mem.Write16(addr+24+uint64(i)*2, w)
+		}
+		if len(nameW) < 260 {
+			mem.Write16(addr+24+uint64(len(nameW))*2, 0)
+		}
+		return true
+	}
+	writeNLSVersionInfoData := func(addr uint64, ex bool) bool {
+		if addr == 0 {
+			return false
+		}
+		size := uint32(16)
+		if ex {
+			size = 32
+		}
+		mem.Write32(addr, size)
+		mem.Write32(addr+4, 0x00060201)
+		mem.Write32(addr+8, 0x00060201)
+		mem.Write32(addr+12, defaultLocaleLCID)
+		if ex {
+			for i := uint64(0); i < 16; i++ {
+				mem.Write8(addr+16+i, 0)
+			}
+		}
+		return true
+	}
+	isCommonNLSRune := func(r rune) bool {
+		switch {
+		case r == 0:
+			return true
+		case r >= 0x20 && r <= 0x7E:
+			return true
+		case r >= 0x00A0 && r <= 0x024F:
+			return true
+		case r >= 0x0370 && r <= 0x03FF:
+			return true
+		case r >= 0x0400 && r <= 0x052F:
+			return true
+		case r >= 0x2000 && r <= 0x206F:
+			return true
+		case r >= 0x3040 && r <= 0x30FF:
+			return true
+		case r >= 0x4E00 && r <= 0x9FFF:
+			return true
+		default:
+			return false
+		}
 	}
 	type consoleInputEvent struct {
 		KeyDown         bool
@@ -1518,36 +1857,55 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 				ret = 1
 			}
 		case "RtlAddFunctionTable":
-			if len(args) >= 3 && args[0] != 0 {
-				rtlFunctionTableMu.Lock()
-				rtlFunctionTables[args[0]] = args[2]
-				rtlFunctionTableMu.Unlock()
+			if len(args) >= 3 && ntapi.AddDynamicFunctionTable(ctx.Mem, args[0], uint32(args[1]), args[2]) {
 				ret = 1
 			}
 		case "RtlDeleteFunctionTable":
-			if len(args) > 0 {
-				rtlFunctionTableMu.Lock()
-				delete(rtlFunctionTables, args[0])
-				rtlFunctionTableMu.Unlock()
+			if len(args) > 0 && ntapi.DeleteDynamicFunctionTable(args[0]) {
 				ret = 1
 			}
 		case "RtlInstallFunctionTableCallback":
-			if len(args) >= 2 {
-				rtlFunctionTableMu.Lock()
-				rtlFunctionTableCallbacks[args[0]] = args[1]
-				rtlFunctionTableMu.Unlock()
+			if len(args) >= 5 && ntapi.InstallDynamicFunctionTableCallback(args[0], args[1], args[2], args[3], args[4]) {
 				ret = 1
 			}
+		case "RtlLookupFunctionEntry":
+			if len(args) >= 3 {
+				_, imageBase, entryAddr := ntapi.LookupFunctionEntry(ctx.Mem, args[0], func(addr uint64, callArgs []uint64) (uint64, error) {
+					return callGuest(ctx, addr, callArgs)
+				})
+				if args[1] != 0 {
+					ctx.Mem.Write64(args[1], imageBase)
+				}
+				ret = entryAddr
+			}
 		case "RtlVirtualUnwind":
-			if len(args) >= 7 {
-				if args[4] != 0 {
-					ctx.Mem.Write64(args[4], 0)
-				}
-				if args[5] != 0 {
-					ctx.Mem.Write64(args[5], 0)
-				}
-				if args[6] != 0 {
-					ctx.Mem.Write64(args[6], 0)
+			if len(args) >= 8 {
+				contextRecord, err := ntapi.ReadAMD64Context(ctx.Mem, args[4])
+				if err == nil {
+					functionEntry := ntapi.ReadRuntimeFunctionEntry(ctx.Mem, args[3])
+					if functionEntry == nil {
+						functionEntry, _, _ = ntapi.LookupFunctionEntry(ctx.Mem, args[2], func(addr uint64, callArgs []uint64) (uint64, error) {
+							return callGuest(ctx, addr, callArgs)
+						})
+					}
+					handlerAddr, handlerData, establisherFrame, err := ntapi.VirtualUnwind(
+						ctx.Mem,
+						uint32(args[0]),
+						args[1],
+						args[2],
+						functionEntry,
+						contextRecord,
+					)
+					if err == nil {
+						_ = ntapi.WriteAMD64Context(ctx.Mem, args[4], contextRecord)
+						if args[5] != 0 {
+							ctx.Mem.Write64(args[5], handlerData)
+						}
+						if args[6] != 0 {
+							ctx.Mem.Write64(args[6], establisherFrame)
+						}
+						ret = handlerAddr
+					}
 				}
 			}
 		case "GetWriteWatch":
@@ -2272,14 +2630,22 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "UnhandledExceptionFilter", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "UnhandledExceptionFilter", 1, 1)
+		if procState.UnhandledExceptionFilter == 0 || ctx.Arg(0) == 0 {
+			ctx.SetReturn(ntapi.ExceptionContinueSearch)
+			return 0
+		}
+		ret, err := callGuest(ctx, procState.UnhandledExceptionFilter, []uint64{ctx.Arg(0)})
+		if err != nil {
+			ctx.SetReturn(ntapi.ExceptionContinueSearch)
+			return 0
+		}
+		ctx.SetReturn(ret)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "RtlCaptureContext", func(ctx *ntapi.TrapContext) uint32 {
-		// Zero-fill the CONTEXT structure (1232 bytes on x64)
-		addr := ctx.Arg(0)
-		if addr != 0 {
-			for i := uint64(0); i < 1232; i += 8 {
-				ctx.Mem.Write64Raw(addr+i, 0)
+		if addr := ctx.Arg(0); addr != 0 {
+			if cm, ok := ctx.CPU.(ntapi.ContextMarshaler); ok {
+				_ = cm.SaveContext(ctx.Mem, addr)
 			}
 		}
 		return 0
@@ -2491,6 +2857,8 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		// ReactOS: dll/win32/kernel32/winnls/string/nls.c
 		cp := uint32(ctx.Arg(0))
 		switch cp {
+		case 1200: // UTF-16LE
+			ctx.SetReturn(1)
 		case 437, 850, 852, 855, 857, 860, 861, 862, 863, 865, 866, 869: // OEM code pages
 			ctx.SetReturn(1)
 		case 874, 932, 936, 949, 950: // CJK/Thai code pages
@@ -2530,15 +2898,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetCPInfo", func(ctx *ntapi.TrapContext) uint32 {
-		// codePage := ctx.Arg(0) - ignored, always return SBCS info
+		codePage := uint32(ctx.Arg(0))
 		lpCPInfo := ctx.Arg(1) // CPINFO*: MaxCharSize(4) + DefaultChar(2) + LeadByte(12)
-		if lpCPInfo != 0 {
-			ctx.Mem.Write32(lpCPInfo, 1)     // MaxCharSize = 1 (SBCS)
-			ctx.Mem.Write8(lpCPInfo+4, 0x3F) // DefaultChar[0] = '?'
-			ctx.Mem.Write8(lpCPInfo+5, 0)    // DefaultChar[1] = 0
-			for i := uint64(0); i < 12; i++ {
-				ctx.Mem.Write8(lpCPInfo+6+i, 0) // LeadByte = all zeros
-			}
+		if !writeCPInfoData(lpCPInfo, codePage) {
+			ctx.SetReturn(0)
+			return 0
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -2560,139 +2924,100 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(kernel32, "MultiByteToWideChar", func(ctx *ntapi.TrapContext) uint32 {
 		codePage := uint32(ctx.Arg(0))
-		// dwFlags := uint32(ctx.Arg(1))
 		srcStr := ctx.Arg(2)
 		srcLen := int64(int32(ctx.Arg(3)))
 		dstBuf := ctx.Arg(4)
 		dstLen := int64(int32(ctx.Arg(5)))
-		if srcLen == -1 {
-			srcLen = 0
-			for {
-				b, _ := ctx.Mem.Read8(srcStr + uint64(srcLen))
-				srcLen++
-				if b == 0 {
-					break
-				}
-			}
-		}
-		if codePage == 65001 { // CP_UTF8
-			raw := make([]byte, srcLen)
-			for i := int64(0); i < srcLen; i++ {
-				raw[i], _ = ctx.Mem.Read8(srcStr + uint64(i))
-			}
-			runes := make([]rune, 0, srcLen)
-			for len(raw) > 0 {
-				r, size := utf8.DecodeRune(raw)
-				runes = append(runes, r)
-				raw = raw[size:]
-			}
-			wchars := utf16.Encode(runes)
-			if dstLen == 0 {
-				ctx.SetReturn(uint64(len(wchars)))
-				return 0
-			}
-			n := int64(len(wchars))
-			if n > dstLen {
-				n = dstLen
-				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122) // ERROR_INSUFFICIENT_BUFFER
-			}
-			for i := int64(0); i < n; i++ {
-				ctx.Mem.Write16(dstBuf+uint64(i*2), wchars[i])
-			}
-			ctx.SetReturn(uint64(n))
+		if srcStr == 0 {
+			ctx.SetReturn(0)
 			return 0
 		}
-		// CP_ACP(0) / 1252 / other SBCS: Latin-1 → UTF-16 (1:1 mapping)
+		raw := readANSIBytesArg(srcStr, int32(srcLen))
+		var wchars []uint16
+		switch codePage {
+		case 65001:
+			wchars = utf16.Encode([]rune(string(raw)))
+		case 0, 1252:
+			wchars = make([]uint16, len(raw))
+			for i, b := range raw {
+				wchars[i] = uint16(b)
+			}
+		default:
+			ctx.SetReturn(0)
+			return 0
+		}
 		if dstLen == 0 {
-			ctx.SetReturn(uint64(srcLen))
+			ctx.SetReturn(uint64(len(wchars)))
 			return 0
 		}
-		n := srcLen
-		if n > dstLen {
-			n = dstLen
+		if int64(len(wchars)) > dstLen {
 			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+			ctx.SetReturn(0)
+			return 0
 		}
-		for i := int64(0); i < n; i++ {
-			b, _ := ctx.Mem.Read8(srcStr + uint64(i))
-			ctx.Mem.Write16(dstBuf+uint64(i*2), uint16(b))
+		for i, w := range wchars {
+			ctx.Mem.Write16(dstBuf+uint64(i)*2, w)
 		}
-		ctx.SetReturn(uint64(n))
+		ctx.SetReturn(uint64(len(wchars)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "WideCharToMultiByte", func(ctx *ntapi.TrapContext) uint32 {
 		codePage := uint32(ctx.Arg(0))
-		// dwFlags := uint32(ctx.Arg(1))
 		srcStr := ctx.Arg(2)
 		srcLen := int64(int32(ctx.Arg(3)))
 		dstBuf := ctx.Arg(4)
 		dstLen := int64(int32(ctx.Arg(5)))
-		// lpDefaultChar := ctx.Arg(6)
 		lpUsedDefaultChar := ctx.Arg(7)
-		if srcLen == -1 {
-			srcLen = 0
-			for {
-				w, _ := ctx.Mem.Read16(srcStr + uint64(srcLen*2))
-				srcLen++
-				if w == 0 {
-					break
-				}
-			}
-		}
-		if codePage == 65001 { // CP_UTF8
-			wchars := make([]uint16, srcLen)
-			for i := int64(0); i < srcLen; i++ {
-				wchars[i], _ = ctx.Mem.Read16(srcStr + uint64(i*2))
-			}
-			runes := utf16.Decode(wchars)
-			var buf []byte
-			tmp := make([]byte, 4)
-			for _, r := range runes {
-				n := utf8.EncodeRune(tmp, r)
-				buf = append(buf, tmp[:n]...)
-			}
-			if dstLen == 0 {
-				ctx.SetReturn(uint64(len(buf)))
-				return 0
-			}
-			n := int64(len(buf))
-			if n > dstLen {
-				n = dstLen
-				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
-			}
-			for i := int64(0); i < n; i++ {
-				ctx.Mem.Write8(dstBuf+uint64(i), buf[i])
-			}
-			ctx.SetReturn(uint64(n))
+		if srcStr == 0 {
+			ctx.SetReturn(0)
 			return 0
 		}
-		// CP_ACP(0) / 1252 / other SBCS: truncate UTF-16 to byte
+		units := readUTF16UnitsArg(srcStr, int32(srcLen))
+		var out []byte
 		if dstLen == 0 {
-			ctx.SetReturn(uint64(srcLen))
+			switch codePage {
+			case 65001:
+				ctx.SetReturn(uint64(len([]byte(string(utf16.Decode(units))))))
+			case 0, 1252:
+				ctx.SetReturn(uint64(len(units)))
+			default:
+				ctx.SetReturn(0)
+			}
 			return 0
-		}
-		n := srcLen
-		if n > dstLen {
-			n = dstLen
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
 		}
 		usedDefault := false
-		for i := int64(0); i < n; i++ {
-			w, _ := ctx.Mem.Read16(srcStr + uint64(i*2))
-			if w > 0xFF {
-				ctx.Mem.Write8(dstBuf+uint64(i), '?')
-				usedDefault = true
-			} else {
-				ctx.Mem.Write8(dstBuf+uint64(i), byte(w))
+		switch codePage {
+		case 65001:
+			out = []byte(string(utf16.Decode(units)))
+		case 0, 1252:
+			out = make([]byte, len(units))
+			for i, w := range units {
+				if w > 0x00FF {
+					out[i] = '?'
+					usedDefault = true
+				} else {
+					out[i] = byte(w)
+				}
 			}
+		default:
+			ctx.SetReturn(0)
+			return 0
+		}
+		if int64(len(out)) > dstLen {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+			ctx.SetReturn(0)
+			return 0
+		}
+		for i, b := range out {
+			ctx.Mem.Write8(dstBuf+uint64(i), b)
 		}
 		if lpUsedDefaultChar != 0 {
+			ctx.Mem.Write32(lpUsedDefaultChar, 0)
 			if usedDefault {
-				ctx.Mem.Write32(lpUsedDefaultChar, 1)
-			} else {
-				ctx.Mem.Write32(lpUsedDefaultChar, 0)
+				ctx.Mem.Write8(lpUsedDefaultChar, 1)
 			}
 		}
-		ctx.SetReturn(uint64(n))
+		ctx.SetReturn(uint64(len(out)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "LocalAlloc", func(ctx *ntapi.TrapContext) uint32 {
@@ -4297,6 +4622,55 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(uint64(n))
 		return 0
 	})
+	d.RegisterAutoStubHandler(kernel32, "CharUpperW", func(ctx *ntapi.TrapContext) uint32 {
+		arg := ctx.Arg(0)
+		if arg <= 0xFFFF {
+			r := unicode.ToUpper(rune(uint16(arg)))
+			ctx.SetReturn(uint64(uint16(r)))
+			return 0
+		}
+		s := readGuestUTF16(arg)
+		ws := utf16Encode(strings.ToUpper(s))
+		for i, w := range ws {
+			ctx.Mem.Write16(arg+uint64(i)*2, w)
+		}
+		ctx.Mem.Write16(arg+uint64(len(ws))*2, 0)
+		ctx.SetReturn(arg)
+		return 0
+	})
+	d.RegisterAutoStubHandler(kernel32, "CharLowerW", func(ctx *ntapi.TrapContext) uint32 {
+		arg := ctx.Arg(0)
+		if arg <= 0xFFFF {
+			r := unicode.ToLower(rune(uint16(arg)))
+			ctx.SetReturn(uint64(uint16(r)))
+			return 0
+		}
+		s := readGuestUTF16(arg)
+		ws := utf16Encode(strings.ToLower(s))
+		for i, w := range ws {
+			ctx.Mem.Write16(arg+uint64(i)*2, w)
+		}
+		ctx.Mem.Write16(arg+uint64(len(ws))*2, 0)
+		ctx.SetReturn(arg)
+		return 0
+	})
+	d.RegisterAutoStubHandler(kernel32, "IsCharAlphaW", func(ctx *ntapi.TrapContext) uint32 {
+		if unicode.IsLetter(rune(uint16(ctx.Arg(0)))) {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
+	d.RegisterAutoStubHandler(kernel32, "IsCharAlphaNumericW", func(ctx *ntapi.TrapContext) uint32 {
+		r := rune(uint16(ctx.Arg(0)))
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
 	d.RegisterAutoStubHandler(kernel32, "LCMapStringA", func(ctx *ntapi.TrapContext) uint32 {
 		dwMapFlags := ctx.Arg(1)
 		srcStr := ctx.Arg(2)
@@ -4386,269 +4760,262 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(uint64(n))
 		return 0
 	})
-	// Helper: write locale info string to Unicode buffer
+	// Helper: write locale info strings to guest buffers.
 	writeLocaleInfoW := func(buf uint64, cchBuf uint64, val string) uint32 {
-		ws := utf16Encode(val)
-		if buf == 0 {
-			return uint32(len(ws) + 1)
-		}
-		n := uint64(len(ws) + 1)
-		if cchBuf > 0 && n > cchBuf {
-			n = cchBuf
-		}
-		for i := uint64(0); i < n-1 && i < uint64(len(ws)); i++ {
-			mem.Write16(buf+i*2, ws[i])
-		}
-		mem.Write16(buf+(n-1)*2, 0)
-		return uint32(n)
+		return uint32(writeUTF16StringCount(buf, val, cchBuf))
 	}
-	getLocaleInfoValue := func(lctype uint32) string {
+	writeLocaleInfoA := func(buf uint64, cchBuf uint64, val string) uint32 {
+		return uint32(writeANSIStringCount(buf, val, cchBuf))
+	}
+	getLocaleInfoValue := func(lctype uint32) (string, bool) {
 		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
 		// LCTYPE constants from winnls.h for en-US locale
+		switch lctype {
+		case 0x1001: // LOCALE_SENGLANGUAGE
+			return "English", true
+		case 0x1002: // LOCALE_SENGCOUNTRY
+			return "United States", true
+		case 0x1003: // LOCALE_STIMEFORMAT
+			return "h:mm:ss tt", true
+		case 0x1004: // LOCALE_IDEFAULTANSICODEPAGE
+			return "1252", true
+		case 0x100A: // LOCALE_IPAPERSIZE
+			return "1", true
+		case 0x1011: // LOCALE_IDEFAULTMACCODEPAGE
+			return "10000", true
+		case 0x1012: // LOCALE_IDEFAULTEBCDICCODEPAGE
+			return "037", true
+		}
 		switch lctype & 0xFFFF {
 		case 0x01: // LOCALE_ILANGUAGE
-			return "0409"
+			return "0409", true
 		case 0x02: // LOCALE_SLANGUAGE
-			return "English (United States)"
+			return "English (United States)", true
 		case 0x03: // LOCALE_SABBREVLANGNAME
-			return "ENU"
+			return "ENU", true
 		case 0x04: // LOCALE_SNATIVELANGNAME
-			return "English"
+			return "English", true
 		case 0x05: // LOCALE_ICOUNTRY
-			return "1"
+			return "1", true
 		case 0x06: // LOCALE_SCOUNTRY
-			return "United States"
+			return "United States", true
 		case 0x07: // LOCALE_SABBREVCTRYNAME
-			return "USA"
+			return "USA", true
 		case 0x08: // LOCALE_SNATIVECTRYNAME
-			return "United States"
+			return "United States", true
 		case 0x09: // LOCALE_IDEFAULTLANGUAGE
-			return "0409"
+			return "0409", true
 		case 0x0A: // LOCALE_IDEFAULTCOUNTRY
-			return "1"
+			return "1", true
 		case 0x0B: // LOCALE_IDEFAULTCODEPAGE (OEM)
-			return "437"
+			return "437", true
 		case 0x0C: // LOCALE_SLIST
-			return ","
+			return ",", true
 		case 0x0D: // LOCALE_IMEASURE (1=US/imperial)
-			return "1"
+			return "1", true
 		case 0x0E: // LOCALE_SDECIMAL
-			return "."
+			return ".", true
 		case 0x0F: // LOCALE_STHOUSAND
-			return ","
+			return ",", true
 		case 0x10: // LOCALE_SGROUPING
-			return "3;0"
+			return "3;0", true
 		case 0x11: // LOCALE_IDIGITS
-			return "2"
+			return "2", true
 		case 0x12: // LOCALE_ILZERO
-			return "1"
+			return "1", true
 		case 0x13: // LOCALE_SNATIVEDIGITS
-			return "0123456789"
+			return "0123456789", true
 		case 0x14: // LOCALE_SCURRENCY
-			return "$"
+			return "$", true
 		case 0x15: // LOCALE_SINTLSYMBOL
-			return "USD"
+			return "USD", true
 		case 0x16: // LOCALE_SMONDECIMALSEP
-			return "."
+			return ".", true
 		case 0x17: // LOCALE_SMONTHOUSANDSEP
-			return ","
+			return ",", true
 		case 0x18: // LOCALE_SMONGROUPING
-			return "3;0"
+			return "3;0", true
 		case 0x19: // LOCALE_ICURRDIGITS
-			return "2"
+			return "2", true
 		case 0x1B: // LOCALE_ICURRENCY
-			return "0"
+			return "0", true
 		case 0x1C: // LOCALE_INEGCURR
-			return "0"
+			return "0", true
 		case 0x1D: // LOCALE_SDATE
-			return "/"
+			return "/", true
 		case 0x1E: // LOCALE_STIME
-			return ":"
+			return ":", true
 		case 0x1F: // LOCALE_SSHORTDATE
-			return "M/d/yyyy"
+			return "M/d/yyyy", true
 		case 0x20: // LOCALE_SLONGDATE
-			return "dddd, MMMM d, yyyy"
+			return "dddd, MMMM d, yyyy", true
 		case 0x21: // LOCALE_IDATE
-			return "0"
+			return "0", true
 		case 0x23: // LOCALE_ITIME
-			return "0"
+			return "0", true
 		case 0x25: // LOCALE_ITLZERO
-			return "0"
+			return "0", true
 		case 0x28: // LOCALE_S1159
-			return "AM"
+			return "AM", true
 		case 0x29: // LOCALE_S2359
-			return "PM"
+			return "PM", true
 		case 0x2A: // LOCALE_SDAYNAME1 (Monday)
-			return "Monday"
+			return "Monday", true
 		case 0x2B: // LOCALE_SDAYNAME2
-			return "Tuesday"
+			return "Tuesday", true
 		case 0x2C: // LOCALE_SDAYNAME3
-			return "Wednesday"
+			return "Wednesday", true
 		case 0x2D: // LOCALE_SDAYNAME4
-			return "Thursday"
+			return "Thursday", true
 		case 0x2E: // LOCALE_SDAYNAME5
-			return "Friday"
+			return "Friday", true
 		case 0x2F: // LOCALE_SDAYNAME6
-			return "Saturday"
+			return "Saturday", true
 		case 0x30: // LOCALE_SDAYNAME7
-			return "Sunday"
+			return "Sunday", true
 		case 0x31: // LOCALE_SABBREVDAYNAME1
-			return "Mon"
+			return "Mon", true
 		case 0x32: // LOCALE_SABBREVDAYNAME2
-			return "Tue"
+			return "Tue", true
 		case 0x33: // LOCALE_SABBREVDAYNAME3
-			return "Wed"
+			return "Wed", true
 		case 0x34: // LOCALE_SABBREVDAYNAME4
-			return "Thu"
+			return "Thu", true
 		case 0x35: // LOCALE_SABBREVDAYNAME5
-			return "Fri"
+			return "Fri", true
 		case 0x36: // LOCALE_SABBREVDAYNAME6
-			return "Sat"
+			return "Sat", true
 		case 0x37: // LOCALE_SABBREVDAYNAME7
-			return "Sun"
+			return "Sun", true
 		case 0x38: // LOCALE_SMONTHNAME1
-			return "January"
+			return "January", true
 		case 0x39: // LOCALE_SMONTHNAME2
-			return "February"
+			return "February", true
 		case 0x3A: // LOCALE_SMONTHNAME3
-			return "March"
+			return "March", true
 		case 0x3B: // LOCALE_SMONTHNAME4
-			return "April"
+			return "April", true
 		case 0x3C: // LOCALE_SMONTHNAME5
-			return "May"
+			return "May", true
 		case 0x3D: // LOCALE_SMONTHNAME6
-			return "June"
+			return "June", true
 		case 0x3E: // LOCALE_SMONTHNAME7
-			return "July"
+			return "July", true
 		case 0x3F: // LOCALE_SMONTHNAME8
-			return "August"
+			return "August", true
 		case 0x40: // LOCALE_SMONTHNAME9
-			return "September"
+			return "September", true
 		case 0x41: // LOCALE_SMONTHNAME10
-			return "October"
+			return "October", true
 		case 0x42: // LOCALE_SMONTHNAME11
-			return "November"
+			return "November", true
 		case 0x43: // LOCALE_SMONTHNAME12
-			return "December"
+			return "December", true
 		case 0x44: // LOCALE_SABBREVMONTHNAME1
-			return "Jan"
+			return "Jan", true
 		case 0x45: // LOCALE_SABBREVMONTHNAME2
-			return "Feb"
+			return "Feb", true
 		case 0x46: // LOCALE_SABBREVMONTHNAME3
-			return "Mar"
+			return "Mar", true
 		case 0x47: // LOCALE_SABBREVMONTHNAME4
-			return "Apr"
+			return "Apr", true
 		case 0x48: // LOCALE_SABBREVMONTHNAME5
-			return "May"
+			return "May", true
 		case 0x49: // LOCALE_SABBREVMONTHNAME6
-			return "Jun"
+			return "Jun", true
 		case 0x4A: // LOCALE_SABBREVMONTHNAME7
-			return "Jul"
+			return "Jul", true
 		case 0x4B: // LOCALE_SABBREVMONTHNAME8
-			return "Aug"
+			return "Aug", true
 		case 0x4C: // LOCALE_SABBREVMONTHNAME9
-			return "Sep"
+			return "Sep", true
 		case 0x4D: // LOCALE_SABBREVMONTHNAME10
-			return "Oct"
+			return "Oct", true
 		case 0x4E: // LOCALE_SABBREVMONTHNAME11
-			return "Nov"
+			return "Nov", true
 		case 0x4F: // LOCALE_SABBREVMONTHNAME12
-			return "Dec"
+			return "Dec", true
 		case 0x50: // LOCALE_SPOSITIVESIGN
-			return ""
+			return "", true
 		case 0x51: // LOCALE_SNEGATIVESIGN
-			return "-"
+			return "-", true
 		case 0x59: // LOCALE_SISO639LANGNAME
-			return "en"
+			return "en", true
 		case 0x5A: // LOCALE_SISO3166CTRYNAME
-			return "US"
+			return "US", true
 		case 0x5C: // LOCALE_SNAME (Vista+)
-			return "en-US"
+			return defaultLocaleName, true
 		case 0x5D: // LOCALE_SDURATION
-			return "h:mm:ss"
+			return "h:mm:ss", true
 		case 0x60: // LOCALE_SSHORTESTDAYNAME1
-			return "Mo"
+			return "Mo", true
 		case 0x61: // LOCALE_SSHORTESTDAYNAME2
-			return "Tu"
+			return "Tu", true
 		case 0x62: // LOCALE_SSHORTESTDAYNAME3
-			return "We"
+			return "We", true
 		case 0x63: // LOCALE_SSHORTESTDAYNAME4
-			return "Th"
+			return "Th", true
 		case 0x64: // LOCALE_SSHORTESTDAYNAME5
-			return "Fr"
+			return "Fr", true
 		case 0x65: // LOCALE_SSHORTESTDAYNAME6
-			return "Sa"
+			return "Sa", true
 		case 0x66: // LOCALE_SSHORTESTDAYNAME7
-			return "Su"
+			return "Su", true
 		case 0x6C: // LOCALE_SSCRIPTS
-			return "Latn;"
+			return "Latn;", true
 		case 0x6D: // LOCALE_SPARENT
-			return "en"
+			return "en", true
 		case 0x72: // LOCALE_SENGLISHDISPLAYNAME
-			return "English (United States)"
+			return "English (United States)", true
 		case 0x73: // LOCALE_SNATIVEDISPLAYNAME
-			return "English (United States)"
+			return "English (United States)", true
 		case 0x76: // LOCALE_SPERCENT
-			return "%"
+			return "%", true
 		case 0x79: // LOCALE_SSHORTTIME
-			return "h:mm tt"
-		case 0x1001: // LOCALE_SENGLANGUAGE (alias)
-			return "English"
-		case 0x1002: // LOCALE_SENGCOUNTRY
-			return "United States"
-		case 0x1003: // LOCALE_STIMEFORMAT
-			return "h:mm:ss tt"
-		case 0x1004: // LOCALE_IDEFAULTANSICODEPAGE
-			return "1252"
-		case 0x100A: // LOCALE_IPAPERSIZE
-			return "1"
-		case 0x1011: // LOCALE_IDEFAULTMACCODEPAGE
-			return "10000"
-		case 0x1012: // LOCALE_IDEFAULTEBCDICCODEPAGE
-			return "037"
+			return "h:mm tt", true
 		default:
-			return ""
+			return "", false
 		}
 	}
 	d.RegisterAutoStubHandler(kernel32, "GetLocaleInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		locale := uint32(ctx.Arg(0))
 		lctype := uint32(ctx.Arg(1))
 		buf := ctx.Arg(2)
 		cchBuf := ctx.Arg(3)
-		val := getLocaleInfoValue(lctype)
-		if val == "" {
-			val = ""
-		}
-		if buf == 0 {
-			ctx.SetReturn(uint64(len(val) + 1))
+		_ = lcidToLocaleNameValue(locale)
+		val, ok := getLocaleInfoValue(lctype)
+		if !ok {
+			ctx.SetReturn(0)
 			return 0
 		}
-		n := uint64(len(val) + 1)
-		if cchBuf > 0 && n > cchBuf {
-			n = cchBuf
-		}
-		for i := uint64(0); i < n-1 && i < uint64(len(val)); i++ {
-			ctx.Mem.Write8(buf+i, val[i])
-		}
-		ctx.Mem.Write8(buf+n-1, 0)
-		ctx.SetReturn(n)
+		ctx.SetReturn(uint64(writeLocaleInfoA(buf, cchBuf, val)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetLocaleInfoW", func(ctx *ntapi.TrapContext) uint32 {
+		locale := uint32(ctx.Arg(0))
 		lctype := uint32(ctx.Arg(1))
 		buf := ctx.Arg(2)
 		cchBuf := ctx.Arg(3)
-		val := getLocaleInfoValue(lctype)
-		n := writeLocaleInfoW(buf, cchBuf, val)
-		ctx.SetReturn(uint64(n))
+		_ = lcidToLocaleNameValue(locale)
+		val, ok := getLocaleInfoValue(lctype)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(uint64(writeLocaleInfoW(buf, cchBuf, val)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetLocaleInfoEx", func(ctx *ntapi.TrapContext) uint32 {
+		_ = normalizeLocaleName(readGuestUTF16(ctx.Arg(0)))
 		lctype := uint32(ctx.Arg(2))
 		buf := ctx.Arg(3)
 		cchBuf := ctx.Arg(4)
-		val := getLocaleInfoValue(lctype)
-		n := writeLocaleInfoW(buf, cchBuf, val)
-		ctx.SetReturn(uint64(n))
+		val, ok := getLocaleInfoValue(lctype)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(uint64(writeLocaleInfoW(buf, cchBuf, val)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CompareStringEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -4658,22 +5025,8 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		cch1 := int32(ctx.Arg(3))
 		s2Ptr := ctx.Arg(4)
 		cch2 := int32(ctx.Arg(5))
-		readW := func(ptr uint64, cch int32) string {
-			if ptr == 0 {
-				return ""
-			}
-			if cch == -1 {
-				return readGuestUTF16(ptr)
-			}
-			data := make([]uint16, cch)
-			for i := 0; i < int(cch); i++ {
-				w, _ := mem.Read16(ptr + uint64(i)*2)
-				data[i] = w
-			}
-			return string(utf16.Decode(data))
-		}
-		s1 := readW(s1Ptr, cch1)
-		s2 := readW(s2Ptr, cch2)
+		s1 := readWideStringArg(s1Ptr, cch1)
+		s2 := readWideStringArg(s2Ptr, cch2)
 		if dwFlags&1 != 0 { // NORM_IGNORECASE
 			s1 = strings.ToLower(s1)
 			s2 = strings.ToLower(s2)
@@ -4693,22 +5046,8 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		cch1 := int32(ctx.Arg(3))
 		s2Ptr := ctx.Arg(4)
 		cch2 := int32(ctx.Arg(5))
-		readW := func(ptr uint64, cch int32) string {
-			if ptr == 0 {
-				return ""
-			}
-			if cch == -1 {
-				return readGuestUTF16(ptr)
-			}
-			data := make([]uint16, cch)
-			for i := 0; i < int(cch); i++ {
-				w, _ := mem.Read16(ptr + uint64(i)*2)
-				data[i] = w
-			}
-			return string(utf16.Decode(data))
-		}
-		s1 := readW(s1Ptr, cch1)
-		s2 := readW(s2Ptr, cch2)
+		s1 := readWideStringArg(s1Ptr, cch1)
+		s2 := readWideStringArg(s2Ptr, cch2)
 		if dwFlags&1 != 0 {
 			s1 = strings.ToLower(s1)
 			s2 = strings.ToLower(s2)
@@ -4723,7 +5062,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetUserDefaultLCID", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetUserDefaultLCID", 0, uint64(0x0409))
+		return runKernel32TrivialHandler(ctx, "GetUserDefaultLCID", 0, uint64(defaultLocaleLCID))
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsValidLocale", func(ctx *ntapi.TrapContext) uint32 {
 		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
@@ -4759,7 +5098,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "EnumSystemLocalesW", 2, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetOEMCP", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetOEMCP", 8, 437)
+		return runKernel32TrivialHandler(ctx, "GetOEMCP", 8, uint64(defaultOEMCodePage))
 	})
 	// --- Time functions ---
 	d.RegisterAutoStubHandler(kernel32, "GetTimeZoneInformation", func(ctx *ntapi.TrapContext) uint32 {
@@ -5121,6 +5460,47 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			// No handler found - log and continue (best effort)
 			ravelog.Logf("[win32] RaiseException: C++ exception (0xe06d7363) - no SEH handler, continuing\n")
 			return 0
+		}
+		exceptionRecordAddr := mem.Mmap(0, 0x100, mmu.PermRead|mmu.PermWrite)
+		contextRecordAddr := mem.Mmap(0, 1232, mmu.PermRead|mmu.PermWrite)
+		mem.Write32(exceptionRecordAddr+0x00, uint32(code))
+		mem.Write32(exceptionRecordAddr+0x04, uint32(flags))
+		mem.Write64(exceptionRecordAddr+0x08, 0)
+		mem.Write64(exceptionRecordAddr+0x10, ctx.CPU.GetPC())
+		nParams := uint32(ctx.Arg(2))
+		if nParams > 15 {
+			nParams = 15
+		}
+		mem.Write32(exceptionRecordAddr+0x18, nParams)
+		if pArgs := ctx.Arg(3); pArgs != 0 {
+			for i := uint32(0); i < nParams; i++ {
+				v, _ := mem.Read64(pArgs + uint64(i)*8)
+				mem.Write64(exceptionRecordAddr+0x20+uint64(i)*8, v)
+			}
+		}
+		if cm, ok := ctx.CPU.(ntapi.ContextMarshaler); ok {
+			_ = cm.SaveContext(mem, contextRecordAddr)
+		}
+		handled, _ := ntapi.DispatchException(ctx.Mem, exceptionRecordAddr, contextRecordAddr, func(addr uint64, args []uint64) (uint64, error) {
+			return callGuest(ctx, addr, args)
+		}, ctx.Trace)
+		if handled {
+			if cm, ok := ctx.CPU.(ntapi.ContextMarshaler); ok {
+				_ = cm.RestoreContext(mem, contextRecordAddr)
+			}
+			return 0
+		}
+		if procState.UnhandledExceptionFilter != 0 {
+			exceptionPointersAddr := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+			mem.Write64(exceptionPointersAddr+0, exceptionRecordAddr)
+			mem.Write64(exceptionPointersAddr+8, contextRecordAddr)
+			ret, err := callGuest(ctx, procState.UnhandledExceptionFilter, []uint64{exceptionPointersAddr})
+			if err == nil && uint32(ret) == ntapi.ExceptionContinueExecution {
+				if cm, ok := ctx.CPU.(ntapi.ContextMarshaler); ok {
+					_ = cm.RestoreContext(mem, contextRecordAddr)
+				}
+				return 0
+			}
 		}
 		fmt.Fprintf(os.Stderr, "govm: RaiseException code=0x%x flags=0x%x - aborting\n", code, flags)
 		os.Exit(1)
@@ -8102,88 +8482,21 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "GetBinaryTypeW", 2, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetCPInfoExA", func(ctx *ntapi.TrapContext) uint32 {
-		codePage := ctx.Arg(0)
+		codePage := uint32(ctx.Arg(0))
 		lpCPInfoEx := ctx.Arg(2)
-		if lpCPInfoEx == 0 {
+		if !writeCPInfoExAData(lpCPInfoEx, codePage) {
 			ctx.SetReturn(0)
 			return 0
-		}
-		var maxCharSize uint32
-		var cpName string
-		var cp uint32
-		switch codePage {
-		case 65001:
-			maxCharSize = 4
-			cpName = "65001 (UTF-8)"
-			cp = 65001
-		case 1252:
-			maxCharSize = 1
-			cpName = "1252 (ANSI - Latin I)"
-			cp = 1252
-		default:
-			maxCharSize = 1
-			cpName = fmt.Sprintf("%d (Unknown)", codePage)
-			cp = uint32(codePage)
-		}
-		ctx.Mem.Write32(lpCPInfoEx, maxCharSize)
-		ctx.Mem.Write8(lpCPInfoEx+4, 0x3F) // DefaultChar[0] = '?'
-		ctx.Mem.Write8(lpCPInfoEx+5, 0)
-		for i := uint64(0); i < 12; i++ {
-			ctx.Mem.Write8(lpCPInfoEx+6+i, 0)
-		}
-		ctx.Mem.Write16(lpCPInfoEx+18, 0x003F) // UnicodeDefaultChar
-		ctx.Mem.Write32(lpCPInfoEx+20, cp)
-		for i := 0; i < len(cpName) && i < 260; i++ {
-			ctx.Mem.Write8(lpCPInfoEx+24+uint64(i), cpName[i])
-		}
-		if len(cpName) < 260 {
-			ctx.Mem.Write8(lpCPInfoEx+24+uint64(len(cpName)), 0)
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetCPInfoExW", func(ctx *ntapi.TrapContext) uint32 {
-		codePage := ctx.Arg(0)
-		// dwFlags = ctx.Arg(1) (ignored)
+		codePage := uint32(ctx.Arg(0))
 		lpCPInfoEx := ctx.Arg(2)
-		if lpCPInfoEx == 0 {
+		if !writeCPInfoExWData(lpCPInfoEx, codePage) {
 			ctx.SetReturn(0)
 			return 0
-		}
-		var maxCharSize uint32
-		var cpName string
-		var cp uint32
-		switch codePage {
-		case 65001: // CP_UTF8
-			maxCharSize = 4
-			cpName = "65001 (UTF-8)"
-			cp = 65001
-		case 1252:
-			maxCharSize = 1
-			cpName = "1252 (ANSI - Latin I)"
-			cp = 1252
-		default:
-			maxCharSize = 1
-			cpName = fmt.Sprintf("%d (Unknown)", codePage)
-			cp = uint32(codePage)
-		}
-		ctx.Mem.Write32(lpCPInfoEx, maxCharSize) // MaxCharSize
-		ctx.Mem.Write8(lpCPInfoEx+4, 0x3F)       // DefaultChar[0] = '?'
-		ctx.Mem.Write8(lpCPInfoEx+5, 0)          // DefaultChar[1]
-		for i := uint64(0); i < 12; i++ {
-			ctx.Mem.Write8(lpCPInfoEx+6+i, 0) // LeadByte = all zeros
-		}
-		ctx.Mem.Write16(lpCPInfoEx+18, 0x003F) // UnicodeDefaultChar = '?'
-		ctx.Mem.Write32(lpCPInfoEx+20, cp)     // CodePage
-		nameW := utf16Encode(cpName)
-		for i, w := range nameW {
-			if i >= 260 {
-				break
-			}
-			ctx.Mem.Write16(lpCPInfoEx+24+uint64(i)*2, w)
-		}
-		if len(nameW) < 260 {
-			ctx.Mem.Write16(lpCPInfoEx+24+uint64(len(nameW))*2, 0) // null-terminate
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -9303,27 +9616,20 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetNLSVersion", func(ctx *ntapi.TrapContext) uint32 {
-		// function = Arg(0), lpLocaleName = Arg(1)
 		lpVersionInfo := ctx.Arg(2)
-		if lpVersionInfo == 0 {
+		if !writeNLSVersionInfoData(lpVersionInfo, false) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		ctx.Mem.Write32(lpVersionInfo+4, 0x00060201) // dwNLSVersion
-		ctx.Mem.Write32(lpVersionInfo+8, 0x00060201) // dwDefinedVersion
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetNLSVersionEx", func(ctx *ntapi.TrapContext) uint32 {
-		// function = Arg(0), lpLocaleName = Arg(1)
 		lpVersionInfo := ctx.Arg(2)
-		if lpVersionInfo == 0 {
+		if !writeNLSVersionInfoData(lpVersionInfo, true) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		ctx.Mem.Write32(lpVersionInfo+4, 0x00060201) // dwNLSVersion
-		ctx.Mem.Write32(lpVersionInfo+8, 0x00060201) // dwDefinedVersion
-		ctx.Mem.Write32(lpVersionInfo+12, 0x0409)    // dwEffectiveId (en-US)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9898,32 +10204,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "GetSystemDEPPolicy", 4, 3)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetSystemDefaultLCID", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetSystemDefaultLCID", 0, uint64(0x0409))
+		return runKernel32TrivialHandler(ctx, "GetSystemDefaultLCID", 0, uint64(defaultLocaleLCID))
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetSystemDefaultLangID", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetSystemDefaultLangID", 0, uint64(0x0409))
+		return runKernel32TrivialHandler(ctx, "GetSystemDefaultLangID", 0, uint64(defaultLocaleLCID))
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetSystemDefaultLocaleName", func(ctx *ntapi.TrapContext) uint32 {
-		buf := ctx.Arg(0)
-		cch := ctx.Arg(1)
-		ws := utf16Encode("en-US")
-		n := uint64(len(ws) + 1)
-		if buf != 0 && cch > 0 {
-			if n > cch {
-				n = cch
-			}
-			for i, w := range ws {
-				if uint64(i) < n-1 {
-					ctx.Mem.Write16(buf+uint64(i)*2, w)
-				}
-			}
-			ctx.Mem.Write16(buf+(n-1)*2, 0)
-		}
-		ctx.SetReturn(n)
+		ctx.SetReturn(writeUTF16StringCount(ctx.Arg(0), defaultLocaleName, ctx.Arg(1)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetSystemDefaultUILanguage", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetSystemDefaultUILanguage", 0, uint64(0x0409))
+		return runKernel32TrivialHandler(ctx, "GetSystemDefaultUILanguage", 0, uint64(defaultLocaleLCID))
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetSystemDirectoryA", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(0)
@@ -10245,7 +10536,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetThreadLocale", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetThreadLocale", 0, uint64(0x0409))
+		threadLocaleMu.Lock()
+		locale := threadLocale
+		threadLocaleMu.Unlock()
+		ctx.SetReturn(uint64(locale))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetThreadPreferredUILanguages", func(ctx *ntapi.TrapContext) uint32 {
 		dwFlags := ctx.Arg(0)
@@ -10309,7 +10604,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetThreadUILanguage", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetThreadUILanguage", 0, uint64(0x0409))
+		return runKernel32TrivialHandler(ctx, "GetThreadUILanguage", 0, uint64(defaultLocaleLCID))
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetTickCount64", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "GetTickCount64", 0, uint64(uint64(time.Since(startTime).Milliseconds())))
@@ -10345,29 +10640,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetUserDefaultLangID", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetUserDefaultLangID", 0, uint64(0x0409))
+		return runKernel32TrivialHandler(ctx, "GetUserDefaultLangID", 0, uint64(defaultLocaleLCID))
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetUserDefaultLocaleName", func(ctx *ntapi.TrapContext) uint32 {
-		buf := ctx.Arg(0)
-		cch := ctx.Arg(1)
-		ws := utf16Encode("en-US")
-		n := uint64(len(ws) + 1)
-		if buf != 0 && cch > 0 {
-			if n > cch {
-				n = cch
-			}
-			for i, w := range ws {
-				if uint64(i) < n-1 {
-					ctx.Mem.Write16(buf+uint64(i)*2, w)
-				}
-			}
-			ctx.Mem.Write16(buf+(n-1)*2, 0)
-		}
-		ctx.SetReturn(n)
+		ctx.SetReturn(writeUTF16StringCount(ctx.Arg(0), defaultLocaleName, ctx.Arg(1)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetUserDefaultUILanguage", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetUserDefaultUILanguage", 0, uint64(0x0409))
+		return runKernel32TrivialHandler(ctx, "GetUserDefaultUILanguage", 0, uint64(defaultLocaleLCID))
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetUserGeoID", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "GetUserGeoID", 1, 1)
@@ -10906,13 +11186,22 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "IsBadWritePtr", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsDBCSLeadByte", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "IsDBCSLeadByte", 8, 0)
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsDBCSLeadByteEx", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "IsDBCSLeadByteEx", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsNLSDefinedString", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "IsNLSDefinedString", 5, 1)
+		src := readWideStringArg(ctx.Arg(3), int32(ctx.Arg(4)))
+		for _, r := range src {
+			if !isCommonNLSRune(r) {
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsNormalizedString", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "IsNormalizedString", 3, 1)
@@ -11050,61 +11339,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "K32QueryWorkingSetEx", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "LCIDToLocaleName", func(ctx *ntapi.TrapContext) uint32 {
-		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
-		lcid := uint32(ctx.Arg(0))
-		buf := ctx.Arg(1)
-		cch := ctx.Arg(2)
-		var name string
-		switch lcid {
-		case 0x0409, 0x0000, 0x0400, 0x0800: // en-US, NEUTRAL, USER_DEFAULT, SYSTEM_DEFAULT
-			name = "en-US"
-		case 0x0809:
-			name = "en-GB"
-		case 0x0C09:
-			name = "en-AU"
-		case 0x1009:
-			name = "en-CA"
-		case 0x0009:
-			name = "en"
-		case 0x007F: // LOCALE_INVARIANT
-			name = ""
-		case 0x0407:
-			name = "de-DE"
-		case 0x040C:
-			name = "fr-FR"
-		case 0x0410:
-			name = "it-IT"
-		case 0x0411:
-			name = "ja-JP"
-		case 0x0412:
-			name = "ko-KR"
-		case 0x0804:
-			name = "zh-CN"
-		case 0x0404:
-			name = "zh-TW"
-		case 0x0416:
-			name = "pt-BR"
-		case 0x0C0A:
-			name = "es-ES"
-		case 0x0419:
-			name = "ru-RU"
-		default:
-			name = "en-US"
-		}
-		ws := utf16Encode(name)
-		n := uint64(len(ws) + 1)
-		if buf != 0 && cch > 0 {
-			if n > cch {
-				n = cch
-			}
-			for i, w := range ws {
-				if uint64(i) < n-1 {
-					ctx.Mem.Write16(buf+uint64(i)*2, w)
-				}
-			}
-			ctx.Mem.Write16(buf+(n-1)*2, 0)
-		}
-		ctx.SetReturn(n - 1) // returns char count without null
+		ctx.SetReturn(writeUTF16StringCount(ctx.Arg(1), lcidToLocaleNameValue(uint32(ctx.Arg(0))), ctx.Arg(2)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "LZClose", func(ctx *ntapi.TrapContext) uint32 {
@@ -11236,44 +11471,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "LocalUnlock", 8, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "LocaleNameToLCID", func(ctx *ntapi.TrapContext) uint32 {
-		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
-		name := readGuestUTF16(ctx.Arg(0))
-		switch strings.ToLower(name) {
-		case "en-us":
-			ctx.SetReturn(0x0409)
-		case "en-gb":
-			ctx.SetReturn(0x0809)
-		case "en-au":
-			ctx.SetReturn(0x0C09)
-		case "en-ca":
-			ctx.SetReturn(0x1009)
-		case "en":
-			ctx.SetReturn(0x0009)
-		case "de-de":
-			ctx.SetReturn(0x0407)
-		case "fr-fr":
-			ctx.SetReturn(0x040C)
-		case "it-it":
-			ctx.SetReturn(0x0410)
-		case "ja-jp":
-			ctx.SetReturn(0x0411)
-		case "ko-kr":
-			ctx.SetReturn(0x0412)
-		case "zh-cn":
-			ctx.SetReturn(0x0804)
-		case "zh-tw":
-			ctx.SetReturn(0x0404)
-		case "pt-br":
-			ctx.SetReturn(0x0416)
-		case "es-es":
-			ctx.SetReturn(0x0C0A)
-		case "ru-ru":
-			ctx.SetReturn(0x0419)
-		case "": // LOCALE_NAME_USER_DEFAULT
-			ctx.SetReturn(0x0409)
-		default:
-			ctx.SetReturn(0x0409) // fallback to en-US
-		}
+		ctx.SetReturn(uint64(localeNameToLCIDValue(readGuestUTF16(ctx.Arg(0)))))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "LocateXStateFeature", func(ctx *ntapi.TrapContext) uint32 {
@@ -12971,34 +13169,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "ResizePseudoConsole", 4, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "ResolveLocaleName", func(ctx *ntapi.TrapContext) uint32 {
-		// ReactOS: dll/win32/kernel32/winnls/string/locale.c
-		// Resolves a locale name to a valid one; unknown names resolve to "en-US"
-		name := readGuestUTF16(ctx.Arg(0))
-		buf := ctx.Arg(1)
-		cch := ctx.Arg(2)
-		resolved := name
-		switch strings.ToLower(name) {
-		case "en-us", "en-gb", "en-au", "en-ca", "en",
-			"de-de", "fr-fr", "it-it", "ja-jp", "ko-kr",
-			"zh-cn", "zh-tw", "pt-br", "es-es", "ru-ru":
-			// keep as-is
-		default:
-			resolved = "en-US"
-		}
-		ws := utf16Encode(resolved)
-		if buf != 0 && cch > 0 {
-			n := uint64(len(ws))
-			if n >= cch {
-				n = cch - 1
-			}
-			for i := uint64(0); i < n; i++ {
-				ctx.Mem.Write16(buf+i*2, ws[i])
-			}
-			ctx.Mem.Write16(buf+n*2, 0)
-			ctx.SetReturn(n + 1)
-		} else {
-			ctx.SetReturn(uint64(len(ws) + 1))
-		}
+		ctx.SetReturn(writeUTF16StringCount(ctx.Arg(1), resolveLocaleNameValue(readGuestUTF16(ctx.Arg(0))), ctx.Arg(2)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "RestoreLastError", func(ctx *ntapi.TrapContext) uint32 {
@@ -13821,7 +13992,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "SetThreadInformation", 4, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadLocale", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "SetThreadLocale", 1, 1)
+		threadLocaleMu.Lock()
+		threadLocale = uint32(ctx.Arg(0))
+		threadLocaleMu.Unlock()
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadPreferredUILanguages", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "SetThreadPreferredUILanguages", 8, 1)
@@ -15144,7 +15319,62 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "_DebugPrintf", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "__C_specific_handler", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "__C_specific_handler", 8, 0)
+		exceptionRecord := ctx.Arg(0)
+		dispatcherContext, err := ntapi.ReadDispatcherContext(ctx.Mem, ctx.Arg(3))
+		if err != nil || dispatcherContext == nil || dispatcherContext.HandlerData == 0 {
+			ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
+			return 0
+		}
+		controlRVA := uint32(0)
+		if dispatcherContext.ControlPc >= dispatcherContext.ImageBase {
+			controlRVA = uint32(dispatcherContext.ControlPc - dispatcherContext.ImageBase)
+		}
+		scopeCount, _ := ctx.Mem.Read32(dispatcherContext.HandlerData)
+		for i := uint32(0); i < scopeCount; i++ {
+			recordAddr := dispatcherContext.HandlerData + 4 + uint64(i)*16
+			beginRVA, _ := ctx.Mem.Read32(recordAddr)
+			endRVA, _ := ctx.Mem.Read32(recordAddr + 4)
+			handlerRVA, _ := ctx.Mem.Read32(recordAddr + 8)
+			jumpTarget, _ := ctx.Mem.Read32(recordAddr + 12)
+			if controlRVA < beginRVA || controlRVA >= endRVA || jumpTarget == 0 {
+				continue
+			}
+			filterResult := uint32(ntapi.ExceptionContinueSearch)
+			switch handlerRVA {
+			case 0:
+				filterResult = ntapi.ExceptionContinueSearch
+			case 1:
+				filterResult = ntapi.ExceptionExecuteHandler
+			default:
+				exceptionPointersAddr := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+				mem.Write64(exceptionPointersAddr+0, exceptionRecord)
+				mem.Write64(exceptionPointersAddr+8, dispatcherContext.ContextRecord)
+				ret, err := callGuest(ctx, dispatcherContext.ImageBase+uint64(handlerRVA), []uint64{exceptionPointersAddr})
+				if err == nil {
+					filterResult = uint32(ret)
+				}
+			}
+			if filterResult == ntapi.ExceptionContinueExecution {
+				ctx.SetReturn(ntapi.ExceptionDispositionContinueExecution)
+				return 0
+			}
+			if filterResult != ntapi.ExceptionExecuteHandler {
+				continue
+			}
+			contextRecord, err := ntapi.ReadAMD64Context(ctx.Mem, dispatcherContext.ContextRecord)
+			if err != nil {
+				break
+			}
+			dispatcherContext.TargetIp = dispatcherContext.ImageBase + uint64(jumpTarget)
+			_ = ntapi.WriteDispatcherContext(ctx.Mem, ctx.Arg(3), dispatcherContext)
+			contextRecord.Rip = dispatcherContext.TargetIp
+			contextRecord.Regs[4] = dispatcherContext.EstablisherFrame
+			_ = ntapi.WriteAMD64Context(ctx.Mem, dispatcherContext.ContextRecord, contextRecord)
+			ctx.SetReturn(ntapi.ExceptionDispositionContinueExecution)
+			return 0
+		}
+		ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "__chkstk", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "__chkstk", 8, 0)
