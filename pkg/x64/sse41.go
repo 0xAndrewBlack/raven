@@ -30,6 +30,16 @@ func (c *CPU) loadXMM128(pfx *prefixState) (dst int, src [2]uint64, err error) {
 	return dst, src, nil
 }
 
+func satSigned16(v int32) int16 {
+	if v < -32768 {
+		return -32768
+	}
+	if v > 32767 {
+		return 32767
+	}
+	return int16(v)
+}
+
 // dispatch0F38 handles the 66 0F 38 xx family (SSE4.1 integer ops).
 func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 	op3, err := c.fetch8()
@@ -68,6 +78,292 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 					r[1] |= uint64(sb) << (uint(i-8) * 8)
 				}
 			}
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PHADDW xmm1, xmm2/m128 (0F 38 01)
+	case 0x01:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 2; i++ {
+			base := i * 32
+			v := uint16(int16(d[0]>>base) + int16(d[0]>>(base+16)))
+			r[0] |= uint64(v) << (i * 16)
+			v = uint16(int16(d[1]>>base) + int16(d[1]>>(base+16)))
+			r[0] |= uint64(v) << ((i + 2) * 16)
+			v = uint16(int16(src[0]>>base) + int16(src[0]>>(base+16)))
+			r[1] |= uint64(v) << (i * 16)
+			v = uint16(int16(src[1]>>base) + int16(src[1]>>(base+16)))
+			r[1] |= uint64(v) << ((i + 2) * 16)
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PHADDD xmm1, xmm2/m128 (0F 38 02)
+	case 0x02:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		c.XMM[dst] = [2]uint64{
+			uint64(uint32(int32(d[0])+int32(d[0]>>32))) |
+				(uint64(uint32(int32(d[1])+int32(d[1]>>32))) << 32),
+			uint64(uint32(int32(src[0])+int32(src[0]>>32))) |
+				(uint64(uint32(int32(src[1])+int32(src[1]>>32))) << 32),
+		}
+		return nil
+
+	// PHADDSW xmm1, xmm2/m128 (0F 38 03)
+	case 0x03:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 2; i++ {
+			base := i * 32
+			v := satSigned16(int32(int16(d[0]>>base)) + int32(int16(d[0]>>(base+16))))
+			r[0] |= uint64(uint16(v)) << (i * 16)
+			v = satSigned16(int32(int16(d[1]>>base)) + int32(int16(d[1]>>(base+16))))
+			r[0] |= uint64(uint16(v)) << ((i + 2) * 16)
+			v = satSigned16(int32(int16(src[0]>>base)) + int32(int16(src[0]>>(base+16))))
+			r[1] |= uint64(uint16(v)) << (i * 16)
+			v = satSigned16(int32(int16(src[1]>>base)) + int32(int16(src[1]>>(base+16))))
+			r[1] |= uint64(uint16(v)) << ((i + 2) * 16)
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PMADDUBSW xmm1, xmm2/m128 (0F 38 04)
+	case 0x04:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 4; i++ {
+			base := i * 16
+			sum := int32(uint8(d[0]>>base))*int32(int8(src[0]>>base)) +
+				int32(uint8(d[0]>>(base+8)))*int32(int8(src[0]>>(base+8)))
+			r[0] |= uint64(uint16(satSigned16(sum))) << base
+			sum = int32(uint8(d[1]>>base))*int32(int8(src[1]>>base)) +
+				int32(uint8(d[1]>>(base+8)))*int32(int8(src[1]>>(base+8)))
+			r[1] |= uint64(uint16(satSigned16(sum))) << base
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PHSUBW xmm1, xmm2/m128 (0F 38 05)
+	case 0x05:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 2; i++ {
+			base := i * 32
+			v := uint16(int16(d[0]>>base) - int16(d[0]>>(base+16)))
+			r[0] |= uint64(v) << (i * 16)
+			v = uint16(int16(d[1]>>base) - int16(d[1]>>(base+16)))
+			r[0] |= uint64(v) << ((i + 2) * 16)
+			v = uint16(int16(src[0]>>base) - int16(src[0]>>(base+16)))
+			r[1] |= uint64(v) << (i * 16)
+			v = uint16(int16(src[1]>>base) - int16(src[1]>>(base+16)))
+			r[1] |= uint64(v) << ((i + 2) * 16)
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PHSUBD xmm1, xmm2/m128 (0F 38 06)
+	case 0x06:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		c.XMM[dst] = [2]uint64{
+			uint64(uint32(int32(d[0])-int32(d[0]>>32))) |
+				(uint64(uint32(int32(d[1])-int32(d[1]>>32))) << 32),
+			uint64(uint32(int32(src[0])-int32(src[0]>>32))) |
+				(uint64(uint32(int32(src[1])-int32(src[1]>>32))) << 32),
+		}
+		return nil
+
+	// PHSUBSW xmm1, xmm2/m128 (0F 38 07)
+	case 0x07:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 2; i++ {
+			base := i * 32
+			v := satSigned16(int32(int16(d[0]>>base)) - int32(int16(d[0]>>(base+16))))
+			r[0] |= uint64(uint16(v)) << (i * 16)
+			v = satSigned16(int32(int16(d[1]>>base)) - int32(int16(d[1]>>(base+16))))
+			r[0] |= uint64(uint16(v)) << ((i + 2) * 16)
+			v = satSigned16(int32(int16(src[0]>>base)) - int32(int16(src[0]>>(base+16))))
+			r[1] |= uint64(uint16(v)) << (i * 16)
+			v = satSigned16(int32(int16(src[1]>>base)) - int32(int16(src[1]>>(base+16))))
+			r[1] |= uint64(uint16(v)) << ((i + 2) * 16)
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PSIGNB xmm1, xmm2/m128 (0F 38 08)
+	case 0x08:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 16; i++ {
+			half, shift := i/8, (i%8)*8
+			dv := int8(d[half] >> shift)
+			sv := int8(src[half] >> shift)
+			var out int8
+			if sv < 0 {
+				out = -dv
+			} else if sv > 0 {
+				out = dv
+			}
+			r[half] |= uint64(uint8(out)) << shift
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PSIGNW xmm1, xmm2/m128 (0F 38 09)
+	case 0x09:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 8; i++ {
+			half, shift := i/4, (i%4)*16
+			dv := int16(d[half] >> shift)
+			sv := int16(src[half] >> shift)
+			var out int16
+			if sv < 0 {
+				out = -dv
+			} else if sv > 0 {
+				out = dv
+			}
+			r[half] |= uint64(uint16(out)) << shift
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PSIGND xmm1, xmm2/m128 (0F 38 0A)
+	case 0x0A:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 4; i++ {
+			half, shift := i/2, (i%2)*32
+			dv := int32(d[half] >> shift)
+			sv := int32(src[half] >> shift)
+			var out int32
+			if sv < 0 {
+				out = -dv
+			} else if sv > 0 {
+				out = dv
+			}
+			r[half] |= uint64(uint32(out)) << shift
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PMULHRSW xmm1, xmm2/m128 (0F 38 0B)
+	case 0x0B:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		d := c.XMM[dst]
+		var r [2]uint64
+		for i := uint(0); i < 8; i++ {
+			half, shift := i/4, (i%4)*16
+			prod := int32(int16(d[half]>>shift)) * int32(int16(src[half]>>shift))
+			r[half] |= uint64(uint16(int16((prod+0x4000)>>15))) << shift
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PABSB xmm1, xmm2/m128 (0F 38 1C)
+	case 0x1C:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		var r [2]uint64
+		for i := uint(0); i < 16; i++ {
+			half, shift := i/8, (i%8)*8
+			v := int8(src[half] >> shift)
+			var out uint8
+			if v < 0 {
+				out = uint8(-int16(v))
+			} else {
+				out = uint8(v)
+			}
+			r[half] |= uint64(out) << shift
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PABSW xmm1, xmm2/m128 (0F 38 1D)
+	case 0x1D:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		var r [2]uint64
+		for i := uint(0); i < 8; i++ {
+			half, shift := i/4, (i%4)*16
+			v := int16(src[half] >> shift)
+			var out uint16
+			if v < 0 {
+				out = uint16(-int32(v))
+			} else {
+				out = uint16(v)
+			}
+			r[half] |= uint64(out) << shift
+		}
+		c.XMM[dst] = r
+		return nil
+
+	// PABSD xmm1, xmm2/m128 (0F 38 1E)
+	case 0x1E:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		var r [2]uint64
+		for i := uint(0); i < 4; i++ {
+			half, shift := i/2, (i%2)*32
+			v := int32(src[half] >> shift)
+			var out uint32
+			if v < 0 {
+				out = uint32(-int64(v))
+			} else {
+				out = uint32(v)
+			}
+			r[half] |= uint64(out) << shift
 		}
 		c.XMM[dst] = r
 		return nil
@@ -429,6 +725,51 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 			}
 		}
 		c.XMM[dst] = [2]uint64{uint64(minVal) | (uint64(minIdx) << 16), 0}
+		return nil
+
+	// AESIMC xmm1, xmm2/m128 (0F 38 DB)
+	case 0xDB:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		c.XMM[dst] = c.aesInvMixColumns(src)
+		return nil
+
+	// AESENC xmm1, xmm2/m128 (0F 38 DC)
+	case 0xDC:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		c.XMM[dst] = c.aesEncRound(c.XMM[dst], src)
+		return nil
+
+	// AESENCLAST xmm1, xmm2/m128 (0F 38 DD)
+	case 0xDD:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		c.XMM[dst] = c.aesEncLastRound(c.XMM[dst], src)
+		return nil
+
+	// AESDEC xmm1, xmm2/m128 (0F 38 DE)
+	case 0xDE:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		c.XMM[dst] = c.aesDecRound(c.XMM[dst], src)
+		return nil
+
+	// AESDECLAST xmm1, xmm2/m128 (0F 38 DF)
+	case 0xDF:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		c.XMM[dst] = c.aesDecLastRound(c.XMM[dst], src)
 		return nil
 
 	default:
@@ -877,7 +1218,7 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		srcOff := uint((imm & 0x04) >> 2) * 4
+		srcOff := uint((imm&0x04)>>2) * 4
 		dstOff := uint((imm & 0x03)) * 4
 		var r [2]uint64
 		for i := uint(0); i < 8; i++ {
@@ -930,6 +1271,19 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		b := src[(imm>>4)&1]
 		lo, hi := clmul64(a, b)
 		c.XMM[m.reg] = [2]uint64{lo, hi}
+		return nil
+
+	// AESKEYGENASSIST xmm1, xmm2/m128, imm8 (0F 3A DF)
+	case 0xDF:
+		dst, src, err := c.loadXMM128(pfx)
+		if err != nil {
+			return err
+		}
+		imm, err := c.fetch8()
+		if err != nil {
+			return err
+		}
+		c.XMM[dst] = c.aesKeyGenAssist(src, imm)
 		return nil
 
 	// PCMPESTRM xmm1, xmm2/m128, imm8 (0F 3A 60) - explicit-length string compare to mask
