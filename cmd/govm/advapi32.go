@@ -1,10 +1,17 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/des"
 	"crypto/hmac"
 	"crypto/md5"
+	cryptorand "crypto/rand"
+	"crypto/rc4"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/binary"
 	"fmt"
 	"hash"
 	"strings"
@@ -13,7 +20,6 @@ import (
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
-	"golang.org/x/sys/unix"
 )
 
 func registerAdvapi32Handlers1(hctx *HandlerCtx) {
@@ -441,61 +447,330 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 		}
 		return 0
 	})
-	// CryptAcquireContextW: acquire a CSP handle
-	d.RegisterAutoStubHandler(advapi32, "CryptAcquireContextW", func(ctx *ntapi.TrapContext) uint32 {
-		phProv := ctx.Arg(0)
-		if phProv != 0 {
-			ctx.Mem.Write64(phProv, 0xC0DE1234)
-		}
-		ctx.SetReturn(1) // TRUE
-		return 0
-	})
-	d.RegisterAutoStubHandler(advapi32, "CryptAcquireContextA", func(ctx *ntapi.TrapContext) uint32 {
-		phProv := ctx.Arg(0)
-		if phProv != 0 {
-			ctx.Mem.Write64(phProv, 0xC0DE1234)
-		}
-		ctx.SetReturn(1) // TRUE
-		return 0
-	})
-	// CryptCreateHash, CryptHashData, CryptGetHashParam, CryptDestroyHash, CryptReleaseContext
-	// Real hash implementations using Go standard library
+	type cryptProviderState struct {
+		container string
+		provider  string
+		provType  uint32
+		flags     uint32
+	}
 	type cryptHashState struct {
 		h     hash.Hash
 		algID uint32
 	}
+	type cryptKeyState struct {
+		data  []byte
+		algID uint32
+		iv    []byte
+		mode  uint32
+	}
+	const (
+		calgMD2      = 0x8002
+		calgMD5      = 0x8003
+		calgSHA1     = 0x8004
+		calgHMAC     = 0x8009
+		calgSHA256   = 0x800c
+		calgSHA384   = 0x800d
+		calgSHA512   = 0x800e
+		calgRC4      = 0x6801
+		calgDES      = 0x6601
+		calg3DES     = 0x6603
+		calgAES128   = 0x660e
+		calgAES192   = 0x660f
+		calgAES256   = 0x6610
+		calgAES      = 0x6611
+		hpAlgID      = 1
+		hpHashVal    = 2
+		hpHashSize   = 4
+		hpHmacInfo   = 5
+		kpIV         = 1
+		kpMode       = 4
+		kpAlgID      = 7
+		kpBlockLen   = 8
+		kpKeyLen     = 9
+		cryptModeCBC = 1
+		cryptModeECB = 2
+	)
+	cryptProviders := map[uint64]*cryptProviderState{}
 	cryptHashes := map[uint64]*cryptHashState{}
+	cryptKeys := map[uint64]*cryptKeyState{}
+	cryptProvMu := sync.Mutex{}
 	cryptHashMu := sync.Mutex{}
+	cryptKeyMu := sync.Mutex{}
+	nextCryptProv := uint64(0xC0010001)
 	nextCryptH := uint64(0xA0010001)
-	d.RegisterAutoStubHandler(advapi32, "CryptCreateHash", func(ctx *ntapi.TrapContext) uint32 {
-		algID := uint32(ctx.Arg(1))
-		phHash := ctx.Arg(3)
-		var h hash.Hash
+	nextCryptKey := uint64(0xB0010001)
+	boolToUint64 := func(v bool) uint64 {
+		if v {
+			return 1
+		}
+		return 0
+	}
+	readCryptoGuestBytes := func(mem *mmu.MMU, ptr, size uint64) ([]byte, bool) {
+		if size == 0 {
+			return []byte{}, true
+		}
+		if ptr == 0 || size > uint64(^uint(0)>>1) {
+			return nil, false
+		}
+		data, err := mem.ReadBytes(ptr, int(size))
+		if err != nil {
+			return nil, false
+		}
+		return data, true
+	}
+	hashFactoryFromAlgID := func(algID uint32) (func() hash.Hash, bool) {
 		switch algID {
-		case 0x8003:
-			h = md5.New() // CALG_MD5
-		case 0x8004:
-			h = sha1.New() // CALG_SHA1
-		case 0x800c:
-			h = sha256.New() // CALG_SHA_256
-		case 0x800d:
-			h = sha256.New() // CALG_SHA_384 (use sha256 as fallback)
-		case 0x800e:
-			h = sha256.New() // CALG_SHA_512 (use sha256 as fallback)
-		case 0x8002:
-			h = md5.New() // CALG_MD2 (use md5)
+		case calgMD2, calgMD5:
+			return md5.New, true
+		case calgSHA1, calgHMAC:
+			return sha1.New, true
+		case calgSHA256:
+			return sha256.New, true
+		case calgSHA384:
+			return sha512.New384, true
+		case calgSHA512:
+			return sha512.New, true
 		default:
-			h = sha1.New() // fallback
+			return nil, false
+		}
+	}
+	defaultKeyLength := func(algID uint32) int {
+		switch algID {
+		case calgRC4:
+			return 16
+		case calgDES:
+			return 8
+		case calg3DES:
+			return 24
+		case calgAES128:
+			return 16
+		case calgAES192:
+			return 24
+		case calgAES256:
+			return 32
+		case calgAES:
+			return 32
+		default:
+			return 16
+		}
+	}
+	blockSizeForAlg := func(algID uint32, key []byte) int {
+		switch algID {
+		case calgDES, calg3DES:
+			return 8
+		case calgAES128, calgAES192, calgAES256, calgAES:
+			if len(key) == 16 || len(key) == 24 || len(key) == 32 {
+				return 16
+			}
+		}
+		return 0
+	}
+	expandKeyMaterial := func(seed []byte, size int) []byte {
+		if len(seed) >= size {
+			return append([]byte(nil), seed[:size]...)
+		}
+		out := append([]byte(nil), seed...)
+		counter := uint32(1)
+		for len(out) < size {
+			block := make([]byte, 4+len(seed))
+			binary.LittleEndian.PutUint32(block, counter)
+			copy(block[4:], seed)
+			sum := sha256.Sum256(block)
+			out = append(out, sum[:]...)
+			counter++
+		}
+		return out[:size]
+	}
+	newBlockCipher := func(algID uint32, key []byte) (cipher.Block, bool) {
+		switch algID {
+		case calgDES:
+			block, err := des.NewCipher(key)
+			return block, err == nil
+		case calg3DES:
+			block, err := des.NewTripleDESCipher(key)
+			return block, err == nil
+		case calgAES128, calgAES192, calgAES256, calgAES:
+			block, err := aes.NewCipher(key)
+			return block, err == nil
+		default:
+			return nil, false
+		}
+	}
+	encryptWithKey := func(ks *cryptKeyState, data []byte, final bool) ([]byte, bool) {
+		if ks == nil {
+			return nil, false
+		}
+		if ks.algID == calgRC4 {
+			stream, err := rc4.NewCipher(ks.data)
+			if err != nil {
+				return nil, false
+			}
+			out := make([]byte, len(data))
+			stream.XORKeyStream(out, data)
+			return out, true
+		}
+		block, ok := newBlockCipher(ks.algID, ks.data)
+		if !ok {
+			return nil, false
+		}
+		blockSize := block.BlockSize()
+		iv := append([]byte(nil), ks.iv...)
+		if len(iv) < blockSize {
+			iv = make([]byte, blockSize)
+		} else {
+			iv = iv[:blockSize]
+		}
+		working := append([]byte(nil), data...)
+		if final {
+			working = pkcs7Pad(working, blockSize)
+		} else if len(working)%blockSize != 0 {
+			return nil, false
+		}
+		out := make([]byte, len(working))
+		if ks.mode == cryptModeECB {
+			for off := 0; off < len(working); off += blockSize {
+				block.Encrypt(out[off:off+blockSize], working[off:off+blockSize])
+			}
+		} else {
+			cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, working)
+			if len(out) >= blockSize {
+				ks.iv = append(ks.iv[:0], out[len(out)-blockSize:]...)
+			}
+		}
+		return out, true
+	}
+	decryptWithKey := func(ks *cryptKeyState, data []byte, final bool) ([]byte, bool) {
+		if ks == nil {
+			return nil, false
+		}
+		if ks.algID == calgRC4 {
+			stream, err := rc4.NewCipher(ks.data)
+			if err != nil {
+				return nil, false
+			}
+			out := make([]byte, len(data))
+			stream.XORKeyStream(out, data)
+			return out, true
+		}
+		block, ok := newBlockCipher(ks.algID, ks.data)
+		if !ok || len(data)%block.BlockSize() != 0 {
+			return nil, false
+		}
+		blockSize := block.BlockSize()
+		iv := append([]byte(nil), ks.iv...)
+		if len(iv) < blockSize {
+			iv = make([]byte, blockSize)
+		} else {
+			iv = iv[:blockSize]
+		}
+		out := make([]byte, len(data))
+		if ks.mode == cryptModeECB {
+			for off := 0; off < len(data); off += blockSize {
+				block.Decrypt(out[off:off+blockSize], data[off:off+blockSize])
+			}
+		} else {
+			cipher.NewCBCDecrypter(block, iv).CryptBlocks(out, data)
+			if len(data) >= blockSize {
+				ks.iv = append(ks.iv[:0], data[len(data)-blockSize:]...)
+			}
+		}
+		if final {
+			unpadded, ok := pkcs7Unpad(out, blockSize)
+			if !ok {
+				return nil, false
+			}
+			out = unpadded
+		}
+		return out, true
+	}
+	writeCryptoParam := func(mem *mmu.MMU, pbData, pdwDataLen uint64, value []byte) bool {
+		if pdwDataLen == 0 {
+			return false
+		}
+		required := uint32(len(value))
+		if pbData == 0 {
+			mem.Write32(pdwDataLen, required)
+			return true
+		}
+		avail, _ := mem.Read32(pdwDataLen)
+		mem.Write32(pdwDataLen, required)
+		if avail < required {
+			return false
+		}
+		mem.WriteBytes(pbData, value)
+		return true
+	}
+	d.RegisterAutoStubHandler(advapi32, "CryptAcquireContextW", func(ctx *ntapi.TrapContext) uint32 {
+		phProv := ctx.Arg(0)
+		if phProv == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		container := readGuestUTF16(ctx.Arg(1))
+		provider := readGuestUTF16(ctx.Arg(2))
+		cryptProvMu.Lock()
+		handle := nextCryptProv
+		nextCryptProv++
+		cryptProviders[handle] = &cryptProviderState{
+			container: container,
+			provider:  provider,
+			provType:  uint32(ctx.Arg(3)),
+			flags:     uint32(ctx.Arg(4)),
+		}
+		cryptProvMu.Unlock()
+		ctx.Mem.Write64(phProv, handle)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptAcquireContextA", func(ctx *ntapi.TrapContext) uint32 {
+		phProv := ctx.Arg(0)
+		if phProv == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		container := readGuestString(ctx.Arg(1))
+		provider := readGuestString(ctx.Arg(2))
+		cryptProvMu.Lock()
+		handle := nextCryptProv
+		nextCryptProv++
+		cryptProviders[handle] = &cryptProviderState{
+			container: container,
+			provider:  provider,
+			provType:  uint32(ctx.Arg(3)),
+			flags:     uint32(ctx.Arg(4)),
+		}
+		cryptProvMu.Unlock()
+		ctx.Mem.Write64(phProv, handle)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptCreateHash", func(ctx *ntapi.TrapContext) uint32 {
+		hProv := ctx.Arg(0)
+		algID := uint32(ctx.Arg(1))
+		phHash := ctx.Arg(4)
+		if phHash == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		cryptProvMu.Lock()
+		_, provOK := cryptProviders[hProv]
+		cryptProvMu.Unlock()
+		if !provOK {
+			ctx.SetReturn(0)
+			return 0
+		}
+		newHash, ok := hashFactoryFromAlgID(algID)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
 		}
 		cryptHashMu.Lock()
 		handle := nextCryptH
 		nextCryptH++
-		cryptHashes[handle] = &cryptHashState{h: h, algID: algID}
+		cryptHashes[handle] = &cryptHashState{h: newHash(), algID: algID}
 		cryptHashMu.Unlock()
-		if phHash != 0 {
-			ctx.Mem.Write64(phHash, handle)
-		}
-		ctx.SetReturn(1) // TRUE
+		ctx.Mem.Write64(phHash, handle)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptHashData", func(ctx *ntapi.TrapContext) uint32 {
@@ -505,16 +780,25 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 		cryptHashMu.Lock()
 		hs := cryptHashes[hHash]
 		cryptHashMu.Unlock()
-		if hs != nil && pbData != 0 && dwLen > 0 {
-			data, _ := ctx.Mem.ReadBytes(pbData, int(dwLen))
-			hs.h.Write(data)
+		if hs == nil {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(1) // TRUE
+		data, ok := readCryptoGuestBytes(ctx.Mem, pbData, dwLen)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if _, err := hs.h.Write(data); err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptGetHashParam", func(ctx *ntapi.TrapContext) uint32 {
 		hHash := ctx.Arg(0)
-		dwParam := ctx.Arg(1)
+		dwParam := uint32(ctx.Arg(1))
 		pbData := ctx.Arg(2)
 		pdwDataLen := ctx.Arg(3)
 		cryptHashMu.Lock()
@@ -524,37 +808,20 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		const HP_HASHVAL = 2
-		const HP_HASHSIZE = 4
-		const HP_ALGID = 1
 		switch dwParam {
-		case HP_ALGID:
-			if pdwDataLen != 0 {
-				ctx.Mem.Write32(pdwDataLen, 4)
-			}
-			if pbData != 0 {
-				ctx.Mem.Write32(pbData, hs.algID)
-			}
-		case HP_HASHSIZE:
-			sz := uint32(hs.h.Size())
-			if pdwDataLen != 0 {
-				ctx.Mem.Write32(pdwDataLen, 4)
-			}
-			if pbData != 0 {
-				ctx.Mem.Write32(pbData, sz)
-			}
-		case HP_HASHVAL:
-			sum := hs.h.Sum(nil)
-			sz := uint32(len(sum))
-			if pdwDataLen != 0 {
-				avail, _ := ctx.Mem.Read32(pdwDataLen)
-				ctx.Mem.Write32(pdwDataLen, sz)
-				if pbData != 0 && avail >= sz {
-					ctx.Mem.WriteBytes(pbData, sum)
-				}
-			}
+		case hpAlgID:
+			buf := make([]byte, 4)
+			binary.LittleEndian.PutUint32(buf, hs.algID)
+			ctx.SetReturn(boolToUint64(writeCryptoParam(ctx.Mem, pbData, pdwDataLen, buf)))
+		case hpHashSize:
+			buf := make([]byte, 4)
+			binary.LittleEndian.PutUint32(buf, uint32(hs.h.Size()))
+			ctx.SetReturn(boolToUint64(writeCryptoParam(ctx.Mem, pbData, pdwDataLen, buf)))
+		case hpHashVal:
+			ctx.SetReturn(boolToUint64(writeCryptoParam(ctx.Mem, pbData, pdwDataLen, hs.h.Sum(nil))))
+		default:
+			ctx.SetReturn(0)
 		}
-		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptDestroyHash", func(ctx *ntapi.TrapContext) uint32 {
@@ -562,73 +829,139 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 		cryptHashMu.Lock()
 		delete(cryptHashes, hHash)
 		cryptHashMu.Unlock()
-		ctx.SetReturn(1) // TRUE
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptHashSessionKey", func(ctx *ntapi.TrapContext) uint32 {
 		hHash := ctx.Arg(0)
 		hKey := ctx.Arg(1)
-		dwFlags := uint32(ctx.Arg(2))
-		ravelog.Logf("[advapi32] CryptHashSessionKey hash=0x%x key=0x%x flags=0x%x\n", hHash, hKey, dwFlags)
+		cryptHashMu.Lock()
+		hs := cryptHashes[hHash]
+		cryptHashMu.Unlock()
+		cryptKeyMu.Lock()
+		ks := cryptKeys[hKey]
+		cryptKeyMu.Unlock()
+		if hs == nil || ks == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if _, err := hs.h.Write(ks.data); err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptReleaseContext", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		hProv := ctx.Arg(0)
+		cryptProvMu.Lock()
+		_, ok := cryptProviders[hProv]
+		delete(cryptProviders, hProv)
+		cryptProvMu.Unlock()
+		ctx.SetReturn(boolToUint64(ok))
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptGenRandom", func(ctx *ntapi.TrapContext) uint32 {
+		hProv := ctx.Arg(0)
 		dwLen := ctx.Arg(1)
 		pbBuffer := ctx.Arg(2)
-		if pbBuffer != 0 && dwLen > 0 {
-			buf := make([]byte, dwLen)
-			_, _ = unix.Getrandom(buf, 0)
-			for i, b := range buf {
-				ctx.Mem.Write8(pbBuffer+uint64(i), b)
-			}
+		cryptProvMu.Lock()
+		_, ok := cryptProviders[hProv]
+		cryptProvMu.Unlock()
+		if !ok || (pbBuffer == 0 && dwLen != 0) {
+			ctx.SetReturn(0)
+			return 0
+		}
+		buf := make([]byte, dwLen)
+		if _, err := cryptorand.Read(buf); err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if pbBuffer != 0 {
+			ctx.Mem.WriteBytes(pbBuffer, buf)
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
-	// CryptDeriveKey, CryptImportKey, CryptExportKey, CryptEncrypt, CryptDecrypt
-	// Store simple key handles
-	type cryptKeyState struct {
-		data  []byte
-		algID uint32
-	}
-	cryptKeys := map[uint64]*cryptKeyState{}
-	cryptKeyMu := sync.Mutex{}
-	nextCryptKey := uint64(0xB0010001)
 	d.RegisterAutoStubHandler(advapi32, "CryptDeriveKey", func(ctx *ntapi.TrapContext) uint32 {
+		hProv := ctx.Arg(0)
 		algID := uint32(ctx.Arg(1))
+		hBaseData := ctx.Arg(2)
+		dwFlags := uint32(ctx.Arg(3))
 		phKey := ctx.Arg(4)
-		cryptKeyMu.Lock()
-		kh := nextCryptKey
-		nextCryptKey++
-		cryptKeys[kh] = &cryptKeyState{algID: algID}
-		cryptKeyMu.Unlock()
-		if phKey != 0 {
-			ctx.Mem.Write64(phKey, kh)
+		if phKey == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
+		cryptProvMu.Lock()
+		_, provOK := cryptProviders[hProv]
+		cryptProvMu.Unlock()
+		cryptHashMu.Lock()
+		hs := cryptHashes[hBaseData]
+		cryptHashMu.Unlock()
+		if !provOK || hs == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		keyLen := int(dwFlags >> 16)
+		if keyLen != 0 {
+			keyLen /= 8
+		}
+		if keyLen == 0 {
+			keyLen = defaultKeyLength(algID)
+		}
+		keyData := expandKeyMaterial(hs.h.Sum(nil), keyLen)
+		cryptKeyMu.Lock()
+		handle := nextCryptKey
+		nextCryptKey++
+		cryptKeys[handle] = &cryptKeyState{
+			data:  keyData,
+			algID: algID,
+			iv:    make([]byte, blockSizeForAlg(algID, keyData)),
+			mode:  cryptModeCBC,
+		}
+		cryptKeyMu.Unlock()
+		ctx.Mem.Write64(phKey, handle)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptImportKey", func(ctx *ntapi.TrapContext) uint32 {
+		hProv := ctx.Arg(0)
 		pbData := ctx.Arg(1)
 		dwLen := ctx.Arg(2)
-		phKey := ctx.Arg(4)
-		var data []byte
-		if pbData != 0 && dwLen > 0 {
-			data, _ = ctx.Mem.ReadBytes(pbData, int(dwLen))
+		phKey := ctx.Arg(5)
+		if phKey == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		cryptProvMu.Lock()
+		_, provOK := cryptProviders[hProv]
+		cryptProvMu.Unlock()
+		raw, ok := readCryptoGuestBytes(ctx.Mem, pbData, dwLen)
+		if !provOK || !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		algID := uint32(0)
+		keyData := append([]byte(nil), raw...)
+		if len(raw) >= 12 && raw[0] == 0x08 {
+			algID = binary.LittleEndian.Uint32(raw[4:8])
+			keyLen := int(binary.LittleEndian.Uint32(raw[8:12]))
+			if len(raw) >= 12+keyLen {
+				keyData = append([]byte(nil), raw[12:12+keyLen]...)
+			}
 		}
 		cryptKeyMu.Lock()
-		kh := nextCryptKey
+		handle := nextCryptKey
 		nextCryptKey++
-		cryptKeys[kh] = &cryptKeyState{data: data}
-		cryptKeyMu.Unlock()
-		if phKey != 0 {
-			ctx.Mem.Write64(phKey, kh)
+		cryptKeys[handle] = &cryptKeyState{
+			data:  keyData,
+			algID: algID,
+			iv:    make([]byte, blockSizeForAlg(algID, keyData)),
+			mode:  cryptModeCBC,
 		}
+		cryptKeyMu.Unlock()
+		ctx.Mem.Write64(phKey, handle)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -639,13 +972,17 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 		cryptKeyMu.Lock()
 		ks := cryptKeys[hKey]
 		cryptKeyMu.Unlock()
-		if ks != nil && pdwLen != 0 {
-			if pbData != 0 {
-				ctx.Mem.WriteBytes(pbData, ks.data)
-			}
-			ctx.Mem.Write32(pdwLen, uint32(len(ks.data)))
+		if ks == nil || pdwLen == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(1)
+		blob := make([]byte, 12+len(ks.data))
+		blob[0] = 0x08
+		blob[1] = 0x02
+		binary.LittleEndian.PutUint32(blob[4:8], ks.algID)
+		binary.LittleEndian.PutUint32(blob[8:12], uint32(len(ks.data)))
+		copy(blob[12:], ks.data)
+		ctx.SetReturn(boolToUint64(writeCryptoParam(ctx.Mem, pbData, pdwLen, blob)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptDestroyKey", func(ctx *ntapi.TrapContext) uint32 {
@@ -660,24 +997,95 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 		hKey := ctx.Arg(0)
 		dwParam := uint32(ctx.Arg(1))
 		pbData := ctx.Arg(2)
-		dwFlags := uint32(ctx.Arg(3))
-		ravelog.Logf("[advapi32] CryptSetKeyParam key=0x%x param=%d data=0x%x flags=0x%x\n", hKey, dwParam, pbData, dwFlags)
-		ctx.SetReturn(1)
-		return 0
+		cryptKeyMu.Lock()
+		ks := cryptKeys[hKey]
+		cryptKeyMu.Unlock()
+		if ks == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		switch dwParam {
+		case kpIV:
+			size := blockSizeForAlg(ks.algID, ks.data)
+			if size == 0 {
+				ctx.SetReturn(1)
+				return 0
+			}
+			iv, ok := readCryptoGuestBytes(ctx.Mem, pbData, uint64(size))
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			cryptKeyMu.Lock()
+			ks.iv = append(ks.iv[:0], iv...)
+			cryptKeyMu.Unlock()
+			ctx.SetReturn(1)
+			return 0
+		case kpMode:
+			if pbData == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			mode, err := ctx.Mem.Read32(pbData)
+			if err != nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			cryptKeyMu.Lock()
+			ks.mode = mode
+			cryptKeyMu.Unlock()
+			ctx.SetReturn(1)
+			return 0
+		default:
+			ctx.SetReturn(1)
+			return 0
+		}
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptGetKeyParam", func(ctx *ntapi.TrapContext) uint32 {
 		hKey := ctx.Arg(0)
 		dwParam := uint32(ctx.Arg(1))
 		pbData := ctx.Arg(2)
 		pdwDataLen := ctx.Arg(3)
-		ravelog.Logf("[advapi32] CryptGetKeyParam key=0x%x param=%d\n", hKey, dwParam)
-		if pdwDataLen != 0 && pbData == 0 {
-			ctx.Mem.Write32(pdwDataLen, 4)
-		} else if pdwDataLen != 0 && pbData != 0 {
-			ctx.Mem.Write32(pbData, 0)
-			ctx.Mem.Write32(pdwDataLen, 4)
+		cryptKeyMu.Lock()
+		ks := cryptKeys[hKey]
+		cryptKeyMu.Unlock()
+		if ks == nil {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(1)
+		var value []byte
+		switch dwParam {
+		case kpAlgID:
+			value = make([]byte, 4)
+			binary.LittleEndian.PutUint32(value, ks.algID)
+		case kpKeyLen:
+			value = make([]byte, 4)
+			binary.LittleEndian.PutUint32(value, uint32(len(ks.data)*8))
+		case kpBlockLen:
+			value = make([]byte, 4)
+			binary.LittleEndian.PutUint32(value, uint32(blockSizeForAlg(ks.algID, ks.data)*8))
+		case kpIV:
+			size := blockSizeForAlg(ks.algID, ks.data)
+			if size == 0 {
+				value = []byte{}
+			} else if len(ks.iv) >= size {
+				value = append([]byte(nil), ks.iv[:size]...)
+			} else {
+				value = make([]byte, size)
+				copy(value, ks.iv)
+			}
+		case kpMode:
+			value = make([]byte, 4)
+			mode := ks.mode
+			if mode == 0 {
+				mode = cryptModeCBC
+			}
+			binary.LittleEndian.PutUint32(value, mode)
+		default:
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(boolToUint64(writeCryptoParam(ctx.Mem, pbData, pdwDataLen, value)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptSignHashW", func(ctx *ntapi.TrapContext) uint32 {
@@ -733,58 +1141,161 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptEncrypt", func(ctx *ntapi.TrapContext) uint32 {
-		// BOOL CryptEncrypt(HCRYPTKEY hKey, HCRYPTHASH hHash, BOOL Final,
-		//   DWORD dwFlags, BYTE *pbData, DWORD *pdwDataLen, DWORD dwBufLen)
-		// Pass-through: data already in pbData, leave as-is (no-op encryption)
+		hKey := ctx.Arg(0)
+		final := ctx.Arg(2) != 0
+		pbData := ctx.Arg(4)
+		pdwDataLen := ctx.Arg(5)
+		dwBufLen := ctx.Arg(6)
+		if pbData == 0 || pdwDataLen == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		cryptKeyMu.Lock()
+		ks := cryptKeys[hKey]
+		cryptKeyMu.Unlock()
+		if ks == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		dataLen, err := ctx.Mem.Read32(pdwDataLen)
+		if err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		data, ok := readCryptoGuestBytes(ctx.Mem, pbData, uint64(dataLen))
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		out, ok := encryptWithKey(ks, data, final)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.Mem.Write32(pdwDataLen, uint32(len(out)))
+		if uint64(len(out)) > dwBufLen {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.Mem.WriteBytes(pbData, out)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptDecrypt", func(ctx *ntapi.TrapContext) uint32 {
-		// BOOL CryptDecrypt(HCRYPTKEY hKey, HCRYPTHASH hHash, BOOL Final,
-		//   DWORD dwFlags, BYTE *pbData, DWORD *pdwDataLen)
-		// Pass-through: data already in pbData, leave as-is (no-op decryption)
+		hKey := ctx.Arg(0)
+		final := ctx.Arg(2) != 0
+		pbData := ctx.Arg(4)
+		pdwDataLen := ctx.Arg(5)
+		if pbData == 0 || pdwDataLen == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		cryptKeyMu.Lock()
+		ks := cryptKeys[hKey]
+		cryptKeyMu.Unlock()
+		if ks == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		dataLen, err := ctx.Mem.Read32(pdwDataLen)
+		if err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		data, ok := readCryptoGuestBytes(ctx.Mem, pbData, uint64(dataLen))
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		out, ok := decryptWithKey(ks, data, final)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.Mem.WriteBytes(pbData, out)
+		ctx.Mem.Write32(pdwDataLen, uint32(len(out)))
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptGenKey", func(ctx *ntapi.TrapContext) uint32 {
+		hProv := ctx.Arg(0)
 		algID := uint32(ctx.Arg(1))
+		dwFlags := uint32(ctx.Arg(2))
 		phKey := ctx.Arg(3)
-		cryptKeyMu.Lock()
-		kh := nextCryptKey
-		nextCryptKey++
-		cryptKeys[kh] = &cryptKeyState{algID: algID}
-		cryptKeyMu.Unlock()
-		if phKey != 0 {
-			ctx.Mem.Write64(phKey, kh)
+		if phKey == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
+		cryptProvMu.Lock()
+		_, provOK := cryptProviders[hProv]
+		cryptProvMu.Unlock()
+		if !provOK {
+			ctx.SetReturn(0)
+			return 0
+		}
+		keyLen := int(dwFlags >> 16)
+		if keyLen != 0 {
+			keyLen /= 8
+		}
+		if keyLen == 0 {
+			keyLen = defaultKeyLength(algID)
+		}
+		keyData := make([]byte, keyLen)
+		if _, err := cryptorand.Read(keyData); err != nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		cryptKeyMu.Lock()
+		handle := nextCryptKey
+		nextCryptKey++
+		cryptKeys[handle] = &cryptKeyState{
+			data:  keyData,
+			algID: algID,
+			iv:    make([]byte, blockSizeForAlg(algID, keyData)),
+			mode:  cryptModeCBC,
+		}
+		cryptKeyMu.Unlock()
+		ctx.Mem.Write64(phKey, handle)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "CryptSetHashParam", func(ctx *ntapi.TrapContext) uint32 {
-		// HP_HMAC_INFO (0x0005) - set HMAC key
 		hHash := ctx.Arg(0)
-		dwParam := ctx.Arg(1)
+		dwParam := uint32(ctx.Arg(1))
 		pbData := ctx.Arg(2)
 		cryptHashMu.Lock()
 		hs := cryptHashes[hHash]
 		cryptHashMu.Unlock()
-		const HP_HMAC_INFO = 5
-		if hs != nil && dwParam == HP_HMAC_INFO && pbData != 0 {
-			// HMAC_INFO: HashAlgid(4)+pad(4)+pbInnerString(8)+cbInnerString(4)+pad(4)+pbOuterString(8)+cbOuterString(4)
-			// Reinitialize as HMAC-SHA256 (simplified)
-			hs.h = hmac.New(sha256.New, nil)
+		if hs == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if dwParam == hpHmacInfo && pbData != 0 {
+			hashAlgID, err := ctx.Mem.Read32(pbData)
+			if err != nil {
+				ctx.SetReturn(0)
+				return 0
+			}
+			newHash, ok := hashFactoryFromAlgID(hashAlgID)
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			cryptHashMu.Lock()
+			hs.h = hmac.New(newHash, nil)
+			hs.algID = hashAlgID
+			cryptHashMu.Unlock()
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
-	_ = hmac.New // ensure import used
 	// SystemFunction036 = RtlGenRandom (used by msvcrt, ucrt, etc.)
 	d.RegisterAutoStubHandler(advapi32, "SystemFunction036", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(0)
 		sz := ctx.Arg(1)
 		if buf != 0 && sz > 0 {
 			b := make([]byte, sz)
-			unix.Getrandom(b, 0)
+			cryptorand.Read(b)
 			for i, v := range b {
 				ctx.Mem.Write8(buf+uint64(i), v)
 			}
@@ -1922,7 +2433,7 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		sidLen := uint32(8 + uint32(nSub)*4)
 		aceSize := uint16(4 + 4 + sidLen)
 		aceOff := pAcl + 8 + uint64(aceCount)*uint64(aceSize)
-		mem.Write8(aceOff, 0)           // ACCESS_ALLOWED_ACE_TYPE
+		mem.Write8(aceOff, 0) // ACCESS_ALLOWED_ACE_TYPE
 		mem.Write8(aceOff+1, aceFlags)
 		mem.Write16(aceOff+2, aceSize)
 		mem.Write32(aceOff+4, accessMask)
@@ -1945,7 +2456,7 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		sidLen := uint32(8 + uint32(nSub)*4)
 		aceSize := uint16(4 + 4 + sidLen)
 		aceOff := pAcl + 8 + uint64(aceCount)*uint64(aceSize)
-		mem.Write8(aceOff, 1)           // ACCESS_DENIED_ACE_TYPE
+		mem.Write8(aceOff, 1) // ACCESS_DENIED_ACE_TYPE
 		mem.Write8(aceOff+1, 0)
 		mem.Write16(aceOff+2, aceSize)
 		mem.Write32(aceOff+4, accessMask)
@@ -2370,7 +2881,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheck p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2382,7 +2895,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckAndAuditAlarmA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2394,7 +2909,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckAndAuditAlarmW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2406,7 +2923,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckByType p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2418,7 +2937,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckByTypeAndAuditAlarmA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2430,7 +2951,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckByTypeAndAuditAlarmW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2442,7 +2965,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckByTypeResultList p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2454,7 +2979,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckByTypeResultListAndAuditAlarmA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2466,7 +2993,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckByTypeResultListAndAuditAlarmByHandleA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2478,7 +3007,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckByTypeResultListAndAuditAlarmByHandleW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2490,7 +3021,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AccessCheckByTypeResultListAndAuditAlarmW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2502,7 +3035,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AddAccessAllowedObjectAce p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2513,7 +3048,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] AddAccessDeniedAceEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2525,7 +3061,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AddAccessDeniedObjectAce p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2537,7 +3075,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AddAuditAccessAce p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2549,7 +3089,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AddAuditAccessAceEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2561,7 +3103,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AddAuditAccessObjectAce p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2580,7 +3124,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] AdjustTokenGroups p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2625,7 +3171,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] BuildExplicitAccessWithNameA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2636,7 +3183,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] BuildExplicitAccessWithNameW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2648,7 +3196,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] BuildImpersonateExplicitAccessWithNameA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2660,7 +3210,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] BuildImpersonateExplicitAccessWithNameW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2686,7 +3238,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] BuildSecurityDescriptorA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2698,7 +3252,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] BuildSecurityDescriptorW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2724,7 +3280,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] BuildTrusteeWithObjectsAndNameA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2736,7 +3294,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] BuildTrusteeWithObjectsAndNameW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2747,7 +3307,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] BuildTrusteeWithObjectsAndSidA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2758,7 +3319,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] BuildTrusteeWithObjectsAndSidW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2827,7 +3389,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] ConvertSecurityDescriptorToStringSecurityDescriptorA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2838,7 +3401,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] ConvertSecurityDescriptorToStringSecurityDescriptorW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2870,7 +3434,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ConvertToAutoInheritPrivateObjectSecurity p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2882,7 +3448,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CreatePrivateObjectSecurity p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2894,7 +3462,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CreatePrivateObjectSecurityEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2906,7 +3476,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CreatePrivateObjectSecurityWithMultipleInheritance p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2918,7 +3490,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CreateProcessAsUserA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2930,7 +3504,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CreateProcessAsUserW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2942,7 +3518,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CreateProcessWithLogonW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2954,7 +3532,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CreateProcessWithTokenW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2966,7 +3546,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CreateRestrictedToken p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3160,7 +3742,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CryptEnumProviderTypesA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3172,7 +3756,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CryptEnumProviderTypesW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3184,7 +3770,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CryptEnumProvidersA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3196,7 +3784,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] CryptEnumProvidersW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3207,7 +3797,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] CryptGetDefaultProviderA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3218,7 +3809,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] CryptGetDefaultProviderW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3229,8 +3821,11 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		pdwDataLen := ctx.Arg(3)
 		dwFlags := ctx.Arg(4)
 		ravelog.Logf("[advapi32] CryptGetProvParam prov=0x%x param=%d\n", hProv, dwParam)
-		_ = pbData; _ = dwFlags
-		if pdwDataLen != 0 { ctx.Mem.Write32(pdwDataLen, 0) }
+		_ = pbData
+		_ = dwFlags
+		if pdwDataLen != 0 {
+			ctx.Mem.Write32(pdwDataLen, 0)
+		}
 		ctx.SetReturn(0) // FALSE - param not supported
 		return 0
 	})
@@ -3419,7 +4014,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ElfReadEventLogA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -3431,7 +4028,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ElfReadEventLogW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -3459,7 +4058,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ElfReportEventA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -3471,7 +4072,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ElfReportEventAndSourceW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -3483,7 +4086,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ElfReportEventW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -3514,7 +4119,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] EnumDependentServicesA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3526,7 +4133,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] EnumDependentServicesW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3538,7 +4147,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] EnumServiceGroupW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3550,7 +4161,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] EnumServicesStatusA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3562,7 +4175,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] EnumServicesStatusExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3574,7 +4189,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] EnumServicesStatusExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3586,7 +4203,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] EnumServicesStatusW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3688,7 +4307,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] GetEventLogInformation p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3715,7 +4335,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] GetFileSecurityA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3726,7 +4347,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] GetFileSecurityW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3738,7 +4360,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] GetInheritanceSourceA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3750,7 +4374,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] GetInheritanceSourceW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3761,7 +4387,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] GetKernelObjectSecurity p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3793,7 +4420,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		hEventLog := ctx.Arg(0)
 		pnRecords := ctx.Arg(1)
 		ravelog.Logf("[advapi32] GetNumberOfEventLogRecords log=0x%x\n", hEventLog)
-		if pnRecords != 0 { ctx.Mem.Write32(pnRecords, 0) }
+		if pnRecords != 0 {
+			ctx.Mem.Write32(pnRecords, 0)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -3811,7 +4440,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] GetPrivateObjectSecurity p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3837,11 +4467,21 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		if pSD != 0 {
 			ctrl, _ := ctx.Mem.Read16(pSD + 2)
 			if lpbSaclPresent != 0 {
-				if ctrl&0x0010 != 0 { ctx.Mem.Write32(lpbSaclPresent, 1) } else { ctx.Mem.Write32(lpbSaclPresent, 0) }
+				if ctrl&0x0010 != 0 {
+					ctx.Mem.Write32(lpbSaclPresent, 1)
+				} else {
+					ctx.Mem.Write32(lpbSaclPresent, 0)
+				}
 			}
-			if pSacl != 0 { ctx.Mem.Write64(pSacl, 0) }
+			if pSacl != 0 {
+				ctx.Mem.Write64(pSacl, 0)
+			}
 			if lpbSaclDefaulted != 0 {
-				if ctrl&0x0020 != 0 { ctx.Mem.Write32(lpbSaclDefaulted, 1) } else { ctx.Mem.Write32(lpbSaclDefaulted, 0) }
+				if ctrl&0x0020 != 0 {
+					ctx.Mem.Write32(lpbSaclDefaulted, 1)
+				} else {
+					ctx.Mem.Write32(lpbSaclDefaulted, 0)
+				}
 			}
 		}
 		ctx.SetReturn(1) // TRUE
@@ -3855,7 +4495,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] GetSecurityInfoExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3867,7 +4509,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] GetSecurityInfoExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4025,7 +4669,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] I_ScSetServiceBitsA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4036,7 +4681,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] I_ScSetServiceBitsW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4067,7 +4713,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] InitiateSystemShutdownA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4079,7 +4726,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] InitiateSystemShutdownExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4091,7 +4740,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] InitiateSystemShutdownExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4102,7 +4753,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] InitiateSystemShutdownW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4123,7 +4775,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpDomain := ctx.Arg(1)
 		lpPassword := ctx.Arg(2)
 		var user string
-		if lpUsername != 0 { user = readGuestUTF16(lpUsername) }
+		if lpUsername != 0 {
+			user = readGuestUTF16(lpUsername)
+		}
 		ravelog.Logf("[advapi32] LogonUserA user=%q domain=0x%x\n", user, lpDomain)
 		_ = lpPassword
 		ctx.SetReturn(1) // TRUE - logon always succeeds in emulator
@@ -4134,7 +4788,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpDomain := ctx.Arg(1)
 		lpPassword := ctx.Arg(2)
 		var user string
-		if lpUsername != 0 { user = readGuestUTF16(lpUsername) }
+		if lpUsername != 0 {
+			user = readGuestUTF16(lpUsername)
+		}
 		ravelog.Logf("[advapi32] LogonUserExA user=%q domain=0x%x\n", user, lpDomain)
 		_ = lpPassword
 		ctx.SetReturn(1) // TRUE - logon always succeeds in emulator
@@ -4145,7 +4801,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpDomain := ctx.Arg(1)
 		lpPassword := ctx.Arg(2)
 		var user string
-		if lpUsername != 0 { user = readGuestUTF16(lpUsername) }
+		if lpUsername != 0 {
+			user = readGuestUTF16(lpUsername)
+		}
 		ravelog.Logf("[advapi32] LogonUserExW user=%q domain=0x%x\n", user, lpDomain)
 		_ = lpPassword
 		ctx.SetReturn(1) // TRUE - logon always succeeds in emulator
@@ -4156,7 +4814,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpDomain := ctx.Arg(1)
 		lpPassword := ctx.Arg(2)
 		var user string
-		if lpUsername != 0 { user = readGuestUTF16(lpUsername) }
+		if lpUsername != 0 {
+			user = readGuestUTF16(lpUsername)
+		}
 		ravelog.Logf("[advapi32] LogonUserW user=%q domain=0x%x\n", user, lpDomain)
 		_ = lpPassword
 		ctx.SetReturn(1) // TRUE - logon always succeeds in emulator
@@ -4170,7 +4830,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] LookupAccountNameA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4182,7 +4844,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] LookupAccountNameW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4252,7 +4916,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaCreateTrustedDomainEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4286,7 +4951,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaEnumerateAccounts p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4307,7 +4973,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaEnumeratePrivileges p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4325,7 +4992,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaEnumerateTrustedDomains p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4336,7 +5004,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaEnumerateTrustedDomainsEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4382,7 +5051,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaLookupNames p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4394,7 +5064,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] LsaLookupNames2 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4431,7 +5103,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaLookupSids p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4440,11 +5113,16 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		ravelog.Logf("[advapi32] LsaNtStatusToWinError status=0x%x\n", status)
 		var win32 uint64
 		switch status {
-		case 0: win32 = 0
-		case 0xC0000022: win32 = 5
-		case 0xC000000D: win32 = 87
-		case 0xC0000034: win32 = 2
-		default: win32 = 317
+		case 0:
+			win32 = 0
+		case 0xC0000022:
+			win32 = 5
+		case 0xC000000D:
+			win32 = 87
+		case 0xC0000034:
+			win32 = 2
+		default:
+			win32 = 317
 		}
 		ctx.SetReturn(win32)
 		return 0
@@ -4548,7 +5226,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaQuerySecret p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4587,7 +5266,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaRemoveAccountRights p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4622,7 +5302,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] LsaSetForestTrustInformation p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -4706,7 +5387,7 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		// args 2-10: size pointers
 		ravelog.Logf("[advapi32] MakeAbsoluteSD self=0x%x abs=0x%x\n", pSelfRelSD, pAbsSD)
 		if pAbsSD != 0 {
-			ctx.Mem.Write8(pAbsSD, 1) // revision
+			ctx.Mem.Write8(pAbsSD, 1)    // revision
 			ctx.Mem.Write16(pAbsSD+2, 0) // not self-relative
 		}
 		ctx.SetReturn(1) // TRUE
@@ -4779,7 +5460,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ObjectOpenAuditAlarmA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4791,7 +5474,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ObjectOpenAuditAlarmW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4803,7 +5488,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ObjectPrivilegeAuditAlarmA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4815,7 +5502,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] ObjectPrivilegeAuditAlarmW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4868,7 +5557,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] PrivilegedServiceAuditAlarmA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4879,7 +5569,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] PrivilegedServiceAuditAlarmW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4907,7 +5598,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] QueryServiceConfig2A p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4918,7 +5610,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] QueryServiceConfig2W p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4949,7 +5642,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] QueryServiceObjectSecurity p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4961,7 +5655,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		pcbBytesNeeded := ctx.Arg(4)
 		ravelog.Logf("[advapi32] QueryServiceStatusEx svc=0x%x level=%d buf=0x%x size=%d\n", hService, infoLevel, lpBuffer, cbBufSize)
 		needed := uint32(36) // SERVICE_STATUS_PROCESS size
-		if pcbBytesNeeded != 0 { ctx.Mem.Write32(pcbBytesNeeded, needed) }
+		if pcbBytesNeeded != 0 {
+			ctx.Mem.Write32(pcbBytesNeeded, needed)
+		}
 		if cbBufSize < uint64(needed) {
 			ctx.SetReturn(0) // FALSE
 			return 0
@@ -4993,9 +5689,13 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		hKey := ctx.Arg(1)
 		phkResult := ctx.Arg(2)
 		var machine string
-		if lpMachineName != 0 { machine = readGuestUTF16(lpMachineName) }
+		if lpMachineName != 0 {
+			machine = readGuestUTF16(lpMachineName)
+		}
 		ravelog.Logf("[advapi32] RegConnectRegistryA machine=%q hkey=0x%x\n", machine, hKey)
-		if phkResult != 0 { ctx.Mem.Write64(phkResult, hKey) }
+		if phkResult != 0 {
+			ctx.Mem.Write64(phkResult, hKey)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -5004,9 +5704,13 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		hKey := ctx.Arg(1)
 		phkResult := ctx.Arg(2)
 		var machine string
-		if lpMachineName != 0 { machine = readGuestUTF16(lpMachineName) }
+		if lpMachineName != 0 {
+			machine = readGuestUTF16(lpMachineName)
+		}
 		ravelog.Logf("[advapi32] RegConnectRegistryW machine=%q hkey=0x%x\n", machine, hKey)
-		if phkResult != 0 { ctx.Mem.Write64(phkResult, hKey) }
+		if phkResult != 0 {
+			ctx.Mem.Write64(phkResult, hKey)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -5023,7 +5727,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpSubKey := ctx.Arg(1)
 		samDesired := ctx.Arg(2)
 		var sub string
-		if lpSubKey != 0 { sub = readGuestUTF16(lpSubKey) }
+		if lpSubKey != 0 {
+			sub = readGuestUTF16(lpSubKey)
+		}
 		ravelog.Logf("[advapi32] RegDeleteKeyExA hkey=0x%x sub=%q sam=0x%x\n", hKey, sub, samDesired)
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
@@ -5033,7 +5739,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpSubKey := ctx.Arg(1)
 		samDesired := ctx.Arg(2)
 		var sub string
-		if lpSubKey != 0 { sub = readGuestUTF16(lpSubKey) }
+		if lpSubKey != 0 {
+			sub = readGuestUTF16(lpSubKey)
+		}
 		ravelog.Logf("[advapi32] RegDeleteKeyExW hkey=0x%x sub=%q sam=0x%x\n", hKey, sub, samDesired)
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
@@ -5073,7 +5781,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] RegEnumKeyExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(259)
 		return 0
 	})
@@ -5083,7 +5793,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpName := ctx.Arg(2)
 		cchName := ctx.Arg(3)
 		ravelog.Logf("[advapi32] RegEnumKeyW hkey=0x%x idx=%d\n", hKey, dwIndex)
-		_ = lpName; _ = cchName
+		_ = lpName
+		_ = cchName
 		ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
 		return 0
 	})
@@ -5095,7 +5806,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] RegEnumValueA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(259)
 		return 0
 	})
@@ -5112,7 +5825,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpcbSD := ctx.Arg(3)
 		ravelog.Logf("[advapi32] RegGetKeySecurity hkey=0x%x secInfo=0x%x\n", hKey, secInfo)
 		_ = pSD
-		if lpcbSD != 0 { ctx.Mem.Write32(lpcbSD, 20) } // SECURITY_DESCRIPTOR_MIN_LENGTH
+		if lpcbSD != 0 {
+			ctx.Mem.Write32(lpcbSD, 20)
+		} // SECURITY_DESCRIPTOR_MIN_LENGTH
 		ctx.SetReturn(122) // ERROR_INSUFFICIENT_BUFFER
 		return 0
 	})
@@ -5124,8 +5839,12 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		pdwType := ctx.Arg(4)
 		pvData := ctx.Arg(5)
 		var sub, val string
-		if lpSubKey != 0 { sub = readGuestUTF16(lpSubKey) }
-		if lpValue != 0 { val = readGuestUTF16(lpValue) }
+		if lpSubKey != 0 {
+			sub = readGuestUTF16(lpSubKey)
+		}
+		if lpValue != 0 {
+			val = readGuestUTF16(lpValue)
+		}
 		ravelog.Logf("[advapi32] RegGetValueA hkey=0x%x sub=%q val=%q flags=0x%x data=0x%x\n", hKey, sub, val, dwFlags, pvData)
 		_ = pdwType
 		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
@@ -5175,10 +5894,14 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		// ... lpcValues, lpcbMaxValueNameLen, lpcbMaxValueLen, lpcbSecurityDescriptor, lpftLastWriteTime
 		for _, off := range []int{4, 5} {
 			ptr := ctx.Arg(off)
-			if ptr != 0 { ctx.Mem.Write32(ptr, 0) }
+			if ptr != 0 {
+				ctx.Mem.Write32(ptr, 0)
+			}
 		}
 		// lpcValues
-		if p := ctx.Arg(6); p != 0 { ctx.Mem.Write32(p, 0) }
+		if p := ctx.Arg(6); p != 0 {
+			ctx.Mem.Write32(p, 0)
+		}
 		ravelog.Logf("[advapi32] RegQueryInfoKeyA hkey=0x%x → 0 subkeys/values\n", hKey)
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
@@ -5190,7 +5913,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpValueBuf := ctx.Arg(3)
 		ldwTotsize := ctx.Arg(4)
 		ravelog.Logf("[advapi32] RegQueryMultipleValuesA hkey=0x%x nvals=%d\n", hKey, num_vals)
-		_ = val_list; _ = lpValueBuf; _ = ldwTotsize
+		_ = val_list
+		_ = lpValueBuf
+		_ = ldwTotsize
 		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
@@ -5201,7 +5926,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		lpValueBuf := ctx.Arg(3)
 		ldwTotsize := ctx.Arg(4)
 		ravelog.Logf("[advapi32] RegQueryMultipleValuesW hkey=0x%x nvals=%d\n", hKey, num_vals)
-		_ = val_list; _ = lpValueBuf; _ = ldwTotsize
+		_ = val_list
+		_ = lpValueBuf
+		_ = ldwTotsize
 		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
@@ -5300,7 +6027,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] RegSetValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5356,7 +6084,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] RegisterTraceGuidsA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5368,7 +6098,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] RegisterTraceGuidsW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5392,7 +6124,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] SaferComputeTokenFromLevel p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5403,7 +6136,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] SaferCreateLevel p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5415,7 +6149,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] SaferGetPolicyInformation p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5498,7 +6234,8 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[advapi32] SetPrivateObjectSecurity p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5846,7 +6583,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] TreeResetNamedSecurityInfoA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5858,7 +6597,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[advapi32] TreeResetNamedSecurityInfoW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})

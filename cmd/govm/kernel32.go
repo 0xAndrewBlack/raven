@@ -10,10 +10,12 @@ import (
 	"golang.org/x/sys/unix"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -234,6 +236,791 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		mem.Write16(addr+limit*2, 0)
 		return required
 	}
+	type consoleInputEvent struct {
+		KeyDown         bool
+		RepeatCount     uint16
+		VirtualKeyCode  uint16
+		VirtualScanCode uint16
+		UnicodeChar     uint16
+		AsciiChar       byte
+		ControlKeyState uint32
+	}
+	const (
+		consolePseudoHWND           = uint64(0xC0DE0001)
+		stdInputHandleValue         = uint64(0x100)
+		stdOutputHandleValue        = uint64(0x101)
+		stdErrorHandleValue         = uint64(0x102)
+		enableVTProcessing   uint32 = 0x0004
+		keyEventRecordType   uint16 = 0x0001
+	)
+	var consoleStateMu sync.Mutex
+	activeConsoleState := ntapi.GlobalConsole
+	consoleTitle := ntapi.GlobalConsole.Title
+	consoleAttached := true
+	consoleInputMode := uint32(0x0007)
+	consoleOutputModes := map[uint64]uint32{
+		stdOutputHandleValue: 0x0007,
+		stdErrorHandleValue:  0x0007,
+	}
+	var consoleSavedCursorX int
+	var consoleSavedCursorY int
+	var consoleInputMu sync.Mutex
+	consoleInputCond := sync.NewCond(&consoleInputMu)
+	consoleInputQueue := make([]consoleInputEvent, 0, 32)
+	var consoleCtrlMu sync.Mutex
+	consoleCtrlHandlers := map[uint64]struct{}{}
+	consoleCtrlIgnore := false
+	clampInt := func(v, minV, maxV int) int {
+		if v < minV {
+			return minV
+		}
+		if v > maxV {
+			return maxV
+		}
+		return v
+	}
+	makeConsoleCells := func(width, height int, attr uint16) []ntapi.ConsoleCellAttr {
+		if width <= 0 {
+			width = 120
+		}
+		if height <= 0 {
+			height = 30
+		}
+		cells := make([]ntapi.ConsoleCellAttr, width*height)
+		for i := range cells {
+			cells[i] = ntapi.ConsoleCellAttr{Char: ' ', Attr: attr}
+		}
+		return cells
+	}
+	resizeConsoleState := func(cs *ntapi.ConsoleState, width, height int) {
+		if cs == nil {
+			return
+		}
+		if width <= 0 {
+			width = 120
+		}
+		if height <= 0 {
+			height = 30
+		}
+		oldWidth, oldHeight := cs.Width, cs.Height
+		oldCells := append([]ntapi.ConsoleCellAttr(nil), cs.Cells...)
+		if cs.Attr == 0 {
+			cs.Attr = 0x07
+		}
+		cs.Width = width
+		cs.Height = height
+		cs.Cells = makeConsoleCells(width, height, cs.Attr)
+		copyW := width
+		if oldWidth < copyW {
+			copyW = oldWidth
+		}
+		copyH := height
+		if oldHeight < copyH {
+			copyH = oldHeight
+		}
+		for y := 0; y < copyH; y++ {
+			for x := 0; x < copyW; x++ {
+				cs.Cells[y*width+x] = oldCells[y*oldWidth+x]
+			}
+		}
+		if width > 0 {
+			cs.CursorX = clampInt(cs.CursorX, 0, width-1)
+		} else {
+			cs.CursorX = 0
+		}
+		if height > 0 {
+			cs.CursorY = clampInt(cs.CursorY, 0, height-1)
+		} else {
+			cs.CursorY = 0
+		}
+	}
+	if consoleTitle == "" {
+		consoleTitle = "Raven Console"
+	}
+	if activeConsoleState.Attr == 0 {
+		activeConsoleState.Attr = 0x07
+	}
+	activeConsoleState.Title = consoleTitle
+	activeConsoleState.Mode = consoleOutputModes[stdOutputHandleValue]
+	activeConsoleState.CursorVisible = true
+	if activeConsoleState.CursorSize == 0 {
+		activeConsoleState.CursorSize = 25
+	}
+	resizeConsoleState(activeConsoleState, 120, 30)
+	colorNibbleToANSI := func(nibble uint16, background bool) int {
+		fgMap := []int{30, 34, 32, 36, 31, 35, 33, 37}
+		bgMap := []int{40, 44, 42, 46, 41, 45, 43, 47}
+		idx := int(nibble & 0x7)
+		code := fgMap[idx]
+		if background {
+			code = bgMap[idx]
+		}
+		if nibble&0x8 != 0 {
+			code += 60
+		}
+		return code
+	}
+	attrToANSI := func(attr uint16) string {
+		fg := colorNibbleToANSI(attr&0x0F, false)
+		bg := colorNibbleToANSI((attr>>4)&0x0F, true)
+		return fmt.Sprintf("\x1b[0;%d;%dm", fg, bg)
+	}
+	ansiToColorNibble := func(code int, background bool) (uint16, bool) {
+		var idx int
+		bright := false
+		switch {
+		case !background && code >= 30 && code <= 37:
+			idx = code - 30
+		case !background && code >= 90 && code <= 97:
+			idx = code - 90
+			bright = true
+		case background && code >= 40 && code <= 47:
+			idx = code - 40
+		case background && code >= 100 && code <= 107:
+			idx = code - 100
+			bright = true
+		default:
+			return 0, false
+		}
+		var nibble uint16
+		switch idx {
+		case 0:
+			nibble = 0
+		case 1:
+			nibble = 4
+		case 2:
+			nibble = 2
+		case 3:
+			nibble = 6
+		case 4:
+			nibble = 1
+		case 5:
+			nibble = 5
+		case 6:
+			nibble = 3
+		case 7:
+			nibble = 7
+		}
+		if bright {
+			nibble |= 0x8
+		}
+		return nibble, true
+	}
+	resolveConsoleState := func(handle uint64) *ntapi.ConsoleState {
+		consoleStateMu.Lock()
+		defer consoleStateMu.Unlock()
+		switch handle {
+		case 0, stdOutputHandleValue, stdErrorHandleValue:
+			return activeConsoleState
+		}
+		if sb, ok := handles.Get(ntapi.Handle(handle)).(*ntapi.ConsoleScreenBufferHandle); ok && sb != nil && sb.State != nil {
+			return sb.State
+		}
+		return activeConsoleState
+	}
+	isVisibleConsoleState := func(cs *ntapi.ConsoleState) bool {
+		consoleStateMu.Lock()
+		defer consoleStateMu.Unlock()
+		return consoleAttached && cs != nil && cs == activeConsoleState
+	}
+	outputModeForHandle := func(handle uint64) uint32 {
+		consoleStateMu.Lock()
+		defer consoleStateMu.Unlock()
+		if handle == stdInputHandleValue {
+			return consoleInputMode
+		}
+		if mode, ok := consoleOutputModes[handle]; ok {
+			return mode
+		}
+		return 0x0007
+	}
+	setOutputModeForHandle := func(handle uint64, mode uint32) {
+		consoleStateMu.Lock()
+		if handle == stdInputHandleValue {
+			consoleInputMode = mode
+			consoleStateMu.Unlock()
+			return
+		}
+		consoleOutputModes[handle] = mode
+		var cs *ntapi.ConsoleState
+		switch handle {
+		case 0, stdOutputHandleValue, stdErrorHandleValue:
+			cs = activeConsoleState
+		default:
+			if sb, ok := handles.Get(ntapi.Handle(handle)).(*ntapi.ConsoleScreenBufferHandle); ok && sb != nil {
+				cs = sb.State
+			}
+		}
+		consoleStateMu.Unlock()
+		if cs != nil {
+			cs.Mode = mode
+		}
+	}
+	scrollConsoleState := func(cs *ntapi.ConsoleState, lines int) {
+		if cs == nil || lines <= 0 || cs.Width <= 0 || cs.Height <= 0 {
+			return
+		}
+		if lines > cs.Height {
+			lines = cs.Height
+		}
+		copy(cs.Cells, cs.Cells[lines*cs.Width:])
+		fillStart := (cs.Height - lines) * cs.Width
+		for i := fillStart; i < len(cs.Cells); i++ {
+			cs.Cells[i] = ntapi.ConsoleCellAttr{Char: ' ', Attr: cs.Attr}
+		}
+		cs.CursorY -= lines
+		if cs.CursorY < 0 {
+			cs.CursorY = 0
+		}
+	}
+	var putConsoleRune func(cs *ntapi.ConsoleState, r rune)
+	putConsoleRune = func(cs *ntapi.ConsoleState, r rune) {
+		if cs == nil || cs.Width <= 0 || cs.Height <= 0 {
+			return
+		}
+		switch r {
+		case '\r':
+			cs.CursorX = 0
+			return
+		case '\n':
+			cs.CursorX = 0
+			cs.CursorY++
+			if cs.CursorY >= cs.Height {
+				scrollConsoleState(cs, 1)
+				cs.CursorY = cs.Height - 1
+			}
+			return
+		case '\b':
+			if cs.CursorX > 0 {
+				cs.CursorX--
+			}
+			return
+		case '\t':
+			nextTab := ((cs.CursorX / 8) + 1) * 8
+			for cs.CursorX < nextTab {
+				putConsoleRune(cs, ' ')
+			}
+			return
+		}
+		if cs.CursorX >= cs.Width {
+			cs.CursorX = 0
+			cs.CursorY++
+		}
+		if cs.CursorY >= cs.Height {
+			scrollConsoleState(cs, 1)
+			cs.CursorY = cs.Height - 1
+		}
+		idx := cs.CursorY*cs.Width + cs.CursorX
+		if idx >= 0 && idx < len(cs.Cells) {
+			ch := uint16('?')
+			if r >= 0 && r <= 0xFFFF {
+				ch = uint16(r)
+			}
+			cs.Cells[idx] = ntapi.ConsoleCellAttr{Char: ch, Attr: cs.Attr}
+		}
+		cs.CursorX++
+		if cs.CursorX >= cs.Width {
+			cs.CursorX = 0
+			cs.CursorY++
+			if cs.CursorY >= cs.Height {
+				scrollConsoleState(cs, 1)
+				cs.CursorY = cs.Height - 1
+			}
+		}
+	}
+	consoleCSIParams := func(raw string) []int {
+		if raw == "" {
+			return nil
+		}
+		raw = strings.TrimPrefix(raw, "?")
+		parts := strings.Split(raw, ";")
+		params := make([]int, 0, len(parts))
+		for _, part := range parts {
+			if part == "" {
+				params = append(params, 0)
+				continue
+			}
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				params = append(params, 0)
+				continue
+			}
+			params = append(params, n)
+		}
+		return params
+	}
+	applyConsoleCSI := func(cs *ntapi.ConsoleState, raw string, final byte) {
+		if cs == nil {
+			return
+		}
+		params := consoleCSIParams(raw)
+		first := func(def int) int {
+			if len(params) == 0 || params[0] == 0 {
+				return def
+			}
+			return params[0]
+		}
+		switch final {
+		case 'A':
+			cs.CursorY = clampInt(cs.CursorY-first(1), 0, cs.Height-1)
+		case 'B':
+			cs.CursorY = clampInt(cs.CursorY+first(1), 0, cs.Height-1)
+		case 'C':
+			cs.CursorX = clampInt(cs.CursorX+first(1), 0, cs.Width-1)
+		case 'D':
+			cs.CursorX = clampInt(cs.CursorX-first(1), 0, cs.Width-1)
+		case 'G':
+			cs.CursorX = clampInt(first(1)-1, 0, cs.Width-1)
+		case 'H', 'f':
+			row, col := 1, 1
+			if len(params) > 0 && params[0] > 0 {
+				row = params[0]
+			}
+			if len(params) > 1 && params[1] > 0 {
+				col = params[1]
+			}
+			cs.CursorY = clampInt(row-1, 0, cs.Height-1)
+			cs.CursorX = clampInt(col-1, 0, cs.Width-1)
+		case 'J':
+			mode := first(0)
+			if mode == 2 {
+				for i := range cs.Cells {
+					cs.Cells[i] = ntapi.ConsoleCellAttr{Char: ' ', Attr: cs.Attr}
+				}
+				cs.CursorX, cs.CursorY = 0, 0
+			}
+		case 'K':
+			mode := first(0)
+			start, end := cs.CursorX, cs.Width-1
+			if mode == 1 {
+				start = 0
+				end = cs.CursorX
+			} else if mode == 2 {
+				start = 0
+			}
+			for x := start; x <= end && x < cs.Width; x++ {
+				idx := cs.CursorY*cs.Width + x
+				if idx >= 0 && idx < len(cs.Cells) {
+					cs.Cells[idx] = ntapi.ConsoleCellAttr{Char: ' ', Attr: cs.Attr}
+				}
+			}
+		case 'm':
+			if len(params) == 0 {
+				params = []int{0}
+			}
+			attr := cs.Attr
+			for _, code := range params {
+				switch code {
+				case 0:
+					attr = 0x07
+				case 1:
+					attr |= 0x08
+				case 22:
+					attr &^= 0x08
+				case 39:
+					attr = (attr & 0xF0) | 0x07
+				case 49:
+					attr &= 0x0F
+				default:
+					if nibble, ok := ansiToColorNibble(code, false); ok {
+						attr = (attr & 0xF0) | nibble
+					} else if nibble, ok := ansiToColorNibble(code, true); ok {
+						attr = (attr & 0x0F) | (nibble << 4)
+					}
+				}
+			}
+			cs.Attr = attr
+		case 's':
+			consoleSavedCursorX = cs.CursorX
+			consoleSavedCursorY = cs.CursorY
+		case 'u':
+			cs.CursorX = clampInt(consoleSavedCursorX, 0, cs.Width-1)
+			cs.CursorY = clampInt(consoleSavedCursorY, 0, cs.Height-1)
+		}
+	}
+	applyConsoleText := func(cs *ntapi.ConsoleState, text string) {
+		if cs == nil || text == "" {
+			return
+		}
+		for i := 0; i < len(text); {
+			if text[i] == 0x1b && i+1 < len(text) {
+				switch text[i+1] {
+				case '[':
+					j := i + 2
+					for j < len(text) && (text[j] < 0x40 || text[j] > 0x7E) {
+						j++
+					}
+					if j < len(text) {
+						applyConsoleCSI(cs, text[i+2:j], text[j])
+						i = j + 1
+						continue
+					}
+				case ']':
+					j := i + 2
+					for j < len(text) && text[j] != 0x07 {
+						if text[j] == 0x1b && j+1 < len(text) && text[j+1] == '\\' {
+							break
+						}
+						j++
+					}
+					payload := text[i+2 : j]
+					if strings.HasPrefix(payload, "0;") || strings.HasPrefix(payload, "2;") {
+						consoleTitle = payload[2:]
+						cs.Title = consoleTitle
+						ntapi.GlobalConsole.Title = consoleTitle
+					}
+					if j < len(text) && text[j] == 0x07 {
+						i = j + 1
+					} else if j+1 < len(text) && text[j] == 0x1b && text[j+1] == '\\' {
+						i = j + 2
+					} else {
+						i = j
+					}
+					continue
+				}
+			}
+			r, size := utf8.DecodeRuneInString(text[i:])
+			if r == utf8.RuneError && size == 1 {
+				r = rune(text[i])
+			}
+			putConsoleRune(cs, r)
+			i += size
+		}
+	}
+	renderConsoleState := func(f *os.File, cs *ntapi.ConsoleState) {
+		if f == nil || cs == nil || !consoleAttached {
+			return
+		}
+		_, _ = f.WriteString("\x1b[2J\x1b[H")
+		lastAttr := uint16(0xFFFF)
+		for y := 0; y < cs.Height; y++ {
+			for x := 0; x < cs.Width; x++ {
+				cell := cs.Cells[y*cs.Width+x]
+				if cell.Attr != lastAttr {
+					_, _ = f.WriteString(attrToANSI(cell.Attr))
+					lastAttr = cell.Attr
+				}
+				r := rune(cell.Char)
+				if r == 0 {
+					r = ' '
+				}
+				_, _ = f.WriteString(string(r))
+			}
+			if y+1 < cs.Height {
+				_, _ = f.WriteString("\n")
+			}
+		}
+		_, _ = f.WriteString(attrToANSI(cs.Attr))
+		_, _ = f.WriteString(fmt.Sprintf("\x1b[%d;%dH", cs.CursorY+1, cs.CursorX+1))
+	}
+	refreshVisibleConsole := func(cs *ntapi.ConsoleState) {
+		if isVisibleConsoleState(cs) {
+			renderConsoleState(os.Stdout, cs)
+		}
+	}
+	emitConsoleTitle := func(title string) {
+		if !consoleAttached {
+			return
+		}
+		_, _ = os.Stdout.WriteString("\x1b]0;" + title + "\x07")
+	}
+	writeConsoleString := func(handle uint64, text string, rawBytes []byte) int {
+		cs := resolveConsoleState(handle)
+		if cs == nil {
+			return 0
+		}
+		applyConsoleText(cs, text)
+		if !consoleAttached {
+			return len(text)
+		}
+		var out *os.File
+		if handle == stdErrorHandleValue {
+			out = os.Stderr
+		} else {
+			out = os.Stdout
+		}
+		mode := outputModeForHandle(handle)
+		if len(rawBytes) > 0 {
+			_, _ = out.Write(rawBytes)
+			return len(rawBytes)
+		}
+		if mode&enableVTProcessing != 0 || true {
+			_, _ = out.WriteString(text)
+			return len(text)
+		}
+		return len(text)
+	}
+	consoleFillStateChars := func(cs *ntapi.ConsoleState, x, y, n int, ch uint16, attr uint16) int {
+		if cs == nil || cs.Width <= 0 || cs.Height <= 0 || n <= 0 {
+			return 0
+		}
+		wrote := 0
+		for i := 0; i < n; i++ {
+			cx := x + i
+			cy := y
+			for cx >= cs.Width {
+				cx -= cs.Width
+				cy++
+			}
+			if cy < 0 || cy >= cs.Height || cx < 0 || cx >= cs.Width {
+				break
+			}
+			cs.Cells[cy*cs.Width+cx] = ntapi.ConsoleCellAttr{Char: ch, Attr: attr}
+			wrote++
+		}
+		return wrote
+	}
+	consoleFillStateAttrs := func(cs *ntapi.ConsoleState, x, y, n int, attr uint16) int {
+		if cs == nil || cs.Width <= 0 || cs.Height <= 0 || n <= 0 {
+			return 0
+		}
+		wrote := 0
+		for i := 0; i < n; i++ {
+			cx := x + i
+			cy := y
+			for cx >= cs.Width {
+				cx -= cs.Width
+				cy++
+			}
+			if cy < 0 || cy >= cs.Height || cx < 0 || cx >= cs.Width {
+				break
+			}
+			cell := &cs.Cells[cy*cs.Width+cx]
+			cell.Attr = attr
+			wrote++
+		}
+		return wrote
+	}
+	consoleVKForRune := func(r rune) uint16 {
+		switch r {
+		case '\b':
+			return 0x08
+		case '\t':
+			return 0x09
+		case '\n', '\r':
+			return 0x0D
+		case 0x1b:
+			return 0x1B
+		}
+		if r >= 'a' && r <= 'z' {
+			return uint16(r - 'a' + 'A')
+		}
+		if r >= 'A' && r <= 'Z' {
+			return uint16(r)
+		}
+		if r >= '0' && r <= '9' {
+			return uint16(r)
+		}
+		return uint16(r)
+	}
+	makeConsoleKeyEvent := func(r rune) consoleInputEvent {
+		ascii := byte(0)
+		if r >= 0 && r <= 0xFF {
+			ascii = byte(r)
+		}
+		u := uint16('?')
+		if r >= 0 && r <= 0xFFFF {
+			u = uint16(r)
+		}
+		return consoleInputEvent{
+			KeyDown:         true,
+			RepeatCount:     1,
+			VirtualKeyCode:  consoleVKForRune(r),
+			UnicodeChar:     u,
+			AsciiChar:       ascii,
+			ControlKeyState: 0,
+		}
+	}
+	makeSpecialConsoleKeyEvent := func(vk uint16, unicode rune) consoleInputEvent {
+		evt := makeConsoleKeyEvent(unicode)
+		evt.VirtualKeyCode = vk
+		if unicode == 0 {
+			evt.UnicodeChar = 0
+			evt.AsciiChar = 0
+		}
+		return evt
+	}
+	enqueueConsoleEvent := func(evt consoleInputEvent) {
+		consoleInputMu.Lock()
+		consoleInputQueue = append(consoleInputQueue, evt)
+		consoleInputCond.Broadcast()
+		consoleInputMu.Unlock()
+	}
+	writeConsoleInputRecord := func(addr uint64, evt consoleInputEvent) {
+		ctxBool := uint32(0)
+		if evt.KeyDown {
+			ctxBool = 1
+		}
+		mem.Write16(addr+0, keyEventRecordType)
+		mem.Write16(addr+2, 0)
+		mem.Write32(addr+4, ctxBool)
+		mem.Write16(addr+8, evt.RepeatCount)
+		mem.Write16(addr+10, evt.VirtualKeyCode)
+		mem.Write16(addr+12, evt.VirtualScanCode)
+		mem.Write16(addr+14, evt.UnicodeChar)
+		mem.Write32(addr+16, evt.ControlKeyState)
+	}
+	dequeueConsoleEvent := func(block bool) (consoleInputEvent, bool) {
+		consoleInputMu.Lock()
+		defer consoleInputMu.Unlock()
+		for len(consoleInputQueue) == 0 {
+			if !block {
+				return consoleInputEvent{}, false
+			}
+			consoleInputCond.Wait()
+		}
+		evt := consoleInputQueue[0]
+		consoleInputQueue = append(consoleInputQueue[:0], consoleInputQueue[1:]...)
+		return evt, true
+	}
+	peekConsoleEvents := func(limit int) []consoleInputEvent {
+		consoleInputMu.Lock()
+		defer consoleInputMu.Unlock()
+		if limit <= 0 || limit > len(consoleInputQueue) {
+			limit = len(consoleInputQueue)
+		}
+		out := make([]consoleInputEvent, limit)
+		copy(out, consoleInputQueue[:limit])
+		return out
+	}
+	readConsoleText := func(maxChars int, ansi bool) ([]byte, []uint16) {
+		if maxChars <= 0 {
+			return nil, nil
+		}
+		ans := make([]byte, 0, maxChars)
+		wide := make([]uint16, 0, maxChars)
+		for len(wide) < maxChars {
+			evt, ok := dequeueConsoleEvent(true)
+			if !ok {
+				break
+			}
+			if evt.UnicodeChar == 0 && evt.AsciiChar == 0 {
+				continue
+			}
+			ch := evt.UnicodeChar
+			if ch == '\r' {
+				ch = '\n'
+			}
+			wide = append(wide, ch)
+			if ansi {
+				b := evt.AsciiChar
+				if b == 0 {
+					b = '?'
+				}
+				if ch == '\n' {
+					b = '\n'
+				}
+				ans = append(ans, b)
+			}
+			if ch == '\n' {
+				break
+			}
+		}
+		return ans, wide
+	}
+	readConsoleEventFromReader := func() (consoleInputEvent, bool) {
+		if stdinReader == nil {
+			return consoleInputEvent{}, false
+		}
+		b, err := stdinReader.ReadByte()
+		if err != nil {
+			return consoleInputEvent{}, false
+		}
+		if b == 0x1b {
+			if stdinReader.Buffered() > 0 {
+				next, err := stdinReader.ReadByte()
+				if err != nil {
+					return makeSpecialConsoleKeyEvent(0x1B, 0x1b), true
+				}
+				if next == '[' || next == 'O' {
+					seq := []byte{next}
+					for stdinReader.Buffered() > 0 {
+						part, err := stdinReader.ReadByte()
+						if err != nil {
+							break
+						}
+						seq = append(seq, part)
+						if part >= 0x40 && part <= 0x7E {
+							break
+						}
+					}
+					if len(seq) >= 2 {
+						final := seq[len(seq)-1]
+						switch final {
+						case 'A':
+							return makeSpecialConsoleKeyEvent(0x26, 0), true
+						case 'B':
+							return makeSpecialConsoleKeyEvent(0x28, 0), true
+						case 'C':
+							return makeSpecialConsoleKeyEvent(0x27, 0), true
+						case 'D':
+							return makeSpecialConsoleKeyEvent(0x25, 0), true
+						case 'H':
+							return makeSpecialConsoleKeyEvent(0x24, 0), true
+						case 'F':
+							return makeSpecialConsoleKeyEvent(0x23, 0), true
+						case '~':
+							param := string(seq[1 : len(seq)-1])
+							switch param {
+							case "1", "7":
+								return makeSpecialConsoleKeyEvent(0x24, 0), true
+							case "4", "8":
+								return makeSpecialConsoleKeyEvent(0x23, 0), true
+							case "3":
+								return makeSpecialConsoleKeyEvent(0x2E, 0), true
+							}
+						}
+					}
+				} else {
+					_ = stdinReader.UnreadByte()
+				}
+			}
+			return makeSpecialConsoleKeyEvent(0x1B, 0x1b), true
+		}
+		if b < utf8.RuneSelf {
+			if b == '\r' {
+				b = '\n'
+			}
+			return makeConsoleKeyEvent(rune(b)), true
+		}
+		buf := []byte{b}
+		for !utf8.FullRune(buf) {
+			next, err := stdinReader.ReadByte()
+			if err != nil {
+				break
+			}
+			buf = append(buf, next)
+		}
+		r, _ := utf8.DecodeRune(buf)
+		if r == utf8.RuneError {
+			r = rune(buf[0])
+		}
+		return makeConsoleKeyEvent(r), true
+	}
+	go func() {
+		for {
+			evt, ok := readConsoleEventFromReader()
+			if !ok {
+				return
+			}
+			enqueueConsoleEvent(evt)
+		}
+	}()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		for range sigCh {
+			consoleCtrlMu.Lock()
+			ignore := consoleCtrlIgnore
+			hasAny := ignore || len(consoleCtrlHandlers) > 0
+			consoleCtrlMu.Unlock()
+			if hasAny {
+				evt := makeSpecialConsoleKeyEvent(0x03, 0x03)
+				evt.ControlKeyState = 0x0008
+				enqueueConsoleEvent(evt)
+			}
+		}
+	}()
 	readEnvironmentBlockA := func(addr uint64) map[string]string {
 		env := map[string]string{}
 		if addr == 0 {
@@ -1730,13 +2517,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetConsoleMode", func(ctx *ntapi.TrapContext) uint32 {
 		lpMode := ctx.Arg(1)
 		if lpMode != 0 {
-			ctx.Mem.Write32(lpMode, 0x0007) // ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+			ctx.Mem.Write32(lpMode, outputModeForHandle(ctx.Arg(0)))
 		}
 		ctx.SetReturn(1) // TRUE = is a console
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleMode", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "SetConsoleMode", 2, 1)
+		handle := ctx.Arg(0)
+		mode := uint32(ctx.Arg(1))
+		setOutputModeForHandle(handle, mode)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetCPInfo", func(ctx *ntapi.TrapContext) uint32 {
 		// codePage := ctx.Arg(0) - ignored, always return SBCS info
@@ -2043,11 +2834,15 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		var written int
 		switch hFile {
 		case 0x101: // stdout
-			written, _ = os.Stdout.Write(data)
+			written = writeConsoleString(uint64(hFile), string(data), data)
 		case 0x102: // stderr
-			written, _ = os.Stderr.Write(data)
+			written = writeConsoleString(uint64(hFile), string(data), data)
 		default:
 			obj := handles.Get(hFile)
+			if _, ok := obj.(*ntapi.ConsoleScreenBufferHandle); ok {
+				written = writeConsoleString(uint64(hFile), string(data), data)
+				break
+			}
 			// Named pipe write
 			if ph, ok := obj.(*ntapi.NamedPipeHandle); ok {
 				if ph.PipeWrite(data) {
@@ -2100,14 +2895,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			utf16Chars[i], _ = ctx.Mem.Read16(buf + i*2)
 		}
 		text := string(utf16Decode(utf16Chars))
-		switch handle {
-		case 0x101:
-			os.Stdout.WriteString(text)
-		case 0x102:
-			os.Stderr.WriteString(text)
-		default:
-			os.Stdout.WriteString(text)
-		}
+		writeConsoleString(handle, text, nil)
 		if lpWritten != 0 {
 			ctx.Mem.Write32(lpWritten, uint32(nChars))
 		}
@@ -2160,9 +2948,20 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "FreeEnvironmentStringsW", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "FreeEnvironmentStringsW", 1, 1)
 	})
-	// SetConsoleCtrlHandler: no-op
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleCtrlHandler", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "SetConsoleCtrlHandler", 2, 1)
+		handler := ctx.Arg(0)
+		add := ctx.Arg(1) != 0
+		consoleCtrlMu.Lock()
+		if handler == 0 {
+			consoleCtrlIgnore = add
+		} else if add {
+			consoleCtrlHandlers[handler] = struct{}{}
+		} else {
+			delete(consoleCtrlHandlers, handler)
+		}
+		consoleCtrlMu.Unlock()
+		ctx.SetReturn(1)
+		return 0
 	})
 	// EncodePointer/DecodePointer: just return the pointer as-is
 	d.RegisterAutoStubHandler(kernel32, "EncodePointer", func(ctx *ntapi.TrapContext) uint32 {
@@ -4758,16 +5557,15 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		buf := ctx.Arg(1)
 		nCharsToRead := uint32(ctx.Arg(2))
 		charsRead := ctx.Arg(3)
-		line, _ := stdinReader.ReadString('\n')
-		runes := []rune(line)
-		if uint32(len(runes)) > nCharsToRead {
-			runes = runes[:nCharsToRead]
+		_, wide := readConsoleText(int(nCharsToRead), false)
+		if uint32(len(wide)) > nCharsToRead {
+			wide = wide[:nCharsToRead]
 		}
-		for i, r := range runes {
-			ctx.Mem.Write16(buf+uint64(i)*2, uint16(r))
+		for i, r := range wide {
+			ctx.Mem.Write16(buf+uint64(i)*2, r)
 		}
 		if charsRead != 0 {
-			ctx.Mem.Write32(charsRead, uint32(len(runes)))
+			ctx.Mem.Write32(charsRead, uint32(len(wide)))
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -5079,9 +5877,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 	// GetConsoleScreenBufferInfo: return reasonable 80x25 defaults
 	d.RegisterAutoStubHandler(kernel32, "GetConsoleScreenBufferInfo", func(ctx *ntapi.TrapContext) uint32 {
+		cs := resolveConsoleState(ctx.Arg(0))
 		pInfo := ctx.Arg(1)
-		if pInfo != 0 {
-			cs := ntapi.GlobalConsole
+		if pInfo != 0 && cs != nil {
 			mem.Write16(pInfo+0, uint16(cs.Width))
 			mem.Write16(pInfo+2, uint16(cs.Height))
 			mem.Write16(pInfo+4, uint16(cs.CursorX))
@@ -5090,16 +5888,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			mem.Write16(pInfo+10, 0)
 			mem.Write16(pInfo+12, 0)
 			mem.Write16(pInfo+14, uint16(cs.Width-1))
-			mem.Write16(pInfo+16, 24)
+			mem.Write16(pInfo+16, uint16(cs.Height-1))
 			mem.Write16(pInfo+18, uint16(cs.Width))
-			mem.Write16(pInfo+20, 25)
+			mem.Write16(pInfo+20, uint16(cs.Height))
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	// GetConsoleWindow: return hctx.MainHWND for apps that need a window handle
 	d.RegisterAutoStubHandler(kernel32, "GetConsoleWindow", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetConsoleWindow", 0, uint64(hctx.MainHWND))
+		ctx.SetReturn(consolePseudoHWND)
+		return 0
 	})
 	// GetDiskFreeSpaceExA: use real host disk space via statfs
 	d.RegisterAutoStubHandler(kernel32, "GetDiskFreeSpaceExA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5166,15 +5965,15 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			// DWORDLONG ullTotalVirtual        +40
 			// DWORDLONG ullAvailVirtual        +48
 			// DWORDLONG ullAvailExtendedVirtual +56
-			mem.Write32(pBuf+0, 64)                        // dwLength
-			mem.Write32(pBuf+4, 40)                        // dwMemoryLoad (40%)
-			mem.Write64(pBuf+8, 8*1024*1024*1024)          // ullTotalPhys = 8 GB
-			mem.Write64(pBuf+16, 5*1024*1024*1024)         // ullAvailPhys = 5 GB
-			mem.Write64(pBuf+24, 16*1024*1024*1024)        // ullTotalPageFile = 16 GB
-			mem.Write64(pBuf+32, 12*1024*1024*1024)        // ullAvailPageFile = 12 GB
-			mem.Write64(pBuf+40, 0x00007FFFFFFEFFFF)       // ullTotalVirtual = ~128 TB
-			mem.Write64(pBuf+48, 0x00007FFFFFDEFFFF)       // ullAvailVirtual
-			mem.Write64(pBuf+56, 0)                        // ullAvailExtendedVirtual
+			mem.Write32(pBuf+0, 64)                  // dwLength
+			mem.Write32(pBuf+4, 40)                  // dwMemoryLoad (40%)
+			mem.Write64(pBuf+8, 8*1024*1024*1024)    // ullTotalPhys = 8 GB
+			mem.Write64(pBuf+16, 5*1024*1024*1024)   // ullAvailPhys = 5 GB
+			mem.Write64(pBuf+24, 16*1024*1024*1024)  // ullTotalPageFile = 16 GB
+			mem.Write64(pBuf+32, 12*1024*1024*1024)  // ullAvailPageFile = 12 GB
+			mem.Write64(pBuf+40, 0x00007FFFFFFEFFFF) // ullTotalVirtual = ~128 TB
+			mem.Write64(pBuf+48, 0x00007FFFFFDEFFFF) // ullAvailVirtual
+			mem.Write64(pBuf+56, 0)                  // ullAvailExtendedVirtual
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -5185,10 +5984,16 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0)                                           // FALSE
 		return 0
 	})
-	// SetConsoleTextAttribute: no-op (no real console)
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleTextAttribute", func(ctx *ntapi.TrapContext) uint32 {
+		handle := ctx.Arg(0)
 		attr := uint16(ctx.Arg(1))
-		ntapi.GlobalConsole.Attr = attr
+		cs := resolveConsoleState(handle)
+		if cs != nil {
+			cs.Attr = attr
+		}
+		if isVisibleConsoleState(cs) {
+			_, _ = os.Stdout.WriteString(attrToANSI(attr))
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5243,7 +6048,13 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "AllocConsole", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "AllocConsole", 0, 1)
+		consoleStateMu.Lock()
+		consoleAttached = true
+		consoleStateMu.Unlock()
+		emitConsoleTitle(consoleTitle)
+		refreshVisibleConsole(activeConsoleState)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "AllocateUserPhysicalPages", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "AllocateUserPhysicalPages", 3, 0)
@@ -5696,7 +6507,21 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "CreateBoundaryDescriptorW", 8, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateConsoleScreenBuffer", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CreateConsoleScreenBuffer", 5, uint64(0xFFFFFFFFFFFFFFFF))
+		sb := ntapi.NewConsoleScreenBuffer()
+		if sb.State != nil {
+			resizeConsoleState(sb.State, activeConsoleState.Width, activeConsoleState.Height)
+			sb.State.Attr = activeConsoleState.Attr
+			sb.State.Mode = outputModeForHandle(stdOutputHandleValue)
+			sb.State.Title = consoleTitle
+			sb.State.CursorVisible = activeConsoleState.CursorVisible
+			sb.State.CursorSize = activeConsoleState.CursorSize
+		}
+		h := handles.Alloc(sb)
+		consoleStateMu.Lock()
+		consoleOutputModes[uint64(h)] = sb.State.Mode
+		consoleStateMu.Unlock()
+		ctx.SetReturn(uint64(h))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateDirectoryA", func(ctx *ntapi.TrapContext) uint32 {
 		pathPtr := ctx.Arg(0)
@@ -6788,45 +7613,59 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(kernel32, "FillConsoleOutputAttribute", func(ctx *ntapi.TrapContext) uint32 {
 		// FillConsoleOutputAttribute(hConsole, wAttr, nLength, dwWriteCoord, lpNumWritten)
+		cs := resolveConsoleState(ctx.Arg(0))
 		attr := uint16(ctx.Arg(1))
 		n := int(ctx.Arg(2))
 		coord := ctx.Arg(3) // COORD as DWORD: low=X, high=Y
 		numWritten := ctx.Arg(4)
 		x := int(coord & 0xFFFF)
 		y := int((coord >> 16) & 0xFFFF)
-		wrote := ntapi.GlobalConsole.FillAttr(x, y, n, attr)
+		wrote := consoleFillStateAttrs(cs, x, y, n, attr)
 		if numWritten != 0 {
 			ctx.Mem.Write32(numWritten, uint32(wrote))
 		}
+		refreshVisibleConsole(cs)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FillConsoleOutputCharacterA", func(ctx *ntapi.TrapContext) uint32 {
 		// FillConsoleOutputCharacterA(hConsole, cChar, nLength, dwWriteCoord, lpNumWritten)
+		cs := resolveConsoleState(ctx.Arg(0))
 		ch := uint16(ctx.Arg(1) & 0xFF)
 		n := int(ctx.Arg(2))
 		coord := ctx.Arg(3)
 		numWritten := ctx.Arg(4)
 		x := int(coord & 0xFFFF)
 		y := int((coord >> 16) & 0xFFFF)
-		wrote := ntapi.GlobalConsole.FillChar(x, y, n, ch, ntapi.GlobalConsole.Attr)
+		attr := uint16(0x07)
+		if cs != nil {
+			attr = cs.Attr
+		}
+		wrote := consoleFillStateChars(cs, x, y, n, ch, attr)
 		if numWritten != 0 {
 			ctx.Mem.Write32(numWritten, uint32(wrote))
 		}
+		refreshVisibleConsole(cs)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FillConsoleOutputCharacterW", func(ctx *ntapi.TrapContext) uint32 {
+		cs := resolveConsoleState(ctx.Arg(0))
 		ch := uint16(ctx.Arg(1))
 		n := int(ctx.Arg(2))
 		coord := ctx.Arg(3)
 		numWritten := ctx.Arg(4)
 		x := int(coord & 0xFFFF)
 		y := int((coord >> 16) & 0xFFFF)
-		wrote := ntapi.GlobalConsole.FillChar(x, y, n, ch, ntapi.GlobalConsole.Attr)
+		attr := uint16(0x07)
+		if cs != nil {
+			attr = cs.Attr
+		}
+		wrote := consoleFillStateChars(cs, x, y, n, ch, attr)
 		if numWritten != 0 {
 			ctx.Mem.Write32(numWritten, uint32(wrote))
 		}
+		refreshVisibleConsole(cs)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7185,7 +8024,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FreeConsole", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "FreeConsole", 0, 1)
+		consoleStateMu.Lock()
+		consoleAttached = false
+		consoleStateMu.Unlock()
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FreeEnvironmentStringsA", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "FreeEnvironmentStringsA", 8, 1)
@@ -7606,23 +8449,23 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "GetConsoleProcessList", 2, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetConsoleScreenBufferInfoEx", func(ctx *ntapi.TrapContext) uint32 {
+		cs := resolveConsoleState(ctx.Arg(0))
 		pInfo := ctx.Arg(1)
-		if pInfo != 0 {
-			cs := ntapi.GlobalConsole
-			ctx.Mem.Write32(pInfo+0, 96)                  // cbSize = sizeof(CONSOLE_SCREEN_BUFFER_INFOEX)
-			ctx.Mem.Write16(pInfo+4, uint16(cs.Width))    // dwSize.X
-			ctx.Mem.Write16(pInfo+6, uint16(cs.Height))   // dwSize.Y
-			ctx.Mem.Write16(pInfo+8, uint16(cs.CursorX))  // dwCursorPosition.X
-			ctx.Mem.Write16(pInfo+10, uint16(cs.CursorY)) // dwCursorPosition.Y
-			ctx.Mem.Write16(pInfo+12, cs.Attr)            // wAttributes
-			ctx.Mem.Write16(pInfo+14, 0)                  // srWindow.Left
-			ctx.Mem.Write16(pInfo+16, 0)                  // srWindow.Top
-			ctx.Mem.Write16(pInfo+18, uint16(cs.Width-1)) // srWindow.Right
-			ctx.Mem.Write16(pInfo+20, 24)                 // srWindow.Bottom
-			ctx.Mem.Write16(pInfo+22, uint16(cs.Width))   // dwMaximumWindowSize.X
-			ctx.Mem.Write16(pInfo+24, 25)                 // dwMaximumWindowSize.Y
-			ctx.Mem.Write16(pInfo+26, 0)                  // wPopupAttributes
-			ctx.Mem.Write32(pInfo+28, 0)                  // bFullscreenSupported
+		if pInfo != 0 && cs != nil {
+			ctx.Mem.Write32(pInfo+0, 96)                   // cbSize = sizeof(CONSOLE_SCREEN_BUFFER_INFOEX)
+			ctx.Mem.Write16(pInfo+4, uint16(cs.Width))     // dwSize.X
+			ctx.Mem.Write16(pInfo+6, uint16(cs.Height))    // dwSize.Y
+			ctx.Mem.Write16(pInfo+8, uint16(cs.CursorX))   // dwCursorPosition.X
+			ctx.Mem.Write16(pInfo+10, uint16(cs.CursorY))  // dwCursorPosition.Y
+			ctx.Mem.Write16(pInfo+12, cs.Attr)             // wAttributes
+			ctx.Mem.Write16(pInfo+14, 0)                   // srWindow.Left
+			ctx.Mem.Write16(pInfo+16, 0)                   // srWindow.Top
+			ctx.Mem.Write16(pInfo+18, uint16(cs.Width-1))  // srWindow.Right
+			ctx.Mem.Write16(pInfo+20, uint16(cs.Height-1)) // srWindow.Bottom
+			ctx.Mem.Write16(pInfo+22, uint16(cs.Width))    // dwMaximumWindowSize.X
+			ctx.Mem.Write16(pInfo+24, uint16(cs.Height))   // dwMaximumWindowSize.Y
+			ctx.Mem.Write16(pInfo+26, 0)                   // wPopupAttributes
+			ctx.Mem.Write32(pInfo+28, 0)                   // bFullscreenSupported
 			// ColorTable[16] at offset 32: fill with default 16-color palette
 			palette := []uint32{
 				0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xC0C0C0,
@@ -7638,7 +8481,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetConsoleTitleA", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(0)
 		nSz := ctx.Arg(1)
-		title := ntapi.GlobalConsole.Title
+		title := consoleTitle
 		if buf != 0 && nSz > 0 {
 			b := []byte(title)
 			if uint64(len(b)+1) > nSz {
@@ -7652,7 +8495,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetConsoleTitleW", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(0)
 		nSz := ctx.Arg(1)
-		title := ntapi.GlobalConsole.Title
+		title := consoleTitle
 		ws := utf16Encode(title)
 		if buf != 0 && nSz > 0 {
 			limit := uint64(len(ws))
@@ -8611,7 +9454,10 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		// BOOL GetNumberOfConsoleInputEvents(HANDLE hConsoleInput, LPDWORD lpcNumberOfEvents)
 		lpNumEvents := ctx.Arg(1)
 		if lpNumEvents != 0 {
-			ctx.Mem.Write32(lpNumEvents, 0) // no pending input events
+			consoleInputMu.Lock()
+			n := uint32(len(consoleInputQueue))
+			consoleInputMu.Unlock()
+			ctx.Mem.Write32(lpNumEvents, n)
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -10809,9 +11655,15 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		// ReactOS: dll/win32/kernel32/client/console.c
 		// BOOL PeekConsoleInputW(HANDLE hConsoleInput, PINPUT_RECORD lpBuffer,
 		//     DWORD nLength, LPDWORD lpNumberOfEventsRead)
+		lpBuffer := ctx.Arg(1)
+		nLength := int(ctx.Arg(2))
 		lpNumRead := ctx.Arg(3)
+		events := peekConsoleEvents(nLength)
+		for i, evt := range events {
+			writeConsoleInputRecord(lpBuffer+uint64(i)*20, evt)
+		}
 		if lpNumRead != 0 {
-			ctx.Mem.Write32(lpNumRead, 0) // no events peeked
+			ctx.Mem.Write32(lpNumRead, uint32(len(events)))
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -11081,15 +11933,15 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		buf := ctx.Arg(1)
 		nCharsToRead := uint32(ctx.Arg(2))
 		charsRead := ctx.Arg(3)
-		line, _ := stdinReader.ReadString('\n')
-		if uint32(len(line)) > nCharsToRead {
-			line = line[:nCharsToRead]
+		ansi, _ := readConsoleText(int(nCharsToRead), true)
+		if uint32(len(ansi)) > nCharsToRead {
+			ansi = ansi[:nCharsToRead]
 		}
-		for i := 0; i < len(line); i++ {
-			ctx.Mem.Write8(buf+uint64(i), line[i])
+		for i := 0; i < len(ansi); i++ {
+			ctx.Mem.Write8(buf+uint64(i), ansi[i])
 		}
 		if charsRead != 0 {
-			ctx.Mem.Write32(charsRead, uint32(len(line)))
+			ctx.Mem.Write32(charsRead, uint32(len(ansi)))
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -11130,24 +11982,26 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(kernel32, "ReadConsoleInputW", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(1)
+		nLength := int(ctx.Arg(2))
 		lpEventsRead := ctx.Arg(3)
-		b := make([]byte, 1)
-		n, _ := os.Stdin.Read(b)
-		if n == 0 {
+		if nLength <= 0 {
 			if lpEventsRead != 0 {
 				ctx.Mem.Write32(lpEventsRead, 0)
 			}
 			ctx.SetReturn(1)
 			return 0
 		}
-		ch := uint16(b[0])
-		ctx.Mem.Write16(buf+0, 0x0001) // EventType = KEY_EVENT
-		ctx.Mem.Write32(buf+4, 1)      // bKeyDown = TRUE
-		ctx.Mem.Write16(buf+8, 1)      // wRepeatCount
-		ctx.Mem.Write16(buf+10, ch)    // wVirtualKeyCode
-		ctx.Mem.Write16(buf+14, ch)    // UnicodeChar
+		eventsRead := 0
+		for eventsRead < nLength {
+			evt, ok := dequeueConsoleEvent(eventsRead == 0)
+			if !ok {
+				break
+			}
+			writeConsoleInputRecord(buf+uint64(eventsRead)*20, evt)
+			eventsRead++
+		}
 		if lpEventsRead != 0 {
-			ctx.Mem.Write32(lpEventsRead, 1)
+			ctx.Mem.Write32(lpEventsRead, uint32(eventsRead))
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -12421,7 +13275,21 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "SetComputerNameW", 8, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleActiveScreenBuffer", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "SetConsoleActiveScreenBuffer", 1, 1)
+		handle := ntapi.Handle(ctx.Arg(0))
+		sb, ok := handles.Get(handle).(*ntapi.ConsoleScreenBufferHandle)
+		if !ok || sb == nil || sb.State == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		consoleStateMu.Lock()
+		activeConsoleState = sb.State
+		if mode, ok := consoleOutputModes[uint64(handle)]; ok {
+			consoleOutputModes[stdOutputHandleValue] = mode
+		}
+		consoleStateMu.Unlock()
+		refreshVisibleConsole(sb.State)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleCP", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "SetConsoleCP", 1, 1)
@@ -12449,11 +13317,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleCursorPosition", func(ctx *ntapi.TrapContext) uint32 {
 		// SetConsoleCursorPosition(hConsole, dwCursorPosition)
 		// dwCursorPosition is passed as a DWORD: X in low 16 bits, Y in high 16
+		cs := resolveConsoleState(ctx.Arg(0))
 		coord := ctx.Arg(1)
 		x := int(coord & 0xFFFF)
 		y := int((coord >> 16) & 0xFFFF)
-		ntapi.GlobalConsole.CursorX = x
-		ntapi.GlobalConsole.CursorY = y
+		if cs != nil {
+			cs.CursorX = clampInt(x, 0, cs.Width-1)
+			cs.CursorY = clampInt(y, 0, cs.Height-1)
+			if isVisibleConsoleState(cs) {
+				_, _ = os.Stdout.WriteString(fmt.Sprintf("\x1b[%d;%dH", cs.CursorY+1, cs.CursorX+1))
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -12509,18 +13383,35 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "SetConsoleScreenBufferInfoEx", 2, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleScreenBufferSize", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "SetConsoleScreenBufferSize", 2, 1)
+		cs := resolveConsoleState(ctx.Arg(0))
+		coord := ctx.Arg(1)
+		w := int(coord & 0xFFFF)
+		h := int((coord >> 16) & 0xFFFF)
+		resizeConsoleState(cs, w, h)
+		refreshVisibleConsole(cs)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleTitleA", func(ctx *ntapi.TrapContext) uint32 {
 		if p := ctx.Arg(0); p != 0 {
-			ntapi.GlobalConsole.Title = readGuestString(p)
+			consoleTitle = readGuestString(p)
+			ntapi.GlobalConsole.Title = consoleTitle
+			if activeConsoleState != nil {
+				activeConsoleState.Title = consoleTitle
+			}
+			emitConsoleTitle(consoleTitle)
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleTitleW", func(ctx *ntapi.TrapContext) uint32 {
 		if p := ctx.Arg(0); p != 0 {
-			ntapi.GlobalConsole.Title = readGuestUTF16(p)
+			consoleTitle = readGuestUTF16(p)
+			ntapi.GlobalConsole.Title = consoleTitle
+			if activeConsoleState != nil {
+				activeConsoleState.Title = consoleTitle
+			}
+			emitConsoleTitle(consoleTitle)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -14006,14 +14897,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 				b, _ := ctx.Mem.Read8(buf + i)
 				data[i] = b
 			}
-			switch handle {
-			case 0x101:
-				os.Stdout.Write(data)
-			case 0x102:
-				os.Stderr.Write(data)
-			default:
-				os.Stdout.Write(data)
-			}
+			writeConsoleString(handle, string(data), data)
 		}
 		if lpWritten != 0 {
 			ctx.Mem.Write32(lpWritten, uint32(nChars))
