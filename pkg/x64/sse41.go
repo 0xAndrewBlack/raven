@@ -40,6 +40,25 @@ func satSigned16(v int32) int16 {
 	return int16(v)
 }
 
+func crc32cByte(crc uint32, b byte) uint32 {
+	crc ^= uint32(b)
+	for i := 0; i < 8; i++ {
+		if crc&1 != 0 {
+			crc = (crc >> 1) ^ 0x82F63B78
+		} else {
+			crc >>= 1
+		}
+	}
+	return crc
+}
+
+func crc32cUpdate(crc uint32, value uint64, size int) uint32 {
+	for i := 0; i < size; i++ {
+		crc = crc32cByte(crc, byte(value>>(uint(i)*8)))
+	}
+	return crc
+}
+
 // dispatch0F38 handles the 66 0F 38 xx family (SSE4.1 integer ops).
 func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 	op3, err := c.fetch8()
@@ -771,6 +790,98 @@ func (c *CPU) dispatch0F38(pfx *prefixState, startRIP uint64) error {
 		}
 		c.XMM[dst] = c.aesDecLastRound(c.XMM[dst], src)
 		return nil
+
+	// MOVBE r16/r32/r64, m16/m32/m64 (0F 38 F0)
+	// CRC32 r32, r/m8 (F2 0F 38 F0)
+	case 0xF0:
+		m, err := c.decodeModRM(pfx)
+		if err != nil {
+			return err
+		}
+		if pfx.repne {
+			src, err := c.readRM(m, pfx, 1)
+			if err != nil {
+				return err
+			}
+			crc := crc32cUpdate(uint32(c.Regs[m.reg]), src, 1)
+			c.writeRegSized(m.reg, 4, uint64(crc))
+			return nil
+		}
+		if m.mod == 3 {
+			return fmt.Errorf("invalid MOVBE load register form at RIP=0x%x", startRIP)
+		}
+		addr, _, err := c.resolveRMAddr(m, pfx)
+		if err != nil {
+			return err
+		}
+		size := 4
+		if pfx.rexW() {
+			size = 8
+		} else if pfx.op66 {
+			size = 2
+		}
+		val, err := c.readMem(addr, size)
+		if err != nil {
+			return err
+		}
+		switch size {
+		case 2:
+			val = uint64(bits.ReverseBytes16(uint16(val)))
+		case 4:
+			val = uint64(bits.ReverseBytes32(uint32(val)))
+		case 8:
+			val = bits.ReverseBytes64(val)
+		}
+		c.writeRegSized(m.reg, size, val)
+		return nil
+
+	// MOVBE m16/m32/m64, r16/r32/r64 (0F 38 F1)
+	// CRC32 r32/r64, r/m16/r/m32/r/m64 (F2 0F 38 F1)
+	case 0xF1:
+		m, err := c.decodeModRM(pfx)
+		if err != nil {
+			return err
+		}
+		if pfx.repne {
+			srcSize := 4
+			dstSize := 4
+			if pfx.rexW() {
+				srcSize = 8
+				dstSize = 8
+			} else if pfx.op66 {
+				srcSize = 2
+			}
+			src, err := c.readRM(m, pfx, srcSize)
+			if err != nil {
+				return err
+			}
+			crc := crc32cUpdate(uint32(c.Regs[m.reg]), src, srcSize)
+			c.writeRegSized(m.reg, dstSize, uint64(crc))
+			return nil
+		}
+		if m.mod == 3 {
+			return fmt.Errorf("invalid MOVBE store register form at RIP=0x%x", startRIP)
+		}
+		addr, _, err := c.resolveRMAddr(m, pfx)
+		if err != nil {
+			return err
+		}
+		size := 4
+		if pfx.rexW() {
+			size = 8
+		} else if pfx.op66 {
+			size = 2
+		}
+		val := c.readRegSized(m.reg, size)
+		switch size {
+		case 2:
+			val = uint64(bits.ReverseBytes16(uint16(val)))
+		case 4:
+			val = uint64(bits.ReverseBytes32(uint32(val)))
+		case 8:
+			val = bits.ReverseBytes64(val)
+		}
+		return c.writeMem(addr, size, val)
 
 	default:
 		return fmt.Errorf("unimplemented 0F 38 %02X at RIP=0x%x", op3, startRIP)

@@ -47,6 +47,7 @@ const (
 const (
 	xcr0Value         = 0x7
 	xsaveHeaderOffset = 0x200
+	xsaveYMMHiOffset  = 0x240
 	xsaveXStateBV     = 0x7
 )
 
@@ -64,7 +65,8 @@ type CPU struct {
 	gsBase  uint64
 
 	// SSE/AVX registers (128-bit XMM0-XMM15, stored as two uint64).
-	XMM [16][2]uint64
+	XMM    [16][2]uint64
+	YMM_hi [16][2]uint64
 
 	// x87 FPU state
 	fpuST  [8]float64 // ST(0)-ST(7) physical register file
@@ -275,6 +277,14 @@ func (p *prefixState) rexR() bool { return p.hasREX && p.rex&0x04 != 0 }
 func (p *prefixState) rexX() bool { return p.hasREX && p.rex&0x02 != 0 }
 func (p *prefixState) rexB() bool { return p.hasREX && p.rex&0x01 != 0 }
 
+type vexState struct {
+	vvvv   int
+	L      bool
+	pp     byte
+	mapSel byte
+	W      bool
+}
+
 func (c *CPU) fetch8() (byte, error) {
 	pageBase := c.RIP &^ (mmu.PageSize - 1)
 	off := c.RIP - pageBase
@@ -391,10 +401,143 @@ func (c *CPU) step() error {
 			pfx.rex = b
 			pfx.hasREX = true
 		default:
+			if b == 0xC4 || b == 0xC5 {
+				vex, err := c.decodeVEXPrefix(b, &pfx, startRIP)
+				if err != nil {
+					return err
+				}
+				return c.dispatchVEX(vex, &pfx, startRIP)
+			}
 			// Not a prefix - this is the opcode byte
 			return c.dispatch(b, &pfx, startRIP)
 		}
 	}
+}
+
+func (c *CPU) decodeVEXPrefix(op byte, pfx *prefixState, startRIP uint64) (*vexState, error) {
+	pfx.rex = 0x40
+	pfx.hasREX = true
+
+	switch op {
+	case 0xC5:
+		b2, err := c.fetch8()
+		if err != nil {
+			return nil, err
+		}
+		if b2&0x80 == 0 {
+			pfx.rex |= 0x04
+		}
+		return &vexState{
+			vvvv:   int((^b2 >> 3) & 0x0F),
+			L:      b2&0x04 != 0,
+			pp:     b2 & 0x03,
+			mapSel: 1,
+		}, nil
+
+	case 0xC4:
+		b2, err := c.fetch8()
+		if err != nil {
+			return nil, err
+		}
+		b3, err := c.fetch8()
+		if err != nil {
+			return nil, err
+		}
+		if b2&0x80 == 0 {
+			pfx.rex |= 0x04
+		}
+		if b2&0x40 == 0 {
+			pfx.rex |= 0x02
+		}
+		if b2&0x20 == 0 {
+			pfx.rex |= 0x01
+		}
+		if b3&0x80 != 0 {
+			pfx.rex |= 0x08
+		}
+		mapSel := b2 & 0x1F
+		if mapSel < 1 || mapSel > 3 {
+			return nil, fmt.Errorf("unsupported VEX map 0x%02X at RIP=0x%x", mapSel, startRIP)
+		}
+		return &vexState{
+			vvvv:   int((^b3 >> 3) & 0x0F),
+			L:      b3&0x04 != 0,
+			pp:     b3 & 0x03,
+			mapSel: mapSel,
+			W:      b3&0x80 != 0,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("invalid VEX prefix 0x%02X at RIP=0x%x", op, startRIP)
+}
+
+func (c *CPU) peekVEXDestReg(pfx *prefixState) (int, error) {
+	b, err := c.mem.Read8(c.RIP)
+	if err != nil {
+		return 0, err
+	}
+	return regIndex((b>>3)&7, pfx.rexR()), nil
+}
+
+func (c *CPU) dispatchVEX(vex *vexState, pfx *prefixState, startRIP uint64) error {
+	pfx.op66 = false
+	pfx.repe = false
+	pfx.repne = false
+	switch vex.pp {
+	case 1:
+		pfx.op66 = true
+	case 2:
+		pfx.repe = true
+	case 3:
+		pfx.repne = true
+	}
+	if vex.W {
+		pfx.rex |= 0x08
+	}
+	pfx.hasREX = true
+
+	_, err := c.fetch8()
+	if err != nil {
+		return err
+	}
+
+	var dest int
+	var savedXMM [2]uint64
+	var savedYMMHi [2]uint64
+	if vex.vvvv != 0x0F {
+		dest, err = c.peekVEXDestReg(pfx)
+		if err != nil {
+			return err
+		}
+		savedXMM = c.XMM[dest]
+		savedYMMHi = c.YMM_hi[dest]
+		c.XMM[dest] = c.XMM[vex.vvvv]
+		c.YMM_hi[dest] = c.YMM_hi[vex.vvvv]
+	}
+
+	c.RIP--
+
+	switch vex.mapSel {
+	case 1:
+		err = c.dispatch0F(pfx, startRIP)
+	case 2:
+		err = c.dispatch0F38(pfx, startRIP)
+	case 3:
+		err = c.dispatch0F3A(pfx, startRIP)
+	default:
+		err = fmt.Errorf("unsupported VEX map 0x%02X at RIP=0x%x", vex.mapSel, startRIP)
+	}
+	if err != nil {
+		if vex.vvvv != 0x0F {
+			c.XMM[dest] = savedXMM
+			c.YMM_hi[dest] = savedYMMHi
+		}
+		return err
+	}
+	if !vex.L && vex.vvvv != 0x0F {
+		c.YMM_hi[dest] = [2]uint64{}
+	}
+	return nil
 }
 
 // operandSize returns the effective operand size in bytes.
@@ -740,6 +883,15 @@ func (c *CPU) execXSAVE(addr uint64) error {
 	if err := c.mem.Write64(addr+xsaveHeaderOffset+0x008, 0); err != nil {
 		return err
 	}
+	for i := 0; i < 16; i++ {
+		slot := addr + xsaveYMMHiOffset + uint64(i)*16
+		if err := c.mem.Write64(slot, c.YMM_hi[i][0]); err != nil {
+			return err
+		}
+		if err := c.mem.Write64(slot+8, c.YMM_hi[i][1]); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -779,6 +931,18 @@ func (c *CPU) execXRSTOR(addr uint64) error {
 			return err
 		}
 		c.XMM[i] = [2]uint64{lo, hi}
+	}
+	for i := 0; i < 16; i++ {
+		slot := addr + xsaveYMMHiOffset + uint64(i)*16
+		lo, err := c.mem.Read64(slot)
+		if err != nil {
+			return err
+		}
+		hi, err := c.mem.Read64(slot + 8)
+		if err != nil {
+			return err
+		}
+		c.YMM_hi[i] = [2]uint64{lo, hi}
 	}
 	return nil
 }
@@ -2045,13 +2209,43 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		if m.mod != 3 {
-			return fmt.Errorf("unimplemented 0F C7 memory form /%d at RIP=0x%x", (m.raw>>3)&7, startRIP)
-		}
 		switch (m.raw >> 3) & 7 {
+		case 1: // CMPXCHG16B m128
+			if !pfx.rexW() || m.mod == 3 {
+				return fmt.Errorf("unimplemented 0F C7 /%02X at RIP=0x%x", m.raw, startRIP)
+			}
+			addr, _, err := c.resolveRMAddr(m, pfx)
+			if err != nil {
+				return err
+			}
+			lo, err := c.mem.Read64(addr)
+			if err != nil {
+				return err
+			}
+			hi, err := c.mem.Read64(addr + 8)
+			if err != nil {
+				return err
+			}
+			if c.Regs[RAX] == lo && c.Regs[RDX] == hi {
+				c.Rflags |= flagZF
+				if err := c.mem.Write64(addr, c.Regs[RBX]); err != nil {
+					return err
+				}
+				return c.mem.Write64(addr+8, c.Regs[RCX])
+			}
+			c.Rflags &^= flagZF
+			c.Regs[RAX] = lo
+			c.Regs[RDX] = hi
+			return nil
 		case 6: // RDRAND
+			if m.mod != 3 {
+				return fmt.Errorf("unimplemented 0F C7 memory form /%d at RIP=0x%x", (m.raw>>3)&7, startRIP)
+			}
 			return c.execRandInstruction(m.rm, size)
 		case 7: // RDSEED
+			if m.mod != 3 {
+				return fmt.Errorf("unimplemented 0F C7 memory form /%d at RIP=0x%x", (m.raw>>3)&7, startRIP)
+			}
 			return c.execRandInstruction(m.rm, size)
 		default:
 			return fmt.Errorf("unimplemented 0F C7 /%02X at RIP=0x%x", m.raw, startRIP)
@@ -2088,11 +2282,12 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 		case 1: // family/model/stepping + feature flags
 			c.Regs[RAX] = 0x000506e3 // family 6, model 94 (Skylake)
 			c.Regs[RBX] = 0x00100800
-			c.Regs[RCX] = 0x67dafbbf // SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT - no AVX (VEX prefix not decoded)
-			c.Regs[RDX] = 0xbfebfbff // FPU, SSE, SSE2, etc.
+			c.Regs[RCX] = 0x67dafbbf | (1 << 26) | (1 << 27) | (1 << 28) // SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, XSAVE, OSXSAVE, AVX
+			c.Regs[RDX] = 0xbfebfbff                                     // FPU, SSE, SSE2, etc.
 		case 7: // extended features
 			c.Regs[RAX] = 0
-			c.Regs[RBX] = 0x00000008 // BMI1 only (no AVX2, no BMI2)
+			c.Regs[RBX] = 0
+			// TODO: BMI1/BMI2 requires VEX prefix support
 			c.Regs[RCX] = 0
 			c.Regs[RDX] = 0
 		case 0x80000000: // max extended leaf
