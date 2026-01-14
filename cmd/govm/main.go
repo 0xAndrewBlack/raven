@@ -4707,6 +4707,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- msimg32.dll ---
 	delayReg(func() { registerMsimg32Handlers(hctx) })
 
+	// --- msi.dll ---
+	delayReg(func() { registerMsiHandlers(hctx) })
+
 	// --- psapi.dll ---
 	delayReg(func() { registerPsapiHandlers(hctx) })
 

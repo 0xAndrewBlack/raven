@@ -188,3 +188,43 @@ func (w *TpWait) TrackCallback() func() {
 	w.Pending.Add(1)
 	return func() { w.Pending.Done() }
 }
+
+// TpIo is a Win32 thread pool I/O object (PTP_IO).
+// Wine reference: threadpool.c struct threadpool_object (type=TP_OBJECT_TYPE_IO)
+type TpIo struct {
+	File     Handle
+	Callback uint64 // guest PIO_APC_ROUTINE-like callback pointer
+	Context  uint64 // guest PVOID context
+
+	Pending sync.WaitGroup // tracks in-flight callbacks
+	started int32          // atomic count of StartThreadpoolIo calls
+	closed  int32          // atomic: 1 = shutdown
+}
+
+func (h *TpIo) handleType() string { return "tp_io" }
+
+// IsClosed returns whether the I/O object has been shut down.
+func (t *TpIo) IsClosed() bool { return atomic.LoadInt32(&t.closed) != 0 }
+
+// Shutdown marks the I/O object as closed and clears pending starts.
+func (t *TpIo) Shutdown() {
+	atomic.StoreInt32(&t.closed, 1)
+	atomic.StoreInt32(&t.started, 0)
+}
+
+// Start records a StartThreadpoolIo call.
+func (t *TpIo) Start() bool {
+	if t.IsClosed() {
+		return false
+	}
+	atomic.AddInt32(&t.started, 1)
+	return true
+}
+
+// CancelPending clears any unconsumed StartThreadpoolIo bookkeeping.
+func (t *TpIo) CancelPending() {
+	atomic.StoreInt32(&t.started, 0)
+}
+
+// WaitAll blocks until all in-flight callbacks complete.
+func (t *TpIo) WaitAll() { t.Pending.Wait() }

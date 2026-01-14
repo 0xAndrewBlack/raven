@@ -1600,6 +1600,19 @@ func (ht *HandleTable) GetTpWait(h Handle) *TpWait {
 	return tw
 }
 
+// GetTpIo returns the TpIo for a handle, or nil.
+func (ht *HandleTable) GetTpIo(h Handle) *TpIo {
+	obj := ht.Get(h)
+	if obj == nil {
+		return nil
+	}
+	tio, ok := obj.(*TpIo)
+	if !ok {
+		return nil
+	}
+	return tio
+}
+
 // ======================== TIMER QUEUE TIMERS ========================
 
 // TimerQueueTimer represents a CreateTimerQueueTimer timer.

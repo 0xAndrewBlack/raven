@@ -249,14 +249,16 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(advapi32, "GetUserNameW", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(0)
 		size := ctx.Arg(1)
-		name := "user"
+		name := "User"
 		if size != 0 {
 			ctx.Mem.Write32(size, uint32(len(name)+1))
 		}
-		for i, ch := range name {
-			ctx.Mem.Write16(buf+uint64(i*2), uint16(ch))
+		if buf != 0 {
+			for i, ch := range name {
+				ctx.Mem.Write16(buf+uint64(i*2), uint16(ch))
+			}
+			ctx.Mem.Write16(buf+uint64(len(name)*2), 0)
 		}
-		ctx.Mem.Write16(buf+uint64(len(name)*2), 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -1421,6 +1423,102 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return
 	}
 	_ = advapi32
+	const (
+		processTokenHandle          uint64 = 0xF0000001
+		threadTokenHandle           uint64 = 0xF0000002
+		tokenErrorInsufficientBuffer       = 122
+	)
+	setLastError := func(ctx *ntapi.TrapContext, code uint32) {
+		if ctx.State != nil && ctx.State.TEBAddr != 0 {
+			ctx.Mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, code)
+		}
+	}
+	fixedUserSID := []byte{
+		1, 5,
+		0, 0, 0, 0, 0, 5,
+		21, 0, 0, 0,
+		0xD2, 0x02, 0x96, 0x49,
+		0xD2, 0x02, 0x96, 0x49,
+		0xD2, 0x02, 0x96, 0x49,
+		0xE8, 0x03, 0x00, 0x00,
+	}
+	adminGroupSID := []byte{
+		1, 2,
+		0, 0, 0, 0, 0, 5,
+		32, 0, 0, 0,
+		0x20, 0x02, 0x00, 0x00,
+	}
+	highIntegritySID := []byte{
+		1, 1,
+		0, 0, 0, 0, 0, 16,
+		0x00, 0x30, 0x00, 0x00,
+	}
+	privilegeNameToLUID := map[string]uint64{
+		"SeDebugPrivilege":         20,
+		"SeShutdownPrivilege":      19,
+		"SeBackupPrivilege":        17,
+		"SeRestorePrivilege":       18,
+		"SeTakeOwnershipPrivilege": 9,
+		"SeChangeNotifyPrivilege":  23,
+	}
+	luidToPrivilegeName := map[uint64]string{}
+	for name, luid := range privilegeNameToLUID {
+		luidToPrivilegeName[luid] = name
+	}
+	commonPrivilegeLUIDs := []uint64{
+		privilegeNameToLUID["SeDebugPrivilege"],
+		privilegeNameToLUID["SeShutdownPrivilege"],
+		privilegeNameToLUID["SeBackupPrivilege"],
+		privilegeNameToLUID["SeRestorePrivilege"],
+		privilegeNameToLUID["SeTakeOwnershipPrivilege"],
+		privilegeNameToLUID["SeChangeNotifyPrivilege"],
+	}
+	newSyntheticToken := func() *ntapi.TokenHandle {
+		privs := make(map[uint64]bool, len(commonPrivilegeLUIDs))
+		for _, luid := range commonPrivilegeLUIDs {
+			privs[luid] = true
+		}
+		return &ntapi.TokenHandle{
+			UserSID:         append([]byte(nil), fixedUserSID...),
+			PrimaryGroupSID: append([]byte(nil), adminGroupSID...),
+			Groups:          [][]byte{append([]byte(nil), adminGroupSID...)},
+			Privileges:      privs,
+			Restricted:      false,
+			Elevated:        true,
+			IntegrityLevel:  12288,
+		}
+	}
+	tokenForHandle := func(h uint64) *ntapi.TokenHandle {
+		switch h {
+		case 0, processTokenHandle, threadTokenHandle:
+			return newSyntheticToken()
+		default:
+			if tok := handles.GetToken(ntapi.Handle(h)); tok != nil {
+				cp := tok.Clone()
+				if len(cp.UserSID) == 0 {
+					cp.UserSID = append([]byte(nil), fixedUserSID...)
+				}
+				if len(cp.PrimaryGroupSID) == 0 {
+					cp.PrimaryGroupSID = append([]byte(nil), adminGroupSID...)
+				}
+				if len(cp.Groups) == 0 {
+					cp.Groups = [][]byte{append([]byte(nil), adminGroupSID...)}
+				}
+				if len(cp.Privileges) == 0 {
+					cp.Privileges = make(map[uint64]bool, len(commonPrivilegeLUIDs))
+					for _, luid := range commonPrivilegeLUIDs {
+						cp.Privileges[luid] = true
+					}
+				}
+				if cp.IntegrityLevel == 0 {
+					cp.IntegrityLevel = 12288
+				}
+				cp.Elevated = true
+				return cp
+			}
+			return newSyntheticToken()
+		}
+	}
 
 	d.RegisterAutoStubHandler(advapi32, "AllocateAndInitializeSid", func(ctx *ntapi.TrapContext) uint32 {
 		// Allocate a minimal SID in guest memory
@@ -1470,48 +1568,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		namePtr := ctx.Arg(1)
 		luidPtr := ctx.Arg(2)
 		name := readGuestUTF16(namePtr)
-		// Map known privilege names to LUIDs (from ntddk.h / winnt.h)
-		luidMap := map[string]uint64{
-			"SeCreateTokenPrivilege":          2,
-			"SeAssignPrimaryTokenPrivilege":   3,
-			"SeLockMemoryPrivilege":           4,
-			"SeIncreaseQuotaPrivilege":        5,
-			"SeMachineAccountPrivilege":       6,
-			"SeTcbPrivilege":                  7,
-			"SeSecurityPrivilege":             8,
-			"SeTakeOwnershipPrivilege":        9,
-			"SeLoadDriverPrivilege":           10,
-			"SeSystemProfilePrivilege":        11,
-			"SeSystemtimePrivilege":           12,
-			"SeProfileSingleProcessPrivilege": 13,
-			"SeIncreaseBasePriorityPrivilege": 14,
-			"SeCreatePagefilePrivilege":       15,
-			"SeCreatePermanentPrivilege":      16,
-			"SeBackupPrivilege":               17,
-			"SeRestorePrivilege":              18,
-			"SeShutdownPrivilege":             19,
-			"SeDebugPrivilege":                20,
-			"SeAuditPrivilege":                21,
-			"SeSystemEnvironmentPrivilege":    22,
-			"SeChangeNotifyPrivilege":         23,
-			"SeRemoteShutdownPrivilege":       24,
-			"SeUndockPrivilege":               25,
-			"SeSyncAgentPrivilege":            26,
-			"SeEnableDelegationPrivilege":     27,
-			"SeManageVolumePrivilege":         28,
-			"SeImpersonatePrivilege":          29,
-			"SeCreateGlobalPrivilege":         30,
-			"SeTrustedCredManAccessPrivilege": 31,
-			"SeRelabelPrivilege":              32,
-			"SeIncreaseWorkingSetPrivilege":   33,
-			"SeTimeZonePrivilege":             34,
-			"SeCreateSymbolicLinkPrivilege":   35,
-		}
-		luid := uint64(0)
-		if v, ok := luidMap[name]; ok {
+		luid := uint64(0xFFFF)
+		if v, ok := privilegeNameToLUID[name]; ok {
 			luid = v
-		} else {
-			luid = 0xFFFF // unknown but nonzero
 		}
 		if luidPtr != 0 {
 			mem.Write32(luidPtr, uint32(luid)) // LowPart
@@ -1524,20 +1583,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		namePtr := ctx.Arg(1)
 		luidPtr := ctx.Arg(2)
 		name := readGuestString(namePtr)
-		luidMap := map[string]uint32{
-			"SeDebugPrivilege": 20, "SeShutdownPrivilege": 19,
-			"SeBackupPrivilege": 17, "SeRestorePrivilege": 18,
-			"SeImpersonatePrivilege": 29, "SeCreateGlobalPrivilege": 30,
-			"SeChangeNotifyPrivilege": 23, "SeIncreaseQuotaPrivilege": 5,
-			"SeIncreaseBasePriorityPrivilege": 14, "SeLoadDriverPrivilege": 10,
-			"SeManageVolumePrivilege": 28, "SeSecurityPrivilege": 8,
-			"SeSystemEnvironmentPrivilege": 22, "SeSystemProfilePrivilege": 11,
-			"SeSystemtimePrivilege": 12, "SeTakeOwnershipPrivilege": 9,
-			"SeTcbPrivilege": 7, "SeUndockPrivilege": 25,
-		}
 		luid := uint32(0xFFFF)
-		if v, ok := luidMap[name]; ok {
-			luid = v
+		if v, ok := privilegeNameToLUID[name]; ok {
+			luid = uint32(v)
 		}
 		if luidPtr != 0 {
 			mem.Write32(luidPtr, luid)
@@ -1547,44 +1595,29 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "AdjustTokenPrivileges", func(ctx *ntapi.TrapContext) uint32 {
-		// BOOL AdjustTokenPrivileges(HANDLE, BOOL DisableAll, PTOKEN_PRIVILEGES NewState,
-		//   DWORD BufLen, PTOKEN_PRIVILEGES PrevState, PDWORD ReturnLen)
-		disableAll := ctx.Arg(1)
-		newState := ctx.Arg(2)
-		if disableAll == 0 && newState != 0 {
-			// Not all privileges assigned - set ERROR_NOT_ALL_ASSIGNED
-			if ctx.State != nil && ctx.State.TEBAddr != 0 {
-				mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, 1300)
-			}
-		} else {
-			if ctx.State != nil && ctx.State.TEBAddr != 0 {
-				mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, 0)
-			}
-		}
-		ctx.SetReturn(1) // TRUE
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "OpenProcessToken", func(ctx *ntapi.TrapContext) uint32 {
 		phToken := ctx.Arg(2)
-		h := handles.Alloc(&ntapi.GenericHandle{Kind: "token"})
 		if phToken != 0 {
-			mem.Write64(phToken, uint64(h))
+			mem.Write64(phToken, processTokenHandle)
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "OpenThreadToken", func(ctx *ntapi.TrapContext) uint32 {
-		phToken := ctx.Arg(2)
-		h := handles.Alloc(&ntapi.GenericHandle{Kind: "token"})
+		phToken := ctx.Arg(3)
 		if phToken != 0 {
-			mem.Write64(phToken, uint64(h))
+			mem.Write64(phToken, threadTokenHandle)
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "DuplicateTokenEx", func(ctx *ntapi.TrapContext) uint32 {
 		phNewToken := ctx.Arg(5)
-		h := handles.Alloc(&ntapi.TokenHandle{})
+		h := handles.Alloc(tokenForHandle(ctx.Arg(0)).Clone())
 		if phNewToken != 0 {
 			mem.Write64(phNewToken, uint64(h))
 		}
@@ -1613,6 +1646,79 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 			return 0
 		})
 	}
+	d.RegisterAutoStubHandler(advapi32, "PrivilegeCheck", func(ctx *ntapi.TrapContext) uint32 {
+		pfResult := ctx.Arg(2)
+		if pfResult != 0 {
+			mem.Write32(pfResult, 1)
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LookupPrivilegeNameW", func(ctx *ntapi.TrapContext) uint32 {
+		lpLuid := ctx.Arg(1)
+		lpName := ctx.Arg(2)
+		lpcchName := ctx.Arg(3)
+		if lpLuid == 0 || lpcchName == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		low, _ := mem.Read32(lpLuid)
+		high, _ := mem.Read32(lpLuid + 4)
+		name := luidToPrivilegeName[(uint64(high)<<32)|uint64(low)]
+		if name == "" {
+			name = "SeChangeNotifyPrivilege"
+		}
+		ws := utf16Encode(name)
+		needed := uint32(len(ws))
+		avail, _ := mem.Read32(lpcchName)
+		mem.Write32(lpcchName, needed)
+		if lpName != 0 && avail < needed+1 {
+			setLastError(ctx, tokenErrorInsufficientBuffer)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if lpName != 0 {
+			for i, w := range ws {
+				mem.Write16(lpName+uint64(i)*2, w)
+			}
+			mem.Write16(lpName+uint64(len(ws))*2, 0)
+		}
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LookupPrivilegeNameA", func(ctx *ntapi.TrapContext) uint32 {
+		lpLuid := ctx.Arg(1)
+		lpName := ctx.Arg(2)
+		lpcchName := ctx.Arg(3)
+		if lpLuid == 0 || lpcchName == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		low, _ := mem.Read32(lpLuid)
+		high, _ := mem.Read32(lpLuid + 4)
+		name := luidToPrivilegeName[(uint64(high)<<32)|uint64(low)]
+		if name == "" {
+			name = "SeChangeNotifyPrivilege"
+		}
+		needed := uint32(len(name))
+		avail, _ := mem.Read32(lpcchName)
+		mem.Write32(lpcchName, needed)
+		if lpName != 0 && avail < needed+1 {
+			setLastError(ctx, tokenErrorInsufficientBuffer)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if lpName != 0 {
+			for i := 0; i < len(name); i++ {
+				mem.Write8(lpName+uint64(i), name[i])
+			}
+			mem.Write8(lpName+uint64(len(name)), 0)
+		}
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
 	// SCM emulation - enough for service discovery/start/stop probes during app initialization.
 	type scmHandle struct {
 		kind string // "scm" or "service"
@@ -1680,11 +1786,6 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 			"Spooler":           {name: "Spooler", displayName: "Print Spooler", status: serviceStopped, serviceType: serviceWin32OwnProcess, startType: serviceAutoStart},
 		}
 	)
-	setLastError := func(ctx *ntapi.TrapContext, code uint32) {
-		if ctx.State != nil && ctx.State.TEBAddr != 0 {
-			ctx.Mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, code)
-		}
-	}
 	utf16BytesWithNul := func(s string) []byte {
 		ws := utf16Encode(s)
 		data := make([]byte, (len(ws)+1)*2)
@@ -1896,7 +1997,7 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 			ctx.Mem.Write32(pcbBytesNeeded, needed)
 		}
 		if cbBufSize < uint64(needed) || lpServiceConfig == 0 {
-			setLastError(ctx, errorInsufficientBuffer)
+			setLastError(ctx, tokenErrorInsufficientBuffer)
 			return 0
 		}
 		for i := uint64(0); i < queryServiceConfigSize64; i++ {
@@ -1935,7 +2036,7 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 			ctx.Mem.Write32(pcbBytesNeeded, needed)
 		}
 		if cbBufSize < uint64(needed) || lpServiceConfig == 0 {
-			setLastError(ctx, errorInsufficientBuffer)
+			setLastError(ctx, tokenErrorInsufficientBuffer)
 			return 0
 		}
 		for i := uint64(0); i < queryServiceConfigSize64; i++ {
@@ -2818,7 +2919,7 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		peUse := ctx.Arg(6)
 
 		nameWs := utf16Encode("User")
-		domainWs := utf16Encode("RAVEN")
+		domainWs := utf16Encode("DESKTOP")
 		nameNeeded := uint32(len(nameWs) + 1)
 		domainNeeded := uint32(len(domainWs) + 1)
 
@@ -2863,7 +2964,7 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		peUse := ctx.Arg(6)
 
 		name := "User"
-		domain := "RAVEN"
+		domain := "DESKTOP"
 		nameNeeded := uint32(len(name) + 1)
 		domainNeeded := uint32(len(domain) + 1)
 
@@ -2902,17 +3003,14 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 	// Security descriptor helpers
 	d.RegisterAutoStubHandler(advapi32, "InitializeSecurityDescriptor", func(ctx *ntapi.TrapContext) uint32 {
 		pSd := ctx.Arg(0)
-		// rev := ctx.Arg(1) // SECURITY_DESCRIPTOR_REVISION = 1
 		if pSd == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// SECURITY_DESCRIPTOR (absolute): revision(1)+sbz(1)+control(2)+owner(8)+group(8)+sacl(8)+dacl(8)
 		for i := uint64(0); i < 40; i++ {
 			mem.Write8(pSd+i, 0)
 		}
-		mem.Write8(pSd, 1)         // Revision = 1
-		mem.Write16(pSd+2, 0x8000) // SE_SELF_RELATIVE flag off, no DACL by default
+		mem.Write8(pSd, 1)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3002,17 +3100,35 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorDacl", func(ctx *ntapi.TrapContext) uint32 {
+		pSd := ctx.Arg(0)
 		pbPresent := ctx.Arg(1)
 		ppDacl := ctx.Arg(2)
 		pbDefaulted := ctx.Arg(3)
+		ctrl := uint16(0)
+		if pSd != 0 {
+			ctrl, _ = mem.Read16(pSd + 2)
+		}
 		if pbPresent != 0 {
-			mem.Write32(pbPresent, 0)
-		} // no DACL
+			if ctrl&0x0004 != 0 {
+				mem.Write32(pbPresent, 1)
+			} else {
+				mem.Write32(pbPresent, 0)
+			}
+		}
 		if ppDacl != 0 {
-			mem.Write64(ppDacl, 0)
+			if pSd != 0 {
+				dacl, _ := mem.Read64(pSd + 28)
+				mem.Write64(ppDacl, dacl)
+			} else {
+				mem.Write64(ppDacl, 0)
+			}
 		}
 		if pbDefaulted != 0 {
-			mem.Write32(pbDefaulted, 0)
+			if ctrl&0x0008 != 0 {
+				mem.Write32(pbDefaulted, 1)
+			} else {
+				mem.Write32(pbDefaulted, 0)
+			}
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -3083,17 +3199,19 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 	// ACL helpers
 	d.RegisterAutoStubHandler(advapi32, "InitializeAcl", func(ctx *ntapi.TrapContext) uint32 {
 		pAcl := ctx.Arg(0)
-		nAclLen := ctx.Arg(1)
-		// aclRevision := ctx.Arg(2) // 2 = ACL_REVISION
+		_ = ctx.Arg(1)
+		aclRevision := ctx.Arg(2)
 		if pAcl == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// ACL header: AclRevision(1)+Sbz1(1)+AclSize(2)+AceCount(2)+Sbz2(2)
-		mem.Write8(pAcl, 2) // AclRevision
+		if aclRevision == 0 {
+			aclRevision = 2
+		}
+		mem.Write8(pAcl, uint8(aclRevision))
 		mem.Write8(pAcl+1, 0)
-		mem.Write16(pAcl+2, uint16(nAclLen)) // AclSize
-		mem.Write16(pAcl+4, 0)               // AceCount = 0
+		mem.Write16(pAcl+2, 8)
+		mem.Write16(pAcl+4, 0)
 		mem.Write16(pAcl+6, 0)
 		ctx.SetReturn(1)
 		return 0
@@ -3107,24 +3225,23 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// Read current AceCount
 		aceCount, _ := mem.Read16(pAcl + 4)
 		aclSize, _ := mem.Read16(pAcl + 2)
+		if aclSize < 8 {
+			aclSize = 8
+		}
 		nSub, _ := mem.Read8(pSid + 1)
 		sidLen := uint32(8 + uint32(nSub)*4)
-		aceSize := uint16(4 + 4 + sidLen) // ACE_HEADER(4) + Mask(4) + SID
-		// Write ACE after ACL header + existing ACEs
-		// Find end: we track AclSize used in bytes (simple append)
-		aceOff := uint64(aclSize) // placed at end of current ACL
-		_ = aceOff
-		aceOff = pAcl + 8 + uint64(aceCount)*uint64(aceSize) // naive
-		mem.Write8(aceOff, 0)                                // ACCESS_ALLOWED_ACE_TYPE
-		mem.Write8(aceOff+1, 0)                              // Flags
-		mem.Write16(aceOff+2, aceSize)                       // AceSize
+		aceSize := uint16(8 + sidLen)
+		aceOff := pAcl + uint64(aclSize)
+		mem.Write8(aceOff, 0)
+		mem.Write8(aceOff+1, 0)
+		mem.Write16(aceOff+2, aceSize)
 		mem.Write32(aceOff+4, accessMask)
 		sidData, _ := mem.ReadBytes(pSid, int(sidLen))
 		mem.WriteBytes(aceOff+8, sidData)
 		mem.Write16(pAcl+4, aceCount+1)
+		mem.Write16(pAcl+2, aclSize+aceSize)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3192,16 +3309,25 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		pAcl := ctx.Arg(0)
 		aceIndex := ctx.Arg(1)
 		ppAce := ctx.Arg(2)
+		if pAcl == 0 || ppAce == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		aceCount, _ := mem.Read16(pAcl + 4)
 		if uint64(aceCount) <= aceIndex {
 			ctx.SetReturn(0)
 			return 0
 		}
-		if ppAce != 0 {
-			// Find ace at index (fixed-size: 12 bytes each for simple ACEs)
-			aceOff := pAcl + 8 + aceIndex*12
-			mem.Write64(ppAce, aceOff)
+		aceOff := pAcl + 8
+		for i := uint64(0); i < aceIndex; i++ {
+			aceSize, _ := mem.Read16(aceOff + 2)
+			if aceSize == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			aceOff += uint64(aceSize)
 		}
+		mem.Write64(ppAce, aceOff)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3306,224 +3432,240 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 
 	// GetTokenInformation - expanded classes
 	d.RegisterAutoStubHandler(advapi32, "GetTokenInformation", func(ctx *ntapi.TrapContext) uint32 {
-		tokenClass := ctx.Arg(1)
+		token := tokenForHandle(ctx.Arg(0))
+		tokenClass := uint32(ctx.Arg(1))
 		buf := ctx.Arg(2)
-		bufLen := ctx.Arg(3)
+		bufLen := uint32(ctx.Arg(3))
 		retLen := ctx.Arg(4)
-		switch tokenClass {
-		case 1: // TokenUser: TOKEN_USER = {SID_AND_ATTRIBUTES{pSid, Attributes}}
-			// We return a TOKEN_USER with a minimal local admin SID S-1-5-21-0-0-0-500
-			// SID S-1-5-21: 28 bytes (Revision+nSub+6auth+5*4sub)
-			sidBytes := []byte{
-				1, 5, // Revision=1, nSub=5
-				0, 0, 0, 0, 0, 5, // Authority=5 (NT)
-				21, 0, 0, 0, // Sub 1 = 21
-				0, 0, 0, 0, // Sub 2
-				0, 0, 0, 0, // Sub 3
-				0, 0, 0, 0, // Sub 4
-				0xF4, 1, 0, 0, // Sub 5 = 500 (Administrator RID)
-			}
-			needed := 16 + uint32(len(sidBytes)) // SID_AND_ATTRIBUTES(16) + SID
+		failBuffer := func(needed uint32) uint32 {
 			if retLen != 0 {
 				mem.Write32(retLen, needed)
 			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				sidAddr := buf + 16
-				mem.WriteBytes(sidAddr, sidBytes)
-				mem.Write64(buf, sidAddr) // pSid
-				mem.Write32(buf+8, 0)     // Attributes
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 2: // TokenGroups
-			needed := uint32(4) // TOKEN_GROUPS.GroupCount=0 only
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write32(buf, 0) // GroupCount = 0
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 3: // TokenPrivileges
-			needed := uint32(4)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write32(buf, 0)
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 5: // TokenPrimaryGroup
-			needed := uint32(8)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write64(buf, 0)
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 6: // TokenDefaultDacl
-			needed := uint32(8)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write64(buf, 0)
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 7: // TokenSource
-			needed := uint32(16)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				// TOKEN_SOURCE: SourceName[8] + SourceIdentifier (LUID 8 bytes)
-				for i := uint64(0); i < 16; i++ {
-					mem.Write8(buf+i, 0)
-				}
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 8: // TokenType
-			needed := uint32(4)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write32(buf, 1) // TokenPrimary = 1
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 9: // TokenImpersonationLevel
-			needed := uint32(4)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write32(buf, 2) // SecurityImpersonation
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 10: // TokenStatistics: 48 bytes
-			needed := uint32(48)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				for i := uint64(0); i < 48; i++ {
-					mem.Write8(buf+i, 0)
-				}
-				mem.Write32(buf+16, 1) // TokenType = Primary
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 17: // TokenElevationType
-			needed := uint32(4)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write32(buf, 1) // TokenElevationTypeDefault
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 18: // TokenLinkedToken
-			needed := uint32(8)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write64(buf, 0)
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 19: // TokenElevation
-			needed := uint32(4)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write32(buf, 0) // TokenIsElevated = FALSE
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 20: // TokenHasRestrictions
-			needed := uint32(4)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write32(buf, 0) // FALSE
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		case 25: // TokenIntegrityLevel
-			needed := uint32(20) // SID_AND_ATTRIBUTES + minimal SID
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				// S-1-16-8192 (Medium integrity)
-				sidAddr := buf + 12
-				mem.Write8(sidAddr, 1)   // Revision
-				mem.Write8(sidAddr+1, 1) // nSub = 1
-				mem.Write8(sidAddr+2, 0)
-				mem.Write8(sidAddr+3, 0)
-				mem.Write8(sidAddr+4, 0)
-				mem.Write8(sidAddr+5, 0)
-				mem.Write8(sidAddr+6, 0)
-				mem.Write8(sidAddr+7, 16)    // Authority = 16 (mandatory)
-				mem.Write32(sidAddr+8, 8192) // Sub = 0x2000 = medium
-				mem.Write64(buf, sidAddr)    // pSid
-				mem.Write32(buf+8, 0)        // Attributes
-				ctx.SetReturn(1)
-				return 0
-			}
-			ctx.SetReturn(0)
-			return 0
-		default:
-			needed := uint32(8)
-			if retLen != 0 {
-				mem.Write32(retLen, needed)
-			}
-			if buf != 0 && bufLen >= uint64(needed) {
-				mem.Write64(buf, 0)
-				ctx.SetReturn(1)
-				return 0
-			}
+			setLastError(ctx, tokenErrorInsufficientBuffer)
 			ctx.SetReturn(0)
 			return 0
 		}
+		switch tokenClass {
+		case 1: // TokenUser: TOKEN_USER = {SID_AND_ATTRIBUTES{pSid, Attributes}}
+			sidBytes := token.UserSID
+			needed := uint32(16 + len(sidBytes))
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			sidAddr := buf + 16
+			mem.WriteBytes(sidAddr, sidBytes)
+			mem.Write64(buf, sidAddr)
+			mem.Write32(buf+8, 0)
+			mem.Write32(buf+12, 0)
+		case 2: // TokenGroups
+			groups := token.Groups
+			if len(groups) == 0 {
+				groups = [][]byte{adminGroupSID}
+			}
+			needed := uint32(8 + len(groups)*16)
+			for _, sid := range groups {
+				needed += uint32(len(sid))
+			}
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write32(buf, uint32(len(groups)))
+			mem.Write32(buf+4, 0)
+			sidAddr := buf + 8 + uint64(len(groups))*16
+			for i, sid := range groups {
+				entry := buf + 8 + uint64(i)*16
+				mem.Write64(entry, sidAddr)
+				mem.Write32(entry+8, 0x00000007)
+				mem.Write32(entry+12, 0)
+				mem.WriteBytes(sidAddr, sid)
+				sidAddr += uint64(len(sid))
+			}
+		case 3: // TokenPrivileges
+			var privs []uint64
+			if len(token.Privileges) == 0 {
+				privs = append(privs, commonPrivilegeLUIDs...)
+			} else {
+				for _, luid := range commonPrivilegeLUIDs {
+					if token.Privileges[luid] {
+						privs = append(privs, luid)
+					}
+				}
+				if len(privs) == 0 {
+					for luid, enabled := range token.Privileges {
+						if enabled {
+							privs = append(privs, luid)
+						}
+					}
+					sort.Slice(privs, func(i, j int) bool { return privs[i] < privs[j] })
+				}
+			}
+			needed := uint32(4 + len(privs)*12)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write32(buf, uint32(len(privs)))
+			for i, luid := range privs {
+				entry := buf + 4 + uint64(i)*12
+				mem.Write32(entry, uint32(luid))
+				mem.Write32(entry+4, uint32(luid>>32))
+				mem.Write32(entry+8, 0x00000003)
+			}
+		case 4: // TokenOwner
+			sidBytes := token.UserSID
+			needed := uint32(8 + len(sidBytes))
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			sidAddr := buf + 8
+			mem.Write64(buf, sidAddr)
+			mem.WriteBytes(sidAddr, sidBytes)
+		case 5: // TokenPrimaryGroup
+			sidBytes := token.PrimaryGroupSID
+			if len(sidBytes) == 0 {
+				sidBytes = adminGroupSID
+			}
+			needed := uint32(8 + len(sidBytes))
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			sidAddr := buf + 8
+			mem.Write64(buf, sidAddr)
+			mem.WriteBytes(sidAddr, sidBytes)
+		case 6: // TokenDefaultDacl
+			needed := uint32(8)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write64(buf, 0)
+		case 7: // TokenSource
+			needed := uint32(16)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			for i := uint64(0); i < 16; i++ {
+				mem.Write8(buf+i, 0)
+			}
+		case 8: // TokenType
+			needed := uint32(4)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write32(buf, 1)
+		case 9: // TokenImpersonationLevel
+			needed := uint32(4)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write32(buf, 2)
+		case 10: // TokenStatistics: 48 bytes
+			needed := uint32(48)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			for i := uint64(0); i < 48; i++ {
+				mem.Write8(buf+i, 0)
+			}
+			mem.Write32(buf+16, 1)
+		case 18: // TokenElevationType
+			needed := uint32(4)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write32(buf, 2)
+		case 19: // TokenLinkedToken
+			needed := uint32(8)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write64(buf, 0)
+		case 20: // TokenElevation
+			needed := uint32(4)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write32(buf, 1)
+		case 21: // TokenHasRestrictions
+			needed := uint32(4)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			mem.Write32(buf, 0)
+		case 25: // TokenIntegrityLevel
+			needed := uint32(16 + len(highIntegritySID))
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			sidAddr := buf + 16
+			mem.Write64(buf, sidAddr)
+			mem.Write32(buf+8, 0x00000020)
+			mem.Write32(buf+12, 0)
+			mem.WriteBytes(sidAddr, highIntegritySID)
+		default:
+			needed := uint32(8)
+			if buf == 0 || bufLen < needed {
+				return failBuffer(needed)
+			}
+			for i := uint32(0); i < needed; i++ {
+				mem.Write8(buf+uint64(i), 0)
+			}
+		}
+		if retLen != 0 {
+			switch tokenClass {
+			case 1:
+				mem.Write32(retLen, uint32(16+len(token.UserSID)))
+			case 2:
+				groups := token.Groups
+				if len(groups) == 0 {
+					groups = [][]byte{adminGroupSID}
+				}
+				needed := uint32(8 + len(groups)*16)
+				for _, sid := range groups {
+					needed += uint32(len(sid))
+				}
+				mem.Write32(retLen, needed)
+			case 3:
+				count := len(commonPrivilegeLUIDs)
+				if len(token.Privileges) > 0 {
+					count = 0
+					for _, luid := range commonPrivilegeLUIDs {
+						if token.Privileges[luid] {
+							count++
+						}
+					}
+					if count == 0 {
+						for _, enabled := range token.Privileges {
+							if enabled {
+								count++
+							}
+						}
+					}
+				}
+				mem.Write32(retLen, uint32(4+count*12))
+			case 4:
+				mem.Write32(retLen, uint32(8+len(token.UserSID)))
+			case 5:
+				groupSID := token.PrimaryGroupSID
+				if len(groupSID) == 0 {
+					groupSID = adminGroupSID
+				}
+				mem.Write32(retLen, uint32(8+len(groupSID)))
+			case 6, 19:
+				mem.Write32(retLen, 8)
+			case 7:
+				mem.Write32(retLen, 16)
+			case 8, 9, 18, 20, 21:
+				mem.Write32(retLen, 4)
+			case 10:
+				mem.Write32(retLen, 48)
+			case 25:
+				mem.Write32(retLen, uint32(16+len(highIntegritySID)))
+			default:
+				mem.Write32(retLen, 8)
+			}
+		}
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
 	})
 	// GetSecurityDescriptorControl: return default control flags
 	d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorControl", func(ctx *ntapi.TrapContext) uint32 {
@@ -5626,16 +5768,82 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "LookupAccountNameW", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[advapi32] LookupAccountNameW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
+		pSid := ctx.Arg(2)
+		pcbSid := ctx.Arg(3)
+		pDomain := ctx.Arg(4)
+		pcchDomain := ctx.Arg(5)
+		peUse := ctx.Arg(6)
+		sidNeeded := uint32(len(fixedUserSID))
+		domainWs := utf16Encode("DESKTOP")
+		domainNeeded := uint32(len(domainWs) + 1)
+		sidAvail := uint32(0)
+		domainAvail := uint32(0)
+		if pcbSid != 0 {
+			sidAvail, _ = mem.Read32(pcbSid)
+			mem.Write32(pcbSid, sidNeeded)
+		}
+		if pcchDomain != 0 {
+			domainAvail, _ = mem.Read32(pcchDomain)
+			mem.Write32(pcchDomain, domainNeeded)
+		}
+		if (pSid != 0 && sidAvail < sidNeeded) || (pDomain != 0 && domainAvail < domainNeeded) {
+			setLastError(ctx, errorInsufficientBuffer)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if pSid != 0 {
+			mem.WriteBytes(pSid, fixedUserSID)
+		}
+		if pDomain != 0 {
+			for i, w := range domainWs {
+				mem.Write16(pDomain+uint64(i)*2, w)
+			}
+			mem.Write16(pDomain+uint64(len(domainWs))*2, 0)
+		}
+		if peUse != 0 {
+			mem.Write32(peUse, 1)
+		}
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LookupAccountNameA", func(ctx *ntapi.TrapContext) uint32 {
+		pSid := ctx.Arg(2)
+		pcbSid := ctx.Arg(3)
+		pDomain := ctx.Arg(4)
+		pcchDomain := ctx.Arg(5)
+		peUse := ctx.Arg(6)
+		sidNeeded := uint32(len(fixedUserSID))
+		domain := "DESKTOP"
+		domainNeeded := uint32(len(domain) + 1)
+		sidAvail := uint32(0)
+		domainAvail := uint32(0)
+		if pcbSid != 0 {
+			sidAvail, _ = mem.Read32(pcbSid)
+			mem.Write32(pcbSid, sidNeeded)
+		}
+		if pcchDomain != 0 {
+			domainAvail, _ = mem.Read32(pcchDomain)
+			mem.Write32(pcchDomain, domainNeeded)
+		}
+		if (pSid != 0 && sidAvail < sidNeeded) || (pDomain != 0 && domainAvail < domainNeeded) {
+			setLastError(ctx, errorInsufficientBuffer)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if pSid != 0 {
+			mem.WriteBytes(pSid, fixedUserSID)
+		}
+		if pDomain != 0 {
+			for i := 0; i < len(domain); i++ {
+				mem.Write8(pDomain+uint64(i), domain[i])
+			}
+			mem.Write8(pDomain+uint64(len(domain)), 0)
+		}
+		if peUse != 0 {
+			mem.Write32(peUse, 1)
+		}
+		setLastError(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})

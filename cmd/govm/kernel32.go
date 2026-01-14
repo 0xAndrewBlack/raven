@@ -156,6 +156,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	var userGeoName string = "United States"
 	var handleContextMu sync.Mutex
 	handleContexts := map[uint64]uint64{}
+	var ioCompletionMu sync.Mutex
+	ioCompletionPorts := map[uint64]uint64{}
+	ioCompletionKeys := map[uint64]uint64{}
 	var dosDeviceMu sync.Mutex
 	dosDeviceMap := map[string]string{"C:": `\\Device\\HarddiskVolume1`}
 	var volumeMu sync.Mutex
@@ -6540,16 +6543,43 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "CancelDeviceWakeupRequest", 1, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CancelIo", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CancelIo", 8, 1)
+		hFile := ntapi.Handle(ctx.Arg(0))
+		if handles.GetFile(hFile) == nil {
+			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		setLastErrorValue(0)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CancelIoEx", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CancelIoEx", 2, 1)
+		const statusCancelled = 0xC0000120
+		hFile := ntapi.Handle(ctx.Arg(0))
+		lpOverlapped := ctx.Arg(1)
+		if handles.GetFile(hFile) == nil {
+			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		if lpOverlapped != 0 {
+			ctx.Mem.Write64(lpOverlapped, statusCancelled)
+			ctx.Mem.Write64(lpOverlapped+8, 0)
+		}
+		setLastErrorValue(0)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CancelSynchronousIo", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "CancelSynchronousIo", 1, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CancelThreadpoolIo", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CancelThreadpoolIo", 1, 0)
+		h := ntapi.Handle(ctx.Arg(0))
+		if tio := handles.GetTpIo(h); tio != nil {
+			tio.CancelPending()
+		}
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CancelTimerQueueTimer", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "CancelTimerQueueTimer", 8, 1)
@@ -6598,7 +6628,10 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "CloseSystemHandle", 8, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CloseThreadpool", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CloseThreadpool", 8, 0)
+		h := ntapi.Handle(ctx.Arg(0))
+		handles.Close(h)
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CloseThreadpoolCleanupGroup", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "CloseThreadpoolCleanupGroup", 8, 0)
@@ -6607,7 +6640,13 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "CloseThreadpoolCleanupGroupMembers", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CloseThreadpoolIo", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CloseThreadpoolIo", 1, 0)
+		h := ntapi.Handle(ctx.Arg(0))
+		if tio := handles.GetTpIo(h); tio != nil {
+			tio.Shutdown()
+		}
+		handles.Close(h)
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CloseThreadpoolTimer", func(ctx *ntapi.TrapContext) uint32 {
 		h := ntapi.Handle(ctx.Arg(0))
@@ -7052,19 +7091,47 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		// INVALID_HANDLE_VALUE (-1) as FileHandle means "create a new IOCP".
 		fileHandle := ntapi.Handle(ctx.Arg(0))
 		existingPort := ntapi.Handle(ctx.Arg(1))
+		completionKey := ctx.Arg(2)
 		if existingPort != 0 {
-			// Associate file with existing port - just return the existing port handle.
+			if handles.GetIoCompletion(existingPort) == nil {
+				setLastErrorValue(6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+			if fileHandle != 0 && fileHandle != ntapi.InvalidHandle {
+				if handles.GetFile(fileHandle) == nil {
+					setLastErrorValue(6) // ERROR_INVALID_HANDLE
+					ctx.SetReturn(0)
+					return 0
+				}
+				ioCompletionMu.Lock()
+				ioCompletionPorts[uint64(fileHandle)] = uint64(existingPort)
+				ioCompletionKeys[uint64(fileHandle)] = completionKey
+				ioCompletionMu.Unlock()
+			}
+			setLastErrorValue(0)
 			ctx.SetReturn(uint64(existingPort))
 			return 0
 		}
 		if fileHandle == ntapi.InvalidHandle {
 			// Create a new IOCP.
 			h := handles.Alloc(&ntapi.IoCompletionPortHandle{})
+			setLastErrorValue(0)
 			ctx.SetReturn(uint64(h))
 			return 0
 		}
-		// Associate a file handle with a new IOCP (simplified: create new IOCP).
+		if handles.GetFile(fileHandle) == nil {
+			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		// Associate a file handle with a new IOCP.
 		h := handles.Alloc(&ntapi.IoCompletionPortHandle{})
+		ioCompletionMu.Lock()
+		ioCompletionPorts[uint64(fileHandle)] = uint64(h)
+		ioCompletionKeys[uint64(fileHandle)] = completionKey
+		ioCompletionMu.Unlock()
+		setLastErrorValue(0)
 		ctx.SetReturn(uint64(h))
 		return 0
 	})
@@ -7324,7 +7391,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateThreadpoolIo", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CreateThreadpoolIo", 4, 0)
+		file := ntapi.Handle(ctx.Arg(0))
+		callback := ctx.Arg(1)
+		context := ctx.Arg(2)
+		if handles.GetFile(file) == nil {
+			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		h := handles.Alloc(&ntapi.TpIo{File: file, Callback: callback, Context: context})
+		ctx.SetReturn(uint64(h))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateThreadpoolTimer", func(ctx *ntapi.TrapContext) uint32 {
 		callback := ctx.Arg(0)
@@ -9761,10 +9838,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetOverlappedResult", func(ctx *ntapi.TrapContext) uint32 {
 		// GetOverlappedResult(hFile, lpOverlapped, lpNumberOfBytesTransferred, bWait)
+		_ = ctx.Arg(0) // hFile
 		lpOverlapped := ctx.Arg(1)
 		lpBytes := ctx.Arg(2)
-		// bWait := ctx.Arg(3)  // we do sync I/O so always complete
+		bWait := ctx.Arg(3)
 		if lpOverlapped == 0 {
+			setLastErrorValue(87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -9774,10 +9853,22 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		if lpBytes != 0 {
 			ctx.Mem.Write32(lpBytes, uint32(nBytes))
 		}
-		if status == 0 { // STATUS_SUCCESS
+		switch status {
+		case 0: // STATUS_SUCCESS
+			setLastErrorValue(0)
 			ctx.SetReturn(1) // TRUE
-		} else {
-			ctx.SetReturn(0) // FALSE
+		case 0x103: // STATUS_PENDING
+			if bWait != 0 {
+				ctx.Mem.Write64(lpOverlapped, 0)
+				setLastErrorValue(0)
+				ctx.SetReturn(1)
+			} else {
+				setLastErrorValue(996) // ERROR_IO_INCOMPLETE
+				ctx.SetReturn(0)
+			}
+		default:
+			setLastErrorValue(995) // ERROR_OPERATION_ABORTED / generic async failure
+			ctx.SetReturn(0)       // FALSE
 		}
 		return 0
 	})
@@ -10108,15 +10199,24 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
 			pkt, ok := ic.Remove(timeout)
 			if !ok {
-				ctx.SetReturn(0) // FALSE - timeout
+				setLastErrorValue(258) // ERROR_TIMEOUT
+				ctx.SetReturn(0)       // FALSE - timeout
 				return 0
 			}
-			ctx.Mem.Write32(pBytes, pkt.BytesTransferred)
-			ctx.Mem.Write64(pKey, pkt.CompletionKey)
-			ctx.Mem.Write64(pOverlapped, pkt.Overlapped)
+			if pBytes != 0 {
+				ctx.Mem.Write32(pBytes, pkt.BytesTransferred)
+			}
+			if pKey != 0 {
+				ctx.Mem.Write64(pKey, pkt.CompletionKey)
+			}
+			if pOverlapped != 0 {
+				ctx.Mem.Write64(pOverlapped, pkt.Overlapped)
+			}
+			setLastErrorValue(0)
 			ctx.SetReturn(1) // TRUE
 		} else {
-			ctx.SetReturn(0) // FALSE - unknown handle
+			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)     // FALSE - unknown handle
 		}
 		return 0
 	})
@@ -10125,7 +10225,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		//   ulCount, ulNumEntriesRemoved, dwMilliseconds, fAlertable)
 		iocpHandle := ntapi.Handle(ctx.Arg(0))
 		pEntries := ctx.Arg(1)
-		// ulCount := ctx.Arg(2)
+		ulCount := ctx.Arg(2)
 		pRemoved := ctx.Arg(3)
 		ms := ctx.Arg(4)
 		var timeout time.Duration
@@ -10135,22 +10235,41 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			timeout = time.Duration(ms) * time.Millisecond
 		}
 		if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
-			pkt, ok := ic.Remove(timeout)
-			if !ok {
+			if pEntries == 0 || ulCount == 0 {
+				setLastErrorValue(87) // ERROR_INVALID_PARAMETER
 				ctx.SetReturn(0)
 				return 0
 			}
-			// OVERLAPPED_ENTRY: {key, overlapped*, internal, bytes}
-			// Write one entry: key(8) overlapped*(8) internal(8) bytes(4)
-			ctx.Mem.Write64(pEntries+0, pkt.CompletionKey)
-			ctx.Mem.Write64(pEntries+8, pkt.Overlapped)
-			ctx.Mem.Write64(pEntries+16, 0)
-			ctx.Mem.Write32(pEntries+24, pkt.BytesTransferred)
-			if pRemoved != 0 {
-				ctx.Mem.Write32(pRemoved, 1)
+			var removed uint32
+			for removed < uint32(ulCount) {
+				wait := time.Duration(0)
+				if removed == 0 {
+					wait = timeout
+				}
+				pkt, ok := ic.Remove(wait)
+				if !ok {
+					break
+				}
+				base := pEntries + uint64(removed)*32
+				ctx.Mem.Write64(base+0, pkt.CompletionKey)
+				ctx.Mem.Write64(base+8, pkt.Overlapped)
+				ctx.Mem.Write64(base+16, uint64(pkt.Status))
+				ctx.Mem.Write32(base+24, pkt.BytesTransferred)
+				ctx.Mem.Write32(base+28, 0)
+				removed++
 			}
+			if pRemoved != 0 {
+				ctx.Mem.Write32(pRemoved, removed)
+			}
+			if removed == 0 {
+				setLastErrorValue(258) // ERROR_TIMEOUT
+				ctx.SetReturn(0)
+				return 0
+			}
+			setLastErrorValue(0)
 			ctx.SetReturn(1) // TRUE
 		} else {
+			setLastErrorValue(6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 		}
 		return 0
@@ -11896,6 +12015,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		overlapped := ctx.Arg(3)
 		if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
 			ic.Post(key, overlapped, bytes, 0)
+			setLastErrorValue(0)
+		} else {
+			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -12103,8 +12227,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		// ReactOS: dll/win32/kernel32/client/thread.c → RtlQueueWorkItem
 		function := ctx.Arg(0)
 		context := ctx.Arg(1)
-		flags := ctx.Arg(2)
-		ravelog.Logf("[win32] QueueUserWorkItem(func=0x%x, ctx=0x%x, flags=0x%x) → stub TRUE\n", function, context, flags)
+		_ = ctx.Arg(2) // Flags
+		cpuSnap := ctx.CPU
+		go func() {
+			done := tpLaunchCallback(cpuSnap, function, context)
+			if done != nil {
+				<-done
+			}
+		}()
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -14042,6 +14172,33 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
+	d.RegisterAutoStubHandler(kernel32, "InitializeThreadpoolEnvironment", func(ctx *ntapi.TrapContext) uint32 {
+		pcbe := ctx.Arg(0)
+		for off := uint64(0); off < 48; off += 8 {
+			ctx.Mem.Write64(pcbe+off, 0)
+		}
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(kernel32, "SetThreadpoolCallbackPool", func(ctx *ntapi.TrapContext) uint32 {
+		pcbe := ctx.Arg(0)
+		ptpp := ctx.Arg(1)
+		if pcbe != 0 {
+			ctx.Mem.Write64(pcbe+8, ptpp)
+		}
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(kernel32, "DestroyThreadpoolEnvironment", func(ctx *ntapi.TrapContext) uint32 {
+		pcbe := ctx.Arg(0)
+		if pcbe != 0 {
+			for off := uint64(0); off < 48; off += 8 {
+				ctx.Mem.Write64(pcbe+off, 0)
+			}
+		}
+		ctx.SetReturn(0)
+		return 0
+	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadpoolTimer", func(ctx *ntapi.TrapContext) uint32 {
 		h := ntapi.Handle(ctx.Arg(0))
 		pftDueTime := ctx.Arg(1) // PFILETIME (pointer, may be NULL)
@@ -14329,7 +14486,13 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "StartThreadpoolIo", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "StartThreadpoolIo", 4, 0)
+		h := ntapi.Handle(ctx.Arg(0))
+		if tio := handles.GetTpIo(h); tio != nil && tio.Start() {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SubmitThreadpoolWork", func(ctx *ntapi.TrapContext) uint32 {
 		h := ntapi.Handle(ctx.Arg(0))
@@ -14925,7 +15088,16 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "WaitForThreadpoolIoCallbacks", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "WaitForThreadpoolIoCallbacks", 4, 0)
+		h := ntapi.Handle(ctx.Arg(0))
+		cancelPending := ctx.Arg(1)
+		if tio := handles.GetTpIo(h); tio != nil {
+			if cancelPending != 0 {
+				tio.CancelPending()
+			}
+			tio.WaitAll()
+		}
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "WaitForThreadpoolTimerCallbacks", func(ctx *ntapi.TrapContext) uint32 {
 		h := ntapi.Handle(ctx.Arg(0))
