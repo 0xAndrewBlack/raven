@@ -857,4 +857,467 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(uint64(readyCount))
 		return 0
 	})
+
+	// ═══════════════════════════════════════════════════════════════
+	// AUTO-GENERATED: Missing ws2_32 handlers from ReactOS spec
+	// ═══════════════════════════════════════════════════════════════
+
+	d.RegisterAutoStubHandler(ws2, "GetNameInfoW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] GetNameInfoW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WEP", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[ws2_32] WEP()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WPUCompleteOverlappedRequest", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WPUCompleteOverlappedRequest(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAccept", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAAccept(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAddressToStringA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAAddressToStringA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAddressToStringW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAAddressToStringW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAsyncGetHostByAddr", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] WSAAsyncGetHostByAddr(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAsyncGetHostByName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAAsyncGetHostByName(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAsyncGetProtoByName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAAsyncGetProtoByName(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAsyncGetProtoByNumber", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAAsyncGetProtoByNumber(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAsyncGetServByName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] WSAAsyncGetServByName(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAsyncGetServByPort", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] WSAAsyncGetServByPort(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAAsyncSelect", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[ws2_32] WSAAsyncSelect(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSACancelAsyncRequest", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] WSACancelAsyncRequest(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSACancelBlockingCall", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[ws2_32] WSACancelBlockingCall()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAConnect", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] WSAConnect(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSADuplicateSocketA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSADuplicateSocketA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAEnumNameSpaceProvidersA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] WSAEnumNameSpaceProvidersA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAEnumNameSpaceProvidersW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] WSAEnumNameSpaceProvidersW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAEnumProtocolsA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAEnumProtocolsA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAEnumProtocolsW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAEnumProtocolsW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAGetOverlappedResult", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAGetOverlappedResult(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAGetQOSByName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAGetQOSByName(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAGetServiceClassInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[ws2_32] WSAGetServiceClassInfoA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAGetServiceClassInfoW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[ws2_32] WSAGetServiceClassInfoW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAGetServiceClassNameByClassIdA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAGetServiceClassNameByClassIdA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAGetServiceClassNameByClassIdW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAGetServiceClassNameByClassIdW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAHtonl", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAHtonl(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAHtons", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAHtons(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAInstallServiceClassA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] WSAInstallServiceClassA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAInstallServiceClassW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] WSAInstallServiceClassW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAIsBlocking", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[ws2_32] WSAIsBlocking()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAJoinLeaf", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] WSAJoinLeaf(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSALookupServiceBeginA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSALookupServiceBeginA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSALookupServiceBeginW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSALookupServiceBeginW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSALookupServiceEnd", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] WSALookupServiceEnd(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSALookupServiceNextA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[ws2_32] WSALookupServiceNextA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSALookupServiceNextW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[ws2_32] WSALookupServiceNextW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSANSPIoctl", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] WSANSPIoctl(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSANtohl", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSANtohl(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSANtohs", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSANtohs(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAProviderConfigChange", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAProviderConfigChange(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSARecvDisconnect", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] WSARecvDisconnect(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSARecvFrom", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] WSARecvFrom(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSARemoveServiceClass", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] WSARemoveServiceClass(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSASendDisconnect", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] WSASendDisconnect(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSASendTo", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] WSASendTo(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSASetBlockingHook", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] WSASetBlockingHook(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSASetServiceA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSASetServiceA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSASetServiceW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSASetServiceW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAStringToAddressA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAStringToAddressA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAStringToAddressW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSAStringToAddressW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSAUnhookBlockingHook", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[ws2_32] WSAUnhookBlockingHook()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSApSetPostRoutine", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] WSApSetPostRoutine(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCDeinstallProvider", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] WSCDeinstallProvider(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCEnableNSProvider", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] WSCEnableNSProvider(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCEnumProtocols", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[ws2_32] WSCEnumProtocols(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCGetProviderPath", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[ws2_32] WSCGetProviderPath(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCInstallNameSpace", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSCInstallNameSpace(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCInstallProvider", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSCInstallProvider(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCUnInstallNameSpace", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] WSCUnInstallNameSpace(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCUpdateProvider", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[ws2_32] WSCUpdateProvider(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCWriteNameSpaceOrder", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] WSCWriteNameSpaceOrder(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "WSCWriteProviderOrder", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] WSCWriteProviderOrder(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "__WSAFDIsSet", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] __WSAFDIsSet(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "gethostbyaddr", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[ws2_32] gethostbyaddr(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "getnameinfo", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[ws2_32] getnameinfo(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "getprotobyname", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] getprotobyname(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "getprotobynumber", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] getprotobynumber(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "getservbyname", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] getservbyname(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "getservbyport", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[ws2_32] getservbyport(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "htonl", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] htonl(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "htons", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] htons(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "inet_addr", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] inet_addr(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "inet_ntoa", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] inet_ntoa(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "ntohl", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] ntohl(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ws2, "ntohs", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[ws2_32] ntohs(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
 }

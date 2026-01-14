@@ -2345,4 +2345,2387 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
+
+	// ═══════════════════════════════════════════════════════════════
+	// AUTO-GENERATED: Missing advapi32 handlers from ReactOS spec
+	// ═══════════════════════════════════════════════════════════════
+
+	d.RegisterAutoStubHandler(advapi32, "AbortSystemShutdownA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] AbortSystemShutdownA(0x%x)\n", a0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AbortSystemShutdownW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] AbortSystemShutdownW(0x%x)\n", a0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheck", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheck(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckAndAuditAlarmA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckAndAuditAlarmA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckAndAuditAlarmW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckAndAuditAlarmW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckByType", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckByType(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckByTypeAndAuditAlarmA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckByTypeAndAuditAlarmA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckByTypeAndAuditAlarmW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckByTypeAndAuditAlarmW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckByTypeResultList", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckByTypeResultList(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckByTypeResultListAndAuditAlarmA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckByTypeResultListAndAuditAlarmA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckByTypeResultListAndAuditAlarmByHandleA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckByTypeResultListAndAuditAlarmByHandleA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckByTypeResultListAndAuditAlarmByHandleW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckByTypeResultListAndAuditAlarmByHandleW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AccessCheckByTypeResultListAndAuditAlarmW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AccessCheckByTypeResultListAndAuditAlarmW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AddAccessAllowedObjectAce", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AddAccessAllowedObjectAce(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AddAccessDeniedAceEx", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] AddAccessDeniedAceEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AddAccessDeniedObjectAce", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AddAccessDeniedObjectAce(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AddAuditAccessAce", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AddAuditAccessAce(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AddAuditAccessAceEx", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AddAuditAccessAceEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AddAuditAccessObjectAce", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AddAuditAccessObjectAce(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AddUsersToEncryptedFile", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] AddUsersToEncryptedFile(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AdjustTokenGroups", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] AdjustTokenGroups(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AllocateLocallyUniqueId", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] AllocateLocallyUniqueId(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AreAllAccessesGranted", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] AreAllAccessesGranted(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "AreAnyAccessesGranted", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] AreAnyAccessesGranted(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BackupEventLogA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] BackupEventLogA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BackupEventLogW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] BackupEventLogW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildExplicitAccessWithNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] BuildExplicitAccessWithNameA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildExplicitAccessWithNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] BuildExplicitAccessWithNameW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildImpersonateExplicitAccessWithNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] BuildImpersonateExplicitAccessWithNameA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildImpersonateExplicitAccessWithNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] BuildImpersonateExplicitAccessWithNameW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildImpersonateTrusteeA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] BuildImpersonateTrusteeA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildImpersonateTrusteeW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] BuildImpersonateTrusteeW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildSecurityDescriptorA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] BuildSecurityDescriptorA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildSecurityDescriptorW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] BuildSecurityDescriptorW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildTrusteeWithNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] BuildTrusteeWithNameA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildTrusteeWithNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] BuildTrusteeWithNameW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildTrusteeWithObjectsAndNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] BuildTrusteeWithObjectsAndNameA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildTrusteeWithObjectsAndNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] BuildTrusteeWithObjectsAndNameW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildTrusteeWithObjectsAndSidA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] BuildTrusteeWithObjectsAndSidA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildTrusteeWithObjectsAndSidW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] BuildTrusteeWithObjectsAndSidW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildTrusteeWithSidA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] BuildTrusteeWithSidA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "BuildTrusteeWithSidW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] BuildTrusteeWithSidW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ChangeServiceConfig2A", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ChangeServiceConfig2A(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ChangeServiceConfig2W", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ChangeServiceConfig2W(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ClearEventLogA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ClearEventLogA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ClearEventLogW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ClearEventLogW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CloseEncryptedFileRaw", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] CloseEncryptedFileRaw(0x%x)\n", a0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CommandLineFromMsiDescriptor", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CommandLineFromMsiDescriptor(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ConvertSecurityDescriptorToStringSecurityDescriptorA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] ConvertSecurityDescriptorToStringSecurityDescriptorA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ConvertSecurityDescriptorToStringSecurityDescriptorW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] ConvertSecurityDescriptorToStringSecurityDescriptorW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ConvertStringSecurityDescriptorToSecurityDescriptorA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] ConvertStringSecurityDescriptorToSecurityDescriptorA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ConvertStringSecurityDescriptorToSecurityDescriptorW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] ConvertStringSecurityDescriptorToSecurityDescriptorW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ConvertToAutoInheritPrivateObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ConvertToAutoInheritPrivateObjectSecurity(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreatePrivateObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CreatePrivateObjectSecurity(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreatePrivateObjectSecurityEx", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CreatePrivateObjectSecurityEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreatePrivateObjectSecurityWithMultipleInheritance", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CreatePrivateObjectSecurityWithMultipleInheritance(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreateProcessAsUserA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CreateProcessAsUserA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreateProcessAsUserW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CreateProcessAsUserW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreateProcessWithLogonW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CreateProcessWithLogonW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreateProcessWithTokenW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CreateProcessWithTokenW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreateRestrictedToken", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CreateRestrictedToken(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreateTraceInstanceId", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] CreateTraceInstanceId(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredDeleteA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CredDeleteA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredDeleteW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CredDeleteW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredEnumerateA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CredEnumerateA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredEnumerateW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CredEnumerateW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredFree", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] CredFree(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredGetSessionTypes", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] CredGetSessionTypes(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredIsMarshaledCredentialA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] CredIsMarshaledCredentialA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredIsMarshaledCredentialW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] CredIsMarshaledCredentialW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredMarshalCredentialA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CredMarshalCredentialA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredMarshalCredentialW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CredMarshalCredentialW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredReadA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CredReadA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredReadDomainCredentialsA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CredReadDomainCredentialsA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredReadDomainCredentialsW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CredReadDomainCredentialsW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredReadW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CredReadW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredUnmarshalCredentialA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CredUnmarshalCredentialA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredUnmarshalCredentialW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CredUnmarshalCredentialW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredWriteA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] CredWriteA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CredWriteW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] CredWriteW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptContextAddRef", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CryptContextAddRef(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptDuplicateHash", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CryptDuplicateHash(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptDuplicateKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CryptDuplicateKey(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptEnumProviderTypesA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CryptEnumProviderTypesA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptEnumProviderTypesW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CryptEnumProviderTypesW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptEnumProvidersA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CryptEnumProvidersA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptEnumProvidersW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] CryptEnumProvidersW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptGetDefaultProviderA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] CryptGetDefaultProviderA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptGetDefaultProviderW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] CryptGetDefaultProviderW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptGetProvParam", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] CryptGetProvParam(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptGetUserKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] CryptGetUserKey(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptSetProvParam", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CryptSetProvParam(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptSetProviderA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] CryptSetProviderA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptSetProviderExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CryptSetProviderExA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptSetProviderExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] CryptSetProviderExW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CryptSetProviderW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] CryptSetProviderW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "DecryptFileA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] DecryptFileA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "DecryptFileW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] DecryptFileW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "DeleteAce", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] DeleteAce(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "DestroyPrivateObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] DestroyPrivateObjectSecurity(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfBackupEventLogFileA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ElfBackupEventLogFileA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfBackupEventLogFileW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ElfBackupEventLogFileW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfChangeNotify", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ElfChangeNotify(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfClearEventLogFileA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ElfClearEventLogFileA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfClearEventLogFileW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ElfClearEventLogFileW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfCloseEventLog", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] ElfCloseEventLog(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfDeregisterEventSource", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] ElfDeregisterEventSource(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfFlushEventLog", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] ElfFlushEventLog(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfNumberOfRecords", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ElfNumberOfRecords(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfOldestRecord", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] ElfOldestRecord(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfOpenBackupEventLogA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ElfOpenBackupEventLogA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfOpenBackupEventLogW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ElfOpenBackupEventLogW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfOpenEventLogA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ElfOpenEventLogA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfOpenEventLogW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ElfOpenEventLogW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfReadEventLogA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ElfReadEventLogA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfReadEventLogW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ElfReadEventLogW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfRegisterEventSourceA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ElfRegisterEventSourceA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfRegisterEventSourceW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ElfRegisterEventSourceW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfReportEventA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ElfReportEventA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfReportEventAndSourceW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ElfReportEventAndSourceW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ElfReportEventW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ElfReportEventW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EncryptFileA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] EncryptFileA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EncryptFileW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] EncryptFileW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EncryptionDisable", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] EncryptionDisable(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EnumDependentServicesA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] EnumDependentServicesA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EnumDependentServicesW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] EnumDependentServicesW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EnumServiceGroupW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] EnumServiceGroupW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EnumServicesStatusA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] EnumServicesStatusA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EnumServicesStatusExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] EnumServicesStatusExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EnumServicesStatusExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] EnumServicesStatusExW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EnumServicesStatusW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] EnumServicesStatusW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "EqualDomainSid", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] EqualDomainSid(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "FileEncryptionStatusA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] FileEncryptionStatusA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "FileEncryptionStatusW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] FileEncryptionStatusW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "FindFirstFreeAce", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] FindFirstFreeAce(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "FreeEncryptionCertificateHashList", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] FreeEncryptionCertificateHashList(0x%x)\n", a0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "FreeInheritedFromArray", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] FreeInheritedFromArray(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetAuditedPermissionsFromAclA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] GetAuditedPermissionsFromAclA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetAuditedPermissionsFromAclW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] GetAuditedPermissionsFromAclW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetCurrentHwProfileA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetCurrentHwProfileA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetCurrentHwProfileW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetCurrentHwProfileW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetEffectiveRightsFromAclA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] GetEffectiveRightsFromAclA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetEffectiveRightsFromAclW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] GetEffectiveRightsFromAclW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetEventLogInformation", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] GetEventLogInformation(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetExplicitEntriesFromAclA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] GetExplicitEntriesFromAclA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetExplicitEntriesFromAclW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] GetExplicitEntriesFromAclW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetFileSecurityA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] GetFileSecurityA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetFileSecurityW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] GetFileSecurityW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetInheritanceSourceA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] GetInheritanceSourceA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetInheritanceSourceW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] GetInheritanceSourceW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetKernelObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] GetKernelObjectSecurity(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetMultipleTrusteeA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetMultipleTrusteeA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetMultipleTrusteeOperationA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetMultipleTrusteeOperationA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetMultipleTrusteeOperationW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetMultipleTrusteeOperationW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetMultipleTrusteeW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetMultipleTrusteeW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetNumberOfEventLogRecords", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] GetNumberOfEventLogRecords(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetOldestEventLogRecord", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] GetOldestEventLogRecord(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetPrivateObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] GetPrivateObjectSecurity(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorLength", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetSecurityDescriptorLength(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorRMControl", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] GetSecurityDescriptorRMControl(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetSecurityDescriptorSacl", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] GetSecurityDescriptorSacl(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetSecurityInfoExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] GetSecurityInfoExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetSecurityInfoExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] GetSecurityInfoExW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetServiceDisplayNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] GetServiceDisplayNameA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetServiceDisplayNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] GetServiceDisplayNameW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetServiceKeyNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] GetServiceKeyNameA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetServiceKeyNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] GetServiceKeyNameW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetSidLengthRequired", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetSidLengthRequired(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTraceEnableFlags", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTraceEnableFlags(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTraceEnableLevel", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTraceEnableLevel(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTraceLoggerHandle", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTraceLoggerHandle(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTrusteeFormA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTrusteeFormA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTrusteeFormW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTrusteeFormW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTrusteeNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTrusteeNameA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTrusteeNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTrusteeNameW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTrusteeTypeA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTrusteeTypeA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetTrusteeTypeW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] GetTrusteeTypeW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "GetWindowsAccountDomainSid", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] GetWindowsAccountDomainSid(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "I_QueryTagInformation", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] I_QueryTagInformation(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "I_ScGetCurrentGroupStateW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] I_ScGetCurrentGroupStateW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "I_ScIsSecurityProcess", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[advapi32] I_ScIsSecurityProcess()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "I_ScPnPGetServiceName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] I_ScPnPGetServiceName(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "I_ScSendPnPMessage", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] I_ScSendPnPMessage(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "I_ScSetServiceBitsA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] I_ScSetServiceBitsA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "I_ScSetServiceBitsW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] I_ScSetServiceBitsW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "I_ScValidatePnpService", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] I_ScValidatePnpService(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ImpersonateAnonymousToken", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] ImpersonateAnonymousToken(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ImpersonateNamedPipeClient", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] ImpersonateNamedPipeClient(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "InitiateSystemShutdownA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] InitiateSystemShutdownA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "InitiateSystemShutdownExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] InitiateSystemShutdownExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "InitiateSystemShutdownExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] InitiateSystemShutdownExW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "InitiateSystemShutdownW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] InitiateSystemShutdownW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "IsValidAcl", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] IsValidAcl(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LockServiceDatabase", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] LockServiceDatabase(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LogonUserA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] LogonUserA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LogonUserExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] LogonUserExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LogonUserExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] LogonUserExW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LogonUserW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] LogonUserW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LookupAccountNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] LookupAccountNameA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LookupAccountNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] LookupAccountNameW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaAddAccountRights", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaAddAccountRights(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaAddPrivilegesToAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] LsaAddPrivilegesToAccount(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaClearAuditLog", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] LsaClearAuditLog(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaClose", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] LsaClose(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaCreateAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaCreateAccount(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaCreateSecret", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaCreateSecret(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaCreateTrustedDomain", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaCreateTrustedDomain(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaCreateTrustedDomainEx", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaCreateTrustedDomainEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaDelete", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] LsaDelete(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaDeleteTrustedDomain", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] LsaDeleteTrustedDomain(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaEnumerateAccountRights", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaEnumerateAccountRights(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaEnumerateAccounts", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaEnumerateAccounts(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaEnumerateAccountsWithUserRight", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaEnumerateAccountsWithUserRight(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaEnumeratePrivileges", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaEnumeratePrivileges(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaEnumeratePrivilegesOfAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] LsaEnumeratePrivilegesOfAccount(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaEnumerateTrustedDomains", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaEnumerateTrustedDomains(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaEnumerateTrustedDomainsEx", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaEnumerateTrustedDomainsEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaFreeMemory", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] LsaFreeMemory(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaGetQuotasForAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] LsaGetQuotasForAccount(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaGetRemoteUserName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaGetRemoteUserName(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaGetSystemAccessAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] LsaGetSystemAccessAccount(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaGetUserName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] LsaGetUserName(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaLookupNames", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaLookupNames(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaLookupNames2", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] LsaLookupNames2(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaLookupPrivilegeDisplayName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaLookupPrivilegeDisplayName(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaLookupPrivilegeName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaLookupPrivilegeName(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaLookupPrivilegeValue", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaLookupPrivilegeValue(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaLookupSids", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaLookupSids(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaNtStatusToWinError", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] LsaNtStatusToWinError(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaOpenAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaOpenAccount(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaOpenPolicy", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaOpenPolicy(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaOpenPolicySce", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaOpenPolicySce(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaOpenSecret", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaOpenSecret(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaOpenTrustedDomain", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaOpenTrustedDomain(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaOpenTrustedDomainByName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaOpenTrustedDomainByName(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaQueryDomainInformationPolicy", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaQueryDomainInformationPolicy(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaQueryForestTrustInformation", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaQueryForestTrustInformation(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaQueryInfoTrustedDomain", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaQueryInfoTrustedDomain(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaQueryInformationPolicy", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaQueryInformationPolicy(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaQuerySecret", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaQuerySecret(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaQuerySecurityObject", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaQuerySecurityObject(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaQueryTrustedDomainInfo", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaQueryTrustedDomainInfo(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaQueryTrustedDomainInfoByName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaQueryTrustedDomainInfoByName(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaRemoveAccountRights", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaRemoveAccountRights(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaRemovePrivilegesFromAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaRemovePrivilegesFromAccount(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaRetrievePrivateData", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaRetrievePrivateData(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetDomainInformationPolicy", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaSetDomainInformationPolicy(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetForestTrustInformation", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] LsaSetForestTrustInformation(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetInformationPolicy", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaSetInformationPolicy(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetInformationTrustedDomain", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaSetInformationTrustedDomain(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetQuotasForAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] LsaSetQuotasForAccount(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetSecret", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaSetSecret(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetSecurityObject", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaSetSecurityObject(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetSystemAccessAccount", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] LsaSetSystemAccessAccount(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetTrustedDomainInfoByName", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaSetTrustedDomainInfoByName(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaSetTrustedDomainInformation", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] LsaSetTrustedDomainInformation(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "LsaStorePrivateData", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] LsaStorePrivateData(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "MakeAbsoluteSD", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] MakeAbsoluteSD(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "MakeAbsoluteSD2", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] MakeAbsoluteSD2(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "MapGenericMask", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] MapGenericMask(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "NotifyBootConfigStatus", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] NotifyBootConfigStatus(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "NotifyChangeEventLog", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] NotifyChangeEventLog(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ObjectCloseAuditAlarmA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ObjectCloseAuditAlarmA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ObjectCloseAuditAlarmW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ObjectCloseAuditAlarmW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ObjectDeleteAuditAlarmA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ObjectDeleteAuditAlarmA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ObjectDeleteAuditAlarmW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ObjectDeleteAuditAlarmW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ObjectOpenAuditAlarmA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ObjectOpenAuditAlarmA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ObjectOpenAuditAlarmW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ObjectOpenAuditAlarmW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ObjectPrivilegeAuditAlarmA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ObjectPrivilegeAuditAlarmA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ObjectPrivilegeAuditAlarmW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] ObjectPrivilegeAuditAlarmW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenBackupEventLogA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] OpenBackupEventLogA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenBackupEventLogW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] OpenBackupEventLogW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenEncryptedFileRawA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] OpenEncryptedFileRawA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenEncryptedFileRawW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] OpenEncryptedFileRawW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenTraceA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] OpenTraceA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenTraceW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] OpenTraceW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "PrivilegedServiceAuditAlarmA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] PrivilegedServiceAuditAlarmA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "PrivilegedServiceAuditAlarmW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] PrivilegedServiceAuditAlarmW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ProcessTrace", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] ProcessTrace(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryRecoveryAgentsOnEncryptedFile", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] QueryRecoveryAgentsOnEncryptedFile(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceConfig2A", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] QueryServiceConfig2A(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceConfig2W", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] QueryServiceConfig2W(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceLockStatusA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] QueryServiceLockStatusA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceLockStatusW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] QueryServiceLockStatusW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] QueryServiceObjectSecurity(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceStatusEx", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] QueryServiceStatusEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryUsersOnEncryptedFile", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] QueryUsersOnEncryptedFile(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ReadEncryptedFileRaw", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] ReadEncryptedFileRaw(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegConnectRegistryA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegConnectRegistryA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegConnectRegistryW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegConnectRegistryW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegCreateKeyW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegCreateKeyW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegDeleteKeyExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegDeleteKeyExA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegDeleteKeyExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegDeleteKeyExW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegDisablePredefinedCache", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[advapi32] RegDisablePredefinedCache()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegDisableReflectionKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] RegDisableReflectionKey(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegEnableReflectionKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] RegEnableReflectionKey(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegEnumKeyA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegEnumKeyA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegEnumKeyExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] RegEnumKeyExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegEnumKeyW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegEnumKeyW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegEnumValueA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] RegEnumValueA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegFlushKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] RegFlushKey(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegGetKeySecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegGetKeySecurity(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegGetValueA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] RegGetValueA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegLoadKeyA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegLoadKeyA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegLoadKeyW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegLoadKeyW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegOpenCurrentUser", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] RegOpenCurrentUser(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegOpenUserClassesRoot", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegOpenUserClassesRoot(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegOverridePredefKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] RegOverridePredefKey(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegQueryInfoKeyA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] RegQueryInfoKeyA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegQueryMultipleValuesA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] RegQueryMultipleValuesA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegQueryMultipleValuesW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] RegQueryMultipleValuesW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegQueryReflectionKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] RegQueryReflectionKey(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegQueryValueW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegQueryValueW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegReplaceKeyA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegReplaceKeyA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegReplaceKeyW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegReplaceKeyW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegRestoreKeyA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegRestoreKeyA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegRestoreKeyW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegRestoreKeyW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegSaveKeyA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegSaveKeyA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegSaveKeyExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegSaveKeyExA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegSaveKeyExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] RegSaveKeyExW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegSaveKeyW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegSaveKeyW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegSetKeySecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegSetKeySecurity(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegSetValueW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] RegSetValueW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegUnLoadKeyA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] RegUnLoadKeyA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegUnLoadKeyW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] RegUnLoadKeyW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegisterServiceCtrlHandlerA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] RegisterServiceCtrlHandlerA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegisterServiceCtrlHandlerExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegisterServiceCtrlHandlerExA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegisterServiceCtrlHandlerExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] RegisterServiceCtrlHandlerExW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegisterServiceCtrlHandlerW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] RegisterServiceCtrlHandlerW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegisterTraceGuidsA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] RegisterTraceGuidsA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RegisterTraceGuidsW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] RegisterTraceGuidsW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "RemoveUsersFromEncryptedFile", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] RemoveUsersFromEncryptedFile(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SaferCloseLevel", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] SaferCloseLevel(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SaferComputeTokenFromLevel", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] SaferComputeTokenFromLevel(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SaferCreateLevel", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] SaferCreateLevel(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SaferGetPolicyInformation", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] SaferGetPolicyInformation(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SaferIdentifyLevel", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] SaferIdentifyLevel(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SaferRecordEventLogEntry", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SaferRecordEventLogEntry(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetAclInformation", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] SetAclInformation(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetEntriesInAclA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] SetEntriesInAclA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetEntriesInAclW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] SetEntriesInAclW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetFileSecurityA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SetFileSecurityA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetFileSecurityW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SetFileSecurityW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetKernelObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SetKernelObjectSecurity(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetPrivateObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[advapi32] SetPrivateObjectSecurity(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetSecurityDescriptorControl", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SetSecurityDescriptorControl(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetSecurityDescriptorRMControl", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SetSecurityDescriptorRMControl(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetServiceBits", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] SetServiceBits(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetServiceObjectSecurity", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SetServiceObjectSecurity(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SetServiceStatus", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SetServiceStatus(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "StartServiceCtrlDispatcherA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] StartServiceCtrlDispatcherA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "StartServiceCtrlDispatcherW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] StartServiceCtrlDispatcherW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction001", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction001(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction002", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction002(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction003", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction003(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction004", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction004(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction005", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction005(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction006", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction006(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction007", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction007(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction008", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction008(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction009", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction009(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction010", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction010(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction011", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction011(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction012", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction012(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction013", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction013(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction014", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction014(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction015", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction015(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction016", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction016(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction017", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction017(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction018", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction018(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction019", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction019(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction020", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction020(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction021", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction021(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction022", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction022(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction023", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction023(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction024", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction024(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction025", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction025(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction026", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction026(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction027", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction027(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction028", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction028(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction029", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction029(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction030", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction030(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction031", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction031(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction032", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction032(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction033", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction033(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction034", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[advapi32] SystemFunction034(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction035", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] SystemFunction035(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction040", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction040(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "SystemFunction041", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] SystemFunction041(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "TraceEventInstance", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[advapi32] TraceEventInstance(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "TraceMessage", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[advapi32] TraceMessage()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "TraceMessageVa", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[advapi32] TraceMessageVa()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "TreeResetNamedSecurityInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] TreeResetNamedSecurityInfoA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "TreeResetNamedSecurityInfoW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[advapi32] TreeResetNamedSecurityInfoW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "UnlockServiceDatabase", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] UnlockServiceDatabase(0x%x)\n", a0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "UnregisterTraceGuids", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[advapi32] UnregisterTraceGuids(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "WriteEncryptedFileRaw", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[advapi32] WriteEncryptedFileRaw(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
 }

@@ -1465,4 +1465,399 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
+
+	// ═══════════════════════════════════════════════════════════════
+	// AUTO-GENERATED: Missing comctl32 handlers from ReactOS spec
+	// ═══════════════════════════════════════════════════════════════
+
+	d.RegisterAutoStubHandler(comctl32, "AddMRUData", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] AddMRUData(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "AddMRUStringA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] AddMRUStringA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "Alloc", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comctl32] Alloc(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "CreateMRUListA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comctl32] CreateMRUListA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "CreateMRUListLazyA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] CreateMRUListLazyA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "CreateMRUListLazyW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] CreateMRUListLazyW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "CreatePage", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] CreatePage(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "CreateProxyPage", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] CreateProxyPage(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DPA_LoadStream", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] DPA_LoadStream(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DPA_Merge", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[comctl32] DPA_Merge(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DPA_SaveStream", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] DPA_SaveStream(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DelMRUString", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] DelMRUString(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DllInstall", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] DllInstall(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DoReaderMode", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comctl32] DoReaderMode(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DrawShadowText", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[comctl32] DrawShadowText(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DrawTextExPrivWrap", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[comctl32] DrawTextExPrivWrap(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "DrawTextWrap", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[comctl32] DrawTextWrap(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "EnumMRUListA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] EnumMRUListA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "ExtTextOutWrap", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[comctl32] ExtTextOutWrap(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "FindMRUData", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] FindMRUData(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "FindMRUStringA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] FindMRUStringA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "FindMRUStringW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] FindMRUStringW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "Free", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comctl32] Free(0x%x)\n", a0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "GetCharWidthWrap", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] GetCharWidthWrap(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "GetSize", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comctl32] GetSize(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "GetTextExtentPoint32Wrap", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] GetTextExtentPoint32Wrap(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "GetTextExtentPointWrap", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] GetTextExtentPointWrap(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "ImageList_SetColorTable", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] ImageList_SetColorTable(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "IntlStrEqWorkerA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] IntlStrEqWorkerA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "IntlStrEqWorkerW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] IntlStrEqWorkerW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "MirrorIcon", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] MirrorIcon(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "ReAlloc", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] ReAlloc(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "SendNotify", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[comctl32] SendNotify(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "SendNotifyEx", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[comctl32] SendNotifyEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "SetPathWordBreakProc", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] SetPathWordBreakProc(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "SmoothScrollWindow", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comctl32] SmoothScrollWindow(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrCSpnA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrCSpnA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrCSpnIA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrCSpnIA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrCSpnIW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrCSpnIW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrCSpnW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrCSpnW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrChrA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrChrA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrChrIA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrChrIA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrChrIW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrChrIW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrChrW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrChrW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrCmpNA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrCmpNA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrCmpNIA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrCmpNIA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrCmpNIW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrCmpNIW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrCmpNW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrCmpNW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrRChrA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrRChrA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrRChrIA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrRChrIA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrRChrIW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrRChrIW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrRChrW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrRChrW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrRStrIA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrRStrIA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrRStrIW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] StrRStrIW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrStrA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrStrA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrStrIA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrStrIA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrStrIW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrStrIW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrStrW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] StrStrW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrToIntA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comctl32] StrToIntA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "StrToIntW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comctl32] StrToIntW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "Str_GetPtrA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] Str_GetPtrA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "Str_GetPtrW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comctl32] Str_GetPtrW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "Str_SetPtrA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] Str_SetPtrA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "Str_SetPtrW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[comctl32] Str_SetPtrW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comctl32, "TextOutWrap", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[comctl32] TextOutWrap(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
 }

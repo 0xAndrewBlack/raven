@@ -292,4 +292,39 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0) // NULL - dialog not created
 		return 0
 	})
+
+	// ═══════════════════════════════════════════════════════════════
+	// AUTO-GENERATED: Missing comdlg32 handlers from ReactOS spec
+	// ═══════════════════════════════════════════════════════════════
+
+	d.RegisterAutoStubHandler(comdlg32, "ChooseColorA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comdlg32] ChooseColorA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comdlg32, "FindTextA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comdlg32] FindTextA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comdlg32, "GetFileTitleA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[comdlg32] GetFileTitleA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comdlg32, "PrintDlgA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comdlg32] PrintDlgA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[comdlg32] ReplaceTextA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
 }

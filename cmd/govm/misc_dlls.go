@@ -399,6 +399,89 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 		}
 		return 0
 	})
+
+	// ═══════════════════════════════════════════════════════════════
+	// AUTO-GENERATED: Missing version handlers from ReactOS spec
+	// ═══════════════════════════════════════════════════════════════
+
+	d.RegisterAutoStubHandler(version, "GetFileVersionInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[version] GetFileVersionInfoA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "GetFileVersionInfoExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[version] GetFileVersionInfoExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "GetFileVersionInfoExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[version] GetFileVersionInfoExW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "GetFileVersionInfoSizeA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[version] GetFileVersionInfoSizeA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "GetFileVersionInfoSizeExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[version] GetFileVersionInfoSizeExA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "GetFileVersionInfoSizeExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[version] GetFileVersionInfoSizeExW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "VerFindFileA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[version] VerFindFileA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "VerFindFileW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[version] VerFindFileW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "VerInstallFileA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[version] VerInstallFileA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "VerInstallFileW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[version] VerInstallFileW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "VerLanguageNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[version] VerLanguageNameA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "VerLanguageNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[version] VerLanguageNameW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(version, "VerQueryValueA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[version] VerQueryValueA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
 }
 
 func registerImm32Handlers(hctx *HandlerCtx) {
@@ -453,6 +536,747 @@ func registerImm32Handlers(hctx *HandlerCtx) {
 			return 0
 		})
 	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// AUTO-GENERATED: Missing imm32 handlers from ReactOS spec
+	// ═══════════════════════════════════════════════════════════════
+
+	d.RegisterAutoStubHandler(imm32dll, "CtfAImmActivate", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] CtfAImmActivate(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfAImmDeactivate", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] CtfAImmDeactivate(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfAImmIsIME", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] CtfAImmIsIME(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmCoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[imm32] CtfImmCoUninitialize()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmDispatchDefImeMessage", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] CtfImmDispatchDefImeMessage(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmEnterCoInitCountSkipMode", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[imm32] CtfImmEnterCoInitCountSkipMode()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmGenerateMessage", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] CtfImmGenerateMessage(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmGetGuidAtom", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] CtfImmGetGuidAtom(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmHideToolbarWnd", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[imm32] CtfImmHideToolbarWnd()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmIsCiceroEnabled", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[imm32] CtfImmIsCiceroEnabled()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmIsCiceroStartedInThread", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[imm32] CtfImmIsCiceroStartedInThread()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmIsGuidMapEnable", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] CtfImmIsGuidMapEnable(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmIsTextFrameServiceDisabled", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[imm32] CtfImmIsTextFrameServiceDisabled()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmLastEnabledWndDestroy", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] CtfImmLastEnabledWndDestroy(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmLeaveCoInitCountSkipMode", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[imm32] CtfImmLeaveCoInitCountSkipMode()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmRestoreToolbarWnd", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] CtfImmRestoreToolbarWnd(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmSetAppCompatFlags", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] CtfImmSetAppCompatFlags(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmSetCiceroStartInThread", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] CtfImmSetCiceroStartInThread(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "CtfImmTIMActivate", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] CtfImmTIMActivate(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "GetKeyboardLayoutCP", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] GetKeyboardLayoutCP(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmActivateLayout", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmActivateLayout(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmCallImeConsoleIME", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[imm32] ImmCallImeConsoleIME(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmConfigureIMEA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmConfigureIMEA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmConfigureIMEW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmConfigureIMEW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmCreateContext", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[imm32] ImmCreateContext()\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmCreateIMCC", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmCreateIMCC(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmCreateSoftKeyboard", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmCreateSoftKeyboard(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmDestroyContext", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmDestroyContext(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmDestroyIMCC", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmDestroyIMCC(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmDestroySoftKeyboard", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmDestroySoftKeyboard(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmDisableIme", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmDisableIme(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmDisableTextFrameService", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmDisableTextFrameService(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmEnumInputContext", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmEnumInputContext(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmEnumRegisterWordA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[imm32] ImmEnumRegisterWordA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmEnumRegisterWordW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[imm32] ImmEnumRegisterWordW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmEscapeA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmEscapeA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmEscapeW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmEscapeW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmFreeLayout", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmFreeLayout(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGenerateMessage", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmGenerateMessage(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetAppCompatFlags", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmGetAppCompatFlags(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCandidateListA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmGetCandidateListA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCandidateListCountA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmGetCandidateListCountA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCandidateListCountW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmGetCandidateListCountW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCandidateListW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmGetCandidateListW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCandidateWindow", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetCandidateWindow(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCompositionFontA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmGetCompositionFontA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCompositionFontW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmGetCompositionFontW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCompositionString", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmGetCompositionString(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCompositionStringA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmGetCompositionStringA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetCompositionWindow", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmGetCompositionWindow(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetConversionListA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[imm32] ImmGetConversionListA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetConversionListW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[imm32] ImmGetConversionListW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetConversionStatus", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetConversionStatus(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetDescriptionA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetDescriptionA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetDescriptionW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetDescriptionW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetGuideLineA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmGetGuideLineA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetGuideLineW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmGetGuideLineW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetHotKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmGetHotKey(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetIMCCLockCount", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmGetIMCCLockCount(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetIMCCSize", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmGetIMCCSize(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetIMCLockCount", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmGetIMCLockCount(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetIMEFileNameA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetIMEFileNameA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetIMEFileNameW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetIMEFileNameW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetImeInfoEx", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetImeInfoEx(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetImeMenuItemsA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[imm32] ImmGetImeMenuItemsA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetImeMenuItemsW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[imm32] ImmGetImeMenuItemsW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetOpenStatus", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmGetOpenStatus(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetProperty", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmGetProperty(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetRegisterWordStyleA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetRegisterWordStyleA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetRegisterWordStyleW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmGetRegisterWordStyleW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetStatusWindowPos", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmGetStatusWindowPos(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmGetVirtualKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmGetVirtualKey(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmIMPGetIMEA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmIMPGetIMEA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmIMPGetIMEW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmIMPGetIMEW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmIMPQueryIMEA", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmIMPQueryIMEA(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmIMPQueryIMEW", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmIMPQueryIMEW(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmIMPSetIMEA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmIMPSetIMEA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmIMPSetIMEW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmIMPSetIMEW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmInstallIMEA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmInstallIMEA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmInstallIMEW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmInstallIMEW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmIsUIMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmIsUIMessageA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmIsUIMessageW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmIsUIMessageW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmLoadIME", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmLoadIME(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmLoadLayout", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmLoadLayout(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmLockClientImc", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmLockClientImc(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmLockIMC", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmLockIMC(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmLockIMCC", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmLockIMCC(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmLockImeDpi", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmLockImeDpi(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmNotifyIME", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmNotifyIME(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmProcessKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
+		ravelog.Logf("[imm32] ImmProcessKey(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmPutImeMenuItemsIntoMappedFile", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmPutImeMenuItemsIntoMappedFile(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmReSizeIMCC", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmReSizeIMCC(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmRegisterClient", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmRegisterClient(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmRegisterWordA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmRegisterWordA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmRegisterWordW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmRegisterWordW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmRequestMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmRequestMessageA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmRequestMessageW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmRequestMessageW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSendIMEMessageExA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSendIMEMessageExA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSendIMEMessageExW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSendIMEMessageExW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetActiveContext", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmSetActiveContext(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetActiveContextConsoleIME", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSetActiveContextConsoleIME(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetCandidateWindow", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSetCandidateWindow(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetCompositionFontA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSetCompositionFontA(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetCompositionFontW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSetCompositionFontW(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetCompositionStringA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[imm32] ImmSetCompositionStringA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetCompositionStringW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[imm32] ImmSetCompositionStringW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetCompositionWindow", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSetCompositionWindow(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetConversionStatus", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmSetConversionStatus(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetHotKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmSetHotKey(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetOpenStatus", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSetOpenStatus(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSetStatusWindowPos", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSetStatusWindowPos(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmShowSoftKeyboard", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmShowSoftKeyboard(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSimulateHotKey", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmSimulateHotKey(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmSystemHandler", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[imm32] ImmSystemHandler(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmTranslateMessage", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmTranslateMessage(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmUnlockClientImc", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmUnlockClientImc(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmUnlockIMC", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmUnlockIMC(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmUnlockIMCC", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmUnlockIMCC(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmUnlockImeDpi", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmUnlockImeDpi(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmUnregisterWordA", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmUnregisterWordA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmUnregisterWordW", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[imm32] ImmUnregisterWordW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmWINNLSEnableIME", func(ctx *ntapi.TrapContext) uint32 {
+		a0, a1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[imm32] ImmWINNLSEnableIME(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmWINNLSGetEnableStatus", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmWINNLSGetEnableStatus(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(imm32dll, "ImmWINNLSGetIMEHotkey", func(ctx *ntapi.TrapContext) uint32 {
+		a0 := ctx.Arg(0)
+		ravelog.Logf("[imm32] ImmWINNLSGetIMEHotkey(0x%x)\n", a0)
+		ctx.SetReturn(0)
+		return 0
+	})
 }
 
 func registerSensapiHandlers(hctx *HandlerCtx) {
