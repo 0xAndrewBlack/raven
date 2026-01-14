@@ -3498,6 +3498,20 @@ c.XMM[m.rm][0] = (lo >> shift) | (hi << (64 - shift))
 c.XMM[m.rm][1] = hi >> shift
 }
 }
+case 2: // PSRLQ - logical right shift each 64-bit qword by imm8
+var r0, r1 uint64
+if count < 64 {
+r0 = c.XMM[m.rm][0] >> count
+r1 = c.XMM[m.rm][1] >> count
+}
+c.XMM[m.rm] = [2]uint64{r0, r1}
+case 6: // PSLLQ - logical left shift each 64-bit qword by imm8
+var r0, r1 uint64
+if count < 64 {
+r0 = c.XMM[m.rm][0] << count
+r1 = c.XMM[m.rm][1] << count
+}
+c.XMM[m.rm] = [2]uint64{r0, r1}
 case 7: // PSLLDQ
 if count > 15 {
 c.XMM[m.rm] = [2]uint64{0, 0}
