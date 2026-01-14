@@ -298,33 +298,42 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 	// ═══════════════════════════════════════════════════════════════
 
 	d.RegisterAutoStubHandler(comdlg32, "ChooseColorA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comdlg32] ChooseColorA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpcc := ctx.Arg(0)
+		ravelog.Logf("[comdlg32] ChooseColorA cc=0x%x\n", lpcc)
+		// Write a default color (white) to rgbResult (+24)
+		if lpcc != 0 {
+			ctx.Mem.Write32(lpcc + 24, 0x00FFFFFF) // white
+		}
+		ctx.SetReturn(0) // FALSE = cancelled
 		return 0
 	})
 	d.RegisterAutoStubHandler(comdlg32, "FindTextA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comdlg32] FindTextA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpfr := ctx.Arg(0)
+		ravelog.Logf("[comdlg32] FindTextA fr=0x%x\n", lpfr)
+		ctx.SetReturn(0) // NULL = no dialog
 		return 0
 	})
 	d.RegisterAutoStubHandler(comdlg32, "GetFileTitleA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comdlg32] GetFileTitleA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpszFile := ctx.Arg(0)
+		lpszTitle := ctx.Arg(1)
+		cchSize := ctx.Arg(2)
+		ravelog.Logf("[comdlg32] GetFileTitleA file=0x%x buf=0x%x size=%d\n", lpszFile, lpszTitle, cchSize)
+		if lpszTitle != 0 && cchSize > 0 {
+			ctx.Mem.Write8(lpszTitle, 0) // empty title
+		}
+		ctx.SetReturn(0) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(comdlg32, "PrintDlgA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comdlg32] PrintDlgA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lppd := ctx.Arg(0)
+		ravelog.Logf("[comdlg32] PrintDlgA pd=0x%x\n", lppd)
+		ctx.SetReturn(0) // FALSE = cancelled/no printer
 		return 0
 	})
 	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comdlg32] ReplaceTextA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpfr := ctx.Arg(0)
+		ravelog.Logf("[comdlg32] ReplaceTextA fr=0x%x\n", lpfr)
+		ctx.SetReturn(0) // NULL = no dialog
 		return 0
 	})
 }

@@ -12,6 +12,7 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	hwndAlloc := hctx.HwndAlloc
 	hwndChildren := hctx.HwndChildren
 	readGuestUTF16 := hctx.ReadGuestUTF16
+	sharedHeapAlloc := hctx.HeapAlloc
 
 	comctl32, ok := hctx.SynthByName["comctl32.dll"]
 	if !ok {
@@ -1471,393 +1472,781 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	// ═══════════════════════════════════════════════════════════════
 
 	d.RegisterAutoStubHandler(comctl32, "AddMRUData", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] AddMRUData(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hMRU := ctx.Arg(0)
+		lpData := ctx.Arg(1)
+		cbData := ctx.Arg(2)
+		ravelog.Logf("[comctl32] AddMRUData handle=0x%x data=0x%x size=%d\n", hMRU, lpData, cbData)
+		ctx.SetReturn(0) // index 0
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "AddMRUStringA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] AddMRUStringA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hMRU := ctx.Arg(0)
+		lpszString := ctx.Arg(1)
+		ravelog.Logf("[comctl32] AddMRUStringA handle=0x%x\n", hMRU)
+		_ = lpszString
+		ctx.SetReturn(0) // index 0
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "Alloc", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comctl32] Alloc(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		dwSize := ctx.Arg(0)
+		ravelog.Logf("[comctl32] Alloc size=%d\n", dwSize)
+		buf := sharedHeapAlloc(dwSize, true)
+		ctx.SetReturn(buf)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateMRUListA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comctl32] CreateMRUListA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpCreateInfo := ctx.Arg(0)
+		ravelog.Logf("[comctl32] CreateMRUListA info=0x%x\n", lpCreateInfo)
+		ctx.SetReturn(0xDEAD0100) // fake MRU handle
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateMRUListLazyA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] CreateMRUListLazyA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		lpCreateInfo := ctx.Arg(0)
+		param1 := ctx.Arg(1)
+		param2 := ctx.Arg(2)
+		param3 := ctx.Arg(3)
+		ravelog.Logf("[comctl32] CreateMRUListLazyA info=0x%x\n", lpCreateInfo)
+		_ = param1; _ = param2; _ = param3
+		ctx.SetReturn(0xDEAD0101) // fake MRU handle
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateMRUListLazyW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] CreateMRUListLazyW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		lpCreateInfo := ctx.Arg(0)
+		param1 := ctx.Arg(1)
+		param2 := ctx.Arg(2)
+		param3 := ctx.Arg(3)
+		ravelog.Logf("[comctl32] CreateMRUListLazyW info=0x%x\n", lpCreateInfo)
+		_ = param1; _ = param2; _ = param3
+		ctx.SetReturn(0xDEAD0101) // fake MRU handle
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreatePage", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] CreatePage(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pPageInfo := ctx.Arg(0)
+		hModule := ctx.Arg(1)
+		ravelog.Logf("[comctl32] CreatePage info=0x%x module=0x%x\n", pPageInfo, hModule)
+		ctx.SetReturn(0) // NULL
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateProxyPage", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] CreateProxyPage(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pPageInfo := ctx.Arg(0)
+		pProxyPage := ctx.Arg(1)
+		ravelog.Logf("[comctl32] CreateProxyPage info=0x%x proxy=0x%x\n", pPageInfo, pProxyPage)
+		ctx.SetReturn(0) // NULL
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DPA_LoadStream", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] DPA_LoadStream(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		phdpa := ctx.Arg(0)
+		pfn := ctx.Arg(1)
+		pstream := ctx.Arg(2)
+		pvInstData := ctx.Arg(3)
+		ravelog.Logf("[comctl32] DPA_LoadStream hdpa=0x%x fn=0x%x\n", phdpa, pfn)
+		_ = pstream; _ = pvInstData
+		ctx.SetReturn(0x80004005) // E_FAIL
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DPA_Merge", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[comctl32] DPA_Merge(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdpaDest := ctx.Arg(0)
+		hdpaSrc := ctx.Arg(1)
+		dwFlags := ctx.Arg(2)
+		pfnCompare := ctx.Arg(3)
+		pfnMerge := ctx.Arg(4)
+		lParam := ctx.Arg(5)
+		ravelog.Logf("[comctl32] DPA_Merge dest=0x%x src=0x%x flags=0x%x\n", hdpaDest, hdpaSrc, dwFlags)
+		_ = pfnCompare; _ = pfnMerge; _ = lParam
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DPA_SaveStream", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] DPA_SaveStream(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdpa := ctx.Arg(0)
+		pfn := ctx.Arg(1)
+		pstream := ctx.Arg(2)
+		pvInstData := ctx.Arg(3)
+		ravelog.Logf("[comctl32] DPA_SaveStream hdpa=0x%x fn=0x%x\n", hdpa, pfn)
+		_ = pstream; _ = pvInstData
+		ctx.SetReturn(0x80004005) // E_FAIL
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DelMRUString", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] DelMRUString(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hMRU := ctx.Arg(0)
+		nItem := ctx.Arg(1)
+		ravelog.Logf("[comctl32] DelMRUString handle=0x%x item=%d\n", hMRU, nItem)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DllInstall", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] DllInstall(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		bInstall := ctx.Arg(0)
+		pszCmdLine := ctx.Arg(1)
+		ravelog.Logf("[comctl32] DllInstall install=%d\n", bInstall)
+		_ = pszCmdLine
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DoReaderMode", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comctl32] DoReaderMode(0x%x)\n", a0)
+		prmi := ctx.Arg(0)
+		ravelog.Logf("[comctl32] DoReaderMode info=0x%x\n", prmi)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DrawShadowText", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[comctl32] DrawShadowText(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		pszText := ctx.Arg(1)
+		cch := ctx.Arg(2)
+		prc := ctx.Arg(3)
+		dwFlags := ctx.Arg(4)
+		crText := ctx.Arg(5)
+		ravelog.Logf("[comctl32] DrawShadowText hdc=0x%x text=0x%x cch=%d flags=0x%x\n", hdc, pszText, cch, dwFlags)
+		_ = prc; _ = crText
+		ctx.SetReturn(0) // 0 = no height
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DrawTextExPrivWrap", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[comctl32] DrawTextExPrivWrap(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[comctl32] DrawTextExPrivWrap hdc=0x%x - forwarding as nop\n", hdc)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "DrawTextWrap", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[comctl32] DrawTextWrap(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[comctl32] DrawTextWrap hdc=0x%x - forwarding as nop\n", hdc)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "EnumMRUListA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] EnumMRUListA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hMRU := ctx.Arg(0)
+		nItem := ctx.Arg(1)
+		lpData := ctx.Arg(2)
+		cbData := ctx.Arg(3)
+		ravelog.Logf("[comctl32] EnumMRUListA handle=0x%x item=%d\n", hMRU, nItem)
+		_ = lpData; _ = cbData
+		ctx.SetReturn(^uint64(0)) // -1 = no more items
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ExtTextOutWrap", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[comctl32] ExtTextOutWrap(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[comctl32] ExtTextOutWrap hdc=0x%x - forwarding as nop\n", hdc)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FindMRUData", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] FindMRUData(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hMRU := ctx.Arg(0)
+		lpData := ctx.Arg(1)
+		cbData := ctx.Arg(2)
+		lpRegNum := ctx.Arg(3)
+		ravelog.Logf("[comctl32] FindMRUData handle=0x%x\n", hMRU)
+		_ = lpData; _ = cbData
+		if lpRegNum != 0 { ctx.Mem.Write32(lpRegNum, 0) }
+		ctx.SetReturn(^uint64(0)) // -1 = not found
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FindMRUStringA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] FindMRUStringA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hMRU := ctx.Arg(0)
+		lpszString := ctx.Arg(1)
+		lpRegNum := ctx.Arg(2)
+		ravelog.Logf("[comctl32] FindMRUStringA handle=0x%x\n", hMRU)
+		_ = lpszString
+		if lpRegNum != 0 { ctx.Mem.Write32(lpRegNum, 0) }
+		ctx.SetReturn(^uint64(0)) // -1 = not found
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FindMRUStringW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] FindMRUStringW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hMRU := ctx.Arg(0)
+		lpszString := ctx.Arg(1)
+		lpRegNum := ctx.Arg(2)
+		ravelog.Logf("[comctl32] FindMRUStringW handle=0x%x\n", hMRU)
+		_ = lpszString
+		if lpRegNum != 0 { ctx.Mem.Write32(lpRegNum, 0) }
+		ctx.SetReturn(^uint64(0)) // -1 = not found
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "Free", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comctl32] Free(0x%x)\n", a0)
-		ctx.SetReturn(1)
+		lpMem := ctx.Arg(0)
+		ravelog.Logf("[comctl32] Free mem=0x%x\n", lpMem)
+		ctx.SetReturn(1) // TRUE (success)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "GetCharWidthWrap", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] GetCharWidthWrap(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[comctl32] GetCharWidthWrap hdc=0x%x - forwarding as nop\n", hdc)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "GetSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comctl32] GetSize(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpMem := ctx.Arg(0)
+		ravelog.Logf("[comctl32] GetSize mem=0x%x\n", lpMem)
+		ctx.SetReturn(0) // unknown size
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "GetTextExtentPoint32Wrap", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] GetTextExtentPoint32Wrap(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[comctl32] GetTextExtentPoint32Wrap hdc=0x%x - forwarding as nop\n", hdc)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "GetTextExtentPointWrap", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] GetTextExtentPointWrap(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[comctl32] GetTextExtentPointWrap hdc=0x%x - forwarding as nop\n", hdc)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_SetColorTable", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] ImageList_SetColorTable(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		himl := ctx.Arg(0)
+		iStart := ctx.Arg(1)
+		cEntries := ctx.Arg(2)
+		prgb := ctx.Arg(3)
+		ravelog.Logf("[comctl32] ImageList_SetColorTable iml=0x%x start=%d entries=%d\n", himl, iStart, cEntries)
+		_ = prgb
+		ctx.SetReturn(cEntries) // return number of entries set
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "IntlStrEqWorkerA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] IntlStrEqWorkerA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		fCaseSens := ctx.Arg(0)
+		lpString1 := ctx.Arg(1)
+		lpString2 := ctx.Arg(2)
+		nChar := ctx.Arg(3)
+		for i := uint64(0); i < nChar; i++ {
+			c1, _ := ctx.Mem.Read8(lpString1 + i*1)
+			c2, _ := ctx.Mem.Read8(lpString2 + i*1)
+			if fCaseSens == 0 {
+				if c1 >= 65 && c1 <= 90 { c1 += 32 }
+				if c2 >= 65 && c2 <= 90 { c2 += 32 }
+			}
+			if c1 != c2 { ctx.SetReturn(0); return 0 }
+			if c1 == 0 { break }
+		}
+		ctx.SetReturn(1) // TRUE - strings are equal
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "IntlStrEqWorkerW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] IntlStrEqWorkerW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		fCaseSens := ctx.Arg(0)
+		lpString1 := ctx.Arg(1)
+		lpString2 := ctx.Arg(2)
+		nChar := ctx.Arg(3)
+		for i := uint64(0); i < nChar; i++ {
+			c1, _ := ctx.Mem.Read16(lpString1 + i*2)
+			c2, _ := ctx.Mem.Read16(lpString2 + i*2)
+			if fCaseSens == 0 {
+				if c1 >= 65 && c1 <= 90 { c1 += 32 }
+				if c2 >= 65 && c2 <= 90 { c2 += 32 }
+			}
+			if c1 != c2 { ctx.SetReturn(0); return 0 }
+			if c1 == 0 { break }
+		}
+		ctx.SetReturn(1) // TRUE - strings are equal
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "MirrorIcon", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] MirrorIcon(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		phInstOrig := ctx.Arg(0)
+		phIconOrig := ctx.Arg(1)
+		ravelog.Logf("[comctl32] MirrorIcon orig=0x%x icon=0x%x\n", phInstOrig, phIconOrig)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ReAlloc", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] ReAlloc(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpMem := ctx.Arg(0)
+		dwSize := ctx.Arg(1)
+		ravelog.Logf("[comctl32] ReAlloc mem=0x%x size=%d\n", lpMem, dwSize)
+		buf := sharedHeapAlloc(dwSize, true)
+		if lpMem != 0 && buf != 0 {
+			for i := uint64(0); i < dwSize && i < 0x10000; i++ {
+				b, _ := ctx.Mem.Read8(lpMem + i)
+				ctx.Mem.Write8(buf+i, b)
+			}
+		}
+		ctx.SetReturn(buf)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "SendNotify", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[comctl32] SendNotify(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		code := ctx.Arg(1)
+		lpnmh := ctx.Arg(2)
+		ravelog.Logf("[comctl32] SendNotify hwnd=0x%x code=0x%x\n", hwnd, code)
+		_ = lpnmh
+		ctx.SetReturn(0) // LRESULT=0
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "SendNotifyEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[comctl32] SendNotifyEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		hwnd := ctx.Arg(0)
+		hwndFrom := ctx.Arg(1)
+		code := ctx.Arg(2)
+		lpnmh := ctx.Arg(3)
+		ravelog.Logf("[comctl32] SendNotifyEx hwnd=0x%x from=0x%x code=0x%x\n", hwnd, hwndFrom, code)
+		_ = lpnmh
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "SetPathWordBreakProc", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] SetPathWordBreakProc(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(1)
+		hwndEdit := ctx.Arg(0)
+		bSet := ctx.Arg(1)
+		ravelog.Logf("[comctl32] SetPathWordBreakProc hwnd=0x%x set=%d\n", hwndEdit, bSet)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "SmoothScrollWindow", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comctl32] SmoothScrollWindow(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		psInfo := ctx.Arg(0)
+		ravelog.Logf("[comctl32] SmoothScrollWindow info=0x%x\n", psInfo)
+		ctx.SetReturn(0) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrCSpnA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrCSpnA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpStr := ctx.Arg(0)
+		lpSet := ctx.Arg(1)
+		if lpStr == 0 || lpSet == 0 { ctx.SetReturn(0); return 0 }
+		var count uint64
+		for i := lpStr; ; i += 1 {
+			ch, _ := ctx.Mem.Read8(i)
+			if ch == 0 { break }
+			found := false
+			for j := lpSet; ; j += 1 {
+				s, _ := ctx.Mem.Read8(j)
+				if s == 0 { break }
+				if s == ch { found = true; break }
+			}
+			if found { break }
+			count++
+		}
+		ctx.SetReturn(count)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrCSpnIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrCSpnIA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpStr := ctx.Arg(0)
+		lpSet := ctx.Arg(1)
+		if lpStr == 0 || lpSet == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint8) uint8 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		var count uint64
+		for i := lpStr; ; i += 1 {
+			ch, _ := ctx.Mem.Read8(i)
+			if ch == 0 { break }
+			found := false
+			for j := lpSet; ; j += 1 {
+				s, _ := ctx.Mem.Read8(j)
+				if s == 0 { break }
+				if lo(s) == lo(ch) { found = true; break }
+			}
+			if found { break }
+			count++
+		}
+		ctx.SetReturn(count)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrCSpnIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrCSpnIW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpStr := ctx.Arg(0)
+		lpSet := ctx.Arg(1)
+		if lpStr == 0 || lpSet == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint16) uint16 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		var count uint64
+		for i := lpStr; ; i += 2 {
+			ch, _ := ctx.Mem.Read16(i)
+			if ch == 0 { break }
+			found := false
+			for j := lpSet; ; j += 2 {
+				s, _ := ctx.Mem.Read16(j)
+				if s == 0 { break }
+				if lo(s) == lo(ch) { found = true; break }
+			}
+			if found { break }
+			count++
+		}
+		ctx.SetReturn(count)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrCSpnW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrCSpnW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpStr := ctx.Arg(0)
+		lpSet := ctx.Arg(1)
+		if lpStr == 0 || lpSet == 0 { ctx.SetReturn(0); return 0 }
+		var count uint64
+		for i := lpStr; ; i += 2 {
+			ch, _ := ctx.Mem.Read16(i)
+			if ch == 0 { break }
+			found := false
+			for j := lpSet; ; j += 2 {
+				s, _ := ctx.Mem.Read16(j)
+				if s == 0 { break }
+				if s == ch { found = true; break }
+			}
+			if found { break }
+			count++
+		}
+		ctx.SetReturn(count)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrChrA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrChrA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpStart := ctx.Arg(0)
+		wMatch := ctx.Arg(1)
+		if lpStart == 0 { ctx.SetReturn(0); return 0 }
+		for addr := lpStart; ; addr += 1 {
+			ch, _ := ctx.Mem.Read8(addr)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			if uint64(ch) == wMatch { ctx.SetReturn(addr); return 0 }
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrChrIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrChrIA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpStart := ctx.Arg(0)
+		wMatch := ctx.Arg(1)
+		if lpStart == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint64) uint64 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		for addr := lpStart; ; addr += 1 {
+			ch, _ := ctx.Mem.Read8(addr)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			if lo(uint64(ch)) == lo(wMatch) { ctx.SetReturn(addr); return 0 }
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrChrIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrChrIW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpStart := ctx.Arg(0)
+		wMatch := ctx.Arg(1)
+		if lpStart == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint64) uint64 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		for addr := lpStart; ; addr += 2 {
+			ch, _ := ctx.Mem.Read16(addr)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			if lo(uint64(ch)) == lo(wMatch) { ctx.SetReturn(addr); return 0 }
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrChrW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrChrW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpStart := ctx.Arg(0)
+		wMatch := ctx.Arg(1)
+		if lpStart == 0 { ctx.SetReturn(0); return 0 }
+		for addr := lpStart; ; addr += 2 {
+			ch, _ := ctx.Mem.Read16(addr)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			if uint64(ch) == wMatch { ctx.SetReturn(addr); return 0 }
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrCmpNA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrCmpNA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpStr1 := ctx.Arg(0)
+		lpStr2 := ctx.Arg(1)
+		nChar := ctx.Arg(2)
+		for i := uint64(0); i < nChar; i++ {
+			c1, _ := ctx.Mem.Read8(lpStr1 + i*1)
+			c2, _ := ctx.Mem.Read8(lpStr2 + i*1)
+			if c1 != c2 { if c1 < c2 { ctx.SetReturn(^uint64(0)) } else { ctx.SetReturn(1) }; return 0 }
+			if c1 == 0 { break }
+		}
+		ctx.SetReturn(0) // equal
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrCmpNIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrCmpNIA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		lpStr1 := ctx.Arg(0)
+		lpStr2 := ctx.Arg(1)
+		nChar := ctx.Arg(2)
+		lo := func(c uint8) uint8 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		for i := uint64(0); i < nChar; i++ {
+			c1, _ := ctx.Mem.Read8(lpStr1 + i*1)
+			c2, _ := ctx.Mem.Read8(lpStr2 + i*1)
+			l1, l2 := lo(c1), lo(c2)
+			if l1 != l2 { if l1 < l2 { ctx.SetReturn(^uint64(0)) } else { ctx.SetReturn(1) }; return 0 }
+			if c1 == 0 { break }
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrCmpNIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrCmpNIW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		lpStr1 := ctx.Arg(0)
+		lpStr2 := ctx.Arg(1)
+		nChar := ctx.Arg(2)
+		lo := func(c uint16) uint16 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		for i := uint64(0); i < nChar; i++ {
+			c1, _ := ctx.Mem.Read16(lpStr1 + i*2)
+			c2, _ := ctx.Mem.Read16(lpStr2 + i*2)
+			l1, l2 := lo(c1), lo(c2)
+			if l1 != l2 { if l1 < l2 { ctx.SetReturn(^uint64(0)) } else { ctx.SetReturn(1) }; return 0 }
+			if c1 == 0 { break }
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrCmpNW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrCmpNW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpStr1 := ctx.Arg(0)
+		lpStr2 := ctx.Arg(1)
+		nChar := ctx.Arg(2)
+		for i := uint64(0); i < nChar; i++ {
+			c1, _ := ctx.Mem.Read16(lpStr1 + i*2)
+			c2, _ := ctx.Mem.Read16(lpStr2 + i*2)
+			if c1 != c2 { if c1 < c2 { ctx.SetReturn(^uint64(0)) } else { ctx.SetReturn(1) }; return 0 }
+			if c1 == 0 { break }
+		}
+		ctx.SetReturn(0) // equal
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrRChrA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrRChrA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpStart := ctx.Arg(0)
+		lpEnd := ctx.Arg(1)
+		wMatch := ctx.Arg(2)
+		_ = lpEnd
+		if lpStart == 0 { ctx.SetReturn(0); return 0 }
+		var lastMatch uint64
+		for addr := lpStart; ; addr += 1 {
+			ch, _ := ctx.Mem.Read8(addr)
+			if ch == 0 { break }
+			if lpEnd != 0 && addr >= lpEnd { break }
+			if uint64(ch) == wMatch { lastMatch = addr }
+		}
+		ctx.SetReturn(lastMatch)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrRChrIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrRChrIA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpStart := ctx.Arg(0)
+		lpEnd := ctx.Arg(1)
+		wMatch := ctx.Arg(2)
+		_ = lpEnd
+		if lpStart == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint64) uint64 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		var lastMatch uint64
+		for addr := lpStart; ; addr += 1 {
+			ch, _ := ctx.Mem.Read8(addr)
+			if ch == 0 { break }
+			if lpEnd != 0 && addr >= lpEnd { break }
+			if lo(uint64(ch)) == lo(wMatch) { lastMatch = addr }
+		}
+		ctx.SetReturn(lastMatch)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrRChrIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrRChrIW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpStart := ctx.Arg(0)
+		lpEnd := ctx.Arg(1)
+		wMatch := ctx.Arg(2)
+		_ = lpEnd
+		if lpStart == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint64) uint64 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		var lastMatch uint64
+		for addr := lpStart; ; addr += 2 {
+			ch, _ := ctx.Mem.Read16(addr)
+			if ch == 0 { break }
+			if lpEnd != 0 && addr >= lpEnd { break }
+			if lo(uint64(ch)) == lo(wMatch) { lastMatch = addr }
+		}
+		ctx.SetReturn(lastMatch)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrRChrW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrRChrW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpStart := ctx.Arg(0)
+		lpEnd := ctx.Arg(1)
+		wMatch := ctx.Arg(2)
+		_ = lpEnd
+		if lpStart == 0 { ctx.SetReturn(0); return 0 }
+		var lastMatch uint64
+		for addr := lpStart; ; addr += 2 {
+			ch, _ := ctx.Mem.Read16(addr)
+			if ch == 0 { break }
+			if lpEnd != 0 && addr >= lpEnd { break }
+			if uint64(ch) == wMatch { lastMatch = addr }
+		}
+		ctx.SetReturn(lastMatch)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrRStrIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrRStrIA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpSource := ctx.Arg(0)
+		lpLast := ctx.Arg(1)
+		lpSrch := ctx.Arg(2)
+		_ = lpLast
+		if lpSource == 0 || lpSrch == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint8) uint8 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		var lastFound uint64
+		for i := lpSource; ; i += 1 {
+			ch, _ := ctx.Mem.Read8(i)
+			if ch == 0 { break }
+			if lpLast != 0 && i >= lpLast { break }
+			match := true
+			for j := uint64(0); ; j += 1 {
+				s, _ := ctx.Mem.Read8(lpSrch + j)
+				if s == 0 { break }
+				t, _ := ctx.Mem.Read8(i + j)
+				if lo(t) != lo(s) { match = false; break }
+			}
+			if match { lastFound = i }
+		}
+		ctx.SetReturn(lastFound)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrRStrIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] StrRStrIW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpSource := ctx.Arg(0)
+		lpLast := ctx.Arg(1)
+		lpSrch := ctx.Arg(2)
+		_ = lpLast
+		if lpSource == 0 || lpSrch == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint16) uint16 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		var lastFound uint64
+		for i := lpSource; ; i += 2 {
+			ch, _ := ctx.Mem.Read16(i)
+			if ch == 0 { break }
+			if lpLast != 0 && i >= lpLast { break }
+			match := true
+			for j := uint64(0); ; j += 2 {
+				s, _ := ctx.Mem.Read16(lpSrch + j)
+				if s == 0 { break }
+				t, _ := ctx.Mem.Read16(i + j)
+				if lo(t) != lo(s) { match = false; break }
+			}
+			if match { lastFound = i }
+		}
+		ctx.SetReturn(lastFound)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrStrA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrStrA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpFirst := ctx.Arg(0)
+		lpSrch := ctx.Arg(1)
+		if lpFirst == 0 || lpSrch == 0 { ctx.SetReturn(0); return 0 }
+		// Simple O(n*m) substring search
+		for i := lpFirst; ; i += 1 {
+			ch, _ := ctx.Mem.Read8(i)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			match := true
+			for j := uint64(0); ; j += 1 {
+				s, _ := ctx.Mem.Read8(lpSrch + j)
+				if s == 0 { break }
+				t, _ := ctx.Mem.Read8(i + j)
+				if t != s { match = false; break }
+			}
+			if match { ctx.SetReturn(i); return 0 }
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrStrIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrStrIA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpFirst := ctx.Arg(0)
+		lpSrch := ctx.Arg(1)
+		if lpFirst == 0 || lpSrch == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint8) uint8 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		for i := lpFirst; ; i += 1 {
+			ch, _ := ctx.Mem.Read8(i)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			match := true
+			for j := uint64(0); ; j += 1 {
+				s, _ := ctx.Mem.Read8(lpSrch + j)
+				if s == 0 { break }
+				t, _ := ctx.Mem.Read8(i + j)
+				if lo(t) != lo(s) { match = false; break }
+			}
+			if match { ctx.SetReturn(i); return 0 }
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrStrIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrStrIW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpFirst := ctx.Arg(0)
+		lpSrch := ctx.Arg(1)
+		if lpFirst == 0 || lpSrch == 0 { ctx.SetReturn(0); return 0 }
+		lo := func(c uint16) uint16 { if c >= 65 && c <= 90 { return c + 32 }; return c }
+		for i := lpFirst; ; i += 2 {
+			ch, _ := ctx.Mem.Read16(i)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			match := true
+			for j := uint64(0); ; j += 2 {
+				s, _ := ctx.Mem.Read16(lpSrch + j)
+				if s == 0 { break }
+				t, _ := ctx.Mem.Read16(i + j)
+				if lo(t) != lo(s) { match = false; break }
+			}
+			if match { ctx.SetReturn(i); return 0 }
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrStrW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] StrStrW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lpFirst := ctx.Arg(0)
+		lpSrch := ctx.Arg(1)
+		if lpFirst == 0 || lpSrch == 0 { ctx.SetReturn(0); return 0 }
+		// Simple O(n*m) substring search
+		for i := lpFirst; ; i += 2 {
+			ch, _ := ctx.Mem.Read16(i)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			match := true
+			for j := uint64(0); ; j += 2 {
+				s, _ := ctx.Mem.Read16(lpSrch + j)
+				if s == 0 { break }
+				t, _ := ctx.Mem.Read16(i + j)
+				if t != s { match = false; break }
+			}
+			if match { ctx.SetReturn(i); return 0 }
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrToIntA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comctl32] StrToIntA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpSrc := ctx.Arg(0)
+		if lpSrc == 0 { ctx.SetReturn(0); return 0 }
+		var neg bool
+		addr := lpSrc
+		ch, _ := ctx.Mem.Read8(addr)
+		if ch == uint8('-') { neg = true; addr += 1; ch, _ = ctx.Mem.Read8(addr) }
+		if ch == uint8('+') { addr += 1; ch, _ = ctx.Mem.Read8(addr) }
+		var result int64
+		for ch >= uint8('0') && ch <= uint8('9') {
+			result = result*10 + int64(ch-uint8('0'))
+			addr += 1
+			ch, _ = ctx.Mem.Read8(addr)
+		}
+		if neg { result = -result }
+		ctx.SetReturn(uint64(result))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "StrToIntW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[comctl32] StrToIntW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpSrc := ctx.Arg(0)
+		if lpSrc == 0 { ctx.SetReturn(0); return 0 }
+		var neg bool
+		addr := lpSrc
+		ch, _ := ctx.Mem.Read16(addr)
+		if ch == uint16('-') { neg = true; addr += 2; ch, _ = ctx.Mem.Read16(addr) }
+		if ch == uint16('+') { addr += 2; ch, _ = ctx.Mem.Read16(addr) }
+		var result int64
+		for ch >= uint16('0') && ch <= uint16('9') {
+			result = result*10 + int64(ch-uint16('0'))
+			addr += 2
+			ch, _ = ctx.Mem.Read16(addr)
+		}
+		if neg { result = -result }
+		ctx.SetReturn(uint64(result))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "Str_GetPtrA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] Str_GetPtrA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpSrc := ctx.Arg(0)
+		lpDest := ctx.Arg(1)
+		nMaxLen := ctx.Arg(2)
+		if lpSrc == 0 || lpDest == 0 { ctx.SetReturn(0); return 0 }
+		var i uint64
+		for i = 0; i < nMaxLen-1; i++ {
+			ch, _ := ctx.Mem.Read8(lpSrc + i*1)
+			ctx.Mem.Write8(lpDest + i*1, ch)
+			if ch == 0 { ctx.SetReturn(i); return 0 }
+		}
+		ctx.Mem.Write8(lpDest + i*1, 0) // NUL terminate
+		ctx.SetReturn(i)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "Str_GetPtrW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[comctl32] Str_GetPtrW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpSrc := ctx.Arg(0)
+		lpDest := ctx.Arg(1)
+		nMaxLen := ctx.Arg(2)
+		if lpSrc == 0 || lpDest == 0 { ctx.SetReturn(0); return 0 }
+		var i uint64
+		for i = 0; i < nMaxLen-1; i++ {
+			ch, _ := ctx.Mem.Read16(lpSrc + i*2)
+			ctx.Mem.Write16(lpDest + i*2, ch)
+			if ch == 0 { ctx.SetReturn(i); return 0 }
+		}
+		ctx.Mem.Write16(lpDest + i*2, 0) // NUL terminate
+		ctx.SetReturn(i)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "Str_SetPtrA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] Str_SetPtrA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lppDest := ctx.Arg(0)
+		lpSrc := ctx.Arg(1)
+		ravelog.Logf("[comctl32] Str_SetPtrA dest=0x%x src=0x%x\n", lppDest, lpSrc)
+		if lppDest != 0 { ctx.Mem.Write64(lppDest, lpSrc) }
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "Str_SetPtrW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[comctl32] Str_SetPtrW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		lppDest := ctx.Arg(0)
+		lpSrc := ctx.Arg(1)
+		ravelog.Logf("[comctl32] Str_SetPtrW dest=0x%x src=0x%x\n", lppDest, lpSrc)
+		if lppDest != 0 { ctx.Mem.Write64(lppDest, lpSrc) }
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "TextOutWrap", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[comctl32] TextOutWrap(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[comctl32] TextOutWrap hdc=0x%x - forwarding as nop\n", hdc)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 }
