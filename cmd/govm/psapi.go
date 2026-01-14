@@ -3,15 +3,91 @@ package main
 import (
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"runtime"
+	"strings"
 )
 
 func registerPsapiHandlers(hctx *HandlerCtx) {
 	d := hctx.Disp
+	mainModule := hctx.MainModule
 	dll, ok := hctx.SynthByName["psapi.dll"]
 	if !ok {
 		return
 	}
 	_ = dll
+
+	type moduleSnapshot struct {
+		BaseAddr   uint64
+		EntryPoint uint64
+		ImageSize  uint64
+		Name       string
+		FullPath   string
+	}
+	readUnicodeString := func(addr uint64) string {
+		if addr == 0 {
+			return ""
+		}
+		length, _ := hctx.Mem.Read16(addr + ntapi.UnicodeStringLength)
+		buf, _ := hctx.Mem.Read64(addr + ntapi.UnicodeStringBuffer)
+		if buf == 0 || length == 0 {
+			return ""
+		}
+		return hctx.ReadGuestUTF16N(buf, int(length/2))
+	}
+	listLoadedModules := func() []moduleSnapshot {
+		if hctx.ProcState == nil || hctx.ProcState.LdrDataAddr == 0 {
+			return nil
+		}
+		head := hctx.ProcState.LdrDataAddr + ntapi.LdrInLoadOrderModuleList
+		cur, _ := hctx.Mem.Read64(head)
+		seen := map[uint64]struct{}{}
+		var mods []moduleSnapshot
+		for cur != 0 && cur != head {
+			if _, ok := seen[cur]; ok {
+				break
+			}
+			seen[cur] = struct{}{}
+			entry := cur - ntapi.LdrEntryInLoadOrderLinks
+			base, _ := hctx.Mem.Read64(entry + ntapi.LdrEntryDllBase)
+			ep, _ := hctx.Mem.Read64(entry + ntapi.LdrEntryEntryPoint)
+			size, _ := hctx.Mem.Read32(entry + ntapi.LdrEntrySizeOfImage)
+			mods = append(mods, moduleSnapshot{
+				BaseAddr:   base,
+				EntryPoint: ep,
+				ImageSize:  uint64(size),
+				Name:       strings.ToLower(readUnicodeString(entry + ntapi.LdrEntryBaseDllName)),
+				FullPath:   readUnicodeString(entry + ntapi.LdrEntryFullDllName),
+			})
+			cur, _ = hctx.Mem.Read64(cur)
+		}
+		if len(mods) == 0 && mainModule != nil {
+			mods = append(mods, moduleSnapshot{
+				BaseAddr:   mainModule.BaseAddr,
+				EntryPoint: mainModule.EntryPoint,
+				ImageSize:  mainModule.ImageSize,
+				Name:       strings.ToLower(mainModule.Name),
+				FullPath:   hctx.ImagePath,
+			})
+		}
+		return mods
+	}
+	findModule := func(handle uint64) (moduleSnapshot, bool) {
+		if handle == 0 && mainModule != nil {
+			return moduleSnapshot{
+				BaseAddr:   mainModule.BaseAddr,
+				EntryPoint: mainModule.EntryPoint,
+				ImageSize:  mainModule.ImageSize,
+				Name:       strings.ToLower(mainModule.Name),
+				FullPath:   hctx.ImagePath,
+			}, true
+		}
+		for _, mod := range listLoadedModules() {
+			if mod.BaseAddr == handle {
+				return mod, true
+			}
+		}
+		return moduleSnapshot{}, false
+	}
 
 	d.RegisterAutoStubHandler(dll, "EmptyWorkingSet", func(ctx *ntapi.TrapContext) uint32 {
 		hProcess := ctx.Arg(0)
@@ -48,9 +124,17 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		cb := ctx.Arg(2)
 		lpcbNeeded := ctx.Arg(3)
 		ravelog.Logf("[psapi] EnumProcessModules proc=0x%x buf=0x%x size=%d\n", hProcess, lphModule, cb)
-		// Return one fake module handle
-		if lphModule != 0 && cb >= 8 { ctx.Mem.Write64(lphModule, 0x00400000) } // base addr
-		if lpcbNeeded != 0 { ctx.Mem.Write32(lpcbNeeded, 8) } // 1 module * 8 bytes
+		mods := listLoadedModules()
+		if lpcbNeeded != 0 {
+			ctx.Mem.Write32(lpcbNeeded, uint32(len(mods))*8)
+		}
+		maxCount := int(cb / 8)
+		if maxCount > len(mods) {
+			maxCount = len(mods)
+		}
+		for i := 0; i < maxCount; i++ {
+			ctx.Mem.Write64(lphModule+uint64(i)*8, mods[i].BaseAddr)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -226,11 +310,10 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		lpmodinfo := ctx.Arg(2)
 		cb := ctx.Arg(3)
 		ravelog.Logf("[psapi] GetModuleInformation proc=0x%x mod=0x%x\n", hProcess, hModule)
-		// MODULEINFO: lpBaseOfDll(8), SizeOfImage(4), EntryPoint(8)
-		if lpmodinfo != 0 && cb >= 24 {
-			ctx.Mem.Write64(lpmodinfo, 0x00400000)     // lpBaseOfDll
-			ctx.Mem.Write32(lpmodinfo+8, 0x00100000)   // SizeOfImage (1MB)
-			ctx.Mem.Write64(lpmodinfo+16, 0x00401000)  // EntryPoint
+		if mod, ok := findModule(hModule); ok && lpmodinfo != 0 && cb >= 24 {
+			ctx.Mem.Write64(lpmodinfo, mod.BaseAddr)
+			ctx.Mem.Write32(lpmodinfo+8, uint32(mod.ImageSize))
+			ctx.Mem.Write64(lpmodinfo+16, mod.EntryPoint)
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -295,18 +378,19 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		ppsmemCounters := ctx.Arg(1)
 		cb := ctx.Arg(2)
 		ravelog.Logf("[psapi] GetProcessMemoryInfo proc=0x%x\n", Process)
-		// PROCESS_MEMORY_COUNTERS: cb(4), PageFaultCount(4), PeakWorkingSetSize(8), WorkingSetSize(8), ...
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
 		if ppsmemCounters != 0 && cb >= 72 {
-			ctx.Mem.Write32(ppsmemCounters, uint32(cb)) // cb
-			ctx.Mem.Write32(ppsmemCounters+4, 100)      // PageFaultCount
-			ctx.Mem.Write64(ppsmemCounters+8, 64*1024*1024)  // PeakWorkingSetSize (64MB)
-			ctx.Mem.Write64(ppsmemCounters+16, 32*1024*1024) // WorkingSetSize (32MB)
-			ctx.Mem.Write64(ppsmemCounters+24, 16*1024*1024) // QuotaPeakPagedPoolUsage
-			ctx.Mem.Write64(ppsmemCounters+32, 8*1024*1024)  // QuotaPagedPoolUsage
-			ctx.Mem.Write64(ppsmemCounters+40, 4*1024*1024)  // QuotaPeakNonPagedPoolUsage
-			ctx.Mem.Write64(ppsmemCounters+48, 2*1024*1024)  // QuotaNonPagedPoolUsage
-			ctx.Mem.Write64(ppsmemCounters+56, 64*1024*1024) // PagefileUsage
-			ctx.Mem.Write64(ppsmemCounters+64, 64*1024*1024) // PeakPagefileUsage
+			ctx.Mem.Write32(ppsmemCounters, uint32(cb))
+			ctx.Mem.Write32(ppsmemCounters+4, uint32(memStats.Mallocs-memStats.Frees))
+			ctx.Mem.Write64(ppsmemCounters+8, memStats.Sys)
+			ctx.Mem.Write64(ppsmemCounters+16, memStats.Alloc)
+			ctx.Mem.Write64(ppsmemCounters+24, memStats.HeapSys)
+			ctx.Mem.Write64(ppsmemCounters+32, memStats.HeapAlloc)
+			ctx.Mem.Write64(ppsmemCounters+40, memStats.StackSys)
+			ctx.Mem.Write64(ppsmemCounters+48, memStats.StackInuse)
+			ctx.Mem.Write64(ppsmemCounters+56, memStats.HeapInuse)
+			ctx.Mem.Write64(ppsmemCounters+64, memStats.HeapSys)
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0

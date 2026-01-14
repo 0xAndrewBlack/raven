@@ -2045,6 +2045,10 @@ func (cs *comState) release(obj *comObject) uint32 {
 			if data.deleteOnRelease && data.path != "" {
 				_ = os.RemoveAll(data.path)
 			}
+		case *dsBuffer:
+			data.mu.Lock()
+			data.cleanupPendingLock(cs.mem)
+			data.mu.Unlock()
 		}
 		delete(cs.objects, obj.objectAddr)
 	}
@@ -3380,6 +3384,16 @@ func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uin
 		return cs.dispatchIStorage(ctx, obj, method)
 	case "ienumstatstg":
 		return cs.dispatchIEnumSTATSTG(ctx, obj, method)
+	case "direct-sound-device":
+		return cs.dispatchDirectSound(ctx, obj, method)
+	case "direct-sound-capture":
+		return cs.dispatchDirectSoundCapture(ctx, obj, method)
+	case "direct-sound-buffer":
+		return cs.dispatchDirectSoundBuffer(ctx, obj, method)
+	case "direct-input8":
+		return cs.dispatchDirectInput(ctx, obj, method)
+	case "direct-input-device8":
+		return cs.dispatchDirectInputDevice(ctx, obj, method)
 	default:
 		return E_NOTIMPL
 	}

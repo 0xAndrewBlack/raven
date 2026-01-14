@@ -535,7 +535,7 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 	})
 }
 
-func registerImm32Handlers(hctx *HandlerCtx) {
+func registerImm32CompatHandlers(hctx *HandlerCtx) {
 	d := hctx.Disp
 
 	imm32dll, ok := hctx.SynthByName["imm32.dll"]
