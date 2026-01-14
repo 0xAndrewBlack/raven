@@ -2252,6 +2252,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	delayReg(func() { registerShcoreHandlers1(hctx) })
 
 	// --- shlwapi.dll ---
+	delayReg(func() { registerAppcompatHandlers(hctx) })
 	delayReg(func() { registerShlwapiHandlers(hctx) })
 	delayReg(func() { registerShell32Handlers(hctx) })
 
@@ -2366,6 +2367,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// --- oleaut32.dll ---
 	delayReg(func() { registerOleaut32Handlers(hctx) })
+
+	// --- oleacc.dll / uiautomationcore.dll ---
+	delayReg(func() { registerOleaccHandlers(hctx) })
 
 	// Message queue for synthetic messages (WM_CREATE, WM_SIZE, etc.)
 	// hctx.MsgQueue: hctx.MsgQueue already nil
