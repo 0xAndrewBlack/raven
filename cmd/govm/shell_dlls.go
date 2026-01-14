@@ -5316,6 +5316,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 	readGuestString := hctx.ReadGuestString
 	readGuestUTF16 := hctx.ReadGuestUTF16
 
+	sharedHeapAlloc := hctx.HeapAlloc
+
 	shell32, ok := hctx.SynthByName["shell32.dll"]
 	if !ok {
 		return
@@ -5802,9 +5804,17 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "DragQueryFileA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shell32] DragQueryFileA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hDrop := ctx.Arg(0)
+		iFile := ctx.Arg(1)
+		lpszFile := ctx.Arg(2)
+		cch := ctx.Arg(3)
+		ravelog.Logf("[shell32] DragQueryFileA hDrop=0x%x idx=%d\n", hDrop, iFile)
+		if iFile == 0xFFFFFFFF {
+			ctx.SetReturn(0)
+		} else {
+			_ = lpszFile; _ = cch
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "DragQueryFileAorW", func(ctx *ntapi.TrapContext) uint32 {
@@ -5910,15 +5920,25 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "FindExecutableA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shell32] FindExecutableA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpFile := ctx.Arg(0)
+		lpDirectory := ctx.Arg(1)
+		lpResult := ctx.Arg(2)
+		var file string
+		if lpFile != 0 { file = readGuestUTF16(lpFile) }
+		ravelog.Logf("[shell32] FindExecutableA file=%q\n", file)
+		_ = lpDirectory; _ = lpResult
+		ctx.SetReturn(31) // SE_ERR_NOASSOC
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "FindExecutableW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shell32] FindExecutableW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpFile := ctx.Arg(0)
+		lpDirectory := ctx.Arg(1)
+		lpResult := ctx.Arg(2)
+		var file string
+		if lpFile != 0 { file = readGuestUTF16(lpFile) }
+		ravelog.Logf("[shell32] FindExecutableW file=%q\n", file)
+		_ = lpDirectory; _ = lpResult
+		ctx.SetReturn(31) // SE_ERR_NOASSOC
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "FirstUserLogon", func(ctx *ntapi.TrapContext) uint32 {
@@ -5964,21 +5984,30 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILClone", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] ILClone(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pidl := ctx.Arg(0)
+		ravelog.Logf("[shell32] ILClone pidl=0x%x\n", pidl)
+		// Return a minimal clone
+		newPidl := sharedHeapAlloc(4, true)
+		ctx.Mem.Write16(newPidl, 0) // empty PIDL
+		ctx.SetReturn(newPidl)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILCloneFirst", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] ILCloneFirst(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pidl := ctx.Arg(0)
+		ravelog.Logf("[shell32] ILCloneFirst pidl=0x%x\n", pidl)
+		// Return a minimal clone
+		newPidl := sharedHeapAlloc(4, true)
+		ctx.Mem.Write16(newPidl, 0) // empty PIDL
+		ctx.SetReturn(newPidl)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILCombine", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shell32] ILCombine(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pidl1 := ctx.Arg(0)
+		pidl2 := ctx.Arg(1)
+		ravelog.Logf("[shell32] ILCombine pidl1=0x%x pidl2=0x%x\n", pidl1, pidl2)
+		newPidl := sharedHeapAlloc(4, true)
+		ctx.Mem.Write16(newPidl, 0)
+		ctx.SetReturn(newPidl)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILCreateFromPath", func(ctx *ntapi.TrapContext) uint32 {
@@ -6006,15 +6035,15 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILFindLastID", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] ILFindLastID(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pidl := ctx.Arg(0)
+		ravelog.Logf("[shell32] ILFindLastID pidl=0x%x\n", pidl)
+		ctx.SetReturn(pidl) // return the pidl itself for empty PIDLs
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] ILFree(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pidl := ctx.Arg(0)
+		ravelog.Logf("[shell32] ILFree pidl=0x%x\n", pidl)
+		ctx.SetReturn(0) // void
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILGetDisplayName", func(ctx *ntapi.TrapContext) uint32 {
@@ -6042,9 +6071,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILGetSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] ILGetSize(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pidl := ctx.Arg(0)
+		ravelog.Logf("[shell32] ILGetSize pidl=0x%x\n", pidl)
+		ctx.SetReturn(2) // minimal PIDL size (just terminator)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILGlobalClone", func(ctx *ntapi.TrapContext) uint32 {
@@ -6060,15 +6089,19 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILIsEqual", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shell32] ILIsEqual(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pidl1 := ctx.Arg(0)
+		pidl2 := ctx.Arg(1)
+		ravelog.Logf("[shell32] ILIsEqual pidl1=0x%x pidl2=0x%x\n", pidl1, pidl2)
+		eq := uint64(0); if pidl1 == pidl2 { eq = 1 }
+		ctx.SetReturn(eq)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILIsParent", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shell32] ILIsParent(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pidlParent := ctx.Arg(0)
+		pidlChild := ctx.Arg(1)
+		fImmediate := ctx.Arg(2)
+		ravelog.Logf("[shell32] ILIsParent parent=0x%x child=0x%x imm=%d\n", pidlParent, pidlChild, fImmediate)
+		ctx.SetReturn(0) // FALSE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILLoadFromStream", func(ctx *ntapi.TrapContext) uint32 {
@@ -6078,9 +6111,10 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILRemoveLastID", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] ILRemoveLastID(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pidl := ctx.Arg(0)
+		ravelog.Logf("[shell32] ILRemoveLastID pidl=0x%x\n", pidl)
+		if pidl != 0 { ctx.Mem.Write16(pidl, 0) } // make it empty
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ILSaveToStream", func(ctx *ntapi.TrapContext) uint32 {
@@ -6697,9 +6731,10 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHBindToParent", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shell32] SHBindToParent(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		a0 := ctx.Arg(0)
+		a1 := ctx.Arg(1)
+		ravelog.Logf("[shell32] SHBindToParent(0x%x, 0x%x)\n", a0, a1)
+		ctx.SetReturn(0x80004005) // E_FAIL
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHBrowseForFolder", func(ctx *ntapi.TrapContext) uint32 {
@@ -6709,15 +6744,15 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHBrowseForFolderA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] SHBrowseForFolderA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpbi := ctx.Arg(0)
+		ravelog.Logf("[shell32] SHBrowseForFolderA info=0x%x\n", lpbi)
+		ctx.SetReturn(0) // NULL = user cancelled
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHBrowseForFolderW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] SHBrowseForFolderW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lpbi := ctx.Arg(0)
+		ravelog.Logf("[shell32] SHBrowseForFolderW info=0x%x\n", lpbi)
+		ctx.SetReturn(0) // NULL = user cancelled
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHCLSIDFromString", func(ctx *ntapi.TrapContext) uint32 {
@@ -6739,9 +6774,13 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHChangeNotify", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shell32] SHChangeNotify(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		wEventId := ctx.Arg(0)
+		uFlags := ctx.Arg(1)
+		dwItem1 := ctx.Arg(2)
+		dwItem2 := ctx.Arg(3)
+		ravelog.Logf("[shell32] SHChangeNotify event=0x%x flags=0x%x\n", wEventId, uFlags)
+		_ = dwItem1; _ = dwItem2
+		ctx.SetReturn(0) // void
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHChangeNotifyDeregister", func(ctx *ntapi.TrapContext) uint32 {
@@ -7048,9 +7087,10 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetDesktopFolder", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] SHGetDesktopFolder(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		ppshf := ctx.Arg(0)
+		ravelog.Logf("[shell32] SHGetDesktopFolder out=0x%x\n", ppshf)
+		if ppshf != 0 { ctx.Mem.Write64(ppshf, 0) }
+		ctx.SetReturn(0x80004005) // E_FAIL - no COM support yet
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetDiskFreeSpaceA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7078,15 +7118,46 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderLocation", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[shell32] SHGetFolderLocation(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hwndOwner := ctx.Arg(0)
+		nFolder := ctx.Arg(1)
+		hToken := ctx.Arg(2)
+		dwReserved := ctx.Arg(3)
+		ppidl := ctx.Arg(4)
+		_ = hwndOwner; _ = hToken; _ = dwReserved
+		ravelog.Logf("[shell32] SHGetFolderLocation folder=0x%x\n", nFolder)
+		if ppidl != 0 {
+			pidl := sharedHeapAlloc(4, true)
+			ctx.Mem.Write16(pidl, 0)
+			ctx.Mem.Write64(ppidl, pidl)
+		}
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[shell32] SHGetFolderPathA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		nFolder := ctx.Arg(1)
+		hToken := ctx.Arg(2)
+		dwFlags := ctx.Arg(3)
+		pszPath := ctx.Arg(4)
+		_ = hwnd; _ = hToken; _ = dwFlags
+		ravelog.Logf("[shell32] SHGetFolderPathA folder=0x%x path=0x%x\n", nFolder, pszPath)
+		path := "C:\\Users\\User"
+		switch nFolder & 0xFF {
+		case 0x001A: path = "C:\\Users\\User\\AppData\\Roaming"
+		case 0x001C: path = "C:\\Users\\User\\AppData\\Local"
+		case 0x0005: path = "C:\\Users\\User\\Documents"
+		case 0x0024: path = "C:\\Windows"
+		case 0x0025: path = "C:\\Windows\\system32"
+		case 0x0026: path = "C:\\Program Files"
+		case 0x0000: path = "C:\\Users\\User\\Desktop"
+		}
+		if pszPath != 0 {
+			for i := 0; i < len(path); i++ {
+				ctx.Mem.Write8(pszPath+uint64(i), path[i])
+			}
+			ctx.Mem.Write8(pszPath+uint64(len(path)), 0)
+		}
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathAndSubDirA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7120,15 +7191,17 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetInstanceExplorer", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] SHGetInstanceExplorer(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		ppunk := ctx.Arg(0)
+		ravelog.Logf("[shell32] SHGetInstanceExplorer out=0x%x\n", ppunk)
+		if ppunk != 0 { ctx.Mem.Write64(ppunk, 0) }
+		ctx.SetReturn(0x80004005) // E_FAIL
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetMalloc", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shell32] SHGetMalloc(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		ppMalloc := ctx.Arg(0)
+		ravelog.Logf("[shell32] SHGetMalloc out=0x%x\n", ppMalloc)
+		if ppMalloc != 0 { ctx.Mem.Write64(ppMalloc, 0) }
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetNetResource", func(ctx *ntapi.TrapContext) uint32 {
@@ -7150,9 +7223,17 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetNewLinkInfoW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[shell32] SHGetNewLinkInfoW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		pszLinkTo := ctx.Arg(0)
+		pszDir := ctx.Arg(1)
+		pszName := ctx.Arg(2)
+		pfMustCopy := ctx.Arg(3)
+		uFlags := ctx.Arg(4)
+		var linkTo string
+		if pszLinkTo != 0 { linkTo = readGuestUTF16(pszLinkTo) }
+		ravelog.Logf("[shell32] SHGetNewLinkInfoW linkTo=%q\n", linkTo)
+		_ = pszDir; _ = pszName; _ = uFlags
+		if pfMustCopy != 0 { ctx.Mem.Write32(pfMustCopy, 0) }
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetPathFromIDList", func(ctx *ntapi.TrapContext) uint32 {
@@ -7162,15 +7243,32 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetPathFromIDListA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shell32] SHGetPathFromIDListA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pidl := ctx.Arg(0)
+		pszPath := ctx.Arg(1)
+		ravelog.Logf("[shell32] SHGetPathFromIDListA pidl=0x%x path=0x%x\n", pidl, pszPath)
+		defaultPath := "C:\\Users\\User\\Desktop"
+		if pszPath != 0 {
+			for i := 0; i < len(defaultPath); i++ {
+				ctx.Mem.Write8(pszPath+uint64(i), defaultPath[i])
+			}
+			ctx.Mem.Write8(pszPath+uint64(len(defaultPath)), 0)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetPathFromIDListW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shell32] SHGetPathFromIDListW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pidl := ctx.Arg(0)
+		pszPath := ctx.Arg(1)
+		ravelog.Logf("[shell32] SHGetPathFromIDListW pidl=0x%x path=0x%x\n", pidl, pszPath)
+		// Return a default path since we don't have real PIDLs
+		defaultPath := "C:\\Users\\User\\Desktop"
+		if pszPath != 0 {
+			for i, ch := range defaultPath {
+				ctx.Mem.Write16(pszPath+uint64(i*2), uint16(ch))
+			}
+			ctx.Mem.Write16(pszPath+uint64(len(defaultPath)*2), 0)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetProcessDword", func(ctx *ntapi.TrapContext) uint32 {
@@ -7198,14 +7296,18 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetSetSettings", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shell32] SHGetSetSettings(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		lpss := ctx.Arg(0)
+		dwMask := ctx.Arg(1)
+		bSet := ctx.Arg(2)
+		ravelog.Logf("[shell32] SHGetSetSettings flags=0x%x mask=0x%x set=%d\n", lpss, dwMask, bSet)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetSettings", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shell32] SHGetSettings(0x%x, 0x%x)\n", a0, a1)
+		lpsfs := ctx.Arg(0)
+		dwMask := ctx.Arg(1)
+		ravelog.Logf("[shell32] SHGetSettings flags=0x%x mask=0x%x\n", lpsfs, dwMask)
+		if lpsfs != 0 { ctx.Mem.Write32(lpsfs, 0) }
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7216,9 +7318,18 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetSpecialFolderLocation", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shell32] SHGetSpecialFolderLocation(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		csidl := ctx.Arg(1)
+		ppidl := ctx.Arg(2)
+		_ = hwnd
+		ravelog.Logf("[shell32] SHGetSpecialFolderLocation csidl=0x%x out=0x%x\n", csidl, ppidl)
+		// Return a minimal PIDL (2 bytes: size=0 = terminator)
+		if ppidl != 0 {
+			pidl := sharedHeapAlloc(4, true)
+			ctx.Mem.Write16(pidl, 0) // empty PIDL terminator
+			ctx.Mem.Write64(ppidl, pidl)
+		}
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetSpecialFolderPath", func(ctx *ntapi.TrapContext) uint32 {
@@ -7448,9 +7559,22 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHParseDisplayName", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[shell32] SHParseDisplayName(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		pszName := ctx.Arg(0)
+		pbc := ctx.Arg(1)
+		ppidl := ctx.Arg(2)
+		sfgaoIn := ctx.Arg(3)
+		psfgaoOut := ctx.Arg(4)
+		var name string
+		if pszName != 0 { name = readGuestUTF16(pszName) }
+		ravelog.Logf("[shell32] SHParseDisplayName name=%q\n", name)
+		_ = pbc; _ = sfgaoIn
+		if ppidl != 0 {
+			pidl := sharedHeapAlloc(4, true)
+			ctx.Mem.Write16(pidl, 0) // empty PIDL
+			ctx.Mem.Write64(ppidl, pidl)
+		}
+		if psfgaoOut != 0 { ctx.Mem.Write32(psfgaoOut, 0) }
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHPathPrepareForWriteA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7781,9 +7905,15 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ShellAboutA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shell32] ShellAboutA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		szApp := ctx.Arg(1)
+		szOtherStuff := ctx.Arg(2)
+		hIcon := ctx.Arg(3)
+		var app string
+		if szApp != 0 { app = readGuestUTF16(szApp) }
+		ravelog.Logf("[shell32] ShellAboutA app=%q\n", app)
+		_ = hwnd; _ = szOtherStuff; _ = hIcon
+		ctx.SetReturn(1) // TRUE - dialog shown
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ShellDDEInit", func(ctx *ntapi.TrapContext) uint32 {
@@ -7858,15 +7988,17 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "Shell_NotifyIconA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shell32] Shell_NotifyIconA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		dwMessage := ctx.Arg(0)
+		lpData := ctx.Arg(1)
+		ravelog.Logf("[shell32] Shell_NotifyIconA msg=0x%x data=0x%x\n", dwMessage, lpData)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "Shell_NotifyIconW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shell32] Shell_NotifyIconW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		dwMessage := ctx.Arg(0)
+		lpData := ctx.Arg(1)
+		ravelog.Logf("[shell32] Shell_NotifyIconW msg=0x%x data=0x%x\n", dwMessage, lpData)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ShortSizeFormatW", func(ctx *ntapi.TrapContext) uint32 {
