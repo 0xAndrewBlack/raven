@@ -1905,7 +1905,7 @@ c.Regs[RCX] = 0x6c65746e // "ntel"
 case 1: // family/model/stepping + feature flags
 c.Regs[RAX] = 0x000506e3 // family 6, model 94 (Skylake)
 c.Regs[RBX] = 0x00100800
-c.Regs[RCX] = 0x67c2fbbf // SSE3, SSSE3, POPCNT - no SSE4.1/4.2/AVX (0F 3A/38 not implemented)
+c.Regs[RCX] = 0x67dafbbf // SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT - no AVX (VEX prefix not decoded)
 c.Regs[RDX] = 0xbfebfbff // FPU, SSE, SSE2, etc.
 case 7: // extended features
 c.Regs[RAX] = 0
