@@ -2,67 +2,475 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
 
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
-	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
-// csidlToPath maps a CSIDL folder ID to its fake Windows path.
-func csidlToPath(csidl int32) string {
-	switch csidl & 0xFF {
-	case 0x00:
-		return `C:\Users\user\Desktop`
-	case 0x05:
-		return `C:\Users\user\Documents`
-	case 0x06:
-		return `C:\Users\user\Favorites`
-	case 0x08:
-		return `C:\Users\user\AppData\Roaming\Microsoft\Windows\Recent`
-	case 0x09:
-		return `C:\Users\user\AppData\Roaming\Microsoft\Windows\SendTo`
-	case 0x0B:
-		return `C:\Users\user\AppData\Roaming\Microsoft\Windows\Start Menu`
-	case 0x0D:
-		return `C:\Users\user\Music`
-	case 0x0E:
-		return `C:\Users\user\Videos`
-	case 0x10:
-		return `C:\Windows\Desktop`
-	case 0x11:
-		return `C:\`
-	case 0x14:
-		return `C:\Windows\Fonts`
-	case 0x1A:
-		return `C:\Users\user\AppData\Roaming`
-	case 0x1C:
-		return `C:\Users\user\AppData\Local`
-	case 0x1D:
-		return `C:\Windows\Temp`
-	case 0x23:
-		return `C:\ProgramData`
-	case 0x24:
-		return `C:\Windows`
-	case 0x25:
-		return `C:\Windows\System32`
-	case 0x26:
-		return `C:\Program Files`
-	case 0x27:
-		return `C:\Users\user\Pictures`
-	case 0x28:
-		return `C:\Users\user`
-	case 0x29:
-		return `C:\Windows\System32`
-	case 0x2A:
-		return `C:\Program Files`
-	case 0x2B:
-		return `C:\Program Files\Common Files`
-	default:
-		return `C:\Users\user`
+var shellEnvPattern = regexp.MustCompile(`%([^%]+)%`)
+
+var (
+	FOLDERID_Desktop        = GUID{0xB4BFCC3A, 0xDB2C, 0x424C, [8]byte{0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41}}
+	FOLDERID_Documents      = GUID{0xFDD39AD0, 0x238F, 0x46AF, [8]byte{0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7}}
+	FOLDERID_Downloads      = GUID{0x374DE290, 0x123F, 0x4565, [8]byte{0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B}}
+	FOLDERID_Music          = GUID{0x4BD8D571, 0x6D19, 0x48D3, [8]byte{0xBE, 0x97, 0x42, 0x22, 0x20, 0x08, 0x0E, 0x43}}
+	FOLDERID_Pictures       = GUID{0x33E28130, 0x4E1E, 0x4676, [8]byte{0x83, 0x5A, 0x98, 0x39, 0x5C, 0x3B, 0xC3, 0xBB}}
+	FOLDERID_Videos         = GUID{0x18989B1D, 0x99B5, 0x455B, [8]byte{0x84, 0x1C, 0xAB, 0x7C, 0x74, 0xE4, 0xDD, 0xFC}}
+	FOLDERID_LocalAppData   = GUID{0xF1B32785, 0x6FBA, 0x4FCF, [8]byte{0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91}}
+	FOLDERID_RoamingAppData = GUID{0x3EB685DB, 0x65F9, 0x4CF6, [8]byte{0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D}}
+	FOLDERID_ProgramData    = GUID{0x62AB5D82, 0xFDC1, 0x4DC3, [8]byte{0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97}}
+	FOLDERID_Windows        = GUID{0xF38BF404, 0x1D43, 0x42F2, [8]byte{0x93, 0x05, 0x67, 0xDE, 0x0B, 0x28, 0xFC, 0x23}}
+	FOLDERID_System         = GUID{0x1AC14E77, 0x02E7, 0x4E5D, [8]byte{0xB7, 0x44, 0x2E, 0xB1, 0xAE, 0x51, 0x98, 0xB7}}
+	FOLDERID_ProgramFiles   = GUID{0x905E63B6, 0xC1BF, 0x494E, [8]byte{0xB2, 0x9C, 0x65, 0xB7, 0x32, 0xD3, 0xD2, 0x1A}}
+	FOLDERID_Fonts          = GUID{0xFD228CB7, 0xAE11, 0x4AE3, [8]byte{0x86, 0x4C, 0x16, 0xF3, 0x91, 0x0A, 0xB8, 0xFE}}
+	FOLDERID_Temp           = GUID{0x54EED2E0, 0xE7CA, 0x4F7A, [8]byte{0xB1, 0xD7, 0xE4, 0x3B, 0xF4, 0xDF, 0xA6, 0x00}}
+	FOLDERID_Profile        = GUID{0x5E6C858F, 0x0E22, 0x4760, [8]byte{0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73}}
+)
+
+func shellHomeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "/home/user"
 	}
+	return home
+}
+
+func shellUserName() string {
+	base := filepath.Base(shellHomeDir())
+	if base == "." || base == "/" || base == "" {
+		return "user"
+	}
+	return base
+}
+
+func linuxToWinPath(linuxPath string) string {
+	if linuxPath == "" {
+		return `C:\`
+	}
+	clean := filepath.Clean(linuxPath)
+	home := filepath.Clean(shellHomeDir())
+	user := shellUserName()
+	switch {
+	case clean == "/":
+		return `C:\`
+	case clean == home:
+		return `C:\Users\` + user
+	case strings.HasPrefix(clean, home+"/"):
+		rel := strings.TrimPrefix(clean, home+"/")
+		if rel == "" {
+			return `C:\Users\` + user
+		}
+		return `C:\Users\` + user + `\` + strings.ReplaceAll(rel, "/", `\`)
+	}
+	p := strings.ReplaceAll(clean, "/", `\`)
+	if strings.HasPrefix(p, `\`) {
+		return `C:` + p
+	}
+	return `C:\` + p
+}
+
+func winToLinuxPath(winPath string) string {
+	p := strings.ReplaceAll(strings.TrimSpace(winPath), `\`, "/")
+	if len(p) >= 2 && p[1] == ':' {
+		p = p[2:]
+	}
+	if p == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	lower := strings.ToLower(p)
+	userLower := strings.ToLower(shellUserName())
+	switch {
+	case strings.HasPrefix(lower, "/users/"+userLower):
+		prefixLen := len("/Users/") + len(shellUserName())
+		rel := p[prefixLen:]
+		if rel == "" {
+			return shellHomeDir()
+		}
+		return filepath.Clean(shellHomeDir() + rel)
+	case strings.HasPrefix(lower, "/windows/system32"):
+		return filepath.Clean("/usr/lib" + p[len("/Windows/System32"):])
+	case strings.HasPrefix(lower, "/windows"):
+		return filepath.Clean("/usr" + p[len("/Windows"):])
+	case strings.HasPrefix(lower, "/program files"):
+		return filepath.Clean("/opt" + p[len("/Program Files"):])
+	case strings.HasPrefix(lower, "/programdata"):
+		return filepath.Clean("/var/lib" + p[len("/ProgramData"):])
+	default:
+		return filepath.Clean(p)
+	}
+}
+
+func shellCSIDLPaths() map[int]string {
+	home := shellHomeDir()
+	return map[int]string{
+		0x0000: filepath.Join(home, "Desktop"),
+		0x0005: filepath.Join(home, "Documents"),
+		0x0006: filepath.Join(home, "Favorites"),
+		0x0008: filepath.Join(home, ".local", "share", "Recent"),
+		0x0009: filepath.Join(home, ".local", "share", "SendTo"),
+		0x000B: filepath.Join(home, ".config", "Start Menu"),
+		0x000D: filepath.Join(home, "Music"),
+		0x000E: filepath.Join(home, "Videos"),
+		0x0014: filepath.Join(home, ".local", "share", "fonts"),
+		0x001A: filepath.Join(home, ".config"),
+		0x001C: filepath.Join(home, ".local", "share"),
+		0x001D: os.TempDir(),
+		0x0023: "/var/lib",
+		0x0024: "/usr",
+		0x0025: "/usr/lib",
+		0x0026: "/opt",
+		0x0027: filepath.Join(home, "Pictures"),
+		0x0028: home,
+		0x0029: "/usr/lib",
+		0x002A: "/opt",
+		0x002B: "/opt/common",
+	}
+}
+
+func shellKnownFolderPaths() map[GUID]string {
+	home := shellHomeDir()
+	return map[GUID]string{
+		FOLDERID_Desktop:        filepath.Join(home, "Desktop"),
+		FOLDERID_Documents:      filepath.Join(home, "Documents"),
+		FOLDERID_Downloads:      filepath.Join(home, "Downloads"),
+		FOLDERID_Music:          filepath.Join(home, "Music"),
+		FOLDERID_Pictures:       filepath.Join(home, "Pictures"),
+		FOLDERID_Videos:         filepath.Join(home, "Videos"),
+		FOLDERID_LocalAppData:   filepath.Join(home, ".local", "share"),
+		FOLDERID_RoamingAppData: filepath.Join(home, ".config"),
+		FOLDERID_ProgramData:    "/var/lib",
+		FOLDERID_Windows:        "/usr",
+		FOLDERID_System:         "/usr/lib",
+		FOLDERID_ProgramFiles:   "/opt",
+		FOLDERID_Fonts:          "/usr/share/fonts",
+		FOLDERID_Temp:           os.TempDir(),
+		FOLDERID_Profile:        home,
+	}
+}
+
+// csidlToPath maps a CSIDL folder ID to its Windows path backed by the host FS.
+func csidlToPath(csidl int32) string {
+	if p, ok := shellCSIDLPaths()[int(csidl)&0xFF]; ok {
+		return linuxToWinPath(p)
+	}
+	return linuxToWinPath(shellHomeDir())
+}
+
+func knownFolderPath(id GUID) string {
+	if p, ok := shellKnownFolderPaths()[id]; ok {
+		return linuxToWinPath(p)
+	}
+	return linuxToWinPath(shellHomeDir())
+}
+
+func expandShellEnvironmentStrings(src string) string {
+	vars := map[string]string{
+		"APPDATA":       linuxToWinPath(filepath.Join(shellHomeDir(), ".config")),
+		"LOCALAPPDATA":  linuxToWinPath(filepath.Join(shellHomeDir(), ".local", "share")),
+		"TEMP":          linuxToWinPath(os.TempDir()),
+		"TMP":           linuxToWinPath(os.TempDir()),
+		"USERPROFILE":   linuxToWinPath(shellHomeDir()),
+		"WINDIR":        linuxToWinPath("/usr"),
+		"SYSTEMROOT":    linuxToWinPath("/usr"),
+		"SYSTEMDRIVE":   `C:`,
+		"PROGRAMFILES":  linuxToWinPath("/opt"),
+		"COMMONAPPDATA": linuxToWinPath("/var/lib"),
+		"PROGRAMDATA":   linuxToWinPath("/var/lib"),
+		"USERNAME":      shellUserName(),
+		"HOMEPATH":      `\\Users\\` + shellUserName(),
+		"HOMEDRIVE":     `C:`,
+	}
+	return shellEnvPattern.ReplaceAllStringFunc(src, func(match string) string {
+		key := strings.ToUpper(strings.Trim(match, "%"))
+		if val, ok := vars[key]; ok {
+			return val
+		}
+		if val, ok := os.LookupEnv(key); ok {
+			return val
+		}
+		return match
+	})
+}
+
+func writeWideString(mem *mmu.MMU, dst uint64, s string, maxChars int) int {
+	if dst == 0 || maxChars <= 0 {
+		return 0
+	}
+	ws := utf16Encode(s)
+	if len(ws) >= maxChars {
+		ws = ws[:maxChars-1]
+	}
+	for i, w := range ws {
+		mem.Write16(dst+uint64(i)*2, w)
+	}
+	mem.Write16(dst+uint64(len(ws))*2, 0)
+	return len(ws)
+}
+
+func writeAnsiString(mem *mmu.MMU, dst uint64, s string, maxChars int) int {
+	if dst == 0 || maxChars <= 0 {
+		return 0
+	}
+	bs := []byte(s)
+	if len(bs) >= maxChars {
+		bs = bs[:maxChars-1]
+	}
+	for i, b := range bs {
+		mem.Write8(dst+uint64(i), b)
+	}
+	mem.Write8(dst+uint64(len(bs)), 0)
+	return len(bs)
+}
+
+func isAbsoluteWinPath(p string) bool {
+	if len(p) >= 2 && p[1] == ':' {
+		return true
+	}
+	return strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, `/`) || strings.HasPrefix(p, `\`)
+}
+
+func canonicalizeWinPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	norm := strings.ReplaceAll(p, `\`, "/")
+	prefix := ""
+	body := norm
+	if len(norm) >= 2 && norm[1] == ':' {
+		prefix = norm[:2]
+		body = norm[2:]
+	}
+	clean := path.Clean(body)
+	if clean == "." {
+		clean = ""
+	}
+	if prefix != "" {
+		if clean == "" || clean == "/" {
+			return prefix + `\`
+		}
+		if !strings.HasPrefix(clean, "/") {
+			clean = "/" + clean
+		}
+		return prefix + strings.ReplaceAll(clean, "/", `\`)
+	}
+	return strings.ReplaceAll(clean, "/", `\`)
+}
+
+func allocPIDLFromPath(mem *mmu.MMU, alloc func(uint64, bool) uint64, winPath string) uint64 {
+	if alloc == nil {
+		return 0
+	}
+	ws := utf16Encode(winPath)
+	itemSize := uint16(2 + len(ws)*2 + 2)
+	total := uint64(itemSize) + 2
+	pidl := alloc(total, true)
+	if pidl == 0 {
+		return 0
+	}
+	mem.Write16(pidl, itemSize)
+	for i, w := range ws {
+		mem.Write16(pidl+2+uint64(i)*2, w)
+	}
+	mem.Write16(pidl+2+uint64(len(ws))*2, 0)
+	mem.Write16(pidl+uint64(itemSize), 0)
+	return pidl
+}
+
+func pidlPathFromMemory(mem *mmu.MMU, pidl uint64) string {
+	if pidl == 0 {
+		return ""
+	}
+	cb, _ := mem.Read16(pidl)
+	if cb < 4 {
+		return ""
+	}
+	var sb strings.Builder
+	for off := uint64(2); off+1 < uint64(cb); off += 2 {
+		w, _ := mem.Read16(pidl + off)
+		if w == 0 {
+			break
+		}
+		sb.WriteRune(rune(w))
+	}
+	return sb.String()
+}
+
+func parseMultiStringW(mem *mmu.MMU, addr uint64) []string {
+	var out []string
+	if addr == 0 {
+		return out
+	}
+	cur := addr
+	for {
+		var sb strings.Builder
+		for {
+			w, _ := mem.Read16(cur)
+			cur += 2
+			if w == 0 {
+				break
+			}
+			sb.WriteRune(rune(w))
+		}
+		if sb.Len() == 0 {
+			break
+		}
+		out = append(out, sb.String())
+	}
+	return out
+}
+
+func parseMultiStringA(mem *mmu.MMU, addr uint64) []string {
+	var out []string
+	if addr == 0 {
+		return out
+	}
+	cur := addr
+	for {
+		var buf []byte
+		for {
+			b, _ := mem.Read8(cur)
+			cur++
+			if b == 0 {
+				break
+			}
+			buf = append(buf, b)
+		}
+		if len(buf) == 0 {
+			break
+		}
+		out = append(out, string(buf))
+	}
+	return out
+}
+
+func copyHostPath(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel, err := filepath.Rel(src, path)
+			if err != nil {
+				return err
+			}
+			target := dst
+			if rel != "." {
+				target = filepath.Join(dst, rel)
+			}
+			if info != nil && info.IsDir() {
+				return os.MkdirAll(target, 0o755)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			in, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer in.Close()
+			out, err := os.Create(target)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out, in); err != nil {
+				out.Close()
+				return err
+			}
+			return out.Close()
+		})
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func shFileOperationHost(mem *mmu.MMU, fileOp uint64, wide bool) error {
+	if fileOp == 0 {
+		return nil
+	}
+	wFunc, _ := mem.Read32(fileOp + 8)
+	pFrom, _ := mem.Read64(fileOp + 16)
+	pTo, _ := mem.Read64(fileOp + 24)
+	var fromList, toList []string
+	if wide {
+		fromList = parseMultiStringW(mem, pFrom)
+		toList = parseMultiStringW(mem, pTo)
+	} else {
+		fromList = parseMultiStringA(mem, pFrom)
+		toList = parseMultiStringA(mem, pTo)
+	}
+	dstWin := ""
+	if len(toList) > 0 {
+		dstWin = toList[0]
+	}
+	for _, srcWin := range fromList {
+		src := winToLinuxPath(srcWin)
+		switch wFunc {
+		case 1:
+			target := winToLinuxPath(dstWin)
+			if len(fromList) > 1 || (target != "" && func() bool { info, err := os.Stat(target); return err == nil && info.IsDir() }()) {
+				target = filepath.Join(target, filepath.Base(src))
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := os.Rename(src, target); err != nil {
+				return err
+			}
+		case 2:
+			target := winToLinuxPath(dstWin)
+			if len(fromList) > 1 || (target != "" && func() bool { info, err := os.Stat(target); return err == nil && info.IsDir() }()) {
+				target = filepath.Join(target, filepath.Base(src))
+			}
+			if err := copyHostPath(src, target); err != nil {
+				return err
+			}
+		case 3:
+			if err := os.RemoveAll(src); err != nil {
+				return err
+			}
+		case 4:
+			target := winToLinuxPath(dstWin)
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := os.Rename(src, target); err != nil {
+				return err
+			}
+		}
+	}
+	mem.Write32(fileOp+36, 0)
+	return nil
 }
 
 // parseCommandLine splits a Windows command line string respecting double-quotes.
@@ -950,7 +1358,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] AssocQueryKeyA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -961,7 +1370,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] AssocQueryKeyW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -973,7 +1383,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] AssocQueryStringA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -985,7 +1397,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] AssocQueryStringByKeyA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -997,7 +1411,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] AssocQueryStringByKeyW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1029,7 +1445,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] CallWindowProcWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1100,7 +1517,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] CompareStringAltW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1112,7 +1531,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] CompareStringWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1124,7 +1545,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] ConnectToConnectionPoint p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1174,7 +1597,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] CreateDialogIndirectParamWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1185,7 +1609,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] CreateDialogParamWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1214,7 +1639,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] CreateFileWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1232,7 +1659,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] CreateFontWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1268,7 +1697,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] CreateProcessWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1290,7 +1721,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] CreateWindowExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1319,7 +1752,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] DdeQueryStringWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1367,7 +1801,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] DialogBoxIndirectParamWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1378,7 +1813,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] DialogBoxParamWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1428,7 +1864,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] DrawTextExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1439,7 +1877,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] DrawTextWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1457,7 +1896,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] EnumFontFamiliesExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1497,7 +1937,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] ExtTextOutWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1508,7 +1950,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] ExtractIconExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1540,7 +1983,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] FDSA_Initialize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1605,7 +2049,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] FormatMessageWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1655,7 +2101,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] GetCharacterPlacementWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1713,7 +2161,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] GetDateFormatWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1834,7 +2284,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] GetMenuStringWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1870,7 +2321,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] GetNumberFormatWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1911,7 +2364,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] GetPrivateProfileStringWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1922,7 +2377,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] GetPrivateProfileStructWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1933,7 +2389,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] GetProfileStringWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1980,7 +2437,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] GetStringTypeExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2041,7 +2499,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] GetTimeFormatWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2114,7 +2574,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] IConnectionPoint_InvokeWithCancel p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2170,7 +2631,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] IShellFolder_GetDisplayNameOf p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2182,7 +2644,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] IShellFolder_ParseDisplayName p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2228,7 +2692,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] IUnknown_CPContainerInvokeParam p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2254,7 +2719,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] IUnknown_Exec p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2287,7 +2754,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] IUnknown_HandleIRestrict p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2340,7 +2808,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] IUnknown_QueryServiceExec p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2369,7 +2839,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] IUnknown_QueryStatus p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2434,7 +2905,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] InsertMenuWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2593,7 +3065,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] LoadImageWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2652,7 +3126,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] MLBuildResURLA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2664,7 +3140,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] MLBuildResURLW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2722,7 +3200,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] MayExecForward p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2734,7 +3214,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] MayQSForward p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2761,7 +3243,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] ModifyMenuWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2819,7 +3302,13 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		if pszPath != 0 {
 			// Find end of string
 			i := uint64(0)
-			for { b, _ := ctx.Mem.Read8(pszPath + i); if b == 0 { break }; i++ }
+			for {
+				b, _ := ctx.Mem.Read8(pszPath + i)
+				if b == 0 {
+					break
+				}
+				i++
+			}
 			if i > 0 {
 				last, _ := ctx.Mem.Read8(pszPath + i - 1)
 				if last != '\\' {
@@ -2839,7 +3328,13 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		ravelog.Logf("[shlwapi] PathAddBackslashW path=0x%x\n", pszPath)
 		if pszPath != 0 {
 			i := uint64(0)
-			for { ch, _ := ctx.Mem.Read16(pszPath + i*2); if ch == 0 { break }; i++ }
+			for {
+				ch, _ := ctx.Mem.Read16(pszPath + i*2)
+				if ch == 0 {
+					break
+				}
+				i++
+			}
 			if i > 0 {
 				last, _ := ctx.Mem.Read16(pszPath + (i-1)*2)
 				if last != '\\' {
@@ -2865,15 +3360,23 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pszPath := ctx.Arg(0)
 		pszMore := ctx.Arg(1)
 		var base, more string
-		if pszPath != 0 { base = readGuestUTF16(pszPath) }
-		if pszMore != 0 { more = readGuestUTF16(pszMore) }
+		if pszPath != 0 {
+			base = readGuestUTF16(pszPath)
+		}
+		if pszMore != 0 {
+			more = readGuestUTF16(pszMore)
+		}
 		ravelog.Logf("[shlwapi] PathAppendA base=%q more=%q\n", base, more)
 		result := base
-		if len(result) > 0 && result[len(result)-1] != '\\' { result += "\\" }
+		if len(result) > 0 && result[len(result)-1] != '\\' {
+			result += "\\"
+		}
 		result += more
 		if pszPath != 0 {
 			for i, ch := range result {
-				if i >= 259 { break }
+				if i >= 259 {
+					break
+				}
 				ctx.Mem.Write16(pszPath+uint64(i*2), uint16(ch))
 			}
 			ctx.Mem.Write16(pszPath+uint64(len(result)*2), 0)
@@ -2899,12 +3402,16 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pszBuf := ctx.Arg(0)
 		pszPath := ctx.Arg(1)
 		var path string
-		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		if pszPath != 0 {
+			path = readGuestUTF16(pszPath)
+		}
 		ravelog.Logf("[shlwapi] PathCanonicalizeA path=%q\n", path)
 		// Simple canonicalization: just copy (full impl would resolve . and ..)
 		if pszBuf != 0 {
 			for i, ch := range path {
-				if i >= 259 { break }
+				if i >= 259 {
+					break
+				}
 				ctx.Mem.Write16(pszBuf+uint64(i*2), uint16(ch))
 			}
 			ctx.Mem.Write16(pszBuf+uint64(len(path)*2), 0)
@@ -2913,20 +3420,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathCanonicalizeW", func(ctx *ntapi.TrapContext) uint32 {
-		pszBuf := ctx.Arg(0)
-		pszPath := ctx.Arg(1)
-		var path string
-		if pszPath != 0 { path = readGuestUTF16(pszPath) }
-		ravelog.Logf("[shlwapi] PathCanonicalizeW path=%q\n", path)
-		// Simple canonicalization: just copy (full impl would resolve . and ..)
-		if pszBuf != 0 {
-			for i, ch := range path {
-				if i >= 259 { break }
-				ctx.Mem.Write16(pszBuf+uint64(i*2), uint16(ch))
-			}
-			ctx.Mem.Write16(pszBuf+uint64(len(path)*2), 0)
-		}
-		ctx.SetReturn(1) // TRUE
+		canon := canonicalizeWinPath(readGuestUTF16(ctx.Arg(1)))
+		writeWideString(ctx.Mem, ctx.Arg(0), canon, 260)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathCombineA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2934,11 +3430,17 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pszDir := ctx.Arg(1)
 		pszFile := ctx.Arg(2)
 		var dir, file string
-		if pszDir != 0 { dir = readGuestString(pszDir) }
-		if pszFile != 0 { file = readGuestString(pszFile) }
+		if pszDir != 0 {
+			dir = readGuestString(pszDir)
+		}
+		if pszFile != 0 {
+			file = readGuestString(pszFile)
+		}
 		ravelog.Logf("[shlwapi] PathCombineA dir=%q file=%q\n", dir, file)
 		result := dir
-		if len(result) > 0 && result[len(result)-1] != '\\' { result += "\\" }
+		if len(result) > 0 && result[len(result)-1] != '\\' {
+			result += "\\"
+		}
 		result += file
 		if pszDest != 0 {
 			for i := 0; i < len(result) && i < 259; i++ {
@@ -3050,30 +3552,48 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathFindExtensionA", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		ravelog.Logf("[shlwapi] PathFindExtensionA path=0x%x\n", pszPath)
-		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		if pszPath == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		extPos := uint64(0)
 		i := uint64(0)
 		for {
 			b, _ := ctx.Mem.Read8(pszPath + i)
-			if b == 0 { break }
-			if b == '.' { extPos = i }
-			if b == '\\' || b == '/' { extPos = 0 }
+			if b == 0 {
+				break
+			}
+			if b == '.' {
+				extPos = i
+			}
+			if b == '\\' || b == '/' {
+				extPos = 0
+			}
 			i++
 		}
-		if extPos == 0 { extPos = i } // point to NUL if no extension
+		if extPos == 0 {
+			extPos = i
+		} // point to NUL if no extension
 		ctx.SetReturn(pszPath + extPos)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathFindFileNameA", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		ravelog.Logf("[shlwapi] PathFindFileNameA path=0x%x\n", pszPath)
-		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		if pszPath == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		last := pszPath
 		i := uint64(0)
 		for {
 			b, _ := ctx.Mem.Read8(pszPath + i)
-			if b == 0 { break }
-			if b == '\\' || b == '/' { last = pszPath + i + 1 }
+			if b == 0 {
+				break
+			}
+			if b == '\\' || b == '/' {
+				last = pszPath + i + 1
+			}
 			i++
 		}
 		ctx.SetReturn(last)
@@ -3140,12 +3660,21 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathGetArgsA", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		ravelog.Logf("[shlwapi] PathGetArgsA path=0x%x\n", pszPath)
-		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		if pszPath == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		i := uint64(0)
 		for {
 			b, _ := ctx.Mem.Read8(pszPath + i)
-			if b == 0 { ctx.SetReturn(pszPath + i); return 0 }
-			if b == ' ' { ctx.SetReturn(pszPath + i + 1); return 0 }
+			if b == 0 {
+				ctx.SetReturn(pszPath + i)
+				return 0
+			}
+			if b == ' ' {
+				ctx.SetReturn(pszPath + i + 1)
+				return 0
+			}
 			i++
 		}
 		return 0
@@ -3153,12 +3682,21 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathGetArgsW", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		ravelog.Logf("[shlwapi] PathGetArgsW path=0x%x\n", pszPath)
-		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		if pszPath == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		i := uint64(0)
 		for {
 			ch, _ := ctx.Mem.Read16(pszPath + i*2)
-			if ch == 0 { ctx.SetReturn(pszPath + i*2); return 0 }
-			if ch == ' ' { ctx.SetReturn(pszPath + (i+1)*2); return 0 }
+			if ch == 0 {
+				ctx.SetReturn(pszPath + i*2)
+				return 0
+			}
+			if ch == ' ' {
+				ctx.SetReturn(pszPath + (i+1)*2)
+				return 0
+			}
 			i++
 		}
 		return 0
@@ -3204,7 +3742,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathIsFileSpecA", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		var path string
-		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		if pszPath != 0 {
+			path = readGuestUTF16(pszPath)
+		}
 		ravelog.Logf("[shlwapi] PathIsFileSpecA path=%q\n", path)
 		if strings.ContainsAny(path, "\\/") {
 			ctx.SetReturn(0) // has path separators
@@ -3216,7 +3756,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathIsFileSpecW", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		var path string
-		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		if pszPath != 0 {
+			path = readGuestUTF16(pszPath)
+		}
 		ravelog.Logf("[shlwapi] PathIsFileSpecW path=%q\n", path)
 		if strings.ContainsAny(path, "\\/") {
 			ctx.SetReturn(0) // has path separators
@@ -3260,7 +3802,10 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathIsRelativeA", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		ravelog.Logf("[shlwapi] PathIsRelativeA path=0x%x\n", pszPath)
-		if pszPath == 0 { ctx.SetReturn(1); return 0 }
+		if pszPath == 0 {
+			ctx.SetReturn(1)
+			return 0
+		}
 		b0, _ := ctx.Mem.Read8(pszPath)
 		b1, _ := ctx.Mem.Read8(pszPath + 1)
 		if (b0 >= 'A' && b0 <= 'Z' || b0 >= 'a' && b0 <= 'z') && b1 == ':' {
@@ -3275,7 +3820,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathIsRootA", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		var path string
-		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		if pszPath != 0 {
+			path = readGuestUTF16(pszPath)
+		}
 		ravelog.Logf("[shlwapi] PathIsRootA path=%q\n", path)
 		if path == "C:\\" || path == "C:" || path == "\\" {
 			ctx.SetReturn(1)
@@ -3287,7 +3834,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathIsRootW", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		var path string
-		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		if pszPath != 0 {
+			path = readGuestUTF16(pszPath)
+		}
 		ravelog.Logf("[shlwapi] PathIsRootW path=%q\n", path)
 		if path == "C:\\" || path == "C:" || path == "\\" {
 			ctx.SetReturn(1)
@@ -3327,7 +3876,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathIsUNCA", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		var path string
-		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		if pszPath != 0 {
+			path = readGuestUTF16(pszPath)
+		}
 		ravelog.Logf("[shlwapi] PathIsUNCA path=%q\n", path)
 		if len(path) >= 2 && path[0] == '\\' && path[1] == '\\' {
 			ctx.SetReturn(1)
@@ -3363,7 +3914,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathIsUNCW", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		var path string
-		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		if pszPath != 0 {
+			path = readGuestUTF16(pszPath)
+		}
 		ravelog.Logf("[shlwapi] PathIsUNCW path=%q\n", path)
 		if len(path) >= 2 && path[0] == '\\' && path[1] == '\\' {
 			ctx.SetReturn(1)
@@ -3448,7 +4001,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] PathRelativePathToA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3459,7 +4013,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] PathRelativePathToW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3470,8 +4025,13 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			i := uint64(0)
 			for {
 				b, _ := ctx.Mem.Read8(pszPath + i)
-				if b == 0 { break }
-				if b == ' ' { ctx.Mem.Write8(pszPath+i, 0); break }
+				if b == 0 {
+					break
+				}
+				if b == ' ' {
+					ctx.Mem.Write8(pszPath+i, 0)
+					break
+				}
 				i++
 			}
 		}
@@ -3485,8 +4045,13 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			i := uint64(0)
 			for {
 				ch, _ := ctx.Mem.Read16(pszPath + i*2)
-				if ch == 0 { break }
-				if ch == ' ' { ctx.Mem.Write16(pszPath+i*2, 0); break }
+				if ch == 0 {
+					break
+				}
+				if ch == ' ' {
+					ctx.Mem.Write16(pszPath+i*2, 0)
+					break
+				}
 				i++
 			}
 		}
@@ -3498,10 +4063,19 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		ravelog.Logf("[shlwapi] PathRemoveBackslashA path=0x%x\n", pszPath)
 		if pszPath != 0 {
 			i := uint64(0)
-			for { b, _ := ctx.Mem.Read8(pszPath + i); if b == 0 { break }; i++ }
+			for {
+				b, _ := ctx.Mem.Read8(pszPath + i)
+				if b == 0 {
+					break
+				}
+				i++
+			}
 			if i > 0 {
 				last, _ := ctx.Mem.Read8(pszPath + i - 1)
-				if last == '\\' { ctx.Mem.Write8(pszPath+i-1, 0); i-- }
+				if last == '\\' {
+					ctx.Mem.Write8(pszPath+i-1, 0)
+					i--
+				}
 			}
 			ctx.SetReturn(pszPath + i)
 		} else {
@@ -3514,10 +4088,19 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		ravelog.Logf("[shlwapi] PathRemoveBackslashW path=0x%x\n", pszPath)
 		if pszPath != 0 {
 			i := uint64(0)
-			for { ch, _ := ctx.Mem.Read16(pszPath + i*2); if ch == 0 { break }; i++ }
+			for {
+				ch, _ := ctx.Mem.Read16(pszPath + i*2)
+				if ch == 0 {
+					break
+				}
+				i++
+			}
 			if i > 0 {
 				last, _ := ctx.Mem.Read16(pszPath + (i-1)*2)
-				if last == '\\' { ctx.Mem.Write16(pszPath+(i-1)*2, 0); i-- }
+				if last == '\\' {
+					ctx.Mem.Write16(pszPath+(i-1)*2, 0)
+					i--
+				}
 			}
 			ctx.SetReturn(pszPath + i*2)
 		} else {
@@ -3545,12 +4128,20 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			i := uint64(0)
 			for {
 				b, _ := ctx.Mem.Read8(pszPath + i)
-				if b == 0 { break }
-				if b == '.' { extPos = i }
-				if b == '\\' || b == '/' { extPos = 0 }
+				if b == 0 {
+					break
+				}
+				if b == '.' {
+					extPos = i
+				}
+				if b == '\\' || b == '/' {
+					extPos = 0
+				}
 				i++
 			}
-			if extPos != 0 { ctx.Mem.Write8(pszPath+extPos, 0) }
+			if extPos != 0 {
+				ctx.Mem.Write8(pszPath+extPos, 0)
+			}
 		}
 		ctx.SetReturn(0) // void
 		return 0
@@ -3563,11 +4154,20 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			i := uint64(0)
 			for {
 				b, _ := ctx.Mem.Read8(pszPath + i)
-				if b == 0 { break }
-				if b == '\\' || b == '/' { lastSep = i }
+				if b == 0 {
+					break
+				}
+				if b == '\\' || b == '/' {
+					lastSep = i
+				}
 				i++
 			}
-			if lastSep != 0 { ctx.Mem.Write8(pszPath+lastSep, 0); ctx.SetReturn(1) } else { ctx.SetReturn(0) }
+			if lastSep != 0 {
+				ctx.Mem.Write8(pszPath+lastSep, 0)
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
 		} else {
 			ctx.SetReturn(0)
 		}
@@ -3628,12 +4228,19 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathSkipRootA", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		ravelog.Logf("[shlwapi] PathSkipRootA path=0x%x\n", pszPath)
-		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		if pszPath == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		b0, _ := ctx.Mem.Read8(pszPath)
 		b1, _ := ctx.Mem.Read8(pszPath + 1)
 		if (b0 >= 'A' && b0 <= 'Z' || b0 >= 'a' && b0 <= 'z') && b1 == ':' {
 			b2, _ := ctx.Mem.Read8(pszPath + 2)
-			if b2 == '\\' || b2 == '/' { ctx.SetReturn(pszPath + 3) } else { ctx.SetReturn(pszPath + 2) }
+			if b2 == '\\' || b2 == '/' {
+				ctx.SetReturn(pszPath + 3)
+			} else {
+				ctx.SetReturn(pszPath + 2)
+			}
 		} else {
 			ctx.SetReturn(pszPath)
 		}
@@ -3642,12 +4249,19 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "PathSkipRootW", func(ctx *ntapi.TrapContext) uint32 {
 		pszPath := ctx.Arg(0)
 		ravelog.Logf("[shlwapi] PathSkipRootW path=0x%x\n", pszPath)
-		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		if pszPath == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		c0, _ := ctx.Mem.Read16(pszPath)
 		c1, _ := ctx.Mem.Read16(pszPath + 2)
 		if (c0 >= 'A' && c0 <= 'Z' || c0 >= 'a' && c0 <= 'z') && c1 == ':' {
 			c2, _ := ctx.Mem.Read16(pszPath + 4)
-			if c2 == '\\' || c2 == '/' { ctx.SetReturn(pszPath + 6) } else { ctx.SetReturn(pszPath + 4) }
+			if c2 == '\\' || c2 == '/' {
+				ctx.SetReturn(pszPath + 6)
+			} else {
+				ctx.SetReturn(pszPath + 4)
+			}
 		} else {
 			ctx.SetReturn(pszPath)
 		}
@@ -3661,8 +4275,12 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			i := uint64(0)
 			for {
 				b, _ := ctx.Mem.Read8(pszPath + i)
-				if b == 0 { break }
-				if b == '\\' || b == '/' { lastSep = i + 1 }
+				if b == 0 {
+					break
+				}
+				if b == '\\' || b == '/' {
+					lastSep = i + 1
+				}
 				i++
 			}
 			if lastSep > 0 {
@@ -3670,7 +4288,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 				for {
 					b, _ := ctx.Mem.Read8(pszPath + lastSep + j)
 					ctx.Mem.Write8(pszPath+j, b)
-					if b == 0 { break }
+					if b == 0 {
+						break
+					}
 					j++
 				}
 			}
@@ -3738,7 +4358,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] PeekMessageWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3794,7 +4415,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] RegCreateKeyExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3828,7 +4451,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] RegEnumKeyExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3850,7 +4475,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] RegEnumValueWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3861,7 +4488,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] RegOpenKeyExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3881,7 +4509,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] RegQueryInfoKeyWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3893,7 +4523,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] RegQueryValueExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3915,7 +4547,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] RegSetValueExWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3926,7 +4560,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] RegSetValueWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4065,7 +4700,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			i := 0
 			for i < cwchBuf-1 {
 				b, _ := ctx.Mem.Read8(pszSrc + uint64(i))
-				if b == 0 { break }
+				if b == 0 {
+					break
+				}
 				ctx.Mem.Write16(pwszDst+uint64(i*2), uint16(b))
 				i++
 			}
@@ -4138,7 +4775,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHCoCreateInstanceAC p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4184,7 +4822,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHCreatePropertyBagOnProfileSection p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4195,7 +4834,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHCreatePropertyBagOnRegKey p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4221,7 +4861,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHCreateStreamOnFileEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4268,7 +4910,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHCreateWorkerWindowA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4280,7 +4924,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHCreateWorkerWindowW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4292,7 +4938,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHDefExtractIconWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4324,7 +4972,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		hKey := ctx.Arg(0)
 		pszSubKey := ctx.Arg(1)
 		var sub string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
 		ravelog.Logf("[shlwapi] SHDeleteKeyA hkey=0x%x sub=%q\n", hKey, sub)
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
@@ -4333,7 +4983,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		hKey := ctx.Arg(0)
 		pszSubKey := ctx.Arg(1)
 		var sub string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
 		ravelog.Logf("[shlwapi] SHDeleteKeyW hkey=0x%x sub=%q\n", hKey, sub)
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
@@ -4404,7 +5056,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHEnumValueA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4416,7 +5070,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHEnumValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4510,7 +5166,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHForwardContextMenuMsg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4545,7 +5203,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHGetFileInfoWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4556,7 +5215,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHGetIniStringUTF7W p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4567,7 +5227,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHGetIniStringW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4598,7 +5259,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHGetNewLinkInfoWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4668,10 +5330,16 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pvData := ctx.Arg(4)
 		pcbData := ctx.Arg(5)
 		var sub, val string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
-		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
+		if pszValue != 0 {
+			val = readGuestUTF16(pszValue)
+		}
 		ravelog.Logf("[shlwapi] SHGetValueA hkey=0x%x sub=%q val=%q\n", hKey, sub, val)
-		_ = pdwType; _ = pvData; _ = pcbData
+		_ = pdwType
+		_ = pvData
+		_ = pcbData
 		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
@@ -4683,7 +5351,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHGetValueGoodBootA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4695,7 +5365,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHGetValueGoodBootW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4707,10 +5379,16 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pvData := ctx.Arg(4)
 		pcbData := ctx.Arg(5)
 		var sub, val string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
-		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
+		if pszValue != 0 {
+			val = readGuestUTF16(pszValue)
+		}
 		ravelog.Logf("[shlwapi] SHGetValueW hkey=0x%x sub=%q val=%q\n", hKey, sub, val)
-		_ = pdwType; _ = pvData; _ = pcbData
+		_ = pdwType
+		_ = pvData
+		_ = pcbData
 		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
@@ -4721,7 +5399,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHGetViewStatePropertyBag p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4804,7 +5483,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHInvokeCommandOnContextMenu p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4862,13 +5542,17 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		cchOutBuf := ctx.Arg(2)
 		ppvReserved := ctx.Arg(3)
 		var src string
-		if pszSource != 0 { src = readGuestUTF16(pszSource) }
+		if pszSource != 0 {
+			src = readGuestUTF16(pszSource)
+		}
 		ravelog.Logf("[shlwapi] SHLoadIndirectString src=%q\n", src)
 		_ = ppvReserved
 		// Copy source to output as-is
 		if pszOutBuf != 0 && cchOutBuf > 0 {
 			for i, ch := range src {
-				if uint64(i) >= cchOutBuf-1 { break }
+				if uint64(i) >= cchOutBuf-1 {
+					break
+				}
 				ctx.Mem.Write16(pszOutBuf+uint64(i*2), uint16(ch))
 			}
 			ctx.Mem.Write16(pszOutBuf+uint64(len(src)*2), 0)
@@ -4925,7 +5609,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHMapHandle p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4944,7 +5629,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHMessageBoxCheckA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4956,7 +5643,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHMessageBoxCheckExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4968,7 +5657,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHMessageBoxCheckExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4980,7 +5671,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHMessageBoxCheckW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4988,7 +5681,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		hKey := ctx.Arg(0)
 		pszSubKey := ctx.Arg(1)
 		var sub string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
 		ravelog.Logf("[shlwapi] SHOpenRegStream2A hkey=0x%x sub=%q\n", hKey, sub)
 		ctx.SetReturn(0) // NULL IStream
 		return 0
@@ -4997,7 +5692,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		hKey := ctx.Arg(0)
 		pszSubKey := ctx.Arg(1)
 		var sub string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
 		ravelog.Logf("[shlwapi] SHOpenRegStream2W hkey=0x%x sub=%q\n", hKey, sub)
 		ctx.SetReturn(0) // NULL IStream
 		return 0
@@ -5006,7 +5703,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		hKey := ctx.Arg(0)
 		pszSubKey := ctx.Arg(1)
 		var sub string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
 		ravelog.Logf("[shlwapi] SHOpenRegStreamA hkey=0x%x sub=%q\n", hKey, sub)
 		ctx.SetReturn(0) // NULL IStream
 		return 0
@@ -5015,7 +5714,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		hKey := ctx.Arg(0)
 		pszSubKey := ctx.Arg(1)
 		var sub string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
 		ravelog.Logf("[shlwapi] SHOpenRegStreamW hkey=0x%x sub=%q\n", hKey, sub)
 		ctx.SetReturn(0) // NULL IStream
 		return 0
@@ -5051,7 +5752,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHPropagateMessage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5273,7 +5975,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHQueryInfoKeyA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5284,7 +5987,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHQueryInfoKeyW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5296,9 +6000,14 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pvData := ctx.Arg(4)
 		pcbData := ctx.Arg(5)
 		var val string
-		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		if pszValue != 0 {
+			val = readGuestUTF16(pszValue)
+		}
 		ravelog.Logf("[shlwapi] SHQueryValueExA hkey=0x%x val=%q\n", hKey, val)
-		_ = pdwReserved; _ = pdwType; _ = pvData; _ = pcbData
+		_ = pdwReserved
+		_ = pdwType
+		_ = pvData
+		_ = pcbData
 		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
@@ -5310,9 +6019,14 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pvData := ctx.Arg(4)
 		pcbData := ctx.Arg(5)
 		var val string
-		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		if pszValue != 0 {
+			val = readGuestUTF16(pszValue)
+		}
 		ravelog.Logf("[shlwapi] SHQueryValueExW hkey=0x%x val=%q\n", hKey, val)
-		_ = pdwReserved; _ = pdwType; _ = pvData; _ = pcbData
+		_ = pdwReserved
+		_ = pdwType
+		_ = pvData
+		_ = pcbData
 		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
@@ -5324,7 +6038,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHQueueUserWorkItem p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5348,7 +6064,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegCreateUSKeyA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5359,7 +6076,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegCreateUSKeyW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5408,7 +6126,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegEnumUSKeyA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5419,7 +6138,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegEnumUSKeyW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5431,7 +6151,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegEnumUSValueA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5443,7 +6165,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegEnumUSValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5474,7 +6198,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegGetCLSIDKeyA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5485,7 +6210,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegGetCLSIDKeyW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5504,7 +6230,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegGetPathA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5515,7 +6242,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegGetPathW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5527,7 +6255,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegGetUSValueA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5539,7 +6269,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegGetUSValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5551,7 +6283,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegGetValueA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5563,7 +6297,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegGetValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5574,7 +6310,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegOpenUSKeyA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5585,7 +6322,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegOpenUSKeyW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5597,7 +6335,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegQueryInfoUSKeyA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5609,7 +6349,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegQueryInfoUSKeyW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5621,7 +6363,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegQueryUSValueA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5633,7 +6377,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegQueryUSValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5644,7 +6390,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegSetPathA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5655,7 +6402,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHRegSetPathW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5667,7 +6415,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegSetUSValueA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5679,7 +6429,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegSetUSValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5691,7 +6443,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegWriteUSValueA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5703,7 +6457,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHRegWriteUSValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5841,7 +6597,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SHSetTimerQueueTimer p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5853,10 +6611,15 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pvData := ctx.Arg(4)
 		cbData := ctx.Arg(5)
 		var sub, val string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
-		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
+		if pszValue != 0 {
+			val = readGuestUTF16(pszValue)
+		}
 		ravelog.Logf("[shlwapi] SHSetValueA hkey=0x%x sub=%q val=%q type=%d\n", hKey, sub, val, dwType)
-		_ = pvData; _ = cbData
+		_ = pvData
+		_ = cbData
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -5868,10 +6631,15 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pvData := ctx.Arg(4)
 		cbData := ctx.Arg(5)
 		var sub, val string
-		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
-		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		if pszSubKey != 0 {
+			sub = readGuestUTF16(pszSubKey)
+		}
+		if pszValue != 0 {
+			val = readGuestUTF16(pszValue)
+		}
 		ravelog.Logf("[shlwapi] SHSetValueW hkey=0x%x sub=%q val=%q type=%d\n", hKey, sub, val, dwType)
-		_ = pvData; _ = cbData
+		_ = pvData
+		_ = cbData
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -5892,7 +6660,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHSimulateDrop p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5960,7 +6729,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			i := 0
 			for i < cwchBuf-1 {
 				ch, _ := ctx.Mem.Read16(pwszSrc + uint64(i*2))
-				if ch == 0 { break }
+				if ch == 0 {
+					break
+				}
 				ctx.Mem.Write8(pszDst+uint64(i), uint8(ch))
 				i++
 			}
@@ -6052,7 +6823,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHWinHelpOnDemandA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6063,7 +6835,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SHWinHelpOnDemandW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6082,7 +6855,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SKAllocValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6102,7 +6877,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SKGetValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6114,7 +6891,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SKSetValueW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6126,7 +6905,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SearchPathWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6137,7 +6918,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] SendDlgItemMessageWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6149,7 +6931,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] SendMessageTimeoutWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6240,7 +7024,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] ShellMessageBoxWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6258,7 +7043,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] StopWatchA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6279,7 +7065,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] StopWatchW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6353,16 +7140,27 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pszDest := ctx.Arg(0)
 		pszSrc := ctx.Arg(1)
 		cchDestBufSize := int(ctx.Arg(2))
-		if pszDest == 0 { ctx.SetReturn(0); return 0 }
+		if pszDest == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		// Find end of dest
 		i := 0
-		for { ch, _ := ctx.Mem.Read16(pszDest + uint64(i*2)); if ch == 0 { break }; i++ }
+		for {
+			ch, _ := ctx.Mem.Read16(pszDest + uint64(i*2))
+			if ch == 0 {
+				break
+			}
+			i++
+		}
 		// Append src
 		if pszSrc != 0 {
 			j := 0
 			for i+j < cchDestBufSize-1 {
 				ch, _ := ctx.Mem.Read16(pszSrc + uint64(j*2))
-				if ch == 0 { break }
+				if ch == 0 {
+					break
+				}
 				ctx.Mem.Write16(pszDest+uint64((i+j)*2), ch)
 				j++
 			}
@@ -6374,17 +7172,28 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrCatW", func(ctx *ntapi.TrapContext) uint32 {
 		psz1 := ctx.Arg(0)
 		psz2 := ctx.Arg(1)
-		if psz1 == 0 { ctx.SetReturn(0); return 0 }
+		if psz1 == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		// Find end of psz1
 		i := uint64(0)
-		for { ch, _ := ctx.Mem.Read16(psz1 + i*2); if ch == 0 { break }; i++ }
+		for {
+			ch, _ := ctx.Mem.Read16(psz1 + i*2)
+			if ch == 0 {
+				break
+			}
+			i++
+		}
 		// Copy psz2
 		if psz2 != 0 {
 			j := uint64(0)
 			for {
 				ch, _ := ctx.Mem.Read16(psz2 + j*2)
 				ctx.Mem.Write16(psz1+(i+j)*2, ch)
-				if ch == 0 { break }
+				if ch == 0 {
+					break
+				}
 				j++
 			}
 		}
@@ -6394,12 +7203,21 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrChrA", func(ctx *ntapi.TrapContext) uint32 {
 		pszStart := ctx.Arg(0)
 		wMatch := ctx.Arg(1)
-		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		if pszStart == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		i := uint64(0)
 		for {
 			b, _ := ctx.Mem.Read8(pszStart + i)
-			if b == 0 { ctx.SetReturn(0); return 0 }
-			if uint64(b) == wMatch { ctx.SetReturn(pszStart + i); return 0 }
+			if b == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			if uint64(b) == wMatch {
+				ctx.SetReturn(pszStart + i)
+				return 0
+			}
 			i++
 		}
 		return 0
@@ -6407,15 +7225,28 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrChrIA", func(ctx *ntapi.TrapContext) uint32 {
 		pszStart := ctx.Arg(0)
 		wMatch := ctx.Arg(1) & 0xFF
-		if wMatch >= 'A' && wMatch <= 'Z' { wMatch += 32 }
-		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		if wMatch >= 'A' && wMatch <= 'Z' {
+			wMatch += 32
+		}
+		if pszStart == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		i := uint64(0)
 		for {
 			b, _ := ctx.Mem.Read8(pszStart + i)
-			if b == 0 { ctx.SetReturn(0); return 0 }
+			if b == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
 			low := uint64(b)
-			if low >= 'A' && low <= 'Z' { low += 32 }
-			if low == wMatch { ctx.SetReturn(pszStart + i); return 0 }
+			if low >= 'A' && low <= 'Z' {
+				low += 32
+			}
+			if low == wMatch {
+				ctx.SetReturn(pszStart + i)
+				return 0
+			}
 			i++
 		}
 		return 0
@@ -6423,15 +7254,28 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrChrIW", func(ctx *ntapi.TrapContext) uint32 {
 		pszStart := ctx.Arg(0)
 		wMatch := ctx.Arg(1) & 0xFFFF
-		if wMatch >= 'A' && wMatch <= 'Z' { wMatch += 32 }
-		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		if wMatch >= 'A' && wMatch <= 'Z' {
+			wMatch += 32
+		}
+		if pszStart == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		i := uint64(0)
 		for {
 			ch, _ := ctx.Mem.Read16(pszStart + i*2)
-			if ch == 0 { ctx.SetReturn(0); return 0 }
+			if ch == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
 			low := uint64(ch)
-			if low >= 'A' && low <= 'Z' { low += 32 }
-			if low == wMatch { ctx.SetReturn(pszStart + i*2); return 0 }
+			if low >= 'A' && low <= 'Z' {
+				low += 32
+			}
+			if low == wMatch {
+				ctx.SetReturn(pszStart + i*2)
+				return 0
+			}
 			i++
 		}
 		return 0
@@ -6447,12 +7291,21 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrChrW", func(ctx *ntapi.TrapContext) uint32 {
 		pszStart := ctx.Arg(0)
 		wMatch := ctx.Arg(1)
-		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		if pszStart == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		i := uint64(0)
 		for {
 			ch, _ := ctx.Mem.Read16(pszStart + i*2)
-			if ch == 0 { ctx.SetReturn(0); return 0 }
-			if uint64(ch) == wMatch { ctx.SetReturn(pszStart + i*2); return 0 }
+			if ch == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+			if uint64(ch) == wMatch {
+				ctx.SetReturn(pszStart + i*2)
+				return 0
+			}
 			i++
 		}
 		return 0
@@ -6489,8 +7342,12 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		psz1 := ctx.Arg(0)
 		psz2 := ctx.Arg(1)
 		s1, s2 := "", ""
-		if psz1 != 0 { s1 = readGuestUTF16(psz1) }
-		if psz2 != 0 { s2 = readGuestUTF16(psz2) }
+		if psz1 != 0 {
+			s1 = readGuestUTF16(psz1)
+		}
+		if psz2 != 0 {
+			s2 = readGuestUTF16(psz2)
+		}
 		result := strings.Compare(strings.ToLower(s1), strings.ToLower(s2))
 		ctx.SetReturn(uint64(int64(result)))
 		return 0
@@ -6507,10 +7364,18 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		psz2 := ctx.Arg(1)
 		nChar := int(ctx.Arg(2))
 		s1, s2 := "", ""
-		if psz1 != 0 { s1 = readGuestString(psz1) }
-		if psz2 != 0 { s2 = readGuestString(psz2) }
-		if len(s1) > nChar { s1 = s1[:nChar] }
-		if len(s2) > nChar { s2 = s2[:nChar] }
+		if psz1 != 0 {
+			s1 = readGuestString(psz1)
+		}
+		if psz2 != 0 {
+			s2 = readGuestString(psz2)
+		}
+		if len(s1) > nChar {
+			s1 = s1[:nChar]
+		}
+		if len(s2) > nChar {
+			s2 = s2[:nChar]
+		}
 		result := strings.Compare(s1, s2)
 		ctx.SetReturn(uint64(int64(result)))
 		return 0
@@ -6536,10 +7401,18 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		psz2 := ctx.Arg(1)
 		nChar := int(ctx.Arg(2))
 		s1, s2 := "", ""
-		if psz1 != 0 { s1 = readGuestString(psz1) }
-		if psz2 != 0 { s2 = readGuestString(psz2) }
-		if len(s1) > nChar { s1 = s1[:nChar] }
-		if len(s2) > nChar { s2 = s2[:nChar] }
+		if psz1 != 0 {
+			s1 = readGuestString(psz1)
+		}
+		if psz2 != 0 {
+			s2 = readGuestString(psz2)
+		}
+		if len(s1) > nChar {
+			s1 = s1[:nChar]
+		}
+		if len(s2) > nChar {
+			s2 = s2[:nChar]
+		}
 		result := strings.Compare(strings.ToLower(s1), strings.ToLower(s2))
 		ctx.SetReturn(uint64(int64(result)))
 		return 0
@@ -6565,10 +7438,18 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		psz2 := ctx.Arg(1)
 		nChar := int(ctx.Arg(2))
 		s1, s2 := "", ""
-		if psz1 != 0 { s1 = readGuestUTF16(psz1) }
-		if psz2 != 0 { s2 = readGuestUTF16(psz2) }
-		if len(s1) > nChar { s1 = s1[:nChar] }
-		if len(s2) > nChar { s2 = s2[:nChar] }
+		if psz1 != 0 {
+			s1 = readGuestUTF16(psz1)
+		}
+		if psz2 != 0 {
+			s2 = readGuestUTF16(psz2)
+		}
+		if len(s1) > nChar {
+			s1 = s1[:nChar]
+		}
+		if len(s2) > nChar {
+			s2 = s2[:nChar]
+		}
 		result := strings.Compare(strings.ToLower(s1), strings.ToLower(s2))
 		ctx.SetReturn(uint64(int64(result)))
 		return 0
@@ -6578,10 +7459,18 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		psz2 := ctx.Arg(1)
 		nChar := int(ctx.Arg(2))
 		s1, s2 := "", ""
-		if psz1 != 0 { s1 = readGuestUTF16(psz1) }
-		if psz2 != 0 { s2 = readGuestUTF16(psz2) }
-		if len(s1) > nChar { s1 = s1[:nChar] }
-		if len(s2) > nChar { s2 = s2[:nChar] }
+		if psz1 != 0 {
+			s1 = readGuestUTF16(psz1)
+		}
+		if psz2 != 0 {
+			s2 = readGuestUTF16(psz2)
+		}
+		if len(s1) > nChar {
+			s1 = s1[:nChar]
+		}
+		if len(s2) > nChar {
+			s2 = s2[:nChar]
+		}
 		result := strings.Compare(s1, s2)
 		ctx.SetReturn(uint64(int64(result)))
 		return 0
@@ -6590,8 +7479,12 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		psz1 := ctx.Arg(0)
 		psz2 := ctx.Arg(1)
 		s1, s2 := "", ""
-		if psz1 != 0 { s1 = readGuestUTF16(psz1) }
-		if psz2 != 0 { s2 = readGuestUTF16(psz2) }
+		if psz1 != 0 {
+			s1 = readGuestUTF16(psz1)
+		}
+		if psz2 != 0 {
+			s2 = readGuestUTF16(psz2)
+		}
 		result := strings.Compare(s1, s2)
 		ctx.SetReturn(uint64(int64(result)))
 		return 0
@@ -6604,7 +7497,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			for i := 0; i < cchMax-1; i++ {
 				ch, _ := ctx.Mem.Read16(pszSrc + uint64(i*2))
 				ctx.Mem.Write16(pszDst+uint64(i*2), ch)
-				if ch == 0 { break }
+				if ch == 0 {
+					break
+				}
 			}
 			ctx.Mem.Write16(pszDst+uint64((cchMax-1)*2), 0)
 		}
@@ -6635,7 +7530,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			for {
 				ch, _ := ctx.Mem.Read16(pszSrc + i*2)
 				ctx.Mem.Write16(pszDst+i*2, ch)
-				if ch == 0 { break }
+				if ch == 0 {
+					break
+				}
 				i++
 			}
 		}
@@ -6644,21 +7541,45 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrDupA", func(ctx *ntapi.TrapContext) uint32 {
 		pszSrc := ctx.Arg(0)
-		if pszSrc == 0 { ctx.SetReturn(0); return 0 }
+		if pszSrc == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		i := uint64(0)
-		for { b, _ := ctx.Mem.Read8(pszSrc + i); if b == 0 { break }; i++ }
+		for {
+			b, _ := ctx.Mem.Read8(pszSrc + i)
+			if b == 0 {
+				break
+			}
+			i++
+		}
 		buf := sharedHeapAlloc(i+1, true)
-		for j := uint64(0); j <= i; j++ { b, _ := ctx.Mem.Read8(pszSrc + j); ctx.Mem.Write8(buf+j, b) }
+		for j := uint64(0); j <= i; j++ {
+			b, _ := ctx.Mem.Read8(pszSrc + j)
+			ctx.Mem.Write8(buf+j, b)
+		}
 		ctx.SetReturn(buf)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrDupW", func(ctx *ntapi.TrapContext) uint32 {
 		pszSrc := ctx.Arg(0)
-		if pszSrc == 0 { ctx.SetReturn(0); return 0 }
+		if pszSrc == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		i := uint64(0)
-		for { ch, _ := ctx.Mem.Read16(pszSrc + i*2); if ch == 0 { break }; i++ }
+		for {
+			ch, _ := ctx.Mem.Read16(pszSrc + i*2)
+			if ch == 0 {
+				break
+			}
+			i++
+		}
 		buf := sharedHeapAlloc((i+1)*2, true)
-		for j := uint64(0); j <= i; j++ { ch, _ := ctx.Mem.Read16(pszSrc + j*2); ctx.Mem.Write16(buf+j*2, ch) }
+		for j := uint64(0); j <= i; j++ {
+			ch, _ := ctx.Mem.Read16(pszSrc + j*2)
+			ctx.Mem.Write16(buf+j*2, ch)
+		}
 		ctx.SetReturn(buf)
 		return 0
 	})
@@ -6776,14 +7697,21 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pszStart := ctx.Arg(0)
 		pszEnd := ctx.Arg(1)
 		wMatch := ctx.Arg(2)
-		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		if pszStart == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		_ = pszEnd
 		last := uint64(0)
 		i := uint64(0)
 		for {
 			b, _ := ctx.Mem.Read8(pszStart + i)
-			if b == 0 { break }
-			if uint64(b) == wMatch { last = pszStart + i }
+			if b == 0 {
+				break
+			}
+			if uint64(b) == wMatch {
+				last = pszStart + i
+			}
 			i++
 		}
 		ctx.SetReturn(last)
@@ -6809,14 +7737,21 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pszStart := ctx.Arg(0)
 		pszEnd := ctx.Arg(1)
 		wMatch := ctx.Arg(2)
-		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		if pszStart == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		_ = pszEnd
 		last := uint64(0)
 		i := uint64(0)
 		for {
 			ch, _ := ctx.Mem.Read16(pszStart + i*2)
-			if ch == 0 { break }
-			if uint64(ch) == wMatch { last = pszStart + i*2 }
+			if ch == 0 {
+				break
+			}
+			if uint64(ch) == wMatch {
+				last = pszStart + i*2
+			}
 			i++
 		}
 		ctx.SetReturn(last)
@@ -6899,7 +7834,10 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrStrA", func(ctx *ntapi.TrapContext) uint32 {
 		pszFirst := ctx.Arg(0)
 		pszSrch := ctx.Arg(1)
-		if pszFirst == 0 || pszSrch == 0 { ctx.SetReturn(0); return 0 }
+		if pszFirst == 0 || pszSrch == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		s1 := readGuestString(pszFirst)
 		s2 := readGuestString(pszSrch)
 		idx := strings.Index(s1, s2)
@@ -6913,7 +7851,10 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrStrIA", func(ctx *ntapi.TrapContext) uint32 {
 		pszFirst := ctx.Arg(0)
 		pszSrch := ctx.Arg(1)
-		if pszFirst == 0 || pszSrch == 0 { ctx.SetReturn(0); return 0 }
+		if pszFirst == 0 || pszSrch == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		s1 := readGuestString(pszFirst)
 		s2 := readGuestString(pszSrch)
 		idx := strings.Index(strings.ToLower(s1), strings.ToLower(s2))
@@ -6927,7 +7868,10 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrStrIW", func(ctx *ntapi.TrapContext) uint32 {
 		pszFirst := ctx.Arg(0)
 		pszSrch := ctx.Arg(1)
-		if pszFirst == 0 || pszSrch == 0 { ctx.SetReturn(0); return 0 }
+		if pszFirst == 0 || pszSrch == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		s1 := readGuestUTF16(pszFirst)
 		s2 := readGuestUTF16(pszSrch)
 		idx := strings.Index(strings.ToLower(s1), strings.ToLower(s2))
@@ -6957,7 +7901,10 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrStrW", func(ctx *ntapi.TrapContext) uint32 {
 		pszFirst := ctx.Arg(0)
 		pszSrch := ctx.Arg(1)
-		if pszFirst == 0 || pszSrch == 0 { ctx.SetReturn(0); return 0 }
+		if pszFirst == 0 || pszSrch == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		s1 := readGuestUTF16(pszFirst)
 		s2 := readGuestUTF16(pszSrch)
 		idx := strings.Index(s1, s2)
@@ -6987,7 +7934,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrToIntA", func(ctx *ntapi.TrapContext) uint32 {
 		pszSrc := ctx.Arg(0)
 		var s string
-		if pszSrc != 0 { s = readGuestString(pszSrc) }
+		if pszSrc != 0 {
+			s = readGuestString(pszSrc)
+		}
 		n := 0
 		fmt.Sscanf(s, "%d", &n)
 		ctx.SetReturn(uint64(int64(n)))
@@ -7012,7 +7961,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shlwapi, "StrToIntW", func(ctx *ntapi.TrapContext) uint32 {
 		pszSrc := ctx.Arg(0)
 		var s string
-		if pszSrc != 0 { s = readGuestUTF16(pszSrc) }
+		if pszSrc != 0 {
+			s = readGuestUTF16(pszSrc)
+		}
 		n := 0
 		fmt.Sscanf(s, "%d", &n)
 		ctx.SetReturn(uint64(int64(n)))
@@ -7050,7 +8001,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] TrackPopupMenuExWrap p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7062,7 +8015,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] TrackPopupMenuWrap p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7152,7 +8107,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] UrlCombineA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7163,7 +8119,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] UrlCombineW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7260,7 +8217,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] UrlGetPartA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7271,7 +8229,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] UrlGetPartW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7372,7 +8331,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] WNetGetLastErrorWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7415,7 +8375,8 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shlwapi] WritePrivateProfileStructWrapW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7427,7 +8388,9 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shlwapi] ZoneCheckUrlExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7482,6 +8445,11 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 	readGuestUTF16 := hctx.ReadGuestUTF16
 
 	sharedHeapAlloc := hctx.HeapAlloc
+	cs := hctx.Com
+	if cs == nil {
+		cs = newCOMState(hctx)
+		hctx.Com = cs
+	}
 
 	shell32, ok := hctx.SynthByName["shell32.dll"]
 	if !ok {
@@ -7490,17 +8458,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 	_ = shell32
 
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathW", func(ctx *ntapi.TrapContext) uint32 {
-		// HRESULT SHGetFolderPathW(HWND hwnd, int nFolder, HANDLE hToken, DWORD dwFlags, LPWSTR pszPath)
-		folder := ctx.Arg(1)
-		buf := ctx.Arg(3)
-		path := csidlToPath(int32(folder))
-		if buf != 0 {
-			for i, ch := range path {
-				ctx.Mem.Write16(buf+uint64(i*2), uint16(ch))
-			}
-			ctx.Mem.Write16(buf+uint64(len(path)*2), 0)
-		}
-		ctx.SetReturn(0) // S_OK
+		writeWideString(ctx.Mem, ctx.Arg(4), csidlToPath(int32(ctx.Arg(1))), 260)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "DragAcceptFiles", func(ctx *ntapi.TrapContext) uint32 {
@@ -7544,43 +8503,21 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetKnownFolderPath", func(ctx *ntapi.TrapContext) uint32 {
-		// HRESULT SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PWSTR *ppszPath)
 		rfid := ctx.Arg(0)
 		ppszPath := ctx.Arg(3)
-		path := `C:\Users\user\AppData\Roaming` // default fallback
-		if rfid != 0 {
-			guidStr := readGUIDString(ctx.Mem, rfid)
-			knownFolders := map[string]string{
-				"{374DE290-123F-4565-9164-39C4925E467B}": `C:\Users\user\Downloads`,
-				"{FDD39AD0-238F-46AF-ADB4-6C85480369C7}": `C:\Users\user\Documents`,
-				"{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}": `C:\Users\user\AppData\Roaming`,
-				"{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}": `C:\Users\user\AppData\Local`,
-				"{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}": `C:\Users\user\Desktop`,
-				"{5E6C858F-0E22-4760-9AFE-EA3317B67173}": `C:\Users\user`,
-				"{905E63B6-C1BF-494E-B29C-65B732D3D21A}": `C:\Program Files`,
-				"{F38BF404-1D43-42F2-9305-67DE0B28FC23}": `C:\Windows`,
-				"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}": `C:\Windows\System32`,
-				"{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}": `C:\ProgramData`,
-				"{FD228CB7-AE11-4AE3-864C-16F3910AB8FE}": `C:\Windows\Fonts`,
-				"{33E28130-4E1E-4676-835A-98395C3BC3BB}": `C:\Users\user\Pictures`,
-				"{4BD8D571-6D19-48D3-BE97-422220080E43}": `C:\Users\user\Music`,
-				"{18989B1D-99B5-455B-841C-AB7C74E4DDFC}": `C:\Users\user\Videos`,
-			}
-			if p, ok := knownFolders[guidStr]; ok {
-				path = p
-			}
+		if ppszPath == 0 || rfid == 0 {
+			ctx.SetReturn(E_POINTER)
+			return 0
 		}
-		ws := utf16Encode(path)
-		bufSize := uint64(len(ws)+1) * 2
-		addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
-		for i, w := range ws {
-			mem.Write16(addr+uint64(i)*2, w)
+		path := knownFolderPath(readGUID(ctx.Mem, rfid))
+		buf := cs.allocTaskMem(uint64((len(utf16Encode(path))+1)*2), true)
+		if buf == 0 {
+			ctx.SetReturn(E_OUTOFMEMORY)
+			return 0
 		}
-		mem.Write16(addr+uint64(len(ws))*2, 0)
-		if ppszPath != 0 {
-			ctx.Mem.Write64(ppszPath, addr)
-		}
-		ctx.SetReturn(0) // S_OK
+		writeWideString(ctx.Mem, buf, path, len(utf16Encode(path))+1)
+		ctx.Mem.Write64(ppszPath, buf)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHCreateDirectoryExW", func(ctx *ntapi.TrapContext) uint32 {
@@ -7601,12 +8538,38 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0)
 		return 0
 	})
-	d.RegisterAutoStubHandler(shell32, "SHFileOperationA", func(ctx *ntapi.TrapContext) uint32 {
-		lpFileOp := ctx.Arg(0)
-		if lpFileOp != 0 {
-			ctx.Mem.Write32(lpFileOp+36, 0) // fAnyOperationsAborted = FALSE
+	d.RegisterAutoStubHandler(shell32, "CommandLineToArgvW", func(ctx *ntapi.TrapContext) uint32 {
+		cmdLine := readGuestUTF16(ctx.Arg(0))
+		pNumArgs := ctx.Arg(1)
+		args := parseCommandLine(cmdLine)
+		if len(args) == 0 {
+			args = []string{hctx.ImagePath}
 		}
-		ctx.SetReturn(0) // success
+		ptrAreaSize := uint64(len(args)+1) * 8
+		strAreaSize := uint64(0)
+		for _, a := range args {
+			strAreaSize += uint64((len(utf16Encode(a)) + 1) * 2)
+		}
+		page := mem.Mmap(0, ptrAreaSize+strAreaSize, mmu.PermRead|mmu.PermWrite)
+		strOff := page + ptrAreaSize
+		for i, arg := range args {
+			mem.Write64(page+uint64(i)*8, strOff)
+			chars := writeWideString(mem, strOff, arg, len(utf16Encode(arg))+1)
+			strOff += uint64(chars+1) * 2
+		}
+		mem.Write64(page+uint64(len(args))*8, 0)
+		if pNumArgs != 0 {
+			mem.Write32(pNumArgs, uint32(len(args)))
+		}
+		ctx.SetReturn(page)
+		return 0
+	})
+	d.RegisterAutoStubHandler(shell32, "SHFileOperationA", func(ctx *ntapi.TrapContext) uint32 {
+		if err := shFileOperationHost(ctx.Mem, ctx.Arg(0), false); err != nil {
+			ctx.SetReturn(1)
+			return 0
+		}
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "DragQueryFileW", func(ctx *ntapi.TrapContext) uint32 {
@@ -7621,69 +8584,156 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0 // no-op
 	})
 	d.RegisterAutoStubHandler(shell32, "ShellExecuteW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(42) // >32 means success
+		op := strings.ToLower(readGuestUTF16(ctx.Arg(1)))
+		file := readGuestUTF16(ctx.Arg(2))
+		params := readGuestUTF16(ctx.Arg(3))
+		dir := readGuestUTF16(ctx.Arg(4))
+		if op == "" {
+			op = "open"
+		}
+		target := file
+		if !strings.Contains(target, "://") {
+			target = winToLinuxPath(target)
+		}
+		if op != "open" {
+			ctx.SetReturn(31)
+			return 0
+		}
+		args := []string{target}
+		if params != "" {
+			args = append(args, parseCommandLine(params)...)
+		}
+		cmd := exec.Command("xdg-open", args...)
+		if dir != "" {
+			cmd.Dir = winToLinuxPath(dir)
+		}
+		if err := cmd.Start(); err != nil {
+			ctx.SetReturn(31)
+			return 0
+		}
+		ctx.SetReturn(33)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ShellExecuteA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(42) // >32 means success
+		op := strings.ToLower(readGuestString(ctx.Arg(1)))
+		file := readGuestString(ctx.Arg(2))
+		params := readGuestString(ctx.Arg(3))
+		dir := readGuestString(ctx.Arg(4))
+		if op == "" {
+			op = "open"
+		}
+		target := file
+		if !strings.Contains(target, "://") {
+			target = winToLinuxPath(target)
+		}
+		if op != "open" {
+			ctx.SetReturn(31)
+			return 0
+		}
+		args := []string{target}
+		if params != "" {
+			args = append(args, parseCommandLine(params)...)
+		}
+		cmd := exec.Command("xdg-open", args...)
+		if dir != "" {
+			cmd.Dir = winToLinuxPath(dir)
+		}
+		if err := cmd.Start(); err != nil {
+			ctx.SetReturn(31)
+			return 0
+		}
+		ctx.SetReturn(33)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHFileOperationW", func(ctx *ntapi.TrapContext) uint32 {
-		// Clear fAnyOperationsAborted in SHFILEOPSTRUCT (offset 36 = 0x24)
-		lpFileOp := ctx.Arg(0)
-		if lpFileOp != 0 {
-			ctx.Mem.Write32(lpFileOp+36, 0)
+		if err := shFileOperationHost(ctx.Mem, ctx.Arg(0), true); err != nil {
+			ctx.SetReturn(1)
+			return 0
 		}
-		ctx.SetReturn(0) // success
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHCreateItemFromParsingName", func(ctx *ntapi.TrapContext) uint32 {
+		pszPath := ctx.Arg(0)
+		riid := ctx.Arg(2)
 		ppv := ctx.Arg(3)
-		if ppv != 0 {
-			ctx.Mem.Write64(ppv, 0)
+		if ppv == 0 || riid == 0 {
+			ctx.SetReturn(E_POINTER)
+			return 0
 		}
-		ctx.SetReturn(0x80004001) // E_NOTIMPL
+		ctx.Mem.Write64(ppv, 0)
+		reqIID := readGUID(ctx.Mem, riid)
+		if !guidEqual(reqIID, IID_IShellFolder) && !guidEqual(reqIID, IID_IUnknown) {
+			ctx.SetReturn(E_NOINTERFACE)
+			return 0
+		}
+		path := readGuestUTF16(pszPath)
+		if path == "" {
+			path = csidlToPath(0)
+		}
+		obj, err := cs.createShellFolderObject(path)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppv, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetSpecialFolderPathW", func(ctx *ntapi.TrapContext) uint32 {
-		// BOOL SHGetSpecialFolderPathW(HWND hwnd, LPWSTR pszPath, int csidl, BOOL fCreate)
-		pszPath := ctx.Arg(1)
-		csidl := ctx.Arg(2)
-		path := csidlToPath(int32(csidl))
-		if pszPath != 0 {
-			for i, ch := range path {
-				ctx.Mem.Write16(pszPath+uint64(i*2), uint16(ch))
-			}
-			ctx.Mem.Write16(pszPath+uint64(len(path)*2), 0)
+		path := csidlToPath(int32(ctx.Arg(2)))
+		if ctx.Arg(3) != 0 {
+			_ = os.MkdirAll(winToLinuxPath(path), 0o755)
 		}
-		ctx.SetReturn(1) // TRUE
+		writeWideString(ctx.Mem, ctx.Arg(1), path, 260)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetSpecialFolderPathA", func(ctx *ntapi.TrapContext) uint32 {
-		pszPath := ctx.Arg(1)
-		csidl := ctx.Arg(2)
-		path := csidlToPath(int32(csidl))
-		if pszPath != 0 {
-			for i := 0; i < len(path); i++ {
-				ctx.Mem.Write8(pszPath+uint64(i), path[i])
-			}
-			ctx.Mem.Write8(pszPath+uint64(len(path)), 0)
+		path := csidlToPath(int32(ctx.Arg(2)))
+		if ctx.Arg(3) != 0 {
+			_ = os.MkdirAll(winToLinuxPath(path), 0o755)
 		}
-		ctx.SetReturn(1) // TRUE
+		writeAnsiString(ctx.Mem, ctx.Arg(1), path, 260)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFileInfoW", func(ctx *ntapi.TrapContext) uint32 {
-		// DWORD_PTR SHGetFileInfoW(LPCWSTR pszPath, DWORD dwFileAttributes,
-		//   SHFILEINFOW *psfi, UINT cbFileInfo, UINT uFlags)
+		pathStr := readGuestUTF16(ctx.Arg(0))
 		psfi := ctx.Arg(2)
 		cbFileInfo := ctx.Arg(3)
-		if psfi != 0 && cbFileInfo >= 4 {
-			// Zero the SHFILEINFOW struct (up to cbFileInfo bytes)
-			for i := uint64(0); i < cbFileInfo && i < 692; i++ {
+		if psfi != 0 && cbFileInfo > 0 {
+			for i := uint64(0); i < cbFileInfo && i < 696; i++ {
 				ctx.Mem.Write8(psfi+i, 0)
 			}
+			linuxPath := winToLinuxPath(pathStr)
+			info, err := os.Stat(linuxPath)
+			displayName := pathStr
+			if displayName == "" {
+				displayName = csidlToPath(0)
+			}
+			typeName := "File"
+			attrs := uint32(0x80)
+			iconIdx := uint32(0)
+			if err == nil {
+				base := filepath.Base(linuxPath)
+				if base != "." && base != "/" && base != "" {
+					displayName = base
+				}
+				if info.IsDir() {
+					typeName = "File Folder"
+					attrs = 0x10
+					iconIdx = 1
+				} else if ext := strings.ToLower(filepath.Ext(linuxPath)); ext != "" {
+					typeName = strings.ToUpper(strings.TrimPrefix(ext, ".")) + " File"
+				}
+			}
+			ctx.Mem.Write32(psfi+8, iconIdx)
+			ctx.Mem.Write32(psfi+12, attrs)
+			writeWideString(ctx.Mem, psfi+16, displayName, 260)
+			writeWideString(ctx.Mem, psfi+536, typeName, 80)
 		}
-		ctx.SetReturn(1) // non-zero = success
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFileInfoA", func(ctx *ntapi.TrapContext) uint32 {
@@ -7763,7 +8813,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] ArrangeWindows p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7775,7 +8826,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] CDefFolderMenu_Create p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7787,7 +8840,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] CDefFolderMenu_Create2 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -7819,7 +8874,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] CallCPLEntry16 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8070,7 +9127,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		if iFile == 0xFFFFFFFF {
 			ctx.SetReturn(0)
 		} else {
-			_ = lpszFile; _ = cch
+			_ = lpszFile
+			_ = cch
 			ctx.SetReturn(0)
 		}
 		return 0
@@ -8083,7 +9141,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] DragQueryFileAorW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8164,7 +9224,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] ExtractIconEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8175,7 +9236,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] ExtractIconResInfoA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8186,7 +9248,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] ExtractIconResInfoW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8226,9 +9289,12 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		lpDirectory := ctx.Arg(1)
 		lpResult := ctx.Arg(2)
 		var file string
-		if lpFile != 0 { file = readGuestUTF16(lpFile) }
+		if lpFile != 0 {
+			file = readGuestUTF16(lpFile)
+		}
 		ravelog.Logf("[shell32] FindExecutableA file=%q\n", file)
-		_ = lpDirectory; _ = lpResult
+		_ = lpDirectory
+		_ = lpResult
 		ctx.SetReturn(31) // SE_ERR_NOASSOC
 		return 0
 	})
@@ -8237,9 +9303,12 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		lpDirectory := ctx.Arg(1)
 		lpResult := ctx.Arg(2)
 		var file string
-		if lpFile != 0 { file = readGuestUTF16(lpFile) }
+		if lpFile != 0 {
+			file = readGuestUTF16(lpFile)
+		}
 		ravelog.Logf("[shell32] FindExecutableW file=%q\n", file)
-		_ = lpDirectory; _ = lpResult
+		_ = lpDirectory
+		_ = lpResult
 		ctx.SetReturn(31) // SE_ERR_NOASSOC
 		return 0
 	})
@@ -8288,7 +9357,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] GetFileNameFromBrowse p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8419,7 +9490,10 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		pidl1 := ctx.Arg(0)
 		pidl2 := ctx.Arg(1)
 		ravelog.Logf("[shell32] ILIsEqual pidl1=0x%x pidl2=0x%x\n", pidl1, pidl2)
-		eq := uint64(0); if pidl1 == pidl2 { eq = 1 }
+		eq := uint64(0)
+		if pidl1 == pidl2 {
+			eq = 1
+		}
 		ctx.SetReturn(eq)
 		return 0
 	})
@@ -8441,7 +9515,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shell32, "ILRemoveLastID", func(ctx *ntapi.TrapContext) uint32 {
 		pidl := ctx.Arg(0)
 		ravelog.Logf("[shell32] ILRemoveLastID pidl=0x%x\n", pidl)
-		if pidl != 0 { ctx.Mem.Write16(pidl, 0) } // make it empty
+		if pidl != 0 {
+			ctx.Mem.Write16(pidl, 0)
+		} // make it empty
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -8460,7 +9536,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] Int64ToString p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8528,7 +9606,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] LargeIntegerToString p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8579,7 +9659,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] NTSHChangeNotifyRegister p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8849,7 +9931,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] PathMakeUniqueName p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8980,7 +10063,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] PifMgr_GetProperties p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9001,7 +10085,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] PifMgr_SetProperties p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9111,7 +10196,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] RealShellExecuteA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(42)
 		return 0
 	})
@@ -9123,7 +10210,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] RealShellExecuteExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(42)
 		return 0
 	})
@@ -9135,7 +10224,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] RealShellExecuteExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(42)
 		return 0
 	})
@@ -9147,7 +10238,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] RealShellExecuteW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(42)
 		return 0
 	})
@@ -9190,7 +10283,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] RunDll_CallEntry16 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9202,7 +10296,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] RunFileDlg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9260,15 +10356,11 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHBrowseForFolderA", func(ctx *ntapi.TrapContext) uint32 {
-		lpbi := ctx.Arg(0)
-		ravelog.Logf("[shell32] SHBrowseForFolderA info=0x%x\n", lpbi)
-		ctx.SetReturn(0) // NULL = user cancelled
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHBrowseForFolderW", func(ctx *ntapi.TrapContext) uint32 {
-		lpbi := ctx.Arg(0)
-		ravelog.Logf("[shell32] SHBrowseForFolderW info=0x%x\n", lpbi)
-		ctx.SetReturn(0) // NULL = user cancelled
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHCLSIDFromString", func(ctx *ntapi.TrapContext) uint32 {
@@ -9300,7 +10392,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		dwItem1 := ctx.Arg(2)
 		dwItem2 := ctx.Arg(3)
 		ravelog.Logf("[shell32] SHChangeNotify event=0x%x flags=0x%x\n", wEventId, uFlags)
-		_ = dwItem1; _ = dwItem2
+		_ = dwItem1
+		_ = dwItem2
 		ctx.SetReturn(0) // void
 		return 0
 	})
@@ -9328,7 +10421,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHChangeNotifyRegister p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9374,7 +10469,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHCoCreateInstance p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9395,7 +10491,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHCreateDefClassObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9419,7 +10516,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHCreateFileDataObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9440,7 +10538,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHCreateLinks p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9528,7 +10627,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHDefExtractIconA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9540,7 +10641,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHDefExtractIconW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9571,7 +10674,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHDoDragDrop p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9609,7 +10713,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHExtractIconsW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -9720,7 +10826,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHGetDataFromIDListA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9731,15 +10838,25 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHGetDataFromIDListW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetDesktopFolder", func(ctx *ntapi.TrapContext) uint32 {
 		ppshf := ctx.Arg(0)
-		ravelog.Logf("[shell32] SHGetDesktopFolder out=0x%x\n", ppshf)
-		if ppshf != 0 { ctx.Mem.Write64(ppshf, 0) }
-		ctx.SetReturn(0x80004005) // E_FAIL - no COM support yet
+		if ppshf == 0 {
+			ctx.SetReturn(E_POINTER)
+			return 0
+		}
+		ctx.Mem.Write64(ppshf, 0)
+		obj, err := cs.createShellFolderObject(csidlToPath(0))
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppshf, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetDiskFreeSpaceA", func(ctx *ntapi.TrapContext) uint32 {
@@ -9779,7 +10896,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHGetFileInfo p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9789,7 +10907,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		hToken := ctx.Arg(2)
 		dwReserved := ctx.Arg(3)
 		ppidl := ctx.Arg(4)
-		_ = hwndOwner; _ = hToken; _ = dwReserved
+		_ = hwndOwner
+		_ = hToken
+		_ = dwReserved
 		ravelog.Logf("[shell32] SHGetFolderLocation folder=0x%x\n", nFolder)
 		if ppidl != 0 {
 			pidl := sharedHeapAlloc(4, true)
@@ -9800,54 +10920,30 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathA", func(ctx *ntapi.TrapContext) uint32 {
-		hwnd := ctx.Arg(0)
-		nFolder := ctx.Arg(1)
-		hToken := ctx.Arg(2)
-		dwFlags := ctx.Arg(3)
-		pszPath := ctx.Arg(4)
-		_ = hwnd; _ = hToken; _ = dwFlags
-		ravelog.Logf("[shell32] SHGetFolderPathA folder=0x%x path=0x%x\n", nFolder, pszPath)
-		path := "C:\\Users\\User"
-		switch nFolder & 0xFF {
-		case 0x001A: path = "C:\\Users\\User\\AppData\\Roaming"
-		case 0x001C: path = "C:\\Users\\User\\AppData\\Local"
-		case 0x0005: path = "C:\\Users\\User\\Documents"
-		case 0x0024: path = "C:\\Windows"
-		case 0x0025: path = "C:\\Windows\\system32"
-		case 0x0026: path = "C:\\Program Files"
-		case 0x0000: path = "C:\\Users\\User\\Desktop"
-		}
-		if pszPath != 0 {
-			for i := 0; i < len(path); i++ {
-				ctx.Mem.Write8(pszPath+uint64(i), path[i])
-			}
-			ctx.Mem.Write8(pszPath+uint64(len(path)), 0)
-		}
-		ctx.SetReturn(0) // S_OK
+		writeAnsiString(ctx.Mem, ctx.Arg(4), csidlToPath(int32(ctx.Arg(1))), 260)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathAndSubDirA", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[shell32] SHGetFolderPathAndSubDirA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
-		ctx.SetReturn(0)
+		base := csidlToPath(int32(ctx.Arg(1)))
+		subDir := readGuestString(ctx.Arg(4))
+		full := base
+		if subDir != "" {
+			full = canonicalizeWinPath(base + `\` + subDir)
+		}
+		writeAnsiString(ctx.Mem, ctx.Arg(5), full, 260)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathAndSubDirW", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[shell32] SHGetFolderPathAndSubDirW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
-		ctx.SetReturn(0)
+		base := csidlToPath(int32(ctx.Arg(1)))
+		subDir := readGuestUTF16(ctx.Arg(4))
+		full := base
+		if subDir != "" {
+			full = canonicalizeWinPath(base + `\` + subDir)
+		}
+		writeWideString(ctx.Mem, ctx.Arg(5), full, 260)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetIconOverlayIndexA", func(ctx *ntapi.TrapContext) uint32 {
@@ -9875,14 +10971,18 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(shell32, "SHGetInstanceExplorer", func(ctx *ntapi.TrapContext) uint32 {
 		ppunk := ctx.Arg(0)
 		ravelog.Logf("[shell32] SHGetInstanceExplorer out=0x%x\n", ppunk)
-		if ppunk != 0 { ctx.Mem.Write64(ppunk, 0) }
+		if ppunk != 0 {
+			ctx.Mem.Write64(ppunk, 0)
+		}
 		ctx.SetReturn(0x80004005) // E_FAIL
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetMalloc", func(ctx *ntapi.TrapContext) uint32 {
 		ppMalloc := ctx.Arg(0)
 		ravelog.Logf("[shell32] SHGetMalloc out=0x%x\n", ppMalloc)
-		if ppMalloc != 0 { ctx.Mem.Write64(ppMalloc, 0) }
+		if ppMalloc != 0 {
+			ctx.Mem.Write64(ppMalloc, 0)
+		}
 		ctx.SetReturn(0) // S_OK
 		return 0
 	})
@@ -9903,7 +11003,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHGetNewLinkInfo p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9914,7 +11015,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHGetNewLinkInfoA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9925,47 +11027,47 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		pfMustCopy := ctx.Arg(3)
 		uFlags := ctx.Arg(4)
 		var linkTo string
-		if pszLinkTo != 0 { linkTo = readGuestUTF16(pszLinkTo) }
+		if pszLinkTo != 0 {
+			linkTo = readGuestUTF16(pszLinkTo)
+		}
 		ravelog.Logf("[shell32] SHGetNewLinkInfoW linkTo=%q\n", linkTo)
-		_ = pszDir; _ = pszName; _ = uFlags
-		if pfMustCopy != 0 { ctx.Mem.Write32(pfMustCopy, 0) }
+		_ = pszDir
+		_ = pszName
+		_ = uFlags
+		if pfMustCopy != 0 {
+			ctx.Mem.Write32(pfMustCopy, 0)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetPathFromIDList", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[shell32] SHGetPathFromIDList p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		path := pidlPathFromMemory(ctx.Mem, ctx.Arg(0))
+		if path == "" {
+			ctx.SetReturn(0)
+			return 0
+		}
+		writeAnsiString(ctx.Mem, ctx.Arg(1), path, 260)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetPathFromIDListA", func(ctx *ntapi.TrapContext) uint32 {
-		pidl := ctx.Arg(0)
-		pszPath := ctx.Arg(1)
-		ravelog.Logf("[shell32] SHGetPathFromIDListA pidl=0x%x path=0x%x\n", pidl, pszPath)
-		defaultPath := "C:\\Users\\User\\Desktop"
-		if pszPath != 0 {
-			for i := 0; i < len(defaultPath); i++ {
-				ctx.Mem.Write8(pszPath+uint64(i), defaultPath[i])
-			}
-			ctx.Mem.Write8(pszPath+uint64(len(defaultPath)), 0)
+		path := pidlPathFromMemory(ctx.Mem, ctx.Arg(0))
+		if path == "" {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(1) // TRUE
+		writeAnsiString(ctx.Mem, ctx.Arg(1), path, 260)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetPathFromIDListW", func(ctx *ntapi.TrapContext) uint32 {
-		pidl := ctx.Arg(0)
-		pszPath := ctx.Arg(1)
-		ravelog.Logf("[shell32] SHGetPathFromIDListW pidl=0x%x path=0x%x\n", pidl, pszPath)
-		// Return a default path since we don't have real PIDLs
-		defaultPath := "C:\\Users\\User\\Desktop"
-		if pszPath != 0 {
-			for i, ch := range defaultPath {
-				ctx.Mem.Write16(pszPath+uint64(i*2), uint16(ch))
-			}
-			ctx.Mem.Write16(pszPath+uint64(len(defaultPath)*2), 0)
+		path := pidlPathFromMemory(ctx.Mem, ctx.Arg(0))
+		if path == "" {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(1) // TRUE
+		writeWideString(ctx.Mem, ctx.Arg(1), path, 260)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetProcessDword", func(ctx *ntapi.TrapContext) uint32 {
@@ -10011,7 +11113,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		lpsfs := ctx.Arg(0)
 		dwMask := ctx.Arg(1)
 		ravelog.Logf("[shell32] SHGetSettings flags=0x%x mask=0x%x\n", lpsfs, dwMask)
-		if lpsfs != 0 { ctx.Mem.Write32(lpsfs, 0) }
+		if lpsfs != 0 {
+			ctx.Mem.Write32(lpsfs, 0)
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -10022,18 +11126,18 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetSpecialFolderLocation", func(ctx *ntapi.TrapContext) uint32 {
-		hwnd := ctx.Arg(0)
-		csidl := ctx.Arg(1)
 		ppidl := ctx.Arg(2)
-		_ = hwnd
-		ravelog.Logf("[shell32] SHGetSpecialFolderLocation csidl=0x%x out=0x%x\n", csidl, ppidl)
-		// Return a minimal PIDL (2 bytes: size=0 = terminator)
-		if ppidl != 0 {
-			pidl := sharedHeapAlloc(4, true)
-			ctx.Mem.Write16(pidl, 0) // empty PIDL terminator
-			ctx.Mem.Write64(ppidl, pidl)
+		if ppidl == 0 {
+			ctx.SetReturn(E_POINTER)
+			return 0
 		}
-		ctx.SetReturn(0) // S_OK
+		pidl := allocPIDLFromPath(ctx.Mem, sharedHeapAlloc, csidlToPath(int32(ctx.Arg(1))))
+		if pidl == 0 {
+			ctx.SetReturn(E_OUTOFMEMORY)
+			return 0
+		}
+		ctx.Mem.Write64(ppidl, pidl)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetSpecialFolderPath", func(ctx *ntapi.TrapContext) uint32 {
@@ -10054,7 +11158,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHGetUnreadMailCountW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -10143,7 +11249,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHInvokePrinterCommandA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -10154,7 +11261,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHInvokePrinterCommandW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -10253,7 +11361,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHMapIDListToImageListIndexAsync p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -10314,7 +11424,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHOpenPropSheetA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -10326,7 +11438,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHOpenPropSheetW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -10346,22 +11460,26 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHParseDisplayName", func(ctx *ntapi.TrapContext) uint32 {
-		pszName := ctx.Arg(0)
-		pbc := ctx.Arg(1)
-		ppidl := ctx.Arg(2)
-		sfgaoIn := ctx.Arg(3)
-		psfgaoOut := ctx.Arg(4)
-		var name string
-		if pszName != 0 { name = readGuestUTF16(pszName) }
-		ravelog.Logf("[shell32] SHParseDisplayName name=%q\n", name)
-		_ = pbc; _ = sfgaoIn
-		if ppidl != 0 {
-			pidl := sharedHeapAlloc(4, true)
-			ctx.Mem.Write16(pidl, 0) // empty PIDL
-			ctx.Mem.Write64(ppidl, pidl)
+		name := readGuestUTF16(ctx.Arg(0))
+		if !isAbsoluteWinPath(name) {
+			name = canonicalizeWinPath(csidlToPath(0) + `\` + name)
 		}
-		if psfgaoOut != 0 { ctx.Mem.Write32(psfgaoOut, 0) }
-		ctx.SetReturn(0) // S_OK
+		if ctx.Arg(2) != 0 {
+			pidl := allocPIDLFromPath(ctx.Mem, sharedHeapAlloc, name)
+			if pidl == 0 {
+				ctx.SetReturn(E_OUTOFMEMORY)
+				return 0
+			}
+			ctx.Mem.Write64(ctx.Arg(2), pidl)
+		}
+		if ctx.Arg(4) != 0 {
+			attrs := uint32(0)
+			if info, err := os.Stat(winToLinuxPath(name)); err == nil && info.IsDir() {
+				attrs = 0x10
+			}
+			ctx.Mem.Write32(ctx.Arg(4), attrs)
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHPathPrepareForWriteA", func(ctx *ntapi.TrapContext) uint32 {
@@ -10392,7 +11510,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHPropStgCreate p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -10403,7 +11523,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] SHPropStgReadMultiple p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -10415,7 +11536,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] SHPropStgWriteMultiple p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -10786,9 +11909,13 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		szOtherStuff := ctx.Arg(2)
 		hIcon := ctx.Arg(3)
 		var app string
-		if szApp != 0 { app = readGuestUTF16(szApp) }
+		if szApp != 0 {
+			app = readGuestUTF16(szApp)
+		}
 		ravelog.Logf("[shell32] ShellAboutA app=%q\n", app)
-		_ = hwnd; _ = szOtherStuff; _ = hIcon
+		_ = hwnd
+		_ = szOtherStuff
+		_ = hIcon
 		ctx.SetReturn(1) // TRUE - dialog shown
 		return 0
 	})
@@ -10849,7 +11976,8 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[shell32] ShellMessageBoxA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -10881,7 +12009,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] Shell_MergeMenus p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -11154,7 +12284,9 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[shell32] WOWShellExecute p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})

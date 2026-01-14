@@ -3,7 +3,13 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -25,11 +31,74 @@ const (
 	REGDB_E_CLASSNOTREG       = 0x80040154
 	CO_E_CLASSSTRING          = 0x800401F3
 	RPC_E_CHANGED_MODE        = 0x80010106
+	STG_E_INVALIDFUNCTION     = 0x80030001
+	STG_E_FILENOTFOUND        = 0x80030002
+	STG_E_PATHNOTFOUND        = 0x80030003
+	STG_E_ACCESSDENIED        = 0x80030005
+	STG_E_INVALIDPOINTER      = 0x80030009
+	STG_E_NOMOREFILES         = 0x80030012
+	STG_E_FILEALREADYEXISTS   = 0x80030050
+	STG_E_INVALIDNAME         = 0x800300FC
+	STG_E_REVERTED            = 0x80030102
 
 	COINIT_MULTITHREADED     = 0x0
 	COINIT_APARTMENTTHREADED = 0x2
 
+	STGM_READ            = 0x00000000
+	STGM_WRITE           = 0x00000001
+	STGM_READWRITE       = 0x00000002
+	STGM_SHARE_EXCLUSIVE = 0x00000010
+	STGM_SHARE_DENY_NONE = 0x00000040
+	STGM_CREATE          = 0x00001000
+	STGM_DELETEONRELEASE = 0x04000000
+
+	STATFLAG_NONAME = 0x00000001
+
+	STGTY_STORAGE   = 1
+	STGTY_STREAM    = 2
+	STGTY_LOCKBYTES = 3
+
 	comTrapIDBase = 0x10000000
+	variantSize   = 24
+
+	FADF_HAVEVARTYPE = 0x0080
+
+	VARIANT_FALSE = 0x0000
+	VARIANT_TRUE  = 0xFFFF
+
+	DISP_E_MEMBERNOTFOUND = 0x80020003
+	DISP_E_PARAMNOTFOUND  = 0x80020004
+	DISP_E_TYPEMISMATCH   = 0x80020005
+	DISP_E_UNKNOWNNAME    = 0x80020006
+	DISP_E_EXCEPTION      = 0x80020009
+	DISP_E_BADPARAMCOUNT  = 0x8002000E
+
+	VT_EMPTY    = 0
+	VT_NULL     = 1
+	VT_I2       = 2
+	VT_I4       = 3
+	VT_R4       = 4
+	VT_R8       = 5
+	VT_BSTR     = 8
+	VT_DISPATCH = 9
+	VT_ERROR    = 10
+	VT_BOOL     = 11
+	VT_VARIANT  = 12
+	VT_UNKNOWN  = 13
+	VT_I1       = 16
+	VT_UI1      = 17
+	VT_UI2      = 18
+	VT_UI4      = 19
+	VT_I8       = 20
+	VT_UI8      = 21
+	VT_INT      = 22
+	VT_UINT     = 23
+	VT_HRESULT  = 25
+	VT_PTR      = 26
+	VT_LPSTR    = 30
+	VT_LPWSTR   = 31
+	VT_ARRAY    = 0x2000
+	VT_BYREF    = 0x4000
 )
 
 type GUID struct {
@@ -40,13 +109,27 @@ type GUID struct {
 }
 
 var (
-	IID_IUnknown      = GUID{0x00000000, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IClassFactory = GUID{0x00000001, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IDispatch     = GUID{0x00020400, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IMalloc       = GUID{0x00000002, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IStream       = GUID{0x0000000C, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IUnknown         = GUID{0x00000000, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IClassFactory    = GUID{0x00000001, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IMalloc          = GUID{0x00000002, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IDispatch        = GUID{0x00020400, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_ILockBytes       = GUID{0x0000000A, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IStorage         = GUID{0x0000000B, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IStream          = GUID{0x0000000C, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IEnumSTATSTG     = GUID{0x0000000D, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IPersist         = GUID{0x0000010C, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IPersistFile     = GUID{0x0000010B, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IEnumIDList      = GUID{0x000214F2, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IShellFolder     = GUID{0x000214E6, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IShellLinkA      = GUID{0x000214EE, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IShellLinkW      = GUID{0x000214F9, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IErrorInfo       = GUID{0x1CF2B120, 0x547D, 0x101B, [8]byte{0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19}}
+	IID_ICreateErrorInfo = GUID{0x22F03340, 0x547D, 0x101B, [8]byte{0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19}}
+	IID_ITypeInfo        = GUID{0x00020401, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_ITypeLib         = GUID{0x00020402, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
 
 	CLSID_StdComponentCategoriesMgr = GUID{0x0002E005, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	CLSID_ShellLink                 = GUID{0x00021401, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
 )
 
 type hresultError uint32
@@ -63,6 +146,7 @@ type comObject struct {
 	objectAddr    uint64
 	kind          string
 	supportedIIDs map[GUID]bool
+	altInterfaces map[GUID]uint64
 	data          interface{}
 }
 
@@ -71,11 +155,123 @@ type classFactory struct {
 	create func(iid GUID) (*comObject, error)
 }
 
+type safeArrayBound struct {
+	cElements uint32
+	lLbound   int32
+}
+
+type safeArrayInfo struct {
+	addr       uint64
+	vt         uint16
+	cDims      uint16
+	fFeatures  uint16
+	cbElements uint32
+	cLocks     uint32
+	pvData     uint64
+	bounds     []safeArrayBound
+	iid        GUID
+	recordInfo uint64
+}
+
+type typeInfoData struct {
+	lcid     uint32
+	nextID   int32
+	names    map[string]int32
+	dispToID map[int32]string
+}
+
+type stdDispatchData struct {
+	instance uint64
+	typeInfo uint64
+}
+
+type errorInfoData struct {
+	peer        uint64
+	guid        GUID
+	source      string
+	description string
+	helpFile    string
+	helpContext uint32
+}
+
+type typeLibData struct {
+	path string
+}
+
 type registeredClassObject struct {
 	clsid        GUID
 	unkPtr       uint64
 	dwClsContext uint32
 	flags        uint32
+}
+
+type shellLinkData struct {
+	path         string
+	description  string
+	workingDir   string
+	arguments    string
+	iconLocation string
+	iconIndex    int32
+	showCmd      int32
+	hotkey       uint16
+	currentFile  string
+	dirty        bool
+}
+
+type shellFolderData struct {
+	path string
+}
+
+type enumIDListData struct {
+	items []string
+	index int
+}
+
+type memoryBuffer struct {
+	data            []byte
+	hglobal         uint64
+	deleteOnRelease bool
+	refs            int32
+}
+
+type memStream struct {
+	buffer *memoryBuffer
+	pos    int64
+	name   string
+}
+
+type fileStream struct {
+	path    string
+	file    *os.File
+	pos     int64
+	name    string
+	grfMode uint32
+}
+
+type lockBytes struct {
+	buffer *memoryBuffer
+}
+
+type dirStorage struct {
+	path            string
+	name            string
+	grfMode         uint32
+	deleteOnRelease bool
+	clsid           GUID
+	stateBits       uint32
+}
+
+type statStgEntry struct {
+	name    string
+	stgType uint32
+	size    uint64
+	modTime time.Time
+	clsid   GUID
+}
+
+type enumSTATSTG struct {
+	entries []statStgEntry
+	index   int
 }
 
 type comState struct {
@@ -90,12 +286,14 @@ type comState struct {
 	nextTrapID          uint32
 	taskAllocs          map[uint64]uint64
 	bstrAllocs          map[uint64]uint64
+	safeArrays          map[uint64]*safeArrayInfo
 	mem                 *mmu.MMU
 	disp                *ntapi.Dispatcher
 	heapAlloc           func(uint64, bool) uint64
 	heapFree            func(uint64)
 	regHive             *ntapi.RegistryHive
 	progIDs             map[string]GUID
+	errorInfo           uint64
 }
 
 func newCOMState(hctx *HandlerCtx) *comState {
@@ -108,6 +306,7 @@ func newCOMState(hctx *HandlerCtx) *comState {
 		nextTrapID:          comTrapIDBase,
 		taskAllocs:          make(map[uint64]uint64),
 		bstrAllocs:          make(map[uint64]uint64),
+		safeArrays:          make(map[uint64]*safeArrayInfo),
 		mem:                 hctx.Mem,
 		disp:                hctx.Disp,
 		heapAlloc:           hctx.HeapAlloc,
@@ -137,6 +336,12 @@ func newCOMState(hctx *HandlerCtx) *comState {
 				obj.supportedIIDs[IID_IDispatch] = true
 			}
 			return obj, nil
+		},
+	}
+	cs.classFactories[CLSID_ShellLink] = &classFactory{
+		clsid: CLSID_ShellLink,
+		create: func(iid GUID) (*comObject, error) {
+			return cs.createShellLinkObjects(iid)
 		},
 	}
 	return cs
@@ -210,6 +415,745 @@ func decodeUTF16LEString(data []byte) string {
 	return sb.String()
 }
 
+func readBSTRString(mem *mmu.MMU, bstr uint64) string {
+	if bstr == 0 {
+		return ""
+	}
+	byteLen, err := mem.Read32(bstr - 4)
+	if err != nil || byteLen == 0 {
+		return ""
+	}
+	data, err := mem.ReadBytes(bstr, int(byteLen))
+	if err != nil {
+		return ""
+	}
+	return decodeUTF16LEString(data)
+}
+
+func writeUTF16Buffer(mem *mmu.MMU, addr uint64, s string) {
+	ws := utf16Encode(s)
+	for i, w := range ws {
+		mem.Write16(addr+uint64(i)*2, w)
+	}
+	mem.Write16(addr+uint64(len(ws))*2, 0)
+}
+
+func (cs *comState) allocBSTRString(s string) uint64 {
+	ws := utf16Encode(s)
+	base := cs.heapAlloc(4+uint64(len(ws))*2+2, true)
+	if base == 0 {
+		return 0
+	}
+	cs.mem.Write32(base, uint32(len(ws)*2))
+	for i, w := range ws {
+		cs.mem.Write16(base+4+uint64(i)*2, w)
+	}
+	cs.mem.Write16(base+4+uint64(len(ws))*2, 0)
+	bstr := base + 4
+	cs.bstrAllocs[bstr] = base
+	return bstr
+}
+
+func readVariantType(mem *mmu.MMU, addr uint64) uint16 {
+	vt, _ := mem.Read16(addr)
+	return vt
+}
+
+func readVariantValue(mem *mmu.MMU, addr uint64) uint64 {
+	val, _ := mem.Read64(addr + 8)
+	return val
+}
+
+func writeVariantEmpty(mem *mmu.MMU, addr uint64) {
+	mem.WriteBytes(addr, make([]byte, variantSize))
+}
+
+func writeVariantScalar(mem *mmu.MMU, addr uint64, vt uint16, value uint64) {
+	writeVariantEmpty(mem, addr)
+	mem.Write16(addr, vt)
+	mem.Write64(addr+8, value)
+}
+
+func variantBaseType(vt uint16) uint16 {
+	return vt &^ (VT_ARRAY | VT_BYREF)
+}
+
+func variantElementType(vt uint16) uint16 {
+	return vt &^ VT_BYREF
+}
+
+func vartypeElemSize(vt uint16) uint32 {
+	switch vt &^ (VT_ARRAY | VT_BYREF) {
+	case VT_I1, VT_UI1:
+		return 1
+	case VT_I2, VT_UI2, VT_BOOL:
+		return 2
+	case VT_I4, VT_UI4, VT_INT, VT_UINT, VT_R4, VT_ERROR, VT_HRESULT:
+		return 4
+	case VT_VARIANT:
+		return variantSize
+	default:
+		return 8
+	}
+}
+
+func signExtend32(v uint32) int64 {
+	return int64(int32(v))
+}
+
+func boolToVariantBool(v bool) uint16 {
+	if v {
+		return VARIANT_TRUE
+	}
+	return VARIANT_FALSE
+}
+
+func normalizeBoolString(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+func oleVariantTimeToTime(v float64) time.Time {
+	base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+	days := int64(v)
+	frac := v - float64(days)
+	if frac < 0 {
+		days--
+		frac = v - float64(days)
+	}
+	return base.AddDate(0, 0, int(days)).Add(time.Duration(frac * 24 * float64(time.Hour)))
+}
+
+func timeToOleVariantTime(t time.Time) float64 {
+	base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+	return t.Sub(base).Hours() / 24
+}
+
+func readFloat64(mem *mmu.MMU, addr uint64) float64 {
+	u, _ := mem.Read64(addr)
+	return math.Float64frombits(u)
+}
+
+func writeFloat64(mem *mmu.MMU, addr uint64, value float64) {
+	mem.Write64(addr, math.Float64bits(value))
+}
+
+func readFloat32(mem *mmu.MMU, addr uint64) float32 {
+	u, _ := mem.Read32(addr)
+	return math.Float32frombits(u)
+}
+
+func (cs *comState) addRefPtr(ptr uint64) {
+	if obj := cs.objects[ptr]; obj != nil {
+		cs.addRef(obj)
+	}
+}
+
+func (cs *comState) releasePtr(ptr uint64) {
+	if obj := cs.objects[ptr]; obj != nil {
+		cs.release(obj)
+	}
+}
+
+func (cs *comState) copyBytes(dst, src uint64, size uint32) {
+	if size == 0 {
+		return
+	}
+	data, err := cs.mem.ReadBytes(src, int(size))
+	if err != nil {
+		return
+	}
+	cs.mem.WriteBytes(dst, data)
+}
+
+func (cs *comState) variantToString(addr uint64) (string, bool) {
+	vt := readVariantType(cs.mem, addr)
+	if vt&VT_BYREF != 0 {
+		ptr := readVariantValue(cs.mem, addr)
+		switch variantBaseType(vt) {
+		case VT_BSTR:
+			val, _ := cs.mem.Read64(ptr)
+			return readBSTRString(cs.mem, val), true
+		case VT_I4, VT_INT:
+			v, _ := cs.mem.Read32(ptr)
+			return strconv.FormatInt(signExtend32(v), 10), true
+		case VT_R8:
+			return strconv.FormatFloat(readFloat64(cs.mem, ptr), 'f', -1, 64), true
+		case VT_BOOL:
+			v, _ := cs.mem.Read16(ptr)
+			return strconv.FormatBool(v != 0), true
+		}
+	}
+	switch variantBaseType(vt) {
+	case VT_EMPTY:
+		return "", true
+	case VT_BSTR:
+		return readBSTRString(cs.mem, readVariantValue(cs.mem, addr)), true
+	case VT_I1:
+		return strconv.FormatInt(int64(int8(readVariantValue(cs.mem, addr))), 10), true
+	case VT_UI1:
+		return strconv.FormatUint(uint64(uint8(readVariantValue(cs.mem, addr))), 10), true
+	case VT_I2:
+		return strconv.FormatInt(int64(int16(readVariantValue(cs.mem, addr))), 10), true
+	case VT_UI2:
+		return strconv.FormatUint(uint64(uint16(readVariantValue(cs.mem, addr))), 10), true
+	case VT_I4, VT_INT:
+		return strconv.FormatInt(int64(int32(readVariantValue(cs.mem, addr))), 10), true
+	case VT_UI4, VT_UINT:
+		return strconv.FormatUint(uint64(uint32(readVariantValue(cs.mem, addr))), 10), true
+	case VT_I8:
+		return strconv.FormatInt(int64(readVariantValue(cs.mem, addr)), 10), true
+	case VT_UI8:
+		return strconv.FormatUint(readVariantValue(cs.mem, addr), 10), true
+	case VT_R4:
+		return strconv.FormatFloat(float64(math.Float32frombits(uint32(readVariantValue(cs.mem, addr)))), 'f', -1, 32), true
+	case VT_R8:
+		return strconv.FormatFloat(math.Float64frombits(readVariantValue(cs.mem, addr)), 'f', -1, 64), true
+	case VT_BOOL:
+		return strconv.FormatBool(uint16(readVariantValue(cs.mem, addr)) != 0), true
+	}
+	return "", false
+}
+
+func (cs *comState) variantToInt64(addr uint64) (int64, bool) {
+	vt := readVariantType(cs.mem, addr)
+	if vt&VT_BYREF != 0 {
+		ptr := readVariantValue(cs.mem, addr)
+		switch variantBaseType(vt) {
+		case VT_I4, VT_INT:
+			v, _ := cs.mem.Read32(ptr)
+			return int64(int32(v)), true
+		case VT_I8:
+			v, _ := cs.mem.Read64(ptr)
+			return int64(v), true
+		case VT_UI4, VT_UINT:
+			v, _ := cs.mem.Read32(ptr)
+			return int64(v), true
+		case VT_BOOL:
+			v, _ := cs.mem.Read16(ptr)
+			if v != 0 {
+				return -1, true
+			}
+			return 0, true
+		}
+	}
+	switch variantBaseType(vt) {
+	case VT_EMPTY:
+		return 0, true
+	case VT_I1:
+		return int64(int8(readVariantValue(cs.mem, addr))), true
+	case VT_UI1:
+		return int64(uint8(readVariantValue(cs.mem, addr))), true
+	case VT_I2:
+		return int64(int16(readVariantValue(cs.mem, addr))), true
+	case VT_UI2:
+		return int64(uint16(readVariantValue(cs.mem, addr))), true
+	case VT_I4, VT_INT:
+		return int64(int32(readVariantValue(cs.mem, addr))), true
+	case VT_UI4, VT_UINT:
+		return int64(uint32(readVariantValue(cs.mem, addr))), true
+	case VT_I8:
+		return int64(readVariantValue(cs.mem, addr)), true
+	case VT_UI8:
+		return int64(readVariantValue(cs.mem, addr)), true
+	case VT_R4:
+		return int64(math.Float32frombits(uint32(readVariantValue(cs.mem, addr)))), true
+	case VT_R8:
+		return int64(math.Float64frombits(readVariantValue(cs.mem, addr))), true
+	case VT_BOOL:
+		if uint16(readVariantValue(cs.mem, addr)) != 0 {
+			return -1, true
+		}
+		return 0, true
+	case VT_BSTR:
+		n, err := strconv.ParseInt(strings.TrimSpace(readBSTRString(cs.mem, readVariantValue(cs.mem, addr))), 10, 64)
+		return n, err == nil
+	}
+	return 0, false
+}
+
+func (cs *comState) variantToFloat64(addr uint64) (float64, bool) {
+	vt := readVariantType(cs.mem, addr)
+	if vt&VT_BYREF != 0 {
+		ptr := readVariantValue(cs.mem, addr)
+		switch variantBaseType(vt) {
+		case VT_R8:
+			return readFloat64(cs.mem, ptr), true
+		case VT_R4:
+			return float64(readFloat32(cs.mem, ptr)), true
+		case VT_I4, VT_INT:
+			v, _ := cs.mem.Read32(ptr)
+			return float64(int32(v)), true
+		}
+	}
+	switch variantBaseType(vt) {
+	case VT_EMPTY:
+		return 0, true
+	case VT_R4:
+		return float64(math.Float32frombits(uint32(readVariantValue(cs.mem, addr)))), true
+	case VT_R8:
+		return math.Float64frombits(readVariantValue(cs.mem, addr)), true
+	case VT_I1:
+		return float64(int8(readVariantValue(cs.mem, addr))), true
+	case VT_UI1:
+		return float64(uint8(readVariantValue(cs.mem, addr))), true
+	case VT_I2:
+		return float64(int16(readVariantValue(cs.mem, addr))), true
+	case VT_UI2:
+		return float64(uint16(readVariantValue(cs.mem, addr))), true
+	case VT_I4, VT_INT:
+		return float64(int32(readVariantValue(cs.mem, addr))), true
+	case VT_UI4, VT_UINT:
+		return float64(uint32(readVariantValue(cs.mem, addr))), true
+	case VT_I8:
+		return float64(int64(readVariantValue(cs.mem, addr))), true
+	case VT_UI8:
+		return float64(readVariantValue(cs.mem, addr)), true
+	case VT_BOOL:
+		if uint16(readVariantValue(cs.mem, addr)) != 0 {
+			return -1, true
+		}
+		return 0, true
+	case VT_BSTR:
+		f, err := strconv.ParseFloat(strings.TrimSpace(readBSTRString(cs.mem, readVariantValue(cs.mem, addr))), 64)
+		return f, err == nil
+	}
+	return 0, false
+}
+
+func (cs *comState) variantToBool(addr uint64) (bool, bool) {
+	vt := readVariantType(cs.mem, addr)
+	if vt&VT_BYREF != 0 {
+		ptr := readVariantValue(cs.mem, addr)
+		switch variantBaseType(vt) {
+		case VT_BOOL:
+			v, _ := cs.mem.Read16(ptr)
+			return v != 0, true
+		case VT_I4, VT_INT:
+			v, _ := cs.mem.Read32(ptr)
+			return v != 0, true
+		}
+	}
+	switch variantBaseType(vt) {
+	case VT_EMPTY:
+		return false, true
+	case VT_BOOL:
+		return uint16(readVariantValue(cs.mem, addr)) != 0, true
+	case VT_I1, VT_UI1, VT_I2, VT_UI2, VT_I4, VT_UI4, VT_INT, VT_UINT, VT_I8, VT_UI8:
+		i, ok := cs.variantToInt64(addr)
+		return i != 0, ok
+	case VT_R4, VT_R8:
+		f, ok := cs.variantToFloat64(addr)
+		return f != 0, ok
+	case VT_BSTR:
+		switch normalizeBoolString(readBSTRString(cs.mem, readVariantValue(cs.mem, addr))) {
+		case "", "0", "false", "no", "off":
+			return false, true
+		case "-1", "1", "true", "yes", "on":
+			return true, true
+		}
+	}
+	return false, false
+}
+
+func safeArrayDescriptorSize(cDims uint16) uint64 {
+	return 24 + uint64(cDims)*8
+}
+
+func (cs *comState) loadSafeArray(psa uint64) *safeArrayInfo {
+	if psa == 0 {
+		return nil
+	}
+	if sa := cs.safeArrays[psa]; sa != nil {
+		return sa
+	}
+	cDims, err := cs.mem.Read16(psa)
+	if err != nil || cDims == 0 {
+		return nil
+	}
+	fFeatures, _ := cs.mem.Read16(psa + 2)
+	cbElements, _ := cs.mem.Read32(psa + 4)
+	cLocks, _ := cs.mem.Read32(psa + 8)
+	pvData, _ := cs.mem.Read64(psa + 16)
+	sa := &safeArrayInfo{
+		addr:       psa,
+		cDims:      cDims,
+		fFeatures:  fFeatures,
+		cbElements: cbElements,
+		cLocks:     cLocks,
+		pvData:     pvData,
+	}
+	sa.bounds = make([]safeArrayBound, cDims)
+	for i := uint16(0); i < cDims; i++ {
+		entry := psa + 24 + uint64(i)*8
+		cElements, _ := cs.mem.Read32(entry)
+		lBound, _ := cs.mem.Read32(entry + 4)
+		sa.bounds[i] = safeArrayBound{cElements: cElements, lLbound: int32(lBound)}
+	}
+	if fFeatures&FADF_HAVEVARTYPE != 0 {
+		vt, _ := cs.mem.Read16(psa + 12)
+		sa.vt = vt
+	}
+	cs.safeArrays[psa] = sa
+	return sa
+}
+
+func (cs *comState) syncSafeArray(sa *safeArrayInfo) {
+	if sa == nil {
+		return
+	}
+	cs.mem.Write16(sa.addr, sa.cDims)
+	cs.mem.Write16(sa.addr+2, sa.fFeatures)
+	cs.mem.Write32(sa.addr+4, sa.cbElements)
+	cs.mem.Write32(sa.addr+8, sa.cLocks)
+	cs.mem.Write16(sa.addr+12, sa.vt)
+	cs.mem.Write64(sa.addr+16, sa.pvData)
+	for i, b := range sa.bounds {
+		entry := sa.addr + 24 + uint64(i)*8
+		cs.mem.Write32(entry, b.cElements)
+		cs.mem.Write32(entry+4, uint32(b.lLbound))
+	}
+}
+
+func (cs *comState) safeArrayElementOffset(sa *safeArrayInfo, rgIndices uint64) (uint64, bool) {
+	if sa == nil || rgIndices == 0 || len(sa.bounds) == 0 {
+		return 0, false
+	}
+	var offset uint64
+	stride := uint64(1)
+	for dim := len(sa.bounds) - 1; dim >= 0; dim-- {
+		raw, err := cs.mem.Read32(rgIndices + uint64(dim)*4)
+		if err != nil {
+			return 0, false
+		}
+		idx := int64(int32(raw))
+		b := sa.bounds[dim]
+		rel := idx - int64(b.lLbound)
+		if rel < 0 || rel >= int64(b.cElements) {
+			return 0, false
+		}
+		offset += uint64(rel) * stride
+		stride *= uint64(b.cElements)
+		if dim == 0 {
+			break
+		}
+	}
+	return offset * uint64(sa.cbElements), true
+}
+
+func (cs *comState) safeArrayTotalBytes(sa *safeArrayInfo) uint64 {
+	if sa == nil {
+		return 0
+	}
+	total := uint64(sa.cbElements)
+	for _, b := range sa.bounds {
+		total *= uint64(b.cElements)
+	}
+	return total
+}
+
+func (cs *comState) createSafeArray(vt uint16, cDims uint16, rgsabound uint64) uint64 {
+	if cDims == 0 || rgsabound == 0 {
+		return 0
+	}
+	sa := &safeArrayInfo{
+		vt:         vt,
+		cDims:      cDims,
+		fFeatures:  FADF_HAVEVARTYPE,
+		cbElements: vartypeElemSize(vt),
+		bounds:     make([]safeArrayBound, cDims),
+	}
+	for i := uint16(0); i < cDims; i++ {
+		entry := rgsabound + uint64(i)*8
+		cElements, _ := cs.mem.Read32(entry)
+		lBound, _ := cs.mem.Read32(entry + 4)
+		sa.bounds[i] = safeArrayBound{cElements: cElements, lLbound: int32(lBound)}
+	}
+	desc := cs.heapAlloc(safeArrayDescriptorSize(cDims), true)
+	if desc == 0 {
+		return 0
+	}
+	sa.addr = desc
+	totalBytes := cs.safeArrayTotalBytes(sa)
+	if totalBytes == 0 {
+		totalBytes = uint64(sa.cbElements)
+	}
+	data := cs.heapAlloc(totalBytes, true)
+	if data == 0 {
+		cs.heapFree(desc)
+		return 0
+	}
+	sa.pvData = data
+	cs.safeArrays[desc] = sa
+	cs.syncSafeArray(sa)
+	return desc
+}
+
+func (cs *comState) safeArrayDestroy(psa uint64, freeDesc bool) uint32 {
+	sa := cs.loadSafeArray(psa)
+	if sa == nil {
+		return E_INVALIDARG
+	}
+	count := uint64(0)
+	if sa.cbElements != 0 {
+		count = cs.safeArrayTotalBytes(sa) / uint64(sa.cbElements)
+	}
+	switch variantElementType(sa.vt) {
+	case VT_BSTR:
+		for i := uint64(0); i < count; i++ {
+			ptr, _ := cs.mem.Read64(sa.pvData + i*8)
+			cs.freeBSTR(ptr)
+		}
+	case VT_UNKNOWN, VT_DISPATCH:
+		for i := uint64(0); i < count; i++ {
+			ptr, _ := cs.mem.Read64(sa.pvData + i*8)
+			cs.releasePtr(ptr)
+		}
+	case VT_VARIANT:
+		for i := uint64(0); i < count; i++ {
+			cs.variantClear(sa.pvData + i*variantSize)
+		}
+	}
+	if sa.pvData != 0 {
+		cs.heapFree(sa.pvData)
+		sa.pvData = 0
+	}
+	if freeDesc {
+		delete(cs.safeArrays, psa)
+		cs.heapFree(psa)
+	} else {
+		sa.cLocks = 0
+		cs.syncSafeArray(sa)
+	}
+	return S_OK
+}
+
+func (cs *comState) variantClear(addr uint64) uint32 {
+	if addr == 0 {
+		return E_INVALIDARG
+	}
+	vt := readVariantType(cs.mem, addr)
+	base := variantBaseType(vt)
+	if vt&VT_BYREF == 0 {
+		switch {
+		case vt&VT_ARRAY != 0:
+			cs.safeArrayDestroy(readVariantValue(cs.mem, addr), true)
+		case base == VT_BSTR:
+			cs.freeBSTR(readVariantValue(cs.mem, addr))
+		case base == VT_UNKNOWN || base == VT_DISPATCH:
+			cs.releasePtr(readVariantValue(cs.mem, addr))
+		}
+	}
+	writeVariantEmpty(cs.mem, addr)
+	return S_OK
+}
+
+func (cs *comState) variantCopy(dst, src uint64) uint32 {
+	if dst == 0 || src == 0 {
+		return E_INVALIDARG
+	}
+	if dst == src {
+		return S_OK
+	}
+	if hr := cs.variantClear(dst); hr != S_OK {
+		return hr
+	}
+	vt := readVariantType(cs.mem, src)
+	base := variantBaseType(vt)
+	switch {
+	case vt&VT_BYREF != 0:
+		cs.copyBytes(dst, src, variantSize)
+	case vt&VT_ARRAY != 0:
+		psa := readVariantValue(cs.mem, src)
+		sa := cs.loadSafeArray(psa)
+		if sa == nil {
+			writeVariantScalar(cs.mem, dst, vt, 0)
+			return S_OK
+		}
+		boundsPtr := cs.allocTaskMem(uint64(sa.cDims)*8, true)
+		for i, b := range sa.bounds {
+			cs.mem.Write32(boundsPtr+uint64(i)*8, b.cElements)
+			cs.mem.Write32(boundsPtr+uint64(i)*8+4, uint32(b.lLbound))
+		}
+		newPSA := cs.createSafeArray(sa.vt, sa.cDims, boundsPtr)
+		cs.freeTaskMem(boundsPtr)
+		newSA := cs.loadSafeArray(newPSA)
+		if newSA == nil {
+			return E_OUTOFMEMORY
+		}
+		count := uint64(0)
+		if sa.cbElements != 0 {
+			count = cs.safeArrayTotalBytes(sa) / uint64(sa.cbElements)
+		}
+		switch variantElementType(sa.vt) {
+		case VT_BSTR:
+			for i := uint64(0); i < count; i++ {
+				ptr, _ := cs.mem.Read64(sa.pvData + i*8)
+				cs.mem.Write64(newSA.pvData+i*8, cs.allocBSTRString(readBSTRString(cs.mem, ptr)))
+			}
+		case VT_UNKNOWN, VT_DISPATCH:
+			for i := uint64(0); i < count; i++ {
+				ptr, _ := cs.mem.Read64(sa.pvData + i*8)
+				cs.addRefPtr(ptr)
+				cs.mem.Write64(newSA.pvData+i*8, ptr)
+			}
+		case VT_VARIANT:
+			for i := uint64(0); i < count; i++ {
+				if hr := cs.variantCopy(newSA.pvData+i*variantSize, sa.pvData+i*variantSize); hr != S_OK {
+					return hr
+				}
+			}
+		default:
+			cs.copyBytes(newSA.pvData, sa.pvData, uint32(cs.safeArrayTotalBytes(sa)))
+		}
+		writeVariantScalar(cs.mem, dst, vt, newPSA)
+	case base == VT_BSTR:
+		writeVariantScalar(cs.mem, dst, vt, cs.allocBSTRString(readBSTRString(cs.mem, readVariantValue(cs.mem, src))))
+	case base == VT_UNKNOWN || base == VT_DISPATCH:
+		ptr := readVariantValue(cs.mem, src)
+		cs.addRefPtr(ptr)
+		writeVariantScalar(cs.mem, dst, vt, ptr)
+	default:
+		cs.copyBytes(dst, src, variantSize)
+	}
+	return S_OK
+}
+
+func (cs *comState) variantCopyIndirect(dst, src uint64) uint32 {
+	if dst == 0 || src == 0 {
+		return E_INVALIDARG
+	}
+	vt := readVariantType(cs.mem, src)
+	if vt&VT_BYREF == 0 {
+		return cs.variantCopy(dst, src)
+	}
+	ptr := readVariantValue(cs.mem, src)
+	base := variantBaseType(vt)
+	switch base {
+	case VT_VARIANT:
+		return cs.variantCopy(dst, ptr)
+	case VT_BSTR:
+		val, _ := cs.mem.Read64(ptr)
+		writeVariantScalar(cs.mem, dst, VT_BSTR, cs.allocBSTRString(readBSTRString(cs.mem, val)))
+	case VT_UNKNOWN, VT_DISPATCH:
+		val, _ := cs.mem.Read64(ptr)
+		cs.addRefPtr(val)
+		writeVariantScalar(cs.mem, dst, base, val)
+	case VT_I4, VT_INT, VT_UI4, VT_UINT, VT_ERROR, VT_HRESULT:
+		val, _ := cs.mem.Read32(ptr)
+		writeVariantScalar(cs.mem, dst, base, uint64(val))
+	case VT_I2, VT_UI2, VT_BOOL:
+		val, _ := cs.mem.Read16(ptr)
+		writeVariantScalar(cs.mem, dst, base, uint64(val))
+	case VT_I1, VT_UI1:
+		val, _ := cs.mem.Read8(ptr)
+		writeVariantScalar(cs.mem, dst, base, uint64(val))
+	case VT_R4:
+		val, _ := cs.mem.Read32(ptr)
+		writeVariantScalar(cs.mem, dst, VT_R4, uint64(val))
+	case VT_R8, VT_I8, VT_UI8:
+		val, _ := cs.mem.Read64(ptr)
+		writeVariantScalar(cs.mem, dst, base, val)
+	default:
+		return DISP_E_TYPEMISMATCH
+	}
+	return S_OK
+}
+
+func (cs *comState) variantChangeType(dst, src uint64, vt uint16) uint32 {
+	if dst == 0 || src == 0 {
+		return E_INVALIDARG
+	}
+	if vt == VT_VARIANT {
+		return cs.variantCopy(dst, src)
+	}
+	if dst == src {
+		tmp := cs.allocTaskMem(variantSize, true)
+		if tmp == 0 {
+			return E_OUTOFMEMORY
+		}
+		defer cs.freeTaskMem(tmp)
+		if hr := cs.variantCopy(tmp, src); hr != S_OK {
+			return hr
+		}
+		src = tmp
+	}
+	if hr := cs.variantClear(dst); hr != S_OK {
+		return hr
+	}
+	switch vt {
+	case VT_EMPTY:
+		writeVariantEmpty(cs.mem, dst)
+		return S_OK
+	case VT_BSTR:
+		s, ok := cs.variantToString(src)
+		if !ok {
+			return DISP_E_TYPEMISMATCH
+		}
+		writeVariantScalar(cs.mem, dst, VT_BSTR, cs.allocBSTRString(s))
+		return S_OK
+	case VT_I4, VT_INT:
+		i, ok := cs.variantToInt64(src)
+		if !ok {
+			return DISP_E_TYPEMISMATCH
+		}
+		writeVariantScalar(cs.mem, dst, vt, uint64(uint32(int32(i))))
+		return S_OK
+	case VT_R8:
+		f, ok := cs.variantToFloat64(src)
+		if !ok {
+			return DISP_E_TYPEMISMATCH
+		}
+		writeVariantScalar(cs.mem, dst, VT_R8, math.Float64bits(f))
+		return S_OK
+	case VT_BOOL:
+		b, ok := cs.variantToBool(src)
+		if !ok {
+			return DISP_E_TYPEMISMATCH
+		}
+		writeVariantScalar(cs.mem, dst, VT_BOOL, uint64(boolToVariantBool(b)))
+		return S_OK
+	default:
+		return DISP_E_TYPEMISMATCH
+	}
+}
+
+func (cs *comState) typeInfoFor(ptr uint64) *typeInfoData {
+	if obj := cs.objects[ptr]; obj != nil {
+		if ti, ok := obj.data.(*typeInfoData); ok {
+			return ti
+		}
+		if sd, ok := obj.data.(*stdDispatchData); ok {
+			if typeObj := cs.objects[sd.typeInfo]; typeObj != nil {
+				ti, _ := typeObj.data.(*typeInfoData)
+				return ti
+			}
+		}
+	}
+	return nil
+}
+
+func (cs *comState) lookupDispID(typeInfo uint64, name string, create bool) (int32, bool) {
+	ti := cs.typeInfoFor(typeInfo)
+	if ti == nil {
+		return 0, false
+	}
+	key := strings.ToLower(strings.TrimSpace(name))
+	if id, ok := ti.names[key]; ok {
+		return id, true
+	}
+	if !create {
+		return 0, false
+	}
+	if ti.nextID <= 0 {
+		ti.nextID = 1
+	}
+	id := ti.nextID
+	ti.nextID++
+	ti.names[key] = id
+	ti.dispToID[id] = name
+	return id, true
+}
+
 func hresultFromError(err error) uint32 {
 	if err == nil {
 		return S_OK
@@ -225,6 +1169,473 @@ func minU64(a, b uint64) uint64 {
 		return a
 	}
 	return b
+}
+
+func filetimeFromTime(t time.Time) uint64 {
+	if t.IsZero() {
+		return 0
+	}
+	const epochDiff = uint64(11644473600) * 10000000
+	return uint64(t.Unix())*10000000 + uint64(t.Nanosecond()/100) + epochDiff
+}
+
+func timeFromFiletime(ft uint64) time.Time {
+	if ft == 0 {
+		return time.Time{}
+	}
+	const epochDiff = int64(11644473600) * 10000000
+	unix100ns := int64(ft) - epochDiff
+	sec := unix100ns / 10000000
+	nsec := (unix100ns % 10000000) * 100
+	if nsec < 0 {
+		sec--
+		nsec += 1000000000
+	}
+	return time.Unix(sec, nsec)
+}
+
+func readFiletime(mem *mmu.MMU, ptr uint64) time.Time {
+	if ptr == 0 {
+		return time.Time{}
+	}
+	ft, _ := mem.Read64(ptr)
+	return timeFromFiletime(ft)
+}
+
+func writeGuestUTF16String(mem *mmu.MMU, ptr uint64, s string) {
+	runes := []rune(s)
+	for i, r := range runes {
+		mem.Write16(ptr+uint64(i)*2, uint16(r))
+	}
+	mem.Write16(ptr+uint64(len(runes))*2, 0)
+}
+
+func readGuestUTF16String(mem *mmu.MMU, ptr uint64) string {
+	if ptr == 0 {
+		return ""
+	}
+	var runes []rune
+	for i := 0; i < 32768; i++ {
+		w, err := mem.Read16(ptr + uint64(i)*2)
+		if err != nil || w == 0 {
+			break
+		}
+		runes = append(runes, rune(w))
+	}
+	return string(runes)
+}
+
+func readGuestANSIString(mem *mmu.MMU, ptr uint64) string {
+	if ptr == 0 {
+		return ""
+	}
+	var out []byte
+	for i := 0; i < 32768; i++ {
+		b, err := mem.Read8(ptr + uint64(i))
+		if err != nil || b == 0 {
+			break
+		}
+		out = append(out, b)
+	}
+	return string(out)
+}
+
+func writeGuestANSIString(mem *mmu.MMU, ptr uint64, s string) {
+	for i := 0; i < len(s); i++ {
+		mem.Write8(ptr+uint64(i), s[i])
+	}
+	mem.Write8(ptr+uint64(len(s)), 0)
+}
+
+func writeGuestUTF16StringN(mem *mmu.MMU, ptr uint64, s string, cch int) {
+	if ptr == 0 || cch <= 0 {
+		return
+	}
+	ws := utf16Encode(s)
+	if len(ws) >= cch {
+		ws = ws[:cch-1]
+	}
+	for i, w := range ws {
+		mem.Write16(ptr+uint64(i)*2, w)
+	}
+	mem.Write16(ptr+uint64(len(ws))*2, 0)
+}
+
+func writeGuestANSIStringN(mem *mmu.MMU, ptr uint64, s string, cch int) {
+	if ptr == 0 || cch <= 0 {
+		return
+	}
+	if len(s) >= cch {
+		s = s[:cch-1]
+	}
+	writeGuestANSIString(mem, ptr, s)
+}
+
+func mapStorageError(err error) uint32 {
+	if err == nil {
+		return S_OK
+	}
+	if os.IsNotExist(err) {
+		return STG_E_FILENOTFOUND
+	}
+	if os.IsPermission(err) {
+		return STG_E_ACCESSDENIED
+	}
+	var pathErr *os.PathError
+	if ok := strings.Contains(strings.ToLower(err.Error()), "path"); ok {
+		return STG_E_PATHNOTFOUND
+	}
+	_ = pathErr
+	return E_FAIL
+}
+
+func storageHostPath(winPath string) (string, error) {
+	winPath = strings.TrimSpace(winPath)
+	if winPath == "" {
+		return "", hresultError(STG_E_INVALIDNAME)
+	}
+	host := filepath.Clean(winPathToVFS(winPath))
+	if host == "" || host == "." {
+		return "", hresultError(STG_E_INVALIDNAME)
+	}
+	return host, nil
+}
+
+func storageElementPath(basePath, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\:`) {
+		return "", hresultError(STG_E_INVALIDNAME)
+	}
+	return filepath.Join(basePath, name), nil
+}
+
+func storageMarkerPath(path string) string {
+	return filepath.Join(path, ".govm-storage")
+}
+
+func storageCLSIDPath(path string) string {
+	return filepath.Join(path, ".govm-clsid")
+}
+
+func storageStateBitsPath(path string) string {
+	return filepath.Join(path, ".govm-statebits")
+}
+
+func isStorageMetadataName(name string) bool {
+	return strings.HasPrefix(name, ".govm-")
+}
+
+func loadStorageMetadata(ds *dirStorage) {
+	if ds == nil {
+		return
+	}
+	if data, err := os.ReadFile(storageCLSIDPath(ds.path)); err == nil {
+		if guid, ok := parseGUIDString(strings.TrimSpace(string(data))); ok {
+			ds.clsid = guid
+		}
+	}
+	if data, err := os.ReadFile(storageStateBitsPath(ds.path)); err == nil {
+		var stateBits uint32
+		if _, scanErr := fmt.Sscanf(strings.TrimSpace(string(data)), "%x", &stateBits); scanErr == nil {
+			ds.stateBits = stateBits
+		}
+	}
+}
+
+func persistStorageMetadata(ds *dirStorage) {
+	if ds == nil || ds.path == "" {
+		return
+	}
+	_ = os.MkdirAll(ds.path, 0755)
+	_ = os.WriteFile(storageMarkerPath(ds.path), []byte("govm\n"), 0644)
+	if ds.clsid != (GUID{}) {
+		_ = os.WriteFile(storageCLSIDPath(ds.path), []byte(guidString(ds.clsid)), 0644)
+	}
+	_ = os.WriteFile(storageStateBitsPath(ds.path), []byte(fmt.Sprintf("%08X\n", ds.stateBits)), 0644)
+}
+
+func listStorageEntries(path string) ([]statStgEntry, error) {
+	dirEntries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]statStgEntry, 0, len(dirEntries))
+	for _, entry := range dirEntries {
+		if isStorageMetadataName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		item := statStgEntry{
+			name:    entry.Name(),
+			modTime: info.ModTime(),
+		}
+		if entry.IsDir() {
+			item.stgType = STGTY_STORAGE
+			sub := &dirStorage{path: filepath.Join(path, entry.Name())}
+			loadStorageMetadata(sub)
+			item.clsid = sub.clsid
+		} else {
+			item.stgType = STGTY_STREAM
+			item.size = uint64(info.Size())
+		}
+		entries = append(entries, item)
+	}
+	return entries, nil
+}
+
+func copyPathRecursive(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		if err := os.MkdirAll(dst, 0755); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := copyPathRecursive(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
+}
+
+func writeSTATSTG(mem *mmu.MMU, cs *comState, ptr uint64, entry statStgEntry, grfStatFlag uint32, stateBits uint32) {
+	if ptr == 0 {
+		return
+	}
+	mem.WriteBytes(ptr, make([]byte, 72))
+	if grfStatFlag&STATFLAG_NONAME == 0 && entry.name != "" {
+		nameRunes := []rune(entry.name)
+		namePtr := cs.allocTaskMem(uint64(len(nameRunes)+1)*2, true)
+		if namePtr != 0 {
+			writeGuestUTF16String(mem, namePtr, entry.name)
+			mem.Write64(ptr, namePtr)
+		}
+	}
+	mem.Write32(ptr+8, entry.stgType)
+	mem.Write64Raw(ptr+16, entry.size)
+	ft := filetimeFromTime(entry.modTime)
+	mem.Write64Raw(ptr+24, ft)
+	mem.Write64Raw(ptr+32, ft)
+	mem.Write64Raw(ptr+40, ft)
+	writeGUID(mem, ptr+48, entry.clsid)
+	mem.Write32(ptr+64, stateBits)
+}
+
+func mapStreamFlags(grfMode uint32, create bool) int {
+	var flags int
+	switch grfMode & 0x3 {
+	case STGM_READWRITE:
+		flags = os.O_RDWR
+	case STGM_WRITE:
+		flags = os.O_WRONLY
+	default:
+		flags = os.O_RDONLY
+	}
+	if create || grfMode&STGM_CREATE != 0 {
+		flags |= os.O_CREATE
+	}
+	if grfMode&STGM_CREATE != 0 {
+		flags |= os.O_TRUNC
+	}
+	return flags
+}
+
+func newMemoryBuffer(mem *mmu.MMU, hglobal uint64, deleteOnRelease bool) *memoryBuffer {
+	buf := &memoryBuffer{
+		hglobal:         hglobal,
+		deleteOnRelease: deleteOnRelease,
+		refs:            1,
+	}
+	if hglobal != 0 {
+		_, size, mapped, _ := mem.QueryRegion(hglobal)
+		if mapped && size > 0 {
+			if data, err := mem.ReadBytes(hglobal, int(size)); err == nil {
+				buf.data = append(buf.data, data...)
+			}
+		}
+	}
+	return buf
+}
+
+func (b *memoryBuffer) addRef() {
+	if b != nil {
+		b.refs++
+	}
+}
+
+func (b *memoryBuffer) release(mem *mmu.MMU) {
+	if b == nil {
+		return
+	}
+	if b.refs > 0 {
+		b.refs--
+	}
+	if b.refs == 0 && b.deleteOnRelease && b.hglobal != 0 {
+		_, size, mapped, _ := mem.QueryRegion(b.hglobal)
+		if mapped && size > 0 {
+			mem.Munmap(b.hglobal, size)
+		}
+		b.hglobal = 0
+	}
+}
+
+func (b *memoryBuffer) setSize(size int64) error {
+	if size < 0 {
+		return hresultError(E_INVALIDARG)
+	}
+	if size <= int64(len(b.data)) {
+		b.data = b.data[:int(size)]
+		return nil
+	}
+	growth := int(size) - len(b.data)
+	b.data = append(b.data, make([]byte, growth)...)
+	return nil
+}
+
+func (b *memoryBuffer) syncToHGlobal(mem *mmu.MMU) uint64 {
+	if b == nil {
+		return 0
+	}
+	sizeNeeded := uint64(len(b.data))
+	if sizeNeeded == 0 {
+		sizeNeeded = 1
+	}
+	if b.hglobal != 0 {
+		_, curSize, mapped, _ := mem.QueryRegion(b.hglobal)
+		if !mapped || curSize < sizeNeeded {
+			if mapped && curSize > 0 && b.deleteOnRelease {
+				mem.Munmap(b.hglobal, curSize)
+			}
+			b.hglobal = 0
+		}
+	}
+	if b.hglobal == 0 {
+		b.hglobal = mem.Mmap(0, sizeNeeded, mmu.PermRead|mmu.PermWrite)
+	}
+	if b.hglobal != 0 {
+		if len(b.data) > 0 {
+			mem.WriteBytes(b.hglobal, b.data)
+		}
+	}
+	return b.hglobal
+}
+
+func streamSize(data interface{}) (int64, error) {
+	switch s := data.(type) {
+	case *memStream:
+		return int64(len(s.buffer.data)), nil
+	case *fileStream:
+		info, err := s.file.Stat()
+		if err != nil {
+			return 0, err
+		}
+		return info.Size(), nil
+	default:
+		return 0, hresultError(E_INVALIDARG)
+	}
+}
+
+func streamReadAt(data interface{}, pos int64, dst []byte) (int, error) {
+	if pos < 0 {
+		return 0, hresultError(E_INVALIDARG)
+	}
+	switch s := data.(type) {
+	case *memStream:
+		if pos >= int64(len(s.buffer.data)) {
+			return 0, io.EOF
+		}
+		n := copy(dst, s.buffer.data[int(pos):])
+		if n < len(dst) {
+			return n, io.EOF
+		}
+		return n, nil
+	case *fileStream:
+		return s.file.ReadAt(dst, pos)
+	default:
+		return 0, hresultError(E_INVALIDARG)
+	}
+}
+
+func streamWriteAt(data interface{}, pos int64, src []byte) (int, error) {
+	if pos < 0 {
+		return 0, hresultError(E_INVALIDARG)
+	}
+	switch s := data.(type) {
+	case *memStream:
+		end := pos + int64(len(src))
+		if err := s.buffer.setSize(end); err != nil {
+			return 0, err
+		}
+		return copy(s.buffer.data[int(pos):], src), nil
+	case *fileStream:
+		return s.file.WriteAt(src, pos)
+	default:
+		return 0, hresultError(E_INVALIDARG)
+	}
+}
+
+func streamSetSize(data interface{}, size int64) error {
+	switch s := data.(type) {
+	case *memStream:
+		return s.buffer.setSize(size)
+	case *fileStream:
+		return s.file.Truncate(size)
+	default:
+		return hresultError(E_INVALIDARG)
+	}
+}
+
+func streamCommit(data interface{}) error {
+	switch s := data.(type) {
+	case *memStream:
+		return nil
+	case *fileStream:
+		return s.file.Sync()
+	default:
+		return hresultError(E_INVALIDARG)
+	}
+}
+
+func streamName(data interface{}) string {
+	switch s := data.(type) {
+	case *memStream:
+		return s.name
+	case *fileStream:
+		return s.name
+	default:
+		return ""
+	}
+}
+
+func streamModTime(data interface{}) time.Time {
+	switch s := data.(type) {
+	case *memStream:
+		return time.Time{}
+	case *fileStream:
+		info, err := s.file.Stat()
+		if err == nil {
+			return info.ModTime()
+		}
+	}
+	return time.Time{}
 }
 
 func (cs *comState) initialize(apartmentType uint32) uint32 {
@@ -354,6 +1765,7 @@ func (cs *comState) createGuestObject(mem *mmu.MMU, iid GUID, methods int) (*com
 		objectAddr:    objAddr,
 		kind:          "iunknown",
 		supportedIIDs: map[GUID]bool{IID_IUnknown: true, iid: true},
+		altInterfaces: make(map[GUID]uint64),
 	}
 	cs.objects[objAddr] = obj
 	for i := 0; i < methods; i++ {
@@ -403,6 +1815,209 @@ func (cs *comState) createIMallocObject() (*comObject, error) {
 	return obj, nil
 }
 
+func (cs *comState) createShellFolderObject(winPath string) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IShellFolder, 13)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "shell-folder"
+	obj.data = &shellFolderData{path: canonicalizeWinPath(winPath)}
+	obj.supportedIIDs[IID_IShellFolder] = true
+	return obj, nil
+}
+
+func (cs *comState) createEnumIDListObject(items []string, start int) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IEnumIDList, 7)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "enum-idlist"
+	obj.data = &enumIDListData{items: items, index: start}
+	obj.supportedIIDs[IID_IEnumIDList] = true
+	return obj, nil
+}
+
+func (cs *comState) createShellLinkObjects(iid GUID) (*comObject, error) {
+	switch {
+	case guidEqual(iid, IID_IUnknown), guidEqual(iid, IID_IShellLinkW), guidEqual(iid, IID_IShellLinkA), guidEqual(iid, IID_IPersistFile), guidEqual(iid, IID_IPersist):
+	default:
+		return nil, hresultError(E_NOINTERFACE)
+	}
+	data := &shellLinkData{showCmd: 1}
+	linkW, err := cs.createGuestObject(cs.mem, IID_IShellLinkW, 21)
+	if err != nil {
+		return nil, err
+	}
+	linkA, err := cs.createGuestObject(cs.mem, IID_IShellLinkA, 21)
+	if err != nil {
+		return nil, err
+	}
+	persist, err := cs.createGuestObject(cs.mem, IID_IPersistFile, 9)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range []*comObject{linkW, linkA, persist} {
+		obj.clsid = CLSID_ShellLink
+		obj.data = data
+	}
+	linkW.kind = "shell-link-w"
+	linkA.kind = "shell-link-a"
+	persist.kind = "persist-file"
+	linkW.supportedIIDs[IID_IShellLinkW] = true
+	linkA.supportedIIDs[IID_IShellLinkA] = true
+	persist.supportedIIDs[IID_IPersistFile] = true
+	persist.supportedIIDs[IID_IPersist] = true
+	linkW.altInterfaces[IID_IShellLinkA] = linkA.objectAddr
+	linkW.altInterfaces[IID_IPersistFile] = persist.objectAddr
+	linkW.altInterfaces[IID_IPersist] = persist.objectAddr
+	linkA.altInterfaces[IID_IShellLinkW] = linkW.objectAddr
+	linkA.altInterfaces[IID_IPersistFile] = persist.objectAddr
+	linkA.altInterfaces[IID_IPersist] = persist.objectAddr
+	persist.altInterfaces[IID_IShellLinkW] = linkW.objectAddr
+	persist.altInterfaces[IID_IShellLinkA] = linkA.objectAddr
+	switch {
+	case guidEqual(iid, IID_IShellLinkA):
+		return linkA, nil
+	case guidEqual(iid, IID_IPersistFile), guidEqual(iid, IID_IPersist):
+		return persist, nil
+	default:
+		return linkW, nil
+	}
+}
+
+func (cs *comState) createMemoryStreamObject(buffer *memoryBuffer, name string) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IStream, 14)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "istream"
+	obj.data = &memStream{buffer: buffer, name: name}
+	obj.supportedIIDs[IID_IStream] = true
+	return obj, nil
+}
+
+func (cs *comState) createFileStreamObject(path, name string, grfMode uint32, create bool) (*comObject, error) {
+	if create {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return nil, err
+		}
+	}
+	file, err := os.OpenFile(path, mapStreamFlags(grfMode, create), 0644)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := cs.createGuestObject(cs.mem, IID_IStream, 14)
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	obj.kind = "istream"
+	obj.data = &fileStream{path: path, file: file, name: name, grfMode: grfMode}
+	obj.supportedIIDs[IID_IStream] = true
+	return obj, nil
+}
+
+func (cs *comState) createStorageObject(path, name string, grfMode uint32, deleteOnRelease bool) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IStorage, 18)
+	if err != nil {
+		return nil, err
+	}
+	ds := &dirStorage{
+		path:            path,
+		name:            name,
+		grfMode:         grfMode,
+		deleteOnRelease: deleteOnRelease,
+	}
+	loadStorageMetadata(ds)
+	obj.kind = "istorage"
+	obj.data = ds
+	obj.supportedIIDs[IID_IStorage] = true
+	return obj, nil
+}
+
+func (cs *comState) createLockBytesObject(buffer *memoryBuffer) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_ILockBytes, 10)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "ilockbytes"
+	obj.data = &lockBytes{buffer: buffer}
+	obj.supportedIIDs[IID_ILockBytes] = true
+	return obj, nil
+}
+
+func (cs *comState) createEnumSTATSTGObject(entries []statStgEntry) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IEnumSTATSTG, 7)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "ienumstatstg"
+	obj.data = &enumSTATSTG{entries: entries}
+	obj.supportedIIDs[IID_IEnumSTATSTG] = true
+	return obj, nil
+}
+
+func (cs *comState) createTypeInfoObject(lcid uint32) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_ITypeInfo, 22)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "type-info"
+	obj.supportedIIDs[IID_ITypeInfo] = true
+	obj.data = &typeInfoData{
+		lcid:     lcid,
+		nextID:   1,
+		names:    make(map[string]int32),
+		dispToID: make(map[int32]string),
+	}
+	return obj, nil
+}
+
+func (cs *comState) createStdDispatchObject(instance, typeInfo uint64) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IDispatch, 7)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "std-dispatch"
+	obj.supportedIIDs[IID_IDispatch] = true
+	obj.data = &stdDispatchData{instance: instance, typeInfo: typeInfo}
+	return obj, nil
+}
+
+func (cs *comState) createTypeLibObject(path string) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_ITypeLib, 13)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "type-lib"
+	obj.supportedIIDs[IID_ITypeLib] = true
+	obj.data = &typeLibData{path: path}
+	return obj, nil
+}
+
+func (cs *comState) createErrorInfoObjects() (*comObject, *comObject, error) {
+	createObj, err := cs.createGuestObject(cs.mem, IID_ICreateErrorInfo, 8)
+	if err != nil {
+		return nil, nil, err
+	}
+	readObj, err := cs.createGuestObject(cs.mem, IID_IErrorInfo, 8)
+	if err != nil {
+		delete(cs.objects, createObj.objectAddr)
+		return nil, nil, err
+	}
+	createData := &errorInfoData{peer: readObj.objectAddr}
+	readData := &errorInfoData{peer: createObj.objectAddr}
+	createObj.kind = "create-error-info"
+	createObj.data = createData
+	createObj.supportedIIDs[IID_ICreateErrorInfo] = true
+	createObj.supportedIIDs[IID_IErrorInfo] = true
+	readObj.kind = "error-info"
+	readObj.data = readData
+	readObj.supportedIIDs[IID_IErrorInfo] = true
+	readObj.supportedIIDs[IID_ICreateErrorInfo] = true
+	return createObj, readObj, nil
+}
+
 func (cs *comState) addRef(obj *comObject) uint32 {
 	obj.refCount++
 	return uint32(obj.refCount)
@@ -413,6 +2028,24 @@ func (cs *comState) release(obj *comObject) uint32 {
 		obj.refCount--
 	}
 	if obj.refCount == 0 {
+		switch data := obj.data.(type) {
+		case *memStream:
+			if data.buffer != nil {
+				data.buffer.release(cs.mem)
+			}
+		case *fileStream:
+			if data.file != nil {
+				_ = data.file.Close()
+			}
+		case *lockBytes:
+			if data.buffer != nil {
+				data.buffer.release(cs.mem)
+			}
+		case *dirStorage:
+			if data.deleteOnRelease && data.path != "" {
+				_ = os.RemoveAll(data.path)
+			}
+		}
 		delete(cs.objects, obj.objectAddr)
 	}
 	return uint32(obj.refCount)
@@ -429,6 +2062,29 @@ func (cs *comState) queryInterface(ctx *ntapi.TrapContext, obj *comObject) uint3
 		return E_POINTER
 	}
 	iid := readGUID(ctx.Mem, riidPtr)
+	if data, ok := obj.data.(*errorInfoData); ok {
+		switch {
+		case obj.kind == "create-error-info" && guidEqual(iid, IID_IErrorInfo):
+			if peer := cs.objects[data.peer]; peer != nil {
+				ctx.Mem.Write64(ppv, peer.objectAddr)
+				cs.addRef(peer)
+				return S_OK
+			}
+		case obj.kind == "error-info" && guidEqual(iid, IID_ICreateErrorInfo):
+			if peer := cs.objects[data.peer]; peer != nil {
+				ctx.Mem.Write64(ppv, peer.objectAddr)
+				cs.addRef(peer)
+				return S_OK
+			}
+		}
+	}
+	if alt, ok := obj.altInterfaces[iid]; ok && alt != 0 {
+		if peer := cs.objects[alt]; peer != nil {
+			ctx.Mem.Write64(ppv, peer.objectAddr)
+			cs.addRef(peer)
+			return S_OK
+		}
+	}
 	if obj.supportedIIDs[iid] || guidEqual(iid, IID_IUnknown) {
 		ctx.Mem.Write64(ppv, obj.objectAddr)
 		cs.addRef(obj)
@@ -437,16 +2093,203 @@ func (cs *comState) queryInterface(ctx *ntapi.TrapContext, obj *comObject) uint3
 	return E_NOINTERFACE
 }
 
-func (cs *comState) dispatchIDispatch(ctx *ntapi.TrapContext, method int) uint32 {
+func (cs *comState) dispatchIDispatch(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
 	switch method {
 	case 3:
 		pctinfo := ctx.Arg(1)
 		if pctinfo != 0 {
-			ctx.Mem.Write32(pctinfo, 0)
+			if obj.kind == "std-dispatch" {
+				ctx.Mem.Write32(pctinfo, 1)
+			} else {
+				ctx.Mem.Write32(pctinfo, 0)
+			}
 		}
 		return S_OK
-	case 4, 5, 6:
+	case 4:
+		iTInfo := uint32(ctx.Arg(1))
+		ppTInfo := ctx.Arg(3)
+		if ppTInfo == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppTInfo, 0)
+		if iTInfo != 0 {
+			return DISP_E_BADPARAMCOUNT
+		}
+		if sd, ok := obj.data.(*stdDispatchData); ok && sd.typeInfo != 0 {
+			ctx.Mem.Write64(ppTInfo, sd.typeInfo)
+			cs.addRefPtr(sd.typeInfo)
+			return S_OK
+		}
 		return E_NOTIMPL
+	case 5:
+		riid := ctx.Arg(1)
+		rgszNames := ctx.Arg(2)
+		cNames := int(ctx.Arg(3))
+		rgDispID := ctx.Arg(4)
+		if riid != 0 && !guidEqual(readGUID(ctx.Mem, riid), GUID{}) {
+			return E_INVALIDARG
+		}
+		if rgszNames == 0 || rgDispID == 0 || cNames <= 0 {
+			return E_INVALIDARG
+		}
+		tiPtr := obj.objectAddr
+		if sd, ok := obj.data.(*stdDispatchData); ok {
+			tiPtr = sd.typeInfo
+		}
+		for i := 0; i < cNames; i++ {
+			namePtr, _ := ctx.Mem.Read64(rgszNames + uint64(i)*8)
+			if namePtr == 0 {
+				return DISP_E_UNKNOWNNAME
+			}
+			name := hctxReadUTF16(ctx.Mem, namePtr)
+			id, ok := cs.lookupDispID(tiPtr, name, false)
+			if !ok {
+				return DISP_E_UNKNOWNNAME
+			}
+			ctx.Mem.Write32(rgDispID+uint64(i)*4, uint32(id))
+		}
+		return S_OK
+	case 6:
+		if obj.kind == "std-dispatch" {
+			return DISP_E_MEMBERNOTFOUND
+		}
+		return E_NOTIMPL
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchTypeInfo(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	ti, _ := obj.data.(*typeInfoData)
+	if ti == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 10:
+		rgszNames := ctx.Arg(1)
+		cNames := int(ctx.Arg(2))
+		rgMemID := ctx.Arg(3)
+		if rgszNames == 0 || rgMemID == 0 || cNames <= 0 {
+			return E_INVALIDARG
+		}
+		for i := 0; i < cNames; i++ {
+			namePtr, _ := ctx.Mem.Read64(rgszNames + uint64(i)*8)
+			if namePtr == 0 {
+				return DISP_E_UNKNOWNNAME
+			}
+			name := hctxReadUTF16(ctx.Mem, namePtr)
+			id, ok := cs.lookupDispID(obj.objectAddr, name, false)
+			if !ok {
+				return DISP_E_UNKNOWNNAME
+			}
+			ctx.Mem.Write32(rgMemID+uint64(i)*4, uint32(id))
+		}
+		return S_OK
+	case 11:
+		return DISP_E_MEMBERNOTFOUND
+	case 12:
+		helpString := ctx.Arg(2)
+		if helpString != 0 {
+			ctx.Mem.Write64(helpString, 0)
+		}
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func hctxReadUTF16(mem *mmu.MMU, addr uint64) string {
+	if addr == 0 {
+		return ""
+	}
+	var data []byte
+	for i := uint64(0); ; i += 2 {
+		w, _ := mem.Read16(addr + i)
+		if w == 0 {
+			break
+		}
+		var tmp [2]byte
+		binary.LittleEndian.PutUint16(tmp[:], w)
+		data = append(data, tmp[:]...)
+	}
+	return decodeUTF16LEString(data)
+}
+
+func (cs *comState) dispatchErrorInfo(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	data, _ := obj.data.(*errorInfoData)
+	if data == nil {
+		return E_FAIL
+	}
+	switch obj.kind {
+	case "create-error-info":
+		switch method {
+		case 3:
+			if guidPtr := ctx.Arg(1); guidPtr != 0 {
+				data.guid = readGUID(ctx.Mem, guidPtr)
+				if peerObj := cs.objects[data.peer]; peerObj != nil {
+					if peer, _ := peerObj.data.(*errorInfoData); peer != nil {
+						peer.guid = data.guid
+					}
+				}
+			}
+			return S_OK
+		case 4:
+			data.source = hctxReadUTF16(ctx.Mem, ctx.Arg(1))
+		case 5:
+			data.description = hctxReadUTF16(ctx.Mem, ctx.Arg(1))
+		case 6:
+			data.helpFile = hctxReadUTF16(ctx.Mem, ctx.Arg(1))
+		case 7:
+			data.helpContext = uint32(ctx.Arg(1))
+		default:
+			return E_NOTIMPL
+		}
+		if peerObj := cs.objects[data.peer]; peerObj != nil {
+			if peer, _ := peerObj.data.(*errorInfoData); peer != nil {
+				peer.source = data.source
+				peer.description = data.description
+				peer.helpFile = data.helpFile
+				peer.helpContext = data.helpContext
+			}
+		}
+		return S_OK
+	case "error-info":
+		switch method {
+		case 3:
+			if pguid := ctx.Arg(1); pguid != 0 {
+				writeGUID(ctx.Mem, pguid, data.guid)
+			}
+			return S_OK
+		case 4:
+			if pp := ctx.Arg(1); pp != 0 {
+				ctx.Mem.Write64(pp, cs.allocBSTRString(data.source))
+			}
+			return S_OK
+		case 5:
+			if pp := ctx.Arg(1); pp != 0 {
+				ctx.Mem.Write64(pp, cs.allocBSTRString(data.description))
+			}
+			return S_OK
+		case 6:
+			if pp := ctx.Arg(1); pp != 0 {
+				ctx.Mem.Write64(pp, cs.allocBSTRString(data.helpFile))
+			}
+			return S_OK
+		case 7:
+			if pctx := ctx.Arg(1); pctx != 0 {
+				ctx.Mem.Write32(pctx, data.helpContext)
+			}
+			return S_OK
+		}
+	}
+	return E_NOTIMPL
+}
+
+func (cs *comState) dispatchTypeLib(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	switch method {
+	case 3:
+		ctx.SetReturn(0)
+		return 0
 	default:
 		return E_NOTIMPL
 	}
@@ -513,6 +2356,984 @@ func (cs *comState) dispatchIMalloc(ctx *ntapi.TrapContext, method int) uint32 {
 	}
 }
 
+func (cs *comState) dispatchShellLink(ctx *ntapi.TrapContext, obj *comObject, method int, wide bool) uint32 {
+	data, _ := obj.data.(*shellLinkData)
+	if data == nil {
+		return E_FAIL
+	}
+	readStr := func(ptr uint64) string {
+		if wide {
+			return readGuestUTF16String(cs.mem, ptr)
+		}
+		return readGuestANSIString(cs.mem, ptr)
+	}
+	writeStr := func(ptr uint64, s string, cch int) {
+		if wide {
+			writeGuestUTF16StringN(cs.mem, ptr, s, cch)
+		} else {
+			writeGuestANSIStringN(cs.mem, ptr, s, cch)
+		}
+	}
+	switch method {
+	case 3:
+		writeStr(ctx.Arg(1), data.path, int(ctx.Arg(2)))
+		if pfd := ctx.Arg(3); pfd != 0 {
+			cs.mem.WriteBytes(pfd, make([]byte, 320))
+		}
+		return S_OK
+	case 4:
+		ppidl := ctx.Arg(1)
+		if ppidl == 0 {
+			return E_POINTER
+		}
+		pidl := allocPIDLFromPath(cs.mem, cs.allocTaskMem, data.path)
+		if pidl == 0 {
+			return E_OUTOFMEMORY
+		}
+		cs.mem.Write64(ppidl, pidl)
+		return S_OK
+	case 5:
+		data.path = pidlPathFromMemory(cs.mem, ctx.Arg(1))
+		data.dirty = true
+		return S_OK
+	case 6:
+		writeStr(ctx.Arg(1), data.description, int(ctx.Arg(2)))
+		return S_OK
+	case 7:
+		data.description = readStr(ctx.Arg(1))
+		data.dirty = true
+		return S_OK
+	case 8:
+		writeStr(ctx.Arg(1), data.workingDir, int(ctx.Arg(2)))
+		return S_OK
+	case 9:
+		data.workingDir = readStr(ctx.Arg(1))
+		data.dirty = true
+		return S_OK
+	case 10:
+		writeStr(ctx.Arg(1), data.arguments, int(ctx.Arg(2)))
+		return S_OK
+	case 11:
+		data.arguments = readStr(ctx.Arg(1))
+		data.dirty = true
+		return S_OK
+	case 12:
+		if ptr := ctx.Arg(1); ptr != 0 {
+			cs.mem.Write16(ptr, data.hotkey)
+		}
+		return S_OK
+	case 13:
+		data.hotkey = uint16(ctx.Arg(1))
+		data.dirty = true
+		return S_OK
+	case 14:
+		if ptr := ctx.Arg(1); ptr != 0 {
+			cs.mem.Write32(ptr, uint32(data.showCmd))
+		}
+		return S_OK
+	case 15:
+		data.showCmd = int32(ctx.Arg(1))
+		data.dirty = true
+		return S_OK
+	case 16:
+		writeStr(ctx.Arg(1), data.iconLocation, int(ctx.Arg(2)))
+		if pIndex := ctx.Arg(3); pIndex != 0 {
+			cs.mem.Write32(pIndex, uint32(data.iconIndex))
+		}
+		return S_OK
+	case 17:
+		data.iconLocation = readStr(ctx.Arg(1))
+		data.iconIndex = int32(ctx.Arg(2))
+		data.dirty = true
+		return S_OK
+	case 18:
+		return S_OK
+	case 19:
+		if data.path == "" {
+			return S_FALSE
+		}
+		if !isAbsoluteWinPath(data.path) && data.currentFile != "" {
+			base := filepath.Dir(data.currentFile)
+			data.path = canonicalizeWinPath(base + `\` + data.path)
+		}
+		return S_OK
+	case 20:
+		data.path = readStr(ctx.Arg(1))
+		data.dirty = true
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchPersistFile(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	data, _ := obj.data.(*shellLinkData)
+	if data == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 3:
+		if pClassID := ctx.Arg(1); pClassID != 0 {
+			writeGUID(cs.mem, pClassID, CLSID_ShellLink)
+			return S_OK
+		}
+		return E_POINTER
+	case 4:
+		if data.dirty {
+			return S_OK
+		}
+		return S_FALSE
+	case 5:
+		path := readGuestUTF16String(cs.mem, ctx.Arg(1))
+		if path == "" {
+			return STG_E_INVALIDNAME
+		}
+		b, err := os.ReadFile(winToLinuxPath(path))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return STG_E_FILENOTFOUND
+			}
+			return E_FAIL
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if !strings.Contains(line, "=") {
+				continue
+			}
+			k, v, _ := strings.Cut(line, "=")
+			switch strings.TrimSpace(k) {
+			case "Path":
+				data.path = strings.TrimSpace(v)
+			case "Description":
+				data.description = strings.TrimSpace(v)
+			case "WorkingDirectory":
+				data.workingDir = strings.TrimSpace(v)
+			case "Arguments":
+				data.arguments = strings.TrimSpace(v)
+			case "IconLocation":
+				data.iconLocation = strings.TrimSpace(v)
+			case "IconIndex":
+				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+					data.iconIndex = int32(n)
+				}
+			case "ShowCmd":
+				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+					data.showCmd = int32(n)
+				}
+			case "Hotkey":
+				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+					data.hotkey = uint16(n)
+				}
+			}
+		}
+		data.currentFile = path
+		data.dirty = false
+		return S_OK
+	case 6:
+		path := readGuestUTF16String(cs.mem, ctx.Arg(1))
+		if path == "" {
+			path = data.currentFile
+		}
+		if path == "" {
+			return STG_E_INVALIDNAME
+		}
+		host := winToLinuxPath(path)
+		if err := os.MkdirAll(filepath.Dir(host), 0o755); err != nil {
+			return STG_E_PATHNOTFOUND
+		}
+		content := strings.Join([]string{
+			"[ShellLink]",
+			"Path=" + data.path,
+			"Description=" + data.description,
+			"WorkingDirectory=" + data.workingDir,
+			"Arguments=" + data.arguments,
+			"IconLocation=" + data.iconLocation,
+			"IconIndex=" + strconv.Itoa(int(data.iconIndex)),
+			"ShowCmd=" + strconv.Itoa(int(data.showCmd)),
+			"Hotkey=" + strconv.Itoa(int(data.hotkey)),
+			"",
+		}, "\n")
+		if err := os.WriteFile(host, []byte(content), 0o644); err != nil {
+			return E_FAIL
+		}
+		if ctx.Arg(2) != 0 {
+			data.currentFile = path
+		}
+		data.dirty = false
+		return S_OK
+	case 7:
+		if path := readGuestUTF16String(cs.mem, ctx.Arg(1)); path != "" {
+			data.currentFile = path
+		}
+		data.dirty = false
+		return S_OK
+	case 8:
+		ppszFile := ctx.Arg(1)
+		if ppszFile == 0 {
+			return E_POINTER
+		}
+		cur := data.currentFile
+		if cur == "" {
+			cur = data.path
+		}
+		buf := cs.allocTaskMem(uint64((len(utf16Encode(cur))+1)*2), true)
+		if buf == 0 {
+			return E_OUTOFMEMORY
+		}
+		writeGuestUTF16String(cs.mem, buf, cur)
+		cs.mem.Write64(ppszFile, buf)
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchShellFolder(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	data, _ := obj.data.(*shellFolderData)
+	if data == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 3:
+		name := readGuestUTF16String(cs.mem, ctx.Arg(3))
+		if name == "" {
+			name = data.path
+		}
+		if !isAbsoluteWinPath(name) {
+			name = canonicalizeWinPath(data.path + `\` + name)
+		}
+		if pchEaten := ctx.Arg(4); pchEaten != 0 {
+			cs.mem.Write32(pchEaten, uint32(len(utf16Encode(readGuestUTF16String(cs.mem, ctx.Arg(3))))))
+		}
+		if ppidl := ctx.Arg(5); ppidl != 0 {
+			pidl := allocPIDLFromPath(cs.mem, cs.allocTaskMem, name)
+			if pidl == 0 {
+				return E_OUTOFMEMORY
+			}
+			cs.mem.Write64(ppidl, pidl)
+		}
+		if attrs := ctx.Arg(6); attrs != 0 {
+			cs.mem.Write32(attrs, 0)
+		}
+		return S_OK
+	case 4:
+		ppenum := ctx.Arg(3)
+		if ppenum == 0 {
+			return E_POINTER
+		}
+		entries, err := os.ReadDir(winToLinuxPath(data.path))
+		if err != nil {
+			return E_FAIL
+		}
+		items := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			items = append(items, canonicalizeWinPath(data.path+`\`+entry.Name()))
+		}
+		enumObj, err := cs.createEnumIDListObject(items, 0)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		cs.mem.Write64(ppenum, enumObj.objectAddr)
+		return S_OK
+	case 5:
+		pidl := ctx.Arg(1)
+		riid := ctx.Arg(3)
+		ppv := ctx.Arg(4)
+		if ppv == 0 || riid == 0 {
+			return E_POINTER
+		}
+		cs.mem.Write64(ppv, 0)
+		reqIID := readGUID(cs.mem, riid)
+		if !guidEqual(reqIID, IID_IShellFolder) && !guidEqual(reqIID, IID_IUnknown) {
+			return E_NOINTERFACE
+		}
+		child := pidlPathFromMemory(cs.mem, pidl)
+		if child == "" {
+			return E_INVALIDARG
+		}
+		obj2, err := cs.createShellFolderObject(child)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		cs.mem.Write64(ppv, obj2.objectAddr)
+		return S_OK
+	case 7:
+		a := strings.ToLower(pidlPathFromMemory(cs.mem, ctx.Arg(2)))
+		b := strings.ToLower(pidlPathFromMemory(cs.mem, ctx.Arg(3)))
+		switch {
+		case a == b:
+			return S_OK
+		case a < b:
+			return uint32(0xFFFFFFFF)
+		default:
+			return 1
+		}
+	case 9:
+		if rgf := ctx.Arg(3); rgf != 0 {
+			cs.mem.Write32(rgf, 0)
+		}
+		return S_OK
+	case 11:
+		pidl := ctx.Arg(1)
+		pName := ctx.Arg(3)
+		if pName == 0 {
+			return E_POINTER
+		}
+		name := filepath.Base(winToLinuxPath(pidlPathFromMemory(cs.mem, pidl)))
+		if name == "." || name == "/" || name == "" {
+			name = filepath.Base(winToLinuxPath(data.path))
+		}
+		ptr := cs.allocTaskMem(uint64((len(utf16Encode(name))+1)*2), true)
+		if ptr == 0 {
+			return E_OUTOFMEMORY
+		}
+		writeGuestUTF16String(cs.mem, ptr, name)
+		cs.mem.Write32(pName, 0)
+		cs.mem.Write64(pName+8, ptr)
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchEnumIDList(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	data, _ := obj.data.(*enumIDListData)
+	if data == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 3:
+		celt := int(ctx.Arg(1))
+		rgelt := ctx.Arg(2)
+		pceltFetched := ctx.Arg(3)
+		if rgelt == 0 {
+			return E_POINTER
+		}
+		if pceltFetched != 0 {
+			cs.mem.Write32(pceltFetched, 0)
+		}
+		count := 0
+		for count < celt && data.index < len(data.items) {
+			pidl := allocPIDLFromPath(cs.mem, cs.allocTaskMem, data.items[data.index])
+			if pidl == 0 {
+				return E_OUTOFMEMORY
+			}
+			cs.mem.Write64(rgelt+uint64(count)*8, pidl)
+			data.index++
+			count++
+		}
+		if pceltFetched != 0 {
+			cs.mem.Write32(pceltFetched, uint32(count))
+		}
+		if count == celt {
+			return S_OK
+		}
+		return S_FALSE
+	case 4:
+		data.index += int(ctx.Arg(1))
+		if data.index > len(data.items) {
+			data.index = len(data.items)
+			return S_FALSE
+		}
+		return S_OK
+	case 5:
+		data.index = 0
+		return S_OK
+	case 6:
+		ppenum := ctx.Arg(1)
+		if ppenum == 0 {
+			return E_POINTER
+		}
+		clone, err := cs.createEnumIDListObject(append([]string(nil), data.items...), data.index)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		cs.mem.Write64(ppenum, clone.objectAddr)
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchIStream(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	var pos *int64
+	switch s := obj.data.(type) {
+	case *memStream:
+		pos = &s.pos
+	case *fileStream:
+		pos = &s.pos
+	}
+	switch method {
+	case 3:
+		pv := ctx.Arg(1)
+		cb := ctx.Arg(2)
+		pcbRead := ctx.Arg(3)
+		if pv == 0 && cb != 0 {
+			return STG_E_INVALIDPOINTER
+		}
+		if pcbRead != 0 {
+			ctx.Mem.Write32(pcbRead, 0)
+		}
+		tmp := make([]byte, int(cb))
+		n, err := streamReadAt(obj.data, *pos, tmp)
+		if n > 0 {
+			ctx.Mem.WriteBytes(pv, tmp[:n])
+			*pos += int64(n)
+		}
+		if pcbRead != 0 {
+			ctx.Mem.Write32(pcbRead, uint32(n))
+		}
+		if err != nil && err != io.EOF {
+			return hresultFromError(err)
+		}
+		if uint64(n) == cb {
+			return S_OK
+		}
+		return S_FALSE
+	case 4:
+		pv := ctx.Arg(1)
+		cb := ctx.Arg(2)
+		pcbWritten := ctx.Arg(3)
+		if pv == 0 && cb != 0 {
+			return STG_E_INVALIDPOINTER
+		}
+		if pcbWritten != 0 {
+			ctx.Mem.Write32(pcbWritten, 0)
+		}
+		src, err := ctx.Mem.ReadBytes(pv, int(cb))
+		if err != nil && cb != 0 {
+			return E_POINTER
+		}
+		n, err := streamWriteAt(obj.data, *pos, src)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		*pos += int64(n)
+		if pcbWritten != 0 {
+			ctx.Mem.Write32(pcbWritten, uint32(n))
+		}
+		return S_OK
+	case 5:
+		dlibMove := int64(ctx.Arg(1))
+		dwOrigin := uint32(ctx.Arg(2))
+		plibNewPosition := ctx.Arg(3)
+		size, err := streamSize(obj.data)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		var base int64
+		switch dwOrigin {
+		case 0:
+			base = 0
+		case 1:
+			base = *pos
+		case 2:
+			base = size
+		default:
+			return E_INVALIDARG
+		}
+		next := base + dlibMove
+		if next < 0 {
+			return E_INVALIDARG
+		}
+		*pos = next
+		if plibNewPosition != 0 {
+			ctx.Mem.Write64Raw(plibNewPosition, uint64(next))
+		}
+		return S_OK
+	case 6:
+		if err := streamSetSize(obj.data, int64(ctx.Arg(1))); err != nil {
+			return hresultFromError(err)
+		}
+		return S_OK
+	case 7:
+		pstm := ctx.Arg(1)
+		cb := ctx.Arg(2)
+		pcbRead := ctx.Arg(3)
+		pcbWritten := ctx.Arg(4)
+		if pcbRead != 0 {
+			ctx.Mem.Write64Raw(pcbRead, 0)
+		}
+		if pcbWritten != 0 {
+			ctx.Mem.Write64Raw(pcbWritten, 0)
+		}
+		dest := cs.objects[pstm]
+		if dest == nil || dest.kind != "istream" {
+			return E_POINTER
+		}
+		var dstPos *int64
+		switch s := dest.data.(type) {
+		case *memStream:
+			dstPos = &s.pos
+		case *fileStream:
+			dstPos = &s.pos
+		default:
+			return E_FAIL
+		}
+		remaining := cb
+		buf := make([]byte, 64*1024)
+		var total uint64
+		for remaining > 0 {
+			chunk := minU64(remaining, uint64(len(buf)))
+			n, err := streamReadAt(obj.data, *pos, buf[:chunk])
+			if n > 0 {
+				written, writeErr := streamWriteAt(dest.data, *dstPos, buf[:n])
+				if writeErr != nil {
+					return hresultFromError(writeErr)
+				}
+				*pos += int64(n)
+				*dstPos += int64(written)
+				total += uint64(written)
+				remaining -= uint64(written)
+			}
+			if err == io.EOF || n == 0 {
+				break
+			}
+			if err != nil {
+				return hresultFromError(err)
+			}
+		}
+		if pcbRead != 0 {
+			ctx.Mem.Write64Raw(pcbRead, total)
+		}
+		if pcbWritten != 0 {
+			ctx.Mem.Write64Raw(pcbWritten, total)
+		}
+		if total == cb {
+			return S_OK
+		}
+		return S_FALSE
+	case 8:
+		if err := streamCommit(obj.data); err != nil {
+			return hresultFromError(err)
+		}
+		return S_OK
+	case 9:
+		return STG_E_REVERTED
+	case 10, 11:
+		return S_OK
+	case 12:
+		pstatstg := ctx.Arg(1)
+		grfStatFlag := uint32(ctx.Arg(2))
+		if pstatstg == 0 {
+			return E_POINTER
+		}
+		size, err := streamSize(obj.data)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		writeSTATSTG(ctx.Mem, cs, pstatstg, statStgEntry{
+			name:    streamName(obj.data),
+			stgType: STGTY_STREAM,
+			size:    uint64(size),
+			modTime: streamModTime(obj.data),
+		}, grfStatFlag, 0)
+		return S_OK
+	case 13:
+		ppstm := ctx.Arg(1)
+		if ppstm == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppstm, 0)
+		var clone *comObject
+		var err error
+		switch s := obj.data.(type) {
+		case *memStream:
+			s.buffer.addRef()
+			clone, err = cs.createMemoryStreamObject(s.buffer, s.name)
+			if err == nil {
+				clone.data.(*memStream).pos = s.pos
+			}
+		case *fileStream:
+			clone, err = cs.createFileStreamObject(s.path, s.name, s.grfMode, false)
+			if err == nil {
+				clone.data.(*fileStream).pos = s.pos
+			}
+		default:
+			return E_FAIL
+		}
+		if err != nil {
+			return hresultFromError(err)
+		}
+		ctx.Mem.Write64(ppstm, clone.objectAddr)
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchILockBytes(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	lb, _ := obj.data.(*lockBytes)
+	if lb == nil || lb.buffer == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 3:
+		offset := int64(ctx.Arg(1))
+		pv := ctx.Arg(2)
+		cb := ctx.Arg(3)
+		pcbRead := ctx.Arg(4)
+		if pv == 0 && cb != 0 {
+			return STG_E_INVALIDPOINTER
+		}
+		if pcbRead != 0 {
+			ctx.Mem.Write32(pcbRead, 0)
+		}
+		if offset < 0 || offset >= int64(len(lb.buffer.data)) {
+			return S_FALSE
+		}
+		chunk := lb.buffer.data[int(offset):]
+		if uint64(len(chunk)) > cb {
+			chunk = chunk[:cb]
+		}
+		if len(chunk) > 0 {
+			ctx.Mem.WriteBytes(pv, chunk)
+		}
+		if pcbRead != 0 {
+			ctx.Mem.Write32(pcbRead, uint32(len(chunk)))
+		}
+		if uint64(len(chunk)) == cb {
+			return S_OK
+		}
+		return S_FALSE
+	case 4:
+		offset := int64(ctx.Arg(1))
+		pv := ctx.Arg(2)
+		cb := ctx.Arg(3)
+		pcbWritten := ctx.Arg(4)
+		if pv == 0 && cb != 0 {
+			return STG_E_INVALIDPOINTER
+		}
+		if pcbWritten != 0 {
+			ctx.Mem.Write32(pcbWritten, 0)
+		}
+		src, err := ctx.Mem.ReadBytes(pv, int(cb))
+		if err != nil && cb != 0 {
+			return E_POINTER
+		}
+		if err := lb.buffer.setSize(offset + int64(len(src))); err != nil {
+			return hresultFromError(err)
+		}
+		copy(lb.buffer.data[int(offset):], src)
+		if pcbWritten != 0 {
+			ctx.Mem.Write32(pcbWritten, uint32(len(src)))
+		}
+		return S_OK
+	case 5:
+		return S_OK
+	case 6:
+		if err := lb.buffer.setSize(int64(ctx.Arg(1))); err != nil {
+			return hresultFromError(err)
+		}
+		return S_OK
+	case 7, 8:
+		return S_OK
+	case 9:
+		pstatstg := ctx.Arg(1)
+		grfStatFlag := uint32(ctx.Arg(2))
+		if pstatstg == 0 {
+			return E_POINTER
+		}
+		writeSTATSTG(ctx.Mem, cs, pstatstg, statStgEntry{
+			stgType: STGTY_LOCKBYTES,
+			size:    uint64(len(lb.buffer.data)),
+		}, grfStatFlag, 0)
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchIEnumSTATSTG(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	enumObj, _ := obj.data.(*enumSTATSTG)
+	if enumObj == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 3:
+		celt := int(ctx.Arg(1))
+		rgelt := ctx.Arg(2)
+		pceltFetched := ctx.Arg(3)
+		if celt != 1 && pceltFetched == 0 {
+			return E_POINTER
+		}
+		if pceltFetched != 0 {
+			ctx.Mem.Write32(pceltFetched, 0)
+		}
+		fetched := 0
+		for fetched < celt && enumObj.index < len(enumObj.entries) {
+			writeSTATSTG(ctx.Mem, cs, rgelt+uint64(fetched*72), enumObj.entries[enumObj.index], 0, 0)
+			enumObj.index++
+			fetched++
+		}
+		if pceltFetched != 0 {
+			ctx.Mem.Write32(pceltFetched, uint32(fetched))
+		}
+		if fetched == celt {
+			return S_OK
+		}
+		return S_FALSE
+	case 4:
+		enumObj.index += int(ctx.Arg(1))
+		if enumObj.index > len(enumObj.entries) {
+			enumObj.index = len(enumObj.entries)
+			return S_FALSE
+		}
+		return S_OK
+	case 5:
+		enumObj.index = 0
+		return S_OK
+	case 6:
+		ppenum := ctx.Arg(1)
+		if ppenum == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppenum, 0)
+		cloneEntries := append([]statStgEntry(nil), enumObj.entries...)
+		clone, err := cs.createEnumSTATSTGObject(cloneEntries)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		clone.data.(*enumSTATSTG).index = enumObj.index
+		ctx.Mem.Write64(ppenum, clone.objectAddr)
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchIStorage(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	ds, _ := obj.data.(*dirStorage)
+	if ds == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 3:
+		ppstm := ctx.Arg(5)
+		if ppstm == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppstm, 0)
+		name := readGuestUTF16String(ctx.Mem, ctx.Arg(1))
+		grfMode := uint32(ctx.Arg(2))
+		path, err := storageElementPath(ds.path, name)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		stream, err := cs.createFileStreamObject(path, name, grfMode, true)
+		if err != nil {
+			return mapStorageError(err)
+		}
+		ctx.Mem.Write64(ppstm, stream.objectAddr)
+		return S_OK
+	case 4:
+		ppstm := ctx.Arg(5)
+		if ppstm == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppstm, 0)
+		name := readGuestUTF16String(ctx.Mem, ctx.Arg(1))
+		grfMode := uint32(ctx.Arg(3))
+		path, err := storageElementPath(ds.path, name)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		stream, err := cs.createFileStreamObject(path, name, grfMode, false)
+		if err != nil {
+			return mapStorageError(err)
+		}
+		ctx.Mem.Write64(ppstm, stream.objectAddr)
+		return S_OK
+	case 5:
+		ppstg := ctx.Arg(5)
+		if ppstg == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppstg, 0)
+		name := readGuestUTF16String(ctx.Mem, ctx.Arg(1))
+		grfMode := uint32(ctx.Arg(2))
+		path, err := storageElementPath(ds.path, name)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		if err := os.MkdirAll(path, 0755); err != nil {
+			return mapStorageError(err)
+		}
+		child, err := cs.createStorageObject(path, name, grfMode, grfMode&STGM_DELETEONRELEASE != 0)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		persistStorageMetadata(child.data.(*dirStorage))
+		ctx.Mem.Write64(ppstg, child.objectAddr)
+		return S_OK
+	case 6:
+		ppstg := ctx.Arg(6)
+		if ppstg == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppstg, 0)
+		name := readGuestUTF16String(ctx.Mem, ctx.Arg(1))
+		grfMode := uint32(ctx.Arg(3))
+		path, err := storageElementPath(ds.path, name)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return mapStorageError(err)
+		}
+		if !info.IsDir() {
+			return STG_E_FILENOTFOUND
+		}
+		child, err := cs.createStorageObject(path, name, grfMode, false)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		ctx.Mem.Write64(ppstg, child.objectAddr)
+		return S_OK
+	case 7:
+		dest := cs.objects[ctx.Arg(4)]
+		if dest == nil || dest.kind != "istorage" {
+			return E_POINTER
+		}
+		if err := copyPathRecursive(ds.path, dest.data.(*dirStorage).path); err != nil {
+			return mapStorageError(err)
+		}
+		return S_OK
+	case 8:
+		name := readGuestUTF16String(ctx.Mem, ctx.Arg(1))
+		dest := cs.objects[ctx.Arg(2)]
+		if dest == nil || dest.kind != "istorage" {
+			return E_POINTER
+		}
+		newName := readGuestUTF16String(ctx.Mem, ctx.Arg(3))
+		if strings.TrimSpace(newName) == "" {
+			newName = name
+		}
+		srcPath, err := storageElementPath(ds.path, name)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		dstPath, err := storageElementPath(dest.data.(*dirStorage).path, newName)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		if err := os.Rename(srcPath, dstPath); err != nil {
+			if copyErr := copyPathRecursive(srcPath, dstPath); copyErr != nil {
+				return mapStorageError(copyErr)
+			}
+			_ = os.RemoveAll(srcPath)
+		}
+		return S_OK
+	case 9:
+		persistStorageMetadata(ds)
+		return S_OK
+	case 10:
+		return STG_E_REVERTED
+	case 11:
+		ppenum := ctx.Arg(4)
+		if ppenum == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(ppenum, 0)
+		entries, err := listStorageEntries(ds.path)
+		if err != nil {
+			return mapStorageError(err)
+		}
+		enumObj, err := cs.createEnumSTATSTGObject(entries)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		ctx.Mem.Write64(ppenum, enumObj.objectAddr)
+		return S_OK
+	case 12:
+		name := readGuestUTF16String(ctx.Mem, ctx.Arg(1))
+		path, err := storageElementPath(ds.path, name)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return mapStorageError(err)
+		}
+		return S_OK
+	case 13:
+		oldName := readGuestUTF16String(ctx.Mem, ctx.Arg(1))
+		newName := readGuestUTF16String(ctx.Mem, ctx.Arg(2))
+		oldPath, err := storageElementPath(ds.path, oldName)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		newPath, err := storageElementPath(ds.path, newName)
+		if err != nil {
+			return hresultFromError(err)
+		}
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return mapStorageError(err)
+		}
+		return S_OK
+	case 14:
+		targetPath := ds.path
+		if name := readGuestUTF16String(ctx.Mem, ctx.Arg(1)); strings.TrimSpace(name) != "" {
+			var err error
+			targetPath, err = storageElementPath(ds.path, name)
+			if err != nil {
+				return hresultFromError(err)
+			}
+		}
+		modTime := readFiletime(ctx.Mem, ctx.Arg(4))
+		accessTime := readFiletime(ctx.Mem, ctx.Arg(3))
+		if accessTime.IsZero() {
+			accessTime = modTime
+		}
+		if modTime.IsZero() {
+			modTime = time.Now()
+		}
+		if accessTime.IsZero() {
+			accessTime = modTime
+		}
+		if err := os.Chtimes(targetPath, accessTime, modTime); err != nil {
+			return mapStorageError(err)
+		}
+		return S_OK
+	case 15:
+		clsidPtr := ctx.Arg(1)
+		if clsidPtr == 0 {
+			return E_POINTER
+		}
+		ds.clsid = readGUID(ctx.Mem, clsidPtr)
+		persistStorageMetadata(ds)
+		return S_OK
+	case 16:
+		grfStateBits := uint32(ctx.Arg(1))
+		grfMask := uint32(ctx.Arg(2))
+		ds.stateBits = (ds.stateBits &^ grfMask) | (grfStateBits & grfMask)
+		persistStorageMetadata(ds)
+		return S_OK
+	case 17:
+		pstatstg := ctx.Arg(1)
+		grfStatFlag := uint32(ctx.Arg(2))
+		if pstatstg == 0 {
+			return E_POINTER
+		}
+		info, err := os.Stat(ds.path)
+		if err != nil {
+			return mapStorageError(err)
+		}
+		name := ds.name
+		if name == "" {
+			name = filepath.Base(ds.path)
+		}
+		writeSTATSTG(ctx.Mem, cs, pstatstg, statStgEntry{
+			name:    name,
+			stgType: STGTY_STORAGE,
+			modTime: info.ModTime(),
+			clsid:   ds.clsid,
+		}, grfStatFlag, ds.stateBits)
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
 func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uint32 {
 	obj := cs.objects[ctx.Arg(0)]
 	if obj == nil {
@@ -533,8 +3354,32 @@ func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uin
 		return cs.dispatchClassFactory(ctx, obj, method)
 	case "imalloc":
 		return cs.dispatchIMalloc(ctx, method)
-	case "idispatch":
-		return cs.dispatchIDispatch(ctx, method)
+	case "shell-link-w":
+		return cs.dispatchShellLink(ctx, obj, method, true)
+	case "shell-link-a":
+		return cs.dispatchShellLink(ctx, obj, method, false)
+	case "persist-file":
+		return cs.dispatchPersistFile(ctx, obj, method)
+	case "shell-folder":
+		return cs.dispatchShellFolder(ctx, obj, method)
+	case "enum-idlist":
+		return cs.dispatchEnumIDList(ctx, obj, method)
+	case "idispatch", "std-dispatch":
+		return cs.dispatchIDispatch(ctx, obj, method)
+	case "type-info":
+		return cs.dispatchTypeInfo(ctx, obj, method)
+	case "create-error-info", "error-info":
+		return cs.dispatchErrorInfo(ctx, obj, method)
+	case "type-lib":
+		return cs.dispatchTypeLib(ctx, obj, method)
+	case "istream":
+		return cs.dispatchIStream(ctx, obj, method)
+	case "ilockbytes":
+		return cs.dispatchILockBytes(ctx, obj, method)
+	case "istorage":
+		return cs.dispatchIStorage(ctx, obj, method)
+	case "ienumstatstg":
+		return cs.dispatchIEnumSTATSTG(ctx, obj, method)
 	default:
 		return E_NOTIMPL
 	}
@@ -798,34 +3643,21 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateStreamOnHGlobal", func(ctx *ntapi.TrapContext) uint32 {
-		// hGlobal, fDeleteOnRelease, ppstm
+		hGlobal := ctx.Arg(0)
+		fDeleteOnRelease := ctx.Arg(1)
 		ppstm := ctx.Arg(2)
 		if ppstm == 0 {
-			ctx.SetReturn(0x80004003)
+			ctx.SetReturn(uint64(E_POINTER))
 			return 0
 		}
-		// Minimal IStream stub (same IUnknown pattern)
-		objAddr := mem.Mmap(0, 8+64+10*64, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-		vtAddr := objAddr + 8
-		stubBase := vtAddr + 80 // 10 vtable entries × 8
-		// Write xor eax,eax; ret for all 10 IStream methods
-		for i := uint64(0); i < 10; i++ {
-			s := stubBase + i*64
-			ctx.Mem.Write8(s+0, 0x31)
-			ctx.Mem.Write8(s+1, 0xC0)
-			ctx.Mem.Write8(s+2, 0xC3)
-			ctx.Mem.Write64(vtAddr+i*8, s)
+		ctx.Mem.Write64(ppstm, 0)
+		stream, err := cs.createMemoryStreamObject(newMemoryBuffer(mem, hGlobal, fDeleteOnRelease != 0), "")
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
 		}
-		// AddRef/Release (idx 1,2) → return 1
-		for _, i := range []uint64{1, 2} {
-			s := stubBase + i*64
-			ctx.Mem.Write8(s+0, 0xB8)
-			ctx.Mem.Write32(s+1, 1)
-			ctx.Mem.Write8(s+5, 0xC3)
-		}
-		ctx.Mem.Write64(objAddr, vtAddr)
-		ctx.Mem.Write64(ppstm, objAddr)
-		ctx.SetReturn(0) // S_OK
+		ctx.Mem.Write64(ppstm, stream.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoUninitialize", func(ctx *ntapi.TrapContext) uint32 {
@@ -1652,11 +4484,21 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateILockBytesOnHGlobal", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[ole32] CreateILockBytesOnHGlobal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		hGlobal := ctx.Arg(0)
+		fDeleteOnRelease := ctx.Arg(1)
+		pplkbyt := ctx.Arg(2)
+		if pplkbyt == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(pplkbyt, 0)
+		obj, err := cs.createLockBytesObject(newMemoryBuffer(mem, hGlobal, fDeleteOnRelease != 0))
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(pplkbyt, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateItemMoniker", func(ctx *ntapi.TrapContext) uint32 {
@@ -1752,17 +4594,47 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetHGlobalFromILockBytes", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[ole32] GetHGlobalFromILockBytes p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		punk := ctx.Arg(0)
+		phglobal := ctx.Arg(1)
+		if phglobal == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(phglobal, 0)
+		obj := cs.objects[punk]
+		if obj == nil {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		lb, ok := obj.data.(*lockBytes)
+		if !ok || lb.buffer == nil {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		ctx.Mem.Write64(phglobal, lb.buffer.syncToHGlobal(mem))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetHGlobalFromStream", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[ole32] GetHGlobalFromStream p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		pstm := ctx.Arg(0)
+		phglobal := ctx.Arg(1)
+		if phglobal == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(phglobal, 0)
+		obj := cs.objects[pstm]
+		if obj == nil {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ms, ok := obj.data.(*memStream)
+		if !ok || ms.buffer == nil {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		ctx.Mem.Write64(phglobal, ms.buffer.syncToHGlobal(mem))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetRunningObjectTable", func(ctx *ntapi.TrapContext) uint32 {
@@ -2636,17 +5508,34 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0)
 		return 0
 	})
+	d.RegisterAutoStubHandler(ole32, "PropVariantInit", func(ctx *ntapi.TrapContext) uint32 {
+		pvar := ctx.Arg(0)
+		if pvar != 0 {
+			ctx.Mem.WriteBytes(pvar, make([]byte, variantSize))
+		}
+		return 0
+	})
 	d.RegisterAutoStubHandler(ole32, "PropVariantClear", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] PropVariantClear p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		pvar := ctx.Arg(0)
+		if pvar == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.WriteBytes(pvar, make([]byte, variantSize))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "PropVariantCopy", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[ole32] PropVariantCopy p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		dest := ctx.Arg(0)
+		src := ctx.Arg(1)
+		if dest == 0 || src == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		if data, err := ctx.Mem.ReadBytes(src, variantSize); err == nil {
+			ctx.Mem.WriteBytes(dest, data)
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "ReadClassStg", func(ctx *ntapi.TrapContext) uint32 {
@@ -2788,125 +5677,313 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreateDocfile", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[ole32] StgCreateDocfile p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		pwcsName := ctx.Arg(0)
+		grfMode := uint32(ctx.Arg(1))
+		ppstgOpen := ctx.Arg(3)
+		if ppstgOpen == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppstgOpen, 0)
+		hostPath, err := storageHostPath(readGuestUTF16(pwcsName))
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		if info, statErr := os.Stat(hostPath); statErr == nil && !info.IsDir() {
+			ctx.SetReturn(uint64(STG_E_FILEALREADYEXISTS))
+			return 0
+		}
+		if err := os.MkdirAll(hostPath, 0755); err != nil {
+			ctx.SetReturn(uint64(mapStorageError(err)))
+			return 0
+		}
+		obj, err := cs.createStorageObject(hostPath, filepath.Base(hostPath), grfMode, grfMode&STGM_DELETEONRELEASE != 0)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		persistStorageMetadata(obj.data.(*dirStorage))
+		ctx.Mem.Write64(ppstgOpen, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreateDocfileOnILockBytes", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[ole32] StgCreateDocfileOnILockBytes p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		plkbyt := ctx.Arg(0)
+		grfMode := uint32(ctx.Arg(1))
+		ppstgOpen := ctx.Arg(3)
+		if ppstgOpen == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppstgOpen, 0)
+		if cs.objects[plkbyt] == nil {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		hostPath := filepath.Join(".govm-ilockbytes-storage", fmt.Sprintf("%016X", plkbyt))
+		if err := os.MkdirAll(hostPath, 0755); err != nil {
+			ctx.SetReturn(uint64(mapStorageError(err)))
+			return 0
+		}
+		obj, err := cs.createStorageObject(hostPath, filepath.Base(hostPath), grfMode, grfMode&STGM_DELETEONRELEASE != 0)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		persistStorageMetadata(obj.data.(*dirStorage))
+		ctx.Mem.Write64(ppstgOpen, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreatePropSetStg", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[ole32] StgCreatePropSetStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		pstg := ctx.Arg(0)
+		ppPropSetStg := ctx.Arg(2)
+		if ppPropSetStg == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppPropSetStg, 0)
+		obj := cs.objects[pstg]
+		if obj == nil {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppPropSetStg, pstg)
+		cs.addRef(obj)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreatePropStg", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[ole32] StgCreatePropStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
-		ctx.SetReturn(0)
+		punk := ctx.Arg(0)
+		pfmtid := ctx.Arg(1)
+		ppPropStg := ctx.Arg(5)
+		if ppPropStg == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppPropStg, 0)
+		obj := cs.objects[punk]
+		if obj == nil {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		stg, ok := obj.data.(*dirStorage)
+		if !ok {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		name := "__prop_" + strings.Trim(guidString(readGUID(ctx.Mem, pfmtid)), "{}")
+		path, err := storageElementPath(stg.path, name)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		stream, err := cs.createFileStreamObject(path, name, STGM_READWRITE|STGM_CREATE, true)
+		if err != nil {
+			ctx.SetReturn(uint64(mapStorageError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppPropStg, stream.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreateStorageEx", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[ole32] StgCreateStorageEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
-		ctx.SetReturn(0)
+		pwcsName := ctx.Arg(0)
+		grfMode := uint32(ctx.Arg(1))
+		riid := ctx.Arg(6)
+		ppObjectOpen := ctx.Arg(7)
+		if ppObjectOpen == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		if riid != 0 {
+			iid := readGUID(ctx.Mem, riid)
+			if !guidEqual(iid, IID_IStorage) && !guidEqual(iid, IID_IUnknown) {
+				ctx.SetReturn(uint64(E_NOINTERFACE))
+				return 0
+			}
+		}
+		ctx.Mem.Write64(ppObjectOpen, 0)
+		hostPath, err := storageHostPath(readGuestUTF16(pwcsName))
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		if err := os.MkdirAll(hostPath, 0755); err != nil {
+			ctx.SetReturn(uint64(mapStorageError(err)))
+			return 0
+		}
+		obj, err := cs.createStorageObject(hostPath, filepath.Base(hostPath), grfMode, grfMode&STGM_DELETEONRELEASE != 0)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		persistStorageMetadata(obj.data.(*dirStorage))
+		ctx.Mem.Write64(ppObjectOpen, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgIsStorageFile", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] StgIsStorageFile p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		hostPath, err := storageHostPath(readGuestUTF16(ctx.Arg(0)))
+		if err != nil {
+			ctx.SetReturn(uint64(S_FALSE))
+			return 0
+		}
+		info, statErr := os.Stat(hostPath)
+		if statErr == nil && info.IsDir() {
+			ctx.SetReturn(S_OK)
+		} else {
+			ctx.SetReturn(S_FALSE)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgIsStorageILockBytes", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] StgIsStorageILockBytes p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		obj := cs.objects[ctx.Arg(0)]
+		if obj != nil && obj.kind == "ilockbytes" {
+			ctx.SetReturn(S_OK)
+		} else {
+			ctx.SetReturn(S_FALSE)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgOpenPropStg", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		ravelog.Logf("[ole32] StgOpenPropStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		ctx.SetReturn(0)
+		punk := ctx.Arg(0)
+		pfmtid := ctx.Arg(1)
+		grfMode := uint32(ctx.Arg(2))
+		ppPropStg := ctx.Arg(4)
+		if ppPropStg == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppPropStg, 0)
+		obj := cs.objects[punk]
+		if obj == nil {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		stg, ok := obj.data.(*dirStorage)
+		if !ok {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		name := "__prop_" + strings.Trim(guidString(readGUID(ctx.Mem, pfmtid)), "{}")
+		path, err := storageElementPath(stg.path, name)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		stream, err := cs.createFileStreamObject(path, name, grfMode, false)
+		if err != nil {
+			ctx.SetReturn(uint64(mapStorageError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppPropStg, stream.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgOpenStorage", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[ole32] StgOpenStorage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
-		ctx.SetReturn(0)
+		pwcsName := ctx.Arg(0)
+		grfMode := uint32(ctx.Arg(2))
+		ppstgOpen := ctx.Arg(5)
+		if ppstgOpen == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppstgOpen, 0)
+		hostPath, err := storageHostPath(readGuestUTF16(pwcsName))
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		info, err := os.Stat(hostPath)
+		if err != nil {
+			ctx.SetReturn(uint64(mapStorageError(err)))
+			return 0
+		}
+		if !info.IsDir() {
+			ctx.SetReturn(uint64(STG_E_FILENOTFOUND))
+			return 0
+		}
+		obj, err := cs.createStorageObject(hostPath, filepath.Base(hostPath), grfMode, false)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppstgOpen, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgOpenStorageEx", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[ole32] StgOpenStorageEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
-		ctx.SetReturn(0)
+		pwcsName := ctx.Arg(0)
+		grfMode := uint32(ctx.Arg(1))
+		riid := ctx.Arg(6)
+		ppObjectOpen := ctx.Arg(7)
+		if ppObjectOpen == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		if riid != 0 {
+			iid := readGUID(ctx.Mem, riid)
+			if !guidEqual(iid, IID_IStorage) && !guidEqual(iid, IID_IUnknown) {
+				ctx.SetReturn(uint64(E_NOINTERFACE))
+				return 0
+			}
+		}
+		ctx.Mem.Write64(ppObjectOpen, 0)
+		hostPath, err := storageHostPath(readGuestUTF16(pwcsName))
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		info, err := os.Stat(hostPath)
+		if err != nil {
+			ctx.SetReturn(uint64(mapStorageError(err)))
+			return 0
+		}
+		if !info.IsDir() {
+			ctx.SetReturn(uint64(STG_E_FILENOTFOUND))
+			return 0
+		}
+		obj, err := cs.createStorageObject(hostPath, filepath.Base(hostPath), grfMode, false)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppObjectOpen, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgOpenStorageOnILockBytes", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[ole32] StgOpenStorageOnILockBytes p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
-		ctx.SetReturn(0)
+		plkbyt := ctx.Arg(0)
+		grfMode := uint32(ctx.Arg(2))
+		ppstgOpen := ctx.Arg(5)
+		if ppstgOpen == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppstgOpen, 0)
+		if cs.objects[plkbyt] == nil {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		hostPath := filepath.Join(".govm-ilockbytes-storage", fmt.Sprintf("%016X", plkbyt))
+		info, err := os.Stat(hostPath)
+		if err != nil {
+			ctx.SetReturn(uint64(mapStorageError(err)))
+			return 0
+		}
+		if !info.IsDir() {
+			ctx.SetReturn(uint64(STG_E_FILENOTFOUND))
+			return 0
+		}
+		obj, err := cs.createStorageObject(hostPath, filepath.Base(hostPath), grfMode, false)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppstgOpen, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgSetTimes", func(ctx *ntapi.TrapContext) uint32 {
@@ -3007,7 +6084,6 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 
 func registerOleaut32Handlers(hctx *HandlerCtx) {
 	d := hctx.Disp
-	mem := hctx.Mem
 	cs := hctx.Com
 	if cs == nil {
 		cs = newCOMState(hctx)
@@ -3018,7 +6094,6 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 	if !ok {
 		return
 	}
-	sharedHeapAlloc := hctx.HeapAlloc
 	_ = oleaut32
 
 	d.RegisterAutoStubHandler(oleaut32, "SysAllocString", func(ctx *ntapi.TrapContext) uint32 {
@@ -3079,67 +6154,24 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// VariantInit: zero the 16-byte VARIANT struct
+	// VariantInit: zero the x64 VARIANT struct
 	d.RegisterAutoStubHandler(oleaut32, "VariantInit", func(ctx *ntapi.TrapContext) uint32 {
 		pVar := ctx.Arg(0)
 		if pVar != 0 {
-			zeros := make([]byte, 16)
-			ctx.Mem.WriteBytes(pVar, zeros) // VT_EMPTY = 0
+			writeVariantEmpty(ctx.Mem, pVar)
 		}
 		return 0
 	})
-	// VariantClear: reset VARIANT to VT_EMPTY
 	d.RegisterAutoStubHandler(oleaut32, "VariantClear", func(ctx *ntapi.TrapContext) uint32 {
-		pVar := ctx.Arg(0)
-		if pVar != 0 {
-			zeros := make([]byte, 16)
-			ctx.Mem.WriteBytes(pVar, zeros)
-		}
-		ctx.SetReturn(0) // S_OK
+		ctx.SetReturn(uint64(cs.variantClear(ctx.Arg(0))))
 		return 0
 	})
-	// VariantCopy
 	d.RegisterAutoStubHandler(oleaut32, "VariantCopy", func(ctx *ntapi.TrapContext) uint32 {
-		pDest := ctx.Arg(0)
-		pSrc := ctx.Arg(1)
-		if pDest != 0 && pSrc != 0 {
-			data, err := ctx.Mem.ReadBytes(pSrc, 16)
-			if err == nil {
-				ctx.Mem.WriteBytes(pDest, data)
-			}
-		}
-		ctx.SetReturn(0) // S_OK
+		ctx.SetReturn(uint64(cs.variantCopy(ctx.Arg(0), ctx.Arg(1))))
 		return 0
 	})
-	// VariantChangeType: Convert a VARIANT to a different type.
-	// ReactOS/Wine: dll/win32/oleaut32/variant.c
 	d.RegisterAutoStubHandler(oleaut32, "VariantChangeType", func(ctx *ntapi.TrapContext) uint32 {
-		// HRESULT VariantChangeType(VARIANTARG *pvargDest, const VARIANTARG *pvarSrc, USHORT wFlags, VARTYPE vt)
-		pvargDest := ctx.Arg(0)
-		pvarSrc := ctx.Arg(1)
-		vtTarget := uint16(ctx.Arg(3))
-		if pvargDest == 0 || pvarSrc == 0 {
-			ctx.SetReturn(0x80070057) // E_INVALIDARG
-			return 0
-		}
-		// VARIANT layout: vt(2), reserved(6), data(8..16)
-		vtSrc, _ := mem.Read16(pvarSrc)
-		const (
-			VT_EMPTY = 0
-			VT_I4    = 3
-			VT_BSTR  = 8
-		)
-		// Trivial same-type copy
-		if vtSrc == vtTarget {
-			for i := uint64(0); i < 24; i++ {
-				b, _ := mem.Read8(pvarSrc + i)
-				mem.Write8(pvargDest+i, b)
-			}
-			ctx.SetReturn(0) // S_OK
-			return 0
-		}
-		// Can't convert complex types - return DISP_E_TYPEMISMATCH
-		ctx.SetReturn(0x80020005)
+		ctx.SetReturn(uint64(cs.variantChangeType(ctx.Arg(0), ctx.Arg(1), uint16(ctx.Arg(3)))))
 		return 0
 	})
 	// ═══════════════════════════════════════════════════════════════
@@ -3191,30 +6223,73 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "CreateDispTypeInfo", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[oleaut32] CreateDispTypeInfo p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		pInterfaceData := ctx.Arg(0)
+		lcid := uint32(ctx.Arg(1))
+		ppTInfo := ctx.Arg(2)
+		if ppTInfo == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppTInfo, 0)
+		obj, err := cs.createTypeInfoObject(lcid)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ti, _ := obj.data.(*typeInfoData)
+		if pInterfaceData != 0 && ti != nil {
+			cMembers, _ := ctx.Mem.Read32(pInterfaceData + 8)
+			namesPtr, _ := ctx.Mem.Read64(pInterfaceData + 16)
+			for i := uint32(0); i < cMembers && namesPtr != 0; i++ {
+				namePtr, _ := ctx.Mem.Read64(namesPtr + uint64(i)*8)
+				name := hctxReadUTF16(ctx.Mem, namePtr)
+				if strings.TrimSpace(name) != "" {
+					cs.lookupDispID(obj.objectAddr, name, true)
+				}
+			}
+		}
+		ctx.Mem.Write64(ppTInfo, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "CreateErrorInfo", func(ctx *ntapi.TrapContext) uint32 {
 		pperrinfo := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] CreateErrorInfo out=0x%x\n", pperrinfo)
-		if pperrinfo != 0 {
-			ctx.Mem.Write64(pperrinfo, 0)
+		if pperrinfo == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
 		}
-		ctx.SetReturn(0x80004005) // E_FAIL
+		ctx.Mem.Write64(pperrinfo, 0)
+		createObj, readObj, err := cs.createErrorInfoObjects()
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		cs.errorInfo = readObj.objectAddr
+		ctx.Mem.Write64(pperrinfo, createObj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "CreateStdDispatch", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[oleaut32] CreateStdDispatch p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		punkOuter := ctx.Arg(0)
+		pvThis := ctx.Arg(1)
+		ptinfo := ctx.Arg(2)
+		ppunkStdDisp := ctx.Arg(3)
+		if ppunkStdDisp == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppunkStdDisp, 0)
+		if punkOuter != 0 {
+			ctx.SetReturn(uint64(CLASS_E_NOAGGREGATION))
+			return 0
+		}
+		obj, err := cs.createStdDispatchObject(pvThis, ptinfo)
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppunkStdDisp, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "CreateTypeLib", func(ctx *ntapi.TrapContext) uint32 {
@@ -3248,13 +6323,29 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DispGetIDsOfNames", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[oleaut32] DispGetIDsOfNames p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		ptinfo := ctx.Arg(0)
+		rgszNames := ctx.Arg(1)
+		cNames := int(ctx.Arg(2))
+		rgdispid := ctx.Arg(3)
+		if rgszNames == 0 || rgdispid == 0 || cNames <= 0 {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		for i := 0; i < cNames; i++ {
+			namePtr, _ := ctx.Mem.Read64(rgszNames + uint64(i)*8)
+			if namePtr == 0 {
+				ctx.SetReturn(uint64(DISP_E_UNKNOWNNAME))
+				return 0
+			}
+			name := hctxReadUTF16(ctx.Mem, namePtr)
+			id, ok := cs.lookupDispID(ptinfo, name, false)
+			if !ok {
+				ctx.SetReturn(uint64(DISP_E_UNKNOWNNAME))
+				return 0
+			}
+			ctx.Mem.Write32(rgdispid+uint64(i)*4, uint32(id))
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DispGetParam", func(ctx *ntapi.TrapContext) uint32 {
@@ -3270,17 +6361,31 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DispInvoke", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[oleaut32] DispInvoke p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
-		ctx.SetReturn(0)
+		pvThis := ctx.Arg(0)
+		ptinfo := ctx.Arg(1)
+		dispid := int32(uint32(ctx.Arg(2)))
+		pvarResult := ctx.Arg(5)
+		pexcepinfo := ctx.Arg(6)
+		puArgErr := ctx.Arg(7)
+		if pvarResult != 0 {
+			writeVariantEmpty(ctx.Mem, pvarResult)
+		}
+		if pexcepinfo != 0 {
+			ctx.Mem.WriteBytes(pexcepinfo, make([]byte, 56))
+		}
+		if puArgErr != 0 {
+			ctx.Mem.Write32(puArgErr, 0)
+		}
+		ti := cs.typeInfoFor(ptinfo)
+		if ti == nil || pvThis == 0 {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		if _, ok := ti.dispToID[dispid]; !ok {
+			ctx.SetReturn(uint64(DISP_E_MEMBERNOTFOUND))
+			return 0
+		}
+		ctx.SetReturn(uint64(DISP_E_MEMBERNOTFOUND))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DllCanUnloadNow", func(ctx *ntapi.TrapContext) uint32 {
@@ -3332,11 +6437,20 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(oleaut32, "GetErrorInfo", func(ctx *ntapi.TrapContext) uint32 {
 		dwReserved := ctx.Arg(0)
 		pperrinfo := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] GetErrorInfo reserved=%d out=0x%x\n", dwReserved, pperrinfo)
-		if pperrinfo != 0 {
-			ctx.Mem.Write64(pperrinfo, 0)
-		} // no error info
-		ctx.SetReturn(1) // S_FALSE - no error info available
+		_ = dwReserved
+		if pperrinfo == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(pperrinfo, 0)
+		if cs.errorInfo == 0 {
+			ctx.SetReturn(S_FALSE)
+			return 0
+		}
+		ctx.Mem.Write64(pperrinfo, cs.errorInfo)
+		cs.addRefPtr(cs.errorInfo)
+		cs.errorInfo = 0
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "GetRecordInfoFromGuids", func(ctx *ntapi.TrapContext) uint32 {
@@ -3374,6 +6488,23 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p2 := ctx.Arg(2)
 		ravelog.Logf("[oleaut32] LHashValOfNameSysA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(oleaut32, "LoadTypeLib", func(ctx *ntapi.TrapContext) uint32 {
+		szFile := ctx.Arg(0)
+		ppTLib := ctx.Arg(1)
+		if ppTLib == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppTLib, 0)
+		obj, err := cs.createTypeLibObject(hctxReadUTF16(ctx.Mem, szFile))
+		if err != nil {
+			ctx.SetReturn(uint64(hresultFromError(err)))
+			return 0
+		}
+		ctx.Mem.Write64(ppTLib, obj.objectAddr)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "LPSAFEARRAY_UserFree", func(ctx *ntapi.TrapContext) uint32 {
@@ -3542,9 +6673,7 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "RegisterTypeLib", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] RegisterTypeLib p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "RegisterTypeLibForUser", func(ctx *ntapi.TrapContext) uint32 {
@@ -3563,59 +6692,167 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayAccessData", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayAccessData p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		psa := ctx.Arg(0)
+		ppvData := ctx.Arg(1)
+		if ppvData == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppvData, 0)
+		sa := cs.loadSafeArray(psa)
+		if sa == nil {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		sa.cLocks++
+		cs.syncSafeArray(sa)
+		ctx.Mem.Write64(ppvData, sa.pvData)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayAllocData", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayAllocData p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		psa := ctx.Arg(0)
+		sa := cs.loadSafeArray(psa)
+		if sa == nil {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		if sa.pvData == 0 {
+			sa.pvData = cs.heapAlloc(cs.safeArrayTotalBytes(sa), true)
+		}
+		cs.syncSafeArray(sa)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayAllocDescriptor", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayAllocDescriptor p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		cDims := uint16(ctx.Arg(0))
+		ppsa := ctx.Arg(1)
+		if ppsa == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppsa, 0)
+		if cDims == 0 {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		desc := cs.heapAlloc(safeArrayDescriptorSize(cDims), true)
+		if desc == 0 {
+			ctx.SetReturn(uint64(E_OUTOFMEMORY))
+			return 0
+		}
+		sa := &safeArrayInfo{addr: desc, cDims: cDims, bounds: make([]safeArrayBound, cDims)}
+		cs.safeArrays[desc] = sa
+		cs.syncSafeArray(sa)
+		ctx.Mem.Write64(ppsa, desc)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayAllocDescriptorEx", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayAllocDescriptorEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		vt := uint16(ctx.Arg(0))
+		cDims := uint16(ctx.Arg(1))
+		ppsa := ctx.Arg(2)
+		if ppsa == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppsa, 0)
+		if cDims == 0 {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		desc := cs.heapAlloc(safeArrayDescriptorSize(cDims), true)
+		if desc == 0 {
+			ctx.SetReturn(uint64(E_OUTOFMEMORY))
+			return 0
+		}
+		sa := &safeArrayInfo{
+			addr:       desc,
+			vt:         vt,
+			cDims:      cDims,
+			fFeatures:  FADF_HAVEVARTYPE,
+			cbElements: vartypeElemSize(vt),
+			bounds:     make([]safeArrayBound, cDims),
+		}
+		cs.safeArrays[desc] = sa
+		cs.syncSafeArray(sa)
+		ctx.Mem.Write64(ppsa, desc)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCopy", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayCopy p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		psa := ctx.Arg(0)
+		ppsaOut := ctx.Arg(1)
+		if ppsaOut == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(ppsaOut, 0)
+		sa := cs.loadSafeArray(psa)
+		if sa == nil {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		tmpIn := cs.allocTaskMem(variantSize, true)
+		tmpOut := cs.allocTaskMem(variantSize, true)
+		if tmpIn == 0 || tmpOut == 0 {
+			if tmpIn != 0 {
+				cs.freeTaskMem(tmpIn)
+			}
+			if tmpOut != 0 {
+				cs.freeTaskMem(tmpOut)
+			}
+			ctx.SetReturn(uint64(E_OUTOFMEMORY))
+			return 0
+		}
+		defer cs.freeTaskMem(tmpIn)
+		defer cs.freeTaskMem(tmpOut)
+		writeVariantScalar(ctx.Mem, tmpIn, VT_ARRAY|sa.vt, psa)
+		writeVariantEmpty(ctx.Mem, tmpOut)
+		if hr := cs.variantCopy(tmpOut, tmpIn); hr != S_OK {
+			ctx.SetReturn(uint64(hr))
+			return 0
+		}
+		ctx.Mem.Write64(ppsaOut, readVariantValue(ctx.Mem, tmpOut))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCopyData", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayCopyData p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		psaSrc := ctx.Arg(0)
+		psaDst := ctx.Arg(1)
+		saSrc := cs.loadSafeArray(psaSrc)
+		saDst := cs.loadSafeArray(psaDst)
+		if saSrc == nil || saDst == nil || saSrc.cbElements != saDst.cbElements || len(saSrc.bounds) != len(saDst.bounds) {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		if hr := cs.safeArrayDestroy(psaDst, false); hr != S_OK {
+			ctx.SetReturn(uint64(hr))
+			return 0
+		}
+		saDst.vt = saSrc.vt
+		saDst.fFeatures = saSrc.fFeatures
+		saDst.cbElements = saSrc.cbElements
+		saDst.bounds = append(saDst.bounds[:0], saSrc.bounds...)
+		saDst.pvData = cs.heapAlloc(cs.safeArrayTotalBytes(saSrc), true)
+		cs.syncSafeArray(saDst)
+		switch variantElementType(saSrc.vt) {
+		case VT_VARIANT:
+			count := cs.safeArrayTotalBytes(saSrc) / variantSize
+			for i := uint64(0); i < count; i++ {
+				if hr := cs.variantCopy(saDst.pvData+i*variantSize, saSrc.pvData+i*variantSize); hr != S_OK {
+					ctx.SetReturn(uint64(hr))
+					return 0
+				}
+			}
+		default:
+			cs.copyBytes(saDst.pvData, saSrc.pvData, uint32(cs.safeArrayTotalBytes(saSrc)))
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCreate", func(ctx *ntapi.TrapContext) uint32 {
-		vt := ctx.Arg(0)
-		cDims := ctx.Arg(1)
-		rgsabound := ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayCreate vt=%d dims=%d\n", vt, cDims)
-		// Return minimal fake SAFEARRAY
-		buf := sharedHeapAlloc(64, true)
-		ctx.Mem.Write16(buf, uint16(cDims)) // cDims
-		ctx.Mem.Write16(buf+2, 0)           // fFeatures
-		ctx.Mem.Write32(buf+4, 0)           // cbElements
-		_ = rgsabound
-		ctx.SetReturn(buf)
+		ctx.SetReturn(cs.createSafeArray(uint16(ctx.Arg(0)), uint16(ctx.Arg(1)), ctx.Arg(2)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCreateEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -3629,11 +6866,14 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCreateVector", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayCreateVector p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		vt := uint16(ctx.Arg(0))
+		lBound := int32(uint32(ctx.Arg(1)))
+		cElements := uint32(ctx.Arg(2))
+		bounds := cs.allocTaskMem(8, true)
+		ctx.Mem.Write32(bounds, cElements)
+		ctx.Mem.Write32(bounds+4, uint32(lBound))
+		ctx.SetReturn(cs.createSafeArray(vt, 1, bounds))
+		cs.freeTaskMem(bounds)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCreateVectorEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -3647,41 +6887,70 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayDestroy", func(ctx *ntapi.TrapContext) uint32 {
-		psa := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayDestroy psa=0x%x\n", psa)
-		ctx.SetReturn(0) // S_OK
+		ctx.SetReturn(uint64(cs.safeArrayDestroy(ctx.Arg(0), true)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayDestroyData", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayDestroyData p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		ctx.SetReturn(uint64(cs.safeArrayDestroy(ctx.Arg(0), false)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayDestroyDescriptor", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayDestroyDescriptor p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		psa := ctx.Arg(0)
+		if sa := cs.loadSafeArray(psa); sa != nil {
+			delete(cs.safeArrays, psa)
+			cs.heapFree(psa)
+			ctx.SetReturn(S_OK)
+		} else {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetDim", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayGetDim p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		if sa := cs.loadSafeArray(ctx.Arg(0)); sa != nil {
+			ctx.SetReturn(uint64(sa.cDims))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetElement", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayGetElement p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		psa := ctx.Arg(0)
+		rgIndices := ctx.Arg(1)
+		pv := ctx.Arg(2)
+		sa := cs.loadSafeArray(psa)
+		if sa == nil || pv == 0 {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		offset, ok := cs.safeArrayElementOffset(sa, rgIndices)
+		if !ok {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		elem := sa.pvData + offset
+		switch variantElementType(sa.vt) {
+		case VT_BSTR:
+			bstr, _ := ctx.Mem.Read64(elem)
+			ctx.Mem.Write64(pv, cs.allocBSTRString(readBSTRString(ctx.Mem, bstr)))
+		case VT_UNKNOWN, VT_DISPATCH:
+			ptr, _ := ctx.Mem.Read64(elem)
+			cs.addRefPtr(ptr)
+			ctx.Mem.Write64(pv, ptr)
+		case VT_VARIANT:
+			ctx.SetReturn(uint64(cs.variantCopy(pv, elem)))
+			return 0
+		default:
+			cs.copyBytes(pv, elem, sa.cbElements)
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetElemsize", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayGetElemsize p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		if sa := cs.loadSafeArray(ctx.Arg(0)); sa != nil {
+			ctx.SetReturn(uint64(sa.cbElements))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetIID", func(ctx *ntapi.TrapContext) uint32 {
@@ -3692,11 +6961,15 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetLBound", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayGetLBound p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		sa := cs.loadSafeArray(ctx.Arg(0))
+		nDim := int(ctx.Arg(1))
+		plBound := ctx.Arg(2)
+		if sa == nil || plBound == 0 || nDim < 1 || nDim > len(sa.bounds) {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		ctx.Mem.Write32(plBound, uint32(sa.bounds[nDim-1].lLbound))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetRecordInfo", func(ctx *ntapi.TrapContext) uint32 {
@@ -3707,24 +6980,38 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetUBound", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayGetUBound p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		sa := cs.loadSafeArray(ctx.Arg(0))
+		nDim := int(ctx.Arg(1))
+		plBound := ctx.Arg(2)
+		if sa == nil || plBound == 0 || nDim < 1 || nDim > len(sa.bounds) {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		b := sa.bounds[nDim-1]
+		ctx.Mem.Write32(plBound, uint32(int64(b.lLbound)+int64(b.cElements)-1))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetVartype", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayGetVartype p0=0x%x, p1=0x%x\n", p0, p1)
-		ctx.SetReturn(0)
+		sa := cs.loadSafeArray(ctx.Arg(0))
+		pvt := ctx.Arg(1)
+		if sa == nil || pvt == 0 {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		ctx.Mem.Write16(pvt, sa.vt)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayLock", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayLock p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		sa := cs.loadSafeArray(ctx.Arg(0))
+		if sa == nil {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		sa.cLocks++
+		cs.syncSafeArray(sa)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayPtrOfIndex", func(ctx *ntapi.TrapContext) uint32 {
@@ -3736,11 +7023,43 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayPutElement", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayPutElement p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		ctx.SetReturn(0)
+		psa := ctx.Arg(0)
+		rgIndices := ctx.Arg(1)
+		pv := ctx.Arg(2)
+		sa := cs.loadSafeArray(psa)
+		if sa == nil || pv == 0 {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		offset, ok := cs.safeArrayElementOffset(sa, rgIndices)
+		if !ok {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		elem := sa.pvData + offset
+		switch variantElementType(sa.vt) {
+		case VT_BSTR:
+			old, _ := ctx.Mem.Read64(elem)
+			cs.freeBSTR(old)
+			src, _ := ctx.Mem.Read64(pv)
+			ctx.Mem.Write64(elem, cs.allocBSTRString(readBSTRString(ctx.Mem, src)))
+		case VT_UNKNOWN, VT_DISPATCH:
+			old, _ := ctx.Mem.Read64(elem)
+			cs.releasePtr(old)
+			src, _ := ctx.Mem.Read64(pv)
+			cs.addRefPtr(src)
+			ctx.Mem.Write64(elem, src)
+		case VT_VARIANT:
+			if hr := cs.variantClear(elem); hr != S_OK {
+				ctx.SetReturn(uint64(hr))
+				return 0
+			}
+			ctx.SetReturn(uint64(cs.variantCopy(elem, pv)))
+			return 0
+		default:
+			cs.copyBytes(elem, pv, sa.cbElements)
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayRedim", func(ctx *ntapi.TrapContext) uint32 {
@@ -3765,22 +7084,40 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayUnaccessData", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayUnaccessData p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		sa := cs.loadSafeArray(ctx.Arg(0))
+		if sa == nil {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		if sa.cLocks > 0 {
+			sa.cLocks--
+		}
+		cs.syncSafeArray(sa)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayUnlock", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayUnlock p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		sa := cs.loadSafeArray(ctx.Arg(0))
+		if sa == nil {
+			ctx.SetReturn(uint64(E_INVALIDARG))
+			return 0
+		}
+		if sa.cLocks > 0 {
+			sa.cLocks--
+		}
+		cs.syncSafeArray(sa)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SetErrorInfo", func(ctx *ntapi.TrapContext) uint32 {
 		dwReserved := ctx.Arg(0)
 		perrinfo := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SetErrorInfo reserved=%d info=0x%x\n", dwReserved, perrinfo)
-		ctx.SetReturn(0) // S_OK
+		_ = dwReserved
+		cs.errorInfo = perrinfo
+		if perrinfo != 0 {
+			cs.addRefPtr(perrinfo)
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SetOaNoCache", func(ctx *ntapi.TrapContext) uint32 {
@@ -3836,6 +7173,10 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		p1 := ctx.Arg(1)
 		ravelog.Logf("[oleaut32] SystemTimeToVariantTime p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(oleaut32, "UnRegisterTypeLib", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "UnRegisterTypeLibForUser", func(ctx *ntapi.TrapContext) uint32 {
@@ -3976,13 +7317,22 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromStr", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBoolFromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		bstrIn := ctx.Arg(0)
+		pboolOut := ctx.Arg(3)
+		if pboolOut == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		switch normalizeBoolString(readBSTRString(ctx.Mem, bstrIn)) {
+		case "", "0", "false", "no", "off":
+			ctx.Mem.Write16(pboolOut, VARIANT_FALSE)
+		case "-1", "1", "true", "yes", "on":
+			ctx.Mem.Write16(pboolOut, VARIANT_TRUE)
+		default:
+			ctx.SetReturn(uint64(DISP_E_TYPEMISMATCH))
+			return 0
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromUI1", func(ctx *ntapi.TrapContext) uint32 {
@@ -4052,13 +7402,15 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromDate", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromDate p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		dateVal := ctx.FloatArg(0)
+		pbstrOut := ctx.Arg(3)
+		if pbstrOut == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		t := oleVariantTimeToTime(dateVal).UTC()
+		ctx.Mem.Write64(pbstrOut, cs.allocBSTRString(t.Format("2006-01-02 15:04:05")))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromDec", func(ctx *ntapi.TrapContext) uint32 {
@@ -4102,13 +7454,14 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromI4", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromI4 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		lVal := int32(uint32(ctx.Arg(0)))
+		pbstrOut := ctx.Arg(3)
+		if pbstrOut == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(pbstrOut, cs.allocBSTRString(strconv.FormatInt(int64(lVal), 10)))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromI8", func(ctx *ntapi.TrapContext) uint32 {
@@ -4132,13 +7485,14 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromR8", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromR8 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		dblVal := ctx.FloatArg(0)
+		pbstrOut := ctx.Arg(3)
+		if pbstrOut == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		ctx.Mem.Write64(pbstrOut, cs.allocBSTRString(strconv.FormatFloat(dblVal, 'f', -1, 64)))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromUI1", func(ctx *ntapi.TrapContext) uint32 {
@@ -5095,13 +8449,19 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarI4FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		bstrIn := ctx.Arg(0)
+		plOut := ctx.Arg(3)
+		if plOut == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		v, err := strconv.ParseInt(strings.TrimSpace(readBSTRString(ctx.Mem, bstrIn)), 10, 32)
+		if err != nil {
+			ctx.SetReturn(uint64(DISP_E_TYPEMISMATCH))
+			return 0
+		}
+		ctx.Mem.Write32(plOut, uint32(int32(v)))
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromUI1", func(ctx *ntapi.TrapContext) uint32 {
@@ -5523,13 +8883,19 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarR8FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		ctx.SetReturn(0)
+		bstrIn := ctx.Arg(0)
+		pdblOut := ctx.Arg(3)
+		if pdblOut == 0 {
+			ctx.SetReturn(uint64(E_POINTER))
+			return 0
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(readBSTRString(ctx.Mem, bstrIn)), 64)
+		if err != nil {
+			ctx.SetReturn(uint64(DISP_E_TYPEMISMATCH))
+			return 0
+		}
+		writeFloat64(ctx.Mem, pdblOut, v)
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromUI1", func(ctx *ntapi.TrapContext) uint32 {
@@ -6050,29 +9416,11 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VariantChangeTypeEx", func(ctx *ntapi.TrapContext) uint32 {
-		pvargDest := ctx.Arg(0)
-		pvarSrc := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VariantChangeTypeEx dest=0x%x src=0x%x\n", pvargDest, pvarSrc)
-		// Just copy for now
-		if pvargDest != 0 && pvarSrc != 0 {
-			for i := uint64(0); i < 24; i++ {
-				b, _ := ctx.Mem.Read8(pvarSrc + i)
-				ctx.Mem.Write8(pvargDest+i, b)
-			}
-		}
-		ctx.SetReturn(0) // S_OK
+		ctx.SetReturn(uint64(cs.variantChangeType(ctx.Arg(0), ctx.Arg(1), uint16(ctx.Arg(4)))))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VariantCopyInd", func(ctx *ntapi.TrapContext) uint32 {
-		pvargDest := ctx.Arg(0)
-		pvargSrc := ctx.Arg(1)
-		if pvargDest != 0 && pvargSrc != 0 {
-			for i := uint64(0); i < 24; i++ {
-				b, _ := ctx.Mem.Read8(pvargSrc + i)
-				ctx.Mem.Write8(pvargDest+i, b)
-			}
-		}
-		ctx.SetReturn(0) // S_OK
+		ctx.SetReturn(uint64(cs.variantCopyIndirect(ctx.Arg(0), ctx.Arg(1))))
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VariantTimeToDosDateTime", func(ctx *ntapi.TrapContext) uint32 {

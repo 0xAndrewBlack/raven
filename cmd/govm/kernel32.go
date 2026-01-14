@@ -5550,18 +5550,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		srcPtr := ctx.Arg(0)
 		dst := ctx.Arg(1)
 		size := ctx.Arg(2)
-		src := readGuestUTF16(srcPtr)
-		// Expand common Windows environment variables
-		src = strings.ReplaceAll(src, `%APPDATA%`, `C:\Users\User\AppData\Roaming`)
-		src = strings.ReplaceAll(src, `%LOCALAPPDATA%`, `C:\Users\User\AppData\Local`)
-		src = strings.ReplaceAll(src, `%TEMP%`, `C:\Windows\Temp`)
-		src = strings.ReplaceAll(src, `%TMP%`, `C:\Windows\Temp`)
-		src = strings.ReplaceAll(src, `%USERPROFILE%`, `C:\Users\User`)
-		src = strings.ReplaceAll(src, `%WINDIR%`, `C:\Windows`)
-		src = strings.ReplaceAll(src, `%SYSTEMROOT%`, `C:\Windows`)
-		src = strings.ReplaceAll(src, `%SYSTEMDRIVE%`, `C:`)
-		src = strings.ReplaceAll(src, `%PROGRAMFILES%`, `C:\Program Files`)
-		src = strings.ReplaceAll(src, `%USERNAME%`, `User`)
+		src := expandShellEnvironmentStrings(readGuestUTF16(srcPtr))
 		// Write result
 		runes := []rune(src)
 		n := uint64(0)
@@ -7938,18 +7927,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "ExitVDM", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "ExpandEnvironmentStringsA", func(ctx *ntapi.TrapContext) uint32 {
-		src := readGuestString(ctx.Arg(0))
+		src := expandShellEnvironmentStrings(readGuestString(ctx.Arg(0)))
 		dst := ctx.Arg(1)
 		maxChars := ctx.Arg(2)
-		expanded := os.ExpandEnv(src)
 		if dst != 0 && maxChars > 0 {
-			data := []byte(expanded)
+			data := []byte(src)
 			if uint64(len(data)) >= maxChars {
 				data = data[:maxChars-1]
 			}
 			ctx.Mem.WriteBytes(dst, append(data, 0))
 		}
-		ctx.SetReturn(uint64(len(expanded) + 1))
+		ctx.SetReturn(uint64(len(src) + 1))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ExpungeConsoleCommandHistoryA", func(ctx *ntapi.TrapContext) uint32 {
