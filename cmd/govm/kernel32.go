@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,6 +74,8 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	var fiberMu sync.Mutex
 	fiberMap := map[uint64]uint64{} // fiberAddr → lpParameter
 	var nextFiberAddr uint64
+	var loadedLibraryRefs = map[uint64]uint32{}
+	var startupInfoDesktopAddr uint64
 	// Standard handle overrides for SetStdHandle/GetStdHandle.
 	stdHandleMap := map[uint32]uint64{
 		0xFFFFFFF6: 0x100, // STD_INPUT_HANDLE
@@ -214,6 +217,328 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		entry.LastReturn = ret
 		entry.LastError = lastErr
 		trivialKernel32Mu.Unlock()
+	}
+	type moduleSnapshot struct {
+		BaseAddr   uint64
+		EntryPoint uint64
+		ImageSize  uint64
+		Name       string
+		FullPath   string
+	}
+	normalizeModuleName := func(name string) string {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if idx := strings.LastIndexAny(name, `/\`); idx >= 0 {
+			name = name[idx+1:]
+		}
+		if name == "" {
+			return ""
+		}
+		if !strings.HasSuffix(name, ".dll") && !strings.HasSuffix(name, ".exe") {
+			name += ".dll"
+		}
+		return name
+	}
+	readUnicodeString := func(addr uint64) string {
+		if addr == 0 {
+			return ""
+		}
+		length, _ := mem.Read16(addr + ntapi.UnicodeStringLength)
+		buf, _ := mem.Read64(addr + ntapi.UnicodeStringBuffer)
+		if buf == 0 || length == 0 {
+			return ""
+		}
+		return readGuestUTF16N(buf, int(length/2))
+	}
+	listLoadedModules := func() []moduleSnapshot {
+		if procState == nil || procState.LdrDataAddr == 0 {
+			return nil
+		}
+		head := procState.LdrDataAddr + ntapi.LdrInLoadOrderModuleList
+		cur, _ := mem.Read64(head)
+		seen := map[uint64]struct{}{}
+		mods := make([]moduleSnapshot, 0, 16)
+		for cur != 0 && cur != head {
+			if _, ok := seen[cur]; ok {
+				break
+			}
+			seen[cur] = struct{}{}
+			entry := cur - ntapi.LdrEntryInLoadOrderLinks
+			base, _ := mem.Read64(entry + ntapi.LdrEntryDllBase)
+			ep, _ := mem.Read64(entry + ntapi.LdrEntryEntryPoint)
+			size32, _ := mem.Read32(entry + ntapi.LdrEntrySizeOfImage)
+			mods = append(mods, moduleSnapshot{
+				BaseAddr:   base,
+				EntryPoint: ep,
+				ImageSize:  uint64(size32),
+				Name:       strings.ToLower(readUnicodeString(entry + ntapi.LdrEntryBaseDllName)),
+				FullPath:   readUnicodeString(entry + ntapi.LdrEntryFullDllName),
+			})
+			next, _ := mem.Read64(cur)
+			cur = next
+			if len(mods) >= 512 {
+				break
+			}
+		}
+		if len(mods) == 0 && mainModule != nil {
+			mods = append(mods, moduleSnapshot{
+				BaseAddr:   mainModule.BaseAddr,
+				EntryPoint: mainModule.EntryPoint,
+				ImageSize:  mainModule.ImageSize,
+				Name:       strings.ToLower(mainModule.Name),
+				FullPath:   imagePath,
+			})
+		}
+		return mods
+	}
+	moduleSnapshotFromSynth := func(synth *ntapi.SynthPE) moduleSnapshot {
+		fullPath := `C:\Windows\System32\` + synth.Name
+		if mainModule != nil && synth.BaseAddr == mainModule.BaseAddr {
+			fullPath = imagePath
+		}
+		return moduleSnapshot{
+			BaseAddr:   synth.BaseAddr,
+			EntryPoint: synth.BaseAddr,
+			ImageSize:  synth.ImageSize,
+			Name:       strings.ToLower(synth.Name),
+			FullPath:   fullPath,
+		}
+	}
+	findModuleByHandle := func(hModule uint64) (moduleSnapshot, bool) {
+		if hModule == 0 {
+			if mainModule != nil {
+				return moduleSnapshot{
+					BaseAddr:   mainModule.BaseAddr,
+					EntryPoint: mainModule.EntryPoint,
+					ImageSize:  mainModule.ImageSize,
+					Name:       strings.ToLower(mainModule.Name),
+					FullPath:   imagePath,
+				}, true
+			}
+			imageBase, _ := mem.Read64(procState.PEBAddr + ntapi.PebImageBaseAddress)
+			return moduleSnapshot{BaseAddr: imageBase, EntryPoint: imageBase, Name: strings.ToLower(filepath.Base(imagePath)), FullPath: imagePath}, imageBase != 0
+		}
+		for _, mod := range listLoadedModules() {
+			if mod.BaseAddr == hModule {
+				return mod, true
+			}
+		}
+		seen := map[uint64]struct{}{}
+		for _, synth := range synthByName {
+			if _, ok := seen[synth.BaseAddr]; ok {
+				continue
+			}
+			seen[synth.BaseAddr] = struct{}{}
+			if synth.BaseAddr == hModule {
+				return moduleSnapshotFromSynth(synth), true
+			}
+		}
+		return moduleSnapshot{}, false
+	}
+	findModuleByName := func(name string) (moduleSnapshot, bool) {
+		norm := normalizeModuleName(name)
+		if norm == "" {
+			return findModuleByHandle(0)
+		}
+		for _, mod := range listLoadedModules() {
+			if norm == normalizeModuleName(mod.Name) || norm == normalizeModuleName(filepath.Base(strings.ReplaceAll(mod.FullPath, `\`, `/`))) {
+				return mod, true
+			}
+		}
+		if synth, ok := synthByName[norm]; ok {
+			return moduleSnapshotFromSynth(synth), true
+		}
+		return moduleSnapshot{}, false
+	}
+	findModuleByAddress := func(addr uint64) (moduleSnapshot, bool) {
+		for _, mod := range listLoadedModules() {
+			if addr >= mod.BaseAddr && addr < mod.BaseAddr+mod.ImageSize {
+				return mod, true
+			}
+		}
+		seen := map[uint64]struct{}{}
+		for _, synth := range synthByName {
+			if _, ok := seen[synth.BaseAddr]; ok {
+				continue
+			}
+			seen[synth.BaseAddr] = struct{}{}
+			if addr >= synth.BaseAddr && addr < synth.BaseAddr+synth.ImageSize {
+				return moduleSnapshotFromSynth(synth), true
+			}
+		}
+		return moduleSnapshot{}, false
+	}
+	processAffinityMask := func() uint64 {
+		ncpu := runtime.NumCPU()
+		switch {
+		case ncpu <= 1:
+			return 1
+		case ncpu >= 64:
+			return ^uint64(0)
+		default:
+			return (uint64(1) << uint(ncpu)) - 1
+		}
+	}
+	writeSystemInfo := func(addr uint64) {
+		if addr == 0 {
+			return
+		}
+		for i := uint64(0); i < 48; i++ {
+			mem.Write8(addr+i, 0)
+		}
+		ncpu := uint32(runtime.NumCPU())
+		if ncpu == 0 {
+			ncpu = 1
+		}
+		mem.Write16(addr+0, 9)
+		mem.Write16(addr+2, 0)
+		mem.Write32(addr+4, 4096)
+		mem.Write64(addr+8, 0x10000)
+		mem.Write64(addr+16, 0x00007FFFFFFEFFFF)
+		mem.Write64(addr+24, processAffinityMask())
+		mem.Write32(addr+32, ncpu)
+		mem.Write32(addr+36, 8664)
+		mem.Write32(addr+40, 65536)
+		mem.Write16(addr+44, 6)
+		mem.Write16(addr+46, 0x5E03)
+	}
+	normalizeEnvName := func(name string) string {
+		return strings.ToUpper(strings.TrimSpace(name))
+	}
+	deleteGuestEnv := func(name string) {
+		norm := normalizeEnvName(name)
+		for key := range envVars {
+			if normalizeEnvName(key) == norm {
+				delete(envVars, key)
+			}
+		}
+	}
+	defaultEnvValue := func(name string) (string, bool) {
+		switch normalizeEnvName(name) {
+		case "PATH":
+			v, ok := os.LookupEnv("PATH")
+			return v, ok && v != ""
+		case "TEMP", "TMP":
+			return os.TempDir(), true
+		case "USERPROFILE":
+			v, ok := os.LookupEnv("HOME")
+			return v, ok && v != ""
+		case "APPDATA":
+			if v, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok && v != "" {
+				return v, true
+			}
+			if home, ok := os.LookupEnv("HOME"); ok && home != "" {
+				return filepath.Join(home, ".config"), true
+			}
+		case "LOCALAPPDATA":
+			if v, ok := os.LookupEnv("XDG_DATA_HOME"); ok && v != "" {
+				return v, true
+			}
+			if home, ok := os.LookupEnv("HOME"); ok && home != "" {
+				return filepath.Join(home, ".local", "share"), true
+			}
+		case "COMMONAPPDATA", "PROGRAMDATA":
+			return "/var/lib", true
+		case "WINDIR", "SYSTEMROOT":
+			return "/usr", true
+		case "SYSTEMDRIVE":
+			return "C:", true
+		case "PROCESSOR_ARCHITECTURE":
+			return "AMD64", true
+		case "NUMBER_OF_PROCESSORS":
+			return strconv.Itoa(runtime.NumCPU()), true
+		case "OS":
+			return "Windows_NT", true
+		case "USERNAME":
+			if v, ok := os.LookupEnv("USER"); ok && v != "" {
+				return v, true
+			}
+		}
+		v, ok := os.LookupEnv(name)
+		return v, ok && v != ""
+	}
+	lookupEnvValue := func(name string) (string, bool) {
+		norm := normalizeEnvName(name)
+		for key, val := range envVars {
+			if normalizeEnvName(key) == norm {
+				return val, true
+			}
+		}
+		return defaultEnvValue(norm)
+	}
+	hostEnvKey := func(name string) string {
+		switch normalizeEnvName(name) {
+		case "USERPROFILE":
+			return "HOME"
+		case "APPDATA":
+			return "XDG_CONFIG_HOME"
+		case "LOCALAPPDATA":
+			return "XDG_DATA_HOME"
+		case "TEMP", "TMP":
+			return "TMPDIR"
+		case "USERNAME":
+			return "USER"
+		default:
+			return normalizeEnvName(name)
+		}
+	}
+	effectiveEnvironment := func() map[string]string {
+		env := map[string]string{}
+		for _, kv := range os.Environ() {
+			if idx := strings.IndexByte(kv, '='); idx > 0 {
+				env[normalizeEnvName(kv[:idx])] = kv[idx+1:]
+			}
+		}
+		for _, key := range []string{
+			"PATH", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+			"COMMONAPPDATA", "PROGRAMDATA", "WINDIR", "SYSTEMROOT",
+			"SYSTEMDRIVE", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
+			"OS", "USERNAME",
+		} {
+			if val, ok := defaultEnvValue(key); ok {
+				env[key] = val
+			}
+		}
+		for key, val := range envVars {
+			env[normalizeEnvName(key)] = val
+		}
+		return env
+	}
+	expandGuestEnvironmentStrings := func(src string) string {
+		if src == "" {
+			return ""
+		}
+		return shellEnvPattern.ReplaceAllStringFunc(src, func(match string) string {
+			key := strings.Trim(match, "%")
+			if val, ok := lookupEnvValue(key); ok {
+				return val
+			}
+			return match
+		})
+	}
+	buildEnvironmentBlockW := func() uint64 {
+		env := effectiveEnvironment()
+		keys := make([]string, 0, len(env))
+		for key := range env {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		block := make([]uint16, 0, 256)
+		for _, key := range keys {
+			block = append(block, utf16Encode(key+"="+env[key])...)
+			block = append(block, 0)
+		}
+		block = append(block, 0)
+		addr := mem.Mmap(0, uint64(len(block))*2, mmu.PermRead|mmu.PermWrite)
+		for i, w := range block {
+			mem.Write16(addr+uint64(i)*2, w)
+		}
+		return addr
+	}
+	windowsFileTime := func(t time.Time) uint64 {
+		if t.IsZero() {
+			return 0
+		}
+		return uint64(t.UnixNano()/100) + 116444736000000000
 	}
 	writeANSIString := func(addr uint64, s string, cch uint64) uint64 {
 		required := uint64(len(s) + 1)
@@ -2147,16 +2472,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetModuleHandleA", func(ctx *ntapi.TrapContext) uint32 {
 		name := ctx.Arg(0)
 		if name == 0 {
-			// Read ImageBase from PEB
-			imageBase, _ := ctx.Mem.Read64(ctx.State.PEBAddr + 0x10)
-			ctx.SetReturn(imageBase)
-		} else {
-			modName := strings.ToLower(readGuestString(name))
-			if !strings.HasSuffix(modName, ".dll") && !strings.HasSuffix(modName, ".exe") {
-				modName += ".dll"
+			if mod, ok := findModuleByHandle(0); ok {
+				ctx.SetReturn(mod.BaseAddr)
+			} else {
+				ctx.SetReturn(0)
 			}
-			if s, ok := synthByName[modName]; ok {
-				ctx.SetReturn(s.BaseAddr)
+		} else {
+			if mod, ok := findModuleByName(readGuestString(name)); ok {
+				ctx.SetReturn(mod.BaseAddr)
 			} else {
 				ctx.SetReturn(0)
 			}
@@ -2166,15 +2489,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetModuleHandleW", func(ctx *ntapi.TrapContext) uint32 {
 		name := ctx.Arg(0)
 		if name == 0 {
-			imageBase, _ := ctx.Mem.Read64(ctx.State.PEBAddr + 0x10)
-			ctx.SetReturn(imageBase)
-		} else {
-			modName := strings.ToLower(readGuestUTF16(name))
-			if !strings.HasSuffix(modName, ".dll") && !strings.HasSuffix(modName, ".exe") {
-				modName += ".dll"
+			if mod, ok := findModuleByHandle(0); ok {
+				ctx.SetReturn(mod.BaseAddr)
+			} else {
+				ctx.SetReturn(0)
 			}
-			if s, ok := synthByName[modName]; ok {
-				ctx.SetReturn(s.BaseAddr)
+		} else {
+			if mod, ok := findModuleByName(readGuestUTF16(name)); ok {
+				ctx.SetReturn(mod.BaseAddr)
 			} else {
 				ctx.SetReturn(0)
 			}
@@ -2182,29 +2504,29 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetModuleHandleExW", func(ctx *ntapi.TrapContext) uint32 {
-		// dwFlags=arg0, lpModuleName=arg1, phModule=arg2
+		dwFlags := uint32(ctx.Arg(0))
 		modNamePtr := ctx.Arg(1)
 		phModule := ctx.Arg(2)
-		if modNamePtr == 0 {
-			imageBase, _ := ctx.Mem.Read64(ctx.State.PEBAddr + 0x10)
-			if phModule != 0 {
-				ctx.Mem.Write64Raw(phModule, imageBase)
-			}
-			ctx.SetReturn(1) // TRUE
+		var (
+			mod moduleSnapshot
+			ok  bool
+		)
+		if dwFlags&0x00000004 != 0 {
+			mod, ok = findModuleByAddress(modNamePtr)
+		} else if modNamePtr == 0 {
+			mod, ok = findModuleByHandle(0)
 		} else {
-			modName := strings.ToLower(readGuestUTF16(modNamePtr))
-			if !strings.HasSuffix(modName, ".dll") && !strings.HasSuffix(modName, ".exe") {
-				modName += ".dll"
-			}
-			if s, ok := synthByName[modName]; ok {
-				if phModule != 0 {
-					ctx.Mem.Write64Raw(phModule, s.BaseAddr)
-				}
-				ctx.SetReturn(1)
-			} else {
-				ctx.SetReturn(0)
-			}
+			mod, ok = findModuleByName(readGuestUTF16(modNamePtr))
 		}
+		if !ok {
+			setLastErrorValue(126) // ERROR_MOD_NOT_FOUND
+			ctx.SetReturn(0)
+			return 0
+		}
+		if phModule != 0 {
+			ctx.Mem.Write64Raw(phModule, mod.BaseAddr)
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetStartupInfoA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2420,22 +2742,23 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsProcessorFeaturePresent", func(ctx *ntapi.TrapContext) uint32 {
 		feature := uint32(ctx.Arg(0))
-		// Standard x86-64 features that are always present on any 64-bit CPU
 		supported := map[uint32]bool{
-			0:  true,  // PF_FLOATING_POINT_PRECISION_ERRATA (no errata)
-			3:  true,  // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
-			6:  true,  // PF_PAE_ENABLED
-			7:  true,  // PF_NX_ENABLED
-			8:  true,  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2 - required for x64)
-			9:  false, // PF_SSE3_INSTRUCTIONS_AVAILABLE
-			10: true,  // PF_COMPARE_EXCHANGE128
-			12: true,  // PF_CHANNELS_ENABLED
-			13: true,  // PF_XSAVE_ENABLED
-			17: true,  // PF_SSSE3_INSTRUCTIONS_AVAILABLE
-			20: true,  // PF_FASTFAIL_AVAILABLE
-			23: true,  // PF_RDTSC_INSTRUCTION_AVAILABLE
-			36: true,  // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
-			37: true,  // PF_SSE4_2_INSTRUCTIONS_AVAILABLE
+			2:  true, // PF_COMPARE_EXCHANGE_DOUBLE
+			3:  true, // PF_MMX_INSTRUCTIONS_AVAILABLE
+			6:  true, // PF_XMMI_INSTRUCTIONS_AVAILABLE
+			8:  true, // PF_RDTSC_INSTRUCTION_AVAILABLE
+			9:  true, // PF_PAE_ENABLED
+			10: true, // PF_XMMI64_INSTRUCTIONS_AVAILABLE
+			11: true, // PF_SSE_DAZ_MODE_AVAILABLE
+			12: true, // PF_NX_ENABLED
+			13: true, // PF_SSE3_INSTRUCTIONS_AVAILABLE
+			14: true, // PF_COMPARE_EXCHANGE128
+			17: true, // PF_SSSE3_INSTRUCTIONS_AVAILABLE
+			18: true, // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
+			19: true, // PF_SSE4_2_INSTRUCTIONS_AVAILABLE
+			20: true, // PF_AVX_INSTRUCTIONS_AVAILABLE
+			21: true, // PF_AVX2_INSTRUCTIONS_AVAILABLE
+			23: true, // modern x64 feature probe
 		}
 		if supported[feature] {
 			ctx.SetReturn(1)
@@ -2475,28 +2798,25 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		name := strings.ToLower(readGuestUTF16(namePtr))
-		if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
-			name = name[idx+1:]
-		}
-		if !strings.HasSuffix(name, ".dll") {
-			name += ".dll"
-		}
+		name := normalizeModuleName(readGuestUTF16(namePtr))
 		// Redirect API set DLLs to their real implementation
 		resolved := resolveApiSetDLL(name)
 		if resolved != name {
 			if synth, ok := synthByName[resolved]; ok {
 				synthByName[name] = synth // cache redirect
+				loadedLibraryRefs[synth.BaseAddr]++
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
 		}
 		if synth, ok := synthByName[name]; ok {
+			loadedLibraryRefs[synth.BaseAddr]++
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
 		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 		synthByName[name] = newSynth
+		loadedLibraryRefs[newSynth.BaseAddr] = 1
 		ravelog.Logf("[win32] LoadLibraryExW: auto-created stub for %q\n", name)
 		ctx.SetReturn(newSynth.BaseAddr)
 		return 0
@@ -2507,27 +2827,24 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		name := strings.ToLower(readGuestUTF16(namePtr))
-		if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
-			name = name[idx+1:]
-		}
-		if !strings.HasSuffix(name, ".dll") {
-			name += ".dll"
-		}
+		name := normalizeModuleName(readGuestUTF16(namePtr))
 		resolved := resolveApiSetDLL(name)
 		if resolved != name {
 			if synth, ok := synthByName[resolved]; ok {
 				synthByName[name] = synth
+				loadedLibraryRefs[synth.BaseAddr]++
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
 		}
 		if synth, ok := synthByName[name]; ok {
+			loadedLibraryRefs[synth.BaseAddr]++
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
 		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 		synthByName[name] = newSynth
+		loadedLibraryRefs[newSynth.BaseAddr] = 1
 		ravelog.Logf("[win32] LoadLibraryW: auto-created stub for %q\n", name)
 		ctx.SetReturn(newSynth.BaseAddr)
 		return 0
@@ -2538,27 +2855,24 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		name := strings.ToLower(readGuestString(namePtr))
-		if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
-			name = name[idx+1:]
-		}
-		if !strings.HasSuffix(name, ".dll") {
-			name += ".dll"
-		}
+		name := normalizeModuleName(readGuestString(namePtr))
 		resolved := resolveApiSetDLL(name)
 		if resolved != name {
 			if synth, ok := synthByName[resolved]; ok {
 				synthByName[name] = synth
+				loadedLibraryRefs[synth.BaseAddr]++
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
 		}
 		if synth, ok := synthByName[name]; ok {
+			loadedLibraryRefs[synth.BaseAddr]++
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
 		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 		synthByName[name] = newSynth
+		loadedLibraryRefs[newSynth.BaseAddr] = 1
 		ravelog.Logf("[win32] LoadLibraryA: auto-created stub for %q\n", name)
 		ctx.SetReturn(newSynth.BaseAddr)
 		return 0
@@ -2572,6 +2886,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
+		}
+		if refs := loadedLibraryRefs[hModule]; refs > 1 {
+			loadedLibraryRefs[hModule] = refs - 1
+		} else {
+			delete(loadedLibraryRefs, hModule)
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -2675,20 +2994,40 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	tlsValues := make(map[uint32]uint64) // slot → value
 	tlsFreeSlots := make(map[uint32]bool)
 	d.RegisterAutoStubHandler(kernel32, "TlsAlloc", func(ctx *ntapi.TrapContext) uint32 {
-		slot := tlsNextSlot
-		tlsNextSlot++
+		var slot uint32
+		for freeSlot := range tlsFreeSlots {
+			delete(tlsFreeSlots, freeSlot)
+			slot = freeSlot
+			break
+		}
+		if slot == 0 {
+			slot = tlsNextSlot
+			tlsNextSlot++
+		}
 		ctx.SetReturn(uint64(slot))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "TlsGetValue", func(ctx *ntapi.TrapContext) uint32 {
 		slot := uint32(ctx.Arg(0))
+		if tlsFreeSlots[slot] {
+			setLastErrorValue(87)
+			ctx.SetReturn(0)
+			return 0
+		}
+		setLastErrorValue(0)
 		ctx.SetReturn(tlsValues[slot])
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "TlsSetValue", func(ctx *ntapi.TrapContext) uint32 {
 		slot := uint32(ctx.Arg(0))
+		if tlsFreeSlots[slot] || slot == 0 {
+			setLastErrorValue(87)
+			ctx.SetReturn(0)
+			return 0
+		}
 		val := ctx.Arg(1)
 		tlsValues[slot] = val
+		setLastErrorValue(0)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -2713,7 +3052,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		slot := uint32(ctx.Arg(0))
 		// Read from guest FLS array
 		flsArr, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebFlsData)
+		if flsArr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		val, _ := ctx.Mem.Read64(flsArr + uint64(slot)*8)
+		setLastErrorValue(0)
 		ctx.SetReturn(val)
 		return 0
 	})
@@ -2721,7 +3065,13 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		slot := uint32(ctx.Arg(0))
 		val := ctx.Arg(1)
 		flsArr, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebFlsData)
+		if flsArr == 0 {
+			setLastErrorValue(87)
+			ctx.SetReturn(0)
+			return 0
+		}
 		ctx.Mem.Write64(flsArr+uint64(slot)*8, val)
+		setLastErrorValue(0)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -2729,7 +3079,10 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		slot := uint32(ctx.Arg(0))
 		// Zero the slot in guest memory
 		flsArr, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebFlsData)
-		ctx.Mem.Write64(flsArr+uint64(slot)*8, 0)
+		if flsArr != 0 {
+			ctx.Mem.Write64(flsArr+uint64(slot)*8, 0)
+		}
+		setLastErrorValue(0)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -2807,22 +3160,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetSystemInfo", func(ctx *ntapi.TrapContext) uint32 {
-		si := ctx.Arg(0)
-		// SYSTEM_INFO on x64 (48 bytes)
-		for i := uint64(0); i < 48; i++ {
-			ctx.Mem.Write8(si+i, 0)
-		}
-		ctx.Mem.Write16(si+0, 9)                   // wProcessorArchitecture = AMD64
-		ctx.Mem.Write16(si+2, 0)                   // wReserved
-		ctx.Mem.Write32(si+4, 4096)                // dwPageSize
-		ctx.Mem.Write64(si+8, 0x10000)             // lpMinimumApplicationAddress
-		ctx.Mem.Write64(si+16, 0x00007FFFFFFEFFFF) // lpMaximumApplicationAddress
-		ctx.Mem.Write64(si+24, 0xF)                // dwActiveProcessorMask (4 CPUs)
-		ctx.Mem.Write32(si+32, 4)                  // dwNumberOfProcessors
-		ctx.Mem.Write32(si+36, 8664)               // dwProcessorType = PROCESSOR_AMD_X8664
-		ctx.Mem.Write32(si+40, 65536)              // dwAllocationGranularity
-		ctx.Mem.Write16(si+44, 6)                  // wProcessorLevel
-		ctx.Mem.Write16(si+46, 0x5E03)             // wProcessorRevision (Skylake stepping 3)
+		writeSystemInfo(ctx.Arg(0))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetVersionExA", func(ctx *ntapi.TrapContext) uint32 {
@@ -3047,23 +3385,16 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		hModule := ctx.Arg(0)
 		buf := ctx.Arg(1)
 		size := ctx.Arg(2)
-		var path string
-		imageBase, _ := ctx.Mem.Read64(ctx.State.PEBAddr + 0x10)
-		if hModule == 0 || hModule == imageBase {
-			path = imagePath
+		path := imagePath
+		if mod, ok := findModuleByHandle(hModule); ok && mod.FullPath != "" {
+			path = mod.FullPath
+		}
+		required := writeANSIStringCount(buf, path, size)
+		if required > 0 {
+			ctx.SetReturn(required - 1)
 		} else {
-			path = "C:\\Windows\\System32\\unknown.dll"
+			ctx.SetReturn(0)
 		}
-		name := []byte(path)
-		n := uint64(len(name))
-		if n >= size {
-			n = size - 1
-		}
-		for i := uint64(0); i < n; i++ {
-			ctx.Mem.Write8(buf+i, name[i])
-		}
-		ctx.Mem.Write8(buf+n, 0)
-		ctx.SetReturn(n)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetFileAttributesA", func(ctx *ntapi.TrapContext) uint32 {
@@ -3128,9 +3459,14 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		for i := uint64(0); i < 104; i++ {
 			ctx.Mem.Write8(addr+i, 0)
 		}
+		if startupInfoDesktopAddr == 0 {
+			startupInfoDesktopAddr = mem.Mmap(0, uint64((len(utf16Encode(`WinSta0\Default`))+1)*2), mmu.PermRead|mmu.PermWrite)
+			writeUTF16String(startupInfoDesktopAddr, `WinSta0\Default`, uint64(len(utf16Encode(`WinSta0\Default`))+1))
+		}
 		ctx.Mem.Write32(addr, 104)       // cb
+		ctx.Mem.Write64(addr+16, startupInfoDesktopAddr)
 		ctx.Mem.Write32(addr+60, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
-		ctx.Mem.Write16(addr+64, 0x0001) // wShowWindow = SW_SHOWNORMAL
+		ctx.Mem.Write16(addr+64, 0x0005) // wShowWindow = SW_SHOW
 		return 0
 	})
 	// GetFileType: FILE_TYPE_CHAR for std handles, FILE_TYPE_DISK for files, FILE_TYPE_PIPE for pipes
@@ -3239,22 +3575,16 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		hModule := ctx.Arg(0)
 		buf := ctx.Arg(1)
 		size := ctx.Arg(2)
-		var path string
-		imageBase, _ := ctx.Mem.Read64(ctx.State.PEBAddr + 0x10)
-		if hModule == 0 || hModule == imageBase {
-			path = imagePath
+		path := imagePath
+		if mod, ok := findModuleByHandle(hModule); ok && mod.FullPath != "" {
+			path = mod.FullPath
+		}
+		required := writeUTF16String(buf, path, size)
+		if required > 0 {
+			ctx.SetReturn(required - 1)
 		} else {
-			path = "C:\\Windows\\System32\\unknown.dll"
+			ctx.SetReturn(0)
 		}
-		n := uint64(len(path))
-		if n >= size {
-			n = size - 1
-		}
-		for i := uint64(0); i < n; i++ {
-			ctx.Mem.Write16(buf+i*2, uint16(path[i]))
-		}
-		ctx.Mem.Write16(buf+n*2, 0) // null terminator
-		ctx.SetReturn(n)
 		return 0
 	})
 	// InitializeSListHead: zero 16 bytes
@@ -3268,9 +3598,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	})
 	// GetEnvironmentStringsW: return pointer to env block from PEB
 	d.RegisterAutoStubHandler(kernel32, "GetEnvironmentStringsW", func(ctx *ntapi.TrapContext) uint32 {
-		paramsAddr, _ := ctx.Mem.Read64(ctx.State.PEBAddr + ntapi.PebProcessParameters)
-		envPtr, _ := ctx.Mem.Read64(paramsAddr + ntapi.ProcessParamsEnvironment)
-		ctx.SetReturn(envPtr)
+		ctx.SetReturn(buildEnvironmentBlockW())
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FreeEnvironmentStringsW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3572,21 +3900,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "GetVersion", 0, uint64(uint64(19045<<16|0<<8|10)))
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetNativeSystemInfo", func(ctx *ntapi.TrapContext) uint32 {
-		si := ctx.Arg(0)
-		for i := uint64(0); i < 48; i++ {
-			ctx.Mem.Write8(si+i, 0)
-		}
-		ctx.Mem.Write16(si+0, 9)                   // wProcessorArchitecture = AMD64
-		ctx.Mem.Write16(si+2, 0)                   // wReserved
-		ctx.Mem.Write32(si+4, 4096)                // dwPageSize
-		ctx.Mem.Write64(si+8, 0x10000)             // lpMinimumApplicationAddress
-		ctx.Mem.Write64(si+16, 0x00007FFFFFFEFFFF) // lpMaximumApplicationAddress
-		ctx.Mem.Write64(si+24, 0xF)                // dwActiveProcessorMask (4 CPUs)
-		ctx.Mem.Write32(si+32, 4)                  // dwNumberOfProcessors
-		ctx.Mem.Write32(si+36, 8664)               // dwProcessorType = PROCESSOR_AMD_X8664
-		ctx.Mem.Write32(si+40, 65536)              // dwAllocationGranularity
-		ctx.Mem.Write16(si+44, 6)                  // wProcessorLevel
-		ctx.Mem.Write16(si+46, 0x5E03)             // wProcessorRevision (Skylake stepping 3)
+		writeSystemInfo(ctx.Arg(0))
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5516,24 +5830,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "TerminateProcess", func(ctx *ntapi.TrapContext) uint32 {
+		hProcess := ctx.Arg(0)
 		code := ctx.Arg(1)
-		// Log guest call stack
-		sp := ctx.CPU.GetSP()
-		fmt.Fprintf(os.Stderr, "govm: TerminateProcess code=%d (0x%x) RSP=0x%x\n", code, code, sp)
-		for i := uint64(0); i < 8; i++ {
-			ret, _ := ctx.Mem.Read64(sp + i*8)
-			fmt.Fprintf(os.Stderr, "  [RSP+0x%02x] = 0x%x\n", i*8, ret)
+		if hProcess == uint64(^uint64(0)) || hProcess == uint64(^uint32(0)) || hProcess == uint64(os.Getpid()) {
+			if wlDisplay != nil {
+				wlDisplay.Close()
+			}
+			pprof.StopCPUProfile()
+			os.Exit(int(code))
 		}
-		// STATUS_STACK_BUFFER_OVERRUN (GS cookie failure) - try to survive by
-		// rewinding the stack to the message loop if possible.
-		if code == 0xC0000417 {
-			fmt.Fprintf(os.Stderr, "govm: GS cookie failure - attempting to survive\n")
-			// Return 0 from TerminateProcess; caller (__report_gsfailure) will
-			// return as well. Execution continues from the instruction after CALL.
-			ctx.SetReturn(0)
-			return 0
-		}
-		os.Exit(int(code))
+		setLastErrorValue(6) // ERROR_INVALID_HANDLE
+		ctx.SetReturn(0)
 		return 0
 	})
 	// --- Miscellaneous ---
@@ -5553,31 +5860,22 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		srcPtr := ctx.Arg(0)
 		dst := ctx.Arg(1)
 		size := ctx.Arg(2)
-		src := expandShellEnvironmentStrings(readGuestUTF16(srcPtr))
-		// Write result
-		runes := []rune(src)
-		n := uint64(0)
-		for i, r := range runes {
-			if n < size {
-				ctx.Mem.Write16(dst+n*2, uint16(r))
-			}
-			n++
-			_ = i
-		}
-		if n < size {
-			ctx.Mem.Write16(dst+n*2, 0)
-		}
-		ctx.SetReturn(n + 1) // length including null
+		src := expandGuestEnvironmentStrings(readGuestUTF16(srcPtr))
+		ctx.SetReturn(writeUTF16String(dst, src, size))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetEnvironmentVariableW", func(ctx *ntapi.TrapContext) uint32 {
-		name := readGuestUTF16(ctx.Arg(0))
+		name := normalizeEnvName(readGuestUTF16(ctx.Arg(0)))
 		valPtr := ctx.Arg(1)
+		deleteGuestEnv(name)
 		if valPtr == 0 {
-			delete(envVars, name)
+			_ = os.Unsetenv(hostEnvKey(name))
 		} else {
-			envVars[name] = readGuestUTF16(valPtr)
+			value := readGuestUTF16(valPtr)
+			envVars[name] = value
+			_ = os.Setenv(hostEnvKey(name), value)
 		}
+		setLastErrorValue(0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5982,6 +6280,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		if lpIsWow64 != 0 {
 			mem.Write32(lpIsWow64, 0) // FALSE
 		}
+		setLastErrorValue(0)
 		ctx.SetReturn(1) // success
 		return 0
 	})
@@ -6093,14 +6392,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		name := readGuestString(ctx.Arg(0))
 		buf := ctx.Arg(1)
 		size := ctx.Arg(2)
-		var val string
-		if v, ok := envVars[name]; ok {
-			val = v
-		} else {
-			val = os.Getenv(name)
-		}
-		if val == "" {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 203)
+		val, ok := lookupEnvValue(name)
+		if !ok {
+			setLastErrorValue(203)
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -6110,6 +6404,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		if needed > size {
+			setLastErrorValue(122)
 			ctx.SetReturn(needed)
 			return 0
 		}
@@ -6117,6 +6412,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write8(buf+uint64(i), val[i])
 		}
 		ctx.Mem.Write8(buf+uint64(len(val)), 0)
+		setLastErrorValue(0)
 		ctx.SetReturn(uint64(len(val)))
 		return 0
 	})
@@ -6802,6 +7098,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		fiberMap[addr] = lpParam
 		// Store lpParameter at the start of the fiber data block
 		mem.Write64(addr, lpParam)
+		mem.Write64(procState.TEBAddr+ntapi.TebFiberData, addr)
 		fiberMu.Unlock()
 		ctx.SetReturn(addr)
 		return 0
@@ -6815,6 +7112,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		addr := nextFiberAddr
 		fiberMap[addr] = lpParam
 		mem.Write64(addr, lpParam)
+		mem.Write64(procState.TEBAddr+ntapi.TebFiberData, addr)
 		fiberMu.Unlock()
 		ctx.SetReturn(addr)
 		return 0
@@ -7014,6 +7312,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		mem.Write64(addr, lpParam)
 		// Store start address at offset 8 for potential future dispatch
 		mem.Write64(addr+8, ctx.Arg(1))
+		setLastErrorValue(0)
 		fiberMu.Unlock()
 		ctx.SetReturn(addr)
 		return 0
@@ -7029,6 +7328,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		fiberMap[addr] = lpParam
 		mem.Write64(addr, lpParam)
 		mem.Write64(addr+8, ctx.Arg(3)) // lpStartAddress
+		setLastErrorValue(0)
 		fiberMu.Unlock()
 		ctx.SetReturn(addr)
 		return 0
@@ -7299,22 +7599,34 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CreateProcessA", 10, 0)
+		setLastErrorValue(50) // ERROR_NOT_SUPPORTED
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessAsUserA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CreateProcessAsUserA", 4, 0)
+		setLastErrorValue(50)
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessAsUserW", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CreateProcessAsUserW", 4, 0)
+		setLastErrorValue(50)
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessInternalA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CreateProcessInternalA", 8, 0)
+		setLastErrorValue(50)
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessInternalW", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CreateProcessInternalW", 8, 0)
+		setLastErrorValue(50)
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessW", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "CreateProcessW", 10, 0)
+		setLastErrorValue(50)
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreatePseudoConsole", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "CreatePseudoConsole", 4, 0)
@@ -7576,6 +7888,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		fiberMu.Lock()
 		delete(fiberMap, lpFiber)
 		fiberMu.Unlock()
+		if cur, _ := mem.Read64(procState.TEBAddr + ntapi.TebFiberData); cur == lpFiber {
+			mem.Write64(procState.TEBAddr+ntapi.TebFiberData, 0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteFileA", func(ctx *ntapi.TrapContext) uint32 {
@@ -8004,17 +8319,10 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "ExitVDM", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "ExpandEnvironmentStringsA", func(ctx *ntapi.TrapContext) uint32 {
-		src := expandShellEnvironmentStrings(readGuestString(ctx.Arg(0)))
+		src := expandGuestEnvironmentStrings(readGuestString(ctx.Arg(0)))
 		dst := ctx.Arg(1)
 		maxChars := ctx.Arg(2)
-		if dst != 0 && maxChars > 0 {
-			data := []byte(src)
-			if uint64(len(data)) >= maxChars {
-				data = data[:maxChars-1]
-			}
-			ctx.Mem.WriteBytes(dst, append(data, 0))
-		}
-		ctx.SetReturn(uint64(len(src) + 1))
+		ctx.SetReturn(writeANSIString(dst, src, maxChars))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ExpungeConsoleCommandHistoryA", func(ctx *ntapi.TrapContext) uint32 {
@@ -9122,14 +9430,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		name := readGuestUTF16(ctx.Arg(0))
 		buf := ctx.Arg(1)
 		size := ctx.Arg(2)
-		var val string
-		if v, ok := envVars[name]; ok {
-			val = v
-		} else {
-			val = os.Getenv(name)
-		}
-		if val == "" {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 203) // ERROR_ENVVAR_NOT_FOUND
+		val, ok := lookupEnvValue(name)
+		if !ok {
+			setLastErrorValue(203) // ERROR_ENVVAR_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -9140,6 +9443,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		if needed > size {
+			setLastErrorValue(122)
 			ctx.SetReturn(needed)
 			return 0
 		}
@@ -9147,6 +9451,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write16(buf+uint64(i)*2, w)
 		}
 		ctx.Mem.Write16(buf+uint64(len(ws))*2, 0)
+		setLastErrorValue(0)
 		ctx.SetReturn(uint64(len(ws)))
 		return 0
 	})
@@ -10038,10 +10343,10 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		lpProcessAffinityMask := ctx.Arg(1)
 		lpSystemAffinityMask := ctx.Arg(2)
 		if lpProcessAffinityMask != 0 {
-			ctx.Mem.Write64(lpProcessAffinityMask, 0xF)
+			ctx.Mem.Write64(lpProcessAffinityMask, processAffinityMask())
 		}
 		if lpSystemAffinityMask != 0 {
-			ctx.Mem.Write64(lpSystemAffinityMask, 0xF)
+			ctx.Mem.Write64(lpSystemAffinityMask, processAffinityMask())
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -10101,7 +10406,27 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "GetProcessShutdownParameters", 2, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetProcessTimes", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetProcessTimes", 5, 1)
+		lpCreationTime := ctx.Arg(1)
+		lpExitTime := ctx.Arg(2)
+		lpKernelTime := ctx.Arg(3)
+		lpUserTime := ctx.Arg(4)
+		elapsed := time.Since(startTime)
+		kernelTicks := uint64((elapsed / 2).Nanoseconds() / 100)
+		userTicks := uint64((elapsed - elapsed/2).Nanoseconds() / 100)
+		if lpCreationTime != 0 {
+			ctx.Mem.Write64Raw(lpCreationTime, windowsFileTime(startTime))
+		}
+		if lpExitTime != 0 {
+			ctx.Mem.Write64Raw(lpExitTime, 0)
+		}
+		if lpKernelTime != 0 {
+			ctx.Mem.Write64Raw(lpKernelTime, kernelTicks)
+		}
+		if lpUserTime != 0 {
+			ctx.Mem.Write64Raw(lpUserTime, userTicks)
+		}
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetProcessVersion", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "GetProcessVersion", 1, 0)
@@ -11362,7 +11687,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "IsValidNLSVersion", 8, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsWow64Process2", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "IsWow64Process2", 4, 1)
+		pProcessMachine := ctx.Arg(1)
+		pNativeMachine := ctx.Arg(2)
+		if pProcessMachine != 0 {
+			ctx.Mem.Write16(pProcessMachine, 0)
+		}
+		if pNativeMachine != 0 {
+			ctx.Mem.Write16(pNativeMachine, 0x8664)
+		}
+		setLastErrorValue(0)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "K32EmptyWorkingSet", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "K32EmptyWorkingSet", 8, 0)
@@ -11377,10 +11712,40 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "K32EnumPageFilesW", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "K32EnumProcessModules", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "K32EnumProcessModules", 8, 0)
+		mods := listLoadedModules()
+		lphModule := ctx.Arg(1)
+		cb := ctx.Arg(2)
+		lpcbNeeded := ctx.Arg(3)
+		if lpcbNeeded != 0 {
+			ctx.Mem.Write32(lpcbNeeded, uint32(len(mods))*8)
+		}
+		maxCount := int(cb / 8)
+		if maxCount > len(mods) {
+			maxCount = len(mods)
+		}
+		for i := 0; i < maxCount; i++ {
+			ctx.Mem.Write64(lphModule+uint64(i)*8, mods[i].BaseAddr)
+		}
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "K32EnumProcessModulesEx", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "K32EnumProcessModulesEx", 8, 0)
+		mods := listLoadedModules()
+		lphModule := ctx.Arg(1)
+		cb := ctx.Arg(2)
+		lpcbNeeded := ctx.Arg(3)
+		if lpcbNeeded != 0 {
+			ctx.Mem.Write32(lpcbNeeded, uint32(len(mods))*8)
+		}
+		maxCount := int(cb / 8)
+		if maxCount > len(mods) {
+			maxCount = len(mods)
+		}
+		for i := 0; i < maxCount; i++ {
+			ctx.Mem.Write64(lphModule+uint64(i)*8, mods[i].BaseAddr)
+		}
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "K32EnumProcesses", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "K32EnumProcesses", 8, 0)
@@ -11416,7 +11781,18 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "K32GetModuleFileNameExW", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "K32GetModuleInformation", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "K32GetModuleInformation", 8, 0)
+		hModule := ctx.Arg(1)
+		lpmodinfo := ctx.Arg(2)
+		cb := ctx.Arg(3)
+		if mod, ok := findModuleByHandle(hModule); ok && lpmodinfo != 0 && cb >= 24 {
+			ctx.Mem.Write64(lpmodinfo, mod.BaseAddr)
+			ctx.Mem.Write32(lpmodinfo+8, uint32(mod.ImageSize))
+			ctx.Mem.Write64(lpmodinfo+16, mod.EntryPoint)
+			ctx.SetReturn(1)
+			return 0
+		}
+		ctx.SetReturn(0)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "K32GetPerformanceInfo", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "K32GetPerformanceInfo", 8, 0)
@@ -11428,7 +11804,24 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "K32GetProcessImageFileNameW", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "K32GetProcessMemoryInfo", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "K32GetProcessMemoryInfo", 8, 0)
+		ppsmemCounters := ctx.Arg(1)
+		cb := ctx.Arg(2)
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+		if ppsmemCounters != 0 && cb >= 72 {
+			ctx.Mem.Write32(ppsmemCounters, uint32(cb))
+			ctx.Mem.Write32(ppsmemCounters+4, uint32(memStats.Mallocs-memStats.Frees))
+			ctx.Mem.Write64(ppsmemCounters+8, memStats.Sys)
+			ctx.Mem.Write64(ppsmemCounters+16, memStats.Alloc)
+			ctx.Mem.Write64(ppsmemCounters+24, memStats.HeapSys)
+			ctx.Mem.Write64(ppsmemCounters+32, memStats.HeapAlloc)
+			ctx.Mem.Write64(ppsmemCounters+40, memStats.StackSys)
+			ctx.Mem.Write64(ppsmemCounters+48, memStats.StackInuse)
+			ctx.Mem.Write64(ppsmemCounters+56, memStats.HeapInuse)
+			ctx.Mem.Write64(ppsmemCounters+64, memStats.HeapSys)
+		}
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "K32GetWsChanges", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "K32GetWsChanges", 8, 0)
@@ -13769,13 +14162,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "SetEnvironmentStringsW", 8, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetEnvironmentVariableA", func(ctx *ntapi.TrapContext) uint32 {
-		name := readGuestString(ctx.Arg(0))
+		name := normalizeEnvName(readGuestString(ctx.Arg(0)))
 		valPtr := ctx.Arg(1)
+		deleteGuestEnv(name)
 		if valPtr == 0 {
-			delete(envVars, name)
+			_ = os.Unsetenv(hostEnvKey(name))
 		} else {
-			envVars[name] = readGuestString(valPtr)
+			value := readGuestString(valPtr)
+			envVars[name] = value
+			_ = os.Setenv(hostEnvKey(name), value)
 		}
+		setLastErrorValue(0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -13943,7 +14340,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		return runKernel32TrivialHandler(ctx, "SetPriorityClass", 2, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetProcessAffinityMask", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "SetProcessAffinityMask", 2, 1)
+		setLastErrorValue(0)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetProcessAffinityUpdateMode", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "SetProcessAffinityUpdateMode", 8, 1)
@@ -14544,6 +14943,9 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		// True fiber switching requires full coroutine support. For now, log
 		// the attempt and no-op (the calling fiber continues).
 		lpFiber := ctx.Arg(0)
+		if _, ok := fiberMap[lpFiber]; ok {
+			mem.Write64(procState.TEBAddr+ntapi.TebFiberData, lpFiber)
+		}
 		ravelog.Logf("[win32] SwitchToFiber(0x%x) → stub no-op\n", lpFiber)
 		return 0
 	})
