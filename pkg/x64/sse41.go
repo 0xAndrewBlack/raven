@@ -1158,6 +1158,47 @@ func (c *CPU) dispatch0F3A(pfx *prefixState, startRIP uint64) error {
 		}
 		return nil
 
+	// INSERTPS xmm1, xmm2/m32, imm8 (0F 3A 18)
+	case 0x18:
+		m, err := c.decodeModRM(pfx)
+		if err != nil {
+			return err
+		}
+		imm, err := c.fetch8()
+		if err != nil {
+			return err
+		}
+		var srcFloat uint32
+		if m.mod == 3 {
+			// source is XMM register - select dword by count_s (bits 7:6)
+			countS := uint((imm >> 6) & 0x03)
+			half, shift := countS/2, (countS%2)*32
+			srcFloat = uint32(c.XMM[m.rm][half] >> shift)
+		} else {
+			// source is m32
+			addr, _, err := c.resolveRMAddr(m, pfx)
+			if err != nil {
+				return err
+			}
+			srcFloat, _ = c.mem.Read32(addr)
+		}
+		// count_d selects destination dword (bits 5:4)
+		countD := uint((imm >> 4) & 0x03)
+		dst := c.XMM[m.reg]
+		// insert source into destination slot
+		dHalf, dShift := countD/2, (countD%2)*32
+		dst[dHalf] = (dst[dHalf] & ^(uint64(0xffffffff) << dShift)) | (uint64(srcFloat) << dShift)
+		// zmask: bits 3:0 - if bit i is set, zero dword i
+		zmask := imm & 0x0f
+		for i := uint(0); i < 4; i++ {
+			if (zmask>>i)&1 != 0 {
+				h, s := i/2, (i%2)*32
+				dst[h] &= ^(uint64(0xffffffff) << s)
+			}
+		}
+		c.XMM[m.reg] = dst
+		return nil
+
 	// PINSRB xmm1, r/m8, imm8 (0F 3A 20)
 	case 0x20:
 		m, err := c.decodeModRM(pfx)
