@@ -3889,8 +3889,40 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// --- wininet.dll ---
 	delayReg(func() { registerWininetHandlers(hctx) })
-}
 
+	// --- winmm.dll ---
+	delayReg(func() { registerWinmmHandlers(hctx) })
+
+	// --- msimg32.dll ---
+	delayReg(func() { registerMsimg32Handlers(hctx) })
+
+	// --- psapi.dll ---
+	delayReg(func() { registerPsapiHandlers(hctx) })
+
+	// --- userenv.dll ---
+	delayReg(func() { registerUserenvHandlers(hctx) })
+
+	// --- secur32.dll ---
+	delayReg(func() { registerSecur32Handlers(hctx) })
+
+	// --- setupapi.dll ---
+	delayReg(func() { registerSetupapiHandlers(hctx) })
+
+	// --- netapi32.dll ---
+	delayReg(func() { registerNetapi32Handlers(hctx) })
+
+	// --- powrprof.dll ---
+	delayReg(func() { registerPowrprofHandlers(hctx) })
+
+	// --- wtsapi32.dll ---
+	delayReg(func() { registerWtsapi32Handlers(hctx) })
+
+	// --- normaliz.dll ---
+	delayReg(func() { registerNormalizHandlers(hctx) })
+
+	// --- bcrypt.dll ---
+	delayReg(func() { registerBcryptHandlers(hctx) })
+	}
 // autoSynthUnresolved generates synthetic stub DLLs for any DLLs referenced
 // in the main module's imports that aren't already in loadedModules.
 func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[string]*loader.PEModule) []*ntapi.SynthPE {
