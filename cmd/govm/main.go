@@ -2331,6 +2331,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// ShowWindow(SW_HIDE). These must NOT be auto-shown when the parent is
 	// shown or when they receive a SetWindowPos/MoveWindow with non-zero size.
 	hctx.HwndExplicitlyHidden = make(map[uint64]bool)
+	hctx.WinErasePending = make(map[uint64]bool)
 
 	// clientAreaOrigin returns the absolute (surface) coordinates of a
 	// window's client-area top-left. For hctx.MainHWND with a menu bar the
