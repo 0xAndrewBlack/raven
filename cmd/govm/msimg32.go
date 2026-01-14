@@ -19,9 +19,14 @@ func registerMsimg32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "AlphaBlend", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[msimg32] AlphaBlend(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdcDest := ctx.Arg(0)
+		xoriginDest := ctx.Arg(1)
+		yoriginDest := ctx.Arg(2)
+		wDest := ctx.Arg(3)
+		hDest := ctx.Arg(4)
+		hdcSrc := ctx.Arg(5)
+		ravelog.Logf("[msimg32] AlphaBlend dest=0x%x src=0x%x (%d,%d %dx%d)\n", hdcDest, hdcSrc, xoriginDest, yoriginDest, wDest, hDest)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-private", func(ctx *ntapi.TrapContext) uint32 {
@@ -31,15 +36,26 @@ func registerMsimg32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "GradientFill", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[msimg32] GradientFill(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		pVertex := ctx.Arg(1)
+		nVertex := ctx.Arg(2)
+		pMesh := ctx.Arg(3)
+		nMesh := ctx.Arg(4)
+		ulMode := ctx.Arg(5)
+		ravelog.Logf("[msimg32] GradientFill hdc=0x%x vertices=%d mesh=%d mode=%d\n", hdc, nVertex, nMesh, ulMode)
+		_ = pVertex; _ = pMesh
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "TransparentBlt", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[msimg32] TransparentBlt(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdcDest := ctx.Arg(0)
+		xoriginDest := ctx.Arg(1)
+		yoriginDest := ctx.Arg(2)
+		wDest := ctx.Arg(3)
+		hDest := ctx.Arg(4)
+		hdcSrc := ctx.Arg(5)
+		ravelog.Logf("[msimg32] TransparentBlt dest=0x%x src=0x%x (%d,%d %dx%d)\n", hdcDest, hdcSrc, xoriginDest, yoriginDest, wDest, hDest)
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 }
