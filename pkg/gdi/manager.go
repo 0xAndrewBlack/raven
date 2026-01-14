@@ -111,15 +111,26 @@ func (m *Manager) AllocScreenDC() (uint64, *DC) {
 func (m *Manager) AllocMemDC() (uint64, *DC) {
 	dc := NewMemoryDC()
 	h := m.alloc()
+	def := m.createBitmapObject(1, 1, 1, false, 0, NewSurface(1, 1))
+	dc.DefaultBitmapHandle = def
+	if obj := m.objects[def]; obj != nil {
+		dc.Bitmap = obj.Bitmap
+		dc.BitmapHandle = def
+		dc.Target = obj.Bitmap.Surf
+		dc.ClipX0 = 0
+		dc.ClipY0 = 0
+		dc.ClipX1 = obj.Bitmap.Width
+		dc.ClipY1 = obj.Bitmap.Height
+	}
 	m.dcs[h] = dc
 	return h, dc
 }
 
-// DeleteDC removes a DC from the table and releases its bitmap surface.
+// DeleteDC removes a DC from the table and releases its default monochrome bitmap.
 func (m *Manager) DeleteDC(h uint64) {
 	if dc, ok := m.dcs[h]; ok {
-		if dc.Bitmap != nil {
-			dc.Bitmap.Surf = nil
+		if dc.DefaultBitmapHandle != 0 {
+			delete(m.objects, dc.DefaultBitmapHandle)
 		}
 	}
 	delete(m.dcs, h)
@@ -155,8 +166,7 @@ func (m *Manager) CreatePatternBrush(bitmapH uint64) uint64 {
 	if obj, ok := m.objects[bitmapH]; ok && obj.Bitmap != nil {
 		bm = obj.Bitmap
 	}
-	m.objects[h] = &Object{Type: ObjBrush, Brush: &Brush{Style: 3}}
-	_ = bm
+	m.objects[h] = &Object{Type: ObjBrush, Brush: &Brush{Style: 3, Pattern: bm}}
 	return h
 }
 
@@ -220,26 +230,56 @@ func (m *Manager) CreateFont(f *Font) uint64 {
 	return h
 }
 
-// CreateCompatibleBitmap allocates a bitmap of given dimensions.
-// ReactOS: NtGdiCreateCompatibleBitmap
-func (m *Manager) CreateCompatibleBitmap(w, h int32) uint64 {
+func (m *Manager) createBitmapObject(w, h, bitCount int32, topDown bool, bits uint64, surf *Surface) uint64 {
 	if w <= 0 {
 		w = 1
 	}
 	if h <= 0 {
 		h = 1
 	}
+	if bitCount <= 0 {
+		bitCount = 32
+	}
 	handle := m.alloc()
-	bm := &Bitmap{Width: w, Height: h}
-	bm.Surf = NewSurface(w, h)
-	m.objects[handle] = &Object{Type: ObjBitmap, Bitmap: bm}
+	m.objects[handle] = &Object{
+		Type: ObjBitmap,
+		Bitmap: &Bitmap{
+			Width:    w,
+			Height:   h,
+			BitCount: bitCount,
+			TopDown:  topDown,
+			Bits:     bits,
+			Surf:     surf,
+		},
+	}
 	return handle
+}
+
+// CreateCompatibleBitmap allocates a bitmap of given dimensions.
+// ReactOS: NtGdiCreateCompatibleBitmap
+func (m *Manager) CreateCompatibleBitmap(w, h int32) uint64 {
+	return m.createBitmapObject(w, h, 32, false, 0, NewSurface(w, h))
 }
 
 // CreateDIBSection allocates a DIB section (treated as a compatible bitmap).
 // ReactOS: NtGdiCreateDIBSection
 func (m *Manager) CreateDIBSection(w, h int32) uint64 {
 	return m.CreateCompatibleBitmap(w, h)
+}
+
+// CreateDIBSectionWithData allocates a DIB section backed by the provided pixel slice.
+func (m *Manager) CreateDIBSectionWithData(w, h, bitCount int32, bits uint64, pix []byte, topDown bool) uint64 {
+	if w <= 0 {
+		w = 1
+	}
+	if h <= 0 {
+		h = 1
+	}
+	stride := w * 4
+	if pix == nil || int32(len(pix)) < stride*h {
+		pix = make([]byte, stride*h)
+	}
+	return m.createBitmapObject(w, h, bitCount, topDown, bits, WrapPix(pix, w, h, stride))
 }
 
 // DeleteObject frees a GDI object handle and releases its bitmap surface.
@@ -254,6 +294,7 @@ func (m *Manager) DeleteObject(h uint64) bool {
 	obj, ok := m.objects[h]
 	if ok && obj.Type == ObjBitmap && obj.Bitmap != nil {
 		obj.Bitmap.Surf = nil
+		obj.Bitmap.Bits = 0
 	}
 	delete(m.objects, h)
 	return ok
@@ -486,9 +527,13 @@ func (m *Manager) SelectObject(dcH, objH uint64) uint64 {
 		dc.Font = obj.Font
 		return prev
 	case ObjBitmap:
-		prev := m.findBitmapHandle(dc.Bitmap)
+		prev := dc.BitmapHandle
+		if prev == 0 {
+			prev = m.findBitmapHandle(dc.Bitmap)
+		}
 		bm := obj.Bitmap
 		dc.Bitmap = bm
+		dc.BitmapHandle = objH
 		// Selecting a bitmap into a DC makes it a memory DC targeting that bitmap.
 		// ReactOS: NtGdiSelectBitmap → GreSelectBitmap resets origin to (0,0).
 		if bm != nil && bm.Surf != nil {
@@ -500,6 +545,12 @@ func (m *Manager) SelectObject(dcH, objH uint64) uint64 {
 			dc.ClipY0 = 0
 			dc.ClipX1 = bm.Width
 			dc.ClipY1 = bm.Height
+		} else {
+			dc.Target = nil
+			dc.ClipX0 = 0
+			dc.ClipY0 = 0
+			dc.ClipX1 = 0
+			dc.ClipY1 = 0
 		}
 		return prev
 	}

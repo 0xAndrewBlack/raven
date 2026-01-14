@@ -5,6 +5,8 @@ package comctl32
 import (
 	"sync"
 	"sync/atomic"
+
+	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
 )
 
 // ImageList flags (ILC_*)
@@ -48,9 +50,10 @@ const CLR_NONE = uint32(0xFFFFFFFF)
 
 // ilImage is a single image slot in an ImageList
 type ilImage struct {
-	// In a real impl these would hold pixel data.
-	// We track metadata only (sufficient for NPP which just uses icons for toolbar).
 	overlayIdx int
+	pix        []byte
+	mask       []byte
+	hasAlpha   bool
 }
 
 // ImageList holds state for an HIMAGELIST handle
@@ -60,6 +63,7 @@ type ImageList struct {
 	flags     uint32
 	bkColor   uint32
 	images    []ilImage
+	grow      int32
 	dragIndex int // for drag operations; -1 = none
 	filterIdx int32
 	filter    uint32
@@ -72,12 +76,13 @@ var (
 )
 
 // allocIL allocates a new ImageList and returns its handle
-func allocIL(cx, cy int32, flags uint32) uint64 {
+func allocIL(cx, cy int32, flags uint32, grow int32) uint64 {
 	il := &ImageList{
 		cx:        cx,
 		cy:        cy,
 		flags:     flags,
 		bkColor:   CLR_NONE,
+		grow:      grow,
 		dragIndex: -1,
 		filterIdx: -1,
 	}
@@ -99,7 +104,7 @@ func ImageListCreate(cx, cy int32, flags uint32, cInitial, cGrow int32) uint64 {
 	if cx <= 0 || cy <= 0 {
 		return 0
 	}
-	id := allocIL(cx, cy, flags)
+	id := allocIL(cx, cy, flags, cGrow)
 	il := getIL(id)
 	if il != nil && cInitial > 0 {
 		il.images = make([]ilImage, 0, cInitial)
@@ -149,6 +154,38 @@ func ImageListSetImageCount(h uint64, count uint32) bool {
 
 // ImageListAdd adds an image (returns index, -1 on error) (ImageList_Add)
 func ImageListAdd(h uint64) int32 {
+	return ImageListAddImage(h, nil, nil, false)
+}
+
+func cloneBytes(src []byte) []byte {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func cloneImage(img ilImage) ilImage {
+	img.pix = cloneBytes(img.pix)
+	img.mask = cloneBytes(img.mask)
+	return img
+}
+
+func normalizeImageData(cx, cy int32, pix []byte) []byte {
+	size := int(cx * cy * 4)
+	if size <= 0 {
+		return nil
+	}
+	if len(pix) == size {
+		return cloneBytes(pix)
+	}
+	out := make([]byte, size)
+	copy(out, pix)
+	return out
+}
+
+func ImageListAddImage(h uint64, pix []byte, mask []byte, hasAlpha bool) int32 {
 	il := getIL(h)
 	if il == nil {
 		return -1
@@ -156,7 +193,11 @@ func ImageListAdd(h uint64) int32 {
 	il.mu.Lock()
 	defer il.mu.Unlock()
 	idx := int32(len(il.images))
-	il.images = append(il.images, ilImage{})
+	il.images = append(il.images, ilImage{
+		pix:      normalizeImageData(il.cx, il.cy, pix),
+		mask:     cloneBytes(mask),
+		hasAlpha: hasAlpha,
+	})
 	return idx
 }
 
@@ -167,18 +208,23 @@ func ImageListAddMasked(h uint64) int32 {
 
 // ImageListReplaceIcon replaces or adds an icon (ImageList_ReplaceIcon)
 func ImageListReplaceIcon(h uint64, i int32) int32 {
+	return ImageListReplaceIconData(h, i, nil)
+}
+
+func ImageListReplaceIconData(h uint64, i int32, pix []byte) int32 {
 	il := getIL(h)
 	if il == nil {
 		return -1
 	}
 	il.mu.Lock()
 	defer il.mu.Unlock()
+	img := ilImage{pix: normalizeImageData(il.cx, il.cy, pix), hasAlpha: true}
 	if i < 0 || i >= int32(len(il.images)) {
-		// Append
 		idx := int32(len(il.images))
-		il.images = append(il.images, ilImage{})
+		il.images = append(il.images, img)
 		return idx
 	}
+	il.images[i] = img
 	return i
 }
 
@@ -271,14 +317,16 @@ func ImageListDuplicate(h uint64) uint64 {
 	}
 	il.mu.Lock()
 	defer il.mu.Unlock()
-	newID := allocIL(il.cx, il.cy, il.flags)
+	newID := allocIL(il.cx, il.cy, il.flags, il.grow)
 	newIL := getIL(newID)
 	if newIL == nil {
 		return 0
 	}
 	newIL.bkColor = il.bkColor
 	newIL.images = make([]ilImage, len(il.images))
-	copy(newIL.images, il.images)
+	for i := range il.images {
+		newIL.images[i] = cloneImage(il.images[i])
+	}
 	return newID
 }
 
@@ -294,14 +342,14 @@ func ImageListCopy(hDst uint64, iDst int32, hSrc uint64, iSrc int32, uFlags uint
 	if iSrc < 0 || iSrc >= int32(len(src.images)) {
 		return false
 	}
-	srcImg := src.images[iSrc]
+	srcImg := cloneImage(src.images[iSrc])
 	dst.mu.Lock()
 	defer dst.mu.Unlock()
 	if iDst < 0 || iDst >= int32(len(dst.images)) {
 		return false
 	}
 	if uFlags&0x1 != 0 { // ILCF_SWAP
-		dst.images[iDst], src.images[iSrc] = src.images[iSrc], dst.images[iDst]
+		dst.images[iDst], src.images[iSrc] = cloneImage(src.images[iSrc]), cloneImage(dst.images[iDst])
 	} else {
 		dst.images[iDst] = srcImg
 	}
@@ -333,6 +381,10 @@ func ImageListSetFlags(h uint64, flags uint32) bool {
 
 // ImageListReplace replaces an existing image slot.
 func ImageListReplace(h uint64, i int32) bool {
+	return ImageListReplaceImage(h, i, nil, nil, false)
+}
+
+func ImageListReplaceImage(h uint64, i int32, pix []byte, mask []byte, hasAlpha bool) bool {
 	il := getIL(h)
 	if il == nil {
 		return false
@@ -342,7 +394,64 @@ func ImageListReplace(h uint64, i int32) bool {
 	if i < 0 || i >= int32(len(il.images)) {
 		return false
 	}
-	il.images[i] = ilImage{}
+	il.images[i] = ilImage{
+		pix:      normalizeImageData(il.cx, il.cy, pix),
+		mask:     cloneBytes(mask),
+		hasAlpha: hasAlpha,
+	}
+	return true
+}
+
+func ImageListGetImage(h uint64, i int32) (pix []byte, mask []byte, hasAlpha bool, ok bool) {
+	il := getIL(h)
+	if il == nil {
+		return nil, nil, false, false
+	}
+	il.mu.Lock()
+	defer il.mu.Unlock()
+	if i < 0 || i >= int32(len(il.images)) {
+		return nil, nil, false, false
+	}
+	img := il.images[i]
+	return cloneBytes(img.pix), cloneBytes(img.mask), img.hasAlpha, true
+}
+
+func ImageListDrawTo(h uint64, i int32, dst *gdi.DC, x, y int32, style uint32) bool {
+	if dst == nil || dst.Target == nil {
+		return false
+	}
+	il := getIL(h)
+	if il == nil {
+		return false
+	}
+	il.mu.Lock()
+	if i < 0 || i >= int32(len(il.images)) {
+		il.mu.Unlock()
+		return false
+	}
+	cx, cy := il.cx, il.cy
+	img := cloneImage(il.images[i])
+	bk := il.bkColor
+	il.mu.Unlock()
+	if len(img.pix) == 0 {
+		return false
+	}
+	surf := gdi.WrapPix(img.pix, cx, cy, cx*4)
+	dx := x + dst.OriginX
+	dy := y + dst.OriginY
+	if bk != CLR_NONE && style&ILD_TRANSPARENT == 0 {
+		dst.Target.FillRect(dx, dy, dx+cx, dy+cy, bk)
+	}
+	switch {
+	case style&ILD_BLEND50 != 0:
+		dst.Target.AlphaBlendSurface(dx, dy, cx, cy, surf, 0, 0, cx, cy, 128, img.hasAlpha)
+	case style&ILD_BLEND25 != 0:
+		dst.Target.AlphaBlendSurface(dx, dy, cx, cy, surf, 0, 0, cx, cy, 192, img.hasAlpha)
+	case style&ILD_TRANSPARENT != 0:
+		dst.Target.AlphaBlendSurface(dx, dy, cx, cy, surf, 0, 0, cx, cy, 255, img.hasAlpha)
+	default:
+		dst.Target.BitBlt(dx, dy, surf, 0, 0, cx, cy)
+	}
 	return true
 }
 

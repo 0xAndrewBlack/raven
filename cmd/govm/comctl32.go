@@ -11,8 +11,14 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	d := hctx.Disp
 	hwndAlloc := hctx.HwndAlloc
 	hwndChildren := hctx.HwndChildren
+	gdiMgr := hctx.GdiMgr
+	getDC := hctx.GetDCFn
 	readGuestUTF16 := hctx.ReadGuestUTF16
 	sharedHeapAlloc := hctx.HeapAlloc
+	peLoadRawResource := hctx.PeLoadRawResource
+	decodeDIBSlots := hctx.DecodeDIBSlots
+	mainModule := hctx.MainModule
+	bitmapHandles := hctx.BitmapHandles
 
 	comctl32, ok := hctx.SynthByName["comctl32.dll"]
 	if !ok {
@@ -52,6 +58,105 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		dragListWindows      = map[uint64]bool{}
 		imageListDrag        = imageListDragState{dragIndex: -1, cursorIndex: -1}
 	)
+	makePlaceholderIcon := func(cx, cy int32, seed uint64) []byte {
+		if cx <= 0 {
+			cx = 16
+		}
+		if cy <= 0 {
+			cy = 16
+		}
+		pix := make([]byte, cx*cy*4)
+		base := uint32(seed&0xFFFFFF) | 0x404040
+		for y := int32(0); y < cy; y++ {
+			for x := int32(0); x < cx; x++ {
+				off := int((y*cx + x) * 4)
+				c := base
+				if x == 0 || y == 0 || x == cx-1 || y == cy-1 {
+					c = 0x202020
+				}
+				pix[off+0] = byte(c)
+				pix[off+1] = byte(c >> 8)
+				pix[off+2] = byte(c >> 16)
+				pix[off+3] = 0xFF
+			}
+		}
+		return pix
+	}
+	slotsToImageList := func(himl uint64, slots [][]uint32, maskColor uint32) int32 {
+		first := int32(-1)
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himl)
+		if !ok || cx <= 0 || cy <= 0 {
+			return -1
+		}
+		for _, slot := range slots {
+			if len(slot) == 0 {
+				continue
+			}
+			pix := make([]byte, cx*cy*4)
+			for i, c := range slot {
+				if i*4+3 >= len(pix) {
+					break
+				}
+				if c == maskColor {
+					pix[i*4+3] = 0
+				} else {
+					pix[i*4+0] = byte(c)
+					pix[i*4+1] = byte(c >> 8)
+					pix[i*4+2] = byte(c >> 16)
+					pix[i*4+3] = 0xFF
+				}
+			}
+			idx := comctl32pkg.ImageListAddImage(himl, pix, nil, true)
+			if first < 0 {
+				first = idx
+			}
+		}
+		return first
+	}
+	extractBitmapSlots := func(hbm uint64, cx, cy int32, maskColor *uint32) [][]uint32 {
+		if bd := bitmapHandles[hbm]; bd != nil && len(bd.slots) > 0 {
+			return bd.slots
+		}
+		obj := gdiMgr.GetObject(hbm)
+		if obj == nil || obj.Bitmap == nil || obj.Bitmap.Surf == nil {
+			return nil
+		}
+		bm := obj.Bitmap
+		width := bm.Width
+		height := bm.Height
+		if width <= 0 || height <= 0 {
+			return nil
+		}
+		if cx <= 0 {
+			cx = width
+		}
+		if cy <= 0 {
+			cy = height
+		}
+		nSlots := int(width / cx)
+		if nSlots <= 0 {
+			nSlots = 1
+		}
+		slots := make([][]uint32, nSlots)
+		for s := 0; s < nSlots; s++ {
+			slot := make([]uint32, cx*cy)
+			for y := int32(0); y < cy && y < height; y++ {
+				for x := int32(0); x < cx; x++ {
+					srcX := int32(s)*cx + x
+					if srcX >= width {
+						break
+					}
+					c := bm.Surf.GetPixel(srcX, y)
+					if maskColor != nil && c == *maskColor {
+						c = 0
+					}
+					slot[y*cx+x] = c
+				}
+			}
+			slots[s] = slot
+		}
+		return slots
+	}
 	resetImageListDrag := func() {
 		if imageListDrag.himlDrag != 0 {
 			comctl32pkg.ImageListDestroy(imageListDrag.himlDrag)
@@ -156,7 +261,16 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	// ImageList_AddMasked - adds bitmap with mask colour; return index
 	d.RegisterAutoStubHandler(comctl32, "ImageList_AddMasked", func(ctx *ntapi.TrapContext) uint32 {
 		himl := ctx.Arg(0)
-		idx := comctl32pkg.ImageListAddMasked(himl)
+		hbm := ctx.Arg(1)
+		crMask := uint32(ctx.Arg(2))
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himl)
+		idx := int32(-1)
+		if ok {
+			idx = slotsToImageList(himl, extractBitmapSlots(hbm, cx, cy, &crMask), crMask)
+		}
+		if idx < 0 {
+			idx = comctl32pkg.ImageListAddMasked(himl)
+		}
 		ctx.SetReturn(uint64(int64(idx)))
 		return 0
 	})
@@ -164,7 +278,21 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	// ImageList_Add - adds bitmap without mask; return index
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Add", func(ctx *ntapi.TrapContext) uint32 {
 		himl := ctx.Arg(0)
-		idx := comctl32pkg.ImageListAdd(himl)
+		hbmImage := ctx.Arg(1)
+		hbmMask := ctx.Arg(2)
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himl)
+		idx := int32(-1)
+		if ok {
+			var maskColor *uint32
+			if hbmMask != 0 {
+				zero := uint32(0)
+				maskColor = &zero
+			}
+			idx = slotsToImageList(himl, extractBitmapSlots(hbmImage, cx, cy, maskColor), 0)
+		}
+		if idx < 0 {
+			idx = comctl32pkg.ImageListAdd(himl)
+		}
 		ctx.SetReturn(uint64(int64(idx)))
 		return 0
 	})
@@ -198,8 +326,8 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		x := int32(ctx.Arg(3))
 		y := int32(ctx.Arg(4))
 		fStyle := uint32(ctx.Arg(5))
-		count := comctl32pkg.ImageListGetImageCount(himl)
-		ok := himl != 0 && i >= 0 && i < count
+		dc := getDC(hdc)
+		ok := comctl32pkg.ImageListDrawTo(himl, i, dc, x, y, fStyle)
 		ravelog.Logf("[comctl32] ImageList_Draw himl=0x%x i=%d hdc=0x%x x=%d y=%d style=0x%x ok=%v\n",
 			himl, i, hdc, x, y, fStyle, ok)
 		if ok {
@@ -229,7 +357,7 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		if dy == 0 {
 			dy = cy
 		}
-		ok = ok && i >= 0 && i < comctl32pkg.ImageListGetImageCount(himl)
+		ok = ok && comctl32pkg.ImageListDrawTo(himl, i, getDC(hdc), x, y, fStyle)
 		ravelog.Logf("[comctl32] ImageList_DrawEx himl=0x%x i=%d hdc=0x%x x=%d y=%d dx=%d dy=%d rgbBk=0x%x rgbFg=0x%x style=0x%x ok=%v\n",
 			himl, i, hdc, x, y, dx, dy, rgbBk, rgbFg, fStyle, ok)
 		if ok {
@@ -282,7 +410,15 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	// ── ImageList full coverage ──────────────────────────────────────────
 	d.RegisterAutoStubHandler(comctl32, "ImageList_AddIcon", func(ctx *ntapi.TrapContext) uint32 {
 		h := ctx.Arg(0)
-		idx := comctl32pkg.ImageListAdd(h)
+		hIcon := ctx.Arg(1)
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(h)
+		idx := int32(-1)
+		if ok {
+			idx = comctl32pkg.ImageListAddImage(h, makePlaceholderIcon(cx, cy, hIcon), nil, true)
+		}
+		if idx < 0 {
+			idx = comctl32pkg.ImageListAdd(h)
+		}
 		ctx.SetReturn(uint64(int64(idx)))
 		return 0
 	})
@@ -568,7 +704,32 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		i := int32(ctx.Arg(1))
 		hbmImage := ctx.Arg(2)
 		hbmMask := ctx.Arg(3)
-		ok := comctl32pkg.ImageListReplace(himl, i)
+		cx, cy, sizeOK := comctl32pkg.ImageListGetIconSize(himl)
+		ok := false
+		if sizeOK {
+			var maskColor *uint32
+			if hbmMask != 0 {
+				zero := uint32(0)
+				maskColor = &zero
+			}
+			slots := extractBitmapSlots(hbmImage, cx, cy, maskColor)
+			if len(slots) > 0 {
+				pix := make([]byte, cx*cy*4)
+				for idx2, c := range slots[0] {
+					if idx2*4+3 >= len(pix) {
+						break
+					}
+					pix[idx2*4+0] = byte(c)
+					pix[idx2*4+1] = byte(c >> 8)
+					pix[idx2*4+2] = byte(c >> 16)
+					pix[idx2*4+3] = 0xFF
+				}
+				ok = comctl32pkg.ImageListReplaceImage(himl, i, pix, nil, true)
+			}
+		}
+		if !ok {
+			ok = comctl32pkg.ImageListReplace(himl, i)
+		}
 		ravelog.Logf("[comctl32] ImageList_Replace himl=0x%x i=%d hbmImage=0x%x hbmMask=0x%x ok=%v\n",
 			himl, i, hbmImage, hbmMask, ok)
 		if ok {
@@ -590,12 +751,29 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_LoadImageA", func(ctx *ntapi.TrapContext) uint32 {
-		newH := comctl32pkg.ImageListCreate(16, 16, 0, 0, 4)
+		newH := comctl32pkg.ImageListCreate(16, 16, uint32(ctx.Arg(6)), 0, int32(ctx.Arg(3)))
 		ctx.SetReturn(newH)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_LoadImageW", func(ctx *ntapi.TrapContext) uint32 {
-		newH := comctl32pkg.ImageListCreate(16, 16, 0, 0, 4)
+		hInst := ctx.Arg(0)
+		lpbmp := ctx.Arg(1)
+		cx := int32(ctx.Arg(2))
+		cGrow := int32(ctx.Arg(3))
+		crMask := uint32(ctx.Arg(4))
+		uType := uint32(ctx.Arg(5))
+		uFlags := uint32(ctx.Arg(6))
+		if cx <= 0 {
+			cx = 16
+		}
+		cy := cx
+		newH := comctl32pkg.ImageListCreate(cx, cy, uFlags, 0, cGrow)
+		if uType == 0 && lpbmp < 0x10000 && mainModule != nil && (hInst == 0 || hInst == mainModule.BaseAddr) {
+			if addr, sz, ok := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2, uint32(lpbmp)); ok {
+				slots := decodeDIBSlots(addr, sz, int(cx), int(cy))
+				slotsToImageList(newH, slots, crMask)
+			}
+		}
 		ctx.SetReturn(newH)
 		return 0
 	})
@@ -675,7 +853,7 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		frame, _ := ctx.Mem.Read32(pimldp + 76)
 		crEffect, _ := ctx.Mem.Read32(pimldp + 80)
 		i := int32(iRaw)
-		ok := himl != 0 && i >= 0 && i < comctl32pkg.ImageListGetImageCount(himl)
+		ok := himl != 0 && comctl32pkg.ImageListDrawTo(himl, i, getDC(hdcDst), int32(xRaw), int32(yRaw), fStyle)
 		ravelog.Logf("[comctl32] ImageList_DrawIndirect pimldp=0x%x cbSize=%d himl=0x%x i=%d hdc=0x%x x=%d y=%d cx=%d cy=%d xBitmap=%d yBitmap=%d rgbBk=0x%x rgbFg=0x%x style=0x%x rop=0x%x state=0x%x frame=%d effect=0x%x ok=%v\n",
 			pimldp, cbSize, himl, i, hdcDst, int32(xRaw), int32(yRaw), int32(cxRaw), int32(cyRaw),
 			int32(xBitmapRaw), int32(yBitmapRaw), rgbBk, rgbFg, fStyle, dwRop, fState, frame, crEffect, ok)

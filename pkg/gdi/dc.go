@@ -28,6 +28,9 @@ type DC struct {
 	Font   *Font
 	Bitmap *Bitmap // selected into memory DC via SelectObject(HBITMAP)
 
+	BitmapHandle        uint64
+	DefaultBitmapHandle uint64
+
 	// Text / background colours.
 	TextColor uint32 // COLORREF 0x00RRGGBB
 	BkColor   uint32
@@ -106,6 +109,8 @@ type XForm struct {
 // dcSave is a snapshot of mutable DC state stored by SaveDC.
 // ReactOS: DCSAVE in win32ss/gdi/ntgdi/dc.c
 type dcSave struct {
+	Target                     *Surface
+	IsScreen                   bool
 	OriginX, OriginY           int32
 	ClipX0, ClipY0             int32
 	ClipX1, ClipY1             int32
@@ -113,6 +118,8 @@ type dcSave struct {
 	Pen                        *Pen
 	Font                       *Font
 	Bitmap                     *Bitmap
+	BitmapHandle               uint64
+	DefaultBitmapHandle        uint64
 	TextColor, BkColor         uint32
 	BkMode                     int32
 	TextAlign                  int32
@@ -209,10 +216,13 @@ func (dc *DC) InheritFrom(src *DC) {
 // ReactOS: NtGdiSaveDC in win32ss/gdi/ntgdi/dc.c
 func (dc *DC) Save() int {
 	snap := &dcSave{
-		OriginX: dc.OriginX, OriginY: dc.OriginY,
+		Target:   dc.Target,
+		IsScreen: dc.IsScreen,
+		OriginX:  dc.OriginX, OriginY: dc.OriginY,
 		ClipX0: dc.ClipX0, ClipY0: dc.ClipY0,
 		ClipX1: dc.ClipX1, ClipY1: dc.ClipY1,
 		Brush: dc.Brush, Pen: dc.Pen, Font: dc.Font, Bitmap: dc.Bitmap,
+		BitmapHandle: dc.BitmapHandle, DefaultBitmapHandle: dc.DefaultBitmapHandle,
 		TextColor: dc.TextColor, BkColor: dc.BkColor, BkMode: dc.BkMode,
 		TextAlign: dc.TextAlign, MapMode: dc.MapMode,
 		WindowOrgX: dc.WindowOrgX, WindowOrgY: dc.WindowOrgY,
@@ -242,10 +252,12 @@ func (dc *DC) Restore(level int) bool {
 	}
 	s := dc.saved[idx]
 	dc.saved = dc.saved[:idx]
+	dc.Target, dc.IsScreen = s.Target, s.IsScreen
 	dc.OriginX, dc.OriginY = s.OriginX, s.OriginY
 	dc.ClipX0, dc.ClipY0 = s.ClipX0, s.ClipY0
 	dc.ClipX1, dc.ClipY1 = s.ClipX1, s.ClipY1
 	dc.Brush, dc.Pen, dc.Font, dc.Bitmap = s.Brush, s.Pen, s.Font, s.Bitmap
+	dc.BitmapHandle, dc.DefaultBitmapHandle = s.BitmapHandle, s.DefaultBitmapHandle
 	dc.TextColor, dc.BkColor, dc.BkMode = s.TextColor, s.BkColor, s.BkMode
 	dc.TextAlign = s.TextAlign
 	dc.MapMode = s.MapMode

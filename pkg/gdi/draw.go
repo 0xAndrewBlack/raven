@@ -2,6 +2,19 @@ package gdi
 
 import "math"
 
+const (
+	ropBlackness  = 0x00000042
+	ropNotSrcCopy = 0x00330008
+	ropSrcErase   = 0x00440328
+	ropSrcInvert  = 0x00660046
+	ropSrcAnd     = 0x008800C6
+	ropPatInvert  = 0x005A0049
+	ropSrcPaint   = 0x00EE0086
+	ropPatCopy    = 0x00F00021
+	ropSrcCopy    = 0x00CC0020
+	ropWhiteness  = 0x00FF0062
+)
+
 // draw.go - GDI drawing primitives
 // ReactOS reference: win32ss/gdi/ntgdi/
 
@@ -147,18 +160,18 @@ func (dc *DC) Ellipse(x0, y0, x1, y1 int32) {
 //
 // rop3 values: SRCCOPY=0xCC0020, PATCOPY=0xF00021, BLACKNESS=0x420000, WHITENESS=0xFF0062
 func (dc *DC) BitBlt(dx, dy, w, h int32, src *DC, sx, sy int32, rop3 uint32) {
-	if src == nil || src.Target == nil {
-		return
-	}
 	if dc.Target == nil {
 		return
 	}
 	// Map destination to absolute surface coords using DC origin.
 	adx := dx + dc.OriginX
 	ady := dy + dc.OriginY
-	// Map source to source-surface-local coords.
-	asx := sx + src.OriginX
-	asy := sy + src.OriginY
+	asx := sx
+	asy := sy
+	if src != nil {
+		asx += src.OriginX
+		asy += src.OriginY
+	}
 	// Apply DC clip rect to destination region.
 	if dc.ClipX1 > dc.ClipX0 {
 		if adx < dc.ClipX0 {
@@ -181,46 +194,158 @@ func (dc *DC) BitBlt(dx, dy, w, h int32, src *DC, sx, sy int32, rop3 uint32) {
 	if w <= 0 || h <= 0 {
 		return
 	}
-	switch rop3 & 0xFF0000 {
-	case 0xCC0000: // SRCCOPY
-		dc.Target.BitBlt(adx, ady, src.Target, asx, asy, w, h)
-	case 0x000000: // BLACKNESS
-		dc.Target.FillRect(adx, ady, adx+w, ady+h, 0x000000)
-	case 0xFF0000: // WHITENESS
-		dc.Target.FillRect(adx, ady, adx+w, ady+h, 0xFFFFFF)
-	case 0xF00000: // PATCOPY
-		color := uint32(0xF0F0F0)
-		if dc.Brush != nil && dc.Brush.Style == 0 {
-			color = dc.Brush.Color
-		}
-		dc.Target.FillRect(adx, ady, adx+w, ady+h, color)
-	default:
-		// Unrecognised ROP - fall back to SRCCOPY
-		dc.Target.BitBlt(adx, ady, src.Target, asx, asy, w, h)
+	if !ropNeedsSource(rop3) {
+		dc.applySolidROP(adx, ady, w, h, rop3)
+		return
 	}
+	if src == nil || src.Target == nil {
+		return
+	}
+	if rop3 == ropSrcCopy {
+		dc.Target.BitBlt(adx, ady, src.Target, asx, asy, w, h)
+		return
+	}
+	dc.blitROP(adx, ady, w, h, src.Target, asx, asy, w, h, rop3)
 }
 
 // StretchBlt copies and scales src to dst with nearest-neighbour interpolation.
 // ReactOS: NtGdiStretchBlt → EngStretchBlt
 func (dc *DC) StretchBlt(dx, dy, dw, dh int32, src *DC, sx, sy, sw, sh int32, rop3 uint32) {
-	if src == nil || src.Target == nil || dc.Target == nil {
+	if dc.Target == nil {
 		return
 	}
 	adx := dx + dc.OriginX
 	ady := dy + dc.OriginY
-	asx := sx + src.OriginX
-	asy := sy + src.OriginY
-	switch rop3 & 0xFF0000 {
-	case 0x000000:
-		dc.Target.FillRect(adx, ady, adx+dw, ady+dh, 0x000000)
-	case 0xFF0000:
-		dc.Target.FillRect(adx, ady, adx+dw, ady+dh, 0xFFFFFF)
-	case 0xF00000:
-		if color, ok := dc.brushColor(); ok {
-			dc.Target.FillRect(adx, ady, adx+dw, ady+dh, color)
-		}
-	default:
+	asx := sx
+	asy := sy
+	if src != nil {
+		asx += src.OriginX
+		asy += src.OriginY
+	}
+	if !ropNeedsSource(rop3) {
+		dc.applySolidROP(adx, ady, dw, dh, rop3)
+		return
+	}
+	if src == nil || src.Target == nil {
+		return
+	}
+	if rop3 == ropSrcCopy {
 		dc.Target.StretchBlt(adx, ady, dw, dh, src.Target, asx, asy, sw, sh)
+		return
+	}
+	dc.blitROP(adx, ady, dw, dh, src.Target, asx, asy, sw, sh, rop3)
+}
+
+func ropNeedsSource(rop3 uint32) bool {
+	switch rop3 {
+	case ropBlackness, ropWhiteness, ropPatCopy, ropPatInvert:
+		return false
+	default:
+		return true
+	}
+}
+
+func (dc *DC) applySolidROP(dx, dy, w, h int32, rop3 uint32) {
+	switch rop3 {
+	case ropBlackness:
+		dc.Target.FillRect(dx, dy, dx+w, dy+h, 0x000000)
+	case ropWhiteness:
+		dc.Target.FillRect(dx, dy, dx+w, dy+h, 0xFFFFFF)
+	case ropPatInvert:
+		dc.fillPatternROP(dx, dy, w, h, true)
+	default:
+		dc.fillPatternROP(dx, dy, w, h, false)
+	}
+}
+
+func (dc *DC) fillPatternROP(dx, dy, w, h int32, invert bool) {
+	if dc.Target == nil || w <= 0 || h <= 0 {
+		return
+	}
+	if dc.Brush != nil && dc.Brush.Style == 3 && dc.Brush.Pattern != nil && dc.Brush.Pattern.Surf != nil {
+		ps := dc.Brush.Pattern.Surf
+		for row := int32(0); row < h; row++ {
+			dstY := dy + row
+			if dstY < 0 || dstY >= dc.Target.Height {
+				continue
+			}
+			for col := int32(0); col < w; col++ {
+				dstX := dx + col
+				if dstX < 0 || dstX >= dc.Target.Width {
+					continue
+				}
+				c := ps.GetPixel(col%ps.Width, row%ps.Height)
+				if invert {
+					c = c ^ dc.Target.GetPixel(dstX, dstY)
+				}
+				dc.Target.SetPixel(dstX, dstY, c)
+			}
+		}
+		return
+	}
+	color := uint32(0xF0F0F0)
+	if dc.Brush != nil && dc.Brush.Style == 0 {
+		color = dc.Brush.Color
+	}
+	if invert {
+		for row := int32(0); row < h; row++ {
+			dstY := dy + row
+			if dstY < 0 || dstY >= dc.Target.Height {
+				continue
+			}
+			for col := int32(0); col < w; col++ {
+				dstX := dx + col
+				if dstX < 0 || dstX >= dc.Target.Width {
+					continue
+				}
+				dc.Target.SetPixel(dstX, dstY, dc.Target.GetPixel(dstX, dstY)^color)
+			}
+		}
+		return
+	}
+	dc.Target.FillRect(dx, dy, dx+w, dy+h, color)
+}
+
+func (dc *DC) blitROP(dx, dy, dw, dh int32, src *Surface, sx, sy, sw, sh int32, rop3 uint32) {
+	if dc.Target == nil || src == nil || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 {
+		return
+	}
+	for row := int32(0); row < dh; row++ {
+		srcY := sy + row*sh/dh
+		dstY := dy + row
+		if srcY < 0 || srcY >= src.Height || dstY < 0 || dstY >= dc.Target.Height {
+			continue
+		}
+		for col := int32(0); col < dw; col++ {
+			srcX := sx + col*sw/dw
+			dstX := dx + col
+			if srcX < 0 || srcX >= src.Width || dstX < 0 || dstX >= dc.Target.Width {
+				continue
+			}
+			srcColor := src.GetPixel(srcX, srcY)
+			dstColor := dc.Target.GetPixel(dstX, dstY)
+			out := applyROPColor(rop3, srcColor, dstColor)
+			dc.Target.SetPixel(dstX, dstY, out)
+		}
+	}
+}
+
+func applyROPColor(rop3, srcColor, dstColor uint32) uint32 {
+	switch rop3 {
+	case ropSrcCopy:
+		return srcColor
+	case ropSrcPaint:
+		return srcColor | dstColor
+	case ropSrcAnd:
+		return srcColor & dstColor
+	case ropSrcInvert:
+		return srcColor ^ dstColor
+	case ropNotSrcCopy:
+		return (^srcColor) & 0x00FFFFFF
+	case ropSrcErase:
+		return srcColor & (^dstColor & 0x00FFFFFF)
+	default:
+		return srcColor
 	}
 }
 

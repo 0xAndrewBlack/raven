@@ -19,9 +19,10 @@ const (
 // ReactOS: BRUSH / EBRUSHOBJ in win32ss/gdi/ntgdi/brush.c
 type Brush struct {
 	// Style: BS_SOLID=0, BS_NULL/BS_HOLLOW=1, BS_HATCHED=2, BS_PATTERN=3, BS_DIBPATTERN=5
-	Style int32
-	Color uint32 // COLORREF for solid brushes
-	Hatch int32  // hatch style for hatched brushes
+	Style   int32
+	Color   uint32 // COLORREF for solid brushes
+	Hatch   int32  // hatch style for hatched brushes
+	Pattern *Bitmap
 }
 
 // Pen represents a GDI pen.
@@ -63,9 +64,12 @@ type Font struct {
 // Bitmap represents a GDI bitmap (HBITMAP).
 // ReactOS: SURFACE in win32ss/gdi/ntgdi/surface.c
 type Bitmap struct {
-	Width  int32
-	Height int32
-	Surf   *Surface // nil = uninitialized (compatible bitmap not yet used)
+	Width    int32
+	Height   int32
+	BitCount int32
+	TopDown  bool
+	Bits     uint64
+	Surf     *Surface // nil = uninitialized (compatible bitmap not yet used)
 }
 
 // Region represents a GDI clip region (HRGN).

@@ -52,6 +52,28 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 
 	identityXform := [6]uint32{0x3F800000, 0, 0, 0x3F800000, 0, 0}
 
+	writeBitmapObject := func(ctx *ntapi.TrapContext, pv uint64, bm *gdi.Bitmap) {
+		if pv == 0 || bm == nil {
+			return
+		}
+		widthBytes := bm.Width * 4
+		if widthBytes < 0 {
+			widthBytes = -widthBytes
+		}
+		bitsPixel := bm.BitCount
+		if bitsPixel == 0 {
+			bitsPixel = 32
+		}
+		ctx.Mem.Write32(pv, 0)
+		ctx.Mem.Write32(pv+4, uint32(bm.Width))
+		ctx.Mem.Write32(pv+8, uint32(bm.Height))
+		ctx.Mem.Write32(pv+12, uint32(widthBytes))
+		ctx.Mem.Write16(pv+16, 1)
+		ctx.Mem.Write16(pv+18, uint16(bitsPixel))
+		ctx.Mem.Write32(pv+20, 0)
+		ctx.Mem.Write64(pv+24, bm.Bits)
+	}
+
 	// readXformMem reads an XFORM struct (6 float32s) from guest memory.
 	readXformMem := func(ctx *ntapi.TrapContext, addr uint64) [6]uint32 {
 		var xf [6]uint32
@@ -192,12 +214,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		hdcParent := ctx.Arg(0)
 		h, memDC := gdiMgr.AllocMemDC()
 		if parent := gdiMgr.GetDC(hdcParent); parent != nil {
-			// Inherit parent DC properties (origin, clip, colours, surface).
 			memDC.InheritFrom(parent)
-		} else if gdiMgr.Screen != nil {
-			// No parent → attach to screen surface directly (transparent mode).
-			memDC.Target = gdiMgr.Screen
-			memDC.IsScreen = true
 		}
 		memDC.WorldTransform = gdi.IdentityXForm()
 		memDC.PolyFillMode = 1
@@ -211,7 +228,15 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateCompatibleBitmap", func(ctx *ntapi.TrapContext) uint32 {
-		h := gdiMgr.CreateCompatibleBitmap(int32(ctx.Arg(1)), int32(ctx.Arg(2)))
+		w := int32(ctx.Arg(1))
+		hgt := int32(ctx.Arg(2))
+		if w <= 0 {
+			w = 1
+		}
+		if hgt <= 0 {
+			hgt = 1
+		}
+		h := gdiMgr.CreateCompatibleBitmap(w, hgt)
 		callerRIP := uint64(0)
 		var callers [8]uint64
 		if rr, ok := ctx.CPU.(ntapi.RegisterReader); ok {
@@ -229,14 +254,20 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		// CreateDIBSection(hdc, pbmi, usage, ppvBits, hSection, offset)
 		pbi := ctx.Arg(1)
 		ppvBits := ctx.Arg(4)
-		w, h := int32(0), int32(0)
+		w, h, bitCount := int32(0), int32(0), int32(32)
+		topDown := false
 		if pbi != 0 {
 			v32, _ := mem.Read32(pbi + 4)
 			w = int32(v32)
 			v32, _ = mem.Read32(pbi + 8)
 			h = int32(v32)
 			if h < 0 {
+				topDown = true
 				h = -h
+			}
+			v16, _ := mem.Read16(pbi + 14)
+			if v16 != 0 {
+				bitCount = int32(v16)
 			}
 		}
 		if w <= 0 {
@@ -245,15 +276,15 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		if h <= 0 {
 			h = 1
 		}
-		// Allocate guest memory for the pixel data and write ppvBits
-		stride := int(w) * 4 // 32bpp BGRA
+		stride := int(w) * 4
 		sz := uint64(stride * int(h))
 		bits := mem.Mmap(0, sz, mmu.PermRead|mmu.PermWrite)
+		pix, _ := mem.ReadBytes(bits, int(sz))
 		if ppvBits != 0 {
 			mem.Write64(ppvBits, bits)
 		}
-		hBmp := gdiMgr.CreateDIBSection(w, h)
-		ravelog.Logf("[gdi] CreateDIBSection %dx%d → hbm=0x%x bits=0x%x (%d bytes)\n", w, h, hBmp, bits, sz)
+		hBmp := gdiMgr.CreateDIBSectionWithData(w, h, bitCount, bits, pix, topDown)
+		ravelog.Logf("[gdi] CreateDIBSection %dx%d bpp=%d topDown=%v → hbm=0x%x bits=0x%x (%d bytes)\n", w, h, bitCount, topDown, hBmp, bits, sz)
 		ctx.SetReturn(hBmp)
 		return 0
 	})
@@ -385,16 +416,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			}
 		case gdi.ObjBitmap:
 			ctx.SetReturn(32) // sizeof(BITMAP) on x64
-			if pv != 0 && obj.Bitmap != nil {
-				ctx.Mem.Write32(pv, 0)
-				ctx.Mem.Write32(pv+4, uint32(obj.Bitmap.Width))
-				ctx.Mem.Write32(pv+8, uint32(obj.Bitmap.Height))
-				ctx.Mem.Write32(pv+12, uint32(obj.Bitmap.Width*4))
-				ctx.Mem.Write16(pv+16, 1)
-				ctx.Mem.Write16(pv+18, 32)
-				ctx.Mem.Write32(pv+20, 0)
-				ctx.Mem.Write64(pv+24, 0)
-			}
+			writeBitmapObject(ctx, pv, obj.Bitmap)
 		default:
 			ctx.SetReturn(0)
 		}
@@ -874,10 +896,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "BitBlt", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		hdcDst := ctx.Arg(0)
 		dx := int32(ctx.Arg(1))
 		dy := int32(ctx.Arg(2))
@@ -903,10 +921,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "StretchBlt", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		hdcDst := ctx.Arg(0)
 		dx := int32(ctx.Arg(1))
 		dy := int32(ctx.Arg(2))
@@ -925,10 +939,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PatBlt", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		x := int32(ctx.Arg(1))
 		y := int32(ctx.Arg(2))
@@ -936,23 +946,13 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		h := int32(ctx.Arg(4))
 		rop := ctx.Arg(5)
 		ravelog.Logf("[gdi] PatBlt dc=0x%x x=%d y=%d w=%d h=%d rop=0x%x\n", ctx.Arg(0), x, y, w, h, rop)
-		switch rop & 0xFF0000 {
-		case 0x000000: // BLACKNESS
+		switch rop {
+		case 0x00000042: // BLACKNESS
 			dc.FillRect(x, y, x+w, y+h, 0x000000)
-		case 0xFF0000: // WHITENESS
+		case 0x00FF0062: // WHITENESS
 			dc.FillRect(x, y, x+w, y+h, 0xFFFFFF)
-		case 0x5A0000: // PATINVERT - XOR; approximate as solid fill
-			brushColor := uint32(0xF0F0F0)
-			if dc.Brush != nil && dc.Brush.Style == 0 {
-				brushColor = dc.Brush.Color
-			}
-			dc.FillRect(x, y, x+w, y+h, brushColor^0xFFFFFF)
-		default: // PATCOPY and others - fill with brush
-			brushColor := uint32(0xF0F0F0)
-			if dc.Brush != nil && dc.Brush.Style == 0 {
-				brushColor = dc.Brush.Color
-			}
-			dc.FillRect(x, y, x+w, y+h, brushColor)
+		default:
+			dc.BitBlt(x, y, w, h, nil, 0, 0, uint32(rop))
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -2662,7 +2662,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetBitmapBits", func(ctx *ntapi.TrapContext) uint32 {
-		// GetBitmapBits(hbm, cb, lpvBits) - 24bpp BGR rows, 4-byte aligned
 		hbm := ctx.Arg(0)
 		cb := int(ctx.Arg(1))
 		pBits := ctx.Arg(2)
@@ -2672,23 +2671,26 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		bm := obj.Bitmap
-		stride := gdi.DIBStride(bm.Width, 24)
-		rows := cb / int(stride)
-		if rows <= 0 {
+		stride := int(bm.Width) * 4
+		size := stride * int(bm.Height)
+		if cb < size {
+			size = cb
+		}
+		if size <= 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		buf := make([]byte, rows*int(stride))
-		gdi.WriteDIBFromSurface(buf, bm.Surf, 0, 0, bm.Width, int32(rows), 24)
-		n := rows * int(stride)
-		for i := 0; i < n; i++ {
-			ctx.Mem.Write8(pBits+uint64(i), buf[i])
+		buf := bm.Surf.Pix
+		if bm.Bits != 0 {
+			if host, err := mem.ReadBytes(bm.Bits, len(buf)); err == nil {
+				buf = host
+			}
 		}
-		ctx.SetReturn(uint64(n))
+		ctx.Mem.WriteBytes(pBits, buf[:size])
+		ctx.SetReturn(uint64(size))
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetBitmapBits", func(ctx *ntapi.TrapContext) uint32 {
-		// SetBitmapBits(hbm, cb, lpvBits) - 24bpp BGR rows, 4-byte aligned
 		hbm := ctx.Arg(0)
 		cb := int(ctx.Arg(1))
 		pBits := ctx.Arg(2)
@@ -2698,33 +2700,20 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		bm := obj.Bitmap
-		stride := gdi.DIBStride(bm.Width, 24)
-		if stride == 0 {
+		size := len(bm.Surf.Pix)
+		if cb < size {
+			size = cb
+		}
+		if size <= 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		rows := cb / int(stride)
-		if rows <= 0 {
-			ctx.SetReturn(0)
-			return 0
+		buf, _ := ctx.Mem.ReadBytes(pBits, size)
+		copy(bm.Surf.Pix[:size], buf)
+		if bm.Bits != 0 {
+			mem.WriteBytes(bm.Bits, buf)
 		}
-		buf := make([]byte, cb)
-		for i := 0; i < cb; i++ {
-			buf[i], _ = ctx.Mem.Read8(pBits + uint64(i))
-		}
-		// Write 24bpp bottom-up into surface (flip)
-		for row := 0; row < rows; row++ {
-			srcRow := (rows - 1 - row) // bottom-up
-			sy := srcRow
-			for col := int32(0); col < bm.Width && col < int32(int(stride/3)); col++ {
-				off := row*int(stride) + int(col)*3
-				b := buf[off]
-				g := buf[off+1]
-				r := buf[off+2]
-				bm.Surf.SetPixel(col, int32(sy), uint32(r)<<16|uint32(g)<<8|uint32(b))
-			}
-		}
-		ctx.SetReturn(uint64(rows * int(stride)))
+		ctx.SetReturn(uint64(size))
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetBitmapDimensionEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -3755,13 +3744,21 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		bm := obj.Bitmap
 		// Fill BITMAPINFOHEADER if provided (bitCount=32 BI_RGB)
 		if pBMI != 0 {
-			ctx.Mem.Write32(pBMI, 40)                  // biSize
-			ctx.Mem.Write32(pBMI+4, uint32(bm.Width))  // biWidth
-			ctx.Mem.Write32(pBMI+8, uint32(bm.Height)) // biHeight (bottom-up)
-			ctx.Mem.Write16(pBMI+12, 1)                // biPlanes
-			ctx.Mem.Write16(pBMI+14, 32)               // biBitCount
-			ctx.Mem.Write32(pBMI+16, 0)                // biCompression BI_RGB
-			ctx.Mem.Write32(pBMI+20, 0)                // biSizeImage
+			ctx.Mem.Write32(pBMI, 40)                 // biSize
+			ctx.Mem.Write32(pBMI+4, uint32(bm.Width)) // biWidth
+			height := bm.Height
+			if bm.TopDown {
+				height = -height
+			}
+			ctx.Mem.Write32(pBMI+8, uint32(height))
+			ctx.Mem.Write16(pBMI+12, 1) // biPlanes
+			bitCount := bm.BitCount
+			if bitCount == 0 {
+				bitCount = 32
+			}
+			ctx.Mem.Write16(pBMI+14, uint16(bitCount))
+			ctx.Mem.Write32(pBMI+16, 0) // biCompression BI_RGB
+			ctx.Mem.Write32(pBMI+20, uint32(gdi.DIBStride(bm.Width, bitCount)*bm.Height))
 			ctx.Mem.Write32(pBMI+24, 0)
 			ctx.Mem.Write32(pBMI+28, 0)
 			ctx.Mem.Write32(pBMI+32, 0)
@@ -3771,13 +3768,18 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(uint64(numScans))
 			return 0
 		}
-		// Write pixel data (32bpp bottom-up)
-		stride := gdi.DIBStride(bm.Width, 32)
-		buf := make([]byte, int(stride)*int(numScans))
-		gdi.WriteDIBFromSurface(buf, bm.Surf, 0, startScan, bm.Width, numScans, 32)
-		for i, b := range buf {
-			ctx.Mem.Write8(lpvBits+uint64(i), b)
+		bitCount := bm.BitCount
+		if bitCount == 0 {
+			bitCount = 32
 		}
+		height := bm.Height
+		if bm.TopDown {
+			height = -height
+		}
+		stride := gdi.DIBStride(bm.Width, bitCount)
+		buf := make([]byte, int(stride)*int(numScans))
+		gdi.WriteDIBFromSurface(buf, bm.Surf, 0, startScan, bm.Width, numScans, bitCount)
+		ctx.Mem.WriteBytes(lpvBits, buf)
 		ctx.SetReturn(uint64(numScans))
 		return 0
 	})
@@ -3796,15 +3798,17 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		bm := obj.Bitmap
-		srcW, _, bitCount, _, ct, _ := readDIBInfo(pBMI)
+		srcW, srcH, bitCount, _, ct, _ := readDIBInfo(pBMI)
 		// lpBits contains numScans scan lines starting from startScan
-		pixData := readDIBPixels(lpBits, srcW, numScans, bitCount)
+		pixData := readDIBPixels(lpBits, srcW, srcH, bitCount)
 		if pixData == nil {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// Blit DIB rows into bitmap surface at startScan offset
-		bm.Surf.BlitDIB(0, startScan, bm.Width, numScans, pixData, srcW, numScans, bitCount, ct, 0, 0, bm.Width, numScans)
+		bm.Surf.BlitDIB(0, startScan, bm.Width, numScans, pixData, srcW, srcH, bitCount, ct, 0, startScan, bm.Width, numScans)
+		if bm.Bits != 0 {
+			mem.WriteBytes(bm.Bits, bm.Surf.Pix)
+		}
 		ctx.SetReturn(uint64(numScans))
 		return 0
 	})
@@ -3844,16 +3848,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			}
 		case gdi.ObjBitmap:
 			ctx.SetReturn(32) // sizeof(BITMAP) on x64
-			if pv != 0 && obj.Bitmap != nil {
-				ctx.Mem.Write32(pv, 0)
-				ctx.Mem.Write32(pv+4, uint32(obj.Bitmap.Width))
-				ctx.Mem.Write32(pv+8, uint32(obj.Bitmap.Height))
-				ctx.Mem.Write32(pv+12, uint32(obj.Bitmap.Width*4))
-				ctx.Mem.Write16(pv+16, 1)
-				ctx.Mem.Write16(pv+18, 32)
-				ctx.Mem.Write32(pv+20, 0) // padding
-				ctx.Mem.Write64(pv+24, 0) // bmBits (8 bytes on x64)
-			}
+			writeBitmapObject(ctx, pv, obj.Bitmap)
 		case gdi.ObjFont:
 			// LOGFONTA = 60 bytes (lfFaceName is char[32] at offset 28)
 			ctx.SetReturn(60)
