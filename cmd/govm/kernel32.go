@@ -1657,25 +1657,47 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write8(si+i, 0)
 		}
 		ctx.Mem.Write16(si+0, 9)                   // wProcessorArchitecture = AMD64
+		ctx.Mem.Write16(si+2, 0)                   // wReserved
 		ctx.Mem.Write32(si+4, 4096)                // dwPageSize
 		ctx.Mem.Write64(si+8, 0x10000)             // lpMinimumApplicationAddress
 		ctx.Mem.Write64(si+16, 0x00007FFFFFFEFFFF) // lpMaximumApplicationAddress
 		ctx.Mem.Write64(si+24, 0xF)                // dwActiveProcessorMask (4 CPUs)
 		ctx.Mem.Write32(si+32, 4)                  // dwNumberOfProcessors
-		ctx.Mem.Write32(si+36, 8664)               // dwProcessorType = AMD X86_64
+		ctx.Mem.Write32(si+36, 8664)               // dwProcessorType = PROCESSOR_AMD_X8664
 		ctx.Mem.Write32(si+40, 65536)              // dwAllocationGranularity
 		ctx.Mem.Write16(si+44, 6)                  // wProcessorLevel
-		ctx.Mem.Write16(si+46, 0)                  // wProcessorRevision
+		ctx.Mem.Write16(si+46, 0x5E03)             // wProcessorRevision (Skylake stepping 3)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetVersionExA", func(ctx *ntapi.TrapContext) uint32 {
 		info := ctx.Arg(0)
-		// dwOSVersionInfoSize already set by caller; fill key fields
+		// OSVERSIONINFOEXA layout (156 bytes for Ex, 148 for base):
+		//   +0x00 DWORD dwOSVersionInfoSize
+		//   +0x04 DWORD dwMajorVersion
+		//   +0x08 DWORD dwMinorVersion
+		//   +0x0C DWORD dwBuildNumber
+		//   +0x10 DWORD dwPlatformId
+		//   +0x14 CHAR  szCSDVersion[128]  (128 bytes, offset 20..147)
+		//   +0x94 WORD  wServicePackMajor  (offset 148)
+		//   +0x96 WORD  wServicePackMinor
+		//   +0x98 WORD  wSuiteMask
+		//   +0x9A BYTE  wProductType
+		//   +0x9B BYTE  wReserved
+		structSize, _ := ctx.Mem.Read32(info)
 		ctx.Mem.Write32(info+4, 10)     // dwMajorVersion = 10
 		ctx.Mem.Write32(info+8, 0)      // dwMinorVersion = 0
 		ctx.Mem.Write32(info+12, 19041) // dwBuildNumber
 		ctx.Mem.Write32(info+16, 2)     // dwPlatformId = VER_PLATFORM_WIN32_NT
-		ctx.SetReturn(1)                // TRUE
+		// szCSDVersion[128]: empty string (zero first byte, rest already 0)
+		ctx.Mem.Write8(info+20, 0)
+		if structSize >= 156 { // OSVERSIONINFOEXA
+			ctx.Mem.Write16(info+148, 0)     // wServicePackMajor
+			ctx.Mem.Write16(info+150, 0)     // wServicePackMinor
+			ctx.Mem.Write16(info+152, 0x300) // wSuiteMask: VER_SUITE_SINGLEUSERTS|VER_SUITE_TERMINAL
+			ctx.Mem.Write8(info+154, 1)      // wProductType = VER_NT_WORKSTATION
+			ctx.Mem.Write8(info+155, 0)      // wReserved
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "IsValidCodePage", func(ctx *ntapi.TrapContext) uint32 {
@@ -2390,11 +2412,32 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	// --- Version / system info ---
 	d.RegisterAutoStubHandler(kernel32, "GetVersionExW", func(ctx *ntapi.TrapContext) uint32 {
 		lpInfo := ctx.Arg(0)
-		// OSVERSIONINFOW: major=10, minor=0, build=19045
+		// OSVERSIONINFOEXW layout (284 bytes for Ex, 276 for base):
+		//   +0x00  DWORD dwOSVersionInfoSize
+		//   +0x04  DWORD dwMajorVersion
+		//   +0x08  DWORD dwMinorVersion
+		//   +0x0C  DWORD dwBuildNumber
+		//   +0x10  DWORD dwPlatformId
+		//   +0x14  WCHAR szCSDVersion[128]  (256 bytes, offsets 20..275)
+		//   +0x114 WORD  wServicePackMajor  (offset 276)
+		//   +0x116 WORD  wServicePackMinor
+		//   +0x118 WORD  wSuiteMask
+		//   +0x11A BYTE  wProductType
+		//   +0x11B BYTE  wReserved
+		structSize, _ := ctx.Mem.Read32(lpInfo)
 		ctx.Mem.Write32(lpInfo+4, 10)     // dwMajorVersion
 		ctx.Mem.Write32(lpInfo+8, 0)      // dwMinorVersion
-		ctx.Mem.Write32(lpInfo+12, 19045) // dwBuildNumber
+		ctx.Mem.Write32(lpInfo+12, 19041) // dwBuildNumber
 		ctx.Mem.Write32(lpInfo+16, 2)     // dwPlatformId = VER_PLATFORM_WIN32_NT
+		// szCSDVersion[128]: empty string (null-terminate first WCHAR)
+		ctx.Mem.Write16(lpInfo+20, 0)
+		if structSize >= 284 { // OSVERSIONINFOEXW
+			ctx.Mem.Write16(lpInfo+276, 0)     // wServicePackMajor
+			ctx.Mem.Write16(lpInfo+278, 0)     // wServicePackMinor
+			ctx.Mem.Write16(lpInfo+280, 0x300) // wSuiteMask: VER_SUITE_SINGLEUSERTS|VER_SUITE_TERMINAL
+			ctx.Mem.Write8(lpInfo+282, 1)      // wProductType = VER_NT_WORKSTATION
+			ctx.Mem.Write8(lpInfo+283, 0)      // wReserved
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2406,13 +2449,17 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		for i := uint64(0); i < 48; i++ {
 			ctx.Mem.Write8(si+i, 0)
 		}
-		ctx.Mem.Write16(si+0, 9)
-		ctx.Mem.Write32(si+4, 4096)
-		ctx.Mem.Write64(si+8, 0x10000)
-		ctx.Mem.Write64(si+16, 0x00007FFFFFFEFFFF)
-		ctx.Mem.Write64(si+24, 1)
-		ctx.Mem.Write32(si+32, 4)
-		ctx.Mem.Write32(si+40, 65536)
+		ctx.Mem.Write16(si+0, 9)                   // wProcessorArchitecture = AMD64
+		ctx.Mem.Write16(si+2, 0)                   // wReserved
+		ctx.Mem.Write32(si+4, 4096)                // dwPageSize
+		ctx.Mem.Write64(si+8, 0x10000)             // lpMinimumApplicationAddress
+		ctx.Mem.Write64(si+16, 0x00007FFFFFFEFFFF) // lpMaximumApplicationAddress
+		ctx.Mem.Write64(si+24, 0xF)                // dwActiveProcessorMask (4 CPUs)
+		ctx.Mem.Write32(si+32, 4)                  // dwNumberOfProcessors
+		ctx.Mem.Write32(si+36, 8664)               // dwProcessorType = PROCESSOR_AMD_X8664
+		ctx.Mem.Write32(si+40, 65536)              // dwAllocationGranularity
+		ctx.Mem.Write16(si+44, 6)                  // wProcessorLevel
+		ctx.Mem.Write16(si+46, 0x5E03)             // wProcessorRevision (Skylake stepping 3)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3918,10 +3965,51 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	// --- Time functions ---
 	d.RegisterAutoStubHandler(kernel32, "GetTimeZoneInformation", func(ctx *ntapi.TrapContext) uint32 {
 		tz := ctx.Arg(0)
+		// TIME_ZONE_INFORMATION (172 bytes):
+		//   +0x00 LONG  Bias                   (4 bytes)
+		//   +0x04 WCHAR StandardName[32]       (64 bytes, offsets 4..67)
+		//   +0x44 SYSTEMTIME StandardDate      (16 bytes, offsets 68..83)
+		//   +0x54 LONG  StandardBias           (4 bytes)
+		//   +0x58 WCHAR DaylightName[32]       (64 bytes, offsets 88..151)
+		//   +0x98 SYSTEMTIME DaylightDate      (16 bytes, offsets 152..167)
+		//   +0xA8 LONG  DaylightBias           (4 bytes)
 		for i := uint64(0); i < 172; i++ {
 			ctx.Mem.Write8(tz+i, 0)
 		}
-		ctx.SetReturn(0) // TIME_ZONE_ID_UNKNOWN
+		// Bias = -60 (UTC+1, Central European) as signed int32
+		biasSigned := int32(-60)
+		ctx.Mem.Write32(tz+0, uint32(biasSigned))
+		// StandardName = "UTC" (UTF-16LE)
+		for i, r := range "UTC" {
+			ctx.Mem.Write16(tz+4+uint64(i)*2, uint16(r))
+		}
+		// StandardDate SYSTEMTIME: {wYear=0, wMonth=10, wDayOfWeek=0, wDay=5, wHour=3, ...}
+		ctx.Mem.Write16(tz+68, 0)  // wYear
+		ctx.Mem.Write16(tz+70, 10) // wMonth = October
+		ctx.Mem.Write16(tz+72, 0)  // wDayOfWeek = Sunday
+		ctx.Mem.Write16(tz+74, 5)  // wDay = last occurrence
+		ctx.Mem.Write16(tz+76, 3)  // wHour = 3:00
+		// StandardBias = 0
+		ctx.Mem.Write32(tz+84, 0)
+		// DaylightName = "UTC+1" (UTF-16LE)
+		for i, r := range "UTC+1" {
+			ctx.Mem.Write16(tz+88+uint64(i)*2, uint16(r))
+		}
+		// DaylightDate SYSTEMTIME: {wYear=0, wMonth=3, wDayOfWeek=0, wDay=5, wHour=2, ...}
+		ctx.Mem.Write16(tz+152, 0) // wYear
+		ctx.Mem.Write16(tz+154, 3) // wMonth = March
+		ctx.Mem.Write16(tz+156, 0) // wDayOfWeek = Sunday
+		ctx.Mem.Write16(tz+158, 5) // wDay = last occurrence
+		ctx.Mem.Write16(tz+160, 2) // wHour = 2:00
+		// DaylightBias = -60
+		ctx.Mem.Write32(tz+168, uint32(biasSigned))
+		// Determine if currently in DST (Northern Hemisphere: April-October)
+		month := int(time.Now().Month())
+		if month >= 4 && month <= 10 {
+			ctx.SetReturn(2) // TIME_ZONE_ID_DAYLIGHT
+		} else {
+			ctx.SetReturn(1) // TIME_ZONE_ID_STANDARD
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetLocalTime", func(ctx *ntapi.TrapContext) uint32 {
@@ -4866,7 +4954,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetComputerNameW", func(ctx *ntapi.TrapContext) uint32 {
 		lpBuffer := ctx.Arg(0)
 		nSize := ctx.Arg(1)
-		name := "GOVM"
+		name := "RAVEN-PC"
 		if lpBuffer != 0 && nSize != 0 {
 			maxLen, _ := mem.Read32(nSize)
 			for i, ch := range name {
@@ -5064,31 +5152,29 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(driveType)
 		return 0
 	})
-	// GlobalMemoryStatusEx: fill MEMORYSTATUSEX with 8 GB total / 4 GB free
+	// GlobalMemoryStatusEx: fill MEMORYSTATUSEX with 8 GB total / 5 GB free
 	d.RegisterAutoStubHandler(kernel32, "GlobalMemoryStatusEx", func(ctx *ntapi.TrapContext) uint32 {
 		pBuf := ctx.Arg(0)
 		if pBuf != 0 {
 			// MEMORYSTATUSEX layout (64 bytes total):
-			// DWORD  dwLength          +0
-			// DWORD  dwMemoryLoad      +4
-			// DWORDLONG ullTotalPhys   +8
-			// DWORDLONG ullAvailPhys   +16
-			// DWORDLONG ullTotalPageFile +24
-			// DWORDLONG ullAvailPageFile +32
-			// DWORDLONG ullTotalVirtual  +40
-			// DWORDLONG ullAvailVirtual  +48
+			// DWORD  dwLength                 +0
+			// DWORD  dwMemoryLoad             +4
+			// DWORDLONG ullTotalPhys           +8
+			// DWORDLONG ullAvailPhys           +16
+			// DWORDLONG ullTotalPageFile       +24
+			// DWORDLONG ullAvailPageFile       +32
+			// DWORDLONG ullTotalVirtual        +40
+			// DWORDLONG ullAvailVirtual        +48
 			// DWORDLONG ullAvailExtendedVirtual +56
-			const total = 8 * 1024 * 1024 * 1024 // 8 GB
-			const avail = 4 * 1024 * 1024 * 1024 // 4 GB
-			mem.Write32(pBuf+0, 64)              // dwLength
-			mem.Write32(pBuf+4, 50)              // dwMemoryLoad (50%)
-			mem.Write64(pBuf+8, total)           // ullTotalPhys
-			mem.Write64(pBuf+16, avail)          // ullAvailPhys
-			mem.Write64(pBuf+24, total)          // ullTotalPageFile
-			mem.Write64(pBuf+32, avail)          // ullAvailPageFile
-			mem.Write64(pBuf+40, 0x7FFFFFFFFFFF) // ullTotalVirtual
-			mem.Write64(pBuf+48, 0x7FFFFFFFFFFF) // ullAvailVirtual
-			mem.Write64(pBuf+56, 0)              // ullAvailExtendedVirtual
+			mem.Write32(pBuf+0, 64)                        // dwLength
+			mem.Write32(pBuf+4, 40)                        // dwMemoryLoad (40%)
+			mem.Write64(pBuf+8, 8*1024*1024*1024)          // ullTotalPhys = 8 GB
+			mem.Write64(pBuf+16, 5*1024*1024*1024)         // ullAvailPhys = 5 GB
+			mem.Write64(pBuf+24, 16*1024*1024*1024)        // ullTotalPageFile = 16 GB
+			mem.Write64(pBuf+32, 12*1024*1024*1024)        // ullAvailPageFile = 12 GB
+			mem.Write64(pBuf+40, 0x00007FFFFFFEFFFF)       // ullTotalVirtual = ~128 TB
+			mem.Write64(pBuf+48, 0x00007FFFFFDEFFFF)       // ullAvailVirtual
+			mem.Write64(pBuf+56, 0)                        // ullAvailExtendedVirtual
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -7377,7 +7463,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetComputerNameA", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(0)
 		sizePtr := ctx.Arg(1)
-		name := "RAVEN"
+		name := "RAVEN-PC"
 		ctx.Mem.WriteBytes(buf, append([]byte(name), 0))
 		ctx.Mem.Write32(sizePtr, uint32(len(name)))
 		ctx.SetReturn(1)

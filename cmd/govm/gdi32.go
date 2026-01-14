@@ -1792,9 +1792,21 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		if f == nil {
 			f = gdi.DefaultFont()
 		}
-		charW := f.AveCharWidth
+		pixSize := f.Height
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
 		if pBuf != 0 {
 			for i := first; i <= last; i++ {
+				charW := f.AveCharWidth
+				if f.FaceID >= 0 {
+					if g := gdi.GlyphFor(f.FaceID, pixSize, rune(i)); g != nil {
+						charW = g.Advance
+					}
+				}
 				ctx.Mem.Write32(pBuf+uint64(i-first)*4, uint32(charW))
 			}
 		}
@@ -1815,9 +1827,21 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		if f == nil {
 			f = gdi.DefaultFont()
 		}
-		charW := f.AveCharWidth
+		pixSize := f.Height
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
 		if pBuf != 0 {
 			for i := first; i <= last; i++ {
+				charW := f.AveCharWidth
+				if f.FaceID >= 0 {
+					if g := gdi.GlyphFor(f.FaceID, pixSize, rune(i)); g != nil {
+						charW = g.Advance
+					}
+				}
 				ctx.Mem.Write32(pBuf+uint64(i-first)*4, uint32(charW))
 			}
 		}
@@ -1838,13 +1862,25 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		if f == nil {
 			f = gdi.DefaultFont()
 		}
-		charW := f.AveCharWidth
+		pixSize := f.Height
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
 		if pBuf != 0 {
 			for i := first; i <= last; i++ {
 				off := pBuf + uint64(i-first)*12
-				ctx.Mem.Write32(off, 0)               // abcA
-				ctx.Mem.Write32(off+4, uint32(charW)) // abcB
-				ctx.Mem.Write32(off+8, 0)             // abcC
+				charW := f.AveCharWidth
+				if f.FaceID >= 0 {
+					if g := gdi.GlyphFor(f.FaceID, pixSize, rune(i)); g != nil {
+						charW = g.Advance
+					}
+				}
+				ctx.Mem.Write32(off, 0)               // abcA (left bearing)
+				ctx.Mem.Write32(off+4, uint32(charW)) // abcB (character width)
+				ctx.Mem.Write32(off+8, 0)             // abcC (right bearing)
 			}
 		}
 		ctx.SetReturn(1)
@@ -1864,9 +1900,21 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		if f == nil {
 			f = gdi.DefaultFont()
 		}
-		w := float32(f.AveCharWidth)
+		pixSize := f.Height
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
 		for i := first; i <= last; i++ {
 			base := pBuf + uint64(i-first)*12
+			w := float32(f.AveCharWidth)
+			if f.FaceID >= 0 {
+				if g := gdi.GlyphFor(f.FaceID, pixSize, rune(i)); g != nil {
+					w = float32(g.Advance)
+				}
+			}
 			ctx.Mem.Write32(base, math.Float32bits(0))   // abcfA (left bearing)
 			ctx.Mem.Write32(base+4, math.Float32bits(w))  // abcfB (char width)
 			ctx.Mem.Write32(base+8, math.Float32bits(0))  // abcfC (right bearing)
@@ -1888,8 +1936,20 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		if f == nil {
 			f = gdi.DefaultFont()
 		}
-		w := float32(f.AveCharWidth)
+		pixSize := f.Height
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
 		for i := first; i <= last; i++ {
+			w := float32(f.AveCharWidth)
+			if f.FaceID >= 0 {
+				if g := gdi.GlyphFor(f.FaceID, pixSize, rune(i)); g != nil {
+					w = float32(g.Advance)
+				}
+			}
 			ctx.Mem.Write32(pBuf+uint64(i-first)*4, math.Float32bits(w))
 		}
 		ctx.SetReturn(1)
