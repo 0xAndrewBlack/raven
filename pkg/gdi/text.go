@@ -14,7 +14,7 @@ const (
 
 // defaultFont returns the built-in 8×16 system font.
 func defaultFont() *Font {
-	return &Font{
+	f := &Font{
 		Height:       fontCharH,
 		Width:        fontCharW,
 		AveCharWidth: fontCharW,
@@ -27,6 +27,16 @@ func defaultFont() *Font {
 		CharSet:      0,
 		FaceID:       -1,
 	}
+	if faceID := ResolveFontFaceStyle(f.FaceName, false, false); faceID >= 0 {
+		f.FaceID = faceID
+		cellH, asc, desc, aveW := FaceMetrics(faceID, fontCharH)
+		f.CellHeight = cellH
+		f.Ascent = asc
+		f.Descent = desc
+		f.AveCharWidth = aveW
+		f.MaxCharWidth = aveW * 2
+	}
+	return f
 }
 
 // DefaultFont is the exported alias for defaultFont.

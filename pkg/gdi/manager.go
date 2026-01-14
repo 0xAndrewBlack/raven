@@ -173,9 +173,11 @@ func (m *Manager) CreatePen(style, width int32, color uint32) uint64 {
 func (m *Manager) CreateFont(f *Font) uint64 {
 	// Try to resolve a real TrueType face if one is available
 	f.FaceID = -1
-	if f.FaceName != "" {
-		f.FaceID = ResolveFontFace(f.FaceName)
+	family := f.FaceName
+	if family == "" {
+		family = "System"
 	}
+	f.FaceID = ResolveFontFaceStyle(family, f.Weight >= 700, f.Italic)
 
 	// Compute actual pixel size: LOGFONT.lfHeight < 0 means "cell height in pixels"
 	pixSize := f.Height

@@ -2,10 +2,9 @@ package gdi
 
 // truetype.go - TrueType/OpenType font loader and rasterizer.
 //
-// When a host sysroot is available, we load real TTF/OTF files from
-// <sysroot>/Windows/Fonts/ and use golang.org/x/image/font/opentype to
-// rasterize glyphs.  This replaces the hard-coded 8×16 bitmap font for
-// all fonts that can be resolved by family name.
+// We load real TTF/OTF files and use golang.org/x/image/font/opentype to
+// rasterize glyphs. Fonts may come from explicit host directories or be
+// resolved on demand through fontconfig.
 //
 // ReactOS reference: win32ss/gdi/ntgdi/freetype.c (FreeType integration)
 
@@ -34,10 +33,10 @@ type GlyphKey struct {
 
 // GlyphImage is a cached pre-rendered glyph.
 type GlyphImage struct {
-	Pix    []byte // BGRA pixels
-	W, H   int32
+	Pix                []byte // BGRA pixels
+	W, H               int32
 	BearingX, BearingY int32 // offset from pen origin to glyph top-left
-	Advance int32            // pen advance after this glyph
+	Advance            int32 // pen advance after this glyph
 }
 
 // FontCache holds loaded font faces and glyph bitmaps.
@@ -51,6 +50,8 @@ type FontCache struct {
 	mu         sync.Mutex
 	searchDirs []string                 // host directories to scan for TTF files
 	faceByName map[string]int           // family name (lower) → face ID
+	faceBySpec map[string]int           // logical family + style → face ID
+	pathToFace map[string]int           // absolute font path → face ID
 	faceNames  []string                 // canonical family name indexed by face ID
 	faces      []*opentype.Font         // indexed by face ID
 	glyphs     map[GlyphKey]*GlyphImage // rasterized glyph cache
@@ -58,6 +59,8 @@ type FontCache struct {
 
 var globalFontCache = &FontCache{
 	faceByName: make(map[string]int),
+	faceBySpec: make(map[string]int),
+	pathToFace: make(map[string]int),
 	glyphs:     make(map[GlyphKey]*GlyphImage),
 }
 
@@ -129,6 +132,68 @@ func (fc *FontCache) addFaceData(data []byte, stem string) int {
 	return id
 }
 
+func (fc *FontCache) addFaceFile(path, alias string) int {
+	if path == "" {
+		return -1
+	}
+	cleanPath := filepath.Clean(path)
+	fc.mu.Lock()
+	if id, ok := fc.pathToFace[cleanPath]; ok {
+		if alias != "" {
+			fc.faceBySpec[fontSpecKey(alias, false, false)] = id
+		}
+		fc.mu.Unlock()
+		return id
+	}
+	fc.mu.Unlock()
+
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return -1
+	}
+	f, err := opentype.Parse(data)
+	if err != nil {
+		return -1
+	}
+	canonical := strings.TrimSuffix(filepath.Base(cleanPath), filepath.Ext(cleanPath))
+	if sf, err2 := sfnt.Parse(data); err2 == nil {
+		var nameBuf sfnt.Buffer
+		if n, err3 := sf.Name(&nameBuf, sfnt.NameIDFamily); err3 == nil && n != "" {
+			canonical = n
+		}
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if id, ok := fc.pathToFace[cleanPath]; ok {
+		if alias != "" {
+			fc.faceBySpec[fontSpecKey(alias, false, false)] = id
+		}
+		return id
+	}
+	id := len(fc.faces)
+	fc.faces = append(fc.faces, f)
+	fc.faceNames = append(fc.faceNames, canonical)
+	fc.pathToFace[cleanPath] = id
+
+	canonicalKey := strings.ToLower(strings.TrimSpace(canonical))
+	if canonicalKey != "" {
+		if _, exists := fc.faceByName[canonicalKey]; !exists {
+			fc.faceByName[canonicalKey] = id
+		}
+	}
+	stemKey := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(filepath.Base(cleanPath), filepath.Ext(cleanPath))))
+	if stemKey != "" {
+		if _, exists := fc.faceByName[stemKey]; !exists {
+			fc.faceByName[stemKey] = id
+		}
+	}
+	if alias != "" {
+		fc.faceBySpec[fontSpecKey(alias, false, false)] = id
+	}
+	return id
+}
+
 // findFace returns the face ID for a given logical font family name, or -1.
 func (fc *FontCache) findFace(familyName string) int {
 	fc.mu.Lock()
@@ -142,6 +207,15 @@ func (fc *FontCache) findFace(familyName string) int {
 		if strings.HasPrefix(k, key) || strings.HasPrefix(key, k) {
 			return id
 		}
+	}
+	return -1
+}
+
+func (fc *FontCache) findFaceSpec(familyName string, bold, italic bool) int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if id, ok := fc.faceBySpec[fontSpecKey(familyName, bold, italic)]; ok {
+		return id
 	}
 	return -1
 }
@@ -259,7 +333,32 @@ func HasTTFFonts() bool {
 
 // ResolveFontFace returns the face ID for a LOGFONT family name, or -1.
 func ResolveFontFace(name string) int {
-	return globalFontCache.findFace(name)
+	return ResolveFontFaceStyle(name, false, false)
+}
+
+// ResolveFontFaceStyle returns the face ID for a logical family/style tuple, or -1.
+func ResolveFontFaceStyle(name string, bold, italic bool) int {
+	if id := globalFontCache.findFaceSpec(name, bold, italic); id >= 0 {
+		return id
+	}
+	if id := globalFontCache.findFace(name); id >= 0 && !bold && !italic {
+		globalFontCache.mu.Lock()
+		globalFontCache.faceBySpec[fontSpecKey(name, bold, italic)] = id
+		globalFontCache.mu.Unlock()
+		return id
+	}
+	path := findSystemFont(name, bold, italic)
+	if path == "" {
+		return -1
+	}
+	id := globalFontCache.addFaceFile(path, name)
+	if id < 0 {
+		return -1
+	}
+	globalFontCache.mu.Lock()
+	globalFontCache.faceBySpec[fontSpecKey(name, bold, italic)] = id
+	globalFontCache.mu.Unlock()
+	return id
 }
 
 // GlyphFor returns the rasterized glyph for a given face/size/rune.

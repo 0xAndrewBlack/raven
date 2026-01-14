@@ -39,6 +39,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	readDIBInfo := hctx.ReadDIBInfo
 	readDIBPixels := hctx.ReadDIBPixels
 	readGuestUTF16 := hctx.ReadGuestUTF16
+	readGuestUTF16N := hctx.ReadGuestUTF16N
 	sharedHeapAlloc := hctx.HeapAlloc
 
 	gdi32, ok := hctx.SynthByName["gdi32.dll"]
@@ -128,6 +129,10 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			f.Height = int32(v32)
 			v32, _ = mem.Read32(lf + 4)
 			f.Width = int32(v32)
+			v32, _ = mem.Read32(lf + 8)
+			f.Escapement = int32(v32)
+			v32, _ = mem.Read32(lf + 12)
+			f.Orientation = int32(v32)
 			v32, _ = mem.Read32(lf + 16)
 			f.Weight = int32(v32)
 			v8, _ := mem.Read8(lf + 20)
@@ -147,7 +152,11 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			v8, _ = mem.Read8(lf + 27)
 			f.PitchFamily = v8
 			// FaceName at offset 28 (LF_FACESIZE=32 UTF-16LE chars)
-			f.FaceName = readGuestUTF16(lf + 28)
+			name := readGuestUTF16N(lf+28, 32)
+			if nul := strings.IndexByte(name, 0); nul >= 0 {
+				name = name[:nul]
+			}
+			f.FaceName = name
 		}
 		h := gdiMgr.CreateFont(f)
 		ctx.SetReturn(h)

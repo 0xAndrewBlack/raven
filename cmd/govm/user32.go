@@ -4695,6 +4695,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			IDCANCEL       = 2
 		)
 
+		if ret, ok := hostMessageBox(caption, text, uint32(uType)); ok {
+			ctx.SetReturn(uint64(ret))
+			return 0
+		}
+
 		// Show visual overlay dialog
 		hctx.DialogActive = true
 		hctx.DialogTitle = caption
@@ -4737,6 +4742,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			IDYES          = 6
 			IDCANCEL       = 2
 		)
+
+		if ret, ok := hostMessageBox(caption, text, uint32(uType)); ok {
+			ctx.SetReturn(uint64(ret))
+			return 0
+		}
 
 		// Show visual overlay dialog
 		hctx.DialogActive = true
