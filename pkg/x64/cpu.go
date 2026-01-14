@@ -58,6 +58,13 @@ gsBase  uint64
 // SSE/AVX registers (128-bit XMM0-XMM15, stored as two uint64).
 XMM [16][2]uint64
 
+// x87 FPU state
+fpuST  [8]float64 // ST(0)-ST(7) physical register file
+fpuTop int         // top of stack pointer (0-7)
+fpuCW  uint16      // control word
+fpuSW  uint16      // status word
+fpuTW  uint16      // tag word
+
 // PreStep is an optional hook called before each instruction.
 // If it returns true, the instruction was handled externally (e.g. JIT).
 PreStep func(c *CPU) bool
@@ -1288,23 +1295,9 @@ return c.execShift(pfx, 1, -2)
 case 0xD3:
 return c.execShift(pfx, size, -2)
 
-// --- x87 FPU stubs (0xD8-0xDF) ---
-// Minimally decode the ModRM to skip the instruction bytes.
-// busybox uses FLDCW/FNSTCW for FP rounding control; we
-// just swallow these silently.
+// --- x87 FPU (0xD8-0xDF) ---
 case 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF:
-m, err := c.decodeModRM(pfx)
-if err != nil {
-return err
-}
-if m.mod != 3 {
-// Memory operand: consume displacement via resolveRMAddr
-_, _, err := c.resolveRMAddr(m, pfx)
-if err != nil {
-return err
-}
-}
-return nil
+return c.execX87(op, pfx)
 
 // --- MOVSXD (0x63) ---
 case 0x63:
@@ -1317,6 +1310,10 @@ if err != nil {
 return err
 }
 c.writeRegSized(m.reg, 8, uint64(int64(int32(val))))
+return nil
+
+// --- FWAIT/WAIT (0x9B) ---
+case 0x9B:
 return nil
 
 // --- CDQ/CQO (0x99) ---
@@ -1717,6 +1714,22 @@ c.writeRegSized(m.reg, size, result)
 return nil
 
 // --- BSR (0xBD), BSF (0xBC) ---
+// --- POPCNT (F3 0F B8) ---
+case 0xB8:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+val, err := c.readRM(m, pfx, size)
+if err != nil {
+return err
+}
+c.writeRegSized(m.reg, size, uint64(bits.OnesCount64(val)))
+c.Rflags &^= flagCF | flagZF | flagSF | flagPF | flagOF
+if val == 0 {
+c.Rflags |= flagZF
+}
+return nil
 case 0xBC: // BSF / TZCNT
 m, err := c.decodeModRM(pfx)
 if err != nil {
@@ -3326,6 +3339,12 @@ r1 |= 0xFFFFFFFF << shift
 c.XMM[m.reg] = [2]uint64{r0, r1}
 return nil
 
+// --- EMMS (0x77) ---
+case 0x77:
+// Clear MMX state / mark all FPU registers as empty
+c.fpuTW = 0xFFFF
+return nil
+
 // --- PMOVMSKB r32, xmm (0xD7) ---
 case 0xD7:
 m, err := c.decodeModRM(pfx)
@@ -4135,6 +4154,64 @@ db2 = sb2
 r1 |= uint64(db2) << shift
 }
 c.XMM[m.reg] = [2]uint64{r0, r1}
+return nil
+
+// --- PMULUDQ xmm, xmm/m128 (0xF4) ---
+case 0xF4:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.XMM[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+// Multiply low 32 bits of each 64-bit lane, producing 64-bit results
+a0 := c.XMM[m.reg][0] & 0xFFFFFFFF
+b0 := src[0] & 0xFFFFFFFF
+a1 := c.XMM[m.reg][1] & 0xFFFFFFFF
+b1 := src[1] & 0xFFFFFFFF
+c.XMM[m.reg] = [2]uint64{a0 * b0, a1 * b1}
+return nil
+
+// --- PMADDWD xmm, xmm/m128 (0xF5) ---
+case 0xF5:
+m, err := c.decodeModRM(pfx)
+if err != nil {
+return err
+}
+var src [2]uint64
+if m.mod == 3 {
+src = c.XMM[m.rm]
+} else {
+addr, _, err := c.resolveRMAddr(m, pfx)
+if err != nil {
+return err
+}
+src[0], _ = c.mem.Read64(addr)
+src[1], _ = c.mem.Read64(addr + 8)
+}
+// Multiply pairs of signed 16-bit, add adjacent pairs → 32-bit
+d := c.XMM[m.reg]
+var r [2]uint64
+for q := 0; q < 2; q++ {
+for i := uint(0); i < 2; i++ {
+// Each 32-bit result = (d[2i] * src[2i]) + (d[2i+1] * src[2i+1])
+w0 := int32(int16(uint16(d[q] >> (i * 32))))
+w1 := int32(int16(uint16(d[q] >> (i*32 + 16))))
+s0 := int32(int16(uint16(src[q] >> (i * 32))))
+s1 := int32(int16(uint16(src[q] >> (i*32 + 16))))
+r[q] |= uint64(uint32(w0*s0+w1*s1)) << (i * 32)
+}
+}
+c.XMM[m.reg] = r
 return nil
 
 // --- PSUBD xmm, xmm/m128 (0xFA) ---
