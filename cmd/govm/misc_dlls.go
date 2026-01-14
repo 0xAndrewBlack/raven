@@ -1,123 +1,10 @@
 package main
 
 import (
-	"fmt"
-
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
-	"golang.org/x/sys/unix"
 )
-
-func registerRpcrt4Handlers(hctx *HandlerCtx) {
-	d := hctx.Disp
-	mem := hctx.Mem
-
-	rpcrt4, ok := hctx.SynthByName["rpcrt4.dll"]
-	if !ok {
-		return
-	}
-	_ = rpcrt4
-
-	genGUIDrpc := func(ptr uint64) {
-		if ptr == 0 {
-			return
-		}
-		var b [16]byte
-		unix.Getrandom(b[:], 0)
-		b[6] = (b[6] & 0x0F) | 0x40
-		b[8] = (b[8] & 0x3F) | 0x80
-		mem.Write32(ptr, uint32(b[0])|uint32(b[1])<<8|uint32(b[2])<<16|uint32(b[3])<<24)
-		mem.Write16(ptr+4, uint16(b[4])|uint16(b[5])<<8)
-		mem.Write16(ptr+6, uint16(b[6])|uint16(b[7])<<8)
-		for i := 0; i < 8; i++ {
-			mem.Write8(ptr+8+uint64(i), b[8+i])
-		}
-	}
-	d.RegisterAutoStubHandler(rpcrt4, "UuidCreate", func(ctx *ntapi.TrapContext) uint32 {
-		genGUIDrpc(ctx.Arg(0))
-		ctx.SetReturn(0) // RPC_S_OK
-		return 0
-	})
-	d.RegisterAutoStubHandler(rpcrt4, "UuidCreateSequential", func(ctx *ntapi.TrapContext) uint32 {
-		genGUIDrpc(ctx.Arg(0))
-		ctx.SetReturn(0)
-		return 0
-	})
-	d.RegisterAutoStubHandler(rpcrt4, "UuidToStringW", func(ctx *ntapi.TrapContext) uint32 {
-		// UuidToStringW(UUID* uuid, RPC_WSTR* StringUuid)
-		uuidPtr := ctx.Arg(0)
-		ppStr := ctx.Arg(1)
-		if uuidPtr == 0 || ppStr == 0 {
-			ctx.SetReturn(10) /* RPC_S_INVALID_ARG */
-			return 0
-		}
-		a0, _ := mem.Read32(uuidPtr)
-		a1, _ := mem.Read16(uuidPtr + 4)
-		a2, _ := mem.Read16(uuidPtr + 6)
-		var b [8]byte
-		for i := 0; i < 8; i++ {
-			b[i], _ = mem.Read8(uuidPtr + 8 + uint64(i))
-		}
-		s := fmt.Sprintf("%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-			a0, a1, a2, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7])
-		ws := utf16Encode(s)
-		addr := mem.Mmap(0, uint64(len(ws)+1)*2, mmu.PermRead|mmu.PermWrite)
-		for i, w := range ws {
-			mem.Write16(addr+uint64(i)*2, w)
-		}
-		mem.Write16(addr+uint64(len(ws))*2, 0)
-		mem.Write64(ppStr, addr)
-		ctx.SetReturn(0)
-		return 0
-	})
-	d.RegisterAutoStubHandler(rpcrt4, "UuidToStringA", func(ctx *ntapi.TrapContext) uint32 {
-		uuidPtr := ctx.Arg(0)
-		ppStr := ctx.Arg(1)
-		if uuidPtr == 0 || ppStr == 0 {
-			ctx.SetReturn(10)
-			return 0
-		}
-		a0, _ := mem.Read32(uuidPtr)
-		a1, _ := mem.Read16(uuidPtr + 4)
-		a2, _ := mem.Read16(uuidPtr + 6)
-		var b [8]byte
-		for i := 0; i < 8; i++ {
-			b[i], _ = mem.Read8(uuidPtr + 8 + uint64(i))
-		}
-		s := fmt.Sprintf("%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-			a0, a1, a2, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7])
-		addr := mem.Mmap(0, uint64(len(s)+1), mmu.PermRead|mmu.PermWrite)
-		mem.WriteBytes(addr, append([]byte(s), 0))
-		mem.Write64(ppStr, addr)
-		ctx.SetReturn(0)
-		return 0
-	})
-	d.RegisterAutoStubHandler(rpcrt4, "RpcStringFreeW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // RPC_S_OK
-		return 0
-	})
-	d.RegisterAutoStubHandler(rpcrt4, "RpcStringFreeA", func(ctx *ntapi.TrapContext) uint32 {
-		// RPC_STATUS RpcStringFreeA(RPC_CSTR *String)
-		ppStr := ctx.Arg(0)
-		if ppStr != 0 {
-			mem.Write64(ppStr, 0) // set *String = NULL
-		}
-		ctx.SetReturn(0) // RPC_S_OK
-		return 0
-	})
-	for _, fn := range []string{"RpcBindingFree", "RpcBindingFromStringBindingW",
-		"RpcBindingFromStringBindingA", "RpcStringBindingComposeW", "RpcStringBindingComposeA",
-		"RpcServerRegisterIf", "RpcServerRegisterIf2", "RpcServerListen",
-		"NdrClientCall2", "NdrClientCall3"} {
-		fn := fn
-		d.RegisterAutoStubHandler(rpcrt4, fn, func(ctx *ntapi.TrapContext) uint32 {
-			ravelog.Logf("[rpcrt4] %s arg0=0x%x - RPC stub\n", fn, ctx.Arg(0))
-			ctx.SetReturn(0)
-			return 0
-		})
-	}
-}
 
 func registerUxthemeHandlers(hctx *HandlerCtx) {
 	d := hctx.Disp
@@ -421,7 +308,8 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[version] GetFileVersionInfoExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -432,7 +320,8 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[version] GetFileVersionInfoExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -467,7 +356,9 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[version] VerFindFileA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -479,7 +370,9 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[version] VerFindFileW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -491,7 +384,9 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[version] VerInstallFileA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -503,7 +398,9 @@ func registerVersionHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[version] VerInstallFileW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -726,7 +623,8 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[imm32] ImmCallImeConsoleIME p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -817,7 +715,9 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[imm32] ImmEnumRegisterWordA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -829,7 +729,9 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[imm32] ImmEnumRegisterWordW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -962,7 +864,9 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[imm32] ImmGetConversionListA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -974,7 +878,9 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[imm32] ImmGetConversionListW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1082,7 +988,9 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[imm32] ImmGetImeMenuItemsA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1094,7 +1002,9 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[imm32] ImmGetImeMenuItemsW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1268,7 +1178,8 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[imm32] ImmProcessKey p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1386,7 +1297,9 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[imm32] ImmSetCompositionStringA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -1398,7 +1311,9 @@ func registerImm32CompatHandlers(hctx *HandlerCtx) {
 		p4 := ctx.Arg(4)
 		p5 := ctx.Arg(5)
 		ravelog.Logf("[imm32] ImmSetCompositionStringW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4; _ = p5
+		_ = p3
+		_ = p4
+		_ = p5
 		ctx.SetReturn(1)
 		return 0
 	})
