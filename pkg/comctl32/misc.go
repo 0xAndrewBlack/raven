@@ -32,7 +32,16 @@ const (
 type flatSBState struct {
 	mu          sync.Mutex
 	props       map[uint32]int32
+	bars        map[int32]*flatScrollState
 	initialized bool
+}
+
+type flatScrollState struct {
+	min      int32
+	max      int32
+	page     uint32
+	pos      int32
+	trackPos int32
 }
 
 var (
@@ -45,10 +54,22 @@ func getFSB(hwnd uint64) *flatSBState {
 	defer fsbMu.Unlock()
 	s := fsbMap[hwnd]
 	if s == nil {
-		s = &flatSBState{props: make(map[uint32]int32)}
+		s = &flatSBState{
+			props: make(map[uint32]int32),
+			bars:  make(map[int32]*flatScrollState),
+		}
 		fsbMap[hwnd] = s
 	}
 	return s
+}
+
+func getFSBBar(s *flatSBState, nBar int32) *flatScrollState {
+	bar := s.bars[nBar]
+	if bar == nil {
+		bar = &flatScrollState{}
+		s.bars[nBar] = bar
+	}
+	return bar
 }
 
 // InitializeFlatSB initializes flat scroll bars for hwnd
@@ -87,6 +108,107 @@ func FlatSBSetScrollProp(hwnd uint64, index uint32, newValue int32, _ bool) bool
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.props[index] = newValue
+	return true
+}
+
+// FlatSBGetScrollPos gets the current flat-scroll position for a bar.
+func FlatSBGetScrollPos(hwnd uint64, nBar int32) int32 {
+	s := getFSB(hwnd)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return getFSBBar(s, nBar).pos
+}
+
+// FlatSBGetScrollRange gets the current flat-scroll range for a bar.
+func FlatSBGetScrollRange(hwnd uint64, nBar int32) (int32, int32) {
+	s := getFSB(hwnd)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bar := getFSBBar(s, nBar)
+	return bar.min, bar.max
+}
+
+// FlatSBGetScrollInfo gets the tracked flat-scroll info for a bar.
+func FlatSBGetScrollInfo(hwnd uint64, nBar int32) (min, max int32, page uint32, pos, trackPos int32) {
+	s := getFSB(hwnd)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bar := getFSBBar(s, nBar)
+	return bar.min, bar.max, bar.page, bar.pos, bar.trackPos
+}
+
+// FlatSBSetScrollInfo updates the tracked flat-scroll info and returns the resulting position.
+func FlatSBSetScrollInfo(hwnd uint64, nBar int32, mask uint32, min, max int32, page uint32, pos, trackPos int32, _ bool) int32 {
+	s := getFSB(hwnd)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bar := getFSBBar(s, nBar)
+	if mask&0x01 != 0 {
+		bar.min = min
+		bar.max = max
+	}
+	if mask&0x02 != 0 {
+		bar.page = page
+	}
+	if mask&0x04 != 0 {
+		bar.pos = pos
+	}
+	if mask&0x10 != 0 {
+		bar.trackPos = trackPos
+	}
+	if bar.pos < bar.min {
+		bar.pos = bar.min
+	}
+	if bar.max >= bar.min && bar.pos > bar.max {
+		bar.pos = bar.max
+	}
+	if bar.trackPos < bar.min {
+		bar.trackPos = bar.min
+	}
+	if bar.max >= bar.min && bar.trackPos > bar.max {
+		bar.trackPos = bar.max
+	}
+	return bar.pos
+}
+
+// FlatSBSetScrollPos updates the tracked flat-scroll position and returns the previous one.
+func FlatSBSetScrollPos(hwnd uint64, nBar int32, pos int32, _ bool) int32 {
+	s := getFSB(hwnd)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bar := getFSBBar(s, nBar)
+	old := bar.pos
+	bar.pos = pos
+	if bar.pos < bar.min {
+		bar.pos = bar.min
+	}
+	if bar.max >= bar.min && bar.pos > bar.max {
+		bar.pos = bar.max
+	}
+	bar.trackPos = bar.pos
+	return old
+}
+
+// FlatSBSetScrollRange updates the tracked flat-scroll range.
+func FlatSBSetScrollRange(hwnd uint64, nBar int32, min, max int32, _ bool) bool {
+	s := getFSB(hwnd)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bar := getFSBBar(s, nBar)
+	bar.min = min
+	bar.max = max
+	if bar.pos < min {
+		bar.pos = min
+	}
+	if max >= min && bar.pos > max {
+		bar.pos = max
+	}
+	if bar.trackPos < min {
+		bar.trackPos = min
+	}
+	if max >= min && bar.trackPos > max {
+		bar.trackPos = max
+	}
 	return true
 }
 

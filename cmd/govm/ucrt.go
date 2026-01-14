@@ -47,11 +47,13 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "_configure_narrow_argv", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		ravelog.Logf("[ucrt] _configure_narrow_argv called\n")
+		ctx.SetReturn(0) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "_initialize_narrow_environment", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		ravelog.Logf("[ucrt] _initialize_narrow_environment called\n")
+		ctx.SetReturn(0) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "_set_app_type", func(ctx *ntapi.TrapContext) uint32 {
@@ -227,10 +229,12 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 
 	// Wide-char CRT init stubs (same as narrow counterparts)
 	d.RegisterAutoStubHandler(ucrt, "_configure_wide_argv", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[ucrt] _configure_wide_argv called\n")
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "_initialize_wide_environment", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[ucrt] _initialize_wide_environment called\n")
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -363,22 +367,41 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 
 	// fprintf/printf: handled via __stdio_common_vsprintf at lower level, but stub direct calls
 	d.RegisterAutoStubHandler(ucrt, "_set_new_mode", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		newMode := int32(ctx.Arg(0))
+		ravelog.Logf("[ucrt] _set_new_mode mode=%d\n", newMode)
+		ctx.SetReturn(0) // return previous mode (0)
 		return 0
 	})
+	atexitFuncs := []uint64{}
 	d.RegisterAutoStubHandler(ucrt, "_crt_atexit", func(ctx *ntapi.TrapContext) uint32 {
+		fn := ctx.Arg(0)
+		atexitFuncs = append(atexitFuncs, fn)
+		ravelog.Logf("[ucrt] _crt_atexit fn=0x%x (total=%d)\n", fn, len(atexitFuncs))
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "_register_onexit_function", func(ctx *ntapi.TrapContext) uint32 {
+		table := ctx.Arg(0)
+		fn := ctx.Arg(1)
+		ravelog.Logf("[ucrt] _register_onexit_function table=0x%x fn=0x%x\n", table, fn)
+		atexitFuncs = append(atexitFuncs, fn)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "_initialize_onexit_table", func(ctx *ntapi.TrapContext) uint32 {
+		table := ctx.Arg(0)
+		ravelog.Logf("[ucrt] _initialize_onexit_table table=0x%x\n", table)
+		if table != 0 {
+			mem.Write64(table, 0)   // _first
+			mem.Write64(table+8, 0) // _last
+			mem.Write64(table+16, 0) // _end
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "_register_thread_local_exe_atexit_callback", func(ctx *ntapi.TrapContext) uint32 {
+		fn := ctx.Arg(0)
+		ravelog.Logf("[ucrt] _register_thread_local_exe_atexit_callback fn=0x%x\n", fn)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1832,7 +1855,11 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "__stdio_common_vfscanf", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		options := ctx.Arg(0)
+		stream := ctx.Arg(1)
+		fmtAddr := ctx.Arg(2)
+		ravelog.Logf("[ucrt] __stdio_common_vfscanf options=0x%x stream=0x%x fmt=0x%x\n", options, stream, fmtAddr)
+		ctx.SetReturn(0) // 0 items scanned
 		return 0
 	})
 	d.RegisterAutoStubHandler(ucrt, "__p__commode", func(ctx *ntapi.TrapContext) uint32 {
@@ -1926,13 +1953,21 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 
 	// __stdio_common_vsscanf: scan from narrow string - stub returns 0 items
 	d.RegisterAutoStubHandler(ucrt, "__stdio_common_vsscanf", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		options := ctx.Arg(0)
+		buffer := ctx.Arg(1)
+		fmtAddr := ctx.Arg(3)
+		ravelog.Logf("[ucrt] __stdio_common_vsscanf options=0x%x buf=0x%x fmt=0x%x\n", options, buffer, fmtAddr)
+		ctx.SetReturn(0) // 0 items scanned
 		return 0
 	})
 
-	// __stdio_common_vswscanf: scan from wide string - stub returns 0 items
+	// __stdio_common_vswscanf: scan from wide string
 	d.RegisterAutoStubHandler(ucrt, "__stdio_common_vswscanf", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		options := ctx.Arg(0)
+		buffer := ctx.Arg(1)
+		fmtAddr := ctx.Arg(3)
+		ravelog.Logf("[ucrt] __stdio_common_vswscanf options=0x%x buf=0x%x fmt=0x%x\n", options, buffer, fmtAddr)
+		ctx.SetReturn(0) // 0 items scanned
 		return 0
 	})
 

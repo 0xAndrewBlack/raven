@@ -4,6 +4,7 @@ import (
 	comctl32pkg "github.com/mirkobrombin/Raven/pkg/comctl32"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"sync"
 )
 
 func registerComctl32Handlers(hctx *HandlerCtx) {
@@ -20,6 +21,45 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 
 	// MUI language: stored per-process; default en-US (0x0409).
 	muiLanguage := uint32(0x0409)
+	type imageListStreamSnapshot struct {
+		cx      int32
+		cy      int32
+		flags   uint32
+		bkColor uint32
+		count   uint32
+	}
+	type imageListDragState struct {
+		himlTrack     uint64
+		himlDrag      uint64
+		himlNoCursor  uint64
+		cursorHiml    uint64
+		hwnd          uint64
+		dragIndex     int32
+		cursorIndex   int32
+		x             int32
+		y             int32
+		hotspotX      int32
+		hotspotY      int32
+		cursorOffsetX int32
+		cursorOffsetY int32
+		visible       bool
+	}
+	var (
+		comctlMu             sync.Mutex
+		imageListStreams     = map[uint64]imageListStreamSnapshot{}
+		registeredClassNames = map[string]struct{}{}
+		dragListWindows      = map[uint64]bool{}
+		imageListDrag        = imageListDragState{dragIndex: -1, cursorIndex: -1}
+	)
+	resetImageListDrag := func() {
+		if imageListDrag.himlDrag != 0 {
+			comctl32pkg.ImageListDestroy(imageListDrag.himlDrag)
+		}
+		if imageListDrag.himlNoCursor != 0 && imageListDrag.himlNoCursor != imageListDrag.himlDrag {
+			comctl32pkg.ImageListDestroy(imageListDrag.himlNoCursor)
+		}
+		imageListDrag = imageListDragState{dragIndex: -1, cursorIndex: -1}
+	}
 
 	d.RegisterAutoStubHandler(comctl32, "InitCommonControls", func(ctx *ntapi.TrapContext) uint32 {
 		return 0 // void function
@@ -149,15 +189,53 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ImageList_Draw - draw image from list to HDC (no-op stub)
+	// ImageList_Draw - draw image from list to HDC
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Draw", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		i := int32(ctx.Arg(1))
+		hdc := ctx.Arg(2)
+		x := int32(ctx.Arg(3))
+		y := int32(ctx.Arg(4))
+		fStyle := uint32(ctx.Arg(5))
+		count := comctl32pkg.ImageListGetImageCount(himl)
+		ok := himl != 0 && i >= 0 && i < count
+		ravelog.Logf("[comctl32] ImageList_Draw himl=0x%x i=%d hdc=0x%x x=%d y=%d style=0x%x ok=%v\n",
+			himl, i, hdc, x, y, fStyle, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 
-	// ImageList_DrawEx - extended draw (no-op stub)
+	// ImageList_DrawEx - extended draw
 	d.RegisterAutoStubHandler(comctl32, "ImageList_DrawEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		i := int32(ctx.Arg(1))
+		hdc := ctx.Arg(2)
+		x := int32(ctx.Arg(3))
+		y := int32(ctx.Arg(4))
+		dx := int32(ctx.Arg(5))
+		dy := int32(ctx.Arg(6))
+		rgbBk := uint32(ctx.Arg(7))
+		rgbFg := uint32(ctx.Arg(8))
+		fStyle := uint32(ctx.Arg(9))
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himl)
+		if dx == 0 {
+			dx = cx
+		}
+		if dy == 0 {
+			dy = cy
+		}
+		ok = ok && i >= 0 && i < comctl32pkg.ImageListGetImageCount(himl)
+		ravelog.Logf("[comctl32] ImageList_DrawEx himl=0x%x i=%d hdc=0x%x x=%d y=%d dx=%d dy=%d rgbBk=0x%x rgbFg=0x%x style=0x%x ok=%v\n",
+			himl, i, hdc, x, y, dx, dy, rgbBk, rgbFg, fStyle, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 
@@ -234,10 +312,10 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		}
 		// Fill rcImage with the image rect
 		x := i * cx
-		ctx.Mem.Write32(pInfo+24, uint32(x))       // rcImage.left
-		ctx.Mem.Write32(pInfo+28, 0)                // rcImage.top
-		ctx.Mem.Write32(pInfo+32, uint32(x+cx))     // rcImage.right
-		ctx.Mem.Write32(pInfo+36, uint32(cy))        // rcImage.bottom
+		ctx.Mem.Write32(pInfo+24, uint32(x))    // rcImage.left
+		ctx.Mem.Write32(pInfo+28, 0)            // rcImage.top
+		ctx.Mem.Write32(pInfo+32, uint32(x+cx)) // rcImage.right
+		ctx.Mem.Write32(pInfo+36, uint32(cy))   // rcImage.bottom
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -272,11 +350,22 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetFlags", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		himl := ctx.Arg(0)
+		flags := comctl32pkg.ImageListGetFlags(himl)
+		ravelog.Logf("[comctl32] ImageList_GetFlags himl=0x%x -> 0x%x\n", himl, flags)
+		ctx.SetReturn(uint64(flags))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_SetFlags", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		flags := uint32(ctx.Arg(1))
+		ok := comctl32pkg.ImageListSetFlags(himl, flags)
+		ravelog.Logf("[comctl32] ImageList_SetFlags himl=0x%x flags=0x%x ok=%v\n", himl, flags, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_SetOverlayImage", func(ctx *ntapi.TrapContext) uint32 {
@@ -289,34 +378,183 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_GetDragImage", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		ppt := ctx.Arg(0)
+		pptHotspot := ctx.Arg(1)
+		comctlMu.Lock()
+		drag := imageListDrag
+		comctlMu.Unlock()
+		if drag.himlDrag != 0 {
+			if ppt != 0 {
+				ctx.Mem.Write32(ppt, uint32(drag.x))
+				ctx.Mem.Write32(ppt+4, uint32(drag.y))
+			}
+			if pptHotspot != 0 {
+				ctx.Mem.Write32(pptHotspot, uint32(drag.hotspotX))
+				ctx.Mem.Write32(pptHotspot+4, uint32(drag.hotspotY))
+			}
+		}
+		ravelog.Logf("[comctl32] ImageList_GetDragImage ppt=0x%x pptHotspot=0x%x -> himl=0x%x pos=%d,%d hotspot=%d,%d\n",
+			ppt, pptHotspot, drag.himlDrag, drag.x, drag.y, drag.hotspotX, drag.hotspotY)
+		ctx.SetReturn(drag.himlDrag)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_BeginDrag", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himlTrack := ctx.Arg(0)
+		iTrack := int32(ctx.Arg(1))
+		dxHotspot := int32(ctx.Arg(2))
+		dyHotspot := int32(ctx.Arg(3))
+		flags := comctl32pkg.ImageListGetFlags(himlTrack)
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himlTrack)
+		count := comctl32pkg.ImageListGetImageCount(himlTrack)
+		ok = ok && iTrack >= 0 && iTrack < count
+		comctlMu.Lock()
+		alreadyDragging := imageListDrag.himlDrag != 0
+		if ok && !alreadyDragging {
+			dragHiml := comctl32pkg.ImageListCreate(cx, cy, flags, 1, 1)
+			ok = dragHiml != 0 && comctl32pkg.ImageListSetImageCount(dragHiml, 1)
+			if ok {
+				imageListDrag = imageListDragState{
+					himlTrack:    himlTrack,
+					himlDrag:     dragHiml,
+					himlNoCursor: dragHiml,
+					dragIndex:    iTrack,
+					cursorIndex:  -1,
+					hotspotX:     dxHotspot,
+					hotspotY:     dyHotspot,
+				}
+			}
+		}
+		comctlMu.Unlock()
+		ravelog.Logf("[comctl32] ImageList_BeginDrag himl=0x%x iTrack=%d dxHotspot=%d dyHotspot=%d ok=%v active=%v\n",
+			himlTrack, iTrack, dxHotspot, dyHotspot, ok && !alreadyDragging, alreadyDragging)
+		if ok && !alreadyDragging {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_EndDrag", func(ctx *ntapi.TrapContext) uint32 {
+		comctlMu.Lock()
+		drag := imageListDrag
+		resetImageListDrag()
+		comctlMu.Unlock()
+		ravelog.Logf("[comctl32] ImageList_EndDrag himlDrag=0x%x hwnd=0x%x visible=%v\n", drag.himlDrag, drag.hwnd, drag.visible)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_DragEnter", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		hwndLock := ctx.Arg(0)
+		x := int32(ctx.Arg(1))
+		y := int32(ctx.Arg(2))
+		comctlMu.Lock()
+		ok := imageListDrag.himlDrag != 0
+		if ok {
+			imageListDrag.hwnd = hwndLock
+			imageListDrag.x = x
+			imageListDrag.y = y
+			imageListDrag.visible = true
+		}
+		comctlMu.Unlock()
+		ravelog.Logf("[comctl32] ImageList_DragEnter hwnd=0x%x x=%d y=%d ok=%v\n", hwndLock, x, y, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_DragLeave", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		hwndLock := ctx.Arg(0)
+		comctlMu.Lock()
+		ok := imageListDrag.himlDrag != 0
+		if ok {
+			if imageListDrag.hwnd == 0 || hwndLock == 0 || imageListDrag.hwnd == hwndLock {
+				imageListDrag.visible = false
+			}
+		}
+		comctlMu.Unlock()
+		ravelog.Logf("[comctl32] ImageList_DragLeave hwnd=0x%x ok=%v\n", hwndLock, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_DragMove", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		x := int32(ctx.Arg(0))
+		y := int32(ctx.Arg(1))
+		comctlMu.Lock()
+		ok := imageListDrag.himlDrag != 0
+		if ok {
+			imageListDrag.x = x
+			imageListDrag.y = y
+		}
+		comctlMu.Unlock()
+		ravelog.Logf("[comctl32] ImageList_DragMove x=%d y=%d ok=%v\n", x, y, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_DragShowNolock", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		bShow := ctx.Arg(0) != 0
+		comctlMu.Lock()
+		ok := imageListDrag.himlDrag != 0
+		changed := false
+		if ok && imageListDrag.visible != bShow {
+			imageListDrag.visible = bShow
+			changed = true
+		}
+		comctlMu.Unlock()
+		ravelog.Logf("[comctl32] ImageList_DragShowNolock show=%v ok=%v changed=%v\n", bShow, ok, changed)
+		if ok && changed {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_SetDragCursorImage", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himlDrag := ctx.Arg(0)
+		iDrag := int32(ctx.Arg(1))
+		dxHotspot := int32(ctx.Arg(2))
+		dyHotspot := int32(ctx.Arg(3))
+		flags := comctl32pkg.ImageListGetFlags(himlDrag)
+		baseFlags := flags
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himlDrag)
+		count := comctl32pkg.ImageListGetImageCount(himlDrag)
+		ok = ok && iDrag >= 0 && iDrag < count
+		comctlMu.Lock()
+		if ok && imageListDrag.himlDrag != 0 {
+			if baseFlags == 0 {
+				baseFlags = comctl32pkg.ImageListGetFlags(imageListDrag.himlNoCursor)
+			}
+			if imageListDrag.himlDrag != imageListDrag.himlNoCursor {
+				comctl32pkg.ImageListDestroy(imageListDrag.himlDrag)
+			}
+			merged := comctl32pkg.ImageListCreate(cx, cy, baseFlags, 1, 1)
+			ok = merged != 0 && comctl32pkg.ImageListSetImageCount(merged, 1)
+			if ok {
+				imageListDrag.himlDrag = merged
+				imageListDrag.cursorHiml = himlDrag
+				imageListDrag.cursorIndex = iDrag
+				imageListDrag.cursorOffsetX = dxHotspot
+				imageListDrag.cursorOffsetY = dyHotspot
+			}
+		} else {
+			ok = false
+		}
+		comctlMu.Unlock()
+		ravelog.Logf("[comctl32] ImageList_SetDragCursorImage himl=0x%x iDrag=%d dxHotspot=%d dyHotspot=%d ok=%v\n",
+			himlDrag, iDrag, dxHotspot, dyHotspot, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Duplicate", func(ctx *ntapi.TrapContext) uint32 {
@@ -325,7 +563,18 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Replace", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		i := int32(ctx.Arg(1))
+		hbmImage := ctx.Arg(2)
+		hbmMask := ctx.Arg(3)
+		ok := comctl32pkg.ImageListReplace(himl, i)
+		ravelog.Logf("[comctl32] ImageList_Replace himl=0x%x i=%d hbmImage=0x%x hbmMask=0x%x ok=%v\n",
+			himl, i, hbmImage, hbmMask, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Merge", func(ctx *ntapi.TrapContext) uint32 {
@@ -355,15 +604,85 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Read", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		pstm := ctx.Arg(0)
+		var snap imageListStreamSnapshot
+		comctlMu.Lock()
+		snap, ok := imageListStreams[pstm]
+		comctlMu.Unlock()
+		var himl uint64
+		if ok && pstm != 0 {
+			himl = comctl32pkg.ImageListCreate(snap.cx, snap.cy, snap.flags, int32(snap.count), 1)
+			if himl != 0 {
+				comctl32pkg.ImageListSetImageCount(himl, snap.count)
+				comctl32pkg.ImageListSetBkColor(himl, snap.bkColor)
+			}
+		}
+		ravelog.Logf("[comctl32] ImageList_Read pstm=0x%x restored=%v himl=0x%x count=%d flags=0x%x\n",
+			pstm, ok, himl, snap.count, snap.flags)
+		ctx.SetReturn(himl)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_Write", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		himl := ctx.Arg(0)
+		pstm := ctx.Arg(1)
+		cx, cy, ok := comctl32pkg.ImageListGetIconSize(himl)
+		flags := comctl32pkg.ImageListGetFlags(himl)
+		count := uint32(comctl32pkg.ImageListGetImageCount(himl))
+		bkColor := comctl32pkg.ImageListGetBkColor(himl)
+		if ok && pstm != 0 {
+			comctlMu.Lock()
+			imageListStreams[pstm] = imageListStreamSnapshot{
+				cx:      cx,
+				cy:      cy,
+				flags:   flags,
+				bkColor: bkColor,
+				count:   count,
+			}
+			comctlMu.Unlock()
+		}
+		ravelog.Logf("[comctl32] ImageList_Write himl=0x%x pstm=0x%x count=%d flags=0x%x ok=%v\n",
+			himl, pstm, count, flags, ok && pstm != 0)
+		if ok && pstm != 0 {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_DrawIndirect", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		pimldp := ctx.Arg(0)
+		if pimldp == 0 {
+			ravelog.Logf("[comctl32] ImageList_DrawIndirect pimldp=0x0 ok=false\n")
+			ctx.SetReturn(0)
+			return 0
+		}
+		cbSize, _ := ctx.Mem.Read32(pimldp)
+		himl, _ := ctx.Mem.Read64(pimldp + 8)
+		iRaw, _ := ctx.Mem.Read32(pimldp + 16)
+		hdcDst, _ := ctx.Mem.Read64(pimldp + 24)
+		xRaw, _ := ctx.Mem.Read32(pimldp + 32)
+		yRaw, _ := ctx.Mem.Read32(pimldp + 36)
+		cxRaw, _ := ctx.Mem.Read32(pimldp + 40)
+		cyRaw, _ := ctx.Mem.Read32(pimldp + 44)
+		xBitmapRaw, _ := ctx.Mem.Read32(pimldp + 48)
+		yBitmapRaw, _ := ctx.Mem.Read32(pimldp + 52)
+		rgbBk, _ := ctx.Mem.Read32(pimldp + 56)
+		rgbFg, _ := ctx.Mem.Read32(pimldp + 60)
+		fStyle, _ := ctx.Mem.Read32(pimldp + 64)
+		dwRop, _ := ctx.Mem.Read32(pimldp + 68)
+		fState, _ := ctx.Mem.Read32(pimldp + 72)
+		frame, _ := ctx.Mem.Read32(pimldp + 76)
+		crEffect, _ := ctx.Mem.Read32(pimldp + 80)
+		i := int32(iRaw)
+		ok := himl != 0 && i >= 0 && i < comctl32pkg.ImageListGetImageCount(himl)
+		ravelog.Logf("[comctl32] ImageList_DrawIndirect pimldp=0x%x cbSize=%d himl=0x%x i=%d hdc=0x%x x=%d y=%d cx=%d cy=%d xBitmap=%d yBitmap=%d rgbBk=0x%x rgbFg=0x%x style=0x%x rop=0x%x state=0x%x frame=%d effect=0x%x ok=%v\n",
+			pimldp, cbSize, himl, i, hdcDst, int32(xRaw), int32(yRaw), int32(cxRaw), int32(cyRaw),
+			int32(xBitmapRaw), int32(yBitmapRaw), rgbBk, rgbFg, fStyle, dwRop, fState, frame, crEffect, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "HIMAGELIST_QueryInterface", func(ctx *ntapi.TrapContext) uint32 {
@@ -685,8 +1004,9 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		"FlatSB_EnableScrollBar", "FlatSB_ShowScrollBar",
 	} {
 		fn := fn
-		_ = fn
 		d.RegisterAutoStubHandler(comctl32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			ravelog.Logf("[comctl32] %s hwnd=0x%x\n", fn, hwnd)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -694,28 +1014,37 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_GetScrollInfo", func(ctx *ntapi.TrapContext) uint32 {
 		// ReactOS: FlatSB_GetScrollInfo - fill SCROLLINFO with defaults
 		// SCROLLINFO: cbSize(+0), fMask(+4), nMin(+8), nMax(+12), nPage(+16), nPos(+20), nTrackPos(+24)
+		hwnd := ctx.Arg(0)
+		nBar := int32(ctx.Arg(1))
 		psi := ctx.Arg(2)
+		var fMask uint32
 		if psi != 0 {
-			fMask, _ := ctx.Mem.Read32(psi + 4)
+			fMask, _ = ctx.Mem.Read32(psi + 4)
+			nMin, nMax, nPage, nPos, nTrackPos := comctl32pkg.FlatSBGetScrollInfo(hwnd, nBar)
 			if fMask&0x01 != 0 { // SIF_RANGE
-				ctx.Mem.Write32(psi+8, 0)  // nMin
-				ctx.Mem.Write32(psi+12, 0) // nMax
+				ctx.Mem.Write32(psi+8, uint32(nMin))
+				ctx.Mem.Write32(psi+12, uint32(nMax))
 			}
 			if fMask&0x02 != 0 { // SIF_PAGE
-				ctx.Mem.Write32(psi+16, 0) // nPage
+				ctx.Mem.Write32(psi+16, nPage)
 			}
 			if fMask&0x04 != 0 { // SIF_POS
-				ctx.Mem.Write32(psi+20, 0) // nPos
+				ctx.Mem.Write32(psi+20, uint32(nPos))
 			}
 			if fMask&0x10 != 0 { // SIF_TRACKPOS
-				ctx.Mem.Write32(psi+24, 0) // nTrackPos
+				ctx.Mem.Write32(psi+24, uint32(nTrackPos))
 			}
 		}
+		ravelog.Logf("[comctl32] FlatSB_GetScrollInfo hwnd=0x%x nBar=%d psi=0x%x mask=0x%x\n", hwnd, nBar, psi, fMask)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_GetScrollPos", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		nBar := int32(ctx.Arg(1))
+		pos := comctl32pkg.FlatSBGetScrollPos(hwnd, nBar)
+		ravelog.Logf("[comctl32] FlatSB_GetScrollPos hwnd=0x%x nBar=%d -> %d\n", hwnd, nBar, pos)
+		ctx.SetReturn(uint64(int64(pos)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_GetScrollProp", func(ctx *ntapi.TrapContext) uint32 {
@@ -736,24 +1065,62 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_GetScrollRange", func(ctx *ntapi.TrapContext) uint32 {
-		// ReactOS: FlatSB_GetScrollRange - returns min=0, max=0 as default
+		hwnd := ctx.Arg(0)
+		nBar := int32(ctx.Arg(1))
 		pMinPos := ctx.Arg(2)
 		pMaxPos := ctx.Arg(3)
+		minPos, maxPos := comctl32pkg.FlatSBGetScrollRange(hwnd, nBar)
 		if pMinPos != 0 {
-			ctx.Mem.Write32(pMinPos, 0)
+			ctx.Mem.Write32(pMinPos, uint32(minPos))
 		}
 		if pMaxPos != 0 {
-			ctx.Mem.Write32(pMaxPos, 0)
+			ctx.Mem.Write32(pMaxPos, uint32(maxPos))
 		}
+		ravelog.Logf("[comctl32] FlatSB_GetScrollRange hwnd=0x%x nBar=%d pMin=0x%x pMax=0x%x -> [%d,%d]\n",
+			hwnd, nBar, pMinPos, pMaxPos, minPos, maxPos)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_SetScrollInfo", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		nBar := int32(ctx.Arg(1))
+		psi := ctx.Arg(2)
+		fRedraw := ctx.Arg(3) != 0
+		var (
+			mask     uint32
+			minPos   int32
+			maxPos   int32
+			page     uint32
+			pos      int32
+			trackPos int32
+		)
+		if psi != 0 {
+			mask, _ = ctx.Mem.Read32(psi + 4)
+			v, _ := ctx.Mem.Read32(psi + 8)
+			minPos = int32(v)
+			v, _ = ctx.Mem.Read32(psi + 12)
+			maxPos = int32(v)
+			page, _ = ctx.Mem.Read32(psi + 16)
+			v, _ = ctx.Mem.Read32(psi + 20)
+			pos = int32(v)
+			v, _ = ctx.Mem.Read32(psi + 24)
+			trackPos = int32(v)
+		}
+		newPos := comctl32pkg.FlatSBSetScrollInfo(hwnd, nBar, mask, minPos, maxPos, page, pos, trackPos, fRedraw)
+		ravelog.Logf("[comctl32] FlatSB_SetScrollInfo hwnd=0x%x nBar=%d psi=0x%x mask=0x%x min=%d max=%d page=%d pos=%d track=%d redraw=%v -> %d\n",
+			hwnd, nBar, psi, mask, minPos, maxPos, page, pos, trackPos, fRedraw, newPos)
+		ctx.SetReturn(uint64(int64(newPos)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_SetScrollPos", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		nBar := int32(ctx.Arg(1))
+		pos := int32(ctx.Arg(2))
+		fRedraw := ctx.Arg(3) != 0
+		oldPos := comctl32pkg.FlatSBSetScrollPos(hwnd, nBar, pos, fRedraw)
+		ravelog.Logf("[comctl32] FlatSB_SetScrollPos hwnd=0x%x nBar=%d pos=%d redraw=%v -> old=%d\n",
+			hwnd, nBar, pos, fRedraw, oldPos)
+		ctx.SetReturn(uint64(int64(oldPos)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_SetScrollProp", func(ctx *ntapi.TrapContext) uint32 {
@@ -770,7 +1137,19 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "FlatSB_SetScrollRange", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		hwnd := ctx.Arg(0)
+		nBar := int32(ctx.Arg(1))
+		minPos := int32(ctx.Arg(2))
+		maxPos := int32(ctx.Arg(3))
+		fRedraw := ctx.Arg(4) != 0
+		ok := comctl32pkg.FlatSBSetScrollRange(hwnd, nBar, minPos, maxPos, fRedraw)
+		ravelog.Logf("[comctl32] FlatSB_SetScrollRange hwnd=0x%x nBar=%d min=%d max=%d redraw=%v ok=%v\n",
+			hwnd, nBar, minPos, maxPos, fRedraw, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 
@@ -948,17 +1327,82 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "MakeDragList", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		hwndLB := ctx.Arg(0)
+		ok := hwndLB != 0
+		if ok {
+			comctlMu.Lock()
+			dragListWindows[hwndLB] = true
+			comctlMu.Unlock()
+		}
+		ravelog.Logf("[comctl32] MakeDragList hwndLB=0x%x ok=%v\n", hwndLB, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "MenuHelp", func(ctx *ntapi.TrapContext) uint32 {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ShowHideMenuCtl", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		hwnd := ctx.Arg(0)
+		uFlags := ctx.Arg(1)
+		lpInfo := ctx.Arg(2)
+		var (
+			menuHandle1 uint32
+			menuHandle2 uint32
+			controlID   uint32
+			foundPair   bool
+			visible     bool
+		)
+		if lpInfo != 0 {
+			menuHandle1, _ = ctx.Mem.Read32(lpInfo)
+			menuHandle2, _ = ctx.Mem.Read32(lpInfo + 4)
+			for off := uint64(8); off < 8+64*8; off += 8 {
+				menuID, _ := ctx.Mem.Read32(lpInfo + off)
+				ctrlID, _ := ctx.Mem.Read32(lpInfo + off + 4)
+				if menuID == 0 && ctrlID == 0 {
+					break
+				}
+				if uint64(menuID) == uFlags {
+					controlID = ctrlID
+					foundPair = true
+					break
+				}
+			}
+		}
+		if foundPair {
+			for childHwnd, cs := range hwndChildren {
+				if cs.parentHWND == hwnd && cs.ctrlID == uint64(controlID) {
+					cs.visible = !cs.visible
+					visible = cs.visible
+					ravelog.Logf("[comctl32] ShowHideMenuCtl hwnd=0x%x flags=0x%x menu=(0x%x,0x%x) ctrlID=%d child=0x%x visible=%v\n",
+						hwnd, uFlags, menuHandle1, menuHandle2, controlID, childHwnd, visible)
+					ctx.SetReturn(1)
+					return 0
+				}
+			}
+		}
+		ravelog.Logf("[comctl32] ShowHideMenuCtl hwnd=0x%x flags=0x%x menu=(0x%x,0x%x) ctrlID=%d foundPair=%v visible=%v\n",
+			hwnd, uFlags, menuHandle1, menuHandle2, controlID, foundPair, visible)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "RegisterClassNameW", func(ctx *ntapi.TrapContext) uint32 {
+		classNamePtr := ctx.Arg(0)
+		className := ""
+		if classNamePtr != 0 {
+			className = readGuestUTF16(classNamePtr)
+		}
+		comctlMu.Lock()
+		_, alreadyRegistered := registeredClassNames[className]
+		if className != "" {
+			registeredClassNames[className] = struct{}{}
+		}
+		comctlMu.Unlock()
+		ravelog.Logf("[comctl32] RegisterClassNameW className=%q ptr=0x%x alreadyRegistered=%v\n",
+			className, classNamePtr, alreadyRegistered)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -992,7 +1436,16 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "ImageList_SetFilter", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		himl := ctx.Arg(0)
+		i := int32(ctx.Arg(1))
+		dwFilter := uint32(ctx.Arg(2))
+		ok := comctl32pkg.ImageListSetFilter(himl, i, dwFilter)
+		ravelog.Logf("[comctl32] ImageList_SetFilter himl=0x%x i=%d filter=0x%x ok=%v\n", himl, i, dwFilter, ok)
+		if ok {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "_TrackMouseEvent", func(ctx *ntapi.TrapContext) uint32 {

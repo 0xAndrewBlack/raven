@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 	"golang.org/x/sys/unix"
@@ -110,8 +111,8 @@ func registerRpcrt4Handlers(hctx *HandlerCtx) {
 		"RpcServerRegisterIf", "RpcServerRegisterIf2", "RpcServerListen",
 		"NdrClientCall2", "NdrClientCall3"} {
 		fn := fn
-		_ = fn
 		d.RegisterAutoStubHandler(rpcrt4, fn, func(ctx *ntapi.TrapContext) uint32 {
+			ravelog.Logf("[rpcrt4] %s arg0=0x%x - RPC stub\n", fn, ctx.Arg(0))
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -136,59 +137,116 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "CloseThemeData", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hTheme := ctx.Arg(0)
+		ravelog.Logf("[uxtheme] CloseThemeData hTheme=0x%x\n", hTheme)
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "DrawThemeBackground", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		hdc := ctx.Arg(1)
+		iPartId := int32(ctx.Arg(2))
+		iStateId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] DrawThemeBackground hTheme=0x%x hdc=0x%x part=%d state=%d\n", hTheme, hdc, iPartId, iStateId)
 		ctx.SetReturn(0x80004001) // E_NOTIMPL
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "DrawThemeText", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		hdc := ctx.Arg(1)
+		iPartId := int32(ctx.Arg(2))
+		iStateId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] DrawThemeText hTheme=0x%x hdc=0x%x part=%d state=%d\n", hTheme, hdc, iPartId, iStateId)
 		ctx.SetReturn(0x80004001) // E_NOTIMPL
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeColor", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		iPartId := int32(ctx.Arg(1))
+		iStateId := int32(ctx.Arg(2))
+		iPropId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] GetThemeColor hTheme=0x%x part=%d state=%d prop=%d\n", hTheme, iPartId, iStateId, iPropId)
 		ctx.SetReturn(0x80070006) // E_HANDLE - no theme handle
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeInt", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		iPartId := int32(ctx.Arg(1))
+		iStateId := int32(ctx.Arg(2))
+		iPropId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] GetThemeInt hTheme=0x%x part=%d state=%d prop=%d\n", hTheme, iPartId, iStateId, iPropId)
 		ctx.SetReturn(0x80070006) // E_HANDLE
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeMetric", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		hdc := ctx.Arg(1)
+		iPartId := int32(ctx.Arg(2))
+		iStateId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] GetThemeMetric hTheme=0x%x hdc=0x%x part=%d state=%d\n", hTheme, hdc, iPartId, iStateId)
 		ctx.SetReturn(0x80070006) // E_HANDLE
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeFont", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		hdc := ctx.Arg(1)
+		iPartId := int32(ctx.Arg(2))
+		iStateId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] GetThemeFont hTheme=0x%x hdc=0x%x part=%d state=%d\n", hTheme, hdc, iPartId, iStateId)
 		ctx.SetReturn(0x80004001) // E_NOTIMPL
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeRect", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		iPartId := int32(ctx.Arg(1))
+		iStateId := int32(ctx.Arg(2))
+		iPropId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] GetThemeRect hTheme=0x%x part=%d state=%d prop=%d\n", hTheme, iPartId, iStateId, iPropId)
 		ctx.SetReturn(0x80004001) // E_NOTIMPL
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemePartSize", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		hdc := ctx.Arg(1)
+		iPartId := int32(ctx.Arg(2))
+		iStateId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] GetThemePartSize hTheme=0x%x hdc=0x%x part=%d state=%d\n", hTheme, hdc, iPartId, iStateId)
 		ctx.SetReturn(0x80004001) // E_NOTIMPL
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeTextExtent", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		hdc := ctx.Arg(1)
+		iPartId := int32(ctx.Arg(2))
+		iStateId := int32(ctx.Arg(3))
+		ravelog.Logf("[uxtheme] GetThemeTextExtent hTheme=0x%x hdc=0x%x part=%d state=%d\n", hTheme, hdc, iPartId, iStateId)
 		ctx.SetReturn(0x80004001) // E_NOTIMPL
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "IsThemeActive", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[uxtheme] IsThemeActive -> FALSE (themes disabled)\n")
 		ctx.SetReturn(0) // FALSE - themes disabled
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "IsAppThemed", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[uxtheme] IsAppThemed -> FALSE\n")
 		ctx.SetReturn(0) // FALSE
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "IsThemeBackgroundPartiallyTransparent", func(ctx *ntapi.TrapContext) uint32 {
+		hTheme := ctx.Arg(0)
+		iPartId := int32(ctx.Arg(1))
+		iStateId := int32(ctx.Arg(2))
+		ravelog.Logf("[uxtheme] IsThemeBackgroundPartiallyTransparent hTheme=0x%x part=%d state=%d\n", hTheme, iPartId, iStateId)
 		ctx.SetReturn(0) // FALSE
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "DrawThemeParentBackground", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		hdc := ctx.Arg(1)
+		pRect := ctx.Arg(2)
+		ravelog.Logf("[uxtheme] DrawThemeParentBackground hwnd=0x%x hdc=0x%x rect=0x%x\n", hwnd, hdc, pRect)
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "BufferedPaintInit", func(ctx *ntapi.TrapContext) uint32 {
@@ -196,7 +254,8 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "BufferedPaintUnInit", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		ravelog.Logf("[uxtheme] BufferedPaintUnInit called\n")
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "EndBufferedAnimation", func(ctx *ntapi.TrapContext) uint32 {

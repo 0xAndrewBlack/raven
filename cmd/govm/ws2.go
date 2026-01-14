@@ -4,6 +4,7 @@ import (
 	"net"
 	"syscall"
 
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
@@ -63,6 +64,7 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ws2, "WSACleanup", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[ws2_32] WSACleanup called\n")
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -796,6 +798,10 @@ func registerWs2Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ws2, "WSAEventSelect", func(ctx *ntapi.TrapContext) uint32 {
+		sock := ctx.Arg(0)
+		hEvent := ctx.Arg(1)
+		lNetworkEvents := ctx.Arg(2)
+		ravelog.Logf("[ws2_32] WSAEventSelect sock=0x%x event=0x%x networkEvents=0x%x\n", sock, hEvent, lNetworkEvents)
 		ctx.SetReturn(0)
 		return 0
 	})

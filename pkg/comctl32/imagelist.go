@@ -9,38 +9,38 @@ import (
 
 // ImageList flags (ILC_*)
 const (
-	ILC_MASK       = 0x0001
-	ILC_COLOR      = 0x0000
-	ILC_COLORDDB   = 0x00FE
-	ILC_COLOR4     = 0x0004
-	ILC_COLOR8     = 0x0008
-	ILC_COLOR16    = 0x0010
-	ILC_COLOR24    = 0x0018
-	ILC_COLOR32    = 0x0020
-	ILC_PALETTE    = 0x0800
-	ILC_MIRROR     = 0x2000
-	ILC_PERITEMMIRROR = 0x8000
-	ILC_ORIGINALSIZE  = 0x00010000
+	ILC_MASK             = 0x0001
+	ILC_COLOR            = 0x0000
+	ILC_COLORDDB         = 0x00FE
+	ILC_COLOR4           = 0x0004
+	ILC_COLOR8           = 0x0008
+	ILC_COLOR16          = 0x0010
+	ILC_COLOR24          = 0x0018
+	ILC_COLOR32          = 0x0020
+	ILC_PALETTE          = 0x0800
+	ILC_MIRROR           = 0x2000
+	ILC_PERITEMMIRROR    = 0x8000
+	ILC_ORIGINALSIZE     = 0x00010000
 	ILC_HIGHQUALITYSCALE = 0x00020000
 )
 
 // ImageList draw flags (ILD_*)
 const (
-	ILD_NORMAL      = 0x0000
-	ILD_TRANSPARENT = 0x0001
-	ILD_MASK        = 0x0010
-	ILD_IMAGE       = 0x0020
-	ILD_ROP         = 0x0040
-	ILD_BLEND25     = 0x0002
-	ILD_BLEND50     = 0x0004
-	ILD_OVERLAYMASK = 0x0F00
+	ILD_NORMAL        = 0x0000
+	ILD_TRANSPARENT   = 0x0001
+	ILD_MASK          = 0x0010
+	ILD_IMAGE         = 0x0020
+	ILD_ROP           = 0x0040
+	ILD_BLEND25       = 0x0002
+	ILD_BLEND50       = 0x0004
+	ILD_OVERLAYMASK   = 0x0F00
 	ILD_PRESERVEALPHA = 0x1000
-	ILD_SCALE       = 0x2000
-	ILD_DPISCALE    = 0x4000
-	ILD_ASYNC       = 0x8000
-	ILD_SELECTED    = ILD_BLEND50
-	ILD_FOCUS       = ILD_BLEND25
-	ILD_BLEND       = ILD_BLEND50
+	ILD_SCALE         = 0x2000
+	ILD_DPISCALE      = 0x4000
+	ILD_ASYNC         = 0x8000
+	ILD_SELECTED      = ILD_BLEND50
+	ILD_FOCUS         = ILD_BLEND25
+	ILD_BLEND         = ILD_BLEND50
 )
 
 // ImageList background color sentinel
@@ -61,11 +61,13 @@ type ImageList struct {
 	bkColor   uint32
 	images    []ilImage
 	dragIndex int // for drag operations; -1 = none
+	filterIdx int32
+	filter    uint32
 }
 
 var (
 	ilMu     sync.Mutex
-	ilMap    = map[uint64]*ImageList{}
+	ilMap           = map[uint64]*ImageList{}
 	ilNextID uint64 = 0x10000 // starts at 64K to avoid confusion with HWNDs
 )
 
@@ -77,6 +79,7 @@ func allocIL(cx, cy int32, flags uint32) uint64 {
 		flags:     flags,
 		bkColor:   CLR_NONE,
 		dragIndex: -1,
+		filterIdx: -1,
 	}
 	id := atomic.AddUint64(&ilNextID, 1)
 	ilMu.Lock()
@@ -302,5 +305,56 @@ func ImageListCopy(hDst uint64, iDst int32, hSrc uint64, iSrc int32, uFlags uint
 	} else {
 		dst.images[iDst] = srcImg
 	}
+	return true
+}
+
+// ImageListGetFlags returns the image list flags.
+func ImageListGetFlags(h uint64) uint32 {
+	il := getIL(h)
+	if il == nil {
+		return 0
+	}
+	il.mu.Lock()
+	defer il.mu.Unlock()
+	return il.flags
+}
+
+// ImageListSetFlags updates the image list flags.
+func ImageListSetFlags(h uint64, flags uint32) bool {
+	il := getIL(h)
+	if il == nil {
+		return false
+	}
+	il.mu.Lock()
+	il.flags = flags
+	il.mu.Unlock()
+	return true
+}
+
+// ImageListReplace replaces an existing image slot.
+func ImageListReplace(h uint64, i int32) bool {
+	il := getIL(h)
+	if il == nil {
+		return false
+	}
+	il.mu.Lock()
+	defer il.mu.Unlock()
+	if i < 0 || i >= int32(len(il.images)) {
+		return false
+	}
+	il.images[i] = ilImage{}
+	return true
+}
+
+// ImageListSetFilter stores the last filter applied to the image list.
+func ImageListSetFilter(h uint64, i int32, filter uint32) bool {
+	il := getIL(h)
+	if il == nil {
+		return false
+	}
+	il.mu.Lock()
+	il.filterIdx = i
+	il.filter = filter
+	il.mu.Unlock()
 	return true
 }

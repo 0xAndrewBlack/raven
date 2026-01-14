@@ -1115,16 +1115,40 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFileInfoA", func(ctx *ntapi.TrapContext) uint32 {
+		pszPath := ctx.Arg(0)
+		dwFileAttributes := uint32(ctx.Arg(1))
+		psfi := ctx.Arg(2)
+		cbFileInfo := ctx.Arg(3)
+		uFlags := uint32(ctx.Arg(4))
+		pathStr := readGuestString(pszPath)
+		ravelog.Logf("[shell32] SHGetFileInfoA path=%q attr=0x%x flags=0x%x\n", pathStr, dwFileAttributes, uFlags)
+		if psfi != 0 && cbFileInfo > 0 {
+			for i := uint64(0); i < cbFileInfo && i < 352; i++ {
+				mem.Write8(psfi+i, 0)
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ExtractIconExW", func(ctx *ntapi.TrapContext) uint32 {
-		// UINT ExtractIconExW(LPCWSTR lpszFile, int nIconIndex,
-		//   HICON *phiconLarge, HICON *phiconSmall, UINT nIcons)
+		lpszFile := ctx.Arg(0)
+		nIconIndex := int32(ctx.Arg(1))
+		phiconLarge := ctx.Arg(2)
+		phiconSmall := ctx.Arg(3)
+		nIcons := uint32(ctx.Arg(4))
+		fileName := readGuestUTF16(lpszFile)
+		ravelog.Logf("[shell32] ExtractIconExW file=%q idx=%d large=0x%x small=0x%x n=%d\n", fileName, nIconIndex, phiconLarge, phiconSmall, nIcons)
 		ctx.SetReturn(0) // 0 icons extracted
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "ExtractIconExA", func(ctx *ntapi.TrapContext) uint32 {
+		lpszFile := ctx.Arg(0)
+		nIconIndex := int32(ctx.Arg(1))
+		phiconLarge := ctx.Arg(2)
+		phiconSmall := ctx.Arg(3)
+		nIcons := uint32(ctx.Arg(4))
+		fileName := readGuestString(lpszFile)
+		ravelog.Logf("[shell32] ExtractIconExA file=%q idx=%d large=0x%x small=0x%x n=%d\n", fileName, nIconIndex, phiconLarge, phiconSmall, nIcons)
 		ctx.SetReturn(0)
 		return 0
 	})

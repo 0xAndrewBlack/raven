@@ -47,6 +47,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	queuePaint := hctx.QueuePaint
 	readGuestString := hctx.ReadGuestString
 	readGuestUTF16 := hctx.ReadGuestUTF16
+	readGuestUTF16N := hctx.ReadGuestUTF16N
 	scratchAlloc := hctx.ScratchAlloc
 	syncScreenSurface := hctx.SyncScreenSurface
 	timerMap := hctx.TimerMap
@@ -2848,6 +2849,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	// DestroyAcceleratorTable
 	d.RegisterAutoStubHandler(user32, "DestroyAcceleratorTable", func(ctx *ntapi.TrapContext) uint32 {
+		hAccel := ctx.Arg(0)
+		delete(accelTables, hAccel)
+		ravelog.Logf("[user32] DestroyAcceleratorTable hAccel=0x%x", hAccel)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3106,6 +3110,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "PrintWindow", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL PrintWindow(HWND hwnd, HDC hdcBlt, UINT nFlags)
+		hwnd := ctx.Arg(0)
+		hdcBlt := ctx.Arg(1)
+		nFlags := uint32(ctx.Arg(2))
+		ravelog.Logf("[user32] PrintWindow hwnd=0x%x hdc=0x%x flags=0x%x", hwnd, hdcBlt, nFlags)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3308,6 +3317,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GrayStringW", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL GrayStringW(HDC hDC, HBRUSH hBrush, GRAYSTRINGPROC lpOutputFunc, LPARAM lpData, int nCount, int X, int Y, int nWidth, int nHeight)
+		hdc := ctx.Arg(0)
+		lpData := ctx.Arg(3)
+		nCount := int32(ctx.Arg(4))
+		x := int32(ctx.Arg(5))
+		y := int32(ctx.Arg(6))
+		dc := getDC(hdc)
+		if dc != nil && dc.Target != nil && lpData != 0 && nCount > 0 {
+			txt := readGuestUTF16N(lpData, int(nCount))
+			oldColor := dc.TextColor
+			dc.TextColor = 0x808080
+			dc.TextOut(x, y, txt, false)
+			dc.TextColor = oldColor
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3410,10 +3433,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ShowScrollBar", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		wBar := int32(ctx.Arg(1))
+		bShow := ctx.Arg(2) != 0
+		ravelog.Logf("[user32] ShowScrollBar hwnd=0x%x bar=%d show=%v\n", hwnd, wBar, bShow)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EnableScrollBar", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		wSBflags := uint32(ctx.Arg(1))
+		wArrows := uint32(ctx.Arg(2))
+		ravelog.Logf("[user32] EnableScrollBar hwnd=0x%x flags=0x%x arrows=0x%x\n", hwnd, wSBflags, wArrows)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3447,6 +3478,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ScrollDC", func(ctx *ntapi.TrapContext) uint32 {
+		hDC := ctx.Arg(0)
+		dx := int32(ctx.Arg(1))
+		dy := int32(ctx.Arg(2))
+		lprcUpdate := ctx.Arg(6)
+		if lprcUpdate != 0 {
+			mem.Write32(lprcUpdate, 0)
+			mem.Write32(lprcUpdate+4, 0)
+			mem.Write32(lprcUpdate+8, 0)
+			mem.Write32(lprcUpdate+12, 0)
+		}
+		ravelog.Logf("[user32] ScrollDC hdc=0x%x dx=%d dy=%d\n", hDC, dx, dy)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3468,6 +3510,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0 // ERROR - no window region set
 	})
 	d.RegisterAutoStubHandler(user32, "GetWindowRgnBox", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		lprc := ctx.Arg(1)
+		if _, ok := hwndWindowRgn[hwnd]; ok && lprc != 0 {
+			if cs, ok2 := hwndChildren[hwnd]; ok2 {
+				mem.Write32(lprc, 0)
+				mem.Write32(lprc+4, 0)
+				mem.Write32(lprc+8, uint32(cs.w))
+				mem.Write32(lprc+12, uint32(cs.h))
+				ctx.SetReturn(1)
+				return 0
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3524,11 +3578,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
+	caretBlinkTime := uint32(530)
 	d.RegisterAutoStubHandler(user32, "GetCaretBlinkTime", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(530)
+		ctx.SetReturn(uint64(caretBlinkTime))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetCaretBlinkTime", func(ctx *ntapi.TrapContext) uint32 {
+		newTime := uint32(ctx.Arg(0))
+		if newTime > 0 {
+			caretBlinkTime = newTime
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3835,7 +3894,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.ReturnOverridden = true
 		return 0
 	})
+	lockedUpdateHwnd := uint64(0)
 	d.RegisterAutoStubHandler(user32, "LockWindowUpdate", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		if hwnd == 0 {
+			lockedUpdateHwnd = 0
+		} else {
+			if lockedUpdateHwnd != 0 && lockedUpdateHwnd != hwnd {
+				ctx.SetReturn(0)
+				return 0
+			}
+			lockedUpdateHwnd = hwnd
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3913,7 +3983,27 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateDialogParamW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// HWND CreateDialogParamW(HINSTANCE hInstance, LPCWSTR lpTemplate,
+		//   HWND hWndParent, DLGPROC lpDialogFunc, LPARAM dwInitParam)
+		// ReactOS: win32ss/user/user32/windows/dialog.c
+		lpTemplate := ctx.Arg(1)
+		hWndParent := ctx.Arg(2)
+		lpDialogFunc := ctx.Arg(3)
+		templateName := ""
+		if lpTemplate < 0x10000 {
+			templateName = fmt.Sprintf("#%d", lpTemplate)
+		} else {
+			templateName = readGuestUTF16(lpTemplate)
+		}
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className:  "DialogBox",
+			parentHWND: hWndParent,
+			visible:    true,
+		}
+		ravelog.Logf("[dialog] CreateDialogParamW template=%s parent=0x%x dlgProc=0x%x → hwnd=0x%x\n",
+			templateName, hWndParent, lpDialogFunc, hwnd)
+		ctx.SetReturn(hwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3927,6 +4017,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EndDialog", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL EndDialog(HWND hDlg, INT_PTR nResult)
+		// ReactOS: win32ss/user/user32/windows/dialog.c
+		hDlg := ctx.Arg(0)
+		nResult := ctx.Arg(1)
+		ravelog.Logf("[dialog] EndDialog hwnd=0x%x result=%d\n", hDlg, nResult)
+		// Mark dialog as not visible, clean up
+		if cs, ok := hwndChildren[hDlg]; ok {
+			cs.visible = false
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3972,6 +4071,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "MapDialogRect", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL MapDialogRect(HWND hDlg, LPRECT lpRect)
+		// ReactOS: win32ss/user/user32/windows/dialog.c
+		// Converts dialog units to pixels using font metrics
+		// Default: 1 DLU horizontal = avg char width / 4
+		//          1 DLU vertical = char height / 8
+		// Using 8x16 as default system font metrics
+		lpRect := ctx.Arg(1)
+		if lpRect != 0 {
+			l, _ := mem.Read32(lpRect)
+			t, _ := mem.Read32(lpRect + 4)
+			r, _ := mem.Read32(lpRect + 8)
+			b, _ := mem.Read32(lpRect + 12)
+			baseX := uint32(8) // avg char width
+			baseY := uint32(16) // char height
+			mem.Write32(lpRect, l*baseX/4)
+			mem.Write32(lpRect+4, t*baseY/8)
+			mem.Write32(lpRect+8, r*baseX/4)
+			mem.Write32(lpRect+12, b*baseY/8)
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4142,14 +4260,32 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DrawIcon", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL DrawIcon(HDC hDC, int X, int Y, HICON hIcon)
+		// ReactOS: win32ss/user/ntuser/cursoricon.c - calls DrawIconEx internally
+		hdc := ctx.Arg(0)
+		x := int32(ctx.Arg(1))
+		y := int32(ctx.Arg(2))
+		// hIcon := ctx.Arg(3)
+		dc := getDC(hdc)
+		if dc != nil && dc.Target != nil {
+			dc.Target.FillRect(x, y, x+32, y+32, 0x808080) // gray placeholder
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DestroyIcon", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL DestroyIcon(HICON hIcon)
+		// ReactOS: win32ss/user/ntuser/cursoricon.c
+		hIcon := ctx.Arg(0)
+		ravelog.Logf("[user32] DestroyIcon hIcon=0x%x\n", hIcon)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DestroyCursor", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL DestroyCursor(HCURSOR hCursor)
+		// ReactOS: win32ss/user/ntuser/cursoricon.c
+		hCursor := ctx.Arg(0)
+		ravelog.Logf("[user32] DestroyCursor hCursor=0x%x\n", hCursor)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4176,6 +4312,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	// Misc UI
 	d.RegisterAutoStubHandler(user32, "DrawStateW", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL DrawStateW(HDC hdc, HBRUSH hbrFore, DRAWSTATEPROC qfnCallBack,
+		//   LPARAM lData, WPARAM wData, int x, int y, int cx, int cy, UINT uFlags)
+		// ReactOS: win32ss/user/user32/windows/draw.c
+		hdc := ctx.Arg(0)
+		_ = hdc
+		x := int32(ctx.Arg(5))
+		y := int32(ctx.Arg(6))
+		ravelog.Logf("[user32] DrawStateW hdc=0x%x x=%d y=%d\n", hdc, x, y)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4208,6 +4352,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "PaintDesktop", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL PaintDesktop(HDC hdc) - fills with desktop color (COLOR_DESKTOP)
+		// ReactOS: win32ss/user/ntuser/painting.c
+		hdc := ctx.Arg(0)
+		dc := getDC(hdc)
+		if dc != nil && dc.Target != nil {
+			desktopColor := uint32(0x004E6A) // default teal
+			if len(hctx.SysColors) > 1 {
+				desktopColor = hctx.SysColors[1] // COLOR_DESKTOP=1
+			}
+			dc.Target.FillRect(0, 0, dc.Target.Width, dc.Target.Height, desktopColor)
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4990,6 +5145,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "UnhookWindowsHookEx", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL UnhookWindowsHookEx(HHOOK hhk)
+		// ReactOS: win32ss/user/ntuser/hook.c NtUserUnhookWindowsHookEx
+		hhk := ctx.Arg(0)
+		ravelog.Logf("[user32] UnhookWindowsHookEx hhk=0x%x\n", hhk)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5014,10 +5173,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write32(pRect+8, uint32(rc.Right))
 			ctx.Mem.Write32(pRect+12, uint32(rc.Bottom))
 		}
-		ctx.SetReturn(1)
-		return 0
-	})
-	d.RegisterAutoStubHandler(user32, "LockWindowUpdate", func(ctx *ntapi.TrapContext) uint32 {
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5521,14 +5676,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
-	// CreateDialogParamW: modeless dialog creation - return a fake HWND
-	d.RegisterAutoStubHandler(user32, "CreateDialogParamW", func(ctx *ntapi.TrapContext) uint32 {
-		hwnd := hwndAlloc()
-		ctx.SetReturn(hwnd)
-		return 0
-	})
-	// SetMenuItemBitmaps: associate bitmaps with menu items - no-op (no bitmap rendering)
+	// SetMenuItemBitmaps: associate bitmaps with menu items
 	d.RegisterAutoStubHandler(user32, "SetMenuItemBitmaps", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SetMenuItemBitmaps(HMENU hMenu, UINT uPosition, UINT uFlags, HBITMAP hBitmapUnchecked, HBITMAP hBitmapChecked)
+		// ReactOS: win32ss/user/ntuser/menu.c
+		hMenu := ctx.Arg(0)
+		uPosition := ctx.Arg(1)
+		uFlags := uint32(ctx.Arg(2))
+		ravelog.Logf("[user32] SetMenuItemBitmaps menu=0x%x pos=%d flags=0x%x\n", hMenu, uPosition, uFlags)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5556,11 +5711,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 			}
 		}
-		ctx.SetReturn(1)
-		return 0
-	})
-	// DestroyIcon: free an icon handle - no-op stub
-	d.RegisterAutoStubHandler(user32, "DestroyIcon", func(ctx *ntapi.TrapContext) uint32 {
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5619,9 +5769,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// GetDoubleClickTime: standard Windows default of 500ms
+	// GetDoubleClickTime/SetDoubleClickTime with mutable state
+	doubleClickTime := uint32(500)
 	d.RegisterAutoStubHandler(user32, "GetDoubleClickTime", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(500)
+		ctx.SetReturn(uint64(doubleClickTime))
 		return 0
 	})
 
@@ -6094,6 +6245,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	clipStore := make(map[uint32]uint64) // format → HGLOBAL
 	var clipFormats []uint32             // ordered list of stored formats
 	clipSeq := uint32(1)
+	clipboardViewerHwnd := uint64(0)
 
 	d.RegisterAutoStubHandler(user32, "OpenClipboard", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
@@ -6168,14 +6320,22 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetClipboardViewer", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		ctx.SetReturn(clipboardViewerHwnd)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetClipboardViewer", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		prev := clipboardViewerHwnd
+		clipboardViewerHwnd = hwnd
+		ctx.SetReturn(prev)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ChangeClipboardChain", func(ctx *ntapi.TrapContext) uint32 {
+		hWndRemove := ctx.Arg(0)
+		hWndNewNext := ctx.Arg(1)
+		if clipboardViewerHwnd == hWndRemove {
+		clipboardViewerHwnd = hWndNewNext
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -6266,15 +6426,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// -------------------------------------------------------
 	// Keyboard / input
 	// -------------------------------------------------------
+	keyboardState := make([]byte, 256)
 	d.RegisterAutoStubHandler(user32, "GetKeyboardState", func(ctx *ntapi.TrapContext) uint32 {
 		p := ctx.Arg(0)
 		for i := uint64(0); i < 256; i++ {
-			ctx.Mem.Write8(p+i, 0)
+			ctx.Mem.Write8(p+i, keyboardState[i])
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetKeyboardState", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SetKeyboardState(LPBYTE lpKeyState)
+		// ReactOS: win32ss/user/ntuser/input.c
+		p := ctx.Arg(0)
+		if p != 0 {
+			for i := uint64(0); i < 256; i++ {
+				b, _ := ctx.Mem.Read8(p + i)
+				keyboardState[i] = b
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -6329,6 +6499,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "UnloadKeyboardLayout", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL UnloadKeyboardLayout(HKL hkl)
+		// ReactOS: win32ss/user/ntuser/kbdlayout.c
+		hkl := ctx.Arg(0)
+		ravelog.Logf("[user32] UnloadKeyboardLayout hkl=0x%x\n", hkl)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -6341,7 +6515,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "GetKBCodePage", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1252)
+		// UINT GetKBCodePage(void)
+		// ReactOS: win32ss/user/user32/misc/misc.c
+		// Returns the OEM code page for the system
+		ctx.SetReturn(1252) // Windows-1252 Western European
 		return 0
 	})
 	// VkKeyScan: map ASCII char to VK | (shiftState << 8)
@@ -6377,6 +6554,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -6411,6 +6590,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -6438,6 +6619,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -6452,10 +6635,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ReplyMessage", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// BOOL ReplyMessage(LRESULT lResult)
+		// ReactOS: win32ss/user/ntuser/message.c
+		// Replies to a SendMessage before the handler returns
+		lResult := ctx.Arg(0)
+		ravelog.Logf("[user32] ReplyMessage result=0x%x\n", lResult)
+		ctx.SetReturn(1) // TRUE if called within SendMessage handler
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "QuerySendMessage", func(ctx *ntapi.TrapContext) uint32 {
+		// Undocumented - returns 0 if not in a SendMessage
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6500,10 +6689,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "WaitMessage", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL WaitMessage(void) - blocks until message available
+		// ReactOS: win32ss/user/ntuser/message.c
+		// In our emulator, poll Wayland once then return
+		if wlDisplay != nil {
+			wlDisplay.Poll()
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "WaitForInputIdle", func(ctx *ntapi.TrapContext) uint32 {
+		// DWORD WaitForInputIdle(HANDLE hProcess, DWORD dwMilliseconds)
+		// ReactOS: win32ss/user/ntuser/input.c
+		// 0 = wait satisfied, WAIT_TIMEOUT=258
+		// Since we're single-process, the app is always "idle"
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6511,12 +6710,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
 	}
+	messageExtraInfo := uint64(0)
 	d.RegisterAutoStubHandler(user32, "SetMessageExtraInfo", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// LPARAM SetMessageExtraInfo(LPARAM lParam) - returns previous value
+		prev := messageExtraInfo
+		messageExtraInfo = ctx.Arg(0)
+		ctx.SetReturn(prev)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "PostMessageA", func(ctx *ntapi.TrapContext) uint32 {
@@ -6537,6 +6742,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -6707,11 +6914,22 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "TranslateMessageEx", func(ctx *ntapi.TrapContext) uint32 {
+		// Undocumented extended TranslateMessage. Same behavior.
+		pMsg := ctx.Arg(0)
+		if pMsg != 0 {
+			msg, _ := mem.Read32(pMsg + 8) // MSG.message
+			if msg == 0x0100 || msg == 0x0104 { // WM_KEYDOWN, WM_SYSKEYDOWN
+				ctx.SetReturn(1)
+				return 0
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6721,6 +6939,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -6730,11 +6950,29 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// Window state / info
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "IsIconic", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		var style uint64
+		if m, ok := windowLongPtr[hwnd]; ok {
+			style = m[-16]
+		}
+		if style&0x20000000 != 0 { // WS_MINIMIZE
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsZoomed", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hwnd := ctx.Arg(0)
+		var style uint64
+		if m, ok := windowLongPtr[hwnd]; ok {
+			style = m[-16]
+		}
+		if style&0x01000000 != 0 { // WS_MAXIMIZE
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsWindowEnabled", func(ctx *ntapi.TrapContext) uint32 {
@@ -6795,15 +7033,32 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsServerSideWindow", func(ctx *ntapi.TrapContext) uint32 {
+		// Undocumented. We never use server-side windows.
+		_ = ctx.Arg(0) // hWnd
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsSETEnabled", func(ctx *ntapi.TrapContext) uint32 {
+		// Undocumented. Software Enhancement Technology - always disabled.
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "AnyPopup", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// BOOL AnyPopup() - returns TRUE if any visible popup/owned window exists
+		// ReactOS: win32ss/user/ntuser/window.c
+		found := false
+		for _, h := range win32.Global.AllWindows() {
+			wnd := win32.Global.Get(h)
+			if wnd != nil && wnd.Parent != 0 && wnd.Style&0x10000000 != 0 { // WS_VISIBLE
+				found = true
+				break
+			}
+		}
+		if found {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetActiveWindow", func(ctx *ntapi.TrapContext) uint32 {
@@ -6872,14 +7127,46 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "BringWindowToTop", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// BOOL BringWindowToTop(HWND hWnd) - equivalent to SetWindowPos(SWP_NOMOVE|SWP_NOSIZE)
+		// ReactOS: win32ss/user/ntuser/winpos.c
+		hwnd := ctx.Arg(0)
+		if hwnd == hctx.MainHWND || hwndChildren[hwnd] != nil {
+			hctx.ActiveHwnd = hwnd
+			queuePaint(hwnd)
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ShowWindowAsync", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL ShowWindowAsync(HWND hWnd, int nCmdShow)
+		// ReactOS: posts message instead of synchronous ShowWindow
+		hwnd := ctx.Arg(0)
+		nCmd := uint32(ctx.Arg(1))
+		ravelog.Logf("[user32] ShowWindowAsync hwnd=0x%x cmd=%d\n", hwnd, nCmd)
+		if cs, ok := hwndChildren[hwnd]; ok {
+			cs.visible = (nCmd != 0) // SW_HIDE=0
+		}
+		queuePaint(hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ShowOwnedPopups", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL ShowOwnedPopups(HWND hWndOwner, BOOL fShow)
+		// ReactOS: win32ss/user/ntuser/window.c
+		owner := ctx.Arg(0)
+		fShow := ctx.Arg(1) != 0
+		for _, h := range win32.Global.AllWindows() {
+			wnd := win32.Global.Get(h)
+			if wnd != nil && wnd.Parent == owner {
+				if fShow {
+					wnd.Style |= 0x10000000 // WS_VISIBLE
+				} else {
+					wnd.Style &^= 0x10000000
+				}
+			}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7151,11 +7438,19 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(h)
 		return 0
 	})
+	helpIdMap := map[uint64]uint32{}
 	d.RegisterAutoStubHandler(user32, "GetWindowContextHelpId", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// DWORD GetWindowContextHelpId(HWND hWnd)
+		// ReactOS: win32ss/user/ntuser/window.c
+		hwnd := ctx.Arg(0)
+		ctx.SetReturn(uint64(helpIdMap[hwnd]))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetWindowContextHelpId", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SetWindowContextHelpId(HWND hWnd, DWORD dwContextHelpId)
+		hwnd := ctx.Arg(0)
+		helpID := uint32(ctx.Arg(1))
+		helpIdMap[hwnd] = helpID
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7541,6 +7836,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -7553,11 +7850,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// -------------------------------------------------------
 	// Cursor / display
 	// -------------------------------------------------------
+	cursorPosX, cursorPosY := int32(0), int32(0)
 	d.RegisterAutoStubHandler(user32, "ShowCursor", func(ctx *ntapi.TrapContext) uint32 {
 		ctx.SetReturn(1)
 		return 0 // fake refcount 1
 	})
 	d.RegisterAutoStubHandler(user32, "SetCursorPos", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL SetCursorPos(int X, int Y)
+		// ReactOS: win32ss/user/ntuser/cursoricon.c
+		cursorPosX = int32(ctx.Arg(0))
+		cursorPosY = int32(ctx.Arg(1))
+		ravelog.Logf("[user32] SetCursorPos x=%d y=%d\n", cursorPosX, cursorPosY)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7573,21 +7876,41 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
+	var clipCursorRect *[4]int32
 	d.RegisterAutoStubHandler(user32, "ClipCursor", func(ctx *ntapi.TrapContext) uint32 {
+		// BOOL ClipCursor(const RECT *lpRect)
+		// ReactOS: win32ss/user/ntuser/cursoricon.c
+		pRect := ctx.Arg(0)
+		if pRect == 0 {
+			clipCursorRect = nil // release clip
+		} else {
+			l, _ := mem.Read32(pRect)
+			t, _ := mem.Read32(pRect + 4)
+			r, _ := mem.Read32(pRect + 8)
+			b, _ := mem.Read32(pRect + 12)
+			clipCursorRect = &[4]int32{int32(l), int32(t), int32(r), int32(b)}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetClipCursor", func(ctx *ntapi.TrapContext) uint32 {
 		p := ctx.Arg(0)
 		if p != 0 {
-			var w, h int32 = 1920, 1080
-			if wlWindow != nil {
-				w, h = wlWindow.Width, wlWindow.Height
+			if clipCursorRect != nil {
+				ctx.Mem.Write32(p, uint32(clipCursorRect[0]))
+				ctx.Mem.Write32(p+4, uint32(clipCursorRect[1]))
+				ctx.Mem.Write32(p+8, uint32(clipCursorRect[2]))
+				ctx.Mem.Write32(p+12, uint32(clipCursorRect[3]))
+			} else {
+				var w, h int32 = 1920, 1080
+				if wlWindow != nil {
+					w, h = wlWindow.Width, wlWindow.Height
+				}
+				ctx.Mem.Write32(p, 0)
+				ctx.Mem.Write32(p+4, 0)
+				ctx.Mem.Write32(p+8, uint32(w))
+				ctx.Mem.Write32(p+12, uint32(h))
 			}
-			ctx.Mem.Write32(p, 0)
-			ctx.Mem.Write32(p+4, 0)
-			ctx.Mem.Write32(p+8, uint32(w))
-			ctx.Mem.Write32(p+12, uint32(h))
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -7599,15 +7922,32 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetCursorFrameInfo", func(ctx *ntapi.TrapContext) uint32 {
+		// Undocumented. Returns HCURSOR of animation frame.
+		// hCursor := ctx.Arg(0)
+		// istep := ctx.Arg(1)  // animation step pointer
+		// We don't support animated cursors - return NULL
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetCursorContents", func(ctx *ntapi.TrapContext) uint32 {
+		// Undocumented NtUserSetCursorContents
+		// hCursor := ctx.Arg(0)
+		// pInfo := ctx.Arg(1)
+		ravelog.Logf("[user32] SetCursorContents (stub)\n")
 		ctx.SetReturn(1)
 		return 0
 	})
+	mouseSwapped := false
 	d.RegisterAutoStubHandler(user32, "SwapMouseButton", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// BOOL SwapMouseButton(BOOL fSwap) - returns previous state
+		// ReactOS: win32ss/user/ntuser/misc.c
+		prev := mouseSwapped
+		mouseSwapped = ctx.Arg(0) != 0
+		if prev {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "TrackMouseEvent", func(ctx *ntapi.TrapContext) uint32 {
@@ -7667,6 +8007,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -7798,10 +8140,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "RegisterShellHookWindow", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		ravelog.Logf("[user32] RegisterShellHookWindow hwnd=0x%x", hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DeregisterShellHookWindow", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		ravelog.Logf("[user32] DeregisterShellHookWindow hwnd=0x%x", hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7866,6 +8212,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -7878,6 +8226,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -7928,10 +8278,43 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0 // MAKELONG(4,8)
 	})
 	d.RegisterAutoStubHandler(user32, "GetDlgItemTextA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hDlg := ctx.Arg(0)
+		nIDDlgItem := ctx.Arg(1)
+		lpStr := ctx.Arg(2)
+		nMaxCount := int(ctx.Arg(3))
+		var text string
+		for h, cs := range hwndChildren {
+		if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+		text = hwndChildren[h].text
+		break
+		}
+		}
+		written := 0
+		if lpStr != 0 && nMaxCount > 0 {
+		bs := []byte(text)
+		if len(bs) >= nMaxCount {
+		bs = bs[:nMaxCount-1]
+		}
+		for i, b := range bs {
+		ctx.Mem.Write8(lpStr+uint64(i), b)
+		written++
+		}
+		ctx.Mem.Write8(lpStr+uint64(written), 0)
+		}
+		ctx.SetReturn(uint64(written))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetDlgItemTextA", func(ctx *ntapi.TrapContext) uint32 {
+		hDlg := ctx.Arg(0)
+		nIDDlgItem := ctx.Arg(1)
+		lpStr := ctx.Arg(2)
+		text := readGuestString(lpStr)
+		for h, cs := range hwndChildren {
+		if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+		hwndChildren[h].text = text
+		break
+		}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7948,6 +8331,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -7967,6 +8352,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8061,12 +8448,36 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "GetMenuStringA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hMenu := ctx.Arg(0)
+		uIDItem := ctx.Arg(1)
+		lpStr := ctx.Arg(2)
+		cchMax := int(ctx.Arg(3))
+		uFlags := uint32(ctx.Arg(4))
+		item := findMenuItem(hMenu, uIDItem, uFlags)
+		text := ""
+		if item != nil {
+		text = item.text
+		}
+		written := 0
+		if lpStr != 0 && cchMax > 0 {
+		bs := []byte(text)
+		if len(bs) >= cchMax {
+		bs = bs[:cchMax-1]
+		}
+		for i, b := range bs {
+		ctx.Mem.Write8(lpStr+uint64(i), b)
+		written++
+		}
+		ctx.Mem.Write8(lpStr+uint64(written), 0)
+		}
+		ctx.SetReturn(uint64(written))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetMenuItemID", func(ctx *ntapi.TrapContext) uint32 {
@@ -8096,6 +8507,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -8178,6 +8591,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8199,10 +8614,45 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "HiliteMenuItem", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		hMenu := ctx.Arg(1)
+		uIDItem := ctx.Arg(2)
+		uHilite := uint32(ctx.Arg(3))
+		item := findMenuItem(hMenu, uIDItem, uHilite)
+		if item != nil {
+		if uHilite&0x0080 != 0 { // MF_HILITE
+		item.flags |= 0x0080
+		} else {
+		item.flags &^= 0x0080
+		}
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CheckMenuRadioItem", func(ctx *ntapi.TrapContext) uint32 {
+		hMenu := ctx.Arg(0)
+		first := uint32(ctx.Arg(1))
+		last := uint32(ctx.Arg(2))
+		check := uint32(ctx.Arg(3))
+		flags := uint32(ctx.Arg(4))
+		m, ok := menus[hMenu]
+		if !ok {
+		ctx.SetReturn(0)
+		return 0
+		}
+		const mfChecked = 0x0008
+		for _, item := range m.items {
+		id := uint32(item.id)
+		if flags&0x0400 != 0 { // MF_BYPOSITION - skip for now
+		continue
+		}
+		if id >= first && id <= last {
+		if id == check {
+		item.flags |= mfChecked | 0x0200
+		} else {
+		item.flags &^= mfChecked | 0x0200
+		}
+		}
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8234,15 +8684,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "EndMenu", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[user32] EndMenu\n")
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetSystemMenu", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		hMenu := ctx.Arg(1)
+		ravelog.Logf("[user32] SetSystemMenu hwnd=0x%x menu=0x%x", hwnd, hMenu)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8250,6 +8706,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8360,6 +8818,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DrawStateA", func(ctx *ntapi.TrapContext) uint32 {
+		hdc := ctx.Arg(0)
+		x := int32(ctx.Arg(5))
+		y := int32(ctx.Arg(6))
+		ravelog.Logf("[user32] DrawStateA hdc=0x%x x=%d y=%d", hdc, x, y)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8368,11 +8830,37 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "GrayStringA", func(ctx *ntapi.TrapContext) uint32 {
+		hdc := ctx.Arg(0)
+		lpData := ctx.Arg(3)
+		nCount := int32(ctx.Arg(4))
+		x := int32(ctx.Arg(5))
+		y := int32(ctx.Arg(6))
+		dc := getDC(hdc)
+		if dc != nil && dc.Target != nil && lpData != 0 {
+			var txt string
+			if nCount > 0 {
+				// Read nCount bytes from guest as ANSI string
+				bs := make([]byte, nCount)
+				for i := int32(0); i < nCount; i++ {
+					b, _ := ctx.Mem.Read8(lpData + uint64(i))
+					bs[i] = b
+				}
+				txt = string(bs)
+			} else {
+				txt = readGuestString(lpData)
+			}
+			oldColor := dc.TextColor
+			dc.TextColor = 0x808080
+			dc.TextOut(x, y, txt, false)
+			dc.TextColor = oldColor
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8380,12 +8868,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "ExcludeUpdateRgn", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
+		// int ExcludeUpdateRgn(HDC hDC, HWND hWnd) - returns SIMPLEREGION
+		_ = ctx.Arg(0) // hDC
+		_ = ctx.Arg(1) // hWnd
+		ctx.SetReturn(1) // SIMPLEREGION
 		return 0
 	})
 
@@ -8393,6 +8886,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// Misc utility
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "MessageBeep", func(ctx *ntapi.TrapContext) uint32 {
+		uType := uint32(ctx.Arg(0))
+		ravelog.Logf("[user32] MessageBeep type=0x%x", uType)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8443,6 +8938,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ExitWindowsEx", func(ctx *ntapi.TrapContext) uint32 {
+		uFlags := uint32(ctx.Arg(0))
+		dwReason := uint32(ctx.Arg(1))
+		ravelog.Logf("[user32] ExitWindowsEx flags=0x%x reason=0x%x (ignored)", uFlags, dwReason)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8450,15 +8948,23 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "AnimateWindow", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		dwTime := uint32(ctx.Arg(1))
+		dwFlags := uint32(ctx.Arg(2))
+		ravelog.Logf("[user32] AnimateWindow hwnd=0x%x time=%d flags=0x%x", hwnd, dwTime, dwFlags)
+		queuePaint(hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "LockWorkStation", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[user32] LockWorkStation (ignored)\n")
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8484,6 +8990,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -8515,11 +9023,28 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetGuiResources", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(100)
+		// DWORD GetGuiResources(HANDLE hProcess, DWORD uiFlags)
+		uiFlags := uint32(ctx.Arg(1))
+		count := uint32(len(hwndChildren))
+		if uiFlags == 1 { // GR_GDIOBJECTS
+		count = 50
+		}
+		ctx.SetReturn(uint64(count))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetGUIThreadInfo", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// BOOL GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
+		pgui := ctx.Arg(1)
+		if pgui != 0 {
+		mem.Write32(pgui, 48) // cbSize
+		mem.Write32(pgui+4, 0) // flags
+		mem.Write64(pgui+8, hctx.ActiveHwnd) // hwndActive
+		mem.Write64(pgui+16, hctx.FocusHwnd) // hwndFocus
+		mem.Write64(pgui+24, 0) // hwndCapture
+		mem.Write64(pgui+32, 0) // hwndMenuOwner
+		mem.Write64(pgui+40, 0) // hwndMoveSize
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetComboBoxInfo", func(ctx *ntapi.TrapContext) uint32 {
@@ -8539,6 +9064,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8547,6 +9074,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -8559,15 +9088,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "RegisterHotKey", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		id := int32(ctx.Arg(1))
+		fsModifiers := uint32(ctx.Arg(2))
+		vk := uint32(ctx.Arg(3))
+		ravelog.Logf("[user32] RegisterHotKey hwnd=0x%x id=%d mod=0x%x vk=0x%x", hwnd, id, fsModifiers, vk)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "UnregisterHotKey", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		id := int32(ctx.Arg(1))
+		ravelog.Logf("[user32] UnregisterHotKey hwnd=0x%x id=%d", hwnd, id)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8580,6 +9119,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "UnregisterDeviceNotification", func(ctx *ntapi.TrapContext) uint32 {
+		handle := ctx.Arg(0)
+		ravelog.Logf("[user32] UnregisterDeviceNotification handle=0x%x", handle)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8587,6 +9128,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8612,10 +9155,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DragDetect", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		// BOOL DragDetect(HWND hwnd, POINT pt)
+		_ = ctx.Arg(0) // hwnd
+		_ = ctx.Arg(1) // pt packed as POINT
+		ctx.SetReturn(0) // no drag detected
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DragObject", func(ctx *ntapi.TrapContext) uint32 {
+		// DWORD DragObject(HWND hwndParent, HWND hwndFrom, UINT fmt, ULONG_PTR data, HCURSOR hcur)
+		_ = ctx.Arg(0)
+		_ = ctx.Arg(1)
+		ravelog.Logf("[user32] DragObject (stub)\n")
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -8718,6 +9268,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -8917,6 +9469,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8938,6 +9492,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8952,6 +9508,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8966,6 +9524,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8974,6 +9534,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8987,6 +9549,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9153,15 +9717,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "LookupIconIdFromDirectoryEx", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
-		return 0
-	})
-	d.RegisterAutoStubHandler(user32, "DestroyIcon", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
-		return 0
-	})
-	d.RegisterAutoStubHandler(user32, "DestroyCursor", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		// int LookupIconIdFromDirectoryEx(PBYTE presBits, BOOL fIcon, int cxDesired, int cyDesired, UINT Flags)
+		// ReactOS: win32ss/user/user32/windows/cursoricon.c
+		presBits := ctx.Arg(0)
+		fIcon := ctx.Arg(1) != 0
+		cxDesired := int32(ctx.Arg(2))
+		cyDesired := int32(ctx.Arg(3))
+		ravelog.Logf("[user32] LookupIconIdFromDirectoryEx bits=0x%x icon=%v cx=%d cy=%d\n",
+			presBits, fIcon, cxDesired, cyDesired)
+		ctx.SetReturn(1) // first resource ID
 		return 0
 	})
 	for _, fn := range []string{"PrivateExtractIconExA", "PrivateExtractIconExW",
@@ -9191,6 +9755,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9288,6 +9854,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9339,6 +9907,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetDoubleClickTime", func(ctx *ntapi.TrapContext) uint32 {
+		newTime := uint32(ctx.Arg(0))
+		if newTime > 0 {
+			doubleClickTime = newTime
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9350,6 +9922,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9359,6 +9933,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9369,6 +9945,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9403,6 +9981,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9411,6 +9991,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
 			ctx.SetReturn(1)
 			return 0
 		})

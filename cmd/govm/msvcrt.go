@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
@@ -1071,7 +1072,15 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "ferror", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		fp := ctx.Arg(0)
+		// CRT ferror checks the error indicator on the stream
+		// We don't track per-stream error state; report no error if the file exists
+		if _, ok := hctx.CrtFiles[fp]; ok {
+			ctx.SetReturn(0)
+		} else {
+			ravelog.Logf("[msvcrt] ferror: unknown stream 0x%x\n", fp)
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(msvcrt, "fgets", func(ctx *ntapi.TrapContext) uint32 {
