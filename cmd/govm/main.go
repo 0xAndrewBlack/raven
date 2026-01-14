@@ -2835,7 +2835,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 1, true
 
 		case 0x000D: // WM_GETTEXT
-			return 0, true // TODO: copy text to buffer
+			maxChars := wParam
+			buf := lParam
+			if buf == 0 || maxChars == 0 {
+				return 0, true
+			}
+			ws := utf16Encode(cs.text)
+			limit := uint64(len(ws))
+			if limit+1 > maxChars {
+				limit = maxChars - 1
+			}
+			for i := uint64(0); i < limit; i++ {
+				mem.Write16(buf+i*2, ws[i])
+			}
+			mem.Write16(buf+limit*2, 0) // null terminator
+			return limit, true
 
 		case 0x0005: // WM_SIZE
 			// StatusBar auto-sizes to parent width
@@ -2908,9 +2922,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return 1, true
 			case 0x000D: // WM_GETTEXT
-				return uint64(len(cs.text)), true
+				maxChars := wParam
+				buf := lParam
+				if buf == 0 || maxChars == 0 {
+					return 0, true
+				}
+				ws := utf16Encode(cs.text)
+				limit := uint64(len(ws))
+				if limit+1 > maxChars {
+					limit = maxChars - 1
+				}
+				for i := uint64(0); i < limit; i++ {
+					mem.Write16(buf+i*2, ws[i])
+				}
+				mem.Write16(buf+limit*2, 0)
+				return limit, true
 			case 0x000E: // WM_GETTEXTLENGTH
-				return uint64(len(cs.text)), true
+				return uint64(len(utf16Encode(cs.text))), true
 			case 0x00B7: // EM_SETMODIFY
 				cs.editModified = wParam != 0
 				return 0, true
@@ -2953,15 +2981,54 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case 0x00D7: // EM_CHARFROMPOS
 				return 0, true
 			case 0x00BE: // EM_GETLINECOUNT
-				return 1, true
+				lines := strings.Count(cs.text, "\n") + 1
+				if cs.text == "" {
+					lines = 1
+				}
+				return uint64(lines), true
 			case 0x00C1: // EM_GETLINE
-				return 0, true
+				lineIdx := int(wParam)
+				buf := lParam
+				textLines := strings.Split(cs.text, "\n")
+				if lineIdx < 0 || lineIdx >= len(textLines) || buf == 0 {
+					return 0, true
+				}
+				line := textLines[lineIdx]
+				ws := utf16Encode(line)
+				// First word at buf is max chars (pre-filled by caller)
+				maxChars, _ := mem.Read16(buf)
+				if maxChars == 0 {
+					maxChars = uint16(len(ws))
+				}
+				limit := len(ws)
+				if limit > int(maxChars) {
+					limit = int(maxChars)
+				}
+				for i := 0; i < limit; i++ {
+					mem.Write16(buf+uint64(i)*2, ws[i])
+				}
+				return uint64(limit), true
 			case 0x00B6: // EM_LINEFROMCHAR
 				return 0, true
 			case 0x00B9: // EM_LINEINDEX
 				return 0, true
 			case 0x00C4: // EM_LINELENGTH
-				return uint64(len(cs.text)), true
+				charIdx := int(wParam)
+				textLines := strings.Split(cs.text, "\n")
+				// Find which line charIdx belongs to
+				pos := 0
+				for _, line := range textLines {
+					lineLen := len(utf16Encode(line))
+					if charIdx < 0 || pos+lineLen >= charIdx {
+						return uint64(lineLen), true
+					}
+					pos += lineLen + 1 // +1 for \n
+				}
+				// Default: last line length
+				if len(textLines) > 0 {
+					return uint64(len(utf16Encode(textLines[len(textLines)-1]))), true
+				}
+				return 0, true
 			}
 		}
 
