@@ -2731,12 +2731,32 @@ func handleRtlGetVersion(ctx *TrapContext) uint32 {
 	buffer := ctx.Arg(0) // PRTL_OSVERSIONINFOW
 
 	if buffer != 0 {
-		// dwOSVersionInfoSize
-		ctx.Mem.Write32(buffer+0, 284)    // sizeof(RTL_OSVERSIONINFOW)
+		// RTL_OSVERSIONINFOEXW layout (284 bytes):
+		//   +0x00  DWORD dwOSVersionInfoSize
+		//   +0x04  DWORD dwMajorVersion
+		//   +0x08  DWORD dwMinorVersion
+		//   +0x0C  DWORD dwBuildNumber
+		//   +0x10  DWORD dwPlatformId
+		//   +0x14  WCHAR szCSDVersion[128]  (256 bytes, offsets 20..275)
+		//   +0x114 WORD  wServicePackMajor  (offset 276)
+		//   +0x116 WORD  wServicePackMinor
+		//   +0x118 WORD  wSuiteMask
+		//   +0x11A BYTE  wProductType
+		//   +0x11B BYTE  wReserved
+		structSize, _ := ctx.Mem.Read32(buffer)
 		ctx.Mem.Write32(buffer+4, 10)     // dwMajorVersion
 		ctx.Mem.Write32(buffer+8, 0)      // dwMinorVersion
-		ctx.Mem.Write32(buffer+12, 19045) // dwBuildNumber
+		ctx.Mem.Write32(buffer+12, 19041) // dwBuildNumber
 		ctx.Mem.Write32(buffer+16, 2)     // dwPlatformId = VER_PLATFORM_WIN32_NT
+		// szCSDVersion[128]: empty string (null-terminate first WCHAR)
+		ctx.Mem.Write16(buffer+20, 0)
+		if structSize >= 284 { // RTL_OSVERSIONINFOEXW
+			ctx.Mem.Write16(buffer+276, 0)     // wServicePackMajor
+			ctx.Mem.Write16(buffer+278, 0)     // wServicePackMinor
+			ctx.Mem.Write16(buffer+280, 0x300) // wSuiteMask: VER_SUITE_SINGLEUSERTS|VER_SUITE_TERMINAL
+			ctx.Mem.Write8(buffer+282, 1)      // wProductType = VER_NT_WORKSTATION
+			ctx.Mem.Write8(buffer+283, 0)      // wReserved
+		}
 	}
 	return StatusSuccess
 }

@@ -4952,7 +4952,74 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			w = int32(wlWindow.Width)
 			h = int32(wlWindow.Height)
 		}
+		// writeLogFont writes a complete LOGFONTW (92 bytes) at pvParam+off.
+		writeLogFont := func(off uint64, name string, height int32) {
+			ctx.Mem.Write32(pvParam+off+0, uint32(height)) // lfHeight
+			ctx.Mem.Write32(pvParam+off+4, 0)              // lfWidth
+			ctx.Mem.Write32(pvParam+off+8, 0)              // lfEscapement
+			ctx.Mem.Write32(pvParam+off+12, 0)             // lfOrientation
+			ctx.Mem.Write32(pvParam+off+16, 400)           // lfWeight = FW_NORMAL
+			ctx.Mem.Write8(pvParam+off+20, 0)              // lfItalic
+			ctx.Mem.Write8(pvParam+off+21, 0)              // lfUnderline
+			ctx.Mem.Write8(pvParam+off+22, 0)              // lfStrikeOut
+			ctx.Mem.Write8(pvParam+off+23, 1)              // lfCharSet = DEFAULT_CHARSET
+			ctx.Mem.Write8(pvParam+off+24, 0)              // lfOutPrecision
+			ctx.Mem.Write8(pvParam+off+25, 0)              // lfClipPrecision
+			ctx.Mem.Write8(pvParam+off+26, 5)              // lfQuality = CLEARTYPE_QUALITY
+			ctx.Mem.Write8(pvParam+off+27, 0x22)           // lfPitchAndFamily
+			ws := utf16Encode(name)
+			for i, wc := range ws {
+				ctx.Mem.Write16(pvParam+off+28+uint64(i)*2, wc)
+			}
+			ctx.Mem.Write16(pvParam+off+28+uint64(len(ws))*2, 0) // null terminator
+		}
 		switch uiAction {
+		case 0x0026: // SPI_GETDRAGFULLWINDOWS
+			if pvParam != 0 {
+				ctx.Mem.Write32(pvParam, 1) // TRUE
+			}
+		case 0x0029: // SPI_GETNONCLIENTMETRICS - fill NONCLIENTMETRICSW (504 bytes)
+			if pvParam != 0 {
+				// NONCLIENTMETRICSW layout (Vista+, 504 bytes):
+				// +0x00 cbSize=504, +0x04 iBorderWidth=1, +0x08 iScrollWidth=17, +0x0C iScrollHeight=17
+				// +0x10 iCaptionWidth=36, +0x14 iCaptionHeight=36
+				// +0x18 lfCaptionFont (92 bytes)
+				// +0x74 iSmCaptionWidth=36, +0x78 iSmCaptionHeight=36
+				// +0x7C lfSmCaptionFont (92 bytes)
+				// +0xD8 iMenuWidth=36, +0xDC iMenuHeight=36
+				// +0xE0 lfMenuFont (92 bytes)
+				// +0x13C lfStatusFont (92 bytes)
+				// +0x198 lfMessageFont (92 bytes)
+				// +0x1F4 iPaddedBorderWidth=4
+				ctx.Mem.Write32(pvParam+0, 504)  // cbSize
+				ctx.Mem.Write32(pvParam+4, 1)    // iBorderWidth
+				ctx.Mem.Write32(pvParam+8, 17)   // iScrollWidth
+				ctx.Mem.Write32(pvParam+12, 17)  // iScrollHeight
+				ctx.Mem.Write32(pvParam+16, 36)  // iCaptionWidth
+				ctx.Mem.Write32(pvParam+20, 36)  // iCaptionHeight
+				writeLogFont(24, "Segoe UI", -12)  // lfCaptionFont
+				ctx.Mem.Write32(pvParam+116, 36) // iSmCaptionWidth
+				ctx.Mem.Write32(pvParam+120, 36) // iSmCaptionHeight
+				writeLogFont(124, "Segoe UI", -12) // lfSmCaptionFont
+				ctx.Mem.Write32(pvParam+216, 36) // iMenuWidth
+				ctx.Mem.Write32(pvParam+220, 36) // iMenuHeight
+				writeLogFont(224, "Segoe UI", -12) // lfMenuFont
+				writeLogFont(316, "Segoe UI", -12) // lfStatusFont
+				writeLogFont(408, "Segoe UI", -12) // lfMessageFont
+				ctx.Mem.Write32(pvParam+500, 4)  // iPaddedBorderWidth
+			}
+		case 0x002B: // SPI_GETMINIMIZEDMETRICS - MINIMIZEDMETRICS (20 bytes)
+			if pvParam != 0 {
+				ctx.Mem.Write32(pvParam+0, 20) // cbSize
+				ctx.Mem.Write32(pvParam+4, 160) // iWidth
+				ctx.Mem.Write32(pvParam+8, 0)   // iHorzGap
+				ctx.Mem.Write32(pvParam+12, 0)  // iVertGap
+				ctx.Mem.Write32(pvParam+16, 0)  // iArrange
+			}
+		case 0x001F: // SPI_GETICONTITLELOGFONT - LOGFONTW (92 bytes)
+			if pvParam != 0 {
+				writeLogFont(0, "Segoe UI", -12)
+			}
 		case 0x0030: // SPI_GETWORKAREA
 			if pvParam != 0 {
 				ctx.Mem.Write32(pvParam+0, 0)
@@ -4960,10 +5027,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				ctx.Mem.Write32(pvParam+8, uint32(w))
 				ctx.Mem.Write32(pvParam+12, uint32(h))
 			}
-		case 0x0048: // SPI_GETFONTSMOOTHINGTYPE
+		case 0x0048: // SPI_GETANIMATION - ANIMATIONINFO{cbSize=8, iMinAnimate=0}
 			if pvParam != 0 {
-				ctx.Mem.Write32(pvParam, 2)
-			} // FE_FONTSMOOTHINGCLEARTYPE
+				ctx.Mem.Write32(pvParam, 8)
+				ctx.Mem.Write32(pvParam+4, 0)
+			}
 		case 0x004A: // SPI_GETFONTSMOOTHING
 			if pvParam != 0 {
 				ctx.Mem.Write32(pvParam, 1)
@@ -4972,69 +5040,24 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			if pvParam != 0 {
 				ctx.Mem.Write32(pvParam, 0)
 			}
-		case 0x0024: // SPI_GETNONCLIENTMETRICS - fill NONCLIENTMETRICSW
-			if pvParam != 0 {
-				// NONCLIENTMETRICSW (504 bytes on Vista+):
-				// +0   cbSize        = 504
-				// +4   iBorderWidth  = 1
-				// +8   iScrollWidth  = 17
-				// +12  iScrollHeight = 17
-				// +16  iCaptionWidth  = 23
-				// +20  iCaptionHeight = 23
-				// +24  lfCaptionFont  (LOGFONTW = 92 bytes, all zero except lfHeight=−11, lfCharSet=1, name="Segoe UI")
-				// +116 iSmCaptionWidth  = 12
-				// +120 iSmCaptionHeight = 15
-				// +124 lfSmCaptionFont  (92 bytes)
-				// +216 iMenuWidth  = 18
-				// +220 iMenuHeight = 19
-				// +224 lfMenuFont  (92 bytes)
-				// +316 lfStatusFont (92 bytes)
-				// +408 lfMessageFont (92 bytes)
-				// +500 iPaddedBorderWidth = 4
-				ctx.Mem.Write32(pvParam+0, 504)  // cbSize
-				ctx.Mem.Write32(pvParam+4, 1)    // iBorderWidth
-				ctx.Mem.Write32(pvParam+8, 17)   // iScrollWidth
-				ctx.Mem.Write32(pvParam+12, 17)  // iScrollHeight
-				ctx.Mem.Write32(pvParam+16, 23)  // iCaptionWidth
-				ctx.Mem.Write32(pvParam+20, 23)  // iCaptionHeight
-				ctx.Mem.Write32(pvParam+116, 12) // iSmCaptionWidth
-				ctx.Mem.Write32(pvParam+120, 15) // iSmCaptionHeight
-				ctx.Mem.Write32(pvParam+216, 18) // iMenuWidth
-				ctx.Mem.Write32(pvParam+220, 19) // iMenuHeight
-				ctx.Mem.Write32(pvParam+500, 4)  // iPaddedBorderWidth
-				// Write "Segoe UI" into lfCaptionFont.lfFaceName (offset 24+28=52 from pvParam)
-				writeLogFontName := func(off uint64, name string, height int32) {
-					ctx.Mem.Write32(pvParam+off, uint32(height)) // lfHeight
-					ctx.Mem.Write32(pvParam+off+16, 400)         // lfWeight = FW_NORMAL
-					ctx.Mem.Write8(pvParam+off+20, 0)            // lfItalic
-					ws := utf16Encode(name)
-					for i, w := range ws {
-						ctx.Mem.Write16(pvParam+off+28+uint64(i)*2, w)
-					}
-				}
-				writeLogFontName(24, "Segoe UI", -11)
-				writeLogFontName(124, "Segoe UI", -11)
-				writeLogFontName(224, "Segoe UI", -11)
-				writeLogFontName(316, "Segoe UI", -11)
-				writeLogFontName(408, "Segoe UI", -11)
-			}
 		case 0x001A: // SPI_GETDESKWALLPAPER
 			if pvParam != 0 {
 				ctx.Mem.Write16(pvParam, 0)
-			}
-		case 0x0059: // SPI_GETANIMATION - ANIMATIONINFO cbSize+iMinAnimate
-			if pvParam != 0 {
-				ctx.Mem.Write32(pvParam, 8)
-				ctx.Mem.Write32(pvParam+4, 0)
 			}
 		case 0x0068: // SPI_GETWHEELSCROLLLINES
 			if pvParam != 0 {
 				ctx.Mem.Write32(pvParam, 3)
 			}
-		case 0x006A: // SPI_GETFONTSMOOTHINGORIENTATIONTYPE
+		case 0x006A: // SPI_GETMENUSHOWDELAY
 			if pvParam != 0 {
-				ctx.Mem.Write32(pvParam, 0)
-			} // FE_FONTSMOOTHINGORIENTATIONRGB
+				ctx.Mem.Write32(pvParam, 400)
+			}
+		case 0x200A: // SPI_GETFONTSMOOTHINGTYPE
+			if pvParam != 0 {
+				ctx.Mem.Write32(pvParam, 2) // FE_FONTSMOOTHINGCLEARTYPE
+			}
+		default:
+			ravelog.Logf("[spi] SystemParametersInfoW unknown uiAction=0x%x pvParam=0x%x\n", uiAction, pvParam)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -8718,7 +8741,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "SystemParametersInfoA", func(ctx *ntapi.TrapContext) uint32 {
 		uiAction := ctx.Arg(0)
-		// uiParam := ctx.Arg(1)
 		pvParam := ctx.Arg(2)
 		w := int32(1920)
 		h := int32(1080)
@@ -8726,7 +8748,61 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			w = int32(wlWindow.Width)
 			h = int32(wlWindow.Height)
 		}
+		writeLogFontA := func(off uint64, name string, height int32) {
+			mem.Write32(pvParam+off+0, uint32(height))
+			mem.Write32(pvParam+off+4, 0)
+			mem.Write32(pvParam+off+8, 0)
+			mem.Write32(pvParam+off+12, 0)
+			mem.Write32(pvParam+off+16, 400) // lfWeight = FW_NORMAL
+			mem.Write8(pvParam+off+20, 0)    // lfItalic
+			mem.Write8(pvParam+off+21, 0)    // lfUnderline
+			mem.Write8(pvParam+off+22, 0)    // lfStrikeOut
+			mem.Write8(pvParam+off+23, 1)    // lfCharSet = DEFAULT_CHARSET
+			mem.Write8(pvParam+off+24, 0)    // lfOutPrecision
+			mem.Write8(pvParam+off+25, 0)    // lfClipPrecision
+			mem.Write8(pvParam+off+26, 5)    // lfQuality = CLEARTYPE_QUALITY
+			mem.Write8(pvParam+off+27, 0x22) // lfPitchAndFamily
+			// LOGFONTA: lfFaceName is 32 bytes of ANSI chars at +28
+			for i, ch := range name {
+				mem.Write8(pvParam+off+28+uint64(i), uint8(ch))
+			}
+			mem.Write8(pvParam+off+28+uint64(len(name)), 0)
+		}
 		switch uiAction {
+		case 0x0026: // SPI_GETDRAGFULLWINDOWS
+			if pvParam != 0 {
+				mem.Write32(pvParam, 1)
+			}
+		case 0x0029: // SPI_GETNONCLIENTMETRICS - NONCLIENTMETRICSA (500 bytes: no iPaddedBorderWidth pre-Vista)
+			if pvParam != 0 {
+				mem.Write32(pvParam+0, 500)  // cbSize
+				mem.Write32(pvParam+4, 1)    // iBorderWidth
+				mem.Write32(pvParam+8, 17)   // iScrollWidth
+				mem.Write32(pvParam+12, 17)  // iScrollHeight
+				mem.Write32(pvParam+16, 36)  // iCaptionWidth
+				mem.Write32(pvParam+20, 36)  // iCaptionHeight
+				writeLogFontA(24, "Segoe UI", -12)
+				mem.Write32(pvParam+84, 36)  // iSmCaptionWidth (+0x54)
+				mem.Write32(pvParam+88, 36)  // iSmCaptionHeight (+0x58)
+				writeLogFontA(92, "Segoe UI", -12)
+				mem.Write32(pvParam+152, 36) // iMenuWidth (+0x98)
+				mem.Write32(pvParam+156, 36) // iMenuHeight (+0x9C)
+				writeLogFontA(160, "Segoe UI", -12)
+				writeLogFontA(220, "Segoe UI", -12) // lfStatusFont
+				writeLogFontA(280, "Segoe UI", -12) // lfMessageFont
+			}
+		case 0x002B: // SPI_GETMINIMIZEDMETRICS
+			if pvParam != 0 {
+				mem.Write32(pvParam+0, 20)
+				mem.Write32(pvParam+4, 160)
+				mem.Write32(pvParam+8, 0)
+				mem.Write32(pvParam+12, 0)
+				mem.Write32(pvParam+16, 0)
+			}
+		case 0x001F: // SPI_GETICONTITLELOGFONT - LOGFONTA (60 bytes)
+			if pvParam != 0 {
+				writeLogFontA(0, "Segoe UI", -12)
+			}
 		case 0x0030: // SPI_GETWORKAREA
 			if pvParam != 0 {
 				mem.Write32(pvParam+0, 0)
@@ -8734,13 +8810,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				mem.Write32(pvParam+8, uint32(w))
 				mem.Write32(pvParam+12, uint32(h))
 			}
-		case 0x004A: // SPI_GETNONCLIENTMETRICS
+		case 0x0048: // SPI_GETANIMATION
 			if pvParam != 0 {
-				cbSize, _ := mem.Read32(pvParam)
-				zeros := make([]byte, cbSize)
-				mem.WriteBytes(pvParam, zeros)
-				mem.Write32(pvParam, cbSize)
+				mem.Write32(pvParam, 8)
+				mem.Write32(pvParam+4, 0)
 			}
+		case 0x004A: // SPI_GETFONTSMOOTHING
+			if pvParam != 0 {
+				mem.Write32(pvParam, 1)
+			}
+		case 0x006A: // SPI_GETMENUSHOWDELAY
+			if pvParam != 0 {
+				mem.Write32(pvParam, 400)
+			}
+		case 0x200A: // SPI_GETFONTSMOOTHINGTYPE
+			if pvParam != 0 {
+				mem.Write32(pvParam, 2) // FE_FONTSMOOTHINGCLEARTYPE
+			}
+		default:
+			ravelog.Logf("[spi] SystemParametersInfoA unknown uiAction=0x%x pvParam=0x%x\n", uiAction, pvParam)
 		}
 		ctx.SetReturn(1)
 		return 0
