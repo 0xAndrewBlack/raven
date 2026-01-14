@@ -4049,17 +4049,41 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "AddFontResourceA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[gdi32] AddFontResourceA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pName := ctx.Arg(0)
+		var name string
+		if pName != 0 {
+			var buf []byte
+			for i := uint64(0); ; i++ {
+				b, _ := mem.Read8(pName + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			name = string(buf)
+		}
+		ravelog.Logf("[gdi32] AddFontResourceA(%q)\n", name)
+		ctx.SetReturn(1) // success: 1 font added
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "AddFontResourceExA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] AddFontResourceExA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pName := ctx.Arg(0)
+		fl := ctx.Arg(1)
+		_ = ctx.Arg(2) // reserved
+		var name string
+		if pName != 0 {
+			var buf []byte
+			for i := uint64(0); ; i++ {
+				b, _ := mem.Read8(pName + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			name = string(buf)
+		}
+		ravelog.Logf("[gdi32] AddFontResourceExA(%q, flags=0x%x)\n", name, fl)
+		ctx.SetReturn(1) // success: 1 font added
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "AddFontResourceTracking", func(ctx *ntapi.TrapContext) uint32 {
@@ -4161,31 +4185,39 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CopyEnhMetaFileA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] CopyEnhMetaFileA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hEmf := ctx.Arg(0)
+		pFile := ctx.Arg(1)
+		ravelog.Logf("[gdi32] CopyEnhMetaFileA(0x%x, 0x%x)\n", hEmf, pFile)
+		h := gdiMgr.Metafiles.Create(gdi.MetafileEMF, 0, "")
+		gdiMgr.Metafiles.Close(0)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CopyEnhMetaFileW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] CopyEnhMetaFileW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hEmf := ctx.Arg(0)
+		pFile := ctx.Arg(1)
+		ravelog.Logf("[gdi32] CopyEnhMetaFileW(0x%x, 0x%x)\n", hEmf, pFile)
+		h := gdiMgr.Metafiles.Create(gdi.MetafileEMF, 0, "")
+		gdiMgr.Metafiles.Close(0)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CopyMetaFileA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] CopyMetaFileA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hMf := ctx.Arg(0)
+		pFile := ctx.Arg(1)
+		ravelog.Logf("[gdi32] CopyMetaFileA(0x%x, 0x%x)\n", hMf, pFile)
+		h := gdiMgr.Metafiles.Create(gdi.MetafileWMF, 0, "")
+		gdiMgr.Metafiles.Close(0)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CopyMetaFileW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] CopyMetaFileW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hMf := ctx.Arg(0)
+		pFile := ctx.Arg(1)
+		ravelog.Logf("[gdi32] CopyMetaFileW(0x%x, 0x%x)\n", hMf, pFile)
+		h := gdiMgr.Metafiles.Create(gdi.MetafileWMF, 0, "")
+		gdiMgr.Metafiles.Close(0)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateColorSpaceA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4201,49 +4233,173 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateDIBPatternBrush", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] CreateDIBPatternBrush(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hGlobal := ctx.Arg(0)
+		usage := ctx.Arg(1)
+		ravelog.Logf("[gdi32] CreateDIBPatternBrush(hGlobal=0x%x, usage=%d)\n", hGlobal, usage)
+		h := gdiMgr.CreatePatternBrush(0)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateDIBPatternBrushPt", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] CreateDIBPatternBrushPt(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pData := ctx.Arg(0)
+		usage := ctx.Arg(1)
+		ravelog.Logf("[gdi32] CreateDIBPatternBrushPt(pData=0x%x, usage=%d)\n", pData, usage)
+		h := gdiMgr.CreatePatternBrush(0)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateDiscardableBitmap", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] CreateDiscardableBitmap(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		_ = ctx.Arg(0) // hdc
+		w := int32(ctx.Arg(1))
+		h := int32(ctx.Arg(2))
+		hBmp := gdiMgr.CreateCompatibleBitmap(w, h)
+		ravelog.Logf("[gdi32] CreateDiscardableBitmap(w=%d, h=%d) → 0x%x\n", w, h, hBmp)
+		ctx.SetReturn(hBmp)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateEnhMetaFileA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] CreateEnhMetaFileA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdcRef := ctx.Arg(0)
+		pFile := ctx.Arg(1)
+		_ = ctx.Arg(2) // lpRect
+		_ = ctx.Arg(3) // lpDescription
+		var fileName string
+		if pFile != 0 {
+			var buf []byte
+			for i := uint64(0); ; i++ {
+				b, _ := mem.Read8(pFile + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			fileName = string(buf)
+		}
+		h := gdiMgr.Metafiles.Create(gdi.MetafileEMF, hdcRef, fileName)
+		ravelog.Logf("[gdi32] CreateEnhMetaFileA(hdcRef=0x%x, file=%q) → 0x%x\n", hdcRef, fileName, h)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateFontA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5, a6, a7 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5), ctx.Arg(6), ctx.Arg(7)
-		ravelog.Logf("[gdi32] CreateFontA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5, a6, a7)
-		ctx.SetReturn(0)
+		f := &gdi.Font{
+			Height:        int32(ctx.Arg(0)),
+			Width:         int32(ctx.Arg(1)),
+			Escapement:    int32(ctx.Arg(2)),
+			Orientation:   int32(ctx.Arg(3)),
+			Weight:        int32(ctx.Arg(4)),
+			Italic:        ctx.Arg(5) != 0,
+			Underline:     ctx.Arg(6) != 0,
+			StrikeOut:     ctx.Arg(7) != 0,
+			CharSet:       uint8(ctx.Arg(8)),
+			OutPrecision:  uint8(ctx.Arg(9)),
+			ClipPrecision: uint8(ctx.Arg(10)),
+			Quality:       uint8(ctx.Arg(11)),
+			PitchFamily:   uint8(ctx.Arg(12)),
+		}
+		pFace := ctx.Arg(13)
+		if pFace != 0 {
+			var buf []byte
+			for i := uint64(0); i < 32; i++ {
+				b, _ := mem.Read8(pFace + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			f.FaceName = string(buf)
+		}
+		h := gdiMgr.CreateFont(f)
+		ravelog.Logf("[gdi32] CreateFontA(%q, h=%d, w=%d, wt=%d) → 0x%x\n", f.FaceName, f.Height, f.Width, f.Weight, h)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateFontIndirectA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[gdi32] CreateFontIndirectA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lf := ctx.Arg(0)
+		f := &gdi.Font{}
+		if lf != 0 {
+			v32, _ := mem.Read32(lf)
+			f.Height = int32(v32)
+			v32, _ = mem.Read32(lf + 4)
+			f.Width = int32(v32)
+			v32, _ = mem.Read32(lf + 8)
+			f.Escapement = int32(v32)
+			v32, _ = mem.Read32(lf + 12)
+			f.Orientation = int32(v32)
+			v32, _ = mem.Read32(lf + 16)
+			f.Weight = int32(v32)
+			v8, _ := mem.Read8(lf + 20)
+			f.Italic = v8 != 0
+			v8, _ = mem.Read8(lf + 21)
+			f.Underline = v8 != 0
+			v8, _ = mem.Read8(lf + 22)
+			f.StrikeOut = v8 != 0
+			v8, _ = mem.Read8(lf + 23)
+			f.CharSet = v8
+			v8, _ = mem.Read8(lf + 24)
+			f.OutPrecision = v8
+			v8, _ = mem.Read8(lf + 25)
+			f.ClipPrecision = v8
+			v8, _ = mem.Read8(lf + 26)
+			f.Quality = v8
+			v8, _ = mem.Read8(lf + 27)
+			f.PitchFamily = v8
+			var buf []byte
+			for i := uint64(0); i < 32; i++ {
+				b, _ := mem.Read8(lf + 28 + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			f.FaceName = string(buf)
+		}
+		h := gdiMgr.CreateFont(f)
+		ravelog.Logf("[gdi32] CreateFontIndirectA(%q, h=%d) → 0x%x\n", f.FaceName, f.Height, h)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateFontIndirectExA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[gdi32] CreateFontIndirectExA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		lf := ctx.Arg(0)
+		f := &gdi.Font{}
+		if lf != 0 {
+			v32, _ := mem.Read32(lf)
+			f.Height = int32(v32)
+			v32, _ = mem.Read32(lf + 4)
+			f.Width = int32(v32)
+			v32, _ = mem.Read32(lf + 8)
+			f.Escapement = int32(v32)
+			v32, _ = mem.Read32(lf + 12)
+			f.Orientation = int32(v32)
+			v32, _ = mem.Read32(lf + 16)
+			f.Weight = int32(v32)
+			v8, _ := mem.Read8(lf + 20)
+			f.Italic = v8 != 0
+			v8, _ = mem.Read8(lf + 21)
+			f.Underline = v8 != 0
+			v8, _ = mem.Read8(lf + 22)
+			f.StrikeOut = v8 != 0
+			v8, _ = mem.Read8(lf + 23)
+			f.CharSet = v8
+			v8, _ = mem.Read8(lf + 24)
+			f.OutPrecision = v8
+			v8, _ = mem.Read8(lf + 25)
+			f.ClipPrecision = v8
+			v8, _ = mem.Read8(lf + 26)
+			f.Quality = v8
+			v8, _ = mem.Read8(lf + 27)
+			f.PitchFamily = v8
+			var buf []byte
+			for i := uint64(0); i < 32; i++ {
+				b, _ := mem.Read8(lf + 28 + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			f.FaceName = string(buf)
+		}
+		h := gdiMgr.CreateFont(f)
+		ravelog.Logf("[gdi32] CreateFontIndirectExA(%q, h=%d) → 0x%x\n", f.FaceName, f.Height, h)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateHalftonePalette", func(ctx *ntapi.TrapContext) uint32 {
@@ -4253,9 +4409,22 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateMetaFileA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[gdi32] CreateMetaFileA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pFile := ctx.Arg(0)
+		var fileName string
+		if pFile != 0 {
+			var buf []byte
+			for i := uint64(0); ; i++ {
+				b, _ := mem.Read8(pFile + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			fileName = string(buf)
+		}
+		h := gdiMgr.Metafiles.Create(gdi.MetafileWMF, 0, fileName)
+		ravelog.Logf("[gdi32] CreateMetaFileA(%q) → 0x%x\n", fileName, h)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreatePolyPolygonRgn", func(ctx *ntapi.TrapContext) uint32 {
@@ -5008,33 +5177,78 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumEnhMetaFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[gdi32] EnumEnhMetaFile(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		hEmf := ctx.Arg(1)
+		lpProc := ctx.Arg(2)
+		_ = ctx.Arg(3) // lpData
+		_ = ctx.Arg(4) // lpRect
+		ravelog.Logf("[gdi32] EnumEnhMetaFile(hdc=0x%x, hEmf=0x%x, proc=0x%x)\n", hdc, hEmf, lpProc)
+		ctx.SetReturn(1) // success, no records enumerated
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumFontFamiliesA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] EnumFontFamiliesA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpFamily := ctx.Arg(1)
+		lpProc := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+		var family string
+		if lpFamily != 0 {
+			var buf []byte
+			for i := uint64(0); i < 32; i++ {
+				b, _ := mem.Read8(lpFamily + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			family = string(buf)
+		}
+		ravelog.Logf("[gdi32] EnumFontFamiliesA(hdc=0x%x, family=%q, proc=0x%x, lParam=0x%x)\n", hdc, family, lpProc, lParam)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumFontFamiliesExA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[gdi32] EnumFontFamiliesExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpLogfont := ctx.Arg(1)
+		lpProc := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+		_ = ctx.Arg(4) // dwFlags
+		ravelog.Logf("[gdi32] EnumFontFamiliesExA(hdc=0x%x, logfont=0x%x, proc=0x%x, lParam=0x%x)\n", hdc, lpLogfont, lpProc, lParam)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumFontFamiliesW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] EnumFontFamiliesW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpFamily := ctx.Arg(1)
+		lpProc := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+		var family string
+		if lpFamily != 0 {
+			family = readGuestUTF16(lpFamily)
+		}
+		ravelog.Logf("[gdi32] EnumFontFamiliesW(hdc=0x%x, family=%q, proc=0x%x, lParam=0x%x)\n", hdc, family, lpProc, lParam)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumFontsA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] EnumFontsA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpFamily := ctx.Arg(1)
+		lpProc := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+		var family string
+		if lpFamily != 0 {
+			var buf []byte
+			for i := uint64(0); i < 32; i++ {
+				b, _ := mem.Read8(lpFamily + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			family = string(buf)
+		}
+		ravelog.Logf("[gdi32] EnumFontsA(hdc=0x%x, family=%q, proc=0x%x, lParam=0x%x)\n", hdc, family, lpProc, lParam)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumICMProfilesA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5054,9 +5268,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumMetaFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] EnumMetaFile(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		hMf := ctx.Arg(1)
+		lpProc := ctx.Arg(2)
+		_ = ctx.Arg(3) // lParam
+		ravelog.Logf("[gdi32] EnumMetaFile(hdc=0x%x, hMf=0x%x, proc=0x%x)\n", hdc, hMf, lpProc)
+		ctx.SetReturn(1) // success, no records
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumObjects", func(ctx *ntapi.TrapContext) uint32 {
@@ -5085,11 +5302,11 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ExtCreateRegion", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] ExtCreateRegion(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		lpXform := ctx.Arg(0)
+		nCount := ctx.Arg(1)
+		lpRgnData := ctx.Arg(2)
+		ravelog.Logf("[gdi32] ExtCreateRegion(xform=0x%x, count=%d, data=0x%x)\n", lpXform, nCount, lpRgnData)
+		ctx.SetReturn(0) // return NULL (empty region)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ExtEscape", func(ctx *ntapi.TrapContext) uint32 {
@@ -5730,11 +5947,17 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetBoundsRect", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] GetBoundsRect(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lprcBounds := ctx.Arg(1)
+		flags := ctx.Arg(2)
+		ravelog.Logf("[gdi32] GetBoundsRect(hdc=0x%x, lprc=0x%x, flags=0x%x)\n", hdc, lprcBounds, flags)
+		if lprcBounds != 0 {
+			ctx.Mem.Write32(lprcBounds, 0)
+			ctx.Mem.Write32(lprcBounds+4, 0)
+			ctx.Mem.Write32(lprcBounds+8, 0)
+			ctx.Mem.Write32(lprcBounds+12, 0)
+		}
+		ctx.SetReturn(0) // DCB_RESET - bounds rectangle is empty
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetBrushAttributes", func(ctx *ntapi.TrapContext) uint32 {
@@ -5751,33 +5974,50 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetCharABCWidthsA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] GetCharABCWidthsA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		first := ctx.Arg(1)
+		last := ctx.Arg(2)
+		_ = ctx.Arg(3) // lpABC
+		ravelog.Logf("[gdi32] GetCharABCWidthsA(hdc=0x%x, first=%d, last=%d)\n", hdc, first, last)
+		ctx.SetReturn(0) // failure
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetCharABCWidthsFloatA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] GetCharABCWidthsFloatA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		first := ctx.Arg(1)
+		last := ctx.Arg(2)
+		_ = ctx.Arg(3) // lpABCF
+		ravelog.Logf("[gdi32] GetCharABCWidthsFloatA(hdc=0x%x, first=%d, last=%d)\n", hdc, first, last)
+		ctx.SetReturn(0) // failure
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetCharABCWidthsI", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[gdi32] GetCharABCWidthsI(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		giFirst := ctx.Arg(1)
+		cgi := ctx.Arg(2)
+		_ = ctx.Arg(3) // pgi
+		_ = ctx.Arg(4) // lpABC
+		ravelog.Logf("[gdi32] GetCharABCWidthsI(hdc=0x%x, first=%d, count=%d)\n", hdc, giFirst, cgi)
+		ctx.SetReturn(0) // failure
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetCharWidthFloatA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] GetCharWidthFloatA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		first := ctx.Arg(1)
+		last := ctx.Arg(2)
+		_ = ctx.Arg(3) // lpBuffer
+		ravelog.Logf("[gdi32] GetCharWidthFloatA(hdc=0x%x, first=%d, last=%d)\n", hdc, first, last)
+		ctx.SetReturn(0) // failure
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetCharWidthI", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[gdi32] GetCharWidthI(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		giFirst := ctx.Arg(1)
+		cgi := ctx.Arg(2)
+		_ = ctx.Arg(3) // pgi
+		_ = ctx.Arg(4) // lpBuffer
+		ravelog.Logf("[gdi32] GetCharWidthI(hdc=0x%x, first=%d, count=%d)\n", hdc, giFirst, cgi)
+		ctx.SetReturn(0) // failure
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetCharWidthInfo", func(ctx *ntapi.TrapContext) uint32 {
@@ -5788,15 +6028,25 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetCharacterPlacementA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[gdi32] GetCharacterPlacementA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpString := ctx.Arg(1)
+		nCount := ctx.Arg(2)
+		nMaxExtent := ctx.Arg(3)
+		lpResults := ctx.Arg(4)
+		dwFlags := ctx.Arg(5)
+		ravelog.Logf("[gdi32] GetCharacterPlacementA(hdc=0x%x, str=0x%x, n=%d, max=%d, res=0x%x, flags=0x%x)\n", hdc, lpString, nCount, nMaxExtent, lpResults, dwFlags)
+		ctx.SetReturn(0) // failure
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetCharacterPlacementW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[gdi32] GetCharacterPlacementW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpString := ctx.Arg(1)
+		nCount := ctx.Arg(2)
+		nMaxExtent := ctx.Arg(3)
+		lpResults := ctx.Arg(4)
+		dwFlags := ctx.Arg(5)
+		ravelog.Logf("[gdi32] GetCharacterPlacementW(hdc=0x%x, str=0x%x, n=%d, max=%d, res=0x%x, flags=0x%x)\n", hdc, lpString, nCount, nMaxExtent, lpResults, dwFlags)
+		ctx.SetReturn(0) // failure
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetColorAdjustment", func(ctx *ntapi.TrapContext) uint32 {
@@ -5813,8 +6063,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetDIBColorTable", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] GetDIBColorTable(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		hdc := ctx.Arg(0)
+		iStart := ctx.Arg(1)
+		cEntries := ctx.Arg(2)
+		pColors := ctx.Arg(3)
+		ravelog.Logf("[gdi32] GetDIBColorTable(hdc=0x%x, start=%d, count=%d, buf=0x%x)\n", hdc, iStart, cEntries, pColors)
+		// Return 0 entries (no color table available for 32bpp DIBs)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -5902,9 +6156,9 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetFontLanguageInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[gdi32] GetFontLanguageInfo(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[gdi32] GetFontLanguageInfo(hdc=0x%x)\n", hdc)
+		ctx.SetReturn(0) // no complex script support
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetFontResourceInfoW", func(ctx *ntapi.TrapContext) uint32 {
@@ -5914,34 +6168,52 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetFontUnicodeRanges", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] GetFontUnicodeRanges(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpgs := ctx.Arg(1)
+		ravelog.Logf("[gdi32] GetFontUnicodeRanges(hdc=0x%x, lpgs=0x%x)\n", hdc, lpgs)
+		ctx.SetReturn(0) // failure / no data
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetGlyphIndicesA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[gdi32] GetGlyphIndicesA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpstr := ctx.Arg(1)
+		c := ctx.Arg(2)
+		_ = ctx.Arg(3) // pgi
+		_ = ctx.Arg(4) // fl
+		ravelog.Logf("[gdi32] GetGlyphIndicesA(hdc=0x%x, str=0x%x, count=%d)\n", hdc, lpstr, c)
+		ctx.SetReturn(0xFFFFFFFF) // GDI_ERROR
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetGlyphOutline", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5, a6 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5), ctx.Arg(6)
-		ravelog.Logf("[gdi32] GetGlyphOutline(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5, a6)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		uChar := ctx.Arg(1)
+		fuFormat := ctx.Arg(2)
+		_ = ctx.Arg(3) // lpgm
+		_ = ctx.Arg(4) // cjBuffer
+		_ = ctx.Arg(5) // pvBuffer
+		_ = ctx.Arg(6) // lpmat2
+		ravelog.Logf("[gdi32] GetGlyphOutline(hdc=0x%x, char=0x%x, fmt=0x%x)\n", hdc, uChar, fuFormat)
+		ctx.SetReturn(0xFFFFFFFF) // GDI_ERROR
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetGlyphOutlineA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5, a6 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5), ctx.Arg(6)
-		ravelog.Logf("[gdi32] GetGlyphOutlineA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5, a6)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		uChar := ctx.Arg(1)
+		fuFormat := ctx.Arg(2)
+		_ = ctx.Arg(3) // lpgm
+		_ = ctx.Arg(4) // cjBuffer
+		_ = ctx.Arg(5) // pvBuffer
+		_ = ctx.Arg(6) // lpmat2
+		ravelog.Logf("[gdi32] GetGlyphOutlineA(hdc=0x%x, char=0x%x, fmt=0x%x)\n", hdc, uChar, fuFormat)
+		ctx.SetReturn(0xFFFFFFFF) // GDI_ERROR
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetGlyphOutlineWow", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5, a6 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5), ctx.Arg(6)
-		ravelog.Logf("[gdi32] GetGlyphOutlineWow(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5, a6)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		uChar := ctx.Arg(1)
+		fuFormat := ctx.Arg(2)
+		ravelog.Logf("[gdi32] GetGlyphOutlineWow(hdc=0x%x, char=0x%x, fmt=0x%x)\n", hdc, uChar, fuFormat)
+		ctx.SetReturn(0xFFFFFFFF) // GDI_ERROR
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetHFONT", func(ctx *ntapi.TrapContext) uint32 {
@@ -5967,19 +6239,19 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetKerningPairs", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] GetKerningPairs(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		nPairs := ctx.Arg(1)
+		_ = ctx.Arg(2) // lpKernPair
+		ravelog.Logf("[gdi32] GetKerningPairs(hdc=0x%x, nPairs=%d)\n", hdc, nPairs)
+		ctx.SetReturn(0) // no kerning pairs
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetKerningPairsA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] GetKerningPairsA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		nPairs := ctx.Arg(1)
+		_ = ctx.Arg(2) // lpKernPair
+		ravelog.Logf("[gdi32] GetKerningPairsA(hdc=0x%x, nPairs=%d)\n", hdc, nPairs)
+		ctx.SetReturn(0) // no kerning pairs
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetLogColorSpaceA", func(ctx *ntapi.TrapContext) uint32 {
@@ -6019,10 +6291,10 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetMetaRgn", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] GetMetaRgn(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		hrgn := ctx.Arg(1)
+		ravelog.Logf("[gdi32] GetMetaRgn(hdc=0x%x, hrgn=0x%x)\n", hdc, hrgn)
+		ctx.SetReturn(0) // 0 = no meta region set
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetMiterLimit", func(ctx *ntapi.TrapContext) uint32 {
@@ -6033,11 +6305,11 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetOutlineTextMetricsA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] GetOutlineTextMetricsA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		cbData := ctx.Arg(1)
+		_ = ctx.Arg(2) // lpOTM
+		ravelog.Logf("[gdi32] GetOutlineTextMetricsA(hdc=0x%x, cb=%d)\n", hdc, cbData)
+		ctx.SetReturn(0) // failure - no outline text metrics available
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetPixelFormat", func(ctx *ntapi.TrapContext) uint32 {
@@ -6047,11 +6319,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetRandomRgn", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] GetRandomRgn(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		hrgn := ctx.Arg(1)
+		iNum := int32(ctx.Arg(2))
+		ravelog.Logf("[gdi32] GetRandomRgn(hdc=0x%x, hrgn=0x%x, iNum=%d)\n", hdc, hrgn, iNum)
+		// -1 = no clipping region, 0 = error, 1 = region returned
+		ctx.SetReturn(uint64(uint32(0xFFFFFFFF))) // -1: no region
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetRasterizerCaps", func(ctx *ntapi.TrapContext) uint32 {
@@ -6062,11 +6335,11 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetRegionData", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] GetRegionData(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hrgn := ctx.Arg(0)
+		nCount := ctx.Arg(1)
+		_ = ctx.Arg(2) // lpRgnData
+		ravelog.Logf("[gdi32] GetRegionData(hrgn=0x%x, nCount=%d)\n", hrgn, nCount)
+		ctx.SetReturn(0) // failure
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetRelAbs", func(ctx *ntapi.TrapContext) uint32 {
@@ -6095,47 +6368,155 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextCharset", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[gdi32] GetTextCharset(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[gdi32] GetTextCharset(hdc=0x%x)\n", hdc)
+		ctx.SetReturn(1) // DEFAULT_CHARSET
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextCharsetInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] GetTextCharsetInfo(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		lpSig := ctx.Arg(1)
+		_ = ctx.Arg(2) // dwFlags
+		ravelog.Logf("[gdi32] GetTextCharsetInfo(hdc=0x%x, lpSig=0x%x)\n", hdc, lpSig)
+		// Zero out FONTSIGNATURE if provided (24 bytes: 4 USB DWORDs + 2 CSB DWORDs)
+		if lpSig != 0 {
+			for i := uint64(0); i < 24; i += 4 {
+				ctx.Mem.Write32(lpSig+i, 0)
+			}
+		}
+		ctx.SetReturn(1) // DEFAULT_CHARSET
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextExtentExPointI", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5, a6 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5), ctx.Arg(6)
-		ravelog.Logf("[gdi32] GetTextExtentExPointI(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5, a6)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // pgiIn
+		cgi := int32(ctx.Arg(2))
+		nMaxExtent := ctx.Arg(3)
+		lpnFit := ctx.Arg(4)
+		_ = ctx.Arg(5) // lpnDx
+		lpSize := ctx.Arg(6)
+		ravelog.Logf("[gdi32] GetTextExtentExPointI(hdc=0x%x, count=%d, maxExt=%d)\n", hdc, cgi, nMaxExtent)
+		dc := getDC(hdc)
+		charW := int32(8)
+		charH := int32(16)
+		if dc.Font != nil {
+			if dc.Font.AveCharWidth > 0 {
+				charW = dc.Font.AveCharWidth
+			}
+			if dc.Font.CellHeight > 0 {
+				charH = dc.Font.CellHeight
+			}
+		}
+		if lpSize != 0 {
+			ctx.Mem.Write32(lpSize, uint32(charW*cgi))
+			ctx.Mem.Write32(lpSize+4, uint32(charH))
+		}
+		if lpnFit != 0 {
+			ctx.Mem.Write32(lpnFit, uint32(cgi))
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextExtentExPointWPri", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5, a6 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5), ctx.Arg(6)
-		ravelog.Logf("[gdi32] GetTextExtentExPointWPri(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5, a6)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // lpszStr
+		cchString := int32(ctx.Arg(2))
+		nMaxExtent := ctx.Arg(3)
+		lpnFit := ctx.Arg(4)
+		_ = ctx.Arg(5) // lpnDx
+		lpSize := ctx.Arg(6)
+		ravelog.Logf("[gdi32] GetTextExtentExPointWPri(hdc=0x%x, count=%d, maxExt=%d)\n", hdc, cchString, nMaxExtent)
+		dc := getDC(hdc)
+		charW := int32(8)
+		charH := int32(16)
+		if dc.Font != nil {
+			if dc.Font.AveCharWidth > 0 {
+				charW = dc.Font.AveCharWidth
+			}
+			if dc.Font.CellHeight > 0 {
+				charH = dc.Font.CellHeight
+			}
+		}
+		if lpSize != 0 {
+			ctx.Mem.Write32(lpSize, uint32(charW*cchString))
+			ctx.Mem.Write32(lpSize+4, uint32(charH))
+		}
+		if lpnFit != 0 {
+			ctx.Mem.Write32(lpnFit, uint32(cchString))
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextExtentPointA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] GetTextExtentPointA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // lpString
+		c := int32(ctx.Arg(2))
+		lpSize := ctx.Arg(3)
+		ravelog.Logf("[gdi32] GetTextExtentPointA(hdc=0x%x, count=%d)\n", hdc, c)
+		dc := getDC(hdc)
+		charW := int32(8)
+		charH := int32(16)
+		if dc.Font != nil {
+			if dc.Font.AveCharWidth > 0 {
+				charW = dc.Font.AveCharWidth
+			}
+			if dc.Font.CellHeight > 0 {
+				charH = dc.Font.CellHeight
+			}
+		}
+		if lpSize != 0 {
+			ctx.Mem.Write32(lpSize, uint32(charW*c))
+			ctx.Mem.Write32(lpSize+4, uint32(charH))
+		}
+		ctx.SetReturn(1) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextExtentPointI", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] GetTextExtentPointI(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // pgiIn
+		cgi := int32(ctx.Arg(2))
+		lpSize := ctx.Arg(3)
+		ravelog.Logf("[gdi32] GetTextExtentPointI(hdc=0x%x, count=%d)\n", hdc, cgi)
+		dc := getDC(hdc)
+		charW := int32(8)
+		charH := int32(16)
+		if dc.Font != nil {
+			if dc.Font.AveCharWidth > 0 {
+				charW = dc.Font.AveCharWidth
+			}
+			if dc.Font.CellHeight > 0 {
+				charH = dc.Font.CellHeight
+			}
+		}
+		if lpSize != 0 {
+			ctx.Mem.Write32(lpSize, uint32(charW*cgi))
+			ctx.Mem.Write32(lpSize+4, uint32(charH))
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextExtentPointW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] GetTextExtentPointW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // lpString
+		c := int32(ctx.Arg(2))
+		lpSize := ctx.Arg(3)
+		ravelog.Logf("[gdi32] GetTextExtentPointW(hdc=0x%x, count=%d)\n", hdc, c)
+		dc := getDC(hdc)
+		charW := int32(8)
+		charH := int32(16)
+		if dc.Font != nil {
+			if dc.Font.AveCharWidth > 0 {
+				charW = dc.Font.AveCharWidth
+			}
+			if dc.Font.CellHeight > 0 {
+				charH = dc.Font.CellHeight
+			}
+		}
+		if lpSize != 0 {
+			ctx.Mem.Write32(lpSize, uint32(charW*c))
+			ctx.Mem.Write32(lpSize+4, uint32(charH))
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextFaceAliasW", func(ctx *ntapi.TrapContext) uint32 {
@@ -6245,15 +6626,21 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PlayEnhMetaFileRecord", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] PlayEnhMetaFileRecord(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // lpHandleTable
+		_ = ctx.Arg(2) // lpEnhMetaRecord
+		_ = ctx.Arg(3) // nHandles
+		ravelog.Logf("[gdi32] PlayEnhMetaFileRecord(hdc=0x%x)\n", hdc)
+		ctx.SetReturn(1) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PlayMetaFileRecord", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] PlayMetaFileRecord(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // lpHandleTable
+		_ = ctx.Arg(2) // lpMetaRecord
+		_ = ctx.Arg(3) // nHandles
+		ravelog.Logf("[gdi32] PlayMetaFileRecord(hdc=0x%x)\n", hdc)
+		ctx.SetReturn(1) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PlgBlt", func(ctx *ntapi.TrapContext) uint32 {
@@ -6304,17 +6691,41 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "RemoveFontResourceA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[gdi32] RemoveFontResourceA(0x%x)\n", a0)
-		ctx.SetReturn(1)
+		pName := ctx.Arg(0)
+		var name string
+		if pName != 0 {
+			var buf []byte
+			for i := uint64(0); ; i++ {
+				b, _ := mem.Read8(pName + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			name = string(buf)
+		}
+		ravelog.Logf("[gdi32] RemoveFontResourceA(%q)\n", name)
+		ctx.SetReturn(1) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "RemoveFontResourceExA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] RemoveFontResourceExA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(1)
+		pName := ctx.Arg(0)
+		fl := ctx.Arg(1)
+		_ = ctx.Arg(2) // reserved
+		var name string
+		if pName != 0 {
+			var buf []byte
+			for i := uint64(0); ; i++ {
+				b, _ := mem.Read8(pName + i)
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+			name = string(buf)
+		}
+		ravelog.Logf("[gdi32] RemoveFontResourceExA(%q, flags=0x%x)\n", name, fl)
+		ctx.SetReturn(1) // success
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "RemoveFontResourceTracking", func(ctx *ntapi.TrapContext) uint32 {
@@ -6325,10 +6736,10 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ResetDCA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] ResetDCA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(1)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // lpDevMode
+		ravelog.Logf("[gdi32] ResetDCA(hdc=0x%x)\n", hdc)
+		ctx.SetReturn(hdc) // return the DC handle on success
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ResizePalette", func(ctx *ntapi.TrapContext) uint32 {
@@ -6401,11 +6812,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetBoundsRect", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		a2 := ctx.Arg(2)
-		ravelog.Logf("[gdi32] SetBoundsRect(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(1)
+		hdc := ctx.Arg(0)
+		_ = ctx.Arg(1) // lprcBounds
+		flags := ctx.Arg(2)
+		ravelog.Logf("[gdi32] SetBoundsRect(hdc=0x%x, flags=0x%x)\n", hdc, flags)
+		// Return previous state: DCB_DISABLE (0x0008) - bounds accumulation was disabled
+		ctx.SetReturn(0x0008)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetBrushAttributes", func(ctx *ntapi.TrapContext) uint32 {
@@ -6430,9 +6842,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetDIBColorTable", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[gdi32] SetDIBColorTable(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(1)
+		hdc := ctx.Arg(0)
+		iStart := ctx.Arg(1)
+		cEntries := ctx.Arg(2)
+		_ = ctx.Arg(3) // prgbq
+		ravelog.Logf("[gdi32] SetDIBColorTable(hdc=0x%x, start=%d, count=%d)\n", hdc, iStart, cEntries)
+		ctx.SetReturn(cEntries) // return number of entries set
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetDeviceGammaRamp", func(ctx *ntapi.TrapContext) uint32 {
@@ -6443,10 +6858,13 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetEnhMetaFileBits", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] SetEnhMetaFileBits(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(1)
+		nSize := ctx.Arg(0)
+		_ = ctx.Arg(1) // pb
+		ravelog.Logf("[gdi32] SetEnhMetaFileBits(size=%d)\n", nSize)
+		// Create a dummy closed EMF from the raw bits
+		h := gdiMgr.Metafiles.Create(gdi.MetafileEMF, 0, "")
+		gdiMgr.Metafiles.Close(0)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetFontEnumeration", func(ctx *ntapi.TrapContext) uint32 {
@@ -6500,16 +6918,18 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetMetaFileBitsEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[gdi32] SetMetaFileBitsEx(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(1)
+		nSize := ctx.Arg(0)
+		_ = ctx.Arg(1) // pb
+		ravelog.Logf("[gdi32] SetMetaFileBitsEx(size=%d)\n", nSize)
+		h := gdiMgr.Metafiles.Create(gdi.MetafileWMF, 0, "")
+		gdiMgr.Metafiles.Close(0)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetMetaRgn", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[gdi32] SetMetaRgn(0x%x)\n", a0)
-		ctx.SetReturn(1)
+		hdc := ctx.Arg(0)
+		ravelog.Logf("[gdi32] SetMetaRgn(hdc=0x%x)\n", hdc)
+		ctx.SetReturn(0) // ERROR (NULLREGION=1 would be success)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetMiterLimit", func(ctx *ntapi.TrapContext) uint32 {
