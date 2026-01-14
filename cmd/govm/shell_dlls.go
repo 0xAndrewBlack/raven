@@ -158,6 +158,7 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 	if !ok {
 		return
 	}
+	sharedHeapAlloc := hctx.HeapAlloc
 	_ = shlwapi
 
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveFileSpecW", func(ctx *ntapi.TrapContext) uint32 {
@@ -2267,15 +2268,44 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathAddBackslashA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathAddBackslashA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathAddBackslashA path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			// Find end of string
+			i := uint64(0)
+			for { b, _ := ctx.Mem.Read8(pszPath + i); if b == 0 { break }; i++ }
+			if i > 0 {
+				last, _ := ctx.Mem.Read8(pszPath + i - 1)
+				if last != '\\' {
+					ctx.Mem.Write8(pszPath+i, '\\')
+					ctx.Mem.Write8(pszPath+i+1, 0)
+					i++
+				}
+			}
+			ctx.SetReturn(pszPath + i) // return pointer to NUL
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathAddBackslashW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathAddBackslashW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathAddBackslashW path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			i := uint64(0)
+			for { ch, _ := ctx.Mem.Read16(pszPath + i*2); if ch == 0 { break }; i++ }
+			if i > 0 {
+				last, _ := ctx.Mem.Read16(pszPath + (i-1)*2)
+				if last != '\\' {
+					ctx.Mem.Write16(pszPath+i*2, '\\')
+					ctx.Mem.Write16(pszPath+(i+1)*2, 0)
+					i++
+				}
+			}
+			ctx.SetReturn(pszPath + i*2)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathAddExtensionA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2285,9 +2315,23 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathAppendA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] PathAppendA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		pszMore := ctx.Arg(1)
+		var base, more string
+		if pszPath != 0 { base = readGuestUTF16(pszPath) }
+		if pszMore != 0 { more = readGuestUTF16(pszMore) }
+		ravelog.Logf("[shlwapi] PathAppendA base=%q more=%q\n", base, more)
+		result := base
+		if len(result) > 0 && result[len(result)-1] != '\\' { result += "\\" }
+		result += more
+		if pszPath != 0 {
+			for i, ch := range result {
+				if i >= 259 { break }
+				ctx.Mem.Write16(pszPath+uint64(i*2), uint16(ch))
+			}
+			ctx.Mem.Write16(pszPath+uint64(len(result)*2), 0)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathBuildRootA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2303,21 +2347,57 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathCanonicalizeA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] PathCanonicalizeA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszBuf := ctx.Arg(0)
+		pszPath := ctx.Arg(1)
+		var path string
+		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		ravelog.Logf("[shlwapi] PathCanonicalizeA path=%q\n", path)
+		// Simple canonicalization: just copy (full impl would resolve . and ..)
+		if pszBuf != 0 {
+			for i, ch := range path {
+				if i >= 259 { break }
+				ctx.Mem.Write16(pszBuf+uint64(i*2), uint16(ch))
+			}
+			ctx.Mem.Write16(pszBuf+uint64(len(path)*2), 0)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathCanonicalizeW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] PathCanonicalizeW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszBuf := ctx.Arg(0)
+		pszPath := ctx.Arg(1)
+		var path string
+		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		ravelog.Logf("[shlwapi] PathCanonicalizeW path=%q\n", path)
+		// Simple canonicalization: just copy (full impl would resolve . and ..)
+		if pszBuf != 0 {
+			for i, ch := range path {
+				if i >= 259 { break }
+				ctx.Mem.Write16(pszBuf+uint64(i*2), uint16(ch))
+			}
+			ctx.Mem.Write16(pszBuf+uint64(len(path)*2), 0)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathCombineA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] PathCombineA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pszDest := ctx.Arg(0)
+		pszDir := ctx.Arg(1)
+		pszFile := ctx.Arg(2)
+		var dir, file string
+		if pszDir != 0 { dir = readGuestString(pszDir) }
+		if pszFile != 0 { file = readGuestString(pszFile) }
+		ravelog.Logf("[shlwapi] PathCombineA dir=%q file=%q\n", dir, file)
+		result := dir
+		if len(result) > 0 && result[len(result)-1] != '\\' { result += "\\" }
+		result += file
+		if pszDest != 0 {
+			for i := 0; i < len(result) && i < 259; i++ {
+				ctx.Mem.Write8(pszDest+uint64(i), result[i])
+			}
+			ctx.Mem.Write8(pszDest+uint64(len(result)), 0)
+		}
+		ctx.SetReturn(pszDest)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathCommonPrefixA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2393,15 +2473,35 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathFindExtensionA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathFindExtensionA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathFindExtensionA path=0x%x\n", pszPath)
+		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		extPos := uint64(0)
+		i := uint64(0)
+		for {
+			b, _ := ctx.Mem.Read8(pszPath + i)
+			if b == 0 { break }
+			if b == '.' { extPos = i }
+			if b == '\\' || b == '/' { extPos = 0 }
+			i++
+		}
+		if extPos == 0 { extPos = i } // point to NUL if no extension
+		ctx.SetReturn(pszPath + extPos)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathFindFileNameA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathFindFileNameA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathFindFileNameA path=0x%x\n", pszPath)
+		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		last := pszPath
+		i := uint64(0)
+		for {
+			b, _ := ctx.Mem.Read8(pszPath + i)
+			if b == 0 { break }
+			if b == '\\' || b == '/' { last = pszPath + i + 1 }
+			i++
+		}
+		ctx.SetReturn(last)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathFindNextComponentA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2453,15 +2553,29 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathGetArgsA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathGetArgsA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathGetArgsA path=0x%x\n", pszPath)
+		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		i := uint64(0)
+		for {
+			b, _ := ctx.Mem.Read8(pszPath + i)
+			if b == 0 { ctx.SetReturn(pszPath + i); return 0 }
+			if b == ' ' { ctx.SetReturn(pszPath + i + 1); return 0 }
+			i++
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathGetArgsW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathGetArgsW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathGetArgsW path=0x%x\n", pszPath)
+		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		i := uint64(0)
+		for {
+			ch, _ := ctx.Mem.Read16(pszPath + i*2)
+			if ch == 0 { ctx.SetReturn(pszPath + i*2); return 0 }
+			if ch == ' ' { ctx.SetReturn(pszPath + (i+1)*2); return 0 }
+			i++
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathGetCharTypeA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2501,15 +2615,27 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsFileSpecA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathIsFileSpecA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		var path string
+		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		ravelog.Logf("[shlwapi] PathIsFileSpecA path=%q\n", path)
+		if strings.ContainsAny(path, "\\/") {
+			ctx.SetReturn(0) // has path separators
+		} else {
+			ctx.SetReturn(1) // just a filename
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsFileSpecW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathIsFileSpecW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		var path string
+		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		ravelog.Logf("[shlwapi] PathIsFileSpecW path=%q\n", path)
+		if strings.ContainsAny(path, "\\/") {
+			ctx.SetReturn(0) // has path separators
+		} else {
+			ctx.SetReturn(1) // just a filename
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsLFNFileSpecA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2543,21 +2669,42 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsRelativeA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathIsRelativeA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathIsRelativeA path=0x%x\n", pszPath)
+		if pszPath == 0 { ctx.SetReturn(1); return 0 }
+		b0, _ := ctx.Mem.Read8(pszPath)
+		b1, _ := ctx.Mem.Read8(pszPath + 1)
+		if (b0 >= 'A' && b0 <= 'Z' || b0 >= 'a' && b0 <= 'z') && b1 == ':' {
+			ctx.SetReturn(0) // absolute
+		} else if b0 == '\\' && b1 == '\\' {
+			ctx.SetReturn(0) // UNC
+		} else {
+			ctx.SetReturn(1) // relative
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsRootA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathIsRootA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		var path string
+		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		ravelog.Logf("[shlwapi] PathIsRootA path=%q\n", path)
+		if path == "C:\\" || path == "C:" || path == "\\" {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsRootW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathIsRootW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		var path string
+		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		ravelog.Logf("[shlwapi] PathIsRootW path=%q\n", path)
+		if path == "C:\\" || path == "C:" || path == "\\" {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsSameRootA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2585,9 +2732,15 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsUNCA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathIsUNCA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		var path string
+		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		ravelog.Logf("[shlwapi] PathIsUNCA path=%q\n", path)
+		if len(path) >= 2 && path[0] == '\\' && path[1] == '\\' {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsUNCServerA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2615,9 +2768,15 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsUNCW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathIsUNCW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		var path string
+		if pszPath != 0 { path = readGuestUTF16(pszPath) }
+		ravelog.Logf("[shlwapi] PathIsUNCW path=%q\n", path)
+		if len(path) >= 2 && path[0] == '\\' && path[1] == '\\' {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathIsValidCharA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2699,27 +2858,65 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveArgsA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathRemoveArgsA(0x%x)\n", a0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathRemoveArgsA path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			i := uint64(0)
+			for {
+				b, _ := ctx.Mem.Read8(pszPath + i)
+				if b == 0 { break }
+				if b == ' ' { ctx.Mem.Write8(pszPath+i, 0); break }
+				i++
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveArgsW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathRemoveArgsW(0x%x)\n", a0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathRemoveArgsW path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			i := uint64(0)
+			for {
+				ch, _ := ctx.Mem.Read16(pszPath + i*2)
+				if ch == 0 { break }
+				if ch == ' ' { ctx.Mem.Write16(pszPath+i*2, 0); break }
+				i++
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveBackslashA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathRemoveBackslashA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathRemoveBackslashA path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			i := uint64(0)
+			for { b, _ := ctx.Mem.Read8(pszPath + i); if b == 0 { break }; i++ }
+			if i > 0 {
+				last, _ := ctx.Mem.Read8(pszPath + i - 1)
+				if last == '\\' { ctx.Mem.Write8(pszPath+i-1, 0); i-- }
+			}
+			ctx.SetReturn(pszPath + i)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveBackslashW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathRemoveBackslashW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathRemoveBackslashW path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			i := uint64(0)
+			for { ch, _ := ctx.Mem.Read16(pszPath + i*2); if ch == 0 { break }; i++ }
+			if i > 0 {
+				last, _ := ctx.Mem.Read16(pszPath + (i-1)*2)
+				if last == '\\' { ctx.Mem.Write16(pszPath+(i-1)*2, 0); i-- }
+			}
+			ctx.SetReturn(pszPath + i*2)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveBlanksA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2735,15 +2932,39 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveExtensionA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathRemoveExtensionA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathRemoveExtensionA path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			extPos := uint64(0)
+			i := uint64(0)
+			for {
+				b, _ := ctx.Mem.Read8(pszPath + i)
+				if b == 0 { break }
+				if b == '.' { extPos = i }
+				if b == '\\' || b == '/' { extPos = 0 }
+				i++
+			}
+			if extPos != 0 { ctx.Mem.Write8(pszPath+extPos, 0) }
+		}
+		ctx.SetReturn(0) // void
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveFileSpecA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathRemoveFileSpecA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathRemoveFileSpecA path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			lastSep := uint64(0)
+			i := uint64(0)
+			for {
+				b, _ := ctx.Mem.Read8(pszPath + i)
+				if b == 0 { break }
+				if b == '\\' || b == '/' { lastSep = i }
+				i++
+			}
+			if lastSep != 0 { ctx.Mem.Write8(pszPath+lastSep, 0); ctx.SetReturn(1) } else { ctx.SetReturn(0) }
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathRenameExtensionA", func(ctx *ntapi.TrapContext) uint32 {
@@ -2789,27 +3010,69 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathSkipRootA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathSkipRootA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathSkipRootA path=0x%x\n", pszPath)
+		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		b0, _ := ctx.Mem.Read8(pszPath)
+		b1, _ := ctx.Mem.Read8(pszPath + 1)
+		if (b0 >= 'A' && b0 <= 'Z' || b0 >= 'a' && b0 <= 'z') && b1 == ':' {
+			b2, _ := ctx.Mem.Read8(pszPath + 2)
+			if b2 == '\\' || b2 == '/' { ctx.SetReturn(pszPath + 3) } else { ctx.SetReturn(pszPath + 2) }
+		} else {
+			ctx.SetReturn(pszPath)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathSkipRootW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathSkipRootW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathSkipRootW path=0x%x\n", pszPath)
+		if pszPath == 0 { ctx.SetReturn(0); return 0 }
+		c0, _ := ctx.Mem.Read16(pszPath)
+		c1, _ := ctx.Mem.Read16(pszPath + 2)
+		if (c0 >= 'A' && c0 <= 'Z' || c0 >= 'a' && c0 <= 'z') && c1 == ':' {
+			c2, _ := ctx.Mem.Read16(pszPath + 4)
+			if c2 == '\\' || c2 == '/' { ctx.SetReturn(pszPath + 6) } else { ctx.SetReturn(pszPath + 4) }
+		} else {
+			ctx.SetReturn(pszPath)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathStripPathA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathStripPathA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathStripPathA path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			lastSep := uint64(0)
+			i := uint64(0)
+			for {
+				b, _ := ctx.Mem.Read8(pszPath + i)
+				if b == 0 { break }
+				if b == '\\' || b == '/' { lastSep = i + 1 }
+				i++
+			}
+			if lastSep > 0 {
+				j := uint64(0)
+				for {
+					b, _ := ctx.Mem.Read8(pszPath + lastSep + j)
+					ctx.Mem.Write8(pszPath+j, b)
+					if b == 0 { break }
+					j++
+				}
+			}
+		}
+		ctx.SetReturn(0) // void
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathStripToRootA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] PathStripToRootA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszPath := ctx.Arg(0)
+		ravelog.Logf("[shlwapi] PathStripToRootA path=0x%x\n", pszPath)
+		if pszPath != 0 {
+			// Write "C:\" as root
+			ctx.Mem.Write16(pszPath, uint16('C'))
+			ctx.Mem.Write16(pszPath+2, uint16(':'))
+			ctx.Mem.Write16(pszPath+4, uint16('\\'))
+			ctx.Mem.Write16(pszPath+6, 0)
+		}
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "PathUnExpandEnvStringsA", func(ctx *ntapi.TrapContext) uint32 {
@@ -3077,9 +3340,22 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHAnsiToUnicode", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] SHAnsiToUnicode(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pszSrc := ctx.Arg(0)
+		pwszDst := ctx.Arg(1)
+		cwchBuf := int(ctx.Arg(2))
+		if pszSrc != 0 && pwszDst != 0 {
+			i := 0
+			for i < cwchBuf-1 {
+				b, _ := ctx.Mem.Read8(pszSrc + uint64(i))
+				if b == 0 { break }
+				ctx.Mem.Write16(pwszDst+uint64(i*2), uint16(b))
+				i++
+			}
+			ctx.Mem.Write16(pwszDst+uint64(i*2), 0)
+			ctx.SetReturn(uint64(i + 1))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHAnsiToUnicodeCP", func(ctx *ntapi.TrapContext) uint32 {
@@ -3245,15 +3521,21 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHDeleteKeyA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] SHDeleteKeyA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		var sub string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		ravelog.Logf("[shlwapi] SHDeleteKeyA hkey=0x%x sub=%q\n", hKey, sub)
+		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHDeleteKeyW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] SHDeleteKeyW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		var sub string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		ravelog.Logf("[shlwapi] SHDeleteKeyW hkey=0x%x sub=%q\n", hKey, sub)
+		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHDeleteOrphanKeyA", func(ctx *ntapi.TrapContext) uint32 {
@@ -3489,9 +3771,18 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHGetValueA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[shlwapi] SHGetValueA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		pszValue := ctx.Arg(2)
+		pdwType := ctx.Arg(3)
+		pvData := ctx.Arg(4)
+		pcbData := ctx.Arg(5)
+		var sub, val string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		ravelog.Logf("[shlwapi] SHGetValueA hkey=0x%x sub=%q val=%q\n", hKey, sub, val)
+		_ = pdwType; _ = pvData; _ = pcbData
+		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHGetValueGoodBootA", func(ctx *ntapi.TrapContext) uint32 {
@@ -3507,9 +3798,18 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHGetValueW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[shlwapi] SHGetValueW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		pszValue := ctx.Arg(2)
+		pdwType := ctx.Arg(3)
+		pvData := ctx.Arg(4)
+		pcbData := ctx.Arg(5)
+		var sub, val string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		ravelog.Logf("[shlwapi] SHGetValueW hkey=0x%x sub=%q val=%q\n", hKey, sub, val)
+		_ = pdwType; _ = pvData; _ = pcbData
+		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHGetViewStatePropertyBag", func(ctx *ntapi.TrapContext) uint32 {
@@ -3627,9 +3927,23 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHLoadIndirectString", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shlwapi] SHLoadIndirectString(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		pszSource := ctx.Arg(0)
+		pszOutBuf := ctx.Arg(1)
+		cchOutBuf := ctx.Arg(2)
+		ppvReserved := ctx.Arg(3)
+		var src string
+		if pszSource != 0 { src = readGuestUTF16(pszSource) }
+		ravelog.Logf("[shlwapi] SHLoadIndirectString src=%q\n", src)
+		_ = ppvReserved
+		// Copy source to output as-is
+		if pszOutBuf != 0 && cchOutBuf > 0 {
+			for i, ch := range src {
+				if uint64(i) >= cchOutBuf-1 { break }
+				ctx.Mem.Write16(pszOutBuf+uint64(i*2), uint16(ch))
+			}
+			ctx.Mem.Write16(pszOutBuf+uint64(len(src)*2), 0)
+		}
+		ctx.SetReturn(0) // S_OK
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHLoadMenuPopup", func(ctx *ntapi.TrapContext) uint32 {
@@ -3699,27 +4013,39 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHOpenRegStream2A", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shlwapi] SHOpenRegStream2A(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		var sub string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		ravelog.Logf("[shlwapi] SHOpenRegStream2A hkey=0x%x sub=%q\n", hKey, sub)
+		ctx.SetReturn(0) // NULL IStream
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHOpenRegStream2W", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shlwapi] SHOpenRegStream2W(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		var sub string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		ravelog.Logf("[shlwapi] SHOpenRegStream2W hkey=0x%x sub=%q\n", hKey, sub)
+		ctx.SetReturn(0) // NULL IStream
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHOpenRegStreamA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shlwapi] SHOpenRegStreamA(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		var sub string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		ravelog.Logf("[shlwapi] SHOpenRegStreamA hkey=0x%x sub=%q\n", hKey, sub)
+		ctx.SetReturn(0) // NULL IStream
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHOpenRegStreamW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[shlwapi] SHOpenRegStreamW(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		var sub string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		ravelog.Logf("[shlwapi] SHOpenRegStreamW hkey=0x%x sub=%q\n", hKey, sub)
+		ctx.SetReturn(0) // NULL IStream
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHPackDispParams", func(ctx *ntapi.TrapContext) uint32 {
@@ -3915,15 +4241,31 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHQueryValueExA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[shlwapi] SHQueryValueExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszValue := ctx.Arg(1)
+		pdwReserved := ctx.Arg(2)
+		pdwType := ctx.Arg(3)
+		pvData := ctx.Arg(4)
+		pcbData := ctx.Arg(5)
+		var val string
+		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		ravelog.Logf("[shlwapi] SHQueryValueExA hkey=0x%x val=%q\n", hKey, val)
+		_ = pdwReserved; _ = pdwType; _ = pvData; _ = pcbData
+		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHQueryValueExW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[shlwapi] SHQueryValueExW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszValue := ctx.Arg(1)
+		pdwReserved := ctx.Arg(2)
+		pdwType := ctx.Arg(3)
+		pvData := ctx.Arg(4)
+		pcbData := ctx.Arg(5)
+		var val string
+		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		ravelog.Logf("[shlwapi] SHQueryValueExW hkey=0x%x val=%q\n", hKey, val)
+		_ = pdwReserved; _ = pdwType; _ = pvData; _ = pcbData
+		ctx.SetReturn(2) // ERROR_FILE_NOT_FOUND
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHQueueUserWorkItem", func(ctx *ntapi.TrapContext) uint32 {
@@ -4256,15 +4598,33 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHSetValueA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[shlwapi] SHSetValueA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		pszValue := ctx.Arg(2)
+		dwType := ctx.Arg(3)
+		pvData := ctx.Arg(4)
+		cbData := ctx.Arg(5)
+		var sub, val string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		ravelog.Logf("[shlwapi] SHSetValueA hkey=0x%x sub=%q val=%q type=%d\n", hKey, sub, val, dwType)
+		_ = pvData; _ = cbData
+		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHSetValueW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[shlwapi] SHSetValueW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hKey := ctx.Arg(0)
+		pszSubKey := ctx.Arg(1)
+		pszValue := ctx.Arg(2)
+		dwType := ctx.Arg(3)
+		pvData := ctx.Arg(4)
+		cbData := ctx.Arg(5)
+		var sub, val string
+		if pszSubKey != 0 { sub = readGuestUTF16(pszSubKey) }
+		if pszValue != 0 { val = readGuestUTF16(pszValue) }
+		ravelog.Logf("[shlwapi] SHSetValueW hkey=0x%x sub=%q val=%q type=%d\n", hKey, sub, val, dwType)
+		_ = pvData; _ = cbData
+		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHSetWindowBits", func(ctx *ntapi.TrapContext) uint32 {
@@ -4328,9 +4688,22 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHUnicodeToAnsi", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] SHUnicodeToAnsi(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pwszSrc := ctx.Arg(0)
+		pszDst := ctx.Arg(1)
+		cwchBuf := int(ctx.Arg(2))
+		if pwszSrc != 0 && pszDst != 0 {
+			i := 0
+			for i < cwchBuf-1 {
+				ch, _ := ctx.Mem.Read16(pwszSrc + uint64(i*2))
+				if ch == 0 { break }
+				ctx.Mem.Write8(pszDst+uint64(i), uint8(ch))
+				i++
+			}
+			ctx.Mem.Write8(pszDst+uint64(i), 0)
+			ctx.SetReturn(uint64(i + 1))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "SHUnicodeToAnsiCP", func(ctx *ntapi.TrapContext) uint32 {
@@ -4596,33 +4969,90 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCatBuffW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] StrCatBuffW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pszDest := ctx.Arg(0)
+		pszSrc := ctx.Arg(1)
+		cchDestBufSize := int(ctx.Arg(2))
+		if pszDest == 0 { ctx.SetReturn(0); return 0 }
+		// Find end of dest
+		i := 0
+		for { ch, _ := ctx.Mem.Read16(pszDest + uint64(i*2)); if ch == 0 { break }; i++ }
+		// Append src
+		if pszSrc != 0 {
+			j := 0
+			for i+j < cchDestBufSize-1 {
+				ch, _ := ctx.Mem.Read16(pszSrc + uint64(j*2))
+				if ch == 0 { break }
+				ctx.Mem.Write16(pszDest+uint64((i+j)*2), ch)
+				j++
+			}
+			ctx.Mem.Write16(pszDest+uint64((i+j)*2), 0)
+		}
+		ctx.SetReturn(pszDest)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCatW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrCatW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		psz1 := ctx.Arg(0)
+		psz2 := ctx.Arg(1)
+		if psz1 == 0 { ctx.SetReturn(0); return 0 }
+		// Find end of psz1
+		i := uint64(0)
+		for { ch, _ := ctx.Mem.Read16(psz1 + i*2); if ch == 0 { break }; i++ }
+		// Copy psz2
+		if psz2 != 0 {
+			j := uint64(0)
+			for {
+				ch, _ := ctx.Mem.Read16(psz2 + j*2)
+				ctx.Mem.Write16(psz1+(i+j)*2, ch)
+				if ch == 0 { break }
+				j++
+			}
+		}
+		ctx.SetReturn(psz1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrChrA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrChrA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszStart := ctx.Arg(0)
+		wMatch := ctx.Arg(1)
+		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		i := uint64(0)
+		for {
+			b, _ := ctx.Mem.Read8(pszStart + i)
+			if b == 0 { ctx.SetReturn(0); return 0 }
+			if uint64(b) == wMatch { ctx.SetReturn(pszStart + i); return 0 }
+			i++
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrChrIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrChrIA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszStart := ctx.Arg(0)
+		wMatch := ctx.Arg(1) & 0xFF
+		if wMatch >= 'A' && wMatch <= 'Z' { wMatch += 32 }
+		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		i := uint64(0)
+		for {
+			b, _ := ctx.Mem.Read8(pszStart + i)
+			if b == 0 { ctx.SetReturn(0); return 0 }
+			low := uint64(b)
+			if low >= 'A' && low <= 'Z' { low += 32 }
+			if low == wMatch { ctx.SetReturn(pszStart + i); return 0 }
+			i++
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrChrIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrChrIW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszStart := ctx.Arg(0)
+		wMatch := ctx.Arg(1) & 0xFFFF
+		if wMatch >= 'A' && wMatch <= 'Z' { wMatch += 32 }
+		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		i := uint64(0)
+		for {
+			ch, _ := ctx.Mem.Read16(pszStart + i*2)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			low := uint64(ch)
+			if low >= 'A' && low <= 'Z' { low += 32 }
+			if low == wMatch { ctx.SetReturn(pszStart + i*2); return 0 }
+			i++
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrChrNW", func(ctx *ntapi.TrapContext) uint32 {
@@ -4632,9 +5062,16 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrChrW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrChrW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszStart := ctx.Arg(0)
+		wMatch := ctx.Arg(1)
+		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		i := uint64(0)
+		for {
+			ch, _ := ctx.Mem.Read16(pszStart + i*2)
+			if ch == 0 { ctx.SetReturn(0); return 0 }
+			if uint64(ch) == wMatch { ctx.SetReturn(pszStart + i*2); return 0 }
+			i++
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpCA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4662,9 +5099,13 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrCmpIW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		psz1 := ctx.Arg(0)
+		psz2 := ctx.Arg(1)
+		s1, s2 := "", ""
+		if psz1 != 0 { s1 = readGuestUTF16(psz1) }
+		if psz2 != 0 { s2 = readGuestUTF16(psz2) }
+		result := strings.Compare(strings.ToLower(s1), strings.ToLower(s2))
+		ctx.SetReturn(uint64(int64(result)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpLogicalW", func(ctx *ntapi.TrapContext) uint32 {
@@ -4674,9 +5115,16 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpNA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] StrCmpNA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		psz1 := ctx.Arg(0)
+		psz2 := ctx.Arg(1)
+		nChar := int(ctx.Arg(2))
+		s1, s2 := "", ""
+		if psz1 != 0 { s1 = readGuestString(psz1) }
+		if psz2 != 0 { s2 = readGuestString(psz2) }
+		if len(s1) > nChar { s1 = s1[:nChar] }
+		if len(s2) > nChar { s2 = s2[:nChar] }
+		result := strings.Compare(s1, s2)
+		ctx.SetReturn(uint64(int64(result)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpNCA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4692,9 +5140,16 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpNIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] StrCmpNIA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		psz1 := ctx.Arg(0)
+		psz2 := ctx.Arg(1)
+		nChar := int(ctx.Arg(2))
+		s1, s2 := "", ""
+		if psz1 != 0 { s1 = readGuestString(psz1) }
+		if psz2 != 0 { s2 = readGuestString(psz2) }
+		if len(s1) > nChar { s1 = s1[:nChar] }
+		if len(s2) > nChar { s2 = s2[:nChar] }
+		result := strings.Compare(strings.ToLower(s1), strings.ToLower(s2))
+		ctx.SetReturn(uint64(int64(result)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpNICA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4710,27 +5165,54 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpNIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] StrCmpNIW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		psz1 := ctx.Arg(0)
+		psz2 := ctx.Arg(1)
+		nChar := int(ctx.Arg(2))
+		s1, s2 := "", ""
+		if psz1 != 0 { s1 = readGuestUTF16(psz1) }
+		if psz2 != 0 { s2 = readGuestUTF16(psz2) }
+		if len(s1) > nChar { s1 = s1[:nChar] }
+		if len(s2) > nChar { s2 = s2[:nChar] }
+		result := strings.Compare(strings.ToLower(s1), strings.ToLower(s2))
+		ctx.SetReturn(uint64(int64(result)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpNW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] StrCmpNW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		psz1 := ctx.Arg(0)
+		psz2 := ctx.Arg(1)
+		nChar := int(ctx.Arg(2))
+		s1, s2 := "", ""
+		if psz1 != 0 { s1 = readGuestUTF16(psz1) }
+		if psz2 != 0 { s2 = readGuestUTF16(psz2) }
+		if len(s1) > nChar { s1 = s1[:nChar] }
+		if len(s2) > nChar { s2 = s2[:nChar] }
+		result := strings.Compare(s1, s2)
+		ctx.SetReturn(uint64(int64(result)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCmpW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrCmpW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		psz1 := ctx.Arg(0)
+		psz2 := ctx.Arg(1)
+		s1, s2 := "", ""
+		if psz1 != 0 { s1 = readGuestUTF16(psz1) }
+		if psz2 != 0 { s2 = readGuestUTF16(psz2) }
+		result := strings.Compare(s1, s2)
+		ctx.SetReturn(uint64(int64(result)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCpyNW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] StrCpyNW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pszDst := ctx.Arg(0)
+		pszSrc := ctx.Arg(1)
+		cchMax := int(ctx.Arg(2))
+		if pszDst != 0 && pszSrc != 0 && cchMax > 0 {
+			for i := 0; i < cchMax-1; i++ {
+				ch, _ := ctx.Mem.Read16(pszSrc + uint64(i*2))
+				ctx.Mem.Write16(pszDst+uint64(i*2), ch)
+				if ch == 0 { break }
+			}
+			ctx.Mem.Write16(pszDst+uint64((cchMax-1)*2), 0)
+		}
+		ctx.SetReturn(pszDst)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCpyNXA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4746,21 +5228,38 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrCpyW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrCpyW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszDst := ctx.Arg(0)
+		pszSrc := ctx.Arg(1)
+		if pszDst != 0 && pszSrc != 0 {
+			i := uint64(0)
+			for {
+				ch, _ := ctx.Mem.Read16(pszSrc + i*2)
+				ctx.Mem.Write16(pszDst+i*2, ch)
+				if ch == 0 { break }
+				i++
+			}
+		}
+		ctx.SetReturn(pszDst)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrDupA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] StrDupA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszSrc := ctx.Arg(0)
+		if pszSrc == 0 { ctx.SetReturn(0); return 0 }
+		i := uint64(0)
+		for { b, _ := ctx.Mem.Read8(pszSrc + i); if b == 0 { break }; i++ }
+		buf := sharedHeapAlloc(i+1, true)
+		for j := uint64(0); j <= i; j++ { b, _ := ctx.Mem.Read8(pszSrc + j); ctx.Mem.Write8(buf+j, b) }
+		ctx.SetReturn(buf)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrDupW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] StrDupW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszSrc := ctx.Arg(0)
+		if pszSrc == 0 { ctx.SetReturn(0); return 0 }
+		i := uint64(0)
+		for { ch, _ := ctx.Mem.Read16(pszSrc + i*2); if ch == 0 { break }; i++ }
+		buf := sharedHeapAlloc((i+1)*2, true)
+		for j := uint64(0); j <= i; j++ { ch, _ := ctx.Mem.Read16(pszSrc + j*2); ctx.Mem.Write16(buf+j*2, ch) }
+		ctx.SetReturn(buf)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrFormatByteSize64A", func(ctx *ntapi.TrapContext) uint32 {
@@ -4842,9 +5341,20 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrRChrA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] StrRChrA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pszStart := ctx.Arg(0)
+		pszEnd := ctx.Arg(1)
+		wMatch := ctx.Arg(2)
+		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		_ = pszEnd
+		last := uint64(0)
+		i := uint64(0)
+		for {
+			b, _ := ctx.Mem.Read8(pszStart + i)
+			if b == 0 { break }
+			if uint64(b) == wMatch { last = pszStart + i }
+			i++
+		}
+		ctx.SetReturn(last)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrRChrIA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4860,9 +5370,20 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrRChrW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[shlwapi] StrRChrW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(0)
+		pszStart := ctx.Arg(0)
+		pszEnd := ctx.Arg(1)
+		wMatch := ctx.Arg(2)
+		if pszStart == 0 { ctx.SetReturn(0); return 0 }
+		_ = pszEnd
+		last := uint64(0)
+		i := uint64(0)
+		for {
+			ch, _ := ctx.Mem.Read16(pszStart + i*2)
+			if ch == 0 { break }
+			if uint64(ch) == wMatch { last = pszStart + i*2 }
+			i++
+		}
+		ctx.SetReturn(last)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrRStrIA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4920,21 +5441,45 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrStrA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrStrA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszFirst := ctx.Arg(0)
+		pszSrch := ctx.Arg(1)
+		if pszFirst == 0 || pszSrch == 0 { ctx.SetReturn(0); return 0 }
+		s1 := readGuestString(pszFirst)
+		s2 := readGuestString(pszSrch)
+		idx := strings.Index(s1, s2)
+		if idx >= 0 {
+			ctx.SetReturn(pszFirst + uint64(idx))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrStrIA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrStrIA(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszFirst := ctx.Arg(0)
+		pszSrch := ctx.Arg(1)
+		if pszFirst == 0 || pszSrch == 0 { ctx.SetReturn(0); return 0 }
+		s1 := readGuestString(pszFirst)
+		s2 := readGuestString(pszSrch)
+		idx := strings.Index(strings.ToLower(s1), strings.ToLower(s2))
+		if idx >= 0 {
+			ctx.SetReturn(pszFirst + uint64(idx))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrStrIW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrStrIW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszFirst := ctx.Arg(0)
+		pszSrch := ctx.Arg(1)
+		if pszFirst == 0 || pszSrch == 0 { ctx.SetReturn(0); return 0 }
+		s1 := readGuestUTF16(pszFirst)
+		s2 := readGuestUTF16(pszSrch)
+		idx := strings.Index(strings.ToLower(s1), strings.ToLower(s2))
+		if idx >= 0 {
+			ctx.SetReturn(pszFirst + uint64(idx*2))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrStrNIW", func(ctx *ntapi.TrapContext) uint32 {
@@ -4950,9 +5495,17 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrStrW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[shlwapi] StrStrW(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0)
+		pszFirst := ctx.Arg(0)
+		pszSrch := ctx.Arg(1)
+		if pszFirst == 0 || pszSrch == 0 { ctx.SetReturn(0); return 0 }
+		s1 := readGuestUTF16(pszFirst)
+		s2 := readGuestUTF16(pszSrch)
+		idx := strings.Index(s1, s2)
+		if idx >= 0 {
+			ctx.SetReturn(pszFirst + uint64(idx*2))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrToInt64ExA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4968,9 +5521,12 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrToIntA", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] StrToIntA(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszSrc := ctx.Arg(0)
+		var s string
+		if pszSrc != 0 { s = readGuestString(pszSrc) }
+		n := 0
+		fmt.Sscanf(s, "%d", &n)
+		ctx.SetReturn(uint64(int64(n)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrToIntExA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4986,9 +5542,12 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrToIntW", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] StrToIntW(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pszSrc := ctx.Arg(0)
+		var s string
+		if pszSrc != 0 { s = readGuestUTF16(pszSrc) }
+		n := 0
+		fmt.Sscanf(s, "%d", &n)
+		ctx.SetReturn(uint64(int64(n)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "StrTrimA", func(ctx *ntapi.TrapContext) uint32 {
