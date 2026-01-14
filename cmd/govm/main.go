@@ -3922,6 +3922,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// --- bcrypt.dll ---
 	delayReg(func() { registerBcryptHandlers(hctx) })
+
+	// --- d3d11.dll / dxgi.dll ---
+	delayReg(func() { registerD3d11Handlers(hctx) })
+	// --- opengl32.dll ---
+	delayReg(func() { registerOpengl32Handlers(hctx) })
 	}
 // autoSynthUnresolved generates synthetic stub DLLs for any DLLs referenced
 // in the main module's imports that aren't already in loadedModules.
