@@ -25,11 +25,11 @@ const (
 	glMinorVersion           = 0x821C
 	glFramebufferComplete    = 0x8CD5
 
-	pfdDoublebuffer = 0x00000001
-	pfdDrawToWindow = 0x00000004
+	pfdDoublebuffer  = 0x00000001
+	pfdDrawToWindow  = 0x00000004
 	pfdSupportOpenGL = 0x00000020
-	pfdTypeRGBA     = 0
-	pfdMainPlane    = 0
+	pfdTypeRGBA      = 0
+	pfdMainPlane     = 0
 )
 
 type glState struct {

@@ -417,17 +417,17 @@ func WriteDIBFromSurface(buf []byte, s *Surface, sx, sy, sw, sh, bitCount int32)
 				if pixOff+3 >= len(buf) {
 					continue
 				}
-				buf[pixOff+0] = byte(c)        // B
-				buf[pixOff+1] = byte(c >> 8)   // G
-				buf[pixOff+2] = byte(c >> 16)  // R
-				buf[pixOff+3] = 0xFF           // A
+				buf[pixOff+0] = byte(c)       // B
+				buf[pixOff+1] = byte(c >> 8)  // G
+				buf[pixOff+2] = byte(c >> 16) // R
+				buf[pixOff+3] = 0xFF          // A
 			} else if bitCount == 24 {
 				if pixOff+2 >= len(buf) {
 					continue
 				}
-				buf[pixOff+0] = byte(c)        // B
-				buf[pixOff+1] = byte(c >> 8)   // G
-				buf[pixOff+2] = byte(c >> 16)  // R
+				buf[pixOff+0] = byte(c)       // B
+				buf[pixOff+1] = byte(c >> 8)  // G
+				buf[pixOff+2] = byte(c >> 16) // R
 			}
 		}
 	}

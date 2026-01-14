@@ -3463,7 +3463,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			startupInfoDesktopAddr = mem.Mmap(0, uint64((len(utf16Encode(`WinSta0\Default`))+1)*2), mmu.PermRead|mmu.PermWrite)
 			writeUTF16String(startupInfoDesktopAddr, `WinSta0\Default`, uint64(len(utf16Encode(`WinSta0\Default`))+1))
 		}
-		ctx.Mem.Write32(addr, 104)       // cb
+		ctx.Mem.Write32(addr, 104) // cb
 		ctx.Mem.Write64(addr+16, startupInfoDesktopAddr)
 		ctx.Mem.Write32(addr+60, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
 		ctx.Mem.Write16(addr+64, 0x0005) // wShowWindow = SW_SHOW

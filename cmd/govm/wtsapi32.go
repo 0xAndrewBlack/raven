@@ -25,7 +25,8 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pPassword := ctx.Arg(2)
 		bWait := ctx.Arg(3)
 		ravelog.Logf("[wtsapi32] WTSConnectSessionA src=%d dst=%d\n", LogonId, TargetLogonId)
-		_ = pPassword; _ = bWait
+		_ = pPassword
+		_ = bWait
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -35,7 +36,8 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pPassword := ctx.Arg(2)
 		bWait := ctx.Arg(3)
 		ravelog.Logf("[wtsapi32] WTSConnectSessionW src=%d dst=%d\n", LogonId, TargetLogonId)
-		_ = pPassword; _ = bWait
+		_ = pPassword
+		_ = bWait
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -61,9 +63,14 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppProcessInfo := ctx.Arg(3)
 		pCount := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateProcessesA server=0x%x\n", hServer)
-		_ = Reserved; _ = Version
-		if pCount != 0 { ctx.Mem.Write32(pCount, 0) }
-		if ppProcessInfo != 0 { ctx.Mem.Write64(ppProcessInfo, 0) }
+		_ = Reserved
+		_ = Version
+		if pCount != 0 {
+			ctx.Mem.Write32(pCount, 0)
+		}
+		if ppProcessInfo != 0 {
+			ctx.Mem.Write64(ppProcessInfo, 0)
+		}
 		ctx.SetReturn(1) // TRUE (0 processes)
 		return 0
 	})
@@ -75,8 +82,12 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pCount := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateProcessesExA level=%d session=%d\n", pLevel, SessionId)
 		_ = hServer
-		if pCount != 0 { ctx.Mem.Write32(pCount, 0) }
-		if ppProcessInfo != 0 { ctx.Mem.Write64(ppProcessInfo, 0) }
+		if pCount != 0 {
+			ctx.Mem.Write32(pCount, 0)
+		}
+		if ppProcessInfo != 0 {
+			ctx.Mem.Write64(ppProcessInfo, 0)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -88,8 +99,12 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pCount := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateProcessesExW level=%d session=%d\n", pLevel, SessionId)
 		_ = hServer
-		if pCount != 0 { ctx.Mem.Write32(pCount, 0) }
-		if ppProcessInfo != 0 { ctx.Mem.Write64(ppProcessInfo, 0) }
+		if pCount != 0 {
+			ctx.Mem.Write32(pCount, 0)
+		}
+		if ppProcessInfo != 0 {
+			ctx.Mem.Write64(ppProcessInfo, 0)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -100,9 +115,14 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppProcessInfo := ctx.Arg(3)
 		pCount := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateProcessesW server=0x%x\n", hServer)
-		_ = Reserved; _ = Version
-		if pCount != 0 { ctx.Mem.Write32(pCount, 0) }
-		if ppProcessInfo != 0 { ctx.Mem.Write64(ppProcessInfo, 0) }
+		_ = Reserved
+		_ = Version
+		if pCount != 0 {
+			ctx.Mem.Write32(pCount, 0)
+		}
+		if ppProcessInfo != 0 {
+			ctx.Mem.Write64(ppProcessInfo, 0)
+		}
 		ctx.SetReturn(1) // TRUE (0 processes)
 		return 0
 	})
@@ -113,9 +133,15 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppServerInfo := ctx.Arg(3)
 		pCount := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateServersA\n")
-		_ = pDomainName; _ = Reserved; _ = Version
-		if pCount != 0 { ctx.Mem.Write32(pCount, 0) }
-		if ppServerInfo != 0 { ctx.Mem.Write64(ppServerInfo, 0) }
+		_ = pDomainName
+		_ = Reserved
+		_ = Version
+		if pCount != 0 {
+			ctx.Mem.Write32(pCount, 0)
+		}
+		if ppServerInfo != 0 {
+			ctx.Mem.Write64(ppServerInfo, 0)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -126,9 +152,15 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppServerInfo := ctx.Arg(3)
 		pCount := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateServersW\n")
-		_ = pDomainName; _ = Reserved; _ = Version
-		if pCount != 0 { ctx.Mem.Write32(pCount, 0) }
-		if ppServerInfo != 0 { ctx.Mem.Write64(ppServerInfo, 0) }
+		_ = pDomainName
+		_ = Reserved
+		_ = Version
+		if pCount != 0 {
+			ctx.Mem.Write32(pCount, 0)
+		}
+		if ppServerInfo != 0 {
+			ctx.Mem.Write64(ppServerInfo, 0)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -139,9 +171,14 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppSessionInfo := ctx.Arg(3)
 		pCount := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateSessionsA server=0x%x\n", hServer)
-		_ = Reserved; _ = Version
-		if pCount != 0 { ctx.Mem.Write32(pCount, 0) }
-		if ppSessionInfo != 0 { ctx.Mem.Write64(ppSessionInfo, 0) }
+		_ = Reserved
+		_ = Version
+		if pCount != 0 {
+			ctx.Mem.Write32(pCount, 0)
+		}
+		if ppSessionInfo != 0 {
+			ctx.Mem.Write64(ppSessionInfo, 0)
+		}
 		ctx.SetReturn(1) // TRUE (0 sessions)
 		return 0
 	})
@@ -152,7 +189,8 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateSessionsExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -163,7 +201,8 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		p4 := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateSessionsExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3; _ = p4
+		_ = p3
+		_ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -174,9 +213,14 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppSessionInfo := ctx.Arg(3)
 		pCount := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSEnumerateSessionsW server=0x%x\n", hServer)
-		_ = Reserved; _ = Version
-		if pCount != 0 { ctx.Mem.Write32(pCount, 0) }
-		if ppSessionInfo != 0 { ctx.Mem.Write64(ppSessionInfo, 0) }
+		_ = Reserved
+		_ = Version
+		if pCount != 0 {
+			ctx.Mem.Write32(pCount, 0)
+		}
+		if ppSessionInfo != 0 {
+			ctx.Mem.Write64(ppSessionInfo, 0)
+		}
 		ctx.SetReturn(1) // TRUE (0 sessions)
 		return 0
 	})
@@ -245,8 +289,12 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pBytesReturned := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSQuerySessionInformationA session=%d class=%d\n", SessionId, WTSInfoClass)
 		_ = hServer
-		if ppBuffer != 0 { ctx.Mem.Write64(ppBuffer, 0) }
-		if pBytesReturned != 0 { ctx.Mem.Write32(pBytesReturned, 0) }
+		if ppBuffer != 0 {
+			ctx.Mem.Write64(ppBuffer, 0)
+		}
+		if pBytesReturned != 0 {
+			ctx.Mem.Write32(pBytesReturned, 0)
+		}
 		ctx.SetReturn(0) // FALSE (not available)
 		return 0
 	})
@@ -258,8 +306,12 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pBytesReturned := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSQuerySessionInformationW session=%d class=%d\n", SessionId, WTSInfoClass)
 		_ = hServer
-		if ppBuffer != 0 { ctx.Mem.Write64(ppBuffer, 0) }
-		if pBytesReturned != 0 { ctx.Mem.Write32(pBytesReturned, 0) }
+		if ppBuffer != 0 {
+			ctx.Mem.Write64(ppBuffer, 0)
+		}
+		if pBytesReturned != 0 {
+			ctx.Mem.Write32(pBytesReturned, 0)
+		}
 		ctx.SetReturn(0) // FALSE (not available)
 		return 0
 	})
@@ -270,9 +322,14 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppBuffer := ctx.Arg(3)
 		pBytesReturned := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSQueryUserConfigA class=%d\n", WTSConfigClass)
-		_ = pServerName; _ = pUserName
-		if ppBuffer != 0 { ctx.Mem.Write64(ppBuffer, 0) }
-		if pBytesReturned != 0 { ctx.Mem.Write32(pBytesReturned, 0) }
+		_ = pServerName
+		_ = pUserName
+		if ppBuffer != 0 {
+			ctx.Mem.Write64(ppBuffer, 0)
+		}
+		if pBytesReturned != 0 {
+			ctx.Mem.Write32(pBytesReturned, 0)
+		}
 		ctx.SetReturn(0) // FALSE
 		return 0
 	})
@@ -283,9 +340,14 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppBuffer := ctx.Arg(3)
 		pBytesReturned := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSQueryUserConfigW class=%d\n", WTSConfigClass)
-		_ = pServerName; _ = pUserName
-		if ppBuffer != 0 { ctx.Mem.Write64(ppBuffer, 0) }
-		if pBytesReturned != 0 { ctx.Mem.Write32(pBytesReturned, 0) }
+		_ = pServerName
+		_ = pUserName
+		if ppBuffer != 0 {
+			ctx.Mem.Write64(ppBuffer, 0)
+		}
+		if pBytesReturned != 0 {
+			ctx.Mem.Write32(pBytesReturned, 0)
+		}
 		ctx.SetReturn(0) // FALSE
 		return 0
 	})
@@ -320,7 +382,11 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pMessage := ctx.Arg(4)
 		MessageLength := ctx.Arg(5)
 		ravelog.Logf("[wtsapi32] WTSSendMessageA session=%d\n", SessionId)
-		_ = hServer; _ = pTitle; _ = TitleLength; _ = pMessage; _ = MessageLength
+		_ = hServer
+		_ = pTitle
+		_ = TitleLength
+		_ = pMessage
+		_ = MessageLength
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -332,7 +398,11 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pMessage := ctx.Arg(4)
 		MessageLength := ctx.Arg(5)
 		ravelog.Logf("[wtsapi32] WTSSendMessageW session=%d\n", SessionId)
-		_ = hServer; _ = pTitle; _ = TitleLength; _ = pMessage; _ = MessageLength
+		_ = hServer
+		_ = pTitle
+		_ = TitleLength
+		_ = pMessage
+		_ = MessageLength
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -343,7 +413,9 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pBuffer := ctx.Arg(3)
 		DataLength := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSSetUserConfigA class=%d len=%d\n", WTSConfigClass, DataLength)
-		_ = pServerName; _ = pUserName; _ = pBuffer
+		_ = pServerName
+		_ = pUserName
+		_ = pBuffer
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -354,7 +426,9 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pBuffer := ctx.Arg(3)
 		DataLength := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSSetUserConfigW class=%d len=%d\n", WTSConfigClass, DataLength)
-		_ = pServerName; _ = pUserName; _ = pBuffer
+		_ = pServerName
+		_ = pUserName
+		_ = pBuffer
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -372,7 +446,9 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		HotkeyVk := ctx.Arg(2)
 		HotkeyModifiers := ctx.Arg(3)
 		ravelog.Logf("[wtsapi32] WTSStartRemoteControlSessionA session=%d\n", TargetLogonId)
-		_ = pTargetServerName; _ = HotkeyVk; _ = HotkeyModifiers
+		_ = pTargetServerName
+		_ = HotkeyVk
+		_ = HotkeyModifiers
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -382,7 +458,9 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		HotkeyVk := ctx.Arg(2)
 		HotkeyModifiers := ctx.Arg(3)
 		ravelog.Logf("[wtsapi32] WTSStartRemoteControlSessionW session=%d\n", TargetLogonId)
-		_ = pTargetServerName; _ = HotkeyVk; _ = HotkeyModifiers
+		_ = pTargetServerName
+		_ = HotkeyVk
+		_ = HotkeyModifiers
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -426,7 +504,8 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		SessionId := ctx.Arg(1)
 		pVirtualName := ctx.Arg(2)
 		ravelog.Logf("[wtsapi32] WTSVirtualChannelOpen session=%d\n", SessionId)
-		_ = hServer; _ = pVirtualName
+		_ = hServer
+		_ = pVirtualName
 		ctx.SetReturn(0xDEAD0600) // fake channel handle
 		return 0
 	})
@@ -457,8 +536,12 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		ppBuffer := ctx.Arg(2)
 		pBytesReturned := ctx.Arg(3)
 		ravelog.Logf("[wtsapi32] WTSVirtualChannelQuery handle=0x%x class=%d\n", hChannelHandle, class)
-		if ppBuffer != 0 { ctx.Mem.Write64(ppBuffer, 0) }
-		if pBytesReturned != 0 { ctx.Mem.Write32(pBytesReturned, 0) }
+		if ppBuffer != 0 {
+			ctx.Mem.Write64(ppBuffer, 0)
+		}
+		if pBytesReturned != 0 {
+			ctx.Mem.Write32(pBytesReturned, 0)
+		}
 		ctx.SetReturn(0) // FALSE
 		return 0
 	})
@@ -469,8 +552,11 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		BufferSize := ctx.Arg(3)
 		pBytesRead := ctx.Arg(4)
 		ravelog.Logf("[wtsapi32] WTSVirtualChannelRead handle=0x%x timeout=%d\n", hChannelHandle, TimeOut)
-		_ = Buffer; _ = BufferSize
-		if pBytesRead != 0 { ctx.Mem.Write32(pBytesRead, 0) }
+		_ = Buffer
+		_ = BufferSize
+		if pBytesRead != 0 {
+			ctx.Mem.Write32(pBytesRead, 0)
+		}
 		ctx.SetReturn(1) // TRUE (0 bytes)
 		return 0
 	})
@@ -481,7 +567,9 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		pBytesWritten := ctx.Arg(3)
 		ravelog.Logf("[wtsapi32] WTSVirtualChannelWrite handle=0x%x len=%d\n", hChannelHandle, Length)
 		_ = Buffer
-		if pBytesWritten != 0 { ctx.Mem.Write32(pBytesWritten, uint32(Length)) }
+		if pBytesWritten != 0 {
+			ctx.Mem.Write32(pBytesWritten, uint32(Length))
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})

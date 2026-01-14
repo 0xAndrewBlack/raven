@@ -100,7 +100,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		cb := ctx.Arg(1)
 		lpcbNeeded := ctx.Arg(2)
 		ravelog.Logf("[psapi] EnumDeviceDrivers buf=0x%x size=%d\n", lpImageBase, cb)
-		if lpcbNeeded != 0 { ctx.Mem.Write32(lpcbNeeded, 0) } // no drivers
+		if lpcbNeeded != 0 {
+			ctx.Mem.Write32(lpcbNeeded, 0)
+		} // no drivers
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -145,10 +147,12 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		ravelog.Logf("[psapi] EnumProcesses buf=0x%x size=%d\n", lpidProcess, cb)
 		// Return our fake PID (4 = System) + current process (1000)
 		if lpidProcess != 0 && cb >= 8 {
-			ctx.Mem.Write32(lpidProcess, 4)     // System
+			ctx.Mem.Write32(lpidProcess, 4)      // System
 			ctx.Mem.Write32(lpidProcess+4, 1000) // current
 		}
-		if lpcbNeeded != 0 { ctx.Mem.Write32(lpcbNeeded, 8) } // 2 PIDs * 4 bytes
+		if lpcbNeeded != 0 {
+			ctx.Mem.Write32(lpcbNeeded, 8)
+		} // 2 PIDs * 4 bytes
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -160,7 +164,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		name := "ntoskrnl.exe"
 		if lpFilename != 0 && nSize > 0 {
 			for i, ch := range name {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write8(lpFilename+uint64(i)*1, byte(ch))
 			}
 			ctx.Mem.Write8(lpFilename+uint64(len(name))*1, 0)
@@ -176,7 +182,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		name := "ntoskrnl.exe"
 		if lpFilename != 0 && nSize > 0 {
 			for i, ch := range name {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write16(lpFilename+uint64(i)*2, uint16(ch))
 			}
 			ctx.Mem.Write16(lpFilename+uint64(len(name))*2, 0)
@@ -192,7 +200,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		path := "\\SystemRoot\\System32\\ntoskrnl.exe"
 		if lpFilename != 0 && nSize > 0 {
 			for i, ch := range path {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write8(lpFilename+uint64(i)*1, byte(ch))
 			}
 			ctx.Mem.Write8(lpFilename+uint64(len(path))*1, 0)
@@ -208,7 +218,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		path := "\\SystemRoot\\System32\\ntoskrnl.exe"
 		if lpFilename != 0 && nSize > 0 {
 			for i, ch := range path {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write16(lpFilename+uint64(i)*2, uint16(ch))
 			}
 			ctx.Mem.Write16(lpFilename+uint64(len(path))*2, 0)
@@ -222,7 +234,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		lpFilename := ctx.Arg(2)
 		nSize := ctx.Arg(3)
 		ravelog.Logf("[psapi] GetMappedFileNameA proc=0x%x addr=0x%x\n", hProcess, lpv)
-		if lpFilename != 0 && nSize > 0 { ctx.Mem.Write8(lpFilename, 0) }
+		if lpFilename != 0 && nSize > 0 {
+			ctx.Mem.Write8(lpFilename, 0)
+		}
 		ctx.SetReturn(0) // 0 = not mapped
 		return 0
 	})
@@ -232,7 +246,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		lpFilename := ctx.Arg(2)
 		nSize := ctx.Arg(3)
 		ravelog.Logf("[psapi] GetMappedFileNameW proc=0x%x addr=0x%x\n", hProcess, lpv)
-		if lpFilename != 0 && nSize > 0 { ctx.Mem.Write16(lpFilename, 0) }
+		if lpFilename != 0 && nSize > 0 {
+			ctx.Mem.Write16(lpFilename, 0)
+		}
 		ctx.SetReturn(0) // 0 = not mapped
 		return 0
 	})
@@ -245,7 +261,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		name := "program.exe"
 		if lpBaseName != 0 && nSize > 0 {
 			for i, ch := range name {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write8(lpBaseName+uint64(i)*1, byte(ch))
 			}
 			ctx.Mem.Write8(lpBaseName+uint64(len(name))*1, 0)
@@ -262,7 +280,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		name := "program.exe"
 		if lpBaseName != 0 && nSize > 0 {
 			for i, ch := range name {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write16(lpBaseName+uint64(i)*2, uint16(ch))
 			}
 			ctx.Mem.Write16(lpBaseName+uint64(len(name))*2, 0)
@@ -279,7 +299,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		path := "C:\\program.exe"
 		if lpFilename != 0 && nSize > 0 {
 			for i, ch := range path {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write8(lpFilename+uint64(i)*1, byte(ch))
 			}
 			ctx.Mem.Write8(lpFilename+uint64(len(path))*1, 0)
@@ -296,7 +318,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		path := "C:\\program.exe"
 		if lpFilename != 0 && nSize > 0 {
 			for i, ch := range path {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write16(lpFilename+uint64(i)*2, uint16(ch))
 			}
 			ctx.Mem.Write16(lpFilename+uint64(len(path))*2, 0)
@@ -323,8 +347,8 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		cb := ctx.Arg(1)
 		ravelog.Logf("[psapi] GetPerformanceInfo size=%d\n", cb)
 		if pPerformanceInformation != 0 && cb >= 104 {
-			ctx.Mem.Write32(pPerformanceInformation, uint32(cb)) // cb
-			ctx.Mem.Write64(pPerformanceInformation+8, 1024*1024)  // CommitTotal (pages)
+			ctx.Mem.Write32(pPerformanceInformation, uint32(cb))     // cb
+			ctx.Mem.Write64(pPerformanceInformation+8, 1024*1024)    // CommitTotal (pages)
 			ctx.Mem.Write64(pPerformanceInformation+16, 4*1024*1024) // CommitLimit
 			ctx.Mem.Write64(pPerformanceInformation+24, 2*1024*1024) // CommitPeak
 			ctx.Mem.Write64(pPerformanceInformation+32, 2*1024*1024) // PhysicalTotal
@@ -349,7 +373,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		path := "\\Device\\HarddiskVolume1\\program.exe"
 		if lpImageFileName != 0 && nSize > 0 {
 			for i, ch := range path {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write8(lpImageFileName+uint64(i)*1, byte(ch))
 			}
 			ctx.Mem.Write8(lpImageFileName+uint64(len(path))*1, 0)
@@ -365,7 +391,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		path := "\\Device\\HarddiskVolume1\\program.exe"
 		if lpImageFileName != 0 && nSize > 0 {
 			for i, ch := range path {
-				if uint64(i) >= nSize-1 { break }
+				if uint64(i) >= nSize-1 {
+					break
+				}
 				ctx.Mem.Write16(lpImageFileName+uint64(i)*2, uint16(ch))
 			}
 			ctx.Mem.Write16(lpImageFileName+uint64(len(path))*2, 0)
@@ -400,7 +428,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		lpWatchInfo := ctx.Arg(1)
 		cb := ctx.Arg(2)
 		ravelog.Logf("[psapi] GetWsChanges proc=0x%x size=%d\n", hProcess, cb)
-		if lpWatchInfo != 0 && cb >= 16 { ctx.Mem.Write64(lpWatchInfo, 0) } // no changes
+		if lpWatchInfo != 0 && cb >= 16 {
+			ctx.Mem.Write64(lpWatchInfo, 0)
+		} // no changes
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -415,7 +445,9 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		pv := ctx.Arg(1)
 		cb := ctx.Arg(2)
 		ravelog.Logf("[psapi] QueryWorkingSet proc=0x%x size=%d\n", hProcess, cb)
-		if pv != 0 && cb >= 8 { ctx.Mem.Write64(pv, 0) } // NumberOfEntries = 0
+		if pv != 0 && cb >= 8 {
+			ctx.Mem.Write64(pv, 0)
+		} // NumberOfEntries = 0
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})

@@ -21,7 +21,10 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		TargetDataRep := ctx.Arg(4)
 		phNewContext := ctx.Arg(5)
 		ravelog.Logf("[secur32] AcceptSecurityContext cred=0x%x ctx=0x%x\n", phCredential, phContext)
-		_ = pInput; _ = fContextReq; _ = TargetDataRep; _ = phNewContext
+		_ = pInput
+		_ = fContextReq
+		_ = TargetDataRep
+		_ = phNewContext
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -33,7 +36,11 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pAuthData := ctx.Arg(4)
 		pGetKeyFn := ctx.Arg(5)
 		ravelog.Logf("[secur32] AcquireCredentialsHandleA use=0x%x\n", fCredentialUse)
-		_ = pszPrincipal; _ = pszPackage; _ = pvLogonId; _ = pAuthData; _ = pGetKeyFn
+		_ = pszPrincipal
+		_ = pszPackage
+		_ = pvLogonId
+		_ = pAuthData
+		_ = pGetKeyFn
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -45,7 +52,11 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pAuthData := ctx.Arg(4)
 		pGetKeyFn := ctx.Arg(5)
 		ravelog.Logf("[secur32] AcquireCredentialsHandleW use=0x%x\n", fCredentialUse)
-		_ = pszPrincipal; _ = pszPackage; _ = pvLogonId; _ = pAuthData; _ = pGetKeyFn
+		_ = pszPrincipal
+		_ = pszPackage
+		_ = pvLogonId
+		_ = pAuthData
+		_ = pGetKeyFn
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -57,7 +68,11 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pAuthData := ctx.Arg(4)
 		pGetKeyFn := ctx.Arg(5)
 		ravelog.Logf("[secur32] AddCredentialsA use=0x%x\n", fCredentialUse)
-		_ = phCredentials; _ = pszPrincipal; _ = pszPackage; _ = pAuthData; _ = pGetKeyFn
+		_ = phCredentials
+		_ = pszPrincipal
+		_ = pszPackage
+		_ = pAuthData
+		_ = pGetKeyFn
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -69,7 +84,11 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pAuthData := ctx.Arg(4)
 		pGetKeyFn := ctx.Arg(5)
 		ravelog.Logf("[secur32] AddCredentialsW use=0x%x\n", fCredentialUse)
-		_ = phCredentials; _ = pszPrincipal; _ = pszPackage; _ = pAuthData; _ = pGetKeyFn
+		_ = phCredentials
+		_ = pszPrincipal
+		_ = pszPackage
+		_ = pAuthData
+		_ = pGetKeyFn
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -110,7 +129,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pfQOP := ctx.Arg(3)
 		ravelog.Logf("[secur32] DecryptMessage ctx=0x%x seq=%d\n", phContext, MessageSeqNo)
 		_ = pMessage
-		if pfQOP != 0 { ctx.Mem.Write32(pfQOP, 0) }
+		if pfQOP != 0 {
+			ctx.Mem.Write32(pfQOP, 0)
+		}
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -146,8 +167,12 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pcPackages := ctx.Arg(0)
 		ppPackageInfo := ctx.Arg(1)
 		ravelog.Logf("[secur32] EnumerateSecurityPackagesA\n")
-		if pcPackages != 0 { ctx.Mem.Write32(pcPackages, 0) } // 0 packages
-		if ppPackageInfo != 0 { ctx.Mem.Write64(ppPackageInfo, 0) }
+		if pcPackages != 0 {
+			ctx.Mem.Write32(pcPackages, 0)
+		} // 0 packages
+		if ppPackageInfo != 0 {
+			ctx.Mem.Write64(ppPackageInfo, 0)
+		}
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -155,8 +180,12 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pcPackages := ctx.Arg(0)
 		ppPackageInfo := ctx.Arg(1)
 		ravelog.Logf("[secur32] EnumerateSecurityPackagesW\n")
-		if pcPackages != 0 { ctx.Mem.Write32(pcPackages, 0) } // 0 packages
-		if ppPackageInfo != 0 { ctx.Mem.Write64(ppPackageInfo, 0) }
+		if pcPackages != 0 {
+			ctx.Mem.Write32(pcPackages, 0)
+		} // 0 packages
+		if ppPackageInfo != 0 {
+			ctx.Mem.Write64(ppPackageInfo, 0)
+		}
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -166,7 +195,8 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pPackedContext := ctx.Arg(2)
 		pToken := ctx.Arg(3)
 		ravelog.Logf("[secur32] ExportSecurityContext ctx=0x%x flags=0x%x\n", phContext, fFlags)
-		_ = pPackedContext; _ = pToken
+		_ = pPackedContext
+		_ = pToken
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -188,9 +218,13 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		nSize := ctx.Arg(2)
 		ravelog.Logf("[secur32] GetComputerObjectNameA format=%d\n", NameFormat)
 		name := "RAVEN-PC"
-		if nSize != 0 { ctx.Mem.Write32(nSize, uint32(len(name)+1)) }
+		if nSize != 0 {
+			ctx.Mem.Write32(nSize, uint32(len(name)+1))
+		}
 		if lpNameBuffer != 0 {
-			for i, ch := range name { ctx.Mem.Write8(lpNameBuffer+uint64(i)*1, byte(ch)) }
+			for i, ch := range name {
+				ctx.Mem.Write8(lpNameBuffer+uint64(i)*1, byte(ch))
+			}
 			ctx.Mem.Write8(lpNameBuffer+uint64(len(name))*1, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -202,9 +236,13 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		nSize := ctx.Arg(2)
 		ravelog.Logf("[secur32] GetComputerObjectNameW format=%d\n", NameFormat)
 		name := "RAVEN-PC"
-		if nSize != 0 { ctx.Mem.Write32(nSize, uint32(len(name)+1)) }
+		if nSize != 0 {
+			ctx.Mem.Write32(nSize, uint32(len(name)+1))
+		}
 		if lpNameBuffer != 0 {
-			for i, ch := range name { ctx.Mem.Write16(lpNameBuffer+uint64(i)*2, uint16(ch)) }
+			for i, ch := range name {
+				ctx.Mem.Write16(lpNameBuffer+uint64(i)*2, uint16(ch))
+			}
 			ctx.Mem.Write16(lpNameBuffer+uint64(len(name))*2, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -224,9 +262,13 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		nSize := ctx.Arg(2)
 		ravelog.Logf("[secur32] GetUserNameExA format=%d\n", NameFormat)
 		name := "User"
-		if nSize != 0 { ctx.Mem.Write32(nSize, uint32(len(name)+1)) }
+		if nSize != 0 {
+			ctx.Mem.Write32(nSize, uint32(len(name)+1))
+		}
 		if lpNameBuffer != 0 {
-			for i, ch := range name { ctx.Mem.Write8(lpNameBuffer+uint64(i)*1, byte(ch)) }
+			for i, ch := range name {
+				ctx.Mem.Write8(lpNameBuffer+uint64(i)*1, byte(ch))
+			}
 			ctx.Mem.Write8(lpNameBuffer+uint64(len(name))*1, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -238,9 +280,13 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		nSize := ctx.Arg(2)
 		ravelog.Logf("[secur32] GetUserNameExW format=%d\n", NameFormat)
 		name := "User"
-		if nSize != 0 { ctx.Mem.Write32(nSize, uint32(len(name)+1)) }
+		if nSize != 0 {
+			ctx.Mem.Write32(nSize, uint32(len(name)+1))
+		}
 		if lpNameBuffer != 0 {
-			for i, ch := range name { ctx.Mem.Write16(lpNameBuffer+uint64(i)*2, uint16(ch)) }
+			for i, ch := range name {
+				ctx.Mem.Write16(lpNameBuffer+uint64(i)*2, uint16(ch))
+			}
 			ctx.Mem.Write16(lpNameBuffer+uint64(len(name))*2, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -258,7 +304,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		Token := ctx.Arg(2)
 		phContext := ctx.Arg(3)
 		ravelog.Logf("[secur32] ImportSecurityContextA pkg=0x%x\n", pszPackage)
-		_ = pPackedContext; _ = Token; _ = phContext
+		_ = pPackedContext
+		_ = Token
+		_ = phContext
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -268,7 +316,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		Token := ctx.Arg(2)
 		phContext := ctx.Arg(3)
 		ravelog.Logf("[secur32] ImportSecurityContextW pkg=0x%x\n", pszPackage)
-		_ = pPackedContext; _ = Token; _ = phContext
+		_ = pPackedContext
+		_ = Token
+		_ = phContext
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -290,7 +340,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		Reserved1 := ctx.Arg(4)
 		TargetDataRep := ctx.Arg(5)
 		ravelog.Logf("[secur32] InitializeSecurityContextA cred=0x%x ctx=0x%x req=0x%x\n", phCredential, phContext, fContextReq)
-		_ = pszTargetName; _ = Reserved1; _ = TargetDataRep
+		_ = pszTargetName
+		_ = Reserved1
+		_ = TargetDataRep
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -302,7 +354,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		Reserved1 := ctx.Arg(4)
 		TargetDataRep := ctx.Arg(5)
 		ravelog.Logf("[secur32] InitializeSecurityContextW cred=0x%x ctx=0x%x req=0x%x\n", phCredential, phContext, fContextReq)
-		_ = pszTargetName; _ = Reserved1; _ = TargetDataRep
+		_ = pszTargetName
+		_ = Reserved1
+		_ = TargetDataRep
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -314,16 +368,23 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		ProtocolReturnBuffer := ctx.Arg(4)
 		ReturnBufferLength := ctx.Arg(5)
 		ravelog.Logf("[secur32] LsaCallAuthenticationPackage handle=0x%x pkg=%d\n", LsaHandle, AuthPackage)
-		_ = ProtocolSubmitBuffer; _ = SubmitBufferLength
-		if ProtocolReturnBuffer != 0 { ctx.Mem.Write64(ProtocolReturnBuffer, 0) }
-		if ReturnBufferLength != 0 { ctx.Mem.Write32(ReturnBufferLength, 0) }
+		_ = ProtocolSubmitBuffer
+		_ = SubmitBufferLength
+		if ProtocolReturnBuffer != 0 {
+			ctx.Mem.Write64(ProtocolReturnBuffer, 0)
+		}
+		if ReturnBufferLength != 0 {
+			ctx.Mem.Write32(ReturnBufferLength, 0)
+		}
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "LsaConnectUntrusted", func(ctx *ntapi.TrapContext) uint32 {
 		LsaHandle := ctx.Arg(0)
 		ravelog.Logf("[secur32] LsaConnectUntrusted\n")
-		if LsaHandle != 0 { ctx.Mem.Write64(LsaHandle, 0xDEAD0900) }
+		if LsaHandle != 0 {
+			ctx.Mem.Write64(LsaHandle, 0xDEAD0900)
+		}
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -337,8 +398,12 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		LogonSessionCount := ctx.Arg(0)
 		LogonSessionList := ctx.Arg(1)
 		ravelog.Logf("[secur32] LsaEnumerateLogonSessions\n")
-		if LogonSessionCount != 0 { ctx.Mem.Write32(LogonSessionCount, 0) }
-		if LogonSessionList != 0 { ctx.Mem.Write64(LogonSessionList, 0) }
+		if LogonSessionCount != 0 {
+			ctx.Mem.Write32(LogonSessionCount, 0)
+		}
+		if LogonSessionList != 0 {
+			ctx.Mem.Write64(LogonSessionList, 0)
+		}
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -352,7 +417,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		LogonId := ctx.Arg(0)
 		ppLogonSessionData := ctx.Arg(1)
 		ravelog.Logf("[secur32] LsaGetLogonSessionData id=0x%x\n", LogonId)
-		if ppLogonSessionData != 0 { ctx.Mem.Write64(ppLogonSessionData, 0) }
+		if ppLogonSessionData != 0 {
+			ctx.Mem.Write64(ppLogonSessionData, 0)
+		}
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -364,7 +431,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		AuthInfo := ctx.Arg(4)
 		AuthInfoLength := ctx.Arg(5)
 		ravelog.Logf("[secur32] LsaLogonUser handle=0x%x type=%d pkg=%d\n", LsaHandle, LogonType, AuthPackage)
-		_ = OriginName; _ = AuthInfo; _ = AuthInfoLength
+		_ = OriginName
+		_ = AuthInfo
+		_ = AuthInfoLength
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -374,7 +443,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		AuthPackage := ctx.Arg(2)
 		ravelog.Logf("[secur32] LsaLookupAuthenticationPackage handle=0x%x\n", LsaHandle)
 		_ = PackageName
-		if AuthPackage != 0 { ctx.Mem.Write32(AuthPackage, 0) }
+		if AuthPackage != 0 {
+			ctx.Mem.Write32(AuthPackage, 0)
+		}
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -384,7 +455,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		SecurityMode := ctx.Arg(2)
 		ravelog.Logf("[secur32] LsaRegisterLogonProcess name=0x%x\n", LogonProcessName)
 		_ = SecurityMode
-		if LsaHandle != 0 { ctx.Mem.Write64(LsaHandle, 0xDEAD0901) }
+		if LsaHandle != 0 {
+			ctx.Mem.Write64(LsaHandle, 0xDEAD0901)
+		}
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
@@ -452,7 +525,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		phContext := ctx.Arg(0)
 		Token := ctx.Arg(1)
 		ravelog.Logf("[secur32] QuerySecurityContextToken ctx=0x%x\n", phContext)
-		if Token != 0 { ctx.Mem.Write64(Token, 0xDEAD0800) }
+		if Token != 0 {
+			ctx.Mem.Write64(Token, 0xDEAD0800)
+		}
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -460,7 +535,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pszPackageName := ctx.Arg(0)
 		ppPackageInfo := ctx.Arg(1)
 		ravelog.Logf("[secur32] QuerySecurityPackageInfoA name=0x%x\n", pszPackageName)
-		if ppPackageInfo != 0 { ctx.Mem.Write64(ppPackageInfo, 0) }
+		if ppPackageInfo != 0 {
+			ctx.Mem.Write64(ppPackageInfo, 0)
+		}
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -468,7 +545,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pszPackageName := ctx.Arg(0)
 		ppPackageInfo := ctx.Arg(1)
 		ravelog.Logf("[secur32] QuerySecurityPackageInfoW name=0x%x\n", pszPackageName)
-		if ppPackageInfo != 0 { ctx.Mem.Write64(ppPackageInfo, 0) }
+		if ppPackageInfo != 0 {
+			ctx.Mem.Write64(ppPackageInfo, 0)
+		}
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -494,7 +573,8 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pBuffer := ctx.Arg(2)
 		cbBuffer := ctx.Arg(3)
 		ravelog.Logf("[secur32] SetContextAttributesA ctx=0x%x attr=%d\n", phContext, ulAttribute)
-		_ = pBuffer; _ = cbBuffer
+		_ = pBuffer
+		_ = cbBuffer
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -504,7 +584,8 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pBuffer := ctx.Arg(2)
 		cbBuffer := ctx.Arg(3)
 		ravelog.Logf("[secur32] SetContextAttributesW ctx=0x%x attr=%d\n", phContext, ulAttribute)
-		_ = pBuffer; _ = cbBuffer
+		_ = pBuffer
+		_ = cbBuffer
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})
@@ -515,8 +596,11 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		lpTranslatedName := ctx.Arg(3)
 		nSize := ctx.Arg(4)
 		ravelog.Logf("[secur32] TranslateNameA from=%d to=%d\n", AccountNameFormat, DesiredNameFormat)
-		_ = lpAccountName; _ = lpTranslatedName
-		if nSize != 0 { ctx.Mem.Write32(nSize, 0) }
+		_ = lpAccountName
+		_ = lpTranslatedName
+		if nSize != 0 {
+			ctx.Mem.Write32(nSize, 0)
+		}
 		ctx.SetReturn(0) // FALSE - translation not available
 		return 0
 	})
@@ -527,8 +611,11 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		lpTranslatedName := ctx.Arg(3)
 		nSize := ctx.Arg(4)
 		ravelog.Logf("[secur32] TranslateNameW from=%d to=%d\n", AccountNameFormat, DesiredNameFormat)
-		_ = lpAccountName; _ = lpTranslatedName
-		if nSize != 0 { ctx.Mem.Write32(nSize, 0) }
+		_ = lpAccountName
+		_ = lpTranslatedName
+		if nSize != 0 {
+			ctx.Mem.Write32(nSize, 0)
+		}
 		ctx.SetReturn(0) // FALSE - translation not available
 		return 0
 	})
@@ -549,7 +636,9 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		pfQOP := ctx.Arg(3)
 		ravelog.Logf("[secur32] VerifySignature ctx=0x%x seq=%d\n", phContext, MessageSeqNo)
 		_ = pMessage
-		if pfQOP != 0 { ctx.Mem.Write32(pfQOP, 0) }
+		if pfQOP != 0 {
+			ctx.Mem.Write32(pfQOP, 0)
+		}
 		ctx.SetReturn(0) // SEC_E_OK
 		return 0
 	})

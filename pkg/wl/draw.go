@@ -151,38 +151,37 @@ func truncateTitle(title string, maxW int) string {
 	return string(runes[:maxChars-3]) + "..."
 }
 
-
 // Screenshot saves the current framebuffer as a PNG file.
 // The entire surface (title bar + client area) is captured.
 func (w *Window) Screenshot(path string) error {
-if w.Pix == nil {
-return fmt.Errorf("no pixel buffer")
-}
-totalH := int(w.Height + w.TitleBarH)
-width := int(w.Width)
-stride := int(w.Stride)
-if totalH <= 0 || width <= 0 {
-return fmt.Errorf("zero-size surface")
-}
-img := image.NewRGBA(image.Rect(0, 0, width, totalH))
-for y := 0; y < totalH; y++ {
-rowOff := y * stride
-for x := 0; x < width; x++ {
-off := rowOff + x*4
-if off+2 >= len(w.Pix) {
-break
-}
-// XRGB8888 memory: [B][G][R][X]
-img.Pix[(y*width+x)*4+0] = w.Pix[off+2] // R
-img.Pix[(y*width+x)*4+1] = w.Pix[off+1] // G
-img.Pix[(y*width+x)*4+2] = w.Pix[off+0] // B
-img.Pix[(y*width+x)*4+3] = 255           // A
-}
-}
-f, err := os.Create(path)
-if err != nil {
-return err
-}
-defer f.Close()
-return png.Encode(f, img)
+	if w.Pix == nil {
+		return fmt.Errorf("no pixel buffer")
+	}
+	totalH := int(w.Height + w.TitleBarH)
+	width := int(w.Width)
+	stride := int(w.Stride)
+	if totalH <= 0 || width <= 0 {
+		return fmt.Errorf("zero-size surface")
+	}
+	img := image.NewRGBA(image.Rect(0, 0, width, totalH))
+	for y := 0; y < totalH; y++ {
+		rowOff := y * stride
+		for x := 0; x < width; x++ {
+			off := rowOff + x*4
+			if off+2 >= len(w.Pix) {
+				break
+			}
+			// XRGB8888 memory: [B][G][R][X]
+			img.Pix[(y*width+x)*4+0] = w.Pix[off+2] // R
+			img.Pix[(y*width+x)*4+1] = w.Pix[off+1] // G
+			img.Pix[(y*width+x)*4+2] = w.Pix[off+0] // B
+			img.Pix[(y*width+x)*4+3] = 255          // A
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
 }

@@ -42,10 +42,10 @@ const (
 // Matches the wp-cursor-shape-v1 protocol enum.
 const (
 	CursorDefault    = uint32(1)
-	CursorText       = uint32(9)  // I-beam
+	CursorText       = uint32(9) // I-beam
 	CursorWait       = uint32(6)
 	CursorCrosshair  = uint32(8)
-	CursorPointer    = uint32(4)  // hand
+	CursorPointer    = uint32(4) // hand
 	CursorMove       = uint32(13)
 	CursorNotAllowed = uint32(15)
 	CursorResizeNS   = uint32(27) // NS_RESIZE
@@ -74,6 +74,8 @@ type KeyEvent struct {
 	Pressed  bool   // true=press, false=release
 	Char     rune   // mapped character (0 if non-printable)
 	VK       uint32 // Win32 virtual key code
+	ScanCode uint32 // best-effort hardware scan code
+	Extended bool   // true when Win32 lParam extended-key bit should be set
 }
 
 // MouseEvent holds a mouse event from Wayland.
@@ -90,7 +92,7 @@ const shmFmtXRGB8888 = 1
 // Display is a connection to a Wayland compositor.
 type Display struct {
 	conn    *net.UnixConn
-	fd      int    // raw socket fd for unix.Select/epoll use
+	fd      int // raw socket fd for unix.Select/epoll use
 	nextID  uint32
 	objects map[uint32]objKind
 
@@ -107,10 +109,10 @@ type Display struct {
 	decorMgrGlobal, decorMgrVer     uint32
 	cursorShapeMgrGlobal            uint32
 
-	decorMgrID        uint32
-	cursorShapeMgrID  uint32
-	cursorShapeDevID  uint32
-	pendingCursor     uint32 // shape to set on next enter, or 0
+	decorMgrID       uint32
+	cursorShapeMgrID uint32
+	cursorShapeDevID uint32
+	pendingCursor    uint32 // shape to set on next enter, or 0
 
 	seatID     uint32
 	keyboardID uint32
@@ -149,10 +151,10 @@ type Window struct {
 	Pix       []byte // mmap'd XRGB8888 pixels (B, G, R, X per pixel)
 	fd        int    // memfd backing Pix
 
-	configured   bool
-	needsResize  bool
-	appResized   bool // set when app called Resize(); suppresses compositor shrink
-	Closed       bool
+	configured  bool
+	needsResize bool
+	appResized  bool // set when app called Resize(); suppresses compositor shrink
+	Closed      bool
 }
 
 // --- wire helpers ---
@@ -471,12 +473,14 @@ func (d *Display) dispatchOne() (EventType, error) {
 			if len(payload) >= 16 {
 				keycode := gu32(payload[8:])
 				state := gu32(payload[12:])
-				vk, ch := evdevToWin32(keycode, d.shiftDown)
+				vk, ch, extended := evdevToWin32(keycode, d.shiftDown)
 				d.keyEvents = append(d.keyEvents, KeyEvent{
-					Keycode: keycode,
-					Pressed: state == 1,
-					Char:    ch,
-					VK:      vk,
+					Keycode:  keycode,
+					Pressed:  state == 1,
+					Char:     ch,
+					VK:       vk,
+					ScanCode: keycode & 0xFF,
+					Extended: extended,
 				})
 				return EventKey, nil
 			}
@@ -484,8 +488,8 @@ func (d *Display) dispatchOne() (EventType, error) {
 			if len(payload) >= 16 {
 				depressed := gu32(payload[4:])
 				d.shiftDown = depressed&1 != 0 // MOD_SHIFT
-				d.ctrlDown = depressed&4 != 0   // MOD_CONTROL
-				d.altDown = depressed&8 != 0     // MOD_ALT
+				d.ctrlDown = depressed&4 != 0  // MOD_CONTROL
+				d.altDown = depressed&8 != 0   // MOD_ALT
 			}
 		}
 	}
@@ -737,9 +741,9 @@ func (d *Display) CreateWindow(title string, w, h, titleBarH int32) (*Window, er
 	}
 
 	// attach + damage + commit
-	d.send(win.surfaceID, 1, pu32(win.bufferID), pi32(0), pi32(0))                                         // attach
+	d.send(win.surfaceID, 1, pu32(win.bufferID), pi32(0), pi32(0))                              // attach
 	d.send(win.surfaceID, 9, pi32(0), pi32(0), pi32(win.Width), pi32(win.Height+win.TitleBarH)) // damage_buffer
-	d.send(win.surfaceID, 6)                                                                                 // commit
+	d.send(win.surfaceID, 6)                                                                    // commit
 
 	return win, nil
 }
@@ -793,9 +797,9 @@ func (w *Window) createBuffer() error {
 func (w *Window) Commit() {
 	totalH := w.Height + w.TitleBarH
 	d := w.disp
-	d.send(w.surfaceID, 1, pu32(w.bufferID), pi32(0), pi32(0))                        // attach
+	d.send(w.surfaceID, 1, pu32(w.bufferID), pi32(0), pi32(0))            // attach
 	d.send(w.surfaceID, 9, pi32(0), pi32(0), pi32(w.Width), pi32(totalH)) // damage_buffer
-	d.send(w.surfaceID, 6)                                                              // commit
+	d.send(w.surfaceID, 6)                                                // commit
 }
 
 // SetTitleBar sets the title bar height and title, and marks the buffer for recreation.
@@ -981,9 +985,9 @@ func (d *Display) InjectClick(x, y int32) {
 	d.mouseX = x
 	d.mouseY = y
 	d.mouseEvents = append(d.mouseEvents,
-		MouseEvent{X: x, Y: y, Kind: 0},                                        // motion
-		MouseEvent{X: x, Y: y, Button: 272, Pressed: true, Kind: 1},            // press
-		MouseEvent{X: x, Y: y, Button: 272, Pressed: false, Kind: 1},           // release
+		MouseEvent{X: x, Y: y, Kind: 0},                              // motion
+		MouseEvent{X: x, Y: y, Button: 272, Pressed: true, Kind: 1},  // press
+		MouseEvent{X: x, Y: y, Button: 272, Pressed: false, Kind: 1}, // release
 	)
 }
 
@@ -996,9 +1000,10 @@ func (d *Display) InjectMouseMove(x, y int32) {
 
 // InjectKey queues a synthetic key press+release for a given Linux keycode.
 func (d *Display) InjectKey(keycode uint32) {
+	vk, ch, extended := evdevToWin32(keycode, d.shiftDown)
 	d.keyEvents = append(d.keyEvents,
-		KeyEvent{Keycode: keycode, Pressed: true},
-		KeyEvent{Keycode: keycode, Pressed: false},
+		KeyEvent{Keycode: keycode, Pressed: true, VK: vk, Char: ch, ScanCode: keycode & 0xFF, Extended: extended},
+		KeyEvent{Keycode: keycode, Pressed: false, VK: vk, Char: ch, ScanCode: keycode & 0xFF, Extended: extended},
 	)
 }
 
@@ -1016,99 +1021,106 @@ func (d *Display) Close() {
 }
 
 // evdevToWin32 maps a Linux evdev keycode to a Win32 VK code and character.
-func evdevToWin32(keycode uint32, shift bool) (vk uint32, ch rune) {
-type keyMap struct {
-vk      uint32
-lower   rune
-upper   rune
-}
+func evdevToWin32(keycode uint32, shift bool) (vk uint32, ch rune, extended bool) {
+	type keyMap struct {
+		vk       uint32
+		lower    rune
+		upper    rune
+		extended bool
+	}
 
-// Common evdev keycodes (KEY_* from input-event-codes.h)
-table := map[uint32]keyMap{
-1:  {0x1B, 0x1B, 0x1B},     // ESC
-2:  {0x31, '1', '!'},        // 1
-3:  {0x32, '2', '@'},        // 2
-4:  {0x33, '3', '#'},        // 3
-5:  {0x34, '4', '$'},        // 4
-6:  {0x35, '5', '%'},        // 5
-7:  {0x36, '6', '^'},        // 6
-8:  {0x37, '7', '&'},        // 7
-9:  {0x38, '8', '*'},        // 8
-10: {0x39, '9', '('},        // 9
-11: {0x30, '0', ')'},        // 0
-12: {0xBD, '-', '_'},        // minus
-13: {0xBB, '=', '+'},        // equal
-14: {0x08, '\b', '\b'},      // backspace
-15: {0x09, '\t', '\t'},      // tab
-16: {0x51, 'q', 'Q'},
-17: {0x57, 'w', 'W'},
-18: {0x45, 'e', 'E'},
-19: {0x52, 'r', 'R'},
-20: {0x54, 't', 'T'},
-21: {0x59, 'y', 'Y'},
-22: {0x55, 'u', 'U'},
-23: {0x49, 'i', 'I'},
-24: {0x4F, 'o', 'O'},
-25: {0x50, 'p', 'P'},
-26: {0xDB, '[', '{'},
-27: {0xDD, ']', '}'},
-28: {0x0D, '\r', '\r'},      // enter
-30: {0x41, 'a', 'A'},
-31: {0x53, 's', 'S'},
-32: {0x44, 'd', 'D'},
-33: {0x46, 'f', 'F'},
-34: {0x47, 'g', 'G'},
-35: {0x48, 'h', 'H'},
-36: {0x4A, 'j', 'J'},
-37: {0x4B, 'k', 'K'},
-38: {0x4C, 'l', 'L'},
-39: {0xBA, ';', ':'},
-40: {0xDE, '\'', '"'},
-41: {0xC0, '`', '~'},
-43: {0xDC, '\\', '|'},
-44: {0x5A, 'z', 'Z'},
-45: {0x58, 'x', 'X'},
-46: {0x43, 'c', 'C'},
-47: {0x56, 'v', 'V'},
-48: {0x42, 'b', 'B'},
-49: {0x4E, 'n', 'N'},
-50: {0x4D, 'm', 'M'},
-51: {0xBC, ',', '<'},
-52: {0xBE, '.', '>'},
-53: {0xBF, '/', '?'},
-57: {0x20, ' ', ' '},        // space
-// Function keys
-59: {0x70, 0, 0}, // F1
-60: {0x71, 0, 0}, // F2
-61: {0x72, 0, 0}, // F3
-62: {0x73, 0, 0}, // F4
-63: {0x74, 0, 0}, // F5
-64: {0x75, 0, 0}, // F6
-65: {0x76, 0, 0}, // F7
-66: {0x77, 0, 0}, // F8
-67: {0x78, 0, 0}, // F9
-68: {0x79, 0, 0}, // F10
-87: {0x7A, 0, 0}, // F11
-88: {0x7B, 0, 0}, // F12
-// Navigation
-102: {0x24, 0, 0}, // Home
-103: {0x26, 0, 0}, // Up
-104: {0x21, 0, 0}, // PageUp
-105: {0x25, 0, 0}, // Left
-106: {0x27, 0, 0}, // Right
-107: {0x23, 0, 0}, // End
-108: {0x28, 0, 0}, // Down
-109: {0x22, 0, 0}, // PageDown
-110: {0x2D, 0, 0}, // Insert
-111: {0x2E, 0, 0}, // Delete
-}
+	// Common evdev keycodes (KEY_* from input-event-codes.h)
+	table := map[uint32]keyMap{
+		1:  {0x1B, 0x1B, 0x1B, false}, // ESC
+		2:  {0x31, '1', '!', false},   // 1
+		3:  {0x32, '2', '@', false},   // 2
+		4:  {0x33, '3', '#', false},   // 3
+		5:  {0x34, '4', '$', false},   // 4
+		6:  {0x35, '5', '%', false},   // 5
+		7:  {0x36, '6', '^', false},   // 6
+		8:  {0x37, '7', '&', false},   // 7
+		9:  {0x38, '8', '*', false},   // 8
+		10: {0x39, '9', '(', false},   // 9
+		11: {0x30, '0', ')', false},   // 0
+		12: {0xBD, '-', '_', false},   // minus
+		13: {0xBB, '=', '+', false},   // equal
+		14: {0x08, '\b', '\b', false}, // backspace
+		15: {0x09, '\t', '\t', false}, // tab
+		16: {0x51, 'q', 'Q', false},
+		17: {0x57, 'w', 'W', false},
+		18: {0x45, 'e', 'E', false},
+		19: {0x52, 'r', 'R', false},
+		20: {0x54, 't', 'T', false},
+		21: {0x59, 'y', 'Y', false},
+		22: {0x55, 'u', 'U', false},
+		23: {0x49, 'i', 'I', false},
+		24: {0x4F, 'o', 'O', false},
+		25: {0x50, 'p', 'P', false},
+		26: {0xDB, '[', '{', false},
+		27: {0xDD, ']', '}', false},
+		28: {0x0D, '\r', '\r', false}, // enter
+		29: {0x11, 0, 0, false},       // left ctrl
+		30: {0x41, 'a', 'A', false},
+		31: {0x53, 's', 'S', false},
+		32: {0x44, 'd', 'D', false},
+		33: {0x46, 'f', 'F', false},
+		34: {0x47, 'g', 'G', false},
+		35: {0x48, 'h', 'H', false},
+		36: {0x4A, 'j', 'J', false},
+		37: {0x4B, 'k', 'K', false},
+		38: {0x4C, 'l', 'L', false},
+		39: {0xBA, ';', ':', false},
+		40: {0xDE, '\'', '"', false},
+		41: {0xC0, '`', '~', false},
+		42: {0x10, 0, 0, false}, // left shift
+		43: {0xDC, '\\', '|', false},
+		44: {0x5A, 'z', 'Z', false},
+		45: {0x58, 'x', 'X', false},
+		46: {0x43, 'c', 'C', false},
+		47: {0x56, 'v', 'V', false},
+		48: {0x42, 'b', 'B', false},
+		49: {0x4E, 'n', 'N', false},
+		50: {0x4D, 'm', 'M', false},
+		51: {0xBC, ',', '<', false},
+		52: {0xBE, '.', '>', false},
+		53: {0xBF, '/', '?', false},
+		54: {0x10, 0, 0, false},     // right shift
+		56: {0x12, 0, 0, false},     // left alt
+		57: {0x20, ' ', ' ', false}, // space
+		// Function keys
+		59: {0x70, 0, 0, false}, // F1
+		60: {0x71, 0, 0, false}, // F2
+		61: {0x72, 0, 0, false}, // F3
+		62: {0x73, 0, 0, false}, // F4
+		63: {0x74, 0, 0, false}, // F5
+		64: {0x75, 0, 0, false}, // F6
+		65: {0x76, 0, 0, false}, // F7
+		66: {0x77, 0, 0, false}, // F8
+		67: {0x78, 0, 0, false}, // F9
+		68: {0x79, 0, 0, false}, // F10
+		87: {0x7A, 0, 0, false}, // F11
+		88: {0x7B, 0, 0, false}, // F12
+		// Navigation
+		97:  {0x11, 0, 0, true}, // right ctrl
+		100: {0x12, 0, 0, true}, // right alt
+		102: {0x24, 0, 0, true}, // Home
+		103: {0x26, 0, 0, true}, // Up
+		104: {0x21, 0, 0, true}, // PageUp
+		105: {0x25, 0, 0, true}, // Left
+		106: {0x27, 0, 0, true}, // Right
+		107: {0x23, 0, 0, true}, // End
+		108: {0x28, 0, 0, true}, // Down
+		109: {0x22, 0, 0, true}, // PageDown
+		110: {0x2D, 0, 0, true}, // Insert
+		111: {0x2E, 0, 0, true}, // Delete
+	}
 
-if km, ok := table[keycode]; ok {
-ch := km.lower
-if shift {
-ch = km.upper
-}
-return km.vk, ch
-}
-return 0, 0
+	if km, ok := table[keycode]; ok {
+		ch := km.lower
+		if shift && km.upper != 0 {
+			ch = km.upper
+		}
+		return km.vk, ch, km.extended
+	}
+	return 0, 0, false
 }

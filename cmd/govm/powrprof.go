@@ -21,10 +21,13 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		OutputBuffer := ctx.Arg(3)
 		OutputBufferLength := ctx.Arg(4)
 		ravelog.Logf("[powrprof] CallNtPowerInformation level=%d\n", InformationLevel)
-		_ = InputBuffer; _ = InputBufferLength
+		_ = InputBuffer
+		_ = InputBufferLength
 		// Zero-fill output buffer
 		if OutputBuffer != 0 {
-			for i := uint64(0); i < OutputBufferLength; i++ { ctx.Mem.Write8(OutputBuffer+i, 0) }
+			for i := uint64(0); i < OutputBufferLength; i++ {
+				ctx.Mem.Write8(OutputBuffer+i, 0)
+			}
 		}
 		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
@@ -51,7 +54,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(dll, "GetActivePwrScheme", func(ctx *ntapi.TrapContext) uint32 {
 		puiID := ctx.Arg(0)
 		ravelog.Logf("[powrprof] GetActivePwrScheme\n")
-		if puiID != 0 { ctx.Mem.Write32(puiID, 0) } // scheme 0 = Balanced
+		if puiID != 0 {
+			ctx.Mem.Write32(puiID, 0)
+		} // scheme 0 = Balanced
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -60,10 +65,14 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		pPowerPolicy := ctx.Arg(1)
 		ravelog.Logf("[powrprof] GetCurrentPowerPolicies\n")
 		if pGlobalPowerPolicy != 0 {
-			for i := uint64(0); i < 128; i++ { ctx.Mem.Write8(pGlobalPowerPolicy+i, 0) }
+			for i := uint64(0); i < 128; i++ {
+				ctx.Mem.Write8(pGlobalPowerPolicy+i, 0)
+			}
 		}
 		if pPowerPolicy != 0 {
-			for i := uint64(0); i < 256; i++ { ctx.Mem.Write8(pPowerPolicy+i, 0) }
+			for i := uint64(0); i < 256; i++ {
+				ctx.Mem.Write8(pPowerPolicy+i, 0)
+			}
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -73,8 +82,10 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		ravelog.Logf("[powrprof] GetPwrCapabilities\n")
 		if lpSystemPowerCapabilities != 0 {
 			// SYSTEM_POWER_CAPABILITIES: zero-fill then set key fields
-			for i := uint64(0); i < 100; i++ { ctx.Mem.Write8(lpSystemPowerCapabilities+i, 0) }
-			ctx.Mem.Write8(lpSystemPowerCapabilities, 1)   // PowerButtonPresent
+			for i := uint64(0); i < 100; i++ {
+				ctx.Mem.Write8(lpSystemPowerCapabilities+i, 0)
+			}
+			ctx.Mem.Write8(lpSystemPowerCapabilities, 1)    // PowerButtonPresent
 			ctx.Mem.Write8(lpSystemPowerCapabilities+1, 0)  // SleepButtonPresent
 			ctx.Mem.Write8(lpSystemPowerCapabilities+2, 0)  // LidPresent
 			ctx.Mem.Write8(lpSystemPowerCapabilities+3, 1)  // SystemS1 (standby)
@@ -88,8 +99,12 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		puiMax := ctx.Arg(0)
 		puiMin := ctx.Arg(1)
 		ravelog.Logf("[powrprof] GetPwrDiskSpindownRange\n")
-		if puiMax != 0 { ctx.Mem.Write32(puiMax, 3600) } // 60 minutes
-		if puiMin != 0 { ctx.Mem.Write32(puiMin, 0) }    // never
+		if puiMax != 0 {
+			ctx.Mem.Write32(puiMax, 3600)
+		} // 60 minutes
+		if puiMin != 0 {
+			ctx.Mem.Write32(puiMin, 0)
+		} // never
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -135,7 +150,10 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		Index := ctx.Arg(4)
 		Buffer := ctx.Arg(5)
 		ravelog.Logf("[powrprof] PowerEnumerate flags=0x%x idx=%d\n", AccessFlags, Index)
-		_ = RootPowerKey; _ = SchemeGuid; _ = SubGroupOfPowerSettingsGuid; _ = Buffer
+		_ = RootPowerKey
+		_ = SchemeGuid
+		_ = SubGroupOfPowerSettingsGuid
+		_ = Buffer
 		ctx.SetReturn(259) // ERROR_NO_MORE_ITEMS
 		return 0
 	})
@@ -149,10 +167,14 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 			ctx.Mem.Write32(buf, 0x381b4222)
 			ctx.Mem.Write16(buf+4, 0xf694)
 			ctx.Mem.Write16(buf+6, 0x41f0)
-			ctx.Mem.Write8(buf+8, 0x96); ctx.Mem.Write8(buf+9, 0x85)
-			ctx.Mem.Write8(buf+10, 0xff); ctx.Mem.Write8(buf+11, 0x5b)
-			ctx.Mem.Write8(buf+12, 0xb2); ctx.Mem.Write8(buf+13, 0x60)
-			ctx.Mem.Write8(buf+14, 0xdf); ctx.Mem.Write8(buf+15, 0x2e)
+			ctx.Mem.Write8(buf+8, 0x96)
+			ctx.Mem.Write8(buf+9, 0x85)
+			ctx.Mem.Write8(buf+10, 0xff)
+			ctx.Mem.Write8(buf+11, 0x5b)
+			ctx.Mem.Write8(buf+12, 0xb2)
+			ctx.Mem.Write8(buf+13, 0x60)
+			ctx.Mem.Write8(buf+14, 0xdf)
+			ctx.Mem.Write8(buf+15, 0x2e)
 			ctx.Mem.Write64(ActivePolicyGuid, buf)
 		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
@@ -173,9 +195,16 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		Type := ctx.Arg(4)
 		Buffer := ctx.Arg(5)
 		ravelog.Logf("[powrprof] PowerReadACValue\n")
-		_ = RootPowerKey; _ = SchemeGuid; _ = SubGroupGuid; _ = PowerSettingGuid
-		if Type != 0 { ctx.Mem.Write32(Type, 4) } // REG_DWORD
-		if Buffer != 0 { ctx.Mem.Write32(Buffer, 0) }
+		_ = RootPowerKey
+		_ = SchemeGuid
+		_ = SubGroupGuid
+		_ = PowerSettingGuid
+		if Type != 0 {
+			ctx.Mem.Write32(Type, 4)
+		} // REG_DWORD
+		if Buffer != 0 {
+			ctx.Mem.Write32(Buffer, 0)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -186,7 +215,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		settingGuid := ctx.Arg(3)
 		valueIndex := ctx.Arg(4)
 		ravelog.Logf("[powrprof] PowerReadACValueIndex root=0x%x scheme=0x%x sub=0x%x set=0x%x out=0x%x\n", rootKey, schemeGuid, subgroupGuid, settingGuid, valueIndex)
-		if valueIndex != 0 { ctx.Mem.Write32(valueIndex, 0) }
+		if valueIndex != 0 {
+			ctx.Mem.Write32(valueIndex, 0)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -198,9 +229,16 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		Type := ctx.Arg(4)
 		Buffer := ctx.Arg(5)
 		ravelog.Logf("[powrprof] PowerReadDCValue\n")
-		_ = RootPowerKey; _ = SchemeGuid; _ = SubGroupGuid; _ = PowerSettingGuid
-		if Type != 0 { ctx.Mem.Write32(Type, 4) } // REG_DWORD
-		if Buffer != 0 { ctx.Mem.Write32(Buffer, 0) } // value = 0
+		_ = RootPowerKey
+		_ = SchemeGuid
+		_ = SubGroupGuid
+		_ = PowerSettingGuid
+		if Type != 0 {
+			ctx.Mem.Write32(Type, 4)
+		} // REG_DWORD
+		if Buffer != 0 {
+			ctx.Mem.Write32(Buffer, 0)
+		} // value = 0
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -211,7 +249,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		settingGuid := ctx.Arg(3)
 		valueIndex := ctx.Arg(4)
 		ravelog.Logf("[powrprof] PowerReadDCValueIndex root=0x%x scheme=0x%x sub=0x%x set=0x%x out=0x%x\n", rootKey, schemeGuid, subgroupGuid, settingGuid, valueIndex)
-		if valueIndex != 0 { ctx.Mem.Write32(valueIndex, 0) }
+		if valueIndex != 0 {
+			ctx.Mem.Write32(valueIndex, 0)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -224,7 +264,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		bufferSize := ctx.Arg(5)
 		ravelog.Logf("[powrprof] PowerReadFriendlyName root=0x%x buf=0x%x\n", rootKey, buffer)
 		_, _, _, _ = schemeGuid, subgroupGuid, settingGuid, buffer
-		if bufferSize != 0 { ctx.Mem.Write32(bufferSize, 0) }
+		if bufferSize != 0 {
+			ctx.Mem.Write32(bufferSize, 0)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -234,7 +276,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		RegistrationHandle := ctx.Arg(2)
 		ravelog.Logf("[powrprof] PowerRegisterSuspendResumeNotification flags=0x%x\n", Flags)
 		_ = Recipient
-		if RegistrationHandle != 0 { ctx.Mem.Write64(RegistrationHandle, 0xDEAD0701) }
+		if RegistrationHandle != 0 {
+			ctx.Mem.Write64(RegistrationHandle, 0xDEAD0701)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -250,8 +294,11 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		Recipient := ctx.Arg(2)
 		RegistrationHandle := ctx.Arg(3)
 		ravelog.Logf("[powrprof] PowerSettingRegisterNotification flags=0x%x\n", Flags)
-		_ = SettingGuid; _ = Recipient
-		if RegistrationHandle != 0 { ctx.Mem.Write64(RegistrationHandle, 0xDEAD0700) }
+		_ = SettingGuid
+		_ = Recipient
+		if RegistrationHandle != 0 {
+			ctx.Mem.Write64(RegistrationHandle, 0xDEAD0700)
+		}
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -268,7 +315,10 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		PowerSettingGuid := ctx.Arg(3)
 		ACValueIndex := ctx.Arg(4)
 		ravelog.Logf("[powrprof] PowerWriteACValueIndex val=%d\n", ACValueIndex)
-		_ = RootPowerKey; _ = SchemeGuid; _ = SubGroupGuid; _ = PowerSettingGuid
+		_ = RootPowerKey
+		_ = SchemeGuid
+		_ = SubGroupGuid
+		_ = PowerSettingGuid
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -279,7 +329,10 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		PowerSettingGuid := ctx.Arg(3)
 		DCValueIndex := ctx.Arg(4)
 		ravelog.Logf("[powrprof] PowerWriteDCValueIndex val=%d\n", DCValueIndex)
-		_ = RootPowerKey; _ = SchemeGuid; _ = SubGroupGuid; _ = PowerSettingGuid
+		_ = RootPowerKey
+		_ = SchemeGuid
+		_ = SubGroupGuid
+		_ = PowerSettingGuid
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -287,7 +340,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		pGlobalPowerPolicy := ctx.Arg(0)
 		ravelog.Logf("[powrprof] ReadGlobalPwrPolicy\n")
 		if pGlobalPowerPolicy != 0 {
-			for i := uint64(0); i < 128; i++ { ctx.Mem.Write8(pGlobalPowerPolicy+i, 0) }
+			for i := uint64(0); i < 128; i++ {
+				ctx.Mem.Write8(pGlobalPowerPolicy+i, 0)
+			}
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -297,7 +352,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		pMachineProcessorPowerPolicy := ctx.Arg(1)
 		ravelog.Logf("[powrprof] ReadProcessorPwrScheme id=%d\n", uiID)
 		if pMachineProcessorPowerPolicy != 0 {
-			for i := uint64(0); i < 64; i++ { ctx.Mem.Write8(pMachineProcessorPowerPolicy+i, 0) }
+			for i := uint64(0); i < 64; i++ {
+				ctx.Mem.Write8(pMachineProcessorPowerPolicy+i, 0)
+			}
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -307,7 +364,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		pPowerPolicy := ctx.Arg(1)
 		ravelog.Logf("[powrprof] ReadPwrScheme id=%d\n", uiID)
 		if pPowerPolicy != 0 {
-			for i := uint64(0); i < 256; i++ { ctx.Mem.Write8(pPowerPolicy+i, 0) }
+			for i := uint64(0); i < 256; i++ {
+				ctx.Mem.Write8(pPowerPolicy+i, 0)
+			}
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -317,7 +376,8 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		pGlobalPP := ctx.Arg(1)
 		pPP := ctx.Arg(2)
 		ravelog.Logf("[powrprof] SetActivePwrScheme id=%d\n", uiID)
-		_ = pGlobalPP; _ = pPP
+		_ = pGlobalPP
+		_ = pPP
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -350,7 +410,9 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		lpszDescription := ctx.Arg(2)
 		lpScheme := ctx.Arg(3)
 		ravelog.Logf("[powrprof] WritePwrScheme id=0x%x\n", puiID)
-		_ = lpszSchemeName; _ = lpszDescription; _ = lpScheme
+		_ = lpszSchemeName
+		_ = lpszDescription
+		_ = lpScheme
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -358,7 +420,8 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		pGlobalPowerPolicy := ctx.Arg(0)
 		pPowerPolicy := ctx.Arg(1)
 		ravelog.Logf("[powrprof] ValidatePowerPolicies\n")
-		_ = pGlobalPowerPolicy; _ = pPowerPolicy
+		_ = pGlobalPowerPolicy
+		_ = pPowerPolicy
 		ctx.SetReturn(1) // TRUE - valid
 		return 0
 	})

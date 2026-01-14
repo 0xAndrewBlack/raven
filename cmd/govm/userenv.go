@@ -78,7 +78,9 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 			for i := uint64(0); i < dwSize*1; i++ {
 				b, _ := ctx.Mem.Read8(lpSrc + i)
 				ctx.Mem.Write8(lpDest+i, b)
-				if b == 0 { break }
+				if b == 0 {
+					break
+				}
 			}
 		}
 		ctx.SetReturn(1) // TRUE
@@ -95,7 +97,9 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 			for i := uint64(0); i < dwSize*2; i++ {
 				b, _ := ctx.Mem.Read8(lpSrc + i)
 				ctx.Mem.Write8(lpDest+i, b)
-				if b == 0 { break }
+				if b == 0 {
+					break
+				}
 			}
 		}
 		ctx.SetReturn(1) // TRUE
@@ -106,9 +110,13 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpcchSize := ctx.Arg(1)
 		ravelog.Logf("[userenv] GetAllUsersProfileDirectoryA\n")
 		path := "C:\\ProgramData"
-		if lpcchSize != 0 { ctx.Mem.Write32(lpcchSize, uint32(len(path)+1)) }
+		if lpcchSize != 0 {
+			ctx.Mem.Write32(lpcchSize, uint32(len(path)+1))
+		}
 		if lpProfileDir != 0 {
-			for i, ch := range path { ctx.Mem.Write8(lpProfileDir+uint64(i)*1, byte(ch)) }
+			for i, ch := range path {
+				ctx.Mem.Write8(lpProfileDir+uint64(i)*1, byte(ch))
+			}
 			ctx.Mem.Write8(lpProfileDir+uint64(len(path))*1, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -119,9 +127,13 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpcchSize := ctx.Arg(1)
 		ravelog.Logf("[userenv] GetAllUsersProfileDirectoryW\n")
 		path := "C:\\ProgramData"
-		if lpcchSize != 0 { ctx.Mem.Write32(lpcchSize, uint32(len(path)+1)) }
+		if lpcchSize != 0 {
+			ctx.Mem.Write32(lpcchSize, uint32(len(path)+1))
+		}
 		if lpProfileDir != 0 {
-			for i, ch := range path { ctx.Mem.Write16(lpProfileDir+uint64(i)*2, uint16(ch)) }
+			for i, ch := range path {
+				ctx.Mem.Write16(lpProfileDir+uint64(i)*2, uint16(ch))
+			}
 			ctx.Mem.Write16(lpProfileDir+uint64(len(path))*2, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -134,8 +146,12 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		pGuidExtension := ctx.Arg(3)
 		ppGPOList := ctx.Arg(4)
 		ravelog.Logf("[userenv] GetAppliedGPOListA flags=0x%x\n", dwFlags)
-		_ = pMachineName; _ = pSidUser; _ = pGuidExtension
-		if ppGPOList != 0 { ctx.Mem.Write64(ppGPOList, 0) } // NULL = no GPOs
+		_ = pMachineName
+		_ = pSidUser
+		_ = pGuidExtension
+		if ppGPOList != 0 {
+			ctx.Mem.Write64(ppGPOList, 0)
+		} // NULL = no GPOs
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -146,8 +162,12 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		pGuidExtension := ctx.Arg(3)
 		ppGPOList := ctx.Arg(4)
 		ravelog.Logf("[userenv] GetAppliedGPOListW flags=0x%x\n", dwFlags)
-		_ = pMachineName; _ = pSidUser; _ = pGuidExtension
-		if ppGPOList != 0 { ctx.Mem.Write64(ppGPOList, 0) } // NULL = no GPOs
+		_ = pMachineName
+		_ = pSidUser
+		_ = pGuidExtension
+		if ppGPOList != 0 {
+			ctx.Mem.Write64(ppGPOList, 0)
+		} // NULL = no GPOs
 		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
@@ -156,9 +176,13 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpcchSize := ctx.Arg(1)
 		ravelog.Logf("[userenv] GetDefaultUserProfileDirectoryA\n")
 		path := "C:\\Users\\Default"
-		if lpcchSize != 0 { ctx.Mem.Write32(lpcchSize, uint32(len(path)+1)) }
+		if lpcchSize != 0 {
+			ctx.Mem.Write32(lpcchSize, uint32(len(path)+1))
+		}
 		if lpProfileDir != 0 {
-			for i, ch := range path { ctx.Mem.Write8(lpProfileDir+uint64(i)*1, byte(ch)) }
+			for i, ch := range path {
+				ctx.Mem.Write8(lpProfileDir+uint64(i)*1, byte(ch))
+			}
 			ctx.Mem.Write8(lpProfileDir+uint64(len(path))*1, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -169,9 +193,13 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpcchSize := ctx.Arg(1)
 		ravelog.Logf("[userenv] GetDefaultUserProfileDirectoryW\n")
 		path := "C:\\Users\\Default"
-		if lpcchSize != 0 { ctx.Mem.Write32(lpcchSize, uint32(len(path)+1)) }
+		if lpcchSize != 0 {
+			ctx.Mem.Write32(lpcchSize, uint32(len(path)+1))
+		}
 		if lpProfileDir != 0 {
-			for i, ch := range path { ctx.Mem.Write16(lpProfileDir+uint64(i)*2, uint16(ch)) }
+			for i, ch := range path {
+				ctx.Mem.Write16(lpProfileDir+uint64(i)*2, uint16(ch))
+			}
 			ctx.Mem.Write16(lpProfileDir+uint64(len(path))*2, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -180,7 +208,9 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(dll, "GetProfileType", func(ctx *ntapi.TrapContext) uint32 {
 		pdwFlags := ctx.Arg(0)
 		ravelog.Logf("[userenv] GetProfileType\n")
-		if pdwFlags != 0 { ctx.Mem.Write32(pdwFlags, 0) } // PT_TEMPORARY = 0 (local profile)
+		if pdwFlags != 0 {
+			ctx.Mem.Write32(pdwFlags, 0)
+		} // PT_TEMPORARY = 0 (local profile)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -189,9 +219,13 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpcchSize := ctx.Arg(1)
 		ravelog.Logf("[userenv] GetProfilesDirectoryA\n")
 		path := "C:\\Users"
-		if lpcchSize != 0 { ctx.Mem.Write32(lpcchSize, uint32(len(path)+1)) }
+		if lpcchSize != 0 {
+			ctx.Mem.Write32(lpcchSize, uint32(len(path)+1))
+		}
 		if lpProfileDir != 0 {
-			for i, ch := range path { ctx.Mem.Write8(lpProfileDir+uint64(i)*1, byte(ch)) }
+			for i, ch := range path {
+				ctx.Mem.Write8(lpProfileDir+uint64(i)*1, byte(ch))
+			}
 			ctx.Mem.Write8(lpProfileDir+uint64(len(path))*1, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -202,9 +236,13 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpcchSize := ctx.Arg(1)
 		ravelog.Logf("[userenv] GetProfilesDirectoryW\n")
 		path := "C:\\Users"
-		if lpcchSize != 0 { ctx.Mem.Write32(lpcchSize, uint32(len(path)+1)) }
+		if lpcchSize != 0 {
+			ctx.Mem.Write32(lpcchSize, uint32(len(path)+1))
+		}
 		if lpProfileDir != 0 {
-			for i, ch := range path { ctx.Mem.Write16(lpProfileDir+uint64(i)*2, uint16(ch)) }
+			for i, ch := range path {
+				ctx.Mem.Write16(lpProfileDir+uint64(i)*2, uint16(ch))
+			}
 			ctx.Mem.Write16(lpProfileDir+uint64(len(path))*2, 0)
 		}
 		ctx.SetReturn(1) // TRUE
@@ -216,7 +254,9 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpcchSize := ctx.Arg(2)
 		ravelog.Logf("[userenv] GetUserProfileDirectoryA token=0x%x\n", hToken)
 		path := "C:\\Users\\User"
-		if lpcchSize != 0 { ctx.Mem.Write32(lpcchSize, uint32(len(path)+1)) }
+		if lpcchSize != 0 {
+			ctx.Mem.Write32(lpcchSize, uint32(len(path)+1))
+		}
 		if lpProfileDir != 0 {
 			for i, ch := range path {
 				ctx.Mem.Write8(lpProfileDir+uint64(i)*1, byte(ch))
@@ -232,7 +272,9 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpcchSize := ctx.Arg(2)
 		ravelog.Logf("[userenv] GetUserProfileDirectoryW token=0x%x\n", hToken)
 		path := "C:\\Users\\User"
-		if lpcchSize != 0 { ctx.Mem.Write32(lpcchSize, uint32(len(path)+1)) }
+		if lpcchSize != 0 {
+			ctx.Mem.Write32(lpcchSize, uint32(len(path)+1))
+		}
 		if lpProfileDir != 0 {
 			for i, ch := range path {
 				ctx.Mem.Write16(lpProfileDir+uint64(i)*2, uint16(ch))
@@ -253,7 +295,9 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpProfileInfo := ctx.Arg(1)
 		ravelog.Logf("[userenv] LoadUserProfileA token=0x%x info=0x%x\n", hToken, lpProfileInfo)
 		// Set hProfile in PROFILEINFO (+24 on x64)
-		if lpProfileInfo != 0 { ctx.Mem.Write64(lpProfileInfo+24, 0xDEAD0200) }
+		if lpProfileInfo != 0 {
+			ctx.Mem.Write64(lpProfileInfo+24, 0xDEAD0200)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -262,7 +306,9 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		lpProfileInfo := ctx.Arg(1)
 		ravelog.Logf("[userenv] LoadUserProfileW token=0x%x info=0x%x\n", hToken, lpProfileInfo)
 		// Set hProfile in PROFILEINFO (+24 on x64)
-		if lpProfileInfo != 0 { ctx.Mem.Write64(lpProfileInfo+24, 0xDEAD0200) }
+		if lpProfileInfo != 0 {
+			ctx.Mem.Write64(lpProfileInfo+24, 0xDEAD0200)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})

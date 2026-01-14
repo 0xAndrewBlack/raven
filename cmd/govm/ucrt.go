@@ -392,8 +392,8 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		table := ctx.Arg(0)
 		ravelog.Logf("[ucrt] _initialize_onexit_table table=0x%x\n", table)
 		if table != 0 {
-			mem.Write64(table, 0)   // _first
-			mem.Write64(table+8, 0) // _last
+			mem.Write64(table, 0)    // _first
+			mem.Write64(table+8, 0)  // _last
 			mem.Write64(table+16, 0) // _end
 		}
 		ctx.SetReturn(0)

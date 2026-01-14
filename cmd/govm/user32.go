@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +61,130 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 	hwndDisabled := make(map[uint64]bool)
 	hwndWindowRgn := make(map[uint64]uint64)
+	var keyState [256]byte
+	keyTransition := make(map[uint32]bool)
+	var currentCursorHandle uint64 = 32512 // IDC_ARROW default
+	cursorPosX, cursorPosY := int32(0), int32(0)
+
+	mapCursorHandle := func(hCursor uint64) (uint32, string) {
+		switch hCursor {
+		case 32512:
+			return wl.CursorDefault, "default"
+		case 32513:
+			return wl.CursorText, "text"
+		case 32514:
+			return wl.CursorWait, "wait"
+		case 32515:
+			return wl.CursorCrosshair, "crosshair"
+		case 32644:
+			return wl.CursorResizeEW, "ew-resize"
+		case 32645:
+			return wl.CursorResizeNS, "ns-resize"
+		case 32646:
+			return wl.CursorResizeAll, "all-scroll"
+		case 32648:
+			return wl.CursorNotAllowed, "not-allowed"
+		case 32649:
+			return wl.CursorPointer, "pointer"
+		default:
+			return wl.CursorDefault, "default"
+		}
+	}
+	setKeyDown := func(vk uint32, down bool) {
+		if vk >= uint32(len(keyState)) {
+			return
+		}
+		if down {
+			keyState[vk] |= 0x80
+			keyTransition[vk] = true
+		} else {
+			keyState[vk] &^= 0x80
+		}
+	}
+	keyStateValue := func(vk uint32, consume bool) uint16 {
+		if vk >= uint32(len(keyState)) {
+			return 0
+		}
+		var state uint16
+		if keyState[vk]&0x80 != 0 {
+			state |= 0x8000
+		}
+		if keyTransition[vk] {
+			state |= 0x0001
+			if consume {
+				delete(keyTransition, vk)
+			}
+		}
+		return state
+	}
+	makeKeyLParam := func(scanCode uint32, extended, keyDown bool, wasDown bool) uint64 {
+		lParam := uint64(1) | (uint64(scanCode&0xFF) << 16)
+		if extended {
+			lParam |= 1 << 24
+		}
+		if wasDown {
+			lParam |= 1 << 30
+		}
+		if !keyDown {
+			lParam |= 1 << 31
+		}
+		return lParam
+	}
+	absWindowOffset := func(hwnd uint64) (int32, int32) {
+		if hwnd == 0 {
+			return 0, 0
+		}
+		if cs, ok := hwndChildren[hwnd]; ok {
+			return cs.x, cs.y
+		}
+		return clientAreaOrigin(hwnd)
+	}
+	absoluteClientRect := func(hwnd uint64) (int32, int32, int32, int32) {
+		ox, oy := absWindowOffset(hwnd)
+		if cs, ok := hwndChildren[hwnd]; ok {
+			return ox, oy, ox + cs.w, oy + cs.h
+		}
+		if wlWindow != nil && hwnd == hctx.MainHWND {
+			w := wlWindow.Width
+			h := wlWindow.Height
+			if _, hasMenu := hwndMenuBar[hwnd]; hasMenu && h > win32.GetSystemMetrics(win32.SM_CYMENU) {
+				h -= win32.GetSystemMetrics(win32.SM_CYMENU)
+			}
+			return ox, oy, ox + w, oy + h
+		}
+		return ox, oy, ox, oy
+	}
+	makeClientLParam := func(hwnd uint64, sx, sy int32) uint64 {
+		ox, oy := absWindowOffset(hwnd)
+		return uint64(uint16(sx-ox)) | (uint64(uint16(sy-oy)) << 16)
+	}
+	findDeepestChildAt := func(parent uint64, sx, sy int32) (uint64, uint64) {
+		var (
+			best      uint64
+			bestParam uint64
+			bestArea  int64 = 1<<62 - 1
+		)
+		var walk func(uint64)
+		walk = func(curParent uint64) {
+			for h, cs := range hwndChildren {
+				if cs.parentHWND != curParent || !cs.visible {
+					continue
+				}
+				if sx < cs.x || sx >= cs.x+cs.w || sy < cs.y || sy >= cs.y+cs.h {
+					continue
+				}
+				walk(h)
+				area := int64(cs.w) * int64(cs.h)
+				if best == 0 || area <= bestArea {
+					best = h
+					bestArea = area
+					bestParam = makeClientLParam(h, sx, sy)
+				}
+			}
+		}
+		walk(parent)
+		return best, bestParam
+	}
 
 	// findMenuItem locates a menu item by position or command ID.
 	findMenuItem := func(hMenu uint64, uID uint64, uFlags uint32) *menuItem {
@@ -976,9 +1102,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hwnd := ctx.Arg(0)
 		ox, oy := clientAreaOrigin(hwnd)
 		h, dc := allocScreenDC(ox, oy)
-		if cs, ok := hwndChildren[hwnd]; ok {
-			dc.SetClipRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h)
-		}
+		x0, y0, x1, y1 := absoluteClientRect(hwnd)
+		dc.SetClipRect(x0, y0, x1, y1)
 		ctx.SetReturn(h)
 		return 0
 	})
@@ -2486,13 +2611,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					if target == 0 {
 						target = hctx.MainHWND
 					}
+					scanCode := ke.ScanCode
+					if scanCode == 0 {
+						scanCode = ke.Keycode & 0xFF
+					}
+					wasDown := keyState[ke.VK]&0x80 != 0
+					setKeyDown(ke.VK, ke.Pressed)
 					if ke.Pressed {
-						hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0100, uint64(ke.VK), 0})
+						lParam := makeKeyLParam(scanCode, ke.Extended, true, wasDown)
+						hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0100, uint64(ke.VK), lParam})
 						if ke.Char >= 0x20 || ke.Char == '\r' || ke.Char == '\b' || ke.Char == '\t' {
-							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0102, uint64(ke.Char), 0})
+							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0102, uint64(ke.Char), lParam})
 						}
 					} else {
-						hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0101, uint64(ke.VK), 0})
+						lParam := makeKeyLParam(scanCode, ke.Extended, false, wasDown)
+						hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0101, uint64(ke.VK), lParam})
 					}
 				}
 			}
@@ -2502,6 +2635,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					if !ok {
 						break
 					}
+					cursorPosX, cursorPosY = me.X, me.Y
 					ravelog.Logf("[mouse] kind=%d x=%d y=%d button=%d pressed=%v\n", me.Kind, me.X, me.Y, me.Button, me.Pressed)
 					// Our custom title bar occupies y=[0, TitleBarH).
 					// Menu bar occupies y=[TitleBarH, TitleBarH+menuBarHeight).
@@ -2519,71 +2653,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					clientX := me.X
 					clientY := me.Y - clientTop
 
-					// childAt returns the deepest visible window at surface position (sx, sy),
-					// or 0 if none. Returns window-relative coordinates via relParam.
-					//
-					// Priority rules (mimicking Win32 z-order / WM_NCHITTEST):
-					//   1. SysTabControl32 only claims clicks inside its tab-strip header
-					//      (top 22 px). Clicks in the content area fall through to siblings.
-					//   2. Among equal-priority candidates, prefer the window with the
-					//      smaller area (most specific / on top visually).
-					//   3. Grandchildren of containers (e.g. ReBarWindow32) beat their parent.
-					childAt := func(sx, sy int32) (child uint64, relParam uint64) {
-						const tabStripH = int32(22) // height of SysTabControl32 header strip
-						isContainerClass := func(cn string) bool {
-							return cn == "rebarwindow32"
-						}
-						area := func(c *controlState) int64 { return int64(c.w) * int64(c.h) }
-						for chWnd, cs := range hwndChildren {
-							if cs.parentHWND != hctx.MainHWND || !cs.visible {
-								continue
-							}
-							if sx < cs.x || sx >= cs.x+cs.w || sy < cs.y || sy >= cs.y+cs.h {
-								continue
-							}
-							// SysTabControl32: only claim the tab-strip header area.
-							// Content area is transparent - let siblings underneath handle it.
-							if cs.className == "systabcontrol32" && sy >= cs.y+tabStripH {
-								continue
-							}
-							// Grandchildren of container classes beat the container itself.
-							if isContainerClass(cs.className) {
-								for gcWnd, gcs := range hwndChildren {
-									if gcs.parentHWND != chWnd || !gcs.visible {
-										continue
-									}
-									if sx >= gcs.x && sx < gcs.x+gcs.w && sy >= gcs.y && sy < gcs.y+gcs.h {
-										if child == 0 || area(gcs) < area(hwndChildren[child]) {
-											child = gcWnd
-											relParam = uint64(uint16(sx-gcs.x)) | (uint64(uint16(sy-gcs.y)) << 16)
-										}
-									}
-								}
-								continue
-							}
-							// Accept this child if it is more specific than the current winner.
-							if child == 0 || area(cs) < area(hwndChildren[child]) {
-								child = chWnd
-								relParam = uint64(uint16(sx-cs.x)) | (uint64(uint16(sy-cs.y)) << 16)
-							}
-						}
-						return child, relParam
-					}
 					// routeMouseToChild routes a mouse message to child or hctx.MainHWND.
 					// Returns true if routed to a child builtin (no need to queue).
 					routeMouseMsg := func(msg uint32, wp uint64, sx, sy int32) {
 						targetHWND := hctx.MouseCapture
 						var relParam uint64
 						if targetHWND == 0 {
-							targetHWND, relParam = childAt(sx, sy)
+							targetHWND, relParam = findDeepestChildAt(hctx.MainHWND, sx, sy)
 						} else {
-							if cs, ok := hwndChildren[targetHWND]; ok {
-								rx := uint64(uint16(sx - cs.x))
-								ry := uint64(uint16(sy - cs.y))
-								relParam = rx | (ry << 16)
-							} else {
-								relParam = uint64(uint16(sx)) | (uint64(uint16(sy-clientTop)) << 16)
-							}
+							relParam = makeClientLParam(targetHWND, sx, sy)
 						}
 						if targetHWND != 0 {
 							_, handled := builtinWndProc(targetHWND, msg, wp, relParam)
@@ -2592,7 +2670,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 							}
 						} else {
 							// Fall back to hctx.MainHWND with client-relative coords
-							mcp := uint64(uint16(sx)) | (uint64(uint16(sy-clientTop)) << 16)
+							mcp := makeClientLParam(hctx.MainHWND, sx, sy)
 							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, msg, wp, mcp})
 						}
 					}
@@ -2738,7 +2816,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 									}
 									if !dropHit {
 										// Route click to child under cursor or hctx.MainHWND
-										hitChild, hitRelParam := childAt(me.X, me.Y)
+										hitChild, hitRelParam := findDeepestChildAt(hctx.MainHWND, me.X, me.Y)
 										if hitChild != 0 {
 											// Update focus to clicked child
 											if hctx.FocusHwnd != hitChild {
@@ -2907,23 +2985,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			evt, _ := wlDisplay.Poll()
 			if evt != wl.EventNone && evt != wl.EventClose {
 				if evt == wl.EventKey {
-					for {
-						ke, ok := wlDisplay.PollKey()
-						if !ok {
-							break
-						}
-						target := hctx.FocusHwnd
-						if target == 0 {
-							target = hctx.MainHWND
-						}
-						if ke.Pressed {
-							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0100, uint64(ke.VK), 0})
-							if ke.Char >= 0x20 || ke.Char == '\r' || ke.Char == '\b' || ke.Char == '\t' {
-								hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0102, uint64(ke.Char), 0})
-							}
-						} else {
-							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0101, uint64(ke.VK), 0})
-						}
+					if dispatchWl != nil {
+						dispatchWl(evt)
 					}
 				}
 				if evt == wl.EventMouse {
@@ -4703,8 +4766,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
 			rcLeft, rcTop = 0, 0
 			rcRight, rcBottom = cs.w, cs.h
-			// Clip all GDI drawing to this child's screen rect
-			dc.SetClipRect(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h)
+			// Clip all GDI drawing to this child's client rect, including parent chain offset.
+			x0, y0, x1, y1 := absoluteClientRect(hwnd)
+			dc.SetClipRect(x0, y0, x1, y1)
 			// For Scintilla windows: record sciThis for diagnostics only.
 			// Do NOT patch Scintilla internal state - offsets are version-specific
 			// and writing wrong fields corrupts state (e.g. sets paintState=painting,
@@ -4746,6 +4810,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			commitIfDone()
 		}
 		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "LoadCursorA", func(ctx *ntapi.TrapContext) uint32 {
+		lpCursorName := ctx.Arg(1)
+		if lpCursorName < 0x10000 && lpCursorName != 0 {
+			ctx.SetReturn(lpCursorName)
+		} else {
+			ctx.SetReturn(32512)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetDesktopWindow", func(ctx *ntapi.TrapContext) uint32 {
@@ -4998,45 +5071,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		return 0
 	})
-	var currentCursorHandle uint64 = 32512 // IDC_ARROW default
-	cursorPosX, cursorPosY := int32(0), int32(0)
 	d.RegisterAutoStubHandler(user32, "SetCursor", func(ctx *ntapi.TrapContext) uint32 {
 		hCursor := ctx.Arg(0)
 		prevCursor := currentCursorHandle
 		currentCursorHandle = hCursor
-		// Map Windows IDC_ cursor IDs to wp_cursor_shape_v1 shapes.
+		shape, _ := mapCursorHandle(hCursor)
 		if wlDisplay != nil {
-			var shape uint32
-			switch hCursor {
-			case 32512:
-				shape = wl.CursorDefault // IDC_ARROW
-			case 32513:
-				shape = wl.CursorText // IDC_IBEAM
-			case 32514:
-				shape = wl.CursorProgress // IDC_WAIT (spinner)
-			case 32515:
-				shape = wl.CursorCrosshair // IDC_CROSS
-			case 32642:
-				shape = wl.CursorResizeNWSE // IDC_SIZENWSE
-			case 32643:
-				shape = wl.CursorResizeNESW // IDC_SIZENESW
-			case 32644:
-				shape = wl.CursorResizeEW // IDC_SIZEWE
-			case 32645:
-				shape = wl.CursorResizeNS // IDC_SIZENS
-			case 32646:
-				shape = wl.CursorMove // IDC_SIZEALL
-			case 32648:
-				shape = wl.CursorNotAllowed // IDC_NO
-			case 32649:
-				shape = wl.CursorPointer // IDC_HAND
-			case 32650:
-				shape = wl.CursorProgress // IDC_APPSTARTING
-			case 32651:
-				shape = wl.CursorHelp // IDC_HELP
-			default:
-				shape = wl.CursorDefault
-			}
 			wlDisplay.SetCursorShape(shape)
 		}
 		ctx.SetReturn(prevCursor)
@@ -5045,12 +5085,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "GetCursorPos", func(ctx *ntapi.TrapContext) uint32 {
 		p := ctx.Arg(0)
 		if p != 0 {
-			mx, my := cursorPosX, cursorPosY
-			if hctx.WlDisplay != nil {
-				mx, my = hctx.WlDisplay.MousePos()
-			}
-			ctx.Mem.Write32(p, uint32(mx))
-			ctx.Mem.Write32(p+4, uint32(my))
+			ctx.Mem.Write32(p, uint32(cursorPosX))
+			ctx.Mem.Write32(p+4, uint32(cursorPosY))
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -5346,60 +5382,33 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetKeyState", func(ctx *ntapi.TrapContext) uint32 {
-		// ReactOS: win32ss/user/ntuser/input.c NtUserGetKeyState
 		vk := ctx.Arg(0) & 0xFF
-		var state int16
 		switch vk {
-		case 0x10: // VK_SHIFT
+		case 0x10:
 			if hctx.WlDisplay != nil && hctx.WlDisplay.ShiftDown() {
-				state = -128 // 0xFF80 - high bit = pressed
+				keyState[vk] |= 0x80
+			} else {
+				keyState[vk] &^= 0x80
 			}
-		case 0x11: // VK_CONTROL
+		case 0x11:
 			if hctx.WlDisplay != nil && hctx.WlDisplay.CtrlDown() {
-				state = -128
+				keyState[vk] |= 0x80
+			} else {
+				keyState[vk] &^= 0x80
 			}
-		case 0x12: // VK_MENU (Alt)
+		case 0x12:
 			if hctx.WlDisplay != nil && hctx.WlDisplay.AltDown() {
-				state = -128
+				keyState[vk] |= 0x80
+			} else {
+				keyState[vk] &^= 0x80
 			}
-		case 0xA0: // VK_LSHIFT
-			if hctx.WlDisplay != nil && hctx.WlDisplay.ShiftDown() {
-				state = -128
-			}
-		case 0xA2: // VK_LCONTROL
-			if hctx.WlDisplay != nil && hctx.WlDisplay.CtrlDown() {
-				state = -128
-			}
-		case 0xA4: // VK_LMENU
-			if hctx.WlDisplay != nil && hctx.WlDisplay.AltDown() {
-				state = -128
-			}
-		case 0x14: // VK_CAPITAL - toggled state in low bit
-			// We don't track CapsLock yet
 		}
-		ctx.SetReturn(uint64(uint16(state)))
+		ctx.SetReturn(uint64(uint16(keyStateValue(uint32(vk), true))))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetAsyncKeyState", func(ctx *ntapi.TrapContext) uint32 {
 		vk := ctx.Arg(0) & 0xFF
-		var state int16
-		switch vk {
-		case 0x10, 0xA0, 0xA1: // VK_SHIFT, VK_LSHIFT, VK_RSHIFT
-			if hctx.WlDisplay != nil && hctx.WlDisplay.ShiftDown() {
-				state = -32768 // 0x8000 - currently held
-			}
-		case 0x11, 0xA2, 0xA3: // VK_CONTROL, VK_LCONTROL, VK_RCONTROL
-			if hctx.WlDisplay != nil && hctx.WlDisplay.CtrlDown() {
-				state = -32768
-			}
-		case 0x12, 0xA4, 0xA5: // VK_MENU, VK_LMENU, VK_RMENU
-			if hctx.WlDisplay != nil && hctx.WlDisplay.AltDown() {
-				state = -32768
-			}
-		case 0x01: // VK_LBUTTON
-			// TODO: track mouse button state
-		}
-		ctx.SetReturn(uint64(uint16(state)))
+		ctx.SetReturn(uint64(uint16(keyStateValue(uint32(vk), false) & 0x8000)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetWindowsHookExW", func(ctx *ntapi.TrapContext) uint32 {
@@ -6059,16 +6068,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 
 	// LoadCursorA: ANSI wrapper - same as LoadCursorW
-	d.RegisterAutoStubHandler(user32, "LoadCursorA", func(ctx *ntapi.TrapContext) uint32 {
-		lpCursorName := ctx.Arg(1)
-		if lpCursorName < 0x10000 && lpCursorName != 0 {
-			ctx.SetReturn(lpCursorName)
-		} else {
-			ctx.SetReturn(0x00010001)
-		}
-		return 0
-	})
-
 	// SetWindowsHookExA: ANSI wrapper - return dummy hook handle
 	d.RegisterAutoStubHandler(user32, "SetWindowsHookExA", func(ctx *ntapi.TrapContext) uint32 {
 		ctx.SetReturn(0x00060001) // dummy hook handle
@@ -6508,10 +6507,54 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	var clipFormats []uint32             // ordered list of stored formats
 	clipSeq := uint32(1)
 	clipboardViewerHwnd := uint64(0)
+	syncClipboardFromHost := func() {
+		cmd := exec.Command("wl-paste", "--no-newline")
+		out, err := cmd.Output()
+		if err != nil || len(out) == 0 {
+			return
+		}
+		const cfUnicodeText = 13
+		wide := make([]byte, 0, len(out)*2+2)
+		for _, b := range out {
+			wide = append(wide, b, 0)
+		}
+		wide = append(wide, 0, 0)
+		addr := hctx.HeapAlloc(uint64(len(wide)), true)
+		for i, b := range wide {
+			mem.Write8(addr+uint64(i), b)
+		}
+		if _, exists := clipStore[cfUnicodeText]; !exists {
+			clipFormats = append(clipFormats, cfUnicodeText)
+		}
+		clipStore[cfUnicodeText] = addr
+	}
+	pushClipboardToHost := func(hMem uint64, format uint32) {
+		if hMem == 0 || format != 13 {
+			return
+		}
+		ptr := hMem
+		var buf bytes.Buffer
+		for off := uint64(0); off < 1<<20; off += 2 {
+			w, _ := mem.Read16(ptr + off)
+			if w == 0 {
+				break
+			}
+			if w < 0x80 {
+				buf.WriteByte(byte(w))
+			}
+		}
+		if buf.Len() == 0 {
+			return
+		}
+		cmd := exec.Command("wl-copy")
+		cmd.Stdin = bytes.NewReader(buf.Bytes())
+		_ = cmd.Run()
+	}
 
 	d.RegisterAutoStubHandler(user32, "OpenClipboard", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		if win32.OpenClipboard(hwnd) {
+			syncClipboardFromHost()
 			ctx.SetReturn(1)
 		} else {
 			ctx.SetReturn(0)
@@ -6543,12 +6586,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			clipStore[format] = hMem
 			clipSeq++
+			pushClipboardToHost(hMem, format)
 		}
 		ctx.SetReturn(hMem)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetClipboardData", func(ctx *ntapi.TrapContext) uint32 {
 		format := uint32(ctx.Arg(0))
+		syncClipboardFromHost()
 		if h, ok := clipStore[format]; ok {
 			ctx.SetReturn(h)
 		} else {
@@ -8174,11 +8219,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "GetCursorInfo", func(ctx *ntapi.TrapContext) uint32 {
 		p := ctx.Arg(0)
 		if p != 0 {
-			ctx.Mem.Write32(p, 20)           // cbSize
-			ctx.Mem.Write32(p+4, 1)          // flags = CURSOR_SHOWING
-			ctx.Mem.Write64(p+8, 0x00010001) // hCursor
-			ctx.Mem.Write32(p+16, 0)
-			ctx.Mem.Write32(p+20, 0) // pt
+			ctx.Mem.Write32(p, 20)  // cbSize
+			ctx.Mem.Write32(p+4, 1) // flags = CURSOR_SHOWING
+			ctx.Mem.Write64(p+8, currentCursorHandle)
+			ctx.Mem.Write32(p+16, uint32(cursorPosX))
+			ctx.Mem.Write32(p+20, uint32(cursorPosY))
 		}
 		ctx.SetReturn(1)
 		return 0

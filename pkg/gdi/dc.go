@@ -93,9 +93,10 @@ type DC struct {
 
 // XForm represents a 2D affine transformation matrix (XFORM).
 // ReactOS: XFORM in wingdi.h
-//   | eM11  eM12  0 |
-//   | eM21  eM22  0 |
-//   | eDx   eDy   1 |
+//
+//	| eM11  eM12  0 |
+//	| eM21  eM22  0 |
+//	| eDx   eDy   1 |
 type XForm struct {
 	EM11, EM12 float32
 	EM21, EM22 float32
@@ -105,52 +106,52 @@ type XForm struct {
 // dcSave is a snapshot of mutable DC state stored by SaveDC.
 // ReactOS: DCSAVE in win32ss/gdi/ntgdi/dc.c
 type dcSave struct {
-	OriginX, OriginY       int32
-	ClipX0, ClipY0         int32
-	ClipX1, ClipY1         int32
-	Brush                  *Brush
-	Pen                    *Pen
-	Font                   *Font
-	Bitmap                 *Bitmap
-	TextColor, BkColor     uint32
-	BkMode                 int32
-	TextAlign              int32
-	MapMode                int32
-	WindowOrgX, WindowOrgY int32
-	WindowExtX, WindowExtY int32
+	OriginX, OriginY           int32
+	ClipX0, ClipY0             int32
+	ClipX1, ClipY1             int32
+	Brush                      *Brush
+	Pen                        *Pen
+	Font                       *Font
+	Bitmap                     *Bitmap
+	TextColor, BkColor         uint32
+	BkMode                     int32
+	TextAlign                  int32
+	MapMode                    int32
+	WindowOrgX, WindowOrgY     int32
+	WindowExtX, WindowExtY     int32
 	ViewportExtX, ViewportExtY int32
-	CharExtra              int32
-	StretchBltMode         int32
-	ClipRgnHandle          uint64
-	ArcDir                 int32
-	CurX, CurY             int32
-	ROP2                   int32
-	DCPenColor, DCBrushColor uint32
-	GraphicsMode           int32
-	WorldTransform         XForm
-	PolyFillMode           int32
+	CharExtra                  int32
+	StretchBltMode             int32
+	ClipRgnHandle              uint64
+	ArcDir                     int32
+	CurX, CurY                 int32
+	ROP2                       int32
+	DCPenColor, DCBrushColor   uint32
+	GraphicsMode               int32
+	WorldTransform             XForm
+	PolyFillMode               int32
 }
 
 // NewScreenDC creates a DC that targets the given Surface (the Wayland framebuffer).
 func NewScreenDC(s *Surface) *DC {
 	return &DC{
-		Target:       s,
-		IsScreen:     true,
-		TextColor:    0x000000,
-		BkColor:      0xFFFFFF,
-		BkMode:       2, // OPAQUE
-		ROP2:         13,
-		MapMode:      1, // MM_TEXT
-		WindowExtX:   1, WindowExtY: 1,
+		Target:     s,
+		IsScreen:   true,
+		TextColor:  0x000000,
+		BkColor:    0xFFFFFF,
+		BkMode:     2, // OPAQUE
+		ROP2:       13,
+		MapMode:    1, // MM_TEXT
+		WindowExtX: 1, WindowExtY: 1,
 		ViewportExtX: 1, ViewportExtY: 1,
 		StretchBltMode: 1, // BLACKONWHITE
-		ArcDir:       1,  // COUNTERCLOCKWISE
-		Brush:        stockBrushes[StockWhiteBrush],
-		Pen:          stockPens[StockBlackPen],
-		Font:         defaultFont(),
-		GraphicsMode: 1, // GM_COMPATIBLE
+		ArcDir:         1, // COUNTERCLOCKWISE
+		Brush:          stockBrushes[StockWhiteBrush],
+		Pen:            stockPens[StockBlackPen],
+		Font:           defaultFont(),
+		GraphicsMode:   1,                       // GM_COMPATIBLE
 		WorldTransform: XForm{EM11: 1, EM22: 1}, // identity
-		PolyFillMode: 1, // ALTERNATE
+		PolyFillMode:   1,                       // ALTERNATE
 	}
 }
 
@@ -158,14 +159,14 @@ func NewScreenDC(s *Surface) *DC {
 // A bitmap must be selected via SelectBitmap before drawing.
 func NewMemoryDC() *DC {
 	return &DC{
-		IsScreen:       false,
-		TextColor:      0x000000,
-		BkColor:        0xFFFFFF,
-		BkMode:         2,
-		ROP2:           13,
-		MapMode:        1,
-		WindowExtX:     1, WindowExtY: 1,
-		ViewportExtX:   1, ViewportExtY: 1,
+		IsScreen:   false,
+		TextColor:  0x000000,
+		BkColor:    0xFFFFFF,
+		BkMode:     2,
+		ROP2:       13,
+		MapMode:    1,
+		WindowExtX: 1, WindowExtY: 1,
+		ViewportExtX: 1, ViewportExtY: 1,
 		StretchBltMode: 1,
 		ArcDir:         1,
 		Brush:          stockBrushes[StockWhiteBrush],

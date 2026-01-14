@@ -34,9 +34,9 @@ func (s *Surface) SetPixel(x, y int32, c uint32) {
 	s.Pix[off+0] = byte(c >> 16) // R → stored as R in offset+2? No - XRGB8888 is B G R X
 	// XRGB8888 in memory: byte0=B, byte1=G, byte2=R, byte3=X
 	// COLORREF: 0x00RRGGBB → R=bits[23:16], G=bits[15:8], B=bits[7:0]
-	s.Pix[off+0] = byte(c)        // B
-	s.Pix[off+1] = byte(c >> 8)   // G
-	s.Pix[off+2] = byte(c >> 16)  // R
+	s.Pix[off+0] = byte(c)       // B
+	s.Pix[off+1] = byte(c >> 8)  // G
+	s.Pix[off+2] = byte(c >> 16) // R
 	s.Pix[off+3] = 0xFF
 }
 
@@ -49,7 +49,6 @@ func (s *Surface) GetPixel(x, y int32) uint32 {
 	r := uint32(s.Pix[off+2])
 	return r<<16 | g<<8 | b
 }
-
 
 func (s *Surface) FillRect(x0, y0, x1, y1 int32, color uint32) {
 	if x0 < 0 {

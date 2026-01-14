@@ -43,7 +43,8 @@ func registerMsimg32Handlers(hctx *HandlerCtx) {
 		nMesh := ctx.Arg(4)
 		ulMode := ctx.Arg(5)
 		ravelog.Logf("[msimg32] GradientFill hdc=0x%x vertices=%d mesh=%d mode=%d\n", hdc, nVertex, nMesh, ulMode)
-		_ = pVertex; _ = pMesh
+		_ = pVertex
+		_ = pMesh
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})

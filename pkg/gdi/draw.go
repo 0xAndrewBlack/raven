@@ -547,7 +547,30 @@ func (dc *DC) penColor() (uint32, bool) {
 
 func (dc *DC) drawLineWidth(x0, y0, x1, y1 int32, color uint32, width int32) {
 	if width <= 1 {
-		dc.target().DrawLine(x0, y0, x1, y1, color)
+		s := dc.target()
+		if dc.ClipX1 <= dc.ClipX0 || dc.ClipY1 <= dc.ClipY0 {
+			s.DrawLine(x0, y0, x1, y1, color)
+			return
+		}
+		dx := abs32(x1 - x0)
+		dy := abs32(y1 - y0)
+		steps := dx
+		if dy > steps {
+			steps = dy
+		}
+		if steps == 0 {
+			if _, _, _, _, ok := dc.clipRect(x0, y0, x0+1, y0+1); ok {
+				s.SetPixel(x0, y0, color)
+			}
+			return
+		}
+		for i := int32(0); i <= steps; i++ {
+			px := x0 + (x1-x0)*i/steps
+			py := y0 + (y1-y0)*i/steps
+			if _, _, _, _, ok := dc.clipRect(px, py, px+1, py+1); ok {
+				s.SetPixel(px, py, color)
+			}
+		}
 		return
 	}
 	half := width / 2
@@ -563,11 +586,11 @@ func (dc *DC) drawLineWidth(x0, y0, x1, y1 int32, color uint32, width int32) {
 	}
 	if abs32(dx) >= abs32(dy) {
 		for oy := -half; oy <= half; oy++ {
-			dc.target().DrawLine(x0, y0+oy, x1, y1+oy, color)
+			dc.drawLineWidth(x0, y0+oy, x1, y1+oy, color, 1)
 		}
 	} else {
 		for ox := -half; ox <= half; ox++ {
-			dc.target().DrawLine(x0+ox, y0, x1+ox, y1, color)
+			dc.drawLineWidth(x0+ox, y0, x1+ox, y1, color, 1)
 		}
 	}
 }

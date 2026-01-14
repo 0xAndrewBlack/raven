@@ -1424,9 +1424,9 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 	}
 	_ = advapi32
 	const (
-		processTokenHandle          uint64 = 0xF0000001
-		threadTokenHandle           uint64 = 0xF0000002
-		tokenErrorInsufficientBuffer       = 122
+		processTokenHandle           uint64 = 0xF0000001
+		threadTokenHandle            uint64 = 0xF0000002
+		tokenErrorInsufficientBuffer        = 122
 	)
 	setLastError := func(ctx *ntapi.TrapContext, code uint32) {
 		if ctx.State != nil && ctx.State.TEBAddr != 0 {
