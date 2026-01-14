@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"os"
+	"strings"
 	"time"
+	"unicode"
 
 	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
 	"github.com/mirkobrombin/Raven/pkg/loader"
@@ -29,6 +31,16 @@ type menuItem struct {
 
 type menuData struct {
 	items []menuItem
+}
+
+type popupMenuState struct {
+	Menu       uint64
+	OwnerHWND  uint64
+	X, Y       int32
+	Width      int32
+	Height     int32
+	ItemHeight int32
+	Items      []menuItem
 }
 
 type viewMapping struct {
@@ -227,6 +239,7 @@ type HandlerCtx struct {
 	ActiveHwnd        uint64
 	OpenMenuIdx       int
 	OpenMenuHwnd      uint64
+	ActivePopupMenu   *popupMenuState
 
 	// Modal dialog overlay state
 	DialogActive     bool
@@ -320,3 +333,82 @@ type HandlerCtx struct {
 }
 
 const menuBarHeight int32 = 20
+
+const popupMenuItemHeight int32 = 22
+
+func menuHasRenderableText(s string) bool {
+	for _, r := range s {
+		if r > 32 && !unicode.IsSpace(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func menuTextParts(s string) (label, accel string) {
+	label = s
+	if idx := strings.IndexByte(s, '\t'); idx >= 0 {
+		label = s[:idx]
+		accel = s[idx+1:]
+	}
+	return label, accel
+}
+
+func menuTextWidth(s string) int32 {
+	return int32(len([]rune(s)) * 8)
+}
+
+func menuPopupLayout(items []menuItem, x, y, boundW, boundH int32, stripAmp func(string) string) popupMenuState {
+	layout := popupMenuState{
+		X:          x,
+		Y:          y,
+		ItemHeight: popupMenuItemHeight,
+		Items:      items,
+	}
+	width := int32(96)
+	for _, item := range items {
+		if item.flags&0x0800 != 0 {
+			continue
+		}
+		label, accel := menuTextParts(item.text)
+		if stripAmp != nil {
+			label = stripAmp(label)
+			accel = stripAmp(accel)
+		}
+		if !menuHasRenderableText(label) && !menuHasRenderableText(accel) {
+			continue
+		}
+		itemW := int32(28) + menuTextWidth(label)
+		if accel != "" {
+			itemW += int32(24) + menuTextWidth(accel)
+		} else {
+			itemW += 20
+		}
+		if len(item.submenu) > 0 || item.flags&0x0010 != 0 {
+			itemW += 12
+		}
+		if itemW > width {
+			width = itemW
+		}
+	}
+	if len(items) == 0 {
+		layout.Width = width
+		layout.Height = 0
+		return layout
+	}
+	layout.Width = width
+	layout.Height = int32(len(items)) * layout.ItemHeight
+	if boundW > 0 && layout.X+layout.Width > boundW {
+		layout.X = boundW - layout.Width
+	}
+	if boundH > 0 && layout.Y+layout.Height > boundH {
+		layout.Y = boundH - layout.Height
+	}
+	if layout.X < 0 {
+		layout.X = 0
+	}
+	if layout.Y < 0 {
+		layout.Y = 0
+	}
+	return layout
+}

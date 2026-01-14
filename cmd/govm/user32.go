@@ -250,22 +250,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 		}
 	}
-	drawMenuCheckmark := func(x, y int32, color uint32) {
-		if wlWindow == nil {
-			return
-		}
-		drawAbsVLine(x, y+4, y+8, color)
-		drawAbsVLine(x+1, y+5, y+9, color)
-		drawAbsVLine(x+2, y+6, y+10, color)
-		drawAbsVLine(x+3, y+5, y+9, color)
-		drawAbsVLine(x+4, y+4, y+8, color)
-		drawAbsVLine(x+5, y+3, y+7, color)
-	}
-	_ = getMenuClientTop
-	_ = showPopupMenu
-	_ = showMenuBarPopup
-	_ = closePopupMenus
-	_ = drawMenuCheckmark
 	drawScrollBar := func(rect win32.Rect, vertical bool, si win32.ScrollInfo) {
 		if wlWindow == nil {
 			return
@@ -1272,13 +1256,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				if wlWindow.Resize(newW, newH) {
 					syncScreenSurface()
 				}
-				clientH := newH
-				if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
-					if clientH > menuBarHeight {
-						clientH -= menuBarHeight
-					}
-				}
-				lParam := uint64(uint16(newW)) | (uint64(uint16(clientH)) << 16)
+				clientW, clientH := getTopLevelClientSize(hwnd)
+				lParam := uint64(uint16(clientW)) | (uint64(uint16(clientH)) << 16)
 				hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd, 0x0005, 0, lParam})
 				if bRepaint != 0 {
 					queuePaint(hwnd)
@@ -2309,7 +2288,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			// Check menu area
 			if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
-				wr.Top += menuBarHeight
+				wr.Top += win32.GetSystemMetrics(win32.SM_CYMENU)
 				if !win32.PtInRect(&wr, px, py) {
 					ctx.SetReturn(5) // HTMENU
 					return 0
@@ -2406,13 +2385,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			if cs, ok := hwndChildren[hwnd]; ok {
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
 			} else if hwnd == hctx.MainHWND {
-				clientTop := wlWindow.TitleBarH
-				if _, hasMenu := hwndMenuBar[hwnd]; hasMenu {
-					clientTop = wlWindow.TitleBarH + menuBarHeight
-				}
+				clientTop := getMenuClientTop(hwnd)
 				w := wlWindow.Width
 				h := wlWindow.Height + wlWindow.TitleBarH
-				wlWindow.DrawRectAbs(0, clientTop, w, h, bgColor)
+				vScrollW, hScrollH := getClientScrollbarSizes(hwnd)
+				wlWindow.DrawRectAbs(0, clientTop, w-vScrollW, h-hScrollH, bgColor)
 			}
 			ctx.SetReturn(1)
 			return 0
@@ -3643,6 +3620,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		pos32, _ := mem.Read32(psi + 20)
 		si.Pos = int32(pos32)
 		pos := win32.SetScrollInfo(hwnd, nBar, &si, uint32(fMask))
+		requestWindowRepaint(hwnd)
 		ctx.SetReturn(uint64(pos))
 		return 0
 	})
@@ -3657,6 +3635,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		nBar := int(ctx.Arg(1))
 		pos := int32(ctx.Arg(2))
 		prev := win32.SetScrollPos(hwnd, nBar, pos)
+		requestWindowRepaint(hwnd)
 		ctx.SetReturn(uint64(prev))
 		return 0
 	})
@@ -3681,6 +3660,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		mn := int32(ctx.Arg(2))
 		mx := int32(ctx.Arg(3))
 		win32.SetScrollRange(hwnd, nBar, mn, mx)
+		requestWindowRepaint(hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3689,6 +3669,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		wBar := int32(ctx.Arg(1))
 		bShow := ctx.Arg(2) != 0
 		ravelog.Logf("[user32] ShowScrollBar hwnd=0x%x bar=%d show=%v\n", hwnd, wBar, bShow)
+		requestWindowRepaint(hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4678,7 +4659,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			// Non-client area: draw menu bar (same filter/width as click-handler and drawMenuOverlay).
 			if menuH, ok := hwndMenuBar[hwnd]; ok {
 				if md, ok2 := menus[menuH]; ok2 && len(md.items) > 0 {
-					clientTop = wlWindow.TitleBarH + menuBarHeight
+					clientTop = getMenuClientTop(hwnd)
 					wlWindow.DrawRectAbs(0, wlWindow.TitleBarH, w, clientTop, hctx.SysColors[15])
 					wlWindow.DrawRectAbs(0, clientTop-1, w, clientTop, hctx.SysColors[16])
 					x := int32(4)
@@ -4686,24 +4667,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						if item.flags&0x0800 != 0 || item.flags&0x0010 == 0 {
 							continue // separator or non-popup
 						}
-						label := menuStripAmpersand(item.text)
-						if idx := strings.IndexByte(label, '\t'); idx >= 0 {
-							label = label[:idx]
-						}
+						label, _ := menuTextParts(menuStripAmpersand(item.text))
 						if label == "" || label == "-" {
 							continue
 						}
-						hasRenderable := false
-						for _, r := range label {
-							if r > 32 {
-								hasRenderable = true
-								break
-							}
-						}
-						if !hasRenderable {
+						if !menuHasRenderableText(label) {
 							continue
 						}
-						tw := int32(len([]rune(label)))*8 + 12
+						tw := menuTextWidth(label) + 12
 						if hctx.OpenMenuIdx == i && hctx.OpenMenuHwnd == hwnd {
 							wlWindow.DrawRectAbs(x, wlWindow.TitleBarH, x+tw, clientTop-1, hctx.SysColors[20])
 							ncDrawText(x+4, wlWindow.TitleBarH+3, label, 0x000000, hctx.SysColors[20], true, 12)
@@ -4810,6 +4781,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			delete(hwndMenuBar, hwnd)
 		} else {
 			hwndMenuBar[hwnd] = hMenu
+		}
+		if hwnd == hctx.MainHWND {
+			requestWindowRepaint(hwnd)
 		}
 		_ = menus[hMenu]
 		ctx.SetReturn(1)
@@ -4922,7 +4896,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// Invalidate the menu bar area to trigger a repaint on next WM_PAINT.
 		hwnd := ctx.Arg(0)
 		if hwnd == hctx.MainHWND || hwnd == 0 {
-			queuePaint(hctx.MainHWND)
+			requestWindowRepaint(hctx.MainHWND)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -5097,7 +5071,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			y -= cs.y
 		} else if hwnd == hctx.MainHWND && wlWindow != nil {
 			// hctx.MainHWND client area starts below the NC area (TitleBarH + menuBar).
-			y -= wlWindow.TitleBarH + menuBarHeight
+			y -= getMenuClientTop(hwnd)
 		}
 		ctx.Mem.Write32(pPt, uint32(x))
 		ctx.Mem.Write32(pPt+4, uint32(y))
@@ -5118,7 +5092,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			x += cs.x
 			y += cs.y
 		} else if hwnd == hctx.MainHWND && wlWindow != nil {
-			y += wlWindow.TitleBarH + menuBarHeight
+			y += getMenuClientTop(hwnd)
 		}
 		ctx.Mem.Write32(pPt, uint32(x))
 		ctx.Mem.Write32(pPt+4, uint32(y))
@@ -5138,7 +5112,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				return cs.x, cs.y
 			}
 			if h == hctx.MainHWND && wlWindow != nil {
-				return 0, wlWindow.TitleBarH + menuBarHeight
+				return 0, getMenuClientTop(h)
 			}
 			return 0, 0
 		}
@@ -9090,6 +9064,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
 			hMenu := ctx.Arg(0)
 			uFlags := uint32(ctx.Arg(1))
+			x := int32(ctx.Arg(2))
+			y := int32(ctx.Arg(3))
 			hwndOwner := ctx.Arg(5)
 			if fn == "TrackPopupMenuEx" {
 				hwndOwner = ctx.Arg(4)
@@ -9102,6 +9078,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				MF_POPUP      = 0x0010
 				WM_COMMAND    = 0x0111
 			)
+			if hwndOwner == 0 {
+				hwndOwner = hctx.MainHWND
+			}
+			if wlWindow != nil {
+				showPopupMenu(hMenu, hwndOwner, x, y)
+				requestWindowRepaint(hwndOwner)
+			}
 			selected := uint64(0)
 			if m, ok := menus[hMenu]; ok {
 				for _, item := range m.items {
@@ -9124,16 +9107,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 			}
 			if uFlags&TPM_RETURNCMD != 0 {
+				closePopupMenus()
 				ctx.SetReturn(selected)
 				return 0
 			}
 			if selected != 0 {
 				target := hwndOwner
-				if target == 0 {
-					target = hctx.MainHWND
-				}
 				hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, WM_COMMAND, selected, 0})
 			}
+			closePopupMenus()
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -9151,6 +9133,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	}
 	d.RegisterAutoStubHandler(user32, "EndMenu", func(ctx *ntapi.TrapContext) uint32 {
 		ravelog.Logf("[user32] EndMenu\n")
+		closePopupMenus()
+		requestWindowRepaint(hctx.MainHWND)
 		ctx.SetReturn(1)
 		return 0
 	})

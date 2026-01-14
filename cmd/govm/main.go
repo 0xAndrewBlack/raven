@@ -28,6 +28,7 @@ import (
 	gosyscall "github.com/mirkobrombin/Raven/pkg/syscall"
 	"github.com/mirkobrombin/Raven/pkg/thread"
 	"github.com/mirkobrombin/Raven/pkg/vfs"
+	"github.com/mirkobrombin/Raven/pkg/win32"
 	"github.com/mirkobrombin/Raven/pkg/win32k"
 	"github.com/mirkobrombin/Raven/pkg/wl"
 	"github.com/mirkobrombin/Raven/pkg/x64"
@@ -2464,81 +2465,46 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 
 	hctx.DrawMenuOverlay = func() {
-		if wlWindow == nil || hctx.OpenMenuIdx < 0 {
+		if wlWindow == nil {
 			return
 		}
-		menuH, ok := hctx.HwndMenuBar[hctx.MainHWND]
-		if !ok {
+		pm := hctx.ActivePopupMenu
+		if pm == nil || len(pm.Items) == 0 {
 			return
 		}
-		md, ok2 := hctx.Menus[menuH]
-		if !ok2 || hctx.OpenMenuHwnd != hctx.MainHWND {
-			return
-		}
-		clientTop := wlWindow.TitleBarH + menuBarHeight
-		x := int32(4)
-		for i, item := range md.items {
-			if item.flags&0x0800 != 0 || item.flags&0x0010 == 0 {
+		dropX, dropY, dropW, dropH := pm.X, pm.Y, pm.Width, pm.Height
+		wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
+		wlWindow.DrawRectAbs(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
+		wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
+		wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+1, 0xA0A0A0)
+		wlWindow.DrawRectAbs(dropX, dropY, dropX+1, dropY+dropH, 0xA0A0A0)
+		wlWindow.DrawRectAbs(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, 0xA0A0A0)
+		wlWindow.DrawRectAbs(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, 0xA0A0A0)
+		for j, si := range pm.Items {
+			iy := dropY + int32(j)*pm.ItemHeight
+			if si.flags&0x0800 != 0 {
+				wlWindow.DrawRectAbs(dropX+6, iy+pm.ItemHeight/2, dropX+dropW-6, iy+pm.ItemHeight/2+1, sysColors[16])
 				continue
 			}
-			label := hctx.MenuStripAmpersand(item.text)
-			if idx := strings.IndexByte(label, '\t'); idx >= 0 {
-				label = label[:idx]
+			if si.flags&0x0003 != 0 {
+				wlWindow.DrawRectAbs(dropX+2, iy+1, dropX+dropW-2, iy+pm.ItemHeight-1, 0xF0F0F0)
 			}
-			if label == "" || label == "-" {
-				continue
+			label, accel := menuTextParts(hctx.MenuStripAmpersand(si.text))
+			hctx.NcDrawText(dropX+24, iy+4, label, 0x000000, sysColors[15], true, 12)
+			if accel != "" {
+				accelX := dropX + dropW - 12 - int32(len([]rune(accel))*8)
+				hctx.NcDrawText(accelX, iy+4, accel, 0x404040, sysColors[15], true, 12)
 			}
-			hasRenderable := false
-			for _, r := range label {
-				if r > 32 {
-					hasRenderable = true
-					break
-				}
+			if si.flags&0x0008 != 0 {
+				wlWindow.DrawRectAbs(dropX+8, iy+7, dropX+10, iy+13, 0x000000)
+				wlWindow.DrawRectAbs(dropX+10, iy+9, dropX+14, iy+11, 0x000000)
 			}
-			if !hasRenderable {
-				continue
+			if len(si.submenu) > 0 || si.flags&0x0010 != 0 {
+				ax := dropX + dropW - 8
+				wlWindow.DrawRectAbs(ax, iy+9, ax+1, iy+10, 0x000000)
+				wlWindow.DrawRectAbs(ax+1, iy+8, ax+2, iy+11, 0x000000)
+				wlWindow.DrawRectAbs(ax+2, iy+7, ax+3, iy+12, 0x000000)
 			}
-			tw := int32(len([]rune(label)))*8 + 12
-			if i == hctx.OpenMenuIdx {
-				// Resolve submenu items dynamically (handles late-binding via MF_POPUP)
-				subItems := item.submenu
-				if len(subItems) == 0 && item.flags&0x10 != 0 {
-					if sub, ok3 := hctx.Menus[item.id]; ok3 {
-						subItems = sub.items
-					}
-				}
-				if len(subItems) > 0 {
-					dropX := x
-					dropY := clientTop
-					dropW := int32(200)
-					dropH := int32(len(subItems)) * 20
-					// Shadow
-					wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
-					wlWindow.DrawRectAbs(dropX+dropW, dropY+2, dropX+dropW+2, dropY+dropH+2, 0x808080)
-					// Background
-					wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+dropH, sysColors[15])
-					// Border
-					wlWindow.DrawRectAbs(dropX, dropY, dropX+dropW, dropY+1, sysColors[16])
-					wlWindow.DrawRectAbs(dropX, dropY, dropX+1, dropY+dropH, sysColors[16])
-					wlWindow.DrawRectAbs(dropX, dropY+dropH-1, dropX+dropW, dropY+dropH, sysColors[16])
-					wlWindow.DrawRectAbs(dropX+dropW-1, dropY, dropX+dropW, dropY+dropH, sysColors[16])
-					for j, si := range subItems {
-						iy := dropY + int32(j)*20
-						if si.flags&0x0800 != 0 {
-							wlWindow.DrawRectAbs(dropX+2, iy+9, dropX+dropW-2, iy+10, sysColors[16])
-							wlWindow.DrawRectAbs(dropX+2, iy+10, dropX+dropW-2, iy+11, sysColors[20])
-						} else {
-							sl := hctx.MenuStripAmpersand(si.text)
-							if k := strings.IndexByte(sl, '\t'); k >= 0 {
-								sl = sl[:k]
-							}
-							hctx.NcDrawText(dropX+20, iy+3, sl, 0x000000, sysColors[15], true, 12)
-						}
-					}
-					break
-				}
-			}
-			x += tw
 		}
 	}
 
@@ -2623,6 +2589,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hctx.RepaintBuiltin = false
 			hctx.PaintTree(hctx.MainHWND)
 		}
+		if hctx.MainHWND != 0 {
+			if wnd := win32.Global.Get(hctx.MainHWND); wnd != nil {
+				win32.Global.UpdatePos(wnd, 0, 0, w.Width, w.Height+w.TitleBarH)
+			}
+		}
 		// Always draw dropdown menu overlay on top of everything (including toolbar).
 		hctx.DrawMenuOverlay()
 		// Draw modal dialog overlay on top of everything else.
@@ -2630,11 +2601,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		ravelog.Logf("[commit] Commit w=%d h=%d pixLen=%d\n", w.Width, w.Height, len(w.Pix))
 		w.Commit()
 		frameCount++
-		// Save a debug screenshot only for the first 10 frames to avoid filling /tmp.
-		if frameCount <= 10 {
-			path := fmt.Sprintf("/tmp/npp_frame%d.png", frameCount)
-			saveScreenshot(w.Pix, int(w.Width), int(w.Height+w.TitleBarH), path)
-		}
 	}
 
 	// builtinWndProc handles messages for built-in window classes (Edit, StatusBar, etc.)
