@@ -9,7 +9,27 @@ import (
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/win32"
 )
+
+type gdiDrawTextAdapter struct {
+	dc *gdi.DC
+}
+
+func (a gdiDrawTextAdapter) TextExtent(s string) (w, h int32) {
+	return a.dc.TextExtentStr(s)
+}
+
+func (a gdiDrawTextAdapter) TextOut(x, y int32, s string) {
+	a.dc.TextOut(x, y, s, false)
+}
+
+func (a gdiDrawTextAdapter) FontHeight() int32 {
+	if a.dc == nil || a.dc.Font == nil {
+		return gdi.DefaultFont().CellHeight
+	}
+	return a.dc.Font.CellHeight
+}
 
 func registerGdi32Handlers(hctx *HandlerCtx) {
 	d := hctx.Disp
@@ -29,18 +49,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 
 	ravelog.Logf("[gdi] registrar running: %d exports\n", len(gdi32.Exports))
 
-	// Per-DC auxiliary state not in gdi.DC (stored here to avoid modifying pkg/gdi).
-	// World transform: 6 IEEE-754 float32 values (eM11, eM12, eM21, eM22, eDx, eDy).
-	dcWorldXform := map[uint64][6]uint32{} // key=hdc handle
 	identityXform := [6]uint32{0x3F800000, 0, 0, 0x3F800000, 0, 0}
-	getXform := func(hdc uint64) [6]uint32 {
-		if xf, ok := dcWorldXform[hdc]; ok {
-			return xf
-		}
-		return identityXform
-	}
-	// PolyFillMode: ALTERNATE=1 (default), WINDING=2.
-	dcPolyFillMode := map[uint64]int32{} // key=hdc handle
 
 	// readXformMem reads an XFORM struct (6 float32s) from guest memory.
 	readXformMem := func(ctx *ntapi.TrapContext, addr uint64) [6]uint32 {
@@ -56,6 +65,26 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write32(addr+uint64(i)*4, xf[i])
 		}
 	}
+	rawToXForm := func(xf [6]uint32) gdi.XForm {
+		return gdi.XForm{
+			EM11: math.Float32frombits(xf[0]),
+			EM12: math.Float32frombits(xf[1]),
+			EM21: math.Float32frombits(xf[2]),
+			EM22: math.Float32frombits(xf[3]),
+			EDx:  math.Float32frombits(xf[4]),
+			EDy:  math.Float32frombits(xf[5]),
+		}
+	}
+	xformToRaw := func(xf gdi.XForm) [6]uint32 {
+		return [6]uint32{
+			math.Float32bits(xf.EM11),
+			math.Float32bits(xf.EM12),
+			math.Float32bits(xf.EM21),
+			math.Float32bits(xf.EM22),
+			math.Float32bits(xf.EDx),
+			math.Float32bits(xf.EDy),
+		}
+	}
 	// xformMul multiplies two XFORM matrices: result = a * b.
 	// ReactOS: CombineTransform in win32ss/gdi/ntgdi/coord.c
 	xformMul := func(a, b [6]uint32) [6]uint32 {
@@ -66,12 +95,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			bf[i] = math.Float32frombits(b[i])
 		}
 		var r [6]float32
-		r[0] = af[0]*bf[0] + af[1]*bf[2]          // eM11
-		r[1] = af[0]*bf[1] + af[1]*bf[3]          // eM12
-		r[2] = af[2]*bf[0] + af[3]*bf[2]          // eM21
-		r[3] = af[2]*bf[1] + af[3]*bf[3]          // eM22
-		r[4] = af[4]*bf[0] + af[5]*bf[2] + bf[4]  // eDx
-		r[5] = af[4]*bf[1] + af[5]*bf[3] + bf[5]  // eDy
+		r[0] = af[0]*bf[0] + af[1]*bf[2]         // eM11
+		r[1] = af[0]*bf[1] + af[1]*bf[3]         // eM12
+		r[2] = af[2]*bf[0] + af[3]*bf[2]         // eM21
+		r[3] = af[2]*bf[1] + af[3]*bf[3]         // eM22
+		r[4] = af[4]*bf[0] + af[5]*bf[2] + bf[4] // eDx
+		r[5] = af[4]*bf[1] + af[5]*bf[3] + bf[5] // eDy
 		var out [6]uint32
 		for i := 0; i < 6; i++ {
 			out[i] = math.Float32bits(r[i])
@@ -105,8 +134,18 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			f.Italic = v8 != 0
 			v8, _ = mem.Read8(lf + 21)
 			f.Underline = v8 != 0
+			v8, _ = mem.Read8(lf + 22)
+			f.StrikeOut = v8 != 0
 			v8, _ = mem.Read8(lf + 23)
 			f.CharSet = v8
+			v8, _ = mem.Read8(lf + 24)
+			f.OutPrecision = v8
+			v8, _ = mem.Read8(lf + 25)
+			f.ClipPrecision = v8
+			v8, _ = mem.Read8(lf + 26)
+			f.Quality = v8
+			v8, _ = mem.Read8(lf + 27)
+			f.PitchFamily = v8
 			// FaceName at offset 28 (LF_FACESIZE=32 UTF-16LE chars)
 			f.FaceName = readGuestUTF16(lf + 28)
 		}
@@ -116,10 +155,26 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(gdi32, "CreateFontW", func(ctx *ntapi.TrapContext) uint32 {
 		f := &gdi.Font{
-			Height: int32(ctx.Arg(0)),
-			Width:  int32(ctx.Arg(1)),
-			Weight: int32(ctx.Arg(5)),
-			Italic: ctx.Arg(6) != 0,
+			Height:        int32(ctx.Arg(0)),
+			Width:         int32(ctx.Arg(1)),
+			Escapement:    int32(ctx.Arg(2)),
+			Orientation:   int32(ctx.Arg(3)),
+			Weight:        int32(ctx.Arg(4)),
+			Italic:        ctx.Arg(5) != 0,
+			Underline:     ctx.Arg(6) != 0,
+			StrikeOut:     ctx.Arg(7) != 0,
+			CharSet:       uint8(ctx.Arg(8)),
+			OutPrecision:  uint8(ctx.Arg(9)),
+			ClipPrecision: uint8(ctx.Arg(10)),
+			Quality:       uint8(ctx.Arg(11)),
+			PitchFamily:   uint8(ctx.Arg(12)),
+		}
+		if pFace := ctx.Arg(13); pFace != 0 {
+			name := readGuestUTF16(pFace)
+			if len(name) > 31 {
+				name = name[:31]
+			}
+			f.FaceName = name
 		}
 		ctx.SetReturn(gdiMgr.CreateFont(f))
 		return 0
@@ -135,6 +190,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			memDC.Target = gdiMgr.Screen
 			memDC.IsScreen = true
 		}
+		memDC.WorldTransform = gdi.IdentityXForm()
+		memDC.PolyFillMode = 1
 		callerRIP := uint64(0)
 		if rr, ok := ctx.CPU.(ntapi.RegisterReader); ok {
 			rsp := rr.ReadReg(4) // RSP
@@ -218,13 +275,21 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "DeleteDC", func(ctx *ntapi.TrapContext) uint32 {
-		gdiMgr.DeleteDC(ctx.Arg(0))
+		hdc := ctx.Arg(0)
+		if gdiMgr.GetDC(hdc) == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+		gdiMgr.DeleteDC(hdc)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "DeleteObject", func(ctx *ntapi.TrapContext) uint32 {
-		gdiMgr.DeleteObject(ctx.Arg(0))
-		ctx.SetReturn(1)
+		if gdiMgr.DeleteObject(ctx.Arg(0)) {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SelectObject", func(ctx *ntapi.TrapContext) uint32 {
@@ -308,6 +373,18 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 					ctx.Mem.Write16(pv+28+uint64(i)*2, uint16(ch))
 				}
 				ctx.Mem.Write16(pv+28+uint64(len(face))*2, 0) // NUL terminator
+			}
+		case gdi.ObjBitmap:
+			ctx.SetReturn(32) // sizeof(BITMAP) on x64
+			if pv != 0 && obj.Bitmap != nil {
+				ctx.Mem.Write32(pv, 0)
+				ctx.Mem.Write32(pv+4, uint32(obj.Bitmap.Width))
+				ctx.Mem.Write32(pv+8, uint32(obj.Bitmap.Height))
+				ctx.Mem.Write32(pv+12, uint32(obj.Bitmap.Width*4))
+				ctx.Mem.Write16(pv+16, 1)
+				ctx.Mem.Write16(pv+18, 32)
+				ctx.Mem.Write32(pv+20, 0)
+				ctx.Mem.Write64(pv+24, 0)
 			}
 		default:
 			ctx.SetReturn(0)
@@ -555,9 +632,15 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 					} else {
 						w += f.AveCharWidth
 					}
+					w += dc.CharExtra
+				}
+				if w > 0 {
+					w -= dc.CharExtra
 				}
 			} else {
-				w = nLen * f.AveCharWidth
+				if nLen > 0 {
+					w = nLen*f.AveCharWidth + (nLen-1)*dc.CharExtra
+				}
 			}
 			ctx.Mem.Write32(pSize, uint32(w))
 			ctx.Mem.Write32(pSize+4, uint32(f.CellHeight))
@@ -592,9 +675,15 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 					} else {
 						w += f.AveCharWidth
 					}
+					w += dc.CharExtra
+				}
+				if w > 0 {
+					w -= dc.CharExtra
 				}
 			} else {
-				w = nLen * f.AveCharWidth
+				if nLen > 0 {
+					w = nLen*f.AveCharWidth + (nLen-1)*dc.CharExtra
+				}
 			}
 			ctx.Mem.Write32(pSize, uint32(w))
 			ctx.Mem.Write32(pSize+4, uint32(f.CellHeight))
@@ -699,10 +788,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "TextOutW", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		x := int32(ctx.Arg(1))
 		y := int32(ctx.Arg(2))
@@ -717,10 +802,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ExtTextOutW", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		x := int32(ctx.Arg(1))
 		y := int32(ctx.Arg(2))
@@ -868,10 +949,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "FillRect", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		lpRect := ctx.Arg(1)
 		if lpRect == 0 {
 			ctx.SetReturn(1)
@@ -888,11 +965,23 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
-	d.RegisterAutoStubHandler(gdi32, "Rectangle", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
+	d.RegisterAutoStubHandler(gdi32, "FrameRect", func(ctx *ntapi.TrapContext) uint32 {
+		lpRect := ctx.Arg(1)
+		if lpRect == 0 {
+			ctx.SetReturn(0)
 			return 0
 		}
+		dc := getDC(ctx.Arg(0))
+		left, _ := mem.Read32(lpRect)
+		top, _ := mem.Read32(lpRect + 4)
+		right, _ := mem.Read32(lpRect + 8)
+		bottom, _ := mem.Read32(lpRect + 12)
+		color := gdiMgr.BrushColor(ctx.Arg(2), hctx.SysColors)
+		dc.FrameRect(int32(left), int32(top), int32(right), int32(bottom), color)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "Rectangle", func(ctx *ntapi.TrapContext) uint32 {
 		dc := getDC(ctx.Arg(0))
 		dc.Rectangle(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)))
 		ctx.SetReturn(1)
@@ -911,20 +1000,12 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "LineTo", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		dc.LineTo(int32(ctx.Arg(1)), int32(ctx.Arg(2)))
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Ellipse", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		dc.Ellipse(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)))
 		ctx.SetReturn(1)
@@ -1553,7 +1634,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			x, y := float64(int32(px)), float64(int32(py))
 			// Apply world transform if GM_ADVANCED
 			if dc.GraphicsMode == 2 {
-				xf := getXform(ctx.Arg(0))
+				xf := xformToRaw(dc.WorldTransform)
 				af := [6]float32{}
 				for j := 0; j < 6; j++ {
 					af[j] = math.Float32frombits(xf[j])
@@ -1602,7 +1683,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			y += float64(dc.WindowOrgY)
 			// Reverse world transform if GM_ADVANCED
 			if dc.GraphicsMode == 2 {
-				xf := getXform(ctx.Arg(0))
+				xf := xformToRaw(dc.WorldTransform)
 				af := [6]float32{}
 				for j := 0; j < 6; j++ {
 					af[j] = math.Float32frombits(xf[j])
@@ -1681,19 +1762,23 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetWorldTransform", func(ctx *ntapi.TrapContext) uint32 {
 		dc := getDC(ctx.Arg(0))
-		if dc.GraphicsMode != 2 {
+		if dc == nil || dc.GraphicsMode != 2 {
 			ctx.SetReturn(0)
 			return 0
 		}
 		p := ctx.Arg(1)
 		if p != 0 {
-			dcWorldXform[ctx.Arg(0)] = readXformMem(ctx, p)
+			dc.WorldTransform = rawToXForm(readXformMem(ctx, p))
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetWorldTransform", func(ctx *ntapi.TrapContext) uint32 {
-		xf := getXform(ctx.Arg(0))
+		dc := getDC(ctx.Arg(0))
+		xf := identityXform
+		if dc != nil {
+			xf = xformToRaw(dc.WorldTransform)
+		}
 		p := ctx.Arg(1)
 		if p != 0 {
 			writeXformMem(ctx, p, xf)
@@ -1707,19 +1792,27 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		hdc := ctx.Arg(0)
 		p := ctx.Arg(1)
 		mode := ctx.Arg(2)
+		dc := getDC(hdc)
+		if dc == nil || dc.GraphicsMode != 2 {
+			ctx.SetReturn(0)
+			return 0
+		}
 		switch mode {
 		case 1: // MWT_IDENTITY
-			dcWorldXform[hdc] = identityXform
+			dc.WorldTransform = gdi.IdentityXForm()
 		case 2: // MWT_LEFTMULTIPLY: result = pXform * current
 			if p != 0 {
 				newXf := readXformMem(ctx, p)
-				dcWorldXform[hdc] = xformMul(newXf, getXform(hdc))
+				dc.WorldTransform = rawToXForm(xformMul(newXf, xformToRaw(dc.WorldTransform)))
 			}
 		case 3: // MWT_RIGHTMULTIPLY: result = current * pXform
 			if p != 0 {
 				newXf := readXformMem(ctx, p)
-				dcWorldXform[hdc] = xformMul(getXform(hdc), newXf)
+				dc.WorldTransform = rawToXForm(xformMul(xformToRaw(dc.WorldTransform), newXf))
 			}
+		default:
+			ctx.SetReturn(0)
+			return 0
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -1778,21 +1871,23 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	// ReactOS: NtGdiSetPolyFillMode / NtGdiGetPolyFillMode
 	// ALTERNATE=1 (default), WINDING=2.
 	d.RegisterAutoStubHandler(gdi32, "SetPolyFillMode", func(ctx *ntapi.TrapContext) uint32 {
-		hdc := ctx.Arg(0)
 		mode := int32(ctx.Arg(1))
-		prev, ok := dcPolyFillMode[hdc]
-		if !ok {
-			prev = 1 // ALTERNATE default
+		dc := getDC(ctx.Arg(0))
+		prev := int32(1)
+		if dc != nil && dc.PolyFillMode != 0 {
+			prev = dc.PolyFillMode
 		}
-		dcPolyFillMode[hdc] = mode
+		if dc != nil && (mode == 1 || mode == 2) {
+			dc.PolyFillMode = mode
+		}
 		ctx.SetReturn(uint64(uint32(prev)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetPolyFillMode", func(ctx *ntapi.TrapContext) uint32 {
-		hdc := ctx.Arg(0)
-		mode, ok := dcPolyFillMode[hdc]
-		if !ok {
-			mode = 1 // ALTERNATE default
+		dc := getDC(ctx.Arg(0))
+		mode := int32(1)
+		if dc != nil && dc.PolyFillMode != 0 {
+			mode = dc.PolyFillMode
 		}
 		ctx.SetReturn(uint64(uint32(mode)))
 		return 0
@@ -1960,8 +2055,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 				}
 			}
 			ctx.Mem.Write32(base, math.Float32bits(0))   // abcfA (left bearing)
-			ctx.Mem.Write32(base+4, math.Float32bits(w))  // abcfB (char width)
-			ctx.Mem.Write32(base+8, math.Float32bits(0))  // abcfC (right bearing)
+			ctx.Mem.Write32(base+4, math.Float32bits(w)) // abcfB (char width)
+			ctx.Mem.Write32(base+8, math.Float32bits(0)) // abcfC (right bearing)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -2648,30 +2743,18 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	// --- Drawing extras ---
 	d.RegisterAutoStubHandler(gdi32, "RoundRect", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		dc.RoundRect(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)), int32(ctx.Arg(5)), int32(ctx.Arg(6)))
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "SetPixel", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(0)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		dc.SetPixel(int32(ctx.Arg(1)), int32(ctx.Arg(2)), uint32(ctx.Arg(3)))
 		ctx.SetReturn(ctx.Arg(3))
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetPixel", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(0xFFFFFFFF)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		c := dc.GetPixel(int32(ctx.Arg(1)), int32(ctx.Arg(2)))
 		ctx.SetReturn(uint64(c))
@@ -2716,10 +2799,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "DrawFocusRect", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		pRect := ctx.Arg(1)
 		if pRect != 0 {
@@ -2733,10 +2812,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "InvertRect", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		pRect := ctx.Arg(1)
 		if pRect != 0 {
@@ -2750,10 +2825,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Polygon", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		pPts := ctx.Arg(1)
 		n := int(ctx.Arg(2))
@@ -2768,10 +2839,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Polyline", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		pPts := ctx.Arg(1)
 		n := int(ctx.Arg(2))
@@ -2802,11 +2869,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PolyBezier", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
-		// Approximate bezier as polyline
 		dc := getDC(ctx.Arg(0))
 		pPts := ctx.Arg(1)
 		n := int(ctx.Arg(2))
@@ -2816,25 +2878,21 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			y, _ := mem.Read32(pPts + uint64(i)*8 + 4)
 			pts[i] = [2]int32{int32(x), int32(y)}
 		}
-		dc.PolylinePoints(pts)
+		dc.PolyBezier(pts)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "PolyBezierTo", func(ctx *ntapi.TrapContext) uint32 {
-		// ReactOS: NtGdiPolyPolyDraw - bezier to current position
-		// Approximate as line segments through control points.
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		pPts := ctx.Arg(1)
 		n := int(ctx.Arg(2))
+		pts := make([][2]int32, n)
 		for i := 0; i < n; i++ {
 			x, _ := mem.Read32(pPts + uint64(i)*8)
 			y, _ := mem.Read32(pPts + uint64(i)*8 + 4)
-			dc.LineTo(int32(x), int32(y))
+			pts[i] = [2]int32{int32(x), int32(y)}
 		}
+		dc.PolyBezierTo(pts)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2858,7 +2916,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			}
 			pts := make([][2]int32, n)
 			for i := 0; i < n; i++ {
-				x, _ := mem.Read32(pPts + (off+uint64(i)*8))
+				x, _ := mem.Read32(pPts + (off + uint64(i)*8))
 				y, _ := mem.Read32(pPts + (off + uint64(i)*8 + 4))
 				pts[i] = [2]int32{int32(x), int32(y)}
 			}
@@ -2888,7 +2946,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			}
 			pts := make([][2]int32, n)
 			for i := 0; i < n; i++ {
-				x, _ := mem.Read32(pPts + (off+uint64(i)*8))
+				x, _ := mem.Read32(pPts + (off + uint64(i)*8))
 				y, _ := mem.Read32(pPts + (off + uint64(i)*8 + 4))
 				pts[i] = [2]int32{int32(x), int32(y)}
 			}
@@ -2899,57 +2957,28 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "Arc", func(ctx *ntapi.TrapContext) uint32 {
-		// Arc: draw ellipse approximation
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
-		dc.Ellipse(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)))
+		dc.Arc(
+			int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)),
+			int32(ctx.Arg(5)), int32(ctx.Arg(6)), int32(ctx.Arg(7)), int32(ctx.Arg(8)),
+		)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ArcTo", func(ctx *ntapi.TrapContext) uint32 {
-		// ArcTo(hdc, x1, y1, x2, y2, x3, y3, x4, y4)
-		// Draws an arc and updates the current position.
-		// ReactOS: NtGdiArcInternal(GdiTypeArcTo, ...)
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
-		x1 := int32(ctx.Arg(1))
-		y1 := int32(ctx.Arg(2))
-		x2 := int32(ctx.Arg(3))
-		y2 := int32(ctx.Arg(4))
-		// Draw line from current position to the arc start (approx: top of bounding ellipse)
-		dc.LineTo(x1+dc.OriginX, y1+dc.OriginY)
-		// Draw the arc (approximate with ellipse outline)
-		dc.Ellipse(x1, y1, x2, y2)
-		// Update current position to arc end (bottom-right of bounding rect)
-		dc.CurX = x2
-		dc.CurY = y2
+		dc.ArcTo(
+			int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), int32(ctx.Arg(4)),
+			int32(ctx.Arg(5)), int32(ctx.Arg(6)), int32(ctx.Arg(7)), int32(ctx.Arg(8)),
+		)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "AngleArc", func(ctx *ntapi.TrapContext) uint32 {
-		// AngleArc(hdc, x, y, dwRadius, eStartAngle, eSweepAngle)
-		// Draws a line from current position to the start of the arc, then draws the arc.
-		// ReactOS: NtGdiAngleArc
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
-		cx := int32(ctx.Arg(1))
-		cy := int32(ctx.Arg(2))
-		r := int32(ctx.Arg(3))
-		// Approximate: draw ellipse around center
-		dc.LineTo(cx-r+dc.OriginX, cy+dc.OriginY)
-		dc.Ellipse(cx-r, cy-r, cx+r, cy+r)
-		// Update current position to end of arc
-		dc.CurX = cx + r
-		dc.CurY = cy
+		start := math.Float32frombits(uint32(ctx.Arg(4)))
+		sweep := math.Float32frombits(uint32(ctx.Arg(5)))
+		dc.AngleArc(int32(ctx.Arg(1)), int32(ctx.Arg(2)), int32(ctx.Arg(3)), float64(start), float64(sweep))
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -2994,7 +3023,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		if dc.Brush != nil && dc.Brush.Style == 0 {
 			brushColor = dc.Brush.Color
 		}
-		surf.FloodFill( x, y, borderColor, brushColor, true)
+		surf.FloodFill(x, y, borderColor, brushColor, true)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3021,7 +3050,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			brushColor = dc.Brush.Color
 		}
 		isBorder := fillType == 0
-		surf.FloodFill( x, y, color, brushColor, isBorder)
+		surf.FloodFill(x, y, color, brushColor, isBorder)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3915,10 +3944,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	// --- TextOutA ---
 	// ReactOS: NtGdiExtTextOutW (ANSI → wide conversion in gdi32 client)
 	d.RegisterAutoStubHandler(gdi32, "TextOutA", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		x := int32(ctx.Arg(1))
 		y := int32(ctx.Arg(2))
@@ -3938,10 +3963,6 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	// --- ExtTextOutA ---
 	// ReactOS: NtGdiExtTextOutW (ANSI → wide in gdi32 client)
 	d.RegisterAutoStubHandler(gdi32, "ExtTextOutA", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow == nil {
-			ctx.SetReturn(1)
-			return 0
-		}
 		dc := getDC(ctx.Arg(0))
 		x := int32(ctx.Arg(1))
 		y := int32(ctx.Arg(2))
@@ -3999,6 +4020,92 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			dc.TextOut(x, y, text, false)
 		}
 		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "DrawTextW", func(ctx *ntapi.TrapContext) uint32 {
+		dc := getDC(ctx.Arg(0))
+		lpStr := ctx.Arg(1)
+		nLen := int(ctx.Arg(2))
+		pRect := ctx.Arg(3)
+		format := uint32(ctx.Arg(4))
+		if dc == nil || pRect == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		left, _ := mem.Read32(pRect)
+		top, _ := mem.Read32(pRect + 4)
+		right, _ := mem.Read32(pRect + 8)
+		bottom, _ := mem.Read32(pRect + 12)
+		var text []rune
+		if lpStr != 0 {
+			if nLen < 0 {
+				text = []rune(readGuestUTF16(lpStr))
+			} else {
+				chars := make([]uint16, 0, nLen)
+				for i := 0; i < nLen; i++ {
+					ch, _ := mem.Read16(lpStr + uint64(i)*2)
+					if ch == 0 {
+						break
+					}
+					chars = append(chars, ch)
+				}
+				text = gdi.UTF16ToRunes(chars)
+			}
+		}
+		rect := win32.Rect{Left: int32(left), Top: int32(top), Right: int32(right), Bottom: int32(bottom)}
+		height := win32.DrawTextW(gdiDrawTextAdapter{dc: dc}, text, &rect, format)
+		mem.Write32(pRect, uint32(rect.Left))
+		mem.Write32(pRect+4, uint32(rect.Top))
+		mem.Write32(pRect+8, uint32(rect.Right))
+		mem.Write32(pRect+12, uint32(rect.Bottom))
+		ctx.SetReturn(uint64(height))
+		return 0
+	})
+	d.RegisterAutoStubHandler(gdi32, "DrawTextA", func(ctx *ntapi.TrapContext) uint32 {
+		dc := getDC(ctx.Arg(0))
+		lpStr := ctx.Arg(1)
+		nLen := int(ctx.Arg(2))
+		pRect := ctx.Arg(3)
+		format := uint32(ctx.Arg(4))
+		if dc == nil || pRect == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		left, _ := mem.Read32(pRect)
+		top, _ := mem.Read32(pRect + 4)
+		right, _ := mem.Read32(pRect + 8)
+		bottom, _ := mem.Read32(pRect + 12)
+		text := ""
+		if lpStr != 0 {
+			if nLen < 0 {
+				var buf []byte
+				for i := uint64(0); ; i++ {
+					b, _ := mem.Read8(lpStr + i)
+					if b == 0 {
+						break
+					}
+					buf = append(buf, b)
+				}
+				text = string(buf)
+			} else {
+				buf := make([]byte, 0, nLen)
+				for i := 0; i < nLen; i++ {
+					b, _ := mem.Read8(lpStr + uint64(i))
+					if b == 0 {
+						break
+					}
+					buf = append(buf, b)
+				}
+				text = string(buf)
+			}
+		}
+		rect := win32.Rect{Left: int32(left), Top: int32(top), Right: int32(right), Bottom: int32(bottom)}
+		height := win32.DrawTextW(gdiDrawTextAdapter{dc: dc}, []rune(text), &rect, format)
+		mem.Write32(pRect, uint32(rect.Left))
+		mem.Write32(pRect+4, uint32(rect.Top))
+		mem.Write32(pRect+8, uint32(rect.Right))
+		mem.Write32(pRect+12, uint32(rect.Bottom))
+		ctx.SetReturn(uint64(height))
 		return 0
 	})
 	// --- GetDCOrgEx ---

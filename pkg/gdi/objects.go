@@ -7,7 +7,7 @@ package gdi
 type ObjType int
 
 const (
-	ObjBrush  ObjType = iota + 1
+	ObjBrush ObjType = iota + 1
 	ObjPen
 	ObjFont
 	ObjBitmap
@@ -36,20 +36,20 @@ type Pen struct {
 // Font represents a logical font (HFONT).
 // ReactOS: FONTOBJ / LFONT in win32ss/gdi/ntgdi/freetype.c
 type Font struct {
-	Height      int32
-	Width       int32
-	Escapement  int32
-	Orientation int32
-	Weight      int32
-	Italic      bool
-	Underline   bool
-	StrikeOut   bool
-	CharSet     uint8
-	OutPrecision uint8
+	Height        int32
+	Width         int32
+	Escapement    int32
+	Orientation   int32
+	Weight        int32
+	Italic        bool
+	Underline     bool
+	StrikeOut     bool
+	CharSet       uint8
+	OutPrecision  uint8
 	ClipPrecision uint8
-	Quality     uint8
-	PitchFamily uint8
-	FaceName    string
+	Quality       uint8
+	PitchFamily   uint8
+	FaceName      string
 	// Computed metrics (filled by CreateFont / selectFont)
 	AveCharWidth int32
 	MaxCharWidth int32
@@ -73,8 +73,8 @@ type Bitmap struct {
 // We implement rectangular regions only for now.
 type Region struct {
 	X0, Y0, X1, Y1 int32 // bounding rect
-	IsEmpty         bool
-	IsInfinite      bool
+	IsEmpty        bool
+	IsInfinite     bool
 }
 
 // Object wraps any GDI object with its type tag.
@@ -90,18 +90,21 @@ type Object struct {
 
 // Stock object indices - GetStockObject constants.
 const (
-	StockWhiteBrush    = 0
-	StockLtGrayBrush   = 1
-	StockGrayBrush     = 2
-	StockDkGrayBrush   = 3
-	StockBlackBrush    = 4
-	StockNullBrush     = 5
-	StockWhitePen      = 6
-	StockBlackPen      = 7
-	StockNullPen       = 8
-	StockSystemFont    = 13
+	StockWhiteBrush        = 0
+	StockLtGrayBrush       = 1
+	StockGrayBrush         = 2
+	StockDkGrayBrush       = 3
+	StockBlackBrush        = 4
+	StockNullBrush         = 5
+	StockWhitePen          = 6
+	StockBlackPen          = 7
+	StockNullPen           = 8
+	StockOEMFixedFont      = 10
+	StockAnsiFixedFont     = 11
+	StockAnsiVarFont       = 12
+	StockSystemFont        = 13
 	StockDeviceDefaultFont = 14
-	StockDefaultPalette = 15
-	StockSystemFixedFont = 16
-	StockDefaultGuiFont  = 17
+	StockDefaultPalette    = 15
+	StockSystemFixedFont   = 16
+	StockDefaultGuiFont    = 17
 )

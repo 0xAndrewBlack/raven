@@ -77,6 +77,17 @@ type controlState struct {
 	exStyle       uint32
 	text          string
 	visible       bool
+	listView      *listViewState
+	treeView      *treeViewState
+	treeViewIndex map[uint64]*tvItem
+	statusBar     *statusBarState
+	statusSimple  bool
+	statusMinH    int32
+	tab           *tabState
+	progress      *progressState
+	progressMq    bool
+	toolbar       *toolbarState
+	tooltip       *tooltipState
 	sbParts       []int32
 	sbTexts       []string
 	editModified  bool

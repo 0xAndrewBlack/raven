@@ -39,7 +39,11 @@ func (dc *DC) TextExtent(chars []uint16) (w, h int32) {
 	if f == nil {
 		f = defaultFont()
 	}
-	return int32(len(chars)) * f.AveCharWidth, f.CellHeight
+	charCount := int32(len(UTF16ToRunes(chars)))
+	if charCount == 0 {
+		return 0, f.CellHeight
+	}
+	return charCount*f.AveCharWidth + (charCount-1)*dc.CharExtra, f.CellHeight
 }
 
 // TextExtentStr is the same for a Go string (ASCII).
@@ -49,7 +53,10 @@ func (dc *DC) TextExtentStr(s string) (w, h int32) {
 		f = defaultFont()
 	}
 	runes := []rune(s)
-	return int32(len(runes)) * f.AveCharWidth, f.CellHeight
+	if len(runes) == 0 {
+		return 0, f.CellHeight
+	}
+	return int32(len(runes))*f.AveCharWidth + int32(len(runes)-1)*dc.CharExtra, f.CellHeight
 }
 
 // TextOut renders a Go string at (x, y) in client coordinates.
@@ -65,7 +72,7 @@ func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
 	}
 
 	runes := []rune(text)
-	textW := int32(len(runes)) * f.AveCharWidth
+	textW, _ := dc.TextExtentStr(text)
 	hAlign := dc.TextAlign & 0x06
 	vAlign := dc.TextAlign & 0x18
 	switch hAlign {
@@ -261,9 +268,15 @@ func (dc *DC) TextOutW(x, y int32, chars []uint16, opaque bool) {
 		// Decode UTF-16 surrogates to runes
 		runes := utf16ToRunes(chars)
 		textW := int32(0)
-		// rough width for alignment (use AveCharWidth from metrics)
-		for range runes {
-			textW += f.AveCharWidth
+		for i, r := range runes {
+			if g := GlyphFor(f.FaceID, pixSizeForFont(f), r); g != nil {
+				textW += g.Advance
+			} else {
+				textW += f.AveCharWidth
+			}
+			if i+1 < len(runes) {
+				textW += dc.CharExtra
+			}
 		}
 		hAlign := dc.TextAlign & 0x06
 		vAlign := dc.TextAlign & 0x18
@@ -281,7 +294,7 @@ func (dc *DC) TextOutW(x, y int32, chars []uint16, opaque bool) {
 		case 8:
 			ay -= f.CellHeight
 		}
-		dc.textOutTTF(ax, ay, runes, f, false)
+		dc.textOutTTF(ax, ay, runes, f, opaque)
 		return
 	}
 	// Bitmap fallback: decode to ASCII best-effort
@@ -293,7 +306,7 @@ func (dc *DC) TextOutW(x, y int32, chars []uint16, opaque bool) {
 			ascii = append(ascii, '?')
 		}
 	}
-	dc.TextOut(x, y, string(ascii), false)
+	dc.TextOut(x, y, string(ascii), opaque)
 }
 
 // UTF16ToRunes converts a UTF-16 slice to []rune, handling surrogate pairs.
@@ -317,3 +330,13 @@ func UTF16ToRunes(s []uint16) []rune {
 // utf16ToRunes is the internal alias.
 func utf16ToRunes(s []uint16) []rune { return UTF16ToRunes(s) }
 
+func pixSizeForFont(f *Font) int32 {
+	pixSize := f.Height
+	if pixSize < 0 {
+		pixSize = -pixSize
+	}
+	if pixSize == 0 {
+		pixSize = 12
+	}
+	return pixSize
+}

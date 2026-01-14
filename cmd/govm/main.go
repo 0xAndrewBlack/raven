@@ -2640,6 +2640,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if !ok {
 			return 0, false
 		}
+		initBuiltinControlState(cs)
 
 		switch msg {
 		case 0x000F: // WM_PAINT
@@ -2673,6 +2674,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				wlWindow.DrawRectAbs(cursorX, cursorY, cursorX+1, cursorY+16, 0x000000)
 			case "msctls_statusbar32":
+				syncStatusBarCompat(cs)
 				// Snap statusbar to bottom of Wayland window (common control behavior: WM_SIZE repositions it)
 				if wlWindow != nil {
 					sbY := wlWindow.Height + wlWindow.TitleBarH - cs.h
@@ -2782,6 +2784,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					renderTree(cs.tvRoots, 1)
 				}
 			case "syslistview32":
+				syncListViewCompat(cs)
 				// 3D sunken border + white area with column header
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])
@@ -2802,7 +2805,41 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRectAbs(colX-1, cs.y+1, colX, cs.y+21, sysColors[16])
 					}
 				}
+				if cs.listView != nil {
+					rowY := cs.y + 24
+					rowH := int32(18)
+					for i, item := range cs.listView.items {
+						if rowY+rowH > cs.y+cs.h-1 {
+							break
+						}
+						bg := sysColors[5]
+						if item.state&0x0002 != 0 {
+							bg = 0xD9E8FB
+						}
+						wlWindow.DrawRectAbs(cs.x+2, rowY, cs.x+cs.w-2, rowY+rowH, bg)
+						colX := cs.x + 6
+						if item.text != "" {
+							hctx.NcDrawText(colX, rowY+1, item.text, 0x000000, bg, true, 12)
+						}
+						for subIdx, sub := range item.subItems {
+							if subIdx+1 >= len(cs.listView.columns) {
+								break
+							}
+							width := int32(cs.listView.columns[subIdx].width)
+							if width <= 0 {
+								width = 100
+							}
+							colX += width
+							if sub != "" {
+								hctx.NcDrawText(colX+4, rowY+1, sub, 0x000000, bg, true, 12)
+							}
+						}
+						_ = i
+						rowY += rowH
+					}
+				}
 			case "systabcontrol32":
+				syncTabCompat(cs)
 				const tabH = int32(22)
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				wlWindow.DrawRectAbs(cs.x, cs.y+tabH-1, cs.x+cs.w, cs.y+tabH, sysColors[16])
@@ -3048,35 +3085,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			switch msg {
 			case wmUser + 4: // SB_SETPARTS
 				nParts := int(wParam)
-				if nParts > 0 && nParts < 256 && lParam != 0 {
-					cs.sbParts = make([]int32, nParts)
-					cs.sbTexts = make([]string, nParts)
-					for i := 0; i < nParts; i++ {
-						v, _ := mem.Read32(lParam + uint64(i*4))
-						cs.sbParts[i] = int32(v)
+				if nParts > 0 && nParts < 256 {
+					cs.statusBar.parts = make([]int, nParts)
+					if len(cs.statusBar.texts) < nParts {
+						texts := make([]string, nParts)
+						copy(texts, cs.statusBar.texts)
+						cs.statusBar.texts = texts
+					} else {
+						cs.statusBar.texts = cs.statusBar.texts[:nParts]
 					}
 				}
+				if nParts > 0 && nParts < 256 && lParam != 0 {
+					for i := 0; i < nParts; i++ {
+						v, _ := mem.Read32(lParam + uint64(i*4))
+						cs.statusBar.parts[i] = int(v)
+					}
+				}
+				syncStatusBarCompat(cs)
+				hctx.QueuePaint(hwnd)
 				return 1, true
 			case wmUser + 11: // SB_SETTEXTW (unicode)
 				part := int(wParam & 0xFF)
 				// Auto-grow parts array if needed
-				for len(cs.sbTexts) <= part {
-					cs.sbTexts = append(cs.sbTexts, "")
+				for len(cs.statusBar.texts) <= part {
+					cs.statusBar.texts = append(cs.statusBar.texts, "")
 				}
-				for len(cs.sbParts) <= part {
-					cs.sbParts = append(cs.sbParts, -1)
+				for len(cs.statusBar.parts) <= part {
+					cs.statusBar.parts = append(cs.statusBar.parts, -1)
 				}
 				if lParam != 0 {
-					cs.sbTexts[part] = readGuestUTF16(lParam)
+					cs.statusBar.texts[part] = readGuestUTF16(lParam)
 				}
+				syncStatusBarCompat(cs)
+				hctx.QueuePaint(hwnd)
 				return 1, true
 			case wmUser + 1: // SB_SETTEXTA
 				part := int(wParam & 0xFF)
-				for len(cs.sbTexts) <= part {
-					cs.sbTexts = append(cs.sbTexts, "")
+				for len(cs.statusBar.texts) <= part {
+					cs.statusBar.texts = append(cs.statusBar.texts, "")
 				}
-				for len(cs.sbParts) <= part {
-					cs.sbParts = append(cs.sbParts, -1)
+				for len(cs.statusBar.parts) <= part {
+					cs.statusBar.parts = append(cs.statusBar.parts, -1)
 				}
 				if lParam != 0 {
 					// Read ASCII string
@@ -3088,20 +3137,54 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 						buf = append(buf, b)
 					}
-					cs.sbTexts[part] = string(buf)
+					cs.statusBar.texts[part] = string(buf)
 				}
+				syncStatusBarCompat(cs)
+				hctx.QueuePaint(hwnd)
 				return 1, true
 			case wmUser + 5: // SB_GETPARTS
-				return uint64(len(cs.sbParts)), true
+				if lParam != 0 {
+					limit := len(cs.statusBar.parts)
+					if int(wParam) < limit {
+						limit = int(wParam)
+					}
+					for i := 0; i < limit; i++ {
+						mem.Write32(lParam+uint64(i*4), uint32(cs.statusBar.parts[i]))
+					}
+				}
+				return uint64(len(cs.statusBar.parts)), true
 			case wmUser + 3: // SB_GETTEXTLENGTHW
 				part := int(wParam)
-				if part >= 0 && part < len(cs.sbTexts) {
-					return uint64(len(cs.sbTexts[part])), true
+				if part >= 0 && part < len(cs.statusBar.texts) {
+					return uint64(len(utf16Encode(cs.statusBar.texts[part]))), true
 				}
 				return 0, true
 			case wmUser + 13: // SB_GETTEXTW
+				part := int(wParam & 0xFF)
+				if part >= 0 && part < len(cs.statusBar.texts) && lParam != 0 {
+					ws := utf16Encode(cs.statusBar.texts[part])
+					for i, ch := range ws {
+						mem.Write16(lParam+uint64(i*2), ch)
+					}
+					mem.Write16(lParam+uint64(len(ws))*2, 0)
+					return uint64(len(ws)), true
+				}
 				return 0, true
-			case wmUser + 9: // SB_ISSIMPLE
+			case wmUser + 8: // SB_SETMINHEIGHT
+				cs.statusMinH = int32(wParam)
+				if cs.statusMinH > 0 {
+					cs.h = cs.statusMinH + 4
+				}
+				hctx.QueuePaint(hwnd)
+				return 1, true
+			case wmUser + 9: // SB_SIMPLE
+				cs.statusSimple = wParam != 0
+				hctx.QueuePaint(hwnd)
+				return 1, true
+			case wmUser + 14: // SB_ISSIMPLE
+				if cs.statusSimple {
+					return 1, true
+				}
 				return 0, true
 			case wmUser + 6: // SB_GETBORDERS
 				return 0, true
@@ -3111,27 +3194,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// TreeView messages (TVM_xxx = TV_FIRST + x, TV_FIRST = 0x1100)
 		if cs.className == "systreeview32" {
 			const tvFirst = 0x1100
-			if cs.tvItems == nil {
-				cs.tvItems = make(map[uint64]*treeItem)
-				cs.tvNextHandle = 0x10001
-			}
+			tv := cs.treeView
 			switch msg {
 			case tvFirst + 0, tvFirst + 50: // TVM_INSERTITEMA, TVM_INSERTITEMW
-				// lParam → TVINSERTSTRUCTW
 				if lParam == 0 {
 					return 0, true
 				}
 				hParent, _ := mem.Read64(lParam)
-				// hInsertAfter at lParam+8 (ignored for now)
-				// TVITEMEXW starts at lParam+16
 				itemBase := lParam + 16
 				mask, _ := mem.Read32(itemBase)
-				// x64 TVITEMEXW layout: mask(4)+pad(4), hItem(8), state(4)+stateMask(4), pszText(8), cchTextMax(4)+iImage(4), iSelectedImage(4)+cChildren(4), lParam(8)
+				state, _ := mem.Read32(itemBase + 16)
 				pszText, _ := mem.Read64(itemBase + 24)
 				itemLParam, _ := mem.Read64(itemBase + 48)
-
 				text := ""
 				const tvifText = 0x0001
+				const tvifState = 0x0008
 				const lpstrTextcallback = 0xFFFFFFFFFFFFFFFF
 				if mask&tvifText != 0 && pszText != 0 && pszText != lpstrTextcallback {
 					if msg == tvFirst+50 { // wide
@@ -3140,38 +3217,91 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						text = readGuestString(pszText)
 					}
 				}
-
-				h := cs.tvNextHandle
-				cs.tvNextHandle++
-				ti := &treeItem{handle: h, parent: hParent, text: text, lParam: itemLParam, expanded: true}
-				cs.tvItems[h] = ti
-
-				const tviRoot uint64 = 0xFFFFFFFFFFFF0000
-				if hParent == 0 || hParent == tviRoot || hParent == 0xFFFF0000 {
-					cs.tvRoots = append(cs.tvRoots, h)
-				} else if pt, ok := cs.tvItems[hParent]; ok {
-					pt.children = append(pt.children, h)
-				} else {
-					cs.tvRoots = append(cs.tvRoots, h)
+				newItem := &tvItem{
+					handle:   tv.nextH,
+					text:     text,
+					param:    itemLParam,
+					expanded: true,
 				}
-				return h, true
+				if mask&tvifState != 0 {
+					newItem.state = state
+				}
+				tv.nextH++
+				parent := tv.root
+				const tviRoot uint64 = 0xFFFFFFFFFFFF0000
+				if hParent != 0 && hParent != tviRoot && hParent != 0xFFFF0000 {
+					if existing, ok := cs.treeViewIndex[hParent]; ok && existing != nil {
+						parent = existing
+					}
+				}
+				newItem.parent = parent
+				parent.children = append(parent.children, newItem)
+				cs.treeViewIndex[newItem.handle] = newItem
+				syncTreeViewCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return newItem.handle, true
 			case tvFirst + 2: // TVM_DELETEITEM
+				const tviRoot uint64 = 0xFFFFFFFFFFFF0000
+				if lParam == 0 || lParam == tviRoot || lParam == 0xFFFF0000 {
+					tv.root.children = nil
+					tv.selected = nil
+					cs.treeViewIndex = map[uint64]*tvItem{}
+					syncTreeViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				if item, ok := cs.treeViewIndex[lParam]; ok {
+					treeViewRemoveItem(cs, item)
+					syncTreeViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
 				return 1, true
 			case tvFirst + 1: // TVM_EXPAND
+				if item, ok := cs.treeViewIndex[lParam]; ok && item != nil {
+					const (
+						tveCollapse      = 0x0001
+						tveExpand        = 0x0002
+						tveToggle        = 0x0003
+						tveCollapseReset = 0x8000
+					)
+					action := uint32(wParam)
+					switch action &^ tveCollapseReset {
+					case tveCollapse:
+						item.expanded = false
+					case tveExpand:
+						item.expanded = true
+					case tveToggle:
+						item.expanded = !item.expanded
+					}
+					syncTreeViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+				}
 				return 1, true
 			case tvFirst + 9: // TVM_SETIMAGELIST
 				return 0, true
 			case tvFirst + 8: // TVM_GETIMAGELIST
 				return 0, true
 			case tvFirst + 11: // TVM_SELECTITEM
+				if item, ok := cs.treeViewIndex[lParam]; ok {
+					tv.selected = item
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				if lParam == 0 {
+					tv.selected = nil
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
 				return 1, true
 			case tvFirst + 13: // TVM_GETITEMW
-				// lParam → TVITEMEXW, read hItem from offset 8
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
 					hItem, _ := mem.Read64(lParam + 8)
-					if ti, ok := cs.tvItems[hItem]; ok {
+					if ti, ok := cs.treeViewIndex[hItem]; ok {
 						const tvifText = 0x0001
+						const tvifParam = 0x0004
+						const tvifState = 0x0008
 						if mask&tvifText != 0 {
 							pszText, _ := mem.Read64(lParam + 24)
 							cchMax, _ := mem.Read32(lParam + 32)
@@ -3187,16 +3317,116 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								mem.Write16(pszText+uint64(len(nameU16))*2, 0)
 							}
 						}
+						if mask&tvifParam != 0 {
+							mem.Write64(lParam+48, ti.param)
+						}
+						if mask&tvifState != 0 {
+							mem.Write32(lParam+16, ti.state)
+						}
 						return 1, true
 					}
 				}
 				return 0, true
 			case tvFirst + 63: // TVM_SETITEMW
+				if lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					hItem, _ := mem.Read64(lParam + 8)
+					if ti, ok := cs.treeViewIndex[hItem]; ok {
+						const tvifText = 0x0001
+						const tvifParam = 0x0004
+						const tvifState = 0x0008
+						if mask&tvifText != 0 {
+							pszText, _ := mem.Read64(lParam + 24)
+							if pszText != 0 {
+								ti.text = readGuestUTF16(pszText)
+							}
+						}
+						if mask&tvifParam != 0 {
+							ti.param, _ = mem.Read64(lParam + 48)
+						}
+						if mask&tvifState != 0 {
+							ti.state, _ = mem.Read32(lParam + 16)
+						}
+						syncTreeViewCompat(cs)
+						hctx.QueuePaint(hwnd)
+						return 1, true
+					}
+				}
 				return 1, true
 			case tvFirst + 14: // TVM_EDITLABELW
 				return 0, true
 			case tvFirst + 26: // TVM_GETCOUNT
-				return uint64(len(cs.tvItems)), true
+				return uint64(len(cs.treeViewIndex)), true
+			case tvFirst + 10: // TVM_GETNEXTITEM
+				switch uint32(wParam) {
+				case 0x0001: // TVGN_ROOT
+					if len(tv.root.children) > 0 {
+						return tv.root.children[0].handle, true
+					}
+				case 0x0002: // TVGN_NEXT
+					if item, ok := cs.treeViewIndex[lParam]; ok {
+						if next := treeViewNextSibling(item); next != nil {
+							return next.handle, true
+						}
+					}
+				case 0x0003: // TVGN_PREVIOUS
+					if item, ok := cs.treeViewIndex[lParam]; ok && item.parent != nil {
+						siblings := item.parent.children
+						for i, sibling := range siblings {
+							if sibling == item && i > 0 {
+								return siblings[i-1].handle, true
+							}
+						}
+					}
+				case 0x0004: // TVGN_PARENT
+					if item, ok := cs.treeViewIndex[lParam]; ok && item.parent != nil && item.parent != tv.root {
+						return item.parent.handle, true
+					}
+				case 0x0005: // TVGN_CHILD
+					if item, ok := cs.treeViewIndex[lParam]; ok && len(item.children) > 0 {
+						return item.children[0].handle, true
+					}
+				case 0x0009: // TVGN_CARET
+					if tv.selected != nil {
+						return tv.selected.handle, true
+					}
+				}
+				return 0, true
+			case tvFirst + 4: // TVM_GETITEMRECT
+				if lParam != 0 {
+					hItem, _ := mem.Read64(lParam)
+					if _, ok := cs.treeViewIndex[hItem]; ok {
+						items := treeViewVisibleItems(tv)
+						for idx, item := range items {
+							if item.handle == hItem {
+								top := int32(idx)*18 + 2
+								mem.Write32(lParam, 2)
+								mem.Write32(lParam+4, uint32(top))
+								mem.Write32(lParam+8, uint32(cs.w-2))
+								mem.Write32(lParam+12, uint32(top+18))
+								return 1, true
+							}
+						}
+					}
+				}
+				return 0, true
+			case tvFirst + 19: // TVM_SORTCHILDREN
+				parent := tv.root
+				if lParam != 0 {
+					var ok bool
+					parent, ok = cs.treeViewIndex[lParam]
+					if !ok {
+						return 0, true
+					}
+				}
+				if parent != nil {
+					sort.SliceStable(parent.children, func(i, j int) bool {
+						return strings.ToLower(parent.children[i].text) < strings.ToLower(parent.children[j].text)
+					})
+					syncTreeViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+				}
+				return 1, true
 			default:
 				if msg >= tvFirst && msg < tvFirst+100 {
 					return 0, true
@@ -3207,6 +3437,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// ListView messages (LVM_xxx = LV_FIRST + x, LV_FIRST = 0x1000)
 		if cs.className == "syslistview32" {
 			const lvFirst = 0x1000
+			lv := cs.listView
 			switch msg {
 			case lvFirst + 0: // LVM_GETBKCOLOR
 				return 0xFFFFFF, true
@@ -3217,19 +3448,81 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case lvFirst + 3: // LVM_SETIMAGELIST
 				return 0, true
 			case lvFirst + 4: // LVM_GETITEMCOUNT
-				return 0, true
-			case lvFirst + 7: // LVM_INSERTITEMA
-				return 0, true
-			case lvFirst + 77: // LVM_INSERTITEMW
-				return 0, true
+				return uint64(len(lv.items)), true
+			case lvFirst + 7, lvFirst + 77: // LVM_INSERTITEMA/W
+				if lParam == 0 {
+					return uint64(^uint32(0)), true
+				}
+				mask, _ := mem.Read32(lParam)
+				iItemV, _ := mem.Read32(lParam + 4)
+				iSubItemV, _ := mem.Read32(lParam + 8)
+				state, _ := mem.Read32(lParam + 12)
+				pszText, _ := mem.Read64(lParam + 20)
+				iImageV, _ := mem.Read32(lParam + 28)
+				param, _ := mem.Read64(lParam + 40)
+				item := lvItem{image: int(int32(iImageV)), param: param, state: state}
+				if mask&0x0001 != 0 && pszText != 0 && pszText != 0xFFFFFFFFFFFFFFFF {
+					if msg == lvFirst+77 {
+						item.text = readGuestUTF16(pszText)
+					} else {
+						item.text = readGuestString(pszText)
+					}
+				}
+				idx := int(int32(iItemV))
+				if idx < 0 || idx > len(lv.items) {
+					idx = len(lv.items)
+				}
+				if int32(iSubItemV) > 0 {
+					if idx < len(lv.items) {
+						subIdx := int(int32(iSubItemV) - 1)
+						for len(lv.items[idx].subItems) <= subIdx {
+							lv.items[idx].subItems = append(lv.items[idx].subItems, "")
+						}
+						lv.items[idx].subItems[subIdx] = item.text
+						if item.param != 0 {
+							lv.items[idx].param = item.param
+						}
+						if item.image != 0 {
+							lv.items[idx].image = item.image
+						}
+						if item.state != 0 {
+							lv.items[idx].state = item.state
+						}
+						hctx.QueuePaint(hwnd)
+						return uint64(idx), true
+					}
+					return uint64(^uint32(0)), true
+				}
+				lv.items = append(lv.items, lvItem{})
+				copy(lv.items[idx+1:], lv.items[idx:])
+				lv.items[idx] = item
+				if item.state&0x0002 != 0 || lv.selectedIdx < 0 {
+					lv.selectedIdx = idx
+				}
+				hctx.QueuePaint(hwnd)
+				return uint64(idx), true
 			case lvFirst + 8: // LVM_DELETEITEM
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(lv.items) {
+					lv.items = append(lv.items[:idx], lv.items[idx+1:]...)
+					if lv.selectedIdx == idx {
+						lv.selectedIdx = -1
+					} else if lv.selectedIdx > idx {
+						lv.selectedIdx--
+					}
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
 				return 1, true
 			case lvFirst + 9: // LVM_DELETEALLITEMS
+				lv.items = nil
+				lv.selectedIdx = -1
+				hctx.QueuePaint(hwnd)
 				return 1, true
 			case lvFirst + 27: // LVM_INSERTCOLUMNA
 				if lParam != 0 {
-					// LVCOLUMNA: mask(4) pad(4) fmt(4) cx(4) pszText(8) ...
 					mask, _ := mem.Read32(lParam)
+					fmtV, _ := mem.Read32(lParam + 4)
 					cx, _ := mem.Read32(lParam + 8)
 					pszText, _ := mem.Read64(lParam + 16)
 					text := ""
@@ -3240,12 +3533,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if width == 0 {
 						width = 100
 					}
-					cs.lvColumns = append(cs.lvColumns, listColumn{text: text, width: width})
+					col := lvColumn{text: text, width: int(width), fmt: int(int32(fmtV))}
+					idx := int(int32(wParam))
+					if idx < 0 || idx > len(lv.columns) {
+						idx = len(lv.columns)
+					}
+					lv.columns = append(lv.columns, lvColumn{})
+					copy(lv.columns[idx+1:], lv.columns[idx:])
+					lv.columns[idx] = col
+					syncListViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return uint64(idx), true
 				}
-				return uint64(len(cs.lvColumns) - 1), true
+				return uint64(len(lv.columns)), true
 			case lvFirst + 97: // LVM_INSERTCOLUMNW
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
+					fmtV, _ := mem.Read32(lParam + 4)
 					cx, _ := mem.Read32(lParam + 8)
 					pszText, _ := mem.Read64(lParam + 16)
 					text := ""
@@ -3256,16 +3560,207 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if width == 0 {
 						width = 100
 					}
-					cs.lvColumns = append(cs.lvColumns, listColumn{text: text, width: width})
+					col := lvColumn{text: text, width: int(width), fmt: int(int32(fmtV))}
+					idx := int(int32(wParam))
+					if idx < 0 || idx > len(lv.columns) {
+						idx = len(lv.columns)
+					}
+					lv.columns = append(lv.columns, lvColumn{})
+					copy(lv.columns[idx+1:], lv.columns[idx:])
+					lv.columns[idx] = col
+					syncListViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return uint64(idx), true
 				}
-				return uint64(len(cs.lvColumns) - 1), true
-			case lvFirst + 30: // LVM_SETCOLUMNWIDTH
+				return uint64(len(lv.columns)), true
+			case lvFirst + 96: // LVM_SETCOLUMNW
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(lv.columns) && lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					if mask&0x0001 != 0 {
+						fmtV, _ := mem.Read32(lParam + 4)
+						lv.columns[idx].fmt = int(int32(fmtV))
+					}
+					if mask&0x0002 != 0 {
+						cx, _ := mem.Read32(lParam + 8)
+						lv.columns[idx].width = int(int32(cx))
+					}
+					if mask&0x0004 != 0 {
+						pszText, _ := mem.Read64(lParam + 16)
+						if pszText != 0 {
+							lv.columns[idx].text = readGuestUTF16(pszText)
+						}
+					}
+					syncListViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+				}
 				return 1, true
+			case lvFirst + 28: // LVM_DELETECOLUMN
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(lv.columns) {
+					lv.columns = append(lv.columns[:idx], lv.columns[idx+1:]...)
+					syncListViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				return 0, true
+			case lvFirst + 30: // LVM_SETCOLUMNWIDTH
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(lv.columns) {
+					lv.columns[idx].width = int(int32(lParam))
+					syncListViewCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				return 1, true
+			case lvFirst + 29: // LVM_GETCOLUMNWIDTH
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(lv.columns) {
+					return uint64(lv.columns[idx].width), true
+				}
+				return 0, true
 			case lvFirst + 31: // LVM_CREATEDRAGIMAGE
 				return 0, true
 			case lvFirst + 54: // LVM_SETEXTENDEDLISTVIEWSTYLE
-				return 0, true
+				if wParam == 0 {
+					lv.extStyle = uint32(lParam)
+				} else {
+					lv.extStyle = (lv.extStyle &^ uint32(wParam)) | (uint32(lParam) & uint32(wParam))
+				}
+				return uint64(lv.extStyle), true
 			case lvFirst + 55: // LVM_GETEXTENDEDLISTVIEWSTYLE
+				return uint64(lv.extStyle), true
+			case lvFirst + 75: // LVM_GETITEMW
+				if lParam == 0 {
+					return 0, true
+				}
+				iItemV, _ := mem.Read32(lParam + 4)
+				iSubItemV, _ := mem.Read32(lParam + 8)
+				idx := int(int32(iItemV))
+				subIdx := int(int32(iSubItemV))
+				if idx < 0 || idx >= len(lv.items) {
+					return 0, true
+				}
+				item := &lv.items[idx]
+				mask, _ := mem.Read32(lParam)
+				if mask&0x0001 != 0 {
+					pszText, _ := mem.Read64(lParam + 20)
+					cchTextMax, _ := mem.Read32(lParam + 28)
+					text := item.text
+					if subIdx > 0 && subIdx-1 < len(item.subItems) {
+						text = item.subItems[subIdx-1]
+					}
+					if pszText != 0 && cchTextMax > 0 {
+						ws := utf16Encode(text)
+						limit := int(cchTextMax) - 1
+						if limit < 0 {
+							limit = 0
+						}
+						if len(ws) > limit {
+							ws = ws[:limit]
+						}
+						for i, ch := range ws {
+							mem.Write16(pszText+uint64(i*2), ch)
+						}
+						mem.Write16(pszText+uint64(len(ws))*2, 0)
+					}
+				}
+				if mask&0x0002 != 0 {
+					mem.Write32(lParam+28, uint32(item.image))
+				}
+				if mask&0x0004 != 0 {
+					mem.Write64(lParam+40, item.param)
+				}
+				if mask&0x0008 != 0 {
+					mem.Write32(lParam+12, item.state)
+				}
+				return 1, true
+			case lvFirst + 76: // LVM_SETITEMW
+				if lParam == 0 {
+					return 0, true
+				}
+				iItemV, _ := mem.Read32(lParam + 4)
+				iSubItemV, _ := mem.Read32(lParam + 8)
+				idx := int(int32(iItemV))
+				subIdx := int(int32(iSubItemV))
+				if idx < 0 || idx >= len(lv.items) {
+					return 0, true
+				}
+				mask, _ := mem.Read32(lParam)
+				item := &lv.items[idx]
+				if mask&0x0001 != 0 {
+					pszText, _ := mem.Read64(lParam + 20)
+					if pszText != 0 && pszText != 0xFFFFFFFFFFFFFFFF {
+						text := readGuestUTF16(pszText)
+						if subIdx > 0 {
+							for len(item.subItems) < subIdx {
+								item.subItems = append(item.subItems, "")
+							}
+							item.subItems[subIdx-1] = text
+						} else {
+							item.text = text
+						}
+					}
+				}
+				if mask&0x0002 != 0 {
+					iImageV, _ := mem.Read32(lParam + 28)
+					item.image = int(int32(iImageV))
+				}
+				if mask&0x0004 != 0 {
+					item.param, _ = mem.Read64(lParam + 40)
+				}
+				if mask&0x0008 != 0 {
+					item.state, _ = mem.Read32(lParam + 12)
+				}
+				hctx.QueuePaint(hwnd)
+				return 1, true
+			case lvFirst + 50: // LVM_GETSELECTEDCOUNT
+				count := 0
+				for _, item := range lv.items {
+					if item.state&0x0002 != 0 {
+						count++
+					}
+				}
+				return uint64(count), true
+			case lvFirst + 12: // LVM_GETNEXTITEM
+				start := int(int32(wParam))
+				flags := uint32(lParam)
+				if start < -1 {
+					start = -1
+				}
+				for i := start + 1; i < len(lv.items); i++ {
+					if flags == 0 || (flags&0x0002 != 0 && lv.items[i].state&0x0002 != 0) {
+						return uint64(i), true
+					}
+				}
+				return uint64(^uint32(0)), true
+			case lvFirst + 48: // LVM_SORTITEMS
+				sort.SliceStable(lv.items, func(i, j int) bool {
+					return strings.ToLower(lv.items[i].text) < strings.ToLower(lv.items[j].text)
+				})
+				hctx.QueuePaint(hwnd)
+				return 1, true
+			case lvFirst + 19: // LVM_ENSUREVISIBLE
+				return 1, true
+			case lvFirst + 43: // LVM_SETITEMSTATE
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(lv.items) && lParam != 0 {
+					state, _ := mem.Read32(lParam + 12)
+					stateMask, _ := mem.Read32(lParam + 16)
+					lv.items[idx].state = (lv.items[idx].state &^ stateMask) | (state & stateMask)
+					if lv.items[idx].state&0x0002 != 0 {
+						lv.selectedIdx = idx
+					} else if lv.selectedIdx == idx {
+						lv.selectedIdx = -1
+					}
+					hctx.QueuePaint(hwnd)
+				}
+				return 1, true
+			case lvFirst + 44: // LVM_GETITEMSTATE
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(lv.items) {
+					return uint64(lv.items[idx].state & uint32(lParam)), true
+				}
 				return 0, true
 			default:
 				if msg >= lvFirst && msg < lvFirst+200 {
@@ -3290,6 +3785,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if !ok {
 			return innerBuiltin(hwnd, msg, wParam, lParam)
 		}
+		initBuiltinControlState(cs)
 		switch cs.className {
 		case "rebarwindow32":
 			const rbFirst = 0x0400
@@ -3377,6 +3873,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		case "toolbarwindow32":
 			const tbFirst = 0x0400
 			const wmUser = 0x0400
+			tb := cs.toolbar
 			switch msg {
 			case 0x000F: // WM_PAINT
 				if wlWindow != nil {
@@ -3405,11 +3902,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRectAbs(bx+bw-1, by, bx+bw, by+bh, 0x716F64)       // outer right shadow
 						wlWindow.DrawRectAbs(bx, by+bh-1, bx+bw, by+bh, 0x716F64)       // outer bottom shadow
 					}
-					for _, btn := range cs.tbButtons {
+					for _, btn := range tb.buttons {
 						if x >= cs.x+cs.w {
 							break
 						}
-						if btn.fsStyle&0x01 != 0 { // TBSTYLE_SEP
+						if btn.style&0x01 != 0 { // TBSTYLE_SEP
 							mid := x + 3
 							wlWindow.DrawRectAbs(mid, cs.y+padY+2, mid+1, cs.y+padY+btnH-2, 0x716F64)
 							wlWindow.DrawRectAbs(mid+1, cs.y+padY+2, mid+2, cs.y+padY+btnH-2, 0xFFFFFF)
@@ -3418,7 +3915,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 						drawBtn(x, cs.y+padY, btnW, btnH)
 						// Draw icon if available
-						iconIdx := int(btn.iBitmap)
+						iconIdx := -1
 						iconW := int(cs.tbBitmapIconW)
 						iconH := int(cs.tbBitmapIconH)
 						if iconW <= 0 {
@@ -3467,16 +3964,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					btnW = 23
 				}
 				x := int32(2)
-				for _, btn := range cs.tbButtons {
-					if btn.fsStyle&0x01 != 0 { // TBSTYLE_SEP
+				for _, btn := range tb.buttons {
+					if btn.style&0x01 != 0 { // TBSTYLE_SEP
 						x += 8
 						continue
 					}
 					if clickX >= x && clickX < x+btnW {
-						if btn.fsState&0x08 == 0 { // dispatch unless TBSTATE_HIDDEN (0x08)
+						if btn.state&0x08 == 0 { // dispatch unless TBSTATE_HIDDEN (0x08)
 							// WM_COMMAND: LOWORD=cmdID, HIWORD=1 (BN_CLICKED), lParam=toolbar HWND
 							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{cs.parentHWND, 0x0111,
-								uint64(uint16(btn.idCommand)) | (1 << 16), hwnd})
+								uint64(uint16(btn.id)) | (1 << 16), hwnd})
 						}
 						break
 					}
@@ -3484,6 +3981,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return 0, true
 			case wmUser + 3: // TB_ENABLEBUTTON
+				id := int(int32(wParam))
+				for i := range tb.buttons {
+					if tb.buttons[i].id == id {
+						if lParam != 0 {
+							tb.buttons[i].state &^= 0x04
+						} else {
+							tb.buttons[i].state |= 0x04
+						}
+						syncToolbarCompat(cs)
+						hctx.QueuePaint(hwnd)
+						break
+					}
+				}
 				return 1, true
 			case wmUser + 4: // TB_CHECKBUTTON
 				return 1, true
@@ -3492,11 +4002,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 9: // TB_HIDEBUTTON
 				return 1, true
 			case wmUser + 6: // TB_GETSTATE
+				id := int(int32(wParam))
+				for _, btn := range tb.buttons {
+					if btn.id == id {
+						return uint64(btn.state), true
+					}
+				}
 				return 0, true
 			case wmUser + 11: // TB_ISBUTTONCHECKED
 				return 0, true
 			case wmUser + 10: // TB_ISBUTTONENABLED
-				return 1, true
+				id := int(int32(wParam))
+				for _, btn := range tb.buttons {
+					if btn.id == id {
+						if btn.state&0x04 == 0 {
+							return 1, true
+						}
+						return 0, true
+					}
+				}
+				return 0, true
 			case wmUser + 19: // TB_ADDBITMAP - load bitmap from PE resource, return start index
 				startIdx := len(cs.tbBitmapStore)
 				nBitmaps := int(wParam)
@@ -3566,11 +4091,39 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						fsState = stateBytes[0]
 						fsStyle = stateBytes[1]
 					}
-					cs.tbButtons = append(cs.tbButtons, tbButtonData{int32(iBitmapV), int32(idCommandV), fsState, fsStyle})
+					tb.buttons = append(tb.buttons, tbButton{
+						id:    int(int32(idCommandV)),
+						state: int(fsState),
+						style: int(fsStyle),
+					})
 					if i < 5 { // log first few to avoid spam
 						ravelog.Logf("[toolbar] TB_ADDBUTTONSW[%d] iBitmap=%d idCmd=0x%x state=0x%x style=0x%x\n", i, iBitmapV, idCommandV, fsState, fsStyle)
 					}
 				}
+				syncToolbarCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return 1, true
+			case wmUser + 67: // TB_INSERTBUTTONW
+				idx := int(int32(wParam))
+				if lParam == 0 {
+					return 0, true
+				}
+				idCommandV, _ := mem.Read32(lParam + 4)
+				stateBytes, _ := mem.ReadBytes(lParam+8, 2)
+				fsState, fsStyle := byte(0), byte(0)
+				if len(stateBytes) >= 2 {
+					fsState = stateBytes[0]
+					fsStyle = stateBytes[1]
+				}
+				btn := tbButton{id: int(int32(idCommandV)), state: int(fsState), style: int(fsStyle)}
+				if idx < 0 || idx > len(tb.buttons) {
+					idx = len(tb.buttons)
+				}
+				tb.buttons = append(tb.buttons, tbButton{})
+				copy(tb.buttons[idx+1:], tb.buttons[idx:])
+				tb.buttons[idx] = btn
+				syncToolbarCompat(cs)
+				hctx.QueuePaint(hwnd)
 				return 1, true
 			case wmUser + 44: // TB_BUTTONSTRUCTSIZE
 				return 0, true
@@ -3599,9 +4152,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 56: // TB_GETBUTTONSIZE
 				return (uint64(26) << 16) | 24, true // height=26, width=24
 			case wmUser + 22: // TB_BUTTONCOUNT
-				return uint64(len(cs.tbButtons)), true
+				return uint64(len(tb.buttons)), true
 			case wmUser + 21: // TB_DELETEBUTTON
-				return 1, true
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(tb.buttons) {
+					tb.buttons = append(tb.buttons[:idx], tb.buttons[idx+1:]...)
+					syncToolbarCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				return 0, true
 			case wmUser + 71: // TB_SETTOOLTIPS
 				return 0, true
 			case wmUser + 36: // TB_SETMAXTEXTROWS
@@ -3627,7 +4187,90 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 39: // TB_SETPARENT
 				return 0, true
 			case wmUser + 93: // TB_SETBUTTONINFOW
+				id := int(int32(wParam))
+				if lParam != 0 {
+					mask, _ := mem.Read32(lParam + 4)
+					for i := range tb.buttons {
+						if tb.buttons[i].id != id {
+							continue
+						}
+						if mask&0x0004 != 0 {
+							state, _ := mem.Read8(lParam + 8)
+							tb.buttons[i].state = int(state)
+						}
+						if mask&0x0008 != 0 {
+							style, _ := mem.Read8(lParam + 9)
+							tb.buttons[i].style = int(style)
+						}
+						if mask&0x0010 != 0 {
+							tb.buttons[i].param, _ = mem.Read64(lParam + 16)
+						}
+						if mask&0x0002 != 0 {
+							pszText, _ := mem.Read64(lParam + 40)
+							if pszText != 0 {
+								tb.buttons[i].text = readGuestUTF16(pszText)
+							}
+						}
+						syncToolbarCompat(cs)
+						hctx.QueuePaint(hwnd)
+						break
+					}
+				}
 				return 1, true
+			case wmUser + 95: // TB_GETBUTTONINFOW
+				if lParam == 0 {
+					return uint64(^uint32(0)), true
+				}
+				id := int(int32(wParam))
+				for i, btn := range tb.buttons {
+					if btn.id != id {
+						continue
+					}
+					mask, _ := mem.Read32(lParam + 4)
+					if mask&0x0001 != 0 {
+						mem.Write32(lParam, uint32(i))
+					}
+					if mask&0x0004 != 0 {
+						mem.Write8(lParam+8, uint8(btn.state))
+					}
+					if mask&0x0008 != 0 {
+						mem.Write8(lParam+9, uint8(btn.style))
+					}
+					if mask&0x0010 != 0 {
+						mem.Write64(lParam+16, btn.param)
+					}
+					if mask&0x0002 != 0 {
+						pszText, _ := mem.Read64(lParam + 40)
+						cchText, _ := mem.Read32(lParam + 48)
+						if pszText != 0 && cchText > 0 {
+							ws := utf16Encode(btn.text)
+							limit := int(cchText) - 1
+							if limit < 0 {
+								limit = 0
+							}
+							if len(ws) > limit {
+								ws = ws[:limit]
+							}
+							for j, ch := range ws {
+								mem.Write16(pszText+uint64(j*2), ch)
+							}
+							mem.Write16(pszText+uint64(len(ws))*2, 0)
+						}
+					}
+					return uint64(i), true
+				}
+				return uint64(^uint32(0)), true
+			case wmUser + 17: // TB_SETSTATE
+				id := int(int32(wParam))
+				for i := range tb.buttons {
+					if tb.buttons[i].id == id {
+						tb.buttons[i].state = int(uint32(lParam))
+						syncToolbarCompat(cs)
+						hctx.QueuePaint(hwnd)
+						break
+					}
+				}
+				return 0, true
 			case wmUser + 63: // TB_GETEXTENDEDSTYLE
 				return 0, true
 			case wmUser + 64: // TB_SETEXTENDEDSTYLE
@@ -3642,53 +4285,87 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		case "systabcontrol32":
 			const tcmFirst = 0x1300
+			tab := cs.tab
 			switch msg {
 			case tcmFirst + 7: // TCM_INSERTITEMA
-				// TCITEMA: mask(4), dwState(4), dwStateMask(4), [pad4], pszText(8 ptr)
+				item := tabItem{}
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
 					if mask&0x1 != 0 { // TCIF_TEXT
 						pText, _ := mem.Read64(lParam + 16)
 						if pText != 0 {
-							text := readGuestString(pText)
-							cs.tabTitles = append(cs.tabTitles, text)
+							item.text = readGuestString(pText)
 						}
-					} else {
-						cs.tabTitles = append(cs.tabTitles, "")
+					}
+					if mask&0x20 != 0 {
+						item.param, _ = mem.Read64(lParam + 24)
 					}
 				}
-				cs.tabCount++
-				return uint64(cs.tabCount - 1), true
+				idx := int(int32(wParam))
+				if idx < 0 || idx > len(tab.items) {
+					idx = len(tab.items)
+				}
+				tab.items = append(tab.items, tabItem{})
+				copy(tab.items[idx+1:], tab.items[idx:])
+				tab.items[idx] = item
+				if tab.curSel < 0 {
+					tab.curSel = 0
+				}
+				syncTabCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return uint64(idx), true
 			case tcmFirst + 62: // TCM_INSERTITEMW
-				// TCITEMW: mask(4), dwState(4), dwStateMask(4), [pad4], pszText(8 ptr)
+				item := tabItem{}
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
 					if mask&0x1 != 0 { // TCIF_TEXT
 						pText, _ := mem.Read64(lParam + 16)
 						if pText != 0 {
-							text := readGuestUTF16(pText)
-							cs.tabTitles = append(cs.tabTitles, text)
+							item.text = readGuestUTF16(pText)
 						}
-					} else {
-						cs.tabTitles = append(cs.tabTitles, "")
 					}
-				} else {
-					cs.tabTitles = append(cs.tabTitles, "")
+					if mask&0x20 != 0 {
+						item.param, _ = mem.Read64(lParam + 24)
+					}
 				}
-				cs.tabCount++
-				return uint64(cs.tabCount - 1), true
+				idx := int(int32(wParam))
+				if idx < 0 || idx > len(tab.items) {
+					idx = len(tab.items)
+				}
+				tab.items = append(tab.items, tabItem{})
+				copy(tab.items[idx+1:], tab.items[idx:])
+				tab.items[idx] = item
+				if tab.curSel < 0 {
+					tab.curSel = 0
+				}
+				syncTabCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return uint64(idx), true
 			case tcmFirst + 8: // TCM_DELETEITEM
-				if cs.tabCount > 0 {
-					cs.tabCount--
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(tab.items) {
+					tab.items = append(tab.items[:idx], tab.items[idx+1:]...)
+					if tab.curSel >= len(tab.items) {
+						tab.curSel = len(tab.items) - 1
+					}
+					syncTabCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return 1, true
 				}
-				return 1, true
-			case tcmFirst + 5: // TCM_GETITEMCOUNT
-				return uint64(cs.tabCount), true
-			case tcmFirst + 11: // TCM_GETCURSEL
-				return uint64(cs.tabCurSel), true
-			case tcmFirst + 12: // TCM_SETCURSEL
-				cs.tabCurSel = int(wParam)
 				return 0, true
+			case tcmFirst + 4: // TCM_GETITEMCOUNT
+				return uint64(len(tab.items)), true
+			case tcmFirst + 11: // TCM_GETCURSEL
+				return uint64(tab.curSel), true
+			case tcmFirst + 12: // TCM_SETCURSEL
+				prev := tab.curSel
+				newSel := int(int32(wParam))
+				if newSel >= 0 && newSel < len(tab.items) {
+					tab.curSel = newSel
+					syncTabCompat(cs)
+					hctx.QueuePaint(hwnd)
+				}
+				return uint64(prev), true
 			case tcmFirst + 13: // TCM_HITTEST
 				return uint64(0xFFFFFFFF), true // no tab hit
 			case tcmFirst + 10: // TCM_GETITEMRECT
@@ -3699,10 +4376,63 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					mem.Write32(lParam+12, 22)
 				}
 				return 1, true
-			case tcmFirst + 61: // TCM_GETITEMA
-				return 1, true
 			case tcmFirst + 60: // TCM_GETITEMW
-				return 1, true
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(tab.items) && lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					if mask&0x1 != 0 {
+						pText, _ := mem.Read64(lParam + 16)
+						if pText != 0 {
+							ws := utf16Encode(tab.items[idx].text)
+							for i, ch := range ws {
+								mem.Write16(pText+uint64(i*2), ch)
+							}
+							mem.Write16(pText+uint64(len(ws))*2, 0)
+						}
+					}
+					if mask&0x20 != 0 {
+						mem.Write64(lParam+24, tab.items[idx].param)
+					}
+					return 1, true
+				}
+				return 0, true
+			case tcmFirst + 5: // TCM_GETITEMA
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(tab.items) && lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					if mask&0x1 != 0 {
+						pText, _ := mem.Read64(lParam + 16)
+						if pText != 0 {
+							for i, b := range []byte(tab.items[idx].text) {
+								mem.Write8(pText+uint64(i), b)
+							}
+							mem.Write8(pText+uint64(len(tab.items[idx].text)), 0)
+						}
+					}
+					if mask&0x20 != 0 {
+						mem.Write64(lParam+24, tab.items[idx].param)
+					}
+					return 1, true
+				}
+				return 0, true
+			case tcmFirst + 61: // TCM_SETITEMW
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(tab.items) && lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					if mask&0x1 != 0 {
+						pText, _ := mem.Read64(lParam + 16)
+						if pText != 0 {
+							tab.items[idx].text = readGuestUTF16(pText)
+						}
+					}
+					if mask&0x20 != 0 {
+						tab.items[idx].param, _ = mem.Read64(lParam + 24)
+					}
+					syncTabCompat(cs)
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				return 0, true
 			case tcmFirst + 48: // TCM_ADJUSTRECT
 				// Shrinks or expands rect by tab bar height
 				if lParam != 0 {
@@ -3740,7 +4470,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					wlWindow.DrawRectAbs(cs.x, cs.y+tabH-1, cs.x+cs.w, cs.y+tabH, sysColors[16])
 					// Draw tabs
 					x := cs.x
-					for i := 0; i < cs.tabCount; i++ {
+					for i := 0; i < len(tab.items); i++ {
 						sel := i == cs.tabCurSel
 						bgCol := sysColors[15]
 						if sel {
@@ -3753,9 +4483,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRectAbs(x+tabW-1, cs.y, x+tabW, cs.y+tabH, sysColors[16])
 						wlWindow.DrawRectAbs(x, cs.y, x+tabW, cs.y+1, sysColors[16])
 						// tab title
-						if i < len(cs.tabTitles) && cs.tabTitles[i] != "" {
+						if i < len(tab.items) && tab.items[i].text != "" {
 							textColor := uint32(0x000000)
-							hctx.NcDrawText(x+4, cs.y+4, cs.tabTitles[i], textColor, bgCol, false, 12)
+							hctx.NcDrawText(x+4, cs.y+4, tab.items[i].text, textColor, bgCol, false, 12)
 						}
 						x += tabW
 					}
@@ -3766,15 +4496,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				const tabW2 = int32(80)
 				tx := int32(0)
 				hitTab := -1
-				for i := 0; i < cs.tabCount; i++ {
+				for i := 0; i < len(tab.items); i++ {
 					if clickX >= tx && clickX < tx+tabW2 {
 						hitTab = i
 						break
 					}
 					tx += tabW2
 				}
-				if hitTab >= 0 && hitTab != cs.tabCurSel {
-					cs.tabCurSel = hitTab
+				if hitTab >= 0 && hitTab != tab.curSel {
+					tab.curSel = hitTab
+					syncTabCompat(cs)
 					// Send WM_NOTIFY(TCN_SELCHANGE=-551) to parent so NPP switches document.
 					// NMHDR layout: hwndFrom(8), idFrom(8), code(4+4pad).
 					nmhdr := hctx.ScratchAlloc(32)
@@ -3915,6 +4646,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// --- gdi32.dll ---
 	delayReg(func() { registerGdi32Handlers(hctx) })
+
+	// --- gdiplus.dll ---
+	delayReg(func() { registerGdiplusHandlers(hctx) })
 
 	// --- crypt32.dll ---
 	delayReg(func() { registerCrypt32Handlers(hctx) })

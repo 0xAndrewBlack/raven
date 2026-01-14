@@ -394,6 +394,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				text:    windowName,
 				visible: style&0x10000000 != 0, // WS_VISIBLE
 			}
+			initBuiltinControlState(hwndChildren[hwnd])
 			// Initialise GWL_STYLE / GWL_EXSTYLE so GetWindowLong returns correct values.
 			windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
 			win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
@@ -2476,26 +2477,26 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 														}
 														ravelog.Logf("[click] dropdown item i=%d subItems=%d dropX=%d dropY=%d\n", i, len(subItems), x, clientTop)
 														if len(subItems) > 0 {
-														dropX := x
-														dropY := clientTop
-														dropW := int32(200)
-														dropH := int32(len(subItems)) * 20
-														if me.X >= dropX && me.X < dropX+dropW && me.Y >= dropY && me.Y < dropY+dropH {
-															itemIdx := int(me.Y-dropY) / 20
-															if itemIdx >= 0 && itemIdx < len(subItems) {
-																si := subItems[itemIdx]
-																if si.flags&0x0800 != 0 {
-																	// Separator - keep menu open
-																	dropHit = true
-																	break
+															dropX := x
+															dropY := clientTop
+															dropW := int32(200)
+															dropH := int32(len(subItems)) * 20
+															if me.X >= dropX && me.X < dropX+dropW && me.Y >= dropY && me.Y < dropY+dropH {
+																itemIdx := int(me.Y-dropY) / 20
+																if itemIdx >= 0 && itemIdx < len(subItems) {
+																	si := subItems[itemIdx]
+																	if si.flags&0x0800 != 0 {
+																		// Separator - keep menu open
+																		dropHit = true
+																		break
+																	}
+																	hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, 0x0111, si.id, 0})
 																}
-																hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, 0x0111, si.id, 0})
+																hctx.OpenMenuIdx = -1
+																queuePaint(hctx.MainHWND)
+																dropHit = true
+																break
 															}
-															hctx.OpenMenuIdx = -1
-															queuePaint(hctx.MainHWND)
-															dropHit = true
-															break
-														}
 														}
 													}
 													x += tw
@@ -2804,12 +2805,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		wParam, _ := mem.Read64(pMsg + 12)
 		key := uint16(wParam & 0xFFFF)
 		const (
-			WM_KEYDOWN   = 0x0100
+			WM_KEYDOWN    = 0x0100
 			WM_SYSKEYDOWN = 0x0104
-			FVIRTKEY     = 0x01
-			FCONTROL     = 0x08
-			FALT         = 0x10
-			FSHIFT       = 0x04
+			FVIRTKEY      = 0x01
+			FCONTROL      = 0x08
+			FALT          = 0x10
+			FSHIFT        = 0x04
 		)
 		if msgID != WM_KEYDOWN && msgID != WM_SYSKEYDOWN {
 			ctx.SetReturn(0)
@@ -3959,10 +3960,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			mem.Write64(rsp, hctx.SyncTrampoline)
 
 			// Set up WM_INITDIALOG call: dlgProc(hwnd, WM_INITDIALOG, wParam=focus, lParam=initParam)
-			rw.WriteReg(1, dlgHwnd)         // RCX = hDlg
-			rw.WriteReg(2, 0x0110)          // RDX = WM_INITDIALOG
-			rw.WriteReg(8, 0)               // R8 = wParam (focus control, 0 for now)
-			rw.WriteReg(9, dwInitParam)      // R9 = lParam (init param)
+			rw.WriteReg(1, dlgHwnd)     // RCX = hDlg
+			rw.WriteReg(2, 0x0110)      // RDX = WM_INITDIALOG
+			rw.WriteReg(8, 0)           // R8 = wParam (focus control, 0 for now)
+			rw.WriteReg(9, dwInitParam) // R9 = lParam (init param)
 			ctx.CPU.SetPC(lpDialogFunc)
 			ctx.ReturnOverridden = true
 			return 0
@@ -4083,7 +4084,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			t, _ := mem.Read32(lpRect + 4)
 			r, _ := mem.Read32(lpRect + 8)
 			b, _ := mem.Read32(lpRect + 12)
-			baseX := uint32(8) // avg char width
+			baseX := uint32(8)  // avg char width
 			baseY := uint32(16) // char height
 			mem.Write32(lpRect, l*baseX/4)
 			mem.Write32(lpRect+4, t*baseY/8)
@@ -4297,9 +4298,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// ICONINFO: fIcon(BOOL 4), xHotspot(DWORD 4), yHotspot(DWORD 4), hbmMask(HBITMAP 8), hbmColor(HBITMAP 8)
 		pInfo := ctx.Arg(1)
 		if pInfo != 0 {
-			mem.Write32(pInfo, 1)   // fIcon = TRUE
-			mem.Write32(pInfo+4, 0) // xHotspot
-			mem.Write32(pInfo+8, 0) // yHotspot
+			mem.Write32(pInfo, 1)    // fIcon = TRUE
+			mem.Write32(pInfo+4, 0)  // xHotspot
+			mem.Write32(pInfo+8, 0)  // yHotspot
 			mem.Write64(pInfo+16, 0) // hbmMask (NULL)
 			mem.Write64(pInfo+24, 0) // hbmColor (NULL)
 		}
@@ -4991,26 +4992,26 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				// +0x13C lfStatusFont (92 bytes)
 				// +0x198 lfMessageFont (92 bytes)
 				// +0x1F4 iPaddedBorderWidth=4
-				ctx.Mem.Write32(pvParam+0, 504)  // cbSize
-				ctx.Mem.Write32(pvParam+4, 1)    // iBorderWidth
-				ctx.Mem.Write32(pvParam+8, 17)   // iScrollWidth
-				ctx.Mem.Write32(pvParam+12, 17)  // iScrollHeight
-				ctx.Mem.Write32(pvParam+16, 36)  // iCaptionWidth
-				ctx.Mem.Write32(pvParam+20, 36)  // iCaptionHeight
+				ctx.Mem.Write32(pvParam+0, 504)    // cbSize
+				ctx.Mem.Write32(pvParam+4, 1)      // iBorderWidth
+				ctx.Mem.Write32(pvParam+8, 17)     // iScrollWidth
+				ctx.Mem.Write32(pvParam+12, 17)    // iScrollHeight
+				ctx.Mem.Write32(pvParam+16, 36)    // iCaptionWidth
+				ctx.Mem.Write32(pvParam+20, 36)    // iCaptionHeight
 				writeLogFont(24, "Segoe UI", -12)  // lfCaptionFont
-				ctx.Mem.Write32(pvParam+116, 36) // iSmCaptionWidth
-				ctx.Mem.Write32(pvParam+120, 36) // iSmCaptionHeight
+				ctx.Mem.Write32(pvParam+116, 36)   // iSmCaptionWidth
+				ctx.Mem.Write32(pvParam+120, 36)   // iSmCaptionHeight
 				writeLogFont(124, "Segoe UI", -12) // lfSmCaptionFont
-				ctx.Mem.Write32(pvParam+216, 36) // iMenuWidth
-				ctx.Mem.Write32(pvParam+220, 36) // iMenuHeight
+				ctx.Mem.Write32(pvParam+216, 36)   // iMenuWidth
+				ctx.Mem.Write32(pvParam+220, 36)   // iMenuHeight
 				writeLogFont(224, "Segoe UI", -12) // lfMenuFont
 				writeLogFont(316, "Segoe UI", -12) // lfStatusFont
 				writeLogFont(408, "Segoe UI", -12) // lfMessageFont
-				ctx.Mem.Write32(pvParam+500, 4)  // iPaddedBorderWidth
+				ctx.Mem.Write32(pvParam+500, 4)    // iPaddedBorderWidth
 			}
 		case 0x002B: // SPI_GETMINIMIZEDMETRICS - MINIMIZEDMETRICS (20 bytes)
 			if pvParam != 0 {
-				ctx.Mem.Write32(pvParam+0, 20) // cbSize
+				ctx.Mem.Write32(pvParam+0, 20)  // cbSize
 				ctx.Mem.Write32(pvParam+4, 160) // iWidth
 				ctx.Mem.Write32(pvParam+8, 0)   // iHorzGap
 				ctx.Mem.Write32(pvParam+12, 0)  // iVertGap
@@ -6357,7 +6358,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hWndRemove := ctx.Arg(0)
 		hWndNewNext := ctx.Arg(1)
 		if clipboardViewerHwnd == hWndRemove {
-		clipboardViewerHwnd = hWndNewNext
+			clipboardViewerHwnd = hWndNewNext
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -6947,7 +6948,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// Undocumented extended TranslateMessage. Same behavior.
 		pMsg := ctx.Arg(0)
 		if pMsg != 0 {
-			msg, _ := mem.Read32(pMsg + 8) // MSG.message
+			msg, _ := mem.Read32(pMsg + 8)      // MSG.message
 			if msg == 0x0100 || msg == 0x0104 { // WM_KEYDOWN, WM_SYSKEYDOWN
 				ctx.SetReturn(1)
 				return 0
@@ -7552,18 +7553,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		if pOut != 0 {
-			mem.Write32(pOut, 80)                   // cbSize
-			mem.Write32(pOut+4, ci.Style)            // style
-			mem.Write64(pOut+8, ci.WndProc)          // lpfnWndProc
+			mem.Write32(pOut, 80)                     // cbSize
+			mem.Write32(pOut+4, ci.Style)             // style
+			mem.Write64(pOut+8, ci.WndProc)           // lpfnWndProc
 			mem.Write32(pOut+16, uint32(ci.ClsExtra)) // cbClsExtra
 			mem.Write32(pOut+20, uint32(ci.WndExtra)) // cbWndExtra
-			mem.Write64(pOut+24, ci.HInstance)         // hInstance
-			mem.Write64(pOut+32, ci.HIcon)             // hIcon
-			mem.Write64(pOut+40, ci.HCursor)           // hCursor
-			mem.Write64(pOut+48, ci.HbrBG)             // hbrBackground
-			mem.Write64(pOut+56, ci.MenuName)          // lpszMenuName
-			mem.Write64(pOut+64, 0)                    // lpszClassName (pointer; set to 0)
-			mem.Write64(pOut+72, ci.HIconSm)           // hIconSm
+			mem.Write64(pOut+24, ci.HInstance)        // hInstance
+			mem.Write64(pOut+32, ci.HIcon)            // hIcon
+			mem.Write64(pOut+40, ci.HCursor)          // hCursor
+			mem.Write64(pOut+48, ci.HbrBG)            // hbrBackground
+			mem.Write64(pOut+56, ci.MenuName)         // lpszMenuName
+			mem.Write64(pOut+64, 0)                   // lpszClassName (pointer; set to 0)
+			mem.Write64(pOut+72, ci.HIconSm)          // hIconSm
 		}
 		ctx.SetReturn(uint64(atom))
 		return 0
@@ -7617,9 +7618,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		if pOut != 0 {
 			mem.Write32(pOut, ci.Style)               // style
-			mem.Write64(pOut+8, ci.WndProc)            // lpfnWndProc
-			mem.Write32(pOut+16, uint32(ci.ClsExtra))  // cbClsExtra
-			mem.Write32(pOut+20, uint32(ci.WndExtra))  // cbWndExtra
+			mem.Write64(pOut+8, ci.WndProc)           // lpfnWndProc
+			mem.Write32(pOut+16, uint32(ci.ClsExtra)) // cbClsExtra
+			mem.Write32(pOut+20, uint32(ci.WndExtra)) // cbWndExtra
 			mem.Write64(pOut+24, ci.HInstance)
 			mem.Write64(pOut+32, ci.HIcon)
 			mem.Write64(pOut+40, ci.HCursor)
@@ -8266,7 +8267,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		msgID, _ := mem.Read32(pMsg + 8) // message field at offset 8
-		if msgID == 0x0100 { // WM_KEYDOWN
+		if msgID == 0x0100 {             // WM_KEYDOWN
 			wParam, _ := mem.Read64(pMsg + 12)
 			vk := uint32(wParam & 0xFF)
 			if vk == 0x09 || vk == 0x1B { // VK_TAB or VK_ESCAPE
@@ -8307,22 +8308,22 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		nMaxCount := int(ctx.Arg(3))
 		var text string
 		for h, cs := range hwndChildren {
-		if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
-		text = hwndChildren[h].text
-		break
-		}
+			if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+				text = hwndChildren[h].text
+				break
+			}
 		}
 		written := 0
 		if lpStr != 0 && nMaxCount > 0 {
-		bs := []byte(text)
-		if len(bs) >= nMaxCount {
-		bs = bs[:nMaxCount-1]
-		}
-		for i, b := range bs {
-		ctx.Mem.Write8(lpStr+uint64(i), b)
-		written++
-		}
-		ctx.Mem.Write8(lpStr+uint64(written), 0)
+			bs := []byte(text)
+			if len(bs) >= nMaxCount {
+				bs = bs[:nMaxCount-1]
+			}
+			for i, b := range bs {
+				ctx.Mem.Write8(lpStr+uint64(i), b)
+				written++
+			}
+			ctx.Mem.Write8(lpStr+uint64(written), 0)
 		}
 		ctx.SetReturn(uint64(written))
 		return 0
@@ -8333,10 +8334,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		lpStr := ctx.Arg(2)
 		text := readGuestString(lpStr)
 		for h, cs := range hwndChildren {
-		if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
-		hwndChildren[h].text = text
-		break
-		}
+			if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+				hwndChildren[h].text = text
+				break
+			}
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -8486,19 +8487,19 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		item := findMenuItem(hMenu, uIDItem, uFlags)
 		text := ""
 		if item != nil {
-		text = item.text
+			text = item.text
 		}
 		written := 0
 		if lpStr != 0 && cchMax > 0 {
-		bs := []byte(text)
-		if len(bs) >= cchMax {
-		bs = bs[:cchMax-1]
-		}
-		for i, b := range bs {
-		ctx.Mem.Write8(lpStr+uint64(i), b)
-		written++
-		}
-		ctx.Mem.Write8(lpStr+uint64(written), 0)
+			bs := []byte(text)
+			if len(bs) >= cchMax {
+				bs = bs[:cchMax-1]
+			}
+			for i, b := range bs {
+				ctx.Mem.Write8(lpStr+uint64(i), b)
+				written++
+			}
+			ctx.Mem.Write8(lpStr+uint64(written), 0)
 		}
 		ctx.SetReturn(uint64(written))
 		return 0
@@ -8540,14 +8541,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		pInfo := ctx.Arg(3) // MENUBARINFO
 		if pInfo != 0 {
 			// MENUBARINFO: cbSize(4)+rcBar(16)+hMenu(8)+hwndMenu(8)+fBarFocused:1+fFocused:1
-			mem.Write32(pInfo, 48)    // cbSize
-			mem.Write32(pInfo+4, 0)   // rcBar.left
-			mem.Write32(pInfo+8, 0)   // rcBar.top
-			mem.Write32(pInfo+12, 0)  // rcBar.right
-			mem.Write32(pInfo+16, 0)  // rcBar.bottom
-			mem.Write64(pInfo+24, 0)  // hMenu
-			mem.Write64(pInfo+32, 0)  // hwndMenu
-			mem.Write32(pInfo+40, 0)  // flags
+			mem.Write32(pInfo, 48)   // cbSize
+			mem.Write32(pInfo+4, 0)  // rcBar.left
+			mem.Write32(pInfo+8, 0)  // rcBar.top
+			mem.Write32(pInfo+12, 0) // rcBar.right
+			mem.Write32(pInfo+16, 0) // rcBar.bottom
+			mem.Write64(pInfo+24, 0) // hMenu
+			mem.Write64(pInfo+32, 0) // hwndMenu
+			mem.Write32(pInfo+40, 0) // flags
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -8642,11 +8643,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		uHilite := uint32(ctx.Arg(3))
 		item := findMenuItem(hMenu, uIDItem, uHilite)
 		if item != nil {
-		if uHilite&0x0080 != 0 { // MF_HILITE
-		item.flags |= 0x0080
-		} else {
-		item.flags &^= 0x0080
-		}
+			if uHilite&0x0080 != 0 { // MF_HILITE
+				item.flags |= 0x0080
+			} else {
+				item.flags &^= 0x0080
+			}
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -8659,22 +8660,22 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		flags := uint32(ctx.Arg(4))
 		m, ok := menus[hMenu]
 		if !ok {
-		ctx.SetReturn(0)
-		return 0
+			ctx.SetReturn(0)
+			return 0
 		}
 		const mfChecked = 0x0008
 		for _, item := range m.items {
-		id := uint32(item.id)
-		if flags&0x0400 != 0 { // MF_BYPOSITION - skip for now
-		continue
-		}
-		if id >= first && id <= last {
-		if id == check {
-		item.flags |= mfChecked | 0x0200
-		} else {
-		item.flags &^= mfChecked | 0x0200
-		}
-		}
+			id := uint32(item.id)
+			if flags&0x0400 != 0 { // MF_BYPOSITION - skip for now
+				continue
+			}
+			if id >= first && id <= last {
+				if id == check {
+					item.flags |= mfChecked | 0x0200
+				} else {
+					item.flags &^= mfChecked | 0x0200
+				}
+			}
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -8775,15 +8776,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 		case 0x0029: // SPI_GETNONCLIENTMETRICS - NONCLIENTMETRICSA (500 bytes: no iPaddedBorderWidth pre-Vista)
 			if pvParam != 0 {
-				mem.Write32(pvParam+0, 500)  // cbSize
-				mem.Write32(pvParam+4, 1)    // iBorderWidth
-				mem.Write32(pvParam+8, 17)   // iScrollWidth
-				mem.Write32(pvParam+12, 17)  // iScrollHeight
-				mem.Write32(pvParam+16, 36)  // iCaptionWidth
-				mem.Write32(pvParam+20, 36)  // iCaptionHeight
+				mem.Write32(pvParam+0, 500) // cbSize
+				mem.Write32(pvParam+4, 1)   // iBorderWidth
+				mem.Write32(pvParam+8, 17)  // iScrollWidth
+				mem.Write32(pvParam+12, 17) // iScrollHeight
+				mem.Write32(pvParam+16, 36) // iCaptionWidth
+				mem.Write32(pvParam+20, 36) // iCaptionHeight
 				writeLogFontA(24, "Segoe UI", -12)
-				mem.Write32(pvParam+84, 36)  // iSmCaptionWidth (+0x54)
-				mem.Write32(pvParam+88, 36)  // iSmCaptionHeight (+0x58)
+				mem.Write32(pvParam+84, 36) // iSmCaptionWidth (+0x54)
+				mem.Write32(pvParam+88, 36) // iSmCaptionHeight (+0x58)
 				writeLogFontA(92, "Segoe UI", -12)
 				mem.Write32(pvParam+152, 36) // iMenuWidth (+0x98)
 				mem.Write32(pvParam+156, 36) // iMenuHeight (+0x9C)
@@ -8964,8 +8965,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	}
 	d.RegisterAutoStubHandler(user32, "ExcludeUpdateRgn", func(ctx *ntapi.TrapContext) uint32 {
 		// int ExcludeUpdateRgn(HDC hDC, HWND hWnd) - returns SIMPLEREGION
-		_ = ctx.Arg(0) // hDC
-		_ = ctx.Arg(1) // hWnd
+		_ = ctx.Arg(0)   // hDC
+		_ = ctx.Arg(1)   // hWnd
 		ctx.SetReturn(1) // SIMPLEREGION
 		return 0
 	})
@@ -9115,7 +9116,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		uiFlags := uint32(ctx.Arg(1))
 		count := uint32(len(hwndChildren))
 		if uiFlags == 1 { // GR_GDIOBJECTS
-		count = 50
+			count = 50
 		}
 		ctx.SetReturn(uint64(count))
 		return 0
@@ -9124,13 +9125,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// BOOL GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
 		pgui := ctx.Arg(1)
 		if pgui != 0 {
-		mem.Write32(pgui, 48) // cbSize
-		mem.Write32(pgui+4, 0) // flags
-		mem.Write64(pgui+8, hctx.ActiveHwnd) // hwndActive
-		mem.Write64(pgui+16, hctx.FocusHwnd) // hwndFocus
-		mem.Write64(pgui+24, 0) // hwndCapture
-		mem.Write64(pgui+32, 0) // hwndMenuOwner
-		mem.Write64(pgui+40, 0) // hwndMoveSize
+			mem.Write32(pgui, 48)                // cbSize
+			mem.Write32(pgui+4, 0)               // flags
+			mem.Write64(pgui+8, hctx.ActiveHwnd) // hwndActive
+			mem.Write64(pgui+16, hctx.FocusHwnd) // hwndFocus
+			mem.Write64(pgui+24, 0)              // hwndCapture
+			mem.Write64(pgui+32, 0)              // hwndMenuOwner
+			mem.Write64(pgui+40, 0)              // hwndMoveSize
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -9140,7 +9141,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if pInfo != 0 {
 			// COMBOBOXINFO: cbSize(4)+rcItem(16)+rcButton(16)+stateButton(4)+hwndCombo(8)+hwndItem(8)+hwndList(8)
 			hwnd := ctx.Arg(0)
-			mem.Write32(pInfo, 64) // cbSize
+			mem.Write32(pInfo, 64)      // cbSize
 			mem.Write64(pInfo+44, hwnd) // hwndCombo
 			mem.Write64(pInfo+52, 0)    // hwndItem
 			mem.Write64(pInfo+60, 0)    // hwndList
@@ -9244,8 +9245,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(user32, "DragDetect", func(ctx *ntapi.TrapContext) uint32 {
 		// BOOL DragDetect(HWND hwnd, POINT pt)
-		_ = ctx.Arg(0) // hwnd
-		_ = ctx.Arg(1) // pt packed as POINT
+		_ = ctx.Arg(0)   // hwnd
+		_ = ctx.Arg(1)   // pt packed as POINT
 		ctx.SetReturn(0) // no drag detected
 		return 0
 	})
@@ -9439,6 +9440,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				text:    windowName,
 				visible: style&0x10000000 != 0,
 			}
+			initBuiltinControlState(hwndChildren[hwnd])
 			windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
 			win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
 			if lClassName == "edit" && hctx.FocusHwnd == 0 {

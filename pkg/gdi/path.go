@@ -183,7 +183,7 @@ func (dc *DC) StrokePath() bool {
 			dc.CurX = p.X
 			dc.CurY = p.Y
 		case PT_LINETO:
-			dc.LineTo(p.X + dc.OriginX, p.Y + dc.OriginY)
+			dc.LineTo(p.X, p.Y)
 			dc.CurX = p.X
 			dc.CurY = p.Y
 		case PT_BEZIERTO:
@@ -199,7 +199,7 @@ func (dc *DC) StrokePath() bool {
 			// Find the subpath start and draw line back to it
 			for j := i; j >= 0; j-- {
 				if pts[j].Flags&0x06 == PT_MOVETO {
-					dc.LineTo(pts[j].X+dc.OriginX, pts[j].Y+dc.OriginY)
+					dc.LineTo(pts[j].X, pts[j].Y)
 					break
 				}
 			}
@@ -237,7 +237,7 @@ func (dc *DC) FillPath() bool {
 			maxY = p.Y
 		}
 	}
-	dc.FillRectBrush(minX+dc.OriginX, minY+dc.OriginY, maxX+dc.OriginX, maxY+dc.OriginY)
+	dc.FillRectBrush(minX, minY, maxX, maxY)
 	return true
 }
 
@@ -346,7 +346,7 @@ func (dc *DC) SelectClipPath(mode int) bool {
 func flattenBezier(dc *DC, x0, y0, x1, y1, x2, y2, x3, y3 int32) {
 	segs := flattenBezierPts(x0, y0, x1, y1, x2, y2, x3, y3)
 	for _, s := range segs {
-		dc.LineTo(s[0]+dc.OriginX, s[1]+dc.OriginY)
+		dc.LineTo(s[0], s[1])
 	}
 }
 

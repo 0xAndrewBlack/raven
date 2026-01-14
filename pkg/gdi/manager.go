@@ -5,8 +5,8 @@ import "sync/atomic"
 // Manager is the central GDI handle table.
 // ReactOS equivalent: GDI handle table in win32ss/gdi/ntgdi/gdiobj.c
 //
-// Handles are monotonically-increasing uint64 values starting at 0x10000.
-// The lower word encodes the object type (for quick validation).
+// Dynamic handles are monotonically-increasing uint64 values starting at
+// 0x80000100. Stock objects live in the fixed 0x80000000-0x80000020 range.
 // External code (main.go) uses uint64 handles exclusively.
 type Manager struct {
 	next    uint64 // atomic
@@ -32,12 +32,15 @@ type Manager struct {
 	nextFontMemRes   uint64
 }
 
-var baseHandle = uint64(0x10000)
+const (
+	stockHandleBase   = uint64(0x80000000)
+	dynamicHandleBase = uint64(0x80000100)
+)
 
 // NewManager creates an initialised GDI Manager with stock objects.
 func NewManager() *Manager {
 	m := &Manager{
-		next:             baseHandle,
+		next:             dynamicHandleBase,
 		objects:          make(map[uint64]*Object),
 		dcs:              make(map[uint64]*DC),
 		SystemPalette:    DefaultSystemPalette(),
@@ -57,27 +60,40 @@ func (m *Manager) alloc() uint64 {
 
 func (m *Manager) initStock() {
 	for idx, brush := range stockBrushes {
-		h := m.alloc()
+		h := stockHandleBase + uint64(idx)
 		m.objects[h] = &Object{Type: ObjBrush, Brush: brush}
 		if idx < len(m.stock) {
 			m.stock[idx] = h
 		}
 	}
 	for idx, pen := range stockPens {
-		h := m.alloc()
+		h := stockHandleBase + uint64(idx)
 		m.objects[h] = &Object{Type: ObjPen, Pen: pen}
 		if idx < len(m.stock) {
 			m.stock[idx] = h
 		}
 	}
 	// System font stock objects
-	for _, idx := range []int{StockSystemFont, StockDefaultGuiFont, StockSystemFixedFont, StockDeviceDefaultFont} {
+	for _, idx := range []int{
+		StockOEMFixedFont,
+		StockAnsiFixedFont,
+		StockAnsiVarFont,
+		StockSystemFont,
+		StockDefaultGuiFont,
+		StockSystemFixedFont,
+		StockDeviceDefaultFont,
+	} {
 		f := defaultFont()
-		h := m.alloc()
+		h := stockHandleBase + uint64(idx)
 		m.objects[h] = &Object{Type: ObjFont, Font: f}
 		if idx < len(m.stock) {
 			m.stock[idx] = h
 		}
+	}
+	if StockDefaultPalette < len(m.stock) {
+		h := stockHandleBase + uint64(StockDefaultPalette)
+		m.stock[StockDefaultPalette] = h
+		m.palettes[h] = m.SystemPalette
 	}
 }
 
@@ -227,6 +243,12 @@ func (m *Manager) CreateDIBSection(w, h int32) uint64 {
 // DeleteObject frees a GDI object handle and releases its bitmap surface.
 // ReactOS: NtGdiDeleteObjectApp
 func (m *Manager) DeleteObject(h uint64) bool {
+	if h >= stockHandleBase && h < stockHandleBase+0x20 {
+		return false
+	}
+	if m.DeletePalette(h) {
+		return true
+	}
 	obj, ok := m.objects[h]
 	if ok && obj.Type == ObjBitmap && obj.Bitmap != nil {
 		obj.Bitmap.Surf = nil
@@ -245,10 +267,10 @@ func (m *Manager) GetObject(h uint64) *Object {
 
 // Region result codes (Win32 standard).
 const (
-	RgnError       = 0
-	RgnNull        = 1
-	RgnSimple      = 2
-	RgnComplex     = 3
+	RgnError   = 0
+	RgnNull    = 1
+	RgnSimple  = 2
+	RgnComplex = 3
 )
 
 // Region combine modes (CombineRgn).
@@ -341,7 +363,9 @@ func (m *Manager) CombineRgn(dst, src1, src2 uint64, mode int) int {
 	case RgnCopy:
 		x0, y0, x1, y1 = r1.X0, r1.Y0, r1.X1, r1.Y1
 	case RgnAnd:
-		if r2 == nil { return RgnError }
+		if r2 == nil {
+			return RgnError
+		}
 		x0 = max32(r1.X0, r2.X0)
 		y0 = max32(r1.Y0, r2.Y0)
 		x1 = min32(r1.X1, r2.X1)
@@ -351,14 +375,18 @@ func (m *Manager) CombineRgn(dst, src1, src2 uint64, mode int) int {
 			return RgnNull
 		}
 	case RgnOr:
-		if r2 == nil { return RgnError }
+		if r2 == nil {
+			return RgnError
+		}
 		x0 = min32(r1.X0, r2.X0)
 		y0 = min32(r1.Y0, r2.Y0)
 		x1 = max32(r1.X1, r2.X1)
 		y1 = max32(r1.Y1, r2.Y1)
 	case RgnXor:
 		// Simplified: use union for XOR (approximation)
-		if r2 == nil { return RgnError }
+		if r2 == nil {
+			return RgnError
+		}
 		x0 = min32(r1.X0, r2.X0)
 		y0 = min32(r1.Y0, r2.Y0)
 		x1 = max32(r1.X1, r2.X1)
@@ -406,8 +434,18 @@ func (m *Manager) SelectClipRgn(dcH, rgnH uint64) int {
 	return RgnSimple
 }
 
-func min32(a, b int32) int32 { if a < b { return a }; return b }
-func max32(a, b int32) int32 { if a > b { return a }; return b }
+func min32(a, b int32) int32 {
+	if a < b {
+		return a
+	}
+	return b
+}
+func max32(a, b int32) int32 {
+	if a > b {
+		return a
+	}
+	return b
+}
 
 // GetStockObject returns the handle of a stock GDI object.
 // ReactOS: NtGdiGetStockObject
