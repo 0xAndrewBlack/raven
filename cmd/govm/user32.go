@@ -4683,6 +4683,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		text := readGuestString(textPtr)
 		caption := readGuestString(captionPtr)
 		ravelog.Logf("[user32] MessageBoxA: [%s] %s type=0x%x\n", caption, text, uType)
+		fmt.Printf("[MessageBoxA] %s: %s\n", caption, text)
 
 		const (
 			MB_OK          = 0
@@ -4725,6 +4726,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		text := readGuestUTF16(textPtr)
 		caption := readGuestUTF16(captionPtr)
 		ravelog.Logf("[user32] MessageBoxW: [%s] %s type=0x%x\n", caption, text, uType)
+		fmt.Printf("[MessageBoxW] %s: %s\n", caption, text)
 
 		const (
 			MB_OK          = 0
@@ -4762,6 +4764,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	var currentCursorHandle uint64 = 32512 // IDC_ARROW default
+	cursorPosX, cursorPosY := int32(0), int32(0)
 	d.RegisterAutoStubHandler(user32, "SetCursor", func(ctx *ntapi.TrapContext) uint32 {
 		hCursor := ctx.Arg(0)
 		prevCursor := currentCursorHandle
@@ -4807,7 +4810,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "GetCursorPos", func(ctx *ntapi.TrapContext) uint32 {
 		p := ctx.Arg(0)
 		if p != 0 {
-			var mx, my int32
+			mx, my := cursorPosX, cursorPosY
 			if hctx.WlDisplay != nil {
 				mx, my = hctx.WlDisplay.MousePos()
 			}
@@ -6933,8 +6936,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "SendMessageTimeoutA", sendMsgTimeoutImpl)
 	d.RegisterAutoStubHandler(user32, "SendMessageTimeoutW", sendMsgTimeoutImpl)
 	for _, fn := range []string{
-		"SendMessageCallbackA", "SendMessageCallbackW",
-		"SendNotifyMessageA", "SendNotifyMessageW", "SendDlgItemMessageA"} {
+		"SendMessageCallbackA", "SendMessageCallbackW"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
@@ -6944,6 +6946,47 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		})
 	}
+	for _, fn := range []string{"SendNotifyMessageA", "SendNotifyMessageW"} {
+		fn := fn
+		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
+			hwnd := ctx.Arg(0)
+			msg := uint32(ctx.Arg(1))
+			wParam := ctx.Arg(2)
+			lParam := ctx.Arg(3)
+			target := hwnd
+			if target == 0 || target == 0xFFFF || target == 0xFFFFFFFFFFFFFFFF {
+				target = hctx.MainHWND
+			}
+			if target == hctx.MainHWND || hwndChildren[target] != nil {
+				hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, msg, wParam, lParam})
+				ctx.SetReturn(1)
+			} else {
+				ctx.SetReturn(0)
+			}
+			return 0
+		})
+	}
+	d.RegisterAutoStubHandler(user32, "SendDlgItemMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		hDlg := ctx.Arg(0)
+		nIDDlgItem := ctx.Arg(1)
+		msg := uint32(ctx.Arg(2))
+		wParam := ctx.Arg(3)
+		lParam := ctx.Arg(4)
+		for h, cs := range hwndChildren {
+			if cs.parentHWND == hDlg && cs.ctrlID == nIDDlgItem {
+				if result, handled := builtinWndProc(h, msg, wParam, lParam); handled {
+					ctx.SetReturn(result)
+					return 0
+				}
+				if wp, ok := hwndWndProc[h]; ok && wp != 0 {
+					hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{h, msg, wParam, lParam})
+				}
+				break
+			}
+		}
+		ctx.SetReturn(0)
+		return 0
+	})
 	d.RegisterAutoStubHandler(user32, "TranslateMessageEx", func(ctx *ntapi.TrapContext) uint32 {
 		// Undocumented extended TranslateMessage. Same behavior.
 		pMsg := ctx.Arg(0)
@@ -7874,10 +7917,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// -------------------------------------------------------
 	// Cursor / display
 	// -------------------------------------------------------
-	cursorPosX, cursorPosY := int32(0), int32(0)
+	showCursorCount := int32(0)
 	d.RegisterAutoStubHandler(user32, "ShowCursor", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1)
-		return 0 // fake refcount 1
+		if ctx.Arg(0) == 0 {
+			showCursorCount--
+		} else {
+			showCursorCount++
+		}
+		ctx.SetReturn(uint64(int64(showCursorCount)))
+		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetCursorPos", func(ctx *ntapi.TrapContext) uint32 {
 		// BOOL SetCursorPos(int X, int Y)
@@ -8350,26 +8398,118 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0 // return hCtl
 		})
 	}
-	for _, fn := range []string{"CreateDialogParamA", "CreateDialogIndirectParamA",
-		"CreateDialogIndirectParamAorW"} {
-		fn := fn
-		_ = fn
-		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
+	d.RegisterAutoStubHandler(user32, "CreateDialogParamA", func(ctx *ntapi.TrapContext) uint32 {
+		lpTemplate := ctx.Arg(1)
+		hWndParent := ctx.Arg(2)
+		lpDialogFunc := ctx.Arg(3)
+		templateName := ""
+		if lpTemplate < 0x10000 {
+			templateName = fmt.Sprintf("#%d", lpTemplate)
+		} else {
+			templateName = readGuestString(lpTemplate)
+		}
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className:  "dialogbox",
+			parentHWND: hWndParent,
+			visible:    true,
+		}
+		ravelog.Logf("[dialog] CreateDialogParamA template=%s parent=0x%x dlgProc=0x%x → hwnd=0x%x\n",
+			templateName, hWndParent, lpDialogFunc, hwnd)
+		ctx.SetReturn(hwnd)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamA", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className: "dialogbox",
+			visible:   true,
+		}
+		ravelog.Logf("[dialog] CreateDialogIndirectParamA → hwnd=0x%x\n", hwnd)
+		ctx.SetReturn(hwnd)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamAorW", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className: "dialogbox",
+			visible:   true,
+		}
+		ravelog.Logf("[dialog] CreateDialogIndirectParamAorW → hwnd=0x%x\n", hwnd)
+		ctx.SetReturn(hwnd)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "DialogBoxParamA", func(ctx *ntapi.TrapContext) uint32 {
+		lpTemplate := ctx.Arg(1)
+		hWndParent := ctx.Arg(2)
+		lpDialogFunc := ctx.Arg(3)
+		dwInitParam := ctx.Arg(4)
+
+		templateName := ""
+		if lpTemplate < 0x10000 {
+			templateName = fmt.Sprintf("#%d", lpTemplate)
+		} else {
+			templateName = readGuestString(lpTemplate)
+		}
+		ravelog.Logf("[dialog] DialogBoxParamA template=%s parent=0x%x dlgProc=0x%x initParam=0x%x\n",
+			templateName, hWndParent, lpDialogFunc, dwInitParam)
+
+		if lpDialogFunc == 0 {
 			ctx.SetReturn(0)
 			return 0
-		})
-	}
-	for _, fn := range []string{"DialogBoxParamA", "DialogBoxIndirectParamA",
-		"DialogBoxIndirectParamAorW"} {
-		fn := fn
-		_ = fn
-		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			ctx.SetReturn(uint64(0xFFFFFFFF))
-			return 0 // -1 = error
-		})
-	}
+		}
+
+		dlgHwnd := hwndAlloc()
+		hwndChildren[dlgHwnd] = &controlState{
+			className:  "dialogbox",
+			parentHWND: hWndParent,
+			visible:    true,
+		}
+
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+		if ok && ok2 {
+			rsp := rr.ReadReg(4)
+			retAddr, _ := mem.Read64(rsp)
+			hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+				queue:               nil,
+				retAddr:             retAddr,
+				hwnd:                2,
+				returnWndProcResult: false,
+			})
+			mem.Write64(rsp, hctx.SyncTrampoline)
+			rw.WriteReg(1, dlgHwnd)
+			rw.WriteReg(2, 0x0110)
+			rw.WriteReg(8, 0)
+			rw.WriteReg(9, dwInitParam)
+			ctx.CPU.SetPC(lpDialogFunc)
+			ctx.ReturnOverridden = true
+			return 0
+		}
+
+		ctx.SetReturn(2)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "DialogBoxIndirectParamA", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className: "dialogbox",
+			visible:   true,
+		}
+		ravelog.Logf("[dialog] DialogBoxIndirectParamA → hwnd=0x%x\n", hwnd)
+		ctx.SetReturn(hwnd)
+		return 0
+	})
+	d.RegisterAutoStubHandler(user32, "DialogBoxIndirectParamAorW", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := hwndAlloc()
+		hwndChildren[hwnd] = &controlState{
+			className: "dialogbox",
+			visible:   true,
+		}
+		ravelog.Logf("[dialog] DialogBoxIndirectParamAorW → hwnd=0x%x\n", hwnd)
+		ctx.SetReturn(hwnd)
+		return 0
+	})
 	for _, fn := range []string{"DlgDirListA", "DlgDirListW", "DlgDirListComboBoxA",
 		"DlgDirListComboBoxW", "DlgDirSelectExA", "DlgDirSelectExW",
 		"DlgDirSelectComboBoxExA", "DlgDirSelectComboBoxExW"} {
@@ -8686,20 +8826,54 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	for _, fn := range []string{"TrackPopupMenu", "TrackPopupMenuEx"} {
 		fn := fn
-		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			// hMenu := ntapi.Handle(ctx.Arg(0))
-			uFlags := ctx.Arg(1)
-			// x := int32(ctx.Arg(2))
-			// y := int32(ctx.Arg(3))
-			// reserved := ctx.Arg(4)  // only for TrackPopupMenu
-			// hwndOwner := ntapi.Handle(ctx.Arg(5))
-			const TPM_RETURNCMD = 0x0100
-			if uFlags&TPM_RETURNCMD != 0 {
-				ctx.SetReturn(0) // no selection
-			} else {
-				ctx.SetReturn(1) // TRUE = menu was tracked
+			hMenu := ctx.Arg(0)
+			uFlags := uint32(ctx.Arg(1))
+			hwndOwner := ctx.Arg(5)
+			if fn == "TrackPopupMenuEx" {
+				hwndOwner = ctx.Arg(4)
 			}
+			const (
+				TPM_RETURNCMD = 0x0100
+				MF_SEPARATOR  = 0x0800
+				MF_GRAYED     = 0x0001
+				MF_DISABLED   = 0x0002
+				MF_POPUP      = 0x0010
+				WM_COMMAND    = 0x0111
+			)
+			selected := uint64(0)
+			if m, ok := menus[hMenu]; ok {
+				for _, item := range m.items {
+					if item.flags&(MF_SEPARATOR|MF_GRAYED|MF_DISABLED) != 0 {
+						continue
+					}
+					if item.flags&MF_POPUP != 0 && len(item.submenu) > 0 {
+						for _, sub := range item.submenu {
+							if sub.flags&(MF_SEPARATOR|MF_GRAYED|MF_DISABLED) == 0 && sub.id != 0 {
+								selected = sub.id
+								break
+							}
+						}
+					} else if item.id != 0 {
+						selected = item.id
+					}
+					if selected != 0 {
+						break
+					}
+				}
+			}
+			if uFlags&TPM_RETURNCMD != 0 {
+				ctx.SetReturn(selected)
+				return 0
+			}
+			if selected != 0 {
+				target := hwndOwner
+				if target == 0 {
+					target = hctx.MainHWND
+				}
+				hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, WM_COMMAND, selected, 0})
+			}
+			ctx.SetReturn(1)
 			return 0
 		})
 	}

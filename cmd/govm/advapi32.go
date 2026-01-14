@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
+	"sort"
 	"strings"
 	"sync"
 
@@ -1413,6 +1414,7 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 	mem := hctx.Mem
 	readGuestString := hctx.ReadGuestString
 	readGuestUTF16 := hctx.ReadGuestUTF16
+	regHive := hctx.RegHive
 
 	advapi32, ok := hctx.SynthByName["advapi32.dll"]
 	if !ok {
@@ -1611,22 +1613,729 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 			return 0
 		})
 	}
-	// SCM stubs - service manager not supported but apps probe for it
-	for _, fn := range []string{"OpenSCManagerA", "OpenSCManagerW",
-		"OpenServiceA", "OpenServiceW",
-		"CreateServiceA", "CreateServiceW",
-		"StartServiceA", "StartServiceW",
-		"ControlService", "DeleteService",
-		"CloseServiceHandle", "QueryServiceStatus",
-		"QueryServiceConfigA", "QueryServiceConfigW",
-		"ChangeServiceConfigA", "ChangeServiceConfigW"} {
-		fn := fn
-		d.RegisterAutoStubHandler(advapi32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			ravelog.Logf("[advapi32] %s arg0=0x%x arg1=0x%x - SCM not supported\n", fn, ctx.Arg(0), ctx.Arg(1))
+	// SCM emulation - enough for service discovery/start/stop probes during app initialization.
+	type scmHandle struct {
+		kind string // "scm" or "service"
+		name string // service name
+	}
+	type serviceInfo struct {
+		name         string
+		displayName  string
+		status       uint32
+		serviceType  uint32
+		startType    uint32
+		errorControl uint32
+		binaryPath   string
+		startName    string
+	}
+	const (
+		errorInvalidHandle         = 6
+		errorInvalidParameter      = 87
+		errorInsufficientBuffer    = 122
+		errorMoreData              = 234
+		errorServiceDoesNotExist   = 1060
+		errorServiceExists         = 1073
+		scStatusProcessInfo        = 0
+		serviceKernelDriver        = 0x1
+		serviceFileSystemDriver    = 0x2
+		serviceWin32OwnProcess     = 0x10
+		serviceWin32ShareProcess   = 0x20
+		serviceWin32               = 0x30
+		serviceStateActive         = 0x1
+		serviceStateInactive       = 0x2
+		serviceStateAll            = 0x3
+		serviceStopped             = 0x1
+		serviceStartPending        = 0x2
+		serviceStopPending         = 0x3
+		serviceRunning             = 0x4
+		serviceContinuePending     = 0x5
+		servicePausePending        = 0x6
+		servicePaused              = 0x7
+		serviceAcceptStop          = 0x1
+		serviceAcceptPauseContinue = 0x2
+		serviceControlStop         = 0x1
+		serviceControlPause        = 0x2
+		serviceControlContinue     = 0x3
+		serviceControlInterrogate  = 0x4
+		serviceAutoStart           = 0x2
+		serviceDemandStart         = 0x3
+		queryServiceConfigSize64   = 64
+		serviceStatusSize          = 28
+		serviceStatusProcessSize   = 36
+		enumServiceStatusProcSize  = 56
+	)
+	var (
+		scmMu                = sync.Mutex{}
+		scmHandles           = map[uint64]*scmHandle{}
+		nextSCMH      uint64 = 0x5C000001
+		knownServices        = map[string]*serviceInfo{
+			"EventLog":          {name: "EventLog", displayName: "Windows Event Log", status: serviceRunning, serviceType: serviceWin32ShareProcess, startType: serviceAutoStart},
+			"CryptSvc":          {name: "CryptSvc", displayName: "Cryptographic Services", status: serviceRunning, serviceType: serviceWin32ShareProcess, startType: serviceAutoStart},
+			"Dnscache":          {name: "Dnscache", displayName: "DNS Client", status: serviceRunning, serviceType: serviceWin32ShareProcess, startType: serviceAutoStart},
+			"LanmanWorkstation": {name: "LanmanWorkstation", displayName: "Workstation", status: serviceRunning, serviceType: serviceWin32ShareProcess, startType: serviceAutoStart},
+			"RpcSs":             {name: "RpcSs", displayName: "Remote Procedure Call", status: serviceRunning, serviceType: serviceWin32OwnProcess, startType: serviceAutoStart},
+			"Winmgmt":           {name: "Winmgmt", displayName: "Windows Management Instrumentation", status: serviceRunning, serviceType: serviceWin32OwnProcess, startType: serviceAutoStart},
+			"wuauserv":          {name: "wuauserv", displayName: "Windows Update", status: serviceStopped, serviceType: serviceWin32ShareProcess, startType: serviceDemandStart},
+			"BITS":              {name: "BITS", displayName: "Background Intelligent Transfer", status: serviceStopped, serviceType: serviceWin32ShareProcess, startType: serviceDemandStart},
+			"Spooler":           {name: "Spooler", displayName: "Print Spooler", status: serviceStopped, serviceType: serviceWin32OwnProcess, startType: serviceAutoStart},
+		}
+	)
+	setLastError := func(ctx *ntapi.TrapContext, code uint32) {
+		if ctx.State != nil && ctx.State.TEBAddr != 0 {
+			ctx.Mem.Write32(ctx.State.TEBAddr+ntapi.TebLastErrorValue, code)
+		}
+	}
+	utf16BytesWithNul := func(s string) []byte {
+		ws := utf16Encode(s)
+		data := make([]byte, (len(ws)+1)*2)
+		for i, w := range ws {
+			binary.LittleEndian.PutUint16(data[i*2:], w)
+		}
+		return data
+	}
+	regSetString := func(key *ntapi.RegistryKey, name, value string) {
+		if key == nil {
+			return
+		}
+		if key.Values == nil {
+			key.Values = make(map[string]*ntapi.RegistryValue)
+		}
+		key.Values[name] = &ntapi.RegistryValue{Name: name, Type: ntapi.RegSZ, Data: utf16BytesWithNul(value)}
+	}
+	regSetDWORD := func(key *ntapi.RegistryKey, name string, value uint32) {
+		if key == nil {
+			return
+		}
+		if key.Values == nil {
+			key.Values = make(map[string]*ntapi.RegistryValue)
+		}
+		data := make([]byte, 4)
+		binary.LittleEndian.PutUint32(data, value)
+		key.Values[name] = &ntapi.RegistryValue{Name: name, Type: ntapi.RegDWORD, Data: data}
+	}
+	serviceRegistryPath := func(name string) string {
+		return `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\` + name
+	}
+	ensureServiceDefaults := func(svc *serviceInfo) {
+		if svc == nil {
+			return
+		}
+		if svc.name == "" {
+			svc.name = "Service"
+		}
+		if svc.displayName == "" {
+			svc.displayName = svc.name
+		}
+		if svc.serviceType == 0 {
+			svc.serviceType = serviceWin32OwnProcess
+		}
+		if svc.startType == 0 {
+			svc.startType = serviceDemandStart
+		}
+		if svc.errorControl == 0 {
+			svc.errorControl = 1
+		}
+		if svc.startName == "" {
+			svc.startName = "LocalSystem"
+		}
+		if svc.binaryPath == "" {
+			if svc.serviceType == serviceWin32ShareProcess {
+				svc.binaryPath = `C:\Windows\System32\svchost.exe -k netsvcs`
+			} else {
+				svc.binaryPath = fmt.Sprintf(`C:\Windows\System32\%s.exe`, svc.name)
+			}
+		}
+	}
+	syncServiceRegistry := func(svc *serviceInfo) {
+		ensureServiceDefaults(svc)
+		key := regHive.CreateKey(serviceRegistryPath(svc.name))
+		regSetString(key, "DisplayName", svc.displayName)
+		regSetDWORD(key, "Start", svc.startType)
+		regSetDWORD(key, "Type", svc.serviceType)
+		regSetDWORD(key, "ErrorControl", svc.errorControl)
+		regSetString(key, "ImagePath", svc.binaryPath)
+		regSetString(key, "ObjectName", svc.startName)
+	}
+	deleteServiceRegistry := func(name string) {
+		regHive.DeleteKey(serviceRegistryPath(name))
+	}
+	findServiceByName := func(name string) (*serviceInfo, string) {
+		scmMu.Lock()
+		defer scmMu.Unlock()
+		if svc, ok := knownServices[name]; ok {
+			ensureServiceDefaults(svc)
+			return svc, name
+		}
+		for key, svc := range knownServices {
+			if strings.EqualFold(key, name) || strings.EqualFold(svc.name, name) {
+				ensureServiceDefaults(svc)
+				return svc, key
+			}
+		}
+		return nil, ""
+	}
+	findServiceByDisplayName := func(displayName string) (*serviceInfo, string) {
+		scmMu.Lock()
+		defer scmMu.Unlock()
+		for key, svc := range knownServices {
+			ensureServiceDefaults(svc)
+			if strings.EqualFold(svc.displayName, displayName) {
+				return svc, key
+			}
+		}
+		return nil, ""
+	}
+	getSCMHandle := func(h uint64) *scmHandle {
+		scmMu.Lock()
+		defer scmMu.Unlock()
+		return scmHandles[h]
+	}
+	newSCMHandle := func(kind, name string) uint64 {
+		scmMu.Lock()
+		defer scmMu.Unlock()
+		h := nextSCMH
+		nextSCMH++
+		scmHandles[h] = &scmHandle{kind: kind, name: name}
+		return h
+	}
+	removeSCMHandle := func(h uint64) bool {
+		scmMu.Lock()
+		defer scmMu.Unlock()
+		if _, ok := scmHandles[h]; !ok {
+			return false
+		}
+		delete(scmHandles, h)
+		return true
+	}
+	getServiceForHandle := func(h uint64) *serviceInfo {
+		scmMu.Lock()
+		defer scmMu.Unlock()
+		sh := scmHandles[h]
+		if sh == nil || sh.kind != "service" {
+			return nil
+		}
+		if svc, ok := knownServices[sh.name]; ok {
+			ensureServiceDefaults(svc)
+			return svc
+		}
+		for key, svc := range knownServices {
+			if strings.EqualFold(key, sh.name) || strings.EqualFold(svc.name, sh.name) {
+				ensureServiceDefaults(svc)
+				return svc
+			}
+		}
+		return nil
+	}
+	writeServiceStatus := func(ctx *ntapi.TrapContext, ptr uint64, svc *serviceInfo) {
+		if ptr == 0 || svc == nil {
+			return
+		}
+		controlsAccepted := uint32(0)
+		switch svc.status {
+		case serviceRunning, servicePaused:
+			controlsAccepted = serviceAcceptStop | serviceAcceptPauseContinue
+		}
+		for i := 0; i < serviceStatusSize; i++ {
+			ctx.Mem.Write8(ptr+uint64(i), 0)
+		}
+		ctx.Mem.Write32(ptr+0, svc.serviceType)
+		ctx.Mem.Write32(ptr+4, svc.status)
+		ctx.Mem.Write32(ptr+8, controlsAccepted)
+		ctx.Mem.Write32(ptr+12, 0)
+		ctx.Mem.Write32(ptr+16, 0)
+		ctx.Mem.Write32(ptr+20, 0)
+		ctx.Mem.Write32(ptr+24, 0)
+	}
+	writeServiceStatusProcess := func(ctx *ntapi.TrapContext, ptr uint64, svc *serviceInfo) {
+		if ptr == 0 || svc == nil {
+			return
+		}
+		writeServiceStatus(ctx, ptr, svc)
+		pid := uint32(0)
+		if svc.status == serviceRunning || svc.status == servicePaused {
+			pid = 1
+		}
+		ctx.Mem.Write32(ptr+28, pid)
+		ctx.Mem.Write32(ptr+32, 0)
+	}
+	serviceMatchesType := func(svc *serviceInfo, filter uint32) bool {
+		if svc == nil || filter == 0 {
+			return true
+		}
+		if filter&serviceWin32 == serviceWin32 && (svc.serviceType == serviceWin32OwnProcess || svc.serviceType == serviceWin32ShareProcess) {
+			return true
+		}
+		if filter&(serviceKernelDriver|serviceFileSystemDriver|serviceWin32OwnProcess|serviceWin32ShareProcess) == 0 {
+			return true
+		}
+		return svc.serviceType&filter != 0
+	}
+	serviceMatchesState := func(svc *serviceInfo, filter uint32) bool {
+		if svc == nil || filter == 0 || filter == serviceStateAll {
+			return true
+		}
+		active := svc.status != serviceStopped
+		switch filter {
+		case serviceStateActive:
+			return active
+		case serviceStateInactive:
+			return !active
+		default:
+			return true
+		}
+	}
+	queryServiceConfigW := func(ctx *ntapi.TrapContext, hService, lpServiceConfig, cbBufSize, pcbBytesNeeded uint64) uint32 {
+		svc := getServiceForHandle(hService)
+		if svc == nil {
+			setLastError(ctx, errorInvalidHandle)
+			return 0
+		}
+		ensureServiceDefaults(svc)
+		needed := uint32(queryServiceConfigSize64 + len(utf16BytesWithNul(svc.binaryPath)) + len(utf16BytesWithNul(svc.startName)) + len(utf16BytesWithNul(svc.displayName)))
+		if pcbBytesNeeded != 0 {
+			ctx.Mem.Write32(pcbBytesNeeded, needed)
+		}
+		if cbBufSize < uint64(needed) || lpServiceConfig == 0 {
+			setLastError(ctx, errorInsufficientBuffer)
+			return 0
+		}
+		for i := uint64(0); i < queryServiceConfigSize64; i++ {
+			ctx.Mem.Write8(lpServiceConfig+i, 0)
+		}
+		strPtr := lpServiceConfig + queryServiceConfigSize64
+		binaryPathPtr := strPtr
+		writeGuestUTF16String(ctx.Mem, binaryPathPtr, svc.binaryPath)
+		strPtr += uint64(len(utf16BytesWithNul(svc.binaryPath)))
+		startNamePtr := strPtr
+		writeGuestUTF16String(ctx.Mem, startNamePtr, svc.startName)
+		strPtr += uint64(len(utf16BytesWithNul(svc.startName)))
+		displayNamePtr := strPtr
+		writeGuestUTF16String(ctx.Mem, displayNamePtr, svc.displayName)
+		ctx.Mem.Write32(lpServiceConfig+0, svc.serviceType)
+		ctx.Mem.Write32(lpServiceConfig+4, svc.startType)
+		ctx.Mem.Write32(lpServiceConfig+8, svc.errorControl)
+		ctx.Mem.Write64(lpServiceConfig+16, binaryPathPtr)
+		ctx.Mem.Write64(lpServiceConfig+24, 0)
+		ctx.Mem.Write32(lpServiceConfig+32, 0)
+		ctx.Mem.Write64(lpServiceConfig+40, 0)
+		ctx.Mem.Write64(lpServiceConfig+48, startNamePtr)
+		ctx.Mem.Write64(lpServiceConfig+56, displayNamePtr)
+		setLastError(ctx, 0)
+		return 1
+	}
+	queryServiceConfigA := func(ctx *ntapi.TrapContext, hService, lpServiceConfig, cbBufSize, pcbBytesNeeded uint64) uint32 {
+		svc := getServiceForHandle(hService)
+		if svc == nil {
+			setLastError(ctx, errorInvalidHandle)
+			return 0
+		}
+		ensureServiceDefaults(svc)
+		needed := uint32(queryServiceConfigSize64 + len(svc.binaryPath) + 1 + len(svc.startName) + 1 + len(svc.displayName) + 1)
+		if pcbBytesNeeded != 0 {
+			ctx.Mem.Write32(pcbBytesNeeded, needed)
+		}
+		if cbBufSize < uint64(needed) || lpServiceConfig == 0 {
+			setLastError(ctx, errorInsufficientBuffer)
+			return 0
+		}
+		for i := uint64(0); i < queryServiceConfigSize64; i++ {
+			ctx.Mem.Write8(lpServiceConfig+i, 0)
+		}
+		strPtr := lpServiceConfig + queryServiceConfigSize64
+		binaryPathPtr := strPtr
+		writeGuestANSIString(ctx.Mem, binaryPathPtr, svc.binaryPath)
+		strPtr += uint64(len(svc.binaryPath) + 1)
+		startNamePtr := strPtr
+		writeGuestANSIString(ctx.Mem, startNamePtr, svc.startName)
+		strPtr += uint64(len(svc.startName) + 1)
+		displayNamePtr := strPtr
+		writeGuestANSIString(ctx.Mem, displayNamePtr, svc.displayName)
+		ctx.Mem.Write32(lpServiceConfig+0, svc.serviceType)
+		ctx.Mem.Write32(lpServiceConfig+4, svc.startType)
+		ctx.Mem.Write32(lpServiceConfig+8, svc.errorControl)
+		ctx.Mem.Write64(lpServiceConfig+16, binaryPathPtr)
+		ctx.Mem.Write64(lpServiceConfig+24, 0)
+		ctx.Mem.Write32(lpServiceConfig+32, 0)
+		ctx.Mem.Write64(lpServiceConfig+40, 0)
+		ctx.Mem.Write64(lpServiceConfig+48, startNamePtr)
+		ctx.Mem.Write64(lpServiceConfig+56, displayNamePtr)
+		setLastError(ctx, 0)
+		return 1
+	}
+	changeServiceConfigCommon := func(ctx *ntapi.TrapContext, hService uint64, displayName string, serviceType, startType, errorControl uint32, binaryPath, startName string) uint32 {
+		svc := getServiceForHandle(hService)
+		if svc == nil {
+			setLastError(ctx, errorInvalidHandle)
+			return 0
+		}
+		scmMu.Lock()
+		if displayName != "" {
+			svc.displayName = displayName
+		}
+		if serviceType != 0xFFFFFFFF && serviceType != 0 {
+			svc.serviceType = serviceType
+		}
+		if startType != 0xFFFFFFFF && startType != 0 {
+			svc.startType = startType
+		}
+		if errorControl != 0xFFFFFFFF && errorControl != 0 {
+			svc.errorControl = errorControl
+		}
+		if binaryPath != "" {
+			svc.binaryPath = binaryPath
+		}
+		if startName != "" {
+			svc.startName = startName
+		}
+		ensureServiceDefaults(svc)
+		scmMu.Unlock()
+		syncServiceRegistry(svc)
+		setLastError(ctx, 0)
+		return 1
+	}
+	enumServicesStatusEx := func(ctx *ntapi.TrapContext, hSCManager, infoLevel, dwServiceType, dwServiceState, lpServices, cbBufSize, pcbBytesNeeded, lpServicesReturned, lpResumeHandle uint64, wide bool) uint32 {
+		h := getSCMHandle(hSCManager)
+		if h == nil || h.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			return 0
+		}
+		if infoLevel != scStatusProcessInfo {
+			setLastError(ctx, errorInvalidParameter)
+			return 0
+		}
+		scmMu.Lock()
+		names := make([]string, 0, len(knownServices))
+		for name := range knownServices {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		services := make([]*serviceInfo, 0, len(names))
+		for _, name := range names {
+			svc := knownServices[name]
+			ensureServiceDefaults(svc)
+			if serviceMatchesType(svc, uint32(dwServiceType)) && serviceMatchesState(svc, uint32(dwServiceState)) {
+				services = append(services, svc)
+			}
+		}
+		scmMu.Unlock()
+		needed := uint32(len(services) * enumServiceStatusProcSize)
+		for _, svc := range services {
+			if wide {
+				needed += uint32(len(utf16BytesWithNul(svc.name)) + len(utf16BytesWithNul(svc.displayName)))
+			} else {
+				needed += uint32(len(svc.name) + 1 + len(svc.displayName) + 1)
+			}
+		}
+		if pcbBytesNeeded != 0 {
+			ctx.Mem.Write32(pcbBytesNeeded, needed)
+		}
+		if lpServicesReturned != 0 {
+			ctx.Mem.Write32(lpServicesReturned, 0)
+		}
+		if lpResumeHandle != 0 {
+			ctx.Mem.Write32(lpResumeHandle, 0)
+		}
+		if cbBufSize < uint64(needed) || lpServices == 0 {
+			setLastError(ctx, errorMoreData)
+			return 0
+		}
+		strPtr := lpServices + uint64(len(services)*enumServiceStatusProcSize)
+		for i, svc := range services {
+			entry := lpServices + uint64(i*enumServiceStatusProcSize)
+			namePtr := strPtr
+			if wide {
+				writeGuestUTF16String(ctx.Mem, namePtr, svc.name)
+				strPtr += uint64(len(utf16BytesWithNul(svc.name)))
+			} else {
+				writeGuestANSIString(ctx.Mem, namePtr, svc.name)
+				strPtr += uint64(len(svc.name) + 1)
+			}
+			displayNamePtr := strPtr
+			if wide {
+				writeGuestUTF16String(ctx.Mem, displayNamePtr, svc.displayName)
+				strPtr += uint64(len(utf16BytesWithNul(svc.displayName)))
+			} else {
+				writeGuestANSIString(ctx.Mem, displayNamePtr, svc.displayName)
+				strPtr += uint64(len(svc.displayName) + 1)
+			}
+			ctx.Mem.Write64(entry+0, namePtr)
+			ctx.Mem.Write64(entry+8, displayNamePtr)
+			writeServiceStatusProcess(ctx, entry+16, svc)
+		}
+		if lpServicesReturned != 0 {
+			ctx.Mem.Write32(lpServicesReturned, uint32(len(services)))
+		}
+		setLastError(ctx, 0)
+		return 1
+	}
+	for _, svc := range knownServices {
+		ensureServiceDefaults(svc)
+		syncServiceRegistry(svc)
+	}
+	d.RegisterAutoStubHandler(advapi32, "OpenSCManagerW", func(ctx *ntapi.TrapContext) uint32 {
+		h := newSCMHandle("scm", "")
+		setLastError(ctx, 0)
+		ctx.SetReturn(h)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenSCManagerA", func(ctx *ntapi.TrapContext) uint32 {
+		h := newSCMHandle("scm", "")
+		setLastError(ctx, 0)
+		ctx.SetReturn(h)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CloseServiceHandle", func(ctx *ntapi.TrapContext) uint32 {
+		if !removeSCMHandle(ctx.Arg(0)) {
+			setLastError(ctx, errorInvalidHandle)
 			ctx.SetReturn(0)
 			return 0
-		})
-	}
+		}
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenServiceW", func(ctx *ntapi.TrapContext) uint32 {
+		hMgr := getSCMHandle(ctx.Arg(0))
+		if hMgr == nil || hMgr.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		name := readGuestUTF16(ctx.Arg(1))
+		svc, key := findServiceByName(name)
+		if svc == nil {
+			setLastError(ctx, errorServiceDoesNotExist)
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(newSCMHandle("service", key))
+		setLastError(ctx, 0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "OpenServiceA", func(ctx *ntapi.TrapContext) uint32 {
+		hMgr := getSCMHandle(ctx.Arg(0))
+		if hMgr == nil || hMgr.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		name := readGuestString(ctx.Arg(1))
+		svc, key := findServiceByName(name)
+		if svc == nil {
+			setLastError(ctx, errorServiceDoesNotExist)
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(newSCMHandle("service", key))
+		setLastError(ctx, 0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreateServiceW", func(ctx *ntapi.TrapContext) uint32 {
+		hMgr := getSCMHandle(ctx.Arg(0))
+		if hMgr == nil || hMgr.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		name := readGuestUTF16(ctx.Arg(1))
+		if name == "" {
+			setLastError(ctx, errorInvalidParameter)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if svc, _ := findServiceByName(name); svc != nil {
+			setLastError(ctx, errorServiceExists)
+			ctx.SetReturn(0)
+			return 0
+		}
+		svc := &serviceInfo{
+			name:         name,
+			displayName:  readGuestUTF16(ctx.Arg(2)),
+			status:       serviceStopped,
+			serviceType:  uint32(ctx.Arg(4)),
+			startType:    uint32(ctx.Arg(5)),
+			errorControl: uint32(ctx.Arg(6)),
+			binaryPath:   readGuestUTF16(ctx.Arg(7)),
+			startName:    readGuestUTF16(ctx.Arg(11)),
+		}
+		ensureServiceDefaults(svc)
+		scmMu.Lock()
+		knownServices[name] = svc
+		scmMu.Unlock()
+		syncServiceRegistry(svc)
+		ctx.SetReturn(newSCMHandle("service", name))
+		setLastError(ctx, 0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "CreateServiceA", func(ctx *ntapi.TrapContext) uint32 {
+		hMgr := getSCMHandle(ctx.Arg(0))
+		if hMgr == nil || hMgr.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		name := readGuestString(ctx.Arg(1))
+		if name == "" {
+			setLastError(ctx, errorInvalidParameter)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if svc, _ := findServiceByName(name); svc != nil {
+			setLastError(ctx, errorServiceExists)
+			ctx.SetReturn(0)
+			return 0
+		}
+		svc := &serviceInfo{
+			name:         name,
+			displayName:  readGuestString(ctx.Arg(2)),
+			status:       serviceStopped,
+			serviceType:  uint32(ctx.Arg(4)),
+			startType:    uint32(ctx.Arg(5)),
+			errorControl: uint32(ctx.Arg(6)),
+			binaryPath:   readGuestString(ctx.Arg(7)),
+			startName:    readGuestString(ctx.Arg(11)),
+		}
+		ensureServiceDefaults(svc)
+		scmMu.Lock()
+		knownServices[name] = svc
+		scmMu.Unlock()
+		syncServiceRegistry(svc)
+		ctx.SetReturn(newSCMHandle("service", name))
+		setLastError(ctx, 0)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "DeleteService", func(ctx *ntapi.TrapContext) uint32 {
+		hService := ctx.Arg(0)
+		sh := getSCMHandle(hService)
+		if sh == nil || sh.kind != "service" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		scmMu.Lock()
+		delete(knownServices, sh.name)
+		scmMu.Unlock()
+		deleteServiceRegistry(sh.name)
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "StartServiceW", func(ctx *ntapi.TrapContext) uint32 {
+		svc := getServiceForHandle(ctx.Arg(0))
+		if svc == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		scmMu.Lock()
+		svc.status = serviceRunning
+		scmMu.Unlock()
+		syncServiceRegistry(svc)
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "StartServiceA", func(ctx *ntapi.TrapContext) uint32 {
+		svc := getServiceForHandle(ctx.Arg(0))
+		if svc == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		scmMu.Lock()
+		svc.status = serviceRunning
+		scmMu.Unlock()
+		syncServiceRegistry(svc)
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ControlService", func(ctx *ntapi.TrapContext) uint32 {
+		svc := getServiceForHandle(ctx.Arg(0))
+		if svc == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		control := uint32(ctx.Arg(1))
+		switch control {
+		case serviceControlStop:
+			scmMu.Lock()
+			svc.status = serviceStopped
+			scmMu.Unlock()
+		case serviceControlPause:
+			scmMu.Lock()
+			svc.status = servicePaused
+			scmMu.Unlock()
+		case serviceControlContinue:
+			scmMu.Lock()
+			svc.status = serviceRunning
+			scmMu.Unlock()
+		case serviceControlInterrogate:
+			// keep current status
+		default:
+			setLastError(ctx, errorInvalidParameter)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if pStatus := ctx.Arg(2); pStatus != 0 {
+			writeServiceStatus(ctx, pStatus, svc)
+		}
+		syncServiceRegistry(svc)
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceStatus", func(ctx *ntapi.TrapContext) uint32 {
+		svc := getServiceForHandle(ctx.Arg(0))
+		if svc == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if pStatus := ctx.Arg(1); pStatus != 0 {
+			writeServiceStatus(ctx, pStatus, svc)
+		}
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceConfigW", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(uint64(queryServiceConfigW(ctx, ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3))))
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "QueryServiceConfigA", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(uint64(queryServiceConfigA(ctx, ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3))))
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ChangeServiceConfigW", func(ctx *ntapi.TrapContext) uint32 {
+		ret := changeServiceConfigCommon(
+			ctx,
+			ctx.Arg(0),
+			readGuestUTF16(ctx.Arg(10)),
+			uint32(ctx.Arg(1)),
+			uint32(ctx.Arg(2)),
+			uint32(ctx.Arg(3)),
+			readGuestUTF16(ctx.Arg(4)),
+			readGuestUTF16(ctx.Arg(8)),
+		)
+		ctx.SetReturn(uint64(ret))
+		return 0
+	})
+	d.RegisterAutoStubHandler(advapi32, "ChangeServiceConfigA", func(ctx *ntapi.TrapContext) uint32 {
+		ret := changeServiceConfigCommon(
+			ctx,
+			ctx.Arg(0),
+			readGuestString(ctx.Arg(10)),
+			uint32(ctx.Arg(1)),
+			uint32(ctx.Arg(2)),
+			uint32(ctx.Arg(3)),
+			readGuestString(ctx.Arg(4)),
+			readGuestString(ctx.Arg(8)),
+		)
+		ctx.SetReturn(uint64(ret))
+		return 0
+	})
 	// Event log stubs
 	for _, fn := range []string{"RegisterEventSourceA", "RegisterEventSourceW",
 		"DeregisterEventSource", "ReportEventA", "ReportEventW",
@@ -3339,18 +4048,22 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "ChangeServiceConfig2A", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[advapi32] ChangeServiceConfig2A p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		if getServiceForHandle(ctx.Arg(0)) == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		setLastError(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "ChangeServiceConfig2W", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		ravelog.Logf("[advapi32] ChangeServiceConfig2W p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		if getServiceForHandle(ctx.Arg(0)) == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		setLastError(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4168,31 +4881,35 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "EnumServicesStatusExA", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[advapi32] EnumServicesStatusExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
-		ctx.SetReturn(1)
+		ctx.SetReturn(uint64(enumServicesStatusEx(
+			ctx,
+			ctx.Arg(0),
+			ctx.Arg(1),
+			ctx.Arg(2),
+			ctx.Arg(3),
+			ctx.Arg(4),
+			ctx.Arg(5),
+			ctx.Arg(6),
+			ctx.Arg(7),
+			ctx.Arg(8),
+			false,
+		)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "EnumServicesStatusExW", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		p5 := ctx.Arg(5)
-		ravelog.Logf("[advapi32] EnumServicesStatusExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		_ = p5
-		ctx.SetReturn(1)
+		ctx.SetReturn(uint64(enumServicesStatusEx(
+			ctx,
+			ctx.Arg(0),
+			ctx.Arg(1),
+			ctx.Arg(2),
+			ctx.Arg(3),
+			ctx.Arg(4),
+			ctx.Arg(5),
+			ctx.Arg(6),
+			ctx.Arg(7),
+			ctx.Arg(8),
+			true,
+		)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "EnumServicesStatusW", func(ctx *ntapi.TrapContext) uint32 {
@@ -4516,42 +5233,114 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "GetServiceDisplayNameA", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[advapi32] GetServiceDisplayNameA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
+		hMgr := getSCMHandle(ctx.Arg(0))
+		if hMgr == nil || hMgr.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		svc, _ := findServiceByName(readGuestString(ctx.Arg(1)))
+		if svc == nil {
+			setLastError(ctx, errorServiceDoesNotExist)
+			ctx.SetReturn(0)
+			return 0
+		}
+		needed := uint32(len(svc.displayName) + 1)
+		if ctx.Arg(3) != 0 {
+			avail, _ := ctx.Mem.Read32(ctx.Arg(3))
+			ctx.Mem.Write32(ctx.Arg(3), needed)
+			if ctx.Arg(2) == 0 || avail < needed {
+				setLastError(ctx, errorInsufficientBuffer)
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		writeGuestANSIString(ctx.Mem, ctx.Arg(2), svc.displayName)
+		setLastError(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "GetServiceDisplayNameW", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[advapi32] GetServiceDisplayNameW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
+		hMgr := getSCMHandle(ctx.Arg(0))
+		if hMgr == nil || hMgr.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		svc, _ := findServiceByName(readGuestUTF16(ctx.Arg(1)))
+		if svc == nil {
+			setLastError(ctx, errorServiceDoesNotExist)
+			ctx.SetReturn(0)
+			return 0
+		}
+		needed := uint32(len(utf16Encode(svc.displayName)) + 1)
+		if ctx.Arg(3) != 0 {
+			avail, _ := ctx.Mem.Read32(ctx.Arg(3))
+			ctx.Mem.Write32(ctx.Arg(3), needed)
+			if ctx.Arg(2) == 0 || avail < needed {
+				setLastError(ctx, errorInsufficientBuffer)
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		writeGuestUTF16String(ctx.Mem, ctx.Arg(2), svc.displayName)
+		setLastError(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "GetServiceKeyNameA", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[advapi32] GetServiceKeyNameA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
+		hMgr := getSCMHandle(ctx.Arg(0))
+		if hMgr == nil || hMgr.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		svc, _ := findServiceByDisplayName(readGuestString(ctx.Arg(1)))
+		if svc == nil {
+			setLastError(ctx, errorServiceDoesNotExist)
+			ctx.SetReturn(0)
+			return 0
+		}
+		needed := uint32(len(svc.name) + 1)
+		if ctx.Arg(3) != 0 {
+			avail, _ := ctx.Mem.Read32(ctx.Arg(3))
+			ctx.Mem.Write32(ctx.Arg(3), needed)
+			if ctx.Arg(2) == 0 || avail < needed {
+				setLastError(ctx, errorInsufficientBuffer)
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		writeGuestANSIString(ctx.Mem, ctx.Arg(2), svc.name)
+		setLastError(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "GetServiceKeyNameW", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		ravelog.Logf("[advapi32] GetServiceKeyNameW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
+		hMgr := getSCMHandle(ctx.Arg(0))
+		if hMgr == nil || hMgr.kind != "scm" {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		svc, _ := findServiceByDisplayName(readGuestUTF16(ctx.Arg(1)))
+		if svc == nil {
+			setLastError(ctx, errorServiceDoesNotExist)
+			ctx.SetReturn(0)
+			return 0
+		}
+		needed := uint32(len(utf16Encode(svc.name)) + 1)
+		if ctx.Arg(3) != 0 {
+			avail, _ := ctx.Mem.Read32(ctx.Arg(3))
+			ctx.Mem.Write32(ctx.Arg(3), needed)
+			if ctx.Arg(2) == 0 || avail < needed {
+				setLastError(ctx, errorInsufficientBuffer)
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		writeGuestUTF16String(ctx.Mem, ctx.Arg(2), svc.name)
+		setLastError(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5592,27 +6381,29 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "QueryServiceConfig2A", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		ravelog.Logf("[advapi32] QueryServiceConfig2A p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		ctx.SetReturn(1)
+		if getServiceForHandle(ctx.Arg(0)) == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if ctx.Arg(4) != 0 {
+			ctx.Mem.Write32(ctx.Arg(4), 0)
+		}
+		setLastError(ctx, errorInvalidParameter)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "QueryServiceConfig2W", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		ravelog.Logf("[advapi32] QueryServiceConfig2W p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
-		ctx.SetReturn(1)
+		if getServiceForHandle(ctx.Arg(0)) == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if ctx.Arg(4) != 0 {
+			ctx.Mem.Write32(ctx.Arg(4), 0)
+		}
+		setLastError(ctx, errorInvalidParameter)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "QueryServiceLockStatusA", func(ctx *ntapi.TrapContext) uint32 {
@@ -5648,25 +6439,28 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "QueryServiceStatusEx", func(ctx *ntapi.TrapContext) uint32 {
-		hService := ctx.Arg(0)
-		infoLevel := ctx.Arg(1)
-		lpBuffer := ctx.Arg(2)
-		cbBufSize := ctx.Arg(3)
-		pcbBytesNeeded := ctx.Arg(4)
-		ravelog.Logf("[advapi32] QueryServiceStatusEx svc=0x%x level=%d buf=0x%x size=%d\n", hService, infoLevel, lpBuffer, cbBufSize)
-		needed := uint32(36) // SERVICE_STATUS_PROCESS size
-		if pcbBytesNeeded != 0 {
-			ctx.Mem.Write32(pcbBytesNeeded, needed)
-		}
-		if cbBufSize < uint64(needed) {
-			ctx.SetReturn(0) // FALSE
+		svc := getServiceForHandle(ctx.Arg(0))
+		if svc == nil {
+			setLastError(ctx, errorInvalidHandle)
+			ctx.SetReturn(0)
 			return 0
 		}
-		if lpBuffer != 0 {
-			ctx.Mem.Write32(lpBuffer, 0x10) // SERVICE_WIN32_OWN_PROCESS
-			ctx.Mem.Write32(lpBuffer+4, 1)  // SERVICE_STOPPED
+		if ctx.Arg(1) != scStatusProcessInfo {
+			setLastError(ctx, errorInvalidParameter)
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(1) // TRUE
+		if ctx.Arg(4) != 0 {
+			ctx.Mem.Write32(ctx.Arg(4), serviceStatusProcessSize)
+		}
+		if ctx.Arg(3) < serviceStatusProcessSize || ctx.Arg(2) == 0 {
+			setLastError(ctx, errorInsufficientBuffer)
+			ctx.SetReturn(0)
+			return 0
+		}
+		writeServiceStatusProcess(ctx, ctx.Arg(2), svc)
+		setLastError(ctx, 0)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "QueryUsersOnEncryptedFile", func(ctx *ntapi.TrapContext) uint32 {

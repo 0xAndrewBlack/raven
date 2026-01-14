@@ -1,8 +1,9 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -10,330 +11,512 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
+const (
+	ofnFileMustExist = 0x00001000
+	sFalse           = 0x00000001
+	eNotImpl         = 0x80004001
+)
+
 func registerComdlg32Handlers(hctx *HandlerCtx) {
 	d := hctx.Disp
 	mem := hctx.Mem
 	readGuestString := hctx.ReadGuestString
 	readGuestUTF16 := hctx.ReadGuestUTF16
+	stdinReader := hctx.StdinReader
 
 	comdlg32, ok := hctx.SynthByName["comdlg32.dll"]
 	if !ok {
 		return
 	}
-	_ = comdlg32
+
+	readANSIWithLimit := func(addr uint64, maxBytes uint32) string {
+		if addr == 0 || maxBytes == 0 {
+			return ""
+		}
+		buf := make([]byte, 0, maxBytes)
+		for i := uint32(0); i < maxBytes; i++ {
+			b, err := mem.Read8(addr + uint64(i))
+			if err != nil || b == 0 {
+				break
+			}
+			buf = append(buf, b)
+		}
+		return string(buf)
+	}
+
+	writeANSIWithLimit := func(addr uint64, maxBytes uint32, s string) bool {
+		if addr == 0 || maxBytes == 0 {
+			return false
+		}
+		b := []byte(s)
+		if uint32(len(b))+1 > maxBytes {
+			if maxBytes == 0 {
+				return false
+			}
+			b = b[:maxBytes-1]
+		}
+		for i, c := range b {
+			mem.Write8(addr+uint64(i), c)
+		}
+		mem.Write8(addr+uint64(len(b)), 0)
+		return true
+	}
+
+	writeUTF16WithLimit := func(addr uint64, maxChars uint32, s string) bool {
+		if addr == 0 || maxChars == 0 {
+			return false
+		}
+		ws := utf16Encode(s)
+		if uint32(len(ws))+1 > maxChars {
+			if maxChars == 0 {
+				return false
+			}
+			ws = ws[:maxChars-1]
+		}
+		for i, w := range ws {
+			mem.Write16(addr+uint64(i)*2, w)
+		}
+		mem.Write16(addr+uint64(len(ws))*2, 0)
+		return true
+	}
+
+	readFilterW := func(addr uint64) []string {
+		if addr == 0 {
+			return nil
+		}
+		items := make([]string, 0, 8)
+		cur := addr
+		for len(items) < 32 {
+			var chars []uint16
+			for {
+				w, err := mem.Read16(cur)
+				if err != nil {
+					return items
+				}
+				cur += 2
+				if w == 0 {
+					break
+				}
+				chars = append(chars, w)
+			}
+			if len(chars) == 0 {
+				break
+			}
+			items = append(items, string(utf16Decode(chars)))
+		}
+		return items
+	}
+
+	readFilterA := func(addr uint64) []string {
+		if addr == 0 {
+			return nil
+		}
+		items := make([]string, 0, 8)
+		cur := addr
+		for len(items) < 32 {
+			var bytes []byte
+			for {
+				b, err := mem.Read8(cur)
+				if err != nil {
+					return items
+				}
+				cur++
+				if b == 0 {
+					break
+				}
+				bytes = append(bytes, b)
+			}
+			if len(bytes) == 0 {
+				break
+			}
+			items = append(items, string(bytes))
+		}
+		return items
+	}
+
+	promptPath := func(dialogTitle, kind, defaultPath, initialDir string, mustExist bool) (string, bool) {
+		if stdinReader == nil {
+			return "", false
+		}
+		reader := stdinReader
+		if reader == nil {
+			reader = bufio.NewReader(os.Stdin)
+		}
+		fmt.Fprintf(os.Stderr, "[comdlg32] %s (%s)\n", dialogTitle, kind)
+		if initialDir != "" {
+			fmt.Fprintf(os.Stderr, "[comdlg32] initial dir: %s\n", initialDir)
+		}
+		if defaultPath != "" {
+			fmt.Fprintf(os.Stderr, "[comdlg32] default path: %s\n", defaultPath)
+		}
+		if mustExist {
+			fmt.Fprintln(os.Stderr, "[comdlg32] file must exist")
+		}
+		fmt.Fprint(os.Stderr, "[comdlg32] Enter path (blank to cancel): ")
+		line, err := reader.ReadString('\n')
+		if err != nil && len(line) == 0 {
+			return "", false
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return "", false
+		}
+		return line, true
+	}
+
+	normalizePath := func(pathValue, initialDir, defExt string, forSave bool) string {
+		pathValue = strings.TrimSpace(pathValue)
+		if pathValue == "" {
+			return ""
+		}
+		if !filepath.IsAbs(pathValue) {
+			base := initialDir
+			if base == "" {
+				base = "."
+			}
+			pathValue = filepath.Join(base, pathValue)
+		}
+		pathValue = filepath.Clean(pathValue)
+		if forSave && defExt != "" && filepath.Ext(pathValue) == "" {
+			ext := defExt
+			if !strings.HasPrefix(ext, ".") {
+				ext = "." + ext
+			}
+			pathValue += ext
+		}
+		return pathValue
+	}
+
+	writeOpenFileMetadata := func(ofnPtr uint64, result string, fileTitlePtr uint64, maxFileTitle uint32, ansi bool) {
+		base := filepath.Base(result)
+		fileOffset := uint16(0)
+		if idx := strings.LastIndexAny(result, `/\`); idx >= 0 {
+			fileOffset = uint16(idx + 1)
+		}
+		fileExt := uint16(0)
+		if dot := strings.LastIndex(base, "."); dot >= 0 {
+			fileExt = uint16(int(fileOffset) + dot + 1)
+		}
+		mem.Write16(ofnPtr+100, fileOffset)
+		mem.Write16(ofnPtr+102, fileExt)
+		if fileTitlePtr != 0 && maxFileTitle > 0 {
+			if ansi {
+				writeANSIWithLimit(fileTitlePtr, maxFileTitle, base)
+			} else {
+				writeUTF16WithLimit(fileTitlePtr, maxFileTitle, base)
+			}
+		}
+	}
+
+	handleFileDialogW := func(ctx *ntapi.TrapContext, saving bool) {
+		pOFN := ctx.Arg(0)
+		if pOFN == 0 {
+			ctx.SetReturn(0)
+			return
+		}
+
+		lpstrFilter, _ := mem.Read64(pOFN + 24)
+		nFilterIndex, _ := mem.Read32(pOFN + 44)
+		lpstrFile, _ := mem.Read64(pOFN + 48)
+		nMaxFile, _ := mem.Read32(pOFN + 56)
+		lpstrFileTitle, _ := mem.Read64(pOFN + 64)
+		nMaxFileTitle, _ := mem.Read32(pOFN + 72)
+		lpstrInitialDir, _ := mem.Read64(pOFN + 80)
+		lpstrTitle, _ := mem.Read64(pOFN + 88)
+		flags, _ := mem.Read32(pOFN + 96)
+		lpstrDefExt, _ := mem.Read64(pOFN + 104)
+
+		initialDir := ""
+		if lpstrInitialDir != 0 {
+			initialDir = readGuestUTF16(lpstrInitialDir)
+		}
+		title := "Open File"
+		if saving {
+			title = "Save File"
+		}
+		if lpstrTitle != 0 {
+			if s := readGuestUTF16(lpstrTitle); s != "" {
+				title = s
+			}
+		}
+		defExt := ""
+		if lpstrDefExt != 0 {
+			defExt = readGuestUTF16(lpstrDefExt)
+		}
+		currentPath := readGuestUTF16(lpstrFile)
+		filterPairs := readFilterW(lpstrFilter)
+		if len(filterPairs) > 0 {
+			ravelog.Logf("[comdlg32] %sW filters=%v index=%d\n", title, filterPairs, nFilterIndex)
+		}
+
+		result := normalizePath(currentPath, initialDir, defExt, saving)
+		if result == "" {
+			prompted, ok := promptPath(title, map[bool]string{true: "save", false: "open"}[saving], currentPath, initialDir, !saving && (flags&ofnFileMustExist) != 0)
+			if !ok {
+				ctx.SetReturn(0)
+				return
+			}
+			result = normalizePath(prompted, initialDir, defExt, saving)
+		}
+		if result == "" {
+			ctx.SetReturn(0)
+			return
+		}
+		if !saving && (flags&ofnFileMustExist) != 0 {
+			if _, err := os.Stat(result); err != nil {
+				ravelog.Logf("[comdlg32] %sW rejecting missing file %q: %v\n", title, result, err)
+				ctx.SetReturn(0)
+				return
+			}
+		}
+
+		if !writeUTF16WithLimit(lpstrFile, nMaxFile, result) {
+			ctx.SetReturn(0)
+			return
+		}
+		writeOpenFileMetadata(pOFN, result, lpstrFileTitle, nMaxFileTitle, false)
+		ravelog.Logf("[comdlg32] %sW selected %q\n", title, result)
+		ctx.SetReturn(1)
+	}
+
+	handleFileDialogA := func(ctx *ntapi.TrapContext, saving bool) {
+		pOFN := ctx.Arg(0)
+		if pOFN == 0 {
+			ctx.SetReturn(0)
+			return
+		}
+
+		lpstrFilter, _ := mem.Read64(pOFN + 24)
+		nFilterIndex, _ := mem.Read32(pOFN + 44)
+		lpstrFile, _ := mem.Read64(pOFN + 48)
+		nMaxFile, _ := mem.Read32(pOFN + 56)
+		lpstrFileTitle, _ := mem.Read64(pOFN + 64)
+		nMaxFileTitle, _ := mem.Read32(pOFN + 72)
+		lpstrInitialDir, _ := mem.Read64(pOFN + 80)
+		lpstrTitle, _ := mem.Read64(pOFN + 88)
+		flags, _ := mem.Read32(pOFN + 96)
+		lpstrDefExt, _ := mem.Read64(pOFN + 104)
+
+		initialDir := ""
+		if lpstrInitialDir != 0 {
+			initialDir = readGuestString(lpstrInitialDir)
+		}
+		title := "Open File"
+		if saving {
+			title = "Save File"
+		}
+		if lpstrTitle != 0 {
+			if s := readGuestString(lpstrTitle); s != "" {
+				title = s
+			}
+		}
+		defExt := ""
+		if lpstrDefExt != 0 {
+			defExt = readGuestString(lpstrDefExt)
+		}
+		currentPath := readANSIWithLimit(lpstrFile, nMaxFile)
+		filterPairs := readFilterA(lpstrFilter)
+		if len(filterPairs) > 0 {
+			ravelog.Logf("[comdlg32] %sA filters=%v index=%d\n", title, filterPairs, nFilterIndex)
+		}
+
+		result := normalizePath(currentPath, initialDir, defExt, saving)
+		if result == "" {
+			prompted, ok := promptPath(title, map[bool]string{true: "save", false: "open"}[saving], currentPath, initialDir, !saving && (flags&ofnFileMustExist) != 0)
+			if !ok {
+				ctx.SetReturn(0)
+				return
+			}
+			result = normalizePath(prompted, initialDir, defExt, saving)
+		}
+		if result == "" {
+			ctx.SetReturn(0)
+			return
+		}
+		if !saving && (flags&ofnFileMustExist) != 0 {
+			if _, err := os.Stat(result); err != nil {
+				ravelog.Logf("[comdlg32] %sA rejecting missing file %q: %v\n", title, result, err)
+				ctx.SetReturn(0)
+				return
+			}
+		}
+
+		if !writeANSIWithLimit(lpstrFile, nMaxFile, result) {
+			ctx.SetReturn(0)
+			return
+		}
+		writeOpenFileMetadata(pOFN, result, lpstrFileTitle, nMaxFileTitle, true)
+		ravelog.Logf("[comdlg32] %sA selected %q\n", title, result)
+		ctx.SetReturn(1)
+	}
 
 	d.RegisterAutoStubHandler(comdlg32, "GetFileTitleW", func(ctx *ntapi.TrapContext) uint32 {
-		lpBuffer := ctx.Arg(1)
-		cbBuf := ctx.Arg(2)
-		if lpBuffer != 0 && cbBuf > 0 {
-			mem.Write16(lpBuffer, 0)
+		src := readGuestUTF16(ctx.Arg(0))
+		dst := ctx.Arg(1)
+		cch := uint32(ctx.Arg(2))
+		if dst != 0 && cch > 0 {
+			writeUTF16WithLimit(dst, cch, filepath.Base(src))
 		}
 		ctx.SetReturn(0)
 		return 0
 	})
-	// PrintDlgW: print dialog - return FALSE (user cancelled / not supported)
-	d.RegisterAutoStubHandler(comdlg32, "PrintDlgW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - user cancelled
+
+	d.RegisterAutoStubHandler(comdlg32, "GetFileTitleA", func(ctx *ntapi.TrapContext) uint32 {
+		src := readGuestString(ctx.Arg(0))
+		dst := ctx.Arg(1)
+		cch := uint32(ctx.Arg(2))
+		if dst != 0 && cch > 0 {
+			writeANSIWithLimit(dst, cch, filepath.Base(src))
+		}
+		ctx.SetReturn(0)
 		return 0
 	})
-	// ChooseColorW: color picker dialog - return FALSE (user cancelled)
-	d.RegisterAutoStubHandler(comdlg32, "ChooseColorW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - user cancelled
-		return 0
-	})
 
-	// GetOpenFileNameW / GetSaveFileNameW - use alacritty+fzf for file picking
-	// OPENFILENAMEW struct offsets (Win64):
-	//   +0  lStructSize(4)  +8  hwndOwner(8)  +16 hInstance(8)
-	//   +24 lpstrFilter(8)  +32 lpstrCustomFilter(8)  +40 nMaxCustFilter(4)  +44 nFilterIndex(4)
-	//   +48 lpstrFile(8)    +56 nMaxFile(4)   +64 lpstrFileTitle(8)  +72 nMaxFileTitle(4)
-	//   +80 lpstrInitialDir(8)  +88 lpstrTitle(8)  +96 Flags(4)
-	//   +100 nFileOffset(2)  +102 nFileExtension(2)  +104 lpstrDefExt(8)
-	showFileDialog := func(ctx *ntapi.TrapContext, saving bool) {
-		pOFN := ctx.Arg(0)
-		if pOFN == 0 {
-			ctx.SetReturn(0)
-			return
-		}
-
-		lpstrFile, _ := ctx.Mem.Read64(pOFN + 48)
-		nMaxFile, _ := ctx.Mem.Read32(pOFN + 56)
-		lpstrInitDir, _ := ctx.Mem.Read64(pOFN + 80)
-		lpstrTitle, _ := ctx.Mem.Read64(pOFN + 88)
-		lpstrFilter, _ := ctx.Mem.Read64(pOFN + 24)
-		_ = lpstrFilter
-
-		initDir := "."
-		if lpstrInitDir != 0 {
-			initDir = readGuestUTF16(lpstrInitDir)
-		}
-		dialogTitle := "Open File"
-		if saving {
-			dialogTitle = "Save As"
-		}
-		if lpstrTitle != 0 {
-			if t := readGuestUTF16(lpstrTitle); t != "" {
-				dialogTitle = t
-			}
-		}
-
-		// Write result to a temp file
-		tmpFile := os.TempDir() + "/raven_filepick.txt"
-		os.Remove(tmpFile)
-
-		var cmd *exec.Cmd
-		if saving {
-			// For save: use a simple bash read prompt in alacritty
-			script := `cd ` + shellescape(initDir) + ` && read -e -p "Save as: " -i "" fn && echo "$fn" > ` + shellescape(tmpFile)
-			cmd = exec.Command("alacritty", "--title", dialogTitle, "-e", "bash", "-c", script)
-		} else {
-			// For open: use fzf for file selection
-			script := `cd ` + shellescape(initDir) + ` && find . -type f 2>/dev/null | sed 's|^./||' | sort | fzf --prompt="` + dialogTitle + `> " --height=80% > ` + shellescape(tmpFile)
-			cmd = exec.Command("alacritty", "--title", dialogTitle, "-e", "bash", "-c", script)
-		}
-
-		// Run synchronously - blocks until dialog closes
-		if err := cmd.Run(); err != nil {
-			ravelog.Logf("[comdlg32] %s: alacritty exit: %v\n", dialogTitle, err)
-			ctx.SetReturn(0)
-			return
-		}
-
-		data, err := os.ReadFile(tmpFile)
-		os.Remove(tmpFile)
-		if err != nil || len(data) == 0 {
-			ctx.SetReturn(0)
-			return
-		}
-		result := strings.TrimRight(string(data), "\r\n")
-		if result == "" {
-			ctx.SetReturn(0)
-			return
-		}
-
-		// Make absolute
-		if !filepath.IsAbs(result) {
-			result = filepath.Join(initDir, result)
-		}
-
-		// Write UTF-16 result to lpstrFile
-		if lpstrFile == 0 || nMaxFile == 0 {
-			ctx.SetReturn(1)
-			return
-		}
-		ws := utf16Encode(result)
-		maxW := int(nMaxFile) - 1
-		if len(ws) > maxW {
-			ws = ws[:maxW]
-		}
-		for i, w := range ws {
-			ctx.Mem.Write16(lpstrFile+uint64(i)*2, w)
-		}
-		ctx.Mem.Write16(lpstrFile+uint64(len(ws))*2, 0)
-
-		// nFileOffset = offset of filename part (after last backslash/slash)
-		slash := strings.LastIndexAny(result, `/\`)
-		nFileOffset := uint16(slash + 1) // chars, 0-based
-		// nFileExtension = offset of extension dot
-		dot := strings.LastIndex(result, ".")
-		nFileExt := uint16(0)
-		if dot > slash {
-			nFileExt = uint16(dot)
-		}
-		ctx.Mem.Write16(pOFN+100, nFileOffset)
-		ctx.Mem.Write16(pOFN+102, nFileExt)
-
-		ravelog.Logf("[comdlg32] %s → %q\n", dialogTitle, result)
-		ctx.SetReturn(1)
-	}
 	d.RegisterAutoStubHandler(comdlg32, "GetOpenFileNameW", func(ctx *ntapi.TrapContext) uint32 {
-		showFileDialog(ctx, false)
+		handleFileDialogW(ctx, false)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comdlg32, "GetSaveFileNameW", func(ctx *ntapi.TrapContext) uint32 {
-		showFileDialog(ctx, true)
+		handleFileDialogW(ctx, true)
 		return 0
 	})
-	// ANSI variants - same struct layout, strings are ANSI instead of UTF-16
-	showFileDialogA := func(ctx *ntapi.TrapContext, saving bool) {
-		pOFN := ctx.Arg(0)
-		if pOFN == 0 {
-			ctx.SetReturn(0)
-			return
-		}
-		lpstrFileA, _ := ctx.Mem.Read64(pOFN + 48)
-		nMaxFile, _ := ctx.Mem.Read32(pOFN + 56)
-		lpstrInitDirA, _ := ctx.Mem.Read64(pOFN + 80)
-		lpstrTitleA, _ := ctx.Mem.Read64(pOFN + 88)
-		initDir := "."
-		if lpstrInitDirA != 0 {
-			if d2 := readGuestString(lpstrInitDirA); d2 != "" {
-				initDir = d2
-			}
-		}
-		dialogTitle := "Open File"
-		if saving {
-			dialogTitle = "Save As"
-		}
-		if lpstrTitleA != 0 {
-			if t := readGuestString(lpstrTitleA); t != "" {
-				dialogTitle = t
-			}
-		}
-		tmpFile := os.TempDir() + "/raven_filepick.txt"
-		os.Remove(tmpFile)
-		var cmd *exec.Cmd
-		if saving {
-			script := `cd ` + shellescape(initDir) + ` && read -e -p "Save as: " -i "" fn && echo "$fn" > ` + shellescape(tmpFile)
-			cmd = exec.Command("alacritty", "--title", dialogTitle, "-e", "bash", "-c", script)
-		} else {
-			script := `cd ` + shellescape(initDir) + ` && find . -type f 2>/dev/null | sed 's|^./||' | sort | fzf --prompt="` + dialogTitle + `> " --height=80% > ` + shellescape(tmpFile)
-			cmd = exec.Command("alacritty", "--title", dialogTitle, "-e", "bash", "-c", script)
-		}
-		if err := cmd.Run(); err != nil {
-			ctx.SetReturn(0)
-			return
-		}
-		data, err := os.ReadFile(tmpFile)
-		os.Remove(tmpFile)
-		if err != nil || len(data) == 0 {
-			ctx.SetReturn(0)
-			return
-		}
-		result := strings.TrimRight(string(data), "\r\n")
-		if result == "" {
-			ctx.SetReturn(0)
-			return
-		}
-		if !filepath.IsAbs(result) {
-			result = filepath.Join(initDir, result)
-		}
-		if lpstrFileA == 0 || nMaxFile == 0 {
-			ctx.SetReturn(1)
-			return
-		}
-		b := append([]byte(result), 0)
-		if uint32(len(b)) > nMaxFile {
-			b = b[:nMaxFile]
-		}
-		for i, c := range b {
-			mem.Write8(lpstrFileA+uint64(i), c)
-		}
-		slash := strings.LastIndexAny(result, `/\`)
-		ctx.Mem.Write16(pOFN+100, uint16(slash+1))
-		dot := strings.LastIndex(result, ".")
-		if dot > slash {
-			ctx.Mem.Write16(pOFN+102, uint16(dot))
-		}
-		ravelog.Logf("[comdlg32] %s(A) → %q\n", dialogTitle, result)
-		ctx.SetReturn(1)
-	}
 	d.RegisterAutoStubHandler(comdlg32, "GetOpenFileNameA", func(ctx *ntapi.TrapContext) uint32 {
-		showFileDialogA(ctx, false)
+		handleFileDialogA(ctx, false)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comdlg32, "GetSaveFileNameA", func(ctx *ntapi.TrapContext) uint32 {
-		showFileDialogA(ctx, true)
+		handleFileDialogA(ctx, true)
 		return 0
 	})
 
-	// ChooseFontW: font picker - return FALSE (user cancelled)
-	d.RegisterAutoStubHandler(comdlg32, "ChooseFontW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - user cancelled
-		return 0
-	})
-	d.RegisterAutoStubHandler(comdlg32, "ChooseFontA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - user cancelled
-		return 0
-	})
-	// PrintDlgExW: extended print dialog - return S_FALSE (1) meaning user cancelled
-	d.RegisterAutoStubHandler(comdlg32, "PrintDlgExW", func(ctx *ntapi.TrapContext) uint32 {
-		// Set dwResultAction = PD_RESULT_CANCEL (0) in the PRINTDLGEX struct
-		pPD := ctx.Arg(0)
-		if pPD != 0 {
-			// dwResultAction is at the end of PRINTDLGEX; offset varies but
-			// for our purposes returning S_FALSE is sufficient to indicate cancel
+	d.RegisterAutoStubHandler(comdlg32, "ChooseColorW", func(ctx *ntapi.TrapContext) uint32 {
+		lpcc := ctx.Arg(0)
+		if lpcc == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(1) // S_FALSE - user cancelled
+		rgb, _ := mem.Read32(lpcc + 24)
+		lpCustColors, _ := mem.Read64(lpcc + 32)
+		flags, _ := mem.Read32(lpcc + 40)
+		ravelog.Logf("[comdlg32] ChooseColorW default=0x%08x cust=0x%x flags=0x%x\n", rgb, lpCustColors, flags)
+		mem.Write32(lpcc+24, rgb)
+		ctx.SetReturn(1)
 		return 0
 	})
-	d.RegisterAutoStubHandler(comdlg32, "PrintDlgExA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // S_FALSE - user cancelled
-		return 0
-	})
-	// PageSetupDlgW: page setup dialog - return FALSE (user cancelled)
-	d.RegisterAutoStubHandler(comdlg32, "PageSetupDlgW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - user cancelled
-		return 0
-	})
-	d.RegisterAutoStubHandler(comdlg32, "PageSetupDlgA", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - user cancelled
-		return 0
-	})
-	// CommDlgExtendedError: return 0 (no error) after cancelled dialogs
-	d.RegisterAutoStubHandler(comdlg32, "CommDlgExtendedError", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // CDERR_OK - no error
-		return 0
-	})
-	// FindTextW / ReplaceTextW: find/replace dialogs - return NULL
-	d.RegisterAutoStubHandler(comdlg32, "FindTextW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL - dialog not created
-		return 0
-	})
-	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextW", func(ctx *ntapi.TrapContext) uint32 {
-		// HWND ReplaceTextW(LPFINDREPLACEW lpfr)
-		// ReactOS: dll/win32/comdlg32/finddlg.c
-		// Creates a modeless Find & Replace dialog. We can't fully implement
-		// the dialog yet, but we log the request and return NULL (dialog not created).
-		lpfr := ctx.Arg(0)
-		if lpfr != 0 {
-			ravelog.Logf("[comdlg32] ReplaceTextW called (lpfr=0x%X, not yet implemented)\n", lpfr)
-		}
-		ctx.SetReturn(0) // NULL - dialog not created
-		return 0
-	})
-
-	// ═══════════════════════════════════════════════════════════════
-	// AUTO-GENERATED: Missing comdlg32 handlers from ReactOS spec
-	// ═══════════════════════════════════════════════════════════════
 
 	d.RegisterAutoStubHandler(comdlg32, "ChooseColorA", func(ctx *ntapi.TrapContext) uint32 {
 		lpcc := ctx.Arg(0)
-		ravelog.Logf("[comdlg32] ChooseColorA cc=0x%x\n", lpcc)
-		// Write a default color (white) to rgbResult (+24)
-		if lpcc != 0 {
-			ctx.Mem.Write32(lpcc + 24, 0x00FFFFFF) // white
+		if lpcc == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(0) // FALSE = cancelled
+		rgb, _ := mem.Read32(lpcc + 24)
+		lpCustColors, _ := mem.Read64(lpcc + 32)
+		flags, _ := mem.Read32(lpcc + 40)
+		ravelog.Logf("[comdlg32] ChooseColorA default=0x%08x cust=0x%x flags=0x%x\n", rgb, lpCustColors, flags)
+		mem.Write32(lpcc+24, rgb)
+		ctx.SetReturn(1)
 		return 0
 	})
-	d.RegisterAutoStubHandler(comdlg32, "FindTextA", func(ctx *ntapi.TrapContext) uint32 {
-		lpfr := ctx.Arg(0)
-		ravelog.Logf("[comdlg32] FindTextA fr=0x%x\n", lpfr)
-		ctx.SetReturn(0) // NULL = no dialog
-		return 0
-	})
-	d.RegisterAutoStubHandler(comdlg32, "GetFileTitleA", func(ctx *ntapi.TrapContext) uint32 {
-		lpszFile := ctx.Arg(0)
-		lpszTitle := ctx.Arg(1)
-		cchSize := ctx.Arg(2)
-		ravelog.Logf("[comdlg32] GetFileTitleA file=0x%x buf=0x%x size=%d\n", lpszFile, lpszTitle, cchSize)
-		if lpszTitle != 0 && cchSize > 0 {
-			ctx.Mem.Write8(lpszTitle, 0) // empty title
+
+	d.RegisterAutoStubHandler(comdlg32, "ChooseFontW", func(ctx *ntapi.TrapContext) uint32 {
+		lpcf := ctx.Arg(0)
+		if lpcf == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(0) // success
+		lpLogFont, _ := mem.Read64(lpcf + 24)
+		pointSize, _ := mem.Read32(lpcf + 32)
+		flags, _ := mem.Read32(lpcf + 36)
+		rgbColors, _ := mem.Read32(lpcf + 40)
+		ravelog.Logf("[comdlg32] ChooseFontW logfont=0x%x pointSize=%d flags=0x%x color=0x%08x\n", lpLogFont, pointSize, flags, rgbColors)
+		ctx.SetReturn(1)
 		return 0
 	})
+
+	d.RegisterAutoStubHandler(comdlg32, "ChooseFontA", func(ctx *ntapi.TrapContext) uint32 {
+		lpcf := ctx.Arg(0)
+		if lpcf == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		lpLogFont, _ := mem.Read64(lpcf + 24)
+		pointSize, _ := mem.Read32(lpcf + 32)
+		flags, _ := mem.Read32(lpcf + 36)
+		rgbColors, _ := mem.Read32(lpcf + 40)
+		ravelog.Logf("[comdlg32] ChooseFontA logfont=0x%x pointSize=%d flags=0x%x color=0x%08x\n", lpLogFont, pointSize, flags, rgbColors)
+		ctx.SetReturn(1)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(comdlg32, "PrintDlgW", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[comdlg32] PrintDlgW cancelled: no printer backend\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+
 	d.RegisterAutoStubHandler(comdlg32, "PrintDlgA", func(ctx *ntapi.TrapContext) uint32 {
-		lppd := ctx.Arg(0)
-		ravelog.Logf("[comdlg32] PrintDlgA pd=0x%x\n", lppd)
-		ctx.SetReturn(0) // FALSE = cancelled/no printer
+		ravelog.Logf("[comdlg32] PrintDlgA cancelled: no printer backend\n")
+		ctx.SetReturn(0)
 		return 0
 	})
+
+	d.RegisterAutoStubHandler(comdlg32, "PrintDlgExW", func(ctx *ntapi.TrapContext) uint32 {
+		pPD := ctx.Arg(0)
+		if pPD != 0 {
+			mem.Write32(pPD+72, 0) // dwResultAction = PD_RESULT_CANCEL for current struct assumption
+		}
+		ctx.SetReturn(eNotImpl)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(comdlg32, "PrintDlgExA", func(ctx *ntapi.TrapContext) uint32 {
+		pPD := ctx.Arg(0)
+		if pPD != 0 {
+			mem.Write32(pPD+72, 0)
+		}
+		ctx.SetReturn(eNotImpl)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(comdlg32, "PageSetupDlgW", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(comdlg32, "PageSetupDlgA", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(comdlg32, "FindTextW", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[comdlg32] FindTextW unsupported modeless dialog\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(comdlg32, "FindTextA", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[comdlg32] FindTextA unsupported modeless dialog\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextW", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[comdlg32] ReplaceTextW unsupported modeless dialog\n")
+		ctx.SetReturn(0)
+		return 0
+	})
+
 	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextA", func(ctx *ntapi.TrapContext) uint32 {
-		lpfr := ctx.Arg(0)
-		ravelog.Logf("[comdlg32] ReplaceTextA fr=0x%x\n", lpfr)
-		ctx.SetReturn(0) // NULL = no dialog
+		ravelog.Logf("[comdlg32] ReplaceTextA unsupported modeless dialog\n")
+		ctx.SetReturn(0)
 		return 0
 	})
+
+	d.RegisterAutoStubHandler(comdlg32, "CommDlgExtendedError", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	_ = sFalse
 }
