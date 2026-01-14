@@ -4668,21 +4668,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- iphlpapi.dll ---
 	delayReg(func() { registerIphlpapiHandlers(hctx) })
 
-	// --- version.dll ---
-	versionBuf := mem.Mmap(0, 128, mmu.PermRead|mmu.PermWrite)
-	// VS_FIXEDFILEINFO at versionBuf
-	mem.Write32(versionBuf+0, 0xFEEF04BD)  // dwSignature
-	mem.Write32(versionBuf+4, 0x00010000)  // dwStrucVersion
-	mem.Write32(versionBuf+8, 0x00080007)  // dwFileVersionMS (8.7)
-	mem.Write32(versionBuf+12, 0x00060000) // dwFileVersionLS
-	mem.Write32(versionBuf+16, 0x00080007) // dwProductVersionMS
-	mem.Write32(versionBuf+20, 0x00060000) // dwProductVersionLS
-	mem.Write32(versionBuf+24, 0x0000003F) // dwFileFlagsMask
-	mem.Write32(versionBuf+28, 0)          // dwFileFlags
-	mem.Write32(versionBuf+32, 0x00040004) // dwFileOS (VOS_NT_WINDOWS32)
-	mem.Write32(versionBuf+36, 1)          // dwFileType (VFT_APP)
-	delayReg(func() { registerVersionHandlers(hctx) })
-
 	// --- imm32.dll ---
 	delayReg(func() { registerImm32Handlers(hctx) })
 
@@ -4692,7 +4677,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- dwmapi.dll ---
 	delayReg(func() { registerDwmapiHandlers(hctx) })
 
-	// --- dbghelp.dll ---
+	// --- dbghelp.dll / version.dll / imagehlp.dll ---
 	delayReg(func() { registerDbghelpHandlers(hctx) })
 
 	// --- wintrust.dll ---
@@ -4745,6 +4730,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// --- bcrypt.dll ---
 	delayReg(func() { registerBcryptHandlers(hctx) })
+
+	// --- cabinet.dll ---
+	delayReg(func() { registerCabinetHandlers(hctx) })
 
 	// --- d3d11.dll / dxgi.dll ---
 	delayReg(func() { registerD3d11Handlers(hctx) })
