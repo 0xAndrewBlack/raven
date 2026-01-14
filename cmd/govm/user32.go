@@ -6554,8 +6554,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -6590,8 +6590,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -6619,8 +6619,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -6710,8 +6710,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -6742,8 +6742,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -6914,8 +6914,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -6939,8 +6939,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -7836,8 +7836,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8007,8 +8007,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8212,8 +8212,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8226,8 +8226,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8331,8 +8331,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8352,8 +8352,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8448,8 +8448,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -8507,8 +8507,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -8591,8 +8591,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8684,8 +8684,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8706,8 +8706,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8830,8 +8830,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -8868,8 +8868,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8948,8 +8948,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -8990,8 +8990,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -9064,8 +9064,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9074,8 +9074,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -9088,8 +9088,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9128,8 +9128,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9268,8 +9268,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})
@@ -9469,8 +9469,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9492,8 +9492,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9508,8 +9508,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9524,8 +9524,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9534,8 +9534,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9549,8 +9549,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9755,8 +9755,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9854,8 +9854,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9922,8 +9922,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9933,8 +9933,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9945,8 +9945,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9981,8 +9981,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(0)
 			return 0
 		})
@@ -9991,8 +9991,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
-			a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, a0, a1, a2, a3)
+			p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+			ravelog.Logf("[user32] %s(0x%x, 0x%x, 0x%x, 0x%x)\n", fn, p0, p1, p2, p3)
 			ctx.SetReturn(1)
 			return 0
 		})

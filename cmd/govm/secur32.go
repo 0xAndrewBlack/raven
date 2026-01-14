@@ -211,8 +211,10 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "GetSecurityUserInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[secur32] GetSecurityUserInfo(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[secur32] GetSecurityUserInfo p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -387,14 +389,16 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "LsaRegisterPolicyChangeNotification", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[secur32] LsaRegisterPolicyChangeNotification(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[secur32] LsaRegisterPolicyChangeNotification p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "LsaUnregisterPolicyChangeNotification", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[secur32] LsaUnregisterPolicyChangeNotification(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[secur32] LsaUnregisterPolicyChangeNotification p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -475,8 +479,12 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "SealMessage", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[secur32] SealMessage(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[secur32] SealMessage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -525,8 +533,12 @@ func registerSecur32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "UnsealMessage", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[secur32] UnsealMessage(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[secur32] UnsealMessage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})

@@ -41,15 +41,20 @@ func registerBcryptHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-stub", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[bcrypt] -stub(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[bcrypt] -stub(0x%x)\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "BCryptEnumAlgorithms", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[bcrypt] BCryptEnumAlgorithms(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
-		ctx.SetReturn(0)
+		dwAlgOps := ctx.Arg(0)
+		pAlgCount := ctx.Arg(1)
+		ppAlgList := ctx.Arg(2)
+		dwFlags := ctx.Arg(3)
+		ravelog.Logf("[bcrypt] BCryptEnumAlgorithms ops=0x%x count=0x%x list=0x%x flags=0x%x\n", dwAlgOps, pAlgCount, ppAlgList, dwFlags)
+		if pAlgCount != 0 { ctx.Mem.Write32(pAlgCount, 0) }
+		if ppAlgList != 0 { ctx.Mem.Write64(ppAlgList, 0) }
+		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "BCryptFinishHash", func(ctx *ntapi.TrapContext) uint32 {
@@ -78,9 +83,10 @@ func registerBcryptHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "BCryptGetFipsAlgorithmMode", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[bcrypt] BCryptGetFipsAlgorithmMode(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pfEnabled := ctx.Arg(0)
+		ravelog.Logf("[bcrypt] BCryptGetFipsAlgorithmMode out=0x%x\n", pfEnabled)
+		if pfEnabled != 0 { ctx.Mem.Write8(pfEnabled, 0) }
+		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "BCryptGetProperty", func(ctx *ntapi.TrapContext) uint32 {
@@ -99,9 +105,18 @@ func registerBcryptHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "BCryptHash", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[bcrypt] BCryptHash(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		hAlg := ctx.Arg(0)
+		pbSecret := ctx.Arg(1)
+		cbSecret := ctx.Arg(2)
+		pbInput := ctx.Arg(3)
+		cbInput := ctx.Arg(4)
+		pbOutput := ctx.Arg(5)
+		cbOutput := ctx.Arg(6)
+		ravelog.Logf("[bcrypt] BCryptHash alg=0x%x in=%d out=%d\n", hAlg, cbInput, cbOutput)
+		_, _ = pbSecret, cbSecret
+		_ = pbInput
+		for i := uint64(0); i < cbOutput && i < 256; i++ { ctx.Mem.Write8(pbOutput+i, 0) }
+		ctx.SetReturn(0) // STATUS_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "BCryptHashData", func(ctx *ntapi.TrapContext) uint32 {
@@ -115,8 +130,8 @@ func registerBcryptHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-stub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[bcrypt] -stub(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[bcrypt] -stub(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -134,8 +149,8 @@ func registerBcryptHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-stub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[bcrypt] -stub(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[bcrypt] -stub(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})

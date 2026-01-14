@@ -146,14 +146,24 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "WTSEnumerateSessionsExA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[wtsapi32] WTSEnumerateSessionsExA(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[wtsapi32] WTSEnumerateSessionsExA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "WTSEnumerateSessionsExW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[wtsapi32] WTSEnumerateSessionsExW(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[wtsapi32] WTSEnumerateSessionsExW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -280,8 +290,9 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "WTSQueryUserToken", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[wtsapi32] WTSQueryUserToken(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[wtsapi32] WTSQueryUserToken p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -475,8 +486,10 @@ func registerWtsapi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "WTSWaitSystemEvent", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[wtsapi32] WTSWaitSystemEvent(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[wtsapi32] WTSWaitSystemEvent p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})

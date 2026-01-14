@@ -38,15 +38,21 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "DeleteProfileA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[userenv] DeleteProfileA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(1)
+		lpSidString := ctx.Arg(0)
+		lpProfilePath := ctx.Arg(1)
+		lpComputerName := ctx.Arg(2)
+		ravelog.Logf("[userenv] DeleteProfileA sid=0x%x path=0x%x\n", lpSidString, lpProfilePath)
+		_ = lpComputerName
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "DeleteProfileW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[userenv] DeleteProfileW(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
-		ctx.SetReturn(1)
+		lpSidString := ctx.Arg(0)
+		lpProfilePath := ctx.Arg(1)
+		lpComputerName := ctx.Arg(2)
+		ravelog.Logf("[userenv] DeleteProfileW sid=0x%x path=0x%x\n", lpSidString, lpProfilePath)
+		_ = lpComputerName
+		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "DestroyEnvironmentBlock", func(ctx *ntapi.TrapContext) uint32 {
@@ -309,122 +315,122 @@ func registerUserenvHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0, p1, p2, p3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0, p1, p2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x)\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0, p1, p2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x)\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[userenv] -noname(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[userenv] -noname(0x%x)\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[userenv] -noname(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-noname", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[userenv] -noname(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[userenv] -noname(0x%x)\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})

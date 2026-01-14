@@ -350,38 +350,50 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 	// ═══════════════════════════════════════════════════════════════
 
 	d.RegisterAutoStubHandler(ole32, "BindMoniker", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] BindMoniker(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] BindMoniker p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CLIPFORMAT_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CLIPFORMAT_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CLIPFORMAT_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CLIPFORMAT_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CLIPFORMAT_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CLIPFORMAT_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CLIPFORMAT_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CLIPFORMAT_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CLIPFORMAT_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CLIPFORMAT_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CLIPFORMAT_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CLIPFORMAT_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CLSIDFromProgIDEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CLSIDFromProgIDEx(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CLSIDFromProgIDEx p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -391,8 +403,9 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoAllowSetForegroundWindow", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoAllowSetForegroundWindow(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoAllowSetForegroundWindow p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -402,68 +415,82 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoCancelCall", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoCancelCall(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoCancelCall p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoCopyProxy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoCopyProxy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoCopyProxy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoCreateFreeThreadedMarshaler", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoCreateFreeThreadedMarshaler(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoCreateFreeThreadedMarshaler p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoCreateInstanceFromApp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoCreateInstanceFromApp(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoCreateInstanceFromApp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoDecrementMTAUsage", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoDecrementMTAUsage(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoDecrementMTAUsage p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoDisableCallCancellation", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoDisableCallCancellation(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoDisableCallCancellation p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoDisconnectObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoDisconnectObject(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoDisconnectObject p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoDosDateTimeToFileTime", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoDosDateTimeToFileTime(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoDosDateTimeToFileTime p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoEnableCallCancellation", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoEnableCallCancellation(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoEnableCallCancellation p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoFileTimeNow", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoFileTimeNow(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoFileTimeNow p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoFileTimeToDosDateTime", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoFileTimeToDosDateTime(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoFileTimeToDosDateTime p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -488,8 +515,10 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetActivationState", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoGetActivationState(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoGetActivationState p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -503,26 +532,30 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetCallContext", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoGetCallContext(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoGetCallContext p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetCallState", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoGetCallState(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoGetCallState p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetCallerTID", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoGetCallerTID(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoGetCallerTID p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetCancelObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoGetCancelObject(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoGetCancelObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -539,14 +572,14 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetContextToken", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoGetContextToken(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoGetContextToken p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetCurrentLogicalThreadId", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoGetCurrentLogicalThreadId(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoGetCurrentLogicalThreadId p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -556,26 +589,42 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetDefaultContext", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoGetDefaultContext(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoGetDefaultContext p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetInstanceFromFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoGetInstanceFromFile(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoGetInstanceFromFile p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetInstanceFromIStorage", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoGetInstanceFromIStorage(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoGetInstanceFromIStorage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetInterfaceAndReleaseStream", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoGetInterfaceAndReleaseStream(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoGetInterfaceAndReleaseStream p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -588,44 +637,63 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetMarshalSizeMax", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoGetMarshalSizeMax(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoGetMarshalSizeMax p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] CoGetObject(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] CoGetObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetObjectContext", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoGetObjectContext(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoGetObjectContext p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetPSClsid", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoGetPSClsid(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoGetPSClsid p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetStandardMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoGetStandardMarshal(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoGetStandardMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetState", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoGetState(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoGetState p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoGetTreatAsClass", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoGetTreatAsClass(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoGetTreatAsClass p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -635,38 +703,42 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoIncrementMTAUsage", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoIncrementMTAUsage(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoIncrementMTAUsage p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoInitializeWOW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoInitializeWOW(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoInitializeWOW p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoIsHandlerConnected", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoIsHandlerConnected(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoIsHandlerConnected p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoIsOle1Class", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoIsOle1Class(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoIsOle1Class p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoLoadLibrary", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoLoadLibrary(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoLoadLibrary p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoLockObjectExternal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoLockObjectExternal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoLockObjectExternal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -678,51 +750,72 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoMarshalInterThreadInterfaceInStream", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoMarshalInterThreadInterfaceInStream(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoMarshalInterThreadInterfaceInStream p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoMarshalInterface", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoMarshalInterface(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoMarshalInterface p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoQueryClientBlanket", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoQueryClientBlanket(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoQueryClientBlanket p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoQueryProxyBlanket", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoQueryProxyBlanket(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoQueryProxyBlanket p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterChannelHook", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoRegisterChannelHook(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoRegisterChannelHook p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterClassObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[ole32] CoRegisterClassObject(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0) // S_OK
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoRegisterClassObject p0=0x%x\n", p0)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterInitializeSpy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoRegisterInitializeSpy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoRegisterInitializeSpy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterMallocSpy", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoRegisterMallocSpy(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoRegisterMallocSpy p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -735,26 +828,28 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterPSClsid", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoRegisterPSClsid(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoRegisterPSClsid p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterSurrogate", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoRegisterSurrogate(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoRegisterSurrogate p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRegisterSurrogateEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoRegisterSurrogateEx(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoRegisterSurrogateEx p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoReleaseMarshalData", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoReleaseMarshalData(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoReleaseMarshalData p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -774,15 +869,14 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRevokeClassObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[ole32] CoRevokeClassObject(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0) // S_OK
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoRevokeClassObject p0=0x%x\n", p0)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoRevokeInitializeSpy", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoRevokeInitializeSpy(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoRevokeInitializeSpy p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -792,14 +886,20 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoSetProxyBlanket", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] CoSetProxyBlanket(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] CoSetProxyBlanket p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoSetState", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CoSetState(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CoSetState p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -809,14 +909,16 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoSwitchCallContext", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoSwitchCallContext(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoSwitchCallContext p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoTreatAsClass", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CoTreatAsClass(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CoTreatAsClass p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -829,92 +931,114 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoUnmarshalInterface", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CoUnmarshalInterface(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CoUnmarshalInterface p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CoWaitForMultipleHandles", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[ole32] CoWaitForMultipleHandles(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[ole32] CoWaitForMultipleHandles p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateAntiMoniker", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CreateAntiMoniker(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CreateAntiMoniker p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateBindCtx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CreateBindCtx(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CreateBindCtx p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateClassMoniker", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CreateClassMoniker(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CreateClassMoniker p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateDataAdviseHolder", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CreateDataAdviseHolder(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CreateDataAdviseHolder p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateDataCache", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] CreateDataCache(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] CreateDataCache p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateErrorInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CreateErrorInfo(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CreateErrorInfo p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateFileMoniker", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CreateFileMoniker(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CreateFileMoniker p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateGenericComposite", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CreateGenericComposite(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CreateGenericComposite p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateILockBytesOnHGlobal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CreateILockBytesOnHGlobal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CreateILockBytesOnHGlobal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateItemMoniker", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] CreateItemMoniker(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] CreateItemMoniker p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateObjrefMoniker", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CreateObjrefMoniker(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CreateObjrefMoniker p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreateOleAdviseHolder", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] CreateOleAdviseHolder(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] CreateOleAdviseHolder p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "CreatePointerMoniker", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] CreatePointerMoniker(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] CreatePointerMoniker p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -924,14 +1048,17 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "DllDebugObjectRPCHook", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] DllDebugObjectRPCHook(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] DllDebugObjectRPCHook p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "DllGetClassObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] DllGetClassObject(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] DllGetClassObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -946,368 +1073,471 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "FmtIdToPropStgName", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] FmtIdToPropStgName(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] FmtIdToPropStgName p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "FreePropVariantArray", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] FreePropVariantArray(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] FreePropVariantArray p0=0x%x, p1=0x%x\n", p0, p1)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetClassFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] GetClassFile(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] GetClassFile p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetConvertStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] GetConvertStg(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] GetConvertStg p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetErrorInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] GetErrorInfo(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] GetErrorInfo p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetHGlobalFromILockBytes", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] GetHGlobalFromILockBytes(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] GetHGlobalFromILockBytes p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetHGlobalFromStream", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] GetHGlobalFromStream(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] GetHGlobalFromStream p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "GetRunningObjectTable", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] GetRunningObjectTable(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] GetRunningObjectTable p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HACCEL_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HACCEL_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HACCEL_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HACCEL_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HACCEL_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HACCEL_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HACCEL_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HACCEL_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HACCEL_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HACCEL_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HACCEL_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HACCEL_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HBITMAP_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HBITMAP_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HBITMAP_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HBITMAP_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HBITMAP_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HBITMAP_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HBITMAP_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HBITMAP_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HBITMAP_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HBITMAP_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HBITMAP_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HBITMAP_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HBRUSH_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HBRUSH_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HBRUSH_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HBRUSH_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HBRUSH_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HBRUSH_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HBRUSH_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HBRUSH_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HBRUSH_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HBRUSH_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HBRUSH_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HBRUSH_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HDC_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HDC_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HDC_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HDC_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HDC_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HDC_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HDC_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HDC_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HDC_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HDC_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HDC_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HDC_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HENHMETAFILE_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HENHMETAFILE_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HENHMETAFILE_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HENHMETAFILE_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HENHMETAFILE_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HENHMETAFILE_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HENHMETAFILE_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HENHMETAFILE_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HENHMETAFILE_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HENHMETAFILE_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HENHMETAFILE_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HENHMETAFILE_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HGLOBAL_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HGLOBAL_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HGLOBAL_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HGLOBAL_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HGLOBAL_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HGLOBAL_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HGLOBAL_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HGLOBAL_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HGLOBAL_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HGLOBAL_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HGLOBAL_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HGLOBAL_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HICON_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HICON_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HICON_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HICON_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HICON_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HICON_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HICON_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HICON_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HICON_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HICON_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HICON_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HICON_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMENU_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HMENU_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HMENU_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMENU_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMENU_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMENU_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMENU_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMENU_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMENU_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMENU_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMENU_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMENU_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMETAFILEPICT_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HMETAFILEPICT_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HMETAFILEPICT_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMETAFILEPICT_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMETAFILEPICT_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMETAFILEPICT_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMETAFILEPICT_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMETAFILEPICT_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMETAFILEPICT_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMETAFILEPICT_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMETAFILEPICT_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMETAFILEPICT_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMETAFILE_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HMETAFILE_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HMETAFILE_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMETAFILE_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMETAFILE_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMETAFILE_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMETAFILE_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMETAFILE_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMETAFILE_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HMETAFILE_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HMETAFILE_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HMETAFILE_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HPALETTE_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HPALETTE_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HPALETTE_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HPALETTE_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HPALETTE_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HPALETTE_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HPALETTE_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HPALETTE_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HPALETTE_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HPALETTE_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HPALETTE_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HPALETTE_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HWND_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] HWND_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] HWND_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HWND_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HWND_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HWND_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HWND_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HWND_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HWND_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "HWND_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] HWND_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] HWND_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "IsAccelerator", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] IsAccelerator(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] IsAccelerator p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "IsValidInterface", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] IsValidInterface(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] IsValidInterface p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "MkParseDisplayName", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] MkParseDisplayName(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] MkParseDisplayName p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "MonikerCommonPrefixWith", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] MonikerCommonPrefixWith(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] MonikerCommonPrefixWith p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "Ole32DllGetClassObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] Ole32DllGetClassObject(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] Ole32DllGetClassObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1317,116 +1547,197 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleConvertIStorageToOLESTREAM", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleConvertIStorageToOLESTREAM(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleConvertIStorageToOLESTREAM p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleConvertIStorageToOLESTREAMEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleConvertIStorageToOLESTREAMEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleConvertIStorageToOLESTREAMEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleConvertOLESTREAMToIStorage", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleConvertOLESTREAMToIStorage(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleConvertOLESTREAMToIStorage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreate(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreate p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateDefaultHandler", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] OleCreateDefaultHandler(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] OleCreateDefaultHandler p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateEmbeddingHelper", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateEmbeddingHelper(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateEmbeddingHelper p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateFromData", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateFromData(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateFromData p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateFromDataEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateFromDataEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateFromDataEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateFromFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateFromFile(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateFromFile p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateFromFileEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateFromFileEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateFromFileEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateLink", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateLink(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateLink p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateLinkFromData", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateLinkFromData(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateLinkFromData p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateLinkToFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateLinkToFile(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateLinkToFile p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateMenuDescriptor", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleCreateMenuDescriptor(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleCreateMenuDescriptor p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleCreateStaticFromData", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] OleCreateStaticFromData(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] OleCreateStaticFromData p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleDestroyMenuDescriptor", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] OleDestroyMenuDescriptor(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] OleDestroyMenuDescriptor p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleDoAutoConvert", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleDoAutoConvert(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleDoAutoConvert p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleDraw", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] OleDraw(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] OleDraw p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleDuplicateData", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleDuplicateData(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleDuplicateData p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1436,158 +1747,195 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleGetAutoConvert", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleGetAutoConvert(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleGetAutoConvert p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleGetClipboard", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] OleGetClipboard(0x%x)\n", a0)
-		ctx.SetReturn(0) // S_OK
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] OleGetClipboard p0=0x%x\n", p0)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleGetIconOfClass", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleGetIconOfClass(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleGetIconOfClass p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleGetIconOfFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleGetIconOfFile(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleGetIconOfFile p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleInitializeWOW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleInitializeWOW(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleInitializeWOW p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleIsCurrentClipboard", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] OleIsCurrentClipboard(0x%x)\n", a0)
-		ctx.SetReturn(0) // S_OK
-		return 0
-	})
-	d.RegisterAutoStubHandler(ole32, "OleIsRunning", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] OleIsRunning(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] OleIsCurrentClipboard p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
+	d.RegisterAutoStubHandler(ole32, "OleIsRunning", func(ctx *ntapi.TrapContext) uint32 {
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] OleIsRunning p0=0x%x\n", p0)
+		ctx.SetReturn(1)
+		return 0
+	})
 	d.RegisterAutoStubHandler(ole32, "OleLoad", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] OleLoad(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] OleLoad p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleLoadFromStream", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleLoadFromStream(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleLoadFromStream p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleLockRunning", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleLockRunning(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleLockRunning p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleMetafilePictFromIconAndLabel", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] OleMetafilePictFromIconAndLabel(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] OleMetafilePictFromIconAndLabel p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleNoteObjectVisible", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleNoteObjectVisible(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleNoteObjectVisible p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleQueryCreateFromData", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] OleQueryCreateFromData(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] OleQueryCreateFromData p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleQueryLinkFromData", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] OleQueryLinkFromData(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] OleQueryLinkFromData p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleRegEnumFormatEtc", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleRegEnumFormatEtc(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleRegEnumFormatEtc p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleRegEnumVerbs", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleRegEnumVerbs(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleRegEnumVerbs p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleRegGetMiscStatus", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleRegGetMiscStatus(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleRegGetMiscStatus p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleRegGetUserType", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleRegGetUserType(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleRegGetUserType p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleRun", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] OleRun(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] OleRun p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleSave", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleSave(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleSave p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleSaveToStream", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleSaveToStream(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleSaveToStream p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleSetAutoConvert", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleSetAutoConvert(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleSetAutoConvert p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleSetClipboard", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] OleSetClipboard(0x%x)\n", a0)
-		ctx.SetReturn(0) // S_OK
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] OleSetClipboard p0=0x%x\n", p0)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleSetContainedObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] OleSetContainedObject(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] OleSetContainedObject p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleSetMenuDescriptor", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[ole32] OleSetMenuDescriptor(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[ole32] OleSetMenuDescriptor p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "OleTranslateAccelerator", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] OleTranslateAccelerator(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] OleTranslateAccelerator p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1600,206 +1948,291 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "PropStgNameToFmtId", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] PropStgNameToFmtId(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] PropStgNameToFmtId p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "PropSysAllocString", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] PropSysAllocString(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] PropSysAllocString p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "PropSysFreeString", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] PropSysFreeString(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] PropSysFreeString p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "PropVariantClear", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] PropVariantClear(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] PropVariantClear p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "PropVariantCopy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] PropVariantCopy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] PropVariantCopy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "ReadClassStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] ReadClassStg(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] ReadClassStg p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "ReadClassStm", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] ReadClassStm(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] ReadClassStm p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "ReadFmtUserTypeStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] ReadFmtUserTypeStg(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] ReadFmtUserTypeStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "ReleaseStgMedium", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] ReleaseStgMedium(0x%x)\n", a0)
-		ctx.SetReturn(1)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] ReleaseStgMedium p0=0x%x\n", p0)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "RoGetAgileReference", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] RoGetAgileReference(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] RoGetAgileReference p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "SNB_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] SNB_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] SNB_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "SNB_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] SNB_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] SNB_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "SNB_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] SNB_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] SNB_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "SNB_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] SNB_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] SNB_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "STGMEDIUM_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] STGMEDIUM_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] STGMEDIUM_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "STGMEDIUM_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] STGMEDIUM_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] STGMEDIUM_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "STGMEDIUM_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] STGMEDIUM_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] STGMEDIUM_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "STGMEDIUM_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] STGMEDIUM_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] STGMEDIUM_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "SetConvertStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] SetConvertStg(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] SetConvertStg p0=0x%x, p1=0x%x\n", p0, p1)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "SetErrorInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] SetErrorInfo(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] SetErrorInfo p0=0x%x, p1=0x%x\n", p0, p1)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgConvertPropertyToVariant", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] StgConvertPropertyToVariant(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] StgConvertPropertyToVariant p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgConvertVariantToProperty", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] StgConvertVariantToProperty(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] StgConvertVariantToProperty p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreateDocfile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] StgCreateDocfile(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] StgCreateDocfile p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreateDocfileOnILockBytes", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] StgCreateDocfileOnILockBytes(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] StgCreateDocfileOnILockBytes p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreatePropSetStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] StgCreatePropSetStg(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] StgCreatePropSetStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreatePropStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] StgCreatePropStg(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] StgCreatePropStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgCreateStorageEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] StgCreateStorageEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] StgCreateStorageEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgIsStorageFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] StgIsStorageFile(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] StgIsStorageFile p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgIsStorageILockBytes", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] StgIsStorageILockBytes(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] StgIsStorageILockBytes p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgOpenPropStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[ole32] StgOpenPropStg(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[ole32] StgOpenPropStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgOpenStorage", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] StgOpenStorage(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] StgOpenStorage p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgOpenStorageEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] StgOpenStorageEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] StgOpenStorageEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgOpenStorageOnILockBytes", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[ole32] StgOpenStorageOnILockBytes(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[ole32] StgOpenStorageOnILockBytes p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "StgSetTimes", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] StgSetTimes(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] StgSetTimes p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -1830,44 +2263,62 @@ func registerOle32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "WdtpInterfacePointer_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[ole32] WdtpInterfacePointer_UserFree(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[ole32] WdtpInterfacePointer_UserFree p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "WdtpInterfacePointer_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[ole32] WdtpInterfacePointer_UserMarshal(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[ole32] WdtpInterfacePointer_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "WdtpInterfacePointer_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[ole32] WdtpInterfacePointer_UserSize(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[ole32] WdtpInterfacePointer_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "WdtpInterfacePointer_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[ole32] WdtpInterfacePointer_UserUnmarshal(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[ole32] WdtpInterfacePointer_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "WriteClassStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] WriteClassStg(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] WriteClassStg p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "WriteClassStm", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[ole32] WriteClassStm(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[ole32] WriteClassStm p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(ole32, "WriteFmtUserTypeStg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[ole32] WriteFmtUserTypeStg(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] WriteFmtUserTypeStg p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2033,44 +2484,54 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 	// ═══════════════════════════════════════════════════════════════
 
 	d.RegisterAutoStubHandler(oleaut32, "BSTR_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] BSTR_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] BSTR_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "BSTR_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] BSTR_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] BSTR_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "BSTR_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] BSTR_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] BSTR_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "BSTR_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] BSTR_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] BSTR_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "BstrFromVector", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] BstrFromVector(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] BstrFromVector p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "ClearCustData", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] ClearCustData(0x%x)\n", a0)
-		ctx.SetReturn(1)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] ClearCustData p0=0x%x\n", p0)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "CreateDispTypeInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] CreateDispTypeInfo(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] CreateDispTypeInfo p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2082,44 +2543,73 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "CreateStdDispatch", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] CreateStdDispatch(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] CreateStdDispatch p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "CreateTypeLib", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] CreateTypeLib(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] CreateTypeLib p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "CreateTypeLib2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] CreateTypeLib2(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] CreateTypeLib2 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DispCallFunc", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] DispCallFunc(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] DispCallFunc p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DispGetIDsOfNames", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] DispGetIDsOfNames(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] DispGetIDsOfNames p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DispGetParam", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[oleaut32] DispGetParam(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[oleaut32] DispGetParam p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DispInvoke", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] DispInvoke(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] DispInvoke p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2129,8 +2619,10 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DllGetClassObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] DllGetClassObject(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[ole32] DllGetClassObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2145,20 +2637,25 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "DosDateTimeToVariantTime", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] DosDateTimeToVariantTime(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] DosDateTimeToVariantTime p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "GetActiveObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] GetActiveObject(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] GetActiveObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "GetAltMonthNames", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] GetAltMonthNames(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] GetAltMonthNames p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2171,50 +2668,68 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "GetRecordInfoFromGuids", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] GetRecordInfoFromGuids(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] GetRecordInfoFromGuids p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "GetRecordInfoFromTypeInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] GetRecordInfoFromTypeInfo(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] GetRecordInfoFromTypeInfo p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "LHashValOfNameSys", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] LHashValOfNameSys(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] LHashValOfNameSys p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "LHashValOfNameSysA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] LHashValOfNameSysA(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] LHashValOfNameSysA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "LPSAFEARRAY_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] LPSAFEARRAY_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] LPSAFEARRAY_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "LPSAFEARRAY_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] LPSAFEARRAY_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] LPSAFEARRAY_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "LPSAFEARRAY_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] LPSAFEARRAY_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] LPSAFEARRAY_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "LPSAFEARRAY_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] LPSAFEARRAY_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] LPSAFEARRAY_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2224,135 +2739,186 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleCreateFontIndirect", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] OleCreateFontIndirect(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] OleCreateFontIndirect p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleCreatePictureIndirect", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] OleCreatePictureIndirect(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] OleCreatePictureIndirect p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleCreatePropertyFrame", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] OleCreatePropertyFrame(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] OleCreatePropertyFrame p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleCreatePropertyFrameIndirect", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] OleCreatePropertyFrameIndirect(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] OleCreatePropertyFrameIndirect p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleIconToCursor", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] OleIconToCursor(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] OleIconToCursor p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleLoadPicture", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[oleaut32] OleLoadPicture(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[oleaut32] OleLoadPicture p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleLoadPictureEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] OleLoadPictureEx(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] OleLoadPictureEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleLoadPictureFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] OleLoadPictureFile(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] OleLoadPictureFile p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleLoadPicturePath", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] OleLoadPicturePath(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] OleLoadPicturePath p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleSavePictureFile", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] OleSavePictureFile(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] OleSavePictureFile p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "OleTranslateColor", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] OleTranslateColor(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] OleTranslateColor p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "QueryPathOfRegTypeLib", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[oleaut32] QueryPathOfRegTypeLib(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[oleaut32] QueryPathOfRegTypeLib p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "RegisterActiveObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] RegisterActiveObject(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] RegisterActiveObject p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "RegisterTypeLib", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		a1 := ctx.Arg(1)
-		ravelog.Logf("[oleaut32] RegisterTypeLib(0x%x, 0x%x)\n", a0, a1)
-		ctx.SetReturn(0) // S_OK
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] RegisterTypeLib p0=0x%x\n", p0)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "RegisterTypeLibForUser", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] RegisterTypeLibForUser(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] RegisterTypeLibForUser p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "RevokeActiveObject", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] RevokeActiveObject(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] RevokeActiveObject p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayAccessData", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayAccessData(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArrayAccessData p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayAllocData", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayAllocData(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] SafeArrayAllocData p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayAllocDescriptor", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayAllocDescriptor(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArrayAllocDescriptor p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayAllocDescriptorEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayAllocDescriptorEx(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] SafeArrayAllocDescriptorEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCopy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayCopy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArrayCopy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCopyData", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayCopyData(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArrayCopyData p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2371,20 +2937,30 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCreateEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] SafeArrayCreateEx(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] SafeArrayCreateEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCreateVector", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayCreateVector(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] SafeArrayCreateVector p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayCreateVectorEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] SafeArrayCreateVectorEx(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] SafeArrayCreateVectorEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2395,110 +2971,126 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayDestroyData", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayDestroyData(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] SafeArrayDestroyData p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayDestroyDescriptor", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayDestroyDescriptor(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] SafeArrayDestroyDescriptor p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetDim", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayGetDim(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] SafeArrayGetDim p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetElement", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayGetElement(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] SafeArrayGetElement p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetElemsize", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayGetElemsize(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] SafeArrayGetElemsize p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetIID", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayGetIID(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArrayGetIID p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetLBound", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayGetLBound(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] SafeArrayGetLBound p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetRecordInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayGetRecordInfo(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArrayGetRecordInfo p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetUBound", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayGetUBound(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] SafeArrayGetUBound p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayGetVartype", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayGetVartype(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArrayGetVartype p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayLock", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayLock(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] SafeArrayLock p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayPtrOfIndex", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayPtrOfIndex(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] SafeArrayPtrOfIndex p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayPutElement", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] SafeArrayPutElement(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] SafeArrayPutElement p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayRedim", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArrayRedim(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArrayRedim p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArraySetIID", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArraySetIID(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArraySetIID p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArraySetRecordInfo", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SafeArraySetRecordInfo(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SafeArraySetRecordInfo p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayUnaccessData", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayUnaccessData(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] SafeArrayUnaccessData p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SafeArrayUnlock", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[oleaut32] SafeArrayUnlock(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[oleaut32] SafeArrayUnlock p0=0x%x\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -2551,1736 +3143,2209 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "SystemTimeToVariantTime", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] SystemTimeToVariantTime(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] SystemTimeToVariantTime p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "UnRegisterTypeLibForUser", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[oleaut32] UnRegisterTypeLibForUser(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[oleaut32] UnRegisterTypeLibForUser p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VARIANT_UserFree", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VARIANT_UserFree(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VARIANT_UserFree p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VARIANT_UserMarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VARIANT_UserMarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VARIANT_UserMarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VARIANT_UserSize", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VARIANT_UserSize(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VARIANT_UserSize p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VARIANT_UserUnmarshal", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VARIANT_UserUnmarshal(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VARIANT_UserUnmarshal p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarAbs", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarAbs(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarAbs p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarAdd", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarAdd(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarAdd p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarAnd", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarAnd(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarAnd p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarBoolFromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarBoolFromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBoolFromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBoolFromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBoolFromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarBoolFromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarBoolFromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrCat", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarBstrCat(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarBstrCat p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrCmp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrCmp(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrCmp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromBool(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromBool p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromCy(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromCy p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromDate(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromDate p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromDec(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromDec p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromDisp(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromI1(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromI1 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromI2(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromI2 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromI4(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromI4 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromI8(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromI8 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromR4(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromR4 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromR8(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromR8 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromUI1(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromUI1 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromUI2(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromUI2 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromUI4(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromUI4 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarBstrFromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarBstrFromUI8(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarBstrFromUI8 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCat", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarCat(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarCat p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCmp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarCmp(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarCmp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyAbs", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyAbs(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyAbs p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyAdd", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarCyAdd(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarCyAdd p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyCmp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyCmp(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyCmp p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyCmpR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyCmpR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyCmpR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFix", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFix(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFix p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarCyFromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarCyFromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarCyFromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarCyFromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyFromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyFromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyFromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyInt", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyInt(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyInt p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyMul", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarCyMul(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarCyMul p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyMulI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarCyMulI4(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarCyMulI4 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyMulI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarCyMulI8(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarCyMulI8 p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyNeg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarCyNeg(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarCyNeg p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCyRound", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarCyRound(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarCyRound p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarCySub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarCySub(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarCySub p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDateFromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDateFromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarDateFromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarDateFromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDateFromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDateFromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromUdate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDateFromUdate(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDateFromUdate p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDateFromUdateEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarDateFromUdateEx(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarDateFromUdateEx p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecAbs", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecAbs(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecAbs p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecAdd", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDecAdd(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDecAdd p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecCmp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecCmp(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecCmp p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecCmpR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecCmpR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecCmpR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecDiv", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDecDiv(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDecDiv p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFix", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFix(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFix p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDecFromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDecFromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarDecFromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarDecFromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecFromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecFromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecFromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecInt", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecInt(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecInt p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecMul", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDecMul(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDecMul p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecNeg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarDecNeg(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarDecNeg p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecRound", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDecRound(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDecRound p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDecSub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDecSub(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDecSub p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarDiv", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarDiv(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarDiv p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarEqv", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarEqv(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarEqv p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarFix", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarFix(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarFix p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarFormat", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] VarFormat(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] VarFormat p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarFormatCurrency", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] VarFormatCurrency(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] VarFormatCurrency p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarFormatDateTime", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarFormatDateTime(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarFormatDateTime p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarFormatNumber", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] VarFormatNumber(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] VarFormatNumber p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarFormatPercent", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[oleaut32] VarFormatPercent(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		p5 := ctx.Arg(5)
+		ravelog.Logf("[oleaut32] VarFormatPercent p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4; _ = p5
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarI1FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarI1FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarI1FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarI1FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI1FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI1FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI1FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarI2FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarI2FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarI2FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarI2FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI2FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI2FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI2FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarI4FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarI4FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarI4FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarI4FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI4FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI4FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI4FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarI8FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarI8FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarI8FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarI8FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarI8FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarI8FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarI8FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarIdiv", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarIdiv(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarIdiv p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarImp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarImp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarImp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarInt", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarInt(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarInt p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarMod", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarMod(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarMod p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarMonthName", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarMonthName(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarMonthName p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarMul", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarMul(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarMul p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarNeg", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarNeg(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarNeg p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarNot", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarNot(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarNot p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarNumFromParseNum", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarNumFromParseNum(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarNumFromParseNum p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarOr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarOr(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarOr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarParseNumFromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[oleaut32] VarParseNumFromStr(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[oleaut32] VarParseNumFromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarPow", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarPow(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarPow p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4CmpR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4CmpR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4CmpR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarR4FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarR4FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarR4FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarR4FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR4FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR4FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR4FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarR8FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarR8FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarR8FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarR8FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarR8FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarR8FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8Pow", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarR8Pow(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarR8Pow p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarR8Round", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarR8Round(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarR8Round p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarRound", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarRound(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarRound p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarSub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarSub(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarSub p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarUI1FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarUI1FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarUI1FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarUI1FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI1FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI1FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI1FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarUI2FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarUI2FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarUI2FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarUI2FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI2FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI2FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI2FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarUI4FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarUI4FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarUI4FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarUI4FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI4FromUI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI4FromUI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI4FromUI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromBool", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromBool(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromBool p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromCy", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromCy(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromCy p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromDate(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromDate p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromDec", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromDec(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromDec p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromDisp", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarUI8FromDisp(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarUI8FromDisp p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromI8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromI8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromI8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromR4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromR4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromR4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromR8", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromR8(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromR8 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromStr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)
-		ravelog.Logf("[oleaut32] VarUI8FromStr(0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		ravelog.Logf("[oleaut32] VarUI8FromStr p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromUI1", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromUI1(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromUI1 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromUI2", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromUI2(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromUI2 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUI8FromUI4", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VarUI8FromUI4(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VarUI8FromUI4 p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarUdateFromDate", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarUdateFromDate(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarUdateFromDate p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarWeekdayName", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[oleaut32] VarWeekdayName(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		p3 := ctx.Arg(3)
+		p4 := ctx.Arg(4)
+		ravelog.Logf("[oleaut32] VarWeekdayName p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
+		_ = p3; _ = p4
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VarXor", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VarXor(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VarXor p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -4308,20 +5373,24 @@ func registerOleaut32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VariantTimeToDosDateTime", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[oleaut32] VariantTimeToDosDateTime(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		p2 := ctx.Arg(2)
+		ravelog.Logf("[oleaut32] VariantTimeToDosDateTime p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VariantTimeToSystemTime", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VariantTimeToSystemTime(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VariantTimeToSystemTime p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(oleaut32, "VectorFromBstr", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[oleaut32] VectorFromBstr(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[oleaut32] VectorFromBstr p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})

@@ -129,32 +129,32 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-stub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[winmm] -stub(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
+		p0, p1, p2, p3, p4, p5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
+		ravelog.Logf("[winmm] -stub(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", p0, p1, p2, p3, p4, p5)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-stub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[winmm] -stub(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[winmm] -stub(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-stub", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[winmm] -stub(0x%x)\n", a0)
+		p0 := ctx.Arg(0)
+		ravelog.Logf("[winmm] -stub(0x%x)\n", p0)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-stub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[winmm] -stub(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0, p1, p2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[winmm] -stub(0x%x, 0x%x, 0x%x)\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-stub", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[winmm] -stub(0x%x, 0x%x)\n", a0, a1)
+		p0, p1 := ctx.Arg(0), ctx.Arg(1)
+		ravelog.Logf("[winmm] -stub(0x%x, 0x%x)\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})

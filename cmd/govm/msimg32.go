@@ -30,8 +30,8 @@ func registerMsimg32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "-private", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
-		ravelog.Logf("[msimg32] -private(0x%x, 0x%x, 0x%x)\n", a0, a1, a2)
+		p0, p1, p2 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		ravelog.Logf("[msimg32] -private(0x%x, 0x%x, 0x%x)\n", p0, p1, p2)
 		ctx.SetReturn(0)
 		return 0
 	})

@@ -94,9 +94,10 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "IsAdminOverrideActive", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[powrprof] IsAdminOverrideActive(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		pScheme := ctx.Arg(0)
+		ravelog.Logf("[powrprof] IsAdminOverrideActive scheme=0x%x\n", pScheme)
+		_ = pScheme
+		ctx.SetReturn(0) // FALSE
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "IsPwrHibernateAllowed", func(ctx *ntapi.TrapContext) uint32 {
@@ -120,9 +121,10 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "PowerDeterminePlatformRoleEx", func(ctx *ntapi.TrapContext) uint32 {
-		a0 := ctx.Arg(0)
-		ravelog.Logf("[powrprof] PowerDeterminePlatformRoleEx(0x%x)\n", a0)
-		ctx.SetReturn(0)
+		flags := ctx.Arg(0)
+		ravelog.Logf("[powrprof] PowerDeterminePlatformRoleEx flags=0x%x\n", flags)
+		_ = flags
+		ctx.SetReturn(1) // PlatformRoleDesktop
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "PowerEnumerate", func(ctx *ntapi.TrapContext) uint32 {
@@ -178,9 +180,14 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "PowerReadACValueIndex", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[powrprof] PowerReadACValueIndex(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		rootKey := ctx.Arg(0)
+		schemeGuid := ctx.Arg(1)
+		subgroupGuid := ctx.Arg(2)
+		settingGuid := ctx.Arg(3)
+		valueIndex := ctx.Arg(4)
+		ravelog.Logf("[powrprof] PowerReadACValueIndex root=0x%x scheme=0x%x sub=0x%x set=0x%x out=0x%x\n", rootKey, schemeGuid, subgroupGuid, settingGuid, valueIndex)
+		if valueIndex != 0 { ctx.Mem.Write32(valueIndex, 0) }
+		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "PowerReadDCValue", func(ctx *ntapi.TrapContext) uint32 {
@@ -198,15 +205,27 @@ func registerPowrprofHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "PowerReadDCValueIndex", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)
-		ravelog.Logf("[powrprof] PowerReadDCValueIndex(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4)
-		ctx.SetReturn(0)
+		rootKey := ctx.Arg(0)
+		schemeGuid := ctx.Arg(1)
+		subgroupGuid := ctx.Arg(2)
+		settingGuid := ctx.Arg(3)
+		valueIndex := ctx.Arg(4)
+		ravelog.Logf("[powrprof] PowerReadDCValueIndex root=0x%x scheme=0x%x sub=0x%x set=0x%x out=0x%x\n", rootKey, schemeGuid, subgroupGuid, settingGuid, valueIndex)
+		if valueIndex != 0 { ctx.Mem.Write32(valueIndex, 0) }
+		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "PowerReadFriendlyName", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1, a2, a3, a4, a5 := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5)
-		ravelog.Logf("[powrprof] PowerReadFriendlyName(0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n", a0, a1, a2, a3, a4, a5)
-		ctx.SetReturn(0)
+		rootKey := ctx.Arg(0)
+		schemeGuid := ctx.Arg(1)
+		subgroupGuid := ctx.Arg(2)
+		settingGuid := ctx.Arg(3)
+		buffer := ctx.Arg(4)
+		bufferSize := ctx.Arg(5)
+		ravelog.Logf("[powrprof] PowerReadFriendlyName root=0x%x buf=0x%x\n", rootKey, buffer)
+		_, _, _, _ = schemeGuid, subgroupGuid, settingGuid, buffer
+		if bufferSize != 0 { ctx.Mem.Write32(bufferSize, 0) }
+		ctx.SetReturn(0) // ERROR_SUCCESS
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "PowerRegisterSuspendResumeNotification", func(ctx *ntapi.TrapContext) uint32 {

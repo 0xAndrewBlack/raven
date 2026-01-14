@@ -29,14 +29,16 @@ func registerPsapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "EnumPageFilesA", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[psapi] EnumPageFilesA(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[psapi] EnumPageFilesA p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "EnumPageFilesW", func(ctx *ntapi.TrapContext) uint32 {
-		a0, a1 := ctx.Arg(0), ctx.Arg(1)
-		ravelog.Logf("[psapi] EnumPageFilesW(0x%x, 0x%x)\n", a0, a1)
+		p0 := ctx.Arg(0)
+		p1 := ctx.Arg(1)
+		ravelog.Logf("[psapi] EnumPageFilesW p0=0x%x, p1=0x%x\n", p0, p1)
 		ctx.SetReturn(0)
 		return 0
 	})
