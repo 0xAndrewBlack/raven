@@ -232,6 +232,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		return top
 	}
+	requestCommit := func(repaintBuiltin bool) {
+		if wlWindow == nil {
+			return
+		}
+		if hctx.HasBaseFrame {
+			if repaintBuiltin {
+				hctx.RepaintBuiltin = true
+			}
+			hctx.FrameReady = true
+			commitIfDone()
+			return
+		}
+		wlWindow.Commit()
+	}
 	getTopLevelClientSize := func(hwnd uint64) (int32, int32) {
 		if wlWindow == nil {
 			return 0, 0
@@ -981,9 +995,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "UpdateWindow", func(ctx *ntapi.TrapContext) uint32 {
-		// Trigger immediate paint for main window
 		hwnd := ctx.Arg(0)
+		if hwnd == 0 {
+			hwnd = hctx.MainHWND
+		}
 		if hwnd == hctx.MainHWND && wlWindow != nil {
+			queuePaint(hwnd)
+		} else if cs, ok := hwndChildren[hwnd]; ok && cs.visible {
 			queuePaint(hwnd)
 		}
 		ctx.SetReturn(1)
@@ -1108,7 +1126,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ReleaseDC", func(ctx *ntapi.TrapContext) uint32 {
-		gdiMgr.DeleteDC(ctx.Arg(1))
+		hdc := ctx.Arg(1)
+		dc := gdiMgr.GetDC(hdc)
+		dirtyScreen := dc != nil && dc.IsScreen && dc.Dirty
+		gdiMgr.DeleteDC(hdc)
+		if dirtyScreen {
+			requestCommit(false)
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -1460,12 +1484,23 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hwnd := ctx.Arg(0)
 		index := int32(ctx.Arg(1))
 		newVal := ctx.Arg(2)
+		if index >= 0 {
+			if atom := hctx.HwndClassAtom[hwnd]; atom != 0 {
+				if ci := hctx.ClassInfo[atom]; ci != nil && index >= ci.WndExtra {
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+		}
 		m := windowLongPtr[hwnd]
 		if m == nil {
 			m = make(map[int32]uint64)
 			windowLongPtr[hwnd] = m
 		}
 		old := m[index]
+		if old == 0 {
+			old = win32.Global.GetLong(hwnd, index)
+		}
 		m[index] = newVal
 		// GWLP_WNDPROC (-4): sync with hwndWndProc dispatch map
 		if index == -4 {
@@ -1496,9 +1531,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "GetWindowLongPtrW", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		index := int32(ctx.Arg(1))
+		if index >= 0 {
+			if atom := hctx.HwndClassAtom[hwnd]; atom != 0 {
+				if ci := hctx.ClassInfo[atom]; ci != nil && index >= ci.WndExtra {
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+		}
 		var val uint64
 		if m, ok := windowLongPtr[hwnd]; ok {
 			val = m[index]
+		}
+		if val == 0 {
+			val = win32.Global.GetLong(hwnd, index)
 		}
 		// GWLP_WNDPROC (-4): fall back to hwndWndProc dispatch map
 		if index == -4 && val == 0 {
@@ -1513,12 +1559,23 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hwnd := ctx.Arg(0)
 		index := int32(ctx.Arg(1))
 		newVal := ctx.Arg(2)
+		if index >= 0 {
+			if atom := hctx.HwndClassAtom[hwnd]; atom != 0 {
+				if ci := hctx.ClassInfo[atom]; ci != nil && index >= ci.WndExtra {
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+		}
 		m := windowLongPtr[hwnd]
 		if m == nil {
 			m = make(map[int32]uint64)
 			windowLongPtr[hwnd] = m
 		}
 		old := m[index]
+		if old == 0 {
+			old = win32.Global.GetLong(hwnd, index)
+		}
 		m[index] = newVal
 		if index == -4 {
 			if old == 0 {
@@ -1526,6 +1583,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			hwndWndProc[hwnd] = newVal
 		}
+		win32.Global.SetLong(hwnd, index, newVal)
 		if index == -16 {
 			if cs, ok := hwndChildren[hwnd]; ok {
 				const wsVisible = uint32(0x10000000)
@@ -1547,9 +1605,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "GetWindowLongPtrA", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		index := int32(ctx.Arg(1))
+		if index >= 0 {
+			if atom := hctx.HwndClassAtom[hwnd]; atom != 0 {
+				if ci := hctx.ClassInfo[atom]; ci != nil && index >= ci.WndExtra {
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+		}
 		var val uint64
 		if m, ok := windowLongPtr[hwnd]; ok {
 			val = m[index]
+		}
+		if val == 0 {
+			val = win32.Global.GetLong(hwnd, index)
 		}
 		if index == -4 && val == 0 {
 			val = hwndWndProc[hwnd]
@@ -1562,13 +1631,31 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hwnd := ctx.Arg(0)
 		index := int32(ctx.Arg(1))
 		newVal := ctx.Arg(2)
+		if index >= 0 {
+			if atom := hctx.HwndClassAtom[hwnd]; atom != 0 {
+				if ci := hctx.ClassInfo[atom]; ci != nil && index >= ci.WndExtra {
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+		}
 		m := windowLongPtr[hwnd]
 		if m == nil {
 			m = make(map[int32]uint64)
 			windowLongPtr[hwnd] = m
 		}
 		old := m[index]
+		if old == 0 {
+			old = win32.Global.GetLong(hwnd, index)
+		}
 		m[index] = newVal
+		win32.Global.SetLong(hwnd, index, newVal)
+		if index == -4 {
+			if old == 0 {
+				old = hwndWndProc[hwnd]
+			}
+			hwndWndProc[hwnd] = newVal
+		}
 		if index == -16 {
 			if cs, ok := hwndChildren[hwnd]; ok {
 				const wsVisible = uint32(0x10000000)
@@ -1588,11 +1675,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "GetWindowLongW", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		index := int32(ctx.Arg(1))
-		if m, ok := windowLongPtr[hwnd]; ok {
-			ctx.SetReturn(m[index])
-		} else {
-			ctx.SetReturn(0)
+		if index >= 0 {
+			if atom := hctx.HwndClassAtom[hwnd]; atom != 0 {
+				if ci := hctx.ClassInfo[atom]; ci != nil && index >= ci.WndExtra {
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
 		}
+		if m, ok := windowLongPtr[hwnd]; ok {
+			if val := m[index]; val != 0 {
+				ctx.SetReturn(val)
+				return 0
+			}
+		}
+		ctx.SetReturn(win32.Global.GetLong(hwnd, index))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SetPropW", func(ctx *ntapi.TrapContext) uint32 {
@@ -1728,6 +1825,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		// Built-in controls first
 		if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+			if msg == 0x000F || msg == 0x0014 || msg == 0x0085 || msg == 0x0113 {
+				requestCommit(msg != 0x0113)
+			}
 			ctx.SetReturn(result)
 			return 0
 		}
@@ -3031,10 +3131,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if _, isChild := hwndChildren[hwnd]; isChild {
 			result, handled := builtinWndProc(hwnd, message, wParam, lParam)
 			if handled {
-				// After a WM_PAINT is fully handled (no guest WndProc will call
-				// EndPaint), check if we now have a complete frame to commit.
-				if message == 0x000F {
-					commitIfDone()
+				if message == 0x000F || message == 0x0014 || message == 0x0085 || message == 0x0113 {
+					requestCommit(message != 0x0113)
 				}
 				ctx.SetReturn(result)
 				return 0
@@ -3310,6 +3408,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				return 0
 			}
 		}
+		var rect *win32.Rect
+		if pRect := ctx.Arg(1); pRect != 0 {
+			l, _ := mem.Read32(pRect)
+			t, _ := mem.Read32(pRect + 4)
+			r, _ := mem.Read32(pRect + 8)
+			b, _ := mem.Read32(pRect + 12)
+			rect = &win32.Rect{Left: int32(l), Top: int32(t), Right: int32(r), Bottom: int32(b)}
+		}
+		win32.Global.Invalidate(target, rect)
+		if ctx.Arg(2) != 0 {
+			hctx.WinErasePending[target] = true
+		}
 		queuePaint(target)
 		ctx.SetReturn(1)
 		return 0
@@ -3325,6 +3435,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				return 0
 			}
 		}
+		win32.Global.Invalidate(target, nil)
+		if ctx.Arg(2) != 0 {
+			hctx.WinErasePending[target] = true
+		}
 		queuePaint(target)
 		ctx.SetReturn(1)
 		return 0
@@ -3335,6 +3449,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			hwnd = hctx.MainHWND
 		}
 		hctx.WinInvalid[hwnd] = false
+		delete(hctx.WinErasePending, hwnd)
+		win32.Global.Validate(hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3344,6 +3460,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			hwnd = hctx.MainHWND
 		}
 		hctx.WinInvalid[hwnd] = false
+		delete(hctx.WinErasePending, hwnd)
+		win32.Global.Validate(hwnd)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -3376,7 +3494,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if hwnd == 0 {
 			hwnd = hctx.MainHWND
 		}
-		if !hctx.WinInvalid[hwnd] {
+		dirtyRect, dirty := win32.Global.GetUpdateRect(hwnd)
+		if !dirty && !hctx.WinInvalid[hwnd] {
 			if pRect != 0 {
 				ctx.Mem.Write32(pRect, 0)
 				ctx.Mem.Write32(pRect+4, 0)
@@ -3387,16 +3506,23 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		if pRect != 0 {
-			var w, h int32 = 800, 600
-			if cs, ok := hwndChildren[hwnd]; ok {
-				w, h = cs.w, cs.h
-			} else if wlWindow != nil {
-				w, h = wlWindow.Width, wlWindow.Height
+			if dirty {
+				ctx.Mem.Write32(pRect, uint32(dirtyRect.Left))
+				ctx.Mem.Write32(pRect+4, uint32(dirtyRect.Top))
+				ctx.Mem.Write32(pRect+8, uint32(dirtyRect.Right))
+				ctx.Mem.Write32(pRect+12, uint32(dirtyRect.Bottom))
+			} else {
+				var w, h int32 = 800, 600
+				if cs, ok := hwndChildren[hwnd]; ok {
+					w, h = cs.w, cs.h
+				} else if wlWindow != nil {
+					w, h = wlWindow.Width, wlWindow.Height
+				}
+				ctx.Mem.Write32(pRect, 0)
+				ctx.Mem.Write32(pRect+4, 0)
+				ctx.Mem.Write32(pRect+8, uint32(w))
+				ctx.Mem.Write32(pRect+12, uint32(h))
 			}
-			ctx.Mem.Write32(pRect, 0)
-			ctx.Mem.Write32(pRect+4, 0)
-			ctx.Mem.Write32(pRect+8, uint32(w))
-			ctx.Mem.Write32(pRect+12, uint32(h))
 		}
 		ctx.SetReturn(1) // update region is non-empty
 		return 0
@@ -3753,22 +3879,64 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "ScrollWindowEx", func(ctx *ntapi.TrapContext) uint32 {
 		// ReactOS: win32ss/user/ntuser/scrollex.c NtUserScrollWindowEx
 		hwnd := ctx.Arg(0)
-		// dx := int32(ctx.Arg(1))
-		// dy := int32(ctx.Arg(2))
-		// prcScroll := ctx.Arg(3) // nullable RECT
-		// prcClip := ctx.Arg(4)   // nullable RECT
+		dx := int32(ctx.Arg(1))
+		dy := int32(ctx.Arg(2))
+		prcScroll := ctx.Arg(3) // nullable RECT
+		prcClip := ctx.Arg(4)   // nullable RECT
 		// hrgnUpdate := ctx.Arg(5)
 		prcUpdate := ctx.Arg(6)
-		// flags := ctx.Arg(7) // SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE
-		// Write update rect if requested (full client area)
+		if wlWindow != nil && (dx != 0 || dy != 0) {
+			syncScreenSurface()
+			left, top, right, bottom := int32(0), int32(0), int32(0), int32(0)
+			if cs, ok := hwndChildren[hwnd]; ok {
+				right, bottom = cs.w, cs.h
+			} else if hwnd == hctx.MainHWND {
+				right, bottom = wlWindow.Width, wlWindow.Height
+			}
+			if prcScroll != 0 {
+				l, _ := mem.Read32(prcScroll)
+				t, _ := mem.Read32(prcScroll + 4)
+				r, _ := mem.Read32(prcScroll + 8)
+				b, _ := mem.Read32(prcScroll + 12)
+				left, top, right, bottom = int32(l), int32(t), int32(r), int32(b)
+			}
+			if prcClip != 0 {
+				l, _ := mem.Read32(prcClip)
+				t, _ := mem.Read32(prcClip + 4)
+				r, _ := mem.Read32(prcClip + 8)
+				b, _ := mem.Read32(prcClip + 12)
+				if int32(l) > left {
+					left = int32(l)
+				}
+				if int32(t) > top {
+					top = int32(t)
+				}
+				if int32(r) < right {
+					right = int32(r)
+				}
+				if int32(b) < bottom {
+					bottom = int32(b)
+				}
+			}
+			if right > left && bottom > top && gdiMgr.Screen != nil {
+				ox, oy := absWindowOffset(hwnd)
+				gdiMgr.Screen.BitBlt(ox+left+dx, oy+top+dy, gdiMgr.Screen, ox+left, oy+top, right-left, bottom-top)
+			}
+		}
 		if prcUpdate != 0 {
 			if cs, ok := hwndChildren[hwnd]; ok {
 				mem.Write32(prcUpdate, 0)
 				mem.Write32(prcUpdate+4, 0)
 				mem.Write32(prcUpdate+8, uint32(cs.w))
 				mem.Write32(prcUpdate+12, uint32(cs.h))
+			} else if hwnd == hctx.MainHWND && wlWindow != nil {
+				mem.Write32(prcUpdate, 0)
+				mem.Write32(prcUpdate+4, 0)
+				mem.Write32(prcUpdate+8, uint32(wlWindow.Width))
+				mem.Write32(prcUpdate+12, uint32(wlWindow.Height))
 			}
 		}
+		win32.Global.Invalidate(hwnd, nil)
 		queuePaint(hwnd)
 		ctx.SetReturn(1) // SIMPLEREGION
 		return 0
@@ -4698,8 +4866,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "BeginPaint", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		pPaint := ctx.Arg(1)
+		dirtyRect, dirty := win32.Global.GetUpdateRect(hwnd)
 		if hwnd != 0 {
 			hctx.WinInvalid[hwnd] = false
+			win32.Global.Validate(hwnd)
 		}
 		ox, oy := clientAreaOrigin(hwnd)
 		if cs, ok := hwndChildren[hwnd]; ok {
@@ -4711,6 +4881,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ravelog.Logf("[paint] BeginPaint hwnd=0x%x → hdc=0x%x ox=%d oy=%d\n", hwnd, hdc, ox, oy)
 
 		var rcLeft, rcTop, rcRight, rcBottom int32
+		erase := hctx.WinErasePending[hwnd]
+		delete(hctx.WinErasePending, hwnd)
+		if dirty {
+			rcLeft, rcTop, rcRight, rcBottom = dirtyRect.Left, dirtyRect.Top, dirtyRect.Right, dirtyRect.Bottom
+		}
 
 		if wlWindow != nil && hwnd == hctx.MainHWND {
 			wlWindow.ResizeIfNeeded()
@@ -4752,8 +4927,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			// Do NOT fill the full client area - child windows cover it entirely.
 			// Filling here wipes Scintilla/children that painted first in the message queue.
 			// ReactOS WM_ERASEBKGND only fills uncovered (non-child) regions.
-			rcLeft, rcTop = 0, 0
-			rcRight, rcBottom = w, h
+			if rcRight <= rcLeft || rcBottom <= rcTop {
+				rcLeft, rcTop = 0, 0
+				rcRight, rcBottom = w, h
+			}
 			dc.SetClipRect(0, clientTop, w, h+wlWindow.TitleBarH)
 		} else if cs, ok := hwndChildren[hwnd]; ok && wlWindow != nil {
 			// Child window BeginPaint: fill with class brush
@@ -4764,8 +4941,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 			}
 			wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
-			rcLeft, rcTop = 0, 0
-			rcRight, rcBottom = cs.w, cs.h
+			if rcRight <= rcLeft || rcBottom <= rcTop {
+				rcLeft, rcTop = 0, 0
+				rcRight, rcBottom = cs.w, cs.h
+			}
 			// Clip all GDI drawing to this child's client rect, including parent chain offset.
 			x0, y0, x1, y1 := absoluteClientRect(hwnd)
 			dc.SetClipRect(x0, y0, x1, y1)
@@ -4781,8 +4960,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 
 		if pPaint != 0 {
-			ctx.Mem.Write64(pPaint, hdc)                 // hdc
-			ctx.Mem.Write32(pPaint+8, 0)                 // fErase = FALSE → paintingAllText = true in Scintilla
+			ctx.Mem.Write64(pPaint, hdc) // hdc
+			if erase {
+				ctx.Mem.Write32(pPaint+8, 1)
+			} else {
+				ctx.Mem.Write32(pPaint+8, 0)
+			}
 			ctx.Mem.Write32(pPaint+12, uint32(rcLeft))   // rcPaint.left
 			ctx.Mem.Write32(pPaint+16, uint32(rcTop))    // rcPaint.top
 			ctx.Mem.Write32(pPaint+20, uint32(rcRight))  // rcPaint.right
@@ -7121,8 +7304,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if _, isChild := hwndChildren[hwnd]; isChild {
 			result, handled := builtinWndProc(hwnd, message, wParam, lParam)
 			if handled {
-				if message == 0x000F {
-					commitIfDone()
+				if message == 0x000F || message == 0x0014 || message == 0x0085 || message == 0x0113 {
+					requestCommit(message != 0x0113)
 				}
 				ctx.SetReturn(result)
 				return 0
@@ -7159,6 +7342,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		wParam := ctx.Arg(2)
 		lParam := ctx.Arg(3)
 		if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+			if msg == 0x000F || msg == 0x0014 || msg == 0x0085 || msg == 0x0113 {
+				requestCommit(msg != 0x0113)
+			}
 			ctx.SetReturn(result)
 			return 0
 		}

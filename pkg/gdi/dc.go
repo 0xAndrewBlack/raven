@@ -12,6 +12,7 @@ type DC struct {
 	// Rendering target surface.
 	Target   *Surface
 	IsScreen bool
+	Dirty    bool
 
 	// DC origin offset (GreSetDCOrg / SetViewportOrgEx).
 	// All logical coordinates are translated by this offset before rendering.
@@ -111,6 +112,7 @@ type XForm struct {
 type dcSave struct {
 	Target                     *Surface
 	IsScreen                   bool
+	Dirty                      bool
 	OriginX, OriginY           int32
 	ClipX0, ClipY0             int32
 	ClipX1, ClipY1             int32
@@ -218,6 +220,7 @@ func (dc *DC) Save() int {
 	snap := &dcSave{
 		Target:   dc.Target,
 		IsScreen: dc.IsScreen,
+		Dirty:    dc.Dirty,
 		OriginX:  dc.OriginX, OriginY: dc.OriginY,
 		ClipX0: dc.ClipX0, ClipY0: dc.ClipY0,
 		ClipX1: dc.ClipX1, ClipY1: dc.ClipY1,
@@ -253,6 +256,7 @@ func (dc *DC) Restore(level int) bool {
 	s := dc.saved[idx]
 	dc.saved = dc.saved[:idx]
 	dc.Target, dc.IsScreen = s.Target, s.IsScreen
+	dc.Dirty = s.Dirty
 	dc.OriginX, dc.OriginY = s.OriginX, s.OriginY
 	dc.ClipX0, dc.ClipY0 = s.ClipX0, s.ClipY0
 	dc.ClipX1, dc.ClipY1 = s.ClipX1, s.ClipY1

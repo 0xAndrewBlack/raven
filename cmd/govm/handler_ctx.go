@@ -223,6 +223,7 @@ type HandlerCtx struct {
 	TimerMap             map[uint64]*win32Timer
 	WindowLongPtr        map[uint64]map[int32]uint64
 	WindowProps          map[uint64]map[string]uint64
+	WinErasePending      map[uint64]bool
 	RebarBandCounts      map[uint64]int
 
 	// Mutable scalars (accessed directly as hctx.Field)

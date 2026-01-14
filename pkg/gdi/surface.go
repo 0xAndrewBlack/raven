@@ -181,6 +181,19 @@ func (s *Surface) BitBlt(dx, dy int32, src *Surface, sx, sy, w, h int32) {
 	}
 	dstStride := int(s.Stride)
 	srcStride := int(src.Stride)
+	if s == src {
+		rowBytes := int(w) * 4
+		buf := make([]byte, rowBytes*int(h))
+		for row := int32(0); row < h; row++ {
+			sOff := int(sy+row)*srcStride + int(sx)*4
+			copy(buf[int(row)*rowBytes:int(row+1)*rowBytes], src.Pix[sOff:sOff+rowBytes])
+		}
+		for row := int32(0); row < h; row++ {
+			dOff := int(dy+row)*dstStride + int(dx)*4
+			copy(s.Pix[dOff:dOff+rowBytes], buf[int(row)*rowBytes:int(row+1)*rowBytes])
+		}
+		return
+	}
 	for row := int32(0); row < h; row++ {
 		dOff := int(dy+row)*dstStride + int(dx)*4
 		sOff := int(sy+row)*srcStride + int(sx)*4

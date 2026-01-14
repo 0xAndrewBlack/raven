@@ -76,6 +76,9 @@ func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
 	if dc.Target == nil {
 		return
 	}
+	if len(text) > 0 || opaque {
+		dc.Dirty = true
+	}
 	f := dc.Font
 	if f == nil {
 		f = defaultFont()

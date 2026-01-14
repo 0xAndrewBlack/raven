@@ -22,6 +22,7 @@ const (
 // RECT coordinates are exclusive on the right/bottom edge (Win32 convention).
 // ReactOS: NtGdiFillRect → BRUSH_EngFillSpans
 func (dc *DC) FillRect(left, top, right, bottom int32, color uint32) {
+	dc.Dirty = true
 	x0 := left + dc.OriginX
 	y0 := top + dc.OriginY
 	x1 := right + dc.OriginX
@@ -64,6 +65,7 @@ func (dc *DC) Rectangle(x0, y0, x1, y1 int32) {
 
 // DrawBorder draws a 1-pixel border around the given rect.
 func (dc *DC) DrawBorder(x0, y0, x1, y1 int32, color uint32) {
+	dc.Dirty = true
 	s := dc.target()
 	ox, oy := dc.OriginX, dc.OriginY
 	width := dc.penWidth()
@@ -103,6 +105,7 @@ func (dc *DC) LineTo(x, y int32) {
 		dc.CurX, dc.CurY = x, y
 		return
 	}
+	dc.Dirty = true
 	x0 := dc.CurX + dc.OriginX
 	y0 := dc.CurY + dc.OriginY
 	x1 := x + dc.OriginX
@@ -134,6 +137,7 @@ func (dc *DC) Ellipse(x0, y0, x1, y1 int32) {
 	}
 	cx := (x0 + x1) / 2
 	cy := (y0 + y1) / 2
+	dc.Dirty = true
 	a := (x1 - x0) / 2
 	b := (y1 - y0) / 2
 	if a <= 0 || b <= 0 {
@@ -163,6 +167,7 @@ func (dc *DC) BitBlt(dx, dy, w, h int32, src *DC, sx, sy int32, rop3 uint32) {
 	if dc.Target == nil {
 		return
 	}
+	dc.Dirty = true
 	// Map destination to absolute surface coords using DC origin.
 	adx := dx + dc.OriginX
 	ady := dy + dc.OriginY
@@ -214,6 +219,7 @@ func (dc *DC) StretchBlt(dx, dy, dw, dh int32, src *DC, sx, sy, sw, sh int32, ro
 	if dc.Target == nil {
 		return
 	}
+	dc.Dirty = true
 	adx := dx + dc.OriginX
 	ady := dy + dc.OriginY
 	asx := sx

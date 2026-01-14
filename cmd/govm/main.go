@@ -2382,6 +2382,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			hwnd = hctx.MainHWND
 		}
 		hctx.WinInvalid[hwnd] = true
+		win32.Global.Invalidate(hwnd, nil)
 		for _, qm := range hctx.MsgQueue {
 			if qm.hwnd == hwnd && qm.message == 0x000F {
 				return
