@@ -1,8 +1,10 @@
 package main
 
 import (
+	"strings"
 	"sync"
 
+	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
@@ -36,11 +38,601 @@ type dwmThumbnailState struct {
 
 var dwmThumbnailGlobal = dwmThumbnailState{nextHandle: 0x7000, thumbs: make(map[uint32]struct{})}
 
+var themeColors = struct {
+	ButtonFace      uint32
+	ButtonHighlight uint32
+	ButtonShadow    uint32
+	ButtonText      uint32
+	Window          uint32
+	WindowText      uint32
+	Highlight       uint32
+	HighlightText   uint32
+	GrayText        uint32
+	Border          uint32
+	ScrollbarTrack  uint32
+	ScrollbarThumb  uint32
+}{
+	ButtonFace:      0x00F0F0F0,
+	ButtonHighlight: 0x00FFFFFF,
+	ButtonShadow:    0x00A0A0A0,
+	ButtonText:      0x00000000,
+	Window:          0x00FFFFFF,
+	WindowText:      0x00000000,
+	Highlight:       0x000078D7,
+	HighlightText:   0x00FFFFFF,
+	GrayText:        0x006D6D6D,
+	Border:          0x00D5D5D5,
+	ScrollbarTrack:  0x00F0F0F0,
+	ScrollbarThumb:  0x00CDCDCD,
+}
+
 const (
 	sOK                     uint64 = 0
 	eInvalidArg             uint64 = 0x80070057
 	dwmECompositionDisabled uint64 = 0x80263001
 )
+
+const (
+	tmtBorderColor = 3801
+	tmtFillColor   = 3802
+	tmtTextColor   = 3803
+)
+
+func normalizeThemeClass(className string) string {
+	className = strings.TrimSpace(className)
+	if className == "" {
+		return "WINDOW"
+	}
+	parts := strings.FieldsFunc(className, func(r rune) bool {
+		return r == ';' || r == ','
+	})
+	if len(parts) > 0 {
+		className = parts[0]
+	}
+	if idx := strings.LastIndex(className, "::"); idx >= 0 {
+		className = className[idx+2:]
+	}
+	return strings.ToUpper(strings.TrimSpace(className))
+}
+
+func getThemeInfo(handle uint64) *themeData {
+	themeGlobal.mu.Lock()
+	defer themeGlobal.mu.Unlock()
+	td := themeGlobal.themes[uint32(handle)]
+	if td == nil {
+		return nil
+	}
+	copy := *td
+	return &copy
+}
+
+func themedStateFlags(className string, partID, stateID int32) (hot, pressed, disabled, checked, selected bool) {
+	switch className {
+	case "BUTTON":
+		switch partID {
+		case 1:
+			hot = stateID == 2 || stateID == 6
+			pressed = stateID == 3 || stateID == 6
+			disabled = stateID == 4
+			selected = stateID == 5 || stateID == 6
+		case 2, 3:
+			if stateID >= 1 {
+				mode := (stateID - 1) % 4
+				hot = mode == 1
+				pressed = mode == 2
+				disabled = mode == 3
+				checked = stateID > 4
+			}
+		}
+	case "HEADER", "TOOLBAR":
+		hot = stateID == 2
+		pressed = stateID == 3
+		disabled = stateID == 4
+	case "TAB":
+		selected = stateID == 2 || stateID == 4
+		hot = stateID == 3
+		disabled = stateID == 5
+	case "MENU":
+		selected = stateID == 2 || stateID == 3
+		hot = selected
+		disabled = stateID == 4
+	case "EDIT":
+		selected = stateID == 5 || stateID == 6
+		disabled = stateID == 4
+	case "LISTVIEW", "TREEVIEW":
+		selected = stateID == 2 || stateID == 3
+		hot = stateID == 2
+		disabled = stateID == 4
+	case "SCROLLBAR":
+		if partID == 1 && stateID >= 1 {
+			mode := (stateID - 1) % 4
+			hot = mode == 1
+			pressed = mode == 2
+			disabled = mode == 3
+		} else {
+			hot = stateID == 2
+			pressed = stateID == 3
+			disabled = stateID == 4
+		}
+	case "WINDOW":
+		selected = stateID == 1
+		disabled = stateID != 1
+	}
+	return
+}
+
+func themePartColors(className string, partID, stateID int32) (fillColor, borderColor, textColor uint32) {
+	fillColor = themeColors.ButtonFace
+	borderColor = themeColors.Border
+	textColor = themeColors.WindowText
+
+	hot, pressed, disabled, checked, selected := themedStateFlags(className, partID, stateID)
+	if disabled {
+		textColor = themeColors.GrayText
+		fillColor = 0x00F6F6F6
+	}
+
+	switch className {
+	case "BUTTON":
+		switch partID {
+		case 1:
+			if pressed {
+				fillColor = 0x00E5F1FB
+				borderColor = 0x00006CBE
+			} else if hot || selected {
+				fillColor = 0x00F5F9FF
+				borderColor = 0x000078D7
+			}
+			if disabled {
+				borderColor = themeColors.Border
+			}
+		case 2, 3:
+			fillColor = themeColors.Window
+			if hot {
+				borderColor = themeColors.Highlight
+			}
+			if pressed {
+				fillColor = 0x00E5F1FB
+				borderColor = 0x00006CBE
+			}
+			if checked {
+				fillColor = themeColors.Window
+			}
+		case 4:
+			fillColor = 0
+			borderColor = themeColors.Border
+		}
+	case "EDIT":
+		fillColor = themeColors.Window
+		if selected {
+			borderColor = themeColors.Highlight
+		}
+		if disabled {
+			fillColor = themeColors.ButtonFace
+		}
+	case "LISTVIEW":
+		fillColor = themeColors.Window
+		if selected {
+			fillColor = themeColors.Highlight
+			textColor = themeColors.HighlightText
+			borderColor = themeColors.Highlight
+		}
+	case "HEADER":
+		if pressed {
+			fillColor = 0x00E8E8E8
+		} else if hot {
+			fillColor = 0x00F8F8F8
+		}
+	case "TOOLBAR":
+		if partID == 1 {
+			if pressed {
+				fillColor = 0x00E5F1FB
+				borderColor = 0x00006CBE
+			} else if hot || selected {
+				fillColor = 0x00F5F9FF
+				borderColor = themeColors.Highlight
+			}
+		} else {
+			fillColor = 0
+			borderColor = themeColors.Border
+		}
+	case "TAB":
+		if partID == 1 {
+			if selected {
+				fillColor = themeColors.Window
+				borderColor = themeColors.Border
+			} else if hot {
+				fillColor = 0x00FAFAFA
+			} else {
+				fillColor = 0x00EDEDED
+			}
+		} else {
+			fillColor = themeColors.Window
+		}
+	case "SCROLLBAR":
+		if partID == 1 {
+			fillColor = themeColors.ScrollbarTrack
+			if hot {
+				fillColor = 0x00E8E8E8
+			}
+			if pressed {
+				fillColor = 0x00DADADA
+			}
+		} else if partID == 2 || partID == 3 {
+			fillColor = themeColors.ScrollbarThumb
+		} else {
+			fillColor = themeColors.ScrollbarTrack
+		}
+	case "REBAR":
+		fillColor = themeColors.ButtonFace
+	case "STATUS":
+		fillColor = themeColors.ButtonFace
+	case "MENU":
+		switch partID {
+		case 7:
+			fillColor = themeColors.ButtonFace
+			borderColor = 0
+		case 8:
+			if selected {
+				fillColor = 0x00E5F3FF
+				borderColor = themeColors.Highlight
+			}
+		case 9:
+			fillColor = themeColors.Window
+		case 14:
+			fillColor = themeColors.Window
+			if selected {
+				fillColor = themeColors.Highlight
+				textColor = themeColors.HighlightText
+				borderColor = themeColors.Highlight
+			}
+		}
+	case "TREEVIEW":
+		if partID == 1 && selected {
+			fillColor = themeColors.Highlight
+			borderColor = themeColors.Highlight
+			textColor = themeColors.HighlightText
+		} else if partID == 2 {
+			fillColor = themeColors.Window
+		}
+	case "WINDOW":
+		switch partID {
+		case 1, 2, 3:
+			if selected {
+				fillColor = themeColors.Highlight
+				textColor = themeColors.HighlightText
+			} else {
+				fillColor = themeColors.ButtonFace
+			}
+		default:
+			fillColor = 0
+			borderColor = themeColors.Border
+		}
+	}
+	return
+}
+
+func themePartSize(className string, partID int32) (int32, int32) {
+	switch className {
+	case "BUTTON":
+		switch partID {
+		case 1:
+			return 75, 23
+		case 2, 3:
+			return 13, 13
+		case 4:
+			return 80, 18
+		}
+	case "EDIT":
+		return 100, 23
+	case "LISTVIEW":
+		if partID == 2 {
+			return 120, 24
+		}
+		return 80, 18
+	case "HEADER":
+		return 80, 20
+	case "TOOLBAR":
+		if partID == 5 {
+			return 6, 24
+		}
+		return 24, 24
+	case "TAB":
+		if partID == 9 {
+			return 120, 24
+		}
+		return 80, 24
+	case "SCROLLBAR":
+		switch partID {
+		case 1:
+			return 17, 17
+		case 2:
+			return 17, 10
+		case 3:
+			return 10, 17
+		case 8, 9:
+			return 8, 8
+		}
+	case "REBAR":
+		return 120, 24
+	case "STATUS":
+		switch partID {
+		case 1:
+			return 80, 20
+		case 2, 3:
+			return 16, 16
+		}
+	case "MENU":
+		switch partID {
+		case 7:
+			return 120, 24
+		case 8, 14:
+			return 100, 22
+		case 9:
+			return 160, 24
+		}
+	case "TREEVIEW":
+		if partID == 2 {
+			return 9, 9
+		}
+		return 120, 18
+	case "WINDOW":
+		switch partID {
+		case 1:
+			return 120, 23
+		case 2, 3:
+			return 120, 18
+		default:
+			return 4, 4
+		}
+	}
+	return 20, 20
+}
+
+func themeMin32(a, b int32) int32 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func drawThemedRect(dc *gdi.DC, left, top, right, bottom int32, fillColor, borderColor uint32) {
+	if dc == nil || left >= right || top >= bottom {
+		return
+	}
+	if fillColor != 0 {
+		dc.FillRect(left, top, right, bottom, fillColor)
+	}
+	if borderColor != 0 {
+		dc.DrawBorder(left, top, right, bottom, borderColor)
+	}
+}
+
+func drawThemeArrow(dc *gdi.DC, left, top, right, bottom int32, direction int, color uint32) {
+	if dc == nil || color == 0 {
+		return
+	}
+	cx := (left + right) / 2
+	cy := (top + bottom) / 2
+	size := themeMin32((right-left)/2, (bottom-top)/2)
+	if size < 2 {
+		size = 2
+	}
+	for i := int32(0); i < size; i++ {
+		switch direction {
+		case 0:
+			y := cy - size/2 + i
+			dc.FillRect(cx-i, y, cx+i+1, y+1, color)
+		case 1:
+			y := cy + size/2 - i
+			dc.FillRect(cx-i, y, cx+i+1, y+1, color)
+		case 2:
+			x := cx - size/2 + i
+			dc.FillRect(x, cy-i, x+1, cy+i+1, color)
+		default:
+			x := cx + size/2 - i
+			dc.FillRect(x, cy-i, x+1, cy+i+1, color)
+		}
+	}
+}
+
+func drawThemeCheckMark(dc *gdi.DC, left, top, right, bottom int32, color uint32) {
+	if dc == nil || color == 0 {
+		return
+	}
+	size := themeMin32(right-left, bottom-top)
+	startX := left + size/5
+	startY := top + size/2
+	for i := int32(0); i < size/4; i++ {
+		dc.FillRect(startX+i, startY+i, startX+i+2, startY+i+2, color)
+	}
+	midX := startX + size/4
+	midY := startY + size/4
+	for i := int32(0); i < size/2; i++ {
+		dc.FillRect(midX+i, midY-i, midX+i+2, midY-i+2, color)
+	}
+}
+
+func drawThemeGripper(dc *gdi.DC, left, top, right, bottom int32, vertical bool, color uint32) {
+	if dc == nil || color == 0 {
+		return
+	}
+	if vertical {
+		x := (left + right) / 2
+		for y := top + 3; y < bottom-2; y += 4 {
+			dc.FillRect(x, y, x+2, y+2, color)
+		}
+		return
+	}
+	y := (top + bottom) / 2
+	for x := left + 3; x < right-2; x += 4 {
+		dc.FillRect(x, y, x+2, y+2, color)
+	}
+}
+
+func drawThemeGlyph(dc *gdi.DC, left, top, right, bottom int32, expanded bool) {
+	drawThemedRect(dc, left, top, right, bottom, themeColors.Window, themeColors.Border)
+	midX := (left + right) / 2
+	midY := (top + bottom) / 2
+	dc.FillRect(left+2, midY, right-2, midY+1, themeColors.WindowText)
+	if !expanded {
+		dc.FillRect(midX, top+2, midX+1, bottom-2, themeColors.WindowText)
+	}
+}
+
+func drawThemeClassBackground(dc *gdi.DC, className string, partID, stateID int32, left, top, right, bottom int32) {
+	fillColor, borderColor, textColor := themePartColors(className, partID, stateID)
+	width := right - left
+	height := bottom - top
+
+	switch className {
+	case "BUTTON":
+		switch partID {
+		case 2, 3:
+			size := themeMin32(width, height)
+			boxLeft := left + (width-size)/2
+			boxTop := top + (height-size)/2
+			boxRight := boxLeft + size
+			boxBottom := boxTop + size
+			drawThemedRect(dc, boxLeft, boxTop, boxRight, boxBottom, fillColor, borderColor)
+			_, _, _, checked, _ := themedStateFlags(className, partID, stateID)
+			if checked {
+				if partID == 2 {
+					dc.FillRect(boxLeft+4, boxTop+4, boxRight-4, boxBottom-4, textColor)
+				} else {
+					drawThemeCheckMark(dc, boxLeft+2, boxTop+2, boxRight-2, boxBottom-2, textColor)
+				}
+			}
+			return
+		case 4:
+			if top < bottom {
+				midY := top + 7
+				if midY < bottom {
+					dc.FillRect(left, midY, right, midY+1, borderColor)
+				}
+				dc.FillRect(left, midY, left+1, bottom, borderColor)
+				dc.FillRect(right-1, midY, right, bottom, borderColor)
+				dc.FillRect(left, bottom-1, right, bottom, borderColor)
+			}
+			return
+		}
+	case "EDIT", "HEADER", "REBAR", "STATUS", "LISTVIEW", "TAB":
+		drawThemedRect(dc, left, top, right, bottom, fillColor, borderColor)
+		if className == "TAB" && partID == 1 {
+			_, _, _, _, selected := themedStateFlags(className, partID, stateID)
+			if selected {
+				dc.FillRect(left+1, bottom-1, right-1, bottom, themeColors.Window)
+			}
+		}
+		return
+	case "TOOLBAR":
+		if partID == 5 {
+			x := (left + right) / 2
+			dc.FillRect(x, top+2, x+1, bottom-2, themeColors.Border)
+			return
+		}
+		drawThemedRect(dc, left, top, right, bottom, fillColor, borderColor)
+		return
+	case "SCROLLBAR":
+		switch partID {
+		case 1:
+			drawThemedRect(dc, left, top, right, bottom, fillColor, borderColor)
+			dir := 0
+			if stateID >= 1 {
+				dir = int((stateID - 1) / 4)
+			}
+			drawThemeArrow(dc, left+3, top+3, right-3, bottom-3, dir, textColor)
+			return
+		case 2, 3:
+			drawThemedRect(dc, left, top, right, bottom, fillColor, borderColor)
+			drawThemeGripper(dc, left+2, top+2, right-2, bottom-2, partID == 3, themeColors.ButtonShadow)
+			return
+		case 8:
+			drawThemeGripper(dc, left, top, right, bottom, false, themeColors.ButtonShadow)
+			return
+		case 9:
+			drawThemeGripper(dc, left, top, right, bottom, true, themeColors.ButtonShadow)
+			return
+		}
+	case "MENU":
+		drawThemedRect(dc, left, top, right, bottom, fillColor, borderColor)
+		return
+	case "TREEVIEW":
+		if partID == 2 {
+			drawThemeGlyph(dc, left, top, right, bottom, stateID == 2)
+			return
+		}
+		if fillColor != 0 && (fillColor != themeColors.Window || borderColor != themeColors.Border) {
+			drawThemedRect(dc, left, top, right, bottom, fillColor, borderColor)
+		}
+		return
+	case "WINDOW":
+		drawThemedRect(dc, left, top, right, bottom, fillColor, borderColor)
+		return
+	}
+
+	drawThemedRect(dc, left, top, right, bottom, fillColor, borderColor)
+}
+
+func themeTextDefaultAlign(className string, partID int32) (centerX, centerY bool, margin int32) {
+	margin = 4
+	switch className {
+	case "BUTTON":
+		if partID == 1 {
+			return true, true, 0
+		}
+		if partID == 4 {
+			return false, false, 8
+		}
+	case "HEADER", "TAB":
+		return true, true, 0
+	case "MENU":
+		if partID == 8 {
+			return true, true, 0
+		}
+		return false, true, 6
+	case "STATUS":
+		return false, true, 4
+	case "EDIT":
+		return false, true, 4
+	}
+	return false, true, margin
+}
+
+func drawThemeTextToDC(dc *gdi.DC, className string, partID, stateID int32, text string, left, top, right, bottom int32) {
+	if dc == nil || text == "" {
+		return
+	}
+	_, _, textColor := themePartColors(className, partID, stateID)
+	prevColor := dc.TextColor
+	prevBkMode := dc.BkMode
+	prevAlign := dc.TextAlign
+	dc.TextColor = textColor
+	dc.BkMode = 1
+	dc.TextAlign = 0
+
+	centerX, centerY, margin := themeTextDefaultAlign(className, partID)
+	w, h := dc.TextExtentStr(text)
+	x := left + margin
+	y := top
+	if centerX {
+		x = left + ((right-left)-w)/2
+	}
+	if centerY {
+		y = top + ((bottom-top)-h)/2
+	}
+	if x < left {
+		x = left
+	}
+	if y < top {
+		y = top
+	}
+
+	dc.TextOut(x, y, text, false)
+	dc.TextColor = prevColor
+	dc.BkMode = prevBkMode
+	dc.TextAlign = prevAlign
+}
 
 func writeRect(mem *mmu.MMU, addr uint64, left, top, right, bottom int32) {
 	if addr == 0 {
@@ -171,11 +763,11 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		if getSysColor != nil {
 			return getSysColor(15)
 		}
-		return 0x00F0F0F0
+		return themeColors.ButtonFace
 	}
 	defaultThemeInt := func() uint32 { return 0 }
 	defaultThemeMetric := func() uint32 { return 20 }
-	defaultThemeSize := func() (int32, int32) { return 20, 20 }
+	defaultThemeSize := func(className string, partID int32) (int32, int32) { return themePartSize(className, partID) }
 	defaultTextRect := func(text string) (int32, int32, int32, int32) {
 		width := int32(len([]rune(text)) * 8)
 		if width <= 0 {
@@ -212,19 +804,13 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 
 	d.RegisterAutoStubHandler(uxtheme, "OpenThemeData", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
-		className := readGuestUTF16(ctx.Arg(1))
-		if className == "" {
-			className = "window"
-		}
+		className := normalizeThemeClass(readGuestUTF16(ctx.Arg(1)))
 		ctx.SetReturn(allocThemeHandle(hwnd, className))
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "OpenThemeDataEx", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
-		className := readGuestUTF16(ctx.Arg(1))
-		if className == "" {
-			className = "window"
-		}
+		className := normalizeThemeClass(readGuestUTF16(ctx.Arg(1)))
 		_ = ctx.Arg(2)
 		ctx.SetReturn(allocThemeHandle(hwnd, className))
 		return 0
@@ -259,18 +845,116 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(uxtheme, "DrawThemeBackground", func(ctx *ntapi.TrapContext) uint32 {
+		if gdiMgr == nil {
+			ctx.SetReturn(sOK)
+			return 0
+		}
+		td := getThemeInfo(ctx.Arg(0))
+		className := "WINDOW"
+		if td != nil && td.className != "" {
+			className = td.className
+		}
+		dc := gdiMgr.GetDC(ctx.Arg(1))
+		if dc == nil {
+			ctx.SetReturn(sOK)
+			return 0
+		}
+		left, top, right, bottom, ok := readRect(mem, ctx.Arg(4))
+		if !ok {
+			ctx.SetReturn(sOK)
+			return 0
+		}
+		if clipAddr := ctx.Arg(5); clipAddr != 0 {
+			if cLeft, cTop, cRight, cBottom, clipOK := readRect(mem, clipAddr); clipOK {
+				prev := [4]int32{dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1}
+				dc.SetClipRect(cLeft+dc.OriginX, cTop+dc.OriginY, cRight+dc.OriginX, cBottom+dc.OriginY)
+				drawThemeClassBackground(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), left, top, right, bottom)
+				dc.SetClipRect(prev[0], prev[1], prev[2], prev[3])
+				ctx.SetReturn(sOK)
+				return 0
+			}
+		}
+		drawThemeClassBackground(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), left, top, right, bottom)
 		ctx.SetReturn(sOK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "DrawThemeBackgroundEx", func(ctx *ntapi.TrapContext) uint32 {
+		if gdiMgr == nil {
+			ctx.SetReturn(sOK)
+			return 0
+		}
+		td := getThemeInfo(ctx.Arg(0))
+		className := "WINDOW"
+		if td != nil && td.className != "" {
+			className = td.className
+		}
+		dc := gdiMgr.GetDC(ctx.Arg(1))
+		if dc != nil {
+			left, top, right, bottom, ok := readRect(mem, ctx.Arg(4))
+			if ok {
+				drawThemeClassBackground(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), left, top, right, bottom)
+			}
+		}
 		ctx.SetReturn(sOK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "DrawThemeText", func(ctx *ntapi.TrapContext) uint32 {
+		if gdiMgr == nil {
+			ctx.SetReturn(sOK)
+			return 0
+		}
+		td := getThemeInfo(ctx.Arg(0))
+		className := "WINDOW"
+		if td != nil && td.className != "" {
+			className = td.className
+		}
+		dc := gdiMgr.GetDC(ctx.Arg(1))
+		if dc == nil {
+			ctx.SetReturn(sOK)
+			return 0
+		}
+		pText := ctx.Arg(4)
+		cchText := int(int32(ctx.Arg(5)))
+		text := ""
+		if cchText < 0 {
+			text = readGuestUTF16(pText)
+		} else {
+			text = hctx.ReadGuestUTF16N(pText, cchText)
+		}
+		left, top, right, bottom, ok := readRect(mem, ctx.Arg(7))
+		if !ok {
+			left, top, right, bottom = 0, 0, 0, 0
+		}
+		drawThemeTextToDC(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), text, left, top, right, bottom)
 		ctx.SetReturn(sOK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "DrawThemeTextEx", func(ctx *ntapi.TrapContext) uint32 {
+		if gdiMgr == nil {
+			ctx.SetReturn(sOK)
+			return 0
+		}
+		td := getThemeInfo(ctx.Arg(0))
+		className := "WINDOW"
+		if td != nil && td.className != "" {
+			className = td.className
+		}
+		dc := gdiMgr.GetDC(ctx.Arg(1))
+		if dc == nil {
+			ctx.SetReturn(sOK)
+			return 0
+		}
+		pText := ctx.Arg(4)
+		cchText := int(int32(ctx.Arg(5)))
+		text := ""
+		if cchText < 0 {
+			text = readGuestUTF16(pText)
+		} else {
+			text = hctx.ReadGuestUTF16N(pText, cchText)
+		}
+		if left, top, right, bottom, ok := readRect(mem, ctx.Arg(7)); ok {
+			drawThemeTextToDC(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), text, left, top, right, bottom)
+		}
 		ctx.SetReturn(sOK)
 		return 0
 	})
@@ -292,14 +976,38 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(uxtheme, "GetThemePartSize", func(ctx *ntapi.TrapContext) uint32 {
-		w, h := defaultThemeSize()
+		className := "WINDOW"
+		if td := getThemeInfo(ctx.Arg(0)); td != nil && td.className != "" {
+			className = td.className
+		}
+		w, h := defaultThemeSize(className, int32(ctx.Arg(2)))
 		writeSize(mem, ctx.Arg(6), w, h)
 		ctx.SetReturn(sOK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeColor", func(ctx *ntapi.TrapContext) uint32 {
+		className := "WINDOW"
+		if td := getThemeInfo(ctx.Arg(0)); td != nil && td.className != "" {
+			className = td.className
+		}
+		fillColor, borderColor, textColor := themePartColors(className, int32(ctx.Arg(1)), int32(ctx.Arg(2)))
 		if pColor := ctx.Arg(4); pColor != 0 {
-			mem.Write32(pColor, defaultThemeColor())
+			color := defaultThemeColor()
+			switch uint32(ctx.Arg(3)) {
+			case tmtBorderColor:
+				color = borderColor
+			case tmtTextColor:
+				color = textColor
+			case tmtFillColor:
+				color = fillColor
+			default:
+				if textColor != 0 {
+					color = textColor
+				} else if fillColor != 0 {
+					color = fillColor
+				}
+			}
+			mem.Write32(pColor, color)
 		}
 		ctx.SetReturn(sOK)
 		return 0
@@ -371,14 +1079,22 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeSysColor", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(uint64(defaultThemeColor()))
+		if getSysColor != nil {
+			ctx.SetReturn(uint64(getSysColor(uint32(ctx.Arg(1)))))
+		} else {
+			ctx.SetReturn(uint64(defaultThemeColor()))
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeSysColorBrush", func(ctx *ntapi.TrapContext) uint32 {
 		if gdiMgr == nil {
 			ctx.SetReturn(0)
 		} else {
-			ctx.SetReturn(gdiMgr.CreateSolidBrush(defaultThemeColor()))
+			color := defaultThemeColor()
+			if getSysColor != nil {
+				color = getSysColor(uint32(ctx.Arg(1)))
+			}
+			ctx.SetReturn(gdiMgr.CreateSolidBrush(color))
 		}
 		return 0
 	})
