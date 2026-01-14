@@ -38,6 +38,7 @@ type PEModule struct {
 	ResourceDirRVA   uint32   // RVA of .rsrc (resource directory)
 	ResourceDirSize  uint32   // size of .rsrc
 	BoundImports     []BoundImportEntry
+	DelayImports     []PEImportEntry // delay-loaded imports (resolved lazily or at load)
 }
 
 // BoundImportEntry captures one bound import descriptor from the PE image.
@@ -148,6 +149,7 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	var boundImportRVA, boundImportSize uint32
 	var excDirRVA, excDirSize uint32
 	var resDirRVA, resDirSize uint32
+	var delayImportRVA uint32
 
 	// Check DLL flag in COFF header characteristics
 	mod.IsDLL = pf.Characteristics&0x2000 != 0 // IMAGE_FILE_DLL
@@ -178,6 +180,9 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 			resDirRVA = oh.DataDirectory[2].VirtualAddress
 			resDirSize = oh.DataDirectory[2].Size
 		}
+		if len(oh.DataDirectory) > 13 {
+			delayImportRVA = oh.DataDirectory[13].VirtualAddress
+		}
 	case *pe.OptionalHeader32:
 		mod.Is64 = false
 		imageBase = uint64(oh.ImageBase)
@@ -202,6 +207,9 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 		if len(oh.DataDirectory) > 2 {
 			resDirRVA = oh.DataDirectory[2].VirtualAddress
 			resDirSize = oh.DataDirectory[2].Size
+		}
+		if len(oh.DataDirectory) > 13 {
+			delayImportRVA = oh.DataDirectory[13].VirtualAddress
 		}
 	default:
 		return nil, fmt.Errorf("no optional header in %s", path)
@@ -315,6 +323,11 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	}
 	if boundImportRVA != 0 && boundImportSize > 0 {
 		parseBoundImports(pf, f, mod, boundImportRVA, boundImportSize)
+	}
+
+	// Parse delay-load imports (directory index 13)
+	if delayImportRVA != 0 {
+		parseDelayImports(pf, f, mod, delayImportRVA)
 	}
 
 	return mod, nil
@@ -588,7 +601,126 @@ func parseImports(pf *pe.File, f *os.File, mod *PEModule) {
 	}
 }
 
-// ResolveImports patches IAT slots using the given loaded modules.
+// parseDelayImports reads the delay-load import directory (index 13).
+// Each ImgDelayDescr is 32 bytes:
+//
+//	+0x00 grAttrs      DWORD  (1 = RVA-based addresses)
+//	+0x04 rvaDLLName   DWORD  (RVA of DLL name string)
+//	+0x08 rvaHmod      DWORD  (RVA of module handle storage)
+//	+0x0C rvaIAT       DWORD  (RVA of delay-load IAT)
+//	+0x10 rvaINT       DWORD  (RVA of delay-load INT / name table)
+//	+0x14 rvaBoundIAT  DWORD
+//	+0x18 rvaUnloadIAT DWORD
+//	+0x1C dwTimeStamp  DWORD
+func parseDelayImports(pf *pe.File, f *os.File, mod *PEModule, dirRVA uint32) {
+	secData, secRVA := sectionDataForRVA(pf, f, dirRVA)
+	if secData == nil {
+		return
+	}
+
+	off := dirRVA - secRVA
+	for {
+		if int(off)+32 > len(secData) {
+			break
+		}
+
+		attrs := binary.LittleEndian.Uint32(secData[off:])
+		nameRVA := binary.LittleEndian.Uint32(secData[off+4:])
+		iatRVA := binary.LittleEndian.Uint32(secData[off+0x0C:])
+		intRVA := binary.LittleEndian.Uint32(secData[off+0x10:])
+
+		// Terminator: all-zero descriptor
+		if nameRVA == 0 && iatRVA == 0 {
+			break
+		}
+
+		// grAttrs == 1 means addresses are RVAs; 0 means VAs (old-style).
+		// We only support the modern RVA-based format.
+		isRVA := attrs&1 != 0
+		_ = isRVA // future: handle VA-based if needed
+
+		// Read DLL name
+		dllName := ""
+		nameOff := nameRVA - secRVA
+		if int(nameOff) < len(secData) {
+			dllName = readCString(secData, nameOff)
+		}
+		if dllName == "" {
+			off += 32
+			continue
+		}
+
+		// Walk the INT (Import Name Table) to enumerate imported functions.
+		// Simultaneously walk IAT offsets so we know which slot to patch.
+		lookupRVA := intRVA
+		if lookupRVA == 0 {
+			lookupRVA = iatRVA
+		}
+
+		// May be in a different section
+		intSec, intSecRVA := sectionDataForRVA(pf, f, lookupRVA)
+		if intSec == nil {
+			intSec = secData
+			intSecRVA = secRVA
+		}
+
+		entrySize := uint32(8)
+		if !mod.Is64 {
+			entrySize = 4
+		}
+
+		lookupOff := lookupRVA - intSecRVA
+		iatAddr := uint64(iatRVA) + mod.BaseAddr
+		for {
+			if int(lookupOff)+int(entrySize) > len(intSec) {
+				break
+			}
+
+			var thunk uint64
+			if mod.Is64 {
+				thunk = binary.LittleEndian.Uint64(intSec[lookupOff:])
+			} else {
+				thunk = uint64(binary.LittleEndian.Uint32(intSec[lookupOff:]))
+			}
+			if thunk == 0 {
+				break
+			}
+
+			imp := PEImportEntry{
+				DLLName: dllName,
+				IATSlot: iatAddr,
+			}
+
+			ordinalFlag := uint64(1) << 63
+			if !mod.Is64 {
+				ordinalFlag = 1 << 31
+			}
+
+			if thunk&ordinalFlag != 0 {
+				imp.Ordinal = uint16(thunk & 0xFFFF)
+			} else {
+				hintRVA := uint32(thunk & 0x7FFFFFFF)
+				// Hint/Name entry may be in yet another section
+				hintSec, hintSecRVA := sectionDataForRVA(pf, f, hintRVA)
+				if hintSec == nil {
+					hintSec = secData
+					hintSecRVA = secRVA
+				}
+				hintOff := hintRVA - hintSecRVA
+				if int(hintOff)+2 < len(hintSec) {
+					imp.FuncName = readCString(hintSec, hintOff+2)
+				}
+			}
+
+			mod.DelayImports = append(mod.DelayImports, imp)
+			lookupOff += entrySize
+			iatAddr += uint64(entrySize)
+		}
+
+		ravelog.Logf("[pe] delay-import: %s (%d entries)\n", dllName, len(mod.DelayImports))
+		off += 32
+	}
+}
 func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) error {
 	resolved := 0
 	unresolved := 0
@@ -646,6 +778,59 @@ func ResolveImports(mem *mmu.MMU, mod *PEModule, modules map[string]*PEModule) e
 	}
 	ravelog.Logf("[resolve] %s: %d imports, %d resolved, %d unresolved, exports=%d\n",
 		mod.Name, len(mod.Imports), resolved, unresolved, len(modules))
+
+	// Also resolve delay-load imports. These are eagerly resolved at load time
+	// (same as regular imports) since the emulator handles all DLLs synthetically.
+	delayRes := 0
+	delayUnres := 0
+	for _, imp := range mod.DelayImports {
+		dllKey := strings.ToLower(imp.DLLName)
+		target, ok := modules[dllKey]
+		if !ok {
+			dllKey = strings.TrimSuffix(dllKey, ".dll")
+			target, ok = modules[dllKey]
+		}
+		if !ok {
+			ravelog.Logf("[resolve-delay] DLL NOT FOUND: %s (for %s)\n", imp.DLLName, mod.Name)
+			delayUnres++
+			continue
+		}
+
+		var addr uint64
+		if imp.FuncName != "" {
+			addr = target.Exports[imp.FuncName]
+			if addr == 0 {
+				if fwd, ok := target.Forwards[imp.FuncName]; ok {
+					addr = resolveForward(fwd, modules)
+				}
+			}
+		} else {
+			addr = target.ExportOrds[imp.Ordinal]
+			if addr == 0 {
+				if fwd, ok := target.ForwardOrds[imp.Ordinal]; ok {
+					addr = resolveForward(fwd, modules)
+				}
+			}
+		}
+
+		if addr != 0 {
+			if mod.Is64 {
+				mem.Write64Raw(imp.IATSlot, addr)
+			} else {
+				mem.Write32Raw(imp.IATSlot, uint32(addr))
+			}
+			delayRes++
+		} else {
+			ravelog.Logf("[resolve-delay] UNRESOLVED: %s!%s (ord=%d) for %s IAT=0x%x\n",
+				imp.DLLName, imp.FuncName, imp.Ordinal, mod.Name, imp.IATSlot)
+			delayUnres++
+		}
+	}
+	if len(mod.DelayImports) > 0 {
+		ravelog.Logf("[resolve] %s: %d delay-imports, %d resolved, %d unresolved\n",
+			mod.Name, len(mod.DelayImports), delayRes, delayUnres)
+	}
+
 	return nil
 }
 
