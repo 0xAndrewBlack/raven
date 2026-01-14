@@ -4738,8 +4738,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- cabinet.dll ---
 	delayReg(func() { registerCabinetHandlers(hctx) })
 
-	// --- d3d11.dll / dxgi.dll ---
-	delayReg(func() { registerD3d11Handlers(hctx) })
+	// --- d3d9.dll / d3d11.dll / d3d12.dll / dxgi.dll ---
+	delayReg(func() { registerD3dHandlers(hctx) })
 	// --- opengl32.dll ---
 	delayReg(func() { registerOpengl32Handlers(hctx) })
 }
