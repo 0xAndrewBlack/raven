@@ -4619,6 +4619,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- gdi32.dll ---
 	delayReg(func() { registerGdi32Handlers(hctx) })
 
+	// --- win32u.dll ---
+	delayReg(func() { registerWin32UHandlers(hctx) })
+
 	// --- gdiplus.dll ---
 	delayReg(func() { registerGdiplusHandlers(hctx) })
 
