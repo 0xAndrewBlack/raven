@@ -456,7 +456,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		case 22:
 			val = 0 // NUMFONTS
 		case 24:
-			val = 0xFFFFFF // NUMCOLORS
+			val = 0xFFFFFFFF // NUMCOLORS: -1 for true-color display
 		case 26:
 			val = 0x0001 // CLIPCAPS
 		case 28:

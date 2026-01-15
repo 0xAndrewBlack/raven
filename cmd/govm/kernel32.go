@@ -3187,7 +3187,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		if structSize >= 156 { // OSVERSIONINFOEXA
 			ctx.Mem.Write16(info+148, 0)     // wServicePackMajor
 			ctx.Mem.Write16(info+150, 0)     // wServicePackMinor
-			ctx.Mem.Write16(info+152, 0x300) // wSuiteMask: VER_SUITE_SINGLEUSERTS|VER_SUITE_TERMINAL
+			ctx.Mem.Write16(info+152, 0x100) // wSuiteMask: VER_SUITE_ENTERPRISE
 			ctx.Mem.Write8(info+154, 1)      // wProductType = VER_NT_WORKSTATION
 			ctx.Mem.Write8(info+155, 0)      // wReserved
 		}
@@ -3889,7 +3889,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		if structSize >= 284 { // OSVERSIONINFOEXW
 			ctx.Mem.Write16(lpInfo+276, 0)     // wServicePackMajor
 			ctx.Mem.Write16(lpInfo+278, 0)     // wServicePackMinor
-			ctx.Mem.Write16(lpInfo+280, 0x300) // wSuiteMask: VER_SUITE_SINGLEUSERTS|VER_SUITE_TERMINAL
+			ctx.Mem.Write16(lpInfo+280, 0x100) // wSuiteMask: VER_SUITE_ENTERPRISE
 			ctx.Mem.Write8(lpInfo+282, 1)      // wProductType = VER_NT_WORKSTATION
 			ctx.Mem.Write8(lpInfo+283, 0)      // wReserved
 		}
@@ -5431,40 +5431,23 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		for i := uint64(0); i < 172; i++ {
 			ctx.Mem.Write8(tz+i, 0)
 		}
-		// Bias = -60 (UTC+1, Central European) as signed int32
-		biasSigned := int32(-60)
-		ctx.Mem.Write32(tz+0, uint32(biasSigned))
+		// Bias = 0 (UTC)
+		ctx.Mem.Write32(tz+0, 0)
 		// StandardName = "UTC" (UTF-16LE)
 		for i, r := range "UTC" {
 			ctx.Mem.Write16(tz+4+uint64(i)*2, uint16(r))
 		}
-		// StandardDate SYSTEMTIME: {wYear=0, wMonth=10, wDayOfWeek=0, wDay=5, wHour=3, ...}
-		ctx.Mem.Write16(tz+68, 0)  // wYear
-		ctx.Mem.Write16(tz+70, 10) // wMonth = October
-		ctx.Mem.Write16(tz+72, 0)  // wDayOfWeek = Sunday
-		ctx.Mem.Write16(tz+74, 5)  // wDay = last occurrence
-		ctx.Mem.Write16(tz+76, 3)  // wHour = 3:00
+		// StandardDate SYSTEMTIME: all zeros (no transition)
 		// StandardBias = 0
 		ctx.Mem.Write32(tz+84, 0)
-		// DaylightName = "UTC+1" (UTF-16LE)
-		for i, r := range "UTC+1" {
+		// DaylightName = "UTC" (UTF-16LE)
+		for i, r := range "UTC" {
 			ctx.Mem.Write16(tz+88+uint64(i)*2, uint16(r))
 		}
-		// DaylightDate SYSTEMTIME: {wYear=0, wMonth=3, wDayOfWeek=0, wDay=5, wHour=2, ...}
-		ctx.Mem.Write16(tz+152, 0) // wYear
-		ctx.Mem.Write16(tz+154, 3) // wMonth = March
-		ctx.Mem.Write16(tz+156, 0) // wDayOfWeek = Sunday
-		ctx.Mem.Write16(tz+158, 5) // wDay = last occurrence
-		ctx.Mem.Write16(tz+160, 2) // wHour = 2:00
-		// DaylightBias = -60
-		ctx.Mem.Write32(tz+168, uint32(biasSigned))
-		// Determine if currently in DST (Northern Hemisphere: April-October)
-		month := int(time.Now().Month())
-		if month >= 4 && month <= 10 {
-			ctx.SetReturn(2) // TIME_ZONE_ID_DAYLIGHT
-		} else {
-			ctx.SetReturn(1) // TIME_ZONE_ID_STANDARD
-		}
+		// DaylightDate SYSTEMTIME: all zeros (no transition)
+		// DaylightBias = 0
+		ctx.Mem.Write32(tz+168, 0)
+		ctx.SetReturn(0) // TIME_ZONE_ID_UNKNOWN
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetLocalTime", func(ctx *ntapi.TrapContext) uint32 {
@@ -6420,7 +6403,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetComputerNameW", func(ctx *ntapi.TrapContext) uint32 {
 		lpBuffer := ctx.Arg(0)
 		nSize := ctx.Arg(1)
-		name := "RAVEN-PC"
+		name := "RAVEN"
 		if lpBuffer != 0 && nSize != 0 {
 			maxLen, _ := mem.Read32(nSize)
 			for i, ch := range name {
@@ -6634,13 +6617,13 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			// DWORDLONG ullAvailVirtual        +48
 			// DWORDLONG ullAvailExtendedVirtual +56
 			mem.Write32(pBuf+0, 64)                  // dwLength
-			mem.Write32(pBuf+4, 40)                  // dwMemoryLoad (40%)
+			mem.Write32(pBuf+4, 30)                  // dwMemoryLoad (30%)
 			mem.Write64(pBuf+8, 8*1024*1024*1024)    // ullTotalPhys = 8 GB
-			mem.Write64(pBuf+16, 5*1024*1024*1024)   // ullAvailPhys = 5 GB
+			mem.Write64(pBuf+16, 6*1024*1024*1024)   // ullAvailPhys = 6 GB
 			mem.Write64(pBuf+24, 16*1024*1024*1024)  // ullTotalPageFile = 16 GB
-			mem.Write64(pBuf+32, 12*1024*1024*1024)  // ullAvailPageFile = 12 GB
-			mem.Write64(pBuf+40, 0x00007FFFFFFEFFFF) // ullTotalVirtual = ~128 TB
-			mem.Write64(pBuf+48, 0x00007FFFFFDEFFFF) // ullAvailVirtual
+			mem.Write64(pBuf+32, 14*1024*1024*1024)  // ullAvailPageFile = 14 GB
+			mem.Write64(pBuf+40, 0x7FFFFFFFFFFF)     // ullTotalVirtual
+			mem.Write64(pBuf+48, 0x7FF000000000)     // ullAvailVirtual
 			mem.Write64(pBuf+56, 0)                  // ullAvailExtendedVirtual
 		}
 		ctx.SetReturn(1) // TRUE
@@ -8992,7 +8975,7 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kernel32, "GetComputerNameA", func(ctx *ntapi.TrapContext) uint32 {
 		buf := ctx.Arg(0)
 		sizePtr := ctx.Arg(1)
-		name := "RAVEN-PC"
+		name := "RAVEN"
 		ctx.Mem.WriteBytes(buf, append([]byte(name), 0))
 		ctx.Mem.Write32(sizePtr, uint32(len(name)))
 		ctx.SetReturn(1)

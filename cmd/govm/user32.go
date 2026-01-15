@@ -5374,15 +5374,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if pInfo != 0 {
 			cbSize, _ := ctx.Mem.Read32(pInfo)
 			if cbSize >= 40 {
-				ctx.Mem.Write32(pInfo+4, 0)     // rcMonitor.left
-				ctx.Mem.Write32(pInfo+8, 0)     // rcMonitor.top
-				ctx.Mem.Write32(pInfo+12, 1920) // rcMonitor.right
-				ctx.Mem.Write32(pInfo+16, 1080) // rcMonitor.bottom
-				ctx.Mem.Write32(pInfo+20, 0)    // rcWork.left
-				ctx.Mem.Write32(pInfo+24, 0)    // rcWork.top
-				ctx.Mem.Write32(pInfo+28, 1920) // rcWork.right
-				ctx.Mem.Write32(pInfo+32, 1040) // rcWork.bottom
-				ctx.Mem.Write32(pInfo+36, 1)    // dwFlags = MONITORINFOF_PRIMARY
+				sw := int32(1920)
+				sh := int32(1080)
+				if wlWindow != nil {
+					sw = wlWindow.Width
+					sh = wlWindow.Height
+				}
+				ctx.Mem.Write32(pInfo+4, 0)           // rcMonitor.left
+				ctx.Mem.Write32(pInfo+8, 0)           // rcMonitor.top
+				ctx.Mem.Write32(pInfo+12, uint32(sw)) // rcMonitor.right
+				ctx.Mem.Write32(pInfo+16, uint32(sh)) // rcMonitor.bottom
+				ctx.Mem.Write32(pInfo+20, 0)          // rcWork.left
+				ctx.Mem.Write32(pInfo+24, 0)          // rcWork.top
+				ctx.Mem.Write32(pInfo+28, uint32(sw)) // rcWork.right
+				ctx.Mem.Write32(pInfo+32, uint32(sh)) // rcWork.bottom
+				ctx.Mem.Write32(pInfo+36, 1)          // dwFlags = MONITORINFOF_PRIMARY
 			}
 		}
 		ctx.SetReturn(1)
@@ -5393,15 +5399,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if pInfo != 0 {
 			cbSize, _ := ctx.Mem.Read32(pInfo)
 			if cbSize >= 40 {
-				ctx.Mem.Write32(pInfo+4, 0)     // rcMonitor.left
-				ctx.Mem.Write32(pInfo+8, 0)     // rcMonitor.top
-				ctx.Mem.Write32(pInfo+12, 1920) // rcMonitor.right
-				ctx.Mem.Write32(pInfo+16, 1080) // rcMonitor.bottom
-				ctx.Mem.Write32(pInfo+20, 0)    // rcWork.left
-				ctx.Mem.Write32(pInfo+24, 0)    // rcWork.top
-				ctx.Mem.Write32(pInfo+28, 1920) // rcWork.right
-				ctx.Mem.Write32(pInfo+32, 1040) // rcWork.bottom
-				ctx.Mem.Write32(pInfo+36, 1)    // dwFlags = MONITORINFOF_PRIMARY
+				sw := int32(1920)
+				sh := int32(1080)
+				if wlWindow != nil {
+					sw = wlWindow.Width
+					sh = wlWindow.Height
+				}
+				ctx.Mem.Write32(pInfo+4, 0)           // rcMonitor.left
+				ctx.Mem.Write32(pInfo+8, 0)           // rcMonitor.top
+				ctx.Mem.Write32(pInfo+12, uint32(sw)) // rcMonitor.right
+				ctx.Mem.Write32(pInfo+16, uint32(sh)) // rcMonitor.bottom
+				ctx.Mem.Write32(pInfo+20, 0)          // rcWork.left
+				ctx.Mem.Write32(pInfo+24, 0)          // rcWork.top
+				ctx.Mem.Write32(pInfo+28, uint32(sw)) // rcWork.right
+				ctx.Mem.Write32(pInfo+32, uint32(sh)) // rcWork.bottom
+				ctx.Mem.Write32(pInfo+36, 1)          // dwFlags = MONITORINFOF_PRIMARY
 			}
 		}
 		ctx.SetReturn(1)
@@ -5497,6 +5509,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				ctx.Mem.Write32(pvParam+4, 0)
 			}
 		case 0x004A: // SPI_GETFONTSMOOTHING
+			if pvParam != 0 {
+				ctx.Mem.Write32(pvParam, 1)
+			}
+		case 0x0042: // SPI_GETHIGHCONTRAST - fill HIGHCONTRAST {cbSize=12, dwFlags=0, lpszDefaultScheme=NULL}
+			if pvParam != 0 {
+				ctx.Mem.Write32(pvParam+0, 12) // cbSize
+				ctx.Mem.Write32(pvParam+4, 0)  // dwFlags = 0 (high contrast off)
+				ctx.Mem.Write64(pvParam+8, 0)  // lpszDefaultScheme = NULL
+			}
+		case 0x009C: // SPI_GETSMOOTHEDGES
 			if pvParam != 0 {
 				ctx.Mem.Write32(pvParam, 1)
 			}
