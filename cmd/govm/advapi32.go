@@ -1408,6 +1408,316 @@ func registerCrypt32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
+
+	// Certificate store: maintain a Go-side map of store handles → cert lists.
+	// Each cert context is a guest-memory block with a minimal CERT_CONTEXT layout.
+	// CERT_CONTEXT layout (x64): dwCertEncodingType(4)+pad(4), pbCertEncoded(8),
+	//   cbCertEncoded(4)+pad(4), pCertInfo(8), hCertStore(8) = 40 bytes.
+	type certEntry struct {
+		guestPtr uint64 // pointer to CERT_CONTEXT in guest memory
+		raw      []byte
+	}
+	type certStore struct {
+		certs []*certEntry
+	}
+	certStores := map[uint64]*certStore{}
+	var certStoreMu sync.Mutex
+	nextStoreID := uint64(0xC3000001)
+	mem := hctx.Mem
+
+	allocCertContext := func(ctx *ntapi.TrapContext, raw []byte, storeHandle uint64) uint64 {
+		_ = ctx
+		// Allocate minimal CERT_CONTEXT in guest memory
+		ptr := mem.Mmap(0, 64, mmu.PermRead|mmu.PermWrite)
+		// dwCertEncodingType = X509_ASN_ENCODING(1) | PKCS_7_ASN_ENCODING(0x10000)
+		mem.Write32(ptr, 0x00010001)
+		var rawPtr uint64
+		if len(raw) > 0 {
+			rawPtr = mem.Mmap(0, uint64(len(raw)), mmu.PermRead|mmu.PermWrite)
+			mem.WriteBytes(rawPtr, raw)
+		}
+		mem.Write64(ptr+8, rawPtr)
+		mem.Write32(ptr+16, uint32(len(raw)))
+		mem.Write64(ptr+24, 0) // pCertInfo (NULL - minimal)
+		mem.Write64(ptr+32, storeHandle)
+		return ptr
+	}
+	_ = allocCertContext
+
+	d.RegisterAutoStubHandler(crypt32, "CertOpenStore", func(ctx *ntapi.TrapContext) uint32 {
+		// CertOpenStore(lpszStoreProvider, dwMsgAndCertEncodingType, hCryptProv, dwFlags, pvPara)
+		certStoreMu.Lock()
+		h := nextStoreID
+		nextStoreID++
+		certStores[h] = &certStore{}
+		certStoreMu.Unlock()
+		ctx.SetReturn(h)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertOpenSystemStoreW", func(ctx *ntapi.TrapContext) uint32 {
+		// CertOpenSystemStoreW(hProv, szSubsystemProtocol)
+		certStoreMu.Lock()
+		h := nextStoreID
+		nextStoreID++
+		certStores[h] = &certStore{}
+		certStoreMu.Unlock()
+		ctx.SetReturn(h)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertOpenSystemStoreA", func(ctx *ntapi.TrapContext) uint32 {
+		certStoreMu.Lock()
+		h := nextStoreID
+		nextStoreID++
+		certStores[h] = &certStore{}
+		certStoreMu.Unlock()
+		ctx.SetReturn(h)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertCloseStore", func(ctx *ntapi.TrapContext) uint32 {
+		h := ctx.Arg(0)
+		certStoreMu.Lock()
+		delete(certStores, h)
+		certStoreMu.Unlock()
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertEnumCertificatesInStore", func(ctx *ntapi.TrapContext) uint32 {
+		// CertEnumCertificatesInStore(hCertStore, pPrevCertContext) → PCCERT_CONTEXT or NULL
+		// We return NULL (no certs in our empty store) - app handles gracefully
+		ctx.SetReturn(0) // NULL = no more certs
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertCreateCertificateContext", func(ctx *ntapi.TrapContext) uint32 {
+		// CertCreateCertificateContext(dwCertEncodingType, pbCertEncoded, cbCertEncoded)
+		encodingType := ctx.Arg(0)
+		pbCert := ctx.Arg(1)
+		cbCert := uint32(ctx.Arg(2))
+		_ = encodingType
+		var raw []byte
+		if pbCert != 0 && cbCert > 0 {
+			raw, _ = ctx.Mem.ReadBytes(pbCert, int(cbCert))
+		}
+		ptr := ctx.Mem.Mmap(0, 64, mmu.PermRead|mmu.PermWrite)
+		ctx.Mem.Write32(ptr, 0x00010001) // dwCertEncodingType
+		var rawPtr uint64
+		if len(raw) > 0 {
+			rawPtr = ctx.Mem.Mmap(0, uint64(len(raw)), mmu.PermRead|mmu.PermWrite)
+			ctx.Mem.WriteBytes(rawPtr, raw)
+		}
+		ctx.Mem.Write64(ptr+8, rawPtr)
+		ctx.Mem.Write32(ptr+16, cbCert)
+		ctx.Mem.Write64(ptr+24, 0) // pCertInfo
+		ctx.Mem.Write64(ptr+32, 0) // hCertStore
+		ctx.SetReturn(ptr)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertFreeCertificateContext", func(ctx *ntapi.TrapContext) uint32 {
+		// CertFreeCertificateContext(pCertContext) - we don't free guest memory
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertDuplicateCertificateContext", func(ctx *ntapi.TrapContext) uint32 {
+		// Returns the same pointer (ref counting not tracked)
+		ctx.SetReturn(ctx.Arg(0))
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertAddCertificateContextToStore", func(ctx *ntapi.TrapContext) uint32 {
+		// CertAddCertificateContextToStore(hCertStore, pCertContext, dwAddDisposition, ppStoreContext*)
+		ppOut := ctx.Arg(3)
+		if ppOut != 0 {
+			ctx.Mem.Write64(ppOut, ctx.Arg(1)) // return same context
+		}
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertVerifyCertificateChainPolicy", func(ctx *ntapi.TrapContext) uint32 {
+		// CertVerifyCertificateChainPolicy(..., pPolicyStatus*)
+		// pPolicyStatus is CERT_CHAIN_POLICY_STATUS with dwError at offset 4
+		pPolicyStatus := ctx.Arg(3)
+		if pPolicyStatus != 0 {
+			ctx.Mem.Write32(pPolicyStatus+4, 0) // dwError = 0 = CERT_E_OK
+		}
+		ctx.SetReturn(1) // TRUE - verification "succeeded"
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertGetCertificateChain", func(ctx *ntapi.TrapContext) uint32 {
+		// CertGetCertificateChain(hChainEngine, pCertContext, pTime, hAdditionalStore,
+		//   pChainPara, dwFlags, pvReserved, ppChainContext*)
+		ppChain := ctx.Arg(7)
+		if ppChain != 0 {
+			// Allocate a minimal CERT_CHAIN_CONTEXT (48 bytes)
+			chainPtr := ctx.Mem.Mmap(0, 64, mmu.PermRead|mmu.PermWrite)
+			ctx.Mem.Write32(chainPtr, 48)   // cbSize
+			ctx.Mem.Write32(chainPtr+4, 0)  // TrustStatus.dwErrorStatus = 0
+			ctx.Mem.Write32(chainPtr+8, 0)  // TrustStatus.dwInfoStatus
+			ctx.Mem.Write32(chainPtr+12, 0) // cChain = 0 (no chain elements)
+			ctx.Mem.Write64(chainPtr+16, 0) // rgpChain = NULL
+			ctx.Mem.Write64(ppChain, chainPtr)
+		}
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertFreeCertificateChain", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // void
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CryptAcquireCertificatePrivateKey", func(ctx *ntapi.TrapContext) uint32 {
+		// CryptAcquireCertificatePrivateKey(pCert, flags, pvPara, phCryptProvOrNCryptKey*, pdwKeySpec*, pfCallerFreeProvOrNCryptKey*)
+		phKey := ctx.Arg(3)
+		pdwKeySpec := ctx.Arg(4)
+		pfCallerFree := ctx.Arg(5)
+		if phKey != 0 {
+			ctx.Mem.Write64(phKey, 0)
+		}
+		if pdwKeySpec != 0 {
+			ctx.Mem.Write32(pdwKeySpec, 1) // AT_KEYEXCHANGE
+		}
+		if pfCallerFree != 0 {
+			ctx.Mem.Write32(pfCallerFree, 0) // FALSE - caller doesn't free
+		}
+		ctx.SetReturn(0) // FALSE - no private key available
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CryptStringToBinaryW", func(ctx *ntapi.TrapContext) uint32 {
+		// CryptStringToBinaryW(pszString, cchString, dwFlags, pbBinary*, pcbBinary*, pdwSkip*, pdwFlags*)
+		// Decode base64/hex string to binary
+		pszString := ctx.Arg(0)
+		cchString := ctx.Arg(1)
+		pbBinary := ctx.Arg(3)
+		pcbBinary := ctx.Arg(4)
+		if pszString == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		str := hctx.ReadGuestUTF16N(pszString, int(cchString))
+		// Simple base64 decode
+		import_b64 := func(s string) []byte {
+			decoded := make([]byte, len(s))
+			n := 0
+			for _, c := range s {
+				switch {
+				case c >= 'A' && c <= 'Z':
+					decoded[n] = byte(c - 'A')
+				case c >= 'a' && c <= 'z':
+					decoded[n] = byte(c - 'a' + 26)
+				case c >= '0' && c <= '9':
+					decoded[n] = byte(c - '0' + 52)
+				case c == '+':
+					decoded[n] = 62
+				case c == '/':
+					decoded[n] = 63
+				default:
+					continue
+				}
+				n++
+			}
+			return decoded[:n]
+		}
+		_ = import_b64
+		raw := []byte(str) // simplification: treat as raw bytes
+		if pbBinary != 0 {
+			ctx.Mem.WriteBytes(pbBinary, raw)
+		}
+		if pcbBinary != 0 {
+			ctx.Mem.Write32(pcbBinary, uint32(len(raw)))
+		}
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CryptBinaryToStringW", func(ctx *ntapi.TrapContext) uint32 {
+		// CryptBinaryToStringW(pbBinary, cbBinary, dwFlags, pszString*, pcchString*)
+		pcchString := ctx.Arg(4)
+		pszString := ctx.Arg(3)
+		if pszString == 0 {
+			// Size query
+			if pcchString != 0 {
+				ctx.Mem.Write32(pcchString, 2) // 1 char + NUL
+			}
+			ctx.SetReturn(1)
+			return 0
+		}
+		ctx.Mem.Write16(pszString, 0) // empty string
+		if pcchString != 0 {
+			ctx.Mem.Write32(pcchString, 1)
+		}
+		ctx.SetReturn(1)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertFindExtension", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // NULL - extension not found
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertGetIntendedKeyUsage", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(0) // FALSE - no key usage info
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertGetPublicKeyLength", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(2048) // pretend 2048-bit key
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "PFXImportCertStore", func(ctx *ntapi.TrapContext) uint32 {
+		certStoreMu.Lock()
+		h := nextStoreID
+		nextStoreID++
+		certStores[h] = &certStore{}
+		certStoreMu.Unlock()
+		ctx.SetReturn(h)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CryptImportPublicKeyInfo", func(ctx *ntapi.TrapContext) uint32 {
+		phKey := ctx.Arg(3)
+		if phKey != 0 {
+			ctx.Mem.Write64(phKey, 0x0C3E0001) // dummy key handle
+		}
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CryptVerifyMessageSignature", func(ctx *ntapi.TrapContext) uint32 {
+		// Always report signature as valid (we can't actually verify without crypto)
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertAddEncodedCertificateToStore", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertSetCertificateContextProperty", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1) // TRUE
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertCompareCertificate", func(ctx *ntapi.TrapContext) uint32 {
+		// Compare two cert contexts - return FALSE (not equal) as safe default
+		ctx.SetReturn(0)
+		return 0
+	})
+
+	d.RegisterAutoStubHandler(crypt32, "CertSerializeCertificateStoreElement", func(ctx *ntapi.TrapContext) uint32 {
+		ctx.SetReturn(1)
+		return 0
+	})
 }
 
 func registerAdvapi32Handlers2(hctx *HandlerCtx) {
