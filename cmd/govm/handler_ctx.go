@@ -299,6 +299,10 @@ type HandlerCtx struct {
 	DelayHandlerRegistrars []func()
 	SysColors              [31]uint32
 
+	// Func fields - shared dialog handlers set by registerComdlg32Handlers
+	HandleFileDialogW func(*ntapi.TrapContext, bool)
+	HandleFileDialogA func(*ntapi.TrapContext, bool)
+
 	// Func fields - closures from setup section
 	ReadGuestUTF16      func(uint64) string
 	ReadGuestUTF16N     func(uint64, int) string

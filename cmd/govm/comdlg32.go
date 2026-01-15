@@ -963,6 +963,9 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
+	hctx.HandleFileDialogW = handleFileDialogW
+	hctx.HandleFileDialogA = handleFileDialogA
+
 	d.RegisterAutoStubHandler(comdlg32, "GetOpenFileNameW", func(ctx *ntapi.TrapContext) uint32 {
 		handleFileDialogW(ctx, false)
 		return 0

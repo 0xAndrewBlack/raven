@@ -2336,9 +2336,11 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "GetOpenFileNameWrapW", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] GetOpenFileNameWrapW p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		if hctx.HandleFileDialogW != nil {
+			hctx.HandleFileDialogW(ctx, false)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "GetPerfTime", func(ctx *ntapi.TrapContext) uint32 {
@@ -2402,9 +2404,11 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "GetSaveFileNameWrapW", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		ravelog.Logf("[shlwapi] GetSaveFileNameWrapW p0=0x%x\n", p0)
-		ctx.SetReturn(0)
+		if hctx.HandleFileDialogW != nil {
+			hctx.HandleFileDialogW(ctx, true)
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "GetShellSecurityDescriptor", func(ctx *ntapi.TrapContext) uint32 {
