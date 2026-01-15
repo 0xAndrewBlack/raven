@@ -203,31 +203,74 @@ func registerD3d9Handlers(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 func registerD3d11HandlersBridge(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 	d := hctx.Disp
 	d.RegisterAutoStubHandler(dll, "D3D11CreateDevice", func(ctx *ntapi.TrapContext) uint32 {
-		if ppDevice := ctx.Arg(7); ppDevice != 0 {
-			ctx.Mem.Write64(ppDevice, 0)
-		}
-		if pFeatureLevel := ctx.Arg(8); pFeatureLevel != 0 {
+		ppDevice := ctx.Arg(7)
+		pFeatureLevel := ctx.Arg(8)
+		ppImmediateContext := ctx.Arg(9)
+		// pFeatureLevel output: always report D3D_FEATURE_LEVEL_11_0
+		if pFeatureLevel != 0 {
 			ctx.Mem.Write32(pFeatureLevel, D3D_FEATURE_LEVEL_11_0)
 		}
-		if ppImmediateContext := ctx.Arg(9); ppImmediateContext != 0 {
-			ctx.Mem.Write64(ppImmediateContext, 0)
+		if ppDevice == 0 {
+			// Capability-check only (ppDevice == NULL): report success.
+			if ppImmediateContext != 0 {
+				ctx.Mem.Write64(ppImmediateContext, 0)
+			}
+			ctx.SetReturn(S_OK)
+			return 0
 		}
-		ctx.SetReturn(E_NOTIMPL)
+		devObj := d3d11CreateDevice(hctx)
+		if devObj == 0 {
+			ctx.Mem.Write64(ppDevice, 0)
+			if ppImmediateContext != 0 {
+				ctx.Mem.Write64(ppImmediateContext, 0)
+			}
+			ctx.SetReturn(E_OUTOFMEMORY)
+			return 0
+		}
+		ctx.Mem.Write64(ppDevice, devObj)
+		if ppImmediateContext != 0 {
+			icObj := d3d11CreateContext(ctx.Mem, ctx.Disp)
+			ctx.Mem.Write64(ppImmediateContext, icObj)
+		}
+		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "D3D11CreateDeviceAndSwapChain", func(ctx *ntapi.TrapContext) uint32 {
-		if ppSwapChain := ctx.Arg(8); ppSwapChain != 0 {
+		// Arg layout: pAdapter(0) DriverType(1) Software(2) Flags(3)
+		// pFeatureLevels(4) FeatureLevels(5) SDKVersion(6) pSwapChainDesc(7)
+		// ppSwapChain(8) ppDevice(9) pFeatureLevel(10) ppImmediateContext(11)
+		ppSwapChain := ctx.Arg(8)
+		ppDevice := ctx.Arg(9)
+		pFeatureLevel := ctx.Arg(10)
+		ppImmediateContext := ctx.Arg(11)
+		if ppSwapChain != 0 {
 			ctx.Mem.Write64(ppSwapChain, 0)
 		}
-		if ppDevice := ctx.Arg(9); ppDevice != 0 {
-			ctx.Mem.Write64(ppDevice, 0)
-		}
-		if pFeatureLevel := ctx.Arg(10); pFeatureLevel != 0 {
+		if pFeatureLevel != 0 {
 			ctx.Mem.Write32(pFeatureLevel, D3D_FEATURE_LEVEL_11_0)
 		}
-		if ppImmediateContext := ctx.Arg(11); ppImmediateContext != 0 {
-			ctx.Mem.Write64(ppImmediateContext, 0)
+		if ppDevice == 0 {
+			if ppImmediateContext != 0 {
+				ctx.Mem.Write64(ppImmediateContext, 0)
+			}
+			ctx.SetReturn(S_OK)
+			return 0
 		}
+		devObj := d3d11CreateDevice(hctx)
+		if devObj == 0 {
+			ctx.Mem.Write64(ppDevice, 0)
+			if ppImmediateContext != 0 {
+				ctx.Mem.Write64(ppImmediateContext, 0)
+			}
+			ctx.SetReturn(E_OUTOFMEMORY)
+			return 0
+		}
+		ctx.Mem.Write64(ppDevice, devObj)
+		if ppImmediateContext != 0 {
+			icObj := d3d11CreateContext(ctx.Mem, ctx.Disp)
+			ctx.Mem.Write64(ppImmediateContext, icObj)
+		}
+		// SwapChain creation is unsupported in software emulation.
 		ctx.SetReturn(E_NOTIMPL)
 		return 0
 	})
@@ -770,4 +813,66 @@ func d3dModeDimensions(index uint32) (uint32, uint32) {
 	default:
 		return 3840, 2160
 	}
+}
+
+// ---- D3D11 device and device-context COM stubs ----
+//
+// ID3D11Device vtable has 43 entries (methods 0-42).
+// ID3D11DeviceContext vtable has 121 entries (methods 0-120).
+// We implement the IUnknown trio via d3dDispatchCOMMethod and handle the
+// small set of methods that matter for feature-detection and context retrieval.
+
+const (
+	d3d11DeviceMethods  = 43
+	d3d11ContextMethods = 121
+)
+
+func d3d11CreateDevice(hctx *HandlerCtx) uint64 {
+	return d3dCreateCOMObject(hctx, "d3d11-device", d3d11DeviceMethods, 0, d3d11DeviceDispatch)
+}
+
+func d3d11CreateContext(mem *mmu.MMU, disp *ntapi.Dispatcher) uint64 {
+	return d3dCreateCOMObjectFromID(mem, disp, "d3d11-context", d3d11ContextMethods, 0, d3d11ContextDispatch)
+}
+
+func d3d11DeviceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32 {
+	switch method {
+	case 37: // GetFeatureLevel → D3D_FEATURE_LEVEL_11_0 returned in EAX
+		ctx.SetReturn(D3D_FEATURE_LEVEL_11_0)
+		return 0
+	case 38: // GetCreationFlags → 0
+		ctx.SetReturn(0)
+		return 0
+	case 39: // GetDeviceRemovedReason → S_OK (device not removed)
+		return S_OK
+	case 40: // GetImmediateContext(ppImmediateContext)
+		ppIC := ctx.Arg(1)
+		if ppIC == 0 {
+			return E_POINTER
+		}
+		icObj := d3d11CreateContext(ctx.Mem, ctx.Disp)
+		ctx.Mem.Write64(ppIC, icObj)
+		return S_OK
+	case 41: // SetExceptionMode → S_OK
+		return S_OK
+	case 42: // GetExceptionMode → 0 (no exception mode flags)
+		ctx.SetReturn(0)
+		return 0
+	default:
+		return E_NOTIMPL
+	}
+}
+
+// d3d11ContextDispatch handles ID3D11DeviceContext methods beyond IUnknown.
+// Most are fire-and-forget "set" commands; we acknowledge them silently.
+func d3d11ContextDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32 {
+	// GetDevice (method 3 on ID3D11DeviceChild, inherited)
+	if method == 3 {
+		if ppDevice := ctx.Arg(1); ppDevice != 0 {
+			ctx.Mem.Write64(ppDevice, 0) // no back-reference to device
+		}
+		return S_OK
+	}
+	// Flush (method 114) and similar state-sync ops succeed silently.
+	return S_OK
 }

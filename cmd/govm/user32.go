@@ -6962,17 +6962,22 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	clipSeq := uint32(1)
 	clipboardViewerHwnd := uint64(0)
 	syncClipboardFromHost := func() {
-		cmd := exec.Command("wl-paste", "--no-newline")
-		out, err := cmd.Output()
+		out, err := exec.Command("wl-paste", "--no-newline").Output()
 		if err != nil || len(out) == 0 {
-			return
+			// wl-paste not available or clipboard empty - try xclip as fallback
+			out, err = exec.Command("xclip", "-selection", "clipboard", "-o").Output()
+			if err != nil || len(out) == 0 {
+				return
+			}
 		}
 		const cfUnicodeText = 13
-		wide := make([]byte, 0, len(out)*2+2)
-		for _, b := range out {
-			wide = append(wide, b, 0)
+		// Properly encode UTF-8 text from host to UTF-16LE for the guest.
+		ws := utf16Encode(string(out))
+		wide := make([]byte, (len(ws)+1)*2) // +1 for null terminator
+		for i, w := range ws {
+			wide[i*2] = byte(w)
+			wide[i*2+1] = byte(w >> 8)
 		}
-		wide = append(wide, 0, 0)
 		addr := hctx.HeapAlloc(uint64(len(wide)), true)
 		for i, b := range wide {
 			mem.Write8(addr+uint64(i), b)
@@ -6981,46 +6986,76 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			clipFormats = append(clipFormats, cfUnicodeText)
 		}
 		clipStore[cfUnicodeText] = addr
+		// Also expose CF_TEXT (1) as ANSI - just the raw UTF-8 bytes null-terminated.
+		const cfText = 1
+		ansi := make([]byte, len(out)+1)
+		copy(ansi, out)
+		ansiAddr := hctx.HeapAlloc(uint64(len(ansi)), true)
+		for i, b := range ansi {
+			mem.Write8(ansiAddr+uint64(i), b)
+		}
+		if _, exists := clipStore[cfText]; !exists {
+			clipFormats = append(clipFormats, cfText)
+		}
+		clipStore[cfText] = ansiAddr
 	}
 	pushClipboardToHost := func(hMem uint64, format uint32) {
-		if hMem == 0 || format != 13 {
+		if hMem == 0 {
 			return
 		}
-		ptr := hMem
-		var buf bytes.Buffer
-		for off := uint64(0); off < 1<<20; off += 2 {
-			w, _ := mem.Read16(ptr + off)
-			if w == 0 {
-				break
+		var text []byte
+		switch format {
+		case 13: // CF_UNICODETEXT - read null-terminated UTF-16LE from guest
+			var ws []uint16
+			for off := uint64(0); off < 1<<20; off += 2 {
+				w, _ := mem.Read16(hMem + off)
+				if w == 0 {
+					break
+				}
+				ws = append(ws, w)
 			}
-			if w < 0x80 {
-				buf.WriteByte(byte(w))
+			if len(ws) == 0 {
+				return
 			}
-		}
-		if buf.Len() == 0 {
+			text = utf16Decode(ws) // utf16Decode is defined in main.go
+		case 1: // CF_TEXT - read null-terminated ANSI string from guest
+			var buf bytes.Buffer
+			for off := uint64(0); off < 1<<20; off++ {
+				b, _ := mem.Read8(hMem + off)
+				if b == 0 {
+					break
+				}
+				buf.WriteByte(b)
+			}
+			if buf.Len() == 0 {
+				return
+			}
+			text = buf.Bytes()
+		default:
 			return
 		}
 		cmd := exec.Command("wl-copy")
-		cmd.Stdin = bytes.NewReader(buf.Bytes())
-		_ = cmd.Run()
+		cmd.Stdin = bytes.NewReader(text)
+		if err := cmd.Run(); err != nil {
+			// fallback to xclip
+			xc := exec.Command("xclip", "-selection", "clipboard")
+			xc.Stdin = bytes.NewReader(text)
+			_ = xc.Run()
+		}
 	}
 
 	d.RegisterAutoStubHandler(user32, "OpenClipboard", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
-		if win32.OpenClipboard(hwnd) {
-			syncClipboardFromHost()
-			ctx.SetReturn(1)
-		} else {
-			ctx.SetReturn(0)
-		}
+		// Force-close any previous open; the emulated process is always its own clipboard owner.
+		win32.CloseClipboard()
+		win32.OpenClipboard(hwnd)
+		syncClipboardFromHost()
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CloseClipboard", func(ctx *ntapi.TrapContext) uint32 {
-		if win32.CloseClipboard() {
-			ctx.SetReturn(1)
-		} else {
-			ctx.SetReturn(0)
-		}
+		win32.CloseClipboard()
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EmptyClipboard", func(ctx *ntapi.TrapContext) uint32 {
