@@ -348,6 +348,7 @@ func newCOMState(hctx *HandlerCtx) *comState {
 	}
 	registerMSXMLClassFactories(cs)
 	registerWICClassFactories(cs)
+	registerD2D1ClassFactories(cs)
 	return cs
 }
 
@@ -3433,6 +3434,34 @@ func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uin
 		return cs.dispatchWICStream(ctx, obj, method)
 	case "wic-component-info":
 		return cs.dispatchWICComponentInfo(ctx, obj, method)
+	case "d2d1-factory":
+		return cs.dispatchD2D1Factory(ctx, obj, method)
+	case "d2d1-solid-color-brush":
+		return cs.dispatchD2D1SolidColorBrush(ctx, obj, method)
+	case "d2d1-bitmap-brush":
+		return cs.dispatchD2D1BitmapBrush(ctx, obj, method)
+	case "d2d1-gradient-stops":
+		return cs.dispatchD2D1GradientStops(ctx, obj, method)
+	case "d2d1-linear-gradient-brush":
+		return cs.dispatchD2D1LinearGradientBrush(ctx, obj, method)
+	case "d2d1-radial-gradient-brush":
+		return cs.dispatchD2D1RadialGradientBrush(ctx, obj, method)
+	case "d2d1-bitmap":
+		return cs.dispatchD2D1Bitmap(ctx, obj, method)
+	case "d2d1-rectangle-geometry", "d2d1-rounded-geometry", "d2d1-ellipse-geometry", "d2d1-geometry-group", "d2d1-transformed-geometry", "d2d1-path-geometry":
+		return cs.dispatchD2D1Geometry(ctx, obj, method)
+	case "d2d1-geometry-sink":
+		return cs.dispatchD2D1GeometrySink(ctx, obj, method)
+	case "d2d1-hwnd-render-target", "d2d1-dc-render-target", "d2d1-bitmap-render-target":
+		return cs.dispatchD2D1RenderTarget(ctx, obj, method)
+	case "d2d1-stroke-style":
+		return cs.dispatchD2D1StrokeStyle(ctx, obj, method)
+	case "d2d1-drawing-state-block":
+		return cs.dispatchD2D1DrawingState(ctx, obj, method)
+	case "d2d1-layer":
+		return cs.dispatchD2D1Layer(ctx, obj, method)
+	case "d2d1-mesh":
+		return cs.dispatchD2D1Mesh(ctx, obj, method)
 	default:
 		return E_NOTIMPL
 	}
