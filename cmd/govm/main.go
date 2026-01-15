@@ -4941,6 +4941,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 39: // TB_SETPARENT
 				return 0, true
 			case wmUser + 93: // TB_SETBUTTONINFOW
+				// TBBUTTONINFOW layout (64-bit):
+				// 0: cbSize(4), 4: dwMask(4), 8: idCommand(4), 12: iImage(4),
+				// 16: fsState(1), 17: fsStyle(1), 18: cx(2), 20: pad(4),
+				// 24: lParam(8), 32: pszText(8), 40: cchText(4)
 				id := int(int32(wParam))
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam + 4)
@@ -4948,19 +4952,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if tb.buttons[i].id != id {
 							continue
 						}
-						if mask&0x0004 != 0 {
-							state, _ := mem.Read8(lParam + 8)
+						if mask&0x0001 != 0 { // TBIF_IMAGE
+							iImage, _ := mem.Read32(lParam + 12)
+							tb.buttons[i].iBitmap = int(int32(iImage))
+						}
+						if mask&0x0004 != 0 { // TBIF_STATE
+							state, _ := mem.Read8(lParam + 16)
 							tb.buttons[i].state = int(state)
 						}
-						if mask&0x0008 != 0 {
-							style, _ := mem.Read8(lParam + 9)
+						if mask&0x0008 != 0 { // TBIF_STYLE
+							style, _ := mem.Read8(lParam + 17)
 							tb.buttons[i].style = int(style)
 						}
-						if mask&0x0010 != 0 {
-							tb.buttons[i].param, _ = mem.Read64(lParam + 16)
+						if mask&0x0010 != 0 { // TBIF_LPARAM
+							tb.buttons[i].param, _ = mem.Read64(lParam + 24)
 						}
-						if mask&0x0002 != 0 {
-							pszText, _ := mem.Read64(lParam + 40)
+						if mask&0x0002 != 0 { // TBIF_TEXT
+							pszText, _ := mem.Read64(lParam + 32)
 							if pszText != 0 {
 								tb.buttons[i].text = readGuestUTF16(pszText)
 							}
@@ -4981,21 +4989,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						continue
 					}
 					mask, _ := mem.Read32(lParam + 4)
-					if mask&0x0001 != 0 {
-						mem.Write32(lParam, uint32(i))
+					if mask&0x0001 != 0 { // TBIF_IMAGE
+						mem.Write32(lParam+12, uint32(int32(btn.iBitmap)))
 					}
-					if mask&0x0004 != 0 {
-						mem.Write8(lParam+8, uint8(btn.state))
+					if mask&0x0004 != 0 { // TBIF_STATE
+						mem.Write8(lParam+16, uint8(btn.state))
 					}
-					if mask&0x0008 != 0 {
-						mem.Write8(lParam+9, uint8(btn.style))
+					if mask&0x0008 != 0 { // TBIF_STYLE
+						mem.Write8(lParam+17, uint8(btn.style))
 					}
-					if mask&0x0010 != 0 {
-						mem.Write64(lParam+16, btn.param)
+					if mask&0x0010 != 0 { // TBIF_LPARAM
+						mem.Write64(lParam+24, btn.param)
 					}
-					if mask&0x0002 != 0 {
-						pszText, _ := mem.Read64(lParam + 40)
-						cchText, _ := mem.Read32(lParam + 48)
+					if mask&0x0002 != 0 { // TBIF_TEXT
+						pszText, _ := mem.Read64(lParam + 32)
+						cchText, _ := mem.Read32(lParam + 40)
 						if pszText != 0 && cchText > 0 {
 							ws := utf16Encode(btn.text)
 							limit := int(cchText) - 1

@@ -3876,7 +3876,58 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ScrollWindow", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/scrollex.c co_UserScrollWindowEx
 		hwnd := ctx.Arg(0)
+		dx := int32(ctx.Arg(1))
+		dy := int32(ctx.Arg(2))
+		lpRect := ctx.Arg(3)
+		lpClipRect := ctx.Arg(4)
+
+		if wlWindow != nil && (dx != 0 || dy != 0) {
+			syncScreenSurface()
+			var left, top, right, bottom int32
+			if lpRect != 0 {
+				v, _ := mem.Read32(lpRect)
+				left = int32(v)
+				v, _ = mem.Read32(lpRect + 4)
+				top = int32(v)
+				v, _ = mem.Read32(lpRect + 8)
+				right = int32(v)
+				v, _ = mem.Read32(lpRect + 12)
+				bottom = int32(v)
+			} else if cs, ok := hwndChildren[hwnd]; ok {
+				left, top = 0, 0
+				right, bottom = cs.w, cs.h
+			} else {
+				right, bottom = wlWindow.Width, wlWindow.Height
+			}
+			if lpClipRect != 0 {
+				v, _ := mem.Read32(lpClipRect)
+				cl := int32(v)
+				v, _ = mem.Read32(lpClipRect + 4)
+				ct := int32(v)
+				v, _ = mem.Read32(lpClipRect + 8)
+				cr := int32(v)
+				v, _ = mem.Read32(lpClipRect + 12)
+				cb := int32(v)
+				if cl > left {
+					left = cl
+				}
+				if ct > top {
+					top = ct
+				}
+				if cr < right {
+					right = cr
+				}
+				if cb < bottom {
+					bottom = cb
+				}
+			}
+			if right > left && bottom > top && gdiMgr.Screen != nil {
+				ox, oy := absWindowOffset(hwnd)
+				gdiMgr.Screen.BitBlt(ox+left+dx, oy+top+dy, gdiMgr.Screen, ox+left, oy+top, right-left, bottom-top)
+			}
+		}
 		queuePaint(hwnd)
 		ctx.SetReturn(1)
 		return 0
@@ -3947,17 +3998,77 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ScrollDC", func(ctx *ntapi.TrapContext) uint32 {
+		// ReactOS: win32ss/user/ntuser/scrollex.c NtUserScrollDC
 		hDC := ctx.Arg(0)
 		dx := int32(ctx.Arg(1))
 		dy := int32(ctx.Arg(2))
+		lprcScroll := ctx.Arg(3)
+		lprcClip := ctx.Arg(4)
+		// arg5 = hrgnUpdate (ignored)
 		lprcUpdate := ctx.Arg(6)
+
+		dc := getDC(hDC)
+		if dc != nil && (dx != 0 || dy != 0) {
+			// Get the live surface (screen DCs use Mgr.Screen for live buffer)
+			var surf *gdi.Surface
+			if dc.IsScreen && dc.Mgr != nil && dc.Mgr.Screen != nil {
+				surf = dc.Mgr.Screen
+			} else {
+				surf = dc.Target
+			}
+			if surf != nil && surf.Pix != nil {
+				var left, top, right, bottom int32
+				if lprcScroll != 0 {
+					v, _ := mem.Read32(lprcScroll)
+					left = int32(v)
+					v, _ = mem.Read32(lprcScroll + 4)
+					top = int32(v)
+					v, _ = mem.Read32(lprcScroll + 8)
+					right = int32(v)
+					v, _ = mem.Read32(lprcScroll + 12)
+					bottom = int32(v)
+				} else {
+					left, top = 0, 0
+					right = dc.ClipX1 - dc.OriginX
+					bottom = dc.ClipY1 - dc.OriginY
+				}
+				if lprcClip != 0 {
+					v, _ := mem.Read32(lprcClip)
+					cl := int32(v)
+					v, _ = mem.Read32(lprcClip + 4)
+					ct := int32(v)
+					v, _ = mem.Read32(lprcClip + 8)
+					cr := int32(v)
+					v, _ = mem.Read32(lprcClip + 12)
+					cb := int32(v)
+					if cl > left {
+						left = cl
+					}
+					if ct > top {
+						top = ct
+					}
+					if cr < right {
+						right = cr
+					}
+					if cb < bottom {
+						bottom = cb
+					}
+				}
+				if right > left && bottom > top {
+					ax := dc.OriginX + left
+					ay := dc.OriginY + top
+					w := right - left
+					h := bottom - top
+					surf.BitBlt(ax+dx, ay+dy, surf, ax, ay, w, h)
+				}
+			}
+		}
 		if lprcUpdate != 0 {
 			mem.Write32(lprcUpdate, 0)
 			mem.Write32(lprcUpdate+4, 0)
 			mem.Write32(lprcUpdate+8, 0)
 			mem.Write32(lprcUpdate+12, 0)
 		}
-		ravelog.Logf("[user32] ScrollDC hdc=0x%x dx=%d dy=%d\n", hDC, dx, dy)
 		ctx.SetReturn(1)
 		return 0
 	})
