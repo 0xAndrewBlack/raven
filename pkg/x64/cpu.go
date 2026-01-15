@@ -929,6 +929,57 @@ func (c *CPU) execRandInstruction(dst int, size int) error {
 	return nil
 }
 
+// execFXSAVE saves x87 FPU + SSE state to a 512-byte FXSAVE area.
+// Layout is identical to the legacy portion of XSAVE (no XSAVE header / YMM-hi).
+func (c *CPU) execFXSAVE(addr uint64) error {
+	sw := (c.fpuSW &^ 0x3800) | (uint16(c.fpuTop&7) << 11)
+	c.mem.Write16(addr+0x000, c.fpuCW)
+	c.mem.Write16(addr+0x002, sw)
+	c.mem.Write8(addr+0x004, c.xsaveFTW())
+	c.mem.Write8(addr+0x005, 0)   // reserved
+	c.mem.Write16(addr+0x006, 0)  // FOP
+	c.mem.Write64(addr+0x008, 0)  // RIP of last FP instruction
+	c.mem.Write64(addr+0x010, 0)  // RDP
+	c.mem.Write32(addr+0x018, 0x1F80) // MXCSR default
+	c.mem.Write32(addr+0x01C, 0xFFFF) // MXCSR_MASK
+	// MM0-MM7 / ST0-ST7 at +0x020, 16 bytes each
+	for i := 0; i < 8; i++ {
+		slot := addr + 0x020 + uint64(i)*16
+		c.mem.Write64(slot, math.Float64bits(c.fpuST[i]))
+		c.mem.Write64(slot+8, 0)
+	}
+	// XMM0-XMM15 at +0x0A0, 16 bytes each
+	for i := 0; i < 16; i++ {
+		slot := addr + 0x0A0 + uint64(i)*16
+		c.mem.Write64(slot, c.XMM[i][0])
+		c.mem.Write64(slot+8, c.XMM[i][1])
+	}
+	return nil
+}
+
+// execFXRSTOR restores x87 FPU + SSE state from a 512-byte FXSAVE area.
+func (c *CPU) execFXRSTOR(addr uint64) error {
+	cw, _ := c.mem.Read16(addr + 0x000)
+	sw, _ := c.mem.Read16(addr + 0x002)
+	ftw, _ := c.mem.Read8(addr + 0x004)
+	c.fpuCW = cw
+	c.fpuSW = sw &^ 0x3800
+	c.fpuTop = int((sw >> 11) & 0x7)
+	c.fpuTW = xrstorFTW(ftw)
+	for i := 0; i < 8; i++ {
+		slot := addr + 0x020 + uint64(i)*16
+		v, _ := c.mem.Read64(slot)
+		c.fpuST[i] = math.Float64frombits(v)
+	}
+	for i := 0; i < 16; i++ {
+		slot := addr + 0x0A0 + uint64(i)*16
+		lo, _ := c.mem.Read64(slot)
+		hi, _ := c.mem.Read64(slot + 8)
+		c.XMM[i] = [2]uint64{lo, hi}
+	}
+	return nil
+}
+
 func (c *CPU) execXSAVE(addr uint64) error {
 	sw := (c.fpuSW &^ 0x3800) | (uint16(c.fpuTop&7) << 11)
 	if err := c.mem.Write16(addr+0x000, c.fpuCW); err != nil {
@@ -3413,12 +3464,20 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		switch (m.raw >> 3) & 7 {
+		case 0: // FXSAVE m512byte
+			return c.execFXSAVE(addr)
+		case 1: // FXRSTOR m512byte
+			return c.execFXRSTOR(addr)
 		case 2, 3: // LDMXCSR / STMXCSR
 			return nil
 		case 4: // XSAVE
 			return c.execXSAVE(addr)
 		case 5: // XRSTOR
 			return c.execXRSTOR(addr)
+		case 6: // CLWB (treat as no-op - cache writeback not needed in emulation)
+			return nil
+		case 7: // CLFLUSH m8 (no-op)
+			return nil
 		default:
 			return fmt.Errorf("unimplemented 0F AE /%d at RIP=0x%x", (m.raw>>3)&7, startRIP)
 		}

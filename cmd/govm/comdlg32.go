@@ -1111,28 +1111,90 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	d.RegisterAutoStubHandler(comdlg32, "FindTextW", func(ctx *ntapi.TrapContext) uint32 {
-		ravelog.Logf("[comdlg32] FindTextW unsupported modeless dialog\n")
-		ctx.SetReturn(0)
+	// FINDREPLACEW 64-bit layout:
+	//   +0  lStructSize (4), +4 pad(4), +8 hwndOwner(8), +16 hInstance(8)
+	//   +24 Flags(4), +28 pad(4), +32 lpstrFindWhat(8), +40 lpstrReplaceWith(8)
+	//   +48 wFindWhatLen(2), +50 wReplaceWithLen(2), +52 pad(4)  total=80
+	openFindReplaceDialog := func(ctx *ntapi.TrapContext, isReplace bool) uint32 {
+		pfr := ctx.Arg(0)
+		if pfr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		ownerHWND, _ := mem.Read64(pfr + 8)
+		if ownerHWND == 0 {
+			ownerHWND = hctx.MainHWND
+		}
+		lpstrFindWhat, _ := mem.Read64(pfr + 32)
+		wFindWhatLen16, _ := mem.Read16(pfr + 48)
+		lpstrReplaceWith, _ := mem.Read64(pfr + 40)
+		wReplaceWithLen16, _ := mem.Read16(pfr + 50)
+
+		// Read initial search text if the buffer already contains something.
+		initFind := ""
+		if lpstrFindWhat != 0 && wFindWhatLen16 > 0 {
+			initFind = readGuestUTF16(lpstrFindWhat)
+		}
+
+		// Register (or look up) the FINDMSGSTRING message ID.
+		// Both FindTextW and the host app call RegisterWindowMessage("commdlg_FindReplace").
+		const findMsgName = "commdlg_FindReplace"
+		msgID, hasMsgID := hctx.RegisteredMsgNames[findMsgName]
+		if !hasMsgID {
+			msgID = hctx.NextMsgID
+			hctx.NextMsgID++
+			hctx.RegisteredMsgNames[findMsgName] = msgID
+		}
+
+		// Allocate a minimal HWND for the modeless dialog so NPP gets a valid handle.
+		dlgHwnd := hctx.HwndAlloc()
+		cs := &controlState{
+			className:  "dialog",
+			parentHWND: ownerHWND,
+			visible:    false, // rendered by DrawDialogOverlay, not paintTree
+			w:          1,
+			h:          1,
+		}
+		hctx.HwndChildren[dlgHwnd] = cs
+
+		hctx.FindDialog = &FindDialogState{
+			DlgHWND:          dlgHwnd,
+			OwnerHWND:        ownerHWND,
+			PFR:              pfr,
+			LpstrFindWhat:    lpstrFindWhat,
+			FindWhatLen:      wFindWhatLen16,
+			LpstrReplaceWith: lpstrReplaceWith,
+			ReplaceWithLen:   wReplaceWithLen16,
+			MsgID:            msgID,
+			IsReplace:        isReplace,
+			FindText:         initFind,
+			SearchDown:       true,
+		}
+
+		label := map[bool]string{false: "FindTextW", true: "ReplaceTextW"}[isReplace]
+		ravelog.Logf("[comdlg32] %s owner=0x%x dlgHwnd=0x%x msgID=0x%x\n",
+			label, ownerHWND, dlgHwnd, msgID)
+
+		// Trigger repaint so the dialog renders immediately.
+		hctx.QueuePaint(hctx.MainHWND)
+		ctx.SetReturn(dlgHwnd)
 		return 0
+	}
+
+	d.RegisterAutoStubHandler(comdlg32, "FindTextW", func(ctx *ntapi.TrapContext) uint32 {
+		return openFindReplaceDialog(ctx, false)
 	})
 
 	d.RegisterAutoStubHandler(comdlg32, "FindTextA", func(ctx *ntapi.TrapContext) uint32 {
-		ravelog.Logf("[comdlg32] FindTextA unsupported modeless dialog\n")
-		ctx.SetReturn(0)
-		return 0
+		return openFindReplaceDialog(ctx, false)
 	})
 
 	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextW", func(ctx *ntapi.TrapContext) uint32 {
-		ravelog.Logf("[comdlg32] ReplaceTextW unsupported modeless dialog\n")
-		ctx.SetReturn(0)
-		return 0
+		return openFindReplaceDialog(ctx, true)
 	})
 
 	d.RegisterAutoStubHandler(comdlg32, "ReplaceTextA", func(ctx *ntapi.TrapContext) uint32 {
-		ravelog.Logf("[comdlg32] ReplaceTextA unsupported modeless dialog\n")
-		ctx.SetReturn(0)
-		return 0
+		return openFindReplaceDialog(ctx, true)
 	})
 
 	d.RegisterAutoStubHandler(comdlg32, "CommDlgExtendedError", func(ctx *ntapi.TrapContext) uint32 {

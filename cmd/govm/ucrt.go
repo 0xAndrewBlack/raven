@@ -716,6 +716,23 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(ucrt, "abort", ucrtExit)
+	// _assert(msg, file, line) and _wassert(wmsg, wfile, line): print and abort.
+	d.RegisterAutoStubHandler(ucrt, "_assert", func(ctx *ntapi.TrapContext) uint32 {
+		msg := mem.ReadCString(ctx.Arg(0), 512)
+		file := mem.ReadCString(ctx.Arg(1), 256)
+		line := ctx.Arg(2)
+		ravelog.Logf("[ucrt] _assert FAILED: %q  at %s:%d\n", msg, file, line)
+		os.Exit(3)
+		return 0
+	})
+	d.RegisterAutoStubHandler(ucrt, "_wassert", func(ctx *ntapi.TrapContext) uint32 {
+		msg := readGuestUTF16(ctx.Arg(0))
+		file := readGuestUTF16(ctx.Arg(1))
+		line := ctx.Arg(2)
+		ravelog.Logf("[ucrt] _wassert FAILED: %q  at %s:%d\n", msg, file, line)
+		os.Exit(3)
+		return 0
+	})
 	d.RegisterAutoStubHandler(ucrt, "terminate", func(ctx *ntapi.TrapContext) uint32 {
 		ravelog.Logf("[win32] terminate() called - ignoring\n")
 		return 0

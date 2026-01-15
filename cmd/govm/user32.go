@@ -12,6 +12,7 @@ import (
 
 	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 	"github.com/mirkobrombin/Raven/pkg/win32"
 	"github.com/mirkobrombin/Raven/pkg/wl"
@@ -712,8 +713,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "RegisterWindowMessageW", func(ctx *ntapi.TrapContext) uint32 {
+		name := ""
+		if p := ctx.Arg(0); p != 0 {
+			name = readGuestUTF16(p)
+		}
+		if name != "" {
+			if existing, ok := hctx.RegisteredMsgNames[name]; ok {
+				ctx.SetReturn(uint64(existing))
+				return 0
+			}
+		}
 		id := hctx.NextMsgID
 		hctx.NextMsgID++
+		if name != "" {
+			hctx.RegisteredMsgNames[name] = id
+		}
 		ctx.SetReturn(uint64(id))
 		return 0
 	})
@@ -2747,6 +2761,40 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						requestWindowRepaint(hctx.MainHWND)
 						continue
 					}
+					// FindDialog keyboard intercept: route printable chars to overlay
+					if ke.Pressed && hctx.FindDialog != nil {
+						fd := hctx.FindDialog
+						switch {
+						case ke.VK == 0x1B: // ESC → close dialog
+							hctx.FindDialog = nil
+							requestWindowRepaint(hctx.MainHWND)
+							continue
+						case ke.VK == 0x0D: // Enter → Find Next
+							sendFindMessage(hctx, mem, 0x0008 /*FR_FINDNEXT*/)
+							continue
+						case ke.VK == 0x08: // Backspace
+							if !fd.FocusOnReplace {
+								if len(fd.FindText) > 0 {
+									fd.FindText = fd.FindText[:len([]rune(fd.FindText))-1]
+								}
+							} else {
+								if len(fd.ReplaceText) > 0 {
+									fd.ReplaceText = fd.ReplaceText[:len([]rune(fd.ReplaceText))-1]
+								}
+							}
+							requestWindowRepaint(hctx.MainHWND)
+							continue
+						case ke.Char >= 0x20:
+							ch := string(rune(ke.Char))
+							if !fd.FocusOnReplace {
+								fd.FindText += ch
+							} else {
+								fd.ReplaceText += ch
+							}
+							requestWindowRepaint(hctx.MainHWND)
+							continue
+						}
+					}
 					target := hctx.FocusHwnd
 					if target == 0 {
 						target = hctx.MainHWND
@@ -2859,6 +2907,57 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						case btnLeft:
 							if me.Pressed {
 								ravelog.Logf("[click] left press x=%d y=%d ncMenuTop=%d clientTop=%d\n", me.X, me.Y, ncMenuTop, clientTop)
+
+								// Find/Replace modeless dialog intercept
+								if hctx.FindDialog != nil {
+									fd := hctx.FindDialog
+									x, y := me.X, me.Y
+									// Find edit field
+									if x >= fd.FindEditX && x < fd.FindEditX+fd.FindEditW &&
+										y >= fd.FindEditY && y < fd.FindEditY+fd.FindEditH {
+										fd.FocusOnReplace = false
+										requestWindowRepaint(hctx.MainHWND)
+										break
+									}
+									// Replace edit field
+									if fd.IsReplace && x >= fd.ReplEditX && x < fd.ReplEditX+fd.ReplEditW &&
+										y >= fd.ReplEditY && y < fd.ReplEditY+fd.ReplEditH {
+										fd.FocusOnReplace = true
+										requestWindowRepaint(hctx.MainHWND)
+										break
+									}
+									// Find Next button
+									if x >= fd.FindNextBtnX && x < fd.FindNextBtnX+fd.FindNextBtnW &&
+										y >= fd.FindNextBtnY && y < fd.FindNextBtnY+fd.FindNextBtnH {
+										sendFindMessage(hctx, mem, 0x0008 /*FR_FINDNEXT*/)
+										break
+									}
+									// Replace button
+									if fd.IsReplace && x >= fd.ReplaceBtnX && x < fd.ReplaceBtnX+fd.ReplaceBtnW &&
+										y >= fd.ReplaceBtnY && y < fd.ReplaceBtnY+fd.ReplaceBtnH {
+										sendFindMessage(hctx, mem, 0x0010 /*FR_REPLACE*/)
+										break
+									}
+									// Replace All button
+									if fd.IsReplace && x >= fd.ReplAllBtnX && x < fd.ReplAllBtnX+fd.ReplAllBtnW &&
+										y >= fd.ReplAllBtnY && y < fd.ReplAllBtnY+fd.ReplAllBtnH {
+										sendFindMessage(hctx, mem, 0x0020 /*FR_REPLACEALL*/)
+										break
+									}
+									// Cancel button
+									if x >= fd.CancelBtnX && x < fd.CancelBtnX+fd.CancelBtnW &&
+										y >= fd.CancelBtnY && y < fd.CancelBtnY+fd.CancelBtnH {
+										sendFindMessage(hctx, mem, 0x0040 /*FR_DIALOGTERM*/)
+										hctx.FindDialog = nil
+										requestWindowRepaint(hctx.MainHWND)
+										break
+									}
+									// Click inside dialog body (but not a button) → just absorb
+									if x >= fd.X && x < fd.X+fd.W && y >= fd.Y && y < fd.Y+fd.H {
+										break
+									}
+									// Click outside dialog → fall through to normal handling
+								}
 
 								// Modal dialog intercept: all clicks go to dialog when active
 								if hctx.DialogActive {
@@ -10122,15 +10221,19 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(user32, "RegisterWindowMessageA", func(ctx *ntapi.TrapContext) uint32 {
 		p := ctx.Arg(0)
-		hash := uint64(0xC000)
-		for i := uint64(0); i < 64; i++ {
-			b, _ := mem.Read8(p + i)
-			if b == 0 {
-				break
+		name := mem.ReadCString(p, 256)
+		if name != "" {
+			if existing, ok := hctx.RegisteredMsgNames[name]; ok {
+				ctx.SetReturn(uint64(existing))
+				return 0
 			}
-			hash = hash*31 + uint64(b)
 		}
-		ctx.SetReturn((hash & 0x3FFF) + 0xC000)
+		id := hctx.NextMsgID
+		hctx.NextMsgID++
+		if name != "" {
+			hctx.RegisteredMsgNames[name] = id
+		}
+		ctx.SetReturn(uint64(id))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ExitWindowsEx", func(ctx *ntapi.TrapContext) uint32 {
@@ -11251,4 +11354,45 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	nextDynID++
 	_ = nextDynID
+}
+
+// sendFindMessage writes the current FindDialog text into the guest FINDREPLACEW
+// struct and posts the FINDMSGSTRING message to the owner window.
+// flags: FR_FINDNEXT=0x08, FR_REPLACE=0x10, FR_REPLACEALL=0x20, FR_DIALOGTERM=0x40
+func sendFindMessage(hctx *HandlerCtx, mem *mmu.MMU, flags uint32) {
+	fd := hctx.FindDialog
+	if fd == nil {
+		return
+	}
+	// Write find text into guest buffer.
+	if fd.LpstrFindWhat != 0 {
+		writeGuestUTF16StringN(mem, fd.LpstrFindWhat, fd.FindText, int(fd.FindWhatLen))
+	}
+	// Write replace text for replace operations.
+	if fd.IsReplace && fd.LpstrReplaceWith != 0 {
+		writeGuestUTF16StringN(mem, fd.LpstrReplaceWith, fd.ReplaceText, int(fd.ReplaceWithLen))
+	}
+	// Build FR flags: preserve direction and case-sensitive bits.
+	var fr uint32 = flags
+	if fd.SearchDown {
+		fr |= 0x0001 // FR_DOWN
+	}
+	if fd.CaseSensitive {
+		fr |= 0x0004 // FR_MATCHCASE
+	}
+	if fd.WholeWord {
+		fr |= 0x0002 // FR_WHOLEWORD
+	}
+	// Write flags into FINDREPLACEW.Flags (+24)
+	if fd.PFR != 0 {
+		mem.Write32(fd.PFR+24, fr)
+	}
+	// Post message to owner window.
+	hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{
+		hwnd:    fd.OwnerHWND,
+		message: uint32(fd.MsgID),
+		wParam:  0,
+		lParam:  fd.PFR,
+	})
+	ravelog.Logf("[FindDialog] sendFindMessage flags=0x%x text=%q\n", flags, fd.FindText)
 }

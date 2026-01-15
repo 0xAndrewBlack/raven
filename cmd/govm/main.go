@@ -221,6 +221,10 @@ func runELF(absPath string, guestArgv []string, trace bool, enableWayland bool) 
 			waylandDisp = "wayland-0"
 		}
 		guestEnvp = append(guestEnvp, "WAYLAND_DISPLAY="+waylandDisp)
+		// Explicit EGL platform so libglvnd registers only one winsys backend.
+		// Without this, glvnd probes both X11 and Wayland, triggering a double-
+		// registration assertion in __glvndWinsysDispatchAllocIndex.
+		guestEnvp = append(guestEnvp, "EGL_PLATFORM=wayland")
 		// Software GL via Mesa/Gallium - no GPU device needed.
 		guestEnvp = append(guestEnvp, "LIBGL_ALWAYS_SOFTWARE=1")
 		guestEnvp = append(guestEnvp, "GALLIUM_DRIVER=softpipe")
@@ -2328,6 +2332,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 	hctx.HwndAlloc = hwndAlloc
 	hctx.NextMsgID = 0xC000 // RegisterWindowMessage range
+	hctx.RegisteredMsgNames = make(map[string]uint32)
 	hctx.NextAtom = 0xC001  // RegisterClass atom range
 	// hctx.FocusHwnd: hctx.FocusHwnd already zero-valued
 	// hctx.MouseCapture: hctx.MouseCapture already zero-valued
@@ -2577,6 +2582,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// DrawDialogOverlay renders the modal dialog box on top of everything.
 	hctx.DrawDialogOverlay = func() {
+		// Draw Find/Replace modeless dialog if open.
+		if hctx.FindDialog != nil && wlWindow != nil {
+			drawFindDialogOverlay(hctx, wlWindow)
+		}
+
 		if !hctx.DialogActive || wlWindow == nil {
 			return
 		}
@@ -6357,4 +6367,122 @@ func saveScreenshot(pix []byte, w, h int, path string) {
 		return
 	}
 	os.WriteFile(path, buf.Bytes(), 0644)
+}
+
+// drawFindDialogOverlay renders the modeless Find/Replace dialog as an overlay
+// on the Wayland window. It also fills in the FindDialogState hit-test bounds.
+func drawFindDialogOverlay(hctx *HandlerCtx, w *wl.Window) {
+	fd := hctx.FindDialog
+	if fd == nil || w == nil {
+		return
+	}
+	const (
+		dlgW        = int32(380)
+		dlgHFind    = int32(130)
+		dlgHReplace = int32(160)
+		titleBarH   = int32(22)
+		pad         = int32(8)
+	)
+	dlgH := dlgHFind
+	if fd.IsReplace {
+		dlgH = dlgHReplace
+	}
+	// Position: top-right of window
+	winW := int32(w.Width)
+	x := winW - dlgW - 16
+	y := w.TitleBarH + 4
+	if x < 4 {
+		x = 4
+	}
+	fd.X, fd.Y, fd.W, fd.H = x, y, dlgW, dlgH
+
+	// Dialog background & border
+	w.DrawRectAbs(x, y, x+dlgW, y+dlgH, 0xF0F0F0)
+	w.DrawRectAbs(x, y, x+dlgW, y+1, 0x808080)
+	w.DrawRectAbs(x, y, x+1, y+dlgH, 0x808080)
+	w.DrawRectAbs(x, y+dlgH-1, x+dlgW, y+dlgH, 0x808080)
+	w.DrawRectAbs(x+dlgW-1, y, x+dlgW, y+dlgH, 0x808080)
+
+	// Title bar
+	title := "Find"
+	if fd.IsReplace {
+		title = "Replace"
+	}
+	w.DrawRectAbs(x+1, y+1, x+dlgW-1, y+titleBarH, 0x0078D7)
+	hctx.NcDrawText(x+6, y+4, title, 0xFFFFFF, 0x0078D7, true, 11)
+
+	row := y + titleBarH + pad
+
+	// "Find what:" label + edit field
+	hctx.NcDrawText(x+pad, row+3, "Find what:", 0x000000, 0xF0F0F0, true, 11)
+	editX := x + pad + 76
+	editW := dlgW - pad - 76 - 90 - pad
+	editH := int32(20)
+	w.DrawRectAbs(editX, row, editX+editW, row+editH, 0xFFFFFF)
+	w.DrawRectAbs(editX, row, editX+editW, row+1, 0x808080)
+	w.DrawRectAbs(editX, row, editX+1, row+editH, 0x808080)
+	w.DrawRectAbs(editX, row+editH-1, editX+editW, row+editH, 0x808080)
+	w.DrawRectAbs(editX+editW-1, row, editX+editW, row+editH, 0x808080)
+	findDisplay := fd.FindText
+	if !fd.FocusOnReplace {
+		findDisplay += "_" // cursor indicator
+	}
+	hctx.NcDrawText(editX+3, row+3, findDisplay, 0x000000, 0xFFFFFF, true, 11)
+	fd.FindEditX, fd.FindEditY, fd.FindEditW, fd.FindEditH = editX, row, editW, editH
+
+	row += editH + pad
+
+	// "Replace with:" label + edit field (Replace dialog only)
+	if fd.IsReplace {
+		hctx.NcDrawText(x+pad, row+3, "Replace with:", 0x000000, 0xF0F0F0, true, 11)
+		replEditX := x + pad + 90
+		replEditW := dlgW - pad - 90 - 90 - pad
+		w.DrawRectAbs(replEditX, row, replEditX+replEditW, row+editH, 0xFFFFFF)
+		w.DrawRectAbs(replEditX, row, replEditX+replEditW, row+1, 0x808080)
+		w.DrawRectAbs(replEditX, row, replEditX+1, row+editH, 0x808080)
+		w.DrawRectAbs(replEditX, row+editH-1, replEditX+replEditW, row+editH, 0x808080)
+		w.DrawRectAbs(replEditX+replEditW-1, row, replEditX+replEditW, row+editH, 0x808080)
+		replDisplay := fd.ReplaceText
+		if fd.FocusOnReplace {
+			replDisplay += "_"
+		}
+		hctx.NcDrawText(replEditX+3, row+3, replDisplay, 0x000000, 0xFFFFFF, true, 11)
+		fd.ReplEditX, fd.ReplEditY, fd.ReplEditW, fd.ReplEditH = replEditX, row, replEditW, editH
+		row += editH + pad
+	}
+
+	// Buttons (right-aligned column)
+	const btnW, btnH = int32(82), int32(24)
+	btnX := x + dlgW - btnW - pad
+
+	drawBtn := func(bx, by int32, label string) {
+		w.DrawRectAbs(bx, by, bx+btnW, by+btnH, 0xE1E1E1)
+		w.DrawRectAbs(bx, by, bx+btnW, by+1, 0xADADAD)
+		w.DrawRectAbs(bx, by, bx+1, by+btnH, 0xADADAD)
+		w.DrawRectAbs(bx, by+btnH-1, bx+btnW, by+btnH, 0xADADAD)
+		w.DrawRectAbs(bx+btnW-1, by, bx+btnW, by+btnH, 0xADADAD)
+		// Center label
+		labelX := bx + (btnW-int32(len(label))*6)/2
+		if labelX < bx+4 {
+			labelX = bx + 4
+		}
+		hctx.NcDrawText(labelX, by+5, label, 0x000000, 0xE1E1E1, true, 11)
+	}
+
+	btnRow := y + titleBarH + pad
+	drawBtn(btnX, btnRow, "Find Next")
+	fd.FindNextBtnX, fd.FindNextBtnY, fd.FindNextBtnW, fd.FindNextBtnH = btnX, btnRow, btnW, btnH
+	btnRow += btnH + 4
+
+	if fd.IsReplace {
+		drawBtn(btnX, btnRow, "Replace")
+		fd.ReplaceBtnX, fd.ReplaceBtnY, fd.ReplaceBtnW, fd.ReplaceBtnH = btnX, btnRow, btnW, btnH
+		btnRow += btnH + 4
+		drawBtn(btnX, btnRow, "Replace All")
+		fd.ReplAllBtnX, fd.ReplAllBtnY, fd.ReplAllBtnW, fd.ReplAllBtnH = btnX, btnRow, btnW, btnH
+		btnRow += btnH + 4
+	}
+
+	drawBtn(btnX, btnRow, "Cancel")
+	fd.CancelBtnX, fd.CancelBtnY, fd.CancelBtnW, fd.CancelBtnH = btnX, btnRow, btnW, btnH
 }

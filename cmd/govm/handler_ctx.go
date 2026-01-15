@@ -187,6 +187,35 @@ type registeredClassInfo struct {
 	Atom      uint16
 }
 
+// FindDialogState holds state for the built-in modeless Find/Replace dialog overlay.
+// Created by FindTextW/ReplaceTextW, rendered by DrawDialogOverlay.
+type FindDialogState struct {
+	DlgHWND          uint64
+	OwnerHWND        uint64
+	PFR              uint64 // guest pointer to FINDREPLACEW
+	LpstrFindWhat    uint64 // guest pointer to find-string buffer
+	FindWhatLen      uint16
+	LpstrReplaceWith uint64 // guest pointer to replace-string buffer (Replace only)
+	ReplaceWithLen   uint16
+	MsgID            uint32 // registered FINDMSGSTRING message ID
+	IsReplace        bool
+	// UI input state
+	FindText       string
+	ReplaceText    string
+	FocusOnReplace bool // cursor in replace field vs find field
+	CaseSensitive  bool
+	WholeWord      bool
+	SearchDown     bool
+	// Rendering hit-test bounds (set each frame by DrawFindDialog)
+	X, Y, W, H                     int32
+	FindEditX, FindEditY, FindEditW, FindEditH         int32
+	ReplEditX, ReplEditY, ReplEditW, ReplEditH         int32
+	FindNextBtnX, FindNextBtnY, FindNextBtnW, FindNextBtnH int32
+	ReplaceBtnX, ReplaceBtnY, ReplaceBtnW, ReplaceBtnH int32
+	ReplAllBtnX, ReplAllBtnY, ReplAllBtnW, ReplAllBtnH int32
+	CancelBtnX, CancelBtnY, CancelBtnW, CancelBtnH    int32
+}
+
 // ─── HandlerCtx bridges closure-captured state to extracted DLL files ───────
 
 type HandlerCtx struct {
@@ -271,6 +300,11 @@ type HandlerCtx struct {
 	DialogBtnY          int32
 	DialogBtnW          int32
 	DialogBtnH          int32
+
+	// Modeless Find/Replace dialog state (FindTextW/ReplaceTextW)
+	FindDialog         *FindDialogState
+	RegisteredMsgNames map[string]uint32 // RegisterWindowMessage name → ID
+
 	NextHWND            uint64
 	NextMsgID           uint32
 	NextAtom            uint16
