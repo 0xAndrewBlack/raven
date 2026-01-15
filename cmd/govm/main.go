@@ -37,7 +37,22 @@ import (
 
 func utf16Decode(s []uint16) []byte {
 	var out []byte
-	for _, w := range s {
+	for i := 0; i < len(s); i++ {
+		w := s[i]
+		// Handle surrogate pairs (U+10000..U+10FFFF)
+		if w >= 0xD800 && w <= 0xDBFF && i+1 < len(s) {
+			w2 := s[i+1]
+			if w2 >= 0xDC00 && w2 <= 0xDFFF {
+				r := 0x10000 + uint32(w&0x3FF)<<10 | uint32(w2&0x3FF)
+				out = append(out,
+					byte(0xF0|(r>>18)),
+					byte(0x80|((r>>12)&0x3F)),
+					byte(0x80|((r>>6)&0x3F)),
+					byte(0x80|(r&0x3F)))
+				i++ // skip low surrogate
+				continue
+			}
+		}
 		if w < 0x80 {
 			out = append(out, byte(w))
 		} else if w < 0x800 {
@@ -3185,9 +3200,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case "systabcontrol32":
 				syncTabCompat(cs)
 				const tabH = int32(22)
+				const tabPad = int32(16) // padding on each side of text
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				wlWindow.DrawRectAbs(cs.x, cs.y+tabH-1, cs.x+cs.w, cs.y+tabH, sysColors[16])
-				// Draw each tab
 				tx := cs.x
 				for i := 0; i < cs.tabCount; i++ {
 					sel := i == cs.tabCurSel
@@ -3195,13 +3210,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					if sel {
 						bgCol = sysColors[5]
 					}
-					tabW := int32(80)
+					label := ""
+					if i < len(cs.tabTitles) {
+						label = cs.tabTitles[i]
+					}
+					tabW := menuTextWidth(label) + tabPad*2
+					if tabW < 40 {
+						tabW = 40
+					}
 					wlWindow.DrawRectAbs(tx, cs.y, tx+tabW, cs.y+tabH, bgCol)
 					wlWindow.DrawRectAbs(tx, cs.y, tx+1, cs.y+tabH, sysColors[16])
 					wlWindow.DrawRectAbs(tx+tabW-1, cs.y, tx+tabW, cs.y+tabH, sysColors[16])
 					wlWindow.DrawRectAbs(tx, cs.y, tx+tabW, cs.y+1, sysColors[16])
-					if i < len(cs.tabTitles) && cs.tabTitles[i] != "" {
-						hctx.NcDrawText(tx+4, cs.y+4, cs.tabTitles[i], 0x000000, bgCol, false, 12)
+					if label != "" {
+						hctx.NcDrawText(tx+tabPad/2, cs.y+4, label, 0x000000, bgCol, false, 12)
 					}
 					tx += tabW
 				}
@@ -5129,12 +5151,46 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return uint64(prev), true
 			case tcmFirst + 13: // TCM_HITTEST
+				if lParam != 0 {
+					v, _ := mem.Read32(lParam)
+					ptX := int32(v)
+					const tabPadHT = int32(16)
+					tx := int32(0)
+					for i := 0; i < len(tab.items); i++ {
+						tw := menuTextWidth(tab.items[i].text) + tabPadHT*2
+						if tw < 40 {
+							tw = 40
+						}
+						if ptX >= tx && ptX < tx+tw {
+							mem.Write32(lParam+8, 0x0001) // TCHT_ONITEM
+							return uint64(i), true
+						}
+						tx += tw
+					}
+				}
 				return uint64(0xFFFFFFFF), true // no tab hit
 			case tcmFirst + 10: // TCM_GETITEMRECT
 				if lParam != 0 {
-					mem.Write32(lParam, uint32(int32(wParam)*80))
+					idx := int(int32(wParam))
+					const tabPadR = int32(16)
+					left := int32(0)
+					for i := 0; i < idx && i < len(tab.items); i++ {
+						tw := menuTextWidth(tab.items[i].text) + tabPadR*2
+						if tw < 40 {
+							tw = 40
+						}
+						left += tw
+					}
+					tw := int32(80) // default
+					if idx >= 0 && idx < len(tab.items) {
+						tw = menuTextWidth(tab.items[idx].text) + tabPadR*2
+						if tw < 40 {
+							tw = 40
+						}
+					}
+					mem.Write32(lParam, uint32(left))
 					mem.Write32(lParam+4, 0)
-					mem.Write32(lParam+8, uint32(int32(wParam)*80+80))
+					mem.Write32(lParam+8, uint32(left+tw))
 					mem.Write32(lParam+12, 22)
 				}
 				return 1, true
@@ -5255,15 +5311,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0, true
 			case 0x0201: // WM_LBUTTONDOWN - find which tab was hit and notify parent
 				clickX := int32(lParam & 0xFFFF)
-				const tabW2 = int32(80)
+				const tabPad2 = int32(16)
 				tx := int32(0)
 				hitTab := -1
 				for i := 0; i < len(tab.items); i++ {
-					if clickX >= tx && clickX < tx+tabW2 {
+					label := tab.items[i].text
+					tw := menuTextWidth(label) + tabPad2*2
+					if tw < 40 {
+						tw = 40
+					}
+					if clickX >= tx && clickX < tx+tw {
 						hitTab = i
 						break
 					}
-					tx += tabW2
+					tx += tw
 				}
 				if hitTab >= 0 && hitTab != tab.curSel {
 					tab.curSel = hitTab
