@@ -4380,10 +4380,106 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	// Dialog functions
 
-	// DialogBoxParamW: modal dialog.
-	// Full implementation would load the template, create controls, run a modal loop.
-	// For now: allocate an HWND, call dlgProc(WM_INITDIALOG) via syncDispatch,
-	// then return IDCANCEL (2). This lets dialog init code run.
+	// modalDlgEntry tracks an active modal dialog so that EndDialog can perform a
+	// longjmp-style return to the original DialogBoxParamW call site.
+	type modalDlgEntry struct {
+		hwnd    uint64
+		retAddr uint64 // original return address at the DialogBoxParamW call site
+		retRSP  uint64 // RSP value after DialogBoxParamW would have returned normally
+	}
+	var modalDialogStack []modalDlgEntry
+
+	// loadDlgTemplate tries to read a DLGTEMPLATE from the process's .rsrc
+	// section for the given template specifier (integer ID or name string).
+	// Returns nil if the resource cannot be found or parsed.
+	loadDlgTemplate := func(lpTemplate uint64) *dlgInfo {
+		if mainModule == nil || hctx.PeLoadRawResource == nil {
+			return nil
+		}
+		var resID uint32
+		if lpTemplate < 0x10000 {
+			resID = uint32(lpTemplate)
+		}
+		if resID == 0 {
+			return nil // named templates not supported yet
+		}
+		dataAddr, dataSize, ok := hctx.PeLoadRawResource(
+			mainModule.BaseAddr, mainModule.ResourceDirRVA,
+			5 /*RT_DIALOG*/, resID)
+		if !ok || dataAddr == 0 || dataSize == 0 {
+			return nil
+		}
+		raw, err := mem.ReadBytes(dataAddr, int(dataSize))
+		if err != nil || len(raw) == 0 {
+			return nil
+		}
+		info, err := parseDLGTEMPLATE(raw)
+		if err != nil {
+			ravelog.Logf("[dialog] parseDLGTEMPLATE error: %v\n", err)
+			return nil
+		}
+		return info
+	}
+
+	// createDlgControls instantiates child controlState entries for every item
+	// described in info.  The dialog HWND itself must already exist in hwndChildren.
+	createDlgControls := func(dlgHwnd uint64, info *dlgInfo) {
+		for _, item := range info.items {
+			px, py, pcx, pcy := dlgUnitsToPixels(item.x, item.y, item.cx, item.cy)
+			child := hwndAlloc()
+			hwndChildren[child] = &controlState{
+				className:  strings.ToLower(item.class),
+				parentHWND: dlgHwnd,
+				ctrlID:     uint64(item.id),
+				x:          px,
+				y:          py,
+				w:          pcx,
+				h:          pcy,
+				style:      item.style,
+				exStyle:    item.extStyle,
+				text:       item.title,
+				visible:    true,
+			}
+			if item.title != "" {
+				hwndTitle[child] = item.title
+			}
+		}
+	}
+
+	// dispatchWmInitDialog sets up a syncDispatch trampoline call to
+	// dlgProc(dlgHwnd, WM_INITDIALOG, 0, dwInitParam).
+	// isModal controls whether the syncTrampoline redirects to the message loop
+	// afterwards (true) or returns immediately (false).
+	dispatchWmInitDialog := func(ctx *ntapi.TrapContext, dlgHwnd, lpDialogFunc, dwInitParam uint64, isModal bool) bool {
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
+		if !ok || !ok2 {
+			return false
+		}
+		rsp := rr.ReadReg(4) // RSP (points to caller's return address)
+		retAddr, _ := mem.Read64(rsp)
+		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			queue:               nil,
+			retAddr:             retAddr,
+			hwnd:                2, // IDCANCEL (fallback if modal redirect is unavailable)
+			returnWndProcResult: false,
+			IsModalDialog:       isModal,
+			ModalDlgHwnd:        dlgHwnd,
+		})
+		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(1, dlgHwnd)     // RCX = hDlg
+		rw.WriteReg(2, 0x0110)      // RDX = WM_INITDIALOG
+		rw.WriteReg(8, 0)           // R8  = wParam (first focusable control, 0 for now)
+		rw.WriteReg(9, dwInitParam) // R9  = lParam
+		ctx.CPU.SetPC(lpDialogFunc)
+		ctx.ReturnOverridden = true
+		return true
+	}
+
+	// DialogBoxParamW: modal dialog box.
+	// Loads and parses the DLGTEMPLATE resource, creates child controls, sends
+	// WM_INITDIALOG, then enters a modal message loop (via the SyncStack modal
+	// redirect mechanism).  EndDialog triggers the longjmp return.
 	d.RegisterAutoStubHandler(user32, "DialogBoxParamW", func(ctx *ntapi.TrapContext) uint32 {
 		// hInstance := ctx.Arg(0)
 		lpTemplate := ctx.Arg(1)
@@ -4405,96 +4501,243 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 
-		// Allocate an HWND for the dialog
+		// Allocate the dialog HWND
 		dlgHwnd := hwndAlloc()
-		hwndChildren[dlgHwnd] = &controlState{
-			className:  "DialogBox",
+		cs := &controlState{
+			className:  "dialog",
 			parentHWND: hWndParent,
 			visible:    true,
 		}
 
-		// Send WM_INITDIALOG synchronously via trampoline
-		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
-		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
-		if ok && ok2 && lpDialogFunc != 0 {
-			rsp := rr.ReadReg(4) // RSP
-			retAddr, _ := mem.Read64(rsp)
-			hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
-				queue:               nil,
-				retAddr:             retAddr,
-				hwnd:                2, // IDCANCEL
-				returnWndProcResult: false,
-			})
-			mem.Write64(rsp, hctx.SyncTrampoline)
+		// Load and parse the DLGTEMPLATE resource
+		if info := loadDlgTemplate(lpTemplate); info != nil {
+			cs.w = int32(info.cx) * 2
+			cs.h = int32(info.cy) * 2
+			cs.text = info.title
+			if info.title != "" {
+				hwndTitle[dlgHwnd] = info.title
+			}
+			hwndChildren[dlgHwnd] = cs
+			createDlgControls(dlgHwnd, info)
+		} else {
+			hwndChildren[dlgHwnd] = cs
+		}
+		hwndWndProc[dlgHwnd] = lpDialogFunc
 
-			// Set up WM_INITDIALOG call: dlgProc(hwnd, WM_INITDIALOG, wParam=focus, lParam=initParam)
-			rw.WriteReg(1, dlgHwnd)     // RCX = hDlg
-			rw.WriteReg(2, 0x0110)      // RDX = WM_INITDIALOG
-			rw.WriteReg(8, 0)           // R8 = wParam (focus control, 0 for now)
-			rw.WriteReg(9, dwInitParam) // R9 = lParam (init param)
-			ctx.CPU.SetPC(lpDialogFunc)
-			ctx.ReturnOverridden = true
+		// Save call-site state for EndDialog longjmp
+		rr, okR := ctx.CPU.(ntapi.RegisterReader)
+		if okR {
+			rsp := rr.ReadReg(4)
+			retAddr, _ := mem.Read64(rsp)
+			modalDialogStack = append(modalDialogStack, modalDlgEntry{
+				hwnd:    dlgHwnd,
+				retAddr: retAddr,
+				retRSP:  rsp + 8, // RSP after DialogBoxParamW would return
+			})
+		}
+
+		// Dispatch WM_INITDIALOG; syncTrampoline will redirect to message loop
+		if dispatchWmInitDialog(ctx, dlgHwnd, lpDialogFunc, dwInitParam, true) {
 			return 0
 		}
 
-		// Fallback: just return IDCANCEL
-		ctx.SetReturn(2) // IDCANCEL
+		// Fallback: no register access - return IDCANCEL
+		ctx.SetReturn(2)
 		return 0
 	})
+
 	d.RegisterAutoStubHandler(user32, "DialogBoxIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
-		hwnd := hwndAlloc()
-		hwndChildren[hwnd] = &controlState{
-			className: "DialogBox",
-			visible:   true,
+		// HWND DialogBoxIndirectParamW(hInstance, lpTemplate, hWndParent, lpDialogFunc, dwInitParam)
+		// lpTemplate (arg 1) is a direct pointer to a DLGTEMPLATE in memory.
+		hWndParent := ctx.Arg(2)
+		lpDialogFunc := ctx.Arg(3)
+		dwInitParam := ctx.Arg(4)
+		pTemplate := ctx.Arg(1)
+
+		dlgHwnd := hwndAlloc()
+		cs := &controlState{
+			className:  "dialog",
+			parentHWND: hWndParent,
+			visible:    true,
 		}
-		ravelog.Logf("[dialog] DialogBoxIndirectParamW → hwnd=0x%x\n", hwnd)
-		ctx.SetReturn(hwnd)
+
+		if pTemplate != 0 && lpDialogFunc != 0 {
+			// Try to read the DLGTEMPLATE directly from guest memory (up to 64 KB)
+			raw, err := mem.ReadBytes(pTemplate, 65536)
+			if err == nil {
+				if info, err2 := parseDLGTEMPLATE(raw); err2 == nil {
+					cs.w = int32(info.cx) * 2
+					cs.h = int32(info.cy) * 2
+					cs.text = info.title
+					if info.title != "" {
+						hwndTitle[dlgHwnd] = info.title
+					}
+					hwndChildren[dlgHwnd] = cs
+					createDlgControls(dlgHwnd, info)
+					hwndWndProc[dlgHwnd] = lpDialogFunc
+
+					rr, okR := ctx.CPU.(ntapi.RegisterReader)
+					if okR {
+						rsp := rr.ReadReg(4)
+						retAddr, _ := mem.Read64(rsp)
+						modalDialogStack = append(modalDialogStack, modalDlgEntry{
+							hwnd:    dlgHwnd,
+							retAddr: retAddr,
+							retRSP:  rsp + 8,
+						})
+					}
+					if dispatchWmInitDialog(ctx, dlgHwnd, lpDialogFunc, dwInitParam, true) {
+						return 0
+					}
+					ctx.SetReturn(2)
+					return 0
+				}
+			}
+		}
+
+		hwndChildren[dlgHwnd] = cs
+		ravelog.Logf("[dialog] DialogBoxIndirectParamW → hwnd=0x%x\n", dlgHwnd)
+		ctx.SetReturn(2)
 		return 0
 	})
+
 	d.RegisterAutoStubHandler(user32, "CreateDialogParamW", func(ctx *ntapi.TrapContext) uint32 {
-		// HWND CreateDialogParamW(HINSTANCE hInstance, LPCWSTR lpTemplate,
-		//   HWND hWndParent, DLGPROC lpDialogFunc, LPARAM dwInitParam)
-		// ReactOS: win32ss/user/user32/windows/dialog.c
+		// HWND CreateDialogParamW(hInstance, lpTemplate, hWndParent, lpDialogFunc, dwInitParam)
+		// Modeless dialog: create controls, send WM_INITDIALOG, return HWND immediately.
 		lpTemplate := ctx.Arg(1)
 		hWndParent := ctx.Arg(2)
 		lpDialogFunc := ctx.Arg(3)
+		dwInitParam := ctx.Arg(4)
+
 		templateName := ""
 		if lpTemplate < 0x10000 {
 			templateName = fmt.Sprintf("#%d", lpTemplate)
 		} else {
 			templateName = readGuestUTF16(lpTemplate)
 		}
-		hwnd := hwndAlloc()
-		hwndChildren[hwnd] = &controlState{
-			className:  "DialogBox",
+
+		dlgHwnd := hwndAlloc()
+		cs := &controlState{
+			className:  "dialog",
 			parentHWND: hWndParent,
 			visible:    true,
 		}
-		ravelog.Logf("[dialog] CreateDialogParamW template=%s parent=0x%x dlgProc=0x%x → hwnd=0x%x\n",
-			templateName, hWndParent, lpDialogFunc, hwnd)
-		ctx.SetReturn(hwnd)
-		return 0
-	})
-	d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
-		hwnd := hwndAlloc()
-		hwndChildren[hwnd] = &controlState{
-			className: "DialogBox",
-			visible:   true,
+
+		if info := loadDlgTemplate(lpTemplate); info != nil {
+			cs.w = int32(info.cx) * 2
+			cs.h = int32(info.cy) * 2
+			cs.text = info.title
+			if info.title != "" {
+				hwndTitle[dlgHwnd] = info.title
+			}
+			hwndChildren[dlgHwnd] = cs
+			createDlgControls(dlgHwnd, info)
+		} else {
+			hwndChildren[dlgHwnd] = cs
 		}
-		ravelog.Logf("[dialog] CreateDialogIndirectParamW → hwnd=0x%x\n", hwnd)
-		ctx.SetReturn(hwnd)
+		if lpDialogFunc != 0 {
+			hwndWndProc[dlgHwnd] = lpDialogFunc
+		}
+
+		ravelog.Logf("[dialog] CreateDialogParamW template=%s parent=0x%x dlgProc=0x%x → hwnd=0x%x\n",
+			templateName, hWndParent, lpDialogFunc, dlgHwnd)
+
+		// Send WM_INITDIALOG for modeless dialog (not modal - return HWND immediately after)
+		if lpDialogFunc != 0 {
+			dispatchWmInitDialog(ctx, dlgHwnd, lpDialogFunc, dwInitParam, false)
+			// dispatchWmInitDialog sets ReturnOverridden; set return value to dlgHwnd
+			// via the syncStack frame's hwnd field (it gets returned after WM_INITDIALOG)
+			if len(hctx.SyncStack) > 0 {
+				hctx.SyncStack[len(hctx.SyncStack)-1].hwnd = dlgHwnd
+			}
+			return 0
+		}
+		ctx.SetReturn(dlgHwnd)
 		return 0
 	})
+
+	d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamW", func(ctx *ntapi.TrapContext) uint32 {
+		hWndParent := ctx.Arg(2)
+		lpDialogFunc := ctx.Arg(3)
+		dwInitParam := ctx.Arg(4)
+		pTemplate := ctx.Arg(1)
+
+		dlgHwnd := hwndAlloc()
+		cs := &controlState{
+			className:  "dialog",
+			parentHWND: hWndParent,
+			visible:    true,
+		}
+		hwndChildren[dlgHwnd] = cs
+
+		if pTemplate != 0 {
+			raw, err := mem.ReadBytes(pTemplate, 65536)
+			if err == nil {
+				if info, err2 := parseDLGTEMPLATE(raw); err2 == nil {
+					cs.w = int32(info.cx) * 2
+					cs.h = int32(info.cy) * 2
+					cs.text = info.title
+					if info.title != "" {
+						hwndTitle[dlgHwnd] = info.title
+					}
+					createDlgControls(dlgHwnd, info)
+				}
+			}
+		}
+		if lpDialogFunc != 0 {
+			hwndWndProc[dlgHwnd] = lpDialogFunc
+			dispatchWmInitDialog(ctx, dlgHwnd, lpDialogFunc, dwInitParam, false)
+			if len(hctx.SyncStack) > 0 {
+				hctx.SyncStack[len(hctx.SyncStack)-1].hwnd = dlgHwnd
+			}
+			return 0
+		}
+		ravelog.Logf("[dialog] CreateDialogIndirectParamW → hwnd=0x%x\n", dlgHwnd)
+		ctx.SetReturn(dlgHwnd)
+		return 0
+	})
+
 	d.RegisterAutoStubHandler(user32, "EndDialog", func(ctx *ntapi.TrapContext) uint32 {
 		// BOOL EndDialog(HWND hDlg, INT_PTR nResult)
-		// ReactOS: win32ss/user/user32/windows/dialog.c
 		hDlg := ctx.Arg(0)
 		nResult := ctx.Arg(1)
 		ravelog.Logf("[dialog] EndDialog hwnd=0x%x result=%d\n", hDlg, nResult)
-		// Mark dialog as not visible, clean up
+
+		// Hide the dialog and remove its children
 		if cs, ok := hwndChildren[hDlg]; ok {
 			cs.visible = false
 		}
+
+		// Search for a matching pending modal dialog entry.
+		for i := len(modalDialogStack) - 1; i >= 0; i-- {
+			entry := modalDialogStack[i]
+			if entry.hwnd != hDlg {
+				continue
+			}
+			// Found. Remove from stack (all entries at or above i are completed).
+			modalDialogStack = modalDialogStack[:i]
+
+			// Clear any pending SyncStack frames - we are performing a longjmp.
+			hctx.SyncStack = hctx.SyncStack[:0]
+
+			// Perform longjmp: push the original DialogBoxParamW return address
+			// onto the guest stack at retRSP-8, set RSP, then RET via the
+			// SyncTrampoline's lone RET byte (offset +15).
+			rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+			if !ok {
+				ctx.SetReturn(1)
+				return 0
+			}
+			rsp := entry.retRSP - 8
+			mem.Write64(rsp, entry.retAddr)
+			rw.WriteReg(4, rsp)
+			ctx.SetReturn(nResult)
+			ctx.CPU.SetPC(hctx.SyncTrampoline + 15) // the 0xC3 (RET) byte
+			ctx.ReturnOverridden = true
+			return 0
+		}
+
+		// No matching modal dialog - modeless case, just return TRUE.
 		ctx.SetReturn(1)
 		return 0
 	})

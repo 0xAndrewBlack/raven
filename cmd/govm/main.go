@@ -5430,7 +5430,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		retAddr := frame.retAddr
 		hwnd := frame.hwnd
 		returnWndProcResult := frame.returnWndProcResult
+		isModal := frame.IsModalDialog
 		hctx.SyncStack = hctx.SyncStack[:len(hctx.SyncStack)-1]
+
+		// Modal-dialog redirect: after WM_INITDIALOG, re-enter the message loop
+		// instead of returning immediately to DialogBoxParamW's call site.
+		// EndDialog will later trigger the actual return via a stack unwind.
+		if isModal {
+			if msgLoopSP != 0 && msgLoopPC != 0 {
+				rsp := msgLoopSP - 8
+				mem.Write64(rsp, msgLoopPC)
+				rw.WriteReg(4, rsp)
+				ctx.SetReturn(0)
+				return 0
+			}
+			// Message loop not yet entered - fall through and return IDCANCEL.
+		}
 
 		rsp := rr.ReadReg(4) // RSP
 		rsp -= 8

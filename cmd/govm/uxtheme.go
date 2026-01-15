@@ -766,7 +766,6 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		return themeColors.ButtonFace
 	}
 	defaultThemeInt := func() uint32 { return 0 }
-	defaultThemeMetric := func() uint32 { return 20 }
 	defaultThemeSize := func(className string, partID int32) (int32, int32) { return themePartSize(className, partID) }
 	defaultTextRect := func(text string) (int32, int32, int32, int32) {
 		width := int32(len([]rune(text)) * 8)
@@ -1030,8 +1029,20 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeMetric", func(ctx *ntapi.TrapContext) uint32 {
+		iPropId := uint32(ctx.Arg(4))
 		if pValue := ctx.Arg(5); pValue != 0 {
-			mem.Write32(pValue, defaultThemeMetric())
+			switch iPropId {
+			case 2403: // TMT_BORDERSIZE
+				mem.Write32(pValue, 1)
+			case 3801: // TMT_BORDERCOLOR
+				mem.Write32(pValue, 0x00A0A0A0)
+			case 2411: // TMT_ROUNDCORNERWIDTH
+				mem.Write32(pValue, 2)
+			case 2412: // TMT_ROUNDCORNERHEIGHT
+				mem.Write32(pValue, 2)
+			default:
+				mem.Write32(pValue, 0)
+			}
 		}
 		ctx.SetReturn(sOK)
 		return 0

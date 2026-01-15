@@ -158,6 +158,12 @@ type syncDispatchFrame struct {
 	retAddr             uint64
 	hwnd                uint64
 	returnWndProcResult bool
+	// IsModalDialog: when true the trampoline redirects to the message loop
+	// after the WM_INITDIALOG dispatch completes (instead of returning to the
+	// DialogBoxParamW call site immediately).  The actual return is triggered
+	// later by EndDialog via a stack-unwind (longjmp-style).
+	IsModalDialog bool
+	ModalDlgHwnd  uint64
 }
 
 type freeBlock struct {
