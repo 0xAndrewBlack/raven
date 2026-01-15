@@ -1185,24 +1185,60 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hInst := ctx.Arg(0)
 		nameArg := ctx.Arg(1)
 		imgType := ctx.Arg(2)
-		// IMAGE_BITMAP=0: try to load from PE resource
-		if imgType == 0 && nameArg < 0x10000 && mainModule != nil &&
-			(hInst == mainModule.BaseAddr || hInst == 0) {
-			resID := uint32(nameArg)
-			addr, sz, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2 /*RT_BITMAP*/, resID)
-			if ok2 {
-				slots := decodeDIBSlots(addr, sz, 0, 0)
-				h := hctx.NextBitmapHandle
-				hctx.NextBitmapHandle += 2
-				bd := &bitmapHandleData{slots: slots}
-				if len(slots) > 0 {
-					bd.w = len(slots[0])
+		// cxDesired := int32(ctx.Arg(3))
+		// cyDesired := int32(ctx.Arg(4))
+		fuLoad := ctx.Arg(5)
+		_ = fuLoad
+
+		fromModule := mainModule != nil && (hInst == mainModule.BaseAddr || hInst == 0)
+		isIntResource := nameArg < 0x10000
+
+		switch imgType {
+		case 0: // IMAGE_BITMAP
+			if isIntResource && fromModule {
+				resID := uint32(nameArg)
+				addr, sz, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2 /*RT_BITMAP*/, resID)
+				if ok2 {
+					slots := decodeDIBSlots(addr, sz, 0, 0)
+					h := hctx.NextBitmapHandle
+					hctx.NextBitmapHandle += 2
+					bd := &bitmapHandleData{slots: slots}
+					if len(slots) > 0 {
+						bd.w = len(slots[0])
+					}
+					bitmapHandles[h] = bd
+					ravelog.Logf("[loadimage] LoadImageW IMAGE_BITMAP resID=0x%x → handle=0x%x slots=%d\n", resID, h, len(slots))
+					ctx.SetReturn(h)
+					return 0
 				}
-				bitmapHandles[h] = bd
-				ravelog.Logf("[loadimage] LoadImageW IMAGE_BITMAP resID=0x%x → handle=0x%x slots=%d\n", resID, h, len(slots))
-				ctx.SetReturn(h)
+			}
+		case 1: // IMAGE_ICON
+			if isIntResource && fromModule {
+				resID := uint32(nameArg)
+				_, _, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 14 /*RT_GROUP_ICON*/, resID)
+				if ok2 {
+					ctx.SetReturn(0x00020000 + uint64(resID))
+					return 0
+				}
+				_, _, ok3 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 3 /*RT_ICON*/, resID)
+				if ok3 {
+					ctx.SetReturn(0x00020000 + uint64(resID))
+					return 0
+				}
+			}
+			if hInst == 0 && isIntResource && nameArg >= 32512 && nameArg <= 32522 {
+				ctx.SetReturn(0x00020000 + nameArg) // system icon
 				return 0
 			}
+			ctx.SetReturn(0x00020001) // dummy icon
+			return 0
+		case 2: // IMAGE_CURSOR
+			if hInst == 0 && isIntResource && nameArg >= 32512 {
+				ctx.SetReturn(0x00010000 + nameArg) // system cursor
+				return 0
+			}
+			ctx.SetReturn(0x00010001) // dummy cursor
+			return 0
 		}
 		ctx.SetReturn(0x00030001) // fallback dummy handle
 		return 0

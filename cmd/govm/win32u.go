@@ -831,10 +831,23 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
+		pixSize := f.Height
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
 		for i := first; i <= last && pBuf != 0; i++ {
 			off := pBuf + uint64(i-first)*12
+			w := f.AveCharWidth
+			if f.FaceID >= 0 {
+				if g := gdi.GlyphFor(f.FaceID, pixSize, rune(i)); g != nil && g.Advance > 0 {
+					w = g.Advance
+				}
+			}
 			ctx.Mem.Write32(off, 0)
-			ctx.Mem.Write32(off+4, uint32(f.AveCharWidth))
+			ctx.Mem.Write32(off+4, uint32(w))
 			ctx.Mem.Write32(off+8, 0)
 		}
 		ctx.SetReturn(1)
@@ -853,8 +866,21 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
+		pixSize := f.Height
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
 		for i := first; i <= last && pBuf != 0; i++ {
-			ctx.Mem.Write32(pBuf+uint64(i-first)*4, uint32(f.AveCharWidth))
+			w := f.AveCharWidth
+			if f.FaceID >= 0 {
+				if g := gdi.GlyphFor(f.FaceID, pixSize, rune(i)); g != nil && g.Advance > 0 {
+					w = g.Advance
+				}
+			}
+			ctx.Mem.Write32(pBuf+uint64(i-first)*4, uint32(w))
 		}
 		ctx.SetReturn(1)
 		return 0
