@@ -77,17 +77,17 @@ func CallDllMain(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline, dllB
 	savedRIP := cpu.GetPC()
 
 	// Set up Windows x64 calling convention
-	rw.WriteReg(regRCX, dllBase)       // hinstDLL
+	rw.WriteReg(regRCX, dllBase)          // hinstDLL
 	rw.WriteReg(regRDX, DllProcessAttach) // fdwReason
-	rw.WriteReg(regR8, 0)              // lpvReserved
+	rw.WriteReg(regR8, 0)                 // lpvReserved
 
 	// Simulate a CALL to entryPoint: allocate shadow space, then push return addr.
 	// Windows x64 ABI: caller's RSP is 16-byte aligned, caller allocates 32-byte
 	// shadow space, then CALL pushes the return address (RSP becomes aligned-8).
 	sp := cpu.GetSP()
 	sp &= ^uint64(0xF) // ensure 16-byte aligned before "call"
-	sp -= 32            // shadow space (32 bytes for 4 register args)
-	sp -= 8             // CALL pushes return address
+	sp -= 32           // shadow space (32 bytes for 4 register args)
+	sp -= 8            // CALL pushes return address
 	mem.Write64(sp, trampoline.Addr)
 	cpu.SetSP(sp)
 

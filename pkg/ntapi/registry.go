@@ -10,15 +10,15 @@ import (
 
 // Registry value types.
 const (
-	RegNone              uint32 = 0
-	RegSZ                uint32 = 1  // null-terminated UTF-16LE string
-	RegExpandSZ          uint32 = 2  // expandable string
-	RegBinary            uint32 = 3  // binary data
-	RegDWORD             uint32 = 4  // 32-bit integer
-	RegDWORDBigEndian    uint32 = 5
-	RegLink              uint32 = 6
-	RegMultiSZ           uint32 = 7  // double-null-terminated string list
-	RegQWORD             uint32 = 11 // 64-bit integer
+	RegNone           uint32 = 0
+	RegSZ             uint32 = 1 // null-terminated UTF-16LE string
+	RegExpandSZ       uint32 = 2 // expandable string
+	RegBinary         uint32 = 3 // binary data
+	RegDWORD          uint32 = 4 // 32-bit integer
+	RegDWORDBigEndian uint32 = 5
+	RegLink           uint32 = 6
+	RegMultiSZ        uint32 = 7  // double-null-terminated string list
+	RegQWORD          uint32 = 11 // 64-bit integer
 )
 
 // RegistryValue holds a single registry value.

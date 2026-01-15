@@ -323,6 +323,9 @@ func (d *Dispatcher) RegisterDynamicHandler(mem *mmu.MMU, synth *SynthPE, funcNa
 // Handle is the vmcall trap entry point, called by the CPU emulator.
 func (d *Dispatcher) Handle(cpu arch.CPU) {
 	d.ctx.CPU = cpu
+	if setter, ok := any(d.ctx).(interface{ SetCurrentCPU(arch.CPU) }); ok {
+		setter.SetCurrentCPU(cpu)
+	}
 	syscallID := uint32(cpu.SyscallNum()) // EAX contains the syscall ID
 
 	handler, ok := d.handlers[syscallID]

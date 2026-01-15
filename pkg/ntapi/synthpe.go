@@ -24,9 +24,9 @@ type SynthPE struct {
 	Name       string
 	BaseAddr   uint64
 	ImageSize  uint64
-	Exports    map[string]uint64  // name → guest address of stub
-	StubIDs    map[uint64]uint32  // guest address → syscall ID
-	ExportOrds map[uint16]uint64  // export ordinal → guest address of stub
+	Exports    map[string]uint64 // name → guest address of stub
+	StubIDs    map[uint64]uint32 // guest address → syscall ID
+	ExportOrds map[uint16]uint64 // export ordinal → guest address of stub
 }
 
 // AddDynamicExport allocates a new trap stub in guest memory and
@@ -1074,8 +1074,8 @@ var win32uExports = []string{
 
 const (
 	// Syscall ID ranges
-	ntapiIDBase  = 0x0000 // NtXxx/RtlXxx syscalls: 0x0000-0x0FFF
-	win32uIDBase = 0x1000 // NtUser*/NtGdi* syscalls: 0x1000-0x1FFF
+	ntapiIDBase     = 0x0000 // NtXxx/RtlXxx syscalls: 0x0000-0x0FFF
+	win32uIDBase    = 0x1000 // NtUser*/NtGdi* syscalls: 0x1000-0x1FFF
 	AutoSynthIDBase = 0x2000 // auto-generated stub DLLs: 0x2000-0xFFDD
 
 	// DynExportIDBase is the starting ID for dynamically added exports
@@ -1136,7 +1136,7 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 
 	// --- Write minimal PE headers ---
 	// DOS header
-	mem.Write16(baseAddr, 0x5A4D) // "MZ"
+	mem.Write16(baseAddr, 0x5A4D)    // "MZ"
 	mem.Write32(baseAddr+0x3C, 0x80) // e_lfanew
 
 	// PE signature
@@ -1144,26 +1144,26 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 
 	// COFF header (20 bytes at offset 0x84)
 	coff := baseAddr + 0x84
-	mem.Write16(coff+0, 0x8664) // Machine = AMD64
-	mem.Write16(coff+2, 2)      // NumberOfSections (.text, .edata)
-	mem.Write16(coff+16, 0xF0)  // SizeOfOptionalHeader
+	mem.Write16(coff+0, 0x8664)  // Machine = AMD64
+	mem.Write16(coff+2, 2)       // NumberOfSections (.text, .edata)
+	mem.Write16(coff+16, 0xF0)   // SizeOfOptionalHeader
 	mem.Write16(coff+18, 0x2022) // Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE | DLL
 
 	// Optional header (PE32+ at offset 0x98)
 	opt := baseAddr + 0x98
-	mem.Write16(opt+0, 0x020B)           // Magic = PE32+
-	mem.Write32(opt+16, uint32(textRVA)) // AddressOfEntryPoint (dummy)
-	mem.Write64(opt+24, baseAddr)        // ImageBase
-	mem.Write32(opt+32, 0x1000)          // SectionAlignment
-	mem.Write32(opt+36, 0x200)           // FileAlignment
-	mem.Write16(opt+40, 6)               // MajorOperatingSystemVersion
-	mem.Write16(opt+42, 0)               // MinorOperatingSystemVersion
-	mem.Write16(opt+48, 6)               // MajorSubsystemVersion
-	mem.Write32(opt+56, uint32(sizeOfImage))  // SizeOfImage
-	mem.Write32(opt+60, uint32(headerSize))   // SizeOfHeaders
-	mem.Write16(opt+68, 3)               // Subsystem = WINDOWS_CUI
-	mem.Write16(opt+70, 0x0160)          // DllCharacteristics (DYNAMIC_BASE | NX_COMPAT | HIGH_ENTROPY_VA)
-	mem.Write32(opt+108, 16)             // NumberOfRvaAndSizes
+	mem.Write16(opt+0, 0x020B)               // Magic = PE32+
+	mem.Write32(opt+16, uint32(textRVA))     // AddressOfEntryPoint (dummy)
+	mem.Write64(opt+24, baseAddr)            // ImageBase
+	mem.Write32(opt+32, 0x1000)              // SectionAlignment
+	mem.Write32(opt+36, 0x200)               // FileAlignment
+	mem.Write16(opt+40, 6)                   // MajorOperatingSystemVersion
+	mem.Write16(opt+42, 0)                   // MinorOperatingSystemVersion
+	mem.Write16(opt+48, 6)                   // MajorSubsystemVersion
+	mem.Write32(opt+56, uint32(sizeOfImage)) // SizeOfImage
+	mem.Write32(opt+60, uint32(headerSize))  // SizeOfHeaders
+	mem.Write16(opt+68, 3)                   // Subsystem = WINDOWS_CUI
+	mem.Write16(opt+70, 0x0160)              // DllCharacteristics (DYNAMIC_BASE | NX_COMPAT | HIGH_ENTROPY_VA)
+	mem.Write32(opt+108, 16)                 // NumberOfRvaAndSizes
 
 	// Export directory entry in DataDirectory[0]
 	dataDirBase := opt + 112
@@ -1184,10 +1184,10 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 	// .edata section
 	secBase2 := secBase + 40
 	writeSectionName(mem, secBase2, ".edata")
-	mem.Write32(secBase2+8, edataSize)          // VirtualSize
-	mem.Write32(secBase2+12, uint32(edataRVA))  // VirtualAddress
-	mem.Write32(secBase2+16, edataSize)          // SizeOfRawData
-	mem.Write32(secBase2+20, uint32(edataRVA))  // PointerToRawData
+	mem.Write32(secBase2+8, edataSize)         // VirtualSize
+	mem.Write32(secBase2+12, uint32(edataRVA)) // VirtualAddress
+	mem.Write32(secBase2+16, edataSize)        // SizeOfRawData
+	mem.Write32(secBase2+20, uint32(edataRVA)) // PointerToRawData
 	mem.Write32(secBase2+36, imageScnMemRead)
 
 	// --- Write .text section: trap stubs ---
@@ -1217,9 +1217,9 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 
 	// IMAGE_EXPORT_DIRECTORY
 	mem.Write32(exportDir+12, uint32(edataRVA+40+uint64(numExports)*10)) // Name RVA (DLL name, placed after tables)
-	mem.Write32(exportDir+16, 0)            // OrdinalBase
-	mem.Write32(exportDir+20, numExports)   // NumberOfFunctions
-	mem.Write32(exportDir+24, numExports)   // NumberOfNames
+	mem.Write32(exportDir+16, 0)                                         // OrdinalBase
+	mem.Write32(exportDir+20, numExports)                                // NumberOfFunctions
+	mem.Write32(exportDir+24, numExports)                                // NumberOfNames
 	mem.Write32(exportDir+28, uint32(funcTableRVA))
 	mem.Write32(exportDir+32, uint32(nameTableRVA))
 	mem.Write32(exportDir+36, uint32(ordTableRVA))
