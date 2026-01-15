@@ -292,6 +292,7 @@ type comState struct {
 	heapAlloc           func(uint64, bool) uint64
 	heapFree            func(uint64)
 	regHive             *ntapi.RegistryHive
+	hctx                *HandlerCtx
 	progIDs             map[string]GUID
 	errorInfo           uint64
 }
@@ -312,6 +313,7 @@ func newCOMState(hctx *HandlerCtx) *comState {
 		heapAlloc:           hctx.HeapAlloc,
 		heapFree:            hctx.HeapFree,
 		regHive:             hctx.RegHive,
+		hctx:                hctx,
 		progIDs:             make(map[string]GUID),
 	}
 	cs.classFactories[CLSID_StdComponentCategoriesMgr] = &classFactory{
@@ -345,6 +347,7 @@ func newCOMState(hctx *HandlerCtx) *comState {
 		},
 	}
 	registerMSXMLClassFactories(cs)
+	registerWICClassFactories(cs)
 	return cs
 }
 
@@ -2046,6 +2049,17 @@ func (cs *comState) release(obj *comObject) uint32 {
 			if data.deleteOnRelease && data.path != "" {
 				_ = os.RemoveAll(data.path)
 			}
+		case *wicStream:
+			switch s := data.data.(type) {
+			case *memStream:
+				if s.buffer != nil {
+					s.buffer.release(cs.mem)
+				}
+			case *fileStream:
+				if s.file != nil {
+					_ = s.file.Close()
+				}
+			}
 		case *dsBuffer:
 			data.mu.Lock()
 			data.cleanupPendingLock(cs.mem)
@@ -3405,6 +3419,20 @@ func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uin
 		return cs.dispatchXMLNamedNodeMap(ctx, obj, method)
 	case "xml-parse-error":
 		return cs.dispatchXMLParseError(ctx, obj, method)
+	case "wic-factory":
+		return cs.dispatchWICFactory(ctx, obj, method)
+	case "wic-decoder":
+		return cs.dispatchWICDecoder(ctx, obj, method)
+	case "wic-frame":
+		return cs.dispatchWICFrame(ctx, obj, method)
+	case "wic-format-converter":
+		return cs.dispatchWICFormatConverter(ctx, obj, method)
+	case "wic-bitmap":
+		return cs.dispatchWICBitmap(ctx, obj, method)
+	case "wic-stream":
+		return cs.dispatchWICStream(ctx, obj, method)
+	case "wic-component-info":
+		return cs.dispatchWICComponentInfo(ctx, obj, method)
 	default:
 		return E_NOTIMPL
 	}

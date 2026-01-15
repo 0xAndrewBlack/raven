@@ -2373,6 +2373,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- oleacc.dll / uiautomationcore.dll ---
 	delayReg(func() { registerOleaccHandlers(hctx) })
 
+	// --- windowscodecs.dll ---
+	delayReg(func() { registerWindowsCodecsHandlers(hctx) })
+
 	// Message queue for synthetic messages (WM_CREATE, WM_SIZE, etc.)
 	// hctx.MsgQueue: hctx.MsgQueue already nil
 	// Tracks non-empty update regions per HWND.
