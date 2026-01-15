@@ -14,6 +14,10 @@ type DC struct {
 	IsScreen bool
 	Dirty    bool
 
+	// Mgr is set for screen DCs so that target() always returns the live
+	// Manager.Screen even after a Wayland buffer resize replaces the mmap.
+	Mgr *Manager
+
 	// DC origin offset (GreSetDCOrg / SetViewportOrgEx).
 	// All logical coordinates are translated by this offset before rendering.
 	OriginX, OriginY int32
@@ -328,7 +332,12 @@ func (dc *DC) clipRect(x0, y0, x1, y1 int32) (int32, int32, int32, int32, bool) 
 }
 
 // target returns the Surface to draw on (nil-safe; returns a dummy if unset).
+// For screen DCs, it always fetches the live Manager.Screen so that buffer
+// replacements after a Wayland resize are picked up without re-allocating DCs.
 func (dc *DC) target() *Surface {
+	if dc.IsScreen && dc.Mgr != nil && dc.Mgr.Screen != nil {
+		return dc.Mgr.Screen
+	}
 	if dc.Target != nil {
 		return dc.Target
 	}

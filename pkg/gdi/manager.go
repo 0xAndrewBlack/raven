@@ -102,6 +102,7 @@ func (m *Manager) initStock() {
 // AllocScreenDC creates a screen-target DC wrapping the current Screen surface.
 func (m *Manager) AllocScreenDC() (uint64, *DC) {
 	dc := NewScreenDC(m.Screen)
+	dc.Mgr = m // live screen lookup - survives Wayland buffer resizes
 	h := m.alloc()
 	m.dcs[h] = dc
 	return h, dc

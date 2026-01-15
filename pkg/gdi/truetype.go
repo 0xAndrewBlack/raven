@@ -249,7 +249,7 @@ func (fc *FontCache) GetGlyph(faceID int, size int32, r rune) *GlyphImage {
 	}
 	opts := &opentype.FaceOptions{
 		Size:    float64(size),
-		DPI:     96,
+		DPI:     72, // Size is already in pixels: pixels = pts * DPI/72 = size * 72/72 = size
 		Hinting: font.HintingFull,
 	}
 	fr, err := opentype.NewFace(face, opts)
@@ -375,7 +375,7 @@ func FaceMetrics(faceID int, size int32) (cellH, asc, desc, aveW int32) {
 	if size <= 0 {
 		size = 12
 	}
-	opts := &opentype.FaceOptions{Size: float64(size), DPI: 96, Hinting: font.HintingFull}
+	opts := &opentype.FaceOptions{Size: float64(size), DPI: 72, Hinting: font.HintingFull}
 	fr, err := opentype.NewFace(face, opts)
 	if err != nil {
 		return fontCharH, 13, 3, fontCharW
