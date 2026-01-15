@@ -28,6 +28,7 @@ import (
 	gosyscall "github.com/mirkobrombin/Raven/pkg/syscall"
 	"github.com/mirkobrombin/Raven/pkg/thread"
 	"github.com/mirkobrombin/Raven/pkg/vfs"
+	comctl32 "github.com/mirkobrombin/Raven/pkg/comctl32"
 	"github.com/mirkobrombin/Raven/pkg/win32"
 	"github.com/mirkobrombin/Raven/pkg/win32k"
 	"github.com/mirkobrombin/Raven/pkg/wl"
@@ -2467,15 +2468,53 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		dc.Font = f
 		dc.TextColor = fg
 		dc.BkColor = bg
-		// Fill background if opaque
+		// Fill background if opaque - use real glyph widths
 		if opaque {
-			runes := []rune(text)
-			tw := int32(len(runes)) * f.AveCharWidth
+			tw := int32(0)
+			pixSize := size
+			if pixSize < 0 {
+				pixSize = -pixSize
+			}
+			if pixSize == 0 {
+				pixSize = 12
+			}
+			for _, r := range text {
+				if g := gdi.GlyphFor(f.FaceID, pixSize, r); g != nil {
+					tw += g.Advance
+				} else {
+					tw += f.AveCharWidth
+				}
+			}
 			dc.FillRect(x, y, x+tw, y+f.CellHeight, bg)
 		}
 		dc.TextOut(x, y, text, opaque)
 		gdiMgr.DeleteDC(h)
 	}
+
+	// Wire real glyph-based text measurement for menu layout.
+	hctx.MeasureNcText = func(text string, size int32) int32 {
+		f := hctx.NcTextFont(size)
+		if f == nil || f.FaceID < 0 {
+			return int32(len([]rune(text))) * 7
+		}
+		pixSize := size
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
+		w := int32(0)
+		for _, r := range text {
+			if g := gdi.GlyphFor(f.FaceID, pixSize, r); g != nil {
+				w += g.Advance
+			} else {
+				w += f.AveCharWidth
+			}
+		}
+		return w
+	}
+	menuTextMeasure = hctx.MeasureNcText
 
 	hctx.DrawMenuOverlay = func() {
 		if wlWindow == nil {
@@ -4570,7 +4609,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 						drawBtn(x, cs.y+padY, btnW, btnH)
 						// Draw icon if available
-						iconIdx := -1
+						iconIdx := btn.iBitmap
 						iconW := int(cs.tbBitmapIconW)
 						iconH := int(cs.tbBitmapIconH)
 						if iconW <= 0 {
@@ -4585,21 +4624,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							offY := cs.y + padY + (btnH-int32(iconH))/2
 							winW := int(wlWindow.Width)
 							winH := int(wlWindow.Height + wlWindow.TitleBarH)
-							maskColor := uint32(0x00FF00FF) // magenta = transparent
 							for py := 0; py < iconH; py++ {
 								for px := 0; px < iconW; px++ {
-									c := pix[py*iconW+px]
-									if c == maskColor {
-										continue
+									idx := py*iconW + px
+									if idx >= len(pix) {
+										break
+									}
+									c := pix[idx]
+									a := byte(c >> 24)
+									if a == 0 {
+										continue // fully transparent
 									}
 									sx := int(offX) + px
 									sy := int(offY) + py
 									if sx >= 0 && sy >= 0 && sx < winW && sy < winH {
 										base := (sy*winW + sx) * 4
-										wlWindow.Pix[base+0] = byte(c & 0xFF)         // B
-										wlWindow.Pix[base+1] = byte((c >> 8) & 0xFF)  // G
-										wlWindow.Pix[base+2] = byte((c >> 16) & 0xFF) // R
-										wlWindow.Pix[base+3] = 0xFF
+										if a == 0xFF {
+											wlWindow.Pix[base+0] = byte(c & 0xFF)
+											wlWindow.Pix[base+1] = byte((c >> 8) & 0xFF)
+											wlWindow.Pix[base+2] = byte((c >> 16) & 0xFF)
+											wlWindow.Pix[base+3] = 0xFF
+										} else {
+											// Alpha blend: dst = src*a + dst*(1-a)
+											sa := uint32(a)
+											da := 255 - sa
+											wlWindow.Pix[base+0] = byte((uint32(byte(c&0xFF))*sa + uint32(wlWindow.Pix[base+0])*da) / 255)
+											wlWindow.Pix[base+1] = byte((uint32(byte((c>>8)&0xFF))*sa + uint32(wlWindow.Pix[base+1])*da) / 255)
+											wlWindow.Pix[base+2] = byte((uint32(byte((c>>16)&0xFF))*sa + uint32(wlWindow.Pix[base+2])*da) / 255)
+											wlWindow.Pix[base+3] = 0xFF
+										}
 									}
 								}
 							}
@@ -4747,9 +4800,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						fsStyle = stateBytes[1]
 					}
 					tb.buttons = append(tb.buttons, tbButton{
-						id:    int(int32(idCommandV)),
-						state: int(fsState),
-						style: int(fsStyle),
+						id:      int(int32(idCommandV)),
+						iBitmap: int(int32(iBitmapV)),
+						state:   int(fsState),
+						style:   int(fsStyle),
 					})
 					if i < 5 { // log first few to avoid spam
 						ravelog.Logf("[toolbar] TB_ADDBUTTONSW[%d] iBitmap=%d idCmd=0x%x state=0x%x style=0x%x\n", i, iBitmapV, idCommandV, fsState, fsStyle)
@@ -4763,6 +4817,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if lParam == 0 {
 					return 0, true
 				}
+				iBitmapV, _ := mem.Read32(lParam)
 				idCommandV, _ := mem.Read32(lParam + 4)
 				stateBytes, _ := mem.ReadBytes(lParam+8, 2)
 				fsState, fsStyle := byte(0), byte(0)
@@ -4770,7 +4825,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					fsState = stateBytes[0]
 					fsStyle = stateBytes[1]
 				}
-				btn := tbButton{id: int(int32(idCommandV)), state: int(fsState), style: int(fsStyle)}
+				btn := tbButton{id: int(int32(idCommandV)), iBitmap: int(int32(iBitmapV)), state: int(fsState), style: int(fsStyle)}
 				if idx < 0 || idx > len(tb.buttons) {
 					idx = len(tb.buttons)
 				}
@@ -4822,9 +4877,53 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 36: // TB_SETMAXTEXTROWS
 				return 1, true
 			case wmUser + 70: // TB_SETIMAGELIST
-				return 0, true
+				old := cs.tbImageList
+				cs.tbImageList = lParam
+				// Import images from ImageList into tbBitmapStore for rendering
+				if lParam != 0 {
+					count := int(comctl32.ImageListGetImageCount(lParam))
+					cx, cy, ok := comctl32.ImageListGetIconSize(lParam)
+					if ok && cx > 0 && cy > 0 {
+						cs.tbBitmapIconW = cx
+						cs.tbBitmapIconH = cy
+					}
+					for i := 0; i < count; i++ {
+						pix, _, hasAlpha, ok := comctl32.ImageListGetImage(lParam, int32(i))
+						if !ok || len(pix) == 0 {
+							cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
+							continue
+						}
+						iw := int(cs.tbBitmapIconW)
+						ih := int(cs.tbBitmapIconH)
+						if iw <= 0 {
+							iw = 16
+						}
+						if ih <= 0 {
+							ih = 16
+						}
+						row := make([]uint32, iw*ih)
+						for py := 0; py < ih; py++ {
+							for px := 0; px < iw; px++ {
+								off := (py*iw + px) * 4
+								if off+3 >= len(pix) {
+									break
+								}
+								b, g, r, a := pix[off], pix[off+1], pix[off+2], pix[off+3]
+								if hasAlpha && a == 0 {
+									row[py*iw+px] = 0x00FF00FF // magenta = transparent
+								} else {
+									row[py*iw+px] = uint32(b) | uint32(g)<<8 | uint32(r)<<16 | uint32(a)<<24
+								}
+							}
+						}
+						cs.tbBitmapStore = append(cs.tbBitmapStore, row)
+					}
+					ravelog.Logf("[toolbar] TB_SETIMAGELIST h=0x%x count=%d iconW=%d iconH=%d\n",
+						lParam, count, cs.tbBitmapIconW, cs.tbBitmapIconH)
+				}
+				return old, true
 			case wmUser + 69: // TB_GETIMAGELIST
-				return 0, true
+				return cs.tbImageList, true
 			case wmUser + 41: // TB_GETITEMRECT
 				if lParam != 0 {
 					btnIdx := int32(wParam)

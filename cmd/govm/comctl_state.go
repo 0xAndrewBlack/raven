@@ -68,11 +68,12 @@ type toolbarState struct {
 }
 
 type tbButton struct {
-	id    int
-	text  string
-	state int
-	style int
-	param uint64
+	id      int
+	iBitmap int // bitmap index in tbBitmapStore or ImageList
+	text    string
+	state   int
+	style   int
+	param   uint64
 }
 
 type tooltipState struct {
@@ -289,6 +290,7 @@ func syncToolbarCompat(cs *controlState) {
 	cs.tbButtons = make([]tbButtonData, len(cs.toolbar.buttons))
 	for i, btn := range cs.toolbar.buttons {
 		cs.tbButtons[i] = tbButtonData{
+			iBitmap:   int32(btn.iBitmap),
 			idCommand: int32(btn.id),
 			fsState:   uint8(btn.state),
 			fsStyle:   uint8(btn.style),

@@ -6616,15 +6616,15 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 			// DWORDLONG ullTotalVirtual        +40
 			// DWORDLONG ullAvailVirtual        +48
 			// DWORDLONG ullAvailExtendedVirtual +56
-			mem.Write32(pBuf+0, 64)                  // dwLength
-			mem.Write32(pBuf+4, 30)                  // dwMemoryLoad (30%)
-			mem.Write64(pBuf+8, 8*1024*1024*1024)    // ullTotalPhys = 8 GB
-			mem.Write64(pBuf+16, 6*1024*1024*1024)   // ullAvailPhys = 6 GB
-			mem.Write64(pBuf+24, 16*1024*1024*1024)  // ullTotalPageFile = 16 GB
-			mem.Write64(pBuf+32, 14*1024*1024*1024)  // ullAvailPageFile = 14 GB
-			mem.Write64(pBuf+40, 0x7FFFFFFFFFFF)     // ullTotalVirtual
-			mem.Write64(pBuf+48, 0x7FF000000000)     // ullAvailVirtual
-			mem.Write64(pBuf+56, 0)                  // ullAvailExtendedVirtual
+			mem.Write32(pBuf+0, 64)                 // dwLength
+			mem.Write32(pBuf+4, 30)                 // dwMemoryLoad (30%)
+			mem.Write64(pBuf+8, 8*1024*1024*1024)   // ullTotalPhys = 8 GB
+			mem.Write64(pBuf+16, 6*1024*1024*1024)  // ullAvailPhys = 6 GB
+			mem.Write64(pBuf+24, 16*1024*1024*1024) // ullTotalPageFile = 16 GB
+			mem.Write64(pBuf+32, 14*1024*1024*1024) // ullAvailPageFile = 14 GB
+			mem.Write64(pBuf+40, 0x7FFFFFFFFFFF)    // ullTotalVirtual
+			mem.Write64(pBuf+48, 0x7FF000000000)    // ullAvailVirtual
+			mem.Write64(pBuf+56, 0)                 // ullAvailExtendedVirtual
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0

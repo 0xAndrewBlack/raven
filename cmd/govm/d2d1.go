@@ -98,8 +98,8 @@ type d2d1RenderTarget struct {
 type d2d1SolidColorBrush struct {
 	factoryPtr uint64
 	r, g, b, a float32
-	opacity     float32
-	transform   [6]float32
+	opacity    float32
+	transform  [6]float32
 }
 
 type d2d1BitmapBrush struct {
@@ -178,10 +178,10 @@ type d2d1GeometrySink struct {
 }
 
 type d2d1Bitmap struct {
-	factoryPtr     uint64
-	width, height  uint32
-	pixels         []byte
-	stride         uint32
+	factoryPtr    uint64
+	width, height uint32
+	pixels        []byte
+	stride        uint32
 }
 
 type d2d1StrokeStyle struct {

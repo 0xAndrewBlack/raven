@@ -128,6 +128,7 @@ type controlState struct {
 	tbBitmapIconW     int32
 	tbBitmapIconH     int32
 	tbBitmapStore     [][]uint32
+	tbImageList       uint64 // HIMAGELIST from TB_SETIMAGELIST
 }
 
 type queuedMsg struct {
@@ -348,6 +349,7 @@ type HandlerCtx struct {
 	ScratchAlloc        func(uint64) uint64
 	NcTextFont          func(int32) *gdi.Font
 	NcDrawText          func(int32, int32, string, uint32, uint32, bool, int32)
+	MeasureNcText       func(string, int32) int32 // measure text width in NC font
 	DrawMenuOverlay     func()
 	DrawDialogOverlay   func()
 	CommitIfDone        func()
@@ -382,8 +384,15 @@ func menuTextParts(s string) (label, accel string) {
 	return label, accel
 }
 
+// menuTextMeasure is set at runtime to use real TrueType glyph metrics.
+// Falls back to len(rune)*7 if not set.
+var menuTextMeasure func(string, int32) int32
+
 func menuTextWidth(s string) int32 {
-	return int32(len([]rune(s)) * 8)
+	if menuTextMeasure != nil {
+		return menuTextMeasure(s, 12) // 12px = NC menu font
+	}
+	return int32(len([]rune(s)) * 7)
 }
 
 func menuPopupLayout(items []menuItem, x, y, boundW, boundH int32, stripAmp func(string) string) popupMenuState {
