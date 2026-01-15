@@ -2104,6 +2104,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 
 	// ── Create HandlerCtx (shared state for all extracted DLL handlers) ──
+	guestCallTrampoline := ntapi.AllocTrampoline(mem)
 	hctx := &HandlerCtx{
 		// Core references
 		Mem: mem, Disp: d, Handles: handles, ProcState: procState,
@@ -2140,12 +2141,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		CrtFiles:  make(map[uint64]*os.File),
 		CrtNextFP: mem.Mmap(0, 0x10000, mmu.PermRead|mmu.PermWrite),
 		// Mutable scalars (initial values)
-		MainActive:        true,
-		DelayLoadFallback: delayLoadFallback,
-		NextDelayID:       nextDelayID,
-		NextLocalAtom:     nextLocalAtom,
-		NextGlobalAtom:    nextGlobalAtom,
-		FrameCount:        frameCount,
+		MainActive:          true,
+		DelayLoadFallback:   delayLoadFallback,
+		NextDelayID:         nextDelayID,
+		NextLocalAtom:       nextLocalAtom,
+		NextGlobalAtom:      nextGlobalAtom,
+		FrameCount:          frameCount,
+		GuestCallTrampoline: guestCallTrampoline,
 	}
 	// Sync callback: when user32 creates the Wayland window, update local wlWindow
 	// so that all closures in this function (builtinWndProc, paintTree, etc.) see it.
@@ -2608,6 +2610,249 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		frameCount++
 	}
 
+	sendNotifySync := func(parentHWND uint64, msg uint32, wParam, lParam uint64) uint64 {
+		if parentHWND == 0 {
+			return 0
+		}
+		if result, handled := hctx.BuiltinWndProc(parentHWND, msg, wParam, lParam); handled {
+			return result
+		}
+		wp := hctx.HwndWndProc[parentHWND]
+		if wp == 0 || hctx.CurrentCPU == nil || hctx.GuestCallTrampoline == nil {
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{parentHWND, msg, wParam, lParam})
+			return 0
+		}
+		ret, err := ntapi.CallGuestFunction(hctx.CurrentCPU, mem, hctx.GuestCallTrampoline, wp,
+			[]uint64{parentHWND, uint64(msg), wParam, lParam}, false)
+		if err != nil {
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{parentHWND, msg, wParam, lParam})
+			return 0
+		}
+		return ret
+	}
+	writeGuestUTF16Limited := func(ptr uint64, text string, maxChars int) {
+		if ptr == 0 || maxChars <= 0 {
+			return
+		}
+		ws := utf16Encode(text)
+		limit := maxChars - 1
+		if limit < 0 {
+			limit = 0
+		}
+		if len(ws) > limit {
+			ws = ws[:limit]
+		}
+		for i, ch := range ws {
+			mem.Write16(ptr+uint64(i*2), ch)
+		}
+		mem.Write16(ptr+uint64(len(ws))*2, 0)
+	}
+	writeGuestStringLimited := func(ptr uint64, text string, maxChars int) {
+		if ptr == 0 || maxChars <= 0 {
+			return
+		}
+		buf := []byte(text)
+		limit := maxChars - 1
+		if limit < 0 {
+			limit = 0
+		}
+		if len(buf) > limit {
+			buf = buf[:limit]
+		}
+		for i, b := range buf {
+			mem.Write8(ptr+uint64(i), b)
+		}
+		mem.Write8(ptr+uint64(len(buf)), 0)
+	}
+	readTooltipText := func(ptr uint64, isWide bool) string {
+		if ptr == 0 || ptr == 0xFFFFFFFFFFFFFFFF {
+			return ""
+		}
+		if isWide {
+			return readGuestUTF16(ptr)
+		}
+		return readGuestString(ptr)
+	}
+	findTooltipIndex := func(tt *tooltipState, hwndTool, uid uint64) int {
+		if tt == nil {
+			return -1
+		}
+		for i, tool := range tt.tools {
+			if tool.hwnd == hwndTool && tool.id == uid {
+				return i
+			}
+		}
+		return -1
+	}
+	writeToolInfo := func(ptr uint64, tool tooltipTool, isWide bool) {
+		if ptr == 0 {
+			return
+		}
+		mem.Write32(ptr+4, tool.flags)
+		mem.Write64(ptr+8, tool.hwnd)
+		mem.Write64(ptr+16, tool.id)
+		mem.Write32(ptr+24, uint32(tool.rect[0]))
+		mem.Write32(ptr+28, uint32(tool.rect[1]))
+		mem.Write32(ptr+32, uint32(tool.rect[2]))
+		mem.Write32(ptr+36, uint32(tool.rect[3]))
+		pszText, _ := mem.Read64(ptr + 48)
+		cchTextMax := 260
+		if pszText != 0 {
+			if isWide {
+				writeGuestUTF16Limited(pszText, tool.text, cchTextMax)
+			} else {
+				writeGuestStringLimited(pszText, tool.text, cchTextMax)
+			}
+		}
+	}
+	parseToolInfo := func(ptr uint64, isWide bool) (tooltipTool, bool) {
+		if ptr == 0 {
+			return tooltipTool{}, false
+		}
+		flags, _ := mem.Read32(ptr + 4)
+		hwndTool, _ := mem.Read64(ptr + 8)
+		uid, _ := mem.Read64(ptr + 16)
+		left, _ := mem.Read32(ptr + 24)
+		top, _ := mem.Read32(ptr + 28)
+		right, _ := mem.Read32(ptr + 32)
+		bottom, _ := mem.Read32(ptr + 36)
+		pszText, _ := mem.Read64(ptr + 48)
+		return tooltipTool{
+			id:    uid,
+			hwnd:  hwndTool,
+			text:  readTooltipText(pszText, isWide),
+			rect:  [4]int32{int32(left), int32(top), int32(right), int32(bottom)},
+			flags: flags,
+		}, true
+	}
+	readHeaderItem := func(ptr uint64, isWide bool) headerItem {
+		item := headerItem{width: 80, order: -1, image: -1}
+		if ptr == 0 {
+			return item
+		}
+		mask, _ := mem.Read32(ptr)
+		if mask&0x0001 != 0 {
+			cxy, _ := mem.Read32(ptr + 4)
+			item.width = int32(cxy)
+		}
+		if mask&0x0002 != 0 {
+			pszText, _ := mem.Read64(ptr + 8)
+			item.text = readTooltipText(pszText, isWide)
+		}
+		if mask&0x0004 != 0 {
+			hbm, _ := mem.Read64(ptr + 16)
+			item.bitmap = hbm
+		}
+		if mask&0x0008 != 0 {
+			fmtV, _ := mem.Read32(ptr + 28)
+			item.fmt = int32(fmtV)
+		}
+		if mask&0x0010 != 0 {
+			param, _ := mem.Read64(ptr + 32)
+			item.param = param
+		}
+		if mask&0x0020 != 0 {
+			iImage, _ := mem.Read32(ptr + 40)
+			item.image = int32(iImage)
+		}
+		if mask&0x0080 != 0 {
+			iOrder, _ := mem.Read32(ptr + 44)
+			item.order = int32(iOrder)
+		}
+		if mask&0x0200 != 0 {
+			state, _ := mem.Read32(ptr + 60)
+			item.state = state
+		}
+		return item
+	}
+	writeHeaderItem := func(ptr uint64, src headerItem, isWide bool) {
+		if ptr == 0 {
+			return
+		}
+		mask, _ := mem.Read32(ptr)
+		if mask&0x0001 != 0 {
+			mem.Write32(ptr+4, uint32(src.width))
+		}
+		if mask&0x0002 != 0 {
+			pszText, _ := mem.Read64(ptr + 8)
+			cchTextMax, _ := mem.Read32(ptr + 24)
+			if isWide {
+				writeGuestUTF16Limited(pszText, src.text, int(cchTextMax))
+			} else {
+				writeGuestStringLimited(pszText, src.text, int(cchTextMax))
+			}
+		}
+		if mask&0x0004 != 0 {
+			mem.Write64(ptr+16, src.bitmap)
+		}
+		if mask&0x0008 != 0 {
+			mem.Write32(ptr+28, uint32(src.fmt))
+		}
+		if mask&0x0010 != 0 {
+			mem.Write64(ptr+32, src.param)
+		}
+		if mask&0x0020 != 0 {
+			mem.Write32(ptr+40, uint32(src.image))
+		}
+		if mask&0x0080 != 0 {
+			mem.Write32(ptr+44, uint32(src.order))
+		}
+		if mask&0x0200 != 0 {
+			mem.Write32(ptr+60, src.state)
+		}
+	}
+	listViewGetItemCount := func(lv *listViewState) int {
+		if lv == nil {
+			return 0
+		}
+		if lv.style&0x1000 != 0 {
+			return lv.virtualCount
+		}
+		return len(lv.items)
+	}
+	listViewFetchVirtualItem := func(hwnd uint64, cs *controlState, idx, subIdx int, wide bool) lvItem {
+		lv := cs.listView
+		if lv == nil {
+			return lvItem{}
+		}
+		var item lvItem
+		if idx >= 0 && idx < len(lv.items) {
+			item = lv.items[idx]
+		}
+		bufChars := 260
+		textBuf := hctx.ScratchAlloc(uint64(bufChars * 2))
+		nm := hctx.ScratchAlloc(128)
+		mem.Write64(nm, hwnd)
+		mem.Write64(nm+8, cs.ctrlID)
+		mem.Write32(nm+16, 0xFFFFFF4F)
+		base := nm + 24
+		mem.Write32(base, 0x000F)
+		mem.Write32(base+4, uint32(idx))
+		mem.Write32(base+8, uint32(subIdx))
+		mem.Write32(base+12, item.state)
+		mem.Write32(base+16, 0)
+		mem.Write64(base+20, textBuf)
+		mem.Write32(base+28, uint32(bufChars))
+		mem.Write32(base+32, uint32(item.image))
+		mem.Write64(base+40, item.param)
+		sendNotifySync(cs.parentHWND, 0x004E, uint64(cs.ctrlID), nm)
+		pszText, _ := mem.Read64(base + 20)
+		if pszText == 0 {
+			pszText = textBuf
+		}
+		if wide {
+			item.text = readGuestUTF16(pszText)
+		} else {
+			item.text = readGuestString(pszText)
+		}
+		state, _ := mem.Read32(base + 12)
+		item.state = state
+		iImage, _ := mem.Read32(base + 32)
+		item.image = int(int32(iImage))
+		item.param, _ = mem.Read64(base + 40)
+		return item
+	}
+
 	// builtinWndProc handles messages for built-in window classes (Edit, StatusBar, etc.)
 	// Returns (result, handled).
 	hctx.BuiltinWndProc = func(hwnd uint64, msg uint32, wParam, lParam uint64) (uint64, bool) {
@@ -2693,6 +2938,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					oy := gripY + (2-i)*4 + 2
 					wlWindow.DrawRectAbs(ox, oy, ox+2, oy+2, sysColors[20])
 					wlWindow.DrawRectAbs(ox+1, oy+1, ox+3, oy+3, sysColors[16])
+				}
+			case "msctls_progress32":
+				syncProgressBarCompat(cs)
+				bg := uint32(0xE6E6E6)
+				fill := uint32(0x0078D7)
+				if cs.progress != nil {
+					if cs.progress.bkColor != 0 {
+						bg = cs.progress.bkColor
+					}
+					if cs.progress.barColor != 0 {
+						fill = cs.progress.barColor
+					}
+					switch cs.progress.state {
+					case 2:
+						fill = 0xD9534F
+					case 3:
+						fill = 0xF0AD4E
+					}
+				}
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bg)
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, 0xC8C8C8)
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, 0xC8C8C8)
+				wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, 0xFFFFFF)
+				wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, 0xFFFFFF)
+				if cs.progressBarCompat != nil {
+					minV := cs.progressBarCompat.min
+					maxV := cs.progressBarCompat.max
+					posV := clampInt32(cs.progressBarCompat.pos, minV, maxV)
+					rangeV := maxV - minV
+					if rangeV <= 0 {
+						rangeV = 1
+					}
+					fillW := (cs.w - 2) * (posV - minV) / rangeV
+					if fillW < 0 {
+						fillW = 0
+					}
+					if fillW > cs.w-2 {
+						fillW = cs.w - 2
+					}
+					if fillW > 0 {
+						wlWindow.DrawRectAbs(cs.x+1, cs.y+1, cs.x+1+fillW, cs.y+cs.h-1, fill)
+					}
 				}
 			case "static":
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
@@ -2783,9 +3070,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if cs.listView != nil {
 					rowY := cs.y + 24
 					rowH := int32(18)
-					for i, item := range cs.listView.items {
+					itemCount := listViewGetItemCount(cs.listView)
+					for i := 0; i < itemCount; i++ {
 						if rowY+rowH > cs.y+cs.h-1 {
 							break
+						}
+						item := lvItem{}
+						if cs.listView.style&0x1000 != 0 {
+							item = listViewFetchVirtualItem(hwnd, cs, i, 0, true)
+						} else if i < len(cs.listView.items) {
+							item = cs.listView.items[i]
 						}
 						bg := sysColors[5]
 						if item.state&0x0002 != 0 {
@@ -2796,21 +3090,51 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if item.text != "" {
 							hctx.NcDrawText(colX, rowY+1, item.text, 0x000000, bg, true, 12)
 						}
-						for subIdx, sub := range item.subItems {
-							if subIdx+1 >= len(cs.listView.columns) {
-								break
-							}
-							width := int32(cs.listView.columns[subIdx].width)
+						colCount := len(cs.listView.columns)
+						for subIdx := 1; subIdx < colCount; subIdx++ {
+							width := int32(cs.listView.columns[subIdx-1].width)
 							if width <= 0 {
 								width = 100
 							}
 							colX += width
+							sub := ""
+							if cs.listView.style&0x1000 != 0 {
+								sub = listViewFetchVirtualItem(hwnd, cs, i, subIdx, true).text
+							} else if subIdx-1 < len(item.subItems) {
+								sub = item.subItems[subIdx-1]
+							}
 							if sub != "" {
 								hctx.NcDrawText(colX+4, rowY+1, sub, 0x000000, bg, true, 12)
 							}
 						}
-						_ = i
 						rowY += rowH
+					}
+				}
+			case "sysheader32":
+				if cs.header != nil {
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[20])
+					wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16])
+					wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[16])
+					x := cs.x
+					for i, item := range cs.header.items {
+						w := item.width
+						if w <= 0 {
+							w = 80
+						}
+						wlWindow.DrawRectAbs(x, cs.y, x+w, cs.y+cs.h, sysColors[15])
+						wlWindow.DrawRectAbs(x+w-1, cs.y+1, x+w, cs.y+cs.h-1, sysColors[16])
+						if item.text != "" {
+							hctx.NcDrawText(x+6, cs.y+4, item.text, 0x000000, sysColors[15], true, 12)
+						}
+						if int32(i) == cs.header.focusedIdx {
+							wlWindow.DrawRectAbs(x+2, cs.y+2, x+w-2, cs.y+cs.h-2, 0xBBD7F2)
+						}
+						x += w
+						if x >= cs.x+cs.w {
+							break
+						}
 					}
 				}
 			case "systabcontrol32":
@@ -3166,6 +3490,96 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 		}
 
+		if cs.className == "msctls_progress32" {
+			const wmUser = 0x0400
+			pb := cs.progress
+			switch msg {
+			case wmUser + 1: // PBM_SETRANGE
+				old := (uint64(uint16(pb.min)) << 16) | uint64(uint16(pb.max))
+				pb.min = int(int16(lParam & 0xFFFF))
+				pb.max = int(int16((lParam >> 16) & 0xFFFF))
+				if pb.max <= pb.min {
+					pb.max = pb.min + 1
+				}
+				pb.pos = int(clampInt32(int32(pb.pos), int32(pb.min), int32(pb.max)))
+				syncProgressBarCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return old, true
+			case wmUser + 2: // PBM_SETPOS
+				old := pb.pos
+				pb.pos = int(clampInt32(int32(wParam), int32(pb.min), int32(pb.max)))
+				syncProgressBarCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return uint64(old), true
+			case wmUser + 3: // PBM_DELTAPOS
+				old := pb.pos
+				pb.pos = int(clampInt32(int32(pb.pos)+int32(wParam), int32(pb.min), int32(pb.max)))
+				syncProgressBarCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return uint64(old), true
+			case wmUser + 4: // PBM_SETSTEP
+				old := pb.step
+				pb.step = int(int32(wParam))
+				syncProgressBarCompat(cs)
+				return uint64(old), true
+			case wmUser + 5: // PBM_STEPIT
+				pb.pos = int(clampInt32(int32(pb.pos)+int32(pb.step), int32(pb.min), int32(pb.max)))
+				syncProgressBarCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return uint64(pb.pos), true
+			case wmUser + 6: // PBM_SETRANGE32
+				pb.min = int(int32(wParam))
+				pb.max = int(int32(lParam))
+				if pb.max <= pb.min {
+					pb.max = pb.min + 1
+				}
+				pb.pos = int(clampInt32(int32(pb.pos), int32(pb.min), int32(pb.max)))
+				syncProgressBarCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return 1, true
+			case wmUser + 7: // PBM_GETRANGE
+				if lParam != 0 {
+					mem.Write32(lParam, uint32(int32(pb.min)))
+					mem.Write32(lParam+4, uint32(int32(pb.max)))
+				}
+				if wParam != 0 {
+					return uint64(pb.max), true
+				}
+				return uint64(pb.min), true
+			case wmUser + 8: // PBM_GETPOS
+				return uint64(pb.pos), true
+			case wmUser + 9: // PBM_SETBARCOLOR
+				old := pb.barColor
+				pb.barColor = uint32(lParam)
+				hctx.QueuePaint(hwnd)
+				return uint64(old), true
+			case wmUser + 10: // PBM_SETMARQUEE
+				pb.marquee = wParam != 0
+				cs.progressMq = pb.marquee
+				syncProgressBarCompat(cs)
+				hctx.QueuePaint(hwnd)
+				return 1, true
+			case wmUser + 13: // PBM_GETSTEP
+				return uint64(pb.step), true
+			case wmUser + 14: // PBM_GETBKCOLOR
+				return uint64(pb.bkColor), true
+			case wmUser + 15: // PBM_GETBARCOLOR
+				return uint64(pb.barColor), true
+			case wmUser + 16: // PBM_SETSTATE
+				old := pb.state
+				pb.state = int32(wParam)
+				hctx.QueuePaint(hwnd)
+				return uint64(old), true
+			case wmUser + 17: // PBM_GETSTATE
+				return uint64(pb.state), true
+			case 0x2001: // PBM_SETBKCOLOR / CCM_SETBKCOLOR
+				old := pb.bkColor
+				pb.bkColor = uint32(lParam)
+				hctx.QueuePaint(hwnd)
+				return uint64(old), true
+			}
+		}
+
 		// TreeView messages (TVM_xxx = TV_FIRST + x, TV_FIRST = 0x1100)
 		if cs.className == "systreeview32" {
 			const tvFirst = 0x1100
@@ -3423,8 +3837,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case lvFirst + 3: // LVM_SETIMAGELIST
 				return 0, true
 			case lvFirst + 4: // LVM_GETITEMCOUNT
-				return uint64(len(lv.items)), true
+				return uint64(listViewGetItemCount(lv)), true
 			case lvFirst + 7, lvFirst + 77: // LVM_INSERTITEMA/W
+				if lv.style&0x1000 != 0 {
+					return uint64(^uint32(0)), true
+				}
 				if lParam == 0 {
 					return uint64(^uint32(0)), true
 				}
@@ -3477,6 +3894,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				hctx.QueuePaint(hwnd)
 				return uint64(idx), true
 			case lvFirst + 8: // LVM_DELETEITEM
+				if lv.style&0x1000 != 0 {
+					if lv.virtualCount > 0 {
+						lv.virtualCount--
+					}
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
 				idx := int(int32(wParam))
 				if idx >= 0 && idx < len(lv.items) {
 					lv.items = append(lv.items[:idx], lv.items[idx+1:]...)
@@ -3490,10 +3914,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return 1, true
 			case lvFirst + 9: // LVM_DELETEALLITEMS
+				if lv.style&0x1000 != 0 {
+					lv.virtualCount = 0
+				}
 				lv.items = nil
 				lv.selectedIdx = -1
 				hctx.QueuePaint(hwnd)
 				return 1, true
+			case lvFirst + 47: // LVM_SETITEMCOUNT
+				if lv.style&0x1000 != 0 {
+					lv.virtualCount = int(int32(wParam))
+					if lv.virtualCount < 0 {
+						lv.virtualCount = 0
+					}
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				return 0, true
 			case lvFirst + 27: // LVM_INSERTCOLUMNA
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
@@ -3613,35 +4050,29 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				iSubItemV, _ := mem.Read32(lParam + 8)
 				idx := int(int32(iItemV))
 				subIdx := int(int32(iSubItemV))
-				if idx < 0 || idx >= len(lv.items) {
+				if idx < 0 || idx >= listViewGetItemCount(lv) {
 					return 0, true
 				}
-				item := &lv.items[idx]
+				item := lvItem{}
+				if lv.style&0x1000 != 0 {
+					item = listViewFetchVirtualItem(hwnd, cs, idx, subIdx, true)
+				} else {
+					item = lv.items[idx]
+				}
 				mask, _ := mem.Read32(lParam)
 				if mask&0x0001 != 0 {
 					pszText, _ := mem.Read64(lParam + 20)
 					cchTextMax, _ := mem.Read32(lParam + 28)
 					text := item.text
-					if subIdx > 0 && subIdx-1 < len(item.subItems) {
+					if lv.style&0x1000 == 0 && subIdx > 0 && subIdx-1 < len(item.subItems) {
 						text = item.subItems[subIdx-1]
 					}
 					if pszText != 0 && cchTextMax > 0 {
-						ws := utf16Encode(text)
-						limit := int(cchTextMax) - 1
-						if limit < 0 {
-							limit = 0
-						}
-						if len(ws) > limit {
-							ws = ws[:limit]
-						}
-						for i, ch := range ws {
-							mem.Write16(pszText+uint64(i*2), ch)
-						}
-						mem.Write16(pszText+uint64(len(ws))*2, 0)
+						writeGuestUTF16Limited(pszText, text, int(cchTextMax))
 					}
 				}
 				if mask&0x0002 != 0 {
-					mem.Write32(lParam+28, uint32(item.image))
+					mem.Write32(lParam+32, uint32(item.image))
 				}
 				if mask&0x0004 != 0 {
 					mem.Write64(lParam+40, item.param)
@@ -3651,6 +4082,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return 1, true
 			case lvFirst + 76: // LVM_SETITEMW
+				if lv.style&0x1000 != 0 {
+					return 0, true
+				}
 				if lParam == 0 {
 					return 0, true
 				}
@@ -3690,6 +4124,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				hctx.QueuePaint(hwnd)
 				return 1, true
 			case lvFirst + 50: // LVM_GETSELECTEDCOUNT
+				if lv.style&0x1000 != 0 {
+					if lv.selectedIdx >= 0 && lv.selectedIdx < lv.virtualCount {
+						return 1, true
+					}
+					return 0, true
+				}
 				count := 0
 				for _, item := range lv.items {
 					if item.state&0x0002 != 0 {
@@ -3703,7 +4143,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if start < -1 {
 					start = -1
 				}
-				for i := start + 1; i < len(lv.items); i++ {
+				limit := listViewGetItemCount(lv)
+				for i := start + 1; i < limit; i++ {
+					if lv.style&0x1000 != 0 {
+						if flags == 0 || (flags&0x0002 != 0 && lv.selectedIdx == i) {
+							return uint64(i), true
+						}
+						continue
+					}
 					if flags == 0 || (flags&0x0002 != 0 && lv.items[i].state&0x0002 != 0) {
 						return uint64(i), true
 					}
@@ -3719,6 +4166,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 1, true
 			case lvFirst + 43: // LVM_SETITEMSTATE
 				idx := int(int32(wParam))
+				if lv.style&0x1000 != 0 {
+					if idx >= 0 && idx < lv.virtualCount && lParam != 0 {
+						state, _ := mem.Read32(lParam + 12)
+						stateMask, _ := mem.Read32(lParam + 16)
+						if stateMask&0x0002 != 0 {
+							if state&0x0002 != 0 {
+								lv.selectedIdx = idx
+							} else if lv.selectedIdx == idx {
+								lv.selectedIdx = -1
+							}
+						}
+						hctx.QueuePaint(hwnd)
+					}
+					return 1, true
+				}
 				if idx >= 0 && idx < len(lv.items) && lParam != 0 {
 					state, _ := mem.Read32(lParam + 12)
 					stateMask, _ := mem.Read32(lParam + 16)
@@ -3733,6 +4195,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 1, true
 			case lvFirst + 44: // LVM_GETITEMSTATE
 				idx := int(int32(wParam))
+				if lv.style&0x1000 != 0 {
+					if idx >= 0 && idx < lv.virtualCount && lv.selectedIdx == idx {
+						return uint64(0x0002 & uint32(lParam)), true
+					}
+					return 0, true
+				}
 				if idx >= 0 && idx < len(lv.items) {
 					return uint64(lv.items[idx].state & uint32(lParam)), true
 				}
@@ -3741,6 +4209,212 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if msg >= lvFirst && msg < lvFirst+200 {
 					return 0, true
 				}
+			}
+		}
+
+		if cs.className == "sysheader32" {
+			const hdmFirst = 0x1200
+			hd := cs.header
+			switch msg {
+			case hdmFirst + 0: // HDM_GETITEMCOUNT
+				return uint64(len(hd.items)), true
+			case hdmFirst + 1, hdmFirst + 10: // HDM_INSERTITEMA/W
+				idx := int(int32(wParam))
+				if idx < 0 || idx > len(hd.items) {
+					idx = len(hd.items)
+				}
+				item := readHeaderItem(lParam, msg == hdmFirst+10)
+				if item.width <= 0 {
+					item.width = 80
+				}
+				if item.order < 0 {
+					item.order = int32(idx)
+				}
+				hd.items = append(hd.items, headerItem{})
+				copy(hd.items[idx+1:], hd.items[idx:])
+				hd.items[idx] = item
+				hctx.QueuePaint(hwnd)
+				return uint64(idx), true
+			case hdmFirst + 2: // HDM_DELETEITEM
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(hd.items) {
+					hd.items = append(hd.items[:idx], hd.items[idx+1:]...)
+					if hd.focusedIdx >= int32(len(hd.items)) {
+						hd.focusedIdx = int32(len(hd.items)) - 1
+					}
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				return 0, true
+			case hdmFirst + 3, hdmFirst + 11: // HDM_GETITEMA/W
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(hd.items) && lParam != 0 {
+					writeHeaderItem(lParam, hd.items[idx], msg == hdmFirst+11)
+					return 1, true
+				}
+				return 0, true
+			case hdmFirst + 4, hdmFirst + 12: // HDM_SETITEMA/W
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(hd.items) && lParam != 0 {
+					mask, _ := mem.Read32(lParam)
+					item := hd.items[idx]
+					patch := readHeaderItem(lParam, msg == hdmFirst+12)
+					if mask&0x0001 != 0 {
+						item.width = patch.width
+					}
+					if mask&0x0002 != 0 {
+						item.text = patch.text
+					}
+					if mask&0x0004 != 0 {
+						item.bitmap = patch.bitmap
+					}
+					if mask&0x0008 != 0 {
+						item.fmt = patch.fmt
+					}
+					if mask&0x0010 != 0 {
+						item.param = patch.param
+					}
+					if mask&0x0020 != 0 {
+						item.image = patch.image
+					}
+					if mask&0x0080 != 0 {
+						item.order = patch.order
+					}
+					if mask&0x0200 != 0 {
+						item.state = patch.state
+					}
+					hd.items[idx] = item
+					hctx.QueuePaint(hwnd)
+					return 1, true
+				}
+				return 0, true
+			case hdmFirst + 5: // HDM_LAYOUT
+				if lParam != 0 {
+					prc, _ := mem.Read64(lParam)
+					pwpos, _ := mem.Read64(lParam + 8)
+					if pwpos != 0 {
+						mem.Write64(pwpos+0, hwnd)
+						mem.Write32(pwpos+8, uint32(cs.x))
+						mem.Write32(pwpos+12, uint32(cs.y))
+						mem.Write32(pwpos+16, uint32(cs.w))
+						mem.Write32(pwpos+20, uint32(cs.h))
+						mem.Write32(pwpos+24, 0x0040) // SWP_NOZORDER
+					}
+					if prc != 0 {
+						left, _ := mem.Read32(prc)
+						top, _ := mem.Read32(prc + 4)
+						right, _ := mem.Read32(prc + 8)
+						mem.Write32(prc, left)
+						mem.Write32(prc+4, top+uint32(cs.h))
+						mem.Write32(prc+8, right)
+					}
+				}
+				return 1, true
+			case hdmFirst + 6: // HDM_HITTEST
+				if lParam == 0 {
+					return ^uint64(0), true
+				}
+				xp, _ := mem.Read32(lParam)
+				x := int32(xp)
+				cur := int32(0)
+				for i, item := range hd.items {
+					w := item.width
+					if w <= 0 {
+						w = 80
+					}
+					if x >= cur && x < cur+w {
+						mem.Write32(lParam+8, uint32(i))
+						return uint64(i), true
+					}
+					cur += w
+				}
+				mem.Write32(lParam+8, 0xFFFFFFFF)
+				return ^uint64(0), true
+			case hdmFirst + 7: // HDM_GETITEMRECT
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(hd.items) && lParam != 0 {
+					left := int32(0)
+					for i := 0; i < idx; i++ {
+						w := hd.items[i].width
+						if w <= 0 {
+							w = 80
+						}
+						left += w
+					}
+					width := hd.items[idx].width
+					if width <= 0 {
+						width = 80
+					}
+					mem.Write32(lParam, uint32(left))
+					mem.Write32(lParam+4, 0)
+					mem.Write32(lParam+8, uint32(left+width))
+					mem.Write32(lParam+12, uint32(cs.h))
+					return 1, true
+				}
+				return 0, true
+			case hdmFirst + 8: // HDM_SETIMAGELIST
+				old := hd.imageList
+				hd.imageList = lParam
+				return old, true
+			case hdmFirst + 9: // HDM_GETIMAGELIST
+				return hd.imageList, true
+			case hdmFirst + 16: // HDM_GETORDERARRAY
+				count := int(int32(wParam))
+				if lParam == 0 {
+					return 0, true
+				}
+				if count > len(hd.items) {
+					count = len(hd.items)
+				}
+				for i := 0; i < count; i++ {
+					order := hd.items[i].order
+					if order < 0 {
+						order = int32(i)
+					}
+					mem.Write32(lParam+uint64(i*4), uint32(order))
+				}
+				return 1, true
+			case hdmFirst + 17: // HDM_SETORDERARRAY
+				count := int(int32(wParam))
+				if lParam != 0 && count > 0 {
+					if count > len(hd.items) {
+						count = len(hd.items)
+					}
+					for i := 0; i < count; i++ {
+						order, _ := mem.Read32(lParam + uint64(i*4))
+						hd.items[i].order = int32(order)
+					}
+					hctx.QueuePaint(hwnd)
+				}
+				return 1, true
+			case hdmFirst + 18: // HDM_GETITEMDROPDOWNRECT
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(hd.items) && lParam != 0 {
+					left := int32(0)
+					for i := 0; i < idx; i++ {
+						w := hd.items[i].width
+						if w <= 0 {
+							w = 80
+						}
+						left += w
+					}
+					width := hd.items[idx].width
+					if width <= 0 {
+						width = 80
+					}
+					mem.Write32(lParam, uint32(left+width-16))
+					mem.Write32(lParam+4, 0)
+					mem.Write32(lParam+8, uint32(left+width))
+					mem.Write32(lParam+12, uint32(cs.h))
+					return 1, true
+				}
+				return 0, true
+			case hdmFirst + 19: // HDM_GETFOCUSEDITEM
+				return uint64(hd.focusedIdx), true
+			case hdmFirst + 20: // HDM_SETFOCUSEDITEM
+				hd.focusedIdx = int32(wParam)
+				hctx.QueuePaint(hwnd)
+				return 1, true
 			}
 		}
 
@@ -4497,8 +5171,159 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 
 		case "tooltips_class32":
-			// Tooltips: just return success for all messages
-			return 0, true
+			const wmUser = 0x0400
+			tt := cs.tooltip
+			switch msg {
+			case wmUser + 1: // TTM_ACTIVATE
+				tt.active = wParam != 0
+				return 0, true
+			case wmUser + 3: // TTM_SETDELAYTIME
+				return 0, true
+			case wmUser + 4, wmUser + 50: // TTM_ADDTOOLA/W
+				tool, ok := parseToolInfo(lParam, msg == wmUser+50)
+				if !ok {
+					return 0, true
+				}
+				if idx := findTooltipIndex(tt, tool.hwnd, tool.id); idx >= 0 {
+					tt.tools[idx] = tool
+				} else {
+					tt.tools = append(tt.tools, tool)
+				}
+				return 1, true
+			case wmUser + 51: // TTM_DELTOOLW
+				tool, ok := parseToolInfo(lParam, true)
+				if !ok {
+					return 0, true
+				}
+				if idx := findTooltipIndex(tt, tool.hwnd, tool.id); idx >= 0 {
+					tt.tools = append(tt.tools[:idx], tt.tools[idx+1:]...)
+					return 1, true
+				}
+				return 0, true
+			case wmUser + 6, wmUser + 52: // TTM_NEWTOOLRECTA/W
+				tool, ok := parseToolInfo(lParam, msg == wmUser+52)
+				if !ok {
+					return 0, true
+				}
+				if idx := findTooltipIndex(tt, tool.hwnd, tool.id); idx >= 0 {
+					tt.tools[idx].rect = tool.rect
+					return 1, true
+				}
+				return 0, true
+			case wmUser + 13: // TTM_GETTOOLCOUNT
+				return uint64(len(tt.tools)), true
+			case wmUser + 8, wmUser + 53: // TTM_GETTOOLINFOA/W
+				tool, ok := parseToolInfo(lParam, msg == wmUser+53)
+				if !ok {
+					return 0, true
+				}
+				if idx := findTooltipIndex(tt, tool.hwnd, tool.id); idx >= 0 {
+					writeToolInfo(lParam, tt.tools[idx], msg == wmUser+53)
+					return 1, true
+				}
+				return 0, true
+			case wmUser + 54: // TTM_SETTOOLINFOW
+				tool, ok := parseToolInfo(lParam, true)
+				if !ok {
+					return 0, true
+				}
+				if idx := findTooltipIndex(tt, tool.hwnd, tool.id); idx >= 0 {
+					tt.tools[idx] = tool
+					return 1, true
+				}
+				tt.tools = append(tt.tools, tool)
+				return 1, true
+			case wmUser + 55: // TTM_HITTESTW
+				if lParam == 0 {
+					return 0, true
+				}
+				hwndTool, _ := mem.Read64(lParam)
+				x, _ := mem.Read32(lParam + 8)
+				y, _ := mem.Read32(lParam + 12)
+				for _, tool := range tt.tools {
+					if hwndTool != 0 && tool.hwnd != hwndTool {
+						continue
+					}
+					if int32(x) >= tool.rect[0] && int32(x) < tool.rect[2] && int32(y) >= tool.rect[1] && int32(y) < tool.rect[3] {
+						toolInfo := lParam + 24
+						writeToolInfo(toolInfo, tool, true)
+						return 1, true
+					}
+				}
+				return 0, true
+			case wmUser + 56: // TTM_GETTEXTW
+				tool, ok := parseToolInfo(lParam, true)
+				if !ok {
+					return 0, true
+				}
+				if idx := findTooltipIndex(tt, tool.hwnd, tool.id); idx >= 0 {
+					pszText, _ := mem.Read64(lParam + 48)
+					writeGuestUTF16Limited(pszText, tt.tools[idx].text, 260)
+					return 1, true
+				}
+				return 0, true
+			case wmUser + 57: // TTM_UPDATETIPTEXTW
+				tool, ok := parseToolInfo(lParam, true)
+				if !ok {
+					return 0, true
+				}
+				if idx := findTooltipIndex(tt, tool.hwnd, tool.id); idx >= 0 {
+					tt.tools[idx].text = tool.text
+					return 1, true
+				}
+				tt.tools = append(tt.tools, tool)
+				return 1, true
+			case wmUser + 24: // TTM_SETMAXTIPWIDTH
+				old := tt.maxWidth
+				tt.maxWidth = int32(lParam)
+				return uint64(old), true
+			case wmUser + 19: // TTM_SETTIPBKCOLOR
+				old := tt.bgColor
+				tt.bgColor = uint32(wParam)
+				return uint64(old), true
+			case wmUser + 20: // TTM_SETTIPTEXTCOLOR
+				old := tt.textColor
+				tt.textColor = uint32(wParam)
+				return uint64(old), true
+			case wmUser + 34: // TTM_POPUP
+				return 0, true
+			case wmUser + 7: // TTM_RELAYEVENT
+				return 0, true
+			case wmUser + 16: // TTM_WINDOWFROMPOINT
+				if lParam == 0 {
+					return 0, true
+				}
+				x, _ := mem.Read32(lParam)
+				y, _ := mem.Read32(lParam + 4)
+				for _, tool := range tt.tools {
+					if int32(x) >= tool.rect[0] && int32(x) < tool.rect[2] && int32(y) >= tool.rect[1] && int32(y) < tool.rect[3] {
+						return tool.hwnd, true
+					}
+				}
+				return 0, true
+			case wmUser + 17: // TTM_TRACKACTIVATE
+				tt.active = wParam != 0
+				return 0, true
+			case wmUser + 18: // TTM_TRACKPOSITION
+				return 0, true
+			case wmUser + 29: // TTM_UPDATE
+				return 0, true
+			case wmUser + 58: // TTM_ENUMTOOLSW
+				idx := int(int32(wParam))
+				if idx >= 0 && idx < len(tt.tools) && lParam != 0 {
+					writeToolInfo(lParam, tt.tools[idx], true)
+					return 1, true
+				}
+				return 0, true
+			case wmUser + 59: // TTM_GETCURRENTTOOLW
+				if len(tt.tools) > 0 && lParam != 0 {
+					writeToolInfo(lParam, tt.tools[0], true)
+					return 1, true
+				}
+				return 0, true
+			default:
+				return 0, true
+			}
 		}
 		return innerBuiltin(hwnd, msg, wParam, lParam)
 	}

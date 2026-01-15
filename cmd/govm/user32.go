@@ -800,6 +800,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				visible: style&0x10000000 != 0, // WS_VISIBLE
 			}
 			initBuiltinControlState(hwndChildren[hwnd])
+			if lClassName == "msctls_progress32" {
+				syncProgressBarCompat(hwndChildren[hwnd])
+			}
 			// Initialise GWL_STYLE / GWL_EXSTYLE so GetWindowLong returns correct values.
 			windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
 			win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
@@ -1815,6 +1818,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SendMessageW", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CurrentCPU = ctx.CPU
 		hwnd := ctx.Arg(0)
 		msg := uint32(ctx.Arg(1))
 		wParam := ctx.Arg(2)
@@ -3116,6 +3120,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DispatchMessageW", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CurrentCPU = ctx.CPU
 		pMsg := ctx.Arg(0)
 		if pMsg == 0 {
 			ctx.SetReturn(0)
@@ -4516,6 +4521,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SendDlgItemMessageW", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CurrentCPU = ctx.CPU
 		hDlg := ctx.Arg(0)
 		nIDDlgItem := ctx.Arg(1)
 		msg := uint32(ctx.Arg(2))
@@ -7289,6 +7295,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DispatchMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CurrentCPU = ctx.CPU
 		pMsg := ctx.Arg(0)
 		if pMsg == 0 {
 			ctx.SetReturn(0)
@@ -7337,6 +7344,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SendMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CurrentCPU = ctx.CPU
 		hwnd := ctx.Arg(0)
 		msg := uint32(ctx.Arg(1))
 		wParam := ctx.Arg(2)
@@ -7378,6 +7386,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// SendMessageTimeoutA/W - ReactOS: win32ss/user/ntuser/message.c co_IntSendMessageTimeout
 	// Signature: LRESULT SendMessageTimeoutW(HWND,UINT,WPARAM,LPARAM,UINT fuFlags,UINT uTimeout,PDWORD_PTR lpdwResult)
 	sendMsgTimeoutImpl := func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CurrentCPU = ctx.CPU
 		hwnd := ctx.Arg(0)
 		msg := uint32(ctx.Arg(1))
 		wParam := ctx.Arg(2)
@@ -7433,6 +7442,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "SendDlgItemMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		hctx.CurrentCPU = ctx.CPU
 		hDlg := ctx.Arg(0)
 		nIDDlgItem := ctx.Arg(1)
 		msg := uint32(ctx.Arg(2))
@@ -10091,6 +10101,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				visible: style&0x10000000 != 0,
 			}
 			initBuiltinControlState(hwndChildren[hwnd])
+			if lClassName == "msctls_progress32" {
+				syncProgressBarCompat(hwndChildren[hwnd])
+			}
 			windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
 			win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
 			if lClassName == "edit" && hctx.FocusHwnd == 0 {

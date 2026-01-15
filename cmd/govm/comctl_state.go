@@ -3,11 +3,12 @@ package main
 import "strings"
 
 type listViewState struct {
-	items       []lvItem
-	columns     []lvColumn
-	style       uint32
-	extStyle    uint32
-	selectedIdx int
+	items        []lvItem
+	columns      []lvColumn
+	style        uint32
+	extStyle     uint32
+	selectedIdx  int
+	virtualCount int
 }
 
 type lvItem struct {
@@ -57,6 +58,9 @@ type tabItem struct {
 
 type progressState struct {
 	pos, min, max, step int
+	barColor, bkColor   uint32
+	state               int32
+	marquee             bool
 }
 
 type toolbarState struct {
@@ -72,13 +76,36 @@ type tbButton struct {
 }
 
 type tooltipState struct {
-	tools []tooltipTool
+	tools     []tooltipTool
+	active    bool
+	maxWidth  int32
+	bgColor   uint32
+	textColor uint32
 }
 
 type tooltipTool struct {
-	id   uint64
-	text string
-	hwnd uint64
+	id    uint64
+	text  string
+	hwnd  uint64
+	rect  [4]int32
+	flags uint32
+}
+
+type headerState struct {
+	items      []headerItem
+	imageList  uint64
+	focusedIdx int32
+}
+
+type headerItem struct {
+	text   string
+	width  int32
+	fmt    int32
+	param  uint64
+	image  int32
+	order  int32
+	state  uint32
+	bitmap uint64
 }
 
 func initBuiltinControlState(cs *controlState) {
@@ -112,7 +139,7 @@ func initBuiltinControlState(cs *controlState) {
 		}
 	case "msctls_progress32":
 		if cs.progress == nil {
-			cs.progress = &progressState{min: 0, max: 100, step: 10}
+			cs.progress = &progressState{min: 0, max: 100, step: 10, barColor: 0x0078D7, bkColor: 0xE6E6E6, state: 1}
 		}
 	case "toolbarwindow32":
 		if cs.toolbar == nil {
@@ -120,7 +147,11 @@ func initBuiltinControlState(cs *controlState) {
 		}
 	case "tooltips_class32":
 		if cs.tooltip == nil {
-			cs.tooltip = &tooltipState{}
+			cs.tooltip = &tooltipState{active: true, maxWidth: -1, bgColor: 0xFFFFE1, textColor: 0x000000}
+		}
+	case "sysheader32":
+		if cs.header == nil {
+			cs.header = &headerState{focusedIdx: -1}
 		}
 	}
 }
@@ -262,5 +293,20 @@ func syncToolbarCompat(cs *controlState) {
 			fsState:   uint8(btn.state),
 			fsStyle:   uint8(btn.style),
 		}
+	}
+}
+
+func syncProgressBarCompat(cs *controlState) {
+	if cs == nil || cs.progress == nil {
+		return
+	}
+	cs.progressBarCompat = &progressBarCompat{
+		hwnd:      cs.ctrlID,
+		className: cs.className,
+		min:       int32(cs.progress.min),
+		max:       int32(cs.progress.max),
+		pos:       int32(cs.progress.pos),
+		step:      int32(cs.progress.step),
+		marquee:   cs.progress.marquee,
 	}
 }

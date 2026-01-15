@@ -7,6 +7,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/mirkobrombin/Raven/pkg/arch"
 	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
 	"github.com/mirkobrombin/Raven/pkg/loader"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -80,43 +81,53 @@ type tbButtonData struct {
 	fsStyle   uint8
 }
 
-type controlState struct {
+type progressBarCompat struct {
+	hwnd          uint64
 	className     string
-	parentHWND    uint64
-	ctrlID        uint64
-	x, y, w, h    int32
-	style         uint32
-	exStyle       uint32
-	text          string
-	visible       bool
-	listView      *listViewState
-	treeView      *treeViewState
-	treeViewIndex map[uint64]*tvItem
-	statusBar     *statusBarState
-	statusSimple  bool
-	statusMinH    int32
-	tab           *tabState
-	progress      *progressState
-	progressMq    bool
-	toolbar       *toolbarState
-	tooltip       *tooltipState
-	sbParts       []int32
-	sbTexts       []string
-	editModified  bool
-	tvItems       map[uint64]*treeItem
-	tvNextHandle  uint64
-	tvRoots       []uint64
-	lvColumns     []listColumn
-	checkState    uint32
-	tabCount      int
-	tabCurSel     int
-	tabTitles     []string
-	tbButtons     []tbButtonData
-	tbBtnW        int32
-	tbBtnH        int32
-	tbBitmapIconW int32
-	tbBitmapIconH int32
-	tbBitmapStore [][]uint32
+	min, max, pos int32
+	step          int32
+	marquee       bool
+}
+
+type controlState struct {
+	className         string
+	parentHWND        uint64
+	ctrlID            uint64
+	x, y, w, h        int32
+	style             uint32
+	exStyle           uint32
+	text              string
+	visible           bool
+	listView          *listViewState
+	treeView          *treeViewState
+	treeViewIndex     map[uint64]*tvItem
+	statusBar         *statusBarState
+	statusSimple      bool
+	statusMinH        int32
+	tab               *tabState
+	progress          *progressState
+	progressMq        bool
+	toolbar           *toolbarState
+	tooltip           *tooltipState
+	header            *headerState
+	progressBarCompat *progressBarCompat
+	sbParts           []int32
+	sbTexts           []string
+	editModified      bool
+	tvItems           map[uint64]*treeItem
+	tvNextHandle      uint64
+	tvRoots           []uint64
+	lvColumns         []listColumn
+	checkState        uint32
+	tabCount          int
+	tabCurSel         int
+	tabTitles         []string
+	tbButtons         []tbButtonData
+	tbBtnW            int32
+	tbBtnH            int32
+	tbBitmapIconW     int32
+	tbBitmapIconH     int32
+	tbBitmapStore     [][]uint32
 }
 
 type queuedMsg struct {
@@ -183,6 +194,7 @@ type HandlerCtx struct {
 	RegHive     *ntapi.RegistryHive
 	SynthByName map[string]*ntapi.SynthPE
 	Com         *comState
+	CurrentCPU  arch.CPU
 
 	// Config
 	Argv        []string
@@ -243,29 +255,30 @@ type HandlerCtx struct {
 	ActivePopupMenu   *popupMenuState
 
 	// Modal dialog overlay state
-	DialogActive     bool
-	DialogTitle      string
-	DialogText       string
-	DialogText2      string // secondary line (e.g. version info)
-	DialogHwnd       uint64 // owner window
-	DialogBtnX       int32  // OK button bounds (set by DrawDialogOverlay)
-	DialogBtnY       int32
-	DialogBtnW       int32
-	DialogBtnH       int32
-	NextHWND         uint64
-	NextMsgID        uint32
-	NextAtom         uint16
-	NextGDIHandle    uint64
-	NextBitmapHandle uint64
-	NextTimerID      uint64
-	FrameReady       bool
-	HasBaseFrame     bool
-	RepaintBuiltin   bool
-	ScratchOff       uint64
-	ScratchPage      uint64
-	SyncTrampoline   uint64
-	LastPostedMainW  int32
-	LastPostedMainH  int32
+	DialogActive        bool
+	DialogTitle         string
+	DialogText          string
+	DialogText2         string // secondary line (e.g. version info)
+	DialogHwnd          uint64 // owner window
+	DialogBtnX          int32  // OK button bounds (set by DrawDialogOverlay)
+	DialogBtnY          int32
+	DialogBtnW          int32
+	DialogBtnH          int32
+	NextHWND            uint64
+	NextMsgID           uint32
+	NextAtom            uint16
+	NextGDIHandle       uint64
+	NextBitmapHandle    uint64
+	NextTimerID         uint64
+	FrameReady          bool
+	HasBaseFrame        bool
+	RepaintBuiltin      bool
+	ScratchOff          uint64
+	ScratchPage         uint64
+	SyncTrampoline      uint64
+	GuestCallTrampoline *ntapi.DllMainTrampoline
+	LastPostedMainW     int32
+	LastPostedMainH     int32
 
 	// Caret state
 	CaretHwnd    uint64
@@ -331,6 +344,10 @@ type HandlerCtx struct {
 
 	CrtFiles  map[uint64]*os.File // guest FILE* → Go *os.File
 	CrtNextFP uint64              // next guest FILE* address to allocate
+}
+
+func (h *HandlerCtx) SetCurrentCPU(cpu arch.CPU) {
+	h.CurrentCPU = cpu
 }
 
 const menuBarHeight int32 = 20
