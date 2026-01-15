@@ -164,7 +164,8 @@ func (dc *DC) Ellipse(x0, y0, x1, y1 int32) {
 //
 // rop3 values: SRCCOPY=0xCC0020, PATCOPY=0xF00021, BLACKNESS=0x420000, WHITENESS=0xFF0062
 func (dc *DC) BitBlt(dx, dy, w, h int32, src *DC, sx, sy int32, rop3 uint32) {
-	if dc.Target == nil {
+	dstSurf := dc.target()
+	if dstSurf.Pix == nil {
 		return
 	}
 	dc.Dirty = true
@@ -203,20 +204,25 @@ func (dc *DC) BitBlt(dx, dy, w, h int32, src *DC, sx, sy int32, rop3 uint32) {
 		dc.applySolidROP(adx, ady, w, h, rop3)
 		return
 	}
-	if src == nil || src.Target == nil {
+	if src == nil {
+		return
+	}
+	srcSurf := src.target()
+	if srcSurf.Pix == nil {
 		return
 	}
 	if rop3 == ropSrcCopy {
-		dc.Target.BitBlt(adx, ady, src.Target, asx, asy, w, h)
+		dstSurf.BitBlt(adx, ady, srcSurf, asx, asy, w, h)
 		return
 	}
-	dc.blitROP(adx, ady, w, h, src.Target, asx, asy, w, h, rop3)
+	dc.blitROP(adx, ady, w, h, srcSurf, asx, asy, w, h, rop3)
 }
 
 // StretchBlt copies and scales src to dst with nearest-neighbour interpolation.
 // ReactOS: NtGdiStretchBlt → EngStretchBlt
 func (dc *DC) StretchBlt(dx, dy, dw, dh int32, src *DC, sx, sy, sw, sh int32, rop3 uint32) {
-	if dc.Target == nil {
+	dstSurf := dc.target()
+	if dstSurf.Pix == nil {
 		return
 	}
 	dc.Dirty = true
@@ -232,14 +238,18 @@ func (dc *DC) StretchBlt(dx, dy, dw, dh int32, src *DC, sx, sy, sw, sh int32, ro
 		dc.applySolidROP(adx, ady, dw, dh, rop3)
 		return
 	}
-	if src == nil || src.Target == nil {
+	if src == nil {
+		return
+	}
+	srcSurf := src.target()
+	if srcSurf.Pix == nil {
 		return
 	}
 	if rop3 == ropSrcCopy {
-		dc.Target.StretchBlt(adx, ady, dw, dh, src.Target, asx, asy, sw, sh)
+		dstSurf.StretchBlt(adx, ady, dw, dh, srcSurf, asx, asy, sw, sh)
 		return
 	}
-	dc.blitROP(adx, ady, dw, dh, src.Target, asx, asy, sw, sh, rop3)
+	dc.blitROP(adx, ady, dw, dh, srcSurf, asx, asy, sw, sh, rop3)
 }
 
 func ropNeedsSource(rop3 uint32) bool {
@@ -252,11 +262,12 @@ func ropNeedsSource(rop3 uint32) bool {
 }
 
 func (dc *DC) applySolidROP(dx, dy, w, h int32, rop3 uint32) {
+	s := dc.target()
 	switch rop3 {
 	case ropBlackness:
-		dc.Target.FillRect(dx, dy, dx+w, dy+h, 0x000000)
+		s.FillRect(dx, dy, dx+w, dy+h, 0x000000)
 	case ropWhiteness:
-		dc.Target.FillRect(dx, dy, dx+w, dy+h, 0xFFFFFF)
+		s.FillRect(dx, dy, dx+w, dy+h, 0xFFFFFF)
 	case ropPatInvert:
 		dc.fillPatternROP(dx, dy, w, h, true)
 	default:
@@ -265,26 +276,27 @@ func (dc *DC) applySolidROP(dx, dy, w, h int32, rop3 uint32) {
 }
 
 func (dc *DC) fillPatternROP(dx, dy, w, h int32, invert bool) {
-	if dc.Target == nil || w <= 0 || h <= 0 {
+	s := dc.target()
+	if s.Pix == nil || w <= 0 || h <= 0 {
 		return
 	}
 	if dc.Brush != nil && dc.Brush.Style == 3 && dc.Brush.Pattern != nil && dc.Brush.Pattern.Surf != nil {
 		ps := dc.Brush.Pattern.Surf
 		for row := int32(0); row < h; row++ {
 			dstY := dy + row
-			if dstY < 0 || dstY >= dc.Target.Height {
+			if dstY < 0 || dstY >= s.Height {
 				continue
 			}
 			for col := int32(0); col < w; col++ {
 				dstX := dx + col
-				if dstX < 0 || dstX >= dc.Target.Width {
+				if dstX < 0 || dstX >= s.Width {
 					continue
 				}
 				c := ps.GetPixel(col%ps.Width, row%ps.Height)
 				if invert {
-					c = c ^ dc.Target.GetPixel(dstX, dstY)
+					c = c ^ s.GetPixel(dstX, dstY)
 				}
-				dc.Target.SetPixel(dstX, dstY, c)
+				s.SetPixel(dstX, dstY, c)
 			}
 		}
 		return
@@ -296,42 +308,43 @@ func (dc *DC) fillPatternROP(dx, dy, w, h int32, invert bool) {
 	if invert {
 		for row := int32(0); row < h; row++ {
 			dstY := dy + row
-			if dstY < 0 || dstY >= dc.Target.Height {
+			if dstY < 0 || dstY >= s.Height {
 				continue
 			}
 			for col := int32(0); col < w; col++ {
 				dstX := dx + col
-				if dstX < 0 || dstX >= dc.Target.Width {
+				if dstX < 0 || dstX >= s.Width {
 					continue
 				}
-				dc.Target.SetPixel(dstX, dstY, dc.Target.GetPixel(dstX, dstY)^color)
+				s.SetPixel(dstX, dstY, s.GetPixel(dstX, dstY)^color)
 			}
 		}
 		return
 	}
-	dc.Target.FillRect(dx, dy, dx+w, dy+h, color)
+	s.FillRect(dx, dy, dx+w, dy+h, color)
 }
 
 func (dc *DC) blitROP(dx, dy, dw, dh int32, src *Surface, sx, sy, sw, sh int32, rop3 uint32) {
-	if dc.Target == nil || src == nil || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 {
+	s := dc.target()
+	if s.Pix == nil || src == nil || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 {
 		return
 	}
 	for row := int32(0); row < dh; row++ {
 		srcY := sy + row*sh/dh
 		dstY := dy + row
-		if srcY < 0 || srcY >= src.Height || dstY < 0 || dstY >= dc.Target.Height {
+		if srcY < 0 || srcY >= src.Height || dstY < 0 || dstY >= s.Height {
 			continue
 		}
 		for col := int32(0); col < dw; col++ {
 			srcX := sx + col*sw/dw
 			dstX := dx + col
-			if srcX < 0 || srcX >= src.Width || dstX < 0 || dstX >= dc.Target.Width {
+			if srcX < 0 || srcX >= src.Width || dstX < 0 || dstX >= s.Width {
 				continue
 			}
 			srcColor := src.GetPixel(srcX, srcY)
-			dstColor := dc.Target.GetPixel(dstX, dstY)
+			dstColor := s.GetPixel(dstX, dstY)
 			out := applyROPColor(rop3, srcColor, dstColor)
-			dc.Target.SetPixel(dstX, dstY, out)
+			s.SetPixel(dstX, dstY, out)
 		}
 	}
 }

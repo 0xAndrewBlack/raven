@@ -73,7 +73,7 @@ func (dc *DC) TextExtentStr(s string) (w, h int32) {
 // opaque=true fills the background rectangle first.
 // ReactOS: NtGdiExtTextOutW → ftGdiExtTextOutW
 func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
-	if dc.Target == nil {
+	if dc.target().Pix == nil {
 		return
 	}
 	if len(text) > 0 || opaque {
@@ -110,7 +110,7 @@ func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
 
 // textOutTTF renders using TrueType rasterized glyphs.
 func (dc *DC) textOutTTF(x, y int32, runes []rune, f *Font, opaque bool) {
-	s := dc.Target
+	s := dc.target()
 	cx := x + dc.OriginX
 	cy := y + dc.OriginY
 
@@ -215,7 +215,7 @@ func (dc *DC) textOutBitmap(x, y int32, text string, opaque bool) {
 	bgG := byte(bgColor >> 8)
 	bgR := byte(bgColor >> 16)
 
-	s := dc.Target
+	s := dc.target()
 	cx := x + dc.OriginX
 	cy := y + dc.OriginY
 
