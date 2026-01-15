@@ -2378,6 +2378,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- windowscodecs.dll ---
 	delayReg(func() { registerWindowsCodecsHandlers(hctx) })
 
+	// --- dwrite.dll ---
+	delayReg(func() { registerDWriteHandlers(hctx) })
+
 	// Message queue for synthetic messages (WM_CREATE, WM_SIZE, etc.)
 	// hctx.MsgQueue: hctx.MsgQueue already nil
 	// Tracks non-empty update regions per HWND.
