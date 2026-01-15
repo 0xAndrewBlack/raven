@@ -344,6 +344,7 @@ func newCOMState(hctx *HandlerCtx) *comState {
 			return cs.createShellLinkObjects(iid)
 		},
 	}
+	registerMSXMLClassFactories(cs)
 	return cs
 }
 
@@ -3394,6 +3395,16 @@ func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uin
 		return cs.dispatchDirectInput(ctx, obj, method)
 	case "direct-input-device8":
 		return cs.dispatchDirectInputDevice(ctx, obj, method)
+	case "xml-document":
+		return cs.dispatchXMLDocument(ctx, obj, method)
+	case "xml-node":
+		return cs.dispatchXMLNode(ctx, obj, method)
+	case "xml-node-list":
+		return cs.dispatchXMLNodeList(ctx, obj, method)
+	case "xml-named-node-map":
+		return cs.dispatchXMLNamedNodeMap(ctx, obj, method)
+	case "xml-parse-error":
+		return cs.dispatchXMLParseError(ctx, obj, method)
 	default:
 		return E_NOTIMPL
 	}
