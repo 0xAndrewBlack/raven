@@ -5833,6 +5833,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- wininet.dll ---
 	delayReg(func() { registerWininetHandlers(hctx) })
 
+	// --- winhttp.dll ---
+	delayReg(func() { registerWinhttpHandlers(hctx) })
+
 	// --- winmm.dll ---
 	delayReg(func() { registerWinmmHandlers(hctx) })
 
