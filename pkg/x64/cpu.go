@@ -49,6 +49,9 @@ const (
 	xsaveHeaderOffset = 0x200
 	xsaveYMMHiOffset  = 0x240
 	xsaveXStateBV     = 0x7
+	defaultFPUCW      = 0x037F
+	defaultMXCSR      = 0x1F80
+	defaultMXCSRMask  = 0x0000FFFF
 )
 
 // CPU implements an x86_64 (AMD64) long-mode emulator.
@@ -74,6 +77,7 @@ type CPU struct {
 	fpuCW  uint16     // control word
 	fpuSW  uint16     // status word
 	fpuTW  uint16     // tag word
+	MXCSR  uint32
 
 	// PreStep is an optional hook called before each instruction.
 	// If it returns true, the instruction was handled externally (e.g. JIT).
@@ -95,7 +99,14 @@ type CPU struct {
 var _ arch.CPU = (*CPU)(nil)
 
 // New creates an x86_64 CPU bound to the given MMU.
-func New(mem *mmu.MMU) *CPU { return &CPU{mem: mem} }
+func New(mem *mmu.MMU) *CPU {
+	return &CPU{
+		mem:   mem,
+		fpuCW: defaultFPUCW,
+		fpuTW: 0xFFFF,
+		MXCSR: defaultMXCSR,
+	}
+}
 
 func (c *CPU) Stop()              { c.running = false }
 func (c *CPU) GetPC() uint64      { return c.RIP }
@@ -938,26 +949,52 @@ func (c *CPU) execFXSAVE(addr uint64) error {
 		return fmt.Errorf("FXSAVE: address 0x%x is not 16-byte aligned", addr)
 	}
 	sw := (c.fpuSW &^ 0x3800) | (uint16(c.fpuTop&7) << 11)
-	c.mem.Write16(addr+0x000, c.fpuCW)
-	c.mem.Write16(addr+0x002, sw)
-	c.mem.Write8(addr+0x004, c.xsaveFTW())
-	c.mem.Write8(addr+0x005, 0)   // reserved
-	c.mem.Write16(addr+0x006, 0)  // FOP
-	c.mem.Write64(addr+0x008, 0)  // RIP of last FP instruction
-	c.mem.Write64(addr+0x010, 0)  // RDP
-	c.mem.Write32(addr+0x018, 0x1F80) // MXCSR default
-	c.mem.Write32(addr+0x01C, 0xFFFF) // MXCSR_MASK
+	if err := c.mem.Write16(addr+0x000, c.fpuCW); err != nil {
+		return err
+	}
+	if err := c.mem.Write16(addr+0x002, sw); err != nil {
+		return err
+	}
+	if err := c.mem.Write8(addr+0x004, c.xsaveFTW()); err != nil {
+		return err
+	}
+	if err := c.mem.Write8(addr+0x005, 0); err != nil {
+		return err
+	}
+	if err := c.mem.Write16(addr+0x006, 0); err != nil {
+		return err
+	}
+	if err := c.mem.Write64(addr+0x008, 0); err != nil {
+		return err
+	}
+	if err := c.mem.Write64(addr+0x010, 0); err != nil {
+		return err
+	}
+	if err := c.mem.Write32(addr+0x018, c.MXCSR); err != nil {
+		return err
+	}
+	if err := c.mem.Write32(addr+0x01C, defaultMXCSRMask); err != nil {
+		return err
+	}
 	// MM0-MM7 / ST0-ST7 at +0x020, 16 bytes each
 	for i := 0; i < 8; i++ {
 		slot := addr + 0x020 + uint64(i)*16
-		c.mem.Write64(slot, math.Float64bits(c.fpuST[i]))
-		c.mem.Write64(slot+8, 0)
+		if err := c.mem.Write64(slot, math.Float64bits(c.fpuST[i])); err != nil {
+			return err
+		}
+		if err := c.mem.Write64(slot+8, 0); err != nil {
+			return err
+		}
 	}
 	// XMM0-XMM15 at +0x0A0, 16 bytes each
 	for i := 0; i < 16; i++ {
 		slot := addr + 0x0A0 + uint64(i)*16
-		c.mem.Write64(slot, c.XMM[i][0])
-		c.mem.Write64(slot+8, c.XMM[i][1])
+		if err := c.mem.Write64(slot, c.XMM[i][0]); err != nil {
+			return err
+		}
+		if err := c.mem.Write64(slot+8, c.XMM[i][1]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -970,10 +1007,12 @@ func (c *CPU) execFXRSTOR(addr uint64) error {
 	cw, _ := c.mem.Read16(addr + 0x000)
 	sw, _ := c.mem.Read16(addr + 0x002)
 	ftw, _ := c.mem.Read8(addr + 0x004)
+	mxcsr, _ := c.mem.Read32(addr + 0x018)
 	c.fpuCW = cw
 	c.fpuSW = sw &^ 0x3800
 	c.fpuTop = int((sw >> 11) & 0x7)
 	c.fpuTW = xrstorFTW(ftw)
+	c.MXCSR = mxcsr & defaultMXCSRMask
 	for i := 0; i < 8; i++ {
 		slot := addr + 0x020 + uint64(i)*16
 		v, _ := c.mem.Read64(slot)
@@ -1008,10 +1047,10 @@ func (c *CPU) execXSAVE(addr uint64) error {
 	if err := c.mem.Write64(addr+0x010, 0); err != nil {
 		return err
 	}
-	if err := c.mem.Write32(addr+0x018, 0x1F80); err != nil {
+	if err := c.mem.Write32(addr+0x018, c.MXCSR); err != nil {
 		return err
 	}
-	if err := c.mem.Write32(addr+0x01C, 0xFFFF); err != nil {
+	if err := c.mem.Write32(addr+0x01C, defaultMXCSRMask); err != nil {
 		return err
 	}
 	for i := 0; i < 8; i++ {
@@ -1063,10 +1102,15 @@ func (c *CPU) execXRSTOR(addr uint64) error {
 	if err != nil {
 		return err
 	}
+	mxcsr, err := c.mem.Read32(addr + 0x018)
+	if err != nil {
+		return err
+	}
 	c.fpuCW = cw
 	c.fpuSW = sw &^ 0x3800
 	c.fpuTop = int((sw >> 11) & 0x7)
 	c.fpuTW = xrstorFTW(ftw)
+	c.MXCSR = mxcsr & defaultMXCSRMask
 	for i := 0; i < 8; i++ {
 		slot := addr + 0x020 + uint64(i)*16
 		v, err := c.mem.Read64(slot)
@@ -1377,9 +1421,6 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		target := uint64(int64(c.RIP) + int64(int32(rel)))
-		if target == 0x120011 {
-			ravelog.Logf("[DBG] call rel32 to 0x120011 from RIP=0x%x\n", c.RIP)
-		}
 		if err := c.push64(c.RIP); err != nil {
 			return err
 		}
@@ -3476,8 +3517,15 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return c.execFXSAVE(addr)
 		case 1: // FXRSTOR m512byte
 			return c.execFXRSTOR(addr)
-		case 2, 3: // LDMXCSR / STMXCSR
+		case 2: // LDMXCSR
+			val, err := c.mem.Read32(addr)
+			if err != nil {
+				return err
+			}
+			c.MXCSR = val & defaultMXCSRMask
 			return nil
+		case 3: // STMXCSR
+			return c.mem.Write32(addr, c.MXCSR)
 		case 4: // XSAVE
 			return c.execXSAVE(addr)
 		case 5: // XRSTOR
@@ -6399,16 +6447,6 @@ func (c *CPU) execGroup45(pfx *prefixState, size int) error {
 		if err != nil {
 			return err
 		}
-		if val == 0x120011 {
-			addr2, _, _ := c.resolveRMAddr(m, pfx)
-			raw, _ := c.mem.Read64(addr2)
-			ravelog.Logf("[DBG] call to 0x120011 from RIP=0x%x addr=0x%x raw_read=0x%x\n",
-				c.RIP, addr2, raw)
-		}
-		if val == 0 {
-			ravelog.Logf("[DBG] call to 0x0 from retAddr=0x%x RSP=0x%x RBX=0x%x RCX=0x%x\n",
-				c.RIP, c.Regs[RSP], c.Regs[RBX], c.Regs[RCX])
-		}
 		if err := c.push64(c.RIP); err != nil {
 			return err
 		}
@@ -6419,14 +6457,6 @@ func (c *CPU) execGroup45(pfx *prefixState, size int) error {
 		val, err := c.readRM(m, pfx, 8)
 		if err != nil {
 			return err
-		}
-		if val == 0x120011 {
-			addr2, _, _ := c.resolveRMAddr(m, pfx)
-			ravelog.Logf("[DBG] jmp to 0x120011 from RIP=0x%x addr=0x%x\n", c.RIP, addr2)
-		}
-		if val == 0 {
-			ravelog.Logf("[DBG] jmp to 0x0 from retAddr=0x%x RSP=0x%x RBX=0x%x\n",
-				c.RIP, c.Regs[RSP], c.Regs[RBX])
 		}
 		c.RIP = val
 		return nil

@@ -356,6 +356,8 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	fs.MkdirAll("/Windows/TEMP")
 	fs.MkdirAll("/Users/user/AppData/Local/Temp")
 	fs.MkdirAll("/Program Files")
+	fs.MkdirAll("/Users/" + shellUserName() + "/.config")
+	populateVFSFromHost(fs, filepath.Join("testdata", "npp"), "/Users/"+shellUserName()+"/.config/Notepad++")
 
 	// Populate VFS with the PE's directory contents
 	peDir := filepath.Dir(absPath)
