@@ -953,10 +953,19 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(user32, "DestroyWindow", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
-		ravelog.Logf("[destroy] hwnd=0x%x\n", hwnd)
-		delete(hwndChildren, hwnd)
-		delete(hwndWndProc, hwnd)
-		ctx.SetReturn(1) // TRUE
+		ravelog.Logf("[destroy] DestroyWindow hwnd=0x%x\n", hwnd)
+		if _, hasWP := hwndWndProc[hwnd]; hasWP {
+			// Queue WM_DESTROY + WM_NCDESTROY so the WndProc can call PostQuitMessage.
+			// Do NOT remove from hwndWndProc yet - DispatchMessageW needs it to deliver
+			// WM_DESTROY. Cleanup happens lazily (the process exits shortly after).
+			hctx.MsgQueue = append(hctx.MsgQueue,
+				queuedMsg{hwnd, 0x0002, 0, 0}, // WM_DESTROY
+				queuedMsg{hwnd, 0x0082, 0, 0}, // WM_NCDESTROY
+			)
+		} else {
+			delete(hwndChildren, hwnd)
+		}
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ShowWindow", func(ctx *ntapi.TrapContext) uint32 {
@@ -3118,7 +3127,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			if pMsg != 0 {
 				writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 			}
-			ctx.SetReturn(1)
+			if m.message == 0x0012 { // WM_QUIT - GetMessage returns FALSE to end the message loop
+				ctx.SetReturn(0)
+			} else {
+				ctx.SetReturn(1)
+			}
 			return true
 		}
 
@@ -3281,7 +3294,23 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 		wndProc, ok := hwndWndProc[hwnd]
 		if !ok || wndProc == 0 {
-			ravelog.Logf("[dispatch] no WndProc for hwnd=0x%x msg=0x%x\n", hwnd, message)
+			// Fallback: look up WndProc from the window's registered class atom.
+			// This handles cases where hwndWndProc was not populated at CreateWindowExW
+			// (e.g., class registered by atom only, or late subclass initialization).
+			if atom, hasAtom := hctx.HwndClassAtom[hwnd]; hasAtom {
+				if wp, hasWP := hctx.AtomWndProc[atom]; hasWP && wp != 0 {
+					wndProc = wp
+					ok = true
+					hwndWndProc[hwnd] = wndProc // cache for future dispatches
+					ravelog.Logf("[dispatch] recovered WndProc for hwnd=0x%x msg=0x%x via atom=0x%x wndProc=0x%x\n", hwnd, message, atom, wndProc)
+				}
+			}
+		}
+		if !ok || wndProc == 0 {
+			ravelog.Logf("[dispatch] no WndProc for hwnd=0x%x msg=0x%x hwndWndProcLen=%d\n", hwnd, message, len(hwndWndProc))
+			for k, v := range hwndWndProc {
+				ravelog.Logf("[dispatch]   map[0x%x]=0x%x\n", k, v)
+			}
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -6759,7 +6788,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			if pMsg != 0 {
 				writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 			}
-			ctx.SetReturn(1)
+			if m.message == 0x0012 { // WM_QUIT → return FALSE to end message loop
+				ctx.SetReturn(0)
+			} else {
+				ctx.SetReturn(1)
+			}
 			return 0
 		}
 		// No messages; return WM_QUIT to avoid infinite spin

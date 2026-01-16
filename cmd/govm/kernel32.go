@@ -1685,6 +1685,10 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 				evt := makeSpecialConsoleKeyEvent(0x03, 0x03)
 				evt.ControlKeyState = 0x0008
 				enqueueConsoleEvent(evt)
+			} else {
+				// No PE handler registered: restore default SIGINT behavior (kill process).
+				signal.Reset(os.Interrupt)
+				os.Exit(130)
 			}
 		}
 	}()
