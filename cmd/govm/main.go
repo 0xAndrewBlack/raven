@@ -2742,6 +2742,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return result
 		}
 		wp := hctx.HwndWndProc[parentHWND]
+		if wp == 0 {
+			// Fallback: recover WndProc via class atom.
+			if atom, ok := hctx.HwndClassAtom[parentHWND]; ok {
+				if recovered, ok2 := hctx.AtomWndProc[atom]; ok2 && recovered != 0 {
+					wp = recovered
+					hctx.HwndWndProc[parentHWND] = wp
+				}
+			}
+		}
 		if wp == 0 || hctx.CurrentCPU == nil || hctx.GuestCallTrampoline == nil {
 			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{parentHWND, msg, wParam, lParam})
 			return 0

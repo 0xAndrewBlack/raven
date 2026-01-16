@@ -1897,6 +1897,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// For guest WndProcs: dispatch synchronously via hctx.SyncStack
 		wp, hasWP := hwndWndProc[hwnd]
 		if !hasWP || wp == 0 {
+			// Fallback: recover WndProc via class atom (same logic as DispatchMessageW).
+			if atom, hasAtom := hctx.HwndClassAtom[hwnd]; hasAtom {
+				if recovered, ok := hctx.AtomWndProc[atom]; ok && recovered != 0 {
+					wp = recovered
+					hasWP = true
+					hwndWndProc[hwnd] = wp
+				}
+			}
+		}
+		if !hasWP || wp == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -2647,7 +2657,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		// WM_CLOSE (0x0010): destroy the window.
-		if msg == 0x0010 && wlWindow != nil {
+		if msg == 0x0010 {
 			ravelog.Logf("[wm] WM_CLOSE hwnd=0x%x\n", hwnd)
 			// Post WM_DESTROY + WM_QUIT
 			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd: hwnd, message: 0x0002, wParam: 0, lParam: 0}) // WM_DESTROY
@@ -7903,6 +7913,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 		wndProc, ok := hwndWndProc[hwnd]
 		if !ok || wndProc == 0 {
+			// Fallback: recover WndProc via class atom.
+			if atom, hasAtom := hctx.HwndClassAtom[hwnd]; hasAtom {
+				if recovered, okA := hctx.AtomWndProc[atom]; okA && recovered != 0 {
+					wndProc = recovered
+					ok = true
+					hwndWndProc[hwnd] = wndProc
+				}
+			}
+		}
+		if !ok || wndProc == 0 {
 			ravelog.Logf("[dispatch] DispatchMessageA: no WndProc for hwnd=0x%x msg=0x%x\n", hwnd, message)
 			ctx.SetReturn(0)
 			return 0
@@ -7939,6 +7959,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		wp, hasWP := hwndWndProc[hwnd]
+		if !hasWP || wp == 0 {
+			// Fallback: recover WndProc via class atom.
+			if atom, hasAtom := hctx.HwndClassAtom[hwnd]; hasAtom {
+				if recovered, ok := hctx.AtomWndProc[atom]; ok && recovered != 0 {
+					wp = recovered
+					hasWP = true
+					hwndWndProc[hwnd] = wp
+				}
+			}
+		}
 		if !hasWP || wp == 0 {
 			ctx.SetReturn(0)
 			return 0
