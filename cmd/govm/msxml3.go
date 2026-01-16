@@ -11,6 +11,7 @@ import (
 
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/vfs"
 )
 
 var (
@@ -712,13 +713,54 @@ func resolveMSXMLHostPath(imagePath, filePath string) string {
 	return filepath.Clean(filepath.Join(base, filePath))
 }
 
+// vfsReadFile reads filePath through the VFS first; falls back to os.ReadFile.
+// vfsPath is the VFS-style path (e.g. "/npp/langs.xml") derived from the Windows path.
+func vfsReadFile(fs *vfs.VFS, vfsPath string) ([]byte, error) {
+	if fs != nil {
+		fd, err := fs.Open(vfsPath, vfs.O_RDONLY)
+		if err == nil {
+			var buf []byte
+			tmp := make([]byte, 4096)
+			for {
+				n, readErr := fs.Read(fd, tmp)
+				if n > 0 {
+					buf = append(buf, tmp[:n]...)
+				}
+				if readErr != nil {
+					break
+				}
+			}
+			fs.Close(fd)
+			return buf, nil
+		}
+	}
+	return os.ReadFile(vfsPath)
+}
+
+// vfsWriteFile writes data to filePath through the VFS first; falls back to os.WriteFile.
+func vfsWriteFile(fs *vfs.VFS, vfsPath string, data []byte) error {
+	if fs != nil {
+		fd, err := fs.Open(vfsPath, vfs.O_CREAT|vfs.O_TRUNC|vfs.O_RDWR)
+		if err == nil {
+			fs.Write(fd, data)
+			fs.Close(fd)
+			return nil
+		}
+	}
+	return os.WriteFile(vfsPath, data, 0644)
+}
+
 func (doc *xmlDoc) loadFromPath(imagePath, filePath string) bool {
+	return doc.loadFromPathVFS(nil, imagePath, filePath)
+}
+
+func (doc *xmlDoc) loadFromPathVFS(fs *vfs.VFS, imagePath, filePath string) bool {
 	hostPath := resolveMSXMLHostPath(imagePath, filePath)
 	if hostPath == "" {
 		doc.setParseError(hresultError(E_INVALIDARG))
 		return false
 	}
-	data, err := os.ReadFile(hostPath)
+	data, err := vfsReadFile(fs, hostPath)
 	if err != nil {
 		doc.setParseError(err)
 		doc.url = filePath
@@ -729,11 +771,15 @@ func (doc *xmlDoc) loadFromPath(imagePath, filePath string) bool {
 }
 
 func (doc *xmlDoc) saveToPath(imagePath, filePath string) error {
+	return doc.saveToPathVFS(nil, imagePath, filePath)
+}
+
+func (doc *xmlDoc) saveToPathVFS(fs *vfs.VFS, imagePath, filePath string) error {
 	hostPath := resolveMSXMLHostPath(imagePath, filePath)
 	if hostPath == "" {
 		return hresultError(E_INVALIDARG)
 	}
-	return os.WriteFile(hostPath, []byte(serializeXMLNode(doc.root)), 0644)
+	return vfsWriteFile(fs, hostPath, []byte(serializeXMLNode(doc.root)))
 }
 
 func variantStringValue(mem *mmu.MMU, addr uint64) (string, bool) {
@@ -1420,7 +1466,7 @@ func (cs *comState) dispatchXMLDocument(ctx *ntapi.TrapContext, obj *comObject, 
 		if !ok {
 			return DISP_E_TYPEMISMATCH
 		}
-		return writeBool16(ctx.Mem, ctx.Arg(2), doc.loadFromPath("", path))
+		return writeBool16(ctx.Mem, ctx.Arg(2), doc.loadFromPathVFS(ctx.FS, cs.hctx.ImagePath, path))
 	case 59:
 		state := int32(0)
 		if doc.loaded {
@@ -1447,7 +1493,7 @@ func (cs *comState) dispatchXMLDocument(ctx *ntapi.TrapContext, obj *comObject, 
 		if !ok {
 			return DISP_E_TYPEMISMATCH
 		}
-		if err := doc.saveToPath("", path); err != nil {
+		if err := doc.saveToPathVFS(ctx.FS, cs.hctx.ImagePath, path); err != nil {
 			return hresultFromError(err)
 		}
 		return S_OK

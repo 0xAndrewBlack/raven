@@ -1150,7 +1150,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			className = fmt.Sprintf("atom:0x%x", lpClassName)
 		} else {
 			className = readGuestUTF16(lpClassName)
-			classAtom = hctx.ClassNameAtom[className]
+			classAtom = hctx.ClassNameAtom[strings.ToLower(className)]
 		}
 		if classAtom != 0 {
 			hctx.HwndClassAtom[hwnd] = classAtom
@@ -1820,7 +1820,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 				name = readGuestUTF16(lpName)
 			}
 			if name != "" {
-				hctx.ClassNameAtom[name] = a
+				hctx.ClassNameAtom[strings.ToLower(name)] = a
 			}
 			hctx.ClassInfo[a] = &registeredClassInfo{
 				Style: style, WndProc: wndProc,
@@ -1839,8 +1839,8 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		if namePtr != 0 && namePtr < 0x10000 {
 			name = fmt.Sprintf("atom:0x%x", namePtr)
 		}
-		if atom, ok := hctx.ClassNameAtom[name]; ok {
-			delete(hctx.ClassNameAtom, name)
+		if atom, ok := hctx.ClassNameAtom[strings.ToLower(name)]; ok {
+			delete(hctx.ClassNameAtom, strings.ToLower(name))
 			delete(hctx.AtomWndProc, atom)
 			delete(hctx.ClassInfo, atom)
 		}
@@ -1853,7 +1853,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			return hctx.ClassInfo[uint16(nameArg)]
 		}
 		name := readGuestUTF16(nameArg)
-		return hctx.ClassInfo[hctx.ClassNameAtom[name]]
+		return hctx.ClassInfo[hctx.ClassNameAtom[strings.ToLower(name)]]
 	}
 	reg("NtUserGetClassInfo", func(ctx *ntapi.TrapContext) uint32 {
 		ci := getClassInfo(ctx)

@@ -1677,6 +1677,12 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 	signal.Notify(sigCh, os.Interrupt)
 	go func() {
 		for range sigCh {
+			// GUI apps (with a Wayland window) don't use console ctrl handlers;
+			// kill the process directly so Ctrl+C always works for the user.
+			if hctx.WlWindow != nil {
+				signal.Reset(os.Interrupt)
+				os.Exit(130)
+			}
 			consoleCtrlMu.Lock()
 			ignore := consoleCtrlIgnore
 			hasAny := ignore || len(consoleCtrlHandlers) > 0
@@ -4453,6 +4459,18 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		}
 		winPath := readGuestUTF16(pathPtr)
 		path := winPathToVFS(winPath)
+		// Check VFS first
+		if vnode, err := ctx.FS.StatPath(-1, path); err == nil {
+			var attrs uint32 = 0x20 // FILE_ATTRIBUTE_NORMAL
+			if vnode.IsDir {
+				attrs = 0x10 // FILE_ATTRIBUTE_DIRECTORY
+			}
+			if strings.HasPrefix(filepath.Base(path), ".") {
+				attrs |= 0x02 // FILE_ATTRIBUTE_HIDDEN
+			}
+			ctx.SetReturn(uint64(attrs))
+			return 0
+		}
 		info, err := os.Stat(path)
 		if err != nil {
 			ctx.SetReturn(0xFFFFFFFF) // INVALID_FILE_ATTRIBUTES
@@ -4460,11 +4478,11 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		}
 		var attrs uint32 = 0x20 // FILE_ATTRIBUTE_NORMAL
 		if info.IsDir() {
-			attrs = 0x10
-		} // FILE_ATTRIBUTE_DIRECTORY
+			attrs = 0x10 // FILE_ATTRIBUTE_DIRECTORY
+		}
 		if strings.HasPrefix(info.Name(), ".") {
-			attrs |= 0x02
-		} // FILE_ATTRIBUTE_HIDDEN
+			attrs |= 0x02 // FILE_ATTRIBUTE_HIDDEN
+		}
 		ctx.SetReturn(uint64(attrs))
 		return 0
 	})
@@ -4473,14 +4491,37 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		// fInfoLevelId := ctx.Arg(1) // always GetFileExInfoStandard (0)
 		lpFileInfo := ctx.Arg(2)
 		path := winPathToVFS(readGuestUTF16(lpFileName))
+		// WIN32_FILE_ATTRIBUTE_DATA layout:
+		// dwFileAttributes(4), ftCreationTime(8), ftLastAccessTime(8),
+		// ftLastWriteTime(8), nFileSizeHigh(4), nFileSizeLow(4)
+		const epochDiff = uint64(11644473600) * 10000000
+		// Check VFS first
+		if vnode, err := ctx.FS.StatPath(-1, path); err == nil {
+			var attrs uint32
+			if vnode.IsDir {
+				attrs = 0x10
+			} else {
+				attrs = 0x80
+			}
+			ctx.Mem.Write32(lpFileInfo, attrs)
+			ft := uint64(vnode.Mtime.UnixNano())/100 + epochDiff
+			ctx.Mem.Write32(lpFileInfo+4, uint32(ft))
+			ctx.Mem.Write32(lpFileInfo+8, uint32(ft>>32))
+			ctx.Mem.Write32(lpFileInfo+12, uint32(ft))
+			ctx.Mem.Write32(lpFileInfo+16, uint32(ft>>32))
+			ctx.Mem.Write32(lpFileInfo+20, uint32(ft))
+			ctx.Mem.Write32(lpFileInfo+24, uint32(ft>>32))
+			size := uint64(vnode.Size)
+			ctx.Mem.Write32(lpFileInfo+28, uint32(size>>32))
+			ctx.Mem.Write32(lpFileInfo+32, uint32(size))
+			ctx.SetReturn(1)
+			return 0
+		}
 		info, err := os.Stat(path)
 		if err != nil {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// WIN32_FILE_ATTRIBUTE_DATA layout:
-		// dwFileAttributes(4), ftCreationTime(8), ftLastAccessTime(8),
-		// ftLastWriteTime(8), nFileSizeHigh(4), nFileSizeLow(4)
 		var attrs uint32
 		if info.IsDir() {
 			attrs = 0x10 // FILE_ATTRIBUTE_DIRECTORY
@@ -4489,7 +4530,6 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		}
 		ctx.Mem.Write32(lpFileInfo, attrs)
 		// File times - use ModTime for all three (creation, access, write)
-		const epochDiff = uint64(11644473600) * 10000000
 		ft := uint64(info.ModTime().UnixNano())/100 + epochDiff
 		ctx.Mem.Write32(lpFileInfo+4, uint32(ft))
 		ctx.Mem.Write32(lpFileInfo+8, uint32(ft>>32))
