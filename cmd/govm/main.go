@@ -2511,6 +2511,49 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		gdiMgr.DeleteDC(h)
 	}
 
+	// NcDrawTextClipped: like NcDrawText but clips to (cx0,cy0,cx1,cy1) in absolute surface coords.
+	hctx.NcDrawTextClipped = func(x, y, cx0, cy0, cx1, cy1 int32, text string, fg, bg uint32, opaque bool, size int32) {
+		if wlWindow == nil {
+			return
+		}
+		f := hctx.NcTextFont(size)
+		if f == nil {
+			if x < cx0 {
+				x = cx0
+			}
+			wlWindow.DrawTextAbs(x, y, text, fg, bg, opaque)
+			return
+		}
+		syncScreenSurface()
+		h, dc := gdiMgr.AllocScreenDC()
+		dc.OriginX = 0
+		dc.OriginY = 0
+		dc.Font = f
+		dc.TextColor = fg
+		dc.BkColor = bg
+		dc.SetClipRect(cx0, cy0, cx1, cy1)
+		if opaque {
+			tw := int32(0)
+			pixSize := size
+			if pixSize < 0 {
+				pixSize = -pixSize
+			}
+			if pixSize == 0 {
+				pixSize = 12
+			}
+			for _, r := range text {
+				if g := gdi.GlyphFor(f.FaceID, pixSize, r); g != nil {
+					tw += g.Advance
+				} else {
+					tw += f.AveCharWidth
+				}
+			}
+			dc.FillRect(x, y, x+tw, y+f.CellHeight, bg)
+		}
+		dc.TextOut(x, y, text, opaque)
+		gdiMgr.DeleteDC(h)
+	}
+
 	// Wire real glyph-based text measurement for menu layout.
 	hctx.MeasureNcText = func(text string, size int32) int32 {
 		f := hctx.NcTextFont(size)
@@ -2993,7 +3036,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRectAbs(left, cs.y+cs.h-2, right-1, cs.y+cs.h-1, sysColors[20]) // bottom highlight
 						wlWindow.DrawRectAbs(right-2, cs.y+3, right-1, cs.y+cs.h-1, sysColors[20])   // right highlight
 						if i < len(cs.sbTexts) && cs.sbTexts[i] != "" {
-							hctx.NcDrawText(left+4, cs.y+4, cs.sbTexts[i], 0x000000, sysColors[15], true, 12)
+							// Clip text to pane bounds so adjacent panes don't bleed into each other.
+							hctx.NcDrawTextClipped(left+4, cs.y+4, left+4, cs.y+3, right-3, cs.y+cs.h-2, cs.sbTexts[i], 0x000000, sysColors[15], true, 12)
 						}
 						left = right
 					}
@@ -4640,7 +4684,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							continue
 						}
 						drawBtn(x, cs.y+padY, btnW, btnH)
-						// Draw icon if available
+						// Draw icon if available; resolve lazy handle if pixel data not yet loaded.
 						iconIdx := btn.iBitmap
 						iconW := int(cs.tbBitmapIconW)
 						iconH := int(cs.tbBitmapIconH)
@@ -4650,8 +4694,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if iconH <= 0 {
 							iconH = 16
 						}
-						if iconIdx >= 0 && iconIdx < len(cs.tbBitmapStore) && len(cs.tbBitmapStore[iconIdx]) > 0 {
-							pix := cs.tbBitmapStore[iconIdx]
+						var pix []uint32
+						if iconIdx >= 0 && iconIdx < len(cs.tbBitmapStore) {
+							pix = cs.tbBitmapStore[iconIdx]
+							if len(pix) == 0 && cs.tbHandleMap != nil {
+								if hbm, ok2 := cs.tbHandleMap[iconIdx]; ok2 {
+									if bd, ok3 := hctx.BitmapHandles[hbm]; ok3 && len(bd.slots) > 0 {
+										cs.tbBitmapStore[iconIdx] = bd.slots[0]
+										pix = cs.tbBitmapStore[iconIdx]
+									}
+								}
+							}
+						}
+						if len(pix) > 0 {
 							offX := x + (btnW-int32(iconW))/2
 							offY := cs.y + padY + (btnH-int32(iconH))/2
 							winW := int(wlWindow.Width)
@@ -4780,16 +4835,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						nBitmaps, hInst, nID, mainModule.BaseAddr, iconW, iconH)
 
 					if hInst == 0 {
-						// nID is an HBITMAP handle from LoadImage/LoadBitmap
+						// nID is an HBITMAP handle from LoadImage/LoadBitmap.
+						// If the handle does not exist yet (lazy-load ordering), store it in
+						// tbHandleMap for lazy resolution at render time.
 						if bd, ok2 := hctx.BitmapHandles[nID]; ok2 && len(bd.slots) > 0 {
-							// re-slice icons using requested icon size
-							// bd.slots may have been decoded with wrong size, re-decode from scratch if needed
-							// For now use slots as-is if count matches or just use them
 							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP handle found, %d slots\n", len(bd.slots))
 							cs.tbBitmapStore = append(cs.tbBitmapStore, bd.slots...)
 						} else {
-							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP handle 0x%x not found or empty\n", nID)
+							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP handle 0x%x not found - lazy\n", nID)
+							if cs.tbHandleMap == nil {
+								cs.tbHandleMap = make(map[int]uint64)
+							}
 							for i := 0; i < nBitmaps; i++ {
+								cs.tbHandleMap[startIdx+i] = nID
 								cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
 							}
 						}

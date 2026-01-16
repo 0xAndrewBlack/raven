@@ -128,7 +128,8 @@ type controlState struct {
 	tbBitmapIconW     int32
 	tbBitmapIconH     int32
 	tbBitmapStore     [][]uint32
-	tbImageList       uint64 // HIMAGELIST from TB_SETIMAGELIST
+	tbHandleMap       map[int]uint64 // slot index → pending HBITMAP handle (lazy resolution)
+	tbImageList       uint64         // HIMAGELIST from TB_SETIMAGELIST
 }
 
 type queuedMsg struct {
@@ -383,6 +384,7 @@ type HandlerCtx struct {
 	ScratchAlloc        func(uint64) uint64
 	NcTextFont          func(int32) *gdi.Font
 	NcDrawText          func(int32, int32, string, uint32, uint32, bool, int32)
+	NcDrawTextClipped   func(x, y, cx0, cy0, cx1, cy1 int32, text string, fg, bg uint32, opaque bool, size int32)
 	MeasureNcText       func(string, int32) int32 // measure text width in NC font
 	DrawMenuOverlay     func()
 	DrawDialogOverlay   func()

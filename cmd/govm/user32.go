@@ -5436,10 +5436,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 			}
 			wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
-			if rcRight <= rcLeft || rcBottom <= rcTop {
-				rcLeft, rcTop = 0, 0
-				rcRight, rcBottom = cs.w, cs.h
-			}
+			// Always give child windows the full client rect as rcPaint.
+			// Scintilla and other smart controls use rcPaint to determine what to redraw;
+			// giving them a partial dirty rect (e.g. 14px for one cursor line) causes
+			// them to only render a tiny strip instead of the full window.
+			// GDI ops are already clipped to absoluteClientRect so over-reporting is safe.
+			rcLeft, rcTop = 0, 0
+			rcRight, rcBottom = cs.w, cs.h
 			// Clip all GDI drawing to this child's client rect, including parent chain offset.
 			x0, y0, x1, y1 := absoluteClientRect(hwnd)
 			dc.SetClipRect(x0, y0, x1, y1)
