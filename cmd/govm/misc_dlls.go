@@ -1099,25 +1099,4 @@ func registerWintrustHandlers(hctx *HandlerCtx) {
 	})
 }
 
-func registerWininetHandlers(hctx *HandlerCtx) {
-	d := hctx.Disp
-
-	wininet, ok := hctx.SynthByName["wininet.dll"]
-	if !ok {
-		return
-	}
-	_ = wininet
-
-	d.RegisterAutoStubHandler(wininet, "InternetCrackUrlW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - no URL parsing in emulator
-		return 0
-	})
-	d.RegisterAutoStubHandler(wininet, "InternetGetConnectedState", func(ctx *ntapi.TrapContext) uint32 {
-		lpdwFlags := ctx.Arg(0)
-		if lpdwFlags != 0 {
-			ctx.Mem.Write32(lpdwFlags, 0x40)
-		} // INTERNET_CONNECTION_LAN
-		ctx.SetReturn(1) // TRUE
-		return 0
-	})
-}
+// registerWininetHandlers is in wininet.go with real HTTP implementation.
