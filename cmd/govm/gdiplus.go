@@ -27,30 +27,42 @@ var (
 )
 
 type gdipGraphics struct {
-	hdc        uint64
-	smoothing  int
-	textHint   int
-	ownsDC     bool
-	clipActive bool
-	clipX      float64
-	clipY      float64
-	clipW      float64
-	clipH      float64
-	world      [6]float64
-	nextState  uint32
-	saved      map[uint32]gdipGraphicsState
+	hdc             uint64
+	smoothing       int
+	textHint        int
+	compositingMode int
+	compositingQual int
+	interpMode      int
+	pixelOffsetMode int
+	pageUnit        int
+	pageScale       float32
+	ownsDC          bool
+	clipActive      bool
+	clipX           float64
+	clipY           float64
+	clipW           float64
+	clipH           float64
+	world           [6]float64
+	nextState       uint32
+	saved           map[uint32]gdipGraphicsState
 }
 
 type gdipGraphicsState struct {
-	dcLevel    int
-	smoothing  int
-	textHint   int
-	clipActive bool
-	clipX      float64
-	clipY      float64
-	clipW      float64
-	clipH      float64
-	world      [6]float64
+	dcLevel         int
+	smoothing       int
+	textHint        int
+	compositingMode int
+	compositingQual int
+	interpMode      int
+	pixelOffsetMode int
+	pageUnit        int
+	pageScale       float32
+	clipActive      bool
+	clipX           float64
+	clipY           float64
+	clipW           float64
+	clipH           float64
+	world           [6]float64
 }
 
 type gdipPen struct {
@@ -65,21 +77,26 @@ type gdipBrush struct {
 }
 
 type gdipFont struct {
-	family string
-	size   float32
-	style  int
-	unit   int
+	family       string
+	familyHandle uint64
+	size         float32
+	style        int
+	unit         int
 }
 
 type gdipImage struct {
-	width     int
-	height    int
-	format    int
-	data      []byte
-	stride    int
-	lockAddr  uint64
-	lockFlags uint32
-	locked    bool
+	width      int
+	height     int
+	format     int
+	data       []byte
+	stride     int
+	lockAddr   uint64
+	lockFlags  uint32
+	locked     bool
+	xdpi       float32
+	ydpi       float32
+	imgType    int
+	frameCount int
 }
 
 type gdipStringFormat struct {
@@ -97,6 +114,26 @@ type gdipPath struct {
 	figures  [][][2]float64
 	closed   []bool
 }
+
+type gdipRegion struct {
+	isInfinite bool
+	rectX      float64
+	rectY      float64
+	rectW      float64
+	rectH      float64
+}
+
+type gdipImageAttrs struct {
+	wrapMode   int
+	colorKey   bool
+	colorKeyLo uint32
+	colorKeyHi uint32
+}
+
+var (
+	gdipRegionMap     = map[uint64]*gdipRegion{}
+	gdipImageAttrsMap = map[uint64]*gdipImageAttrs{}
+)
 
 const (
 	GdipOk               = 0
@@ -291,15 +328,21 @@ func registerGdiplusHandlers(hctx *HandlerCtx) {
 			g.nextState = 1
 		}
 		g.saved[g.nextState] = gdipGraphicsState{
-			dcLevel:    dc.Save(),
-			smoothing:  g.smoothing,
-			textHint:   g.textHint,
-			clipActive: g.clipActive,
-			clipX:      g.clipX,
-			clipY:      g.clipY,
-			clipW:      g.clipW,
-			clipH:      g.clipH,
-			world:      g.world,
+			dcLevel:         dc.Save(),
+			smoothing:       g.smoothing,
+			textHint:        g.textHint,
+			clipActive:      g.clipActive,
+			clipX:           g.clipX,
+			clipY:           g.clipY,
+			clipW:           g.clipW,
+			clipH:           g.clipH,
+			world:           g.world,
+			compositingMode: g.compositingMode,
+			compositingQual: g.compositingQual,
+			interpMode:      g.interpMode,
+			pixelOffsetMode: g.pixelOffsetMode,
+			pageUnit:        g.pageUnit,
+			pageScale:       g.pageScale,
 		}
 		_ = ctx.Mem.Write32(out, g.nextState)
 		return GdipOk
@@ -323,6 +366,12 @@ func registerGdiplusHandlers(hctx *HandlerCtx) {
 		g.clipW = state.clipW
 		g.clipH = state.clipH
 		g.world = state.world
+		g.compositingMode = state.compositingMode
+		g.compositingQual = state.compositingQual
+		g.interpMode = state.interpMode
+		g.pixelOffsetMode = state.pixelOffsetMode
+		g.pageUnit = state.pageUnit
+		g.pageScale = state.pageScale
 		if g.clipActive {
 			gdipApplyClip(g, dc)
 		} else {
@@ -606,10 +655,11 @@ func registerGdiplusHandlers(hctx *HandlerCtx) {
 			return GdipInvalidParameter
 		}
 		h := gdipStoreFont(&gdipFont{
-			family: family,
-			size:   gdipRealArg32(ctx, 1),
-			style:  int(int32(ctx.Arg(2))),
-			unit:   int(int32(ctx.Arg(3))),
+			family:       family,
+			familyHandle: ctx.Arg(0),
+			size:         gdipRealArg32(ctx, 1),
+			style:        int(int32(ctx.Arg(2))),
+			unit:         int(int32(ctx.Arg(3))),
 		})
 		_ = ctx.Mem.Write64(out, h)
 		return GdipOk
@@ -746,11 +796,15 @@ func registerGdiplusHandlers(hctx *HandlerCtx) {
 			}
 		}
 		hImg := gdipStoreImage(&gdipImage{
-			width:  w,
-			height: h,
-			format: format,
-			data:   data,
-			stride: stride,
+			width:      w,
+			height:     h,
+			format:     format,
+			data:       data,
+			stride:     stride,
+			xdpi:       96,
+			ydpi:       96,
+			imgType:    1,
+			frameCount: 1,
 		})
 		_ = ctx.Mem.Write64(out, hImg)
 		return GdipOk
@@ -772,11 +826,15 @@ func registerGdiplusHandlers(hctx *HandlerCtx) {
 			copy(data, bm.Surf.Pix)
 		}
 		hImg := gdipStoreImage(&gdipImage{
-			width:  int(bm.Width),
-			height: int(bm.Height),
-			format: gdipPixelFormat32bppARGB,
-			data:   data,
-			stride: stride,
+			width:      int(bm.Width),
+			height:     int(bm.Height),
+			format:     gdipPixelFormat32bppARGB,
+			data:       data,
+			stride:     stride,
+			xdpi:       96,
+			ydpi:       96,
+			imgType:    1,
+			frameCount: 1,
 		})
 		_ = ctx.Mem.Write64(out, hImg)
 		return GdipOk
@@ -870,6 +928,9 @@ func registerGdiplusHandlers(hctx *HandlerCtx) {
 			return GdipGenericError
 		}
 		img, ok := gdipDecodeBMP(data)
+		if !ok {
+			img, ok = gdipDecodePNG(data)
+		}
 		if !ok {
 			return GdipNotImplemented
 		}
@@ -1037,6 +1098,14 @@ func registerGdiplusHandlers(hctx *HandlerCtx) {
 		gdipPathStartFigure(p)
 		return GdipOk
 	})
+
+	// Extension handlers (image I/O, path ops, regions) registered below
+	registerGdiplusHandlersExt(hctx)
+}
+
+// registerGdiplusHandlersExt is a placeholder for additional GDI+ handlers.
+// Additional GDI+ handlers belong here.
+func registerGdiplusHandlersExt(hctx *HandlerCtx) {
 }
 
 func gdipStoreGraphics(g *gdipGraphics) uint64 {
@@ -1689,11 +1758,15 @@ func gdipDecodeBMP(data []byte) (*gdipImage, bool) {
 		}
 	}
 	return &gdipImage{
-		width:  w,
-		height: h,
-		format: gdipPixelFormat32bppARGB,
-		data:   dst,
-		stride: dstStride,
+		width:      w,
+		height:     h,
+		format:     gdipPixelFormat32bppARGB,
+		data:       dst,
+		stride:     dstStride,
+		xdpi:       96,
+		ydpi:       96,
+		imgType:    1,
+		frameCount: 1,
 	}, true
 }
 
@@ -1804,4 +1877,644 @@ func gdipPathAddEllipse(p *gdipPath, x, y, w, h float64) {
 		p.figures[idx] = append(p.figures[idx], [2]float64{cx + rx*math.Cos(t), cy + ry*math.Sin(t)})
 	}
 	p.closed[idx] = true
+}
+
+func gdipStoreRegion(r *gdipRegion) uint64 {
+	gdipMu.Lock()
+	defer gdipMu.Unlock()
+	h := gdipNextHandle
+	gdipNextHandle++
+	gdipRegionMap[h] = r
+	return h
+}
+
+func gdipGetRegion(h uint64) (*gdipRegion, bool) {
+	gdipMu.Lock()
+	defer gdipMu.Unlock()
+	r, ok := gdipRegionMap[h]
+	return r, ok
+}
+
+func gdipStoreImageAttrs(a *gdipImageAttrs) uint64 {
+	gdipMu.Lock()
+	defer gdipMu.Unlock()
+	h := gdipNextHandle
+	gdipNextHandle++
+	gdipImageAttrsMap[h] = a
+	return h
+}
+
+func gdipGetImageAttrs(h uint64) (*gdipImageAttrs, bool) {
+	if h == 0 {
+		return nil, false
+	}
+	gdipMu.Lock()
+	defer gdipMu.Unlock()
+	a, ok := gdipImageAttrsMap[h]
+	return a, ok
+}
+
+func gdipPathAddBezier(p *gdipPath, x1, y1, x2, y2, x3, y3, x4, y4 float64) {
+	idx := gdipPathEnsureFigure(p)
+	if len(p.figures[idx]) == 0 {
+		p.figures[idx] = append(p.figures[idx], [2]float64{x1, y1})
+	}
+	steps := 16
+	for i := 1; i <= steps; i++ {
+		t := float64(i) / float64(steps)
+		u := 1 - t
+		px := u*u*u*x1 + 3*u*u*t*x2 + 3*u*t*t*x3 + t*t*t*x4
+		py := u*u*u*y1 + 3*u*u*t*y2 + 3*u*t*t*y3 + t*t*t*y4
+		p.figures[idx] = append(p.figures[idx], [2]float64{px, py})
+	}
+}
+
+func gdipPathAddPie(p *gdipPath, x, y, w, h, startDeg, sweepDeg float64) {
+	cx := x + w/2
+	cy := y + h/2
+	rx := w / 2
+	ry := h / 2
+	gdipPathStartFigure(p)
+	idx := gdipPathEnsureFigure(p)
+	p.figures[idx] = append(p.figures[idx], [2]float64{cx, cy})
+	steps := 16
+	for i := 0; i <= steps; i++ {
+		t := (startDeg + sweepDeg*float64(i)/float64(steps)) * math.Pi / 180
+		px := cx + rx*math.Cos(t)
+		py := cy + ry*math.Sin(t)
+		p.figures[idx] = append(p.figures[idx], [2]float64{px, py})
+	}
+	p.closed[idx] = true
+}
+
+func gdipPathAddPolygon(p *gdipPath, pts [][2]float64) {
+	if len(pts) < 3 {
+		return
+	}
+	gdipPathStartFigure(p)
+	idx := gdipPathEnsureFigure(p)
+	p.figures[idx] = append(p.figures[idx], pts...)
+	p.closed[idx] = true
+}
+
+func gdipPathAddClosedCurve(p *gdipPath, pts [][2]float64) {
+	if len(pts) < 3 {
+		return
+	}
+	gdipPathStartFigure(p)
+	idx := gdipPathEnsureFigure(p)
+	cardPts := gdipCardinalSpline(pts, 0.5, true)
+	p.figures[idx] = append(p.figures[idx], cardPts...)
+	p.closed[idx] = true
+}
+
+func gdipPathAddCurve(p *gdipPath, pts [][2]float64) {
+	if len(pts) < 2 {
+		return
+	}
+	idx := gdipPathEnsureFigure(p)
+	cardPts := gdipCardinalSpline(pts, 0.5, false)
+	p.figures[idx] = append(p.figures[idx], cardPts...)
+}
+
+func gdipPathAddLines(p *gdipPath, pts [][2]float64) {
+	if len(pts) < 2 {
+		return
+	}
+	idx := gdipPathEnsureFigure(p)
+	if len(p.figures[idx]) == 0 {
+		p.figures[idx] = append(p.figures[idx], pts[0])
+	}
+	p.figures[idx] = append(p.figures[idx], pts[1:]...)
+}
+
+// gdipCardinalSpline converts control points to a polyline via Catmull-Rom interpolation.
+func gdipCardinalSpline(pts [][2]float64, tension float64, closed bool) [][2]float64 {
+	n := len(pts)
+	if n < 2 {
+		return pts
+	}
+	steps := 8
+	result := make([][2]float64, 0, n*steps)
+	count := n
+	if !closed {
+		count = n - 1
+	}
+	for i := 0; i < count; i++ {
+		p0 := pts[(i-1+n)%n]
+		p1 := pts[i]
+		p2 := pts[(i+1)%n]
+		p3 := pts[(i+2)%n]
+		if !closed {
+			if i == 0 {
+				p0 = p1
+			}
+			if i >= n-2 {
+				p3 = p2
+			}
+		}
+		for s := 0; s < steps; s++ {
+			t := float64(s) / float64(steps)
+			t2 := t * t
+			t3 := t2 * t
+			h1 := 2*t3 - 3*t2 + 1
+			h2 := t3 - 2*t2 + t
+			h3 := -2*t3 + 3*t2
+			h4 := t3 - t2
+			px := h1*p1[0] + h2*tension*(p2[0]-p0[0]) + h3*p2[0] + h4*tension*(p3[0]-p1[0])
+			py := h1*p1[1] + h2*tension*(p2[1]-p0[1]) + h3*p2[1] + h4*tension*(p3[1]-p1[1])
+			result = append(result, [2]float64{px, py})
+		}
+	}
+	if !closed && n > 1 {
+		result = append(result, pts[n-1])
+	}
+	return result
+}
+
+func gdipArcToPoints(x, y, w, h, startDeg, sweepDeg float64) [][2]float64 {
+	cx := x + w/2
+	cy := y + h/2
+	rx := w / 2
+	ry := h / 2
+	steps := int(math.Abs(sweepDeg)/5) + 4
+	if steps < 4 {
+		steps = 4
+	}
+	pts := make([][2]float64, 0, steps+1)
+	for i := 0; i <= steps; i++ {
+		t := (startDeg + sweepDeg*float64(i)/float64(steps)) * math.Pi / 180
+		pts = append(pts, [2]float64{cx + rx*math.Cos(t), cy + ry*math.Sin(t)})
+	}
+	return pts
+}
+
+func gdipPieToPoints(x, y, w, h, startDeg, sweepDeg float64) [][2]float64 {
+	cx := x + w/2
+	cy := y + h/2
+	rx := w / 2
+	ry := h / 2
+	steps := int(math.Abs(sweepDeg)/5) + 4
+	if steps < 4 {
+		steps = 4
+	}
+	pts := make([][2]float64, 0, steps+3)
+	pts = append(pts, [2]float64{cx, cy})
+	for i := 0; i <= steps; i++ {
+		t := (startDeg + sweepDeg*float64(i)/float64(steps)) * math.Pi / 180
+		pts = append(pts, [2]float64{cx + rx*math.Cos(t), cy + ry*math.Sin(t)})
+	}
+	pts = append(pts, [2]float64{cx, cy})
+	return pts
+}
+
+func gdipReadPointsF(mem *mmu.MMU, addr uint64, count int) [][2]float64 {
+	pts := make([][2]float64, 0, count)
+	for i := 0; i < count; i++ {
+		off := addr + uint64(i*8)
+		x := gdipReadFloat32(mem, off)
+		y := gdipReadFloat32(mem, off+4)
+		pts = append(pts, [2]float64{float64(x), float64(y)})
+	}
+	return pts
+}
+
+func gdipReadPointsI(mem *mmu.MMU, addr uint64, count int) [][2]float64 {
+	pts := make([][2]float64, 0, count)
+	for i := 0; i < count; i++ {
+		x, _ := mem.Read32(addr + uint64(i*8))
+		y, _ := mem.Read32(addr + uint64(i*8+4))
+		pts = append(pts, [2]float64{float64(int32(x)), float64(int32(y))})
+	}
+	return pts
+}
+
+func gdipToIntPts(g *gdipGraphics, pts [][2]float64) [][2]int32 {
+	result := make([][2]int32, len(pts))
+	for i, p := range pts {
+		tx, ty := gdipTransformPoint(g, p[0], p[1])
+		result[i] = [2]int32{int32(math.Round(tx)), int32(math.Round(ty))}
+	}
+	return result
+}
+
+func gdipImageRotateFlipData(img *gdipImage, rfType int) {
+	w, h := img.width, img.height
+	stride := img.stride
+	rotate := rfType & 3
+	flip := (rfType & 4) != 0
+
+	src := make([]byte, len(img.data))
+	copy(src, img.data)
+
+	var nw, nh int
+	switch rotate {
+	case 0:
+		nw, nh = w, h
+	case 1:
+		nw, nh = h, w
+	case 2:
+		nw, nh = w, h
+	case 3:
+		nw, nh = h, w
+	default:
+		nw, nh = w, h
+	}
+	nstride := nw * 4
+	dst := make([]byte, nstride*nh)
+
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			srcOff := y*stride + x*4
+			var dx, dy int
+			switch rotate {
+			case 0:
+				dx, dy = x, y
+			case 1:
+				dx, dy = h-1-y, x
+			case 2:
+				dx, dy = w-1-x, h-1-y
+			case 3:
+				dx, dy = y, w-1-x
+			}
+			if flip {
+				dx = nw - 1 - dx
+			}
+			dstOff := dy*nstride + dx*4
+			if srcOff+4 <= len(src) && dstOff+4 <= len(dst) {
+				copy(dst[dstOff:dstOff+4], src[srcOff:srcOff+4])
+			}
+		}
+	}
+	img.width = nw
+	img.height = nh
+	img.stride = nstride
+	img.data = dst
+}
+
+func gdipImageGetPixel(img *gdipImage, x, y int) uint32 {
+	if x < 0 || y < 0 || x >= img.width || y >= img.height {
+		return 0
+	}
+	off := y*img.stride + x*4
+	if off+4 > len(img.data) {
+		return 0
+	}
+	b := img.data[off]
+	green := img.data[off+1]
+	r := img.data[off+2]
+	a := img.data[off+3]
+	return uint32(a)<<24 | uint32(r)<<16 | uint32(green)<<8 | uint32(b)
+}
+
+func gdipImageSetPixel(img *gdipImage, x, y int, argb uint32) {
+	if x < 0 || y < 0 || x >= img.width || y >= img.height {
+		return
+	}
+	off := y*img.stride + x*4
+	if off+4 > len(img.data) {
+		return
+	}
+	img.data[off] = byte(argb)
+	img.data[off+1] = byte(argb >> 8)
+	img.data[off+2] = byte(argb >> 16)
+	img.data[off+3] = byte(argb >> 24)
+}
+
+func gdipCloneImageData(img *gdipImage) *gdipImage {
+	data := make([]byte, len(img.data))
+	copy(data, img.data)
+	return &gdipImage{
+		width:      img.width,
+		height:     img.height,
+		format:     img.format,
+		data:       data,
+		stride:     img.stride,
+		xdpi:       img.xdpi,
+		ydpi:       img.ydpi,
+		imgType:    img.imgType,
+		frameCount: img.frameCount,
+	}
+}
+
+func gdipMatrixInvert(m [6]float64) ([6]float64, bool) {
+	det := m[0]*m[3] - m[1]*m[2]
+	if det == 0 {
+		return m, false
+	}
+	inv := 1.0 / det
+	return [6]float64{
+		m[3] * inv,
+		-m[1] * inv,
+		-m[2] * inv,
+		m[0] * inv,
+		(m[2]*m[5] - m[3]*m[4]) * inv,
+		(m[1]*m[4] - m[0]*m[5]) * inv,
+	}, true
+}
+
+func gdipShearMatrix(sx, sy float64) [6]float64 {
+	return [6]float64{1, sy, sx, 1, 0, 0}
+}
+
+func gdipMatrixTransformPoints(m [6]float64, pts [][2]float64) {
+	for i := range pts {
+		x, y := pts[i][0], pts[i][1]
+		pts[i][0] = x*m[0] + y*m[2] + m[4]
+		pts[i][1] = x*m[1] + y*m[3] + m[5]
+	}
+}
+
+func gdipPathTotalPointCount(p *gdipPath) int {
+	n := 0
+	for _, fig := range p.figures {
+		n += len(fig)
+	}
+	return n
+}
+
+// gdipEncodePNG encodes BGRA pixel data to PNG format.
+func gdipEncodePNG(width, height, stride int, data []byte) []byte {
+	var buf []byte
+	buf = append(buf, 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A)
+
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], uint32(width))
+	binary.BigEndian.PutUint32(ihdr[4:8], uint32(height))
+	ihdr[8] = 8  // bit depth
+	ihdr[9] = 6  // RGBA
+	ihdr[10] = 0 // compression
+	ihdr[11] = 0 // filter
+	ihdr[12] = 0 // interlace
+	buf = append(buf, gdipPNGChunk([]byte("IHDR"), ihdr)...)
+
+	rawRows := make([]byte, 0, height*(1+width*4))
+	for y := 0; y < height; y++ {
+		rawRows = append(rawRows, 0) // filter: none
+		for x := 0; x < width; x++ {
+			off := y*stride + x*4
+			if off+4 <= len(data) {
+				rawRows = append(rawRows, data[off+2], data[off+1], data[off], data[off+3])
+			} else {
+				rawRows = append(rawRows, 0, 0, 0, 255)
+			}
+		}
+	}
+	zdata := gdipZlibStore(rawRows)
+	buf = append(buf, gdipPNGChunk([]byte("IDAT"), zdata)...)
+	buf = append(buf, gdipPNGChunk([]byte("IEND"), nil)...)
+	return buf
+}
+
+func gdipPNGChunk(chunkType, data []byte) []byte {
+	length := len(data)
+	chunk := make([]byte, 4+4+length+4)
+	binary.BigEndian.PutUint32(chunk[0:4], uint32(length))
+	copy(chunk[4:8], chunkType)
+	if length > 0 {
+		copy(chunk[8:], data)
+	}
+	crc := gdipCRC32(chunk[4 : 8+length])
+	binary.BigEndian.PutUint32(chunk[8+length:], crc)
+	return chunk
+}
+
+func gdipZlibStore(data []byte) []byte {
+	var buf []byte
+	buf = append(buf, 0x78, 0x01)
+	remaining := len(data)
+	offset := 0
+	for remaining > 0 {
+		blockSize := remaining
+		if blockSize > 65535 {
+			blockSize = 65535
+		}
+		last := byte(0)
+		if remaining <= 65535 {
+			last = 1
+		}
+		buf = append(buf, last)
+		buf = append(buf, byte(blockSize), byte(blockSize>>8))
+		nlen := blockSize ^ 0xFFFF
+		buf = append(buf, byte(nlen), byte(nlen>>8))
+		buf = append(buf, data[offset:offset+blockSize]...)
+		offset += blockSize
+		remaining -= blockSize
+	}
+	a32 := gdipAdler32(data)
+	buf = append(buf, byte(a32>>24), byte(a32>>16), byte(a32>>8), byte(a32))
+	return buf
+}
+
+var gdipCRCTable [256]uint32
+
+func init() {
+	for i := 0; i < 256; i++ {
+		c := uint32(i)
+		for j := 0; j < 8; j++ {
+			if c&1 != 0 {
+				c = 0xEDB88320 ^ (c >> 1)
+			} else {
+				c >>= 1
+			}
+		}
+		gdipCRCTable[i] = c
+	}
+}
+
+func gdipCRC32(data []byte) uint32 {
+	crc := ^uint32(0)
+	for _, b := range data {
+		crc = gdipCRCTable[byte(crc)^b] ^ (crc >> 8)
+	}
+	return ^crc
+}
+
+func gdipAdler32(data []byte) uint32 {
+	a, b := uint32(1), uint32(0)
+	for _, d := range data {
+		a = (a + uint32(d)) % 65521
+		b = (b + a) % 65521
+	}
+	return (b << 16) | a
+}
+
+// gdipDecodePNG is a minimal PNG decoder for 8-bit RGB/RGBA images.
+func gdipDecodePNG(data []byte) (*gdipImage, bool) {
+	if len(data) < 8 {
+		return nil, false
+	}
+	if data[0] != 0x89 || data[1] != 'P' || data[2] != 'N' || data[3] != 'G' {
+		return nil, false
+	}
+	offset := 8
+	var width, height int
+	var bitDepth, colorType byte
+	var idatData []byte
+	for offset+8 <= len(data) {
+		chunkLen := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		chunkType := string(data[offset+4 : offset+8])
+		if offset+8+chunkLen+4 > len(data) {
+			break
+		}
+		chunkData := data[offset+8 : offset+8+chunkLen]
+		switch chunkType {
+		case "IHDR":
+			if chunkLen < 13 {
+				return nil, false
+			}
+			width = int(binary.BigEndian.Uint32(chunkData[0:4]))
+			height = int(binary.BigEndian.Uint32(chunkData[4:8]))
+			bitDepth = chunkData[8]
+			colorType = chunkData[9]
+			if bitDepth != 8 || (colorType != 2 && colorType != 6) {
+				return nil, false
+			}
+		case "IDAT":
+			idatData = append(idatData, chunkData...)
+		}
+		offset += 8 + chunkLen + 4
+	}
+	if width == 0 || height == 0 || len(idatData) == 0 {
+		return nil, false
+	}
+	raw := gdipZlibDecompress(idatData)
+	if raw == nil {
+		return nil, false
+	}
+	channels := 3
+	if colorType == 6 {
+		channels = 4
+	}
+	rowLen := 1 + width*channels
+	if len(raw) < height*rowLen {
+		return nil, false
+	}
+	dstStride := width * 4
+	pix := make([]byte, dstStride*height)
+	prevRow := make([]byte, width*channels)
+	for y := 0; y < height; y++ {
+		rowOff := y * rowLen
+		filter := raw[rowOff]
+		curRow := make([]byte, width*channels)
+		copy(curRow, raw[rowOff+1:rowOff+1+width*channels])
+		gdipPNGUnfilter(curRow, prevRow, channels, filter)
+		for x := 0; x < width; x++ {
+			si := x * channels
+			di := y*dstStride + x*4
+			r, g, b := curRow[si], curRow[si+1], curRow[si+2]
+			a := byte(255)
+			if channels == 4 {
+				a = curRow[si+3]
+			}
+			pix[di] = b
+			pix[di+1] = g
+			pix[di+2] = r
+			pix[di+3] = a
+		}
+		copy(prevRow, curRow)
+	}
+	return &gdipImage{
+		width:      width,
+		height:     height,
+		format:     gdipPixelFormat32bppARGB,
+		data:       pix,
+		stride:     dstStride,
+		xdpi:       96,
+		ydpi:       96,
+		imgType:    1,
+		frameCount: 1,
+	}, true
+}
+
+func gdipPNGUnfilter(cur, prev []byte, bpp int, filter byte) {
+	switch filter {
+	case 1: // Sub
+		for i := bpp; i < len(cur); i++ {
+			cur[i] += cur[i-bpp]
+		}
+	case 2: // Up
+		for i := 0; i < len(cur); i++ {
+			cur[i] += prev[i]
+		}
+	case 3: // Average
+		for i := 0; i < len(cur); i++ {
+			a := byte(0)
+			if i >= bpp {
+				a = cur[i-bpp]
+			}
+			cur[i] += byte((int(a) + int(prev[i])) / 2)
+		}
+	case 4: // Paeth
+		for i := 0; i < len(cur); i++ {
+			a := byte(0)
+			if i >= bpp {
+				a = cur[i-bpp]
+			}
+			b := prev[i]
+			c := byte(0)
+			if i >= bpp {
+				c = prev[i-bpp]
+			}
+			cur[i] += gdipPaeth(a, b, c)
+		}
+	}
+}
+
+func gdipPaeth(a, b, c byte) byte {
+	p := int(a) + int(b) - int(c)
+	pa := p - int(a)
+	if pa < 0 {
+		pa = -pa
+	}
+	pb := p - int(b)
+	if pb < 0 {
+		pb = -pb
+	}
+	pc := p - int(c)
+	if pc < 0 {
+		pc = -pc
+	}
+	if pa <= pb && pa <= pc {
+		return a
+	}
+	if pb <= pc {
+		return b
+	}
+	return c
+}
+
+// gdipZlibDecompress decompresses zlib store blocks (minimal implementation).
+func gdipZlibDecompress(data []byte) []byte {
+	if len(data) < 6 {
+		return nil
+	}
+	offset := 2
+	var out []byte
+	for offset < len(data)-4 {
+		if offset >= len(data) {
+			break
+		}
+		bfinal := data[offset] & 1
+		btype := (data[offset] >> 1) & 3
+		offset++
+		if btype == 0 {
+			if offset+4 > len(data) {
+				break
+			}
+			length := int(data[offset]) | int(data[offset+1])<<8
+			offset += 4
+			if offset+length > len(data) {
+				length = len(data) - offset
+			}
+			out = append(out, data[offset:offset+length]...)
+			offset += length
+		} else {
+			return out
+		}
+		if bfinal != 0 {
+			break
+		}
+	}
+	return out
 }
