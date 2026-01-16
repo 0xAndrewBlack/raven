@@ -2305,6 +2305,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	delayReg(func() { registerAdvapi32Handlers1(hctx) })
 
+	// --- kernelbase.dll (extra handlers not covered by kernel32 alias) ---
+	delayReg(func() { registerKernelbaseHandlers(hctx) })
+
+	// --- vcruntime140.dll ---
+	delayReg(func() { registerVcruntime140Handlers(hctx) })
+
+	// --- msvcp140.dll ---
+	delayReg(func() { registerMsvcp140Handlers(hctx) })
+
 	// Simple handle generator for GDI objects, windows, etc.
 	hctx.NextGDIHandle = 0xD0010001 // GDI handle space
 	gdiAlloc := func() uint64 {
@@ -5897,6 +5906,8 @@ func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[stri
 			return "advapi32.dll"
 		case strings.HasPrefix(name, "api-ms-win-shcore-"):
 			return "shcore.dll"
+		case name == "kernelbase.dll":
+			return "kernel32.dll"
 		default:
 			return name
 		}
