@@ -619,7 +619,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			name := readGuestUTF16(lpName)
 			if name != "" {
-				hctx.ClassNameAtom[name] = a
+				hctx.ClassNameAtom[strings.ToLower(name)] = a
 			}
 			hctx.ClassInfo[a] = &registeredClassInfo{
 				Style: style, WndProc: wndProc,
@@ -680,7 +680,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				name = readGuestUTF16(lpName)
 			}
 			if name != "" {
-				hctx.ClassNameAtom[name] = a
+				hctx.ClassNameAtom[strings.ToLower(name)] = a
 			}
 			hctx.ClassInfo[a] = &registeredClassInfo{
 				Style: style, WndProc: wndProc,
@@ -748,7 +748,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			className = fmt.Sprintf("atom:0x%x", lpClassName)
 		} else if lpClassName != 0 {
 			className = readGuestUTF16(lpClassName)
-			if a, ok := hctx.ClassNameAtom[className]; ok {
+			if a, ok := hctx.ClassNameAtom[strings.ToLower(className)]; ok {
 				classAtomForHwnd = a
 				if wp, ok2 := hctx.AtomWndProc[a]; ok2 {
 					hwndWndProc[hwnd] = wp
@@ -883,7 +883,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 							classAtom = uint16(lpClassName)
 						} else {
 							cn := readGuestUTF16(lpClassName)
-							classAtom = hctx.ClassNameAtom[cn]
+							classAtom = hctx.ClassNameAtom[strings.ToLower(cn)]
 						}
 						if mh, ok := hctx.ClassMenuHandle[classAtom]; ok {
 							hwndMenuBar[hwnd] = mh
@@ -8646,7 +8646,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			atom = uint16(lpClassName)
 		} else {
 			name := readGuestUTF16(lpClassName)
-			atom = hctx.ClassNameAtom[name]
+			atom = hctx.ClassNameAtom[strings.ToLower(name)]
 		}
 		ci := hctx.ClassInfo[atom]
 		if ci == nil {
@@ -8678,7 +8678,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			atom = uint16(lpClassName)
 		} else {
 			name := readGuestString(lpClassName)
-			atom = hctx.ClassNameAtom[name]
+			atom = hctx.ClassNameAtom[strings.ToLower(name)]
 		}
 		ci := hctx.ClassInfo[atom]
 		if ci == nil {
@@ -8710,7 +8710,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			atom = uint16(lpClassName)
 		} else {
 			name := readGuestUTF16(lpClassName)
-			atom = hctx.ClassNameAtom[name]
+			atom = hctx.ClassNameAtom[strings.ToLower(name)]
 		}
 		ci := hctx.ClassInfo[atom]
 		if ci == nil {
@@ -8740,7 +8740,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			atom = uint16(lpClassName)
 		} else {
 			name := readGuestString(lpClassName)
-			atom = hctx.ClassNameAtom[name]
+			atom = hctx.ClassNameAtom[strings.ToLower(name)]
 		}
 		ci := hctx.ClassInfo[atom]
 		if ci == nil {
@@ -10530,7 +10530,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			name := readGuestString(lpName)
 			if name != "" {
-				hctx.ClassNameAtom[name] = a
+				hctx.ClassNameAtom[strings.ToLower(name)] = a
 			}
 			hctx.ClassInfo[a] = &registeredClassInfo{
 				Style: style, WndProc: wndProc,
@@ -10585,7 +10585,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			name := readGuestString(lpName)
 			if name != "" {
-				hctx.ClassNameAtom[name] = a
+				hctx.ClassNameAtom[strings.ToLower(name)] = a
 			}
 			hctx.ClassInfo[a] = &registeredClassInfo{
 				Style: style, WndProc: wndProc,
@@ -10626,7 +10626,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			className = fmt.Sprintf("atom:0x%x", lpClassName)
 		} else if lpClassName != 0 {
 			className = readGuestString(lpClassName)
-			if a, ok := hctx.ClassNameAtom[className]; ok {
+			if a, ok := hctx.ClassNameAtom[strings.ToLower(className)]; ok {
 				classAtomForHwnd = a
 				if wp, ok2 := hctx.AtomWndProc[a]; ok2 {
 					hwndWndProc[hwnd] = wp

@@ -552,7 +552,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	}
 
 	// Auto-generate synthetic stub DLLs for any unresolved import DLLs
-	autoSynthDLLs := autoSynthUnresolved(mem, result.MainModule, loadedModules)
+	autoSynthDLLs, synthAliases := autoSynthUnresolved(mem, result.MainModule, loadedModules)
 	// Pre-create shcore.dll so DPI functions are available via GetProcAddress
 	synthShcore := ntapi.GenerateSynthDLL(mem, "shcore.dll", []string{}, 0)
 	// Include pre-generated full DLLs so their handlers are wired in registerAutoSynthHandlers.
@@ -569,6 +569,13 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 			ImageSize: synth.ImageSize,
 			Entry:     synth.BaseAddr,
 		})
+	}
+	// Register forwarding DLL aliases (api-ms-win-crt-* → ucrtbase.dll, etc.) so
+	// that ResolveImports can find and patch their IAT entries correctly.
+	for alias, canonical := range synthAliases {
+		if mod, ok := loadedModules[canonical]; ok {
+			loadedModules[alias] = mod
+		}
 	}
 
 	// Add well-known ordinal aliases for auto-synth DLLs.
@@ -5862,9 +5869,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 // autoSynthUnresolved generates synthetic stub DLLs for any DLLs referenced
 // in the main module's imports that aren't already in loadedModules.
-func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[string]*loader.PEModule) []*ntapi.SynthPE {
-	// Collect function names per unresolved DLL
-	needed := make(map[string][]string) // dll name → function names
+// Returns the synths and a map of alias→canonical DLL names (for IAT patching).
+func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[string]*loader.PEModule) ([]*ntapi.SynthPE, map[string]string) {
+	// Canonicalize api-ms-win-crt-* and api-ms-win-core-* to their real DLLs so
+	// all their functions share a single SynthPE and a single set of handler IDs.
+	// Without this, each forwarding DLL gets its own unique stub IDs, making it
+	// impossible to register handlers in one place for both ucrtbase.dll and
+	// api-ms-win-crt-runtime-l1-1-0.dll (etc.).
+	canonicalize := func(name string) string {
+		switch {
+		case strings.HasPrefix(name, "api-ms-win-crt-"):
+			return "ucrtbase.dll"
+		case strings.HasPrefix(name, "api-ms-win-core-"):
+			return "kernel32.dll"
+		case strings.HasPrefix(name, "api-ms-win-security-"):
+			return "advapi32.dll"
+		case strings.HasPrefix(name, "api-ms-win-shcore-"):
+			return "shcore.dll"
+		default:
+			return name
+		}
+	}
+
+	aliases := make(map[string]string) // original name → canonical name
+	needed := make(map[string][]string) // canonical dll name → function names
 	for _, imp := range mainMod.Imports {
 		dllKey := strings.ToLower(imp.DLLName)
 		if _, ok := loaded[dllKey]; ok {
@@ -5873,12 +5901,20 @@ func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[stri
 		if _, ok := loaded[strings.TrimSuffix(dllKey, ".dll")]; ok {
 			continue
 		}
+		canonical := canonicalize(dllKey)
+		if canonical != dllKey {
+			aliases[dllKey] = canonical
+			// If the canonical DLL is already loaded, we only need the alias.
+			if _, ok := loaded[canonical]; ok {
+				continue
+			}
+		}
 		if imp.FuncName != "" {
-			needed[dllKey] = append(needed[dllKey], imp.FuncName)
+			needed[canonical] = append(needed[canonical], imp.FuncName)
 		} else {
 			// Ordinal-only import: use a generated placeholder so the DLL gets a synth
 			placeholder := fmt.Sprintf("ord_%d", imp.Ordinal)
-			needed[dllKey] = append(needed[dllKey], placeholder)
+			needed[canonical] = append(needed[canonical], placeholder)
 		}
 	}
 
@@ -5900,7 +5936,7 @@ func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[stri
 		ravelog.Logf("[pe] auto-synth %s: %d stubs (id base 0x%X)\n",
 			dllName, len(unique), nextID-uint32(len(unique)))
 	}
-	return result
+	return result, aliases
 }
 
 // patchCRTDataExports fixes IAT slots for known msvcrt data exports.
