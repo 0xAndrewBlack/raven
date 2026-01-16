@@ -60,6 +60,14 @@ type bitmapHandleData struct {
 	pix   []uint32
 }
 
+// tbLazyRef tracks a not-yet-loaded toolbar bitmap slot.
+// When TB_ADDBITMAP is called before LoadImage creates the HBITMAP, we store
+// the expected handle and the slot offset within that bitmap strip.
+type tbLazyRef struct {
+	handle    uint64
+	slotIndex int
+}
+
 type treeItem struct {
 	handle   uint64
 	parent   uint64
@@ -128,7 +136,7 @@ type controlState struct {
 	tbBitmapIconW     int32
 	tbBitmapIconH     int32
 	tbBitmapStore     [][]uint32
-	tbHandleMap       map[int]uint64 // slot index → pending HBITMAP handle (lazy resolution)
+	tbHandleMap       map[int]tbLazyRef // slot index → pending HBITMAP handle + slot offset (lazy resolution)
 	tbImageList       uint64         // HIMAGELIST from TB_SETIMAGELIST
 }
 

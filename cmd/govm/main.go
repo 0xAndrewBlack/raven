@@ -4698,9 +4698,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if iconIdx >= 0 && iconIdx < len(cs.tbBitmapStore) {
 							pix = cs.tbBitmapStore[iconIdx]
 							if len(pix) == 0 && cs.tbHandleMap != nil {
-								if hbm, ok2 := cs.tbHandleMap[iconIdx]; ok2 {
-									if bd, ok3 := hctx.BitmapHandles[hbm]; ok3 && len(bd.slots) > 0 {
-										cs.tbBitmapStore[iconIdx] = bd.slots[0]
+								if ref, ok2 := cs.tbHandleMap[iconIdx]; ok2 {
+									if bd, ok3 := hctx.BitmapHandles[ref.handle]; ok3 && ref.slotIndex < len(bd.slots) {
+										cs.tbBitmapStore[iconIdx] = bd.slots[ref.slotIndex]
 										pix = cs.tbBitmapStore[iconIdx]
 									}
 								}
@@ -4844,10 +4844,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						} else {
 							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP handle 0x%x not found - lazy\n", nID)
 							if cs.tbHandleMap == nil {
-								cs.tbHandleMap = make(map[int]uint64)
+								cs.tbHandleMap = make(map[int]tbLazyRef)
 							}
 							for i := 0; i < nBitmaps; i++ {
-								cs.tbHandleMap[startIdx+i] = nID
+								cs.tbHandleMap[startIdx+i] = tbLazyRef{handle: nID, slotIndex: i}
 								cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
 							}
 						}

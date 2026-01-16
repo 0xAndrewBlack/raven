@@ -931,7 +931,12 @@ func (c *CPU) execRandInstruction(dst int, size int) error {
 
 // execFXSAVE saves x87 FPU + SSE state to a 512-byte FXSAVE area.
 // Layout is identical to the legacy portion of XSAVE (no XSAVE header / YMM-hi).
+// NOTE: x87 ST registers are stored as float64 (64-bit precision) rather than
+// the full 80-bit extended format; sufficient for virtually all modern software.
 func (c *CPU) execFXSAVE(addr uint64) error {
+	if addr&0xF != 0 {
+		return fmt.Errorf("FXSAVE: address 0x%x is not 16-byte aligned", addr)
+	}
 	sw := (c.fpuSW &^ 0x3800) | (uint16(c.fpuTop&7) << 11)
 	c.mem.Write16(addr+0x000, c.fpuCW)
 	c.mem.Write16(addr+0x002, sw)
@@ -959,6 +964,9 @@ func (c *CPU) execFXSAVE(addr uint64) error {
 
 // execFXRSTOR restores x87 FPU + SSE state from a 512-byte FXSAVE area.
 func (c *CPU) execFXRSTOR(addr uint64) error {
+	if addr&0xF != 0 {
+		return fmt.Errorf("FXRSTOR: address 0x%x is not 16-byte aligned", addr)
+	}
 	cw, _ := c.mem.Read16(addr + 0x000)
 	sw, _ := c.mem.Read16(addr + 0x002)
 	ftw, _ := c.mem.Read8(addr + 0x004)
