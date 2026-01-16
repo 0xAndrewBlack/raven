@@ -1798,16 +1798,20 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					b := v & 0xFF
 					g := (v >> 8) & 0xFF
 					r := (v >> 16) & 0xFF
-					pixel = (r << 16) | (g << 8) | b
+					a := (v >> 24) & 0xFF
+					if a == 0 {
+						a = 0xFF // BI_RGB 32-bit: reserved byte is 0, treat as opaque
+					}
+					pixel = (a << 24) | (r << 16) | (g << 8) | b
 				case 24:
 					b0, _ := mem.ReadBytes(rowBase+uint64(col)*3, 3)
 					if len(b0) == 3 {
-						pixel = (uint32(b0[2]) << 16) | (uint32(b0[1]) << 8) | uint32(b0[0])
+						pixel = 0xFF000000 | (uint32(b0[2]) << 16) | (uint32(b0[1]) << 8) | uint32(b0[0])
 					}
 				case 8:
 					idx, _ := mem.ReadBytes(rowBase+uint64(col), 1)
 					if len(idx) > 0 && int(idx[0]) < len(palette) {
-						pixel = palette[idx[0]]
+						pixel = 0xFF000000 | palette[idx[0]]
 					}
 				case 4:
 					b0, _ := mem.ReadBytes(rowBase+uint64(col/2), 1)
@@ -1819,7 +1823,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							nibble = b0[0] & 0xF
 						}
 						if int(nibble) < len(palette) {
-							pixel = palette[nibble]
+							pixel = 0xFF000000 | palette[nibble]
 						}
 					}
 				}
@@ -4702,6 +4706,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 									if bd, ok3 := hctx.BitmapHandles[ref.handle]; ok3 && ref.slotIndex < len(bd.slots) {
 										cs.tbBitmapStore[iconIdx] = bd.slots[ref.slotIndex]
 										pix = cs.tbBitmapStore[iconIdx]
+									} else if obj := gdiMgr.GetObject(ref.handle); obj != nil && obj.Bitmap != nil && obj.Bitmap.Surf != nil {
+										surf := obj.Bitmap.Surf
+										bw := int(surf.Width)
+										bh := int(surf.Height)
+										iw, ih := iconW, iconH
+										s := ref.slotIndex
+										slot := make([]uint32, iw*ih)
+										for py := 0; py < ih && py < bh; py++ {
+											for px := 0; px < iw; px++ {
+												off := (py*bw + s*iw + px) * 4
+												if off+3 >= len(surf.Pix) {
+													break
+												}
+												b, g, r, a := surf.Pix[off], surf.Pix[off+1], surf.Pix[off+2], surf.Pix[off+3]
+												if a == 0 {
+													a = 0xFF
+												}
+												slot[py*iw+px] = uint32(b) | uint32(g)<<8 | uint32(r)<<16 | uint32(a)<<24
+											}
+										}
+										cs.tbBitmapStore[iconIdx] = slot
+										pix = slot
 									}
 								}
 							}
@@ -4835,14 +4861,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						nBitmaps, hInst, nID, mainModule.BaseAddr, iconW, iconH)
 
 					if hInst == 0 {
-						// nID is an HBITMAP handle from LoadImage/LoadBitmap.
-						// If the handle does not exist yet (lazy-load ordering), store it in
-						// tbHandleMap for lazy resolution at render time.
+						// nID is an HBITMAP handle (LoadBitmap/LoadImage or CreateDIBSection).
+						// Check bitmapHandles, then gdiMgr (DIBSection), then defer lazy.
 						if bd, ok2 := hctx.BitmapHandles[nID]; ok2 && len(bd.slots) > 0 {
 							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP handle found, %d slots\n", len(bd.slots))
 							cs.tbBitmapStore = append(cs.tbBitmapStore, bd.slots...)
+						} else if obj := gdiMgr.GetObject(nID); obj != nil && obj.Bitmap != nil && obj.Bitmap.Surf != nil {
+							surf := obj.Bitmap.Surf
+							bw := int(surf.Width)
+							bh := int(surf.Height)
+							iw, ih := iconW, iconH
+							if iw <= 0 {
+								iw = bw
+							}
+							if ih <= 0 {
+								ih = bh
+							}
+							ns := bw / iw
+							if ns == 0 {
+								ns = 1
+							}
+							slots := make([][]uint32, ns)
+							for s := 0; s < ns; s++ {
+								pix := make([]uint32, iw*ih)
+								for py := 0; py < ih && py < bh; py++ {
+									for px := 0; px < iw; px++ {
+										off := (py*bw + s*iw + px) * 4
+										if off+3 >= len(surf.Pix) {
+											break
+										}
+										b, g, r, a := surf.Pix[off], surf.Pix[off+1], surf.Pix[off+2], surf.Pix[off+3]
+										if a == 0 {
+											a = 0xFF
+										}
+										pix[py*iw+px] = uint32(b) | uint32(g)<<8 | uint32(r)<<16 | uint32(a)<<24
+									}
+								}
+								slots[s] = pix
+							}
+							ravelog.Logf("[toolbar] TB_ADDBITMAP GDI surf %dx%d → %d slots (iconW=%d iconH=%d)\n", bw, bh, ns, iw, ih)
+							cs.tbBitmapStore = append(cs.tbBitmapStore, slots...)
 						} else {
-							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP handle 0x%x not found - lazy\n", nID)
+							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP 0x%x not found - lazy\n", nID)
 							if cs.tbHandleMap == nil {
 								cs.tbHandleMap = make(map[int]tbLazyRef)
 							}
