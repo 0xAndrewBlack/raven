@@ -5994,8 +5994,51 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		lpXform := ctx.Arg(0)
 		nCount := ctx.Arg(1)
 		lpRgnData := ctx.Arg(2)
-		ravelog.Logf("[gdi32] ExtCreateRegion(xform=0x%x, count=%d, data=0x%x)\n", lpXform, nCount, lpRgnData)
-		ctx.SetReturn(0) // return NULL (empty region)
+		_ = lpXform // transform not applied (approximation)
+		if lpRgnData == 0 || nCount < 32 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		// RGNDATAHEADER: dwSize(4), iType(4), nCount(4), nRgnSize(4), rcBound(16) = 32 bytes
+		nRects, _ := mem.Read32(lpRgnData + 8) // RGNDATAHEADER.nCount
+		bLeft, _ := mem.Read32(lpRgnData + 16)
+		bTop, _ := mem.Read32(lpRgnData + 20)
+		bRight, _ := mem.Read32(lpRgnData + 24)
+		bBottom, _ := mem.Read32(lpRgnData + 28)
+		// Rectangles start at offset 32, each RECT = 16 bytes (left, top, right, bottom as int32)
+		// We approximate as the bounding rect for now; a full scan could union all rects.
+		var rgnX0, rgnY0, rgnX1, rgnY1 int32
+		if nRects > 0 {
+			rgnX0, rgnY0, rgnX1, rgnY1 = int32(bLeft), int32(bTop), int32(bRight), int32(bBottom)
+			// Walk all rects and compute true bounding union
+			base := lpRgnData + 32
+			for i := uint32(0); i < nRects; i++ {
+				off := base + uint64(i)*16
+				l, _ := mem.Read32(off)
+				t, _ := mem.Read32(off + 4)
+				r, _ := mem.Read32(off + 8)
+				b, _ := mem.Read32(off + 12)
+				if i == 0 {
+					rgnX0, rgnY0, rgnX1, rgnY1 = int32(l), int32(t), int32(r), int32(b)
+				} else {
+					if int32(l) < rgnX0 {
+						rgnX0 = int32(l)
+					}
+					if int32(t) < rgnY0 {
+						rgnY0 = int32(t)
+					}
+					if int32(r) > rgnX1 {
+						rgnX1 = int32(r)
+					}
+					if int32(b) > rgnY1 {
+						rgnY1 = int32(b)
+					}
+				}
+			}
+		}
+		h := gdiMgr.CreateRectRgn(rgnX0, rgnY0, rgnX1, rgnY1)
+		ravelog.Logf("[gdi32] ExtCreateRegion nRects=%d bound=(%d,%d,%d,%d) → 0x%x\n", nRects, rgnX0, rgnY0, rgnX1, rgnY1, h)
+		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "ExtEscape", func(ctx *ntapi.TrapContext) uint32 {

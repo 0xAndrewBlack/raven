@@ -2163,7 +2163,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				// Queue WM_PAINT for guest children so they repaint on top.
 				for h, cs := range hwndChildren {
 					if cs.parentHWND == hctx.MainHWND && cs.visible && cs.w > 0 && cs.h > 0 {
-						if _, hasGuest := hwndWndProc[h]; hasGuest {
+						wp := hwndWndProc[h]
+						if wp == 0 {
+							if atom, ok2 := hctx.HwndClassAtom[h]; ok2 {
+								if recovered, ok3 := hctx.AtomWndProc[atom]; ok3 && recovered != 0 {
+									wp = recovered
+									hwndWndProc[h] = wp
+								}
+							}
+						}
+						if wp != 0 {
 							queuePaint(h)
 						}
 					}
@@ -3358,6 +3367,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// BOOL TranslateAcceleratorW(HWND, HACCEL, LPMSG)
 		// ReactOS: win32ss/user/ntuser/accelerator.c NtUserTranslateAccelerator
 		// Read MSG: {hwnd(8), message(4), wParam(8), lParam(8), time(4), pt.x(4), pt.y(4)}
+		targetHWND := ctx.Arg(0)
 		hAccel := ctx.Arg(1)
 		pMsg := ctx.Arg(2)
 		if pMsg == 0 || hAccel == 0 {
@@ -3379,22 +3389,50 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			FCONTROL      = 0x08
 			FALT          = 0x10
 			FSHIFT        = 0x04
+			// VK constants for modifier keys
+			VK_SHIFT   = 0x10
+			VK_CONTROL = 0x11
+			VK_MENU    = 0x12 // Alt
 		)
 		if msgID != WM_KEYDOWN && msgID != WM_SYSKEYDOWN {
 			ctx.SetReturn(0)
 			return 0
 		}
+		ctrlDown := keyState[VK_CONTROL]&0x80 != 0
+		altDown := keyState[VK_MENU]&0x80 != 0
+		shiftDown := keyState[VK_SHIFT]&0x80 != 0
 		for _, ae := range entries {
 			if ae.fVirt&FVIRTKEY != 0 {
-				if ae.key == key {
-					// match (simplified: we don't check modifier state)
-					ctx.SetReturn(1)
-					return 0
+				if ae.key != key {
+					continue
 				}
-			} else if uint16(ae.key) == key {
-				ctx.SetReturn(1)
-				return 0
+			} else {
+				if uint16(ae.key) != key {
+					continue
+				}
 			}
+			// Check modifier requirements
+			if ae.fVirt&FCONTROL != 0 && !ctrlDown {
+				continue
+			}
+			if ae.fVirt&FALT != 0 && !altDown {
+				continue
+			}
+			if ae.fVirt&FSHIFT != 0 && !shiftDown {
+				continue
+			}
+			// Accelerator matched - post WM_COMMAND(HIWORD=1, LOWORD=cmdID) to target window.
+			// ReactOS: IntTranslateKbdMessage posts WM_COMMAND with 1 in HIWORD (accelerator source).
+			cmdID := uint64(ae.cmd)
+			wp := cmdID | (1 << 16) // MAKEWPARAM(cmdID, 1)
+			hw := targetHWND
+			if hw == 0 {
+				hw = hctx.MainHWND
+			}
+			ravelog.Logf("[accel] TranslateAcceleratorW key=0x%x → WM_COMMAND cmd=0x%x hwnd=0x%x\n", key, cmdID, hw)
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hw, 0x0111, wp, 0})
+			ctx.SetReturn(1)
+			return 0
 		}
 		ctx.SetReturn(0)
 		return 0
@@ -3497,14 +3535,27 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		// ReactOS co_UserSetFocus: send WM_KILLFOCUS to old window, WM_SETFOCUS to new.
+		// Use class-atom fallback to find WndProc in case hwndWndProc wasn't populated at creation time.
+		hasGuestWndProc := func(h uint64) bool {
+			if wp := hwndWndProc[h]; wp != 0 {
+				return true
+			}
+			if atom, ok := hctx.HwndClassAtom[h]; ok {
+				if wp, ok2 := hctx.AtomWndProc[atom]; ok2 && wp != 0 {
+					hwndWndProc[h] = wp // cache for future
+					return true
+				}
+			}
+			return false
+		}
 		if prev != 0 {
-			if _, hasGuest := hwndWndProc[prev]; hasGuest {
+			if hasGuestWndProc(prev) {
 				hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{prev, 0x0008, newFocus, 0}) // WM_KILLFOCUS
 			}
 		}
 		hctx.FocusHwnd = newFocus
 		if newFocus != 0 {
-			if _, hasGuest := hwndWndProc[newFocus]; hasGuest {
+			if hasGuestWndProc(newFocus) {
 				hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{newFocus, 0x0007, prev, 0}) // WM_SETFOCUS
 			}
 		}
