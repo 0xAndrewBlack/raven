@@ -13,7 +13,7 @@ type TpPool struct {
 	MaxThreads int32
 }
 
-func (h *TpPool) handleType() string { return "tp_pool" }
+func (h *TpPool) HandleType() string { return "tp_pool" }
 
 // TpWork is a Win32 thread pool work item (PTP_WORK).
 // Wine reference: threadpool.c struct threadpool_object (type=TP_OBJECT_TYPE_WORK)
@@ -26,7 +26,7 @@ type TpWork struct {
 	closed  int32          // atomic: 1 = shutdown
 }
 
-func (h *TpWork) handleType() string { return "tp_work" }
+func (h *TpWork) HandleType() string { return "tp_work" }
 
 // IsClosed returns whether the work item has been shut down.
 func (w *TpWork) IsClosed() bool { return atomic.LoadInt32(&w.closed) != 0 }
@@ -62,7 +62,7 @@ type TpTimer struct {
 	closed  int32          // atomic: 1 = shutdown
 }
 
-func (h *TpTimer) handleType() string { return "tp_timer" }
+func (h *TpTimer) HandleType() string { return "tp_timer" }
 
 // IsSet returns whether the timer is armed.
 func (t *TpTimer) IsSet() bool {
@@ -149,7 +149,7 @@ type TpWait struct {
 	closed  int32          // atomic: 1 = shutdown
 }
 
-func (h *TpWait) handleType() string { return "tp_wait" }
+func (h *TpWait) HandleType() string { return "tp_wait" }
 
 // Stop cancels any running wait goroutine.
 func (w *TpWait) Stop() {
@@ -201,7 +201,7 @@ type TpIo struct {
 	closed  int32          // atomic: 1 = shutdown
 }
 
-func (h *TpIo) handleType() string { return "tp_io" }
+func (h *TpIo) HandleType() string { return "tp_io" }
 
 // IsClosed returns whether the I/O object has been shut down.
 func (t *TpIo) IsClosed() bool { return atomic.LoadInt32(&t.closed) != 0 }

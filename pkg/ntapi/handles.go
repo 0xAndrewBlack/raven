@@ -16,7 +16,7 @@ const (
 
 // HandleObject is any object tracked by the handle table.
 type HandleObject interface {
-	handleType() string
+	HandleType() string
 }
 
 // FileHandle wraps a VFS file descriptor.
@@ -25,7 +25,7 @@ type FileHandle struct {
 	Path string
 }
 
-func (h *FileHandle) handleType() string { return "file" }
+func (h *FileHandle) HandleType() string { return "file" }
 
 // EventHandle is a Win32 event synchronization object.
 type EventHandle struct {
@@ -44,7 +44,7 @@ func NewEvent(manualReset, initialState bool) *EventHandle {
 	return eh
 }
 
-func (h *EventHandle) handleType() string { return "event" }
+func (h *EventHandle) HandleType() string { return "event" }
 
 func (h *EventHandle) getCond() *sync.Cond {
 	if h.cond == nil {
@@ -152,7 +152,7 @@ type MutantHandle struct {
 	abandoned bool   // set when owning thread exits without releasing
 }
 
-func (h *MutantHandle) handleType() string { return "mutant" }
+func (h *MutantHandle) HandleType() string { return "mutant" }
 
 func (h *MutantHandle) getCond() *sync.Cond {
 	if h.cond == nil {
@@ -290,7 +290,7 @@ func NewSemaphore(initial, max int32) *SemaphoreHandle {
 	return &SemaphoreHandle{count: initial, maxCount: max}
 }
 
-func (h *SemaphoreHandle) handleType() string { return "semaphore" }
+func (h *SemaphoreHandle) HandleType() string { return "semaphore" }
 
 func (h *SemaphoreHandle) getCond() *sync.Cond {
 	if h.cond == nil {
@@ -388,7 +388,7 @@ type IoCompletionPortHandle struct {
 	closed  bool
 }
 
-func (h *IoCompletionPortHandle) handleType() string { return "iocp" }
+func (h *IoCompletionPortHandle) HandleType() string { return "iocp" }
 
 func (h *IoCompletionPortHandle) getCond() *sync.Cond {
 	if h.cond == nil {
@@ -459,7 +459,7 @@ type RegistryKeyHandle struct {
 	Path string // full normalized path e.g. HKEY_LOCAL_MACHINE\SOFTWARE\...
 }
 
-func (h *RegistryKeyHandle) handleType() string { return "regkey" }
+func (h *RegistryKeyHandle) HandleType() string { return "regkey" }
 
 // SectionHandle represents a memory section object.
 type SectionHandle struct {
@@ -467,7 +467,7 @@ type SectionHandle struct {
 	Perms uint8
 }
 
-func (h *SectionHandle) handleType() string { return "section" }
+func (h *SectionHandle) HandleType() string { return "section" }
 
 // FileMappingHandle represents a Win32 file mapping (CreateFileMapping).
 // HostBuf holds the in-memory copy of the file or anonymous buffer.
@@ -480,14 +480,14 @@ type FileMappingHandle struct {
 	Protect uint32
 }
 
-func (h *FileMappingHandle) handleType() string { return "filemapping" }
+func (h *FileMappingHandle) HandleType() string { return "filemapping" }
 
 // HeapHandle represents a Win32 heap.
 type HeapHandle struct {
 	Allocations map[uint64]uint64 // guest address → size
 }
 
-func (h *HeapHandle) handleType() string { return "heap" }
+func (h *HeapHandle) HandleType() string { return "heap" }
 
 // FindHandle is used by FindFirstFileW/FindNextFileW for directory enumeration.
 type FindHandle struct {
@@ -496,7 +496,7 @@ type FindHandle struct {
 	Dir     string
 }
 
-func (f *FindHandle) handleType() string { return "find" }
+func (f *FindHandle) HandleType() string { return "find" }
 
 // ThreadHandle represents a Win32 thread handle.
 type ThreadHandle struct {
@@ -507,7 +507,7 @@ type ThreadHandle struct {
 	HideFromDebugger bool
 }
 
-func (h *ThreadHandle) handleType() string { return "thread" }
+func (h *ThreadHandle) HandleType() string { return "thread" }
 
 // NamedPipeHandle represents one end of a named pipe.
 // ToServer carries data client→server; ToClient carries data server→client.
@@ -521,7 +521,7 @@ type NamedPipeHandle struct {
 	mu        sync.Mutex
 }
 
-func (h *NamedPipeHandle) handleType() string { return "named_pipe" }
+func (h *NamedPipeHandle) HandleType() string { return "named_pipe" }
 
 // NewServerPipe creates a server-side NamedPipeHandle with bidirectional channels.
 func NewServerPipe(name string) *NamedPipeHandle {
@@ -655,7 +655,7 @@ type TokenHandle struct {
 	IntegrityLevel  uint32
 }
 
-func (h *TokenHandle) handleType() string { return "token" }
+func (h *TokenHandle) HandleType() string { return "token" }
 
 // NewDefaultTokenHandle creates the synthetic process token used by the emulator.
 func NewDefaultTokenHandle() *TokenHandle {
@@ -717,7 +717,7 @@ type SocketHandle struct {
 func NewSocketHandle(fd, family, sockType, proto int) *SocketHandle {
 	return &SocketHandle{FD: fd, Family: family, SockType: sockType, Proto: proto}
 }
-func (h *SocketHandle) handleType() string { return "socket" }
+func (h *SocketHandle) HandleType() string { return "socket" }
 
 // GetSocket returns the SocketHandle for a handle, or nil.
 func (ht *HandleTable) GetSocket(h Handle) *SocketHandle {
@@ -751,7 +751,7 @@ func NewWaitableTimer(manualReset bool) *WaitableTimerHandle {
 	}
 }
 
-func (t *WaitableTimerHandle) handleType() string { return "waitable_timer" }
+func (t *WaitableTimerHandle) HandleType() string { return "waitable_timer" }
 
 // Set arms the timer to fire after 'due' from now (or at absolute time if negative Windows FILETIME).
 // period is the recurring period in milliseconds (0 = one-shot).
@@ -887,7 +887,7 @@ type GenericHandle struct {
 	Kind string
 }
 
-func (h *GenericHandle) handleType() string { return h.Kind }
+func (h *GenericHandle) HandleType() string { return h.Kind }
 
 // SymbolicLinkHandle represents an object-manager symbolic link.
 type SymbolicLinkHandle struct {
@@ -895,7 +895,7 @@ type SymbolicLinkHandle struct {
 	Target string
 }
 
-func (h *SymbolicLinkHandle) handleType() string { return "symbolic_link" }
+func (h *SymbolicLinkHandle) HandleType() string { return "symbolic_link" }
 
 // CondVarEntry is a guest CONDITION_VARIABLE backed by a channel.
 // Since the guest CPU is single-threaded, Sleep always times out - callers recheck.
@@ -1022,7 +1022,7 @@ func NewKeyedEvent(name string) *KeyedEventHandle {
 	}
 }
 
-func (k *KeyedEventHandle) handleType() string { return "keyed-event" }
+func (k *KeyedEventHandle) HandleType() string { return "keyed-event" }
 
 // Wait blocks until a matching Release for key is called (or timeout).
 func (k *KeyedEventHandle) Wait(key uint64, timeout time.Duration) uint32 {
@@ -1121,7 +1121,7 @@ func NewJobHandle(name string) *JobHandle {
 	return &JobHandle{Name: name}
 }
 
-func (j *JobHandle) handleType() string { return "job" }
+func (j *JobHandle) HandleType() string { return "job" }
 
 // AddProcess adds a process ID to the job.
 func (j *JobHandle) AddProcess(pid uint32) {
@@ -1147,7 +1147,7 @@ func NewMailslot(name string, maxMsg, readTimeout uint32) *MailslotHandle {
 	}
 }
 
-func (m *MailslotHandle) handleType() string { return "mailslot" }
+func (m *MailslotHandle) HandleType() string { return "mailslot" }
 
 // Write adds a message to the mailslot.
 func (m *MailslotHandle) Write(msg []byte) {
@@ -1625,7 +1625,7 @@ type TimerQueueTimer struct {
 	mu       sync.Mutex
 }
 
-func (h *TimerQueueTimer) handleType() string { return "timerqueuetimer" }
+func (h *TimerQueueTimer) HandleType() string { return "timerqueuetimer" }
 
 // Stop cancels the timer if running.
 func (h *TimerQueueTimer) Stop() {
@@ -1813,7 +1813,7 @@ type ConsoleScreenBufferHandle struct {
 	State *ConsoleState
 }
 
-func (h *ConsoleScreenBufferHandle) handleType() string { return "console_screen_buffer" }
+func (h *ConsoleScreenBufferHandle) HandleType() string { return "console_screen_buffer" }
 
 // NewConsoleScreenBuffer creates a screen buffer backed by its own console state.
 func NewConsoleScreenBuffer() *ConsoleScreenBufferHandle {

@@ -2870,7 +2870,7 @@ func handleNtQueryObject(ctx *TrapContext) uint32 {
 	case 1: // ObjectNameInformation (UNICODE_STRING + name)
 		var name string
 		if obj != nil {
-			name = `\BaseNamedObjects\` + obj.handleType()
+			name = `\BaseNamedObjects\` + obj.HandleType()
 		} else {
 			name = ""
 		}
@@ -2896,7 +2896,7 @@ func handleNtQueryObject(ctx *TrapContext) uint32 {
 	case 2: // ObjectTypeInformation
 		typeName := "Unknown"
 		if obj != nil {
-			typeName = obj.handleType()
+			typeName = obj.HandleType()
 		}
 		wsBytes := encodeUTF16LE(typeName)
 		needed := uint64(72 + len(wsBytes) + 2) // OBJECT_TYPE_INFORMATION is 72 bytes + name
