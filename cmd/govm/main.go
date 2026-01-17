@@ -6125,8 +6125,12 @@ func patchCRTDataExports(mem *mmu.MMU, mainMod *loader.PEModule, argv []string) 
 	// Write command line string
 	mem.WriteBytes(dataPage+0x000, append([]byte(cmdLine), 0))
 
-	// _acmdln: pointer to the command line string
-	mem.Write64(dataPage+0x200, dataPage+0x000)
+	// _acmdln: pointer to the command line string (4-byte for PE32, 8-byte for PE64)
+	if mainMod.Is64 {
+		mem.Write64(dataPage+0x200, dataPage+0x000)
+	} else {
+		mem.Write32(dataPage+0x200, uint32(dataPage+0x000))
+	}
 
 	// _commode: 0
 	mem.Write32(dataPage+0x208, 0)
@@ -6134,8 +6138,10 @@ func patchCRTDataExports(mem *mmu.MMU, mainMod *loader.PEModule, argv []string) 
 	// _fmode: 0
 	mem.Write32(dataPage+0x210, 0)
 
-	// __initenv: null pointer
-	mem.Write64(dataPage+0x218, 0)
+	// __initenv: null pointer (4-byte for PE32, 8-byte for PE64)
+	if mainMod.Is64 {
+		mem.Write64(dataPage+0x218, 0)
+	}
 
 	// _errno: 0
 	mem.Write32(dataPage+0x220, 0)

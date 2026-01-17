@@ -1326,6 +1326,76 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 
+	// __p__acmdln: return char** pointer to _acmdln (ANSI command line)
+	var acmdlnSlot uint64
+	d.RegisterAutoStubHandler(msvcrt, "__p__acmdln", func(ctx *ntapi.TrapContext) uint32 {
+		if acmdlnSlot == 0 {
+			cmdBytes := append([]byte(hctx.CmdLine), 0)
+			base := mem.Mmap(0, uint64(len(cmdBytes)+8), mmu.PermRead|mmu.PermWrite)
+			if base != 0 {
+				mem.WriteBytes(base, cmdBytes)
+				strAddr := base
+				acmdlnSlot = base + uint64(len(cmdBytes)+3)&^3
+				if acmdlnSlot < 0x100000000 {
+					mem.Write32(acmdlnSlot, uint32(strAddr))
+				} else {
+					mem.Write64(acmdlnSlot, strAddr)
+				}
+			}
+		}
+		ctx.SetReturn(acmdlnSlot)
+		return 0
+	})
+
+	// __p__wcmdln: return wchar_t** pointer to _wcmdln (wide command line)
+	var wcmdlnSlot uint64
+	d.RegisterAutoStubHandler(msvcrt, "__p__wcmdln", func(ctx *ntapi.TrapContext) uint32 {
+		if wcmdlnSlot == 0 {
+			// encode command line as UTF-16LE + null terminator
+			cmdW := make([]byte, (len(hctx.CmdLine)+1)*2)
+			for i, c := range hctx.CmdLine {
+				cmdW[i*2] = byte(c)
+			}
+			base := mem.Mmap(0, uint64(len(cmdW)+8), mmu.PermRead|mmu.PermWrite)
+			if base != 0 {
+				mem.WriteBytes(base, cmdW)
+				strAddr := base
+				wcmdlnSlot = base + uint64(len(cmdW)+3)&^3
+				if wcmdlnSlot < 0x100000000 {
+					mem.Write32(wcmdlnSlot, uint32(strAddr))
+				} else {
+					mem.Write64(wcmdlnSlot, strAddr)
+				}
+			}
+		}
+		ctx.SetReturn(wcmdlnSlot)
+		return 0
+	})
+
+	// _ismbblead: returns non-zero if the byte is a DBCS lead byte.
+	// For code page 932/936/949/950 only some byte ranges are lead bytes.
+	// We emulate as code page 932 (Shift-JIS) for compatibility; standard
+	// ASCII (0x00-0x7F) never qualifies.
+	d.RegisterAutoStubHandler(msvcrt, "_ismbblead", func(ctx *ntapi.TrapContext) uint32 {
+		c := ctx.Arg(0) & 0xFF
+		// Shift-JIS lead byte ranges: 0x81-0x9F, 0xE0-0xFC
+		if (c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC) {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
+	d.RegisterAutoStubHandler(msvcrt, "_ismbbtrail", func(ctx *ntapi.TrapContext) uint32 {
+		c := ctx.Arg(0) & 0xFF
+		if c >= 0x40 && c <= 0xFC && c != 0x7F {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
+
 	// _register_thread_local_exe_atexit_callback: register a callback for thread-local
 	// cleanup at exe exit. We store it but never invoke it since we don't have
 	// a full CRT teardown sequence.

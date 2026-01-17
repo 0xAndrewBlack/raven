@@ -693,13 +693,22 @@ func d3dCreateCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string,
 	if methods < 3 {
 		methods = 3
 	}
+	// Allocate with the larger 64-bit layout; we'll use it regardless and
+	// detect the pointer width from the returned address.
 	totalSize := uint64(8 + methods*8 + methods*16)
 	objAddr := mem.Mmap(0, totalSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
 	if objAddr == 0 {
 		return 0
 	}
-	vtableAddr := objAddr + 8
-	stubBase := vtableAddr + uint64(methods*8)
+
+	// PE32 processes live entirely below 4 GB - use 4-byte vtable pointers.
+	ptrSize := 8
+	if objAddr < 0x100000000 {
+		ptrSize = 4
+	}
+
+	vtableAddr := objAddr + uint64(ptrSize)
+	stubBase := vtableAddr + uint64(methods*ptrSize)
 	obj := &d3dCOMObject{
 		objectAddr: objAddr,
 		kind:       kind,
@@ -729,11 +738,19 @@ func d3dCreateCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string,
 			code[j] = 0xCC
 		}
 		mem.WriteBytes(stubAddr, code)
-		mem.Write64(vtableAddr+uint64(i*8), stubAddr)
+		if ptrSize == 4 {
+			mem.Write32(vtableAddr+uint64(i*4), uint32(stubAddr))
+		} else {
+			mem.Write64(vtableAddr+uint64(i*8), stubAddr)
+		}
 	}
 	d3dCOMMu.Unlock()
 
-	mem.Write64(objAddr, vtableAddr)
+	if ptrSize == 4 {
+		mem.Write32(objAddr, uint32(vtableAddr))
+	} else {
+		mem.Write64(objAddr, vtableAddr)
+	}
 	return objAddr
 }
 

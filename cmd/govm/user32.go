@@ -11010,6 +11010,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
 					queue:   []syncDispatch{{wndProc: wp, hwnd: hwnd, msg: 0x0001, wParam: 0, lParam: cs}},
 					retAddr: retAddr,
+					hwnd:    hwnd,
 				})
 				rw.WriteReg(1, hwnd)
 				rw.WriteReg(2, 0x0081)

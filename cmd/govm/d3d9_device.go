@@ -178,6 +178,21 @@ func d3d9DeviceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) u
 	case 17: // Present(pSrcRect, pDstRect, hWnd, pDirtyRegion)
 		if r := bridge.renderer; r != nil {
 			r.Present(bridge.hctx.WlWindow)
+		} else if win := bridge.hctx.WlWindow; win != nil && win.Pix != nil {
+			// Software fallback: fill the entire back-buffer with the last clear color
+			// so apps get visible output even without Vulkan.
+			c := device.ClearColor // D3DCOLOR = 0xAARRGGBB
+			rr := byte(c >> 16)
+			gg := byte(c >> 8)
+			bb := byte(c)
+			pix := win.Pix
+			for i := 0; i+3 < len(pix); i += 4 {
+				pix[i+0] = bb // B
+				pix[i+1] = gg // G
+				pix[i+2] = rr // R
+				pix[i+3] = 0xFF
+			}
+			win.Commit()
 		}
 		return D3D_OK
 	case 41: // BeginScene
