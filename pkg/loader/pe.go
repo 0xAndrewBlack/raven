@@ -96,16 +96,26 @@ func LoadPE(path string, mem *mmu.MMU, argv []string, envp []string) (*PELoadRes
 	mem.MapRange(stackBottom, stackSize, mmu.PermRead|mmu.PermWrite)
 
 	// Simulate a CALL to the entry point.
-	// Caller's RSP is 16-byte aligned. Allocate 32-byte shadow space,
-	// then push return address (0 = process exit sentinel).
-	sp := stackTop      // 16-byte aligned
-	sp -= 32            // shadow space (32 bytes for 4 register args)
-	sp -= 8             // CALL pushes return address
-	write64(mem, sp, 0) // exit sentinel (ret to 0 → process exit)
+	sp := stackTop // 16-byte aligned
+	if mod.Is64 {
+		// x64: allocate 32-byte shadow space, push 8-byte return address.
+		sp -= 32            // shadow space (32 bytes for 4 register args)
+		sp -= 8             // CALL pushes return address
+		write64(mem, sp, 0) // exit sentinel (ret to 0 → process exit)
+	} else {
+		// x86 (PE32): no shadow space, push 4-byte return address.
+		sp -= 4
+		mem.Write32(sp, 0) // exit sentinel
+	}
 
 	// Set brk after the image
 	brkAddr := (mod.BaseAddr + mod.ImageSize + mmu.PageSize - 1) & mmu.PageMask
 	mem.SetBrk(brkAddr)
+
+	resultArch := arch.ArchAMD64
+	if !mod.Is64 {
+		resultArch = arch.ArchI386
+	}
 
 	return &PELoadResult{
 		LoadResult: LoadResult{
@@ -113,7 +123,7 @@ func LoadPE(path string, mem *mmu.MMU, argv []string, envp []string) (*PELoadRes
 			StackPtr:   sp,
 			BrkAddr:    brkAddr,
 			TLSAddr:    0, // TEB is set up separately by P1
-			Arch:       arch.ArchAMD64,
+			Arch:       resultArch,
 		},
 		MainModule: mod,
 	}, nil

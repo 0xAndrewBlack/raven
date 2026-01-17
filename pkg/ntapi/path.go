@@ -1,6 +1,7 @@
 package ntapi
 
 import (
+	pathpkg "path"
 	"strings"
 )
 
@@ -106,6 +107,33 @@ func ReadObjectAttributes(ctx *TrapContext, addr uint64) (rootDir Handle, name s
 		return 0, "", 0, nil
 	}
 
+	if ctx.State != nil && ctx.State.Is32 {
+		rootDirVal, rerr := ctx.Mem.Read32(addr + 0x04)
+		if rerr != nil {
+			return 0, "", 0, rerr
+		}
+		rootDir = Handle(rootDirVal)
+
+		namePtr, nerr := ctx.Mem.Read32(addr + 0x08)
+		if nerr != nil {
+			return 0, "", 0, nerr
+		}
+
+		attrsVal, aerr := ctx.Mem.Read32(addr + 0x0C)
+		if aerr != nil {
+			return 0, "", 0, aerr
+		}
+		attrs = attrsVal
+
+		if namePtr != 0 {
+			name, err = ReadUnicodeString(ctx.Mem, uint64(namePtr))
+			if err != nil {
+				return 0, "", 0, err
+			}
+		}
+		return rootDir, name, attrs, nil
+	}
+
 	rootDirVal, err := ctx.Mem.Read64(addr + 0x08)
 	if err != nil {
 		return 0, "", 0, err
@@ -141,15 +169,27 @@ func ResolveObjectPath(ctx *TrapContext, addr uint64) (string, error) {
 		return "", err
 	}
 
+	if name == "" {
+		if rootDir != 0 {
+			if fh := ctx.Handles.GetFile(rootDir); fh != nil {
+				return fh.Path, nil
+			}
+		}
+		return "/", nil
+	}
+
 	if rootDir != 0 {
 		// Relative to a directory handle
 		fh := ctx.Handles.GetFile(rootDir)
 		if fh != nil {
-			basePath := fh.Path
-			if !strings.HasSuffix(basePath, "/") {
-				basePath += "/"
+			if strings.HasPrefix(name, `\`) || (len(name) >= 2 && name[1] == ':') {
+				return NtPathToVFS(name), nil
 			}
-			return basePath + NtPathToVFS(name), nil
+			basePath := fh.Path
+			if basePath == "" {
+				basePath = "/"
+			}
+			return pathpkg.Clean(pathpkg.Join(basePath, NtPathToVFS(name))), nil
 		}
 	}
 

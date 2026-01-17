@@ -2,33 +2,21 @@ package main
 
 import (
 	"encoding/binary"
-	"fmt"
-	"io"
-	"os/exec"
 	"sync"
-	"time"
+	"unsafe"
 
+	"github.com/mirkobrombin/Raven/pkg/audio"
+	dsoundpkg "github.com/mirkobrombin/Raven/pkg/dsound"
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
 const (
-	dsBCapsPrimaryBuffer = 0x00000001
-	dsBCapsCtrlVolume    = 0x00000080
-	dsBCapsCtrlPan       = 0x00000040
-	dsBCapsCtrlFrequency = 0x00000020
-
 	dsBStatusPlaying = 0x00000001
 	dsBStatusLooping = 0x00000004
-
-	dsBPlayLooping = 0x00000001
-
-	dsBLockFromWriteCursor = 0x00000001
-	dsBLockEntireBuffer    = 0x00000002
-
-	dsSpeakerStereo = 0x00000004
-
-	waveFormatPCM = 0x0001
+	dsSpeakerStereo  = 0x00000004
+	waveFormatPCM    = 0x0001
 )
 
 var (
@@ -55,13 +43,14 @@ type dsBufferDesc struct {
 	Flags       uint32
 	BufferBytes uint32
 	Format      waveFormatEx
+	HasFormat   bool
 }
 
 type dsPendingLock struct {
-	ptr1         uint64
+	guestPtr1    uint64
 	bytes1       uint32
 	offset1      uint32
-	ptr2         uint64
+	guestPtr2    uint64
 	bytes2       uint32
 	offset2      uint32
 	nextWritePos uint32
@@ -72,38 +61,16 @@ type directSoundDeviceData struct {
 	capture          bool
 	cooperativeLevel uint32
 	speakerConfig    uint32
-	defaultFormat    waveFormatEx
+	device           *dsoundpkg.DirectSound
 }
 
-type dsBuffer struct {
-	mu sync.Mutex
-
-	parent *directSoundDeviceData
-
-	format    waveFormatEx
-	size      uint32
-	data      []byte
-	playPos   uint32
-	writePos  uint32
-	playing   bool
-	looping   bool
-	volume    int32
-	pan       int32
-	frequency uint32
-	flags     uint32
-	primary   bool
-
-	playStart    time.Time
-	playStartPos uint32
-	pendingLock  *dsPendingLock
+type dsBufferObject struct {
+	buffer      *dsoundpkg.Buffer
+	parent      *directSoundDeviceData
+	flags       uint32
+	primary     bool
+	pendingLock *dsPendingLock
 }
-
-type dsoundBackend struct {
-	once sync.Once
-	name string
-}
-
-var globalDsoundBackend dsoundBackend
 
 func defaultWaveFormatEx() waveFormatEx {
 	w := waveFormatEx{
@@ -111,7 +78,6 @@ func defaultWaveFormatEx() waveFormatEx {
 		Channels:      2,
 		SamplesPerSec: 44100,
 		BitsPerSample: 16,
-		CbSize:        0,
 	}
 	return normalizeWaveFormatEx(w)
 }
@@ -140,6 +106,32 @@ func normalizeWaveFormatEx(w waveFormatEx) waveFormatEx {
 	}
 	w.AvgBytesPerSec = uint32(avg)
 	return w
+}
+
+func toDSoundFormat(w waveFormatEx) dsoundpkg.WAVEFORMATEX {
+	w = normalizeWaveFormatEx(w)
+	return dsoundpkg.WAVEFORMATEX{
+		WFormatTag:      w.FormatTag,
+		NChannels:       w.Channels,
+		NSamplesPerSec:  w.SamplesPerSec,
+		NAvgBytesPerSec: w.AvgBytesPerSec,
+		NBlockAlign:     w.BlockAlign,
+		WBitsPerSample:  w.BitsPerSample,
+		CbSize:          w.CbSize,
+	}
+}
+
+func fromDSoundFormat(w dsoundpkg.WAVEFORMATEX) waveFormatEx {
+	w = dsoundpkg.NormalizeFormat(w)
+	return waveFormatEx{
+		FormatTag:      w.WFormatTag,
+		Channels:       w.NChannels,
+		SamplesPerSec:  w.NSamplesPerSec,
+		AvgBytesPerSec: w.NAvgBytesPerSec,
+		BlockAlign:     w.NBlockAlign,
+		BitsPerSample:  w.WBitsPerSample,
+		CbSize:         w.CbSize,
+	}
 }
 
 func readWaveFormatEx(mem *mmu.MMU, addr uint64) waveFormatEx {
@@ -182,38 +174,29 @@ func writeWaveFormatEx(mem *mmu.MMU, addr uint64, w waveFormatEx, max uint32) ui
 }
 
 func readDSBufferDesc(mem *mmu.MMU, addr uint64) dsBufferDesc {
+	desc := dsBufferDesc{Format: defaultWaveFormatEx()}
 	if addr == 0 {
-		return dsBufferDesc{
-			Flags:       0,
-			BufferBytes: defaultWaveFormatEx().AvgBytesPerSec,
-			Format:      defaultWaveFormatEx(),
-		}
+		desc.BufferBytes = desc.Format.AvgBytesPerSec
+		return desc
 	}
-	flags, _ := mem.Read32(addr + 4)
-	bufferBytes, _ := mem.Read32(addr + 8)
+	desc.Flags, _ = mem.Read32(addr + 4)
+	desc.BufferBytes, _ = mem.Read32(addr + 8)
 	wfxPtr, _ := mem.Read64(addr + 16)
-	format := defaultWaveFormatEx()
 	if wfxPtr != 0 {
-		format = readWaveFormatEx(mem, wfxPtr)
+		desc.Format = readWaveFormatEx(mem, wfxPtr)
+		desc.HasFormat = true
 	}
-	format = normalizeWaveFormatEx(format)
-	if bufferBytes == 0 {
-		bufferBytes = format.AvgBytesPerSec
+	desc.Format = normalizeWaveFormatEx(desc.Format)
+	if desc.BufferBytes == 0 {
+		desc.BufferBytes = desc.Format.AvgBytesPerSec
 	}
-	if flags&dsBCapsPrimaryBuffer != 0 && bufferBytes == 0 {
-		bufferBytes = format.AvgBytesPerSec
+	if desc.BufferBytes == 0 {
+		desc.BufferBytes = 4096
 	}
-	if bufferBytes == 0 {
-		bufferBytes = 4096
-	}
-	return dsBufferDesc{
-		Flags:       flags,
-		BufferBytes: bufferBytes,
-		Format:      format,
-	}
+	return desc
 }
 
-func writeDSCaps(mem *mmu.MMU, addr uint64) {
+func writeDSCaps(mem *mmu.MMU, addr uint64, device *dsoundpkg.DirectSound) {
 	if addr == 0 {
 		return
 	}
@@ -221,8 +204,12 @@ func writeDSCaps(mem *mmu.MMU, addr uint64) {
 	if size == 0 {
 		size = 96
 	}
+	caps := dsoundpkg.DSBCAPS{}
+	if device != nil {
+		caps = device.GetCaps()
+	}
 	mem.Write32(addr+0, size)
-	mem.Write32(addr+4, 0)
+	mem.Write32(addr+4, caps.DwFlags)
 	mem.Write32(addr+8, 100)
 	mem.Write32(addr+12, 200000)
 	mem.Write32(addr+16, 1)
@@ -234,8 +221,8 @@ func writeDSCaps(mem *mmu.MMU, addr uint64) {
 	mem.Write32(addr+40, 0)
 }
 
-func writeDSBufferCaps(mem *mmu.MMU, addr uint64, buf *dsBuffer) {
-	if addr == 0 || buf == nil {
+func writeDSBufferCaps(mem *mmu.MMU, addr uint64, data *dsBufferObject) {
+	if addr == 0 || data == nil || data.buffer == nil {
 		return
 	}
 	size, _ := mem.Read32(addr)
@@ -243,8 +230,8 @@ func writeDSBufferCaps(mem *mmu.MMU, addr uint64, buf *dsBuffer) {
 		size = 20
 	}
 	mem.Write32(addr+0, size)
-	mem.Write32(addr+4, buf.flags)
-	mem.Write32(addr+8, buf.size)
+	mem.Write32(addr+4, data.flags)
+	mem.Write32(addr+8, data.buffer.Size)
 	mem.Write32(addr+12, 0)
 	mem.Write32(addr+16, 0)
 }
@@ -290,65 +277,95 @@ func allocGuestUTF16(mem *mmu.MMU, s string) (uint64, uint64) {
 	return allocGuestTemp(mem, raw)
 }
 
-func advancePlayCursorLocked(buf *dsBuffer) {
-	if buf == nil || !buf.playing || buf.size == 0 || buf.playStart.IsZero() {
+func cleanupPendingLock(mem *mmu.MMU, lock *dsPendingLock) {
+	if lock == nil {
 		return
 	}
-	bytesPerSec := uint64(buf.format.AvgBytesPerSec)
-	if buf.format.SamplesPerSec != 0 && buf.frequency != 0 && buf.frequency != buf.format.SamplesPerSec {
-		bytesPerSec = uint64(buf.format.AvgBytesPerSec) * uint64(buf.frequency) / uint64(buf.format.SamplesPerSec)
+	if lock.guestPtr1 != 0 && lock.bytes1 != 0 {
+		mem.Munmap(lock.guestPtr1, uint64(lock.bytes1))
 	}
-	if bytesPerSec == 0 {
-		return
-	}
-	elapsed := time.Since(buf.playStart)
-	advanced := uint64(elapsed) * bytesPerSec / uint64(time.Second)
-	buf.playPos = (buf.playStartPos + uint32(advanced%uint64(buf.size))) % buf.size
-}
-
-func (buf *dsBuffer) cleanupPendingLock(mem *mmu.MMU) {
-	if buf == nil || buf.pendingLock == nil {
-		return
-	}
-	if buf.pendingLock.ptr1 != 0 && buf.pendingLock.bytes1 != 0 {
-		mem.Munmap(buf.pendingLock.ptr1, uint64(buf.pendingLock.bytes1))
-	}
-	if buf.pendingLock.ptr2 != 0 && buf.pendingLock.bytes2 != 0 {
-		mem.Munmap(buf.pendingLock.ptr2, uint64(buf.pendingLock.bytes2))
-	}
-	buf.pendingLock = nil
-}
-
-func (buf *dsBuffer) writeRegionFromInternal(mem *mmu.MMU, ptr uint64, offset uint32, count uint32) {
-	if buf == nil || ptr == 0 || count == 0 || buf.size == 0 {
-		return
-	}
-	end := offset + count
-	if end > uint32(len(buf.data)) {
-		end = uint32(len(buf.data))
-	}
-	if end > offset {
-		mem.WriteBytes(ptr, buf.data[offset:end])
+	if lock.guestPtr2 != 0 && lock.bytes2 != 0 {
+		mem.Munmap(lock.guestPtr2, uint64(lock.bytes2))
 	}
 }
 
-func (buf *dsBuffer) readRegionToInternal(mem *mmu.MMU, ptr uint64, offset uint32, count uint32) {
-	if buf == nil || ptr == 0 || count == 0 || buf.size == 0 {
+func copyFromGuestToBuffer(mem *mmu.MMU, buffer *dsoundpkg.Buffer, guestPtr uint64, offset, count uint32) {
+	if buffer == nil || guestPtr == 0 || count == 0 || offset >= uint32(len(buffer.Data)) {
 		return
 	}
-	raw, err := mem.ReadBytes(ptr, int(count))
+	raw, err := mem.ReadBytes(guestPtr, int(count))
 	if err != nil {
 		return
 	}
 	end := offset + uint32(len(raw))
-	if end > uint32(len(buf.data)) {
-		end = uint32(len(buf.data))
+	if end > uint32(len(buffer.Data)) {
+		end = uint32(len(buffer.Data))
 		raw = raw[:end-offset]
 	}
-	copy(buf.data[offset:end], raw)
+	copy(buffer.Data[offset:end], raw)
 }
 
-func (cs *comState) createDirectSoundObject(capture bool) (*comObject, error) {
+func cloneDSBuffer(src *dsBufferObject) *dsBufferObject {
+	if src == nil || src.buffer == nil {
+		return nil
+	}
+	format := src.buffer.GetFormat()
+	clone := &dsoundpkg.Buffer{
+		Data:        append([]byte(nil), src.buffer.Data...),
+		Size:        src.buffer.Size,
+		Format:      format,
+		PlayCursor:  src.buffer.PlayCursor,
+		WriteCursor: src.buffer.WriteCursor,
+		Playing:     src.buffer.Playing,
+		Looping:     src.buffer.Looping,
+		Volume:      src.buffer.GetVolume(),
+		Frequency:   src.buffer.GetFrequency(),
+		Pan:         src.buffer.GetPan(),
+	}
+	return &dsBufferObject{
+		buffer:  clone,
+		parent:  src.parent,
+		flags:   src.flags,
+		primary: src.primary,
+	}
+}
+
+func bufferOffset(buffer *dsoundpkg.Buffer, ptr uintptr, length uint32) uint32 {
+	if buffer == nil || ptr == 0 || length == 0 || len(buffer.Data) == 0 {
+		return 0
+	}
+	base := uintptr(unsafe.Pointer(&buffer.Data[0]))
+	return uint32(ptr - base)
+}
+
+func bufferBytes(ptr uintptr, length uint32) []byte {
+	if ptr == 0 || length == 0 {
+		return nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(ptr)), int(length))
+}
+
+func ensureDirectSoundAudio(hctx *HandlerCtx, device *dsoundpkg.DirectSound) {
+	if hctx == nil || device == nil || hctx.AudioOutput != nil {
+		return
+	}
+	format := dsoundpkg.NormalizeFormat(device.Format)
+	out, err := audio.Init(int(format.NSamplesPerSec), int(format.NChannels), int(format.WBitsPerSample))
+	if err != nil {
+		ravelog.Logf("[dsound] host audio init failed: %v\n", err)
+		return
+	}
+	hctx.AudioOutput = out
+}
+
+func attachDirectSoundMixer(hctx *HandlerCtx, device *dsoundpkg.DirectSound) {
+	if hctx == nil || device == nil || hctx.AudioOutput == nil {
+		return
+	}
+	hctx.AudioOutput.SetMixer(device.Mixer(device.Format))
+}
+
+func (cs *comState) createDirectSoundObject(capture bool, device *dsoundpkg.DirectSound) (*comObject, error) {
 	iid := IID_IDirectSound8
 	methods := 12
 	kind := "direct-sound-device"
@@ -361,11 +378,14 @@ func (cs *comState) createDirectSoundObject(capture bool) (*comObject, error) {
 	if err != nil {
 		return nil, err
 	}
+	if device == nil {
+		device = dsoundpkg.NewDirectSound()
+	}
 	obj.kind = kind
 	obj.data = &directSoundDeviceData{
 		capture:       capture,
 		speakerConfig: dsSpeakerStereo,
-		defaultFormat: defaultWaveFormatEx(),
+		device:        device,
 	}
 	if capture {
 		obj.supportedIIDs[IID_IDirectSoundCapture] = true
@@ -382,126 +402,30 @@ func (cs *comState) createDirectSoundBufferObject(device *directSoundDeviceData,
 	if err != nil {
 		return nil, err
 	}
-	desc.Format = normalizeWaveFormatEx(desc.Format)
-	if desc.BufferBytes == 0 {
-		desc.BufferBytes = desc.Format.AvgBytesPerSec
+	if device == nil || device.device == nil {
+		device = &directSoundDeviceData{speakerConfig: dsSpeakerStereo, device: dsoundpkg.NewDirectSound()}
 	}
-	data := &dsBuffer{
-		parent:    device,
-		format:    desc.Format,
-		size:      desc.BufferBytes,
-		data:      make([]byte, desc.BufferBytes),
-		volume:    0,
-		pan:       0,
-		frequency: desc.Format.SamplesPerSec,
-		flags:     desc.Flags,
-		primary:   desc.Flags&dsBCapsPrimaryBuffer != 0,
+	pkgDesc := dsoundpkg.DSBUFFERDESC{
+		DwSize:        20,
+		DwFlags:       desc.Flags,
+		DwBufferBytes: desc.BufferBytes,
+	}
+	if desc.HasFormat {
+		format := toDSoundFormat(desc.Format)
+		pkgDesc.LpwfxFormat = &format
+	}
+	buffer := device.device.CreateSoundBuffer(pkgDesc)
+	attachDirectSoundMixer(cs.hctx, device.device)
+	data := &dsBufferObject{
+		buffer:  buffer,
+		parent:  device,
+		flags:   desc.Flags,
+		primary: desc.Flags&dsoundpkg.DSBCAPS_PRIMARYBUFFER != 0,
 	}
 	obj.kind = "direct-sound-buffer"
 	obj.data = data
 	obj.supportedIIDs[IID_IDirectSoundBuffer] = true
 	return obj, nil
-}
-
-func cloneDSBuffer(src *dsBuffer) *dsBuffer {
-	if src == nil {
-		return nil
-	}
-	return &dsBuffer{
-		parent:       src.parent,
-		format:       src.format,
-		size:         src.size,
-		data:         append([]byte(nil), src.data...),
-		playPos:      src.playPos,
-		writePos:     src.writePos,
-		playing:      src.playing,
-		looping:      src.looping,
-		volume:       src.volume,
-		pan:          src.pan,
-		frequency:    src.frequency,
-		flags:        src.flags,
-		primary:      src.primary,
-		playStart:    src.playStart,
-		playStartPos: src.playStartPos,
-	}
-}
-
-func dsoundBackendName() string {
-	globalDsoundBackend.once.Do(func() {
-		for _, name := range []string{"paplay", "aplay"} {
-			if _, err := exec.LookPath(name); err == nil {
-				globalDsoundBackend.name = name
-				return
-			}
-		}
-		globalDsoundBackend.name = ""
-	})
-	return globalDsoundBackend.name
-}
-
-func playPCMAsync(format waveFormatEx, pcm []byte) {
-	if len(pcm) == 0 || format.FormatTag != waveFormatPCM {
-		return
-	}
-	backend := dsoundBackendName()
-	if backend == "" {
-		return
-	}
-	var args []string
-	switch backend {
-	case "paplay":
-		var paplayFmt string
-		switch format.BitsPerSample {
-		case 8:
-			paplayFmt = "u8"
-		case 16:
-			paplayFmt = "s16le"
-		default:
-			return
-		}
-		args = []string{
-			"--raw",
-			fmt.Sprintf("--channels=%d", format.Channels),
-			fmt.Sprintf("--rate=%d", format.SamplesPerSec),
-			fmt.Sprintf("--format=%s", paplayFmt),
-		}
-	case "aplay":
-		var aplayFmt string
-		switch format.BitsPerSample {
-		case 8:
-			aplayFmt = "U8"
-		case 16:
-			aplayFmt = "S16_LE"
-		default:
-			return
-		}
-		args = []string{
-			"-q",
-			"-t", "raw",
-			"-c", fmt.Sprintf("%d", format.Channels),
-			"-r", fmt.Sprintf("%d", format.SamplesPerSec),
-			"-f", aplayFmt,
-		}
-	default:
-		return
-	}
-	cmd := exec.Command(backend, args...)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return
-	}
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		return
-	}
-	payload := append([]byte(nil), pcm...)
-	go func() {
-		_, _ = stdin.Write(payload)
-		_ = stdin.Close()
-		_ = cmd.Wait()
-	}()
 }
 
 func enumerateDirectSoundDevices(ctx *ntapi.TrapContext, callback, userCtx uint64, desc, module string) uint32 {
@@ -549,7 +473,7 @@ func (cs *comState) dispatchDirectSound(ctx *ntapi.TrapContext, obj *comObject, 
 		ctx.Mem.Write64(ppBuffer, bufObj.objectAddr)
 		return S_OK
 	case 4:
-		writeDSCaps(ctx.Mem, ctx.Arg(1))
+		writeDSCaps(ctx.Mem, ctx.Arg(1), device.device)
 		return S_OK
 	case 5:
 		origPtr := ctx.Arg(1)
@@ -562,13 +486,11 @@ func (cs *comState) dispatchDirectSound(ctx *ntapi.TrapContext, obj *comObject, 
 		if origObj == nil {
 			return E_INVALIDARG
 		}
-		origBuf, _ := origObj.data.(*dsBuffer)
+		origBuf, _ := origObj.data.(*dsBufferObject)
 		if origBuf == nil {
 			return E_INVALIDARG
 		}
-		origBuf.mu.Lock()
 		clone := cloneDSBuffer(origBuf)
-		origBuf.mu.Unlock()
 		dupObj, err := cs.createGuestObject(cs.mem, IID_IDirectSoundBuffer, 21)
 		if err != nil {
 			return hresultFromError(err)
@@ -576,11 +498,20 @@ func (cs *comState) dispatchDirectSound(ctx *ntapi.TrapContext, obj *comObject, 
 		dupObj.kind = "direct-sound-buffer"
 		dupObj.data = clone
 		dupObj.supportedIIDs[IID_IDirectSoundBuffer] = true
+		if device.device != nil && clone != nil && !clone.primary {
+			device.device.SecondaryBuffers = append(device.device.SecondaryBuffers, clone.buffer)
+			attachDirectSoundMixer(cs.hctx, device.device)
+		}
 		ctx.Mem.Write64(ppDup, dupObj.objectAddr)
 		return S_OK
 	case 6:
+		hwnd := uint32(ctx.Arg(1))
+		level := uint32(ctx.Arg(2))
 		device.mu.Lock()
-		device.cooperativeLevel = uint32(ctx.Arg(2))
+		device.cooperativeLevel = level
+		if device.device != nil {
+			device.device.SetCooperativeLevel(hwnd, level)
+		}
 		device.mu.Unlock()
 		return S_OK
 	case 7:
@@ -638,7 +569,7 @@ func (cs *comState) dispatchDirectSoundCapture(ctx *ntapi.TrapContext, obj *comO
 		ctx.Mem.Write64(ppBuffer, bufObj.objectAddr)
 		return S_OK
 	case 4:
-		writeDSCaps(ctx.Mem, ctx.Arg(1))
+		writeDSCaps(ctx.Mem, ctx.Arg(1), device.device)
 		return S_OK
 	case 5:
 		return S_OK
@@ -654,28 +585,21 @@ func (cs *comState) dispatchDirectSoundCapture(ctx *ntapi.TrapContext, obj *comO
 }
 
 func (cs *comState) dispatchDirectSoundBuffer(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
-	buf, _ := obj.data.(*dsBuffer)
-	if buf == nil {
+	data, _ := obj.data.(*dsBufferObject)
+	if data == nil || data.buffer == nil {
 		return E_FAIL
 	}
+	buf := data.buffer
 	switch method {
 	case 3:
-		buf.mu.Lock()
-		writeDSBufferCaps(ctx.Mem, ctx.Arg(1), buf)
-		buf.mu.Unlock()
+		writeDSBufferCaps(ctx.Mem, ctx.Arg(1), data)
 		return S_OK
 	case 4:
-		playPtr := ctx.Arg(1)
-		writePtr := ctx.Arg(2)
-		buf.mu.Lock()
-		advancePlayCursorLocked(buf)
-		playPos := buf.playPos
-		writePos := buf.writePos
-		buf.mu.Unlock()
-		if playPtr != 0 {
+		playPos, writePos := buf.GetCurrentPosition()
+		if playPtr := ctx.Arg(1); playPtr != 0 {
 			ctx.Mem.Write32(playPtr, playPos)
 		}
-		if writePtr != 0 {
+		if writePtr := ctx.Arg(2); writePtr != 0 {
 			ctx.Mem.Write32(writePtr, writePos)
 		}
 		return S_OK
@@ -683,9 +607,7 @@ func (cs *comState) dispatchDirectSoundBuffer(ctx *ntapi.TrapContext, obj *comOb
 		pwfx := ctx.Arg(1)
 		sizeAllocated := uint32(ctx.Arg(2))
 		sizeWritten := ctx.Arg(3)
-		buf.mu.Lock()
-		written := writeWaveFormatEx(ctx.Mem, pwfx, buf.format, sizeAllocated)
-		buf.mu.Unlock()
+		written := writeWaveFormatEx(ctx.Mem, pwfx, fromDSoundFormat(buf.GetFormat()), sizeAllocated)
 		if sizeWritten != 0 {
 			ctx.Mem.Write32(sizeWritten, written)
 		}
@@ -695,62 +617,58 @@ func (cs *comState) dispatchDirectSoundBuffer(ctx *ntapi.TrapContext, obj *comOb
 		if pOut == 0 {
 			return E_POINTER
 		}
-		buf.mu.Lock()
-		ctx.Mem.Write32(pOut, uint32(buf.volume))
-		buf.mu.Unlock()
+		ctx.Mem.Write32(pOut, uint32(buf.GetVolume()))
 		return S_OK
 	case 7:
 		pOut := ctx.Arg(1)
 		if pOut == 0 {
 			return E_POINTER
 		}
-		buf.mu.Lock()
-		ctx.Mem.Write32(pOut, uint32(buf.pan))
-		buf.mu.Unlock()
+		ctx.Mem.Write32(pOut, uint32(buf.GetPan()))
 		return S_OK
 	case 8:
 		pOut := ctx.Arg(1)
 		if pOut == 0 {
 			return E_POINTER
 		}
-		buf.mu.Lock()
-		ctx.Mem.Write32(pOut, buf.frequency)
-		buf.mu.Unlock()
+		ctx.Mem.Write32(pOut, buf.GetFrequency())
 		return S_OK
 	case 9:
 		pOut := ctx.Arg(1)
 		if pOut == 0 {
 			return E_POINTER
 		}
-		buf.mu.Lock()
-		advancePlayCursorLocked(buf)
 		status := uint32(0)
-		if buf.playing {
+		if buf.GetStatus()&dsoundpkg.DSBSTATUS_PLAYING != 0 {
 			status |= dsBStatusPlaying
 		}
-		if buf.looping {
+		if buf.GetStatus()&dsoundpkg.DSBSTATUS_LOOPING != 0 {
 			status |= dsBStatusLooping
 		}
-		buf.mu.Unlock()
 		ctx.Mem.Write32(pOut, status)
 		return S_OK
 	case 10:
 		desc := readDSBufferDesc(ctx.Mem, ctx.Arg(2))
-		buf.mu.Lock()
-		buf.cleanupPendingLock(ctx.Mem)
-		buf.format = desc.Format
-		buf.size = desc.BufferBytes
-		buf.data = make([]byte, desc.BufferBytes)
-		buf.playPos = 0
-		buf.writePos = 0
-		buf.playing = false
-		buf.looping = false
-		buf.volume = 0
-		buf.pan = 0
-		buf.frequency = desc.Format.SamplesPerSec
-		buf.flags = desc.Flags
-		buf.primary = desc.Flags&dsBCapsPrimaryBuffer != 0
-		buf.mu.Unlock()
+		cleanupPendingLock(ctx.Mem, data.pendingLock)
+		data.pendingLock = nil
+		buf.Stop()
+		buf.Data = make([]byte, desc.BufferBytes)
+		buf.Size = desc.BufferBytes
+		buf.WriteCursor = 0
+		buf.SetCurrentPosition(0)
+		buf.SetVolume(0)
+		buf.SetPan(0)
+		buf.SetFormat(toDSoundFormat(desc.Format))
+		buf.SetFrequency(toDSoundFormat(desc.Format).NSamplesPerSec)
+		data.flags = desc.Flags
+		data.primary = desc.Flags&dsoundpkg.DSBCAPS_PRIMARYBUFFER != 0
+		if data.parent != nil && data.parent.device != nil && data.primary {
+			data.parent.device.PrimaryBuffer = buf
+			data.parent.device.Format = toDSoundFormat(desc.Format)
+		}
+		if data.parent != nil {
+			attachDirectSoundMixer(cs.hctx, data.parent.device)
+		}
 		return S_OK
 	case 11:
 		offset := uint32(ctx.Arg(1))
@@ -767,127 +685,79 @@ func (cs *comState) dispatchDirectSoundBuffer(ctx *ntapi.TrapContext, obj *comOb
 		ctx.Mem.Write32(pb1, 0)
 		ctx.Mem.Write64(pp2, 0)
 		ctx.Mem.Write32(pb2, 0)
-		buf.mu.Lock()
-		defer buf.mu.Unlock()
-		if buf.size == 0 {
+		if buf.Size == 0 {
 			return E_FAIL
 		}
-		if flags&dsBLockEntireBuffer != 0 || requested == 0 || requested > buf.size {
-			requested = buf.size
+		if flags&dsoundpkg.DSBLOCK_ENTIREBUFFER != 0 || requested == 0 || requested > buf.Size {
+			requested = buf.Size
 		}
-		if flags&dsBLockFromWriteCursor != 0 {
-			offset = buf.writePos
+		if flags&dsoundpkg.DSBLOCK_FROMWRITECURSOR != 0 {
+			offset = buf.WriteCursor
 		}
-		if offset >= buf.size {
-			offset %= buf.size
+		if offset >= buf.Size {
+			offset %= buf.Size
 		}
-		buf.cleanupPendingLock(ctx.Mem)
-		firstLen := requested
-		secondLen := uint32(0)
-		if offset+requested > buf.size {
-			firstLen = buf.size - offset
-			secondLen = requested - firstLen
-		}
+		cleanupPendingLock(ctx.Mem, data.pendingLock)
+		ptr1, len1, ptr2, len2 := buf.Lock(offset, requested, flags)
 		pending := &dsPendingLock{
-			offset1:      offset,
-			bytes1:       firstLen,
-			offset2:      0,
-			bytes2:       secondLen,
-			nextWritePos: (offset + requested) % buf.size,
+			offset1:      bufferOffset(buf, ptr1, len1),
+			bytes1:       len1,
+			offset2:      bufferOffset(buf, ptr2, len2),
+			bytes2:       len2,
+			nextWritePos: (offset + len1 + len2) % buf.Size,
 		}
-		if secondLen != 0 {
-			pending.offset2 = 0
+		if len1 != 0 {
+			pending.guestPtr1, _ = allocGuestTemp(ctx.Mem, append([]byte(nil), bufferBytes(ptr1, len1)...))
 		}
-		if firstLen != 0 {
-			pending.ptr1, _ = allocGuestTemp(ctx.Mem, buf.data[offset:offset+firstLen])
+		if len2 != 0 {
+			pending.guestPtr2, _ = allocGuestTemp(ctx.Mem, append([]byte(nil), bufferBytes(ptr2, len2)...))
 		}
-		if secondLen != 0 {
-			pending.ptr2, _ = allocGuestTemp(ctx.Mem, buf.data[0:secondLen])
-		}
-		buf.pendingLock = pending
-		ctx.Mem.Write64(pp1, pending.ptr1)
+		data.pendingLock = pending
+		ctx.Mem.Write64(pp1, pending.guestPtr1)
 		ctx.Mem.Write32(pb1, pending.bytes1)
-		ctx.Mem.Write64(pp2, pending.ptr2)
+		ctx.Mem.Write64(pp2, pending.guestPtr2)
 		ctx.Mem.Write32(pb2, pending.bytes2)
 		return S_OK
 	case 12:
-		flags := uint32(ctx.Arg(3))
-		var snapshot []byte
-		var format waveFormatEx
-		var primary bool
-		buf.mu.Lock()
-		advancePlayCursorLocked(buf)
-		buf.playing = true
-		buf.looping = flags&dsBPlayLooping != 0
-		buf.playStartPos = buf.playPos
-		buf.playStart = time.Now()
-		format = buf.format
-		primary = buf.primary
-		snapshot = append(snapshot, buf.data...)
-		buf.mu.Unlock()
-		if !primary {
-			playPCMAsync(format, snapshot)
+		buf.Play(uint32(ctx.Arg(1)), uint32(ctx.Arg(2)), uint32(ctx.Arg(3)))
+		if data.parent != nil {
+			attachDirectSoundMixer(cs.hctx, data.parent.device)
 		}
 		return S_OK
 	case 13:
-		newPos := uint32(ctx.Arg(1))
-		buf.mu.Lock()
-		if buf.size != 0 {
-			newPos %= buf.size
-		} else {
-			newPos = 0
-		}
-		buf.playPos = newPos
-		buf.playStartPos = newPos
-		buf.playStart = time.Now()
-		buf.mu.Unlock()
+		buf.SetCurrentPosition(uint32(ctx.Arg(1)))
 		return S_OK
 	case 14:
-		wfx := ctx.Arg(1)
-		buf.mu.Lock()
-		buf.format = readWaveFormatEx(ctx.Mem, wfx)
-		buf.frequency = buf.format.SamplesPerSec
-		buf.mu.Unlock()
+		format := toDSoundFormat(readWaveFormatEx(ctx.Mem, ctx.Arg(1)))
+		buf.SetFormat(format)
+		if data.primary && data.parent != nil && data.parent.device != nil {
+			data.parent.device.Format = format
+		}
+		if data.parent != nil {
+			attachDirectSoundMixer(cs.hctx, data.parent.device)
+		}
 		return S_OK
 	case 15:
-		vol := int32(ctx.Arg(1))
-		buf.mu.Lock()
-		buf.volume = clampInt32(vol, -10000, 0)
-		buf.mu.Unlock()
+		buf.SetVolume(int32(ctx.Arg(1)))
 		return S_OK
 	case 16:
-		pan := int32(ctx.Arg(1))
-		buf.mu.Lock()
-		buf.pan = clampInt32(pan, -10000, 10000)
-		buf.mu.Unlock()
+		buf.SetPan(int32(ctx.Arg(1)))
 		return S_OK
 	case 17:
-		freq := uint32(ctx.Arg(1))
-		buf.mu.Lock()
-		if freq == 0 {
-			freq = buf.format.SamplesPerSec
-		}
-		buf.frequency = clampUint32(freq, 100, 200000)
-		buf.mu.Unlock()
+		buf.SetFrequency(uint32(ctx.Arg(1)))
 		return S_OK
 	case 18:
-		buf.mu.Lock()
-		advancePlayCursorLocked(buf)
-		buf.playing = false
-		buf.looping = false
-		buf.playStart = time.Time{}
-		buf.mu.Unlock()
+		buf.Stop()
 		return S_OK
 	case 19:
-		buf.mu.Lock()
-		buf.readRegionToInternal(ctx.Mem, ctx.Arg(1), 0, 0)
-		if buf.pendingLock != nil {
-			buf.readRegionToInternal(ctx.Mem, buf.pendingLock.ptr1, buf.pendingLock.offset1, buf.pendingLock.bytes1)
-			buf.readRegionToInternal(ctx.Mem, buf.pendingLock.ptr2, buf.pendingLock.offset2, buf.pendingLock.bytes2)
-			buf.writePos = buf.pendingLock.nextWritePos
+		if data.pendingLock != nil {
+			copyFromGuestToBuffer(ctx.Mem, buf, data.pendingLock.guestPtr1, data.pendingLock.offset1, data.pendingLock.bytes1)
+			copyFromGuestToBuffer(ctx.Mem, buf, data.pendingLock.guestPtr2, data.pendingLock.offset2, data.pendingLock.bytes2)
+			buf.WriteCursor = data.pendingLock.nextWritePos
+			buf.Unlock(0, data.pendingLock.bytes1, 0, data.pendingLock.bytes2)
+			cleanupPendingLock(ctx.Mem, data.pendingLock)
+			data.pendingLock = nil
 		}
-		buf.cleanupPendingLock(ctx.Mem)
-		buf.mu.Unlock()
 		return S_OK
 	case 20:
 		return S_OK
@@ -920,7 +790,10 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(CLASS_E_NOAGGREGATION)
 			return 0
 		}
-		obj, err := cs.createDirectSoundObject(false)
+		device := dsoundpkg.NewDirectSound()
+		hctx.DirectSound = device
+		ensureDirectSoundAudio(hctx, device)
+		obj, err := cs.createDirectSoundObject(false, device)
 		if err != nil {
 			ctx.SetReturn(uint64(hresultFromError(err)))
 			return 0
@@ -942,7 +815,10 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(CLASS_E_NOAGGREGATION)
 			return 0
 		}
-		obj, err := cs.createDirectSoundObject(false)
+		device := dsoundpkg.NewDirectSound()
+		hctx.DirectSound = device
+		ensureDirectSoundAudio(hctx, device)
+		obj, err := cs.createDirectSoundObject(false, device)
 		if err != nil {
 			ctx.SetReturn(uint64(hresultFromError(err)))
 			return 0
@@ -970,7 +846,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(CLASS_E_NOAGGREGATION)
 			return 0
 		}
-		obj, err := cs.createDirectSoundObject(true)
+		obj, err := cs.createDirectSoundObject(true, dsoundpkg.NewDirectSound())
 		if err != nil {
 			ctx.SetReturn(uint64(hresultFromError(err)))
 			return 0
@@ -992,7 +868,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(CLASS_E_NOAGGREGATION)
 			return 0
 		}
-		obj, err := cs.createDirectSoundObject(true)
+		obj, err := cs.createDirectSoundObject(true, dsoundpkg.NewDirectSound())
 		if err != nil {
 			ctx.SetReturn(uint64(hresultFromError(err)))
 			return 0

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
+	comctl32 "github.com/mirkobrombin/Raven/pkg/comctl32"
 	"github.com/mirkobrombin/Raven/pkg/cpu"
 	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
 	"github.com/mirkobrombin/Raven/pkg/jit"
@@ -28,7 +29,6 @@ import (
 	gosyscall "github.com/mirkobrombin/Raven/pkg/syscall"
 	"github.com/mirkobrombin/Raven/pkg/thread"
 	"github.com/mirkobrombin/Raven/pkg/vfs"
-	comctl32 "github.com/mirkobrombin/Raven/pkg/comctl32"
 	"github.com/mirkobrombin/Raven/pkg/win32"
 	"github.com/mirkobrombin/Raven/pkg/win32k"
 	"github.com/mirkobrombin/Raven/pkg/wl"
@@ -370,9 +370,9 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 		fmt.Fprintf(os.Stderr, "govm: PE load error: %v\n", err)
 		os.Exit(1)
 	}
+	// PE32 and PE32+ are both supported; set MMU/CPU mode accordingly.
 	if !result.MainModule.Is64 {
-		fmt.Fprintf(os.Stderr, "govm: PE32 (x86) binaries are not supported yet: %s\n", absPath)
-		os.Exit(1)
+		mem.Mode32 = true
 	}
 
 	// Record boot time for GetTickCount / KUSER_SHARED_DATA TickCount updates.
@@ -642,6 +642,16 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	// Stack layout - below KUSER_SHARED_DATA (0x7FFE0000)
 	stackTop := uint64(0x7FFD0000)
 	stackSize := uint64(64 * 1024 * 1024)
+	if !result.MainModule.Is64 {
+		// PE32: keep stack in lower 2GB
+		stackTop = 0x00FF0000
+		stackSize = 8 * 1024 * 1024
+	}
+
+	procArch := "AMD64"
+	if !result.MainModule.Is64 {
+		procArch = "x86"
+	}
 
 	// Initialize PEB/TEB
 	procState, err := ntapi.InitProcess(mem, &ntapi.ProcessInit{
@@ -657,13 +667,14 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 			"TEMP=C:\\Windows\\TEMP",
 			"TMP=C:\\Windows\\TEMP",
 			"OS=Windows_NT",
-			"PROCESSOR_ARCHITECTURE=AMD64",
+			"PROCESSOR_ARCHITECTURE=" + procArch,
 			"NUMBER_OF_PROCESSORS=4",
 		},
 		ProcessId:  1000,
 		ThreadId:   1004,
 		StackBase:  stackTop,
 		StackLimit: stackTop - stackSize,
+		Is32:       !result.MainModule.Is64,
 	}, modules)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "govm: PEB/TEB init error: %v\n", err)
@@ -688,9 +699,23 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	// cpu-recover never needs to handle them (they just return 0 quietly).
 	patchUnresolvedOrdinals(mem, dispatcher, result.MainModule)
 
+	is32 := !result.MainModule.Is64
+
 	// Register auto-synth stub names with the dispatcher for trace output
 	for _, synth := range autoSynthDLLs {
 		dispatcher.RegisterAutoStubNames(synth)
+		// Apply Win32 API arg counts for PE32 stdcall cleanup
+		if is32 {
+			dispatcher.ApplyWin32ArgCounts(synth)
+		}
+		// Mark C runtime DLLs as cdecl (caller cleans up args, not callee)
+		dllLower := strings.ToLower(synth.Name)
+		if dllLower == "msvcrt.dll" || dllLower == "ucrtbase.dll" ||
+			strings.HasPrefix(dllLower, "msvcp") || strings.HasPrefix(dllLower, "vcruntime") {
+			for _, id := range synth.StubIDs {
+				dispatcher.MarkCdeclRange(id, 1)
+			}
+		}
 	}
 
 	// Register handlers for critical CRT/Win32 functions
@@ -702,8 +727,13 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	// Must happen before registerAutoSynthHandlers so sharedHeapAlloc can read it.
 	const heapInlineSize = 256 * 1024 * 1024 // 256MB
 	heapRegion := mem.Mmap(0, heapInlineSize, mmu.PermRead|mmu.PermWrite)
-	mem.Write64(procState.TEBAddr+ntapi.TebHeapBase, heapRegion)
-	mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
+	if is32 {
+		mem.Write32(procState.TEBAddr+ntapi.Teb32HeapBase, uint32(heapRegion))
+		mem.Write32(procState.TEBAddr+ntapi.Teb32HeapOffset, 0)
+	} else {
+		mem.Write64(procState.TEBAddr+ntapi.TebHeapBase, heapRegion)
+		mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
+	}
 
 	registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry, autoScript)
 
@@ -715,28 +745,44 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 
 	// Create x64 CPU
 	c := x64.New(mem)
+	if !result.MainModule.Is64 {
+		c.Mode32 = true
+	}
 	c.SetPC(result.EntryPoint)
 	c.SetSP(result.StackPtr)
-	c.SetGSBase(procState.TEBAddr) // GS points to TEB (x64 Windows convention)
+	if c.Mode32 {
+		c.SetTLS(procState.TEBAddr) // FS points to TEB (x86 Win32 convention)
+	} else {
+		c.SetGSBase(procState.TEBAddr) // GS points to TEB (x64 Windows convention)
+	}
 
 	// Wire JIT compiler
 	jitCache := jit.NewCache(mem)
 	_ = jitCache // JIT disabled - needs debugging for NPP
 
 	// Wire up implicit TLS (__declspec(thread)) if the PE has a TLS directory.
-	// TEB+0x58 (ThreadLocalStoragePointer) must point to an array of per-module
-	// TLS data blocks, indexed by the module's TLS index.
 	if result.MainModule.TLSDataAddr != 0 {
-		tlsSlotsArray := mem.Mmap(0, 64*8, mmu.PermRead|mmu.PermWrite) // up to 64 modules
-		mem.Write64(tlsSlotsArray+0, result.MainModule.TLSDataAddr)    // slot 0 = main module
-		mem.Write64(procState.TEBAddr+0x58, tlsSlotsArray)
+		if is32 {
+			tlsSlotsArray := mem.Mmap(0, 64*4, mmu.PermRead|mmu.PermWrite)
+			mem.Write32(tlsSlotsArray+0, uint32(result.MainModule.TLSDataAddr))
+			mem.Write32(procState.TEBAddr+ntapi.Teb32ThreadLocalStorage, uint32(tlsSlotsArray))
+		} else {
+			tlsSlotsArray := mem.Mmap(0, 64*8, mmu.PermRead|mmu.PermWrite)
+			mem.Write64(tlsSlotsArray+0, result.MainModule.TLSDataAddr)
+			mem.Write64(procState.TEBAddr+0x58, tlsSlotsArray)
+		}
 	}
 
 	// Allocate FLS data array in guest memory for inline FlsGetValue/FlsSetValue.
-	// This eliminates vmcall overhead for the hottest CRT path.
 	const flsMaxSlots = 128
-	flsDataArray := mem.Mmap(0, flsMaxSlots*8, mmu.PermRead|mmu.PermWrite)
-	mem.Write64(procState.TEBAddr+ntapi.TebFlsData, flsDataArray)
+	var flsDataArray uint64
+	if is32 {
+		flsDataArray = mem.Mmap(0, flsMaxSlots*4, mmu.PermRead|mmu.PermWrite)
+		mem.Write32(procState.TEBAddr+ntapi.Teb32FlsData, uint32(flsDataArray))
+	} else {
+		flsDataArray = mem.Mmap(0, flsMaxSlots*8, mmu.PermRead|mmu.PermWrite)
+		mem.Write64(procState.TEBAddr+ntapi.TebFlsData, flsDataArray)
+	}
 
 	// Map a zero-filled null page so that null-pointer dereferences with small
 	// offsets (like [rcx+0x28] with rcx=0) read/write zero instead of segfaulting.
@@ -745,7 +791,10 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	mem.MapRange(0, 0x10000, mmu.PermRead|mmu.PermWrite) // force-map pages 0-0xFFFF
 
 	// Patch hot Win32 API stubs with inline x64 code to avoid vmcall overhead.
-	patchHotStubs(mem, autoSynthDLLs, flsDataArray)
+	// Skip for PE32 - the inline stubs use GS-segment and 64-bit instructions.
+	if !is32 {
+		patchHotStubs(mem, autoSynthDLLs, flsDataArray)
+	}
 
 	if trace && exceptionTable != nil {
 		ravelog.Logf("[seh] parsed %d RUNTIME_FUNCTION entries from .pdata\n", len(exceptionTable.Entries))
@@ -1015,8 +1064,24 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	var heapFreeList []freeBlock
 	heapMmapBlocks := make(map[uint64]uint64) // user ptr → block size
 	var heapMu sync.Mutex                     // protects heapFreeList, heapMmapBlocks, and TEB bump counter
+	mode32 := !mainModule.Is64
 
-	heapRegion, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
+	// Resolve TEB heap fields (different offsets for x86 vs x64)
+	var tebHeapBaseOff, tebHeapOffOff uint64
+	if mode32 {
+		tebHeapBaseOff = ntapi.Teb32HeapBase
+		tebHeapOffOff = ntapi.Teb32HeapOffset
+	} else {
+		tebHeapBaseOff = ntapi.TebHeapBase
+		tebHeapOffOff = ntapi.TebHeapOffset
+	}
+	var heapRegion uint64
+	if mode32 {
+		v, _ := mem.Read32(procState.TEBAddr + tebHeapBaseOff)
+		heapRegion = uint64(v)
+	} else {
+		heapRegion, _ = mem.Read64(procState.TEBAddr + tebHeapBaseOff)
+	}
 
 	sharedHeapAlloc := func(size uint64, zeroInit bool) uint64 {
 		heapMu.Lock()
@@ -1056,19 +1121,35 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 
 		// Bump allocator
-		heapOff, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
+		var heapOff uint64
+		if mode32 {
+			v, _ := mem.Read32(procState.TEBAddr + tebHeapOffOff)
+			heapOff = uint64(v)
+		} else {
+			heapOff, _ = mem.Read64(procState.TEBAddr + tebHeapOffOff)
+		}
 		if heapOff+totalBlock <= 256*1024*1024 {
 			addr := heapRegion + heapOff
 			mem.Write64(addr, totalBlock)
 			heapOff += totalBlock
-			mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, heapOff)
+			if mode32 {
+				mem.Write32(procState.TEBAddr+tebHeapOffOff, uint32(heapOff))
+			} else {
+				mem.Write64(procState.TEBAddr+tebHeapOffOff, heapOff)
+			}
 			return addr + 16
 		}
 
 		// Mmap overflow
 		addr := mem.Mmap(0, totalBlock, mmu.PermRead|mmu.PermWrite)
 		if addr == 0 {
-			heapOff, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
+			var heapOff uint64
+			if mode32 {
+				v, _ := mem.Read32(procState.TEBAddr + tebHeapOffOff)
+				heapOff = uint64(v)
+			} else {
+				heapOff, _ = mem.Read64(procState.TEBAddr + tebHeapOffOff)
+			}
 			var freeTotal uint64
 			for _, fb := range heapFreeList {
 				freeTotal += fb.blockSize
@@ -2355,7 +2436,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	hctx.HwndAlloc = hwndAlloc
 	hctx.NextMsgID = 0xC000 // RegisterWindowMessage range
 	hctx.RegisteredMsgNames = make(map[string]uint32)
-	hctx.NextAtom = 0xC001  // RegisterClass atom range
+	hctx.NextAtom = 0xC001 // RegisterClass atom range
 	// hctx.FocusHwnd: hctx.FocusHwnd already zero-valued
 	// hctx.MouseCapture: hctx.MouseCapture already zero-valued
 
@@ -5702,17 +5783,77 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	//   +15 C3                    RET
 	//   +16 (8 bytes)             WndProc RAX save slot
 	hctx.SyncTrampoline = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-	// MOV [RIP+9], RAX - after this 7-byte instruction RIP=+7, so [+7+9]=[+16]
-	mem.Write8(hctx.SyncTrampoline+0, 0x48)
-	mem.Write8(hctx.SyncTrampoline+1, 0x89)
-	mem.Write8(hctx.SyncTrampoline+2, 0x05)
-	mem.Write32(hctx.SyncTrampoline+3, 9)   // RIP-relative offset
-	mem.Write8(hctx.SyncTrampoline+7, 0xB8) // MOV EAX, imm32
-	mem.Write32(hctx.SyncTrampoline+8, syncTrampolineID)
-	mem.Write8(hctx.SyncTrampoline+12, 0x0F) // vmcall
-	mem.Write8(hctx.SyncTrampoline+13, 0x01)
-	mem.Write8(hctx.SyncTrampoline+14, 0xC1)
-	mem.Write8(hctx.SyncTrampoline+15, 0xC3) // ret
+	is32 := procState.Is32
+	if is32 {
+		// PE32 trampoline layout:
+		//   +0  A3 [addr32]          MOV [scratch], EAX  ; save WndProc result
+		//   +5  B8 [imm32]           MOV EAX, syncTrampolineID
+		//   +10 0F 01 C1             VMCALL
+		//   +13 C3                   RET
+		//   +14 (4 bytes)            scratch slot for EAX
+		scratchAddr := uint32(hctx.SyncTrampoline + 14)
+		mem.Write8(hctx.SyncTrampoline+0, 0xA3)
+		mem.Write32(hctx.SyncTrampoline+1, scratchAddr)
+		mem.Write8(hctx.SyncTrampoline+5, 0xB8) // MOV EAX, imm32
+		mem.Write32(hctx.SyncTrampoline+6, syncTrampolineID)
+		mem.Write8(hctx.SyncTrampoline+10, 0x0F) // vmcall
+		mem.Write8(hctx.SyncTrampoline+11, 0x01)
+		mem.Write8(hctx.SyncTrampoline+12, 0xC1)
+		mem.Write8(hctx.SyncTrampoline+13, 0xC3) // ret
+	} else {
+		// x64 trampoline layout:
+		//   +0  48 89 05 09 00 00 00  MOV [RIP+9], RAX  ; save WndProc result at +16
+		//   +7  B8 FE 3F 00 00        MOV EAX, 0x3FFE   ; trampoline vmcall ID
+		//   +12 0F 01 C1              VMCALL
+		//   +15 C3                    RET
+		//   +16 (8 bytes)             WndProc RAX save slot
+		mem.Write8(hctx.SyncTrampoline+0, 0x48)
+		mem.Write8(hctx.SyncTrampoline+1, 0x89)
+		mem.Write8(hctx.SyncTrampoline+2, 0x05)
+		mem.Write32(hctx.SyncTrampoline+3, 9) // RIP-relative offset
+		mem.Write8(hctx.SyncTrampoline+7, 0xB8)
+		mem.Write32(hctx.SyncTrampoline+8, syncTrampolineID)
+		mem.Write8(hctx.SyncTrampoline+12, 0x0F)
+		mem.Write8(hctx.SyncTrampoline+13, 0x01)
+		mem.Write8(hctx.SyncTrampoline+14, 0xC1)
+		mem.Write8(hctx.SyncTrampoline+15, 0xC3)
+	}
+
+	// syncSetupWndProcCall sets up a guest WndProc call for both PE32 (stdcall
+	// on stack) and PE32+ (x64 fastcall in registers). It pushes a return
+	// address (retAddr) so the WndProc RET returns there.
+	syncSetupWndProcCall := func(ctx *ntapi.TrapContext, wndProc, hwnd uint64, msg uint32, wParam, lParam, retAddr uint64) {
+		rw := ctx.CPU.(ntapi.RegisterWriter)
+		rr := ctx.CPU.(ntapi.RegisterReader)
+		if is32 {
+			// PE32 stdcall: push args right-to-left, then retAddr
+			rsp := rr.ReadReg(4)
+			rsp -= 4
+			mem.Write32(rsp, uint32(lParam))
+			rsp -= 4
+			mem.Write32(rsp, uint32(wParam))
+			rsp -= 4
+			mem.Write32(rsp, msg)
+			rsp -= 4
+			mem.Write32(rsp, uint32(hwnd))
+			rsp -= 4
+			mem.Write32(rsp, uint32(retAddr))
+			rw.WriteReg(4, rsp)
+		} else {
+			rsp := rr.ReadReg(4)
+			rsp -= 8
+			mem.Write64(rsp, retAddr)
+			rw.WriteReg(4, rsp)
+			rw.WriteReg(1, hwnd)
+			rw.WriteReg(2, uint64(msg))
+			rw.WriteReg(8, wParam)
+			rw.WriteReg(9, lParam)
+		}
+		ctx.CPU.SetPC(wndProc)
+		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
+	}
+	hctx.SyncCallWndProc = syncSetupWndProcCall
 
 	d.RegisterHandler(syncTrampolineID, "syncDispatchTrampoline", func(ctx *ntapi.TrapContext) uint32 {
 		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
@@ -5731,21 +5872,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if len(frame.queue) > 0 {
 			sd := frame.queue[0]
 			frame.queue = frame.queue[1:]
-
-			// Push trampoline as return address
-			rsp := rr.ReadReg(4) // RSP
-			rsp -= 8
-			mem.Write64(rsp, hctx.SyncTrampoline)
-			rw.WriteReg(4, rsp) // update RSP
-
-			// Set up WndProc args (x64 calling convention)
-			rw.WriteReg(1, sd.hwnd)        // RCX = hwnd
-			rw.WriteReg(2, uint64(sd.msg)) // RDX = msg
-			rw.WriteReg(8, sd.wParam)      // R8 = wParam
-			rw.WriteReg(9, sd.lParam)      // R9 = lParam
-
-			ctx.CPU.SetPC(sd.wndProc)
-			ctx.ReturnOverridden = true
+			syncSetupWndProcCall(ctx, sd.wndProc, sd.hwnd, uint32(sd.msg), sd.wParam, sd.lParam, hctx.SyncTrampoline)
 			return 0
 		}
 
@@ -5761,24 +5888,37 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		// EndDialog will later trigger the actual return via a stack unwind.
 		if isModal {
 			if msgLoopSP != 0 && msgLoopPC != 0 {
-				rsp := msgLoopSP - 8
-				mem.Write64(rsp, msgLoopPC)
-				rw.WriteReg(4, rsp)
+				if is32 {
+					rsp := msgLoopSP - 4
+					mem.Write32(rsp, uint32(msgLoopPC))
+					rw.WriteReg(4, rsp)
+				} else {
+					rsp := msgLoopSP - 8
+					mem.Write64(rsp, msgLoopPC)
+					rw.WriteReg(4, rsp)
+				}
 				ctx.SetReturn(0)
 				return 0
 			}
-			// Message loop not yet entered - fall through and return IDCANCEL.
 		}
 
-		rsp := rr.ReadReg(4) // RSP
-		rsp -= 8
-		mem.Write64(rsp, retAddr)
+		rsp := rr.ReadReg(4)
+		if is32 {
+			rsp -= 4
+			mem.Write32(rsp, uint32(retAddr))
+		} else {
+			rsp -= 8
+			mem.Write64(rsp, retAddr)
+		}
 		rw.WriteReg(4, rsp)
 		if returnWndProcResult {
-			// RAX was saved to hctx.SyncTrampoline+16 by the first trampoline instruction
-			// before MOV EAX,ID overwrote it.
-			saved, _ := mem.Read64(hctx.SyncTrampoline + 16)
-			ctx.SetReturn(saved)
+			if is32 {
+				saved, _ := mem.Read32(hctx.SyncTrampoline + 14)
+				ctx.SetReturn(uint64(saved))
+			} else {
+				saved, _ := mem.Read64(hctx.SyncTrampoline + 16)
+				ctx.SetReturn(saved)
+			}
 		} else {
 			ctx.SetReturn(hwnd)
 		}
@@ -5916,7 +6056,7 @@ func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[stri
 		}
 	}
 
-	aliases := make(map[string]string) // original name → canonical name
+	aliases := make(map[string]string)  // original name → canonical name
 	needed := make(map[string][]string) // canonical dll name → function names
 	for _, imp := range mainMod.Imports {
 		dllKey := strings.ToLower(imp.DLLName)
@@ -6014,7 +6154,11 @@ func patchCRTDataExports(mem *mmu.MMU, mainMod *loader.PEModule, argv []string) 
 	// Patch IAT slots
 	for _, imp := range mainMod.Imports {
 		if addr, ok := dataExports[imp.FuncName]; ok {
-			mem.Write64Raw(imp.IATSlot, addr)
+			if mainMod.Is64 {
+				mem.Write64Raw(imp.IATSlot, addr)
+			} else {
+				mem.Write32Raw(imp.IATSlot, uint32(addr))
+			}
 		}
 	}
 }
@@ -6024,20 +6168,25 @@ func patchCRTDataExports(mem *mmu.MMU, mainMod *loader.PEModule, argv []string) 
 // trampoline that logs the call and returns 0.  This covers ordinal-only
 // imports (e.g. COMCTL32 FlatSB ordinals) that no synthetic DLL exposes.
 func patchUnresolvedOrdinals(mem *mmu.MMU, d *ntapi.Dispatcher, mainMod *loader.PEModule) {
-	const unresolvedSentinel = 0xDEAD_DEAD_0001_0000
 	// ID range reserved for ordinal stubs - well above auto-synth (0x2000+)
 	const ordinalIDBase = uint32(0xF000)
 	const stubBytes = 9 // B8 xx xx xx xx | 0F 01 C1 | C3
 
 	// Collect unresolved entries
 	var unresolved []loader.PEImportEntry
+	unresolvedSentinel64 := uint64(0xDEAD_DEAD_0001_0000)
+	unresolvedSentinel32 := uint32(0xDEAD0000)
 	for _, imp := range mainMod.Imports {
-		if !mainMod.Is64 {
-			continue
-		}
-		v, _ := mem.Read64(imp.IATSlot)
-		if v == unresolvedSentinel {
-			unresolved = append(unresolved, imp)
+		if mainMod.Is64 {
+			v, _ := mem.Read64(imp.IATSlot)
+			if v == unresolvedSentinel64 {
+				unresolved = append(unresolved, imp)
+			}
+		} else {
+			v, _ := mem.Read32(imp.IATSlot)
+			if v == unresolvedSentinel32 {
+				unresolved = append(unresolved, imp)
+			}
 		}
 	}
 	if len(unresolved) == 0 {
@@ -6069,7 +6218,11 @@ func patchUnresolvedOrdinals(mem *mmu.MMU, d *ntapi.Dispatcher, mainMod *loader.
 				return 0
 			})
 
-		mem.Write64Raw(imp.IATSlot, stubAddr)
+		if mainMod.Is64 {
+			mem.Write64Raw(imp.IATSlot, stubAddr)
+		} else {
+			mem.Write32Raw(imp.IATSlot, uint32(stubAddr))
+		}
 		ravelog.Logf("[ordinal] patched %s!ord%d IAT=0x%x → stub=0x%x\n",
 			imp.DLLName, imp.Ordinal, imp.IATSlot, stubAddr)
 	}

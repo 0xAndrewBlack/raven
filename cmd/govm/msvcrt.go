@@ -65,6 +65,7 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		mem.Write64(rsp, hctx.SyncTrampoline)
 		ctx.CPU.SetPC(fns[0])
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 
@@ -1334,5 +1335,10 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		_ = tlsAtexitCallback // stored for potential future use
 		ctx.SetReturn(0)
 		return 0
+	})
+
+	registerCommonCRTOverrides(hctx, msvcrt, crtModuleConfig{
+		iobBase:   func() uint64 { return iobBase },
+		iobStride: iobStride,
 	})
 }

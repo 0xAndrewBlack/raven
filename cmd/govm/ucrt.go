@@ -2073,6 +2073,7 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		mem.Write64(rsp, hctx.SyncTrampoline)
 		ctx.CPU.SetPC(fns[0])
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 
@@ -2139,5 +2140,10 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		}
 		ctx.SetReturn(uint64(val))
 		return 0
+	})
+
+	registerCommonCRTOverrides(hctx, ucrt, crtModuleConfig{
+		iobBase:   func() uint64 { return crtIOBBase },
+		iobStride: 0x30,
 	})
 }

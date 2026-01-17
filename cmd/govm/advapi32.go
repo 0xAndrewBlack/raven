@@ -105,10 +105,16 @@ func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 		existed := ctx.Reg.OpenKey(path) != nil
 		key := ctx.Reg.CreateKey(path)
 		h := handles.Alloc(&ntapi.RegistryKeyHandle{Hive: regHive, Key: key, Path: path})
-		if phk := ctx.Arg(6); phk != 0 {
-			ctx.Mem.Write64(phk, uint64(h))
+		// RegCreateKeyExW args: hKey(0), lpSubKey(1), Reserved(2), lpClass(3),
+		// dwOptions(4), samDesired(5), lpSecurityAttributes(6), phkResult(7), lpdwDisposition(8)
+		if phk := ctx.Arg(7); phk != 0 {
+			if ctx.State != nil && ctx.State.Is32 {
+				ctx.Mem.Write32(phk, uint32(h))
+			} else {
+				ctx.Mem.Write64(phk, uint64(h))
+			}
 		}
-		if disp := ctx.Arg(7); disp != 0 {
+		if disp := ctx.Arg(8); disp != 0 {
 			if existed {
 				ctx.Mem.Write32(disp, 2)
 			} else {

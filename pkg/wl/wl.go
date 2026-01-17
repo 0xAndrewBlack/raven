@@ -36,6 +36,8 @@ const (
 	kindDecoration
 	kindCursorShapeManager
 	kindCursorShapeDevice
+	kindLinuxDmabuf
+	kindLinuxBufferParams
 )
 
 // CursorShape values for wp_cursor_shape_device_v1.set_shape.
@@ -108,10 +110,12 @@ type Display struct {
 	seatGlobal, seatVer             uint32
 	decorMgrGlobal, decorMgrVer     uint32
 	cursorShapeMgrGlobal            uint32
+	dmabufGlobal, dmabufVer         uint32
 
 	decorMgrID       uint32
 	cursorShapeMgrID uint32
 	cursorShapeDevID uint32
+	dmabufID         uint32
 	pendingCursor    uint32 // shape to set on next enter, or 0
 
 	seatID     uint32
@@ -128,6 +132,8 @@ type Display struct {
 	mouseX, mouseY int32 // current surface-local position (fixed-point → int)
 	mouseEvents    []MouseEvent
 	lastSerial     uint32 // last input event serial (for interactive move/resize)
+	dmabufFormats  map[uint32]map[uint64]struct{}
+	dmabufParams   map[uint32]*Window
 
 	readBuf []byte // buffered data from oversized reads
 
@@ -150,11 +156,20 @@ type Window struct {
 	Stride    int32
 	Pix       []byte // mmap'd XRGB8888 pixels (B, G, R, X per pixel)
 	fd        int    // memfd backing Pix
+	dmabufID  uint32
 
 	configured  bool
 	needsResize bool
 	appResized  bool // set when app called Resize(); suppresses compositor shrink
 	Closed      bool
+
+	dmabufWidth     uint32
+	dmabufHeight    uint32
+	dmabufStride    uint32
+	dmabufFormat    uint32
+	dmabufModifier  uint64
+	dmabufParamsID  uint32
+	dmabufCreateErr error
 }
 
 // --- wire helpers ---
@@ -338,8 +353,38 @@ func (d *Display) dispatchOne() (EventType, error) {
 	case kindShm:
 		// format - ignore
 
+	case kindLinuxDmabuf:
+		if op == 0 && len(payload) >= 4 {
+			d.recordDmabufFormat(gu32(payload[0:]), 0)
+		} else if op == 1 && len(payload) >= 12 {
+			format := gu32(payload[0:])
+			modifier := uint64(gu32(payload[4:]))<<32 | uint64(gu32(payload[8:]))
+			d.recordDmabufFormat(format, modifier)
+		}
+
 	case kindBuffer:
 		// release - TODO: double buffering
+
+	case kindLinuxBufferParams:
+		win := d.dmabufParams[objID]
+		switch op {
+		case 0:
+			if win != nil && len(payload) >= 4 {
+				win.dmabufID = gu32(payload[0:])
+				d.objects[win.dmabufID] = kindBuffer
+				win.dmabufParamsID = 0
+				win.dmabufCreateErr = nil
+				delete(d.dmabufParams, objID)
+				delete(d.objects, objID)
+			}
+		case 1:
+			if win != nil {
+				win.dmabufParamsID = 0
+				win.dmabufCreateErr = fmt.Errorf("wayland: zwp_linux_buffer_params_v1.create failed")
+				delete(d.dmabufParams, objID)
+				delete(d.objects, objID)
+			}
+		}
 
 	case kindXdgWmBase:
 		if op == 0 { // ping
@@ -514,6 +559,8 @@ func (d *Display) handleGlobal(name uint32, iface string, ver uint32) {
 		d.decorMgrGlobal, d.decorMgrVer = name, ver
 	case "wp_cursor_shape_manager_v1":
 		d.cursorShapeMgrGlobal = name
+	case "zwp_linux_dmabuf_v1":
+		d.dmabufGlobal, d.dmabufVer = name, ver
 	}
 }
 
@@ -572,6 +619,14 @@ func (d *Display) roundtrip(callbackID uint32) error {
 				msg, _ := gstr(payload[8:])
 				return fmt.Errorf("wayland error: %s", msg)
 			}
+		case kindLinuxDmabuf:
+			if op == 0 && len(payload) >= 4 {
+				d.recordDmabufFormat(gu32(payload[0:]), 0)
+			} else if op == 1 && len(payload) >= 12 {
+				format := gu32(payload[0:])
+				modifier := uint64(gu32(payload[4:]))<<32 | uint64(gu32(payload[8:]))
+				d.recordDmabufFormat(format, modifier)
+			}
 		}
 	}
 }
@@ -611,9 +666,11 @@ func Connect() (*Display, error) {
 	}
 
 	d := &Display{
-		conn:    conn,
-		nextID:  2,
-		objects: map[uint32]objKind{1: kindDisplay},
+		conn:          conn,
+		nextID:        2,
+		objects:       map[uint32]objKind{1: kindDisplay},
+		dmabufFormats: map[uint32]map[uint64]struct{}{},
+		dmabufParams:  map[uint32]*Window{},
 	}
 
 	// extract raw fd for non-blocking Poll / unix.Select
@@ -671,6 +728,11 @@ func Connect() (*Display, error) {
 		d.cursorShapeMgrID = d.alloc(kindCursorShapeManager)
 		d.send(d.registryID, 0, pu32(d.cursorShapeMgrGlobal), pstr("wp_cursor_shape_manager_v1"),
 			pu32(1), pu32(d.cursorShapeMgrID))
+	}
+	if d.dmabufGlobal != 0 {
+		d.dmabufID = d.alloc(kindLinuxDmabuf)
+		d.send(d.registryID, 0, pu32(d.dmabufGlobal), pstr("zwp_linux_dmabuf_v1"),
+			pu32(min32(d.dmabufVer, 3)), pu32(d.dmabufID))
 	}
 
 	// second roundtrip for shm formats etc
@@ -841,6 +903,7 @@ func (w *Window) ResizeIfNeeded() bool {
 		unix.Close(w.fd)
 		w.fd = 0
 	}
+	w.destroyDmabufBuffer()
 	w.disp.send(w.bufferID, 0) // wl_buffer.destroy
 	w.createBuffer()
 	return true
@@ -1010,6 +1073,7 @@ func (d *Display) InjectKey(keycode uint32) {
 // Close tears down the Wayland connection.
 func (d *Display) Close() {
 	if d.win != nil {
+		d.win.destroyDmabufBuffer()
 		if d.win.Pix != nil {
 			unix.Munmap(d.win.Pix)
 		}

@@ -26,6 +26,14 @@ import (
 )
 
 func registerKernel32Handlers(hctx *HandlerCtx) {
+	kernel32, ok := hctx.SynthByName["kernel32.dll"]
+	if !ok {
+		return
+	}
+	registerKernel32HandlersForSynth(hctx, kernel32)
+}
+
+func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE) {
 	addAtomGlobal := hctx.AddAtomGlobal
 	addAtomLocal := hctx.AddAtomLocal
 	cmdLine := hctx.CmdLine
@@ -2442,11 +2450,6 @@ func registerKernel32Handlers(hctx *HandlerCtx) {
 		}
 		return 0
 	}
-	kernel32, ok := hctx.SynthByName["kernel32.dll"]
-	if !ok {
-		return
-	}
-	_ = kernel32
 	d.RegisterAutoStubHandler(kernel32, "GetStdHandle", func(ctx *ntapi.TrapContext) uint32 {
 		nStdHandle := uint32(ctx.Arg(0))
 		stdHandleMu.Lock()

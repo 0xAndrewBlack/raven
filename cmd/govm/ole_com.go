@@ -127,9 +127,14 @@ var (
 	IID_ICreateErrorInfo = GUID{0x22F03340, 0x547D, 0x101B, [8]byte{0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19}}
 	IID_ITypeInfo        = GUID{0x00020401, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
 	IID_ITypeLib         = GUID{0x00020402, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IModalWindow     = GUID{0xB4DB1657, 0x70D7, 0x485E, [8]byte{0x8E, 0x3E, 0x6F, 0xCB, 0x5A, 0x5C, 0x18, 0x02}}
+	IID_IFileDialog      = GUID{0x42F85136, 0xDB7E, 0x439C, [8]byte{0x85, 0xF1, 0xE4, 0x07, 0x5D, 0x13, 0x5F, 0xC8}}
+	IID_IFileOpenDialog  = GUID{0xD57C7288, 0xD4AD, 0x4768, [8]byte{0xBE, 0x02, 0x9D, 0x96, 0x95, 0x32, 0xD9, 0x60}}
 
 	CLSID_StdComponentCategoriesMgr = GUID{0x0002E005, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
 	CLSID_ShellLink                 = GUID{0x00021401, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	CLSID_FileOpenDialog            = GUID{0xDC1C5A9C, 0xE88A, 0x4DDE, [8]byte{0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7}}
+	CLSID_MemoryAllocator           = GUID{0x1E651CC0, 0xB199, 0x11D0, [8]byte{0x82, 0x12, 0x00, 0xC0, 0x4F, 0xC3, 0x2C, 0x45}}
 )
 
 type hresultError uint32
@@ -240,6 +245,18 @@ type memStream struct {
 	name   string
 }
 
+type fileOpenDialogData struct {
+	title           string
+	fileName        string
+	okButtonLabel   string
+	fileNameLabel   string
+	defaultExt      string
+	options         uint32
+	fileTypeIndex   uint32
+	clientGUID      GUID
+	nextAdviseToken uint32
+}
+
 type fileStream struct {
 	path    string
 	file    *os.File
@@ -274,6 +291,12 @@ type enumSTATSTG struct {
 	index   int
 }
 
+type comThreadState struct {
+	initialized   bool
+	initCount     int32
+	apartmentType uint32
+}
+
 type comState struct {
 	initialized   bool
 	initCount     int32
@@ -295,6 +318,7 @@ type comState struct {
 	hctx                *HandlerCtx
 	progIDs             map[string]GUID
 	errorInfo           uint64
+	threadStates        map[uint64]*comThreadState
 }
 
 func newCOMState(hctx *HandlerCtx) *comState {
@@ -315,41 +339,40 @@ func newCOMState(hctx *HandlerCtx) *comState {
 		regHive:             hctx.RegHive,
 		hctx:                hctx,
 		progIDs:             make(map[string]GUID),
+		threadStates:        make(map[uint64]*comThreadState),
 	}
-	cs.classFactories[CLSID_StdComponentCategoriesMgr] = &classFactory{
-		clsid: CLSID_StdComponentCategoriesMgr,
-		create: func(iid GUID) (*comObject, error) {
-			var methods int
-			switch {
-			case guidEqual(iid, IID_IUnknown):
-				methods = 3
-			case guidEqual(iid, IID_IDispatch):
-				methods = 7
-			default:
-				return nil, hresultError(E_NOINTERFACE)
-			}
-			obj, err := cs.createGuestObject(cs.mem, iid, methods)
-			if err != nil {
-				return nil, err
-			}
-			obj.clsid = CLSID_StdComponentCategoriesMgr
-			if guidEqual(iid, IID_IDispatch) {
-				obj.kind = "idispatch"
-				obj.supportedIIDs[IID_IDispatch] = true
-			}
-			return obj, nil
-		},
-	}
-	cs.classFactories[CLSID_ShellLink] = &classFactory{
-		clsid: CLSID_ShellLink,
-		create: func(iid GUID) (*comObject, error) {
-			return cs.createShellLinkObjects(iid)
-		},
-	}
+	cs.registerClassFactory(CLSID_StdComponentCategoriesMgr, func(iid GUID) (*comObject, error) {
+		var methods int
+		switch {
+		case guidEqual(iid, IID_IUnknown):
+			methods = 3
+		case guidEqual(iid, IID_IDispatch):
+			methods = 7
+		default:
+			return nil, hresultError(E_NOINTERFACE)
+		}
+		obj, err := cs.createGuestObject(cs.mem, iid, methods)
+		if err != nil {
+			return nil, err
+		}
+		obj.clsid = CLSID_StdComponentCategoriesMgr
+		if guidEqual(iid, IID_IDispatch) {
+			obj.kind = "idispatch"
+			obj.supportedIIDs[IID_IDispatch] = true
+		}
+		return obj, nil
+	})
+	cs.registerClassFactory(CLSID_ShellLink, cs.createShellLinkObjects)
+	cs.registerClassFactory(CLSID_FileOpenDialog, cs.createFileOpenDialogObject)
+	cs.registerClassFactory(CLSID_MemoryAllocator, cs.createMemoryAllocatorObject)
 	registerMSXMLClassFactories(cs)
 	registerWICClassFactories(cs)
 	registerD2D1ClassFactories(cs)
 	return cs
+}
+
+func (cs *comState) registerClassFactory(clsid GUID, create func(iid GUID) (*comObject, error)) {
+	cs.classFactories[clsid] = &classFactory{clsid: clsid, create: create}
 }
 
 func readGUID(mem *mmu.MMU, addr uint64) GUID {
@@ -760,6 +783,51 @@ func (cs *comState) variantToBool(addr uint64) (bool, bool) {
 	return false, false
 }
 
+func (cs *comState) variantToInterfacePtr(addr uint64, iid GUID) (uint64, bool) {
+	if addr == 0 {
+		return 0, false
+	}
+	vt := readVariantType(cs.mem, addr)
+	if vt&VT_ARRAY != 0 {
+		return 0, false
+	}
+	base := variantBaseType(vt)
+	switch base {
+	case VT_EMPTY, VT_NULL:
+		return 0, true
+	case VT_UNKNOWN, VT_DISPATCH:
+		ptr := readVariantValue(cs.mem, addr)
+		if vt&VT_BYREF != 0 {
+			var err error
+			ptr, err = cs.mem.Read64(ptr)
+			if err != nil {
+				return 0, false
+			}
+		}
+		if ptr == 0 {
+			return 0, true
+		}
+		obj := cs.objects[ptr]
+		if obj == nil {
+			switch {
+			case guidEqual(iid, IID_IUnknown) && base == VT_UNKNOWN:
+				return ptr, true
+			case guidEqual(iid, IID_IDispatch) && base == VT_DISPATCH:
+				return ptr, true
+			default:
+				return 0, false
+			}
+		}
+		if guidEqual(iid, IID_IUnknown) || obj.supportedIIDs[iid] {
+			return ptr, true
+		}
+		if alt := obj.altInterfaces[iid]; alt != 0 {
+			return alt, true
+		}
+	}
+	return 0, false
+}
+
 func safeArrayDescriptorSize(cDims uint16) uint64 {
 	return 24 + uint64(cDims)*8
 }
@@ -1103,6 +1171,13 @@ func (cs *comState) variantChangeType(dst, src uint64, vt uint16) uint32 {
 		}
 		writeVariantScalar(cs.mem, dst, vt, uint64(uint32(int32(i))))
 		return S_OK
+	case VT_I2:
+		i, ok := cs.variantToInt64(src)
+		if !ok {
+			return DISP_E_TYPEMISMATCH
+		}
+		writeVariantScalar(cs.mem, dst, VT_I2, uint64(uint16(int16(i))))
+		return S_OK
 	case VT_R8:
 		f, ok := cs.variantToFloat64(src)
 		if !ok {
@@ -1116,6 +1191,22 @@ func (cs *comState) variantChangeType(dst, src uint64, vt uint16) uint32 {
 			return DISP_E_TYPEMISMATCH
 		}
 		writeVariantScalar(cs.mem, dst, VT_BOOL, uint64(boolToVariantBool(b)))
+		return S_OK
+	case VT_UNKNOWN:
+		ptr, ok := cs.variantToInterfacePtr(src, IID_IUnknown)
+		if !ok {
+			return DISP_E_TYPEMISMATCH
+		}
+		cs.addRefPtr(ptr)
+		writeVariantScalar(cs.mem, dst, VT_UNKNOWN, ptr)
+		return S_OK
+	case VT_DISPATCH:
+		ptr, ok := cs.variantToInterfacePtr(src, IID_IDispatch)
+		if !ok {
+			return DISP_E_TYPEMISMATCH
+		}
+		cs.addRefPtr(ptr)
+		writeVariantScalar(cs.mem, dst, VT_DISPATCH, ptr)
 		return S_OK
 	default:
 		return DISP_E_TYPEMISMATCH
@@ -1643,28 +1734,58 @@ func streamModTime(data interface{}) time.Time {
 	return time.Time{}
 }
 
+func (cs *comState) currentThreadToken() uint64 {
+	if cs != nil && cs.hctx != nil && cs.hctx.CurrentCPU != nil {
+		if tls := cs.hctx.CurrentCPU.GetTLS(); tls != 0 {
+			return tls
+		}
+	}
+	return 1
+}
+
+func (cs *comState) threadState() *comThreadState {
+	token := cs.currentThreadToken()
+	if state := cs.threadStates[token]; state != nil {
+		return state
+	}
+	state := &comThreadState{apartmentType: COINIT_APARTMENTTHREADED}
+	cs.threadStates[token] = state
+	return state
+}
+
 func (cs *comState) initialize(apartmentType uint32) uint32 {
-	if cs.initialized {
-		if cs.apartmentType != apartmentType {
+	state := cs.threadState()
+	if state.initialized {
+		if state.apartmentType != apartmentType {
 			return RPC_E_CHANGED_MODE
 		}
-		cs.initCount++
-		return S_FALSE
+		state.initCount++
+		cs.initialized = true
+		cs.initCount = state.initCount
+		cs.apartmentType = state.apartmentType
+		return S_OK
 	}
+	state.initialized = true
+	state.initCount = 1
+	state.apartmentType = apartmentType
 	cs.initialized = true
-	cs.initCount = 1
-	cs.apartmentType = apartmentType
+	cs.initCount = state.initCount
+	cs.apartmentType = state.apartmentType
 	return S_OK
 }
 
 func (cs *comState) uninitialize() {
-	if cs.initCount > 0 {
-		cs.initCount--
+	state := cs.threadState()
+	if state.initCount > 0 {
+		state.initCount--
 	}
-	if cs.initCount == 0 {
-		cs.initialized = false
-		cs.apartmentType = COINIT_APARTMENTTHREADED
+	if state.initCount == 0 {
+		state.initialized = false
+		state.apartmentType = COINIT_APARTMENTTHREADED
 	}
+	cs.initialized = state.initialized
+	cs.initCount = state.initCount
+	cs.apartmentType = state.apartmentType
 }
 
 func (cs *comState) allocTaskMem(size uint64, zeroInit bool) uint64 {
@@ -1820,6 +1941,20 @@ func (cs *comState) createIMallocObject() (*comObject, error) {
 	return obj, nil
 }
 
+func (cs *comState) createMemoryAllocatorObject(iid GUID) (*comObject, error) {
+	switch {
+	case guidEqual(iid, IID_IUnknown), guidEqual(iid, IID_IMalloc):
+		obj, err := cs.createIMallocObject()
+		if err != nil {
+			return nil, err
+		}
+		obj.clsid = CLSID_MemoryAllocator
+		return obj, nil
+	default:
+		return nil, hresultError(E_NOINTERFACE)
+	}
+}
+
 func (cs *comState) createShellFolderObject(winPath string) (*comObject, error) {
 	obj, err := cs.createGuestObject(cs.mem, IID_IShellFolder, 13)
 	if err != nil {
@@ -1898,6 +2033,25 @@ func (cs *comState) createMemoryStreamObject(buffer *memoryBuffer, name string) 
 	obj.kind = "istream"
 	obj.data = &memStream{buffer: buffer, name: name}
 	obj.supportedIIDs[IID_IStream] = true
+	return obj, nil
+}
+
+func (cs *comState) createFileOpenDialogObject(iid GUID) (*comObject, error) {
+	switch {
+	case guidEqual(iid, IID_IUnknown), guidEqual(iid, IID_IModalWindow), guidEqual(iid, IID_IFileDialog), guidEqual(iid, IID_IFileOpenDialog):
+	default:
+		return nil, hresultError(E_NOINTERFACE)
+	}
+	obj, err := cs.createGuestObject(cs.mem, IID_IFileOpenDialog, 27)
+	if err != nil {
+		return nil, err
+	}
+	obj.clsid = CLSID_FileOpenDialog
+	obj.kind = "file-open-dialog"
+	obj.data = &fileOpenDialogData{fileTypeIndex: 1}
+	obj.supportedIIDs[IID_IModalWindow] = true
+	obj.supportedIIDs[IID_IFileDialog] = true
+	obj.supportedIIDs[IID_IFileOpenDialog] = true
 	return obj, nil
 }
 
@@ -2061,10 +2215,9 @@ func (cs *comState) release(obj *comObject) uint32 {
 					_ = s.file.Close()
 				}
 			}
-		case *dsBuffer:
-			data.mu.Lock()
-			data.cleanupPendingLock(cs.mem)
-			data.mu.Unlock()
+		case *dsBufferObject:
+			cleanupPendingLock(cs.mem, data.pendingLock)
+			data.pendingLock = nil
 		}
 		delete(cs.objects, obj.objectAddr)
 	}
@@ -2174,6 +2327,100 @@ func (cs *comState) dispatchIDispatch(ctx *ntapi.TrapContext, obj *comObject, me
 			return DISP_E_MEMBERNOTFOUND
 		}
 		return E_NOTIMPL
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) allocTaskMemUTF16String(s string) uint64 {
+	ws := utf16Encode(s)
+	ptr := cs.allocTaskMem(uint64(len(ws)+1)*2, true)
+	if ptr == 0 {
+		return 0
+	}
+	for i, w := range ws {
+		cs.mem.Write16(ptr+uint64(i)*2, w)
+	}
+	cs.mem.Write16(ptr+uint64(len(ws))*2, 0)
+	return ptr
+}
+
+func (cs *comState) dispatchFileOpenDialog(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	data, _ := obj.data.(*fileOpenDialogData)
+	if data == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 3:
+		return 0x800704C7
+	case 4:
+		return S_OK
+	case 5:
+		data.fileTypeIndex = uint32(ctx.Arg(1))
+		return S_OK
+	case 6:
+		piFileType := ctx.Arg(1)
+		if piFileType == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write32(piFileType, data.fileTypeIndex)
+		return S_OK
+	case 7:
+		pdwCookie := ctx.Arg(2)
+		if pdwCookie == 0 {
+			return E_POINTER
+		}
+		data.nextAdviseToken++
+		if data.nextAdviseToken == 0 {
+			data.nextAdviseToken = 1
+		}
+		ctx.Mem.Write32(pdwCookie, data.nextAdviseToken)
+		return S_OK
+	case 8:
+		return S_OK
+	case 9:
+		data.options = uint32(ctx.Arg(1))
+		return S_OK
+	case 10:
+		pfos := ctx.Arg(1)
+		if pfos == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write32(pfos, data.options)
+		return S_OK
+	case 14:
+		data.fileName = readGuestUTF16String(cs.mem, ctx.Arg(1))
+		return S_OK
+	case 15:
+		pszName := ctx.Arg(1)
+		if pszName == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(pszName, 0)
+		ptr := cs.allocTaskMemUTF16String(data.fileName)
+		if ptr == 0 && data.fileName != "" {
+			return E_OUTOFMEMORY
+		}
+		ctx.Mem.Write64(pszName, ptr)
+		return S_OK
+	case 16:
+		data.title = readGuestUTF16String(cs.mem, ctx.Arg(1))
+		return S_OK
+	case 17:
+		data.okButtonLabel = readGuestUTF16String(cs.mem, ctx.Arg(1))
+		return S_OK
+	case 18:
+		data.fileNameLabel = readGuestUTF16String(cs.mem, ctx.Arg(1))
+		return S_OK
+	case 21:
+		data.defaultExt = readGuestUTF16String(cs.mem, ctx.Arg(1))
+		return S_OK
+	case 22:
+		return S_OK
+	case 23:
+		data.clientGUID = GUID{}
+		data.nextAdviseToken = 0
+		return S_OK
 	default:
 		return E_NOTIMPL
 	}
@@ -3394,6 +3641,8 @@ func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uin
 		return cs.dispatchTypeLib(ctx, obj, method)
 	case "istream":
 		return cs.dispatchIStream(ctx, obj, method)
+	case "file-open-dialog":
+		return cs.dispatchFileOpenDialog(ctx, obj, method)
 	case "ilockbytes":
 		return cs.dispatchILockBytes(ctx, obj, method)
 	case "istorage":
@@ -3470,7 +3719,7 @@ func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uin
 func (cs *comState) instantiate(clsid, iid GUID) (*comObject, uint32) {
 	cf, ok := cs.classFactories[clsid]
 	if !ok {
-		return nil, CLASS_E_CLASSNOTAVAILABLE
+		return nil, REGDB_E_CLASSNOTREG
 	}
 	obj, err := cf.create(iid)
 	if err != nil {

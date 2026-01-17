@@ -77,6 +77,8 @@ type MMU struct {
 	tlb      [tlbSize]tlbEntry       // direct-mapped TLB
 	brkAddr  uint64
 	heapBase uint64
+	// Mode32 constrains Mmap allocations to the lower 4 GB (for PE32).
+	Mode32 bool
 	// Debug: write watchpoint
 	WatchAddr  uint64
 	WatchSize  uint64
@@ -560,7 +562,11 @@ func (m *MMU) Mmap(addr, length uint64, perms uint8) uint64 {
 	}
 
 	if addr == 0 {
-		addr = 0x400000000000
+		start := uint64(0x400000000000)
+		if m.Mode32 {
+			start = 0x10000000 // PE32: allocate in lower 4GB
+		}
+		addr = start
 		for {
 			conflict := false
 			for pg := addr; pg < addr+length; pg += PageSize {
@@ -574,6 +580,9 @@ func (m *MMU) Mmap(addr, length uint64, perms uint8) uint64 {
 			}
 			addr += length
 			addr = (addr + PageSize - 1) & PageMask
+			if m.Mode32 && addr+length > 0x7FFF0000 {
+				panic("mmu: out of 32-bit address space")
+			}
 		}
 	}
 	for pg := addr; pg < addr+length; pg += PageSize {

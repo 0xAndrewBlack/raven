@@ -67,6 +67,9 @@ type CPU struct {
 	fsBase  uint64
 	gsBase  uint64
 
+	// Mode32 enables 32-bit (IA-32 compat) execution for PE32 binaries.
+	Mode32 bool
+
 	// SSE/AVX registers (128-bit XMM0-XMM15, stored as two uint64).
 	XMM    [16][2]uint64
 	YMM_hi [16][2]uint64
@@ -123,7 +126,12 @@ func (c *CPU) SetSyscallReturn(v uint64)               { c.Regs[RAX] = v }
 func (c *CPU) SyscallReturnPC() uint64                 { return c.RIP }
 func (c *CPU) GetMem() *mmu.MMU                        { return c.mem }
 func (c *CPU) GetInstret() uint64                      { return c.instret }
-func (c *CPU) GetArch() arch.Arch                      { return arch.ArchAMD64 }
+func (c *CPU) GetArch() arch.Arch {
+	if c.Mode32 {
+		return arch.ArchI386
+	}
+	return arch.ArchAMD64
+}
 func (c *CPU) SetSyscallHandler(h arch.SyscallHandler) { c.syscall = h }
 func (c *CPU) SetTraceRange(start, end uint64) {
 	c.traceHeap = true
@@ -289,7 +297,7 @@ func (c *CPU) Run() error {
 			// simulate a function that returns 0 (pop retaddr, set RAX=0).
 			// Only recover if the return address itself is valid (mapped).
 			if c.RIP < 0x10000 || c.RIP > 0x7FFFFFFFFFFF {
-				retAddr, rerr := c.pop64()
+				retAddr, rerr := c.popN()
 				if rerr == nil && retAddr >= 0x10000 && retAddr <= 0x7FFFFFFFFFFF {
 					if _, verr := c.mem.Read8(retAddr); verr == nil {
 						recoverCount++
@@ -320,7 +328,7 @@ func (c *CPU) Run() error {
 			}
 			// Also recover from any fetch segfault at unmapped addresses
 			if _, rerr := c.mem.Read8(c.RIP); rerr != nil {
-				retAddr, rerr2 := c.pop64()
+				retAddr, rerr2 := c.popN()
 				if rerr2 == nil && retAddr >= 0x10000 && retAddr <= 0x7FFFFFFFFFFF {
 					if _, verr := c.mem.Read8(retAddr); verr == nil {
 						recoverCount++
@@ -483,6 +491,9 @@ func (c *CPU) fetchImm(width int) (int64, error) {
 
 // step decodes and executes a single instruction.
 func (c *CPU) step() error {
+	if c.Mode32 {
+		c.RIP &= 0xFFFFFFFF
+	}
 	startRIP := c.RIP
 
 	// --- Collect prefixes ---
@@ -505,6 +516,10 @@ func (c *CPU) step() error {
 			pfx.segOver = b
 		case b == 0xF0: // LOCK prefix - consumed, treated as no-op in emulation
 		case b >= 0x40 && b <= 0x4F:
+			if c.Mode32 {
+				// In 32-bit mode, 0x40-0x4F are INC/DEC r32, not REX
+				return c.dispatch(b, &pfx, startRIP)
+			}
 			pfx.rex = b
 			pfx.hasREX = true
 		default:
@@ -729,12 +744,18 @@ func (c *CPU) resolveRMAddr(m *modrm, pfx *prefixState) (uint64, bool, error) {
 			return 0, false, err2
 		}
 		base = c.decodeSIB(sib, m.mod, pfx)
-	case rmField == 5 && m.mod == 0: // RIP-relative
+	case rmField == 5 && m.mod == 0:
 		disp32, err2 := c.fetch32()
 		if err2 != nil {
 			return 0, false, err2
 		}
-		base = uint64(int64(c.RIP) + int64(int32(disp32)))
+		if c.Mode32 {
+			// 32-bit mode: absolute disp32 (no RIP-relative)
+			base = uint64(int32(disp32)) & 0xFFFFFFFF
+		} else {
+			// 64-bit mode: RIP-relative
+			base = uint64(int64(c.RIP) + int64(int32(disp32)))
+		}
 		if pfx.segOver == 0x64 {
 			base += c.fsBase
 		} else if pfx.segOver == 0x65 {
@@ -747,6 +768,9 @@ func (c *CPU) resolveRMAddr(m *modrm, pfx *prefixState) (uint64, bool, error) {
 	default:
 		idx := regIndex(rmField, pfx.rexB())
 		base = c.Regs[idx]
+		if c.Mode32 {
+			base &= 0xFFFFFFFF
+		}
 	}
 
 	switch m.mod {
@@ -768,6 +792,9 @@ func (c *CPU) resolveRMAddr(m *modrm, pfx *prefixState) (uint64, bool, error) {
 	} else if pfx.segOver == 0x65 {
 		base += c.gsBase
 	}
+	if c.Mode32 {
+		base &= 0xFFFFFFFF
+	}
 	m.resolved = true
 	m.cachedAddr = base
 	return base, false, nil
@@ -780,17 +807,25 @@ func (c *CPU) decodeSIB(sib byte, mod byte, pfx *prefixState) uint64 {
 
 	var base uint64
 	if baseField == 5 && mod == 0 {
-		// disp32 only - will be added by caller as mod==0 with no extra disp,
-		// but we need the 32-bit displacement here.
 		d, _ := c.fetch32()
 		base = uint64(int64(int32(d)))
 	} else {
 		base = c.Regs[regIndex(baseField, pfx.rexB())]
+		if c.Mode32 {
+			base &= 0xFFFFFFFF
+		}
 	}
 
 	idxReg := regIndex(idxField, pfx.rexX())
 	if idxReg != RSP { // index == RSP means "no index"
-		base += c.Regs[idxReg] * uint64(scale)
+		idx := c.Regs[idxReg]
+		if c.Mode32 {
+			idx &= 0xFFFFFFFF
+		}
+		base += idx * uint64(scale)
+	}
+	if c.Mode32 {
+		base &= 0xFFFFFFFF
 	}
 	return base
 }
@@ -1161,6 +1196,36 @@ func (c *CPU) pop64() (uint64, error) {
 	return v, nil
 }
 
+func (c *CPU) push32(v uint32) error {
+	c.Regs[RSP] = (c.Regs[RSP] - 4) & 0xFFFFFFFF
+	return c.mem.Write32(c.Regs[RSP], v)
+}
+
+func (c *CPU) pop32() (uint32, error) {
+	v, err := c.mem.Read32(c.Regs[RSP])
+	if err != nil {
+		return 0, err
+	}
+	c.Regs[RSP] = (c.Regs[RSP] + 4) & 0xFFFFFFFF
+	return v, nil
+}
+
+// Mode-aware push/pop - delegates to 32-bit or 64-bit variants.
+func (c *CPU) pushN(v uint64) error {
+	if c.Mode32 {
+		return c.push32(uint32(v))
+	}
+	return c.push64(v)
+}
+
+func (c *CPU) popN() (uint64, error) {
+	if c.Mode32 {
+		v, err := c.pop32()
+		return uint64(v), err
+	}
+	return c.pop64()
+}
+
 // =========================================================================
 // Flag helpers
 // =========================================================================
@@ -1329,12 +1394,12 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 	// --- PUSH r64 (0x50-0x57) ---
 	case 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57:
 		r := regIndex(op-0x50, pfx.rexB())
-		return c.push64(c.Regs[r])
+		return c.pushN(c.Regs[r])
 
 	// --- POP r64 (0x58-0x5F) ---
 	case 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F:
 		r := regIndex(op-0x58, pfx.rexB())
-		v, err := c.pop64()
+		v, err := c.popN()
 		if err != nil {
 			return err
 		}
@@ -1347,7 +1412,7 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		return c.push64(uint64(int64(int8(imm))))
+		return c.pushN(uint64(int64(int8(imm))))
 
 	// --- PUSH imm32 (0x68) ---
 	case 0x68:
@@ -1355,7 +1420,23 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		return c.push64(uint64(int64(int32(imm))))
+		return c.pushN(uint64(int64(int32(imm))))
+
+	// --- INC r32 (0x40-0x47) / DEC r32 (0x48-0x4F) - 32-bit mode only ---
+	case 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47:
+		r := int(op - 0x40)
+		old := c.Regs[r] & 0xFFFFFFFF
+		res := old + 1
+		c.writeRegSized(r, 4, res)
+		c.setArithFlags(res, 4)
+		return nil
+	case 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F:
+		r := int(op - 0x48)
+		old := c.Regs[r] & 0xFFFFFFFF
+		res := old - 1
+		c.writeRegSized(r, 4, res)
+		c.setArithFlags(res, 4)
+		return nil
 
 	// --- MOV r, imm64 (0xB8-0xBF) ---
 	case 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF:
@@ -1393,7 +1474,7 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 
 	// --- RET (0xC3) ---
 	case 0xC3:
-		ret, err := c.pop64()
+		ret, err := c.popN()
 		if err != nil {
 			return err
 		}
@@ -1406,12 +1487,15 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 		if err != nil {
 			return err
 		}
-		ret, err := c.pop64()
+		ret, err := c.popN()
 		if err != nil {
 			return err
 		}
 		c.RIP = ret
 		c.Regs[RSP] += uint64(imm)
+		if c.Mode32 {
+			c.Regs[RSP] &= 0xFFFFFFFF
+		}
 		return nil
 
 	// --- CALL rel32 (0xE8) ---
@@ -1421,7 +1505,10 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		target := uint64(int64(c.RIP) + int64(int32(rel)))
-		if err := c.push64(c.RIP); err != nil {
+		if c.Mode32 {
+			target &= 0xFFFFFFFF
+		}
+		if err := c.pushN(c.RIP); err != nil {
 			return err
 		}
 		c.RIP = target
@@ -1434,6 +1521,9 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		c.RIP = uint64(int64(c.RIP) + int64(int32(rel)))
+		if c.Mode32 {
+			c.RIP &= 0xFFFFFFFF
+		}
 		return nil
 
 	// --- JMP rel8 (0xEB) ---
@@ -1443,6 +1533,9 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		c.RIP = uint64(int64(c.RIP) + int64(int8(rel)))
+		if c.Mode32 {
+			c.RIP &= 0xFFFFFFFF
+		}
 		return nil
 
 	// --- Jcc rel8 (0x70-0x7F) ---
@@ -1454,6 +1547,9 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 		}
 		if c.flagCond(op - 0x70) {
 			c.RIP = uint64(int64(c.RIP) + int64(int8(rel)))
+			if c.Mode32 {
+				c.RIP &= 0xFFFFFFFF
+			}
 		}
 		return nil
 
@@ -1851,9 +1947,9 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 
 	// --- PUSHFQ/PUSHFD (0x9C), POPFQ/POPFD (0x9D) ---
 	case 0x9C: // PUSHFQ - push RFLAGS
-		return c.push64(c.Rflags)
+		return c.pushN(c.Rflags)
 	case 0x9D: // POPFQ - pop RFLAGS (mask reserved bits)
-		v, err := c.pop64()
+		v, err := c.popN()
 		if err != nil {
 			return err
 		}
@@ -1944,7 +2040,7 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 	// --- LEAVE (0xC9) ---
 	case 0xC9:
 		c.Regs[RSP] = c.Regs[RBP]
-		v, err := c.pop64()
+		v, err := c.popN()
 		if err != nil {
 			return err
 		}
@@ -1962,9 +2058,48 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 		return nil
 
 	// --- CPUID (handled as NOP returning zeros) ---
-	case 0xA2:
-		// STOSB handled in string ops; CPUID is 0F A2 (handled in 0F)
-		return c.execSTOS(pfx, 1)
+	case 0xA2: // MOV [moffs8], AL
+		var addr uint64
+		if c.Mode32 {
+			a32, err := c.fetch32()
+			if err != nil {
+				return err
+			}
+			addr = uint64(a32)
+		} else {
+			var err error
+			addr, err = c.fetch64()
+			if err != nil {
+				return err
+			}
+		}
+		if pfx.segOver == 0x64 {
+			addr += c.fsBase
+		} else if pfx.segOver == 0x65 {
+			addr += c.gsBase
+		}
+		return c.mem.Write8(addr, byte(c.Regs[RAX]))
+	case 0xA3: // MOV [moffs], eAX
+		var addr uint64
+		if c.Mode32 {
+			a32, err := c.fetch32()
+			if err != nil {
+				return err
+			}
+			addr = uint64(a32)
+		} else {
+			var err error
+			addr, err = c.fetch64()
+			if err != nil {
+				return err
+			}
+		}
+		if pfx.segOver == 0x64 {
+			addr += c.fsBase
+		} else if pfx.segOver == 0x65 {
+			addr += c.gsBase
+		}
+		return c.writeMem(addr, size, c.readRegSized(RAX, size))
 
 	// --- String operations ---
 	case 0xA4: // MOVSB
@@ -1990,9 +2125,24 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 
 	// --- MOV moffs (0xA0-0xA3) ---
 	case 0xA0: // MOV AL, moffs8
-		addr, err := c.fetch64()
-		if err != nil {
-			return err
+		var addr uint64
+		if c.Mode32 {
+			a32, err := c.fetch32()
+			if err != nil {
+				return err
+			}
+			addr = uint64(a32)
+		} else {
+			var err error
+			addr, err = c.fetch64()
+			if err != nil {
+				return err
+			}
+		}
+		if pfx.segOver == 0x64 {
+			addr += c.fsBase
+		} else if pfx.segOver == 0x65 {
+			addr += c.gsBase
 		}
 		v, err := c.mem.Read8(addr)
 		if err != nil {
@@ -2001,9 +2151,24 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 		c.writeRegSized(RAX, 1, uint64(v))
 		return nil
 	case 0xA1: // MOV rAX, moffs
-		addr, err := c.fetch64()
-		if err != nil {
-			return err
+		var addr uint64
+		if c.Mode32 {
+			a32, err := c.fetch32()
+			if err != nil {
+				return err
+			}
+			addr = uint64(a32)
+		} else {
+			var err error
+			addr, err = c.fetch64()
+			if err != nil {
+				return err
+			}
+		}
+		if pfx.segOver == 0x64 {
+			addr += c.fsBase
+		} else if pfx.segOver == 0x65 {
+			addr += c.gsBase
 		}
 		v, err := c.readMem(addr, size)
 		if err != nil {
@@ -2127,6 +2292,9 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 		}
 		if c.flagCond(op2 - 0x80) {
 			c.RIP = uint64(int64(c.RIP) + int64(int32(rel)))
+			if c.Mode32 {
+				c.RIP &= 0xFFFFFFFF
+			}
 		}
 		return nil
 
@@ -6442,19 +6610,27 @@ func (c *CPU) execGroup45(pfx *prefixState, size int) error {
 		c.Rflags = (c.Rflags & ^uint64(flagCF)) | saveCF
 		return c.writeRM(m, pfx, size, result)
 
-	case 2: // CALL r/m64
-		val, err := c.readRM(m, pfx, 8)
+	case 2: // CALL r/m
+		ptrSize := 8
+		if c.Mode32 {
+			ptrSize = 4
+		}
+		val, err := c.readRM(m, pfx, ptrSize)
 		if err != nil {
 			return err
 		}
-		if err := c.push64(c.RIP); err != nil {
+		if err := c.pushN(c.RIP); err != nil {
 			return err
 		}
 		c.RIP = val
 		return nil
 
-	case 4: // JMP r/m64
-		val, err := c.readRM(m, pfx, 8)
+	case 4: // JMP r/m
+		ptrSize := 8
+		if c.Mode32 {
+			ptrSize = 4
+		}
+		val, err := c.readRM(m, pfx, ptrSize)
 		if err != nil {
 			return err
 		}
@@ -6462,11 +6638,15 @@ func (c *CPU) execGroup45(pfx *prefixState, size int) error {
 		return nil
 
 	case 6: // PUSH r/m
-		val, err := c.readRM(m, pfx, 8)
+		ptrSize := 8
+		if c.Mode32 {
+			ptrSize = 4
+		}
+		val, err := c.readRM(m, pfx, ptrSize)
 		if err != nil {
 			return err
 		}
-		return c.push64(val)
+		return c.pushN(val)
 	}
 
 	return fmt.Errorf("unimplemented group 5 op %d", m.reg)

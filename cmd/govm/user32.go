@@ -159,6 +159,41 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ox, oy := absWindowOffset(hwnd)
 		return uint64(uint16(sx-ox)) | (uint64(uint16(sy-oy)) << 16)
 	}
+	const (
+		cwUseDefault          = ^int32(0x7fffffff)
+		maxWindowCoordinate   = 0x7FFF
+		defaultTopLevelWidth  = int32(800)
+		defaultTopLevelHeight = int32(600)
+	)
+	readCreateWindowIntArg := func(ctx *ntapi.TrapContext, n int) int32 {
+		if ctx.State != nil && ctx.State.Is32 {
+			sp := ctx.CPU.GetSP()
+			val, err := mem.Read32(sp + 4 + uint64(n)*4)
+			if err != nil {
+				return 0
+			}
+			return int32(val)
+		}
+		return int32(ctx.Arg(n))
+	}
+	resolveTopLevelCreateWindowSize := func(ctx *ntapi.TrapContext) (int32, int32) {
+		w, h := defaultTopLevelWidth, defaultTopLevelHeight
+		nw := readCreateWindowIntArg(ctx, 6)
+		nh := readCreateWindowIntArg(ctx, 7)
+		if nw == cwUseDefault {
+			return w, h
+		}
+		if nw > 0 && nw < maxWindowCoordinate {
+			w = nw
+		}
+		if nh == cwUseDefault {
+			return w, h
+		}
+		if nh > 0 && nh < maxWindowCoordinate {
+			h = nh
+		}
+		return w, h
+	}
 	findDeepestChildAt := func(parent uint64, sx, sy int32) (uint64, uint64) {
 		var (
 			best      uint64
@@ -597,22 +632,47 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "RegisterClassW", func(ctx *ntapi.TrapContext) uint32 {
-		// WNDCLASSW layout (x64): style(4)+pad(4), lpfnWndProc(8), cbClsExtra(4)+cbWndExtra(4),
-		//   hInstance(8), hIcon(8), hCursor(8), hbrBackground(8), lpszMenuName(8), lpszClassName(8)
 		pClass := ctx.Arg(0)
 		a := hctx.NextAtom
 		hctx.NextAtom++
 		if pClass != 0 {
-			style, _ := mem.Read32(pClass)
-			wndProc, _ := mem.Read64(pClass + 8)
-			cbClsExtra, _ := mem.Read32(pClass + 16)
-			cbWndExtra, _ := mem.Read32(pClass + 20)
-			hInst, _ := mem.Read64(pClass + 24)
-			hIcon, _ := mem.Read64(pClass + 32)
-			hCursor, _ := mem.Read64(pClass + 40)
-			hBrush, _ := mem.Read64(pClass + 48)
-			lpMenuName, _ := mem.Read64(pClass + 56)
-			lpName, _ := mem.Read64(pClass + 64)
+			var style uint32
+			var wndProc, hInst, hIcon, hCursor, hBrush, lpMenuName, lpName uint64
+			var cbClsExtra, cbWndExtra uint32
+			if ctx.State != nil && ctx.State.Is32 {
+				// WNDCLASSW x86: style(4), lpfnWndProc(4), cbClsExtra(4), cbWndExtra(4),
+				//   hInstance(4), hIcon(4), hCursor(4), hbrBackground(4), lpszMenuName(4), lpszClassName(4)
+				style, _ = mem.Read32(pClass)
+				v, _ := mem.Read32(pClass + 4)
+				wndProc = uint64(v)
+				cbClsExtra, _ = mem.Read32(pClass + 8)
+				cbWndExtra, _ = mem.Read32(pClass + 12)
+				v, _ = mem.Read32(pClass + 16)
+				hInst = uint64(v)
+				v, _ = mem.Read32(pClass + 20)
+				hIcon = uint64(v)
+				v, _ = mem.Read32(pClass + 24)
+				hCursor = uint64(v)
+				v, _ = mem.Read32(pClass + 28)
+				hBrush = uint64(v)
+				v, _ = mem.Read32(pClass + 32)
+				lpMenuName = uint64(v)
+				v, _ = mem.Read32(pClass + 36)
+				lpName = uint64(v)
+			} else {
+				// WNDCLASSW x64: style(4)+pad(4), lpfnWndProc(8), cbClsExtra(4)+cbWndExtra(4),
+				//   hInstance(8), hIcon(8), hCursor(8), hbrBackground(8), lpszMenuName(8), lpszClassName(8)
+				style, _ = mem.Read32(pClass)
+				wndProc, _ = mem.Read64(pClass + 8)
+				cbClsExtra, _ = mem.Read32(pClass + 16)
+				cbWndExtra, _ = mem.Read32(pClass + 20)
+				hInst, _ = mem.Read64(pClass + 24)
+				hIcon, _ = mem.Read64(pClass + 32)
+				hCursor, _ = mem.Read64(pClass + 40)
+				hBrush, _ = mem.Read64(pClass + 48)
+				lpMenuName, _ = mem.Read64(pClass + 56)
+				lpName, _ = mem.Read64(pClass + 64)
+			}
 			hctx.AtomWndProc[a] = wndProc
 			if hBrush > 0 && hBrush <= 30 {
 				hctx.ClassBrush[a] = uint32(hBrush)
@@ -652,23 +712,50 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "RegisterClassExW", func(ctx *ntapi.TrapContext) uint32 {
-		// WNDCLASSEXW layout (x64): cbSize(4)+style(4), lpfnWndProc(8), cbClsExtra(4)+cbWndExtra(4),
-		//   hInstance(8), hIcon(8), hCursor(8), hbrBackground(8), lpszMenuName(8), lpszClassName(8), hIconSm(8)
 		pClass := ctx.Arg(0)
 		a := hctx.NextAtom
 		hctx.NextAtom++
 		if pClass != 0 {
-			style, _ := mem.Read32(pClass + 4)
-			wndProc, _ := mem.Read64(pClass + 8)
-			cbClsExtra, _ := mem.Read32(pClass + 16)
-			cbWndExtra, _ := mem.Read32(pClass + 20)
-			hInst, _ := mem.Read64(pClass + 24)
-			hIcon, _ := mem.Read64(pClass + 32)
-			hCursor, _ := mem.Read64(pClass + 40)
-			hBrush, _ := mem.Read64(pClass + 48)
-			lpszMenuName, _ := mem.Read64(pClass + 56)
-			lpName, _ := mem.Read64(pClass + 64)
-			hIconSm, _ := mem.Read64(pClass + 72)
+			var style uint32
+			var wndProc, hInst, hIcon, hCursor, hBrush, lpszMenuName, lpName, hIconSm uint64
+			var cbClsExtra, cbWndExtra uint32
+			if ctx.State != nil && ctx.State.Is32 {
+				// WNDCLASSEXW x86: cbSize(4), style(4), lpfnWndProc(4), cbClsExtra(4), cbWndExtra(4),
+				//   hInstance(4), hIcon(4), hCursor(4), hbrBackground(4), lpszMenuName(4), lpszClassName(4), hIconSm(4)
+				style, _ = mem.Read32(pClass + 4)
+				v, _ := mem.Read32(pClass + 8)
+				wndProc = uint64(v)
+				cbClsExtra, _ = mem.Read32(pClass + 12)
+				cbWndExtra, _ = mem.Read32(pClass + 16)
+				v, _ = mem.Read32(pClass + 20)
+				hInst = uint64(v)
+				v, _ = mem.Read32(pClass + 24)
+				hIcon = uint64(v)
+				v, _ = mem.Read32(pClass + 28)
+				hCursor = uint64(v)
+				v, _ = mem.Read32(pClass + 32)
+				hBrush = uint64(v)
+				v, _ = mem.Read32(pClass + 36)
+				lpszMenuName = uint64(v)
+				v, _ = mem.Read32(pClass + 40)
+				lpName = uint64(v)
+				v, _ = mem.Read32(pClass + 44)
+				hIconSm = uint64(v)
+			} else {
+				// WNDCLASSEXW x64: cbSize(4)+style(4), lpfnWndProc(8), cbClsExtra(4)+cbWndExtra(4),
+				//   hInstance(8), hIcon(8), hCursor(8), hbrBackground(8), lpszMenuName(8), lpszClassName(8), hIconSm(8)
+				style, _ = mem.Read32(pClass + 4)
+				wndProc, _ = mem.Read64(pClass + 8)
+				cbClsExtra, _ = mem.Read32(pClass + 16)
+				cbWndExtra, _ = mem.Read32(pClass + 20)
+				hInst, _ = mem.Read64(pClass + 24)
+				hIcon, _ = mem.Read64(pClass + 32)
+				hCursor, _ = mem.Read64(pClass + 40)
+				hBrush, _ = mem.Read64(pClass + 48)
+				lpszMenuName, _ = mem.Read64(pClass + 56)
+				lpName, _ = mem.Read64(pClass + 64)
+				hIconSm, _ = mem.Read64(pClass + 72)
+			}
 			hctx.AtomWndProc[a] = wndProc
 			if hBrush > 0 && hBrush <= 30 {
 				hctx.ClassBrush[a] = uint32(hBrush)
@@ -765,15 +852,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		const wsChild = 0x40000000
 		// Track child windows (built-in classes like Edit, Static, Button)
 		if style&wsChild != 0 {
-			cx := int32(ctx.Arg(4))
-			cy := int32(ctx.Arg(5))
-			cw := int32(ctx.Arg(6))
-			ch := int32(ctx.Arg(7))
+			cx := readCreateWindowIntArg(ctx, 4)
+			cy := readCreateWindowIntArg(ctx, 5)
+			cw := readCreateWindowIntArg(ctx, 6)
+			ch := readCreateWindowIntArg(ctx, 7)
 			parentHwnd := ctx.Arg(8) // hWndParent
-			if cx < 0 || cx > 0x7FFF {
+			if cx < 0 || cx > maxWindowCoordinate {
 				cx = 0
 			}
-			if cy < 0 || cy > 0x7FFF {
+			if cy < 0 || cy > maxWindowCoordinate {
 				cy = 0
 			}
 			var defW, defH int32 = 800, 600
@@ -782,10 +869,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			// Child windows with invalid/zero dimensions start at 0×0.
 			// They will be sized by the parent's WM_SIZE/MoveWindow calls.
-			if cw < 0 || cw > 0x7FFF {
+			if cw < 0 || cw > maxWindowCoordinate {
 				cw = 0
 			}
-			if ch < 0 || ch > 0x7FFF {
+			if ch < 0 || ch > maxWindowCoordinate {
 				ch = 0
 			}
 			lClassName := strings.ToLower(className)
@@ -833,13 +920,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				if title == "" {
 					title = "govm"
 				}
-				var w, h int32 = 800, 600
-				if nw := int32(ctx.Arg(6)); nw > 0 && nw < 0x7FFF {
-					w = nw
-				}
-				if nh := int32(ctx.Arg(7)); nh > 0 && nh < 0x7FFF {
-					h = nh
-				}
+				w, h := resolveTopLevelCreateWindowSize(ctx)
 				const wsCaption = 0x00C00000
 				// Compute NC top height from window style (ported from ReactOS NCCALCSIZE).
 				// This replaces the hardcoded titleBarH=30 that was the old fake CSD.
@@ -897,48 +978,68 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		// Dispatch WM_NCCREATE + WM_CREATE synchronously for windows with a WndProc
 		if wp, hasWP := hwndWndProc[hwnd]; hasWP && wp != 0 {
-			// Build CREATESTRUCT in guest memory (80 bytes, x64 layout):
-			//   0: lpCreateParams(8) 8: hInstance(8) 16: hMenu(8) 24: hwndParent(8)
-			//  32: cy(4) 36: cx(4) 40: y(4) 44: x(4)
-			//  48: style(4) 52: pad(4) 56: lpszName(8) 64: lpszClass(8) 72: dwExStyle(4)
-			cs := scratchAlloc(80)
-			mem.Write64(cs+0, ctx.Arg(11))         // lpCreateParams
-			mem.Write64(cs+8, ctx.Arg(10))         // hInstance
-			mem.Write64(cs+16, ctx.Arg(9))         // hMenu
-			mem.Write64(cs+24, ctx.Arg(8))         // hwndParent
-			mem.Write32(cs+32, uint32(ctx.Arg(7))) // cy (nHeight)
-			mem.Write32(cs+36, uint32(ctx.Arg(6))) // cx (nWidth)
-			mem.Write32(cs+40, uint32(ctx.Arg(5))) // y
-			mem.Write32(cs+44, uint32(ctx.Arg(4))) // x
-			mem.Write32(cs+48, style)              // style
-			mem.Write32(cs+52, 0)                  // padding
-			mem.Write64(cs+56, ctx.Arg(2))         // lpszName
-			mem.Write64(cs+64, ctx.Arg(1))         // lpszClass
-			mem.Write32(cs+72, uint32(ctx.Arg(0))) // dwExStyle
+			is32 := ctx.State != nil && ctx.State.Is32
+			var cs uint64
+			if is32 {
+				// x86 CREATESTRUCT (48 bytes, 4-byte pointers):
+				//  0: lpCreateParams(4) 4: hInstance(4) 8: hMenu(4) 12: hwndParent(4)
+				// 16: cy(4) 20: cx(4) 24: y(4) 28: x(4)
+				// 32: style(4) 36: lpszName(4) 40: lpszClass(4) 44: dwExStyle(4)
+				cs = scratchAlloc(48)
+				mem.Write32(cs+0, uint32(ctx.Arg(11))) // lpCreateParams
+				mem.Write32(cs+4, uint32(ctx.Arg(10))) // hInstance
+				mem.Write32(cs+8, uint32(ctx.Arg(9)))  // hMenu
+				mem.Write32(cs+12, uint32(ctx.Arg(8))) // hwndParent
+				mem.Write32(cs+16, uint32(ctx.Arg(7))) // cy (nHeight)
+				mem.Write32(cs+20, uint32(ctx.Arg(6))) // cx (nWidth)
+				mem.Write32(cs+24, uint32(ctx.Arg(5))) // y
+				mem.Write32(cs+28, uint32(ctx.Arg(4))) // x
+				mem.Write32(cs+32, style)              // style
+				mem.Write32(cs+36, uint32(ctx.Arg(2))) // lpszName
+				mem.Write32(cs+40, uint32(ctx.Arg(1))) // lpszClass
+				mem.Write32(cs+44, uint32(ctx.Arg(0))) // dwExStyle
+			} else {
+				// x64 CREATESTRUCT (80 bytes, 8-byte pointers):
+				cs = scratchAlloc(80)
+				mem.Write64(cs+0, ctx.Arg(11))         // lpCreateParams
+				mem.Write64(cs+8, ctx.Arg(10))         // hInstance
+				mem.Write64(cs+16, ctx.Arg(9))         // hMenu
+				mem.Write64(cs+24, ctx.Arg(8))         // hwndParent
+				mem.Write32(cs+32, uint32(ctx.Arg(7))) // cy (nHeight)
+				mem.Write32(cs+36, uint32(ctx.Arg(6))) // cx (nWidth)
+				mem.Write32(cs+40, uint32(ctx.Arg(5))) // y
+				mem.Write32(cs+44, uint32(ctx.Arg(4))) // x
+				mem.Write32(cs+48, style)              // style
+				mem.Write32(cs+52, 0)                  // padding
+				mem.Write64(cs+56, ctx.Arg(2))         // lpszName
+				mem.Write64(cs+64, ctx.Arg(1))         // lpszClass
+				mem.Write32(cs+72, uint32(ctx.Arg(0))) // dwExStyle
+			}
 
 			// Synchronous dispatch via trampoline:
 			// Queue WM_CREATE (dispatched second), then set up WM_NCCREATE (dispatched first).
-			rw, ok := ctx.CPU.(ntapi.RegisterWriter)
 			rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
-			if ok && ok2 {
-				// Save original return address and push a new sync frame
-				rsp := rr.ReadReg(4) // RSP
-				retAddr, _ := mem.Read64(rsp)
+			if ok2 {
+				// Save original return address and push a new sync frame.
+				// For PE32, the stub's doStdcallCleanup is skipped (ReturnOverridden=true),
+				// so we must manually account for stdcall arg cleanup.
+				rsp := rr.ReadReg(4)
+				var retAddr uint64
+				if is32 {
+					v, _ := mem.Read32(rsp)
+					retAddr = uint64(v)
+					// PE32 stdcall cleanup: skip retAddr (4) + 12 args (48)
+					rsp += 4 + 12*4
+				} else {
+					retAddr, _ = mem.Read64(rsp)
+				}
 				hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
 					queue:   []syncDispatch{{wndProc: wp, hwnd: hwnd, msg: 0x0001, wParam: 0, lParam: cs}},
 					retAddr: retAddr,
 					hwnd:    hwnd,
 				})
-				mem.Write64(rsp, hctx.SyncTrampoline) // WndProc RET → trampoline
-
-				// Set up WM_NCCREATE call
-				rw.WriteReg(1, hwnd)   // RCX = hwnd
-				rw.WriteReg(2, 0x0081) // RDX = WM_NCCREATE
-				rw.WriteReg(8, 0)      // R8 = wParam
-				rw.WriteReg(9, cs)     // R9 = lParam (CREATESTRUCT)
-
-				ctx.CPU.SetPC(wp)
-				ctx.ReturnOverridden = true
+				ctx.CPU.(ntapi.RegisterWriter).WriteReg(4, rsp)
+				hctx.SyncCallWndProc(ctx, wp, hwnd, 0x0081, 0, cs, hctx.SyncTrampoline)
 				return 0
 			}
 			// Fallback: queue messages if register access unavailable
@@ -1882,10 +1983,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		msg := uint32(ctx.Arg(1))
 		wParam := ctx.Arg(2)
 		lParam := ctx.Arg(3)
-		// Log SCI messages (>= 0x400 = WM_USER) sent to Scintilla
-		if msg >= 0x0400 {
-			ravelog.Logf("[sci] SendMessageW hwnd=0x%x msg=0x%x(%d) wParam=0x%x\n", hwnd, msg, msg, wParam)
-		}
 		// Built-in controls first
 		if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
 			if msg == 0x000F || msg == 0x0014 || msg == 0x0085 || msg == 0x0113 {
@@ -1913,15 +2010,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		rw, okW := ctx.CPU.(ntapi.RegisterWriter)
 		rr, okR := ctx.CPU.(ntapi.RegisterReader)
 		if okW && okR {
+			is32 := ctx.State != nil && ctx.State.Is32
 			rsp := rr.ReadReg(4)
-			retAddr, _ := mem.Read64(rsp)
+			var retAddr uint64
+			if is32 {
+				r32, _ := mem.Read32(rsp)
+				retAddr = uint64(r32)
+			} else {
+				retAddr, _ = mem.Read64(rsp)
+			}
 			// Validate retAddr: must be a plausible code address (>= 16MB).
 			// Values below 0x1000000 are HWNDs or other small handles stored on the
 			// stack (e.g., as shadow space), not valid return addresses. Using such a
 			// value as a return target after WndProc would crash the CPU.
 			if retAddr < 0x1000000 {
-				ravelog.Logf("[sendmsg] skipping sync dispatch: bad retAddr=0x%x hwnd=0x%x msg=0x%x\n",
-					retAddr, hwnd, msg)
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -1931,13 +2033,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				hwnd:                hwnd,
 				returnWndProcResult: true,
 			})
-			mem.Write64(rsp, hctx.SyncTrampoline)
-			rw.WriteReg(1, hwnd)
-			rw.WriteReg(2, uint64(msg))
-			rw.WriteReg(8, wParam)
-			rw.WriteReg(9, lParam)
-			ctx.CPU.SetPC(wp)
-			ctx.ReturnOverridden = true
+			if is32 {
+				// PE32 stdcall: manually clean up SendMessageW's 4 args + retAddr
+				rsp += 4 + 4*4 // skip retAddr + 4 args
+				rw.WriteReg(4, rsp)
+				hctx.SyncCallWndProc(ctx, wp, hwnd, msg, wParam, lParam, hctx.SyncTrampoline)
+			} else {
+				mem.Write64(rsp, hctx.SyncTrampoline)
+				rw.WriteReg(1, hwnd)
+				rw.WriteReg(2, uint64(msg))
+				rw.WriteReg(8, wParam)
+				rw.WriteReg(9, lParam)
+				ctx.CPU.SetPC(wp)
+				ctx.ReturnOverridden = true
+				ctx.PCRedirected = true
+			}
 			return 0
 		}
 		// Fallback: queue for async dispatch (won't return result synchronously)
@@ -2706,17 +2816,46 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	}
 	d.RegisterAutoStubHandler(user32, "DefWindowProcW", defWindowProcFn)
-	// writeMsg writes a Win32 MSG struct to guest memory (correct x64 layout).
-	// MSG: HWND(8) message(4) pad(4) WPARAM(8) LPARAM(8) time(4) POINT(8)
-	writeMsg := func(pMsg, hwnd uint64, message uint32, wParam, lParam uint64) {
-		mem.Write64(pMsg, hwnd)
-		mem.Write32(pMsg+8, message)
-		mem.Write32(pMsg+12, 0) // padding
-		mem.Write64(pMsg+16, wParam)
-		mem.Write64(pMsg+24, lParam)
-		mem.Write32(pMsg+32, 0) // time
-		mem.Write32(pMsg+36, 0) // pt.x
-		mem.Write32(pMsg+40, 0) // pt.y
+	// writeMsg writes a Win32 MSG struct to guest memory.
+	// x64 MSG: HWND(8) message(4) pad(4) WPARAM(8) LPARAM(8) time(4) POINT(8)
+	// x86 MSG: HWND(4) message(4) WPARAM(4) LPARAM(4) time(4) POINT(8)
+	writeMsg := func(ctx *ntapi.TrapContext, pMsg, hwnd uint64, message uint32, wParam, lParam uint64) {
+		if ctx.State != nil && ctx.State.Is32 {
+			mem.Write32(pMsg, uint32(hwnd))
+			mem.Write32(pMsg+4, message)
+			mem.Write32(pMsg+8, uint32(wParam))
+			mem.Write32(pMsg+12, uint32(lParam))
+			mem.Write32(pMsg+16, 0) // time
+			mem.Write32(pMsg+20, 0) // pt.x
+			mem.Write32(pMsg+24, 0) // pt.y
+		} else {
+			mem.Write64(pMsg, hwnd)
+			mem.Write32(pMsg+8, message)
+			mem.Write32(pMsg+12, 0) // padding
+			mem.Write64(pMsg+16, wParam)
+			mem.Write64(pMsg+24, lParam)
+			mem.Write32(pMsg+32, 0) // time
+			mem.Write32(pMsg+36, 0) // pt.x
+			mem.Write32(pMsg+40, 0) // pt.y
+		}
+	}
+	// readMsg reads a Win32 MSG struct from guest memory.
+	readMsg := func(ctx *ntapi.TrapContext, pMsg uint64) (hwnd uint64, message uint32, wParam, lParam uint64) {
+		if ctx.State != nil && ctx.State.Is32 {
+			v, _ := mem.Read32(pMsg)
+			hwnd = uint64(v)
+			message, _ = mem.Read32(pMsg + 4)
+			v, _ = mem.Read32(pMsg + 8)
+			wParam = uint64(v)
+			v, _ = mem.Read32(pMsg + 12)
+			lParam = uint64(v)
+		} else {
+			hwnd, _ = mem.Read64(pMsg)
+			message, _ = mem.Read32(pMsg + 8)
+			wParam, _ = mem.Read64(pMsg + 16)
+			lParam, _ = mem.Read64(pMsg + 24)
+		}
+		return
 	}
 	// GetMessageW: drain message queue first, then block on Wayland events
 	// dispatchWl is shared with PeekMessageW - defined as a package-level var so both can access it.
@@ -2726,9 +2865,15 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 		// Save message loop entry point for crash recovery
 		if msgLoopSP == 0 {
-			retAddr, _ := mem.Read64(ctx.CPU.GetSP())
-			msgLoopPC = retAddr
-			msgLoopSP = ctx.CPU.GetSP() + 8
+			if ctx.State != nil && ctx.State.Is32 {
+				retAddr32, _ := mem.Read32(ctx.CPU.GetSP())
+				msgLoopPC = uint64(retAddr32)
+				msgLoopSP = ctx.CPU.GetSP() + 4
+			} else {
+				retAddr, _ := mem.Read64(ctx.CPU.GetSP())
+				msgLoopPC = retAddr
+				msgLoopSP = ctx.CPU.GetSP() + 8
+			}
 		}
 
 		// Helper: check expired timers, post WM_TIMER for each.
@@ -3144,7 +3289,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				hctx.WinInvalid[hctx.MainHWND] = false
 			}
 			if pMsg != 0 {
-				writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
+				writeMsg(ctx, pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 			}
 			if m.message == 0x0012 { // WM_QUIT - GetMessage returns FALSE to end the message loop
 				ctx.SetReturn(0)
@@ -3156,7 +3301,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 		if wlDisplay == nil {
 			if pMsg != 0 {
-				writeMsg(pMsg, hctx.MainHWND, 0x12, 0, 0)
+				writeMsg(ctx, pMsg, hctx.MainHWND, 0x12, 0, 0)
 			}
 			ctx.SetReturn(0)
 			return 0
@@ -3277,7 +3422,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			hctx.MsgQueue = hctx.MsgQueue[1:]
 		}
 		if pMsg != 0 {
-			writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
+			writeMsg(ctx, pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -3293,11 +3438,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// MSG layout (x64): HWND(8) message(4) pad(4) WPARAM(8) LPARAM(8) ...
-		hwnd, _ := mem.Read64(pMsg)
-		message, _ := mem.Read32(pMsg + 8)
-		wParam, _ := mem.Read64(pMsg + 16)
-		lParam, _ := mem.Read64(pMsg + 24)
+		hwnd, message, wParam, lParam := readMsg(ctx, pMsg)
 
 		// Try built-in control first
 		if _, isChild := hwndChildren[hwnd]; isChild {
@@ -3321,36 +3462,40 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					wndProc = wp
 					ok = true
 					hwndWndProc[hwnd] = wndProc // cache for future dispatches
-					ravelog.Logf("[dispatch] recovered WndProc for hwnd=0x%x msg=0x%x via atom=0x%x wndProc=0x%x\n", hwnd, message, atom, wndProc)
 				}
 			}
 		}
 		if !ok || wndProc == 0 {
-			ravelog.Logf("[dispatch] no WndProc for hwnd=0x%x msg=0x%x hwndWndProcLen=%d\n", hwnd, message, len(hwndWndProc))
-			for k, v := range hwndWndProc {
-				ravelog.Logf("[dispatch]   map[0x%x]=0x%x\n", k, v)
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		is32 := ctx.State != nil && ctx.State.Is32
+		if is32 {
+			// PE32 stdcall: manually clean up DispatchMessageW's 1 arg (pMsg),
+			// then set up WndProc call with args on stack.
+			rr := ctx.CPU.(ntapi.RegisterReader)
+			rw := ctx.CPU.(ntapi.RegisterWriter)
+			rsp := rr.ReadReg(4)
+			retAddr32, _ := mem.Read32(rsp)
+			rsp += 4 + 1*4 // skip retAddr + 1 arg (pMsg)
+			rw.WriteReg(4, rsp)
+			hctx.SyncCallWndProc(ctx, wndProc, hwnd, message, wParam, lParam, uint64(retAddr32))
+		} else {
+			rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
 			}
-			ctx.SetReturn(0)
-			return 0
+			// x64: Stack is already correct: [RSP] = caller's return address.
+			rw.WriteReg(1, hwnd)
+			rw.WriteReg(2, uint64(message))
+			rw.WriteReg(8, wParam)
+			rw.WriteReg(9, lParam)
+			ctx.CPU.SetPC(wndProc)
+			ctx.ReturnOverridden = true
+			ctx.PCRedirected = true
 		}
-
-		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
-		if !ok {
-			ctx.SetReturn(0)
-			return 0
-		}
-
-		ravelog.Logf("[dispatch] hwnd=0x%x msg=0x%x → WndProc=0x%x\n", hwnd, message, wndProc)
-
-		// Stack is already correct: [RSP] = caller's return address,
-		// [RSP+8..RSP+0x28] = shadow space. WndProc will RET to caller.
-		rw.WriteReg(1, hwnd)            // RCX
-		rw.WriteReg(2, uint64(message)) // RDX
-		rw.WriteReg(8, wParam)          // R8
-		rw.WriteReg(9, lParam)          // R9
-
-		ctx.CPU.SetPC(wndProc)
-		ctx.ReturnOverridden = true
 		return 0
 	})
 	// Accelerator table tracking
@@ -3379,8 +3524,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		msgID, _ := mem.Read32(pMsg + 8)
-		wParam, _ := mem.Read64(pMsg + 12)
+		_, msgID, wParam, _ := readMsg(ctx, pMsg)
 		key := uint16(wParam & 0xFFFF)
 		const (
 			WM_KEYDOWN    = 0x0100
@@ -4647,6 +4791,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		rw.WriteReg(9, 0)
 		ctx.CPU.SetPC(sd.wndProc)
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "EnumWindows", func(ctx *ntapi.TrapContext) uint32 {
@@ -4697,6 +4842,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		rw.WriteReg(9, 0)
 		ctx.CPU.SetPC(queue[0].wndProc)
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 	lockedUpdateHwnd := uint64(0)
@@ -4809,6 +4955,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		rw.WriteReg(9, dwInitParam) // R9  = lParam
 		ctx.CPU.SetPC(lpDialogFunc)
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return true
 	}
 
@@ -5070,6 +5217,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(nResult)
 			ctx.CPU.SetPC(hctx.SyncTrampoline + 15) // the 0xC3 (RET) byte
 			ctx.ReturnOverridden = true
+			ctx.PCRedirected = true
 			return 0
 		}
 
@@ -5479,6 +5627,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			_ = h
 			clientTop := wlWindow.TitleBarH
 
+			// Ensure HasBaseFrame is set when any BeginPaint fires for the
+			// main window.  Apps that handle WM_PAINT directly (WINMINE, etc.)
+			// never invoke DefWindowProcW's WM_PAINT path, so HasBaseFrame
+			// would never be set and EndPaint would never commit the frame.
+			if !hctx.HasBaseFrame {
+				hctx.HasBaseFrame = true
+			}
+
 			// Non-client area: draw menu bar (same filter/width as click-handler and drawMenuOverlay).
 			if menuH, ok := hwndMenuBar[hwnd]; ok {
 				if md, ok2 := menus[menuH]; ok2 && len(md.items) > 0 {
@@ -5548,20 +5704,28 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 
 		if pPaint != 0 {
-			ctx.Mem.Write64(pPaint, hdc) // hdc
+			// PE32 PAINTSTRUCT: hdc(4) fErase(4) rcPaint(16) ...
+			// PE64 PAINTSTRUCT: hdc(8) fErase(4) rcPaint(16) ...
+			is32 := ctx.State != nil && ctx.State.Is32
+			eraseVal := uint32(0)
 			if erase {
-				ctx.Mem.Write32(pPaint+8, 1)
-			} else {
-				ctx.Mem.Write32(pPaint+8, 0)
+				eraseVal = 1
 			}
-			ctx.Mem.Write32(pPaint+12, uint32(rcLeft))   // rcPaint.left
-			ctx.Mem.Write32(pPaint+16, uint32(rcTop))    // rcPaint.top
-			ctx.Mem.Write32(pPaint+20, uint32(rcRight))  // rcPaint.right
-			ctx.Mem.Write32(pPaint+24, uint32(rcBottom)) // rcPaint.bottom
-			// Verify reads back correctly
-			rv, _ := ctx.Mem.Read32(pPaint + 20)
-			rb, _ := ctx.Mem.Read32(pPaint + 24)
-			ravelog.Logf("[paint] PAINTSTRUCT pPaint=0x%x right=%d bottom=%d (wrote %d,%d)\n", pPaint, rv, rb, rcRight, rcBottom)
+			if is32 {
+				ctx.Mem.Write32(pPaint, uint32(hdc))         // hdc (4 bytes)
+				ctx.Mem.Write32(pPaint+4, eraseVal)          // fErase
+				ctx.Mem.Write32(pPaint+8, uint32(rcLeft))    // rcPaint.left
+				ctx.Mem.Write32(pPaint+12, uint32(rcTop))    // rcPaint.top
+				ctx.Mem.Write32(pPaint+16, uint32(rcRight))  // rcPaint.right
+				ctx.Mem.Write32(pPaint+20, uint32(rcBottom)) // rcPaint.bottom
+			} else {
+				ctx.Mem.Write64(pPaint, hdc)                 // hdc (8 bytes)
+				ctx.Mem.Write32(pPaint+8, eraseVal)          // fErase
+				ctx.Mem.Write32(pPaint+12, uint32(rcLeft))   // rcPaint.left
+				ctx.Mem.Write32(pPaint+16, uint32(rcTop))    // rcPaint.top
+				ctx.Mem.Write32(pPaint+20, uint32(rcRight))  // rcPaint.right
+				ctx.Mem.Write32(pPaint+24, uint32(rcBottom)) // rcPaint.bottom
+			}
 		}
 		ctx.SetReturn(hdc)
 		return 0
@@ -6847,7 +7011,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			m := hctx.MsgQueue[0]
 			hctx.MsgQueue = hctx.MsgQueue[1:]
 			if pMsg != 0 {
-				writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
+				writeMsg(ctx, pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 			}
 			if m.message == 0x0012 { // WM_QUIT → return FALSE to end message loop
 				ctx.SetReturn(0)
@@ -6858,7 +7022,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		// No messages; return WM_QUIT to avoid infinite spin
 		if pMsg != 0 {
-			writeMsg(pMsg, hctx.MainHWND, 0x12, 0, 0) // WM_QUIT
+			writeMsg(ctx, pMsg, hctx.MainHWND, 0x12, 0, 0) // WM_QUIT
 		}
 		ctx.SetReturn(0)
 		return 0
@@ -7932,7 +8096,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			hctx.MsgQueue = hctx.MsgQueue[1:]
 		}
 		if pMsg != 0 {
-			writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
+			writeMsg(ctx, pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -7944,11 +8108,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		// MSG layout (x64): HWND(8) message(4) pad(4) WPARAM(8) LPARAM(8) ...
-		hwnd, _ := mem.Read64(pMsg)
-		message, _ := mem.Read32(pMsg + 8)
-		wParam, _ := mem.Read64(pMsg + 16)
-		lParam, _ := mem.Read64(pMsg + 24)
+		// MSG layout: use arch-aware readMsg
+		hwnd, message, wParam, lParam := readMsg(ctx, pMsg)
 
 		// Try built-in control first
 		if _, isChild := hwndChildren[hwnd]; isChild {
@@ -7994,6 +8155,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 		ctx.CPU.SetPC(wndProc)
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SendMessageA", func(ctx *ntapi.TrapContext) uint32 {
@@ -8040,6 +8202,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			rw.WriteReg(9, lParam)
 			ctx.CPU.SetPC(wp)
 			ctx.ReturnOverridden = true
+			ctx.PCRedirected = true
 			return 0
 		}
 		hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd, msg, wParam, lParam})
@@ -8130,7 +8293,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// Undocumented extended TranslateMessage. Same behavior.
 		pMsg := ctx.Arg(0)
 		if pMsg != 0 {
-			msg, _ := mem.Read32(pMsg + 8)      // MSG.message
+			_, msg, _, _ := readMsg(ctx, pMsg)
 			if msg == 0x0100 || msg == 0x0104 { // WM_KEYDOWN, WM_SYSKEYDOWN
 				ctx.SetReturn(1)
 				return 0
@@ -9444,18 +9607,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		})
 	}
 	d.RegisterAutoStubHandler(user32, "IsDialogMessage", func(ctx *ntapi.TrapContext) uint32 {
-		// BOOL IsDialogMessageW(HWND hDlg, LPMSG lpMsg)
-		// ReactOS: win32ss/user/user32/windows/dialog.c IsDialogMessageW
-		// Checks if a message is for the dialog (Tab, Enter, Esc, arrow keys).
-		// We check for Tab (VK_TAB=0x09) and Esc (VK_ESCAPE=0x1B) in WM_KEYDOWN.
 		pMsg := ctx.Arg(1)
 		if pMsg == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		msgID, _ := mem.Read32(pMsg + 8) // message field at offset 8
-		if msgID == 0x0100 {             // WM_KEYDOWN
-			wParam, _ := mem.Read64(pMsg + 12)
+		_, msgID, wParam, _ := readMsg(ctx, pMsg)
+		if msgID == 0x0100 { // WM_KEYDOWN
 			vk := uint32(wParam & 0xFF)
 			if vk == 0x09 || vk == 0x1B { // VK_TAB or VK_ESCAPE
 				ctx.SetReturn(1) // consumed by dialog
@@ -9466,15 +9624,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "IsDialogMessageA", func(ctx *ntapi.TrapContext) uint32 {
-		// Same logic as IsDialogMessageW (ANSI version)
 		pMsg := ctx.Arg(1)
 		if pMsg == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		msgID, _ := mem.Read32(pMsg + 8)
+		_, msgID, wParam, _ := readMsg(ctx, pMsg)
 		if msgID == 0x0100 {
-			wParam, _ := mem.Read64(pMsg + 12)
 			vk := uint32(wParam & 0xFF)
 			if vk == 0x09 || vk == 0x1B {
 				ctx.SetReturn(1)
@@ -9623,6 +9779,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			rw.WriteReg(9, dwInitParam)
 			ctx.CPU.SetPC(lpDialogFunc)
 			ctx.ReturnOverridden = true
+			ctx.PCRedirected = true
 			return 0
 		}
 
@@ -10723,25 +10880,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 
 		const wsChild = 0x40000000
 		if style&wsChild != 0 {
-			cx := int32(ctx.Arg(4))
-			cy := int32(ctx.Arg(5))
-			cw := int32(ctx.Arg(6))
-			ch := int32(ctx.Arg(7))
+			cx := readCreateWindowIntArg(ctx, 4)
+			cy := readCreateWindowIntArg(ctx, 5)
+			cw := readCreateWindowIntArg(ctx, 6)
+			ch := readCreateWindowIntArg(ctx, 7)
 			parentHwnd := ctx.Arg(8)
-			if cx < 0 || cx > 0x7FFF {
+			if cx < 0 || cx > maxWindowCoordinate {
 				cx = 0
 			}
-			if cy < 0 || cy > 0x7FFF {
+			if cy < 0 || cy > maxWindowCoordinate {
 				cy = 0
 			}
 			var defW, defH int32 = 800, 600
 			if wlWindow != nil {
 				defW, defH = wlWindow.Width, wlWindow.Height
 			}
-			if cw < 0 || cw > 0x7FFF {
+			if cw < 0 || cw > maxWindowCoordinate {
 				cw = 0
 			}
-			if ch < 0 || ch > 0x7FFF {
+			if ch < 0 || ch > maxWindowCoordinate {
 				ch = 0
 			}
 			lClassName := strings.ToLower(className)
@@ -10785,13 +10942,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				if title == "" {
 					title = "govm"
 				}
-				var w, h int32 = 800, 600
-				if nw := int32(ctx.Arg(6)); nw > 0 && nw < 0x7FFF {
-					w = nw
-				}
-				if nh := int32(ctx.Arg(7)); nh > 0 && nh < 0x7FFF {
-					h = nh
-				}
+				w, h := resolveTopLevelCreateWindowSize(ctx)
 				ncTop := int32(0)
 				if wlDisplay.HasNoSSD() {
 					var r win32.Rect
@@ -11218,6 +11369,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					rw.WriteReg(9, lParam)
 					ctx.CPU.SetPC(lpPrevWndFunc)
 					ctx.ReturnOverridden = true
+					ctx.PCRedirected = true
 					return 0
 				}
 			}
@@ -11262,6 +11414,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					rw.WriteReg(9, lParam)
 					ctx.CPU.SetPC(lpPrevWndFunc)
 					ctx.ReturnOverridden = true
+					ctx.PCRedirected = true
 					return 0
 				}
 			}
@@ -11321,6 +11474,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		rw.WriteReg(9, 0)
 		ctx.CPU.SetPC(queue[0].wndProc)
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "SwitchToThisWindow", func(ctx *ntapi.TrapContext) uint32 {

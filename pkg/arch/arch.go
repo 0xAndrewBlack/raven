@@ -8,6 +8,7 @@ type Arch int
 const (
 	ArchRISCV64 Arch = iota
 	ArchAMD64
+	ArchI386 // PE32 (32-bit x86)
 )
 
 // ExitError signals a guest exit(2) syscall.

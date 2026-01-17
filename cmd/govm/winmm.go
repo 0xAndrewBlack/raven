@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
+	dsoundpkg "github.com/mirkobrombin/Raven/pkg/dsound"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
@@ -28,7 +29,8 @@ const (
 	mmSysErrNotSupported = 8
 	mmSysErrInvalParam   = 11
 
-	wavErrBadFormat = 32
+	wavErrBadFormat    = 32
+	wavErrStillPlaying = 33
 
 	timErrNoError = 0
 	timErrNoCanDo = 97
@@ -46,8 +48,9 @@ const (
 
 	callbackFunction = 0x00030000
 
-	mmTimeMS    = 0x0001
-	mmTimeBytes = 0x0004
+	mmTimeMS      = 0x0001
+	mmTimeSamples = 0x0002
+	mmTimeBytes   = 0x0004
 
 	womOpen  = 0x03BB
 	womClose = 0x03BC
@@ -58,6 +61,22 @@ const (
 
 	waveCapsVolume   = 0x0004
 	waveCapsLRVolume = 0x0008
+
+	waveFormat1M16 = 0x00000004
+	waveFormat1S16 = 0x00000008
+	waveFormat2M16 = 0x00000040
+	waveFormat2S16 = 0x00000080
+	waveFormat4M16 = 0x00000400
+	waveFormat4S16 = 0x00000800
+
+	sndAsync     = 0x0001
+	sndNoDefault = 0x0002
+	sndMemory    = 0x0004
+	sndLoop      = 0x0008
+	sndNoStop    = 0x0010
+	sndAlias     = 0x00010000
+	sndFilename  = 0x00020000
+	sndResource  = 0x00040004
 
 	mmioWriteFlag     = 0x00000001
 	mmioReadWriteFlag = 0x00000002
@@ -78,15 +97,15 @@ type waveHeader struct {
 type queuedWaveBuffer struct {
 	headerPtr uint64
 	header    waveHeader
-	data      []byte
+	remaining uint32
 }
 
 type waveOutDevice struct {
 	mu           sync.Mutex
 	format       waveFormatEx
 	buffers      []queuedWaveBuffer
-	cmd          *exec.Cmd
-	pipe         io.WriteCloser
+	device       *dsoundpkg.DirectSound
+	buffer       *dsoundpkg.SoundBuffer
 	callback     uint64
 	instance     uint64
 	flags        uint32
@@ -95,8 +114,20 @@ type waveOutDevice struct {
 	pitch        uint32
 	playbackRate uint32
 	paused       bool
-	silent       bool
+	playing      bool
+	closed       bool
+	lastTick     time.Time
+	queuedBytes  uint64
+	notify       chan struct{}
+	stop         chan struct{}
 	callbackCPU  arch.CPU
+}
+
+type playSoundPlayback struct {
+	buffer   *dsoundpkg.SoundBuffer
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 type waveInDevice struct {
@@ -240,14 +271,14 @@ func writeWaveOutCapsW(mem *mmu.MMU, addr uint64, cb uint32) {
 	binary.LittleEndian.PutUint16(buf[0:], 1)
 	binary.LittleEndian.PutUint16(buf[2:], 1)
 	binary.LittleEndian.PutUint32(buf[4:], 0x00010000)
-	name := utf16Encode("go-vm WaveOut")
+	name := utf16Encode("Raven Audio")
 	for i, w := range name {
 		if 8+i*2+1 >= len(buf) || i >= 31 {
 			break
 		}
 		binary.LittleEndian.PutUint16(buf[8+i*2:], w)
 	}
-	binary.LittleEndian.PutUint32(buf[72:], 0)
+	binary.LittleEndian.PutUint32(buf[72:], waveFormat1M16|waveFormat1S16|waveFormat2M16|waveFormat2S16|waveFormat4M16|waveFormat4S16)
 	binary.LittleEndian.PutUint16(buf[76:], 2)
 	binary.LittleEndian.PutUint32(buf[80:], waveCapsVolume|waveCapsLRVolume)
 	mem.WriteBytes(addr, buf[:minU32(cb, uint32(len(buf)))])
@@ -261,11 +292,132 @@ func writeWaveOutCapsA(mem *mmu.MMU, addr uint64, cb uint32) {
 	binary.LittleEndian.PutUint16(buf[0:], 1)
 	binary.LittleEndian.PutUint16(buf[2:], 1)
 	binary.LittleEndian.PutUint32(buf[4:], 0x00010000)
-	copy(buf[8:40], []byte("go-vm WaveOut"))
-	binary.LittleEndian.PutUint32(buf[40:], 0)
+	copy(buf[8:40], []byte("Raven Audio"))
+	binary.LittleEndian.PutUint32(buf[40:], waveFormat1M16|waveFormat1S16|waveFormat2M16|waveFormat2S16|waveFormat4M16|waveFormat4S16)
 	binary.LittleEndian.PutUint16(buf[44:], 2)
 	binary.LittleEndian.PutUint32(buf[48:], waveCapsVolume|waveCapsLRVolume)
 	mem.WriteBytes(addr, buf[:minU32(cb, uint32(len(buf)))])
+}
+
+func ensureWinmmDirectSound(hctx *HandlerCtx) *dsoundpkg.DirectSound {
+	if hctx.DirectSound == nil {
+		hctx.DirectSound = dsoundpkg.NewDirectSound()
+	}
+	return hctx.DirectSound
+}
+
+func createWinmmSecondaryBuffer(hctx *HandlerCtx, format waveFormatEx, size uint32) *dsoundpkg.SoundBuffer {
+	if size == 0 {
+		size = format.AvgBytesPerSec
+	}
+	if size == 0 {
+		size = 4096
+	}
+	dsFormat := toDSoundFormat(format)
+	return ensureWinmmDirectSound(hctx).CreateSoundBuffer(dsoundpkg.DSBUFFERDESC{
+		DwFlags:       dsoundpkg.DSBCAPS_CTRLVOLUME | dsoundpkg.DSBCAPS_GLOBALFOCUS | dsoundpkg.DSBCAPS_GETCURRENTPOSITION2,
+		DwBufferBytes: size,
+		LpwfxFormat:   &dsFormat,
+	})
+}
+
+func writeToSoundBuffer(buffer *dsoundpkg.SoundBuffer, data []byte, offset uint32) uint32 {
+	if buffer == nil || buffer.Size == 0 || len(buffer.Data) == 0 || len(data) == 0 {
+		return offset
+	}
+	if offset >= buffer.Size {
+		offset %= buffer.Size
+	}
+	pos := offset
+	remaining := data
+	for len(remaining) > 0 {
+		chunk := int(buffer.Size - pos)
+		if chunk > len(remaining) {
+			chunk = len(remaining)
+		}
+		start := int(pos)
+		copy(buffer.Data[start:start+chunk], remaining[:chunk])
+		remaining = remaining[chunk:]
+		pos = (pos + uint32(chunk)) % buffer.Size
+	}
+	buffer.WriteCursor = pos
+	return pos
+}
+
+func waveOutDuration(format waveFormatEx, bytes uint32) time.Duration {
+	if format.AvgBytesPerSec == 0 || bytes == 0 {
+		return 0
+	}
+	return time.Duration((uint64(bytes) * uint64(time.Second)) / uint64(format.AvgBytesPerSec))
+}
+
+func waveVolumeToDS(vol uint32) int32 {
+	left := vol & 0xFFFF
+	right := (vol >> 16) & 0xFFFF
+	level := (left + right) / 2
+	if level >= 0xFFFF {
+		return 0
+	}
+	return -10000 + int32((level*10000)/0xFFFF)
+}
+
+func dsVolumeToWave(vol int32) uint32 {
+	if vol < -10000 {
+		vol = -10000
+	}
+	if vol > 0 {
+		vol = 0
+	}
+	level := uint32((int64(vol)+10000)*0xFFFF/10000) & 0xFFFF
+	return level | (level << 16)
+}
+
+func parseWAV(data []byte) (waveFormatEx, []byte, error) {
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
+		return waveFormatEx{}, nil, fmt.Errorf("invalid wav")
+	}
+	var format waveFormatEx
+	var pcm []byte
+	for off := 12; off+8 <= len(data); {
+		chunkID := string(data[off : off+4])
+		chunkSize := int(binary.LittleEndian.Uint32(data[off+4:]))
+		off += 8
+		if chunkSize < 0 || off+chunkSize > len(data) {
+			return waveFormatEx{}, nil, fmt.Errorf("invalid wav chunk")
+		}
+		chunk := data[off : off+chunkSize]
+		switch chunkID {
+		case "fmt ":
+			if len(chunk) < 16 {
+				return waveFormatEx{}, nil, fmt.Errorf("short fmt chunk")
+			}
+			format = waveFormatEx{
+				FormatTag:      binary.LittleEndian.Uint16(chunk[0:2]),
+				Channels:       binary.LittleEndian.Uint16(chunk[2:4]),
+				SamplesPerSec:  binary.LittleEndian.Uint32(chunk[4:8]),
+				AvgBytesPerSec: binary.LittleEndian.Uint32(chunk[8:12]),
+				BlockAlign:     binary.LittleEndian.Uint16(chunk[12:14]),
+				BitsPerSample:  binary.LittleEndian.Uint16(chunk[14:16]),
+			}
+			if len(chunk) >= 18 {
+				format.CbSize = binary.LittleEndian.Uint16(chunk[16:18])
+			}
+		case "data":
+			pcm = append([]byte(nil), chunk...)
+		}
+		off += chunkSize
+		if chunkSize&1 != 0 {
+			off++
+		}
+	}
+	if len(pcm) == 0 {
+		return waveFormatEx{}, nil, fmt.Errorf("missing wav data")
+	}
+	format = normalizeWaveFormatEx(format)
+	if format.FormatTag != waveFormatPCM && format.FormatTag != waveFormatIEEEFloat {
+		return waveFormatEx{}, nil, fmt.Errorf("unsupported wav format")
+	}
+	return format, pcm, nil
 }
 
 func writeWaveInCapsW(mem *mmu.MMU, addr uint64, cb uint32) {
@@ -586,21 +738,117 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 		}
 	}
 
-	flushWaveOutLocked := func(hwo uint64, dev *waveOutDevice) {
-		if dev.paused {
+	advanceWaveOutLocked := func(hwo uint64, dev *waveOutDevice) {
+		if dev == nil || dev.paused || !dev.playing || dev.lastTick.IsZero() || dev.format.AvgBytesPerSec == 0 {
 			return
 		}
-		for len(dev.buffers) > 0 {
-			buf := dev.buffers[0]
-			dev.buffers = dev.buffers[1:]
-			if !dev.silent && dev.pipe != nil && len(buf.data) > 0 {
-				if _, err := dev.pipe.Write(buf.data); err != nil {
-					dev.silent = true
+		elapsed := time.Since(dev.lastTick)
+		if elapsed <= 0 {
+			return
+		}
+		advance := (uint64(elapsed) * uint64(dev.format.AvgBytesPerSec)) / uint64(time.Second)
+		if advance == 0 {
+			return
+		}
+		if advance > dev.queuedBytes {
+			advance = dev.queuedBytes
+		}
+		consumed := advance
+		dev.queuedBytes -= advance
+		dev.position += advance
+		if dev.buffer != nil && dev.buffer.Size != 0 {
+			dev.buffer.PlayCursor = uint32(dev.position % uint64(dev.buffer.Size))
+		}
+		for advance > 0 && len(dev.buffers) > 0 {
+			buf := &dev.buffers[0]
+			if advance >= uint64(buf.remaining) {
+				advance -= uint64(buf.remaining)
+				buf.remaining = 0
+				writeWaveOutDone(hwo, dev, buf.header)
+				dev.buffers = dev.buffers[1:]
+				continue
+			}
+			buf.remaining -= uint32(advance)
+			advance = 0
+		}
+		consumedDur := time.Duration((consumed * uint64(time.Second)) / uint64(dev.format.AvgBytesPerSec))
+		if consumedDur <= 0 {
+			consumedDur = time.Nanosecond
+		}
+		dev.lastTick = dev.lastTick.Add(consumedDur)
+		if dev.queuedBytes == 0 {
+			dev.playing = false
+			dev.lastTick = time.Time{}
+			if dev.buffer != nil {
+				dev.buffer.Stop()
+			}
+		}
+	}
+
+	signalWaveOut := func(dev *waveOutDevice) {
+		if dev == nil || dev.notify == nil {
+			return
+		}
+		select {
+		case dev.notify <- struct{}{}:
+		default:
+		}
+	}
+
+	startWaveOutWorker := func(hwo uint64, dev *waveOutDevice) {
+		go func() {
+			var timer *time.Timer
+			stopTimer := func() {
+				if timer == nil {
+					return
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
 			}
-			dev.position += uint64(len(buf.data))
-			writeWaveOutDone(hwo, dev, buf.header)
-		}
+			for {
+				dev.mu.Lock()
+				if dev.closed {
+					dev.mu.Unlock()
+					stopTimer()
+					return
+				}
+				advanceWaveOutLocked(hwo, dev)
+				wait := time.Duration(0)
+				if !dev.paused && dev.playing && len(dev.buffers) > 0 {
+					wait = waveOutDuration(dev.format, dev.buffers[0].remaining)
+					if wait <= 0 {
+						wait = time.Millisecond
+					}
+				}
+				dev.mu.Unlock()
+				if wait == 0 {
+					stopTimer()
+					select {
+					case <-dev.notify:
+					case <-dev.stop:
+						return
+					}
+					continue
+				}
+				if timer == nil {
+					timer = time.NewTimer(wait)
+				} else {
+					stopTimer()
+					timer.Reset(wait)
+				}
+				select {
+				case <-timer.C:
+				case <-dev.notify:
+				case <-dev.stop:
+					stopTimer()
+					return
+				}
+			}
+		}()
 	}
 
 	dispatchWaveInBuffer := func(hwi uint64, dev *waveInDevice, hdr waveHeader) {
@@ -628,16 +876,6 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 			}
 			dev.mu.Unlock()
 		}()
-	}
-
-	restartWaveOut := func(dev *waveOutDevice) {
-		stopCmd(dev.cmd, dev.pipe)
-		dev.cmd = nil
-		dev.pipe = nil
-		cmd, pipe, silent, _ := startAudioProcess(dev.format)
-		dev.cmd = cmd
-		dev.pipe = pipe
-		dev.silent = silent
 	}
 
 	restartWaveIn := func(dev *waveInDevice) {
@@ -723,6 +961,267 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 		winmmHandleMu.Unlock()
 	}
 
+	readAllVFS := func(fs *vfs.VFS, path string) ([]byte, error) {
+		fd, err := fs.Open(path, vfs.O_RDONLY)
+		if err != nil {
+			return nil, err
+		}
+		defer fs.Close(fd)
+		data := make([]byte, 0, 4096)
+		buf := make([]byte, 4096)
+		for {
+			n, err := fs.Read(fd, buf)
+			if n > 0 {
+				data = append(data, buf[:n]...)
+			}
+			if err != nil || n == 0 {
+				break
+			}
+		}
+		return data, nil
+	}
+
+	resolvePlaySoundModule := func(hModule uint64) (uint64, uint32) {
+		if hctx.MainModule == nil {
+			return 0, 0
+		}
+		if hModule == 0 || hModule == hctx.MainModule.BaseAddr {
+			return hctx.MainModule.BaseAddr, hctx.MainModule.ResourceDirRVA
+		}
+		return 0, 0
+	}
+
+	matchResourceEntry := func(dirAddr, rsrcBase uint64, wantString bool, wantName string, wantID uint32) (uint32, bool) {
+		if dirAddr == 0 {
+			return 0, false
+		}
+		namedCount, _ := mem.Read16(dirAddr + 12)
+		idCount, _ := mem.Read16(dirAddr + 14)
+		entryBase := dirAddr + 16
+		total := uint64(namedCount) + uint64(idCount)
+		wantUTF16 := utf16Encode(wantName)
+		for i := uint64(0); i < total; i++ {
+			nameRaw, _ := mem.Read32(entryBase + i*8)
+			off, _ := mem.Read32(entryBase + i*8 + 4)
+			if wantString {
+				if nameRaw&0x80000000 == 0 {
+					continue
+				}
+				nameAddr := rsrcBase + uint64(nameRaw&0x7FFFFFFF)
+				nameLen, _ := mem.Read16(nameAddr)
+				if int(nameLen) != len(wantUTF16) {
+					continue
+				}
+				matched := true
+				for j, wantRune := range wantUTF16 {
+					got, _ := mem.Read16(nameAddr + 2 + uint64(j*2))
+					if got != wantRune {
+						matched = false
+						break
+					}
+				}
+				if matched {
+					return off, true
+				}
+				continue
+			}
+			if nameRaw == wantID {
+				return off, true
+			}
+		}
+		return 0, false
+	}
+
+	firstResourceEntry := func(dirAddr uint64) (uint32, bool) {
+		if dirAddr == 0 {
+			return 0, false
+		}
+		namedCount, _ := mem.Read16(dirAddr + 12)
+		idCount, _ := mem.Read16(dirAddr + 14)
+		if namedCount == 0 && idCount == 0 {
+			return 0, false
+		}
+		off, _ := mem.Read32(dirAddr + 20)
+		return off, true
+	}
+
+	loadPlaySoundResource := func(hModule, namePtr uint64, wide bool) ([]byte, error) {
+		baseAddr, rsrcRVA := resolvePlaySoundModule(hModule)
+		if baseAddr == 0 || rsrcRVA == 0 {
+			return nil, fmt.Errorf("resource module unavailable")
+		}
+		if namePtr <= 0xFFFF && hctx.PeLoadRawResource != nil {
+			if dataAddr, dataSize, ok := hctx.PeLoadRawResource(baseAddr, rsrcRVA, 10, uint32(namePtr)); ok && dataAddr != 0 {
+				return mem.ReadBytes(dataAddr, int(dataSize))
+			}
+		}
+		rsrcBase := baseAddr + uint64(rsrcRVA)
+		typeOff, ok := matchResourceEntry(rsrcBase, rsrcBase, true, "WAVE", 0)
+		if !ok || typeOff&0x80000000 == 0 {
+			return nil, fmt.Errorf("wave resource type not found")
+		}
+		typeDir := rsrcBase + uint64(typeOff&0x7FFFFFFF)
+		wantString := namePtr > 0xFFFF
+		wantName := ""
+		if wantString {
+			if wide {
+				wantName = readGuestUTF16(namePtr)
+			} else {
+				wantName = readGuestString(namePtr)
+			}
+		}
+		nameOff, ok := matchResourceEntry(typeDir, rsrcBase, wantString, wantName, uint32(namePtr))
+		if !ok || nameOff&0x80000000 == 0 {
+			return nil, fmt.Errorf("wave resource not found")
+		}
+		langDir := rsrcBase + uint64(nameOff&0x7FFFFFFF)
+		dataOff, ok := firstResourceEntry(langDir)
+		if !ok || dataOff&0x80000000 != 0 {
+			return nil, fmt.Errorf("wave resource language missing")
+		}
+		dataEntry := rsrcBase + uint64(dataOff)
+		dataRVA, _ := mem.Read32(dataEntry)
+		dataSize, _ := mem.Read32(dataEntry + 4)
+		if dataRVA == 0 || dataSize == 0 {
+			return nil, fmt.Errorf("wave resource empty")
+		}
+		return mem.ReadBytes(baseAddr+uint64(dataRVA), int(dataSize))
+	}
+
+	playSoundMu := sync.Mutex{}
+	var activePlaySound *playSoundPlayback
+
+	stopPlaySound := func(playback *playSoundPlayback) {
+		if playback == nil {
+			return
+		}
+		playback.stopOnce.Do(func() {
+			close(playback.stop)
+		})
+	}
+
+	playSoundData := func(format waveFormatEx, pcm []byte, flags uint32) *playSoundPlayback {
+		buffer := createWinmmSecondaryBuffer(hctx, format, uint32(len(pcm)))
+		if buffer != nil {
+			buffer.SetFormat(toDSoundFormat(format))
+			buffer.Data = make([]byte, len(pcm))
+			copy(buffer.Data, pcm)
+			buffer.Size = uint32(len(pcm))
+			buffer.WriteCursor = uint32(len(pcm))
+			buffer.SetCurrentPosition(0)
+		}
+		playback := &playSoundPlayback{
+			buffer: buffer,
+			stop:   make(chan struct{}),
+			done:   make(chan struct{}),
+		}
+		go func() {
+			defer close(playback.done)
+			if playback.buffer != nil {
+				playFlags := uint32(0)
+				if flags&sndLoop != 0 {
+					playFlags = dsoundpkg.DSBPLAY_LOOPING
+				}
+				playback.buffer.Play(0, 0, playFlags)
+			}
+			if flags&sndLoop != 0 {
+				<-playback.stop
+			} else {
+				wait := waveOutDuration(format, uint32(len(pcm)))
+				if wait <= 0 {
+					wait = time.Millisecond
+				}
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-playback.stop:
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+				}
+			}
+			if playback.buffer != nil {
+				playback.buffer.Stop()
+				ensureWinmmDirectSound(hctx).ReleaseSoundBuffer(playback.buffer)
+			}
+			playSoundMu.Lock()
+			if activePlaySound == playback {
+				activePlaySound = nil
+			}
+			playSoundMu.Unlock()
+		}()
+		return playback
+	}
+
+	handlePlaySound := func(ctx *ntapi.TrapContext, wide bool, hmodArgIndex, flagsArgIndex int) uint64 {
+		flags := uint32(ctx.Arg(flagsArgIndex))
+		hmod := uint64(0)
+		if hmodArgIndex >= 0 {
+			hmod = ctx.Arg(hmodArgIndex)
+		}
+		if ctx.Arg(0) == 0 {
+			playSoundMu.Lock()
+			cur := activePlaySound
+			activePlaySound = nil
+			playSoundMu.Unlock()
+			stopPlaySound(cur)
+			return 1
+		}
+		if flags&sndAlias != 0 {
+			return 0
+		}
+		var raw []byte
+		var err error
+		switch {
+		case flags&sndFilename != 0:
+			name := readGuestString(ctx.Arg(0))
+			if wide {
+				name = readGuestUTF16(ctx.Arg(0))
+			}
+			raw, err = readAllVFS(ctx.FS, winPathToVFS(name))
+		case flags&sndResource == sndResource:
+			raw, err = loadPlaySoundResource(hmod, ctx.Arg(0), wide)
+		case flags&sndMemory != 0:
+			return 0
+		default:
+			name := readGuestString(ctx.Arg(0))
+			if wide {
+				name = readGuestUTF16(ctx.Arg(0))
+			}
+			raw, err = readAllVFS(ctx.FS, winPathToVFS(name))
+		}
+		if err != nil || len(raw) == 0 {
+			if flags&sndNoDefault != 0 {
+				return 0
+			}
+			return 0
+		}
+		format, pcm, err := parseWAV(raw)
+		if err != nil {
+			return 0
+		}
+		playSoundMu.Lock()
+		if activePlaySound != nil && flags&sndNoStop != 0 {
+			playSoundMu.Unlock()
+			return 0
+		}
+		prev := activePlaySound
+		activePlaySound = nil
+		playSoundMu.Unlock()
+		stopPlaySound(prev)
+		playback := playSoundData(format, pcm, flags)
+		playSoundMu.Lock()
+		activePlaySound = playback
+		playSoundMu.Unlock()
+		if flags&sndAsync == 0 && flags&sndLoop == 0 {
+			<-playback.done
+		}
+		return 1
+	}
+
 	registerFixed := func(name string, ret uint64) {
 		d.RegisterAutoStubHandler(dll, name, func(ctx *ntapi.TrapContext) uint32 {
 			ravelog.Logf("[winmm] %s\n", name)
@@ -744,14 +1243,35 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 	registerFixed("GetDriverModuleHandle", 0)
 	registerFixed("OpenDriver", 0)
 	registerFixed("OpenDriverA", 0)
-	registerFixed("PlaySound", 1)
-	registerFixed("PlaySoundA", 1)
-	registerFixed("PlaySoundW", 1)
 	registerFixed("SendDriverMessage", 0)
-	registerFixed("sndPlaySoundA", 1)
-	registerFixed("sndPlaySoundW", 1)
 	registerFixed("mmsystemGetVersion", 0x0500)
 	registerFixed("-stub", 0)
+
+	d.RegisterAutoStubHandler(dll, "PlaySoundA", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[winmm] PlaySoundA\n")
+		ctx.SetReturn(handlePlaySound(ctx, false, 1, 2))
+		return 0
+	})
+	d.RegisterAutoStubHandler(dll, "PlaySoundW", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[winmm] PlaySoundW\n")
+		ctx.SetReturn(handlePlaySound(ctx, true, 1, 2))
+		return 0
+	})
+	d.RegisterAutoStubHandler(dll, "PlaySound", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[winmm] PlaySound\n")
+		ctx.SetReturn(handlePlaySound(ctx, false, 1, 2))
+		return 0
+	})
+	d.RegisterAutoStubHandler(dll, "sndPlaySoundA", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[winmm] sndPlaySoundA\n")
+		ctx.SetReturn(handlePlaySound(ctx, false, -1, 1))
+		return 0
+	})
+	d.RegisterAutoStubHandler(dll, "sndPlaySoundW", func(ctx *ntapi.TrapContext) uint32 {
+		ravelog.Logf("[winmm] sndPlaySoundW\n")
+		ctx.SetReturn(handlePlaySound(ctx, true, -1, 1))
+		return 0
+	})
 
 	registerFixed("auxGetNumDevs", 0)
 	registerFixed("auxGetVolume", 0)
@@ -1278,21 +1798,28 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(wavErrBadFormat)
 			return 0
 		}
-		cmd, pipe, silent, _ := startAudioProcess(format)
+		buffer := createWinmmSecondaryBuffer(hctx, format, format.AvgBytesPerSec)
+		if buffer == nil {
+			ctx.SetReturn(mmSysErrNoMem)
+			return 0
+		}
 		dev := &waveOutDevice{
 			format:       format,
-			cmd:          cmd,
-			pipe:         pipe,
+			device:       ensureWinmmDirectSound(hctx),
+			buffer:       buffer,
 			callback:     ctx.Arg(3),
 			instance:     ctx.Arg(4),
 			flags:        uint32(ctx.Arg(5)),
 			volume:       0xFFFFFFFF,
 			pitch:        0x10000,
 			playbackRate: 0x10000,
-			silent:       silent,
+			notify:       make(chan struct{}, 1),
+			stop:         make(chan struct{}),
 			callbackCPU:  ctx.CPU.CloneForThread(),
 		}
+		dev.buffer.SetVolume(waveVolumeToDS(dev.volume))
 		h := allocWaveOutHandle(dev)
+		startWaveOutWorker(h, dev)
 		ctx.Mem.Write64(phwo, h)
 		if dev.flags&callbackFunction == callbackFunction {
 			invokeGuestCallback(dev.callbackCPU, dev.callback, h, uint64(womOpen), dev.instance, 0, 0)
@@ -1309,13 +1836,25 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 			return 0
 		}
 		dev.mu.Lock()
-		stopCmd(dev.cmd, dev.pipe)
-		dev.cmd = nil
-		dev.pipe = nil
+		dev.closed = true
+		dev.playing = false
+		dev.paused = false
+		dev.queuedBytes = 0
+		dev.buffers = nil
+		if dev.buffer != nil {
+			dev.buffer.Stop()
+			dev.buffer.SetCurrentPosition(0)
+			dev.buffer.PlayCursor = 0
+			dev.buffer.WriteCursor = 0
+		}
+		close(dev.stop)
 		if dev.flags&callbackFunction == callbackFunction {
 			invokeGuestCallback(dev.callbackCPU, dev.callback, h, uint64(womClose), dev.instance, 0, 0)
 		}
 		dev.mu.Unlock()
+		if dev.device != nil && dev.buffer != nil {
+			dev.device.ReleaseSoundBuffer(dev.buffer)
+		}
 		closeWaveOutHandle(h)
 		ctx.SetReturn(mmSysErrNoError)
 		return 0
@@ -1368,24 +1907,32 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 		}
 		data, _ := ctx.Mem.ReadBytes(hdr.dataPtr, int(hdr.bufferLen))
 		dev.mu.Lock()
+		advanceWaveOutLocked(h, dev)
 		hdr.flags &^= whdrDone
 		writeWaveHeader(ctx.Mem, hdr)
-		if dev.paused {
-			dev.buffers = append(dev.buffers, queuedWaveBuffer{
-				headerPtr: hdr.guestHeaderPtr,
-				header:    hdr,
-				data:      data,
-			})
-		} else {
-			if !dev.silent && dev.pipe != nil && len(data) > 0 {
-				if _, err := dev.pipe.Write(data); err != nil {
-					dev.silent = true
+		if dev.buffer != nil {
+			dev.buffer.SetFormat(toDSoundFormat(dev.format))
+			dev.buffer.WriteCursor = writeToSoundBuffer(dev.buffer, data, dev.buffer.WriteCursor)
+		}
+		dev.buffers = append(dev.buffers, queuedWaveBuffer{
+			headerPtr: hdr.guestHeaderPtr,
+			header:    hdr,
+			remaining: uint32(len(data)),
+		})
+		dev.queuedBytes += uint64(len(data))
+		if !dev.paused && dev.queuedBytes > 0 {
+			if !dev.playing {
+				dev.playing = true
+				dev.lastTick = time.Now()
+				if dev.buffer != nil {
+					dev.buffer.Play(0, 0, 0)
 				}
+			} else if dev.lastTick.IsZero() {
+				dev.lastTick = time.Now()
 			}
-			dev.position += uint64(len(data))
-			writeWaveOutDone(h, dev, hdr)
 		}
 		dev.mu.Unlock()
+		signalWaveOut(dev)
 		ctx.SetReturn(mmSysErrNoError)
 		return 0
 	})
@@ -1397,11 +1944,13 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 			return 0
 		}
 		dev.mu.Lock()
+		advanceWaveOutLocked(ctx.Arg(0), dev)
 		dev.paused = true
-		if dev.cmd != nil && dev.cmd.Process != nil {
-			_ = dev.cmd.Process.Signal(syscall.SIGSTOP)
+		if dev.buffer != nil {
+			dev.buffer.Stop()
 		}
 		dev.mu.Unlock()
+		signalWaveOut(dev)
 		ctx.SetReturn(mmSysErrNoError)
 		return 0
 	})
@@ -1414,12 +1963,17 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 			return 0
 		}
 		dev.mu.Lock()
+		advanceWaveOutLocked(h, dev)
 		dev.paused = false
-		if dev.cmd != nil && dev.cmd.Process != nil {
-			_ = dev.cmd.Process.Signal(syscall.SIGCONT)
+		if dev.queuedBytes > 0 {
+			dev.playing = true
+			dev.lastTick = time.Now()
+			if dev.buffer != nil {
+				dev.buffer.Play(0, 0, 0)
+			}
 		}
-		flushWaveOutLocked(uint64(h), dev)
 		dev.mu.Unlock()
+		signalWaveOut(dev)
 		ctx.SetReturn(mmSysErrNoError)
 		return 0
 	})
@@ -1432,13 +1986,24 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 			return 0
 		}
 		dev.mu.Lock()
+		advanceWaveOutLocked(h, dev)
 		for _, buf := range dev.buffers {
-			writeWaveOutDone(uint64(h), dev, buf.header)
+			writeWaveOutDone(h, dev, buf.header)
 		}
 		dev.buffers = nil
-		restartWaveOut(dev)
+		dev.position = 0
+		dev.queuedBytes = 0
+		dev.playing = false
+		dev.lastTick = time.Time{}
 		dev.paused = false
+		if dev.buffer != nil {
+			dev.buffer.Stop()
+			dev.buffer.SetCurrentPosition(0)
+			dev.buffer.PlayCursor = 0
+			dev.buffer.WriteCursor = 0
+		}
 		dev.mu.Unlock()
+		signalWaveOut(dev)
 		ctx.SetReturn(mmSysErrNoError)
 		return 0
 	})
@@ -1450,7 +2015,11 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 			return 0
 		}
 		if ctx.Arg(1) != 0 {
-			ctx.Mem.Write32(ctx.Arg(1), dev.volume)
+			vol := dev.volume
+			if dev.buffer != nil {
+				vol = dsVolumeToWave(dev.buffer.GetVolume())
+			}
+			ctx.Mem.Write32(ctx.Arg(1), vol)
 		}
 		ctx.SetReturn(mmSysErrNoError)
 		return 0
@@ -1464,6 +2033,9 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 		}
 		dev.mu.Lock()
 		dev.volume = uint32(ctx.Arg(1))
+		if dev.buffer != nil {
+			dev.buffer.SetVolume(waveVolumeToDS(dev.volume))
+		}
 		dev.mu.Unlock()
 		ctx.SetReturn(mmSysErrNoError)
 		return 0
@@ -1475,6 +2047,8 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(mmSysErrInvalHandle)
 			return 0
 		}
+		dev.mu.Lock()
+		advanceWaveOutLocked(ctx.Arg(0), dev)
 		reqType, _ := ctx.Mem.Read32(ctx.Arg(1))
 		valType := reqType
 		if valType == 0 {
@@ -1483,10 +2057,13 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 		value := uint32(dev.position)
 		if valType == mmTimeMS && dev.format.AvgBytesPerSec != 0 {
 			value = uint32((dev.position * 1000) / uint64(dev.format.AvgBytesPerSec))
+		} else if valType == mmTimeSamples && dev.format.BlockAlign != 0 {
+			value = uint32(dev.position / uint64(dev.format.BlockAlign))
 		} else {
 			valType = mmTimeBytes
 			value = uint32(dev.position)
 		}
+		dev.mu.Unlock()
 		writeMMTime(ctx.Mem, ctx.Arg(1), valType, value)
 		ctx.SetReturn(mmSysErrNoError)
 		return 0

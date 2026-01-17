@@ -8,6 +8,105 @@ import (
 
 // Windows 10 x64 structure offsets (verified against phnt/Vergilius Project).
 
+// TEB offsets (x86 / Win32).
+const (
+	Teb32Size = 0x1000
+
+	Teb32ExceptionList      = 0x0000
+	Teb32StackBase          = 0x0004
+	Teb32StackLimit         = 0x0008
+	Teb32SubSystemTib       = 0x000C
+	Teb32FiberData          = 0x0010
+	Teb32Self               = 0x0018
+	Teb32EnvironmentPointer = 0x001C
+	Teb32ProcessId          = 0x0020
+	Teb32ThreadId           = 0x0024
+	Teb32ActiveRpcHandle    = 0x0028
+	Teb32ThreadLocalStorage = 0x002C
+	Teb32PEB                = 0x0030
+	Teb32LastErrorValue     = 0x0034
+	Teb32CountCritSec       = 0x0038
+	Teb32CurrentLocale      = 0x00C4
+	Teb32TlsSlots           = 0x0E10 // 64 × 4 bytes
+	Teb32TlsExpansionSlots  = 0x0F94
+	Teb32FlsData            = 0x0FB4 // pointer to FLS slot array
+	Teb32HeapBase           = 0x0FC0 // custom: inline heap base (matches Raven convention)
+	Teb32HeapOffset         = 0x0FC4 // custom: inline heap bump offset
+)
+
+// PEB offsets (x86 / Win32).
+const (
+	Peb32Size = 0x480
+
+	Peb32BeingDebugged        = 0x0002
+	Peb32ImageBaseAddress     = 0x0008
+	Peb32Ldr                  = 0x000C
+	Peb32ProcessParameters    = 0x0010
+	Peb32SubSystemData        = 0x0014
+	Peb32ProcessHeap          = 0x0018
+	Peb32FastPebLock          = 0x001C
+	Peb32KernelCallbackTable  = 0x002C
+	Peb32TlsBitmap            = 0x0040
+	Peb32TlsBitmapBits        = 0x0044 // 2 × uint32
+	Peb32NumberOfProcessors   = 0x0064
+	Peb32NtGlobalFlag         = 0x0068
+	Peb32OSMajorVersion       = 0x00A4
+	Peb32OSMinorVersion       = 0x00A8
+	Peb32OSBuildNumber        = 0x00AC
+	Peb32OSPlatformId         = 0x00B0
+	Peb32ImageSubsystem       = 0x00B4
+	Peb32ImageSubsystemMajor  = 0x00B8
+	Peb32SessionId            = 0x01D4
+	Peb32FlsBitmap            = 0x020C
+	Peb32FlsBitmapBits        = 0x0210 // 4 × uint32
+	Peb32FlsListHead          = 0x0220 // LIST_ENTRY32
+	Peb32FlsCallback          = 0x0228
+	Peb32GdiSharedHandleTable = 0x0094
+)
+
+// LDR_DATA_TABLE_ENTRY offsets (x86).
+const (
+	Ldr32EntrySize               = 0x80
+	Ldr32EntryInLoadOrderLinks   = 0x0000
+	Ldr32EntryInMemoryOrderLinks = 0x0008
+	Ldr32EntryInInitOrderLinks   = 0x0010
+	Ldr32EntryDllBase            = 0x0018
+	Ldr32EntryEntryPoint         = 0x001C
+	Ldr32EntrySizeOfImage        = 0x0020
+	Ldr32EntryFullDllName        = 0x0024 // UNICODE_STRING32
+	Ldr32EntryBaseDllName        = 0x002C // UNICODE_STRING32
+)
+
+// UNICODE_STRING32 layout.
+const (
+	UnicodeString32Length    = 0x00 // USHORT
+	UnicodeString32MaxLength = 0x02 // USHORT
+	UnicodeString32Buffer    = 0x04 // DWORD
+	UnicodeString32Size      = 0x08
+)
+
+// x86 RTL_USER_PROCESS_PARAMETERS offsets.
+const (
+	ProcessParams32Size            = 0x200
+	ProcessParams32StdInputHandle  = 0x0018
+	ProcessParams32StdOutputHandle = 0x001C
+	ProcessParams32StdErrorHandle  = 0x0020
+	ProcessParams32CurrentDir      = 0x0024 // CURDIR32 (UNICODE_STRING32 + HANDLE)
+	ProcessParams32ImagePathName   = 0x0038 // UNICODE_STRING32
+	ProcessParams32CommandLine     = 0x0040 // UNICODE_STRING32
+	ProcessParams32Environment     = 0x0048 // DWORD pointer
+)
+
+// LDR_DATA32 offsets (x86).
+const (
+	Ldr32DataSize                = 0x30
+	Ldr32Length                  = 0x0000
+	Ldr32Initialized             = 0x0004
+	Ldr32InLoadOrderModuleList   = 0x000C // LIST_ENTRY32
+	Ldr32InMemoryOrderModuleList = 0x0014
+	Ldr32InInitOrderModuleList   = 0x001C
+)
+
 // TEB offsets (x64).
 const (
 	TebSize = 0x1838
@@ -142,6 +241,7 @@ type ProcessInit struct {
 	ThreadId    uint32
 	StackBase   uint64
 	StackLimit  uint64
+	Is32        bool // PE32 (x86) process
 }
 
 // ModuleInfo describes a loaded module for the LDR list.
@@ -167,6 +267,7 @@ type ProcessState struct {
 	ProcessId                uint32
 	ThreadId                 uint32
 	UnhandledExceptionFilter uint64
+	Is32                     bool // PE32 (x86) process
 
 	// HeapAlloc/HeapFree are set by registerAutoSynthHandlers to route
 	// RtlAllocateHeap / RtlFreeHeap through the shared bump-allocator.
@@ -177,6 +278,9 @@ type ProcessState struct {
 
 // InitProcess allocates and populates PEB, TEB, and supporting structures.
 func InitProcess(mem *mmu.MMU, init *ProcessInit, modules []ModuleInfo) (*ProcessState, error) {
+	if init.Is32 {
+		return initProcess32(mem, init, modules)
+	}
 	state := &ProcessState{}
 
 	// Allocate all structures in one contiguous region for simplicity.
@@ -379,6 +483,175 @@ func linkModuleList(mem *mmu.MMU, head, modBase uint64, count int, linkOff uint6
 	}
 }
 
+// initProcess32 allocates and populates 32-bit (x86) PEB, TEB, and supporting structures.
+func initProcess32(mem *mmu.MMU, init *ProcessInit, modules []ModuleInfo) (*ProcessState, error) {
+	state := &ProcessState{Is32: true}
+
+	totalModEntries := uint64(len(modules)) * Ldr32EntrySize
+	stringPoolSize := uint64(4096)
+	totalSize := uint64(Teb32Size) + uint64(Peb32Size) + uint64(Ldr32DataSize) +
+		uint64(ProcessParams32Size) + 4096 + totalModEntries + stringPoolSize
+
+	regionBase := mem.Mmap(0, totalSize, mmu.PermRead|mmu.PermWrite)
+
+	tebAddr := regionBase
+	pebAddr := tebAddr + Teb32Size
+	ldrAddr := pebAddr + uint64(Peb32Size)
+	paramsAddr := ldrAddr + Ldr32DataSize
+	envAddr := paramsAddr + ProcessParams32Size
+	modBase := envAddr + 4096
+	strPool := modBase + totalModEntries
+
+	state.TEBAddr = tebAddr
+	state.PEBAddr = pebAddr
+	state.LdrDataAddr = ldrAddr
+	state.ProcessParamsAddr = paramsAddr
+	state.EnvironmentAddr = envAddr
+	state.ModuleListAddr = modBase
+
+	// --- TEB32 ---
+	mem.Write32(tebAddr+Teb32ExceptionList, 0xFFFFFFFF) // no SEH handler
+	mem.Write32(tebAddr+Teb32StackBase, uint32(init.StackBase))
+	mem.Write32(tebAddr+Teb32StackLimit, uint32(init.StackLimit))
+	mem.Write32(tebAddr+Teb32Self, uint32(tebAddr))
+	mem.Write32(tebAddr+Teb32PEB, uint32(pebAddr))
+	mem.Write32(tebAddr+Teb32ProcessId, init.ProcessId)
+	mem.Write32(tebAddr+Teb32ThreadId, init.ThreadId)
+	mem.Write32(tebAddr+Teb32LastErrorValue, 0)
+
+	// --- PEB32 ---
+	mem.Write8(pebAddr+Peb32BeingDebugged, 0)
+	mem.Write32(pebAddr+Peb32ImageBaseAddress, uint32(init.ImageBase))
+	mem.Write32(pebAddr+Peb32Ldr, uint32(ldrAddr))
+	mem.Write32(pebAddr+Peb32ProcessParameters, uint32(paramsAddr))
+
+	processHeap := mem.Mmap(0, 0x1000, mmu.PermRead|mmu.PermWrite)
+	mem.Write32(pebAddr+Peb32ProcessHeap, uint32(processHeap))
+
+	fastPebLock := mem.Mmap(0, 32, mmu.PermRead|mmu.PermWrite)
+	mem.Write32(pebAddr+Peb32FastPebLock, uint32(fastPebLock))
+	mem.Write32(fastPebLock+4, 0xFFFFFFFF) // LockCount = -1
+
+	// TLS bitmap
+	tlsBitmap := mem.Mmap(0, 12, mmu.PermRead|mmu.PermWrite)
+	mem.Write32(tlsBitmap, 64)                                   // SizeOfBitMap
+	mem.Write32(tlsBitmap+4, uint32(pebAddr+Peb32TlsBitmapBits)) // Buffer
+	mem.Write32(pebAddr+Peb32TlsBitmap, uint32(tlsBitmap))
+
+	// FLS bitmap
+	flsBitmap := mem.Mmap(0, 12, mmu.PermRead|mmu.PermWrite)
+	mem.Write32(flsBitmap, 128)
+	mem.Write32(flsBitmap+4, uint32(pebAddr+Peb32FlsBitmapBits))
+	mem.Write32(pebAddr+Peb32FlsBitmap, uint32(flsBitmap))
+	mem.Write32(pebAddr+Peb32FlsBitmapBits, 1) // reserve slot 0
+	// FlsListHead: circular
+	mem.Write32(pebAddr+Peb32FlsListHead, uint32(pebAddr+Peb32FlsListHead))
+	mem.Write32(pebAddr+Peb32FlsListHead+4, uint32(pebAddr+Peb32FlsListHead))
+
+	// GDI shared handle table
+	gdiTableSize := uint64(0x4000 * 24)
+	gdiTable := mem.Mmap(0, gdiTableSize, mmu.PermRead|mmu.PermWrite)
+	mem.Write32(pebAddr+Peb32GdiSharedHandleTable, uint32(gdiTable))
+	state.GdiTableAddr = gdiTable
+	stockDCEntry := gdiTable + 52*24
+	mem.Write8(stockDCEntry+0x0E, 0x01) // OBJ_DC
+
+	mem.Write32(pebAddr+Peb32NumberOfProcessors, 4)
+	mem.Write32(pebAddr+Peb32NtGlobalFlag, 0)
+	mem.Write32(pebAddr+Peb32OSMajorVersion, 10)
+	mem.Write32(pebAddr+Peb32OSMinorVersion, 0)
+	mem.Write16(pebAddr+Peb32OSBuildNumber, 19045)
+	mem.Write32(pebAddr+Peb32OSPlatformId, 2)
+	mem.Write32(pebAddr+Peb32ImageSubsystem, 2) // IMAGE_SUBSYSTEM_WINDOWS_GUI
+
+	// --- RTL_USER_PROCESS_PARAMETERS (32-bit) ---
+	strCursor := strPool
+	writeUS32 := func(addr uint64, s string) {
+		utf16 := encodeUTF16LE(s)
+		byteLen := uint16(len(utf16))
+		mem.Write16(addr+UnicodeString32Length, byteLen)
+		mem.Write16(addr+UnicodeString32MaxLength, byteLen+2)
+		mem.Write32(addr+UnicodeString32Buffer, uint32(strCursor))
+		mem.WriteBytes(strCursor, utf16)
+		mem.Write16(strCursor+uint64(byteLen), 0)
+		strCursor += uint64(byteLen) + 2
+		strCursor = (strCursor + 3) & ^uint64(3) // align to 4
+	}
+
+	writeUS32(paramsAddr+ProcessParams32ImagePathName, init.ImagePath)
+	writeUS32(paramsAddr+ProcessParams32CommandLine, init.CommandLine)
+	writeUS32(paramsAddr+ProcessParams32CurrentDir, init.CurrentDir)
+
+	mem.Write32(paramsAddr+ProcessParams32StdInputHandle, 0xFFFFFFF6)
+	mem.Write32(paramsAddr+ProcessParams32StdOutputHandle, 0xFFFFFFF5)
+	mem.Write32(paramsAddr+ProcessParams32StdErrorHandle, 0xFFFFFFF4)
+
+	envData := buildEnvironmentBlock(init.Environment)
+	mem.WriteBytes(envAddr, envData)
+	mem.Write32(paramsAddr+ProcessParams32Environment, uint32(envAddr))
+
+	// --- PEB_LDR_DATA32 ---
+	loadOrderHead := ldrAddr + Ldr32InLoadOrderModuleList
+	memOrderHead := ldrAddr + Ldr32InMemoryOrderModuleList
+	initOrderHead := ldrAddr + Ldr32InInitOrderModuleList
+
+	mem.Write32(ldrAddr+Ldr32Length, uint32(Ldr32DataSize))
+	mem.Write8(ldrAddr+Ldr32Initialized, 1)
+
+	if len(modules) == 0 {
+		mem.Write32(loadOrderHead, uint32(loadOrderHead))
+		mem.Write32(loadOrderHead+4, uint32(loadOrderHead))
+		mem.Write32(memOrderHead, uint32(memOrderHead))
+		mem.Write32(memOrderHead+4, uint32(memOrderHead))
+		mem.Write32(initOrderHead, uint32(initOrderHead))
+		mem.Write32(initOrderHead+4, uint32(initOrderHead))
+	} else {
+		for i, mod := range modules {
+			entryAddr := modBase + uint64(i)*Ldr32EntrySize
+			mem.Write32(entryAddr+Ldr32EntryDllBase, uint32(mod.BaseAddr))
+			mem.Write32(entryAddr+Ldr32EntryEntryPoint, uint32(mod.Entry))
+			mem.Write32(entryAddr+Ldr32EntrySizeOfImage, uint32(mod.ImageSize))
+			mem.Write16(entryAddr+Ldr32EntryBaseDllName+6, 0xFFFF) // LoadCount
+			writeUS32(entryAddr+Ldr32EntryBaseDllName, mod.Name)
+			writeUS32(entryAddr+Ldr32EntryFullDllName, mod.FullPath)
+		}
+		linkModuleList32(mem, loadOrderHead, modBase, len(modules), Ldr32EntryInLoadOrderLinks)
+		linkModuleList32(mem, memOrderHead, modBase, len(modules), Ldr32EntryInMemoryOrderLinks)
+		linkModuleList32(mem, initOrderHead, modBase, len(modules), Ldr32EntryInInitOrderLinks)
+	}
+
+	return state, nil
+}
+
+// linkModuleList32 creates a circular doubly-linked list with 32-bit pointers.
+func linkModuleList32(mem *mmu.MMU, head, modBase uint64, count int, linkOff uint64) {
+	if count == 0 {
+		mem.Write32(head, uint32(head))
+		mem.Write32(head+4, uint32(head))
+		return
+	}
+	firstLink := modBase + linkOff
+	lastLink := modBase + uint64(count-1)*Ldr32EntrySize + linkOff
+	mem.Write32(head, uint32(firstLink))
+	mem.Write32(head+4, uint32(lastLink))
+	for i := 0; i < count; i++ {
+		entryLink := modBase + uint64(i)*Ldr32EntrySize + linkOff
+		var prev, next uint64
+		if i == 0 {
+			prev = head
+		} else {
+			prev = modBase + uint64(i-1)*Ldr32EntrySize + linkOff
+		}
+		if i == count-1 {
+			next = head
+		} else {
+			next = modBase + uint64(i+1)*Ldr32EntrySize + linkOff
+		}
+		mem.Write32(entryLink, uint32(next))
+		mem.Write32(entryLink+4, uint32(prev))
+	}
+}
+
 // encodeUTF16LE converts a Go string to UTF-16LE bytes.
 func encodeUTF16LE(s string) []byte {
 	buf := make([]byte, 0, len(s)*2)
@@ -430,9 +703,18 @@ func ReadUnicodeString(mem *mmu.MMU, addr uint64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	bufPtr, err := mem.Read64(addr + UnicodeStringBuffer)
-	if err != nil {
-		return "", err
+	var bufPtr uint64
+	if mem.Mode32 {
+		ptr32, perr := mem.Read32(addr + UnicodeString32Buffer)
+		if perr != nil {
+			return "", perr
+		}
+		bufPtr = uint64(ptr32)
+	} else {
+		bufPtr, err = mem.Read64(addr + UnicodeStringBuffer)
+		if err != nil {
+			return "", err
+		}
 	}
 	if length == 0 || bufPtr == 0 {
 		return "", nil

@@ -8,6 +8,10 @@ import (
 	"unicode"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/audio"
+	"github.com/mirkobrombin/Raven/pkg/d3d11"
+	"github.com/mirkobrombin/Raven/pkg/d3d9"
+	dsound "github.com/mirkobrombin/Raven/pkg/dsound"
 	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
 	"github.com/mirkobrombin/Raven/pkg/loader"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -137,7 +141,7 @@ type controlState struct {
 	tbBitmapIconH     int32
 	tbBitmapStore     [][]uint32
 	tbHandleMap       map[int]tbLazyRef // slot index → pending HBITMAP handle + slot offset (lazy resolution)
-	tbImageList       uint64         // HIMAGELIST from TB_SETIMAGELIST
+	tbImageList       uint64            // HIMAGELIST from TB_SETIMAGELIST
 }
 
 type queuedMsg struct {
@@ -216,30 +220,35 @@ type FindDialogState struct {
 	WholeWord      bool
 	SearchDown     bool
 	// Rendering hit-test bounds (set each frame by DrawFindDialog)
-	X, Y, W, H                     int32
-	FindEditX, FindEditY, FindEditW, FindEditH         int32
-	ReplEditX, ReplEditY, ReplEditW, ReplEditH         int32
+	X, Y, W, H                                             int32
+	FindEditX, FindEditY, FindEditW, FindEditH             int32
+	ReplEditX, ReplEditY, ReplEditW, ReplEditH             int32
 	FindNextBtnX, FindNextBtnY, FindNextBtnW, FindNextBtnH int32
-	ReplaceBtnX, ReplaceBtnY, ReplaceBtnW, ReplaceBtnH int32
-	ReplAllBtnX, ReplAllBtnY, ReplAllBtnW, ReplAllBtnH int32
-	CancelBtnX, CancelBtnY, CancelBtnW, CancelBtnH    int32
+	ReplaceBtnX, ReplaceBtnY, ReplaceBtnW, ReplaceBtnH     int32
+	ReplAllBtnX, ReplAllBtnY, ReplAllBtnW, ReplAllBtnH     int32
+	CancelBtnX, CancelBtnY, CancelBtnW, CancelBtnH         int32
 }
 
 // ─── HandlerCtx bridges closure-captured state to extracted DLL files ───────
 
 type HandlerCtx struct {
 	// Core references
-	Mem         *mmu.MMU
-	Disp        *ntapi.Dispatcher
-	Handles     *ntapi.HandleTable
-	ProcState   *ntapi.ProcessState
-	ExTable     *ntapi.ExceptionTable
-	MainModule  *loader.PEModule
-	TMPtr       **thread.Manager
-	RegHive     *ntapi.RegistryHive
-	SynthByName map[string]*ntapi.SynthPE
-	Com         *comState
-	CurrentCPU  arch.CPU
+	Mem                   *mmu.MMU
+	Disp                  *ntapi.Dispatcher
+	Handles               *ntapi.HandleTable
+	ProcState             *ntapi.ProcessState
+	ExTable               *ntapi.ExceptionTable
+	MainModule            *loader.PEModule
+	TMPtr                 **thread.Manager
+	RegHive               *ntapi.RegistryHive
+	SynthByName           map[string]*ntapi.SynthPE
+	Com                   *comState
+	CurrentCPU            arch.CPU
+	D3D9Device            *d3d9.Device
+	D3D11Device           *d3d11.Device
+	D3D11ImmediateContext *d3d11.DeviceContext
+	DirectSound           *dsound.DirectSound
+	AudioOutput           audio.Output
 
 	// Config
 	Argv        []string
@@ -300,15 +309,15 @@ type HandlerCtx struct {
 	ActivePopupMenu   *popupMenuState
 
 	// Modal dialog overlay state
-	DialogActive        bool
-	DialogTitle         string
-	DialogText          string
-	DialogText2         string // secondary line (e.g. version info)
-	DialogHwnd          uint64 // owner window
-	DialogBtnX          int32  // OK button bounds (set by DrawDialogOverlay)
-	DialogBtnY          int32
-	DialogBtnW          int32
-	DialogBtnH          int32
+	DialogActive bool
+	DialogTitle  string
+	DialogText   string
+	DialogText2  string // secondary line (e.g. version info)
+	DialogHwnd   uint64 // owner window
+	DialogBtnX   int32  // OK button bounds (set by DrawDialogOverlay)
+	DialogBtnY   int32
+	DialogBtnW   int32
+	DialogBtnH   int32
 
 	// Modeless Find/Replace dialog state (FindTextW/ReplaceTextW)
 	FindDialog         *FindDialogState
@@ -326,6 +335,7 @@ type HandlerCtx struct {
 	ScratchOff          uint64
 	ScratchPage         uint64
 	SyncTrampoline      uint64
+	SyncCallWndProc     func(ctx *ntapi.TrapContext, wndProc, hwnd uint64, msg uint32, wParam, lParam, retAddr uint64)
 	GuestCallTrampoline *ntapi.DllMainTrampoline
 	LastPostedMainW     int32
 	LastPostedMainH     int32

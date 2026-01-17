@@ -7,12 +7,11 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
-// registerKernelbaseHandlers registers handlers for kernelbase.dll functions
-// that are forwarded from advapi32/ntdll and are NOT already covered by the
-// kernel32 canonical alias. If kernelbase.dll is imported, the canonicalize
-// function maps it to kernel32.dll, so most kernel32 handlers apply automatically.
-// This function adds the additional advapi32-forwarded functions that kernelbase
-// also exports (registry, security, etc.) and ntdll-forwarded functions.
+// registerKernelbaseHandlers registers handlers for kernelbase.dll functions.
+// kernelbase.dll is usually serviced by the kernel32 synth, so we alias the
+// module name to the kernel32 synth and, if a dedicated kernelbase synth exists,
+// wire all kernel32 handlers into it as forwards. This function also adds the
+// extra advapi32/ntdll-style exports that kernelbase exposes directly.
 func registerKernelbaseHandlers(hctx *HandlerCtx) {
 	d := hctx.Disp
 	handles := hctx.Handles
@@ -24,10 +23,16 @@ func registerKernelbaseHandlers(hctx *HandlerCtx) {
 	regQueryValue := hctx.RegQueryValue
 	regIsProbeKey := hctx.RegIsProbeKey
 
-	// kernelbase is aliased to kernel32, so use the kernel32 synth PE.
-	kb, ok := hctx.SynthByName["kernel32.dll"]
+	kernel32, ok := hctx.SynthByName["kernel32.dll"]
 	if !ok {
 		return
+	}
+	kb := kernel32
+	if dedicatedKB, ok := hctx.SynthByName["kernelbase.dll"]; ok && dedicatedKB != kernel32 {
+		registerKernel32HandlersForSynth(hctx, dedicatedKB)
+		kb = dedicatedKB
+	} else {
+		hctx.SynthByName["kernelbase.dll"] = kernel32
 	}
 	_ = readGuestString
 	_ = regHive
@@ -282,12 +287,12 @@ func registerKernelbaseHandlers(hctx *HandlerCtx) {
 		if tokenInfoClass == 1 && tokenInfo != 0 && tokenInfoLen >= 20 {
 			// SID pointer at offset 0, then attributes at offset 8
 			sidAddr := tokenInfo + 16
-			ctx.Mem.Write64(tokenInfo, sidAddr)   // SID*
-			ctx.Mem.Write32(tokenInfo+8, 0)        // Attributes
+			ctx.Mem.Write64(tokenInfo, sidAddr) // SID*
+			ctx.Mem.Write32(tokenInfo+8, 0)     // Attributes
 			// Write a minimal SID: S-1-5-21-0-0-0-1000 (local user)
-			ctx.Mem.Write8(sidAddr+0, 1)   // Revision
-			ctx.Mem.Write8(sidAddr+1, 5)   // SubAuthorityCount
-			ctx.Mem.Write8(sidAddr+2, 0)   // IdentifierAuthority[0..5]
+			ctx.Mem.Write8(sidAddr+0, 1) // Revision
+			ctx.Mem.Write8(sidAddr+1, 5) // SubAuthorityCount
+			ctx.Mem.Write8(sidAddr+2, 0) // IdentifierAuthority[0..5]
 			ctx.Mem.Write8(sidAddr+3, 0)
 			ctx.Mem.Write8(sidAddr+4, 0)
 			ctx.Mem.Write8(sidAddr+5, 0)
@@ -314,8 +319,8 @@ func registerKernelbaseHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(kb, "LookupPrivilegeValueW", func(ctx *ntapi.TrapContext) uint32 {
 		luidPtr := ctx.Arg(2)
 		if luidPtr != 0 {
-			ctx.Mem.Write32(luidPtr, 20)   // LUID.LowPart (SE_DEBUG_PRIVILEGE)
-			ctx.Mem.Write32(luidPtr+4, 0)  // LUID.HighPart
+			ctx.Mem.Write32(luidPtr, 20)  // LUID.LowPart (SE_DEBUG_PRIVILEGE)
+			ctx.Mem.Write32(luidPtr+4, 0) // LUID.HighPart
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -350,9 +355,9 @@ func registerKernelbaseHandlers(hctx *HandlerCtx) {
 			}
 		}
 		byteLen := uint16(charCount * 2)
-		ctx.Mem.Write16(destAddr+0, byteLen)     // Length (bytes, not including null)
-		ctx.Mem.Write16(destAddr+2, byteLen+2)    // MaximumLength
-		ctx.Mem.Write64(destAddr+8, sourceStr)     // Buffer
+		ctx.Mem.Write16(destAddr+0, byteLen)   // Length (bytes, not including null)
+		ctx.Mem.Write16(destAddr+2, byteLen+2) // MaximumLength
+		ctx.Mem.Write64(destAddr+8, sourceStr) // Buffer
 		return 0
 	})
 

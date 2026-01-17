@@ -1657,6 +1657,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		rw.WriteReg(9, lParam)
 		ctx.CPU.SetPC(wndProc)
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 	reg("NtUserPostMessage", func(ctx *ntapi.TrapContext) uint32 {
@@ -1700,6 +1701,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			rw.WriteReg(9, lParam)
 			ctx.CPU.SetPC(wp)
 			ctx.ReturnOverridden = true
+			ctx.PCRedirected = true
 			return 0
 		}
 		hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd: hwnd, message: msg, wParam: wParam, lParam: lParam})

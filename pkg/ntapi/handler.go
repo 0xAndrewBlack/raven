@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,12 +33,14 @@ const (
 	StatusNoSuchFile           uint32 = 0xC000000F
 	StatusNoMemory             uint32 = 0xC0000017
 	StatusObjectTypeMismatch   uint32 = 0xC0000024
+	StatusObjectNameCollision  uint32 = 0xC0000035
 	StatusKeyNotFound          uint32 = 0xC0000225
 	StatusPending              uint32 = 0x00000103
 	StatusTimeout              uint32 = 0x00000102
 	StatusWait0                uint32 = 0x00000000
 	StatusAlerted              uint32 = 0x00000101
 	StatusProcessIsTerminating uint32 = 0xC000010A
+	StatusEndOfFile            uint32 = 0xC0000011
 )
 
 // File access and creation flags.
@@ -56,81 +59,334 @@ const (
 
 // FileInformationClass values.
 const (
+	fileDirectoryInformation     = 1
 	fileBasicInformation         = 4
 	fileStandardInformation      = 5
 	fileNameInformation          = 9
 	filePositionInformation      = 14
 	fileDispositionInformation   = 13
 	fileBothDirectoryInformation = 3
+	fileEndOfFileInformation     = 20
 	fileAllInformation           = 18
 )
 
 // ======================== FILE I/O ========================
+
+const (
+	dupCloseSource = 0x00000001
+	dupSameAccess  = 0x00000002
+
+	memCommit   = 0x00001000
+	memReserve  = 0x00002000
+	memDecommit = 0x00004000
+	memRelease  = 0x00008000
+
+	secCommit = 0x08000000
+)
+
+type ntDirEntry struct {
+	Name  string
+	IsDir bool
+	Size  int64
+	Atime time.Time
+	Mtime time.Time
+	Ctime time.Time
+	Nlink uint32
+}
+
+func writeGuestPtr(mem *mmu.MMU, addr, val uint64) {
+	if addr == 0 {
+		return
+	}
+	if mem.Mode32 {
+		mem.Write32(addr, uint32(val))
+		return
+	}
+	mem.Write64(addr, val)
+}
+
+func signalHandleEvent(ctx *TrapContext, eventHandle Handle) {
+	if eventHandle == 0 {
+		return
+	}
+	if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
+		eh.Set()
+	}
+}
+
+func ntStatusFromErr(err error, notFound uint32) uint32 {
+	if err == nil {
+		return StatusSuccess
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "not found"), strings.Contains(msg, "no such"):
+		return notFound
+	case strings.Contains(msg, "exist"), strings.Contains(msg, "collision"):
+		return StatusObjectNameCollision
+	case strings.Contains(msg, "directory"):
+		return StatusAccessDenied
+	default:
+		return StatusAccessDenied
+	}
+}
+
+func desiredAccessToOpenFlags(desiredAccess uint32) int {
+	const (
+		genericRead   = 0x80000000
+		genericWrite  = 0x40000000
+		fileReadData  = 0x0001
+		fileWriteData = 0x0002
+		fileAppend    = 0x0004
+	)
+	canRead := desiredAccess&genericRead != 0 || desiredAccess&fileReadData != 0
+	canWrite := desiredAccess&genericWrite != 0 || desiredAccess&(fileWriteData|fileAppend) != 0
+	switch {
+	case canRead && canWrite:
+		return os.O_RDWR
+	case canWrite:
+		return os.O_WRONLY
+	default:
+		return os.O_RDONLY
+	}
+}
+
+func getFileOffset(ctx *TrapContext, fh *FileHandle) uint64 {
+	if fh == nil {
+		return 0
+	}
+	fd := ctx.FS.GetFD(fh.FD)
+	if fd != nil {
+		return uint64(fd.Offset)
+	}
+	off, err := ctx.FS.Lseek(fh.FD, 0, 1)
+	if err != nil || off < 0 {
+		return 0
+	}
+	return uint64(off)
+}
+
+func wildcardMatch(pattern, name string) bool {
+	pattern = strings.ToLower(pattern)
+	name = strings.ToLower(name)
+	var match func(pi, ni int) bool
+	match = func(pi, ni int) bool {
+		for pi < len(pattern) {
+			switch pattern[pi] {
+			case '*':
+				for pi+1 < len(pattern) && pattern[pi+1] == '*' {
+					pi++
+				}
+				if pi+1 == len(pattern) {
+					return true
+				}
+				for i := ni; i <= len(name); i++ {
+					if match(pi+1, i) {
+						return true
+					}
+				}
+				return false
+			case '?':
+				if ni >= len(name) {
+					return false
+				}
+				pi++
+				ni++
+			default:
+				if ni >= len(name) || pattern[pi] != name[ni] {
+					return false
+				}
+				pi++
+				ni++
+			}
+		}
+		return ni == len(name)
+	}
+	if pattern == "" {
+		return true
+	}
+	if pattern == "*.*" {
+		return true
+	}
+	return match(0, 0)
+}
+
+func listDirectoryEntries(ctx *TrapContext, fh *FileHandle) []ntDirEntry {
+	if fh == nil {
+		return nil
+	}
+	if dirNode := ctx.FS.Stat(fh.FD); dirNode != nil && dirNode.IsDir && len(dirNode.Children) > 0 {
+		names := make([]string, 0, len(dirNode.Children))
+		for name := range dirNode.Children {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		out := make([]ntDirEntry, 0, len(names))
+		for _, name := range names {
+			child := dirNode.Children[name]
+			out = append(out, ntDirEntry{
+				Name:  child.Name,
+				IsDir: child.IsDir,
+				Size:  child.Size,
+				Atime: child.Atime,
+				Mtime: child.Mtime,
+				Ctime: child.Ctime,
+				Nlink: child.Nlink,
+			})
+		}
+		return out
+	}
+
+	hostEntries, err := os.ReadDir(fh.Path)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(hostEntries, func(i, j int) bool {
+		return strings.ToLower(hostEntries[i].Name()) < strings.ToLower(hostEntries[j].Name())
+	})
+	out := make([]ntDirEntry, 0, len(hostEntries))
+	for _, entry := range hostEntries {
+		info, ierr := entry.Info()
+		if ierr != nil {
+			continue
+		}
+		out = append(out, ntDirEntry{
+			Name:  entry.Name(),
+			IsDir: entry.IsDir(),
+			Size:  info.Size(),
+			Atime: info.ModTime(),
+			Mtime: info.ModTime(),
+			Ctime: info.ModTime(),
+			Nlink: 1,
+		})
+	}
+	return out
+}
+
+func closeHandleObject(ctx *TrapContext, handle Handle, obj HandleObject) {
+	switch v := obj.(type) {
+	case *FileHandle:
+		if v.DeletePending && v.Path != "" {
+			_ = ctx.FS.Unlinkat(-1, v.Path, 0)
+		}
+		_ = ctx.FS.Close(v.FD)
+	case *SectionHandle:
+		if v.FileFD >= 0 {
+			_ = ctx.FS.Close(v.FileFD)
+		}
+	}
+	_ = handle
+}
+
+func cloneHandleObject(ctx *TrapContext, obj HandleObject) (HandleObject, uint32) {
+	switch v := obj.(type) {
+	case *FileHandle:
+		newFD, err := ctx.FS.Dup(v.FD)
+		if err != nil {
+			return nil, StatusInvalidHandle
+		}
+		cp := *v
+		cp.FD = newFD
+		return &cp, StatusSuccess
+	case *SectionHandle:
+		cp := *v
+		if v.FileFD >= 0 {
+			newFD, err := ctx.FS.Dup(v.FileFD)
+			if err != nil {
+				return nil, StatusInvalidHandle
+			}
+			cp.FileFD = newFD
+		}
+		if v.ViewSizes != nil {
+			cp.ViewSizes = make(map[uint64]uint64, len(v.ViewSizes))
+			for k, val := range v.ViewSizes {
+				cp.ViewSizes[k] = val
+			}
+		}
+		return &cp, StatusSuccess
+	default:
+		return obj, StatusSuccess
+	}
+}
 
 func handleNtCreateFile(ctx *TrapContext) uint32 {
 	// NtCreateFile(FileHandle*, DesiredAccess, ObjectAttributes*, IoStatusBlock*,
 	//              AllocationSize*, FileAttributes, ShareAccess, CreateDisposition,
 	//              CreateOptions, EaBuffer*, EaLength)
 	handlePtr := ctx.Arg(0)
-	_ = ctx.Arg(1) // desiredAccess
+	desiredAccess := uint32(ctx.Arg(1))
 	objAttr := ctx.Arg(2)
 	ioStatus := ctx.Arg(3)
-	createDisp := ctx.Arg(5) // stack arg
-	createOpts := ctx.Arg(6) // stack arg
+	createDisp := uint32(ctx.Arg(7))
+	createOpts := uint32(ctx.Arg(8))
 
+	rootDir, _, attrs, err := ReadObjectAttributes(ctx, objAttr)
 	path, err := ResolveObjectPath(ctx, objAttr)
-	if err != nil {
+	if err != nil || path == "" {
+		writeIOStatus(ctx.Mem, ioStatus, StatusObjectPathNotFound, 0)
 		return StatusObjectPathNotFound
 	}
-
 	if ctx.Trace {
-		fmt.Printf("  NtCreateFile: path=%q disp=%d opts=0x%x\n", path, createDisp, createOpts)
+		fmt.Printf("  NtCreateFile: path=%q root=0x%x attrs=0x%x access=0x%x disp=%d opts=0x%x\n", path, rootDir, attrs, desiredAccess, createDisp, createOpts)
 	}
 
 	isDir := createOpts&fileDirectoryFile != 0
+	baseFlags := desiredAccessToOpenFlags(desiredAccess)
+	fileInfo := uint64(1)
 
-	// Map CreateDisposition to VFS open flags
-	flags := 0 // O_RDWR
-	switch uint32(createDisp) {
-	case fileOpen:
-		flags = 0 // open existing
-	case fileCreate:
-		flags = 0x40 | 0x80 // O_CREAT | O_EXCL
-	case fileOpenIf:
-		flags = 0x40 // O_CREAT
+	_, statErr := ctx.FS.StatPath(-100, path)
+	exists := statErr == nil
+	if createDisp == fileCreate && exists {
+		writeIOStatus(ctx.Mem, ioStatus, StatusObjectNameCollision, 0)
+		return StatusObjectNameCollision
+	}
+	if createDisp == fileOpen && !exists {
+		writeIOStatus(ctx.Mem, ioStatus, StatusObjectNameNotFound, 0)
+		return StatusObjectNameNotFound
+	}
+
+	flags := baseFlags
+	switch createDisp {
+	case fileCreate, fileOpenIf:
+		flags |= os.O_CREATE
 	case fileOverwrite, fileOverwriteIf, fileSupersede:
-		flags = 0x40 | 0x200 // O_CREAT | O_TRUNC
+		flags |= os.O_CREATE | os.O_TRUNC
+	}
+	if desiredAccess&0x0004 != 0 {
+		flags |= os.O_APPEND
 	}
 
 	if isDir {
-		// Create directory if needed
-		ctx.FS.MkdirAll(path)
-	}
-
-	fd, vfsErr := ctx.FS.OpenAt(-100, path, flags, 0644)
-	if vfsErr != nil {
-		if strings.Contains(vfsErr.Error(), "not found") || strings.Contains(vfsErr.Error(), "no such") {
-			return StatusObjectNameNotFound
+		if createDisp == fileCreate || createDisp == fileOpenIf || createDisp == fileOverwriteIf || createDisp == fileSupersede {
+			ctx.FS.MkdirAll(path)
+			fileInfo = 2
 		}
-		return StatusAccessDenied
+	} else {
+		switch createDisp {
+		case fileCreate:
+			fileInfo = 2
+		case fileOpenIf:
+			if !exists {
+				fileInfo = 2
+			}
+		case fileOverwrite, fileOverwriteIf:
+			fileInfo = 3
+		case fileSupersede:
+			fileInfo = 4
+		}
 	}
 
-	fh := &FileHandle{FD: fd, Path: path}
+	fd, openErr := ctx.FS.OpenAt(-100, path, flags, 0644)
+	if openErr != nil {
+		status := ntStatusFromErr(openErr, StatusObjectNameNotFound)
+		writeIOStatus(ctx.Mem, ioStatus, status, 0)
+		return status
+	}
+
+	fh := &FileHandle{FD: fd, Path: path, Access: desiredAccess}
 	h := ctx.Handles.Alloc(fh)
-
-	// Write handle to caller
-	ctx.Mem.Write64(handlePtr, uint64(h))
-
-	// IO_STATUS_BLOCK: Status=0, Information=FILE_OPENED (1) or FILE_CREATED (2)
-	if ioStatus != 0 {
-		ctx.Mem.Write32(ioStatus, StatusSuccess)
-		info := uint64(1) // FILE_OPENED
-		if uint32(createDisp) == fileCreate || uint32(createDisp) == fileOpenIf {
-			info = 2 // FILE_CREATED
-		}
-		ctx.Mem.Write64(ioStatus+8, info)
-	}
-
+	writeGuestPtr(ctx.Mem, handlePtr, uint64(h))
+	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, fileInfo)
 	return StatusSuccess
 }
 
@@ -159,24 +415,18 @@ func handleNtReadFile(ctx *TrapContext) uint32 {
 			n := pipe.PipeRead(data)
 			status := uint32(StatusSuccess)
 			if n == 0 && length > 0 {
-				status = StatusTimeout
+				status = StatusEndOfFile
 			}
 			if n > 0 {
 				ctx.Mem.WriteBytes(bufAddr, data[:n])
 			}
-			if ioStatus != 0 {
-				ctx.Mem.Write64(ioStatus, uint64(status))
-				ctx.Mem.Write64(ioStatus+8, uint64(n))
-			}
-			if eventHandle != 0 {
-				if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
-					eh.Set()
-				}
-			}
+			writeIOStatus(ctx.Mem, ioStatus, status, uint64(n))
+			signalHandleEvent(ctx, eventHandle)
 			return status
 		}
 	}
 	if fh == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
 		return StatusInvalidHandle
 	}
 
@@ -188,20 +438,13 @@ func handleNtReadFile(ctx *TrapContext) uint32 {
 			n, err := ctx.FS.Pread(fh.FD, buf, int64(offset))
 			status := uint32(StatusSuccess)
 			if n == 0 && err != nil {
-				status = 0xC0000011 // STATUS_END_OF_FILE
+				status = StatusEndOfFile
 			}
 			if n > 0 {
 				ctx.Mem.WriteBytes(bufAddr, buf[:n])
 			}
-			if ioStatus != 0 {
-				ctx.Mem.Write64(ioStatus, uint64(status))
-				ctx.Mem.Write64(ioStatus+8, uint64(n))
-			}
-			if eventHandle != 0 {
-				if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
-					eh.Set()
-				}
-			}
+			writeIOStatus(ctx.Mem, ioStatus, status, uint64(n))
+			signalHandleEvent(ctx, eventHandle)
 			return status
 		}
 	}
@@ -210,24 +453,15 @@ func handleNtReadFile(ctx *TrapContext) uint32 {
 	n, err := ctx.FS.Read(fh.FD, buf)
 	status := uint32(StatusSuccess)
 	if n == 0 && err != nil {
-		status = 0xC0000011 // STATUS_END_OF_FILE
+		status = StatusEndOfFile
 	}
 
 	if n > 0 {
 		ctx.Mem.WriteBytes(bufAddr, buf[:n])
 	}
 
-	if ioStatus != 0 {
-		ctx.Mem.Write64(ioStatus, uint64(status))
-		ctx.Mem.Write64(ioStatus+8, uint64(n))
-	}
-
-	// Signal event handle if provided
-	if eventHandle != 0 {
-		if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
-			eh.Set()
-		}
-	}
+	writeIOStatus(ctx.Mem, ioStatus, status, uint64(n))
+	signalHandleEvent(ctx, eventHandle)
 
 	return status
 }
@@ -256,10 +490,7 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 			fd = 2
 		}
 		ctx.FS.Write(fd, data)
-		if ioStatus != 0 {
-			ctx.Mem.Write64(ioStatus, uint64(StatusSuccess))
-			ctx.Mem.Write64(ioStatus+8, length)
-		}
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, length)
 		return StatusSuccess
 	}
 
@@ -277,19 +508,13 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 			if !pipe.PipeWrite(data) {
 				return StatusAccessDenied
 			}
-			if ioStatus != 0 {
-				ctx.Mem.Write64(ioStatus, uint64(StatusSuccess))
-				ctx.Mem.Write64(ioStatus+8, length)
-			}
-			if eventHandle != 0 {
-				if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
-					eh.Set()
-				}
-			}
+			writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, length)
+			signalHandleEvent(ctx, eventHandle)
 			return StatusSuccess
 		}
 	}
 	if fh == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
 		return StatusInvalidHandle
 	}
 
@@ -305,15 +530,8 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 			if writeErr != nil {
 				return StatusAccessDenied
 			}
-			if ioStatus != 0 {
-				ctx.Mem.Write64(ioStatus, uint64(StatusSuccess))
-				ctx.Mem.Write64(ioStatus+8, uint64(n))
-			}
-			if eventHandle != 0 {
-				if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
-					eh.Set()
-				}
-			}
+			writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, uint64(n))
+			signalHandleEvent(ctx, eventHandle)
 			return StatusSuccess
 		}
 	}
@@ -328,30 +546,19 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 		return StatusAccessDenied
 	}
 
-	if ioStatus != 0 {
-		ctx.Mem.Write64(ioStatus, uint64(StatusSuccess))
-		ctx.Mem.Write64(ioStatus+8, uint64(n))
-	}
-
-	// Signal event handle if provided
-	if eventHandle != 0 {
-		if eh := ctx.Handles.GetEvent(eventHandle); eh != nil {
-			eh.Set()
-		}
-	}
+	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, uint64(n))
+	signalHandleEvent(ctx, eventHandle)
 
 	return StatusSuccess
 }
 
 func handleNtClose(ctx *TrapContext) uint32 {
 	handle := Handle(ctx.Arg(0))
-
-	// Check if it's a file handle and close the VFS fd
-	fh := ctx.Handles.GetFile(handle)
-	if fh != nil {
-		ctx.FS.Close(fh.FD)
+	obj := ctx.Handles.Get(handle)
+	if obj == nil {
+		return StatusInvalidHandle
 	}
-
+	closeHandleObject(ctx, handle, obj)
 	if !ctx.Handles.Close(handle) {
 		return StatusInvalidHandle
 	}
@@ -367,212 +574,241 @@ func handleNtQueryInformationFile(ctx *TrapContext) uint32 {
 
 	fh := ctx.Handles.GetFile(fileHandle)
 	if fh == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
 		return StatusInvalidHandle
 	}
 
 	node := ctx.FS.Stat(fh.FD)
 	if node == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusNoSuchFile, 0)
 		return StatusNoSuchFile
 	}
 
-	attrs := uint32(0x80) // FILE_ATTRIBUTE_NORMAL
+	attrs := uint32(0x80)
 	if node.IsDir {
-		attrs = 0x10 // FILE_ATTRIBUTE_DIRECTORY
+		attrs = 0x10
 	}
-	nowFT := windowsFileTime(time.Now())
-	winPath := fh.Path
-	if !strings.HasPrefix(winPath, `\`) && !(len(winPath) >= 2 && winPath[1] == ':') {
-		winPath = strings.ReplaceAll(winPath, "/", `\`)
-		if !strings.HasPrefix(winPath, `\`) {
-			winPath = `\` + winPath
-		}
-		winPath = `C:` + winPath
+	createFT := windowsFileTime(node.Ctime)
+	accessFT := windowsFileTime(node.Atime)
+	writeFT := windowsFileTime(node.Mtime)
+	changeFT := windowsFileTime(node.Ctime)
+	eof := uint64(node.Size)
+	alloc := (eof + mmu.PageSize - 1) & mmu.PageMask
+	if eof == 0 {
+		alloc = 0
 	}
+	winPath := `\??\` + VFSToNtPath(fh.Path)
 	nameBytes := encodeUTF16LE(winPath)
+	position := getFileOffset(ctx, fh)
 
 	switch infoClass {
-	case fileBasicInformation: // 4
+	case fileBasicInformation:
 		if length < 40 {
 			writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
 			return StatusBufferTooSmall
 		}
-		if buffer != 0 {
-			ctx.Mem.Write64(buffer+0, nowFT)  // CreationTime
-			ctx.Mem.Write64(buffer+8, nowFT)  // LastAccessTime
-			ctx.Mem.Write64(buffer+16, nowFT) // LastWriteTime
-			ctx.Mem.Write64(buffer+24, nowFT) // ChangeTime
-			ctx.Mem.Write32(buffer+32, attrs) // FileAttributes
-			ctx.Mem.Write32(buffer+36, 0)     // Reserved
-		}
+		ctx.Mem.Write64(buffer+0, createFT)
+		ctx.Mem.Write64(buffer+8, accessFT)
+		ctx.Mem.Write64(buffer+16, writeFT)
+		ctx.Mem.Write64(buffer+24, changeFT)
+		ctx.Mem.Write32(buffer+32, attrs)
+		ctx.Mem.Write32(buffer+36, 0)
 		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 40)
 		return StatusSuccess
-
-	case fileStandardInformation: // 5
+	case fileStandardInformation:
 		if length < 24 {
 			writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
 			return StatusBufferTooSmall
 		}
-		if buffer != 0 {
-			ctx.Mem.Write64(buffer+0, uint64(node.Size)) // AllocationSize
-			ctx.Mem.Write64(buffer+8, uint64(node.Size)) // EndOfFile
-			ctx.Mem.Write32(buffer+16, node.Nlink)       // NumberOfLinks
-			ctx.Mem.Write8(buffer+20, 0)                 // DeletePending
-			ctx.Mem.Write8(buffer+21, boolToByte(node.IsDir))
-		}
+		ctx.Mem.Write64(buffer+0, alloc)
+		ctx.Mem.Write64(buffer+8, eof)
+		ctx.Mem.Write32(buffer+16, node.Nlink)
+		ctx.Mem.Write8(buffer+20, boolToByte(fh.DeletePending))
+		ctx.Mem.Write8(buffer+21, boolToByte(node.IsDir))
 		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 24)
 		return StatusSuccess
-
-	case fileNameInformation: // 9
+	case fileNameInformation:
 		needed := uint64(4 + len(nameBytes))
 		if length < 4 {
 			writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
 			return StatusBufferTooSmall
 		}
-		if buffer != 0 {
-			ctx.Mem.Write32(buffer+0, uint32(len(nameBytes))) // FileNameLength (bytes)
-			toCopy := minUint32(uint32(len(nameBytes)), uint32(length-4))
-			if toCopy > 0 {
-				ctx.Mem.WriteBytes(buffer+4, nameBytes[:toCopy])
-			}
+		ctx.Mem.Write32(buffer+0, uint32(len(nameBytes)))
+		toCopy := minUint32(uint32(len(nameBytes)), uint32(length-4))
+		if toCopy > 0 {
+			ctx.Mem.WriteBytes(buffer+4, nameBytes[:toCopy])
 		}
-		if uint64(length) < needed {
-			writeIOStatus(ctx.Mem, ioStatus, StatusBufferOverflow, uint64(length))
+		if length < needed {
+			writeIOStatus(ctx.Mem, ioStatus, StatusBufferOverflow, length)
 			return StatusBufferOverflow
 		}
 		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, needed)
 		return StatusSuccess
-
-	case fileAllInformation: // 18
-		// FILE_ALL_INFORMATION = 96-byte fixed part + FILE_NAME_INFORMATION.
+	case filePositionInformation:
+		if length < 8 {
+			writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
+			return StatusBufferTooSmall
+		}
+		ctx.Mem.Write64(buffer, position)
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 8)
+		return StatusSuccess
+	case fileEndOfFileInformation:
+		if length < 8 {
+			writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
+			return StatusBufferTooSmall
+		}
+		ctx.Mem.Write64(buffer, eof)
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 8)
+		return StatusSuccess
+	case fileAllInformation:
 		needed := uint64(96 + 4 + len(nameBytes))
 		if length < 96 {
 			writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
 			return StatusBufferTooSmall
 		}
-		if buffer != 0 {
-			// FILE_BASIC_INFORMATION @ +0 (40 bytes)
-			ctx.Mem.Write64(buffer+0, nowFT)
-			ctx.Mem.Write64(buffer+8, nowFT)
-			ctx.Mem.Write64(buffer+16, nowFT)
-			ctx.Mem.Write64(buffer+24, nowFT)
-			ctx.Mem.Write32(buffer+32, attrs)
-			ctx.Mem.Write32(buffer+36, 0)
-
-			// FILE_STANDARD_INFORMATION @ +40 (24 bytes)
-			ctx.Mem.Write64(buffer+40, uint64(node.Size))
-			ctx.Mem.Write64(buffer+48, uint64(node.Size))
-			ctx.Mem.Write32(buffer+56, node.Nlink)
-			ctx.Mem.Write8(buffer+60, 0) // DeletePending
-			ctx.Mem.Write8(buffer+61, boolToByte(node.IsDir))
-
-			// FILE_INTERNAL/EA/ACCESS/POSITION/MODE/ALIGNMENT left zeroed by default.
-			// FILE_NAME_INFORMATION @ +96
-			ctx.Mem.Write32(buffer+96, uint32(len(nameBytes)))
-			avail := uint32(0)
-			if length > 100 {
-				avail = uint32(length - 100)
-			}
-			toCopy := minUint32(uint32(len(nameBytes)), avail)
-			if toCopy > 0 {
-				ctx.Mem.WriteBytes(buffer+100, nameBytes[:toCopy])
-			}
+		ctx.Mem.Write64(buffer+0, createFT)
+		ctx.Mem.Write64(buffer+8, accessFT)
+		ctx.Mem.Write64(buffer+16, writeFT)
+		ctx.Mem.Write64(buffer+24, changeFT)
+		ctx.Mem.Write32(buffer+32, attrs)
+		ctx.Mem.Write32(buffer+36, 0)
+		ctx.Mem.Write64(buffer+40, alloc)
+		ctx.Mem.Write64(buffer+48, eof)
+		ctx.Mem.Write32(buffer+56, node.Nlink)
+		ctx.Mem.Write8(buffer+60, boolToByte(fh.DeletePending))
+		ctx.Mem.Write8(buffer+61, boolToByte(node.IsDir))
+		ctx.Mem.Write32(buffer+76, fh.Access)
+		ctx.Mem.Write64(buffer+80, position)
+		ctx.Mem.Write32(buffer+88, 0)
+		ctx.Mem.Write32(buffer+92, 0)
+		ctx.Mem.Write32(buffer+96, uint32(len(nameBytes)))
+		avail := uint32(0)
+		if length > 100 {
+			avail = uint32(length - 100)
 		}
-		if uint64(length) < needed {
-			writeIOStatus(ctx.Mem, ioStatus, StatusBufferOverflow, uint64(length))
+		toCopy := minUint32(uint32(len(nameBytes)), avail)
+		if toCopy > 0 {
+			ctx.Mem.WriteBytes(buffer+100, nameBytes[:toCopy])
+		}
+		if length < needed {
+			writeIOStatus(ctx.Mem, ioStatus, StatusBufferOverflow, length)
 			return StatusBufferOverflow
 		}
 		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, needed)
 		return StatusSuccess
+	default:
+		writeIOStatus(ctx.Mem, ioStatus, StatusNotImplemented, 0)
+		return StatusNotImplemented
 	}
-
-	// Fallback compatibility behavior for unknown information classes.
-	if length < 24 {
-		writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
-		return StatusBufferTooSmall
-	}
-	if buffer != 0 {
-		ctx.Mem.Write64(buffer+0, uint64(node.Size))
-		ctx.Mem.Write64(buffer+8, uint64(node.Size))
-		ctx.Mem.Write32(buffer+16, node.Nlink)
-		ctx.Mem.Write8(buffer+20, 0)
-		ctx.Mem.Write8(buffer+21, boolToByte(node.IsDir))
-	}
-	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 24)
-	return StatusSuccess
 }
 
 func handleNtSetInformationFile(ctx *TrapContext) uint32 {
 	fileHandle := Handle(ctx.Arg(0))
 	ioStatus := ctx.Arg(1)
 	buffer := ctx.Arg(2)
-	_ = uint32(ctx.Arg(3)) // Length
+	length := uint32(ctx.Arg(3))
 	class := uint32(ctx.Arg(4))
 
-	switch class {
-	case 13: // FileDispositionInformation
-		// DeleteFile flag at buffer+0 (BOOLEAN)
-		// Just acknowledge - actual deletion happens on close
-		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
-		return StatusSuccess
-
-	case 14: // FilePositionInformation
-		fh := ctx.Handles.GetFile(fileHandle)
-		if fh == nil {
-			return StatusInvalidHandle
-		}
-		pos, _ := ctx.Mem.Read64(buffer)
-		ctx.FS.Lseek(fh.FD, int64(pos), 0) // SEEK_SET
-		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
-		return StatusSuccess
-
-	case 20: // FileEndOfFileInformation
-		fh := ctx.Handles.GetFile(fileHandle)
-		if fh == nil {
-			return StatusInvalidHandle
-		}
-		eof, _ := ctx.Mem.Read64(buffer)
-		ctx.FS.Ftruncate(fh.FD, int64(eof))
-		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
-		return StatusSuccess
-
-	case 19: // FileAllocationInformation
-		fh := ctx.Handles.GetFile(fileHandle)
-		if fh == nil {
-			return StatusInvalidHandle
-		}
-		alloc, _ := ctx.Mem.Read64(buffer)
-		ctx.FS.Ftruncate(fh.FD, int64(alloc))
-		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
-		return StatusSuccess
-
-	case 10: // FileRenameInformation
-		fh := ctx.Handles.GetFile(fileHandle)
-		if fh == nil {
-			return StatusInvalidHandle
-		}
-		// FILE_RENAME_INFORMATION: {ReplaceIfExists:1, RootDirectory:8, FileNameLength:4, FileName:...}
-		nameLen, _ := ctx.Mem.Read32(buffer + 16)
-		if nameLen > 0 {
-			nameBytes, _ := ctx.Mem.ReadBytes(buffer+20, int(nameLen))
-			var chars []uint16
-			for i := 0; i+1 < len(nameBytes); i += 2 {
-				chars = append(chars, uint16(nameBytes[i])|uint16(nameBytes[i+1])<<8)
-			}
-			newName := string(decodeUTF16(chars))
-			newName = strings.TrimPrefix(newName, `\??\`)
-			newName = strings.ReplaceAll(newName, `\`, "/")
-			if len(newName) >= 2 && newName[1] == ':' {
-				newName = newName[2:]
-			}
-			ctx.FS.Renameat(-1, fh.Path, -1, newName)
-		}
-		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
-		return StatusSuccess
+	fh := ctx.Handles.GetFile(fileHandle)
+	if fh == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+		return StatusInvalidHandle
 	}
 
-	// Default: success for unhandled classes
-	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
-	return StatusSuccess
+	switch class {
+	case fileDispositionInformation:
+		deleteFile := false
+		if buffer != 0 {
+			flag, _ := ctx.Mem.Read8(buffer)
+			deleteFile = flag != 0
+		}
+		fh.DeletePending = deleteFile
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+		return StatusSuccess
+	case filePositionInformation:
+		pos, _ := ctx.Mem.Read64(buffer)
+		if _, err := ctx.FS.Lseek(fh.FD, int64(pos), 0); err != nil {
+			writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
+			return StatusInvalidParameter
+		}
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+		return StatusSuccess
+	case fileEndOfFileInformation, 19:
+		eof, _ := ctx.Mem.Read64(buffer)
+		if err := ctx.FS.Ftruncate(fh.FD, int64(eof)); err != nil {
+			status := ntStatusFromErr(err, StatusInvalidParameter)
+			writeIOStatus(ctx.Mem, ioStatus, status, 0)
+			return status
+		}
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+		return StatusSuccess
+	case 10:
+		var replaceIfExists bool
+		var rootDir Handle
+		var nameLen uint32
+		var nameAddr uint64
+		if ctx.Mem.Mode32 {
+			flag, _ := ctx.Mem.Read8(buffer)
+			replaceIfExists = flag != 0
+			rootVal, _ := ctx.Mem.Read32(buffer + 4)
+			rootDir = Handle(rootVal)
+			nameLen, _ = ctx.Mem.Read32(buffer + 8)
+			nameAddr = buffer + 12
+		} else {
+			flag, _ := ctx.Mem.Read8(buffer)
+			replaceIfExists = flag != 0
+			rootVal, _ := ctx.Mem.Read64(buffer + 8)
+			rootDir = Handle(rootVal)
+			nameLen, _ = ctx.Mem.Read32(buffer + 16)
+			nameAddr = buffer + 20
+		}
+		if nameLen == 0 || length < nameLen {
+			writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
+			return StatusInvalidParameter
+		}
+		nameBytes, err := ctx.Mem.ReadBytes(nameAddr, int(nameLen))
+		if err != nil {
+			writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
+			return StatusInvalidParameter
+		}
+		newName := decodeUTF16LE(nameBytes)
+		newPath := NtPathToVFS(newName)
+		if !(strings.HasPrefix(newName, `\`) || (len(newName) >= 2 && newName[1] == ':')) {
+			basePath := fh.Path
+			if rootDir != 0 {
+				if base := ctx.Handles.GetFile(rootDir); base != nil {
+					basePath = base.Path
+				}
+			} else if slash := strings.LastIndex(basePath, "/"); slash >= 0 {
+				basePath = basePath[:slash]
+				if basePath == "" {
+					basePath = "/"
+				}
+			}
+			if !strings.HasPrefix(newPath, "/") {
+				newPath = "/" + newPath
+			}
+			if basePath == "/" {
+				newPath = basePath + strings.TrimPrefix(newPath, "/")
+			} else {
+				newPath = basePath + newPath
+			}
+		}
+		if replaceIfExists {
+			_ = ctx.FS.Unlinkat(-1, newPath, 0)
+		}
+		if err := ctx.FS.Renameat(-1, fh.Path, -1, newPath); err != nil {
+			status := ntStatusFromErr(err, StatusObjectNameNotFound)
+			writeIOStatus(ctx.Mem, ioStatus, status, 0)
+			return status
+		}
+		fh.Path = newPath
+		writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+		return StatusSuccess
+	default:
+		writeIOStatus(ctx.Mem, ioStatus, StatusNotImplemented, 0)
+		return StatusNotImplemented
+	}
 }
 
 func decodeUTF16(chars []uint16) []rune {
@@ -592,66 +828,111 @@ func decodeUTF16(chars []uint16) []rune {
 
 func handleNtQueryDirectoryFile(ctx *TrapContext) uint32 {
 	fileHandle := Handle(ctx.Arg(0))
-	ioStatus := ctx.Arg(1)
-	buffer := ctx.Arg(2)
-	length := ctx.Arg(3)
+	eventHandle := Handle(ctx.Arg(1))
+	ioStatus := ctx.Arg(4)
+	buffer := ctx.Arg(5)
+	length := ctx.Arg(6)
+	infoClass := uint32(ctx.Arg(7))
+	returnSingleEntry := ctx.Arg(8) != 0
+	fileNamePtr := ctx.Arg(9)
+	restartScan := ctx.Arg(10) != 0
 
 	fh := ctx.Handles.GetFile(fileHandle)
 	if fh == nil {
 		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
 		return StatusInvalidHandle
 	}
+	if restartScan {
+		fh.DirIndex = 0
+	}
+	if fileNamePtr != 0 {
+		mask, err := ReadUnicodeString(ctx.Mem, fileNamePtr)
+		if err == nil {
+			fh.DirMask = mask
+		}
+	}
 
-	entries := ctx.FS.Getdents64(fh.FD)
-	if len(entries) == 0 {
+	allEntries := listDirectoryEntries(ctx, fh)
+	if len(allEntries) == 0 {
 		writeIOStatus(ctx.Mem, ioStatus, StatusNoMoreFiles, 0)
 		return StatusNoMoreFiles
 	}
 
-	// Write FileBothDirectoryInformation entries
-	offset := uint64(0)
-	for i, entry := range entries {
-		nameUTF16 := encodeUTF16LE(entry.Name)
-		entrySize := uint64(104 + len(nameUTF16)) // base struct + filename
-		entrySize = (entrySize + 7) & ^uint64(7)  // align to 8
+	matches := make([]ntDirEntry, 0, len(allEntries))
+	for _, entry := range allEntries {
+		if fh.DirMask == "" || wildcardMatch(fh.DirMask, entry.Name) {
+			matches = append(matches, entry)
+		}
+	}
+	if fh.DirIndex >= len(matches) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusNoMoreFiles, 0)
+		return StatusNoMoreFiles
+	}
 
+	offset := uint64(0)
+	prevOffset := uint64(0)
+	prevSize := uint64(0)
+	written := 0
+	for idx := fh.DirIndex; idx < len(matches); idx++ {
+		entry := matches[idx]
+		nameUTF16 := encodeUTF16LE(entry.Name)
+		baseSize := uint64(64)
+		nameOffset := uint64(64)
+		if infoClass == fileBothDirectoryInformation {
+			baseSize = 94
+			nameOffset = 94
+		} else if infoClass != fileDirectoryInformation {
+			writeIOStatus(ctx.Mem, ioStatus, StatusNotImplemented, 0)
+			return StatusNotImplemented
+		}
+		entrySize := (baseSize + uint64(len(nameUTF16)) + 7) &^ uint64(7)
 		if offset+entrySize > length {
 			break
 		}
-
 		addr := buffer + offset
-
-		// NextEntryOffset
-		if i < len(entries)-1 {
-			ctx.Mem.Write32(addr+0, uint32(entrySize))
-		} else {
-			ctx.Mem.Write32(addr+0, 0) // last entry
+		if written > 0 {
+			ctx.Mem.Write32(buffer+prevOffset, uint32(prevSize))
 		}
-		// FileIndex
-		ctx.Mem.Write32(addr+4, uint32(i))
-		// EndOfFile
-		ctx.Mem.Write64(addr+40, uint64(entry.Size))
-		// AllocationSize
-		ctx.Mem.Write64(addr+48, uint64(entry.Size))
-		// FileAttributes
-		attrs := uint32(0x80) // FILE_ATTRIBUTE_NORMAL
+		createFT := windowsFileTime(entry.Ctime)
+		accessFT := windowsFileTime(entry.Atime)
+		writeFT := windowsFileTime(entry.Mtime)
+		changeFT := windowsFileTime(entry.Ctime)
+		attrs := uint32(0x80)
 		if entry.IsDir {
-			attrs = 0x10 // FILE_ATTRIBUTE_DIRECTORY
+			attrs = 0x10
 		}
+		ctx.Mem.Write32(addr+0, 0)
+		ctx.Mem.Write32(addr+4, uint32(idx))
+		ctx.Mem.Write64(addr+8, createFT)
+		ctx.Mem.Write64(addr+16, accessFT)
+		ctx.Mem.Write64(addr+24, writeFT)
+		ctx.Mem.Write64(addr+32, changeFT)
+		ctx.Mem.Write64(addr+40, uint64(entry.Size))
+		ctx.Mem.Write64(addr+48, uint64(entry.Size))
 		ctx.Mem.Write32(addr+56, attrs)
-		// FileNameLength
 		ctx.Mem.Write32(addr+60, uint32(len(nameUTF16)))
-		// FileName (at offset 104)
-		ctx.Mem.WriteBytes(addr+104, nameUTF16)
-
+		if infoClass == fileBothDirectoryInformation {
+			ctx.Mem.Write32(addr+64, 0)
+			ctx.Mem.Write8(addr+68, 0)
+			ctx.Mem.Write8(addr+69, 0)
+		}
+		ctx.Mem.WriteBytes(addr+nameOffset, nameUTF16)
+		prevOffset = offset
+		prevSize = entrySize
 		offset += entrySize
+		written++
+		fh.DirIndex = idx + 1
+		if returnSingleEntry {
+			break
+		}
 	}
-	if offset == 0 {
+	if written == 0 {
 		writeIOStatus(ctx.Mem, ioStatus, StatusBufferTooSmall, 0)
 		return StatusBufferTooSmall
 	}
+	ctx.Mem.Write32(buffer+prevOffset, 0)
 	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, offset)
-
+	signalHandleEvent(ctx, eventHandle)
 	return StatusSuccess
 }
 
@@ -835,22 +1116,46 @@ func handleNtCreateSection(ctx *TrapContext) uint32 {
 	_ = ctx.Arg(1) // DesiredAccess
 	_ = ctx.Arg(2) // ObjectAttributes
 	maxSizePtr := ctx.Arg(3)
+	sectionProtect := uint32(ctx.Arg(4))
+	allocationAttrs := uint32(ctx.Arg(5))
+	fileHandle := Handle(ctx.Arg(6))
 
 	var maxSize uint64
 	if maxSizePtr != 0 {
 		maxSize, _ = ctx.Mem.Read64(maxSizePtr)
 	}
-	if maxSize == 0 {
-		maxSize = mmu.PageSize
+
+	perms := NtMemProtectToMMU(sectionProtect)
+	if perms == 0 {
+		perms = mmu.PermRead | mmu.PermWrite
 	}
 
 	sec := &SectionHandle{
-		Size:  maxSize,
-		Perms: mmu.PermRead | mmu.PermWrite,
+		Perms:     perms,
+		FileFD:    -1,
+		ViewSizes: make(map[uint64]uint64),
 	}
+	if fh := ctx.Handles.GetFile(fileHandle); fh != nil {
+		if maxSize == 0 {
+			if node := ctx.FS.Stat(fh.FD); node != nil {
+				maxSize = uint64(node.Size)
+			}
+		}
+		if dupFD, err := ctx.FS.Dup(fh.FD); err == nil {
+			sec.FileFD = dupFD
+		}
+		sec.Path = fh.Path
+	}
+	if maxSize == 0 && allocationAttrs&secCommit != 0 {
+		maxSize = mmu.PageSize
+	}
+	if maxSize == 0 {
+		maxSize = mmu.PageSize
+	}
+	sec.Size = (maxSize + mmu.PageSize - 1) & mmu.PageMask
 
 	h := ctx.Handles.Alloc(sec)
-	ctx.Mem.Write64(handlePtr, uint64(h))
+	writeGuestPtr(ctx.Mem, handlePtr, uint64(h))
 
 	return StatusSuccess
 }
@@ -860,21 +1165,54 @@ func handleNtMapViewOfSection(ctx *TrapContext) uint32 {
 	_ = ctx.Arg(1) // ProcessHandle
 	baseAddrPtr := ctx.Arg(2)
 	_ = ctx.Arg(3) // ZeroBits
+	_ = ctx.Arg(4) // CommitSize
+	sectionOffsetPtr := ctx.Arg(5)
+	viewSizePtr := ctx.Arg(6)
+	_ = ctx.Arg(7) // InheritDisposition
+	_ = ctx.Arg(8) // AllocationType
+	win32Protect := uint32(ctx.Arg(9))
 
 	sec := ctx.Handles.GetSection(sectionHandle)
 	if sec == nil {
 		return StatusInvalidHandle
 	}
 
+	baseAddr := uint64(0)
+	if baseAddrPtr != 0 {
+		baseAddr, _ = ctx.Mem.Read64(baseAddrPtr)
+	}
+	sectionOffset := uint64(0)
+	if sectionOffsetPtr != 0 {
+		sectionOffset, _ = ctx.Mem.Read64(sectionOffsetPtr)
+	}
 	size := sec.Size
+	if viewSizePtr != 0 {
+		if requested, _ := ctx.Mem.Read64(viewSizePtr); requested != 0 {
+			size = requested
+		}
+	}
 	if size == 0 {
 		size = mmu.PageSize
 	}
 	size = (size + mmu.PageSize - 1) & mmu.PageMask
+	perms := sec.Perms
+	if win32Protect != 0 {
+		perms = NtMemProtectToMMU(win32Protect)
+	}
 
-	addr := ctx.Mem.Mmap(0, size, sec.Perms)
+	addr := ctx.Mem.Mmap(baseAddr, size, perms)
+	if sec.FileFD >= 0 {
+		buf := make([]byte, size)
+		if n, err := ctx.FS.Pread(sec.FileFD, buf, int64(sectionOffset)); err == nil && n > 0 {
+			ctx.Mem.WriteBytes(addr, buf[:n])
+		}
+	}
+	sec.ViewSizes[addr] = size
 	if baseAddrPtr != 0 {
 		ctx.Mem.Write64(baseAddrPtr, addr)
+	}
+	if viewSizePtr != 0 {
+		ctx.Mem.Write64(viewSizePtr, size)
 	}
 
 	return StatusSuccess
@@ -885,7 +1223,10 @@ func handleNtUnmapViewOfSection(ctx *TrapContext) uint32 {
 	baseAddr := ctx.Arg(1)
 
 	if baseAddr != 0 {
-		ctx.Mem.Munmap(baseAddr, mmu.PageSize)
+		_, size, mapped, _ := ctx.Mem.QueryRegion(baseAddr)
+		if mapped && size > 0 {
+			ctx.Mem.Munmap(baseAddr, size)
+		}
 	}
 	return StatusSuccess
 }
@@ -1566,10 +1907,21 @@ func handleNtQueryInformationThread(ctx *TrapContext) uint32 {
 func handleNtQuerySystemInformation(ctx *TrapContext) uint32 {
 	infoClass := uint32(ctx.Arg(0))
 	buffer := ctx.Arg(1)
-	_ = ctx.Arg(2) // length
+	length := uint32(ctx.Arg(2))
+	retLen := ctx.Arg(3)
+	writeRetLen := func(n uint32) {
+		if retLen != 0 {
+			ctx.Mem.Write32(retLen, n)
+		}
+	}
 
 	switch infoClass {
 	case 0: // SystemBasicInformation
+		const needed = 56
+		writeRetLen(needed)
+		if buffer == 0 || length < needed {
+			return StatusBufferTooSmall
+		}
 		if buffer != 0 {
 			ctx.Mem.Write32(buffer+0, 0)                       // Reserved
 			ctx.Mem.Write32(buffer+4, 100)                     // TimerResolution
@@ -1657,27 +2009,60 @@ func handleNtQuerySystemInformation(ctx *TrapContext) uint32 {
 		}
 
 	case 3: // SystemTimeOfDayInformation (48 bytes)
+		const needed = 48
+		writeRetLen(needed)
+		if buffer == 0 || length < needed {
+			return StatusBufferTooSmall
+		}
 		if buffer != 0 {
-			now := uint64(time.Now().UnixNano()/100 + 116444736000000000) // NT epoch
-			ctx.Mem.Write64(buffer+0, now)                                // BootTime
-			ctx.Mem.Write64(buffer+8, now)                                // CurrentTime
-			ctx.Mem.Write64(buffer+16, 0)                                 // TimeZoneBias
-			ctx.Mem.Write32(buffer+24, 0)                                 // TimeZoneId
-			ctx.Mem.Write32(buffer+28, 0)                                 // Reserved
+			now := uint64(time.Now().UnixNano()/100 + 116444736000000000)
+			ctx.Mem.Write64(buffer+0, 0)
+			ctx.Mem.Write64(buffer+8, now)
+			ctx.Mem.Write64(buffer+16, 0)
+			ctx.Mem.Write32(buffer+24, 0)
+			ctx.Mem.Write32(buffer+28, 0)
+			ctx.Mem.Write64(buffer+32, 0)
+			ctx.Mem.Write64(buffer+40, 0)
 		}
 
 	case 5: // SystemProcessInformation - minimal single-process entry
-		if buffer != 0 {
-			// SYSTEM_PROCESS_INFORMATION: NextEntryOffset=0 terminates list
-			ctx.Mem.Write32(buffer+0, 0)  // NextEntryOffset (last entry)
-			ctx.Mem.Write32(buffer+4, 0)  // NumberOfThreads
-			ctx.Mem.Write64(buffer+8, 0)  // WorkingSetPrivateSize
-			ctx.Mem.Write32(buffer+16, 0) // HardFaultCount
-			ctx.Mem.Write32(buffer+36, 0) // SessionId
-			ctx.Mem.Write64(buffer+56, 4) // UniqueProcessId (PID 4)
-			ctx.Mem.Write64(buffer+64, 0) // InheritedFromUniqueProcessId
-			ctx.Mem.Write32(buffer+72, 0) // HandleCount
+		imageName := "Raven"
+		if ctx.State != nil && ctx.State.ImagePath != "" {
+			imageName = ctx.State.ImagePath
+			if slash := strings.LastIndexAny(imageName, `\/`); slash >= 0 {
+				imageName = imageName[slash+1:]
+			}
 		}
+		nameBytes := encodeUTF16LE(imageName)
+		needed := uint32(0x100 + len(nameBytes) + 2)
+		writeRetLen(needed)
+		if buffer == 0 || length < needed {
+			return StatusBufferTooSmall
+		}
+		ctx.Mem.Write32(buffer+0, 0)
+		ctx.Mem.Write32(buffer+4, 1)
+		ctx.Mem.Write64(buffer+8, 0)
+		ctx.Mem.Write32(buffer+16, 0)
+		ctx.Mem.Write32(buffer+20, 1)
+		ctx.Mem.Write64(buffer+24, 0)
+		ctx.Mem.Write64(buffer+32, 0)
+		ctx.Mem.Write64(buffer+40, 0)
+		ctx.Mem.Write64(buffer+48, 0)
+		ctx.Mem.Write16(buffer+56, uint16(len(nameBytes)))
+		ctx.Mem.Write16(buffer+58, uint16(len(nameBytes)+2))
+		ctx.Mem.Write32(buffer+60, 0)
+		ctx.Mem.Write64(buffer+64, buffer+0x100)
+		ctx.Mem.Write32(buffer+72, 8)
+		pid := uint64(4)
+		if ctx.State != nil && ctx.State.ProcessId != 0 {
+			pid = uint64(ctx.State.ProcessId)
+		}
+		ctx.Mem.Write64(buffer+80, pid)
+		ctx.Mem.Write64(buffer+88, 0)
+		ctx.Mem.Write32(buffer+96, uint32(ctx.Handles.Count()))
+		ctx.Mem.Write32(buffer+100, 0)
+		ctx.Mem.WriteBytes(buffer+0x100, nameBytes)
+		ctx.Mem.Write16(buffer+0x100+uint64(len(nameBytes)), 0)
 
 	case 7: // SystemProcessorSpeedInformation / SystemNumaProcessorMap
 		if buffer != 0 {
@@ -1793,6 +2178,8 @@ func handleNtAllocateVirtualMemory(ctx *TrapContext) uint32 {
 	// ProcessHandle, BaseAddress*, ZeroBits, RegionSize*, AllocationType, Protect
 	basePtr := ctx.Arg(1)
 	sizePtr := ctx.Arg(3)
+	allocationType := uint32(ctx.Arg(4))
+	protect := uint32(ctx.Arg(5))
 
 	baseAddr, _ := ctx.Mem.Read64(basePtr)
 	size, _ := ctx.Mem.Read64(sizePtr)
@@ -1800,47 +2187,80 @@ func handleNtAllocateVirtualMemory(ctx *TrapContext) uint32 {
 	if size == 0 {
 		return StatusInvalidParameter
 	}
+	if allocationType&(memCommit|memReserve) == 0 {
+		return StatusInvalidParameter
+	}
 
-	// Align size to page boundary
 	size = (size + mmu.PageSize - 1) & mmu.PageMask
-
-	perms := mmu.PermRead | mmu.PermWrite
+	perms := NtMemProtectToMMU(protect)
+	if perms == 0 {
+		perms = mmu.PermRead | mmu.PermWrite
+	}
 	addr := ctx.Mem.Mmap(baseAddr, size, perms)
 	if addr < 0x1000 {
 		ravelog.Logf("[WARN] NtAllocateVirtualMemory failed addr=0x%x size=0x%x baseAddr=0x%x\n", addr, size, baseAddr)
 		return StatusNoMemory
 	}
 
-	ctx.Mem.Write64(basePtr, addr)
-	ctx.Mem.Write64(sizePtr, size)
+	writeGuestPtr(ctx.Mem, basePtr, addr)
+	writeGuestPtr(ctx.Mem, sizePtr, size)
 
 	return StatusSuccess
 }
 
 func handleNtFreeVirtualMemory(ctx *TrapContext) uint32 {
 	basePtr := ctx.Arg(1)
-	sizePtr := ctx.Arg(3)
+	sizePtr := ctx.Arg(2)
+	freeType := uint32(ctx.Arg(3))
 
 	baseAddr, _ := ctx.Mem.Read64(basePtr)
 	size, _ := ctx.Mem.Read64(sizePtr)
-
-	if size == 0 {
-		size = mmu.PageSize
+	if baseAddr == 0 {
+		return StatusInvalidParameter
 	}
-
+	if freeType&memRelease != 0 {
+		_, regionSize, mapped, _ := ctx.Mem.QueryRegion(baseAddr)
+		if mapped && regionSize > 0 {
+			size = regionSize
+		}
+	} else if freeType&memDecommit != 0 {
+		if size == 0 {
+			_, regionSize, mapped, _ := ctx.Mem.QueryRegion(baseAddr)
+			if mapped && regionSize > 0 {
+				size = regionSize
+			}
+		}
+	} else {
+		return StatusInvalidParameter
+	}
+	if size == 0 {
+		return StatusInvalidParameter
+	}
 	ctx.Mem.Munmap(baseAddr, size)
+	writeGuestPtr(ctx.Mem, sizePtr, size)
 	return StatusSuccess
 }
 
 func handleNtProtectVirtualMemory(ctx *TrapContext) uint32 {
 	basePtr := ctx.Arg(1)
-	sizePtr := ctx.Arg(3)
+	sizePtr := ctx.Arg(2)
+	newProtect := uint32(ctx.Arg(3))
+	oldProtectPtr := ctx.Arg(4)
 
 	baseAddr, _ := ctx.Mem.Read64(basePtr)
 	size, _ := ctx.Mem.Read64(sizePtr)
-
-	perms := mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+	_, _, mapped, oldPerms := ctx.Mem.QueryRegion(baseAddr)
+	if !mapped {
+		return StatusInvalidParameter
+	}
+	perms := NtMemProtectToMMU(newProtect)
+	if perms == 0 && newProtect != 0x01 {
+		return StatusInvalidParameter
+	}
 	ctx.Mem.Mprotect(baseAddr, size, perms)
+	if oldProtectPtr != 0 {
+		ctx.Mem.Write32(oldProtectPtr, MMUPermsToNtProtect(oldPerms))
+	}
 
 	return StatusSuccess
 }
@@ -1897,11 +2317,11 @@ func handleNtQueryVirtualMemory(ctx *TrapContext) uint32 {
 		wsBytes := encodeUTF16LE(imagePath)
 		needed := uint64(16 + len(wsBytes) + 2)
 		if retLen != 0 {
-			ctx.Mem.Write64(retLen, needed)
+			writeGuestPtr(ctx.Mem, retLen, needed)
 		}
 		if bufLen < needed {
-			return 0xC0000023
-		} // STATUS_BUFFER_TOO_SMALL
+			return StatusBufferTooSmall
+		}
 		strData := buffer + 16
 		ctx.Mem.Write16(buffer, uint16(len(wsBytes)))     // Length
 		ctx.Mem.Write16(buffer+2, uint16(len(wsBytes)+2)) // MaxLength
@@ -1941,18 +2361,32 @@ func handleNtQueryVirtualMemory(ctx *TrapContext) uint32 {
 		protect = 0x01 // PAGE_NOACCESS
 	}
 
-	// MEMORY_BASIC_INFORMATION layout (Win64):
-	// +0  BaseAddress        (PVOID, 8)
-	// +8  AllocationBase     (PVOID, 8)
-	// +16 AllocationProtect  (DWORD, 4) + padding (4)
-	// +24 RegionSize         (SIZE_T, 8)
-	// +32 State              (DWORD, 4)
-	// +36 Protect            (DWORD, 4)
-	// +40 Type               (DWORD, 4)
+	if ctx.Mem.Mode32 {
+		if retLen != 0 {
+			ctx.Mem.Write32(retLen, 28)
+		}
+		if bufLen < 28 {
+			return StatusBufferTooSmall
+		}
+		ctx.Mem.Write32(buffer+0, uint32(base))
+		ctx.Mem.Write32(buffer+4, uint32(base))
+		ctx.Mem.Write32(buffer+8, protect)
+		ctx.Mem.Write32(buffer+12, uint32(size))
+		ctx.Mem.Write32(buffer+16, state)
+		ctx.Mem.Write32(buffer+20, protect)
+		ctx.Mem.Write32(buffer+24, typ)
+		return StatusSuccess
+	}
+	if retLen != 0 {
+		ctx.Mem.Write64(retLen, 48)
+	}
+	if bufLen < 48 {
+		return StatusBufferTooSmall
+	}
 	ctx.Mem.Write64(buffer+0, base)
-	ctx.Mem.Write64(buffer+8, base) // AllocationBase = BaseAddress (simplified)
+	ctx.Mem.Write64(buffer+8, base)
 	ctx.Mem.Write32(buffer+16, protect)
-	ctx.Mem.Write32(buffer+20, 0) // PartitionId padding
+	ctx.Mem.Write32(buffer+20, 0)
 	ctx.Mem.Write64(buffer+24, size)
 	ctx.Mem.Write32(buffer+32, state)
 	ctx.Mem.Write32(buffer+36, protect)
@@ -2345,6 +2779,13 @@ func ntWaitOne(ctx *TrapContext, h Handle, timeout time.Duration) uint32 {
 		}
 	case nil:
 		return StatusInvalidHandle
+	case *GenericHandle:
+		switch strings.ToLower(v.Kind) {
+		case "process", "thread":
+			return StatusWait0
+		default:
+			return StatusWait0
+		}
 	default:
 		// Unknown handle type - treat as signaled
 		return StatusWait0
@@ -2795,16 +3236,23 @@ func handleRtlNtStatusToDosError(ctx *TrapContext) uint32 {
 
 func handleRtlSetLastWin32Error(ctx *TrapContext) uint32 {
 	errorCode := uint32(ctx.Arg(0))
-	// Write to TEB.LastErrorValue
 	if ctx.State != nil && ctx.State.TEBAddr != 0 {
-		ctx.Mem.Write32(ctx.State.TEBAddr+TebLastErrorValue, errorCode)
+		off := uint64(TebLastErrorValue)
+		if ctx.State.Is32 {
+			off = Teb32LastErrorValue
+		}
+		ctx.Mem.Write32(ctx.State.TEBAddr+off, errorCode)
 	}
 	return StatusSuccess
 }
 
 func handleRtlGetLastWin32Error(ctx *TrapContext) uint32 {
 	if ctx.State != nil && ctx.State.TEBAddr != 0 {
-		val, err := ctx.Mem.Read32(ctx.State.TEBAddr + TebLastErrorValue)
+		off := uint64(TebLastErrorValue)
+		if ctx.State.Is32 {
+			off = Teb32LastErrorValue
+		}
+		val, err := ctx.Mem.Read32(ctx.State.TEBAddr + off)
 		if err == nil {
 			ctx.CPU.SetSyscallReturn(uint64(val))
 			return val
@@ -2827,15 +3275,20 @@ func handleNtDuplicateObject(ctx *TrapContext) uint32 {
 		return StatusInvalidHandle
 	}
 
-	newHandle := ctx.Handles.Alloc(obj)
+	cloned, status := cloneHandleObject(ctx, obj)
+	if status != StatusSuccess {
+		return status
+	}
+	newHandle := ctx.Handles.Alloc(cloned)
 	if targetHandlePtr != 0 {
-		ctx.Mem.Write64(targetHandlePtr, uint64(newHandle))
+		writeGuestPtr(ctx.Mem, targetHandlePtr, uint64(newHandle))
 	}
 
-	// DUPLICATE_CLOSE_SOURCE = 0x01
-	if options&0x01 != 0 {
+	if options&dupCloseSource != 0 {
+		closeHandleObject(ctx, srcHandle, obj)
 		ctx.Handles.Close(srcHandle)
 	}
+	_ = options & dupSameAccess
 
 	return StatusSuccess
 }
@@ -2848,6 +3301,40 @@ func handleNtQueryObject(ctx *TrapContext) uint32 {
 	retLen := ctx.Arg(4)
 
 	obj := ctx.Handles.Get(h)
+	typeName := "Unknown"
+	name := ""
+	if obj != nil {
+		switch strings.ToLower(obj.HandleType()) {
+		case "file":
+			typeName = "File"
+			if fh := ctx.Handles.GetFile(h); fh != nil {
+				name = `\\??\\` + VFSToNtPath(fh.Path)
+			}
+		case "event":
+			typeName = "Event"
+		case "mutant":
+			typeName = "Mutant"
+		case "semaphore":
+			typeName = "Semaphore"
+		case "thread":
+			typeName = "Thread"
+		case "process":
+			typeName = "Process"
+		case "section":
+			typeName = "Section"
+		default:
+			typeName = obj.HandleType()
+		}
+		if name == "" {
+			if n, ok := ctx.Handles.NameOf(h); ok && n != "" {
+				name = `\BaseNamedObjects\` + n
+			}
+		}
+	}
+	dataOff := uint64(16)
+	if ctx.Mem.Mode32 {
+		dataOff = 8
+	}
 	switch infoClass {
 	case 0: // ObjectBasicInformation (40 bytes)
 		if retLen != 0 {
@@ -2868,53 +3355,50 @@ func handleNtQueryObject(ctx *TrapContext) uint32 {
 		ctx.Mem.Write64(buffer+36, 0)  // NameInformationLength + TypeInformationLength
 		return StatusSuccess
 	case 1: // ObjectNameInformation (UNICODE_STRING + name)
-		var name string
-		if obj != nil {
-			name = `\BaseNamedObjects\` + obj.HandleType()
-		} else {
-			name = ""
-		}
 		wsBytes := encodeUTF16LE(name)
-		needed := uint64(16 + len(wsBytes) + 2)
+		needed := uint64(dataOff + uint64(len(wsBytes)) + 2)
 		if retLen != 0 {
-			ctx.Mem.Write64(retLen, needed)
+			ctx.Mem.Write32(retLen, uint32(needed))
 		}
 		if buffer == 0 {
 			return StatusSuccess
 		}
 		if bufLen < needed {
-			return 0xC0000023
+			return StatusBufferTooSmall
 		}
-		strData := buffer + 16
+		strData := buffer + dataOff
 		ctx.Mem.Write16(buffer, uint16(len(wsBytes)))
 		ctx.Mem.Write16(buffer+2, uint16(len(wsBytes)+2))
-		ctx.Mem.Write32(buffer+4, 0)
-		ctx.Mem.Write64(buffer+8, strData)
+		if ctx.Mem.Mode32 {
+			ctx.Mem.Write32(buffer+4, uint32(strData))
+		} else {
+			ctx.Mem.Write32(buffer+4, 0)
+			ctx.Mem.Write64(buffer+8, strData)
+		}
 		ctx.Mem.WriteBytes(strData, wsBytes)
 		ctx.Mem.Write16(strData+uint64(len(wsBytes)), 0)
 		return StatusSuccess
 	case 2: // ObjectTypeInformation
-		typeName := "Unknown"
-		if obj != nil {
-			typeName = obj.HandleType()
-		}
 		wsBytes := encodeUTF16LE(typeName)
-		needed := uint64(72 + len(wsBytes) + 2) // OBJECT_TYPE_INFORMATION is 72 bytes + name
+		needed := uint64(72 + len(wsBytes) + 2)
 		if retLen != 0 {
-			ctx.Mem.Write64(retLen, needed)
+			ctx.Mem.Write32(retLen, uint32(needed))
 		}
 		if buffer == 0 {
 			return StatusSuccess
 		}
 		if bufLen < needed {
-			return 0xC0000023
+			return StatusBufferTooSmall
 		}
-		// OBJECT_TYPE_INFORMATION starts with UNICODE_STRING for type name
-		strData := buffer + 16
+		strData := buffer + dataOff
 		ctx.Mem.Write16(buffer, uint16(len(wsBytes)))
 		ctx.Mem.Write16(buffer+2, uint16(len(wsBytes)+2))
-		ctx.Mem.Write32(buffer+4, 0)
-		ctx.Mem.Write64(buffer+8, strData)
+		if ctx.Mem.Mode32 {
+			ctx.Mem.Write32(buffer+4, uint32(strData))
+		} else {
+			ctx.Mem.Write32(buffer+4, 0)
+			ctx.Mem.Write64(buffer+8, strData)
+		}
 		ctx.Mem.WriteBytes(strData, wsBytes)
 		ctx.Mem.Write16(strData+uint64(len(wsBytes)), 0)
 		return StatusSuccess
@@ -3038,6 +3522,10 @@ func writeIOStatus(mem *mmu.MMU, addr uint64, status uint32, info uint64) {
 		return
 	}
 	mem.Write32(addr, status)
+	if mem.Mode32 {
+		mem.Write32(addr+4, uint32(info))
+		return
+	}
 	mem.Write64(addr+8, info)
 }
 
@@ -3065,7 +3553,13 @@ func readGuestUnicodeString(mem *mmu.MMU, addr uint64) string {
 		return ""
 	}
 	length, _ := mem.Read16(addr + UnicodeStringLength)
-	bufPtr, _ := mem.Read64(addr + UnicodeStringBuffer)
+	var bufPtr uint64
+	if mem.Mode32 {
+		ptr32, _ := mem.Read32(addr + UnicodeString32Buffer)
+		bufPtr = uint64(ptr32)
+	} else {
+		bufPtr, _ = mem.Read64(addr + UnicodeStringBuffer)
+	}
 	if bufPtr == 0 || length == 0 {
 		return ""
 	}

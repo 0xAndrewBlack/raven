@@ -21,8 +21,12 @@ type HandleObject interface {
 
 // FileHandle wraps a VFS file descriptor.
 type FileHandle struct {
-	FD   int
-	Path string
+	FD            int
+	Path          string
+	Access        uint32
+	DeletePending bool
+	DirIndex      int
+	DirMask       string
 }
 
 func (h *FileHandle) HandleType() string { return "file" }
@@ -463,8 +467,11 @@ func (h *RegistryKeyHandle) HandleType() string { return "regkey" }
 
 // SectionHandle represents a memory section object.
 type SectionHandle struct {
-	Size  uint64
-	Perms uint8
+	Size      uint64
+	Perms     uint8
+	FileFD    int
+	Path      string
+	ViewSizes map[uint64]uint64
 }
 
 func (h *SectionHandle) HandleType() string { return "section" }

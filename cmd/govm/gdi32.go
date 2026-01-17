@@ -2371,6 +2371,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		rw.WriteReg(9, first.lParam)
 		ctx.CPU.SetPC(first.wndProc)
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EnumFontsW", func(ctx *ntapi.TrapContext) uint32 {
@@ -2497,6 +2498,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		rw.WriteReg(9, first.lParam)
 		ctx.CPU.SetPC(first.wndProc)
 		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "AddFontMemResourceEx", func(ctx *ntapi.TrapContext) uint32 {

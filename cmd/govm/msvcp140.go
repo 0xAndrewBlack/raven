@@ -1,8 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"runtime"
-	"strings"
 	"sync"
 	gotime "time"
 
@@ -24,6 +25,19 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 	if !ok {
 		return
 	}
+
+	abortRuntime := func(kind, msg string) uint32 {
+		if msg != "" {
+			ravelog.Logf("[msvcp] %s: %s\n", kind, msg)
+			fmt.Fprintf(os.Stderr, "govm: %s: %s\n", kind, msg)
+		} else {
+			ravelog.Logf("[msvcp] %s\n", kind)
+			fmt.Fprintf(os.Stderr, "govm: %s\n", kind)
+		}
+		os.Exit(3)
+		return 0
+	}
+	_ = abortRuntime
 
 	// ════════════════════════════════════════════════════════════════════
 	// operator new / operator delete
@@ -61,16 +75,22 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 
 	// operator new(size_t)
 	d.RegisterAutoStubHandler(msvcp, "??2@YAPEAX_K@Z", operatorNew)
+	d.RegisterAutoStubHandler(msvcp, "??2@YAPAXI@Z", operatorNew)
 	// operator new[](size_t)
 	d.RegisterAutoStubHandler(msvcp, "??_U@YAPEAX_K@Z", operatorNew)
+	d.RegisterAutoStubHandler(msvcp, "??_U@YAPAXI@Z", operatorNew)
 	// operator delete(void*)
 	d.RegisterAutoStubHandler(msvcp, "??3@YAXPEAX@Z", operatorDelete)
+	d.RegisterAutoStubHandler(msvcp, "??3@YAXPAX@Z", operatorDelete)
 	// operator delete[](void*)
 	d.RegisterAutoStubHandler(msvcp, "??_V@YAXPEAX@Z", operatorDelete)
+	d.RegisterAutoStubHandler(msvcp, "??_V@YAXPAX@Z", operatorDelete)
 	// operator delete(void*, size_t) - sized delete
 	d.RegisterAutoStubHandler(msvcp, "??3@YAXPEAX_K@Z", operatorDelete)
+	d.RegisterAutoStubHandler(msvcp, "??3@YAXPAXI@Z", operatorDelete)
 	// operator delete[](void*, size_t) - sized delete[]
 	d.RegisterAutoStubHandler(msvcp, "??_V@YAXPEAX_K@Z", operatorDelete)
+	d.RegisterAutoStubHandler(msvcp, "??_V@YAXPAXI@Z", operatorDelete)
 	// operator new(size_t, nothrow) - returns null on failure
 	d.RegisterAutoStubHandler(msvcp, "??2@YAPEAX_KAEBUnothrow_t@std@@@Z", operatorNew)
 	// operator new[](size_t, nothrow)
@@ -151,9 +171,9 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(msvcp, "??0exception@@QEAA@XZ", func(ctx *ntapi.TrapContext) uint32 {
 		thisPtr := ctx.Arg(0)
 		if thisPtr != 0 {
-			mem.Write64(thisPtr, 0)    // vtable
-			mem.Write64(thisPtr+8, 0)  // _Mywhat = NULL
-			mem.Write8(thisPtr+16, 0)  // _Mydofree = false
+			mem.Write64(thisPtr, 0)   // vtable
+			mem.Write64(thisPtr+8, 0) // _Mywhat = NULL
+			mem.Write8(thisPtr+16, 0) // _Mydofree = false
 		}
 		ctx.SetReturn(thisPtr)
 		return 0
@@ -189,11 +209,11 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 	// ════════════════════════════════════════════════════════════════════
 
 	const (
-		msvcStringBufOff  = 0   // union: inline buffer or heap pointer
-		msvcStringSizeOff = 16  // _Mysize
-		msvcStringResOff  = 24  // _Myres (capacity)
-		msvcStringSSOMax  = 15  // max chars for SSO
-		msvcStringSize    = 32  // sizeof(std::string)
+		msvcStringBufOff  = 0  // union: inline buffer or heap pointer
+		msvcStringSizeOff = 16 // _Mysize
+		msvcStringResOff  = 24 // _Myres (capacity)
+		msvcStringSSOMax  = 15 // max chars for SSO
+		msvcStringSize    = 32 // sizeof(std::string)
 	)
 
 	readMsvcString := func(addr uint64) string {
@@ -483,6 +503,63 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
+	// wstring constructor from const wchar_t*
+	d.RegisterAutoStubHandler(msvcp, "??0?$basic_string@_WU?$char_traits@_W@std@@V?$allocator@_W@2@@std@@QEAA@PEB_W@Z", func(ctx *ntapi.TrapContext) uint32 {
+		thisPtr := ctx.Arg(0)
+		srcPtr := ctx.Arg(1)
+		writeMsvcWString(thisPtr, hctx.ReadGuestUTF16(srcPtr))
+		ctx.SetReturn(thisPtr)
+		return 0
+	})
+
+	// wstring assign(const wchar_t*)
+	d.RegisterAutoStubHandler(msvcp, "?assign@?$basic_string@_WU?$char_traits@_W@std@@V?$allocator@_W@2@@std@@QEAAAEAV12@PEB_W@Z", func(ctx *ntapi.TrapContext) uint32 {
+		thisPtr := ctx.Arg(0)
+		destroyMsvcWString(thisPtr)
+		writeMsvcWString(thisPtr, hctx.ReadGuestUTF16(ctx.Arg(1)))
+		ctx.SetReturn(thisPtr)
+		return 0
+	})
+
+	// wstring c_str()
+	d.RegisterAutoStubHandler(msvcp, "?c_str@?$basic_string@_WU?$char_traits@_W@std@@V?$allocator@_W@2@@std@@QEBAPEB_WXZ", func(ctx *ntapi.TrapContext) uint32 {
+		thisPtr := ctx.Arg(0)
+		if thisPtr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		res, _ := mem.Read64(thisPtr + msvcStringResOff)
+		if res <= wstrSSOMax {
+			ctx.SetReturn(thisPtr + msvcStringBufOff)
+		} else {
+			ptr, _ := mem.Read64(thisPtr + msvcStringBufOff)
+			ctx.SetReturn(ptr)
+		}
+		return 0
+	})
+
+	// wstring size()/length()
+	d.RegisterAutoStubHandler(msvcp, "?size@?$basic_string@_WU?$char_traits@_W@std@@V?$allocator@_W@2@@std@@QEBA_KXZ", func(ctx *ntapi.TrapContext) uint32 {
+		thisPtr := ctx.Arg(0)
+		if thisPtr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		sz, _ := mem.Read64(thisPtr + msvcStringSizeOff)
+		ctx.SetReturn(sz)
+		return 0
+	})
+	d.RegisterAutoStubHandler(msvcp, "?length@?$basic_string@_WU?$char_traits@_W@std@@V?$allocator@_W@2@@std@@QEBA_KXZ", func(ctx *ntapi.TrapContext) uint32 {
+		thisPtr := ctx.Arg(0)
+		if thisPtr == 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		sz, _ := mem.Read64(thisPtr + msvcStringSizeOff)
+		ctx.SetReturn(sz)
+		return 0
+	})
+
 	// ════════════════════════════════════════════════════════════════════
 	// std::mutex - backed by Go sync.Mutex keyed on guest address
 	// ════════════════════════════════════════════════════════════════════
@@ -625,18 +702,8 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	var condMapMu sync.Mutex
-	condMap := make(map[uint64]*sync.Cond)
-
-	getCond := func(addr uint64) *sync.Cond {
-		condMapMu.Lock()
-		defer condMapMu.Unlock()
-		c, ok := condMap[addr]
-		if !ok {
-			c = sync.NewCond(&sync.Mutex{})
-			condMap[addr] = c
-		}
-		return c
+	getCond := func(addr uint64) *ntapi.CondVarEntry {
+		return ntapi.GlobalCondVars.Get(addr)
 	}
 
 	d.RegisterAutoStubHandler(msvcp, "_Cnd_init", func(ctx *ntapi.TrapContext) uint32 {
@@ -646,10 +713,7 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(msvcp, "_Cnd_wait", func(ctx *ntapi.TrapContext) uint32 {
-		c := getCond(ctx.Arg(0))
-		c.L.Lock()
-		c.Wait()
-		c.L.Unlock()
+		getCond(ctx.Arg(0)).Sleep(10 * gotime.Millisecond)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -667,9 +731,6 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(msvcp, "_Cnd_destroy", func(ctx *ntapi.TrapContext) uint32 {
-		condMapMu.Lock()
-		delete(condMap, ctx.Arg(0))
-		condMapMu.Unlock()
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -713,45 +774,32 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 	// Error-throwing helpers and time utilities
 	// ════════════════════════════════════════════════════════════════════
 
+	d.RegisterAutoStubHandler(msvcp, "?_Throw_C_error@std@@YAXH@Z", func(ctx *ntapi.TrapContext) uint32 {
+		return abortRuntime("std::_Throw_C_error", fmt.Sprintf("code=%d", int32(ctx.Arg(0))))
+	})
+
 	d.RegisterAutoStubHandler(msvcp, "?_Xlength_error@std@@YAXPEBD@Z", func(ctx *ntapi.TrapContext) uint32 {
-		msg := hctx.ReadGuestString(ctx.Arg(0))
-		ravelog.Logf("[msvcp] std::_Xlength_error: %s\n", msg)
-		ctx.SetReturn(0)
-		return 0
+		return abortRuntime("std::_Xlength_error", hctx.ReadGuestString(ctx.Arg(0)))
 	})
 
 	d.RegisterAutoStubHandler(msvcp, "?_Xout_of_range@std@@YAXPEBD@Z", func(ctx *ntapi.TrapContext) uint32 {
-		msg := hctx.ReadGuestString(ctx.Arg(0))
-		ravelog.Logf("[msvcp] std::_Xout_of_range: %s\n", msg)
-		ctx.SetReturn(0)
-		return 0
+		return abortRuntime("std::_Xout_of_range", hctx.ReadGuestString(ctx.Arg(0)))
 	})
 
 	d.RegisterAutoStubHandler(msvcp, "?_Xbad_alloc@std@@YAXXZ", func(ctx *ntapi.TrapContext) uint32 {
-		ravelog.Logf("[msvcp] std::_Xbad_alloc\n")
-		ctx.SetReturn(0)
-		return 0
+		return abortRuntime("std::_Xbad_alloc", "")
 	})
 
 	d.RegisterAutoStubHandler(msvcp, "?_Xinvalid_argument@std@@YAXPEBD@Z", func(ctx *ntapi.TrapContext) uint32 {
-		msg := hctx.ReadGuestString(ctx.Arg(0))
-		ravelog.Logf("[msvcp] std::_Xinvalid_argument: %s\n", msg)
-		ctx.SetReturn(0)
-		return 0
+		return abortRuntime("std::_Xinvalid_argument", hctx.ReadGuestString(ctx.Arg(0)))
 	})
 
 	d.RegisterAutoStubHandler(msvcp, "?_Xoverflow_error@std@@YAXPEBD@Z", func(ctx *ntapi.TrapContext) uint32 {
-		msg := hctx.ReadGuestString(ctx.Arg(0))
-		ravelog.Logf("[msvcp] std::_Xoverflow_error: %s\n", msg)
-		ctx.SetReturn(0)
-		return 0
+		return abortRuntime("std::_Xoverflow_error", hctx.ReadGuestString(ctx.Arg(0)))
 	})
 
 	d.RegisterAutoStubHandler(msvcp, "?_Xruntime_error@std@@YAXPEBD@Z", func(ctx *ntapi.TrapContext) uint32 {
-		msg := hctx.ReadGuestString(ctx.Arg(0))
-		ravelog.Logf("[msvcp] std::_Xruntime_error: %s\n", msg)
-		ctx.SetReturn(0)
-		return 0
+		return abortRuntime("std::_Xruntime_error", hctx.ReadGuestString(ctx.Arg(0)))
 	})
 
 	d.RegisterAutoStubHandler(msvcp, "_Xtime_get_ticks", func(ctx *ntapi.TrapContext) uint32 {
@@ -778,7 +826,6 @@ func registerMsvcp140Handlers(hctx *HandlerCtx) {
 
 	_ = readMsvcString
 	_ = readMsvcWString
-	_ = strings.HasPrefix
 
 	ravelog.Logf("[msvcp] registered msvcp140 handlers\n")
 }
