@@ -18,15 +18,33 @@ const (
 	d3d9VertexDeclarationMethods = 8
 )
 
+// d3d9Bridge bundles device + renderer + host context so the COM dispatch
+// function can reach all three without a separate lookup.
+type d3d9Bridge struct {
+	hctx     *HandlerCtx
+	device   *d3d9.Device
+	renderer *d3d9.Renderer
+}
+
 func d3d9CreateDeviceObject(hctx *HandlerCtx, presentParams uint64) uint64 {
 	device := d3d9.NewDevice()
+	width, height := uint32(800), uint32(600)
 	if params, ok := readGuestStruct[d3d9.D3DPRESENT_PARAMETERS](hctx.Mem, presentParams); ok {
 		if params.BackBufferWidth != 0 && params.BackBufferHeight != 0 {
-			device.SetViewport(d3d9.Viewport{Width: params.BackBufferWidth, Height: params.BackBufferHeight, MinZ: 0, MaxZ: 1})
+			width, height = params.BackBufferWidth, params.BackBufferHeight
 		}
 	}
+	device.SetViewport(d3d9.Viewport{Width: width, Height: height, MinZ: 0, MaxZ: 1})
 	hctx.D3D9Device = device
-	return d3dCreatePayloadCOMObject(hctx.Mem, hctx.Disp, "d3d9-device", d3d9DeviceMethods, device, d3d9DeviceDispatch)
+
+	renderer, err := d3d9.NewRenderer(width, height)
+	if err != nil {
+		renderer = nil
+	}
+	hctx.D3D9Renderer = renderer
+
+	bridge := &d3d9Bridge{hctx: hctx, device: device, renderer: renderer}
+	return d3dCreatePayloadCOMObject(hctx.Mem, hctx.Disp, "d3d9-device", d3d9DeviceMethods, bridge, d3d9DeviceDispatch)
 }
 
 func d3dCreatePayloadCOMObject(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string, methods int, payload any, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32) uint64 {
@@ -107,13 +125,14 @@ func d3dLookupPayload[T any](addr uint64) (T, bool) {
 }
 
 func d3d9DeviceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32 {
-	device, ok := obj.payload.(*d3d9.Device)
-	if !ok || device == nil {
+	bridge, ok := obj.payload.(*d3d9Bridge)
+	if !ok || bridge == nil || bridge.device == nil {
 		return E_POINTER
 	}
+	device := bridge.device
 
 	switch method {
-	case 3, 5, 16, 17, 18, 20, 21, 22, 30, 31, 32, 33, 34, 35, 37, 39, 61, 70, 71, 72, 73, 74, 77, 79, 80, 81, 82, 83, 84, 91, 92, 93, 94, 95, 96, 97, 98, 99, 102, 103, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118:
+	case 3, 5, 16, 18, 20, 21, 22, 30, 31, 32, 33, 34, 35, 37, 39, 61, 70, 71, 72, 73, 74, 77, 79, 80, 84, 91, 92, 93, 94, 95, 96, 97, 98, 99, 102, 103, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118:
 		return D3D_OK
 	case 4:
 		ctx.SetReturn(256 << 20)
@@ -156,17 +175,35 @@ func d3d9DeviceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) u
 		return d3d9DeviceCreateVertexBuffer(ctx)
 	case 27:
 		return d3d9DeviceCreateIndexBuffer(ctx)
-	case 41:
+	case 17: // Present(pSrcRect, pDstRect, hWnd, pDirtyRegion)
+		if r := bridge.renderer; r != nil {
+			r.Present(bridge.hctx.WlWindow)
+		}
+		return D3D_OK
+	case 41: // BeginScene
 		device.SceneActive = true
+		if r := bridge.renderer; r != nil {
+			r.BeginScene()
+		}
 		return D3D_OK
-	case 42:
+	case 42: // EndScene
 		device.SceneActive = false
+		if r := bridge.renderer; r != nil {
+			r.EndScene()
+		}
 		return D3D_OK
-	case 43:
-		device.ClearFlags = uint32(ctx.Arg(3))
-		device.ClearColor = uint32(ctx.Arg(4))
-		device.ClearDepth = math.Float32frombits(uint32(ctx.Arg(5)))
-		device.ClearStencil = uint32(ctx.Arg(6))
+	case 43: // Clear
+		flags := uint32(ctx.Arg(3))
+		color := uint32(ctx.Arg(4))
+		z := math.Float32frombits(uint32(ctx.Arg(5)))
+		stencil := uint32(ctx.Arg(6))
+		device.ClearFlags = flags
+		device.ClearColor = color
+		device.ClearDepth = z
+		device.ClearStencil = stencil
+		if r := bridge.renderer; r != nil {
+			r.Clear(flags, color, z, stencil)
+		}
 		return D3D_OK
 	case 44:
 		matrix, ok := readGuestStruct[[16]float32](ctx.Mem, ctx.Arg(2))
@@ -446,6 +483,28 @@ func d3d9DeviceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) u
 			}
 		}
 		return D3D_OK
+	case 81: // DrawPrimitive(PrimType, StartVertex, PrimCount)
+		if r := bridge.renderer; r != nil && device.SceneActive {
+			r.DrawPrimitive(device, uint32(ctx.Arg(1)), uint32(ctx.Arg(2)), uint32(ctx.Arg(3)))
+		}
+		return D3D_OK
+	case 82: // DrawIndexedPrimitive(PrimType, BaseVertexIndex, MinVertexIndex, NumVertices, StartIndex, PrimCount)
+		if r := bridge.renderer; r != nil && device.SceneActive {
+			r.DrawIndexedPrimitive(device, uint32(ctx.Arg(1)), int32(ctx.Arg(2)), uint32(ctx.Arg(3)), uint32(ctx.Arg(4)), uint32(ctx.Arg(5)), uint32(ctx.Arg(6)))
+		}
+		return D3D_OK
+	case 83: // DrawPrimitiveUP(PrimType, PrimCount, pVertexData, Stride)
+		pData := ctx.Arg(3)
+		stride := uint32(ctx.Arg(4))
+		if r := bridge.renderer; r != nil && device.SceneActive && pData != 0 && stride != 0 {
+			primType := uint32(ctx.Arg(1))
+			primCount := uint32(ctx.Arg(2))
+			byteCount := d3d9VertexCountForPrim(primType, primCount) * stride
+			if data, err := ctx.Mem.ReadBytes(pData, int(byteCount)); err == nil {
+				r.DrawPrimitiveUP(device, primType, primCount, data, stride)
+			}
+		}
+		return D3D_OK
 	default:
 		return D3D_OK
 	}
@@ -620,6 +679,23 @@ func writeGuestStruct(mem *mmu.MMU, addr uint64, value any) bool {
 
 func identityMatrix() [16]float32 {
 	return [16]float32{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
+}
+
+func d3d9VertexCountForPrim(primType, primCount uint32) uint32 {
+	switch primType {
+	case 1: // D3DPT_POINTLIST
+		return primCount
+	case 2: // D3DPT_LINELIST
+		return primCount * 2
+	case 3: // D3DPT_LINESTRIP
+		return primCount + 1
+	case 4: // D3DPT_TRIANGLELIST
+		return primCount * 3
+	case 5, 6: // D3DPT_TRIANGLESTRIP, D3DPT_TRIANGLEFAN
+		return primCount + 2
+	default:
+		return 0
+	}
 }
 
 func maxU32(a, b uint32) uint32 {

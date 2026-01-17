@@ -245,6 +245,7 @@ type HandlerCtx struct {
 	Com                   *comState
 	CurrentCPU            arch.CPU
 	D3D9Device            *d3d9.Device
+	D3D9Renderer          *d3d9.Renderer
 	D3D11Device           *d3d11.Device
 	D3D11ImmediateContext *d3d11.DeviceContext
 	DirectSound           *dsound.DirectSound

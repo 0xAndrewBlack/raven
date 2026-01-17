@@ -245,6 +245,32 @@ func (r *Renderer) DrawIndexedPrimitive(dev *Device, primType uint32, baseVertex
 	vk.CmdDrawIndexed(r.vkCommandBuffer, indexCount, 1, startIndex, baseVertex, 0)
 }
 
+// DrawPrimitiveUP draws using vertex data from a Go byte slice (guest memory
+// already copied), bypassing the stream source / vertex buffer mechanism.
+func (r *Renderer) DrawPrimitiveUP(dev *Device, primType uint32, primCount uint32, vertexData []byte, stride uint32) {
+	if r == nil || dev == nil || !r.inScene || len(vertexData) == 0 || primCount == 0 {
+		return
+	}
+	vertexCount := primitiveVertexCount(primType, primCount)
+	if vertexCount == 0 {
+		return
+	}
+	vb, _, ok := r.uploadBytes(vertexData, vk.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+	if !ok {
+		return
+	}
+	topology := d3dPrimToVkTopology(primType)
+	pipeline := r.getOrCreatePipeline(dev, topology)
+	if pipeline == 0 {
+		return
+	}
+	vk.CmdBindPipeline(r.vkCommandBuffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
+	vk.CmdBindVertexBuffers(r.vkCommandBuffer, 0, []vk.VkBuffer{vb}, []vk.VkDeviceSize{0})
+	r.bindViewportAndScissor(dev)
+	r.pushConstants(dev)
+	vk.CmdDraw(r.vkCommandBuffer, vertexCount, 1, 0, 0)
+}
+
 func (r *Renderer) Present(windows ...*wl.Window) []byte {
 	if r == nil {
 		return nil
