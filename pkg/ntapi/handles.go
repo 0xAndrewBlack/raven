@@ -1276,11 +1276,12 @@ type HandleTable struct {
 }
 
 // NewHandleTable creates an empty handle table.
-// Handles start at 0x100 to avoid collision with pseudo-handles.
+// Handles start at 0x200 to avoid collision with pseudo-handles and
+// hardcoded stdin/stdout/stderr values (0x100/0x101/0x102/0x103).
 func NewHandleTable() *HandleTable {
 	return &HandleTable{
 		handles: make(map[Handle]HandleObject),
-		nextID:  0x100,
+		nextID:  0x200,
 		named:   make(map[string]Handle),
 		names:   make(map[Handle]string),
 	}

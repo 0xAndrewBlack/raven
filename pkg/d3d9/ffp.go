@@ -73,7 +73,7 @@ func GenerateFFPVertexShader(numTexCoords int, lighting bool, numLights int) []b
 	fnType := b.TypeFunction(voidType)
 	mainID := b.AllocID()
 
-	inPosition := b.Variable(inVec3Ptr, spvStorageClassInput)
+	inPosition := b.Variable(inVec4Ptr, spvStorageClassInput)
 	b.Decorate(inPosition, spvDecorationLocation, 0)
 	inNormal := b.Variable(inVec3Ptr, spvStorageClassInput)
 	b.Decorate(inNormal, spvDecorationLocation, 1)
@@ -115,7 +115,7 @@ func GenerateFFPVertexShader(numTexCoords int, lighting bool, numLights int) []b
 	int0 := b.Constant(intType, 0)
 	int1 := b.Constant(intType, 1)
 
-	position := b.Load(vec3Type, inPosition)
+	position := b.Load(vec4Type, inPosition)
 	px := b.CompositeExtract(floatType, position, 0)
 	py := b.CompositeExtract(floatType, position, 1)
 	pz := b.CompositeExtract(floatType, position, 2)

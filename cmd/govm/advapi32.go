@@ -5503,27 +5503,71 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		ctx.SetReturn(0)
 		return 0
 	})
+	// GetFileSecurityA(lpFileName, RequestedInformation, pSecurityDescriptor, nLength, lpnLengthNeeded)
+	// Returns a minimal self-relative SECURITY_DESCRIPTOR with NULL DACL (grants full access).
 	d.RegisterAutoStubHandler(advapi32, "GetFileSecurityA", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		ravelog.Logf("[advapi32] GetFileSecurityA p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
+		lpFileName := ctx.Arg(0)
+		pSecDesc := ctx.Arg(2)
+		nLength := ctx.Arg(3)
+		lpnLengthNeeded := ctx.Arg(4)
+		path := ""
+		if lpFileName != 0 {
+			path = ctx.Mem.ReadCString(lpFileName, 260)
+		}
+		// Minimal self-relative SECURITY_DESCRIPTOR: 20 bytes, NULL DACL = full access.
+		// Revision=1, Control=SE_SELF_RELATIVE|SE_DACL_PRESENT=0x8004, all offsets=0.
+		const sdSize = uint32(20)
+		if lpnLengthNeeded != 0 {
+			ctx.Mem.Write32Raw(lpnLengthNeeded, sdSize)
+		}
+		if nLength < uint64(sdSize) || pSecDesc == 0 {
+			ravelog.Logf("[advapi32] GetFileSecurityA(%q) → ERROR_INSUFFICIENT_BUFFER (need %d)\n", path, sdSize)
+			setLastError(ctx, 122) // ERROR_INSUFFICIENT_BUFFER
+			ctx.SetReturn(0)
+			return 0
+		}
+		sd := []byte{
+			1, 0, // Revision=1, Sbz1=0
+			0x04, 0x80, // Control: SE_SELF_RELATIVE(0x8000)|SE_DACL_PRESENT(0x0004)
+			0, 0, 0, 0, // OffsetOwner=0
+			0, 0, 0, 0, // OffsetGroup=0
+			0, 0, 0, 0, // OffsetSacl=0
+			0, 0, 0, 0, // OffsetDacl=0 (NULL DACL)
+		}
+		_ = ctx.Mem.WriteBytes(pSecDesc, sd)
+		ravelog.Logf("[advapi32] GetFileSecurityA(%q) → ok (NULL DACL)\n", path)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(advapi32, "GetFileSecurityW", func(ctx *ntapi.TrapContext) uint32 {
-		p0 := ctx.Arg(0)
-		p1 := ctx.Arg(1)
-		p2 := ctx.Arg(2)
-		p3 := ctx.Arg(3)
-		p4 := ctx.Arg(4)
-		ravelog.Logf("[advapi32] GetFileSecurityW p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
-		_ = p3
-		_ = p4
+		lpFileName := ctx.Arg(0)
+		pSecDesc := ctx.Arg(2)
+		nLength := ctx.Arg(3)
+		lpnLengthNeeded := ctx.Arg(4)
+		path := ""
+		if lpFileName != 0 {
+			path = readGuestUTF16(lpFileName)
+		}
+		const sdSize = uint32(20)
+		if lpnLengthNeeded != 0 {
+			ctx.Mem.Write32Raw(lpnLengthNeeded, sdSize)
+		}
+		if nLength < uint64(sdSize) || pSecDesc == 0 {
+			ravelog.Logf("[advapi32] GetFileSecurityW(%q) → ERROR_INSUFFICIENT_BUFFER (need %d)\n", path, sdSize)
+			setLastError(ctx, 122)
+			ctx.SetReturn(0)
+			return 0
+		}
+		sd := []byte{
+			1, 0,
+			0x04, 0x80,
+			0, 0, 0, 0,
+			0, 0, 0, 0,
+			0, 0, 0, 0,
+			0, 0, 0, 0,
+		}
+		_ = ctx.Mem.WriteBytes(pSecDesc, sd)
+		ravelog.Logf("[advapi32] GetFileSecurityW(%q) → ok (NULL DACL)\n", path)
 		ctx.SetReturn(1)
 		return 0
 	})

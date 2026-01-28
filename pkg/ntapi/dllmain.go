@@ -46,6 +46,82 @@ func AllocTrampoline(mem *mmu.MMU) *DllMainTrampoline {
 	return &DllMainTrampoline{Addr: addr}
 }
 
+// CallDllMain32 invokes a PE32 DLL's entry point (DllMain) with DLL_PROCESS_ATTACH.
+// It saves the CPU state, sets up the Windows x86 stdcall stack frame, runs the CPU
+// until the trampoline fires the return sentinel, then restores the CPU state.
+//
+// Windows x86 stdcall for DllMain:
+//
+//	[esp+4]  = hinstDLL (DLL base address, truncated to 32 bits)
+//	[esp+8]  = fdwReason (DLL_PROCESS_ATTACH = 1)
+//	[esp+0xc] = lpvReserved (0 for dynamic loads)
+func CallDllMain32(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline, dllBase, entryPoint uint64, trace bool) error {
+	if entryPoint == 0 || entryPoint == dllBase {
+		return nil // no entry point
+	}
+
+	rw, ok := cpu.(RegisterWriter)
+	if !ok {
+		return fmt.Errorf("CPU does not support RegisterWriter for DllMain32 calls")
+	}
+	rr, ok := cpu.(RegisterReader)
+	if !ok {
+		return fmt.Errorf("CPU does not support RegisterReader for DllMain32 calls")
+	}
+
+	// Save all general-purpose registers + RIP
+	var savedRegs [16]uint64
+	for i := 0; i < 16; i++ {
+		savedRegs[i] = rr.ReadReg(i)
+	}
+	savedRIP := cpu.GetPC()
+	savedSP := cpu.GetSP()
+
+	// Set up Windows x86 stdcall stack: push right-to-left, then return address.
+	// The DllMain prototype is:  BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
+	// Stdcall: callee cleans up args (ret 0xC). Caller pushes:
+	//   1. lpvReserved = 0
+	//   2. fdwReason   = DLL_PROCESS_ATTACH
+	//   3. hinstDLL    = dllBase (32-bit)
+	//   4. return address (pushed last, lowest address = what [esp] points to on entry)
+	sp := savedSP & ^uint64(0xF) // align to 16
+	sp -= 4
+	mem.Write32(sp, 0) // lpvReserved
+	sp -= 4
+	mem.Write32(sp, DllProcessAttach) // fdwReason
+	sp -= 4
+	mem.Write32(sp, uint32(dllBase)) // hinstDLL
+	sp -= 4
+	mem.Write32(sp, uint32(trampoline.Addr)) // return address
+	cpu.SetSP(sp)
+
+	// Set EIP to DllMain entry
+	cpu.SetPC(entryPoint)
+
+	fmt.Printf("[dllmain32] calling entry 0x%x (base=0x%x) trampoline=0x%x sp=0x%x\n", entryPoint, dllBase, trampoline.Addr, sp)
+
+	// Run the CPU until the trampoline sentinel fires Stop()
+	err := cpu.Run()
+	cpu.Resume() // reset running flag so the outer Run() loop can continue
+	fmt.Printf("[dllmain32] cpu.Run() returned: err=%v\n", err)
+	if err != nil {
+		if _, isExit := err.(*arch.ExitError); isExit {
+			return err
+		}
+	}
+
+	// Restore CPU state
+	for i := 0; i < 16; i++ {
+		rw.WriteReg(i, savedRegs[i])
+	}
+	cpu.SetPC(savedRIP)
+	cpu.SetSP(savedSP)
+
+	fmt.Printf("[dllmain32] entry 0x%x completed, restored PC=0x%x SP=0x%x\n", entryPoint, savedRIP, savedSP)
+
+	return nil
+}
+
 // CallDllMain invokes a DLL's entry point (DllMain) with DLL_PROCESS_ATTACH.
 // It saves the CPU state, sets up the Windows x64 ABI arguments, runs the CPU
 // until the trampoline fires the return sentinel, then restores the CPU state.
@@ -100,6 +176,7 @@ func CallDllMain(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline, dllB
 
 	// Run the CPU until the trampoline sentinel fires Stop()
 	err := cpu.Run()
+	cpu.Resume() // reset running flag so the outer Run() loop can continue
 	if err != nil {
 		// ExitError means the DllMain called NtTerminateProcess - that's fatal
 		if _, isExit := err.(*arch.ExitError); isExit {

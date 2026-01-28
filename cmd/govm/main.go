@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
@@ -353,6 +356,8 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 
 	// Populate VFS with basic Windows directory structure
 	fs.MkdirAll("/Windows/System32")
+	fs.MkdirAll("/Windows/System32/Fonts")
+	fs.MkdirAll("/Windows/Temp")
 	fs.MkdirAll("/Windows/TEMP")
 	fs.MkdirAll("/Users/user/AppData/Local/Temp")
 	fs.MkdirAll("/Program Files")
@@ -363,6 +368,56 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	peDir := filepath.Dir(absPath)
 	peDirBase := filepath.Base(peDir)
 	populateVFSFromHost(fs, peDir, "/"+peDirBase)
+
+	// Detect Wise 5.x self-extracting installer and extract game files proactively.
+	// This bypasses the native bytecode conditional that gates file extraction in the
+	// Wise script interpreter (which we can't intercept).
+	if raw, err := os.ReadFile(absPath); err == nil && len(raw) > 0x100 {
+		if raw[0] == 'M' && raw[1] == 'Z' {
+			// Check for Wise installer signature: overlay containing deflatable script
+			// with %MAINDIR% file entries.
+			peOff := int(binary.LittleEndian.Uint32(raw[0x3c:]))
+			if peOff+0x100 < len(raw) && string(raw[peOff:peOff+4]) == "PE\x00\x00" {
+				numSec := int(binary.LittleEndian.Uint16(raw[peOff+6:]))
+				secStart := peOff + 0x18 + int(binary.LittleEndian.Uint16(raw[peOff+0x14:]))
+				ovOff := 0
+				for i := 0; i < numSec; i++ {
+					off := secStart + i*0x28
+					end := int(binary.LittleEndian.Uint32(raw[off+0x14:])) + int(binary.LittleEndian.Uint32(raw[off+0x10:]))
+					if end > ovOff {
+						ovOff = end
+					}
+				}
+				if ovOff > 0 && ovOff < len(raw)-0x100 {
+					// Try to decompress script at overlay+0x51
+					scriptOff := ovOff + 0x51
+					if scriptOff < len(raw) {
+						r := flate.NewReader(bytes.NewReader(raw[scriptOff:]))
+						script, serr := io.ReadAll(r)
+						r.Close()
+						if serr == nil && bytes.Contains(script, []byte("%MAINDIR%\\")) {
+							ravelog.Logf("[wise-detect] Wise 5.x installer detected, extracting files...\n")
+							if err := wiseExtractArchive(absPath, fs, "/DXBall"); err != nil {
+								ravelog.Logf("[wise-detect] extraction error: %v\n", err)
+							} else {
+								wiseExtractDone = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// After Wise extraction, redirect PE loading to the extracted game EXE
+	// instead of continuing with the installer.
+	if wiseExtractDone && wiseGameHostPath != "" {
+		ravelog.Logf("[wise-detect] redirecting PE load to extracted game: %s\n", wiseGameHostPath)
+		absPath = wiseGameHostPath
+		guestArgv = []string{absPath}
+		// Also ensure the game directory is populated in VFS from host (if present)
+		// The game files are already in /DXBall from Wise extraction.
+	}
 
 	// Load the main PE
 	result, err := loader.LoadPE(absPath, mem, guestArgv, nil)
@@ -607,6 +662,27 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 					synth.ExportOrds[ord] = addr
 				}
 			}
+		case "dsound.dll":
+			// Windows DSOUND ordinal 1 = DirectSoundCreate.
+			// Auto-synth creates "ord_1" placeholder; rename to real name so
+			// registerDsoundHandlers can wire up the handler.
+			dsOrdNames := map[uint16]string{
+				1: "DirectSoundCreate",
+				2: "DirectSoundEnumerateA",
+				3: "DirectSoundEnumerateW",
+				6: "DirectSoundCaptureCreate",
+				7: "DirectSoundCaptureEnumerateA",
+				8: "DirectSoundCaptureEnumerateW",
+			}
+			for ord, name := range dsOrdNames {
+				placeholder := fmt.Sprintf("ord_%d", ord)
+				if addr, ok := synth.Exports[placeholder]; ok {
+					synth.Exports[name] = addr
+					synth.ExportOrds[ord] = addr
+				} else if addr, ok := synth.Exports[name]; ok {
+					synth.ExportOrds[ord] = addr
+				}
+			}
 		}
 	}
 
@@ -652,6 +728,16 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	if !result.MainModule.Is64 {
 		procArch = "x86"
 	}
+	guestEnvironment := []string{
+		"PATH=C:\\Windows\\System32;C:\\Windows",
+		"SYSTEMROOT=C:\\Windows",
+		"WINDIR=C:\\Windows",
+		"TEMP=C:\\Windows\\TEMP",
+		"TMP=C:\\Windows\\TEMP",
+		"OS=Windows_NT",
+		"PROCESSOR_ARCHITECTURE=" + procArch,
+		"NUMBER_OF_PROCESSORS=4",
+	}
 
 	// Initialize PEB/TEB
 	procState, err := ntapi.InitProcess(mem, &ntapi.ProcessInit{
@@ -661,20 +747,12 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 		CommandLine: cmdLine,
 		ImagePath:   `C:\` + filepath.Base(absPath),
 		CurrentDir:  `C:\`,
-		Environment: []string{
-			"PATH=C:\\Windows\\System32;C:\\Windows",
-			"SYSTEMROOT=C:\\Windows",
-			"TEMP=C:\\Windows\\TEMP",
-			"TMP=C:\\Windows\\TEMP",
-			"OS=Windows_NT",
-			"PROCESSOR_ARCHITECTURE=" + procArch,
-			"NUMBER_OF_PROCESSORS=4",
-		},
-		ProcessId:  1000,
-		ThreadId:   1004,
-		StackBase:  stackTop,
-		StackLimit: stackTop - stackSize,
-		Is32:       !result.MainModule.Is64,
+		Environment: guestEnvironment,
+		ProcessId:   1000,
+		ThreadId:    1004,
+		StackBase:   stackTop,
+		StackLimit:  stackTop - stackSize,
+		Is32:        !result.MainModule.Is64,
 	}, modules)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "govm: PEB/TEB init error: %v\n", err)
@@ -750,6 +828,41 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	}
 	c.SetPC(result.EntryPoint)
 	c.SetSP(result.StackPtr)
+	ravelog.Logf("[pe] starting entry at 0x%x SP=0x%x mode32=%v\n", result.EntryPoint, result.StackPtr, !result.MainModule.Is64)
+	// Watch for writes to the return address area around 0x7ffcff40
+	if !result.MainModule.Is64 {
+		// Dump function prologue at 0x40cc60 and code at 0x40d03f (the good path)
+		for _, base := range []uint64{0x40cc60, 0x40d03f} {
+			var codeBuf [32]byte
+			for i := range codeBuf {
+				codeBuf[i], _ = mem.Read8(base + uint64(i))
+			}
+			ravelog.Logf("[CODE-DUMP] 0x%x: % x\n", base, codeBuf[:])
+		}
+		// DXBall: force DirectX availability flag - the game's packer
+		// normally sets [0x434998] during import resolution, but our
+		// synthetic DLL system resolves imports differently.
+		mem.Write32(0x434998, 1)
+	}
+
+	// PE32 NULL-guard page: make page 0 executable with a vtable that
+	// returns S_OK for any method call on a NULL object pointer.
+	// Prevents crashes from null COM object dereferences.
+	if c.Mode32 {
+		// Map page 0 as RWX (MapPage handles both new and existing pages)
+		mem.MapPage(0, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+		// Fill first 0x200 bytes with pointers to a "ret 8" stub at 0xF00
+		stubAddr := uint32(0xF00)
+		for off := uint32(0); off < 0x200; off += 4 {
+			mem.Write32(uint64(off), stubAddr)
+		}
+		// Write "xor eax,eax; ret 8" stub at 0xF00
+		mem.Write8(0xF00, 0x31) // xor eax, eax
+		mem.Write8(0xF01, 0xC0)
+		mem.Write8(0xF02, 0xC2) // ret 8
+		mem.Write8(0xF03, 0x08)
+		mem.Write8(0xF04, 0x00)
+	}
 	if c.Mode32 {
 		c.SetTLS(procState.TEBAddr) // FS points to TEB (x86 Win32 convention)
 	} else {
@@ -876,7 +989,12 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 		// Restore CPU state for main entry
 		c.SetPC(result.EntryPoint)
 		c.SetSP(result.StackPtr)
-		ravelog.Logf("[pe] DllMain phase complete, starting main entry at 0x%x\n", result.EntryPoint)
+		ravelog.Logf("[pe] DllMain phase complete, starting main entry at 0x%x SP=0x%x\n", result.EntryPoint, result.StackPtr)
+		// Debug: dump stack top to verify exit sentinel
+		for i := uint64(0); i < 32; i += 4 {
+			v, _ := mem.Read32(result.StackPtr + i)
+			ravelog.Logf("[pe] stack[SP+0x%x] = 0x%08x\n", i, v)
+		}
 	}
 
 	// Background goroutine to keep KUSER_SHARED_DATA TickCount and SystemTime up-to-date.
@@ -1277,7 +1395,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// Menu data structures
 	const menuBarHeight int32 = 20
-	envVars := map[string]string{} // guest environment variables (SetEnvironmentVariableW/GetEnvironmentVariableW)
 
 	// Atom tables
 	localAtomTable := map[string]uint16{}
@@ -2051,7 +2168,115 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		return string(result)
 	}
 
-	// --- GDI rendering state ---
+	// ansiprintf is like wideprintf but reads %s as ANSI (for wsprintfA, sprintfA, etc.)
+	// In ANSI variants: %s = ANSI string, %S = wide string.
+	ansiprintf := func(format string, args []uint64) string {
+		var result []rune
+		argIdx := 0
+		nextArg := func() int64 {
+			if argIdx < len(args) {
+				v := args[argIdx]
+				argIdx++
+				return int64(v)
+			}
+			return 0
+		}
+		nextPtr := func() uint64 {
+			if argIdx < len(args) {
+				v := args[argIdx]
+				argIdx++
+				return v
+			}
+			return 0
+		}
+
+		i := 0
+		for i < len(format) {
+			if format[i] != '%' {
+				result = append(result, rune(format[i]))
+				i++
+				continue
+			}
+			i++ // skip '%'
+			if i >= len(format) {
+				break
+			}
+			// Flags
+			for i < len(format) && (format[i] == '-' || format[i] == '+' || format[i] == '0' || format[i] == ' ' || format[i] == '#') {
+				i++
+			}
+			// Width
+			for i < len(format) && format[i] >= '0' && format[i] <= '9' {
+				i++
+			}
+			// Precision
+			if i < len(format) && format[i] == '.' {
+				i++
+				for i < len(format) && format[i] >= '0' && format[i] <= '9' {
+					i++
+				}
+			}
+			// Length modifier
+			if i < len(format) && format[i] == 'l' {
+				i++
+				if i < len(format) && format[i] == 'l' {
+					i++
+				}
+			} else if i < len(format) && format[i] == 'h' {
+				i++
+			} else if i < len(format) && format[i] == 'I' {
+				i++
+				if i+1 < len(format) && format[i] == '6' && format[i+1] == '4' {
+					i += 2
+				}
+			}
+			if i >= len(format) {
+				break
+			}
+			switch format[i] {
+			case 'd', 'i':
+				v := nextArg()
+				for _, r := range fmt.Sprintf("%d", int32(v)) {
+					result = append(result, r)
+				}
+			case 'u':
+				v := nextArg()
+				for _, r := range fmt.Sprintf("%d", uint32(v)) {
+					result = append(result, r)
+				}
+			case 'x':
+				v := nextArg()
+				for _, r := range fmt.Sprintf("%x", uint32(v)) {
+					result = append(result, r)
+				}
+			case 'X':
+				v := nextArg()
+				for _, r := range fmt.Sprintf("%X", uint32(v)) {
+					result = append(result, r)
+				}
+			case 's': // ANSI string
+				p := nextPtr()
+				for _, r := range readGuestString(p) {
+					result = append(result, r)
+				}
+			case 'S': // Wide string in ANSI printf
+				p := nextPtr()
+				for _, r := range readGuestUTF16(p) {
+					result = append(result, r)
+				}
+			case 'c':
+				v := nextArg()
+				result = append(result, rune(v))
+			case '%':
+				result = append(result, '%')
+			default:
+				result = append(result, '%', rune(format[i]))
+			}
+			i++
+		}
+		return string(result)
+	}
+
 	// gdiMgr manages all GDI objects and DCs. Screen surface is wired to
 	// wlWindow.Pix when the Wayland window is created.
 	// ReactOS reference: win32ss/gdi/ntgdi/gdiobj.c
@@ -2219,6 +2444,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// ── Create HandlerCtx (shared state for all extracted DLL handlers) ──
 	guestCallTrampoline := ntapi.AllocTrampoline(mem)
+	envVars := map[string]string{
+		"PATH":                   "C:\\Windows\\System32;C:\\Windows",
+		"SYSTEMROOT":             "C:\\Windows",
+		"WINDIR":                 "C:\\Windows",
+		"TEMP":                   "C:\\Windows\\TEMP",
+		"TMP":                    "C:\\Windows\\TEMP",
+		"OS":                     "Windows_NT",
+		"NUMBER_OF_PROCESSORS":   "4",
+		"PROCESSOR_ARCHITECTURE": "AMD64",
+	}
+	if mode32 {
+		envVars["PROCESSOR_ARCHITECTURE"] = "x86"
+	}
 	hctx := &HandlerCtx{
 		// Core references
 		Mem: mem, Disp: d, Handles: handles, ProcState: procState,
@@ -2240,7 +2478,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		ReadGuestUTF16: readGuestUTF16, ReadGuestUTF16N: readGuestUTF16N,
 		ReadGuestString: readGuestString,
 		HeapAlloc:       sharedHeapAlloc, HeapFree: sharedHeapFree,
-		Wideprintf: wideprintf, CrtStreamWriter: crtStreamWriter,
+		Wideprintf: wideprintf, Ansiprintf: ansiprintf, CrtStreamWriter: crtStreamWriter,
 		AddAtomLocal: addAtomLocal, AddAtomGlobal: addAtomGlobal,
 		IniRead: iniRead, IniWrite: iniWrite,
 		DoCreateFileMapping: doCreateFileMapping, DoMapView: doMapView, DoUnmapView: doUnmapView,
@@ -5777,11 +6015,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	const syncTrampolineID = 0x3FFE
 	// Allocate a trampoline page.
 	// Layout:
-	//   +0  48 89 05 09 00 00 00  MOV [RIP+9], RAX  ; save WndProc result at +16
-	//   +7  B8 FE 3F 00 00        MOV EAX, 0x3FFE   ; trampoline vmcall ID
-	//   +12 0F 01 C1              VMCALL
-	//   +15 C3                    RET
-	//   +16 (8 bytes)             WndProc RAX save slot
+	//   PE32:
+	//     +0  A3 [addr32]          MOV [scratch], EAX
+	//     +5  B8 [imm32]           MOV EAX, syncTrampolineID
+	//     +10 0F 01 C1             VMCALL
+	//     +13 C3                   RET
+	//     +14 (4 bytes)            scratch slot
+	//   PE64:
+	//     +0  48 89 05 0D 00 00 00 MOV [RIP+13], RAX ; save WndProc result at +20
+	//     +7  48 83 C4 28          ADD RSP, 0x28     ; release Win64 shadow/alignment space
+	//     +11 B8 FE 3F 00 00       MOV EAX, 0x3FFE
+	//     +16 0F 01 C1             VMCALL
+	//     +19 C3                   RET
+	//     +20 (8 bytes)            scratch slot
 	hctx.SyncTrampoline = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
 	is32 := procState.Is32
 	if is32 {
@@ -5802,24 +6048,58 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		mem.Write8(hctx.SyncTrampoline+13, 0xC3) // ret
 	} else {
 		// x64 trampoline layout:
-		//   +0  48 89 05 09 00 00 00  MOV [RIP+9], RAX  ; save WndProc result at +16
-		//   +7  B8 FE 3F 00 00        MOV EAX, 0x3FFE   ; trampoline vmcall ID
-		//   +12 0F 01 C1              VMCALL
-		//   +15 C3                    RET
-		//   +16 (8 bytes)             WndProc RAX save slot
+		//   +0  48 89 05 0D 00 00 00  MOV [RIP+13], RAX ; save WndProc result at +20
+		//   +7  48 83 C4 28           ADD RSP, 0x28     ; release Win64 shadow/alignment space
+		//   +11 B8 FE 3F 00 00        MOV EAX, 0x3FFE
+		//   +16 0F 01 C1              VMCALL
+		//   +19 C3                    RET
+		//   +20 (8 bytes)             WndProc RAX save slot
 		mem.Write8(hctx.SyncTrampoline+0, 0x48)
 		mem.Write8(hctx.SyncTrampoline+1, 0x89)
 		mem.Write8(hctx.SyncTrampoline+2, 0x05)
-		mem.Write32(hctx.SyncTrampoline+3, 9) // RIP-relative offset
-		mem.Write8(hctx.SyncTrampoline+7, 0xB8)
-		mem.Write32(hctx.SyncTrampoline+8, syncTrampolineID)
-		mem.Write8(hctx.SyncTrampoline+12, 0x0F)
-		mem.Write8(hctx.SyncTrampoline+13, 0x01)
-		mem.Write8(hctx.SyncTrampoline+14, 0xC1)
-		mem.Write8(hctx.SyncTrampoline+15, 0xC3)
+		mem.Write32(hctx.SyncTrampoline+3, 13) // RIP-relative offset
+		mem.Write8(hctx.SyncTrampoline+7, 0x48)
+		mem.Write8(hctx.SyncTrampoline+8, 0x83)
+		mem.Write8(hctx.SyncTrampoline+9, 0xC4)
+		mem.Write8(hctx.SyncTrampoline+10, 0x28)
+		mem.Write8(hctx.SyncTrampoline+11, 0xB8)
+		mem.Write32(hctx.SyncTrampoline+12, syncTrampolineID)
+		mem.Write8(hctx.SyncTrampoline+16, 0x0F)
+		mem.Write8(hctx.SyncTrampoline+17, 0x01)
+		mem.Write8(hctx.SyncTrampoline+18, 0xC1)
+		mem.Write8(hctx.SyncTrampoline+19, 0xC3)
 	}
 
-	// syncSetupWndProcCall sets up a guest WndProc call for both PE32 (stdcall
+	// ModalPumpTrampoline stub: same layout as SyncTrampoline but uses
+	// modalPumpTrampolineID.  Placed at SyncTrampoline+64 in the same page.
+	hctx.ModalPumpTrampoline = hctx.SyncTrampoline + 64
+	if is32 {
+		scratchAddr2 := uint32(hctx.ModalPumpTrampoline + 14)
+		mem.Write8(hctx.ModalPumpTrampoline+0, 0xA3)
+		mem.Write32(hctx.ModalPumpTrampoline+1, scratchAddr2)
+		mem.Write8(hctx.ModalPumpTrampoline+5, 0xB8)
+		mem.Write32(hctx.ModalPumpTrampoline+6, modalPumpTrampolineID)
+		mem.Write8(hctx.ModalPumpTrampoline+10, 0x0F)
+		mem.Write8(hctx.ModalPumpTrampoline+11, 0x01)
+		mem.Write8(hctx.ModalPumpTrampoline+12, 0xC1)
+		mem.Write8(hctx.ModalPumpTrampoline+13, 0xC3)
+	} else {
+		mem.Write8(hctx.ModalPumpTrampoline+0, 0x48)
+		mem.Write8(hctx.ModalPumpTrampoline+1, 0x89)
+		mem.Write8(hctx.ModalPumpTrampoline+2, 0x05)
+		mem.Write32(hctx.ModalPumpTrampoline+3, 13)
+		mem.Write8(hctx.ModalPumpTrampoline+7, 0x48)
+		mem.Write8(hctx.ModalPumpTrampoline+8, 0x83)
+		mem.Write8(hctx.ModalPumpTrampoline+9, 0xC4)
+		mem.Write8(hctx.ModalPumpTrampoline+10, 0x28)
+		mem.Write8(hctx.ModalPumpTrampoline+11, 0xB8)
+		mem.Write32(hctx.ModalPumpTrampoline+12, modalPumpTrampolineID)
+		mem.Write8(hctx.ModalPumpTrampoline+16, 0x0F)
+		mem.Write8(hctx.ModalPumpTrampoline+17, 0x01)
+		mem.Write8(hctx.ModalPumpTrampoline+18, 0xC1)
+		mem.Write8(hctx.ModalPumpTrampoline+19, 0xC3)
+	}
+
 	// on stack) and PE32+ (x64 fastcall in registers). It pushes a return
 	// address (retAddr) so the WndProc RET returns there.
 	syncSetupWndProcCall := func(ctx *ntapi.TrapContext, wndProc, hwnd uint64, msg uint32, wParam, lParam, retAddr uint64) {
@@ -5841,7 +6121,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			rw.WriteReg(4, rsp)
 		} else {
 			rsp := rr.ReadReg(4)
-			rsp -= 8
+			// Win64 requires 32 bytes of shadow space plus 8 bytes to keep the
+			// callee entry stack aligned like a normal CALL would.
+			rsp -= 48
 			mem.Write64(rsp, retAddr)
 			rw.WriteReg(4, rsp)
 			rw.WriteReg(1, hwnd)
@@ -5907,7 +6189,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			rsp -= 4
 			mem.Write32(rsp, uint32(retAddr))
 		} else {
-			rsp -= 8
 			mem.Write64(rsp, retAddr)
 		}
 		rw.WriteReg(4, rsp)
@@ -5916,7 +6197,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				saved, _ := mem.Read32(hctx.SyncTrampoline + 14)
 				ctx.SetReturn(uint64(saved))
 			} else {
-				saved, _ := mem.Read64(hctx.SyncTrampoline + 16)
+				saved, _ := mem.Read64(hctx.SyncTrampoline + 20)
 				ctx.SetReturn(saved)
 			}
 		} else {
@@ -6512,6 +6793,10 @@ func winPathToVFS(winPath string) string {
 	// Ensure leading slash
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
+	}
+	// Collapse consecutive slashes (e.g. from "C:\Temp\" + "\file.exe")
+	for strings.Contains(p, "//") {
+		p = strings.ReplaceAll(p, "//", "/")
 	}
 	return p
 }

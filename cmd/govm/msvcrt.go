@@ -36,9 +36,20 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(msvcrt, "_initterm", func(ctx *ntapi.TrapContext) uint32 {
 		begin := ctx.Arg(0)
 		end := ctx.Arg(1)
+		is32 := begin < 0x100000000
+		stride := uint64(8)
+		if is32 {
+			stride = 4
+		}
 		var fns []uint64
-		for ptr := begin; ptr < end; ptr += 8 {
-			fp, _ := mem.Read64(ptr)
+		for ptr := begin; ptr < end; ptr += stride {
+			var fp uint64
+			if is32 {
+				v, _ := mem.Read32(ptr)
+				fp = uint64(v)
+			} else {
+				fp, _ = mem.Read64(ptr)
+			}
 			if fp != 0 {
 				fns = append(fns, fp)
 			}
@@ -46,13 +57,19 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		if len(fns) == 0 {
 			return 0
 		}
-		_, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
 		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
 		if !ok || !ok2 {
 			return 0
 		}
 		rsp := rr.ReadReg(4)
-		retAddr, _ := mem.Read64(rsp)
+		var retAddr uint64
+		if is32 {
+			v, _ := mem.Read32(rsp)
+			retAddr = uint64(v)
+		} else {
+			retAddr, _ = mem.Read64(rsp)
+		}
 		var queue []syncDispatch
 		for _, fp := range fns[1:] {
 			queue = append(queue, syncDispatch{wndProc: fp})
@@ -62,7 +79,13 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 			retAddr: retAddr,
 			hwnd:    0,
 		})
-		mem.Write64(rsp, hctx.SyncTrampoline)
+		if is32 {
+			mem.Write32(rsp, uint32(hctx.SyncTrampoline))
+		} else {
+			rsp -= 48
+			mem.Write64(rsp, hctx.SyncTrampoline)
+			rw.WriteReg(4, rsp)
+		}
 		ctx.CPU.SetPC(fns[0])
 		ctx.ReturnOverridden = true
 		ctx.PCRedirected = true
@@ -74,6 +97,7 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		pArgc := ctx.Arg(0)
 		pArgv := ctx.Arg(1)
 		pEnv := ctx.Arg(2)
+		is32 := ctx.State != nil && ctx.State.Is32
 
 		// Allocate argv array in guest memory
 		argc := len(argv)
@@ -82,23 +106,45 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		for _, a := range argv {
 			totalStrLen += len(a) + 1
 		}
-		argvBuf := mem.Mmap(0, uint64(8*(argc+1)+totalStrLen+64), mmu.PermRead|mmu.PermWrite)
-		strOff := argvBuf + uint64(8*(argc+1))
+		ptrSize := uint64(8)
+		if is32 {
+			ptrSize = 4
+		}
+		argvBuf := mem.Mmap(0, uint64(int(ptrSize)*(argc+1)+totalStrLen+64), mmu.PermRead|mmu.PermWrite)
+		strOff := argvBuf + uint64(int(ptrSize)*(argc+1))
 		for i, a := range argv {
-			mem.Write64(argvBuf+uint64(i*8), strOff)
+			if is32 {
+				mem.Write32(argvBuf+uint64(i)*ptrSize, uint32(strOff))
+			} else {
+				mem.Write64(argvBuf+uint64(i)*ptrSize, strOff)
+			}
 			mem.WriteBytes(strOff, append([]byte(a), 0))
 			strOff += uint64(len(a) + 1)
 		}
-		mem.Write64(argvBuf+uint64(argc*8), 0) // null terminator
+		if is32 {
+			mem.Write32(argvBuf+uint64(argc)*ptrSize, 0)
+		} else {
+			mem.Write64(argvBuf+uint64(argc)*ptrSize, 0)
+		}
 
 		// Write results
 		mem.Write32(pArgc, uint32(argc))
-		mem.Write64(pArgv, argvBuf)
+		if is32 {
+			mem.Write32(pArgv, uint32(argvBuf))
+		} else {
+			mem.Write64(pArgv, argvBuf)
+		}
 
 		// Empty environment
 		envBuf := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
-		mem.Write64(envBuf, 0) // null-terminated env array
-		mem.Write64(pEnv, envBuf)
+		if is32 {
+			mem.Write32(envBuf, 0)
+			mem.Write32(pEnv, uint32(envBuf))
+		} else {
+			mem.Write64(envBuf, 0)
+			mem.Write64(pEnv, envBuf)
+		}
+		ravelog.Logf("[env] __getmainargs is32=%v argc=%d argv=0x%x env=0x%x\n", is32, argc, argvBuf, envBuf)
 
 		return 0
 	})
@@ -1249,10 +1295,22 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(msvcrt, "_initterm_e", func(ctx *ntapi.TrapContext) uint32 {
 		begin := ctx.Arg(0)
 		end := ctx.Arg(1)
-		for ptr := begin; ptr < end; ptr += 8 {
-			fnPtr, _ := mem.Read64(ptr)
+		is32 := begin < 0x100000000
+		stride := uint64(8)
+		if is32 {
+			stride = 4
+		}
+		for ptr := begin; ptr < end; ptr += stride {
+			var fnPtr uint64
+			if is32 {
+				v, _ := mem.Read32(ptr)
+				fnPtr = uint64(v)
+			} else {
+				fnPtr, _ = mem.Read64(ptr)
+			}
 			if fnPtr != 0 {
 				// Skip calling - assume all initializers succeed
+				_ = fnPtr
 			}
 		}
 		ctx.SetReturn(0)

@@ -1873,17 +1873,23 @@ func (cs *comState) freeBSTR(bstr uint64) {
 	}
 }
 
-func (cs *comState) createGuestObject(mem *mmu.MMU, iid GUID, methods int) (*comObject, error) {
+func (cs *comState) createGuestObject(mem *mmu.MMU, iid GUID, methods int, stdcallArgs ...[]int) (*comObject, error) {
 	if methods < 3 {
 		methods = 3
 	}
+	// Use 64-bit layout for allocation; detect 32-bit from address range.
 	totalSize := uint64(8 + methods*8 + methods*16)
 	objAddr := mem.Mmap(0, totalSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
 	if objAddr == 0 {
 		return nil, hresultError(E_OUTOFMEMORY)
 	}
-	vtableAddr := objAddr + 8
-	stubBase := vtableAddr + uint64(methods*8)
+	// PE32 processes live entirely below 4 GB - use 4-byte vtable pointers.
+	ptrSize := 8
+	if objAddr < 0x100000000 {
+		ptrSize = 4
+	}
+	vtableAddr := objAddr + uint64(ptrSize)
+	stubBase := vtableAddr + uint64(methods*ptrSize)
 	obj := &comObject{
 		primaryIID:    iid,
 		refCount:      1,
@@ -1901,6 +1907,9 @@ func (cs *comState) createGuestObject(mem *mmu.MMU, iid GUID, methods int) (*com
 		cs.disp.RegisterHandler(trapID, fmt.Sprintf("com!%s[%d]", guidString(iid), methodIndex), func(ctx *ntapi.TrapContext) uint32 {
 			return cs.dispatchObjectMethod(ctx, methodIndex)
 		})
+		if len(stdcallArgs) > 0 && i < len(stdcallArgs[0]) {
+			cs.disp.SetStdcallArgCount(trapID, stdcallArgs[0][i])
+		}
 		stubAddr := stubBase + uint64(i*16)
 		code := make([]byte, 16)
 		code[0] = 0xB8
@@ -1913,9 +1922,17 @@ func (cs *comState) createGuestObject(mem *mmu.MMU, iid GUID, methods int) (*com
 			code[j] = 0xCC
 		}
 		mem.WriteBytes(stubAddr, code)
-		mem.Write64(vtableAddr+uint64(i*8), stubAddr)
+		if ptrSize == 4 {
+			mem.Write32(vtableAddr+uint64(i*4), uint32(stubAddr))
+		} else {
+			mem.Write64(vtableAddr+uint64(i*8), stubAddr)
+		}
 	}
-	mem.Write64(objAddr, vtableAddr)
+	if ptrSize == 4 {
+		mem.Write32(objAddr, uint32(vtableAddr))
+	} else {
+		mem.Write64(objAddr, vtableAddr)
+	}
 	return obj, nil
 }
 
@@ -2224,13 +2241,22 @@ func (cs *comState) release(obj *comObject) uint32 {
 	return uint32(obj.refCount)
 }
 
+// writeGuestPtr writes a pointer-sized value to guest memory, respecting PE32/PE64.
+func writeGuestPtr(ctx *ntapi.TrapContext, addr, val uint64) {
+	if ctx.State != nil && ctx.State.Is32 {
+		ctx.Mem.Write32(addr, uint32(val))
+	} else {
+		ctx.Mem.Write64(addr, val)
+	}
+}
+
 func (cs *comState) queryInterface(ctx *ntapi.TrapContext, obj *comObject) uint32 {
 	riidPtr := ctx.Arg(1)
 	ppv := ctx.Arg(2)
 	if ppv == 0 {
 		return E_POINTER
 	}
-	ctx.Mem.Write64(ppv, 0)
+	writeGuestPtr(ctx, ppv, 0)
 	if riidPtr == 0 {
 		return E_POINTER
 	}
@@ -2239,13 +2265,13 @@ func (cs *comState) queryInterface(ctx *ntapi.TrapContext, obj *comObject) uint3
 		switch {
 		case obj.kind == "create-error-info" && guidEqual(iid, IID_IErrorInfo):
 			if peer := cs.objects[data.peer]; peer != nil {
-				ctx.Mem.Write64(ppv, peer.objectAddr)
+				writeGuestPtr(ctx, ppv, peer.objectAddr)
 				cs.addRef(peer)
 				return S_OK
 			}
 		case obj.kind == "error-info" && guidEqual(iid, IID_ICreateErrorInfo):
 			if peer := cs.objects[data.peer]; peer != nil {
-				ctx.Mem.Write64(ppv, peer.objectAddr)
+				writeGuestPtr(ctx, ppv, peer.objectAddr)
 				cs.addRef(peer)
 				return S_OK
 			}
@@ -2253,13 +2279,13 @@ func (cs *comState) queryInterface(ctx *ntapi.TrapContext, obj *comObject) uint3
 	}
 	if alt, ok := obj.altInterfaces[iid]; ok && alt != 0 {
 		if peer := cs.objects[alt]; peer != nil {
-			ctx.Mem.Write64(ppv, peer.objectAddr)
+			writeGuestPtr(ctx, ppv, peer.objectAddr)
 			cs.addRef(peer)
 			return S_OK
 		}
 	}
 	if obj.supportedIIDs[iid] || guidEqual(iid, IID_IUnknown) {
-		ctx.Mem.Write64(ppv, obj.objectAddr)
+		writeGuestPtr(ctx, ppv, obj.objectAddr)
 		cs.addRef(obj)
 		return S_OK
 	}

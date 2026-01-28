@@ -118,6 +118,14 @@ func CmdCopyImageToBuffer(cb VkCommandBuffer, image VkImage, imageLayout VkImage
 	callVoid(procs.vkCmdCopyImageToBuffer, uintptr(cb), uintptr(image), uintptr(imageLayout), uintptr(buffer), uintptr(len(regions)), uintptr(unsafe.Pointer(&regions[0])))
 }
 
+func CmdCopyImage(cb VkCommandBuffer, srcImage VkImage, srcLayout VkImageLayout, dstImage VkImage, dstLayout VkImageLayout, region VkImageCopy) {
+	callVoid(procs.vkCmdCopyImage,
+		uintptr(cb),
+		uintptr(srcImage), uintptr(srcLayout),
+		uintptr(dstImage), uintptr(dstLayout),
+		1, uintptr(unsafe.Pointer(&region)))
+}
+
 func QueueSubmit(queue VkQueue, cb VkCommandBuffer, fence VkFence) VkResult {
 	ci := VkSubmitInfo{
 		SType:              VK_STRUCTURE_TYPE_SUBMIT_INFO,

@@ -143,6 +143,7 @@ func CallGuestFunction(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline
 	cpu.SetPC(addr)
 
 	err := cpu.Run()
+	cpu.Resume() // reset running flag so the outer Run() loop can continue
 	ret := rr.ReadReg(regRAX)
 	restoreErr := restoreCPUContextFromGuest(cpu, mem, savedCtx)
 	if err != nil {

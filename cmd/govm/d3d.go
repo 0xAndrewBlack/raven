@@ -83,6 +83,9 @@ var (
 func registerD3dHandlers(hctx *HandlerCtx) {
 	d := hctx.Disp
 
+	if dll, ok := hctx.SynthByName["ddraw.dll"]; ok {
+		registerDdrawHandlers(hctx, dll)
+	}
 	if dll, ok := hctx.SynthByName["dxgi.dll"]; ok {
 		registerDxgiHandlers(hctx, dll)
 	}
@@ -164,7 +167,8 @@ func registerDxgiHandlers(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 func registerD3d9Handlers(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 	d := hctx.Disp
 	d.RegisterAutoStubHandler(dll, "Direct3DCreate9", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(d3d9CreateObject(hctx))
+		obj := d3d9CreateObject(hctx)
+		ctx.SetReturn(obj)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "Direct3DCreate9Ex", func(ctx *ntapi.TrapContext) uint32 {
@@ -672,12 +676,12 @@ func d3d9Dispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32 
 	}
 }
 
-func d3dCreateCOMObject(hctx *HandlerCtx, kind string, methods int, id uint32, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32) uint64 {
-	return d3dCreateCOMObjectFromID(hctx.Mem, hctx.Disp, kind, methods, id, dispatch)
+func d3dCreateCOMObject(hctx *HandlerCtx, kind string, methods int, id uint32, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32, stdcallArgs ...[]int) uint64 {
+	return d3dCreateCOMObjectFromID(hctx.Mem, hctx.Disp, kind, methods, id, dispatch, stdcallArgs...)
 }
 
-func d3dCreatePayloadCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string, methods int, id uint32, payload any, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32) uint64 {
-	addr := d3dCreateCOMObjectFromID(mem, disp, kind, methods, id, dispatch)
+func d3dCreatePayloadCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string, methods int, id uint32, payload any, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32, stdcallArgs ...[]int) uint64 {
+	addr := d3dCreateCOMObjectFromID(mem, disp, kind, methods, id, dispatch, stdcallArgs...)
 	if addr == 0 {
 		return 0
 	}
@@ -689,7 +693,7 @@ func d3dCreatePayloadCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind 
 	return addr
 }
 
-func d3dCreateCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string, methods int, id uint32, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32) uint64 {
+func d3dCreateCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string, methods int, id uint32, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32, stdcallArgs ...[]int) uint64 {
 	if methods < 3 {
 		methods = 3
 	}
@@ -726,6 +730,10 @@ func d3dCreateCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string,
 		disp.RegisterHandler(trapID, fmt.Sprintf("d3d!%s[%d]", kind, methodIndex), func(ctx *ntapi.TrapContext) uint32 {
 			return d3dDispatchCOMMethod(ctx, methodIndex)
 		})
+		// PE32 stdcall: register arg count so cleanup pops the right number
+		if len(stdcallArgs) > 0 && i < len(stdcallArgs[0]) {
+			disp.SetStdcallArgCount(trapID, stdcallArgs[0][i])
+		}
 		stubAddr := stubBase + uint64(i*16)
 		code := make([]byte, 16)
 		code[0] = 0xB8
@@ -769,7 +777,11 @@ func d3dDispatchCOMMethod(ctx *ntapi.TrapContext, method int) uint32 {
 			d3dCOMMu.Unlock()
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppv, thisPtr)
+		if ctx.State != nil && ctx.State.Is32 {
+			ctx.Mem.Write32(ppv, uint32(thisPtr))
+		} else {
+			ctx.Mem.Write64(ppv, thisPtr)
+		}
 		obj.refCount++
 		d3dCOMMu.Unlock()
 		return S_OK

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/mirkobrombin/Raven/pkg/audio"
+	// "github.com/mirkobrombin/Raven/pkg/audio"
 	dsoundpkg "github.com/mirkobrombin/Raven/pkg/dsound"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -346,16 +346,11 @@ func bufferBytes(ptr uintptr, length uint32) []byte {
 }
 
 func ensureDirectSoundAudio(hctx *HandlerCtx, device *dsoundpkg.DirectSound) {
-	if hctx == nil || device == nil || hctx.AudioOutput != nil {
-		return
-	}
-	format := dsoundpkg.NormalizeFormat(device.Format)
-	out, err := audio.Init(int(format.NSamplesPerSec), int(format.NChannels), int(format.WBitsPerSample))
-	if err != nil {
-		ravelog.Logf("[dsound] host audio init failed: %v\n", err)
-		return
-	}
-	hctx.AudioOutput = out
+	// Audio init via purego/PipeWire triggers Go stack-copier crashes
+	// (reflect.MakeFunc frames contain stale C return values that look
+	// like invalid Go pointers). Skip host audio for now - game runs
+	// silently but renders correctly.
+	return
 }
 
 func attachDirectSoundMixer(hctx *HandlerCtx, device *dsoundpkg.DirectSound) {
@@ -365,16 +360,70 @@ func attachDirectSoundMixer(hctx *HandlerCtx, device *dsoundpkg.DirectSound) {
 	hctx.AudioOutput.SetMixer(device.Mixer(device.Format))
 }
 
+// Stdcall arg counts for IDirectSound8 (12 methods)
+var dsound8StdcallArgs = []int{
+	3, // 0: QueryInterface(this, riid, ppv)
+	1, // 1: AddRef(this)
+	1, // 2: Release(this)
+	4, // 3: CreateSoundBuffer(this, pDesc, ppBuffer, pUnkOuter)
+	2, // 4: GetCaps(this, pCaps)
+	3, // 5: DuplicateSoundBuffer(this, pOrig, ppDup)
+	3, // 6: SetCooperativeLevel(this, hwnd, level)
+	1, // 7: Compact(this)
+	2, // 8: GetSpeakerConfig(this, pConfig)
+	2, // 9: SetSpeakerConfig(this, config)
+	2, // 10: Initialize(this, pcGuidDevice)
+	2, // 11: VerifyCertification(this, pdwCertified)
+}
+
+// Stdcall arg counts for IDirectSoundCapture (7 methods)
+var dsoundCaptureStdcallArgs = []int{
+	3, // 0: QueryInterface
+	1, // 1: AddRef
+	1, // 2: Release
+	4, // 3: CreateCaptureBuffer(this, pDesc, ppBuffer, pUnk)
+	2, // 4: GetCaps(this, pCaps)
+	2, // 5: Initialize(this, pGuid)
+	2, // 6: VerifyCertification(this, pdwCertified)
+}
+
+// Stdcall arg counts for IDirectSoundBuffer (21 methods)
+var dsoundBufferStdcallArgs = []int{
+	3, // 0: QueryInterface(this, riid, ppv)
+	1, // 1: AddRef(this)
+	1, // 2: Release(this)
+	2, // 3: GetCaps(this, pCaps)
+	3, // 4: GetCurrentPosition(this, pdwPlay, pdwWrite)
+	4, // 5: GetFormat(this, pwfx, dwSizeAllocated, pdwSizeWritten)
+	2, // 6: GetVolume(this, plVolume)
+	2, // 7: GetPan(this, plPan)
+	2, // 8: GetFrequency(this, pdwFreq)
+	2, // 9: GetStatus(this, pdwStatus)
+	3, // 10: Initialize(this, pDS, pcDSBufferDesc)
+	8, // 11: Lock(this, dwOffset, dwBytes, ppv1, pb1, ppv2, pb2, dwFlags)
+	4, // 12: Play(this, dwReserved1, dwPriority, dwFlags)
+	2, // 13: SetCurrentPosition(this, dwNewPosition)
+	2, // 14: SetFormat(this, pcfxFormat)
+	2, // 15: SetVolume(this, lVolume)
+	2, // 16: SetPan(this, lPan)
+	2, // 17: SetFrequency(this, dwFrequency)
+	1, // 18: Stop(this)
+	5, // 19: Unlock(this, pvPtr1, dwBytes1, pvPtr2, dwBytes2)
+	1, // 20: Restore(this)
+}
+
 func (cs *comState) createDirectSoundObject(capture bool, device *dsoundpkg.DirectSound) (*comObject, error) {
 	iid := IID_IDirectSound8
 	methods := 12
 	kind := "direct-sound-device"
+	args := dsound8StdcallArgs
 	if capture {
 		iid = IID_IDirectSoundCapture8
 		methods = 7
 		kind = "direct-sound-capture"
+		args = dsoundCaptureStdcallArgs
 	}
-	obj, err := cs.createGuestObject(cs.mem, iid, methods)
+	obj, err := cs.createGuestObject(cs.mem, iid, methods, args)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +447,7 @@ func (cs *comState) createDirectSoundObject(capture bool, device *dsoundpkg.Dire
 }
 
 func (cs *comState) createDirectSoundBufferObject(device *directSoundDeviceData, desc dsBufferDesc) (*comObject, error) {
-	obj, err := cs.createGuestObject(cs.mem, IID_IDirectSoundBuffer, 21)
+	obj, err := cs.createGuestObject(cs.mem, IID_IDirectSoundBuffer, 21, dsoundBufferStdcallArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -461,16 +510,18 @@ func (cs *comState) dispatchDirectSound(ctx *ntapi.TrapContext, obj *comObject, 
 		if ppBuffer == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppBuffer, 0)
+		writeGuestPtr(ctx, ppBuffer, 0)
 		if pUnkOuter != 0 {
 			return CLASS_E_NOAGGREGATION
 		}
 		desc := readDSBufferDesc(ctx.Mem, pDesc)
 		bufObj, err := cs.createDirectSoundBufferObject(device, desc)
 		if err != nil {
+			ravelog.Logf("[dsound] CreateSoundBuffer FAILED: %v\n", err)
 			return hresultFromError(err)
 		}
-		ctx.Mem.Write64(ppBuffer, bufObj.objectAddr)
+		writeGuestPtr(ctx, ppBuffer, bufObj.objectAddr)
+		ravelog.Logf("[dsound] CreateSoundBuffer → obj=0x%x flags=0x%x size=%d\n", bufObj.objectAddr, desc.Flags, desc.BufferBytes)
 		return S_OK
 	case 4:
 		writeDSCaps(ctx.Mem, ctx.Arg(1), device.device)
@@ -481,7 +532,7 @@ func (cs *comState) dispatchDirectSound(ctx *ntapi.TrapContext, obj *comObject, 
 		if ppDup == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppDup, 0)
+		writeGuestPtr(ctx, ppDup, 0)
 		origObj := cs.objects[origPtr]
 		if origObj == nil {
 			return E_INVALIDARG
@@ -491,7 +542,7 @@ func (cs *comState) dispatchDirectSound(ctx *ntapi.TrapContext, obj *comObject, 
 			return E_INVALIDARG
 		}
 		clone := cloneDSBuffer(origBuf)
-		dupObj, err := cs.createGuestObject(cs.mem, IID_IDirectSoundBuffer, 21)
+		dupObj, err := cs.createGuestObject(cs.mem, IID_IDirectSoundBuffer, 21, dsoundBufferStdcallArgs)
 		if err != nil {
 			return hresultFromError(err)
 		}
@@ -502,7 +553,7 @@ func (cs *comState) dispatchDirectSound(ctx *ntapi.TrapContext, obj *comObject, 
 			device.device.SecondaryBuffers = append(device.device.SecondaryBuffers, clone.buffer)
 			attachDirectSoundMixer(cs.hctx, device.device)
 		}
-		ctx.Mem.Write64(ppDup, dupObj.objectAddr)
+		writeGuestPtr(ctx, ppDup, dupObj.objectAddr)
 		return S_OK
 	case 6:
 		hwnd := uint32(ctx.Arg(1))
@@ -557,7 +608,7 @@ func (cs *comState) dispatchDirectSoundCapture(ctx *ntapi.TrapContext, obj *comO
 		if ppBuffer == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppBuffer, 0)
+		writeGuestPtr(ctx, ppBuffer, 0)
 		if pUnkOuter != 0 {
 			return CLASS_E_NOAGGREGATION
 		}
@@ -566,7 +617,7 @@ func (cs *comState) dispatchDirectSoundCapture(ctx *ntapi.TrapContext, obj *comO
 		if err != nil {
 			return hresultFromError(err)
 		}
-		ctx.Mem.Write64(ppBuffer, bufObj.objectAddr)
+		writeGuestPtr(ctx, ppBuffer, bufObj.objectAddr)
 		return S_OK
 	case 4:
 		writeDSCaps(ctx.Mem, ctx.Arg(1), device.device)
@@ -681,9 +732,9 @@ func (cs *comState) dispatchDirectSoundBuffer(ctx *ntapi.TrapContext, obj *comOb
 		if pp1 == 0 || pb1 == 0 || pp2 == 0 || pb2 == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(pp1, 0)
+		writeGuestPtr(ctx, pp1, 0)
 		ctx.Mem.Write32(pb1, 0)
-		ctx.Mem.Write64(pp2, 0)
+		writeGuestPtr(ctx, pp2, 0)
 		ctx.Mem.Write32(pb2, 0)
 		if buf.Size == 0 {
 			return E_FAIL
@@ -713,9 +764,9 @@ func (cs *comState) dispatchDirectSoundBuffer(ctx *ntapi.TrapContext, obj *comOb
 			pending.guestPtr2, _ = allocGuestTemp(ctx.Mem, append([]byte(nil), bufferBytes(ptr2, len2)...))
 		}
 		data.pendingLock = pending
-		ctx.Mem.Write64(pp1, pending.guestPtr1)
+		writeGuestPtr(ctx, pp1, pending.guestPtr1)
 		ctx.Mem.Write32(pb1, pending.bytes1)
-		ctx.Mem.Write64(pp2, pending.guestPtr2)
+		writeGuestPtr(ctx, pp2, pending.guestPtr2)
 		ctx.Mem.Write32(pb2, pending.bytes2)
 		return S_OK
 	case 12:
@@ -785,7 +836,12 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		ctx.Mem.Write64(ppDS, 0)
+		is32 := ctx.State != nil && ctx.State.Is32
+		if is32 {
+			ctx.Mem.Write32(ppDS, 0)
+		} else {
+			ctx.Mem.Write64(ppDS, 0)
+		}
 		if pUnkOuter != 0 {
 			ctx.SetReturn(CLASS_E_NOAGGREGATION)
 			return 0
@@ -798,7 +854,12 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(uint64(hresultFromError(err)))
 			return 0
 		}
-		ctx.Mem.Write64(ppDS, obj.objectAddr)
+		ravelog.Logf("[dsound] DirectSoundCreate → obj=0x%x\n", obj.objectAddr)
+		if is32 {
+			ctx.Mem.Write32(ppDS, uint32(obj.objectAddr))
+		} else {
+			ctx.Mem.Write64(ppDS, obj.objectAddr)
+		}
 		ctx.SetReturn(S_OK)
 		return 0
 	})
@@ -810,7 +871,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		ctx.Mem.Write64(ppDS8, 0)
+		writeGuestPtr(ctx, ppDS8, 0)
 		if pUnkOuter != 0 {
 			ctx.SetReturn(CLASS_E_NOAGGREGATION)
 			return 0
@@ -823,7 +884,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(uint64(hresultFromError(err)))
 			return 0
 		}
-		ctx.Mem.Write64(ppDS8, obj.objectAddr)
+		writeGuestPtr(ctx, ppDS8, obj.objectAddr)
 		ctx.SetReturn(S_OK)
 		return 0
 	})
@@ -841,7 +902,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		ctx.Mem.Write64(ppCapture, 0)
+		writeGuestPtr(ctx, ppCapture, 0)
 		if pUnkOuter != 0 {
 			ctx.SetReturn(CLASS_E_NOAGGREGATION)
 			return 0
@@ -851,7 +912,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(uint64(hresultFromError(err)))
 			return 0
 		}
-		ctx.Mem.Write64(ppCapture, obj.objectAddr)
+		writeGuestPtr(ctx, ppCapture, obj.objectAddr)
 		ctx.SetReturn(S_OK)
 		return 0
 	})
@@ -863,7 +924,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		ctx.Mem.Write64(ppCapture8, 0)
+		writeGuestPtr(ctx, ppCapture8, 0)
 		if pUnkOuter != 0 {
 			ctx.SetReturn(CLASS_E_NOAGGREGATION)
 			return 0
@@ -873,7 +934,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(uint64(hresultFromError(err)))
 			return 0
 		}
-		ctx.Mem.Write64(ppCapture8, obj.objectAddr)
+		writeGuestPtr(ctx, ppCapture8, obj.objectAddr)
 		ctx.SetReturn(S_OK)
 		return 0
 	})
@@ -887,7 +948,7 @@ func registerDsoundHandlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(dll, "DllGetClassObject", func(ctx *ntapi.TrapContext) uint32 {
 		ppv := ctx.Arg(2)
 		if ppv != 0 {
-			ctx.Mem.Write64(ppv, 0)
+			writeGuestPtr(ctx, ppv, 0)
 		}
 		ctx.SetReturn(CLASS_E_CLASSNOTAVAILABLE)
 		return 0

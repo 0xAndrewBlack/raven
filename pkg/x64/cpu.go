@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
-	"os"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -97,6 +96,14 @@ type CPU struct {
 	traceRIPLo  uint64
 	traceRIPHi  uint64
 	lastHeapSig uint64
+
+	// Crash trace ring buffer: last 512 RIPs before a fault.
+	traceRing    [512]uint64
+	traceRingPos int
+
+	// zeroRegionLogged: one-shot flag for logging first entry into 0x10400000..0x10BFFFFF
+	zeroRegionLogged bool
+	prevRIP          uint64
 }
 
 var _ arch.CPU = (*CPU)(nil)
@@ -112,6 +119,7 @@ func New(mem *mmu.MMU) *CPU {
 }
 
 func (c *CPU) Stop()              { c.running = false }
+func (c *CPU) Resume()            { c.running = true }
 func (c *CPU) GetPC() uint64      { return c.RIP }
 func (c *CPU) SetPC(v uint64)     { c.RIP = v; c.fetchPage = nil }
 func (c *CPU) GetSP() uint64      { return c.Regs[RSP] }
@@ -286,13 +294,68 @@ func (c *CPU) CloneForThread() arch.CPU {
 func (c *CPU) Run() error {
 	c.running = true
 	var recoverCount int
+	var lastRecoverRIP uint64
+	var sameRecoverCount int
 	for c.running {
 		// JIT fast path
 		if c.PreStep != nil && c.PreStep(c) {
 			c.instret++
 			continue
 		}
+		// Record RIP in crash trace ring buffer before executing
+		c.traceRing[c.traceRingPos] = c.RIP
+		c.traceRingPos = (c.traceRingPos + 1) & 511
+		// One-shot: log first entry into the zero VirtualAlloc region
+		if !c.zeroRegionLogged && c.RIP >= 0x10400000 && c.RIP <= 0x10BFFFFF {
+			c.zeroRegionLogged = true
+			ravelog.Logf("[zero-region] First entry: RIP=0x%x prevRIP=0x%x\n", c.RIP, c.prevRIP)
+			// Dump bytes at current RIP (the target code)
+			ravelog.Logf("[zero-region] bytes@RIP:")
+			for j := uint64(0); j < 32; j++ {
+				b, _ := c.mem.Read8(c.RIP + j)
+				ravelog.Logf(" %02x", b)
+			}
+			ravelog.Logf("\n")
+			// Dump top 8 stack words
+			sp := c.GetSP()
+			for i := uint64(0); i < 8; i++ {
+				v, _ := c.mem.Read32(sp + i*4)
+				ravelog.Logf("[zero-region]   stack[%d] = 0x%08x\n", i, v)
+			}
+			// Dump bytes at prevRIP to see the jump/call instruction
+			ravelog.Logf("[zero-region] bytes@prevRIP:")
+			for j := uint64(0); j < 8; j++ {
+				b, _ := c.mem.Read8(c.prevRIP + j)
+				ravelog.Logf(" %02x", b)
+			}
+			ravelog.Logf("\n")
+			// Dump ring buffer history (last 512 instructions before first entry)
+			ravelog.Logf("[zero-region] history (last 512 RIPs):\n")
+			for i := 0; i < 512; i++ {
+				idx := (c.traceRingPos + i) & 511
+				if rip := c.traceRing[idx]; rip != 0 {
+					b0, _ := c.mem.Read8(rip)
+					b1, _ := c.mem.Read8(rip + 1)
+					b2, _ := c.mem.Read8(rip + 2)
+					b3, _ := c.mem.Read8(rip + 3)
+					ravelog.Logf("[zero-region]   0x%x: %02x %02x %02x %02x\n", rip, b0, b1, b2, b3)
+				}
+			}
+		}
+		c.prevRIP = c.RIP
 		if err := c.step(); err != nil {
+			// Print crash trace ring buffer (last N RIPs)
+			ravelog.Logf("[crash-trace] Last instructions before fault:\n")
+			for i := 0; i < 512; i++ {
+				idx := (c.traceRingPos + i) & 511
+				if rip := c.traceRing[idx]; rip != 0 {
+					b0, _ := c.mem.Read8(rip)
+					b1, _ := c.mem.Read8(rip + 1)
+					b2, _ := c.mem.Read8(rip + 2)
+					b3, _ := c.mem.Read8(rip + 3)
+					ravelog.Logf("[crash-trace]   0x%x: %02x %02x %02x %02x\n", rip, b0, b1, b2, b3)
+				}
+			}
 			// Unmapped function call recovery: if RIP points to unmapped memory,
 			// simulate a function that returns 0 (pop retaddr, set RAX=0).
 			// Only recover if the return address itself is valid (mapped).
@@ -302,27 +365,101 @@ func (c *CPU) Run() error {
 					if _, verr := c.mem.Read8(retAddr); verr == nil {
 						recoverCount++
 						if recoverCount <= 20 {
-							ravelog.Logf("[cpu-recover] #%d call to unmapped 0x%x, returning to 0x%x RBX=0x%x RSP=0x%x\n", recoverCount, c.RIP, retAddr, c.Regs[RBX], c.GetSP())
-							if recoverCount == 1 {
-								// Print full register state and stack
-								fmt.Fprintf(os.Stderr, "  RAX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
-									c.Regs[RAX], c.Regs[RCX], c.Regs[RDX], c.Regs[RSI], c.Regs[RDI])
-								fmt.Fprintf(os.Stderr, "  R8=0x%x R9=0x%x R10=0x%x R11=0x%x RBP=0x%x\n",
-									c.Regs[R8], c.Regs[R9], c.Regs[R10], c.Regs[R11], c.Regs[RBP])
-								// Print stack frames
-								sp := c.GetSP()
-								for i := 0; i < 16; i++ {
-									v, _ := c.mem.Read64(sp + uint64(i*8))
-									fmt.Fprintf(os.Stderr, "  [RSP+0x%02x] = 0x%x\n", i*8, v)
-								}
+							var callSite [16]byte
+							for ci := 0; ci < 16; ci++ {
+								callSite[ci], _ = c.mem.Read8(retAddr - 16 + uint64(ci))
 							}
+							ravelog.Logf("[cpu-recover] #%d call to unmapped 0x%x, returning to 0x%x RBX=0x%x RSP=0x%x callsite=[%02x %02x %02x %02x %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+								recoverCount, c.RIP, retAddr, c.Regs[RBX], c.GetSP(),
+								callSite[0], callSite[1], callSite[2], callSite[3], callSite[4], callSite[5], callSite[6], callSite[7],
+								callSite[8], callSite[9], callSite[10], callSite[11], callSite[12], callSite[13], callSite[14], callSite[15])
 						}
 						if recoverCount > 100 {
 							return fmt.Errorf("at RIP=0x%x: too many crash recoveries (%d), last return to 0x%x", c.RIP, recoverCount, retAddr)
 						}
-						c.Regs[RAX] = 0
+						// Track repeated recoveries to the same address.
+						// For NULL COM calls (target < 0x1000), use a higher
+						// threshold before loop-break since games may iterate
+						// over sparse COM arrays with a few NULL entries per frame.
+						isNullCOM := c.RIP < 0x1000
+						if retAddr == lastRecoverRIP {
+							sameRecoverCount++
+						} else {
+							lastRecoverRIP = retAddr
+							sameRecoverCount = 1
+						}
+						nullCOMThreshold := 3
+						if isNullCOM {
+							nullCOMThreshold = 20
+						}
+						// If stuck in an infinite loop calling NULL COM methods,
+						// skip the entire calling function by unwinding the stack.
+						if sameRecoverCount > nullCOMThreshold && c.Mode32 {
+							cleanup := c.detectStdcallCleanup(retAddr)
+							sp := c.GetSP() + uint64(cleanup)
+							for scan := uint64(0); scan < 256; scan += 4 {
+								candidate, serr := c.mem.Read32(sp + scan)
+								if serr != nil {
+									break
+								}
+								addr := uint64(candidate)
+								if addr >= 0x400000 && addr < 0x7FFF0000 {
+									_, _, mapped, perms := c.mem.QueryRegion(addr)
+									if mapped && perms&4 != 0 { // must be executable
+										c.SetSP(sp + scan + 4)
+										c.Regs[RAX] = 0
+										c.RIP = addr
+										sameRecoverCount = 0
+										if recoverCount <= 20 {
+											ravelog.Logf("[cpu-recover]   loop-break: unwound to 0x%x RSP=0x%x\n", addr, c.GetSP())
+										}
+										break
+									}
+								}
+							}
+							continue
+						}
+						// In PE32 mode, detect COM vtable calls and clean up
+						// stdcall args that the callee would have cleaned with ret N.
+						if c.Mode32 {
+							cleanup := c.detectStdcallCleanup(retAddr)
+							if cleanup > 0 {
+								sp := c.GetSP()
+								c.SetSP(sp + uint64(cleanup))
+								if recoverCount <= 20 {
+									ravelog.Logf("[cpu-recover]   stdcall cleanup: RSP += %d (0x%x → 0x%x)\n", cleanup, sp, sp+uint64(cleanup))
+								}
+							}
+						}
+						c.Regs[RAX] = 0 // S_OK for NULL COM, 0 otherwise
 						c.RIP = retAddr
 						continue
+					}
+				}
+				// Standard recovery failed (retAddr invalid). In PE32 mode,
+				// scan the stack for the nearest valid code address to recover
+				// from cascading NULL COM vtable calls.
+				if c.Mode32 {
+					sp := c.GetSP()
+					for scan := uint64(0); scan < 64; scan += 4 {
+						candidate, serr := c.mem.Read32(sp + scan)
+						if serr != nil {
+							break
+						}
+						addr := uint64(candidate)
+						if addr >= 0x400000 && addr < 0x7FFF0000 {
+							_, _, mapped, perms := c.mem.QueryRegion(addr)
+							if mapped && perms&4 != 0 { // must be executable
+								recoverCount++
+								c.SetSP(sp + scan + 4)
+								c.Regs[RAX] = 0
+								c.RIP = addr
+								if recoverCount <= 20 {
+									ravelog.Logf("[cpu-recover] #%d stack-scan at 0x%x, found retAddr=0x%x at RSP+0x%x\n", recoverCount, c.RIP, addr, scan)
+								}
+								break
+							}
+						}
 					}
 				}
 			}
@@ -345,15 +482,42 @@ func (c *CPU) Run() error {
 						if recoverCount > 100 {
 							return fmt.Errorf("at RIP=0x%x: too many crash recoveries (%d), last return to 0x%x", c.RIP, recoverCount, retAddr)
 						}
+						if c.Mode32 {
+							cleanup := c.detectStdcallCleanup(retAddr)
+							if cleanup > 0 {
+								sp := c.GetSP()
+								c.SetSP(sp + uint64(cleanup))
+								if recoverCount <= 20 {
+									ravelog.Logf("[cpu-recover]   stdcall cleanup: RSP += %d (0x%x → 0x%x)\n", cleanup, sp, sp+uint64(cleanup))
+								}
+							}
+						}
 						c.Regs[RAX] = 0
 						c.RIP = retAddr
 						continue
 					}
 				}
 			}
+			// Check if stack-scan recovery succeeded (set RIP to valid address)
+			if c.RIP >= 0x10000 && c.RIP <= 0x7FFFFFFFFFFF {
+				if _, verr := c.mem.Read8(c.RIP); verr == nil {
+					continue
+				}
+			}
 			// RIP=0 typically means a thread returned through a null sentinel - skip noisy dump.
 			if c.RIP != 0 {
+				// Show memory region info for crash RIP and fault address
+				ripBase, ripSize, ripMapped, ripPerms := c.mem.QueryRegion(c.RIP)
 				ravelog.Logf("[crash-regs] RIP=0x%x TLS=0x%x err=%v\n", c.RIP, c.GetTLS(), err)
+				ravelog.Logf("[crash-regs] RIP region: base=0x%x size=0x%x mapped=%v perms=0x%x\n", ripBase, ripSize, ripMapped, ripPerms)
+				// Dump bytes at RIP
+				var ripBytes [16]byte
+				for i := range ripBytes {
+					ripBytes[i], _ = c.mem.Read8(c.RIP + uint64(i))
+				}
+				ravelog.Logf("[crash-regs] bytes@RIP: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+					ripBytes[0], ripBytes[1], ripBytes[2], ripBytes[3], ripBytes[4], ripBytes[5], ripBytes[6], ripBytes[7],
+					ripBytes[8], ripBytes[9], ripBytes[10], ripBytes[11], ripBytes[12], ripBytes[13], ripBytes[14], ripBytes[15])
 				ravelog.Logf("[crash-regs] RAX=0x%x RBX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
 					c.Regs[RAX], c.Regs[RBX], c.Regs[RCX], c.Regs[RDX], c.Regs[RSI], c.Regs[RDI])
 				ravelog.Logf("[crash-regs] R8=0x%x R9=0x%x R10=0x%x R11=0x%x R12=0x%x R13=0x%x R14=0x%x R15=0x%x RBP=0x%x RSP=0x%x\n",
@@ -761,7 +925,7 @@ func (c *CPU) resolveRMAddr(m *modrm, pfx *prefixState) (uint64, bool, error) {
 		} else if pfx.segOver == 0x65 {
 			base += c.gsBase
 		}
-		m.ripRelative = true
+		m.ripRelative = !c.Mode32
 		m.resolved = true
 		m.cachedAddr = base
 		return base, false, nil
@@ -1379,6 +1543,84 @@ func (c *CPU) flagCond(cond byte) bool {
 	return false
 }
 
+// detectStdcallCleanup looks at the call instruction before retAddr to
+// determine how many bytes a stdcall callee would have cleaned from the stack.
+// Returns the cleanup amount in bytes, or 0 if unknown.
+func (c *CPU) detectStdcallCleanup(retAddr uint64) uint32 {
+	// Read 32 bytes before retAddr for wider scan
+	const bufSz = 32
+	var buf [bufSz]byte
+	for i := 0; i < bufSz; i++ {
+		buf[i], _ = c.mem.Read8(retAddr - uint64(bufSz) + uint64(i))
+	}
+	// Find the call instruction ending at retAddr (buf[bufSz]).
+	// call [reg+disp32]: FF 90-97 dd dd dd dd (6 bytes)
+	// call [reg+disp8]:  FF 50-57 dd          (3 bytes)
+	// call reg:          FF D0-D7              (2 bytes)
+	callLen := 0
+	idx := bufSz // start of call instruction in buf
+	if buf[bufSz-6] == 0xFF && (buf[bufSz-5]&0xF8) == 0x90 {
+		callLen = 6
+		idx = bufSz - 6
+	} else if buf[bufSz-3] == 0xFF && (buf[bufSz-2]&0xF8) == 0x50 {
+		callLen = 3
+		idx = bufSz - 3
+	} else if buf[bufSz-2] == 0xFF && (buf[bufSz-1]&0xF8) == 0xD0 {
+		callLen = 2
+		idx = bufSz - 2
+	}
+	if callLen == 0 {
+		return 0
+	}
+	// Scan backwards from the call instruction, counting push instructions.
+	// Skip over known non-push instructions (LEA, MOV, etc.) to handle
+	// interleaved register setup between pushes.
+	pushCount := uint32(0)
+	pos := idx
+	for pos > 0 {
+		// push reg (1 byte: 0x50-0x57)
+		if buf[pos-1] >= 0x50 && buf[pos-1] <= 0x57 {
+			pushCount++
+			pos--
+			continue
+		}
+		// push imm8 (2 bytes: 6A xx)
+		if pos >= 2 && buf[pos-2] == 0x6A {
+			pushCount++
+			pos -= 2
+			continue
+		}
+		// push imm32 (5 bytes: 68 xx xx xx xx)
+		if pos >= 5 && buf[pos-5] == 0x68 {
+			pushCount++
+			pos -= 5
+			continue
+		}
+		// Skip: mov ecx,[eax] = 8B 08 (2 bytes)
+		if pos >= 2 && buf[pos-2] == 0x8B && buf[pos-1] == 0x08 {
+			pos -= 2
+			continue
+		}
+		// Skip: lea reg,[esp+disp8] = 8D 44 24 xx (4 bytes)
+		if pos >= 4 && buf[pos-4] == 0x8D && buf[pos-3] == 0x44 && buf[pos-2] == 0x24 {
+			pos -= 4
+			continue
+		}
+		// Skip: mov reg,imm32 = B8-BF xx xx xx xx (5 bytes)
+		if pos >= 5 && buf[pos-5] >= 0xB8 && buf[pos-5] <= 0xBF {
+			pos -= 5
+			continue
+		}
+		// Skip: xor reg,reg = 33 C0-FF (2 bytes) or 31 C0-FF
+		if pos >= 2 && (buf[pos-2] == 0x33 || buf[pos-2] == 0x31) {
+			pos -= 2
+			continue
+		}
+		break
+	}
+	return pushCount * 4
+}
+
 // =========================================================================
 // Main dispatch
 // =========================================================================
@@ -1404,6 +1646,46 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		c.Regs[r] = v
+		return nil
+
+	// --- PUSHA/PUSHAD (0x60) - 32-bit only ---
+	// Pushes EAX, ECX, EDX, EBX, ESP (original), EBP, ESI, EDI
+	case 0x60:
+		origESP := c.Regs[RSP]
+		for _, r := range []int{RAX, RCX, RDX, RBX} {
+			if err := c.push32(uint32(c.Regs[r])); err != nil {
+				return err
+			}
+		}
+		if err := c.push32(uint32(origESP)); err != nil { // original ESP
+			return err
+		}
+		for _, r := range []int{RBP, RSI, RDI} {
+			if err := c.push32(uint32(c.Regs[r])); err != nil {
+				return err
+			}
+		}
+		return nil
+
+	// --- POPA/POPAD (0x61) - 32-bit only ---
+	// Pops EDI, ESI, EBP, [skip ESP], EBX, EDX, ECX, EAX
+	case 0x61:
+		for _, r := range []int{RDI, RSI, RBP} {
+			v, err := c.pop32()
+			if err != nil {
+				return err
+			}
+			c.Regs[r] = uint64(v)
+		}
+		// Skip the saved ESP slot
+		c.Regs[RSP] = (c.Regs[RSP] + 4) & 0xFFFFFFFF
+		for _, r := range []int{RBX, RDX, RCX, RAX} {
+			v, err := c.pop32()
+			if err != nil {
+				return err
+			}
+			c.Regs[r] = uint64(v)
+		}
 		return nil
 
 	// --- PUSH imm8 (0x6A) ---

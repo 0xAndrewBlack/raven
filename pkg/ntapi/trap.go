@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -179,7 +180,8 @@ type XMMAccess interface {
 // Dispatcher routes vmcall traps to the appropriate handler based on syscall ID.
 type Dispatcher struct {
 	handlers         map[uint32]TrapHandler
-	names            map[uint32]string // for trace logging
+	handlersByName   map[string]TrapHandler // funcName → handler, for dynamic re-registration
+	names            map[uint32]string      // for trace logging
 	ntdll            *SynthPE
 	win32u           *SynthPE
 	ctx              *TrapContext
@@ -195,6 +197,7 @@ type Dispatcher struct {
 func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *RegistryHive, state *ProcessState, ntdll, win32u *SynthPE) *Dispatcher {
 	d := &Dispatcher{
 		handlers:         make(map[uint32]TrapHandler),
+		handlersByName:   make(map[string]TrapHandler),
 		names:            make(map[uint32]string),
 		ntdll:            ntdll,
 		win32u:           win32u,
@@ -347,6 +350,32 @@ func (d *Dispatcher) ApplyWin32ArgCounts(synth *SynthPE) {
 	}
 }
 
+// PostRegisterSynthDLL wires up any stubs in synth that were added after the
+// initial handler registration pass (e.g., via AddDynamicExport in loadDLLFromVFS).
+// For each export that lacks a handler or stdcall arg count, it checks
+// handlersByName and win32ArgCounts to fill the gap.
+func (d *Dispatcher) PostRegisterSynthDLL(synth *SynthPE) {
+	for funcName, addr := range synth.Exports {
+		id, ok := synth.StubIDs[addr]
+		if !ok {
+			continue
+		}
+		if d.names[id] == "" {
+			d.names[id] = synth.Name + "!" + funcName
+		}
+		if _, hasHandler := d.handlers[id]; !hasHandler {
+			if h, ok := d.handlersByName[funcName]; ok {
+				d.handlers[id] = h
+			}
+		}
+		if _, hasArgs := d.stdcallArgs[id]; !hasArgs {
+			if nArgs, ok := win32ArgCounts[funcName]; ok {
+				d.stdcallArgs[id] = nArgs
+			}
+		}
+	}
+}
+
 // win32ArgCounts maps Win32 API function names to their stdcall argument counts.
 // This is used for PE32 stdcall cleanup - the callee must pop the correct
 // number of argument bytes from the stack.
@@ -370,6 +399,11 @@ var win32ArgCounts = map[string]int{
 	"GetCommandLineW":                       0,
 	"GetEnvironmentVariableA":               3,
 	"GetEnvironmentVariableW":               3,
+	"GetEnvironmentStrings":                 0,
+	"GetEnvironmentStringsA":                0,
+	"GetEnvironmentStringsW":                0,
+	"FreeEnvironmentStringsA":               1,
+	"FreeEnvironmentStringsW":               1,
 	"SetEnvironmentVariableA":               2,
 	"SetEnvironmentVariableW":               2,
 	"ExpandEnvironmentStringsA":             3,
@@ -1575,11 +1609,80 @@ var win32ArgCounts = map[string]int{
 	"GetModuleFileNameExW": 4,
 	"GetProcessMemoryInfo": 3,
 	"EnumProcessModulesEx": 5,
+
+	// --- gdi32.dll extras (needed for 32-bit installer DLLs) ---
+	"SelectPalette":              3,
+	"RealizePalette":             1,
+	"CreatePalette":              1,
+	"CreateScalableFontResourceA": 4,
+	"CreateScalableFontResourceW": 4,
+	"DeleteMetaFile":             1,
+	"SetMetaFileBitsEx":          2,
+	"GetTextExtentPointA":        4,
+	"GetTextExtentPointW":        4,
+
+	// --- user32.dll extras ---
+	"DrawFocusRect":       2,
+	"GetDialogBaseUnits":  0,
+	"InvalidateRgn":       3,
+
+	// --- user32.dll DDE/misc (needed for 32-bit installer DLLs) ---
+	"DdeInitializeA":         4,
+	"DdeInitializeW":         4,
+	"DdeUninitialize":        1,
+	"DdeCreateStringHandleA": 3,
+	"DdeCreateStringHandleW": 3,
+	"DdeFreeStringHandle":    2,
+	"DdeQueryStringA":        5,
+	"DdeQueryStringW":        5,
+	"DdeNameService":         4,
+	"DdeConnect":             4,
+	"DdeDisconnect":          1,
+	"DdeClientTransaction":   8,
+	"DdeGetData":             4,
+	"DdeCreateDataHandle":    7,
+	"DdeFreeDataHandle":      1,
+	"DdePostAdvise":          3,
+	"WinHelpA":               4,
+	"WinHelpW":               4,
+	"OemToCharA":             2,
+	"OemToCharW":             2,
+	"CharToOemA":             2,
+	"CharToOemW":             2,
+	"DrawIcon":               4,
+
+	// --- advapi32.dll extras ---
+	"RegSetValueA":      5,
+	"RegSetValueW":      5,
+	"RegQueryValueA":    4,
+	"RegQueryValueW":    4,
+	"AccessCheck":       8,
+	"RevertToSelf":      0,
+	"ImpersonateSelf":   1,
+	"GetFileSecurityA":  5,
+	"GetFileSecurityW":  5,
+
+	// --- version.dll extras ---
+	"VerInstallFileA":  8,
+	"VerInstallFileW":  8,
+	"VerFindFileA":     7,
+	"VerFindFileW":     7,
+
+	// --- mpr.dll ---
+	"WNetGetConnectionA": 3,
+	"WNetGetConnectionW": 3,
+
+	// --- winmm.dll extras ---
+	"sndPlaySoundA": 2,
+	"sndPlaySoundW": 2,
+	"midiOutGetNumDevs": 0,
 }
 
 // RegisterAutoStubHandler registers a handler for a specific function in a
 // synthetic DLL by looking up its trap ID.
 func (d *Dispatcher) RegisterAutoStubHandler(synth *SynthPE, funcName string, h TrapHandler) {
+	// Always store by name so dynamic duplicates can inherit this handler.
+	d.handlersByName[funcName] = h
 	addr, ok := synth.Exports[funcName]
 	if !ok {
 		return
@@ -1618,6 +1721,26 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 	}
 	syscallID := uint32(cpu.SyscallNum()) // EAX contains the syscall ID
 	is32 := d.ctx.State != nil && d.ctx.State.Is32
+
+	// Temporary: trace COM trap IDs
+	if syscallID >= 0x10000000 {
+		name := d.names[syscallID]
+		ravelog.Logf("[COM-TRAP] id=0x%x is32=%v name=%s\n", syscallID, is32, name)
+	}
+
+	// Debug: log any stub called from within the zero VirtualAlloc region
+	if is32 {
+		sp := cpu.GetSP()
+		if retAddr, err := d.ctx.Mem.Read32(sp); err == nil {
+			if retAddr >= 0x10400000 && retAddr <= 0x10BFFFFF {
+				name := d.names[syscallID]
+				if name == "" {
+					name = fmt.Sprintf("unknown_0x%04X", syscallID)
+				}
+				ravelog.Logf("[zero-region] stub called from zero-region ret=0x%x: %s\n", retAddr, name)
+			}
+		}
+	}
 
 	handler, ok := d.handlers[syscallID]
 	if !ok {
@@ -1674,6 +1797,14 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		cpu.SetSyscallReturn(uint64(status))
 	}
 
+	// Temporary: trace COM cleanup decision
+	if syscallID >= 0x10000000 {
+		name := d.names[syscallID]
+		explicit, hasExplicit := d.stdcallArgs[syscallID]
+		ravelog.Logf("[COM-POST] %s is32=%v cdecl=%v pcRedir=%v maxArg=%d explicit=%d(%v)\n",
+			name, is32, d.cdeclIDs[syscallID], d.ctx.PCRedirected, d.ctx.maxArgIdx, explicit, hasExplicit)
+	}
+
 	// PE32 stdcall cleanup: the callee must pop arguments from the stack.
 	// Skip if the handler redirected PC (sync WndProc dispatch manages its own stack).
 	if is32 && !d.cdeclIDs[syscallID] && !d.ctx.PCRedirected {
@@ -1685,6 +1816,11 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		if nArgs > 0 {
 			d.doStdcallCleanup(cpu, nArgs)
 		}
+	} else if is32 {
+		name := d.names[syscallID]
+		if strings.Contains(name, "com!") || strings.Contains(name, "d3d!") {
+			ravelog.Logf("[stdcall-SKIP] %s cdecl=%v pcRedir=%v is32=%v\n", name, d.cdeclIDs[syscallID], d.ctx.PCRedirected, is32)
+		}
 	}
 }
 
@@ -1695,6 +1831,7 @@ func (d *Dispatcher) doStdcallCleanup(cpu arch.CPU, nArgs int) {
 	sp := cpu.GetSP()
 	retAddr, _ := d.ctx.Mem.Read32(sp)
 	newSP := sp + 4 + uint64(nArgs)*4
+	ravelog.Logf("[stdcall] nArgs=%d sp=0x%x→0x%x ret=0x%x\n", nArgs, sp, newSP, retAddr)
 	cpu.SetSP(newSP)
 	cpu.SetPC(uint64(retAddr))
 }

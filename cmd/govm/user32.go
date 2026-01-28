@@ -55,6 +55,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	syncScreenSurface := hctx.SyncScreenSurface
 	timerMap := hctx.TimerMap
 	wideprintf := hctx.Wideprintf
+	ansiprintf := hctx.Ansiprintf
 	windowLongPtr := hctx.WindowLongPtr
 	windowProps := hctx.WindowProps
 	wlDisplay := hctx.WlDisplay
@@ -66,6 +67,35 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	keyTransition := make(map[uint32]bool)
 	var currentCursorHandle uint64 = 32512 // IDC_ARROW default
 	cursorPosX, cursorPosY := int32(0), int32(0)
+	isBuiltinWindowClassName := func(name string) bool {
+		switch strings.ToLower(name) {
+		case "button", "edit", "static", "listbox", "combobox", "comboboxex32",
+			"scrollbar", "mdiclient", "tooltips_class32", "toolbarwindow32",
+			"rebarwindow32", "sysheader32", "syslistview32", "systabcontrol32",
+			"msctls_statusbar32", "msctls_progress32", "msctls_trackbar32",
+			"richedit", "richedit20a", "richedit20w", "richedit50w":
+			return true
+		}
+		return strings.HasPrefix(strings.ToLower(name), "msctls_")
+	}
+
+	// Shared timer-expiry check: posts WM_TIMER for each expired timer.
+	// Called from GetMessageA/W and PeekMessageA/W.
+	checkTimers := func() {
+		now := time.Now()
+		for id, t := range timerMap {
+			if now.Before(t.deadline) {
+				continue
+			}
+			t.deadline = now.Add(time.Duration(t.intervalMs) * time.Millisecond)
+			timerMap[id] = t
+			target := t.hwnd
+			if target == 0 {
+				target = hctx.MainHWND
+			}
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0113, id, 0}) // WM_TIMER
+		}
+	}
 
 	mapCursorHandle := func(hCursor uint64) (uint32, string) {
 		switch hCursor {
@@ -623,7 +653,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		for i := 2; i < 10; i++ {
 			args = append(args, ctx.Arg(i))
 		}
-		result := wideprintf(fmtStr, args)
+		result := ansiprintf(fmtStr, args)
+		ravelog.Logf("[wise] wsprintfA fmt=%q result=%q\n", fmtStr, result)
 		for i := range result {
 			mem.Write8(lpOut+uint64(i), result[i])
 		}
@@ -839,6 +870,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				classAtomForHwnd = a
 				if wp, ok2 := hctx.AtomWndProc[a]; ok2 {
 					hwndWndProc[hwnd] = wp
+				}
+			}
+			// Fallback only for app-defined classes. Predefined/common-control class names
+			// like "edit" must not inherit the app's single registered top-level WndProc.
+			if classAtomForHwnd == 0 && len(hctx.ClassNameAtom) == 1 && !isBuiltinWindowClassName(className) {
+				for _, a := range hctx.ClassNameAtom {
+					classAtomForHwnd = a
+					if wp, ok2 := hctx.AtomWndProc[a]; ok2 {
+						hwndWndProc[hwnd] = wp
+					}
 				}
 			}
 		}
@@ -1079,6 +1120,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			sw := uint64(cw)
 			sh := uint64(ch)
 			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd, 0x0005, 0, (sh << 16) | sw}) // WM_SIZE
+			// WM_ACTIVATEAPP(TRUE): sent before WM_ACTIVATE when app gains focus.
+			// Many DirectX games (DXBall etc.) use this to track active state.
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd, 0x001C, 1, 0}) // WM_ACTIVATEAPP
 			// WM_ACTIVATE(WA_ACTIVE=1): NPP's WndProc calls SetFocus(scintilla) here.
 			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd, 0x0006, 1, 0}) // WM_ACTIVATE
 			queuePaint(hwnd)                                                     // WM_PAINT
@@ -1605,6 +1649,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			if wnd := win32.Global.Get(hwnd); wnd != nil {
 				win32.Global.UpdatePos(wnd, ci.x, ci.y, ci.w, ci.h)
 			}
+			// Propagate position delta to child windows (dialog controls keep their
+			// parent-relative layout when the parent window is moved).
+			deltaX := ci.x - prevX
+			deltaY := ci.y - prevY
+			if deltaX != 0 || deltaY != 0 {
+				for childHWND, child := range hwndChildren {
+					if child.parentHWND == hwnd {
+						child.x += deltaX
+						child.y += deltaY
+						if wnd2 := win32.Global.Get(childHWND); wnd2 != nil {
+							win32.Global.UpdatePos(wnd2, child.x, child.y, child.w, child.h)
+						}
+					}
+				}
+			}
 			// Queue WM_SIZE / WM_MOVE for windows with a guest WndProc
 			if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
 				if sizeChanged {
@@ -2039,7 +2098,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				rw.WriteReg(4, rsp)
 				hctx.SyncCallWndProc(ctx, wp, hwnd, msg, wParam, lParam, hctx.SyncTrampoline)
 			} else {
+				rsp -= 48
 				mem.Write64(rsp, hctx.SyncTrampoline)
+				rw.WriteReg(4, rsp)
 				rw.WriteReg(1, hwnd)
 				rw.WriteReg(2, uint64(msg))
 				rw.WriteReg(8, wParam)
@@ -2876,24 +2937,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 		}
 
-		// Helper: check expired timers, post WM_TIMER for each.
-		checkTimers := func() {
-			now := time.Now()
-			for id, t := range timerMap {
-				if now.Before(t.deadline) {
-					continue
-				}
-				// Re-arm before posting to avoid duplicate posts.
-				t.deadline = now.Add(time.Duration(t.intervalMs) * time.Millisecond)
-				timerMap[id] = t
-				target := t.hwnd
-				if target == 0 {
-					target = hctx.MainHWND
-				}
-				hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0113, id, 0}) // WM_TIMER
-			}
-		}
-
 		// Helper: convert a Wayland event into Win32 messages.
 		dispatchWl = func(evt wl.EventType) {
 			if evt == wl.EventClose {
@@ -3397,6 +3440,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// wMsgFilterMax := ctx.Arg(3)
 		remove := ctx.Arg(4)&0x1 != 0 // PM_REMOVE = 0x0001
 
+		checkTimers() // fire any expired timers before checking the queue
+
 		if wlDisplay != nil {
 			evt, _ := wlDisplay.Poll()
 			if evt != wl.EventNone && evt != wl.EventClose {
@@ -3750,6 +3795,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			hctx.NextTimerID++
 			id = hctx.NextTimerID
 		}
+		ravelog.Logf("[wise] SetTimer hwnd=0x%x id=%d interval=%dms proc=0x%x\n", hwnd, id, elapse, proc)
 		timerMap[id] = &win32Timer{
 			id:         id,
 			hwnd:       hwnd,
@@ -3762,6 +3808,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(user32, "KillTimer", func(ctx *ntapi.TrapContext) uint32 {
 		id := ctx.Arg(1)
+		ravelog.Logf("[wise] KillTimer hwnd=0x%x id=%d (have=%v)\n", ctx.Arg(0), id, timerMap[id] != nil)
 		delete(timerMap, id)
 		ctx.SetReturn(1)
 		return 0
@@ -4778,11 +4825,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			retAddr: retAddr,
 			hwnd:    1, // return TRUE
 		})
-		mem.Write64(rsp, hctx.SyncTrampoline)
 		// Start first dispatch
 		sd := queue[0]
 		hctx.SyncStack[len(hctx.SyncStack)-1].queue = queue[1:]
-		rsp -= 8
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
 		rw.WriteReg(4, rsp)
 		rw.WriteReg(1, sd.hwnd)
@@ -4833,7 +4879,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			retAddr: retAddr,
 			hwnd:    1,
 		})
-		rsp -= 8
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
 		rw.WriteReg(4, rsp)
 		rw.WriteReg(1, queue[0].hwnd)
@@ -4865,17 +4911,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// modalDlgEntry tracks an active modal dialog so that EndDialog can perform a
 	// longjmp-style return to the original DialogBoxParamW call site.
 	type modalDlgEntry struct {
-		hwnd    uint64
-		retAddr uint64 // original return address at the DialogBoxParamW call site
-		retRSP  uint64 // RSP value after DialogBoxParamW would have returned normally
+		hwnd      uint64
+		retAddr   uint64 // original return address at the DialogBoxParamW call site
+		retRSP    uint64 // RSP value after DialogBoxParamW would have returned normally
+		syncDepth int    // SyncStack depth at DialogBoxParamA entry; EndDialog restores to this
 	}
 	var modalDialogStack []modalDlgEntry
 
 	// loadDlgTemplate tries to read a DLGTEMPLATE from the process's .rsrc
 	// section for the given template specifier (integer ID or name string).
+	// hInstance (0 = use main module) selects which module to search first;
+	// falls back to the main module if the resource is not found there.
 	// Returns nil if the resource cannot be found or parsed.
-	loadDlgTemplate := func(lpTemplate uint64) *dlgInfo {
-		if mainModule == nil || hctx.PeLoadRawResource == nil {
+	loadDlgTemplate := func(hInstance, lpTemplate uint64) *dlgInfo {
+		if hctx.PeLoadRawResource == nil {
 			return nil
 		}
 		var resID uint32
@@ -4884,6 +4933,24 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		if resID == 0 {
 			return nil // named templates not supported yet
+		}
+		// Try the specified module first (e.g. a dynamically loaded DLL).
+		if hInstance != 0 && hctx.VfsModuleResRVA != nil {
+			if resRVA, ok2 := hctx.VfsModuleResRVA[hInstance]; ok2 && resRVA != 0 {
+				if dataAddr, dataSize, ok3 := hctx.PeLoadRawResource(hInstance, resRVA, 5 /*RT_DIALOG*/, resID); ok3 && dataAddr != 0 && dataSize != 0 {
+					if raw, err := mem.ReadBytes(dataAddr, int(dataSize)); err == nil && len(raw) > 0 {
+						if info, err2 := parseDLGTEMPLATE(raw); err2 == nil {
+							return info
+						} else {
+							ravelog.Logf("[dialog] parseDLGTEMPLATE (vfs module 0x%x) error: %v\n", hInstance, err2)
+						}
+					}
+				}
+			}
+		}
+		// Fall back to main module.
+		if mainModule == nil {
+			return nil
 		}
 		dataAddr, dataSize, ok := hctx.PeLoadRawResource(
 			mainModule.BaseAddr, mainModule.ResourceDirRVA,
@@ -4906,8 +4973,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// createDlgControls instantiates child controlState entries for every item
 	// described in info.  The dialog HWND itself must already exist in hwndChildren.
 	createDlgControls := func(dlgHwnd uint64, info *dlgInfo) {
+		ravelog.Logf("[dialog] createDlgControls dlg=0x%x title=%q items=%d\n", dlgHwnd, info.title, len(info.items))
 		for _, item := range info.items {
 			px, py, pcx, pcy := dlgUnitsToPixels(item.x, item.y, item.cx, item.cy)
+			ravelog.Logf("[dialog]   item class=%q id=%d title=%q at(%d,%d %dx%d)\n", item.class, item.id, item.title, px, py, pcx, pcy)
 			child := hwndAlloc()
 			hwndChildren[child] = &controlState{
 				className:  strings.ToLower(item.class),
@@ -4933,13 +5002,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// isModal controls whether the syncTrampoline redirects to the message loop
 	// afterwards (true) or returns immediately (false).
 	dispatchWmInitDialog := func(ctx *ntapi.TrapContext, dlgHwnd, lpDialogFunc, dwInitParam uint64, isModal bool) bool {
-		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
-		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
-		if !ok || !ok2 {
+		rr, ok := ctx.CPU.(ntapi.RegisterReader)
+		if !ok {
 			return false
 		}
-		rsp := rr.ReadReg(4) // RSP (points to caller's return address)
-		retAddr, _ := mem.Read64(rsp)
+		rsp := rr.ReadReg(4)
+		var retAddr uint64
+		if ctx.State != nil && ctx.State.Is32 {
+			v, _ := mem.Read32(rsp)
+			retAddr = uint64(v)
+		} else {
+			retAddr, _ = mem.Read64(rsp)
+		}
 		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
 			queue:               nil,
 			retAddr:             retAddr,
@@ -4948,23 +5022,173 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			IsModalDialog:       isModal,
 			ModalDlgHwnd:        dlgHwnd,
 		})
-		mem.Write64(rsp, hctx.SyncTrampoline)
-		rw.WriteReg(1, dlgHwnd)     // RCX = hDlg
-		rw.WriteReg(2, 0x0110)      // RDX = WM_INITDIALOG
-		rw.WriteReg(8, 0)           // R8  = wParam (first focusable control, 0 for now)
-		rw.WriteReg(9, dwInitParam) // R9  = lParam
-		ctx.CPU.SetPC(lpDialogFunc)
-		ctx.ReturnOverridden = true
-		ctx.PCRedirected = true
+		// SyncCallWndProc handles PE32 vs PE64 stack/register setup internally.
+		hctx.SyncCallWndProc(ctx, lpDialogFunc, dlgHwnd, 0x0110, 0, dwInitParam, hctx.SyncTrampoline)
 		return true
 	}
 
-	// DialogBoxParamW: modal dialog box.
+	// modalPumpTrampoline: synthetic message pump for modal dialogs that are
+	// opened before GetMessageA/W (e.g. installer wizards in WinMain).
+	// After WM_INITDIALOG returns, syncDispatchTrampoline redirects here instead
+	// of returning immediately.  This handler pumps Wayland events and
+	// dispatches queued messages to the active modal dialog proc.
+	// Each invocation dispatches at most one message, then the RET at the end
+	// of the stub re-enters this handler (via msgLoopPC pointing here).
+	// modalPumpLoopBack re-arms the modal pump loop: it writes the trampoline
+	// address back at [msgLoopSP-4] and adjusts ESP so the final RET in the
+	// stub lands on the trampoline again rather than consuming stack garbage.
+	// Must be called whenever the handler returns without dispatching a message.
+	modalPumpLoopBack := func(ctx *ntapi.TrapContext) {
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+		if !ok || msgLoopSP == 0 {
+			return
+		}
+		pe32 := ctx.State != nil && ctx.State.Is32
+		rsp := msgLoopSP - 4
+		if pe32 {
+			mem.Write32(rsp, uint32(msgLoopPC))
+		} else {
+			mem.Write64(rsp, msgLoopPC)
+		}
+		rw.WriteReg(4, rsp)
+	}
+
+	d.RegisterHandler(modalPumpTrampolineID, "modalPumpTrampoline", func(ctx *ntapi.TrapContext) uint32 {
+		if len(modalDialogStack) == 0 {
+			modalPumpLoopBack(ctx)
+			return 0
+		}
+		entry := modalDialogStack[len(modalDialogStack)-1]
+		proc, hasProc := hwndWndProc[entry.hwnd]
+
+		// Pump Wayland events into the message queue.
+		if wlDisplay != nil {
+			evt, _ := wlDisplay.Poll()
+			if evt != wl.EventNone && dispatchWl != nil {
+				dispatchWl(evt)
+			}
+		}
+
+		// Check expired timers.
+		now := time.Now()
+		for id, t := range timerMap {
+			if now.Before(t.deadline) {
+				continue
+			}
+			t.deadline = now.Add(time.Duration(t.intervalMs) * time.Millisecond)
+			timerMap[id] = t
+			target := t.hwnd
+			if target == 0 {
+				target = hctx.MainHWND
+			}
+			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0113, id, 0})
+		}
+
+		// Dispatch the first queued message.
+		if hasProc && proc != 0 && len(hctx.MsgQueue) > 0 {
+			m := hctx.MsgQueue[0]
+			hctx.MsgQueue = hctx.MsgQueue[1:]
+			if m.message == 0x000F {
+				hctx.WinInvalid[m.hwnd] = false
+				// For WM_PAINT of the dialog window: do a Go-side background fill
+				// + paintTree before calling the dialog proc. This mirrors what
+				// DefDlgProc does and ensures the dialog renders even when the
+				// dialog proc returns FALSE (not handled).
+				if wlWindow != nil {
+					if cs, ok := hwndChildren[m.hwnd]; ok {
+						bgColor := hctx.SysColors[5]
+						if a, ok2 := hctx.HwndClassAtom[m.hwnd]; ok2 {
+							if brushIdx, ok3 := hctx.ClassBrush[a]; ok3 && brushIdx > 0 && int(brushIdx-1) < len(hctx.SysColors) {
+								bgColor = hctx.SysColors[brushIdx-1]
+							}
+						}
+						wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
+					}
+					paintTree(m.hwnd)
+					hctx.HasBaseFrame = true
+					hctx.FrameReady = true
+					hctx.CommitIfDone()
+					// Auto-dismiss: queue WM_COMMAND for the best visible button.
+					// Prefer "No" (skip) over "OK" (retry) to avoid installer retry loops.
+					// Fall back to the first visible button otherwise.
+					const (
+						wmCommand = 0x0111
+						bnClicked = 0
+					)
+					var pickHWND uint64
+					var pickCtrlID uint64
+					var pickTitle string
+					foundNo := false
+					for btnHWND, ch := range hwndChildren {
+						if ch.parentHWND != m.hwnd || !strings.EqualFold(ch.className, "button") || !ch.visible {
+							continue
+						}
+						isNo := strings.EqualFold(ch.text, "no") || strings.EqualFold(ch.text, "&no")
+						if isNo && !foundNo {
+							pickHWND, pickCtrlID, pickTitle = btnHWND, ch.ctrlID, ch.text
+							foundNo = true
+						} else if pickCtrlID == 0 {
+							pickHWND, pickCtrlID, pickTitle = btnHWND, ch.ctrlID, ch.text
+						}
+					}
+					if pickCtrlID != 0 {
+						wParam := (uint64(bnClicked) << 16) | (pickCtrlID & 0xFFFF)
+						ravelog.Logf("[dialog] auto-dismiss: WM_COMMAND ctrlID=%d title=%q hwnd=0x%x\n", pickCtrlID, pickTitle, m.hwnd)
+						hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{m.hwnd, wmCommand, wParam, pickHWND})
+					}
+				}
+			}
+			// Push a modal SyncStack frame so syncDispatchTrampoline can
+			// redirect back to the modal pump when the WndProc returns.
+			hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+				queue:               nil,
+				retAddr:             0,
+				hwnd:                m.hwnd,
+				returnWndProcResult: false,
+				IsModalDialog:       true,
+				ModalDlgHwnd:        entry.hwnd,
+			})
+			hctx.SyncCallWndProc(ctx, proc, m.hwnd, uint32(m.message), m.wParam, m.lParam, hctx.SyncTrampoline)
+			return 0
+		}
+
+		// No message ready: block briefly on Wayland fd (up to 16ms) to avoid
+		// burning CPU while the user hasn't interacted yet.
+		if wlDisplay != nil {
+			wlFd := wlDisplay.Fd()
+			var rfds unix.FdSet
+			rfds.Set(wlFd)
+			tv := unix.Timeval{Usec: 16000}
+			n, _ := unix.Select(wlFd+1, &rfds, nil, nil, &tv)
+			if n > 0 {
+				evt2, _ := wlDisplay.Dispatch()
+				if dispatchWl != nil {
+					dispatchWl(evt2)
+				}
+			}
+
+			// Post a synthetic WM_PAINT to keep the dialog redrawn.
+			if hctx.WinInvalid[entry.hwnd] {
+				queuePaint(entry.hwnd)
+			} else if hctx.WinInvalid[hctx.MainHWND] {
+				queuePaint(hctx.MainHWND)
+			}
+		} else {
+			// Headless: yield briefly to avoid spinning at 100% CPU.
+			time.Sleep(16 * time.Millisecond)
+		}
+
+		// Re-arm the loop: write the trampoline address so the final RET
+		// in the stub jumps back here instead of consuming stack garbage.
+		modalPumpLoopBack(ctx)
+		return 0
+	})
+
 	// Loads and parses the DLGTEMPLATE resource, creates child controls, sends
 	// WM_INITDIALOG, then enters a modal message loop (via the SyncStack modal
 	// redirect mechanism).  EndDialog triggers the longjmp return.
 	d.RegisterAutoStubHandler(user32, "DialogBoxParamW", func(ctx *ntapi.TrapContext) uint32 {
-		// hInstance := ctx.Arg(0)
+		hInstance := ctx.Arg(0)
 		lpTemplate := ctx.Arg(1)
 		hWndParent := ctx.Arg(2)
 		lpDialogFunc := ctx.Arg(3)
@@ -4993,7 +5217,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 
 		// Load and parse the DLGTEMPLATE resource
-		if info := loadDlgTemplate(lpTemplate); info != nil {
+		if info := loadDlgTemplate(hInstance, lpTemplate); info != nil {
 			cs.w = int32(info.cx) * 2
 			cs.h = int32(info.cy) * 2
 			cs.text = info.title
@@ -5007,16 +5231,34 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		hwndWndProc[dlgHwnd] = lpDialogFunc
 
-		// Save call-site state for EndDialog longjmp
+		// Save call-site state for EndDialog longjmp.
+		// For PE32 stdcall(5 args): retRSP = rsp + 4(retAddr) + 20(5 args) = rsp+24.
+		// For PE64: retRSP = rsp + 8 (no args on stack after Microsoft ABI).
 		rr, okR := ctx.CPU.(ntapi.RegisterReader)
 		if okR {
 			rsp := rr.ReadReg(4)
-			retAddr, _ := mem.Read64(rsp)
+			var retAddr uint64
+			var retRSP uint64
+			if ctx.State != nil && ctx.State.Is32 {
+				v, _ := mem.Read32(rsp)
+				retAddr = uint64(v)
+				retRSP = rsp + 24 // 4 (retAddr) + 5*4 (stdcall args)
+			} else {
+				retAddr, _ = mem.Read64(rsp)
+				retRSP = rsp + 8
+			}
 			modalDialogStack = append(modalDialogStack, modalDlgEntry{
-				hwnd:    dlgHwnd,
-				retAddr: retAddr,
-				retRSP:  rsp + 8, // RSP after DialogBoxParamW would return
+				hwnd:      dlgHwnd,
+				retAddr:   retAddr,
+				retRSP:    retRSP,
+				syncDepth: len(hctx.SyncStack),
 			})
+			// If no GetMessageA/W loop exists yet, establish the modal pump
+			// as the message loop so syncDispatchTrampoline can redirect there.
+			if msgLoopSP == 0 && hctx.ModalPumpTrampoline != 0 {
+				msgLoopSP = retRSP
+				msgLoopPC = hctx.ModalPumpTrampoline
+			}
 		}
 
 		// Dispatch WM_INITDIALOG; syncTrampoline will redirect to message loop
@@ -5062,12 +5304,26 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					rr, okR := ctx.CPU.(ntapi.RegisterReader)
 					if okR {
 						rsp := rr.ReadReg(4)
-						retAddr, _ := mem.Read64(rsp)
+						var retAddr uint64
+						var retRSP uint64
+						if ctx.State != nil && ctx.State.Is32 {
+							v, _ := mem.Read32(rsp)
+							retAddr = uint64(v)
+							retRSP = rsp + 24
+						} else {
+							retAddr, _ = mem.Read64(rsp)
+							retRSP = rsp + 8
+						}
 						modalDialogStack = append(modalDialogStack, modalDlgEntry{
-							hwnd:    dlgHwnd,
-							retAddr: retAddr,
-							retRSP:  rsp + 8,
+							hwnd:      dlgHwnd,
+							retAddr:   retAddr,
+							retRSP:    retRSP,
+							syncDepth: len(hctx.SyncStack),
 						})
+						if msgLoopSP == 0 && hctx.ModalPumpTrampoline != 0 {
+							msgLoopSP = retRSP
+							msgLoopPC = hctx.ModalPumpTrampoline
+						}
 					}
 					if dispatchWmInitDialog(ctx, dlgHwnd, lpDialogFunc, dwInitParam, true) {
 						return 0
@@ -5087,6 +5343,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "CreateDialogParamW", func(ctx *ntapi.TrapContext) uint32 {
 		// HWND CreateDialogParamW(hInstance, lpTemplate, hWndParent, lpDialogFunc, dwInitParam)
 		// Modeless dialog: create controls, send WM_INITDIALOG, return HWND immediately.
+		hInstance := ctx.Arg(0)
 		lpTemplate := ctx.Arg(1)
 		hWndParent := ctx.Arg(2)
 		lpDialogFunc := ctx.Arg(3)
@@ -5106,7 +5363,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			visible:    true,
 		}
 
-		if info := loadDlgTemplate(lpTemplate); info != nil {
+		if info := loadDlgTemplate(hInstance, lpTemplate); info != nil {
 			cs.w = int32(info.cx) * 2
 			cs.h = int32(info.cy) * 2
 			cs.text = info.title
@@ -5200,22 +5457,40 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			// Found. Remove from stack (all entries at or above i are completed).
 			modalDialogStack = modalDialogStack[:i]
 
-			// Clear any pending SyncStack frames - we are performing a longjmp.
-			hctx.SyncStack = hctx.SyncStack[:0]
+			// Clear only the SyncStack frames added during the modal dialog pump.
+			// Frames from the outer dispatch chain (WM_TIMER → WndProc → WiseMain
+			// etc.) must be preserved so the return path continues correctly.
+			if entry.syncDepth <= len(hctx.SyncStack) {
+				hctx.SyncStack = hctx.SyncStack[:entry.syncDepth]
+			} else {
+				hctx.SyncStack = hctx.SyncStack[:0]
+			}
 
-			// Perform longjmp: push the original DialogBoxParamW return address
-			// onto the guest stack at retRSP-8, set RSP, then RET via the
-			// SyncTrampoline's lone RET byte (offset +15).
+			ravelog.Logf("[dialog] EndDialog longjmp: retAddr=0x%x retRSP=0x%x syncDepth=%d→%d EAX=%d\n",
+				entry.retAddr, entry.retRSP, len(hctx.SyncStack), entry.syncDepth, nResult)
+			// onto the guest stack, set RSP, then RET via the SyncTrampoline's
+			// lone RET byte. Stack layout differs for PE32/PE64.
 			rw, ok := ctx.CPU.(ntapi.RegisterWriter)
 			if !ok {
 				ctx.SetReturn(1)
 				return 0
 			}
-			rsp := entry.retRSP - 8
-			mem.Write64(rsp, entry.retAddr)
-			rw.WriteReg(4, rsp)
+			if ctx.State != nil && ctx.State.Is32 {
+				rsp := entry.retRSP - 4
+				mem.Write32(rsp, uint32(entry.retAddr))
+				rw.WriteReg(4, rsp)
+			} else {
+				rsp := entry.retRSP - 8
+				mem.Write64(rsp, entry.retAddr)
+				rw.WriteReg(4, rsp)
+			}
 			ctx.SetReturn(nResult)
-			ctx.CPU.SetPC(hctx.SyncTrampoline + 15) // the 0xC3 (RET) byte
+			// PE32 trampoline: RET is at +13; x64 trampoline: RET is at +19
+			retOffset := uint64(19)
+			if ctx.State != nil && ctx.State.Is32 {
+				retOffset = 13
+			}
+			ctx.CPU.SetPC(hctx.SyncTrampoline + retOffset)
 			ctx.ReturnOverridden = true
 			ctx.PCRedirected = true
 			return 0
@@ -5909,7 +6184,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
-	d.RegisterAutoStubHandler(user32, "MessageBoxA", func(ctx *ntapi.TrapContext) uint32 {
+	messageBoxAHandler := func(ctx *ntapi.TrapContext) uint32 {
 		textPtr := ctx.Arg(1)
 		captionPtr := ctx.Arg(2)
 		uType := ctx.Arg(3)
@@ -5956,8 +6231,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(IDOK)
 		}
 		return 0
-	})
-	d.RegisterAutoStubHandler(user32, "MessageBoxW", func(ctx *ntapi.TrapContext) uint32 {
+	}
+	d.RegisterAutoStubHandler(user32, "MessageBoxA", messageBoxAHandler)
+	messageBoxWHandler := func(ctx *ntapi.TrapContext) uint32 {
 		textPtr := ctx.Arg(1)
 		captionPtr := ctx.Arg(2)
 		uType := ctx.Arg(3)
@@ -6005,7 +6281,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(IDOK)
 		}
 		return 0
-	})
+	}
+	d.RegisterAutoStubHandler(user32, "MessageBoxW", messageBoxWHandler)
 	d.RegisterAutoStubHandler(user32, "SetCursor", func(ctx *ntapi.TrapContext) uint32 {
 		hCursor := ctx.Arg(0)
 		prevCursor := currentCursorHandle
@@ -7004,28 +7281,133 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// GetMessageA: ANSI wrapper for GetMessageW - delegate to same queue
+	// GetMessageA: full blocking message loop - mirrors GetMessageW exactly.
+	// The ANSI/Unicode distinction doesn't matter since our queue stores Win32
+	// message structs with already-resolved strings.
 	d.RegisterAutoStubHandler(user32, "GetMessageA", func(ctx *ntapi.TrapContext) uint32 {
 		pMsg := ctx.Arg(0)
-		if len(hctx.MsgQueue) > 0 {
+
+		// Save message loop entry point (same logic as GetMessageW).
+		if msgLoopSP == 0 {
+			if ctx.State != nil && ctx.State.Is32 {
+				retAddr32, _ := mem.Read32(ctx.CPU.GetSP())
+				msgLoopPC = uint64(retAddr32)
+				msgLoopSP = ctx.CPU.GetSP() + 4
+				ravelog.Logf("[msg] GetMessageA first call from 0x%x (pMsg=0x%x)\n", retAddr32, pMsg)
+			} else {
+				retAddr, _ := mem.Read64(ctx.CPU.GetSP())
+				msgLoopPC = retAddr
+				msgLoopSP = ctx.CPU.GetSP() + 8
+				ravelog.Logf("[msg] GetMessageA first call from 0x%x (pMsg=0x%x)\n", retAddr, pMsg)
+			}
+		}
+
+		dequeueA := func() bool {
+			if len(hctx.MsgQueue) == 0 {
+				return false
+			}
 			m := hctx.MsgQueue[0]
 			hctx.MsgQueue = hctx.MsgQueue[1:]
+			if m.message == 0x000F && m.hwnd == hctx.MainHWND {
+				hctx.WinInvalid[hctx.MainHWND] = false
+			}
 			if pMsg != 0 {
 				writeMsg(ctx, pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 			}
-			if m.message == 0x0012 { // WM_QUIT → return FALSE to end message loop
+			if m.message == 0x0012 {
 				ctx.SetReturn(0)
 			} else {
 				ctx.SetReturn(1)
 			}
+			return true
+		}
+
+		if wlDisplay == nil {
+			if pMsg != 0 {
+				writeMsg(ctx, pMsg, hctx.MainHWND, 0x12, 0, 0)
+			}
+			ctx.SetReturn(0)
 			return 0
 		}
-		// No messages; return WM_QUIT to avoid infinite spin
-		if pMsg != 0 {
-			writeMsg(ctx, pMsg, hctx.MainHWND, 0x12, 0, 0) // WM_QUIT
+
+		var lastSyntheticFrameNs int64
+		for {
+			checkTimers()
+			if dequeueA() {
+				return 0
+			}
+
+			evt, _ := wlDisplay.Poll()
+			if evt != wl.EventNone {
+				if dispatchWl != nil {
+					dispatchWl(evt)
+				}
+				checkTimers()
+				if dequeueA() {
+					return 0
+				}
+			}
+
+			timeoutUs := int64(16000)
+			now := time.Now()
+			for _, t := range timerMap {
+				d := t.deadline.Sub(now).Microseconds()
+				if d < timeoutUs {
+					if d < 0 {
+						d = 0
+					}
+					timeoutUs = d
+				}
+			}
+
+			wlFd := wlDisplay.Fd()
+			var rfds unix.FdSet
+			rfds.Set(wlFd)
+			tv := unix.Timeval{Sec: timeoutUs / 1_000_000, Usec: timeoutUs % 1_000_000}
+			n, _ := unix.Select(wlFd+1, &rfds, nil, nil, &tv)
+			if n > 0 {
+				evt2, _ := wlDisplay.Dispatch()
+				if dispatchWl != nil {
+					dispatchWl(evt2)
+				}
+			}
+
+			checkTimers()
+
+			if wlDisplay.HasPendingInput() && dispatchWl != nil {
+				dispatchWl(wl.EventKey)
+				dispatchWl(wl.EventMouse)
+			}
+
+			if dequeueA() {
+				return 0
+			}
+
+			nowNs := time.Now().UnixNano()
+			if nowNs-lastSyntheticFrameNs < 16_000_000 {
+				continue
+			}
+			lastSyntheticFrameNs = nowNs
+			var childPaints []uint64
+			for h, cs := range hwndChildren {
+				if hwndWndProc[h] != 0 && cs.visible && hctx.WinInvalid[h] {
+					childPaints = append(childPaints, h)
+				}
+			}
+			if !hctx.WinInvalid[hctx.MainHWND] && len(childPaints) == 0 {
+				continue
+			}
+			sort.Slice(childPaints, func(i, j int) bool { return childPaints[i] < childPaints[j] })
+			if hctx.WinInvalid[hctx.MainHWND] {
+				queuePaint(hctx.MainHWND)
+			}
+			for _, h := range childPaints {
+				queuePaint(h)
+			}
+			if dequeueA() {
+				return 0
+			}
 		}
-		ctx.SetReturn(0)
-		return 0
 	})
 
 	// LoadCursorA: ANSI wrapper - same as LoadCursorW
@@ -7915,6 +8297,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// -------------------------------------------------------
 	d.RegisterAutoStubHandler(user32, "PostQuitMessage", func(ctx *ntapi.TrapContext) uint32 {
 		exitCode := ctx.Arg(0)
+		ravelog.Logf("[user32] PostQuitMessage(%d)\n", exitCode)
 		hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd: 0, message: 0x0012, wParam: exitCode, lParam: 0}) // WM_QUIT
 		return 0
 	})
@@ -8051,46 +8434,123 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		})
 	}
+	var peekACount int
+	var peekACaller uint32
+	// autoClickAt tracks how many "advance" clicks we've injected into the
+	// installer's spin loop. Each click index corresponds to a Wise wizard page.
+	// Injected when the queue has been empty for a sustained stretch.
+	var autoClickAt int    // index of next click to inject
+	var peekEmptyRun int   // consecutive empty-queue returns
+	var wiseTimerFires int // WM_TIMER dispatches seen (need ≥3 before injecting)
+	// Wait for enough WM_TIMER fires (≥3) before auto-clicking so the Wise engine
+	// fully initializes before we advance the wizard. Fire #3 happens at ~2.5M
+	// empty PeekMessageA calls; after that use a smaller idle gap per click.
+	const autoClickIdleFirst = 500_000 // idle gap before 1st click (post-timers)
+	const autoClickIdleNext = 200_000  // idle gap between subsequent clicks
 	d.RegisterAutoStubHandler(user32, "PeekMessageA", func(ctx *ntapi.TrapContext) uint32 {
 		// PeekMessageA: identical to PeekMessageW - our messages are internal, no A/W distinction
 		pMsg := ctx.Arg(0)
 		remove := ctx.Arg(4)&0x1 != 0
+		peekACount++
+		// Dump a stack slice once to find who is calling the drain repeatedly
+		if peekACount == 10 && ctx.State != nil && ctx.State.Is32 {
+			rsp := ctx.CPU.GetSP()
+			retAddr, _ := mem.Read32(rsp)
+			peekACaller = retAddr
+			ravelog.Logf("[msg] PeekMessageA steady-state caller=0x%x rsp=0x%x\n", retAddr, rsp)
+			// Print 32 stack words to find the full call chain
+			for i := uint64(0); i < 32; i++ {
+				v, _ := mem.Read32(rsp + i*4)
+				ravelog.Logf("[stack] [rsp+%d]=0x%08x\n", i*4, v)
+			}
+		}
+		if peekACount%500 == 0 {
+			ravelog.Logf("[msg] PeekMessageA call #%d (queue=%d) caller=0x%x\n", peekACount, len(hctx.MsgQueue), peekACaller)
+		}
+		_ = peekACaller
+
+		checkTimers() // fire any expired timers before checking the queue
 
 		if wlDisplay != nil {
-			evt, _ := wlDisplay.Poll()
-			if evt != wl.EventNone && evt != wl.EventClose {
-				if evt == wl.EventKey {
-					for {
-						ke, ok := wlDisplay.PollKey()
-						if !ok {
-							break
+			evt, err := wlDisplay.Poll()
+			if err != nil {
+				ravelog.Logf("[wl] Poll error: %v\n", err)
+			}
+			if evt == wl.EventClose {
+				ravelog.Logf("[wl] EventClose received - queueing WM_CLOSE\n")
+				hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hctx.MainHWND, 0x0010, 0, 0}) // WM_CLOSE
+			} else if evt != wl.EventNone {
+				for {
+					ke, ok := wlDisplay.PollKey()
+					if !ok {
+						break
+					}
+					target := hctx.FocusHwnd
+					if target == 0 {
+						target = hctx.MainHWND
+					}
+					if ke.Pressed {
+						hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0100, uint64(ke.VK), 0})
+						if ke.Char >= 0x20 || ke.Char == '\r' || ke.Char == '\b' || ke.Char == '\t' {
+							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0102, uint64(ke.Char), 0})
 						}
-						target := hctx.FocusHwnd
-						if target == 0 {
-							target = hctx.MainHWND
-						}
-						if ke.Pressed {
-							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0100, uint64(ke.VK), 0})
-							if ke.Char >= 0x20 || ke.Char == '\r' || ke.Char == '\b' || ke.Char == '\t' {
-								hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0102, uint64(ke.Char), 0})
-							}
-						} else {
-							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0101, uint64(ke.VK), 0})
-						}
+					} else {
+						hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{target, 0x0101, uint64(ke.VK), 0})
 					}
 				}
-				if evt == wl.EventMouse {
-					if dispatchWl != nil {
-						dispatchWl(evt)
-					}
+			}
+			if evt == wl.EventMouse {
+				if dispatchWl != nil {
+					dispatchWl(evt)
 				}
 			}
 		}
 
 		if len(hctx.MsgQueue) == 0 {
+			// Count consecutive empty-queue returns. Once the Wise engine has fully
+			// initialized (≥3 WM_TIMER fires), inject "Next page" events to advance
+			// the wizard without user interaction.
+			peekEmptyRun++
+			idleThreshold := autoClickIdleFirst
+			if autoClickAt > 0 {
+				idleThreshold = autoClickIdleNext
+			}
+			if wiseTimerFires >= 3 && peekEmptyRun >= idleThreshold && autoClickAt < 12 {
+				peekEmptyRun = 0
+				autoClickAt++
+				hw := hctx.MainHWND
+				// WM_USER+1 (0x401) is the Wise engine "Next page" signal.
+				// Also send WM_LBUTTONDOWN/UP at a typical "Next >" button position
+				// (660, 550) as a fallback for installers that use hit-testing.
+				const (
+					wmUser1       = 0x0401
+					wmLButtonDown = 0x0201
+					wmLButtonUp   = 0x0202
+					wmCommand     = 0x0111
+				)
+				lp := uint64((550 << 16) | 660) // MAKELPARAM(660, 550)
+				ravelog.Logf("[auto] inject page-advance #%d → WM_USER+1 + WM_LBUTTONDOWN(660,550) hwnd=0x%x\n",
+					autoClickAt, hw)
+				hctx.MsgQueue = append(hctx.MsgQueue,
+					queuedMsg{hw, wmUser1, 0, 0},
+					queuedMsg{hw, wmLButtonDown, 1, lp},
+					queuedMsg{hw, wmLButtonUp, 0, lp},
+				)
+				// On the 4th wizard page ("Ready to Install"), the user would normally
+				// click the "Install" button which sends WM_COMMAND(IDOK=1). Inject this
+				// explicitly so the Wise engine sets its install-confirmed flag, which
+				// the script checks after the admin-rights test before extracting files.
+				if autoClickAt == 4 {
+					ravelog.Logf("[auto] inject WM_COMMAND(IDOK=1) for Install button → hwnd=0x%x\n", hw)
+					hctx.MsgQueue = append(hctx.MsgQueue,
+						queuedMsg{hw, wmCommand, 1, 0},
+					)
+				}
+			}
 			ctx.SetReturn(0)
 			return 0
 		}
+		peekEmptyRun = 0
 		m := hctx.MsgQueue[0]
 		if remove {
 			hctx.MsgQueue = hctx.MsgQueue[1:]
@@ -8140,14 +8600,29 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 
+		is32 := ctx.State != nil && ctx.State.Is32
+		ravelog.Logf("[dispatch] DispatchMessageA: hwnd=0x%x msg=0x%x → WndProc=0x%x is32=%v\n", hwnd, message, wndProc, is32)
+		if message == 0x0113 { // WM_TIMER dispatched to guest WndProc
+			wiseTimerFires++
+			ravelog.Logf("[wise] WM_TIMER dispatch #%d\n", wiseTimerFires)
+		}
+		if is32 {
+			rr := ctx.CPU.(ntapi.RegisterReader)
+			rw := ctx.CPU.(ntapi.RegisterWriter)
+			rsp := rr.ReadReg(4)
+			retAddr32, _ := mem.Read32(rsp)
+			ravelog.Logf("[dispatch] DispatchMessageA PE32: rsp=0x%x retAddr=0x%x → SyncCallWndProc\n", rsp, retAddr32)
+			rsp += 4 + 1*4 // skip retAddr + 1 arg (pMsg)
+			rw.WriteReg(4, rsp)
+			hctx.SyncCallWndProc(ctx, wndProc, hwnd, message, wParam, lParam, uint64(retAddr32))
+			return 0
+		}
+
 		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
 		if !ok {
 			ctx.SetReturn(0)
 			return 0
 		}
-
-		ravelog.Logf("[dispatch] DispatchMessageA: hwnd=0x%x msg=0x%x → WndProc=0x%x\n", hwnd, message, wndProc)
-
 		rw.WriteReg(1, hwnd)            // RCX
 		rw.WriteReg(2, uint64(message)) // RDX
 		rw.WriteReg(8, wParam)          // R8
@@ -8195,7 +8670,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				queue: []syncDispatch{}, retAddr: retAddr,
 				hwnd: hwnd, returnWndProcResult: true,
 			})
+			rsp -= 48
 			mem.Write64(rsp, hctx.SyncTrampoline)
+			rw.WriteReg(4, rsp)
 			rw.WriteReg(1, hwnd)
 			rw.WriteReg(2, uint64(msg))
 			rw.WriteReg(8, wParam)
@@ -8584,6 +9061,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "SetWindowTextA", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd, p := ctx.Arg(0), ctx.Arg(1)
 		text := readAnsi(p)
+		ravelog.Logf("[user32] SetWindowTextA hwnd=0x%x text=%q\n", hwnd, text)
 		if hwnd == hctx.MainHWND {
 			hctx.MainTitle = text
 		}
@@ -8782,6 +9260,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(user32, "GetWindowDC", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
+		ravelog.Logf("[user32] GetWindowDC hwnd=0x%x\n", hwnd)
 		// Window DC covers the full surface (NC + client), so origin is (0,0) for the main window.
 		var ox, oy int32
 		if cs, ok := hwndChildren[hwnd]; ok {
@@ -9735,6 +10214,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "DialogBoxParamA", func(ctx *ntapi.TrapContext) uint32 {
+		hInstance := ctx.Arg(0)
 		lpTemplate := ctx.Arg(1)
 		hWndParent := ctx.Arg(2)
 		lpDialogFunc := ctx.Arg(3)
@@ -9746,8 +10226,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		} else {
 			templateName = readGuestString(lpTemplate)
 		}
-		ravelog.Logf("[dialog] DialogBoxParamA template=%s parent=0x%x dlgProc=0x%x initParam=0x%x\n",
-			templateName, hWndParent, lpDialogFunc, dwInitParam)
+		// Log the return address (= call site in guest code) to help trace error origins
+		var retAddr uint32
+		if ctx.State != nil && ctx.State.Is32 {
+			retAddr, _ = mem.Read32(ctx.CPU.GetSP())
+		}
+		ravelog.Logf("[dialog] DialogBoxParamA template=%s hInstance=0x%x parent=0x%x dlgProc=0x%x initParam=0x%x callSite=0x%x\n",
+			templateName, hInstance, hWndParent, lpDialogFunc, dwInitParam, retAddr)
 
 		if lpDialogFunc == 0 {
 			ctx.SetReturn(0)
@@ -9755,34 +10240,62 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 
 		dlgHwnd := hwndAlloc()
-		hwndChildren[dlgHwnd] = &controlState{
-			className:  "dialogbox",
+		cs := &controlState{
+			className:  "dialog",
 			parentHWND: hWndParent,
 			visible:    true,
 		}
 
-		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
-		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
-		if ok && ok2 {
+		// Load and parse the DLGTEMPLATE resource from hInstance module.
+		if info := loadDlgTemplate(hInstance, lpTemplate); info != nil {
+			cs.w = int32(info.cx) * 2
+			cs.h = int32(info.cy) * 2
+			cs.text = info.title
+			if info.title != "" {
+				hwndTitle[dlgHwnd] = info.title
+			}
+			hwndChildren[dlgHwnd] = cs
+			createDlgControls(dlgHwnd, info)
+		} else {
+			hwndChildren[dlgHwnd] = cs
+		}
+		hwndWndProc[dlgHwnd] = lpDialogFunc
+		// Mark the new dialog as needing a paint so the modal pump dispatches
+		// WM_PAINT after WM_INITDIALOG completes.
+		queuePaint(dlgHwnd)
+
+		// Save call-site state for EndDialog longjmp.
+		rr, okR := ctx.CPU.(ntapi.RegisterReader)
+		if okR {
 			rsp := rr.ReadReg(4)
-			retAddr, _ := mem.Read64(rsp)
-			hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
-				queue:               nil,
-				retAddr:             retAddr,
-				hwnd:                2,
-				returnWndProcResult: false,
+			var retAddr uint64
+			var retRSP uint64
+			if ctx.State != nil && ctx.State.Is32 {
+				v, _ := mem.Read32(rsp)
+				retAddr = uint64(v)
+				retRSP = rsp + 24 // 4 (retAddr) + 5*4 (stdcall args)
+			} else {
+				retAddr, _ = mem.Read64(rsp)
+				retRSP = rsp + 8
+			}
+			modalDialogStack = append(modalDialogStack, modalDlgEntry{
+				hwnd:      dlgHwnd,
+				retAddr:   retAddr,
+				retRSP:    retRSP,
+				syncDepth: len(hctx.SyncStack),
 			})
-			mem.Write64(rsp, hctx.SyncTrampoline)
-			rw.WriteReg(1, dlgHwnd)
-			rw.WriteReg(2, 0x0110)
-			rw.WriteReg(8, 0)
-			rw.WriteReg(9, dwInitParam)
-			ctx.CPU.SetPC(lpDialogFunc)
-			ctx.ReturnOverridden = true
-			ctx.PCRedirected = true
+			if msgLoopSP == 0 && hctx.ModalPumpTrampoline != 0 {
+				msgLoopSP = retRSP
+				msgLoopPC = hctx.ModalPumpTrampoline
+			}
+		}
+
+		// Dispatch WM_INITDIALOG; syncTrampoline will redirect to message loop.
+		if dispatchWmInitDialog(ctx, dlgHwnd, lpDialogFunc, dwInitParam, true) {
 			return 0
 		}
 
+		// Fallback: no register access - return IDCANCEL
 		ctx.SetReturn(2)
 		return 0
 	})
@@ -10752,16 +11265,43 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		a := hctx.NextAtom
 		hctx.NextAtom++
 		if pClass != 0 {
-			style, _ := mem.Read32(pClass)
-			wndProc, _ := mem.Read64(pClass + 8)
-			cbClsExtra, _ := mem.Read32(pClass + 16)
-			cbWndExtra, _ := mem.Read32(pClass + 20)
-			hInst, _ := mem.Read64(pClass + 24)
-			hIcon, _ := mem.Read64(pClass + 32)
-			hCursor, _ := mem.Read64(pClass + 40)
-			hBrush, _ := mem.Read64(pClass + 48)
-			lpMenuName, _ := mem.Read64(pClass + 56)
-			lpName, _ := mem.Read64(pClass + 64)
+			var style uint32
+			var wndProc, hInst, hIcon, hCursor, hBrush, lpMenuName, lpName uint64
+			var cbClsExtra, cbWndExtra uint32
+			if pClass < 0x100000000 {
+				// WNDCLASSA x86: style(4), lpfnWndProc(4), cbClsExtra(4), cbWndExtra(4),
+				// hInstance(4), hIcon(4), hCursor(4), hbrBackground(4), lpszMenuName(4), lpszClassName(4)
+				style, _ = mem.Read32(pClass)
+				v, _ := mem.Read32(pClass + 4)
+				wndProc = uint64(v)
+				cbClsExtra, _ = mem.Read32(pClass + 8)
+				cbWndExtra, _ = mem.Read32(pClass + 12)
+				v, _ = mem.Read32(pClass + 16)
+				hInst = uint64(v)
+				v, _ = mem.Read32(pClass + 20)
+				hIcon = uint64(v)
+				v, _ = mem.Read32(pClass + 24)
+				hCursor = uint64(v)
+				v, _ = mem.Read32(pClass + 28)
+				hBrush = uint64(v)
+				v, _ = mem.Read32(pClass + 32)
+				lpMenuName = uint64(v)
+				v, _ = mem.Read32(pClass + 36)
+				lpName = uint64(v)
+			} else {
+				// WNDCLASSA x64: style(4)+pad(4), lpfnWndProc(8), cbClsExtra(4)+cbWndExtra(4),
+				// hInstance(8), hIcon(8), hCursor(8), hbrBackground(8), lpszMenuName(8), lpszClassName(8)
+				style, _ = mem.Read32(pClass)
+				wndProc, _ = mem.Read64(pClass + 8)
+				cbClsExtra, _ = mem.Read32(pClass + 16)
+				cbWndExtra, _ = mem.Read32(pClass + 20)
+				hInst, _ = mem.Read64(pClass + 24)
+				hIcon, _ = mem.Read64(pClass + 32)
+				hCursor, _ = mem.Read64(pClass + 40)
+				hBrush, _ = mem.Read64(pClass + 48)
+				lpMenuName, _ = mem.Read64(pClass + 56)
+				lpName, _ = mem.Read64(pClass + 64)
+			}
 			hctx.AtomWndProc[a] = wndProc
 			if hBrush > 0 && hBrush <= 30 {
 				hctx.ClassBrush[a] = uint32(hBrush)
@@ -10801,22 +11341,48 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "RegisterClassExA", func(ctx *ntapi.TrapContext) uint32 {
-		// WNDCLASSEXA has cbSize(4)+style(4) prefix and hIconSm(8) suffix
 		pClass := ctx.Arg(0)
 		a := hctx.NextAtom
 		hctx.NextAtom++
 		if pClass != 0 {
-			style, _ := mem.Read32(pClass + 4)
-			wndProc, _ := mem.Read64(pClass + 8)
-			cbClsExtra, _ := mem.Read32(pClass + 16)
-			cbWndExtra, _ := mem.Read32(pClass + 20)
-			hInst, _ := mem.Read64(pClass + 24)
-			hIcon, _ := mem.Read64(pClass + 32)
-			hCursor, _ := mem.Read64(pClass + 40)
-			hBrush, _ := mem.Read64(pClass + 48)
-			lpMenuName, _ := mem.Read64(pClass + 56)
-			lpName, _ := mem.Read64(pClass + 64)
-			hIconSm, _ := mem.Read64(pClass + 72)
+			var style uint32
+			var wndProc, hInst, hIcon, hCursor, hBrush, lpMenuName, lpName, hIconSm uint64
+			var cbClsExtra, cbWndExtra uint32
+			if pClass < 0x100000000 {
+				// PE32: WNDCLASSEXA - all pointer fields are 4 bytes
+				style, _ = mem.Read32(pClass + 4)
+				v, _ := mem.Read32(pClass + 8)
+				wndProc = uint64(v)
+				cbClsExtra, _ = mem.Read32(pClass + 12)
+				cbWndExtra, _ = mem.Read32(pClass + 16)
+				v, _ = mem.Read32(pClass + 20)
+				hInst = uint64(v)
+				v, _ = mem.Read32(pClass + 24)
+				hIcon = uint64(v)
+				v, _ = mem.Read32(pClass + 28)
+				hCursor = uint64(v)
+				v, _ = mem.Read32(pClass + 32)
+				hBrush = uint64(v)
+				v, _ = mem.Read32(pClass + 36)
+				lpMenuName = uint64(v)
+				v, _ = mem.Read32(pClass + 40)
+				lpName = uint64(v)
+				v, _ = mem.Read32(pClass + 44)
+				hIconSm = uint64(v)
+			} else {
+				// PE64: WNDCLASSEXA - pointer fields are 8 bytes
+				style, _ = mem.Read32(pClass + 4)
+				wndProc, _ = mem.Read64(pClass + 8)
+				cbClsExtra, _ = mem.Read32(pClass + 16)
+				cbWndExtra, _ = mem.Read32(pClass + 20)
+				hInst, _ = mem.Read64(pClass + 24)
+				hIcon, _ = mem.Read64(pClass + 32)
+				hCursor, _ = mem.Read64(pClass + 40)
+				hBrush, _ = mem.Read64(pClass + 48)
+				lpMenuName, _ = mem.Read64(pClass + 56)
+				lpName, _ = mem.Read64(pClass + 64)
+				hIconSm, _ = mem.Read64(pClass + 72)
+			}
 			hctx.AtomWndProc[a] = wndProc
 			if hBrush > 0 && hBrush <= 30 {
 				hctx.ClassBrush[a] = uint32(hBrush)
@@ -10868,6 +11434,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				classAtomForHwnd = a
 				if wp, ok2 := hctx.AtomWndProc[a]; ok2 {
 					hwndWndProc[hwnd] = wp
+				}
+			}
+			// Fallback only for app-defined classes. Predefined/common-control class names
+			// like "edit" must not inherit the app's single registered top-level WndProc.
+			if classAtomForHwnd == 0 && len(hctx.ClassNameAtom) == 1 && !isBuiltinWindowClassName(className) {
+				for _, a := range hctx.ClassNameAtom {
+					classAtomForHwnd = a
+					if wp, ok2 := hctx.AtomWndProc[a]; ok2 {
+						hwndWndProc[hwnd] = wp
+					}
 				}
 			}
 		}
@@ -10985,40 +11561,66 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 			}
 		}
-		// Sync dispatch WM_NCCREATE + WM_CREATE
+		// Sync dispatch WM_NCCREATE + WM_CREATE via SyncCallWndProc (handles PE32/PE64)
 		if wp, hasWP := hwndWndProc[hwnd]; hasWP && wp != 0 {
+			is32 := ctx.State != nil && ctx.State.Is32
 			cs := scratchAlloc(80)
-			mem.Write64(cs+0, ctx.Arg(11))
-			mem.Write64(cs+8, ctx.Arg(10))
-			mem.Write64(cs+16, ctx.Arg(9))
-			mem.Write64(cs+24, ctx.Arg(8))
-			mem.Write32(cs+32, uint32(ctx.Arg(7)))
-			mem.Write32(cs+36, uint32(ctx.Arg(6)))
-			mem.Write32(cs+40, uint32(ctx.Arg(5)))
-			mem.Write32(cs+44, uint32(ctx.Arg(4)))
-			mem.Write32(cs+48, style)
-			mem.Write32(cs+52, 0)
-			mem.Write64(cs+56, ctx.Arg(2))
-			mem.Write64(cs+64, ctx.Arg(1))
-			mem.Write32(cs+72, uint32(ctx.Arg(0)))
+			// CREATESTRUCTA layout (same byte layout as CREATESTRUCTW for all non-string fields)
+			if is32 {
+				mem.Write32(cs+0, uint32(ctx.Arg(11))) // lpCreateParams
+				mem.Write32(cs+4, uint32(ctx.Arg(10))) // hInstance
+				mem.Write32(cs+8, uint32(ctx.Arg(9)))  // hMenu
+				mem.Write32(cs+12, uint32(ctx.Arg(8))) // hwndParent
+				mem.Write32(cs+16, uint32(ctx.Arg(7))) // cy
+				mem.Write32(cs+20, uint32(ctx.Arg(6))) // cx
+				mem.Write32(cs+24, uint32(ctx.Arg(5))) // y
+				mem.Write32(cs+28, uint32(ctx.Arg(4))) // x
+				mem.Write32(cs+32, style)              // style
+				mem.Write32(cs+36, 0)                  // padding / dwExStyle
+				mem.Write32(cs+40, uint32(ctx.Arg(2))) // lpszName
+				mem.Write32(cs+44, uint32(ctx.Arg(1))) // lpszClass
+				mem.Write32(cs+48, uint32(ctx.Arg(0))) // dwExStyle
+			} else {
+				mem.Write64(cs+0, ctx.Arg(11))
+				mem.Write64(cs+8, ctx.Arg(10))
+				mem.Write64(cs+16, ctx.Arg(9))
+				mem.Write64(cs+24, ctx.Arg(8))
+				mem.Write32(cs+32, uint32(ctx.Arg(7)))
+				mem.Write32(cs+36, uint32(ctx.Arg(6)))
+				mem.Write32(cs+40, uint32(ctx.Arg(5)))
+				mem.Write32(cs+44, uint32(ctx.Arg(4)))
+				mem.Write32(cs+48, style)
+				mem.Write32(cs+52, 0)
+				mem.Write64(cs+56, ctx.Arg(2))
+				mem.Write64(cs+64, ctx.Arg(1))
+				mem.Write32(cs+72, uint32(ctx.Arg(0)))
+			}
 
-			rw, ok := ctx.CPU.(ntapi.RegisterWriter)
 			rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
-			if ok && ok2 {
+			if ok2 {
 				rsp := rr.ReadReg(4)
-				retAddr, _ := mem.Read64(rsp)
+				var retAddr uint64
+				if is32 {
+					v, _ := mem.Read32(rsp)
+					retAddr = uint64(v)
+					rsp += 4 + 12*4 // stdcall cleanup: retAddr + 12 DWORD args
+					ctx.CPU.(ntapi.RegisterWriter).WriteReg(4, rsp)
+				} else {
+					retAddr, _ = mem.Read64(rsp)
+				}
 				hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
 					queue:   []syncDispatch{{wndProc: wp, hwnd: hwnd, msg: 0x0001, wParam: 0, lParam: cs}},
 					retAddr: retAddr,
 					hwnd:    hwnd,
 				})
-				rw.WriteReg(1, hwnd)
-				rw.WriteReg(2, 0x0081)
-				rw.WriteReg(8, 0)
-				rw.WriteReg(9, cs)
-				mem.Write64(rsp, hctx.SyncTrampoline)
-				rw.WriteReg(16, wp)
+				hctx.SyncCallWndProc(ctx, wp, hwnd, 0x0081, 0, cs, hctx.SyncTrampoline)
+				return 0
 			}
+			// Fallback: queue messages
+			hctx.MsgQueue = append(hctx.MsgQueue,
+				queuedMsg{hwnd, 0x0081, 0, cs},
+				queuedMsg{hwnd, 0x0001, 0, cs},
+			)
 		}
 		ctx.SetReturn(hwnd)
 		return 0
@@ -11363,7 +11965,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						hwnd:                hwnd,
 						returnWndProcResult: true,
 					})
+					rsp -= 48
 					mem.Write64(rsp, hctx.SyncTrampoline)
+					rw.WriteReg(4, rsp)
 					rw.WriteReg(1, hwnd)
 					rw.WriteReg(2, uint64(msg))
 					rw.WriteReg(8, wParam)
@@ -11408,7 +12012,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						hwnd:                hwnd,
 						returnWndProcResult: true,
 					})
+					rsp -= 48
 					mem.Write64(rsp, hctx.SyncTrampoline)
+					rw.WriteReg(4, rsp)
 					rw.WriteReg(1, hwnd)
 					rw.WriteReg(2, uint64(msg))
 					rw.WriteReg(8, wParam)
@@ -11466,7 +12072,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			retAddr: retAddr,
 			hwnd:    1,
 		})
-		rsp -= 8
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
 		rw.WriteReg(4, rsp)
 		rw.WriteReg(1, queue[0].hwnd)
@@ -11576,6 +12182,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// DPI-aware functions (Win10+) - apps resolve at runtime via GetProcAddress.
 	// Using RegisterDynamicHandler to make them discoverable.
 	nextDynID := uint32(ntapi.DynExportIDBase)
+	d.RegisterDynamicHandler(mem, user32, "MessageBoxA", nextDynID, messageBoxAHandler)
+	nextDynID++
+	d.RegisterDynamicHandler(mem, user32, "MessageBoxW", nextDynID, messageBoxWHandler)
+	nextDynID++
 	dpiStub96 := func(ctx *ntapi.TrapContext) uint32 {
 		ctx.SetReturn(96) // standard DPI
 		return 0

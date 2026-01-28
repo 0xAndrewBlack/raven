@@ -334,9 +334,16 @@ func (d *Display) dispatchOne() (EventType, error) {
 
 	switch kind {
 	case kindDisplay:
-		if op == 0 && len(payload) >= 12 { // error
-			msg, _ := gstr(payload[8:])
-			return EventNone, fmt.Errorf("wayland error: %s", msg)
+		if op == 0 { // error
+			if len(payload) >= 12 {
+				errObj := gu32(payload[0:])
+				errCode := gu32(payload[4:])
+				msg, _ := gstr(payload[8:])
+				return EventNone, fmt.Errorf("wayland protocol error: obj=%d code=%d msg=%q", errObj, errCode, msg)
+			}
+			return EventNone, fmt.Errorf("wayland protocol error: short payload (%d bytes): %x", len(payload), payload)
+		} else if op == 1 && len(payload) >= 4 { // delete_id
+			delete(d.objects, gu32(payload))
 		}
 
 	case kindRegistry:
@@ -348,7 +355,9 @@ func (d *Display) dispatchOne() (EventType, error) {
 		}
 
 	case kindCallback:
-		// done - handled by roundtrip
+		if op == 0 { // done
+			delete(d.objects, objID)
+		}
 
 	case kindShm:
 		// format - ignore
@@ -596,6 +605,36 @@ func (d *Display) roundtrip(callbackID uint32) error {
 				serial := gu32(payload)
 				d.send(d.wmBaseID, 3, pu32(serial))
 			}
+		case kindXdgSurface:
+			if op == 0 { // configure - must ack even during roundtrip
+				serial := gu32(payload)
+				d.send(objID, 4, pu32(serial))
+				if d.win != nil {
+					d.win.configured = true
+				}
+			}
+		case kindXdgToplevel:
+			if op == 0 { // configure(width, height, states) - update pending size
+				if len(payload) >= 8 && d.win != nil {
+					w := int32(gu32(payload[0:]))
+					h := int32(gu32(payload[4:]))
+					if d.win.TitleBarH > 0 && h > d.win.TitleBarH {
+						h -= d.win.TitleBarH
+					}
+					if w > 0 && h > 0 && (w != d.win.Width || h != d.win.Height) {
+						if !(d.win.appResized && (w < d.win.Width || h < d.win.Height)) {
+							d.win.Width = w
+							d.win.Height = h
+							d.win.needsResize = true
+							d.win.appResized = false
+						}
+					}
+				}
+			} else if op == 1 {
+				if d.win != nil {
+					d.win.Closed = true
+				}
+			}
 		case kindSeat:
 			if op == 0 { // capabilities during roundtrip
 				caps := gu32(payload)
@@ -615,9 +654,14 @@ func (d *Display) roundtrip(callbackID uint32) error {
 				}
 			}
 		case kindDisplay:
-			if op == 0 && len(payload) >= 12 {
-				msg, _ := gstr(payload[8:])
-				return fmt.Errorf("wayland error: %s", msg)
+			if op == 0 {
+				if len(payload) >= 12 {
+					errObj := gu32(payload[0:])
+					errCode := gu32(payload[4:])
+					msg, _ := gstr(payload[8:])
+					return fmt.Errorf("wayland protocol error: obj=%d code=%d msg=%q", errObj, errCode, msg)
+				}
+				return fmt.Errorf("wayland protocol error: short payload (%d): %x", len(payload), payload)
 			}
 		case kindLinuxDmabuf:
 			if op == 0 && len(payload) >= 4 {
@@ -807,6 +851,14 @@ func (d *Display) CreateWindow(title string, w, h, titleBarH int32) (*Window, er
 	d.send(win.surfaceID, 9, pi32(0), pi32(0), pi32(win.Width), pi32(win.Height+win.TitleBarH)) // damage_buffer
 	d.send(win.surfaceID, 6)                                                                    // commit
 
+	// Wait for the compositor to process the initial buffer commit. labwc
+	// sends xdg_toplevel.configure(activated) + xdg_surface.configure after
+	// seeing the first buffer. We must ack that configure before any further
+	// commit or the compositor closes the connection (protocol error).
+	cb2 := d.alloc(kindCallback)
+	d.send(1, 0, pu32(cb2))
+	_ = d.roundtrip(cb2)
+
 	return win, nil
 }
 
@@ -854,14 +906,77 @@ func (w *Window) createBuffer() error {
 	return nil
 }
 
-// Commit submits the current pixel buffer to the compositor.
-// NC area painting is handled by WM_NCPAINT in DefWindowProcW, not here.
+// drainIncoming reads and dispatches all pending events from the Wayland
+// socket without blocking. This ensures pending xdg_surface.configure
+// events are acked before the next commit (required by the protocol).
+func (d *Display) drainIncoming() {
+	for {
+		if len(d.readBuf) < 8 {
+			var rfds unix.FdSet
+			rfds.Set(d.fd)
+			n, _ := unix.Select(d.fd+1, &rfds, nil, nil, &unix.Timeval{Sec: 0, Usec: 0})
+			if n <= 0 {
+				return
+			}
+		}
+		if _, err := d.dispatchOne(); err != nil {
+			return
+		}
+	}
+}
+
+// Commit submits the current pixel buffer to the compositor and waits for
+// the compositor to signal it is ready for the next frame. This ensures:
+//   - Any xdg_surface.configure events sent after this commit are received and
+//     acked before the caller can issue the next commit (protocol requirement).
+//   - Natural vsync throttling: Present() blocks until the compositor renders.
 func (w *Window) Commit() {
 	totalH := w.Height + w.TitleBarH
 	d := w.disp
-	d.send(w.surfaceID, 1, pu32(w.bufferID), pi32(0), pi32(0))            // attach
-	d.send(w.surfaceID, 9, pi32(0), pi32(0), pi32(w.Width), pi32(totalH)) // damage_buffer
-	d.send(w.surfaceID, 6)                                                // commit
+
+	// Drain any events that arrived since the last call (non-blocking).
+	d.drainIncoming()
+
+	// Request a frame callback so we know when the compositor is done with
+	// this frame. We MUST wait for this before committing the next frame.
+	frameCbID := d.alloc(kindCallback)
+	d.send(w.surfaceID, 3, pu32(frameCbID)) // wl_surface.frame
+
+	if err := d.send(w.surfaceID, 1, pu32(w.bufferID), pi32(0), pi32(0)); err != nil {
+		delete(d.objects, frameCbID)
+		return
+	}
+	if err := d.send(w.surfaceID, 9, pi32(0), pi32(0), pi32(w.Width), pi32(totalH)); err != nil {
+		delete(d.objects, frameCbID)
+		return
+	}
+	d.send(w.surfaceID, 6) //nolint:errcheck
+
+	// Block until the frame callback fires. While waiting, all incoming
+	// events (including configure events) are dispatched and acked. This
+	// prevents the "commit without ack_configure" protocol violation.
+	// A 50ms timeout prevents deadlock if the compositor never fires the callback
+	// (e.g. when the window is minimized or the compositor is throttling).
+	for {
+		if _, fired := d.objects[frameCbID]; !fired {
+			return // callback was deleted by dispatchOne when it fired
+		}
+		// Wait up to 50ms for data; don't block indefinitely.
+		if len(d.readBuf) < 8 {
+			var rfds unix.FdSet
+			rfds.Set(d.fd)
+			n, _ := unix.Select(d.fd+1, &rfds, nil, nil, &unix.Timeval{Sec: 0, Usec: 50_000})
+			if n <= 0 {
+				delete(d.objects, frameCbID)
+				return
+			}
+		}
+		_, err := d.dispatchOne()
+		if err != nil {
+			delete(d.objects, frameCbID)
+			return
+		}
+	}
 }
 
 // SetTitleBar sets the title bar height and title, and marks the buffer for recreation.

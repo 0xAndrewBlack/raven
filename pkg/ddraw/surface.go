@@ -55,7 +55,7 @@ func (s *Surface) Lock(rect *Rect, desc *DDSURFACEDESC2, flags uint32) error {
 	if desc != nil {
 		lockRect := s.clipRect(rect)
 		desc.DwSize = uint32(sizeofDDSurfaceDesc2())
-		desc.DwFlags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH | DDSD_PIXELFORMAT
+		desc.DwFlags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH | DDSD_PIXELFORMAT | DDSD_LPSURFACE
 		desc.DwWidth = uint32(lockRect.Right - lockRect.Left)
 		desc.DwHeight = uint32(lockRect.Bottom - lockRect.Top)
 		desc.LPitch = int32(s.Pitch)
@@ -169,7 +169,7 @@ func (s *Surface) GetSurfaceDesc(desc *DDSURFACEDESC2) error {
 		return errors.New("ddraw: nil surface desc")
 	}
 	desc.DwSize = uint32(sizeofDDSurfaceDesc2())
-	desc.DwFlags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH | DDSD_PIXELFORMAT
+	desc.DwFlags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH | DDSD_PIXELFORMAT | DDSD_LPSURFACE
 	desc.DwWidth = s.Width
 	desc.DwHeight = s.Height
 	desc.LPitch = int32(s.Pitch)
@@ -348,6 +348,30 @@ func (s *Surface) setPixelColor(x, y int, color uint32) {
 	default:
 		binary.LittleEndian.PutUint32(s.Pixels[off:off+4], encode32Bit(color, s.Format))
 	}
+}
+
+// SetPixelRaw decodes a pixel value in the given source BPP format (using the
+// surface's format at lock time, assumed to be the default for that BPP) and
+// writes it to (x, y) using the surface's current BPP and palette.
+func (s *Surface) SetPixelRaw(x, y int, raw uint32, srcBPP uint32) {
+	var color uint32
+	switch srcBPP {
+	case 8:
+		// 8bpp source: raw is already a palette index; expand to gray or use src as-is
+		v := raw & 0xFF
+		color = v<<16 | v<<8 | v
+	case 16:
+		color = decode16Bit(uint16(raw), defaultPixelFormat(16))
+	case 24:
+		// raw = B | G<<8 | R<<16
+		r := (raw >> 16) & 0xFF
+		g := (raw >> 8) & 0xFF
+		b := raw & 0xFF
+		color = r<<16 | g<<8 | b
+	default: // 32
+		color = decode32Bit(raw, defaultPixelFormat(32))
+	}
+	s.setPixelColor(x, y, color)
 }
 
 func alignedPitch(width, bpp uint32) int {

@@ -47,6 +47,8 @@ type vulkanProcs struct {
 	vkCmdPushConstants            uintptr
 	vkCmdPipelineBarrier          uintptr
 	vkCmdCopyImageToBuffer        uintptr
+	vkCmdCopyImage                uintptr
+	vkGetImageSubresourceLayout   uintptr
 	vkQueueSubmit                 uintptr
 	vkQueueWaitIdle               uintptr
 	vkCreateRenderPass            uintptr
@@ -65,9 +67,11 @@ type vulkanProcs struct {
 	vkMapMemory                   uintptr
 	vkUnmapMemory                 uintptr
 	vkCreateFence                 uintptr
+	vkDestroyFence                uintptr
 	vkCreateSemaphore             uintptr
 	vkWaitForFences               uintptr
 	vkResetFences                 uintptr
+	vkFreeCommandBuffers          uintptr
 	vkGetMemoryFdKHR              uintptr
 	vkCreateSwapchainKHR          uintptr
 	vkDestroySwapchainKHR         uintptr
@@ -99,6 +103,14 @@ func Init() error {
 		procs.vkGetInstanceProcAddr, err = purego.Dlsym(lib, "vkGetInstanceProcAddr")
 		if err != nil {
 			initErr = fmt.Errorf("resolve vkGetInstanceProcAddr: %w", err)
+			return
+		}
+
+		// vkGetDeviceProcAddr is not always available via vkGetInstanceProcAddr(NULL, ...),
+		// so load it directly from the shared library.
+		procs.vkGetDeviceProcAddr, err = purego.Dlsym(lib, "vkGetDeviceProcAddr")
+		if err != nil {
+			initErr = fmt.Errorf("resolve vkGetDeviceProcAddr: %w", err)
 			return
 		}
 
@@ -205,6 +217,12 @@ func LoadDeviceFuncs(device VkDevice) error {
 	if procs.vkCmdCopyImageToBuffer, err = loadRequiredDeviceProc(device, "vkCmdCopyImageToBuffer"); err != nil {
 		return err
 	}
+	if procs.vkCmdCopyImage, err = loadRequiredDeviceProc(device, "vkCmdCopyImage"); err != nil {
+		return err
+	}
+	if procs.vkGetImageSubresourceLayout, err = loadRequiredDeviceProc(device, "vkGetImageSubresourceLayout"); err != nil {
+		return err
+	}
 	if procs.vkQueueSubmit, err = loadRequiredDeviceProc(device, "vkQueueSubmit"); err != nil {
 		return err
 	}
@@ -259,6 +277,9 @@ func LoadDeviceFuncs(device VkDevice) error {
 	if procs.vkCreateFence, err = loadRequiredDeviceProc(device, "vkCreateFence"); err != nil {
 		return err
 	}
+	if procs.vkDestroyFence, err = loadRequiredDeviceProc(device, "vkDestroyFence"); err != nil {
+		return err
+	}
 	if procs.vkCreateSemaphore, err = loadRequiredDeviceProc(device, "vkCreateSemaphore"); err != nil {
 		return err
 	}
@@ -266,6 +287,9 @@ func LoadDeviceFuncs(device VkDevice) error {
 		return err
 	}
 	if procs.vkResetFences, err = loadRequiredDeviceProc(device, "vkResetFences"); err != nil {
+		return err
+	}
+	if procs.vkFreeCommandBuffers, err = loadRequiredDeviceProc(device, "vkFreeCommandBuffers"); err != nil {
 		return err
 	}
 	procs.vkGetMemoryFdKHR, _ = loadOptionalDeviceProc(device, "vkGetMemoryFdKHR")
@@ -280,9 +304,6 @@ func LoadDeviceFuncs(device VkDevice) error {
 
 func loadGlobalFuncs() error {
 	var err error
-	if procs.vkGetDeviceProcAddr, err = loadRequiredGlobalProc("vkGetDeviceProcAddr"); err != nil {
-		return err
-	}
 	if procs.vkCreateInstance, err = loadRequiredGlobalProc("vkCreateInstance"); err != nil {
 		return err
 	}

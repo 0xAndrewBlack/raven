@@ -45,6 +45,14 @@ type Renderer struct {
 	frameFence           vk.VkFence
 	clearValues          [2]vk.VkClearValue
 	inScene              bool
+	// linearExport is a VK_IMAGE_TILING_LINEAR image used as the DMA-buf export
+	// source. The render target uses optimal tiling (GPU-vendor specific layout)
+	// which cannot be imported by the compositor with modifier=0. After each
+	// frame we vkCmdCopyImage from the render target into this linear image and
+	// then export its fd. The actual row pitch is queried once at creation time.
+	linearExport       vk.VkImage
+	linearExportMemory vk.VkDeviceMemory
+	linearExportStride uint32
 }
 
 type ffpPushConstants struct {
@@ -110,7 +118,7 @@ func NewRenderer(width, height uint32) (*Renderer, error) {
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create framebuffer", res)
 	}
-	vertSPV := GenerateFFPVertexShader(4, true, 4)
+	vertSPV := GenerateFFPVertexShader(4, false, 0)
 	fragSPV := GenerateFFPFragmentShader(0, nil)
 	vertModule, res := vk.CreateShaderModule(device, vertSPV)
 	if res != vk.VK_SUCCESS {
@@ -145,6 +153,19 @@ func NewRenderer(width, height uint32) (*Renderer, error) {
 		renderTarget:         &RenderTarget{Width: width, Height: height, Image: colorImage, View: colorView, Memory: colorMemory, Format: vk.VK_FORMAT_B8G8R8A8_UNORM, DmabufStride: width * 4, DmabufFormat: wl.DrmFormatARGB8888},
 		depthBuffer:          depthAttachment{Image: depthImage, View: depthView, Memory: depthMemory},
 		frameFence:           frameFence,
+	}
+	// Create a linear-tiled exportable image so DMA-buf imports use the correct
+	// memory layout. If creation fails, the dmabuf path falls back to readback.
+	if vk.SupportsDmabufExport(device) {
+		linImg, linMem, linRes := vk.CreateLinearExportableImage(device, width, height, vk.VK_FORMAT_B8G8R8A8_UNORM)
+		if linRes == vk.VK_SUCCESS {
+			r.linearExport = linImg
+			r.linearExportMemory = linMem
+			r.linearExportStride = vk.GetLinearImageRowPitch(device, linImg)
+			if r.linearExportStride == 0 {
+				r.linearExportStride = width * 4
+			}
+		}
 	}
 	r.Clear(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL, 0, 1, 0)
 	return r, nil
@@ -313,19 +334,152 @@ func (r *Renderer) tryDmabufPresent(window *wl.Window) bool {
 	if !vk.SupportsDmabufExport(r.vkDevice) || !window.HasDmabufSupport() {
 		return false
 	}
-	if !window.SupportsDmabufFormat(r.renderTarget.DmabufFormat, r.renderTarget.DmabufModifier) {
+	// Require the linear export image - without it we would export optimal-tiled
+	// GPU memory as linear (modifier=0), producing corrupted stripes.
+	if r.linearExport == 0 {
 		return false
 	}
-	if !window.DmabufReady(r.renderTarget.Width, r.renderTarget.Height, r.renderTarget.DmabufStride, r.renderTarget.DmabufFormat, r.renderTarget.DmabufModifier) {
-		fd, err := vk.ExportImageDmabufFd(r.vkDevice, r.renderTarget.Memory)
+	if !window.SupportsDmabufFormat(wl.DrmFormatARGB8888, 0) {
+		return false
+	}
+
+	// Copy the rendered frame from the optimal-tiled render target into the
+	// linear export image so the compositor can read it correctly.
+	if !r.blitToLinear() {
+		return false
+	}
+
+	stride := r.linearExportStride
+	w := r.renderTarget.Width
+	h := r.renderTarget.Height
+	if !window.DmabufReady(w, h, stride, wl.DrmFormatARGB8888, 0) {
+		fd, err := vk.ExportImageDmabufFd(r.vkDevice, r.linearExportMemory)
 		if err != nil {
 			return false
 		}
-		if err := window.CreateDmabufBuffer(fd, r.renderTarget.Width, r.renderTarget.Height, r.renderTarget.DmabufStride, r.renderTarget.DmabufFormat, r.renderTarget.DmabufModifier); err != nil {
+		if err := window.CreateDmabufBuffer(fd, w, h, stride, wl.DrmFormatARGB8888, 0); err != nil {
 			return false
 		}
 	}
 	window.CommitDmabuf()
+	return true
+}
+
+// blitToLinear copies the current render target into the linear export image
+// using a one-shot command buffer submission.
+func (r *Renderer) blitToLinear() bool {
+	cb, res := vk.AllocateCommandBuffer(r.vkDevice, r.vkCommandPool)
+	if res != vk.VK_SUCCESS {
+		return false
+	}
+	if vk.BeginCommandBuffer(cb) != vk.VK_SUCCESS {
+		return false
+	}
+
+	w, h := r.renderTarget.Width, r.renderTarget.Height
+	colorSub := vk.VkImageSubresourceLayers{
+		AspectMask: vk.VK_IMAGE_ASPECT_COLOR_BIT, MipLevel: 0,
+		BaseArrayLayer: 0, LayerCount: 1,
+	}
+
+	// Transition render target: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
+	vk.CmdPipelineBarrier(cb,
+		vk.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+		[]vk.VkImageMemoryBarrier{{
+			SType:               vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			SrcAccessMask:       vk.VkAccessFlags(vk.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT),
+			DstAccessMask:       vk.VkAccessFlags(vk.VK_ACCESS_TRANSFER_READ_BIT),
+			OldLayout:           vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			NewLayout:           vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			SrcQueueFamilyIndex: vk.VK_QUEUE_FAMILY_IGNORED,
+			DstQueueFamilyIndex: vk.VK_QUEUE_FAMILY_IGNORED,
+			Image:               r.renderTarget.Image,
+			SubresourceRange: vk.VkImageSubresourceRange{
+				AspectMask: vk.VK_IMAGE_ASPECT_COLOR_BIT,
+				LevelCount: 1, LayerCount: 1,
+			},
+		}})
+
+	// Transition linear export image: UNDEFINED / GENERAL → TRANSFER_DST_OPTIMAL
+	vk.CmdPipelineBarrier(cb,
+		vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+		[]vk.VkImageMemoryBarrier{{
+			SType:               vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			SrcAccessMask:       0,
+			DstAccessMask:       vk.VkAccessFlags(vk.VK_ACCESS_TRANSFER_WRITE_BIT),
+			OldLayout:           vk.VK_IMAGE_LAYOUT_UNDEFINED,
+			NewLayout:           vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			SrcQueueFamilyIndex: vk.VK_QUEUE_FAMILY_IGNORED,
+			DstQueueFamilyIndex: vk.VK_QUEUE_FAMILY_IGNORED,
+			Image:               r.linearExport,
+			SubresourceRange: vk.VkImageSubresourceRange{
+				AspectMask: vk.VK_IMAGE_ASPECT_COLOR_BIT,
+				LevelCount: 1, LayerCount: 1,
+			},
+		}})
+
+	vk.CmdCopyImage(cb,
+		r.renderTarget.Image, vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		r.linearExport, vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		vk.VkImageCopy{
+			SrcSubresource: colorSub,
+			DstSubresource: colorSub,
+			Extent:         vk.VkExtent3D{Width: w, Height: h, Depth: 1},
+		})
+
+	// Transition linear image to GENERAL so the compositor can read it.
+	vk.CmdPipelineBarrier(cb,
+		vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+		vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+		[]vk.VkImageMemoryBarrier{{
+			SType:               vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			SrcAccessMask:       vk.VkAccessFlags(vk.VK_ACCESS_TRANSFER_WRITE_BIT),
+			DstAccessMask:       0,
+			OldLayout:           vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			NewLayout:           vk.VK_IMAGE_LAYOUT_GENERAL,
+			SrcQueueFamilyIndex: vk.VK_QUEUE_FAMILY_IGNORED,
+			DstQueueFamilyIndex: vk.VK_QUEUE_FAMILY_IGNORED,
+			Image:               r.linearExport,
+			SubresourceRange: vk.VkImageSubresourceRange{
+				AspectMask: vk.VK_IMAGE_ASPECT_COLOR_BIT,
+				LevelCount: 1, LayerCount: 1,
+			},
+		}})
+
+	// Restore render target to COLOR_ATTACHMENT_OPTIMAL for next frame.
+	vk.CmdPipelineBarrier(cb,
+		vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+		vk.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		[]vk.VkImageMemoryBarrier{{
+			SType:               vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			SrcAccessMask:       vk.VkAccessFlags(vk.VK_ACCESS_TRANSFER_READ_BIT),
+			DstAccessMask:       vk.VkAccessFlags(vk.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT),
+			OldLayout:           vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			NewLayout:           vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			SrcQueueFamilyIndex: vk.VK_QUEUE_FAMILY_IGNORED,
+			DstQueueFamilyIndex: vk.VK_QUEUE_FAMILY_IGNORED,
+			Image:               r.renderTarget.Image,
+			SubresourceRange: vk.VkImageSubresourceRange{
+				AspectMask: vk.VK_IMAGE_ASPECT_COLOR_BIT,
+				LevelCount: 1, LayerCount: 1,
+			},
+		}})
+
+	if vk.EndCommandBuffer(cb) != vk.VK_SUCCESS {
+		return false
+	}
+	fence, res := vk.CreateFence(r.vkDevice, false)
+	if res != vk.VK_SUCCESS {
+		return false
+	}
+	if vk.QueueSubmit(r.vkQueue, cb, fence) != vk.VK_SUCCESS {
+		return false
+	}
+	vk.WaitForFence(r.vkDevice, fence, ^uint64(0))
+	vk.DestroyFence(r.vkDevice, fence)
+	vk.FreeCommandBuffer(r.vkDevice, r.vkCommandPool, cb)
 	return true
 }
 
@@ -377,17 +531,11 @@ func copyReadbackToWindow(pixels []byte, width, height uint32, window *wl.Window
 	if dstStride <= 0 {
 		dstStride = int(copyWidth) * 4
 	}
+	rowBytes := int(copyWidth) * 4
+	// SHM format is XRGB8888: the 4th byte (X) is ignored by the compositor,
+	// so a bulk copy per row is safe and avoids the per-pixel alpha-force loop.
 	for y := uint32(0); y < copyHeight; y++ {
-		srcRow := int(y) * srcStride
-		dstRow := int(y) * dstStride
-		for x := uint32(0); x < copyWidth; x++ {
-			si := srcRow + int(x)*4
-			di := dstRow + int(x)*4
-			window.Pix[di+0] = pixels[si+0]
-			window.Pix[di+1] = pixels[si+1]
-			window.Pix[di+2] = pixels[si+2]
-			window.Pix[di+3] = 0xFF
-		}
+		copy(window.Pix[int(y)*dstStride:], pixels[int(y)*srcStride:int(y)*srcStride+rowBytes])
 	}
 }
 
@@ -504,6 +652,9 @@ func (r *Renderer) pushConstants(dev *Device) {
 	view := matrixFromDevice(dev, D3DTS_VIEW)
 	proj := matrixFromDevice(dev, D3DTS_PROJECTION)
 	push := ffpPushConstants{WVP: mulMat4(mulMat4(world, view), proj), World: world, Ambient: colorUint32ToVec4(dev.GetRenderState(D3DRS_AMBIENT))}
+	if dev.FVF&D3DFVF_XYZRHW != 0 {
+		push.WVP = pretransformedWVP(dev, r.renderTarget.Width, r.renderTarget.Height)
+	}
 	lightIndex := 0
 	for idx, enabled := range dev.LightEnabled {
 		if !enabled {
@@ -734,6 +885,32 @@ func depthStencilClearValue(depth float32, stencil uint32) vk.VkClearValue {
 
 func colorUint32ToVec4(color uint32) [4]float32 {
 	return [4]float32{float32((color>>16)&0xff) / 255, float32((color>>8)&0xff) / 255, float32(color&0xff) / 255, float32((color>>24)&0xff) / 255}
+}
+
+func pretransformedWVP(dev *Device, width, height uint32) [16]float32 {
+	vp := dev.Viewport
+	if vp.Width == 0 {
+		vp.Width = width
+	}
+	if vp.Height == 0 {
+		vp.Height = height
+	}
+	if vp.Width == 0 {
+		vp.Width = 1
+	}
+	if vp.Height == 0 {
+		vp.Height = 1
+	}
+	sx := 2.0 / float32(vp.Width)
+	sy := 2.0 / float32(vp.Height)
+	tx := -1.0 - float32(vp.X)*sx
+	ty := -1.0 - float32(vp.Y)*sy
+	return [16]float32{
+		sx, 0, 0, 0,
+		0, sy, 0, 0,
+		0, 0, 1, 0,
+		tx, ty, 0, 1,
+	}
 }
 
 func vkResultError(op string, res vk.VkResult) error { return &vkError{op: op, res: res} }

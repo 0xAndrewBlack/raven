@@ -25,6 +25,10 @@ import (
 // MsgLoopSP/PC are set in GetMessageW; used by __fastfail recovery in runPE.
 var msgLoopSP, msgLoopPC uint64
 
+// modalPumpTrampolineID is the vmcall ID for the modal dialog message pump.
+// Used when an app calls DialogBoxParam before GetMessageA/W (e.g. installers).
+const modalPumpTrampolineID uint32 = 0x3FFD
+
 // ─── Types formerly local to registerAutoSynthHandlers ──────────────────────
 
 type menuItem struct {
@@ -336,6 +340,7 @@ type HandlerCtx struct {
 	ScratchOff          uint64
 	ScratchPage         uint64
 	SyncTrampoline      uint64
+	ModalPumpTrampoline uint64 // address of the modal message pump trampoline stub
 	SyncCallWndProc     func(ctx *ntapi.TrapContext, wndProc, hwnd uint64, msg uint32, wParam, lParam, retAddr uint64)
 	GuestCallTrampoline *ntapi.DllMainTrampoline
 	LastPostedMainW     int32
@@ -371,6 +376,7 @@ type HandlerCtx struct {
 	HeapAlloc           func(uint64, bool) uint64
 	HeapFree            func(uint64)
 	Wideprintf          func(string, []uint64) string
+	Ansiprintf          func(string, []uint64) string
 	CrtStreamWriter     func(uint64, uint64, uint64) *os.File
 	AddAtomLocal        func(string) uint16
 	AddAtomGlobal       func(string) uint16
@@ -411,6 +417,12 @@ type HandlerCtx struct {
 
 	CrtFiles  map[uint64]*os.File // guest FILE* → Go *os.File
 	CrtNextFP uint64              // next guest FILE* address to allocate
+
+	// VfsModuleResRVA maps the base address of a dynamically loaded PE (e.g.
+	// an installer DLL extracted at runtime) to its resource directory RVA.
+	// Populated by LoadLibraryA whenever loadDLLFromVFS succeeds.
+	// Used by loadDlgTemplate to locate dialog resources in the correct module.
+	VfsModuleResRVA map[uint64]uint32
 }
 
 func (h *HandlerCtx) SetCurrentCPU(cpu arch.CPU) {

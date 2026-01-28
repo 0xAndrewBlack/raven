@@ -1694,7 +1694,9 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 				hwnd:                hwnd,
 				returnWndProcResult: true,
 			})
+			rsp -= 48
 			mem.Write64(rsp, hctx.SyncTrampoline)
+			rw.WriteReg(4, rsp)
 			rw.WriteReg(1, hwnd)
 			rw.WriteReg(2, uint64(msg))
 			rw.WriteReg(8, wParam)

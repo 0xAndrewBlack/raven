@@ -1,6 +1,7 @@
 package ddraw
 
 import (
+	"encoding/binary"
 	"errors"
 )
 
@@ -41,12 +42,66 @@ func (dd *DirectDraw) SetDisplayMode(width, height, bpp, refreshRate, flags uint
 	return nil
 }
 
+// SwitchBPP changes the display BPP and converts all existing surfaces.
+// Called when CreatePalette indicates the game expects 8bpp mode.
+func (dd *DirectDraw) SwitchBPP(bpp uint32, palette *Palette) {
+	if dd.DisplayBPP == bpp {
+		return
+	}
+	oldBPP := dd.DisplayBPP
+	dd.DisplayBPP = bpp
+	for _, s := range dd.Surfaces {
+		if s.BPP == bpp {
+			continue
+		}
+		oldPixels := s.Pixels
+		oldPitch := s.Pitch
+		oldFormat := s.Format
+		s.BPP = bpp
+		s.Format = defaultPixelFormat(bpp)
+		s.Pitch = alignedPitch(s.Width, bpp)
+		s.Pixels = make([]byte, s.Pitch*int(s.Height))
+		// Convert existing pixel data from old BPP to new BPP
+		if len(oldPixels) > 0 && palette != nil && oldBPP > bpp {
+			for y := 0; y < int(s.Height); y++ {
+				for x := 0; x < int(s.Width); x++ {
+					off := y*oldPitch + x*bytesPerPixel(oldBPP)
+					var color uint32
+					switch oldBPP {
+					case 32:
+						if off+4 <= len(oldPixels) {
+							color = binary.LittleEndian.Uint32(oldPixels[off : off+4])
+							color = decode32Bit(color, oldFormat)
+						}
+					case 16:
+						if off+2 <= len(oldPixels) {
+							raw := binary.LittleEndian.Uint16(oldPixels[off : off+2])
+							color = decode16Bit(raw, oldFormat)
+						}
+					}
+					s.setPixelColor(x, y, color)
+				}
+			}
+		}
+		if palette != nil && s.Palette == nil {
+			s.Palette = palette
+		}
+	}
+}
+
 func (dd *DirectDraw) CreateSurface(desc *DDSURFACEDESC2) (*Surface, error) {
 	if desc == nil {
 		return nil, errors.New("ddraw: nil surface description")
 	}
-	width := desc.DwWidth
-	height := desc.DwHeight
+	// Only use width/height from the descriptor if the corresponding flag is set;
+	// otherwise these fields may contain uninitialized garbage.
+	var width, height uint32
+	if desc.DwFlags&DDSD_WIDTH != 0 {
+		width = desc.DwWidth
+	}
+	if desc.DwFlags&DDSD_HEIGHT != 0 {
+		height = desc.DwHeight
+	}
 	caps := desc.DdsCaps
 	if caps.DwCaps&DDSCAPS_PRIMARYSURFACE != 0 {
 		if width == 0 {
@@ -63,11 +118,11 @@ func (dd *DirectDraw) CreateSurface(desc *DDSURFACEDESC2) (*Surface, error) {
 		height = dd.DisplayHeight
 	}
 	bpp := dd.DisplayBPP
-	if desc.DdpfPixelFormat.DwRGBBitCount != 0 {
+	if desc.DwFlags&DDSD_PIXELFORMAT != 0 && desc.DdpfPixelFormat.DwRGBBitCount != 0 {
 		bpp = desc.DdpfPixelFormat.DwRGBBitCount
 	}
 	format := desc.DdpfPixelFormat
-	if format.DwSize == 0 {
+	if desc.DwFlags&DDSD_PIXELFORMAT == 0 || format.DwSize == 0 {
 		format = defaultPixelFormat(bpp)
 	}
 	surface := newSurface(width, height, bpp, format, caps)
@@ -76,7 +131,7 @@ func (dd *DirectDraw) CreateSurface(desc *DDSURFACEDESC2) (*Surface, error) {
 		dd.PrimarySurface = surface
 	}
 	dd.Surfaces = append(dd.Surfaces, surface)
-	if caps.DwCaps&DDSCAPS_PRIMARYSURFACE != 0 && desc.DwBackBufferCount > 0 {
+	if caps.DwCaps&DDSCAPS_PRIMARYSURFACE != 0 && desc.DwFlags&DDSD_BACKBUFFERCOUNT != 0 && desc.DwBackBufferCount > 0 {
 		prev := surface
 		for i := uint32(0); i < desc.DwBackBufferCount; i++ {
 			backCaps := caps

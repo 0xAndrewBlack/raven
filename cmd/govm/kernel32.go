@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"compress/flate"
+	"encoding/binary"
 	"fmt"
 	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/loader"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
@@ -24,6 +28,427 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 )
+
+// wiseIsAdminStub is the guest address of a tiny "mov eax,1; ret" stub returned
+// from GetProcAddress("IsAdmin") so the admin-rights check always passes.
+// Also used for any other stub-return-1 need. Allocated lazily at 0x200000.
+var wiseIsAdminStub uint64
+
+// wiseMainDirNameSeen is set to true when lstrcpyA stores "%MAINDIR%" into a
+// variable-name slot. The very next lstrcpyA stores the default value ("DX-Ball");
+// we replace that with an absolute install path so file installation succeeds.
+var wiseMainDirNameSeen bool
+
+// wiseDisabledNameSeen is set to true when lstrcpyA stores "%DISABLED%" into a
+// variable-name slot. The very next lstrcpyA stores "!" (license not accepted);
+// we replace that with "" (empty = accepted) so the script proceeds to install.
+var wiseDisabledNameSeen bool
+
+// wiseF16Count tracks how many times the Wise f16 (wizard-page) handler has
+// been called. Before the 3rd call the DISABLED variable is resolved from the
+// variable table into a working buffer that the script's conditional reads.
+// We must patch the variable-table slots BEFORE f16 #3 runs so the conditional
+// sees DISABLED="" (not "!") and allows game-file extraction to proceed.
+//
+// Variable-table slot addresses (Wise engine, deterministic heap layout):
+//
+//	slot 15 %DISABLED% value @ 0x2001a870  (256-byte slot, base 0x20019970 + 15*0x100)
+//	slot 16 %MAINDIR%  value @ 0x2001a970  (256-byte slot, base 0x20019970 + 16*0x100)
+var wiseF16Count int
+
+
+
+// wiseInstallerDLL caches the first valid PE written to a ~GLH*.TMP staging file
+// (W32WINST.DLL, the Wise extraction engine). The script later overwrites GLF0001.tmp
+// with the README before f12 calls LoadLibraryA on it, so we serve this cache instead.
+var wiseInstallerDLL []byte
+
+// wiseW32WinstBase stores the guest base address of the loaded W32WINST.DLL module.
+// Used by GetProcAddress to route DoService to the real native entry point while
+// keeping IsAdmin stubbed (returns 1 = admin).
+var wiseW32WinstBase uint64
+
+// wiseW32WinstExports maps export names to native guest addresses inside W32WINST.DLL.
+// Populated when loadDLLFromVFS loads the DLL; consumed by GetProcAddress.
+var wiseW32WinstExports map[string]uint64
+
+// wiseExtractDone tracks whether we already extracted Wise archive files.
+var wiseExtractDone bool
+
+// wiseGameHostPath is set by wiseExtractArchive to the host-filesystem temp
+// path of the extracted game PE so that main.go can redirect the PE loader.
+var wiseGameHostPath string
+
+// wiseExtractArchive extracts all game files from a Wise 5.x self-extracting
+// installer into the VFS. It parses the PE overlay to find the script, reads the
+// file table, decompresses each file, and writes it to destDir in the VFS.
+//
+// The Wise 5.x overlay format (for DXBall.EXE):
+//   PE overlay at peOverlayOffset contains:
+//     +0x00: 80-byte header
+//     +0x51: deflated script (contains file table with names, offsets, sizes)
+//     then: resource blocks (GLC0.TMP, helpers, W32WINST.DLL, README)
+//     then: game data blocks (individual deflate streams per file)
+//   data_base = offset of W32WINST.DLL in the overlay (first resource after script)
+//   Each file record in the script: %MAINDIR%\<name>\0 <padding> <D1:u32> <D2:u32> <D3:u32> <D4:u32>
+//   D1 = cumulative compressed offset from data_base; D4 = decompressed size
+func wiseExtractArchive(installerPath string, fs *vfs.VFS, destDir string) error {
+	raw, err := os.ReadFile(installerPath)
+	if err != nil {
+		return fmt.Errorf("read installer: %w", err)
+	}
+
+	// Find PE overlay: read PE optional header to find SizeOfHeaders / end of sections
+	if len(raw) < 0x40 || raw[0] != 'M' || raw[1] != 'Z' {
+		return fmt.Errorf("not a PE file")
+	}
+	peOff := int(binary.LittleEndian.Uint32(raw[0x3c:]))
+	if peOff+0x100 > len(raw) || string(raw[peOff:peOff+4]) != "PE\x00\x00" {
+		return fmt.Errorf("invalid PE signature")
+	}
+	numSections := int(binary.LittleEndian.Uint16(raw[peOff+6:]))
+	sectionStart := peOff + 0x18 + int(binary.LittleEndian.Uint16(raw[peOff+0x14:]))
+	overlayOffset := 0
+	for i := 0; i < numSections; i++ {
+		off := sectionStart + i*0x28
+		rawSize := int(binary.LittleEndian.Uint32(raw[off+0x10:]))
+		rawPtr := int(binary.LittleEndian.Uint32(raw[off+0x14:]))
+		end := rawPtr + rawSize
+		if end > overlayOffset {
+			overlayOffset = end
+		}
+	}
+	if overlayOffset >= len(raw) {
+		return fmt.Errorf("no overlay data")
+	}
+	ravelog.Logf("[wise-extract] overlay at 0x%x (%d bytes overlay)\n", overlayOffset, len(raw)-overlayOffset)
+
+	// Decompress the script (deflate at overlay + 0x51)
+	scriptOffset := overlayOffset + 0x51
+	if scriptOffset >= len(raw) {
+		return fmt.Errorf("script offset out of range")
+	}
+	scriptReader := flate.NewReader(bytes.NewReader(raw[scriptOffset:]))
+	script, err := io.ReadAll(scriptReader)
+	scriptReader.Close()
+	if err != nil {
+		return fmt.Errorf("decompress script: %w", err)
+	}
+	ravelog.Logf("[wise-extract] script: %d bytes\n", len(script))
+
+	// Find data_base: scan the compressed data after the script for blocks.
+	// For DXBall.EXE: data_base = 108536 (overlay + offset to W32WINST.DLL area).
+	// We detect it from the first file's D1 value and its actual block location.
+	// For now, use a heuristic: decompress the script's compressed size to find
+	// where the next section starts.
+	//
+	// Find the compressed script size by scanning forward from scriptOffset
+	// to find where the next valid deflate block starts (GLC0.TMP = a PE32).
+	// But simpler: we know the header at overlay+0x1d contains script_compressed_size.
+	hdrBase := overlayOffset + 1 // header fields start at ov+1 based on our analysis
+	if hdrBase+0x50 > len(raw) {
+		return fmt.Errorf("header too short")
+	}
+	scriptCompSz := int(binary.LittleEndian.Uint32(raw[hdrBase+0x1c:]))
+	glc0CompSz := int(binary.LittleEndian.Uint32(raw[hdrBase+0x20:]))
+	ravelog.Logf("[wise-extract] script_comp=%d glc0_comp=%d\n", scriptCompSz, glc0CompSz)
+
+	// data_base: after script + GLC0.TMP + helper blocks. We need the exact offset.
+	// Parse file table first to get D1 values, then compute data_base from the first
+	// file whose block we can locate.
+	type wiseFile struct {
+		name       string
+		d1, d2, d4 uint32
+	}
+	var files []wiseFile
+	marker := []byte("%MAINDIR%\\")
+	pos := 0
+	for {
+		idx := bytes.Index(script[pos:], marker)
+		if idx < 0 {
+			break
+		}
+		idx += pos
+		// Find end of filename
+		nullIdx := bytes.IndexByte(script[idx+len(marker):], 0)
+		if nullIdx < 0 {
+			pos = idx + 1
+			continue
+		}
+		nameEnd := idx + len(marker) + nullIdx
+		shortName := string(script[idx+len(marker) : nameEnd])
+
+		// Skip padding zeros after null terminator
+		dpos := nameEnd + 1
+		for dpos < len(script) && script[dpos] == 0 {
+			dpos++
+		}
+		if dpos+16 > len(script) {
+			pos = idx + 1
+			continue
+		}
+		d1 := binary.LittleEndian.Uint32(script[dpos:])
+		d2 := binary.LittleEndian.Uint32(script[dpos+4:])
+		d4 := binary.LittleEndian.Uint32(script[dpos+12:])
+
+		// Sanity check: valid file entry has reasonable values
+		if d1 < 1000000 && d2 > d1 && d2 < 1000000 && d4 > 0 && d4 < 10000000 {
+			files = append(files, wiseFile{shortName, d1, d2, d4})
+		}
+		pos = nameEnd + 1
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no file entries found in script")
+	}
+	ravelog.Logf("[wise-extract] found %d file entries\n", len(files))
+
+	// Compute data_base by finding the first file's actual deflate block.
+	// The first file's D1 is a cumulative offset from data_base.
+	// We search for its deflate block by trying offsets near the expected position.
+	firstD1 := int(files[0].d1)
+	firstD4 := int(files[0].d4)
+
+	// data_base is typically: overlay + header(80) + script_comp + glc0_comp + helpers
+	// But helpers have variable sizes. Search backwards from the first file's expected
+	// decompressed size match.
+	dataBase := 0
+	// Try positions from script_end to somewhere reasonable
+	searchStart := overlayOffset + 0x51 + scriptCompSz
+	searchEnd := searchStart + 200000
+	if searchEnd > len(raw) {
+		searchEnd = len(raw)
+	}
+	// The first file block should be at dataBase + firstD1.
+	// Try potential dataBase values:
+	for tryBase := searchStart; tryBase < searchEnd-firstD1; tryBase++ {
+		off := tryBase + firstD1
+		if off+100 > len(raw) {
+			break
+		}
+		r := flate.NewReader(bytes.NewReader(raw[off:]))
+		dec, err := io.ReadAll(r)
+		r.Close()
+		if err == nil && len(dec) == firstD4 {
+			dataBase = tryBase
+			break
+		}
+	}
+	if dataBase == 0 {
+		return fmt.Errorf("could not determine data_base")
+	}
+	ravelog.Logf("[wise-extract] data_base=%d (0x%x)\n", dataBase, dataBase)
+
+	// Create destination directory
+	fs.MkdirAll(destDir)
+
+	// Extract all files
+	extracted := 0
+	for _, f := range files {
+		off := dataBase + int(f.d1)
+		if off >= len(raw) {
+			ravelog.Logf("[wise-extract] SKIP %s: offset %d out of range\n", f.name, off)
+			continue
+		}
+		r := flate.NewReader(bytes.NewReader(raw[off:]))
+		dec, err := io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			ravelog.Logf("[wise-extract] WARN %s: decompress error: %v (got %d bytes)\n", f.name, err, len(dec))
+			// Use partial data if we got some
+			if len(dec) == 0 {
+				continue
+			}
+		}
+
+		// Fix the Default.bds / DXBall.exe swap: if a file named Default.bds
+		// is actually a PE32 (MZ header), it's the game engine - save as DXBall.exe.
+		// If DXBall.exe is NOT a PE32, it's a misnamed data file - save as Default.bds.
+		destName := f.name
+		if len(dec) >= 2 && dec[0] == 'M' && dec[1] == 'Z' {
+			if strings.EqualFold(destName, "Default.bds") {
+				destName = "DXBall.exe"
+				ravelog.Logf("[wise-extract] renamed Default.bds → DXBall.exe (PE32 game engine)\n")
+				// Also write to host temp file so the PE loader can load it directly
+				tmpDir := filepath.Join(os.TempDir(), "DXBall")
+				os.MkdirAll(tmpDir, 0755)
+				tmpPath := filepath.Join(tmpDir, "DXBall.exe")
+				if werr := os.WriteFile(tmpPath, dec, 0644); werr == nil {
+					wiseGameHostPath = tmpPath
+					ravelog.Logf("[wise-extract] game PE saved to %s\n", tmpPath)
+				}
+			}
+		} else if strings.EqualFold(destName, "DXBall.exe") {
+			destName = "Default.bds"
+			ravelog.Logf("[wise-extract] renamed DXBall.exe → Default.bds (data file)\n")
+		}
+
+		vfsPath := destDir + "/" + destName
+		if err := fs.CreateFile(vfsPath, dec, vfs.FileMode(0644)); err != nil {
+			ravelog.Logf("[wise-extract] WARN %s: create error: %v\n", destName, err)
+			continue
+		}
+		extracted++
+		ravelog.Logf("[wise-extract] %s → %d bytes\n", destName, len(dec))
+	}
+
+	ravelog.Logf("[wise-extract] extracted %d/%d files to %s\n", extracted, len(files), destDir)
+	return nil
+}
+
+// loadDLLFromVFS tries to load a PE DLL from VFS-stored bytes (e.g. dynamically
+// extracted installer DLLs). For any import that can't be resolved from existing
+// synth DLLs, it auto-creates stub entries so the IAT is always fully patched.
+// Returns nil if the file is not found in the VFS.
+func loadDLLFromVFS(fs interface {
+	FileBytes(string) ([]byte, error)
+}, rawName string, mem *mmu.MMU, synthByName map[string]*ntapi.SynthPE, nextIDPtr *uint32, disp *ntapi.Dispatcher) *loader.PEModule {
+	// Build candidate VFS paths. Try both original-case and uppercase variants
+	// since VFS is case-sensitive and Windows paths are conventionally uppercase.
+	baseOrig := filepath.Base(strings.ReplaceAll(rawName, `\`, "/"))
+	baseUp := strings.ToUpper(baseOrig)
+	baseLo := strings.ToLower(baseOrig)
+
+	// Gather unique candidates (original, uppercase, lowercase variants).
+	seen := map[string]bool{}
+	var paths []string
+	add := func(p string) {
+		if !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	for _, base := range []string{baseOrig, baseUp, baseLo} {
+		add(winPathToVFS(strings.ReplaceAll(rawName, baseOrig, base)))
+		add("/Windows/" + base)
+		add("/Windows/System32/" + base)
+		add("/" + base)
+	}
+
+	var data []byte
+	var foundPath string
+	for _, p := range paths {
+		b, err := fs.FileBytes(p)
+		if err == nil && len(b) >= 2 && b[0] == 'M' && b[1] == 'Z' {
+			data = b
+			foundPath = p
+			break
+		}
+	}
+	if data == nil {
+		return nil
+	}
+
+	modName := strings.ToLower(filepath.Base(foundPath))
+
+	// Peek at the PE optional header to read the preferred image base.
+	// Old 32-bit DLLs compiled without a relocation table MUST load at their
+	// preferred base or all absolute address references will be wrong.
+	var preferredBase uint64
+	if len(data) >= 64 {
+		lfanew := uint32(data[60]) | uint32(data[61])<<8 | uint32(data[62])<<16 | uint32(data[63])<<24
+		if int(lfanew)+24+32 <= len(data) {
+			magic := uint16(data[lfanew+24]) | uint16(data[lfanew+25])<<8
+			switch magic {
+			case 0x10B: // PE32 - imageBase at offset 28 in optional header
+				if int(lfanew)+52+4 <= len(data) {
+					preferredBase = uint64(uint32(data[lfanew+52]) | uint32(data[lfanew+53])<<8 |
+						uint32(data[lfanew+54])<<16 | uint32(data[lfanew+55])<<24)
+				}
+			case 0x20B: // PE32+ - imageBase at offset 24 in optional header (64-bit)
+				if int(lfanew)+48+8 <= len(data) {
+					preferredBase = uint64(data[lfanew+48]) | uint64(data[lfanew+49])<<8 |
+						uint64(data[lfanew+50])<<16 | uint64(data[lfanew+51])<<24 |
+						uint64(data[lfanew+52])<<32 | uint64(data[lfanew+53])<<40 |
+						uint64(data[lfanew+54])<<48 | uint64(data[lfanew+55])<<56
+				}
+			}
+		}
+	}
+	ravelog.Logf("[win32] loadDLLFromVFS: %q preferredBase=0x%x\n", modName, preferredBase)
+	// Debug: dump DLL to /tmp for disassembly analysis
+	if err2 := os.WriteFile("/tmp/wise_dll.bin", data, 0644); err2 != nil {
+		ravelog.Logf("[win32] loadDLLFromVFS: dump failed: %v\n", err2)
+	}
+
+	mod, err := loader.MapPEBytes(modName, data, mem, preferredBase)
+	if err != nil {
+		ravelog.Logf("[win32] loadDLLFromVFS: MapPEBytes(%q) error: %v\n", foundPath, err)
+		return nil
+	}
+	ravelog.Logf("[win32] loadDLLFromVFS: %q loaded at base=0x%x (delta=0x%x from preferred)\n",
+		modName, mod.BaseAddr, int64(mod.BaseAddr)-int64(preferredBase))
+
+	// Pre-create stubs for any import that isn't yet in synthByName.
+	// This guarantees every IAT slot is patched to a valid trap stub (no 0xDEAD sentinels).
+	// Track which synth DLLs got new exports so we can post-register them.
+	modifiedSynths := map[string]*ntapi.SynthPE{}
+	for _, imp := range mod.Imports {
+		dllKey := strings.ToLower(imp.DLLName)
+		synth, ok := synthByName[dllKey]
+		if !ok {
+			// Create a new stub DLL
+			synth = ntapi.GenerateSynthDLL(mem, dllKey, []string{}, *nextIDPtr)
+			synthByName[dllKey] = synth
+			ravelog.Logf("[win32] loadDLLFromVFS: created stub DLL %q for %s imports\n", dllKey, modName)
+		}
+		if imp.FuncName != "" {
+			if _, has := synth.Exports[imp.FuncName]; !has {
+				id := *nextIDPtr
+				*nextIDPtr++
+				synth.AddDynamicExport(mem, imp.FuncName, id)
+				modifiedSynths[dllKey] = synth
+			}
+		} else if imp.Ordinal != 0 {
+			if _, has := synth.ExportOrds[imp.Ordinal]; !has {
+				id := *nextIDPtr
+				*nextIDPtr++
+				placeholder := fmt.Sprintf("ord_%d", imp.Ordinal)
+				synth.AddDynamicExport(mem, placeholder, id)
+				synth.ExportOrds[imp.Ordinal] = synth.Exports[placeholder]
+				modifiedSynths[dllKey] = synth
+			}
+		}
+	}
+
+	// Wire up handlers/names/stdcall-args for all newly added dynamic exports.
+	if disp != nil {
+		for _, synth := range modifiedSynths {
+			disp.PostRegisterSynthDLL(synth)
+		}
+	}
+
+	// Resolve the loaded DLL's imports against all known synth DLLs.
+	resMap := make(map[string]*loader.PEModule, len(synthByName))
+	for k, s := range synthByName {
+		resMap[k] = &loader.PEModule{
+			Name:       s.Name,
+			BaseAddr:   s.BaseAddr,
+			ImageSize:  s.ImageSize,
+			Exports:    s.Exports,
+			ExportOrds: s.ExportOrds,
+		}
+	}
+	// Also add the module itself (for self-imports)
+	resMap[mod.Name] = mod
+	if err := loader.ResolveImports(mem, mod, resMap); err != nil {
+		ravelog.Logf("[win32] loadDLLFromVFS: ResolveImports warning: %v\n", err)
+	}
+	return mod
+}
+
+// bytesFS is a minimal FileBytes-capable FS that serves a single in-memory file.
+// Used to load a cached PE blob through loadDLLFromVFS without touching the VFS.
+type bytesFS struct {
+	name string
+	data []byte
+}
+
+func (b *bytesFS) FileBytes(path string) ([]byte, error) {
+	if strings.ToLower(filepath.Base(strings.ReplaceAll(path, `\`, "/"))) == strings.ToLower(b.name) {
+		return b.data, nil
+	}
+	return nil, fmt.Errorf("not found: %q", path)
+}
 
 func registerKernel32Handlers(hctx *HandlerCtx) {
 	kernel32, ok := hctx.SynthByName["kernel32.dll"]
@@ -65,6 +490,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	startTime := hctx.StartTime
 	stdinReader := hctx.StdinReader
 	synthByName := hctx.SynthByName
+	nextDynIDPtr := &hctx.NextDelayID
 	tmPtr := hctx.TMPtr
 	wlDisplay := hctx.WlDisplay
 	mainModule := hctx.MainModule
@@ -241,7 +667,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if name == "" {
 			return ""
 		}
-		if !strings.HasSuffix(name, ".dll") && !strings.HasSuffix(name, ".exe") {
+		if !strings.HasSuffix(name, ".dll") && !strings.HasSuffix(name, ".exe") && !strings.HasSuffix(name, ".tmp") {
 			name += ".dll"
 		}
 		return name
@@ -473,39 +899,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		return defaultEnvValue(norm)
 	}
-	hostEnvKey := func(name string) string {
-		switch normalizeEnvName(name) {
-		case "USERPROFILE":
-			return "HOME"
-		case "APPDATA":
-			return "XDG_CONFIG_HOME"
-		case "LOCALAPPDATA":
-			return "XDG_DATA_HOME"
-		case "TEMP", "TMP":
-			return "TMPDIR"
-		case "USERNAME":
-			return "USER"
-		default:
-			return normalizeEnvName(name)
-		}
-	}
 	effectiveEnvironment := func() map[string]string {
 		env := map[string]string{}
-		for _, kv := range os.Environ() {
-			if idx := strings.IndexByte(kv, '='); idx > 0 {
-				env[normalizeEnvName(kv[:idx])] = kv[idx+1:]
-			}
-		}
-		for _, key := range []string{
-			"PATH", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-			"COMMONAPPDATA", "PROGRAMDATA", "WINDIR", "SYSTEMROOT",
-			"SYSTEMDRIVE", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
-			"OS", "USERNAME",
-		} {
-			if val, ok := defaultEnvValue(key); ok {
-				env[key] = val
-			}
-		}
 		for key, val := range envVars {
 			env[normalizeEnvName(key)] = val
 		}
@@ -540,6 +935,23 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		for i, w := range block {
 			mem.Write16(addr+uint64(i)*2, w)
 		}
+		return addr
+	}
+	buildEnvironmentBlockA := func() uint64 {
+		env := effectiveEnvironment()
+		keys := make([]string, 0, len(env))
+		for key := range env {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		block := make([]byte, 0, 512)
+		for _, key := range keys {
+			block = append(block, []byte(key+"="+env[key])...)
+			block = append(block, 0)
+		}
+		block = append(block, 0)
+		addr := mem.Mmap(0, uint64(len(block)), mmu.PermRead|mmu.PermWrite)
+		mem.WriteBytes(addr, block)
 		return addr
 	}
 	windowsFileTime := func(t time.Time) uint64 {
@@ -2544,12 +2956,26 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetStartupInfoA", func(ctx *ntapi.TrapContext) uint32 {
 		addr := ctx.Arg(0)
-		for i := uint64(0); i < 104; i++ {
-			ctx.Mem.Write8(addr+i, 0)
+		is32 := ctx.State != nil && ctx.State.Is32
+		if is32 {
+			// PE32: STARTUPINFOA is 68 bytes (4-byte pointers)
+			// dwFlags at offset 44, wShowWindow at offset 48
+			for i := uint64(0); i < 68; i++ {
+				ctx.Mem.Write8(addr+i, 0)
+			}
+			ctx.Mem.Write32(addr, 68)        // cb = sizeof(STARTUPINFOA) on x86
+			ctx.Mem.Write32(addr+44, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
+			ctx.Mem.Write16(addr+48, 0x0001) // wShowWindow = SW_SHOWNORMAL
+		} else {
+			// PE64: STARTUPINFOA is 104 bytes (8-byte pointers)
+			// dwFlags at offset 60, wShowWindow at offset 64
+			for i := uint64(0); i < 104; i++ {
+				ctx.Mem.Write8(addr+i, 0)
+			}
+			ctx.Mem.Write32(addr, 104)       // cb = sizeof(STARTUPINFOA) on x64
+			ctx.Mem.Write32(addr+60, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
+			ctx.Mem.Write16(addr+64, 0x0001) // wShowWindow = SW_SHOWNORMAL
 		}
-		ctx.Mem.Write32(addr, 104)       // cb = sizeof(STARTUPINFOA) on x64
-		ctx.Mem.Write32(addr+60, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
-		ctx.Mem.Write16(addr+64, 0x0001) // wShowWindow = SW_SHOWNORMAL
 		return 0
 	})
 	// Win32 protection ↔ MMU permission helpers
@@ -2827,6 +3253,29 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
 		}
+		if mod := loadDLLFromVFS(ctx.FS, readGuestUTF16(namePtr), mem, synthByName, nextDynIDPtr, d); mod != nil {
+			wrapped := &ntapi.SynthPE{
+				Name: mod.Name, BaseAddr: mod.BaseAddr, ImageSize: mod.ImageSize,
+				Exports: mod.Exports, ExportOrds: mod.ExportOrds, StubIDs: map[uint64]uint32{},
+			}
+			synthByName[mod.Name] = wrapped
+			synthByName[name] = wrapped
+			loadedLibraryRefs[mod.BaseAddr] = 1
+			ravelog.Logf("[win32] LoadLibraryExW: loaded PE from VFS %q → base=0x%x\n", name, mod.BaseAddr)
+			if mod.EntryPoint != 0 && mod.EntryPoint != mod.BaseAddr {
+				var dllMainErr error
+				if mod.Is64 {
+					dllMainErr = ntapi.CallDllMain(ctx.CPU, mem, guestCallTrampoline, mod.BaseAddr, mod.EntryPoint, ctx.Trace)
+				} else {
+					dllMainErr = ntapi.CallDllMain32(ctx.CPU, mem, guestCallTrampoline, mod.BaseAddr, mod.EntryPoint, ctx.Trace)
+				}
+				if dllMainErr != nil {
+					ravelog.Logf("[win32] LoadLibraryExW: DllMain for %q failed: %v\n", name, dllMainErr)
+				}
+			}
+			ctx.SetReturn(mod.BaseAddr)
+			return 0
+		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 		synthByName[name] = newSynth
 		loadedLibraryRefs[newSynth.BaseAddr] = 1
@@ -2855,6 +3304,29 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
 		}
+		if mod := loadDLLFromVFS(ctx.FS, readGuestUTF16(namePtr), mem, synthByName, nextDynIDPtr, d); mod != nil {
+			wrapped := &ntapi.SynthPE{
+				Name: mod.Name, BaseAddr: mod.BaseAddr, ImageSize: mod.ImageSize,
+				Exports: mod.Exports, ExportOrds: mod.ExportOrds, StubIDs: map[uint64]uint32{},
+			}
+			synthByName[mod.Name] = wrapped
+			synthByName[name] = wrapped
+			loadedLibraryRefs[mod.BaseAddr] = 1
+			ravelog.Logf("[win32] LoadLibraryW: loaded PE from VFS %q → base=0x%x\n", name, mod.BaseAddr)
+			if mod.EntryPoint != 0 && mod.EntryPoint != mod.BaseAddr {
+				var dllMainErr error
+				if mod.Is64 {
+					dllMainErr = ntapi.CallDllMain(ctx.CPU, mem, guestCallTrampoline, mod.BaseAddr, mod.EntryPoint, ctx.Trace)
+				} else {
+					dllMainErr = ntapi.CallDllMain32(ctx.CPU, mem, guestCallTrampoline, mod.BaseAddr, mod.EntryPoint, ctx.Trace)
+				}
+				if dllMainErr != nil {
+					ravelog.Logf("[win32] LoadLibraryW: DllMain for %q failed: %v\n", name, dllMainErr)
+				}
+			}
+			ctx.SetReturn(mod.BaseAddr)
+			return 0
+		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 		synthByName[name] = newSynth
 		loadedLibraryRefs[newSynth.BaseAddr] = 1
@@ -2868,7 +3340,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
-		name := normalizeModuleName(readGuestString(namePtr))
+		rawName := readGuestString(namePtr)
+		ravelog.Logf("[win32] LoadLibraryA called: %q\n", rawName)
+		name := normalizeModuleName(rawName)
 		resolved := resolveApiSetDLL(name)
 		if resolved != name {
 			if synth, ok := synthByName[resolved]; ok {
@@ -2881,6 +3355,45 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if synth, ok := synthByName[name]; ok {
 			loadedLibraryRefs[synth.BaseAddr]++
 			ctx.SetReturn(synth.BaseAddr)
+			return 0
+		}
+		// Try loading from VFS as an actual PE (for dynamically extracted DLLs)
+		if mod := loadDLLFromVFS(ctx.FS, rawName, mem, synthByName, nextDynIDPtr, d); mod != nil {
+			wrapped := &ntapi.SynthPE{
+				Name:       mod.Name,
+				BaseAddr:   mod.BaseAddr,
+				ImageSize:  mod.ImageSize,
+				Exports:    mod.Exports,
+				ExportOrds: mod.ExportOrds,
+				StubIDs:    map[uint64]uint32{},
+			}
+			synthByName[mod.Name] = wrapped
+			synthByName[name] = wrapped
+			loadedLibraryRefs[mod.BaseAddr] = 1
+			// Record the resource directory RVA so user32 can find dialog
+			// resources inside this DLL (e.g. installer wizard dialogs).
+			if mod.ResourceDirRVA != 0 {
+				if hctx.VfsModuleResRVA == nil {
+					hctx.VfsModuleResRVA = make(map[uint64]uint32)
+				}
+				hctx.VfsModuleResRVA[mod.BaseAddr] = mod.ResourceDirRVA
+			}
+			ravelog.Logf("[win32] LoadLibraryA: loaded PE from VFS %q → base=0x%x exports=%d\n", name, mod.BaseAddr, len(mod.Exports))
+			// Call DllMain(hinstDLL, DLL_PROCESS_ATTACH, 0) so the DLL can
+			// initialize its globals (e.g. saving its own module handle for
+			// resource lookups in DialogBoxParamA).
+			if mod.EntryPoint != 0 && mod.EntryPoint != mod.BaseAddr {
+				var dllMainErr error
+				if mod.Is64 {
+					dllMainErr = ntapi.CallDllMain(ctx.CPU, mem, guestCallTrampoline, mod.BaseAddr, mod.EntryPoint, ctx.Trace)
+				} else {
+					dllMainErr = ntapi.CallDllMain32(ctx.CPU, mem, guestCallTrampoline, mod.BaseAddr, mod.EntryPoint, ctx.Trace)
+				}
+				if dllMainErr != nil {
+					ravelog.Logf("[win32] LoadLibraryA: DllMain for %q failed: %v\n", name, dllMainErr)
+				}
+			}
+			ctx.SetReturn(mod.BaseAddr)
 			return 0
 		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
@@ -2946,6 +3459,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		for _, s := range hctx.Dlls {
 			if s.BaseAddr == hModule {
 				if addr, ok := s.Exports[funcName]; ok {
+					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) → 0x%x\n", hModule, funcName, addr)
 					ctx.SetReturn(addr)
 					return 0
 				}
@@ -2955,10 +3469,111 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		for _, s := range synthByName {
 			if s.BaseAddr == hModule {
 				if addr, ok := s.Exports[funcName]; ok {
+					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) → 0x%x (synth)\n", hModule, funcName, addr)
+					// For Wise engine script handlers (f12/f16/f19): log the script struct
+					// so we can see the command string. The dispatch_wrapper saves caller's EDI
+					// (the script struct ptr) via `push edi; xor edi,edi` before calling
+					// GetProcAddress. At this point:
+					//   [ESP+0]  = return address to dispatch_wrapper
+					//   [ESP+4]  = arg0 (hModule)
+					//   [ESP+8]  = arg1 (lpProcName ptr)
+					//   [ESP+12] = saved_edi = script struct pointer
+					if funcName == "f12" || funcName == "f16" || funcName == "f19" {
+						// dispatch_wrapper saves caller's EDI at [ESP+12] before calling us.
+						// All three handlers expect EDI to point to the installer-state struct.
+						// When EDI=0, look up the struct from GLC0.TMP's global pointer and
+						// patch it in so the real function runs with a valid struct.
+						gsp := ctx.CPU.GetSP()
+						savedEDI, _ := ctx.Mem.Read32(gsp + 12)
+						if savedEDI == 0 {
+							lfanewOff, _ := ctx.Mem.Read32(hModule + 60)
+							preferredBase, _ := ctx.Mem.Read32(hModule + uint64(lfanewOff) + 52)
+							actualGlobal := hModule + uint64(0x1ee4c)
+							if preferredBase != 0 {
+								actualGlobal = hModule + (uint64(0x1001ee4c) - uint64(preferredBase))
+							}
+							instPtr, _ := ctx.Mem.Read32(actualGlobal)
+							if instPtr != 0 {
+								ctx.Mem.Write32Raw(gsp+12, instPtr)
+								ravelog.Logf("[wise] %s patched saved_edi=0x%x (global@0x%x)\n",
+									funcName, instPtr, actualGlobal)
+							} else {
+								ravelog.Logf("[wise] %s saved_edi=NULL global=NULL → skip\n", funcName)
+								ctx.SetReturn(0)
+								return 0
+							}
+						} else {
+							ravelog.Logf("[wise] %s script_struct=0x%x (EDI set by caller)\n", funcName, savedEDI)
+						}
+						// f12 = Wise "LoadDLL" opcode. When the DLL name in the script struct
+						// is empty the real f12 shows an unretryable error dialog that loops
+						// forever. On the real installer this step is a no-op (Win9x
+						// LoadLibraryA("") returns NULL silently). Stub f12 out: return a
+						// PE32 "XOR EAX,EAX; RET" trampoline so the script continues with
+						// INSTALL_RESULT="" - the fallback file-extraction block then runs.
+						if funcName == "f12" {
+							// f12 = Wise "LoadDLL" opcode. At this point the installer
+							// is ready to extract files, but the native bytecode
+							// conditional gates it. Extract directly from the archive.
+							if !wiseExtractDone {
+								wiseExtractDone = true
+								installerPath := ctx.FS.ElfPath
+								ravelog.Logf("[wise] f12 → extracting game files from %s\n", installerPath)
+								if err := wiseExtractArchive(installerPath, ctx.FS, "/DXBall"); err != nil {
+									ravelog.Logf("[wise] extraction error: %v\n", err)
+								}
+							}
+							// Let f12 continue natively (loads W32WINST.DLL, calls IsAdmin)
+							ctx.SetReturn(addr)
+							return 0
+						}
+					}
+					// Before the 3rd f16 (wizard page 3) runs, patch the Wise variable
+					// table so DISABLED="" and MAINDIR="C:\DXBall". The script resolves
+					// %DISABLED% into its working buffer AFTER f16 #3 returns; by writing
+					// directly into the table slots here we make lstrlenA(workBuf)=0 so
+					// the conditional takes the "install" branch instead of "skip".
+					if funcName == "f16" {
+						wiseF16Count++
+						if wiseF16Count == 3 {
+							const disabledSlot = uint64(0x2001a870)
+							const maindirSlot = uint64(0x2001a970)
+							_ = ctx.Mem.WriteBytes(disabledSlot, []byte{0x00})
+							maindirBytes := append([]byte("C:\\DXBall"), 0x00)
+							_ = ctx.Mem.WriteBytes(maindirSlot, maindirBytes)
+							ravelog.Logf("[wise] f16 #3 pre-inject: DISABLED=\"\" MAINDIR=\"C:\\DXBall\" (slots 0x%x/0x%x)\n", disabledSlot, maindirSlot)
+						}
+					}
 					ctx.SetReturn(addr)
 					return 0
 				}
 			}
+		}
+		// Wise installer helper: GLF0001.tmp is supposed to be W32WINST.DLL
+		// but gets overwritten by the README before LoadLibraryExA. Return a
+		// "mov eax,1; ret" stub so IsAdmin() returns TRUE and file installation proceeds.
+		if funcName == "IsAdmin" {
+			const stubAddr = uint64(0x200000)
+			if wiseIsAdminStub == 0 {
+				mem.MapRangeZero(stubAddr, 0x1000, mmu.PermRead|mmu.PermExecute)
+				_ = mem.WriteBytesRaw(stubAddr, []byte{0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3})
+				wiseIsAdminStub = stubAddr
+			}
+			ravelog.Logf("[wise] GetProcAddress IsAdmin → stub 0x%x (returns 1)\n", stubAddr)
+			ctx.SetReturn(stubAddr)
+			return 0
+		}
+		// W32WINST.DLL exports (DoService, ShellLink etc.) - return real native addresses
+		// so the extraction engine runs natively inside the emulator.
+		if wiseW32WinstBase != 0 && hModule == wiseW32WinstBase {
+			if addr, ok := wiseW32WinstExports[funcName]; ok {
+				ravelog.Logf("[wise] GetProcAddress(W32WINST, %q) → native 0x%x\n", funcName, addr)
+				ctx.SetReturn(addr)
+				return 0
+			}
+			ravelog.Logf("[wise] GetProcAddress(W32WINST, %q) → not found in exports\n", funcName)
+			ctx.SetReturn(0)
+			return 0
 		}
 		ravelog.Logf("[win32] GetProcAddress(0x%x, %q) → not found\n", hModule, funcName)
 		ctx.SetReturn(0)
@@ -3017,6 +3632,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			slot = tlsNextSlot
 			tlsNextSlot++
 		}
+		ravelog.Logf("[tls] TlsAlloc -> slot=%d\n", slot)
 		ctx.SetReturn(uint64(slot))
 		return 0
 	})
@@ -3024,23 +3640,28 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		slot := uint32(ctx.Arg(0))
 		if tlsFreeSlots[slot] {
 			setLastErrorValue(87)
+			ravelog.Logf("[tls] TlsGetValue(slot=%d) -> 0 (freed)\n", slot)
 			ctx.SetReturn(0)
 			return 0
 		}
+		val := tlsValues[slot]
 		setLastErrorValue(0)
-		ctx.SetReturn(tlsValues[slot])
+		ravelog.Logf("[tls] TlsGetValue(slot=%d) -> 0x%x\n", slot, val)
+		ctx.SetReturn(val)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "TlsSetValue", func(ctx *ntapi.TrapContext) uint32 {
 		slot := uint32(ctx.Arg(0))
 		if tlsFreeSlots[slot] || slot == 0 {
 			setLastErrorValue(87)
+			ravelog.Logf("[tls] TlsSetValue(slot=%d, val=0x%x) -> FAIL\n", slot, ctx.Arg(1))
 			ctx.SetReturn(0)
 			return 0
 		}
 		val := ctx.Arg(1)
 		tlsValues[slot] = val
 		setLastErrorValue(0)
+		ravelog.Logf("[tls] TlsSetValue(slot=%d, val=0x%x) -> OK\n", slot, val)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -3123,6 +3744,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		flags := ctx.Arg(1)
 		zeroInit := flags&0x08 != 0 // HEAP_ZERO_MEMORY
 		ptr := sharedHeapAlloc(size, zeroInit)
+		if size <= 0x10000 {
+			ravelog.Logf("[heap] HeapAlloc(heap=0x%x flags=0x%x size=0x%x) -> 0x%x\n", ctx.Arg(0), flags, size, ptr)
+		}
 		ctx.SetReturn(ptr)
 		return 0
 	})
@@ -3329,14 +3953,24 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		units := readUTF16UnitsArg(srcStr, int32(srcLen))
 		var out []byte
 		if dstLen == 0 {
+			var required uint64
 			switch codePage {
 			case 65001:
-				ctx.SetReturn(uint64(len([]byte(string(utf16.Decode(units))))))
+				required = uint64(len([]byte(string(utf16.Decode(units)))))
 			case 0, 1252:
-				ctx.SetReturn(uint64(len(units)))
+				required = uint64(len(units))
+				if srcLen == -1 {
+					required++
+				}
 			default:
 				ctx.SetReturn(0)
+				ravelog.Logf("[nls] WideCharToMultiByte(cp=%d src=0x%x srcLen=%d dst=0x%x dstLen=%d sizeOnly=1) -> 0\n",
+					codePage, srcStr, srcLen, dstBuf, dstLen)
+				return 0
 			}
+			ravelog.Logf("[nls] WideCharToMultiByte(cp=%d src=0x%x srcLen=%d dst=0x%x dstLen=%d sizeOnly=1) -> %d\n",
+				codePage, srcStr, srcLen, dstBuf, dstLen, required)
+			ctx.SetReturn(required)
 			return 0
 		}
 		usedDefault := false
@@ -3359,6 +3993,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		if int64(len(out)) > dstLen {
 			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+			ravelog.Logf("[nls] WideCharToMultiByte(cp=%d src=0x%x srcLen=%d dst=0x%x dstLen=%d sizeOnly=0) -> 0 need=%d\n",
+				codePage, srcStr, srcLen, dstBuf, dstLen, len(out))
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -3371,6 +4007,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				ctx.Mem.Write8(lpUsedDefaultChar, 1)
 			}
 		}
+		ravelog.Logf("[nls] WideCharToMultiByte(cp=%d src=0x%x srcLen=%d dst=0x%x dstLen=%d sizeOnly=0) -> %d\n",
+			codePage, srcStr, srcLen, dstBuf, dstLen, len(out))
 		ctx.SetReturn(uint64(len(out)))
 		return 0
 	})
@@ -3416,9 +4054,29 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0xFFFFFFFF)
 			return 0
 		}
-		path := winPathToVFS(readGuestString(pathPtr))
+		winPath := readGuestString(pathPtr)
+		path := winPathToVFS(winPath)
+		// Check in-memory VFS first
+		if vnode, err := ctx.FS.StatPath(-1, path); err == nil {
+			var attrs uint32 = 0x20 // FILE_ATTRIBUTE_NORMAL
+			if vnode.IsDir {
+				attrs = 0x10
+			}
+			ravelog.Logf("[wise] GetFileAttributesA(%q) → VFS attrs=0x%x\n", winPath, attrs)
+			ctx.SetReturn(uint64(attrs))
+			return 0
+		}
+		// Check if a synth DLL stub exists for this name
+		baseName := strings.ToLower(filepath.Base(strings.ReplaceAll(winPath, `\`, "/")))
+		if _, ok := synthByName[baseName]; ok {
+			ravelog.Logf("[wise] GetFileAttributesA(%q) → synth stub attr=0x20\n", winPath)
+			ctx.SetReturn(0x20)
+			return 0
+		}
+		// Fall back to real filesystem
 		info, err := os.Stat(path)
 		if err != nil {
+			ravelog.Logf("[wise] GetFileAttributesA(%q) → NOT FOUND\n", winPath)
 			ctx.SetReturn(0xFFFFFFFF)
 			return 0
 		}
@@ -3426,6 +4084,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if info.IsDir() {
 			attrs = 0x10
 		} // FILE_ATTRIBUTE_DIRECTORY
+		ravelog.Logf("[wise] GetFileAttributesA(%q) → real FS attrs=0x%x\n", winPath, attrs)
 		ctx.SetReturn(uint64(attrs))
 		return 0
 	})
@@ -3466,20 +4125,39 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ctx.SetReturn(cmdLineWAddr)
 		return 0
 	})
-	// GetStartupInfoW: fill STARTUPINFOW (104 bytes on x64)
+	// GetStartupInfoW: fill STARTUPINFOW (68 bytes PE32, 104 bytes PE64)
 	d.RegisterAutoStubHandler(kernel32, "GetStartupInfoW", func(ctx *ntapi.TrapContext) uint32 {
 		addr := ctx.Arg(0)
-		for i := uint64(0); i < 104; i++ {
-			ctx.Mem.Write8(addr+i, 0)
+		is32 := ctx.State != nil && ctx.State.Is32
+		if is32 {
+			// PE32: STARTUPINFOW is 68 bytes (4-byte pointers)
+			// lpDesktop at offset 8, dwFlags at offset 44, wShowWindow at offset 48
+			for i := uint64(0); i < 68; i++ {
+				ctx.Mem.Write8(addr+i, 0)
+			}
+			if startupInfoDesktopAddr == 0 {
+				startupInfoDesktopAddr = mem.Mmap(0, uint64((len(utf16Encode(`WinSta0\Default`))+1)*2), mmu.PermRead|mmu.PermWrite)
+				writeUTF16String(startupInfoDesktopAddr, `WinSta0\Default`, uint64(len(utf16Encode(`WinSta0\Default`))+1))
+			}
+			ctx.Mem.Write32(addr, 68)                               // cb
+			ctx.Mem.Write32(addr+8, uint32(startupInfoDesktopAddr)) // lpDesktop
+			ctx.Mem.Write32(addr+44, 0x0001)                        // dwFlags = STARTF_USESHOWWINDOW
+			ctx.Mem.Write16(addr+48, 0x0005)                        // wShowWindow = SW_SHOW
+		} else {
+			// PE64: STARTUPINFOW is 104 bytes (8-byte pointers)
+			// lpDesktop at offset 16, dwFlags at offset 60, wShowWindow at offset 64
+			for i := uint64(0); i < 104; i++ {
+				ctx.Mem.Write8(addr+i, 0)
+			}
+			if startupInfoDesktopAddr == 0 {
+				startupInfoDesktopAddr = mem.Mmap(0, uint64((len(utf16Encode(`WinSta0\Default`))+1)*2), mmu.PermRead|mmu.PermWrite)
+				writeUTF16String(startupInfoDesktopAddr, `WinSta0\Default`, uint64(len(utf16Encode(`WinSta0\Default`))+1))
+			}
+			ctx.Mem.Write32(addr, 104) // cb
+			ctx.Mem.Write64(addr+16, startupInfoDesktopAddr)
+			ctx.Mem.Write32(addr+60, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
+			ctx.Mem.Write16(addr+64, 0x0005) // wShowWindow = SW_SHOW
 		}
-		if startupInfoDesktopAddr == 0 {
-			startupInfoDesktopAddr = mem.Mmap(0, uint64((len(utf16Encode(`WinSta0\Default`))+1)*2), mmu.PermRead|mmu.PermWrite)
-			writeUTF16String(startupInfoDesktopAddr, `WinSta0\Default`, uint64(len(utf16Encode(`WinSta0\Default`))+1))
-		}
-		ctx.Mem.Write32(addr, 104) // cb
-		ctx.Mem.Write64(addr+16, startupInfoDesktopAddr)
-		ctx.Mem.Write32(addr+60, 0x0001) // dwFlags = STARTF_USESHOWWINDOW
-		ctx.Mem.Write16(addr+64, 0x0005) // wShowWindow = SW_SHOW
 		return 0
 	})
 	// GetFileType: FILE_TYPE_CHAR for std handles, FILE_TYPE_DISK for files, FILE_TYPE_PIPE for pipes
@@ -3508,6 +4186,32 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		lpWritten := ctx.Arg(3)
 		lpOverlapped := ctx.Arg(4)
 		data, _ := ctx.Mem.ReadBytes(bufAddr, int(nBytes))
+		pathStr := ""
+		if fh2, ok := handles.Get(hFile).(*ntapi.FileHandle); ok {
+			pathStr = fh2.Path
+		}
+		if nBytes <= 8192 {
+			ravelog.Logf("[wise] WriteFile handle=0x%x path=%q nBytes=%d hex=%x\n", hFile, pathStr, nBytes, data)
+		} else {
+			ravelog.Logf("[wise] WriteFile handle=0x%x path=%q nBytes=%d hex(first512)=%x\n", hFile, pathStr, nBytes, data[:512])
+		}
+		// Cache the first valid Win32 PE written to ~GLH*.TMP - that's W32WINST.DLL, the
+		// Wise extraction engine. The script later overwrites GLF0001.tmp with the
+		// README, so we need this cached copy for f12's LoadLibraryA call.
+		// Require a proper PE signature (MZ + "PE\x00\x00" at e_lfanew offset), not just
+		// MZ, to skip the old-format NE/MZ files that also start with 'MZ'.
+		if wiseInstallerDLL == nil && len(data) >= 0x40 && data[0] == 'M' && data[1] == 'Z' {
+			lfanew := int(data[0x3c]) | int(data[0x3d])<<8 | int(data[0x3e])<<16 | int(data[0x3f])<<24
+			if lfanew > 0 && lfanew+4 <= len(data) &&
+				data[lfanew] == 'P' && data[lfanew+1] == 'E' && data[lfanew+2] == 0 && data[lfanew+3] == 0 {
+				baseName := strings.ToUpper(filepath.Base(strings.ReplaceAll(pathStr, `\`, "/")))
+				if strings.HasPrefix(baseName, "~GLH") && strings.HasSuffix(baseName, ".TMP") {
+					wiseInstallerDLL = make([]byte, len(data))
+					copy(wiseInstallerDLL, data)
+					ravelog.Logf("[wise] cached W32WINST.DLL (%d bytes) from %q\n", len(wiseInstallerDLL), pathStr)
+				}
+			}
+		}
 		var written int
 		switch hFile {
 		case 0x101: // stdout
@@ -3611,7 +4315,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	// GetEnvironmentStringsW: return pointer to env block from PEB
 	d.RegisterAutoStubHandler(kernel32, "GetEnvironmentStringsW", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(buildEnvironmentBlockW())
+		addr := buildEnvironmentBlockW()
+		ravelog.Logf("[env] GetEnvironmentStringsW -> 0x%x\n", addr)
+		ctx.SetReturn(addr)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FreeEnvironmentStringsW", func(ctx *ntapi.TrapContext) uint32 {
@@ -3734,6 +4440,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "lstrcmpiA", func(ctx *ntapi.TrapContext) uint32 {
 		a := ctx.Arg(0)
 		b := ctx.Arg(1)
+		sa := readGuestString(a)
+		sb := readGuestString(b)
+		ravelog.Logf("[wise] lstrcmpiA(%q, %q)\n", sa, sb)
 		for i := uint64(0); ; i++ {
 			ba, _ := ctx.Mem.Read8(a + i)
 			bb, _ := ctx.Mem.Read8(b + i)
@@ -3823,7 +4532,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		path := winPathToVFS(readGuestUTF16(pathPtr))
-		if err := os.MkdirAll(path, 0755); err != nil {
+		if _, err := ctx.FS.Resolve(path); err == nil {
+			// Already exists - Windows returns FALSE + ERROR_ALREADY_EXISTS
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.FS.Mkdir(path); err != nil {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 3) // ERROR_PATH_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -4673,9 +5389,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteFileW", func(ctx *ntapi.TrapContext) uint32 {
 		path := winPathToVFS(readGuestUTF16(ctx.Arg(0)))
-		if err := os.Remove(path); err != nil {
-			ctx.SetReturn(0)
-			return 0
+		if err := ctx.FS.Unlinkat(-1, path, 0); err != nil {
+			if err2 := os.Remove(path); err2 != nil {
+				ctx.SetReturn(0)
+				return 0
+			}
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -5898,12 +6616,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		name := normalizeEnvName(readGuestUTF16(ctx.Arg(0)))
 		valPtr := ctx.Arg(1)
 		deleteGuestEnv(name)
-		if valPtr == 0 {
-			_ = os.Unsetenv(hostEnvKey(name))
-		} else {
+		if valPtr != 0 {
 			value := readGuestUTF16(valPtr)
 			envVars[name] = value
-			_ = os.Setenv(hostEnvKey(name), value)
 		}
 		setLastErrorValue(0)
 		ctx.SetReturn(1)
@@ -6498,9 +7213,15 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		fd, err := ctx.FS.Open(vfsPath, flags)
 		if err != nil {
+			// Try resolving relative to the PE's directory
 			parts := strings.SplitN(strings.TrimPrefix(vfsPath, "/"), "/", 2)
+			var altPath string
 			if len(parts) == 2 {
-				altPath := peVfsDir + "/" + parts[1]
+				altPath = peVfsDir + "/" + parts[1]
+			} else if len(parts) == 1 {
+				altPath = peVfsDir + "/" + parts[0]
+			}
+			if altPath != "" {
 				if fd2, err2 := ctx.FS.Open(altPath, flags); err2 == nil {
 					fd = fd2
 					err = nil
@@ -6509,11 +7230,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 		}
 		if err != nil {
+			ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) → INVALID_HANDLE_VALUE err=%v\n", name, flags, err)
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
 			procState.LastError = 2
 			return 0
 		}
 		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
+		ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) → handle 0x%x\n", name, flags, h)
 		ctx.SetReturn(uint64(h))
 		return 0
 	})
@@ -7265,9 +7988,17 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
-		path := winPathToVFS(readGuestString(pathPtr))
-		if err := os.MkdirAll(path, 0755); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183) // ERROR_ALREADY_EXISTS
+		winPath := readGuestString(pathPtr)
+		path := winPathToVFS(winPath)
+		ravelog.Logf("[wise] CreateDirectoryA(%q)\n", winPath)
+		if _, err := ctx.FS.Resolve(path); err == nil {
+			// Already exists - Windows returns FALSE + ERROR_ALREADY_EXISTS
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.FS.Mkdir(path); err != nil {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 3) // ERROR_PATH_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -7281,7 +8012,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		path := winPathToVFS(readGuestString(pathPtr))
-		if err := os.MkdirAll(path, 0755); err != nil {
+		if _, err := ctx.FS.Resolve(path); err == nil {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.FS.Mkdir(path); err != nil {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 3)
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -7295,7 +8032,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		path := winPathToVFS(readGuestUTF16(pathPtr))
-		if err := os.MkdirAll(path, 0755); err != nil {
+		if _, err := ctx.FS.Resolve(path); err == nil {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.FS.Mkdir(path); err != nil {
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 3)
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -7924,7 +8667,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteFileA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "DeleteFileA", 1, 1)
+		name := readGuestString(ctx.Arg(0))
+		ravelog.Logf("[kernel32] DeleteFileA(%q)\n", name)
+		vfsPath := winPathToVFS(name)
+		if err := ctx.FS.Unlinkat(-1, vfsPath, 0); err != nil {
+			os.Remove(vfsPath) // fallback to real FS
+		}
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeleteFileTransactedA", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "DeleteFileTransactedA", 4, 0)
@@ -8184,7 +8934,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			hwnd:                1,
 			returnWndProcResult: true,
 		})
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
 		rw.WriteReg(1, first.hwnd)
 		rw.WriteReg(2, first.msg)
 		rw.WriteReg(8, first.wParam)
@@ -8250,7 +9002,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			hwnd:                1,
 			returnWndProcResult: true,
 		})
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
 		rw.WriteReg(1, first.hwnd)
 		rw.WriteReg(2, first.msg)
 		rw.WriteReg(8, first.wParam)
@@ -8312,7 +9066,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			hwnd:                1,
 			returnWndProcResult: true,
 		})
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
 		rw.WriteReg(1, locBuf) // RCX = lpLocaleString
 		rw.WriteReg(2, 0)      // RDX = dwFlags
 		rw.WriteReg(8, lParam) // R8  = lParam
@@ -8814,7 +9570,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FreeEnvironmentStringsA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "FreeEnvironmentStringsA", 8, 1)
+		return runKernel32TrivialHandler(ctx, "FreeEnvironmentStringsA", 1, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "FreeLibraryWhenCallbackReturns", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "FreeLibraryWhenCallbackReturns", 4, 0)
@@ -9443,17 +10199,15 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "GetEnabledXStateFeatures", 4, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetEnvironmentStrings", func(ctx *ntapi.TrapContext) uint32 {
-		block := []byte("PATH=\x00\x00")
-		buf := mem.Mmap(0, uint64(len(block)), mmu.PermRead|mmu.PermWrite)
-		ctx.Mem.WriteBytes(buf, block)
-		ctx.SetReturn(buf)
+		addr := buildEnvironmentBlockA()
+		ravelog.Logf("[env] GetEnvironmentStrings -> 0x%x\n", addr)
+		ctx.SetReturn(addr)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetEnvironmentStringsA", func(ctx *ntapi.TrapContext) uint32 {
-		block := []byte("PATH=\x00\x00")
-		buf := mem.Mmap(0, uint64(len(block)), mmu.PermRead|mmu.PermWrite)
-		ctx.Mem.WriteBytes(buf, block)
-		ctx.SetReturn(buf)
+		addr := buildEnvironmentBlockA()
+		ravelog.Logf("[env] GetEnvironmentStringsA -> 0x%x\n", addr)
+		ctx.SetReturn(addr)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetEnvironmentVariableW", func(ctx *ntapi.TrapContext) uint32 {
@@ -10682,6 +11436,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		buf := ctx.Arg(0)
 		path := "C:\\Windows\\System32"
 		ctx.Mem.WriteBytes(buf, append([]byte(path), 0))
+		ravelog.Logf("[wise] GetSystemDirectoryA → %q\n", path)
 		ctx.SetReturn(uint64(len(path)))
 		return 0
 	})
@@ -11260,6 +12015,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		buf := ctx.Arg(0)
 		path := "C:\\Windows"
 		ctx.Mem.WriteBytes(buf, append([]byte(path), 0))
+		ravelog.Logf("[wise] GetWindowsDirectoryA → %q\n", path)
 		ctx.SetReturn(uint64(len(path)))
 		return 0
 	})
@@ -11907,17 +12663,47 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "LoadLibraryExA", func(ctx *ntapi.TrapContext) uint32 {
 		namePtr := ctx.Arg(0)
+		flags := ctx.Arg(2)
 		if namePtr == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		name := strings.ToLower(readGuestString(namePtr))
+		rawName := readGuestString(namePtr)
+		name := strings.ToLower(rawName)
 		if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
 			name = name[idx+1:]
 		}
 		if !strings.HasSuffix(name, ".dll") {
 			name += ".dll"
 		}
+		ravelog.Logf("[wise] LoadLibraryExA(%q flags=0x%x baseName=%q)\n", rawName, flags, name)
+
+		// When f12 loads GLF0001.tmp (W32WINST.DLL), the script has already
+		// overwritten it with the README. If VFS content is not a valid PE,
+		// serve the cached W32WINST.DLL bytes saved during extraction.
+		if name == "glf0001.tmp.dll" && wiseInstallerDLL != nil {
+			vfsBytes, _ := ctx.FS.FileBytes("/Windows/Temp/GLF0001.tmp")
+			if len(vfsBytes) < 2 || vfsBytes[0] != 'M' || vfsBytes[1] != 'Z' {
+				ravelog.Logf("[wise] LoadLibraryExA: GLF0001.tmp is not a PE (got %d bytes), serving cached W32WINST.DLL (%d bytes)\n",
+					len(vfsBytes), len(wiseInstallerDLL))
+				if mod := loadDLLFromVFS(
+					&bytesFS{name: "glf0001.tmp", data: wiseInstallerDLL},
+					"glf0001.tmp",
+					mem, synthByName, nextDynIDPtr, d,
+				); mod != nil {
+					ravelog.Logf("[wise] LoadLibraryExA: W32WINST.DLL loaded at 0x%x\n", mod.BaseAddr)
+					// Store module info for GPA intercept - do NOT put in synthByName
+					// because native addresses would be called directly and IsAdmin
+					// needs to be stubbed (return 1 = admin).
+					wiseW32WinstBase = mod.BaseAddr
+					wiseW32WinstExports = mod.Exports
+					ravelog.Logf("[wise] W32WINST.DLL exports: %v\n", mod.Exports)
+					ctx.SetReturn(mod.BaseAddr)
+					return 0
+				}
+			}
+		}
+
 		if synth, ok := synthByName[name]; ok {
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
@@ -12108,20 +12894,56 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "Module32NextW", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "MoveFileA", func(ctx *ntapi.TrapContext) uint32 {
-		src := winPathToVFS(readGuestString(ctx.Arg(0)))
-		dst := winPathToVFS(readGuestString(ctx.Arg(1)))
-		if err := os.Rename(src, dst); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
+		srcWin := readGuestString(ctx.Arg(0))
+		dstWin := readGuestString(ctx.Arg(1))
+		src := winPathToVFS(srcWin)
+		dst := winPathToVFS(dstWin)
+		ravelog.Logf("[wise] MoveFileA(%q → %q)\n", srcWin, dstWin)
+		// MoveFileA fails if destination already exists (unlike MoveFileExA with MOVEFILE_REPLACE_EXISTING)
+		if _, err := ctx.FS.StatPath(-1, dst); err == nil {
+			ravelog.Logf("[wise] MoveFileA(%q → %q) failed: destination exists\n", srcWin, dstWin)
+			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183) // ERROR_ALREADY_EXISTS
 			ctx.SetReturn(0)
 			return 0
+		}
+		if err := ctx.FS.Renameat(-1, src, -1, dst); err != nil {
+			// fallback: try real FS (no overwrite check needed for real FS as it doesn't have our VFS files)
+			if _, serr := os.Stat(dst); serr == nil {
+				ravelog.Logf("[wise] MoveFileA(%q → %q) failed: destination exists on real FS\n", srcWin, dstWin)
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+				ctx.SetReturn(0)
+				return 0
+			}
+			if err2 := os.Rename(src, dst); err2 != nil {
+				ravelog.Logf("[wise] MoveFileA(%q → %q) failed: %v\n", srcWin, dstWin, err)
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
+				ctx.SetReturn(0)
+				return 0
+			}
 		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "MoveFileExA", func(ctx *ntapi.TrapContext) uint32 {
-		src := winPathToVFS(readGuestString(ctx.Arg(0)))
-		dst := winPathToVFS(readGuestString(ctx.Arg(1)))
-		_ = os.Rename(src, dst)
+		srcWin := readGuestString(ctx.Arg(0))
+		dstWin := readGuestString(ctx.Arg(1))
+		flags := ctx.Arg(2)
+		src := winPathToVFS(srcWin)
+		dst := winPathToVFS(dstWin)
+		ravelog.Logf("[wise] MoveFileExA(%q → %q flags=0x%x)\n", srcWin, dstWin, flags)
+		const MOVEFILE_REPLACE_EXISTING = 0x1
+		if flags&MOVEFILE_REPLACE_EXISTING == 0 {
+			// No replace flag: fail if destination exists (same as MoveFileA)
+			if _, err := ctx.FS.StatPath(-1, dst); err == nil {
+				ravelog.Logf("[wise] MoveFileExA(%q → %q) failed: destination exists (no REPLACE_EXISTING flag)\n", srcWin, dstWin)
+				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		if err := ctx.FS.Renameat(-1, src, -1, dst); err != nil {
+			_ = os.Rename(src, dst) // fallback
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -14195,12 +15017,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		name := normalizeEnvName(readGuestString(ctx.Arg(0)))
 		valPtr := ctx.Arg(1)
 		deleteGuestEnv(name)
-		if valPtr == 0 {
-			_ = os.Unsetenv(hostEnvKey(name))
-		} else {
+		if valPtr != 0 {
 			value := readGuestString(valPtr)
 			envVars[name] = value
-			_ = os.Setenv(hostEnvKey(name), value)
 		}
 		setLastErrorValue(0)
 		ctx.SetReturn(1)
@@ -15206,19 +16025,47 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "VirtualAlloc", func(ctx *ntapi.TrapContext) uint32 {
 		lpAddress := ctx.Arg(0)
 		dwSize := ctx.Arg(1)
-		// flAllocationType := ctx.Arg(2) // MEM_COMMIT=0x1000, MEM_RESERVE=0x2000
-		// flProtect := ctx.Arg(3)        // PAGE_READWRITE=0x04, etc.
+		flAllocationType := ctx.Arg(2)
+		flProtect := ctx.Arg(3)
 		if dwSize == 0 {
 			dwSize = 0x1000
 		}
 		dwSize = (dwSize + 0xFFF) &^ 0xFFF // page-align
-		perms := mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+
+		const memCommit = 0x1000
+		const memReserve = 0x2000
+
+		// MEM_COMMIT on an already-reserved (mapped) region: just return the address.
+		// Windows allows Reserve then Commit in two separate calls; our MMU maps on
+		// Reserve so the pages already exist - just validate and return.
+		if flAllocationType&memCommit != 0 && flAllocationType&memReserve == 0 && lpAddress != 0 {
+			if mem.IsMapped(lpAddress) {
+				perms := win32ProtToMMU(flProtect)
+				if perms == 0 {
+					perms = mmu.PermRead | mmu.PermWrite
+				}
+				_ = perms // perms already set on reserve; no-op here
+				ravelog.Logf("[win32] VirtualAlloc MEM_COMMIT(0x%x, 0x%x) already mapped → 0x%x\n", lpAddress, dwSize, lpAddress)
+				ctx.SetReturn(lpAddress)
+				return 0
+			}
+		}
+
+		perms := win32ProtToMMU(flProtect)
+		if perms == 0 {
+			perms = mmu.PermRead | mmu.PermWrite | mmu.PermExecute
+		}
+		// MEM_RESERVE with PAGE_NOACCESS still needs the range mapped so
+		// subsequent MEM_COMMIT calls find it already present.
+		if flAllocationType&memReserve != 0 && flAllocationType&memCommit == 0 {
+			perms = mmu.PermRead | mmu.PermWrite | mmu.PermExecute // map RWX; protect later
+		}
 		addr := mem.Mmap(lpAddress, dwSize, perms)
 		if addr == 0 {
 			ctx.SetReturn(0)
 			return 0
 		}
-		ravelog.Logf("[win32] VirtualAlloc(0x%x, 0x%x) → 0x%x\n", lpAddress, dwSize, addr)
+		ravelog.Logf("[win32] VirtualAlloc(0x%x, 0x%x, type=0x%x) → 0x%x\n", lpAddress, dwSize, flAllocationType, addr)
 		ctx.SetReturn(addr)
 		return 0
 	})
@@ -15972,31 +16819,177 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "__chkstk", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "_hread", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "_hread", 8, 0)
+		hFile := ntapi.Handle(ctx.Arg(0))
+		bufPtr := ctx.Arg(1)
+		nBytes := int(ctx.Arg(2))
+		fh := handles.GetFile(hFile)
+		if fh == nil || nBytes == 0 {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		buf := make([]byte, nBytes)
+		n, err := ctx.FS.Read(fh.FD, buf)
+		if err != nil && n == 0 {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		ctx.Mem.WriteBytes(bufPtr, buf[:n])
+		ctx.SetReturn(uint64(n))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "_hwrite", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "_hwrite", 8, 0)
+		hFile := ntapi.Handle(ctx.Arg(0))
+		bufPtr := ctx.Arg(1)
+		nBytes := int(ctx.Arg(2))
+		fh := handles.GetFile(hFile)
+		if fh == nil || nBytes == 0 {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		data, err := ctx.Mem.ReadBytes(bufPtr, nBytes)
+		if err != nil {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		n, werr := ctx.FS.Write(fh.FD, data)
+		if werr != nil {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		ctx.SetReturn(uint64(n))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "_lclose", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "_lclose", 1, uint64(0xFFFF))
+		hFile := ntapi.Handle(ctx.Arg(0))
+		if fh := handles.GetFile(hFile); fh != nil {
+			ctx.FS.Close(fh.FD)
+			handles.Close(hFile)
+			ctx.SetReturn(0)
+		} else {
+			ctx.SetReturn(0xFFFF)
+		}
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "_lcreat", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "_lcreat", 2, uint64(0xFFFF))
+		name := readGuestString(ctx.Arg(0))
+		vfsPath := winPathToVFS(name)
+		fd, err := ctx.FS.Open(vfsPath, vfs.O_CREAT|vfs.O_RDWR|vfs.O_TRUNC)
+		if err != nil {
+			ravelog.Logf("[kernel32] _lcreat(%q) → HFILE_ERROR\n", name)
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
+		ravelog.Logf("[kernel32] _lcreat(%q) → handle=0x%x\n", name, uint64(h))
+		ctx.SetReturn(uint64(h))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "_llseek", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "_llseek", 3, uint64(0xFFFF))
+		hFile := ntapi.Handle(ctx.Arg(0))
+		offset := int64(int32(ctx.Arg(1))) // sign-extend 32-bit offset
+		origin := int(ctx.Arg(2))
+		fh := handles.GetFile(hFile)
+		if fh == nil {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		newPos, err := ctx.FS.Lseek(fh.FD, offset, origin)
+		if err != nil {
+			ravelog.Logf("[kernel32] _llseek(0x%x, %d, %d) → ERROR\n", uint64(hFile), offset, origin)
+			ctx.SetReturn(0xFFFF)
+		} else {
+			ravelog.Logf("[kernel32] _llseek(0x%x, %d, %d) → %d\n", uint64(hFile), offset, origin, newPos)
+			ctx.SetReturn(uint64(uint32(newPos)))
+		}
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "_local_unwind", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "_local_unwind", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "_lopen", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "_lopen", 2, uint64(0xFFFF))
+		name := readGuestString(ctx.Arg(0))
+		iReadWrite := ctx.Arg(1)
+		vfsPath := winPathToVFS(name)
+		lastBS := strings.LastIndex(imagePath, `\`)
+		peWinDir := imagePath
+		if lastBS >= 0 {
+			peWinDir = imagePath[:lastBS]
+		}
+		peVfsDir := winPathToVFS(peWinDir)
+		var flags int
+		switch iReadWrite & 3 {
+		case 1:
+			flags = vfs.O_WRONLY
+		case 2:
+			flags = vfs.O_RDWR
+		default:
+			flags = vfs.O_RDONLY
+		}
+		fd, err := ctx.FS.Open(vfsPath, flags)
+		if err != nil {
+			parts := strings.SplitN(strings.TrimPrefix(vfsPath, "/"), "/", 2)
+			if len(parts) == 2 {
+				altPath := peVfsDir + "/" + parts[1]
+				if fd2, err2 := ctx.FS.Open(altPath, flags); err2 == nil {
+					fd, err = fd2, nil
+					vfsPath = altPath
+				}
+			}
+		}
+		if err != nil {
+			ravelog.Logf("[kernel32] _lopen(%q) → HFILE_ERROR\n", name)
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
+		ravelog.Logf("[kernel32] _lopen(%q) → handle=0x%x\n", name, uint64(h))
+		ctx.SetReturn(uint64(h))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "_lread", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "_lread", 3, uint64(0xFFFF))
+		hFile := ntapi.Handle(ctx.Arg(0))
+		bufPtr := ctx.Arg(1)
+		nBytes := int(ctx.Arg(2))
+		fh := handles.GetFile(hFile)
+		if fh == nil || nBytes == 0 {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		buf := make([]byte, nBytes)
+		n, err := ctx.FS.Read(fh.FD, buf)
+		if err != nil && n == 0 {
+			ravelog.Logf("[kernel32] _lread(0x%x, %d) → ERROR\n", uint64(hFile), nBytes)
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		ctx.Mem.WriteBytes(bufPtr, buf[:n])
+		ravelog.Logf("[kernel32] _lread(0x%x, %d) → %d\n", uint64(hFile), nBytes, n)
+		ctx.SetReturn(uint64(n))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "_lwrite", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "_lwrite", 3, uint64(0xFFFF))
+		hFile := ntapi.Handle(ctx.Arg(0))
+		bufPtr := ctx.Arg(1)
+		nBytes := int(ctx.Arg(2))
+		fh := handles.GetFile(hFile)
+		if fh == nil || nBytes == 0 {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		data, err := ctx.Mem.ReadBytes(bufPtr, nBytes)
+		if err != nil {
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		n, werr := ctx.FS.Write(fh.FD, data)
+		if werr != nil {
+			ravelog.Logf("[kernel32] _lwrite(0x%x, %d) → ERROR\n", uint64(hFile), nBytes)
+			ctx.SetReturn(0xFFFF)
+			return 0
+		}
+		ravelog.Logf("[kernel32] _lwrite(0x%x, %d) → %d\n", uint64(hFile), nBytes, n)
+		ctx.SetReturn(uint64(n))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "dprintf", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "dprintf", 8, 0)
@@ -16016,6 +17009,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		src := ctx.Arg(1)
 		s1 := readGuestString(dst)
 		s2 := readGuestString(src)
+		ravelog.Logf("[wise] lstrcatA(%q + %q)\n", s1, s2)
 		ctx.Mem.WriteBytes(dst+uint64(len(s1)), append([]byte(s2), 0))
 		ctx.SetReturn(dst)
 		return 0
@@ -16089,6 +17083,31 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "lstrcpyA", func(ctx *ntapi.TrapContext) uint32 {
 		dst := ctx.Arg(0)
 		src := readGuestString(ctx.Arg(1))
+		// Wise installer: when the script writes "%MAINDIR%" as a variable-name slot,
+		// the immediately-following lstrcpyA writes the default folder name ("DX-Ball").
+		// Intercept that default and replace it with a real absolute install path so
+		// the file-installation phase uses a valid directory.
+		if wiseMainDirNameSeen {
+			wiseMainDirNameSeen = false
+			realPath := "C:\\DXBall"
+			ravelog.Logf("[wise] lstrcpyA MAINDIR value injection: %q → %q\n", src, realPath)
+			src = realPath
+		} else if src == "%MAINDIR%" {
+			wiseMainDirNameSeen = true
+		}
+		// Wise installer: when the DISABLED wizard page writes "!" as its default
+		// value (meaning "license not accepted / installation disabled"), replace it
+		// with "" (empty = accepted) so the file-installation phase is not skipped.
+		if wiseDisabledNameSeen {
+			wiseDisabledNameSeen = false
+			if src == "!" {
+				ravelog.Logf("[wise] lstrcpyA DISABLED value injection: %q → %q (auto-accept)\n", src, "")
+				src = ""
+			}
+		} else if src == "%DISABLED%" {
+			wiseDisabledNameSeen = true
+		}
+		ravelog.Logf("[wise] lstrcpyA(dst=0x%x, %q)\n", dst, src)
 		ctx.Mem.WriteBytes(dst, append([]byte(src), 0))
 		ctx.SetReturn(dst)
 		return 0
@@ -16112,7 +17131,22 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "lstrlen", 1, uint64(uint64(len(readGuestString(ctx.Arg(0))))))
 	})
 	d.RegisterAutoStubHandler(kernel32, "lstrlenA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "lstrlenA", 1, uint64(uint64(len(readGuestString(ctx.Arg(0))))))
+		arg := ctx.Arg(0)
+		result := uint64(len(readGuestString(arg)))
+		// Wise installer: after f16 #3 runs, the engine copies %DISABLED% value
+		// into its working buffer at 0x200098a0 (no Win32 API call, pure guest code).
+		// The script then calls lstrlenA(0x200098a0) to decide whether installation
+		// is "disabled". If the result is >0 ("!" = disabled), the script skips all
+		// game-file extraction. We intercept that specific check and return 0 so the
+		// script takes the "not disabled → extract game files" branch.
+		const wiseWorkBuf = uint64(0x200098a0)
+		if arg == wiseWorkBuf && wiseF16Count == 3 && result > 0 {
+			ravelog.Logf("[wise] lstrlenA(workBuf=0x%x) f16#3 DISABLED override: %d → 0\n", arg, result)
+			// Clear the buffer so any subsequent lstrlenA also sees empty.
+			_ = ctx.Mem.WriteBytes(wiseWorkBuf, []byte{0x00})
+			result = 0
+		}
+		return runKernel32TrivialHandler(ctx, "lstrlenA", 1, result)
 	})
 	d.RegisterAutoStubHandler(kernel32, "timeBeginPeriod", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "timeBeginPeriod", 8, 0)

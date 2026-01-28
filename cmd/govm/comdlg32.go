@@ -230,6 +230,9 @@ func runPortalFileChooser(method, title string, filters []dialogFilter, initialD
 }
 
 func findDialogTool() string {
+	if os.Getenv("GOVM_NO_DIALOGS") != "" {
+		return ""
+	}
 	for _, tool := range []string{"zenity", "kdialog", "yad"} {
 		if p, err := exec.LookPath(tool); err == nil {
 			return p
@@ -476,7 +479,13 @@ func hostMessageBox(title, text string, uType uint32) (int, bool) {
 
 	tool := findDialogTool()
 	if tool == "" {
-		return 0, false
+		// No dialog tool available: silently return default affirmative button.
+		switch uType & 0xF {
+		case 4, 3: // MB_YESNO, MB_YESNOCANCEL
+			return idYes, true
+		default:
+			return idOK, true
+		}
 	}
 	buttons := uType & 0xF
 	icon := uType & mbIconMask

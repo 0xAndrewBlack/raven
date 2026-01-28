@@ -104,6 +104,11 @@ func (c *CPU) Stop() {
 	c.running = false
 }
 
+// Resume resets the stopped state so Run() can continue after a nested Stop().
+func (c *CPU) Resume() {
+	c.running = true
+}
+
 // Step executes a single instruction (32-bit or 16-bit compressed).
 func (c *CPU) Step() error {
 	// Fetch first 16 bits to detect compressed vs normal

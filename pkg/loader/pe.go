@@ -343,7 +343,32 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 	return mod, nil
 }
 
-// applyRelocations processes the .reloc section and patches addresses.
+// MapPEBytes loads a PE image from an in-memory byte slice into the MMU.
+// It writes the bytes to a temporary host file and delegates to MapPEFile,
+// overriding the module name with the provided name.
+func MapPEBytes(name string, data []byte, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
+	tmp, err := os.CreateTemp("", "govm-dll-*.pe")
+	if err != nil {
+		return nil, fmt.Errorf("MapPEBytes tmpfile: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("MapPEBytes write: %w", err)
+	}
+	tmp.Close()
+	defer os.Remove(tmpPath)
+
+	mod, err := MapPEFile(tmpPath, mem, forceBase)
+	if err != nil {
+		return nil, err
+	}
+	mod.Name = strings.ToLower(name)
+	return mod, nil
+}
+
+
 func applyRelocations(mem *mmu.MMU, base, relocRVA, relocSize uint64, delta int64, is64 bool) error {
 	addr := base + relocRVA
 	end := addr + relocSize

@@ -27,6 +27,10 @@ type SyscallHandler func(CPU)
 type CPU interface {
 	Run() error
 	Stop()
+	// Resume resets the stopped state so the CPU can be Run() again.
+	// Must be called after a nested Run() inside a vmcall handler to restore
+	// the outer Run() loop's ability to continue executing.
+	Resume()
 
 	GetPC() uint64
 	SetPC(uint64)

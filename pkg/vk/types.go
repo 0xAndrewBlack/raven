@@ -430,6 +430,7 @@ const (
 	VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT     VkPipelineStageFlags = 0x00000200
 	VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT VkPipelineStageFlags = 0x00000400
 	VK_PIPELINE_STAGE_TRANSFER_BIT                VkPipelineStageFlags = 0x00001000
+	VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT          VkPipelineStageFlags = 0x00002000
 )
 
 const (
@@ -1022,6 +1023,28 @@ type VkPresentInfoKHR struct {
 
 type VkClearValue struct {
 	Uint32 [4]uint32
+}
+
+type VkImageSubresource struct {
+	AspectMask VkImageAspectFlags
+	MipLevel   uint32
+	ArrayLayer uint32
+}
+
+type VkSubresourceLayout struct {
+	Offset     VkDeviceSize
+	Size       VkDeviceSize
+	RowPitch   VkDeviceSize
+	ArrayPitch VkDeviceSize
+	DepthPitch VkDeviceSize
+}
+
+type VkImageCopy struct {
+	SrcSubresource VkImageSubresourceLayers
+	SrcOffset      VkOffset3D
+	DstSubresource VkImageSubresourceLayers
+	DstOffset      VkOffset3D
+	Extent         VkExtent3D
 }
 
 type VkBufferImageCopy struct {

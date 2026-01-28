@@ -341,6 +341,26 @@ func (v *VFS) Open(path string, flags int) (int, error) {
 	return v.OpenAt(-100, path, flags, 0644)
 }
 
+// FileBytes reads all bytes of a VFS file at the given path.
+func (v *VFS) FileBytes(path string) ([]byte, error) {
+	fd, err := v.Open(path, O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer v.Close(fd)
+	v.mu.Lock()
+	f, ok := v.fds[fd]
+	v.mu.Unlock()
+	if !ok || f.Node == nil {
+		return nil, fmt.Errorf("no data for %q", path)
+	}
+	out := make([]byte, len(f.Node.Data))
+	copy(out, f.Node.Data)
+	return out, nil
+}
+
+
+
 // Read reads up to len(buf) bytes from fd.
 func (v *VFS) Read(fd int, buf []byte) (int, error) {
 	v.mu.Lock()
@@ -863,7 +883,18 @@ func (v *VFS) Resolve(path string) (*VNode, error) {
 		}
 		child, ok := cur.Children[p]
 		if !ok {
-			return nil, fmt.Errorf("not found: %s", path)
+			// Case-insensitive fallback (Windows filenames are case-insensitive)
+			lp := strings.ToLower(p)
+			for name, node := range cur.Children {
+				if strings.ToLower(name) == lp {
+					child = node
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return nil, fmt.Errorf("not found: %s", path)
+			}
 		}
 		cur = child
 	}

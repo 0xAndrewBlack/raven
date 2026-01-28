@@ -741,7 +741,11 @@ func (m *MMU) MapHostSlice(guestAddr uint64, hostSlice []byte, perms uint8) uint
 
 	length := uint64(len(hostSlice))
 	if guestAddr == 0 {
-		guestAddr = 0x500000000000
+		if m.Mode32 {
+			guestAddr = 0x10000000
+		} else {
+			guestAddr = 0x500000000000
+		}
 		for {
 			conflict := false
 			for pg := guestAddr & PageMask; pg < guestAddr+length; pg += PageSize {

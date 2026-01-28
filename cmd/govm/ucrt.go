@@ -2053,7 +2053,7 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		_, ok := ctx.CPU.(ntapi.RegisterWriter)
+		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
 		rr, ok2 := ctx.CPU.(ntapi.RegisterReader)
 		if !ok || !ok2 {
 			ctx.SetReturn(0)
@@ -2070,7 +2070,9 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 			retAddr: retAddr,
 			hwnd:    0,
 		})
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
 		ctx.CPU.SetPC(fns[0])
 		ctx.ReturnOverridden = true
 		ctx.PCRedirected = true

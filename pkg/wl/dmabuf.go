@@ -110,13 +110,13 @@ func (w *Window) CreateDmabufBuffer(fd int, width, height, stride uint32, format
 	w.dmabufFormat = format
 	w.dmabufModifier = modifier
 
-	if err := d.send(d.dmabufID, 0, pu32(paramsID)); err != nil {
+	if err := d.send(d.dmabufID, 1, pu32(paramsID)); err != nil { // opcode 1 = create_params
 		delete(d.dmabufParams, paramsID)
 		delete(d.objects, paramsID)
 		w.destroyDmabufBuffer()
 		return err
 	}
-	if err := d.sendFD(paramsID, 0, fd,
+	if err := d.sendFD(paramsID, 1, fd, // opcode 1 = add
 		pu32(0),
 		pu32(0),
 		pu32(stride),

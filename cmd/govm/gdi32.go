@@ -2363,7 +2363,9 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			hwnd:                1, // fallback return value
 			returnWndProcResult: true,
 		})
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
 
 		rw.WriteReg(1, first.hwnd)
 		rw.WriteReg(2, first.msg)
@@ -2490,7 +2492,9 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			hwnd:                1,
 			returnWndProcResult: true,
 		})
+		rsp -= 48
 		mem.Write64(rsp, hctx.SyncTrampoline)
+		rw.WriteReg(4, rsp)
 
 		rw.WriteReg(1, first.hwnd)
 		rw.WriteReg(2, first.msg)
@@ -3181,10 +3185,20 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "RealizePalette", func(ctx *ntapi.TrapContext) uint32 {
-		// On true-color displays, RealizePalette is effectively a no-op.
-		// Returns the number of entries in the logical palette that were
-		// mapped to different entries in the system palette (0 on truecolor).
-		// ReactOS: NtGdiRealizePalette
+		// Apply the selected logical palette to the system palette.
+		// For 8bpp DDraw games (like DXBall) that manage colors via GDI
+		// rather than IDirectDrawPalette::SetEntries, propagate entries to DDraw.
+		hdc := ctx.Arg(0)
+		hPal := dcSelectedPalette[hdc]
+		if hPal != 0 {
+			if pal := gdiMgr.GetPalette(hPal); pal != nil {
+				raw := make([][4]byte, len(pal.Entries))
+				for i, e := range pal.Entries {
+					raw[i] = [4]byte{e.R, e.G, e.B, e.Flags}
+				}
+				ddrawApplyGDIPalette(raw)
+			}
+		}
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3961,6 +3975,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 				b, _ := mem.Read8(lpStr + uint64(i))
 				buf[i] = b
 			}
+			ravelog.Logf("[gdi32] TextOutA hdc=0x%x x=%d y=%d text=%q\n", ctx.Arg(0), x, y, string(buf))
 			dc.TextOut(x, y, string(buf), false)
 		}
 		ctx.SetReturn(1)
@@ -3985,6 +4000,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			}
 			text = string(buf)
 		}
+		ravelog.Logf("[gdi32] ExtTextOutA hdc=0x%x x=%d y=%d opts=0x%x text=%q\n", ctx.Arg(0), x, y, opts, text)
 		if lprc != 0 {
 			rL, _ := mem.Read32(lprc)
 			rT, _ := mem.Read32(lprc + 4)
@@ -4105,6 +4121,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 				text = string(buf)
 			}
 		}
+		ravelog.Logf("[gdi32] DrawTextA hdc=0x%x text=%q rect=(%d,%d,%d,%d) fmt=0x%x\n", ctx.Arg(0), text, left, top, right, bottom, format)
 		rect := win32.Rect{Left: int32(left), Top: int32(top), Right: int32(right), Bottom: int32(bottom)}
 		height := win32.DrawTextW(gdiDrawTextAdapter{dc: dc}, []rune(text), &rect, format)
 		mem.Write32(pRect, uint32(rect.Left))

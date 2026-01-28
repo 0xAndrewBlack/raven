@@ -28,7 +28,11 @@ type d3d9Bridge struct {
 
 func d3d9CreateDeviceObject(hctx *HandlerCtx, presentParams uint64) uint64 {
 	device := d3d9.NewDevice()
+	// Default to window size; fall back to 800×600 if no window exists.
 	width, height := uint32(800), uint32(600)
+	if win := hctx.WlWindow; win != nil && win.Width > 0 && win.Height > 0 {
+		width, height = uint32(win.Width), uint32(win.Height)
+	}
 	if params, ok := readGuestStruct[d3d9.D3DPRESENT_PARAMETERS](hctx.Mem, presentParams); ok {
 		if params.BackBufferWidth != 0 && params.BackBufferHeight != 0 {
 			width, height = params.BackBufferWidth, params.BackBufferHeight
@@ -47,8 +51,8 @@ func d3d9CreateDeviceObject(hctx *HandlerCtx, presentParams uint64) uint64 {
 	return d3dCreatePayloadCOMObject(hctx.Mem, hctx.Disp, "d3d9-device", d3d9DeviceMethods, bridge, d3d9DeviceDispatch)
 }
 
-func d3dCreatePayloadCOMObject(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string, methods int, payload any, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32) uint64 {
-	addr := d3dCreateCOMObjectFromID(mem, disp, kind, methods, 0, dispatch)
+func d3dCreatePayloadCOMObject(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string, methods int, payload any, dispatch func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32, stdcallArgs ...[]int) uint64 {
+	addr := d3dCreateCOMObjectFromID(mem, disp, kind, methods, 0, dispatch, stdcallArgs...)
 	if addr == 0 {
 		return 0
 	}
@@ -176,11 +180,11 @@ func d3d9DeviceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) u
 	case 27:
 		return d3d9DeviceCreateIndexBuffer(ctx)
 	case 17: // Present(pSrcRect, pDstRect, hWnd, pDirtyRegion)
+		win := bridge.hctx.WlWindow
 		if r := bridge.renderer; r != nil {
-			r.Present(bridge.hctx.WlWindow)
-		} else if win := bridge.hctx.WlWindow; win != nil && win.Pix != nil {
-			// Software fallback: fill the entire back-buffer with the last clear color
-			// so apps get visible output even without Vulkan.
+			r.Present(win)
+		} else if win != nil && win.Pix != nil {
+			// Software fallback: fill the entire back-buffer with the last clear color.
 			c := device.ClearColor // D3DCOLOR = 0xAARRGGBB
 			rr := byte(c >> 16)
 			gg := byte(c >> 8)
@@ -192,6 +196,8 @@ func d3d9DeviceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) u
 				pix[i+2] = rr // R
 				pix[i+3] = 0xFF
 			}
+			win.Commit()
+		} else if win != nil {
 			win.Commit()
 		}
 		return D3D_OK
@@ -543,7 +549,17 @@ func d3d9ResourceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject)
 		case 10:
 			ctx.SetReturn(uint64(d3d9.D3DRTYPE_VERTEXBUFFER))
 			return 0
-		case 11, 12:
+		case 11: // Lock(OffsetToLock, SizeToLock, ppbData, Flags)
+			ppbData := ctx.Arg(4)
+			if ppbData != 0 {
+				if payload.GuestAddr == 0 {
+					payload.GuestAddr = ctx.Mem.MapHostSlice(0, payload.Data, mmu.PermRead|mmu.PermWrite)
+				}
+				offset := uint32(ctx.Arg(2))
+				ctx.Mem.Write32(ppbData, uint32(payload.GuestAddr)+offset)
+			}
+			return D3D_OK
+		case 12: // Unlock
 			return D3D_OK
 		}
 	case *d3d9.IndexBuffer:
@@ -551,7 +567,17 @@ func d3d9ResourceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject)
 		case 10:
 			ctx.SetReturn(uint64(d3d9.D3DRTYPE_INDEXBUFFER))
 			return 0
-		case 11, 12:
+		case 11: // Lock(OffsetToLock, SizeToLock, ppbData, Flags)
+			ppbData := ctx.Arg(4)
+			if ppbData != 0 {
+				if payload.GuestAddr == 0 {
+					payload.GuestAddr = ctx.Mem.MapHostSlice(0, payload.Data, mmu.PermRead|mmu.PermWrite)
+				}
+				offset := uint32(ctx.Arg(2))
+				ctx.Mem.Write32(ppbData, uint32(payload.GuestAddr)+offset)
+			}
+			return D3D_OK
+		case 12: // Unlock
 			return D3D_OK
 		}
 	case *d3d9.VertexDeclaration:
