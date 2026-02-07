@@ -1,3 +1,5 @@
+//go:build guest_linux
+
 package syscall
 
 import (

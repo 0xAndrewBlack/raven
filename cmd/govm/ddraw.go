@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package main
 
 import (
@@ -7,9 +9,9 @@ import (
 	"time"
 
 	"github.com/mirkobrombin/Raven/pkg/ddraw"
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
-	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
 
 const (
@@ -20,9 +22,11 @@ const (
 
 // PE32 stdcall arg counts for COM methods (including 'this' pointer).
 // IDirectDraw7 vtable (30 methods):
-//  0:QueryInterface(3) 1:AddRef(1) 2:Release(1) 3:Compact(1) 4:CreateClipper(3)
-//  5:CreatePalette(5) 6:CreateSurface(4) 7:DuplicateSurface(3) 8:EnumDisplayModes(5)
-//  9:EnumSurfaces(5) 10:FlipToGDISurface(1) 11:GetCaps(3) 12:GetDisplayMode(2)
+//
+//	0:QueryInterface(3) 1:AddRef(1) 2:Release(1) 3:Compact(1) 4:CreateClipper(3)
+//	5:CreatePalette(5) 6:CreateSurface(4) 7:DuplicateSurface(3) 8:EnumDisplayModes(5)
+//	9:EnumSurfaces(5) 10:FlipToGDISurface(1) 11:GetCaps(3) 12:GetDisplayMode(2)
+//
 // 13:GetFourCCCodes(3) 14:GetGDISurface(2) 15:GetMonitorFrequency(2) 16:GetScanLine(2)
 // 17:GetVerticalBlankStatus(2) 18:Initialize(2) 19:RestoreAllSurfaces(1)
 // 20:SetCooperativeLevel(3) 21:SetDisplayMode(6) 22:WaitForVerticalBlank(3)
@@ -34,9 +38,11 @@ var ddraw7StdcallArgs = []int{
 }
 
 // IDirectDrawSurface7 vtable (49 methods):
-//  0:QueryInterface(3) 1:AddRef(1) 2:Release(1) 3:AddAttachedSurface(2)
-//  4:AddOverlayDirtyRect(2) 5:Blt(6) 6:BltBatch(3) 7:BltFast(6)
-//  8:DeleteAttachedSurface(3) 9:EnumAttachedSurfaces(3) 10:EnumOverlayZOrders(4)
+//
+//	0:QueryInterface(3) 1:AddRef(1) 2:Release(1) 3:AddAttachedSurface(2)
+//	4:AddOverlayDirtyRect(2) 5:Blt(6) 6:BltBatch(3) 7:BltFast(6)
+//	8:DeleteAttachedSurface(3) 9:EnumAttachedSurfaces(3) 10:EnumOverlayZOrders(4)
+//
 // 11:Flip(3) 12:GetAttachedSurface(3) 13:GetBltStatus(2) 14:GetCaps(2)
 // 15:GetClipper(2) 16:GetColorKey(3) 17:GetDC(2) 18:GetFlipStatus(2)
 // 19:GetOverlayPosition(3) 20:GetPalette(2) 21:GetPixelFormat(2)
@@ -57,8 +63,9 @@ var ddrawSurface7StdcallArgs = []int{
 }
 
 // IDirectDrawPalette vtable (7 methods):
-//  0:QueryInterface(3) 1:AddRef(1) 2:Release(1) 3:GetCaps(2) 4:GetEntries(5)
-//  5:Initialize(3) 6:SetEntries(5)
+//
+//	0:QueryInterface(3) 1:AddRef(1) 2:Release(1) 3:GetCaps(2) 4:GetEntries(5)
+//	5:Initialize(3) 6:SetEntries(5)
 var ddrawPaletteStdcallArgs = []int{3, 1, 1, 2, 5, 3, 5}
 
 var (
@@ -103,9 +110,10 @@ var nullCOMPageSetup bool
 // setupNullCOMPage0 rebuilds page 0 with VMCALL traps so NULL COM object
 // dereferences route through the dispatcher (with proper stdcall cleanup)
 // instead of crashing. Layout:
-//   [0x000] = 0x00000004  (vtable ptr → self + 4)
-//   [0x004..0x103] = 64 method pointers → stubs at 0x200+
-//   [0x200..0x5FF] = 64 VMCALL stubs (16 bytes each)
+//
+//	[0x000] = 0x00000004  (vtable ptr → self + 4)
+//	[0x004..0x103] = 64 method pointers → stubs at 0x200+
+//	[0x200..0x5FF] = 64 VMCALL stubs (16 bytes each)
 func setupNullCOMPage0(mem *mmu.MMU, disp *ntapi.Dispatcher) {
 	if nullCOMPageSetup {
 		return
@@ -500,7 +508,11 @@ func ddrawSurfaceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject)
 		}
 		// Debug: check if destination pixels are non-zero after Blt
 		nzDst := 0
-		for _, b := range surface.Pixels { if b != 0 { nzDst++ } }
+		for _, b := range surface.Pixels {
+			if b != 0 {
+				nzDst++
+			}
+		}
 		ravelog.Logf("[ddraw] Blt done: dst nonZero=%d/%d\n", nzDst, len(surface.Pixels))
 		ddrawLastRenderTarget = surface
 		if surface.IsPrimary {
@@ -625,7 +637,7 @@ func ddrawSurfaceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject)
 			readback, _ := ctx.Mem.ReadBytes(pDesc, 44)
 			if len(readback) >= 40 {
 				ravelog.Logf("[ddraw] GetSurfaceDesc: wrote to 0x%x: dwSize=%d dwFlags=0x%x lpSurface=0x%x (at offset36=0x%x)\n",
-					pDesc, 
+					pDesc,
 					uint32(readback[0])|uint32(readback[1])<<8|uint32(readback[2])<<16|uint32(readback[3])<<24,
 					uint32(readback[4])|uint32(readback[5])<<8|uint32(readback[6])<<16|uint32(readback[7])<<24,
 					guestAddr,
@@ -715,7 +727,11 @@ func ddrawSurfaceDispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject)
 			if err == nil {
 				// Check for non-zero data after unlock
 				nz := 0
-				for _, b := range data { if b != 0 { nz++ } }
+				for _, b := range data {
+					if b != 0 {
+						nz++
+					}
+				}
 				ravelog.Logf("[ddraw] Unlock: surfObj=%p %dx%d lockSize=%d nonZero=%d\n",
 					surfObj, surface.Width, surface.Height, surfObj.lockSize, nz)
 				writeSurfaceBytes(surface, surfObj.lockRect, data, surfObj.lockBPP, surfObj.lockPitch)
@@ -967,12 +983,20 @@ func presentPrimarySurface(hctx *HandlerCtx, surface *ddraw.Surface) {
 	// Debug: check primary surface pixels and all related surfaces
 	if ddrawFrameDumped == 0 {
 		nzPrimary := 0
-		for _, b := range surface.Pixels { if b != 0 { nzPrimary++ } }
+		for _, b := range surface.Pixels {
+			if b != 0 {
+				nzPrimary++
+			}
+		}
 		ravelog.Logf("[present] primary nonZero=%d/%d bpp=%d\n", nzPrimary, len(surface.Pixels), surface.BPP)
 		// Check palette
 		if surface.Palette != nil {
 			nzPal := 0
-			for _, e := range surface.Palette.Entries { if e.Red != 0 || e.Green != 0 || e.Blue != 0 { nzPal++ } }
+			for _, e := range surface.Palette.Entries {
+				if e.Red != 0 || e.Green != 0 || e.Blue != 0 {
+					nzPal++
+				}
+			}
 			ravelog.Logf("[present] palette nonZero=%d/256\n", nzPal)
 		}
 		// Check if game wrote directly to palette COM object memory (Wine layout: palent at offset 8)

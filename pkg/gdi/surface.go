@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 // Package gdi implements a software GDI layer modelled after ReactOS win32ss/gdi/.
 // The rendering target is a 32-bit XRGB8888 pixel buffer (B, G, R, X byte order),
 // compatible with the Wayland wl_shm shared-memory surface used by pkg/wl.

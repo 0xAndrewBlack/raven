@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package d3d9
 
 type TextureStageConfig struct {

@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package gdi
 
 // truetype.go - TrueType/OpenType font loader and rasterizer.

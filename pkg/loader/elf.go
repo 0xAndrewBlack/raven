@@ -1,3 +1,5 @@
+//go:build guest_linux
+
 package loader
 
 import (
@@ -13,20 +15,6 @@ import (
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
-
-const (
-	DefaultStackSize = 64 * 1024 * 1024   // 64 MiB - generous for UI apps like Lapce
-	StackTop         = uint64(0x700000000000)  // top of guest stack
-)
-
-// LoadResult holds the state produced by loading an ELF.
-type LoadResult struct {
-	EntryPoint uint64
-	StackPtr   uint64
-	BrkAddr    uint64
-	TLSAddr    uint64    // Thread-Local Storage base (0 if none)
-	Arch       arch.Arch // detected architecture
-}
 
 // LoadELF parses an ELF file and maps it into the given MMU.
 func LoadELF(path string, mem *mmu.MMU, argv []string, envp []string) (*LoadResult, error) {

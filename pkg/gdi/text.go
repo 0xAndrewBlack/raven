@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package gdi
 
 // text.go - GDI text rendering

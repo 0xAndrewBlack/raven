@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package gdi
 
 // font8x16 is a bitmap font for ASCII 32-126. Each glyph is 8x16.

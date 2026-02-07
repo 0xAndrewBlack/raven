@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package main
 
 import (
@@ -56,8 +58,6 @@ var wiseDisabledNameSeen bool
 //	slot 16 %MAINDIR%  value @ 0x2001a970  (256-byte slot, base 0x20019970 + 16*0x100)
 var wiseF16Count int
 
-
-
 // wiseInstallerDLL caches the first valid PE written to a ~GLH*.TMP staging file
 // (W32WINST.DLL, the Wise extraction engine). The script later overwrites GLF0001.tmp
 // with the README before f12 calls LoadLibraryA on it, so we serve this cache instead.
@@ -84,14 +84,15 @@ var wiseGameHostPath string
 // file table, decompresses each file, and writes it to destDir in the VFS.
 //
 // The Wise 5.x overlay format (for DXBall.EXE):
-//   PE overlay at peOverlayOffset contains:
-//     +0x00: 80-byte header
-//     +0x51: deflated script (contains file table with names, offsets, sizes)
-//     then: resource blocks (GLC0.TMP, helpers, W32WINST.DLL, README)
-//     then: game data blocks (individual deflate streams per file)
-//   data_base = offset of W32WINST.DLL in the overlay (first resource after script)
-//   Each file record in the script: %MAINDIR%\<name>\0 <padding> <D1:u32> <D2:u32> <D3:u32> <D4:u32>
-//   D1 = cumulative compressed offset from data_base; D4 = decompressed size
+//
+//	PE overlay at peOverlayOffset contains:
+//	  +0x00: 80-byte header
+//	  +0x51: deflated script (contains file table with names, offsets, sizes)
+//	  then: resource blocks (GLC0.TMP, helpers, W32WINST.DLL, README)
+//	  then: game data blocks (individual deflate streams per file)
+//	data_base = offset of W32WINST.DLL in the overlay (first resource after script)
+//	Each file record in the script: %MAINDIR%\<name>\0 <padding> <D1:u32> <D2:u32> <D3:u32> <D4:u32>
+//	D1 = cumulative compressed offset from data_base; D4 = decompressed size
 func wiseExtractArchive(installerPath string, fs *vfs.VFS, destDir string) error {
 	raw, err := os.ReadFile(installerPath)
 	if err != nil {

@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package gdi
 
 // GDI object types - ReactOS win32ss/gdi/ntgdi/

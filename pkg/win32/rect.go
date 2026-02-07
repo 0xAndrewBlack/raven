@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package win32
 
 // Rect operations - ported from ReactOS win32ss/user/user32/windows/rect.c

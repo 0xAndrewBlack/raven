@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package ddraw
 
 func (s *Surface) ReadbackXRGB8888(dstWidth, dstHeight int) []byte {

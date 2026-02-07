@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package d3d9
 
 import shared "github.com/mirkobrombin/Raven/pkg/spirv"

@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package d3d11
 
 import "github.com/mirkobrombin/Raven/pkg/vk"

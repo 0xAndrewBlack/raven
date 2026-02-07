@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 // Package win32 provides a user32-compatible Win32 window management layer.
 // Ported from ReactOS win32ss/user/user32/windows/.
 package win32

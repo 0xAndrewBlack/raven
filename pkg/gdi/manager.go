@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package gdi
 
 import "sync/atomic"

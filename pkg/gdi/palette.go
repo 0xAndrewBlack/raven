@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package gdi
 
 // Palette implements Win32 logical palette management.

@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package comctl32
 
 import "sync"

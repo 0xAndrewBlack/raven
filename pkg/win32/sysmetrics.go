@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package win32
 
 // System metrics - ReactOS win32ss/user/user32/misc/misc.c → NtUserGetSystemMetrics

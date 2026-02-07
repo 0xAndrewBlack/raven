@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package dxgi
 
 import "github.com/mirkobrombin/Raven/pkg/vk"

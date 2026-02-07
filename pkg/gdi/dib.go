@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package gdi
 
 // dib.go - Device Independent Bitmap (DIB) support

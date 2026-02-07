@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 // Package comctl32 implements Windows Common Controls (comctl32.dll) in pure Go,
 // mirroring the ReactOS/Wine implementation for use by the Raven PE emulator.
 package comctl32

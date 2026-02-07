@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package ntapi
 
 import "github.com/mirkobrombin/Raven/pkg/mmu"

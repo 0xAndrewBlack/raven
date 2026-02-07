@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package win32
 
 // Non-client area helpers - ported from ReactOS

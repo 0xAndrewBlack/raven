@@ -1,3 +1,5 @@
+//go:build guest_windows
+
 package ddraw
 
 type DDSCAPS2 struct {
