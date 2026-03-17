@@ -515,7 +515,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 		mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
 	}
 
-	registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry, autoScript)
+	registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry, autoScript, enableWayland)
 
 	// Set up Win32k subsystem
 	w32k := win32k.New(mem, handles)
@@ -901,7 +901,7 @@ func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
 
 // registerAutoSynthHandlers registers vmcall handlers for critical
 // CRT and Win32 functions in auto-generated synthetic DLLs.
-func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule, tmPtr **thread.Manager, bootTime time.Time, regHive *ntapi.RegistryHive, autoScript string) {
+func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule, tmPtr **thread.Manager, bootTime time.Time, regHive *ntapi.RegistryHive, autoScript string, enableWayland bool) {
 	synthByName := make(map[string]*ntapi.SynthPE)
 	for _, s := range dlls {
 		synthByName[strings.ToLower(s.Name)] = s
@@ -1072,7 +1072,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	var wlWindow *wl.Window
 	// mainHWND/mainTitle/mainActive: will be set via hctx after it is created
 	// (hctx.MainHWND, hctx.MainTitle, hctx.MainActive)
-	if wld, err := wl.Connect(); err == nil {
+	if !enableWayland {
+		ravelog.Logf("[wl] headless (-wayland=false): window display disabled\n")
+	} else if wld, err := wl.Connect(); err == nil {
 		wlDisplay = wld
 		ravelog.Logf("[wl] connected to Wayland compositor\n")
 	} else {
