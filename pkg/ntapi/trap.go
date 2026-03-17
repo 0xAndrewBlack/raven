@@ -229,6 +229,18 @@ func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *Registr
 	d.registerNtapiHandlers()
 	d.registerWin32kHandlers()
 
+	// ntdll's CRT/Wine-helper exports use cdecl (the CALLER cleans the stack),
+	// unlike the stdcall Nt*/Rtl*/Zw*/Csr*/Dbg*/Ldr* services. They are exactly
+	// the lowercase/_-prefixed names. Mark them cdecl so the dispatcher does NOT
+	// pop their args - otherwise both callee (us) and caller pop, misaligning the
+	// PE32 stack and crashing real DLL init (e.g. user32's SxS lookup calls
+	// ntdll!_wcsicmp repeatedly; the drift led to a ret onto the stack).
+	for i, name := range ntapiExports {
+		if len(name) > 0 && (name[0] == '_' || (name[0] >= 'a' && name[0] <= 'z')) {
+			d.cdeclIDs[ntapiIDBase+uint32(i)] = true
+		}
+	}
+
 	// Register the DllMain return sentinel
 	d.register(DllMainReturnID, "_DllMainReturn", func(ctx *TrapContext) uint32 {
 		ctx.CPU.Stop()
