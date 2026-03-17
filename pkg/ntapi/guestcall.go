@@ -146,7 +146,10 @@ func CallGuestFunction(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline
 
 	err := cpu.Run()
 	cpu.Resume() // reset running flag so the outer Run() loop can continue
-	ret := rr.ReadReg(regRAX)
+	// The return trampoline stashes the callee's RAX into R11 before issuing the
+	// vmcall (which overwrites EAX with the trap ID), so the real return value is
+	// recovered from R11, not RAX.
+	ret := rr.ReadReg(regR11)
 	restoreErr := restoreCPUContextFromGuest(cpu, mem, savedCtx)
 	if err != nil {
 		return ret, err

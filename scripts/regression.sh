@@ -70,5 +70,14 @@ run_case sqlite_select 30 "sqlite> *4"            "$TMP/sql.in" testdata/sqlite3
 # 4. Windows PE GUI: Notepad runs the message loop and exits cleanly.
 run_case notepad_run   25 "\[win32\] exit\(0\)"   /dev/null testdata/notepad.exe
 
+# 5-7. DLL export check: load a real (non-synthetic) PE DLL, run DllMain, call an
+#      export end-to-end, recover the correct return value.
+FIX=testdata/dll_fixture/raven_min.dll
+run_case dll_add       20 "raven_add => 42"       /dev/null -call-export raven_add:20,22  "$FIX"
+run_case dll_magic     20 "raven_magic => 10794"  /dev/null -call-export raven_magic       "$FIX"
+run_case dll_sum3      20 "raven_sum3 => 6"        /dev/null -call-export raven_sum3:1,2,3  "$FIX"
+run_case dll_inc       20 "raven_inc => 101"       /dev/null -call-export raven_inc          "$FIX"  # .data + reloc
+run_case dll_double    20 "raven_double => 42"     /dev/null -call-export raven_double:21    "$FIX"  # intra-module call
+
 echo "==> $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

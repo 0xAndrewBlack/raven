@@ -18,11 +18,18 @@ const (
 )
 
 // DllMainTrampoline holds the guest address of a small code region used as
-// a return address when calling DllMain. The trampoline executes:
+// a return address when calling DllMain or any guest export. The trampoline
+// executes:
 //
+//	mov r11, rax              ; 49 89 C3   (preserve the callee's return value)
 //	mov eax, DllMainReturnID  ; B8 DE FF 00 00
 //	vmcall                    ; 0F 01 C1
 //	hlt                       ; F4
+//
+// The `mov eax, ID` is required because the vmcall dispatcher reads the trap ID
+// from EAX - which destroys the callee's return value. Stashing RAX into R11
+// first lets CallGuestFunction recover the real return value (the dispatcher
+// never touches R11). For DllMain the return value is simply ignored.
 type DllMainTrampoline struct {
 	Addr uint64
 }
@@ -32,15 +39,19 @@ func AllocTrampoline(mem *mmu.MMU) *DllMainTrampoline {
 	size := uint64(16) // more than enough for the stub
 	addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermExecute|mmu.PermWrite)
 
+	// mov r11, rax (49 89 C3) - preserve the callee's return value
+	mem.Write8(addr+0, 0x49)
+	mem.Write8(addr+1, 0x89)
+	mem.Write8(addr+2, 0xC3)
 	// mov eax, DllMainReturnID (B8 xx xx xx xx)
-	mem.Write8(addr+0, 0xB8)
-	mem.Write32(addr+1, DllMainReturnID)
+	mem.Write8(addr+3, 0xB8)
+	mem.Write32(addr+4, DllMainReturnID)
 	// vmcall (0F 01 C1)
-	mem.Write8(addr+5, 0x0F)
-	mem.Write8(addr+6, 0x01)
-	mem.Write8(addr+7, 0xC1)
+	mem.Write8(addr+8, 0x0F)
+	mem.Write8(addr+9, 0x01)
+	mem.Write8(addr+10, 0xC1)
 	// hlt (F4) - safety net
-	mem.Write8(addr+8, 0xF4)
+	mem.Write8(addr+11, 0xF4)
 
 	// Make the page read+execute only after writing
 	mem.Mprotect(addr, size, mmu.PermRead|mmu.PermExecute)

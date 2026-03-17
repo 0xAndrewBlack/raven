@@ -38,7 +38,7 @@ import (
 )
 
 // runPE runs a Windows PE binary with the NT subsystem.
-func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript string) {
+func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript, callExport string) {
 	mem := mmu.New()
 	fs := vfs.New()
 	fs.ElfPath = absPath
@@ -697,6 +697,12 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 			v, _ := mem.Read32(result.StackPtr + i)
 			ravelog.Logf("[pe] stack[SP+0x%x] = 0x%08x\n", i, v)
 		}
+	}
+
+	// DLL export check: load a real DLL, run its DllMain, call an export.
+	if callExport != "" {
+		doCallExport(c, mem, result.MainModule, callExport, trace)
+		return
 	}
 
 	// Background goroutine to keep KUSER_SHARED_DATA TickCount and SystemTime up-to-date.
@@ -6810,4 +6816,57 @@ func drawFindDialogOverlay(hctx *HandlerCtx, w *wl.Window) {
 
 	drawBtn(btnX, btnRow, "Cancel")
 	fd.CancelBtnX, fd.CancelBtnY, fd.CancelBtnW, fd.CancelBtnH = btnX, btnRow, btnW, btnH
+}
+
+// doCallExport implements the DLL export check (-call-export): it runs
+// the main module's DllMain (if it is a DLL) and then synchronously invokes a
+// named export with the given arguments, printing its return value. It proves
+// the loader + emulator + ntdll can execute real, non-synthetic DLL code
+// end-to-end. Spec form: "exportName" or "exportName:arg0,arg1,..." (args parse
+// as Go integer literals, e.g. 2, 0x2A, -5). Exit code 0 on a successful call.
+func doCallExport(c arch.CPU, mem *mmu.MMU, mod *loader.PEModule, spec string, trace bool) {
+	tramp := ntapi.AllocTrampoline(mem)
+
+	// Initialize the DLL (DLL_PROCESS_ATTACH) before calling into it.
+	if mod.IsDLL && mod.EntryPoint != 0 && mod.EntryPoint != mod.BaseAddr {
+		ravelog.Logf("[call-export] running DllMain at 0x%x\n", mod.EntryPoint)
+		if err := ntapi.CallDllMain(c, mem, tramp, mod.BaseAddr, mod.EntryPoint, trace); err != nil {
+			fmt.Fprintf(os.Stderr, "[call-export] DllMain failed: %v\n", err)
+			os.Exit(3)
+		}
+	}
+
+	name := spec
+	var args []uint64
+	if i := strings.IndexByte(spec, ':'); i >= 0 {
+		name = spec[:i]
+		for _, a := range strings.Split(spec[i+1:], ",") {
+			a = strings.TrimSpace(a)
+			if a == "" {
+				continue
+			}
+			v, err := strconv.ParseInt(a, 0, 64)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[call-export] bad argument %q: %v\n", a, err)
+				os.Exit(2)
+			}
+			args = append(args, uint64(v))
+		}
+	}
+
+	addr, ok := mod.Exports[name]
+	if !ok || addr == 0 {
+		fmt.Fprintf(os.Stderr, "[call-export] export %q not found in %s (%d exports available)\n",
+			name, mod.Name, len(mod.Exports))
+		os.Exit(4)
+	}
+
+	ravelog.Logf("[call-export] calling %s @0x%x with %v\n", name, addr, args)
+	ret, err := ntapi.CallGuestFunction(c, mem, tramp, addr, args, trace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[call-export] call to %s failed: %v\n", name, err)
+		os.Exit(5)
+	}
+	// Exports here return a 32-bit int in EAX; show signed-decimal and hex.
+	fmt.Printf("[call-export] %s => %d (0x%x)\n", name, int64(int32(uint32(ret))), ret)
 }

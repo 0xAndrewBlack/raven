@@ -7,5 +7,5 @@ func hasWindowsSupport() bool { return false }
 
 // runPE is a stub for builds without guest_windows; main() guards the call
 // behind hasWindowsSupport() so this is never invoked.
-func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript string) {
+func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript, callExport string) {
 }
