@@ -551,13 +551,16 @@ func initProcess32(mem *mmu.MMU, init *ProcessInit, modules []ModuleInfo) (*Proc
 	mem.Write32(pebAddr+Peb32FlsListHead, uint32(pebAddr+Peb32FlsListHead))
 	mem.Write32(pebAddr+Peb32FlsListHead+4, uint32(pebAddr+Peb32FlsListHead))
 
-	// GDI shared handle table
-	gdiTableSize := uint64(0x4000 * 24)
+	// GDI shared handle table. On 32-bit, GDI_TABLE_ENTRY is 16 bytes:
+	//   KernelData(+0,4) ProcessId(+4,4) {FullUnique u16@+8, ObjectType u8@+0xA,
+	//   Flags u8@+0xB} UserData(+0xC,4 → DC_ATTR). GDI_HANDLE_COUNT = 0x10000.
+	const gdiEntry32 = 16
+	gdiTableSize := uint64(0x10000 * gdiEntry32)
 	gdiTable := mem.Mmap(0, gdiTableSize, mmu.PermRead|mmu.PermWrite)
 	mem.Write32(pebAddr+Peb32GdiSharedHandleTable, uint32(gdiTable))
 	state.GdiTableAddr = gdiTable
-	stockDCEntry := gdiTable + 52*24
-	mem.Write8(stockDCEntry+0x0E, 0x01) // OBJ_DC
+	stockDCEntry := gdiTable + 52*gdiEntry32
+	mem.Write8(stockDCEntry+0x0A, 0x01) // ObjectType = DC
 
 	mem.Write32(pebAddr+Peb32NumberOfProcessors, 4)
 	mem.Write32(pebAddr+Peb32NtGlobalFlag, 0)

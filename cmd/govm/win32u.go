@@ -396,6 +396,30 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		}
 		memDC.WorldTransform = gdi.IdentityXForm()
 		memDC.PolyFillMode = 1
+		// Real ReactOS gdi32 (PE32) validates the returned HDC against the
+		// GdiSharedHandleTable and reads its DC_ATTR. Return a ReactOS-format
+		// handle (index | LO_DC_TYPE) and populate a 16-byte table entry +
+		// zeroed DC_ATTR; alias the same DC under that handle for later calls.
+		if st := hctx.ProcState; st != nil && st.Is32 && st.GdiTableAddr != 0 {
+			idx := uint32(h & 0x0000FFFF)
+			dcattr := mem.Mmap(0, 256, mmu.PermRead|mmu.PermWrite)
+			for i := uint64(0); i < 256; i += 4 {
+				mem.Write32(dcattr+i, 0)
+			}
+			mem.Write32(dcattr+0x10, 0x00FFFFFF) // crBackgroundClr (white)
+			mem.Write32(dcattr+0x18, 0x00000000) // crForegroundClr (black)
+			entry := st.GdiTableAddr + uint64(idx)*16
+			mem.Write32(entry+0x00, uint32(dcattr)) // KernelData (non-NULL)
+			mem.Write32(entry+0x04, st.ProcessId)   // ProcessId (owner)
+			mem.Write16(entry+0x08, uint16(idx))    // FullUnique
+			mem.Write8(entry+0x0A, 0x01)            // ObjectType = DC
+			mem.Write8(entry+0x0B, 0)               // Flags
+			mem.Write32(entry+0x0C, uint32(dcattr)) // UserData → DC_ATTR
+			ros := uint64(idx | 0x00010000)         // GDILoObjType_LO_DC_TYPE
+			gdiMgr.AliasDC(ros, memDC)
+			ctx.SetReturn(ros)
+			return 0
+		}
 		ctx.SetReturn(h)
 		return 0
 	})

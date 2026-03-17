@@ -144,6 +144,13 @@ func (m *Manager) GetDC(h uint64) *DC {
 	return m.dcs[h]
 }
 
+// AliasDC maps an additional handle value to an existing DC. Used to expose a
+// ReactOS-format HGDIOBJ (index | LO_DC_TYPE) for the same DC that a real
+// gdi32 will pass to subsequent NtGdi* services.
+func (m *Manager) AliasDC(h uint64, dc *DC) {
+	m.dcs[h] = dc
+}
+
 // --- GDI object lifecycle ---
 
 // CreateSolidBrush allocates a solid brush handle.
