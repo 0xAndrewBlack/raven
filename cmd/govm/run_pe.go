@@ -547,6 +547,12 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 
 	registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry, autoScript, enableWayland)
 
+	// Real-DLL win32k handlers, registered LAST so they win the dispatcher map
+	// over the HLE win32u handlers (gdiMgr) for a real ReactOS gdi32/user32.
+	if procState.Is32 && sysroot != "" {
+		registerRealNtGdiHandlers(dispatcher)
+	}
+
 	// Set up Win32k subsystem
 	w32k := win32k.New(mem, handles)
 	gdi := win32k.NewGDI(mem, w32k)
