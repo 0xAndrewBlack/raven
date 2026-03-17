@@ -1,5 +1,5 @@
 
-govm
+/govm
 *.plan
 epoll_dump
 epoll_dump.c
