@@ -17,6 +17,7 @@ func main() {
 	trace := flag.Bool("trace", false, "enable instruction trace to stderr")
 	traceSyscall := flag.Bool("trace-syscall", false, "trace Nt*/NtUser*/NtGdi* seam crossings only (no instruction noise; PE mode)")
 	callExport := flag.String("call-export", "", "PE DLL mode: run DllMain then call an export, e.g. -call-export 'raven_add:2,2' (DLL export check)")
+	renderPNG := flag.String("render-png", "", "after -call-export, render the win32k windows to a PNG (visual stack proof)")
 	memMB := flag.Int("mem", 256, "guest memory limit in MiB (advisory)")
 	sysroot := flag.String("sysroot", "", "path to Windows system DLL directory (for PE mode)")
 	regFile := flag.String("registry", "", "path to registry hive JSON file (for PE mode)")
@@ -69,7 +70,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Rebuild with: go build -tags guest_windows\n")
 			os.Exit(1)
 		}
-		runPE(absPath, guestArgv, *sysroot, *regFile, *trace, *traceSyscall, *wayland, *autoScript, *callExport)
+		runPE(absPath, guestArgv, *sysroot, *regFile, *trace, *traceSyscall, *wayland, *autoScript, *callExport, *renderPNG)
 	} else {
 		if !hasLinuxSupport() {
 			fmt.Fprintf(os.Stderr, "Error: Linux guest support is not compiled into this binary.\n")

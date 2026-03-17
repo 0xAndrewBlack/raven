@@ -38,7 +38,7 @@ import (
 )
 
 // runPE runs a Windows PE binary with the NT subsystem.
-func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript, callExport string) {
+func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript, callExport, renderPNG string) {
 	mem := mmu.New()
 	fs := vfs.New()
 	fs.ElfPath = absPath
@@ -723,6 +723,13 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	// DLL export check: load a real DLL, run its DllMain, call an export.
 	if callExport != "" {
 		doCallExport(c, mem, result.MainModule, callExport, trace)
+		if renderPNG != "" {
+			if err := w32kBridge.RenderPNG(renderPNG); err != nil {
+				fmt.Fprintf(os.Stderr, "[render-png] %v\n", err)
+			} else {
+				fmt.Printf("[render-png] wrote %s\n", renderPNG)
+			}
+		}
 		return
 	}
 

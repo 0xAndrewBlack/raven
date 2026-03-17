@@ -18,3 +18,12 @@ __declspec(dllexport) __attribute__((naked)) unsigned long long nt_winfrompt(
     __asm__ volatile("movq %rcx,%r10\n\t movl $0x1004,%eax\n\t syscall\n\t retq\n\t");
 }
 int __stdcall _DllMainCRTStartup(void *h, unsigned long r, void *x) { (void)h;(void)r;(void)x; return 1; }
+
+// demo() drives the GUI stack: it creates several windows via real win32k
+// syscalls. Run with -render-png to composite them to a PNG.
+__declspec(dllexport) unsigned long long demo(void) {
+    nt_create(0x10000000, 60,  50,  ((unsigned long long)360 << 16) | 220);
+    nt_create(0x10000000, 300, 180, ((unsigned long long)320 << 16) | 200);
+    nt_create(0x10000000, 150, 330, ((unsigned long long)420 << 16) | 150);
+    return 0;
+}
