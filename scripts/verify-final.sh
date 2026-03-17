@@ -71,6 +71,26 @@ else
   echo "  sysroot gdi32 not found at $GDI32 (set RAVEN_SYSROOT)"
 fi
 
+# --- 4b. GUI_FIXTURE fixture: real user32+gdi32 GUI (no CRT/COM) ---
+say "4b. GUI_FIXTURE fixture - raven_gui_min.exe on REAL user32/gdi32"
+GUI=testdata/dll_fixture/raven_gui_min.exe
+gui_state="n/a"
+if [ -f "$GUI" ] && [ -d "$SYSROOT" ]; then
+  timeout 25 /tmp/raven-vf -wayland=false -sysroot "$SYSROOT" -trace-syscall \
+    "$GUI" </dev/null >/tmp/vf-gui.out 2>&1
+  nt=$(grep -oE "Nt(User|Gdi)[A-Za-z]+" /tmp/vf-gui.out | sort -u | tr '\n' ' ')
+  echo "  real NtUser/NtGdi issued: $nt"
+  if echo "$nt" | grep -q NtUserCreateWindowEx; then
+    gui_state="reaches-CreateWindow"
+    echo "  → reaches RegisterClass + CreateWindowEx on real user32/gdi32"
+    echo "  → does NOT paint yet: user32 validates HWNDs via gSharedInfo/ValidateHwnd"
+    echo "    (USER shared handle table from NtUserProcessConnect) - not built yet,"
+    echo "    so ShowWindow/BeginPaint no-op."
+  fi
+else
+  echo "  fixture or sysroot missing"
+fi
+
 # --- 5. render-png (win32k → gfx → PNG) ---
 say "5. render-png → $PNG"
 rm -f "$PNG"
@@ -99,12 +119,13 @@ echo "  Real gdi32 executes    : $gdi32_real   (real ReactOS gdi32 runs a GDI ex
 echo "  Render engine → PNG    : $render_real (win32k syscall fixture renders to PNG via pkg/gfx)"
 echo
 echo "  GUI_FIXTURE (real user32+gdi32 app paints, headless PNG + live Wayland): NOT MET"
-echo "     Why: the render PNG above is the SYNTHETIC win32k fixture, not real"
-echo "     gdi32/user32. Real gdi32 executes individual exports (proof above),"
-echo "     but a full real GUI app (notepad) does not yet reach its message loop:"
-echo "     it now runs past CRT memcpy corruption (fixed) into real msvcrt/COM"
-echo "     init, where it hits a chain of NULL function-pointer calls (CRT/COM"
-echo "     bring-up)."
+echo "     Progress (4b above): raven_gui_min.exe drives REAL user32/gdi32 through"
+echo "     init and reaches RegisterClass + CreateWindowEx (valid HWND). It does"
+echo "     NOT paint yet: real user32 validates HWNDs via gSharedInfo/ValidateHwnd"
+echo "     (the USER shared handle table from NtUserProcessConnect), not built -"
+echo "     so ShowWindow/BeginPaint no-op. That table + per-window WND objects"
+echo "     (binary SHAREDINFO/HANDLEENTRY/WND) is the next piece for GUI_FIXTURE."
+echo "     The render PNG above is the SYNTHETIC win32k fixture, not real gdi32."
 echo "  CONTROL_CHECK (comctl32 real control, zero per-control code): NOT MET (blocked on GUI_FIXTURE)"
 echo "  APPLICATION_CHECK (shipped app like notepad++):                   NOT MET (blocked on GUI_FIXTURE)"
 echo
