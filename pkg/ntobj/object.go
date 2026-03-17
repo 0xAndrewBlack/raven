@@ -46,11 +46,12 @@ type Manager struct {
 	mu    sync.Mutex
 	cond  *sync.Cond
 	names map[string]*Object
+	apcs  map[uint64][]func() // per-thread user-APC queue (alertable waits)
 }
 
 // New creates an empty object manager.
 func New() *Manager {
-	m := &Manager{names: make(map[string]*Object)}
+	m := &Manager{names: make(map[string]*Object), apcs: make(map[uint64][]func())}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -159,15 +160,33 @@ func (m *Manager) Read(fn func()) {
 	m.mu.Unlock()
 }
 
-// Wait blocks until one (waitAll=false) or all (waitAll=true) of the given
-// objects are signaled and atomically satisfies them, or until the timeout
-// elapses. timeout < 0 means INFINITE. Returns a Win32 wait code:
-// WaitObject0(+index) / WaitAbandoned0(+index) / WaitTimeout.
+// QueueAPC queues a user-APC for thread tid and wakes alertable waiters. The
+// callback runs in the waiting thread when it next enters an alertable wait
+// (returned by WaitEx so the caller invokes it outside the manager lock).
+func (m *Manager) QueueAPC(tid uint64, fn func()) {
+	m.mu.Lock()
+	m.apcs[tid] = append(m.apcs[tid], fn)
+	m.cond.Broadcast()
+	m.mu.Unlock()
+}
+
+// Wait is WaitEx without alertability (see WaitEx).
+func (m *Manager) Wait(objs []Waitable, waitAll bool, tid uint64, timeout time.Duration) uint32 {
+	r, _ := m.WaitEx(objs, waitAll, tid, timeout, false)
+	return r
+}
+
+// WaitEx blocks until one (waitAll=false) or all (waitAll=true) of the given
+// objects are signaled and atomically satisfies them, until the timeout elapses,
+// or - when alertable - until a user-APC is queued for tid. timeout < 0 means
+// INFINITE. Returns a Win32 wait code (WaitObject0(+i) / WaitAbandoned0(+i) /
+// WaitTimeout / WaitIOCompletion) and, for the WaitIOCompletion case, the drained
+// APC callbacks to run outside the lock.
 //
 // The WaitAll path is atomic: objects are satisfied only when ALL are
 // simultaneously signaled, so an auto-reset object is never consumed while the
 // thread goes on to block on another - the lost-wakeup bug of sequential waits.
-func (m *Manager) Wait(objs []Waitable, waitAll bool, tid uint64, timeout time.Duration) uint32 {
+func (m *Manager) WaitEx(objs []Waitable, waitAll bool, tid uint64, timeout time.Duration, alertable bool) (uint32, []func()) {
 	infinite := timeout < 0
 	deadline := time.Now().Add(timeout)
 
@@ -197,24 +216,32 @@ func (m *Manager) Wait(objs []Waitable, waitAll bool, tid uint64, timeout time.D
 					}
 				}
 				if abandoned {
-					return WaitAbandoned0
+					return WaitAbandoned0, nil
 				}
-				return WaitObject0
+				return WaitObject0, nil
 			}
 		} else {
 			for i, o := range objs {
 				if o.signaled(tid) {
 					ab := o.satisfy(tid)
 					if ab {
-						return WaitAbandoned0 + uint32(i)
+						return WaitAbandoned0 + uint32(i), nil
 					}
-					return WaitObject0 + uint32(i)
+					return WaitObject0 + uint32(i), nil
 				}
 			}
 		}
 
+		// Alertable: a queued user-APC interrupts the wait (WAIT_IO_COMPLETION).
+		if alertable {
+			if q := m.apcs[tid]; len(q) > 0 {
+				delete(m.apcs, tid)
+				return WaitIOCompletion, q
+			}
+		}
+
 		if !infinite && !time.Now().Before(deadline) {
-			return WaitTimeout
+			return WaitTimeout, nil
 		}
 		m.cond.Wait()
 	}
