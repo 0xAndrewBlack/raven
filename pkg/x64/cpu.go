@@ -498,8 +498,12 @@ func (c *CPU) Run() error {
 					}
 				}
 			}
-			// Check if stack-scan recovery succeeded (set RIP to valid address)
-			if c.RIP >= 0x10000 && c.RIP <= 0x7FFFFFFFFFFF {
+			// Check if stack-scan recovery succeeded (set RIP to a NEW valid
+			// address). Require c.RIP to have actually moved off the faulting
+			// instruction (c.prevRIP); otherwise a fault at a mapped instruction
+			// that nothing recovered (e.g. `push ebp` with a bad ESP) would be
+			// re-executed forever here instead of being surfaced and halted.
+			if c.RIP != c.prevRIP && c.RIP >= 0x10000 && c.RIP <= 0x7FFFFFFFFFFF {
 				if _, verr := c.mem.Read8(c.RIP); verr == nil {
 					continue
 				}
