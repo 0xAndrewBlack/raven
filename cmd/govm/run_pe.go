@@ -38,7 +38,7 @@ import (
 )
 
 // runPE runs a Windows PE binary with the NT subsystem.
-func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bool, enableWayland bool, autoScript string) {
+func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript string) {
 	mem := mmu.New()
 	fs := vfs.New()
 	fs.ElfPath = absPath
@@ -472,6 +472,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace bo
 	// Create the trap dispatcher
 	dispatcher := ntapi.NewDispatcher(mem, fs, handles, registry, procState, synthNtdll, synthWin32u)
 	dispatcher.SetTrace(trace)
+	dispatcher.SetTraceSyscall(traceSyscall)
 	dispatcher.SetSysRoot(sysroot)
 
 	// Register no-op stubs for any remaining unresolved ordinal imports so

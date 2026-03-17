@@ -15,6 +15,7 @@ func main() {
 	ravelog.Banner("v0.1.0")
 
 	trace := flag.Bool("trace", false, "enable instruction trace to stderr")
+	traceSyscall := flag.Bool("trace-syscall", false, "trace Nt*/NtUser*/NtGdi* seam crossings only (no instruction noise; PE mode)")
 	memMB := flag.Int("mem", 256, "guest memory limit in MiB (advisory)")
 	sysroot := flag.String("sysroot", "", "path to Windows system DLL directory (for PE mode)")
 	regFile := flag.String("registry", "", "path to registry hive JSON file (for PE mode)")
@@ -67,7 +68,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Rebuild with: go build -tags guest_windows\n")
 			os.Exit(1)
 		}
-		runPE(absPath, guestArgv, *sysroot, *regFile, *trace, *wayland, *autoScript)
+		runPE(absPath, guestArgv, *sysroot, *regFile, *trace, *traceSyscall, *wayland, *autoScript)
 	} else {
 		if !hasLinuxSupport() {
 			fmt.Fprintf(os.Stderr, "Error: Linux guest support is not compiled into this binary.\n")

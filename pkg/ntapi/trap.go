@@ -21,16 +21,19 @@ type TrapHandler func(ctx *TrapContext) uint32
 
 // TrapContext provides access to guest CPU state and VM subsystems for handlers.
 type TrapContext struct {
-	CPU        arch.CPU
-	Mem        *mmu.MMU
-	FS         *vfs.VFS
-	Handles    *HandleTable
-	Reg        *RegistryHive
-	State      *ProcessState
-	Disp       *Dispatcher
-	Trace      bool
-	flsSlots   map[uint32]uint64
-	flsNextIdx uint32
+	CPU     arch.CPU
+	Mem     *mmu.MMU
+	FS      *vfs.VFS
+	Handles *HandleTable
+	Reg     *RegistryHive
+	State   *ProcessState
+	Disp    *Dispatcher
+	Trace   bool
+	// TraceSyscall logs every Nt*/NtUser*/NtGdi* seam crossing without the
+	// per-instruction noise of Trace. This is the lens for the win32k pivot.
+	TraceSyscall bool
+	flsSlots     map[uint32]uint64
+	flsNextIdx   uint32
 	// ReturnOverridden is set by handlers that manage RAX directly,
 	// preventing the dispatcher from overwriting it with the handler's return.
 	ReturnOverridden bool
@@ -233,6 +236,12 @@ func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *Registr
 // SetTrace enables/disables trace logging.
 func (d *Dispatcher) SetTrace(trace bool) {
 	d.ctx.Trace = trace
+}
+
+// SetTraceSyscall enables/disables syscall-seam trace logging: one concise line
+// per Nt*/NtUser*/NtGdi* crossing (handler name + id), without instruction noise.
+func (d *Dispatcher) SetTraceSyscall(on bool) {
+	d.ctx.TraceSyscall = on
 }
 
 // SetSysRoot sets the path to the Windows system DLL directory for NLS file loading.
@@ -1613,20 +1622,20 @@ var win32ArgCounts = map[string]int{
 	"EnumProcessModulesEx": 5,
 
 	// --- gdi32.dll extras (needed for 32-bit installer DLLs) ---
-	"SelectPalette":              3,
-	"RealizePalette":             1,
-	"CreatePalette":              1,
+	"SelectPalette":               3,
+	"RealizePalette":              1,
+	"CreatePalette":               1,
 	"CreateScalableFontResourceA": 4,
 	"CreateScalableFontResourceW": 4,
-	"DeleteMetaFile":             1,
-	"SetMetaFileBitsEx":          2,
-	"GetTextExtentPointA":        4,
-	"GetTextExtentPointW":        4,
+	"DeleteMetaFile":              1,
+	"SetMetaFileBitsEx":           2,
+	"GetTextExtentPointA":         4,
+	"GetTextExtentPointW":         4,
 
 	// --- user32.dll extras ---
-	"DrawFocusRect":       2,
-	"GetDialogBaseUnits":  0,
-	"InvalidateRgn":       3,
+	"DrawFocusRect":      2,
+	"GetDialogBaseUnits": 0,
+	"InvalidateRgn":      3,
 
 	// --- user32.dll DDE/misc (needed for 32-bit installer DLLs) ---
 	"DdeInitializeA":         4,
@@ -1654,29 +1663,29 @@ var win32ArgCounts = map[string]int{
 	"DrawIcon":               4,
 
 	// --- advapi32.dll extras ---
-	"RegSetValueA":      5,
-	"RegSetValueW":      5,
-	"RegQueryValueA":    4,
-	"RegQueryValueW":    4,
-	"AccessCheck":       8,
-	"RevertToSelf":      0,
-	"ImpersonateSelf":   1,
-	"GetFileSecurityA":  5,
-	"GetFileSecurityW":  5,
+	"RegSetValueA":     5,
+	"RegSetValueW":     5,
+	"RegQueryValueA":   4,
+	"RegQueryValueW":   4,
+	"AccessCheck":      8,
+	"RevertToSelf":     0,
+	"ImpersonateSelf":  1,
+	"GetFileSecurityA": 5,
+	"GetFileSecurityW": 5,
 
 	// --- version.dll extras ---
-	"VerInstallFileA":  8,
-	"VerInstallFileW":  8,
-	"VerFindFileA":     7,
-	"VerFindFileW":     7,
+	"VerInstallFileA": 8,
+	"VerInstallFileW": 8,
+	"VerFindFileA":    7,
+	"VerFindFileW":    7,
 
 	// --- mpr.dll ---
 	"WNetGetConnectionA": 3,
 	"WNetGetConnectionW": 3,
 
 	// --- winmm.dll extras ---
-	"sndPlaySoundA": 2,
-	"sndPlaySoundW": 2,
+	"sndPlaySoundA":     2,
+	"sndPlaySoundW":     2,
 	"midiOutGetNumDevs": 0,
 }
 
@@ -1742,6 +1751,18 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 				ravelog.Logf("[zero-region] stub called from zero-region ret=0x%x: %s\n", retAddr, name)
 			}
 		}
+	}
+
+	if d.ctx.TraceSyscall {
+		name := d.names[syscallID]
+		if name == "" {
+			name = fmt.Sprintf("unknown_0x%04X", syscallID)
+		}
+		impl := ""
+		if _, ok := d.handlers[syscallID]; !ok {
+			impl = " [UNIMPL]"
+		}
+		ravelog.Logf("[syscall] %s (id=0x%04X)%s\n", name, syscallID, impl)
 	}
 
 	handler, ok := d.handlers[syscallID]
