@@ -6378,6 +6378,11 @@ func findDLL(sysroot, name string) string {
 		filepath.Join(sysroot, "System32", name),
 		filepath.Join(sysroot, "system32", name),
 		filepath.Join(sysroot, "SysWOW64", name),
+		// User-provided system layout: <sysroot>/Windows/System32 (matches
+		// the Fonts loader, which reads <sysroot>/Windows/Fonts).
+		filepath.Join(sysroot, "Windows", "System32", name),
+		filepath.Join(sysroot, "Windows", "system32", name),
+		filepath.Join(sysroot, "Windows", "SysWOW64", name),
 	}
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {
