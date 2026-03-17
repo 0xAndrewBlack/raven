@@ -6995,31 +6995,39 @@ func (c *CPU) execCMPXCHG(pfx *prefixState, size int) error {
 // =========================================================================
 
 func (c *CPU) execMOVS(pfx *prefixState, size int) error {
+	// In 32-bit (PE32) mode the string op uses ECX/ESI/EDI (32-bit). Masking is
+	// essential: if the high 32 bits of RCX hold stale data, a 64-bit count
+	// would make `rep movsb` copy billions of bytes and trash all of memory
+	// (observed: stack corruption → bogus return address).
+	mask := uint64(0xFFFFFFFFFFFFFFFF)
+	if c.Mode32 {
+		mask = 0xFFFFFFFF
+	}
 	hasRep := pfx.repe || pfx.repne
-	if hasRep && c.Regs[RCX] == 0 {
+	if hasRep && (c.Regs[RCX]&mask) == 0 {
 		return nil
 	}
+	delta := uint64(size)
 	for {
-		v, err := c.readMem(c.Regs[RSI], size)
+		v, err := c.readMem(c.Regs[RSI]&mask, size)
 		if err != nil {
 			return err
 		}
-		if err := c.writeMem(c.Regs[RDI], size, v); err != nil {
+		if err := c.writeMem(c.Regs[RDI]&mask, size, v); err != nil {
 			return err
 		}
-		delta := uint64(size)
 		if c.Rflags&flagDF != 0 {
-			c.Regs[RSI] -= delta
-			c.Regs[RDI] -= delta
+			c.Regs[RSI] = (c.Regs[RSI] - delta) & mask
+			c.Regs[RDI] = (c.Regs[RDI] - delta) & mask
 		} else {
-			c.Regs[RSI] += delta
-			c.Regs[RDI] += delta
+			c.Regs[RSI] = (c.Regs[RSI] + delta) & mask
+			c.Regs[RDI] = (c.Regs[RDI] + delta) & mask
 		}
 		if !hasRep {
 			return nil
 		}
-		c.Regs[RCX]--
-		if c.Regs[RCX] == 0 {
+		c.Regs[RCX] = (c.Regs[RCX] - 1) & mask
+		if (c.Regs[RCX] & mask) == 0 {
 			return nil
 		}
 	}
