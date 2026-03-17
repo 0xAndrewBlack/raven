@@ -559,9 +559,6 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 
 	// Real-DLL win32k handlers, registered LAST so they win the dispatcher map
 	// over the HLE win32u handlers (gdiMgr) for a real ReactOS gdi32/user32.
-	if procState.Is32 && sysroot != "" {
-		registerRealNtGdiHandlers(dispatcher)
-	}
 
 	// Set up Win32k subsystem
 	w32k := win32k.New(mem, handles)
@@ -670,6 +667,11 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	// copies it into r10). Anything that isn't a win32k service falls through to
 	// the NT trap dispatcher (preserving the prior syscall behavior).
 	w32kBridge := newWin32kBridge(mem, 1280, 1024)
+	// Real-DLL win32k handlers (NtUser*/NtGdi*) over winmgr/gfx, registered LAST
+	// so they win the dispatcher map over the HLE win32u stubs. PE32 + sysroot.
+	if procState.Is32 && sysroot != "" {
+		registerRealWin32kHandlers(dispatcher, w32kBridge)
+	}
 	syscallHandler := func(cpu arch.CPU) {
 		idx := uint32(cpu.SyscallNum())
 		if rr, ok := cpu.(ntapi.RegisterReader); ok {

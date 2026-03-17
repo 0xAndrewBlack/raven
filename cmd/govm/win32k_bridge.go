@@ -45,18 +45,32 @@ type win32kBridge struct {
 	fonts   *gfx.FontCache
 	fontID  int
 	classOK bool
+
+	// DLL message-loop and paint state.
+	paintQueue   []winmgr.HWND      // windows awaiting their first WM_PAINT
+	paintDCs     map[uint32]paintDC // HDC -> client-area origin on screen
+	nextPaintHDC uint32             // HDC allocator for BeginPaint
+}
+
+// paintDC binds a BeginPaint HDC to where its window's client area lives on the
+// screen surface, so real gdi32 NtGdi* draws land in the right place.
+type paintDC struct {
+	originX, originY int
+	w, h             int
 }
 
 func newWin32kBridge(mem *mmu.MMU, screenW, screenH int) *win32kBridge {
 	b := &win32kBridge{
-		mem:     mem,
-		wm:      winmgr.New(),
-		menus:   winmgr.NewMenuTable(),
-		gdiObjs: gfx.NewObjectTable(),
-		screen:  gfx.NewSurface(screenW, screenH),
-		table:   winmgr.NewSyscallTable(),
-		fonts:   gfx.NewFontCache(),
-		fontID:  -1,
+		mem:          mem,
+		wm:           winmgr.New(),
+		menus:        winmgr.NewMenuTable(),
+		gdiObjs:      gfx.NewObjectTable(),
+		screen:       gfx.NewSurface(screenW, screenH),
+		table:        winmgr.NewSyscallTable(),
+		fonts:        gfx.NewFontCache(),
+		fontID:       -1,
+		paintDCs:     make(map[uint32]paintDC),
+		nextPaintHDC: 0xDC000001,
 	}
 	for _, p := range []string{
 		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -78,6 +92,23 @@ func (b *win32kBridge) ensureClass() {
 		b.wm.RegisterClass(&winmgr.Class{Name: "RavenWindow"})
 		b.classOK = true
 	}
+}
+
+// beginPaintDC allocates an HDC bound to the window's client area on the screen
+// surface (client = window rect minus the caption bar drawn by RenderPNG).
+func (b *win32kBridge) beginPaintDC(hwnd winmgr.HWND) uint32 {
+	const titleH = 22
+	hdc := b.nextPaintHDC
+	b.nextPaintHDC++
+	pdc := paintDC{originX: 0, originY: 0, w: b.screen.W, h: b.screen.H}
+	if r, ok := b.wm.WindowRect(hwnd); ok {
+		pdc = paintDC{
+			originX: int(r.Left), originY: int(r.Top) + titleH,
+			w: int(r.Right - r.Left), h: int(r.Bottom-r.Top) - titleH,
+		}
+	}
+	b.paintDCs[hdc] = pdc
+	return hdc
 }
 
 func (b *win32kBridge) register() {
