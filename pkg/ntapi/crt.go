@@ -4,8 +4,78 @@ package ntapi
 
 import "github.com/mirkobrombin/Raven/pkg/mmu"
 
+// RegisterCRT32Handlers registers Go (vmcall) handlers for the ntdll CRT stubs
+// in a 32-bit (PE32) process. PatchCRTFunctions writes x64-only inline code
+// (rcx/rdx/r8 + REX-prefixed instructions) which is meaningless in 32-bit mode
+// (e.g. 0x4C decodes as `dec esp`, corrupting the stack), so for PE32 we keep
+// the stubs as vmcall traps and implement them here, reading cdecl stack args.
+func RegisterCRT32Handlers(d *Dispatcher, synth *SynthPE) {
+	memcpyFwd := func(ctx *TrapContext, dst, src, n uint64) {
+		for i := uint64(0); i < n; i++ {
+			b, _ := ctx.Mem.Read8(src + i)
+			ctx.Mem.Write8(dst+i, b)
+		}
+	}
+	d.RegisterAutoStubHandler(synth, "memcpy", func(ctx *TrapContext) uint32 {
+		dst, src, n := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		memcpyFwd(ctx, dst, src, n)
+		ctx.SetReturn(dst)
+		return 0
+	})
+	d.RegisterAutoStubHandler(synth, "memmove", func(ctx *TrapContext) uint32 {
+		dst, src, n := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		if dst > src && dst < src+n {
+			for i := n; i > 0; i-- { // backward (overlap)
+				b, _ := ctx.Mem.Read8(src + i - 1)
+				ctx.Mem.Write8(dst+i-1, b)
+			}
+		} else {
+			memcpyFwd(ctx, dst, src, n)
+		}
+		ctx.SetReturn(dst)
+		return 0
+	})
+	d.RegisterAutoStubHandler(synth, "memset", func(ctx *TrapContext) uint32 {
+		dst, val, n := ctx.Arg(0), ctx.Arg(1), ctx.Arg(2)
+		for i := uint64(0); i < n; i++ {
+			ctx.Mem.Write8(dst+i, byte(val))
+		}
+		ctx.SetReturn(dst)
+		return 0
+	})
+	d.RegisterAutoStubHandler(synth, "strlen", func(ctx *TrapContext) uint32 {
+		s := ctx.Arg(0)
+		var n uint64
+		for {
+			b, _ := ctx.Mem.Read8(s + n)
+			if b == 0 {
+				break
+			}
+			n++
+		}
+		ctx.SetReturn(n)
+		return 0
+	})
+	d.RegisterAutoStubHandler(synth, "strcmp", func(ctx *TrapContext) uint32 {
+		a, b := ctx.Arg(0), ctx.Arg(1)
+		for i := uint64(0); ; i++ {
+			ca, _ := ctx.Mem.Read8(a + i)
+			cb, _ := ctx.Mem.Read8(b + i)
+			if ca != cb {
+				ctx.SetReturn(uint64(int64(int32(ca) - int32(cb))))
+				return 0
+			}
+			if ca == 0 {
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+	})
+}
+
 // PatchCRTFunctions replaces synthetic ntdll CRT stubs with real x64 machine
 // code so they execute natively in the emulator instead of trapping.
+// x64 ONLY - see RegisterCRT32Handlers for the PE32 path.
 func PatchCRTFunctions(synth *SynthPE, mem *mmu.MMU) {
 	// memcpy(rcx=dst, rdx=src, r8=count) → rax=dst
 	synth.PatchStub(mem, "memcpy", []byte{

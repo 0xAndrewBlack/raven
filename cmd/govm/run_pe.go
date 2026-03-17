@@ -148,7 +148,12 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 
 	// Generate synthetic ntdll.dll and win32u.dll
 	synthNtdll := ntapi.GenerateNtdll(mem)
-	ntapi.PatchCRTFunctions(synthNtdll, mem)
+	// PatchCRTFunctions writes x64-only inline code; in a PE32 process it would
+	// decode as garbage (0x4C = dec esp) and corrupt the stack. For 32-bit,
+	// keep the ntdll CRT stubs as vmcall traps (handlers registered below).
+	if !mem.Mode32 {
+		ntapi.PatchCRTFunctions(synthNtdll, mem)
+	}
 	synthWin32u := ntapi.GenerateWin32u(mem)
 
 	// Pre-generate full kernel32.dll and comctl32.dll with ALL exports so that
@@ -501,6 +506,11 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 
 	// Create the trap dispatcher
 	dispatcher := ntapi.NewDispatcher(mem, fs, handles, registry, procState, synthNtdll, synthWin32u)
+	// PE32: ntdll CRT stubs (memcpy/memmove/memset/strlen/strcmp) are served by
+	// Go handlers since the x64 inline patch is skipped for 32-bit.
+	if mem.Mode32 {
+		ntapi.RegisterCRT32Handlers(dispatcher, synthNtdll)
+	}
 	dispatcher.SetTrace(trace)
 	dispatcher.SetTraceSyscall(traceSyscall)
 	dispatcher.SetSysRoot(sysroot)
