@@ -12,6 +12,7 @@ import (
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/ntobj"
 	"github.com/mirkobrombin/Raven/pkg/vfs"
 	"golang.org/x/sys/unix"
 	"io"
@@ -4637,7 +4638,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	// --- Sync primitives ---
 	d.RegisterAutoStubHandler(kernel32, "CreateMutexW", func(ctx *ntapi.TrapContext) uint32 {
 		bInitialOwner := ctx.Arg(1) != 0
-		mh := &ntapi.MutantHandle{}
+		mh := ntapi.NewMutant(0)
 		if bInitialOwner {
 			var tid uint32 = 1
 			if *tmPtr != nil {
@@ -4707,7 +4708,28 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0x102)
 			return 0
 		}
-		// WaitAll: wait for all in sequence
+		// WaitAll: when every handle is a unified waitable object
+		// (event/mutant/semaphore), run a single ATOMIC multi-object wait through
+		// the object manager - objects are acquired only when all are
+		// simultaneously signaled, avoiding the lost-wakeup bug of consuming an
+		// auto-reset object and then blocking on the next.
+		waitables := make([]ntobj.Waitable, 0, nCount)
+		unified := true
+		for i := uint64(0); i < nCount; i++ {
+			hv, _ := ctx.Mem.Read64(pHandles + i*8)
+			w := handles.WaitableFor(ntapi.Handle(hv))
+			if w == nil {
+				unified = false
+				break
+			}
+			waitables = append(waitables, w)
+		}
+		if unified {
+			ctx.SetReturn(uint64(ntapi.ObjMgr.Wait(waitables, true, uint64(tid), timeout)))
+			return 0
+		}
+		// Fallback for handle sets containing non-unified types (thread, timer,
+		// IOCP, ...): sequential wait (not atomic, preserves prior behavior).
 		for i := uint64(0); i < nCount; i++ {
 			hv, _ := ctx.Mem.Read64(pHandles + i*8)
 			res := waitOneWin32(handles, ntapi.Handle(hv), tid, timeout)
@@ -8291,7 +8313,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "CreateMutexA", func(ctx *ntapi.TrapContext) uint32 {
 		// CreateMutexA(lpAttr, bInitialOwner, lpName)
 		bInitialOwner := ctx.Arg(1) != 0
-		mh := &ntapi.MutantHandle{}
+		mh := ntapi.NewMutant(0)
 		if bInitialOwner {
 			var tid uint32 = 1
 			if *tmPtr != nil {
@@ -8307,7 +8329,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// CreateMutexExA(lpAttr, lpName, dwFlags, dwDesiredAccess)
 		// dwFlags: 1 = CREATE_MUTEX_INITIAL_OWNER
 		dwFlags := ctx.Arg(2)
-		mh := &ntapi.MutantHandle{}
+		mh := ntapi.NewMutant(0)
 		if dwFlags&1 != 0 {
 			var tid uint32 = 1
 			if *tmPtr != nil {
@@ -8321,7 +8343,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateMutexExW", func(ctx *ntapi.TrapContext) uint32 {
 		dwFlags := ctx.Arg(2)
-		mh := &ntapi.MutantHandle{}
+		mh := ntapi.NewMutant(0)
 		if dwFlags&1 != 0 {
 			var tid uint32 = 1
 			if *tmPtr != nil {

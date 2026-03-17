@@ -150,6 +150,15 @@ func (m *Manager) Signal(fn func()) {
 	m.mu.Unlock()
 }
 
+// Read runs fn under the manager lock without waking waiters. Use it for
+// non-consuming state reads (NtQueryEvent/QuerySemaphore, IsSignaled peeks) that
+// must observe object state consistently but never satisfy a wait.
+func (m *Manager) Read(fn func()) {
+	m.mu.Lock()
+	fn()
+	m.mu.Unlock()
+}
+
 // Wait blocks until one (waitAll=false) or all (waitAll=true) of the given
 // objects are signaled and atomically satisfies them, or until the timeout
 // elapses. timeout < 0 means INFINITE. Returns a Win32 wait code:
@@ -233,9 +242,15 @@ func (e *Event) satisfy(uint64) bool {
 	return false
 }
 
-// Set/Reset/Pulse mutate state; call them via Manager.Signal.
+// Set/Reset mutate state; call them via Manager.Signal.
 func (e *Event) Set()   { e.state = true }
 func (e *Event) Reset() { e.state = false }
+
+// Peek reports the signaled state without consuming it (manager lock held).
+func (e *Event) Peek() bool { return e.state }
+
+// Manual reports whether this is a manual-reset event (manager lock held).
+func (e *Event) Manual() bool { return e.manual }
 
 // Semaphore is a counting semaphore with an upper bound.
 type Semaphore struct {
@@ -263,6 +278,9 @@ func (s *Semaphore) Release(n int32) (prev int32, ok bool) {
 // Count returns the current count (caller must hold the manager lock, e.g. via
 // Signal or a test helper).
 func (s *Semaphore) Count() int32 { return s.count }
+
+// Max returns the upper bound (manager lock held).
+func (s *Semaphore) Max() int32 { return s.max }
 
 // Mutant is a Win32 mutex: recursive ownership by a single thread, with
 // abandoned semantics when the owner exits without releasing.
@@ -321,8 +339,22 @@ func (mu *Mutant) Abandon(tid uint64) {
 	}
 }
 
+// AbandonCurrent marks the mutant abandoned if it is currently owned by anyone
+// (used when the owning thread terminates and the tid is taken from the object).
+// Call via Manager.Signal.
+func (mu *Mutant) AbandonCurrent() {
+	if mu.owner != 0 {
+		mu.owner = 0
+		mu.recursion = 0
+		mu.abandoned = true
+	}
+}
+
 // Owner returns the current owning tid (0 = unowned).
 func (mu *Mutant) Owner() uint64 { return mu.owner }
+
+// Recursion returns the current recursion (lock) count (manager lock held).
+func (mu *Mutant) Recursion() int32 { return mu.recursion }
 
 // Latch is a one-shot manual signal used for thread/process termination: once
 // Signaled it stays signaled forever and satisfies all current and future

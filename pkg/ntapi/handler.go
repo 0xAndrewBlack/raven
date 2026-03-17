@@ -2407,10 +2407,7 @@ func handleNtCreateEvent(ctx *TrapContext) uint32 {
 
 	autoReset := eventType == 1 // SynchronizationEvent
 
-	evt := &EventHandle{
-		autoReset: autoReset,
-		signaled:  false,
-	}
+	evt := NewEvent(!autoReset, false)
 
 	// Read name from OBJECT_ATTRIBUTES if present
 	var name string
@@ -2457,9 +2454,7 @@ func handleNtResetEvent(ctx *TrapContext) uint32 {
 		return StatusInvalidHandle
 	}
 
-	evt.mu.Lock()
-	evt.signaled = false
-	evt.mu.Unlock()
+	evt.Reset()
 
 	return StatusSuccess
 }
@@ -2476,9 +2471,7 @@ func handleNtPulseEvent(ctx *TrapContext) uint32 {
 	if evt == nil {
 		return StatusInvalidHandle
 	}
-	evt.mu.Lock()
-	prev := evt.signaled
-	evt.mu.Unlock()
+	prev := evt.PeekSignaled()
 	if prevPtr != 0 {
 		if prev {
 			ctx.Mem.Write32(prevPtr, 1)
@@ -2488,9 +2481,7 @@ func handleNtPulseEvent(ctx *TrapContext) uint32 {
 	}
 	evt.Signal()
 	// Auto-reset: clear immediately after waking (best effort)
-	evt.mu.Lock()
-	evt.signaled = false
-	evt.mu.Unlock()
+	evt.Reset()
 	return StatusSuccess
 }
 
@@ -2513,14 +2504,12 @@ func handleNtQueryEvent(ctx *TrapContext) uint32 {
 	signaled := false
 	eventType := uint32(0) // NotificationEvent
 	if evt != nil {
-		evt.mu.Lock()
-		signaled = evt.signaled
-		if !evt.autoReset {
-			eventType = 0
+		signaled = evt.PeekSignaled()
+		if evt.IsManualReset() {
+			eventType = 0 // NotificationEvent
 		} else {
-			eventType = 1
-		} // SynchronizationEvent
-		evt.mu.Unlock()
+			eventType = 1 // SynchronizationEvent
+		}
 	}
 	if buffer != 0 {
 		ctx.Mem.Write32(buffer, eventType)
@@ -2569,10 +2558,8 @@ func handleNtQuerySemaphore(ctx *TrapContext) uint32 {
 	count, maxCount := int32(0), int32(1)
 	sem := ctx.Handles.GetSemaphore(handle)
 	if sem != nil {
-		sem.mu.Lock()
-		count = int32(sem.count)
-		maxCount = int32(sem.maxCount)
-		sem.mu.Unlock()
+		count = sem.Count()
+		maxCount = sem.MaxCount()
 	}
 	if buffer != 0 {
 		ctx.Mem.Write32(buffer, uint32(count))
@@ -2840,7 +2827,7 @@ func handleNtCreateMutant(ctx *TrapContext) uint32 {
 	objAttr := ctx.Arg(2)
 	initialOwner := ctx.Arg(3) != 0
 
-	m := &MutantHandle{}
+	m := NewMutant(0)
 	if initialOwner {
 		m.WaitTimeout(1, 0) // TID=1 as simplified owner
 	}
@@ -2873,9 +2860,7 @@ func handleNtReleaseMutant(ctx *TrapContext) uint32 {
 	h := Handle(ctx.Arg(0))
 	pPrevCount := ctx.Arg(1)
 	if mh := ctx.Handles.GetMutant(h); mh != nil {
-		mh.mu.Lock()
-		prev := mh.count
-		mh.mu.Unlock()
+		prev := mh.Count()
 		mh.Release(1) // TID=1 simplified
 		if pPrevCount != 0 {
 			ctx.Mem.Write32(pPrevCount, uint32(prev))

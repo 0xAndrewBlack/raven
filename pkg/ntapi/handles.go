@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mirkobrombin/Raven/pkg/ntobj"
 )
 
 // HANDLE type for Windows guest.
@@ -35,114 +37,63 @@ func (h *FileHandle) HandleType() string { return "file" }
 
 // EventHandle is a Win32 event synchronization object.
 type EventHandle struct {
-	mu        sync.Mutex
-	cond      *sync.Cond
-	signaled  bool
-	autoReset bool
+	ev *ntobj.Event
 }
 
-// NewEvent creates an EventHandle with the given manual-reset and initial state.
+// NewEvent creates an EventHandle with the given manual-reset and initial state,
+// backed by the process-wide object manager.
 func NewEvent(manualReset, initialState bool) *EventHandle {
-	eh := &EventHandle{autoReset: !manualReset}
-	if initialState {
-		eh.signaled = true
-	}
-	return eh
+	return &EventHandle{ev: ntobj.NewEvent(manualReset, initialState)}
 }
 
 func (h *EventHandle) HandleType() string { return "event" }
 
-func (h *EventHandle) getCond() *sync.Cond {
-	if h.cond == nil {
-		h.cond = sync.NewCond(&h.mu)
-	}
-	return h.cond
-}
+// Waitable returns the underlying object-manager waitable (for unified
+// multi-object waits).
+func (h *EventHandle) Waitable() ntobj.Waitable { return h.ev }
 
 // Set signals the event (SetEvent).
-func (h *EventHandle) Set() {
-	h.mu.Lock()
-	h.signaled = true
-	if h.cond != nil {
-		h.cond.Broadcast()
-	}
-	h.mu.Unlock()
-}
+func (h *EventHandle) Set() { ObjMgr.Signal(func() { h.ev.Set() }) }
 
 // Signal is an alias for Set (used by NtFsControlFile pipe completion).
 func (h *EventHandle) Signal() { h.Set() }
 
 // Reset clears the event signal (ResetEvent).
-func (h *EventHandle) Reset() {
-	h.mu.Lock()
-	h.signaled = false
-	h.mu.Unlock()
+func (h *EventHandle) Reset() { ObjMgr.Signal(func() { h.ev.Reset() }) }
+
+// IsSignaled returns whether the event is signaled, consuming the signal for an
+// auto-reset event (matches the historical semantics).
+func (h *EventHandle) IsSignaled() bool {
+	return ObjMgr.Wait([]ntobj.Waitable{h.ev}, false, 0, 0) == ntobj.WaitObject0
 }
 
-// IsSignaled returns whether the event is signaled.
-// If autoReset is true, it clears the signal after returning true.
-func (h *EventHandle) IsSignaled() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.signaled {
-		if h.autoReset {
-			h.signaled = false
-		}
-		return true
-	}
-	return false
+// PeekSignaled reports the signaled state without consuming it (NtQueryEvent).
+func (h *EventHandle) PeekSignaled() bool {
+	var s bool
+	ObjMgr.Read(func() { s = h.ev.Peek() })
+	return s
+}
+
+// IsManualReset reports whether this is a manual-reset (notification) event.
+func (h *EventHandle) IsManualReset() bool {
+	var m bool
+	ObjMgr.Read(func() { m = h.ev.Manual() })
+	return m
 }
 
 // WaitTimeout blocks until the event is signaled or the timeout expires.
 // Pass d < 0 for INFINITE wait. Returns true if signaled, false on timeout.
 func (h *EventHandle) WaitTimeout(d time.Duration) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.signaled {
-		if h.autoReset {
-			h.signaled = false
-		}
-		return true
-	}
-	if d == 0 {
-		return false
-	}
-	c := h.getCond()
-	if d < 0 {
-		for !h.signaled {
-			c.Wait()
-		}
-		if h.autoReset {
-			h.signaled = false
-		}
-		return true
-	}
-	// Timed wait: fire a broadcast after the timeout to unblock.
-	deadline := time.Now().Add(d)
-	go func() {
-		time.Sleep(d)
-		h.mu.Lock()
-		c.Broadcast()
-		h.mu.Unlock()
-	}()
-	for !h.signaled && time.Now().Before(deadline) {
-		c.Wait()
-	}
-	if h.signaled {
-		if h.autoReset {
-			h.signaled = false
-		}
-		return true
-	}
-	return false
+	return ObjMgr.Wait([]ntobj.Waitable{h.ev}, false, 0, d) == ntobj.WaitObject0
 }
 
-// WaitChan returns a channel that receives once when the event is signaled.
-// Used by WaitForMultipleObjects to fan-in multiple handles with reflect.Select.
+// WaitChan returns a channel that receives once when the event is signaled
+// (and, for auto-reset events, has been acquired by this waiter). Used by
+// WaitForMultipleObjects to fan-in multiple handles with reflect.Select.
 func (h *EventHandle) WaitChan() <-chan struct{} {
 	ch := make(chan struct{}, 1)
 	go func() {
-		h.WaitTimeout(-1)
+		ObjMgr.Wait([]ntobj.Waitable{h.ev}, false, 0, -1)
 		ch <- struct{}{}
 	}()
 	return ch
@@ -151,132 +102,71 @@ func (h *EventHandle) WaitChan() <-chan struct{} {
 // MutantHandle is a Win32 mutex object (kernel mutant).
 // ReactOS reference: ntoskrnl/ke/mutex.c
 type MutantHandle struct {
-	mu        sync.Mutex
-	cond      *sync.Cond
-	ownerTID  uint32 // TID of the thread that owns the mutex (0 = unowned)
-	count     int32  // recursion count (>0 = locked)
-	abandoned bool   // set when owning thread exits without releasing
+	mu *ntobj.Mutant
+}
+
+// NewMutant creates a mutant, optionally initially owned by ownerTID (0 = none).
+func NewMutant(ownerTID uint32) *MutantHandle {
+	return &MutantHandle{mu: ntobj.NewMutant(uint64(ownerTID))}
 }
 
 func (h *MutantHandle) HandleType() string { return "mutant" }
 
-func (h *MutantHandle) getCond() *sync.Cond {
-	if h.cond == nil {
-		h.cond = sync.NewCond(&h.mu)
+func (h *MutantHandle) lazy() *ntobj.Mutant {
+	if h.mu == nil {
+		h.mu = ntobj.NewMutant(0)
 	}
-	return h.cond
+	return h.mu
 }
 
-// IsSignaled returns true when the mutex is unowned (can be acquired).
+// Waitable returns the underlying object-manager waitable.
+func (h *MutantHandle) Waitable() ntobj.Waitable { return h.lazy() }
+
+// Count returns the current recursion (lock) count (NtReleaseMutant previous).
+func (h *MutantHandle) Count() int32 {
+	m := h.lazy()
+	var c int32
+	ObjMgr.Read(func() { c = m.Recursion() })
+	return c
+}
+
+// IsSignaled returns true when the mutex is unowned (can be acquired) - a
+// non-consuming peek.
 func (h *MutantHandle) IsSignaled() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.count == 0
+	m := h.lazy()
+	var unowned bool
+	ObjMgr.Read(func() { unowned = m.Owner() == 0 })
+	return unowned
 }
 
 // WaitTimeout tries to acquire the mutex, blocking up to d.
 // Returns WAIT_OBJECT_0 (0), WAIT_ABANDONED (0x80), or WAIT_TIMEOUT (0x102).
 // Pass tid = current thread ID, d < 0 for INFINITE.
 func (h *MutantHandle) WaitTimeout(tid uint32, d time.Duration) uint32 {
-	const (
-		waitObject0   = uint32(0x00000000)
-		waitAbandoned = uint32(0x00000080)
-		waitTimeout   = uint32(0x00000102)
-	)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	// Recursive acquisition by the same thread.
-	if h.ownerTID == tid && tid != 0 && h.count > 0 {
-		h.count++
-		return waitObject0
-	}
-
-	// Try non-blocking acquire.
-	if h.count == 0 {
-		wasAbandoned := h.abandoned
-		h.ownerTID = tid
-		h.count = 1
-		h.abandoned = false
-		if wasAbandoned {
-			return waitAbandoned
-		}
-		return waitObject0
-	}
-
-	if d == 0 {
-		return waitTimeout
-	}
-
-	c := h.getCond()
-	if d < 0 {
-		// INFINITE: block until unowned.
-		for h.count != 0 {
-			c.Wait()
-		}
-	} else {
-		deadline := time.Now().Add(d)
-		go func() {
-			time.Sleep(d)
-			h.mu.Lock()
-			c.Broadcast()
-			h.mu.Unlock()
-		}()
-		for h.count != 0 && time.Now().Before(deadline) {
-			c.Wait()
-		}
-		if h.count != 0 {
-			return waitTimeout
-		}
-	}
-
-	wasAbandoned := h.abandoned
-	h.ownerTID = tid
-	h.count = 1
-	h.abandoned = false
-	if wasAbandoned {
-		return waitAbandoned
-	}
-	return waitObject0
+	return ObjMgr.Wait([]ntobj.Waitable{h.lazy()}, false, uint64(tid), d)
 }
 
-// Release releases one level of mutex ownership by tid.
-// Returns true on success.
+// Release releases one level of mutex ownership by tid. Returns true on success.
 func (h *MutantHandle) Release(tid uint32) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.count == 0 || (tid != 0 && h.ownerTID != tid) {
-		return false
-	}
-	h.count--
-	if h.count == 0 {
-		h.ownerTID = 0
-		if h.cond != nil {
-			h.cond.Signal()
-		}
-	}
-	return true
+	m := h.lazy()
+	var ok bool
+	ObjMgr.Signal(func() { ok = m.Release(uint64(tid)) })
+	return ok
 }
 
 // Abandon marks the mutex as abandoned (owning thread exited).
 func (h *MutantHandle) Abandon() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.count > 0 {
-		h.count = 0
-		h.ownerTID = 0
-		h.abandoned = true
-		if h.cond != nil {
-			h.cond.Broadcast()
-		}
-	}
+	m := h.lazy()
+	ObjMgr.Signal(func() { m.AbandonCurrent() })
 }
 
-// WaitChan returns a channel that fires once when the mutex becomes acquirable.
+// WaitChan returns a channel that fires once when the mutex becomes acquirable
+// (and has been acquired by tid).
 func (h *MutantHandle) WaitChan(tid uint32) <-chan struct{} {
 	ch := make(chan struct{}, 1)
+	m := h.lazy()
 	go func() {
-		h.WaitTimeout(tid, -1)
+		ObjMgr.Wait([]ntobj.Waitable{m}, false, uint64(tid), -1)
 		ch <- struct{}{}
 	}()
 	return ch
@@ -285,93 +175,58 @@ func (h *MutantHandle) WaitChan(tid uint32) <-chan struct{} {
 // SemaphoreHandle is a Win32 semaphore object.
 // ReactOS reference: ntoskrnl/ke/semaphor.c
 type SemaphoreHandle struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	count    int32
-	maxCount int32
+	sem *ntobj.Semaphore
 }
 
 // NewSemaphore creates a semaphore with the given initial and maximum counts.
 func NewSemaphore(initial, max int32) *SemaphoreHandle {
-	return &SemaphoreHandle{count: initial, maxCount: max}
+	return &SemaphoreHandle{sem: ntobj.NewSemaphore(initial, max)}
 }
 
 func (h *SemaphoreHandle) HandleType() string { return "semaphore" }
 
-func (h *SemaphoreHandle) getCond() *sync.Cond {
-	if h.cond == nil {
-		h.cond = sync.NewCond(&h.mu)
-	}
-	return h.cond
+// Waitable returns the underlying object-manager waitable.
+func (h *SemaphoreHandle) Waitable() ntobj.Waitable { return h.sem }
+
+// Count and MaxCount report the current and maximum counts (NtQuerySemaphore).
+func (h *SemaphoreHandle) Count() int32 {
+	var c int32
+	ObjMgr.Read(func() { c = h.sem.Count() })
+	return c
+}
+func (h *SemaphoreHandle) MaxCount() int32 {
+	var m int32
+	ObjMgr.Read(func() { m = h.sem.Max() })
+	return m
 }
 
 // WaitTimeout decrements the semaphore count, blocking until count > 0 or timeout.
 // Returns WAIT_OBJECT_0 (0) or WAIT_TIMEOUT (0x102).
 func (h *SemaphoreHandle) WaitTimeout(d time.Duration) uint32 {
-	const (
-		waitObject0 = uint32(0x00000000)
-		waitTimeout = uint32(0x00000102)
-	)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.count > 0 {
-		h.count--
-		return waitObject0
-	}
-	if d == 0 {
-		return waitTimeout
-	}
-
-	c := h.getCond()
-	if d < 0 {
-		for h.count == 0 {
-			c.Wait()
-		}
-	} else {
-		deadline := time.Now().Add(d)
-		go func() {
-			time.Sleep(d)
-			h.mu.Lock()
-			c.Broadcast()
-			h.mu.Unlock()
-		}()
-		for h.count == 0 && time.Now().Before(deadline) {
-			c.Wait()
-		}
-		if h.count == 0 {
-			return waitTimeout
-		}
-	}
-	h.count--
-	return waitObject0
+	return ObjMgr.Wait([]ntobj.Waitable{h.sem}, false, 0, d)
 }
 
 // Release increases the semaphore count by releaseCount.
 // Returns the previous count and true on success.
 func (h *SemaphoreHandle) Release(releaseCount int32) (int32, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if releaseCount <= 0 || h.count+releaseCount > h.maxCount {
+	if releaseCount <= 0 {
 		return 0, false
 	}
-	prev := h.count
-	h.count += releaseCount
-	if h.cond != nil {
-		if releaseCount == 1 {
-			h.cond.Signal()
-		} else {
-			h.cond.Broadcast()
-		}
+	var prev int32
+	var ok bool
+	ObjMgr.Signal(func() { prev, ok = h.sem.Release(releaseCount) })
+	if !ok {
+		return 0, false
 	}
 	return prev, true
 }
 
-// WaitChan returns a channel that fires once when the semaphore can be acquired.
+// WaitChan returns a channel that fires once when the semaphore can be acquired
+// (and has been decremented by this waiter).
 func (h *SemaphoreHandle) WaitChan() <-chan struct{} {
 	ch := make(chan struct{}, 1)
 	go func() {
-		h.WaitTimeout(-1)
+		ObjMgr.Wait([]ntobj.Waitable{h.sem}, false, 0, -1)
 		ch <- struct{}{}
 	}()
 	return ch
