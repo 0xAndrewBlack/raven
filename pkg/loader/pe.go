@@ -233,6 +233,14 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 		return nil, fmt.Errorf("no optional header in %s", path)
 	}
 
+	// Establish 32-bit address mode before any relocation Mmap, so a relocated
+	// PE32 image lands in the low 32-bit range. Otherwise a 32-bit DLL run as
+	// the main image (relocated before run_pe sets Mode32) would be placed at
+	// the 64-bit Mmap base and its 32-bit pointer arithmetic would truncate.
+	if !mod.Is64 {
+		mem.Mode32 = true
+	}
+
 	base := imageBase
 	if forceBase != 0 {
 		base = forceBase
