@@ -43,6 +43,11 @@ type TrapContext struct {
 	PCRedirected bool
 	// maxArgIdx tracks the highest Arg() index accessed for PE32 stdcall cleanup.
 	maxArgIdx int
+	// i386ArgExtra is added to the PE32 stack arg base. It is 4 when a win32k
+	// syscall arrived via the KUSER_SHARED_DATA->SystemCall trampoline (the
+	// stub's `call [edx]` pushed one extra return address), and 0 for a direct
+	// synth stub. Set per-call by Handle(); reset to 0 otherwise.
+	i386ArgExtra uint64
 }
 
 // Arg reads a Windows calling convention argument.
@@ -56,7 +61,7 @@ func (ctx *TrapContext) Arg(n int) uint64 {
 		// stdcall: args pushed right-to-left, return addr at [ESP]
 		// arg0 at [ESP+4], arg1 at [ESP+8], ...
 		sp := ctx.CPU.GetSP()
-		addr := sp + 4 + uint64(n)*4 // skip return address
+		addr := sp + 4 + ctx.i386ArgExtra + uint64(n)*4 // skip return address(es)
 		val, err := ctx.Mem.Read32(addr)
 		if err != nil {
 			return 0
@@ -1812,6 +1817,24 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		}
 	}
 
+	// Detect the PE32 win32k path: gdi32/user32 syscall stubs dispatch via
+	// `call [KUSER_SHARED_DATA->SystemCall]`, landing in our vmcall trampoline.
+	// That `call` pushed one extra return address, so stack args sit 4 bytes
+	// higher, and stack cleanup is done by the stub's own `ret N` (not by us).
+	viaTramp := false
+	if is32 && d.ctx.State != nil && d.ctx.State.Win32kTrampoline != 0 {
+		pc := cpu.GetPC()
+		t := d.ctx.State.Win32kTrampoline
+		if pc >= t && pc <= t+4 {
+			viaTramp = true
+		}
+	}
+	if viaTramp {
+		d.ctx.i386ArgExtra = 4
+	} else {
+		d.ctx.i386ArgExtra = 0
+	}
+
 	d.ctx.ReturnOverridden = false
 	d.ctx.PCRedirected = false
 	d.ctx.maxArgIdx = -1
@@ -1830,7 +1853,11 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 
 	// PE32 stdcall cleanup: the callee must pop arguments from the stack.
 	// Skip if the handler redirected PC (sync WndProc dispatch manages its own stack).
-	if is32 && !d.cdeclIDs[syscallID] && !d.ctx.PCRedirected {
+	// Also skip for the SystemCall-trampoline path: the trampoline's `ret`
+	// returns to the real gdi32/user32 stub, whose own `ret N` pops the args.
+	if is32 && viaTramp {
+		// no cleanup: natural return through the trampoline + stub
+	} else if is32 && !d.cdeclIDs[syscallID] && !d.ctx.PCRedirected {
 		// Prefer explicit arg count (from Win32 API table) over heuristic.
 		nArgs := d.ctx.maxArgIdx + 1
 		if explicit, ok := d.stdcallArgs[syscallID]; ok {

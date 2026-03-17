@@ -264,6 +264,7 @@ type ProcessState struct {
 	EnvironmentAddr          uint64
 	ModuleListAddr           uint64 // base of LDR_DATA_TABLE_ENTRY array
 	GdiTableAddr             uint64 // GDI shared handle table base
+	Win32kTrampoline         uint64 // guest addr of the KUSER_SHARED_DATA->SystemCall vmcall stub (PE32)
 	LastError                uint32
 	ImagePath                string // Win32 image path, e.g. "C:\app\program.exe"
 	ProcessId                uint32

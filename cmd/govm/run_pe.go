@@ -249,15 +249,13 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	// trampoline that executes our trap instruction (vmcall, 0F 01 C1) and
 	// returns; the trap enters the NT/win32k dispatcher with EAX = service
 	// number. Without this the call targets uninitialized memory and faults.
-	{
-		tramp := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-		mem.Write8(tramp+0, 0x0F) // vmcall
-		mem.Write8(tramp+1, 0x01)
-		mem.Write8(tramp+2, 0xC1)
-		mem.Write8(tramp+3, 0xC3) // ret
-		mem.Write32(kuserAddr+0x0300, uint32(tramp))
-		ravelog.Logf("[kuser] SystemCall stub at 0x7FFE0300 → trampoline 0x%x\n", tramp)
-	}
+	win32kTramp := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	mem.Write8(win32kTramp+0, 0x0F) // vmcall
+	mem.Write8(win32kTramp+1, 0x01)
+	mem.Write8(win32kTramp+2, 0xC1)
+	mem.Write8(win32kTramp+3, 0xC3) // ret
+	mem.Write32(kuserAddr+0x0300, uint32(win32kTramp))
+	ravelog.Logf("[kuser] SystemCall stub at 0x7FFE0300 → trampoline 0x%x\n", win32kTramp)
 
 	// Map the gap between stack top (0x7FFD0000) and KUSER_SHARED_DATA (0x7FFE0000).
 	// Some DLLs (kernelbase) access memory in this range.
@@ -487,6 +485,10 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 		fmt.Fprintf(os.Stderr, "govm: PEB/TEB init error: %v\n", err)
 		os.Exit(1)
 	}
+	// Tell the dispatcher where the PE32 win32k SystemCall trampoline lives, so
+	// it can recognize syscalls arriving via `call [0x7FFE0300]` and read their
+	// stack args at the right offset (one extra return address).
+	procState.Win32kTrampoline = win32kTramp
 
 	// Initialize NLS code page data in PEB before DllMain
 	ntapi.InitNlsData(mem, procState.PEBAddr, sysroot)
