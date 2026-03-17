@@ -86,16 +86,22 @@ const (
 // LoadPE parses a PE/COFF executable and maps it into the given MMU.
 // It returns the load result and the module descriptor for import resolution.
 func LoadPE(path string, mem *mmu.MMU, argv []string, envp []string) (*PELoadResult, error) {
-	mod, err := MapPEFile(path, mem, 0)
-	if err != nil {
-		return nil, fmt.Errorf("pe load: %w", err)
-	}
-
-	// Set up a minimal Windows-style stack (64 MiB, below KUSER_SHARED_DATA at 0x7FFE0000).
+	// Reserve the Windows-style stack (64 MiB, below KUSER_SHARED_DATA at
+	// 0x7FFE0000) BEFORE mapping the main module. A system DLL run as the main
+	// image (e.g. -call-export gdi32.dll, preferred ImageBase ~0x7c370000) has a
+	// preferred base inside this stack range; mapping the stack first lets
+	// MapPEFile's collision check relocate the image to a free region, instead
+	// of the stack mapping later overwriting the DLL's code pages as RW
+	// (non-executable) and faulting on the first instruction fetch.
 	stackTop := uint64(0x7FFD0000)
 	stackSize := uint64(64 * 1024 * 1024)
 	stackBottom := stackTop - stackSize
 	mem.MapRange(stackBottom, stackSize, mmu.PermRead|mmu.PermWrite)
+
+	mod, err := MapPEFile(path, mem, 0)
+	if err != nil {
+		return nil, fmt.Errorf("pe load: %w", err)
+	}
 
 	// Simulate a CALL to the entry point.
 	sp := stackTop // 16-byte aligned
