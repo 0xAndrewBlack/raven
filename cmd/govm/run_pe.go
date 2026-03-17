@@ -281,6 +281,17 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	loadedModules["comctl32.dll"] = ntapi.SynthToModule(synthComctl32)
 	loadedModules["oleaut32.dll"] = ntapi.SynthToModule(synthOleaut32)
 
+	// Register the main module so loadBYODLLs does not load a second copy when
+	// the main image is itself a DLL that dependents import (e.g. -call-export
+	// gdi32.dll, which user32 imports). Without this the main copy runs at its
+	// preferred ImageBase while a relocated duplicate is loaded for dependents.
+	if result.MainModule != nil && result.MainModule.Name != "" {
+		mainKey := strings.ToLower(result.MainModule.Name)
+		if _, exists := loadedModules[mainKey]; !exists {
+			loadedModules[mainKey] = result.MainModule
+		}
+	}
+
 	var dllLoadOrder []*loader.PEModule
 	if sysroot != "" {
 		modules, loadedModules, dllLoadOrder = loadBYODLLs(mem, sysroot, result.MainModule, modules, loadedModules)
