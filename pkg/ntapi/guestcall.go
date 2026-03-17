@@ -150,6 +150,12 @@ func CallGuestFunction(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline
 	// vmcall (which overwrites EAX with the trap ID), so the real return value is
 	// recovered from R11, not RAX.
 	ret := rr.ReadReg(regR11)
+	if cpu.GetArch() == arch.ArchI386 {
+		// In a 32-bit guest the trampoline's `49 89 C3` (mov r11,rax in x64)
+		// decodes as `dec ecx; mov ebx,eax`, so the callee's 32-bit return value
+		// lands in EBX, not R11.
+		ret = rr.ReadReg(regRBX) & 0xFFFFFFFF
+	}
 	restoreErr := restoreCPUContextFromGuest(cpu, mem, savedCtx)
 	if err != nil {
 		return ret, err

@@ -1856,7 +1856,12 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 	// Also skip for the SystemCall-trampoline path: the trampoline's `ret`
 	// returns to the real gdi32/user32 stub, whose own `ret N` pops the args.
 	if is32 && viaTramp {
-		// no cleanup: natural return through the trampoline + stub
+		// Emulate the trampoline's `ret` (RET 0): pop the return address back
+		// into the real gdi32/user32 stub and set PC, preserving EAX. The stub's
+		// own `ret N` then pops the service args. (Like synth stubs, the CPU
+		// expects the dispatcher to manage the return PC, so a plain skip would
+		// not execute the trampoline's `ret`.)
+		d.doStdcallCleanup(cpu, 0)
 	} else if is32 && !d.cdeclIDs[syscallID] && !d.ctx.PCRedirected {
 		// Prefer explicit arg count (from Win32 API table) over heuristic.
 		nArgs := d.ctx.maxArgIdx + 1
