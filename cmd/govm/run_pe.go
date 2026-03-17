@@ -242,6 +242,23 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	// SystemCall byte at +0x0308 = 0 (use syscall instruction, not indirect)
 	mem.Write8(kuserAddr+0x0308, 0)
 
+	// SystemCall pointer at +0x0300: on 32-bit ReactOS/Windows, ntdll and win32
+	// (gdi32/user32) syscall stubs dispatch via
+	//   mov eax, <service#>; mov edx, 0x7FFE0300; call dword ptr [edx]
+	// i.e. they call SharedUserData->SystemCall. Point it at a tiny guest
+	// trampoline that executes our trap instruction (vmcall, 0F 01 C1) and
+	// returns; the trap enters the NT/win32k dispatcher with EAX = service
+	// number. Without this the call targets uninitialized memory and faults.
+	{
+		tramp := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+		mem.Write8(tramp+0, 0x0F) // vmcall
+		mem.Write8(tramp+1, 0x01)
+		mem.Write8(tramp+2, 0xC1)
+		mem.Write8(tramp+3, 0xC3) // ret
+		mem.Write32(kuserAddr+0x0300, uint32(tramp))
+		ravelog.Logf("[kuser] SystemCall stub at 0x7FFE0300 → trampoline 0x%x\n", tramp)
+	}
+
 	// Map the gap between stack top (0x7FFD0000) and KUSER_SHARED_DATA (0x7FFE0000).
 	// Some DLLs (kernelbase) access memory in this range.
 	gapAddr := uint64(0x7FFD0000)
