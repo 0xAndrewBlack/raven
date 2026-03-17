@@ -9,4 +9,5 @@ stat_dump
 stat_dump.c
 trace.log
 testdata/busybox
-sources/.regression-raven
+sources/
+.regression-raven
