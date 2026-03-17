@@ -616,17 +616,38 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	}
 
 	// Set up handlers
-	c.SetVmcallHandler(dispatcher.Handle) // NT trap handler
-	c.SetSyscallHandler(func(cpu arch.CPU) {
-		if trace {
-			ravelog.Logf("[pe] unexpected Linux syscall %d at RIP=0x%x\n",
-				cpu.SyscallNum(), cpu.GetPC())
+	c.SetVmcallHandler(dispatcher.Handle) // NT trap handler (vmcall import thunks)
+
+	// win32k bridge: real DLLs reach the GUI engines through numbered syscalls.
+	// x64 syscall convention: service index in EAX; args in R10, RDX, R8, R9,
+	// then the stack (rcx is clobbered by the syscall instruction, so the stub
+	// copies it into r10). Anything that isn't a win32k service falls through to
+	// the NT trap dispatcher (preserving the prior syscall behavior).
+	w32kBridge := newWin32kBridge(mem, 1280, 1024)
+	syscallHandler := func(cpu arch.CPU) {
+		idx := uint32(cpu.SyscallNum())
+		if rr, ok := cpu.(ntapi.RegisterReader); ok {
+			args := []uint64{rr.ReadReg(10), rr.ReadReg(2), rr.ReadReg(8), rr.ReadReg(9)}
+			sp := rr.ReadReg(4)
+			for i := 0; i < 4; i++ {
+				v, _ := mem.Read64(sp + 0x28 + uint64(i)*8)
+				args = append(args, v)
+			}
+			if ret, name, ok := w32kBridge.dispatch(idx, args); ok {
+				if traceSyscall {
+					ravelog.Logf("[win32k] %s (idx=0x%x) -> 0x%x\n", name, idx, ret)
+				}
+				cpu.SetSyscallReturn(ret)
+				return
+			}
 		}
-		cpu.SetSyscallReturn(0xC0000002) // STATUS_NOT_IMPLEMENTED
-	})
+		// Not a win32k service: hand off to the NT trap dispatcher.
+		dispatcher.Handle(cpu)
+	}
+	c.SetSyscallHandler(syscallHandler)
 
 	// Thread manager
-	tm := thread.NewManager(mem, dispatcher.Handle)
+	tm := thread.NewManager(mem, syscallHandler)
 	tmPtr = tm
 	mainThread := tm.MainThread(c)
 

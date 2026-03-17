@@ -79,5 +79,11 @@ run_case dll_sum3      20 "raven_sum3 => 6"        /dev/null -call-export raven_
 run_case dll_inc       20 "raven_inc => 101"       /dev/null -call-export raven_inc          "$FIX"  # .data + reloc
 run_case dll_double    20 "raven_double => 42"     /dev/null -call-export raven_double:21    "$FIX"  # intra-module call
 
+# 8. Win32k syscall check: a real DLL issues a NUMBER-INDEXED win32k syscall
+#    (mov r10,rcx; mov eax,idx; syscall) that reaches the winmgr engine and
+#    returns the created HWND - the path real gdi32/user32 use.
+W32K=testdata/dll_fixture/raven_win32k.dll
+run_case win32k_syscall 20 "nt_create => 65552" /dev/null -call-export nt_create:0x10000000,30,40,0x00C80064 "$W32K"
+
 echo "==> $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
