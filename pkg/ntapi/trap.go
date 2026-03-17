@@ -2376,6 +2376,7 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("NtGdiCreatePen"), "NtGdiCreatePen", handleNtGdiCreatePen)
 	d.register(idOf("NtGdiCreateRectRgn"), "NtGdiCreateRectRgn", handleNtGdiCreateRectRgn)
 	d.register(idOf("NtGdiCreateCompatibleDC"), "NtGdiCreateCompatibleDC", handleNtGdiCreateCompatibleDC)
+	d.register(idOf("NtGdiGetStockObject"), "NtGdiGetStockObject", handleNtGdiGetStockObject)
 	d.register(idOf("NtGdiCreateCompatibleBitmap"), "NtGdiCreateCompatibleBitmap", handleNtGdiCreateCompatibleBitmap)
 	d.register(idOf("NtGdiHfontCreate"), "NtGdiHfontCreate", handleNtGdiHfontCreate)
 	d.register(idOf("NtGdiExtGetObjectW"), "NtGdiExtGetObjectW", handleNtGdiExtGetObjectW)

@@ -7439,6 +7439,32 @@ func handleNtGdiCreateCompatibleDC(ctx *TrapContext) uint32 {
 	return StatusSuccess
 }
 
+// handleNtGdiGetStockObject returns a ReactOS-format stock-object HGDIOBJ for a
+// stock index (WHITE_BRUSH=0 ... DC_PEN=19). The handle encodes the object type in
+// bits 16-22 (GDILoObjType_LO_*_TYPE) plus the stock mask (0x00800000); gdi32
+// caches it and passes it to SelectObject/GetObject. Stock objects share a fixed
+// low index range so they never collide with allocated handles.
+func handleNtGdiGetStockObject(ctx *TrapContext) uint32 {
+	idx := ctx.Arg(0)
+	var loType uint32
+	switch {
+	case idx <= 5 || idx == 18: // WHITE..DKGRAY..HOLLOW brush, DC_BRUSH
+		loType = 0x00100000 // LO_BRUSH_TYPE
+	case (idx >= 6 && idx <= 8) || idx == 19: // WHITE/BLACK/NULL pen, DC_PEN
+		loType = 0x00300000 // LO_PEN_TYPE
+	case idx >= 10 && idx <= 17: // stock fonts (OEM..DEFAULT_GUI)
+		loType = 0x000a0000 // LO_FONT_TYPE (GDIObjType_LFONT_TYPE << 16)
+	case idx == 9 || idx == 14: // *_PALETTE
+		loType = 0x00080000 // LO_PALETTE_TYPE
+	default:
+		loType = 0x00100000
+	}
+	// stock index lives in the reserved low table range [0x20, 0x40)
+	handle := 0x00800000 | loType | (0x20 + uint32(idx&0x1F))
+	ctx.SetReturn(uint64(handle))
+	return StatusSuccess
+}
+
 func handleNtGdiCreateCompatibleBitmap(ctx *TrapContext) uint32 {
 	handle := allocGdiHandle(ctx, "bitmap", gdiObjBitmap)
 	ctx.SetReturn(uint64(handle))
