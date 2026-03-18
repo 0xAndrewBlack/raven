@@ -35,13 +35,28 @@ func registerRealWin32kHandlers(d *ntapi.Dispatcher, b *win32kBridge) {
 		return 0
 	})
 
-	// --- user32 class registration. Real user32 keeps the WNDCLASS (incl. the
-	// guest WndProc) on its side; the kernel side just needs a non-zero atom. ---
+	// NtUserProcessConnect(hProcess, PUSERCONNECT, size): user32 init calls this
+	// to obtain gSharedInfo (SERVERINFO + the HANDLEENTRY table aheList) used by
+	// ValidateHwnd. Without it ShowWindow/BeginPaint no-op on a created window.
+	reg("NtUserProcessConnect", func(ctx *ntapi.TrapContext) uint32 {
+		b.setupSharedInfo(uint32(ctx.Arg(1)))
+		ctx.SetReturn(0) // STATUS_SUCCESS
+		return 0
+	})
+
+	// --- user32 class registration. Real user32 keeps the WNDCLASS on its side;
+	// the kernel needs a non-zero atom AND the WndProc (for the WND it creates).
+	// NtUserRegisterClassExWOW(WNDCLASSEXW* lpwcx, ...): WNDCLASSEXW.lpfnWndProc@8.
 	var nextAtom uint32 = 0xC001
 	reg("NtUserRegisterClassExWOW", func(ctx *ntapi.TrapContext) uint32 {
 		b.ensureClass()
 		a := nextAtom
 		nextAtom++
+		if wcx := uint32(ctx.Arg(0)); wcx != 0 {
+			wndproc, _ := b.mem.Read32(uint64(wcx) + 8) // lpfnWndProc
+			b.wndProcOf[a] = uint32(wndproc)
+			b.lastWndProc = uint32(wndproc)
+		}
 		ctx.SetReturn(uint64(a))
 		return 0
 	})
@@ -76,6 +91,9 @@ func registerRealWin32kHandlers(d *ntapi.Dispatcher, b *win32kBridge) {
 			ctx.SetReturn(0)
 			return 0
 		}
+		// Build the shared WND object so real user32 ValidateHwnd resolves it.
+		b.createWND(uint32(win.Handle), uint32(ctx.Arg(4)), uint32(ctx.Arg(0)),
+			b.lastWndProc, 0, x, y, w, h)
 		ctx.SetReturn(uint64(uint32(win.Handle)))
 		return 0
 	})

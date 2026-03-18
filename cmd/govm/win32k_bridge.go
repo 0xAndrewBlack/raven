@@ -50,6 +50,37 @@ type win32kBridge struct {
 	paintQueue   []winmgr.HWND      // windows awaiting their first WM_PAINT
 	paintDCs     map[uint32]paintDC // HDC -> client-area origin on screen
 	nextPaintHDC uint32             // HDC allocator for BeginPaint
+
+	// USER shared handle table (what real user32 ValidateHwnd reads).
+	aheList     uint32            // guest addr of the HANDLEENTRY array
+	aheCount    uint32            // number of entries
+	gpsi        uint32            // guest addr of SERVERINFO
+	wndProcOf   map[uint32]uint32 // class atom -> guest WndProc
+	wndOf       map[uint32]uint32 // HWND -> guest WND object address
+	lastWndProc uint32            // most-recently registered class WndProc
+	heapNext    uint32            // bump allocator for USER kernel objects
+}
+
+// USER object layout constants (ReactOS, 32-bit). HANDLEENTRY = 12 bytes.
+const (
+	heSize         = 12    // sizeof(HANDLEENTRY)
+	typeWindow     = 1     // TYPE_WINDOW
+	wndStyle       = 0x20  // WND.style
+	wndExStyle     = 0x1C  // WND.ExStyle
+	wndRcWindow    = 0x40  // WND.rcWindow (RECT)
+	wndRcClient    = 0x50  // WND.rcClient (RECT)
+	wndLpfnWndProc = 0x60  // WND.lpfnWndProc
+	wndPcls        = 0x64  // WND.pcls
+	wndState       = 0x14  // WND.state
+	wndSizeAlloc   = 0x100 // generous WND allocation
+)
+
+// userAlloc bumps a small guest region for USER kernel objects (WND/CLS/handle
+// table). Allocated once from the MMU in setupSharedInfo.
+func (b *win32kBridge) userAlloc(n uint32) uint32 {
+	a := b.heapNext
+	b.heapNext += (n + 15) &^ 15
+	return a
 }
 
 // paintDC binds a BeginPaint HDC to where its window's client area lives on the
@@ -71,6 +102,8 @@ func newWin32kBridge(mem *mmu.MMU, screenW, screenH int) *win32kBridge {
 		fontID:       -1,
 		paintDCs:     make(map[uint32]paintDC),
 		nextPaintHDC: 0xDC000001,
+		wndProcOf:    make(map[uint32]uint32),
+		wndOf:        make(map[uint32]uint32),
 	}
 	for _, p := range []string{
 		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -109,6 +142,73 @@ func (b *win32kBridge) beginPaintDC(hwnd winmgr.HWND) uint32 {
 	}
 	b.paintDCs[hdc] = pdc
 	return hdc
+}
+
+// setupSharedInfo lazily allocates the USER shared region (HANDLEENTRY table +
+// SERVERINFO + room for WND/CLS objects) and writes a USERCONNECT for the
+// caller. Mirrors what win32k returns from NtUserProcessConnect; ulSharedDelta=0
+// so kernel pointers == user pointers (single address space).
+func (b *win32kBridge) setupSharedInfo(pUserConnect uint32) {
+	if b.aheList == 0 {
+		const region = 8 << 20 // 8 MiB for handle table + USER objects
+		base := uint32(b.mem.Mmap(0, region, mmu.PermRead|mmu.PermWrite))
+		b.aheCount = 0x4000
+		b.aheList = base
+		psi := base + b.aheCount*heSize // SERVERINFO after the handle table
+		b.mem.Write32(uint64(psi+4), b.aheCount) // cHandleEntries
+		b.heapNext = psi + 0x600                 // objects after SERVERINFO
+		b.gpsi = psi
+	}
+	if pUserConnect == 0 {
+		return
+	}
+	// USERCONNECT: ulVersion@0, ulCurrentVersion@4, dwDispatchCount@8, siClient@12
+	b.mem.Write32(uint64(pUserConnect+0), 0x00050000) // USER_VERSION
+	b.mem.Write32(uint64(pUserConnect+4), 0x00050000)
+	b.mem.Write32(uint64(pUserConnect+8), 0)
+	// SHAREDINFO: psi@0, aheList@4, pDispInfo@8, ulSharedDelta@12
+	si := pUserConnect + 12
+	b.mem.Write32(uint64(si+0), b.gpsi)
+	b.mem.Write32(uint64(si+4), b.aheList)
+	b.mem.Write32(uint64(si+8), 0)
+	b.mem.Write32(uint64(si+12), 0) // ulSharedDelta = 0
+}
+
+// createWND allocates a WND object, fills the fields real user32 reads, and
+// registers its HANDLEENTRY so ValidateHwnd(hwnd) resolves. wndproc is the
+// guest WndProc (from the class). Returns the WND guest address.
+func (b *win32kBridge) createWND(hwnd, style, exStyle, wndproc, pcls uint32, x, y, w, h int32) uint32 {
+	wnd := b.userAlloc(wndSizeAlloc)
+	for i := uint32(0); i < wndSizeAlloc; i += 4 {
+		b.mem.Write32(uint64(wnd+i), 0)
+	}
+	b.mem.Write32(uint64(wnd+0), hwnd) // head.h
+	b.mem.Write32(uint64(wnd+16), wnd) // head.pSelf (delta 0)
+	b.mem.Write32(uint64(wnd+wndState), 0)
+	b.mem.Write32(uint64(wnd+wndExStyle), exStyle)
+	b.mem.Write32(uint64(wnd+wndStyle), style)
+	b.mem.Write32(uint64(wnd+wndRcWindow+0), uint32(x))
+	b.mem.Write32(uint64(wnd+wndRcWindow+4), uint32(y))
+	b.mem.Write32(uint64(wnd+wndRcWindow+8), uint32(x+w))
+	b.mem.Write32(uint64(wnd+wndRcWindow+12), uint32(y+h))
+	b.mem.Write32(uint64(wnd+wndRcClient+0), uint32(x))
+	b.mem.Write32(uint64(wnd+wndRcClient+4), uint32(y))
+	b.mem.Write32(uint64(wnd+wndRcClient+8), uint32(x+w))
+	b.mem.Write32(uint64(wnd+wndRcClient+12), uint32(y+h))
+	b.mem.Write32(uint64(wnd+wndLpfnWndProc), wndproc)
+	b.mem.Write32(uint64(wnd+wndPcls), pcls)
+	// register HANDLEENTRY[index]
+	idx := hwnd & 0xFFFF
+	if idx < b.aheCount {
+		e := b.aheList + idx*heSize
+		b.mem.Write32(uint64(e+0), wnd) // phead
+		b.mem.Write32(uint64(e+4), 0)   // pOwner
+		b.mem.Write8(uint64(e+8), typeWindow)
+		b.mem.Write8(uint64(e+9), 0)
+		b.mem.Write16(uint64(e+10), uint16(hwnd>>16)) // wUniq
+	}
+	b.wndOf[hwnd] = wnd
+	return wnd
 }
 
 func (b *win32kBridge) register() {
