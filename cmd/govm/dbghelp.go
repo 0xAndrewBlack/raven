@@ -88,7 +88,7 @@ func registerVersionDLLHandlers(hctx *HandlerCtx) {
 	}
 	writeVerQueryResult := func(ctx *ntapi.TrapContext, resultPtr uint64, valueLen uint32) {
 		if ctx.Arg(2) != 0 {
-			ctx.Mem.Write64(ctx.Arg(2), resultPtr)
+			writeGuestPtr(ctx, ctx.Arg(2), resultPtr)
 		}
 		if ctx.Arg(3) != 0 {
 			ctx.Mem.Write32(ctx.Arg(3), valueLen)

@@ -5,9 +5,15 @@ package gdi
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 )
+
+type fontMatch struct {
+	path  string
+	index int
+}
 
 var windowsFontMap = map[string]string{
 	"arial":                "sans-serif",
@@ -33,7 +39,7 @@ var windowsFontMap = map[string]string{
 
 var (
 	fontMatchMu    sync.Mutex
-	fontMatchCache = make(map[string]string)
+	fontMatchCache = make(map[string]fontMatch)
 )
 
 func fontSpecKey(family string, bold, italic bool) string {
@@ -71,32 +77,32 @@ func mapWindowsFontFamily(family string) string {
 	return trimmed
 }
 
-func findSystemFont(family string, bold, italic bool) string {
+func findSystemFont(family string, bold, italic bool) fontMatch {
 	key := fontSpecKey(family, bold, italic)
 	fontMatchMu.Lock()
-	if path, ok := fontMatchCache[key]; ok {
+	if match, ok := fontMatchCache[key]; ok {
 		fontMatchMu.Unlock()
-		return path
+		return match
 	}
 	fontMatchMu.Unlock()
 
 	mapped := mapWindowsFontFamily(family)
 	style := fontStyleName(bold, italic)
-	path := runFcMatch(mapped, style)
-	if path == "" && mapped != family {
-		path = runFcMatch(strings.TrimSpace(family), style)
+	match := runFcMatch(mapped, style)
+	if match.path == "" && mapped != family {
+		match = runFcMatch(strings.TrimSpace(family), style)
 	}
-	if path == "" {
-		path = fallbackFont()
+	if match.path == "" {
+		match = fallbackFont()
 	}
 
 	fontMatchMu.Lock()
-	fontMatchCache[key] = path
+	fontMatchCache[key] = match
 	fontMatchMu.Unlock()
-	return path
+	return match
 }
 
-func runFcMatch(family, style string) string {
+func fontPattern(family, style string) string {
 	pattern := strings.TrimSpace(family)
 	if pattern == "" {
 		pattern = "sans-serif"
@@ -104,23 +110,64 @@ func runFcMatch(family, style string) string {
 	if style != "" {
 		pattern += ":style=" + style
 	}
-	out, err := exec.Command("fc-match", "-f", "%{file}", pattern).Output()
-	if err != nil {
-		return ""
-	}
-	path := strings.TrimSpace(string(out))
-	if path == "" {
-		return ""
-	}
-	if _, err := os.Stat(path); err != nil {
-		return ""
-	}
-	return path
+	return pattern
 }
 
-func fallbackFont() string {
-	if path := runFcMatch("sans-serif", "Regular"); path != "" {
-		return path
+func parseFontMatches(out []byte) []fontMatch {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	matches := make([]fontMatch, 0, len(lines))
+	for _, line := range lines {
+		parts := strings.SplitN(line, "\t", 2)
+		path := strings.TrimSpace(parts[0])
+		if path == "" {
+			continue
+		}
+		index := 0
+		if len(parts) == 2 {
+			index, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
+		}
+		if _, err := os.Stat(path); err == nil {
+			matches = append(matches, fontMatch{path: path, index: index})
+		}
+	}
+	return matches
+}
+
+func runFcMatch(family, style string) fontMatch {
+	out, err := exec.Command("fc-match", "-f", "%{file}\t%{index}\n", fontPattern(family, style)).Output()
+	if err != nil {
+		return fontMatch{}
+	}
+	matches := parseFontMatches(out)
+	if len(matches) == 0 {
+		return fontMatch{}
+	}
+	return matches[0]
+}
+
+func runFcMatchAll(family, style string) []fontMatch {
+	out, err := exec.Command("fc-match", "-s", "-f", "%{file}\t%{index}\n", fontPattern(family, style)).Output()
+	if err != nil {
+		return nil
+	}
+	return parseFontMatches(out)
+}
+
+func findSystemFallbackFonts(family string, r rune) []fontMatch {
+	generic := "sans-serif"
+	lower := strings.ToLower(family)
+	if strings.Contains(lower, "mono") ||
+		strings.Contains(lower, "courier") ||
+		strings.Contains(lower, "consolas") ||
+		strings.Contains(lower, "fixed") {
+		generic = "monospace"
+	}
+	return runFcMatchAll(generic+":charset="+strconv.FormatInt(int64(r), 16), "")
+}
+
+func fallbackFont() fontMatch {
+	if match := runFcMatch("sans-serif", "Regular"); match.path != "" {
+		return match
 	}
 	for _, p := range []string{
 		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -129,8 +176,8 @@ func fallbackFont() string {
 		"/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
 	} {
 		if _, err := os.Stat(p); err == nil {
-			return p
+			return fontMatch{path: p}
 		}
 	}
-	return ""
+	return fontMatch{}
 }

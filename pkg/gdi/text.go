@@ -44,6 +44,63 @@ func defaultFont() *Font {
 // DefaultFont is the exported alias for defaultFont.
 func DefaultFont() *Font { return defaultFont() }
 
+func defaultGUIFont() *Font {
+	f := &Font{
+		Height:       -12,
+		Width:        0,
+		AveCharWidth: 7,
+		MaxCharWidth: 14,
+		CellHeight:   14,
+		Ascent:       11,
+		Descent:      3,
+		FaceName:     "Segoe UI",
+		Weight:       400,
+		CharSet:      0,
+		PitchFamily:  2,
+		FaceID:       -1,
+	}
+	if faceID := ResolveFontFaceStyle(f.FaceName, false, false); faceID >= 0 {
+		f.FaceID = faceID
+		f.CellHeight, f.Ascent, f.Descent, f.AveCharWidth = FaceMetrics(faceID, 12)
+		f.MaxCharWidth = f.AveCharWidth * 2
+	}
+	return f
+}
+
+// DefaultGUIFont returns the system font used by standard controls.
+func DefaultGUIFont() *Font { return defaultGUIFont() }
+
+// TextMetricPitchAndFamily returns the physical font flags used by TEXTMETRIC.
+func TextMetricPitchAndFamily(f *Font) uint8 {
+	if f == nil {
+		f = defaultFont()
+	}
+	value := f.PitchFamily & 0xf0
+	variable := f.PitchFamily&0x03 == 2
+	if f.FaceID < 0 && f.PitchFamily&0x03 == 0 && f.AveCharWidth > 0 && f.MaxCharWidth > 0 {
+		variable = f.AveCharWidth != f.MaxCharWidth
+	}
+	if f.FaceID >= 0 {
+		size := f.Height
+		if size < 0 {
+			size = -size
+		}
+		if size == 0 {
+			size = 12
+		}
+		narrow := GlyphFor(f.FaceID, size, 'i')
+		wide := GlyphFor(f.FaceID, size, 'W')
+		if narrow != nil && wide != nil {
+			variable = narrow.Advance != wide.Advance
+		}
+		value |= 0x06 // TMPF_VECTOR | TMPF_TRUETYPE
+	}
+	if variable {
+		value |= 0x01 // TMPF_FIXED_PITCH means variable pitch
+	}
+	return value
+}
+
 // TextExtent returns the pixel width of a UTF-16LE string using the DC's current font.
 // ReactOS: GreGetTextExtentW → ftGdiGetTextExtentW
 func (dc *DC) TextExtent(chars []uint16) (w, h int32) {
@@ -51,11 +108,11 @@ func (dc *DC) TextExtent(chars []uint16) (w, h int32) {
 	if f == nil {
 		f = defaultFont()
 	}
-	charCount := int32(len(UTF16ToRunes(chars)))
-	if charCount == 0 {
+	runes := UTF16ToRunes(chars)
+	if len(runes) == 0 {
 		return 0, f.CellHeight
 	}
-	return charCount*f.AveCharWidth + (charCount-1)*dc.CharExtra, f.CellHeight
+	return textRunesWidth(f, runes, dc.CharExtra), f.CellHeight
 }
 
 // TextExtentStr is the same for a Go string (ASCII).
@@ -68,7 +125,25 @@ func (dc *DC) TextExtentStr(s string) (w, h int32) {
 	if len(runes) == 0 {
 		return 0, f.CellHeight
 	}
-	return int32(len(runes))*f.AveCharWidth + int32(len(runes)-1)*dc.CharExtra, f.CellHeight
+	return textRunesWidth(f, runes, dc.CharExtra), f.CellHeight
+}
+
+func textRunesWidth(f *Font, runes []rune, charExtra int32) int32 {
+	width := int32(0)
+	pixSize := pixSizeForFont(f)
+	for i, r := range runes {
+		advance := f.AveCharWidth
+		if f.FaceID >= 0 {
+			if glyph := GlyphFor(f.FaceID, pixSize, r); glyph != nil {
+				advance = glyph.Advance
+			}
+		}
+		width += advance
+		if i+1 < len(runes) {
+			width += charExtra
+		}
+	}
+	return width
 }
 
 // TextOut renders a Go string at (x, y) in client coordinates.

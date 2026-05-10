@@ -13,8 +13,9 @@ import (
 
 // Thread represents a guest hardware thread (hart).
 type Thread struct {
-	ID  int
-	CPU arch.CPU
+	ID     int
+	CPU    arch.CPU
+	Active bool
 }
 
 // FutexWaiter represents a goroutine waiting on a futex.
@@ -25,12 +26,13 @@ type FutexWaiter struct {
 
 // Manager handles thread creation via clone().
 type Manager struct {
-	mu      sync.Mutex
-	threads []*Thread
-	nextID  int
-	mem     *mmu.MMU
-	handler arch.SyscallHandler
-	wg      sync.WaitGroup
+	mu       sync.Mutex
+	threads  []*Thread
+	nextID   int
+	mem      *mmu.MMU
+	handler  arch.SyscallHandler
+	exitHook func(arch.CPU)
+	wg       sync.WaitGroup
 
 	// Thread stack tracking: base → end (base+size). Protects stacks from
 	// premature munmap by the parent (Rust/glibc frees the stack right after
@@ -56,7 +58,7 @@ func NewManager(mem *mmu.MMU, handler arch.SyscallHandler) *Manager {
 // MainThread registers an existing CPU as the initial thread (tid=1, matching PID).
 func (m *Manager) MainThread(c arch.CPU) *Thread {
 	c.SetSyscallHandler(m.handler)
-	t := &Thread{ID: 1, CPU: c}
+	t := &Thread{ID: 1, CPU: c, Active: true}
 	m.threads = append(m.threads, t)
 	return t
 }
@@ -87,7 +89,7 @@ func (m *Manager) Clone(parentCPU arch.CPU, childPC, childSP, tls, stackBase, st
 		m.registerStack(stackBase, stackSize)
 	}
 
-	t := &Thread{ID: tid, CPU: c}
+	t := &Thread{ID: tid, CPU: c, Active: true}
 	m.mu.Lock()
 	m.threads = append(m.threads, t)
 	m.mu.Unlock()
@@ -95,6 +97,7 @@ func (m *Manager) Clone(parentCPU arch.CPU, childPC, childSP, tls, stackBase, st
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer m.markCPUExited(c)
 		ravelog.Logf("[govm] thread %d start: PC=0x%x SP=0x%x TLS=0x%x\n",
 			tid, c.GetPC(), c.GetSP(), c.GetTLS())
 		if err := c.Run(); err != nil {
@@ -191,6 +194,41 @@ func (m *Manager) GetTID(c arch.CPU) int {
 	return 1 // default to main thread TID
 }
 
+// GetCPU returns the CPU registered for a guest thread ID.
+func (m *Manager) GetCPU(tid int) (arch.CPU, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.threads {
+		if t.ID == tid && t.Active {
+			return t.CPU, true
+		}
+	}
+	return nil, false
+}
+
+// SetExitHook registers cleanup invoked after a non-main guest thread exits.
+func (m *Manager) SetExitHook(hook func(arch.CPU)) {
+	m.mu.Lock()
+	m.exitHook = hook
+	m.mu.Unlock()
+}
+
+func (m *Manager) markCPUExited(cpu arch.CPU) {
+	m.mu.Lock()
+	var hook func(arch.CPU)
+	for _, thread := range m.threads {
+		if thread.CPU == cpu && thread.ID != 1 {
+			thread.Active = false
+			hook = m.exitHook
+			break
+		}
+	}
+	m.mu.Unlock()
+	if hook != nil {
+		hook(cpu)
+	}
+}
+
 // Wait blocks until all spawned threads finish.
 func (m *Manager) Wait() {
 	m.wg.Wait()
@@ -211,15 +249,40 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 	c.SetPC(startAddr)
 	// x64 ABI: at function entry RSP must be 8 mod 16 (as if arrived via CALL,
 	// which pushed an 8-byte return address onto a previously 16-aligned stack).
-	sp := stackBase + stackSize - 8
-	c.SetSP(sp)
+	sp := uint64(0)
+	expectedReturnPC := uint64(0xFFFFFFFFFFFFFFF0)
 	// Write null return address so a bare ret from the thread function faults at
 	// address 0x0 (which we treat as clean normal exit in the Run loop).
-	m.mem.Write64Raw(sp, 0)
+	if xc, ok := c.(*x64.CPU); ok && xc.Mode32 {
+		expectedReturnPC = 0xFFFFFFF0
+		sp = stackBase + stackSize - 8
+		if err := m.mem.Write32Raw(sp, uint32(expectedReturnPC)); err != nil {
+			return 0, nil, err
+		}
+		if err := m.mem.Write32Raw(sp+4, uint32(lpParam)); err != nil {
+			return 0, nil, err
+		}
+	} else {
+		sp = stackBase + stackSize - 8 - 32
+		if err := m.mem.Write64Raw(sp, expectedReturnPC); err != nil {
+			return 0, nil, err
+		}
+	}
+	c.SetSP(sp)
 	// Set RCX = lpParam (Win32 calling convention: first arg in RCX)
 	if xc, ok := c.(*x64.CPU); ok {
-		xc.WriteReg(x64.RCX, lpParam)
-		if tebAddr != 0 {
+		xc.ExpectedReturnPC = expectedReturnPC
+		if xc.Mode32 {
+			xc.ExpectedReturnSP = sp + 8
+		} else {
+			xc.ExpectedReturnSP = sp + 8
+		}
+		if !xc.Mode32 {
+			xc.WriteReg(x64.RCX, lpParam)
+		}
+		if tebAddr != 0 && xc.Mode32 {
+			xc.SetTLS(tebAddr)
+		} else if tebAddr != 0 {
 			xc.SetGSBase(tebAddr)
 		}
 	}
@@ -229,7 +292,7 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 		m.registerStack(stackBase, stackSize)
 	}
 
-	t := &Thread{ID: tid, CPU: c}
+	t := &Thread{ID: tid, CPU: c, Active: true}
 	m.mu.Lock()
 	m.threads = append(m.threads, t)
 	m.mu.Unlock()
@@ -239,12 +302,17 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 	go func() {
 		defer m.wg.Done()
 		defer close(done)
+		defer m.markCPUExited(c)
 		ravelog.Logf("[govm] win32-thread %d start: PC=0x%x SP=0x%x\n", tid, c.GetPC(), c.GetSP())
 		if err := c.Run(); err != nil {
 			// A fetch fault at address 0x0 means the thread function returned
 			// through the null sentinel return address - treat as clean exit.
 			var f *mmu.Fault
-			if errors.As(err, &f) && f.Addr == 0 {
+			expectedSP := sp + 8
+			if xc, ok := c.(*x64.CPU); ok && xc.Mode32 {
+				expectedSP = sp + 8
+			}
+			if errors.As(err, &f) && f.Addr == expectedReturnPC && c.GetPC() == expectedReturnPC && c.GetSP() == expectedSP {
 				ravelog.Logf("[govm] win32-thread %d exited normally (returned)\n", tid)
 			} else {
 				ravelog.Logf("[govm] win32-thread %d exited: %v\n", tid, err)
@@ -269,25 +337,50 @@ func (m *Manager) CloneWin32ThreadEx(parentCPU arch.CPU, startAddr, stackBase, s
 
 	c := parentCPU.CloneForThread()
 	c.SetPC(startAddr)
-	sp := stackBase + stackSize - 8
-	c.SetSP(sp)
-	m.mem.Write64Raw(sp, 0)
+	sp := uint64(0)
+	expectedReturnPC := uint64(0xFFFFFFFFFFFFFFF0)
 	if xc, ok := c.(*x64.CPU); ok {
-		regs := [4]int{x64.RCX, x64.RDX, x64.R8, x64.R9}
-		for i := 0; i < len(args) && i < 4; i++ {
-			xc.WriteReg(regs[i], args[i])
+		if xc.Mode32 {
+			expectedReturnPC = 0xFFFFFFF0
+			sp = stackBase + stackSize - uint64(4*(len(args)+1))
+			if err := m.mem.Write32Raw(sp, uint32(expectedReturnPC)); err != nil {
+				return 0, nil, err
+			}
+			for i, arg := range args {
+				if err := m.mem.Write32Raw(sp+4+uint64(i*4), uint32(arg)); err != nil {
+					return 0, nil, err
+				}
+			}
+		} else {
+			sp = stackBase + stackSize - 8 - 32
+			if err := m.mem.Write64Raw(sp, expectedReturnPC); err != nil {
+				return 0, nil, err
+			}
+			regs := [4]int{x64.RCX, x64.RDX, x64.R8, x64.R9}
+			for i := 0; i < len(args) && i < 4; i++ {
+				xc.WriteReg(regs[i], args[i])
+			}
 		}
-		if tebAddr != 0 {
+		xc.ExpectedReturnPC = expectedReturnPC
+		if xc.Mode32 {
+			xc.ExpectedReturnSP = sp + 4 + uint64(len(args)*4)
+		} else {
+			xc.ExpectedReturnSP = sp + 8
+		}
+		if tebAddr != 0 && xc.Mode32 {
+			xc.SetTLS(tebAddr)
+		} else if tebAddr != 0 {
 			xc.SetGSBase(tebAddr)
 		}
 	}
+	c.SetSP(sp)
 	c.SetSyscallHandler(m.handler)
 
 	if stackBase != 0 && stackSize != 0 {
 		m.registerStack(stackBase, stackSize)
 	}
 
-	t := &Thread{ID: tid, CPU: c}
+	t := &Thread{ID: tid, CPU: c, Active: true}
 	m.mu.Lock()
 	m.threads = append(m.threads, t)
 	m.mu.Unlock()
@@ -297,10 +390,15 @@ func (m *Manager) CloneWin32ThreadEx(parentCPU arch.CPU, startAddr, stackBase, s
 	go func() {
 		defer m.wg.Done()
 		defer close(done)
+		defer m.markCPUExited(c)
 		ravelog.Logf("[govm] win32-thread %d start: PC=0x%x SP=0x%x\n", tid, c.GetPC(), c.GetSP())
 		if err := c.Run(); err != nil {
 			var f *mmu.Fault
-			if errors.As(err, &f) && f.Addr == 0 {
+			expectedSP := sp + 8
+			if xc, ok := c.(*x64.CPU); ok && xc.Mode32 {
+				expectedSP = sp + 4 + uint64(len(args)*4)
+			}
+			if errors.As(err, &f) && f.Addr == expectedReturnPC && c.GetPC() == expectedReturnPC && c.GetSP() == expectedSP {
 				ravelog.Logf("[govm] win32-thread %d exited normally (returned)\n", tid)
 			} else {
 				ravelog.Logf("[govm] win32-thread %d exited: %v\n", tid, err)

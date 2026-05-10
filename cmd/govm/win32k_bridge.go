@@ -18,9 +18,11 @@ import (
 	"image"
 	"image/png"
 	"os"
+	"sort"
 
 	"github.com/mirkobrombin/Raven/pkg/gfx"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/win32"
 	"github.com/mirkobrombin/Raven/pkg/winmgr"
 )
 
@@ -154,7 +156,7 @@ func (b *win32kBridge) setupSharedInfo(pUserConnect uint32) {
 		base := uint32(b.mem.Mmap(0, region, mmu.PermRead|mmu.PermWrite))
 		b.aheCount = 0x4000
 		b.aheList = base
-		psi := base + b.aheCount*heSize // SERVERINFO after the handle table
+		psi := base + b.aheCount*heSize          // SERVERINFO after the handle table
 		b.mem.Write32(uint64(psi+4), b.aheCount) // cHandleEntries
 		b.heapNext = psi + 0x600                 // objects after SERVERINFO
 		b.gpsi = psi
@@ -300,23 +302,18 @@ func (b *win32kBridge) RenderPNG(path string) error {
 	b.screen.ResetClip()
 	b.screen.FillRect(b.screen.Bounds(), 0xFF1E1E2E) // desktop background
 
-	z := b.wm.TopLevelZOrder(true)     // front..back
-	for i := len(z) - 1; i >= 0; i-- { // paint back-to-front
-		r, ok := b.wm.WindowRect(z[i])
-		if !ok {
-			continue
+	z := b.wm.TopLevelZOrder(true) // front..back
+	if len(z) > 0 {
+		for i := len(z) - 1; i >= 0; i-- { // paint back-to-front
+			r, ok := b.wm.WindowRect(z[i])
+			if !ok {
+				continue
+			}
+			rect := gfx.Rect{Left: int(r.Left), Top: int(r.Top), Right: int(r.Right), Bottom: int(r.Bottom)}
+			b.renderWindowFrame(rect, fmt.Sprintf("Raven Window %#x", uint32(z[i])))
 		}
-		rect := gfx.Rect{Left: int(r.Left), Top: int(r.Top), Right: int(r.Right), Bottom: int(r.Bottom)}
-		const titleH = 22
-		b.screen.FillRect(gfx.Rect{rect.Left, rect.Top, rect.Right, rect.Top + titleH}, 0xFF3B6EA5)    // caption
-		b.screen.FillRect(gfx.Rect{rect.Left, rect.Top + titleH, rect.Right, rect.Bottom}, 0xFFF2F2F2) // client
-		b.screen.FrameRect(rect, 0xFF101010)                                                           // frame
-		if b.fontID >= 0 {
-			b.fonts.DrawText(b.screen, fmt.Sprintf("Raven Window %#x", uint32(z[i])),
-				rect.Left+8, rect.Top+16, b.fontID, 14, 0xFFFFFFFF)
-			b.fonts.DrawText(b.screen, "rendered by pkg/winmgr + pkg/gfx (no Wine, no ReactOS DLL yet)",
-				rect.Left+10, rect.Top+titleH+24, b.fontID, 13, 0xFF202020)
-		}
+	} else {
+		b.renderHLEWindows()
 	}
 
 	img := image.NewRGBA(image.Rect(0, 0, b.screen.W, b.screen.H))
@@ -327,10 +324,84 @@ func (b *win32kBridge) RenderPNG(path string) error {
 		img.Pix[i*4+2] = byte(p)
 		img.Pix[i*4+3] = byte(p >> 24)
 	}
-	f, err := os.Create(path)
+	tmpPath := path + ".tmp"
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return png.Encode(f, img)
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func (b *win32kBridge) renderWindowFrame(rect gfx.Rect, title string) {
+	const titleH = 22
+	b.screen.FillRect(gfx.Rect{rect.Left, rect.Top, rect.Right, rect.Top + titleH}, 0xFF3B6EA5)
+	b.screen.FillRect(gfx.Rect{rect.Left, rect.Top + titleH, rect.Right, rect.Bottom}, 0xFFF2F2F2)
+	b.screen.FrameRect(rect, 0xFF101010)
+	if b.fontID >= 0 {
+		b.fonts.DrawText(b.screen, title, rect.Left+8, rect.Top+16, b.fontID, 14, 0xFFFFFFFF)
+	}
+}
+
+func (b *win32kBridge) renderHLEWindows() {
+	handles := win32.Global.AllWindows()
+	sort.Slice(handles, func(i, j int) bool { return handles[i] < handles[j] })
+	topLevels := make([]uint64, 0, len(handles))
+	for _, h := range handles {
+		wnd := win32.Global.Get(h)
+		if wnd == nil || wnd.Parent != 0 || wnd.RcWindow.Empty() || isRenderableControlClass(wnd.ClassName) {
+			continue
+		}
+		topLevels = append(topLevels, h)
+	}
+	for _, h := range topLevels {
+		wnd := win32.Global.Get(h)
+		if wnd == nil {
+			continue
+		}
+		rect := gfx.Rect{Left: int(wnd.RcWindow.Left), Top: int(wnd.RcWindow.Top), Right: int(wnd.RcWindow.Right), Bottom: int(wnd.RcWindow.Bottom)}
+		title := wnd.ClassName
+		if title == "" {
+			title = fmt.Sprintf("HWND %#x", h)
+		}
+		b.renderWindowFrame(rect, title)
+		for _, ch := range handles {
+			child := win32.Global.Get(ch)
+			if child == nil || child.Parent != h || child.RcWindow.Empty() || child.ClassName == "tooltips_class32" {
+				continue
+			}
+			r := gfx.Rect{Left: int(child.RcWindow.Left), Top: int(child.RcWindow.Top), Right: int(child.RcWindow.Right), Bottom: int(child.RcWindow.Bottom)}
+			fill := uint32(0xFFECE9D8)
+			switch child.ClassName {
+			case "scintilla":
+				fill = 0xFFFFFFFF
+			case "tooltips_class32":
+				fill = 0xFFFFFFE1
+			case "msctls_statusbar32":
+				fill = 0xFFF0F0F0
+			}
+			b.screen.FillRect(r, fill)
+			b.screen.FrameRect(r, 0xFF9A9A9A)
+			if b.fontID >= 0 && child.ClassName != "" && r.Right-r.Left > 80 && r.Bottom-r.Top > 18 {
+				b.fonts.DrawText(b.screen, child.ClassName, r.Left+4, r.Top+14, b.fontID, 11, 0xFF202020)
+			}
+		}
+	}
+}
+
+func isRenderableControlClass(className string) bool {
+	switch className {
+	case "tooltips_class32", "rebarwindow32", "toolbarwindow32", "msctls_statusbar32", "systabcontrol32", "scintilla":
+		return true
+	default:
+		return false
+	}
 }

@@ -1,6 +1,59 @@
 package mmu
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
+
+func TestFetch64ChecksExecutePermissionAcrossPages(t *testing.T) {
+	m := New()
+	const addr = uint64(0x1ffc)
+	m.MapPage(0x1000, PermRead|PermWrite|PermExecute)
+	m.MapPage(0x2000, PermRead|PermWrite)
+	for i := uint64(0); i < 8; i++ {
+		if err := m.Write8(addr+i, byte(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.Fetch64(addr); err == nil {
+		t.Fatal("cross-page fetch succeeded through a non-executable page")
+	}
+	m.Mprotect(0x2000, PageSize, PermRead|PermExecute)
+	if _, err := m.Fetch64(addr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConcurrentPageLookupsKeepPagesSeparate(t *testing.T) {
+	m := New()
+	const first = uint64(0x1000)
+	const second = first + 1024*PageSize
+	m.MapPage(first, PermRead|PermWrite)
+	m.MapPage(second, PermRead|PermWrite)
+	m.Write8(first, 0x11)
+	m.Write8(second, 0x22)
+
+	var wg sync.WaitGroup
+	errs := make(chan string, 2)
+	read := func(addr uint64, want byte) {
+		defer wg.Done()
+		for i := 0; i < 10000; i++ {
+			got, err := m.Read8(addr)
+			if err != nil || got != want {
+				errs <- "lookup returned the wrong page"
+				return
+			}
+		}
+	}
+	wg.Add(2)
+	go read(first, 0x11)
+	go read(second, 0x22)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+}
 
 func TestMapAndReadWrite(t *testing.T) {
 	m := New()
@@ -94,5 +147,48 @@ func TestBrk(t *testing.T) {
 	// should be writable
 	if err := m.Write8(0x11000, 0x42); err != nil {
 		t.Fatalf("write to brk region failed: %v", err)
+	}
+}
+
+func TestFlatBackingAliasesGuestMemory(t *testing.T) {
+	m := New()
+	if err := m.EnableFlatBacking(); err != nil {
+		t.Skipf("flat backing unavailable: %v", err)
+	}
+	if err := m.MapPage(0x400000, PermRead|PermWrite); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Write32(0x400010, 0xDEADBEEF); err != nil {
+		t.Fatal(err)
+	}
+	flat := m.FlatBase()
+	if flat == nil {
+		t.Fatal("FlatBase is nil after EnableFlatBacking")
+	}
+	got := uint32(flat[0x400010]) | uint32(flat[0x400011])<<8 | uint32(flat[0x400012])<<16 | uint32(flat[0x400013])<<24
+	if got != 0xDEADBEEF {
+		t.Fatalf("flat region sees 0x%x, want 0xDEADBEEF", got)
+	}
+	// Writes through the flat region must be visible to guest reads.
+	flat[0x400020] = 0x5A
+	v, err := m.Read8(0x400020)
+	if err != nil || v != 0x5A {
+		t.Fatalf("guest read got 0x%x err=%v, want 0x5A", v, err)
+	}
+	// Remapping a previously used page must hand back zeroed memory.
+	m.Munmap(0x400000, PageSize)
+	if err := m.MapPage(0x400000, PermRead|PermWrite); err != nil {
+		t.Fatal(err)
+	}
+	v, err = m.Read8(0x400010)
+	if err != nil || v != 0 {
+		t.Fatalf("recycled page read got 0x%x err=%v, want 0", v, err)
+	}
+	// Pages above 4GiB still work via heap backing.
+	if err := m.MapPage(1<<33, PermRead|PermWrite); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Write32(1<<33, 42); err != nil {
+		t.Fatal(err)
 	}
 }

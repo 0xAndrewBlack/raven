@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	gotime "time"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
@@ -250,24 +251,13 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 
 	// __p___wargv: returns pointer to wide argv (WCHAR** pointer-to-pointer)
 	var wargvSlot uint64
+	var wargvMu sync.Mutex
 	d.RegisterAutoStubHandler(ucrt, "__p___wargv", func(ctx *ntapi.TrapContext) uint32 {
+		wargvMu.Lock()
+		defer wargvMu.Unlock()
 		if wargvSlot == 0 {
-			page := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
-			wargvArrayAddr := page + 8
-			strOff := wargvArrayAddr + uint64((len(argv)+1)*8)
-			for i, a := range argv {
-				mem.Write64(wargvArrayAddr+uint64(i)*8, strOff)
-				runes := []rune(a)
-				for _, r := range runes {
-					mem.Write16(strOff, uint16(r))
-					strOff += 2
-				}
-				mem.Write16(strOff, 0) // null-terminate
-				strOff += 2
-			}
-			mem.Write64(wargvArrayAddr+uint64(len(argv))*8, 0)
-			mem.Write64(page, wargvArrayAddr)
-			wargvSlot = page
+			is32 := ctx.State != nil && ctx.State.Is32
+			wargvSlot = allocWideArgv(mem, argv, is32)
 		}
 		ctx.SetReturn(wargvSlot)
 		return 0
@@ -2067,7 +2057,8 @@ func registerUcrtHandlers(hctx *HandlerCtx) {
 		for _, fp := range fns[1:] {
 			queue = append(queue, syncDispatch{wndProc: fp})
 		}
-		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+		syncStack := hctx.syncStack(ctx)
+		*syncStack = append(*syncStack, syncDispatchFrame{
 			queue:   queue,
 			retAddr: retAddr,
 			hwnd:    0,

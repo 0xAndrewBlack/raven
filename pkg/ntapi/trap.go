@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -189,25 +190,32 @@ type XMMAccess interface {
 
 // Dispatcher routes vmcall traps to the appropriate handler based on syscall ID.
 type Dispatcher struct {
+	mu               sync.RWMutex
 	handlers         map[uint32]TrapHandler
-	handlersByName   map[string]TrapHandler // funcName → handler, for dynamic re-registration
-	names            map[uint32]string      // for trace logging
+	handlersByModule map[string]map[string]TrapHandler
+	nextDynamicID    uint32
+	hprof            *handlerProfiler  // optional hot-handler profiler (RAVEN_PROFILE_HANDLERS)
+	traceStdcall     bool              // log guest-range stdcall cleanups (RAVEN_TRACE_STDCALL)
+	names            map[uint32]string // for trace logging
 	ntdll            *SynthPE
 	win32u           *SynthPE
 	ctx              *TrapContext
-	moduleExports    map[uint64]map[string]uint64 // baseAddr → name → addr
-	moduleOrdExports map[uint64]map[uint16]uint64 // baseAddr → ordinal → addr
+	moduleExports    map[uint64]map[string]uint64 // baseAddr -> name -> addr
+	moduleOrdExports map[uint64]map[uint16]uint64 // baseAddr -> ordinal -> addr
 	sysRoot          string                       // path to Windows system DLL directory
-	nlsCache         map[uint32][]byte            // cached NLS file data by code page
-	cdeclIDs         map[uint32]bool              // IDs that use cdecl (no callee cleanup)
-	stdcallArgs      map[uint32]int               // explicit stdcall cleanup: ID → arg count
+	nlsMu            sync.Mutex
+	nlsCache         map[uint32][]byte // cached NLS file data by code page
+	cdeclIDs         map[uint32]bool   // IDs that use cdecl (no callee cleanup)
+	cdeclModules     map[string]bool   // modules whose current and future exports use cdecl
+	stdcallArgs      map[uint32]int    // explicit stdcall cleanup: ID -> arg count
+	userCallbacks    UserCallbackManager
 }
 
 // NewDispatcher creates a trap dispatcher with all registered handlers.
 func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *RegistryHive, state *ProcessState, ntdll, win32u *SynthPE) *Dispatcher {
 	d := &Dispatcher{
 		handlers:         make(map[uint32]TrapHandler),
-		handlersByName:   make(map[string]TrapHandler),
+		handlersByModule: make(map[string]map[string]TrapHandler),
 		names:            make(map[uint32]string),
 		ntdll:            ntdll,
 		win32u:           win32u,
@@ -215,6 +223,7 @@ func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *Registr
 		moduleOrdExports: make(map[uint64]map[uint16]uint64),
 		nlsCache:         make(map[uint32][]byte),
 		cdeclIDs:         make(map[uint32]bool),
+		cdeclModules:     make(map[string]bool),
 		stdcallArgs:      make(map[uint32]int),
 		ctx: &TrapContext{
 			Mem:     mem,
@@ -268,6 +277,8 @@ func (d *Dispatcher) SetSysRoot(path string) {
 
 // loadNlsFile loads an NLS code page file from the sysroot.
 func (d *Dispatcher) loadNlsFile(codePage uint32) ([]byte, error) {
+	d.nlsMu.Lock()
+	defer d.nlsMu.Unlock()
 	if data, ok := d.nlsCache[codePage]; ok {
 		return data, nil
 	}
@@ -286,6 +297,8 @@ func (d *Dispatcher) loadNlsFile(codePage uint32) ([]byte, error) {
 
 // RegisterModuleExports registers a loaded module's exports for LdrGetProcedureAddress.
 func (d *Dispatcher) RegisterModuleExports(baseAddr uint64, exports map[string]uint64, ordExports map[uint16]uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if len(exports) > 0 {
 		d.moduleExports[baseAddr] = exports
 	}
@@ -294,22 +307,52 @@ func (d *Dispatcher) RegisterModuleExports(baseAddr uint64, exports map[string]u
 	}
 }
 
-// LookupExportByModule resolves a function address from a module's export table.
-func (d *Dispatcher) LookupExportByModule(moduleBase uint64, funcName string, ordinal uint16) uint64 {
-	// Check synthetic ntdll/win32u first
-	if d.ntdll != nil && moduleBase == d.ntdll.BaseAddr {
-		if funcName != "" {
-			if addr, ok := d.ntdll.Exports[funcName]; ok {
-				return addr
+func IsHiddenNtdllExport(name string) bool {
+	return strings.EqualFold(name, "wine_get_version")
+}
+
+func (d *Dispatcher) lookupSynthExportLocked(synth *SynthPE, funcName string, ordinal uint16) uint64 {
+	if synth == nil {
+		return 0
+	}
+	if synth == d.ntdll || strings.EqualFold(synth.Name, "ntdll.dll") {
+		if IsHiddenNtdllExport(funcName) {
+			return 0
+		}
+		if funcName == "" && ordinal != 0 {
+			hiddenAddr := synth.Exports["wine_get_version"]
+			if hiddenAddr != 0 && synth.ExportOrds[ordinal] == hiddenAddr {
+				return 0
 			}
 		}
 	}
-	if d.win32u != nil && moduleBase == d.win32u.BaseAddr {
-		if funcName != "" {
-			if addr, ok := d.win32u.Exports[funcName]; ok {
-				return addr
-			}
+	if funcName != "" {
+		if addr := synth.Exports[funcName]; addr != 0 {
+			return addr
 		}
+	}
+	if ordinal != 0 {
+		return synth.ExportOrds[ordinal]
+	}
+	return 0
+}
+
+func (d *Dispatcher) LookupSynthExport(synth *SynthPE, funcName string, ordinal uint16) uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lookupSynthExportLocked(synth, funcName, ordinal)
+}
+
+// LookupExportByModule resolves a function address from a module's export table.
+func (d *Dispatcher) LookupExportByModule(moduleBase uint64, funcName string, ordinal uint16) uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	// Check synthetic ntdll/win32u first
+	if d.ntdll != nil && moduleBase == d.ntdll.BaseAddr {
+		return d.lookupSynthExportLocked(d.ntdll, funcName, ordinal)
+	}
+	if d.win32u != nil && moduleBase == d.win32u.BaseAddr {
+		return d.lookupSynthExportLocked(d.win32u, funcName, ordinal)
 	}
 
 	// Check registered module exports
@@ -334,6 +377,8 @@ func (d *Dispatcher) LookupExportByModule(moduleBase uint64, funcName string, or
 // trap IDs so they appear in trace output. The synth DLL's StubIDs maps
 // stub guest addresses to trap IDs.
 func (d *Dispatcher) RegisterAutoStubNames(synth *SynthPE) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	for _, id := range synth.StubIDs {
 		for name, addr := range synth.Exports {
 			if synth.StubIDs[addr] == id {
@@ -347,19 +392,45 @@ func (d *Dispatcher) RegisterAutoStubNames(synth *SynthPE) {
 // MarkCdeclRange marks all IDs in the range [base, base+count) as cdecl.
 // Used for msvcrt/ucrtbase functions that use cdecl calling convention.
 func (d *Dispatcher) MarkCdeclRange(base uint32, count int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	for i := 0; i < count; i++ {
 		d.cdeclIDs[base+uint32(i)] = true
 	}
 }
 
+// MarkCdeclModule marks every current and future synthetic export in a module
+// as cdecl. CRT exports can be materialized lazily by GetProcAddress.
+func (d *Dispatcher) MarkCdeclModule(synth *SynthPE) {
+	if synth == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cdeclModules == nil {
+		d.cdeclModules = make(map[string]bool)
+	}
+	if d.cdeclIDs == nil {
+		d.cdeclIDs = make(map[uint32]bool)
+	}
+	d.cdeclModules[strings.ToLower(synth.Name)] = true
+	for _, id := range synth.StubIDs {
+		d.cdeclIDs[id] = true
+	}
+}
+
 // SetStdcallArgCount explicitly sets the arg count for a specific syscall ID.
 func (d *Dispatcher) SetStdcallArgCount(id uint32, nArgs int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.stdcallArgs[id] = nArgs
 }
 
 // SetStdcallArgCountByName looks up a function name in a SynthPE and sets
 // its stdcall arg count.
 func (d *Dispatcher) SetStdcallArgCountByName(synth *SynthPE, name string, nArgs int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if addr, ok := synth.Exports[name]; ok {
 		if id, ok := synth.StubIDs[addr]; ok {
 			d.stdcallArgs[id] = nArgs
@@ -369,6 +440,12 @@ func (d *Dispatcher) SetStdcallArgCountByName(synth *SynthPE, name string, nArgs
 
 // ApplyWin32ArgCounts sets stdcall arg counts for all known Win32 APIs in a synth DLL.
 func (d *Dispatcher) ApplyWin32ArgCounts(synth *SynthPE) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.applyWin32ArgCountsLocked(synth)
+}
+
+func (d *Dispatcher) applyWin32ArgCountsLocked(synth *SynthPE) {
 	for name, addr := range synth.Exports {
 		if nArgs, ok := win32ArgCounts[name]; ok {
 			if id, ok := synth.StubIDs[addr]; ok {
@@ -381,8 +458,14 @@ func (d *Dispatcher) ApplyWin32ArgCounts(synth *SynthPE) {
 // PostRegisterSynthDLL wires up any stubs in synth that were added after the
 // initial handler registration pass (e.g., via AddDynamicExport in loadDLLFromVFS).
 // For each export that lacks a handler or stdcall arg count, it checks
-// handlersByName and win32ArgCounts to fill the gap.
+// module handler registry and win32ArgCounts to fill the gap.
 func (d *Dispatcher) PostRegisterSynthDLL(synth *SynthPE) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.handlersByModule == nil {
+		d.handlersByModule = make(map[string]map[string]TrapHandler)
+	}
+	moduleHandlers := d.handlersByModule[strings.ToLower(synth.Name)]
 	for funcName, addr := range synth.Exports {
 		id, ok := synth.StubIDs[addr]
 		if !ok {
@@ -392,7 +475,7 @@ func (d *Dispatcher) PostRegisterSynthDLL(synth *SynthPE) {
 			d.names[id] = synth.Name + "!" + funcName
 		}
 		if _, hasHandler := d.handlers[id]; !hasHandler {
-			if h, ok := d.handlersByName[funcName]; ok {
+			if h, ok := moduleHandlers[funcName]; ok {
 				d.handlers[id] = h
 			}
 		}
@@ -451,6 +534,7 @@ var win32ArgCounts = map[string]int{
 	"GetVersionExA":                         1,
 	"GetVersionExW":                         1,
 	"GetVersion":                            0,
+	"RtlGetNtVersionNumbers":                3,
 	"GetTickCount":                          0,
 	"GetTickCount64":                        0,
 	"QueryPerformanceCounter":               1,
@@ -768,6 +852,10 @@ var win32ArgCounts = map[string]int{
 	"UpdateWindow":                1,
 	"MoveWindow":                  6,
 	"SetWindowPos":                7,
+	"BeginDeferWindowPos":         1,
+	"DeferWindowPos":              8,
+	"EndDeferWindowPos":           1,
+	"GetEffectiveClientRect":      3,
 	"GetWindowRect":               2,
 	"GetClientRect":               2,
 	"AdjustWindowRect":            3,
@@ -1116,6 +1204,12 @@ var win32ArgCounts = map[string]int{
 	"CreateDCA":              4,
 	"CreateDCW":              4,
 	"DeleteDC":               1,
+	"AbortDoc":               1,
+	"StartDocA":              2,
+	"StartDocW":              2,
+	"StartPage":              1,
+	"EndPage":                1,
+	"EndDoc":                 1,
 	"SaveDC":                 1,
 	"RestoreDC":              2,
 	"SetMapMode":             2,
@@ -1709,8 +1803,18 @@ var win32ArgCounts = map[string]int{
 // RegisterAutoStubHandler registers a handler for a specific function in a
 // synthetic DLL by looking up its trap ID.
 func (d *Dispatcher) RegisterAutoStubHandler(synth *SynthPE, funcName string, h TrapHandler) {
-	// Always store by name so dynamic duplicates can inherit this handler.
-	d.handlersByName[funcName] = h
+	if synth == nil || h == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	moduleKey := strings.ToLower(synth.Name)
+	moduleHandlers := d.handlersByModule[moduleKey]
+	if moduleHandlers == nil {
+		moduleHandlers = make(map[string]TrapHandler)
+		d.handlersByModule[moduleKey] = moduleHandlers
+	}
+	moduleHandlers[funcName] = h
 	addr, ok := synth.Exports[funcName]
 	if !ok {
 		return
@@ -1722,15 +1826,87 @@ func (d *Dispatcher) RegisterAutoStubHandler(synth *SynthPE, funcName string, h 
 	d.handlers[id] = h
 }
 
+// WrapAutoStubHandler replaces an existing synthetic DLL handler while
+// preserving access to the handler registered before it.
+func (d *Dispatcher) WrapAutoStubHandler(synth *SynthPE, funcName string, wrap func(TrapHandler) TrapHandler) bool {
+	if d == nil || synth == nil || wrap == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	addr, ok := synth.Exports[funcName]
+	if !ok {
+		return false
+	}
+	id, ok := synth.StubIDs[addr]
+	if !ok {
+		return false
+	}
+	previous, ok := d.handlers[id]
+	if !ok {
+		return false
+	}
+	handler := wrap(previous)
+	if handler == nil {
+		return false
+	}
+	d.handlers[id] = handler
+	if d.handlersByModule == nil {
+		d.handlersByModule = make(map[string]map[string]TrapHandler)
+	}
+	moduleKey := strings.ToLower(synth.Name)
+	moduleHandlers := d.handlersByModule[moduleKey]
+	if moduleHandlers == nil {
+		moduleHandlers = make(map[string]TrapHandler)
+		d.handlersByModule[moduleKey] = moduleHandlers
+	}
+	moduleHandlers[funcName] = handler
+	return true
+}
+
 // RegisterDynamicHandler adds a new export to a synthetic DLL and registers
 // a handler for it. Used for functions that apps look up via GetProcAddress
 // but aren't in the DLL's original import table.
 func (d *Dispatcher) RegisterDynamicHandler(mem *mmu.MMU, synth *SynthPE, funcName string, id uint32, h TrapHandler) {
+	if synth == nil || h == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.registerDynamicHandlerLocked(mem, synth, funcName, id, h)
+}
+
+func (d *Dispatcher) dynamicIDInUseLocked(id uint32) bool {
+	if _, ok := d.handlers[id]; ok {
+		return true
+	}
+	return d.names[id] != ""
+}
+
+func (d *Dispatcher) registerDynamicHandlerLocked(mem *mmu.MMU, synth *SynthPE, funcName string, id uint32, h TrapHandler) {
+	if d.handlersByModule == nil {
+		d.handlersByModule = make(map[string]map[string]TrapHandler)
+	}
+	moduleKey := strings.ToLower(synth.Name)
+	moduleHandlers := d.handlersByModule[moduleKey]
+	if moduleHandlers == nil {
+		moduleHandlers = make(map[string]TrapHandler)
+		d.handlersByModule[moduleKey] = moduleHandlers
+	}
+	moduleHandlers[funcName] = h
 	// Check if already exists as a regular export
 	if addr, ok := synth.Exports[funcName]; ok {
 		if existingID, ok := synth.StubIDs[addr]; ok {
 			d.handlers[existingID] = h
 			return
+		}
+	}
+	if d.dynamicIDInUseLocked(id) {
+		if d.nextDynamicID > id {
+			id = d.nextDynamicID
+		}
+		for d.dynamicIDInUseLocked(id) {
+			id++
 		}
 	}
 	allocID := synth.AddDynamicExport(mem, funcName, id)
@@ -1739,29 +1915,120 @@ func (d *Dispatcher) RegisterDynamicHandler(mem *mmu.MMU, synth *SynthPE, funcNa
 	}
 	d.handlers[id] = h
 	d.names[id] = synth.Name + "!" + funcName
+	if d.cdeclModules[moduleKey] {
+		if d.cdeclIDs == nil {
+			d.cdeclIDs = make(map[uint32]bool)
+		}
+		d.cdeclIDs[id] = true
+	}
+	if id >= d.nextDynamicID {
+		d.nextDynamicID = id + 1
+	}
+}
+
+func (d *Dispatcher) EnsureDynamicExport(mem *mmu.MMU, synth *SynthPE, funcName string, idFloor uint32) (uint64, uint32, bool) {
+	if synth == nil {
+		return 0, idFloor, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if addr := synth.Exports[funcName]; addr != 0 {
+		if d.nextDynamicID > idFloor {
+			idFloor = d.nextDynamicID
+		}
+		return addr, idFloor, false
+	}
+	id := idFloor
+	if d.nextDynamicID > id {
+		id = d.nextDynamicID
+	}
+	for d.dynamicIDInUseLocked(id) {
+		id++
+	}
+	if synth.AddDynamicExport(mem, funcName, id) == 0 {
+		return synth.Exports[funcName], idFloor, false
+	}
+	d.names[id] = synth.Name + "!" + funcName
+	if d.cdeclModules[strings.ToLower(synth.Name)] {
+		if d.cdeclIDs == nil {
+			d.cdeclIDs = make(map[uint32]bool)
+		}
+		d.cdeclIDs[id] = true
+	}
+	if nArgs, ok := win32ArgCounts[funcName]; ok {
+		d.stdcallArgs[id] = nArgs
+	}
+	d.nextDynamicID = id + 1
+	return synth.Exports[funcName], d.nextDynamicID, true
+}
+
+func (d *Dispatcher) SetSynthOrdinal(synth *SynthPE, ordinal uint16, addr uint64) {
+	if synth == nil || addr == 0 {
+		return
+	}
+	d.mu.Lock()
+	synth.ExportOrds[ordinal] = addr
+	d.mu.Unlock()
+}
+
+// MaterializeNamedHandler adds a synthetic export for a handler that was
+// registered by name before the application requested it with GetProcAddress.
+func (d *Dispatcher) MaterializeNamedHandler(mem *mmu.MMU, synth *SynthPE, funcName string, idFloor uint32) (uint64, uint32) {
+	if synth == nil {
+		return 0, idFloor
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if addr, ok := synth.Exports[funcName]; ok {
+		if d.nextDynamicID > idFloor {
+			idFloor = d.nextDynamicID
+		}
+		return addr, idFloor
+	}
+	h, ok := d.handlersByModule[strings.ToLower(synth.Name)][funcName]
+	if !ok {
+		return 0, idFloor
+	}
+	id := idFloor
+	if d.nextDynamicID > id {
+		id = d.nextDynamicID
+	}
+	for d.dynamicIDInUseLocked(id) {
+		id++
+	}
+	d.registerDynamicHandlerLocked(mem, synth, funcName, id, h)
+	d.applyWin32ArgCountsLocked(synth)
+	return synth.Exports[funcName], d.nextDynamicID
+}
+
+func (d *Dispatcher) handlerSnapshot(id uint32) (TrapHandler, string, bool, int, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	handler := d.handlers[id]
+	name := d.names[id]
+	cdecl := d.cdeclIDs[id]
+	argCount, hasArgCount := d.stdcallArgs[id]
+	return handler, name, cdecl, argCount, hasArgCount
 }
 
 // Handle is the vmcall trap entry point, called by the CPU emulator.
 func (d *Dispatcher) Handle(cpu arch.CPU) {
-	d.ctx.CPU = cpu
-	if setter, ok := any(d.ctx).(interface{ SetCurrentCPU(arch.CPU) }); ok {
+	callCtx := *d.ctx
+	callCtx.CPU = cpu
+	ctx := &callCtx
+	if setter, ok := any(ctx).(interface{ SetCurrentCPU(arch.CPU) }); ok {
 		setter.SetCurrentCPU(cpu)
 	}
 	syscallID := uint32(cpu.SyscallNum()) // EAX contains the syscall ID
-	is32 := d.ctx.State != nil && d.ctx.State.Is32
-
-	// Temporary: trace COM trap IDs
-	if syscallID >= 0x10000000 {
-		name := d.names[syscallID]
-		ravelog.Logf("[COM-TRAP] id=0x%x is32=%v name=%s\n", syscallID, is32, name)
-	}
+	is32 := ctx.State != nil && ctx.State.Is32
+	handler, handlerName, isCdecl, explicitArgCount, hasExplicitArgCount := d.handlerSnapshot(syscallID)
 
 	// Debug: log any stub called from within the zero VirtualAlloc region
 	if is32 {
 		sp := cpu.GetSP()
-		if retAddr, err := d.ctx.Mem.Read32(sp); err == nil {
+		if retAddr, err := ctx.Mem.Read32(sp); err == nil {
 			if retAddr >= 0x10400000 && retAddr <= 0x10BFFFFF {
-				name := d.names[syscallID]
+				name := handlerName
 				if name == "" {
 					name = fmt.Sprintf("unknown_0x%04X", syscallID)
 				}
@@ -1770,21 +2037,20 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		}
 	}
 
-	if d.ctx.TraceSyscall {
-		name := d.names[syscallID]
+	if ctx.TraceSyscall {
+		name := handlerName
 		if name == "" {
 			name = fmt.Sprintf("unknown_0x%04X", syscallID)
 		}
 		impl := ""
-		if _, ok := d.handlers[syscallID]; !ok {
+		if handler == nil {
 			impl = " [UNIMPL]"
 		}
 		ravelog.Logf("[syscall] %s (id=0x%04X)%s\n", name, syscallID, impl)
 	}
 
-	handler, ok := d.handlers[syscallID]
-	if !ok {
-		name := d.names[syscallID]
+	if handler == nil {
+		name := handlerName
 		if name == "" {
 			name = fmt.Sprintf("unknown_0x%04X", syscallID)
 		}
@@ -1807,24 +2073,24 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		}
 		// PE32 stdcall cleanup for unimplemented stubs:
 		// use the arg count table if available.
-		if is32 && !d.cdeclIDs[syscallID] {
-			if nArgs, ok := d.stdcallArgs[syscallID]; ok && nArgs > 0 {
-				d.doStdcallCleanup(cpu, nArgs)
+		if is32 && !isCdecl {
+			if hasExplicitArgCount && explicitArgCount > 0 {
+				d.doStdcallCleanup(cpu, explicitArgCount)
 			}
 		}
 		return
 	}
 
-	if d.ctx.Trace {
-		name := d.names[syscallID]
+	if ctx.Trace {
+		name := handlerName
 		sp := cpu.GetSP()
 		if name != "__wine_dbg_header" || sp < 0x7C000000 {
 			if is32 {
-				retAddr, _ := d.ctx.Mem.Read32(sp)
-				ravelog.Logf("[trace] → %s (id=0x%04X) sp=0x%x ret=0x%x\n", name, syscallID, sp, retAddr)
+				retAddr, _ := ctx.Mem.Read32(sp)
+				ravelog.Logf("[trace] -> %s (id=0x%04X) sp=0x%x ret=0x%x\n", name, syscallID, sp, retAddr)
 			} else {
-				retAddr, _ := d.ctx.Mem.Read64(sp)
-				ravelog.Logf("[trace] → %s (id=0x%04X) sp=0x%x ret=0x%x\n", name, syscallID, sp, retAddr)
+				retAddr, _ := ctx.Mem.Read64(sp)
+				ravelog.Logf("[trace] -> %s (id=0x%04X) sp=0x%x ret=0x%x\n", name, syscallID, sp, retAddr)
 			}
 		}
 	}
@@ -1834,33 +2100,54 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 	// That `call` pushed one extra return address, so stack args sit 4 bytes
 	// higher, and stack cleanup is done by the stub's own `ret N` (not by us).
 	viaTramp := false
-	if is32 && d.ctx.State != nil && d.ctx.State.Win32kTrampoline != 0 {
+	if is32 && ctx.State != nil && ctx.State.Win32kTrampoline != 0 {
 		pc := cpu.GetPC()
-		t := d.ctx.State.Win32kTrampoline
+		t := ctx.State.Win32kTrampoline
 		if pc >= t && pc <= t+4 {
 			viaTramp = true
 		}
 	}
 	if viaTramp {
-		d.ctx.i386ArgExtra = 4
+		ctx.i386ArgExtra = 4
 	} else {
-		d.ctx.i386ArgExtra = 0
+		ctx.i386ArgExtra = 0
 	}
 
-	d.ctx.ReturnOverridden = false
-	d.ctx.PCRedirected = false
-	d.ctx.maxArgIdx = -1
-	status := handler(d.ctx)
-	if !d.ctx.ReturnOverridden {
+	ctx.ReturnOverridden = false
+	ctx.PCRedirected = false
+	ctx.maxArgIdx = -1
+
+	// Win32 API/COM stub calls (cdecl/stdcall) must preserve the caller's
+	// callee-saved registers (EBX, ESI, EDI, EBP). Our Go handlers only set
+	// the return value (EAX) and must not leak register changes back to the
+	// guest, otherwise games that keep a live value in EBX across an API call
+	// (e.g. kkrieger's message pump, which needs EBX==0) break. Snapshot them
+	// before the handler and restore after, unless the handler deliberately
+	// redirects control flow (sync WndProc dispatch, callbacks) where the
+	// register state must flow into the redirected target.
+	var savedCallee [4]uint64
+	rrCallee, hasRR := cpu.(RegisterReader)
+	if is32 && hasRR {
+		savedCallee = [4]uint64{rrCallee.ReadReg(3), rrCallee.ReadReg(5), rrCallee.ReadReg(6), rrCallee.ReadReg(7)} // EBX,EBP,ESI,EDI
+	}
+
+	if d.hprof != nil {
+		d.hprof.record(syscallID, cpu.GetPC())
+	}
+	status := handler(ctx)
+	if !ctx.ReturnOverridden {
 		cpu.SetSyscallReturn(uint64(status))
 	}
 
-	// Temporary: trace COM cleanup decision
-	if syscallID >= 0x10000000 {
-		name := d.names[syscallID]
-		explicit, hasExplicit := d.stdcallArgs[syscallID]
-		ravelog.Logf("[COM-POST] %s is32=%v cdecl=%v pcRedir=%v maxArg=%d explicit=%d(%v)\n",
-			name, is32, d.cdeclIDs[syscallID], d.ctx.PCRedirected, d.ctx.maxArgIdx, explicit, hasExplicit)
+	if is32 && hasRR && !ctx.PCRedirected {
+		if rw, ok := cpu.(RegisterWriter); ok {
+			regs := [4]int{3, 5, 6, 7}
+			for i, r := range regs {
+				if rrCallee.ReadReg(r) != savedCallee[i] {
+					rw.WriteReg(r, savedCallee[i])
+				}
+			}
+		}
 	}
 
 	// PE32 stdcall cleanup: the callee must pop arguments from the stack.
@@ -1874,19 +2161,41 @@ func (d *Dispatcher) Handle(cpu arch.CPU) {
 		// expects the dispatcher to manage the return PC, so a plain skip would
 		// not execute the trampoline's `ret`.)
 		d.doStdcallCleanup(cpu, 0)
-	} else if is32 && !d.cdeclIDs[syscallID] && !d.ctx.PCRedirected {
+	} else if is32 && !isCdecl && !ctx.PCRedirected {
 		// Prefer explicit arg count (from Win32 API table) over heuristic.
-		nArgs := d.ctx.maxArgIdx + 1
-		if explicit, ok := d.stdcallArgs[syscallID]; ok {
-			nArgs = explicit
+		nArgs := ctx.maxArgIdx + 1
+		if hasExplicitArgCount {
+			nArgs = explicitArgCount
+		}
+		if d.traceStdcall {
+			sp := cpu.GetSP()
+			ret, _ := d.ctx.Mem.Read32(sp)
+			// Only the game's own code range, to find the call that misaligns
+			// the stack right before the message pump reads a bad EBX.
+			if ret >= 0x800000 && ret < 0x820000 {
+				ebx := uint64(0)
+				if rr, ok := cpu.(RegisterReader); ok {
+					ebx = rr.ReadReg(3)
+				}
+				ravelog.Logf("[stdcall] %s nArgs=%d sp=0x%x ret=0x%x ebx=0x%x\n",
+					handlerName, nArgs, sp, ret, ebx)
+			}
 		}
 		if nArgs > 0 {
 			d.doStdcallCleanup(cpu, nArgs)
 		}
 	} else if is32 {
-		name := d.names[syscallID]
+		name := handlerName
 		if strings.Contains(name, "com!") || strings.Contains(name, "d3d!") {
-			ravelog.Logf("[stdcall-SKIP] %s cdecl=%v pcRedir=%v is32=%v\n", name, d.cdeclIDs[syscallID], d.ctx.PCRedirected, is32)
+			ravelog.Logf("[stdcall-SKIP] %s cdecl=%v pcRedir=%v is32=%v\n", name, isCdecl, ctx.PCRedirected, is32)
+		}
+		if d.traceStdcall {
+			sp := cpu.GetSP()
+			ret, _ := d.ctx.Mem.Read32(sp)
+			if ret >= 0x800000 && ret < 0x820000 {
+				ravelog.Logf("[stdcall-nocleanup] %s id=0x%x cdecl=%v pcRedir=%v maxArgIdx=%d sp=0x%x ret=0x%x\n",
+					name, syscallID, isCdecl, ctx.PCRedirected, ctx.maxArgIdx, sp, ret)
+			}
 		}
 	}
 }
@@ -1898,7 +2207,6 @@ func (d *Dispatcher) doStdcallCleanup(cpu arch.CPU, nArgs int) {
 	sp := cpu.GetSP()
 	retAddr, _ := d.ctx.Mem.Read32(sp)
 	newSP := sp + 4 + uint64(nArgs)*4
-	ravelog.Logf("[stdcall] nArgs=%d sp=0x%x→0x%x ret=0x%x\n", nArgs, sp, newSP, retAddr)
 	cpu.SetSP(newSP)
 	cpu.SetPC(uint64(retAddr))
 }
@@ -1911,6 +2219,8 @@ func (d *Dispatcher) register(id uint32, name string, h TrapHandler) {
 
 // RegisterHandler registers a handler for a specific syscall ID.
 func (d *Dispatcher) RegisterHandler(id uint32, name string, h TrapHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.handlers[id] = h
 	d.names[id] = name
 }
@@ -1923,6 +2233,7 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	}
 
 	// File I/O
+	d.register(idOf("NtCallbackReturn"), "NtCallbackReturn", d.handleNtCallbackReturn)
 	d.register(idOf("NtCreateFile"), "NtCreateFile", handleNtCreateFile)
 	d.register(idOf("NtOpenFile"), "NtOpenFile", handleNtOpenFile)
 	d.register(idOf("NtReadFile"), "NtReadFile", handleNtReadFile)
@@ -2412,6 +2723,8 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("RtlDecodePointer"), "RtlDecodePointer", handleRtlDecodePointer)
 	d.register(idOf("RtlEncodeSystemPointer"), "RtlEncodeSystemPointer", handleRtlEncodeSystemPointer)
 	d.register(idOf("RtlDecodeSystemPointer"), "RtlDecodeSystemPointer", handleRtlDecodeSystemPointer)
+	d.register(idOf("RtlCmDecodeMemIoResource"), "RtlCmDecodeMemIoResource", handleRtlCmDecodeMemIoResource)
+	d.register(idOf("RtlIoDecodeMemIoResource"), "RtlIoDecodeMemIoResource", handleRtlIoDecodeMemIoResource)
 	// Thread management
 	d.register(idOf("NtTerminateThread"), "NtTerminateThread", handleNtTerminateThread)
 	d.register(idOf("ZwTerminateThread"), "ZwTerminateThread", handleNtTerminateThread)
@@ -2448,6 +2761,8 @@ func (d *Dispatcher) registerWin32kHandlers() {
 
 // RegisterWin32kHandler allows external packages to register Win32k handlers.
 func (d *Dispatcher) RegisterWin32kHandler(name string, h TrapHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	for i, n := range win32uExports {
 		if n == name {
 			id := win32uIDBase + uint32(i)

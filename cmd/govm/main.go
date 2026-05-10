@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime/pprof"
 	"strings"
+	"sync"
+	"time"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
@@ -22,6 +24,7 @@ func main() {
 	sysroot := flag.String("sysroot", "", "path to Windows system DLL directory (for PE mode)")
 	regFile := flag.String("registry", "", "path to registry hive JSON file (for PE mode)")
 	cpuprof := flag.String("cpuprofile", "", "write CPU profile to file")
+	cpuprofDuration := flag.Duration("cpuprofile-duration", 0, "stop CPU profiling after this duration")
 	wayland := flag.Bool("wayland", true, "enable Wayland passthrough (use --wayland=false for headless)")
 	autoScript := flag.String("auto", "", "automation script: semicolon-separated commands\n"+
 		"  <delay>:screenshot:<path>    - save PNG screenshot\n"+
@@ -45,8 +48,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "cpuprofile: %v\n", err)
 			os.Exit(1)
 		}
-		pprof.StartCPUProfile(f)
-		defer pprof.StopCPUProfile()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintf(os.Stderr, "cpuprofile: %v\n", err)
+			f.Close()
+			os.Exit(1)
+		}
+		stopProfile := sync.OnceFunc(func() {
+			pprof.StopCPUProfile()
+			f.Close()
+		})
+		defer stopProfile()
+		if *cpuprofDuration > 0 {
+			timer := time.AfterFunc(*cpuprofDuration, stopProfile)
+			defer timer.Stop()
+		}
 	}
 
 	args := flag.Args()

@@ -13,16 +13,138 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
+	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/gdi"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/vfs"
 )
 
 const (
-	ofnFileMustExist = 0x00001000
-	sFalse           = 0x00000001
-	eNotImpl         = 0x80004001
+	ofnFileMustExist   = 0x00001000
+	pdReturnDC         = 0x00000100
+	pdReturnIC         = 0x00000200
+	pdReturnDefault    = 0x00000400
+	pdPageNums         = 0x00000002
+	pdNoPageNums       = 0x00000008
+	pdUseDevModeCopies = 0x00040000
+	dmCopies           = 0x00000100
+	sFalse             = 0x00000001
+	eNotImpl           = 0x80004001
 )
+
+type printDialogLayout struct {
+	size            uint32
+	hDevModeOffset  uint64
+	hDevNamesOffset uint64
+	hDCOffset       uint64
+	flagsOffset     uint64
+	copiesOffset    uint64
+	pointerSize     uint64
+}
+
+func printDialogStructLayout(is64 bool) printDialogLayout {
+	if is64 {
+		return printDialogLayout{size: 120, hDevModeOffset: 16, hDevNamesOffset: 24, hDCOffset: 32, flagsOffset: 40, copiesOffset: 52, pointerSize: 8}
+	}
+	return printDialogLayout{size: 66, hDevModeOffset: 8, hDevNamesOffset: 12, hDCOffset: 16, flagsOffset: 20, copiesOffset: 32, pointerSize: 4}
+}
+
+func readDialogPointer(mem *mmu.MMU, addr uint64, size uint64) uint64 {
+	if size == 8 {
+		value, _ := mem.Read64(addr)
+		return value
+	}
+	value, _ := mem.Read32(addr)
+	return uint64(value)
+}
+
+func writeDialogPointer(mem *mmu.MMU, addr uint64, size uint64, value uint64) {
+	if size == 8 {
+		mem.Write64(addr, value)
+		return
+	}
+	mem.Write32(addr, uint32(value))
+}
+
+func writePrintDialogString(mem *mmu.MMU, addr uint64, value string, wide bool) uint64 {
+	if wide {
+		for i, r := range []rune(value) {
+			mem.Write16(addr+uint64(i)*2, uint16(r))
+		}
+		mem.Write16(addr+uint64(len([]rune(value)))*2, 0)
+		return uint64(len([]rune(value)) + 1)
+	}
+	for i := range value {
+		mem.Write8(addr+uint64(i), value[i])
+	}
+	mem.Write8(addr+uint64(len(value)), 0)
+	return uint64(len(value) + 1)
+}
+
+func allocPrintDevMode(hctx *HandlerCtx, wide bool) uint64 {
+	size := uint64(156)
+	nameBytes := uint64(32)
+	if wide {
+		size = 220
+		nameBytes = 64
+	}
+	addr := hctx.allocGlobal(size)
+	writePrintDialogString(hctx.Mem, addr, "Raven Virtual Printer", wide)
+	hctx.Mem.Write16(addr+nameBytes, 0x0401)
+	hctx.Mem.Write16(addr+nameBytes+2, 1)
+	hctx.Mem.Write16(addr+nameBytes+4, uint16(size))
+	return addr
+}
+
+func printDevModeCopies(mem *mmu.MMU, addr uint64, wide bool) uint16 {
+	if addr == 0 {
+		return 0
+	}
+	offset := uint64(54)
+	if wide {
+		offset = 86
+	}
+	copies, _ := mem.Read16(addr + offset)
+	return copies
+}
+
+func setPrintDevModeCopies(mem *mmu.MMU, addr uint64, wide bool, copies uint16) {
+	fieldsOffset, copiesOffset := uint64(40), uint64(54)
+	if wide {
+		fieldsOffset, copiesOffset = 72, 86
+	}
+	fields, _ := mem.Read32(addr + fieldsOffset)
+	mem.Write32(addr+fieldsOffset, fields|dmCopies)
+	mem.Write16(addr+copiesOffset, copies)
+}
+
+func allocPrintDevNames(hctx *HandlerCtx, wide bool) uint64 {
+	values := []string{"Raven", "Raven Virtual Printer", "FILE:"}
+	headerChars := uint64(8)
+	if wide {
+		headerChars = 4
+	}
+	chars := headerChars
+	for _, value := range values {
+		chars += uint64(len(value) + 1)
+	}
+	charSize := uint64(1)
+	if wide {
+		charSize = 2
+	}
+	addr := hctx.allocGlobal(chars * charSize)
+	offset := headerChars
+	for i, value := range values {
+		hctx.Mem.Write16(addr+uint64(i)*2, uint16(offset))
+		offset += writePrintDialogString(hctx.Mem, addr+offset*charSize, value, wide)
+	}
+	hctx.Mem.Write16(addr+6, 1)
+	return addr
+}
 
 type dialogFilter struct {
 	name     string
@@ -31,7 +153,7 @@ type dialogFilter struct {
 
 var (
 	portalHandleRE = regexp.MustCompile(`objectpath '([^']+)'`)
-	portalURIRE    = regexp.MustCompile(`file://[^'>\]\s]+`)
+	portalURIRE    = regexp.MustCompile(`file://[^"'>\]\s]+`)
 	rgbColorRE     = regexp.MustCompile(`rgb\(\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]+)\s*\)`)
 	hexColorRE     = regexp.MustCompile(`(?i)#?([0-9a-f]{6})`)
 	fontSizeRE     = regexp.MustCompile(`\s+([0-9]+(?:\.[0-9]+)?)\s*$`)
@@ -107,6 +229,31 @@ func normalizeDialogGuestPath(pathValue string) string {
 	return pathValue
 }
 
+func prepareDialogGuestFile(hctx *HandlerCtx, fs *vfs.VFS, hostPath, guestPath string, saving bool) error {
+	if hctx == nil || fs == nil {
+		return fmt.Errorf("dialog filesystem is unavailable")
+	}
+	vfsPath := winPathToVFS(guestPath)
+	fs.MkdirAll(filepath.Dir(vfsPath))
+	if saving {
+		if err := os.MkdirAll(filepath.Dir(hostPath), 0755); err != nil {
+			return err
+		}
+	}
+	data, err := os.ReadFile(hostPath)
+	if err != nil {
+		if !saving || !os.IsNotExist(err) {
+			return err
+		}
+		data = nil
+	}
+	if err := fs.CreateFile(vfsPath, data, 0644); err != nil {
+		return err
+	}
+	hctx.bindHostSavePath(vfsPath, hostPath)
+	return nil
+}
+
 func formatGVariantString(value string) string {
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	value = strings.ReplaceAll(value, `'`, `\'`)
@@ -162,6 +309,34 @@ func runPortalFileChooser(method, title string, filters []dialogFilter, initialD
 	if err != nil {
 		return "", false
 	}
+	monitorPath, err := exec.LookPath("dbus-monitor")
+	if err != nil {
+		return "", false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	monitor := exec.CommandContext(ctx, monitorPath, "--session", "--monitor",
+		"type='signal',interface='org.freedesktop.portal.Request',member='Response'")
+	stdout, err := monitor.StdoutPipe()
+	if err != nil {
+		cancel()
+		return "", false
+	}
+	monitor.Stderr = os.Stderr
+	if err := monitor.Start(); err != nil {
+		cancel()
+		ravelog.Logf("[comdlg32] portal monitor start failed: %v\n", err)
+		return "", false
+	}
+	defer func() {
+		cancel()
+		_ = monitor.Wait()
+	}()
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 4096), 256*1024)
+	if !scanner.Scan() {
+		return "", false
+	}
+
 	options := buildPortalOptions(filters, initialDir, defaultName)
 	callArgs := []string{
 		"call",
@@ -183,52 +358,48 @@ func runPortalFileChooser(method, title string, filters []dialogFilter, initialD
 		ravelog.Logf("[comdlg32] portal %s returned unexpected handle: %s\n", method, strings.TrimSpace(string(out)))
 		return "", false
 	}
+	ravelog.Logf("[comdlg32] portal %s handle=%s\n", method, match[1])
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	monitorArgs := []string{
-		"monitor",
-		"--session",
-		"--dest", "org.freedesktop.portal.Desktop",
-		"--object-path", match[1],
-	}
-	cmd := exec.CommandContext(ctx, gdbusPath, monitorArgs...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", false
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		ravelog.Logf("[comdlg32] portal monitor start failed: %v\n", err)
-		return "", false
-	}
-
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 4096), 256*1024)
-	var chosen string
-	var ok bool
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.Contains(line, "org.freedesktop.portal.Request.Response") {
-			continue
-		}
-		if strings.Contains(line, "(uint32 0,") {
-			if uri := portalURIRE.FindString(line); uri != "" {
-				if decoded, err := url.PathUnescape(strings.TrimPrefix(uri, "file://")); err == nil {
-					chosen = decoded
-					ok = true
-				}
-			}
-		}
-		break
-	}
-	cancel()
-	_ = cmd.Wait()
+	chosen, ok := scanPortalResponse(scanner, match[1])
 	if scanErr := scanner.Err(); scanErr != nil {
 		ravelog.Logf("[comdlg32] portal monitor failed: %v\n", scanErr)
 	}
 	return chosen, ok
+}
+
+func scanPortalResponse(scanner *bufio.Scanner, handle string) (string, bool) {
+	matched := false
+	accepted := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "signal ") {
+			if matched {
+				return "", false
+			}
+			matched = strings.Contains(line, "path="+handle+";") &&
+				strings.Contains(line, "interface=org.freedesktop.portal.Request;") &&
+				strings.Contains(line, "member=Response")
+			continue
+		}
+		if !matched {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 2 && fields[0] == "uint32" {
+			accepted = fields[1] == "0"
+			if !accepted {
+				return "", false
+			}
+			continue
+		}
+		if accepted {
+			if uri := portalURIRE.FindString(line); uri != "" {
+				decoded, err := url.PathUnescape(strings.TrimPrefix(uri, "file://"))
+				return decoded, err == nil && decoded != ""
+			}
+		}
+	}
+	return "", false
 }
 
 func findDialogTool() string {
@@ -279,11 +450,17 @@ func runDialogCommand(tool string, args ...string) (string, bool) {
 	return strings.TrimSpace(string(out)), true
 }
 
+func fileDialogOverride() (string, bool) {
+	path := strings.TrimSpace(os.Getenv("RAVEN_FILE_DIALOG_PATH"))
+	return path, path != ""
+}
+
 func openFileDialog(initialDir string, filters []dialogFilter, title string) (string, bool) {
-	if result, ok := runPortalFileChooser("OpenFile", title, filters, initialDir, ""); ok {
+	if result, ok := fileDialogOverride(); ok {
 		return result, true
 	}
-	switch filepath.Base(findDialogTool()) {
+	tool := findDialogTool()
+	switch filepath.Base(tool) {
 	case "zenity":
 		args := []string{"--file-selection"}
 		if title != "" {
@@ -293,7 +470,7 @@ func openFileDialog(initialDir string, filters []dialogFilter, title string) (st
 			args = append(args, "--filename="+dir+string(os.PathSeparator))
 		}
 		args = append(args, buildZenityFilters(filters)...)
-		return runDialogCommand(findDialogTool(), args...)
+		return runDialogCommand(tool, args...)
 	case "kdialog":
 		dir := normalizeDialogHostPath(initialDir)
 		if dir == "" {
@@ -303,7 +480,7 @@ func openFileDialog(initialDir string, filters []dialogFilter, title string) (st
 		if filter := buildKDialogFilter(filters); filter != "" {
 			args = append(args, filter)
 		}
-		return runDialogCommand(findDialogTool(), args...)
+		return runDialogCommand(tool, args...)
 	case "yad":
 		args := []string{"--file"}
 		if title != "" {
@@ -312,17 +489,18 @@ func openFileDialog(initialDir string, filters []dialogFilter, title string) (st
 		if dir := normalizeDialogHostPath(initialDir); dir != "" {
 			args = append(args, "--filename="+dir+string(os.PathSeparator))
 		}
-		return runDialogCommand(findDialogTool(), args...)
+		return runDialogCommand(tool, args...)
 	default:
-		return "", false
+		return runPortalFileChooser("OpenFile", title, filters, initialDir, "")
 	}
 }
 
 func saveFileDialog(initialDir string, filters []dialogFilter, title, defaultName string) (string, bool) {
-	if result, ok := runPortalFileChooser("SaveFile", title, filters, initialDir, defaultName); ok {
+	if result, ok := fileDialogOverride(); ok {
 		return result, true
 	}
-	switch filepath.Base(findDialogTool()) {
+	tool := findDialogTool()
+	switch filepath.Base(tool) {
 	case "zenity":
 		args := []string{"--file-selection", "--save", "--confirm-overwrite"}
 		if title != "" {
@@ -342,7 +520,7 @@ func saveFileDialog(initialDir string, filters []dialogFilter, title, defaultNam
 			args = append(args, "--filename="+filename)
 		}
 		args = append(args, buildZenityFilters(filters)...)
-		return runDialogCommand(findDialogTool(), args...)
+		return runDialogCommand(tool, args...)
 	case "kdialog":
 		filename := normalizeDialogHostPath(defaultName)
 		if filename == "" {
@@ -357,7 +535,7 @@ func saveFileDialog(initialDir string, filters []dialogFilter, title, defaultNam
 		if filter := buildKDialogFilter(filters); filter != "" {
 			args = append(args, filter)
 		}
-		return runDialogCommand(findDialogTool(), args...)
+		return runDialogCommand(tool, args...)
 	case "yad":
 		args := []string{"--file", "--save", "--confirm-overwrite"}
 		if title != "" {
@@ -370,9 +548,9 @@ func saveFileDialog(initialDir string, filters []dialogFilter, title, defaultNam
 		if filename != "" {
 			args = append(args, "--filename="+filename)
 		}
-		return runDialogCommand(findDialogTool(), args...)
+		return runDialogCommand(tool, args...)
 	default:
-		return "", false
+		return runPortalFileChooser("SaveFile", title, filters, initialDir, defaultName)
 	}
 }
 
@@ -401,6 +579,13 @@ func parseColorOutput(value string) (uint32, bool) {
 }
 
 func colorDialog(initialColor uint32) (uint32, bool) {
+	if value, exists := os.LookupEnv("RAVEN_COLOR_DIALOG_VALUE"); exists {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return initialColor, false
+		}
+		return parseColorOutput(value)
+	}
 	tool := findDialogTool()
 	if tool == "" {
 		return 0, false
@@ -592,6 +777,21 @@ func hostMessageBox(title, text string, uType uint32) (int, bool) {
 func registerComdlg32Handlers(hctx *HandlerCtx) {
 	d := hctx.Disp
 	mem := hctx.Mem
+	extendedErrors := make(map[uint64]uint32)
+	var extendedErrorMu sync.Mutex
+	extendedErrorKey := func(ctx *ntapi.TrapContext) uint64 {
+		if ctx.CPU.GetArch() == arch.ArchAMD64 {
+			if cpu, ok := ctx.CPU.(interface{ GetGSBase() uint64 }); ok {
+				return cpu.GetGSBase()
+			}
+		}
+		return ctx.CPU.GetTLS()
+	}
+	setExtendedError := func(ctx *ntapi.TrapContext, value uint32) {
+		extendedErrorMu.Lock()
+		extendedErrors[extendedErrorKey(ctx)] = value
+		extendedErrorMu.Unlock()
+	}
 	readGuestString := hctx.ReadGuestString
 	readGuestUTF16 := hctx.ReadGuestUTF16
 	stdinReader := hctx.StdinReader
@@ -858,6 +1058,11 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		}
 
 		guestResult := normalizeDialogGuestPath(result)
+		if err := prepareDialogGuestFile(hctx, ctx.FS, result, guestResult, saving); err != nil {
+			ravelog.Logf("[comdlg32] %sW cannot prepare %q: %v\n", title, result, err)
+			ctx.SetReturn(0)
+			return
+		}
 		if !writeUTF16WithLimit(lpstrFile, nMaxFile, guestResult) {
 			ctx.SetReturn(0)
 			return
@@ -943,6 +1148,11 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		}
 
 		guestResult := normalizeDialogGuestPath(result)
+		if err := prepareDialogGuestFile(hctx, ctx.FS, result, guestResult, saving); err != nil {
+			ravelog.Logf("[comdlg32] %sA cannot prepare %q: %v\n", title, result, err)
+			ctx.SetReturn(0)
+			return
+		}
 		if !writeANSIWithLimit(lpstrFile, nMaxFile, guestResult) {
 			ctx.SetReturn(0)
 			return
@@ -1082,16 +1292,202 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	d.RegisterAutoStubHandler(comdlg32, "PrintDlgW", func(ctx *ntapi.TrapContext) uint32 {
-		ravelog.Logf("[comdlg32] PrintDlgW cancelled: no printer backend\n")
-		ctx.SetReturn(0)
+	printDialog := func(ctx *ntapi.TrapContext, wide bool) uint32 {
+		setExtendedError(ctx, 0)
+		pPD := ctx.Arg(0)
+		if pPD == 0 {
+			setExtendedError(ctx, 1) // CDERR_STRUCTSIZE
+			ctx.SetReturn(0)
+			return 0
+		}
+		layout := printDialogStructLayout(ctx.CPU.GetArch() != arch.ArchI386)
+		structSize, _ := mem.Read32(pPD)
+		if structSize != layout.size {
+			setExtendedError(ctx, 1) // CDERR_STRUCTSIZE
+			ctx.SetReturn(0)
+			return 0
+		}
+		flags, _ := mem.Read32(pPD + layout.flagsOffset)
+		outputPath := strings.TrimSpace(os.Getenv("RAVEN_PRINT_OUTPUT"))
+		if outputPath == "" {
+			outputPath = "raven-print.png"
+		}
+		hDevMode := readDialogPointer(mem, pPD+layout.hDevModeOffset, layout.pointerSize)
+		hDevNames := readDialogPointer(mem, pPD+layout.hDevNamesOffset, layout.pointerSize)
+		copies, _ := mem.Read16(pPD + layout.copiesOffset)
+		if flags&pdUseDevModeCopies != 0 {
+			if devModeCopies := printDevModeCopies(mem, hDevMode, wide); devModeCopies != 0 {
+				copies = devModeCopies
+			}
+		}
+		if copies == 0 {
+			copies = 1
+		}
+		if flags&pdReturnDefault != 0 && (hDevMode != 0 || hDevNames != 0) {
+			setExtendedError(ctx, 0x1003) // PDERR_RETDEFFAILURE
+			ctx.SetReturn(0)
+			return 0
+		}
+		if flags&pdReturnDefault == 0 {
+			result := strings.ToLower(strings.TrimSpace(os.Getenv("RAVEN_PRINT_DIALOG_RESULT")))
+			if result != "" && result != "1" && result != "ok" && result != "print" {
+				ravelog.Logf("[comdlg32] PrintDlg cancelled\n")
+				ctx.SetReturn(0)
+				return 0
+			}
+			if result == "" {
+				if !hctx.PrintDialogMu.TryLock() {
+					setExtendedError(ctx, 0x1009) // PDERR_CREATEFAILURE
+					ctx.SetReturn(0)
+					return 0
+				}
+				defer hctx.PrintDialogMu.Unlock()
+				ownerOffset := uint64(4)
+				if layout.pointerSize == 8 {
+					ownerOffset = 8
+				}
+				owner := readDialogPointer(mem, pPD+ownerOffset, layout.pointerSize)
+				if owner == 0 {
+					owner = hctx.MainHWND
+				}
+				fromPage, _ := mem.Read16(pPD + layout.flagsOffset + 4)
+				toPage, _ := mem.Read16(pPD + layout.flagsOffset + 6)
+				minPage, _ := mem.Read16(pPD + layout.flagsOffset + 8)
+				maxPage, _ := mem.Read16(pPD + layout.flagsOffset + 10)
+				if minPage == 0 {
+					minPage = 1
+				}
+				if maxPage < minPage {
+					maxPage = 0xffff
+				}
+				if fromPage < minPage || fromPage > maxPage {
+					fromPage = minPage
+				}
+				if toPage < fromPage || toPage > maxPage {
+					toPage = fromPage
+				}
+				dlgHWND := hctx.HwndAlloc()
+				hctx.HwndChildren[dlgHWND] = &controlState{
+					className:  "dialog",
+					parentHWND: owner,
+					visible:    true,
+					showCalled: true,
+					text:       "Print",
+					w:          520,
+					h:          360,
+				}
+				hctx.PrintDialog = &PrintDialogState{
+					DlgHWND:        dlgHWND,
+					OwnerHWND:      owner,
+					OutputPath:     outputPath,
+					AllPages:       flags&pdPageNums == 0 || flags&pdNoPageNums != 0,
+					FromPage:       fromPage,
+					ToPage:         toPage,
+					MinPage:        minPage,
+					MaxPage:        maxPage,
+					AllowPageRange: flags&pdNoPageNums == 0,
+					Copies:         copies,
+				}
+				if hctx.RequestWindowRepaint != nil {
+					hctx.RequestWindowRepaint(dlgHWND)
+				}
+				if hctx.WlWindows[dlgHWND] == nil {
+					delete(hctx.HwndChildren, dlgHWND)
+					hctx.PrintDialog = nil
+					setExtendedError(ctx, 0x1009) // PDERR_CREATEFAILURE
+					ctx.SetReturn(0)
+					return 0
+				}
+				ravelog.Logf("[comdlg32] PrintDlg dialog hwnd=0x%x owner=0x%x\n", dlgHWND, owner)
+				for hctx.PrintDialog != nil && hctx.PrintDialog.Result == 0 {
+					if hctx.PumpWaylandOnce == nil {
+						hctx.PrintDialog.Result = 2
+						break
+					}
+					if !hctx.PumpWaylandOnce() {
+						hctx.PrintDialog.Result = 2
+						setExtendedError(ctx, 0x100E) // CDERR_DIALOGFAILURE
+					}
+				}
+				accepted := hctx.PrintDialog != nil && hctx.PrintDialog.Result == 1
+				if accepted {
+					copies = hctx.PrintDialog.Copies
+					mem.Write16(pPD+layout.flagsOffset+4, hctx.PrintDialog.FromPage)
+					mem.Write16(pPD+layout.flagsOffset+6, hctx.PrintDialog.ToPage)
+					if hctx.PrintDialog.AllPages {
+						flags &^= pdPageNums
+					} else {
+						flags |= pdPageNums
+					}
+					mem.Write32(pPD+layout.flagsOffset, flags)
+				}
+				if hctx.DestroyOwnedDialog != nil {
+					hctx.DestroyOwnedDialog(dlgHWND)
+				}
+				delete(hctx.HwndChildren, dlgHWND)
+				hctx.PrintDialog = nil
+				if !accepted {
+					ravelog.Logf("[comdlg32] PrintDlg dialog cancelled\n")
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+		}
+		if flags&(pdReturnDC|pdReturnIC) != 0 && hctx.GdiMgr == nil {
+			setExtendedError(ctx, 0x1008) // PDERR_NODEVICES
+			ctx.SetReturn(0)
+			return 0
+		}
+		if hDevMode == 0 {
+			hDevMode = allocPrintDevMode(hctx, wide)
+			writeDialogPointer(mem, pPD+layout.hDevModeOffset, layout.pointerSize, hDevMode)
+		}
+		if hDevNames == 0 {
+			hDevNames = allocPrintDevNames(hctx, wide)
+			writeDialogPointer(mem, pPD+layout.hDevNamesOffset, layout.pointerSize, hDevNames)
+		}
+		if flags&pdUseDevModeCopies != 0 {
+			setPrintDevModeCopies(mem, hDevMode, wide, copies)
+			mem.Write16(pPD+layout.copiesOffset, 1)
+		} else {
+			mem.Write16(pPD+layout.copiesOffset, copies)
+		}
+		if flags&(pdReturnDC|pdReturnIC) != 0 {
+			hDC, dc := hctx.GdiMgr.AllocMemDC()
+			if hDC == 0 || dc == nil {
+				setExtendedError(ctx, 0x1008) // PDERR_NODEVICES
+				ctx.SetReturn(0)
+				return 0
+			}
+			dc.Target = gdi.NewSurface(1240, 1754)
+			dc.InfoOnly = flags&pdReturnIC != 0 && flags&pdReturnDC == 0
+			dc.Target.FillRect(0, 0, dc.Target.Width, dc.Target.Height, 0xFFFFFF)
+			dc.ClipX0, dc.ClipY0 = 0, 0
+			dc.ClipX1, dc.ClipY1 = dc.Target.Width, dc.Target.Height
+			writeDialogPointer(mem, pPD+layout.hDCOffset, layout.pointerSize, hDC)
+			hctx.PrintJobsMu.Lock()
+			if hctx.PrintJobs == nil {
+				hctx.PrintJobs = make(map[uint64]*printJobState)
+			}
+			hctx.PrintJobs[hDC] = &printJobState{
+				outputPath: outputPath,
+				infoOnly:   dc.InfoOnly,
+				copies:     copies,
+			}
+			hctx.PrintJobsMu.Unlock()
+		}
+		structCopies, _ := mem.Read16(pPD + layout.copiesOffset)
+		ravelog.Logf("[comdlg32] PrintDlg accepted flags=0x%x copies=%d nCopies=%d devmode=0x%x devnames=0x%x\n", flags, copies, structCopies, hDevMode, hDevNames)
+		ctx.SetReturn(1)
 		return 0
+	}
+
+	d.RegisterAutoStubHandler(comdlg32, "PrintDlgW", func(ctx *ntapi.TrapContext) uint32 {
+		return printDialog(ctx, true)
 	})
 
 	d.RegisterAutoStubHandler(comdlg32, "PrintDlgA", func(ctx *ntapi.TrapContext) uint32 {
-		ravelog.Logf("[comdlg32] PrintDlgA cancelled: no printer backend\n")
-		ctx.SetReturn(0)
-		return 0
+		return printDialog(ctx, false)
 	})
 
 	d.RegisterAutoStubHandler(comdlg32, "PrintDlgExW", func(ctx *ntapi.TrapContext) uint32 {
@@ -1157,14 +1553,23 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 			hctx.RegisteredMsgNames[findMsgName] = msgID
 		}
 
-		// Allocate a minimal HWND for the modeless dialog so NPP gets a valid handle.
+		// Allocate the modeless owned dialog HWND returned to the application.
 		dlgHwnd := hctx.HwndAlloc()
+		dlgW := int32(380)
+		dlgH := int32(130)
+		title := "Find"
+		if isReplace {
+			dlgH = 160
+			title = "Replace"
+		}
 		cs := &controlState{
 			className:  "dialog",
 			parentHWND: ownerHWND,
-			visible:    false, // rendered by DrawDialogOverlay, not paintTree
-			w:          1,
-			h:          1,
+			visible:    true,
+			showCalled: true,
+			text:       title,
+			w:          dlgW,
+			h:          dlgH,
 		}
 		hctx.HwndChildren[dlgHwnd] = cs
 
@@ -1186,8 +1591,11 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 		ravelog.Logf("[comdlg32] %s owner=0x%x dlgHwnd=0x%x msgID=0x%x\n",
 			label, ownerHWND, dlgHwnd, msgID)
 
-		// Trigger repaint so the dialog renders immediately.
-		hctx.QueuePaint(hctx.MainHWND)
+		if hctx.RequestWindowRepaint != nil {
+			hctx.RequestWindowRepaint(dlgHwnd)
+		} else {
+			hctx.QueuePaint(dlgHwnd)
+		}
 		ctx.SetReturn(dlgHwnd)
 		return 0
 	}
@@ -1209,7 +1617,10 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 	})
 
 	d.RegisterAutoStubHandler(comdlg32, "CommDlgExtendedError", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0)
+		extendedErrorMu.Lock()
+		value := extendedErrors[extendedErrorKey(ctx)]
+		extendedErrorMu.Unlock()
+		ctx.SetReturn(uint64(value))
 		return 0
 	})
 

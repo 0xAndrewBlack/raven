@@ -149,6 +149,45 @@ func writeUTF16(mem *mmu.MMU, addr uint64, s string, max int) int {
 	return n
 }
 
+func allocWideArgv(mem *mmu.MMU, argv []string, is32 bool) uint64 {
+	ptrSize := uint64(8)
+	if is32 {
+		ptrSize = 4
+	}
+	units := make([][]uint16, len(argv))
+	totalUnits := 0
+	for i, arg := range argv {
+		units[i] = utf16Encode(arg)
+		totalUnits += len(units[i]) + 1
+	}
+	arraySize := uint64(len(argv)+1) * ptrSize
+	page := mem.Mmap(0, ptrSize+arraySize+uint64(totalUnits*2), mmu.PermRead|mmu.PermWrite)
+	if page == 0 {
+		return 0
+	}
+	arrayAddr := page + ptrSize
+	strAddr := arrayAddr + arraySize
+	writePointer := func(addr, value uint64) {
+		if is32 {
+			mem.Write32(addr, uint32(value))
+		} else {
+			mem.Write64(addr, value)
+		}
+	}
+	for i := range argv {
+		writePointer(arrayAddr+uint64(i)*ptrSize, strAddr)
+		for _, unit := range units[i] {
+			mem.Write16(strAddr, unit)
+			strAddr += 2
+		}
+		mem.Write16(strAddr, 0)
+		strAddr += 2
+	}
+	writePointer(arrayAddr+uint64(len(argv))*ptrSize, 0)
+	writePointer(page, arrayAddr)
+	return page
+}
+
 func collectCallArgs(ctx *ntapi.TrapContext, start, count int) []uint64 {
 	args := make([]uint64, 0, count)
 	for i := 0; i < count; i++ {
@@ -157,11 +196,16 @@ func collectCallArgs(ctx *ntapi.TrapContext, start, count int) []uint64 {
 	return args
 }
 
-func collectVAList(mem *mmu.MMU, vaList uint64, count int) []uint64 {
+func collectVAList(mem *mmu.MMU, vaList uint64, count int, is32 bool) []uint64 {
 	args := make([]uint64, 0, count)
 	for i := 0; i < count; i++ {
-		v, _ := mem.Read64(vaList + uint64(i*8))
-		args = append(args, v)
+		if is32 {
+			v, _ := mem.Read32(vaList + uint64(i*4))
+			args = append(args, uint64(v))
+		} else {
+			v, _ := mem.Read64(vaList + uint64(i*8))
+			args = append(args, v)
+		}
 	}
 	return args
 }
@@ -829,7 +873,7 @@ func registerCommonCRTOverrides(hctx *HandlerCtx, synth *ntapi.SynthPE, cfg crtM
 			}
 			args := collectCallArgs(ctx, spec.startArg, 24)
 			if spec.vaArg >= 0 {
-				args = collectVAList(mem, ctx.Arg(spec.vaArg), 24)
+				args = collectVAList(mem, ctx.Arg(spec.vaArg), 24, ctx.State != nil && ctx.State.Is32)
 			}
 			out := formatString(mem, format, args, spec.wideFmt)
 			if spec.bufArg >= 0 {
@@ -877,7 +921,7 @@ func registerCommonCRTOverrides(hctx *HandlerCtx, synth *ntapi.SynthPE, cfg crtM
 			if strings.Contains(spec.name, "common") {
 				input = readCString(mem, ctx.Arg(1), -1)
 				format = readCString(mem, ctx.Arg(2), -1)
-				args = collectVAList(mem, ctx.Arg(4), 16)
+				args = collectVAList(mem, ctx.Arg(4), 16, ctx.State != nil && ctx.State.Is32)
 			}
 			if spec.wide {
 				input = readUTF16(mem, ctx.Arg(0), -1)

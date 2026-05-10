@@ -68,6 +68,21 @@ func (w *Window) DrawText(x, y int32, text string, fgColor, bgColor uint32, opaq
 
 // DrawTextAbs renders text at absolute surface coordinates (no TitleBarH offset).
 func (w *Window) DrawTextAbs(x, y int32, text string, fgColor, bgColor uint32, opaque bool) {
+	w.drawTextAbsClipped(x, y, w.Width, w.Height+w.TitleBarH, text, fgColor, bgColor, opaque)
+}
+
+// DrawTextAbsClipped renders text without writing beyond the supplied bounds.
+func (w *Window) DrawTextAbsClipped(x, y, maxX, maxY int32, text string, fgColor, bgColor uint32, opaque bool) {
+	if maxX > w.Width {
+		maxX = w.Width
+	}
+	if totalH := w.Height + w.TitleBarH; maxY > totalH {
+		maxY = totalH
+	}
+	w.drawTextAbsClipped(x, y, maxX, maxY, text, fgColor, bgColor, opaque)
+}
+
+func (w *Window) drawTextAbsClipped(x, y, maxX, maxY int32, text string, fgColor, bgColor uint32, opaque bool) {
 	// COLORREF: 0x00RRGGBB → Wayland XRGB8888: [B][G][R][X]
 	fgB := byte(fgColor)
 	fgG := byte(fgColor >> 8)
@@ -76,7 +91,6 @@ func (w *Window) DrawTextAbs(x, y int32, text string, fgColor, bgColor uint32, o
 	bgG := byte(bgColor >> 8)
 	bgR := byte(bgColor >> 16)
 
-	totalH := int(w.Height + w.TitleBarH)
 	stride := int(w.Stride)
 	cx := int(x)
 	cy := int(y)
@@ -90,10 +104,10 @@ func (w *Window) DrawTextAbs(x, y int32, text string, fgColor, bgColor uint32, o
 		if ch == '\r' {
 			continue
 		}
-		if cy+16 > totalH {
+		if cy+16 > int(maxY) {
 			break
 		}
-		if cx+8 > int(w.Width) {
+		if cx+8 > int(maxX) {
 			continue
 		}
 
@@ -106,7 +120,7 @@ func (w *Window) DrawTextAbs(x, y int32, text string, fgColor, bgColor uint32, o
 
 		for row := 0; row < 16; row++ {
 			py := cy + row
-			if py < 0 || py >= totalH {
+			if py < 0 || py >= int(maxY) {
 				continue
 			}
 			bits := glyphData[row]
@@ -116,7 +130,7 @@ func (w *Window) DrawTextAbs(x, y int32, text string, fgColor, bgColor uint32, o
 			}
 			for col := 0; col < 8; col++ {
 				px := cx + col
-				if px < 0 || px >= int(w.Width) {
+				if px < 0 || px >= int(maxX) {
 					off += 4
 					continue
 				}
@@ -178,10 +192,19 @@ func (w *Window) Screenshot(path string) error {
 			img.Pix[(y*width+x)*4+3] = 255          // A
 		}
 	}
-	f, err := os.Create(path)
+	tmpPath := path + ".tmp"
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return png.Encode(f, img)
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }

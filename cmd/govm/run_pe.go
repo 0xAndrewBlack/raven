@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"sort"
 	"strconv"
@@ -29,6 +30,7 @@ import (
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/ntobj"
 	"github.com/mirkobrombin/Raven/pkg/thread"
 	"github.com/mirkobrombin/Raven/pkg/vfs"
 	"github.com/mirkobrombin/Raven/pkg/win32"
@@ -40,6 +42,13 @@ import (
 // runPE runs a Windows PE binary with the NT subsystem.
 func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript, callExport, renderPNG string) {
 	mem := mmu.New()
+	if os.Getenv("RAVEN_FLAT_MEM") != "" {
+		if err := mem.EnableFlatBacking(); err != nil {
+			ravelog.Logf("[mmu] flat backing unavailable: %v\n", err)
+		} else {
+			ravelog.Logf("[mmu] flat 4GiB backing enabled\n")
+		}
+	}
 	fs := vfs.New()
 	fs.ElfPath = absPath
 
@@ -62,13 +71,24 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	fs.MkdirAll("/Windows/TEMP")
 	fs.MkdirAll("/Users/user/AppData/Local/Temp")
 	fs.MkdirAll("/Program Files")
-	fs.MkdirAll("/Users/" + shellUserName() + "/.config")
-	populateVFSFromHost(fs, filepath.Join("testdata", "npp"), "/Users/"+shellUserName()+"/.config/Notepad++")
+	userName := shellUserName()
+	fs.MkdirAll("/Users/" + userName + "/.config")
+	fs.MkdirAll("/Users/" + userName + "/AppData/Local")
+	fs.MkdirAll("/Users/" + userName + "/AppData/Roaming")
+	populateVFSFromHost(fs, filepath.Join("testdata", "npp"), "/Users/"+userName+"/.config/Notepad++")
+	populateVFSFromHost(fs, filepath.Join("testdata", "npp"), "/Users/"+userName+"/AppData/Roaming/Notepad++")
+	for _, name := range []string{"config.xml", "contextMenu.xml", "doLocalConf.xml", "langs.xml", "shortcuts.xml", "stylers.xml", "toolbarIcons.xml"} {
+		if data, err := os.ReadFile(filepath.Join("testdata", "npp", name)); err == nil {
+			fs.CreateFile("/Users/"+name, data, 0644)
+		}
+	}
 
 	// Populate VFS with the PE's directory contents
 	peDir := filepath.Dir(absPath)
 	peDirBase := filepath.Base(peDir)
 	populateVFSFromHost(fs, peDir, "/"+peDirBase)
+	fs.Cwd = "/" + peDirBase
+	guestArgv, hostArgPaths := preparePEGuestArgs(fs, absPath, guestArgv)
 
 	// Detect Wise 5.x self-extracting installer and extract game files proactively.
 	// This bypasses the native bytecode conditional that gates file extraction in the
@@ -115,7 +135,11 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	if wiseExtractDone && wiseGameHostPath != "" {
 		ravelog.Logf("[wise-detect] redirecting PE load to extracted game: %s\n", wiseGameHostPath)
 		absPath = wiseGameHostPath
+		peDir = filepath.Dir(absPath)
+		peDirBase = filepath.Base(peDir)
+		fs.Cwd = "/" + peDirBase
 		guestArgv = []string{absPath}
+		guestArgv, hostArgPaths = preparePEGuestArgs(fs, absPath, guestArgv)
 		// Also ensure the game directory is populated in VFS from host (if present)
 		// The game files are already in /DXBall from Wise extraction.
 	}
@@ -344,8 +368,39 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	autoSynthDLLs, synthAliases := autoSynthUnresolved(mem, result.MainModule, loadedModules)
 	// Pre-create shcore.dll so DPI functions are available via GetProcAddress
 	synthShcore := ntapi.GenerateSynthDLL(mem, "shcore.dll", []string{}, 0)
+	// Programs may load either CRT dynamically without importing it. Keep empty
+	// synthetic modules available so registered handlers can be materialized by
+	// GetProcAddress on demand.
+	synthMsvcrt := ntapi.GenerateSynthDLL(mem, "msvcrt.dll", []string{}, 0)
+	synthUcrtbase := ntapi.GenerateSynthDLL(mem, "ucrtbase.dll", []string{}, 0)
+	// Games commonly resolve the multimedia timer API dynamically.
+	synthWinmm := ntapi.GenerateSynthDLL(mem, "winmm.dll", []string{
+		"timeBeginPeriod",
+		"timeEndPeriod",
+		"timeGetDevCaps",
+		"timeGetSystemTime",
+		"timeGetTime",
+		"timeKillEvent",
+		"timeSetEvent",
+	}, 0)
+	synthUser32 := ntapi.GenerateSynthDLL(mem, "user32.dll", []string{}, 0)
 	// Include pre-generated full DLLs so their handlers are wired in registerAutoSynthHandlers.
 	autoSynthDLLs = append(autoSynthDLLs, synthKernel32, synthComctl32, synthOleaut32, synthShcore)
+	for _, coreSynth := range []*ntapi.SynthPE{synthMsvcrt, synthUcrtbase, synthWinmm, synthUser32} {
+		if _, loaded := loadedModules[strings.ToLower(coreSynth.Name)]; loaded {
+			continue
+		}
+		found := false
+		for _, existing := range autoSynthDLLs {
+			if strings.EqualFold(existing.Name, coreSynth.Name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			autoSynthDLLs = append(autoSynthDLLs, coreSynth)
+		}
+	}
 	for _, synth := range autoSynthDLLs {
 		dllKey := strings.ToLower(synth.Name)
 		if _, already := loadedModules[dllKey]; !already {
@@ -445,7 +500,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	patchCRTDataExports(mem, result.MainModule, guestArgv)
 
 	// Build command line
-	cmdLine := strings.Join(guestArgv, " ")
+	cmdLine := windowsCommandLine(guestArgv)
 
 	// Stack layout - below KUSER_SHARED_DATA (0x7FFE0000)
 	stackTop := uint64(0x7FFD0000)
@@ -472,13 +527,15 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	}
 
 	// Initialize PEB/TEB
+	guestImagePath := `C:\` + peDirBase + `\` + filepath.Base(absPath)
+	guestCurrentDir := `C:\` + peDirBase
 	procState, err := ntapi.InitProcess(mem, &ntapi.ProcessInit{
 		ImageBase:   result.MainModule.BaseAddr,
 		ImageSize:   result.MainModule.ImageSize,
 		EntryPoint:  result.MainModule.EntryPoint,
 		CommandLine: cmdLine,
-		ImagePath:   `C:\` + filepath.Base(absPath),
-		CurrentDir:  `C:\`,
+		ImagePath:   guestImagePath,
+		CurrentDir:  guestCurrentDir,
 		Environment: guestEnvironment,
 		ProcessId:   1000,
 		ThreadId:    1004,
@@ -506,6 +563,30 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 
 	// Create the trap dispatcher
 	dispatcher := ntapi.NewDispatcher(mem, fs, handles, registry, procState, synthNtdll, synthWin32u)
+	if os.Getenv("RAVEN_PROFILE_HANDLERS") != "" {
+		dispatcher.EnableHandlerProfile()
+	}
+	if os.Getenv("RAVEN_TRACE_STDCALL") != "" {
+		dispatcher.EnableStdcallTrace()
+	}
+	if os.Getenv("RAVEN_WATCH_STACKVAL") != "" {
+		// Catch whatever writes the sentinel 0x20000010 onto the guest stack
+		// (it clobbers a saved EBX and breaks kkrieger's pump). Cover the whole
+		// 32-bit stack region; the callback filters by value and dumps a Go
+		// stack trace once so the culprit (handler vs guest interpreter) is clear.
+		mem.WatchAddr = 0x7ff00000
+		mem.WatchSize = 0x00100000
+		var stackValHit bool
+		mem.WatchCB = func(addr, val uint64, size int) {
+			if stackValHit || size != 4 || uint32(val) != 0x20000010 {
+				return
+			}
+			stackValHit = true
+			buf := make([]byte, 4096)
+			n := runtime.Stack(buf, false)
+			ravelog.Logf("[stackval] 0x20000010 written to stack @0x%x\n%s\n", addr, buf[:n])
+		}
+	}
 	// PE32: ntdll CRT stubs (memcpy/memmove/memset/strlen/strcmp) are served by
 	// Go handlers since the x64 inline patch is skipped for 32-bit.
 	if mem.Mode32 {
@@ -521,8 +602,12 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 
 	is32 := !result.MainModule.Is64
 
+	handlerSynthDLLs := make([]*ntapi.SynthPE, 0, len(autoSynthDLLs)+2)
+	handlerSynthDLLs = append(handlerSynthDLLs, autoSynthDLLs...)
+	handlerSynthDLLs = append(handlerSynthDLLs, synthNtdll, synthWin32u)
+
 	// Register auto-synth stub names with the dispatcher for trace output
-	for _, synth := range autoSynthDLLs {
+	for _, synth := range handlerSynthDLLs {
 		dispatcher.RegisterAutoStubNames(synth)
 		// Apply Win32 API arg counts for PE32 stdcall cleanup
 		if is32 {
@@ -532,9 +617,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 		dllLower := strings.ToLower(synth.Name)
 		if dllLower == "msvcrt.dll" || dllLower == "ucrtbase.dll" ||
 			strings.HasPrefix(dllLower, "msvcp") || strings.HasPrefix(dllLower, "vcruntime") {
-			for _, id := range synth.StubIDs {
-				dispatcher.MarkCdeclRange(id, 1)
-			}
+			dispatcher.MarkCdeclModule(synth)
 		}
 	}
 
@@ -555,7 +638,13 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 		mem.Write64(procState.TEBAddr+ntapi.TebHeapOffset, 0)
 	}
 
-	registerAutoSynthHandlers(mem, dispatcher, autoSynthDLLs, guestArgv, cmdLine, winImagePath, handles, procState, exceptionTable, result.MainModule, &tmPtr, bootTime, registry, autoScript, enableWayland)
+	var renderSnapshot func()
+	renderSnapshotProxy := func() {
+		if renderSnapshot != nil {
+			renderSnapshot()
+		}
+	}
+	hctx := registerAutoSynthHandlers(mem, dispatcher, handlerSynthDLLs, guestArgv, cmdLine, winImagePath, absPath, handles, procState, exceptionTable, result.MainModule, loadedModules, &tmPtr, bootTime, registry, autoScript, enableWayland, renderSnapshotProxy, renderPNG, hostArgPaths)
 
 	// Real-DLL win32k handlers, registered LAST so they win the dispatcher map
 	// over the HLE win32u handlers (gdiMgr) for a real ReactOS gdi32/user32.
@@ -568,6 +657,37 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 
 	// Create x64 CPU
 	c := x64.New(mem)
+	if os.Getenv("RAVEN_PROFILE_OPCODES") != "" {
+		c.EnableOpcodeProfile()
+	}
+	if os.Getenv("RAVEN_WATCH_EBX") != "" {
+		c.EnableEBXWatch()
+	}
+	if slot := os.Getenv("RAVEN_WATCH_SLOT"); slot != "" {
+		// Watch a single guest stack address (deterministic across runs) for
+		// every write, logging value + guest RIP, to find what overwrites the
+		// saved-EBX slot that the texture-setup function's epilogue pops.
+		var addr uint64
+		fmt.Sscanf(slot, "0x%x", &addr)
+		mem.WatchAddr = addr
+		mem.WatchSize = 4
+		mem.WatchCB = func(a, val uint64, size int) {
+			if size == 4 {
+				ravelog.Logf("[slot] write @0x%x val=0x%08x guestRIP=0x%x\n", a, uint32(val), c.GetPC())
+			}
+		}
+	}
+	if os.Getenv("RAVEN_LOG_INSTRET") != "" {
+		go func() {
+			var last uint64
+			for {
+				time.Sleep(10 * time.Second)
+				now := c.GetInstret()
+				ravelog.Logf("[instret] main-thread %d insns in 10s (%.1f M/s)\n", now-last, float64(now-last)/10e6)
+				last = now
+			}
+		}()
+	}
 	if !result.MainModule.Is64 {
 		c.Mode32 = true
 	}
@@ -616,6 +736,13 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 
 	// Wire JIT compiler
 	jitCache := jit.NewCache(mem)
+	jitPE32 := c.Mode32 && os.Getenv("RAVEN_JIT_PE32_EXPERIMENTAL") != ""
+	if os.Getenv("RAVEN_JIT") != "" && (!c.Mode32 || jitPE32) {
+		x64.NewJITCompiler(c, mem).Enable()
+		ravelog.Logf("[jit] enabled mode32=%v\n", c.Mode32)
+	} else if os.Getenv("RAVEN_JIT") != "" {
+		ravelog.Logf("[jit] disabled for PE32 guests\n")
+	}
 	_ = jitCache // JIT disabled - needs debugging for NPP
 
 	// Wire up implicit TLS (__declspec(thread)) if the PE has a TLS directory.
@@ -667,6 +794,15 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	// copies it into r10). Anything that isn't a win32k service falls through to
 	// the NT trap dispatcher (preserving the prior syscall behavior).
 	w32kBridge := newWin32kBridge(mem, 1280, 1024)
+	if renderPNG != "" {
+		renderSnapshot = func() {
+			if err := w32kBridge.RenderPNG(renderPNG); err != nil {
+				ravelog.Logf("[render-png] %v\n", err)
+				return
+			}
+			ravelog.Logf("[render-png] wrote %s\n", renderPNG)
+		}
+	}
 	// Real-DLL win32k handlers (NtUser*/NtGdi*) over winmgr/gfx, registered LAST
 	// so they win the dispatcher map over the HLE win32u stubs. PE32 + sysroot.
 	if procState.Is32 && sysroot != "" {
@@ -697,6 +833,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	// Thread manager
 	tm := thread.NewManager(mem, syscallHandler)
 	tmPtr = tm
+	tm.SetExitHook(hctx.cleanupMessageCPU)
 	mainThread := tm.MainThread(c)
 
 	if trace {
@@ -862,11 +999,43 @@ rerun:
 	tm.Wait()
 }
 
+func drawMenuBitmapPixels(window *wl.Window, pixels []uint32, sourceWidth, width, height int, x, y int32, monochrome bool, monoColor uint32) bool {
+	if window == nil || sourceWidth <= 0 || width <= 0 || height <= 0 || len(pixels) < sourceWidth*height {
+		return false
+	}
+	for py := 0; py < height; py++ {
+		for px := 0; px < width; px++ {
+			color := pixels[py*sourceWidth+px]
+			if monochrome {
+				if color&0x00ffffff == 0x00ffffff {
+					continue
+				}
+				color = 0xff000000 | monoColor&0x00ffffff
+			}
+			if color>>24 == 0 {
+				continue
+			}
+			dx, dy := x+int32(px), y+int32(py)
+			if dx < 0 || dy < 0 || dx >= window.Width || dy >= window.Height+window.TitleBarH {
+				continue
+			}
+			offset := int(dy*window.Stride + dx*4)
+			if offset+3 >= len(window.Pix) {
+				continue
+			}
+			window.Pix[offset] = byte(color)
+			window.Pix[offset+1] = byte(color >> 8)
+			window.Pix[offset+2] = byte(color >> 16)
+			window.Pix[offset+3] = 0xff
+		}
+	}
+	return true
+}
+
 // runAutoScript parses and executes a semicolon-separated automation script.
 // Format: "<delay_sec>:<action>:<args>;..."
-// Actions: screenshot:<path>, click:<x>,<y>, key:<keycode>
-func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
-	start := time.Now()
+// Actions: screenshot:<path>, click:<x>,<y>, key:<keycode>, chord:<modifier>,<keycode>
+func runAutoScript(script string, disp *wl.Display) {
 	type autoCmd struct {
 		delay  time.Duration
 		action string
@@ -899,6 +1068,13 @@ func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
 			args:   args,
 		})
 	}
+	if disp != nil {
+		for len(disp.Windows()) == 0 {
+			time.Sleep(25 * time.Millisecond)
+		}
+		ravelog.Logf("[auto] first window ready\n")
+	}
+	start := time.Now()
 
 	for _, cmd := range cmds {
 		// Wait until the scheduled time
@@ -908,7 +1084,13 @@ func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
 		}
 		switch cmd.action {
 		case "screenshot":
-			w := *winPtr
+			var w *wl.Window
+			if disp != nil {
+				windows := disp.Windows()
+				if len(windows) > 0 {
+					w = windows[0]
+				}
+			}
 			if w == nil {
 				ravelog.Logf("[auto] screenshot: no window yet\n")
 				continue
@@ -917,6 +1099,19 @@ func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
 				ravelog.Logf("[auto] screenshot %q failed: %v\n", cmd.args, err)
 			} else {
 				ravelog.Logf("[auto] screenshot saved: %s\n", cmd.args)
+			}
+		case "screenshot-all":
+			if disp == nil {
+				ravelog.Logf("[auto] screenshot-all: no display\n")
+				continue
+			}
+			for i, win := range disp.Windows() {
+				path := fmt.Sprintf("%s-%d.png", cmd.args, i)
+				if err := win.Screenshot(path); err != nil {
+					ravelog.Logf("[auto] screenshot-all %q failed: %v\n", path, err)
+				} else {
+					ravelog.Logf("[auto] screenshot-all saved: %s title=%q\n", path, win.Title)
+				}
 			}
 		case "click":
 			if disp == nil {
@@ -932,6 +1127,45 @@ func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
 			y, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
 			disp.InjectClick(int32(x), int32(y))
 			ravelog.Logf("[auto] click at (%d,%d)\n", x, y)
+		case "double-click":
+			if disp == nil {
+				ravelog.Logf("[auto] double-click: no display\n")
+				continue
+			}
+			parts := strings.SplitN(cmd.args, ",", 2)
+			if len(parts) != 2 {
+				ravelog.Logf("[auto] double-click: bad args %q\n", cmd.args)
+				continue
+			}
+			x, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+			y, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			disp.InjectDoubleClick(int32(x), int32(y))
+			ravelog.Logf("[auto] double-click at (%d,%d)\n", x, y)
+		case "click-title":
+			if disp == nil {
+				ravelog.Logf("[auto] click-title: no display\n")
+				continue
+			}
+			parts := strings.SplitN(cmd.args, ",", 3)
+			if len(parts) != 3 {
+				ravelog.Logf("[auto] click-title: bad args %q\n", cmd.args)
+				continue
+			}
+			x, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			y, _ := strconv.Atoi(strings.TrimSpace(parts[2]))
+			var target *wl.Window
+			for _, win := range disp.Windows() {
+				if strings.EqualFold(win.Title, strings.TrimSpace(parts[0])) {
+					target = win
+					break
+				}
+			}
+			if target == nil {
+				ravelog.Logf("[auto] click-title: window %q not found\n", parts[0])
+				continue
+			}
+			disp.InjectClickWindow(target, int32(x), int32(y))
+			ravelog.Logf("[auto] click-title %q at (%d,%d)\n", target.Title, x, y)
 		case "key":
 			if disp == nil {
 				ravelog.Logf("[auto] key: no display\n")
@@ -940,6 +1174,82 @@ func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
 			code, _ := strconv.Atoi(cmd.args)
 			disp.InjectKey(uint32(code))
 			ravelog.Logf("[auto] key %d\n", code)
+		case "key-title":
+			if disp == nil {
+				continue
+			}
+			parts := strings.SplitN(cmd.args, ",", 2)
+			if len(parts) != 2 {
+				ravelog.Logf("[auto] key-title: bad args %q\n", cmd.args)
+				continue
+			}
+			code, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			var target *wl.Window
+			for _, win := range disp.Windows() {
+				if strings.EqualFold(win.Title, strings.TrimSpace(parts[0])) {
+					target = win
+					break
+				}
+			}
+			if target == nil {
+				ravelog.Logf("[auto] key-title: window %q not found\n", parts[0])
+				continue
+			}
+			disp.InjectKeyWindow(target, uint32(code))
+			ravelog.Logf("[auto] key-title %q key %d\n", target.Title, code)
+		case "type-title":
+			if disp == nil {
+				continue
+			}
+			parts := strings.SplitN(cmd.args, ",", 2)
+			if len(parts) != 2 {
+				ravelog.Logf("[auto] type-title: bad args %q\n", cmd.args)
+				continue
+			}
+			var target *wl.Window
+			for _, win := range disp.Windows() {
+				if strings.EqualFold(win.Title, strings.TrimSpace(parts[0])) {
+					target = win
+					break
+				}
+			}
+			if target == nil {
+				ravelog.Logf("[auto] type-title: window %q not found\n", parts[0])
+				continue
+			}
+			disp.InjectTextWindow(target, parts[1])
+			ravelog.Logf("[auto] type-title %q text=%q\n", target.Title, parts[1])
+		case "close-title":
+			if disp == nil {
+				continue
+			}
+			var target *wl.Window
+			for _, win := range disp.Windows() {
+				if strings.EqualFold(win.Title, strings.TrimSpace(cmd.args)) {
+					target = win
+					break
+				}
+			}
+			if target == nil {
+				ravelog.Logf("[auto] close-title: window %q not found\n", cmd.args)
+				continue
+			}
+			disp.InjectCloseWindow(target)
+			ravelog.Logf("[auto] close-title %q\n", target.Title)
+		case "chord":
+			if disp == nil {
+				ravelog.Logf("[auto] chord: no display\n")
+				continue
+			}
+			parts := strings.SplitN(cmd.args, ",", 2)
+			if len(parts) != 2 {
+				ravelog.Logf("[auto] chord: bad args %q\n", cmd.args)
+				continue
+			}
+			modifier, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+			code, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			disp.InjectKeyChord(uint32(modifier), uint32(code))
+			ravelog.Logf("[auto] chord %d,%d\n", modifier, code)
 		default:
 			ravelog.Logf("[auto] unknown action: %q\n", cmd.action)
 		}
@@ -949,7 +1259,7 @@ func runAutoScript(script string, disp *wl.Display, winPtr **wl.Window) {
 
 // registerAutoSynthHandlers registers vmcall handlers for critical
 // CRT and Win32 functions in auto-generated synthetic DLLs.
-func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule, tmPtr **thread.Manager, bootTime time.Time, regHive *ntapi.RegistryHive, autoScript string, enableWayland bool) {
+func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.SynthPE, argv []string, cmdLine, imagePath, hostImagePath string, handles *ntapi.HandleTable, procState *ntapi.ProcessState, exceptionTable *ntapi.ExceptionTable, mainModule *loader.PEModule, loadedModules map[string]*loader.PEModule, tmPtr **thread.Manager, bootTime time.Time, regHive *ntapi.RegistryHive, autoScript string, enableWayland bool, renderSnapshot func(), renderPNG string, hostArgPaths map[string]string) *HandlerCtx {
 	synthByName := make(map[string]*ntapi.SynthPE)
 	for _, s := range dlls {
 		synthByName[strings.ToLower(s.Name)] = s
@@ -1131,7 +1441,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// Automation goroutine: parse -auto script and execute timed actions.
 	if autoScript != "" {
-		go runAutoScript(autoScript, wlDisplay, &wlWindow)
+		go runAutoScript(autoScript, wlDisplay)
 	}
 
 	readGuestUTF16 := func(addr uint64) string {
@@ -1772,6 +2082,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			stride = (biWidth + 3) &^ 3
 		case 4:
 			stride = (biWidth/2 + 3) &^ 3
+		case 1:
+			stride = ((biWidth + 31) / 32) * 4
 		default:
 			return nil
 		}
@@ -1819,13 +2131,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							pixel = 0xFF000000 | palette[nibble]
 						}
 					}
+				case 1:
+					value, _ := mem.ReadBytes(rowBase+uint64(col/8), 1)
+					if len(value) > 0 {
+						index := (value[0] >> uint(7-(col&7))) & 1
+						if int(index) < len(palette) {
+							pixel = 0xff000000 | palette[index]
+						} else if index != 0 {
+							pixel = 0xffffffff
+						} else {
+							pixel = 0xff000000
+						}
+					}
 				}
 				allPix[row*biWidth+col] = pixel
 			}
 		}
 		// Split into icon slots: each slot is iconW wide, full height=iconH
 		if iconW <= 0 {
-			iconW = 16
+			iconW = biWidth
 		}
 		if iconH <= 0 {
 			iconH = biHeight
@@ -1839,8 +2163,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			slot := make([]uint32, iconW*iconH)
 			for row := 0; row < iconH && row < biHeight; row++ {
 				for col := 0; col < iconW; col++ {
-					src := row*biWidth + s*iconW + col
-					if src < len(allPix) {
+					sourceColumn := s*iconW + col
+					src := row*biWidth + sourceColumn
+					if sourceColumn < biWidth && src < len(allPix) {
 						slot[row*iconW+col] = allPix[src]
 					}
 				}
@@ -2243,23 +2568,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	if mode32 {
 		envVars["PROCESSOR_ARCHITECTURE"] = "x86"
 	}
+	renderSnapshotForCtx := renderSnapshot
+	if renderPNG != "" {
+		renderSnapshotForCtx = func() {
+			if wlWindow != nil && len(wlWindow.Pix) > 0 {
+				if err := wlWindow.Screenshot(renderPNG); err != nil {
+					ravelog.Logf("[render-png] %v\n", err)
+					return
+				}
+				ravelog.Logf("[render-png] wrote %s\n", renderPNG)
+				return
+			}
+			if renderSnapshot != nil {
+				renderSnapshot()
+			}
+		}
+	}
+	moduleResourceRVAs := make(map[uint64]uint32)
+	for _, module := range loadedModules {
+		if module != nil && module.BaseAddr != 0 && module.ResourceDirRVA != 0 {
+			moduleResourceRVAs[module.BaseAddr] = module.ResourceDirRVA
+		}
+	}
 	hctx := &HandlerCtx{
 		// Core references
 		Mem: mem, Disp: d, Handles: handles, ProcState: procState,
 		ExTable: exceptionTable, MainModule: mainModule, TMPtr: tmPtr,
 		RegHive: regHive, SynthByName: synthByName,
 		// Config
-		Argv: argv, CmdLine: cmdLine, ImagePath: imagePath,
+		Argv: argv, CmdLine: cmdLine, ImagePath: imagePath, HostImagePath: hostImagePath,
 		StartTime: startTime, BootTime: bootTime, StdinReader: stdinReader,
-		Dlls: dlls,
+		Dlls: dlls, KeepHeadlessAlive: renderPNG != "" || autoScript != "",
 		// Wayland / GUI
-		WlDisplay: wlDisplay, WlWindow: wlWindow, GdiMgr: gdiMgr,
+		WlDisplay: wlDisplay, WlWindow: wlWindow,
+		WlWindows: make(map[uint64]*wl.Window), WlWindowHWND: make(map[*wl.Window]uint64),
+		WindowCPU:      make(map[uint64]arch.CPU),
+		RenderSnapshot: renderSnapshotForCtx, GdiMgr: gdiMgr,
 		// Maps
 		EnvVars:        envVars,
 		LocalAtomTable: localAtomTable, LocalAtomNames: localAtomNames,
 		GlobalAtomTable: globalAtomTable, GlobalAtomNames: globalAtomNames,
-		NamedMappings: namedMappings, IniCache: iniCache,
-		ViewMappings: viewMappings,
+		NamedMappings: namedMappings, LocalAllocSizes: make(map[uint64]uint64), IniCache: iniCache,
+		ViewMappings: viewMappings, HostSavePaths: hostArgPaths, VfsModuleResRVA: moduleResourceRVAs,
 		// Func fields from setup
 		ReadGuestUTF16: readGuestUTF16, ReadGuestUTF16N: readGuestUTF16N,
 		ReadGuestString: readGuestString,
@@ -2455,6 +2805,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	hwndAlloc := func() uint64 {
 		h := hctx.NextHWND
 		hctx.NextHWND++
+		hctx.HwndOrder = append(hctx.HwndOrder, h)
+		hctx.HwndZOrder = append([]uint64{h}, hctx.HwndZOrder...)
 		return h
 	}
 	hctx.HwndAlloc = hwndAlloc
@@ -2543,16 +2895,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		hctx.WinInvalid[hwnd] = true
 		win32.Global.Invalidate(hwnd, nil)
-		for _, qm := range hctx.MsgQueue {
-			if qm.hwnd == hwnd && qm.message == 0x000F {
-				return
-			}
+		if hctx.MsgQueue.contains(func(qm queuedMsg) bool {
+			return qm.hwnd == hwnd && qm.message == 0x000F
+		}) {
+			return
 		}
-		hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd, 0x000F, 0, 0})
+		hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x000F, 0, 0))
 	}
 
 	// win32Timer tracks active SetTimer timers.
-	hctx.TimerMap = map[uint64]*win32Timer{}
 	hctx.NextTimerID = 1000
 	// hctx.FrameReady: set to trigger the next Commit().
 	// hctx.HasBaseFrame: set once DefWindowProcW has drawn the base frame (menu+background).
@@ -2705,6 +3056,50 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		return w
 	}
 	menuTextMeasure = hctx.MeasureNcText
+	drawMenuBitmap := func(handle uint64, x, y, maxWidth, maxHeight int32, color uint32) bool {
+		if handle == 0 || wlWindow == nil {
+			return false
+		}
+		var pixels []uint32
+		width, height := 0, 0
+		monochrome := false
+		if bitmap := hctx.BitmapHandles[handle]; bitmap != nil && len(bitmap.slots) > 0 {
+			pixels = bitmap.slots[0]
+			width, height = bitmap.w, bitmap.h
+			monochrome = bitmap.monochrome
+			if width <= 0 || height <= 0 || width*height > len(pixels) {
+				width = 16
+				if len(pixels)%width != 0 {
+					width = len(pixels)
+				}
+				height = len(pixels) / width
+			}
+		} else if object := gdiMgr.GetObject(handle); object != nil && object.Bitmap != nil && object.Bitmap.Surf != nil {
+			surface := object.Bitmap.Surf
+			width, height = int(surface.Width), int(surface.Height)
+			monochrome = object.Bitmap.BitCount == 1
+			pixels = make([]uint32, width*height)
+			for index := range pixels {
+				offset := index * 4
+				if offset+3 >= len(surface.Pix) {
+					break
+				}
+				pixels[index] = uint32(surface.Pix[offset]) | uint32(surface.Pix[offset+1])<<8 |
+					uint32(surface.Pix[offset+2])<<16 | uint32(surface.Pix[offset+3])<<24
+			}
+		}
+		if width <= 0 || height <= 0 || len(pixels) < width*height {
+			return false
+		}
+		sourceWidth := width
+		if width > int(maxWidth) {
+			width = int(maxWidth)
+		}
+		if height > int(maxHeight) {
+			height = int(maxHeight)
+		}
+		return drawMenuBitmapPixels(wlWindow, pixels, sourceWidth, width, height, x, y, monochrome, color)
+	}
 
 	hctx.DrawMenuOverlay = func() {
 		if wlWindow == nil {
@@ -2713,6 +3108,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		pm := hctx.ActivePopupMenu
 		if pm == nil || len(pm.Items) == 0 {
 			return
+		}
+		// Restore the clean content captured when the menu opened before drawing
+		// the current popup, so navigating between menu-bar items (or opening a
+		// submenu) does not stack one dropdown's pixels over another.
+		if hctx.MenuBehind != nil {
+			wlWindow.RestorePixels(hctx.MenuBehind)
 		}
 		dropX, dropY, dropW, dropH := pm.X, pm.Y, pm.Width, pm.Height
 		wlWindow.DrawRectAbs(dropX+2, dropY+dropH, dropX+dropW+2, dropY+dropH+2, 0x808080)
@@ -2728,24 +3129,44 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				wlWindow.DrawRectAbs(dropX+6, iy+pm.ItemHeight/2, dropX+dropW-6, iy+pm.ItemHeight/2+1, sysColors[16])
 				continue
 			}
-			if si.flags&0x0003 != 0 {
+			selected := j == pm.Selected
+			if selected {
+				wlWindow.DrawRectAbs(dropX+2, iy+1, dropX+dropW-2, iy+pm.ItemHeight-1, sysColors[13])
+			} else if si.flags&0x0003 != 0 {
 				wlWindow.DrawRectAbs(dropX+2, iy+1, dropX+dropW-2, iy+pm.ItemHeight-1, 0xF0F0F0)
 			}
 			label, accel := menuTextParts(hctx.MenuStripAmpersand(si.text))
-			hctx.NcDrawText(dropX+24, iy+4, label, 0x000000, sysColors[15], true, 12)
+			textColor := uint32(0x000000)
+			textBackground := sysColors[15]
+			if selected {
+				textColor = 0xFFFFFF
+				textBackground = sysColors[13]
+			}
+			hctx.NcDrawText(dropX+24, iy+4, label, textColor, textBackground, true, 12)
 			if accel != "" {
 				accelX := dropX + dropW - 12 - int32(len([]rune(accel))*8)
-				hctx.NcDrawText(accelX, iy+4, accel, 0x404040, sysColors[15], true, 12)
+				accelColor := uint32(0x404040)
+				if selected {
+					accelColor = textColor
+				}
+				hctx.NcDrawText(accelX, iy+4, accel, accelColor, textBackground, true, 12)
 			}
+			checkBitmap := si.uncheckedBitmap
 			if si.flags&0x0008 != 0 {
+				checkBitmap = si.checkedBitmap
+			}
+			bitmapDrawn := drawMenuBitmap(checkBitmap, dropX+5, iy+(pm.ItemHeight-16)/2, 16, 16, textColor)
+			if si.flags&0x0008 != 0 && !bitmapDrawn {
 				wlWindow.DrawRectAbs(dropX+8, iy+7, dropX+10, iy+13, 0x000000)
 				wlWindow.DrawRectAbs(dropX+10, iy+9, dropX+14, iy+11, 0x000000)
 			}
 			if len(si.submenu) > 0 || si.flags&0x0010 != 0 {
+				// Submenu indicator points RIGHT (submenu opens to the right):
+				// wide base on the left, narrow tip on the right.
 				ax := dropX + dropW - 8
-				wlWindow.DrawRectAbs(ax, iy+9, ax+1, iy+10, 0x000000)
+				wlWindow.DrawRectAbs(ax, iy+7, ax+1, iy+12, 0x000000)
 				wlWindow.DrawRectAbs(ax+1, iy+8, ax+2, iy+11, 0x000000)
-				wlWindow.DrawRectAbs(ax+2, iy+7, ax+3, iy+12, 0x000000)
+				wlWindow.DrawRectAbs(ax+2, iy+9, ax+3, iy+10, 0x000000)
 			}
 		}
 	}
@@ -2753,10 +3174,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// DrawDialogOverlay renders the modal dialog box on top of everything.
 	hctx.DrawDialogOverlay = func() {
 		// Draw Find/Replace modeless dialog if open.
-		if hctx.FindDialog != nil && wlWindow != nil {
-			drawFindDialogOverlay(hctx, wlWindow)
-		}
-
 		if !hctx.DialogActive || wlWindow == nil {
 			return
 		}
@@ -2848,8 +3265,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		ravelog.Logf("[commit] Commit w=%d h=%d pixLen=%d\n", w.Width, w.Height, len(w.Pix))
 		w.Commit()
 		frameCount++
+		if hctx.RenderSnapshot != nil {
+			hctx.RenderSnapshot()
+		}
 	}
-
 	sendNotifySync := func(parentHWND uint64, msg uint32, wParam, lParam uint64) uint64 {
 		if parentHWND == 0 {
 			return 0
@@ -2867,17 +3286,247 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 			}
 		}
-		if wp == 0 || hctx.CurrentCPU == nil || hctx.GuestCallTrampoline == nil {
-			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{parentHWND, msg, wParam, lParam})
+		cpu := hctx.windowCPU(parentHWND)
+		if cpu == nil {
+			cpu = hctx.GetCurrentCPU()
+		}
+		if wp == 0 || cpu == nil || hctx.GuestCallTrampoline == nil {
+			hctx.enqueueMessage(nil, newQueuedMsg(hctx, parentHWND, msg, wParam, lParam))
 			return 0
 		}
-		ret, err := ntapi.CallGuestFunction(hctx.CurrentCPU, mem, hctx.GuestCallTrampoline, wp,
+		ret, err := ntapi.CallGuestFunction(cpu, mem, hctx.GuestCallTrampoline, wp,
 			[]uint64{parentHWND, uint64(msg), wParam, lParam}, false)
 		if err != nil {
-			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{parentHWND, msg, wParam, lParam})
+			hctx.enqueueMessage(nil, newQueuedMsg(hctx, parentHWND, msg, wParam, lParam))
 			return 0
 		}
 		return ret
+	}
+	measureOwnerListItem := func(state *controlState, index int, itemData uint64) (int32, int32) {
+		if state == nil {
+			return 0, 0
+		}
+		mis := hctx.ScratchAlloc(32)
+		mem.Write32(mis, 2)
+		mem.Write32(mis+4, uint32(state.ctrlID))
+		mem.Write32(mis+8, uint32(index))
+		mem.Write32(mis+12, uint32(state.w))
+		mem.Write32(mis+16, 18)
+		if hctx.ProcState != nil && hctx.ProcState.Is32 {
+			mem.Write32(mis+20, uint32(itemData))
+		} else {
+			mem.Write64(mis+24, itemData)
+		}
+		sendNotifySync(state.parentHWND, 0x002C, state.ctrlID, mis)
+		measuredWidth, _ := mem.Read32(mis + 12)
+		measuredHeight, _ := mem.Read32(mis + 16)
+		return int32(measuredWidth), int32(measuredHeight)
+	}
+	drawOwnerButton := func(root, hwnd uint64, target *wl.Window) bool {
+		state := hctx.HwndChildren[hwnd]
+		rootState := hctx.HwndChildren[root]
+		if state == nil || rootState == nil || target == nil || state.className != "button" || state.style&0x0F != 11 {
+			return false
+		}
+		oldScreen := gdiMgr.Screen
+		gdiMgr.Screen = gdi.WrapPix(target.Pix, target.Width, target.Height+target.TitleBarH, target.Stride)
+		hdc, dc := gdiMgr.AllocScreenDC()
+		dc.OriginX = state.x - rootState.x
+		dc.OriginY = state.y - rootState.y
+
+		is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+		dis := hctx.ScratchAlloc(64)
+		mem.Write32(dis, 4) // ODT_BUTTON
+		mem.Write32(dis+4, uint32(state.ctrlID))
+		mem.Write32(dis+8, uint32(^uint32(0)))
+		mem.Write32(dis+12, 1) // ODA_DRAWENTIRE
+		mem.Write32(dis+16, 0)
+		if is32 {
+			mem.Write32(dis+20, uint32(hwnd))
+			mem.Write32(dis+24, uint32(hdc))
+			mem.Write32(dis+28, 0)
+			mem.Write32(dis+32, 0)
+			mem.Write32(dis+36, uint32(state.w))
+			mem.Write32(dis+40, uint32(state.h))
+			mem.Write32(dis+44, 0)
+		} else {
+			mem.Write64(dis+24, hwnd)
+			mem.Write64(dis+32, hdc)
+			mem.Write32(dis+40, 0)
+			mem.Write32(dis+44, 0)
+			mem.Write32(dis+48, uint32(state.w))
+			mem.Write32(dis+52, uint32(state.h))
+			mem.Write64(dis+56, 0)
+		}
+		sendNotifySync(state.parentHWND, 0x002B, state.ctrlID, dis)
+		ravelog.Logf("[ownerdraw] WM_DRAWITEM hwnd=0x%x parent=0x%x id=%d hdc=0x%x\n", hwnd, state.parentHWND, state.ctrlID, hdc)
+		gdiMgr.DeleteDC(hdc)
+		gdiMgr.Screen = oldScreen
+		target.Commit()
+		return true
+	}
+	drawOwnerListBox := func(root, hwnd uint64, target *wl.Window) bool {
+		state := hctx.HwndChildren[hwnd]
+		rootState := hctx.HwndChildren[root]
+		if state == nil || rootState == nil || target == nil || state.className != "listbox" || state.style&0x0030 == 0 {
+			return false
+		}
+		is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+		if state.style&0x0020 != 0 {
+			if len(state.listItemHeights) != len(state.listItems) {
+				state.listItemHeights = make([]int32, len(state.listItems))
+			}
+			for index := range state.listItems {
+				if state.listItemHeights[index] > 0 {
+					continue
+				}
+				itemData := uint64(0)
+				if index < len(state.listItemData) {
+					itemData = state.listItemData[index]
+				}
+				measuredWidth, measuredHeight := measureOwnerListItem(state, index, itemData)
+				if measuredWidth > 0 && state.listColumnWidth <= 0 {
+					state.listColumnWidth = measuredWidth
+				}
+				if measuredHeight > 0 {
+					state.listItemHeights[index] = measuredHeight
+				}
+			}
+		} else if state.listItemHeight <= 0 || state.listColumnWidth <= 0 {
+			measuredWidth, measuredHeight := measureOwnerListItem(state, -1, 0)
+			if measuredWidth > 0 {
+				state.listColumnWidth = measuredWidth
+			}
+			if measuredHeight > 0 {
+				state.listItemHeight = measuredHeight
+			}
+		}
+
+		oldScreen := gdiMgr.Screen
+		gdiMgr.Screen = gdi.WrapPix(target.Pix, target.Width, target.Height+target.TitleBarH, target.Stride)
+		hdc, dc := gdiMgr.AllocScreenDC()
+		dc.OriginX = state.x - rootState.x
+		dc.OriginY = state.y - rootState.y
+		for index := range state.listItems {
+			left, top, right, bottom, valid := listBoxItemRect(state, index)
+			if !valid || left >= state.w || top >= state.h || right <= 0 || bottom <= 0 {
+				continue
+			}
+			itemState := uint32(0)
+			if index == state.listCurSel {
+				itemState = 0x0001
+			}
+			itemData := uint64(0)
+			if index < len(state.listItemData) {
+				itemData = state.listItemData[index]
+			}
+			dis := hctx.ScratchAlloc(64)
+			mem.Write32(dis, 2)
+			mem.Write32(dis+4, uint32(state.ctrlID))
+			mem.Write32(dis+8, uint32(index))
+			mem.Write32(dis+12, 1)
+			mem.Write32(dis+16, itemState)
+			if is32 {
+				mem.Write32(dis+20, uint32(hwnd))
+				mem.Write32(dis+24, uint32(hdc))
+				mem.Write32(dis+28, uint32(left))
+				mem.Write32(dis+32, uint32(top))
+				mem.Write32(dis+36, uint32(right))
+				mem.Write32(dis+40, uint32(bottom))
+				mem.Write32(dis+44, uint32(itemData))
+			} else {
+				mem.Write64(dis+24, hwnd)
+				mem.Write64(dis+32, hdc)
+				mem.Write32(dis+40, uint32(left))
+				mem.Write32(dis+44, uint32(top))
+				mem.Write32(dis+48, uint32(right))
+				mem.Write32(dis+52, uint32(bottom))
+				mem.Write64(dis+56, itemData)
+			}
+			sendNotifySync(state.parentHWND, 0x002B, state.ctrlID, dis)
+		}
+		gdiMgr.DeleteDC(hdc)
+		gdiMgr.Screen = oldScreen
+		return true
+	}
+	type dialogEraseDC struct {
+		handle uint64
+		target *gdi.Surface
+	}
+	dialogEraseDCs := make(map[uint64]dialogEraseDC)
+	hctx.ReleaseDialogPaintDC = func(hwnd uint64) {
+		if eraseDC := dialogEraseDCs[hwnd]; eraseDC.handle != 0 {
+			gdiMgr.DeleteDC(eraseDC.handle)
+			delete(dialogEraseDCs, hwnd)
+		}
+	}
+	hctx.RenderDialogCustom = func(root uint64, target *wl.Window) {
+		explicitPage := false
+		for _, state := range hctx.HwndChildren {
+			if state.parentHWND == root && (strings.EqualFold(state.className, "dialog") || strings.EqualFold(state.className, "#32770")) && state.style&0x40000000 != 0 && state.showCalled {
+				explicitPage = true
+				break
+			}
+		}
+		var controls []uint64
+		for hwnd, state := range hctx.HwndChildren {
+			if hwnd == root || state == nil || !state.visible || hctx.HwndWndProc[hwnd] == 0 || !isDialogDescendant(hctx, hwnd, root) {
+				continue
+			}
+			if explicitPage {
+				if page := dialogPageFor(hctx, hwnd, root); page != 0 {
+					pageState := hctx.HwndChildren[page]
+					if pageState == nil || !pageState.showCalled || !pageState.visible {
+						continue
+					}
+				}
+			}
+			if strings.EqualFold(state.className, "dialog") || strings.EqualFold(state.className, "#32770") {
+				continue
+			}
+			controls = append(controls, hwnd)
+		}
+		sort.Slice(controls, func(i, j int) bool { return controls[i] < controls[j] })
+		for _, hwnd := range controls {
+			if !hctx.WinInvalid[hwnd] {
+				state := hctx.HwndChildren[hwnd]
+				rootState := hctx.HwndChildren[root]
+				if state == nil || rootState == nil {
+					continue
+				}
+				surface := gdi.WrapPix(target.Pix, target.Width, target.Height+target.TitleBarH, target.Stride)
+				eraseDC := dialogEraseDCs[hwnd]
+				targetChanged := eraseDC.target == nil || len(eraseDC.target.Pix) == 0 || len(surface.Pix) == 0
+				if !targetChanged {
+					targetChanged = &eraseDC.target.Pix[0] != &surface.Pix[0] || eraseDC.target.Width != surface.Width || eraseDC.target.Height != surface.Height || eraseDC.target.Stride != surface.Stride
+				}
+				if targetChanged {
+					if eraseDC.handle != 0 {
+						gdiMgr.DeleteDC(eraseDC.handle)
+					}
+					eraseDC.handle, _ = gdiMgr.AllocTargetDC(surface)
+					eraseDC.target = surface
+					dialogEraseDCs[hwnd] = eraseDC
+				}
+				if dc := gdiMgr.GetDC(eraseDC.handle); dc != nil {
+					dc.OriginX = state.x - rootState.x
+					dc.OriginY = state.y - rootState.y
+					dc.SetClipRect(dc.OriginX, dc.OriginY, dc.OriginX+state.w, dc.OriginY+state.h)
+				}
+				hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x0014, eraseDC.handle, 0))
+				hctx.QueuePaint(hwnd)
+			}
+		}
+		var ownerLists []uint64
+		for hwnd, state := range hctx.HwndChildren {
+			if state != nil && state.visible && state.className == "listbox" && state.style&0x0030 != 0 && isDialogDescendant(hctx, hwnd, root) {
+				ownerLists = append(ownerLists, hwnd)
+			}
+		}
+		sort.Slice(ownerLists, func(i, j int) bool { return ownerLists[i] < ownerLists[j] })
+		for _, hwnd := range ownerLists {
+			drawOwnerListBox(root, hwnd, target)
+		}
 	}
 	writeGuestUTF16Limited := func(ptr uint64, text string, maxChars int) {
 		if ptr == 0 || maxChars <= 0 {
@@ -3064,28 +3713,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if lv == nil {
 			return lvItem{}
 		}
+		is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+		notifyLayout := listViewNotifyOffsets(is32)
+		itemLayout := listViewItemOffsets(is32)
 		var item lvItem
 		if idx >= 0 && idx < len(lv.items) {
 			item = lv.items[idx]
 		}
 		bufChars := 260
 		textBuf := hctx.ScratchAlloc(uint64(bufChars * 2))
-		nm := hctx.ScratchAlloc(128)
-		mem.Write64(nm, hwnd)
-		mem.Write64(nm+8, cs.ctrlID)
-		mem.Write32(nm+16, 0xFFFFFF4F)
-		base := nm + 24
+		nm := hctx.ScratchAlloc(notifyLayout.size)
+		for offset := uint64(0); offset < notifyLayout.size; offset += 4 {
+			mem.Write32(nm+offset, 0)
+		}
+		if is32 {
+			mem.Write32(nm, uint32(hwnd))
+			mem.Write32(nm+4, uint32(cs.ctrlID))
+			if wide {
+				mem.Write32(nm+8, 0xFFFFFF4F)
+			} else {
+				mem.Write32(nm+8, 0xFFFFFF6A)
+			}
+		} else {
+			mem.Write64(nm, hwnd)
+			mem.Write64(nm+8, cs.ctrlID)
+			if wide {
+				mem.Write32(nm+16, 0xFFFFFF4F)
+			} else {
+				mem.Write32(nm+16, 0xFFFFFF6A)
+			}
+		}
+		base := nm + notifyLayout.header
 		mem.Write32(base, 0x000F)
 		mem.Write32(base+4, uint32(idx))
 		mem.Write32(base+8, uint32(subIdx))
 		mem.Write32(base+12, item.state)
-		mem.Write32(base+16, 0)
-		mem.Write64(base+20, textBuf)
-		mem.Write32(base+28, uint32(bufChars))
-		mem.Write32(base+32, uint32(item.image))
-		mem.Write64(base+40, item.param)
+		mem.Write32(base+16, 0xFFFFFFFF)
+		_ = writeGuestPointer(mem, base+itemLayout.text, textBuf, is32)
+		mem.Write32(base+itemLayout.textMax, uint32(bufChars))
+		mem.Write32(base+itemLayout.image, uint32(item.image))
+		_ = writeGuestPointer(mem, base+itemLayout.param, item.param, is32)
 		sendNotifySync(cs.parentHWND, 0x004E, uint64(cs.ctrlID), nm)
-		pszText, _ := mem.Read64(base + 20)
+		pszText, _ := readGuestPointer(mem, base+itemLayout.text, is32)
 		if pszText == 0 {
 			pszText = textBuf
 		}
@@ -3094,11 +3763,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		} else {
 			item.text = readGuestString(pszText)
 		}
-		state, _ := mem.Read32(base + 12)
-		item.state = state
-		iImage, _ := mem.Read32(base + 32)
+		item.state, _ = mem.Read32(base + 12)
+		iImage, _ := mem.Read32(base + itemLayout.image)
 		item.image = int(int32(iImage))
-		item.param, _ = mem.Read64(base + 40)
+		item.param, _ = readGuestPointer(mem, base+itemLayout.param, is32)
 		return item
 	}
 
@@ -3112,11 +3780,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		initBuiltinControlState(cs)
 
 		switch msg {
+		case 0x00F0: // BM_GETCHECK
+			if cs.className == "button" {
+				ravelog.Logf("[button] BM_GETCHECK hwnd=0x%x id=%d state=%d\n", hwnd, cs.ctrlID, cs.checkState)
+				return uint64(cs.checkState), true
+			}
+		case 0x00F1: // BM_SETCHECK
+			if cs.className == "button" {
+				cs.checkState = uint32(wParam)
+				ravelog.Logf("[button] BM_SETCHECK hwnd=0x%x id=%d state=%d\n", hwnd, cs.ctrlID, cs.checkState)
+				if cs.parentHWND != 0 {
+					hctx.QueuePaint(cs.parentHWND)
+				}
+				return 0, true
+			}
 		case 0x000F: // WM_PAINT
+			if root, target, isOwnedDialog := topLevelDialogTarget(hctx, hwnd); isOwnedDialog {
+				if target != nil {
+					if hwnd != root && hctx.HwndWndProc[hwnd] != 0 {
+						return 0, false
+					}
+					hctx.WinInvalid[hwnd] = false
+					delete(hctx.WinErasePending, hwnd)
+					win32.Global.Validate(hwnd)
+					renderOwnedDialog(hctx, root, target)
+					drawOwnerButton(root, hwnd, target)
+				}
+				return 0, true
+			}
+			hctx.WinInvalid[hwnd] = false
+			delete(hctx.WinErasePending, hwnd)
+			win32.Global.Validate(hwnd)
 			if wlWindow == nil {
 				return 0, true
 			}
 			switch cs.className {
+			case "dialog", "dialogbox":
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[20])
 			case "edit":
 				// 3D sunken border
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])            // top shadow
@@ -3171,6 +3875,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRectAbs(left, cs.y+3, left+1, cs.y+cs.h-2, sysColors[16])       // left shadow
 						wlWindow.DrawRectAbs(left, cs.y+cs.h-2, right-1, cs.y+cs.h-1, sysColors[20]) // bottom highlight
 						wlWindow.DrawRectAbs(right-2, cs.y+3, right-1, cs.y+cs.h-1, sysColors[20])   // right highlight
+						if right > left+4 {
+							wlWindow.DrawRectAbs(left+2, cs.y+4, right-3, cs.y+cs.h-2, sysColors[15])
+						}
 						if i < len(cs.sbTexts) && cs.sbTexts[i] != "" {
 							// Clip text to pane bounds so adjacent panes don't bleed into each other.
 							hctx.NcDrawTextClipped(left+4, cs.y+4, left+4, cs.y+3, right-3, cs.y+cs.h-2, cs.sbTexts[i], 0x000000, sysColors[15], true, 12)
@@ -3234,18 +3941,66 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case "static":
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
 				if cs.text != "" {
-					hctx.NcDrawText(cs.x+2, cs.y+2, cs.text, 0x000000, sysColors[15], true, 12)
+					hctx.NcDrawText(cs.x+2, cs.y+2, hctx.MenuStripAmpersand(cs.text), 0x000000, sysColors[15], true, 12)
+				}
+			case "combobox", "comboboxex32":
+				h := cs.h
+				if h > 24 {
+					h = 24
+				}
+				if h < 18 {
+					h = 18
+				}
+				arrowW := int32(20)
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+h, sysColors[5])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+h, sysColors[16])
+				wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+h, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x, cs.y+h-1, cs.x+cs.w, cs.y+h, sysColors[20])
+				wlWindow.DrawRectAbs(cs.x+cs.w-arrowW, cs.y+1, cs.x+cs.w-1, cs.y+h-1, sysColors[15])
+				ax := cs.x + cs.w - arrowW/2
+				ay := cs.y + h/2
+				wlWindow.DrawRectAbs(ax-4, ay-2, ax+4, ay-1, 0x000000)
+				wlWindow.DrawRectAbs(ax-3, ay-1, ax+3, ay, 0x000000)
+				wlWindow.DrawRectAbs(ax-2, ay, ax+2, ay+1, 0x000000)
+				if cs.text != "" {
+					hctx.NcDrawTextClipped(cs.x+4, cs.y+4, cs.x+2, cs.y+2, cs.x+cs.w-arrowW-2, cs.y+h-2, cs.text, 0x000000, sysColors[5], true, 12)
 				}
 			case "button":
-				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
-				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])
-				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[20])
-				wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16])
-				wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[16])
-				if cs.text != "" {
-					tx := cs.x + (cs.w-int32(len(cs.text)*8))/2
-					ty := cs.y + (cs.h-16)/2
-					hctx.NcDrawText(tx, ty, cs.text, 0x000000, sysColors[15], true, 12)
+				label := hctx.MenuStripAmpersand(cs.text)
+				switch cs.style & 0x0F {
+				case 2, 3, 5, 6, 4, 9:
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					boxY := cs.y + (cs.h-13)/2
+					wlWindow.DrawRectAbs(cs.x, boxY, cs.x+13, boxY+13, sysColors[5])
+					wlWindow.DrawRectAbs(cs.x, boxY, cs.x+13, boxY+1, sysColors[16])
+					wlWindow.DrawRectAbs(cs.x, boxY, cs.x+1, boxY+13, sysColors[16])
+					wlWindow.DrawRectAbs(cs.x+12, boxY, cs.x+13, boxY+13, sysColors[20])
+					wlWindow.DrawRectAbs(cs.x, boxY+12, cs.x+13, boxY+13, sysColors[20])
+					if cs.checkState != 0 {
+						wlWindow.DrawRectAbs(cs.x+3, boxY+5, cs.x+6, boxY+8, 0x000000)
+						wlWindow.DrawRectAbs(cs.x+6, boxY+3, cs.x+10, boxY+6, 0x000000)
+					}
+					hctx.NcDrawText(cs.x+18, cs.y+(cs.h-16)/2, label, 0x000000, sysColors[15], true, 12)
+				case 7:
+					wlWindow.DrawRectAbs(cs.x, cs.y+8, cs.x+cs.w, cs.y+9, sysColors[16])
+					wlWindow.DrawRectAbs(cs.x, cs.y+8, cs.x+1, cs.y+cs.h, sysColors[16])
+					wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+					wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y+8, cs.x+cs.w, cs.y+cs.h, sysColors[20])
+					if label != "" {
+						hctx.NcDrawText(cs.x+8, cs.y, label, 0x000000, sysColors[15], true, 12)
+					}
+				default:
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[15])
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[20])
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+1, cs.y+cs.h, sysColors[20])
+					wlWindow.DrawRectAbs(cs.x, cs.y+cs.h-1, cs.x+cs.w, cs.y+cs.h, sysColors[16])
+					wlWindow.DrawRectAbs(cs.x+cs.w-1, cs.y, cs.x+cs.w, cs.y+cs.h, sysColors[16])
+					if label != "" {
+						tx := cs.x + (cs.w-int32(len([]rune(label)))*8)/2
+						ty := cs.y + (cs.h-16)/2
+						hctx.NcDrawText(tx, ty, label, 0x000000, sysColors[15], true, 12)
+					}
 				}
 			case "systreeview32":
 				// 3D sunken border + white area
@@ -3285,7 +4040,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							}
 							// Draw item text
 							if ti.text != "" {
-								hctx.NcDrawText(tx, ty+1, ti.text, 0x000000, sysColors[5], true, 12)
+								textColor := uint32(0x000000)
+								background := sysColors[5]
+								if cs.treeView != nil && cs.treeView.selected != nil && cs.treeView.selected.handle == h {
+									background = sysColors[13]
+									textColor = sysColors[14]
+									wlWindow.DrawRectAbs(tx-2, ty, cs.x+cs.w-2, ty+itemHeight, background)
+								}
+								hctx.NcDrawText(tx, ty+1, ti.text, textColor, background, true, 12)
 							}
 							ty += itemHeight
 							if ti.expanded {
@@ -3431,6 +4193,51 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 			return 0, true
 
+		case 0x0201: // WM_LBUTTONDOWN
+			if hctx.HwndWndProc[hwnd] != 0 && !hctx.CallBuiltinControl {
+				return 0, false
+			}
+			if cs.className == "button" || cs.className == "listbox" {
+				return 0, true
+			}
+
+		case 0x0202: // WM_LBUTTONUP
+			if hctx.HwndWndProc[hwnd] != 0 && !hctx.CallBuiltinControl {
+				return 0, false
+			}
+			if cs.className == "button" {
+				switch cs.style & 0x0F {
+				case 3, 6: // BS_AUTOCHECKBOX, BS_AUTO3STATE
+					cs.checkState = (cs.checkState + 1) % 2
+				case 9: // BS_AUTORADIOBUTTON
+					for _, sibling := range hctx.HwndChildren {
+						if sibling.parentHWND == cs.parentHWND && sibling.className == "button" && sibling.style&0x0F == 9 {
+							sibling.checkState = 0
+						}
+					}
+					cs.checkState = 1
+				}
+				if cs.parentHWND != 0 {
+					ravelog.Logf("[button] BN_CLICKED hwnd=0x%x parent=0x%x id=%d checked=%d\n", hwnd, cs.parentHWND, cs.ctrlID, cs.checkState)
+					hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111, cs.ctrlID&0xFFFF, hwnd))
+				}
+				hctx.QueuePaint(hwnd)
+				return 0, true
+			}
+			if cs.className == "listbox" {
+				x := int32(int16(lParam & 0xFFFF))
+				y := int32(int16((lParam >> 16) & 0xFFFF))
+				index, outside := listBoxItemFromPoint(cs, x, y)
+				if !outside && index >= 0 {
+					cs.listCurSel = index
+					if cs.parentHWND != 0 {
+						hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(1)<<16)|(cs.ctrlID&0xFFFF), hwnd))
+					}
+					hctx.QueuePaint(hwnd)
+				}
+				return 0, true
+			}
+
 		case 0x000C: // WM_SETTEXT
 			if lParam != 0 {
 				cs.text = readGuestUTF16(lParam)
@@ -3495,7 +4302,472 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0, true
 		}
 
+		if cs.className == "combobox" || cs.className == "comboboxex32" {
+			const (
+				cbsSimple       = uint32(1)
+				cbsDropdownList = uint32(3)
+				cbsHasStrings   = uint32(0x0200)
+			)
+			comboType := cs.style & 3
+			comboStoresStrings := cs.style&0x0030 == 0 || cs.style&cbsHasStrings != 0
+			if comboType == cbsSimple {
+				cs.comboDropped = true
+			}
+			cbErr := ^uint64(0)
+			switch msg {
+			case 0x0201: // WM_LBUTTONDOWN
+				y := int32(int16((lParam >> 16) & 0xFFFF))
+				if comboType == cbsSimple && y < 24 {
+					return 0, true
+				}
+				if !cs.comboDropped || y < 24 {
+					cs.comboDropped = !cs.comboDropped
+					cs.comboPressedIndex = 0
+					if cs.comboDropped && cs.comboCurSel >= 0 {
+						cs.comboTopIndex = cs.comboCurSel
+						if cs.comboTopIndex > len(cs.comboItems)-8 {
+							cs.comboTopIndex = len(cs.comboItems) - 8
+						}
+						if cs.comboTopIndex < 0 {
+							cs.comboTopIndex = 0
+						}
+					}
+					ravelog.Logf("[combobox] dropdown hwnd=0x%x parent=0x%x id=%d open=%t items=%d\n", hwnd, cs.parentHWND, cs.ctrlID, cs.comboDropped, len(cs.comboItems))
+					if cs.parentHWND != 0 {
+						if cs.comboDropped {
+							hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(7)<<16)|(cs.ctrlID&0xFFFF), hwnd))
+						} else {
+							hctx.enqueueMessage(nil,
+								newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(10)<<16)|(cs.ctrlID&0xFFFF), hwnd),
+								newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(8)<<16)|(cs.ctrlID&0xFFFF), hwnd),
+							)
+						}
+					}
+				} else {
+					index := cs.comboTopIndex + int((y-26)/18)
+					if index >= 0 && index < len(cs.comboItems) {
+						cs.comboPressedIndex = index + 1
+						hctx.MouseCapture = hwnd
+						ravelog.Logf("[combobox] press hwnd=0x%x index=%d capture=0x%x\n", hwnd, index, hctx.MouseCapture)
+					}
+				}
+				if hctx.RequestWindowRepaint != nil {
+					hctx.RequestWindowRepaint(hwnd)
+				} else {
+					hctx.QueuePaint(hwnd)
+				}
+				return 0, true
+			case 0x020A: // WM_MOUSEWHEEL
+				if cs.comboDropped && len(cs.comboItems) > 8 {
+					delta := int16((wParam >> 16) & 0xFFFF)
+					if delta > 0 && cs.comboTopIndex > 0 {
+						cs.comboTopIndex--
+					} else if delta < 0 && cs.comboTopIndex < len(cs.comboItems)-8 {
+						cs.comboTopIndex++
+					}
+					if hctx.RequestWindowRepaint != nil {
+						hctx.RequestWindowRepaint(hwnd)
+					}
+				}
+				return 0, true
+			case 0x0202: // WM_LBUTTONUP
+				if cs.comboDropped && cs.comboPressedIndex > 0 {
+					index := cs.comboPressedIndex - 1
+					cs.comboPressedIndex = 0
+					if hctx.MouseCapture == hwnd {
+						hctx.MouseCapture = 0
+					}
+					y := int32(int16((lParam >> 16) & 0xFFFF))
+					releaseIndex := cs.comboTopIndex + int((y-26)/18)
+					if cs.comboPopupAbove {
+						rows := len(cs.comboItems) - cs.comboTopIndex
+						if rows > 8 {
+							rows = 8
+						}
+						releaseIndex = cs.comboTopIndex + int((y+int32(rows*18+4)-2)/18)
+					}
+					accepted := releaseIndex == index && index >= 0 && index < len(cs.comboItems)
+					ravelog.Logf("[combobox] release hwnd=0x%x pressed=%d release=%d accepted=%t\n", hwnd, index, releaseIndex, accepted)
+					if accepted {
+						cs.comboCurSel = index
+						cs.text = cs.comboItems[index]
+						ravelog.Logf("[combobox] select hwnd=0x%x parent=0x%x id=%d index=%d text=%q\n", hwnd, cs.parentHWND, cs.ctrlID, index, cs.text)
+						if cs.parentHWND != 0 {
+							hctx.enqueueMessage(nil,
+								newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(1)<<16)|(cs.ctrlID&0xFFFF), hwnd),
+								newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(9)<<16)|(cs.ctrlID&0xFFFF), hwnd),
+								newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(8)<<16)|(cs.ctrlID&0xFFFF), hwnd),
+							)
+						}
+					}
+					if !accepted && cs.parentHWND != 0 {
+						hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(10)<<16)|(cs.ctrlID&0xFFFF), hwnd))
+					}
+					cs.comboDropped = comboType == cbsSimple
+					if cs.parentHWND != 0 && !accepted {
+						hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(8)<<16)|(cs.ctrlID&0xFFFF), hwnd))
+					}
+					if hctx.RequestWindowRepaint != nil {
+						hctx.RequestWindowRepaint(hwnd)
+					}
+				}
+				return 0, true
+			case 0x0102: // WM_CHAR
+				if comboType == cbsDropdownList {
+					return 0, true
+				}
+				ch := rune(wParam)
+				if ch == '\b' {
+					runes := []rune(cs.text)
+					if len(runes) > 0 {
+						cs.text = string(runes[:len(runes)-1])
+					}
+				} else if ch >= 0x20 {
+					cs.text += string(ch)
+				}
+				if cs.parentHWND != 0 {
+					hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111, (uint64(5)<<16)|(cs.ctrlID&0xFFFF), hwnd))
+				}
+				if hctx.RequestWindowRepaint != nil {
+					hctx.RequestWindowRepaint(hwnd)
+				} else {
+					hctx.QueuePaint(hwnd)
+				}
+				return 0, true
+			case 0x0100, 0x0101: // WM_KEYDOWN, WM_KEYUP
+				return 0, true
+			case 0x0143: // CB_ADDSTRING
+				item := ""
+				itemData := uint64(0)
+				if comboStoresStrings {
+					item = readGuestUTF16(lParam)
+				} else {
+					itemData = lParam
+				}
+				cs.comboItems = append(cs.comboItems, item)
+				cs.comboItemData = append(cs.comboItemData, itemData)
+				return uint64(len(cs.comboItems) - 1), true
+			case 0x0144: // CB_DELETESTRING
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.comboItems) {
+					return cbErr, true
+				}
+				oldSelection := cs.comboCurSel
+				cs.comboItems = append(cs.comboItems[:index], cs.comboItems[index+1:]...)
+				cs.comboItemData = append(cs.comboItemData[:index], cs.comboItemData[index+1:]...)
+				if oldSelection == index {
+					cs.comboCurSel = -1
+					cs.text = ""
+				} else if oldSelection > index {
+					cs.comboCurSel--
+				}
+				return uint64(len(cs.comboItems)), true
+			case 0x0146: // CB_GETCOUNT
+				return uint64(len(cs.comboItems)), true
+			case 0x0147: // CB_GETCURSEL
+				if cs.comboCurSel < 0 {
+					return cbErr, true
+				}
+				return uint64(cs.comboCurSel), true
+			case 0x0148: // CB_GETLBTEXT
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.comboItems) || lParam == 0 {
+					return cbErr, true
+				}
+				text := utf16Encode(cs.comboItems[index])
+				for i, ch := range text {
+					mem.Write16(lParam+uint64(i*2), ch)
+				}
+				mem.Write16(lParam+uint64(len(text)*2), 0)
+				return uint64(len(text)), true
+			case 0x0149: // CB_GETLBTEXTLEN
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.comboItems) {
+					return cbErr, true
+				}
+				return uint64(len(utf16Encode(cs.comboItems[index]))), true
+			case 0x014A: // CB_INSERTSTRING
+				index := int(int32(wParam))
+				if index < 0 || index > len(cs.comboItems) {
+					index = len(cs.comboItems)
+				}
+				cs.comboItems = append(cs.comboItems, "")
+				copy(cs.comboItems[index+1:], cs.comboItems[index:])
+				if comboStoresStrings {
+					cs.comboItems[index] = readGuestUTF16(lParam)
+				}
+				cs.comboItemData = append(cs.comboItemData, 0)
+				copy(cs.comboItemData[index+1:], cs.comboItemData[index:])
+				if !comboStoresStrings {
+					cs.comboItemData[index] = lParam
+				}
+				return uint64(index), true
+			case 0x014B: // CB_RESETCONTENT
+				cs.comboItems = nil
+				cs.comboItemData = nil
+				cs.comboCurSel = -1
+				cs.comboTopIndex = 0
+				cs.text = ""
+				return 0, true
+			case 0x014C, 0x014D: // CB_FINDSTRING, CB_SELECTSTRING
+				needle := strings.ToLower(readGuestUTF16(lParam))
+				start := int(int32(wParam)) + 1
+				if start < 0 || start >= len(cs.comboItems) {
+					start = 0
+				}
+				for offset := 0; offset < len(cs.comboItems); offset++ {
+					index := (start + offset) % len(cs.comboItems)
+					if strings.HasPrefix(strings.ToLower(cs.comboItems[index]), needle) {
+						if msg == 0x014D {
+							cs.comboCurSel = index
+							cs.text = cs.comboItems[index]
+							hctx.QueuePaint(hwnd)
+						}
+						return uint64(index), true
+					}
+				}
+				return cbErr, true
+			case 0x014E: // CB_SETCURSEL
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.comboItems) {
+					cs.comboCurSel = -1
+					cs.text = ""
+					return cbErr, true
+				}
+				cs.comboCurSel = index
+				cs.text = cs.comboItems[index]
+				hctx.QueuePaint(hwnd)
+				return uint64(index), true
+			case 0x014F: // CB_SHOWDROPDOWN
+				wasDropped := cs.comboDropped
+				cs.comboDropped = wParam != 0 || comboType == cbsSimple
+				if wasDropped != cs.comboDropped && cs.parentHWND != 0 {
+					notify := uint64(8)
+					if cs.comboDropped {
+						notify = 7
+					}
+					hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111, (notify<<16)|(cs.ctrlID&0xFFFF), hwnd))
+				}
+				if hctx.RequestWindowRepaint != nil {
+					hctx.RequestWindowRepaint(hwnd)
+				} else {
+					hctx.QueuePaint(hwnd)
+				}
+				return 1, true
+			case 0x0150: // CB_GETITEMDATA
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.comboItemData) {
+					return cbErr, true
+				}
+				return cs.comboItemData[index], true
+			case 0x0151: // CB_SETITEMDATA
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.comboItemData) {
+					return cbErr, true
+				}
+				cs.comboItemData[index] = lParam
+				return 0, true
+			case 0x0157: // CB_GETDROPPEDSTATE
+				if cs.comboDropped || comboType == cbsSimple {
+					return 1, true
+				}
+				return 0, true
+			}
+		}
+
 		// Edit-specific messages
+		if cs.className == "listbox" {
+			const lbsHasStrings = uint32(0x0040)
+			const listErr = ^uint64(0)
+			listStoresStrings := cs.style&0x0030 == 0 || cs.style&lbsHasStrings != 0
+			switch msg {
+			case 0x0180: // LB_ADDSTRING
+				text := ""
+				data := lParam
+				if listStoresStrings {
+					text = readGuestUTF16(lParam)
+					data = 0
+				}
+				cs.listItems = append(cs.listItems, text)
+				cs.listItemData = append(cs.listItemData, data)
+				cs.listItemHeights = append(cs.listItemHeights, 0)
+				index := len(cs.listItems) - 1
+				if cs.style&0x0020 != 0 {
+					measuredWidth, measuredHeight := measureOwnerListItem(cs, index, data)
+					if measuredWidth > 0 && cs.listColumnWidth <= 0 {
+						cs.listColumnWidth = measuredWidth
+					}
+					if measuredHeight > 0 {
+						cs.listItemHeights[index] = measuredHeight
+					}
+				}
+				return uint64(index), true
+			case 0x0181: // LB_INSERTSTRING
+				index := int(int32(wParam))
+				if index < 0 || index > len(cs.listItems) {
+					index = len(cs.listItems)
+				}
+				cs.listItems = append(cs.listItems, "")
+				cs.listItemData = append(cs.listItemData, 0)
+				cs.listItemHeights = append(cs.listItemHeights, 0)
+				copy(cs.listItems[index+1:], cs.listItems[index:])
+				copy(cs.listItemData[index+1:], cs.listItemData[index:])
+				copy(cs.listItemHeights[index+1:], cs.listItemHeights[index:])
+				cs.listItems[index] = ""
+				cs.listItemData[index] = 0
+				cs.listItemHeights[index] = 0
+				if listStoresStrings {
+					cs.listItems[index] = readGuestUTF16(lParam)
+				} else {
+					cs.listItemData[index] = lParam
+				}
+				if cs.listCurSel >= index {
+					cs.listCurSel++
+				}
+				if cs.style&0x0020 != 0 {
+					measuredWidth, measuredHeight := measureOwnerListItem(cs, index, cs.listItemData[index])
+					if measuredWidth > 0 && cs.listColumnWidth <= 0 {
+						cs.listColumnWidth = measuredWidth
+					}
+					if measuredHeight > 0 {
+						cs.listItemHeights[index] = measuredHeight
+					}
+				}
+				return uint64(index), true
+			case 0x0182: // LB_DELETESTRING
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.listItems) {
+					return listErr, true
+				}
+				if cs.listCurSel == index {
+					cs.listCurSel = -1
+				} else if cs.listCurSel > index {
+					cs.listCurSel--
+				}
+				cs.listItems = append(cs.listItems[:index], cs.listItems[index+1:]...)
+				cs.listItemData = append(cs.listItemData[:index], cs.listItemData[index+1:]...)
+				if index < len(cs.listItemHeights) {
+					cs.listItemHeights = append(cs.listItemHeights[:index], cs.listItemHeights[index+1:]...)
+				}
+				return uint64(len(cs.listItems)), true
+			case 0x0184: // LB_RESETCONTENT
+				cs.listItems = nil
+				cs.listItemData = nil
+				cs.listItemHeights = nil
+				cs.listCurSel = -1
+				return 0, true
+			case 0x0186: // LB_SETCURSEL
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.listItems) {
+					cs.listCurSel = -1
+					return listErr, true
+				}
+				cs.listCurSel = index
+				hctx.QueuePaint(hwnd)
+				return uint64(index), true
+			case 0x0188: // LB_GETCURSEL
+				if cs.listCurSel < 0 {
+					return listErr, true
+				}
+				return uint64(cs.listCurSel), true
+			case 0x0189: // LB_GETTEXT
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.listItems) || lParam == 0 {
+					return listErr, true
+				}
+				text := utf16Encode(cs.listItems[index])
+				for i, ch := range text {
+					mem.Write16(lParam+uint64(i*2), ch)
+				}
+				mem.Write16(lParam+uint64(len(text)*2), 0)
+				return uint64(len(text)), true
+			case 0x018A: // LB_GETTEXTLEN
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.listItems) {
+					return listErr, true
+				}
+				return uint64(len(utf16Encode(cs.listItems[index]))), true
+			case 0x018B: // LB_GETCOUNT
+				return uint64(len(cs.listItems)), true
+			case 0x0195: // LB_SETCOLUMNWIDTH
+				cs.listColumnWidth = int32(wParam)
+				ravelog.Logf("[listbox] LB_SETCOLUMNWIDTH hwnd=0x%x width=%d\n", hwnd, cs.listColumnWidth)
+				return 0, true
+			case 0x0198: // LB_GETITEMRECT
+				index := int(int32(wParam))
+				left, top, right, bottom, ok := listBoxItemRect(cs, index)
+				if !ok || lParam == 0 {
+					return listErr, true
+				}
+				mem.Write32(lParam, uint32(left))
+				mem.Write32(lParam+4, uint32(top))
+				mem.Write32(lParam+8, uint32(right))
+				mem.Write32(lParam+12, uint32(bottom))
+				return 0, true
+			case 0x0199: // LB_GETITEMDATA
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.listItemData) {
+					return listErr, true
+				}
+				return cs.listItemData[index], true
+			case 0x019A: // LB_SETITEMDATA
+				index := int(int32(wParam))
+				if index < 0 || index >= len(cs.listItemData) {
+					return listErr, true
+				}
+				cs.listItemData[index] = lParam
+				return 0, true
+			case 0x01A0: // LB_SETITEMHEIGHT
+				height := int32(lParam & 0xFFFF)
+				index := int(int32(wParam))
+				if cs.style&0x0020 != 0 && index >= 0 && index < len(cs.listItems) {
+					if len(cs.listItemHeights) != len(cs.listItems) {
+						cs.listItemHeights = make([]int32, len(cs.listItems))
+					}
+					cs.listItemHeights[index] = height
+				} else {
+					cs.listItemHeight = height
+				}
+				ravelog.Logf("[listbox] LB_SETITEMHEIGHT hwnd=0x%x index=%d height=%d\n", hwnd, index, height)
+				return 0, true
+			case 0x01A7: // LB_SETCOUNT
+				count := int(int32(wParam))
+				if count < 0 {
+					return listErr, true
+				}
+				cs.listItems = make([]string, count)
+				cs.listItemData = make([]uint64, count)
+				cs.listItemHeights = make([]int32, count)
+				cs.listCurSel = -1
+				if cs.style&0x0020 != 0 {
+					for index := range cs.listItems {
+						measuredWidth, measuredHeight := measureOwnerListItem(cs, index, 0)
+						if measuredWidth > 0 && cs.listColumnWidth <= 0 {
+							cs.listColumnWidth = measuredWidth
+						}
+						if measuredHeight > 0 {
+							cs.listItemHeights[index] = measuredHeight
+						}
+					}
+				}
+				ravelog.Logf("[listbox] LB_SETCOUNT hwnd=0x%x count=%d\n", hwnd, count)
+				return 0, true
+			case 0x01A9: // LB_ITEMFROMPOINT
+				x := int32(int16(lParam & 0xFFFF))
+				y := int32(int16((lParam >> 16) & 0xFFFF))
+				index, outside := listBoxItemFromPoint(cs, x, y)
+				if index < 0 {
+					index = 0
+					outside = true
+				}
+				result := uint64(uint16(index))
+				if outside {
+					result |= uint64(1) << 16
+				}
+				return result, true
+			}
+		}
+
 		if cs.className == "edit" {
 			switch msg {
 			case 0x0102: // WM_CHAR
@@ -3512,8 +4784,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					cs.text += string(ch)
 				}
 				cs.editModified = true
-				// Queue repaint
-				hctx.QueuePaint(hctx.MainHWND)
+				if hctx.RequestWindowRepaint != nil {
+					hctx.RequestWindowRepaint(hwnd)
+				} else {
+					hctx.QueuePaint(hwnd)
+				}
 				return 0, true
 			case 0x0100: // WM_KEYDOWN
 				return 0, true
@@ -3839,27 +5114,88 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		// TreeView messages (TVM_xxx = TV_FIRST + x, TV_FIRST = 0x1100)
 		if cs.className == "systreeview32" {
-			const tvFirst = 0x1100
 			tv := cs.treeView
+			is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+			layout := treeViewItemOffsets(is32)
 			switch msg {
-			case tvFirst + 0, tvFirst + 50: // TVM_INSERTITEMA, TVM_INSERTITEMW
+			case 0x0201: // WM_LBUTTONDOWN
+				y := int32(int16((lParam >> 16) & 0xFFFF))
+				items := treeViewVisibleItems(tv)
+				index := int((y - 2) / 18)
+				if y < 2 || index < 0 || index >= len(items) {
+					return 0, true
+				}
+				oldItem := tv.selected
+				newItem := items[index]
+				if oldItem == newItem {
+					return 0, true
+				}
+				notifyLayout := treeViewNotifyOffsets(is32)
+				writeNotify := func(code uint32) uint64 {
+					notify := hctx.ScratchAlloc(notifyLayout.size)
+					for offset := uint64(0); offset < notifyLayout.size; offset += 4 {
+						mem.Write32(notify+offset, 0)
+					}
+					if is32 {
+						mem.Write32(notify, uint32(hwnd))
+						mem.Write32(notify+4, uint32(cs.ctrlID))
+						mem.Write32(notify+8, code)
+					} else {
+						mem.Write64(notify, hwnd)
+						mem.Write64(notify+8, cs.ctrlID)
+						mem.Write32(notify+16, code)
+					}
+					mem.Write32(notify+notifyLayout.action, 1)
+					writeItem := func(base uint64, item *tvItem) {
+						if item == nil {
+							return
+						}
+						mem.Write32(base, 0x001C)
+						_ = writeGuestPointer(mem, base+layout.item, item.handle, is32)
+						mem.Write32(base+layout.state, item.state)
+						mem.Write32(base+layout.state+4, 0xFFFFFFFF)
+						_ = writeGuestPointer(mem, base+layout.param, item.param, is32)
+					}
+					writeItem(notify+notifyLayout.itemOld, oldItem)
+					writeItem(notify+notifyLayout.itemNew, newItem)
+					mem.Write32(notify+notifyLayout.point, uint32(int32(int16(lParam&0xFFFF))))
+					mem.Write32(notify+notifyLayout.point+4, uint32(y))
+					return sendNotifySync(cs.parentHWND, 0x004E, cs.ctrlID, notify)
+				}
+				const (
+					tvnSelChangingW = uint32(0xFFFFFE3E)
+					tvnSelChangedW  = uint32(0xFFFFFE3D)
+				)
+				if writeNotify(tvnSelChangingW) != 0 {
+					return 0, true
+				}
+				if oldItem != nil {
+					oldItem.state &^= 0x0002
+				}
+				newItem.state |= 0x0002
+				tv.selected = newItem
+				syncTreeViewCompat(cs)
+				hctx.QueuePaint(hwnd)
+				writeNotify(tvnSelChangedW)
+				return 0, true
+			case tvmInsertItemA, tvmInsertItemW:
 				if lParam == 0 {
 					return 0, true
 				}
-				hParent, _ := mem.Read64(lParam)
-				itemBase := lParam + 16
+				hParent, _ := readGuestPointer(mem, lParam, is32)
+				itemBase := lParam + layout.insertItem
 				mask, _ := mem.Read32(itemBase)
-				state, _ := mem.Read32(itemBase + 16)
-				pszText, _ := mem.Read64(itemBase + 24)
-				itemLParam, _ := mem.Read64(itemBase + 48)
+				state, _ := mem.Read32(itemBase + layout.state)
+				stateMask, _ := mem.Read32(itemBase + layout.state + 4)
+				pszText, _ := readGuestPointer(mem, itemBase+layout.text, is32)
+				itemLParam, _ := readGuestPointer(mem, itemBase+layout.param, is32)
 				text := ""
 				const tvifText = 0x0001
 				const tvifState = 0x0008
-				const lpstrTextcallback = 0xFFFFFFFFFFFFFFFF
-				if mask&tvifText != 0 && pszText != 0 && pszText != lpstrTextcallback {
-					if msg == tvFirst+50 { // wide
+				if mask&tvifText != 0 && pszText != 0 && !isTextCallbackPointer(pszText, is32) {
+					if msg == tvmInsertItemW {
 						text = readGuestUTF16(pszText)
-					} else { // ansi
+					} else {
 						text = readGuestString(pszText)
 					}
 				}
@@ -3870,7 +5206,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					expanded: true,
 				}
 				if mask&tvifState != 0 {
-					newItem.state = state
+					newItem.state = state & stateMask
 				}
 				tv.nextH++
 				parent := tv.root
@@ -3886,7 +5222,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				syncTreeViewCompat(cs)
 				hctx.QueuePaint(hwnd)
 				return newItem.handle, true
-			case tvFirst + 2: // TVM_DELETEITEM
+			case tvmDeleteItem:
 				const tviRoot uint64 = 0xFFFFFFFFFFFF0000
 				if lParam == 0 || lParam == tviRoot || lParam == 0xFFFF0000 {
 					tv.root.children = nil
@@ -3903,7 +5239,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return 1, true
 				}
 				return 1, true
-			case tvFirst + 1: // TVM_EXPAND
+			case tvmExpand:
 				if item, ok := cs.treeViewIndex[lParam]; ok && item != nil {
 					const (
 						tveCollapse      = 0x0001
@@ -3924,74 +5260,90 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					hctx.QueuePaint(hwnd)
 				}
 				return 1, true
-			case tvFirst + 9: // TVM_SETIMAGELIST
+			case tvmSetImageList:
 				return 0, true
-			case tvFirst + 8: // TVM_GETIMAGELIST
+			case tvmGetImageList:
 				return 0, true
-			case tvFirst + 11: // TVM_SELECTITEM
+			case tvmSelectItem:
+				const tvgnCaret = 0x0009
+				if uint32(wParam) != tvgnCaret {
+					return 0, true
+				}
 				if item, ok := cs.treeViewIndex[lParam]; ok {
+					if tv.selected != nil {
+						tv.selected.state &^= 0x0002
+					}
 					tv.selected = item
+					item.state |= 0x0002
+					syncTreeViewCompat(cs)
 					hctx.QueuePaint(hwnd)
 					return 1, true
 				}
 				if lParam == 0 {
+					if tv.selected != nil {
+						tv.selected.state &^= 0x0002
+					}
 					tv.selected = nil
+					syncTreeViewCompat(cs)
 					hctx.QueuePaint(hwnd)
 					return 1, true
 				}
 				return 1, true
-			case tvFirst + 13: // TVM_GETITEMW
+			case tvmGetItemA, tvmGetItemW:
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
-					hItem, _ := mem.Read64(lParam + 8)
+					hItem, _ := readGuestPointer(mem, lParam+layout.item, is32)
 					if ti, ok := cs.treeViewIndex[hItem]; ok {
 						const tvifText = 0x0001
 						const tvifParam = 0x0004
 						const tvifState = 0x0008
 						if mask&tvifText != 0 {
-							pszText, _ := mem.Read64(lParam + 24)
-							cchMax, _ := mem.Read32(lParam + 32)
+							pszText, _ := readGuestPointer(mem, lParam+layout.text, is32)
+							cchMax, _ := mem.Read32(lParam + layout.textMax)
 							if pszText != 0 && cchMax > 0 {
-								nameU16 := utf16Encode(ti.text)
-								limit := int(cchMax) - 1
-								if len(nameU16) > limit {
-									nameU16 = nameU16[:limit]
+								if msg == tvmGetItemW {
+									writeUTF16(mem, pszText, ti.text, int(cchMax))
+								} else {
+									writeCString(mem, pszText, ti.text, int(cchMax))
 								}
-								for i, ch := range nameU16 {
-									mem.Write16(pszText+uint64(i)*2, ch)
-								}
-								mem.Write16(pszText+uint64(len(nameU16))*2, 0)
 							}
 						}
 						if mask&tvifParam != 0 {
-							mem.Write64(lParam+48, ti.param)
+							_ = writeGuestPointer(mem, lParam+layout.param, ti.param, is32)
 						}
 						if mask&tvifState != 0 {
-							mem.Write32(lParam+16, ti.state)
+							stateMask, _ := mem.Read32(lParam + layout.state + 4)
+							mem.Write32(lParam+layout.state, ti.state&stateMask)
 						}
 						return 1, true
 					}
 				}
 				return 0, true
-			case tvFirst + 63: // TVM_SETITEMW
+			case tvmSetItemA, tvmSetItemW:
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
-					hItem, _ := mem.Read64(lParam + 8)
+					hItem, _ := readGuestPointer(mem, lParam+layout.item, is32)
 					if ti, ok := cs.treeViewIndex[hItem]; ok {
 						const tvifText = 0x0001
 						const tvifParam = 0x0004
 						const tvifState = 0x0008
 						if mask&tvifText != 0 {
-							pszText, _ := mem.Read64(lParam + 24)
+							pszText, _ := readGuestPointer(mem, lParam+layout.text, is32)
 							if pszText != 0 {
-								ti.text = readGuestUTF16(pszText)
+								if msg == tvmSetItemW {
+									ti.text = readGuestUTF16(pszText)
+								} else {
+									ti.text = readGuestString(pszText)
+								}
 							}
 						}
 						if mask&tvifParam != 0 {
-							ti.param, _ = mem.Read64(lParam + 48)
+							ti.param, _ = readGuestPointer(mem, lParam+layout.param, is32)
 						}
 						if mask&tvifState != 0 {
-							ti.state, _ = mem.Read32(lParam + 16)
+							state, _ := mem.Read32(lParam + layout.state)
+							stateMask, _ := mem.Read32(lParam + layout.state + 4)
+							ti.state = (ti.state &^ stateMask) | (state & stateMask)
 						}
 						syncTreeViewCompat(cs)
 						hctx.QueuePaint(hwnd)
@@ -3999,11 +5351,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				return 1, true
-			case tvFirst + 14: // TVM_EDITLABELW
+			case tvmEditLabelA, tvmEditLabelW:
 				return 0, true
-			case tvFirst + 26: // TVM_GETCOUNT
+			case tvmGetCount:
 				return uint64(len(cs.treeViewIndex)), true
-			case tvFirst + 10: // TVM_GETNEXTITEM
+			case tvmGetNextItem:
 				switch uint32(wParam) {
 				case 0x0001: // TVGN_ROOT
 					if len(tv.root.children) > 0 {
@@ -4038,9 +5390,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				return 0, true
-			case tvFirst + 4: // TVM_GETITEMRECT
+			case tvmGetItemRect:
 				if lParam != 0 {
-					hItem, _ := mem.Read64(lParam)
+					hItem, _ := readGuestPointer(mem, lParam, is32)
 					if _, ok := cs.treeViewIndex[hItem]; ok {
 						items := treeViewVisibleItems(tv)
 						for idx, item := range items {
@@ -4056,7 +5408,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				return 0, true
-			case tvFirst + 19: // TVM_SORTCHILDREN
+			case tvmSortChildren:
 				parent := tv.root
 				if lParam != 0 {
 					var ok bool
@@ -4074,7 +5426,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return 1, true
 			default:
-				if msg >= tvFirst && msg < tvFirst+100 {
+				if msg >= tvmInsertItemA && msg < tvmInsertItemA+100 {
 					return 0, true
 				}
 			}
@@ -4084,6 +5436,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if cs.className == "syslistview32" {
 			const lvFirst = 0x1000
 			lv := cs.listView
+			is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+			layout := listViewItemOffsets(is32)
 			switch msg {
 			case lvFirst + 0: // LVM_GETBKCOLOR
 				return 0xFFFFFF, true
@@ -4106,11 +5460,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				iItemV, _ := mem.Read32(lParam + 4)
 				iSubItemV, _ := mem.Read32(lParam + 8)
 				state, _ := mem.Read32(lParam + 12)
-				pszText, _ := mem.Read64(lParam + 20)
-				iImageV, _ := mem.Read32(lParam + 28)
-				param, _ := mem.Read64(lParam + 40)
-				item := lvItem{image: int(int32(iImageV)), param: param, state: state}
-				if mask&0x0001 != 0 && pszText != 0 && pszText != 0xFFFFFFFFFFFFFFFF {
+				stateMask, _ := mem.Read32(lParam + 16)
+				pszText, _ := readGuestPointer(mem, lParam+layout.text, is32)
+				iImageV, _ := mem.Read32(lParam + layout.image)
+				param, _ := readGuestPointer(mem, lParam+layout.param, is32)
+				item := lvItem{image: int(int32(iImageV)), param: param}
+				if mask&0x0008 != 0 {
+					item.state = state & stateMask
+				}
+				if mask&0x0001 != 0 && pszText != 0 && !isTextCallbackPointer(pszText, is32) {
 					if msg == lvFirst+77 {
 						item.text = readGuestUTF16(pszText)
 					} else {
@@ -4134,8 +5492,15 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if item.image != 0 {
 							lv.items[idx].image = item.image
 						}
-						if item.state != 0 {
-							lv.items[idx].state = item.state
+						if mask&0x0008 != 0 {
+							lv.items[idx].state = (lv.items[idx].state &^ stateMask) | (state & stateMask)
+							if stateMask&0x0002 != 0 {
+								if state&0x0002 != 0 {
+									lv.selectedIdx = idx
+								} else if lv.selectedIdx == idx {
+									lv.selectedIdx = -1
+								}
+							}
 						}
 						hctx.QueuePaint(hwnd)
 						return uint64(idx), true
@@ -4193,7 +5558,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					mask, _ := mem.Read32(lParam)
 					fmtV, _ := mem.Read32(lParam + 4)
 					cx, _ := mem.Read32(lParam + 8)
-					pszText, _ := mem.Read64(lParam + 16)
+					pszText, _ := readGuestPointer(mem, lParam+listViewColumnTextOffset(is32), is32)
 					text := ""
 					if mask&0x0004 != 0 && pszText != 0 { // LVCF_TEXT
 						text = readGuestString(pszText)
@@ -4220,7 +5585,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					mask, _ := mem.Read32(lParam)
 					fmtV, _ := mem.Read32(lParam + 4)
 					cx, _ := mem.Read32(lParam + 8)
-					pszText, _ := mem.Read64(lParam + 16)
+					pszText, _ := readGuestPointer(mem, lParam+listViewColumnTextOffset(is32), is32)
 					text := ""
 					if mask&0x0004 != 0 && pszText != 0 { // LVCF_TEXT
 						text = readGuestUTF16(pszText)
@@ -4255,7 +5620,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						lv.columns[idx].width = int(int32(cx))
 					}
 					if mask&0x0004 != 0 {
-						pszText, _ := mem.Read64(lParam + 16)
+						pszText, _ := readGuestPointer(mem, lParam+listViewColumnTextOffset(is32), is32)
 						if pszText != 0 {
 							lv.columns[idx].text = readGuestUTF16(pszText)
 						}
@@ -4288,15 +5653,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return uint64(lv.columns[idx].width), true
 				}
 				return 0, true
-			case lvFirst + 31: // LVM_CREATEDRAGIMAGE
+			case lvFirst + 31: // LVM_GETHEADER
+				return 0, true
+			case lvFirst + 33: // LVM_CREATEDRAGIMAGE
 				return 0, true
 			case lvFirst + 54: // LVM_SETEXTENDEDLISTVIEWSTYLE
-				if wParam == 0 {
-					lv.extStyle = uint32(lParam)
-				} else {
-					lv.extStyle = (lv.extStyle &^ uint32(wParam)) | (uint32(lParam) & uint32(wParam))
-				}
-				return uint64(lv.extStyle), true
+				return uint64(setListViewExtendedStyle(lv, uint32(wParam), uint32(lParam))), true
 			case lvFirst + 55: // LVM_GETEXTENDEDLISTVIEWSTYLE
 				return uint64(lv.extStyle), true
 			case lvFirst + 75: // LVM_GETITEMW
@@ -4318,8 +5680,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				mask, _ := mem.Read32(lParam)
 				if mask&0x0001 != 0 {
-					pszText, _ := mem.Read64(lParam + 20)
-					cchTextMax, _ := mem.Read32(lParam + 28)
+					pszText, _ := readGuestPointer(mem, lParam+layout.text, is32)
+					cchTextMax, _ := mem.Read32(lParam + layout.textMax)
 					text := item.text
 					if lv.style&0x1000 == 0 && subIdx > 0 && subIdx-1 < len(item.subItems) {
 						text = item.subItems[subIdx-1]
@@ -4329,13 +5691,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				if mask&0x0002 != 0 {
-					mem.Write32(lParam+32, uint32(item.image))
+					mem.Write32(lParam+layout.image, uint32(item.image))
 				}
 				if mask&0x0004 != 0 {
-					mem.Write64(lParam+40, item.param)
+					_ = writeGuestPointer(mem, lParam+layout.param, item.param, is32)
 				}
 				if mask&0x0008 != 0 {
-					mem.Write32(lParam+12, item.state)
+					stateMask, _ := mem.Read32(lParam + 16)
+					mem.Write32(lParam+12, item.state&stateMask)
 				}
 				return 1, true
 			case lvFirst + 76: // LVM_SETITEMW
@@ -4355,8 +5718,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				mask, _ := mem.Read32(lParam)
 				item := &lv.items[idx]
 				if mask&0x0001 != 0 {
-					pszText, _ := mem.Read64(lParam + 20)
-					if pszText != 0 && pszText != 0xFFFFFFFFFFFFFFFF {
+					pszText, _ := readGuestPointer(mem, lParam+layout.text, is32)
+					if pszText != 0 && !isTextCallbackPointer(pszText, is32) {
 						text := readGuestUTF16(pszText)
 						if subIdx > 0 {
 							for len(item.subItems) < subIdx {
@@ -4369,14 +5732,23 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				if mask&0x0002 != 0 {
-					iImageV, _ := mem.Read32(lParam + 28)
+					iImageV, _ := mem.Read32(lParam + layout.image)
 					item.image = int(int32(iImageV))
 				}
 				if mask&0x0004 != 0 {
-					item.param, _ = mem.Read64(lParam + 40)
+					item.param, _ = readGuestPointer(mem, lParam+layout.param, is32)
 				}
 				if mask&0x0008 != 0 {
-					item.state, _ = mem.Read32(lParam + 12)
+					state, _ := mem.Read32(lParam + 12)
+					stateMask, _ := mem.Read32(lParam + 16)
+					item.state = (item.state &^ stateMask) | (state & stateMask)
+					if stateMask&0x0002 != 0 {
+						if state&0x0002 != 0 {
+							lv.selectedIdx = idx
+						} else if lv.selectedIdx == idx {
+							lv.selectedIdx = -1
+						}
+					}
 				}
 				hctx.QueuePaint(hwnd)
 				return 1, true
@@ -4692,11 +6064,40 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return innerBuiltin(hwnd, msg, wParam, lParam)
 		}
 		initBuiltinControlState(cs)
+		validatePaint := func() {
+			hctx.WinInvalid[hwnd] = false
+			delete(hctx.WinErasePending, hwnd)
+			win32.Global.Validate(hwnd)
+		}
 		switch cs.className {
+		case "msctls_trackbar32":
+			const tbmFirst = 0x0400
+			switch msg {
+			case tbmFirst: // TBM_GETPOS
+				return uint64(uint32(cs.trackPos)), true
+			case tbmFirst + 1: // TBM_GETRANGEMIN
+				return uint64(uint32(cs.trackMin)), true
+			case tbmFirst + 2: // TBM_GETRANGEMAX
+				return uint64(uint32(cs.trackMax)), true
+			case tbmFirst + 5: // TBM_SETPOS
+				cs.trackPos = int32(lParam)
+				return 0, true
+			case tbmFirst + 6: // TBM_SETRANGE
+				cs.trackMin = int32(int16(lParam & 0xFFFF))
+				cs.trackMax = int32(int16((lParam >> 16) & 0xFFFF))
+				return 0, true
+			case tbmFirst + 7: // TBM_SETRANGEMIN
+				cs.trackMin = int32(lParam)
+				return 0, true
+			case tbmFirst + 8: // TBM_SETRANGEMAX
+				cs.trackMax = int32(lParam)
+				return 0, true
+			}
 		case "rebarwindow32":
 			const rbFirst = 0x0400
 			switch msg {
 			case 0x000F: // WM_PAINT
+				validatePaint()
 				// Rebar is a container for toolbars - do NOT fill background here.
 				// Child toolbars draw inside the same rect and we must not overwrite them.
 				// Only draw the 3D-edge lines.
@@ -4780,8 +6181,43 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			const tbFirst = 0x0400
 			const wmUser = 0x0400
 			tb := cs.toolbar
+			is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+			buttonLayout := toolbarButtonOffsets(is32)
+			buttonInfoLayout := toolbarButtonInfoOffsets(is32)
+			if os.Getenv("RAVEN_TRACE_TOOLBAR") != "" && msg != 0x000F {
+				ravelog.Logf("[toolbar-msg] hwnd=0x%x msg=0x%x wParam=0x%x lParam=0x%x\n", hwnd, msg, wParam, lParam)
+			}
+			readToolbarButton := func(base uint64, wide bool) tbButton {
+				iBitmap, _ := mem.Read32(base)
+				idCommand, _ := mem.Read32(base + 4)
+				stateBytes, _ := mem.ReadBytes(base+8, 2)
+				state, style := byte(0), byte(0)
+				if len(stateBytes) == 2 {
+					state = stateBytes[0]
+					style = stateBytes[1]
+				}
+				data, _ := readGuestPointer(mem, base+buttonLayout.data, is32)
+				stringValue, _ := readGuestPointer(mem, base+buttonLayout.string, is32)
+				button := tbButton{
+					id:          int(int32(idCommand)),
+					iBitmap:     int(int32(iBitmap)),
+					state:       int(state),
+					style:       int(style),
+					param:       data,
+					stringValue: stringValue,
+				}
+				if stringValue > 0xFFFF {
+					if wide {
+						button.text = readGuestUTF16(stringValue)
+					} else {
+						button.text = readGuestString(stringValue)
+					}
+				}
+				return button
+			}
 			switch msg {
 			case 0x000F: // WM_PAINT
+				validatePaint()
 				if wlWindow != nil {
 					// Draw toolbar background - slightly darker than button face for contrast
 					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, 0xD4D0C8)
@@ -4808,7 +6244,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						wlWindow.DrawRectAbs(bx+bw-1, by, bx+bw, by+bh, 0x716F64)       // outer right shadow
 						wlWindow.DrawRectAbs(bx, by+bh-1, bx+bw, by+bh, 0x716F64)       // outer bottom shadow
 					}
+					fallbackKey := toolbarFallbackKey{
+						parent: cs.parentHWND,
+						layout: toolbarLayoutSignature(tb),
+					}
 					for _, btn := range tb.buttons {
+						if btn.state&0x08 != 0 {
+							continue
+						}
 						if x >= cs.x+cs.w {
 							break
 						}
@@ -4824,6 +6267,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						iconIdx := btn.iBitmap
 						iconW := int(cs.tbBitmapIconW)
 						iconH := int(cs.tbBitmapIconH)
+						if cs.tbImageList != 0 {
+							if width, height, ok := comctl32.ImageListGetIconSize(cs.tbImageList); ok {
+								iconW = int(width)
+								iconH = int(height)
+								cs.tbBitmapIconW = width
+								cs.tbBitmapIconH = height
+							}
+						}
 						if iconW <= 0 {
 							iconW = 16
 						}
@@ -4831,8 +6282,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							iconH = 16
 						}
 						var pix []uint32
-						if iconIdx >= 0 && iconIdx < len(cs.tbBitmapStore) {
-							pix = cs.tbBitmapStore[iconIdx]
+						imagePresent := false
+						iconStore := cs.tbBitmapStore
+						if cs.tbImageList != 0 {
+							imagePixels, mask, hasAlpha, ok := comctl32.ImageListGetImage(cs.tbImageList, int32(iconIdx))
+							if ok {
+								imagePresent = true
+								pix = toolbarImagePixels(imagePixels, mask, hasAlpha, iconW, iconH)
+							}
+						}
+						if cs.tbImageList == 0 && len(pix) == 0 && iconIdx >= 0 && iconIdx < len(iconStore) {
+							pix = iconStore[iconIdx]
 							if len(pix) == 0 && cs.tbHandleMap != nil {
 								if ref, ok2 := cs.tbHandleMap[iconIdx]; ok2 {
 									if bd, ok3 := hctx.BitmapHandles[ref.handle]; ok3 && ref.slotIndex < len(bd.slots) {
@@ -4863,6 +6323,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 									}
 								}
 							}
+						}
+						if cs.tbImageList == 0 && toolbarIconHasVisiblePixel(pix) {
+							cacheToolbarFallbackIcon(hctx, fallbackKey, iconIdx, iconW, iconH, pix)
+						} else if imagePresent && !toolbarIconHasVisiblePixel(pix) {
+							pix = toolbarFallbackIcon(hctx, fallbackKey, iconIdx, iconW, iconH)
 						}
 						if len(pix) > 0 {
 							offX := x + (btnW-int32(iconW))/2
@@ -4918,43 +6383,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				x := int32(2)
 				for _, btn := range tb.buttons {
+					if btn.state&0x08 != 0 {
+						continue
+					}
 					if btn.style&0x01 != 0 { // TBSTYLE_SEP
 						x += 8
 						continue
 					}
 					if clickX >= x && clickX < x+btnW {
-						if btn.state&0x08 == 0 { // dispatch unless TBSTATE_HIDDEN (0x08)
+						if btn.state&0x0C == 0x04 {
 							// WM_COMMAND: LOWORD=cmdID, HIWORD=1 (BN_CLICKED), lParam=toolbar HWND
-							hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{cs.parentHWND, 0x0111,
-								uint64(uint16(btn.id)) | (1 << 16), hwnd})
+							hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111,
+								uint64(uint16(btn.id))|(1<<16), hwnd))
 						}
 						break
 					}
 					x += btnW + 1
 				}
 				return 0, true
-			case wmUser + 3: // TB_ENABLEBUTTON
+			case wmUser + 1: // TB_ENABLEBUTTON
 				id := int(int32(wParam))
-				for i := range tb.buttons {
-					if tb.buttons[i].id == id {
-						if lParam != 0 {
-							tb.buttons[i].state &^= 0x04
-						} else {
-							tb.buttons[i].state |= 0x04
-						}
-						syncToolbarCompat(cs)
-						hctx.QueuePaint(hwnd)
-						break
-					}
+				if setToolbarButtonFlag(tb, id, 0x04, lParam != 0) {
+					syncToolbarCompat(cs)
+					hctx.QueuePaint(hwnd)
 				}
 				return 1, true
-			case wmUser + 4: // TB_CHECKBUTTON
+			case wmUser + 2: // TB_CHECKBUTTON
+				setToolbarButtonFlag(tb, int(int32(wParam)), 0x01, lParam != 0)
+				syncToolbarCompat(cs)
+				hctx.QueuePaint(hwnd)
 				return 1, true
-			case wmUser + 8: // TB_PRESSBUTTON
+			case wmUser + 3: // TB_PRESSBUTTON
+				setToolbarButtonFlag(tb, int(int32(wParam)), 0x02, lParam != 0)
+				syncToolbarCompat(cs)
+				hctx.QueuePaint(hwnd)
 				return 1, true
-			case wmUser + 9: // TB_HIDEBUTTON
+			case wmUser + 4: // TB_HIDEBUTTON
+				setToolbarButtonFlag(tb, int(int32(wParam)), 0x08, lParam != 0)
+				syncToolbarCompat(cs)
+				hctx.QueuePaint(hwnd)
 				return 1, true
-			case wmUser + 6: // TB_GETSTATE
+			case wmUser + 18: // TB_GETSTATE
 				id := int(int32(wParam))
 				for _, btn := range tb.buttons {
 					if btn.id == id {
@@ -4962,13 +6431,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				return 0, true
-			case wmUser + 11: // TB_ISBUTTONCHECKED
-				return 0, true
-			case wmUser + 10: // TB_ISBUTTONENABLED
+			case wmUser + 10: // TB_ISBUTTONCHECKED
 				id := int(int32(wParam))
 				for _, btn := range tb.buttons {
 					if btn.id == id {
-						if btn.state&0x04 == 0 {
+						if btn.state&0x01 != 0 {
+							return 1, true
+						}
+						return 0, true
+					}
+				}
+				return 0, true
+			case wmUser + 9: // TB_ISBUTTONENABLED
+				id := int(int32(wParam))
+				for _, btn := range tb.buttons {
+					if btn.id == id {
+						if btn.state&0x04 != 0 {
 							return 1, true
 						}
 						return 0, true
@@ -4979,8 +6457,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				startIdx := len(cs.tbBitmapStore)
 				nBitmaps := int(wParam)
 				if lParam != 0 && mainModule != nil {
-					hInst, _ := mem.Read64(lParam)
-					nID, _ := mem.Read64(lParam + 8)
+					hInst, _ := readGuestPointer(mem, lParam, is32)
+					nID, _ := readGuestPointer(mem, lParam+toolbarAddBitmapResourceOffset(is32), is32)
 					iconW := int(cs.tbBitmapIconW)
 					iconH := int(cs.tbBitmapIconH)
 					if iconW <= 0 {
@@ -4992,7 +6470,36 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ravelog.Logf("[toolbar] TB_ADDBITMAP nBitmaps=%d hInst=0x%x nID=0x%x mainBase=0x%x iconW=%d iconH=%d\n",
 						nBitmaps, hInst, nID, mainModule.BaseAddr, iconW, iconH)
 
-					if hInst == 0 {
+					hinstCommctrl := ^uint64(0)
+					if is32 {
+						hinstCommctrl = uint64(^uint32(0))
+					}
+					if hInst == hinstCommctrl {
+						if nBitmaps <= 0 {
+							nBitmaps = 1
+						}
+						for i := 0; i < nBitmaps; i++ {
+							cs.tbBitmapStore = append(cs.tbBitmapStore, makeToolbarPlaceholderIcon(iconW, iconH, nID+uint64(i)))
+						}
+						return uint64(startIdx), true
+					} else if hInst == 0 {
+						if _, ok2 := hctx.BitmapHandles[nID]; !ok2 {
+							obj := gdiMgr.GetObject(nID)
+							if obj == nil || obj.Bitmap == nil || obj.Bitmap.Surf == nil {
+								if lParam != 0 && mainModule != nil {
+									if nID != 0 {
+										if addr, sz, ok3 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 2, uint32(nID)); ok3 {
+											slots := decodeDIBSlots(addr, sz, iconW, iconH)
+											ravelog.Logf("[toolbar] TB_ADDBITMAP fallback resource id=0x%x decoded %d icon slots\n", uint32(nID), len(slots))
+											cs.tbBitmapStore = append(cs.tbBitmapStore, slots...)
+											return uint64(startIdx), true
+										}
+									}
+								}
+								ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP 0x%x not found, returning failure\n", nID)
+								return uint64(uint32(0xFFFFFFFF)), true
+							}
+						}
 						// nID is an HBITMAP handle (LoadBitmap/LoadImage or CreateDIBSection).
 						// Check bitmapHandles, then gdiMgr (DIBSection), then defer lazy.
 						if bd, ok2 := hctx.BitmapHandles[nID]; ok2 && len(bd.slots) > 0 {
@@ -5052,62 +6559,30 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							ravelog.Logf("[toolbar] TB_ADDBITMAP decoded %d icon slots\n", len(slots))
 							cs.tbBitmapStore = append(cs.tbBitmapStore, slots...)
 						} else {
-							for i := 0; i < nBitmaps; i++ {
-								cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
-							}
+							return uint64(uint32(0xFFFFFFFF)), true
 						}
 					} else {
 						ravelog.Logf("[toolbar] TB_ADDBITMAP hInst mismatch 0x%x, skipping\n", hInst)
-						for i := 0; i < nBitmaps; i++ {
-							cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
-						}
+						return uint64(uint32(0xFFFFFFFF)), true
 					}
 				}
 				return uint64(startIdx), true
-			case wmUser + 20: // TB_ADDBUTTONSA
-				return 1, true
-			case wmUser + 68: // TB_ADDBUTTONSW
-				// TBBUTTON (64-bit layout): iBitmap(4), idCommand(4), fsState(1), fsStyle(1), bReserved(6), dwData(8), iString(8) = 32 bytes
+			case wmUser + 20, wmUser + 68: // TB_ADDBUTTONSA, TB_ADDBUTTONSW
 				nButtons := int(wParam)
 				btnStruct := lParam
-				const tbBtnSize = uint64(32)
 				for i := 0; i < nButtons; i++ {
-					base := btnStruct + uint64(i)*tbBtnSize
-					iBitmapV, _ := mem.Read32(base)
-					idCommandV, _ := mem.Read32(base + 4)
-					stateBytes, _ := mem.ReadBytes(base+8, 2)
-					fsState, fsStyle := byte(0), byte(0)
-					if len(stateBytes) >= 2 {
-						fsState = stateBytes[0]
-						fsStyle = stateBytes[1]
-					}
-					tb.buttons = append(tb.buttons, tbButton{
-						id:      int(int32(idCommandV)),
-						iBitmap: int(int32(iBitmapV)),
-						state:   int(fsState),
-						style:   int(fsStyle),
-					})
-					if i < 5 { // log first few to avoid spam
-						ravelog.Logf("[toolbar] TB_ADDBUTTONSW[%d] iBitmap=%d idCmd=0x%x state=0x%x style=0x%x\n", i, iBitmapV, idCommandV, fsState, fsStyle)
-					}
+					base := btnStruct + uint64(i)*buttonLayout.size
+					tb.buttons = append(tb.buttons, readToolbarButton(base, msg == wmUser+68))
 				}
 				syncToolbarCompat(cs)
 				hctx.QueuePaint(hwnd)
 				return 1, true
-			case wmUser + 67: // TB_INSERTBUTTONW
+			case wmUser + 21, wmUser + 67: // TB_INSERTBUTTONA, TB_INSERTBUTTONW
 				idx := int(int32(wParam))
 				if lParam == 0 {
 					return 0, true
 				}
-				iBitmapV, _ := mem.Read32(lParam)
-				idCommandV, _ := mem.Read32(lParam + 4)
-				stateBytes, _ := mem.ReadBytes(lParam+8, 2)
-				fsState, fsStyle := byte(0), byte(0)
-				if len(stateBytes) >= 2 {
-					fsState = stateBytes[0]
-					fsStyle = stateBytes[1]
-				}
-				btn := tbButton{id: int(int32(idCommandV)), iBitmap: int(int32(iBitmapV)), state: int(fsState), style: int(fsStyle)}
+				btn := readToolbarButton(lParam, msg == wmUser+67)
 				if idx < 0 || idx > len(tb.buttons) {
 					idx = len(tb.buttons)
 				}
@@ -5117,14 +6592,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				syncToolbarCompat(cs)
 				hctx.QueuePaint(hwnd)
 				return 1, true
-			case wmUser + 44: // TB_BUTTONSTRUCTSIZE
+			case wmUser + 30: // TB_BUTTONSTRUCTSIZE
 				return 0, true
-			case wmUser + 45: // TB_SETBITMAPSIZE
+			case wmUser + 32: // TB_SETBITMAPSIZE
 				cs.tbBitmapIconW = int32(lParam & 0xFFFF)
 				cs.tbBitmapIconH = int32((lParam >> 16) & 0xFFFF)
 				ravelog.Logf("[toolbar] TB_SETBITMAPSIZE iconW=%d iconH=%d\n", cs.tbBitmapIconW, cs.tbBitmapIconH)
 				return 1, true
-			case wmUser + 48: // TB_AUTOSIZE
+			case wmUser + 33: // TB_AUTOSIZE
 				cs.h = 26
 				// Set width to parent's client width
 				if parent, ok := hctx.HwndChildren[cs.parentHWND]; ok {
@@ -5133,19 +6608,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					cs.w = wlWindow.Width
 				}
 				return 0, true
-			case wmUser + 46: // TB_SETBUTTONSIZE
+			case wmUser + 31: // TB_SETBUTTONSIZE
 				cs.tbBtnW = int32(lParam & 0xFFFF)
 				cs.tbBtnH = int32((lParam >> 16) & 0xFFFF)
 				return 1, true
-			case wmUser + 55: // TB_GETROWS
+			case wmUser + 40: // TB_GETROWS
 				return 1, true
-			case wmUser + 77: // TB_GETROWCOUNT
-				return 1, true
-			case wmUser + 56: // TB_GETBUTTONSIZE
+			case wmUser + 58: // TB_GETBUTTONSIZE
 				return (uint64(26) << 16) | 24, true // height=26, width=24
-			case wmUser + 22: // TB_BUTTONCOUNT
+			case wmUser + 24: // TB_BUTTONCOUNT
 				return uint64(len(tb.buttons)), true
-			case wmUser + 21: // TB_DELETEBUTTON
+			case wmUser + 22: // TB_DELETEBUTTON
 				idx := int(int32(wParam))
 				if idx >= 0 && idx < len(tb.buttons) {
 					tb.buttons = append(tb.buttons[:idx], tb.buttons[idx+1:]...)
@@ -5154,14 +6627,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					return 1, true
 				}
 				return 0, true
-			case wmUser + 71: // TB_SETTOOLTIPS
+			case wmUser + 36: // TB_SETTOOLTIPS
 				return 0, true
-			case wmUser + 36: // TB_SETMAXTEXTROWS
+			case wmUser + 60: // TB_SETMAXTEXTROWS
 				return 1, true
-			case wmUser + 70: // TB_SETIMAGELIST
+			case wmUser + 48: // TB_SETIMAGELIST
 				old := cs.tbImageList
 				cs.tbImageList = lParam
-				// Import images from ImageList into tbBitmapStore for rendering
 				if lParam != 0 {
 					count := int(comctl32.ImageListGetImageCount(lParam))
 					cx, cy, ok := comctl32.ImageListGetIconSize(lParam)
@@ -5169,44 +6641,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						cs.tbBitmapIconW = cx
 						cs.tbBitmapIconH = cy
 					}
-					for i := 0; i < count; i++ {
-						pix, _, hasAlpha, ok := comctl32.ImageListGetImage(lParam, int32(i))
-						if !ok || len(pix) == 0 {
-							cs.tbBitmapStore = append(cs.tbBitmapStore, nil)
-							continue
-						}
-						iw := int(cs.tbBitmapIconW)
-						ih := int(cs.tbBitmapIconH)
-						if iw <= 0 {
-							iw = 16
-						}
-						if ih <= 0 {
-							ih = 16
-						}
-						row := make([]uint32, iw*ih)
-						for py := 0; py < ih; py++ {
-							for px := 0; px < iw; px++ {
-								off := (py*iw + px) * 4
-								if off+3 >= len(pix) {
-									break
-								}
-								b, g, r, a := pix[off], pix[off+1], pix[off+2], pix[off+3]
-								if hasAlpha && a == 0 {
-									row[py*iw+px] = 0x00FF00FF // magenta = transparent
-								} else {
-									row[py*iw+px] = uint32(b) | uint32(g)<<8 | uint32(r)<<16 | uint32(a)<<24
-								}
-							}
-						}
-						cs.tbBitmapStore = append(cs.tbBitmapStore, row)
-					}
 					ravelog.Logf("[toolbar] TB_SETIMAGELIST h=0x%x count=%d iconW=%d iconH=%d\n",
 						lParam, count, cs.tbBitmapIconW, cs.tbBitmapIconH)
 				}
 				return old, true
-			case wmUser + 69: // TB_GETIMAGELIST
+			case wmUser + 49: // TB_GETIMAGELIST
 				return cs.tbImageList, true
-			case wmUser + 41: // TB_GETITEMRECT
+			case wmUser + 29: // TB_GETITEMRECT
 				if lParam != 0 {
 					btnIdx := int32(wParam)
 					x := btnIdx * 24
@@ -5216,17 +6657,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					mem.Write32(lParam+12, 26)
 				}
 				return 1, true
-			case wmUser + 27: // TB_GETBUTTONA
+			case wmUser + 23: // TB_GETBUTTON
+				index := int(int32(wParam))
+				if lParam == 0 || index < 0 || index >= len(tb.buttons) {
+					return 0, true
+				}
+				button := tb.buttons[index]
+				mem.Write32(lParam, uint32(int32(button.iBitmap)))
+				mem.Write32(lParam+4, uint32(int32(button.id)))
+				mem.Write8(lParam+8, uint8(button.state))
+				mem.Write8(lParam+9, uint8(button.style))
+				_ = writeGuestPointer(mem, lParam+buttonLayout.data, button.param, is32)
+				_ = writeGuestPointer(mem, lParam+buttonLayout.string, button.stringValue, is32)
+				return 1, true
+			case wmUser + 37: // TB_SETPARENT
 				return 0, true
-			case wmUser + 111: // TB_GETBUTTONW
-				return 0, true
-			case wmUser + 39: // TB_SETPARENT
-				return 0, true
-			case wmUser + 93: // TB_SETBUTTONINFOW
-				// TBBUTTONINFOW layout (64-bit):
-				// 0: cbSize(4), 4: dwMask(4), 8: idCommand(4), 12: iImage(4),
-				// 16: fsState(1), 17: fsStyle(1), 18: cx(2), 20: pad(4),
-				// 24: lParam(8), 32: pszText(8), 40: cchText(4)
+			case wmUser + 64, wmUser + 66: // TB_SETBUTTONINFOW, TB_SETBUTTONINFOA
 				id := int(int32(wParam))
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam + 4)
@@ -5247,12 +6693,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							tb.buttons[i].style = int(style)
 						}
 						if mask&0x0010 != 0 { // TBIF_LPARAM
-							tb.buttons[i].param, _ = mem.Read64(lParam + 24)
+							tb.buttons[i].param, _ = readGuestPointer(mem, lParam+buttonInfoLayout.param, is32)
 						}
 						if mask&0x0002 != 0 { // TBIF_TEXT
-							pszText, _ := mem.Read64(lParam + 32)
+							pszText, _ := readGuestPointer(mem, lParam+buttonInfoLayout.text, is32)
 							if pszText != 0 {
-								tb.buttons[i].text = readGuestUTF16(pszText)
+								if msg == wmUser+64 {
+									tb.buttons[i].text = readGuestUTF16(pszText)
+								} else {
+									tb.buttons[i].text = readGuestString(pszText)
+								}
 							}
 						}
 						syncToolbarCompat(cs)
@@ -5261,7 +6711,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				return 1, true
-			case wmUser + 95: // TB_GETBUTTONINFOW
+			case wmUser + 63, wmUser + 65: // TB_GETBUTTONINFOW, TB_GETBUTTONINFOA
 				if lParam == 0 {
 					return uint64(^uint32(0)), true
 				}
@@ -5281,24 +6731,28 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						mem.Write8(lParam+17, uint8(btn.style))
 					}
 					if mask&0x0010 != 0 { // TBIF_LPARAM
-						mem.Write64(lParam+24, btn.param)
+						_ = writeGuestPointer(mem, lParam+buttonInfoLayout.param, btn.param, is32)
 					}
 					if mask&0x0002 != 0 { // TBIF_TEXT
-						pszText, _ := mem.Read64(lParam + 32)
-						cchText, _ := mem.Read32(lParam + 40)
+						pszText, _ := readGuestPointer(mem, lParam+buttonInfoLayout.text, is32)
+						cchText, _ := mem.Read32(lParam + buttonInfoLayout.textMax)
 						if pszText != 0 && cchText > 0 {
-							ws := utf16Encode(btn.text)
-							limit := int(cchText) - 1
-							if limit < 0 {
-								limit = 0
+							if msg == wmUser+63 {
+								ws := utf16Encode(btn.text)
+								limit := int(cchText) - 1
+								if limit < 0 {
+									limit = 0
+								}
+								if len(ws) > limit {
+									ws = ws[:limit]
+								}
+								for j, ch := range ws {
+									mem.Write16(pszText+uint64(j*2), ch)
+								}
+								mem.Write16(pszText+uint64(len(ws))*2, 0)
+							} else {
+								writeGuestStringLimited(pszText, btn.text, int(cchText))
 							}
-							if len(ws) > limit {
-								ws = ws[:limit]
-							}
-							for j, ch := range ws {
-								mem.Write16(pszText+uint64(j*2), ch)
-							}
-							mem.Write16(pszText+uint64(len(ws))*2, 0)
 						}
 					}
 					return uint64(i), true
@@ -5315,13 +6769,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 				}
 				return 0, true
-			case wmUser + 63: // TB_GETEXTENDEDSTYLE
-				return 0, true
-			case wmUser + 64: // TB_SETEXTENDEDSTYLE
-				return 0, true
-			case wmUser + 28: // TB_LOADIMAGES
-				return 0, true
-			case wmUser + 5: // TB_GETBUTTON
+			case wmUser + 85: // TB_GETEXTENDEDSTYLE
+				return uint64(tb.extStyle), true
+			case wmUser + 84: // TB_SETEXTENDEDSTYLE
+				old := tb.extStyle
+				tb.extStyle = uint32(lParam)
+				return uint64(old), true
+			case wmUser + 50: // TB_LOADIMAGES
 				return 0, true
 			default:
 				return 0, true
@@ -5329,20 +6783,48 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 		case "systabcontrol32":
 			const tcmFirst = 0x1300
+			const (
+				tcifText  = 0x0001
+				tcifParam = 0x0008
+			)
+			if tabInputNeedsSubclassFirst(hctx.HwndWndProc[hwnd] != 0, hctx.CallBuiltinControl, msg) {
+				return 0, false
+			}
 			tab := cs.tab
+			if os.Getenv("RAVEN_TRACE_CLICK") != "" && msg != 0x000F {
+				ravelog.Logf("[tab-msg] hwnd=0x%x msg=0x%x wParam=0x%x curSel=%d\n", hwnd, msg, wParam, tab.curSel)
+			}
+			is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+			textOffset, paramOffset := tabItemOffsets(is32)
+			readItemPtr := func(addr uint64) uint64 {
+				if is32 {
+					v, _ := mem.Read32(addr)
+					return uint64(v)
+				}
+				v, _ := mem.Read64(addr)
+				return v
+			}
+			readItemParam := readItemPtr
+			writeItemParam := func(addr, value uint64) {
+				if is32 {
+					mem.Write32(addr, uint32(value))
+				} else {
+					mem.Write64(addr, value)
+				}
+			}
 			switch msg {
 			case tcmFirst + 7: // TCM_INSERTITEMA
 				item := tabItem{}
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
-					if mask&0x1 != 0 { // TCIF_TEXT
-						pText, _ := mem.Read64(lParam + 16)
+					if mask&tcifText != 0 {
+						pText := readItemPtr(lParam + textOffset)
 						if pText != 0 {
 							item.text = readGuestString(pText)
 						}
 					}
-					if mask&0x20 != 0 {
-						item.param, _ = mem.Read64(lParam + 24)
+					if mask&tcifParam != 0 {
+						item.param = readItemParam(lParam + paramOffset)
 					}
 				}
 				idx := int(int32(wParam))
@@ -5362,14 +6844,14 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				item := tabItem{}
 				if lParam != 0 {
 					mask, _ := mem.Read32(lParam)
-					if mask&0x1 != 0 { // TCIF_TEXT
-						pText, _ := mem.Read64(lParam + 16)
+					if mask&tcifText != 0 {
+						pText := readItemPtr(lParam + textOffset)
 						if pText != 0 {
 							item.text = readGuestUTF16(pText)
 						}
 					}
-					if mask&0x20 != 0 {
-						item.param, _ = mem.Read64(lParam + 24)
+					if mask&tcifParam != 0 {
+						item.param = readItemParam(lParam + paramOffset)
 					}
 				}
 				idx := int(int32(wParam))
@@ -5399,6 +6881,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0, true
 			case tcmFirst + 4: // TCM_GETITEMCOUNT
 				return uint64(len(tab.items)), true
+			case tcmFirst + 44: // TCM_GETROWCOUNT
+				return tabRowCount(tab), true
 			case tcmFirst + 11: // TCM_GETCURSEL
 				return uint64(tab.curSel), true
 			case tcmFirst + 12: // TCM_SETCURSEL
@@ -5458,8 +6942,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				idx := int(int32(wParam))
 				if idx >= 0 && idx < len(tab.items) && lParam != 0 {
 					mask, _ := mem.Read32(lParam)
-					if mask&0x1 != 0 {
-						pText, _ := mem.Read64(lParam + 16)
+					if mask&tcifText != 0 {
+						pText := readItemPtr(lParam + textOffset)
 						if pText != 0 {
 							ws := utf16Encode(tab.items[idx].text)
 							for i, ch := range ws {
@@ -5468,8 +6952,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							mem.Write16(pText+uint64(len(ws))*2, 0)
 						}
 					}
-					if mask&0x20 != 0 {
-						mem.Write64(lParam+24, tab.items[idx].param)
+					if mask&tcifParam != 0 {
+						writeItemParam(lParam+paramOffset, tab.items[idx].param)
 					}
 					return 1, true
 				}
@@ -5478,8 +6962,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				idx := int(int32(wParam))
 				if idx >= 0 && idx < len(tab.items) && lParam != 0 {
 					mask, _ := mem.Read32(lParam)
-					if mask&0x1 != 0 {
-						pText, _ := mem.Read64(lParam + 16)
+					if mask&tcifText != 0 {
+						pText := readItemPtr(lParam + textOffset)
 						if pText != 0 {
 							for i, b := range []byte(tab.items[idx].text) {
 								mem.Write8(pText+uint64(i), b)
@@ -5487,8 +6971,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							mem.Write8(pText+uint64(len(tab.items[idx].text)), 0)
 						}
 					}
-					if mask&0x20 != 0 {
-						mem.Write64(lParam+24, tab.items[idx].param)
+					if mask&tcifParam != 0 {
+						writeItemParam(lParam+paramOffset, tab.items[idx].param)
 					}
 					return 1, true
 				}
@@ -5497,38 +6981,31 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				idx := int(int32(wParam))
 				if idx >= 0 && idx < len(tab.items) && lParam != 0 {
 					mask, _ := mem.Read32(lParam)
-					if mask&0x1 != 0 {
-						pText, _ := mem.Read64(lParam + 16)
+					if mask&tcifText != 0 {
+						pText := readItemPtr(lParam + textOffset)
 						if pText != 0 {
 							tab.items[idx].text = readGuestUTF16(pText)
 						}
 					}
-					if mask&0x20 != 0 {
-						tab.items[idx].param, _ = mem.Read64(lParam + 24)
+					if mask&tcifParam != 0 {
+						tab.items[idx].param = readItemParam(lParam + paramOffset)
 					}
 					syncTabCompat(cs)
 					hctx.QueuePaint(hwnd)
 					return 1, true
 				}
 				return 0, true
-			case tcmFirst + 48: // TCM_ADJUSTRECT
-				// Shrinks or expands rect by tab bar height
+			case tcmAdjustRect: // TCM_ADJUSTRECT
 				if lParam != 0 {
 					l, _ := mem.Read32(lParam)
 					t, _ := mem.Read32(lParam + 4)
 					r, _ := mem.Read32(lParam + 8)
 					b, _ := mem.Read32(lParam + 12)
-					if wParam != 0 { // expand from display area
-						mem.Write32(lParam, l)
-						mem.Write32(lParam+4, t)
-						mem.Write32(lParam+8, r)
-						mem.Write32(lParam+12, b+22)
-					} else { // shrink to display area
-						mem.Write32(lParam, l)
-						mem.Write32(lParam+4, t+22)
-						mem.Write32(lParam+8, r)
-						mem.Write32(lParam+12, b)
-					}
+					rect := adjustTabRect([4]int32{int32(l), int32(t), int32(r), int32(b)}, cs.style, wParam != 0, 22, 1)
+					mem.Write32(lParam, uint32(rect[0]))
+					mem.Write32(lParam+4, uint32(rect[1]))
+					mem.Write32(lParam+8, uint32(rect[2]))
+					mem.Write32(lParam+12, uint32(rect[3]))
 				}
 				return 0, true
 			case tcmFirst + 26: // TCM_SETITEMSIZE
@@ -5539,7 +7016,16 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				cs.w = int32(lParam & 0xFFFF)
 				cs.h = int32(lParam >> 16)
 				return 0, true
-			case 0x000F: // WM_PAINT - draw tab bar strip (not the full client area)
+			case 0x000F: // WM_PAINT: draw tab bar strip (not the full client area)
+				validatePaint()
+				// A tab control inside an owned dialog (e.g. NPP's Find/Replace)
+				// must be painted by the dialog renderer into the dialog's own
+				// window, not hardcoded onto the main window. Otherwise the tab
+				// strip leaks onto the main window and the panel never switches.
+				if root, target, isOwnedDialog := topLevelDialogTarget(hctx, hwnd); isOwnedDialog && target != nil {
+					renderOwnedDialog(hctx, root, target)
+					return 0, true
+				}
 				if wlWindow != nil {
 					const tabH = int32(22) // height of tab header strip
 					// Only fill the tab strip area, not the entire control height
@@ -5586,16 +7072,31 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 					tx += tw
 				}
-				if hitTab >= 0 && hitTab != tab.curSel {
-					tab.curSel = hitTab
+				if os.Getenv("RAVEN_TRACE_CLICK") != "" {
+					ravelog.Logf("[tab-click] hwnd=0x%x clickX=%d hitTab=%d curSel=%d parent=0x%x is32=%v\n",
+						hwnd, clickX, hitTab, tab.curSel, cs.parentHWND, mem.Mode32)
+				}
+				notifyParent := func(code uint32) uint64 {
+					if hctx.NotifyBuf == 0 {
+						hctx.NotifyBuf = mem.Mmap(0, 128, mmu.PermRead|mmu.PermWrite)
+					}
+					nmhdr := hctx.NotifyBuf
+					if code == tcnSelChanging {
+						nmhdr += 64
+					}
+					if mem.Mode32 {
+						mem.Write32(nmhdr, uint32(hwnd))
+						mem.Write32(nmhdr+4, uint32(cs.ctrlID))
+						mem.Write32(nmhdr+8, code)
+					} else {
+						mem.Write64(nmhdr, hwnd)
+						mem.Write64(nmhdr+8, uint64(cs.ctrlID))
+						mem.Write32(nmhdr+16, code)
+					}
+					return sendNotifySync(cs.parentHWND, 0x004E, uint64(cs.ctrlID), nmhdr)
+				}
+				if selectTabFromInput(tab, hitTab, notifyParent) {
 					syncTabCompat(cs)
-					// Send WM_NOTIFY(TCN_SELCHANGE=-551) to parent so NPP switches document.
-					// NMHDR layout: hwndFrom(8), idFrom(8), code(4+4pad).
-					nmhdr := hctx.ScratchAlloc(32)
-					mem.Write64(nmhdr, hwnd)
-					mem.Write64(nmhdr+8, uint64(cs.ctrlID))
-					mem.Write32(nmhdr+16, 0xFFFFFDE9) // TCN_SELCHANGE = -551
-					hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{cs.parentHWND, 0x004E, uint64(cs.ctrlID), nmhdr})
 					// Repaint tab strip to show new selection.
 					hctx.QueuePaint(hwnd)
 				}
@@ -5771,6 +7272,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		sort.Slice(children, func(i, j int) bool { return children[i] < children[j] })
 		for _, h := range children {
 			cs := hctx.HwndChildren[h]
+			if hctx.WlWindows[h] != nil || (strings.EqualFold(cs.className, "dialog") && cs.parentHWND == hctx.MainHWND) {
+				continue
+			}
 			ravelog.Logf("[paint] paintTree child=0x%x class=%q pos=(%d,%d %dx%d)\n", h, cs.className, cs.x, cs.y, cs.w, cs.h)
 			hctx.BuiltinWndProc(h, 0x000F, 0, 0)
 			hctx.PaintTree(h)
@@ -5917,6 +7421,26 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			rw.WriteReg(8, wParam)
 			rw.WriteReg(9, lParam)
 		}
+		// Injected WndProc dispatches set PCRedirected, so ntapi.Handle skips its
+		// own callee-saved-register restore and delegates it to the trampoline's
+		// per-frame restore. A non-ABI-compliant guest WndProc (e.g. kkrieger's,
+		// which leaves EBX != 0 after DirectSound setup in WM_CREATE) would then
+		// leak a clobbered EBX/EBP/ESI/EDI back into the interrupted caller (the
+		// message pump), breaking it. Capture the caller's pristine callee-saved
+		// registers into the top sync frame on the FIRST dispatch (before any
+		// WndProc runs) so the trampoline can restore them on frame pop. Only the
+		// first setup saves; re-dispatch of queued messages sees hasSavedCalleeRegs
+		// already set and leaves the pristine snapshot intact. Handlers that set
+		// hasSavedCalleeRegs explicitly (CreateWindowExA) are likewise preserved.
+		if is32 {
+			syncStack := hctx.syncStack(ctx)
+			if n := len(*syncStack); n > 0 {
+				if f := &(*syncStack)[n-1]; !f.hasSavedCalleeRegs {
+					f.savedCalleeRegs = [4]uint64{rr.ReadReg(3), rr.ReadReg(5), rr.ReadReg(6), rr.ReadReg(7)} // EBX,EBP,ESI,EDI
+					f.hasSavedCalleeRegs = true
+				}
+			}
+		}
 		ctx.CPU.SetPC(wndProc)
 		ctx.ReturnOverridden = true
 		ctx.PCRedirected = true
@@ -5932,10 +7456,11 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		if !ok2 {
 			return 0
 		}
-		if len(hctx.SyncStack) == 0 {
+		syncStack := hctx.syncStack(ctx)
+		if len(*syncStack) == 0 {
 			return 0
 		}
-		frame := &hctx.SyncStack[len(hctx.SyncStack)-1]
+		frame := &(*syncStack)[len(*syncStack)-1]
 
 		if len(frame.queue) > 0 {
 			sd := frame.queue[0]
@@ -5949,20 +7474,36 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		hwnd := frame.hwnd
 		returnWndProcResult := frame.returnWndProcResult
 		isModal := frame.IsModalDialog
-		hctx.SyncStack = hctx.SyncStack[:len(hctx.SyncStack)-1]
+		modalDlgHwnd := frame.ModalDlgHwnd
+		modalLoopSP := frame.ModalLoopSP
+		modalLoopPC := frame.ModalLoopPC
+		// Restore the caller's callee-saved registers around an injected
+		// WndProc dispatch so it is transparent to the guest (see the
+		// syncDispatchFrame comment). Only for frames that captured them.
+		if frame.hasSavedCalleeRegs {
+			rw.WriteReg(3, frame.savedCalleeRegs[0]) // EBX
+			rw.WriteReg(5, frame.savedCalleeRegs[1]) // EBP
+			rw.WriteReg(6, frame.savedCalleeRegs[2]) // ESI
+			rw.WriteReg(7, frame.savedCalleeRegs[3]) // EDI
+		}
+		*syncStack = (*syncStack)[:len(*syncStack)-1]
 
-		// Modal-dialog redirect: after WM_INITDIALOG, re-enter the message loop
-		// instead of returning immediately to DialogBoxParamW's call site.
-		// EndDialog will later trigger the actual return via a stack unwind.
 		if isModal {
-			if msgLoopSP != 0 && msgLoopPC != 0 {
+			if hctx.FinishModalDialog != nil && hctx.FinishModalDialog(ctx, modalDlgHwnd) {
+				return 0
+			}
+			if modalLoopSP == 0 || modalLoopPC == 0 {
+				modalLoopSP = msgLoopSP
+				modalLoopPC = msgLoopPC
+			}
+			if modalLoopSP != 0 && modalLoopPC != 0 {
 				if is32 {
-					rsp := msgLoopSP - 4
-					mem.Write32(rsp, uint32(msgLoopPC))
+					rsp := modalLoopSP - 4
+					mem.Write32(rsp, uint32(modalLoopPC))
 					rw.WriteReg(4, rsp)
 				} else {
-					rsp := msgLoopSP - 8
-					mem.Write64(rsp, msgLoopPC)
+					rsp := modalLoopSP - 8
+					mem.Write64(rsp, modalLoopPC)
 					rw.WriteReg(4, rsp)
 				}
 				ctx.SetReturn(0)
@@ -6095,6 +7636,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	delayReg(func() { registerD3dHandlers(hctx) })
 	// --- opengl32.dll ---
 	delayReg(func() { registerOpengl32Handlers(hctx) })
+	return hctx
 }
 
 // autoSynthUnresolved generates synthetic stub DLLs for any DLLs referenced
@@ -6175,7 +7717,7 @@ func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[stri
 // These are variables (not functions) whose IAT slots must point to
 // actual guest memory containing the proper values.
 func patchCRTDataExports(mem *mmu.MMU, mainMod *loader.PEModule, argv []string) {
-	cmdLine := strings.Join(argv, " ")
+	cmdLine := windowsCommandLine(argv)
 
 	// Allocate a page for CRT data variables
 	dataPage := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
@@ -6573,6 +8115,80 @@ func populateVFSFromHost(fs *vfs.VFS, hostDir, vfsDir string) {
 	}
 }
 
+func preparePEGuestArgs(fs *vfs.VFS, imagePath string, argv []string) ([]string, map[string]string) {
+	imageDir := filepath.Base(filepath.Dir(imagePath))
+	guestArgs := make([]string, len(argv))
+	hostPaths := make(map[string]string)
+	if len(argv) == 0 {
+		return guestArgs, hostPaths
+	}
+	guestArgs[0] = `C:\` + imageDir + `\` + filepath.Base(imagePath)
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		if strings.Contains(arg, `\`) || len(arg) >= 2 && arg[1] == ':' {
+			guestArgs[i] = arg
+			continue
+		}
+		hostPath, err := filepath.Abs(arg)
+		if err != nil {
+			guestArgs[i] = arg
+			continue
+		}
+		info, err := os.Stat(hostPath)
+		if err != nil || info.IsDir() {
+			guestArgs[i] = arg
+			continue
+		}
+		data, err := os.ReadFile(hostPath)
+		if err != nil {
+			guestArgs[i] = arg
+			continue
+		}
+		guestPath := linuxToWinPath(hostPath)
+		vfsPath := winPathToVFS(guestPath)
+		fs.MkdirAll(filepath.Dir(vfsPath))
+		if err := fs.CreateFile(vfsPath, data, 0644); err != nil {
+			guestArgs[i] = arg
+			continue
+		}
+		guestArgs[i] = guestPath
+		hostPaths[vfsPath] = hostPath
+	}
+	return guestArgs, hostPaths
+}
+
+func windowsCommandLine(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		if arg != "" && !strings.ContainsAny(arg, " \t\"") {
+			quoted[i] = arg
+			continue
+		}
+		var value strings.Builder
+		value.WriteByte('"')
+		backslashes := 0
+		for _, ch := range arg {
+			if ch == '\\' {
+				backslashes++
+				continue
+			}
+			if ch == '"' {
+				value.WriteString(strings.Repeat(`\`, backslashes*2+1))
+				value.WriteRune(ch)
+				backslashes = 0
+				continue
+			}
+			value.WriteString(strings.Repeat(`\`, backslashes))
+			backslashes = 0
+			value.WriteRune(ch)
+		}
+		value.WriteString(strings.Repeat(`\`, backslashes*2))
+		value.WriteByte('"')
+		quoted[i] = value.String()
+	}
+	return strings.Join(quoted, " ")
+}
+
 // winPathToVFS converts a Windows-style path to a VFS path.
 func winPathToVFS(winPath string) string {
 	// Replace backslashes with forward slashes
@@ -6590,6 +8206,16 @@ func winPathToVFS(winPath string) string {
 		p = strings.ReplaceAll(p, "//", "/")
 	}
 	return p
+}
+
+func windowsFileMatch(pattern, name string) bool {
+	pattern = strings.ToLower(pattern)
+	name = strings.ToLower(name)
+	if pattern == "*" || pattern == "*.*" {
+		return true
+	}
+	matched, err := filepath.Match(pattern, name)
+	return err == nil && matched
 }
 
 // normalizePipeName strips the \\.\pipe\ prefix (case-insensitive) from a pipe path.
@@ -6682,6 +8308,104 @@ func waitOneWin32(handles *ntapi.HandleTable, h ntapi.Handle, tid uint32, timeou
 		return waitObject0
 	default:
 		return waitObject0
+	}
+}
+
+func readWin32HandleArray(mem *mmu.MMU, address, count uint64, is32 bool) []ntapi.Handle {
+	if count > 64 {
+		count = 64
+	}
+	result := make([]ntapi.Handle, 0, count)
+	stride := uint64(8)
+	if is32 {
+		stride = 4
+	}
+	for index := uint64(0); index < count; index++ {
+		if is32 {
+			value, err := mem.Read32(address + index*stride)
+			if err != nil {
+				return nil
+			}
+			result = append(result, ntapi.Handle(value))
+			continue
+		}
+		value, err := mem.Read64(address + index*stride)
+		if err != nil {
+			return nil
+		}
+		result = append(result, ntapi.Handle(value))
+	}
+	return result
+}
+
+func waitMultipleFallbackWin32(handles *ntapi.HandleTable, values []ntapi.Handle, tid uint32, waitAll bool, timeout time.Duration) uint64 {
+	const (
+		waitObject0    = uint64(0)
+		waitAbandoned0 = uint64(0x80)
+		waitTimeout    = uint64(0x102)
+		waitFailed     = uint64(0xFFFFFFFF)
+	)
+	if len(values) == 0 {
+		return waitFailed
+	}
+	waitables := make([]ntobj.Waitable, 0, len(values))
+	nonUnified := make([]ntapi.Handle, 0, len(values))
+	for _, handle := range values {
+		waitable := handles.WaitableFor(handle)
+		if waitable == nil {
+			nonUnified = append(nonUnified, handle)
+			continue
+		}
+		waitables = append(waitables, waitable)
+	}
+	if len(nonUnified) == 0 {
+		return uint64(ntapi.ObjMgr.Wait(waitables, waitAll, uint64(tid), timeout))
+	}
+	deadline := time.Time{}
+	if timeout >= 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	remaining := func() time.Duration {
+		if timeout < 0 {
+			return -1
+		}
+		value := time.Until(deadline)
+		if value < 0 {
+			return 0
+		}
+		return value
+	}
+	if waitAll {
+		for _, handle := range nonUnified {
+			result := waitOneWin32(handles, handle, tid, remaining())
+			if result != waitObject0 {
+				return result
+			}
+		}
+		if len(waitables) > 0 {
+			return uint64(ntapi.ObjMgr.Wait(waitables, true, uint64(tid), remaining()))
+		}
+		return waitObject0
+	}
+	for {
+		for index, handle := range values {
+			switch result := waitOneWin32(handles, handle, tid, 0); result {
+			case waitObject0:
+				return waitObject0 + uint64(index)
+			case waitAbandoned0:
+				return waitAbandoned0 + uint64(index)
+			}
+		}
+		if timeout >= 0 && !time.Now().Before(deadline) {
+			return waitTimeout
+		}
+		sleep := time.Millisecond
+		if timeout >= 0 && remaining() < sleep {
+			sleep = remaining()
+		}
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
 	}
 }
 
@@ -6783,9 +8507,8 @@ func saveScreenshot(pix []byte, w, h int, path string) {
 	os.WriteFile(path, buf.Bytes(), 0644)
 }
 
-// drawFindDialogOverlay renders the modeless Find/Replace dialog as an overlay
-// on the Wayland window. It also fills in the FindDialogState hit-test bounds.
-func drawFindDialogOverlay(hctx *HandlerCtx, w *wl.Window) {
+// drawFindDialogWindow renders the modeless Find/Replace dialog.
+func drawFindDialogWindow(hctx *HandlerCtx, w *wl.Window) {
 	fd := hctx.FindDialog
 	if fd == nil || w == nil {
 		return
@@ -6794,20 +8517,14 @@ func drawFindDialogOverlay(hctx *HandlerCtx, w *wl.Window) {
 		dlgW        = int32(380)
 		dlgHFind    = int32(130)
 		dlgHReplace = int32(160)
-		titleBarH   = int32(22)
 		pad         = int32(8)
 	)
 	dlgH := dlgHFind
 	if fd.IsReplace {
 		dlgH = dlgHReplace
 	}
-	// Position: top-right of window
-	winW := int32(w.Width)
-	x := winW - dlgW - 16
-	y := w.TitleBarH + 4
-	if x < 4 {
-		x = 4
-	}
+	x := int32(0)
+	y := int32(0)
 	fd.X, fd.Y, fd.W, fd.H = x, y, dlgW, dlgH
 
 	// Dialog background & border
@@ -6817,18 +8534,10 @@ func drawFindDialogOverlay(hctx *HandlerCtx, w *wl.Window) {
 	w.DrawRectAbs(x, y+dlgH-1, x+dlgW, y+dlgH, 0x808080)
 	w.DrawRectAbs(x+dlgW-1, y, x+dlgW, y+dlgH, 0x808080)
 
-	// Title bar
-	title := "Find"
-	if fd.IsReplace {
-		title = "Replace"
-	}
-	w.DrawRectAbs(x+1, y+1, x+dlgW-1, y+titleBarH, 0x0078D7)
-	hctx.NcDrawText(x+6, y+4, title, 0xFFFFFF, 0x0078D7, true, 11)
-
-	row := y + titleBarH + pad
+	row := y + pad
 
 	// "Find what:" label + edit field
-	hctx.NcDrawText(x+pad, row+3, "Find what:", 0x000000, 0xF0F0F0, true, 11)
+	w.DrawTextAbs(x+pad, row+3, "Find what:", 0x000000, 0xF0F0F0, true)
 	editX := x + pad + 76
 	editW := dlgW - pad - 76 - 90 - pad
 	editH := int32(20)
@@ -6841,14 +8550,14 @@ func drawFindDialogOverlay(hctx *HandlerCtx, w *wl.Window) {
 	if !fd.FocusOnReplace {
 		findDisplay += "_" // cursor indicator
 	}
-	hctx.NcDrawText(editX+3, row+3, findDisplay, 0x000000, 0xFFFFFF, true, 11)
+	w.DrawTextAbs(editX+3, row+3, findDisplay, 0x000000, 0xFFFFFF, true)
 	fd.FindEditX, fd.FindEditY, fd.FindEditW, fd.FindEditH = editX, row, editW, editH
 
 	row += editH + pad
 
 	// "Replace with:" label + edit field (Replace dialog only)
 	if fd.IsReplace {
-		hctx.NcDrawText(x+pad, row+3, "Replace with:", 0x000000, 0xF0F0F0, true, 11)
+		w.DrawTextAbs(x+pad, row+3, "Replace with:", 0x000000, 0xF0F0F0, true)
 		replEditX := x + pad + 90
 		replEditW := dlgW - pad - 90 - 90 - pad
 		w.DrawRectAbs(replEditX, row, replEditX+replEditW, row+editH, 0xFFFFFF)
@@ -6860,7 +8569,7 @@ func drawFindDialogOverlay(hctx *HandlerCtx, w *wl.Window) {
 		if fd.FocusOnReplace {
 			replDisplay += "_"
 		}
-		hctx.NcDrawText(replEditX+3, row+3, replDisplay, 0x000000, 0xFFFFFF, true, 11)
+		w.DrawTextAbs(replEditX+3, row+3, replDisplay, 0x000000, 0xFFFFFF, true)
 		fd.ReplEditX, fd.ReplEditY, fd.ReplEditW, fd.ReplEditH = replEditX, row, replEditW, editH
 		row += editH + pad
 	}
@@ -6880,10 +8589,10 @@ func drawFindDialogOverlay(hctx *HandlerCtx, w *wl.Window) {
 		if labelX < bx+4 {
 			labelX = bx + 4
 		}
-		hctx.NcDrawText(labelX, by+5, label, 0x000000, 0xE1E1E1, true, 11)
+		w.DrawTextAbs(labelX, by+5, label, 0x000000, 0xE1E1E1, true)
 	}
 
-	btnRow := y + titleBarH + pad
+	btnRow := y + pad
 	drawBtn(btnX, btnRow, "Find Next")
 	fd.FindNextBtnX, fd.FindNextBtnY, fd.FindNextBtnW, fd.FindNextBtnH = btnX, btnRow, btnW, btnH
 	btnRow += btnH + 4

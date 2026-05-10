@@ -41,6 +41,12 @@ func CreateShaderModule(device VkDevice, spirvCode []byte) (VkShaderModule, VkRe
 	return shader, res
 }
 
+func DestroyShaderModule(device VkDevice, shader VkShaderModule) {
+	if shader != 0 {
+		callVoid(procs.vkDestroyShaderModule, uintptr(device), uintptr(shader), 0)
+	}
+}
+
 func CreatePipelineLayout(device VkDevice, setLayouts []VkDescriptorSetLayout, pushConstantRanges []VkPushConstantRange) (VkPipelineLayout, VkResult) {
 	ci := VkPipelineLayoutCreateInfo{
 		SType:                  VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -56,6 +62,18 @@ func CreatePipelineLayout(device VkDevice, setLayouts []VkDescriptorSetLayout, p
 	var layout VkPipelineLayout
 	res := callResult(procs.vkCreatePipelineLayout, uintptr(device), uintptr(unsafe.Pointer(&ci)), 0, uintptr(unsafe.Pointer(&layout)))
 	return layout, res
+}
+
+func DestroyPipelineLayout(device VkDevice, layout VkPipelineLayout) {
+	if layout != 0 {
+		callVoid(procs.vkDestroyPipelineLayout, uintptr(device), uintptr(layout), 0)
+	}
+}
+
+func DestroyPipeline(device VkDevice, pipeline VkPipeline) {
+	if pipeline != 0 {
+		callVoid(procs.vkDestroyPipeline, uintptr(device), uintptr(pipeline), 0)
+	}
 }
 
 func CreateGraphicsPipeline(device VkDevice, renderPass VkRenderPass, layout VkPipelineLayout, vertShader, fragShader VkShaderModule, vertexBindings []VkVertexInputBindingDescription, vertexAttribs []VkVertexInputAttributeDescription, topology VkPrimitiveTopology) (VkPipeline, VkResult) {

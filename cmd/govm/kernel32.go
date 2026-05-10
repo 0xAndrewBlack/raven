@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"github.com/mirkobrombin/Raven/pkg/arch"
 	"github.com/mirkobrombin/Raven/pkg/loader"
@@ -17,15 +18,16 @@ import (
 	"golang.org/x/sys/unix"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf16"
@@ -68,6 +70,45 @@ var wiseInstallerDLL []byte
 // Used by GetProcAddress to route DoService to the real native entry point while
 // keeping IsAdmin stubbed (returns 1 = admin).
 var wiseW32WinstBase uint64
+
+type childProcessHandle struct {
+	process *os.Process
+}
+
+func (h *childProcessHandle) HandleType() string { return "Process" }
+
+type childThreadHandle struct{}
+
+func (*childThreadHandle) HandleType() string { return "Thread" }
+
+func releaseLibraryReference(refs map[uint64]uint32, module uint64) bool {
+	if module == 0 {
+		return false
+	}
+	count, ok := refs[module]
+	if !ok {
+		return false
+	}
+	if count > 1 {
+		refs[module]--
+	} else {
+		delete(refs, module)
+	}
+	return true
+}
+
+func hideGetProcAddressExport(moduleName, name string) bool {
+	return strings.EqualFold(moduleName, "ntdll.dll") && ntapi.IsHiddenNtdllExport(name)
+}
+
+func allowLazySynthExport(moduleName string) bool {
+	switch strings.ToLower(moduleName) {
+	case "ntdll.dll", "win32u.dll":
+		return false
+	default:
+		return true
+	}
+}
 
 // wiseW32WinstExports maps export names to native guest addresses inside W32WINST.DLL.
 // Populated when loadDLLFromVFS loads the DLL; consumed by GetProcAddress.
@@ -394,14 +435,30 @@ func loadDLLFromVFS(fs interface {
 			ravelog.Logf("[win32] loadDLLFromVFS: created stub DLL %q for %s imports\n", dllKey, modName)
 		}
 		if imp.FuncName != "" {
-			if _, has := synth.Exports[imp.FuncName]; !has {
+			if disp != nil {
+				_, nextID, added := disp.EnsureDynamicExport(mem, synth, imp.FuncName, *nextIDPtr)
+				*nextIDPtr = nextID
+				if added {
+					modifiedSynths[dllKey] = synth
+				}
+			} else if _, has := synth.Exports[imp.FuncName]; !has {
 				id := *nextIDPtr
 				*nextIDPtr++
 				synth.AddDynamicExport(mem, imp.FuncName, id)
 				modifiedSynths[dllKey] = synth
 			}
 		} else if imp.Ordinal != 0 {
-			if _, has := synth.ExportOrds[imp.Ordinal]; !has {
+			if disp != nil {
+				if disp.LookupSynthExport(synth, "", imp.Ordinal) == 0 {
+					placeholder := fmt.Sprintf("ord_%d", imp.Ordinal)
+					addr, nextID, added := disp.EnsureDynamicExport(mem, synth, placeholder, *nextIDPtr)
+					*nextIDPtr = nextID
+					disp.SetSynthOrdinal(synth, imp.Ordinal, addr)
+					if added {
+						modifiedSynths[dllKey] = synth
+					}
+				}
+			} else if _, has := synth.ExportOrds[imp.Ordinal]; !has {
 				id := *nextIDPtr
 				*nextIDPtr++
 				placeholder := fmt.Sprintf("ord_%d", imp.Ordinal)
@@ -511,6 +568,17 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	fiberMap := map[uint64]uint64{} // fiberAddr → lpParameter
 	var nextFiberAddr uint64
 	var loadedLibraryRefs = map[uint64]uint32{}
+	var loadedLibraryRefsMu sync.Mutex
+	retainLibraryReference := func(module uint64) {
+		loadedLibraryRefsMu.Lock()
+		loadedLibraryRefs[module]++
+		loadedLibraryRefsMu.Unlock()
+	}
+	releaseLoadedLibraryReference := func(module uint64) bool {
+		loadedLibraryRefsMu.Lock()
+		defer loadedLibraryRefsMu.Unlock()
+		return releaseLibraryReference(loadedLibraryRefs, module)
+	}
 	var startupInfoDesktopAddr uint64
 	// Standard handle overrides for SetStdHandle/GetStdHandle.
 	stdHandleMap := map[uint32]uint64{
@@ -536,6 +604,158 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	var processWorkingSetMin uint64 = 1 << 20
 	var processWorkingSetMax uint64 = 16 << 20
 	var processWorkingSetFlags uint32
+	nppUsersConfigOpen := 0
+	isNotepadPP := strings.EqualFold(filepath.Base(strings.ReplaceAll(imagePath, `\`, `/`)), "notepad++.exe")
+	currentDirectory := `C:\`
+	if lastBS := strings.LastIndex(imagePath, `\`); lastBS > 0 {
+		currentDirectory = imagePath[:lastBS]
+	}
+	normalizeWinPath := func(p string) string {
+		p = strings.TrimPrefix(p, `\??\`)
+		p = strings.ReplaceAll(p, `/`, `\`)
+		if p == "" {
+			return currentDirectory
+		}
+		if strings.HasPrefix(p, `\`) && !(len(p) >= 2 && p[1] == ':') {
+			p = `C:` + p
+		} else if !(len(p) >= 2 && p[1] == ':') {
+			base := currentDirectory
+			if !strings.HasSuffix(base, `\`) {
+				base += `\`
+			}
+			p = base + p
+		}
+		drive := `C:`
+		rest := p
+		if len(p) >= 2 && p[1] == ':' {
+			drive = p[:2]
+			rest = p[2:]
+		}
+		parts := make([]string, 0)
+		for _, part := range strings.Split(rest, `\`) {
+			if part == "" || part == "." {
+				continue
+			}
+			if part == ".." {
+				if len(parts) > 0 {
+					parts = parts[:len(parts)-1]
+				}
+				continue
+			}
+			parts = append(parts, part)
+		}
+		if len(parts) == 0 {
+			return drive + `\`
+		}
+		return drive + `\` + strings.Join(parts, `\`)
+	}
+	currentTEB := func(ctx *ntapi.TrapContext) uint64 {
+		if ctx != nil && ctx.CPU != nil {
+			if ctx.CPU.GetArch() == arch.ArchAMD64 {
+				if cpu, ok := ctx.CPU.(interface{ GetGSBase() uint64 }); ok {
+					if teb := cpu.GetGSBase(); teb != 0 {
+						return teb
+					}
+				}
+			}
+			if teb := ctx.CPU.GetTLS(); teb != 0 {
+				return teb
+			}
+		}
+		return procState.TEBAddr
+	}
+	lastErrorOffset := func(ctx *ntapi.TrapContext) uint64 {
+		if ctx != nil && ctx.State != nil && ctx.State.Is32 {
+			return ntapi.Teb32LastErrorValue
+		}
+		return ntapi.TebLastErrorValue
+	}
+	setThreadLastError := func(ctx *ntapi.TrapContext, code uint32) {
+		mem.Write32(currentTEB(ctx)+lastErrorOffset(ctx), code)
+	}
+	setLastErrorValue := setThreadLastError
+
+	setCurrentDirectory := func(ctx *ntapi.TrapContext, dir string) bool {
+		dir = normalizeWinPath(dir)
+		vfsPath := winPathToVFS(dir)
+		node, err := ctx.FS.Resolve(vfsPath)
+		if err != nil || !node.IsDir {
+			return false
+		}
+		currentDirectory = strings.TrimRight(dir, `\`)
+		if len(currentDirectory) == 2 && currentDirectory[1] == ':' {
+			currentDirectory += `\`
+		}
+		ctx.FS.Cwd = vfsPath
+		return true
+	}
+	copyFile := func(ctx *ntapi.TrapContext, srcWin, dstWin string, failIfExists bool) bool {
+		src := winPathToVFS(normalizeWinPath(srcWin))
+		dst := winPathToVFS(normalizeWinPath(dstWin))
+		if ctx.Trace {
+			ravelog.Logf("[win32] CopyFile: %q -> %q\n", srcWin, dstWin)
+		}
+		if dstNode, err := ctx.FS.Resolve(dst); err == nil && dstNode.IsDir {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			return false
+		}
+		if failIfExists {
+			if _, err := ctx.FS.Resolve(dst); err == nil {
+				setThreadLastError(ctx, 80) // ERROR_FILE_EXISTS
+				return false
+			}
+		}
+		if node, err := ctx.FS.Resolve(dst); err == nil && node.IsDir {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			return false
+		}
+		data, err := ctx.FS.FileBytes(src)
+		if err != nil {
+			if b, readErr := os.ReadFile(src); readErr == nil {
+				data = b
+			} else {
+				setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
+				return false
+			}
+		}
+		fd, err := ctx.FS.Open(dst, vfs.O_CREAT|vfs.O_TRUNC|vfs.O_RDWR)
+		if err != nil {
+			setThreadLastError(ctx, 3) // ERROR_PATH_NOT_FOUND
+			return false
+		}
+		defer ctx.FS.Close(fd)
+		if _, err := ctx.FS.Write(fd, data); err != nil {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			return false
+		}
+		setThreadLastError(ctx, 0)
+		return true
+	}
+	notepadPPUsersConfigPath := func(winPath string) (string, bool) {
+		if !isNotepadPP || !strings.EqualFold(normalizeWinPath(winPath), `C:\Users`) {
+			return "", false
+		}
+		sequence := []string{
+			"langs.xml",
+			"stylers.xml",
+			"config.xml",
+			"shortcuts.xml",
+			"contextMenu.xml",
+			"toolbarIcons.xml",
+		}
+		if nppUsersConfigOpen >= len(sequence) {
+			return "", false
+		}
+		name := sequence[nppUsersConfigOpen]
+		nppUsersConfigOpen++
+		return "/Users/" + name, true
+	}
+	writeGuestPtr := func(ctx *ntapi.TrapContext, addr, value uint64) bool {
+		if ctx.State != nil && ctx.State.Is32 {
+			return ctx.Mem.Write32(addr, uint32(value)) == nil
+		}
+		return ctx.Mem.Write64(addr, value) == nil
+	}
 	// Stateful implementations for legacy kernel32 auto-stubs.
 	type trivialKernel32Call struct {
 		Count      uint64
@@ -612,9 +832,6 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	werRuntimeModules := map[string]uint64{}
 	guestCallTrampoline := ntapi.AllocTrampoline(mem)
 
-	setLastErrorValue := func(code uint32) {
-		mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, code)
-	}
 	captureKernel32Args := func(ctx *ntapi.TrapContext, argc int) []uint64 {
 		if argc < 0 {
 			argc = 0
@@ -630,16 +847,6 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	}
 	callGuest := func(ctx *ntapi.TrapContext, addr uint64, args []uint64) (uint64, error) {
 		return ntapi.CallGuestFunction(ctx.CPU, mem, guestCallTrampoline, addr, args, ctx.Trace)
-	}
-	formatKernel32Args := func(args []uint64) string {
-		if len(args) == 0 {
-			return ""
-		}
-		parts := make([]string, len(args))
-		for i, arg := range args {
-			parts[i] = fmt.Sprintf("arg%d=0x%x", i, arg)
-		}
-		return strings.Join(parts, ", ")
 	}
 	recordKernel32Call := func(name string, args []uint64, ret uint64, lastErr uint32) {
 		trivialKernel32Mu.Lock()
@@ -674,12 +881,27 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		return name
 	}
+	is32Process := mem.Mode32 || (procState != nil && procState.Is32)
+	readModulePointer := func(addr uint64) uint64 {
+		if is32Process {
+			value, _ := mem.Read32(addr)
+			return uint64(value)
+		}
+		value, _ := mem.Read64(addr)
+		return value
+	}
 	readUnicodeString := func(addr uint64) string {
 		if addr == 0 {
 			return ""
 		}
 		length, _ := mem.Read16(addr + ntapi.UnicodeStringLength)
-		buf, _ := mem.Read64(addr + ntapi.UnicodeStringBuffer)
+		var buf uint64
+		if is32Process {
+			value, _ := mem.Read32(addr + ntapi.UnicodeString32Buffer)
+			buf = uint64(value)
+		} else {
+			buf, _ = mem.Read64(addr + ntapi.UnicodeStringBuffer)
+		}
 		if buf == 0 || length == 0 {
 			return ""
 		}
@@ -689,8 +911,24 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if procState == nil || procState.LdrDataAddr == 0 {
 			return nil
 		}
-		head := procState.LdrDataAddr + ntapi.LdrInLoadOrderModuleList
-		cur, _ := mem.Read64(head)
+		listOffset := uint64(ntapi.LdrInLoadOrderModuleList)
+		linkOffset := uint64(ntapi.LdrEntryInLoadOrderLinks)
+		baseOffset := uint64(ntapi.LdrEntryDllBase)
+		entryPointOffset := uint64(ntapi.LdrEntryEntryPoint)
+		sizeOffset := uint64(ntapi.LdrEntrySizeOfImage)
+		fullNameOffset := uint64(ntapi.LdrEntryFullDllName)
+		baseNameOffset := uint64(ntapi.LdrEntryBaseDllName)
+		if is32Process {
+			listOffset = ntapi.Ldr32InLoadOrderModuleList
+			linkOffset = ntapi.Ldr32EntryInLoadOrderLinks
+			baseOffset = ntapi.Ldr32EntryDllBase
+			entryPointOffset = ntapi.Ldr32EntryEntryPoint
+			sizeOffset = ntapi.Ldr32EntrySizeOfImage
+			fullNameOffset = ntapi.Ldr32EntryFullDllName
+			baseNameOffset = ntapi.Ldr32EntryBaseDllName
+		}
+		head := procState.LdrDataAddr + listOffset
+		cur := readModulePointer(head)
 		seen := map[uint64]struct{}{}
 		mods := make([]moduleSnapshot, 0, 16)
 		for cur != 0 && cur != head {
@@ -698,19 +936,18 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				break
 			}
 			seen[cur] = struct{}{}
-			entry := cur - ntapi.LdrEntryInLoadOrderLinks
-			base, _ := mem.Read64(entry + ntapi.LdrEntryDllBase)
-			ep, _ := mem.Read64(entry + ntapi.LdrEntryEntryPoint)
-			size32, _ := mem.Read32(entry + ntapi.LdrEntrySizeOfImage)
+			entry := cur - linkOffset
+			base := readModulePointer(entry + baseOffset)
+			ep := readModulePointer(entry + entryPointOffset)
+			size32, _ := mem.Read32(entry + sizeOffset)
 			mods = append(mods, moduleSnapshot{
 				BaseAddr:   base,
 				EntryPoint: ep,
 				ImageSize:  uint64(size32),
-				Name:       strings.ToLower(readUnicodeString(entry + ntapi.LdrEntryBaseDllName)),
-				FullPath:   readUnicodeString(entry + ntapi.LdrEntryFullDllName),
+				Name:       strings.ToLower(readUnicodeString(entry + baseNameOffset)),
+				FullPath:   readUnicodeString(entry + fullNameOffset),
 			})
-			next, _ := mem.Read64(cur)
-			cur = next
+			cur = readModulePointer(cur)
 			if len(mods) >= 512 {
 				break
 			}
@@ -750,7 +987,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 					FullPath:   imagePath,
 				}, true
 			}
-			imageBase, _ := mem.Read64(procState.PEBAddr + ntapi.PebImageBaseAddress)
+			imageBaseOffset := uint64(ntapi.PebImageBaseAddress)
+			if is32Process {
+				imageBaseOffset = ntapi.Peb32ImageBaseAddress
+			}
+			imageBase := readModulePointer(procState.PEBAddr + imageBaseOffset)
 			return moduleSnapshot{BaseAddr: imageBase, EntryPoint: imageBase, Name: strings.ToLower(filepath.Base(imagePath)), FullPath: imagePath}, imageBase != 0
 		}
 		for _, mod := range listLoadedModules() {
@@ -758,6 +999,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				return mod, true
 			}
 		}
+		hctx.SynthMu.RLock()
+		defer hctx.SynthMu.RUnlock()
 		seen := map[uint64]struct{}{}
 		for _, synth := range synthByName {
 			if _, ok := seen[synth.BaseAddr]; ok {
@@ -780,7 +1023,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				return mod, true
 			}
 		}
-		if synth, ok := synthByName[norm]; ok {
+		hctx.SynthMu.RLock()
+		synth, ok := synthByName[norm]
+		hctx.SynthMu.RUnlock()
+		if ok {
 			return moduleSnapshotFromSynth(synth), true
 		}
 		return moduleSnapshot{}, false
@@ -791,6 +1037,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				return mod, true
 			}
 		}
+		hctx.SynthMu.RLock()
+		defer hctx.SynthMu.RUnlock()
 		seen := map[uint64]struct{}{}
 		for _, synth := range synthByName {
 			if _, ok := seen[synth.BaseAddr]; ok {
@@ -854,28 +1102,24 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			v, ok := os.LookupEnv("PATH")
 			return v, ok && v != ""
 		case "TEMP", "TMP":
-			return os.TempDir(), true
+			return `C:\Windows\Temp`, true
 		case "USERPROFILE":
 			v, ok := os.LookupEnv("HOME")
-			return v, ok && v != ""
-		case "APPDATA":
-			if v, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok && v != "" {
-				return v, true
+			if ok && v != "" {
+				return linuxToWinPath(v), true
 			}
+		case "APPDATA":
 			if home, ok := os.LookupEnv("HOME"); ok && home != "" {
-				return filepath.Join(home, ".config"), true
+				return linuxToWinPath(filepath.Join(home, "AppData", "Roaming")), true
 			}
 		case "LOCALAPPDATA":
-			if v, ok := os.LookupEnv("XDG_DATA_HOME"); ok && v != "" {
-				return v, true
-			}
 			if home, ok := os.LookupEnv("HOME"); ok && home != "" {
-				return filepath.Join(home, ".local", "share"), true
+				return linuxToWinPath(filepath.Join(home, "AppData", "Local")), true
 			}
 		case "COMMONAPPDATA", "PROGRAMDATA":
-			return "/var/lib", true
+			return `C:\ProgramData`, true
 		case "WINDIR", "SYSTEMROOT":
-			return "/usr", true
+			return `C:\Windows`, true
 		case "SYSTEMDRIVE":
 			return "C:", true
 		case "PROCESSOR_ARCHITECTURE":
@@ -1032,29 +1276,36 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		mem.Write16(addr+limit*2, 0)
 		return written
 	}
-	readANSIBytesArg := func(ptr uint64, cb int32) []byte {
+	readANSIBytesArg := func(ptr uint64, cb int32) ([]byte, uint32) {
 		if ptr == 0 {
-			return nil
+			return nil, 87 // ERROR_INVALID_PARAMETER
 		}
+		const maxNLSBuffer = int32(16 << 20)
 		if cb == -1 {
 			var out []byte
-			for i := uint64(0); ; i++ {
-				b, _ := mem.Read8(ptr + i)
+			for i := int32(0); i < maxNLSBuffer; i++ {
+				b, err := mem.Read8(ptr + uint64(i))
+				if err != nil {
+					return nil, 998 // ERROR_NOACCESS
+				}
 				out = append(out, b)
 				if b == 0 {
-					break
+					return out, 0
 				}
 			}
-			return out
+			return nil, 8 // ERROR_NOT_ENOUGH_MEMORY
 		}
 		if cb <= 0 {
-			return nil
+			return nil, 87 // ERROR_INVALID_PARAMETER
 		}
-		out := make([]byte, cb)
-		for i := int32(0); i < cb; i++ {
-			out[i], _ = mem.Read8(ptr + uint64(i))
+		if cb > maxNLSBuffer {
+			return nil, 8 // ERROR_NOT_ENOUGH_MEMORY
 		}
-		return out
+		out, err := mem.ReadBytes(ptr, int(cb))
+		if err != nil {
+			return nil, 998 // ERROR_NOACCESS
+		}
+		return out, 0
 	}
 	readUTF16UnitsArg := func(ptr uint64, cch int32) []uint16 {
 		if ptr == 0 {
@@ -2807,12 +3058,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 
 		recordKernel32Call(name, args, ret, lastErr)
 		if ret != 0 || lastErr != 0 {
-			setLastErrorValue(lastErr)
-		}
-		if argsText := formatKernel32Args(args); argsText != "" {
-			ravelog.Logf("[kernel32] %s(%s) => 0x%x\n", name, argsText, ret)
-		} else {
-			ravelog.Logf("[kernel32] %s() => 0x%x\n", name, ret)
+			setLastErrorValue(ctx, lastErr)
 		}
 		ctx.SetReturn(ret)
 		return 0
@@ -2877,12 +3123,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetLastError", func(ctx *ntapi.TrapContext) uint32 {
-		v, _ := ctx.Mem.Read32(procState.TEBAddr + ntapi.TebLastErrorValue)
+		v, _ := ctx.Mem.Read32(currentTEB(ctx) + lastErrorOffset(ctx))
 		ctx.SetReturn(uint64(v))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetLastError", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, uint32(ctx.Arg(0)))
+		setThreadLastError(ctx, uint32(ctx.Arg(0)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetCurrentProcess", func(ctx *ntapi.TrapContext) uint32 {
@@ -2946,12 +3192,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			mod, ok = findModuleByName(readGuestUTF16(modNamePtr))
 		}
 		if !ok {
-			setLastErrorValue(126) // ERROR_MOD_NOT_FOUND
+			setLastErrorValue(ctx, 126) // ERROR_MOD_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
 		if phModule != 0 {
-			ctx.Mem.Write64Raw(phModule, mod.BaseAddr)
+			is32 := mem.Mode32 || (procState != nil && procState.Is32)
+			_ = writeGuestPointer(ctx.Mem, phModule, mod.BaseAddr, is32)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -3239,30 +3486,39 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
+		hctx.SynthMu.Lock()
 		name := normalizeModuleName(readGuestUTF16(namePtr))
 		// Redirect API set DLLs to their real implementation
 		resolved := resolveApiSetDLL(name)
 		if resolved != name {
 			if synth, ok := synthByName[resolved]; ok {
 				synthByName[name] = synth // cache redirect
-				loadedLibraryRefs[synth.BaseAddr]++
+				hctx.SynthMu.Unlock()
+				retainLibraryReference(synth.BaseAddr)
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
 		}
 		if synth, ok := synthByName[name]; ok {
-			loadedLibraryRefs[synth.BaseAddr]++
+			hctx.SynthMu.Unlock()
+			retainLibraryReference(synth.BaseAddr)
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
 		}
-		if mod := loadDLLFromVFS(ctx.FS, readGuestUTF16(namePtr), mem, synthByName, nextDynIDPtr, d); mod != nil {
+		hctx.NextDelayMu.Lock()
+		mod := loadDLLFromVFS(ctx.FS, readGuestUTF16(namePtr), mem, synthByName, nextDynIDPtr, d)
+		hctx.NextDelayMu.Unlock()
+		if mod != nil {
 			wrapped := &ntapi.SynthPE{
 				Name: mod.Name, BaseAddr: mod.BaseAddr, ImageSize: mod.ImageSize,
 				Exports: mod.Exports, ExportOrds: mod.ExportOrds, StubIDs: map[uint64]uint32{},
 			}
 			synthByName[mod.Name] = wrapped
 			synthByName[name] = wrapped
-			loadedLibraryRefs[mod.BaseAddr] = 1
+			d.RegisterModuleExports(mod.BaseAddr, mod.Exports, mod.ExportOrds)
+			hctx.SynthMu.Unlock()
+			retainLibraryReference(mod.BaseAddr)
+			hctx.setModuleResourceRVA(mod.BaseAddr, mod.ResourceDirRVA)
 			ravelog.Logf("[win32] LoadLibraryExW: loaded PE from VFS %q → base=0x%x\n", name, mod.BaseAddr)
 			if mod.EntryPoint != 0 && mod.EntryPoint != mod.BaseAddr {
 				var dllMainErr error
@@ -3280,7 +3536,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 		synthByName[name] = newSynth
-		loadedLibraryRefs[newSynth.BaseAddr] = 1
+		retainLibraryReference(newSynth.BaseAddr)
+		for _, reg := range hctx.DelayHandlerRegistrars {
+			reg()
+		}
+		hctx.SynthMu.Unlock()
 		ravelog.Logf("[win32] LoadLibraryExW: auto-created stub for %q\n", name)
 		ctx.SetReturn(newSynth.BaseAddr)
 		return 0
@@ -3291,29 +3551,38 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
+		hctx.SynthMu.Lock()
 		name := normalizeModuleName(readGuestUTF16(namePtr))
 		resolved := resolveApiSetDLL(name)
 		if resolved != name {
 			if synth, ok := synthByName[resolved]; ok {
 				synthByName[name] = synth
-				loadedLibraryRefs[synth.BaseAddr]++
+				hctx.SynthMu.Unlock()
+				retainLibraryReference(synth.BaseAddr)
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
 		}
 		if synth, ok := synthByName[name]; ok {
-			loadedLibraryRefs[synth.BaseAddr]++
+			hctx.SynthMu.Unlock()
+			retainLibraryReference(synth.BaseAddr)
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
 		}
-		if mod := loadDLLFromVFS(ctx.FS, readGuestUTF16(namePtr), mem, synthByName, nextDynIDPtr, d); mod != nil {
+		hctx.NextDelayMu.Lock()
+		mod := loadDLLFromVFS(ctx.FS, readGuestUTF16(namePtr), mem, synthByName, nextDynIDPtr, d)
+		hctx.NextDelayMu.Unlock()
+		if mod != nil {
 			wrapped := &ntapi.SynthPE{
 				Name: mod.Name, BaseAddr: mod.BaseAddr, ImageSize: mod.ImageSize,
 				Exports: mod.Exports, ExportOrds: mod.ExportOrds, StubIDs: map[uint64]uint32{},
 			}
 			synthByName[mod.Name] = wrapped
 			synthByName[name] = wrapped
-			loadedLibraryRefs[mod.BaseAddr] = 1
+			d.RegisterModuleExports(mod.BaseAddr, mod.Exports, mod.ExportOrds)
+			hctx.SynthMu.Unlock()
+			retainLibraryReference(mod.BaseAddr)
+			hctx.setModuleResourceRVA(mod.BaseAddr, mod.ResourceDirRVA)
 			ravelog.Logf("[win32] LoadLibraryW: loaded PE from VFS %q → base=0x%x\n", name, mod.BaseAddr)
 			if mod.EntryPoint != 0 && mod.EntryPoint != mod.BaseAddr {
 				var dllMainErr error
@@ -3331,7 +3600,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 		synthByName[name] = newSynth
-		loadedLibraryRefs[newSynth.BaseAddr] = 1
+		retainLibraryReference(newSynth.BaseAddr)
+		for _, reg := range hctx.DelayHandlerRegistrars {
+			reg()
+		}
+		hctx.SynthMu.Unlock()
 		ravelog.Logf("[win32] LoadLibraryW: auto-created stub for %q\n", name)
 		ctx.SetReturn(newSynth.BaseAddr)
 		return 0
@@ -3342,6 +3615,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
+		hctx.SynthMu.Lock()
 		rawName := readGuestString(namePtr)
 		ravelog.Logf("[win32] LoadLibraryA called: %q\n", rawName)
 		name := normalizeModuleName(rawName)
@@ -3349,18 +3623,23 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if resolved != name {
 			if synth, ok := synthByName[resolved]; ok {
 				synthByName[name] = synth
-				loadedLibraryRefs[synth.BaseAddr]++
+				hctx.SynthMu.Unlock()
+				retainLibraryReference(synth.BaseAddr)
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
 		}
 		if synth, ok := synthByName[name]; ok {
-			loadedLibraryRefs[synth.BaseAddr]++
+			hctx.SynthMu.Unlock()
+			retainLibraryReference(synth.BaseAddr)
 			ctx.SetReturn(synth.BaseAddr)
 			return 0
 		}
 		// Try loading from VFS as an actual PE (for dynamically extracted DLLs)
-		if mod := loadDLLFromVFS(ctx.FS, rawName, mem, synthByName, nextDynIDPtr, d); mod != nil {
+		hctx.NextDelayMu.Lock()
+		mod := loadDLLFromVFS(ctx.FS, rawName, mem, synthByName, nextDynIDPtr, d)
+		hctx.NextDelayMu.Unlock()
+		if mod != nil {
 			wrapped := &ntapi.SynthPE{
 				Name:       mod.Name,
 				BaseAddr:   mod.BaseAddr,
@@ -3371,15 +3650,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 			synthByName[mod.Name] = wrapped
 			synthByName[name] = wrapped
-			loadedLibraryRefs[mod.BaseAddr] = 1
+			d.RegisterModuleExports(mod.BaseAddr, mod.Exports, mod.ExportOrds)
+			hctx.SynthMu.Unlock()
+			retainLibraryReference(mod.BaseAddr)
 			// Record the resource directory RVA so user32 can find dialog
 			// resources inside this DLL (e.g. installer wizard dialogs).
-			if mod.ResourceDirRVA != 0 {
-				if hctx.VfsModuleResRVA == nil {
-					hctx.VfsModuleResRVA = make(map[uint64]uint32)
-				}
-				hctx.VfsModuleResRVA[mod.BaseAddr] = mod.ResourceDirRVA
-			}
+			hctx.setModuleResourceRVA(mod.BaseAddr, mod.ResourceDirRVA)
 			ravelog.Logf("[win32] LoadLibraryA: loaded PE from VFS %q → base=0x%x exports=%d\n", name, mod.BaseAddr, len(mod.Exports))
 			// Call DllMain(hinstDLL, DLL_PROCESS_ATTACH, 0) so the DLL can
 			// initialize its globals (e.g. saving its own module handle for
@@ -3400,7 +3676,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		newSynth := ntapi.GenerateSynthDLL(mem, name, []string{}, 0)
 		synthByName[name] = newSynth
-		loadedLibraryRefs[newSynth.BaseAddr] = 1
+		retainLibraryReference(newSynth.BaseAddr)
+		for _, reg := range hctx.DelayHandlerRegistrars {
+			reg()
+		}
+		hctx.SynthMu.Unlock()
 		ravelog.Logf("[win32] LoadLibraryA: auto-created stub for %q\n", name)
 		ctx.SetReturn(newSynth.BaseAddr)
 		return 0
@@ -3410,15 +3690,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// ReactOS: dll/win32/kernel32/client/loader.c
 		// We use synthesized DLLs with no real ref-counting; always succeed.
 		hModule := ctx.Arg(0)
-		if hModule == 0 {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+		if !releaseLoadedLibraryReference(hModule) {
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
-		}
-		if refs := loadedLibraryRefs[hModule]; refs > 1 {
-			loadedLibraryRefs[hModule] = refs - 1
-		} else {
-			delete(loadedLibraryRefs, hModule)
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -3430,6 +3705,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
+		hctx.SynthMu.RLock()
+		defer hctx.SynthMu.RUnlock()
 		// Detect ordinal import (high word of pointer is 0 → low word is ordinal)
 		hi, _ := ctx.Mem.Read32(procNamePtr + 2)
 		var funcName string
@@ -3439,7 +3716,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			// Search all synths for this ordinal
 			for _, s := range hctx.Dlls {
 				if s.BaseAddr == hModule {
-					if addr, ok := s.ExportOrds[ordinal]; ok {
+					if addr := d.LookupSynthExport(s, "", ordinal); addr != 0 {
 						ctx.SetReturn(addr)
 						return 0
 					}
@@ -3447,7 +3724,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 			for _, s := range synthByName {
 				if s.BaseAddr == hModule {
-					if addr, ok := s.ExportOrds[ordinal]; ok {
+					if addr := d.LookupSynthExport(s, "", ordinal); addr != 0 {
 						ctx.SetReturn(addr)
 						return 0
 					}
@@ -3460,7 +3737,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// Search pre-loaded dlls slice first
 		for _, s := range hctx.Dlls {
 			if s.BaseAddr == hModule {
-				if addr, ok := s.Exports[funcName]; ok {
+				if hideGetProcAddressExport(s.Name, funcName) {
+					ravelog.Logf("[win32] GetProcAddress(0x%x, %q) -> not found\n", hModule, funcName)
+					ctx.SetReturn(0)
+					return 0
+				}
+				if addr := d.LookupSynthExport(s, funcName, 0); addr != 0 {
 					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) → 0x%x\n", hModule, funcName, addr)
 					ctx.SetReturn(addr)
 					return 0
@@ -3470,7 +3752,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// Also search synthByName (covers DLLs loaded via LoadLibraryW at runtime)
 		for _, s := range synthByName {
 			if s.BaseAddr == hModule {
-				if addr, ok := s.Exports[funcName]; ok {
+				if hideGetProcAddressExport(s.Name, funcName) {
+					ravelog.Logf("[win32] GetProcAddress(0x%x, %q) -> not found\n", hModule, funcName)
+					ctx.SetReturn(0)
+					return 0
+				}
+				if addr := d.LookupSynthExport(s, funcName, 0); addr != 0 {
 					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) → 0x%x (synth)\n", hModule, funcName, addr)
 					// For Wise engine script handlers (f12/f16/f19): log the script struct
 					// so we can see the command string. The dispatch_wrapper saves caller's EDI
@@ -3549,6 +3836,19 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 					ctx.SetReturn(addr)
 					return 0
 				}
+				if !allowLazySynthExport(s.Name) {
+					continue
+				}
+				hctx.NextDelayMu.Lock()
+				addr, nextID := d.MaterializeNamedHandler(mem, s, funcName, *nextDynIDPtr)
+				if addr != 0 {
+					*nextDynIDPtr = nextID
+					hctx.NextDelayMu.Unlock()
+					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) -> 0x%x (lazy synth)\n", hModule, funcName, addr)
+					ctx.SetReturn(addr)
+					return 0
+				}
+				hctx.NextDelayMu.Unlock()
 			}
 		}
 		// Wise installer helper: GLF0001.tmp is supposed to be W32WINST.DLL
@@ -3641,13 +3941,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "TlsGetValue", func(ctx *ntapi.TrapContext) uint32 {
 		slot := uint32(ctx.Arg(0))
 		if tlsFreeSlots[slot] {
-			setLastErrorValue(87)
+			setLastErrorValue(ctx, 87)
 			ravelog.Logf("[tls] TlsGetValue(slot=%d) -> 0 (freed)\n", slot)
 			ctx.SetReturn(0)
 			return 0
 		}
 		val := tlsValues[slot]
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ravelog.Logf("[tls] TlsGetValue(slot=%d) -> 0x%x\n", slot, val)
 		ctx.SetReturn(val)
 		return 0
@@ -3655,14 +3955,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "TlsSetValue", func(ctx *ntapi.TrapContext) uint32 {
 		slot := uint32(ctx.Arg(0))
 		if tlsFreeSlots[slot] || slot == 0 {
-			setLastErrorValue(87)
+			setLastErrorValue(ctx, 87)
 			ravelog.Logf("[tls] TlsSetValue(slot=%d, val=0x%x) -> FAIL\n", slot, ctx.Arg(1))
 			ctx.SetReturn(0)
 			return 0
 		}
 		val := ctx.Arg(1)
 		tlsValues[slot] = val
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ravelog.Logf("[tls] TlsSetValue(slot=%d, val=0x%x) -> OK\n", slot, val)
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -3693,7 +3993,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		val, _ := ctx.Mem.Read64(flsArr + uint64(slot)*8)
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(val)
 		return 0
 	})
@@ -3702,12 +4002,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		val := ctx.Arg(1)
 		flsArr, _ := ctx.Mem.Read64(procState.TEBAddr + ntapi.TebFlsData)
 		if flsArr == 0 {
-			setLastErrorValue(87)
+			setLastErrorValue(ctx, 87)
 			ctx.SetReturn(0)
 			return 0
 		}
 		ctx.Mem.Write64(flsArr+uint64(slot)*8, val)
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -3718,7 +4018,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if flsArr != 0 {
 			ctx.Mem.Write64(flsArr+uint64(slot)*8, 0)
 		}
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -3746,9 +4046,6 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		flags := ctx.Arg(1)
 		zeroInit := flags&0x08 != 0 // HEAP_ZERO_MEMORY
 		ptr := sharedHeapAlloc(size, zeroInit)
-		if size <= 0x10000 {
-			ravelog.Logf("[heap] HeapAlloc(heap=0x%x flags=0x%x size=0x%x) -> 0x%x\n", ctx.Arg(0), flags, size, ptr)
-		}
 		ctx.SetReturn(ptr)
 		return 0
 	})
@@ -3904,18 +4201,40 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "MultiByteToWideChar", func(ctx *ntapi.TrapContext) uint32 {
 		codePage := uint32(ctx.Arg(0))
+		flags := uint32(ctx.Arg(1))
 		srcStr := ctx.Arg(2)
 		srcLen := int64(int32(ctx.Arg(3)))
 		dstBuf := ctx.Arg(4)
 		dstLen := int64(int32(ctx.Arg(5)))
-		if srcStr == 0 {
+		if srcStr == 0 || srcLen == 0 || srcLen < -1 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
-		raw := readANSIBytesArg(srcStr, int32(srcLen))
+		if dstLen > 0 && dstBuf == srcStr {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		if codePage == 65001 && flags&^uint32(0x8) != 0 {
+			setLastErrorValue(ctx, 1004) // ERROR_INVALID_FLAGS
+			ctx.SetReturn(0)
+			return 0
+		}
+		raw, readError := readANSIBytesArg(srcStr, int32(srcLen))
+		if readError != 0 {
+			setLastErrorValue(ctx, readError)
+			ctx.SetReturn(0)
+			return 0
+		}
 		var wchars []uint16
 		switch codePage {
 		case 65001:
+			if flags&0x8 != 0 && !utf8.Valid(raw) {
+				setLastErrorValue(ctx, 1113) // ERROR_NO_UNICODE_TRANSLATION
+				ctx.SetReturn(0)
+				return 0
+			}
 			wchars = utf16.Encode([]rune(string(raw)))
 		case 0, 1252:
 			wchars = make([]uint16, len(raw))
@@ -3923,6 +4242,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				wchars[i] = uint16(b)
 			}
 		default:
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		if dstLen < 0 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -3930,13 +4255,22 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(uint64(len(wchars)))
 			return 0
 		}
+		if dstBuf == 0 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
 		if int64(len(wchars)) > dstLen {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+			setLastErrorValue(ctx, 122) // ERROR_INSUFFICIENT_BUFFER
 			ctx.SetReturn(0)
 			return 0
 		}
 		for i, w := range wchars {
-			ctx.Mem.Write16(dstBuf+uint64(i)*2, w)
+			if err := ctx.Mem.Write16(dstBuf+uint64(i)*2, w); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
 		}
 		ctx.SetReturn(uint64(len(wchars)))
 		return 0
@@ -3994,7 +4328,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		if int64(len(out)) > dstLen {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+			setThreadLastError(ctx, 122)
 			ravelog.Logf("[nls] WideCharToMultiByte(cp=%d src=0x%x srcLen=%d dst=0x%x dstLen=%d sizeOnly=0) -> 0 need=%d\n",
 				codePage, srcStr, srcLen, dstBuf, dstLen, len(out))
 			ctx.SetReturn(0)
@@ -4020,18 +4354,22 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			size = 1
 		}
 		buf := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+		hctx.trackLocalAlloc(buf, size)
 		ctx.SetReturn(buf)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "LocalFree", func(ctx *ntapi.TrapContext) uint32 {
 		hMem := ctx.Arg(0)
-		if hMem != 0 {
-			_, size, mapped, _ := mem.QueryRegion(hMem)
-			if mapped && size > 0 {
-				mem.Munmap(hMem, size)
-			}
+		if hMem == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(0) // NULL = success
+		if size, ok := hctx.takeLocalAlloc(hMem); ok {
+			mem.Munmap(hMem, size)
+			ctx.SetReturn(0)
+		} else {
+			ctx.SetReturn(hMem)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetModuleFileNameA", func(ctx *ntapi.TrapContext) uint32 {
@@ -4057,7 +4395,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		winPath := readGuestString(pathPtr)
-		path := winPathToVFS(winPath)
+		path := winPathToVFS(normalizeWinPath(winPath))
 		// Check in-memory VFS first
 		if vnode, err := ctx.FS.StatPath(-1, path); err == nil {
 			var attrs uint32 = 0x20 // FILE_ATTRIBUTE_NORMAL
@@ -4070,7 +4408,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		// Check if a synth DLL stub exists for this name
 		baseName := strings.ToLower(filepath.Base(strings.ReplaceAll(winPath, `\`, "/")))
-		if _, ok := synthByName[baseName]; ok {
+		hctx.SynthMu.RLock()
+		_, hasSynth := synthByName[baseName]
+		hctx.SynthMu.RUnlock()
+		if hasSynth {
 			ravelog.Logf("[wise] GetFileAttributesA(%q) → synth stub attr=0x20\n", winPath)
 			ctx.SetReturn(0x20)
 			return 0
@@ -4112,19 +4453,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ctx.SetReturn(cmdLineAAddr)
 		return 0
 	})
-	// GetCommandLineW: return pointer to UTF-16LE command line
-	var cmdLineWAddr uint64
 	d.RegisterAutoStubHandler(kernel32, "GetCommandLineW", func(ctx *ntapi.TrapContext) uint32 {
-		if cmdLineWAddr == 0 {
-			utf16 := make([]byte, 0, (len(cmdLine)+1)*2)
-			for _, b := range []byte(cmdLine) {
-				utf16 = append(utf16, b, 0)
-			}
-			utf16 = append(utf16, 0, 0) // null terminator
-			cmdLineWAddr = ctx.Mem.Mmap(0, uint64(len(utf16)), mmu.PermRead|mmu.PermWrite)
-			ctx.Mem.WriteBytes(cmdLineWAddr, utf16)
+		if procState.Is32 {
+			addr, _ := ctx.Mem.Read32(procState.ProcessParamsAddr + ntapi.ProcessParams32CommandLine + 4)
+			ctx.SetReturn(uint64(addr))
+		} else {
+			addr, _ := ctx.Mem.Read64(procState.ProcessParamsAddr + ntapi.ProcessParamsCommandLine + 8)
+			ctx.SetReturn(addr)
 		}
-		ctx.SetReturn(cmdLineWAddr)
 		return 0
 	})
 	// GetStartupInfoW: fill STARTUPINFOW (68 bytes PE32, 104 bytes PE64)
@@ -4184,17 +4520,31 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "WriteFile", func(ctx *ntapi.TrapContext) uint32 {
 		hFile := ntapi.Handle(ctx.Arg(0))
 		bufAddr := ctx.Arg(1)
-		nBytes := ctx.Arg(2)
+		nBytes := uint64(uint32(ctx.Arg(2)))
 		lpWritten := ctx.Arg(3)
 		lpOverlapped := ctx.Arg(4)
-		data, _ := ctx.Mem.ReadBytes(bufAddr, int(nBytes))
+		if lpWritten != 0 {
+			ctx.Mem.Write32(lpWritten, 0)
+		}
+		const maxWriteBuffer = uint64(256 << 20)
+		if nBytes > maxWriteBuffer {
+			setLastErrorValue(ctx, 8) // ERROR_NOT_ENOUGH_MEMORY
+			ctx.SetReturn(0)
+			return 0
+		}
+		data, err := ctx.Mem.ReadBytes(bufAddr, int(nBytes))
+		if err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
 		pathStr := ""
 		if fh2, ok := handles.Get(hFile).(*ntapi.FileHandle); ok {
 			pathStr = fh2.Path
 		}
 		if nBytes <= 8192 {
 			ravelog.Logf("[wise] WriteFile handle=0x%x path=%q nBytes=%d hex=%x\n", hFile, pathStr, nBytes, data)
-		} else {
+		} else if len(data) >= 512 {
 			ravelog.Logf("[wise] WriteFile handle=0x%x path=%q nBytes=%d hex(first512)=%x\n", hFile, pathStr, nBytes, data[:512])
 		}
 		// Cache the first valid Win32 PE written to ~GLH*.TMP - that's W32WINST.DLL, the
@@ -4504,7 +4854,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "GetCurrentDirectoryW", func(ctx *ntapi.TrapContext) uint32 {
 		bufSize := ctx.Arg(0)
 		buf := ctx.Arg(1)
-		dir := `C:\`
+		dir := currentDirectory
 		needed := uint64(len(dir) + 1)
 		if bufSize < needed {
 			ctx.SetReturn(needed)
@@ -4519,8 +4869,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetCurrentDirectoryW", func(ctx *ntapi.TrapContext) uint32 {
 		pathPtr := ctx.Arg(0)
-		dir := winPathToVFS(readGuestUTF16(pathPtr))
-		if err := os.Chdir(dir); err != nil {
+		if !setCurrentDirectory(ctx, readGuestUTF16(pathPtr)) {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -4536,12 +4885,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		path := winPathToVFS(readGuestUTF16(pathPtr))
 		if _, err := ctx.FS.Resolve(path); err == nil {
 			// Already exists - Windows returns FALSE + ERROR_ALREADY_EXISTS
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+			setThreadLastError(ctx, 183)
 			ctx.SetReturn(0)
 			return 0
 		}
 		if err := ctx.FS.Mkdir(path); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 3) // ERROR_PATH_NOT_FOUND
+			setThreadLastError(ctx, 3) // ERROR_PATH_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -4552,24 +4901,27 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		fileNamePtr := ctx.Arg(0)
 		bufLen := ctx.Arg(1)
 		buf := ctx.Arg(2)
-		// Read the input filename
-		var chars []uint16
-		for i := uint64(0); ; i += 2 {
-			w, _ := ctx.Mem.Read16(fileNamePtr + i)
-			chars = append(chars, w)
-			if w == 0 {
-				break
-			}
-		}
-		needed := uint64(len(chars))
+		filePartPtr := ctx.Arg(3)
+		full := normalizeWinPath(readGuestUTF16(fileNamePtr))
+		full16 := utf16Encode(full)
+		needed := uint64(len(full16) + 1)
 		if bufLen < needed {
 			ctx.SetReturn(needed)
 			return 0
 		}
-		for i, w := range chars {
-			ctx.Mem.Write16(buf+uint64(i*2), w)
+		for i, ch := range full16 {
+			ctx.Mem.Write16(buf+uint64(i)*2, ch)
 		}
-		ctx.SetReturn(needed - 1)
+		ctx.Mem.Write16(buf+uint64(len(full16))*2, 0)
+		if filePartPtr != 0 {
+			if slash := strings.LastIndex(full, `\`); slash >= 0 && slash+1 < len(full) {
+				filePart16 := utf16Encode(full[:slash+1])
+				writeGuestPtr(ctx, filePartPtr, buf+uint64(len(filePart16))*2)
+			} else {
+				writeGuestPtr(ctx, filePartPtr, 0)
+			}
+		}
+		ctx.SetReturn(uint64(len(full16)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetLongPathNameW", func(ctx *ntapi.TrapContext) uint32 {
@@ -4675,7 +5027,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if *tmPtr != nil {
 			tid = uint32((*tmPtr).GetTID(ctx.CPU))
 		}
-		ctx.SetReturn(uint64(waitOneWin32(handles, h, tid, timeout)))
+		ctx.SetReturn(waitOneWin32(handles, h, tid, timeout))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "WaitForMultipleObjects", func(ctx *ntapi.TrapContext) uint32 {
@@ -4695,17 +5047,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if nCount > 64 {
 			nCount = 64
 		}
+		values := readWin32HandleArray(ctx.Mem, pHandles, nCount, ctx.State != nil && ctx.State.Is32)
+		if len(values) == 0 {
+			ctx.SetReturn(0xFFFFFFFF)
+			return 0
+		}
 		if !waitAll {
-			// WaitAny: return index of first signaled
-			for i := uint64(0); i < nCount; i++ {
-				hv, _ := ctx.Mem.Read64(pHandles + i*8)
-				res := waitOneWin32(handles, ntapi.Handle(hv), tid, timeout)
-				if res != 0x102 { // not WAIT_TIMEOUT
-					ctx.SetReturn(uint64(res))
-					return 0
-				}
-			}
-			ctx.SetReturn(0x102)
+			ctx.SetReturn(waitMultipleFallbackWin32(handles, values, tid, false, timeout))
 			return 0
 		}
 		// WaitAll: when every handle is a unified waitable object
@@ -4715,9 +5063,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// auto-reset object and then blocking on the next.
 		waitables := make([]ntobj.Waitable, 0, nCount)
 		unified := true
-		for i := uint64(0); i < nCount; i++ {
-			hv, _ := ctx.Mem.Read64(pHandles + i*8)
-			w := handles.WaitableFor(ntapi.Handle(hv))
+		for _, handle := range values {
+			w := handles.WaitableFor(handle)
 			if w == nil {
 				unified = false
 				break
@@ -4730,15 +5077,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		// Fallback for handle sets containing non-unified types (thread, timer,
 		// IOCP, ...): sequential wait (not atomic, preserves prior behavior).
-		for i := uint64(0); i < nCount; i++ {
-			hv, _ := ctx.Mem.Read64(pHandles + i*8)
-			res := waitOneWin32(handles, ntapi.Handle(hv), tid, timeout)
-			if res == 0x102 {
-				ctx.SetReturn(0x102)
-				return 0
-			}
-		}
-		ctx.SetReturn(0)
+		ctx.SetReturn(waitMultipleFallbackWin32(handles, values, tid, true, timeout))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "AcquireSRWLockExclusive", func(ctx *ntapi.TrapContext) uint32 {
@@ -4923,25 +5262,46 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// storage (LastError, stack bounds, TLS slots, exception chain).
 		// We copy the invariant process-wide fields from the main TEB and
 		// fill in thread-specific ones (TID, stack bounds, self pointer).
-		threadTEB := mem.Mmap(0, uint64(ntapi.TebSize), mmu.PermRead|mmu.PermWrite)
+		is32 := ctx.State != nil && ctx.State.Is32
+		tebSize := uint64(ntapi.TebSize)
+		if is32 {
+			tebSize = ntapi.Teb32Size
+		}
+		threadTEB := mem.Mmap(0, tebSize, mmu.PermRead|mmu.PermWrite)
 		if threadTEB != 0 {
-			// Copy TLS/FLS-related fields from main TEB
-			tlsPtr, _ := mem.Read64(procState.TEBAddr + ntapi.TebThreadLocalStorage)
-			mem.Write64(threadTEB+ntapi.TebThreadLocalStorage, tlsPtr)
-			flsPtr, _ := mem.Read64(procState.TEBAddr + ntapi.TebFlsData)
-			mem.Write64(threadTEB+ntapi.TebFlsData, flsPtr)
-			// Copy inline heap pointers so GS:[0x1800] reads work
-			heapBase, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
-			mem.Write64(threadTEB+ntapi.TebHeapBase, heapBase)
-			heapOff, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
-			mem.Write64(threadTEB+ntapi.TebHeapOffset, heapOff)
-			// Thread-specific fields
-			mem.Write64(threadTEB+ntapi.TebSelf, threadTEB)
-			mem.Write64(threadTEB+ntapi.TebPEB, procState.PEBAddr)
-			mem.Write64(threadTEB+ntapi.TebStackBase, stackBase+stackSz)
-			mem.Write64(threadTEB+ntapi.TebStackLimit, stackBase)
-			mem.Write32(threadTEB+ntapi.TebProcessId, uint32(procState.PEBAddr>>12))
-			mem.Write64(threadTEB+ntapi.TebExceptionList, 0xFFFFFFFFFFFFFFFF)
+			if is32 {
+				tlsPtr, _ := mem.Read32(procState.TEBAddr + ntapi.Teb32ThreadLocalStorage)
+				mem.Write32(threadTEB+ntapi.Teb32ThreadLocalStorage, tlsPtr)
+				flsPtr, _ := mem.Read32(procState.TEBAddr + ntapi.Teb32FlsData)
+				mem.Write32(threadTEB+ntapi.Teb32FlsData, flsPtr)
+				heapBase, _ := mem.Read32(procState.TEBAddr + ntapi.Teb32HeapBase)
+				mem.Write32(threadTEB+ntapi.Teb32HeapBase, heapBase)
+				heapOff, _ := mem.Read32(procState.TEBAddr + ntapi.Teb32HeapOffset)
+				mem.Write32(threadTEB+ntapi.Teb32HeapOffset, heapOff)
+				processID, _ := mem.Read32(procState.TEBAddr + ntapi.Teb32ProcessId)
+				mem.Write32(threadTEB+ntapi.Teb32Self, uint32(threadTEB))
+				mem.Write32(threadTEB+ntapi.Teb32PEB, uint32(procState.PEBAddr))
+				mem.Write32(threadTEB+ntapi.Teb32StackBase, uint32(stackBase+stackSz))
+				mem.Write32(threadTEB+ntapi.Teb32StackLimit, uint32(stackBase))
+				mem.Write32(threadTEB+ntapi.Teb32ProcessId, processID)
+				mem.Write32(threadTEB+ntapi.Teb32ExceptionList, 0xFFFFFFFF)
+			} else {
+				tlsPtr, _ := mem.Read64(procState.TEBAddr + ntapi.TebThreadLocalStorage)
+				mem.Write64(threadTEB+ntapi.TebThreadLocalStorage, tlsPtr)
+				flsPtr, _ := mem.Read64(procState.TEBAddr + ntapi.TebFlsData)
+				mem.Write64(threadTEB+ntapi.TebFlsData, flsPtr)
+				heapBase, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapBase)
+				mem.Write64(threadTEB+ntapi.TebHeapBase, heapBase)
+				heapOff, _ := mem.Read64(procState.TEBAddr + ntapi.TebHeapOffset)
+				mem.Write64(threadTEB+ntapi.TebHeapOffset, heapOff)
+				processID, _ := mem.Read32(procState.TEBAddr + ntapi.TebProcessId)
+				mem.Write64(threadTEB+ntapi.TebSelf, threadTEB)
+				mem.Write64(threadTEB+ntapi.TebPEB, procState.PEBAddr)
+				mem.Write64(threadTEB+ntapi.TebStackBase, stackBase+stackSz)
+				mem.Write64(threadTEB+ntapi.TebStackLimit, stackBase)
+				mem.Write32(threadTEB+ntapi.TebProcessId, processID)
+				mem.Write64(threadTEB+ntapi.TebExceptionList, 0xFFFFFFFFFFFFFFFF)
+			}
 		}
 		tid, done, err := tm.CloneWin32Thread(ctx.CPU, lpStartAddress, lpParameter, stackBase, stackSz, threadTEB)
 		if err != nil {
@@ -4949,7 +5309,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		if threadTEB != 0 {
-			mem.Write32(threadTEB+ntapi.TebThreadId, uint32(tid))
+			if is32 {
+				mem.Write32(threadTEB+ntapi.Teb32ThreadId, uint32(tid))
+			} else {
+				mem.Write32(threadTEB+ntapi.TebThreadId, uint32(tid))
+			}
 		}
 		if lpThreadId != 0 {
 			ctx.Mem.Write32(lpThreadId, uint32(tid))
@@ -4981,7 +5345,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			fname = append(fname, w)
 		}
 		name := string(utf16Decode(fname))
-		if ctx.Trace {
+		if ctx.Trace || os.Getenv("RAVEN_TRACE_FIND") != "" {
 			ravelog.Logf("[win32] CreateFileW: %q access=0x%x disp=%d\n", name, desiredAccess, creationDisp)
 		}
 		// Named pipe client connect: \\.\pipe\<name>
@@ -4996,14 +5360,17 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ch := ntapi.NewClientPipe(server)
 			h := handles.Alloc(ch)
 			server.Connected = true
-			if ctx.Trace {
+			if ctx.Trace || os.Getenv("RAVEN_TRACE_FIND") != "" {
 				ravelog.Logf("[win32] CreateFileW: pipe %q client → handle=0x%x\n", name, uint64(h))
 			}
 			ctx.SetReturn(uint64(h))
 			return 0
 		}
 		// Convert Windows path to VFS path
-		vfsPath := winPathToVFS(name)
+		vfsPath := winPathToVFS(normalizeWinPath(name))
+		if compatPath, ok := notepadPPUsersConfigPath(name); ok {
+			vfsPath = compatPath
+		}
 		// Fallback: if path like /AppName/file.xml doesn't exist,
 		// try replacing first directory component with the PE's dir
 		lastBS := strings.LastIndex(imagePath, `\`)
@@ -5052,8 +5419,17 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			procState.LastError = 2           // ERROR_FILE_NOT_FOUND
 			return 0
 		}
+		if node := ctx.FS.Stat(fd); node != nil && node.IsDir {
+			ctx.FS.Close(fd)
+			if ctx.Trace {
+				ravelog.Logf("[win32] CreateFileW: %q invalid directory open\n", name)
+			}
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+			procState.LastError = 5 // ERROR_ACCESS_DENIED
+			return 0
+		}
 		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
-		if ctx.Trace {
+		if ctx.Trace || os.Getenv("RAVEN_TRACE_FIND") != "" {
 			ravelog.Logf("[win32] CreateFileW: %q → handle=0x%x (fd=%d)\n", name, uint64(h), fd)
 		}
 		ctx.SetReturn(uint64(h))
@@ -5128,6 +5504,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if lpBytesRead != 0 {
 			ctx.Mem.Write32(lpBytesRead, uint32(n))
 		}
+		if os.Getenv("RAVEN_TRACE_FIND") != "" &&
+			(strings.HasPrefix(fh.Path, "/home/") || strings.HasPrefix(fh.Path, "/tmp/")) {
+			ravelog.Logf("[find-trace] ReadFile handle=0x%x path=%q requested=%d read=%d overlapped=%t\n",
+				uint64(hFile), fh.Path, nBytesToRead, n, lpOverlapped != 0)
+		}
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -5177,11 +5558,20 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "CloseHandle", func(ctx *ntapi.TrapContext) uint32 {
 		h := ntapi.Handle(ctx.Arg(0))
 		obj := handles.Get(h)
+		var persistErr error
 		if fh, ok := obj.(*ntapi.FileHandle); ok {
+			persistErr = hctx.flushHostSavePath(ctx.FS, fh.Path)
+			if persistErr != nil {
+				ravelog.Logf("[win32] CloseHandle: persist %q: %v\n", fh.Path, persistErr)
+			}
 			ctx.FS.Close(fh.FD)
 		}
 		handles.Close(h)
-		ctx.SetReturn(1) // TRUE
+		if persistErr != nil {
+			ctx.SetReturn(0)
+		} else {
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FlushFileBuffers", func(ctx *ntapi.TrapContext) uint32 {
@@ -5200,7 +5590,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		winPath := readGuestUTF16(pathPtr)
-		path := winPathToVFS(winPath)
+		path := winPathToVFS(normalizeWinPath(winPath))
 		// Check VFS first
 		if vnode, err := ctx.FS.StatPath(-1, path); err == nil {
 			var attrs uint32 = 0x20 // FILE_ATTRIBUTE_NORMAL
@@ -5232,7 +5622,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		lpFileName := ctx.Arg(0)
 		// fInfoLevelId := ctx.Arg(1) // always GetFileExInfoStandard (0)
 		lpFileInfo := ctx.Arg(2)
-		path := winPathToVFS(readGuestUTF16(lpFileName))
+		winPath := readGuestUTF16(lpFileName)
+		path := winPathToVFS(normalizeWinPath(winPath))
+		if ctx.Trace {
+			ravelog.Logf("[win32] GetFileAttributesExW: %q -> %q\n", winPath, path)
+		}
 		// WIN32_FILE_ATTRIBUTE_DATA layout:
 		// dwFileAttributes(4), ftCreationTime(8), ftLastAccessTime(8),
 		// ftLastWriteTime(8), nFileSizeHigh(4), nFileSizeLow(4)
@@ -5290,22 +5684,30 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		pathPtr := ctx.Arg(0)
 		dataPtr := ctx.Arg(1)
 		pattern := readGuestUTF16(pathPtr)
-		vfsPattern := winPathToVFS(pattern)
+		vfsPattern := winPathToVFS(normalizeWinPath(pattern))
 		dir := filepath.Dir(vfsPattern)
 		glob := filepath.Base(vfsPattern)
-		entries, err := os.ReadDir(dir)
+		entries, err := ctx.FS.ReadDir(dir)
+		if os.Getenv("RAVEN_TRACE_FIND") != "" {
+			ravelog.Logf("[find-trace] FindFirstFileW pattern=%q dir=%q glob=%q data=0x%x entries=%d err=%v\n",
+				pattern, dir, glob, dataPtr, len(entries), err)
+		}
 		if err != nil {
+			setThreadLastError(ctx, 3)        // ERROR_PATH_NOT_FOUND
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
 			return 0
 		}
 		var matched []os.DirEntry
 		for _, e := range entries {
-			ok, _ := filepath.Match(glob, e.Name())
-			if ok {
+			if windowsFileMatch(glob, e.Name()) {
 				matched = append(matched, e)
 			}
 		}
+		if os.Getenv("RAVEN_TRACE_FIND") != "" {
+			ravelog.Logf("[find-trace] FindFirstFileW matched=%d\n", len(matched))
+		}
 		if len(matched) == 0 {
+			setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
 			return 0
 		}
@@ -5319,24 +5721,32 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindFirstFileExW", func(ctx *ntapi.TrapContext) uint32 {
 		pathPtr := ctx.Arg(0)
-		dataPtr := ctx.Arg(4)
+		dataPtr := ctx.Arg(2)
 		pattern := readGuestUTF16(pathPtr)
-		vfsPattern := winPathToVFS(pattern)
+		vfsPattern := winPathToVFS(normalizeWinPath(pattern))
 		dir := filepath.Dir(vfsPattern)
 		glob := filepath.Base(vfsPattern)
-		entries, err := os.ReadDir(dir)
+		entries, err := ctx.FS.ReadDir(dir)
+		if os.Getenv("RAVEN_TRACE_FIND") != "" {
+			ravelog.Logf("[find-trace] FindFirstFileExW pattern=%q dir=%q glob=%q data=0x%x entries=%d err=%v\n",
+				pattern, dir, glob, dataPtr, len(entries), err)
+		}
 		if err != nil {
+			setThreadLastError(ctx, 3) // ERROR_PATH_NOT_FOUND
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
 			return 0
 		}
 		var matched []os.DirEntry
 		for _, e := range entries {
-			ok, _ := filepath.Match(glob, e.Name())
-			if ok {
+			if windowsFileMatch(glob, e.Name()) {
 				matched = append(matched, e)
 			}
 		}
+		if os.Getenv("RAVEN_TRACE_FIND") != "" {
+			ravelog.Logf("[find-trace] FindFirstFileExW matched=%d\n", len(matched))
+		}
 		if len(matched) == 0 {
+			setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
 			return 0
 		}
@@ -5353,38 +5763,39 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		dataPtr := ctx.Arg(1)
 		obj := handles.Get(ntapi.Handle(hFind))
 		fh, ok := obj.(*ntapi.FindHandle)
-		if !ok || fh.Idx >= len(fh.Entries) {
+		if !ok {
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		entry, index, total, hasNext := fh.Next()
+		if os.Getenv("RAVEN_TRACE_FIND") != "" {
+			ravelog.Logf("[find-trace] FindNextFileW handle=0x%x index=%d total=%d data=0x%x\n",
+				hFind, index, total, dataPtr)
+		}
+		if !hasNext {
+			setThreadLastError(ctx, 18) // ERROR_NO_MORE_FILES
 			ctx.SetReturn(0)
 			return 0
 		}
 		if dataPtr != 0 {
-			writeFindData(ctx.Mem, dataPtr, fh.Dir, fh.Entries[fh.Idx])
+			writeFindData(ctx.Mem, dataPtr, fh.Dir, entry)
 		}
-		fh.Idx++
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindClose", func(ctx *ntapi.TrapContext) uint32 {
-		handles.Close(ntapi.Handle(ctx.Arg(0)))
+		handle := ntapi.Handle(ctx.Arg(0))
+		if _, ok := handles.Get(handle).(*ntapi.FindHandle); !ok || !handles.Close(handle) {
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CopyFileW", func(ctx *ntapi.TrapContext) uint32 {
-		src := winPathToVFS(readGuestUTF16(ctx.Arg(0)))
-		dst := winPathToVFS(readGuestUTF16(ctx.Arg(1)))
-		in, err := os.Open(src)
-		if err != nil {
-			ctx.SetReturn(0)
-			return 0
-		}
-		defer in.Close()
-		out, err := os.Create(dst)
-		if err != nil {
-			ctx.SetReturn(0)
-			return 0
-		}
-		defer out.Close()
-		if _, err = io.Copy(out, in); err != nil {
+		if !copyFile(ctx, readGuestUTF16(ctx.Arg(0)), readGuestUTF16(ctx.Arg(1)), ctx.Arg(2) != 0) {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -5392,21 +5803,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CopyFileExW", func(ctx *ntapi.TrapContext) uint32 {
-		src := winPathToVFS(readGuestUTF16(ctx.Arg(0)))
-		dst := winPathToVFS(readGuestUTF16(ctx.Arg(1)))
-		in, err := os.Open(src)
-		if err != nil {
+		if !copyFile(ctx, readGuestUTF16(ctx.Arg(0)), readGuestUTF16(ctx.Arg(1)), ctx.Arg(5)&1 != 0) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		defer in.Close()
-		out, err := os.Create(dst)
-		if err != nil {
-			ctx.SetReturn(0)
-			return 0
-		}
-		defer out.Close()
-		io.Copy(out, in)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5422,9 +5822,55 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "MoveFileExW", func(ctx *ntapi.TrapContext) uint32 {
-		src := winPathToVFS(readGuestUTF16(ctx.Arg(0)))
-		dst := winPathToVFS(readGuestUTF16(ctx.Arg(1)))
-		if err := os.Rename(src, dst); err != nil {
+		srcPtr := ctx.Arg(0)
+		dstPtr := ctx.Arg(1)
+		flags := uint32(ctx.Arg(2))
+		if srcPtr == 0 {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		if flags&0x4 != 0 {
+			if flags&0x2 != 0 {
+				setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			} else {
+				setThreadLastError(ctx, 120) // ERROR_CALL_NOT_IMPLEMENTED
+			}
+			ctx.SetReturn(0)
+			return 0
+		}
+		if dstPtr == 0 {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		src := winPathToVFS(normalizeWinPath(readGuestUTF16(srcPtr)))
+		dst := winPathToVFS(normalizeWinPath(readGuestUTF16(dstPtr)))
+		srcNode, srcErr := ctx.FS.StatPath(-1, src)
+		dstNode, dstErr := ctx.FS.StatPath(-1, dst)
+		sameEntry := srcErr == nil && dstErr == nil && srcNode == dstNode
+		if dstErr == nil && dstNode.IsDir && !sameEntry {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
+		}
+		if flags&0x1 == 0 && dstErr == nil && !sameEntry {
+			setThreadLastError(ctx, 183) // ERROR_ALREADY_EXISTS
+			ctx.SetReturn(0)
+			return 0
+		}
+		err := ctx.FS.RenameatWithCommit(-1, src, -1, dst, vfs.RenameOptions{
+			ReplaceExisting:         flags&0x1 != 0,
+			RejectExistingDirectory: true,
+		}, func(source vfs.RenameCommitSource) (vfs.RenameCommitResult, error) {
+			return hctx.commitHostSaveRename(src, dst, source, hostSaveRenameOptions{
+				replaceExisting: flags&0x1 != 0,
+				allowCopy:       flags&0x2 != 0,
+			})
+		})
+		if err != nil {
+			ravelog.Logf("[win32] MoveFileExW failed: %v\n", err)
+			setThreadLastError(ctx, hostSaveMoveErrorCode(err))
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -5435,14 +5881,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		lpFileName := ctx.Arg(0)
 		dwFileAttributes := uint32(ctx.Arg(1))
 		if lpFileName == 0 {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 87) // ERROR_INVALID_PARAMETER
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
 		path := winPathToVFS(readGuestUTF16(lpFileName))
 		info, err := os.Stat(path)
 		if err != nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+			setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -5453,7 +5899,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			mode |= 0200 // add owner write bit
 		}
 		if err := os.Chmod(path, mode); err != nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5) // ERROR_ACCESS_DENIED
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -5473,10 +5919,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "GlobalAlloc", func(ctx *ntapi.TrapContext) uint32 {
 		flags := ctx.Arg(0)
 		size := ctx.Arg(1)
-		if size == 0 {
-			size = 1
-		}
-		addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
+		addr := hctx.allocGlobal(size)
 		if flags&0x0040 != 0 { // GMEM_ZEROINIT
 			for i := uint64(0); i < size; i++ {
 				mem.Write8(addr+i, 0)
@@ -5493,13 +5936,17 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GlobalFree", func(ctx *ntapi.TrapContext) uint32 {
 		hMem := ctx.Arg(0)
-		if hMem != 0 {
-			_, size, mapped, _ := mem.QueryRegion(hMem)
-			if mapped && size > 0 {
-				mem.Munmap(hMem, size)
-			}
+		if hMem == 0 {
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(0) // NULL = success
+		size, ok := hctx.releaseGlobal(hMem)
+		if !ok {
+			ctx.SetReturn(hMem)
+			return 0
+		}
+		mem.Munmap(hMem, size)
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GlobalSize", func(ctx *ntapi.TrapContext) uint32 {
@@ -5508,12 +5955,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
-		_, size, mapped, _ := mem.QueryRegion(hMem)
-		if mapped {
+		if size, ok := hctx.globalAllocSize(hMem); ok {
 			ctx.SetReturn(size)
-		} else {
-			ctx.SetReturn(0)
+			return 0
 		}
+		ctx.SetReturn(0)
 		return 0
 	})
 	// --- Locale / string classification ---
@@ -6610,7 +7056,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			pprof.StopCPUProfile()
 			os.Exit(int(code))
 		}
-		setLastErrorValue(6) // ERROR_INVALID_HANDLE
+		setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -6643,7 +7089,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			value := readGuestUTF16(valPtr)
 			envVars[name] = value
 		}
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -6687,17 +7133,72 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "RegisterApplicationRestart", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "RegisterApplicationRestart", 2, 0)
 	})
+	formatMessageSource := func(ctx *ntapi.TrapContext, template string, wide bool) string {
+		const (
+			formatMessageIgnoreInserts = 0x0200
+			formatMessageArgumentArray = 0x2000
+		)
+		flags := ctx.Arg(0)
+		ignoreInserts := flags&formatMessageIgnoreInserts != 0
+		arguments := ctx.Arg(6)
+		if ignoreInserts || arguments == 0 {
+			return formatMessageFromTemplate(template, ignoreInserts, nil)
+		}
+		is32 := procState != nil && procState.Is32
+		argumentBase := arguments
+		argumentArray := flags&formatMessageArgumentArray != 0
+		if !argumentArray {
+			if pointer, err := readGuestPointer(mem, arguments, is32); err == nil && pointer != 0 {
+				argumentBase = pointer
+			}
+		}
+		pointerSize := uint64(8)
+		if is32 {
+			pointerSize = 4
+		}
+		resolve := func(index int, format string) (string, bool) {
+			if index < 1 || index > 99 {
+				return "", false
+			}
+			slot := uint64(index - 1)
+			if !argumentArray {
+				slot = formatMessageArgumentSlot(template, index, is32)
+			}
+			valueAddr := argumentBase + slot*pointerSize
+			var value uint64
+			if is32 && formatMessageUses64Bit(format) {
+				low, lowErr := mem.Read32(valueAddr)
+				high, highErr := mem.Read32(valueAddr + 4)
+				if lowErr != nil || highErr != nil {
+					return "", false
+				}
+				value = uint64(low) | uint64(high)<<32
+			} else {
+				var err error
+				value, err = readGuestPointer(mem, valueAddr, is32)
+				if err != nil {
+					return "", false
+				}
+			}
+			return formatMessageInsertValue(value, format, wide, readGuestString, readGuestUTF16)
+		}
+		return formatMessageFromTemplate(template, false, resolve)
+	}
 	d.RegisterAutoStubHandler(kernel32, "FormatMessageW", func(ctx *ntapi.TrapContext) uint32 {
 		dwFlags := ctx.Arg(0)
+		lpSource := ctx.Arg(1)
 		dwMessageId := ctx.Arg(2)
 		lpBuffer := ctx.Arg(4)
 		nSize := ctx.Arg(5)
 		const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x100
+		const FORMAT_MESSAGE_FROM_STRING = 0x400
 		const FORMAT_MESSAGE_FROM_SYSTEM = 0x1000
 		// ReactOS: dll/win32/kernel32/client/except.c - FormatMessageW
 		// Map common Win32 error codes to human-readable messages
 		var msg string
-		if dwFlags&FORMAT_MESSAGE_FROM_SYSTEM != 0 {
+		if dwFlags&FORMAT_MESSAGE_FROM_STRING != 0 && lpSource != 0 {
+			msg = formatMessageSource(ctx, readGuestUTF16(lpSource), true)
+		} else if dwFlags&FORMAT_MESSAGE_FROM_SYSTEM != 0 {
 			switch uint32(dwMessageId) {
 			case 0:
 				msg = "The operation completed successfully."
@@ -6814,19 +7315,39 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ws := utf16Encode(msg)
 		n := uint64(len(ws))
 		if dwFlags&FORMAT_MESSAGE_ALLOCATE_BUFFER != 0 {
-			bufSize := (n + 2) * 2
+			if lpBuffer == 0 {
+				setLastErrorValue(ctx, 87)
+				ctx.SetReturn(0)
+				return 0
+			}
+			bufferChars := n + 1
+			if nSize > bufferChars {
+				bufferChars = nSize
+			}
+			bufSize := bufferChars * 2
 			addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
+			if addr == 0 {
+				setLastErrorValue(ctx, 8)
+				ctx.SetReturn(0)
+				return 0
+			}
+			hctx.trackLocalAlloc(addr, bufSize)
 			for i, w := range ws {
 				ctx.Mem.Write16(addr+uint64(i)*2, w)
 			}
 			mem.Write16(addr+n*2, 0)
-			if lpBuffer != 0 {
-				ctx.Mem.Write64(lpBuffer, addr)
+			if !writeGuestPtr(ctx, lpBuffer, addr) {
+				hctx.takeLocalAlloc(addr)
+				mem.Munmap(addr, bufSize)
+				setLastErrorValue(ctx, 998)
+				ctx.SetReturn(0)
+				return 0
 			}
-		} else if lpBuffer != 0 && nSize > 0 {
-			maxN := nSize - 1
-			if n > maxN {
-				n = maxN
+		} else {
+			if lpBuffer == 0 || nSize == 0 || n >= nSize {
+				setLastErrorValue(ctx, 122)
+				ctx.SetReturn(0)
+				return 0
 			}
 			for i := uint64(0); i < n; i++ {
 				ctx.Mem.Write16(lpBuffer+i*2, ws[i])
@@ -6838,13 +7359,17 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "FormatMessageA", func(ctx *ntapi.TrapContext) uint32 {
 		dwFlags := ctx.Arg(0)
+		lpSource := ctx.Arg(1)
 		dwMessageId := ctx.Arg(2)
 		lpBuffer := ctx.Arg(4)
 		nSize := ctx.Arg(5)
 		const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x100
+		const FORMAT_MESSAGE_FROM_STRING = 0x400
 		const FORMAT_MESSAGE_FROM_SYSTEM = 0x1000
 		var msg string
-		if dwFlags&FORMAT_MESSAGE_FROM_SYSTEM != 0 {
+		if dwFlags&FORMAT_MESSAGE_FROM_STRING != 0 && lpSource != 0 {
+			msg = formatMessageSource(ctx, readGuestString(lpSource), false)
+		} else if dwFlags&FORMAT_MESSAGE_FROM_SYSTEM != 0 {
 			switch uint32(dwMessageId) {
 			case 0:
 				msg = "The operation completed successfully."
@@ -6894,18 +7419,38 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		n := uint64(len(msg))
 		if dwFlags&FORMAT_MESSAGE_ALLOCATE_BUFFER != 0 {
-			addr := mem.Mmap(0, n+2, mmu.PermRead|mmu.PermWrite)
+			if lpBuffer == 0 {
+				setLastErrorValue(ctx, 87)
+				ctx.SetReturn(0)
+				return 0
+			}
+			bufSize := n + 1
+			if nSize > bufSize {
+				bufSize = nSize
+			}
+			addr := mem.Mmap(0, bufSize, mmu.PermRead|mmu.PermWrite)
+			if addr == 0 {
+				setLastErrorValue(ctx, 8)
+				ctx.SetReturn(0)
+				return 0
+			}
+			hctx.trackLocalAlloc(addr, bufSize)
 			for i := range msg {
 				ctx.Mem.Write8(addr+uint64(i), msg[i])
 			}
 			mem.Write8(addr+n, 0)
-			if lpBuffer != 0 {
-				ctx.Mem.Write64(lpBuffer, addr)
+			if !writeGuestPtr(ctx, lpBuffer, addr) {
+				hctx.takeLocalAlloc(addr)
+				mem.Munmap(addr, bufSize)
+				setLastErrorValue(ctx, 998)
+				ctx.SetReturn(0)
+				return 0
 			}
-		} else if lpBuffer != 0 && nSize > 0 {
-			maxN := nSize - 1
-			if n > maxN {
-				n = maxN
+		} else {
+			if lpBuffer == 0 || nSize == 0 || n >= nSize {
+				setLastErrorValue(ctx, 122)
+				ctx.SetReturn(0)
+				return 0
 			}
 			for i := uint64(0); i < n; i++ {
 				ctx.Mem.Write8(lpBuffer+i, msg[i])
@@ -7034,12 +7579,23 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FreeLibraryAndExitThread", func(ctx *ntapi.TrapContext) uint32 {
+		hModule := ctx.Arg(0)
+		exitCode := uint32(ctx.Arg(1))
+		releaseLoadedLibraryReference(hModule)
+		if tm := *tmPtr; tm != nil {
+			handles.SetThreadExitCodeByTID(tm.GetTID(ctx.CPU), exitCode)
+		}
+		ravelog.Logf("[win32] FreeLibraryAndExitThread(0x%x, %d)\n", hModule, exitCode)
+		ctx.CPU.Stop()
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ExitThread", func(ctx *ntapi.TrapContext) uint32 {
-		exitCode := ctx.Arg(0)
-		_ = exitCode
-		ctx.SetReturn(0)
+		exitCode := uint32(ctx.Arg(0))
+		if tm := *tmPtr; tm != nil {
+			handles.SetThreadExitCodeByTID(tm.GetTID(ctx.CPU), exitCode)
+		}
+		ravelog.Logf("[win32] ExitThread(%d)\n", exitCode)
+		ctx.CPU.Stop()
 		return 0
 	})
 	// IsWow64Process: always return FALSE (native 64-bit)
@@ -7048,7 +7604,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if lpIsWow64 != 0 {
 			mem.Write32(lpIsWow64, 0) // FALSE
 		}
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1) // success
 		return 0
 	})
@@ -7098,6 +7654,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			goto fallback
 		}
 		// If synth DLL doesn't exist yet, create it from all INT entries
+		hctx.SynthMu.Lock()
 		if _, ok := synthByName[dllName]; !ok {
 			var allFuncs []string
 			for i := uint64(0); ; i++ {
@@ -7122,12 +7679,15 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				}
 			}
 			if len(allFuncs) > 0 {
-				synth := ntapi.GenerateSynthDLL(mem, dllName, allFuncs, hctx.NextDelayID)
+				hctx.NextDelayMu.Lock()
+				idBase := hctx.NextDelayID
+				hctx.NextDelayID += uint32(len(allFuncs))
+				hctx.NextDelayMu.Unlock()
+				synth := ntapi.GenerateSynthDLL(mem, dllName, allFuncs, idBase)
 				synthByName[dllName] = synth
 				d.RegisterAutoStubNames(synth)
 				ravelog.Logf("[pe] delay-synth %s: %d stubs (id base 0x%X) funcs=%v\n",
-					dllName, len(allFuncs), hctx.NextDelayID, allFuncs)
-				hctx.NextDelayID += uint32(len(allFuncs))
+					dllName, len(allFuncs), idBase, allFuncs)
 				// Re-run all handler registrars so newly synthesized DLL gets handlers
 				for _, reg := range hctx.DelayHandlerRegistrars {
 					reg()
@@ -7137,10 +7697,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if synth, ok := synthByName[dllName]; ok {
 			if addr, ok2 := synth.Exports[funcName]; ok2 {
 				mem.Write64(pThunkAddr, addr)
+				hctx.SynthMu.Unlock()
 				ctx.SetReturn(addr)
 				return 0
 			}
 		}
+		hctx.SynthMu.Unlock()
 		ravelog.Logf("[delay] unresolved: %s!%s\n", dllName, funcName)
 	fallback:
 		if hctx.DelayLoadFallback == 0 {
@@ -7162,7 +7724,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		size := ctx.Arg(2)
 		val, ok := lookupEnvValue(name)
 		if !ok {
-			setLastErrorValue(203)
+			setLastErrorValue(ctx, 203)
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -7172,7 +7734,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		if needed > size {
-			setLastErrorValue(122)
+			setLastErrorValue(ctx, 122)
 			ctx.SetReturn(needed)
 			return 0
 		}
@@ -7180,7 +7742,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.Mem.Write8(buf+uint64(i), val[i])
 		}
 		ctx.Mem.Write8(buf+uint64(len(val)), 0)
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(uint64(len(val)))
 		return 0
 	})
@@ -7209,7 +7771,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		desiredAccess := ctx.Arg(1)
 		creationDisp := ctx.Arg(4)
 		name := readGuestString(namePtr)
-		vfsPath := winPathToVFS(name)
+		vfsPath := winPathToVFS(normalizeWinPath(name))
+		if compatPath, ok := notepadPPUsersConfigPath(name); ok {
+			vfsPath = compatPath
+		}
 		lastBS := strings.LastIndex(imagePath, `\`)
 		peWinDir := imagePath
 		if lastBS >= 0 {
@@ -7258,6 +7823,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			procState.LastError = 2
 			return 0
 		}
+		if node := ctx.FS.Stat(fd); node != nil && node.IsDir {
+			ctx.FS.Close(fd)
+			ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) invalid directory open\n", name, flags)
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+			procState.LastError = 5
+			return 0
+		}
 		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
 		ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) → handle 0x%x\n", name, flags, h)
 		ctx.SetReturn(uint64(h))
@@ -7265,8 +7837,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	// CreateToolhelp32Snapshot: no process enumeration support
 	d.RegisterAutoStubHandler(kernel32, "CreateToolhelp32Snapshot", func(ctx *ntapi.TrapContext) uint32 {
-		mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 18) // ERROR_NO_MORE_FILES
-		ctx.SetReturn(0xFFFFFFFFFFFFFFFF)                          // INVALID_HANDLE_VALUE
+		setThreadLastError(ctx, 18)       // ERROR_NO_MORE_FILES
+		ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "DeviceIoControl", func(ctx *ntapi.TrapContext) uint32 {
@@ -7304,7 +7876,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				return 0
 			}
 		case 0x000900A8: // FSCTL_GET_REPARSE_POINT
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 4390) // ERROR_NOT_A_REPARSE_POINT
+			setThreadLastError(ctx, 4390) // ERROR_NOT_A_REPARSE_POINT
 			if lpBytesReturned != 0 {
 				ctx.Mem.Write32(lpBytesReturned, 0)
 			}
@@ -7312,7 +7884,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		// Default: unsupported IOCTL
-		mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 1) // ERROR_INVALID_FUNCTION
+		setThreadLastError(ctx, 1) // ERROR_INVALID_FUNCTION
 		if lpBytesReturned != 0 {
 			ctx.Mem.Write32(lpBytesReturned, 0)
 		}
@@ -7424,8 +7996,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	// Process32First: no processes to enumerate
 	d.RegisterAutoStubHandler(kernel32, "Process32First", func(ctx *ntapi.TrapContext) uint32 {
-		mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 18) // ERROR_NO_MORE_FILES
-		ctx.SetReturn(0)                                           // FALSE
+		setThreadLastError(ctx, 18) // ERROR_NO_MORE_FILES
+		ctx.SetReturn(0)            // FALSE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetConsoleTextAttribute", func(ctx *ntapi.TrapContext) uint32 {
@@ -7617,11 +8189,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "CancelIo", func(ctx *ntapi.TrapContext) uint32 {
 		hFile := ntapi.Handle(ctx.Arg(0))
 		if handles.GetFile(hFile) == nil {
-			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7630,7 +8202,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		hFile := ntapi.Handle(ctx.Arg(0))
 		lpOverlapped := ctx.Arg(1)
 		if handles.GetFile(hFile) == nil {
-			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -7638,7 +8210,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.Mem.Write64(lpOverlapped, statusCancelled)
 			ctx.Mem.Write64(lpOverlapped+8, 0)
 		}
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -7903,32 +8475,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "CopyFile2", 8, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CopyFileA", func(ctx *ntapi.TrapContext) uint32 {
-		src := winPathToVFS(readGuestString(ctx.Arg(0)))
-		dst := winPathToVFS(readGuestString(ctx.Arg(1)))
-		failIfExists := ctx.Arg(2) != 0
-		if failIfExists {
-			if _, err := os.Stat(dst); err == nil {
-				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
-				ctx.SetReturn(0)
-				return 0
-			}
-		}
-		in, err := os.Open(src)
-		if err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2)
-			ctx.SetReturn(0)
-			return 0
-		}
-		defer in.Close()
-		out, err := os.Create(dst)
-		if err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
-			ctx.SetReturn(0)
-			return 0
-		}
-		defer out.Close()
-		if _, err := io.Copy(out, in); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
+		if !copyFile(ctx, readGuestString(ctx.Arg(0)), readGuestString(ctx.Arg(1)), ctx.Arg(2) != 0) {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -7936,32 +8483,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CopyFileExA", func(ctx *ntapi.TrapContext) uint32 {
-		src := winPathToVFS(readGuestString(ctx.Arg(0)))
-		dst := winPathToVFS(readGuestString(ctx.Arg(1)))
-		flags := ctx.Arg(5)
-		if flags&1 != 0 { // COPY_FILE_FAIL_IF_EXISTS
-			if _, err := os.Stat(dst); err == nil {
-				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
-				ctx.SetReturn(0)
-				return 0
-			}
-		}
-		in, err := os.Open(src)
-		if err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2)
-			ctx.SetReturn(0)
-			return 0
-		}
-		defer in.Close()
-		out, err := os.Create(dst)
-		if err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
-			ctx.SetReturn(0)
-			return 0
-		}
-		defer out.Close()
-		if _, err := io.Copy(out, in); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
+		if !copyFile(ctx, readGuestString(ctx.Arg(0)), readGuestString(ctx.Arg(1)), ctx.Arg(5)&1 != 0) {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -8016,12 +8538,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ravelog.Logf("[wise] CreateDirectoryA(%q)\n", winPath)
 		if _, err := ctx.FS.Resolve(path); err == nil {
 			// Already exists - Windows returns FALSE + ERROR_ALREADY_EXISTS
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+			setThreadLastError(ctx, 183)
 			ctx.SetReturn(0)
 			return 0
 		}
 		if err := ctx.FS.Mkdir(path); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 3) // ERROR_PATH_NOT_FOUND
+			setThreadLastError(ctx, 3) // ERROR_PATH_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -8036,12 +8558,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		path := winPathToVFS(readGuestString(pathPtr))
 		if _, err := ctx.FS.Resolve(path); err == nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+			setThreadLastError(ctx, 183)
 			ctx.SetReturn(0)
 			return 0
 		}
 		if err := ctx.FS.Mkdir(path); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 3)
+			setThreadLastError(ctx, 3)
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -8056,12 +8578,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		path := winPathToVFS(readGuestUTF16(pathPtr))
 		if _, err := ctx.FS.Resolve(path); err == nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+			setThreadLastError(ctx, 183)
 			ctx.SetReturn(0)
 			return 0
 		}
 		if err := ctx.FS.Mkdir(path); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 3)
+			setThreadLastError(ctx, 3)
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -8108,7 +8630,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		mem.Write64(addr, lpParam)
 		// Store start address at offset 8 for potential future dispatch
 		mem.Write64(addr+8, ctx.Arg(1))
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		fiberMu.Unlock()
 		ctx.SetReturn(addr)
 		return 0
@@ -8124,7 +8646,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		fiberMap[addr] = lpParam
 		mem.Write64(addr, lpParam)
 		mem.Write64(addr+8, ctx.Arg(3)) // lpStartAddress
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		fiberMu.Unlock()
 		ctx.SetReturn(addr)
 		return 0
@@ -8190,13 +8712,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		completionKey := ctx.Arg(2)
 		if existingPort != 0 {
 			if handles.GetIoCompletion(existingPort) == nil {
-				setLastErrorValue(6) // ERROR_INVALID_HANDLE
+				setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 				ctx.SetReturn(0)
 				return 0
 			}
 			if fileHandle != 0 && fileHandle != ntapi.InvalidHandle {
 				if handles.GetFile(fileHandle) == nil {
-					setLastErrorValue(6) // ERROR_INVALID_HANDLE
+					setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 					ctx.SetReturn(0)
 					return 0
 				}
@@ -8205,19 +8727,19 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				ioCompletionKeys[uint64(fileHandle)] = completionKey
 				ioCompletionMu.Unlock()
 			}
-			setLastErrorValue(0)
+			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(uint64(existingPort))
 			return 0
 		}
 		if fileHandle == ntapi.InvalidHandle {
 			// Create a new IOCP.
 			h := handles.Alloc(&ntapi.IoCompletionPortHandle{})
-			setLastErrorValue(0)
+			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(uint64(h))
 			return 0
 		}
 		if handles.GetFile(fileHandle) == nil {
-			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -8227,7 +8749,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ioCompletionPorts[uint64(fileHandle)] = uint64(h)
 		ioCompletionKeys[uint64(fileHandle)] = completionKey
 		ioCompletionMu.Unlock()
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(uint64(h))
 		return 0
 	})
@@ -8394,35 +8916,130 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ctx.SetReturn(1)
 		return 0
 	})
-	d.RegisterAutoStubHandler(kernel32, "CreateProcessA", func(ctx *ntapi.TrapContext) uint32 {
-		setLastErrorValue(50) // ERROR_NOT_SUPPORTED
-		ctx.SetReturn(0)
+	resolveChildExecutable := func(application, commandLine string) (string, []string, error) {
+		args := parseCommandLine(commandLine)
+		guestExecutable := strings.TrimSpace(application)
+		if guestExecutable == "" && len(args) > 0 {
+			guestExecutable = args[0]
+			args = args[1:]
+		} else if guestExecutable != "" && len(args) > 0 && strings.EqualFold(filepath.Base(strings.ReplaceAll(args[0], `\`, `/`)), filepath.Base(strings.ReplaceAll(guestExecutable, `\`, `/`))) {
+			args = args[1:]
+		}
+		guestExecutable = strings.Trim(guestExecutable, `"`)
+		if guestExecutable == "" {
+			return "", nil, fmt.Errorf("empty executable")
+		}
+
+		hostImage := hctx.HostImagePath
+		guestBase := filepath.Base(strings.ReplaceAll(guestExecutable, `\`, `/`))
+		if hostImage != "" && strings.EqualFold(guestBase, filepath.Base(hostImage)) {
+			return hostImage, args, nil
+		}
+
+		normalized := strings.ReplaceAll(guestExecutable, `\`, `/`)
+		guestImageDir := strings.TrimSuffix(strings.ReplaceAll(filepath.Dir(strings.ReplaceAll(imagePath, `\`, `/`)), `\`, `/`), "/")
+		if hostImage != "" && strings.HasPrefix(strings.ToLower(normalized), strings.ToLower(guestImageDir)+"/") {
+			relative := normalized[len(guestImageDir)+1:]
+			candidate := filepath.Join(filepath.Dir(hostImage), filepath.FromSlash(relative))
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate, args, nil
+			}
+		}
+		for _, candidate := range []string{normalized, filepath.Join(filepath.Dir(hostImage), filepath.FromSlash(normalized))} {
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate, args, nil
+			}
+		}
+		return "", nil, fmt.Errorf("executable %q not found", guestExecutable)
+	}
+	hctx.StartChildProcess = func(application, commandLine string) (*os.Process, error) {
+		target, args, err := resolveChildExecutable(application, commandLine)
+		if err != nil {
+			return nil, err
+		}
+		ravenExecutable, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		cmd := exec.Command(ravenExecutable, append([]string{target}, args...)...)
+		cmd.Env = os.Environ()
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		go func() { _ = cmd.Wait() }()
+		ravelog.Logf("[process] started target=%q pid=%d args=%q\n", target, cmd.Process.Pid, args)
+		return cmd.Process, nil
+	}
+
+	createProcess := func(ctx *ntapi.TrapContext, wide bool) uint32 {
+		var application, commandLine string
+		if wide {
+			application = readGuestUTF16(ctx.Arg(0))
+			commandLine = readGuestUTF16(ctx.Arg(1))
+		} else {
+			application = readGuestString(ctx.Arg(0))
+			commandLine = readGuestString(ctx.Arg(1))
+		}
+		creationFlags := uint32(ctx.Arg(5))
+		processInfo := ctx.Arg(9)
+		if creationFlags&0x00000004 != 0 || processInfo == 0 {
+			setLastErrorValue(ctx, 50)
+			ctx.SetReturn(0)
+			return 0
+		}
+		process, err := hctx.StartChildProcess(application, commandLine)
+		if err != nil {
+			ravelog.Logf("[process] CreateProcess failed: %v\n", err)
+			setLastErrorValue(ctx, 2)
+			ctx.SetReturn(0)
+			return 0
+		}
+		processHandle := handles.Alloc(&childProcessHandle{process: process})
+		threadHandle := handles.Alloc(&childThreadHandle{})
+		if procState.Is32 {
+			mem.Write32(processInfo, uint32(processHandle))
+			mem.Write32(processInfo+4, uint32(threadHandle))
+			mem.Write32(processInfo+8, uint32(process.Pid))
+			mem.Write32(processInfo+12, 1)
+		} else {
+			mem.Write64(processInfo, uint64(processHandle))
+			mem.Write64(processInfo+8, uint64(threadHandle))
+			mem.Write32(processInfo+16, uint32(process.Pid))
+			mem.Write32(processInfo+20, 1)
+		}
+		setLastErrorValue(ctx, 0)
+		ctx.SetReturn(1)
 		return 0
+	}
+
+	d.RegisterAutoStubHandler(kernel32, "CreateProcessA", func(ctx *ntapi.TrapContext) uint32 {
+		return createProcess(ctx, false)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessAsUserA", func(ctx *ntapi.TrapContext) uint32 {
-		setLastErrorValue(50)
+		setLastErrorValue(ctx, 50)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessAsUserW", func(ctx *ntapi.TrapContext) uint32 {
-		setLastErrorValue(50)
+		setLastErrorValue(ctx, 50)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessInternalA", func(ctx *ntapi.TrapContext) uint32 {
-		setLastErrorValue(50)
+		setLastErrorValue(ctx, 50)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessInternalW", func(ctx *ntapi.TrapContext) uint32 {
-		setLastErrorValue(50)
+		setLastErrorValue(ctx, 50)
 		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateProcessW", func(ctx *ntapi.TrapContext) uint32 {
-		setLastErrorValue(50)
-		ctx.SetReturn(0)
-		return 0
+		return createProcess(ctx, true)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreatePseudoConsole", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "CreatePseudoConsole", 4, 0)
@@ -8503,7 +9120,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		callback := ctx.Arg(1)
 		context := ctx.Arg(2)
 		if handles.GetFile(file) == nil {
-			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -8951,7 +9568,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		rest := queue[1:]
 		rsp := rr.ReadReg(4)
 		retAddr, _ := mem.Read64(rsp)
-		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+		syncStack := hctx.syncStack(ctx)
+		*syncStack = append(*syncStack, syncDispatchFrame{
 			queue:               rest,
 			retAddr:             retAddr,
 			hwnd:                1,
@@ -9019,7 +9637,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		rest := queue[1:]
 		rsp := rr.ReadReg(4)
 		retAddr, _ := mem.Read64(rsp)
-		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+		syncStack := hctx.syncStack(ctx)
+		*syncStack = append(*syncStack, syncDispatchFrame{
 			queue:               rest,
 			retAddr:             retAddr,
 			hwnd:                1,
@@ -9083,7 +9702,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// Set up syncDispatch: callback(lpLocaleString=RCX, dwFlags=RDX, lParam=R8)
 		rsp := rr.ReadReg(4)
 		retAddr, _ := mem.Read64(rsp)
-		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+		syncStack := hctx.syncStack(ctx)
+		*syncStack = append(*syncStack, syncDispatchFrame{
 			queue:               nil,
 			retAddr:             retAddr,
 			hwnd:                1,
@@ -9271,22 +9891,23 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		pathPtr := ctx.Arg(0)
 		dataPtr := ctx.Arg(1)
 		pattern := readGuestString(pathPtr)
-		vfsPattern := winPathToVFS(pattern)
+		vfsPattern := winPathToVFS(normalizeWinPath(pattern))
 		dir := filepath.Dir(vfsPattern)
 		glob := filepath.Base(vfsPattern)
-		entries, err := os.ReadDir(dir)
+		entries, err := ctx.FS.ReadDir(dir)
 		if err != nil {
+			setThreadLastError(ctx, 3) // ERROR_PATH_NOT_FOUND
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
 			return 0
 		}
 		var matched []os.DirEntry
 		for _, e := range entries {
-			ok, _ := filepath.Match(glob, e.Name())
-			if ok {
+			if windowsFileMatch(glob, e.Name()) {
 				matched = append(matched, e)
 			}
 		}
 		if len(matched) == 0 {
+			setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
 			return 0
 		}
@@ -9299,7 +9920,36 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindFirstFileExA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "FindFirstFileExA", 6, uint64(0xFFFFFFFFFFFFFFFF))
+		pathPtr := ctx.Arg(0)
+		dataPtr := ctx.Arg(2)
+		pattern := readGuestString(pathPtr)
+		vfsPattern := winPathToVFS(normalizeWinPath(pattern))
+		dir := filepath.Dir(vfsPattern)
+		glob := filepath.Base(vfsPattern)
+		entries, err := ctx.FS.ReadDir(dir)
+		if err != nil {
+			setThreadLastError(ctx, 3) // ERROR_PATH_NOT_FOUND
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+			return 0
+		}
+		var matched []os.DirEntry
+		for _, e := range entries {
+			if windowsFileMatch(glob, e.Name()) {
+				matched = append(matched, e)
+			}
+		}
+		if len(matched) == 0 {
+			setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+			return 0
+		}
+		fh := &ntapi.FindHandle{Entries: matched, Idx: 1, Dir: dir}
+		if dataPtr != 0 {
+			writeFindDataA(mem, dataPtr, dir, matched[0])
+		}
+		h := handles.Alloc(fh)
+		ctx.SetReturn(uint64(h))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "FindFirstFileNameW", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "FindFirstFileNameW", 4, uint64(0xFFFFFFFFFFFFFFFF))
@@ -9396,14 +10046,20 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		dataPtr := ctx.Arg(1)
 		obj := handles.Get(ntapi.Handle(hFind))
 		fh, ok := obj.(*ntapi.FindHandle)
-		if !ok || fh.Idx >= len(fh.Entries) {
+		if !ok {
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		entry, _, _, hasNext := fh.Next()
+		if !hasNext {
+			setThreadLastError(ctx, 18) // ERROR_NO_MORE_FILES
 			ctx.SetReturn(0)
 			return 0
 		}
 		if dataPtr != 0 {
-			writeFindDataA(mem, dataPtr, fh.Dir, fh.Entries[fh.Idx])
+			writeFindDataA(mem, dataPtr, fh.Dir, entry)
 		}
-		fh.Idx++
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -10081,8 +10737,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "GetCurrentConsoleFontEx", 3, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetCurrentDirectoryA", func(ctx *ntapi.TrapContext) uint32 {
-		buf := ctx.Arg(0)
-		path := "C:\\"
+		bufSize := ctx.Arg(0)
+		buf := ctx.Arg(1)
+		path := currentDirectory
+		needed := uint64(len(path) + 1)
+		if bufSize < needed {
+			ctx.SetReturn(needed)
+			return 0
+		}
 		ctx.Mem.WriteBytes(buf, append([]byte(path), 0))
 		ctx.SetReturn(uint64(len(path)))
 		return 0
@@ -10239,7 +10901,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		size := ctx.Arg(2)
 		val, ok := lookupEnvValue(name)
 		if !ok {
-			setLastErrorValue(203) // ERROR_ENVVAR_NOT_FOUND
+			setLastErrorValue(ctx, 203) // ERROR_ENVVAR_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -10250,7 +10912,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		if needed > size {
-			setLastErrorValue(122)
+			setLastErrorValue(ctx, 122)
 			ctx.SetReturn(needed)
 			return 0
 		}
@@ -10258,7 +10920,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.Mem.Write16(buf+uint64(i)*2, w)
 		}
 		ctx.Mem.Write16(buf+uint64(len(ws))*2, 0)
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(uint64(len(ws)))
 		return 0
 	})
@@ -10271,10 +10933,23 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetExitCodeThread", func(ctx *ntapi.TrapContext) uint32 {
+		hThread := ntapi.Handle(ctx.Arg(0))
 		lpExitCode := ctx.Arg(1)
-		if lpExitCode != 0 {
-			ctx.Mem.Write32(lpExitCode, 259)
-		} // STILL_ACTIVE
+		if lpExitCode == 0 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		exitCode, active, ok := handles.ThreadExitCode(hThread)
+		if !ok {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		if active {
+			exitCode = 259 // STILL_ACTIVE
+		}
+		ctx.Mem.Write32(lpExitCode, exitCode)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -10287,7 +10962,33 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "GetFileAttributesExA", func(ctx *ntapi.TrapContext) uint32 {
 		lpFileName := ctx.Arg(0)
 		lpFileInfo := ctx.Arg(2)
-		path := winPathToVFS(readGuestString(lpFileName))
+		winPath := readGuestString(lpFileName)
+		path := winPathToVFS(normalizeWinPath(winPath))
+		if ctx.Trace {
+			ravelog.Logf("[win32] GetFileAttributesExA: %q -> %q\n", winPath, path)
+		}
+		if vnode, err := ctx.FS.StatPath(-1, path); err == nil {
+			var attrs uint32
+			if vnode.IsDir {
+				attrs = 0x10
+			} else {
+				attrs = 0x80
+			}
+			mem.Write32(lpFileInfo, attrs)
+			const epochDiff = uint64(11644473600) * 10000000
+			ft := uint64(vnode.Mtime.UnixNano())/100 + epochDiff
+			mem.Write32(lpFileInfo+4, uint32(ft))
+			mem.Write32(lpFileInfo+8, uint32(ft>>32))
+			mem.Write32(lpFileInfo+12, uint32(ft))
+			mem.Write32(lpFileInfo+16, uint32(ft>>32))
+			mem.Write32(lpFileInfo+20, uint32(ft))
+			mem.Write32(lpFileInfo+24, uint32(ft>>32))
+			size := uint64(vnode.Size)
+			mem.Write32(lpFileInfo+28, uint32(size>>32))
+			mem.Write32(lpFileInfo+32, uint32(size))
+			ctx.SetReturn(1)
+			return 0
+		}
 		info, err := os.Stat(path)
 		if err != nil {
 			ctx.SetReturn(0)
@@ -10327,19 +11028,19 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		hFile := ntapi.Handle(ctx.Arg(0))
 		lpInfo := ctx.Arg(1)
 		if lpInfo == 0 {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
 		fh := handles.GetFile(hFile)
 		if fh == nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
 		node := ctx.FS.Stat(fh.FD)
 		if node == nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+			setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -10397,13 +11098,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		dwBufSize := uint32(ctx.Arg(3))
 		fh := handles.GetFile(hFile)
 		if fh == nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
 		node := ctx.FS.Stat(fh.FD)
 		if node == nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+			setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -10423,7 +11124,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		switch infoClass {
 		case 0: // FileBasicInfo (40 bytes)
 			if dwBufSize < 40 {
-				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122) // ERROR_INSUFFICIENT_BUFFER
+				setThreadLastError(ctx, 122) // ERROR_INSUFFICIENT_BUFFER
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -10435,7 +11136,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.Mem.Write32(lpInfo+36, 0)                // padding
 		case 1: // FileStandardInfo (24 bytes)
 			if dwBufSize < 24 {
-				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+				setThreadLastError(ctx, 122)
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -10464,7 +11165,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			nameBytes := uint32(len(nameUTF16) * 2)
 			needed := 4 + nameBytes
 			if dwBufSize < needed {
-				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+				setThreadLastError(ctx, 122)
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -10474,7 +11175,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 		case 9: // FileAttributeTagInfo (8 bytes)
 			if dwBufSize < 8 {
-				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+				setThreadLastError(ctx, 122)
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -10482,7 +11183,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.Mem.Write32(lpInfo+4, 0)     // ReparseTag
 		case 18: // FileIdInfo (24 bytes)
 			if dwBufSize < 24 {
-				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122)
+				setThreadLastError(ctx, 122)
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -10490,7 +11191,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.Mem.Write64(lpInfo+8, node.Ino)   // FileId low 8 bytes
 			ctx.Mem.Write64(lpInfo+16, 0)         // FileId high 8 bytes
 		default:
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 87) // ERROR_INVALID_PARAMETER
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -10561,7 +11262,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		dwFlags := uint32(ctx.Arg(3))
 		fh := handles.GetFile(hFile)
 		if fh == nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -10593,7 +11294,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		dwFlags := uint32(ctx.Arg(3))
 		fh := handles.GetFile(hFile)
 		if fh == nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -10635,14 +11336,22 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		fileNamePtr := ctx.Arg(0)
 		bufLen := ctx.Arg(1)
 		buf := ctx.Arg(2)
-		name := readGuestString(fileNamePtr)
-		needed := uint64(len(name) + 1) // include null
+		filePartPtr := ctx.Arg(3)
+		name := normalizeWinPath(readGuestString(fileNamePtr))
+		needed := uint64(len(name) + 1)
 		if bufLen < needed {
 			ctx.SetReturn(needed)
 			return 0
 		}
 		mem.WriteBytes(buf, []byte(name))
 		mem.Write8(buf+uint64(len(name)), 0)
+		if filePartPtr != 0 {
+			if slash := strings.LastIndex(name, `\`); slash >= 0 && slash+1 < len(name) {
+				writeGuestPtr(ctx, filePartPtr, buf+uint64(slash+1))
+			} else {
+				writeGuestPtr(ctx, filePartPtr, 0)
+			}
+		}
 		ctx.SetReturn(uint64(len(name)))
 		return 0
 	})
@@ -10770,10 +11479,15 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "GetModuleHandleExA", func(ctx *ntapi.TrapContext) uint32 {
 		modNamePtr := ctx.Arg(1)
 		phModule := ctx.Arg(2)
+		is32 := mem.Mode32 || (procState != nil && procState.Is32)
 		if modNamePtr == 0 {
-			imageBase, _ := mem.Read64(procState.PEBAddr + 0x10)
+			imageBaseOffset := uint64(ntapi.PebImageBaseAddress)
+			if is32 {
+				imageBaseOffset = ntapi.Peb32ImageBaseAddress
+			}
+			imageBase, _ := readGuestPointer(mem, procState.PEBAddr+imageBaseOffset, is32)
 			if phModule != 0 {
-				mem.Write64Raw(phModule, imageBase)
+				_ = writeGuestPointer(mem, phModule, imageBase, is32)
 			}
 			ctx.SetReturn(1)
 		} else {
@@ -10781,9 +11495,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			if !strings.HasSuffix(modName, ".dll") && !strings.HasSuffix(modName, ".exe") {
 				modName += ".dll"
 			}
-			if s, ok := synthByName[modName]; ok {
+			hctx.SynthMu.RLock()
+			s, ok := synthByName[modName]
+			hctx.SynthMu.RUnlock()
+			if ok {
 				if phModule != 0 {
-					mem.Write64Raw(phModule, s.BaseAddr)
+					_ = writeGuestPointer(mem, phModule, s.BaseAddr, is32)
 				}
 				ctx.SetReturn(1)
 			} else {
@@ -10955,7 +11672,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		lpBytes := ctx.Arg(2)
 		bWait := ctx.Arg(3)
 		if lpOverlapped == 0 {
-			setLastErrorValue(87) // ERROR_INVALID_PARAMETER
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -10967,20 +11684,20 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		switch status {
 		case 0: // STATUS_SUCCESS
-			setLastErrorValue(0)
+			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(1) // TRUE
 		case 0x103: // STATUS_PENDING
 			if bWait != 0 {
 				ctx.Mem.Write64(lpOverlapped, 0)
-				setLastErrorValue(0)
+				setLastErrorValue(ctx, 0)
 				ctx.SetReturn(1)
 			} else {
-				setLastErrorValue(996) // ERROR_IO_INCOMPLETE
+				setLastErrorValue(ctx, 996) // ERROR_IO_INCOMPLETE
 				ctx.SetReturn(0)
 			}
 		default:
-			setLastErrorValue(995) // ERROR_OPERATION_ABORTED / generic async failure
-			ctx.SetReturn(0)       // FALSE
+			setLastErrorValue(ctx, 995) // ERROR_OPERATION_ABORTED / generic async failure
+			ctx.SetReturn(0)            // FALSE
 		}
 		return 0
 	})
@@ -11331,8 +12048,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
 			pkt, ok := ic.Remove(timeout)
 			if !ok {
-				setLastErrorValue(258) // ERROR_TIMEOUT
-				ctx.SetReturn(0)       // FALSE - timeout
+				setLastErrorValue(ctx, 258) // ERROR_TIMEOUT
+				ctx.SetReturn(0)            // FALSE - timeout
 				return 0
 			}
 			if pBytes != 0 {
@@ -11344,11 +12061,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			if pOverlapped != 0 {
 				ctx.Mem.Write64(pOverlapped, pkt.Overlapped)
 			}
-			setLastErrorValue(0)
+			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(1) // TRUE
 		} else {
-			setLastErrorValue(6) // ERROR_INVALID_HANDLE
-			ctx.SetReturn(0)     // FALSE - unknown handle
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)          // FALSE - unknown handle
 		}
 		return 0
 	})
@@ -11368,7 +12085,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
 			if pEntries == 0 || ulCount == 0 {
-				setLastErrorValue(87) // ERROR_INVALID_PARAMETER
+				setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -11394,14 +12111,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				ctx.Mem.Write32(pRemoved, removed)
 			}
 			if removed == 0 {
-				setLastErrorValue(258) // ERROR_TIMEOUT
+				setLastErrorValue(ctx, 258) // ERROR_TIMEOUT
 				ctx.SetReturn(0)
 				return 0
 			}
-			setLastErrorValue(0)
+			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(1) // TRUE
 		} else {
-			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 		}
 		return 0
@@ -12241,8 +12958,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "HeapWalk", func(ctx *ntapi.TrapContext) uint32 {
-		mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 259) // ERROR_NO_MORE_ITEMS
-		ctx.SetReturn(0)                                            // FALSE
+		setThreadLastError(ctx, 259) // ERROR_NO_MORE_ITEMS
+		ctx.SetReturn(0)             // FALSE
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "IdnToAscii", func(ctx *ntapi.TrapContext) uint32 {
@@ -12504,7 +13221,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if pNativeMachine != 0 {
 			ctx.Mem.Write16(pNativeMachine, 0x8664)
 		}
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -12691,6 +13408,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
+		hctx.SynthMu.Lock()
+		defer hctx.SynthMu.Unlock()
 		rawName := readGuestString(namePtr)
 		name := strings.ToLower(rawName)
 		if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
@@ -12709,12 +13428,16 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			if len(vfsBytes) < 2 || vfsBytes[0] != 'M' || vfsBytes[1] != 'Z' {
 				ravelog.Logf("[wise] LoadLibraryExA: GLF0001.tmp is not a PE (got %d bytes), serving cached W32WINST.DLL (%d bytes)\n",
 					len(vfsBytes), len(wiseInstallerDLL))
-				if mod := loadDLLFromVFS(
+				hctx.NextDelayMu.Lock()
+				mod := loadDLLFromVFS(
 					&bytesFS{name: "glf0001.tmp", data: wiseInstallerDLL},
 					"glf0001.tmp",
 					mem, synthByName, nextDynIDPtr, d,
-				); mod != nil {
+				)
+				hctx.NextDelayMu.Unlock()
+				if mod != nil {
 					ravelog.Logf("[wise] LoadLibraryExA: W32WINST.DLL loaded at 0x%x\n", mod.BaseAddr)
+					d.RegisterModuleExports(mod.BaseAddr, mod.Exports, mod.ExportOrds)
 					// Store module info for GPA intercept - do NOT put in synthByName
 					// because native addresses would be called directly and IsAdmin
 					// needs to be stubbed (return 1 = admin).
@@ -12773,8 +13496,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		addr := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite)
 		if hMem != 0 && addr != 0 {
-			_, oldSize, mapped, _ := mem.QueryRegion(hMem)
-			if mapped && oldSize > 0 {
+			if oldSize, tracked := hctx.localAllocSize(hMem); tracked {
 				copySize := oldSize
 				if size < copySize {
 					copySize = size
@@ -12783,9 +13505,16 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				if len(old) > 0 {
 					ctx.Mem.WriteBytes(addr, old)
 				}
-				mem.Munmap(hMem, oldSize)
+				if releasedSize, ok := hctx.takeLocalAlloc(hMem); ok {
+					mem.Munmap(hMem, releasedSize)
+				}
+			} else {
+				mem.Munmap(addr, size)
+				ctx.SetReturn(0)
+				return 0
 			}
 		}
+		hctx.trackLocalAlloc(addr, size)
 		ctx.SetReturn(addr)
 		return 0
 	})
@@ -12798,8 +13527,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
-		_, size, mapped, _ := mem.QueryRegion(hMem)
-		if mapped {
+		size, tracked := hctx.localAllocSize(hMem)
+		if tracked {
 			ctx.SetReturn(size)
 		} else {
 			ctx.SetReturn(0)
@@ -12825,7 +13554,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		err := unix.Flock(fh.FD, unix.LOCK_EX|unix.LOCK_NB)
 		if err != nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 33) // ERROR_LOCK_VIOLATION
+			setThreadLastError(ctx, 33) // ERROR_LOCK_VIOLATION
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -12856,7 +13585,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		err := unix.Flock(fh.FD, lockType)
 		if err != nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 33) // ERROR_LOCK_VIOLATION
+			setThreadLastError(ctx, 33) // ERROR_LOCK_VIOLATION
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -12917,15 +13646,20 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "Module32NextW", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "MoveFileA", func(ctx *ntapi.TrapContext) uint32 {
+		if ctx.Arg(0) == 0 || ctx.Arg(1) == 0 {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
 		srcWin := readGuestString(ctx.Arg(0))
 		dstWin := readGuestString(ctx.Arg(1))
-		src := winPathToVFS(srcWin)
-		dst := winPathToVFS(dstWin)
+		src := winPathToVFS(normalizeWinPath(srcWin))
+		dst := winPathToVFS(normalizeWinPath(dstWin))
 		ravelog.Logf("[wise] MoveFileA(%q → %q)\n", srcWin, dstWin)
 		// MoveFileA fails if destination already exists (unlike MoveFileExA with MOVEFILE_REPLACE_EXISTING)
 		if _, err := ctx.FS.StatPath(-1, dst); err == nil {
 			ravelog.Logf("[wise] MoveFileA(%q → %q) failed: destination exists\n", srcWin, dstWin)
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183) // ERROR_ALREADY_EXISTS
+			setThreadLastError(ctx, 183) // ERROR_ALREADY_EXISTS
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -12933,13 +13667,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			// fallback: try real FS (no overwrite check needed for real FS as it doesn't have our VFS files)
 			if _, serr := os.Stat(dst); serr == nil {
 				ravelog.Logf("[wise] MoveFileA(%q → %q) failed: destination exists on real FS\n", srcWin, dstWin)
-				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+				setThreadLastError(ctx, 183)
 				ctx.SetReturn(0)
 				return 0
 			}
 			if err2 := os.Rename(src, dst); err2 != nil {
 				ravelog.Logf("[wise] MoveFileA(%q → %q) failed: %v\n", srcWin, dstWin, err)
-				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
+				setThreadLastError(ctx, 5)
 				ctx.SetReturn(0)
 				return 0
 			}
@@ -12948,24 +13682,65 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "MoveFileExA", func(ctx *ntapi.TrapContext) uint32 {
-		srcWin := readGuestString(ctx.Arg(0))
-		dstWin := readGuestString(ctx.Arg(1))
+		srcPtr := ctx.Arg(0)
+		dstPtr := ctx.Arg(1)
 		flags := ctx.Arg(2)
-		src := winPathToVFS(srcWin)
-		dst := winPathToVFS(dstWin)
+		if srcPtr == 0 {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		if flags&0x4 != 0 {
+			if flags&0x2 != 0 {
+				setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			} else {
+				setThreadLastError(ctx, 120) // ERROR_CALL_NOT_IMPLEMENTED
+			}
+			ctx.SetReturn(0)
+			return 0
+		}
+		if dstPtr == 0 {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		srcWin := readGuestString(srcPtr)
+		dstWin := readGuestString(dstPtr)
+		src := winPathToVFS(normalizeWinPath(srcWin))
+		dst := winPathToVFS(normalizeWinPath(dstWin))
 		ravelog.Logf("[wise] MoveFileExA(%q → %q flags=0x%x)\n", srcWin, dstWin, flags)
 		const MOVEFILE_REPLACE_EXISTING = 0x1
+		srcNode, srcErr := ctx.FS.StatPath(-1, src)
+		dstNode, dstErr := ctx.FS.StatPath(-1, dst)
+		sameEntry := srcErr == nil && dstErr == nil && srcNode == dstNode
+		if dstErr == nil && dstNode.IsDir && !sameEntry {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
+		}
 		if flags&MOVEFILE_REPLACE_EXISTING == 0 {
 			// No replace flag: fail if destination exists (same as MoveFileA)
-			if _, err := ctx.FS.StatPath(-1, dst); err == nil {
+			if dstErr == nil && !sameEntry {
 				ravelog.Logf("[wise] MoveFileExA(%q → %q) failed: destination exists (no REPLACE_EXISTING flag)\n", srcWin, dstWin)
-				mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 183)
+				setThreadLastError(ctx, 183)
 				ctx.SetReturn(0)
 				return 0
 			}
 		}
-		if err := ctx.FS.Renameat(-1, src, -1, dst); err != nil {
-			_ = os.Rename(src, dst) // fallback
+		err := ctx.FS.RenameatWithCommit(-1, src, -1, dst, vfs.RenameOptions{
+			ReplaceExisting:         flags&0x1 != 0,
+			RejectExistingDirectory: true,
+		}, func(source vfs.RenameCommitSource) (vfs.RenameCommitResult, error) {
+			return hctx.commitHostSaveRename(src, dst, source, hostSaveRenameOptions{
+				replaceExisting: flags&0x1 != 0,
+				allowCopy:       flags&0x2 != 0,
+			})
+		})
+		if err != nil {
+			ravelog.Logf("[win32] MoveFileExA failed: %v\n", err)
+			setThreadLastError(ctx, hostSaveMoveErrorCode(err))
+			ctx.SetReturn(0)
+			return 0
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -12977,9 +13752,29 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "MoveFileTransactedW", 4, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "MoveFileW", func(ctx *ntapi.TrapContext) uint32 {
-		src := winPathToVFS(readGuestUTF16(ctx.Arg(0)))
-		dst := winPathToVFS(readGuestUTF16(ctx.Arg(1)))
-		if err := os.Rename(src, dst); err != nil {
+		if ctx.Arg(0) == 0 || ctx.Arg(1) == 0 {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		src := winPathToVFS(normalizeWinPath(readGuestUTF16(ctx.Arg(0))))
+		dst := winPathToVFS(normalizeWinPath(readGuestUTF16(ctx.Arg(1))))
+		srcNode, srcErr := ctx.FS.StatPath(-1, src)
+		dstNode, dstErr := ctx.FS.StatPath(-1, dst)
+		if dstErr == nil && (srcErr != nil || srcNode != dstNode) {
+			setThreadLastError(ctx, 183) // ERROR_ALREADY_EXISTS
+			ctx.SetReturn(0)
+			return 0
+		}
+		err := ctx.FS.RenameatWithCommit(-1, src, -1, dst, vfs.RenameOptions{
+			RejectExistingDirectory: true,
+		}, func(source vfs.RenameCommitSource) (vfs.RenameCommitResult, error) {
+			return hctx.commitHostSaveRename(src, dst, source, hostSaveRenameOptions{
+				allowCopy: true,
+			})
+		})
+		if err != nil {
+			setThreadLastError(ctx, hostSaveMoveErrorCode(err))
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -12990,7 +13785,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		src := winPathToVFS(readGuestString(ctx.Arg(0)))
 		dst := winPathToVFS(readGuestString(ctx.Arg(1)))
 		if err := os.Rename(src, dst); err != nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 5)
+			setThreadLastError(ctx, 5)
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -13028,7 +13823,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		if int(cwDst) < required {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 122) // ERROR_INSUFFICIENT_BUFFER
+			setThreadLastError(ctx, 122) // ERROR_INSUFFICIENT_BUFFER
 			ctx.SetReturn(uint64(int64(-int64(required))))
 			return 0
 		}
@@ -13251,7 +14046,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		lpBytesLeft := ctx.Arg(5)
 		pipe := handles.GetNamedPipe(hPipe)
 		if pipe == nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -13283,9 +14078,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		overlapped := ctx.Arg(3)
 		if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
 			ic.Post(key, overlapped, bytes, 0)
-			setLastErrorValue(0)
+			setLastErrorValue(ctx, 0)
 		} else {
-			setLastErrorValue(6) // ERROR_INVALID_HANDLE
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -14503,16 +15298,16 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "RemoveDirectoryW", func(ctx *ntapi.TrapContext) uint32 {
 		pathPtr := ctx.Arg(0)
 		if pathPtr == 0 {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 87) // ERROR_INVALID_PARAMETER
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
 		path := winPathToVFS(readGuestUTF16(pathPtr))
 		if err := os.Remove(path); err != nil {
 			if os.IsNotExist(err) {
-				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+				setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
 			} else {
-				ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 145) // ERROR_DIR_NOT_EMPTY
+				setThreadLastError(ctx, 145) // ERROR_DIR_NOT_EMPTY
 			}
 			ctx.SetReturn(0)
 			return 0
@@ -14536,11 +15331,60 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "ReplaceFile", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "ReplaceFile", 8, 0)
 	})
+	replaceFile := func(ctx *ntapi.TrapContext, wide bool) uint32 {
+		if ctx.Arg(0) == 0 || ctx.Arg(1) == 0 || ctx.Arg(4) != 0 || ctx.Arg(5) != 0 {
+			setLastErrorValue(ctx, 87)
+			ctx.SetReturn(0)
+			return 0
+		}
+		var replacedWin, replacementWin, backupWin string
+		if wide {
+			replacedWin = readGuestUTF16(ctx.Arg(0))
+			replacementWin = readGuestUTF16(ctx.Arg(1))
+			if ctx.Arg(2) != 0 {
+				backupWin = readGuestUTF16(ctx.Arg(2))
+			}
+		} else {
+			replacedWin = readGuestString(ctx.Arg(0))
+			replacementWin = readGuestString(ctx.Arg(1))
+			if ctx.Arg(2) != 0 {
+				backupWin = readGuestString(ctx.Arg(2))
+			}
+		}
+		if replacedWin == "" || replacementWin == "" {
+			setLastErrorValue(ctx, 87)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if !sameWindowsVolume(replacedWin, replacementWin, backupWin) {
+			setLastErrorValue(ctx, 17)
+			ctx.SetReturn(0)
+			return 0
+		}
+		replaced := winPathToVFS(normalizeWinPath(replacedWin))
+		replacement := winPathToVFS(normalizeWinPath(replacementWin))
+		backup := ""
+		if backupWin != "" {
+			backup = winPathToVFS(normalizeWinPath(backupWin))
+		}
+		if err := replaceVFSFileWithHost(ctx.FS, hctx, replaced, replacement, backup); err != nil {
+			if errors.Is(err, vfs.ErrInvalidPathAlias) {
+				setLastErrorValue(ctx, 87)
+			} else {
+				setLastErrorValue(ctx, 1176)
+			}
+			ctx.SetReturn(0)
+			return 0
+		}
+		setLastErrorValue(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
+	}
 	d.RegisterAutoStubHandler(kernel32, "ReplaceFileA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "ReplaceFileA", 6, 0)
+		return replaceFile(ctx, false)
 	})
 	d.RegisterAutoStubHandler(kernel32, "ReplaceFileW", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "ReplaceFileW", 8, 0)
+		return replaceFile(ctx, true)
 	})
 	d.RegisterAutoStubHandler(kernel32, "RequestDeviceWakeup", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "RequestDeviceWakeup", 1, 1)
@@ -14574,8 +15418,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		th := handles.GetThread(ntapi.Handle(hThread))
 		if th == nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
-			ctx.SetReturn(0xFFFFFFFF)                                 // (DWORD)-1 on error
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0xFFFFFFFF)  // (DWORD)-1 on error
 			return 0
 		}
 		ctx.SetReturn(1) // prior suspend count = 1
@@ -14715,7 +15559,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		lpFilePart := ctx.Arg(5)
 		fileName := readGuestUTF16(lpFileName)
 		if fileName == "" {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 87) // ERROR_INVALID_PARAMETER
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -14762,7 +15606,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 		}
 		if found == "" {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 2) // ERROR_FILE_NOT_FOUND
+			setThreadLastError(ctx, 2) // ERROR_FILE_NOT_FOUND
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -14984,8 +15828,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetCurrentDirectoryA", func(ctx *ntapi.TrapContext) uint32 {
 		pathPtr := ctx.Arg(0)
-		dir := winPathToVFS(readGuestString(pathPtr))
-		if err := os.Chdir(dir); err != nil {
+		if !setCurrentDirectory(ctx, readGuestString(pathPtr)) {
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -15044,7 +15887,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			value := readGuestString(valPtr)
 			envVars[name] = value
 		}
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -15212,7 +16055,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "SetPriorityClass", 2, 1)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetProcessAffinityMask", func(ctx *ntapi.TrapContext) uint32 {
-		setLastErrorValue(0)
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -15802,8 +16645,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		th := handles.GetThread(ntapi.Handle(hThread))
 		if th == nil {
-			mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 6) // ERROR_INVALID_HANDLE
-			ctx.SetReturn(0xFFFFFFFF)                                 // (DWORD)-1 on error
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0xFFFFFFFF)  // (DWORD)-1 on error
 			return 0
 		}
 		ctx.SetReturn(0) // previous suspend count = 0
@@ -15957,7 +16800,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		err := unix.Flock(fh.FD, unix.LOCK_UN)
 		if err != nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 158) // ERROR_NOT_LOCKED
+			setThreadLastError(ctx, 158) // ERROR_NOT_LOCKED
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -15979,7 +16822,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		err := unix.Flock(fh.FD, unix.LOCK_UN)
 		if err != nil {
-			ctx.Mem.Write32(procState.TEBAddr+ntapi.TebLastErrorValue, 158) // ERROR_NOT_LOCKED
+			setThreadLastError(ctx, 158) // ERROR_NOT_LOCKED
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -16278,59 +17121,19 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "WaitForDebugEventEx", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "WaitForMultipleObjectsEx", func(ctx *ntapi.TrapContext) uint32 {
-		// Delegate to WaitForMultipleObjects logic (ignore alertable flag)
 		nCount := ctx.Arg(0)
 		pHandles := ctx.Arg(1)
-		ms := ctx.Arg(3)
-		var timeout time.Duration
-		if ms == 0xFFFFFFFF {
-			timeout = -1
-		} else if ms == 0 {
-			timeout = 0
-		} else {
-			timeout = time.Duration(ms) * time.Millisecond
-		}
+		waitAll := ctx.Arg(2) != 0
 		var tid uint32 = 1
 		if *tmPtr != nil {
 			tid = uint32((*tmPtr).GetTID(ctx.CPU))
 		}
-		type idxChan2 struct {
-			idx int
-			ch  <-chan struct{}
-		}
-		var cases2 []idxChan2
-		for i := uint64(0); i < nCount && i < 64; i++ {
-			hv, _ := ctx.Mem.Read64(pHandles + i*8)
-			h := ntapi.Handle(hv)
-			if th := handles.GetThread(h); th != nil && th.Done != nil {
-				cases2 = append(cases2, idxChan2{int(i), th.Done})
-			} else if eh := handles.GetEvent(h); eh != nil {
-				cases2 = append(cases2, idxChan2{int(i), eh.WaitChan()})
-			} else if mh := handles.GetMutant(h); mh != nil {
-				cases2 = append(cases2, idxChan2{int(i), mh.WaitChan(tid)})
-			} else if sh := handles.GetSemaphore(h); sh != nil {
-				cases2 = append(cases2, idxChan2{int(i), sh.WaitChan()})
-			}
-		}
-		if len(cases2) == 0 {
-			ctx.SetReturn(0)
+		if nCount == 0 || pHandles == 0 {
+			ctx.SetReturn(0xFFFFFFFF)
 			return 0
 		}
-		selCases2 := make([]reflect.SelectCase, 0, len(cases2)+1)
-		for _, ic := range cases2 {
-			selCases2 = append(selCases2, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ic.ch)})
-		}
-		if timeout == 0 {
-			selCases2 = append(selCases2, reflect.SelectCase{Dir: reflect.SelectDefault})
-		} else if timeout > 0 {
-			selCases2 = append(selCases2, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(time.After(timeout))})
-		}
-		chosen2, _, _ := reflect.Select(selCases2)
-		if chosen2 >= len(cases2) {
-			ctx.SetReturn(0x102)
-		} else {
-			ctx.SetReturn(uint64(cases2[chosen2].idx))
-		}
+		values := readWin32HandleArray(ctx.Mem, pHandles, nCount, ctx.State != nil && ctx.State.Is32)
+		ctx.SetReturn(waitMultipleFallbackWin32(handles, values, tid, waitAll, msToTimeout(ctx.Arg(3))))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "WaitForSingleObjectEx", func(ctx *ntapi.TrapContext) uint32 {

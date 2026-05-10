@@ -5,6 +5,7 @@ package vk
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -33,6 +34,7 @@ type vulkanProcs struct {
 	vkDestroyDevice               uintptr
 	vkDeviceWaitIdle              uintptr
 	vkCreateCommandPool           uintptr
+	vkDestroyCommandPool          uintptr
 	vkAllocateCommandBuffers      uintptr
 	vkBeginCommandBuffer          uintptr
 	vkEndCommandBuffer            uintptr
@@ -54,18 +56,34 @@ type vulkanProcs struct {
 	vkQueueSubmit                 uintptr
 	vkQueueWaitIdle               uintptr
 	vkCreateRenderPass            uintptr
+	vkDestroyRenderPass           uintptr
 	vkCreateFramebuffer           uintptr
+	vkDestroyFramebuffer          uintptr
 	vkCreateShaderModule          uintptr
+	vkDestroyShaderModule         uintptr
 	vkCreatePipelineLayout        uintptr
+	vkDestroyPipelineLayout       uintptr
 	vkCreateGraphicsPipelines     uintptr
+	vkDestroyPipeline             uintptr
+	vkCreateDescriptorSetLayout   uintptr
+	vkDestroyDescriptorSetLayout  uintptr
+	vkCreateDescriptorPool        uintptr
+	vkDestroyDescriptorPool       uintptr
+	vkAllocateDescriptorSets      uintptr
+	vkUpdateDescriptorSets        uintptr
+	vkCmdBindDescriptorSets       uintptr
 	vkCreateBuffer                uintptr
+	vkDestroyBuffer               uintptr
 	vkGetBufferMemoryRequirements uintptr
 	vkBindBufferMemory            uintptr
 	vkCreateImage                 uintptr
+	vkDestroyImage                uintptr
 	vkGetImageMemoryRequirements  uintptr
 	vkBindImageMemory             uintptr
 	vkCreateImageView             uintptr
+	vkDestroyImageView            uintptr
 	vkAllocateMemory              uintptr
+	vkFreeMemory                  uintptr
 	vkMapMemory                   uintptr
 	vkUnmapMemory                 uintptr
 	vkCreateFence                 uintptr
@@ -88,9 +106,9 @@ var (
 	initOnce sync.Once
 	initErr  error
 
-	activePhysicalDevice VkPhysicalDevice
-	devicePhysicalMap    sync.Map
-	deviceExtensionMap   sync.Map
+	devicePhysicalMap  sync.Map
+	deviceExtensionMap sync.Map
+	deviceMemoryFdProc sync.Map
 )
 
 func Init() error {
@@ -116,7 +134,7 @@ func Init() error {
 			return
 		}
 
-		if err := loadGlobalFuncs(); err != nil {
+		if err := loadExportedFuncs(); err != nil {
 			initErr = err
 		}
 	})
@@ -124,198 +142,58 @@ func Init() error {
 }
 
 func LoadInstanceFuncs(instance VkInstance) error {
-	if err := Init(); err != nil {
-		return err
-	}
-
-	var err error
-	if procs.vkEnumeratePhysicalDevices, err = loadRequiredInstanceProc(instance, "vkEnumeratePhysicalDevices"); err != nil {
-		return err
-	}
-	if procs.vkGetPhysicalDeviceProperties, err = loadRequiredInstanceProc(instance, "vkGetPhysicalDeviceProperties"); err != nil {
-		return err
-	}
-	if procs.vkGetPhysicalDeviceQueueFamilyProperties, err = loadRequiredInstanceProc(instance, "vkGetPhysicalDeviceQueueFamilyProperties"); err != nil {
-		return err
-	}
-	if procs.vkGetPhysicalDeviceMemoryProperties, err = loadRequiredInstanceProc(instance, "vkGetPhysicalDeviceMemoryProperties"); err != nil {
-		return err
-	}
-	if procs.vkEnumerateDeviceExtensionProperties, err = loadRequiredInstanceProc(instance, "vkEnumerateDeviceExtensionProperties"); err != nil {
-		return err
-	}
-	if procs.vkCreateDevice, err = loadRequiredInstanceProc(instance, "vkCreateDevice"); err != nil {
-		return err
-	}
-	if procs.vkDestroyInstance, err = loadRequiredInstanceProc(instance, "vkDestroyInstance"); err != nil {
-		return err
-	}
-	return nil
+	_ = instance
+	return Init()
 }
 
 func LoadDeviceFuncs(device VkDevice) error {
 	if err := Init(); err != nil {
 		return err
 	}
-
-	var err error
-	if procs.vkGetDeviceQueue, err = loadRequiredDeviceProc(device, "vkGetDeviceQueue"); err != nil {
+	ptr, err := loadOptionalDeviceProc(device, "vkGetMemoryFdKHR")
+	if err != nil {
 		return err
 	}
-	if procs.vkDestroyDevice, err = loadRequiredDeviceProc(device, "vkDestroyDevice"); err != nil {
-		return err
+	if ptr != 0 {
+		deviceMemoryFdProc.Store(device, ptr)
 	}
-	if procs.vkDeviceWaitIdle, err = loadRequiredDeviceProc(device, "vkDeviceWaitIdle"); err != nil {
-		return err
-	}
-	if procs.vkCreateCommandPool, err = loadRequiredDeviceProc(device, "vkCreateCommandPool"); err != nil {
-		return err
-	}
-	if procs.vkAllocateCommandBuffers, err = loadRequiredDeviceProc(device, "vkAllocateCommandBuffers"); err != nil {
-		return err
-	}
-	if procs.vkBeginCommandBuffer, err = loadRequiredDeviceProc(device, "vkBeginCommandBuffer"); err != nil {
-		return err
-	}
-	if procs.vkEndCommandBuffer, err = loadRequiredDeviceProc(device, "vkEndCommandBuffer"); err != nil {
-		return err
-	}
-	if procs.vkResetCommandBuffer, err = loadRequiredDeviceProc(device, "vkResetCommandBuffer"); err != nil {
-		return err
-	}
-	if procs.vkCmdBeginRenderPass, err = loadRequiredDeviceProc(device, "vkCmdBeginRenderPass"); err != nil {
-		return err
-	}
-	if procs.vkCmdEndRenderPass, err = loadRequiredDeviceProc(device, "vkCmdEndRenderPass"); err != nil {
-		return err
-	}
-	if procs.vkCmdBindPipeline, err = loadRequiredDeviceProc(device, "vkCmdBindPipeline"); err != nil {
-		return err
-	}
-	if procs.vkCmdBindVertexBuffers, err = loadRequiredDeviceProc(device, "vkCmdBindVertexBuffers"); err != nil {
-		return err
-	}
-	if procs.vkCmdBindIndexBuffer, err = loadRequiredDeviceProc(device, "vkCmdBindIndexBuffer"); err != nil {
-		return err
-	}
-	if procs.vkCmdDraw, err = loadRequiredDeviceProc(device, "vkCmdDraw"); err != nil {
-		return err
-	}
-	if procs.vkCmdDrawIndexed, err = loadRequiredDeviceProc(device, "vkCmdDrawIndexed"); err != nil {
-		return err
-	}
-	if procs.vkCmdSetViewport, err = loadRequiredDeviceProc(device, "vkCmdSetViewport"); err != nil {
-		return err
-	}
-	if procs.vkCmdSetScissor, err = loadRequiredDeviceProc(device, "vkCmdSetScissor"); err != nil {
-		return err
-	}
-	if procs.vkCmdPushConstants, err = loadRequiredDeviceProc(device, "vkCmdPushConstants"); err != nil {
-		return err
-	}
-	if procs.vkCmdPipelineBarrier, err = loadRequiredDeviceProc(device, "vkCmdPipelineBarrier"); err != nil {
-		return err
-	}
-	if procs.vkCmdCopyImageToBuffer, err = loadRequiredDeviceProc(device, "vkCmdCopyImageToBuffer"); err != nil {
-		return err
-	}
-	if procs.vkCmdCopyImage, err = loadRequiredDeviceProc(device, "vkCmdCopyImage"); err != nil {
-		return err
-	}
-	if procs.vkGetImageSubresourceLayout, err = loadRequiredDeviceProc(device, "vkGetImageSubresourceLayout"); err != nil {
-		return err
-	}
-	if procs.vkQueueSubmit, err = loadRequiredDeviceProc(device, "vkQueueSubmit"); err != nil {
-		return err
-	}
-	if procs.vkQueueWaitIdle, err = loadRequiredDeviceProc(device, "vkQueueWaitIdle"); err != nil {
-		return err
-	}
-	if procs.vkCreateRenderPass, err = loadRequiredDeviceProc(device, "vkCreateRenderPass"); err != nil {
-		return err
-	}
-	if procs.vkCreateFramebuffer, err = loadRequiredDeviceProc(device, "vkCreateFramebuffer"); err != nil {
-		return err
-	}
-	if procs.vkCreateShaderModule, err = loadRequiredDeviceProc(device, "vkCreateShaderModule"); err != nil {
-		return err
-	}
-	if procs.vkCreatePipelineLayout, err = loadRequiredDeviceProc(device, "vkCreatePipelineLayout"); err != nil {
-		return err
-	}
-	if procs.vkCreateGraphicsPipelines, err = loadRequiredDeviceProc(device, "vkCreateGraphicsPipelines"); err != nil {
-		return err
-	}
-	if procs.vkCreateBuffer, err = loadRequiredDeviceProc(device, "vkCreateBuffer"); err != nil {
-		return err
-	}
-	if procs.vkGetBufferMemoryRequirements, err = loadRequiredDeviceProc(device, "vkGetBufferMemoryRequirements"); err != nil {
-		return err
-	}
-	if procs.vkBindBufferMemory, err = loadRequiredDeviceProc(device, "vkBindBufferMemory"); err != nil {
-		return err
-	}
-	if procs.vkCreateImage, err = loadRequiredDeviceProc(device, "vkCreateImage"); err != nil {
-		return err
-	}
-	if procs.vkGetImageMemoryRequirements, err = loadRequiredDeviceProc(device, "vkGetImageMemoryRequirements"); err != nil {
-		return err
-	}
-	if procs.vkBindImageMemory, err = loadRequiredDeviceProc(device, "vkBindImageMemory"); err != nil {
-		return err
-	}
-	if procs.vkCreateImageView, err = loadRequiredDeviceProc(device, "vkCreateImageView"); err != nil {
-		return err
-	}
-	if procs.vkAllocateMemory, err = loadRequiredDeviceProc(device, "vkAllocateMemory"); err != nil {
-		return err
-	}
-	if procs.vkMapMemory, err = loadRequiredDeviceProc(device, "vkMapMemory"); err != nil {
-		return err
-	}
-	if procs.vkUnmapMemory, err = loadRequiredDeviceProc(device, "vkUnmapMemory"); err != nil {
-		return err
-	}
-	if procs.vkCreateFence, err = loadRequiredDeviceProc(device, "vkCreateFence"); err != nil {
-		return err
-	}
-	if procs.vkDestroyFence, err = loadRequiredDeviceProc(device, "vkDestroyFence"); err != nil {
-		return err
-	}
-	if procs.vkCreateSemaphore, err = loadRequiredDeviceProc(device, "vkCreateSemaphore"); err != nil {
-		return err
-	}
-	if procs.vkWaitForFences, err = loadRequiredDeviceProc(device, "vkWaitForFences"); err != nil {
-		return err
-	}
-	if procs.vkResetFences, err = loadRequiredDeviceProc(device, "vkResetFences"); err != nil {
-		return err
-	}
-	if procs.vkFreeCommandBuffers, err = loadRequiredDeviceProc(device, "vkFreeCommandBuffers"); err != nil {
-		return err
-	}
-	procs.vkGetMemoryFdKHR, _ = loadOptionalDeviceProc(device, "vkGetMemoryFdKHR")
-
-	procs.vkCreateSwapchainKHR, _ = loadOptionalDeviceProc(device, "vkCreateSwapchainKHR")
-	procs.vkDestroySwapchainKHR, _ = loadOptionalDeviceProc(device, "vkDestroySwapchainKHR")
-	procs.vkGetSwapchainImagesKHR, _ = loadOptionalDeviceProc(device, "vkGetSwapchainImagesKHR")
-	procs.vkAcquireNextImageKHR, _ = loadOptionalDeviceProc(device, "vkAcquireNextImageKHR")
-	procs.vkQueuePresentKHR, _ = loadOptionalDeviceProc(device, "vkQueuePresentKHR")
 	return nil
 }
 
-func loadGlobalFuncs() error {
-	var err error
-	if procs.vkCreateInstance, err = loadRequiredGlobalProc("vkCreateInstance"); err != nil {
-		return err
+func loadExportedFuncs() error {
+	optional := map[string]bool{
+		"vkCreateSwapchainKHR":    true,
+		"vkDestroySwapchainKHR":   true,
+		"vkGetSwapchainImagesKHR": true,
+		"vkAcquireNextImageKHR":   true,
+		"vkQueuePresentKHR":       true,
 	}
-	if procs.vkEnumerateInstanceLayerProperties, err = loadRequiredGlobalProc("vkEnumerateInstanceLayerProperties"); err != nil {
-		return err
-	}
-	if procs.vkEnumerateInstanceExtensionProperties, err = loadRequiredGlobalProc("vkEnumerateInstanceExtensionProperties"); err != nil {
-		return err
+	typ := reflect.TypeOf(procs)
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := field.Name
+		if name == "lib" || name == "vkGetInstanceProcAddr" || name == "vkGetDeviceProcAddr" || name == "vkGetMemoryFdKHR" {
+			continue
+		}
+		ptr, err := purego.Dlsym(procs.lib, name)
+		if err != nil {
+			if optional[name] {
+				continue
+			}
+			return fmt.Errorf("resolve %s: %w", name, err)
+		}
+		slot := (*uintptr)(unsafe.Add(unsafe.Pointer(&procs), field.Offset))
+		*slot = ptr
 	}
 	return nil
+}
+
+func memoryFdProc(device VkDevice) uintptr {
+	ptr, ok := deviceMemoryFdProc.Load(device)
+	if !ok {
+		return 0
+	}
+	return ptr.(uintptr)
 }
 
 func loadRequiredGlobalProc(name string) (uintptr, error) {
@@ -413,10 +291,8 @@ func stringArray(strs []string) ([][]byte, []*byte) {
 }
 
 func currentPhysicalDevice(device VkDevice) VkPhysicalDevice {
-	if device != 0 {
-		if phys, ok := devicePhysicalMap.Load(device); ok {
-			return phys.(VkPhysicalDevice)
-		}
+	if phys, ok := devicePhysicalMap.Load(device); ok {
+		return phys.(VkPhysicalDevice)
 	}
-	return activePhysicalDevice
+	return 0
 }

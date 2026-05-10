@@ -65,6 +65,12 @@ func CreateRenderPass(device VkDevice, colorFormat, depthFormat VkFormat) (VkRen
 	return renderPass, res
 }
 
+func DestroyRenderPass(device VkDevice, renderPass VkRenderPass) {
+	if renderPass != 0 {
+		callVoid(procs.vkDestroyRenderPass, uintptr(device), uintptr(renderPass), 0)
+	}
+}
+
 func CreateFramebuffer(device VkDevice, renderPass VkRenderPass, imageView, depthView VkImageView, width, height uint32) (VkFramebuffer, VkResult) {
 	attachments := []VkImageView{imageView}
 	if depthView != 0 {
@@ -82,4 +88,10 @@ func CreateFramebuffer(device VkDevice, renderPass VkRenderPass, imageView, dept
 	var framebuffer VkFramebuffer
 	res := callResult(procs.vkCreateFramebuffer, uintptr(device), uintptr(unsafe.Pointer(&ci)), 0, uintptr(unsafe.Pointer(&framebuffer)))
 	return framebuffer, res
+}
+
+func DestroyFramebuffer(device VkDevice, framebuffer VkFramebuffer) {
+	if framebuffer != 0 {
+		callVoid(procs.vkDestroyFramebuffer, uintptr(device), uintptr(framebuffer), 0)
+	}
 }

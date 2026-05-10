@@ -2,14 +2,38 @@ package vfs
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
+	iofs "io/fs"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+var ErrInvalidPathAlias = errors.New("path aliases another replace operand")
+var ErrRenameParentNotFound = errors.New("rename destination parent is unavailable")
+
+// RenameCommitResult controls how RenameatWithCommit updates the source entry.
+type RenameCommitResult struct {
+	KeepSource bool
+}
+
+// RenameCommitSource describes the source while the VFS lock is held.
+type RenameCommitSource struct {
+	Data  []byte
+	IsDir bool
+}
+
+// RenameOptions controls replacement rules for a VFS rename.
+type RenameOptions struct {
+	ReplaceExisting         bool
+	RejectExistingDirectory bool
+}
 
 // FileMode represents virtual file permissions.
 type FileMode uint32
@@ -21,12 +45,12 @@ const (
 
 // Inode types
 const (
-	S_IFMT   uint32 = 0xF000
-	S_IFDIR  uint32 = 0x4000
-	S_IFCHR  uint32 = 0x2000
-	S_IFREG  uint32 = 0x8000
-	S_IFIFO  uint32 = 0x1000
-	S_IFLNK  uint32 = 0xA000
+	S_IFMT  uint32 = 0xF000
+	S_IFDIR uint32 = 0x4000
+	S_IFCHR uint32 = 0x2000
+	S_IFREG uint32 = 0x8000
+	S_IFIFO uint32 = 0x1000
+	S_IFLNK uint32 = 0xA000
 )
 
 // Open flags
@@ -100,12 +124,12 @@ type FD struct {
 	Node     *VNode
 	Offset   int64
 	Flags    int
-	PipeR    *PipeEnd        // non-nil if this fd is a pipe read end
-	PipeW    *PipeEnd        // non-nil if this fd is a pipe write end
-	Socket   *SocketFD       // non-nil for AF_UNIX sockets
-	HostFile *os.File        // non-nil when backed by a real host FD (memfd, etc.)
-	Epoll    *EpollInstance  // non-nil for epoll instances
-	EventFD  *EventFD        // non-nil for eventfd descriptors
+	PipeR    *PipeEnd       // non-nil if this fd is a pipe read end
+	PipeW    *PipeEnd       // non-nil if this fd is a pipe write end
+	Socket   *SocketFD      // non-nil for AF_UNIX sockets
+	HostFile *os.File       // non-nil when backed by a real host FD (memfd, etc.)
+	Epoll    *EpollInstance // non-nil for epoll instances
+	EventFD  *EventFD       // non-nil for eventfd descriptors
 }
 
 // PipeEnd is one end of a virtual pipe.
@@ -151,10 +175,10 @@ type VFS struct {
 	root    *VNode
 	fds     map[int]*FD
 	nextFD  int
-	HostOut func(fd int, data []byte) // callback for stdout/stderr
-	HostIn  func(fd int, buf []byte) int  // callback for stdin
-	ElfPath string                     // path to loaded binary (for /proc/self/exe)
-	Cwd     string                     // current working directory
+	HostOut func(fd int, data []byte)    // callback for stdout/stderr
+	HostIn  func(fd int, buf []byte) int // callback for stdin
+	ElfPath string                       // path to loaded binary (for /proc/self/exe)
+	Cwd     string                       // current working directory
 }
 
 // New creates a VFS with an empty root and pre-opened stdin/stdout/stderr.
@@ -214,6 +238,9 @@ func (v *VFS) initDevFS() {
 
 // MkdirAll creates a directory path and all parents.
 func (v *VFS) MkdirAll(path string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
 	parts := SplitAll(path)
 	cur := v.root
 	for _, p := range parts {
@@ -245,6 +272,108 @@ func (v *VFS) CreateFile(path string, data []byte, mode FileMode) error {
 	nd.Mode = mode
 	parent.Children[name] = nd
 	return nil
+}
+
+type virtualFileInfo struct {
+	name    string
+	size    int64
+	mode    os.FileMode
+	modTime time.Time
+}
+
+func (i virtualFileInfo) Name() string       { return i.name }
+func (i virtualFileInfo) Size() int64        { return i.size }
+func (i virtualFileInfo) Mode() os.FileMode  { return i.mode }
+func (i virtualFileInfo) ModTime() time.Time { return i.modTime }
+func (i virtualFileInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i virtualFileInfo) Sys() any           { return nil }
+
+func virtualDirEntry(node *VNode) os.DirEntry {
+	mode := os.FileMode(node.FileMode & 0777)
+	switch node.FileMode & S_IFMT {
+	case S_IFDIR:
+		mode |= os.ModeDir
+	case S_IFLNK:
+		mode |= os.ModeSymlink
+	case S_IFCHR:
+		mode |= os.ModeDevice | os.ModeCharDevice
+	case S_IFIFO:
+		mode |= os.ModeNamedPipe
+	}
+	return iofs.FileInfoToDirEntry(virtualFileInfo{
+		name:    node.Name,
+		size:    node.Size,
+		mode:    mode,
+		modTime: node.Mtime,
+	})
+}
+
+func caseCorrectHostPath(path string) string {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) || clean == string(filepath.Separator) {
+		return clean
+	}
+
+	current := string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(clean, current), current) {
+		hostEntries, err := os.ReadDir(current)
+		if err != nil {
+			return clean
+		}
+		actual := ""
+		for _, entry := range hostEntries {
+			if entry.Name() == part {
+				actual = entry.Name()
+				break
+			}
+			if actual == "" && strings.EqualFold(entry.Name(), part) {
+				actual = entry.Name()
+			}
+		}
+		if actual == "" {
+			return clean
+		}
+		current = filepath.Join(current, actual)
+	}
+	return current
+}
+
+// ReadDir returns a merged snapshot of virtual and host-backed entries.
+func (v *VFS) ReadDir(path string) ([]os.DirEntry, error) {
+	v.mu.Lock()
+	absPath := v.ResolvePath(-100, path)
+	node, virtualErr := v.Resolve(absPath)
+	entries := make(map[string]os.DirEntry)
+	if virtualErr == nil {
+		if !node.IsDir {
+			v.mu.Unlock()
+			return nil, fmt.Errorf("not a directory: %s", absPath)
+		}
+		for _, child := range node.Children {
+			entries[strings.ToLower(child.Name)] = virtualDirEntry(child)
+		}
+	}
+	v.mu.Unlock()
+
+	hostEntries, hostErr := os.ReadDir(caseCorrectHostPath(absPath))
+	for _, entry := range hostEntries {
+		key := strings.ToLower(entry.Name())
+		if _, exists := entries[key]; !exists {
+			entries[key] = entry
+		}
+	}
+	if virtualErr != nil && hostErr != nil {
+		return nil, virtualErr
+	}
+
+	result := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, entry)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i].Name()) < strings.ToLower(result[j].Name())
+	})
+	return result, nil
 }
 
 // Mkdir creates a directory.
@@ -284,12 +413,27 @@ func (v *VFS) OpenAt(dirfd int, path string, flags int, mode uint32) (int, error
 
 	node, err := v.Resolve(absPath)
 	if err != nil {
+		// Keep creation inside the VFS when its parent is a virtual directory.
+		if flags&O_CREAT != 0 {
+			dir, name := SplitPath(absPath)
+			if parent, perr := v.Resolve(dir); perr == nil {
+				nd := newVNode(name, false)
+				nd.FileMode = S_IFREG | mode
+				parent.Children[name] = nd
+				fd := v.nextFD
+				v.nextFD++
+				v.fds[fd] = &FD{Node: nd, Flags: flags}
+				return fd, nil
+			}
+		}
+
 		// Host passthrough for system libraries, config, and runtime files
 		hostPassthrough := strings.HasPrefix(absPath, "/lib") ||
 			strings.HasPrefix(absPath, "/usr") ||
 			strings.HasPrefix(absPath, "/etc") ||
 			strings.HasPrefix(absPath, "/run/") ||
 			strings.HasPrefix(absPath, "/home/") ||
+			strings.HasPrefix(absPath, "/tmp/") ||
 			strings.HasPrefix(absPath, "/sys/") ||
 			strings.HasPrefix(absPath, "/proc/")
 		if hostPassthrough {
@@ -299,6 +443,15 @@ func (v *VFS) OpenAt(dirfd int, path string, flags int, mode uint32) (int, error
 			} else if flags&O_RDWR != 0 {
 				hostFlags = os.O_RDWR
 			}
+			if flags&O_CREAT != 0 {
+				hostFlags |= os.O_CREATE
+			}
+			if flags&O_TRUNC != 0 {
+				hostFlags |= os.O_TRUNC
+			}
+			if flags&O_APPEND != 0 {
+				hostFlags |= os.O_APPEND
+			}
 			if f, oerr := os.OpenFile(absPath, hostFlags, os.FileMode(mode)); oerr == nil {
 				fd := v.nextFD
 				v.nextFD++
@@ -307,21 +460,6 @@ func (v *VFS) OpenAt(dirfd int, path string, flags int, mode uint32) (int, error
 			}
 		}
 
-		// If O_CREAT, create it in VFS
-		if flags&O_CREAT != 0 {
-			dir, name := SplitPath(absPath)
-			parent, perr := v.Resolve(dir)
-			if perr != nil {
-				return -1, perr
-			}
-			nd := newVNode(name, false)
-			nd.FileMode = S_IFREG | mode
-			parent.Children[name] = nd
-			fd := v.nextFD
-			v.nextFD++
-			v.fds[fd] = &FD{Node: nd, Flags: flags}
-			return fd, nil
-		}
 		return -1, err
 	}
 
@@ -358,8 +496,6 @@ func (v *VFS) FileBytes(path string) ([]byte, error) {
 	copy(out, f.Node.Data)
 	return out, nil
 }
-
-
 
 // Read reads up to len(buf) bytes from fd.
 func (v *VFS) Read(fd int, buf []byte) (int, error) {
@@ -473,11 +609,12 @@ func (v *VFS) Pwrite(fd int, data []byte, offset int64) (int, error) {
 		v.mu.Unlock()
 		return -1, fmt.Errorf("bad fd %d", fd)
 	}
-	v.mu.Unlock()
 
 	// Host file pwrite
 	if f.HostFile != nil {
-		return f.HostFile.WriteAt(data, offset)
+		hostFile := f.HostFile
+		v.mu.Unlock()
+		return hostFile.WriteAt(data, offset)
 	}
 
 	// VFS regular file
@@ -489,9 +626,11 @@ func (v *VFS) Pwrite(fd int, data []byte, offset int64) (int, error) {
 		copy(f.Node.Data[offset:], data)
 		f.Node.Size = int64(len(f.Node.Data))
 		f.Node.Mtime = time.Now()
+		v.mu.Unlock()
 		return len(data), nil
 	}
 
+	v.mu.Unlock()
 	return -1, fmt.Errorf("cannot pwrite to fd %d", fd)
 }
 
@@ -503,35 +642,40 @@ func (v *VFS) Write(fd int, data []byte) (int, error) {
 		v.mu.Unlock()
 		return -1, fmt.Errorf("bad fd %d", fd)
 	}
-	v.mu.Unlock()
 
 	if (fd == 1 || fd == 2) && v.HostOut != nil {
+		v.mu.Unlock()
 		v.HostOut(fd, data)
 		return len(data), nil
 	}
 
 	// EventFD write
 	if f.EventFD != nil {
+		v.mu.Unlock()
 		return f.EventFD.Write(data)
 	}
 
 	// Socket write
 	if f.Socket != nil {
+		v.mu.Unlock()
 		return f.Socket.Write(data)
 	}
 
 	// Host file write (memfd etc.)
 	if f.HostFile != nil {
+		v.mu.Unlock()
 		return f.HostFile.Write(data)
 	}
 
 	// Pipe write end
 	if f.PipeW != nil {
+		v.mu.Unlock()
 		return f.PipeW.Write(data)
 	}
 
 	// /dev/null
 	if f.Node != nil && f.Node.Name == "null" {
+		v.mu.Unlock()
 		return len(data), nil
 	}
 
@@ -548,9 +692,11 @@ func (v *VFS) Write(fd int, data []byte) (int, error) {
 		f.Offset = end
 		f.Node.Size = int64(len(f.Node.Data))
 		f.Node.Mtime = time.Now()
+		v.mu.Unlock()
 		return len(data), nil
 	}
 
+	v.mu.Unlock()
 	return -1, fmt.Errorf("cannot write to fd %d", fd)
 }
 
@@ -1059,34 +1205,231 @@ func (v *VFS) Unlinkat(dirfd int, path string, flags int) error {
 	return nil
 }
 
+// RemoveAll removes a file or directory tree from the VFS.
+func (v *VFS) RemoveAll(dirfd int, path string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	absPath := v.ResolvePath(dirfd, path)
+	if absPath == "/" {
+		return fmt.Errorf("cannot remove VFS root")
+	}
+	dir, name := SplitPath(absPath)
+	parent, err := v.Resolve(dir)
+	if err != nil {
+		return nil
+	}
+	actualName, _, ok := findChildFold(parent, name)
+	if !ok {
+		return nil
+	}
+	delete(parent.Children, actualName)
+	return nil
+}
+
 // Renameat renames a file or directory in the VFS.
 func (v *VFS) Renameat(olddirfd int, oldpath string, newdirfd int, newpath string) error {
+	return v.RenameatWithCommit(olddirfd, oldpath, newdirfd, newpath, RenameOptions{ReplaceExisting: true}, nil)
+}
+
+// RenameatWithCommit runs a non-VFS callback while holding the VFS lock.
+// The callback must not call back into this VFS.
+func (v *VFS) RenameatWithCommit(olddirfd int, oldpath string, newdirfd int, newpath string, options RenameOptions, commit func(source RenameCommitSource) (RenameCommitResult, error)) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	absOld := v.ResolvePath(olddirfd, oldpath)
 	absNew := v.ResolvePath(newdirfd, newpath)
 
-	oldDir, oldName := SplitPath(absOld)
 	newDir, newName := SplitPath(absNew)
 
-	oldParent, err := v.Resolve(oldDir)
+	oldParent, oldName, node, err := v.resolveParentEntry(absOld)
 	if err != nil {
 		return err
-	}
-	node, ok := oldParent.Children[oldName]
-	if !ok {
-		return fmt.Errorf("not found: %s", absOld)
 	}
 
 	newParent, err := v.Resolve(newDir)
-	if err != nil {
-		return err
+	if err != nil || !newParent.IsDir {
+		return fmt.Errorf("%w: %s", ErrRenameParentNotFound, absNew)
+	}
+	if node.IsDir && vnodeContains(node, newParent) {
+		return ErrInvalidPathAlias
+	}
+	dstName, dstNode, dstExists := findChildFold(newParent, newName)
+	sameEntry := oldParent == newParent && dstExists && dstNode == node
+	if dstExists && !sameEntry {
+		if options.RejectExistingDirectory && dstNode.IsDir {
+			return fmt.Errorf("destination is a directory: %s", absNew)
+		}
+		if node.IsDir != dstNode.IsDir {
+			return fmt.Errorf("source and destination types differ")
+		}
+		if dstNode.IsDir && len(dstNode.Children) != 0 {
+			return fmt.Errorf("destination directory is not empty")
+		}
+		if !options.ReplaceExisting {
+			return fmt.Errorf("%w: %s", os.ErrExist, absNew)
+		}
+	}
+
+	var commitResult RenameCommitResult
+	if commit != nil {
+		commitResult, err = commit(RenameCommitSource{
+			Data:  append([]byte(nil), node.Data...),
+			IsDir: node.IsDir,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	if commitResult.KeepSource {
+		if node.IsDir {
+			return fmt.Errorf("cannot retain a directory during rename")
+		}
+		if sameEntry {
+			return ErrInvalidPathAlias
+		}
+		if dstExists {
+			delete(newParent.Children, dstName)
+		}
+		copied := *node
+		copied.Name = newName
+		copied.Data = append([]byte(nil), node.Data...)
+		copied.Children = make(map[string]*VNode)
+		copied.Ino = nextInode()
+		copied.Nlink = 1
+		newParent.Children[newName] = &copied
+		return nil
 	}
 
 	delete(oldParent.Children, oldName)
+	if dstExists && !sameEntry {
+		delete(newParent.Children, dstName)
+	}
 	node.Name = newName
 	newParent.Children[newName] = node
 	return nil
+}
+
+func vnodeContains(root, target *VNode) bool {
+	if root == target {
+		return true
+	}
+	if !root.IsDir {
+		return false
+	}
+	for _, child := range root.Children {
+		if vnodeContains(child, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// ReplaceFile atomically replaces one VFS directory entry with another.
+func (v *VFS) ReplaceFile(replacedPath, replacementPath, backupPath string) error {
+	return v.ReplaceFileWithCommit(replacedPath, replacementPath, backupPath, nil)
+}
+
+// ReplaceFileWithCommit runs an external commit before changing VFS entries.
+func (v *VFS) ReplaceFileWithCommit(replacedPath, replacementPath, backupPath string, commit func(replacedData, replacementData []byte) error) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	replacedPath = pathClean(v.ResolvePath(-1, replacedPath))
+	replacementPath = pathClean(v.ResolvePath(-1, replacementPath))
+	backupPath = pathCleanOptional(v.ResolvePath(-1, backupPath), backupPath != "")
+	if strings.EqualFold(replacedPath, replacementPath) ||
+		(backupPath != "" && (strings.EqualFold(backupPath, replacedPath) || strings.EqualFold(backupPath, replacementPath))) {
+		return ErrInvalidPathAlias
+	}
+
+	replacedParent, replacedName, replaced, err := v.resolveParentEntry(replacedPath)
+	if err != nil || replaced.IsDir {
+		return fmt.Errorf("replaced file is unavailable")
+	}
+	replacementParent, replacementName, replacement, err := v.resolveParentEntry(replacementPath)
+	if err != nil || replacement.IsDir {
+		return fmt.Errorf("replacement file is unavailable")
+	}
+
+	var backupParent *VNode
+	var backupName string
+	if backupPath != "" {
+		backupDir, requestedName := SplitPath(backupPath)
+		backupParent, err = v.Resolve(backupDir)
+		if err != nil || !backupParent.IsDir {
+			return fmt.Errorf("backup directory is unavailable")
+		}
+		backupName = requestedName
+		if actualName, existing, ok := findChildFold(backupParent, requestedName); ok {
+			if existing.IsDir {
+				return fmt.Errorf("backup path is a directory")
+			}
+			backupName = actualName
+		}
+	}
+	if commit != nil {
+		replacedData := append([]byte(nil), replaced.Data...)
+		replacementData := append([]byte(nil), replacement.Data...)
+		if err := commit(replacedData, replacementData); err != nil {
+			return err
+		}
+	}
+
+	delete(replacementParent.Children, replacementName)
+	delete(replacedParent.Children, replacedName)
+	if backupPath != "" {
+		delete(backupParent.Children, backupName)
+		replaced.Name = backupName
+		backupParent.Children[backupName] = replaced
+	} else {
+		replaced.Nlink = 0
+	}
+	replacement.Mode = replaced.Mode
+	replacement.FileMode = replaced.FileMode
+	replacement.Uid = replaced.Uid
+	replacement.Gid = replaced.Gid
+	replacement.Ctime = replaced.Ctime
+	replacement.Name = replacedName
+	replacedParent.Children[replacedName] = replacement
+	return nil
+}
+
+func (v *VFS) resolveParentEntry(filePath string) (*VNode, string, *VNode, error) {
+	dir, requestedName := SplitPath(filePath)
+	parent, err := v.Resolve(dir)
+	if err != nil || !parent.IsDir {
+		return nil, "", nil, fmt.Errorf("parent directory is unavailable")
+	}
+	actualName, node, ok := findChildFold(parent, requestedName)
+	if !ok {
+		return nil, "", nil, fmt.Errorf("not found: %s", filePath)
+	}
+	return parent, actualName, node, nil
+}
+
+func findChildFold(parent *VNode, requestedName string) (string, *VNode, bool) {
+	if child, ok := parent.Children[requestedName]; ok {
+		return requestedName, child, true
+	}
+	for name, child := range parent.Children {
+		if strings.EqualFold(name, requestedName) {
+			return name, child, true
+		}
+	}
+	return "", nil, false
+}
+
+func pathClean(filePath string) string {
+	parts := SplitAll(filePath)
+	return "/" + strings.Join(parts, "/")
+}
+
+func pathCleanOptional(filePath string, present bool) string {
+	if !present {
+		return ""
+	}
+	return pathClean(filePath)
 }
 
 // Ftruncate truncates a file to the given length.
@@ -1155,8 +1498,8 @@ func SplitAll(path string) []string {
 
 // FDSnapshot is a shallow copy of the FD table used for vfork/posix_spawn.
 type FDSnapshot struct {
-fds    map[int]*FD
-nextFD int
+	fds    map[int]*FD
+	nextFD int
 }
 
 // SnapshotFDs returns a shallow copy of the current FD table.
@@ -1164,24 +1507,24 @@ nextFD int
 // FD table after the child calls execve (which modifies the shared table
 // via dup2/close file actions).
 func (v *VFS) SnapshotFDs() FDSnapshot {
-v.mu.Lock()
-defer v.mu.Unlock()
-snap := FDSnapshot{
-fds:    make(map[int]*FD, len(v.fds)),
-nextFD: v.nextFD,
-}
-for k, fd := range v.fds {
-snap.fds[k] = fd
-}
-return snap
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	snap := FDSnapshot{
+		fds:    make(map[int]*FD, len(v.fds)),
+		nextFD: v.nextFD,
+	}
+	for k, fd := range v.fds {
+		snap.fds[k] = fd
+	}
+	return snap
 }
 
 // RestoreFDs replaces the FD table with a previously-saved snapshot.
 // Called after the vfork-child's execve to undo any dup2/close modifications
 // that the child made to the shared FD table.
 func (v *VFS) RestoreFDs(snap FDSnapshot) {
-v.mu.Lock()
-defer v.mu.Unlock()
-v.fds = snap.fds
-v.nextFD = snap.nextFD
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.fds = snap.fds
+	v.nextFD = snap.nextFD
 }

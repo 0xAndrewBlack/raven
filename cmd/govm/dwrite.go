@@ -19,7 +19,7 @@ const (
 
 	dwriteFactoryMethods            = 64
 	dwriteTextFormatMethods         = 28
-	dwriteTextLayoutMethods         = 66
+	dwriteTextLayoutMethods         = 67
 	dwriteFontCollectionMethods     = 7
 	dwriteFontFamilyMethods         = 9
 	dwriteLocalizedStringsMethods   = 9
@@ -203,7 +203,7 @@ func registerDWriteHandlers(hctx *HandlerCtx) {
 		return
 	}
 
-	hctx.Disp.RegisterAutoStubHandler(dll, "DWriteCreateFactory", func(ctx *ntapi.TrapContext) uint32 {
+	registerAutoOrDynamicHandler(hctx, dll, "DWriteCreateFactory", func(ctx *ntapi.TrapContext) uint32 {
 		factoryType := int(ctx.Arg(0))
 		riidPtr := ctx.Arg(1)
 		ppFactory := ctx.Arg(2)
@@ -795,7 +795,23 @@ func dwriteDispatchTextLayout(ctx *ntapi.TrapContext, method int, obj *dwriteCOM
 			dwriteWriteTextRange(ctx.Mem, tr, 0, layout.textLength)
 		}
 		return S_OK
+	case 53, 54, 55:
+		if out := ctx.Arg(2); out != 0 {
+			ctx.Mem.Write64(out, 0)
+		}
+		if tr := ctx.Arg(3); tr != 0 {
+			dwriteWriteTextRange(ctx.Mem, tr, 0, layout.textLength)
+		}
+		return S_OK
 	case 56:
+		if out := ctx.Arg(2); out != 0 {
+			ctx.Mem.Write32(out, uint32(len(utf16Encode(layout.locale))))
+		}
+		if tr := ctx.Arg(3); tr != 0 {
+			dwriteWriteTextRange(ctx.Mem, tr, 0, layout.textLength)
+		}
+		return S_OK
+	case 57:
 		buf := ctx.Arg(2)
 		size := uint32(ctx.Arg(3))
 		if buf != 0 && size > 0 {
@@ -806,6 +822,8 @@ func dwriteDispatchTextLayout(ctx *ntapi.TrapContext, method int, obj *dwriteCOM
 		}
 		return S_OK
 	case 58:
+		return E_NOTIMPL
+	case 59:
 		dwriteEnsureLayout(layout)
 		metricsPtr := ctx.Arg(1)
 		maxCount := uint32(ctx.Arg(2))
@@ -831,21 +849,21 @@ func dwriteDispatchTextLayout(ctx *ntapi.TrapContext, method int, obj *dwriteCOM
 			ctx.Mem.Write32(base+20, 0)
 		}
 		return S_OK
-	case 59:
+	case 60:
 		metricsPtr := ctx.Arg(1)
 		if metricsPtr == 0 {
 			return E_POINTER
 		}
 		dwriteWriteTextMetrics(ctx.Mem, metricsPtr, dwriteTextMetricsForLayout(layout))
 		return S_OK
-	case 60:
+	case 61:
 		if out := ctx.Arg(1); out != 0 {
 			for i := 0; i < 4; i++ {
 				ctx.Mem.Write32(out+uint64(i*4), 0)
 			}
 		}
 		return S_OK
-	case 61:
+	case 62:
 		metricsPtr := ctx.Arg(1)
 		maxCount := uint32(ctx.Arg(2))
 		actualPtr := ctx.Arg(3)
@@ -874,18 +892,18 @@ func dwriteDispatchTextLayout(ctx *ntapi.TrapContext, method int, obj *dwriteCOM
 			ctx.Mem.Write16(base+6, flags)
 		}
 		return S_OK
-	case 62:
+	case 63:
 		if out := ctx.Arg(1); out == 0 {
 			return E_POINTER
 		} else {
 			ctx.Mem.Write32(out, math.Float32bits(float32(dwriteDetermineMinWidth(layout))))
 		}
 		return S_OK
-	case 63:
-		return dwriteHitTestPoint(ctx, layout)
 	case 64:
-		return dwriteHitTestTextPosition(ctx, layout)
+		return dwriteHitTestPoint(ctx, layout)
 	case 65:
+		return dwriteHitTestTextPosition(ctx, layout)
+	case 66:
 		return dwriteHitTestTextRange(ctx, layout)
 	default:
 		return E_NOTIMPL

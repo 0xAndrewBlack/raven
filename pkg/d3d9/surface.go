@@ -3,12 +3,13 @@
 package d3d9
 
 type Surface struct {
-	Width  uint32
-	Height uint32
-	Format uint32
-	Pool   uint32
-	Data   []byte
-	Locked bool
+	Width     uint32
+	Height    uint32
+	Format    uint32
+	Pool      uint32
+	Data      []byte
+	GuestAddr uint64
+	Locked    bool
 }
 
 type Texture struct {

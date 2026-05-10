@@ -17,11 +17,11 @@ const (
 	d2d1BitmapRenderTargetMethods = 58
 	d2d1HwndRenderTargetMethods   = 61
 	d2d1DCRenderTargetMethods     = 58
-	d2d1BrushMethods              = 9
-	d2d1SolidColorBrushMethods    = 11
-	d2d1BitmapBrushMethods        = 17
-	d2d1LinearGradientMethods     = 14
-	d2d1RadialGradientMethods     = 16
+	d2d1BrushMethods              = 8
+	d2d1SolidColorBrushMethods    = 10
+	d2d1BitmapBrushMethods        = 16
+	d2d1LinearGradientMethods     = 13
+	d2d1RadialGradientMethods     = 17
 	d2d1GradientStopsMethods      = 8
 	d2d1BitmapMethods             = 10
 	d2d1GeometryMethods           = 18
@@ -85,6 +85,8 @@ type d2d1RenderTarget struct {
 	dc                  *gdi.DC
 	width               uint32
 	height              uint32
+	originX             int32
+	originY             int32
 	dpiX, dpiY          float32
 	transform           [6]float32
 	clipStack           []d2d1Rect
@@ -252,7 +254,7 @@ func registerD2D1Handlers(hctx *HandlerCtx) {
 	}
 	cs := hctx.Com
 	d := hctx.Disp
-	d.RegisterAutoStubHandler(dll, "D2D1CreateFactory", func(ctx *ntapi.TrapContext) uint32 {
+	registerAutoOrDynamicHandler(hctx, dll, "D2D1CreateFactory", func(ctx *ntapi.TrapContext) uint32 {
 		factoryType := int(ctx.Arg(0))
 		riidPtr := ctx.Arg(1)
 		ppFactory := ctx.Arg(3)
@@ -868,11 +870,18 @@ func d2d1NewDC(rt *d2d1RenderTarget, surf *gdi.Surface, color uint32, strokeWidt
 	}
 	dc := gdi.NewScreenDC(surf)
 	dc.Target = surf
+	dc.OriginX = rt.originX
+	dc.OriginY = rt.originY
 	dc.TextColor = color
 	dc.Brush = &gdi.Brush{Style: 0, Color: color}
 	dc.Pen = &gdi.Pen{Style: 0, Width: strokeWidth, Color: color}
 	if clip, ok := d2d1CurrentClip(rt, surf); ok {
-		dc.SetClipRect(int32(math.Floor(float64(clip.left))), int32(math.Floor(float64(clip.top))), int32(math.Ceil(float64(clip.right))), int32(math.Ceil(float64(clip.bottom))))
+		dc.SetClipRect(
+			rt.originX+int32(math.Floor(float64(clip.left))),
+			rt.originY+int32(math.Floor(float64(clip.top))),
+			rt.originX+int32(math.Ceil(float64(clip.right))),
+			rt.originY+int32(math.Ceil(float64(clip.bottom))),
+		)
 	}
 	return dc
 }
@@ -1327,8 +1336,7 @@ func (cs *comState) dispatchD2D1Factory(ctx *ntapi.TrapContext, obj *comObject, 
 			return E_POINTER
 		}
 		ctx.Mem.Write64(ppGeom, 0)
-		srcObj := cs.objects[srcPtr]
-		srcGeom, _ := srcObj.data.(*d2d1PathGeometry)
+		srcGeom, _ := cs.objectData(srcPtr).(*d2d1PathGeometry)
 		if srcGeom == nil {
 			return E_INVALIDARG
 		}
@@ -1448,6 +1456,10 @@ func (cs *comState) dispatchD2D1Factory(ctx *ntapi.TrapContext, obj *comObject, 
 			dpiX:       96,
 			dpiY:       96,
 			transform:  d2d1IdentityMatrix(),
+		}
+		if state := cs.hctx.HwndChildren[hwnd]; state != nil {
+			rt.originX = state.x
+			rt.originY = state.y
 		}
 		out, err := cs.createD2D1RenderTargetObject("d2d1-hwnd-render-target", d2d1HwndRenderTargetMethods, rt)
 		if err != nil {
@@ -1572,10 +1584,10 @@ func (cs *comState) dispatchD2D1SolidColorBrush(ctx *ntapi.TrapContext, obj *com
 		return E_FAIL
 	}
 	switch method {
-	case 9:
+	case 8:
 		brush.r, brush.g, brush.b, brush.a = readD2D1Color(cs.hctx, ctx.Arg(1))
 		return 0
-	case 10:
+	case 9:
 		writeD2D1Color(ctx.Mem, ctx.Arg(1), brush.r, brush.g, brush.b, brush.a)
 		return 0
 	default:
@@ -1592,21 +1604,21 @@ func (cs *comState) dispatchD2D1BitmapBrush(ctx *ntapi.TrapContext, obj *comObje
 		return E_FAIL
 	}
 	switch method {
-	case 9:
+	case 8:
 		brush.extendModeX = uint32(ctx.Arg(1))
-	case 10:
+	case 9:
 		brush.extendModeY = uint32(ctx.Arg(1))
-	case 11:
+	case 10:
 		brush.interpolation = uint32(ctx.Arg(1))
-	case 12:
+	case 11:
 		brush.bitmapPtr = ctx.Arg(1)
-	case 13:
+	case 12:
 		ctx.SetReturn(uint64(brush.extendModeX))
-	case 14:
+	case 13:
 		ctx.SetReturn(uint64(brush.extendModeY))
-	case 15:
+	case 14:
 		ctx.SetReturn(uint64(brush.interpolation))
-	case 16:
+	case 15:
 		if pp := ctx.Arg(1); pp != 0 {
 			ctx.Mem.Write64(pp, brush.bitmapPtr)
 		}
@@ -1660,17 +1672,17 @@ func (cs *comState) dispatchD2D1LinearGradientBrush(ctx *ntapi.TrapContext, obj 
 		return E_FAIL
 	}
 	switch method {
-	case 9:
+	case 8:
 		brush.start[0], brush.start[1] = readPackedD2D1Point(ctx.Arg(1))
-	case 10:
+	case 9:
 		brush.end[0], brush.end[1] = readPackedD2D1Point(ctx.Arg(1))
-	case 11:
+	case 10:
 		ctx.SetFloatReturn(float64(brush.start[0]))
 		return 0
-	case 12:
+	case 11:
 		ctx.SetFloatReturn(float64(brush.end[0]))
 		return 0
-	case 13:
+	case 12:
 		if pp := ctx.Arg(1); pp != 0 {
 			ctx.Mem.Write64(pp, brush.gradient)
 		}
@@ -1689,21 +1701,27 @@ func (cs *comState) dispatchD2D1RadialGradientBrush(ctx *ntapi.TrapContext, obj 
 		return E_FAIL
 	}
 	switch method {
-	case 9:
+	case 8:
 		brush.center[0], brush.center[1] = readPackedD2D1Point(ctx.Arg(1))
-	case 10:
+	case 9:
 		brush.offset[0], brush.offset[1] = readPackedD2D1Point(ctx.Arg(1))
-	case 11:
+	case 10:
 		brush.radiusX = math.Float32frombits(uint32(ctx.Arg(1)))
-	case 12:
+	case 11:
 		brush.radiusY = math.Float32frombits(uint32(ctx.Arg(1)))
-	case 13:
+	case 12:
 		ctx.SetFloatReturn(float64(brush.center[0]))
 		return 0
-	case 14:
+	case 13:
 		ctx.SetFloatReturn(float64(brush.offset[0]))
 		return 0
+	case 14:
+		ctx.SetFloatReturn(float64(brush.radiusX))
+		return 0
 	case 15:
+		ctx.SetFloatReturn(float64(brush.radiusY))
+		return 0
+	case 16:
 		if pp := ctx.Arg(1); pp != 0 {
 			ctx.Mem.Write64(pp, brush.gradient)
 		}
@@ -1838,8 +1856,7 @@ func (cs *comState) dispatchD2D1GeometryBase(ctx *ntapi.TrapContext, obj *comObj
 		}
 		return S_OK
 	case 8:
-		other := cs.objects[ctx.Arg(1)]
-		otherGeom, _ := other.data.(*d2d1PathGeometry)
+		otherGeom, _ := cs.objectData(ctx.Arg(1)).(*d2d1PathGeometry)
 		relation := uint32(1)
 		if otherGeom != nil {
 			a := d2d1GeometryBounds(geom, d2d1IdentityMatrix())
@@ -1857,14 +1874,14 @@ func (cs *comState) dispatchD2D1GeometryBase(ctx *ntapi.TrapContext, obj *comObj
 		}
 		return S_OK
 	case 9, 12, 17:
-		sinkObj := cs.objects[ctx.Arg(4)]
+		sinkArg := ctx.Arg(4)
 		if method == 9 || method == 12 {
-			sinkObj = cs.objects[ctx.Arg(3)]
+			sinkArg = ctx.Arg(3)
 		}
 		if method == 17 {
-			sinkObj = cs.objects[ctx.Arg(5)]
+			sinkArg = ctx.Arg(5)
 		}
-		sink, _ := sinkObj.data.(*d2d1GeometrySink)
+		sink, _ := cs.objectData(sinkArg).(*d2d1GeometrySink)
 		if sink == nil || sink.geom == nil {
 			return E_INVALIDARG
 		}
@@ -1877,10 +1894,8 @@ func (cs *comState) dispatchD2D1GeometryBase(ctx *ntapi.TrapContext, obj *comObj
 	case 10:
 		return S_OK
 	case 11:
-		other := cs.objects[ctx.Arg(1)]
-		sinkObj := cs.objects[ctx.Arg(5)]
-		otherGeom, _ := other.data.(*d2d1PathGeometry)
-		sink, _ := sinkObj.data.(*d2d1GeometrySink)
+		otherGeom, _ := cs.objectData(ctx.Arg(1)).(*d2d1PathGeometry)
+		sink, _ := cs.objectData(ctx.Arg(5)).(*d2d1GeometrySink)
 		if sink == nil || sink.geom == nil {
 			return E_INVALIDARG
 		}
@@ -1983,8 +1998,7 @@ func (cs *comState) dispatchD2D1Geometry(ctx *ntapi.TrapContext, obj *comObject,
 			ctx.Mem.Write64(ppSink, sink.objectAddr)
 			return S_OK
 		case 19:
-			sinkObj := cs.objects[ctx.Arg(1)]
-			sink, _ := sinkObj.data.(*d2d1GeometrySink)
+			sink, _ := cs.objectData(ctx.Arg(1)).(*d2d1GeometrySink)
 			if sink == nil || sink.geom == nil {
 				return E_INVALIDARG
 			}
@@ -2165,6 +2179,12 @@ func (cs *comState) dispatchD2D1RenderTarget(ctx *ntapi.TrapContext, obj *comObj
 		return cs.dispatchD2D1Resource(ctx, obj, method)
 	}
 	surf := d2d1GetRenderTargetSurface(cs.hctx, rt)
+	if rt.hwnd != 0 {
+		if state := cs.hctx.HwndChildren[rt.hwnd]; state != nil {
+			rt.originX = state.x
+			rt.originY = state.y
+		}
+	}
 	switch method {
 	case 4:
 		size := ctx.Arg(1)
@@ -2485,15 +2505,13 @@ func (cs *comState) dispatchD2D1RenderTarget(ctx *ntapi.TrapContext, obj *comObj
 		}
 		return 0
 	case 22:
-		geomObj := cs.objects[ctx.Arg(1)]
-		geom, _ := geomObj.data.(*d2d1PathGeometry)
+		geom, _ := cs.objectData(ctx.Arg(1)).(*d2d1PathGeometry)
 		if geom != nil {
 			d2d1RasterizeGeometry(cs.hctx, rt, surf, geom, ctx.Arg(2), false, math.Float32frombits(uint32(ctx.Arg(3))))
 		}
 		return 0
 	case 23:
-		geomObj := cs.objects[ctx.Arg(1)]
-		geom, _ := geomObj.data.(*d2d1PathGeometry)
+		geom, _ := cs.objectData(ctx.Arg(1)).(*d2d1PathGeometry)
 		if geom != nil {
 			d2d1RasterizeGeometry(cs.hctx, rt, surf, geom, ctx.Arg(2), true, 1)
 		}
@@ -2501,8 +2519,7 @@ func (cs *comState) dispatchD2D1RenderTarget(ctx *ntapi.TrapContext, obj *comObj
 	case 24, 25:
 		return 0
 	case 26:
-		bmpObj := cs.objects[ctx.Arg(1)]
-		bmp, _ := bmpObj.data.(*d2d1Bitmap)
+		bmp, _ := cs.objectData(ctx.Arg(1)).(*d2d1Bitmap)
 		if bmp == nil || surf == nil {
 			return 0
 		}
@@ -2595,6 +2612,61 @@ func (cs *comState) dispatchD2D1RenderTarget(ctx *ntapi.TrapContext, obj *comObj
 		}
 		return 0
 	case 29:
+		glyphRunPtr := ctx.Arg(2)
+		color, ok := d2d1BrushColorRef(cs.hctx, ctx.Arg(3))
+		if glyphRunPtr == 0 || !ok || surf == nil {
+			return 0
+		}
+		fontFacePtr, _ := ctx.Mem.Read64(glyphRunPtr)
+		fontSizeBits, _ := ctx.Mem.Read32(glyphRunPtr + 8)
+		glyphCount, _ := ctx.Mem.Read32(glyphRunPtr + 12)
+		glyphIndicesPtr, _ := ctx.Mem.Read64(glyphRunPtr + 16)
+		glyphAdvancesPtr, _ := ctx.Mem.Read64(glyphRunPtr + 24)
+		glyphOffsetsPtr, _ := ctx.Mem.Read64(glyphRunPtr + 32)
+		if glyphIndicesPtr == 0 || glyphCount == 0 {
+			return 0
+		}
+		fontSize := float64(math.Float32frombits(fontSizeBits))
+		if fontSize <= 0 {
+			fontSize = 12
+		}
+		format := &dwriteTextFormat{fontFamily: "Segoe UI", fontSize: fontSize, fontWeight: dwriteFontWeightNormal}
+		if faceObj := dwriteLookupObject(fontFacePtr); faceObj != nil {
+			if face, faceOK := faceObj.data.(*dwriteFontFace); faceOK && face != nil {
+				format.fontFamily = dwriteFamilyOrDefault(face.familyName)
+				format.fontWeight = face.weight
+				format.fontStyle = face.style
+			}
+		}
+		dc := d2d1NewDC(rt, surf, color, 1)
+		if dc == nil {
+			return 0
+		}
+		dc.Font = d2d1TextFont(format)
+		baselineX, baselineY := readPackedD2D1Point(ctx.Arg(1))
+		baselineX, baselineY = d2d1ApplyPoint(rt.transform, baselineX, baselineY)
+		penX := baselineX
+		for i := uint32(0); i < glyphCount; i++ {
+			glyph, _ := ctx.Mem.Read16(glyphIndicesPtr + uint64(i)*2)
+			r := rune(glyph)
+			if r == 0 {
+				r = '?'
+			}
+			advanceOffset, ascenderOffset := float32(0), float32(0)
+			if glyphOffsetsPtr != 0 {
+				advanceBits, _ := ctx.Mem.Read32(glyphOffsetsPtr + uint64(i)*8)
+				ascenderBits, _ := ctx.Mem.Read32(glyphOffsetsPtr + uint64(i)*8 + 4)
+				advanceOffset = math.Float32frombits(advanceBits)
+				ascenderOffset = math.Float32frombits(ascenderBits)
+			}
+			dc.TextOut(int32(math.Round(float64(penX+advanceOffset))), int32(math.Round(float64(baselineY-float32(dc.Font.Ascent)-ascenderOffset))), string(r), false)
+			advance := float32(dc.Font.AveCharWidth)
+			if glyphAdvancesPtr != 0 {
+				advanceBits, _ := ctx.Mem.Read32(glyphAdvancesPtr + uint64(i)*4)
+				advance = math.Float32frombits(advanceBits)
+			}
+			penX += advance
+		}
 		return 0
 	case 30:
 		rt.transform = readD2D1Matrix(ctx.Mem, ctx.Arg(1))
@@ -2652,8 +2724,7 @@ func (cs *comState) dispatchD2D1RenderTarget(ctx *ntapi.TrapContext, obj *comObj
 		}
 		return S_OK
 	case 43:
-		stateObj := cs.objects[ctx.Arg(1)]
-		state, _ := stateObj.data.(*d2d1DrawingStateBlock)
+		state, _ := cs.objectData(ctx.Arg(1)).(*d2d1DrawingStateBlock)
 		if state == nil {
 			return E_INVALIDARG
 		}
@@ -2664,8 +2735,7 @@ func (cs *comState) dispatchD2D1RenderTarget(ctx *ntapi.TrapContext, obj *comObj
 		state.textRenderingParams = rt.textRenderingParams
 		return 0
 	case 44:
-		stateObj := cs.objects[ctx.Arg(1)]
-		state, _ := stateObj.data.(*d2d1DrawingStateBlock)
+		state, _ := cs.objectData(ctx.Arg(1)).(*d2d1DrawingStateBlock)
 		if state == nil {
 			return E_INVALIDARG
 		}
@@ -2693,7 +2763,7 @@ func (cs *comState) dispatchD2D1RenderTarget(ctx *ntapi.TrapContext, obj *comObj
 		}
 		if surf != nil {
 			w, h := d2d1RenderTargetSize(rt, surf)
-			surf.FillRect(0, 0, int32(w), int32(h), color)
+			surf.FillRect(rt.originX, rt.originY, rt.originX+int32(w), rt.originY+int32(h), color)
 		}
 		return 0
 	case 48:

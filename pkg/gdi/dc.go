@@ -14,6 +14,7 @@ type DC struct {
 	// Rendering target surface.
 	Target   *Surface
 	IsScreen bool
+	InfoOnly bool
 	Dirty    bool
 
 	// Mgr is set for screen DCs so that target() always returns the live
@@ -337,6 +338,9 @@ func (dc *DC) clipRect(x0, y0, x1, y1 int32) (int32, int32, int32, int32, bool) 
 // For screen DCs, it always fetches the live Manager.Screen so that buffer
 // replacements after a Wayland resize are picked up without re-allocating DCs.
 func (dc *DC) target() *Surface {
+	if dc.InfoOnly {
+		return &Surface{}
+	}
 	if dc.IsScreen && dc.Mgr != nil && dc.Mgr.Screen != nil {
 		return dc.Mgr.Screen
 	}

@@ -25,6 +25,79 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
+func readCryptDataBlob(ctx *ntapi.TrapContext, addr uint64) (uint32, uint64, bool) {
+	if addr == 0 {
+		return 0, 0, false
+	}
+	length, err := ctx.Mem.Read32(addr)
+	if err != nil {
+		return 0, 0, false
+	}
+	if ctx.State != nil && ctx.State.Is32 {
+		data, err := ctx.Mem.Read32(addr + 4)
+		return length, uint64(data), err == nil
+	}
+	data, err := ctx.Mem.Read64(addr + 8)
+	return length, data, err == nil
+}
+
+func writeCryptDataBlob(ctx *ntapi.TrapContext, addr uint64, length uint32, data uint64) bool {
+	if addr == 0 {
+		return false
+	}
+	pointerOffset := uint64(8)
+	pointerSize := uint64(8)
+	if ctx.State != nil && ctx.State.Is32 {
+		pointerOffset = 4
+		pointerSize = 4
+	}
+	for _, target := range []uint64{addr, addr + 3, addr + pointerOffset, addr + pointerOffset + pointerSize - 1} {
+		if _, _, err := ctx.Mem.LookupRead(target, mmu.PermWrite); err != nil {
+			return false
+		}
+	}
+	if pointerSize == 4 {
+		return ctx.Mem.Write32(addr+pointerOffset, uint32(data)) == nil && ctx.Mem.Write32(addr, length) == nil
+	}
+	return ctx.Mem.Write64(addr+pointerOffset, data) == nil && ctx.Mem.Write32(addr, length) == nil
+}
+
+func copyCryptDataBlob(ctx *ntapi.TrapContext, input, output uint64, owner *HandlerCtx) bool {
+	const maxCryptDataBlobSize = uint32(64 << 20)
+	length, data, ok := readCryptDataBlob(ctx, input)
+	if !ok {
+		return false
+	}
+	if length > maxCryptDataBlobSize || (length > 0 && data == 0) {
+		return false
+	}
+	if !writeCryptDataBlob(ctx, output, 0, 0) {
+		return false
+	}
+	if length == 0 {
+		return true
+	}
+	source, err := ctx.Mem.ReadBytes(data, int(length))
+	if err != nil {
+		return false
+	}
+	destination := ctx.Mem.Mmap(0, uint64(length), mmu.PermRead|mmu.PermWrite)
+	if destination == 0 || ctx.Mem.WriteBytes(destination, source) != nil {
+		return false
+	}
+	if owner != nil {
+		owner.trackLocalAlloc(destination, uint64(length))
+	}
+	if !writeCryptDataBlob(ctx, output, length, destination) {
+		if owner != nil {
+			owner.takeLocalAlloc(destination)
+		}
+		ctx.Mem.Munmap(destination, uint64(length))
+		return false
+	}
+	return true
+}
+
 func registerAdvapi32Handlers1(hctx *HandlerCtx) {
 	d := hctx.Disp
 	handles := hctx.Handles
@@ -1326,27 +1399,27 @@ func registerCrypt32Handlers(hctx *HandlerCtx) {
 	_ = crypt32
 
 	d.RegisterAutoStubHandler(crypt32, "CryptQueryObject", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE - no crypto
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(crypt32, "CryptMsgClose", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(crypt32, "CryptMsgGetParam", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(crypt32, "CertCloseStore", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(1) // TRUE
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(crypt32, "CertFindCertificateInStore", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // NULL - not found
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(crypt32, "CertGetCertificateContextProperty", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(0) // FALSE
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(crypt32, "CertGetNameStringW", func(ctx *ntapi.TrapContext) uint32 {
@@ -1355,7 +1428,7 @@ func registerCrypt32Handlers(hctx *HandlerCtx) {
 		if pszNameString != 0 && cchNameString > 0 {
 			ctx.Mem.Write16(pszNameString, 0)
 		}
-		ctx.SetReturn(1) // 1 char (empty string with NUL)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(crypt32, "CertNameToStrW", func(ctx *ntapi.TrapContext) uint32 {
@@ -1368,52 +1441,22 @@ func registerCrypt32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// CryptProtectData / CryptUnprotectData - pass-through (no real encryption).
+	// CryptProtectData / CryptUnprotectData pass through without encryption.
 	// CRYPT_DATA_BLOB: { cbData DWORD(4), padding(4), pbData BYTE*(8) } = 16 bytes on x64
 	d.RegisterAutoStubHandler(crypt32, "CryptProtectData", func(ctx *ntapi.TrapContext) uint32 {
-		pDataIn := ctx.Arg(0)  // DATA_BLOB *pDataIn
-		pDataOut := ctx.Arg(4) // DATA_BLOB *pDataOut
-		if pDataIn == 0 || pDataOut == 0 {
-			ctx.SetReturn(0) // FALSE
-			return 0
+		if copyCryptDataBlob(ctx, ctx.Arg(0), ctx.Arg(4), hctx) {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
 		}
-		cbData, _ := ctx.Mem.Read32(pDataIn)
-		pbData, _ := ctx.Mem.Read64(pDataIn + 8)
-		if cbData == 0 || pbData == 0 {
-			ctx.Mem.Write32(pDataOut, 0)
-			ctx.Mem.Write64(pDataOut+8, 0)
-			ctx.SetReturn(1) // TRUE
-			return 0
-		}
-		src, _ := ctx.Mem.ReadBytes(pbData, int(cbData))
-		dst := ctx.Mem.Mmap(0, uint64(cbData), mmu.PermRead|mmu.PermWrite)
-		ctx.Mem.WriteBytes(dst, src)
-		ctx.Mem.Write32(pDataOut, cbData)
-		ctx.Mem.Write64(pDataOut+8, dst)
-		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 	d.RegisterAutoStubHandler(crypt32, "CryptUnprotectData", func(ctx *ntapi.TrapContext) uint32 {
-		pDataIn := ctx.Arg(0)
-		pDataOut := ctx.Arg(4)
-		if pDataIn == 0 || pDataOut == 0 {
-			ctx.SetReturn(0) // FALSE
-			return 0
-		}
-		cbData, _ := ctx.Mem.Read32(pDataIn)
-		pbData, _ := ctx.Mem.Read64(pDataIn + 8)
-		if cbData == 0 || pbData == 0 {
-			ctx.Mem.Write32(pDataOut, 0)
-			ctx.Mem.Write64(pDataOut+8, 0)
+		if copyCryptDataBlob(ctx, ctx.Arg(0), ctx.Arg(4), hctx) {
 			ctx.SetReturn(1)
-			return 0
+		} else {
+			ctx.SetReturn(0)
 		}
-		src, _ := ctx.Mem.ReadBytes(pbData, int(cbData))
-		dst := ctx.Mem.Mmap(0, uint64(cbData), mmu.PermRead|mmu.PermWrite)
-		ctx.Mem.WriteBytes(dst, src)
-		ctx.Mem.Write32(pDataOut, cbData)
-		ctx.Mem.Write64(pDataOut+8, dst)
-		ctx.SetReturn(1) // TRUE
 		return 0
 	})
 
@@ -1741,6 +1784,13 @@ func registerAdvapi32Handlers2(hctx *HandlerCtx) {
 		return
 	}
 	_ = advapi32
+	if aclui, found := hctx.SynthByName["aclui.dll"]; found {
+		rebindOrdinalImports(hctx, aclui, "aclui.dll", map[uint16]string{2: "EditSecurity"})
+		d.RegisterAutoStubHandler(aclui, "EditSecurity", func(ctx *ntapi.TrapContext) uint32 {
+			return 0
+		})
+	}
+	registerRegeditCompatibility(hctx)
 	const (
 		processTokenHandle           uint64 = 0xF0000001
 		threadTokenHandle            uint64 = 0xF0000002

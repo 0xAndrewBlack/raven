@@ -111,31 +111,36 @@ type GUID struct {
 }
 
 var (
-	IID_IUnknown         = GUID{0x00000000, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IClassFactory    = GUID{0x00000001, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IMalloc          = GUID{0x00000002, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IDispatch        = GUID{0x00020400, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_ILockBytes       = GUID{0x0000000A, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IStorage         = GUID{0x0000000B, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IStream          = GUID{0x0000000C, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IEnumSTATSTG     = GUID{0x0000000D, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IPersist         = GUID{0x0000010C, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IPersistFile     = GUID{0x0000010B, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IEnumIDList      = GUID{0x000214F2, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IShellFolder     = GUID{0x000214E6, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IShellLinkA      = GUID{0x000214EE, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IShellLinkW      = GUID{0x000214F9, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IErrorInfo       = GUID{0x1CF2B120, 0x547D, 0x101B, [8]byte{0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19}}
-	IID_ICreateErrorInfo = GUID{0x22F03340, 0x547D, 0x101B, [8]byte{0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19}}
-	IID_ITypeInfo        = GUID{0x00020401, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_ITypeLib         = GUID{0x00020402, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	IID_IModalWindow     = GUID{0xB4DB1657, 0x70D7, 0x485E, [8]byte{0x8E, 0x3E, 0x6F, 0xCB, 0x5A, 0x5C, 0x18, 0x02}}
-	IID_IFileDialog      = GUID{0x42F85136, 0xDB7E, 0x439C, [8]byte{0x85, 0xF1, 0xE4, 0x07, 0x5D, 0x13, 0x5F, 0xC8}}
-	IID_IFileOpenDialog  = GUID{0xD57C7288, 0xD4AD, 0x4768, [8]byte{0xBE, 0x02, 0x9D, 0x96, 0x95, 0x32, 0xD9, 0x60}}
+	IID_IUnknown             = GUID{0x00000000, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IClassFactory        = GUID{0x00000001, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IMalloc              = GUID{0x00000002, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IDispatch            = GUID{0x00020400, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_ILockBytes           = GUID{0x0000000A, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IStorage             = GUID{0x0000000B, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IStream              = GUID{0x0000000C, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IEnumSTATSTG         = GUID{0x0000000D, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IPersist             = GUID{0x0000010C, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IPersistFile         = GUID{0x0000010B, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IEnumIDList          = GUID{0x000214F2, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IShellFolder         = GUID{0x000214E6, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IShellLinkA          = GUID{0x000214EE, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IShellLinkW          = GUID{0x000214F9, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IErrorInfo           = GUID{0x1CF2B120, 0x547D, 0x101B, [8]byte{0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19}}
+	IID_ICreateErrorInfo     = GUID{0x22F03340, 0x547D, 0x101B, [8]byte{0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19}}
+	IID_ITypeInfo            = GUID{0x00020401, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_ITypeLib             = GUID{0x00020402, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+	IID_IModalWindow         = GUID{0xB4DB1657, 0x70D7, 0x485E, [8]byte{0x8E, 0x3E, 0x6F, 0xCB, 0x5A, 0x5C, 0x18, 0x02}}
+	IID_IFileDialog          = GUID{0x42F85136, 0xDB7E, 0x439C, [8]byte{0x85, 0xF1, 0xE4, 0x07, 0x5D, 0x13, 0x5F, 0xC8}}
+	IID_IFileOpenDialog      = GUID{0xD57C7288, 0xD4AD, 0x4768, [8]byte{0xBE, 0x02, 0x9D, 0x96, 0x95, 0x32, 0xD9, 0x60}}
+	IID_IFileSaveDialog      = GUID{0x84BCCD23, 0x5FDE, 0x4CDB, [8]byte{0xAE, 0xA4, 0xAF, 0x64, 0xB8, 0x3D, 0x78, 0xAB}}
+	IID_IFileDialogCustomize = GUID{0xE6FDD21A, 0x163F, 0x4975, [8]byte{0x9C, 0x8C, 0xA6, 0x9F, 0x1B, 0xA3, 0x70, 0x34}}
+	IID_IShellItem           = GUID{0x43826D1E, 0xE718, 0x42EE, [8]byte{0xBC, 0x55, 0xA1, 0xE2, 0x61, 0xC3, 0x7B, 0xFE}}
+	IID_IShellItemArray      = GUID{0xB63EA76D, 0x1F85, 0x456F, [8]byte{0xA1, 0x9C, 0x48, 0x15, 0x9E, 0xFA, 0x85, 0x8B}}
 
 	CLSID_StdComponentCategoriesMgr = GUID{0x0002E005, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
 	CLSID_ShellLink                 = GUID{0x00021401, 0x0000, 0x0000, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
 	CLSID_FileOpenDialog            = GUID{0xDC1C5A9C, 0xE88A, 0x4DDE, [8]byte{0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7}}
+	CLSID_FileSaveDialog            = GUID{0xC0B4E2F3, 0xBA21, 0x4773, [8]byte{0x8D, 0xBA, 0x33, 0x5E, 0xC9, 0x46, 0xEB, 0x8B}}
 	CLSID_MemoryAllocator           = GUID{0x1E651CC0, 0xB199, 0x11D0, [8]byte{0x82, 0x12, 0x00, 0xC0, 0x4F, 0xC3, 0x2C, 0x45}}
 )
 
@@ -143,6 +148,15 @@ type hresultError uint32
 
 func (e hresultError) Error() string {
 	return fmt.Sprintf("HRESULT 0x%08X", uint32(e))
+}
+
+// objectData returns the payload of a tracked COM object, or nil when the
+// handle is unknown, so callers can type-assert without a nil deref.
+func (cs *comState) objectData(handle uint64) any {
+	if obj := cs.objects[handle]; obj != nil {
+		return obj.data
+	}
+	return nil
 }
 
 type comObject struct {
@@ -248,6 +262,7 @@ type memStream struct {
 }
 
 type fileOpenDialogData struct {
+	saving          bool
 	title           string
 	fileName        string
 	okButtonLabel   string
@@ -257,6 +272,16 @@ type fileOpenDialogData struct {
 	fileTypeIndex   uint32
 	clientGUID      GUID
 	nextAdviseToken uint32
+	selectedPaths   []string
+	checkStates     map[uint32]bool
+}
+
+type shellItemData struct {
+	path string
+}
+
+type shellItemArrayData struct {
+	paths []string
 }
 
 type fileStream struct {
@@ -366,6 +391,7 @@ func newCOMState(hctx *HandlerCtx) *comState {
 	})
 	cs.registerClassFactory(CLSID_ShellLink, cs.createShellLinkObjects)
 	cs.registerClassFactory(CLSID_FileOpenDialog, cs.createFileOpenDialogObject)
+	cs.registerClassFactory(CLSID_FileSaveDialog, cs.createFileSaveDialogObject)
 	cs.registerClassFactory(CLSID_MemoryAllocator, cs.createMemoryAllocatorObject)
 	registerMSXMLClassFactories(cs)
 	registerWICClassFactories(cs)
@@ -1737,9 +1763,11 @@ func streamModTime(data interface{}) time.Time {
 }
 
 func (cs *comState) currentThreadToken() uint64 {
-	if cs != nil && cs.hctx != nil && cs.hctx.CurrentCPU != nil {
-		if tls := cs.hctx.CurrentCPU.GetTLS(); tls != 0 {
-			return tls
+	if cs != nil && cs.hctx != nil {
+		if cpu := cs.hctx.GetCurrentCPU(); cpu != nil {
+			if tls := cpu.GetTLS(); tls != 0 {
+				return tls
+			}
 		}
 	}
 	return 1
@@ -2056,21 +2084,72 @@ func (cs *comState) createMemoryStreamObject(buffer *memoryBuffer, name string) 
 }
 
 func (cs *comState) createFileOpenDialogObject(iid GUID) (*comObject, error) {
+	return cs.createFileDialogObject(iid, false)
+}
+
+func (cs *comState) createFileSaveDialogObject(iid GUID) (*comObject, error) {
+	return cs.createFileDialogObject(iid, true)
+}
+
+func (cs *comState) createFileDialogObject(iid GUID, saving bool) (*comObject, error) {
 	switch {
-	case guidEqual(iid, IID_IUnknown), guidEqual(iid, IID_IModalWindow), guidEqual(iid, IID_IFileDialog), guidEqual(iid, IID_IFileOpenDialog):
+	case guidEqual(iid, IID_IUnknown), guidEqual(iid, IID_IModalWindow), guidEqual(iid, IID_IFileDialog):
+	case !saving && guidEqual(iid, IID_IFileOpenDialog):
+	case saving && guidEqual(iid, IID_IFileSaveDialog):
 	default:
 		return nil, hresultError(E_NOINTERFACE)
 	}
-	obj, err := cs.createGuestObject(cs.mem, IID_IFileOpenDialog, 27)
+	primaryIID := IID_IFileOpenDialog
+	methodCount := 29
+	clsid := CLSID_FileOpenDialog
+	if saving {
+		primaryIID = IID_IFileSaveDialog
+		methodCount = 27
+		clsid = CLSID_FileSaveDialog
+	}
+	obj, err := cs.createGuestObject(cs.mem, primaryIID, methodCount)
 	if err != nil {
 		return nil, err
 	}
-	obj.clsid = CLSID_FileOpenDialog
+	obj.clsid = clsid
 	obj.kind = "file-open-dialog"
-	obj.data = &fileOpenDialogData{fileTypeIndex: 1}
+	data := &fileOpenDialogData{saving: saving, fileTypeIndex: 1, checkStates: make(map[uint32]bool)}
+	obj.data = data
 	obj.supportedIIDs[IID_IModalWindow] = true
 	obj.supportedIIDs[IID_IFileDialog] = true
-	obj.supportedIIDs[IID_IFileOpenDialog] = true
+	obj.supportedIIDs[primaryIID] = true
+	customize, err := cs.createGuestObject(cs.mem, IID_IFileDialogCustomize, 28)
+	if err != nil {
+		return nil, err
+	}
+	customize.kind = "file-dialog-customize"
+	customize.data = data
+	customize.supportedIIDs[IID_IFileDialogCustomize] = true
+	obj.altInterfaces[IID_IFileDialogCustomize] = customize.objectAddr
+	customize.altInterfaces[primaryIID] = obj.objectAddr
+	customize.altInterfaces[IID_IFileDialog] = obj.objectAddr
+	return obj, nil
+}
+
+func (cs *comState) createShellItemObject(path string) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IShellItem, 8)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "shell-item"
+	obj.data = &shellItemData{path: path}
+	obj.supportedIIDs[IID_IShellItem] = true
+	return obj, nil
+}
+
+func (cs *comState) createShellItemArrayObject(paths []string) (*comObject, error) {
+	obj, err := cs.createGuestObject(cs.mem, IID_IShellItemArray, 10)
+	if err != nil {
+		return nil, err
+	}
+	obj.kind = "shell-item-array"
+	obj.data = &shellItemArrayData{paths: append([]string(nil), paths...)}
+	obj.supportedIIDs[IID_IShellItemArray] = true
 	return obj, nil
 }
 
@@ -2380,7 +2459,29 @@ func (cs *comState) dispatchFileOpenDialog(ctx *ntapi.TrapContext, obj *comObjec
 	}
 	switch method {
 	case 3:
-		return 0x800704C7
+		var selected string
+		var ok bool
+		if data.saving {
+			selected, ok = saveFileDialog("", nil, data.title, data.fileName)
+		} else {
+			selected, ok = openFileDialog("", nil, data.title)
+		}
+		if !ok || strings.TrimSpace(selected) == "" {
+			return 0x800704C7
+		}
+		dialogName := "IFileOpenDialog"
+		if data.saving {
+			dialogName = "IFileSaveDialog"
+		}
+		hostPath := normalizeDialogHostPath(selected)
+		guestPath := normalizeDialogGuestPath(hostPath)
+		if err := prepareDialogGuestFile(cs.hctx, ctx.FS, hostPath, guestPath, data.saving); err != nil {
+			ravelog.Logf("[com] %s::Show failed path=%q: %v\n", dialogName, hostPath, err)
+			return hresultFromError(err)
+		}
+		data.selectedPaths = []string{guestPath}
+		ravelog.Logf("[com] %s::Show selected %q\n", dialogName, data.selectedPaths[0])
+		return S_OK
 	case 4:
 		return S_OK
 	case 5:
@@ -2416,10 +2517,12 @@ func (cs *comState) dispatchFileOpenDialog(ctx *ntapi.TrapContext, obj *comObjec
 		}
 		ctx.Mem.Write32(pfos, data.options)
 		return S_OK
-	case 14:
-		data.fileName = readGuestUTF16String(cs.mem, ctx.Arg(1))
+	case 11, 12, 13, 14:
 		return S_OK
 	case 15:
+		data.fileName = readGuestUTF16String(cs.mem, ctx.Arg(1))
+		return S_OK
+	case 16:
 		pszName := ctx.Arg(1)
 		if pszName == 0 {
 			return E_POINTER
@@ -2431,23 +2534,168 @@ func (cs *comState) dispatchFileOpenDialog(ctx *ntapi.TrapContext, obj *comObjec
 		}
 		ctx.Mem.Write64(pszName, ptr)
 		return S_OK
-	case 16:
+	case 17:
 		data.title = readGuestUTF16String(cs.mem, ctx.Arg(1))
 		return S_OK
-	case 17:
+	case 18:
 		data.okButtonLabel = readGuestUTF16String(cs.mem, ctx.Arg(1))
 		return S_OK
-	case 18:
+	case 19:
 		data.fileNameLabel = readGuestUTF16String(cs.mem, ctx.Arg(1))
 		return S_OK
+	case 20:
+		return cs.writeFileDialogShellItem(ctx, data, false)
 	case 21:
-		data.defaultExt = readGuestUTF16String(cs.mem, ctx.Arg(1))
 		return S_OK
 	case 22:
+		data.defaultExt = readGuestUTF16String(cs.mem, ctx.Arg(1))
 		return S_OK
 	case 23:
+		return S_OK
+	case 24:
+		if guidPtr := ctx.Arg(1); guidPtr != 0 {
+			data.clientGUID = readGUID(ctx.Mem, guidPtr)
+		}
+		return S_OK
+	case 25:
 		data.clientGUID = GUID{}
 		data.nextAdviseToken = 0
+		return S_OK
+	case 26:
+		return S_OK
+	case 27, 28:
+		return cs.writeFileDialogShellItem(ctx, data, true)
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchFileDialogCustomize(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	data, _ := obj.data.(*fileOpenDialogData)
+	if data == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 8:
+		data.checkStates[uint32(ctx.Arg(1))] = ctx.Arg(3) != 0
+		return S_OK
+	case 17:
+		checked := ctx.Arg(2)
+		if checked == 0 {
+			return E_POINTER
+		}
+		value := uint32(0)
+		if data.checkStates[uint32(ctx.Arg(1))] {
+			value = 1
+		}
+		ctx.Mem.Write32(checked, value)
+		return S_OK
+	case 18:
+		data.checkStates[uint32(ctx.Arg(1))] = ctx.Arg(2) != 0
+		return S_OK
+	case 13, 22, 24:
+		value := ctx.Arg(2)
+		if value == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write32(value, 0)
+		return S_OK
+	case 15:
+		value := ctx.Arg(2)
+		if value == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(value, cs.allocTaskMemUTF16String(""))
+		return S_OK
+	default:
+		return S_OK
+	}
+}
+
+func (cs *comState) writeFileDialogShellItem(ctx *ntapi.TrapContext, data *fileOpenDialogData, array bool) uint32 {
+	result := ctx.Arg(1)
+	if result == 0 {
+		return E_POINTER
+	}
+	ctx.Mem.Write64(result, 0)
+	if len(data.selectedPaths) == 0 {
+		return E_FAIL
+	}
+	var (
+		obj *comObject
+		err error
+	)
+	if array {
+		obj, err = cs.createShellItemArrayObject(data.selectedPaths)
+	} else {
+		obj, err = cs.createShellItemObject(data.selectedPaths[0])
+	}
+	if err != nil {
+		return E_OUTOFMEMORY
+	}
+	ctx.Mem.Write64(result, obj.objectAddr)
+	return S_OK
+}
+
+func (cs *comState) dispatchShellItem(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	data, _ := obj.data.(*shellItemData)
+	if data == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 5:
+		result := ctx.Arg(2)
+		if result == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(result, 0)
+		guestPath := normalizeDialogGuestPath(data.path)
+		ptr := cs.allocTaskMemUTF16String(guestPath)
+		if ptr == 0 && guestPath != "" {
+			return E_OUTOFMEMORY
+		}
+		ctx.Mem.Write64(result, ptr)
+		return S_OK
+	case 6:
+		attrs := ctx.Arg(2)
+		if attrs == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write32(attrs, 0)
+		return S_OK
+	default:
+		return E_NOTIMPL
+	}
+}
+
+func (cs *comState) dispatchShellItemArray(ctx *ntapi.TrapContext, obj *comObject, method int) uint32 {
+	data, _ := obj.data.(*shellItemArrayData)
+	if data == nil {
+		return E_FAIL
+	}
+	switch method {
+	case 7:
+		count := ctx.Arg(1)
+		if count == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write32(count, uint32(len(data.paths)))
+		return S_OK
+	case 8:
+		index := int(ctx.Arg(1))
+		result := ctx.Arg(2)
+		if result == 0 {
+			return E_POINTER
+		}
+		ctx.Mem.Write64(result, 0)
+		if index < 0 || index >= len(data.paths) {
+			return E_INVALIDARG
+		}
+		item, err := cs.createShellItemObject(data.paths[index])
+		if err != nil {
+			return E_OUTOFMEMORY
+		}
+		ctx.Mem.Write64(result, item.objectAddr)
 		return S_OK
 	default:
 		return E_NOTIMPL
@@ -3671,6 +3919,12 @@ func (cs *comState) dispatchObjectMethod(ctx *ntapi.TrapContext, method int) uin
 		return cs.dispatchIStream(ctx, obj, method)
 	case "file-open-dialog":
 		return cs.dispatchFileOpenDialog(ctx, obj, method)
+	case "file-dialog-customize":
+		return cs.dispatchFileDialogCustomize(ctx, obj, method)
+	case "shell-item":
+		return cs.dispatchShellItem(ctx, obj, method)
+	case "shell-item-array":
+		return cs.dispatchShellItemArray(ctx, obj, method)
 	case "ilockbytes":
 		return cs.dispatchILockBytes(ctx, obj, method)
 	case "istorage":

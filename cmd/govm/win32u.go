@@ -11,6 +11,7 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 	"github.com/mirkobrombin/Raven/pkg/win32"
+	"github.com/mirkobrombin/Raven/pkg/x64"
 )
 
 type win32uLayeredAttrs struct {
@@ -27,6 +28,53 @@ var (
 	win32uLayeredWindows = map[uint64]win32uLayeredAttrs{}
 )
 
+func installWin32uUserCallbackRuntime(hctx *HandlerCtx) ntapi.UserCallbackRuntime {
+	if hctx == nil || hctx.ProcState == nil {
+		return ntapi.UserCallbackRuntime{}
+	}
+	ntdll := hctx.SynthByName["ntdll.dll"]
+	if ntdll == nil {
+		return ntapi.UserCallbackRuntime{}
+	}
+	runtime, err := ntapi.InstallUserCallbackRuntime(hctx.Mem, hctx.ProcState, ntdll.Exports["NtCallbackReturn"])
+	if err != nil {
+		return ntapi.UserCallbackRuntime{}
+	}
+	return runtime
+}
+
+func beginWindowProcUserCallback(d *ntapi.Dispatcher, runtime ntapi.UserCallbackRuntime, ctx *ntapi.TrapContext, wndProc, hwnd uint64, message uint32, wParam, lParam uint64) bool {
+	if d == nil || runtime.Dispatcher == 0 || ctx == nil {
+		return false
+	}
+	cpu, ok := ctx.CPU.(*x64.CPU)
+	if !ok {
+		return false
+	}
+	is32 := ctx.State != nil && ctx.State.Is32
+	input := ntapi.EncodeWindowProcCallbackArguments(is32, ntapi.WindowProcCallbackArguments{
+		Proc:   wndProc,
+		Wnd:    hwnd,
+		Msg:    message,
+		WParam: wParam,
+		LParam: lParam,
+	})
+	_, err := d.BeginUserCallbackWithCompletion(cpu, runtime.Dispatcher, ntapi.User32CallbackWindowProc, input,
+		func(cpu *x64.CPU, callbackReturn ntapi.UserCallbackReturn) {
+			result, readErr := ntapi.ReadWindowProcCallbackResult(ctx.Mem, is32, callbackReturn)
+			if readErr != nil || callbackReturn.Status != ntapi.StatusSuccess {
+				result = 0
+			}
+			cpu.SetSyscallReturn(result)
+		})
+	if err != nil {
+		return false
+	}
+	ctx.ReturnOverridden = true
+	ctx.PCRedirected = true
+	return true
+}
+
 func registerWin32UHandlers(hctx *HandlerCtx) {
 	dll, ok := hctx.SynthByName["win32u.dll"]
 	if !ok {
@@ -42,6 +90,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 	readGuestUTF16N := hctx.ReadGuestUTF16N
 	clientAreaOrigin := hctx.ClientAreaOrigin
 	queuePaint := hctx.QueuePaint
+	userCallbacks := installWin32uUserCallbackRuntime(hctx)
 
 	nextDynID := uint32(ntapi.DynExportIDBase + 0x600)
 	reg := func(name string, handler ntapi.TrapHandler) {
@@ -239,19 +288,32 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		}
 		return val
 	}
-	writeMsg := func(pMsg, hwnd uint64, message uint32, wParam, lParam uint64) {
+	writeMsg := func(ctx *ntapi.TrapContext, pMsg uint64, msg queuedMsg) bool {
 		if pMsg == 0 {
+			return false
+		}
+		if !writeQueuedMessage(mem, pMsg, ctx.State != nil && ctx.State.Is32, msg) {
+			return false
+		}
+		hctx.MessageMetadata.delivered(ctx.CPU, msg)
+		return true
+	}
+	readMsg := func(ctx *ntapi.TrapContext, pMsg uint64) (hwnd uint64, message uint32, wParam, lParam uint64) {
+		if ctx.State != nil && ctx.State.Is32 {
+			value, _ := mem.Read32(pMsg)
+			hwnd = uint64(value)
+			message, _ = mem.Read32(pMsg + 4)
+			value, _ = mem.Read32(pMsg + 8)
+			wParam = uint64(value)
+			value, _ = mem.Read32(pMsg + 12)
+			lParam = uint64(value)
 			return
 		}
-		mem.Write64(pMsg, hwnd)
-		mem.Write32(pMsg+8, message)
-		mem.Write32(pMsg+12, 0)
-		mem.Write64(pMsg+16, wParam)
-		mem.Write64(pMsg+24, lParam)
-		mem.Write32(pMsg+32, 0)
-		mem.Write32(pMsg+36, uint32(win32uCursorPosX))
-		mem.Write32(pMsg+40, uint32(win32uCursorPosY))
-		mem.Write32(pMsg+44, 0)
+		hwnd, _ = mem.Read64(pMsg)
+		message, _ = mem.Read32(pMsg + 8)
+		wParam, _ = mem.Read64(pMsg + 16)
+		lParam, _ = mem.Read64(pMsg + 24)
+		return
 	}
 	absoluteClientRect := func(hwnd uint64) (int32, int32, int32, int32) {
 		ox, oy := clientAreaOrigin(hwnd)
@@ -1615,7 +1677,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 	})
 	reg("NtUserGetMessage", func(ctx *ntapi.TrapContext) uint32 {
 		pMsg := ctx.Arg(0)
-		if len(hctx.MsgQueue) == 0 {
+		if hctx.queueCount(ctx.CPU) == 0 {
 			for hwnd, invalid := range hctx.WinInvalid {
 				if invalid {
 					queuePaint(hwnd)
@@ -1623,33 +1685,39 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 				}
 			}
 		}
-		if len(hctx.MsgQueue) == 0 {
+		m, delivered := hctx.MsgQueue.deliver(ctx.CPU, nil,
+			func(queuedMsg) bool { return true },
+			func(message queuedMsg) bool {
+				return writeMsg(ctx, pMsg, message)
+			})
+		if !delivered {
 			if hctx.WlDisplay == nil {
-				writeMsg(pMsg, hctx.MainHWND, 0x12, 0, 0)
+				writeMsg(ctx, pMsg, newQueuedMsg(hctx, hctx.MainHWND, 0x12, 0, 0))
 				ctx.SetReturn(0)
 				return 0
 			}
 			ctx.SetReturn(0)
 			return 0
 		}
-		m := hctx.MsgQueue[0]
-		hctx.MsgQueue = hctx.MsgQueue[1:]
-		writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
-		ctx.SetReturn(1)
+		if m.message == 0x0012 {
+			ctx.SetReturn(0)
+		} else {
+			ctx.SetReturn(1)
+		}
 		return 0
 	})
 	reg("NtUserPeekMessage", func(ctx *ntapi.TrapContext) uint32 {
 		pMsg := ctx.Arg(0)
 		remove := ctx.Arg(4)&0x1 != 0
-		if len(hctx.MsgQueue) == 0 {
+		_, delivered := hctx.MsgQueue.deliver(ctx.CPU, nil,
+			func(message queuedMsg) bool { return remove && message.message != 0x000F },
+			func(message queuedMsg) bool {
+				return writeMsg(ctx, pMsg, message)
+			})
+		if !delivered {
 			ctx.SetReturn(0)
 			return 0
 		}
-		m := hctx.MsgQueue[0]
-		if remove {
-			hctx.MsgQueue = hctx.MsgQueue[1:]
-		}
-		writeMsg(pMsg, m.hwnd, m.message, m.wParam, m.lParam)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -1659,10 +1727,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		hwnd, _ := mem.Read64(pMsg)
-		message, _ := mem.Read32(pMsg + 8)
-		wParam, _ := mem.Read64(pMsg + 16)
-		lParam, _ := mem.Read64(pMsg + 24)
+		hwnd, message, wParam, lParam := readMsg(ctx, pMsg)
 		if result, handled := hctx.BuiltinWndProc(hwnd, message, wParam, lParam); handled {
 			ctx.SetReturn(result)
 			return 0
@@ -1670,6 +1735,22 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		wndProc := hctx.HwndWndProc[hwnd]
 		if wndProc == 0 {
 			ctx.SetReturn(0)
+			return 0
+		}
+		if beginWindowProcUserCallback(d, userCallbacks, ctx, wndProc, hwnd, message, wParam, lParam) {
+			return 0
+		}
+		if ctx.State != nil && ctx.State.Is32 {
+			rr, readOK := ctx.CPU.(ntapi.RegisterReader)
+			rw, writeOK := ctx.CPU.(ntapi.RegisterWriter)
+			if !readOK || !writeOK {
+				ctx.SetReturn(0)
+				return 0
+			}
+			sp := rr.ReadReg(4)
+			returnPC, _ := mem.Read32(sp)
+			rw.WriteReg(4, sp+8)
+			hctx.SyncCallWndProc(ctx, wndProc, hwnd, message, wParam, lParam, uint64(returnPC))
 			return 0
 		}
 		rw, ok := ctx.CPU.(ntapi.RegisterWriter)
@@ -1688,10 +1769,15 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 	})
 	reg("NtUserPostMessage", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
-		if hwnd == 0 || hwnd == 0xFFFF || hwnd == 0xFFFFFFFFFFFFFFFF {
+		if hwnd == 0 {
+			hctx.enqueueMessage(ctx.CPU, newQueuedMsg(hctx, 0, uint32(ctx.Arg(1)), ctx.Arg(2), ctx.Arg(3)))
+			ctx.SetReturn(1)
+			return 0
+		}
+		if hwnd == 0xFFFF || hwnd == 0xFFFFFFFFFFFFFFFF {
 			hwnd = hctx.MainHWND
 		}
-		hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd: hwnd, message: uint32(ctx.Arg(1)), wParam: ctx.Arg(2), lParam: ctx.Arg(3)})
+		hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, uint32(ctx.Arg(1)), ctx.Arg(2), ctx.Arg(3)))
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -1714,7 +1800,8 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 				ctx.SetReturn(0)
 				return 0
 			}
-			hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+			syncStack := hctx.syncStack(ctx)
+			*syncStack = append(*syncStack, syncDispatchFrame{
 				queue:               nil,
 				retAddr:             retAddr,
 				hwnd:                hwnd,
@@ -1732,7 +1819,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			ctx.PCRedirected = true
 			return 0
 		}
-		hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd: hwnd, message: msg, wParam: wParam, lParam: lParam})
+		hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, msg, wParam, lParam))
 		ctx.SetReturn(0)
 		return 0
 	}
@@ -1752,7 +1839,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 	})
 	reg("NtUserMsgWaitForMultipleObjectsEx", func(ctx *ntapi.TrapContext) uint32 {
 		nCount := uint32(ctx.Arg(0))
-		if len(hctx.MsgQueue) > 0 {
+		if hctx.queueCount(ctx.CPU) > 0 {
 			ctx.SetReturn(uint64(nCount))
 		} else {
 			ctx.SetReturn(0)
@@ -1954,19 +2041,13 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	reg("NtUserGetSystemMetrics", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow != nil {
-			win32.ScreenWidth = hctx.WlWindow.Width
-			win32.ScreenHeight = hctx.WlWindow.Height
-		}
 		ctx.SetReturn(uint64(win32.GetSystemMetrics(int(ctx.Arg(0)))))
 		return 0
 	})
 	reg("NtUserGetSystemMetricsForDpi", func(ctx *ntapi.TrapContext) uint32 {
-		if hctx.WlWindow != nil {
-			win32.ScreenWidth = hctx.WlWindow.Width
-			win32.ScreenHeight = hctx.WlWindow.Height
-		}
-		ctx.SetReturn(uint64(win32.GetSystemMetrics(int(ctx.Arg(0)))))
+		index := int(ctx.Arg(0))
+		dpi := uint32(ctx.Arg(1))
+		ctx.SetReturn(uint64(win32.GetSystemMetricsForDPI(index, dpi)))
 		return 0
 	})
 	reg("NtUserLoadImage", func(ctx *ntapi.TrapContext) uint32 {
@@ -2012,8 +2093,8 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 				if item.flags&(0x0800|0x0001|0x0002) != 0 {
 					continue
 				}
-				if item.flags&0x0010 != 0 && len(item.submenu) > 0 {
-					for _, sub := range item.submenu {
+				if submenu := item.submenuItems(); item.flags&0x0010 != 0 && len(submenu) > 0 {
+					for _, sub := range submenu {
 						if sub.flags&(0x0800|0x0001|0x0002) == 0 && sub.id != 0 {
 							selected = sub.id
 							break
@@ -2032,7 +2113,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			return 0
 		}
 		if selected != 0 {
-			hctx.MsgQueue = append(hctx.MsgQueue, queuedMsg{hwnd: hwndOwner, message: 0x0111, wParam: selected})
+			hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwndOwner, 0x0111, selected, 0))
 		}
 		ctx.SetReturn(1)
 		return 0

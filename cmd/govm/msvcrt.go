@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -76,7 +77,8 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 		for _, fp := range fns[1:] {
 			queue = append(queue, syncDispatch{wndProc: fp})
 		}
-		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+		syncStack := hctx.syncStack(ctx)
+		*syncStack = append(*syncStack, syncDispatchFrame{
 			queue:   queue,
 			retAddr: retAddr,
 			hwnd:    0,
@@ -1355,6 +1357,13 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 
 	// _controlfp_s: control floating-point precision and rounding
 	var msvcrtFpControl uint64 = 0x8001F // default: MCW_EM | _RC_NEAR
+	d.RegisterAutoStubHandler(msvcrt, "_controlfp", func(ctx *ntapi.TrapContext) uint32 {
+		newControl := ctx.Arg(0)
+		mask := ctx.Arg(1)
+		msvcrtFpControl = (msvcrtFpControl &^ mask) | (newControl & mask)
+		ctx.SetReturn(msvcrtFpControl)
+		return 0
+	})
 	d.RegisterAutoStubHandler(msvcrt, "_controlfp_s", func(ctx *ntapi.TrapContext) uint32 {
 		currentControl := ctx.Arg(0)
 		newControl := ctx.Arg(1)
@@ -1369,6 +1378,17 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 
 	// _set_fmode: set default file translation mode
 	var msvcrtFmode uint32 = 0x8000 // _O_BINARY
+	var msvcrtCommodeSlot uint64
+	d.RegisterAutoStubHandler(msvcrt, "__p__commode", func(ctx *ntapi.TrapContext) uint32 {
+		if msvcrtCommodeSlot == 0 {
+			msvcrtCommodeSlot = mem.Mmap(0, 4, mmu.PermRead|mmu.PermWrite)
+			if msvcrtCommodeSlot != 0 {
+				mem.Write32(msvcrtCommodeSlot, 0)
+			}
+		}
+		ctx.SetReturn(msvcrtCommodeSlot)
+		return 0
+	})
 	d.RegisterAutoStubHandler(msvcrt, "_set_fmode", func(ctx *ntapi.TrapContext) uint32 {
 		msvcrtFmode = uint32(ctx.Arg(0))
 		ctx.SetReturn(0)
@@ -1409,19 +1429,22 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 
 	// __p__wcmdln: return wchar_t** pointer to _wcmdln (wide command line)
 	var wcmdlnSlot uint64
+	var wcmdlnMu sync.Mutex
 	d.RegisterAutoStubHandler(msvcrt, "__p__wcmdln", func(ctx *ntapi.TrapContext) uint32 {
+		wcmdlnMu.Lock()
+		defer wcmdlnMu.Unlock()
 		if wcmdlnSlot == 0 {
-			// encode command line as UTF-16LE + null terminator
-			cmdW := make([]byte, (len(hctx.CmdLine)+1)*2)
-			for i, c := range hctx.CmdLine {
-				cmdW[i*2] = byte(c)
-			}
-			base := mem.Mmap(0, uint64(len(cmdW)+8), mmu.PermRead|mmu.PermWrite)
+			cmdW := utf16Encode(hctx.CmdLine)
+			strSize := uint64(len(cmdW)+1) * 2
+			base := mem.Mmap(0, strSize+8, mmu.PermRead|mmu.PermWrite)
 			if base != 0 {
-				mem.WriteBytes(base, cmdW)
+				for i, unit := range cmdW {
+					mem.Write16(base+uint64(i)*2, unit)
+				}
+				mem.Write16(base+uint64(len(cmdW))*2, 0)
 				strAddr := base
-				wcmdlnSlot = base + uint64(len(cmdW)+3)&^3
-				if wcmdlnSlot < 0x100000000 {
+				wcmdlnSlot = (base + strSize + 7) &^ 7
+				if ctx.State != nil && ctx.State.Is32 {
 					mem.Write32(wcmdlnSlot, uint32(strAddr))
 				} else {
 					mem.Write64(wcmdlnSlot, strAddr)
@@ -1429,6 +1452,19 @@ func registerMsvcrtHandlers(hctx *HandlerCtx) {
 			}
 		}
 		ctx.SetReturn(wcmdlnSlot)
+		return 0
+	})
+
+	var wargvSlot uint64
+	var wargvMu sync.Mutex
+	d.RegisterAutoStubHandler(msvcrt, "__p___wargv", func(ctx *ntapi.TrapContext) uint32 {
+		wargvMu.Lock()
+		defer wargvMu.Unlock()
+		if wargvSlot == 0 {
+			is32 := ctx.State != nil && ctx.State.Is32
+			wargvSlot = allocWideArgv(mem, argv, is32)
+		}
+		ctx.SetReturn(wargvSlot)
 		return 0
 	})
 

@@ -65,6 +65,9 @@ func CreateInstance(appName string, enableValidation bool) (VkInstance, VkResult
 		return 0, res
 	}
 	if err := LoadInstanceFuncs(instance); err != nil {
+		if procs.vkDestroyInstance != 0 {
+			callVoid(procs.vkDestroyInstance, uintptr(instance), 0)
+		}
 		return 0, VK_ERROR_INITIALIZATION_FAILED
 	}
 	return instance, VK_SUCCESS
@@ -91,7 +94,6 @@ func PickPhysicalDevice(instance VkInstance) (VkPhysicalDevice, VkResult) {
 	for _, dev := range devices {
 		switch physicalDeviceType(dev) {
 		case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
-			activePhysicalDevice = dev
 			return dev, VK_SUCCESS
 		case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
 			if integrated == 0 {
@@ -101,10 +103,8 @@ func PickPhysicalDevice(instance VkInstance) (VkPhysicalDevice, VkResult) {
 	}
 
 	if integrated != 0 {
-		activePhysicalDevice = integrated
 		return integrated, VK_SUCCESS
 	}
-	activePhysicalDevice = devices[0]
 	return devices[0], VK_SUCCESS
 }
 
@@ -149,6 +149,9 @@ func CreateDevice(physDev VkPhysicalDevice, queueFamilyIdx uint32) (VkDevice, Vk
 		return 0, 0, res
 	}
 	if err := LoadDeviceFuncs(device); err != nil {
+		if procs.vkDestroyDevice != 0 {
+			callVoid(procs.vkDestroyDevice, uintptr(device), 0)
+		}
 		return 0, 0, VK_ERROR_INITIALIZATION_FAILED
 	}
 	enabledExts := make(map[string]struct{}, len(extensions))
@@ -159,9 +162,31 @@ func CreateDevice(physDev VkPhysicalDevice, queueFamilyIdx uint32) (VkDevice, Vk
 
 	var queue VkQueue
 	callVoid(procs.vkGetDeviceQueue, uintptr(device), uintptr(queueFamilyIdx), 0, uintptr(unsafe.Pointer(&queue)))
-	activePhysicalDevice = physDev
 	devicePhysicalMap.Store(device, physDev)
 	return device, queue, VK_SUCCESS
+}
+
+func DeviceWaitIdle(device VkDevice) VkResult {
+	if device == 0 {
+		return VK_SUCCESS
+	}
+	return callResult(procs.vkDeviceWaitIdle, uintptr(device))
+}
+
+func DestroyDevice(device VkDevice) {
+	if device == 0 {
+		return
+	}
+	devicePhysicalMap.Delete(device)
+	deviceExtensionMap.Delete(device)
+	deviceMemoryFdProc.Delete(device)
+	callVoid(procs.vkDestroyDevice, uintptr(device), 0)
+}
+
+func DestroyInstance(instance VkInstance) {
+	if instance != 0 {
+		callVoid(procs.vkDestroyInstance, uintptr(instance), 0)
+	}
 }
 
 func FindGraphicsQueueFamily(physDev VkPhysicalDevice) uint32 {

@@ -176,6 +176,9 @@ const (
 	VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO        VkStructureType = 27
 	VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO             VkStructureType = 28
 	VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO               VkStructureType = 30
+	VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO         VkStructureType = 32
+	VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO               VkStructureType = 33
+	VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO              VkStructureType = 34
 	VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET                      VkStructureType = 35
 	VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO                   VkStructureType = 37
 	VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO                   VkStructureType = 38
@@ -985,6 +988,44 @@ type VkDescriptorBufferInfo struct {
 	Buffer VkBuffer
 	Offset VkDeviceSize
 	Range  VkDeviceSize
+}
+
+type VkDescriptorSetLayoutBinding struct {
+	Binding            uint32
+	DescriptorType     VkDescriptorType
+	DescriptorCount    uint32
+	StageFlags         VkShaderStageFlags
+	PImmutableSamplers *VkSampler
+}
+
+type VkDescriptorSetLayoutCreateInfo struct {
+	SType        VkStructureType
+	PNext        unsafe.Pointer
+	Flags        VkDescriptorSetLayoutCreateFlags
+	BindingCount uint32
+	PBindings    *VkDescriptorSetLayoutBinding
+}
+
+type VkDescriptorPoolSize struct {
+	Type            VkDescriptorType
+	DescriptorCount uint32
+}
+
+type VkDescriptorPoolCreateInfo struct {
+	SType         VkStructureType
+	PNext         unsafe.Pointer
+	Flags         VkDescriptorPoolCreateFlags
+	MaxSets       uint32
+	PoolSizeCount uint32
+	PPoolSizes    *VkDescriptorPoolSize
+}
+
+type VkDescriptorSetAllocateInfo struct {
+	SType              VkStructureType
+	PNext              unsafe.Pointer
+	DescriptorPool     VkDescriptorPool
+	DescriptorSetCount uint32
+	PSetLayouts        *VkDescriptorSetLayout
 }
 
 type VkWriteDescriptorSet struct {

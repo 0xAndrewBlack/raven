@@ -6,12 +6,19 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"strings"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 )
+
+// errIsUnimplemented reports whether err reflects an opcode the interpreter
+// does not implement (as opposed to a genuine guest memory fault).
+func errIsUnimplemented(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unimplemented")
+}
 
 // Register indices (matching AMD64 encoding).
 const (
@@ -37,6 +44,7 @@ const (
 const (
 	flagCF = 1 << 0
 	flagPF = 1 << 2
+	flagAF = 1 << 4
 	flagZF = 1 << 6
 	flagSF = 1 << 7
 	flagDF = 1 << 10
@@ -62,9 +70,12 @@ type CPU struct {
 	syscall arch.SyscallHandler
 	vmcall  arch.SyscallHandler // handler for vmcall (0x0F 0x01 0xC1) - NT trap
 	running bool
-	instret uint64
-	fsBase  uint64
-	gsBase  uint64
+	// ExpectedReturnPC is the unmapped return target installed by the Win32 thread manager.
+	ExpectedReturnPC uint64
+	ExpectedReturnSP uint64
+	instret          uint64
+	fsBase           uint64
+	gsBase           uint64
 
 	// Mode32 enables 32-bit (IA-32 compat) execution for PE32 binaries.
 	Mode32 bool
@@ -83,19 +94,20 @@ type CPU struct {
 
 	// PreStep is an optional hook called before each instruction.
 	// If it returns true, the instruction was handled externally (e.g. JIT).
-	PreStep func(c *CPU) bool
-
-	// Instruction fetch cache: avoids MMU lookup on sequential fetches.
-	fetchPage     []byte // current code page Data slice
-	fetchPageBase uint64 // page-aligned base address of cached page
+	PreStep       func(c *CPU) bool
+	fetchPage     []byte
+	fetchPageBase uint64
+	fetchPageGen  uint64
 
 	// Debug tracing
-	traceHeap   bool
-	traceStart  uint64
-	traceEnd    uint64
-	traceRIPLo  uint64
-	traceRIPHi  uint64
-	lastHeapSig uint64
+	traceHeap    bool
+	traceStart   uint64
+	traceEnd     uint64
+	traceRIPLo   uint64
+	traceRIPHi   uint64
+	lastHeapSig  uint64
+	modrmScratch modrm
+	faultCount   uint64
 
 	// Crash trace ring buffer: last 512 RIPs before a fault.
 	traceRing    [512]uint64
@@ -104,6 +116,31 @@ type CPU struct {
 	// zeroRegionLogged: one-shot flag for logging first entry into 0x10400000..0x10BFFFFF
 	zeroRegionLogged bool
 	prevRIP          uint64
+	opcodeProfile    *opcodeProfile
+	// unimplWarned records instruction sites that have been silently skipped
+	// due to an unimplemented opcode, so each ISA gap is logged loudly once
+	// instead of hiding (a silently-skipped op corrupts guest state).
+	unimplWarned map[uint64]bool
+	// watchEBX / ebxWatchHit: one-shot diagnostic to find where EBX first
+	// takes a sentinel value (RAVEN_WATCH_EBX).
+	watchEBX    bool
+	ebxWatchHit bool
+	// EBX-writer tracking: which instruction last modified EBX, so when the
+	// message pump is reached with the wrong EBX we can name the culprit.
+	prevEBX         uint64
+	lastEBXWriteRIP uint64
+	origEBXWriteRIP uint64
+	pumpWatchHit    bool
+}
+
+// EnableEBXWatch turns on the one-shot EBX sentinel watch.
+func (c *CPU) EnableEBXWatch() { c.watchEBX = true }
+
+type opcodeProfile struct {
+	x87        [1 << 16]uint32
+	mmx        [1 << 16]uint32
+	x87Samples uint32
+	mmxSamples uint32
 }
 
 var _ arch.CPU = (*CPU)(nil)
@@ -121,7 +158,7 @@ func New(mem *mmu.MMU) *CPU {
 func (c *CPU) Stop()              { c.running = false }
 func (c *CPU) Resume()            { c.running = true }
 func (c *CPU) GetPC() uint64      { return c.RIP }
-func (c *CPU) SetPC(v uint64)     { c.RIP = v; c.fetchPage = nil }
+func (c *CPU) SetPC(v uint64)     { c.RIP = v }
 func (c *CPU) GetSP() uint64      { return c.Regs[RSP] }
 func (c *CPU) SetSP(v uint64)     { c.Regs[RSP] = v }
 func (c *CPU) GetTLS() uint64     { return c.fsBase }
@@ -130,10 +167,10 @@ func (c *CPU) SyscallNum() uint64 { return c.Regs[RAX] }
 func (c *CPU) SyscallArgs() [6]uint64 {
 	return [6]uint64{c.Regs[RDI], c.Regs[RSI], c.Regs[RDX], c.Regs[R10], c.Regs[R8], c.Regs[R9]}
 }
-func (c *CPU) SetSyscallReturn(v uint64)               { c.Regs[RAX] = v }
-func (c *CPU) SyscallReturnPC() uint64                 { return c.RIP }
-func (c *CPU) GetMem() *mmu.MMU                        { return c.mem }
-func (c *CPU) GetInstret() uint64                      { return c.instret }
+func (c *CPU) SetSyscallReturn(v uint64) { c.Regs[RAX] = v }
+func (c *CPU) SyscallReturnPC() uint64   { return c.RIP }
+func (c *CPU) GetMem() *mmu.MMU          { return c.mem }
+func (c *CPU) GetInstret() uint64        { return c.instret }
 func (c *CPU) GetArch() arch.Arch {
 	if c.Mode32 {
 		return arch.ArchI386
@@ -151,6 +188,42 @@ func (c *CPU) SetVmcallHandler(h arch.SyscallHandler) { c.vmcall = h }
 func (c *CPU) GetGSBase() uint64                      { return c.gsBase }
 func (c *CPU) SetGSBase(v uint64)                     { c.gsBase = v }
 func (c *CPU) InvalidateFetchCache()                  { c.fetchPage = nil }
+func (c *CPU) EnableOpcodeProfile()                   { c.opcodeProfile = new(opcodeProfile) }
+
+func (c *CPU) recordX87Opcode(op, modRM byte) {
+	if profile := c.opcodeProfile; profile != nil {
+		profile.x87[uint16(op)<<8|uint16(modRM)]++
+		profile.x87Samples++
+		c.finishOpcodeProfile(profile, true)
+	}
+}
+
+func (c *CPU) recordMMXOpcode(op, modRM byte) {
+	if profile := c.opcodeProfile; profile != nil {
+		profile.mmx[uint16(op)<<8|uint16(modRM)]++
+		profile.mmxSamples++
+		c.finishOpcodeProfile(profile, false)
+	}
+}
+
+func (c *CPU) finishOpcodeProfile(profile *opcodeProfile, x87 bool) {
+	if x87 && profile.x87Samples == 1<<18 {
+		for key, count := range profile.x87 {
+			if count != 0 {
+				ravelog.Logf("[opcode-profile] x87 %02x %02x %d\n", key>>8, key&0xff, count)
+			}
+		}
+	} else if !x87 && profile.mmxSamples == 1<<18 {
+		for key, count := range profile.mmx {
+			if count != 0 {
+				ravelog.Logf("[opcode-profile] mmx %02x %02x %d\n", key>>8, key&0xff, count)
+			}
+		}
+	}
+	if profile.x87Samples >= 1<<18 && profile.mmxSamples >= 1<<18 {
+		c.opcodeProfile = nil
+	}
+}
 
 // ReadReg reads a general-purpose register by index (RAX=0 .. R15=15).
 func (c *CPU) ReadReg(idx int) uint64 {
@@ -259,7 +332,6 @@ func (c *CPU) RestoreContext(mem *mmu.MMU, ctxAddr uint64) error {
 	if c.RIP, err = read64(0xF8); err != nil {
 		return err
 	}
-	c.fetchPage = nil
 	return nil
 }
 
@@ -278,6 +350,24 @@ func (c *CPU) WriteXMM(idx int, val uint64) {
 	}
 }
 
+func (c *CPU) readMMX(idx int) uint64 {
+	if idx < 0 || idx >= len(c.fpuST) {
+		return 0
+	}
+	c.fpuTop = 0
+	c.fpuTW = 0
+	return math.Float64bits(c.fpuST[idx])
+}
+
+func (c *CPU) writeMMX(idx int, value uint64) {
+	if idx < 0 || idx >= len(c.fpuST) {
+		return
+	}
+	c.fpuTop = 0
+	c.fpuTW = 0
+	c.fpuST[idx] = math.Float64frombits(value)
+}
+
 func (c *CPU) CloneForThread() arch.CPU {
 	n := New(c.mem)
 	n.Regs = c.Regs
@@ -286,7 +376,20 @@ func (c *CPU) CloneForThread() arch.CPU {
 	n.fsBase = c.fsBase
 	n.gsBase = c.gsBase
 	n.vmcall = c.vmcall
+	n.Mode32 = c.Mode32
 	n.XMM = c.XMM
+	n.YMM_hi = c.YMM_hi
+	n.fpuST = c.fpuST
+	n.fpuTop = c.fpuTop
+	n.fpuCW = c.fpuCW
+	n.fpuSW = c.fpuSW
+	n.fpuTW = c.fpuTW
+	n.MXCSR = c.MXCSR
+	if c.PreStep != nil {
+		// The parent CPU runs with a JIT; give the new thread its own
+		// compiler too (state and fast table are per-CPU).
+		NewJITCompiler(n, c.mem).Enable()
+	}
 	return n
 }
 
@@ -299,12 +402,82 @@ func (c *CPU) Run() error {
 	for c.running {
 		// JIT fast path
 		if c.PreStep != nil && c.PreStep(c) {
-			c.instret++
+			// Compiled blocks bump instret per retired instruction themselves.
 			continue
+		}
+		// Track which instruction last wrote EBX (the previously-executed one).
+		if c.watchEBX {
+			if c.Regs[RBX] != c.prevEBX {
+				c.lastEBXWriteRIP = c.prevRIP
+				// Record the ORIGIN: the first non-restore instruction that puts
+				// the sentinel into EBX. pop(0x58-0x5f)/leave(0xc9)/ret just move
+				// an existing value; we want the load/compute that created it.
+				if c.origEBXWriteRIP == 0 && uint32(c.Regs[RBX]) == 0x20000010 {
+					op0, _ := c.mem.Read8(c.prevRIP)
+					isRestore := op0 == 0xc9 || (op0 >= 0x58 && op0 <= 0x5f)
+					if !isRestore {
+						c.origEBXWriteRIP = c.prevRIP
+						var ob [10]byte
+						for i := range ob {
+							ob[i], _ = c.mem.Read8(c.prevRIP + uint64(i))
+						}
+						ravelog.Logf("[ebx-origin] EBX=0x20000010 first created (non-restore) at RIP=0x%x bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x ESI=0x%x EDX=0x%x EAX=0x%x\n",
+							c.prevRIP, ob[0], ob[1], ob[2], ob[3], ob[4], ob[5], ob[6], ob[7], ob[8], ob[9], c.Regs[RSI], c.Regs[RDX], c.Regs[RAX])
+					}
+				}
+				c.prevEBX = c.Regs[RBX]
+			}
+			// Pump watch: kkrieger's message pump lives at ~0x805392 and needs
+			// EBX==0. If we reach it with the sentinel, name the last writer.
+			if !c.pumpWatchHit && c.Mode32 && c.RIP >= 0x805380 && c.RIP <= 0x805410 && uint32(c.Regs[RBX]) == 0x20000010 {
+				c.pumpWatchHit = true
+				var wb [8]byte
+				for i := range wb {
+					wb[i], _ = c.mem.Read8(c.lastEBXWriteRIP + uint64(i))
+				}
+				ravelog.Logf("[pump-ebx] reached pump RIP=0x%x with EBX=0x20000010; last EBX writer RIP=0x%x bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+					c.RIP, c.lastEBXWriteRIP, wb[0], wb[1], wb[2], wb[3], wb[4], wb[5], wb[6], wb[7])
+			}
 		}
 		// Record RIP in crash trace ring buffer before executing
 		c.traceRing[c.traceRingPos] = c.RIP
 		c.traceRingPos = (c.traceRingPos + 1) & 511
+		// One-shot EBX watch: pinpoint the instruction after which EBX first
+		// holds the sentinel that breaks kkrieger's pump (RAVEN_WATCH_EBX).
+		if c.watchEBX && !c.ebxWatchHit && c.Mode32 && uint32(c.Regs[RBX]) == 0x20000010 {
+			c.ebxWatchHit = true
+			var b [8]byte
+			for i := range b {
+				b[i], _ = c.mem.Read8(c.prevRIP + uint64(i))
+			}
+			ravelog.Logf("[ebx-watch] EBX became 0x20000010 after RIP=0x%x (prevRIP=0x%x) bytes@prev: %02x %02x %02x %02x %02x %02x %02x %02x RAX=0x%x RCX=0x%x RDX=0x%x\n",
+				c.RIP, c.prevRIP, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], c.Regs[RAX], c.Regs[RCX], c.Regs[RDX])
+			esp := c.Regs[RSP]
+			ebp := c.Regs[RBP]
+			iat, _ := c.mem.Read32(0x83f884)
+			ravelog.Logf("[ebx-watch] IAT[0x83f884]=0x%x (call target)\n", iat)
+			ravelog.Logf("[ebx-watch] ESP=0x%x EBP=0x%x stack:\n", esp, ebp)
+			for i := int64(-4); i <= 12; i++ {
+				a := esp + uint64(i*4)
+				v, _ := c.mem.Read32(a)
+				mark := ""
+				if i == 0 {
+					mark = " <-ESP"
+				}
+				ravelog.Logf("[ebx-watch]   [esp%+d]=0x%08x @0x%x%s\n", i*4, v, a, mark)
+			}
+			// Dump the function's code from ~0x50 before the epilogue to it, so the
+			// mis-cleaning call/instructions can be read offline (guest is packed).
+			cbase := c.prevRIP - 0x500
+			for off := uint64(0); off < 0x508; off += 16 {
+				var cb [16]byte
+				for j := range cb {
+					cb[j], _ = c.mem.Read8(cbase + off + uint64(j))
+				}
+				ravelog.Logf("[ebx-watch-code] 0x%x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+					cbase+off, cb[0], cb[1], cb[2], cb[3], cb[4], cb[5], cb[6], cb[7], cb[8], cb[9], cb[10], cb[11], cb[12], cb[13], cb[14], cb[15])
+			}
+		}
 		// One-shot: log first entry into the zero VirtualAlloc region
 		if !c.zeroRegionLogged && c.RIP >= 0x10400000 && c.RIP <= 0x10BFFFFF {
 			c.zeroRegionLogged = true
@@ -344,16 +517,28 @@ func (c *CPU) Run() error {
 		}
 		c.prevRIP = c.RIP
 		if err := c.step(); err != nil {
+			c.faultCount++
+			if c.ExpectedReturnPC != 0 && c.RIP == c.ExpectedReturnPC && c.GetSP() == c.ExpectedReturnSP {
+				return fmt.Errorf("at expected thread return PC 0x%x: %w", c.RIP, err)
+			}
+			if c.faultCount <= 20 {
+				ravelog.Logf("[cpu-fault] #%d RIP=0x%x err=%v\n", c.faultCount, c.RIP, err)
+			}
+			if c.RIP == 0 {
+				return fmt.Errorf("at RIP=0x0: %w", err)
+			}
 			// Print crash trace ring buffer (last N RIPs)
-			ravelog.Logf("[crash-trace] Last instructions before fault:\n")
-			for i := 0; i < 512; i++ {
-				idx := (c.traceRingPos + i) & 511
-				if rip := c.traceRing[idx]; rip != 0 {
-					b0, _ := c.mem.Read8(rip)
-					b1, _ := c.mem.Read8(rip + 1)
-					b2, _ := c.mem.Read8(rip + 2)
-					b3, _ := c.mem.Read8(rip + 3)
-					ravelog.Logf("[crash-trace]   0x%x: %02x %02x %02x %02x\n", rip, b0, b1, b2, b3)
+			if c.faultCount == 1 {
+				ravelog.Logf("[crash-trace] Last instructions before fault:\n")
+				for i := 0; i < 512; i++ {
+					idx := (c.traceRingPos + i) & 511
+					if rip := c.traceRing[idx]; rip != 0 {
+						b0, _ := c.mem.Read8(rip)
+						b1, _ := c.mem.Read8(rip + 1)
+						b2, _ := c.mem.Read8(rip + 2)
+						b3, _ := c.mem.Read8(rip + 3)
+						ravelog.Logf("[crash-trace]   0x%x: %02x %02x %02x %02x\n", rip, b0, b1, b2, b3)
+					}
 				}
 			}
 			// Unmapped function call recovery: if RIP points to unmapped memory,
@@ -369,8 +554,8 @@ func (c *CPU) Run() error {
 							for ci := 0; ci < 16; ci++ {
 								callSite[ci], _ = c.mem.Read8(retAddr - 16 + uint64(ci))
 							}
-							ravelog.Logf("[cpu-recover] #%d call to unmapped 0x%x, returning to 0x%x RBX=0x%x RSP=0x%x callsite=[%02x %02x %02x %02x %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x]\n",
-								recoverCount, c.RIP, retAddr, c.Regs[RBX], c.GetSP(),
+							ravelog.Logf("[cpu-recover] #%d call to unmapped 0x%x, returning to 0x%x RAX=0x%x RCX=0x%x RBX=0x%x RSI=0x%x RSP=0x%x callsite=[%02x %02x %02x %02x %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+								recoverCount, c.RIP, retAddr, c.Regs[RAX], c.Regs[RCX], c.Regs[RBX], c.Regs[RSI], c.GetSP(),
 								callSite[0], callSite[1], callSite[2], callSite[3], callSite[4], callSite[5], callSite[6], callSite[7],
 								callSite[8], callSite[9], callSite[10], callSite[11], callSite[12], callSite[13], callSite[14], callSite[15])
 						}
@@ -427,7 +612,7 @@ func (c *CPU) Run() error {
 								sp := c.GetSP()
 								c.SetSP(sp + uint64(cleanup))
 								if recoverCount <= 20 {
-									ravelog.Logf("[cpu-recover]   stdcall cleanup: RSP += %d (0x%x → 0x%x)\n", cleanup, sp, sp+uint64(cleanup))
+									ravelog.Logf("[cpu-recover]   stdcall cleanup: RSP += %d (0x%x  to  0x%x)\n", cleanup, sp, sp+uint64(cleanup))
 								}
 							}
 						}
@@ -488,7 +673,7 @@ func (c *CPU) Run() error {
 								sp := c.GetSP()
 								c.SetSP(sp + uint64(cleanup))
 								if recoverCount <= 20 {
-									ravelog.Logf("[cpu-recover]   stdcall cleanup: RSP += %d (0x%x → 0x%x)\n", cleanup, sp, sp+uint64(cleanup))
+									ravelog.Logf("[cpu-recover]   stdcall cleanup: RSP += %d (0x%x  to  0x%x)\n", cleanup, sp, sp+uint64(cleanup))
 								}
 							}
 						}
@@ -505,6 +690,19 @@ func (c *CPU) Run() error {
 			// re-executed forever here instead of being surfaced and halted.
 			if c.RIP != c.prevRIP && c.RIP >= 0x10000 && c.RIP <= 0x7FFFFFFFFFFF {
 				if _, verr := c.mem.Read8(c.RIP); verr == nil {
+					// This path silently skips the faulting instruction. An
+					// "unimplemented" opcode skipped here corrupts guest state
+					// invisibly (this is exactly how the missing RCL/RCR hid
+					// for 15 minutes), so surface each such site loudly once.
+					if errIsUnimplemented(err) {
+						if c.unimplWarned == nil {
+							c.unimplWarned = make(map[uint64]bool)
+						}
+						if !c.unimplWarned[c.prevRIP] {
+							c.unimplWarned[c.prevRIP] = true
+							ravelog.Logf("[UNIMPLEMENTED-OPCODE] silently skipped at RIP=0x%x: %v (guest state now corrupt at this site)\n", c.prevRIP, err)
+						}
+					}
 					continue
 				}
 			}
@@ -548,7 +746,7 @@ func (c *CPU) Run() error {
 type prefixState struct {
 	rex     byte
 	hasREX  bool
-	op66    bool // operand-size override → 16-bit
+	op66    bool // operand-size override  to  16-bit
 	op67    bool // address-size override
 	repne   bool // F2
 	repe    bool // F3
@@ -569,31 +767,52 @@ type vexState struct {
 }
 
 func (c *CPU) fetch8() (byte, error) {
-	pageBase := c.RIP &^ (mmu.PageSize - 1)
-	off := c.RIP - pageBase
-	if c.fetchPage != nil && pageBase == c.fetchPageBase {
-		b := c.fetchPage[off]
-		c.RIP++
-		return b, nil
+	rip := c.RIP
+	if page := c.fetchPage; page != nil {
+		offset := rip - c.fetchPageBase
+		if offset < mmu.PageSize {
+			c.RIP = rip + 1
+			return page[offset], nil
+		}
 	}
-	pe, offset, err := c.mem.LookupRead(c.RIP, mmu.PermExecute)
+	return c.fetch8Slow(rip)
+}
+
+//go:noinline
+func (c *CPU) fetch8Slow(rip uint64) (byte, error) {
+	pe, pageOffset, err := c.mem.LookupRead(rip, mmu.PermExecute)
 	if err != nil {
 		return 0, err
 	}
 	c.fetchPage = pe.Data
-	c.fetchPageBase = pageBase
-	b := pe.Data[offset]
+	c.fetchPageBase = rip &^ (mmu.PageSize - 1)
+	b := pe.Data[pageOffset]
 	c.RIP++
 	return b, nil
 }
 
+func (c *CPU) syncFetchGeneration() {
+	for {
+		generation := c.mem.MappingGeneration()
+		if generation&1 != 0 {
+			continue
+		}
+		if generation != c.fetchPageGen {
+			c.fetchPage = nil
+			c.fetchPageGen = generation
+		}
+		return
+	}
+}
+
 func (c *CPU) fetch16() (uint16, error) {
 	pageBase := c.RIP &^ (mmu.PageSize - 1)
-	off := c.RIP - pageBase
-	if c.fetchPage != nil && pageBase == c.fetchPageBase && off <= mmu.PageSize-2 {
-		v := uint16(c.fetchPage[off]) | uint16(c.fetchPage[off+1])<<8
+	offset := c.RIP - pageBase
+	if pageBase == c.fetchPageBase && c.fetchPage != nil && offset <= mmu.PageSize-2 {
+		data := c.fetchPage[offset:]
+		value := uint16(data[0]) | uint16(data[1])<<8
 		c.RIP += 2
-		return v, nil
+		return value, nil
 	}
 	v, err := c.mem.Fetch16(c.RIP)
 	if err != nil {
@@ -605,12 +824,12 @@ func (c *CPU) fetch16() (uint16, error) {
 
 func (c *CPU) fetch32() (uint32, error) {
 	pageBase := c.RIP &^ (mmu.PageSize - 1)
-	off := c.RIP - pageBase
-	if c.fetchPage != nil && pageBase == c.fetchPageBase && off <= mmu.PageSize-4 {
-		d := c.fetchPage[off:]
-		v := uint32(d[0]) | uint32(d[1])<<8 | uint32(d[2])<<16 | uint32(d[3])<<24
+	offset := c.RIP - pageBase
+	if pageBase == c.fetchPageBase && c.fetchPage != nil && offset <= mmu.PageSize-4 {
+		data := c.fetchPage[offset:]
+		value := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16 | uint32(data[3])<<24
 		c.RIP += 4
-		return v, nil
+		return value, nil
 	}
 	v, err := c.mem.Fetch32(c.RIP)
 	if err != nil {
@@ -622,15 +841,15 @@ func (c *CPU) fetch32() (uint32, error) {
 
 func (c *CPU) fetch64() (uint64, error) {
 	pageBase := c.RIP &^ (mmu.PageSize - 1)
-	off := c.RIP - pageBase
-	if c.fetchPage != nil && pageBase == c.fetchPageBase && off <= mmu.PageSize-8 {
-		d := c.fetchPage[off:]
-		v := uint64(d[0]) | uint64(d[1])<<8 | uint64(d[2])<<16 | uint64(d[3])<<24 |
-			uint64(d[4])<<32 | uint64(d[5])<<40 | uint64(d[6])<<48 | uint64(d[7])<<56
+	offset := c.RIP - pageBase
+	if pageBase == c.fetchPageBase && c.fetchPage != nil && offset <= mmu.PageSize-8 {
+		data := c.fetchPage[offset:]
+		value := uint64(data[0]) | uint64(data[1])<<8 | uint64(data[2])<<16 | uint64(data[3])<<24 |
+			uint64(data[4])<<32 | uint64(data[5])<<40 | uint64(data[6])<<48 | uint64(data[7])<<56
 		c.RIP += 8
-		return v, nil
+		return value, nil
 	}
-	v, err := c.mem.Read64(c.RIP)
+	v, err := c.mem.Fetch64(c.RIP)
 	if err != nil {
 		return 0, err
 	}
@@ -662,6 +881,7 @@ func (c *CPU) step() error {
 	if c.Mode32 {
 		c.RIP &= 0xFFFFFFFF
 	}
+	c.syncFetchGeneration()
 	startRIP := c.RIP
 
 	// --- Collect prefixes ---
@@ -786,9 +1006,18 @@ func (c *CPU) dispatchVEX(vex *vexState, pfx *prefixState, startRIP uint64) erro
 	}
 	pfx.hasREX = true
 
-	_, err := c.fetch8()
+	opcode, err := c.fetch8()
 	if err != nil {
 		return err
+	}
+	if vex.mapSel == 1 && (opcode == 0x6F || opcode == 0x7F) {
+		return c.execVEXMoveDQU(vex, pfx, opcode)
+	}
+	if vex.mapSel == 2 && opcode >= 0x99 && opcode <= 0xBF {
+		switch opcode & 0x0F {
+		case 0x09, 0x0B, 0x0D, 0x0F:
+			return c.execVEXScalarFMA(vex, pfx, opcode, startRIP)
+		}
 	}
 
 	var dest int
@@ -828,6 +1057,86 @@ func (c *CPU) dispatchVEX(vex *vexState, pfx *prefixState, startRIP uint64) erro
 		c.YMM_hi[dest] = [2]uint64{}
 	}
 	return nil
+}
+
+func (c *CPU) execVEXMoveDQU(vex *vexState, pfx *prefixState, opcode byte) error {
+	m, err := c.decodeModRM(pfx)
+	if err != nil {
+		return err
+	}
+
+	readReg := func(reg int) ([2]uint64, [2]uint64) {
+		return c.XMM[reg], c.YMM_hi[reg]
+	}
+	writeReg := func(reg int, low, high [2]uint64) {
+		c.XMM[reg] = low
+		if vex.L {
+			c.YMM_hi[reg] = high
+		} else {
+			c.YMM_hi[reg] = [2]uint64{}
+		}
+	}
+	readMem := func(addr uint64) ([2]uint64, [2]uint64, error) {
+		var low, high [2]uint64
+		low[0], err = c.mem.Read64(addr)
+		if err != nil {
+			return low, high, err
+		}
+		low[1], err = c.mem.Read64(addr + 8)
+		if err != nil || !vex.L {
+			return low, high, err
+		}
+		high[0], err = c.mem.Read64(addr + 16)
+		if err != nil {
+			return low, high, err
+		}
+		high[1], err = c.mem.Read64(addr + 24)
+		return low, high, err
+	}
+	writeMem := func(addr uint64, low, high [2]uint64) error {
+		if err := c.mem.Write64(addr, low[0]); err != nil {
+			return err
+		}
+		if err := c.mem.Write64(addr+8, low[1]); err != nil {
+			return err
+		}
+		if !vex.L {
+			return nil
+		}
+		if err := c.mem.Write64(addr+16, high[0]); err != nil {
+			return err
+		}
+		return c.mem.Write64(addr+24, high[1])
+	}
+
+	if opcode == 0x6F {
+		if m.mod == 3 {
+			low, high := readReg(m.rm)
+			writeReg(m.reg, low, high)
+			return nil
+		}
+		addr, _, err := c.resolveRMAddr(m, pfx)
+		if err != nil {
+			return err
+		}
+		low, high, err := readMem(addr)
+		if err != nil {
+			return err
+		}
+		writeReg(m.reg, low, high)
+		return nil
+	}
+
+	low, high := readReg(m.reg)
+	if m.mod == 3 {
+		writeReg(m.rm, low, high)
+		return nil
+	}
+	addr, _, err := c.resolveRMAddr(m, pfx)
+	if err != nil {
+		return err
+	}
+	return writeMem(addr, low, high)
 }
 
 // operandSize returns the effective operand size in bytes.
@@ -882,7 +1191,8 @@ func (c *CPU) decodeModRM(pfx *prefixState) (*modrm, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &modrm{
+	m := &c.modrmScratch
+	*m = modrm{
 		mod: b >> 6,
 		reg: regIndex((b>>3)&7, pfx.rexR()),
 		rm:  regIndex(b&7, pfx.rexB()),
@@ -1419,6 +1729,10 @@ func (c *CPU) setSubFlags(a, b, result uint64, size int) {
 	nbits := size * 8
 	mask := uint64(1)<<nbits - 1
 	c.setArithFlags(result, size)
+	c.Rflags &^= flagAF
+	if (a^b^result)&0x10 != 0 {
+		c.Rflags |= flagAF
+	}
 	// CF: borrow
 	if a&mask < b&mask {
 		c.Rflags |= flagCF
@@ -1436,6 +1750,10 @@ func (c *CPU) setAddFlags(a, b, result uint64, size int) {
 	nbits := size * 8
 	mask := uint64(1)<<nbits - 1
 	c.setArithFlags(result, size)
+	c.Rflags &^= flagAF
+	if (a^b^result)&0x10 != 0 {
+		c.Rflags |= flagAF
+	}
 	if (result & mask) < (a & mask) {
 		c.Rflags |= flagCF
 	}
@@ -1637,6 +1955,39 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 	case 0x90:
 		return nil
 
+	// --- PUSH/POP ES (IA-32 only) ---
+	case 0x06:
+		if !c.Mode32 {
+			return fmt.Errorf("invalid PUSH ES in 64-bit mode at RIP=0x%x", startRIP)
+		}
+		if pfx.op66 {
+			sp := (c.Regs[RSP] - 2) & 0xFFFFFFFF
+			if err := c.mem.Write16(sp, 0); err != nil {
+				return err
+			}
+			c.Regs[RSP] = sp
+			return nil
+		}
+		sp := (c.Regs[RSP] - 4) & 0xFFFFFFFF
+		if err := c.mem.Write16(sp, 0); err != nil {
+			return err
+		}
+		c.Regs[RSP] = sp
+		return nil
+	case 0x07:
+		if !c.Mode32 {
+			return fmt.Errorf("invalid POP ES in 64-bit mode at RIP=0x%x", startRIP)
+		}
+		if pfx.op66 {
+			if _, err := c.mem.Read16(c.Regs[RSP]); err != nil {
+				return err
+			}
+			c.Regs[RSP] = (c.Regs[RSP] + 2) & 0xFFFFFFFF
+			return nil
+		}
+		_, err := c.pop32()
+		return err
+
 	// --- PUSH r64 (0x50-0x57) ---
 	case 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57:
 		r := regIndex(op-0x50, pfx.rexB())
@@ -1711,17 +2062,21 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 	// --- INC r32 (0x40-0x47) / DEC r32 (0x48-0x4F) - 32-bit mode only ---
 	case 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47:
 		r := int(op - 0x40)
-		old := c.Regs[r] & 0xFFFFFFFF
+		old := c.readRegSized(r, size)
 		res := old + 1
-		c.writeRegSized(r, 4, res)
-		c.setArithFlags(res, 4)
+		carry := c.Rflags & flagCF
+		c.writeRegSized(r, size, res)
+		c.setAddFlags(old, 1, res, size)
+		c.Rflags = (c.Rflags &^ flagCF) | carry
 		return nil
 	case 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F:
 		r := int(op - 0x48)
-		old := c.Regs[r] & 0xFFFFFFFF
+		old := c.readRegSized(r, size)
 		res := old - 1
-		c.writeRegSized(r, 4, res)
-		c.setArithFlags(res, 4)
+		carry := c.Rflags & flagCF
+		c.writeRegSized(r, size, res)
+		c.setSubFlags(old, 1, res, size)
+		c.Rflags = (c.Rflags &^ flagCF) | carry
 		return nil
 
 	// --- MOV r, imm64 (0xB8-0xBF) ---
@@ -1781,6 +2136,56 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 		c.Regs[RSP] += uint64(imm)
 		if c.Mode32 {
 			c.Regs[RSP] &= 0xFFFFFFFF
+		}
+		return nil
+
+	// LOOPNE, LOOPE, LOOP, and JCXZ/JECXZ/JRCXZ.
+	case 0xE0, 0xE1, 0xE2, 0xE3:
+		rel, err := c.fetch8()
+		if err != nil {
+			return err
+		}
+		counterBits := 64
+		if c.Mode32 {
+			counterBits = 32
+			if pfx.op67 {
+				counterBits = 16
+			}
+		} else if pfx.op67 {
+			counterBits = 32
+		}
+		counter := c.Regs[RCX]
+		if counterBits == 16 {
+			counter = uint64(uint16(counter))
+		} else if counterBits == 32 {
+			counter = uint64(uint32(counter))
+		}
+		take := false
+		if op == 0xE3 {
+			take = counter == 0
+		} else {
+			counter--
+			if counterBits == 16 {
+				counter = uint64(uint16(counter))
+				c.Regs[RCX] = (c.Regs[RCX] &^ 0xFFFF) | counter
+			} else if counterBits == 32 {
+				counter = uint64(uint32(counter))
+				c.Regs[RCX] = counter
+			} else {
+				c.Regs[RCX] = counter
+			}
+			take = counter != 0
+			if op == 0xE0 {
+				take = take && c.Rflags&flagZF == 0
+			} else if op == 0xE1 {
+				take = take && c.Rflags&flagZF != 0
+			}
+		}
+		if take {
+			c.RIP = uint64(int64(c.RIP) + int64(int8(rel)))
+			if c.Mode32 {
+				c.RIP &= 0xFFFFFFFF
+			}
 		}
 		return nil
 
@@ -2490,7 +2895,10 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 	// --- XCHG rAX, r (0x91-0x97) ---
 	case 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97:
 		r := regIndex(op-0x90, pfx.rexB())
-		c.Regs[RAX], c.Regs[r] = c.Regs[r], c.Regs[RAX]
+		a := c.readRegSized(RAX, size)
+		b := c.readRegSized(r, size)
+		c.writeRegSized(RAX, size, b)
+		c.writeRegSized(r, size, a)
 		return nil
 
 	// --- LAHF (0x9F) / SAHF (0x9E) ---
@@ -2500,6 +2908,31 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 		return nil
 	case 0x9F: // LAHF
 		c.Regs[RAX] = (c.Regs[RAX] & ^uint64(0xFF00)) | (uint64(c.Rflags&0xFF) << 8)
+		return nil
+
+	case 0xD7: // XLAT
+		base := c.Regs[RBX]
+		addressMask := ^uint64(0)
+		if c.Mode32 {
+			if pfx.op67 {
+				addressMask = 0xffff
+			} else {
+				addressMask = 0xffffffff
+			}
+		} else if pfx.op67 {
+			addressMask = 0xffffffff
+		}
+		addr := (base + uint64(byte(c.Regs[RAX]))) & addressMask
+		if pfx.segOver == 0x64 {
+			addr += c.fsBase
+		} else if pfx.segOver == 0x65 {
+			addr += c.gsBase
+		}
+		value, err := c.mem.Read8(addr)
+		if err != nil {
+			return err
+		}
+		c.writeRegSized(RAX, 1, uint64(value))
 		return nil
 
 	// --- INT n (0xCD) ---
@@ -2529,10 +2962,428 @@ func (c *CPU) dispatch(op byte, pfx *prefixState, startRIP uint64) error {
 // Two-byte opcodes (0x0F xx)
 // =========================================================================
 
+func (c *CPU) dispatchMMX(op byte, pfx *prefixState, startRIP uint64) (bool, error) {
+	if op == 0x77 {
+		c.recordMMXOpcode(op, 0xff)
+		c.fpuTW = 0xffff
+		return true, nil
+	}
+	legacy := op >= 0x60 && op <= 0x6b || op >= 0x6e && op <= 0x76 || op == 0x7e || op == 0x7f ||
+		op == 0xc4 || op == 0xc5 || op >= 0xd1 && op <= 0xd5 || op == 0xd7 ||
+		op >= 0xd8 && op <= 0xdf || op >= 0xe0 && op <= 0xe5 || op == 0xe7 ||
+		op >= 0xe8 && op <= 0xef || op >= 0xf1 && op <= 0xf6 || op == 0xf7 ||
+		op >= 0xf8 && op <= 0xfe
+	if !legacy {
+		return false, nil
+	}
+	m, err := c.decodeModRM(pfx)
+	if err != nil {
+		return true, err
+	}
+	c.recordMMXOpcode(op, m.raw)
+	readSrc := func() (uint64, error) {
+		if m.mod == 3 {
+			return c.readMMX(m.rm), nil
+		}
+		addr, _, err := c.resolveRMAddr(m, pfx)
+		if err != nil {
+			return 0, err
+		}
+		return c.mem.Read64(addr)
+	}
+	writeRM := func(value uint64) error {
+		if m.mod == 3 {
+			c.writeMMX(m.rm, value)
+			return nil
+		}
+		addr, _, err := c.resolveRMAddr(m, pfx)
+		if err != nil {
+			return err
+		}
+		return c.mem.Write64(addr, value)
+	}
+	mapLanes := func(dst, src uint64, bits uint, fn func(uint64, uint64) uint64) uint64 {
+		var result uint64
+		mask := uint64(1)<<bits - 1
+		for shift := uint(0); shift < 64; shift += bits {
+			result |= fn(dst>>shift&mask, src>>shift&mask) & mask << shift
+		}
+		return result
+	}
+	signed := func(v uint64, bits uint) int64 {
+		shift := 64 - bits
+		return int64(v<<shift) >> shift
+	}
+	saturateSigned := func(v int64, bits uint) uint64 {
+		min, max := -(int64(1) << (bits - 1)), int64(1)<<(bits-1)-1
+		if v < min {
+			v = min
+		} else if v > max {
+			v = max
+		}
+		return uint64(v) & (uint64(1)<<bits - 1)
+	}
+	saturateUnsigned := func(v int64, bits uint) uint64 {
+		max := int64(1)<<bits - 1
+		if v < 0 {
+			return 0
+		}
+		if v > max {
+			return uint64(max)
+		}
+		return uint64(v)
+	}
+
+	if op == 0x6e || op == 0x7e {
+		if op == 0x6e {
+			var value uint64
+			if m.mod == 3 {
+				value = c.Regs[m.rm]
+			} else {
+				addr, _, err := c.resolveRMAddr(m, pfx)
+				if err != nil {
+					return true, err
+				}
+				if pfx.rexW() {
+					value, err = c.mem.Read64(addr)
+				} else {
+					var value32 uint32
+					value32, err = c.mem.Read32(addr)
+					value = uint64(value32)
+				}
+				if err != nil {
+					return true, err
+				}
+			}
+			if !pfx.rexW() {
+				value = uint64(uint32(value))
+			}
+			c.writeMMX(m.reg, value)
+		} else if m.mod == 3 {
+			size := 4
+			if pfx.rexW() {
+				size = 8
+			}
+			c.writeRegSized(m.rm, size, c.readMMX(m.reg))
+		} else {
+			addr, _, err := c.resolveRMAddr(m, pfx)
+			if err != nil {
+				return true, err
+			}
+			if pfx.rexW() {
+				err = c.mem.Write64(addr, c.readMMX(m.reg))
+			} else {
+				err = c.mem.Write32(addr, uint32(c.readMMX(m.reg)))
+			}
+			if err != nil {
+				return true, err
+			}
+		}
+		return true, nil
+	}
+	if op == 0x6f {
+		src, err := readSrc()
+		if err == nil {
+			c.writeMMX(m.reg, src)
+		}
+		return true, err
+	}
+	if op == 0x7f {
+		return true, writeRM(c.readMMX(m.reg))
+	}
+	if op == 0xc4 {
+		imm, err := c.fetch8()
+		if err != nil {
+			return true, err
+		}
+		var word uint16
+		if m.mod == 3 {
+			word = uint16(c.Regs[m.rm])
+		} else {
+			addr, _, err := c.resolveRMAddr(m, pfx)
+			if err != nil {
+				return true, err
+			}
+			word, err = c.mem.Read16(addr)
+			if err != nil {
+				return true, err
+			}
+		}
+		shift := uint(imm&3) * 16
+		dst := c.readMMX(m.reg)
+		c.writeMMX(m.reg, dst&^(uint64(0xffff)<<shift)|uint64(word)<<shift)
+		return true, nil
+	}
+	if op == 0xc5 {
+		if m.mod != 3 {
+			return true, fmt.Errorf("invalid MMX PEXTRW memory source at RIP=0x%x", startRIP)
+		}
+		imm, err := c.fetch8()
+		if err != nil {
+			return true, err
+		}
+		c.writeRegSized(m.reg, 4, c.readMMX(m.rm)>>(uint(imm&3)*16)&0xffff)
+		return true, nil
+	}
+	if op == 0xd7 {
+		if m.mod != 3 {
+			return true, fmt.Errorf("invalid MMX PMOVMSKB memory source at RIP=0x%x", startRIP)
+		}
+		src := c.readMMX(m.rm)
+		var result uint64
+		for i := uint(0); i < 8; i++ {
+			result |= src >> (i*8 + 7) & 1 << i
+		}
+		c.writeRegSized(m.reg, 4, result)
+		return true, nil
+	}
+	if op == 0xe7 {
+		if m.mod == 3 {
+			return true, fmt.Errorf("invalid MMX MOVNTQ register destination at RIP=0x%x", startRIP)
+		}
+		return true, writeRM(c.readMMX(m.reg))
+	}
+	if op == 0xf7 {
+		if m.mod != 3 {
+			return true, fmt.Errorf("invalid MMX MASKMOVQ memory operand at RIP=0x%x", startRIP)
+		}
+		addr := c.Regs[RDI]
+		data, mask := c.readMMX(m.reg), c.readMMX(m.rm)
+		for i := uint(0); i < 8; i++ {
+			if mask>>(i*8+7)&1 != 0 {
+				if err := c.mem.Write8(addr+uint64(i), byte(data>>(i*8))); err != nil {
+					return true, err
+				}
+			}
+		}
+		return true, nil
+	}
+
+	var shuffleImm byte
+	if op == 0x70 {
+		shuffleImm, err = c.fetch8()
+		if err != nil {
+			return true, err
+		}
+	}
+	src, err := readSrc()
+	if err != nil {
+		return true, err
+	}
+	dst := c.readMMX(m.reg)
+	var result uint64
+	switch op {
+	case 0x60, 0x61, 0x62, 0x68, 0x69, 0x6a:
+		bits := uint(8) << (op & 3)
+		lanes := uint(64) / bits
+		start := uint(0)
+		if op >= 0x68 {
+			start = lanes / 2
+		}
+		for i := uint(0); i < lanes/2; i++ {
+			result |= dst >> ((start + i) * bits) & (uint64(1)<<bits - 1) << (i * bits * 2)
+			result |= src >> ((start + i) * bits) & (uint64(1)<<bits - 1) << (i*bits*2 + bits)
+		}
+	case 0x63, 0x67:
+		for i := uint(0); i < 4; i++ {
+			for half, value := range []uint64{dst, src} {
+				v := signed(value>>(i*16)&0xffff, 16)
+				if op == 0x63 {
+					result |= saturateSigned(v, 8) << (uint(half)*32 + i*8)
+				} else {
+					result |= saturateUnsigned(v, 8) << (uint(half)*32 + i*8)
+				}
+			}
+		}
+	case 0x6b:
+		for i := uint(0); i < 2; i++ {
+			result |= saturateSigned(signed(dst>>(i*32), 32), 16) << (i * 16)
+			result |= saturateSigned(signed(src>>(i*32), 32), 16) << ((i + 2) * 16)
+		}
+	case 0x64, 0x65, 0x66:
+		bits := uint(8) << (op & 3)
+		result = mapLanes(dst, src, bits, func(a, b uint64) uint64 {
+			if signed(a, bits) > signed(b, bits) {
+				return uint64(1)<<bits - 1
+			}
+			return 0
+		})
+	case 0x70:
+		for i := uint(0); i < 4; i++ {
+			result |= src >> (uint(shuffleImm>>(i*2)&3) * 16) & 0xffff << (i * 16)
+		}
+	case 0x71, 0x72, 0x73:
+		if m.mod != 3 {
+			return true, fmt.Errorf("invalid MMX shift memory destination at RIP=0x%x", startRIP)
+		}
+		imm, err := c.fetch8()
+		if err != nil {
+			return true, err
+		}
+		bits := uint(16) << (op - 0x71)
+		count := uint(imm)
+		switch m.reg {
+		case 2:
+			result = mapLanes(src, 0, bits, func(a, _ uint64) uint64 {
+				if count >= bits {
+					return 0
+				}
+				return a >> count
+			})
+		case 4:
+			if op == 0x73 {
+				return true, fmt.Errorf("invalid MMX PSRAQ at RIP=0x%x", startRIP)
+			}
+			result = mapLanes(src, 0, bits, func(a, _ uint64) uint64 {
+				shift := count
+				if shift >= bits {
+					shift = bits - 1
+				}
+				return uint64(signed(a, bits) >> shift)
+			})
+		case 6:
+			result = mapLanes(src, 0, bits, func(a, _ uint64) uint64 {
+				if count >= bits {
+					return 0
+				}
+				return a << count
+			})
+		default:
+			return true, fmt.Errorf("unimplemented MMX 0F %02X /%d at RIP=0x%x", op, m.reg, startRIP)
+		}
+		c.writeMMX(m.rm, result)
+		return true, nil
+	case 0x74, 0x75, 0x76:
+		bits := uint(8) << (op & 3)
+		result = mapLanes(dst, src, bits, func(a, b uint64) uint64 {
+			if a == b {
+				return uint64(1)<<bits - 1
+			}
+			return 0
+		})
+	case 0xd1, 0xd2, 0xd3, 0xe1, 0xe2, 0xf1, 0xf2, 0xf3:
+		bits := uint(16) << ((op & 0xf) - 1)
+		count := uint(src)
+		result = mapLanes(dst, 0, bits, func(a, _ uint64) uint64 {
+			switch op {
+			case 0xd1, 0xd2, 0xd3:
+				if count >= bits {
+					return 0
+				}
+				return a >> count
+			case 0xe1, 0xe2:
+				shift := count
+				if shift >= bits {
+					shift = bits - 1
+				}
+				return uint64(signed(a, bits) >> shift)
+			default:
+				if count >= bits {
+					return 0
+				}
+				return a << count
+			}
+		})
+	case 0xd4:
+		result = dst + src
+	case 0xd5:
+		result = mapLanes(dst, src, 16, func(a, b uint64) uint64 { return a * b })
+	case 0xd8, 0xd9, 0xdc, 0xdd:
+		bits := uint(8) << (op & 1)
+		add := op == 0xdc || op == 0xdd
+		result = mapLanes(dst, src, bits, func(a, b uint64) uint64 {
+			if add {
+				return saturateUnsigned(int64(a)+int64(b), bits)
+			}
+			return saturateUnsigned(int64(a)-int64(b), bits)
+		})
+	case 0xda, 0xde:
+		result = mapLanes(dst, src, 8, func(a, b uint64) uint64 {
+			if op == 0xda && b < a || op == 0xde && b > a {
+				return b
+			}
+			return a
+		})
+	case 0xdb:
+		result = dst & src
+	case 0xdf:
+		result = ^dst & src
+	case 0xe0, 0xe3:
+		bits := uint(8)
+		if op == 0xe3 {
+			bits = 16
+		}
+		result = mapLanes(dst, src, bits, func(a, b uint64) uint64 { return (a + b + 1) >> 1 })
+	case 0xe4:
+		result = mapLanes(dst, src, 16, func(a, b uint64) uint64 { return a * b >> 16 })
+	case 0xe5:
+		result = mapLanes(dst, src, 16, func(a, b uint64) uint64 { return uint64(signed(a, 16)*signed(b, 16)) >> 16 })
+	case 0xe8, 0xe9, 0xec, 0xed:
+		bits := uint(8)
+		if op == 0xe9 || op == 0xed {
+			bits = 16
+		}
+		add := op == 0xec || op == 0xed
+		result = mapLanes(dst, src, bits, func(a, b uint64) uint64 {
+			v := signed(a, bits) - signed(b, bits)
+			if add {
+				v = signed(a, bits) + signed(b, bits)
+			}
+			return saturateSigned(v, bits)
+		})
+	case 0xea, 0xee:
+		result = mapLanes(dst, src, 16, func(a, b uint64) uint64 {
+			if op == 0xea && signed(b, 16) < signed(a, 16) || op == 0xee && signed(b, 16) > signed(a, 16) {
+				return b
+			}
+			return a
+		})
+	case 0xeb:
+		result = dst | src
+	case 0xef:
+		result = dst ^ src
+	case 0xf4:
+		result = uint64(uint32(dst)) * uint64(uint32(src))
+	case 0xf5:
+		for i := uint(0); i < 2; i++ {
+			a := signed(dst>>(i*32), 16)*signed(src>>(i*32), 16) + signed(dst>>(i*32+16), 16)*signed(src>>(i*32+16), 16)
+			result |= uint64(uint32(a)) << (i * 32)
+		}
+	case 0xf6:
+		for i := uint(0); i < 8; i++ {
+			a, b := int64(byte(dst>>uint(i*8))), int64(byte(src>>uint(i*8)))
+			if a > b {
+				result += uint64(a - b)
+			} else {
+				result += uint64(b - a)
+			}
+		}
+	case 0xf8, 0xf9, 0xfa, 0xfc, 0xfd, 0xfe:
+		bits := uint(8) << (op & 3)
+		add := op >= 0xfc
+		result = mapLanes(dst, src, bits, func(a, b uint64) uint64 {
+			if add {
+				return a + b
+			}
+			return a - b
+		})
+	default:
+		return true, fmt.Errorf("unimplemented MMX opcode 0F %02X at RIP=0x%x", op, startRIP)
+	}
+	c.writeMMX(m.reg, result)
+	return true, nil
+}
+
 func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 	op2, err := c.fetch8()
 	if err != nil {
 		return err
+	}
+	if !pfx.op66 && !pfx.repe && !pfx.repne {
+		handled, err := c.dispatchMMX(op2, pfx, startRIP)
+		if handled {
+			return err
+		}
 	}
 	size := operandSize(pfx)
 
@@ -2860,13 +3711,32 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		switch (m.raw >> 3) & 7 {
-		case 1: // CMPXCHG16B m128
-			if !pfx.rexW() || m.mod == 3 {
+		case 1: // CMPXCHG8B m64 (32-bit) / CMPXCHG16B m128 (REX.W)
+			if m.mod == 3 {
 				return fmt.Errorf("unimplemented 0F C7 /%02X at RIP=0x%x", m.raw, startRIP)
 			}
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
 				return err
+			}
+			if !pfx.rexW() {
+				// CMPXCHG8B: compare EDX:EAX with m64. On match, store
+				// ECX:EBX; otherwise reload EDX:EAX from memory. Used by
+				// 32-bit InterlockedCompareExchange64 and CRT atomics.
+				cur, err := c.mem.Read64(addr)
+				if err != nil {
+					return err
+				}
+				want := (c.Regs[RDX]&0xFFFFFFFF)<<32 | (c.Regs[RAX] & 0xFFFFFFFF)
+				if cur == want {
+					c.Rflags |= flagZF
+					store := (c.Regs[RCX]&0xFFFFFFFF)<<32 | (c.Regs[RBX] & 0xFFFFFFFF)
+					return c.mem.Write64(addr, store)
+				}
+				c.Rflags &^= flagZF
+				c.writeRegSized(RAX, 4, cur&0xFFFFFFFF)
+				c.writeRegSized(RDX, 4, cur>>32)
+				return nil
 			}
 			lo, err := c.mem.Read64(addr)
 			if err != nil {
@@ -3055,7 +3925,7 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 		}
 		return nil
 
-	// --- MOVD/MOVQ xmm ↔ r/m (0x6E, 0x7E) ---
+	// --- MOVD/MOVQ xmm  and  r/m (0x6E, 0x7E) ---
 	case 0x6E:
 		// 66 0F 6E: MOVD xmm, r/m32 - 66 is a mandatory SSE prefix, not operand-size override.
 		// REX.W upgrades to MOVQ xmm, r/m64.
@@ -3087,7 +3957,7 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			c.XMM[m.reg] = [2]uint64{val, 0}
 			return nil
 		}
-		// 66 0F 7E = MOVD xmm → r/m32 (store); REX.W → MOVQ xmm → r/m64.
+		// 66 0F 7E = MOVD xmm  to  r/m32 (store); REX.W  to  MOVQ xmm  to  r/m64.
 		// 66 is mandatory SSE prefix here, not operand-size override.
 		sseMovSize := 4
 		if pfx.rexW() {
@@ -3103,15 +3973,30 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		if m.mod == 3 {
-			c.XMM[m.reg] = c.XMM[m.rm]
+			if pfx.op66 || pfx.repe {
+				c.XMM[m.reg] = c.XMM[m.rm]
+			} else {
+				c.writeMMX(m.reg, c.readMMX(m.rm))
+			}
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
 				return err
 			}
-			lo, _ := c.mem.Read64(addr)
-			hi, _ := c.mem.Read64(addr + 8)
-			c.XMM[m.reg] = [2]uint64{lo, hi}
+			lo, err := c.mem.Read64(addr)
+			if err != nil {
+				return err
+			}
+			var hi uint64
+			if pfx.op66 || pfx.repe {
+				hi, err = c.mem.Read64(addr + 8)
+				if err != nil {
+					return err
+				}
+				c.XMM[m.reg] = [2]uint64{lo, hi}
+			} else {
+				c.writeMMX(m.reg, lo)
+			}
 		}
 		return nil
 
@@ -3122,14 +4007,28 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		if m.mod == 3 {
-			c.XMM[m.rm] = c.XMM[m.reg]
+			if pfx.op66 || pfx.repe {
+				c.XMM[m.rm] = c.XMM[m.reg]
+			} else {
+				c.writeMMX(m.rm, c.readMMX(m.reg))
+			}
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
 				return err
 			}
-			c.mem.Write64(addr, c.XMM[m.reg][0])
-			c.mem.Write64(addr+8, c.XMM[m.reg][1])
+			value := c.XMM[m.reg][0]
+			if !pfx.op66 && !pfx.repe {
+				value = c.readMMX(m.reg)
+			}
+			if err := c.mem.Write64(addr, value); err != nil {
+				return err
+			}
+			if pfx.op66 || pfx.repe {
+				if err := c.mem.Write64(addr+8, c.XMM[m.reg][1]); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 
@@ -3444,7 +4343,7 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 				src[0], _ = c.mem.Read64(addr)
 				src[1], _ = c.mem.Read64(addr + 8)
 			}
-			// CVTPD2PS (66 0F 5A): two doubles → two singles in low 64 bits
+			// CVTPD2PS (66 0F 5A): two doubles  to  two singles in low 64 bits
 			if op2 == 0x5A {
 				f0 := float32(math.Float64frombits(src[0]))
 				f1 := float32(math.Float64frombits(src[1]))
@@ -3488,7 +4387,7 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 				src[0], _ = c.mem.Read64(addr)
 				src[1], _ = c.mem.Read64(addr + 8)
 			}
-			// CVTPS2PD (NP 0F 5A): two singles from low 64 bits → two doubles
+			// CVTPS2PD (NP 0F 5A): two singles from low 64 bits  to  two doubles
 			if op2 == 0x5A {
 				f0 := math.Float32frombits(uint32(src[0]))
 				f1 := math.Float32frombits(uint32(src[0] >> 32))
@@ -3872,7 +4771,11 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 		}
 		var src [2]uint64
 		if m.mod == 3 {
-			src = c.XMM[m.rm]
+			if pfx.op66 {
+				src = c.XMM[m.rm]
+			} else {
+				src[0] = c.readMMX(m.rm)
+			}
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
@@ -3881,8 +4784,12 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			src[0], _ = c.mem.Read64(addr)
 			src[1], _ = c.mem.Read64(addr + 8)
 		}
-		c.XMM[m.reg][0] ^= src[0]
-		c.XMM[m.reg][1] ^= src[1]
+		if pfx.op66 {
+			c.XMM[m.reg][0] ^= src[0]
+			c.XMM[m.reg][1] ^= src[1]
+		} else {
+			c.writeMMX(m.reg, c.readMMX(m.reg)^src[0])
+		}
 		return nil
 
 	// --- PAND (0xDB) ---
@@ -4107,15 +5014,29 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 		var src [2]uint64
 		if m.mod == 3 {
 			src = c.XMM[m.rm]
+			if !pfx.op66 {
+				src[0] = c.readMMX(m.rm)
+			}
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
 				return err
 			}
-			src[0], _ = c.mem.Read64(addr)
-			src[1], _ = c.mem.Read64(addr + 8)
+			src[0], err = c.mem.Read64(addr)
+			if err != nil {
+				return err
+			}
+			if pfx.op66 {
+				src[1], err = c.mem.Read64(addr + 8)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		dst := c.XMM[m.reg]
+		if !pfx.op66 {
+			dst[0] = c.readMMX(m.reg)
+		}
 		packWord := func(w int16) uint8 {
 			if w > 127 {
 				return 127
@@ -4126,6 +5047,14 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return uint8(int8(w))
 		}
 		var r0, r1 uint64
+		if !pfx.op66 {
+			for i := uint(0); i < 4; i++ {
+				r0 |= uint64(packWord(int16(dst[0]>>(i*16)))) << (i * 8)
+				r0 |= uint64(packWord(int16(src[0]>>(i*16)))) << ((i + 4) * 8)
+			}
+			c.writeMMX(m.reg, r0)
+			return nil
+		}
 		for i := uint(0); i < 4; i++ {
 			b := packWord(int16(dst[0] >> (i * 16)))
 			r0 |= uint64(b) << (i * 8)
@@ -4153,16 +5082,31 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 		}
 		var src [2]uint64
 		if m.mod == 3 {
-			src = c.XMM[m.rm]
+			if pfx.op66 {
+				src = c.XMM[m.rm]
+			} else {
+				src[0] = c.readMMX(m.rm)
+			}
 		} else {
 			addr, _, err := c.resolveRMAddr(m, pfx)
 			if err != nil {
 				return err
 			}
-			src[0], _ = c.mem.Read64(addr)
-			src[1], _ = c.mem.Read64(addr + 8)
+			src[0], err = c.mem.Read64(addr)
+			if err != nil {
+				return err
+			}
+			if pfx.op66 {
+				src[1], err = c.mem.Read64(addr + 8)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		dst := c.XMM[m.reg]
+		if !pfx.op66 {
+			dst[0] = c.readMMX(m.reg)
+		}
 		packUWord := func(w int16) uint8 {
 			if w > 255 {
 				return 255
@@ -4173,6 +5117,14 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return uint8(w)
 		}
 		var r0, r1 uint64
+		if !pfx.op66 {
+			for i := uint(0); i < 4; i++ {
+				r0 |= uint64(packUWord(int16(dst[0]>>(i*16)))) << (i * 8)
+				r0 |= uint64(packUWord(int16(src[0]>>(i*16)))) << ((i + 4) * 8)
+			}
+			c.writeMMX(m.reg, r0)
+			return nil
+		}
 		for i := uint(0); i < 4; i++ {
 			b := packUWord(int16(dst[0] >> (i * 16)))
 			r0 |= uint64(b) << (i * 8)
@@ -4190,6 +5142,65 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			r1 |= uint64(b) << (32 + i*8)
 		}
 		c.XMM[m.reg] = [2]uint64{r0, r1}
+		return nil
+
+	// --- PACKSSDW mm/xmm, mm/m64 or xmm/m128 (0F 6B) ---
+	case 0x6B:
+		m, err := c.decodeModRM(pfx)
+		if err != nil {
+			return err
+		}
+		var src [2]uint64
+		if m.mod == 3 {
+			if pfx.op66 {
+				src = c.XMM[m.rm]
+			} else {
+				src[0] = c.readMMX(m.rm)
+			}
+		} else {
+			addr, _, err := c.resolveRMAddr(m, pfx)
+			if err != nil {
+				return err
+			}
+			src[0], err = c.mem.Read64(addr)
+			if err != nil {
+				return err
+			}
+			if pfx.op66 {
+				src[1], err = c.mem.Read64(addr + 8)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		saturate := func(v int32) uint16 {
+			if v > 32767 {
+				return 0x7fff
+			}
+			if v < -32768 {
+				return 0x8000
+			}
+			return uint16(int16(v))
+		}
+		dst := c.XMM[m.reg]
+		if !pfx.op66 {
+			dst[0] = c.readMMX(m.reg)
+			var result uint64
+			for i := uint(0); i < 2; i++ {
+				result |= uint64(saturate(int32(dst[0]>>(i*32)))) << (i * 16)
+				result |= uint64(saturate(int32(src[0]>>(i*32)))) << ((i + 2) * 16)
+			}
+			c.writeMMX(m.reg, result)
+			return nil
+		}
+		var result [2]uint64
+		for i := uint(0); i < 4; i++ {
+			d := saturate(int32(dst[i/2] >> ((i % 2) * 32)))
+			s := saturate(int32(src[i/2] >> ((i % 2) * 32)))
+			result[0] |= uint64(d) << (i * 16)
+			result[1] |= uint64(s) << (i * 16)
+		}
+		c.XMM[m.reg] = result
 		return nil
 
 	// --- PUNPCKLQDQ xmm, xmm/m128 (0x6C) ---
@@ -4471,21 +5482,27 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		x := c.XMM[m.rm]
+		if !pfx.op66 {
+			x[0] = c.readMMX(m.rm)
+			x[1] = 0
+		}
 		var mask uint64
 		for i := 0; i < 8; i++ {
 			if x[0]>>(uint(i)*8+7)&1 != 0 {
 				mask |= 1 << uint(i)
 			}
 		}
-		for i := 0; i < 8; i++ {
-			if x[1]>>(uint(i)*8+7)&1 != 0 {
-				mask |= 1 << uint(i+8)
+		if pfx.op66 {
+			for i := 0; i < 8; i++ {
+				if x[1]>>(uint(i)*8+7)&1 != 0 {
+					mask |= 1 << uint(i+8)
+				}
 			}
 		}
 		c.writeRegSized(m.reg, 4, mask)
 		return nil
 
-	// --- MOVQ xmm → xmm/m64 (66 0F D6) ---
+	// --- MOVQ xmm  to  xmm/m64 (66 0F D6) ---
 	case 0xD6:
 		m, err := c.decodeModRM(pfx)
 		if err != nil {
@@ -5468,7 +6485,7 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			src[0], _ = c.mem.Read64(addr)
 			src[1], _ = c.mem.Read64(addr + 8)
 		}
-		// Multiply pairs of signed 16-bit, add adjacent pairs → 32-bit
+		// Multiply pairs of signed 16-bit, add adjacent pairs  to  32-bit
 		d := c.XMM[m.reg]
 		var r [2]uint64
 		for q := 0; q < 2; q++ {
@@ -6230,8 +7247,8 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			v, _ := c.mem.Read16(addr)
 			srcWord = uint16(v)
 		}
-		dst := c.XMM[m.reg]
 		if pfx.op66 { // SSE2: 8 word positions in 128-bit XMM
+			dst := c.XMM[m.reg]
 			idx := imm & 7
 			if idx < 4 {
 				shift := idx * 16
@@ -6240,13 +7257,14 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 				shift := (idx - 4) * 16
 				dst[1] = (dst[1] &^ (0xFFFF << shift)) | (uint64(srcWord) << shift)
 			}
+			c.XMM[m.reg] = dst
 		} else { // MMX: 4 word positions in low 64
+			dst := c.readMMX(m.reg)
 			idx := imm & 3
 			shift := idx * 16
-			dst[0] = (dst[0] &^ (0xFFFF << shift)) | (uint64(srcWord) << shift)
-			dst[1] = 0
+			dst = (dst &^ (uint64(0xFFFF) << shift)) | (uint64(srcWord) << shift)
+			c.writeMMX(m.reg, dst)
 		}
-		c.XMM[m.reg] = dst
 		return nil
 
 	// Without 66 prefix: PEXTRW r32, mm, imm8 (MMX - treat src as XMM low 64)
@@ -6261,9 +7279,11 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			return err
 		}
 		var srcLo, srcHi uint64
-		if m.mod == 3 {
+		if m.mod == 3 && pfx.op66 {
 			srcLo = c.XMM[m.rm][0]
 			srcHi = c.XMM[m.rm][1]
+		} else if m.mod == 3 {
+			srcLo = c.readMMX(m.rm)
 		}
 		var word uint16
 		if pfx.op66 { // SSE2: select among 8 words
@@ -6345,7 +7365,7 @@ func (c *CPU) dispatch0F(pfx *prefixState, startRIP uint64) error {
 			c.XMM[m.reg] = dst
 			return nil
 		}
-		// CVTPD2DQ / CVTTPD2DQ: two packed doubles → two packed int32s
+		// CVTPD2DQ / CVTTPD2DQ: two packed doubles  to  two packed int32s
 		var src [2]uint64
 		if m.mod == 3 {
 			src = c.XMM[m.rm]
@@ -6414,13 +7434,35 @@ func (c *CPU) doALU(op aluOp, a, b uint64, size int) (result uint64, writeBack b
 		return result, true
 	case aluADC:
 		cf := (c.Rflags & flagCF) >> 0
-		result = a + b + cf
-		c.setAddFlags(a, b+cf, result, size)
+		mask := ^uint64(0)
+		if size < 8 {
+			mask = uint64(1)<<(size*8) - 1
+		}
+		a, b = a&mask, b&mask
+		result = (a + b + cf) & mask
+		carry := b > mask-cf || a > mask-(b+cf&mask)
+		c.setAddFlags(a, b, result, size)
+		if carry {
+			c.Rflags |= flagCF
+		} else {
+			c.Rflags &^= flagCF
+		}
 		return result, true
 	case aluSBB:
 		cf := (c.Rflags & flagCF) >> 0
-		result = a - b - cf
-		c.setSubFlags(a, b+cf, result, size)
+		mask := ^uint64(0)
+		if size < 8 {
+			mask = uint64(1)<<(size*8) - 1
+		}
+		a, b = a&mask, b&mask
+		result = (a - b - cf) & mask
+		borrow := b > mask-cf || a < b+cf
+		c.setSubFlags(a, b, result, size)
+		if borrow {
+			c.Rflags |= flagCF
+		} else {
+			c.Rflags &^= flagCF
+		}
 		return result, true
 	case aluAND:
 		result = a & b
@@ -6531,9 +7573,15 @@ func (c *CPU) execGroup1(op byte, pfx *prefixState, size int) error {
 	if err != nil {
 		return err
 	}
+	immValue := uint64(imm)
+	if op == 0x83 {
+		immValue = uint64(int64(int8(imm)))
+	} else if op == 0x81 && s == 8 {
+		immValue = uint64(int64(int32(imm)))
+	}
 
 	aluOps := []aluOp{aluADD, aluOR, aluADC, aluSBB, aluAND, aluSUB, aluXOR, aluCMP}
-	result, wb := c.doALU(aluOps[m.reg], dst, uint64(imm), s)
+	result, wb := c.doALU(aluOps[m.reg], dst, immValue, s)
 	if wb {
 		return c.writeRM(m, pfx, s, result)
 	}
@@ -6653,6 +7701,48 @@ func (c *CPU) execShift(pfx *prefixState, size int, countMode int) error {
 	}
 
 	nbits := uint64(size * 8)
+
+	// RCL/RCR rotate through the carry flag and use a modulus of nbits+1
+	// (the carry adds one bit to the rotation), with the 8/16-bit forms
+	// using %9 and %17. They touch only CF (and OF when count==1), never the
+	// arithmetic flags. Handled before the shared nbits-1 masking below.
+	if m.reg == 2 || m.reg == 3 {
+		mask := uint64(1)<<nbits - 1
+		if nbits == 64 {
+			mask = ^uint64(0)
+		}
+		rcount := count % (nbits + 1)
+		cf := uint64(0)
+		if c.Rflags&flagCF != 0 {
+			cf = 1
+		}
+		if m.reg == 2 { // RCL
+			for i := uint64(0); i < rcount; i++ {
+				newCF := (val >> (nbits - 1)) & 1
+				val = ((val << 1) | cf) & mask
+				cf = newCF
+			}
+		} else { // RCR
+			for i := uint64(0); i < rcount; i++ {
+				newCF := val & 1
+				val = (val >> 1) | (cf << (nbits - 1))
+				cf = newCF
+			}
+			val &= mask
+		}
+		c.Rflags = (c.Rflags &^ flagCF) | cf
+		if count == 1 {
+			var of uint64
+			if m.reg == 2 { // RCL: OF = MSB(result) XOR CF(new)
+				of = ((val >> (nbits - 1)) & 1) ^ cf
+			} else { // RCR: OF = XOR of the two most-significant result bits
+				of = ((val >> (nbits - 1)) & 1) ^ ((val >> (nbits - 2)) & 1)
+			}
+			c.Rflags = (c.Rflags &^ flagOF) | (of << 11)
+		}
+		return c.writeRM(m, pfx, size, val&mask)
+	}
+
 	count &= nbits - 1
 	if count == 0 {
 		return nil
@@ -6673,17 +7763,12 @@ func (c *CPU) execShift(pfx *prefixState, size int, countMode int) error {
 			c.Rflags &^= flagCF
 		}
 	case 5: // SHR
-		c.Rflags &^= flagCF
-		if val>>(count-1)&1 != 0 {
-			c.Rflags |= flagCF
-		}
+		carry := val >> (count - 1) & 1
 		result = val >> count
 		c.setArithFlags(result, size)
+		c.Rflags = (c.Rflags &^ flagCF) | carry
 	case 7: // SAR
-		c.Rflags &^= flagCF
-		if val>>(count-1)&1 != 0 {
-			c.Rflags |= flagCF
-		}
+		carry := val >> (count - 1) & 1
 		switch size {
 		case 1:
 			result = uint64(int8(val) >> count)
@@ -6695,6 +7780,7 @@ func (c *CPU) execShift(pfx *prefixState, size int, countMode int) error {
 			result = uint64(int64(val) >> count)
 		}
 		c.setArithFlags(result, size)
+		c.Rflags = (c.Rflags &^ flagCF) | carry
 	default:
 		return fmt.Errorf("unimplemented shift op %d", m.reg)
 	}
@@ -6743,7 +7829,11 @@ func (c *CPU) execGroup3(pfx *prefixState, size int) error {
 		if err != nil {
 			return err
 		}
-		r := val & uint64(imm)
+		immValue := uint64(imm)
+		if size == 8 {
+			immValue = uint64(int64(int32(imm)))
+		}
+		r := val & immValue
 		c.setArithFlags(r, size)
 		c.Rflags &^= flagCF | flagOF
 		return nil
@@ -6753,58 +7843,79 @@ func (c *CPU) execGroup3(pfx *prefixState, size int) error {
 
 	case 3: // NEG
 		result := -val
-		c.Rflags &^= flagCF
+		c.setArithFlags(result, size)
+		c.Rflags &^= flagAF
 		if val != 0 {
 			c.Rflags |= flagCF
 		}
-		c.setArithFlags(result, size)
-		// NEG sets OF=1 if operand is the minimum signed value (−INT_MIN overflows).
+		if (val^result)&0x10 != 0 {
+			c.Rflags |= flagAF
+		}
+		// NEG overflows only for the minimum signed value.
 		nbits := size * 8
-		if val&(uint64(1)<<nbits-1) == uint64(1)<<(nbits-1) {
+		if val == uint64(1)<<(nbits-1) {
 			c.Rflags |= flagOF
 		}
 		return c.writeRM(m, pfx, size, result)
 
 	case 4: // MUL (unsigned)
 		a := c.readRegSized(RAX, size)
+		var overflow bool
 		switch size {
 		case 1:
 			result := uint16(uint8(a)) * uint16(uint8(val))
 			c.Regs[RAX] = (c.Regs[RAX] & ^uint64(0xFFFF)) | uint64(result)
+			overflow = result>>8 != 0
 		case 2:
 			result := uint32(uint16(a)) * uint32(uint16(val))
 			c.writeRegSized(RAX, 2, uint64(result&0xFFFF))
 			c.writeRegSized(RDX, 2, uint64(result>>16))
+			overflow = result>>16 != 0
 		case 4:
 			result := uint64(uint32(a)) * uint64(uint32(val))
 			c.writeRegSized(RAX, 4, result&0xFFFFFFFF)
 			c.writeRegSized(RDX, 4, result>>32)
+			overflow = result>>32 != 0
 		case 8:
 			hi, lo := bits.Mul64(a, val)
 			c.Regs[RAX] = lo
 			c.Regs[RDX] = hi
+			overflow = hi != 0
+		}
+		c.Rflags &^= flagCF | flagOF
+		if overflow {
+			c.Rflags |= flagCF | flagOF
 		}
 		return nil
 
 	case 5: // IMUL (single operand)
 		a := c.readRegSized(RAX, size)
+		var overflow bool
 		switch size {
 		case 1:
 			result := int16(int8(a)) * int16(int8(val))
 			c.Regs[RAX] = (c.Regs[RAX] & ^uint64(0xFFFF)) | uint64(uint16(result))
+			overflow = int16(int8(result)) != result
 		case 2:
 			result := int32(int16(a)) * int32(int16(val))
 			c.writeRegSized(RAX, 2, uint64(uint16(result)))
 			c.writeRegSized(RDX, 2, uint64(uint16(result>>16)))
+			overflow = int32(int16(result)) != result
 		case 4:
 			result := int64(int32(a)) * int64(int32(val))
 			c.writeRegSized(RAX, 4, uint64(uint32(result)))
 			c.writeRegSized(RDX, 4, uint64(uint32(result>>32)))
+			overflow = int64(int32(result)) != result
 		case 8:
 			// Signed 128-bit multiply
 			hi, lo := imul128(int64(a), int64(val))
 			c.Regs[RAX] = lo
 			c.Regs[RDX] = hi
+			overflow = hi != uint64(int64(lo)>>63)
+		}
+		c.Rflags &^= flagCF | flagOF
+		if overflow {
+			c.Rflags |= flagCF | flagOF
 		}
 		return nil
 
@@ -6827,7 +7938,7 @@ func (c *CPU) execGroup3(pfx *prefixState, size int) error {
 			c.writeRegSized(RAX, 4, dividend/val)
 			c.writeRegSized(RDX, 4, dividend%val)
 		case 8:
-			// 128÷64 division
+			// 128/64 division
 			if c.Regs[RDX] == 0 {
 				c.Regs[RAX] = a / val
 				c.Regs[RDX] = a % val
@@ -6849,6 +7960,11 @@ func (c *CPU) execGroup3(pfx *prefixState, size int) error {
 			d := int8(val)
 			c.writeRegSized(RAX, 1, uint64(int8(ax/int16(d))))
 			c.Regs[RAX] = (c.Regs[RAX] & ^uint64(0xFF00)) | (uint64(uint8(int8(ax%int16(d)))) << 8)
+		case 2:
+			dividend := int32(int16(c.readRegSized(RDX, 2)))<<16 | int32(uint16(c.readRegSized(RAX, 2)))
+			divisor := int32(int16(val))
+			c.writeRegSized(RAX, 2, uint64(uint16(int16(dividend/divisor))))
+			c.writeRegSized(RDX, 2, uint64(uint16(int16(dividend%divisor))))
 		case 4:
 			dividend := int64(int32(c.readRegSized(RDX, 4)))<<32 | int64(c.readRegSized(RAX, 4))
 			divisor := int64(int32(val))
@@ -6998,7 +8114,7 @@ func (c *CPU) execMOVS(pfx *prefixState, size int) error {
 	// In 32-bit (PE32) mode the string op uses ECX/ESI/EDI (32-bit). Masking is
 	// essential: if the high 32 bits of RCX hold stale data, a 64-bit count
 	// would make `rep movsb` copy billions of bytes and trash all of memory
-	// (observed: stack corruption → bogus return address).
+	// (observed: stack corruption  to  bogus return address).
 	mask := uint64(0xFFFFFFFFFFFFFFFF)
 	if c.Mode32 {
 		mask = 0xFFFFFFFF

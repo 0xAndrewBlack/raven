@@ -358,9 +358,24 @@ type FindHandle struct {
 	Entries []os.DirEntry
 	Idx     int
 	Dir     string
+	mu      sync.Mutex
 }
 
 func (f *FindHandle) HandleType() string { return "find" }
+
+func (f *FindHandle) Next() (os.DirEntry, int, int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	index := f.Idx
+	total := len(f.Entries)
+	if index >= total {
+		return nil, index, total, false
+	}
+	entry := f.Entries[index]
+	f.Idx++
+	return entry, index, total, true
+}
 
 // ThreadHandle represents a Win32 thread handle.
 type ThreadHandle struct {
@@ -1307,6 +1322,33 @@ func (ht *HandleTable) GetThread(h Handle) *ThreadHandle {
 		return nil
 	}
 	return th
+}
+
+func (ht *HandleTable) SetThreadExitCodeByTID(tid int, exitCode uint32) bool {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	for _, obj := range ht.handles {
+		if thread, ok := obj.(*ThreadHandle); ok && thread.TID == tid {
+			thread.ExitCode = exitCode
+			return true
+		}
+	}
+	return false
+}
+
+func (ht *HandleTable) ThreadExitCode(h Handle) (exitCode uint32, active, ok bool) {
+	ht.mu.RLock()
+	defer ht.mu.RUnlock()
+	thread, ok := ht.handles[h].(*ThreadHandle)
+	if !ok {
+		return 0, false, false
+	}
+	select {
+	case <-thread.Done:
+		return thread.ExitCode, false, true
+	default:
+		return thread.ExitCode, true, true
+	}
 }
 
 // GetRegKey returns the RegistryKeyHandle for a handle, or nil.

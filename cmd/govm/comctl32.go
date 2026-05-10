@@ -3,11 +3,50 @@
 package main
 
 import (
+	"fmt"
+	"strings"
+	"sync"
+
 	comctl32pkg "github.com/mirkobrombin/Raven/pkg/comctl32"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
-	"sync"
 )
+
+func rebindOrdinalImports(hctx *HandlerCtx, synth *ntapi.SynthPE, dllName string, bindings map[uint16]string) int {
+	if hctx == nil || synth == nil || hctx.Mem == nil {
+		return 0
+	}
+	rebound := 0
+	for ordinal, name := range bindings {
+		addr := synth.Exports[name]
+		if addr == 0 {
+			placeholder := fmt.Sprintf("ord_%d", ordinal)
+			addr = synth.Exports[placeholder]
+			if addr != 0 {
+				synth.Exports[name] = addr
+			}
+		}
+		if addr == 0 {
+			continue
+		}
+		synth.ExportOrds[ordinal] = addr
+		if hctx.MainModule == nil {
+			continue
+		}
+		for _, imp := range hctx.MainModule.Imports {
+			if imp.FuncName != "" || imp.Ordinal != ordinal || !strings.EqualFold(imp.DLLName, dllName) {
+				continue
+			}
+			if hctx.MainModule.Is64 {
+				hctx.Mem.Write64Raw(imp.IATSlot, addr)
+			} else {
+				hctx.Mem.Write32Raw(imp.IATSlot, uint32(addr))
+			}
+			rebound++
+		}
+	}
+	return rebound
+}
 
 func registerComctl32Handlers(hctx *HandlerCtx) {
 	d := hctx.Disp
@@ -26,7 +65,16 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	if !ok {
 		return
 	}
-	_ = comctl32
+	rebindOrdinalImports(hctx, comctl32, "comctl32.dll", map[uint16]string{
+		2:   "MenuHelp",
+		4:   "GetEffectiveClientRect",
+		236: "Str_SetPtrW",
+		329: "DPA_Destroy",
+		334: "DPA_InsertPtr",
+		337: "DPA_DeleteAllPtrs",
+		338: "DPA_Sort",
+		340: "DPA_CreateEx",
+	})
 
 	// MUI language: stored per-process; default en-US (0x0409).
 	muiLanguage := uint32(0x0409)
@@ -937,7 +985,11 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		// Try built-in window procedure first (handles builtin controls),
 		// then fall back to 0 (DefWindowProcW default for most messages).
 		if hctx.BuiltinWndProc != nil {
-			if res, handled := hctx.BuiltinWndProc(hwnd, uMsg, wParam, lParam); handled {
+			wasCallingBuiltin := hctx.CallBuiltinControl
+			hctx.CallBuiltinControl = true
+			res, handled := hctx.BuiltinWndProc(hwnd, uMsg, wParam, lParam)
+			hctx.CallBuiltinControl = wasCallingBuiltin
+			if handled {
 				ctx.SetReturn(res)
 				return 0
 			}
@@ -1389,14 +1441,30 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		// Stub: copy GetClientRect result
 		hwnd := ctx.Arg(0)
 		prc := ctx.Arg(1)
-		if prc != 0 {
-			if cs, ok := hwndChildren[hwnd]; ok {
-				ctx.Mem.Write32(prc, 0)
-				ctx.Mem.Write32(prc+4, 0)
-				ctx.Mem.Write32(prc+8, uint32(cs.w))
-				ctx.Mem.Write32(prc+12, uint32(cs.h))
-			}
+		if prc == 0 {
+			return 0
 		}
+		var width, height int32
+		if cs := hwndChildren[hwnd]; cs != nil {
+			width, height = cs.w, cs.h
+		} else if win := hctx.WlWindows[hwnd]; win != nil {
+			width, height = win.Width, win.Height
+		} else if hwnd == hctx.MainHWND && hctx.WlWindow != nil {
+			width, height = hctx.WlWindow.Width, hctx.WlWindow.Height
+		} else {
+			width, height = 800, 600
+		}
+		if width < 0 {
+			width = 0
+		}
+		if height < 0 {
+			height = 0
+		}
+		ctx.Mem.Write32(prc, 0)
+		ctx.Mem.Write32(prc+4, 0)
+		ctx.Mem.Write32(prc+8, uint32(width))
+		ctx.Mem.Write32(prc+12, uint32(height))
+		ravelog.Logf("[comctl32] GetEffectiveClientRect hwnd=0x%x -> 0,0,%d,%d\n", hwnd, width, height)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "CreateMappedBitmap", func(ctx *ntapi.TrapContext) uint32 {
@@ -2782,20 +2850,63 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		lppDest := ctx.Arg(0)
 		lpSrc := ctx.Arg(1)
 		ravelog.Logf("[comctl32] Str_SetPtrA dest=0x%x src=0x%x\n", lppDest, lpSrc)
-		if lppDest != 0 {
-			ctx.Mem.Write64(lppDest, lpSrc)
+		if lppDest == 0 {
+			return 0
 		}
-		ctx.SetReturn(1) // TRUE
+		is32 := ctx.State != nil && ctx.State.Is32
+		old, _ := readGuestPointer(ctx.Mem, lppDest, is32)
+		if lpSrc == 0 {
+			if old != 0 {
+				hctx.HeapFree(old)
+			}
+			writeGuestPointer(ctx.Mem, lppDest, 0, is32)
+			ctx.SetReturn(1)
+			return 0
+		}
+		source := hctx.ReadGuestString(lpSrc)
+		replacement := hctx.HeapAlloc(uint64(len(source)+1), false)
+		if replacement == 0 {
+			return 0
+		}
+		ctx.Mem.WriteBytes(replacement, append([]byte(source), 0))
+		if old != 0 {
+			hctx.HeapFree(old)
+		}
+		writeGuestPointer(ctx.Mem, lppDest, replacement, is32)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "Str_SetPtrW", func(ctx *ntapi.TrapContext) uint32 {
 		lppDest := ctx.Arg(0)
 		lpSrc := ctx.Arg(1)
 		ravelog.Logf("[comctl32] Str_SetPtrW dest=0x%x src=0x%x\n", lppDest, lpSrc)
-		if lppDest != 0 {
-			ctx.Mem.Write64(lppDest, lpSrc)
+		if lppDest == 0 {
+			return 0
 		}
-		ctx.SetReturn(1) // TRUE
+		is32 := ctx.State != nil && ctx.State.Is32
+		old, _ := readGuestPointer(ctx.Mem, lppDest, is32)
+		if lpSrc == 0 {
+			if old != 0 {
+				hctx.HeapFree(old)
+			}
+			writeGuestPointer(ctx.Mem, lppDest, 0, is32)
+			ctx.SetReturn(1)
+			return 0
+		}
+		source := utf16Encode(hctx.ReadGuestUTF16(lpSrc))
+		replacement := hctx.HeapAlloc(uint64((len(source)+1)*2), false)
+		if replacement == 0 {
+			return 0
+		}
+		for i, ch := range source {
+			ctx.Mem.Write16(replacement+uint64(i)*2, ch)
+		}
+		ctx.Mem.Write16(replacement+uint64(len(source))*2, 0)
+		if old != 0 {
+			hctx.HeapFree(old)
+		}
+		writeGuestPointer(ctx.Mem, lppDest, replacement, is32)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(comctl32, "TextOutWrap", func(ctx *ntapi.TrapContext) uint32 {

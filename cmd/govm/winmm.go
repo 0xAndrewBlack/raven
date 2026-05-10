@@ -1667,7 +1667,6 @@ func registerWinmmHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "timeGetTime", func(ctx *ntapi.TrapContext) uint32 {
-		ravelog.Logf("[winmm] timeGetTime\n")
 		ctx.SetReturn(uint64(uint32(time.Since(hctx.StartTime) / time.Millisecond)))
 		return 0
 	})

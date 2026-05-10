@@ -38,8 +38,50 @@ func (dc *DC) FillRect(left, top, right, bottom int32, color uint32) {
 
 // FillRectBrush fills using the DC's current brush color.
 func (dc *DC) FillRectBrush(left, top, right, bottom int32) {
-	if color, ok := dc.brushColor(); ok {
-		dc.FillRect(left, top, right, bottom, color)
+	if dc.Brush == nil || dc.Brush.Style == 1 {
+		return
+	}
+	if dc.Brush.Style != 2 {
+		dc.FillRect(left, top, right, bottom, dc.Brush.Color)
+		return
+	}
+
+	x0 := left + dc.OriginX
+	y0 := top + dc.OriginY
+	x1 := right + dc.OriginX
+	y1 := bottom + dc.OriginY
+	x0, y0, x1, y1, ok := dc.clipRect(x0, y0, x1, y1)
+	if !ok {
+		return
+	}
+	if dc.BkMode != 1 {
+		dc.target().FillRect(x0, y0, x1, y1, dc.BkColor)
+	}
+	match := func(x, y int32) bool {
+		switch dc.Brush.Hatch {
+		case 0:
+			return y&7 == 0
+		case 1:
+			return x&7 == 0
+		case 2:
+			return (x+y)&7 == 0
+		case 3:
+			return (x-y)&7 == 0
+		case 4:
+			return x&7 == 0 || y&7 == 0
+		case 5:
+			return (x+y)&7 == 0 || (x-y)&7 == 0
+		default:
+			return false
+		}
+	}
+	dc.Dirty = true
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			if match(x, y) {
+				dc.target().SetPixel(x, y, dc.Brush.Color)
+			}
+		}
 	}
 }
 

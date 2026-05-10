@@ -3,8 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 
 	gdi "github.com/mirkobrombin/Raven/pkg/gdi"
@@ -14,8 +20,96 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/win32"
 )
 
+type printJobState struct {
+	outputPath  string
+	page        int
+	docStarted  bool
+	pageStarted bool
+	infoOnly    bool
+	copies      uint16
+}
+
+func (job *printJobState) beginDoc(hasDocInfo bool) bool {
+	if job == nil || job.infoOnly || job.docStarted || !hasDocInfo {
+		return false
+	}
+	job.docStarted = true
+	return true
+}
+
+func (job *printJobState) beginPage() bool {
+	if job == nil || !job.docStarted || job.pageStarted {
+		return false
+	}
+	job.pageStarted = true
+	return true
+}
+
+func (job *printJobState) completePage() bool {
+	if job == nil || !job.docStarted || !job.pageStarted {
+		return false
+	}
+	job.page++
+	job.pageStarted = false
+	return true
+}
+
+func (job *printJobState) canEndDoc() bool {
+	return job != nil && job.docStarted && !job.pageStarted
+}
+
+func savePrintSurface(path string, surface *gdi.Surface) error {
+	if surface == nil || surface.Width <= 0 || surface.Height <= 0 {
+		return fmt.Errorf("invalid print surface")
+	}
+	img := image.NewRGBA(image.Rect(0, 0, int(surface.Width), int(surface.Height)))
+	for y := int32(0); y < surface.Height; y++ {
+		for x := int32(0); x < surface.Width; x++ {
+			off := int(y*surface.Stride + x*4)
+			img.SetRGBA(int(x), int(y), color.RGBA{R: surface.Pix[off+2], G: surface.Pix[off+1], B: surface.Pix[off], A: 0xFF})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return err
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, buf.Bytes(), 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func printPagePath(path string, page int) string {
+	if page <= 1 {
+		return path
+	}
+	ext := filepath.Ext(path)
+	return strings.TrimSuffix(path, ext) + fmt.Sprintf("-page-%d", page) + ext
+}
+
+func printCopyPath(path string, page, copy int) string {
+	pagePath := printPagePath(path, page)
+	if copy <= 1 {
+		return pagePath
+	}
+	ext := filepath.Ext(pagePath)
+	return strings.TrimSuffix(pagePath, ext) + fmt.Sprintf("-copy-%d", copy) + ext
+}
+
 type gdiDrawTextAdapter struct {
 	dc *gdi.DC
+}
+
+func outlineTextMetricSize(is32 bool) uint64 {
+	if is32 {
+		return 216
+	}
+	return 232
 }
 
 func (a gdiDrawTextAdapter) TextExtent(s string) (w, h int32) {
@@ -322,6 +416,9 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
+		hctx.PrintJobsMu.Lock()
+		delete(hctx.PrintJobs, hdc)
+		hctx.PrintJobsMu.Unlock()
 		gdiMgr.DeleteDC(hdc)
 		ctx.SetReturn(1)
 		return 0
@@ -425,18 +522,28 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetDeviceCaps", func(ctx *ntapi.TrapContext) uint32 {
+		hdc := ctx.Arg(0)
 		idx := ctx.Arg(1)
 		val := uint64(0)
 		w, h := uint64(1920), uint64(1080)
-		if hctx.WlWindow != nil {
+		if dc := getDC(hdc); dc != nil && dc.Target != nil {
+			w = uint64(dc.Target.Width)
+			h = uint64(dc.Target.Height)
+		} else if hctx.WlWindow != nil {
 			w = uint64(hctx.WlWindow.Width)
 			h = uint64(hctx.WlWindow.Height)
 		}
+		hctx.PrintJobsMu.Lock()
+		_, isPrinter := hctx.PrintJobs[hdc]
+		hctx.PrintJobsMu.Unlock()
 		switch idx {
 		case 0:
 			val = 0 // DRIVERVERSION
 		case 2:
 			val = 1 // TECHNOLOGY: DT_RASDISPLAY
+			if isPrinter {
+				val = 2 // DT_RASPRINTER
+			}
 		case 4:
 			val = 508 // HORZSIZE (mm)
 		case 6:
@@ -580,8 +687,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write8(pTM+52, italic)
 			ctx.Mem.Write8(pTM+53, underline)
 			ctx.Mem.Write8(pTM+54, 0)
-			ctx.Mem.Write8(pTM+55, 0x01) // TMPF_FIXED_PITCH
-			ctx.Mem.Write8(pTM+56, 0)    // ANSI_CHARSET
+			ctx.Mem.Write8(pTM+55, gdi.TextMetricPitchAndFamily(f))
+			ctx.Mem.Write8(pTM+56, 0) // ANSI_CHARSET
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -627,8 +734,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			ctx.Mem.Write8(pTM+48, italic)
 			ctx.Mem.Write8(pTM+49, underline)
 			ctx.Mem.Write8(pTM+50, 0)
-			ctx.Mem.Write8(pTM+51, 0x01) // TMPF_FIXED_PITCH
-			ctx.Mem.Write8(pTM+52, 0)    // ANSI_CHARSET
+			ctx.Mem.Write8(pTM+51, gdi.TextMetricPitchAndFamily(f))
+			ctx.Mem.Write8(pTM+52, 0) // ANSI_CHARSET
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -726,15 +833,54 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetTextExtentExPointW", func(ctx *ntapi.TrapContext) uint32 {
 		hdc := ctx.Arg(0)
+		lpString := ctx.Arg(1)
 		nLen := int32(ctx.Arg(2))
-		pSize := ctx.Arg(5)
+		maxExtent := int32(ctx.Arg(3))
+		pFit := ctx.Arg(4)
+		pDx := ctx.Arg(5)
+		pSize := ctx.Arg(6)
+		if nLen < 0 || nLen > 8192 || (nLen > 0 && lpString == 0) {
+			ctx.SetReturn(0)
+			return 0
+		}
 		dc := getDC(hdc)
 		f := dc.Font
 		if f == nil {
 			f = gdi.DefaultFont()
 		}
+		pixSize := f.Height
+		if pixSize < 0 {
+			pixSize = -pixSize
+		}
+		if pixSize == 0 {
+			pixSize = 12
+		}
+		width := int32(0)
+		fit := int32(0)
+		for i := int32(0); i < nLen; i++ {
+			ch, _ := ctx.Mem.Read16(lpString + uint64(i)*2)
+			advance := f.AveCharWidth
+			if f.FaceID >= 0 {
+				if glyph := gdi.GlyphFor(f.FaceID, pixSize, rune(ch)); glyph != nil {
+					advance = glyph.Advance
+				}
+			}
+			if i > 0 {
+				width += dc.CharExtra
+			}
+			width += advance
+			if pDx != 0 {
+				ctx.Mem.Write32(pDx+uint64(i)*4, uint32(width))
+			}
+			if maxExtent < 0 || width <= maxExtent {
+				fit = i + 1
+			}
+		}
+		if pFit != 0 {
+			ctx.Mem.Write32(pFit, uint32(fit))
+		}
 		if pSize != 0 {
-			ctx.Mem.Write32(pSize, uint32(nLen*f.AveCharWidth))
+			ctx.Mem.Write32(pSize, uint32(width))
 			ctx.Mem.Write32(pSize+4, uint32(f.CellHeight))
 		}
 		ctx.SetReturn(1)
@@ -825,10 +971,14 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		x := int32(ctx.Arg(1))
 		y := int32(ctx.Arg(2))
 		lpStr := ctx.Arg(3)
-		nLen := int(ctx.Arg(4))
-		text := readGuestUTF16(lpStr)
-		if nLen > 0 && nLen < len(text) {
-			text = text[:nLen]
+		nLen := int(int32(ctx.Arg(4)))
+		if nLen < 0 || nLen > 8192 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		text := ""
+		if lpStr != 0 && nLen > 0 {
+			text = readGuestUTF16N(lpStr, nLen)
 		}
 		dc.TextOut(x, y, text, false)
 		ctx.SetReturn(1)
@@ -841,10 +991,14 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		opts := uint32(ctx.Arg(3))
 		lprc := ctx.Arg(4)
 		lpStr := ctx.Arg(5)
-		nLen := int(ctx.Arg(6))
-		text := readGuestUTF16(lpStr)
-		if nLen > 0 && nLen < len(text) {
-			text = text[:nLen]
+		nLen := int(uint32(ctx.Arg(6)))
+		if nLen > 8192 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		text := ""
+		if lpStr != 0 && nLen > 0 {
+			text = readGuestUTF16N(lpStr, nLen)
 		}
 		if lprc != 0 {
 			rL, _ := mem.Read32(lprc)
@@ -2129,10 +2283,9 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "GetOutlineTextMetricsW", func(ctx *ntapi.TrapContext) uint32 {
-		// OUTLINETEXTMETRICW is ~276 bytes. Return size=276, fill TEXTMETRICW at offset 4.
 		cb := ctx.Arg(1)
 		pOTM := ctx.Arg(2)
-		const otmSize = 276
+		otmSize := outlineTextMetricSize(ctx.State != nil && ctx.State.Is32)
 		if cb == 0 || pOTM == 0 {
 			ctx.SetReturn(otmSize)
 			return 0
@@ -2150,7 +2303,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		for i := uint64(0); i < otmSize; i++ {
 			ctx.Mem.Write8(pOTM+i, 0)
 		}
-		ctx.Mem.Write32(pOTM, otmSize) // otmSize
+		ctx.Mem.Write32(pOTM, uint32(otmSize)) // otmSize
 		// TEXTMETRICW at pOTM+4 (60 bytes)
 		tm := pOTM + 4
 		ch := int32(f.CellHeight)
@@ -2177,8 +2330,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		ctx.Mem.Write8(tm+52, italic)  // tmItalic
 		ctx.Mem.Write8(tm+53, 0)       // tmUnderlined
 		ctx.Mem.Write8(tm+54, 0)       // tmStruckOut
-		ctx.Mem.Write8(tm+55, 1|32)    // tmPitchAndFamily = TMPF_FIXED_PITCH|TMPF_TRUETYPE
-		ctx.Mem.Write8(tm+56, 0)       // tmCharSet = ANSI_CHARSET
+		ctx.Mem.Write8(tm+55, gdi.TextMetricPitchAndFamily(f))
+		ctx.Mem.Write8(tm+56, 0) // tmCharSet = ANSI_CHARSET
 		// OUTLINETEXTMETRICW fields: pOTM+4(TEXTMETRICW,60)+otmFiller(1)+PANOSE(10)+pad(1)=pOTM+76
 		ctx.Mem.Write32(pOTM+96, 2048)                       // otmEMSquare
 		ctx.Mem.Write32(pOTM+100, uint32(f.Ascent))          // otmAscent
@@ -2359,7 +2512,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 
 		rsp := rr.ReadReg(4)
 		retAddr, _ := mem.Read64(rsp)
-		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+		syncStack := hctx.syncStack(ctx)
+		*syncStack = append(*syncStack, syncDispatchFrame{
 			queue:               rest,
 			retAddr:             retAddr,
 			hwnd:                1, // fallback return value
@@ -2488,7 +2642,8 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 
 		rsp := rr.ReadReg(4)
 		retAddr, _ := mem.Read64(rsp)
-		hctx.SyncStack = append(hctx.SyncStack, syncDispatchFrame{
+		syncStack := hctx.syncStack(ctx)
+		*syncStack = append(*syncStack, syncDispatchFrame{
 			queue:               rest,
 			retAddr:             retAddr,
 			hwnd:                1,
@@ -3970,7 +4125,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		x := int32(ctx.Arg(1))
 		y := int32(ctx.Arg(2))
 		lpStr := ctx.Arg(3)
-		nLen := int(ctx.Arg(4))
+		nLen := int(uint32(ctx.Arg(4)))
 		if lpStr != 0 && nLen > 0 {
 			buf := make([]byte, nLen)
 			for i := 0; i < nLen; i++ {
@@ -3992,7 +4147,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		opts := uint32(ctx.Arg(3))
 		lprc := ctx.Arg(4)
 		lpStr := ctx.Arg(5)
-		nLen := int(ctx.Arg(6))
+		nLen := int(uint32(ctx.Arg(6)))
 		text := ""
 		if lpStr != 0 && nLen > 0 {
 			buf := make([]byte, nLen)
@@ -4279,9 +4434,19 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 	// ═══════════════════════════════════════════════════════════════
 
 	d.RegisterAutoStubHandler(gdi32, "AbortDoc", func(ctx *ntapi.TrapContext) uint32 {
-		arg0 := ctx.Arg(0)
-		_ = arg0
-		ravelog.Logf("[gdi32] AbortDoc(0x%x)\n", arg0)
+		hdc := ctx.Arg(0)
+		hctx.PrintJobsMu.Lock()
+		job := hctx.PrintJobs[hdc]
+		ok := job != nil && job.docStarted
+		if ok {
+			delete(hctx.PrintJobs, hdc)
+		}
+		hctx.PrintJobsMu.Unlock()
+		if !ok {
+			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		ravelog.Logf("[gdi32] AbortDoc(0x%x)\n", hdc)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5289,9 +5454,17 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EndDoc", func(ctx *ntapi.TrapContext) uint32 {
-		arg0 := ctx.Arg(0)
-		_ = arg0
-		ravelog.Logf("[gdi32] EndDoc(0x%x)\n", arg0)
+		hdc := ctx.Arg(0)
+		hctx.PrintJobsMu.Lock()
+		job := hctx.PrintJobs[hdc]
+		if !job.canEndDoc() {
+			hctx.PrintJobsMu.Unlock()
+			ctx.SetReturn(^uint64(0)) // SP_ERROR
+			return 0
+		}
+		delete(hctx.PrintJobs, hdc)
+		hctx.PrintJobsMu.Unlock()
+		ravelog.Logf("[gdi32] EndDoc(0x%x) output=%q pages=%d\n", hdc, job.outputPath, job.page)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -5303,9 +5476,38 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "EndPage", func(ctx *ntapi.TrapContext) uint32 {
-		arg0 := ctx.Arg(0)
-		_ = arg0
-		ravelog.Logf("[gdi32] EndPage(0x%x)\n", arg0)
+		hdc := ctx.Arg(0)
+		hctx.PrintJobsMu.Lock()
+		job := hctx.PrintJobs[hdc]
+		if job == nil || !job.docStarted || !job.pageStarted {
+			hctx.PrintJobsMu.Unlock()
+			ctx.SetReturn(^uint64(0)) // SP_ERROR
+			return 0
+		}
+		dc := getDC(hdc)
+		if dc == nil || dc.Target == nil {
+			hctx.PrintJobsMu.Unlock()
+			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		page := job.page + 1
+		copies := int(job.copies)
+		if copies < 1 {
+			copies = 1
+		}
+		for copy := 1; copy <= copies; copy++ {
+			path := printCopyPath(job.outputPath, page, copy)
+			if err := savePrintSurface(path, dc.Target); err != nil {
+				hctx.PrintJobsMu.Unlock()
+				ravelog.Logf("[gdi32] EndPage(0x%x) failed: %v\n", hdc, err)
+				ctx.SetReturn(^uint64(0))
+				return 0
+			}
+			ravelog.Logf("[gdi32] EndPage(0x%x) output=%q copy=%d\n", hdc, path, copy)
+		}
+		job.completePage()
+		dc.Target.FillRect(0, 0, dc.Target.Width, dc.Target.Height, 0xFFFFFF)
+		hctx.PrintJobsMu.Unlock()
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8097,16 +8299,32 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "StartDocA", func(ctx *ntapi.TrapContext) uint32 {
-		arg0 := ctx.Arg(0)
-		_ = arg0
-		ravelog.Logf("[gdi32] StartDocA(0x%x)\n", arg0)
+		hdc := ctx.Arg(0)
+		docInfo := ctx.Arg(1)
+		hctx.PrintJobsMu.Lock()
+		job := hctx.PrintJobs[hdc]
+		if !job.beginDoc(docInfo != 0) {
+			hctx.PrintJobsMu.Unlock()
+			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		hctx.PrintJobsMu.Unlock()
+		ravelog.Logf("[gdi32] StartDocA(0x%x)\n", hdc)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "StartDocW", func(ctx *ntapi.TrapContext) uint32 {
-		arg0 := ctx.Arg(0)
-		_ = arg0
-		ravelog.Logf("[gdi32] StartDocW(0x%x)\n", arg0)
+		hdc := ctx.Arg(0)
+		docInfo := ctx.Arg(1)
+		hctx.PrintJobsMu.Lock()
+		job := hctx.PrintJobs[hdc]
+		if !job.beginDoc(docInfo != 0) {
+			hctx.PrintJobsMu.Unlock()
+			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		hctx.PrintJobsMu.Unlock()
+		ravelog.Logf("[gdi32] StartDocW(0x%x)\n", hdc)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8118,9 +8336,16 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(gdi32, "StartPage", func(ctx *ntapi.TrapContext) uint32 {
-		arg0 := ctx.Arg(0)
-		_ = arg0
-		ravelog.Logf("[gdi32] StartPage(0x%x)\n", arg0)
+		hdc := ctx.Arg(0)
+		hctx.PrintJobsMu.Lock()
+		job := hctx.PrintJobs[hdc]
+		if !job.beginPage() {
+			hctx.PrintJobsMu.Unlock()
+			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		hctx.PrintJobsMu.Unlock()
+		ravelog.Logf("[gdi32] StartPage(0x%x)\n", hdc)
 		ctx.SetReturn(1)
 		return 0
 	})

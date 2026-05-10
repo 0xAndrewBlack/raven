@@ -8,37 +8,37 @@ import "sync"
 
 // Window styles (WS_*)
 const (
-	WS_OVERLAPPED   = 0x00000000
-	WS_POPUP        = 0x80000000
-	WS_CHILD        = 0x40000000
-	WS_MINIMIZE     = 0x20000000
-	WS_VISIBLE      = 0x10000000
-	WS_DISABLED     = 0x08000000
-	WS_CLIPSIBLINGS = 0x04000000
-	WS_CLIPCHILDREN = 0x02000000
-	WS_MAXIMIZE     = 0x01000000
-	WS_CAPTION      = 0x00C00000
-	WS_BORDER       = 0x00800000
-	WS_DLGFRAME     = 0x00400000
-	WS_VSCROLL      = 0x00200000
-	WS_HSCROLL      = 0x00100000
-	WS_SYSMENU      = 0x00080000
-	WS_THICKFRAME   = 0x00040000
-	WS_MINIMIZEBOX  = 0x00020000
-	WS_MAXIMIZEBOX  = 0x00010000
+	WS_OVERLAPPED       = 0x00000000
+	WS_POPUP            = 0x80000000
+	WS_CHILD            = 0x40000000
+	WS_MINIMIZE         = 0x20000000
+	WS_VISIBLE          = 0x10000000
+	WS_DISABLED         = 0x08000000
+	WS_CLIPSIBLINGS     = 0x04000000
+	WS_CLIPCHILDREN     = 0x02000000
+	WS_MAXIMIZE         = 0x01000000
+	WS_CAPTION          = 0x00C00000
+	WS_BORDER           = 0x00800000
+	WS_DLGFRAME         = 0x00400000
+	WS_VSCROLL          = 0x00200000
+	WS_HSCROLL          = 0x00100000
+	WS_SYSMENU          = 0x00080000
+	WS_THICKFRAME       = 0x00040000
+	WS_MINIMIZEBOX      = 0x00020000
+	WS_MAXIMIZEBOX      = 0x00010000
 	WS_OVERLAPPEDWINDOW = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
 		WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
 
 	// Extended styles (WS_EX_*)
-	WS_EX_DLGMODALFRAME  = 0x00000001
-	WS_EX_STATICEDGE     = 0x00020000
-	WS_EX_CLIENTEDGE     = 0x00000200
-	WS_EX_TOOLWINDOW     = 0x00000080
-	WS_EX_LAYERED        = 0x00080000
-	WS_EX_LAYOUTRTL      = 0x00400000
-	WS_EX_CONTROLPARENT  = 0x00010000
-	WS_EX_APPWINDOW      = 0x00040000
-	WS_EX_WINDOWEDGE     = 0x00000100
+	WS_EX_DLGMODALFRAME    = 0x00000001
+	WS_EX_STATICEDGE       = 0x00020000
+	WS_EX_CLIENTEDGE       = 0x00000200
+	WS_EX_TOOLWINDOW       = 0x00000080
+	WS_EX_LAYERED          = 0x00080000
+	WS_EX_LAYOUTRTL        = 0x00400000
+	WS_EX_CONTROLPARENT    = 0x00010000
+	WS_EX_APPWINDOW        = 0x00040000
+	WS_EX_WINDOWEDGE       = 0x00000100
 	WS_EX_OVERLAPPEDWINDOW = WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE
 
 	// GetWindowLong indices
@@ -51,7 +51,7 @@ const (
 	GWLP_HINSTANCE = -6
 	// GWLP_ID == GWL_ID == -12
 	GWLP_HWNDPARENT = -8
-	GWLP_USERDATA  = -21
+	GWLP_USERDATA   = -21
 )
 
 // Rect mirrors Windows RECT: left, top, right, bottom.
@@ -85,7 +85,7 @@ type Window struct {
 	LongPtr map[int32]uint64
 
 	// Dirty update region (for InvalidateRect / GetUpdateRect / BeginPaint).
-	Dirty    bool
+	Dirty     bool
 	DirtyRect Rect
 }
 
@@ -122,7 +122,7 @@ func (m *Manager) UpdatePos(wnd *Window, x, y, w, h int32) {
 	wnd.RcWindow = Rect{x, y, x + w, y + h}
 	bx, by := BorderSize(wnd.Style, wnd.ExStyle)
 	captionH := int32(0)
-	if (wnd.Style&WS_CAPTION) == WS_CAPTION {
+	if (wnd.Style & WS_CAPTION) == WS_CAPTION {
 		if wnd.ExStyle&WS_EX_TOOLWINDOW != 0 {
 			captionH = int32(GetSystemMetrics(SM_CYSMCAPTION))
 		} else {
@@ -150,6 +150,45 @@ func (m *Manager) Destroy(hwnd uint64) {
 	m.mu.Lock()
 	delete(m.windows, hwnd)
 	m.mu.Unlock()
+}
+
+func (m *Manager) SetParent(hwnd, parent uint64) (uint64, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	wnd := m.windows[hwnd]
+	if wnd == nil {
+		return 0, false
+	}
+	oldParent := wnd.Parent
+	wnd.Parent = parent
+	return oldParent, true
+}
+
+func (m *Manager) Parent(hwnd uint64) (uint64, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	wnd := m.windows[hwnd]
+	if wnd == nil {
+		return 0, false
+	}
+	return wnd.Parent, true
+}
+
+func (m *Manager) SetDisabled(hwnd uint64, disabled bool) (bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	wnd := m.windows[hwnd]
+	if wnd == nil {
+		return false, false
+	}
+	wasDisabled := wnd.Style&WS_DISABLED != 0
+	if disabled {
+		wnd.Style |= WS_DISABLED
+	} else {
+		wnd.Style &^= WS_DISABLED
+	}
+	wnd.LongPtr[GWL_STYLE] = uint64(wnd.Style)
+	return wasDisabled, true
 }
 
 // SetLong stores a window long value (GWL_* index).

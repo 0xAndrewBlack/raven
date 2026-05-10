@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
@@ -30,6 +31,11 @@ import (
 type GlyphKey struct {
 	FaceID int
 	Size   int32 // em height in pixels (absolute value of LOGFONT.lfHeight)
+	Rune   rune
+}
+
+type glyphFallbackKey struct {
+	FaceID int
 	Rune   rune
 }
 
@@ -57,6 +63,7 @@ type FontCache struct {
 	faceNames  []string                 // canonical family name indexed by face ID
 	faces      []*opentype.Font         // indexed by face ID
 	glyphs     map[GlyphKey]*GlyphImage // rasterized glyph cache
+	fallbacks  map[glyphFallbackKey]int
 }
 
 var globalFontCache = &FontCache{
@@ -64,6 +71,7 @@ var globalFontCache = &FontCache{
 	faceBySpec: make(map[string]int),
 	pathToFace: make(map[string]int),
 	glyphs:     make(map[GlyphKey]*GlyphImage),
+	fallbacks:  make(map[glyphFallbackKey]int),
 }
 
 // AddSearchDir registers a host directory where TTF files can be found.
@@ -86,7 +94,7 @@ func (fc *FontCache) scanDir(dir string) {
 		}
 		name := e.Name()
 		ext := strings.ToLower(filepath.Ext(name))
-		if ext != ".ttf" && ext != ".otf" {
+		if ext != ".ttf" && ext != ".otf" && ext != ".ttc" && ext != ".otc" {
 			continue
 		}
 		path := filepath.Join(dir, name)
@@ -95,24 +103,32 @@ func (fc *FontCache) scanDir(dir string) {
 			continue
 		}
 		stem := strings.TrimSuffix(name, filepath.Ext(name))
+		if ext == ".ttc" || ext == ".otc" {
+			collection, parseErr := opentype.ParseCollection(data)
+			if parseErr != nil {
+				continue
+			}
+			for index := 0; index < collection.NumFonts(); index++ {
+				fc.addFaceData(data, stem, index)
+			}
+			continue
+		}
 		fc.addFaceData(data, stem)
 	}
 }
 
 // addFaceData parses font bytes and registers the face. stem is used as fallback name.
 // Returns the new face ID, or -1 on parse error. Caller must not hold fc.mu.
-func (fc *FontCache) addFaceData(data []byte, stem string) int {
-	f, err := opentype.Parse(data)
+func (fc *FontCache) addFaceData(data []byte, stem string, faceIndex ...int) int {
+	f, err := parseOpenTypeFont(data, faceIndex...)
 	if err != nil {
 		return -1
 	}
 	// Try to extract the real family name from the name table.
 	canonical := stem
-	if sf, err2 := sfnt.Parse(data); err2 == nil {
-		var nameBuf sfnt.Buffer
-		if n, err3 := sf.Name(&nameBuf, sfnt.NameIDFamily); err3 == nil && n != "" {
-			canonical = n
-		}
+	var nameBuf sfnt.Buffer
+	if n, nameErr := f.Name(&nameBuf, sfnt.NameIDFamily); nameErr == nil && n != "" {
+		canonical = n
 	}
 	key := strings.ToLower(strings.TrimSpace(canonical))
 	fc.mu.Lock()
@@ -134,13 +150,14 @@ func (fc *FontCache) addFaceData(data []byte, stem string) int {
 	return id
 }
 
-func (fc *FontCache) addFaceFile(path, alias string) int {
+func (fc *FontCache) addFaceFile(path string, faceIndex int, alias string) int {
 	if path == "" {
 		return -1
 	}
 	cleanPath := filepath.Clean(path)
+	cacheKey := fmt.Sprintf("%s#%d", cleanPath, faceIndex)
 	fc.mu.Lock()
-	if id, ok := fc.pathToFace[cleanPath]; ok {
+	if id, ok := fc.pathToFace[cacheKey]; ok {
 		if alias != "" {
 			fc.faceBySpec[fontSpecKey(alias, false, false)] = id
 		}
@@ -153,21 +170,19 @@ func (fc *FontCache) addFaceFile(path, alias string) int {
 	if err != nil {
 		return -1
 	}
-	f, err := opentype.Parse(data)
+	f, err := parseOpenTypeFont(data, faceIndex)
 	if err != nil {
 		return -1
 	}
 	canonical := strings.TrimSuffix(filepath.Base(cleanPath), filepath.Ext(cleanPath))
-	if sf, err2 := sfnt.Parse(data); err2 == nil {
-		var nameBuf sfnt.Buffer
-		if n, err3 := sf.Name(&nameBuf, sfnt.NameIDFamily); err3 == nil && n != "" {
-			canonical = n
-		}
+	var nameBuf sfnt.Buffer
+	if n, nameErr := f.Name(&nameBuf, sfnt.NameIDFamily); nameErr == nil && n != "" {
+		canonical = n
 	}
 
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
-	if id, ok := fc.pathToFace[cleanPath]; ok {
+	if id, ok := fc.pathToFace[cacheKey]; ok {
 		if alias != "" {
 			fc.faceBySpec[fontSpecKey(alias, false, false)] = id
 		}
@@ -176,7 +191,7 @@ func (fc *FontCache) addFaceFile(path, alias string) int {
 	id := len(fc.faces)
 	fc.faces = append(fc.faces, f)
 	fc.faceNames = append(fc.faceNames, canonical)
-	fc.pathToFace[cleanPath] = id
+	fc.pathToFace[cacheKey] = id
 
 	canonicalKey := strings.ToLower(strings.TrimSpace(canonical))
 	if canonicalKey != "" {
@@ -194,6 +209,44 @@ func (fc *FontCache) addFaceFile(path, alias string) int {
 		fc.faceBySpec[fontSpecKey(alias, false, false)] = id
 	}
 	return id
+}
+
+func parseOpenTypeFont(data []byte, faceIndex ...int) (*opentype.Font, error) {
+	index := 0
+	if len(faceIndex) > 0 {
+		index = faceIndex[0]
+	}
+	if index == 0 {
+		if face, err := opentype.Parse(data); err == nil {
+			return face, nil
+		}
+	}
+	collection, err := opentype.ParseCollection(data)
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= collection.NumFonts() {
+		return nil, fmt.Errorf("font collection index %d out of range", index)
+	}
+	return collection.Font(index)
+}
+
+func glyphHasInk(glyph *GlyphImage, r rune) bool {
+	if glyph == nil {
+		return false
+	}
+	if unicode.IsSpace(r) || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) {
+		return true
+	}
+	if glyph.W <= 0 || glyph.H <= 0 {
+		return false
+	}
+	for i := 3; i < len(glyph.Pix); i += 4 {
+		if glyph.Pix[i] != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // findFace returns the face ID for a given logical font family name, or -1.
@@ -244,6 +297,11 @@ func (fc *FontCache) GetGlyph(faceID int, size int32, r rune) *GlyphImage {
 
 	face := fc.getFace(faceID)
 	if face == nil {
+		return nil
+	}
+	var glyphBuf sfnt.Buffer
+	index, err := face.GlyphIndex(&glyphBuf, r)
+	if err != nil || index == 0 {
 		return nil
 	}
 	if size <= 0 {
@@ -326,6 +384,39 @@ func (fc *FontCache) GetGlyph(faceID int, size int32, r rune) *GlyphImage {
 	return g
 }
 
+func (fc *FontCache) fallbackFace(faceID int, r rune) int {
+	key := glyphFallbackKey{FaceID: faceID, Rune: r}
+	fc.mu.Lock()
+	if fallback, ok := fc.fallbacks[key]; ok {
+		fc.mu.Unlock()
+		return fallback
+	}
+	family := ""
+	if faceID >= 0 && faceID < len(fc.faceNames) {
+		family = fc.faceNames[faceID]
+	}
+	fc.mu.Unlock()
+
+	fallback := -1
+	for _, match := range findSystemFallbackFonts(family, r) {
+		candidate := fc.addFaceFile(match.path, match.index, "")
+		if candidate < 0 || !glyphHasInk(fc.GetGlyph(candidate, 16, r), r) {
+			continue
+		}
+		fallback = candidate
+		break
+	}
+
+	fc.mu.Lock()
+	if cached, ok := fc.fallbacks[key]; ok {
+		fc.mu.Unlock()
+		return cached
+	}
+	fc.fallbacks[key] = fallback
+	fc.mu.Unlock()
+	return fallback
+}
+
 // HasFonts returns true if at least one TTF/OTF was loaded.
 func HasTTFFonts() bool {
 	globalFontCache.mu.Lock()
@@ -349,11 +440,11 @@ func ResolveFontFaceStyle(name string, bold, italic bool) int {
 		globalFontCache.mu.Unlock()
 		return id
 	}
-	path := findSystemFont(name, bold, italic)
-	if path == "" {
+	match := findSystemFont(name, bold, italic)
+	if match.path == "" {
 		return -1
 	}
-	id := globalFontCache.addFaceFile(path, name)
+	id := globalFontCache.addFaceFile(match.path, match.index, name)
 	if id < 0 {
 		return -1
 	}
@@ -365,7 +456,14 @@ func ResolveFontFaceStyle(name string, bold, italic bool) int {
 
 // GlyphFor returns the rasterized glyph for a given face/size/rune.
 func GlyphFor(faceID int, size int32, r rune) *GlyphImage {
-	return globalFontCache.GetGlyph(faceID, size, r)
+	if glyph := globalFontCache.GetGlyph(faceID, size, r); glyphHasInk(glyph, r) {
+		return glyph
+	}
+	fallback := globalFontCache.fallbackFace(faceID, r)
+	if fallback < 0 || fallback == faceID {
+		return nil
+	}
+	return globalFontCache.GetGlyph(fallback, size, r)
 }
 
 // FaceMetrics returns (cellHeight, ascent, descent, aveCharWidth) for the face at size.

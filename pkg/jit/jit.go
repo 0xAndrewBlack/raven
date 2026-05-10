@@ -13,6 +13,8 @@
 package jit
 
 import (
+	"encoding/binary"
+	"fmt"
 	"math"
 	"math/bits"
 	"sync"
@@ -30,62 +32,414 @@ const MaxBlockInsns = 256
 // It takes the CPU registers, flags, memory and returns the next RIP.
 type CompiledBlock func(s *State) error
 
+// Block pairs a compiled closure (or generated machine code) with a snapshot
+// of the code pages it was decoded from, so self-modifying code invalidates
+// it lazily and precisely.
+type Block struct {
+	fn        CompiledBlock
+	pageAddrs []uint64
+	pages     []*mmu.PageEntry
+	vers      []uint32
+	// native, when non-zero, is the entry point of generated machine code
+	// that supersedes fn; ninsn is how many guest instructions it retires.
+	native    uintptr
+	ninsn     int
+	nativeMMX bool
+	nativeMem bool
+}
+
+// Valid reports whether none of the block's code pages were written since
+// compilation.
+func (b *Block) Valid() bool {
+	for i, pe := range b.pages {
+		if pe.CodeVersion.Load() != b.vers[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (b *Block) validForMapping(mem *mmu.MMU) bool {
+	if !b.Valid() {
+		return false
+	}
+	for i, addr := range b.pageAddrs {
+		pe, _, err := mem.LookupRead(addr, mmu.PermExecute)
+		if err != nil || pe != b.pages[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Run executes the block: generated machine code when available, otherwise
+// the closure interpreter.
+func (b *Block) Run(s *State) error {
+	if b.native != 0 {
+		if b.nativeMMX && (s.FPUST == nil || s.FPUTop == nil || s.FPUTW == nil) ||
+			b.nativeMem && s.Mem.WatchCB != nil {
+			return b.fn(s)
+		}
+		retired, fallback := runNative(b.native, s)
+		if s.Instret != nil {
+			if fallback {
+				*s.Instret += retired
+			} else {
+				*s.Instret += uint64(b.ninsn)
+			}
+		}
+		return nil
+	}
+	return b.fn(s)
+}
+
 // State is the JIT execution context - a flat struct for fast access.
 type State struct {
-	Regs   *[16]uint64
-	RIP    *uint64
-	Rflags *uint64
-	Mem    *mmu.MMU
-	XMM    *[16][2]uint64
-	FSBase uint64
-	GSBase uint64
-	// Set to true if a vmcall/syscall was hit - caller must return to interpreter.
+	Regs     *[16]uint64
+	RIP      *uint64
+	Rflags   *uint64
+	Mem      *mmu.MMU
+	XMM      *[16][2]uint64
+	FPUST    *[8]float64
+	FPUTop   *int
+	FPUCW    *uint16
+	FPUSW    *uint16
+	FPUTW    *uint16
+	FSBase   uint64
+	GSBase   uint64
+	Mode32   bool
+	Fallback bool
+	// Set to true if a vmcall/syscall was hit; caller must return to interpreter.
 	Trap bool
+	// Instret, when non-nil, is incremented once per retired instruction so
+	// the CPU's counter (and the RDTSC it backs) advances at the same rate
+	// as under the interpreter.
+	Instret *uint64
+	// One-entry data-page caches for the block executor's memory helpers.
+	// Invalidated by the CPU wrapper whenever the mapping generation moves.
+	rdBase      uint64
+	rdPage      *mmu.PageEntry
+	wrBase      uint64
+	wrPage      *mmu.PageEntry
+	flatChecked bool
+	flat        []byte
+	perm        []byte
+}
+
+// InvalidatePageCache drops the cached data pages (after a mapping change).
+func (s *State) InvalidatePageCache() {
+	s.rdPage = nil
+	s.wrPage = nil
+}
+
+func (s *State) fillRead(addr uint64) {
+	if s.Mem.WatchCB != nil {
+		return
+	}
+	base := addr & mmu.PageMask
+	if pe, _, err := s.Mem.LookupRead(base, mmu.PermRead); err == nil {
+		s.rdPage, s.rdBase = pe, base
+	}
+}
+
+func (s *State) fillWrite(addr uint64) {
+	if s.Mem.WatchCB != nil {
+		return
+	}
+	base := addr & mmu.PageMask
+	if pe, _, err := s.Mem.LookupRead(base, mmu.PermRead|mmu.PermWrite); err == nil {
+		s.wrPage, s.wrBase = pe, base
+	}
+}
+
+func (s *State) read8(addr uint64) (uint8, error) {
+	if data, ok := s.flatAccess(addr, 1, mmu.PermRead); ok {
+		return data[0], nil
+	}
+	if s.rdPage != nil && addr&mmu.PageMask == s.rdBase {
+		return s.rdPage.Data[addr&(mmu.PageSize-1)], nil
+	}
+	s.fillRead(addr)
+	return s.Mem.Read8(addr)
+}
+
+func (s *State) read16(addr uint64) (uint16, error) {
+	if data, ok := s.flatAccess(addr, 2, mmu.PermRead); ok {
+		return binary.LittleEndian.Uint16(data), nil
+	}
+	off := addr & (mmu.PageSize - 1)
+	if s.rdPage != nil && addr&mmu.PageMask == s.rdBase && off <= mmu.PageSize-2 {
+		return binary.LittleEndian.Uint16(s.rdPage.Data[off:]), nil
+	}
+	s.fillRead(addr)
+	return s.Mem.Read16(addr)
+}
+
+func (s *State) read32(addr uint64) (uint32, error) {
+	if data, ok := s.flatAccess(addr, 4, mmu.PermRead); ok {
+		return binary.LittleEndian.Uint32(data), nil
+	}
+	off := addr & (mmu.PageSize - 1)
+	if s.rdPage != nil && addr&mmu.PageMask == s.rdBase && off <= mmu.PageSize-4 {
+		return binary.LittleEndian.Uint32(s.rdPage.Data[off:]), nil
+	}
+	s.fillRead(addr)
+	return s.Mem.Read32(addr)
+}
+
+func (s *State) read64(addr uint64) (uint64, error) {
+	if data, ok := s.flatAccess(addr, 8, mmu.PermRead); ok {
+		return binary.LittleEndian.Uint64(data), nil
+	}
+	off := addr & (mmu.PageSize - 1)
+	if s.rdPage != nil && addr&mmu.PageMask == s.rdBase && off <= mmu.PageSize-8 {
+		return binary.LittleEndian.Uint64(s.rdPage.Data[off:]), nil
+	}
+	s.fillRead(addr)
+	return s.Mem.Read64(addr)
+}
+
+func (s *State) write8(addr uint64, v uint8) error {
+	if data, ok := s.flatWriteAccess(addr, 1); ok {
+		data[0] = v
+		return nil
+	}
+	if s.wrPage != nil && addr&mmu.PageMask == s.wrBase {
+		s.wrPage.Data[addr&(mmu.PageSize-1)] = v
+		if s.wrPage.Perms&mmu.PermExecute != 0 {
+			s.Mem.NoteExecutableWrite(s.wrPage)
+		}
+		return nil
+	}
+	s.fillWrite(addr)
+	return s.Mem.Write8(addr, v)
+}
+
+func (s *State) write16(addr uint64, v uint16) error {
+	if data, ok := s.flatWriteAccess(addr, 2); ok {
+		binary.LittleEndian.PutUint16(data, v)
+		return nil
+	}
+	off := addr & (mmu.PageSize - 1)
+	if s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-2 {
+		binary.LittleEndian.PutUint16(s.wrPage.Data[off:], v)
+		if s.wrPage.Perms&mmu.PermExecute != 0 {
+			s.Mem.NoteExecutableWrite(s.wrPage)
+		}
+		return nil
+	}
+	s.fillWrite(addr)
+	return s.Mem.Write16(addr, v)
+}
+
+func (s *State) write32(addr uint64, v uint32) error {
+	if data, ok := s.flatWriteAccess(addr, 4); ok {
+		binary.LittleEndian.PutUint32(data, v)
+		return nil
+	}
+	off := addr & (mmu.PageSize - 1)
+	if s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-4 {
+		binary.LittleEndian.PutUint32(s.wrPage.Data[off:], v)
+		if s.wrPage.Perms&mmu.PermExecute != 0 {
+			s.Mem.NoteExecutableWrite(s.wrPage)
+		}
+		return nil
+	}
+	s.fillWrite(addr)
+	return s.Mem.Write32(addr, v)
+}
+
+func (s *State) write64(addr uint64, v uint64) error {
+	if data, ok := s.flatWriteAccess(addr, 8); ok {
+		binary.LittleEndian.PutUint64(data, v)
+		return nil
+	}
+	off := addr & (mmu.PageSize - 1)
+	if s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-8 {
+		binary.LittleEndian.PutUint64(s.wrPage.Data[off:], v)
+		if s.wrPage.Perms&mmu.PermExecute != 0 {
+			s.Mem.NoteExecutableWrite(s.wrPage)
+		}
+		return nil
+	}
+	s.fillWrite(addr)
+	return s.Mem.Write64(addr, v)
+}
+
+func (s *State) flatAccess(addr uint64, size uint64, required uint8) ([]byte, bool) {
+	if !s.Mode32 || s.Mem.WatchCB != nil || size == 0 {
+		return nil, false
+	}
+	if !s.flatChecked {
+		s.initFlat()
+	}
+	if s.flat == nil || s.perm == nil {
+		return nil, false
+	}
+	lastAddr := addr + size - 1
+	if lastAddr >= 1<<32 {
+		return nil, false
+	}
+	first, last := addr>>mmu.PageShift, lastAddr>>mmu.PageShift
+	if s.perm[first]&required != required {
+		return nil, false
+	}
+	if first != last && s.perm[last]&required != required {
+		return nil, false
+	}
+	return s.flat[addr : addr+size], true
+}
+
+//go:noinline
+func (s *State) initFlat() {
+	s.flatChecked = true
+	s.flat = s.Mem.FlatBase()
+	s.perm = s.Mem.PermBitmap()
+}
+
+func (s *State) flatWriteAccess(addr uint64, size uint64) ([]byte, bool) {
+	data, ok := s.flatAccess(addr, size, mmu.PermWrite)
+	if !ok {
+		return nil, false
+	}
+	first, last := addr>>mmu.PageShift, (addr+size-1)>>mmu.PageShift
+	if s.perm[first]&mmu.PermExecute != 0 || s.perm[last]&mmu.PermExecute != 0 {
+		return nil, false
+	}
+	return data, true
 }
 
 // Cache holds compiled blocks and execution counters.
 type Cache struct {
 	mu       sync.RWMutex
-	blocks   map[uint64]CompiledBlock
+	blocks   map[uint64]*Block
 	counters map[uint64]uint32
+	disabled map[uint64]struct{}
 	mem      *mmu.MMU
+	mode32   bool
+	// exec holds generated machine code when the native backend is on.
+	exec *execBuf
+	// nativeMem enables native flat-memory load/store codegen (requires
+	// Mode32 + flat backing + the permission bitmap).
+	nativeMem bool
+	// nativeX87 enables native x87 codegen (opt-in, off by default until
+	// broadly certified against the interpreter).
+	nativeX87 bool
 }
 
 // NewCache creates a JIT cache.
 func NewCache(mem *mmu.MMU) *Cache {
+	return NewCacheMode(mem, false)
+}
+
+func NewCacheMode(mem *mmu.MMU, mode32 bool) *Cache {
 	return &Cache{
-		blocks:   make(map[uint64]CompiledBlock),
+		blocks:   make(map[uint64]*Block),
 		counters: make(map[uint64]uint32),
+		disabled: make(map[uint64]struct{}),
 		mem:      mem,
+		mode32:   mode32,
 	}
+}
+
+// EnableNativeCodegen turns on the machine-code backend for this cache. It
+// allocates an executable arena; if that fails (hardened kernels), native
+// codegen stays off and the closure backend is used unchanged.
+func (c *Cache) EnableNativeCodegen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.exec != nil {
+		return true
+	}
+	buf, err := newExecBuf()
+	if err != nil {
+		return false
+	}
+	c.exec = buf
+	// Native flat-memory access is only safe with Mode32 masking, the flat
+	// region, and the permission bitmap all present.
+	c.nativeMem = c.mode32 && c.mem.FlatBase() != nil && c.mem.PermBitmap() != nil
+	return true
 }
 
 // Lookup returns a compiled block for the given address, or nil.
 // It also increments the execution counter.
-func (c *Cache) Lookup(addr uint64) CompiledBlock {
+func (c *Cache) Lookup(addr uint64) *Block {
 	c.mu.RLock()
-	if fn, ok := c.blocks[addr]; ok {
+	if b, ok := c.blocks[addr]; ok {
 		c.mu.RUnlock()
-		return fn
+		return b
+	}
+	if _, ok := c.disabled[addr]; ok {
+		c.mu.RUnlock()
+		return nil
 	}
 	c.mu.RUnlock()
 
-	// Increment counter
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if b, ok := c.blocks[addr]; ok {
+		return b
+	}
+	if _, ok := c.disabled[addr]; ok {
+		return nil
+	}
 	c.counters[addr]++
 	count := c.counters[addr]
-	c.mu.Unlock()
+	if count < CompileThreshold {
+		return nil
+	}
+	b := c.compile(addr)
+	if b != nil {
+		c.blocks[addr] = b
+	} else {
+		c.disabled[addr] = struct{}{}
+	}
+	delete(c.counters, addr)
+	return b
+}
 
-	if count >= CompileThreshold {
-		if fn := c.compile(addr); fn != nil {
-			c.mu.Lock()
-			c.blocks[addr] = fn
-			delete(c.counters, addr)
-			c.mu.Unlock()
-			return fn
+// Compile promotes an address immediately after the caller has established
+// that it is hot. The result is cached, including unsupported addresses.
+func (c *Cache) Compile(addr uint64) *Block {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if b, ok := c.blocks[addr]; ok {
+		return b
+	}
+	if _, ok := c.disabled[addr]; ok {
+		return nil
+	}
+	b := c.compile(addr)
+	if b != nil {
+		c.blocks[addr] = b
+	} else {
+		c.disabled[addr] = struct{}{}
+	}
+	delete(c.counters, addr)
+	return b
+}
+
+// Drop removes the cached block starting at addr (e.g. after its code pages
+// were overwritten) so it can be recompiled from the fresh bytes.
+func (c *Cache) Drop(addr uint64) {
+	c.mu.Lock()
+	delete(c.blocks, addr)
+	delete(c.disabled, addr)
+	delete(c.counters, addr)
+	c.mu.Unlock()
+}
+
+func (c *Cache) Reset() {
+	c.mu.Lock()
+	for addr, block := range c.blocks {
+		if !block.validForMapping(c.mem) {
+			delete(c.blocks, addr)
 		}
 	}
-	return nil
+	clear(c.counters)
+	clear(c.disabled)
+	c.mu.Unlock()
 }
 
 // Invalidate removes any compiled block covering the given address.
@@ -97,16 +451,64 @@ func (c *Cache) Invalidate(addr uint64) {
 			delete(c.blocks, k)
 		}
 	}
+	for k := range c.disabled {
+		if k&^(mmu.PageSize-1) == page {
+			delete(c.disabled, k)
+		}
+	}
 	c.mu.Unlock()
 }
 
-// compile decodes a basic block starting at addr and returns a compiled closure.
-func (c *Cache) compile(addr uint64) CompiledBlock {
-	insns, err := c.decode(addr)
-	if err != nil || len(insns) == 0 {
+// compile decodes a basic block starting at addr and returns a compiled block.
+func (c *Cache) compile(addr uint64) *Block {
+	// Snapshot the code-page versions BEFORE decoding: a write that lands
+	// during decode then fails Valid() instead of surviving in a stale block.
+	// A block is at most MaxBlockInsns*15 bytes, so it spans at most 3 pages.
+	const maxSpan = 3
+	var prePages [maxSpan]*mmu.PageEntry
+	var preVers [maxSpan]uint32
+	for i := 0; i < maxSpan; i++ {
+		page := addr&mmu.PageMask + uint64(i)*mmu.PageSize
+		if pe, _, err := c.mem.LookupRead(page, 0); err == nil && pe != nil {
+			prePages[i] = pe
+			preVers[i] = pe.CodeVersion.Load()
+		}
+	}
+	insns, end, err := c.decode(addr)
+	if err != nil || len(insns) == 0 || len(insns) == 1 && insns[0].kind == opEnd {
 		return nil
 	}
-	return c.emit(insns)
+	fn := c.emit(insns)
+	if fn == nil {
+		return nil
+	}
+	b := &Block{fn: fn}
+	// Prefer generated machine code when the native backend accepts the
+	// whole block; the closure stays as the fallback path.
+	if c.exec != nil {
+		if entry, ninsn, usesMMX, usesMemory := c.compileNative(insns); entry != 0 {
+			b.native = entry
+			b.ninsn = ninsn
+			b.nativeMMX = usesMMX
+			b.nativeMem = usesMemory
+		}
+	}
+	if end <= addr {
+		end = addr + 1
+	}
+	for i := 0; i < maxSpan; i++ {
+		page := addr&mmu.PageMask + uint64(i)*mmu.PageSize
+		if page >= end {
+			break
+		}
+		if prePages[i] == nil {
+			continue
+		}
+		b.pageAddrs = append(b.pageAddrs, page)
+		b.pages = append(b.pages, prePages[i])
+		b.vers = append(b.vers, preVers[i])
+	}
+	return b
 }
 
 // =========================================================================
@@ -122,9 +524,10 @@ const (
 	opMovRegMem
 	opMovMemReg
 	opMovMemImm
-	opALURegReg  // ADD/SUB/AND/OR/XOR/CMP
+	opALURegReg // ADD/SUB/AND/OR/XOR/CMP
 	opALURegImm
 	opALURegMem
+	opALUMemReg
 	opALUMemImm
 	opLea
 	opPush
@@ -134,8 +537,9 @@ const (
 	opJmp
 	opJcc
 	opTest
+	opTestImm
 	opXchg
-	opCdq      // CDQ/CQO
+	opCdq // CDQ/CQO
 	opMovzx
 	opMovsx
 	opSetcc
@@ -144,11 +548,13 @@ const (
 	opIMul3
 	opDiv
 	opIDiv
-	opShift    // SHL/SHR/SAR/ROL/ROR
+	opShift // SHL/SHR/SAR/ROL/ROR
 	opNot
 	opNeg
 	opInc
 	opDec
+	opX87
+	opMMX
 	opSyscall
 	opVmcall
 	opEnd // sentinel: end of block, return to interpreter
@@ -199,27 +605,30 @@ const (
 )
 
 type insn struct {
-	kind    opKind
-	size    int     // operand size in bytes (1, 2, 4, 8)
-	dst     int     // register index or -1
-	src     int     // register index or -1
-	imm     int64   // immediate value
-	memBase int     // base register for memory operand
-	memIdx  int     // index register (-1 if none)
-	memScale uint8  // scale (1, 2, 4, 8)
-	memDisp int64   // displacement
-	alu     aluOp
-	cc      condCode
-	shift   shiftOp
-	nextRIP uint64  // address of next instruction (for block-end insns)
-	target  uint64  // branch target address
-	useRIP  bool    // memory operand is RIP-relative
+	kind     opKind
+	rip      uint64
+	size     int   // operand size in bytes (1, 2, 4, 8)
+	dst      int   // register index or -1
+	src      int   // register index or -1
+	imm      int64 // immediate value
+	memBase  int   // base register for memory operand
+	memIdx   int   // index register (-1 if none)
+	memScale uint8 // scale (1, 2, 4, 8)
+	memDisp  int64 // displacement
+	alu      aluOp
+	cc       condCode
+	shift    shiftOp
+	nextRIP  uint64 // address of next instruction (for block-end insns)
+	target   uint64 // branch target address
+	useRIP   bool   // memory operand is RIP-relative
+	opcode   byte
 }
 
 // RFLAGS bits
 const (
 	flagCF = 1 << 0
 	flagPF = 1 << 2
+	flagAF = 1 << 4
 	flagZF = 1 << 6
 	flagSF = 1 << 7
 	flagDF = 1 << 10
@@ -231,31 +640,42 @@ const (
 // =========================================================================
 
 type decoder struct {
-	mem  *mmu.MMU
-	pos  uint64
-	insns []insn
+	mem    *mmu.MMU
+	pos    uint64
+	insns  []insn
+	mode32 bool
 }
 
-func (c *Cache) decode(addr uint64) ([]insn, error) {
-	d := &decoder{mem: c.mem, pos: addr}
+func (c *Cache) decode(addr uint64) ([]insn, uint64, error) {
+	d := &decoder{mem: c.mem, pos: addr, mode32: c.mode32}
 	for len(d.insns) < MaxBlockInsns {
+		instructionStart := d.pos
+		firstInstruction := len(d.insns)
 		if err := d.decodeOne(); err != nil {
-			// Can't decode - end block here
+			// Can't decode, end block here
 			if len(d.insns) == 0 {
-				return nil, err
+				return nil, d.pos, err
 			}
-			break
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: instructionStart})
+			d.insns[len(d.insns)-1].rip = instructionStart
+			return d.insns, d.pos, nil
+		}
+		for i := firstInstruction; i < len(d.insns); i++ {
+			d.insns[i].rip = instructionStart
 		}
 		last := d.insns[len(d.insns)-1]
 		// Block terminators
 		switch last.kind {
 		case opRet, opJmp, opCall, opSyscall, opVmcall, opEnd:
-			return d.insns, nil
+			return d.insns, d.pos, nil
 		case opJcc:
-			return d.insns, nil
+			return d.insns, d.pos, nil
 		}
 	}
-	return d.insns, nil
+	if len(d.insns) > 0 {
+		d.insns = append(d.insns, insn{kind: opJmp, rip: d.pos, target: d.pos, nextRIP: d.pos})
+	}
+	return d.insns, d.pos, nil
 }
 
 func (d *decoder) fetch8() (byte, error) {
@@ -325,6 +745,10 @@ func regIdx(field byte, ext bool) int {
 	return r
 }
 
+func usesLegacyHighByte(reg int, p *pfx) bool {
+	return reg >= 4 && reg < 8 && !p.hasREX
+}
+
 // decodeModRM decodes ModRM (and SIB if needed), returning register index,
 // and either a register index or memory operand details.
 func (d *decoder) decodeModRM(p *pfx) (reg int, isReg bool, rm int, base int, idx int, scale uint8, disp int64, useRIP bool, err error) {
@@ -384,7 +808,7 @@ func (d *decoder) decodeModRM(p *pfx) (reg int, isReg bool, rm int, base int, id
 			return
 		}
 		disp = int64(int32(d32))
-		useRIP = true
+		useRIP = !d.mode32
 	} else {
 		base = regIdx(rmField, p.rexB())
 	}
@@ -421,16 +845,21 @@ func (d *decoder) decodeOne() error {
 		}
 		switch {
 		case b == 0x66:
+			if d.mode32 {
+				d.pos = startPos
+				d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+				return nil
+			}
 			p.op66 = true
-		case b == 0xF0: // LOCK
-		case b == 0xF2, b == 0xF3: // REP/REPNE
-		case b == 0x64:
-			p.segFS = true
-		case b == 0x65:
-			p.segGS = true
-		case b == 0x26, b == 0x2E, b == 0x36, b == 0x3E: // segment overrides
-		case b == 0x67: // address size override
+		case b == 0xF0 || b == 0xF2 || b == 0xF3 || b == 0x64 || b == 0x65 ||
+			b == 0x26 || b == 0x2E || b == 0x36 || b == 0x3E || b == 0x67:
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
 		case b >= 0x40 && b <= 0x4F:
+			if d.mode32 {
+				return d.decodeOpcode(b, &p, startPos)
+			}
 			p.rex = b
 			p.hasREX = true
 		default:
@@ -455,6 +884,11 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 	// MOV r, imm (0xB0-0xBF)
 	case 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7:
 		reg := regIdx(op-0xB0, p.rexB())
+		if usesLegacyHighByte(reg, p) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
 		imm, err := d.fetch8()
 		if err != nil {
 			return err
@@ -558,6 +992,16 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 		if err != nil {
 			return err
 		}
+		if sz == 1 && (usesLegacyHighByte(reg, p) || isReg && usesLegacyHighByte(rm, p)) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		if !isReg {
+			d.insns = append(d.insns, insn{kind: opALUMemReg, size: sz, src: reg, alu: aop,
+				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP})
+			return nil
+		}
 		if isReg {
 			d.insns = append(d.insns, insn{kind: opALURegReg, size: sz, dst: rm, src: reg, alu: aop})
 		} else {
@@ -583,6 +1027,11 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
+		}
+		if sz == 1 && (usesLegacyHighByte(reg, p) || isReg && usesLegacyHighByte(rm, p)) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
 		}
 		if isReg {
 			d.insns = append(d.insns, insn{kind: opALURegReg, size: sz, dst: reg, src: rm, alu: aop})
@@ -637,6 +1086,37 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 			d.insns = append(d.insns, insn{kind: opALUMemImm, size: size, alu: aop, imm: immVal,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP})
 		}
+		return nil
+
+	// Group 2: rotate/shift r/m by 1, CL, or imm8.
+	case 0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3:
+		reg, isReg, rm, _, _, _, _, _, err := d.decodeModRM(p)
+		if err != nil {
+			return err
+		}
+		sz := size
+		if op == 0xC0 || op == 0xD0 || op == 0xD2 {
+			sz = 1
+		}
+		if !isReg || sz == 1 && usesLegacyHighByte(rm, p) ||
+			reg != int(shROL) && reg != int(shROR) && reg != int(shSHL) && reg != int(shSHR) && reg != int(shSAR) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		count := int64(1)
+		src := -1
+		if op == 0xC0 || op == 0xC1 {
+			imm, err := d.fetch8()
+			if err != nil {
+				return err
+			}
+			count = int64(imm)
+		} else if op == 0xD2 || op == 0xD3 {
+			count = -1
+			src = 1
+		}
+		d.insns = append(d.insns, insn{kind: opShift, size: sz, dst: rm, src: src, shift: shiftOp(reg), imm: count})
 		return nil
 
 	// MOV r/m, r (0x89)
@@ -720,7 +1200,7 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 		if err != nil {
 			return err
 		}
-		d.insns = append(d.insns, insn{kind: opALURegImm, size: size, dst: 0, alu: aluAND, imm: int64(int32(imm))})
+		d.insns = append(d.insns, insn{kind: opTestImm, size: size, dst: 0, imm: int64(int32(imm))})
 		return nil
 
 	// XCHG rAX, r (0x91-0x97)
@@ -732,6 +1212,28 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 	// CDQ/CQO (0x99)
 	case 0x99:
 		d.insns = append(d.insns, insn{kind: opCdq, size: size})
+		return nil
+
+	case 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF:
+		if !d.mode32 {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
+		if err != nil {
+			return err
+		}
+		if !supportsX87(op, isReg, reg, rm) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		d.insns = append(d.insns, insn{kind: opX87, dst: reg, src: rm, imm: int64(op),
+			memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP})
+		if isReg {
+			d.insns[len(d.insns)-1].size = 1
+		}
 		return nil
 
 	// 0x0F escape
@@ -746,6 +1248,53 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 	}
 }
 
+func supportsX87(op byte, registerForm bool, reg, rm int) bool {
+	if registerForm {
+		switch op {
+		case 0xD8: // FADD/FMUL/FCOM/FCOMP/FSUB/FSUBR/FDIV/FDIVR ST(0), ST(i)
+			return true
+		case 0xD9:
+			switch reg {
+			case 0, 1: // FLD ST(i), FXCH ST(i)
+				return true
+			case 4: // FCHS, FABS, FTST, FXAM
+				return rm == 0 || rm == 1 || rm == 4 || rm == 5
+			case 5: // FLD1/FLDL2T/FLDL2E/FLDPI/FLDLN2/FLDLG2/FLDZ
+				return rm != 7
+			case 6: // F2XM1/FYL2X/FPTAN/FPATAN/FXTRACT/FPREM1/FDECSTP/FINCSTP
+				return true
+			case 7: // FPREM/FYL2XP1/FSQRT/FSINCOS/FRNDINT/FSCALE/FSIN/FCOS
+				return true
+			}
+			return false
+		case 0xDC: // FADD/FMUL/FSUBR/FSUB/FDIVR/FDIV ST(i), ST(0)
+			return reg == 0 || reg == 1 || reg >= 4
+		case 0xDD: // FFREE/FST/FSTP/FUCOM/FUCOMP ST(i)
+			return reg == 0 || reg == 2 || reg == 3 || reg == 4 || reg == 5
+		case 0xDE: // FADDP/FMULP/FCOMPP/FSUBRP/FSUBP/FDIVRP/FDIVP
+			return reg == 0 || reg == 1 || reg >= 4 || reg == 3 && rm == 1
+		case 0xDF: // FNSTSW AX
+			return reg == 4 && rm == 0
+		}
+		return false
+	}
+	switch op {
+	case 0xD8, 0xDC: // arithmetic + FCOM/FCOMP m32/m64
+		return true
+	case 0xDA: // FIADD/FIMUL/FICOM/FICOMP/FISUB/FISUBR/FIDIV/FIDIVR m32
+		return true
+	case 0xD9: // FLD/FST/FSTP m32 + FLDCW/FNSTCW m16
+		return reg == 0 || reg == 2 || reg == 3 || reg == 5 || reg == 7
+	case 0xDB:
+		return reg == 0 || reg == 2 || reg == 3
+	case 0xDD: // FLD/FST/FSTP m64 + FNSTSW m16
+		return reg == 0 || reg == 2 || reg == 3 || reg == 7
+	case 0xDF: // FILD/FIST/FISTP m16, FILD/FISTP m64
+		return reg == 0 || reg == 2 || reg == 3 || reg == 5 || reg == 7
+	}
+	return false
+}
+
 func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 	b, err := d.fetch8()
 	if err != nil {
@@ -754,6 +1303,60 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 	size := p.opSize()
 
 	switch b {
+	case 0x77:
+		if p.op66 {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		d.insns = append(d.insns, insn{kind: opMMX, opcode: b})
+		return nil
+
+	case 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6E, 0x6F, 0x70,
+		0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x7F,
+		0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
+		0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF,
+		0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF8, 0xF9, 0xFA, 0xFC, 0xFD, 0xFE:
+		// MMX only: the 66-prefixed SSE2 forms operate on XMM state the JIT
+		// does not model, REX.W changes MOVD width, and REX.R/B would index
+		// past the 8 MM registers.
+		if p.op66 || p.hasREX {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
+		if err != nil {
+			return err
+		}
+		if b == 0x71 || b == 0x72 || b == 0x73 {
+			// Shift-by-immediate groups: register target, sub-op in reg.
+			if !isReg || reg != 2 && reg != 4 && reg != 6 || b == 0x73 && reg == 4 {
+				d.pos = startPos
+				d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+				return nil
+			}
+		}
+		if b == 0xE7 && isReg { // MOVNTQ requires a memory destination
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		in := insn{kind: opMMX, opcode: b, dst: reg, src: rm,
+			memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP}
+		if isReg {
+			in.size = 1
+		}
+		if b == 0x70 || b == 0x71 || b == 0x72 || b == 0x73 {
+			immediate, err := d.fetch8()
+			if err != nil {
+				return err
+			}
+			in.imm = int64(immediate)
+		}
+		d.insns = append(d.insns, in)
+		return nil
+
 	// Jcc rel32 (0x0F 0x80-0x8F)
 	case 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
 		0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F:
@@ -770,6 +1373,11 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
+		}
+		if isReg && usesLegacyHighByte(rm, p) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
 		}
 		if isReg {
 			d.insns = append(d.insns, insn{kind: opMovzx, size: 1, dst: reg, src: rm})
@@ -799,6 +1407,11 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 		if err != nil {
 			return err
 		}
+		if isReg && usesLegacyHighByte(rm, p) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
 		if isReg {
 			d.insns = append(d.insns, insn{kind: opMovsx, size: 1, dst: reg, src: rm})
 		} else {
@@ -827,6 +1440,11 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 		_, isReg, rm, _, _, _, _, _, err := d.decodeModRM(p)
 		if err != nil {
 			return err
+		}
+		if isReg && usesLegacyHighByte(rm, p) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
 		}
 		if isReg {
 			d.insns = append(d.insns, insn{kind: opSetcc, size: 1, dst: rm, cc: condCode(b - 0x90)})
@@ -864,7 +1482,8 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 
 	// SYSCALL (0x0F 0x05)
 	case 0x05:
-		d.insns = append(d.insns, insn{kind: opSyscall, nextRIP: d.pos})
+		d.pos = startPos
+		d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
 		return nil
 
 	// VMCALL-like (0x0F 0x01 ...)
@@ -874,7 +1493,8 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 			return err
 		}
 		if b2 == 0xC1 {
-			d.insns = append(d.insns, insn{kind: opVmcall, nextRIP: d.pos})
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
 			return nil
 		}
 		d.pos = startPos
@@ -896,9 +1516,13 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 	return func(s *State) error {
 		regs := s.Regs
 		mem := s.Mem
+		instret := s.Instret
 
 		for i := 0; i < len(insns); i++ {
 			in := &insns[i]
+			if instret != nil {
+				*instret++
+			}
 			switch in.kind {
 			case opNop:
 				continue
@@ -930,24 +1554,25 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				}
 
 			case opMovRegMem:
+				*s.RIP = in.rip
 				addr := resolveAddr(s, in)
 				var v uint64
 				var err error
 				switch in.size {
 				case 1:
 					var b byte
-					b, err = mem.Read8(addr)
+					b, err = s.read8(addr)
 					v = uint64(b)
 				case 2:
 					var w uint16
-					w, err = mem.Read16(addr)
+					w, err = s.read16(addr)
 					v = uint64(w)
 				case 4:
 					var d uint32
-					d, err = mem.Read32(addr)
+					d, err = s.read32(addr)
 					v = uint64(d)
 				case 8:
-					v, err = mem.Read64(addr)
+					v, err = s.read64(addr)
 				}
 				if err != nil {
 					return err
@@ -960,31 +1585,33 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				}
 
 			case opMovMemReg:
+				*s.RIP = in.rip
 				addr := resolveAddr(s, in)
 				v := regs[in.src]
 				switch in.size {
 				case 1:
-					mem.Write8(addr, byte(v))
+					s.write8(addr, byte(v))
 				case 2:
-					mem.Write16(addr, uint16(v))
+					s.write16(addr, uint16(v))
 				case 4:
-					mem.Write32(addr, uint32(v))
+					s.write32(addr, uint32(v))
 				case 8:
-					mem.Write64(addr, v)
+					s.write64(addr, v)
 				}
 
 			case opMovMemImm:
+				*s.RIP = in.rip
 				addr := resolveAddr(s, in)
 				v := uint64(in.imm)
 				switch in.size {
 				case 1:
-					mem.Write8(addr, byte(v))
+					s.write8(addr, byte(v))
 				case 2:
-					mem.Write16(addr, uint16(v))
+					s.write16(addr, uint16(v))
 				case 4:
-					mem.Write32(addr, uint32(v))
+					s.write32(addr, uint32(v))
 				case 8:
-					mem.Write64(addr, v)
+					s.write64(addr, v)
 				}
 
 			case opLea:
@@ -1016,55 +1643,110 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				}
 
 			case opALURegMem:
+				*s.RIP = in.rip
 				addr := resolveAddr(s, in)
 				a := truncate(regs[in.dst], in.size)
 				var bv uint64
 				switch in.size {
 				case 1:
-					bb, _ := mem.Read8(addr)
+					bb, _ := s.read8(addr)
 					bv = uint64(bb)
 				case 2:
-					bw, _ := mem.Read16(addr)
+					bw, _ := s.read16(addr)
 					bv = uint64(bw)
 				case 4:
-					bd, _ := mem.Read32(addr)
+					bd, _ := s.read32(addr)
 					bv = uint64(bd)
 				case 8:
-					bv, _ = mem.Read64(addr)
+					bv, _ = s.read64(addr)
 				}
 				r := doALU(s, in.alu, a, bv, in.size)
 				if in.alu != aluCMP {
 					writeReg(regs, in.dst, r, in.size)
 				}
 
-			case opALUMemImm:
+			case opALUMemReg:
+				*s.RIP = in.rip
 				addr := resolveAddr(s, in)
 				var a uint64
 				switch in.size {
 				case 1:
-					bb, _ := mem.Read8(addr)
+					bb, err := s.read8(addr)
+					if err != nil {
+						return err
+					}
 					a = uint64(bb)
 				case 2:
-					bw, _ := mem.Read16(addr)
+					bw, err := s.read16(addr)
+					if err != nil {
+						return err
+					}
 					a = uint64(bw)
 				case 4:
-					bd, _ := mem.Read32(addr)
+					bd, err := s.read32(addr)
+					if err != nil {
+						return err
+					}
 					a = uint64(bd)
 				case 8:
-					a, _ = mem.Read64(addr)
+					var err error
+					a, err = s.read64(addr)
+					if err != nil {
+						return err
+					}
+				}
+				b := truncate(regs[in.src], in.size)
+				r := doALU(s, in.alu, a, b, in.size)
+				if in.alu != aluCMP {
+					switch in.size {
+					case 1:
+						if err := s.write8(addr, byte(r)); err != nil {
+							return err
+						}
+					case 2:
+						if err := s.write16(addr, uint16(r)); err != nil {
+							return err
+						}
+					case 4:
+						if err := s.write32(addr, uint32(r)); err != nil {
+							return err
+						}
+					case 8:
+						if err := s.write64(addr, r); err != nil {
+							return err
+						}
+					}
+				}
+
+			case opALUMemImm:
+				*s.RIP = in.rip
+				addr := resolveAddr(s, in)
+				var a uint64
+				switch in.size {
+				case 1:
+					bb, _ := s.read8(addr)
+					a = uint64(bb)
+				case 2:
+					bw, _ := s.read16(addr)
+					a = uint64(bw)
+				case 4:
+					bd, _ := s.read32(addr)
+					a = uint64(bd)
+				case 8:
+					a, _ = s.read64(addr)
 				}
 				b := uint64(in.imm)
 				r := doALU(s, in.alu, a, b, in.size)
 				if in.alu != aluCMP {
 					switch in.size {
 					case 1:
-						mem.Write8(addr, byte(r))
+						s.write8(addr, byte(r))
 					case 2:
-						mem.Write16(addr, uint16(r))
+						s.write16(addr, uint16(r))
 					case 4:
-						mem.Write32(addr, uint32(r))
+						s.write32(addr, uint32(r))
 					case 8:
-						mem.Write64(addr, r)
+						s.write64(addr, r)
 					}
 				}
 
@@ -1074,28 +1756,83 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				r := a & b
 				setLogicFlags(s, r, in.size)
 
+			case opTestImm:
+				a := truncate(regs[in.dst], in.size)
+				r := a & truncate(uint64(in.imm), in.size)
+				setLogicFlags(s, r, in.size)
+
 			case opPush:
-				sp := regs[4] - 8 // RSP
-				regs[4] = sp
-				mem.Write64(sp, regs[in.src])
+				*s.RIP = in.rip
+				if s.Mode32 {
+					sp := (regs[4] - 4) & 0xFFFFFFFF
+					if err := s.write32(sp, uint32(regs[in.src])); err != nil {
+						return err
+					}
+					regs[4] = sp
+				} else {
+					sp := regs[4] - 8
+					if err := s.write64(sp, regs[in.src]); err != nil {
+						return err
+					}
+					regs[4] = sp
+				}
 
 			case opPop:
+				*s.RIP = in.rip
 				sp := regs[4]
-				v, _ := mem.Read64(sp)
-				regs[4] = sp + 8
-				regs[in.dst] = v
+				if s.Mode32 {
+					v, err := s.read32(sp)
+					if err != nil {
+						return err
+					}
+					regs[4] = (sp + 4) & 0xFFFFFFFF
+					regs[in.dst] = uint64(v)
+				} else {
+					v, err := s.read64(sp)
+					if err != nil {
+						return err
+					}
+					regs[4] = sp + 8
+					regs[in.dst] = v
+				}
 
 			case opCall:
-				sp := regs[4] - 8
-				regs[4] = sp
-				mem.Write64(sp, in.nextRIP) // push return addr
+				*s.RIP = in.rip
+				if s.Mode32 {
+					sp := (regs[4] - 4) & 0xFFFFFFFF
+					if err := s.write32(sp, uint32(in.nextRIP)); err != nil {
+						return err
+					}
+					regs[4] = sp
+				} else {
+					sp := regs[4] - 8
+					if err := s.write64(sp, in.nextRIP); err != nil {
+						return err
+					}
+					regs[4] = sp
+				}
 				*s.RIP = in.target
 				return nil
 
 			case opRet:
+				*s.RIP = in.rip
 				sp := regs[4]
-				ret, _ := mem.Read64(sp)
-				regs[4] = sp + 8 + uint64(in.imm)
+				var ret uint64
+				if s.Mode32 {
+					v, err := s.read32(sp)
+					if err != nil {
+						return err
+					}
+					ret = uint64(v)
+					regs[4] = (sp + 4 + uint64(in.imm)) & 0xFFFFFFFF
+				} else {
+					var err error
+					ret, err = s.read64(sp)
+					if err != nil {
+						return err
+					}
+					regs[4] = sp + 8 + uint64(in.imm)
+				}
 				*s.RIP = ret
 				return nil
 
@@ -1129,6 +1866,21 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 					}
 				}
 
+			case opX87:
+				*s.RIP = in.rip
+				if err := execX87(s, mem, in); err != nil {
+					return err
+				}
+
+			case opMMX:
+				*s.RIP = in.rip
+				if err := execMMX(s, in); err != nil {
+					if instret != nil {
+						(*instret)--
+					}
+					return err
+				}
+
 			case opMovzx:
 				var v uint64
 				if in.src >= 0 {
@@ -1144,10 +1896,10 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 					addr := resolveAddr(s, in)
 					switch in.size {
 					case 1:
-						b, _ := mem.Read8(addr)
+						b, _ := s.read8(addr)
 						v = uint64(b)
 					case 2:
-						w, _ := mem.Read16(addr)
+						w, _ := s.read16(addr)
 						v = uint64(w)
 					}
 				}
@@ -1166,10 +1918,10 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 					addr := resolveAddr(s, in)
 					switch in.size {
 					case 1:
-						b, _ := mem.Read8(addr)
+						b, _ := s.read8(addr)
 						v = int64(int8(b))
 					case 2:
-						w, _ := mem.Read16(addr)
+						w, _ := s.read16(addr)
 						v = int64(int16(w))
 					}
 				}
@@ -1196,6 +1948,14 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				fl := *s.Rflags &^ (flagCF | flagOF)
 				*s.Rflags = fl
 
+			case opShift:
+				count := uint64(in.imm)
+				if in.src == 1 {
+					count = regs[1]
+				}
+				result := shiftRegister(s, truncate(regs[in.dst], in.size), count, in.size, in.shift)
+				writeReg(regs, in.dst, result, in.size)
+
 			case opSyscall:
 				*s.RIP = in.nextRIP
 				s.Trap = true
@@ -1208,6 +1968,7 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 
 			case opEnd:
 				*s.RIP = in.nextRIP
+				s.Fallback = true
 				return nil
 			}
 		}
@@ -1218,6 +1979,786 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 // =========================================================================
 // Helper functions
 // =========================================================================
+
+func execMMX(s *State, in *insn) error {
+	if s.FPUST == nil || s.FPUTop == nil || s.FPUTW == nil {
+		return fmt.Errorf("MMX state is unavailable")
+	}
+	if in.opcode == 0x77 {
+		*s.FPUTW = 0xffff
+		return nil
+	}
+
+	switch in.opcode {
+	case 0x6E:
+		var value uint64
+		if in.size == 1 {
+			value = uint64(uint32(s.Regs[in.src]))
+		} else {
+			v, err := s.read32(resolveAddr(s, in))
+			if err != nil {
+				return err
+			}
+			value = uint64(v)
+		}
+		mmxWrite(s, in.dst, value)
+		return nil
+	case 0x6F:
+		value, err := mmxReadRM(s, in)
+		if err != nil {
+			return err
+		}
+		mmxWrite(s, in.dst, value)
+		return nil
+	case 0x7F, 0xE7:
+		value := math.Float64bits(s.FPUST[in.dst])
+		if err := mmxWriteRM(s, in, value); err != nil {
+			return err
+		}
+		if in.size != 1 {
+			mmxEnter(s)
+		}
+		return nil
+	case 0x71, 0x72, 0x73:
+		value := mmxRead(s, in.src)
+		bits := uint(16) << (in.opcode - 0x71)
+		count := uint(in.imm)
+		var result uint64
+		switch in.dst {
+		case 2: // PSRLW/PSRLD/PSRLQ
+			result = mmxMapLanes(value, 0, bits, func(a, _ uint64) uint64 {
+				if count >= bits {
+					return 0
+				}
+				return a >> count
+			})
+		case 4: // PSRAW/PSRAD
+			result = mmxMapLanes(value, 0, bits, func(a, _ uint64) uint64 {
+				shift := count
+				if shift >= bits {
+					shift = bits - 1
+				}
+				return uint64(mmxSigned(a, bits) >> shift)
+			})
+		case 6: // PSLLW/PSLLD/PSLLQ
+			result = mmxMapLanes(value, 0, bits, func(a, _ uint64) uint64 {
+				if count >= bits {
+					return 0
+				}
+				return a << count
+			})
+		}
+		mmxWrite(s, in.src, result)
+		return nil
+	}
+
+	source, err := mmxReadRM(s, in)
+	if err != nil {
+		return err
+	}
+	destination := mmxRead(s, in.dst)
+	var result uint64
+	switch in.opcode {
+	case 0x60, 0x61, 0x62, 0x68, 0x69, 0x6A: // PUNPCKL*/PUNPCKH*
+		bits := uint(8) << (in.opcode & 3)
+		result = mmxUnpack(destination, source, bits, in.opcode >= 0x68)
+	case 0x63, 0x67: // PACKSSWB/PACKUSWB
+		for i := uint(0); i < 4; i++ {
+			for half, value := range []uint64{destination, source} {
+				v := mmxSigned(value>>(i*16)&0xffff, 16)
+				if in.opcode == 0x63 {
+					result |= mmxSaturateSigned(v, 8) << (uint(half)*32 + i*8)
+				} else {
+					result |= mmxSaturateUnsigned(v, 8) << (uint(half)*32 + i*8)
+				}
+			}
+		}
+	case 0x6B: // PACKSSDW
+		for i := uint(0); i < 2; i++ {
+			result |= mmxSaturateSigned(mmxSigned(destination>>(i*32), 32), 16) << (i * 16)
+			result |= mmxSaturateSigned(mmxSigned(source>>(i*32), 32), 16) << ((i + 2) * 16)
+		}
+	case 0x64, 0x65, 0x66: // PCMPGTB/W/D
+		bits := uint(8) << (in.opcode & 3)
+		result = mmxMapLanes(destination, source, bits, func(a, b uint64) uint64 {
+			if mmxSigned(a, bits) > mmxSigned(b, bits) {
+				return uint64(1)<<bits - 1
+			}
+			return 0
+		})
+	case 0x70: // PSHUFW
+		shuffle := byte(in.imm)
+		for i := uint(0); i < 4; i++ {
+			result |= source >> (uint(shuffle>>(i*2)&3) * 16) & 0xffff << (i * 16)
+		}
+	case 0x74, 0x75, 0x76: // PCMPEQB/W/D
+		bits := uint(8) << (in.opcode & 3)
+		result = mmxMapLanes(destination, source, bits, func(a, b uint64) uint64 {
+			if a == b {
+				return uint64(1)<<bits - 1
+			}
+			return 0
+		})
+	case 0xD1, 0xD2, 0xD3, 0xE1, 0xE2, 0xF1, 0xF2, 0xF3: // shifts by MM/m64 count
+		bits := uint(16) << ((in.opcode & 0xf) - 1)
+		count := uint(source)
+		opcode := in.opcode
+		result = mmxMapLanes(destination, 0, bits, func(a, _ uint64) uint64 {
+			switch opcode {
+			case 0xD1, 0xD2, 0xD3:
+				if count >= bits {
+					return 0
+				}
+				return a >> count
+			case 0xE1, 0xE2:
+				shift := count
+				if shift >= bits {
+					shift = bits - 1
+				}
+				return uint64(mmxSigned(a, bits) >> shift)
+			default:
+				if count >= bits {
+					return 0
+				}
+				return a << count
+			}
+		})
+	case 0xD4: // PADDQ
+		result = destination + source
+	case 0xD5: // PMULLW
+		result = mmxMapLanes(destination, source, 16, func(a, b uint64) uint64 { return a * b })
+	case 0xD8, 0xD9, 0xDC, 0xDD: // PSUBUSB/W, PADDUSB/W
+		bits := uint(8) << (in.opcode & 1)
+		add := in.opcode == 0xDC || in.opcode == 0xDD
+		result = mmxMapLanes(destination, source, bits, func(a, b uint64) uint64 {
+			if add {
+				return mmxSaturateUnsigned(int64(a)+int64(b), bits)
+			}
+			return mmxSaturateUnsigned(int64(a)-int64(b), bits)
+		})
+	case 0xDA, 0xDE: // PMINUB/PMAXUB
+		opcode := in.opcode
+		result = mmxMapLanes(destination, source, 8, func(a, b uint64) uint64 {
+			if opcode == 0xDA && b < a || opcode == 0xDE && b > a {
+				return b
+			}
+			return a
+		})
+	case 0xDB: // PAND
+		result = destination & source
+	case 0xDF: // PANDN
+		result = ^destination & source
+	case 0xE0, 0xE3: // PAVGB/PAVGW
+		bits := uint(8)
+		if in.opcode == 0xE3 {
+			bits = 16
+		}
+		result = mmxMapLanes(destination, source, bits, func(a, b uint64) uint64 { return (a + b + 1) >> 1 })
+	case 0xE4: // PMULHUW
+		result = mmxMapLanes(destination, source, 16, func(a, b uint64) uint64 { return a * b >> 16 })
+	case 0xE5: // PMULHW
+		result = mmxMapLanes(destination, source, 16, func(a, b uint64) uint64 {
+			return uint64(mmxSigned(a, 16)*mmxSigned(b, 16)) >> 16
+		})
+	case 0xE8, 0xE9, 0xEC, 0xED: // PSUBSB/W, PADDSB/W
+		bits := uint(8)
+		if in.opcode == 0xE9 || in.opcode == 0xED {
+			bits = 16
+		}
+		add := in.opcode == 0xEC || in.opcode == 0xED
+		result = mmxMapLanes(destination, source, bits, func(a, b uint64) uint64 {
+			v := mmxSigned(a, bits) - mmxSigned(b, bits)
+			if add {
+				v = mmxSigned(a, bits) + mmxSigned(b, bits)
+			}
+			return mmxSaturateSigned(v, bits)
+		})
+	case 0xEA, 0xEE: // PMINSW/PMAXSW
+		opcode := in.opcode
+		result = mmxMapLanes(destination, source, 16, func(a, b uint64) uint64 {
+			if opcode == 0xEA && mmxSigned(b, 16) < mmxSigned(a, 16) ||
+				opcode == 0xEE && mmxSigned(b, 16) > mmxSigned(a, 16) {
+				return b
+			}
+			return a
+		})
+	case 0xEB: // POR
+		result = destination | source
+	case 0xEF: // PXOR
+		result = destination ^ source
+	case 0xF4: // PMULUDQ
+		result = uint64(uint32(destination)) * uint64(uint32(source))
+	case 0xF5: // PMADDWD
+		for i := uint(0); i < 2; i++ {
+			a := mmxSigned(destination>>(i*32), 16)*mmxSigned(source>>(i*32), 16) +
+				mmxSigned(destination>>(i*32+16), 16)*mmxSigned(source>>(i*32+16), 16)
+			result |= uint64(uint32(a)) << (i * 32)
+		}
+	case 0xF6: // PSADBW
+		for i := uint(0); i < 8; i++ {
+			a, b := int64(byte(destination>>uint(i*8))), int64(byte(source>>uint(i*8)))
+			if a > b {
+				result += uint64(a - b)
+			} else {
+				result += uint64(b - a)
+			}
+		}
+	case 0xF8, 0xF9, 0xFA, 0xFC, 0xFD, 0xFE: // PSUBB/W/D, PADDB/W/D
+		bits := uint(8) << (in.opcode & 3)
+		add := in.opcode >= 0xFC
+		result = mmxMapLanes(destination, source, bits, func(a, b uint64) uint64 {
+			if add {
+				return a + b
+			}
+			return a - b
+		})
+	default:
+		return fmt.Errorf("unsupported MMX opcode 0F %02X", in.opcode)
+	}
+	mmxWrite(s, in.dst, result)
+	return nil
+}
+
+func mmxRead(s *State, index int) uint64 {
+	mmxEnter(s)
+	return math.Float64bits(s.FPUST[index])
+}
+
+func mmxEnter(s *State) {
+	*s.FPUTop = 0
+	*s.FPUTW = 0
+}
+
+func mmxWrite(s *State, index int, value uint64) {
+	mmxEnter(s)
+	s.FPUST[index] = math.Float64frombits(value)
+}
+
+func mmxReadRM(s *State, in *insn) (uint64, error) {
+	if in.size == 1 {
+		return mmxRead(s, in.src), nil
+	}
+	return s.read64(resolveAddr(s, in))
+}
+
+func mmxWriteRM(s *State, in *insn, value uint64) error {
+	if in.size == 1 {
+		mmxWrite(s, in.src, value)
+		return nil
+	}
+	return s.write64(resolveAddr(s, in), value)
+}
+
+func mmxUnpack(dst, src uint64, bits uint, high bool) uint64 {
+	if high {
+		dst >>= 32
+		src >>= 32
+	}
+	switch bits {
+	case 8:
+		return mmxSpreadBytes(uint32(dst)) | mmxSpreadBytes(uint32(src))<<8
+	case 16:
+		return mmxSpreadWords(uint32(dst)) | mmxSpreadWords(uint32(src))<<16
+	default:
+		return uint64(uint32(dst)) | uint64(uint32(src))<<32
+	}
+}
+
+func mmxSpreadBytes(value uint32) uint64 {
+	v := uint64(value)
+	v = (v | v<<16) & 0x0000ffff0000ffff
+	return (v | v<<8) & 0x00ff00ff00ff00ff
+}
+
+func mmxSpreadWords(value uint32) uint64 {
+	v := uint64(value)
+	return (v | v<<16) & 0x0000ffff0000ffff
+}
+
+func mmxMapLanes(dst, src uint64, bits uint, fn func(uint64, uint64) uint64) uint64 {
+	var result uint64
+	mask := uint64(1)<<bits - 1
+	for shift := uint(0); shift < 64; shift += bits {
+		result |= fn(dst>>shift&mask, src>>shift&mask) & mask << shift
+	}
+	return result
+}
+
+func mmxSigned(v uint64, bits uint) int64 {
+	shift := 64 - bits
+	return int64(v<<shift) >> shift
+}
+
+func mmxSaturateSigned(v int64, bits uint) uint64 {
+	min, max := -(int64(1) << (bits - 1)), int64(1)<<(bits-1)-1
+	if v < min {
+		v = min
+	} else if v > max {
+		v = max
+	}
+	return uint64(v) & (uint64(1)<<bits - 1)
+}
+
+func mmxSaturateUnsigned(v int64, bits uint) uint64 {
+	max := int64(1)<<bits - 1
+	if v < 0 {
+		return 0
+	}
+	if v > max {
+		return uint64(max)
+	}
+	return uint64(v)
+}
+
+func execX87(s *State, mem *mmu.MMU, in *insn) error {
+	if s.FPUST == nil || s.FPUTop == nil || s.FPUTW == nil {
+		return fmt.Errorf("x87 state is unavailable")
+	}
+	st := s.FPUST
+	top := s.FPUTop
+	tw := s.FPUTW
+	phys := func(i int) int { return (*top + i) & 7 }
+	push := func(value float64) {
+		*top = (*top - 1) & 7
+		st[*top] = value
+		*tw &^= 3 << (uint(*top) * 2)
+	}
+	pop := func() {
+		*tw |= 3 << (uint(*top) * 2)
+		*top = (*top + 1) & 7
+	}
+	setCC := func(cmp int) error {
+		if s.FPUSW == nil {
+			return fmt.Errorf("x87 status word is unavailable")
+		}
+		*s.FPUSW &^= 0x4500 // clear C0, C2, C3
+		switch cmp {
+		case -1:
+			*s.FPUSW |= 0x0100 // C0=1
+		case 0:
+			*s.FPUSW |= 0x4000 // C3=1
+		case 1:
+			// C0=C2=C3=0
+		default:
+			*s.FPUSW |= 0x4500 // unordered
+		}
+		return nil
+	}
+	op := byte(in.imm)
+	reg := in.dst
+	if in.size == 1 {
+		i := in.src
+		switch op {
+		case 0xD8:
+			switch reg {
+			case 0:
+				st[*top] += st[phys(i)]
+			case 1:
+				st[*top] *= st[phys(i)]
+			case 2:
+				return setCC(x87Compare(st[*top], st[phys(i)]))
+			case 3:
+				if err := setCC(x87Compare(st[*top], st[phys(i)])); err != nil {
+					return err
+				}
+				pop()
+			case 4:
+				st[*top] -= st[phys(i)]
+			case 5:
+				st[*top] = st[phys(i)] - st[*top]
+			case 6:
+				st[*top] /= st[phys(i)]
+			case 7:
+				st[*top] = st[phys(i)] / st[*top]
+			}
+			return nil
+		case 0xD9:
+			switch {
+			case reg == 0: // FLD ST(i)
+				value := st[phys(i)]
+				push(value)
+			case reg == 1: // FXCH ST(i)
+				st[phys(0)], st[phys(i)] = st[phys(i)], st[phys(0)]
+			case reg == 4 && i == 0: // FCHS
+				st[*top] = -st[*top]
+			case reg == 4 && i == 1: // FABS
+				st[*top] = math.Abs(st[*top])
+			case reg == 4 && i == 4: // FTST
+				return setCC(x87Compare(st[*top], 0))
+			case reg == 4 && i == 5: // FXAM
+				if s.FPUSW == nil {
+					return fmt.Errorf("x87 status word is unavailable")
+				}
+				value := st[*top]
+				*s.FPUSW &^= 0x4700
+				if math.IsNaN(value) {
+					*s.FPUSW |= 0x0100
+				} else if math.IsInf(value, 0) {
+					*s.FPUSW |= 0x0500
+				} else if value == 0 {
+					*s.FPUSW |= 0x4000
+				} else {
+					*s.FPUSW |= 0x0400
+				}
+				if math.Signbit(value) {
+					*s.FPUSW |= 0x0200
+				}
+			case reg == 5 && i == 0: // FLD1
+				push(1.0)
+			case reg == 5 && i == 1: // FLDL2T
+				push(math.Log2(10))
+			case reg == 5 && i == 2: // FLDL2E
+				push(math.Log2E)
+			case reg == 5 && i == 3: // FLDPI
+				push(math.Pi)
+			case reg == 5 && i == 4: // FLDLN2
+				push(math.Ln2)
+			case reg == 5 && i == 5: // FLDLG2
+				push(math.Log10(2))
+			case reg == 5 && i == 6: // FLDZ
+				push(0)
+			case reg == 6 && i == 0: // F2XM1
+				st[*top] = math.Exp2(st[*top]) - 1
+			case reg == 6 && i == 1: // FYL2X
+				y, x := st[phys(1)], st[*top]
+				pop()
+				st[*top] = y * math.Log2(x)
+			case reg == 6 && i == 2: // FPTAN
+				st[*top] = math.Tan(st[*top])
+				push(1.0)
+			case reg == 6 && i == 3: // FPATAN
+				y, x := st[phys(1)], st[*top]
+				pop()
+				st[*top] = math.Atan2(y, x)
+			case reg == 6 && i == 4: // FXTRACT
+				frac, exp := math.Frexp(st[*top])
+				st[*top] = float64(exp - 1)
+				push(frac * 2)
+			case reg == 6 && i == 5: // FPREM1
+				st[*top] = math.Remainder(st[*top], st[phys(1)])
+			case reg == 6 && i == 6: // FDECSTP
+				*top = (*top - 1) & 7
+			case reg == 6 && i == 7: // FINCSTP
+				*top = (*top + 1) & 7
+			case reg == 7 && i == 0: // FPREM
+				st0, st1 := st[*top], st[phys(1)]
+				if st1 != 0 {
+					st[*top] = st0 - math.Trunc(st0/st1)*st1
+				}
+			case reg == 7 && i == 1: // FYL2XP1
+				y, x := st[phys(1)], st[*top]
+				pop()
+				st[*top] = y * math.Log2(x+1)
+			case reg == 7 && i == 2: // FSQRT
+				st[*top] = math.Sqrt(st[*top])
+			case reg == 7 && i == 3: // FSINCOS
+				sinValue, cosValue := math.Sincos(st[*top])
+				st[*top] = sinValue
+				push(cosValue)
+			case reg == 7 && i == 4: // FRNDINT
+				st[*top] = float64(x87Round(st[*top], s.FPUCW))
+			case reg == 7 && i == 5: // FSCALE
+				st[*top] = math.Ldexp(st[*top], int(st[phys(1)]))
+			case reg == 7 && i == 6: // FSIN
+				st[*top] = math.Sin(st[*top])
+			case reg == 7 && i == 7: // FCOS
+				st[*top] = math.Cos(st[*top])
+			default:
+				return fmt.Errorf("unsupported x87 register form %02x /%d", op, reg)
+			}
+			return nil
+		case 0xDC:
+			left, right := st[phys(i)], st[*top]
+			switch reg {
+			case 0:
+				st[phys(i)] = left + right
+			case 1:
+				st[phys(i)] = left * right
+			case 4:
+				st[phys(i)] = right - left
+			case 5:
+				st[phys(i)] = left - right
+			case 6:
+				st[phys(i)] = right / left
+			case 7:
+				st[phys(i)] = left / right
+			default:
+				return fmt.Errorf("unsupported x87 register form %02x /%d", op, reg)
+			}
+			return nil
+		case 0xDD:
+			switch reg {
+			case 0: // FFREE ST(i)
+				*tw |= 3 << (uint(phys(i)) * 2)
+			case 2: // FST ST(i)
+				st[phys(i)] = st[*top]
+			case 3: // FSTP ST(i)
+				st[phys(i)] = st[*top]
+				pop()
+			case 4: // FUCOM ST(i)
+				return setCC(x87Compare(st[*top], st[phys(i)]))
+			case 5: // FUCOMP ST(i)
+				if err := setCC(x87Compare(st[*top], st[phys(i)])); err != nil {
+					return err
+				}
+				pop()
+			default:
+				return fmt.Errorf("unsupported x87 register form %02x /%d", op, reg)
+			}
+			return nil
+		case 0xDE:
+			if reg == 3 && i == 1 { // FCOMPP
+				if err := setCC(x87Compare(st[*top], st[phys(1)])); err != nil {
+					return err
+				}
+				pop()
+				pop()
+				return nil
+			}
+			left, right := st[phys(i)], st[*top]
+			switch reg {
+			case 0:
+				st[phys(i)] = left + right
+			case 1:
+				st[phys(i)] = left * right
+			case 4:
+				st[phys(i)] = right - left
+			case 5:
+				st[phys(i)] = left - right
+			case 6:
+				st[phys(i)] = right / left
+			case 7:
+				st[phys(i)] = left / right
+			default:
+				return fmt.Errorf("unsupported x87 register form %02x /%d", op, reg)
+			}
+			pop()
+			return nil
+		case 0xDF:
+			if reg == 4 && i == 0 { // FNSTSW AX
+				if s.FPUSW == nil || s.Regs == nil {
+					return fmt.Errorf("x87 status word is unavailable")
+				}
+				sw := *s.FPUSW | uint16(*top)<<11
+				s.Regs[0] = s.Regs[0]&^0xFFFF | uint64(sw)
+				return nil
+			}
+		}
+		return fmt.Errorf("unsupported x87 register form %02x /%d", op, reg)
+	}
+
+	addr := resolveAddr(s, in)
+	switch op {
+	case 0xD8:
+		bits, err := s.read32(addr)
+		if err != nil {
+			return err
+		}
+		value := float64(math.Float32frombits(bits))
+		if reg == 2 || reg == 3 { // FCOM/FCOMP m32
+			if err := setCC(x87Compare(st[*top], value)); err != nil {
+				return err
+			}
+			if reg == 3 {
+				pop()
+			}
+			return nil
+		}
+		return x87Arithmetic(&st[*top], value, reg)
+	case 0xD9:
+		switch reg {
+		case 0:
+			bits, err := s.read32(addr)
+			if err != nil {
+				return err
+			}
+			push(float64(math.Float32frombits(bits)))
+			return nil
+		case 2, 3:
+			if err := s.write32(addr, math.Float32bits(float32(st[*top]))); err != nil {
+				return err
+			}
+			if reg == 3 {
+				pop()
+			}
+			return nil
+		case 5: // FLDCW m16
+			if s.FPUCW == nil {
+				return fmt.Errorf("x87 control word is unavailable")
+			}
+			bits, err := s.read16(addr)
+			if err != nil {
+				return err
+			}
+			*s.FPUCW = bits
+			return nil
+		case 7: // FNSTCW m16
+			if s.FPUCW == nil {
+				return fmt.Errorf("x87 control word is unavailable")
+			}
+			return s.write16(addr, *s.FPUCW)
+		}
+	case 0xDA: // int32 arithmetic (m32)
+		bits, err := s.read32(addr)
+		if err != nil {
+			return err
+		}
+		value := float64(int32(bits))
+		if reg == 2 || reg == 3 { // FICOM/FICOMP m32
+			if err := setCC(x87Compare(st[*top], value)); err != nil {
+				return err
+			}
+			if reg == 3 {
+				pop()
+			}
+			return nil
+		}
+		return x87Arithmetic(&st[*top], value, reg)
+	case 0xDB:
+		switch reg {
+		case 0:
+			value, err := s.read32(addr)
+			if err != nil {
+				return err
+			}
+			push(float64(int32(value)))
+			return nil
+		case 2, 3:
+			value := x87Round(st[*top], s.FPUCW)
+			if err := s.write32(addr, uint32(int32(value))); err != nil {
+				return err
+			}
+			if reg == 3 {
+				pop()
+			}
+			return nil
+		}
+	case 0xDC:
+		bits, err := s.read64(addr)
+		if err != nil {
+			return err
+		}
+		value := math.Float64frombits(bits)
+		if reg == 2 || reg == 3 { // FCOM/FCOMP m64
+			if err := setCC(x87Compare(st[*top], value)); err != nil {
+				return err
+			}
+			if reg == 3 {
+				pop()
+			}
+			return nil
+		}
+		return x87Arithmetic(&st[*top], value, reg)
+	case 0xDD:
+		switch reg {
+		case 0: // FLD m64
+			bits, err := s.read64(addr)
+			if err != nil {
+				return err
+			}
+			push(math.Float64frombits(bits))
+			return nil
+		case 2, 3: // FST/FSTP m64
+			if err := s.write64(addr, math.Float64bits(st[*top])); err != nil {
+				return err
+			}
+			if reg == 3 {
+				pop()
+			}
+			return nil
+		case 7: // FNSTSW m16
+			if s.FPUSW == nil {
+				return fmt.Errorf("x87 status word is unavailable")
+			}
+			sw := *s.FPUSW | uint16(*top)<<11
+			return s.write16(addr, sw)
+		}
+	case 0xDF:
+		switch reg {
+		case 0: // FILD m16
+			value, err := s.read16(addr)
+			if err != nil {
+				return err
+			}
+			push(float64(int16(value)))
+			return nil
+		case 2, 3: // FIST/FISTP m16
+			value := x87Round(st[*top], s.FPUCW)
+			if err := s.write16(addr, uint16(int16(value))); err != nil {
+				return err
+			}
+			if reg == 3 {
+				pop()
+			}
+			return nil
+		case 5: // FILD m64
+			value, err := s.read64(addr)
+			if err != nil {
+				return err
+			}
+			push(float64(int64(value)))
+			return nil
+		case 7: // FISTP m64
+			value := x87Round(st[*top], s.FPUCW)
+			if err := s.write64(addr, uint64(value)); err != nil {
+				return err
+			}
+			pop()
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported x87 memory form %02x /%d", op, reg)
+}
+
+// x87Compare mirrors the interpreter's fpuCompare: -1, 0, 1, or 2 for NaN.
+func x87Compare(a, b float64) int {
+	if math.IsNaN(a) || math.IsNaN(b) {
+		return 2
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+func x87Arithmetic(st0 *float64, value float64, reg int) error {
+	switch reg {
+	case 0:
+		*st0 += value
+	case 1:
+		*st0 *= value
+	case 4:
+		*st0 -= value
+	case 5:
+		*st0 = value - *st0
+	case 6:
+		*st0 /= value
+	case 7:
+		*st0 = value / *st0
+	default:
+		return fmt.Errorf("unsupported x87 arithmetic /%d", reg)
+	}
+	return nil
+}
+
+func x87Round(value float64, controlWord *uint16) int64 {
+	if controlWord == nil {
+		return int64(math.RoundToEven(value))
+	}
+	switch *controlWord >> 10 & 3 {
+	case 0:
+		return int64(math.RoundToEven(value))
+	case 1:
+		return int64(math.Floor(value))
+	case 2:
+		return int64(math.Ceil(value))
+	default:
+		return int64(math.Trunc(value))
+	}
+}
 
 func resolveAddr(s *State, in *insn) uint64 {
 	if in.useRIP {
@@ -1231,6 +2772,9 @@ func resolveAddr(s *State, in *insn) uint64 {
 		addr += s.Regs[in.memIdx] * uint64(in.memScale)
 	}
 	addr = uint64(int64(addr) + in.memDisp)
+	if s.Mode32 {
+		addr &= 0xFFFFFFFF
+	}
 	return addr
 }
 
@@ -1260,9 +2804,69 @@ func writeReg(regs *[16]uint64, idx int, val uint64, size int) {
 	}
 }
 
+func shiftRegister(s *State, value, count uint64, size int, op shiftOp) uint64 {
+	nbits := uint64(size * 8)
+	count &= nbits - 1
+	if count == 0 {
+		return value
+	}
+
+	mask := truncate(^uint64(0), size)
+	var result uint64
+	switch op {
+	case shROL:
+		result = value<<count | value>>(nbits-count)
+	case shROR:
+		result = value>>count | value<<(nbits-count)
+	case shSHL:
+		result = value << count
+		setShiftResultFlags(s, result, size)
+		setCarryFlag(s, value>>(nbits-count)&1)
+	case shSHR:
+		result = value >> count
+		setShiftResultFlags(s, result, size)
+		setCarryFlag(s, value>>(count-1)&1)
+	case shSAR:
+		switch size {
+		case 1:
+			result = uint64(int8(value) >> count)
+		case 2:
+			result = uint64(int16(value) >> count)
+		case 4:
+			result = uint64(int32(value) >> count)
+		default:
+			result = uint64(int64(value) >> count)
+		}
+		setShiftResultFlags(s, result, size)
+		setCarryFlag(s, value>>(count-1)&1)
+	}
+	return result & mask
+}
+
+func setShiftResultFlags(s *State, result uint64, size int) {
+	flags := *s.Rflags &^ (flagCF | flagZF | flagSF | flagPF | flagOF)
+	result = truncate(result, size)
+	if result == 0 {
+		flags |= flagZF
+	}
+	if signBit(result, size) {
+		flags |= flagSF
+	}
+	if bits.OnesCount8(uint8(result))%2 == 0 {
+		flags |= flagPF
+	}
+	*s.Rflags = flags
+}
+
+func setCarryFlag(s *State, carry uint64) {
+	*s.Rflags = *s.Rflags&^flagCF | carry&1
+}
+
 func doALU(s *State, op aluOp, a, b uint64, size int) uint64 {
 	var r uint64
 	mask := truncate(^uint64(0), size)
+	a &= mask
+	b &= mask
 	switch op {
 	case aluADD:
 		r = (a + b) & mask
@@ -1285,14 +2889,26 @@ func doALU(s *State, op aluOp, a, b uint64, size int) uint64 {
 			cf = 1
 		}
 		r = (a + b + cf) & mask
-		setAddFlags(s, a, b+cf, r, size)
+		carry := b > mask-cf || a > mask-(b+cf&mask)
+		setAddFlags(s, a, b, r, size)
+		if carry {
+			*s.Rflags |= flagCF
+		} else {
+			*s.Rflags &^= flagCF
+		}
 	case aluSBB:
 		cf := uint64(0)
 		if *s.Rflags&flagCF != 0 {
 			cf = 1
 		}
 		r = (a - b - cf) & mask
-		setSubFlags(s, a, b+cf, r, size)
+		borrow := b > mask-cf || a < b+cf
+		setSubFlags(s, a, b, r, size)
+		if borrow {
+			*s.Rflags |= flagCF
+		} else {
+			*s.Rflags &^= flagCF
+		}
 	}
 	return r
 }
@@ -1311,12 +2927,12 @@ func signBit(v uint64, size int) bool {
 }
 
 func setAddFlags(s *State, a, b, r uint64, size int) {
-	fl := *s.Rflags &^ (flagCF | flagZF | flagSF | flagOF | flagPF)
-	mask := truncate(^uint64(0), size)
-	if (a+b)&(mask+1) != 0 || (a+b) > mask {
-		if a+b != r { // carry
-			fl |= flagCF
-		}
+	fl := *s.Rflags &^ (flagCF | flagPF | flagAF | flagZF | flagSF | flagOF)
+	if r < a {
+		fl |= flagCF
+	}
+	if (a^b^r)&0x10 != 0 {
+		fl |= flagAF
 	}
 	if r == 0 {
 		fl |= flagZF
@@ -1328,16 +2944,19 @@ func setAddFlags(s *State, a, b, r uint64, size int) {
 	if signBit(a, size) == signBit(b, size) && signBit(a, size) != signBit(r, size) {
 		fl |= flagOF
 	}
-	if bits.OnesCount8(uint8(r)) % 2 == 0 {
+	if bits.OnesCount8(uint8(r))%2 == 0 {
 		fl |= flagPF
 	}
 	*s.Rflags = fl
 }
 
 func setSubFlags(s *State, a, b, r uint64, size int) {
-	fl := *s.Rflags &^ (flagCF | flagZF | flagSF | flagOF | flagPF)
+	fl := *s.Rflags &^ (flagCF | flagPF | flagAF | flagZF | flagSF | flagOF)
 	if b > a {
 		fl |= flagCF
+	}
+	if (a^b^r)&0x10 != 0 {
+		fl |= flagAF
 	}
 	if r == 0 || truncate(r, size) == 0 {
 		fl |= flagZF
@@ -1348,7 +2967,7 @@ func setSubFlags(s *State, a, b, r uint64, size int) {
 	if signBit(a, size) != signBit(b, size) && signBit(a, size) != signBit(r, size) {
 		fl |= flagOF
 	}
-	if bits.OnesCount8(uint8(r)) % 2 == 0 {
+	if bits.OnesCount8(uint8(r))%2 == 0 {
 		fl |= flagPF
 	}
 	*s.Rflags = fl
@@ -1363,7 +2982,7 @@ func setLogicFlags(s *State, r uint64, size int) {
 	if signBit(r, size) {
 		fl |= flagSF
 	}
-	if bits.OnesCount8(uint8(r)) % 2 == 0 {
+	if bits.OnesCount8(uint8(r))%2 == 0 {
 		fl |= flagPF
 	}
 	*s.Rflags = fl

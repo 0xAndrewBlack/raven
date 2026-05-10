@@ -10,6 +10,7 @@ import (
 
 	"github.com/mirkobrombin/Raven/pkg/d3d9"
 	"github.com/mirkobrombin/Raven/pkg/dxgi"
+	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
@@ -20,6 +21,7 @@ const (
 	DXGI_ERROR_DEVICE_REMOVED = 0x887A0005
 	DXGI_ERROR_DEVICE_RESET   = 0x887A0007
 	D3D_OK                    = 0
+	D3DERR_INVALIDCALL        = 0x8876086C
 	D3DERR_NOTAVAILABLE       = 0x8876086A
 	D3D_FEATURE_LEVEL_9_1     = 0x9100
 	D3D_FEATURE_LEVEL_11_0    = 0xB000
@@ -68,12 +70,15 @@ var dxgiGlobal = dxgiState{
 }
 
 type d3dCOMObject struct {
-	objectAddr uint64
-	kind       string
-	id         uint32
-	refCount   uint32
-	payload    any
-	dispatch   func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32
+	objectAddr   uint64
+	kind         string
+	id           uint32
+	refCount     uint32
+	internalRefs uint32
+	payload      any
+	dispatch     func(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32
+	finalize     func()
+	externalZero func()
 }
 
 var (
@@ -115,13 +120,13 @@ func registerDxgiHandlers(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		ctx.Mem.Write64(ppFactory, 0)
+		writeGuestPtr(ctx, ppFactory, 0)
 		obj := registerFactory()
 		if obj == 0 {
 			ctx.SetReturn(E_OUTOFMEMORY)
 			return 0
 		}
-		ctx.Mem.Write64(ppFactory, obj)
+		writeGuestPtr(ctx, ppFactory, obj)
 		ctx.SetReturn(S_OK)
 		return 0
 	})
@@ -131,13 +136,13 @@ func registerDxgiHandlers(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		ctx.Mem.Write64(ppFactory, 0)
+		writeGuestPtr(ctx, ppFactory, 0)
 		obj := registerFactory()
 		if obj == 0 {
 			ctx.SetReturn(E_OUTOFMEMORY)
 			return 0
 		}
-		ctx.Mem.Write64(ppFactory, obj)
+		writeGuestPtr(ctx, ppFactory, obj)
 		ctx.SetReturn(S_OK)
 		return 0
 	})
@@ -147,19 +152,19 @@ func registerDxgiHandlers(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		ctx.Mem.Write64(ppFactory, 0)
+		writeGuestPtr(ctx, ppFactory, 0)
 		obj := registerFactory()
 		if obj == 0 {
 			ctx.SetReturn(E_OUTOFMEMORY)
 			return 0
 		}
-		ctx.Mem.Write64(ppFactory, obj)
+		writeGuestPtr(ctx, ppFactory, obj)
 		ctx.SetReturn(S_OK)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "DXGIGetDebugInterface1", func(ctx *ntapi.TrapContext) uint32 {
 		if ppv := ctx.Arg(2); ppv != 0 {
-			ctx.Mem.Write64(ppv, 0)
+			writeGuestPtr(ctx, ppv, 0)
 		}
 		ctx.SetReturn(E_NOINTERFACE)
 		return 0
@@ -173,19 +178,26 @@ func registerD3d9Handlers(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 		ctx.SetReturn(obj)
 		return 0
 	})
+	// Direct3DCreate9(UINT SDKVersion) is __stdcall with one arg: the callee must
+	// pop it (ret 4). The handler ignores SDKVersion, so it never touches ctx.Arg
+	// and the maxArgIdx heuristic would clean 0 args, leaving 4 bytes on the guest
+	// stack. That later misaligns the caller's epilogue `pop ebx` and breaks games
+	// (kkrieger reads a stale saved register into EBX, hanging its message pump).
+	// Declare the arg count explicitly.
+	d.SetStdcallArgCountByName(dll, "Direct3DCreate9", 1)
 	d.RegisterAutoStubHandler(dll, "Direct3DCreate9Ex", func(ctx *ntapi.TrapContext) uint32 {
 		ppD3D := ctx.Arg(1)
 		if ppD3D == 0 {
 			ctx.SetReturn(E_POINTER)
 			return 0
 		}
-		ctx.Mem.Write64(ppD3D, 0)
+		writeGuestPtr(ctx, ppD3D, 0)
 		obj := d3d9CreateObject(hctx)
 		if obj == 0 {
 			ctx.SetReturn(E_OUTOFMEMORY)
 			return 0
 		}
-		ctx.Mem.Write64(ppD3D, obj)
+		writeGuestPtr(ctx, ppD3D, obj)
 		ctx.SetReturn(S_OK)
 		return 0
 	})
@@ -210,31 +222,31 @@ func registerD3d12Handlers(hctx *HandlerCtx, dll *ntapi.SynthPE) {
 	d := hctx.Disp
 	d.RegisterAutoStubHandler(dll, "D3D12CreateDevice", func(ctx *ntapi.TrapContext) uint32 {
 		if ppDevice := ctx.Arg(3); ppDevice != 0 {
-			ctx.Mem.Write64(ppDevice, 0)
+			writeGuestPtr(ctx, ppDevice, 0)
 		}
 		ctx.SetReturn(E_NOTIMPL)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "D3D12GetDebugInterface", func(ctx *ntapi.TrapContext) uint32 {
 		if ppvDebug := ctx.Arg(1); ppvDebug != 0 {
-			ctx.Mem.Write64(ppvDebug, 0)
+			writeGuestPtr(ctx, ppvDebug, 0)
 		}
 		ctx.SetReturn(E_NOINTERFACE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "D3D12SerializeRootSignature", func(ctx *ntapi.TrapContext) uint32 {
 		if ppBlob := ctx.Arg(2); ppBlob != 0 {
-			ctx.Mem.Write64(ppBlob, 0)
+			writeGuestPtr(ctx, ppBlob, 0)
 		}
 		if ppErrorBlob := ctx.Arg(3); ppErrorBlob != 0 {
-			ctx.Mem.Write64(ppErrorBlob, 0)
+			writeGuestPtr(ctx, ppErrorBlob, 0)
 		}
 		ctx.SetReturn(E_NOTIMPL)
 		return 0
 	})
 	d.RegisterAutoStubHandler(dll, "D3D12CreateRootSignatureDeserializer", func(ctx *ntapi.TrapContext) uint32 {
 		if ppDeserializer := ctx.Arg(3); ppDeserializer != 0 {
-			ctx.Mem.Write64(ppDeserializer, 0)
+			writeGuestPtr(ctx, ppDeserializer, 0)
 		}
 		ctx.SetReturn(E_NOTIMPL)
 		return 0
@@ -282,7 +294,7 @@ func dxgiDispatchFactory(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) 
 		if ppAdapter == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppAdapter, 0)
+		writeGuestPtr(ctx, ppAdapter, 0)
 		dxgiGlobal.mu.Lock()
 		factory := dxgiGlobal.factories[obj.id]
 		var adapterID uint32
@@ -299,13 +311,13 @@ func dxgiDispatchFactory(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) 
 		if adapterObj == 0 {
 			return E_OUTOFMEMORY
 		}
-		ctx.Mem.Write64(ppAdapter, adapterObj)
+		writeGuestPtr(ctx, ppAdapter, adapterObj)
 		return S_OK
 	case 8:
 		return S_OK
 	case 9:
 		if pWindowHandle := ctx.Arg(1); pWindowHandle != 0 {
-			ctx.Mem.Write64(pWindowHandle, 0)
+			writeGuestPtr(ctx, pWindowHandle, 0)
 		}
 		return S_OK
 	case 10:
@@ -313,16 +325,16 @@ func dxgiDispatchFactory(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) 
 		if ppSwapChain == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppSwapChain, 0)
+		writeGuestPtr(ctx, ppSwapChain, 0)
 		swapChainObj := dxgiCreateSwapChainObject(hctx, ctx.Arg(1), ctx.Arg(2))
 		if swapChainObj == 0 {
 			return E_OUTOFMEMORY
 		}
-		ctx.Mem.Write64(ppSwapChain, swapChainObj)
+		writeGuestPtr(ctx, ppSwapChain, swapChainObj)
 		return S_OK
 	case 11:
 		if ppAdapter := ctx.Arg(2); ppAdapter != 0 {
-			ctx.Mem.Write64(ppAdapter, 0)
+			writeGuestPtr(ctx, ppAdapter, 0)
 		}
 		return E_NOTIMPL
 	default:
@@ -341,7 +353,7 @@ func dxgiDispatchAdapter(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) 
 		if ppOutput == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppOutput, 0)
+		writeGuestPtr(ctx, ppOutput, 0)
 		dxgiGlobal.mu.Lock()
 		adapter := dxgiGlobal.adapters[obj.id]
 		var outputID uint32
@@ -358,7 +370,7 @@ func dxgiDispatchAdapter(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) 
 		if outputObj == 0 {
 			return E_OUTOFMEMORY
 		}
-		ctx.Mem.Write64(ppOutput, outputObj)
+		writeGuestPtr(ctx, ppOutput, outputObj)
 		return S_OK
 	case 8:
 		pDesc := ctx.Arg(1)
@@ -465,7 +477,7 @@ func dxgiDispatchObjectCommon(ctx *ntapi.TrapContext, method int) (bool, uint32)
 		return true, E_NOTIMPL
 	case 6:
 		if ppParent := ctx.Arg(2); ppParent != 0 {
-			ctx.Mem.Write64(ppParent, 0)
+			writeGuestPtr(ctx, ppParent, 0)
 		}
 		return true, E_NOINTERFACE
 	default:
@@ -518,10 +530,10 @@ func dxgiDispatchSwapChain(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject
 		if ppDevice == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppDevice, 0)
+		writeGuestPtr(ctx, ppDevice, 0)
 		if record.deviceObj != 0 {
 			d3dAddRefObject(record.deviceObj)
-			ctx.Mem.Write64(ppDevice, record.deviceObj)
+			writeGuestPtr(ctx, ppDevice, record.deviceObj)
 			return S_OK
 		}
 		return E_NOINTERFACE
@@ -532,7 +544,7 @@ func dxgiDispatchSwapChain(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject
 		if ppSurface == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppSurface, 0)
+		writeGuestPtr(ctx, ppSurface, 0)
 		texture, hr := record.chain.GetBuffer(uint32(ctx.Arg(1)))
 		if hr != dxgi.S_OK || texture == nil {
 			return hr
@@ -544,7 +556,7 @@ func dxgiDispatchSwapChain(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject
 		if textureObj == 0 {
 			return E_OUTOFMEMORY
 		}
-		ctx.Mem.Write64(ppSurface, textureObj)
+		writeGuestPtr(ctx, ppSurface, textureObj)
 		return S_OK
 	case 10, 11:
 		return S_OK
@@ -660,7 +672,7 @@ func d3d9Dispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32 
 		if ppDevice == 0 {
 			return E_POINTER
 		}
-		ctx.Mem.Write64(ppDevice, 0)
+		writeGuestPtr(ctx, ppDevice, 0)
 		var deviceObj uint64
 		if hctx != nil {
 			deviceObj = d3d9CreateDeviceObject(hctx, ctx.Arg(5))
@@ -671,7 +683,9 @@ func d3d9Dispatch(ctx *ntapi.TrapContext, method int, obj *d3dCOMObject) uint32 
 		if deviceObj == 0 {
 			return E_OUTOFMEMORY
 		}
-		ctx.Mem.Write64(ppDevice, deviceObj)
+		writeGuestPtr(ctx, ppDevice, deviceObj)
+		written, _ := ctx.Mem.Read32(ppDevice)
+		ravelog.Logf("[d3d9] CreateDevice ppDevice=0x%x object=0x%x written=0x%x\n", ppDevice, deviceObj, written)
 		return D3D_OK
 	default:
 		return E_NOTIMPL
@@ -733,7 +747,7 @@ func d3dCreateCOMObjectFromID(mem *mmu.MMU, disp *ntapi.Dispatcher, kind string,
 			return d3dDispatchCOMMethod(ctx, methodIndex)
 		})
 		// PE32 stdcall: register arg count so cleanup pops the right number
-		if len(stdcallArgs) > 0 && i < len(stdcallArgs[0]) {
+		if len(stdcallArgs) > 0 && i < len(stdcallArgs[0]) && stdcallArgs[0][i] > 0 {
 			disp.SetStdcallArgCount(trapID, stdcallArgs[0][i])
 		}
 		stubAddr := stubBase + uint64(i*16)
@@ -794,14 +808,8 @@ func d3dDispatchCOMMethod(ctx *ntapi.TrapContext, method int) uint32 {
 		ctx.SetReturn(uint64(count))
 		return 0
 	case 2:
-		if obj.refCount > 0 {
-			obj.refCount--
-		}
-		count := obj.refCount
-		if count == 0 {
-			delete(d3dCOMObjects, thisPtr)
-		}
 		d3dCOMMu.Unlock()
+		count := d3dReleaseObject(thisPtr)
 		ctx.SetReturn(uint64(count))
 		return 0
 	default:
@@ -812,6 +820,61 @@ func d3dDispatchCOMMethod(ctx *ntapi.TrapContext, method int) uint32 {
 		}
 		return dispatch(ctx, method, obj)
 	}
+}
+
+func d3dReleaseObject(addr uint64) uint32 {
+	d3dCOMMu.Lock()
+	obj := d3dCOMObjects[addr]
+	if obj == nil {
+		d3dCOMMu.Unlock()
+		return 0
+	}
+	if obj.refCount > 0 {
+		obj.refCount--
+	}
+	count := obj.refCount
+	var finalize func()
+	var externalZero func()
+	if count == obj.internalRefs {
+		externalZero = obj.externalZero
+		obj.externalZero = nil
+	}
+	if count == 0 {
+		delete(d3dCOMObjects, addr)
+		finalize = obj.finalize
+	}
+	d3dCOMMu.Unlock()
+	if externalZero != nil {
+		externalZero()
+	}
+	if finalize != nil {
+		finalize()
+	}
+	return count
+}
+
+func d3dReleaseInternalObject(addr uint64) uint32 {
+	d3dCOMMu.Lock()
+	obj := d3dCOMObjects[addr]
+	if obj == nil {
+		d3dCOMMu.Unlock()
+		return 0
+	}
+	if obj.internalRefs > 0 {
+		obj.internalRefs--
+		obj.refCount--
+	}
+	count := obj.refCount
+	var finalize func()
+	if count == 0 {
+		delete(d3dCOMObjects, addr)
+		finalize = obj.finalize
+	}
+	d3dCOMMu.Unlock()
+	if finalize != nil {
+		finalize()
+	}
+	return count
 }
 
 func writeFixedCString(mem *mmu.MMU, addr uint64, size int, value string) {

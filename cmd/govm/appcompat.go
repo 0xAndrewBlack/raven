@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
@@ -34,6 +35,21 @@ var defaultCompat = compatConfig{
 	ntVersion:   [2]uint32{10, 0},
 	buildNumber: 19045,
 	spMajor:     0,
+}
+
+func writeRtlGetNtVersionNumbers(mem *mmu.MMU, majorAddr, minorAddr, buildAddr uint64, config compatConfig) {
+	if mem == nil {
+		return
+	}
+	if majorAddr != 0 {
+		_ = mem.Write32(majorAddr, config.ntVersion[0])
+	}
+	if minorAddr != 0 {
+		_ = mem.Write32(minorAddr, config.ntVersion[1])
+	}
+	if buildAddr != 0 {
+		_ = mem.Write32(buildAddr, config.buildNumber|0xF0000000)
+	}
 }
 
 type actCtxState struct {
@@ -684,6 +700,11 @@ func registerAppcompatHandlers(hctx *HandlerCtx) {
 					mem.Write8(buffer+283, 0)
 				}
 			}
+			ctx.SetReturn(0)
+			return 0
+		})
+		d.RegisterAutoStubHandler(dll, "RtlGetNtVersionNumbers", func(ctx *ntapi.TrapContext) uint32 {
+			writeRtlGetNtVersionNumbers(mem, ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), defaultCompat)
 			ctx.SetReturn(0)
 			return 0
 		})

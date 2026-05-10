@@ -380,6 +380,7 @@ var ntapiExports = []string{
 	"RtlGetLocaleFileMappingAddress",
 	"RtlGetNativeSystemInformation",
 	"RtlGetNtGlobalFlags",
+	"RtlGetNtVersionNumbers",
 	"RtlGetNtProductType",
 	"RtlGetOwnerSecurityDescriptor",
 	"RtlGetProcessHeaps",
@@ -662,6 +663,10 @@ var ntapiExports = []string{
 	"wcsstr",
 	"wcstol",
 	"wcstoul",
+
+	// Hardware resource descriptor helpers
+	"RtlCmDecodeMemIoResource",
+	"RtlIoDecodeMemIoResource",
 }
 
 // win32uExports lists Win32k (NtGdi*/NtUser*) syscall stubs in the ReactOS

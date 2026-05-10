@@ -113,34 +113,23 @@ func CallGuestFunction(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline
 		return 0, err
 	}
 
-	sp := cpu.GetSP() &^ uint64(0xF)
-	extraCount := 0
-	if len(args) > 4 {
-		extraCount = len(args) - 4
-	}
-	stackBytes := uint64(32 + extraCount*8)
-	if stackBytes%16 != 0 {
-		stackBytes += 8
-	}
-	sp -= stackBytes
-	sp -= 8
-	mem.Write64(sp, trampoline.Addr)
-	for i := 4; i < len(args); i++ {
-		mem.Write64(sp+0x28+uint64(i-4)*8, args[i])
-	}
+	guestArch := cpu.GetArch()
+	sp := prepareGuestCallStack(mem, guestArch, cpu.GetSP(), trampoline.Addr, args)
 	cpu.SetSP(sp)
 
-	if len(args) > 0 {
-		rw.WriteReg(regRCX, args[0])
-	}
-	if len(args) > 1 {
-		rw.WriteReg(regRDX, args[1])
-	}
-	if len(args) > 2 {
-		rw.WriteReg(regR8, args[2])
-	}
-	if len(args) > 3 {
-		rw.WriteReg(regR9, args[3])
+	if guestArch != arch.ArchI386 {
+		if len(args) > 0 {
+			rw.WriteReg(regRCX, args[0])
+		}
+		if len(args) > 1 {
+			rw.WriteReg(regRDX, args[1])
+		}
+		if len(args) > 2 {
+			rw.WriteReg(regR8, args[2])
+		}
+		if len(args) > 3 {
+			rw.WriteReg(regR9, args[3])
+		}
 	}
 	cpu.SetPC(addr)
 
@@ -150,7 +139,7 @@ func CallGuestFunction(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline
 	// vmcall (which overwrites EAX with the trap ID), so the real return value is
 	// recovered from R11, not RAX.
 	ret := rr.ReadReg(regR11)
-	if cpu.GetArch() == arch.ArchI386 {
+	if guestArch == arch.ArchI386 {
 		// In a 32-bit guest the trampoline's `49 89 C3` (mov r11,rax in x64)
 		// decodes as `dec ecx; mov ebx,eax`, so the callee's 32-bit return value
 		// lands in EBX, not R11.
@@ -164,4 +153,33 @@ func CallGuestFunction(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline
 		return ret, restoreErr
 	}
 	return ret, nil
+}
+
+func prepareGuestCallStack(mem *mmu.MMU, guestArch arch.Arch, stackPointer, returnAddress uint64, args []uint64) uint64 {
+	sp := stackPointer &^ uint64(0xF)
+	if guestArch == arch.ArchI386 {
+		for i := len(args) - 1; i >= 0; i-- {
+			sp -= 4
+			mem.Write32(sp, uint32(args[i]))
+		}
+		sp -= 4
+		mem.Write32(sp, uint32(returnAddress))
+		return sp
+	}
+
+	extraCount := 0
+	if len(args) > 4 {
+		extraCount = len(args) - 4
+	}
+	stackBytes := uint64(32 + extraCount*8)
+	if stackBytes%16 != 0 {
+		stackBytes += 8
+	}
+	sp -= stackBytes
+	sp -= 8
+	mem.Write64(sp, returnAddress)
+	for i := 4; i < len(args); i++ {
+		mem.Write64(sp+0x28+uint64(i-4)*8, args[i])
+	}
+	return sp
 }

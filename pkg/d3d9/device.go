@@ -26,6 +26,24 @@ type Device struct {
 	ClearFlags         uint32
 	ClearDepth         float32
 	ClearStencil       uint32
+
+	// Programmable-shader state (SM1.x/2.0). VSConstants holds the c#
+	// float constant registers set via SetVertexShaderConstantF; a bound
+	// vertex shader (CurrentVertexShader != nil) makes the renderer use the
+	// translated SPIR-V module and feed VSConstants instead of the fixed
+	// transform pipeline.
+	VSConstants        [256][4]float32
+	PSConstants        [256][4]float32
+	CurrentVertexShader *ShaderProgram
+	CurrentPixelShader  *ShaderProgram
+}
+
+// ShaderProgram is a translated D3D9 programmable shader: the parsed SM
+// program plus its compiled SPIR-V and (lazily) its Vulkan module handle.
+type ShaderProgram struct {
+	Parsed   *Shader
+	SPIRV    []byte
+	VkModule uint64 // vk.ShaderModule handle, 0 until created
 }
 
 func NewDevice() *Device {

@@ -2,7 +2,10 @@
 
 package gdi
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // Manager is the central GDI handle table.
 // ReactOS equivalent: GDI handle table in win32ss/gdi/ntgdi/gdiobj.c
@@ -11,6 +14,7 @@ import "sync/atomic"
 // 0x80000100. Stock objects live in the fixed 0x80000000-0x80000020 range.
 // External code (main.go) uses uint64 handles exclusively.
 type Manager struct {
+	mu      sync.RWMutex
 	next    uint64 // atomic
 	objects map[uint64]*Object
 	dcs     map[uint64]*DC
@@ -86,6 +90,9 @@ func (m *Manager) initStock() {
 		StockDeviceDefaultFont,
 	} {
 		f := defaultFont()
+		if idx == StockDefaultGuiFont {
+			f = defaultGUIFont()
+		}
 		h := stockHandleBase + uint64(idx)
 		m.objects[h] = &Object{Type: ObjFont, Font: f}
 		if idx < len(m.stock) {
@@ -106,7 +113,20 @@ func (m *Manager) AllocScreenDC() (uint64, *DC) {
 	dc := NewScreenDC(m.Screen)
 	dc.Mgr = m // live screen lookup - survives Wayland buffer resizes
 	h := m.alloc()
+	m.mu.Lock()
 	m.dcs[h] = dc
+	m.mu.Unlock()
+	return h, dc
+}
+
+// AllocTargetDC creates a screen-compatible DC bound to a specific surface.
+// Independent top-level window buffers use this instead of the primary screen.
+func (m *Manager) AllocTargetDC(surface *Surface) (uint64, *DC) {
+	dc := NewScreenDC(surface)
+	h := m.alloc()
+	m.mu.Lock()
+	m.dcs[h] = dc
+	m.mu.Unlock()
 	return h, dc
 }
 
@@ -116,7 +136,7 @@ func (m *Manager) AllocMemDC() (uint64, *DC) {
 	h := m.alloc()
 	def := m.createBitmapObject(1, 1, 1, false, 0, NewSurface(1, 1))
 	dc.DefaultBitmapHandle = def
-	if obj := m.objects[def]; obj != nil {
+	if obj := m.GetObject(def); obj != nil {
 		dc.Bitmap = obj.Bitmap
 		dc.BitmapHandle = def
 		dc.Target = obj.Bitmap.Surf
@@ -125,12 +145,16 @@ func (m *Manager) AllocMemDC() (uint64, *DC) {
 		dc.ClipX1 = obj.Bitmap.Width
 		dc.ClipY1 = obj.Bitmap.Height
 	}
+	m.mu.Lock()
 	m.dcs[h] = dc
+	m.mu.Unlock()
 	return h, dc
 }
 
 // DeleteDC removes a DC from the table and releases its default monochrome bitmap.
 func (m *Manager) DeleteDC(h uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if dc, ok := m.dcs[h]; ok {
 		if dc.DefaultBitmapHandle != 0 {
 			delete(m.objects, dc.DefaultBitmapHandle)
@@ -141,6 +165,8 @@ func (m *Manager) DeleteDC(h uint64) {
 
 // GetDC looks up a DC handle. Returns nil if not found.
 func (m *Manager) GetDC(h uint64) *DC {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.dcs[h]
 }
 
@@ -148,6 +174,8 @@ func (m *Manager) GetDC(h uint64) *DC {
 // ReactOS-format HGDIOBJ (index | LO_DC_TYPE) for the same DC that a real
 // gdi32 will pass to subsequent NtGdi* services.
 func (m *Manager) AliasDC(h uint64, dc *DC) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.dcs[h] = dc
 }
 
@@ -157,15 +185,19 @@ func (m *Manager) AliasDC(h uint64, dc *DC) {
 // ReactOS: NtGdiCreateSolidBrush
 func (m *Manager) CreateSolidBrush(color uint32) uint64 {
 	h := m.alloc()
+	m.mu.Lock()
 	m.objects[h] = &Object{Type: ObjBrush, Brush: &Brush{Style: 0, Color: color}}
+	m.mu.Unlock()
 	return h
 }
 
-// CreateHatchBrush allocates a hatched brush (rendered as solid for simplicity).
+// CreateHatchBrush allocates a hatched brush.
 // ReactOS: NtGdiCreateHatchBrushInternal
 func (m *Manager) CreateHatchBrush(style int32, color uint32) uint64 {
 	h := m.alloc()
+	m.mu.Lock()
 	m.objects[h] = &Object{Type: ObjBrush, Brush: &Brush{Style: 2, Hatch: style, Color: color}}
+	m.mu.Unlock()
 	return h
 }
 
@@ -173,10 +205,12 @@ func (m *Manager) CreateHatchBrush(style int32, color uint32) uint64 {
 func (m *Manager) CreatePatternBrush(bitmapH uint64) uint64 {
 	h := m.alloc()
 	var bm *Bitmap
+	m.mu.Lock()
 	if obj, ok := m.objects[bitmapH]; ok && obj.Bitmap != nil {
 		bm = obj.Bitmap
 	}
 	m.objects[h] = &Object{Type: ObjBrush, Brush: &Brush{Style: 3, Pattern: bm}}
+	m.mu.Unlock()
 	return h
 }
 
@@ -184,7 +218,9 @@ func (m *Manager) CreatePatternBrush(bitmapH uint64) uint64 {
 // ReactOS: NtGdiCreatePen
 func (m *Manager) CreatePen(style, width int32, color uint32) uint64 {
 	h := m.alloc()
+	m.mu.Lock()
 	m.objects[h] = &Object{Type: ObjPen, Pen: &Pen{Style: style, Width: width, Color: color}}
+	m.mu.Unlock()
 	return h
 }
 
@@ -236,7 +272,9 @@ func (m *Manager) CreateFont(f *Font) uint64 {
 	}
 
 	h := m.alloc()
+	m.mu.Lock()
 	m.objects[h] = &Object{Type: ObjFont, Font: f}
+	m.mu.Unlock()
 	return h
 }
 
@@ -251,6 +289,7 @@ func (m *Manager) createBitmapObject(w, h, bitCount int32, topDown bool, bits ui
 		bitCount = 32
 	}
 	handle := m.alloc()
+	m.mu.Lock()
 	m.objects[handle] = &Object{
 		Type: ObjBitmap,
 		Bitmap: &Bitmap{
@@ -262,6 +301,7 @@ func (m *Manager) createBitmapObject(w, h, bitCount int32, topDown bool, bits ui
 			Surf:     surf,
 		},
 	}
+	m.mu.Unlock()
 	return handle
 }
 
@@ -301,6 +341,8 @@ func (m *Manager) DeleteObject(h uint64) bool {
 	if m.DeletePalette(h) {
 		return true
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	obj, ok := m.objects[h]
 	if ok && obj.Type == ObjBitmap && obj.Bitmap != nil {
 		obj.Bitmap.Surf = nil
@@ -312,6 +354,8 @@ func (m *Manager) DeleteObject(h uint64) bool {
 
 // GetObject returns the GDI object for a handle, or nil.
 func (m *Manager) GetObject(h uint64) *Object {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.objects[h]
 }
 
@@ -339,7 +383,9 @@ const (
 // ReactOS: NtGdiCreateRectRgn
 func (m *Manager) CreateRectRgn(x0, y0, x1, y1 int32) uint64 {
 	h := m.alloc()
+	m.mu.Lock()
 	m.objects[h] = &Object{Type: ObjRegion, Region: &Region{X0: x0, Y0: y0, X1: x1, Y1: y1}}
+	m.mu.Unlock()
 	return h
 }
 
@@ -356,6 +402,8 @@ func (m *Manager) CreateRoundRectRgn(x0, y0, x1, y1, xr, yr int32) uint64 {
 
 // GetRegion returns the Region object for a handle, or nil.
 func (m *Manager) GetRegion(h uint64) *Region {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	obj := m.objects[h]
 	if obj != nil && obj.Type == ObjRegion {
 		return obj.Region
@@ -586,6 +634,8 @@ func (m *Manager) FindBitmapHandle(bm *Bitmap) uint64 {
 }
 
 func (m *Manager) findBrushHandle(b *Brush) uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for h, obj := range m.objects {
 		if obj.Type == ObjBrush && obj.Brush == b {
 			return h
@@ -595,6 +645,8 @@ func (m *Manager) findBrushHandle(b *Brush) uint64 {
 }
 
 func (m *Manager) findPenHandle(p *Pen) uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for h, obj := range m.objects {
 		if obj.Type == ObjPen && obj.Pen == p {
 			return h
@@ -604,6 +656,8 @@ func (m *Manager) findPenHandle(p *Pen) uint64 {
 }
 
 func (m *Manager) findFontHandle(f *Font) uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for h, obj := range m.objects {
 		if obj.Type == ObjFont && obj.Font == f {
 			return h
@@ -619,6 +673,8 @@ func (m *Manager) findBitmapHandle(bm *Bitmap) uint64 {
 	if bm == nil {
 		return 0
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for h, obj := range m.objects {
 		if obj.Type == ObjBitmap && obj.Bitmap == bm {
 			return h

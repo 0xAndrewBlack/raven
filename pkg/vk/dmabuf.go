@@ -21,7 +21,7 @@ func hasDeviceExtension(device VkDevice, name string) bool {
 
 func SupportsDmabufExport(device VkDevice) bool {
 	return device != 0 &&
-		procs.vkGetMemoryFdKHR != 0 &&
+		memoryFdProc(device) != 0 &&
 		hasDeviceExtension(device, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME) &&
 		hasDeviceExtension(device, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
 		hasDeviceExtension(device, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)
@@ -60,10 +60,12 @@ func CreateExportableImage(device VkDevice, width, height uint32, format VkForma
 	callVoid(procs.vkGetImageMemoryRequirements, uintptr(device), uintptr(image), uintptr(unsafe.Pointer(&req)))
 	phys := currentPhysicalDevice(device)
 	if phys == 0 {
+		DestroyImage(device, image)
 		return 0, 0, VK_ERROR_INITIALIZATION_FAILED
 	}
 	memType := FindMemoryType(phys, req.MemoryTypeBits, memProps)
 	if memType == VK_QUEUE_FAMILY_IGNORED {
+		DestroyImage(device, image)
 		return 0, 0, VK_ERROR_OUT_OF_DEVICE_MEMORY
 	}
 
@@ -80,9 +82,15 @@ func CreateExportableImage(device VkDevice, width, height uint32, format VkForma
 	var memory VkDeviceMemory
 	res = callResult(procs.vkAllocateMemory, uintptr(device), uintptr(unsafe.Pointer(&alloc)), 0, uintptr(unsafe.Pointer(&memory)))
 	if res != VK_SUCCESS {
+		DestroyImage(device, image)
 		return 0, 0, res
 	}
 	res = callResult(procs.vkBindImageMemory, uintptr(device), uintptr(image), uintptr(memory), 0)
+	if res != VK_SUCCESS {
+		DestroyImage(device, image)
+		FreeMemory(device, memory)
+		return 0, 0, res
+	}
 	return image, memory, res
 }
 
@@ -96,7 +104,7 @@ func ExportImageDmabufFd(device VkDevice, memory VkDeviceMemory) (int, error) {
 		HandleType: VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
 	}
 	var fd int32 = -1
-	res := callResult(procs.vkGetMemoryFdKHR, uintptr(device), uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&fd)))
+	res := callResult(memoryFdProc(device), uintptr(device), uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&fd)))
 	if res != VK_SUCCESS {
 		return -1, fmt.Errorf("vulkan: vkGetMemoryFdKHR failed: %d", res)
 	}
@@ -136,6 +144,7 @@ func CreateLinearExportableImage(device VkDevice, width, height uint32, format V
 	callVoid(procs.vkGetImageMemoryRequirements, uintptr(device), uintptr(image), uintptr(unsafe.Pointer(&req)))
 	phys := currentPhysicalDevice(device)
 	if phys == 0 {
+		DestroyImage(device, image)
 		return 0, 0, VK_ERROR_INITIALIZATION_FAILED
 	}
 	// Prefer host-visible so the compositor can map it; fall back to device-local.
@@ -145,6 +154,7 @@ func CreateLinearExportableImage(device VkDevice, width, height uint32, format V
 		memType = FindMemoryType(phys, req.MemoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 	}
 	if memType == VK_QUEUE_FAMILY_IGNORED {
+		DestroyImage(device, image)
 		return 0, 0, VK_ERROR_OUT_OF_DEVICE_MEMORY
 	}
 
@@ -161,9 +171,15 @@ func CreateLinearExportableImage(device VkDevice, width, height uint32, format V
 	var memory VkDeviceMemory
 	res = callResult(procs.vkAllocateMemory, uintptr(device), uintptr(unsafe.Pointer(&alloc)), 0, uintptr(unsafe.Pointer(&memory)))
 	if res != VK_SUCCESS {
+		DestroyImage(device, image)
 		return 0, 0, res
 	}
 	res = callResult(procs.vkBindImageMemory, uintptr(device), uintptr(image), uintptr(memory), 0)
+	if res != VK_SUCCESS {
+		DestroyImage(device, image)
+		FreeMemory(device, memory)
+		return 0, 0, res
+	}
 	return image, memory, res
 }
 

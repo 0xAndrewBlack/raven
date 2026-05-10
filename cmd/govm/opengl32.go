@@ -350,7 +350,7 @@ func registerOpengl32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		if addr, ok := dll.Exports[procName]; ok {
+		if addr := d.LookupSynthExport(dll, procName, 0); addr != 0 {
 			ctx.SetReturn(addr)
 			return 0
 		}

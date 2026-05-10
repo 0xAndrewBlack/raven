@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"math"
 	"strconv"
+	"sync"
 	"unsafe"
 
 	"github.com/mirkobrombin/Raven/pkg/vk"
@@ -29,7 +30,14 @@ type depthAttachment struct {
 	Memory vk.VkDeviceMemory
 }
 
+type transientBuffer struct {
+	buffer vk.VkBuffer
+	memory vk.VkDeviceMemory
+}
+
 type Renderer struct {
+	lifecycle            sync.Mutex
+	closed               bool
 	vkInstance           vk.VkInstance
 	vkPhysicalDevice     vk.VkPhysicalDevice
 	vkDevice             vk.VkDevice
@@ -47,6 +55,7 @@ type Renderer struct {
 	frameFence           vk.VkFence
 	clearValues          [2]vk.VkClearValue
 	inScene              bool
+	commandReady         bool
 	// linearExport is a VK_IMAGE_TILING_LINEAR image used as the DMA-buf export
 	// source. The render target uses optimal tiling (GPU-vendor specific layout)
 	// which cannot be imported by the compositor with modifier=0. After each
@@ -55,6 +64,85 @@ type Renderer struct {
 	linearExport       vk.VkImage
 	linearExportMemory vk.VkDeviceMemory
 	linearExportStride uint32
+	pendingBuffers     []transientBuffer
+
+	// Programmable vertex-shader path resources, created lazily on the first
+	// draw that has a translated vertex shader bound. The translated SPIR-V
+	// reads its c# constants from a uniform block at set 0, binding 0, so the
+	// shader path needs a descriptor set + uniform buffer and a pipeline layout
+	// that references the descriptor set layout (instead of the FFP push
+	// constants). shaderModules tracks vk modules created for cached
+	// ShaderProgram.VkModule handles so they can be destroyed on Close.
+	shaderResourcesReady bool
+	shaderDescLayout     vk.VkDescriptorSetLayout
+	shaderDescPool       vk.VkDescriptorPool
+	shaderDescSet        vk.VkDescriptorSet
+	shaderUniformBuffer  vk.VkBuffer
+	shaderUniformMemory  vk.VkDeviceMemory
+	shaderPipelineLayout vk.VkPipelineLayout
+	shaderModules        []vk.VkShaderModule
+}
+
+// vsConstantBufferSize is the byte size of the vertex-shader constant uniform
+// buffer: 256 c# registers of vec4 (16 bytes each).
+const vsConstantBufferSize = 256 * 16
+
+func (r *Renderer) Close() {
+	if r == nil {
+		return
+	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if r.closed {
+		return
+	}
+	r.closed = true
+	device := r.vkDevice
+	if device != 0 {
+		vk.DeviceWaitIdle(device)
+		r.releasePendingBuffers()
+		for _, pipeline := range r.pipelineCache {
+			vk.DestroyPipeline(device, pipeline)
+		}
+		for _, module := range r.shaderModules {
+			vk.DestroyShaderModule(device, module)
+		}
+		if r.shaderResourcesReady {
+			vk.DestroyPipelineLayout(device, r.shaderPipelineLayout)
+			vk.DestroyBuffer(device, r.shaderUniformBuffer)
+			vk.FreeMemory(device, r.shaderUniformMemory)
+			vk.DestroyDescriptorPool(device, r.shaderDescPool)
+			vk.DestroyDescriptorSetLayout(device, r.shaderDescLayout)
+		}
+		vk.DestroyFramebuffer(device, r.currentFramebuffer)
+		vk.DestroyPipelineLayout(device, r.pipelineLayout)
+		vk.DestroyShaderModule(device, r.fragmentShaderModule)
+		vk.DestroyShaderModule(device, r.vertexShaderModule)
+		vk.DestroyRenderPass(device, r.vkRenderPass)
+		if r.linearExport != 0 {
+			vk.DestroyImage(device, r.linearExport)
+			vk.FreeMemory(device, r.linearExportMemory)
+		}
+		if r.depthBuffer.View != 0 {
+			vk.DestroyImageView(device, r.depthBuffer.View)
+		}
+		if r.depthBuffer.Image != 0 {
+			vk.DestroyImage(device, r.depthBuffer.Image)
+			vk.FreeMemory(device, r.depthBuffer.Memory)
+		}
+		if r.renderTarget != nil {
+			vk.DestroyImageView(device, r.renderTarget.View)
+			vk.DestroyImage(device, r.renderTarget.Image)
+			vk.FreeMemory(device, r.renderTarget.Memory)
+		}
+		vk.DestroyFence(device, r.frameFence)
+		if r.vkCommandBuffer != 0 {
+			vk.FreeCommandBuffer(device, r.vkCommandPool, r.vkCommandBuffer)
+		}
+		vk.DestroyCommandPool(device, r.vkCommandPool)
+		vk.DestroyDevice(device)
+	}
+	vk.DestroyInstance(r.vkInstance)
 }
 
 type ffpPushConstants struct {
@@ -73,89 +161,97 @@ func NewRenderer(width, height uint32) (*Renderer, error) {
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create instance", res)
 	}
+	r := &Renderer{vkInstance: instance, pipelineCache: map[uint64]vk.VkPipeline{}}
+	initialized := false
+	defer func() {
+		if !initialized {
+			r.Close()
+		}
+	}()
 	physicalDevice, res := vk.PickPhysicalDevice(instance)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("pick physical device", res)
 	}
+	r.vkPhysicalDevice = physicalDevice
 	queueFamily := vk.FindGraphicsQueueFamily(physicalDevice)
 	device, queue, res := vk.CreateDevice(physicalDevice, queueFamily)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create device", res)
 	}
+	r.vkDevice = device
+	r.vkQueue = queue
 	commandPool, res := vk.CreateCommandPool(device, queueFamily)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create command pool", res)
 	}
+	r.vkCommandPool = commandPool
 	commandBuffer, res := vk.AllocateCommandBuffer(device, commandPool)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("allocate command buffer", res)
 	}
-	colorImage, colorMemory, res := vk.CreateImage(device, width, height, vk.VK_FORMAT_B8G8R8A8_UNORM, vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+	r.vkCommandBuffer = commandBuffer
+	var colorImage vk.VkImage
+	var colorMemory vk.VkDeviceMemory
 	if vk.SupportsDmabufExport(device) {
 		colorImage, colorMemory, res = vk.CreateExportableImage(device, width, height, vk.VK_FORMAT_B8G8R8A8_UNORM, vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vk.VkExternalMemoryHandleTypeFlags(vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT))
 		if res != vk.VK_SUCCESS {
 			colorImage, colorMemory, res = vk.CreateImage(device, width, height, vk.VK_FORMAT_B8G8R8A8_UNORM, vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 		}
+	} else {
+		colorImage, colorMemory, res = vk.CreateImage(device, width, height, vk.VK_FORMAT_B8G8R8A8_UNORM, vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 	}
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create render target", res)
 	}
+	r.renderTarget = &RenderTarget{Width: width, Height: height, Image: colorImage, Memory: colorMemory, Format: vk.VK_FORMAT_B8G8R8A8_UNORM, DmabufStride: width * 4, DmabufFormat: wl.DrmFormatARGB8888}
 	colorView, res := vk.CreateImageView(device, colorImage, vk.VK_FORMAT_B8G8R8A8_UNORM, vk.VK_IMAGE_ASPECT_COLOR_BIT)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create render target view", res)
 	}
+	r.renderTarget.View = colorView
 	depthImage, depthMemory, res := vk.CreateImage(device, width, height, vk.VK_FORMAT_D24_UNORM_S8_UINT, vk.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create depth buffer", res)
 	}
+	r.depthBuffer = depthAttachment{Image: depthImage, Memory: depthMemory}
 	depthView, res := vk.CreateImageView(device, depthImage, vk.VK_FORMAT_D24_UNORM_S8_UINT, vk.VK_IMAGE_ASPECT_DEPTH_BIT|vk.VK_IMAGE_ASPECT_STENCIL_BIT)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create depth buffer view", res)
 	}
+	r.depthBuffer.View = depthView
 	renderPass, res := vk.CreateRenderPass(device, vk.VK_FORMAT_B8G8R8A8_UNORM, vk.VK_FORMAT_D24_UNORM_S8_UINT)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create render pass", res)
 	}
+	r.vkRenderPass = renderPass
 	framebuffer, res := vk.CreateFramebuffer(device, renderPass, colorView, depthView, width, height)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create framebuffer", res)
 	}
+	r.currentFramebuffer = framebuffer
 	vertSPV := GenerateFFPVertexShader(4, false, 0)
 	fragSPV := GenerateFFPFragmentShader(0, nil)
 	vertModule, res := vk.CreateShaderModule(device, vertSPV)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create vertex shader", res)
 	}
+	r.vertexShaderModule = vertModule
 	fragModule, res := vk.CreateShaderModule(device, fragSPV)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create fragment shader", res)
 	}
+	r.fragmentShaderModule = fragModule
 	pushRange := vk.VkPushConstantRange{StageFlags: vk.VkShaderStageFlags(vk.VK_SHADER_STAGE_VERTEX_BIT), Size: uint32(unsafe.Sizeof(ffpPushConstants{}))}
 	pipelineLayout, res := vk.CreatePipelineLayout(device, nil, []vk.VkPushConstantRange{pushRange})
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create pipeline layout", res)
 	}
+	r.pipelineLayout = pipelineLayout
 	frameFence, res := vk.CreateFence(device, true)
 	if res != vk.VK_SUCCESS {
 		return nil, vkResultError("create fence", res)
 	}
-	r := &Renderer{
-		vkInstance:           instance,
-		vkPhysicalDevice:     physicalDevice,
-		vkDevice:             device,
-		vkQueue:              queue,
-		vkCommandPool:        commandPool,
-		vkCommandBuffer:      commandBuffer,
-		vkRenderPass:         renderPass,
-		currentFramebuffer:   framebuffer,
-		pipelineCache:        map[uint64]vk.VkPipeline{},
-		vertexShaderModule:   vertModule,
-		fragmentShaderModule: fragModule,
-		pipelineLayout:       pipelineLayout,
-		renderTarget:         &RenderTarget{Width: width, Height: height, Image: colorImage, View: colorView, Memory: colorMemory, Format: vk.VK_FORMAT_B8G8R8A8_UNORM, DmabufStride: width * 4, DmabufFormat: wl.DrmFormatARGB8888},
-		depthBuffer:          depthAttachment{Image: depthImage, View: depthView, Memory: depthMemory},
-		frameFence:           frameFence,
-	}
+	r.frameFence = frameFence
 	// Create a linear-tiled exportable image so DMA-buf imports use the correct
 	// memory layout. If creation fails, the dmabuf path falls back to readback.
 	if vk.SupportsDmabufExport(device) {
@@ -170,11 +266,20 @@ func NewRenderer(width, height uint32) (*Renderer, error) {
 		}
 	}
 	r.Clear(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL, 0, 1, 0)
+	initialized = true
 	return r, nil
 }
 
 func (r *Renderer) BeginScene() {
-	if r == nil || r.inScene {
+	if r == nil {
+		return
+	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if r.closed || r.inScene {
+		return
+	}
+	if vk.ResetCommandBuffer(r.vkCommandBuffer, 0) != vk.VK_SUCCESS {
 		return
 	}
 	if vk.BeginCommandBuffer(r.vkCommandBuffer) != vk.VK_SUCCESS {
@@ -186,17 +291,32 @@ func (r *Renderer) BeginScene() {
 }
 
 func (r *Renderer) EndScene() {
-	if r == nil || !r.inScene {
+	if r == nil {
+		return
+	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	r.endScene()
+}
+
+func (r *Renderer) endScene() {
+	if r.closed || !r.inScene {
 		return
 	}
 	vk.CmdEndRenderPass(r.vkCommandBuffer)
 	if vk.EndCommandBuffer(r.vkCommandBuffer) == vk.VK_SUCCESS {
 		r.inScene = false
+		r.commandReady = true
 	}
 }
 
 func (r *Renderer) Clear(flags uint32, color uint32, z float32, stencil uint32) {
 	if r == nil {
+		return
+	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if r.closed {
 		return
 	}
 	if flags&D3DCLEAR_TARGET != 0 {
@@ -208,7 +328,12 @@ func (r *Renderer) Clear(flags uint32, color uint32, z float32, stencil uint32) 
 }
 
 func (r *Renderer) DrawPrimitive(dev *Device, primType uint32, startVertex, primCount uint32) {
-	if r == nil || dev == nil || !r.inScene {
+	if r == nil {
+		return
+	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if r.closed || dev == nil || !r.inScene {
 		return
 	}
 	source := dev.StreamSources[0]
@@ -219,7 +344,8 @@ func (r *Renderer) DrawPrimitive(dev *Device, primType uint32, startVertex, prim
 	if vertexCount == 0 {
 		return
 	}
-	pipeline := r.getOrCreatePipeline(dev, d3dPrimToVkTopology(primType))
+	vertModule, layout, useShader := r.resolveVertexStage(dev)
+	pipeline := r.getOrCreatePipeline(dev, d3dPrimToVkTopology(primType), vertModule, layout)
 	if pipeline == 0 {
 		return
 	}
@@ -230,14 +356,19 @@ func (r *Renderer) DrawPrimitive(dev *Device, primType uint32, startVertex, prim
 	vk.CmdBindPipeline(r.vkCommandBuffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
 	vk.CmdBindVertexBuffers(r.vkCommandBuffer, 0, []vk.VkBuffer{vb}, []vk.VkDeviceSize{0})
 	r.bindViewportAndScissor(dev)
-	r.pushConstants(dev)
+	r.bindVertexStageConstants(dev, layout, useShader)
 	vk.CmdDraw(r.vkCommandBuffer, vertexCount, 1, startVertex, 0)
 }
 
 func (r *Renderer) DrawIndexedPrimitive(dev *Device, primType uint32, baseVertex int32, minIdx, numVertices, startIndex, primCount uint32) {
 	_ = minIdx
 	_ = numVertices
-	if r == nil || dev == nil || !r.inScene || dev.IndexBuffer == nil {
+	if r == nil {
+		return
+	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if r.closed || dev == nil || !r.inScene || dev.IndexBuffer == nil {
 		return
 	}
 	source := dev.StreamSources[0]
@@ -248,7 +379,8 @@ func (r *Renderer) DrawIndexedPrimitive(dev *Device, primType uint32, baseVertex
 	if indexCount == 0 {
 		return
 	}
-	pipeline := r.getOrCreatePipeline(dev, d3dPrimToVkTopology(primType))
+	vertModule, layout, useShader := r.resolveVertexStage(dev)
+	pipeline := r.getOrCreatePipeline(dev, d3dPrimToVkTopology(primType), vertModule, layout)
 	if pipeline == 0 {
 		return
 	}
@@ -264,14 +396,19 @@ func (r *Renderer) DrawIndexedPrimitive(dev *Device, primType uint32, baseVertex
 	vk.CmdBindVertexBuffers(r.vkCommandBuffer, 0, []vk.VkBuffer{vb}, []vk.VkDeviceSize{0})
 	vk.CmdBindIndexBuffer(r.vkCommandBuffer, ib, 0, indexType)
 	r.bindViewportAndScissor(dev)
-	r.pushConstants(dev)
+	r.bindVertexStageConstants(dev, layout, useShader)
 	vk.CmdDrawIndexed(r.vkCommandBuffer, indexCount, 1, startIndex, baseVertex, 0)
 }
 
 // DrawPrimitiveUP draws using vertex data from a Go byte slice (guest memory
 // already copied), bypassing the stream source / vertex buffer mechanism.
 func (r *Renderer) DrawPrimitiveUP(dev *Device, primType uint32, primCount uint32, vertexData []byte, stride uint32) {
-	if r == nil || dev == nil || !r.inScene || len(vertexData) == 0 || primCount == 0 {
+	if r == nil {
+		return
+	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if r.closed || dev == nil || !r.inScene || len(vertexData) == 0 || primCount == 0 {
 		return
 	}
 	vertexCount := primitiveVertexCount(primType, primCount)
@@ -283,14 +420,15 @@ func (r *Renderer) DrawPrimitiveUP(dev *Device, primType uint32, primCount uint3
 		return
 	}
 	topology := d3dPrimToVkTopology(primType)
-	pipeline := r.getOrCreatePipeline(dev, topology)
+	vertModule, layout, useShader := r.resolveVertexStage(dev)
+	pipeline := r.getOrCreatePipeline(dev, topology, vertModule, layout)
 	if pipeline == 0 {
 		return
 	}
 	vk.CmdBindPipeline(r.vkCommandBuffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
 	vk.CmdBindVertexBuffers(r.vkCommandBuffer, 0, []vk.VkBuffer{vb}, []vk.VkDeviceSize{0})
 	r.bindViewportAndScissor(dev)
-	r.pushConstants(dev)
+	r.bindVertexStageConstants(dev, layout, useShader)
 	vk.CmdDraw(r.vkCommandBuffer, vertexCount, 1, 0, 0)
 }
 
@@ -298,8 +436,16 @@ func (r *Renderer) Present(windows ...*wl.Window) []byte {
 	if r == nil {
 		return nil
 	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if r.closed {
+		return nil
+	}
 	if r.inScene {
-		r.EndScene()
+		r.endScene()
+	}
+	if !r.commandReady && !r.recordClearFrame() {
+		return nil
 	}
 	if vk.ResetFence(r.vkDevice, r.frameFence) != vk.VK_SUCCESS {
 		return nil
@@ -310,6 +456,8 @@ func (r *Renderer) Present(windows ...*wl.Window) []byte {
 	if vk.WaitForFence(r.vkDevice, r.frameFence, ^uint64(0)) != vk.VK_SUCCESS {
 		return nil
 	}
+	r.releasePendingBuffers()
+	r.commandReady = false
 	var window *wl.Window
 	for _, candidate := range windows {
 		if candidate != nil {
@@ -327,6 +475,20 @@ func (r *Renderer) Present(windows ...*wl.Window) []byte {
 		window.Commit()
 	}
 	return pixels
+}
+
+func (r *Renderer) recordClearFrame() bool {
+	if vk.ResetCommandBuffer(r.vkCommandBuffer, 0) != vk.VK_SUCCESS || vk.BeginCommandBuffer(r.vkCommandBuffer) != vk.VK_SUCCESS {
+		return false
+	}
+	area := vk.VkRect2D{Extent: vk.VkExtent2D{Width: r.renderTarget.Width, Height: r.renderTarget.Height}}
+	vk.CmdBeginRenderPass(r.vkCommandBuffer, r.vkRenderPass, r.currentFramebuffer, area, r.clearValues[:])
+	vk.CmdEndRenderPass(r.vkCommandBuffer)
+	if vk.EndCommandBuffer(r.vkCommandBuffer) != vk.VK_SUCCESS {
+		return false
+	}
+	r.commandReady = true
+	return true
 }
 
 func (r *Renderer) tryDmabufPresent(window *wl.Window) bool {
@@ -374,6 +536,12 @@ func (r *Renderer) blitToLinear() bool {
 	if res != vk.VK_SUCCESS {
 		return false
 	}
+	commandBufferSafe := true
+	defer func() {
+		if commandBufferSafe {
+			vk.FreeCommandBuffer(r.vkDevice, r.vkCommandPool, cb)
+		}
+	}()
 	if vk.BeginCommandBuffer(cb) != vk.VK_SUCCESS {
 		return false
 	}
@@ -476,12 +644,22 @@ func (r *Renderer) blitToLinear() bool {
 	if res != vk.VK_SUCCESS {
 		return false
 	}
+	fenceSafe := true
+	defer func() {
+		if fenceSafe {
+			vk.DestroyFence(r.vkDevice, fence)
+		}
+	}()
 	if vk.QueueSubmit(r.vkQueue, cb, fence) != vk.VK_SUCCESS {
 		return false
 	}
-	vk.WaitForFence(r.vkDevice, fence, ^uint64(0))
-	vk.DestroyFence(r.vkDevice, fence)
-	vk.FreeCommandBuffer(r.vkDevice, r.vkCommandPool, cb)
+	if vk.WaitForFence(r.vkDevice, fence, ^uint64(0)) != vk.VK_SUCCESS {
+		// Do not release submitted resources unless the queue is known idle.
+		// A device failure may leave them live until process teardown.
+		commandBufferSafe = vk.DeviceWaitIdle(r.vkDevice) == vk.VK_SUCCESS
+		fenceSafe = commandBufferSafe
+		return false
+	}
 	return true
 }
 
@@ -494,6 +672,10 @@ func (r *Renderer) readbackPresent() []byte {
 	if res != vk.VK_SUCCESS {
 		return nil
 	}
+	defer func() {
+		vk.DestroyBuffer(r.vkDevice, readbackBuffer)
+		vk.FreeMemory(r.vkDevice, readbackMemory)
+	}()
 	if vk.ResetCommandBuffer(r.vkCommandBuffer, 0) != vk.VK_SUCCESS || vk.BeginCommandBuffer(r.vkCommandBuffer) != vk.VK_SUCCESS {
 		return nil
 	}
@@ -548,13 +730,13 @@ func minU32(a, b uint32) uint32 {
 	return b
 }
 
-func (r *Renderer) getOrCreatePipeline(dev *Device, topology vk.VkPrimitiveTopology) vk.VkPipeline {
-	hash := hashPipelineState(dev, topology)
+func (r *Renderer) getOrCreatePipeline(dev *Device, topology vk.VkPrimitiveTopology, vertModule vk.VkShaderModule, layout vk.VkPipelineLayout) vk.VkPipeline {
+	hash := hashPipelineState(dev, topology, vertModule)
 	if pipeline, ok := r.pipelineCache[hash]; ok {
 		return pipeline
 	}
 	bindings, attrs := r.vertexInputDescriptions(dev)
-	pipeline, res := vk.CreateGraphicsPipelineWithOptions(r.vkDevice, r.vkRenderPass, r.pipelineLayout, r.vertexShaderModule, r.fragmentShaderModule, vk.GraphicsPipelineOptions{
+	pipeline, res := vk.CreateGraphicsPipelineWithOptions(r.vkDevice, r.vkRenderPass, layout, vertModule, r.fragmentShaderModule, vk.GraphicsPipelineOptions{
 		Topology:            topology,
 		VertexBindings:      bindings,
 		VertexAttributes:    attrs,
@@ -597,7 +779,9 @@ func d3dPrimToVkTopology(d3dPrim uint32) vk.VkPrimitiveTopology {
 }
 
 func (r *Renderer) uploadVertexStream(source StreamSource) (vk.VkBuffer, vk.VkDeviceMemory, bool) {
-	data := source.Buffer.Data
+	source.Buffer.BeginRead()
+	defer source.Buffer.EndRead()
+	data := source.Buffer.Data[:min(uint32(len(source.Buffer.Data)), source.Buffer.Size)]
 	if source.Offset < uint32(len(data)) {
 		data = data[source.Offset:]
 	}
@@ -605,7 +789,10 @@ func (r *Renderer) uploadVertexStream(source StreamSource) (vk.VkBuffer, vk.VkDe
 }
 
 func (r *Renderer) uploadIndexBuffer(ib *IndexBuffer) (vk.VkBuffer, vk.VkIndexType, bool) {
-	buffer, _, ok := r.uploadBytes(ib.Data, vk.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+	ib.BeginRead()
+	defer ib.EndRead()
+	data := ib.Data[:min(uint32(len(ib.Data)), ib.Size)]
+	buffer, _, ok := r.uploadBytes(data, vk.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
 	if !ok {
 		return 0, vk.VK_INDEX_TYPE_UINT16, false
 	}
@@ -625,11 +812,22 @@ func (r *Renderer) uploadBytes(data []byte, usage vk.VkBufferUsageFlags) (vk.VkB
 	}
 	ptr, res := vk.MapMemory(r.vkDevice, memory, 0, vk.VkDeviceSize(len(data)))
 	if res != vk.VK_SUCCESS || ptr == nil {
+		vk.DestroyBuffer(r.vkDevice, buffer)
+		vk.FreeMemory(r.vkDevice, memory)
 		return 0, 0, false
 	}
 	copy(unsafe.Slice((*byte)(ptr), len(data)), data)
 	vk.UnmapMemory(r.vkDevice, memory)
+	r.pendingBuffers = append(r.pendingBuffers, transientBuffer{buffer: buffer, memory: memory})
 	return buffer, memory, true
+}
+
+func (r *Renderer) releasePendingBuffers() {
+	for _, resource := range r.pendingBuffers {
+		vk.DestroyBuffer(r.vkDevice, resource.buffer)
+		vk.FreeMemory(r.vkDevice, resource.memory)
+	}
+	r.pendingBuffers = r.pendingBuffers[:0]
 }
 
 func (r *Renderer) bindViewportAndScissor(dev *Device) {
@@ -674,6 +872,111 @@ func (r *Renderer) pushConstants(dev *Device) {
 		}
 	}
 	vk.CmdPushConstants(r.vkCommandBuffer, r.pipelineLayout, vk.VkShaderStageFlags(vk.VK_SHADER_STAGE_VERTEX_BIT), 0, uint32(unsafe.Sizeof(push)), unsafe.Pointer(&push))
+}
+
+// resolveVertexStage decides whether the current draw uses a translated
+// programmable vertex shader or the fixed-function vertex module. When a shader
+// is bound (dev.CurrentVertexShader has translated SPIR-V) it lazily creates the
+// shader-path descriptor resources and the vk shader module, returning the
+// shader module + descriptor-backed pipeline layout and useShader=true. If any
+// of that setup fails, or no shader is bound, it falls back to the FFP module +
+// push-constant layout with useShader=false so drawing still proceeds.
+func (r *Renderer) resolveVertexStage(dev *Device) (vk.VkShaderModule, vk.VkPipelineLayout, bool) {
+	prog := dev.CurrentVertexShader
+	if prog == nil || len(prog.SPIRV) == 0 {
+		return r.vertexShaderModule, r.pipelineLayout, false
+	}
+	if !r.ensureShaderResources() {
+		return r.vertexShaderModule, r.pipelineLayout, false
+	}
+	module := r.ensureVertexShaderModule(prog)
+	if module == 0 {
+		return r.vertexShaderModule, r.pipelineLayout, false
+	}
+	return module, r.shaderPipelineLayout, true
+}
+
+// bindVertexStageConstants feeds the vertex stage its constants. For the shader
+// path it copies dev.VSConstants into the shared uniform buffer and binds the
+// descriptor set; for the FFP path it pushes the fixed-function constants.
+func (r *Renderer) bindVertexStageConstants(dev *Device, layout vk.VkPipelineLayout, useShader bool) {
+	if !useShader {
+		r.pushConstants(dev)
+		return
+	}
+	ptr, res := vk.MapMemory(r.vkDevice, r.shaderUniformMemory, 0, vsConstantBufferSize)
+	if res == vk.VK_SUCCESS && ptr != nil {
+		copy(unsafe.Slice((*byte)(ptr), vsConstantBufferSize), unsafe.Slice((*byte)(unsafe.Pointer(&dev.VSConstants[0][0])), vsConstantBufferSize))
+		vk.UnmapMemory(r.vkDevice, r.shaderUniformMemory)
+	}
+	vk.CmdBindDescriptorSets(r.vkCommandBuffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, r.shaderDescSet)
+}
+
+// ensureShaderResources lazily creates the descriptor set layout, descriptor
+// pool, descriptor set, host-visible uniform buffer and the descriptor-backed
+// pipeline layout used by the programmable vertex-shader path. Created once and
+// reused for every subsequent shader draw.
+func (r *Renderer) ensureShaderResources() bool {
+	if r.shaderResourcesReady {
+		return true
+	}
+	device := r.vkDevice
+	layout, res := vk.CreateDescriptorSetLayout(device)
+	if res != vk.VK_SUCCESS {
+		return false
+	}
+	pool, res := vk.CreateDescriptorPool(device, 1)
+	if res != vk.VK_SUCCESS {
+		vk.DestroyDescriptorSetLayout(device, layout)
+		return false
+	}
+	set, res := vk.AllocateDescriptorSet(device, pool, layout)
+	if res != vk.VK_SUCCESS {
+		vk.DestroyDescriptorPool(device, pool)
+		vk.DestroyDescriptorSetLayout(device, layout)
+		return false
+	}
+	buffer, memory, res := vk.CreateBuffer(device, vsConstantBufferSize, vk.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+	if res != vk.VK_SUCCESS {
+		vk.DestroyDescriptorPool(device, pool)
+		vk.DestroyDescriptorSetLayout(device, layout)
+		return false
+	}
+	pipelineLayout, res := vk.CreatePipelineLayout(device, []vk.VkDescriptorSetLayout{layout}, nil)
+	if res != vk.VK_SUCCESS {
+		vk.DestroyBuffer(device, buffer)
+		vk.FreeMemory(device, memory)
+		vk.DestroyDescriptorPool(device, pool)
+		vk.DestroyDescriptorSetLayout(device, layout)
+		return false
+	}
+	vk.UpdateDescriptorSetUniformBuffer(device, set, buffer, 0, vsConstantBufferSize)
+	r.shaderDescLayout = layout
+	r.shaderDescPool = pool
+	r.shaderDescSet = set
+	r.shaderUniformBuffer = buffer
+	r.shaderUniformMemory = memory
+	r.shaderPipelineLayout = pipelineLayout
+	r.shaderResourcesReady = true
+	return true
+}
+
+// ensureVertexShaderModule lazily creates and caches the vk shader module for a
+// translated vertex ShaderProgram, storing the handle in prog.VkModule.
+func (r *Renderer) ensureVertexShaderModule(prog *ShaderProgram) vk.VkShaderModule {
+	if prog.VkModule != 0 {
+		return vk.VkShaderModule(prog.VkModule)
+	}
+	if len(prog.SPIRV) == 0 {
+		return 0
+	}
+	module, res := vk.CreateShaderModule(r.vkDevice, prog.SPIRV)
+	if res != vk.VK_SUCCESS || module == 0 {
+		return 0
+	}
+	prog.VkModule = uint64(module)
+	r.shaderModules = append(r.shaderModules, module)
+	return module
 }
 
 func (r *Renderer) vertexInputDescriptions(dev *Device) ([]vk.VkVertexInputBindingDescription, []vk.VkVertexInputAttributeDescription) {
@@ -731,7 +1034,7 @@ func declUsageToLocation(usage, usageIndex uint8) int {
 	return -1
 }
 
-func hashPipelineState(dev *Device, topology vk.VkPrimitiveTopology) uint64 {
+func hashPipelineState(dev *Device, topology vk.VkPrimitiveTopology, vertModule vk.VkShaderModule) uint64 {
 	h := fnv.New64a()
 	write := func(v uint64) {
 		var b [8]byte
@@ -741,6 +1044,7 @@ func hashPipelineState(dev *Device, topology vk.VkPrimitiveTopology) uint64 {
 		_, _ = h.Write(b[:])
 	}
 	write(uint64(topology))
+	write(uint64(vertModule))
 	write(uint64(dev.GetRenderState(D3DRS_ALPHABLENDENABLE)))
 	write(uint64(dev.GetRenderState(D3DRS_CULLMODE)))
 	write(uint64(dev.GetRenderState(D3DRS_ZENABLE)))

@@ -15,6 +15,12 @@ func CreateCommandPool(device VkDevice, queueFamily uint32) (VkCommandPool, VkRe
 	return pool, res
 }
 
+func DestroyCommandPool(device VkDevice, pool VkCommandPool) {
+	if pool != 0 {
+		callVoid(procs.vkDestroyCommandPool, uintptr(device), uintptr(pool), 0)
+	}
+}
+
 func AllocateCommandBuffer(device VkDevice, pool VkCommandPool) (VkCommandBuffer, VkResult) {
 	ci := VkCommandBufferAllocateInfo{
 		SType:              VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,

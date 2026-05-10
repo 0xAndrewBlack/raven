@@ -651,12 +651,14 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		nSize := ctx.Arg(2)
 		path := hctx.ImagePath
 		if hModule != 0 {
+			hctx.SynthMu.RLock()
 			for _, synth := range hctx.SynthByName {
 				if synth != nil && synth.BaseAddr == hModule {
 					path = `C:\` + synth.Name
 					break
 				}
 			}
+			hctx.SynthMu.RUnlock()
 		}
 		if buf != 0 && nSize > 0 {
 			chars := []rune(path)
@@ -687,12 +689,15 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		name := normalizeModuleName(hctx.ReadGuestUTF16(namePtr))
+		hctx.SynthMu.RLock()
 		for dllName, synth := range hctx.SynthByName {
 			if normalizeModuleName(dllName) == name {
+				hctx.SynthMu.RUnlock()
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
 		}
+		hctx.SynthMu.RUnlock()
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -706,12 +711,15 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		}
 		name := normalizeModuleName(hctx.ReadGuestUTF16(namePtr))
 		ravelog.Logf("[vcrt] __vcrt_LoadLibraryExW %q\n", name)
+		hctx.SynthMu.RLock()
 		for dllName, synth := range hctx.SynthByName {
 			if normalizeModuleName(dllName) == name {
+				hctx.SynthMu.RUnlock()
 				ctx.SetReturn(synth.BaseAddr)
 				return 0
 			}
 		}
+		hctx.SynthMu.RUnlock()
 		ctx.SetReturn(0xDEAD0000)
 		return 0
 	})

@@ -127,6 +127,7 @@ func (c *CPU) execX87(op byte, pfx *prefixState) error {
 	if err != nil {
 		return err
 	}
+	c.recordX87Opcode(op, m.raw)
 
 	// Memory vs register form
 	if m.mod != 3 {

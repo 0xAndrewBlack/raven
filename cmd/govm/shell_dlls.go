@@ -3,22 +3,166 @@
 package main
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
+	"time"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
+	"github.com/mirkobrombin/Raven/pkg/vfs"
 )
 
 var shellEnvPattern = regexp.MustCompile(`%([^%]+)%`)
+
+const (
+	shStockIconInfo32Size = uint32(536)
+	shStockIconInfo64Size = uint32(544)
+
+	shgsiSmallIcon     = uint32(0x00000001)
+	shgsiShellIconSize = uint32(0x00000004)
+	shgsiIcon          = uint32(0x00000100)
+	shgsiSysIconIndex  = uint32(0x00004000)
+	shgsiLinkOverlay   = uint32(0x00008000)
+	shgsiSelected      = uint32(0x00010000)
+
+	stockIconIDLimit = uint32(181)
+	stockIconPath    = `C:\Windows\System32\shell32.dll`
+)
+
+type stockIconInfoLayout struct {
+	size           uint32
+	hIconOffset    uint64
+	sysIndexOffset uint64
+	iconOffset     uint64
+	pathOffset     uint64
+}
+
+func stockIconInfoLayoutFor(is32 bool) stockIconInfoLayout {
+	if is32 {
+		return stockIconInfoLayout{
+			size:           shStockIconInfo32Size,
+			hIconOffset:    4,
+			sysIndexOffset: 8,
+			iconOffset:     12,
+			pathOffset:     16,
+		}
+	}
+	return stockIconInfoLayout{
+		size:           shStockIconInfo64Size,
+		hIconOffset:    8,
+		sysIndexOffset: 16,
+		iconOffset:     20,
+		pathOffset:     24,
+	}
+}
+
+func stockIconResourceID(stockID uint32) int32 {
+	switch stockID {
+	case 0, 1:
+		return 1
+	case 2:
+		return 3
+	case 3:
+		return 4
+	case 4:
+		return 5
+	case 5, 6, 7, 8, 9, 10, 11, 12, 13:
+		return int32(stockID + 1)
+	case 15, 16, 17, 22, 23, 28, 29, 31, 32, 40:
+		return int32(stockID + 1)
+	case 47, 77:
+		return 194
+	case 50:
+		return 140
+	case 52:
+		return 17
+	case 58:
+		return 54
+	case 83:
+		return 242
+	case 84:
+		return 338
+	case 96:
+		return 269
+	case 104:
+		return 14
+	case 106:
+		return 148
+	default:
+		return 1
+	}
+}
+
+func stockIconHandle(stockID, flags uint32) uint64 {
+	var variant uint64
+	if flags&shgsiSmallIcon != 0 {
+		variant |= 1
+	}
+	if flags&shgsiShellIconSize != 0 {
+		variant |= 2
+	}
+	if flags&shgsiLinkOverlay != 0 {
+		variant |= 4
+	}
+	if flags&shgsiSelected != 0 {
+		variant |= 8
+	}
+	return 0x22000000 | uint64(stockID)<<8 | variant
+}
+
+func fillStockIconInfo(mem *mmu.MMU, addr uint64, is32 bool, stockID, flags uint32) uint32 {
+	if mem == nil || addr == 0 || stockID >= stockIconIDLimit {
+		return E_INVALIDARG
+	}
+	layout := stockIconInfoLayoutFor(is32)
+	cbSize, err := mem.Read32(addr)
+	if err != nil || cbSize != layout.size {
+		return E_INVALIDARG
+	}
+	if !guestRangeAccessible(mem, addr, uint64(layout.size), mmu.PermRead|mmu.PermWrite) {
+		return E_INVALIDARG
+	}
+
+	result := make([]byte, layout.size)
+	binary.LittleEndian.PutUint32(result, layout.size)
+	if flags&shgsiIcon != 0 {
+		handle := stockIconHandle(stockID, flags)
+		if is32 {
+			binary.LittleEndian.PutUint32(result[layout.hIconOffset:], uint32(handle))
+		} else {
+			binary.LittleEndian.PutUint64(result[layout.hIconOffset:], handle)
+		}
+	}
+	sysImageIndex := uint32(math.MaxUint32)
+	if flags&shgsiSysIconIndex != 0 {
+		sysImageIndex = stockID
+	}
+	binary.LittleEndian.PutUint32(result[layout.sysIndexOffset:], sysImageIndex)
+	resourceID := stockIconResourceID(stockID)
+	binary.LittleEndian.PutUint32(result[layout.iconOffset:], uint32(-resourceID))
+	for i, unit := range utf16Encode(stockIconPath) {
+		if i >= 259 {
+			break
+		}
+		binary.LittleEndian.PutUint16(result[layout.pathOffset+uint64(i*2):], unit)
+	}
+	if err := mem.WriteBytes(addr, result); err != nil {
+		return E_INVALIDARG
+	}
+	return S_OK
+}
 
 var (
 	FOLDERID_Desktop        = GUID{0xB4BFCC3A, 0xDB2C, 0x424C, [8]byte{0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41}}
@@ -120,24 +264,24 @@ func shellCSIDLPaths() map[int]string {
 		0x0000: filepath.Join(home, "Desktop"),
 		0x0005: filepath.Join(home, "Documents"),
 		0x0006: filepath.Join(home, "Favorites"),
-		0x0008: filepath.Join(home, ".local", "share", "Recent"),
-		0x0009: filepath.Join(home, ".local", "share", "SendTo"),
-		0x000B: filepath.Join(home, ".config", "Start Menu"),
+		0x0008: filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "Recent"),
+		0x0009: filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "SendTo"),
+		0x000B: filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu"),
 		0x000D: filepath.Join(home, "Music"),
 		0x000E: filepath.Join(home, "Videos"),
-		0x0014: filepath.Join(home, ".local", "share", "fonts"),
-		0x001A: filepath.Join(home, ".config"),
-		0x001C: filepath.Join(home, ".local", "share"),
+		0x0014: filepath.Join(home, "AppData", "Local", "Microsoft", "Windows", "Fonts"),
+		0x001A: filepath.Join(home, "AppData", "Roaming"),
+		0x001C: filepath.Join(home, "AppData", "Local"),
 		0x001D: os.TempDir(),
-		0x0023: "/var/lib",
-		0x0024: "/usr",
-		0x0025: "/usr/lib",
-		0x0026: "/opt",
+		0x0023: "/ProgramData",
+		0x0024: "/Windows",
+		0x0025: "/Windows/System32",
+		0x0026: "/Program Files",
 		0x0027: filepath.Join(home, "Pictures"),
 		0x0028: home,
-		0x0029: "/usr/lib",
-		0x002A: "/opt",
-		0x002B: "/opt/common",
+		0x0029: "/Windows/System32",
+		0x002A: "/Program Files",
+		0x002B: "/Program Files/Common Files",
 	}
 }
 
@@ -150,14 +294,14 @@ func shellKnownFolderPaths() map[GUID]string {
 		FOLDERID_Music:          filepath.Join(home, "Music"),
 		FOLDERID_Pictures:       filepath.Join(home, "Pictures"),
 		FOLDERID_Videos:         filepath.Join(home, "Videos"),
-		FOLDERID_LocalAppData:   filepath.Join(home, ".local", "share"),
-		FOLDERID_RoamingAppData: filepath.Join(home, ".config"),
-		FOLDERID_ProgramData:    "/var/lib",
-		FOLDERID_Windows:        "/usr",
-		FOLDERID_System:         "/usr/lib",
-		FOLDERID_ProgramFiles:   "/opt",
-		FOLDERID_Fonts:          "/usr/share/fonts",
-		FOLDERID_Temp:           os.TempDir(),
+		FOLDERID_LocalAppData:   filepath.Join(home, "AppData", "Local"),
+		FOLDERID_RoamingAppData: filepath.Join(home, "AppData", "Roaming"),
+		FOLDERID_ProgramData:    "/ProgramData",
+		FOLDERID_Windows:        "/Windows",
+		FOLDERID_System:         "/Windows/System32",
+		FOLDERID_ProgramFiles:   "/Program Files",
+		FOLDERID_Fonts:          "/Windows/Fonts",
+		FOLDERID_Temp:           "/Windows/Temp",
 		FOLDERID_Profile:        home,
 	}
 }
@@ -179,17 +323,17 @@ func knownFolderPath(id GUID) string {
 
 func expandShellEnvironmentStrings(src string) string {
 	vars := map[string]string{
-		"APPDATA":       linuxToWinPath(filepath.Join(shellHomeDir(), ".config")),
-		"LOCALAPPDATA":  linuxToWinPath(filepath.Join(shellHomeDir(), ".local", "share")),
-		"TEMP":          linuxToWinPath(os.TempDir()),
-		"TMP":           linuxToWinPath(os.TempDir()),
+		"APPDATA":       linuxToWinPath(filepath.Join(shellHomeDir(), "AppData", "Roaming")),
+		"LOCALAPPDATA":  linuxToWinPath(filepath.Join(shellHomeDir(), "AppData", "Local")),
+		"TEMP":          `C:\Windows\Temp`,
+		"TMP":           `C:\Windows\Temp`,
 		"USERPROFILE":   linuxToWinPath(shellHomeDir()),
-		"WINDIR":        linuxToWinPath("/usr"),
-		"SYSTEMROOT":    linuxToWinPath("/usr"),
+		"WINDIR":        `C:\Windows`,
+		"SYSTEMROOT":    `C:\Windows`,
 		"SYSTEMDRIVE":   `C:`,
-		"PROGRAMFILES":  linuxToWinPath("/opt"),
-		"COMMONAPPDATA": linuxToWinPath("/var/lib"),
-		"PROGRAMDATA":   linuxToWinPath("/var/lib"),
+		"PROGRAMFILES":  `C:\Program Files`,
+		"COMMONAPPDATA": `C:\ProgramData`,
+		"PROGRAMDATA":   `C:\ProgramData`,
 		"USERNAME":      shellUserName(),
 		"HOMEPATH":      `\\Users\\` + shellUserName(),
 		"HOMEDRIVE":     `C:`,
@@ -416,13 +560,288 @@ func copyHostPath(src, dst string) error {
 	return out.Close()
 }
 
-func shFileOperationHost(mem *mmu.MMU, fileOp uint64, wide bool) error {
+type shFileOperationLayout struct {
+	functionOffset uint64
+	fromOffset     uint64
+	toOffset       uint64
+	flagsOffset    uint64
+	abortedOffset  uint64
+}
+
+func shFileOperationLayoutFor(is32 bool) shFileOperationLayout {
+	if is32 {
+		return shFileOperationLayout{
+			functionOffset: 4,
+			fromOffset:     8,
+			toOffset:       12,
+			flagsOffset:    16,
+			abortedOffset:  20,
+		}
+	}
+	return shFileOperationLayout{
+		functionOffset: 8,
+		fromOffset:     16,
+		toOffset:       24,
+		flagsOffset:    32,
+		abortedOffset:  36,
+	}
+}
+
+func copyTrashPath(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		return os.Symlink(target, dst)
+	case info.IsDir():
+		if err := os.Mkdir(dst, info.Mode().Perm()|0o700); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := copyTrashPath(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+				return err
+			}
+		}
+		if err := os.Chmod(dst, info.Mode()); err != nil {
+			return err
+		}
+		return os.Chtimes(dst, trashAccessTime(info), info.ModTime())
+	case info.Mode().IsRegular():
+		in, err := os.Open(src)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			return err
+		}
+		if err := os.Chmod(dst, info.Mode()); err != nil {
+			return err
+		}
+		return os.Chtimes(dst, trashAccessTime(info), info.ModTime())
+	default:
+		return fmt.Errorf("unsupported trash file type: %s", src)
+	}
+}
+
+func trashAccessTime(info os.FileInfo) time.Time {
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return time.Unix(stat.Atim.Sec, stat.Atim.Nsec)
+	}
+	return info.ModTime()
+}
+
+func validateShellDeletePath(path string) error {
+	clean := filepath.Clean(path)
+	if clean == string(filepath.Separator) || !filepath.IsAbs(clean) {
+		return fmt.Errorf("refusing to delete unsafe host path: %s", path)
+	}
+	return nil
+}
+
+func trashDataRoot() (string, error) {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	if !filepath.IsAbs(dataHome) {
+		return "", fmt.Errorf("XDG_DATA_HOME is not absolute: %s", dataHome)
+	}
+	return filepath.Join(dataHome, "Trash"), nil
+}
+
+type trashMoveOps struct {
+	rename          func(string, string) error
+	renameNoReplace func(string, string, bool) error
+	copy            func(string, string) error
+	removeAll       func(string) error
+}
+
+var defaultTrashMoveOps = trashMoveOps{
+	rename: func(sourcePath, targetPath string) error {
+		return renameHostSaveFile(sourcePath, targetPath, false)
+	},
+	renameNoReplace: renameHostSaveFile,
+	copy:            copyTrashPath,
+	removeAll:       os.RemoveAll,
+}
+
+func stageTrashSource(src string, ops trashMoveOps) (string, error) {
+	dir := filepath.Dir(src)
+	base := filepath.Base(src)
+	for suffix := 0; ; suffix++ {
+		name := fmt.Sprintf(".%s.raven-trash-%d", base, os.Getpid())
+		if suffix > 0 {
+			name = fmt.Sprintf("%s.%d", name, suffix)
+		}
+		staged := filepath.Join(dir, name)
+		err := ops.renameNoReplace(src, staged, false)
+		if os.IsExist(err) || errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		return staged, nil
+	}
+}
+
+func moveHostPathToTrash(src string, now time.Time) error {
+	return moveHostPathToTrashWithOps(src, now, defaultTrashMoveOps)
+}
+
+func moveHostPathToTrashWithOps(src string, now time.Time, ops trashMoveOps) error {
+	absolute, err := filepath.Abs(src)
+	if err != nil {
+		return err
+	}
+	if absolute == string(filepath.Separator) {
+		return fmt.Errorf("refusing to trash filesystem root")
+	}
+	if _, err := os.Lstat(absolute); err != nil {
+		return err
+	}
+	root, err := trashDataRoot()
+	if err != nil {
+		return err
+	}
+	filesDir := filepath.Join(root, "files")
+	infoDir := filepath.Join(root, "info")
+	if err := os.MkdirAll(filesDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(infoDir, 0o700); err != nil {
+		return err
+	}
+
+	base := filepath.Base(absolute)
+	for suffix := 0; ; suffix++ {
+		name := base
+		if suffix > 0 {
+			name = fmt.Sprintf("%s.%d", base, suffix)
+		}
+		target := filepath.Join(filesDir, name)
+		if _, err := os.Lstat(target); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		infoPath := filepath.Join(infoDir, name+".trashinfo")
+		infoFile, err := os.OpenFile(infoPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		escapedPath := (&url.URL{Path: absolute}).EscapedPath()
+		_, writeErr := fmt.Fprintf(infoFile, "[Trash Info]\nPath=%s\nDeletionDate=%s\n", escapedPath, now.Format("2006-01-02T15:04:05"))
+		closeErr := infoFile.Close()
+		if writeErr != nil || closeErr != nil {
+			os.Remove(infoPath)
+			if writeErr != nil {
+				return writeErr
+			}
+			return closeErr
+		}
+
+		if err := ops.rename(absolute, target); err == nil {
+			return nil
+		} else if os.IsExist(err) || errors.Is(err, os.ErrExist) {
+			os.Remove(infoPath)
+			continue
+		} else if !errors.Is(err, syscall.EXDEV) {
+			os.Remove(infoPath)
+			return err
+		}
+
+		staged, err := stageTrashSource(absolute, ops)
+		if err != nil {
+			os.Remove(infoPath)
+			return err
+		}
+		copyDir, err := os.MkdirTemp(filesDir, ".raven-trash-copy-*")
+		if err != nil {
+			os.Remove(infoPath)
+			if rollbackErr := ops.renameNoReplace(staged, absolute, false); rollbackErr != nil {
+				return fmt.Errorf("trash staging failed: %w; source retained at %s after rollback failed: %v", err, staged, rollbackErr)
+			}
+			return err
+		}
+		copyTarget := filepath.Join(copyDir, "payload")
+		if err := ops.copy(staged, copyTarget); err != nil {
+			os.RemoveAll(copyDir)
+			os.Remove(infoPath)
+			if rollbackErr := ops.renameNoReplace(staged, absolute, false); rollbackErr != nil {
+				return fmt.Errorf("trash copy failed: %w; source retained at %s after rollback failed: %v", err, staged, rollbackErr)
+			}
+			return err
+		}
+		if err := ops.renameNoReplace(copyTarget, target, false); err != nil {
+			os.RemoveAll(copyDir)
+			os.Remove(infoPath)
+			if rollbackErr := ops.renameNoReplace(staged, absolute, false); rollbackErr != nil {
+				return fmt.Errorf("trash publish failed: %w; source retained at %s after rollback failed: %v", err, staged, rollbackErr)
+			}
+			if os.IsExist(err) || errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return err
+		}
+		if err := os.Remove(copyDir); err != nil {
+			ravelog.Logf("[shell32] trash copy staging cleanup failed path=%q: %v\n", copyDir, err)
+		}
+		if err := ops.removeAll(staged); err != nil {
+			ravelog.Logf("[shell32] trash copy preserved after source cleanup failed path=%q: %v\n", staged, err)
+		}
+		return nil
+	}
+}
+
+func shFileOperationHost(mem *mmu.MMU, fileOp uint64, wide, is32 bool, fs *vfs.VFS, hctx *HandlerCtx) error {
 	if fileOp == 0 {
 		return nil
 	}
-	wFunc, _ := mem.Read32(fileOp + 8)
-	pFrom, _ := mem.Read64(fileOp + 16)
-	pTo, _ := mem.Read64(fileOp + 24)
+	layout := shFileOperationLayoutFor(is32)
+	mem.Write32(fileOp+layout.abortedOffset, 0)
+	wFunc, err := mem.Read32(fileOp + layout.functionOffset)
+	if err != nil {
+		return err
+	}
+	pFrom, err := readGuestPointer(mem, fileOp+layout.fromOffset, is32)
+	if err != nil {
+		return err
+	}
+	pTo, err := readGuestPointer(mem, fileOp+layout.toOffset, is32)
+	if err != nil {
+		return err
+	}
+	flags, err := mem.Read16(fileOp + layout.flagsOffset)
+	if err != nil {
+		return err
+	}
 	var fromList, toList []string
 	if wide {
 		fromList = parseMultiStringW(mem, pFrom)
@@ -458,8 +877,26 @@ func shFileOperationHost(mem *mmu.MMU, fileOp uint64, wide bool) error {
 				return err
 			}
 		case 3:
-			if err := os.RemoveAll(src); err != nil {
+			if err := validateShellDeletePath(src); err != nil {
 				return err
+			}
+			var err error
+			if flags&0x40 != 0 {
+				err = moveHostPathToTrash(src, time.Now())
+			} else {
+				err = os.RemoveAll(src)
+			}
+			if err != nil {
+				return err
+			}
+			vfsPath := winPathToVFS(srcWin)
+			if fs != nil {
+				if err := fs.RemoveAll(-1, vfsPath); err != nil {
+					return err
+				}
+			}
+			if hctx != nil {
+				hctx.unbindHostSavePath(vfsPath)
 			}
 		case 4:
 			target := winToLinuxPath(dstWin)
@@ -469,9 +906,10 @@ func shFileOperationHost(mem *mmu.MMU, fileOp uint64, wide bool) error {
 			if err := os.Rename(src, target); err != nil {
 				return err
 			}
+		default:
+			return fmt.Errorf("unsupported shell file operation: %d", wFunc)
 		}
 	}
-	mem.Write32(fileOp+36, 0)
 	return nil
 }
 
@@ -569,7 +1007,10 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		return
 	}
 	sharedHeapAlloc := hctx.HeapAlloc
-	_ = shlwapi
+	rebindOrdinalImports(hctx, shlwapi, "shlwapi.dll", map[uint16]string{
+		219: "QISearch",
+		388: "ShellMessageBoxWrapW",
+	})
 
 	d.RegisterAutoStubHandler(shlwapi, "PathRemoveFileSpecW", func(ctx *ntapi.TrapContext) uint32 {
 		path := ctx.Arg(0)
@@ -1106,7 +1547,11 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 			}
 			return len(f) == 0
 		}
-		if matchFn(file, spec) {
+		matched := matchFn(file, spec)
+		if os.Getenv("RAVEN_TRACE_FIND") != "" {
+			ravelog.Logf("[find-trace] PathMatchSpecW file=%q spec=%q matched=%t\n", file, spec, matched)
+		}
+		if matched {
 			ctx.SetReturn(1)
 		} else {
 			ctx.SetReturn(0)
@@ -3367,10 +3812,10 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pszMore := ctx.Arg(1)
 		var base, more string
 		if pszPath != 0 {
-			base = readGuestUTF16(pszPath)
+			base = readGuestString(pszPath)
 		}
 		if pszMore != 0 {
-			more = readGuestUTF16(pszMore)
+			more = readGuestString(pszMore)
 		}
 		ravelog.Logf("[shlwapi] PathAppendA base=%q more=%q\n", base, more)
 		result := base
@@ -3379,13 +3824,17 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		}
 		result += more
 		if pszPath != 0 {
-			for i, ch := range result {
+			limit := len(result)
+			if limit > 259 {
+				limit = 259
+			}
+			for i := 0; i < limit; i++ {
 				if i >= 259 {
 					break
 				}
-				ctx.Mem.Write16(pszPath+uint64(i*2), uint16(ch))
+				ctx.Mem.Write8(pszPath+uint64(i), result[i])
 			}
-			ctx.Mem.Write16(pszPath+uint64(len(result)*2), 0)
+			ctx.Mem.Write8(pszPath+uint64(limit), 0)
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -3409,18 +3858,19 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		pszPath := ctx.Arg(1)
 		var path string
 		if pszPath != 0 {
-			path = readGuestUTF16(pszPath)
+			path = readGuestString(pszPath)
 		}
 		ravelog.Logf("[shlwapi] PathCanonicalizeA path=%q\n", path)
-		// Simple canonicalization: just copy (full impl would resolve . and ..)
+		path = canonicalizeWinPath(path)
 		if pszBuf != 0 {
-			for i, ch := range path {
-				if i >= 259 {
-					break
-				}
-				ctx.Mem.Write16(pszBuf+uint64(i*2), uint16(ch))
+			limit := len(path)
+			if limit > 259 {
+				limit = 259
 			}
-			ctx.Mem.Write16(pszBuf+uint64(len(path)*2), 0)
+			for i := 0; i < limit; i++ {
+				ctx.Mem.Write8(pszBuf+uint64(i), path[i])
+			}
+			ctx.Mem.Write8(pszBuf+uint64(limit), 0)
 		}
 		ctx.SetReturn(1) // TRUE
 		return 0
@@ -4410,7 +4860,10 @@ func registerShlwapiHandlers(hctx *HandlerCtx) {
 		p3 := ctx.Arg(3)
 		ravelog.Logf("[shlwapi] QISearch p0=0x%x, p1=0x%x, p2=0x%x\n", p0, p1, p2)
 		_ = p3
-		ctx.SetReturn(0)
+		if p3 != 0 {
+			writeGuestPointer(ctx.Mem, p3, 0, ctx.State != nil && ctx.State.Is32)
+		}
+		ctx.SetReturn(E_NOINTERFACE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(shlwapi, "RegCreateKeyExWrapW", func(ctx *ntapi.TrapContext) uint32 {
@@ -8464,8 +8917,23 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 	_ = shell32
 
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathW", func(ctx *ntapi.TrapContext) uint32 {
-		writeWideString(ctx.Mem, ctx.Arg(4), csidlToPath(int32(ctx.Arg(1))), 260)
+		path := csidlToPath(int32(ctx.Arg(1)))
+		if ctx.Trace {
+			ravelog.Logf("[shell32] SHGetFolderPathW csidl=0x%x -> %q\n", ctx.Arg(1), path)
+		}
+		writeWideString(ctx.Mem, ctx.Arg(4), path, 260)
 		ctx.SetReturn(S_OK)
+		return 0
+	})
+	d.RegisterAutoStubHandler(shell32, "SHGetStockIconInfo", func(ctx *ntapi.TrapContext) uint32 {
+		stockID := uint32(ctx.Arg(0))
+		flags := uint32(ctx.Arg(1))
+		info := ctx.Arg(2)
+		is32 := ctx.Mem != nil && ctx.Mem.Mode32
+		if ctx.State != nil {
+			is32 = ctx.State.Is32
+		}
+		ctx.SetReturn(uint64(fillStockIconInfo(ctx.Mem, info, is32, stockID, flags)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "DragAcceptFiles", func(ctx *ntapi.TrapContext) uint32 {
@@ -8571,7 +9039,7 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHFileOperationA", func(ctx *ntapi.TrapContext) uint32 {
-		if err := shFileOperationHost(ctx.Mem, ctx.Arg(0), false); err != nil {
+		if err := shFileOperationHost(ctx.Mem, ctx.Arg(0), false, ctx.State != nil && ctx.State.Is32, ctx.FS, hctx); err != nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -8605,6 +9073,15 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(31)
 			return 0
 		}
+		if strings.EqualFold(filepath.Ext(file), ".exe") && hctx.StartChildProcess != nil {
+			if _, err := hctx.StartChildProcess(file, strings.TrimSpace(file+" "+params)); err != nil {
+				ravelog.Logf("[shell32] ShellExecuteW failed file=%q: %v\n", file, err)
+				ctx.SetReturn(2)
+				return 0
+			}
+			ctx.SetReturn(33)
+			return 0
+		}
 		args := []string{target}
 		if params != "" {
 			args = append(args, parseCommandLine(params)...)
@@ -8636,6 +9113,15 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(31)
 			return 0
 		}
+		if strings.EqualFold(filepath.Ext(file), ".exe") && hctx.StartChildProcess != nil {
+			if _, err := hctx.StartChildProcess(file, strings.TrimSpace(file+" "+params)); err != nil {
+				ravelog.Logf("[shell32] ShellExecuteA failed file=%q: %v\n", file, err)
+				ctx.SetReturn(2)
+				return 0
+			}
+			ctx.SetReturn(33)
+			return 0
+		}
 		args := []string{target}
 		if params != "" {
 			args = append(args, parseCommandLine(params)...)
@@ -8652,7 +9138,7 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHFileOperationW", func(ctx *ntapi.TrapContext) uint32 {
-		if err := shFileOperationHost(ctx.Mem, ctx.Arg(0), true); err != nil {
+		if err := shFileOperationHost(ctx.Mem, ctx.Arg(0), true, ctx.State != nil && ctx.State.Is32, ctx.FS, hctx); err != nil {
 			ctx.SetReturn(1)
 			return 0
 		}
@@ -10926,7 +11412,11 @@ func registerShell32Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(shell32, "SHGetFolderPathA", func(ctx *ntapi.TrapContext) uint32 {
-		writeAnsiString(ctx.Mem, ctx.Arg(4), csidlToPath(int32(ctx.Arg(1))), 260)
+		path := csidlToPath(int32(ctx.Arg(1)))
+		if ctx.Trace {
+			ravelog.Logf("[shell32] SHGetFolderPathA csidl=0x%x -> %q\n", ctx.Arg(1), path)
+		}
+		writeAnsiString(ctx.Mem, ctx.Arg(4), path, 260)
 		ctx.SetReturn(S_OK)
 		return 0
 	})

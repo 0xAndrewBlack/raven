@@ -21,10 +21,12 @@ func CreateBuffer(device VkDevice, size VkDeviceSize, usage VkBufferUsageFlags, 
 	callVoid(procs.vkGetBufferMemoryRequirements, uintptr(device), uintptr(buffer), uintptr(unsafe.Pointer(&req)))
 	phys := currentPhysicalDevice(device)
 	if phys == 0 {
+		DestroyBuffer(device, buffer)
 		return 0, 0, VK_ERROR_INITIALIZATION_FAILED
 	}
 	memType := FindMemoryType(phys, req.MemoryTypeBits, memProps)
 	if memType == VK_QUEUE_FAMILY_IGNORED {
+		DestroyBuffer(device, buffer)
 		return 0, 0, VK_ERROR_OUT_OF_DEVICE_MEMORY
 	}
 
@@ -36,10 +38,28 @@ func CreateBuffer(device VkDevice, size VkDeviceSize, usage VkBufferUsageFlags, 
 	var memory VkDeviceMemory
 	res = callResult(procs.vkAllocateMemory, uintptr(device), uintptr(unsafe.Pointer(&alloc)), 0, uintptr(unsafe.Pointer(&memory)))
 	if res != VK_SUCCESS {
+		DestroyBuffer(device, buffer)
 		return 0, 0, res
 	}
 	res = callResult(procs.vkBindBufferMemory, uintptr(device), uintptr(buffer), uintptr(memory), 0)
+	if res != VK_SUCCESS {
+		DestroyBuffer(device, buffer)
+		FreeMemory(device, memory)
+		return 0, 0, res
+	}
 	return buffer, memory, res
+}
+
+func DestroyBuffer(device VkDevice, buffer VkBuffer) {
+	if buffer != 0 {
+		callVoid(procs.vkDestroyBuffer, uintptr(device), uintptr(buffer), 0)
+	}
+}
+
+func FreeMemory(device VkDevice, memory VkDeviceMemory) {
+	if memory != 0 {
+		callVoid(procs.vkFreeMemory, uintptr(device), uintptr(memory), 0)
+	}
 }
 
 func CreateImage(device VkDevice, width, height uint32, format VkFormat, usage VkImageUsageFlags, memProps VkMemoryPropertyFlags) (VkImage, VkDeviceMemory, VkResult) {
@@ -66,10 +86,12 @@ func CreateImage(device VkDevice, width, height uint32, format VkFormat, usage V
 	callVoid(procs.vkGetImageMemoryRequirements, uintptr(device), uintptr(image), uintptr(unsafe.Pointer(&req)))
 	phys := currentPhysicalDevice(device)
 	if phys == 0 {
+		DestroyImage(device, image)
 		return 0, 0, VK_ERROR_INITIALIZATION_FAILED
 	}
 	memType := FindMemoryType(phys, req.MemoryTypeBits, memProps)
 	if memType == VK_QUEUE_FAMILY_IGNORED {
+		DestroyImage(device, image)
 		return 0, 0, VK_ERROR_OUT_OF_DEVICE_MEMORY
 	}
 
@@ -81,10 +103,22 @@ func CreateImage(device VkDevice, width, height uint32, format VkFormat, usage V
 	var memory VkDeviceMemory
 	res = callResult(procs.vkAllocateMemory, uintptr(device), uintptr(unsafe.Pointer(&alloc)), 0, uintptr(unsafe.Pointer(&memory)))
 	if res != VK_SUCCESS {
+		DestroyImage(device, image)
 		return 0, 0, res
 	}
 	res = callResult(procs.vkBindImageMemory, uintptr(device), uintptr(image), uintptr(memory), 0)
+	if res != VK_SUCCESS {
+		DestroyImage(device, image)
+		FreeMemory(device, memory)
+		return 0, 0, res
+	}
 	return image, memory, res
+}
+
+func DestroyImage(device VkDevice, image VkImage) {
+	if image != 0 {
+		callVoid(procs.vkDestroyImage, uintptr(device), uintptr(image), 0)
+	}
 }
 
 func CreateImageView(device VkDevice, image VkImage, format VkFormat, aspect VkImageAspectFlags) (VkImageView, VkResult) {
@@ -110,6 +144,12 @@ func CreateImageView(device VkDevice, image VkImage, format VkFormat, aspect VkI
 	var view VkImageView
 	res := callResult(procs.vkCreateImageView, uintptr(device), uintptr(unsafe.Pointer(&ci)), 0, uintptr(unsafe.Pointer(&view)))
 	return view, res
+}
+
+func DestroyImageView(device VkDevice, view VkImageView) {
+	if view != 0 {
+		callVoid(procs.vkDestroyImageView, uintptr(device), uintptr(view), 0)
+	}
 }
 
 func MapMemory(device VkDevice, memory VkDeviceMemory, offset, size VkDeviceSize) (unsafe.Pointer, VkResult) {

@@ -11,3 +11,6 @@ trace.log
 testdata/busybox
 sources/
 .regression-raven
+.raven-tmp/
+*.test
+missing_api.log

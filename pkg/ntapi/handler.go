@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mirkobrombin/Raven/pkg/arch"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
@@ -3450,10 +3451,10 @@ func handleLdrGetDllHandle(ctx *TrapContext) uint32 {
 
 	base := findModuleByName(ctx, nameStr)
 	if base == 0 {
-		ctx.Mem.Write64(handlePtr, 0)
+		writeGuestPointer(ctx.Mem, handlePtr, 0)
 		return 0xC0000135 // STATUS_DLL_NOT_FOUND
 	}
-	ctx.Mem.Write64(handlePtr, base)
+	writeGuestPointer(ctx.Mem, handlePtr, base)
 	return StatusSuccess
 }
 
@@ -3465,7 +3466,7 @@ func handleLdrGetProcedureAddress(ctx *TrapContext) uint32 {
 	funcAddrPtr := ctx.Arg(3) // PVOID*
 
 	if funcAddrPtr != 0 {
-		ctx.Mem.Write64(funcAddrPtr, 0) // Clear output on failure
+		writeGuestPointer(ctx.Mem, funcAddrPtr, 0)
 	}
 
 	if moduleHandle == 0 {
@@ -3474,17 +3475,7 @@ func handleLdrGetProcedureAddress(ctx *TrapContext) uint32 {
 
 	var funcName string
 	if funcNamePtr != 0 {
-		// ANSI_STRING: Length(2), MaxLength(2), pad(4), Buffer*(8)
-		nameLen, _ := ctx.Mem.Read16(funcNamePtr)
-		bufPtr, _ := ctx.Mem.Read64(funcNamePtr + 8)
-		if bufPtr != 0 && nameLen > 0 {
-			buf := make([]byte, nameLen)
-			for i := uint16(0); i < nameLen; i++ {
-				b, _ := ctx.Mem.Read8(bufPtr + uint64(i))
-				buf[i] = b
-			}
-			funcName = string(buf)
-		}
+		funcName = readGuestAnsiString(ctx.Mem, funcNamePtr)
 	}
 
 	// Look up in the Dispatcher's synthetic export table
@@ -3494,7 +3485,7 @@ func handleLdrGetProcedureAddress(ctx *TrapContext) uint32 {
 			moduleHandle, funcName, ordinal, addr)
 	}
 	if addr != 0 && funcAddrPtr != 0 {
-		ctx.Mem.Write64(funcAddrPtr, addr)
+		writeGuestPointer(ctx.Mem, funcAddrPtr, addr)
 		return StatusSuccess
 	}
 
@@ -3534,6 +3525,39 @@ func readGuestStringUTF16(mem *mmu.MMU, addr uint64, maxBytes int) string {
 	return decodeUTF16LE(data)
 }
 
+func readGuestAnsiString(mem *mmu.MMU, addr uint64) string {
+	if mem == nil || addr == 0 {
+		return ""
+	}
+	length, _ := mem.Read16(addr)
+	var buffer uint64
+	if mem.Mode32 {
+		ptr, _ := mem.Read32(addr + 4)
+		buffer = uint64(ptr)
+	} else {
+		buffer, _ = mem.Read64(addr + 8)
+	}
+	if buffer == 0 || length == 0 {
+		return ""
+	}
+	data, err := mem.ReadBytes(buffer, int(length))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func writeGuestPointer(mem *mmu.MMU, addr, value uint64) {
+	if mem == nil || addr == 0 {
+		return
+	}
+	if mem.Mode32 {
+		_ = mem.Write32(addr, uint32(value))
+		return
+	}
+	_ = mem.Write64(addr, value)
+}
+
 // readGuestUnicodeString reads a UNICODE_STRING structure from guest memory.
 func readGuestUnicodeString(mem *mmu.MMU, addr uint64) string {
 	if addr == 0 {
@@ -3555,25 +3579,47 @@ func readGuestUnicodeString(mem *mmu.MMU, addr uint64) string {
 
 // findModuleByName searches PEB_LDR_DATA InLoadOrderModuleList for a DLL by name.
 func findModuleByName(ctx *TrapContext, name string) uint64 {
+	if ctx == nil || ctx.Mem == nil || ctx.State == nil {
+		return 0
+	}
 	pebAddr := ctx.State.PEBAddr
-	ldrAddr, _ := ctx.Mem.Read64(pebAddr + PebLdr)
+	is32 := ctx.Mem.Mode32 || ctx.State.Is32
+	var ldrAddr uint64
+	if is32 {
+		value, _ := ctx.Mem.Read32(pebAddr + Peb32Ldr)
+		ldrAddr = uint64(value)
+	} else {
+		ldrAddr, _ = ctx.Mem.Read64(pebAddr + PebLdr)
+	}
 	if ldrAddr == 0 {
 		return 0
 	}
-	// InLoadOrderModuleList is a LIST_ENTRY at LdrData + 0x10
-	listHead := ldrAddr + LdrInLoadOrderModuleList
-	flink, _ := ctx.Mem.Read64(listHead)
+	listOffset := uint64(LdrInLoadOrderModuleList)
+	baseOffset := uint64(LdrEntryDllBase)
+	nameOffset := uint64(LdrEntryBaseDllName)
+	if is32 {
+		listOffset = Ldr32InLoadOrderModuleList
+		baseOffset = Ldr32EntryDllBase
+		nameOffset = Ldr32EntryBaseDllName
+	}
+	listHead := ldrAddr + listOffset
+	readPointer := func(addr uint64) uint64 {
+		if is32 {
+			value, _ := ctx.Mem.Read32(addr)
+			return uint64(value)
+		}
+		value, _ := ctx.Mem.Read64(addr)
+		return value
+	}
+	flink := readPointer(listHead)
 
 	for flink != 0 && flink != listHead {
-		// LDR_DATA_TABLE_ENTRY starts at InLoadOrderLinks
 		entry := flink
-		// BaseDllName is UNICODE_STRING at offset 0x58
-		baseName := readGuestUnicodeString(ctx.Mem, entry+LdrEntryBaseDllName)
+		baseName := readGuestUnicodeString(ctx.Mem, entry+nameOffset)
 		if strings.EqualFold(baseName, name) {
-			base, _ := ctx.Mem.Read64(entry + LdrEntryDllBase)
-			return base
+			return readPointer(entry + baseOffset)
 		}
-		flink, _ = ctx.Mem.Read64(flink) // next Flink
+		flink = readPointer(flink)
 	}
 	return 0
 }
@@ -4893,7 +4939,7 @@ func handleLdrLoadDll(ctx *TrapContext) uint32 {
 	// LdrLoadDll(path, flags, moduleName*, handle*)
 	handlePtr := ctx.Arg(3)
 	if handlePtr != 0 {
-		ctx.Mem.Write64(handlePtr, 0) // NULL = not found
+		writeGuestPointer(ctx.Mem, handlePtr, 0)
 	}
 	return StatusNotImplemented
 }
@@ -4905,7 +4951,7 @@ func handleLdrGetDllHandleEx(ctx *TrapContext) uint32 {
 	handlePtr := ctx.Arg(4)
 
 	if handlePtr != 0 {
-		ctx.Mem.Write64(handlePtr, 0)
+		writeGuestPointer(ctx.Mem, handlePtr, 0)
 	}
 
 	if moduleNamePtr == 0 {
@@ -4926,7 +4972,7 @@ func handleLdrGetDllHandleEx(ctx *TrapContext) uint32 {
 		return 0xC0000135 // STATUS_DLL_NOT_FOUND
 	}
 	if handlePtr != 0 {
-		ctx.Mem.Write64(handlePtr, base)
+		writeGuestPointer(ctx.Mem, handlePtr, base)
 	}
 	return StatusSuccess
 }
@@ -4934,9 +4980,13 @@ func handleLdrGetDllHandleEx(ctx *TrapContext) uint32 {
 func handleLdrAddRefDll(ctx *TrapContext) uint32 { return StatusSuccess }
 
 func handleLdrGetDllPath(ctx *TrapContext) uint32 {
-	pathPtr := ctx.Arg(1)
-	if pathPtr != 0 {
-		ctx.Mem.Write64(pathPtr, 0)
+	dllPathPtr := ctx.Arg(2)
+	searchPathsPtr := ctx.Arg(3)
+	if dllPathPtr != 0 {
+		writeGuestPointer(ctx.Mem, dllPathPtr, 0)
+	}
+	if searchPathsPtr != 0 {
+		writeGuestPointer(ctx.Mem, searchPathsPtr, 0)
 	}
 	return StatusSuccess
 }
@@ -8251,4 +8301,106 @@ func handleNtAreMappedFilesTheSame(ctx *TrapContext) uint32 {
 		return StatusSuccess
 	}
 	return 0xC0000002 // STATUS_NOT_SAME_DEVICE
+}
+
+const (
+	cmResourceTypePort        = 1
+	cmResourceTypeMemory      = 3
+	cmResourceTypeMemoryLarge = 7
+
+	cmResourceMemoryLargeMask = 0x0e00
+	cmResourceMemoryLarge40   = 0x0200
+	cmResourceMemoryLarge48   = 0x0400
+	cmResourceMemoryLarge64   = 0x0800
+)
+
+func decodeMemIoLength(resourceType byte, flags uint16, encoded uint32) (uint64, bool) {
+	switch resourceType {
+	case cmResourceTypePort, cmResourceTypeMemory:
+		return uint64(encoded), true
+	case cmResourceTypeMemoryLarge:
+		var shift uint
+		switch flags & cmResourceMemoryLargeMask {
+		case cmResourceMemoryLarge40:
+			shift = 8
+		case cmResourceMemoryLarge48:
+			shift = 16
+		case cmResourceMemoryLarge64:
+			shift = 32
+		default:
+			return 0, false
+		}
+		return uint64(encoded) << shift, true
+	default:
+		return 0, false
+	}
+}
+
+func setUint64Return(ctx *TrapContext, value uint64) {
+	if ctx.CPU.GetArch() == arch.ArchI386 {
+		if regs, ok := ctx.CPU.(RegisterWriter); ok {
+			regs.WriteReg(regRDX, value>>32)
+		}
+		ctx.SetReturn(uint64(uint32(value)))
+		return
+	}
+	ctx.SetReturn(value)
+}
+
+func handleRtlCmDecodeMemIoResource(ctx *TrapContext) uint32 {
+	descriptor := ctx.Arg(0)
+	startOut := ctx.Arg(1)
+	resourceType, typeErr := ctx.Mem.Read8(descriptor)
+	flags, flagsErr := ctx.Mem.Read16(descriptor + 2)
+	start, startErr := ctx.Mem.Read64(descriptor + 4)
+	encodedLength, lengthErr := ctx.Mem.Read32(descriptor + 12)
+	if typeErr != nil || flagsErr != nil || startErr != nil || lengthErr != nil {
+		setUint64Return(ctx, 0)
+		return StatusSuccess
+	}
+	length, valid := decodeMemIoLength(resourceType, flags, encodedLength)
+	if !valid {
+		setUint64Return(ctx, 0)
+		return StatusSuccess
+	}
+	if startOut != 0 {
+		ctx.Mem.Write64(startOut, start)
+	}
+	setUint64Return(ctx, length)
+	return StatusSuccess
+}
+
+func handleRtlIoDecodeMemIoResource(ctx *TrapContext) uint32 {
+	descriptor := ctx.Arg(0)
+	alignmentOut := ctx.Arg(1)
+	minimumOut := ctx.Arg(2)
+	maximumOut := ctx.Arg(3)
+	resourceType, typeErr := ctx.Mem.Read8(descriptor + 1)
+	flags, flagsErr := ctx.Mem.Read16(descriptor + 4)
+	encodedLength, lengthErr := ctx.Mem.Read32(descriptor + 8)
+	encodedAlignment, alignmentErr := ctx.Mem.Read32(descriptor + 12)
+	minimum, minimumErr := ctx.Mem.Read64(descriptor + 16)
+	maximum, maximumErr := ctx.Mem.Read64(descriptor + 24)
+	if typeErr != nil || flagsErr != nil || lengthErr != nil || alignmentErr != nil ||
+		minimumErr != nil || maximumErr != nil {
+		setUint64Return(ctx, 0)
+		return StatusSuccess
+	}
+	length, validLength := decodeMemIoLength(resourceType, flags, encodedLength)
+	alignment, validAlignment := decodeMemIoLength(resourceType, flags, encodedAlignment)
+	if !validLength || !validAlignment {
+		setUint64Return(ctx, 0)
+		return StatusSuccess
+	}
+	if alignmentOut != 0 {
+		ctx.Mem.Write64(alignmentOut, alignment)
+	}
+	if minimumOut != 0 {
+		ctx.Mem.Write64(minimumOut, minimum)
+	}
+	if maximumOut != 0 {
+		ctx.Mem.Write64(maximumOut, maximum)
+	}
+	setUint64Return(ctx, length)
+	return StatusSuccess
 }

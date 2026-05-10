@@ -4,6 +4,26 @@ package main
 
 import "strings"
 
+const (
+	tvmInsertItemA  = 0x1100
+	tvmDeleteItem   = 0x1101
+	tvmExpand       = 0x1102
+	tvmGetItemRect  = 0x1104
+	tvmGetCount     = 0x1105
+	tvmGetImageList = 0x1108
+	tvmSetImageList = 0x1109
+	tvmGetNextItem  = 0x110A
+	tvmSelectItem   = 0x110B
+	tvmGetItemA     = 0x110C
+	tvmSetItemA     = 0x110D
+	tvmEditLabelA   = 0x110E
+	tvmSortChildren = 0x1113
+	tvmInsertItemW  = 0x1132
+	tvmGetItemW     = 0x113E
+	tvmSetItemW     = 0x113F
+	tvmEditLabelW   = 0x1141
+)
+
 type listViewState struct {
 	items        []lvItem
 	columns      []lvColumn
@@ -53,6 +73,183 @@ type tabState struct {
 	curSel int
 }
 
+func tabRowCount(tab *tabState) uint64 {
+	if tab == nil || len(tab.items) == 0 {
+		return 0
+	}
+	return 1
+}
+
+func tabItemOffsets(is32 bool) (text, param uint64) {
+	if is32 {
+		return 12, 24
+	}
+	return 16, 32
+}
+
+type treeViewItemLayout struct {
+	item       uint64
+	state      uint64
+	text       uint64
+	textMax    uint64
+	param      uint64
+	insertItem uint64
+}
+
+type treeViewNotifyLayout struct {
+	action  uint64
+	itemOld uint64
+	itemNew uint64
+	point   uint64
+	size    uint64
+}
+
+func treeViewNotifyOffsets(is32 bool) treeViewNotifyLayout {
+	if is32 {
+		return treeViewNotifyLayout{action: 12, itemOld: 16, itemNew: 56, point: 96, size: 104}
+	}
+	return treeViewNotifyLayout{action: 24, itemOld: 32, itemNew: 88, point: 144, size: 152}
+}
+
+func treeViewItemOffsets(is32 bool) treeViewItemLayout {
+	if is32 {
+		return treeViewItemLayout{item: 4, state: 8, text: 16, textMax: 20, param: 36, insertItem: 8}
+	}
+	return treeViewItemLayout{item: 8, state: 16, text: 24, textMax: 32, param: 48, insertItem: 16}
+}
+
+type listViewItemLayout struct {
+	text    uint64
+	textMax uint64
+	image   uint64
+	param   uint64
+}
+
+type listViewNotifyLayout struct {
+	header uint64
+	size   uint64
+}
+
+func listViewNotifyOffsets(is32 bool) listViewNotifyLayout {
+	if is32 {
+		return listViewNotifyLayout{header: 12, size: 72}
+	}
+	return listViewNotifyLayout{header: 24, size: 112}
+}
+
+func setListViewExtendedStyle(lv *listViewState, mask, style uint32) uint32 {
+	old := lv.extStyle
+	if mask == 0 {
+		lv.extStyle = style
+	} else {
+		lv.extStyle = (old &^ mask) | (style & mask)
+	}
+	return old
+}
+
+func listViewItemOffsets(is32 bool) listViewItemLayout {
+	if is32 {
+		return listViewItemLayout{text: 20, textMax: 24, image: 28, param: 32}
+	}
+	return listViewItemLayout{text: 24, textMax: 32, image: 36, param: 40}
+}
+
+func listViewColumnTextOffset(is32 bool) uint64 {
+	if is32 {
+		return 12
+	}
+	return 16
+}
+
+func isTextCallbackPointer(ptr uint64, is32 bool) bool {
+	if is32 {
+		return ptr == uint64(^uint32(0))
+	}
+	return ptr == ^uint64(0)
+}
+
+func tabInputNeedsSubclassFirst(hasGuestWndProc, callingBuiltin bool, msg uint32) bool {
+	if !hasGuestWndProc || callingBuiltin {
+		return false
+	}
+	switch msg {
+	case 0x0201, 0x0203: // WM_LBUTTONDOWN, WM_LBUTTONDBLCLK
+		return true
+	default:
+		return false
+	}
+}
+
+const (
+	tcmAdjustRect  = uint32(0x1328)
+	tcnSelChange   = uint32(0xFFFFFDD9) // -551
+	tcnSelChanging = uint32(0xFFFFFDD8) // -552
+)
+
+func selectTabFromInput(tab *tabState, hit int, notify func(uint32) uint64) bool {
+	if tab == nil || hit < 0 || hit >= len(tab.items) || hit == tab.curSel {
+		return false
+	}
+	if notify != nil && notify(tcnSelChanging) != 0 {
+		return false
+	}
+	tab.curSel = hit
+	if notify != nil {
+		notify(tcnSelChange)
+	}
+	return true
+}
+
+func adjustTabRect(rect [4]int32, style uint32, larger bool, tabHeight, rows int32) [4]int32 {
+	if tabHeight <= 0 {
+		tabHeight = 22
+	}
+	if rows <= 0 {
+		rows = 1
+	}
+	const padding = int32(4)
+	const (
+		tcsBottom   = uint32(0x0002)
+		tcsVertical = uint32(0x0080)
+	)
+	tabsExtent := tabHeight * rows
+	if larger {
+		if style&tcsVertical != 0 {
+			if style&tcsBottom != 0 {
+				rect[2] += tabsExtent
+			} else {
+				rect[0] -= tabsExtent
+			}
+		} else if style&tcsBottom != 0 {
+			rect[3] += tabsExtent
+		} else {
+			rect[1] -= tabsExtent
+		}
+		rect[0] -= padding
+		rect[1] -= padding
+		rect[2] += padding
+		rect[3] += padding
+		return rect
+	}
+
+	rect[0] += padding
+	rect[1] += padding
+	rect[2] -= padding
+	rect[3] -= padding
+	if style&tcsVertical != 0 {
+		if style&tcsBottom != 0 {
+			rect[2] -= tabsExtent
+		} else {
+			rect[0] += tabsExtent
+		}
+	} else if style&tcsBottom != 0 {
+		rect[3] -= tabsExtent
+	} else {
+		rect[1] += tabsExtent
+	}
+	return rect
+}
+
 type tabItem struct {
 	text  string
 	param uint64
@@ -66,16 +263,203 @@ type progressState struct {
 }
 
 type toolbarState struct {
-	buttons []tbButton
+	buttons  []tbButton
+	extStyle uint32
+}
+
+type toolbarButtonLayout struct {
+	size   uint64
+	data   uint64
+	string uint64
+}
+
+type toolbarButtonInfoLayout struct {
+	param   uint64
+	text    uint64
+	textMax uint64
+}
+
+func toolbarButtonOffsets(is32 bool) toolbarButtonLayout {
+	if is32 {
+		return toolbarButtonLayout{size: 20, data: 12, string: 16}
+	}
+	return toolbarButtonLayout{size: 32, data: 16, string: 24}
+}
+
+func toolbarButtonInfoOffsets(is32 bool) toolbarButtonInfoLayout {
+	if is32 {
+		return toolbarButtonInfoLayout{param: 20, text: 24, textMax: 28}
+	}
+	return toolbarButtonInfoLayout{param: 24, text: 32, textMax: 40}
+}
+
+func toolbarAddBitmapResourceOffset(is32 bool) uint64 {
+	if is32 {
+		return 4
+	}
+	return 8
+}
+
+func setToolbarButtonFlag(toolbar *toolbarState, id int, flag int, enabled bool) bool {
+	if toolbar == nil {
+		return false
+	}
+	for i := range toolbar.buttons {
+		if toolbar.buttons[i].id != id {
+			continue
+		}
+		if enabled {
+			toolbar.buttons[i].state |= flag
+		} else {
+			toolbar.buttons[i].state &^= flag
+		}
+		return true
+	}
+	return false
+}
+
+func makeToolbarPlaceholderIcon(width, height int, seed uint64) []uint32 {
+	if width <= 0 || height <= 0 {
+		return nil
+	}
+	pixels := make([]uint32, width*height)
+	color := uint32(0xFF000000 | ((seed * 0x45D9F3B) & 0x00FFFFFF))
+	for y := 2; y < height-2; y++ {
+		for x := 2; x < width-2; x++ {
+			if x == y || x+y == width-1 || x == width/2 || y == height/2 {
+				pixels[y*width+x] = color
+			}
+		}
+	}
+	return pixels
+}
+
+func toolbarIconHasVisiblePixel(pixels []uint32) bool {
+	for _, pixel := range pixels {
+		if pixel>>24 != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+type toolbarFallbackCache struct {
+	width  int
+	height int
+	icons  [][]uint32
+}
+
+type toolbarFallbackKey struct {
+	parent uint64
+	layout uint64
+}
+
+func toolbarLayoutSignature(toolbar *toolbarState) uint64 {
+	if toolbar == nil || len(toolbar.buttons) == 0 {
+		return 0
+	}
+	hash := uint64(14695981039346656037)
+	for _, button := range toolbar.buttons {
+		for _, value := range [...]uint64{uint64(uint32(button.id)), uint64(uint32(button.iBitmap)), uint64(uint32(button.style))} {
+			hash ^= value
+			hash *= 1099511628211
+		}
+	}
+	return hash
+}
+
+func cacheToolbarFallbackIcon(hctx *HandlerCtx, key toolbarFallbackKey, index, width, height int, pixels []uint32) {
+	if hctx == nil || key.parent == 0 || key.layout == 0 || index < 0 || width <= 0 || height <= 0 ||
+		len(pixels) < width*height || !toolbarIconHasVisiblePixel(pixels) {
+		return
+	}
+	hctx.ToolbarFallbackMu.Lock()
+	defer hctx.ToolbarFallbackMu.Unlock()
+	if hctx.ToolbarFallbackIcons == nil {
+		hctx.ToolbarFallbackIcons = make(map[toolbarFallbackKey]*toolbarFallbackCache)
+	}
+	cache := hctx.ToolbarFallbackIcons[key]
+	if cache == nil || cache.width != width || cache.height != height {
+		cache = &toolbarFallbackCache{width: width, height: height}
+		hctx.ToolbarFallbackIcons[key] = cache
+	}
+	for len(cache.icons) <= index {
+		cache.icons = append(cache.icons, nil)
+	}
+	cache.icons[index] = append([]uint32(nil), pixels[:width*height]...)
+}
+
+func toolbarFallbackIcon(hctx *HandlerCtx, key toolbarFallbackKey, index, width, height int) []uint32 {
+	if hctx == nil || key.parent == 0 || key.layout == 0 || index < 0 {
+		return nil
+	}
+	hctx.ToolbarFallbackMu.RLock()
+	defer hctx.ToolbarFallbackMu.RUnlock()
+	cache := hctx.ToolbarFallbackIcons[key]
+	if cache == nil || cache.width != width || cache.height != height || index >= len(cache.icons) {
+		return nil
+	}
+	pixels := cache.icons[index]
+	if !toolbarIconHasVisiblePixel(pixels) {
+		return nil
+	}
+	return pixels
+}
+
+func toolbarMaskPixelTransparent(mask []byte, width, height, x, y int) bool {
+	if width <= 0 || height <= 0 || x < 0 || y < 0 || x >= width || y >= height {
+		return false
+	}
+	pixel := y*width + x
+	stride := ((width + 31) / 32) * 4
+	if len(mask) == stride*height {
+		off := y*stride + x/8
+		return mask[off]&(0x80>>uint(x&7)) != 0
+	}
+	if len(mask) >= width*height*4 {
+		off := pixel * 4
+		return mask[off] != 0 || mask[off+1] != 0 || mask[off+2] != 0
+	}
+	if len(mask) >= width*height {
+		return mask[pixel] != 0
+	}
+	off := y*stride + x/8
+	return off < len(mask) && mask[off]&(0x80>>uint(x&7)) != 0
+}
+
+func toolbarImagePixels(pixels, mask []byte, hasAlpha bool, width, height int) []uint32 {
+	if width <= 0 || height <= 0 || len(pixels) < width*height*4 {
+		return nil
+	}
+	out := make([]uint32, width*height)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			i := y*width + x
+			off := i * 4
+			if toolbarMaskPixelTransparent(mask, width, height, x, y) {
+				continue
+			}
+			alpha := pixels[off+3]
+			if !hasAlpha {
+				alpha = 0xFF
+			}
+			out[i] = uint32(pixels[off]) |
+				uint32(pixels[off+1])<<8 |
+				uint32(pixels[off+2])<<16 |
+				uint32(alpha)<<24
+		}
+	}
+	return out
 }
 
 type tbButton struct {
-	id      int
-	iBitmap int // bitmap index in tbBitmapStore or ImageList
-	text    string
-	state   int
-	style   int
-	param   uint64
+	id          int
+	iBitmap     int // bitmap index in tbBitmapStore or ImageList
+	text        string
+	state       int
+	style       int
+	param       uint64
+	stringValue uint64
 }
 
 type tooltipState struct {
@@ -117,6 +501,18 @@ func initBuiltinControlState(cs *controlState) {
 	}
 	cs.className = strings.ToLower(cs.className)
 	switch cs.className {
+	case "listbox":
+		if cs.listItems == nil && cs.listCurSel == 0 {
+			cs.listCurSel = -1
+		}
+	case "combobox", "comboboxex32":
+		if cs.comboItems == nil && cs.comboCurSel == 0 {
+			cs.comboCurSel = -1
+		}
+	case "msctls_trackbar32":
+		if cs.trackMax == 0 {
+			cs.trackMax = 100
+		}
 	case "msctls_statusbar32":
 		if cs.statusBar == nil {
 			cs.statusBar = &statusBarState{}
