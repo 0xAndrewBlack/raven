@@ -38,6 +38,13 @@ type RenameOptions struct {
 // FileMode represents virtual file permissions.
 type FileMode uint32
 
+// FileIdentity identifies a regular file across open descriptors.
+type FileIdentity struct {
+	Host   bool
+	Device uint64
+	Inode  uint64
+}
+
 const (
 	ModeRead  FileMode = 1 << 0
 	ModeWrite FileMode = 1 << 1
@@ -55,12 +62,13 @@ const (
 
 // Open flags
 const (
-	O_RDONLY = 0
-	O_WRONLY = 1
-	O_RDWR   = 2
-	O_CREAT  = 0x40
-	O_TRUNC  = 0x200
-	O_APPEND = 0x400
+	O_RDONLY  = 0
+	O_WRONLY  = 1
+	O_RDWR    = 2
+	O_ACCMODE = 3
+	O_CREAT   = 0x40
+	O_TRUNC   = 0x200
+	O_APPEND  = 0x400
 )
 
 // Seek whence
@@ -122,7 +130,6 @@ func newVNode(name string, isDir bool) *VNode {
 // FD is an open file descriptor in the guest.
 type FD struct {
 	Node     *VNode
-	Offset   int64
 	Flags    int
 	PipeR    *PipeEnd       // non-nil if this fd is a pipe read end
 	PipeW    *PipeEnd       // non-nil if this fd is a pipe write end
@@ -130,6 +137,27 @@ type FD struct {
 	HostFile *os.File       // non-nil when backed by a real host FD (memfd, etc.)
 	Epoll    *EpollInstance // non-nil for epoll instances
 	EventFD  *EventFD       // non-nil for eventfd descriptors
+	position *filePosition
+}
+
+type filePosition struct {
+	mu     sync.Mutex
+	offset int64
+}
+
+func (f *FD) positionState() *filePosition {
+	if f.position == nil {
+		f.position = &filePosition{}
+	}
+	return f.position
+}
+
+func fdCanRead(f *FD) bool {
+	return f.Flags&O_ACCMODE != O_WRONLY
+}
+
+func fdCanWrite(f *FD) bool {
+	return f.Flags&O_ACCMODE != O_RDONLY
 }
 
 // PipeEnd is one end of a virtual pipe.
@@ -398,6 +426,9 @@ func (v *VFS) OpenAt(dirfd int, path string, flags int, mode uint32) (int, error
 
 	// Resolve path
 	absPath := v.ResolvePath(dirfd, path)
+	if flags&O_TRUNC != 0 && flags&O_ACCMODE == O_RDONLY {
+		return -1, syscall.EACCES
+	}
 
 	// Check for special device paths
 	if absPath == "/dev/null" || absPath == "/dev/zero" || absPath == "/dev/urandom" {
@@ -487,8 +518,8 @@ func (v *VFS) FileBytes(path string) ([]byte, error) {
 	}
 	defer v.Close(fd)
 	v.mu.Lock()
+	defer v.mu.Unlock()
 	f, ok := v.fds[fd]
-	v.mu.Unlock()
 	if !ok || f.Node == nil {
 		return nil, fmt.Errorf("no data for %q", path)
 	}
@@ -505,6 +536,7 @@ func (v *VFS) Read(fd int, buf []byte) (int, error) {
 		v.mu.Unlock()
 		return -1, fmt.Errorf("bad fd %d", fd)
 	}
+	position := f.positionState()
 	v.mu.Unlock()
 
 	// Special: stdin
@@ -520,6 +552,9 @@ func (v *VFS) Read(fd int, buf []byte) (int, error) {
 	// Socket read
 	if f.Socket != nil {
 		return f.Socket.Read(buf)
+	}
+	if !fdCanRead(f) {
+		return -1, syscall.EBADF
 	}
 
 	// Host file read (memfd etc.)
@@ -551,11 +586,13 @@ func (v *VFS) Read(fd int, buf []byte) (int, error) {
 		if f.Node.Data == nil {
 			return 0, nil
 		}
-		if f.Offset >= int64(len(f.Node.Data)) {
+		position.mu.Lock()
+		defer position.mu.Unlock()
+		if position.offset >= int64(len(f.Node.Data)) {
 			return 0, nil
 		}
-		n := copy(buf, f.Node.Data[f.Offset:])
-		f.Offset += int64(n)
+		n := copy(buf, f.Node.Data[position.offset:])
+		position.offset += int64(n)
 		return n, nil
 	}
 
@@ -564,6 +601,9 @@ func (v *VFS) Read(fd int, buf []byte) (int, error) {
 
 // Pread reads from fd at the given offset without changing the file position.
 func (v *VFS) Pread(fd int, buf []byte, offset int64) (int, error) {
+	if offset < 0 || int64(len(buf)) > (1<<63-1)-offset {
+		return -1, syscall.EINVAL
+	}
 	v.mu.Lock()
 	f, ok := v.fds[fd]
 	if !ok {
@@ -571,6 +611,9 @@ func (v *VFS) Pread(fd int, buf []byte, offset int64) (int, error) {
 		return -1, fmt.Errorf("bad fd %d", fd)
 	}
 	v.mu.Unlock()
+	if !fdCanRead(f) {
+		return -1, syscall.EBADF
+	}
 
 	// Host file pread
 	if f.HostFile != nil {
@@ -603,22 +646,36 @@ func (v *VFS) Pread(fd int, buf []byte, offset int64) (int, error) {
 
 // Pwrite writes to fd at the given offset without changing the file position.
 func (v *VFS) Pwrite(fd int, data []byte, offset int64) (int, error) {
+	if offset < 0 || int64(len(data)) > (1<<63-1)-offset {
+		return -1, syscall.EINVAL
+	}
 	v.mu.Lock()
 	f, ok := v.fds[fd]
 	if !ok {
 		v.mu.Unlock()
 		return -1, fmt.Errorf("bad fd %d", fd)
 	}
+	if !fdCanWrite(f) {
+		v.mu.Unlock()
+		return -1, syscall.EBADF
+	}
 
 	// Host file pwrite
 	if f.HostFile != nil {
 		hostFile := f.HostFile
+		appendMode := f.Flags&O_APPEND != 0
 		v.mu.Unlock()
+		if appendMode {
+			return hostFile.Write(data)
+		}
 		return hostFile.WriteAt(data, offset)
 	}
 
 	// VFS regular file
 	if f.Node != nil {
+		if f.Flags&O_APPEND != 0 {
+			offset = int64(len(f.Node.Data))
+		}
 		end := offset + int64(len(data))
 		if end > int64(len(f.Node.Data)) {
 			f.Node.Data = append(f.Node.Data, make([]byte, end-int64(len(f.Node.Data)))...)
@@ -660,6 +717,10 @@ func (v *VFS) Write(fd int, data []byte) (int, error) {
 		v.mu.Unlock()
 		return f.Socket.Write(data)
 	}
+	if !fdCanWrite(f) {
+		v.mu.Unlock()
+		return -1, syscall.EBADF
+	}
 
 	// Host file write (memfd etc.)
 	if f.HostFile != nil {
@@ -681,15 +742,22 @@ func (v *VFS) Write(fd int, data []byte) (int, error) {
 
 	// Regular file write
 	if f.Node != nil {
+		position := f.positionState()
+		position.mu.Lock()
+		defer position.mu.Unlock()
 		if f.Flags&O_APPEND != 0 {
-			f.Offset = int64(len(f.Node.Data))
+			position.offset = int64(len(f.Node.Data))
 		}
-		end := f.Offset + int64(len(data))
+		if position.offset < 0 || int64(len(data)) > (1<<63-1)-position.offset {
+			v.mu.Unlock()
+			return -1, syscall.EINVAL
+		}
+		end := position.offset + int64(len(data))
 		if end > int64(len(f.Node.Data)) {
 			f.Node.Data = append(f.Node.Data, make([]byte, end-int64(len(f.Node.Data)))...)
 		}
-		copy(f.Node.Data[f.Offset:], data)
-		f.Offset = end
+		copy(f.Node.Data[position.offset:], data)
+		position.offset = end
 		f.Node.Size = int64(len(f.Node.Data))
 		f.Node.Mtime = time.Now()
 		v.mu.Unlock()
@@ -738,11 +806,13 @@ func (v *VFS) Dup(oldfd int) (int, error) {
 	newfd := v.nextFD
 	v.nextFD++
 	newFD := &FD{
-		Node:   f.Node,
-		Offset: f.Offset,
-		Flags:  f.Flags,
-		PipeR:  f.PipeR,
-		PipeW:  f.PipeW,
+		Node:     f.Node,
+		Flags:    f.Flags,
+		PipeR:    f.PipeR,
+		PipeW:    f.PipeW,
+		Epoll:    f.Epoll,
+		EventFD:  f.EventFD,
+		position: f.positionState(),
 	}
 	// Duplicate host-backed resources so each guest FD has its own host FD.
 	if f.HostFile != nil {
@@ -777,11 +847,13 @@ func (v *VFS) Dup3(oldfd, newfd int) error {
 		delete(v.fds, newfd)
 	}
 	newFD := &FD{
-		Node:   f.Node,
-		Offset: f.Offset,
-		Flags:  f.Flags,
-		PipeR:  f.PipeR,
-		PipeW:  f.PipeW,
+		Node:     f.Node,
+		Flags:    f.Flags,
+		PipeR:    f.PipeR,
+		PipeW:    f.PipeW,
+		Epoll:    f.Epoll,
+		EventFD:  f.EventFD,
+		position: f.positionState(),
 	}
 	// Duplicate host-backed resources so each guest FD has its own host FD.
 	if f.HostFile != nil {
@@ -822,7 +894,10 @@ func (v *VFS) Lseek(fd int, offset int64, whence int) (int64, error) {
 			if err != nil {
 				return -1, err
 			}
-			f.Offset = off
+			position := f.positionState()
+			position.mu.Lock()
+			position.offset = off
+			position.mu.Unlock()
 			return off, nil
 		}
 		return -1, fmt.Errorf("bad fd (no host file)")
@@ -831,20 +906,23 @@ func (v *VFS) Lseek(fd int, offset int64, whence int) (int64, error) {
 	if f.Node.FileMode&S_IFMT == S_IFCHR {
 		return -1, fmt.Errorf("ESPIPE")
 	}
+	position := f.positionState()
+	position.mu.Lock()
+	defer position.mu.Unlock()
 	switch whence {
 	case SEEK_SET:
-		f.Offset = offset
+		position.offset = offset
 	case SEEK_CUR:
-		f.Offset += offset
+		position.offset += offset
 	case SEEK_END:
-		f.Offset = int64(len(f.Node.Data)) + offset
+		position.offset = int64(len(f.Node.Data)) + offset
 	default:
 		return -1, fmt.Errorf("invalid whence %d", whence)
 	}
-	if f.Offset < 0 {
-		f.Offset = 0
+	if position.offset < 0 {
+		position.offset = 0
 	}
-	return f.Offset, nil
+	return position.offset, nil
 }
 
 // Pipe2 creates a pipe, returning (readFD, writeFD).
@@ -858,10 +936,12 @@ func (v *VFS) Pipe2(flags int) (int, int, error) {
 	v.nextFD++
 	v.fds[rfd] = &FD{
 		Node:  &VNode{Name: "pipe", FileMode: S_IFIFO | 0600, Ino: nextInode()},
+		Flags: flags | O_RDONLY,
 		PipeR: shared,
 	}
 	v.fds[wfd] = &FD{
 		Node:  &VNode{Name: "pipe", FileMode: S_IFIFO | 0600, Ino: nextInode()},
+		Flags: flags | O_WRONLY,
 		PipeW: shared,
 	}
 	return rfd, wfd, nil
@@ -882,6 +962,35 @@ func (v *VFS) Stat(fd int) *VNode {
 		return nil
 	}
 	return f.Node
+}
+
+// FileIdentity returns the stable identity of a regular file descriptor.
+func (v *VFS) FileIdentity(fd int) (FileIdentity, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	f, ok := v.fds[fd]
+	if !ok || f.PipeR != nil || f.PipeW != nil || f.Socket != nil || f.EventFD != nil || f.Epoll != nil {
+		return FileIdentity{}, false
+	}
+	if f.HostFile != nil {
+		info, err := f.HostFile.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			return FileIdentity{}, false
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return FileIdentity{}, false
+		}
+		return FileIdentity{
+			Host:   true,
+			Device: uint64(stat.Dev),
+			Inode:  uint64(stat.Ino),
+		}, true
+	}
+	if f.Node == nil || f.Node.FileMode&S_IFMT != S_IFREG {
+		return FileIdentity{}, false
+	}
+	return FileIdentity{Inode: f.Node.Ino}, true
 }
 
 // StatPath returns stat info for a path.
@@ -978,7 +1087,10 @@ func (v *VFS) Getdents64(fd int) []*VNode {
 	if f.Node == nil || !f.Node.IsDir {
 		return nil
 	}
-	start := int(f.Offset)
+	position := f.positionState()
+	position.mu.Lock()
+	defer position.mu.Unlock()
+	start := int(position.offset)
 	if start >= len(f.Node.Children) {
 		return nil // EOF - all entries already returned
 	}
@@ -990,7 +1102,7 @@ func (v *VFS) Getdents64(fd int) []*VNode {
 		}
 		i++
 	}
-	f.Offset = int64(i)
+	position.offset = int64(i)
 	return entries
 }
 
@@ -1128,7 +1240,7 @@ func (v *VFS) AllocHostFile(f *os.File) int {
 	v.nextFD++
 	node := newVNode(f.Name(), false)
 	node.FileMode = S_IFREG | 0600
-	v.fds[fd] = &FD{Node: node, HostFile: f}
+	v.fds[fd] = &FD{Node: node, Flags: O_RDWR, HostFile: f}
 	return fd
 }
 
@@ -1170,7 +1282,7 @@ func (v *VFS) WrapHostFD(hostFDnum int, name string) int {
 	node.FileMode = S_IFREG | 0600
 	fd := v.nextFD
 	v.nextFD++
-	v.fds[fd] = &FD{Node: node, HostFile: hostFile}
+	v.fds[fd] = &FD{Node: node, Flags: O_RDWR, HostFile: hostFile}
 	return fd
 }
 

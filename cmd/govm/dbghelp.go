@@ -400,10 +400,37 @@ func registerDbghelpDLLHandlers(hctx *HandlerCtx) {
 		ctx.SetReturn(uint64(len(utf16Encode(name))))
 		return 0
 	})
-	d.RegisterAutoStubHandler(dbghelp, "ImageNtHeader", func(ctx *ntapi.TrapContext) uint32 {
+	d.RegisterAutoStubHandler(dbghelp, "ImageNtHeader", handleImageNtHeader)
+}
+
+func handleImageNtHeader(ctx *ntapi.TrapContext) uint32 {
+	base := ctx.Arg(0)
+	if base == 0 {
 		ctx.SetReturn(0)
 		return 0
-	})
+	}
+	dosSignature, err := ctx.Mem.Read16(base)
+	if err != nil || dosSignature != 0x5A4D {
+		ctx.SetReturn(0)
+		return 0
+	}
+	lfanew, err := ctx.Mem.Read32(base + 0x3C)
+	if err != nil {
+		ctx.SetReturn(0)
+		return 0
+	}
+	ntHeader := base + uint64(lfanew)
+	if ntHeader < base {
+		ctx.SetReturn(0)
+		return 0
+	}
+	signature, err := ctx.Mem.Read32(ntHeader)
+	if err != nil || signature != 0x00004550 {
+		ctx.SetReturn(0)
+		return 0
+	}
+	ctx.SetReturn(ntHeader)
+	return 0
 }
 
 func registerImagehlpDLLHandlers(hctx *HandlerCtx) {

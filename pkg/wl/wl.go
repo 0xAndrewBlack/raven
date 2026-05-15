@@ -171,6 +171,8 @@ type Window struct {
 	decorID    uint32
 	poolID     uint32
 	bufferID   uint32
+	frameMu    sync.RWMutex
+	titleMu    sync.RWMutex
 
 	Width     int32
 	Height    int32
@@ -217,6 +219,26 @@ func NewHeadlessWindow(title string, w, h, titleBarH int32) *Window {
 		win.Pix[i+3] = 0xFF
 	}
 	return win
+}
+
+// UpdateFrame applies a complete framebuffer update without exposing partial
+// pixels to concurrent screenshots.
+func (w *Window) UpdateFrame(update func()) {
+	w.frameMu.Lock()
+	defer w.frameMu.Unlock()
+	update()
+}
+
+func (w *Window) TitleText() string {
+	w.titleMu.RLock()
+	defer w.titleMu.RUnlock()
+	return w.Title
+}
+
+func (w *Window) SetTitleText(title string) {
+	w.titleMu.Lock()
+	w.Title = title
+	w.titleMu.Unlock()
 }
 
 // --- wire helpers ---
@@ -1268,7 +1290,7 @@ func (d *Display) clearWindowInput(w *Window) {
 // Call this after CreateWindow to enable the client-side title bar decoration.
 func (w *Window) SetTitleBar(h int32, title string) {
 	w.TitleBarH = h
-	w.Title = title
+	w.SetTitleText(title)
 	w.needsResize = true
 }
 
@@ -1476,7 +1498,7 @@ func (d *Display) ShiftDown() bool {
 
 // SetWindowTitle sends xdg_toplevel.set_title to update the compositor's title bar.
 func (d *Display) SetWindowTitle(win *Window, title string) {
-	win.Title = title
+	win.SetTitleText(title)
 	d.send(win.toplevelID, 2, pstr(title))
 }
 

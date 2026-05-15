@@ -16,6 +16,7 @@ type Thread struct {
 	ID     int
 	CPU    arch.CPU
 	Active bool
+	Done   chan struct{}
 }
 
 // FutexWaiter represents a goroutine waiting on a futex.
@@ -58,7 +59,7 @@ func NewManager(mem *mmu.MMU, handler arch.SyscallHandler) *Manager {
 // MainThread registers an existing CPU as the initial thread (tid=1, matching PID).
 func (m *Manager) MainThread(c arch.CPU) *Thread {
 	c.SetSyscallHandler(m.handler)
-	t := &Thread{ID: 1, CPU: c, Active: true}
+	t := &Thread{ID: 1, CPU: c, Active: true, Done: make(chan struct{})}
 	m.threads = append(m.threads, t)
 	return t
 }
@@ -89,7 +90,8 @@ func (m *Manager) Clone(parentCPU arch.CPU, childPC, childSP, tls, stackBase, st
 		m.registerStack(stackBase, stackSize)
 	}
 
-	t := &Thread{ID: tid, CPU: c, Active: true}
+	done := make(chan struct{})
+	t := &Thread{ID: tid, CPU: c, Active: true, Done: done}
 	m.mu.Lock()
 	m.threads = append(m.threads, t)
 	m.mu.Unlock()
@@ -97,6 +99,7 @@ func (m *Manager) Clone(parentCPU arch.CPU, childPC, childSP, tls, stackBase, st
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer close(done)
 		defer m.markCPUExited(c)
 		ravelog.Logf("[govm] thread %d start: PC=0x%x SP=0x%x TLS=0x%x\n",
 			tid, c.GetPC(), c.GetSP(), c.GetTLS())
@@ -206,6 +209,20 @@ func (m *Manager) GetCPU(tid int) (arch.CPU, bool) {
 	return nil, false
 }
 
+// ThreadDone returns the stable completion signal for a registered thread.
+// The signal belongs to the thread object and remains valid after guest handles
+// referring to that thread have been closed.
+func (m *Manager) ThreadDone(tid int) (chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.threads {
+		if t.ID == tid {
+			return t.Done, t.Done != nil
+		}
+	}
+	return nil, false
+}
+
 // SetExitHook registers cleanup invoked after a non-main guest thread exits.
 func (m *Manager) SetExitHook(hook func(arch.CPU)) {
 	m.mu.Lock()
@@ -292,12 +309,12 @@ func (m *Manager) CloneWin32Thread(parentCPU arch.CPU, startAddr, lpParam, stack
 		m.registerStack(stackBase, stackSize)
 	}
 
-	t := &Thread{ID: tid, CPU: c, Active: true}
+	done := make(chan struct{})
+	t := &Thread{ID: tid, CPU: c, Active: true, Done: done}
 	m.mu.Lock()
 	m.threads = append(m.threads, t)
 	m.mu.Unlock()
 
-	done := make(chan struct{})
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -380,12 +397,12 @@ func (m *Manager) CloneWin32ThreadEx(parentCPU arch.CPU, startAddr, stackBase, s
 		m.registerStack(stackBase, stackSize)
 	}
 
-	t := &Thread{ID: tid, CPU: c, Active: true}
+	done := make(chan struct{})
+	t := &Thread{ID: tid, CPU: c, Active: true, Done: done}
 	m.mu.Lock()
 	m.threads = append(m.threads, t)
 	m.mu.Unlock()
 
-	done := make(chan struct{})
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()

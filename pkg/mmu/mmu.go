@@ -3,6 +3,7 @@ package mmu
 import (
 	"encoding/binary"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -15,14 +16,14 @@ const (
 	PageShift = 12
 
 	// Two-level page table: L1 covers top bits, L2 covers remaining bits.
-	// We support addresses up to 48 bits (256 TB virtual address space).
+	// We support 48-bit canonical addresses.
 	// L1 index = bits [47:27] -> 2^21 = 2M entries
 	// L2 index = bits [26:12] -> 2^15 = 32K entries per L2 table
-	l2Bits = 15
-	l1Bits = 21
-	l2Size = 1 << l2Bits // 32768
-	l1Size = 1 << l1Bits // 2097152
-
+	l2Bits      = 15
+	l1Bits      = 21
+	l2Size      = 1 << l2Bits // 32768
+	l1Size      = 1 << l1Bits // 2097152
+	addressBits = PageShift + l2Bits + l1Bits
 )
 
 // Permission flags for memory pages.
@@ -79,11 +80,12 @@ type MMU struct {
 	// Mode32 constrains Mmap allocations to the lower 4 GB (for PE32).
 	Mode32 bool
 	// Debug: write watchpoint
-	WatchAddr  uint64
-	WatchSize  uint64
-	WatchCB    func(addr, val uint64, size int)
-	mappingGen atomic.Uint64
-	codeGen    atomic.Uint64
+	WatchAddr   uint64
+	WatchSize   uint64
+	WatchCB     func(addr, val uint64, size int)
+	mappingGen  atomic.Uint64
+	codeGen     atomic.Uint64
+	nativeUsers atomic.Uint64
 	// flat, when non-nil, is a reserved low-4GiB host region; guest pages
 	// below 4GiB alias into it at their guest offset, so flatBase+guestAddr
 	// is the host address of guest memory (the layout native code needs).
@@ -154,15 +156,83 @@ func (m *MMU) pageData(vaddr uint64) []byte {
 	return make([]byte, PageSize)
 }
 
-// pageIndices splits a page-aligned address into L1 and L2 indices.
-func pageIndices(vaddr uint64) (int, int) {
+func isCanonicalAddress(vaddr uint64, addressBits uint8) bool {
+	if addressBits == 0 || addressBits >= 64 {
+		return addressBits == 64
+	}
+	payloadMask := (uint64(1) << addressBits) - 1
+	upperMask := ^payloadMask
+	if vaddr&(uint64(1)<<(addressBits-1)) == 0 {
+		return vaddr&upperMask == 0
+	}
+	return vaddr&upperMask == upperMask
+}
+
+func canonicalAddressClass(vaddr uint64, addressBits uint8) (bool, bool) {
+	if !isCanonicalAddress(vaddr, addressBits) {
+		return false, false
+	}
+	return vaddr&(uint64(1)<<(addressBits-1)) != 0, true
+}
+
+func canonicalRangeEnd(start, size uint64, bits uint8) (uint64, uint64, bool) {
+	startHigh, startOK := canonicalAddressClass(start, bits)
+	if !startOK {
+		return 0, start, false
+	}
+	if size == 0 {
+		return start, 0, true
+	}
+	last := start + size - 1
+	if last < start {
+		return 0, ^uint64(0), false
+	}
+	lastHigh, lastOK := canonicalAddressClass(last, bits)
+	if !lastOK || startHigh != lastHigh {
+		faultAddr := ^uint64(0)
+		if !startHigh {
+			faultAddr = uint64(1) << (bits - 1)
+		}
+		return 0, faultAddr, false
+	}
+	return last, 0, true
+}
+
+func canonicalPageSpan(start, size uint64) (uint64, uint64, uint64, bool) {
+	last, faultAddr, ok := canonicalRangeEnd(start, size, addressBits)
+	if !ok {
+		return 0, 0, faultAddr, false
+	}
+	firstPage := start & PageMask
+	if size == 0 {
+		return firstPage, 0, 0, true
+	}
+	lastPage := last & PageMask
+	return firstPage, (lastPage-firstPage)/PageSize + 1, 0, true
+}
+
+func canonicalRangeFault(start, size uint64, perms uint8) error {
+	if _, faultAddr, ok := canonicalRangeEnd(start, size, addressBits); !ok {
+		return &Fault{Addr: faultAddr, Type: FaultUnmapped, Perms: perms}
+	}
+	return nil
+}
+
+// pageIndices splits a canonical address into L1 and L2 indices.
+func pageIndices(vaddr uint64) (int, int, bool) {
+	if !isCanonicalAddress(vaddr, addressBits) {
+		return 0, 0, false
+	}
 	vpn := vaddr >> PageShift
-	return int(vpn>>l2Bits) & (l1Size - 1), int(vpn) & (l2Size - 1)
+	return int(vpn>>l2Bits) & (l1Size - 1), int(vpn) & (l2Size - 1), true
 }
 
 // storePage inserts a page into the two-level table.
 func (m *MMU) storePage(vaddr uint64, pe *PageEntry) {
-	i1, i2 := pageIndices(vaddr)
+	i1, i2, ok := pageIndices(vaddr)
+	if !ok {
+		return
+	}
 	l2 := m.l1[i1].Load()
 	if l2 == nil {
 		candidate := new(l2Table)
@@ -196,7 +266,10 @@ func (m *MMU) isFlatBacked(vaddr uint64, pe *PageEntry) bool {
 
 // getPage retrieves a page from the two-level table (no locks).
 func (m *MMU) getPage(vaddr uint64) *PageEntry {
-	i1, i2 := pageIndices(vaddr)
+	i1, i2, ok := pageIndices(vaddr)
+	if !ok {
+		return nil
+	}
 	l2 := m.l1[i1].Load()
 	if l2 == nil {
 		return nil
@@ -207,7 +280,10 @@ func (m *MMU) getPage(vaddr uint64) *PageEntry {
 // removePage removes a page from the two-level table.
 func (m *MMU) removePage(vaddr uint64) {
 	m.setPerm(vaddr, 0)
-	i1, i2 := pageIndices(vaddr)
+	i1, i2, ok := pageIndices(vaddr)
+	if !ok {
+		return
+	}
 	l2 := m.l1[i1].Load()
 	if l2 != nil {
 		l2[i2].Store(nil)
@@ -216,6 +292,9 @@ func (m *MMU) removePage(vaddr uint64) {
 
 func (m *MMU) beginMappingMutation() {
 	m.mappingGen.Add(1)
+	for m.nativeUsers.Load() != 0 {
+		runtime.Gosched()
+	}
 }
 
 func (m *MMU) endMappingMutation() {
@@ -233,6 +312,9 @@ func (m *MMU) MapPage(vaddr uint64, perms uint8) error {
 }
 
 func (m *MMU) mapPageLocked(vaddr uint64, perms uint8) error {
+	if _, _, ok := pageIndices(vaddr); !ok {
+		return &Fault{Addr: vaddr, Type: FaultUnmapped, Perms: perms}
+	}
 	if pe := m.getPage(vaddr); pe != nil {
 		m.storePage(vaddr, &PageEntry{Data: pe.Data, Perms: perms})
 		return nil
@@ -247,24 +329,32 @@ func (m *MMU) mapPageLocked(vaddr uint64, perms uint8) error {
 
 // MapRange maps contiguous pages covering [start, start+size).
 func (m *MMU) MapRange(start, size uint64, perms uint8) {
+	firstPage, pageCount, _, ok := canonicalPageSpan(start, size)
+	if !ok {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.beginMappingMutation()
 	defer m.endMappingMutation()
-	end := start + size
-	for addr := start & PageMask; addr < end; addr += PageSize {
+	for i := uint64(0); i < pageCount; i++ {
+		addr := firstPage + i*PageSize
 		m.mapPageLocked(addr, perms)
 	}
 }
 
 // MapRangeZero maps contiguous pages covering [start, start+size) and zeroes them.
 func (m *MMU) MapRangeZero(start, size uint64, perms uint8) {
+	firstPage, pageCount, _, ok := canonicalPageSpan(start, size)
+	if !ok {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.beginMappingMutation()
 	defer m.endMappingMutation()
-	end := start + size
-	for addr := start & PageMask; addr < end; addr += PageSize {
+	for i := uint64(0); i < pageCount; i++ {
+		addr := firstPage + i*PageSize
 		m.mapPageLocked(addr, perms)
 		pe := m.getPage(addr)
 		if pe != nil {
@@ -279,6 +369,25 @@ func (m *MMU) MapRangeZero(start, size uint64, perms uint8) {
 // instruction fetch cache.
 func (m *MMU) LookupRead(vaddr uint64, requiredPerms uint8) (*PageEntry, uint64, error) {
 	return m.lookupPage(vaddr, requiredPerms)
+}
+
+// ValidateRange checks every page touched by a canonical address range.
+func (m *MMU) ValidateRange(vaddr, size uint64, requiredPerms uint8) error {
+	last, faultAddr, ok := canonicalRangeEnd(vaddr, size, addressBits)
+	if !ok {
+		return &Fault{Addr: faultAddr, Type: FaultUnmapped, Perms: requiredPerms}
+	}
+	if size == 0 {
+		return nil
+	}
+	for current := vaddr; ; current = current&PageMask + PageSize {
+		if _, _, err := m.lookupPage(current, requiredPerms); err != nil {
+			return err
+		}
+		if current&PageMask == last&PageMask {
+			return nil
+		}
+	}
 }
 
 func (m *MMU) MappingGeneration() uint64 {
@@ -330,6 +439,9 @@ func (m *MMU) Read8(vaddr uint64) (uint8, error) {
 
 // Read16 reads a 16-bit little-endian value.
 func (m *MMU) Read16(vaddr uint64) (uint16, error) {
+	if err := canonicalRangeFault(vaddr, 2, PermRead); err != nil {
+		return 0, err
+	}
 	pe, off, err := m.lookupPage(vaddr, PermRead)
 	if err != nil {
 		return 0, err
@@ -348,6 +460,9 @@ func (m *MMU) Read16(vaddr uint64) (uint16, error) {
 
 // Read32 reads a 32-bit little-endian value.
 func (m *MMU) Read32(vaddr uint64) (uint32, error) {
+	if err := canonicalRangeFault(vaddr, 4, PermRead); err != nil {
+		return 0, err
+	}
 	pe, off, err := m.lookupPage(vaddr, PermRead)
 	if err != nil {
 		return 0, err
@@ -370,6 +485,9 @@ func (m *MMU) Read32(vaddr uint64) (uint32, error) {
 
 // Read64 reads a 64-bit little-endian value.
 func (m *MMU) Read64(vaddr uint64) (uint64, error) {
+	if err := canonicalRangeFault(vaddr, 8, PermRead); err != nil {
+		return 0, err
+	}
 	pe, off, err := m.lookupPage(vaddr, PermRead)
 	if err != nil {
 		return 0, err
@@ -394,7 +512,13 @@ func (m *MMU) Read64(vaddr uint64) (uint64, error) {
 func (m *MMU) checkWatch(addr, val uint64, size int) {
 	if m.WatchCB != nil && m.WatchSize > 0 {
 		end := addr + uint64(size)
+		if end < addr {
+			end = ^uint64(0)
+		}
 		watchEnd := m.WatchAddr + m.WatchSize
+		if watchEnd < m.WatchAddr {
+			watchEnd = ^uint64(0)
+		}
 		if addr < watchEnd && end > m.WatchAddr {
 			m.WatchCB(addr, val, size)
 		}
@@ -402,11 +526,11 @@ func (m *MMU) checkWatch(addr, val uint64, size int) {
 }
 
 func (m *MMU) Write8(vaddr uint64, val uint8) error {
-	m.checkWatch(vaddr, uint64(val), 1)
 	pe, off, err := m.lookupPage(vaddr, PermWrite)
 	if err != nil {
 		return err
 	}
+	m.checkWatch(vaddr, uint64(val), 1)
 	pe.Data[off] = val
 	m.noteExecutableWrite(pe)
 	return nil
@@ -414,6 +538,9 @@ func (m *MMU) Write8(vaddr uint64, val uint8) error {
 
 // Write16 writes a 16-bit little-endian value.
 func (m *MMU) Write16(vaddr uint64, val uint16) error {
+	if err := m.ValidateRange(vaddr, 2, PermWrite); err != nil {
+		return err
+	}
 	m.checkWatch(vaddr, uint64(val), 2)
 	pe, off, err := m.lookupPage(vaddr, PermWrite)
 	if err != nil {
@@ -431,6 +558,9 @@ func (m *MMU) Write16(vaddr uint64, val uint16) error {
 
 // Write32 writes a 32-bit little-endian value.
 func (m *MMU) Write32(vaddr uint64, val uint32) error {
+	if err := m.ValidateRange(vaddr, 4, PermWrite); err != nil {
+		return err
+	}
 	m.checkWatch(vaddr, uint64(val), 4)
 	pe, off, err := m.lookupPage(vaddr, PermWrite)
 	if err != nil {
@@ -453,6 +583,9 @@ func (m *MMU) Write32(vaddr uint64, val uint32) error {
 
 // Write64 writes a 64-bit little-endian value.
 func (m *MMU) Write64(vaddr uint64, val uint64) error {
+	if err := m.ValidateRange(vaddr, 8, PermWrite); err != nil {
+		return err
+	}
 	m.checkWatch(vaddr, val, 8)
 	pe, off, err := m.lookupPage(vaddr, PermWrite)
 	if err != nil {
@@ -475,6 +608,12 @@ func (m *MMU) Write64(vaddr uint64, val uint64) error {
 
 // WriteBytes copies a byte slice into guest memory (requires write permission).
 func (m *MMU) WriteBytes(vaddr uint64, data []byte) error {
+	if err := m.ValidateRange(vaddr, uint64(len(data)), PermWrite); err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
 	startVaddr := vaddr
 	origData := data
 	for len(data) > 0 {
@@ -511,7 +650,11 @@ func (m *MMU) WriteBytes(vaddr uint64, data []byte) error {
 func (m *MMU) ReadCString(vaddr uint64, maxLen int) string {
 	var res []byte
 	for i := 0; i < maxLen; i++ {
-		b, err := m.Read8(vaddr + uint64(i))
+		addr := vaddr + uint64(i)
+		if addr < vaddr {
+			break
+		}
+		b, err := m.Read8(addr)
 		if err != nil || b == 0 {
 			break
 		}
@@ -523,6 +666,12 @@ func (m *MMU) ReadCString(vaddr uint64, maxLen int) string {
 // ReadBytesRaw reads data from guest memory, bypassing permission checks.
 func (m *MMU) ReadBytesRaw(vaddr uint64, n int) ([]byte, error) {
 	buf := make([]byte, n)
+	if err := canonicalRangeFault(vaddr, uint64(n), PermRead); err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return buf, nil
+	}
 	pos := 0
 	for pos < n {
 		base := vaddr & PageMask
@@ -545,6 +694,12 @@ func (m *MMU) ReadBytesRaw(vaddr uint64, n int) ([]byte, error) {
 // ReadBytes reads n bytes from guest memory.
 func (m *MMU) ReadBytes(vaddr uint64, n int) ([]byte, error) {
 	buf := make([]byte, n)
+	if err := canonicalRangeFault(vaddr, uint64(n), PermRead); err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return buf, nil
+	}
 	pos := 0
 	for pos < n {
 		pe, off, err := m.lookupPage(vaddr, PermRead)
@@ -560,6 +715,9 @@ func (m *MMU) ReadBytes(vaddr uint64, n int) ([]byte, error) {
 
 // Fetch16 reads a 16-bit instruction (requires execute permission).
 func (m *MMU) Fetch16(vaddr uint64) (uint16, error) {
+	if err := canonicalRangeFault(vaddr, 2, PermExecute); err != nil {
+		return 0, err
+	}
 	for {
 		generation := m.MappingGeneration()
 		if generation&1 != 0 {
@@ -590,6 +748,9 @@ func (m *MMU) fetch16Once(vaddr uint64) (uint16, error) {
 
 // Fetch32 reads a 32-bit instruction (requires execute permission).
 func (m *MMU) Fetch32(vaddr uint64) (uint32, error) {
+	if err := canonicalRangeFault(vaddr, 4, PermExecute); err != nil {
+		return 0, err
+	}
 	for {
 		generation := m.MappingGeneration()
 		if generation&1 != 0 {
@@ -625,6 +786,9 @@ func (m *MMU) fetch32Once(vaddr uint64) (uint32, error) {
 }
 
 func (m *MMU) Fetch64(vaddr uint64) (uint64, error) {
+	if err := canonicalRangeFault(vaddr, 8, PermExecute); err != nil {
+		return 0, err
+	}
 	for {
 		generation := m.MappingGeneration()
 		if generation&1 != 0 {
@@ -776,12 +940,16 @@ func (m *MMU) Mmap(addr, length uint64, perms uint8) uint64 {
 
 // Munmap removes pages covering [addr, addr+length).
 func (m *MMU) Munmap(addr, length uint64) {
+	firstPage, pageCount, _, ok := canonicalPageSpan(addr, length)
+	if !ok {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.beginMappingMutation()
 	defer m.endMappingMutation()
-	end := addr + length
-	for pg := addr & PageMask; pg < end; pg += PageSize {
+	for i := uint64(0); i < pageCount; i++ {
+		pg := firstPage + i*PageSize
 		m.removePage(pg)
 	}
 }
@@ -834,12 +1002,16 @@ func (m *MMU) QueryRegion(addr uint64) (base, size uint64, mapped bool, perms ui
 	return start, end - start, true, p
 }
 func (m *MMU) Mprotect(addr, length uint64, perms uint8) error {
+	firstPage, pageCount, faultAddr, ok := canonicalPageSpan(addr, length)
+	if !ok {
+		return &Fault{Addr: faultAddr, Type: FaultUnmapped, Perms: perms}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.beginMappingMutation()
 	defer m.endMappingMutation()
-	end := addr + length
-	for pg := addr & PageMask; pg < end; pg += PageSize {
+	for i := uint64(0); i < pageCount; i++ {
+		pg := firstPage + i*PageSize
 		pe := m.getPage(pg)
 		if pe == nil {
 			continue
@@ -851,6 +1023,9 @@ func (m *MMU) Mprotect(addr, length uint64, perms uint8) error {
 
 // Write32Raw writes a 32-bit value bypassing permission checks.
 func (m *MMU) Write32Raw(vaddr uint64, val uint32) error {
+	if err := canonicalRangeFault(vaddr, 4, PermWrite); err != nil {
+		return err
+	}
 	base := vaddr & PageMask
 	offset := vaddr & (PageSize - 1)
 	pe := m.getPage(base)
@@ -872,6 +1047,9 @@ func (m *MMU) Write32Raw(vaddr uint64, val uint32) error {
 
 // Write64Raw writes a 64-bit value bypassing permission checks.
 func (m *MMU) Write64Raw(vaddr uint64, val uint64) error {
+	if err := canonicalRangeFault(vaddr, 8, PermWrite); err != nil {
+		return err
+	}
 	base := vaddr & PageMask
 	offset := vaddr & (PageSize - 1)
 	pe := m.getPage(base)
@@ -897,6 +1075,12 @@ func (m *MMU) Write64Raw(vaddr uint64, val uint64) error {
 
 // WriteBytesRaw copies data into guest memory, bypassing permission checks.
 func (m *MMU) WriteBytesRaw(vaddr uint64, data []byte) error {
+	if err := canonicalRangeFault(vaddr, uint64(len(data)), PermWrite); err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
 	for len(data) > 0 {
 		base := vaddr & PageMask
 		offset := vaddr & (PageSize - 1)

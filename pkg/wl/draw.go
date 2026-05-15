@@ -168,6 +168,8 @@ func truncateTitle(title string, maxW int) string {
 // Screenshot saves the current framebuffer as a PNG file.
 // The entire surface (title bar + client area) is captured.
 func (w *Window) Screenshot(path string) error {
+	w.frameMu.RLock()
+	defer w.frameMu.RUnlock()
 	if w.Pix == nil {
 		return fmt.Errorf("no pixel buffer")
 	}

@@ -11,7 +11,7 @@
 #   2. go test ./...                    - unit tests
 #   3. scripts/regression.sh            - 10/10 end-to-end
 #   4. REAL gdi32 (ReactOS) exec proof  - -call-export on a real gdi32 export
-#   5. render-png                        - produces /tmp/raven-final.png
+#   5. render-png                        - produces ~/.cache/raven/artifacts/raven-final.png
 #   6. fixture, control and application check summary
 #
 # Exit 0 only if build+tests+regression pass. Gate PASS/FAIL is reported
@@ -20,8 +20,12 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 ROOT="$(pwd)"
+source scripts/raven-cache.sh || exit 2
 SYSROOT="${RAVEN_SYSROOT:-/home/user/reactos-sysroot}"
-PNG=/tmp/raven-final.png
+RUN_DIR="$(mktemp -d "$RAVEN_TMPDIR/verify-final.XXXXXX")" || exit 2
+trap 'rm -rf "$RUN_DIR"' EXIT
+PNG="$RAVEN_ARTIFACT_ROOT/raven-final.png"
+RAVEN_VF="$RUN_DIR/raven"
 PASS_ALL=0
 
 say(){ printf '\n=== %s ===\n' "$*"; }
@@ -30,30 +34,30 @@ say(){ printf '\n=== %s ===\n' "$*"; }
 say "1. build (4 configs)"
 build_ok=1
 for tags in "" "guest_windows" "guest_linux" "guest_windows guest_linux"; do
-  if go build -tags "$tags" -o /tmp/raven-vf-build ./cmd/govm 2>/tmp/vf-build.err; then
+  if go build -tags "$tags" -o "$RUN_DIR/raven-build" ./cmd/govm 2>"$RUN_DIR/build.err"; then
     echo "  OK   tags=[$tags]"
   else
-    echo "  FAIL tags=[$tags]"; tail -3 /tmp/vf-build.err; build_ok=0
+    echo "  FAIL tags=[$tags]"; tail -3 "$RUN_DIR/build.err"; build_ok=0
   fi
 done
 # the binary used for the run cases (needs both guest tags)
-go build -tags "guest_windows guest_linux" -o /tmp/raven-vf ./cmd/govm 2>/dev/null
+go build -tags "guest_windows guest_linux" -o "$RAVEN_VF" ./cmd/govm 2>/dev/null
 [ "$build_ok" = 1 ] || PASS_ALL=1
 
 # --- 2. unit tests ---
 say "2. go test ./..."
-if go test -tags "guest_windows guest_linux" ./... >/tmp/vf-test.out 2>&1; then
+if go test -tags "guest_windows guest_linux" ./... >"$RUN_DIR/test.out" 2>&1; then
   echo "  OK"
 else
-  echo "  FAIL"; grep -E "FAIL|panic" /tmp/vf-test.out | head; PASS_ALL=1
+  echo "  FAIL"; grep -E "FAIL|panic" "$RUN_DIR/test.out" | head; PASS_ALL=1
 fi
 
 # --- 3. regression ---
 say "3. scripts/regression.sh"
-if RAVEN=/tmp/raven-vf bash scripts/regression.sh >/tmp/vf-reg.out 2>&1; then
-  tail -1 /tmp/vf-reg.out
+if RAVEN="$RAVEN_VF" bash scripts/regression.sh >"$RUN_DIR/regression.out" 2>&1; then
+  tail -1 "$RUN_DIR/regression.out"
 else
-  echo "  FAIL"; tail -4 /tmp/vf-reg.out; PASS_ALL=1
+  echo "  FAIL"; tail -4 "$RUN_DIR/regression.out"; PASS_ALL=1
 fi
 
 # --- 4. REAL ReactOS gdi32 execution proof ---
@@ -61,7 +65,7 @@ say "4. REAL gdi32 (ReactOS) - -call-export CreateCompatibleDC"
 GDI32="$SYSROOT/Windows/System32/gdi32.dll"
 gdi32_real="n/a"
 if [ -f "$GDI32" ]; then
-  out=$(timeout 25 /tmp/raven-vf -wayland=false -sysroot "$SYSROOT" \
+  out=$(timeout 25 "$RAVEN_VF" -wayland=false -sysroot "$SYSROOT" \
           -call-export CreateCompatibleDC "$GDI32" </dev/null 2>/dev/null \
           | grep "CreateCompatibleDC =>")
   echo "  $out"
@@ -76,9 +80,9 @@ say "4b. GUI_FIXTURE fixture - raven_gui_min.exe on REAL user32/gdi32"
 GUI=testdata/dll_fixture/raven_gui_min.exe
 gui_state="n/a"
 if [ -f "$GUI" ] && [ -d "$SYSROOT" ]; then
-  timeout 25 /tmp/raven-vf -wayland=false -sysroot "$SYSROOT" -trace-syscall \
-    "$GUI" </dev/null >/tmp/vf-gui.out 2>&1
-  nt=$(grep -oE "Nt(User|Gdi)[A-Za-z]+" /tmp/vf-gui.out | sort -u | tr '\n' ' ')
+  timeout 25 "$RAVEN_VF" -wayland=false -sysroot "$SYSROOT" -trace-syscall \
+    "$GUI" </dev/null >"$RUN_DIR/gui.out" 2>&1
+  nt=$(grep -oE "Nt(User|Gdi)[A-Za-z]+" "$RUN_DIR/gui.out" | sort -u | tr '\n' ' ')
   echo "  real NtUser/NtGdi issued: $nt"
   if echo "$nt" | grep -q NtUserCreateWindowEx; then
     gui_state="reaches-CreateWindow"
@@ -98,17 +102,17 @@ render_real="n/a"
 # Highest case that produces a PNG today is the win32k syscall fixture
 # (guest issues real numbered win32k syscalls → pkg/gfx → PNG). NOTE: this
 # exercises the win32k engine + display path, NOT the real ReactOS gdi32.
-timeout 25 /tmp/raven-vf -wayland=false -call-export demo -render-png "$PNG" \
-  testdata/dll_fixture/raven_win32k.dll </dev/null >/tmp/vf-png.out 2>&1
+timeout 25 "$RAVEN_VF" -wayland=false -call-export demo -render-png "$PNG" \
+  testdata/dll_fixture/raven_win32k.dll </dev/null >"$RUN_DIR/png.out" 2>&1
 if [ -f "$PNG" ]; then
   echo "  wrote $PNG ($(file -b "$PNG" 2>/dev/null | cut -c1-40))"
   render_real="engine-only"
 else
-  echo "  no PNG produced"; tail -3 /tmp/vf-png.out
+  echo "  no PNG produced"; tail -3 "$RUN_DIR/png.out"
 fi
 if [ "${WAYLAND:-0}" = 1 ]; then
   echo "  (opening live Wayland window - close it to continue)"
-  timeout 20 /tmp/raven-vf -wayland=true -call-export demo \
+  timeout 20 "$RAVEN_VF" -wayland=true -call-export demo \
     testdata/dll_fixture/raven_win32k.dll </dev/null >/dev/null 2>&1 || true
 fi
 

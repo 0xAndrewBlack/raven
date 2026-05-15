@@ -42,10 +42,11 @@ type Block struct {
 	vers      []uint32
 	// native, when non-zero, is the entry point of generated machine code
 	// that supersedes fn; ninsn is how many guest instructions it retires.
-	native    uintptr
-	ninsn     int
-	nativeMMX bool
-	nativeMem bool
+	native      uintptr
+	ninsn       int
+	nativeMMX   bool
+	nativeMem   bool
+	nativeTable mmu.NativeTableDescriptor
 }
 
 // Valid reports whether none of the block's code pages were written since
@@ -78,9 +79,12 @@ func (b *Block) Run(s *State) error {
 	if b.native != 0 {
 		if b.nativeMMX && (s.FPUST == nil || s.FPUTop == nil || s.FPUTW == nil) ||
 			b.nativeMem && s.Mem.WatchCB != nil {
+			if b.nativeMem {
+				s.InvalidatePageCache()
+			}
 			return b.fn(s)
 		}
-		retired, fallback := runNative(b.native, s)
+		retired, fallback := runNative(b.native, s, &b.nativeTable)
 		if s.Instret != nil {
 			if fallback {
 				*s.Instret += retired
@@ -115,6 +119,9 @@ type State struct {
 	// the CPU's counter (and the RDTSC it backs) advances at the same rate
 	// as under the interpreter.
 	Instret *uint64
+	// x87Unmasked is set by the closure x87 helpers when an enabled exception
+	// is raised. The executor uses it to restore the pre-instruction state.
+	x87Unmasked bool
 	// One-entry data-page caches for the block executor's memory helpers.
 	// Invalidated by the CPU wrapper whenever the mapping generation moves.
 	rdBase      uint64
@@ -204,7 +211,7 @@ func (s *State) write8(addr uint64, v uint8) error {
 		data[0] = v
 		return nil
 	}
-	if s.wrPage != nil && addr&mmu.PageMask == s.wrBase {
+	if s.Mem.WatchCB == nil && s.wrPage != nil && addr&mmu.PageMask == s.wrBase {
 		s.wrPage.Data[addr&(mmu.PageSize-1)] = v
 		if s.wrPage.Perms&mmu.PermExecute != 0 {
 			s.Mem.NoteExecutableWrite(s.wrPage)
@@ -221,7 +228,7 @@ func (s *State) write16(addr uint64, v uint16) error {
 		return nil
 	}
 	off := addr & (mmu.PageSize - 1)
-	if s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-2 {
+	if s.Mem.WatchCB == nil && s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-2 {
 		binary.LittleEndian.PutUint16(s.wrPage.Data[off:], v)
 		if s.wrPage.Perms&mmu.PermExecute != 0 {
 			s.Mem.NoteExecutableWrite(s.wrPage)
@@ -238,7 +245,7 @@ func (s *State) write32(addr uint64, v uint32) error {
 		return nil
 	}
 	off := addr & (mmu.PageSize - 1)
-	if s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-4 {
+	if s.Mem.WatchCB == nil && s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-4 {
 		binary.LittleEndian.PutUint32(s.wrPage.Data[off:], v)
 		if s.wrPage.Perms&mmu.PermExecute != 0 {
 			s.Mem.NoteExecutableWrite(s.wrPage)
@@ -255,7 +262,7 @@ func (s *State) write64(addr uint64, v uint64) error {
 		return nil
 	}
 	off := addr & (mmu.PageSize - 1)
-	if s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-8 {
+	if s.Mem.WatchCB == nil && s.wrPage != nil && addr&mmu.PageMask == s.wrBase && off <= mmu.PageSize-8 {
 		binary.LittleEndian.PutUint64(s.wrPage.Data[off:], v)
 		if s.wrPage.Perms&mmu.PermExecute != 0 {
 			s.Mem.NoteExecutableWrite(s.wrPage)
@@ -298,6 +305,9 @@ func (s *State) initFlat() {
 }
 
 func (s *State) flatWriteAccess(addr uint64, size uint64) ([]byte, bool) {
+	if s.Mem.WatchCB != nil {
+		return nil, false
+	}
 	data, ok := s.flatAccess(addr, size, mmu.PermWrite)
 	if !ok {
 		return nil, false
@@ -307,6 +317,13 @@ func (s *State) flatWriteAccess(addr uint64, size uint64) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
+}
+
+func (s *State) checkWriteRange(addr uint64, size int) error {
+	if size <= 0 {
+		return nil
+	}
+	return s.Mem.ValidateRange(addr, uint64(size), mmu.PermWrite)
 }
 
 // Cache holds compiled blocks and execution counters.
@@ -320,8 +337,9 @@ type Cache struct {
 	// exec holds generated machine code when the native backend is on.
 	exec *execBuf
 	// nativeMem enables native flat-memory load/store codegen (requires
-	// Mode32 + flat backing + the permission bitmap).
-	nativeMem bool
+	// Mode32 flat backing or the sparse PE64 native table).
+	nativeMem   bool
+	nativeTable mmu.NativeTableDescriptor
 	// nativeX87 enables native x87 codegen (opt-in, off by default until
 	// broadly certified against the interpreter).
 	nativeX87 bool
@@ -356,9 +374,12 @@ func (c *Cache) EnableNativeCodegen() bool {
 		return false
 	}
 	c.exec = buf
-	// Native flat-memory access is only safe with Mode32 masking, the flat
-	// region, and the permission bitmap all present.
-	c.nativeMem = c.mode32 && c.mem.FlatBase() != nil && c.mem.PermBitmap() != nil
+	if c.mode32 {
+		c.nativeMem = c.mem.FlatBase() != nil && c.mem.PermBitmap() != nil
+	} else {
+		c.nativeTable = c.mem.NativeTable()
+		c.nativeMem = nativeDescriptorSupported(c.nativeTable)
+	}
 	return true
 }
 
@@ -491,6 +512,9 @@ func (c *Cache) compile(addr uint64) *Block {
 			b.ninsn = ninsn
 			b.nativeMMX = usesMMX
 			b.nativeMem = usesMemory
+			if usesMemory && !c.mode32 {
+				b.nativeTable = c.nativeTable
+			}
 		}
 	}
 	if end <= addr {
@@ -608,6 +632,7 @@ type insn struct {
 	kind     opKind
 	rip      uint64
 	size     int   // operand size in bytes (1, 2, 4, 8)
+	srcSize  int   // source size when it differs from the destination
 	dst      int   // register index or -1
 	src      int   // register index or -1
 	imm      int64 // immediate value
@@ -618,7 +643,7 @@ type insn struct {
 	alu      aluOp
 	cc       condCode
 	shift    shiftOp
-	nextRIP  uint64 // address of next instruction (for block-end insns)
+	nextRIP  uint64 // address of next instruction
 	target   uint64 // branch target address
 	useRIP   bool   // memory operand is RIP-relative
 	opcode   byte
@@ -660,8 +685,15 @@ func (c *Cache) decode(addr uint64) ([]insn, uint64, error) {
 			d.insns[len(d.insns)-1].rip = instructionStart
 			return d.insns, d.pos, nil
 		}
+		instructionEnd := d.pos
 		for i := firstInstruction; i < len(d.insns); i++ {
 			d.insns[i].rip = instructionStart
+			if d.insns[i].kind != opEnd {
+				d.insns[i].nextRIP = instructionEnd
+				if d.mode32 {
+					d.insns[i].nextRIP &= 0xFFFFFFFF
+				}
+			}
 		}
 		last := d.insns[len(d.insns)-1]
 		// Block terminators
@@ -845,11 +877,6 @@ func (d *decoder) decodeOne() error {
 		}
 		switch {
 		case b == 0x66:
-			if d.mode32 {
-				d.pos = startPos
-				d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
-				return nil
-			}
 			p.op66 = true
 		case b == 0xF0 || b == 0xF2 || b == 0xF3 || b == 0x64 || b == 0x65 ||
 			b == 0x26 || b == 0x2E || b == 0x36 || b == 0x3E || b == 0x67:
@@ -873,7 +900,29 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 
 	switch op {
 	case 0x90: // NOP
-		d.insns = append(d.insns, insn{kind: opNop})
+		if p.rexB() {
+			d.insns = append(d.insns, insn{kind: opXchg, size: size, dst: 0, src: 8})
+		} else {
+			d.insns = append(d.insns, insn{kind: opNop})
+		}
+		return nil
+
+	// INC/DEC r32 in 32-bit mode. In 64-bit mode these bytes are REX prefixes.
+	case 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47:
+		if !d.mode32 {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		d.insns = append(d.insns, insn{kind: opInc, size: 4, dst: int(op - 0x40)})
+		return nil
+	case 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F:
+		if !d.mode32 {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		d.insns = append(d.insns, insn{kind: opDec, size: 4, dst: int(op - 0x48)})
 		return nil
 
 	case 0xCC, 0xCD, 0xCE: // INT3, INT, INTO - end block
@@ -912,16 +961,30 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 		}
 		return nil
 
-	// PUSH r64 (0x50-0x57)
+	// PUSH r16/r32/r64 (0x50-0x57)
 	case 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57:
 		reg := regIdx(op-0x50, p.rexB())
-		d.insns = append(d.insns, insn{kind: opPush, size: 8, src: reg})
+		stackSize := 4
+		if !d.mode32 {
+			stackSize = 8
+		}
+		if p.op66 {
+			stackSize = 2
+		}
+		d.insns = append(d.insns, insn{kind: opPush, size: stackSize, src: reg})
 		return nil
 
-	// POP r64 (0x58-0x5F)
+	// POP r16/r32/r64 (0x58-0x5F)
 	case 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F:
 		reg := regIdx(op-0x58, p.rexB())
-		d.insns = append(d.insns, insn{kind: opPop, size: 8, dst: reg})
+		stackSize := 4
+		if !d.mode32 {
+			stackSize = 8
+		}
+		if p.op66 {
+			stackSize = 2
+		}
+		d.insns = append(d.insns, insn{kind: opPop, size: stackSize, dst: reg})
 		return nil
 
 	// RET (0xC3)
@@ -945,6 +1008,9 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 			return err
 		}
 		target := d.pos + uint64(int64(int32(rel)))
+		if d.mode32 {
+			target &= 0xFFFFFFFF
+		}
 		d.insns = append(d.insns, insn{kind: opCall, target: target, nextRIP: d.pos})
 		return nil
 
@@ -955,6 +1021,9 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 			return err
 		}
 		target := d.pos + uint64(int64(int8(rel)))
+		if d.mode32 {
+			target &= 0xFFFFFFFF
+		}
 		d.insns = append(d.insns, insn{kind: opJmp, target: target, nextRIP: d.pos})
 		return nil
 
@@ -965,6 +1034,9 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 			return err
 		}
 		target := d.pos + uint64(int64(int32(rel)))
+		if d.mode32 {
+			target &= 0xFFFFFFFF
+		}
 		d.insns = append(d.insns, insn{kind: opJmp, target: target, nextRIP: d.pos})
 		return nil
 
@@ -976,6 +1048,9 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 			return err
 		}
 		target := d.pos + uint64(int64(int8(rel)))
+		if d.mode32 {
+			target &= 0xFFFFFFFF
+		}
 		d.insns = append(d.insns, insn{kind: opJcc, cc: condCode(op - 0x70), target: target, nextRIP: d.pos})
 		return nil
 
@@ -1060,19 +1135,35 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 		return nil
 
 	// Group 1: ALU r/m, imm8/imm32 (0x80-0x83)
-	case 0x81, 0x83:
+	case 0x80, 0x81, 0x83:
 		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
 		}
 		aop := aluOp(reg)
+		operandSize := size
+		if op == 0x80 {
+			operandSize = 1
+		}
 		var immVal int64
-		if op == 0x83 {
+		if op == 0x80 {
+			ib, e := d.fetch8()
+			if e != nil {
+				return e
+			}
+			immVal = int64(ib)
+		} else if op == 0x83 {
 			ib, e := d.fetch8()
 			if e != nil {
 				return e
 			}
 			immVal = int64(int8(ib))
+		} else if size == 2 {
+			i16, e := d.fetch16()
+			if e != nil {
+				return e
+			}
+			immVal = int64(i16)
 		} else {
 			i32, e := d.fetch32()
 			if e != nil {
@@ -1081,9 +1172,14 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 			immVal = int64(int32(i32))
 		}
 		if isReg {
-			d.insns = append(d.insns, insn{kind: opALURegImm, size: size, dst: rm, alu: aop, imm: immVal})
+			if operandSize == 1 && usesLegacyHighByte(rm, p) {
+				d.pos = startPos
+				d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+				return nil
+			}
+			d.insns = append(d.insns, insn{kind: opALURegImm, size: operandSize, dst: rm, alu: aop, imm: immVal})
 		} else {
-			d.insns = append(d.insns, insn{kind: opALUMemImm, size: size, alu: aop, imm: immVal,
+			d.insns = append(d.insns, insn{kind: opALUMemImm, size: operandSize, alu: aop, imm: immVal,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP})
 		}
 		return nil
@@ -1119,71 +1215,130 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 		d.insns = append(d.insns, insn{kind: opShift, size: sz, dst: rm, src: src, shift: shiftOp(reg), imm: count})
 		return nil
 
-	// MOV r/m, r (0x89)
-	case 0x89:
+	// MOV r/m, r (0x88/0x89)
+	case 0x88, 0x89:
+		movSize := size
+		if op == 0x88 {
+			movSize = 1
+		}
 		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
 		}
+		if movSize == 1 && (usesLegacyHighByte(reg, p) || isReg && usesLegacyHighByte(rm, p)) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
 		if isReg {
-			d.insns = append(d.insns, insn{kind: opMovRegReg, size: size, dst: rm, src: reg})
+			d.insns = append(d.insns, insn{kind: opMovRegReg, size: movSize, dst: rm, src: reg})
 		} else {
-			d.insns = append(d.insns, insn{kind: opMovMemReg, size: size, src: reg,
+			d.insns = append(d.insns, insn{kind: opMovMemReg, size: movSize, src: reg,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP})
 		}
 		return nil
 
-	// MOV r, r/m (0x8B)
-	case 0x8B:
+	// MOV r, r/m (0x8A/0x8B)
+	case 0x8A, 0x8B:
+		movSize := size
+		if op == 0x8A {
+			movSize = 1
+		}
 		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
 		}
+		if movSize == 1 && (usesLegacyHighByte(reg, p) || isReg && usesLegacyHighByte(rm, p)) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
 		if isReg {
-			d.insns = append(d.insns, insn{kind: opMovRegReg, size: size, dst: reg, src: rm})
+			d.insns = append(d.insns, insn{kind: opMovRegReg, size: movSize, dst: reg, src: rm})
 		} else {
-			d.insns = append(d.insns, insn{kind: opMovRegMem, size: size, dst: reg,
+			d.insns = append(d.insns, insn{kind: opMovRegMem, size: movSize, dst: reg,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP})
 		}
 		return nil
 
-	// MOV r/m, imm (0xC7)
-	case 0xC7:
-		_, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
+	// MOV r/m, imm (0xC6/0xC7)
+	case 0xC6, 0xC7:
+		extension, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
 		}
-		imm, err := d.fetch32()
-		if err != nil {
-			return err
+		if extension&7 != 0 {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
 		}
-		immVal := int64(int32(imm))
-		if isReg {
-			d.insns = append(d.insns, insn{kind: opMovRegImm, size: size, dst: rm, imm: immVal})
+		movSize := size
+		var immVal int64
+		if op == 0xC6 {
+			movSize = 1
+			imm, err := d.fetch8()
+			if err != nil {
+				return err
+			}
+			immVal = int64(imm)
+		} else if size == 2 {
+			imm, err := d.fetch16()
+			if err != nil {
+				return err
+			}
+			immVal = int64(imm)
 		} else {
-			d.insns = append(d.insns, insn{kind: opMovMemImm, size: size, imm: immVal,
+			imm, err := d.fetch32()
+			if err != nil {
+				return err
+			}
+			immVal = int64(int32(imm))
+		}
+		if isReg {
+			if movSize == 1 && usesLegacyHighByte(rm, p) {
+				d.pos = startPos
+				d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+				return nil
+			}
+			d.insns = append(d.insns, insn{kind: opMovRegImm, size: movSize, dst: rm, imm: immVal})
+		} else {
+			d.insns = append(d.insns, insn{kind: opMovMemImm, size: movSize, imm: immVal,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP})
 		}
 		return nil
 
 	// LEA r, m (0x8D)
 	case 0x8D:
-		reg, _, _, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
+		reg, isReg, _, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
+		}
+		if isReg {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
 		}
 		d.insns = append(d.insns, insn{kind: opLea, size: size, dst: reg,
 			memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP})
 		return nil
 
-	// TEST r/m, r (0x85)
-	case 0x85:
+	// TEST r/m, r (0x84/0x85)
+	case 0x84, 0x85:
 		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
 		}
+		testSize := size
+		if op == 0x84 {
+			testSize = 1
+		}
+		if testSize == 1 && (usesLegacyHighByte(reg, p) || isReg && usesLegacyHighByte(rm, p)) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
 		if isReg {
-			d.insns = append(d.insns, insn{kind: opTest, size: size, dst: rm, src: reg})
+			d.insns = append(d.insns, insn{kind: opTest, size: testSize, dst: rm, src: reg})
 		} else {
 			_ = base
 			_ = idx
@@ -1194,19 +1349,162 @@ func (d *decoder) decodeOpcode(op byte, p *pfx, startPos uint64) error {
 		}
 		return nil
 
-	// TEST al/rAX, imm (0xA9)
-	case 0xA9:
-		imm, err := d.fetch32()
+	// TEST AL/rAX, imm (0xA8/0xA9)
+	case 0xA8:
+		imm, err := d.fetch8()
 		if err != nil {
 			return err
 		}
-		d.insns = append(d.insns, insn{kind: opTestImm, size: size, dst: 0, imm: int64(int32(imm))})
+		d.insns = append(d.insns, insn{kind: opTestImm, size: 1, dst: 0, imm: int64(imm)})
+		return nil
+	case 0xA9:
+		var imm int64
+		if size == 2 {
+			value, err := d.fetch16()
+			if err != nil {
+				return err
+			}
+			imm = int64(value)
+		} else {
+			value, err := d.fetch32()
+			if err != nil {
+				return err
+			}
+			imm = int64(int32(value))
+		}
+		d.insns = append(d.insns, insn{kind: opTestImm, size: size, dst: 0, imm: imm})
+		return nil
+
+	// XCHG r/m, r (0x86/0x87)
+	case 0x86, 0x87:
+		reg, isReg, rm, _, _, _, _, _, err := d.decodeModRM(p)
+		if err != nil {
+			return err
+		}
+		xchgSize := size
+		if op == 0x86 {
+			xchgSize = 1
+		}
+		if !isReg || xchgSize == 1 && (usesLegacyHighByte(reg, p) || usesLegacyHighByte(rm, p)) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		d.insns = append(d.insns, insn{kind: opXchg, size: xchgSize, dst: rm, src: reg})
 		return nil
 
 	// XCHG rAX, r (0x91-0x97)
 	case 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97:
 		reg := regIdx(op-0x90, p.rexB())
 		d.insns = append(d.insns, insn{kind: opXchg, size: size, dst: 0, src: reg})
+		return nil
+
+	// IMUL r, r/m, imm (0x69/0x6B)
+	case 0x69, 0x6B:
+		reg, isReg, rm, _, _, _, _, _, err := d.decodeModRM(p)
+		if err != nil {
+			return err
+		}
+		if !isReg {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		var imm int64
+		if op == 0x6B {
+			value, err := d.fetch8()
+			if err != nil {
+				return err
+			}
+			imm = int64(int8(value))
+		} else if size == 2 {
+			value, err := d.fetch16()
+			if err != nil {
+				return err
+			}
+			imm = int64(int16(value))
+		} else {
+			value, err := d.fetch32()
+			if err != nil {
+				return err
+			}
+			imm = int64(int32(value))
+		}
+		d.insns = append(d.insns, insn{kind: opIMul3, size: size, dst: reg, src: rm, imm: imm})
+		return nil
+
+	// Group 3: TEST/NOT/NEG/DIV/IDIV register forms.
+	case 0xF6, 0xF7:
+		group, isReg, rm, _, _, _, _, _, err := d.decodeModRM(p)
+		if err != nil {
+			return err
+		}
+		groupSize := size
+		if op == 0xF6 {
+			groupSize = 1
+		}
+		if !isReg || groupSize == 1 && usesLegacyHighByte(rm, p) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		switch group {
+		case 0, 1:
+			var imm int64
+			if groupSize == 1 {
+				value, err := d.fetch8()
+				if err != nil {
+					return err
+				}
+				imm = int64(value)
+			} else if groupSize == 2 {
+				value, err := d.fetch16()
+				if err != nil {
+					return err
+				}
+				imm = int64(value)
+			} else {
+				value, err := d.fetch32()
+				if err != nil {
+					return err
+				}
+				imm = int64(int32(value))
+			}
+			d.insns = append(d.insns, insn{kind: opTestImm, size: groupSize, dst: rm, imm: imm})
+		case 2:
+			d.insns = append(d.insns, insn{kind: opNot, size: groupSize, dst: rm})
+		case 3:
+			d.insns = append(d.insns, insn{kind: opNeg, size: groupSize, dst: rm})
+		case 6:
+			d.insns = append(d.insns, insn{kind: opDiv, size: groupSize, src: rm})
+		case 7:
+			d.insns = append(d.insns, insn{kind: opIDiv, size: groupSize, src: rm})
+		default:
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+		}
+		return nil
+
+	// Group 4/5: INC/DEC register forms.
+	case 0xFE, 0xFF:
+		group, isReg, rm, _, _, _, _, _, err := d.decodeModRM(p)
+		if err != nil {
+			return err
+		}
+		groupSize := size
+		if op == 0xFE {
+			groupSize = 1
+		}
+		if !isReg || group > 1 || groupSize == 1 && usesLegacyHighByte(rm, p) {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
+		kind := opInc
+		if group == 1 {
+			kind = opDec
+		}
+		d.insns = append(d.insns, insn{kind: kind, size: groupSize, dst: rm})
 		return nil
 
 	// CDQ/CQO (0x99)
@@ -1365,6 +1663,9 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 			return err
 		}
 		target := d.pos + uint64(int64(int32(rel)))
+		if d.mode32 {
+			target &= 0xFFFFFFFF
+		}
 		d.insns = append(d.insns, insn{kind: opJcc, cc: condCode(b - 0x80), target: target, nextRIP: d.pos})
 		return nil
 
@@ -1380,23 +1681,28 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 			return nil
 		}
 		if isReg {
-			d.insns = append(d.insns, insn{kind: opMovzx, size: 1, dst: reg, src: rm})
+			d.insns = append(d.insns, insn{kind: opMovzx, size: p.opSize(), srcSize: 1, dst: reg, src: rm})
 		} else {
-			d.insns = append(d.insns, insn{kind: opMovzx, size: 1, dst: reg,
+			d.insns = append(d.insns, insn{kind: opMovzx, size: p.opSize(), srcSize: 1, dst: reg,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP, src: -1})
 		}
 		return nil
 
 	// MOVZX r, r/m16 (0x0F 0xB7)
 	case 0xB7:
+		if p.opSize() == 2 {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
 		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
 		}
 		if isReg {
-			d.insns = append(d.insns, insn{kind: opMovzx, size: 2, dst: reg, src: rm})
+			d.insns = append(d.insns, insn{kind: opMovzx, size: p.opSize(), srcSize: 2, dst: reg, src: rm})
 		} else {
-			d.insns = append(d.insns, insn{kind: opMovzx, size: 2, dst: reg,
+			d.insns = append(d.insns, insn{kind: opMovzx, size: p.opSize(), srcSize: 2, dst: reg,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP, src: -1})
 		}
 		return nil
@@ -1413,23 +1719,28 @@ func (d *decoder) decode0F(p *pfx, startPos uint64) error {
 			return nil
 		}
 		if isReg {
-			d.insns = append(d.insns, insn{kind: opMovsx, size: 1, dst: reg, src: rm})
+			d.insns = append(d.insns, insn{kind: opMovsx, size: p.opSize(), srcSize: 1, dst: reg, src: rm})
 		} else {
-			d.insns = append(d.insns, insn{kind: opMovsx, size: 1, dst: reg,
+			d.insns = append(d.insns, insn{kind: opMovsx, size: p.opSize(), srcSize: 1, dst: reg,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP, src: -1})
 		}
 		return nil
 
 	// MOVSX r, r/m16 (0x0F 0xBF)
 	case 0xBF:
+		if p.opSize() == 2 {
+			d.pos = startPos
+			d.insns = append(d.insns, insn{kind: opEnd, nextRIP: startPos})
+			return nil
+		}
 		reg, isReg, rm, base, idx, scale, disp, useRIP, err := d.decodeModRM(p)
 		if err != nil {
 			return err
 		}
 		if isReg {
-			d.insns = append(d.insns, insn{kind: opMovsx, size: 2, dst: reg, src: rm})
+			d.insns = append(d.insns, insn{kind: opMovsx, size: p.opSize(), srcSize: 2, dst: reg, src: rm})
 		} else {
-			d.insns = append(d.insns, insn{kind: opMovsx, size: 2, dst: reg,
+			d.insns = append(d.insns, insn{kind: opMovsx, size: p.opSize(), srcSize: 2, dst: reg,
 				memBase: base, memIdx: idx, memScale: scale, memDisp: disp, useRIP: useRIP, src: -1})
 		}
 		return nil
@@ -1520,6 +1831,11 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 
 		for i := 0; i < len(insns); i++ {
 			in := &insns[i]
+			if in.kind == opEnd {
+				*s.RIP = in.nextRIP
+				s.Fallback = true
+				return nil
+			}
 			if instret != nil {
 				*instret++
 			}
@@ -1575,53 +1891,57 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 					v, err = s.read64(addr)
 				}
 				if err != nil {
-					return err
+					return unretire(instret, err)
 				}
-				switch in.size {
-				case 4:
-					regs[in.dst] = v // zero-extend 32-bit
-				default:
-					regs[in.dst] = v
-				}
+				writeReg(regs, in.dst, v, in.size)
 
 			case opMovMemReg:
 				*s.RIP = in.rip
 				addr := resolveAddr(s, in)
+				if err := s.checkWriteRange(addr, in.size); err != nil {
+					return unretire(instret, err)
+				}
 				v := regs[in.src]
+				var err error
 				switch in.size {
 				case 1:
-					s.write8(addr, byte(v))
+					err = s.write8(addr, byte(v))
 				case 2:
-					s.write16(addr, uint16(v))
+					err = s.write16(addr, uint16(v))
 				case 4:
-					s.write32(addr, uint32(v))
+					err = s.write32(addr, uint32(v))
 				case 8:
-					s.write64(addr, v)
+					err = s.write64(addr, v)
+				}
+				if err != nil {
+					return unretire(instret, err)
 				}
 
 			case opMovMemImm:
 				*s.RIP = in.rip
 				addr := resolveAddr(s, in)
+				if err := s.checkWriteRange(addr, in.size); err != nil {
+					return unretire(instret, err)
+				}
 				v := uint64(in.imm)
+				var err error
 				switch in.size {
 				case 1:
-					s.write8(addr, byte(v))
+					err = s.write8(addr, byte(v))
 				case 2:
-					s.write16(addr, uint16(v))
+					err = s.write16(addr, uint16(v))
 				case 4:
-					s.write32(addr, uint32(v))
+					err = s.write32(addr, uint32(v))
 				case 8:
-					s.write64(addr, v)
+					err = s.write64(addr, v)
+				}
+				if err != nil {
+					return unretire(instret, err)
 				}
 
 			case opLea:
 				addr := resolveAddr(s, in)
-				switch in.size {
-				case 4:
-					regs[in.dst] = addr & 0xFFFFFFFF
-				default:
-					regs[in.dst] = addr
-				}
+				writeReg(regs, in.dst, addr, in.size)
 
 			case opALURegReg:
 				a := truncate(regs[in.dst], in.size)
@@ -1647,18 +1967,25 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				addr := resolveAddr(s, in)
 				a := truncate(regs[in.dst], in.size)
 				var bv uint64
+				var err error
 				switch in.size {
 				case 1:
-					bb, _ := s.read8(addr)
+					var bb byte
+					bb, err = s.read8(addr)
 					bv = uint64(bb)
 				case 2:
-					bw, _ := s.read16(addr)
+					var bw uint16
+					bw, err = s.read16(addr)
 					bv = uint64(bw)
 				case 4:
-					bd, _ := s.read32(addr)
+					var bd uint32
+					bd, err = s.read32(addr)
 					bv = uint64(bd)
 				case 8:
-					bv, _ = s.read64(addr)
+					bv, err = s.read64(addr)
+				}
+				if err != nil {
+					return unretire(instret, err)
 				}
 				r := doALU(s, in.alu, a, bv, in.size)
 				if in.alu != aluCMP {
@@ -1673,48 +2000,51 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				case 1:
 					bb, err := s.read8(addr)
 					if err != nil {
-						return err
+						return unretire(instret, err)
 					}
 					a = uint64(bb)
 				case 2:
 					bw, err := s.read16(addr)
 					if err != nil {
-						return err
+						return unretire(instret, err)
 					}
 					a = uint64(bw)
 				case 4:
 					bd, err := s.read32(addr)
 					if err != nil {
-						return err
+						return unretire(instret, err)
 					}
 					a = uint64(bd)
 				case 8:
 					var err error
 					a, err = s.read64(addr)
 					if err != nil {
-						return err
+						return unretire(instret, err)
 					}
 				}
 				b := truncate(regs[in.src], in.size)
+				oldFlags := *s.Rflags
+				if in.alu != aluCMP {
+					if err := s.checkWriteRange(addr, in.size); err != nil {
+						return unretire(instret, err)
+					}
+				}
 				r := doALU(s, in.alu, a, b, in.size)
 				if in.alu != aluCMP {
+					var err error
 					switch in.size {
 					case 1:
-						if err := s.write8(addr, byte(r)); err != nil {
-							return err
-						}
+						err = s.write8(addr, byte(r))
 					case 2:
-						if err := s.write16(addr, uint16(r)); err != nil {
-							return err
-						}
+						err = s.write16(addr, uint16(r))
 					case 4:
-						if err := s.write32(addr, uint32(r)); err != nil {
-							return err
-						}
+						err = s.write32(addr, uint32(r))
 					case 8:
-						if err := s.write64(addr, r); err != nil {
-							return err
-						}
+						err = s.write64(addr, r)
+					}
+					if err != nil {
+						*s.Rflags = oldFlags
+						return unretire(instret, err)
 					}
 				}
 
@@ -1722,31 +2052,49 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				*s.RIP = in.rip
 				addr := resolveAddr(s, in)
 				var a uint64
+				var err error
 				switch in.size {
 				case 1:
-					bb, _ := s.read8(addr)
+					var bb byte
+					bb, err = s.read8(addr)
 					a = uint64(bb)
 				case 2:
-					bw, _ := s.read16(addr)
+					var bw uint16
+					bw, err = s.read16(addr)
 					a = uint64(bw)
 				case 4:
-					bd, _ := s.read32(addr)
+					var bd uint32
+					bd, err = s.read32(addr)
 					a = uint64(bd)
 				case 8:
-					a, _ = s.read64(addr)
+					a, err = s.read64(addr)
+				}
+				if err != nil {
+					return unretire(instret, err)
 				}
 				b := uint64(in.imm)
+				oldFlags := *s.Rflags
+				if in.alu != aluCMP {
+					if err := s.checkWriteRange(addr, in.size); err != nil {
+						return unretire(instret, err)
+					}
+				}
 				r := doALU(s, in.alu, a, b, in.size)
 				if in.alu != aluCMP {
+					var err error
 					switch in.size {
 					case 1:
-						s.write8(addr, byte(r))
+						err = s.write8(addr, byte(r))
 					case 2:
-						s.write16(addr, uint16(r))
+						err = s.write16(addr, uint16(r))
 					case 4:
-						s.write32(addr, uint32(r))
+						err = s.write32(addr, uint32(r))
 					case 8:
-						s.write64(addr, r)
+						err = s.write64(addr, r)
+					}
+					if err != nil {
+						*s.Rflags = oldFlags
+						return unretire(instret, err)
 					}
 				}
 
@@ -1763,51 +2111,72 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 
 			case opPush:
 				*s.RIP = in.rip
+				sp := regs[4] - uint64(in.size)
 				if s.Mode32 {
-					sp := (regs[4] - 4) & 0xFFFFFFFF
-					if err := s.write32(sp, uint32(regs[in.src])); err != nil {
-						return err
-					}
-					regs[4] = sp
-				} else {
-					sp := regs[4] - 8
-					if err := s.write64(sp, regs[in.src]); err != nil {
-						return err
-					}
-					regs[4] = sp
+					sp &= 0xFFFFFFFF
 				}
+				if err := s.checkWriteRange(sp, in.size); err != nil {
+					return unretire(instret, err)
+				}
+				var err error
+				switch in.size {
+				case 2:
+					err = s.write16(sp, uint16(regs[in.src]))
+				case 4:
+					err = s.write32(sp, uint32(regs[in.src]))
+				case 8:
+					err = s.write64(sp, regs[in.src])
+				}
+				if err != nil {
+					return unretire(instret, err)
+				}
+				regs[4] = sp
 
 			case opPop:
 				*s.RIP = in.rip
 				sp := regs[4]
-				if s.Mode32 {
-					v, err := s.read32(sp)
-					if err != nil {
-						return err
-					}
-					regs[4] = (sp + 4) & 0xFFFFFFFF
-					regs[in.dst] = uint64(v)
-				} else {
-					v, err := s.read64(sp)
-					if err != nil {
-						return err
-					}
-					regs[4] = sp + 8
-					regs[in.dst] = v
+				var value uint64
+				var err error
+				switch in.size {
+				case 2:
+					var v uint16
+					v, err = s.read16(sp)
+					value = uint64(v)
+				case 4:
+					var v uint32
+					v, err = s.read32(sp)
+					value = uint64(v)
+				case 8:
+					value, err = s.read64(sp)
 				}
+				if err != nil {
+					return unretire(instret, err)
+				}
+				nextSP := sp + uint64(in.size)
+				if s.Mode32 {
+					nextSP &= 0xFFFFFFFF
+				}
+				regs[4] = nextSP
+				writeReg(regs, in.dst, value, in.size)
 
 			case opCall:
 				*s.RIP = in.rip
 				if s.Mode32 {
 					sp := (regs[4] - 4) & 0xFFFFFFFF
+					if err := s.checkWriteRange(sp, 4); err != nil {
+						return unretire(instret, err)
+					}
 					if err := s.write32(sp, uint32(in.nextRIP)); err != nil {
-						return err
+						return unretire(instret, err)
 					}
 					regs[4] = sp
 				} else {
 					sp := regs[4] - 8
+					if err := s.checkWriteRange(sp, 8); err != nil {
+						return unretire(instret, err)
+					}
 					if err := s.write64(sp, in.nextRIP); err != nil {
-						return err
+						return unretire(instret, err)
 					}
 					regs[4] = sp
 				}
@@ -1821,7 +2190,7 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				if s.Mode32 {
 					v, err := s.read32(sp)
 					if err != nil {
-						return err
+						return unretire(instret, err)
 					}
 					ret = uint64(v)
 					regs[4] = (sp + 4 + uint64(in.imm)) & 0xFFFFFFFF
@@ -1829,7 +2198,7 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 					var err error
 					ret, err = s.read64(sp)
 					if err != nil {
-						return err
+						return unretire(instret, err)
 					}
 					regs[4] = sp + 8 + uint64(in.imm)
 				}
@@ -1849,7 +2218,10 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				return nil
 
 			case opXchg:
-				regs[in.dst], regs[in.src] = regs[in.src], regs[in.dst]
+				left := truncate(regs[in.dst], in.size)
+				right := truncate(regs[in.src], in.size)
+				writeReg(regs, in.dst, right, in.size)
+				writeReg(regs, in.src, left, in.size)
 
 			case opCdq:
 				if in.size == 8 {
@@ -1869,23 +2241,19 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 			case opX87:
 				*s.RIP = in.rip
 				if err := execX87(s, mem, in); err != nil {
-					return err
+					return unretire(instret, err)
 				}
 
 			case opMMX:
 				*s.RIP = in.rip
 				if err := execMMX(s, in); err != nil {
-					if instret != nil {
-						(*instret)--
-					}
-					return err
+					return unretire(instret, err)
 				}
 
 			case opMovzx:
 				var v uint64
 				if in.src >= 0 {
-					// Register source
-					switch in.size {
+					switch in.srcSize {
 					case 1:
 						v = regs[in.src] & 0xFF
 					case 2:
@@ -1893,39 +2261,53 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 					}
 				} else {
 					// Memory source
+					*s.RIP = in.rip
 					addr := resolveAddr(s, in)
-					switch in.size {
+					var err error
+					switch in.srcSize {
 					case 1:
-						b, _ := s.read8(addr)
+						var b byte
+						b, err = s.read8(addr)
 						v = uint64(b)
 					case 2:
-						w, _ := s.read16(addr)
+						var w uint16
+						w, err = s.read16(addr)
 						v = uint64(w)
 					}
+					if err != nil {
+						return unretire(instret, err)
+					}
 				}
-				regs[in.dst] = v
+				writeReg(regs, in.dst, v, in.size)
 
 			case opMovsx:
 				var v int64
 				if in.src >= 0 {
-					switch in.size {
+					switch in.srcSize {
 					case 1:
 						v = int64(int8(regs[in.src]))
 					case 2:
 						v = int64(int16(regs[in.src]))
 					}
 				} else {
+					*s.RIP = in.rip
 					addr := resolveAddr(s, in)
-					switch in.size {
+					var err error
+					switch in.srcSize {
 					case 1:
-						b, _ := s.read8(addr)
+						var b byte
+						b, err = s.read8(addr)
 						v = int64(int8(b))
 					case 2:
-						w, _ := s.read16(addr)
+						var w uint16
+						w, err = s.read16(addr)
 						v = int64(int16(w))
 					}
+					if err != nil {
+						return unretire(instret, err)
+					}
 				}
-				regs[in.dst] = uint64(v)
+				writeReg(regs, in.dst, uint64(v), in.size)
 
 			case opSetcc:
 				if evalCC(s, in.cc) {
@@ -1935,18 +2317,51 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				}
 
 			case opCmovcc:
+				if in.size == 4 {
+					regs[in.dst] &= 0xFFFFFFFF
+				}
 				if evalCC(s, in.cc) {
 					writeReg(regs, in.dst, regs[in.src], in.size)
 				}
 
 			case opIMul:
-				a := int64(truncate(regs[in.dst], in.size))
-				b := int64(truncate(regs[in.src], in.size))
-				r := uint64(a * b)
+				r, overflow := signedMultiply(regs[in.dst], regs[in.src], in.size)
 				writeReg(regs, in.dst, r, in.size)
-				// Simplified flags
-				fl := *s.Rflags &^ (flagCF | flagOF)
-				*s.Rflags = fl
+				setMultiplyFlags(s, overflow)
+
+			case opIMul3:
+				r, overflow := signedMultiply(regs[in.src], uint64(in.imm), in.size)
+				writeReg(regs, in.dst, r, in.size)
+				setMultiplyFlags(s, overflow)
+
+			case opNot:
+				writeReg(regs, in.dst, ^truncate(regs[in.dst], in.size), in.size)
+
+			case opNeg:
+				value := truncate(regs[in.dst], in.size)
+				writeReg(regs, in.dst, doALU(s, aluSUB, 0, value, in.size), in.size)
+
+			case opInc, opDec:
+				carry := *s.Rflags & flagCF
+				alu := aluADD
+				if in.kind == opDec {
+					alu = aluSUB
+				}
+				result := doALU(s, alu, truncate(regs[in.dst], in.size), 1, in.size)
+				*s.Rflags = *s.Rflags&^flagCF | carry
+				writeReg(regs, in.dst, result, in.size)
+
+			case opDiv, opIDiv:
+				*s.RIP = in.rip
+				var err error
+				if in.kind == opDiv {
+					err = divideUnsigned(regs, in.src, in.size)
+				} else {
+					err = divideSigned(regs, in.src, in.size)
+				}
+				if err != nil {
+					return unretire(instret, fmt.Errorf("%w at RIP=0x%x", err, in.rip))
+				}
 
 			case opShift:
 				count := uint64(in.imm)
@@ -1966,10 +2381,6 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 				s.Trap = true
 				return nil
 
-			case opEnd:
-				*s.RIP = in.nextRIP
-				s.Fallback = true
-				return nil
 			}
 		}
 		return nil
@@ -1979,6 +2390,13 @@ func (c *Cache) emit(insns []insn) CompiledBlock {
 // =========================================================================
 // Helper functions
 // =========================================================================
+
+func unretire(instret *uint64, err error) error {
+	if instret != nil {
+		(*instret)--
+	}
+	return err
+}
 
 func execMMX(s *State, in *insn) error {
 	if s.FPUST == nil || s.FPUTop == nil || s.FPUTW == nil {
@@ -2310,38 +2728,400 @@ func mmxSaturateUnsigned(v int64, bits uint) uint64 {
 	return uint64(v)
 }
 
+const (
+	x87JITExcInvalid   uint16 = 1 << 0
+	x87JITExcDenormal  uint16 = 1 << 1
+	x87JITExcZero      uint16 = 1 << 2
+	x87JITExcOverflow  uint16 = 1 << 3
+	x87JITExcUnderflow uint16 = 1 << 4
+	x87JITExcPrecision uint16 = 1 << 5
+	x87JITStackFault   uint16 = 1 << 6
+)
+
+func x87JITSignal(s *State, mask uint16, c1 bool) bool {
+	*s.FPUSW |= mask
+	exceptions := mask & 0x3f
+	unmasked := exceptions != 0 && *s.FPUCW&exceptions != exceptions
+	if *s.FPUSW&0x3f&^*s.FPUCW != 0 {
+		*s.FPUSW |= 0x80
+	} else {
+		*s.FPUSW &^= 0x80
+	}
+	if c1 {
+		*s.FPUSW |= 0x0200
+	} else {
+		*s.FPUSW &^= 0x0200
+	}
+	if unmasked {
+		s.x87Unmasked = true
+	}
+	return unmasked
+}
+
+func x87JITTag(s *State, phys int) uint16 {
+	return (*s.FPUTW >> uint(phys*2)) & 3
+}
+
+func x87JITSetTag(s *State, phys int, tag uint16) {
+	shift := uint(phys * 2)
+	*s.FPUTW = (*s.FPUTW &^ (3 << shift)) | (tag&3)<<shift
+}
+
+func x87JITEmpty(s *State, logical int) bool {
+	return x87JITTag(s, (*s.FPUTop+logical)&7) == 3
+}
+
+func x87JITValueTag(value float64) uint16 {
+	if value == 0 {
+		return 1
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) < math.Float64frombits(1<<52) {
+		return 2
+	}
+	return 0
+}
+
+func x87JITRead(s *State, logical int) float64 {
+	phys := (*s.FPUTop + logical) & 7
+	if x87JITTag(s, phys) == 3 {
+		x87JITSignal(s, x87JITExcInvalid|x87JITStackFault, false)
+		return math.NaN()
+	}
+	return s.FPUST[phys]
+}
+
+func x87JITSet(s *State, logical int, value float64) {
+	phys := (*s.FPUTop + logical) & 7
+	s.FPUST[phys] = value
+	x87JITSetTag(s, phys, x87JITValueTag(value))
+}
+
+func x87JITRoundFloat32(value float64, cw uint16) float64 {
+	nearest := float32(value)
+	rounded := float64(nearest)
+	if rounded == value || math.IsNaN(value) {
+		return rounded
+	}
+	switch (cw >> 10) & 3 {
+	case 1:
+		if rounded > value {
+			nearest = math.Nextafter32(nearest, float32(math.Inf(-1)))
+		}
+	case 2:
+		if rounded < value {
+			nearest = math.Nextafter32(nearest, float32(math.Inf(1)))
+		}
+	case 3:
+		if value > 0 && rounded > value || value < 0 && rounded < value {
+			target := float32(math.Inf(-1))
+			if value < 0 {
+				target = float32(math.Inf(1))
+			}
+			nearest = math.Nextafter32(nearest, target)
+		}
+	}
+	return float64(nearest)
+}
+
+func x87JITRoundPrecision(value float64, cw uint16) float64 {
+	if (cw>>8)&3 == 0 {
+		return x87JITRoundFloat32(value, cw)
+	}
+	return value
+}
+
+func x87JITSetResult(s *State, logical int, value float64) {
+	rounded := x87JITRoundPrecision(value, *s.FPUCW)
+	if rounded != value && !math.IsNaN(value) {
+		x87JITSignal(s, x87JITExcPrecision, false)
+		if rounded == 0 {
+			x87JITSignal(s, x87JITExcUnderflow, false)
+		}
+		if math.IsInf(rounded, 0) && !math.IsInf(value, 0) {
+			x87JITSignal(s, x87JITExcOverflow, false)
+		}
+	}
+	x87JITSet(s, logical, rounded)
+}
+
+func x87JITPush(s *State, value float64) {
+	next := (*s.FPUTop - 1) & 7
+	if x87JITTag(s, next) != 3 {
+		x87JITSignal(s, x87JITExcInvalid|x87JITStackFault, true)
+		if s.x87Unmasked {
+			return
+		}
+		value = math.NaN()
+	}
+	*s.FPUTop = next
+	s.FPUST[next] = value
+	x87JITSetTag(s, next, x87JITValueTag(value))
+}
+
+func x87JITPop(s *State) float64 {
+	if x87JITEmpty(s, 0) {
+		x87JITSignal(s, x87JITExcInvalid|x87JITStackFault, false)
+		if s.x87Unmasked {
+			return math.NaN()
+		}
+		*s.FPUTop = (*s.FPUTop + 1) & 7
+		return math.NaN()
+	}
+	value := s.FPUST[*s.FPUTop]
+	x87JITSetTag(s, *s.FPUTop, 3)
+	*s.FPUTop = (*s.FPUTop + 1) & 7
+	return value
+}
+
+func x87JITSwap(s *State, logical int) {
+	p0, pi := *s.FPUTop, (*s.FPUTop+logical)&7
+	if x87JITTag(s, p0) == 3 || x87JITTag(s, pi) == 3 {
+		x87JITSignal(s, x87JITExcInvalid|x87JITStackFault, false)
+	}
+	*s.FPUSW &^= 0x0200
+	s.FPUST[p0], s.FPUST[pi] = s.FPUST[pi], s.FPUST[p0]
+	t0, ti := x87JITTag(s, p0), x87JITTag(s, pi)
+	x87JITSetTag(s, p0, ti)
+	x87JITSetTag(s, pi, t0)
+}
+
+func x87JITSetCC(s *State, cmp int) {
+	*s.FPUSW &^= 0x4700
+	switch cmp {
+	case -1:
+		*s.FPUSW |= 0x0100
+	case 0:
+		*s.FPUSW |= 0x4000
+	case 2:
+		*s.FPUSW |= 0x4500
+	}
+}
+
+func x87JITSignalingNaN(value float64) bool {
+	return math.IsNaN(value) && math.Float64bits(value)&(1<<51) == 0
+}
+
+func x87JITCompareValues(s *State, a, b float64, quiet bool) int {
+	if math.IsNaN(a) || math.IsNaN(b) {
+		if !quiet || x87JITSignalingNaN(a) || x87JITSignalingNaN(b) {
+			x87JITSignal(s, x87JITExcInvalid, false)
+		}
+		return 2
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+func x87JITArithmetic(s *State, a, b float64, op int) float64 {
+	if math.IsNaN(a) || math.IsNaN(b) {
+		if x87JITSignalingNaN(a) || x87JITSignalingNaN(b) {
+			x87JITSignal(s, x87JITExcInvalid, false)
+		}
+	}
+	var result float64
+	switch op {
+	case 0:
+		if math.IsInf(a, 0) && math.IsInf(b, 0) && math.Signbit(a) != math.Signbit(b) {
+			x87JITSignal(s, x87JITExcInvalid, false)
+		}
+		result = a + b
+		if result == 0 && a != 0 && b != 0 && a != -b {
+			x87JITSignal(s, x87JITExcUnderflow, false)
+		}
+		if result == 0 && !math.IsInf(a, 0) && !math.IsInf(b, 0) && (*s.FPUCW>>10)&3 == 1 {
+			return math.Copysign(0, -1)
+		}
+	case 1:
+		if a == 0 && math.IsInf(b, 0) || b == 0 && math.IsInf(a, 0) {
+			x87JITSignal(s, x87JITExcInvalid, false)
+		}
+		result = a * b
+	case 4:
+		if math.IsInf(a, 0) && math.IsInf(b, 0) && math.Signbit(a) == math.Signbit(b) {
+			x87JITSignal(s, x87JITExcInvalid, false)
+		}
+		result = a - b
+		if result == 0 && a != 0 && b != 0 && a != b {
+			x87JITSignal(s, x87JITExcUnderflow, false)
+		}
+		if result == 0 && !math.IsInf(a, 0) && !math.IsInf(b, 0) && (*s.FPUCW>>10)&3 == 1 {
+			return math.Copysign(0, -1)
+		}
+	case 5:
+		return x87JITArithmetic(s, b, a, 4)
+	case 6:
+		if b == 0 {
+			if a == 0 {
+				x87JITSignal(s, x87JITExcInvalid, false)
+			} else if !math.IsInf(a, 0) {
+				x87JITSignal(s, x87JITExcZero, false)
+			}
+		}
+		if math.IsInf(a, 0) && math.IsInf(b, 0) {
+			x87JITSignal(s, x87JITExcInvalid, false)
+		}
+		result = a / b
+	case 7:
+		return x87JITArithmetic(s, b, a, 6)
+	default:
+		return math.NaN()
+	}
+	if math.IsInf(result, 0) && !math.IsInf(a, 0) && !math.IsInf(b, 0) {
+		x87JITSignal(s, x87JITExcOverflow, false)
+	}
+	if result == 0 && a != 0 && b != 0 && !math.IsInf(a, 0) && !math.IsInf(b, 0) && op == 6 {
+		x87JITSignal(s, x87JITExcUnderflow, false)
+	}
+	return result
+}
+
+func x87JITPrem(s *State, st0, st1 float64, nearest bool) {
+	if math.IsNaN(st0) || math.IsNaN(st1) {
+		if x87JITSignalingNaN(st0) || x87JITSignalingNaN(st1) {
+			x87JITSignal(s, x87JITExcInvalid, false)
+		}
+		x87JITSet(s, 0, math.NaN())
+		return
+	}
+	if math.IsInf(st0, 0) || st1 == 0 {
+		x87JITSignal(s, x87JITExcInvalid, false)
+		return
+	}
+	if math.IsInf(st1, 0) {
+		*s.FPUSW &^= 0x4700
+		return
+	}
+	m0, e0 := math.Frexp(st0)
+	m1, e1 := math.Frexp(st1)
+	if e0-e1 >= 64 {
+		scale := e0 - e1 - 63
+		quotient := math.Trunc(math.Ldexp(m0/m1, 63))
+		*s.FPUSW |= 0x0400
+		x87JITSet(s, 0, st0-math.Ldexp(st1, scale)*quotient)
+		return
+	}
+	quotient := math.Trunc(st0 / st1)
+	if nearest {
+		quotient = math.RoundToEven(st0 / st1)
+	}
+	*s.FPUSW &^= 0x0400
+	x87JITSet(s, 0, st0-quotient*st1)
+	*s.FPUSW &^= 0x4700
+	var bitsValue uint64
+	if math.Abs(quotient) < math.Ldexp(1, 63) {
+		bitsValue = uint64(int64(quotient)) & 7
+	} else {
+		r := math.Mod(quotient, 8)
+		if r < 0 {
+			r += 8
+		}
+		bitsValue = uint64(r)
+	}
+	if bitsValue&4 != 0 {
+		*s.FPUSW |= 0x0100
+	}
+	if bitsValue&1 != 0 {
+		*s.FPUSW |= 0x0200
+	}
+	if bitsValue&2 != 0 {
+		*s.FPUSW |= 0x4000
+	}
+}
+
+func x87JITConvertInt(s *State, value float64, bits int, trunc bool) int64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		x87JITSignal(s, x87JITExcInvalid, false)
+		if bits == 16 {
+			return -1 << 15
+		}
+		if bits == 32 {
+			return -1 << 31
+		}
+		return -1 << 63
+	}
+	if trunc {
+		value = math.Trunc(value)
+	} else {
+		value = x87Round(value, s.FPUCW)
+	}
+	min := -math.Ldexp(1, bits-1)
+	max := math.Ldexp(1, bits-1) - 1
+	invalid := value < min || value > max
+	if bits == 64 {
+		invalid = value < -math.Ldexp(1, 63) || value >= math.Ldexp(1, 63)
+	}
+	if invalid {
+		x87JITSignal(s, x87JITExcInvalid, false)
+		if bits == 16 {
+			return -1 << 15
+		}
+		if bits == 32 {
+			return -1 << 31
+		}
+		return -1 << 63
+	}
+	return int64(value)
+}
+
 func execX87(s *State, mem *mmu.MMU, in *insn) error {
+	if s.FPUST == nil || s.FPUTop == nil || s.FPUCW == nil || s.FPUSW == nil || s.FPUTW == nil {
+		return fmt.Errorf("x87 state is unavailable")
+	}
+	stBefore := *s.FPUST
+	topBefore := *s.FPUTop
+	cwBefore := *s.FPUCW
+	swBefore := *s.FPUSW
+	twBefore := *s.FPUTW
+	flagsBefore := uint64(0)
+	if s.Rflags != nil {
+		flagsBefore = *s.Rflags
+	}
+	restore := func(preserveExceptions bool) {
+		exceptionBits := *s.FPUSW & 0x02FF
+		*s.FPUST = stBefore
+		*s.FPUTop = topBefore
+		*s.FPUCW = cwBefore
+		*s.FPUSW = swBefore
+		*s.FPUTW = twBefore
+		if preserveExceptions {
+			*s.FPUSW = (swBefore &^ 0x02FF) | exceptionBits | 0x80
+		}
+		if s.Rflags != nil {
+			*s.Rflags = flagsBefore
+		}
+	}
+	s.x87Unmasked = false
+	err := execX87Core(s, mem, in)
+	if err != nil {
+		restore(s.x87Unmasked)
+		return err
+	}
+	if s.x87Unmasked {
+		restore(true)
+		return fmt.Errorf("unmasked x87 exception")
+	}
+	return nil
+}
+
+func execX87Core(s *State, mem *mmu.MMU, in *insn) error {
 	if s.FPUST == nil || s.FPUTop == nil || s.FPUTW == nil {
 		return fmt.Errorf("x87 state is unavailable")
 	}
-	st := s.FPUST
 	top := s.FPUTop
-	tw := s.FPUTW
 	phys := func(i int) int { return (*top + i) & 7 }
 	push := func(value float64) {
-		*top = (*top - 1) & 7
-		st[*top] = value
-		*tw &^= 3 << (uint(*top) * 2)
+		x87JITPush(s, value)
 	}
 	pop := func() {
-		*tw |= 3 << (uint(*top) * 2)
-		*top = (*top + 1) & 7
+		x87JITPop(s)
 	}
 	setCC := func(cmp int) error {
-		if s.FPUSW == nil {
-			return fmt.Errorf("x87 status word is unavailable")
-		}
-		*s.FPUSW &^= 0x4500 // clear C0, C2, C3
-		switch cmp {
-		case -1:
-			*s.FPUSW |= 0x0100 // C0=1
-		case 0:
-			*s.FPUSW |= 0x4000 // C3=1
-		case 1:
-			// C0=C2=C3=0
-		default:
-			*s.FPUSW |= 0x4500 // unordered
-		}
+		x87JITSetCC(s, cmp)
 		return nil
 	}
 	op := byte(in.imm)
@@ -2352,44 +3132,52 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 		case 0xD8:
 			switch reg {
 			case 0:
-				st[*top] += st[phys(i)]
+				x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), x87JITRead(s, i), 0))
 			case 1:
-				st[*top] *= st[phys(i)]
+				x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), x87JITRead(s, i), 1))
 			case 2:
-				return setCC(x87Compare(st[*top], st[phys(i)]))
+				return setCC(x87JITCompareValues(s, x87JITRead(s, 0), x87JITRead(s, i), false))
 			case 3:
-				if err := setCC(x87Compare(st[*top], st[phys(i)])); err != nil {
+				if err := setCC(x87JITCompareValues(s, x87JITRead(s, 0), x87JITRead(s, i), false)); err != nil {
 					return err
 				}
 				pop()
 			case 4:
-				st[*top] -= st[phys(i)]
+				x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), x87JITRead(s, i), 4))
 			case 5:
-				st[*top] = st[phys(i)] - st[*top]
+				x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), x87JITRead(s, i), 5))
 			case 6:
-				st[*top] /= st[phys(i)]
+				x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), x87JITRead(s, i), 6))
 			case 7:
-				st[*top] = st[phys(i)] / st[*top]
+				x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), x87JITRead(s, i), 7))
 			}
 			return nil
 		case 0xD9:
 			switch {
 			case reg == 0: // FLD ST(i)
-				value := st[phys(i)]
+				value := x87JITRead(s, i)
 				push(value)
 			case reg == 1: // FXCH ST(i)
-				st[phys(0)], st[phys(i)] = st[phys(i)], st[phys(0)]
+				if i == 0 {
+					if x87JITEmpty(s, 0) {
+						x87JITSignal(s, x87JITExcInvalid|x87JITStackFault, false)
+					} else {
+						*s.FPUSW &^= 0x0200
+					}
+				} else {
+					x87JITSwap(s, i)
+				}
 			case reg == 4 && i == 0: // FCHS
-				st[*top] = -st[*top]
+				x87JITSet(s, 0, -x87JITRead(s, 0))
 			case reg == 4 && i == 1: // FABS
-				st[*top] = math.Abs(st[*top])
+				x87JITSet(s, 0, math.Abs(x87JITRead(s, 0)))
 			case reg == 4 && i == 4: // FTST
-				return setCC(x87Compare(st[*top], 0))
+				return setCC(x87JITCompareValues(s, x87JITRead(s, 0), 0, false))
 			case reg == 4 && i == 5: // FXAM
 				if s.FPUSW == nil {
 					return fmt.Errorf("x87 status word is unavailable")
 				}
-				value := st[*top]
+				value := x87JITRead(s, 0)
 				*s.FPUSW &^= 0x4700
 				if math.IsNaN(value) {
 					*s.FPUSW |= 0x0100
@@ -2418,70 +3206,174 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			case reg == 5 && i == 6: // FLDZ
 				push(0)
 			case reg == 6 && i == 0: // F2XM1
-				st[*top] = math.Exp2(st[*top]) - 1
+				x := x87JITRead(s, 0)
+				if math.IsNaN(x) {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				} else if x < -1 || x > 1 {
+					*s.FPUSW |= 0x0400
+				} else {
+					*s.FPUSW &^= 0x0400
+					x87JITSet(s, 0, math.Exp2(x)-1)
+				}
 			case reg == 6 && i == 1: // FYL2X
-				y, x := st[phys(1)], st[*top]
+				y, x := x87JITRead(s, 1), x87JITRead(s, 0)
+				if x < 0 {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				}
+				if x87JITSignalingNaN(x) || x87JITSignalingNaN(y) {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				}
+				if x == 0 {
+					x87JITSignal(s, x87JITExcZero, false)
+				}
 				pop()
-				st[*top] = y * math.Log2(x)
+				x87JITSet(s, 0, y*math.Log2(x))
 			case reg == 6 && i == 2: // FPTAN
-				st[*top] = math.Tan(st[*top])
-				push(1.0)
+				x := x87JITRead(s, 0)
+				if math.IsNaN(x) {
+					if x87JITSignalingNaN(x) {
+						x87JITSignal(s, x87JITExcInvalid, false)
+					}
+					*s.FPUSW &^= 0x0400
+					x87JITSet(s, 0, x)
+				} else if math.IsInf(x, 0) {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				} else if math.Abs(x) < math.Ldexp(1, 63) {
+					*s.FPUSW &^= 0x0400
+					x87JITSet(s, 0, math.Tan(x))
+					push(1.0)
+				} else {
+					*s.FPUSW |= 0x0400
+				}
 			case reg == 6 && i == 3: // FPATAN
-				y, x := st[phys(1)], st[*top]
+				y, x := x87JITRead(s, 1), x87JITRead(s, 0)
 				pop()
-				st[*top] = math.Atan2(y, x)
+				x87JITSet(s, 0, math.Atan2(y, x))
 			case reg == 6 && i == 4: // FXTRACT
-				frac, exp := math.Frexp(st[*top])
-				st[*top] = float64(exp - 1)
-				push(frac * 2)
+				x := x87JITRead(s, 0)
+				*s.FPUSW &^= 0x0200
+				switch {
+				case x == 0:
+					x87JITSignal(s, x87JITExcZero, false)
+					x87JITSet(s, 0, math.Inf(-1))
+					push(math.Copysign(0, x))
+				case math.IsNaN(x):
+					if x87JITSignalingNaN(x) {
+						x87JITSignal(s, x87JITExcInvalid, false)
+						x = math.Float64frombits(math.Float64bits(x) | 1<<51)
+					}
+					x87JITSet(s, 0, x)
+					push(x)
+				case math.IsInf(x, 0):
+					x87JITSet(s, 0, math.Inf(1))
+					push(x)
+				default:
+					frac, exp := math.Frexp(x)
+					x87JITSet(s, 0, float64(exp-1))
+					push(frac * 2)
+				}
 			case reg == 6 && i == 5: // FPREM1
-				st[*top] = math.Remainder(st[*top], st[phys(1)])
+				x87JITPrem(s, x87JITRead(s, 0), x87JITRead(s, 1), true)
 			case reg == 6 && i == 6: // FDECSTP
 				*top = (*top - 1) & 7
+				*s.FPUSW &^= 0x0200
 			case reg == 6 && i == 7: // FINCSTP
 				*top = (*top + 1) & 7
+				*s.FPUSW &^= 0x0200
 			case reg == 7 && i == 0: // FPREM
-				st0, st1 := st[*top], st[phys(1)]
-				if st1 != 0 {
-					st[*top] = st0 - math.Trunc(st0/st1)*st1
-				}
+				x87JITPrem(s, x87JITRead(s, 0), x87JITRead(s, 1), false)
 			case reg == 7 && i == 1: // FYL2XP1
-				y, x := st[phys(1)], st[*top]
+				y, x := x87JITRead(s, 1), x87JITRead(s, 0)
+				if x87JITSignalingNaN(x) || x87JITSignalingNaN(y) {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				} else if x <= -1 {
+					if x == -1 {
+						x87JITSignal(s, x87JITExcZero, false)
+					} else {
+						x87JITSignal(s, x87JITExcInvalid, false)
+					}
+				}
 				pop()
-				st[*top] = y * math.Log2(x+1)
+				x87JITSet(s, 0, y*math.Log2(x+1))
 			case reg == 7 && i == 2: // FSQRT
-				st[*top] = math.Sqrt(st[*top])
+				x := x87JITRead(s, 0)
+				if x < 0 || x87JITSignalingNaN(x) {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				}
+				x87JITSetResult(s, 0, math.Sqrt(x))
 			case reg == 7 && i == 3: // FSINCOS
-				sinValue, cosValue := math.Sincos(st[*top])
-				st[*top] = sinValue
-				push(cosValue)
+				x := x87JITRead(s, 0)
+				if math.IsNaN(x) {
+					if x87JITSignalingNaN(x) {
+						x87JITSignal(s, x87JITExcInvalid, false)
+					}
+					*s.FPUSW &^= 0x0400
+					x87JITSet(s, 0, x)
+				} else if math.IsInf(x, 0) {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				} else if math.Abs(x) < math.Ldexp(1, 63) {
+					*s.FPUSW &^= 0x0400
+					sinValue, cosValue := math.Sincos(x)
+					x87JITSet(s, 0, sinValue)
+					push(cosValue)
+				} else {
+					*s.FPUSW |= 0x0400
+				}
 			case reg == 7 && i == 4: // FRNDINT
-				st[*top] = float64(x87Round(st[*top], s.FPUCW))
+				x87JITSet(s, 0, x87Round(x87JITRead(s, 0), s.FPUCW))
 			case reg == 7 && i == 5: // FSCALE
-				st[*top] = math.Ldexp(st[*top], int(st[phys(1)]))
+				x87JITSet(s, 0, math.Ldexp(x87JITRead(s, 0), int(x87JITRead(s, 1))))
 			case reg == 7 && i == 6: // FSIN
-				st[*top] = math.Sin(st[*top])
+				x := x87JITRead(s, 0)
+				if math.IsNaN(x) {
+					if x87JITSignalingNaN(x) {
+						x87JITSignal(s, x87JITExcInvalid, false)
+					}
+					*s.FPUSW &^= 0x0400
+					x87JITSet(s, 0, x)
+				} else if math.IsInf(x, 0) {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				} else if math.Abs(x) < math.Ldexp(1, 63) {
+					*s.FPUSW &^= 0x0400
+					x87JITSet(s, 0, math.Sin(x))
+				} else {
+					*s.FPUSW |= 0x0400
+				}
 			case reg == 7 && i == 7: // FCOS
-				st[*top] = math.Cos(st[*top])
+				x := x87JITRead(s, 0)
+				if math.IsNaN(x) {
+					if x87JITSignalingNaN(x) {
+						x87JITSignal(s, x87JITExcInvalid, false)
+					}
+					*s.FPUSW &^= 0x0400
+					x87JITSet(s, 0, x)
+				} else if math.IsInf(x, 0) {
+					x87JITSignal(s, x87JITExcInvalid, false)
+				} else if math.Abs(x) < math.Ldexp(1, 63) {
+					*s.FPUSW &^= 0x0400
+					x87JITSet(s, 0, math.Cos(x))
+				} else {
+					*s.FPUSW |= 0x0400
+				}
 			default:
 				return fmt.Errorf("unsupported x87 register form %02x /%d", op, reg)
 			}
 			return nil
 		case 0xDC:
-			left, right := st[phys(i)], st[*top]
+			left, right := x87JITRead(s, i), x87JITRead(s, 0)
 			switch reg {
 			case 0:
-				st[phys(i)] = left + right
+				x87JITSetResult(s, i, x87JITArithmetic(s, left, right, 0))
 			case 1:
-				st[phys(i)] = left * right
+				x87JITSetResult(s, i, x87JITArithmetic(s, left, right, 1))
 			case 4:
-				st[phys(i)] = right - left
+				x87JITSetResult(s, i, x87JITArithmetic(s, right, left, 4))
 			case 5:
-				st[phys(i)] = left - right
+				x87JITSetResult(s, i, x87JITArithmetic(s, left, right, 4))
 			case 6:
-				st[phys(i)] = right / left
+				x87JITSetResult(s, i, x87JITArithmetic(s, right, left, 6))
 			case 7:
-				st[phys(i)] = left / right
+				x87JITSetResult(s, i, x87JITArithmetic(s, left, right, 6))
 			default:
 				return fmt.Errorf("unsupported x87 register form %02x /%d", op, reg)
 			}
@@ -2489,16 +3381,16 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 		case 0xDD:
 			switch reg {
 			case 0: // FFREE ST(i)
-				*tw |= 3 << (uint(phys(i)) * 2)
+				x87JITSetTag(s, phys(i), 3)
 			case 2: // FST ST(i)
-				st[phys(i)] = st[*top]
+				x87JITSet(s, i, x87JITRead(s, 0))
 			case 3: // FSTP ST(i)
-				st[phys(i)] = st[*top]
+				x87JITSet(s, i, x87JITRead(s, 0))
 				pop()
 			case 4: // FUCOM ST(i)
-				return setCC(x87Compare(st[*top], st[phys(i)]))
+				return setCC(x87JITCompareValues(s, x87JITRead(s, 0), x87JITRead(s, i), true))
 			case 5: // FUCOMP ST(i)
-				if err := setCC(x87Compare(st[*top], st[phys(i)])); err != nil {
+				if err := setCC(x87JITCompareValues(s, x87JITRead(s, 0), x87JITRead(s, i), true)); err != nil {
 					return err
 				}
 				pop()
@@ -2508,27 +3400,27 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			return nil
 		case 0xDE:
 			if reg == 3 && i == 1 { // FCOMPP
-				if err := setCC(x87Compare(st[*top], st[phys(1)])); err != nil {
+				if err := setCC(x87JITCompareValues(s, x87JITRead(s, 0), x87JITRead(s, 1), false)); err != nil {
 					return err
 				}
 				pop()
 				pop()
 				return nil
 			}
-			left, right := st[phys(i)], st[*top]
+			left, right := x87JITRead(s, i), x87JITRead(s, 0)
 			switch reg {
 			case 0:
-				st[phys(i)] = left + right
+				x87JITSetResult(s, i, x87JITArithmetic(s, left, right, 0))
 			case 1:
-				st[phys(i)] = left * right
+				x87JITSetResult(s, i, x87JITArithmetic(s, left, right, 1))
 			case 4:
-				st[phys(i)] = right - left
+				x87JITSetResult(s, i, x87JITArithmetic(s, right, left, 4))
 			case 5:
-				st[phys(i)] = left - right
+				x87JITSetResult(s, i, x87JITArithmetic(s, left, right, 4))
 			case 6:
-				st[phys(i)] = right / left
+				x87JITSetResult(s, i, x87JITArithmetic(s, right, left, 6))
 			case 7:
-				st[phys(i)] = left / right
+				x87JITSetResult(s, i, x87JITArithmetic(s, left, right, 6))
 			default:
 				return fmt.Errorf("unsupported x87 register form %02x /%d", op, reg)
 			}
@@ -2556,7 +3448,7 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 		}
 		value := float64(math.Float32frombits(bits))
 		if reg == 2 || reg == 3 { // FCOM/FCOMP m32
-			if err := setCC(x87Compare(st[*top], value)); err != nil {
+			if err := setCC(x87JITCompareValues(s, x87JITRead(s, 0), value, false)); err != nil {
 				return err
 			}
 			if reg == 3 {
@@ -2564,7 +3456,8 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			}
 			return nil
 		}
-		return x87Arithmetic(&st[*top], value, reg)
+		x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), value, reg))
+		return nil
 	case 0xD9:
 		switch reg {
 		case 0:
@@ -2575,7 +3468,21 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			push(float64(math.Float32frombits(bits)))
 			return nil
 		case 2, 3:
-			if err := s.write32(addr, math.Float32bits(float32(st[*top]))); err != nil {
+			value := x87JITRead(s, 0)
+			rounded := x87JITRoundFloat32(value, *s.FPUCW)
+			if rounded != value && !math.IsNaN(value) {
+				x87JITSignal(s, x87JITExcPrecision, false)
+				if rounded == 0 {
+					x87JITSignal(s, x87JITExcUnderflow, false)
+				}
+				if math.IsInf(rounded, 0) && !math.IsInf(value, 0) {
+					x87JITSignal(s, x87JITExcOverflow, false)
+				}
+			}
+			if s.x87Unmasked {
+				return fmt.Errorf("unmasked x87 store precision exception")
+			}
+			if err := s.write32(addr, math.Float32bits(float32(rounded))); err != nil {
 				return err
 			}
 			if reg == 3 {
@@ -2583,14 +3490,16 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			}
 			return nil
 		case 5: // FLDCW m16
-			if s.FPUCW == nil {
-				return fmt.Errorf("x87 control word is unavailable")
-			}
 			bits, err := s.read16(addr)
 			if err != nil {
 				return err
 			}
-			*s.FPUCW = bits
+			*s.FPUCW = (bits & 0x0F3F) | 0x0040
+			if *s.FPUSW&0x3F&^*s.FPUCW != 0 {
+				*s.FPUSW |= 0x80
+			} else {
+				*s.FPUSW &^= 0x80
+			}
 			return nil
 		case 7: // FNSTCW m16
 			if s.FPUCW == nil {
@@ -2605,7 +3514,7 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 		}
 		value := float64(int32(bits))
 		if reg == 2 || reg == 3 { // FICOM/FICOMP m32
-			if err := setCC(x87Compare(st[*top], value)); err != nil {
+			if err := setCC(x87JITCompareValues(s, x87JITRead(s, 0), value, false)); err != nil {
 				return err
 			}
 			if reg == 3 {
@@ -2613,7 +3522,8 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			}
 			return nil
 		}
-		return x87Arithmetic(&st[*top], value, reg)
+		x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), value, reg))
+		return nil
 	case 0xDB:
 		switch reg {
 		case 0:
@@ -2624,8 +3534,11 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			push(float64(int32(value)))
 			return nil
 		case 2, 3:
-			value := x87Round(st[*top], s.FPUCW)
-			if err := s.write32(addr, uint32(int32(value))); err != nil {
+			value := x87JITConvertInt(s, x87JITRead(s, 0), 32, false)
+			if s.x87Unmasked {
+				return fmt.Errorf("unmasked x87 integer conversion exception")
+			}
+			if err := s.write32(addr, uint32(value)); err != nil {
 				return err
 			}
 			if reg == 3 {
@@ -2640,7 +3553,7 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 		}
 		value := math.Float64frombits(bits)
 		if reg == 2 || reg == 3 { // FCOM/FCOMP m64
-			if err := setCC(x87Compare(st[*top], value)); err != nil {
+			if err := setCC(x87JITCompareValues(s, x87JITRead(s, 0), value, false)); err != nil {
 				return err
 			}
 			if reg == 3 {
@@ -2648,7 +3561,8 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			}
 			return nil
 		}
-		return x87Arithmetic(&st[*top], value, reg)
+		x87JITSetResult(s, 0, x87JITArithmetic(s, x87JITRead(s, 0), value, reg))
+		return nil
 	case 0xDD:
 		switch reg {
 		case 0: // FLD m64
@@ -2659,7 +3573,7 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			push(math.Float64frombits(bits))
 			return nil
 		case 2, 3: // FST/FSTP m64
-			if err := s.write64(addr, math.Float64bits(st[*top])); err != nil {
+			if err := s.write64(addr, math.Float64bits(x87JITRead(s, 0))); err != nil {
 				return err
 			}
 			if reg == 3 {
@@ -2683,8 +3597,12 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			push(float64(int16(value)))
 			return nil
 		case 2, 3: // FIST/FISTP m16
-			value := x87Round(st[*top], s.FPUCW)
-			if err := s.write16(addr, uint16(int16(value))); err != nil {
+			value := x87JITRead(s, 0)
+			converted := x87JITConvertInt(s, value, 16, false)
+			if s.x87Unmasked {
+				return fmt.Errorf("unmasked x87 integer conversion exception")
+			}
+			if err := s.write16(addr, uint16(converted)); err != nil {
 				return err
 			}
 			if reg == 3 {
@@ -2699,8 +3617,11 @@ func execX87(s *State, mem *mmu.MMU, in *insn) error {
 			push(float64(int64(value)))
 			return nil
 		case 7: // FISTP m64
-			value := x87Round(st[*top], s.FPUCW)
-			if err := s.write64(addr, uint64(value)); err != nil {
+			converted := x87JITConvertInt(s, x87JITRead(s, 0), 64, false)
+			if s.x87Unmasked {
+				return fmt.Errorf("unmasked x87 integer conversion exception")
+			}
+			if err := s.write64(addr, uint64(converted)); err != nil {
 				return err
 			}
 			pop()
@@ -2744,19 +3665,19 @@ func x87Arithmetic(st0 *float64, value float64, reg int) error {
 	return nil
 }
 
-func x87Round(value float64, controlWord *uint16) int64 {
+func x87Round(value float64, controlWord *uint16) float64 {
 	if controlWord == nil {
-		return int64(math.RoundToEven(value))
+		return math.RoundToEven(value)
 	}
 	switch *controlWord >> 10 & 3 {
 	case 0:
-		return int64(math.RoundToEven(value))
+		return math.RoundToEven(value)
 	case 1:
-		return int64(math.Floor(value))
+		return math.Floor(value)
 	case 2:
-		return int64(math.Ceil(value))
+		return math.Ceil(value)
 	default:
-		return int64(math.Trunc(value))
+		return math.Trunc(value)
 	}
 }
 
@@ -2806,7 +3727,15 @@ func writeReg(regs *[16]uint64, idx int, val uint64, size int) {
 
 func shiftRegister(s *State, value, count uint64, size int, op shiftOp) uint64 {
 	nbits := uint64(size * 8)
-	count &= nbits - 1
+	if size == 8 {
+		count &= 0x3F
+	} else {
+		count &= 0x1F
+	}
+	maskedCount := count
+	if op == shROL || op == shROR {
+		count %= nbits
+	}
 	if count == 0 {
 		return value
 	}
@@ -2816,16 +3745,32 @@ func shiftRegister(s *State, value, count uint64, size int, op shiftOp) uint64 {
 	switch op {
 	case shROL:
 		result = value<<count | value>>(nbits-count)
+		if op == shROL {
+			setCarryFlag(s, result)
+		}
+		if maskedCount == 1 {
+			setOverflowFlag(s, (result>>(nbits-1))^(result&1))
+		}
 	case shROR:
 		result = value>>count | value<<(nbits-count)
+		setCarryFlag(s, result>>(nbits-1))
+		if maskedCount == 1 {
+			setOverflowFlag(s, (result>>(nbits-1))^(result>>(nbits-2)))
+		}
 	case shSHL:
 		result = value << count
 		setShiftResultFlags(s, result, size)
 		setCarryFlag(s, value>>(nbits-count)&1)
+		if count == 1 {
+			setOverflowFlag(s, result>>(nbits-1)^(*s.Rflags&flagCF))
+		}
 	case shSHR:
 		result = value >> count
 		setShiftResultFlags(s, result, size)
 		setCarryFlag(s, value>>(count-1)&1)
+		if count == 1 {
+			setOverflowFlag(s, value>>(nbits-1))
+		}
 	case shSAR:
 		switch size {
 		case 1:
@@ -2839,12 +3784,15 @@ func shiftRegister(s *State, value, count uint64, size int, op shiftOp) uint64 {
 		}
 		setShiftResultFlags(s, result, size)
 		setCarryFlag(s, value>>(count-1)&1)
+		if count == 1 {
+			setOverflowFlag(s, 0)
+		}
 	}
 	return result & mask
 }
 
 func setShiftResultFlags(s *State, result uint64, size int) {
-	flags := *s.Rflags &^ (flagCF | flagZF | flagSF | flagPF | flagOF)
+	flags := *s.Rflags &^ (flagCF | flagZF | flagSF | flagPF)
 	result = truncate(result, size)
 	if result == 0 {
 		flags |= flagZF
@@ -2860,6 +3808,171 @@ func setShiftResultFlags(s *State, result uint64, size int) {
 
 func setCarryFlag(s *State, carry uint64) {
 	*s.Rflags = *s.Rflags&^flagCF | carry&1
+}
+
+func setOverflowFlag(s *State, overflow uint64) {
+	*s.Rflags = *s.Rflags&^flagOF | (overflow&1)*flagOF
+}
+
+func signedValue(value uint64, size int) int64 {
+	switch size {
+	case 1:
+		return int64(int8(value))
+	case 2:
+		return int64(int16(value))
+	case 4:
+		return int64(int32(value))
+	default:
+		return int64(value)
+	}
+}
+
+func signedMagnitude(value int64) uint64 {
+	if value < 0 {
+		return uint64(-(value + 1)) + 1
+	}
+	return uint64(value)
+}
+
+func signedMultiply(left, right uint64, size int) (uint64, bool) {
+	a := signedValue(left, size)
+	b := signedValue(right, size)
+	if size < 8 {
+		product := a * b
+		bits := uint(size * 8)
+		minimum := -int64(1) << (bits - 1)
+		maximum := int64(1)<<(bits-1) - 1
+		return truncate(uint64(product), size), product < minimum || product > maximum
+	}
+
+	negative := a < 0 != (b < 0)
+	high, low := bits.Mul64(signedMagnitude(a), signedMagnitude(b))
+	overflow := high != 0
+	if negative {
+		overflow = overflow || low > uint64(1)<<63
+		low = -low
+	} else {
+		overflow = overflow || low > uint64(math.MaxInt64)
+	}
+	return low, overflow
+}
+
+func setMultiplyFlags(s *State, overflow bool) {
+	*s.Rflags &^= flagCF | flagOF
+	if overflow {
+		*s.Rflags |= flagCF | flagOF
+	}
+}
+
+func divideUnsigned(regs *[16]uint64, source, size int) error {
+	divisor := truncate(regs[source], size)
+	if divisor == 0 {
+		return fmt.Errorf("division by zero")
+	}
+
+	var quotient, remainder uint64
+	switch size {
+	case 1:
+		dividend := regs[0] & 0xFFFF
+		quotient, remainder = dividend/divisor, dividend%divisor
+		if quotient > 0xFF {
+			return fmt.Errorf("division quotient overflow")
+		}
+		regs[0] = regs[0]&^uint64(0xFFFF) | quotient | remainder<<8
+		return nil
+	case 2:
+		dividend := (regs[2]&0xFFFF)<<16 | regs[0]&0xFFFF
+		quotient, remainder = dividend/divisor, dividend%divisor
+		if quotient > 0xFFFF {
+			return fmt.Errorf("division quotient overflow")
+		}
+	case 4:
+		dividend := (regs[2]&0xFFFFFFFF)<<32 | regs[0]&0xFFFFFFFF
+		quotient, remainder = dividend/divisor, dividend%divisor
+		if quotient > 0xFFFFFFFF {
+			return fmt.Errorf("division quotient overflow")
+		}
+	case 8:
+		high, low := regs[2], regs[0]
+		if high >= divisor {
+			return fmt.Errorf("division quotient overflow")
+		}
+		quotient, remainder = bits.Div64(high, low, divisor)
+	default:
+		return fmt.Errorf("unsupported division width %d", size)
+	}
+	writeReg(regs, 0, quotient, size)
+	writeReg(regs, 2, remainder, size)
+	return nil
+}
+
+func divideSigned(regs *[16]uint64, source, size int) error {
+	divisor := signedValue(regs[source], size)
+	if divisor == 0 {
+		return fmt.Errorf("division by zero")
+	}
+
+	if size < 8 {
+		var dividend int64
+		switch size {
+		case 1:
+			dividend = int64(int16(regs[0] & 0xFFFF))
+		case 2:
+			dividend = int64(int32((regs[2]&0xFFFF)<<16 | regs[0]&0xFFFF))
+		case 4:
+			dividend = int64((regs[2]&0xFFFFFFFF)<<32 | regs[0]&0xFFFFFFFF)
+		default:
+			return fmt.Errorf("unsupported signed division width %d", size)
+		}
+		quotient := dividend / divisor
+		remainder := dividend % divisor
+		bits := uint(size * 8)
+		minimum := -int64(1) << (bits - 1)
+		maximum := int64(1)<<(bits-1) - 1
+		if quotient < minimum || quotient > maximum {
+			return fmt.Errorf("division quotient overflow")
+		}
+		if size == 1 {
+			regs[0] = regs[0]&^uint64(0xFFFF) |
+				uint64(uint8(quotient)) |
+				uint64(uint8(remainder))<<8
+			return nil
+		}
+		writeReg(regs, 0, uint64(quotient), size)
+		writeReg(regs, 2, uint64(remainder), size)
+		return nil
+	}
+
+	high, low := regs[2], regs[0]
+	dividendNegative := int64(high) < 0
+	if dividendNegative {
+		low = ^low + 1
+		high = ^high
+		if low == 0 {
+			high++
+		}
+	}
+	divisorNegative := divisor < 0
+	divisorMagnitude := signedMagnitude(divisor)
+	if high >= divisorMagnitude {
+		return fmt.Errorf("division quotient overflow")
+	}
+	quotient, remainder := bits.Div64(high, low, divisorMagnitude)
+	quotientNegative := dividendNegative != divisorNegative
+	if quotientNegative {
+		if quotient > uint64(1)<<63 {
+			return fmt.Errorf("division quotient overflow")
+		}
+		quotient = -quotient
+	} else if quotient > uint64(math.MaxInt64) {
+		return fmt.Errorf("division quotient overflow")
+	}
+	if dividendNegative {
+		remainder = -remainder
+	}
+	regs[0] = quotient
+	regs[2] = remainder
+	return nil
 }
 
 func doALU(s *State, op aluOp, a, b uint64, size int) uint64 {

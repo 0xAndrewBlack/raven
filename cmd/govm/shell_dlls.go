@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mirkobrombin/Raven/pkg/hostenv"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
@@ -260,6 +261,10 @@ func winToLinuxPath(winPath string) string {
 
 func shellCSIDLPaths() map[int]string {
 	home := shellHomeDir()
+	tempDir, err := hostenv.TempDir()
+	if err != nil {
+		tempDir = filepath.Join(home, ".cache", "raven", "tmp")
+	}
 	return map[int]string{
 		0x0000: filepath.Join(home, "Desktop"),
 		0x0005: filepath.Join(home, "Documents"),
@@ -272,7 +277,7 @@ func shellCSIDLPaths() map[int]string {
 		0x0014: filepath.Join(home, "AppData", "Local", "Microsoft", "Windows", "Fonts"),
 		0x001A: filepath.Join(home, "AppData", "Roaming"),
 		0x001C: filepath.Join(home, "AppData", "Local"),
-		0x001D: os.TempDir(),
+		0x001D: tempDir,
 		0x0023: "/ProgramData",
 		0x0024: "/Windows",
 		0x0025: "/Windows/System32",

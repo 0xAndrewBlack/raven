@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -151,6 +150,13 @@ type controlState struct {
 	text              string
 	visible           bool
 	showCalled        bool
+	guestPaintMu      sync.RWMutex
+	guestPainted      bool
+	guestPaintX       int32
+	guestPaintY       int32
+	guestPaintW       int32
+	guestPaintH       int32
+	guestPaintPixels  []byte
 	listItems         []string
 	listItemData      []uint64
 	listCurSel        int
@@ -199,6 +205,52 @@ type controlState struct {
 	tbBitmapStore     [][]uint32
 	tbHandleMap       map[int]tbLazyRef // slot index → pending HBITMAP handle + slot offset (lazy resolution)
 	tbImageList       uint64            // HIMAGELIST from TB_SETIMAGELIST
+	customDrawMu      sync.RWMutex
+	customDrawSkipped map[uint64]struct{}
+}
+
+type controlGeometry struct {
+	x, y, w, h int32
+}
+
+func (state *controlState) mutateGeometry(update func(*controlGeometry)) (controlGeometry, controlGeometry) {
+	state.guestPaintMu.Lock()
+	defer state.guestPaintMu.Unlock()
+	before := controlGeometry{x: state.x, y: state.y, w: state.w, h: state.h}
+	after := before
+	update(&after)
+	state.x, state.y, state.w, state.h = after.x, after.y, after.w, after.h
+	if before != after {
+		state.guestPainted = false
+		state.guestPaintPixels = nil
+	}
+	return before, after
+}
+
+func (state *controlState) setCustomDrawSkipped(items map[uint64]struct{}) {
+	if state == nil {
+		return
+	}
+	state.customDrawMu.Lock()
+	if len(items) == 0 {
+		state.customDrawSkipped = nil
+	} else {
+		state.customDrawSkipped = make(map[uint64]struct{}, len(items))
+		for item := range items {
+			state.customDrawSkipped[item] = struct{}{}
+		}
+	}
+	state.customDrawMu.Unlock()
+}
+
+func (state *controlState) customDrawItemSkipped(item uint64) bool {
+	if state == nil {
+		return false
+	}
+	state.customDrawMu.RLock()
+	_, skipped := state.customDrawSkipped[item]
+	state.customDrawMu.RUnlock()
+	return skipped
 }
 
 type queuedMsg struct {
@@ -210,6 +262,7 @@ type queuedMsg struct {
 	time      uint32
 	x, y      int32
 	extraInfo uint64
+	sent      *synchronousSendRequest
 }
 
 func newQueuedMsg(hctx *HandlerCtx, hwnd uint64, message uint32, wParam, lParam uint64) queuedMsg {
@@ -381,7 +434,7 @@ func (r *modalDialogRegistry) takeEnded(cpu arch.CPU, hwnd uint64) (modalDlgEntr
 		if entry.hwnd != hwnd || !entry.ended {
 			continue
 		}
-		stack = stack[:i]
+		stack = append(stack[:i], stack[i+1:]...)
 		if len(stack) == 0 {
 			delete(r.stacks, cpu)
 		} else {
@@ -559,6 +612,55 @@ type PrintDialogState struct {
 	CopiesY            int32
 }
 
+type dialogSurfaceMutex struct {
+	gate    sync.Mutex
+	stateMu sync.Mutex
+	owner   arch.CPU
+	depth   int
+}
+
+func (m *dialogSurfaceMutex) Lock(cpu arch.CPU) {
+	m.stateMu.Lock()
+	if cpu != nil && m.owner == cpu {
+		m.depth++
+		m.stateMu.Unlock()
+		return
+	}
+	m.stateMu.Unlock()
+
+	m.gate.Lock()
+	m.stateMu.Lock()
+	m.owner = cpu
+	m.depth = 1
+	m.stateMu.Unlock()
+}
+
+func (m *dialogSurfaceMutex) Unlock(cpu arch.CPU) {
+	m.stateMu.Lock()
+	if m.depth == 0 || m.owner != cpu {
+		m.stateMu.Unlock()
+		panic("dialog surface mutex unlocked by non-owner")
+	}
+	m.depth--
+	release := m.depth == 0
+	if release {
+		m.owner = nil
+	}
+	m.stateMu.Unlock()
+	if release {
+		m.gate.Unlock()
+	}
+}
+
+func (m *dialogSurfaceMutex) Transfer(from, to arch.CPU) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	if m.depth == 0 || m.owner != from {
+		panic("dialog surface mutex transferred by non-owner")
+	}
+	m.owner = to
+}
+
 // ─── HandlerCtx bridges closure-captured state to extracted DLL files ───────
 
 type HandlerCtx struct {
@@ -577,7 +679,9 @@ type HandlerCtx struct {
 	CurrentCPUMu          sync.RWMutex
 	WindowCPUMu           sync.RWMutex
 	WindowCPU             map[uint64]arch.CPU
-	DialogRendering       atomic.Bool
+	DialogRenderMu        sync.Mutex
+	DialogRenders         map[uint64]*dialogRenderState
+	DialogSurfaceMu       dialogSurfaceMutex
 	D3D9Device            *d3d9.Device
 	D3D9Renderer          *d3d9.Renderer
 	D3D11Device           *d3d11.Device
@@ -627,7 +731,9 @@ type HandlerCtx struct {
 	BitmapHandles        map[uint64]*bitmapHandleData
 	HwndChildren         map[uint64]*controlState
 	HwndOrder            []uint64
+	HwndZOrderMu         sync.RWMutex
 	HwndZOrder           []uint64
+	HwndTopmost          map[uint64]bool
 	HwndTitle            map[uint64]string
 	HwndExplicitlyHidden map[uint64]bool
 	HwndWndProc          map[uint64]uint64
@@ -643,10 +749,14 @@ type HandlerCtx struct {
 	RebarBandCounts      map[uint64]int
 	HostSavePaths        map[string]string
 	HostSaveMu           sync.Mutex
+	HostSaveIOMu         sync.Mutex
 	SynthMu              sync.RWMutex
 	NextDelayMu          sync.Mutex
 	ToolbarFallbackMu    sync.RWMutex
 	ToolbarFallbackIcons map[toolbarFallbackKey]*toolbarFallbackCache
+	IconHandlesMu        sync.RWMutex
+	IconHandles          map[uint64]*iconHandleData
+	NextIconHandle       uint64
 
 	// Mutable scalars (accessed directly as hctx.Field)
 	MainHWND          uint64
@@ -710,6 +820,13 @@ type HandlerCtx struct {
 	FinishModalDialog   func(ctx *ntapi.TrapContext, hwnd uint64) bool
 	SyncStacks          sync.Map
 	GuestCallTrampoline *ntapi.DllMainTrampoline
+	SubclassRuntime     *subclassDispatchRuntime
+	SubclassWndProc     uint64
+	SubclassReturn      uint64
+	SubclassContinue    uint64
+	HasWindowSubclass   func(uint64) bool
+	ClearSubclasses     func(uint64)
+	CancelSentMessages  func(arch.CPU)
 	LastPostedMainW     int32
 	LastPostedMainH     int32
 
@@ -783,7 +900,7 @@ type HandlerCtx struct {
 	DrawDialogOverlay    func()
 	CommitIfDone         func()
 	RequestWindowRepaint func(uint64)
-	DestroyOwnedDialog   func(uint64)
+	DestroyOwnedDialog   func(uint64, arch.CPU)
 	PumpWaylandOnce      func() bool
 
 	CrtFiles  map[uint64]*os.File // guest FILE* → Go *os.File
@@ -796,6 +913,58 @@ type HandlerCtx struct {
 	VfsModuleResMu  sync.RWMutex
 	PrintJobs       map[uint64]*printJobState
 	PrintJobsMu     sync.Mutex
+}
+
+func (h *HandlerCtx) addZOrder(hwnd uint64, topmost bool) {
+	h.HwndZOrderMu.Lock()
+	defer h.HwndZOrderMu.Unlock()
+	if h.HwndTopmost == nil {
+		h.HwndTopmost = make(map[uint64]bool)
+	}
+	for _, candidate := range h.HwndZOrder {
+		if candidate == hwnd {
+			return
+		}
+	}
+	h.HwndTopmost[hwnd] = topmost
+	index := 0
+	if !topmost {
+		for index < len(h.HwndZOrder) && h.HwndTopmost[h.HwndZOrder[index]] {
+			index++
+		}
+	}
+	h.HwndZOrder = insertZOrderAt(h.HwndZOrder, index, hwnd)
+}
+
+func (h *HandlerCtx) removeZOrder(hwnd uint64) {
+	h.HwndZOrderMu.Lock()
+	defer h.HwndZOrderMu.Unlock()
+	for i, candidate := range h.HwndZOrder {
+		if candidate == hwnd {
+			h.HwndZOrder = append(h.HwndZOrder[:i], h.HwndZOrder[i+1:]...)
+			break
+		}
+	}
+	delete(h.HwndTopmost, hwnd)
+}
+
+func (h *HandlerCtx) reorderZOrder(hwnd, insertAfter uint64) bool {
+	h.HwndZOrderMu.Lock()
+	defer h.HwndZOrderMu.Unlock()
+	var ok bool
+	h.HwndZOrder, ok = reorderWindowGrouped(h.HwndZOrder, hwnd, insertAfter, h.HwndTopmost)
+	return ok
+}
+
+func (h *HandlerCtx) placeNewChildAtBottom(hwnd uint64) bool {
+	const hwndBottom = uint64(1)
+	return h.reorderZOrder(hwnd, hwndBottom)
+}
+
+func (h *HandlerCtx) snapshotZOrder() []uint64 {
+	h.HwndZOrderMu.RLock()
+	defer h.HwndZOrderMu.RUnlock()
+	return append([]uint64(nil), h.HwndZOrder...)
 }
 
 func (h *HandlerCtx) syncStack(ctx *ntapi.TrapContext) *[]syncDispatchFrame {
@@ -932,6 +1101,58 @@ func (h *HandlerCtx) GetCurrentCPU() arch.CPU {
 	cpu := h.CurrentCPU
 	h.CurrentCPUMu.RUnlock()
 	return cpu
+}
+
+func (h *HandlerCtx) storeIcon(handle uint64, icon *iconHandleData) {
+	if handle == 0 || icon == nil {
+		return
+	}
+	h.IconHandlesMu.Lock()
+	if h.IconHandles == nil {
+		h.IconHandles = make(map[uint64]*iconHandleData)
+	}
+	copyIcon := *icon
+	copyIcon.pixels = append([]byte(nil), icon.pixels...)
+	h.IconHandles[handle] = &copyIcon
+	h.IconHandlesMu.Unlock()
+}
+
+func (h *HandlerCtx) allocIcon(icon *iconHandleData) uint64 {
+	h.IconHandlesMu.Lock()
+	if h.NextIconHandle < 0x40000000 {
+		h.NextIconHandle = 0x40000000
+	}
+	h.NextIconHandle++
+	handle := h.NextIconHandle
+	if icon != nil {
+		if h.IconHandles == nil {
+			h.IconHandles = make(map[uint64]*iconHandleData)
+		}
+		copyIcon := *icon
+		copyIcon.pixels = append([]byte(nil), icon.pixels...)
+		h.IconHandles[handle] = &copyIcon
+	}
+	h.IconHandlesMu.Unlock()
+	return handle
+}
+
+func (h *HandlerCtx) iconPixels(handle uint64, width, height int32) []byte {
+	h.IconHandlesMu.RLock()
+	icon := h.IconHandles[handle]
+	var copyIcon *iconHandleData
+	if icon != nil {
+		value := *icon
+		value.pixels = append([]byte(nil), icon.pixels...)
+		copyIcon = &value
+	}
+	h.IconHandlesMu.RUnlock()
+	return scaleIconPixels(copyIcon, width, height)
+}
+
+func (h *HandlerCtx) deleteIcon(handle uint64) {
+	h.IconHandlesMu.Lock()
+	delete(h.IconHandles, handle)
+	h.IconHandlesMu.Unlock()
 }
 
 const menuBarHeight int32 = 20

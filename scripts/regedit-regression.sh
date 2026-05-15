@@ -2,8 +2,9 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "$ROOT/scripts/raven-cache.sh" || exit 2
 TARGET=${REGEDIT_EXE:-"$HOME/Downloads/regedit.exe"}
-RUNTIME_FILE=/tmp/raven-labwc-runtime.path
+RUNTIME_FILE="$RAVEN_LABWC_RUNTIME_FILE"
 RAVEN=${RAVEN:-}
 TIMEOUT_SECONDS=${REGEDIT_TIMEOUT:-18}
 
@@ -16,11 +17,16 @@ if [[ ! -f "$RUNTIME_FILE" ]]; then
 	exit 1
 fi
 
-runtime=$(<"$RUNTIME_FILE")
-trusted_runtime=$(</tmp/raven-labwc-runtime.path)
-user_runtime="/run/user/$(id -u)/raven-labwc-runtime"
-if [[ -z "$runtime" || "$runtime" != "$trusted_runtime" || ( "$runtime" != /tmp/raven-labwc-runtime && "$runtime" != /tmp/raven-labwc-runtime.* && "$runtime" != "$user_runtime" ) || ! -S "$runtime/wayland-0" ]]; then
+runtime_raw=$(<"$RUNTIME_FILE")
+runtime=$(realpath -m -- "$runtime_raw")
+if [[ -z "$runtime_raw" || "$runtime" != "$RAVEN_RUNTIME_ROOT"/labwc-* || ! -S "$runtime/wayland-0" ]]; then
 	echo "isolated labwc socket is unavailable" >&2
+	exit 1
+fi
+user_runtime="/run/user/$(id -u)"
+if [[ -S "$user_runtime/wayland-0" &&
+	"$runtime/wayland-0" -ef "$user_runtime/wayland-0" ]]; then
+	echo "isolated socket resolves to the user compositor" >&2
 	exit 1
 fi
 labwc_pid=""
@@ -36,7 +42,7 @@ if [[ -z "$labwc_pid" ]]; then
 	exit 1
 fi
 if [[ -z "$RAVEN" ]]; then
-	RAVEN=$(mktemp /tmp/raven-regedit.XXXXXX)
+	RAVEN=$(mktemp "$RAVEN_TMPDIR/regedit.XXXXXX")
 	(
 		cd "$ROOT"
 		go build -tags guest_windows -o "$RAVEN" ./cmd/govm
@@ -44,7 +50,20 @@ if [[ -z "$RAVEN" ]]; then
 	trap 'rm -f "$RAVEN"' EXIT
 fi
 
-out=${REGEDIT_ARTIFACTS:-$(mktemp -d /tmp/raven-regedit-regression.XXXXXX)}
+if [[ -z "${REGEDIT_ARTIFACTS:-}" ]]; then
+	out=$(mktemp -d "$RAVEN_ARTIFACT_ROOT/regedit.XXXXXX") || exit 2
+	printf 'raven-regedit-regression\n' >"$out/.raven-regedit-owned"
+	raven_prune_owned_runs "$RAVEN_ARTIFACT_ROOT" ".raven-regedit-owned" 5 || exit 2
+else
+	out=$(realpath -m -- "$REGEDIT_ARTIFACTS")
+	case "$out/" in
+	"$RAVEN_HOME"/*) ;;
+	*)
+		echo "REGEDIT_ARTIFACTS must stay under HOME" >&2
+		exit 2
+		;;
+	esac
+fi
 mkdir -p "$out"
 log="$out/regedit.log"
 screen="$out/regedit.png"

@@ -4,11 +4,70 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 	"github.com/mirkobrombin/Raven/pkg/x64"
 )
+
+func TestDialogSurfaceMutexReentersForOwnerAndExcludesOtherCPU(t *testing.T) {
+	var mutex dialogSurfaceMutex
+	mem := mmu.New()
+	owner := x64.New(mem)
+	other := x64.New(mem)
+
+	mutex.Lock(owner)
+	mutex.Lock(owner)
+	mutex.Transfer(owner, other)
+	mutex.Lock(other)
+	mutex.Unlock(other)
+	mutex.Transfer(other, owner)
+	acquired := make(chan struct{})
+	released := make(chan struct{})
+	go func() {
+		mutex.Lock(other)
+		close(acquired)
+		mutex.Unlock(other)
+		close(released)
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second CPU acquired a recursively held dialog surface")
+	case <-time.After(20 * time.Millisecond):
+	}
+	mutex.Unlock(owner)
+	select {
+	case <-acquired:
+		t.Fatal("second CPU acquired before the outer lock was released")
+	case <-time.After(20 * time.Millisecond):
+	}
+	mutex.Unlock(owner)
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("second CPU did not acquire the released dialog surface")
+	}
+}
+
+func TestDialogSurfaceMutexTransferMovesRecursiveDepth(t *testing.T) {
+	var mutex dialogSurfaceMutex
+	mem := mmu.New()
+	owner := x64.New(mem)
+	callback := x64.New(mem)
+
+	mutex.Lock(owner)
+	mutex.Lock(owner)
+	mutex.Lock(owner)
+	mutex.Transfer(owner, callback)
+	mutex.Unlock(callback)
+	mutex.Unlock(callback)
+	mutex.Unlock(callback)
+
+	mutex.Lock(owner)
+	mutex.Unlock(owner)
+}
 
 func TestSyncStackIsScopedToGuestCPU(t *testing.T) {
 	hctx := &HandlerCtx{}

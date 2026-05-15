@@ -2,13 +2,14 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "$ROOT/scripts/raven-cache.sh" || exit 2
 SOURCE_WIDE="$ROOT/testdata/dll_fixture/end_dialog_fixture.c"
 SOURCE_ANSI="$ROOT/testdata/dll_fixture/end_dialog_ansi_fixture.c"
 CC32=${CC32:-i686-w64-mingw32-gcc}
 CC64=${CC64:-x86_64-w64-mingw32-gcc}
 RAVEN=${RAVEN:-}
 TIMEOUT_SECONDS=${END_DIALOG_TIMEOUT:-15}
-TMP=$(mktemp -d /tmp/raven-end-dialog.XXXXXX)
+TMP=$(mktemp -d "$RAVEN_TMPDIR/end-dialog.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
 for command in "$CC32" "$CC64" timeout; do

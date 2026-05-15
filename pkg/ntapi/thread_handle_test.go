@@ -23,3 +23,16 @@ func TestThreadExitCodeLifecycle(t *testing.T) {
 		t.Fatal("invalid handle was accepted")
 	}
 }
+
+func TestThreadByTIDFindsExistingHandle(t *testing.T) {
+	handles := NewHandleTable()
+	thread := &ThreadHandle{TID: 42, Done: make(chan struct{})}
+	handles.Alloc(thread)
+
+	if got := handles.ThreadByTID(42); got != thread {
+		t.Fatalf("ThreadByTID(42) = %p, want %p", got, thread)
+	}
+	if got := handles.ThreadByTID(43); got != nil {
+		t.Fatalf("ThreadByTID(43) = %p, want nil", got)
+	}
+}

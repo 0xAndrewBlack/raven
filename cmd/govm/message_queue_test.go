@@ -110,6 +110,190 @@ func TestMessageQueueConcurrentProducersAndConsumer(t *testing.T) {
 	}
 }
 
+func TestSynchronousSendWaitsForOwnerCompletion(t *testing.T) {
+	owner := x64.New(mmu.New())
+	var queue messageQueue
+	request := newSynchronousSendRequest(0x50001, 0x8123, 0x4567, 0x89ab)
+	if !queue.enqueueSynchronous(owner, request) {
+		t.Fatal("synchronous send was not queued")
+	}
+
+	result := make(chan uint64, 1)
+	go func() {
+		result <- request.wait()
+	}()
+	select {
+	case value := <-result:
+		t.Fatalf("sender returned before owner dispatch with %#x", value)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	delivered, ok := queue.takeSynchronous(owner)
+	if !ok || delivered != request {
+		t.Fatalf("owner received request %p, %v; want %p", delivered, ok, request)
+	}
+	if delivered.hwnd != 0x50001 || delivered.message != 0x8123 ||
+		delivered.wParam != 0x4567 || delivered.lParam != 0x89ab {
+		t.Fatalf("owner received corrupted request: %+v", delivered)
+	}
+	delivered.complete(0x13579bdf)
+
+	select {
+	case value := <-result:
+		if value != 0x13579bdf {
+			t.Fatalf("sender result = %#x, want 0x13579bdf", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sender did not resume after owner completion")
+	}
+}
+
+func TestSynchronousSendIsInternalAndOwnerScoped(t *testing.T) {
+	owner := x64.New(mmu.New())
+	other := x64.New(mmu.New())
+	var queue messageQueue
+	request := newSynchronousSendRequest(0x50001, 0x8123, 1, 2)
+	queue.enqueueSynchronous(owner, request)
+
+	if queue.count(owner) != 0 || queue.contains(nil) {
+		t.Fatal("synchronous request was exposed as a posted message")
+	}
+	if _, ok := queue.takeSynchronous(other); ok {
+		t.Fatal("non-owner CPU received synchronous request")
+	}
+	if delivered, ok := queue.takeSynchronous(owner); !ok || delivered != request {
+		t.Fatalf("owner received request %p, %v; want %p", delivered, ok, request)
+	}
+}
+
+func TestMessageQueueWakeMasksAndInputAvailable(t *testing.T) {
+	cpu := x64.New(mmu.New())
+	var queue messageQueue
+	queue.enqueue(cpu, queuedMsg{message: 0x0100})
+
+	if !queue.hasWakeMask(cpu, qsKey, false) {
+		t.Fatal("new key input did not set QS_KEY")
+	}
+	if queue.hasWakeMask(cpu, qsTimer, true) {
+		t.Fatal("key input matched QS_TIMER")
+	}
+	queue.markWakeMaskSeen(cpu, qsKey)
+	if queue.hasWakeMask(cpu, qsKey, false) {
+		t.Fatal("seen key input remained new")
+	}
+	if !queue.hasWakeMask(cpu, qsKey, true) {
+		t.Fatal("MWMO_INPUTAVAILABLE did not expose queued key input")
+	}
+	if _, ok := queue.take(cpu, nil); !ok {
+		t.Fatal("queued key input was not delivered")
+	}
+	if queue.hasWakeMask(cpu, qsKey, true) {
+		t.Fatal("removed key input remained available")
+	}
+}
+
+func TestMessageQueueFilteredWaitIgnoresExistingOtherCategory(t *testing.T) {
+	cpu := x64.New(mmu.New())
+	var queue messageQueue
+	queue.enqueue(cpu, queuedMsg{message: 0x0100})
+
+	started := time.Now()
+	if queue.waitWakeMask(cpu, qsTimer, false, 20*time.Millisecond) {
+		t.Fatal("QS_TIMER wait woke for queued key input")
+	}
+	if elapsed := time.Since(started); elapsed < 10*time.Millisecond {
+		t.Fatalf("filtered wait returned too early after %s", elapsed)
+	}
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		queue.enqueue(cpu, queuedMsg{message: 0x0113})
+	}()
+	if !queue.waitWakeMask(cpu, qsTimer, false, time.Second) {
+		t.Fatal("QS_TIMER wait did not wake for timer input")
+	}
+}
+
+func TestMessageQueueSynchronousWakeMaskClearsOnTake(t *testing.T) {
+	cpu := x64.New(mmu.New())
+	var queue messageQueue
+	request := newSynchronousSendRequest(0x50001, 0x8123, 0, 0)
+	queue.enqueueSynchronous(cpu, request)
+
+	if !queue.hasWakeMask(cpu, qsSendMessage, false) {
+		t.Fatal("synchronous request did not set QS_SENDMESSAGE")
+	}
+	if delivered, ok := queue.takeSynchronous(cpu); !ok || delivered != request {
+		t.Fatalf("synchronous request = %p, %v; want %p", delivered, ok, request)
+	}
+	if queue.hasWakeMask(cpu, qsSendMessage, true) {
+		t.Fatal("delivered synchronous request remained available")
+	}
+}
+
+func TestSynchronousSendUnblocksWhenOwnerExits(t *testing.T) {
+	owner := x64.New(mmu.New())
+	var queue messageQueue
+	request := newSynchronousSendRequest(0x50001, 0x8123, 0, 0)
+	queue.enqueueSynchronous(owner, request)
+
+	result := make(chan uint64, 1)
+	go func() {
+		result <- request.wait()
+	}()
+	queue.removeCPU(owner)
+
+	select {
+	case value := <-result:
+		if value != 0 {
+			t.Fatalf("cancelled send result = %#x, want 0", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("owner exit left sender blocked")
+	}
+}
+
+func TestSynchronousSendIsRemovedWhenSenderExits(t *testing.T) {
+	owner := x64.New(mmu.New())
+	sender := x64.New(mmu.New())
+	var queue messageQueue
+	request := newSynchronousSendRequest(0x50001, 0x8123, 0, 0)
+	request.sender = sender
+	queue.enqueueSynchronous(owner, request)
+
+	queue.cancelSynchronousSender(sender)
+
+	if delivered, ok := queue.takeSynchronous(owner); ok || delivered != nil {
+		t.Fatalf("owner received cancelled request %p, %v", delivered, ok)
+	}
+	if result := request.wait(); result != 0 {
+		t.Fatalf("cancelled send result = %#x, want 0", result)
+	}
+}
+
+func TestSynchronousSendReplyCompletesOnlyOnce(t *testing.T) {
+	request := newSynchronousSendRequest(0x50001, 0x8123, 0, 0)
+	request.reply(0x1357)
+	request.complete(0x2468)
+	if !request.replied.Load() {
+		t.Fatal("ReplyMessage state was not recorded")
+	}
+	if result := request.wait(); result != 0x1357 {
+		t.Fatalf("reply result = %#x, want 0x1357", result)
+	}
+}
+
+func TestSynchronousSendTimedWait(t *testing.T) {
+	request := newSynchronousSendRequest(0x50001, 0x8123, 0, 0)
+	if result, ready := request.waitTimeout(0); ready || result != 0 {
+		t.Fatalf("pending wait = %#x, %v; want zero, false", result, ready)
+	}
+	request.complete(0x2468)
+	if result, ready := request.waitTimeout(time.Second); !ready || result != 0x2468 {
+		t.Fatalf("completed wait = %#x, %v; want 0x2468, true", result, ready)
+	}
+}
+
 func TestMessageQueueWakeIsScopedToGuestCPU(t *testing.T) {
 	first := x64.New(mmu.New())
 	second := x64.New(mmu.New())

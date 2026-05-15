@@ -30,7 +30,7 @@ func main() {
 		"  <delay>:screenshot:<path>    - save PNG screenshot\n"+
 		"  <delay>:click:<x>,<y>        - inject left click\n"+
 		"  <delay>:key:<linux_keycode>  - inject key press+release\n"+
-		"  Example: '2:screenshot:/tmp/s1.png;3:click:100,50;4:screenshot:/tmp/s2.png'")
+		"  Example: '2:screenshot:s1.png;3:click:100,50;4:screenshot:s2.png'")
 
 	flag.Usage = func() {
 		ravelog.Banner("v0.1.0")

@@ -98,3 +98,165 @@ func TestGlyphForUsesSystemFallback(t *testing.T) {
 		t.Fatalf("fallback compositing produced %d painted pixels", ink)
 	}
 }
+
+func TestTextOutAdvancesPositionsGlyphs(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		font *Font
+	}{
+		{name: "bitmap", font: bitmapTestFont()},
+		{name: "TrueType", font: DefaultGUIFont()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.name == "TrueType" && test.font.FaceID < 0 {
+				t.Skip("TrueType font is unavailable")
+			}
+			surface := NewSurface(40, 40)
+			dc := NewScreenDC(surface)
+			dc.Font = test.font
+			dc.TextColor = 0xFFFFFF
+			dc.BkMode = 1
+
+			dc.TextOutAdvances(0, 0, "||", false, []int32{14, 8}, nil)
+
+			first := paintedBounds(surface, 0, 0, 8, 20)
+			second := paintedBounds(surface, 8, 0, 30, 20)
+			if first[0] < 0 || second[0] != first[0]+14 {
+				t.Fatalf("glyph origins = %d and %d", first[0], second[0])
+			}
+		})
+	}
+}
+
+func TestTextOutAdvancesAlignsWithPartialAdvanceArray(t *testing.T) {
+	actual := NewSurface(40, 20)
+	actualDC := NewScreenDC(actual)
+	actualDC.Font = bitmapTestFont()
+	actualDC.TextColor = 0xFFFFFF
+	actualDC.BkMode = 1
+	actualDC.TextAlign = 2
+	actualDC.TextOutAdvances(30, 0, "||", false, []int32{12}, nil)
+
+	expected := NewSurface(40, 20)
+	expectedDC := NewScreenDC(expected)
+	expectedDC.Font = bitmapTestFont()
+	expectedDC.TextColor = 0xFFFFFF
+	expectedDC.BkMode = 1
+	expectedDC.TextOutAdvances(10, 0, "||", false, []int32{12}, nil)
+
+	if !bytes.Equal(actual.Pix, expected.Pix) {
+		t.Fatal("partial advance array produced inconsistent right alignment")
+	}
+}
+
+func TestTextOutAdvancesAppliesVerticalOffsets(t *testing.T) {
+	surface := NewSurface(40, 40)
+	dc := NewScreenDC(surface)
+	dc.Font = bitmapTestFont()
+	dc.TextColor = 0xFFFFFF
+	dc.BkMode = 1
+
+	dc.TextOutAdvances(0, 0, "||", false, []int32{12, 8}, []int32{5, 0})
+
+	first := paintedBounds(surface, 0, 0, 8, 16)
+	second := paintedBounds(surface, 8, 0, 30, 30)
+	if first[1] < 0 || second[1] != first[1]+5 {
+		t.Fatalf("glyph origins = %d and %d", first[1], second[1])
+	}
+}
+
+func TestTextOutAdvancesKeepsBitmapFallbackOneToOne(t *testing.T) {
+	for _, advances := range [][]int32{nil, {14, 8}} {
+		surface := NewSurface(50, 20)
+		dc := NewScreenDC(surface)
+		dc.Font = bitmapTestFont()
+		dc.TextColor = 0xFFFFFF
+		dc.BkMode = 1
+
+		dc.TextOutAdvances(0, 0, "\u00C3\u00A9", false, advances, nil)
+
+		start := int32(16)
+		if advances != nil {
+			start = 22
+		}
+		if bounds := paintedBounds(surface, start, 0, 50, 20); bounds[0] >= 0 {
+			t.Fatalf("advances %v produced an extra glyph at x=%d", advances, bounds[0])
+		}
+	}
+}
+
+func TestTextOutANSIPreservesBitmapCodeUnits(t *testing.T) {
+	surface := NewSurface(40, 20)
+	dc := NewScreenDC(surface)
+	dc.Font = bitmapTestFont()
+	dc.TextColor = 0xFFFFFF
+	dc.BkMode = 1
+
+	dc.TextOutANSI(0, 0, []byte{0xC3, 0xA9}, false)
+
+	if second := paintedBounds(surface, 8, 0, 16, 20); second[0] < 0 {
+		t.Fatal("second ANSI byte did not produce a bitmap cell")
+	}
+	if extra := paintedBounds(surface, 16, 0, 40, 20); extra[0] >= 0 {
+		t.Fatalf("ANSI bytes produced an extra glyph at x=%d", extra[0])
+	}
+}
+
+func TestTextOutANSIDecodesWindows1252ForTrueType(t *testing.T) {
+	font := DefaultGUIFont()
+	if font.FaceID < 0 {
+		t.Skip("TrueType font is unavailable")
+	}
+	actual := NewSurface(40, 30)
+	actualDC := NewScreenDC(actual)
+	actualDC.Font = font
+	actualDC.TextColor = 0xFFFFFF
+	actualDC.BkMode = 1
+	actualDC.TextOutANSI(0, 0, []byte{0x80}, false)
+
+	expected := NewSurface(40, 30)
+	expectedDC := NewScreenDC(expected)
+	expectedDC.Font = font
+	expectedDC.TextColor = 0xFFFFFF
+	expectedDC.BkMode = 1
+	expectedDC.TextOut(0, 0, "\u20ac", false)
+
+	if !bytes.Equal(actual.Pix, expected.Pix) {
+		t.Fatal("ANSI 0x80 did not render as the Windows-1252 euro glyph")
+	}
+}
+
+func bitmapTestFont() *Font {
+	return &Font{
+		FaceID:       -1,
+		CellHeight:   fontCharH,
+		Ascent:       13,
+		Descent:      3,
+		AveCharWidth: fontCharW,
+		MaxCharWidth: fontCharW,
+	}
+}
+
+func paintedBounds(surface *Surface, x0, y0, x1, y1 int32) [4]int32 {
+	bounds := [4]int32{-1, -1, -1, -1}
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			if surface.GetPixel(x, y) == 0 {
+				continue
+			}
+			if bounds[0] < 0 || x < bounds[0] {
+				bounds[0] = x
+			}
+			if bounds[1] < 0 || y < bounds[1] {
+				bounds[1] = y
+			}
+			if x > bounds[2] {
+				bounds[2] = x
+			}
+			if y > bounds[3] {
+				bounds[3] = y
+			}
+		}
+	}
+	return bounds
+}

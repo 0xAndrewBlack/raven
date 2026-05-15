@@ -63,13 +63,14 @@ const (
 
 // CPU implements an x86_64 (AMD64) long-mode emulator.
 type CPU struct {
-	Regs    [16]uint64
-	RIP     uint64
-	Rflags  uint64
-	mem     *mmu.MMU
-	syscall arch.SyscallHandler
-	vmcall  arch.SyscallHandler // handler for vmcall (0x0F 0x01 0xC1) - NT trap
-	running bool
+	Regs     [16]uint64
+	RIP      uint64
+	Rflags   uint64
+	mem      *mmu.MMU
+	syscall  arch.SyscallHandler
+	vmcall   arch.SyscallHandler // handler for vmcall (0x0F 0x01 0xC1) - NT trap
+	running  bool
+	abortErr error
 	// ExpectedReturnPC is the unmapped return target installed by the Win32 thread manager.
 	ExpectedReturnPC uint64
 	ExpectedReturnSP uint64
@@ -155,8 +156,17 @@ func New(mem *mmu.MMU) *CPU {
 	}
 }
 
-func (c *CPU) Stop()              { c.running = false }
-func (c *CPU) Resume()            { c.running = true }
+func (c *CPU) Stop() { c.running = false }
+func (c *CPU) Resume() {
+	if c.abortErr == nil {
+		c.running = true
+	}
+}
+func (c *CPU) Abort(err error) {
+	c.abortErr = err
+	c.running = false
+}
+func (c *CPU) AbortError() error  { return c.abortErr }
 func (c *CPU) GetPC() uint64      { return c.RIP }
 func (c *CPU) SetPC(v uint64)     { c.RIP = v }
 func (c *CPU) GetSP() uint64      { return c.Regs[RSP] }
@@ -246,9 +256,9 @@ func (c *CPU) SaveContext(mem *mmu.MMU, ctxAddr uint64) error {
 	if ctxAddr == 0 {
 		return fmt.Errorf("nil CONTEXT address")
 	}
-	// CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER
-	mem.Write32(ctxAddr+0x00, 0x10000B)
-	mem.Write64(ctxAddr+0x30, c.Rflags)
+	// CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT
+	mem.Write32(ctxAddr+0x30, 0x10000B)
+	mem.Write32(ctxAddr+0x44, uint32(c.Rflags))
 	mem.Write64(ctxAddr+0x78, c.Regs[RAX])
 	mem.Write64(ctxAddr+0x80, c.Regs[RCX])
 	mem.Write64(ctxAddr+0x88, c.Regs[RDX])
@@ -266,6 +276,11 @@ func (c *CPU) SaveContext(mem *mmu.MMU, ctxAddr uint64) error {
 	mem.Write64(ctxAddr+0xE8, c.Regs[R14])
 	mem.Write64(ctxAddr+0xF0, c.Regs[R15])
 	mem.Write64(ctxAddr+0xF8, c.RIP)
+	for index, value := range c.XMM {
+		offset := uint64(0x1A0 + index*16)
+		mem.Write64(ctxAddr+offset, value[0])
+		mem.Write64(ctxAddr+offset+8, value[1])
+	}
 	return nil
 }
 
@@ -274,12 +289,14 @@ func (c *CPU) RestoreContext(mem *mmu.MMU, ctxAddr uint64) error {
 	if ctxAddr == 0 {
 		return fmt.Errorf("nil CONTEXT address")
 	}
+	var err error
+	eflags, err := mem.Read32(ctxAddr + 0x44)
+	if err != nil {
+		return err
+	}
+	c.Rflags = uint64(eflags)
 	read64 := func(off uint64) (uint64, error) {
 		return mem.Read64(ctxAddr + off)
-	}
-	var err error
-	if c.Rflags, err = read64(0x30); err != nil {
-		return err
 	}
 	if c.Regs[RAX], err = read64(0x78); err != nil {
 		return err
@@ -331,6 +348,15 @@ func (c *CPU) RestoreContext(mem *mmu.MMU, ctxAddr uint64) error {
 	}
 	if c.RIP, err = read64(0xF8); err != nil {
 		return err
+	}
+	for index := range c.XMM {
+		offset := uint64(0x1A0 + index*16)
+		if c.XMM[index][0], err = read64(offset); err != nil {
+			return err
+		}
+		if c.XMM[index][1], err = read64(offset + 8); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -395,6 +421,9 @@ func (c *CPU) CloneForThread() arch.CPU {
 
 // Run executes the fetch-decode-execute loop.
 func (c *CPU) Run() error {
+	if c.abortErr != nil {
+		return c.abortErr
+	}
 	c.running = true
 	var recoverCount int
 	var lastRecoverRIP uint64
@@ -735,7 +764,7 @@ func (c *CPU) Run() error {
 		}
 		c.instret++
 	}
-	return nil
+	return c.abortErr
 }
 
 // =========================================================================

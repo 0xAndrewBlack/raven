@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/hostenv"
 	"github.com/mirkobrombin/Raven/pkg/loader"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -81,6 +82,416 @@ type childThreadHandle struct{}
 
 func (*childThreadHandle) HandleType() string { return "Thread" }
 
+func terminateRtlUnwind(err error) {
+	fmt.Fprintf(os.Stderr, "govm: RtlUnwindEx terminated with %v\n", err)
+	os.Exit(3)
+	panic("unreachable")
+}
+
+func normalizeRtlUnwindCallerContext(mem *mmu.MMU, contextRecord uint64) error {
+	context, err := ntapi.ReadAMD64Context(mem, contextRecord)
+	if err != nil {
+		return err
+	}
+	returnAddress, err := mem.Read64(context.Regs[4])
+	if err != nil {
+		return fmt.Errorf("read RtlUnwindEx return address: %w", err)
+	}
+	if returnAddress == 0 {
+		return fmt.Errorf("RtlUnwindEx has a null return address")
+	}
+	context.Rip = returnAddress
+	context.Regs[4] += 8
+	return ntapi.WriteAMD64Context(mem, contextRecord, context)
+}
+
+func prepareRtlUnwindContext(
+	mem *mmu.MMU,
+	contextMarshaler ntapi.ContextMarshaler,
+	contextRecord uint64,
+) (uint64, error) {
+	if contextRecord != 0 {
+		if _, err := ntapi.ReadAMD64Context(mem, contextRecord); err != nil {
+			return 0, fmt.Errorf("read supplied unwind context: %w", err)
+		}
+		return contextRecord, nil
+	}
+	contextRecord = mem.Mmap(0, 1232, mmu.PermRead|mmu.PermWrite)
+	if contextRecord == 0 {
+		return 0, fmt.Errorf("allocate unwind context")
+	}
+	if err := contextMarshaler.SaveContext(mem, contextRecord); err != nil {
+		return 0, fmt.Errorf("capture unwind context: %w", err)
+	}
+	if err := normalizeRtlUnwindCallerContext(mem, contextRecord); err != nil {
+		return 0, fmt.Errorf("normalize unwind caller context: %w", err)
+	}
+	return contextRecord, nil
+}
+
+func allocRtlConsolidateTrampoline(mem *mmu.MMU) (*ntapi.DllMainTrampoline, error) {
+	const (
+		size      = uint64(0x1000)
+		codeRVA   = uint32(0x100)
+		unwindRVA = uint32(0x200)
+		pdataRVA  = uint32(0x300)
+	)
+	base := mem.Mmap(0, size, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	if base == 0 {
+		return nil, fmt.Errorf("allocate unwind consolidation trampoline")
+	}
+	code := base + uint64(codeRVA)
+	mem.WriteBytes(code, []byte{0x49, 0x89, 0xC3, 0xB8})
+	mem.Write32(code+4, ntapi.DllMainReturnID)
+	mem.WriteBytes(code+8, []byte{0x0F, 0x01, 0xC1, 0xF4})
+
+	unwind := base + uint64(unwindRVA)
+	mem.Write8(unwind, 1)
+	mem.Write8(unwind+1, 0)
+	mem.Write8(unwind+2, 2)
+	mem.Write8(unwind+3, 0)
+	mem.Write8(unwind+4, 0)
+	mem.Write8(unwind+5, (3<<4)|2)
+	mem.Write8(unwind+6, 0)
+	mem.Write8(unwind+7, 10)
+
+	pdata := base + uint64(pdataRVA)
+	mem.Write32(pdata, codeRVA)
+	mem.Write32(pdata+4, codeRVA+12)
+	mem.Write32(pdata+8, unwindRVA)
+	ntapi.RegisterExceptionTable(base, size, &ntapi.ExceptionTable{
+		ImageBase: base,
+		Entries: []ntapi.RuntimeFunction{{
+			BeginAddress: codeRVA,
+			EndAddress:   codeRVA + 12,
+			UnwindData:   unwindRVA,
+			EntryAddr:    pdata,
+		}},
+	})
+	mem.Mprotect(base, size, mmu.PermRead|mmu.PermExecute)
+	return &ntapi.DllMainTrampoline{Addr: code}, nil
+}
+
+func rtlConsolidateCallStack(mem *mmu.MMU, stackBase, stackSize, returnAddress,
+	targetRip, targetRsp, rflags uint64) (uint64, error) {
+
+	if stackBase == 0 || stackSize < 0x58 || returnAddress == 0 {
+		return 0, fmt.Errorf("invalid unwind consolidation stack")
+	}
+	top := (stackBase + stackSize) &^ uint64(0xF)
+	entryRSP := top - 0x58
+	if entryRSP < stackBase || entryRSP&0xF != 8 {
+		return 0, fmt.Errorf("misaligned unwind consolidation stack")
+	}
+	if err := mem.Write64(entryRSP, returnAddress); err != nil {
+		return 0, err
+	}
+	if err := mem.WriteBytes(entryRSP+8, make([]byte, 32)); err != nil {
+		return 0, err
+	}
+	mem.Write64(entryRSP+0x28, targetRip)
+	mem.Write64(entryRSP+0x30, 0x33)
+	mem.Write64(entryRSP+0x38, rflags)
+	mem.Write64(entryRSP+0x40, targetRsp)
+	mem.Write64(entryRSP+0x48, 0x2B)
+	return entryRSP, nil
+}
+
+func callRtlConsolidateCallback(ctx *ntapi.TrapContext, trampoline *ntapi.DllMainTrampoline,
+	contextRecord, exceptionRecord, callback uint64) (result uint64, err error) {
+
+	if ctx == nil || ctx.CPU == nil || ctx.Mem == nil || trampoline == nil || trampoline.Addr == 0 {
+		return 0, fmt.Errorf("invalid unwind consolidation callback state")
+	}
+	contextMarshaler, ok := ctx.CPU.(ntapi.ContextMarshaler)
+	if !ok {
+		return 0, fmt.Errorf("CPU does not support unwind consolidation contexts")
+	}
+	registerReader, ok := ctx.CPU.(ntapi.RegisterReader)
+	if !ok {
+		return 0, fmt.Errorf("CPU does not support unwind consolidation register reads")
+	}
+	registerWriter, ok := ctx.CPU.(ntapi.RegisterWriter)
+	if !ok {
+		return 0, fmt.Errorf("CPU does not support unwind consolidation register writes")
+	}
+	targetContext, err := ntapi.ReadAMD64Context(ctx.Mem, contextRecord)
+	if err != nil {
+		return 0, err
+	}
+
+	const contextSize = uint64(1232)
+	savedContext := ctx.Mem.Mmap(0, contextSize, mmu.PermRead|mmu.PermWrite)
+	if savedContext == 0 {
+		return 0, fmt.Errorf("allocate unwind consolidation context")
+	}
+	defer ctx.Mem.Munmap(savedContext, contextSize)
+	if err := contextMarshaler.SaveContext(ctx.Mem, savedContext); err != nil {
+		return 0, err
+	}
+	defer func() {
+		restoreErr := contextMarshaler.RestoreContext(ctx.Mem, savedContext)
+		if err == nil && restoreErr != nil {
+			err = restoreErr
+		}
+	}()
+	if err := contextMarshaler.RestoreContext(ctx.Mem, contextRecord); err != nil {
+		return 0, err
+	}
+
+	const stackSize = uint64(64 * 1024)
+	stack := ctx.Mem.Mmap(0, stackSize, mmu.PermRead|mmu.PermWrite)
+	if stack == 0 {
+		return 0, fmt.Errorf("allocate unwind consolidation stack")
+	}
+	defer ctx.Mem.Munmap(stack, stackSize)
+	stackPointer, err := rtlConsolidateCallStack(
+		ctx.Mem,
+		stack,
+		stackSize,
+		trampoline.Addr,
+		targetContext.Rip,
+		targetContext.Regs[4],
+		targetContext.Rflags,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	registerWriter.WriteReg(1, exceptionRecord)
+	ctx.CPU.SetSP(stackPointer)
+	ctx.CPU.SetPC(callback)
+	runErr := ctx.CPU.Run()
+	ctx.CPU.Resume()
+	result = registerReader.ReadReg(11)
+	if runErr != nil {
+		return result, runErr
+	}
+	return result, nil
+}
+
+const (
+	scs32BitBinary = uint32(0)
+	scsDOSBinary   = uint32(1)
+	scsWOWBinary   = uint32(2)
+	scsPIFBinary   = uint32(3)
+	scsPOSIXBinary = uint32(4)
+	scsOS216Binary = uint32(5)
+	scs64BitBinary = uint32(6)
+
+	errorFileNotFound = uint32(2)
+	errorInvalidParam = uint32(87)
+	errorBadExeFormat = uint32(193)
+)
+
+type vfsBinaryReader struct {
+	fs *vfs.VFS
+	fd int
+}
+
+func (r vfsBinaryReader) ReadAt(dst []byte, offset int64) (int, error) {
+	return r.fs.Pread(r.fd, dst, offset)
+}
+
+func readBinaryHeaderAt(reader io.ReaderAt, offset int64, size int) ([]byte, error) {
+	if offset < 0 || size < 0 {
+		return nil, io.ErrUnexpectedEOF
+	}
+	data := make([]byte, size)
+	n, err := reader.ReadAt(data, offset)
+	if n != size {
+		if err == nil {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, err
+	}
+	return data, nil
+}
+
+func classifyWindowsBinary(reader io.ReaderAt, path string) (uint32, uint32) {
+	if strings.EqualFold(filepath.Ext(path), ".pif") {
+		header := make([]byte, 1024)
+		n, _ := reader.ReadAt(header, 0)
+		if bytes.Contains(header[:n], []byte("MICROSOFT PIFEX")) {
+			return scsPIFBinary, 0
+		}
+	}
+
+	dosHeader, err := readBinaryHeaderAt(reader, 0, 0x40)
+	if err != nil || binary.LittleEndian.Uint16(dosHeader) != 0x5A4D {
+		return 0, errorBadExeFormat
+	}
+	newHeaderOffset := int64(binary.LittleEndian.Uint32(dosHeader[0x3C:]))
+	newSignature, err := readBinaryHeaderAt(reader, newHeaderOffset, 4)
+	if err != nil {
+		return scsDOSBinary, 0
+	}
+
+	switch string(newSignature) {
+	case "PE\x00\x00":
+		header, err := readBinaryHeaderAt(reader, newHeaderOffset, 24+70)
+		if err != nil {
+			return 0, errorBadExeFormat
+		}
+		sizeOfOptionalHeader := binary.LittleEndian.Uint16(header[20:22])
+		if sizeOfOptionalHeader < 70 {
+			return 0, errorBadExeFormat
+		}
+		characteristics := binary.LittleEndian.Uint16(header[22:24])
+		if characteristics&0x2000 != 0 {
+			return 0, errorBadExeFormat
+		}
+		subsystem := binary.LittleEndian.Uint16(header[24+68 : 24+70])
+		if subsystem == 7 {
+			return scsPOSIXBinary, 0
+		}
+		switch binary.LittleEndian.Uint16(header[24:26]) {
+		case 0x10B:
+			return scs32BitBinary, 0
+		case 0x20B:
+			return scs64BitBinary, 0
+		default:
+			return 0, errorBadExeFormat
+		}
+	default:
+		if string(newSignature[:2]) == "NE" {
+			targetOS, targetErr := readBinaryHeaderAt(reader, newHeaderOffset+0x36, 1)
+			if targetErr != nil {
+				return 0, errorBadExeFormat
+			}
+			switch targetOS[0] {
+			case 1:
+				return scsOS216Binary, 0
+			case 2, 4:
+				return scsWOWBinary, 0
+			}
+		}
+		return scsDOSBinary, 0
+	}
+}
+
+func normalizeWin32ReadResult(n int, err error) (int, error) {
+	if errors.Is(err, io.EOF) {
+		return n, nil
+	}
+	return n, err
+}
+
+const (
+	fileGenericRead  = uint32(0x80000000)
+	fileGenericWrite = uint32(0x40000000)
+	fileGenericAll   = uint32(0x10000000)
+	fileReadData     = uint32(0x00000001)
+	fileWriteData    = uint32(0x00000002)
+	fileAppendData   = uint32(0x00000004)
+)
+
+func fileAccessCanRead(access uint32) bool {
+	return access&(fileGenericRead|fileGenericAll|fileReadData) != 0
+}
+
+func fileAccessCanWrite(access uint32) bool {
+	return access&(fileGenericWrite|fileGenericAll|fileWriteData|fileAppendData) != 0
+}
+
+func fileAccessCanOverwrite(access uint32) bool {
+	return access&(fileGenericWrite|fileGenericAll|fileWriteData) != 0
+}
+
+func fileHandleCanRead(fh *ntapi.FileHandle) bool {
+	return fh != nil && fileAccessCanRead(fh.Access)
+}
+
+func fileHandleCanWrite(fh *ntapi.FileHandle) bool {
+	return fh != nil && fileAccessCanWrite(fh.Access)
+}
+
+func fileHandleCanLock(fh *ntapi.FileHandle) bool {
+	return fh != nil &&
+		fh.Access&(fileGenericRead|fileGenericWrite|fileGenericAll) != 0
+}
+
+func fileAccessOpenFlags(access uint32) int {
+	flags := vfs.O_RDONLY
+	switch {
+	case fileAccessCanRead(access) && fileAccessCanWrite(access):
+		flags = vfs.O_RDWR
+	case fileAccessCanWrite(access):
+		flags = vfs.O_WRONLY
+	}
+	if !fileAccessCanOverwrite(access) && access&fileAppendData != 0 {
+		flags |= vfs.O_APPEND
+	}
+	return flags
+}
+
+func fileCurrentOffset(fs *vfs.VFS, fh *ntapi.FileHandle) uint64 {
+	offset, err := fs.Lseek(fh.FD, 0, vfs.SEEK_CUR)
+	if err != nil || offset < 0 {
+		return 0
+	}
+	return uint64(offset)
+}
+
+func fileIORangeValid(offset, length uint64) bool {
+	const maxFileOffset = uint64(1<<63 - 1)
+	return offset <= maxFileOffset && length <= maxFileOffset-offset
+}
+
+func fileWriteLockOffset(
+	fs *vfs.VFS,
+	fh *ntapi.FileHandle,
+	requested uint64,
+	useCurrent bool,
+) uint64 {
+	if !fileAccessCanOverwrite(fh.Access) && fh.Access&fileAppendData != 0 {
+		if node := fs.Stat(fh.FD); node != nil && node.Size > 0 {
+			return uint64(node.Size)
+		}
+		return 0
+	}
+	if useCurrent {
+		return fileCurrentOffset(fs, fh)
+	}
+	return requested
+}
+
+func withFileReadAccess(
+	fs *vfs.VFS,
+	locks *ntapi.FileLockManager,
+	fh *ntapi.FileHandle,
+	start, length uint64,
+	access func(),
+) bool {
+	identity, ok := fs.FileIdentity(fh.FD)
+	if !ok {
+		access()
+		return true
+	}
+	return locks.WithReadAccess(identity, fh.LockOwner(), start, length, access)
+}
+
+func withFileWriteAccess(
+	fs *vfs.VFS,
+	locks *ntapi.FileLockManager,
+	fh *ntapi.FileHandle,
+	start, length uint64,
+	access func(),
+) bool {
+	identity, ok := fs.FileIdentity(fh.FD)
+	if !ok {
+		access()
+		return true
+	}
+	return locks.WithWriteAccess(identity, fh.LockOwner(), start, length, access)
+}
+
+func resetWin32ThreadStack(mem *mmu.MMU, base, size uint64) {
+	if mem != nil && base != 0 && size != 0 {
+		mem.MapRangeZero(base, size, mmu.PermRead|mmu.PermWrite)
+	}
+}
+
 func releaseLibraryReference(refs map[uint64]uint32, module uint64) bool {
 	if module == 0 {
 		return false
@@ -108,6 +519,27 @@ func allowLazySynthExport(moduleName string) bool {
 	default:
 		return true
 	}
+}
+
+func getProcAddressOrdinal(value uint64) (uint16, bool) {
+	if value>>16 != 0 {
+		return 0, false
+	}
+	return uint16(value), true
+}
+
+func lookupGetProcAddressOrdinal(hctx *HandlerCtx, module uint64, ordinal uint16) uint64 {
+	for _, synth := range hctx.Dlls {
+		if synth.BaseAddr == module {
+			return hctx.Disp.LookupSynthExport(synth, "", ordinal)
+		}
+	}
+	for _, synth := range hctx.SynthByName {
+		if synth.BaseAddr == module {
+			return hctx.Disp.LookupSynthExport(synth, "", ordinal)
+		}
+	}
+	return 0
 }
 
 // wiseW32WinstExports maps export names to native guest addresses inside W32WINST.DLL.
@@ -310,19 +742,24 @@ func wiseExtractArchive(installerPath string, fs *vfs.VFS, destDir string) error
 		if len(dec) >= 2 && dec[0] == 'M' && dec[1] == 'Z' {
 			if strings.EqualFold(destName, "Default.bds") {
 				destName = "DXBall.exe"
-				ravelog.Logf("[wise-extract] renamed Default.bds → DXBall.exe (PE32 game engine)\n")
+				ravelog.Logf("[wise-extract] renamed Default.bds -> DXBall.exe (PE32 game engine)\n")
 				// Also write to host temp file so the PE loader can load it directly
-				tmpDir := filepath.Join(os.TempDir(), "DXBall")
-				os.MkdirAll(tmpDir, 0755)
-				tmpPath := filepath.Join(tmpDir, "DXBall.exe")
-				if werr := os.WriteFile(tmpPath, dec, 0644); werr == nil {
-					wiseGameHostPath = tmpPath
-					ravelog.Logf("[wise-extract] game PE saved to %s\n", tmpPath)
+				cacheTmp, cacheErr := hostenv.TempDir()
+				if cacheErr != nil {
+					ravelog.Logf("[wise-extract] cache directory failed: %v\n", cacheErr)
+				} else {
+					tmpDir := filepath.Join(cacheTmp, "DXBall")
+					os.MkdirAll(tmpDir, 0700)
+					tmpPath := filepath.Join(tmpDir, "DXBall.exe")
+					if werr := os.WriteFile(tmpPath, dec, 0644); werr == nil {
+						wiseGameHostPath = tmpPath
+						ravelog.Logf("[wise-extract] game PE saved to %s\n", tmpPath)
+					}
 				}
 			}
 		} else if strings.EqualFold(destName, "DXBall.exe") {
 			destName = "Default.bds"
-			ravelog.Logf("[wise-extract] renamed DXBall.exe → Default.bds (data file)\n")
+			ravelog.Logf("[wise-extract] renamed DXBall.exe -> Default.bds (data file)\n")
 		}
 
 		vfsPath := destDir + "/" + destName
@@ -331,7 +768,7 @@ func wiseExtractArchive(installerPath string, fs *vfs.VFS, destDir string) error
 			continue
 		}
 		extracted++
-		ravelog.Logf("[wise-extract] %s → %d bytes\n", destName, len(dec))
+		ravelog.Logf("[wise-extract] %s -> %d bytes\n", destName, len(dec))
 	}
 
 	ravelog.Logf("[wise-extract] extracted %d/%d files to %s\n", extracted, len(files), destDir)
@@ -408,9 +845,10 @@ func loadDLLFromVFS(fs interface {
 		}
 	}
 	ravelog.Logf("[win32] loadDLLFromVFS: %q preferredBase=0x%x\n", modName, preferredBase)
-	// Debug: dump DLL to /tmp for disassembly analysis
-	if err2 := os.WriteFile("/tmp/wise_dll.bin", data, 0644); err2 != nil {
-		ravelog.Logf("[win32] loadDLLFromVFS: dump failed: %v\n", err2)
+	if dumpPath := os.Getenv("RAVEN_DLL_DUMP"); dumpPath != "" {
+		if err := os.WriteFile(dumpPath, data, 0644); err != nil {
+			ravelog.Logf("[win32] loadDLLFromVFS: dump failed: %v\n", err)
+		}
 	}
 
 	mod, err := loader.MapPEBytes(modName, data, mem, preferredBase)
@@ -526,7 +964,6 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	doMapView := hctx.DoMapView
 	doUnmapView := hctx.DoUnmapView
 	envVars := hctx.EnvVars
-	exceptionTable := hctx.ExTable
 	globalAtomNames := hctx.GlobalAtomNames
 	globalAtomTable := hctx.GlobalAtomTable
 	handles := hctx.Handles
@@ -554,18 +991,18 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	wlDisplay := hctx.WlDisplay
 	mainModule := hctx.MainModule
 	peLoadRawResource := hctx.PeLoadRawResource
-	// HRSRC tracking: map from fake handle → {dataAddr, dataSize}
+	// HRSRC tracking: map from fake handle -> {dataAddr, dataSize}
 	type hrsrcEntry struct {
 		dataAddr uint64
 		dataSize uint32
 	}
 	hrsrcTable := map[uint64]hrsrcEntry{}
 	var hrsrcNext uint64 = 0xF0000001
-	// Fiber tracking: map from fiber address → fiber data pointer.
+	// Fiber tracking: map from fiber address -> fiber data pointer.
 	// Each ConvertThreadToFiber/CreateFiber(Ex) allocates a unique guest
 	// page so callers that compare fiber addresses see distinct values.
 	var fiberMu sync.Mutex
-	fiberMap := map[uint64]uint64{} // fiberAddr → lpParameter
+	fiberMap := map[uint64]uint64{} // fiberAddr -> lpParameter
 	var nextFiberAddr uint64
 	var loadedLibraryRefs = map[uint64]uint32{}
 	var loadedLibraryRefsMu sync.Mutex
@@ -815,9 +1252,34 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	var userGeoName string = "United States"
 	var handleContextMu sync.Mutex
 	handleContexts := map[uint64]uint64{}
-	var ioCompletionMu sync.Mutex
-	ioCompletionPorts := map[uint64]uint64{}
-	ioCompletionKeys := map[uint64]uint64{}
+	overlappedIO := newOverlappedRegistry()
+	directoryJournals := newDirectoryJournalRegistry()
+	closeKernelHandle := func(ctx *ntapi.TrapContext, h ntapi.Handle) (bool, error) {
+		obj, objectRefs, ownerRefs, ok := handles.Take(h)
+		if !ok {
+			return false, nil
+		}
+		var persistErr error
+		if file, ok := obj.(*ntapi.FileHandle); ok {
+			directoryJournals.close(h)
+			overlappedIO.cancelHandle(h)
+			ntapi.CancelNativeIOForHandle(handles, h)
+			if ownerRefs == 0 {
+				ntapi.FileLocksFor(ctx.FS).ReleaseOwner(file.LockOwner())
+			}
+			persistErr = hctx.flushHostSavePath(ctx.FS, file.Path)
+			if persistErr != nil {
+				ravelog.Logf("[win32] CloseHandle: persist %q: %v\n", file.Path, persistErr)
+			}
+			if objectRefs == 0 {
+				_ = ctx.FS.Close(file.FD)
+			}
+		}
+		if port, ok := obj.(*ntapi.IoCompletionPortHandle); ok && objectRefs == 0 {
+			port.Close()
+		}
+		return true, persistErr
+	}
 	var dosDeviceMu sync.Mutex
 	dosDeviceMap := map[string]string{"C:": `\\Device\\HarddiskVolume1`}
 	var volumeMu sync.Mutex
@@ -831,6 +1293,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	werFiles := map[string]uint32{}
 	werRuntimeModules := map[string]uint64{}
 	guestCallTrampoline := ntapi.AllocTrampoline(mem)
+	rtlConsolidateTrampoline, err := allocRtlConsolidateTrampoline(mem)
+	if err != nil {
+		panic(err)
+	}
 
 	captureKernel32Args := func(ctx *ntapi.TrapContext, argc int) []uint64 {
 		if argc < 0 {
@@ -3227,7 +3693,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		return 0
 	})
-	// Win32 protection ↔ MMU permission helpers
+	// Win32 protection <-> MMU permission helpers
 	win32ProtToMMU := func(prot uint64) uint8 {
 		switch prot & 0xFF {
 		case 0x01: // PAGE_NOACCESS
@@ -3236,7 +3702,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return mmu.PermRead
 		case 0x04: // PAGE_READWRITE
 			return mmu.PermRead | mmu.PermWrite
-		case 0x08: // PAGE_WRITECOPY → treat as RW
+		case 0x08: // PAGE_WRITECOPY -> treat as RW
 			return mmu.PermRead | mmu.PermWrite
 		case 0x10: // PAGE_EXECUTE
 			return mmu.PermExecute
@@ -3244,7 +3710,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return mmu.PermRead | mmu.PermExecute
 		case 0x40: // PAGE_EXECUTE_READWRITE
 			return mmu.PermRead | mmu.PermWrite | mmu.PermExecute
-		case 0x80: // PAGE_EXECUTE_WRITECOPY → treat as RWX
+		case 0x80: // PAGE_EXECUTE_WRITECOPY -> treat as RWX
 			return mmu.PermRead | mmu.PermWrite | mmu.PermExecute
 		default:
 			return mmu.PermRead | mmu.PermWrite | mmu.PermExecute
@@ -3487,7 +3953,8 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		hctx.SynthMu.Lock()
-		name := normalizeModuleName(readGuestUTF16(namePtr))
+		rawName := readGuestUTF16(namePtr)
+		name := normalizeModuleName(rawName)
 		// Redirect API set DLLs to their real implementation
 		resolved := resolveApiSetDLL(name)
 		if resolved != name {
@@ -3506,7 +3973,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			return 0
 		}
 		hctx.NextDelayMu.Lock()
-		mod := loadDLLFromVFS(ctx.FS, readGuestUTF16(namePtr), mem, synthByName, nextDynIDPtr, d)
+		mod := loadDLLFromVFS(ctx.FS, rawName, mem, synthByName, nextDynIDPtr, d)
 		hctx.NextDelayMu.Unlock()
 		if mod != nil {
 			wrapped := &ntapi.SynthPE{
@@ -3519,7 +3986,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			hctx.SynthMu.Unlock()
 			retainLibraryReference(mod.BaseAddr)
 			hctx.setModuleResourceRVA(mod.BaseAddr, mod.ResourceDirRVA)
-			ravelog.Logf("[win32] LoadLibraryExW: loaded PE from VFS %q → base=0x%x\n", name, mod.BaseAddr)
+			ravelog.Logf("[win32] LoadLibraryExW: loaded PE from VFS %q -> base=0x%x\n", name, mod.BaseAddr)
 			if mod.EntryPoint != 0 && mod.EntryPoint != mod.BaseAddr {
 				var dllMainErr error
 				if mod.Is64 {
@@ -3583,7 +4050,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			hctx.SynthMu.Unlock()
 			retainLibraryReference(mod.BaseAddr)
 			hctx.setModuleResourceRVA(mod.BaseAddr, mod.ResourceDirRVA)
-			ravelog.Logf("[win32] LoadLibraryW: loaded PE from VFS %q → base=0x%x\n", name, mod.BaseAddr)
+			ravelog.Logf("[win32] LoadLibraryW: loaded PE from VFS %q -> base=0x%x\n", name, mod.BaseAddr)
 			if mod.EntryPoint != 0 && mod.EntryPoint != mod.BaseAddr {
 				var dllMainErr error
 				if mod.Is64 {
@@ -3656,7 +4123,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			// Record the resource directory RVA so user32 can find dialog
 			// resources inside this DLL (e.g. installer wizard dialogs).
 			hctx.setModuleResourceRVA(mod.BaseAddr, mod.ResourceDirRVA)
-			ravelog.Logf("[win32] LoadLibraryA: loaded PE from VFS %q → base=0x%x exports=%d\n", name, mod.BaseAddr, len(mod.Exports))
+			ravelog.Logf("[win32] LoadLibraryA: loaded PE from VFS %q -> base=0x%x exports=%d\n", name, mod.BaseAddr, len(mod.Exports))
 			// Call DllMain(hinstDLL, DLL_PROCESS_ATTACH, 0) so the DLL can
 			// initialize its globals (e.g. saving its own module handle for
 			// resource lookups in DialogBoxParamA).
@@ -3707,30 +4174,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		hctx.SynthMu.RLock()
 		defer hctx.SynthMu.RUnlock()
-		// Detect ordinal import (high word of pointer is 0 → low word is ordinal)
-		hi, _ := ctx.Mem.Read32(procNamePtr + 2)
+		// Detect ordinal import (high word of pointer is 0 -> low word is ordinal)
 		var funcName string
-		isOrdinal := hi == 0
-		if isOrdinal {
-			ordinal := uint16(procNamePtr & 0xFFFF)
-			// Search all synths for this ordinal
-			for _, s := range hctx.Dlls {
-				if s.BaseAddr == hModule {
-					if addr := d.LookupSynthExport(s, "", ordinal); addr != 0 {
-						ctx.SetReturn(addr)
-						return 0
-					}
-				}
-			}
-			for _, s := range synthByName {
-				if s.BaseAddr == hModule {
-					if addr := d.LookupSynthExport(s, "", ordinal); addr != 0 {
-						ctx.SetReturn(addr)
-						return 0
-					}
-				}
-			}
-			ctx.SetReturn(0)
+		if ordinal, ok := getProcAddressOrdinal(procNamePtr); ok {
+			ctx.SetReturn(lookupGetProcAddressOrdinal(hctx, hModule, ordinal))
 			return 0
 		}
 		funcName = readGuestString(procNamePtr)
@@ -3743,7 +4190,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 					return 0
 				}
 				if addr := d.LookupSynthExport(s, funcName, 0); addr != 0 {
-					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) → 0x%x\n", hModule, funcName, addr)
+					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) -> 0x%x\n", hModule, funcName, addr)
 					ctx.SetReturn(addr)
 					return 0
 				}
@@ -3758,7 +4205,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 					return 0
 				}
 				if addr := d.LookupSynthExport(s, funcName, 0); addr != 0 {
-					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) → 0x%x (synth)\n", hModule, funcName, addr)
+					ravelog.Logf("[gpa] GetProcAddress(0x%x, %q) -> 0x%x (synth)\n", hModule, funcName, addr)
 					// For Wise engine script handlers (f12/f16/f19): log the script struct
 					// so we can see the command string. The dispatch_wrapper saves caller's EDI
 					// (the script struct ptr) via `push edi; xor edi,edi` before calling
@@ -3787,7 +4234,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 								ravelog.Logf("[wise] %s patched saved_edi=0x%x (global@0x%x)\n",
 									funcName, instPtr, actualGlobal)
 							} else {
-								ravelog.Logf("[wise] %s saved_edi=NULL global=NULL → skip\n", funcName)
+								ravelog.Logf("[wise] %s saved_edi=NULL global=NULL -> skip\n", funcName)
 								ctx.SetReturn(0)
 								return 0
 							}
@@ -3807,7 +4254,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 							if !wiseExtractDone {
 								wiseExtractDone = true
 								installerPath := ctx.FS.ElfPath
-								ravelog.Logf("[wise] f12 → extracting game files from %s\n", installerPath)
+								ravelog.Logf("[wise] f12 -> extracting game files from %s\n", installerPath)
 								if err := wiseExtractArchive(installerPath, ctx.FS, "/DXBall"); err != nil {
 									ravelog.Logf("[wise] extraction error: %v\n", err)
 								}
@@ -3861,7 +4308,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				_ = mem.WriteBytesRaw(stubAddr, []byte{0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3})
 				wiseIsAdminStub = stubAddr
 			}
-			ravelog.Logf("[wise] GetProcAddress IsAdmin → stub 0x%x (returns 1)\n", stubAddr)
+			ravelog.Logf("[wise] GetProcAddress IsAdmin -> stub 0x%x (returns 1)\n", stubAddr)
 			ctx.SetReturn(stubAddr)
 			return 0
 		}
@@ -3869,15 +4316,15 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// so the extraction engine runs natively inside the emulator.
 		if wiseW32WinstBase != 0 && hModule == wiseW32WinstBase {
 			if addr, ok := wiseW32WinstExports[funcName]; ok {
-				ravelog.Logf("[wise] GetProcAddress(W32WINST, %q) → native 0x%x\n", funcName, addr)
+				ravelog.Logf("[wise] GetProcAddress(W32WINST, %q) -> native 0x%x\n", funcName, addr)
 				ctx.SetReturn(addr)
 				return 0
 			}
-			ravelog.Logf("[wise] GetProcAddress(W32WINST, %q) → not found in exports\n", funcName)
+			ravelog.Logf("[wise] GetProcAddress(W32WINST, %q) -> not found in exports\n", funcName)
 			ctx.SetReturn(0)
 			return 0
 		}
-		ravelog.Logf("[win32] GetProcAddress(0x%x, %q) → not found\n", hModule, funcName)
+		ravelog.Logf("[win32] GetProcAddress(0x%x, %q) -> not found\n", hModule, funcName)
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3921,7 +4368,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	// TLS (Thread Local Storage) emulation
 	var tlsNextSlot uint32 = 1           // start at 1, 0 reserved
-	tlsValues := make(map[uint32]uint64) // slot → value
+	tlsValues := make(map[uint32]uint64) // slot -> value
 	tlsFreeSlots := make(map[uint32]bool)
 	d.RegisterAutoStubHandler(kernel32, "TlsAlloc", func(ctx *ntapi.TrapContext) uint32 {
 		var slot uint32
@@ -4402,7 +4849,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			if vnode.IsDir {
 				attrs = 0x10
 			}
-			ravelog.Logf("[wise] GetFileAttributesA(%q) → VFS attrs=0x%x\n", winPath, attrs)
+			ravelog.Logf("[wise] GetFileAttributesA(%q) -> VFS attrs=0x%x\n", winPath, attrs)
 			ctx.SetReturn(uint64(attrs))
 			return 0
 		}
@@ -4412,14 +4859,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		_, hasSynth := synthByName[baseName]
 		hctx.SynthMu.RUnlock()
 		if hasSynth {
-			ravelog.Logf("[wise] GetFileAttributesA(%q) → synth stub attr=0x20\n", winPath)
+			ravelog.Logf("[wise] GetFileAttributesA(%q) -> synth stub attr=0x20\n", winPath)
 			ctx.SetReturn(0x20)
 			return 0
 		}
 		// Fall back to real filesystem
 		info, err := os.Stat(path)
 		if err != nil {
-			ravelog.Logf("[wise] GetFileAttributesA(%q) → NOT FOUND\n", winPath)
+			ravelog.Logf("[wise] GetFileAttributesA(%q) -> NOT FOUND\n", winPath)
 			ctx.SetReturn(0xFFFFFFFF)
 			return 0
 		}
@@ -4427,7 +4874,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if info.IsDir() {
 			attrs = 0x10
 		} // FILE_ATTRIBUTE_DIRECTORY
-		ravelog.Logf("[wise] GetFileAttributesA(%q) → real FS attrs=0x%x\n", winPath, attrs)
+		ravelog.Logf("[wise] GetFileAttributesA(%q) -> real FS attrs=0x%x\n", winPath, attrs)
 		ctx.SetReturn(uint64(attrs))
 		return 0
 	})
@@ -4506,12 +4953,20 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		case 0x100, 0x101, 0x102, 0x103: // stdin, stdout, stderr, and extra console handle
 			ctx.SetReturn(0x0002) // FILE_TYPE_CHAR
 		default:
-			if handles.GetNamedPipe(h) != nil {
+			obj := handles.Get(h)
+			if _, ok := obj.(*ntapi.ConsoleScreenBufferHandle); ok {
+				ctx.SetReturn(0x0002) // FILE_TYPE_CHAR
+			} else if _, ok := obj.(*ntapi.NamedPipeHandle); ok {
 				ctx.SetReturn(0x0003) // FILE_TYPE_PIPE
-			} else if handles.GetFile(h) != nil {
-				ctx.SetReturn(0x0001) // FILE_TYPE_DISK
+			} else if fh, ok := obj.(*ntapi.FileHandle); ok {
+				if fh.IsPipe {
+					ctx.SetReturn(0x0003) // FILE_TYPE_PIPE
+				} else {
+					ctx.SetReturn(0x0001) // FILE_TYPE_DISK
+				}
 			} else {
-				ctx.SetReturn(0x0000) // FILE_TYPE_UNKNOWN
+				setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0x0000)     // FILE_TYPE_UNKNOWN
 			}
 		}
 		return 0
@@ -4524,7 +4979,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		lpWritten := ctx.Arg(3)
 		lpOverlapped := ctx.Arg(4)
 		if lpWritten != 0 {
-			ctx.Mem.Write32(lpWritten, 0)
+			if err := ctx.Mem.Write32(lpWritten, 0); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
 		}
 		const maxWriteBuffer = uint64(256 << 20)
 		if nBytes > maxWriteBuffer {
@@ -4585,35 +5044,134 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 			fh, ok := obj.(*ntapi.FileHandle)
 			if !ok {
+				setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 				ctx.SetReturn(0)
 				return 0
 			}
+			if !fileHandleCanWrite(fh) {
+				setLastErrorValue(ctx, 5) // ERROR_ACCESS_DENIED
+				ctx.SetReturn(0)
+				return 0
+			}
+			var writeErr error
+			lockViolation := false
 			if lpOverlapped != 0 {
-				off32, _ := ctx.Mem.Read32(lpOverlapped + 16)
-				offHi, _ := ctx.Mem.Read32(lpOverlapped + 20)
-				offset := int64(off32) | (int64(offHi) << 32)
-				if off32 == 0xFFFFFFFF && offHi == 0xFFFFFFFF {
-					written, _ = ctx.FS.Write(fh.FD, data)
-				} else {
-					written, _ = ctx.FS.Pwrite(fh.FD, data, offset)
+				const fileFlagOverlapped = uint32(0x40000000)
+				if fh.Flags&fileFlagOverlapped == 0 {
+					setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+					ctx.SetReturn(0)
+					return 0
 				}
-				// Fill OVERLAPPED: Internal=STATUS_SUCCESS, InternalHigh=bytes
-				ctx.Mem.Write64(lpOverlapped, 0)
-				ctx.Mem.Write64(lpOverlapped+8, uint64(written))
-				// Signal hEvent if set
-				evHandle, _ := ctx.Mem.Read64(lpOverlapped + 24)
+				layout := guestOverlappedLayout(mem.Mode32)
+				overlappedSize := uint64(32)
+				if mem.Mode32 {
+					overlappedSize = 20
+				}
+				if err := ctx.Mem.ValidateRange(lpOverlapped, overlappedSize, mmu.PermWrite); err != nil {
+					setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+					ctx.SetReturn(0)
+					return 0
+				}
+				evHandle := layout.readEvent(ctx.Mem, lpOverlapped)
+				var event *ntapi.EventHandle
 				if evHandle != 0 {
-					if eh := handles.GetEvent(ntapi.Handle(evHandle)); eh != nil {
-						eh.Set()
+					event = handles.GetEvent(ntapi.Handle(evHandle &^ 1))
+					if event == nil {
+						setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+						ctx.SetReturn(0)
+						return 0
+					}
+					event.Reset()
+				}
+				off32, offHi := layout.readOffset(ctx.Mem, lpOverlapped)
+				offset := uint64(off32) | uint64(offHi)<<32
+				useCurrent := off32 == 0xFFFFFFFF && offHi == 0xFFFFFFFF
+				lockOffset := fileWriteLockOffset(ctx.FS, fh, offset, useCurrent)
+				if !fileIORangeValid(lockOffset, nBytes) {
+					layout.writeResult(
+						ctx.Mem,
+						lpOverlapped,
+						overlappedStatusInvalidParam,
+						0,
+					)
+					setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+					ctx.SetReturn(0)
+					return 0
+				}
+				lockViolation = !withFileWriteAccess(
+					ctx.FS,
+					ntapi.FileLocksFor(ctx.FS),
+					fh,
+					lockOffset,
+					nBytes,
+					func() {
+						if useCurrent {
+							written, writeErr = ctx.FS.Write(fh.FD, data)
+						} else {
+							written, writeErr = ctx.FS.Pwrite(fh.FD, data, int64(offset))
+						}
+					},
+				)
+				status := overlappedStatusSuccess
+				if lockViolation {
+					status = overlappedStatusLockConflict
+				} else if writeErr != nil {
+					status = overlappedStatusFailed
+				}
+				layout.writeResult(ctx.Mem, lpOverlapped, status, uint32(written))
+				if !lockViolation && writeErr == nil {
+					if event != nil {
+						event.Set()
+					}
+					if evHandle&1 == 0 {
+						if port, completionKey, ok := fh.CompletionAssociation(); ok {
+							port.PostForFile(
+								hFile,
+								completionKey,
+								lpOverlapped,
+								uint32(written),
+								status,
+							)
+						}
 					}
 				}
 			} else {
-				written, _ = ctx.FS.Write(fh.FD, data)
+				lockOffset := fileWriteLockOffset(ctx.FS, fh, 0, true)
+				if !fileIORangeValid(lockOffset, nBytes) {
+					setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+					ctx.SetReturn(0)
+					return 0
+				}
+				lockViolation = !withFileWriteAccess(
+					ctx.FS,
+					ntapi.FileLocksFor(ctx.FS),
+					fh,
+					lockOffset,
+					nBytes,
+					func() {
+						written, writeErr = ctx.FS.Write(fh.FD, data)
+					},
+				)
+			}
+			if lockViolation {
+				setLastErrorValue(ctx, 33) // ERROR_LOCK_VIOLATION
+				ctx.SetReturn(0)
+				return 0
+			}
+			if writeErr != nil {
+				setLastErrorValue(ctx, 31) // ERROR_GEN_FAILURE
+				ctx.SetReturn(0)
+				return 0
 			}
 		}
 		if lpWritten != 0 {
-			ctx.Mem.Write32(lpWritten, uint32(written))
+			if err := ctx.Mem.Write32(lpWritten, uint32(written)); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
 		}
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -5107,11 +5665,27 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SleepEx", func(ctx *ntapi.TrapContext) uint32 {
-		ms := ctx.Arg(0)
-		if ms > 0 && ms < 60000 {
-			time.Sleep(time.Duration(ms) * time.Millisecond)
+		timeout := msToTimeout(ctx.Arg(0))
+		alertable := ctx.Arg(1) != 0
+		if !alertable {
+			if timeout < 0 {
+				select {}
+			}
+			time.Sleep(timeout)
+			ctx.SetReturn(0)
+			return 0
 		}
-		ctx.SetReturn(0)
+		tid := uint32(1)
+		if *tmPtr != nil {
+			tid = uint32((*tmPtr).GetTID(ctx.CPU))
+		}
+		result, apcs := ntapi.ObjMgr.WaitEx(nil, false, uint64(tid), timeout, true)
+		dispatchAlertableAPCs(tid, apcs)
+		if result == ntobj.WaitIOCompletion {
+			ctx.SetReturn(uint64(result))
+		} else {
+			ctx.SetReturn(0)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CreateEventW", func(ctx *ntapi.TrapContext) uint32 {
@@ -5168,6 +5742,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				freeStacks[i] = freeStacks[len(freeStacks)-1]
 				freeStacks = freeStacks[:len(freeStacks)-1]
 				stackMu.Unlock()
+				resetWin32ThreadStack(mem, base, size)
 				return
 			}
 		}
@@ -5247,6 +5822,9 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 		}
 		stackMu.Unlock()
+		if stackBase != 0 {
+			resetWin32ThreadStack(mem, stackBase, stackSz)
+		}
 		if stackBase == 0 {
 			stackBase = mem.Mmap(0, stackSz, mmu.PermRead|mmu.PermWrite)
 		}
@@ -5334,8 +5912,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	// --- File I/O ---
 	d.RegisterAutoStubHandler(kernel32, "CreateFileW", func(ctx *ntapi.TrapContext) uint32 {
 		namePtr := ctx.Arg(0)
-		desiredAccess := ctx.Arg(1)
-		creationDisp := ctx.Arg(4) // CREATE_NEW=1, CREATE_ALWAYS=2, OPEN_EXISTING=3, OPEN_ALWAYS=4, TRUNCATE_EXISTING=5
+		desiredAccess := uint32(ctx.Arg(1))
+		creationDisp := uint32(ctx.Arg(4)) // CREATE_NEW=1, CREATE_ALWAYS=2, OPEN_EXISTING=3, OPEN_ALWAYS=4, TRUNCATE_EXISTING=5
+		flagsAndAttributes := uint32(ctx.Arg(5))
+		if (creationDisp == 2 || creationDisp == 5) && !fileAccessCanOverwrite(desiredAccess) {
+			setLastErrorValue(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+			return 0
+		}
 		var fname []uint16
 		for i := uint64(0); ; i += 2 {
 			w, _ := ctx.Mem.Read16(namePtr + i)
@@ -5354,14 +5938,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			server := ntapi.LookupNamedPipe(pipeName)
 			if server == nil {
 				ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
-				procState.LastError = 2 // ERROR_FILE_NOT_FOUND
+				setLastErrorValue(ctx, 2) // ERROR_FILE_NOT_FOUND
 				return 0
 			}
 			ch := ntapi.NewClientPipe(server)
 			h := handles.Alloc(ch)
 			server.Connected = true
 			if ctx.Trace || os.Getenv("RAVEN_TRACE_FIND") != "" {
-				ravelog.Logf("[win32] CreateFileW: pipe %q client → handle=0x%x\n", name, uint64(h))
+				ravelog.Logf("[win32] CreateFileW: pipe %q client -> handle=0x%x\n", name, uint64(h))
 			}
 			ctx.SetReturn(uint64(h))
 			return 0
@@ -5379,23 +5963,21 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			peWinDir = imagePath[:lastBS]
 		}
 		peVfsDir := winPathToVFS(peWinDir)
+		baseFlags := fileAccessOpenFlags(desiredAccess)
 		var flags int
 		switch creationDisp {
 		case 1: // CREATE_NEW
-			flags = vfs.O_CREAT | vfs.O_RDWR
+			flags = vfs.O_CREAT | baseFlags
 		case 2: // CREATE_ALWAYS
-			flags = vfs.O_CREAT | vfs.O_TRUNC | vfs.O_RDWR
+			flags = vfs.O_CREAT | vfs.O_TRUNC | baseFlags
 		case 3: // OPEN_EXISTING
-			flags = vfs.O_RDONLY
-			if desiredAccess&0x40000000 != 0 { // GENERIC_WRITE
-				flags = vfs.O_RDWR
-			}
+			flags = baseFlags
 		case 4: // OPEN_ALWAYS
-			flags = vfs.O_CREAT | vfs.O_RDWR
+			flags = vfs.O_CREAT | baseFlags
 		case 5: // TRUNCATE_EXISTING
-			flags = vfs.O_TRUNC | vfs.O_RDWR
+			flags = vfs.O_TRUNC | baseFlags
 		default:
-			flags = vfs.O_RDONLY
+			flags = baseFlags
 		}
 		fd, err := ctx.FS.Open(vfsPath, flags)
 		if err != nil {
@@ -5413,24 +5995,35 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		if err != nil {
 			if ctx.Trace {
-				ravelog.Logf("[win32] CreateFileW: %q → INVALID_HANDLE_VALUE (%v)\n", name, err)
+				ravelog.Logf("[win32] CreateFileW: %q -> INVALID_HANDLE_VALUE (%v)\n", name, err)
 			}
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF) // INVALID_HANDLE_VALUE
-			procState.LastError = 2           // ERROR_FILE_NOT_FOUND
+			setLastErrorValue(ctx, 2)         // ERROR_FILE_NOT_FOUND
 			return 0
 		}
+		isDirectory := false
 		if node := ctx.FS.Stat(fd); node != nil && node.IsDir {
-			ctx.FS.Close(fd)
-			if ctx.Trace {
-				ravelog.Logf("[win32] CreateFileW: %q invalid directory open\n", name)
+			isDirectory = true
+			const fileFlagBackupSemantics = uint32(0x02000000)
+			if flagsAndAttributes&fileFlagBackupSemantics == 0 {
+				ctx.FS.Close(fd)
+				if ctx.Trace {
+					ravelog.Logf("[win32] CreateFileW: %q invalid directory open\n", name)
+				}
+				ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+				setLastErrorValue(ctx, 5) // ERROR_ACCESS_DENIED
+				return 0
 			}
-			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
-			procState.LastError = 5 // ERROR_ACCESS_DENIED
-			return 0
 		}
-		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
+		h := handles.Alloc(&ntapi.FileHandle{
+			FD:          fd,
+			Path:        vfsPath,
+			Access:      desiredAccess,
+			Flags:       flagsAndAttributes,
+			IsDirectory: isDirectory,
+		})
 		if ctx.Trace || os.Getenv("RAVEN_TRACE_FIND") != "" {
-			ravelog.Logf("[win32] CreateFileW: %q → handle=0x%x (fd=%d)\n", name, uint64(h), fd)
+			ravelog.Logf("[win32] CreateFileW: %q -> handle=0x%x (fd=%d)\n", name, uint64(h), fd)
 		}
 		ctx.SetReturn(uint64(h))
 		return 0
@@ -5441,17 +6034,43 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		nBytesToRead := uint32(ctx.Arg(2))
 		lpBytesRead := ctx.Arg(3)
 		lpOverlapped := ctx.Arg(4)
+		if lpBytesRead != 0 {
+			if err := ctx.Mem.Write32(lpBytesRead, 0); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		const maxReadBuffer = uint32(256 << 20)
+		if nBytesToRead > maxReadBuffer {
+			setLastErrorValue(ctx, 8) // ERROR_NOT_ENOUGH_MEMORY
+			ctx.SetReturn(0)
+			return 0
+		}
+		if nBytesToRead != 0 {
+			if err := ctx.Mem.ValidateRange(bufAddr, uint64(nBytesToRead), mmu.PermWrite); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
 		// stdin handle
 		if hFile == 0x100 {
 			buf := make([]byte, nBytesToRead)
 			n, err := os.Stdin.Read(buf)
-			ctx.Mem.WriteBytes(bufAddr, buf[:n])
+			if writeErr := ctx.Mem.WriteBytes(bufAddr, buf[:n]); writeErr != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
 			if lpBytesRead != 0 {
 				ctx.Mem.Write32(lpBytesRead, uint32(n))
 			}
 			if err != nil {
+				setLastErrorValue(ctx, 31) // ERROR_GEN_FAILURE
 				ctx.SetReturn(0)
 			} else {
+				setLastErrorValue(ctx, 0)
 				ctx.SetReturn(1)
 			}
 			return 0
@@ -5461,54 +6080,172 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if ph, ok := obj.(*ntapi.NamedPipeHandle); ok {
 			buf := make([]byte, nBytesToRead)
 			n := ph.PipeRead(buf)
-			ctx.Mem.WriteBytes(bufAddr, buf[:n])
+			if err := ctx.Mem.WriteBytes(bufAddr, buf[:n]); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
 			if lpBytesRead != 0 {
 				ctx.Mem.Write32(lpBytesRead, uint32(n))
 			}
+			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(1)
 			return 0
 		}
 		fh, ok := obj.(*ntapi.FileHandle)
 		if !ok {
-			if lpBytesRead != 0 {
-				ctx.Mem.Write32(lpBytesRead, 0)
-			}
-			ctx.SetReturn(0) // FALSE
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)          // FALSE
+			return 0
+		}
+		if !fileHandleCanRead(fh) {
+			setLastErrorValue(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
 			return 0
 		}
 		buf := make([]byte, nBytesToRead)
 		var n int
+		var readErr error
+		readLastError := uint32(31) // ERROR_GEN_FAILURE
+		lockViolation := false
 		if lpOverlapped != 0 {
-			off32, _ := ctx.Mem.Read32(lpOverlapped + 16)
-			offHi, _ := ctx.Mem.Read32(lpOverlapped + 20)
-			offset := int64(off32) | (int64(offHi) << 32)
-			if off32 == 0xFFFFFFFF && offHi == 0xFFFFFFFF {
-				n, _ = ctx.FS.Read(fh.FD, buf)
-			} else {
-				n, _ = ctx.FS.Pread(fh.FD, buf, offset)
+			const fileFlagOverlapped = uint32(0x40000000)
+			if fh.Flags&fileFlagOverlapped == 0 {
+				setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
 			}
-			// Fill OVERLAPPED: Internal=STATUS_SUCCESS, InternalHigh=bytes
-			ctx.Mem.Write64(lpOverlapped, 0)
-			ctx.Mem.Write64(lpOverlapped+8, uint64(n))
-			// Signal hEvent if set
-			evHandle, _ := ctx.Mem.Read64(lpOverlapped + 24)
+			layout := guestOverlappedLayout(mem.Mode32)
+			overlappedSize := uint64(32)
+			if mem.Mode32 {
+				overlappedSize = 20
+			}
+			if err := ctx.Mem.ValidateRange(lpOverlapped, overlappedSize, mmu.PermWrite); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
+			evHandle := layout.readEvent(ctx.Mem, lpOverlapped)
+			var event *ntapi.EventHandle
 			if evHandle != 0 {
-				if eh := handles.GetEvent(ntapi.Handle(evHandle)); eh != nil {
-					eh.Set()
+				event = handles.GetEvent(ntapi.Handle(evHandle &^ 1))
+				if event == nil {
+					setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+					ctx.SetReturn(0)
+					return 0
+				}
+				event.Reset()
+			}
+			off32, offHi := layout.readOffset(ctx.Mem, lpOverlapped)
+			offset := uint64(off32) | uint64(offHi)<<32
+			useCurrent := off32 == 0xFFFFFFFF && offHi == 0xFFFFFFFF
+			lockOffset := offset
+			if useCurrent {
+				lockOffset = fileCurrentOffset(ctx.FS, fh)
+			}
+			if !fileIORangeValid(lockOffset, uint64(nBytesToRead)) {
+				layout.writeResult(
+					ctx.Mem,
+					lpOverlapped,
+					overlappedStatusInvalidParam,
+					0,
+				)
+				setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
+			}
+			lockViolation = !withFileReadAccess(
+				ctx.FS,
+				ntapi.FileLocksFor(ctx.FS),
+				fh,
+				lockOffset,
+				uint64(nBytesToRead),
+				func() {
+					if useCurrent {
+						n, readErr = ctx.FS.Read(fh.FD, buf)
+					} else {
+						n, readErr = ctx.FS.Pread(fh.FD, buf, int64(offset))
+					}
+				},
+			)
+			n, readErr = normalizeWin32ReadResult(n, readErr)
+			status := overlappedStatusSuccess
+			if lockViolation {
+				status = overlappedStatusLockConflict
+			} else if readErr != nil {
+				status = overlappedStatusFailed
+				n = 0
+			}
+			if !lockViolation && readErr == nil {
+				if err := ctx.Mem.WriteBytes(bufAddr, buf[:n]); err != nil {
+					status = overlappedStatusNoAccess
+					readErr = err
+					readLastError = 998 // ERROR_NOACCESS
+					n = 0
+				}
+			}
+			layout.writeResult(ctx.Mem, lpOverlapped, status, uint32(n))
+			if !lockViolation && readErr == nil {
+				if event != nil {
+					event.Set()
+				}
+				if evHandle&1 == 0 {
+					if port, completionKey, ok := fh.CompletionAssociation(); ok {
+						port.PostForFile(
+							hFile,
+							completionKey,
+							lpOverlapped,
+							uint32(n),
+							status,
+						)
+					}
 				}
 			}
 		} else {
-			n, _ = ctx.FS.Read(fh.FD, buf)
+			lockOffset := fileCurrentOffset(ctx.FS, fh)
+			if !fileIORangeValid(lockOffset, uint64(nBytesToRead)) {
+				setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
+			}
+			lockViolation = !withFileReadAccess(
+				ctx.FS,
+				ntapi.FileLocksFor(ctx.FS),
+				fh,
+				lockOffset,
+				uint64(nBytesToRead),
+				func() {
+					n, readErr = ctx.FS.Read(fh.FD, buf)
+				},
+			)
+			n, readErr = normalizeWin32ReadResult(n, readErr)
+			if !lockViolation && readErr == nil {
+				readErr = ctx.Mem.WriteBytes(bufAddr, buf[:n])
+			}
 		}
-		ctx.Mem.WriteBytes(bufAddr, buf[:n])
+		if lockViolation {
+			setLastErrorValue(ctx, 33) // ERROR_LOCK_VIOLATION
+			ctx.SetReturn(0)
+			return 0
+		}
+		if readErr != nil {
+			setLastErrorValue(ctx, readLastError)
+			ctx.SetReturn(0)
+			return 0
+		}
 		if lpBytesRead != 0 {
-			ctx.Mem.Write32(lpBytesRead, uint32(n))
+			if err := ctx.Mem.Write32(lpBytesRead, uint32(n)); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
 		}
 		if os.Getenv("RAVEN_TRACE_FIND") != "" &&
 			(strings.HasPrefix(fh.Path, "/home/") || strings.HasPrefix(fh.Path, "/tmp/")) {
 			ravelog.Logf("[find-trace] ReadFile handle=0x%x path=%q requested=%d read=%d overlapped=%t\n",
 				uint64(hFile), fh.Path, nBytesToRead, n, lpOverlapped != 0)
 		}
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -5557,16 +6294,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "CloseHandle", func(ctx *ntapi.TrapContext) uint32 {
 		h := ntapi.Handle(ctx.Arg(0))
-		obj := handles.Get(h)
-		var persistErr error
-		if fh, ok := obj.(*ntapi.FileHandle); ok {
-			persistErr = hctx.flushHostSavePath(ctx.FS, fh.Path)
-			if persistErr != nil {
-				ravelog.Logf("[win32] CloseHandle: persist %q: %v\n", fh.Path, persistErr)
-			}
-			ctx.FS.Close(fh.FD)
+		ok, persistErr := closeKernelHandle(ctx, h)
+		if !ok {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
 		}
-		handles.Close(h)
 		if persistErr != nil {
 			ctx.SetReturn(0)
 		} else {
@@ -5577,8 +6310,20 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "FlushFileBuffers", func(ctx *ntapi.TrapContext) uint32 {
 		hFile := ntapi.Handle(ctx.Arg(0))
 		fh := handles.GetFile(hFile)
-		if fh != nil {
-			unix.Fsync(fh.FD)
+		if fh == nil {
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		if !fileHandleCanWrite(fh) {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := hctx.flushHostFileBuffers(ctx.FS, fh.FD, fh.Path); err != nil {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -6821,179 +7566,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ctx.SetReturn(imageBase)
 		return 0
 	})
-	// Allocate a vmcall trampoline for catch funclet returns.
-	// When a catch funclet does RET, it lands here.
-	// The trampoline saves RAX (funclet return) in RCX, then does vmcall.
-	catchReturnTrampoline := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-	off := catchReturnTrampoline
-	// mov rcx, rax    (48 89 C1) - save funclet return value
-	mem.Write8(off, 0x48)
-	mem.Write8(off+1, 0x89)
-	mem.Write8(off+2, 0xC1)
-	off += 3
-	// mov eax, CatchReturnID  (B8 xx xx xx xx)
-	mem.Write8(off, 0xB8)
-	mem.Write32(off+1, ntapi.CatchReturnID)
-	off += 5
-	// vmcall  (0F 01 C1)
-	mem.Write8(off, 0x0F)
-	mem.Write8(off+1, 0x01)
-	mem.Write8(off+2, 0xC1)
-	off += 3
-	// ret (C3) - shouldn't reach here
-	mem.Write8(off, 0xC3)
-	d.RegisterHandler(ntapi.CatchReturnID, "CatchReturn", func(ctx *ntapi.TrapContext) uint32 {
-		// RCX = funclet's return value (continuation address)
-		continuation := ctx.Arg(0) // Arg(0) = RCX in Win64 ABI
-		if continuation != 0 {
-			ravelog.Logf("[seh] catch funclet → continuation at 0x%x\n", continuation)
-			ctx.CPU.SetPC(continuation)
-		} else {
-			// RAX=0: funclet didn't provide a continuation.
-			// Use the pre-computed FH4 continuation from IP-to-state map.
-			savedCont, _ := mem.Read64(catchReturnTrampoline + 80)
-			bodyRSP, _ := mem.Read64(catchReturnTrampoline + 152)
-			if savedCont != 0 {
-				ravelog.Logf("[seh] catch funclet → RAX=0, using FH4 continuation at 0x%x bodyRSP=0x%x\n", savedCont, bodyRSP)
-				// Restore non-volatile registers from unwind context
-				if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
-					nonVolRegs := []int{3, 5, 6, 7, 12, 13, 14, 15}
-					for i, reg := range nonVolRegs {
-						val, _ := mem.Read64(catchReturnTrampoline + 88 + uint64(i*8))
-						rw.WriteReg(reg, val)
-					}
-					// Restore R11 = entry RSP (establisher - 8), used as frame pointer by some functions
-					establisher, _ := mem.Read64(catchReturnTrampoline + 160)
-					if establisher != 0 {
-						rw.WriteReg(11, establisher-8) // R11
-					}
-				}
-				ctx.CPU.SetPC(savedCont)
-				ctx.CPU.SetSP(bodyRSP)
-			} else {
-				// No continuation available - resume at RaiseException caller
-				savedRIP, _ := mem.Read64(catchReturnTrampoline + 64)
-				savedRSP, _ := mem.Read64(catchReturnTrampoline + 72)
-				ravelog.Logf("[seh] catch funclet → RAX=0, resuming at RIP=0x%x RSP=0x%x\n", savedRIP, savedRSP)
-				ctx.CPU.SetPC(savedRIP)
-				ctx.CPU.SetSP(savedRSP)
-			}
-		}
-		return 0
-	})
 	d.RegisterAutoStubHandler(kernel32, "RaiseException", func(ctx *ntapi.TrapContext) uint32 {
 		code := ctx.Arg(0)
 		flags := ctx.Arg(1)
 		ravelog.Logf("[win32] RaiseException: code=0x%x flags=0x%x\n", code, flags)
 		if code == 0x406D1388 {
 			return 0 // MS_VC_EXCEPTION (SetThreadName) - ignore
-		}
-		if code == 0xe06d7363 {
-			// MSVC C++ exception - try SEH dispatch to find catch handler
-			rsp := ctx.CPU.GetSP()
-			rip := ctx.CPU.GetPC()
-			handler := ntapi.CxxDispatchException(ctx.Mem, exceptionTable, rsp, rip, ctx.Trace)
-			if handler != nil {
-				imageBase := uint64(0)
-				if exceptionTable != nil {
-					imageBase = exceptionTable.ImageBase
-				}
-				if handler.IsFallback {
-					// FH4 format: can't parse catch blocks, unwind past the handler frame
-					ravelog.Logf("[seh] C++ exception → FH4 fallback unwind to RIP=0x%x RSP=0x%x\n",
-						handler.FallbackRIP, handler.FallbackRSP)
-					if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
-						rw.WriteReg(0, 0) // RAX = 0 (error return)
-						// Restore saved non-volatile registers
-						for reg, val := range handler.SavedRegs {
-							rw.WriteReg(reg, val)
-						}
-					}
-					ctx.CPU.SetSP(handler.FallbackRSP)
-					ctx.CPU.SetPC(handler.FallbackRIP)
-					return 0
-				}
-				catchAddr := imageBase + uint64(handler.FuncletRVA)
-				ravelog.Logf("[seh] C++ exception → catch funclet at 0x%x, establisher=0x%x contRVA=0x%x catchObjOffset=%d\n",
-					catchAddr, handler.EstablisherRBP, handler.ContinuationRVA, handler.CatchObjOffset)
-				// Place the thrown object (or reference) at [EstablisherRBP + CatchObjOffset].
-				// RaiseException args layout for 0xe06d7363:
-				//   args[0] = magic (0x19930520 / 0x19930521)
-				//   args[1] = pointer to thrown object
-				//   args[2] = pointer to _ThrowInfo
-				nParams := ctx.Arg(2)
-				pArgs := ctx.Arg(3)
-				if handler.CatchObjOffset != 0 && nParams >= 2 && pArgs != 0 {
-					thrownObjPtr, _ := mem.Read64(pArgs + 8) // args[1]
-					dest := handler.EstablisherRBP + uint64(int64(handler.CatchObjOffset))
-					ravelog.Logf("[seh] placing thrown obj ptr=0x%x at [establisher+offset]=0x%x\n", thrownObjPtr, dest)
-					mem.Write64(dest, thrownObjPtr)
-				}
-				// If no funclet but we have a continuation, jump directly there
-				if handler.FuncletRVA == 0 && handler.ContinuationRVA != 0 {
-					contAddr := imageBase + uint64(handler.ContinuationRVA)
-					ravelog.Logf("[seh] no funclet, jumping to continuation at 0x%x bodyRSP=0x%x\n", contAddr, handler.BodyRSP)
-					if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
-						if handler.SavedRegs != nil {
-							for reg, val := range handler.SavedRegs {
-								rw.WriteReg(reg, val)
-							}
-						}
-					}
-					// Resume at continuation with the function's body RSP
-					ctx.CPU.SetPC(contAddr)
-					ctx.CPU.SetSP(handler.BodyRSP)
-					return 0
-				}
-				if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
-					// Restore saved non-volatile registers from unwind
-					if handler.SavedRegs != nil {
-						for reg, val := range handler.SavedRegs {
-							rw.WriteReg(reg, val)
-						}
-					}
-					rw.WriteReg(2, handler.EstablisherRBP) // RDX = establisher frame (funclet uses mov rbp, rdx)
-				}
-				// Save the current RSP/RIP so CatchReturn can resume here if RAX=0.
-				// The RaiseException stub's RET will pop the return address from rsp.
-				// We save that return address + the RSP after the pop.
-				raiseRetAddr, _ := mem.Read64(rsp)
-				mem.Write64(catchReturnTrampoline+64, raiseRetAddr)
-				mem.Write64(catchReturnTrampoline+72, rsp+8) // RSP after RaiseException RET
-				// Save FH4 continuation address (if available)
-				if handler.ContinuationRVA != 0 {
-					mem.Write64(catchReturnTrampoline+80, imageBase+uint64(handler.ContinuationRVA))
-				} else {
-					mem.Write64(catchReturnTrampoline+80, 0)
-				}
-				// Save body RSP for continuation (function's RSP after prologue)
-				mem.Write64(catchReturnTrampoline+152, handler.BodyRSP)
-				// Save establisher (for R11 restore: entry RSP = establisher - 8)
-				mem.Write64(catchReturnTrampoline+160, handler.EstablisherRBP)
-				// Save non-volatile registers for continuation restore
-				// Layout: [88]=RBX [96]=RBP [104]=RSI [112]=RDI [120]=R12 [128]=R13 [136]=R14 [144]=R15
-				nonVolRegs := []int{3, 5, 6, 7, 12, 13, 14, 15} // RBX,RBP,RSI,RDI,R12-R15
-				if handler.SavedRegs != nil {
-					for i, reg := range nonVolRegs {
-						if val, ok := handler.SavedRegs[reg]; ok {
-							mem.Write64(catchReturnTrampoline+88+uint64(i*8), val)
-						} else {
-							mem.Write64(catchReturnTrampoline+88+uint64(i*8), 0)
-						}
-					}
-				}
-				// Set up a proper call frame: push catch-return trampoline
-				// so funclet's RET lands on our vmcall trampoline.
-				sp := handler.EstablisherRBP
-				sp -= 8
-				mem.Write64(sp, catchReturnTrampoline)
-				ctx.CPU.SetSP(sp)
-				ctx.CPU.SetPC(catchAddr)
-				return 0
-			}
-			// No handler found - log and continue (best effort)
-			ravelog.Logf("[win32] RaiseException: C++ exception (0xe06d7363) - no SEH handler, continuing\n")
-			return 0
 		}
 		exceptionRecordAddr := mem.Mmap(0, 0x100, mmu.PermRead|mmu.PermWrite)
 		contextRecordAddr := mem.Mmap(0, 1232, mmu.PermRead|mmu.PermWrite)
@@ -7040,10 +7618,68 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		os.Exit(1)
 		return 0
 	})
+	runRtlUnwind := func(ctx *ntapi.TrapContext, targetFrame, targetIP, exceptionRecord, returnValue, contextRecord, historyTable uint64) {
+		if ctx.Trace {
+			ravelog.Logf(
+				"[seh] RtlUnwindEx entry pc=0x%x sp=0x%x targetFrame=0x%x targetIP=0x%x context=0x%x\n",
+				ctx.CPU.GetPC(),
+				ctx.CPU.GetSP(),
+				targetFrame,
+				targetIP,
+				contextRecord,
+			)
+		}
+		if exceptionRecord == 0 {
+			exceptionRecord = mem.Mmap(0, 0x100, mmu.PermRead|mmu.PermWrite)
+			mem.Write32(exceptionRecord, 0xc0000027)
+			mem.Write64(exceptionRecord+0x10, ctx.CPU.GetPC())
+		}
+		contextMarshaler, ok := ctx.CPU.(ntapi.ContextMarshaler)
+		if !ok {
+			terminateRtlUnwind(fmt.Errorf("CPU does not support context marshaling"))
+		}
+		var err error
+		contextRecord, err = prepareRtlUnwindContext(mem, contextMarshaler, contextRecord)
+		if err != nil {
+			terminateRtlUnwind(err)
+		}
+		if ctx.Trace {
+			unwindContext, readErr := ntapi.ReadAMD64Context(mem, contextRecord)
+			if readErr != nil {
+				terminateRtlUnwind(fmt.Errorf("read normalized unwind context: %w", readErr))
+			}
+			ravelog.Logf(
+				"[seh] RtlUnwindEx normalized rip=0x%x rsp=0x%x\n",
+				unwindContext.Rip,
+				unwindContext.Regs[4],
+			)
+		}
+		err = ntapi.UnwindStack(
+			mem,
+			exceptionRecord,
+			contextRecord,
+			targetFrame,
+			targetIP,
+			returnValue,
+			historyTable,
+			func(address uint64, args []uint64) (uint64, error) {
+				return callGuest(ctx, address, args)
+			},
+			ctx.Trace,
+		)
+		if err != nil {
+			terminateRtlUnwind(err)
+		}
+		if err := contextMarshaler.RestoreContext(mem, contextRecord); err != nil {
+			terminateRtlUnwind(fmt.Errorf("restore unwind context: %w", err))
+		}
+	}
 	d.RegisterAutoStubHandler(kernel32, "RtlUnwindEx", func(ctx *ntapi.TrapContext) uint32 {
+		runRtlUnwind(ctx, ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4), ctx.Arg(5))
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "RtlUnwind", func(ctx *ntapi.TrapContext) uint32 {
+		runRtlUnwind(ctx, ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), 0, 0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "TerminateProcess", func(ctx *ntapi.TrapContext) uint32 {
@@ -7768,8 +8404,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	// CreateFileA: convert ANSI filename to UTF-16 then delegate to CreateFileW logic
 	d.RegisterAutoStubHandler(kernel32, "CreateFileA", func(ctx *ntapi.TrapContext) uint32 {
 		namePtr := ctx.Arg(0)
-		desiredAccess := ctx.Arg(1)
-		creationDisp := ctx.Arg(4)
+		desiredAccess := uint32(ctx.Arg(1))
+		creationDisp := uint32(ctx.Arg(4))
+		flagsAndAttributes := uint32(ctx.Arg(5))
+		if (creationDisp == 2 || creationDisp == 5) && !fileAccessCanOverwrite(desiredAccess) {
+			setLastErrorValue(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+			return 0
+		}
 		name := readGuestString(namePtr)
 		vfsPath := winPathToVFS(normalizeWinPath(name))
 		if compatPath, ok := notepadPPUsersConfigPath(name); ok {
@@ -7781,23 +8423,21 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			peWinDir = imagePath[:lastBS]
 		}
 		peVfsDir := winPathToVFS(peWinDir)
+		baseFlags := fileAccessOpenFlags(desiredAccess)
 		var flags int
 		switch creationDisp {
 		case 1:
-			flags = vfs.O_CREAT | vfs.O_RDWR
+			flags = vfs.O_CREAT | baseFlags
 		case 2:
-			flags = vfs.O_CREAT | vfs.O_TRUNC | vfs.O_RDWR
+			flags = vfs.O_CREAT | vfs.O_TRUNC | baseFlags
 		case 3:
-			flags = vfs.O_RDONLY
-			if desiredAccess&0x40000000 != 0 {
-				flags = vfs.O_RDWR
-			}
+			flags = baseFlags
 		case 4:
-			flags = vfs.O_CREAT | vfs.O_RDWR
+			flags = vfs.O_CREAT | baseFlags
 		case 5:
-			flags = vfs.O_TRUNC | vfs.O_RDWR
+			flags = vfs.O_TRUNC | baseFlags
 		default:
-			flags = vfs.O_RDONLY
+			flags = baseFlags
 		}
 		fd, err := ctx.FS.Open(vfsPath, flags)
 		if err != nil {
@@ -7818,20 +8458,31 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 		}
 		if err != nil {
-			ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) → INVALID_HANDLE_VALUE err=%v\n", name, flags, err)
+			ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) -> INVALID_HANDLE_VALUE err=%v\n", name, flags, err)
 			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
-			procState.LastError = 2
+			setLastErrorValue(ctx, 2) // ERROR_FILE_NOT_FOUND
 			return 0
 		}
+		isDirectory := false
 		if node := ctx.FS.Stat(fd); node != nil && node.IsDir {
-			ctx.FS.Close(fd)
-			ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) invalid directory open\n", name, flags)
-			ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
-			procState.LastError = 5
-			return 0
+			isDirectory = true
+			const fileFlagBackupSemantics = uint32(0x02000000)
+			if flagsAndAttributes&fileFlagBackupSemantics == 0 {
+				ctx.FS.Close(fd)
+				ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) invalid directory open\n", name, flags)
+				ctx.SetReturn(0xFFFFFFFFFFFFFFFF)
+				setLastErrorValue(ctx, 5) // ERROR_ACCESS_DENIED
+				return 0
+			}
 		}
-		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
-		ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) → handle 0x%x\n", name, flags, h)
+		h := handles.Alloc(&ntapi.FileHandle{
+			FD:          fd,
+			Path:        vfsPath,
+			Access:      desiredAccess,
+			Flags:       flagsAndAttributes,
+			IsDirectory: isDirectory,
+		})
+		ravelog.Logf("[kernel32] CreateFileA(%q flags=%d) -> handle 0x%x\n", name, flags, h)
 		ctx.SetReturn(uint64(h))
 		return 0
 	})
@@ -7963,7 +8614,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				driveType = 3 // DRIVE_FIXED
 			}
 		}
-		ravelog.Logf("[kernel32] GetDriveTypeA → %d\n", driveType)
+		ravelog.Logf("[kernel32] GetDriveTypeA -> %d\n", driveType)
 		ctx.SetReturn(driveType)
 		return 0
 	})
@@ -8193,12 +8844,16 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
+		var tid uint32 = 1
+		if *tmPtr != nil {
+			tid = uint32((*tmPtr).GetTID(ctx.CPU))
+		}
+		overlappedIO.cancel(hFile, 0, tid, true)
 		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "CancelIoEx", func(ctx *ntapi.TrapContext) uint32 {
-		const statusCancelled = 0xC0000120
 		hFile := ntapi.Handle(ctx.Arg(0))
 		lpOverlapped := ctx.Arg(1)
 		if handles.GetFile(hFile) == nil {
@@ -8206,9 +8861,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
-		if lpOverlapped != 0 {
-			ctx.Mem.Write64(lpOverlapped, statusCancelled)
-			ctx.Mem.Write64(lpOverlapped+8, 0)
+		if overlappedIO.cancel(hFile, lpOverlapped, 0, false) == 0 {
+			setLastErrorValue(ctx, 1168) // ERROR_NOT_FOUND
+			ctx.SetReturn(0)
+			return 0
 		}
 		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1)
@@ -8710,45 +9366,69 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		fileHandle := ntapi.Handle(ctx.Arg(0))
 		existingPort := ntapi.Handle(ctx.Arg(1))
 		completionKey := ctx.Arg(2)
+		invalidFile := fileHandle == ntapi.InvalidHandle ||
+			(mem.Mode32 && uint32(fileHandle) == 0xFFFFFFFF)
+		const fileFlagOverlapped = uint32(0x40000000)
 		if existingPort != 0 {
 			if handles.GetIoCompletion(existingPort) == nil {
 				setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 				ctx.SetReturn(0)
 				return 0
 			}
-			if fileHandle != 0 && fileHandle != ntapi.InvalidHandle {
-				if handles.GetFile(fileHandle) == nil {
-					setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			if fileHandle == 0 || invalidFile {
+				setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
+			}
+			if file := handles.GetFile(fileHandle); file != nil {
+				if file.Flags&fileFlagOverlapped == 0 {
+					setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 					ctx.SetReturn(0)
 					return 0
 				}
-				ioCompletionMu.Lock()
-				ioCompletionPorts[uint64(fileHandle)] = uint64(existingPort)
-				ioCompletionKeys[uint64(fileHandle)] = completionKey
-				ioCompletionMu.Unlock()
+				port := handles.GetIoCompletion(existingPort)
+				if !file.AssociateCompletion(port, completionKey) {
+					setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+					ctx.SetReturn(0)
+					return 0
+				}
+			} else {
+				setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
 			}
 			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(uint64(existingPort))
 			return 0
 		}
-		if fileHandle == ntapi.InvalidHandle {
+		if invalidFile {
 			// Create a new IOCP.
 			h := handles.Alloc(&ntapi.IoCompletionPortHandle{})
 			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(uint64(h))
 			return 0
 		}
-		if handles.GetFile(fileHandle) == nil {
+		file := handles.GetFile(fileHandle)
+		if file == nil {
 			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 			ctx.SetReturn(0)
 			return 0
 		}
+		if file.Flags&fileFlagOverlapped == 0 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
 		// Associate a file handle with a new IOCP.
-		h := handles.Alloc(&ntapi.IoCompletionPortHandle{})
-		ioCompletionMu.Lock()
-		ioCompletionPorts[uint64(fileHandle)] = uint64(h)
-		ioCompletionKeys[uint64(fileHandle)] = completionKey
-		ioCompletionMu.Unlock()
+		port := &ntapi.IoCompletionPortHandle{}
+		h := handles.Alloc(port)
+		if !file.AssociateCompletion(port, completionKey) {
+			port.Close()
+			handles.Close(h)
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
 		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(uint64(h))
 		return 0
@@ -8884,7 +9564,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ntapi.RegisterNamedPipe(pipeName, ph)
 		h := handles.Alloc(ph)
 		if ctx.Trace {
-			ravelog.Logf("[win32] CreateNamedPipeA: %q → handle=0x%x\n", name, uint64(h))
+			ravelog.Logf("[win32] CreateNamedPipeA: %q -> handle=0x%x\n", name, uint64(h))
 		}
 		ctx.SetReturn(uint64(h))
 		return 0
@@ -8896,7 +9576,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ntapi.RegisterNamedPipe(pipeName, ph)
 		h := handles.Alloc(ph)
 		if ctx.Trace {
-			ravelog.Logf("[win32] CreateNamedPipeW: %q → handle=0x%x\n", name, uint64(h))
+			ravelog.Logf("[win32] CreateNamedPipeW: %q -> handle=0x%x\n", name, uint64(h))
 		}
 		ctx.SetReturn(uint64(h))
 		return 0
@@ -8904,15 +9584,67 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "CreatePipe", func(ctx *ntapi.TrapContext) uint32 {
 		hReadPipe := ctx.Arg(0)
 		hWritePipe := ctx.Arg(1)
-		rfile, wfile, err := os.Pipe()
-		if err != nil {
+		is32 := ctx.State != nil && ctx.State.Is32
+		pointerSize := uint64(8)
+		if is32 {
+			pointerSize = 4
+		}
+		if hReadPipe == 0 || hWritePipe == 0 || hReadPipe == hWritePipe {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
-		rh := uint64(handles.Alloc(&ntapi.FileHandle{FD: int(rfile.Fd()), Path: "pipe:read"}))
-		wh := uint64(handles.Alloc(&ntapi.FileHandle{FD: int(wfile.Fd()), Path: "pipe:write"}))
-		ctx.Mem.Write64(hReadPipe, rh)
-		ctx.Mem.Write64(hWritePipe, wh)
+		if err := ctx.Mem.ValidateRange(hReadPipe, pointerSize, mmu.PermWrite); err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.Mem.ValidateRange(hWritePipe, pointerSize, mmu.PermWrite); err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := writeGuestPointer(ctx.Mem, hReadPipe, 0, is32); err != nil {
+			setLastErrorValue(ctx, 998)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := writeGuestPointer(ctx.Mem, hWritePipe, 0, is32); err != nil {
+			setLastErrorValue(ctx, 998)
+			ctx.SetReturn(0)
+			return 0
+		}
+		rfd, wfd, err := ctx.FS.Pipe2(0)
+		if err != nil {
+			setLastErrorValue(ctx, 8) // ERROR_NOT_ENOUGH_MEMORY
+			ctx.SetReturn(0)
+			return 0
+		}
+		rh := handles.Alloc(&ntapi.FileHandle{
+			FD: rfd, Path: "pipe:read", Access: 0x80000000, IsPipe: true,
+		})
+		wh := handles.Alloc(&ntapi.FileHandle{
+			FD: wfd, Path: "pipe:write", Access: 0x40000000, IsPipe: true,
+		})
+		cleanup := func() {
+			handles.Close(rh)
+			handles.Close(wh)
+			_ = ctx.FS.Close(rfd)
+			_ = ctx.FS.Close(wfd)
+		}
+		if err := writeGuestPointer(ctx.Mem, hReadPipe, uint64(rh), is32); err != nil {
+			cleanup()
+			setLastErrorValue(ctx, 998)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := writeGuestPointer(ctx.Mem, hWritePipe, uint64(wh), is32); err != nil {
+			_ = writeGuestPointer(ctx.Mem, hReadPipe, 0, is32)
+			cleanup()
+			setLastErrorValue(ctx, 998)
+			ctx.SetReturn(0)
+			return 0
+		}
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9425,22 +10157,27 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		lpTargetHandle := ctx.Arg(3)
 		dwOptions := uint32(ctx.Arg(6))
 		const DUPLICATE_CLOSE_SOURCE = 0x00000001
-		obj := handles.Get(hSource)
-		if obj == nil {
-			// Unknown handle - return the same numeric value (best effort)
-			if lpTargetHandle != 0 {
-				ctx.Mem.Write64(lpTargetHandle, uint64(hSource))
-			}
-			ctx.SetReturn(1)
+		layout := guestOverlappedLayout(mem.Mode32)
+		if lpTargetHandle == 0 ||
+			ctx.Mem.ValidateRange(lpTargetHandle, layout.pointerSize, mmu.PermWrite) != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
 			return 0
 		}
-		newH := handles.Alloc(obj)
-		if lpTargetHandle != 0 {
-			ctx.Mem.Write64(lpTargetHandle, uint64(newH))
+		closeSource := dwOptions&DUPLICATE_CLOSE_SOURCE != 0
+		newH, _, ok := handles.Duplicate(hSource, closeSource)
+		if !ok {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
 		}
-		if dwOptions&DUPLICATE_CLOSE_SOURCE != 0 {
-			handles.Close(hSource)
+		layout.writePointer(ctx.Mem, lpTargetHandle, uint64(newH))
+		if closeSource {
+			directoryJournals.close(hSource)
+			overlappedIO.cancelHandle(hSource)
+			ntapi.CancelNativeIOForHandle(handles, hSource)
 		}
+		setLastErrorValue(ctx, 0)
 		ctx.SetReturn(1) // TRUE
 		return 0
 	})
@@ -10310,15 +11047,76 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		ctx.SetReturn(0)
 		return 0
 	})
-	d.RegisterAutoStubHandler(kernel32, "GetBinaryType", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetBinaryType", 8, 0)
-	})
-	d.RegisterAutoStubHandler(kernel32, "GetBinaryTypeA", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetBinaryTypeA", 2, 0)
-	})
-	d.RegisterAutoStubHandler(kernel32, "GetBinaryTypeW", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "GetBinaryTypeW", 2, 0)
-	})
+	getBinaryType := func(ctx *ntapi.TrapContext, name string) uint32 {
+		result := ctx.Arg(1)
+		if name == "" || result == 0 {
+			setThreadLastError(ctx, errorInvalidParam)
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		vfsPath := winPathToVFS(normalizeWinPath(name))
+		fd, err := ctx.FS.Open(vfsPath, vfs.O_RDONLY)
+		if err != nil {
+			parts := strings.SplitN(strings.TrimPrefix(vfsPath, "/"), "/", 2)
+			peWinDir := imagePath
+			if lastBS := strings.LastIndex(peWinDir, `\`); lastBS >= 0 {
+				peWinDir = peWinDir[:lastBS]
+			}
+			altPath := winPathToVFS(peWinDir)
+			if len(parts) == 2 {
+				altPath += "/" + parts[1]
+			} else if len(parts) == 1 {
+				altPath += "/" + parts[0]
+			}
+			if altPath != "" {
+				if altFD, altErr := ctx.FS.Open(altPath, vfs.O_RDONLY); altErr == nil {
+					fd = altFD
+					err = nil
+					vfsPath = altPath
+				}
+			}
+		}
+		if err != nil {
+			setThreadLastError(ctx, errorFileNotFound)
+			ctx.SetReturn(0)
+			return 0
+		}
+		defer ctx.FS.Close(fd)
+
+		binaryType, errorCode := classifyWindowsBinary(vfsBinaryReader{fs: ctx.FS, fd: fd}, vfsPath)
+		if errorCode != 0 {
+			setThreadLastError(ctx, errorCode)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.Mem.Write32(result, binaryType); err != nil {
+			setThreadLastError(ctx, errorInvalidParam)
+			ctx.SetReturn(0)
+			return 0
+		}
+		ctx.SetReturn(1)
+		return 0
+	}
+	getBinaryTypeA := func(ctx *ntapi.TrapContext) uint32 {
+		if ctx.Arg(0) == 0 {
+			setThreadLastError(ctx, errorInvalidParam)
+			ctx.SetReturn(0)
+			return 0
+		}
+		return getBinaryType(ctx, readGuestString(ctx.Arg(0)))
+	}
+	getBinaryTypeW := func(ctx *ntapi.TrapContext) uint32 {
+		if ctx.Arg(0) == 0 {
+			setThreadLastError(ctx, errorInvalidParam)
+			ctx.SetReturn(0)
+			return 0
+		}
+		return getBinaryType(ctx, readGuestUTF16(ctx.Arg(0)))
+	}
+	d.RegisterAutoStubHandler(kernel32, "GetBinaryType", getBinaryTypeA)
+	d.RegisterAutoStubHandler(kernel32, "GetBinaryTypeA", getBinaryTypeA)
+	d.RegisterAutoStubHandler(kernel32, "GetBinaryTypeW", getBinaryTypeW)
 	d.RegisterAutoStubHandler(kernel32, "GetCPInfoExA", func(ctx *ntapi.TrapContext) uint32 {
 		codePage := uint32(ctx.Arg(0))
 		lpCPInfoEx := ctx.Arg(2)
@@ -11667,56 +12465,164 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetOverlappedResult", func(ctx *ntapi.TrapContext) uint32 {
 		// GetOverlappedResult(hFile, lpOverlapped, lpNumberOfBytesTransferred, bWait)
-		_ = ctx.Arg(0) // hFile
+		hFile := ntapi.Handle(ctx.Arg(0))
 		lpOverlapped := ctx.Arg(1)
 		lpBytes := ctx.Arg(2)
 		bWait := ctx.Arg(3)
-		if lpOverlapped == 0 {
+		if lpOverlapped == 0 || lpBytes == 0 {
 			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
-		// Internal = NTSTATUS, InternalHigh = bytes transferred
-		status, _ := ctx.Mem.Read64(lpOverlapped)
-		nBytes, _ := ctx.Mem.Read64(lpOverlapped + 8)
-		if lpBytes != 0 {
-			ctx.Mem.Write32(lpBytes, uint32(nBytes))
+		if handles.GetFile(hFile) == nil {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
 		}
-		switch status {
-		case 0: // STATUS_SUCCESS
-			setLastErrorValue(ctx, 0)
-			ctx.SetReturn(1) // TRUE
-		case 0x103: // STATUS_PENDING
-			if bWait != 0 {
-				ctx.Mem.Write64(lpOverlapped, 0)
-				setLastErrorValue(ctx, 0)
-				ctx.SetReturn(1)
-			} else {
-				setLastErrorValue(ctx, 996) // ERROR_IO_INCOMPLETE
-				ctx.SetReturn(0)
+		layout := guestOverlappedLayout(mem.Mode32)
+		overlappedSize := uint64(32)
+		if mem.Mode32 {
+			overlappedSize = 20
+		}
+		if err := ctx.Mem.ValidateRange(lpOverlapped, overlappedSize, mmu.PermWrite); err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.Mem.ValidateRange(lpBytes, 4, mmu.PermWrite); err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		status := uint32(layout.readPointer(ctx.Mem, lpOverlapped+layout.internal))
+		nBytes := uint32(layout.readPointer(ctx.Mem, lpOverlapped+layout.internalHigh))
+		if op := overlappedIO.get(hFile, lpOverlapped); op != nil {
+			if op.pending() {
+				if bWait == 0 {
+					setLastErrorValue(ctx, 996) // ERROR_IO_INCOMPLETE
+					ctx.SetReturn(0)
+					return 0
+				}
+				waitOverlapped(op, -1)
 			}
+			status, nBytes = materializeOverlapped(ctx.Mem, mem.Mode32, op)
+			if status != overlappedStatusPending {
+				overlappedIO.forget(op)
+			}
+		}
+		ctx.Mem.Write32(lpBytes, nBytes)
+		switch status {
+		case overlappedStatusSuccess:
+			setLastErrorValue(ctx, 0)
+			ctx.SetReturn(1)
+		case overlappedStatusPending:
+			setLastErrorValue(ctx, 996) // ERROR_IO_INCOMPLETE
+			ctx.SetReturn(0)
+		case overlappedStatusCancelled:
+			setLastErrorValue(ctx, 995) // ERROR_OPERATION_ABORTED
+			ctx.SetReturn(0)
 		default:
-			setLastErrorValue(ctx, 995) // ERROR_OPERATION_ABORTED / generic async failure
-			ctx.SetReturn(0)            // FALSE
+			setLastErrorValue(ctx, 31) // ERROR_GEN_FAILURE
+			ctx.SetReturn(0)
 		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetOverlappedResultEx", func(ctx *ntapi.TrapContext) uint32 {
 		// GetOverlappedResultEx(hFile, lpOverlapped, lpNumberOfBytesTransferred, dwMilliseconds, bAlertable)
+		hFile := ntapi.Handle(ctx.Arg(0))
 		lpOverlapped := ctx.Arg(1)
 		lpBytes := ctx.Arg(2)
-		if lpOverlapped == 0 {
+		milliseconds := uint32(ctx.Arg(3))
+		alertable := ctx.Arg(4) != 0
+		if lpOverlapped == 0 || lpBytes == 0 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0)
 			return 0
 		}
-		status, _ := ctx.Mem.Read64(lpOverlapped)
-		nBytes, _ := ctx.Mem.Read64(lpOverlapped + 8)
-		if lpBytes != 0 {
-			ctx.Mem.Write32(lpBytes, uint32(nBytes))
+		if handles.GetFile(hFile) == nil {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
 		}
-		if status == 0 {
+		layout := guestOverlappedLayout(mem.Mode32)
+		overlappedSize := uint64(32)
+		if mem.Mode32 {
+			overlappedSize = 20
+		}
+		if err := ctx.Mem.ValidateRange(lpOverlapped, overlappedSize, mmu.PermWrite); err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.Mem.ValidateRange(lpBytes, 4, mmu.PermWrite); err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		status := uint32(layout.readPointer(ctx.Mem, lpOverlapped+layout.internal))
+		nBytes := uint32(layout.readPointer(ctx.Mem, lpOverlapped+layout.internalHigh))
+		if op := overlappedIO.get(hFile, lpOverlapped); op != nil {
+			if op.pending() {
+				var timeout time.Duration
+				if milliseconds == 0xFFFFFFFF {
+					timeout = -1
+				} else {
+					timeout = time.Duration(milliseconds) * time.Millisecond
+				}
+				if alertable {
+					var tid uint32 = 1
+					if *tmPtr != nil {
+						tid = uint32((*tmPtr).GetTID(ctx.CPU))
+					}
+					deadline := time.Now().Add(timeout)
+					for op.pending() {
+						slice := 5 * time.Millisecond
+						if timeout >= 0 {
+							remaining := time.Until(deadline)
+							if remaining <= 0 {
+								break
+							}
+							if remaining < slice {
+								slice = remaining
+							}
+						}
+						result, apcs := ntapi.ObjMgr.WaitEx(nil, false, uint64(tid), slice, true)
+						if result == ntobj.WaitIOCompletion {
+							dispatchAlertableAPCs(tid, apcs)
+							setLastErrorValue(ctx, 192) // WAIT_IO_COMPLETION
+							ctx.SetReturn(0)
+							return 0
+						}
+					}
+				} else if !waitOverlapped(op, timeout) {
+					setLastErrorValue(ctx, 258) // WAIT_TIMEOUT
+					ctx.SetReturn(0)
+					return 0
+				}
+				if op.pending() {
+					setLastErrorValue(ctx, 258) // WAIT_TIMEOUT
+					ctx.SetReturn(0)
+					return 0
+				}
+			}
+			status, nBytes = materializeOverlapped(ctx.Mem, mem.Mode32, op)
+			if status != overlappedStatusPending {
+				overlappedIO.forget(op)
+			}
+		}
+		ctx.Mem.Write32(lpBytes, nBytes)
+		switch status {
+		case overlappedStatusSuccess:
+			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(1)
-		} else {
+		case overlappedStatusPending:
+			setLastErrorValue(ctx, 996) // ERROR_IO_INCOMPLETE
+			ctx.SetReturn(0)
+		case overlappedStatusCancelled:
+			setLastErrorValue(ctx, 995) // ERROR_OPERATION_ABORTED
+			ctx.SetReturn(0)
+		default:
+			setLastErrorValue(ctx, 31) // ERROR_GEN_FAILURE
 			ctx.SetReturn(0)
 		}
 		return 0
@@ -12038,7 +12944,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		pBytes := ctx.Arg(1)
 		pKey := ctx.Arg(2)
 		pOverlapped := ctx.Arg(3)
-		ms := ctx.Arg(4)
+		ms := uint32(ctx.Arg(4))
 		var timeout time.Duration
 		if ms == 0xFFFFFFFF {
 			timeout = -1
@@ -12046,20 +12952,47 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			timeout = time.Duration(ms) * time.Millisecond
 		}
 		if ic := handles.GetIoCompletion(iocpHandle); ic != nil {
-			pkt, ok := ic.Remove(timeout)
-			if !ok {
-				setLastErrorValue(ctx, 258) // ERROR_TIMEOUT
-				ctx.SetReturn(0)            // FALSE - timeout
+			layout := guestOverlappedLayout(mem.Mode32)
+			if pBytes == 0 || pKey == 0 || pOverlapped == 0 ||
+				ctx.Mem.ValidateRange(pBytes, 4, mmu.PermWrite) != nil ||
+				ctx.Mem.ValidateRange(pKey, layout.pointerSize, mmu.PermWrite) != nil ||
+				ctx.Mem.ValidateRange(pOverlapped, layout.pointerSize, mmu.PermWrite) != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
 				return 0
 			}
-			if pBytes != 0 {
-				ctx.Mem.Write32(pBytes, pkt.BytesTransferred)
+			layout.writePointer(ctx.Mem, pOverlapped, 0)
+			pkt, removeResult := ic.RemoveEx(timeout)
+			if removeResult != ntapi.IoCompletionRemoved {
+				if removeResult == ntapi.IoCompletionClosed {
+					setLastErrorValue(ctx, 735) // ERROR_ABANDONED_WAIT_0
+				} else {
+					setLastErrorValue(ctx, 258) // ERROR_TIMEOUT
+				}
+				ctx.SetReturn(0)
+				return 0
 			}
-			if pKey != 0 {
-				ctx.Mem.Write64(pKey, pkt.CompletionKey)
+			status := pkt.Status
+			bytesTransferred := pkt.BytesTransferred
+			if op := overlappedIO.getCompletion(
+				pkt.FileHandle,
+				pkt.Overlapped,
+				pkt.OperationID,
+			); op != nil {
+				status, bytesTransferred = dequeueOverlapped(ctx.Mem, mem.Mode32, op)
+				overlappedIO.forget(op)
 			}
-			if pOverlapped != 0 {
-				ctx.Mem.Write64(pOverlapped, pkt.Overlapped)
+			ctx.Mem.Write32(pBytes, bytesTransferred)
+			layout.writePointer(ctx.Mem, pKey, pkt.CompletionKey)
+			layout.writePointer(ctx.Mem, pOverlapped, pkt.Overlapped)
+			if status != overlappedStatusSuccess {
+				if status == overlappedStatusCancelled {
+					setLastErrorValue(ctx, 995) // ERROR_OPERATION_ABORTED
+				} else {
+					setLastErrorValue(ctx, 31) // ERROR_GEN_FAILURE
+				}
+				ctx.SetReturn(0)
+				return 0
 			}
 			setLastErrorValue(ctx, 0)
 			ctx.SetReturn(1) // TRUE
@@ -12074,9 +13007,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		//   ulCount, ulNumEntriesRemoved, dwMilliseconds, fAlertable)
 		iocpHandle := ntapi.Handle(ctx.Arg(0))
 		pEntries := ctx.Arg(1)
-		ulCount := ctx.Arg(2)
+		ulCount := uint32(ctx.Arg(2))
 		pRemoved := ctx.Arg(3)
-		ms := ctx.Arg(4)
+		ms := uint32(ctx.Arg(4))
+		alertable := ctx.Arg(5) != 0
 		var timeout time.Duration
 		if ms == 0xFFFFFFFF {
 			timeout = -1
@@ -12089,27 +13023,98 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 				ctx.SetReturn(0)
 				return 0
 			}
+			entrySize := uint64(32)
+			if mem.Mode32 {
+				entrySize = 16
+			}
+			if pRemoved == 0 ||
+				ctx.Mem.ValidateRange(pRemoved, 4, mmu.PermWrite) != nil ||
+				ctx.Mem.ValidateRange(
+					pEntries,
+					uint64(ulCount)*entrySize,
+					mmu.PermWrite,
+				) != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
+			ctx.Mem.Write32(pRemoved, 0)
 			var removed uint32
-			for removed < uint32(ulCount) {
+			for removed < ulCount {
 				wait := time.Duration(0)
 				if removed == 0 {
 					wait = timeout
 				}
-				pkt, ok := ic.Remove(wait)
-				if !ok {
+				var pkt ntapi.IoCompletionPacket
+				var removeResult ntapi.IoCompletionRemoveResult
+				if !alertable || removed != 0 {
+					pkt, removeResult = ic.RemoveEx(wait)
+				} else {
+					var tid uint32 = 1
+					if *tmPtr != nil {
+						tid = uint32((*tmPtr).GetTID(ctx.CPU))
+					}
+					deadline := time.Now().Add(wait)
+					for {
+						pkt, removeResult = ic.RemoveEx(0)
+						if removeResult != ntapi.IoCompletionTimedOut {
+							break
+						}
+						slice := 5 * time.Millisecond
+						if wait >= 0 {
+							remaining := time.Until(deadline)
+							if remaining <= 0 {
+								break
+							}
+							if remaining < slice {
+								slice = remaining
+							}
+						}
+						result, apcs := ntapi.ObjMgr.WaitEx(nil, false, uint64(tid), slice, true)
+						if result == ntobj.WaitIOCompletion {
+							dispatchAlertableAPCs(tid, apcs)
+							setLastErrorValue(ctx, 192) // WAIT_IO_COMPLETION
+							ctx.SetReturn(0)
+							return 0
+						}
+					}
+				}
+				if removeResult != ntapi.IoCompletionRemoved {
+					if removeResult == ntapi.IoCompletionClosed {
+						setLastErrorValue(ctx, 735) // ERROR_ABANDONED_WAIT_0
+						ctx.SetReturn(0)
+						return 0
+					}
 					break
 				}
-				base := pEntries + uint64(removed)*32
-				ctx.Mem.Write64(base+0, pkt.CompletionKey)
-				ctx.Mem.Write64(base+8, pkt.Overlapped)
-				ctx.Mem.Write64(base+16, uint64(pkt.Status))
-				ctx.Mem.Write32(base+24, pkt.BytesTransferred)
-				ctx.Mem.Write32(base+28, 0)
+				status := pkt.Status
+				bytesTransferred := pkt.BytesTransferred
+				if op := overlappedIO.getCompletion(
+					pkt.FileHandle,
+					pkt.Overlapped,
+					pkt.OperationID,
+				); op != nil {
+					status, bytesTransferred = dequeueOverlapped(ctx.Mem, mem.Mode32, op)
+					overlappedIO.forget(op)
+				}
+				layout := guestOverlappedLayout(mem.Mode32)
+				internalOffset := uint64(16)
+				bytesOffset := uint64(24)
+				if mem.Mode32 {
+					internalOffset = 8
+					bytesOffset = 12
+				}
+				base := pEntries + uint64(removed)*entrySize
+				layout.writePointer(ctx.Mem, base, pkt.CompletionKey)
+				layout.writePointer(ctx.Mem, base+layout.pointerSize, pkt.Overlapped)
+				layout.writePointer(ctx.Mem, base+internalOffset, uint64(status))
+				ctx.Mem.Write32(base+bytesOffset, bytesTransferred)
+				if !mem.Mode32 {
+					ctx.Mem.Write32(base+28, 0)
+				}
 				removed++
 			}
-			if pRemoved != 0 {
-				ctx.Mem.Write32(pRemoved, removed)
-			}
+			ctx.Mem.Write32(pRemoved, removed)
 			if removed == 0 {
 				setLastErrorValue(ctx, 258) // ERROR_TIMEOUT
 				ctx.SetReturn(0)
@@ -12176,7 +13181,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		buf := ctx.Arg(0)
 		path := "C:\\Windows\\System32"
 		ctx.Mem.WriteBytes(buf, append([]byte(path), 0))
-		ravelog.Logf("[wise] GetSystemDirectoryA → %q\n", path)
+		ravelog.Logf("[wise] GetSystemDirectoryA -> %q\n", path)
 		ctx.SetReturn(uint64(len(path)))
 		return 0
 	})
@@ -12413,7 +13418,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "GetThreadContext", func(ctx *ntapi.TrapContext) uint32 {
 		// BOOL GetThreadContext(HANDLE hThread, LPCONTEXT lpContext);
-		// ReactOS: dll/win32/kernel32/client/except.c → NtGetContextThread
+		// ReactOS: dll/win32/kernel32/client/except.c -> NtGetContextThread
 		// For the current-thread pseudo-handle we can fill in registers from
 		// the calling CPU state. For other threads we return TRUE with zeroed
 		// context (the thread's CPU is running on another goroutine and we
@@ -12755,7 +13760,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		buf := ctx.Arg(0)
 		path := "C:\\Windows"
 		ctx.Mem.WriteBytes(buf, append([]byte(path), 0))
-		ravelog.Logf("[wise] GetWindowsDirectoryA → %q\n", path)
+		ravelog.Logf("[wise] GetWindowsDirectoryA -> %q\n", path)
 		ctx.SetReturn(uint64(len(path)))
 		return 0
 	})
@@ -13549,11 +14554,31 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		hFile := ntapi.Handle(ctx.Arg(0))
 		fh := handles.GetFile(hFile)
 		if fh == nil {
-			ctx.SetReturn(1) // best effort for non-file handles
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
 			return 0
 		}
-		err := unix.Flock(fh.FD, unix.LOCK_EX|unix.LOCK_NB)
-		if err != nil {
+		if !fileHandleCanLock(fh) {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
+		}
+		identity, ok := ctx.FS.FileIdentity(fh.FD)
+		if !ok {
+			setThreadLastError(ctx, 1) // ERROR_INVALID_FUNCTION
+			ctx.SetReturn(0)
+			return 0
+		}
+		start := uint64(uint32(ctx.Arg(1))) | uint64(uint32(ctx.Arg(2)))<<32
+		length := uint64(uint32(ctx.Arg(3))) | uint64(uint32(ctx.Arg(4)))<<32
+		if !ntapi.FileLocksFor(ctx.FS).Lock(
+			identity,
+			fh.LockOwner(),
+			start,
+			length,
+			true,
+			false,
+		) {
 			setThreadLastError(ctx, 33) // ERROR_LOCK_VIOLATION
 			ctx.SetReturn(0)
 			return 0
@@ -13564,35 +14589,180 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "LockFileEx", func(ctx *ntapi.TrapContext) uint32 {
 		hFile := ntapi.Handle(ctx.Arg(0))
 		dwFlags := uint32(ctx.Arg(1))
-		// arg2 = dwReserved
-		// arg3 = nNumberOfBytesToLockLow
-		// arg4 = nNumberOfBytesToLockHigh
+		dwReserved := uint32(ctx.Arg(2))
+		length := uint64(uint32(ctx.Arg(3))) | uint64(uint32(ctx.Arg(4)))<<32
 		lpOverlapped := ctx.Arg(5)
 		fh := handles.GetFile(hFile)
 		if fh == nil {
-			if lpOverlapped != 0 {
-				ctx.Mem.Write64(lpOverlapped, 0) // Internal = STATUS_SUCCESS
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		if !fileHandleCanLock(fh) {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
+		}
+		if dwReserved != 0 || dwFlags&^uint32(0x03) != 0 || lpOverlapped == 0 {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		layout := guestOverlappedLayout(mem.Mode32)
+		overlappedSize := uint64(32)
+		if mem.Mode32 {
+			overlappedSize = 20
+		}
+		if err := ctx.Mem.ValidateRange(
+			lpOverlapped,
+			overlappedSize,
+			mmu.PermRead|mmu.PermWrite,
+		); err != nil {
+			setThreadLastError(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		eventHandle := layout.readEvent(ctx.Mem, lpOverlapped)
+		var event *ntapi.EventHandle
+		if eventHandle != 0 {
+			event = handles.GetEvent(ntapi.Handle(eventHandle &^ 1))
+			if event == nil {
+				setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		identity, ok := ctx.FS.FileIdentity(fh.FD)
+		if !ok {
+			setThreadLastError(ctx, 1) // ERROR_INVALID_FUNCTION
+			ctx.SetReturn(0)
+			return 0
+		}
+		offLow, offHigh := layout.readOffset(ctx.Mem, lpOverlapped)
+		start := uint64(offLow) | uint64(offHigh)<<32
+		exclusive := dwFlags&0x02 != 0
+		failImmediately := dwFlags&0x01 != 0
+		if ntapi.FileLocksFor(ctx.FS).Lock(
+			identity,
+			fh.LockOwner(),
+			start,
+			length,
+			exclusive,
+			false,
+		) {
+			layout.writeResult(ctx.Mem, lpOverlapped, overlappedStatusSuccess, 0)
+			if event != nil {
+				event.Set()
 			}
 			ctx.SetReturn(1)
 			return 0
 		}
-		lockType := unix.LOCK_SH // shared by default
-		if dwFlags&0x02 != 0 {   // LOCKFILE_EXCLUSIVE_LOCK
-			lockType = unix.LOCK_EX
-		}
-		if dwFlags&0x01 != 0 { // LOCKFILE_FAIL_IMMEDIATELY
-			lockType |= unix.LOCK_NB
-		}
-		err := unix.Flock(fh.FD, lockType)
-		if err != nil {
+		if failImmediately {
+			layout.writeResult(ctx.Mem, lpOverlapped, overlappedStatusLockNotGranted, 0)
 			setThreadLastError(ctx, 33) // ERROR_LOCK_VIOLATION
 			ctx.SetReturn(0)
 			return 0
 		}
-		if lpOverlapped != 0 {
-			ctx.Mem.Write64(lpOverlapped, 0) // Internal = STATUS_SUCCESS
+		const fileFlagOverlapped = uint32(0x40000000)
+		if fh.Flags&fileFlagOverlapped == 0 {
+			if !ntapi.FileLocksFor(ctx.FS).Lock(
+				identity,
+				fh.LockOwner(),
+				start,
+				length,
+				exclusive,
+				true,
+			) {
+				setThreadLastError(ctx, 33) // ERROR_LOCK_VIOLATION
+				ctx.SetReturn(0)
+				return 0
+			}
+			layout.writeResult(ctx.Mem, lpOverlapped, overlappedStatusSuccess, 0)
+			if event != nil {
+				event.Set()
+			}
+			ctx.SetReturn(1)
+			return 0
 		}
-		ctx.SetReturn(1) // TRUE
+		if event != nil {
+			event.Reset()
+		}
+		var tid uint32 = 1
+		if *tmPtr != nil {
+			tid = uint32((*tmPtr).GetTID(ctx.CPU))
+		}
+		port, completionKey, associated := fh.CompletionAssociation()
+		var op *overlappedOperation
+		var postCompletion func(uint32, uint32)
+		if eventHandle&1 == 0 && associated {
+			postCompletion = func(bytes, status uint32) {
+				port.PostForFileOperation(
+					hFile,
+					completionKey,
+					lpOverlapped,
+					bytes,
+					status,
+					op.id,
+				)
+			}
+		}
+		op = newOverlappedOperation(
+			overlappedKey{handle: hFile, overlapped: lpOverlapped},
+			tid,
+			0,
+			0,
+			event,
+			postCompletion,
+		)
+		op.deferStatus = postCompletion != nil
+		op.publish = func(status uint32, _ []byte) (uint32, uint32) {
+			if !op.shouldDeferStatus() {
+				if err := layout.writeResultChecked(
+					mem,
+					lpOverlapped,
+					status,
+					0,
+				); err != nil {
+					return overlappedStatusNoAccess, 0
+				}
+			}
+			return status, 0
+		}
+		if !overlappedIO.begin(op) {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := layout.writeResultChecked(
+			ctx.Mem,
+			lpOverlapped,
+			overlappedStatusPending,
+			0,
+		); err != nil {
+			overlappedIO.forget(op)
+			setThreadLastError(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		go func() {
+			acquired := ntapi.FileLocksFor(ctx.FS).LockCancelable(
+				identity,
+				fh.LockOwner(),
+				start,
+				length,
+				exclusive,
+				true,
+				op.done,
+			)
+			if !acquired {
+				return
+			}
+			if !op.complete(overlappedStatusSuccess, nil) {
+				ntapi.FileLocksFor(ctx.FS).Unlock(identity, fh.LockOwner(), start, length)
+			}
+		}()
+		setThreadLastError(ctx, 997) // ERROR_IO_PENDING
+		ctx.SetReturn(0)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "MakeCriticalSectionGlobal", func(ctx *ntapi.TrapContext) uint32 {
@@ -13655,10 +14825,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		dstWin := readGuestString(ctx.Arg(1))
 		src := winPathToVFS(normalizeWinPath(srcWin))
 		dst := winPathToVFS(normalizeWinPath(dstWin))
-		ravelog.Logf("[wise] MoveFileA(%q → %q)\n", srcWin, dstWin)
+		ravelog.Logf("[wise] MoveFileA(%q -> %q)\n", srcWin, dstWin)
 		// MoveFileA fails if destination already exists (unlike MoveFileExA with MOVEFILE_REPLACE_EXISTING)
 		if _, err := ctx.FS.StatPath(-1, dst); err == nil {
-			ravelog.Logf("[wise] MoveFileA(%q → %q) failed: destination exists\n", srcWin, dstWin)
+			ravelog.Logf("[wise] MoveFileA(%q -> %q) failed: destination exists\n", srcWin, dstWin)
 			setThreadLastError(ctx, 183) // ERROR_ALREADY_EXISTS
 			ctx.SetReturn(0)
 			return 0
@@ -13666,13 +14836,13 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if err := ctx.FS.Renameat(-1, src, -1, dst); err != nil {
 			// fallback: try real FS (no overwrite check needed for real FS as it doesn't have our VFS files)
 			if _, serr := os.Stat(dst); serr == nil {
-				ravelog.Logf("[wise] MoveFileA(%q → %q) failed: destination exists on real FS\n", srcWin, dstWin)
+				ravelog.Logf("[wise] MoveFileA(%q -> %q) failed: destination exists on real FS\n", srcWin, dstWin)
 				setThreadLastError(ctx, 183)
 				ctx.SetReturn(0)
 				return 0
 			}
 			if err2 := os.Rename(src, dst); err2 != nil {
-				ravelog.Logf("[wise] MoveFileA(%q → %q) failed: %v\n", srcWin, dstWin, err)
+				ravelog.Logf("[wise] MoveFileA(%q -> %q) failed: %v\n", srcWin, dstWin, err)
 				setThreadLastError(ctx, 5)
 				ctx.SetReturn(0)
 				return 0
@@ -13708,7 +14878,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		dstWin := readGuestString(dstPtr)
 		src := winPathToVFS(normalizeWinPath(srcWin))
 		dst := winPathToVFS(normalizeWinPath(dstWin))
-		ravelog.Logf("[wise] MoveFileExA(%q → %q flags=0x%x)\n", srcWin, dstWin, flags)
+		ravelog.Logf("[wise] MoveFileExA(%q -> %q flags=0x%x)\n", srcWin, dstWin, flags)
 		const MOVEFILE_REPLACE_EXISTING = 0x1
 		srcNode, srcErr := ctx.FS.StatPath(-1, src)
 		dstNode, dstErr := ctx.FS.StatPath(-1, dst)
@@ -13721,7 +14891,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if flags&MOVEFILE_REPLACE_EXISTING == 0 {
 			// No replace flag: fail if destination exists (same as MoveFileA)
 			if dstErr == nil && !sameEntry {
-				ravelog.Logf("[wise] MoveFileExA(%q → %q) failed: destination exists (no REPLACE_EXISTING flag)\n", srcWin, dstWin)
+				ravelog.Logf("[wise] MoveFileExA(%q -> %q) failed: destination exists (no REPLACE_EXISTING flag)\n", srcWin, dstWin)
 				setThreadLastError(ctx, 183)
 				ctx.SetReturn(0)
 				return 0
@@ -13969,7 +15139,26 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "OpenThread", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "OpenThread", 3, uint64(0x1001))
+		tid := int(uint32(ctx.Arg(2)))
+		tm := *tmPtr
+		if tid == 0 || tm == nil {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		done, ok := tm.ThreadDone(tid)
+		if !ok {
+			setLastErrorValue(ctx, 87)
+			ctx.SetReturn(0)
+			return 0
+		}
+		threadHandle := handles.ThreadByTID(tid)
+		if threadHandle == nil {
+			threadHandle = &ntapi.ThreadHandle{TID: tid, Done: done}
+		}
+		setLastErrorValue(ctx, 0)
+		ctx.SetReturn(uint64(handles.Alloc(threadHandle)))
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "OpenThreadToken", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "OpenThreadToken", 4, 0)
@@ -14271,14 +15460,40 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "QueryWin31IniFilesMappedToRegistry", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "QueueUserAPC", func(ctx *ntapi.TrapContext) uint32 {
-		// DWORD QueueUserAPC(PAPCFUNC pfnAPC, HANDLE hThread, ULONG_PTR dwData);
-		// ReactOS: dll/win32/kernel32/client/thread.c → NtQueueApcThread
-		// We do not dispatch APCs yet, but return success so callers proceed.
 		pfnAPC := ctx.Arg(0)
 		hThread := ctx.Arg(1)
 		dwData := ctx.Arg(2)
-		ravelog.Logf("[win32] QueueUserAPC(func=0x%x, thread=0x%x, data=0x%x) → stub TRUE\n", pfnAPC, hThread, dwData)
-		ctx.SetReturn(1) // TRUE
+		tm := *tmPtr
+		if pfnAPC == 0 || tm == nil {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		tid := 0
+		var targetCPU arch.CPU
+		if hThread == 0xFFFFFFFFFFFFFFFE || hThread == 0xFFFFFFFE {
+			tid = tm.GetTID(ctx.CPU)
+			targetCPU = ctx.CPU
+		} else if threadHandle := handles.GetThread(ntapi.Handle(hThread)); threadHandle != nil {
+			tid = threadHandle.TID
+			targetCPU, _ = tm.GetCPU(tid)
+		}
+		if tid == 0 || targetCPU == nil {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		trace := ctx.Trace
+		ntapi.ObjMgr.QueueAPC(uint64(tid), func() {
+			if _, err := ntapi.CallGuestFunction(targetCPU, mem, guestCallTrampoline, pfnAPC, []uint64{dwData}, trace); err != nil {
+				abortGuestCPU(targetCPU, err)
+				ravelog.Logf("[win32] QueueUserAPC callback 0x%x failed: %v\n", pfnAPC, err)
+			}
+		})
+		setLastErrorValue(ctx, 0)
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "QueueUserAPC2", func(ctx *ntapi.TrapContext) uint32 {
@@ -14287,7 +15502,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	d.RegisterAutoStubHandler(kernel32, "QueueUserWorkItem", func(ctx *ntapi.TrapContext) uint32 {
 		// BOOL QueueUserWorkItem(LPTHREAD_START_ROUTINE Function,
 		//                        PVOID Context, ULONG Flags);
-		// ReactOS: dll/win32/kernel32/client/thread.c → RtlQueueWorkItem
+		// ReactOS: dll/win32/kernel32/client/thread.c -> RtlQueueWorkItem
 		function := ctx.Arg(0)
 		context := ctx.Arg(1)
 		_ = ctx.Arg(2) // Flags
@@ -14530,7 +15745,224 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ReadDirectoryChangesW", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "ReadDirectoryChangesW", 8, 1)
+		hDirectory := ntapi.Handle(ctx.Arg(0))
+		buffer := ctx.Arg(1)
+		bufferLen := uint32(ctx.Arg(2))
+		watchSubtree := ctx.Arg(3) != 0
+		filter := uint32(ctx.Arg(4))
+		bytesReturned := ctx.Arg(5)
+		overlapped := ctx.Arg(6)
+		completionRoutine := ctx.Arg(7)
+		file := handles.GetFile(hDirectory)
+		const (
+			fileFlagOverlapped = uint32(0x40000000)
+			validNotifyFilter  = uint32(0x000001FF)
+		)
+		if file == nil || !file.IsDirectory {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
+			return 0
+		}
+		if buffer == 0 || bufferLen < 12 ||
+			filter == 0 || filter&^validNotifyFilter != 0 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		if buffer&3 != 0 {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := ctx.Mem.ValidateRange(buffer, uint64(bufferLen), mmu.PermWrite); err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		if file.Access&(0x00000001|0x80000000) == 0 {
+			setLastErrorValue(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
+		}
+		journal, err := directoryJournals.getOrCreate(hDirectory, ctx.FS, file.Path)
+		if err != nil {
+			setLastErrorValue(ctx, 1) // ERROR_INVALID_FUNCTION
+			ctx.SetReturn(0)
+			return 0
+		}
+		if overlapped == 0 {
+			if completionRoutine != 0 {
+				setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
+			}
+			if bytesReturned == 0 {
+				setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
+			}
+			if err := ctx.Mem.ValidateRange(bytesReturned, 4, mmu.PermWrite); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
+			op := newOverlappedOperation(
+				overlappedKey{handle: hDirectory},
+				0,
+				buffer,
+				bufferLen,
+				nil,
+				nil,
+			)
+			if !journal.arm(op, filter, watchSubtree) {
+				setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+				ctx.SetReturn(0)
+				return 0
+			}
+			waitOverlapped(op, -1)
+			status, data := op.result()
+			if status != overlappedStatusSuccess {
+				ctx.Mem.Write32(bytesReturned, 0)
+				setLastErrorValue(ctx, 995) // ERROR_OPERATION_ABORTED
+				ctx.SetReturn(0)
+				return 0
+			}
+			if err := ctx.Mem.WriteBytes(buffer, data); err != nil {
+				ctx.Mem.Write32(bytesReturned, 0)
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
+			if err := ctx.Mem.Write32(bytesReturned, uint32(len(data))); err != nil {
+				setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+				ctx.SetReturn(0)
+				return 0
+			}
+			setLastErrorValue(ctx, 0)
+			ctx.SetReturn(1)
+			return 0
+		}
+		if file.Flags&fileFlagOverlapped == 0 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		layout := guestOverlappedLayout(mem.Mode32)
+		overlappedSize := uint64(32)
+		if mem.Mode32 {
+			overlappedSize = 20
+		}
+		if err := ctx.Mem.ValidateRange(overlapped, overlappedSize, mmu.PermWrite); err != nil {
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		eventHandle := layout.readEvent(ctx.Mem, overlapped)
+		var event *ntapi.EventHandle
+		if completionRoutine == 0 && eventHandle != 0 {
+			event = handles.GetEvent(ntapi.Handle(eventHandle &^ 1))
+			if event == nil {
+				setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+			event.Reset()
+		}
+		var tid uint32 = 1
+		if *tmPtr != nil {
+			tid = uint32((*tmPtr).GetTID(ctx.CPU))
+		}
+		port, completionKey, associated := file.CompletionAssociation()
+		var op *overlappedOperation
+		var postCompletion func(uint32, uint32)
+		if eventHandle&1 == 0 && associated {
+			postCompletion = func(bytes, status uint32) {
+				port.PostForFileOperation(
+					hDirectory,
+					completionKey,
+					overlapped,
+					bytes,
+					status,
+					op.id,
+				)
+			}
+		}
+		op = newOverlappedOperation(
+			overlappedKey{handle: hDirectory, overlapped: overlapped},
+			tid,
+			buffer,
+			bufferLen,
+			event,
+			postCompletion,
+		)
+		op.deferStatus = postCompletion != nil
+		op.publish = func(status uint32, data []byte) (uint32, uint32) {
+			bytes := uint32(len(data))
+			if status == overlappedStatusSuccess && bytes != 0 {
+				if writeErr := mem.WriteBytes(buffer, data); writeErr != nil {
+					status = overlappedStatusNoAccess
+					bytes = 0
+				}
+			}
+			if !op.shouldDeferStatus() {
+				if writeErr := layout.writeResultChecked(mem, overlapped, status, bytes); writeErr != nil {
+					status = overlappedStatusNoAccess
+					bytes = 0
+				}
+			}
+			return status, bytes
+		}
+		if completionRoutine != 0 {
+			targetCPU := ctx.CPU
+			trace := ctx.Trace
+			op.queueAPC = func() {
+				ntapi.ObjMgr.QueueAPC(uint64(tid), func() {
+					status, bytes := materializeOverlapped(mem, mem.Mode32, op)
+					overlappedIO.forget(op)
+					errorCode := uint64(0)
+					if status == overlappedStatusCancelled {
+						errorCode = 995 // ERROR_OPERATION_ABORTED
+					} else if status != overlappedStatusSuccess {
+						errorCode = 31 // ERROR_GEN_FAILURE
+					}
+					if _, callErr := ntapi.CallGuestFunction(
+						targetCPU,
+						mem,
+						guestCallTrampoline,
+						completionRoutine,
+						[]uint64{errorCode, uint64(bytes), overlapped},
+						trace,
+					); callErr != nil {
+						abortGuestCPU(targetCPU, callErr)
+						ravelog.Logf(
+							"[win32] ReadDirectoryChangesW completion 0x%x failed: %v\n",
+							completionRoutine,
+							callErr,
+						)
+					}
+				})
+			}
+		}
+		if !overlappedIO.begin(op) {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		if err := layout.writeResultChecked(ctx.Mem, overlapped, overlappedStatusPending, 0); err != nil {
+			overlappedIO.forget(op)
+			setLastErrorValue(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		if !journal.arm(op, filter, watchSubtree) {
+			overlappedIO.forget(op)
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		setLastErrorValue(ctx, 0)
+		ctx.SetReturn(1)
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "ReadFileEx", func(ctx *ntapi.TrapContext) uint32 {
 		return runKernel32TrivialHandler(ctx, "ReadFileEx", 5, 0)
@@ -15407,7 +16839,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "ResumeThread", func(ctx *ntapi.TrapContext) uint32 {
 		// DWORD ResumeThread(HANDLE hThread);
-		// ReactOS: dll/win32/kernel32/client/thread.c → NtResumeThread
+		// ReactOS: dll/win32/kernel32/client/thread.c -> NtResumeThread
 		// Returns previous suspend count. We don't track true suspension, so
 		// return 1 (was suspended, now resumed) for real handles, 0 for
 		// the current-thread pseudo-handle.
@@ -15487,7 +16919,53 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "RtlRaiseException", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "RtlRestoreContext", func(ctx *ntapi.TrapContext) uint32 {
-		return runKernel32TrivialHandler(ctx, "RtlRestoreContext", 8, 0)
+		contextRecord := ctx.Arg(0)
+		exceptionRecord := ctx.Arg(1)
+		if contextRecord == 0 {
+			terminateRtlUnwind(fmt.Errorf("RtlRestoreContext received a nil context"))
+		}
+		if exceptionRecord != 0 {
+			status, err := mem.Read32(exceptionRecord)
+			if err != nil {
+				terminateRtlUnwind(fmt.Errorf("read restore exception record: %w", err))
+			}
+			if status == ntapi.StatusUnwindConsolidate {
+				count, err := mem.Read32(exceptionRecord + 0x18)
+				if err != nil || count < 1 {
+					terminateRtlUnwind(fmt.Errorf("invalid unwind consolidation record"))
+				}
+				callback, err := mem.Read64(exceptionRecord + 0x20)
+				if err != nil || callback == 0 {
+					terminateRtlUnwind(fmt.Errorf("invalid unwind consolidation callback"))
+				}
+				continuation, err := callRtlConsolidateCallback(
+					ctx,
+					rtlConsolidateTrampoline,
+					contextRecord,
+					exceptionRecord,
+					callback,
+				)
+				if err != nil {
+					terminateRtlUnwind(fmt.Errorf("unwind consolidation callback: %w", err))
+				}
+				context, err := ntapi.ReadAMD64Context(mem, contextRecord)
+				if err != nil {
+					terminateRtlUnwind(fmt.Errorf("read restore context: %w", err))
+				}
+				context.Rip = continuation
+				if err := ntapi.WriteAMD64Context(mem, contextRecord, context); err != nil {
+					terminateRtlUnwind(fmt.Errorf("write restore context: %w", err))
+				}
+			}
+		}
+		contextMarshaler, ok := ctx.CPU.(ntapi.ContextMarshaler)
+		if !ok {
+			terminateRtlUnwind(fmt.Errorf("CPU does not support context restore"))
+		}
+		if err := contextMarshaler.RestoreContext(mem, contextRecord); err != nil {
+			terminateRtlUnwind(fmt.Errorf("restore CPU context: %w", err))
+		}
+		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "RtlZeroMemory", func(ctx *ntapi.TrapContext) uint32 {
 		dst := ctx.Arg(0)
@@ -16121,7 +17599,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadContext", func(ctx *ntapi.TrapContext) uint32 {
 		// BOOL SetThreadContext(HANDLE hThread, const CONTEXT *lpContext);
-		// ReactOS: dll/win32/kernel32/client/except.c → NtSetContextThread
+		// ReactOS: dll/win32/kernel32/client/except.c -> NtSetContextThread
 		// For the current-thread pseudo-handle, apply integer registers from
 		// the CONTEXT structure. For other threads we accept but don't apply
 		// (their CPU runs on another goroutine).
@@ -16235,7 +17713,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SetThreadPriority", func(ctx *ntapi.TrapContext) uint32 {
 		// BOOL SetThreadPriority(HANDLE hThread, int nPriority);
-		// ReactOS: dll/win32/kernel32/client/thread.c → NtSetInformationThread
+		// ReactOS: dll/win32/kernel32/client/thread.c -> NtSetInformationThread
 		hThread := ctx.Arg(0)
 		nPriority := int32(ctx.Arg(1))
 		if hThread == 0xFFFFFFFFFFFFFFFE {
@@ -16636,7 +18114,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "SuspendThread", func(ctx *ntapi.TrapContext) uint32 {
 		// DWORD SuspendThread(HANDLE hThread);
-		// ReactOS: dll/win32/kernel32/client/thread.c → NtSuspendThread
+		// ReactOS: dll/win32/kernel32/client/thread.c -> NtSuspendThread
 		// Returns previous suspend count. We don't truly suspend threads.
 		hThread := ctx.Arg(0)
 		if hThread == 0xFFFFFFFFFFFFFFFE {
@@ -16661,7 +18139,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if _, ok := fiberMap[lpFiber]; ok {
 			mem.Write64(procState.TEBAddr+ntapi.TebFiberData, lpFiber)
 		}
-		ravelog.Logf("[win32] SwitchToFiber(0x%x) → stub no-op\n", lpFiber)
+		ravelog.Logf("[win32] SwitchToFiber(0x%x) -> stub no-op\n", lpFiber)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "SwitchToThread", func(ctx *ntapi.TrapContext) uint32 {
@@ -16795,11 +18273,24 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		hFile := ntapi.Handle(ctx.Arg(0))
 		fh := handles.GetFile(hFile)
 		if fh == nil {
-			ctx.SetReturn(1) // best effort
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
 			return 0
 		}
-		err := unix.Flock(fh.FD, unix.LOCK_UN)
-		if err != nil {
+		if !fileHandleCanLock(fh) {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
+		}
+		identity, ok := ctx.FS.FileIdentity(fh.FD)
+		if !ok {
+			setThreadLastError(ctx, 1) // ERROR_INVALID_FUNCTION
+			ctx.SetReturn(0)
+			return 0
+		}
+		start := uint64(uint32(ctx.Arg(1))) | uint64(uint32(ctx.Arg(2)))<<32
+		length := uint64(uint32(ctx.Arg(3))) | uint64(uint32(ctx.Arg(4)))<<32
+		if !ntapi.FileLocksFor(ctx.FS).Unlock(identity, fh.LockOwner(), start, length) {
 			setThreadLastError(ctx, 158) // ERROR_NOT_LOCKED
 			ctx.SetReturn(0)
 			return 0
@@ -16809,25 +18300,74 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "UnlockFileEx", func(ctx *ntapi.TrapContext) uint32 {
 		hFile := ntapi.Handle(ctx.Arg(0))
-		// arg1 = dwReserved, arg2 = nNumberOfBytesToUnlockLow
-		// arg3 = nNumberOfBytesToUnlockHigh, arg4 = lpOverlapped
+		dwReserved := uint32(ctx.Arg(1))
+		length := uint64(uint32(ctx.Arg(2))) | uint64(uint32(ctx.Arg(3)))<<32
 		lpOverlapped := ctx.Arg(4)
 		fh := handles.GetFile(hFile)
 		if fh == nil {
-			if lpOverlapped != 0 {
-				ctx.Mem.Write64(lpOverlapped, 0)
-			}
-			ctx.SetReturn(1)
+			setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+			ctx.SetReturn(0)
 			return 0
 		}
-		err := unix.Flock(fh.FD, unix.LOCK_UN)
-		if err != nil {
+		if !fileHandleCanLock(fh) {
+			setThreadLastError(ctx, 5) // ERROR_ACCESS_DENIED
+			ctx.SetReturn(0)
+			return 0
+		}
+		if dwReserved != 0 || lpOverlapped == 0 {
+			setThreadLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(0)
+			return 0
+		}
+		layout := guestOverlappedLayout(mem.Mode32)
+		overlappedSize := uint64(32)
+		if mem.Mode32 {
+			overlappedSize = 20
+		}
+		if err := ctx.Mem.ValidateRange(
+			lpOverlapped,
+			overlappedSize,
+			mmu.PermRead|mmu.PermWrite,
+		); err != nil {
+			setThreadLastError(ctx, 998) // ERROR_NOACCESS
+			ctx.SetReturn(0)
+			return 0
+		}
+		eventHandle := layout.readEvent(ctx.Mem, lpOverlapped)
+		var event *ntapi.EventHandle
+		if eventHandle != 0 {
+			event = handles.GetEvent(ntapi.Handle(eventHandle &^ 1))
+			if event == nil {
+				setThreadLastError(ctx, 6) // ERROR_INVALID_HANDLE
+				ctx.SetReturn(0)
+				return 0
+			}
+		}
+		identity, ok := ctx.FS.FileIdentity(fh.FD)
+		if !ok {
+			setThreadLastError(ctx, 1) // ERROR_INVALID_FUNCTION
+			ctx.SetReturn(0)
+			return 0
+		}
+		offLow, offHigh := layout.readOffset(ctx.Mem, lpOverlapped)
+		start := uint64(offLow) | uint64(offHigh)<<32
+		if !ntapi.FileLocksFor(ctx.FS).Unlock(identity, fh.LockOwner(), start, length) {
+			layout.writeResult(ctx.Mem, lpOverlapped, overlappedStatusRangeNotLocked, 0)
+			if event != nil {
+				event.Set()
+			}
 			setThreadLastError(ctx, 158) // ERROR_NOT_LOCKED
 			ctx.SetReturn(0)
 			return 0
 		}
-		if lpOverlapped != 0 {
-			ctx.Mem.Write64(lpOverlapped, 0)
+		layout.writeResult(ctx.Mem, lpOverlapped, overlappedStatusSuccess, 0)
+		if event != nil {
+			event.Set()
+		}
+		if eventHandle&1 == 0 {
+			if port, completionKey, ok := fh.CompletionAssociation(); ok {
+				port.PostForFile(hFile, completionKey, lpOverlapped, 0, overlappedStatusSuccess)
+			}
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -16911,7 +18451,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 					perms = mmu.PermRead | mmu.PermWrite
 				}
 				_ = perms // perms already set on reserve; no-op here
-				ravelog.Logf("[win32] VirtualAlloc MEM_COMMIT(0x%x, 0x%x) already mapped → 0x%x\n", lpAddress, dwSize, lpAddress)
+				ravelog.Logf("[win32] VirtualAlloc MEM_COMMIT(0x%x, 0x%x) already mapped -> 0x%x\n", lpAddress, dwSize, lpAddress)
 				ctx.SetReturn(lpAddress)
 				return 0
 			}
@@ -16931,7 +18471,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
-		ravelog.Logf("[win32] VirtualAlloc(0x%x, 0x%x, type=0x%x) → 0x%x\n", lpAddress, dwSize, flAllocationType, addr)
+		ravelog.Logf("[win32] VirtualAlloc(0x%x, 0x%x, type=0x%x) -> 0x%x\n", lpAddress, dwSize, flAllocationType, addr)
 		ctx.SetReturn(addr)
 		return 0
 	})
@@ -17124,72 +18664,44 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		nCount := ctx.Arg(0)
 		pHandles := ctx.Arg(1)
 		waitAll := ctx.Arg(2) != 0
+		alertable := ctx.Arg(4) != 0
 		var tid uint32 = 1
 		if *tmPtr != nil {
 			tid = uint32((*tmPtr).GetTID(ctx.CPU))
 		}
-		if nCount == 0 || pHandles == 0 {
+		if nCount == 0 || nCount > 64 || pHandles == 0 {
+			setLastErrorValue(ctx, 87) // ERROR_INVALID_PARAMETER
 			ctx.SetReturn(0xFFFFFFFF)
 			return 0
 		}
 		values := readWin32HandleArray(ctx.Mem, pHandles, nCount, ctx.State != nil && ctx.State.Is32)
-		ctx.SetReturn(waitMultipleFallbackWin32(handles, values, tid, waitAll, msToTimeout(ctx.Arg(3))))
+		if len(values) != int(nCount) {
+			setLastErrorValue(ctx, 87)
+			ctx.SetReturn(0xFFFFFFFF)
+			return 0
+		}
+		result, apcs := waitMultipleExWin32(handles, values, tid, waitAll, msToTimeout(ctx.Arg(3)), alertable)
+		if result == uint64(ntobj.WaitIOCompletion) {
+			dispatchAlertableAPCs(tid, apcs)
+		} else if result == uint64(ntobj.WaitFailed) {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
+		}
+		ctx.SetReturn(result)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "WaitForSingleObjectEx", func(ctx *ntapi.TrapContext) uint32 {
-		// Delegate to WaitForSingleObject logic (ignore alertable flag)
 		h := ntapi.Handle(ctx.Arg(0))
-		ms := ctx.Arg(1)
-		var timeout time.Duration
-		if ms == 0xFFFFFFFF {
-			timeout = -1
-		} else if ms == 0 {
-			timeout = 0
-		} else {
-			timeout = time.Duration(ms) * time.Millisecond
-		}
 		var tid uint32 = 1
 		if *tmPtr != nil {
 			tid = uint32((*tmPtr).GetTID(ctx.CPU))
 		}
-		if th := handles.GetThread(h); th != nil && th.Done != nil {
-			if timeout < 0 {
-				<-th.Done
-				ctx.SetReturn(0)
-			} else if timeout == 0 {
-				select {
-				case <-th.Done:
-					ctx.SetReturn(0)
-				default:
-					ctx.SetReturn(0x102)
-				}
-			} else {
-				select {
-				case <-th.Done:
-					ctx.SetReturn(0)
-				case <-time.After(timeout):
-					ctx.SetReturn(0x102)
-				}
-			}
-			return 0
+		result, apcs := waitOneExWin32(handles, h, tid, msToTimeout(ctx.Arg(1)), ctx.Arg(2) != 0)
+		if result == uint64(ntobj.WaitIOCompletion) {
+			dispatchAlertableAPCs(tid, apcs)
+		} else if result == uint64(ntobj.WaitFailed) {
+			setLastErrorValue(ctx, 6) // ERROR_INVALID_HANDLE
 		}
-		if eh := handles.GetEvent(h); eh != nil {
-			if eh.WaitTimeout(timeout) {
-				ctx.SetReturn(0)
-			} else {
-				ctx.SetReturn(0x102)
-			}
-			return 0
-		}
-		if mh := handles.GetMutant(h); mh != nil {
-			ctx.SetReturn(uint64(mh.WaitTimeout(tid, timeout)))
-			return 0
-		}
-		if sh := handles.GetSemaphore(h); sh != nil {
-			ctx.SetReturn(uint64(sh.WaitTimeout(timeout)))
-			return 0
-		}
-		ctx.SetReturn(0)
+		ctx.SetReturn(result)
 		return 0
 	})
 	d.RegisterAutoStubHandler(kernel32, "WaitForThreadpoolIoCallbacks", func(ctx *ntapi.TrapContext) uint32 {
@@ -17687,9 +19199,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 	})
 	d.RegisterAutoStubHandler(kernel32, "_lclose", func(ctx *ntapi.TrapContext) uint32 {
 		hFile := ntapi.Handle(ctx.Arg(0))
-		if fh := handles.GetFile(hFile); fh != nil {
-			ctx.FS.Close(fh.FD)
-			handles.Close(hFile)
+		if ok, err := closeKernelHandle(ctx, hFile); ok && err == nil {
 			ctx.SetReturn(0)
 		} else {
 			ctx.SetReturn(0xFFFF)
@@ -17701,12 +19211,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		vfsPath := winPathToVFS(name)
 		fd, err := ctx.FS.Open(vfsPath, vfs.O_CREAT|vfs.O_RDWR|vfs.O_TRUNC)
 		if err != nil {
-			ravelog.Logf("[kernel32] _lcreat(%q) → HFILE_ERROR\n", name)
+			ravelog.Logf("[kernel32] _lcreat(%q) -> HFILE_ERROR\n", name)
 			ctx.SetReturn(0xFFFF)
 			return 0
 		}
-		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
-		ravelog.Logf("[kernel32] _lcreat(%q) → handle=0x%x\n", name, uint64(h))
+		h := handles.Alloc(&ntapi.FileHandle{
+			FD: fd, Path: vfsPath, Access: 0xC0000000,
+		})
+		ravelog.Logf("[kernel32] _lcreat(%q) -> handle=0x%x\n", name, uint64(h))
 		ctx.SetReturn(uint64(h))
 		return 0
 	})
@@ -17721,10 +19233,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		newPos, err := ctx.FS.Lseek(fh.FD, offset, origin)
 		if err != nil {
-			ravelog.Logf("[kernel32] _llseek(0x%x, %d, %d) → ERROR\n", uint64(hFile), offset, origin)
+			ravelog.Logf("[kernel32] _llseek(0x%x, %d, %d) -> ERROR\n", uint64(hFile), offset, origin)
 			ctx.SetReturn(0xFFFF)
 		} else {
-			ravelog.Logf("[kernel32] _llseek(0x%x, %d, %d) → %d\n", uint64(hFile), offset, origin, newPos)
+			ravelog.Logf("[kernel32] _llseek(0x%x, %d, %d) -> %d\n", uint64(hFile), offset, origin, newPos)
 			ctx.SetReturn(uint64(uint32(newPos)))
 		}
 		return 0
@@ -17743,13 +19255,17 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		peVfsDir := winPathToVFS(peWinDir)
 		var flags int
+		var access uint32
 		switch iReadWrite & 3 {
 		case 1:
 			flags = vfs.O_WRONLY
+			access = 0x40000000
 		case 2:
 			flags = vfs.O_RDWR
+			access = 0xC0000000
 		default:
 			flags = vfs.O_RDONLY
+			access = 0x80000000
 		}
 		fd, err := ctx.FS.Open(vfsPath, flags)
 		if err != nil {
@@ -17763,12 +19279,14 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			}
 		}
 		if err != nil {
-			ravelog.Logf("[kernel32] _lopen(%q) → HFILE_ERROR\n", name)
+			ravelog.Logf("[kernel32] _lopen(%q) -> HFILE_ERROR\n", name)
 			ctx.SetReturn(0xFFFF)
 			return 0
 		}
-		h := handles.Alloc(&ntapi.FileHandle{FD: fd, Path: vfsPath})
-		ravelog.Logf("[kernel32] _lopen(%q) → handle=0x%x\n", name, uint64(h))
+		h := handles.Alloc(&ntapi.FileHandle{
+			FD: fd, Path: vfsPath, Access: access,
+		})
+		ravelog.Logf("[kernel32] _lopen(%q) -> handle=0x%x\n", name, uint64(h))
 		ctx.SetReturn(uint64(h))
 		return 0
 	})
@@ -17784,12 +19302,12 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		buf := make([]byte, nBytes)
 		n, err := ctx.FS.Read(fh.FD, buf)
 		if err != nil && n == 0 {
-			ravelog.Logf("[kernel32] _lread(0x%x, %d) → ERROR\n", uint64(hFile), nBytes)
+			ravelog.Logf("[kernel32] _lread(0x%x, %d) -> ERROR\n", uint64(hFile), nBytes)
 			ctx.SetReturn(0xFFFF)
 			return 0
 		}
 		ctx.Mem.WriteBytes(bufPtr, buf[:n])
-		ravelog.Logf("[kernel32] _lread(0x%x, %d) → %d\n", uint64(hFile), nBytes, n)
+		ravelog.Logf("[kernel32] _lread(0x%x, %d) -> %d\n", uint64(hFile), nBytes, n)
 		ctx.SetReturn(uint64(n))
 		return 0
 	})
@@ -17809,11 +19327,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		}
 		n, werr := ctx.FS.Write(fh.FD, data)
 		if werr != nil {
-			ravelog.Logf("[kernel32] _lwrite(0x%x, %d) → ERROR\n", uint64(hFile), nBytes)
+			ravelog.Logf("[kernel32] _lwrite(0x%x, %d) -> ERROR\n", uint64(hFile), nBytes)
 			ctx.SetReturn(0xFFFF)
 			return 0
 		}
-		ravelog.Logf("[kernel32] _lwrite(0x%x, %d) → %d\n", uint64(hFile), nBytes, n)
+		ravelog.Logf("[kernel32] _lwrite(0x%x, %d) -> %d\n", uint64(hFile), nBytes, n)
 		ctx.SetReturn(uint64(n))
 		return 0
 	})
@@ -17916,7 +19434,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if wiseMainDirNameSeen {
 			wiseMainDirNameSeen = false
 			realPath := "C:\\DXBall"
-			ravelog.Logf("[wise] lstrcpyA MAINDIR value injection: %q → %q\n", src, realPath)
+			ravelog.Logf("[wise] lstrcpyA MAINDIR value injection: %q -> %q\n", src, realPath)
 			src = realPath
 		} else if src == "%MAINDIR%" {
 			wiseMainDirNameSeen = true
@@ -17927,7 +19445,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		if wiseDisabledNameSeen {
 			wiseDisabledNameSeen = false
 			if src == "!" {
-				ravelog.Logf("[wise] lstrcpyA DISABLED value injection: %q → %q (auto-accept)\n", src, "")
+				ravelog.Logf("[wise] lstrcpyA DISABLED value injection: %q -> %q (auto-accept)\n", src, "")
 				src = ""
 			}
 		} else if src == "%DISABLED%" {
@@ -17964,10 +19482,10 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		// The script then calls lstrlenA(0x200098a0) to decide whether installation
 		// is "disabled". If the result is >0 ("!" = disabled), the script skips all
 		// game-file extraction. We intercept that specific check and return 0 so the
-		// script takes the "not disabled → extract game files" branch.
+		// script takes the "not disabled -> extract game files" branch.
 		const wiseWorkBuf = uint64(0x200098a0)
 		if arg == wiseWorkBuf && wiseF16Count == 3 && result > 0 {
-			ravelog.Logf("[wise] lstrlenA(workBuf=0x%x) f16#3 DISABLED override: %d → 0\n", arg, result)
+			ravelog.Logf("[wise] lstrlenA(workBuf=0x%x) f16#3 DISABLED override: %d -> 0\n", arg, result)
 			// Clear the buffer so any subsequent lstrlenA also sees empty.
 			_ = ctx.Mem.WriteBytes(wiseWorkBuf, []byte{0x00})
 			result = 0
@@ -18004,7 +19522,7 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "wine_get_dos_file_name", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "wine_get_unix_file_name", func(ctx *ntapi.TrapContext) uint32 {
-		// Wine internal: converts DOS path → Unix path. Return NULL since
+		// Wine internal: converts DOS path -> Unix path. Return NULL since
 		// we don't have a Wine-style path mapping.
 		ravelog.Logf("[kernel32] wine_get_unix_file_name called (not supported)\n")
 		ctx.SetReturn(0)

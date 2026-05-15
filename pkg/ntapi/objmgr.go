@@ -21,6 +21,8 @@ func (ht *HandleTable) WaitableFor(h Handle) ntobj.Waitable {
 		return o.Waitable()
 	case *SemaphoreHandle:
 		return o.Waitable()
+	case *WaitableTimerHandle:
+		return o.Waitable()
 	default:
 		return nil
 	}

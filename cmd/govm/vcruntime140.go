@@ -13,6 +13,327 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
+type cxxActiveException struct {
+	record           uint64
+	context          uint64
+	object           uint64
+	handler          *ntapi.CxxCatchHandler
+	rethrow          bool
+	rethrowCompleted bool
+}
+
+type cxxThreadExceptions struct {
+	active      []cxxActiveException
+	recordSlot  uint64
+	contextSlot uint64
+}
+
+type cxxExceptionRegistry struct {
+	mu      sync.Mutex
+	mem     *mmu.MMU
+	threads map[int]*cxxThreadExceptions
+}
+
+const (
+	cxxExceptionRecordSize = uint64(0x100)
+	cxxContextRecordSize   = uint64(1232)
+)
+
+type cxxThrowMappings struct {
+	record  uint64
+	context uint64
+}
+
+func captureCxxThrowMappings(ctx *ntapi.TrapContext) (cxxThrowMappings, error) {
+	var mappings cxxThrowMappings
+	if ctx == nil || ctx.Mem == nil {
+		return mappings, fmt.Errorf("invalid C++ throw context")
+	}
+	mappings.record = ctx.Mem.Mmap(0, cxxExceptionRecordSize, mmu.PermRead|mmu.PermWrite)
+	if mappings.record == 0 {
+		return mappings, fmt.Errorf("allocate C++ exception record")
+	}
+	mappings.context = ctx.Mem.Mmap(0, cxxContextRecordSize, mmu.PermRead|mmu.PermWrite)
+	if mappings.context == 0 {
+		mappings.release(ctx.Mem)
+		return mappings, fmt.Errorf("allocate C++ exception context")
+	}
+	contextMarshaler, ok := ctx.CPU.(ntapi.ContextMarshaler)
+	if !ok {
+		mappings.release(ctx.Mem)
+		return mappings, fmt.Errorf("CPU does not support C++ exception context capture")
+	}
+	if err := contextMarshaler.SaveContext(ctx.Mem, mappings.context); err != nil {
+		mappings.release(ctx.Mem)
+		return mappings, fmt.Errorf("capture C++ exception context: %w", err)
+	}
+	return mappings, nil
+}
+
+func (m *cxxThrowMappings) release(mem *mmu.MMU) {
+	if m == nil || mem == nil {
+		return
+	}
+	if m.context != 0 {
+		mem.Munmap(m.context, cxxContextRecordSize)
+		m.context = 0
+	}
+	if m.record != 0 {
+		mem.Munmap(m.record, cxxExceptionRecordSize)
+		m.record = 0
+	}
+}
+
+func newCxxExceptionRegistry(mem *mmu.MMU) *cxxExceptionRegistry {
+	return &cxxExceptionRegistry{mem: mem, threads: make(map[int]*cxxThreadExceptions)}
+}
+
+func (r *cxxExceptionRegistry) syncSlotsLocked(thread *cxxThreadExceptions) {
+	if r.mem == nil || thread == nil || thread.recordSlot == 0 {
+		return
+	}
+	record := uint64(0)
+	context := uint64(0)
+	if count := len(thread.active); count != 0 {
+		record = thread.active[count-1].record
+		context = thread.active[count-1].context
+	}
+	r.mem.Write64(thread.recordSlot, record)
+	r.mem.Write64(thread.contextSlot, context)
+}
+
+func (r *cxxExceptionRegistry) begin(tid int, record, context, object uint64, handler *ntapi.CxxCatchHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	thread := r.threads[tid]
+	if thread == nil {
+		thread = &cxxThreadExceptions{}
+		r.threads[tid] = thread
+	}
+	thread.active = append(thread.active, cxxActiveException{
+		record: record, context: context, object: object, handler: handler,
+	})
+	r.syncSlotsLocked(thread)
+}
+
+func (r *cxxExceptionRegistry) markRethrow(tid int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	thread := r.threads[tid]
+	if thread == nil || len(thread.active) == 0 {
+		return false
+	}
+	thread.active[len(thread.active)-1].rethrow = true
+	return true
+}
+
+func (r *cxxExceptionRegistry) completeRethrow(tid int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	thread := r.threads[tid]
+	if thread == nil || len(thread.active) == 0 {
+		return false
+	}
+	active := &thread.active[len(thread.active)-1]
+	if !active.rethrow {
+		return false
+	}
+	active.rethrowCompleted = true
+	return true
+}
+
+func (r *cxxExceptionRegistry) current(tid int) (cxxActiveException, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	thread := r.threads[tid]
+	if thread == nil || len(thread.active) == 0 {
+		return cxxActiveException{}, false
+	}
+	return thread.active[len(thread.active)-1], true
+}
+
+func (r *cxxExceptionRegistry) end(tid int) (cxxActiveException, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	thread := r.threads[tid]
+	if thread == nil || len(thread.active) == 0 {
+		return cxxActiveException{}, false
+	}
+	index := len(thread.active) - 1
+	active := thread.active[index]
+	thread.active = thread.active[:index]
+	destroy := !active.rethrow || active.rethrowCompleted
+	if destroy {
+		for _, outer := range thread.active {
+			if outer.object == active.object {
+				destroy = false
+				break
+			}
+		}
+	}
+	r.syncSlotsLocked(thread)
+	return active, destroy
+}
+
+func (r *cxxExceptionRegistry) slots(tid int, allocate func() uint64) (uint64, uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	thread := r.threads[tid]
+	if thread == nil {
+		thread = &cxxThreadExceptions{}
+		r.threads[tid] = thread
+	}
+	if thread.recordSlot == 0 {
+		thread.recordSlot = allocate()
+		if thread.recordSlot != 0 {
+			thread.contextSlot = thread.recordSlot + 8
+		}
+	}
+	r.syncSlotsLocked(thread)
+	return thread.recordSlot, thread.contextSlot
+}
+
+func allocCxxCatchTrampoline(mem *mmu.MMU) (*ntapi.DllMainTrampoline, error) {
+	return allocRtlConsolidateTrampoline(mem)
+}
+
+func cxxCatchCallStack(mem *mmu.MMU, stackBase, stackSize, returnAddress,
+	targetRip, targetRsp, rflags uint64) (uint64, error) {
+
+	return rtlConsolidateCallStack(
+		mem, stackBase, stackSize, returnAddress, targetRip, targetRsp, rflags,
+	)
+}
+
+func writeCxxConsolidateRecord(mem *mmu.MMU, address, callback,
+	originalRecord, contextRecord uint64, handler *ntapi.CxxCatchHandler,
+	unwindStartState *int32) error {
+
+	if address == 0 || callback == 0 || originalRecord == 0 || contextRecord == 0 || handler == nil {
+		return fmt.Errorf("invalid C++ consolidation record")
+	}
+	if err := mem.WriteBytes(address, make([]byte, 0x100)); err != nil {
+		return err
+	}
+	mem.Write32(address, ntapi.StatusUnwindConsolidate)
+	mem.Write32(address+4, 1)
+	mem.Write32(address+0x18, ntapi.CxxConsolidateParameterCount)
+	mem.Write64(address+0x20, callback)
+	mem.Write64(address+0x28, handler.EstablisherRBP)
+	mem.Write64(address+0x30, uint64(int64(handler.CatchState)))
+	mem.Write64(address+0x38, uint64(int64(handler.UnwindTargetState)))
+	if unwindStartState != nil {
+		mem.Write64(address+0x40, uint64(int64(*unwindStartState)))
+		mem.Write64(address+0x68, 1)
+	}
+	mem.Write64(address+0x48, handler.ImageBase+uint64(handler.FuncletRVA))
+	mem.Write64(address+0x50, originalRecord)
+	mem.Write64(address+0x58, contextRecord)
+	for index := uint8(0); index < handler.ContinuationCount && index < 2; index++ {
+		mem.Write64(address+0x60+uint64(index)*8,
+			handler.ImageBase+uint64(handler.ContinuationRVAs[index]))
+	}
+	return nil
+}
+
+func readCxxExceptionInfo(mem *mmu.MMU, exceptionRecord, defaultImageBase uint64) *ntapi.CxxExceptionInfo {
+	if exceptionRecord == 0 {
+		return nil
+	}
+	count, err := mem.Read32(exceptionRecord + 0x18)
+	if err != nil || count < 3 {
+		return nil
+	}
+	object, err := mem.Read64(exceptionRecord + 0x28)
+	if err != nil {
+		return nil
+	}
+	throwInfo, err := mem.Read64(exceptionRecord + 0x30)
+	if err != nil {
+		return nil
+	}
+	imageBase := defaultImageBase
+	if count >= 4 {
+		if value, readErr := mem.Read64(exceptionRecord + 0x38); readErr == nil && value != 0 {
+			imageBase = value
+		}
+	}
+	return &ntapi.CxxExceptionInfo{
+		Object:    object,
+		ThrowInfo: throwInfo,
+		ImageBase: imageBase,
+	}
+}
+
+func executeCxxUnwindActions(mem *mmu.MMU, imageBase uint64, handler *ntapi.CxxCatchHandler, guestCall ntapi.GuestCallFunc) error {
+	if handler == nil || len(handler.UnwindActions) == 0 {
+		return nil
+	}
+	if guestCall == nil {
+		return fmt.Errorf("nil guest caller for C++ unwind")
+	}
+	for index, action := range handler.UnwindActions {
+		if action.HandlerRVA == 0 {
+			return fmt.Errorf("C++ unwind action %d has no handler", index)
+		}
+		actionImageBase := action.ImageBase
+		if actionImageBase == 0 {
+			actionImageBase = imageBase
+		}
+		object, frame, err := action.Arguments(mem)
+		if err != nil {
+			return fmt.Errorf("resolve C++ unwind action %d: %w", index, err)
+		}
+		if _, err := guestCall(actionImageBase+uint64(action.HandlerRVA), []uint64{object, frame}); err != nil {
+			return fmt.Errorf("execute C++ unwind action %d at RVA 0x%x: %w", index, action.HandlerRVA, err)
+		}
+	}
+	return nil
+}
+
+func cxxContinuationAddress(imageBase uint64, handler *ntapi.CxxCatchHandler, result uint64) (uint64, error) {
+	if handler == nil {
+		return 0, fmt.Errorf("nil C++ catch handler")
+	}
+	switch handler.ContinuationCount {
+	case 0:
+		if result != 0 {
+			return result, nil
+		}
+		if handler.ContinuationRVA != 0 {
+			return imageBase + uint64(handler.ContinuationRVA), nil
+		}
+	case 1:
+		if handler.ContinuationRVAs[0] != 0 {
+			return imageBase + uint64(handler.ContinuationRVAs[0]), nil
+		}
+	case 2:
+		if result >= 2 {
+			return 0, fmt.Errorf("invalid C++ continuation selector %d", result)
+		}
+		if handler.ContinuationRVAs[result] != 0 {
+			return imageBase + uint64(handler.ContinuationRVAs[result]), nil
+		}
+	default:
+		return 0, fmt.Errorf("invalid C++ continuation count %d", handler.ContinuationCount)
+	}
+	return 0, fmt.Errorf("C++ catch funclet returned no continuation")
+}
+
+func registerCxxFrameHandlers(
+	d *ntapi.Dispatcher,
+	synthByName map[string]*ntapi.SynthPE,
+	handler ntapi.TrapHandler,
+) {
+	if vcrt := synthByName["vcruntime140.dll"]; vcrt != nil {
+		d.RegisterAutoStubHandler(vcrt, "__CxxFrameHandler3", handler)
+		d.RegisterAutoStubHandler(vcrt, "__CxxFrameHandler4", handler)
+	}
+	if vcrtFH4 := synthByName["vcruntime140_1.dll"]; vcrtFH4 != nil {
+		d.RegisterAutoStubHandler(vcrtFH4, "__CxxFrameHandler4", handler)
+	}
+}
+
 // registerVcruntime140Handlers registers handlers for vcruntime140.dll.
 // This DLL provides C++ exception handling, memory intrinsics, and CRT
 // startup/shutdown helpers that MSVC-compiled binaries depend on.
@@ -25,20 +346,150 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 	handles := hctx.Handles
 	procState := hctx.ProcState
 	tmPtr := hctx.TMPtr
+	guestCallTrampoline := hctx.GuestCallTrampoline
+	if guestCallTrampoline == nil {
+		guestCallTrampoline = ntapi.AllocTrampoline(mem)
+	}
+	catchReturnTrampoline, err := allocCxxCatchTrampoline(mem)
+	if err != nil {
+		panic(err)
+	}
+	callCxxGuest := func(ctx *ntapi.TrapContext, address uint64, args []uint64) (uint64, error) {
+		return ntapi.CallGuestFunction(ctx.CPU, mem, guestCallTrampoline, address, args, ctx.Trace)
+	}
+	callCxxCatchFunclet := func(ctx *ntapi.TrapContext, handler *ntapi.CxxCatchHandler,
+		address, unwindContext uint64) (result uint64, err error) {
+
+		if handler == nil || address == 0 || handler.EstablisherRBP < 8 {
+			return 0, fmt.Errorf("invalid C++ catch funclet call")
+		}
+		contextMarshaler, ok := ctx.CPU.(ntapi.ContextMarshaler)
+		if !ok {
+			return 0, fmt.Errorf("CPU does not support C++ catch context marshaling")
+		}
+		registerReader, ok := ctx.CPU.(ntapi.RegisterReader)
+		if !ok {
+			return 0, fmt.Errorf("CPU does not support C++ catch register reads")
+		}
+		registerWriter, ok := ctx.CPU.(ntapi.RegisterWriter)
+		if !ok {
+			return 0, fmt.Errorf("CPU does not support C++ catch register writes")
+		}
+		const contextSize = uint64(1232)
+		savedContext := mem.Mmap(0, contextSize, mmu.PermRead|mmu.PermWrite)
+		if savedContext == 0 {
+			return 0, fmt.Errorf("allocate C++ catch context")
+		}
+		defer mem.Munmap(savedContext, contextSize)
+		if err := contextMarshaler.SaveContext(mem, savedContext); err != nil {
+			return 0, err
+		}
+		defer func() {
+			restoreErr := contextMarshaler.RestoreContext(mem, savedContext)
+			if err == nil && restoreErr != nil {
+				err = restoreErr
+			}
+		}()
+
+		if unwindContext != 0 {
+			if err := contextMarshaler.RestoreContext(mem, unwindContext); err != nil {
+				return 0, err
+			}
+		}
+		for register, value := range handler.SavedRegs {
+			registerWriter.WriteReg(register, value)
+		}
+		const catchStackSize = uint64(64 * 1024)
+		catchStack := mem.Mmap(0, catchStackSize, mmu.PermRead|mmu.PermWrite)
+		if catchStack == 0 {
+			return 0, fmt.Errorf("allocate C++ catch call stack")
+		}
+		defer mem.Munmap(catchStack, catchStackSize)
+		targetContext, err := ntapi.ReadAMD64Context(mem, unwindContext)
+		if err != nil {
+			return 0, err
+		}
+		stackPointer, err := cxxCatchCallStack(
+			mem,
+			catchStack,
+			catchStackSize,
+			catchReturnTrampoline.Addr,
+			handler.ControlPC,
+			handler.BodyRSP,
+			targetContext.Rflags,
+		)
+		if err != nil {
+			return 0, err
+		}
+		registerWriter.WriteReg(1, address)
+		registerWriter.WriteReg(2, handler.EstablisherRBP)
+		registerWriter.WriteReg(8, 0x100)
+		ctx.CPU.SetSP(stackPointer)
+		ctx.CPU.SetPC(address)
+		runErr := ctx.CPU.Run()
+		ctx.CPU.Resume()
+		result = registerReader.ReadReg(11)
+		if runErr != nil {
+			return result, runErr
+		}
+		return result, nil
+	}
+	runFrameUnwind := func(ctx *ntapi.TrapContext, exceptionRecord uint64, dispatcherContext *ntapi.DispatcherContext) error {
+		flags, err := mem.Read32(exceptionRecord + 4)
+		if err != nil || flags&(ntapi.ExceptionFlagUnwinding|ntapi.ExceptionFlagExitUnwind) == 0 {
+			return err
+		}
+		targetState := int32(-1)
+		var currentState *int32
+		code, _ := mem.Read32(exceptionRecord)
+		parameters, _ := mem.Read32(exceptionRecord + 0x18)
+		if flags&ntapi.ExceptionFlagTargetUnwind != 0 && code == 0x80000029 && parameters >= 4 {
+			value, readErr := mem.Read64(exceptionRecord + 0x38)
+			if readErr != nil {
+				return readErr
+			}
+			targetState = int32(value)
+			if parameters >= ntapi.CxxConsolidateParameterCount {
+				targetFrame, targetErr := mem.Read64(exceptionRecord + 0x28)
+				hasState, stateErr := mem.Read64(exceptionRecord + 0x68)
+				if targetErr != nil {
+					return targetErr
+				}
+				if stateErr != nil {
+					return stateErr
+				}
+				if hasState != 0 && targetFrame == dispatcherContext.EstablisherFrame {
+					value, readErr = mem.Read64(exceptionRecord + 0x40)
+					if readErr != nil {
+						return readErr
+					}
+					state := int32(value)
+					currentState = &state
+				}
+			}
+		}
+		actions, err := ntapi.CxxPlanFrameUnwindAtState(
+			mem,
+			exceptionTable,
+			dispatcherContext.EstablisherFrame,
+			dispatcherContext.ControlPc,
+			targetState,
+			currentState,
+			ctx.Trace,
+		)
+		if err != nil {
+			return err
+		}
+		handler := &ntapi.CxxCatchHandler{UnwindActions: actions}
+		return executeCxxUnwindActions(mem, dispatcherContext.ImageBase, handler, func(address uint64, args []uint64) (uint64, error) {
+			return callCxxGuest(ctx, address, args)
+		})
+	}
 
 	vcrt, ok := hctx.SynthByName["vcruntime140.dll"]
 	if !ok {
 		return
 	}
-
-	// ── Thread-local exception state ──
-	// Per-thread current exception pointer and context.
-	type threadExceptionState struct {
-		exceptionPtr uint64
-		contextPtr   uint64
-	}
-	var currentExMu sync.Mutex
-	currentExceptions := make(map[int]threadExceptionState)
 
 	currentThreadID := func(ctx *ntapi.TrapContext) int {
 		if tmPtr != nil && *tmPtr != nil {
@@ -46,29 +497,22 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		}
 		return 1
 	}
-	setCurrentException := func(ctx *ntapi.TrapContext, exceptionPtr, contextPtr uint64) {
-		currentExMu.Lock()
-		currentExceptions[currentThreadID(ctx)] = threadExceptionState{exceptionPtr: exceptionPtr, contextPtr: contextPtr}
-		currentExMu.Unlock()
-	}
-	getCurrentException := func(ctx *ntapi.TrapContext) threadExceptionState {
-		currentExMu.Lock()
-		defer currentExMu.Unlock()
-		return currentExceptions[currentThreadID(ctx)]
-	}
+	exceptions := newCxxExceptionRegistry(mem)
 	captureContextRecord := func(ctx *ntapi.TrapContext) uint64 {
 		const amd64ContextSize = 1232
 		ctxAddr := mem.Mmap(0, amd64ContextSize, mmu.PermRead|mmu.PermWrite)
 		if ctxAddr == 0 {
 			return 0
 		}
-		mem.Write32(ctxAddr+0x00, 0x10000B)
-		if rr, ok := ctx.CPU.(ntapi.RegisterReader); ok {
-			for i, off := range []uint64{0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0} {
-				mem.Write64(ctxAddr+off, rr.ReadReg(i))
-			}
+		contextMarshaler, ok := ctx.CPU.(ntapi.ContextMarshaler)
+		if !ok {
+			mem.Munmap(ctxAddr, amd64ContextSize)
+			return 0
 		}
-		mem.Write64(ctxAddr+0xF8, ctx.CPU.GetPC())
+		if err := contextMarshaler.SaveContext(mem, ctxAddr); err != nil {
+			mem.Munmap(ctxAddr, amd64ContextSize)
+			return 0
+		}
 		return ctxAddr
 	}
 	normalizeModuleName := func(name string) string {
@@ -82,249 +526,345 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return name
 	}
 
-	// ── Onexit table support ──
+	// -- Onexit table support --
 	// Each onexit table is tracked by its guest address.
 	var onexitMu sync.Mutex
-	onexitTables := make(map[uint64][]uint64) // table addr → list of function pointers
+	onexitTables := make(map[uint64][]uint64) // table addr -> list of function pointers
 
-	// ── Type info destroy list ──
+	// -- Type info destroy list --
 	// MSVC keeps a singly-linked list of RTTI type_info nodes for cleanup.
 	// Each node: { next *node; data *void } - 16 bytes on x64.
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// C++ Exception Handling
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
-	// __CxxFrameHandler3: C++ frame-based exception handler (FH3 format).
-	// Called by the OS exception dispatcher. Walks the function's try/catch
-	// map, evaluates type-match filters, and dispatches to catch funclets.
-	//
-	// Signature: EXCEPTION_DISPOSITION __CxxFrameHandler3(
-	//   EXCEPTION_RECORD *pExcept, void *EstablisherFrame,
-	//   CONTEXT *pContext, DISPATCHER_CONTEXT *pDispatcherContext)
-	d.RegisterAutoStubHandler(vcrt, "__CxxFrameHandler3", func(ctx *ntapi.TrapContext) uint32 {
-		exceptionRecord := ctx.Arg(0)
-		dispatcherContext, err := ntapi.ReadDispatcherContext(ctx.Mem, ctx.Arg(3))
-		if err != nil || dispatcherContext == nil {
-			ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
-			return 0
+	var dispatchCxxException func(
+		*ntapi.TrapContext,
+		uint64,
+		uint64,
+		uint64,
+		*int32,
+		*int32,
+	) (bool, error)
+	dispatchCxxException = func(ctx *ntapi.TrapContext, exceptionRecord, searchContextRecord,
+		unwindContextRecord uint64, searchStateOverride, unwindStateOverride *int32) (bool, error) {
+
+		context, err := ntapi.ReadAMD64Context(mem, searchContextRecord)
+		if err != nil {
+			return false, err
 		}
-
-		// Use the emulator's built-in C++ exception dispatch engine which
-		// parses FH3 FuncInfo, walks tryBlockMap, and matches catch types.
-		rsp := dispatcherContext.EstablisherFrame
-		rip := dispatcherContext.ControlPc
-		handler := ntapi.CxxDispatchException(ctx.Mem, exceptionTable, rsp, rip, ctx.Trace)
-		if handler != nil {
-			imageBase := uint64(0)
-			if exceptionTable != nil {
-				imageBase = exceptionTable.ImageBase
-			}
-			if handler.IsFallback {
-				ravelog.Logf("[vcrt] __CxxFrameHandler3 FH4 fallback unwind RIP=0x%x RSP=0x%x\n",
-					handler.FallbackRIP, handler.FallbackRSP)
-				contextRecord, err := ntapi.ReadAMD64Context(ctx.Mem, dispatcherContext.ContextRecord)
-				if err == nil {
-					contextRecord.Rip = handler.FallbackRIP
-					contextRecord.Regs[7] = handler.FallbackRSP // RSP
-					for reg, val := range handler.SavedRegs {
-						if reg < len(contextRecord.Regs) {
-							contextRecord.Regs[reg] = val
-						}
-					}
-					_ = ntapi.WriteAMD64Context(ctx.Mem, dispatcherContext.ContextRecord, contextRecord)
-				}
-				ctx.SetReturn(ntapi.ExceptionDispositionContinueExecution)
-				return 0
-			}
-			catchAddr := imageBase + uint64(handler.FuncletRVA)
-			ravelog.Logf("[vcrt] __CxxFrameHandler3 → catch at 0x%x establisher=0x%x\n",
-				catchAddr, handler.EstablisherRBP)
-
-			// Place the thrown object at [EstablisherRBP + CatchObjOffset]
-			if handler.CatchObjOffset != 0 {
-				// Read thrown object pointer from the exception parameters
-				nParams, _ := ctx.Mem.Read32(exceptionRecord + 0x18)
-				if nParams >= 2 {
-					thrownObjPtr, _ := ctx.Mem.Read64(exceptionRecord + 0x20 + 8) // args[1]
-					dest := handler.EstablisherRBP + uint64(int64(handler.CatchObjOffset))
-					ctx.Mem.Write64(dest, thrownObjPtr)
-				}
-			}
-
-			// Update context to resume at the catch funclet
-			contextRecord, err := ntapi.ReadAMD64Context(ctx.Mem, dispatcherContext.ContextRecord)
-			if err == nil {
-				if handler.FuncletRVA != 0 {
-					contextRecord.Rip = catchAddr
-				} else if handler.ContinuationRVA != 0 {
-					contextRecord.Rip = imageBase + uint64(handler.ContinuationRVA)
-				}
-				contextRecord.Regs[4] = handler.EstablisherRBP // RBP
-				for reg, val := range handler.SavedRegs {
-					if reg < len(contextRecord.Regs) {
-						contextRecord.Regs[reg] = val
-					}
-				}
-				_ = ntapi.WriteAMD64Context(ctx.Mem, dispatcherContext.ContextRecord, contextRecord)
-			}
-
-			// Save current exception for __current_exception()
-			setCurrentException(ctx, exceptionRecord, dispatcherContext.ContextRecord)
-
-			ctx.SetReturn(ntapi.ExceptionDispositionContinueExecution)
-			return 0
-		}
-
-		ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
-		return 0
-	})
-
-	// __CxxFrameHandler4: FH4 compressed format - same dispatch logic.
-	d.RegisterAutoStubHandler(vcrt, "__CxxFrameHandler4", func(ctx *ntapi.TrapContext) uint32 {
-		exceptionRecord := ctx.Arg(0)
-		dispatcherContext, err := ntapi.ReadDispatcherContext(ctx.Mem, ctx.Arg(3))
-		if err != nil || dispatcherContext == nil {
-			ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
-			return 0
-		}
-
-		rsp := dispatcherContext.EstablisherFrame
-		rip := dispatcherContext.ControlPc
-		handler := ntapi.CxxDispatchException(ctx.Mem, exceptionTable, rsp, rip, ctx.Trace)
-		if handler != nil {
-			imageBase := uint64(0)
-			if exceptionTable != nil {
-				imageBase = exceptionTable.ImageBase
-			}
-			contextRecord, err := ntapi.ReadAMD64Context(ctx.Mem, dispatcherContext.ContextRecord)
-			if err == nil {
-				if handler.CatchObjOffset != 0 {
-					nParams, _ := ctx.Mem.Read32(exceptionRecord + 0x18)
-					if nParams >= 2 {
-						thrownObjPtr, _ := ctx.Mem.Read64(exceptionRecord + 0x28)
-						dest := handler.EstablisherRBP + uint64(int64(handler.CatchObjOffset))
-						ctx.Mem.Write64(dest, thrownObjPtr)
-					}
-				}
-				if handler.IsFallback {
-					contextRecord.Rip = handler.FallbackRIP
-					contextRecord.Regs[7] = handler.FallbackRSP
-				} else if handler.FuncletRVA != 0 {
-					contextRecord.Rip = imageBase + uint64(handler.FuncletRVA)
-				} else if handler.ContinuationRVA != 0 {
-					contextRecord.Rip = imageBase + uint64(handler.ContinuationRVA)
-				}
-				contextRecord.Regs[4] = handler.EstablisherRBP
-				for reg, val := range handler.SavedRegs {
-					if reg < len(contextRecord.Regs) {
-						contextRecord.Regs[reg] = val
-					}
-				}
-				_ = ntapi.WriteAMD64Context(ctx.Mem, dispatcherContext.ContextRecord, contextRecord)
-			}
-			setCurrentException(ctx, exceptionRecord, dispatcherContext.ContextRecord)
-			ctx.SetReturn(ntapi.ExceptionDispositionContinueExecution)
-			return 0
-		}
-		ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
-		return 0
-	})
-
-	// _CxxThrowException: raise a C++ exception.
-	// Builds an EXCEPTION_RECORD with code 0xE06D7363 and dispatches it
-	// through RaiseException, which the emulator's kernel32 handler processes.
-	d.RegisterAutoStubHandler(vcrt, "_CxxThrowException", func(ctx *ntapi.TrapContext) uint32 {
-		pExceptionObject := ctx.Arg(0) // pointer to thrown object
-		pThrowInfo := ctx.Arg(1)       // pointer to _ThrowInfo
-		ravelog.Logf("[vcrt] _CxxThrowException obj=0x%x throwInfo=0x%x\n", pExceptionObject, pThrowInfo)
-
-		// Build an EXCEPTION_RECORD on the guest heap:
-		// ExceptionCode = 0xE06D7363 ('msc' | 0xE0000000)
-		// ExceptionFlags = EXCEPTION_NONCONTINUABLE (1)
-		// NumberParameters = 4
-		// ExceptionInformation[0] = EH magic (0x19930520)
-		// ExceptionInformation[1] = pointer to thrown object
-		// ExceptionInformation[2] = pointer to _ThrowInfo
-		// ExceptionInformation[3] = image base (for RVA-based pThrowInfo)
-		const excRecordSize = 0x100
-		excRecord := mem.Mmap(0, excRecordSize, mmu.PermRead|mmu.PermWrite)
-		mem.Write32(excRecord+0x00, 0xE06D7363)      // ExceptionCode
-		mem.Write32(excRecord+0x04, 1)               // ExceptionFlags = NONCONTINUABLE
-		mem.Write64(excRecord+0x08, 0)               // ExceptionRecord chain
-		mem.Write64(excRecord+0x10, ctx.CPU.GetPC()) // ExceptionAddress
-		mem.Write32(excRecord+0x18, 4)               // NumberParameters
-
 		imageBase := uint64(0)
 		if exceptionTable != nil {
 			imageBase = exceptionTable.ImageBase
 		}
-		mem.Write64(excRecord+0x20, 0x19930520)       // EH magic number
-		mem.Write64(excRecord+0x28, pExceptionObject) // thrown object
-		mem.Write64(excRecord+0x30, pThrowInfo)       // _ThrowInfo
-		mem.Write64(excRecord+0x38, imageBase)        // module base for RVA resolution
+		exception := readCxxExceptionInfo(mem, exceptionRecord, imageBase)
+		var handler *ntapi.CxxCatchHandler
+		if searchStateOverride == nil {
+			handler = ntapi.CxxDispatchException(
+				mem, exceptionTable, context.Regs[4], context.Rip, exception, ctx.Trace,
+			)
+		} else {
+			handler = ntapi.CxxDispatchExceptionAtState(
+				mem,
+				exceptionTable,
+				context.Regs[4],
+				context.Rip,
+				exception,
+				*searchStateOverride,
+				ctx.Trace,
+			)
+		}
+		if handler == nil {
+			return false, nil
+		}
+		if handler.ImageBase == 0 {
+			handler.ImageBase = imageBase
+		}
 
-		// Save as current exception
-		contextRecord := captureContextRecord(ctx)
-		setCurrentException(ctx, excRecord, contextRecord)
+		consolidateRecord := mem.Mmap(0, 0x100, mmu.PermRead|mmu.PermWrite)
+		if consolidateRecord == 0 {
+			return false, fmt.Errorf("allocate C++ consolidation record")
+		}
+		defer mem.Munmap(consolidateRecord, 0x100)
+		callbackToken := consolidateRecord + 0x80
+		if err := writeCxxConsolidateRecord(
+			mem,
+			consolidateRecord,
+			callbackToken,
+			exceptionRecord,
+			unwindContextRecord,
+			handler,
+			unwindStateOverride,
+		); err != nil {
+			return false, err
+		}
 
-		// Dispatch through the emulator's SEH machinery
-		rsp := ctx.CPU.GetSP()
-		rip := ctx.CPU.GetPC()
-		handler := ntapi.CxxDispatchException(ctx.Mem, exceptionTable, rsp, rip, ctx.Trace)
-		if handler != nil {
-			if handler.IsFallback {
-				ravelog.Logf("[vcrt] _CxxThrowException → FH4 fallback RIP=0x%x RSP=0x%x\n",
-					handler.FallbackRIP, handler.FallbackRSP)
-				if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
-					rw.WriteReg(0, 0) // RAX = 0
-					for reg, val := range handler.SavedRegs {
-						rw.WriteReg(reg, val)
+		tid := currentThreadID(ctx)
+		guestCall := func(address uint64, args []uint64) (uint64, error) {
+			if address != callbackToken {
+				return callCxxGuest(ctx, address, args)
+			}
+			if len(args) != 1 || args[0] != consolidateRecord {
+				return 0, fmt.Errorf("invalid C++ consolidation callback arguments")
+			}
+			if err := ntapi.MaterializeCxxCatchObject(mem, handler, exception, func(address uint64, args []uint64) (uint64, error) {
+				return callCxxGuest(ctx, address, args)
+			}); err != nil {
+				return 0, err
+			}
+
+			exceptions.begin(tid, exceptionRecord, unwindContextRecord, exception.Object, handler)
+			funcletResult := uint64(0)
+			if handler.FuncletRVA != 0 {
+				funcletResult, err = callCxxCatchFunclet(
+					ctx,
+					handler,
+					handler.ImageBase+uint64(handler.FuncletRVA),
+					unwindContextRecord,
+				)
+				if err != nil {
+					exceptions.end(tid)
+					return 0, err
+				}
+			}
+
+			active, activeOK := exceptions.current(tid)
+			rethrow := activeOK && active.rethrow
+			continuation := uint64(0)
+			if rethrow {
+				refreshed, readErr := ntapi.ReadAMD64Context(mem, unwindContextRecord)
+				if readErr != nil {
+					exceptions.end(tid)
+					return 0, readErr
+				}
+				continuation = refreshed.Rip
+			} else {
+				continuation, err = cxxContinuationAddress(handler.ImageBase, handler, funcletResult)
+				if err != nil {
+					exceptions.end(tid)
+					return 0, err
+				}
+				refreshed, readErr := ntapi.ReadAMD64Context(mem, unwindContextRecord)
+				if readErr != nil {
+					exceptions.end(tid)
+					return 0, readErr
+				}
+				refreshed.Rip = continuation
+				refreshed.Regs[4] = handler.BodyRSP
+				for register, value := range handler.SavedRegs {
+					if register >= 0 && register < len(refreshed.Regs) {
+						refreshed.Regs[register] = value
 					}
 				}
-				ctx.CPU.SetSP(handler.FallbackRSP)
-				ctx.CPU.SetPC(handler.FallbackRIP)
-				return 0
+				if writeErr := ntapi.WriteAMD64Context(mem, unwindContextRecord, refreshed); writeErr != nil {
+					exceptions.end(tid)
+					return 0, writeErr
+				}
 			}
-			catchAddr := imageBase + uint64(handler.FuncletRVA)
-			// Place thrown object for the catch block
-			if handler.CatchObjOffset != 0 && pExceptionObject != 0 {
-				dest := handler.EstablisherRBP + uint64(int64(handler.CatchObjOffset))
-				mem.Write64(dest, pExceptionObject)
-			}
-			if handler.FuncletRVA == 0 && handler.ContinuationRVA != 0 {
-				contAddr := imageBase + uint64(handler.ContinuationRVA)
-				if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
-					for reg, val := range handler.SavedRegs {
-						rw.WriteReg(reg, val)
+
+			ended, destroy := exceptions.end(tid)
+			if destroy && exception != nil {
+				destructor, destructorErr := exception.DestructorAddress(mem)
+				if destructorErr != nil {
+					return 0, destructorErr
+				}
+				if destructor != 0 {
+					if _, callErr := callCxxGuest(ctx, destructor, []uint64{ended.object}); callErr != nil {
+						return 0, callErr
 					}
 				}
-				ctx.CPU.SetPC(contAddr)
-				ctx.CPU.SetSP(handler.BodyRSP)
+			}
+			return continuation, nil
+		}
+
+		err = ntapi.UnwindStack(
+			mem,
+			consolidateRecord,
+			unwindContextRecord,
+			handler.EstablisherRBP,
+			handler.ControlPC,
+			0,
+			0,
+			guestCall,
+			ctx.Trace,
+		)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	runCxxFrameHandler := func(ctx *ntapi.TrapContext) uint32 {
+		exceptionRecord := ctx.Arg(0)
+		dispatcherContext, err := ntapi.ReadDispatcherContext(mem, ctx.Arg(3))
+		if err != nil || dispatcherContext == nil {
+			ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
+			return 0
+		}
+		exceptionFlags, err := mem.Read32(exceptionRecord + 4)
+		if err != nil {
+			ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
+			return 0
+		}
+		if exceptionFlags&(ntapi.ExceptionFlagUnwinding|ntapi.ExceptionFlagExitUnwind) != 0 {
+			if err := runFrameUnwind(ctx, exceptionRecord, dispatcherContext); err != nil {
+				ravelog.Logf("[vcrt] C++ frame unwind failed: %v\n", err)
+				ctx.SetReturn(^uint64(0))
 				return 0
 			}
-			if rw, ok := ctx.CPU.(ntapi.RegisterWriter); ok {
-				for reg, val := range handler.SavedRegs {
-					rw.WriteReg(reg, val)
-				}
-				rw.WriteReg(2, handler.EstablisherRBP) // RDX = establisher frame
+			ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
+			return 0
+		}
+		handled, err := dispatchCxxException(
+			ctx,
+			exceptionRecord,
+			dispatcherContext.ContextRecord,
+			dispatcherContext.ContextRecord,
+			nil,
+			nil,
+		)
+		if err != nil {
+			ravelog.Logf("[vcrt] C++ phase-two dispatch failed: %v\n", err)
+			ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
+			return 0
+		}
+		if handled {
+			ctx.SetReturn(ntapi.ExceptionDispositionContinueExecution)
+		} else {
+			ctx.SetReturn(ntapi.ExceptionDispositionContinueSearch)
+		}
+		return 0
+	}
+
+	registerCxxFrameHandlers(d, hctx.SynthByName, runCxxFrameHandler)
+
+	d.RegisterAutoStubHandler(vcrt, "_CxxThrowException", func(ctx *ntapi.TrapContext) uint32 {
+		tid := currentThreadID(ctx)
+		pExceptionObject := ctx.Arg(0)
+		pThrowInfo := ctx.Arg(1)
+		if pExceptionObject == 0 && pThrowInfo == 0 {
+			active, ok := exceptions.current(tid)
+			if !ok || active.handler == nil || !exceptions.markRethrow(tid) {
+				fmt.Fprintln(os.Stderr, "govm: C++ rethrow without an active exception")
+				os.Exit(3)
+				return 0
 			}
-			sp := handler.EstablisherRBP - 8
-			ctx.CPU.SetSP(sp)
-			ctx.CPU.SetPC(catchAddr)
+			rethrowContext := captureContextRecord(ctx)
+			if rethrowContext == 0 {
+				fmt.Fprintln(os.Stderr, "govm: cannot capture C++ rethrow context")
+				os.Exit(3)
+				return 0
+			}
+			defer mem.Munmap(rethrowContext, 1232)
+			context, contextErr := ntapi.ReadAMD64Context(mem, rethrowContext)
+			if contextErr != nil {
+				fmt.Fprintf(os.Stderr, "govm: cannot read C++ rethrow context: %v\n", contextErr)
+				os.Exit(3)
+				return 0
+			}
+			returnAddress, returnErr := mem.Read64(context.Regs[4])
+			if returnErr != nil || returnAddress == 0 {
+				fmt.Fprintf(os.Stderr, "govm: cannot find C++ rethrow call site: %v\n", returnErr)
+				os.Exit(3)
+				return 0
+			}
+			context.Rip = returnAddress
+			context.Regs[4] += 8
+			if contextErr = ntapi.WriteAMD64Context(mem, rethrowContext, context); contextErr != nil {
+				fmt.Fprintf(os.Stderr, "govm: cannot write C++ rethrow context: %v\n", contextErr)
+				os.Exit(3)
+				return 0
+			}
+			searchState := active.handler.CatchState
+			unwindState := active.handler.UnwindTargetState
+			handled, err := dispatchCxxException(
+				ctx,
+				active.record,
+				active.context,
+				rethrowContext,
+				&searchState,
+				&unwindState,
+			)
+			if err != nil || !handled || !exceptions.completeRethrow(tid) {
+				fmt.Fprintf(os.Stderr, "govm: unhandled C++ rethrow: %v\n", err)
+				os.Exit(3)
+				return 0
+			}
+			completedContext, readErr := ntapi.ReadAMD64Context(mem, rethrowContext)
+			if readErr != nil {
+				fmt.Fprintf(os.Stderr, "govm: cannot read C++ rethrow continuation: %v\n", readErr)
+				os.Exit(3)
+				return 0
+			}
+			if writeErr := ntapi.WriteAMD64Context(mem, active.context, completedContext); writeErr != nil {
+				fmt.Fprintf(os.Stderr, "govm: cannot transfer C++ rethrow continuation: %v\n", writeErr)
+				os.Exit(3)
+				return 0
+			}
+			ctx.CPU.SetPC(catchReturnTrampoline.Addr)
 			return 0
 		}
 
-		// No handler found - this is a fatal unhandled C++ exception
-		ravelog.Logf("[vcrt] _CxxThrowException: no handler found - calling terminate\n")
-		fmt.Fprintf(os.Stderr, "govm: unhandled C++ exception at RIP=0x%x\n", rip)
-		os.Exit(3)
+		mappings, captureErr := captureCxxThrowMappings(ctx)
+		if captureErr != nil {
+			fmt.Fprintf(os.Stderr, "govm: cannot prepare C++ exception: %v\n", captureErr)
+			os.Exit(3)
+			return 0
+		}
+		defer mappings.release(mem)
+		exceptionRecord := mappings.record
+		contextRecord := mappings.context
+		context, err := ntapi.ReadAMD64Context(mem, contextRecord)
+		if err != nil {
+			mappings.release(mem)
+			fmt.Fprintf(os.Stderr, "govm: cannot read C++ exception context: %v\n", err)
+			os.Exit(3)
+			return 0
+		}
+		returnAddress, err := mem.Read64(context.Regs[4])
+		if err == nil && returnAddress != 0 {
+			context.Rip = returnAddress
+			context.Regs[4] += 8
+			_ = ntapi.WriteAMD64Context(mem, contextRecord, context)
+		}
+
+		imageBase := uint64(0)
+		if _, throwImageBase, _ := ntapi.LookupFunctionEntry(mem, context.Rip, nil); throwImageBase != 0 {
+			imageBase = throwImageBase
+		} else if exceptionTable != nil {
+			imageBase = exceptionTable.ImageBase
+		}
+		mem.Write32(exceptionRecord, 0xE06D7363)
+		mem.Write32(exceptionRecord+4, 1)
+		mem.Write64(exceptionRecord+0x10, context.Rip)
+		mem.Write32(exceptionRecord+0x18, 4)
+		mem.Write64(exceptionRecord+0x20, 0x19930520)
+		mem.Write64(exceptionRecord+0x28, pExceptionObject)
+		mem.Write64(exceptionRecord+0x30, pThrowInfo)
+		mem.Write64(exceptionRecord+0x38, imageBase)
+
+		handled, dispatchErr := dispatchCxxException(
+			ctx, exceptionRecord, contextRecord, contextRecord, nil, nil,
+		)
+		if dispatchErr != nil || !handled {
+			mappings.release(mem)
+			fmt.Fprintf(os.Stderr, "govm: unhandled C++ exception at RIP=0x%x: %v\n", context.Rip, dispatchErr)
+			os.Exit(3)
+			return 0
+		}
+		contextMarshaler, ok := ctx.CPU.(ntapi.ContextMarshaler)
+		if !ok || contextMarshaler.RestoreContext(mem, contextRecord) != nil {
+			mappings.release(mem)
+			fmt.Fprintln(os.Stderr, "govm: cannot restore C++ continuation context")
+			os.Exit(3)
+		}
 		return 0
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// __C_specific_handler / _except_handler4_common: C SEH dispatch.
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
 	runCSpecificHandler := func(ctx *ntapi.TrapContext, exceptionRecordAddr, dispatcherContextAddr uint64) uint32 {
 		dispatcherContext, err := ntapi.ReadDispatcherContext(ctx.Mem, dispatcherContextAddr)
@@ -378,7 +918,6 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 			contextRecord.Rip = dispatcherContext.TargetIp
 			contextRecord.Regs[4] = dispatcherContext.EstablisherFrame
 			_ = ntapi.WriteAMD64Context(ctx.Mem, dispatcherContext.ContextRecord, contextRecord)
-			setCurrentException(ctx, exceptionRecordAddr, dispatcherContext.ContextRecord)
 			ctx.SetReturn(ntapi.ExceptionDispositionContinueExecution)
 			return 0
 		}
@@ -394,9 +933,9 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return runCSpecificHandler(ctx, ctx.Arg(2), ctx.Arg(5))
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// Memory intrinsics (same logic as ucrtbase)
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
 	d.RegisterAutoStubHandler(vcrt, "memset", func(ctx *ntapi.TrapContext) uint32 {
 		dst := ctx.Arg(0)
@@ -497,10 +1036,10 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// _purecall: Called when a pure virtual function is invoked.
 	// This is always a fatal programming error.
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
 	d.RegisterAutoStubHandler(vcrt, "_purecall", func(ctx *ntapi.TrapContext) uint32 {
 		rip := ctx.CPU.GetPC()
@@ -510,10 +1049,10 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// __std_type_info_destroy_list: cleanup hook.
 	// For now we simply clear the head pointer and leave the allocations intact.
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
 	d.RegisterAutoStubHandler(vcrt, "__std_type_info_destroy_list", func(ctx *ntapi.TrapContext) uint32 {
 		if headPtr := ctx.Arg(0); headPtr != 0 {
@@ -522,11 +1061,11 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// __std_exception_copy / __std_exception_destroy
 	// MSVC std::exception internal structure:
 	//   struct __std_exception_data { char* _What; bool _DoFree; };
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
 	d.RegisterAutoStubHandler(vcrt, "__std_exception_copy", func(ctx *ntapi.TrapContext) uint32 {
 		src := ctx.Arg(0) // const __std_exception_data*
@@ -580,9 +1119,9 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// CRT startup/shutdown helpers
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
 	d.RegisterAutoStubHandler(vcrt, "_initialize_narrow_environment", func(ctx *ntapi.TrapContext) uint32 {
 		ravelog.Logf("[vcrt] _initialize_narrow_environment\n")
@@ -640,9 +1179,9 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// __vcrt forwarded kernel32 functions
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
 	// __vcrt_GetModuleFileNameW: forward to GetModuleFileNameW logic
 	d.RegisterAutoStubHandler(vcrt, "__vcrt_GetModuleFileNameW", func(ctx *ntapi.TrapContext) uint32 {
@@ -724,30 +1263,30 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	// __current_exception / __current_exception_context
 	// Return pointers to thread-local exception state.
-	// ════════════════════════════════════════════════════════════════════
-
-	// Allocate guest slots for the pointers
-	currentExSlot := mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
-	currentExCtxSlot := currentExSlot + 8
+	// ====================================================================
 
 	d.RegisterAutoStubHandler(vcrt, "__current_exception", func(ctx *ntapi.TrapContext) uint32 {
-		state := getCurrentException(ctx)
-		mem.Write64(currentExSlot, state.exceptionPtr)
-		ctx.SetReturn(currentExSlot)
+		tid := currentThreadID(ctx)
+		recordSlot, _ := exceptions.slots(tid, func() uint64 {
+			return mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+		})
+		ctx.SetReturn(recordSlot)
 		return 0
 	})
 
 	d.RegisterAutoStubHandler(vcrt, "__current_exception_context", func(ctx *ntapi.TrapContext) uint32 {
-		state := getCurrentException(ctx)
-		mem.Write64(currentExCtxSlot, state.contextPtr)
-		ctx.SetReturn(currentExCtxSlot)
+		tid := currentThreadID(ctx)
+		_, contextSlot := exceptions.slots(tid, func() uint64 {
+			return mem.Mmap(0, 16, mmu.PermRead|mmu.PermWrite)
+		})
+		ctx.SetReturn(contextSlot)
 		return 0
 	})
 
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 	createGuestThread := func(ctx *ntapi.TrapContext, startAddr, param, stackSize, threadIDPtr uint64) uint64 {
 		if startAddr == 0 || tmPtr == nil || *tmPtr == nil || procState == nil || handles == nil {
 			return 0
@@ -808,7 +1347,7 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 	})
 
 	// Additional vcruntime140 exports
-	// ════════════════════════════════════════════════════════════════════
+	// ====================================================================
 
 	// __std_type_info_hash: hash a type_info name for unordered containers.
 	d.RegisterAutoStubHandler(vcrt, "__std_type_info_hash", func(ctx *ntapi.TrapContext) uint32 {
@@ -959,7 +1498,7 @@ func registerVcruntime140Handlers(hctx *HandlerCtx) {
 		return 0
 	})
 
-	// __std_terminate: calls std::terminate() → abort
+	// __std_terminate: calls std::terminate() -> abort
 	d.RegisterAutoStubHandler(vcrt, "__std_terminate", func(ctx *ntapi.TrapContext) uint32 {
 		ravelog.Logf("[vcrt] __std_terminate called\n")
 		fmt.Fprintf(os.Stderr, "govm: std::terminate() called\n")

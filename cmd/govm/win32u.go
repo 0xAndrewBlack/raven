@@ -43,7 +43,15 @@ func installWin32uUserCallbackRuntime(hctx *HandlerCtx) ntapi.UserCallbackRuntim
 	return runtime
 }
 
-func beginWindowProcUserCallback(d *ntapi.Dispatcher, runtime ntapi.UserCallbackRuntime, ctx *ntapi.TrapContext, wndProc, hwnd uint64, message uint32, wParam, lParam uint64) bool {
+func beginWindowProcUserCallback(
+	d *ntapi.Dispatcher,
+	runtime ntapi.UserCallbackRuntime,
+	ctx *ntapi.TrapContext,
+	wndProc, hwnd uint64,
+	message uint32,
+	wParam, lParam uint64,
+	completion func(),
+) bool {
 	if d == nil || runtime.Dispatcher == 0 || ctx == nil {
 		return false
 	}
@@ -66,6 +74,9 @@ func beginWindowProcUserCallback(d *ntapi.Dispatcher, runtime ntapi.UserCallback
 				result = 0
 			}
 			cpu.SetSyscallReturn(result)
+			if completion != nil {
+				completion()
+			}
 		})
 	if err != nil {
 		return false
@@ -91,6 +102,45 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 	clientAreaOrigin := hctx.ClientAreaOrigin
 	queuePaint := hctx.QueuePaint
 	userCallbacks := installWin32uUserCallbackRuntime(hctx)
+	destroyPending := make(map[uint64]bool)
+	destroyDelivered := make(map[uint64]bool)
+
+	cleanupDestroyedWindow := func(root uint64) {
+		for _, hwnd := range windowCleanupHandles(root, hctx.HwndChildren) {
+			if win := hctx.WlWindows[hwnd]; win != nil {
+				if hctx.DestroyOwnedDialog != nil {
+					hctx.DestroyOwnedDialog(hwnd, nil)
+				}
+				delete(hctx.WlWindows, hwnd)
+				delete(hctx.WlWindowHWND, win)
+			}
+			cleanupHandlerWindowState(hctx, hwnd)
+		}
+		if hctx.FocusHwnd == root {
+			hctx.FocusHwnd = hctx.MainHWND
+		}
+		delete(destroyPending, root)
+		delete(destroyDelivered, root)
+	}
+	flushDestroyedWindows := func() {
+		for hwnd := range destroyDelivered {
+			cleanupDestroyedWindow(hwnd)
+		}
+	}
+	resolveWindowProc := func(hwnd uint64) uint64 {
+		if wndProc := hctx.HwndWndProc[hwnd]; wndProc != 0 {
+			return wndProc
+		}
+		atom := hctx.HwndClassAtom[hwnd]
+		wndProc := hctx.AtomWndProc[atom]
+		if wndProc != 0 {
+			hctx.HwndWndProc[hwnd] = wndProc
+		}
+		return wndProc
+	}
+	hasSubclass := func(hwnd uint64) bool {
+		return hctx.HasWindowSubclass != nil && hctx.HasWindowSubclass(hwnd)
+	}
 
 	nextDynID := uint32(ntapi.DynExportIDBase + 0x600)
 	reg := func(name string, handler ntapi.TrapHandler) {
@@ -593,7 +643,8 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		dc := getDC(ctx.Arg(0))
 		rgn := gdiMgr.GetRegion(ctx.Arg(1))
 		if dc != nil && rgn != nil {
-			dc.FillRect(rgn.X0, rgn.Y0, rgn.X1, rgn.Y1, gdiMgr.BrushColor(ctx.Arg(2), hctx.SysColors))
+			fillRectUsingBrushHandle(dc, gdiMgr, ctx.Arg(2), hctx.SysColors,
+				rgn.X0, rgn.Y0, rgn.X1, rgn.Y1)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -1305,10 +1356,21 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 	})
 	reg("NtUserDestroyWindow", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
-		delete(hctx.HwndChildren, hwnd)
-		delete(hctx.HwndWndProc, hwnd)
-		delete(hctx.HwndTitle, hwnd)
-		delete(win32uWindowRgns, hwnd)
+		if hwnd == 0 || destroyPending[hwnd] ||
+			(hctx.HwndChildren[hwnd] == nil && win32.Global.Get(hwnd) == nil) {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if resolveWindowProc(hwnd) == 0 {
+			cleanupDestroyedWindow(hwnd)
+			ctx.SetReturn(1)
+			return 0
+		}
+		destroyPending[hwnd] = true
+		hctx.enqueueMessage(nil,
+			newQueuedMsg(hctx, hwnd, 0x0002, 0, 0),
+			newQueuedMsg(hctx, hwnd, 0x0082, 0, 0),
+		)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -1676,6 +1738,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	reg("NtUserGetMessage", func(ctx *ntapi.TrapContext) uint32 {
+		flushDestroyedWindows()
 		pMsg := ctx.Arg(0)
 		if hctx.queueCount(ctx.CPU) == 0 {
 			for hwnd, invalid := range hctx.WinInvalid {
@@ -1707,6 +1770,7 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	reg("NtUserPeekMessage", func(ctx *ntapi.TrapContext) uint32 {
+		flushDestroyedWindows()
 		pMsg := ctx.Arg(0)
 		remove := ctx.Arg(4)&0x1 != 0
 		_, delivered := hctx.MsgQueue.deliver(ctx.CPU, nil,
@@ -1728,17 +1792,29 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 			return 0
 		}
 		hwnd, message, wParam, lParam := readMsg(ctx, pMsg)
-		if result, handled := hctx.BuiltinWndProc(hwnd, message, wParam, lParam); handled {
-			ctx.SetReturn(result)
-			return 0
+		if !hasSubclass(hwnd) {
+			if result, handled := hctx.BuiltinWndProc(hwnd, message, wParam, lParam); handled {
+				ctx.SetReturn(result)
+				return 0
+			}
 		}
-		wndProc := hctx.HwndWndProc[hwnd]
+		wndProc := resolveWindowProc(hwnd)
 		if wndProc == 0 {
+			if message == 0x0082 && destroyPending[hwnd] {
+				cleanupDestroyedWindow(hwnd)
+			}
 			ctx.SetReturn(0)
 			return 0
 		}
-		if beginWindowProcUserCallback(d, userCallbacks, ctx, wndProc, hwnd, message, wParam, lParam) {
+		var completion func()
+		if message == 0x0082 && destroyPending[hwnd] {
+			completion = func() { cleanupDestroyedWindow(hwnd) }
+		}
+		if beginWindowProcUserCallback(d, userCallbacks, ctx, wndProc, hwnd, message, wParam, lParam, completion) {
 			return 0
+		}
+		if completion != nil {
+			destroyDelivered[hwnd] = true
 		}
 		if ctx.State != nil && ctx.State.Is32 {
 			rr, readOK := ctx.CPU.(ntapi.RegisterReader)
@@ -1782,11 +1858,13 @@ func registerWin32UHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	sendMessage := func(ctx *ntapi.TrapContext, hwnd uint64, msg uint32, wParam, lParam uint64) uint32 {
-		if result, handled := hctx.BuiltinWndProc(hwnd, msg, wParam, lParam); handled {
-			ctx.SetReturn(result)
-			return 0
+		if !hasSubclass(hwnd) {
+			if result, handled := hctx.BuiltinWndProc(hwnd, msg, wParam, lParam); handled {
+				ctx.SetReturn(result)
+				return 0
+			}
 		}
-		wp := hctx.HwndWndProc[hwnd]
+		wp := resolveWindowProc(hwnd)
 		if wp == 0 {
 			ctx.SetReturn(0)
 			return 0

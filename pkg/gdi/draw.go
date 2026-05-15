@@ -36,16 +36,22 @@ func (dc *DC) FillRect(left, top, right, bottom int32, color uint32) {
 	dc.target().FillRect(x0, y0, x1, y1, color)
 }
 
-// FillRectBrush fills using the DC's current brush color.
+// FillRectBrush fills using the DC's current brush.
 func (dc *DC) FillRectBrush(left, top, right, bottom int32) {
-	if dc.Brush == nil || dc.Brush.Style == 1 {
+	dc.FillRectWithBrush(left, top, right, bottom, dc.Brush)
+}
+
+// FillRectWithBrush fills using the supplied brush.
+func (dc *DC) FillRectWithBrush(left, top, right, bottom int32, brush *Brush) {
+	if brush == nil || brush.Style == 1 {
 		return
 	}
-	if dc.Brush.Style != 2 {
-		dc.FillRect(left, top, right, bottom, dc.Brush.Color)
+	if brush.Style != 2 && brush.Style != 3 {
+		dc.FillRect(left, top, right, bottom, brush.Color)
 		return
 	}
 
+	target := dc.target()
 	x0 := left + dc.OriginX
 	y0 := top + dc.OriginY
 	x1 := right + dc.OriginX
@@ -54,11 +60,57 @@ func (dc *DC) FillRectBrush(left, top, right, bottom int32) {
 	if !ok {
 		return
 	}
+	if x0 < 0 {
+		x0 = 0
+	}
+	if y0 < 0 {
+		y0 = 0
+	}
+	if x1 > target.Width {
+		x1 = target.Width
+	}
+	if y1 > target.Height {
+		y1 = target.Height
+	}
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
+
+	if brush.Style == 3 {
+		if brush.Pattern == nil || brush.Pattern.Surf == nil {
+			return
+		}
+		bitmap := brush.Pattern
+		pattern := brush.Pattern.Surf
+		rowBytes := int64(bitmap.Width) * 4
+		requiredBytes := int64(bitmap.Height-1)*int64(pattern.Stride) + rowBytes
+		if bitmap.Width <= 0 || bitmap.Height <= 0 ||
+			pattern.Width < bitmap.Width || pattern.Height < bitmap.Height ||
+			int64(pattern.Stride) < rowBytes || int64(len(pattern.Pix)) < requiredBytes {
+			return
+		}
+		dc.Dirty = true
+		for y := y0; y < y1; y++ {
+			py := (y - dc.OriginY) % bitmap.Height
+			if py < 0 {
+				py += bitmap.Height
+			}
+			for x := x0; x < x1; x++ {
+				px := (x - dc.OriginX) % bitmap.Width
+				if px < 0 {
+					px += bitmap.Width
+				}
+				target.SetPixel(x, y, pattern.GetPixel(px, py))
+			}
+		}
+		return
+	}
+
 	if dc.BkMode != 1 {
-		dc.target().FillRect(x0, y0, x1, y1, dc.BkColor)
+		target.FillRect(x0, y0, x1, y1, dc.BkColor)
 	}
 	match := func(x, y int32) bool {
-		switch dc.Brush.Hatch {
+		switch brush.Hatch {
 		case 0:
 			return y&7 == 0
 		case 1:
@@ -79,7 +131,7 @@ func (dc *DC) FillRectBrush(left, top, right, bottom int32) {
 	for y := y0; y < y1; y++ {
 		for x := x0; x < x1; x++ {
 			if match(x, y) {
-				dc.target().SetPixel(x, y, dc.Brush.Color)
+				target.SetPixel(x, y, brush.Color)
 			}
 		}
 	}

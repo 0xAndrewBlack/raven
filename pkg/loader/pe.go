@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
+	"github.com/mirkobrombin/Raven/pkg/hostenv"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
@@ -363,7 +364,11 @@ func MapPEFile(path string, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
 // It writes the bytes to a temporary host file and delegates to MapPEFile,
 // overriding the module name with the provided name.
 func MapPEBytes(name string, data []byte, mem *mmu.MMU, forceBase uint64) (*PEModule, error) {
-	tmp, err := os.CreateTemp("", "govm-dll-*.pe")
+	tmpDir, err := hostenv.TempDir()
+	if err != nil {
+		return nil, fmt.Errorf("MapPEBytes temp directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, "govm-dll-*.pe")
 	if err != nil {
 		return nil, fmt.Errorf("MapPEBytes tmpfile: %w", err)
 	}
@@ -383,7 +388,6 @@ func MapPEBytes(name string, data []byte, mem *mmu.MMU, forceBase uint64) (*PEMo
 	mod.Name = strings.ToLower(name)
 	return mod, nil
 }
-
 
 func applyRelocations(mem *mmu.MMU, base, relocRVA, relocSize uint64, delta int64, is64 bool) error {
 	addr := base + relocRVA

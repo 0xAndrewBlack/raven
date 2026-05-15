@@ -65,6 +65,16 @@ void raven_entry(void) {
         !behind_group || !group_box || !isolated_group) {
         fail(11);
     }
+    point.x = 20;
+    point.y = 115;
+    if (ChildWindowFromPoint(parent, point) != behind_group) {
+        fail(12);
+    }
+    if (!SetWindowPos(
+            group_box, HWND_TOP, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)) {
+        fail(13);
+    }
 
     point.x = 15;
     point.y = 15;

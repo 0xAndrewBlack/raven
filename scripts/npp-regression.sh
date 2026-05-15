@@ -2,19 +2,37 @@
 
 set -u
 cd "$(dirname "$0")/.." || exit 2
+source scripts/raven-cache.sh || exit 2
 
 RAVEN="${RAVEN:-}"
 if [[ -z "$RAVEN" ]]; then
-  RAVEN="${TMPDIR:-/tmp}/raven-npp-regression"
+  mkdir -p "$RAVEN_CACHE_ROOT/bin"
+  RAVEN="$RAVEN_CACHE_ROOT/bin/raven-npp-regression"
   go build -tags guest_windows -o "$RAVEN" ./cmd/govm || exit 2
 fi
 
-TRUSTED_RUNTIME="$(cat /tmp/raven-labwc-runtime.path 2>/dev/null)"
-RUNTIME="${RAVEN_LABWC_RUNTIME:-$TRUSTED_RUNTIME}"
-USER_RUNTIME="/run/user/$(id -u)/raven-labwc-runtime"
-if [[ -z "$RUNTIME" || "$RUNTIME" != "$TRUSTED_RUNTIME" || ( "$RUNTIME" != /tmp/raven-labwc-runtime && "$RUNTIME" != /tmp/raven-labwc-runtime.* && "$RUNTIME" != "$USER_RUNTIME" ) || ! -S "$RUNTIME/wayland-0" ]]; then
-	 echo "FAIL: isolated labwc socket is unavailable"
-	 exit 2
+TRUSTED_RUNTIME_RAW="$(cat "$RAVEN_LABWC_RUNTIME_FILE" 2>/dev/null)"
+TRUSTED_RUNTIME=""
+if [[ -n "$TRUSTED_RUNTIME_RAW" ]]; then
+  TRUSTED_RUNTIME="$(realpath -m -- "$TRUSTED_RUNTIME_RAW")"
+fi
+RUNTIME_RAW="${RAVEN_LABWC_RUNTIME:-$TRUSTED_RUNTIME}"
+RUNTIME=""
+if [[ -n "$RUNTIME_RAW" ]]; then
+  RUNTIME="$(realpath -m -- "$RUNTIME_RAW")"
+fi
+USER_SESSION_RUNTIME="/run/user/$(id -u)"
+if [[ -z "$RUNTIME" || "$RUNTIME" != "$TRUSTED_RUNTIME" ||
+   "$RUNTIME" != "$RAVEN_RUNTIME_ROOT"/labwc-* ||
+   "$RUNTIME" == "$USER_SESSION_RUNTIME" ||
+   ! -S "$RUNTIME/wayland-0" ]]; then
+  echo "FAIL: isolated labwc socket is unavailable"
+  exit 2
+fi
+if [[ -S "$USER_SESSION_RUNTIME/wayland-0" &&
+   "$RUNTIME/wayland-0" -ef "$USER_SESSION_RUNTIME/wayland-0" ]]; then
+  echo "FAIL: isolated socket resolves to the user compositor"
+  exit 2
 fi
 
 LABWC_PID=""
@@ -29,16 +47,67 @@ if [[ -z "$LABWC_PID" ]]; then
   echo "FAIL: isolated labwc process is unavailable"
   exit 2
 fi
+echo "NPP isolated runtime: $RUNTIME"
+echo "NPP GUI env: DISPLAY=<unset> WAYLAND_SOCKET=<unset> WAYLAND_DISPLAY=wayland-0"
 
-TMP="$(mktemp -d)"
 if [[ -z "${RAVEN_NPP_KEEP_TMP:-}" ]]; then
+  TMP="$(mktemp -d "$RAVEN_TMPDIR/npp.XXXXXX")" || exit 2
   trap 'rm -rf "$TMP"' EXIT
 else
+  TMP="$(mktemp -d "$RAVEN_ARTIFACT_ROOT/npp.XXXXXX")" || exit 2
+  printf 'raven-npp-regression\n' >"$TMP/.raven-npp-owned"
+  raven_prune_owned_runs "$RAVEN_ARTIFACT_ROOT" ".raven-npp-owned" 5 || exit 2
   echo "NPP regression artifacts: $TMP"
 fi
 NPP="$(pwd)/testdata/npp/notepad++.exe"
 FIXTURE="$TMP/raven-open-fixture.txt"
 printf 'Raven open flow works.\n' >"$FIXTURE"
+
+validate_raven_gui_env() {
+  local pid="$1"
+  local child_env attempt
+  for attempt in $(seq 1 100); do
+    child_env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null)" || return 1
+    if ! grep -q '^DISPLAY=' <<<"$child_env" &&
+      ! grep -q '^WAYLAND_SOCKET=' <<<"$child_env" &&
+      grep -Fqx "XDG_RUNTIME_DIR=$RUNTIME" <<<"$child_env" &&
+      grep -Fqx 'WAYLAND_DISPLAY=wayland-0' <<<"$child_env"; then
+      return 0
+    fi
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.01
+  done
+  return 1
+}
+
+stop_raven_pid() {
+  local pid="$1"
+  local attempt
+  kill -INT "$pid" 2>/dev/null || true
+  for attempt in $(seq 1 50); do
+    kill -0 "$pid" 2>/dev/null || {
+      wait "$pid" 2>/dev/null || true
+      return
+    }
+    sleep 0.02
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+  for attempt in $(seq 1 50); do
+    kill -0 "$pid" 2>/dev/null || {
+      wait "$pid" 2>/dev/null || true
+      return
+    }
+    sleep 0.02
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  for attempt in $(seq 1 50); do
+    kill -0 "$pid" 2>/dev/null || {
+      wait "$pid" 2>/dev/null || true
+      return
+    }
+    sleep 0.02
+  done
+}
 
 run_npp() {
   local log="$1"; shift
@@ -51,20 +120,25 @@ run_npp() {
     RAVEN_TRACE_FIND="${RAVEN_TRACE_FIND:-}" \
     "$RAVEN" "$@" >"$log" 2>&1 &
   local pid=$!
+  if ! validate_raven_gui_env "$pid"; then
+    stop_raven_pid "$pid"
+    echo "FAIL: Raven GUI child environment is not isolated" >>"$log"
+    return 1
+  fi
   local deadline=$((SECONDS + ${RUN_TIMEOUT:-110}))
   while kill -0 "$pid" 2>/dev/null; do
+    if grep -q '\[auto\] script failed:' "$log" 2>/dev/null; then
+      stop_raven_pid "$pid"
+      return 1
+    fi
     if grep -q '\[auto\] script complete' "$log" 2>/dev/null; then
-      kill -INT "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      stop_raven_pid "$pid"
       grep -q '\[auto\] script complete' "$log" &&
         ! grep -Eq '\[cpu-fault\]|PE runtime error' "$log"
       return
     fi
     if (( SECONDS >= deadline )); then
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 1
-      kill -KILL "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      stop_raven_pid "$pid"
       return 1
     fi
     sleep 0.2
@@ -192,6 +266,34 @@ for arch in 32 64; do
     fail "PE$arch wait multiple fixture produced a CPU fault"
 done
 
+OVERLAPPED_DIRECTORY_FIXTURE32="$TMP/overlapped_directory_fixture32.exe"
+i686-w64-mingw32-gcc -nostdlib -e _raven_entry -Wl,--subsystem,console \
+  -o "$OVERLAPPED_DIRECTORY_FIXTURE32" \
+  testdata/dll_fixture/overlapped_directory_fixture.c -lkernel32 || \
+  fail "PE32 overlapped directory fixture did not build"
+OVERLAPPED_DIRECTORY_FIXTURE64="$TMP/overlapped_directory_fixture64.exe"
+zig cc -target x86_64-windows-gnu -nostdlib -fno-sanitize=undefined -fno-stack-protector \
+  -Wl,-e,raven_entry -Wl,--subsystem,console \
+  -o "$OVERLAPPED_DIRECTORY_FIXTURE64" \
+  testdata/dll_fixture/overlapped_directory_fixture.c -lkernel32 || \
+  fail "PE64 overlapped directory fixture did not build"
+for arch in 32 64; do
+  fixture_var="OVERLAPPED_DIRECTORY_FIXTURE${arch}"
+  fixture="${!fixture_var}"
+  fixture_dir="$TMP/overlapped-directory-$arch"
+  mkdir "$fixture_dir" || fail "PE$arch overlapped directory fixture setup failed"
+  timeout --foreground --kill-after=3s 12s "$RAVEN" -wayland=false \
+    "$fixture" "$fixture_dir" >"$TMP/overlapped-directory-$arch.log" 2>&1 || \
+    fail "PE$arch overlapped directory fixture failed"
+  grep -q '\[resolve\] overlapped_directory_fixture.* 0 unresolved' \
+    "$TMP/overlapped-directory-$arch.log" || \
+    fail "PE$arch overlapped directory fixture imports were not resolved"
+  grep -q '\[win32\] ExitProcess(0)' "$TMP/overlapped-directory-$arch.log" || \
+    fail "PE$arch overlapped directory fixture did not validate rearm, IOCP, timeout, APC, and cancellation semantics"
+  ! grep -q '\[cpu-fault\]' "$TMP/overlapped-directory-$arch.log" || \
+    fail "PE$arch overlapped directory fixture produced a CPU fault"
+done
+
 THREAD_MESSAGE_FIXTURE32="$TMP/thread_message_fixture32.exe"
 i686-w64-mingw32-gcc -nostdlib -e _raven_entry -Wl,--subsystem,console \
   -o "$THREAD_MESSAGE_FIXTURE32" testdata/dll_fixture/thread_message_fixture.c -luser32 -lkernel32 || \
@@ -295,6 +397,20 @@ check_png_region_colors() {
     fail "expected color detail is missing: $path $geometry"
 }
 
+check_png_region_luminance() {
+  local path="$1"
+  local geometry="$2"
+  local minimum="$3"
+  local maximum="$4"
+  local label="$5"
+  local mean
+  mean="$(convert "$path" -crop "$geometry" +repage -colorspace Gray -format '%[fx:mean]' info: 2>/dev/null)" || \
+    fail "invalid PNG luminance region: $path $geometry"
+  awk -v mean="$mean" -v minimum="$minimum" -v maximum="$maximum" \
+    'BEGIN { exit !(mean >= minimum && mean <= maximum) }' || \
+    fail "$label luminance $mean is outside [$minimum, $maximum]"
+}
+
 check_png_region_changed() {
   local before="$1"
   local after="$2"
@@ -355,27 +471,65 @@ for arch in 32 64; do
   check_png_region "$message_box_png" '320x110+20+20'
 done
 
-OPEN_AUTO='35:chord:29,24;52:screenshot:'"$TMP/open.png"
-DIALOG_PATH="$FIXTURE" run_npp "$TMP/open.log" -auto "$OPEN_AUTO" "$NPP" || fail "Open dialog run terminated unexpectedly"
+OPEN_FIRST="$TMP/first.txt"
+printf 'Raven first tab document.\n' >"$OPEN_FIRST"
+OPEN_AUTO='35:chord:29,24;50:screenshot:'"$TMP/open-second.png"';54:click:30,55;60:screenshot:'"$TMP/open-first.png"';64:click:110,55;70:screenshot:'"$TMP/open-second-again.png"
+DIALOG_PATH="$FIXTURE" RAVEN_TRACE_CLICK=1 run_npp "$TMP/open.log" -auto "$OPEN_AUTO" "$NPP" "$OPEN_FIRST" || \
+  fail "Open dialog and tab switching run terminated unexpectedly"
 grep -Fq "IFileOpenDialog::Show selected" "$TMP/open.log" || fail "IFileOpenDialog did not return the selected host file"
 grep -q 'text="Raven open flow works."' "$TMP/open.log" || fail "Open dialog selection did not reach Scintilla"
+awk '/\[auto\] click at \(30,55\)/ { clicked=1 } clicked && /text="Raven first tab document\."/ { found=1; exit } END { exit !found }' "$TMP/open.log" || \
+  fail "Selecting the first tab after Open did not activate its Scintilla document"
+awk '/\[auto\] click at \(110,55\)/ { clicked=1 } clicked && /text="Raven open flow works\."/ { found=1; exit } END { exit !found }' "$TMP/open.log" || \
+  fail "Selecting the Opened tab did not reactivate its Scintilla document"
 grep -Eq '\[gpa\] GetProcAddress\(.*"RtlGetNtVersionNumbers"\)' "$TMP/open.log" || \
   fail "RtlGetNtVersionNumbers was not resolved from ntdll"
 grep -Fq '"wine_get_version") -> not found' "$TMP/open.log" || \
   fail "Wine detection export was exposed to the application"
 [[ "$(grep -c '\[commit\] Commit' "$TMP/open.log")" -le 120 ]] || fail "Idle editor produced excessive frame commits"
-check_png "$TMP/open.png"
+check_png "$TMP/open-second.png"
+check_png "$TMP/open-first.png"
+check_png "$TMP/open-second-again.png"
+check_png_region_changed "$TMP/open-second.png" "$TMP/open-first.png" '1000x200+50+70'
+check_png_region_same "$TMP/open-second.png" "$TMP/open-second-again.png" '1000x200+50+70'
 
+MARKDOWN_FIXTURE="$TMP/raven-markdown-fixture.md"
+printf '# Raven Markdown fixture\n\n## Stable Scintilla marker\n\n- **Bold marker**\n- `inline code marker`\n- [Raven link](https://example.invalid/raven)\n\n> Markdown rendering stays independent from README edits.\n' >"$MARKDOWN_FIXTURE"
 MARKDOWN_AUTO='35:screenshot:'"$TMP/markdown.png"
-RAVEN_TRACE_FIND=1 run_npp "$TMP/markdown.log" -auto "$MARKDOWN_AUTO" "$NPP" "$(pwd)/README.md" || \
+RAVEN_TRACE_FIND=1 run_npp "$TMP/markdown.log" -auto "$MARKDOWN_AUTO" "$NPP" "$MARKDOWN_FIXTURE" || \
   fail "Markdown UDL run terminated unexpectedly"
 grep -F 'FindFirstFileW pattern="C:\\npp\\userDefineLangs\\*.xml"' "$TMP/markdown.log" |
   grep -Fq 'entries=2 err=<nil>' || fail "Markdown UDL files were not enumerated from the VFS"
 grep -F 'CreateFileW: "C:\\npp\\userDefineLangs\\markdown._preinstalled.udl.xml"' "$TMP/markdown.log" |
   grep -Fq 'handle=' || fail "Markdown UDL file was not opened"
-grep -Fq 'text="## How it works"' "$TMP/markdown.log" || fail "Markdown text was not painted by Scintilla"
+grep -Fq 'text="## Stable Scintilla marker"' "$TMP/markdown.log" || fail "Markdown text was not painted by Scintilla"
 check_png "$TMP/markdown.png"
 check_png_region_colors "$TMP/markdown.png" '1000x540+70+72' 800
+
+FOLD_FIXTURE="$TMP/fold-margin.cpp"
+cat >"$FOLD_FIXTURE" <<'EOF'
+int main() {
+    if (true) {
+        for (int i = 0; i < 4; ++i) {
+            if (i > 1) {
+                return i;
+            }
+        }
+    }
+    return 0;
+}
+EOF
+FOLD_AUTO='35:screenshot:'"$TMP/fold-margin.png"
+run_npp "$TMP/fold-margin.log" -auto "$FOLD_AUTO" "$NPP" "$FOLD_FIXTURE" || \
+  fail "fold-margin rendering run terminated unexpectedly"
+check_png "$TMP/fold-margin.png"
+check_png_region_colors "$TMP/fold-margin.png" '58x360+0+72' 12
+check_png_region_luminance "$TMP/fold-margin.png" '58x360+0+72' 0.08 0.94 \
+  "Scintilla fold margin"
+check_png_region_luminance "$TMP/fold-margin.png" '1050x15+20+637' 0.60 0.98 \
+  "Scintilla horizontal scrollbar"
+check_png_region_luminance "$TMP/fold-margin.png" '1080x20+10+656' 0.60 0.98 \
+  "light bottom rebar"
 
 UNICODE_NPP_FILE="$TMP/"$'unicode-\U0001f600-\u65e5\u672c\u8a9e.md'
 printf '# Unicode path\n\nCaf\303\251, \316\225\316\273\316\273\316\267\316\275\316\271\316\272\316\254, \346\227\245\346\234\254\350\252\236, emoji: \360\237\230\200\n' >"$UNICODE_NPP_FILE"
@@ -389,23 +543,6 @@ grep -Fq 'text="# Unicode path"' "$TMP/unicode.log" || \
 grep -Fq 'text="Caf' "$TMP/unicode.log" || \
   fail "Unicode text was not painted by Scintilla"
 check_png "$TMP/unicode.png"
-
-TAB_FIRST="$TMP/first.txt"
-TAB_SECOND="$TMP/second.txt"
-printf 'Raven first tab document.\n' >"$TAB_FIRST"
-printf 'Raven second tab document.\n' >"$TAB_SECOND"
-TABS_AUTO='35:screenshot:'"$TMP/tabs-second.png"';38:click:30,55;43:screenshot:'"$TMP/tabs-first.png"';46:click:140,55;51:screenshot:'"$TMP/tabs-second-again.png"
-RAVEN_TRACE_CLICK=1 run_npp "$TMP/tabs.log" -auto "$TABS_AUTO" "$NPP" "$TAB_FIRST" "$TAB_SECOND" || \
-  fail "Multi-document tab run terminated unexpectedly"
-awk '/\[auto\] click at \(30,55\)/ { clicked=1 } clicked && /text="Raven first tab document\."/ { found=1; exit } END { exit !found }' "$TMP/tabs.log" || \
-  fail "Selecting the first tab did not activate its Scintilla document"
-awk '/\[auto\] click at \(140,55\)/ { clicked=1 } clicked && /text="Raven second tab document\."/ { found=1; exit } END { exit !found }' "$TMP/tabs.log" || \
-  fail "Selecting the second tab did not reactivate its Scintilla document"
-check_png "$TMP/tabs-second.png"
-check_png "$TMP/tabs-first.png"
-check_png "$TMP/tabs-second-again.png"
-check_png_region_changed "$TMP/tabs-second.png" "$TMP/tabs-first.png" '1000x200+50+70'
-check_png_region_same "$TMP/tabs-second.png" "$TMP/tabs-second-again.png" '1000x200+50+70'
 
 FIND_AUTO='35:chord:29,33;40:click-title:Find,220,52;41:key-title:Find,14;41.2:key-title:Find,14;41.4:key-title:Find,14;41.6:key-title:Find,14;41.8:key-title:Find,14;43:key-title:Find,17;43.2:key-title:Find,24;43.4:key-title:Find,19;43.6:key-title:Find,37;43.8:key-title:Find,31;47:click-title:Find,647,53;52:screenshot-all:'"$TMP/find"';55:key-title:Find,15;58:click-title:Find,100,296;61:screenshot-all:'"$TMP/find-group-before"';64:key-title:Find,106;68:screenshot-all:'"$TMP/find-group-after"';72:click-title:Find,647,226;78:screenshot-all:'"$TMP/find-closed"
 run_npp "$TMP/find.log" -auto "$FIND_AUTO" "$NPP" "$FIXTURE" || fail "Find run terminated unexpectedly"
@@ -486,7 +623,7 @@ check_png_region_changed "$FIND_FILES_RESULTS_MAIN" "$TMP/find-files-opened.png"
 
 REPLACE_FIXTURE="$TMP/raven-replace-fixture.txt"
 printf 'alpha beta alpha\n' >"$REPLACE_FIXTURE"
-REPLACE_AUTO='35:chord:29,35;40:click-title:Replace,220,88;41:key-title:Replace,24;41.2:key-title:Replace,50;41.4:key-title:Replace,18;41.6:key-title:Replace,34;41.8:key-title:Replace,30;45:click-title:Replace,647,126;49:screenshot-all:'"$TMP/replace"';52:click-title:Replace,647,212;55:chord:29,31;58:screenshot:'"$TMP/replace-main.png"
+REPLACE_AUTO='35:chord:29,35;40:click-title:Replace,220,88;41:key-title:Replace,24;41.2:key-title:Replace,50;41.4:key-title:Replace,18;41.6:key-title:Replace,34;41.8:key-title:Replace,30;45:click-title:Replace,647,126;49:screenshot-all:'"$TMP/replace"';52:click-title:Replace,647,212;55:chord:29,31;70:screenshot:'"$TMP/replace-main.png"
 run_npp "$TMP/replace.log" -auto "$REPLACE_AUTO" "$NPP" "$REPLACE_FIXTURE" || fail "Replace run terminated unexpectedly"
 grep -q 'click-title "Replace"' "$TMP/replace.log" || fail "Replace did not open as a separate window"
 grep -q '\[button\] BN_CLICKED.* id=1609' "$TMP/replace.log" || fail "Replace All did not dispatch BN_CLICKED"
@@ -521,8 +658,8 @@ check_png_region "$ABOUT_DIALOG_PNG" '260x24+95+108'
 check_png_region "$ABOUT_DIALOG_PNG" '110x32+215+436'
 check_png "$TMP/about-responsive.png"
 
-PREFERENCES_AUTO='35:click:337,10;39:click:365,31;47:click-title:Preferences,100,67;52:click-title:Preferences,270,62;54:click-title:Preferences,270,62;57:screenshot-all:'"$TMP/preferences"';60:click-title:Preferences,48,83;64:click-title:Preferences,257,62;76:screenshot-all:'"$TMP/preferences-dark"';80:click-title:Preferences,257,32;86:close-title:Preferences;92:screenshot-all:'"$TMP/preferences-closed"';94:click:18,10;97:screenshot:'"$TMP/preferences-responsive.png"
-run_npp "$TMP/preferences.log" -auto "$PREFERENCES_AUTO" "$NPP" || fail "Preferences run terminated unexpectedly"
+PREFERENCES_AUTO='35:click:337,10;39:click:365,31;47:click-title:Preferences,100,67;52:click-title:Preferences,270,62;54:click-title:Preferences,270,62;57:screenshot-all:'"$TMP/preferences"';60:click-title:Preferences,48,83;64:click-title:Preferences,257,62;140:screenshot-all:'"$TMP/preferences-dark"';145:click-title:Preferences,257,32;190:close-title:Preferences;205:screenshot-all:'"$TMP/preferences-closed"';208:click:18,10;214:screenshot:'"$TMP/preferences-responsive.png"
+RUN_TIMEOUT=250 run_npp "$TMP/preferences.log" -auto "$PREFERENCES_AUTO" "$NPP" || fail "Preferences run terminated unexpectedly"
 PREFERENCES_HWND="$(sed -n 's/.*\[dialog-window\] created hwnd=\(0x[0-9a-f]*\) size=1160x470 title="Preferences".*/\1/p' "$TMP/preferences.log" | tail -1)"
 [[ -n "$PREFERENCES_HWND" ]] || fail "Preferences did not open as a separate window"
 grep -q '\[auto\] click-title "Preferences" at (100,67)' "$TMP/preferences.log" || fail "Preferences did not select the Editing 2 page"
@@ -543,6 +680,7 @@ mapfile -t PREFERENCES_CLOSED_PNGS < <(compgen -G "$TMP/preferences-closed-*.png
 PREFERENCES_DIALOG_PNG=""
 PREFERENCES_MAIN_PNG=""
 PREFERENCES_DARK_MAIN_PNG=""
+PREFERENCES_DARK_DIALOG_PNG=""
 for png in "${PREFERENCES_PNGS[@]}"; do
   check_png "$png"
   [[ "$(identify -format '%w %h' "$png")" == "1100 700" ]] && PREFERENCES_MAIN_PNG="$png"
@@ -551,11 +689,25 @@ done
 for png in "${PREFERENCES_DARK_PNGS[@]}"; do
   check_png "$png"
   [[ "$(identify -format '%w %h' "$png")" == "1100 700" ]] && PREFERENCES_DARK_MAIN_PNG="$png"
+  [[ "$(identify -format '%w %h' "$png")" == "1160 470" ]] && PREFERENCES_DARK_DIALOG_PNG="$png"
 done
-[[ -n "$PREFERENCES_MAIN_PNG" && -n "$PREFERENCES_DIALOG_PNG" && -n "$PREFERENCES_DARK_MAIN_PNG" ]] || fail "Preferences screenshots do not match the expected windows"
+[[ -n "$PREFERENCES_MAIN_PNG" && -n "$PREFERENCES_DIALOG_PNG" &&
+   -n "$PREFERENCES_DARK_MAIN_PNG" && -n "$PREFERENCES_DARK_DIALOG_PNG" ]] || \
+  fail "Preferences screenshots do not match the expected windows"
 check_png "$TMP/preferences-responsive.png"
+check_png_region_colors "$TMP/preferences-responsive.png" '800x25+0+20' 50
 check_png_region_changed "$PREFERENCES_MAIN_PNG" "$PREFERENCES_DARK_MAIN_PNG" '1080x620+10+50'
 check_png_region_colors "$PREFERENCES_DARK_MAIN_PNG" '800x25+0+20' 50
+check_png_region_luminance "$PREFERENCES_DARK_MAIN_PNG" '900x20+0+0' 0.05 0.62 \
+  "dark menu"
+check_png_region_luminance "$PREFERENCES_DARK_MAIN_PNG" '1000x24+0+22' 0.05 0.68 \
+  "dark toolbar"
+check_png_region_luminance "$PREFERENCES_DARK_MAIN_PNG" '1000x18+0+681' 0.05 0.62 \
+  "dark status bar"
+check_png_region_luminance "$PREFERENCES_DARK_DIALOG_PNG" '1120x430+20+20' 0.05 0.62 \
+  "dark Preferences"
+check_png_region_luminance "$PREFERENCES_DARK_DIALOG_PNG" '190x400+20+20' 0.05 0.62 \
+  "dark Preferences navigation"
 check_png_region "$PREFERENCES_DIALOG_PNG" '190x400+20+20'
 check_png_region "$PREFERENCES_DIALOG_PNG" '580x118+252+26'
 check_png_region "$PREFERENCES_DIALOG_PNG" '620x242+252+156'
@@ -640,9 +792,13 @@ SAVE_ALL_FIRST="$TMP/raven-save-all-first.txt"
 SAVE_ALL_SECOND="$TMP/raven-save-all-second.txt"
 printf 'first original\n' >"$SAVE_ALL_FIRST"
 printf 'second original\n' >"$SAVE_ALL_SECOND"
-SAVE_ALL_AUTO='35:click:200,81;38:chord:29,30;40:key:45;43:click:30,55;46:click:200,81;49:chord:29,30;51:key:44;54:click:18,10;57:click:70,229;64:click-title:Save,144,164;70:screenshot:'"$TMP/save-all.png"
-RAVEN_TRACE_CLICK=1 run_npp "$TMP/save-all.log" -auto "$SAVE_ALL_AUTO" "$NPP" "$SAVE_ALL_FIRST" "$SAVE_ALL_SECOND" || \
+SAVE_ALL_AUTO='35:click:200,81;40:chord:29,30;45:key:45;60:click:30,55;65:click:200,81;70:chord:29,30;75:key:44;90:click:18,10;95:click:70,229;105:click-title:Save,144,164;115:screenshot:'"$TMP/save-all.png"
+RUN_TIMEOUT=140 RAVEN_TRACE_CLICK=1 run_npp "$TMP/save-all.log" -auto "$SAVE_ALL_AUTO" "$NPP" "$SAVE_ALL_FIRST" "$SAVE_ALL_SECOND" || \
   fail "Save All run terminated unexpectedly"
+awk '/\[auto\] key 45/ { keyed=1; next } keyed && /path="\/npp\/backup\/raven-save-all-second\.txt@.* hex=78$/ { flushed=1 } /\[auto\] click at \(30,55\)/ { exit !flushed } END { exit !flushed }' "$TMP/save-all.log" || \
+  fail "Save All switched tabs before the second document edit was flushed"
+awk '/\[auto\] key 44/ { keyed=1; next } keyed && /path="\/npp\/backup\/raven-save-all-first\.txt@.* hex=7a$/ { flushed=1 } /\[auto\] click at \(18,10\)/ { exit !flushed } END { exit !flushed }' "$TMP/save-all.log" || \
+  fail "Save All opened the menu before the first document edit was flushed"
 grep -q '\[dialog\] DialogBoxParamW template=#1765' "$TMP/save-all.log" || fail "Save All confirmation did not open"
 grep -q '\[button\] BN_CLICKED .* id=6 ' "$TMP/save-all.log" || fail "Save All confirmation did not receive Yes"
 SAVE_ALL_HWND="$(sed -n 's/.*\[dialog-window\] created hwnd=\(0x[0-9a-f]*\).* title="Save".*/\1/p' "$TMP/save-all.log" | tail -1)"
@@ -705,7 +861,7 @@ DELETE_SOURCE="$TMP/raven-delete-source.txt"
 DELETE_DATA_HOME="$TMP/delete-xdg-data"
 DELETE_CONTENT="Deleted content must not reopen."
 printf '%s\n' "$DELETE_CONTENT" >"$DELETE_SOURCE"
-DELETE_AUTO='35:click:18,10;39:click:70,339;48:click-title:Delete file,230,122;58:click:18,10;61:click:70,53;72:screenshot:'"$TMP/delete.png"
+DELETE_AUTO='35:click:18,10;39:click:70,339;44:screenshot-all:'"$TMP/delete-confirm"';48:click-title:Delete file,260,142;58:click:18,10;61:click:70,53;72:screenshot:'"$TMP/delete.png"
 XDG_DATA_HOME="$DELETE_DATA_HOME" DIALOG_PATH="$DELETE_SOURCE" RAVEN_TRACE_CLICK=1 \
   run_npp "$TMP/delete.log" -auto "$DELETE_AUTO" "$NPP" "$DELETE_SOURCE" || \
   fail "Move to Recycle Bin run terminated unexpectedly"
@@ -723,6 +879,11 @@ DELETE_TRASH_INFO="$DELETE_DATA_HOME/Trash/info/$(basename "$DELETE_SOURCE").tra
 grep -Fq "Path=$DELETE_SOURCE" "$DELETE_TRASH_INFO" || fail "Move to Recycle Bin did not write trash metadata"
 awk -v content="$DELETE_CONTENT" '/popup item index=1 id=41002/ { afterOpen=1; next } afterOpen && index($0, "text=\"" content "\"") { exit 1 }' "$TMP/delete.log" || \
   fail "Deleted file reopened from stale VFS content"
+mapfile -t DELETE_CONFIRM_PNGS < <(compgen -G "$TMP/delete-confirm-[0-9]*.png")
+[[ ${#DELETE_CONFIRM_PNGS[@]} -eq 2 ]] || fail "Delete confirmation did not render as a separate window"
+for png in "${DELETE_CONFIRM_PNGS[@]}"; do
+  check_png "$png"
+done
 check_png "$TMP/delete.png"
 
 NEW_SAVE_TARGET="$TMP/raven-new-document.txt"
@@ -833,7 +994,7 @@ mapfile -t PRINT_CANCEL_OPEN_PNGS < <(compgen -G "$TMP/print-cancel-open-[0-9]*.
 mapfile -t PRINT_CANCEL_CLOSED_PNGS < <(compgen -G "$TMP/print-cancel-closed-[0-9]*.png")
 [[ ${#PRINT_CANCEL_OPEN_PNGS[@]} -eq 2 && ${#PRINT_CANCEL_CLOSED_PNGS[@]} -eq 1 ]] || fail "Print Cancel window lifecycle is incorrect"
 
-if grep -qE 'panic:|fatal error:|PE runtime error:|\[cpu-fault\]|\[cpu-recover\]|\[govm\] thread .* crashed:' "$TMP/replace-file.log" "$TMP/print-dialog.log" "$TMP/tab-control.log" "$TMP/dpi-dynamic-32.log" "$TMP/dpi-dynamic-64.log" "$TMP/message-box-32.log" "$TMP/message-box-64.log" "$TMP/open.log" "$TMP/tabs.log" "$TMP/find.log" "$TMP/replace.log" "$TMP/about.log" "$TMP/preferences.log" "$TMP/color.log" "$TMP/style.log" "$TMP/save.log" "$TMP/save-all.log" "$TMP/reload.log" "$TMP/save-as.log" "$TMP/save-copy.log" "$TMP/rename.log" "$TMP/delete.log" "$TMP/new-save.log" "$TMP/edit.log" "$TMP/goto-run.log" "$TMP/print.log" "$TMP/print-cancel.log"; then
+if grep -qE 'panic:|fatal error:|PE runtime error:|\[cpu-fault\]|\[cpu-recover\]|\[govm\] thread .* crashed:' "$TMP"/*.log; then
   fail "runtime failure detected"
 fi
 

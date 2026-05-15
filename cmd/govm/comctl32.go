@@ -7,10 +7,282 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/mirkobrombin/Raven/pkg/arch"
 	comctl32pkg "github.com/mirkobrombin/Raven/pkg/comctl32"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
+	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
+
+const (
+	subclassDispatchThunkID uint32 = 0x3FFB
+	subclassReturnThunkID   uint32 = 0x3FFA
+	subclassContinueThunkID uint32 = 0x3FF9
+)
+
+type subclassWindowInfo struct {
+	original uint64
+	builtin  bool
+}
+
+type subclassDispatchFrame struct {
+	hwnd       uint64
+	entries    []comctl32pkg.SubclassEntry
+	next       int
+	original   uint64
+	builtin    bool
+	returnAddr uint64
+	resumeSP   uint64
+	returns    []subclassContinuation
+}
+
+type subclassContinuation struct {
+	returnAddr uint64
+	resumeSP   uint64
+}
+
+type subclassCPUDispatch struct {
+	mu     sync.Mutex
+	frames []subclassDispatchFrame
+}
+
+type subclassDispatchRuntime struct {
+	cpus    sync.Map
+	windows sync.Map
+}
+
+func (r *subclassDispatchRuntime) cpu(cpu arch.CPU) *subclassCPUDispatch {
+	state := new(subclassCPUDispatch)
+	actual, _ := r.cpus.LoadOrStore(cpu, state)
+	return actual.(*subclassCPUDispatch)
+}
+
+func (r *subclassDispatchRuntime) installWindow(hwnd uint64, info subclassWindowInfo) subclassWindowInfo {
+	actual, _ := r.windows.LoadOrStore(hwnd, info)
+	return actual.(subclassWindowInfo)
+}
+
+func (r *subclassDispatchRuntime) removeWindow(hwnd uint64) (subclassWindowInfo, bool) {
+	info, ok := r.windows.LoadAndDelete(hwnd)
+	if !ok {
+		return subclassWindowInfo{}, false
+	}
+	return info.(subclassWindowInfo), true
+}
+
+func (r *subclassDispatchRuntime) window(hwnd uint64) (subclassWindowInfo, bool) {
+	info, ok := r.windows.Load(hwnd)
+	if !ok {
+		return subclassWindowInfo{}, false
+	}
+	return info.(subclassWindowInfo), true
+}
+
+func (r *subclassDispatchRuntime) begin(cpu arch.CPU, frame subclassDispatchFrame) {
+	state := r.cpu(cpu)
+	state.mu.Lock()
+	state.frames = append(state.frames, frame)
+	state.mu.Unlock()
+}
+
+func (r *subclassDispatchRuntime) nextEntry(cpu arch.CPU, hwnd uint64) (comctl32pkg.SubclassEntry, subclassDispatchFrame, bool) {
+	state := r.cpu(cpu)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.frames) == 0 {
+		return comctl32pkg.SubclassEntry{}, subclassDispatchFrame{}, false
+	}
+	frame := &state.frames[len(state.frames)-1]
+	if frame.hwnd != hwnd {
+		return comctl32pkg.SubclassEntry{}, subclassDispatchFrame{}, false
+	}
+	for frame.next < len(frame.entries) {
+		snapshot := frame.entries[frame.next]
+		frame.next++
+		if current, ok := comctl32pkg.CurrentSubclass(hwnd, snapshot.Token); ok {
+			return current, *frame, true
+		}
+	}
+	return comctl32pkg.SubclassEntry{}, *frame, false
+}
+
+func (r *subclassDispatchRuntime) activeFrame(cpu arch.CPU, hwnd uint64) (subclassDispatchFrame, bool) {
+	state := r.cpu(cpu)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.frames) == 0 {
+		return subclassDispatchFrame{}, false
+	}
+	frame := state.frames[len(state.frames)-1]
+	return frame, frame.hwnd == hwnd
+}
+
+func (r *subclassDispatchRuntime) pushContinuation(cpu arch.CPU, hwnd uint64, continuation subclassContinuation) bool {
+	state := r.cpu(cpu)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.frames) == 0 {
+		return false
+	}
+	frame := &state.frames[len(state.frames)-1]
+	if frame.hwnd != hwnd {
+		return false
+	}
+	frame.returns = append(frame.returns, continuation)
+	return true
+}
+
+func (r *subclassDispatchRuntime) popContinuation(cpu arch.CPU) (subclassContinuation, bool) {
+	state := r.cpu(cpu)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.frames) == 0 {
+		return subclassContinuation{}, false
+	}
+	frame := &state.frames[len(state.frames)-1]
+	if len(frame.returns) == 0 {
+		return subclassContinuation{}, false
+	}
+	index := len(frame.returns) - 1
+	continuation := frame.returns[index]
+	frame.returns = frame.returns[:index]
+	return continuation, true
+}
+
+func (r *subclassDispatchRuntime) finish(cpu arch.CPU) (subclassDispatchFrame, bool) {
+	state := r.cpu(cpu)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.frames) == 0 {
+		return subclassDispatchFrame{}, false
+	}
+	index := len(state.frames) - 1
+	frame := state.frames[index]
+	state.frames = state.frames[:index]
+	if len(state.frames) == 0 {
+		r.cpus.Delete(cpu)
+	}
+	return frame, true
+}
+
+func pointerSized(value uint64, is32 bool) uint64 {
+	if is32 {
+		return value & 0xFFFFFFFF
+	}
+	return value
+}
+
+func guestReturnAddress(ctx *ntapi.TrapContext) (uint64, bool) {
+	if ctx == nil || ctx.CPU == nil || ctx.Mem == nil {
+		return 0, false
+	}
+	sp := ctx.CPU.GetSP()
+	if ctx.CPU.GetArch() == arch.ArchI386 {
+		value, err := ctx.Mem.Read32(sp)
+		return uint64(value), err == nil
+	}
+	value, err := ctx.Mem.Read64(sp)
+	return value, err == nil
+}
+
+func guestCallResumeSP(ctx *ntapi.TrapContext) uint64 {
+	if ctx.CPU.GetArch() == arch.ArchI386 {
+		return ctx.CPU.GetSP() + 20
+	}
+	return ctx.CPU.GetSP() + 8
+}
+
+func redirectSubclassProc(ctx *ntapi.TrapContext, proc, hwnd uint64, msg uint32, wParam, lParam, id, refData, returnAddr uint64) bool {
+	rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+	if !ok || proc == 0 {
+		return false
+	}
+	sp := ctx.CPU.GetSP()
+	if ctx.CPU.GetArch() == arch.ArchI386 {
+		sp -= 8
+		values := [...]uint64{returnAddr, hwnd, uint64(msg), wParam, lParam, id, refData}
+		for index, value := range values {
+			ctx.Mem.Write32(sp+uint64(index)*4, uint32(value))
+		}
+		rw.WriteReg(4, sp)
+	} else {
+		sp -= 16
+		ctx.Mem.Write64(sp, returnAddr)
+		ctx.Mem.Write64(sp+0x28, id)
+		ctx.Mem.Write64(sp+0x30, refData)
+		rw.WriteReg(4, sp)
+		rw.WriteReg(1, hwnd)
+		rw.WriteReg(2, uint64(msg))
+		rw.WriteReg(8, wParam)
+		rw.WriteReg(9, lParam)
+	}
+	ctx.CPU.SetPC(proc)
+	ctx.ReturnOverridden = true
+	ctx.PCRedirected = true
+	return true
+}
+
+func redirectWindowProc(ctx *ntapi.TrapContext, proc, hwnd uint64, msg uint32, wParam, lParam, returnAddr uint64) bool {
+	rw, ok := ctx.CPU.(ntapi.RegisterWriter)
+	if !ok || proc == 0 {
+		return false
+	}
+	sp := ctx.CPU.GetSP()
+	if ctx.CPU.GetArch() == arch.ArchI386 {
+		values := [...]uint64{returnAddr, hwnd, uint64(msg), wParam, lParam}
+		for index, value := range values {
+			ctx.Mem.Write32(sp+uint64(index)*4, uint32(value))
+		}
+	} else {
+		ctx.Mem.Write64(sp, returnAddr)
+		rw.WriteReg(1, hwnd)
+		rw.WriteReg(2, uint64(msg))
+		rw.WriteReg(8, wParam)
+		rw.WriteReg(9, lParam)
+	}
+	ctx.CPU.SetPC(proc)
+	ctx.ReturnOverridden = true
+	ctx.PCRedirected = true
+	return true
+}
+
+func writeSubclassThunk(mem *mmu.MMU, addr uint64, handlerID uint32, popBytes uint16) {
+	mem.Write8(addr, 0xB8)
+	mem.Write32(addr+1, handlerID)
+	mem.Write8(addr+5, 0x0F)
+	mem.Write8(addr+6, 0x01)
+	mem.Write8(addr+7, 0xC1)
+	if popBytes == 0 {
+		mem.Write8(addr+8, 0xC3)
+		return
+	}
+	mem.Write8(addr+8, 0xC2)
+	mem.Write16(addr+9, popBytes)
+}
+
+func installSubclassThunkPage(hctx *HandlerCtx) bool {
+	if hctx.SubclassWndProc != 0 && hctx.SubclassReturn != 0 && hctx.SubclassContinue != 0 {
+		return true
+	}
+	page := hctx.Mem.Mmap(0, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+	is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+	popBytes := uint16(0)
+	if is32 {
+		popBytes = 16
+	}
+	writeSubclassThunk(hctx.Mem, page, subclassDispatchThunkID, popBytes)
+	hctx.SubclassReturn = page + 32
+	hctx.Mem.Write8(hctx.SubclassReturn, 0x50)
+	writeSubclassThunk(hctx.Mem, hctx.SubclassReturn+1, subclassReturnThunkID, 0)
+	hctx.SubclassContinue = page + 64
+	hctx.Mem.Write8(hctx.SubclassContinue, 0x50)
+	writeSubclassThunk(hctx.Mem, hctx.SubclassContinue+1, subclassContinueThunkID, 0)
+	if err := hctx.Mem.Mprotect(page, mmu.PageSize, mmu.PermRead|mmu.PermExecute); err != nil {
+		return false
+	}
+	hctx.SubclassWndProc = page
+	return true
+}
 
 func rebindOrdinalImports(hctx *HandlerCtx, synth *ntapi.SynthPE, dllName string, bindings map[uint16]string) int {
 	if hctx == nil || synth == nil || hctx.Mem == nil {
@@ -65,6 +337,109 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	if !ok {
 		return
 	}
+	if hctx.SubclassRuntime == nil {
+		hctx.SubclassRuntime = new(subclassDispatchRuntime)
+	}
+	subclasses := hctx.SubclassRuntime
+	if !installSubclassThunkPage(hctx) {
+		return
+	}
+	hctx.HasWindowSubclass = comctl32pkg.HasWindowSubclass
+	restoreSubclassWindow := func(hwnd uint64) {
+		if info, found := subclasses.removeWindow(hwnd); found && hctx.HwndWndProc[hwnd] == hctx.SubclassWndProc {
+			hctx.HwndWndProc[hwnd] = info.original
+		}
+		comctl32pkg.RemoveAllSubclasses(hwnd)
+	}
+	hctx.ClearSubclasses = restoreSubclassWindow
+	callBuiltinOriginal := func(ctx *ntapi.TrapContext, hwnd uint64, msg uint32, wParam, lParam uint64) uint64 {
+		if hctx.BuiltinWndProc == nil {
+			return 0
+		}
+		wasCallingBuiltin := hctx.CallBuiltinControl
+		hctx.CallBuiltinControl = true
+		result, handled := hctx.BuiltinWndProc(hwnd, msg, wParam, lParam)
+		hctx.CallBuiltinControl = wasCallingBuiltin
+		if handled {
+			return result
+		}
+		return 0
+	}
+	d.RegisterHandler(subclassDispatchThunkID, "comctl32SubclassDispatch", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		msg := uint32(ctx.Arg(1))
+		wParam := ctx.Arg(2)
+		lParam := ctx.Arg(3)
+		returnAddr, hasReturn := guestReturnAddress(ctx)
+		info, installed := subclasses.window(hwnd)
+		if !hasReturn || !installed {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		subclasses.begin(ctx.CPU, subclassDispatchFrame{
+			hwnd:       hwnd,
+			entries:    comctl32pkg.GetSubclassChain(hwnd),
+			original:   info.original,
+			builtin:    info.builtin,
+			returnAddr: returnAddr,
+			resumeSP:   guestCallResumeSP(ctx),
+		})
+		if entry, _, found := subclasses.nextEntry(ctx.CPU, hwnd); found {
+			if redirectSubclassProc(ctx, entry.PfnSubclass, hwnd, msg, wParam, lParam,
+				entry.UIDSubclass, entry.DwRefData, hctx.SubclassReturn) {
+				return 0
+			}
+		}
+		_, _ = subclasses.finish(ctx.CPU)
+		if redirectWindowProc(ctx, info.original, hwnd, msg, wParam, lParam, returnAddr) {
+			return 0
+		}
+		if info.builtin {
+			ctx.SetReturn(callBuiltinOriginal(ctx, hwnd, msg, wParam, lParam))
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
+	d.RegisterHandler(subclassReturnThunkID, "comctl32SubclassReturn", func(ctx *ntapi.TrapContext) uint32 {
+		sp := ctx.CPU.GetSP()
+		var result uint64
+		if ctx.CPU.GetArch() == arch.ArchI386 {
+			value, _ := ctx.Mem.Read32(sp)
+			result = uint64(value)
+			ctx.CPU.SetSP(sp + 4)
+		} else {
+			result, _ = ctx.Mem.Read64(sp)
+			ctx.CPU.SetSP(sp + 8)
+		}
+		frame, found := subclasses.finish(ctx.CPU)
+		ctx.SetReturn(result)
+		if found {
+			ctx.CPU.SetSP(frame.resumeSP)
+			ctx.CPU.SetPC(frame.returnAddr)
+			ctx.PCRedirected = true
+		}
+		return 0
+	})
+	d.RegisterHandler(subclassContinueThunkID, "comctl32SubclassContinue", func(ctx *ntapi.TrapContext) uint32 {
+		sp := ctx.CPU.GetSP()
+		var result uint64
+		if ctx.CPU.GetArch() == arch.ArchI386 {
+			value, _ := ctx.Mem.Read32(sp)
+			result = uint64(value)
+		} else {
+			result, _ = ctx.Mem.Read64(sp)
+		}
+		continuation, found := subclasses.popContinuation(ctx.CPU)
+		ctx.SetReturn(result)
+		if found {
+			ctx.CPU.SetSP(continuation.resumeSP)
+			ctx.CPU.SetPC(continuation.returnAddr)
+			ctx.PCRedirected = true
+		}
+		return 0
+	})
 	rebindOrdinalImports(hctx, comctl32, "comctl32.dll", map[uint16]string{
 		2:   "MenuHelp",
 		4:   "GetEffectiveClientRect",
@@ -277,7 +652,12 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(comctl32, "ImageList_ReplaceIcon", func(ctx *ntapi.TrapContext) uint32 {
 		himl := ctx.Arg(0)
 		i := int32(ctx.Arg(1))
-		idx := comctl32pkg.ImageListReplaceIcon(himl, i)
+		hicon := ctx.Arg(2)
+		cx, cy, _ := comctl32pkg.ImageListGetIconSize(himl)
+		pixels := hctx.iconPixels(hicon, cx, cy)
+		idx := comctl32pkg.ImageListReplaceIconData(himl, i, pixels)
+		ravelog.Logf("[comctl32] ImageList_ReplaceIcon himl=0x%x i=%d hicon=0x%x pixels=%d -> %d\n",
+			himl, i, hicon, len(pixels), idx)
 		ctx.SetReturn(uint64(int64(idx)))
 		return 0
 	})
@@ -943,9 +1323,23 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(comctl32, "SetWindowSubclass", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		pfn := ctx.Arg(1)
-		uid := uint32(ctx.Arg(2))
-		ref := ctx.Arg(3)
+		is32 := ctx.CPU.GetArch() == arch.ArchI386
+		uid := pointerSized(ctx.Arg(2), is32)
+		ref := pointerSized(ctx.Arg(3), is32)
+		hadSubclass := comctl32pkg.HasWindowSubclass(hwnd)
 		if comctl32pkg.SetWindowSubclass(hwnd, pfn, uid, ref) {
+			if !hadSubclass {
+				original := hctx.HwndWndProc[hwnd]
+				info := subclasses.installWindow(hwnd, subclassWindowInfo{
+					original: original,
+					builtin:  original == 0 && hctx.HwndChildren[hwnd] != nil,
+				})
+				if hctx.HwndWndProc[hwnd] != hctx.SubclassWndProc {
+					hctx.HwndWndProc[hwnd] = hctx.SubclassWndProc
+				}
+				ravelog.Logf("[comctl32] SetWindowSubclass hwnd=0x%x proc=0x%x id=0x%x original=0x%x builtin=%v\n",
+					hwnd, pfn, uid, info.original, info.builtin)
+			}
 			ctx.SetReturn(1)
 		}
 		return 0
@@ -954,13 +1348,18 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(comctl32, "GetWindowSubclass", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		pfn := ctx.Arg(1)
-		uid := uint32(ctx.Arg(2))
+		is32 := ctx.CPU.GetArch() == arch.ArchI386
+		uid := pointerSized(ctx.Arg(2), is32)
 		pRef := ctx.Arg(3)
 		ref, ok := comctl32pkg.GetWindowSubclass(hwnd, pfn, uid)
-		if ok {
-			if pRef != 0 {
+		if ok && pRef != 0 {
+			if is32 {
+				ctx.Mem.Write32(pRef, uint32(ref))
+			} else {
 				ctx.Mem.Write64(pRef, ref)
 			}
+		}
+		if ok {
 			ctx.SetReturn(1)
 		}
 		return 0
@@ -969,8 +1368,13 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(comctl32, "RemoveWindowSubclass", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		pfn := ctx.Arg(1)
-		uid := uint32(ctx.Arg(2))
+		uid := pointerSized(ctx.Arg(2), ctx.CPU.GetArch() == arch.ArchI386)
 		if comctl32pkg.RemoveWindowSubclass(hwnd, pfn, uid) {
+			if !comctl32pkg.HasWindowSubclass(hwnd) {
+				if info, found := subclasses.removeWindow(hwnd); found && hctx.HwndWndProc[hwnd] == hctx.SubclassWndProc {
+					hctx.HwndWndProc[hwnd] = info.original
+				}
+			}
 			ctx.SetReturn(1)
 		}
 		return 0
@@ -981,16 +1385,45 @@ func registerComctl32Handlers(hctx *HandlerCtx) {
 		uMsg := uint32(ctx.Arg(1))
 		wParam := ctx.Arg(2)
 		lParam := ctx.Arg(3)
-		// We can't call guest subclass procs without a full call-chain.
-		// Try built-in window procedure first (handles builtin controls),
-		// then fall back to 0 (DefWindowProcW default for most messages).
+		returnAddr, hasReturn := guestReturnAddress(ctx)
+		if hasReturn {
+			if entry, frame, found := subclasses.nextEntry(ctx.CPU, hwnd); found {
+				continuation := subclassContinuation{
+					returnAddr: returnAddr,
+					resumeSP:   guestCallResumeSP(ctx),
+				}
+				if !subclasses.pushContinuation(ctx.CPU, hwnd, continuation) {
+					ctx.SetReturn(0)
+					return 0
+				}
+				if redirectSubclassProc(ctx, entry.PfnSubclass, hwnd, uMsg, wParam, lParam,
+					entry.UIDSubclass, entry.DwRefData, hctx.SubclassContinue) {
+					return 0
+				}
+				_, _ = subclasses.popContinuation(ctx.CPU)
+			} else if frame.hwnd == hwnd {
+				continuation := subclassContinuation{
+					returnAddr: returnAddr,
+					resumeSP:   guestCallResumeSP(ctx),
+				}
+				pushed := frame.original != 0 && subclasses.pushContinuation(ctx.CPU, hwnd, continuation)
+				if pushed &&
+					redirectWindowProc(ctx, frame.original, hwnd, uMsg, wParam, lParam, hctx.SubclassContinue) {
+					return 0
+				}
+				if pushed {
+					_, _ = subclasses.popContinuation(ctx.CPU)
+				}
+				if frame.builtin {
+					ctx.SetReturn(callBuiltinOriginal(ctx, hwnd, uMsg, wParam, lParam))
+					return 0
+				}
+			}
+		}
 		if hctx.BuiltinWndProc != nil {
-			wasCallingBuiltin := hctx.CallBuiltinControl
-			hctx.CallBuiltinControl = true
-			res, handled := hctx.BuiltinWndProc(hwnd, uMsg, wParam, lParam)
-			hctx.CallBuiltinControl = wasCallingBuiltin
-			if handled {
-				ctx.SetReturn(res)
+			result := callBuiltinOriginal(ctx, hwnd, uMsg, wParam, lParam)
+			if result != 0 {
+				ctx.SetReturn(result)
 				return 0
 			}
 		}

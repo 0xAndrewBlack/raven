@@ -78,6 +78,44 @@ func TestAlertableNonAlertableIgnoresAPC(t *testing.T) {
 	}
 }
 
+func TestRecursiveAlertableWaitSeesNextAPC(t *testing.T) {
+	m := New()
+	const tid = uint64(12)
+	order := make([]int, 0, 2)
+	m.QueueAPC(tid, func() {
+		order = append(order, 1)
+		code, nested := m.WaitEx(nil, false, tid, 0, true)
+		if code != WaitIOCompletion || len(nested) != 1 {
+			t.Fatalf("nested wait = %#x/%d", code, len(nested))
+		}
+		nested[0]()
+	})
+	m.QueueAPC(tid, func() { order = append(order, 2) })
+
+	code, queued := m.WaitEx(nil, false, tid, 0, true)
+	if code != WaitIOCompletion || len(queued) != 1 {
+		t.Fatalf("outer wait = %#x/%d", code, len(queued))
+	}
+	queued[0]()
+	if len(order) != 2 || order[0] != 1 || order[1] != 2 {
+		t.Fatalf("recursive APC order = %v", order)
+	}
+}
+
+func TestDiscardAPCsRemovesThreadQueue(t *testing.T) {
+	m := New()
+	const tid = uint64(13)
+	m.QueueAPC(tid, func() {})
+	m.QueueAPC(tid, func() {})
+	if discarded := m.DiscardAPCs(tid); discarded != 2 {
+		t.Fatalf("discarded APCs = %d", discarded)
+	}
+	code, queued := m.WaitEx(nil, false, tid, 0, true)
+	if code != WaitTimeout || len(queued) != 0 {
+		t.Fatalf("post-discard wait = %#x/%d", code, len(queued))
+	}
+}
+
 func TestSectionNamedRefcount(t *testing.T) {
 	m := New()
 	s1, existed := m.CreateNamed(`\BaseNamedObjects\Shm`, NewSection(0x1000, 0x04, false, -1), nil)

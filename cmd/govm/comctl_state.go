@@ -24,6 +24,145 @@ const (
 	tvmEditLabelW   = 0x1141
 )
 
+const (
+	nmCustomDraw          = uint32(0xFFFFFFF4)
+	cddsPrePaint          = uint32(0x00000001)
+	cddsPostPaint         = uint32(0x00000002)
+	cddsItem              = uint32(0x00010000)
+	cdrfSkipDefault       = uint64(0x00000004)
+	cdrfNotifyPostPaint   = uint64(0x00000010)
+	cdrfNotifyItemDraw    = uint64(0x00000020)
+	wmCtlColorMsgBox      = uint32(0x0132)
+	wmCtlColorEdit        = uint32(0x0133)
+	wmCtlColorListBox     = uint32(0x0134)
+	wmCtlColorButton      = uint32(0x0135)
+	wmCtlColorDialog      = uint32(0x0136)
+	wmCtlColorScrollbar   = uint32(0x0137)
+	wmCtlColorStatic      = uint32(0x0138)
+	wmUAHDrawMenu         = uint32(0x0091)
+	wmUAHDrawMenuItem     = uint32(0x0092)
+	wmUAHInitMenu         = uint32(0x0093)
+	wmUAHMeasureMenuItem  = uint32(0x0094)
+	wmUAHNCPaintMenuPopup = uint32(0x0095)
+)
+
+type customDrawLayout struct {
+	headerSize    uint64
+	drawStage     uint64
+	hdc           uint64
+	rect          uint64
+	itemSpec      uint64
+	itemState     uint64
+	itemParam     uint64
+	structureSize uint64
+}
+
+type rebarBandInfoLayout struct {
+	child         uint64
+	minChildX     uint64
+	minChildY     uint64
+	width         uint64
+	structureSize uint64
+}
+
+func rebarBandInfoOffsets(is32 bool) rebarBandInfoLayout {
+	if is32 {
+		return rebarBandInfoLayout{
+			child: 32, minChildX: 36, minChildY: 40, width: 44, structureSize: 80,
+		}
+	}
+	return rebarBandInfoLayout{
+		child: 40, minChildX: 48, minChildY: 52, width: 56, structureSize: 128,
+	}
+}
+
+func customDrawOffsets(is32 bool) customDrawLayout {
+	if is32 {
+		return customDrawLayout{
+			headerSize: 12, drawStage: 12, hdc: 16, rect: 20,
+			itemSpec: 36, itemState: 40, itemParam: 44, structureSize: 48,
+		}
+	}
+	return customDrawLayout{
+		headerSize: 24, drawStage: 24, hdc: 32, rect: 40,
+		itemSpec: 56, itemState: 64, itemParam: 72, structureSize: 80,
+	}
+}
+
+func customDrawStructureSize(className string, is32 bool) uint64 {
+	if strings.EqualFold(className, "toolbarwindow32") {
+		if is32 {
+			return 112
+		}
+		return 160
+	}
+	return customDrawOffsets(is32).structureSize
+}
+
+type customDrawStage struct {
+	stage uint32
+	item  uint64
+}
+
+func customDrawFollowUpStages(result uint64, itemCount int) []customDrawStage {
+	var stages []customDrawStage
+	if result&cdrfNotifyItemDraw != 0 {
+		for item := 0; item < itemCount; item++ {
+			stages = append(stages, customDrawStage{stage: cddsItem | cddsPrePaint, item: uint64(item)})
+		}
+	}
+	if result&cdrfNotifyPostPaint != 0 {
+		stages = append(stages, customDrawStage{stage: cddsPostPaint})
+	}
+	return stages
+}
+
+type uahDrawItemLayout struct {
+	hwndItem uint64
+	hdc      uint64
+	rect     uint64
+	itemData uint64
+	size     uint64
+}
+
+type uahMenuLayout struct {
+	hdc  uint64
+	size uint64
+}
+
+func uahMenuOffsets(is32 bool) uahMenuLayout {
+	if is32 {
+		return uahMenuLayout{hdc: 4, size: 12}
+	}
+	return uahMenuLayout{hdc: 8, size: 24}
+}
+
+func uahDrawItemOffsets(is32 bool) uahDrawItemLayout {
+	if is32 {
+		return uahDrawItemLayout{hwndItem: 20, hdc: 24, rect: 28, itemData: 44, size: 48}
+	}
+	return uahDrawItemLayout{hwndItem: 24, hdc: 32, rect: 40, itemData: 56, size: 64}
+}
+
+func ctlColorMessageForClass(className string) uint32 {
+	switch strings.ToLower(className) {
+	case "edit", "richedit20w", "richedit50w":
+		return wmCtlColorEdit
+	case "listbox", "combobox", "comboboxex32", "syslistview32", "systreeview32":
+		return wmCtlColorListBox
+	case "button":
+		return wmCtlColorButton
+	case "dialog", "#32770", "dialogbox":
+		return wmCtlColorDialog
+	case "scrollbar":
+		return wmCtlColorScrollbar
+	case "static":
+		return wmCtlColorStatic
+	default:
+		return 0
+	}
+}
+
 type listViewState struct {
 	items        []lvItem
 	columns      []lvColumn
@@ -85,6 +224,14 @@ func tabItemOffsets(is32 bool) (text, param uint64) {
 		return 12, 24
 	}
 	return 16, 32
+}
+
+func tabControlItemWidth(label string) int32 {
+	width := menuTextWidth(label) + 32
+	if width < 40 {
+		return 40
+	}
+	return width
 }
 
 type treeViewItemLayout struct {
@@ -293,6 +440,13 @@ func toolbarButtonInfoOffsets(is32 bool) toolbarButtonInfoLayout {
 	return toolbarButtonInfoLayout{param: 24, text: 32, textMax: 40}
 }
 
+func toolbarButtonInfoSize(is32 bool) uint32 {
+	if is32 {
+		return 32
+	}
+	return 48
+}
+
 func toolbarAddBitmapResourceOffset(is32 bool) uint64 {
 	if is32 {
 		return 4
@@ -316,6 +470,25 @@ func setToolbarButtonFlag(toolbar *toolbarState, id int, flag int, enabled bool)
 		return true
 	}
 	return false
+}
+
+func toolbarButtonInfoIndex(toolbar *toolbarState, value int, mask uint32) int {
+	if toolbar == nil {
+		return -1
+	}
+	const tbifByIndex = uint32(0x80000000)
+	if mask&tbifByIndex != 0 {
+		if value >= 0 && value < len(toolbar.buttons) {
+			return value
+		}
+		return -1
+	}
+	for i := range toolbar.buttons {
+		if toolbar.buttons[i].id == value {
+			return i
+		}
+	}
+	return -1
 }
 
 func makeToolbarPlaceholderIcon(width, height int, seed uint64) []uint32 {
@@ -455,6 +628,7 @@ func toolbarImagePixels(pixels, mask []byte, hasAlpha bool, width, height int) [
 type tbButton struct {
 	id          int
 	iBitmap     int // bitmap index in tbBitmapStore or ImageList
+	width       int
 	text        string
 	state       int
 	style       int

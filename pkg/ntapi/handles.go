@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mirkobrombin/Raven/pkg/ntobj"
@@ -28,12 +29,73 @@ type FileHandle struct {
 	FD            int
 	Path          string
 	Access        uint32
+	Flags         uint32
+	IsDirectory   bool
+	IsPipe        bool
 	DeletePending bool
 	DirIndex      int
 	DirMask       string
+	completion    *fileCompletionState
+	lockOwner     uint64
 }
 
 func (h *FileHandle) HandleType() string { return "file" }
+
+var nextFileLockOwner uint64
+
+func (h *FileHandle) LockOwner() uint64 {
+	if owner := atomic.LoadUint64(&h.lockOwner); owner != 0 {
+		return owner
+	}
+	owner := atomic.AddUint64(&nextFileLockOwner, 1)
+	if atomic.CompareAndSwapUint64(&h.lockOwner, 0, owner) {
+		return owner
+	}
+	return atomic.LoadUint64(&h.lockOwner)
+}
+
+type FileCompletionAssociation struct {
+	Port *IoCompletionPortHandle
+	Key  uint64
+}
+
+type fileCompletionState struct {
+	mu          sync.RWMutex
+	association *FileCompletionAssociation
+}
+
+var fileCompletionInitMu sync.Mutex
+
+func (h *FileHandle) completionState() *fileCompletionState {
+	fileCompletionInitMu.Lock()
+	if h.completion == nil {
+		h.completion = &fileCompletionState{}
+	}
+	state := h.completion
+	fileCompletionInitMu.Unlock()
+	return state
+}
+
+func (h *FileHandle) AssociateCompletion(port *IoCompletionPortHandle, key uint64) bool {
+	state := h.completionState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.association != nil {
+		return false
+	}
+	state.association = &FileCompletionAssociation{Port: port, Key: key}
+	return true
+}
+
+func (h *FileHandle) CompletionAssociation() (*IoCompletionPortHandle, uint64, bool) {
+	state := h.completionState()
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	if state.association == nil {
+		return nil, 0, false
+	}
+	return state.association.Port, state.association.Key, true
+}
 
 // EventHandle is a Win32 event synchronization object.
 type EventHandle struct {
@@ -238,7 +300,17 @@ type IoCompletionPacket struct {
 	Overlapped       uint64
 	BytesTransferred uint32
 	Status           uint32
+	FileHandle       Handle
+	OperationID      uint64
 }
+
+type IoCompletionRemoveResult uint8
+
+const (
+	IoCompletionRemoved IoCompletionRemoveResult = iota
+	IoCompletionTimedOut
+	IoCompletionClosed
+)
 
 // IoCompletionPortHandle is a Win32 I/O Completion Port.
 // ReactOS reference: ntoskrnl/io/comp.c
@@ -260,14 +332,45 @@ func (h *IoCompletionPortHandle) getCond() *sync.Cond {
 
 // Post enqueues a completion packet and wakes one waiting goroutine.
 func (h *IoCompletionPortHandle) Post(key, overlapped uint64, bytes uint32, status uint32) {
+	h.PostForFile(0, key, overlapped, bytes, status)
+}
+
+func (h *IoCompletionPortHandle) PostForFile(
+	file Handle,
+	key, overlapped uint64,
+	bytes, status uint32,
+) {
+	h.PostForFileOperation(file, key, overlapped, bytes, status, 0)
+}
+
+func (h *IoCompletionPortHandle) PostForFileOperation(
+	file Handle,
+	key, overlapped uint64,
+	bytes, status uint32,
+	operationID uint64,
+) {
 	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
 	h.packets = append(h.packets, IoCompletionPacket{
 		CompletionKey:    key,
 		Overlapped:       overlapped,
 		BytesTransferred: bytes,
 		Status:           status,
+		FileHandle:       file,
+		OperationID:      operationID,
 	})
 	h.getCond().Signal()
+	h.mu.Unlock()
+}
+
+func (h *IoCompletionPortHandle) Close() {
+	h.mu.Lock()
+	h.closed = true
+	h.packets = nil
+	h.getCond().Broadcast()
 	h.mu.Unlock()
 }
 
@@ -275,16 +378,24 @@ func (h *IoCompletionPortHandle) Post(key, overlapped uint64, bytes uint32, stat
 // Returns the packet and true on success, or zero-value + false on timeout.
 // Pass d < 0 for INFINITE.
 func (h *IoCompletionPortHandle) Remove(d time.Duration) (IoCompletionPacket, bool) {
+	packet, result := h.RemoveEx(d)
+	return packet, result == IoCompletionRemoved
+}
+
+func (h *IoCompletionPortHandle) RemoveEx(d time.Duration) (IoCompletionPacket, IoCompletionRemoveResult) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if len(h.packets) > 0 {
 		pkt := h.packets[0]
 		h.packets = h.packets[1:]
-		return pkt, true
+		return pkt, IoCompletionRemoved
+	}
+	if h.closed {
+		return IoCompletionPacket{}, IoCompletionClosed
 	}
 	if d == 0 {
-		return IoCompletionPacket{}, false
+		return IoCompletionPacket{}, IoCompletionTimedOut
 	}
 
 	c := h.getCond()
@@ -294,23 +405,26 @@ func (h *IoCompletionPortHandle) Remove(d time.Duration) (IoCompletionPacket, bo
 		}
 	} else {
 		deadline := time.Now().Add(d)
-		go func() {
-			time.Sleep(d)
+		timer := time.AfterFunc(d, func() {
 			h.mu.Lock()
 			c.Broadcast()
 			h.mu.Unlock()
-		}()
+		})
+		defer timer.Stop()
 		for len(h.packets) == 0 && !h.closed && time.Now().Before(deadline) {
 			c.Wait()
 		}
 	}
 
 	if len(h.packets) == 0 {
-		return IoCompletionPacket{}, false
+		if h.closed {
+			return IoCompletionPacket{}, IoCompletionClosed
+		}
+		return IoCompletionPacket{}, IoCompletionTimedOut
 	}
 	pkt := h.packets[0]
 	h.packets = h.packets[1:]
-	return pkt, true
+	return pkt, IoCompletionRemoved
 }
 
 // RegistryKeyHandle wraps a registry key reference.
@@ -348,7 +462,7 @@ func (h *FileMappingHandle) HandleType() string { return "filemapping" }
 
 // HeapHandle represents a Win32 heap.
 type HeapHandle struct {
-	Allocations map[uint64]uint64 // guest address → size
+	Allocations map[uint64]uint64 // guest address -> size
 }
 
 func (h *HeapHandle) HandleType() string { return "heap" }
@@ -389,7 +503,7 @@ type ThreadHandle struct {
 func (h *ThreadHandle) HandleType() string { return "thread" }
 
 // NamedPipeHandle represents one end of a named pipe.
-// ToServer carries data client→server; ToClient carries data server→client.
+// ToServer carries data client->server; ToClient carries data server->client.
 type NamedPipeHandle struct {
 	Name      string
 	ToServer  chan []byte // client writes here, server reads
@@ -615,62 +729,55 @@ func (ht *HandleTable) GetSocket(h Handle) *SocketHandle {
 
 // WaitableTimerHandle is a Win32 waitable timer (manual or auto-reset).
 type WaitableTimerHandle struct {
-	mu          sync.Mutex
-	ch          chan struct{}
-	cancel      chan struct{}
-	manualReset bool
-	signaled    bool
+	mu     sync.Mutex
+	cancel chan struct{}
+	timer  *ntobj.Timer
 }
 
 func NewWaitableTimer(manualReset bool) *WaitableTimerHandle {
 	return &WaitableTimerHandle{
-		ch:          make(chan struct{}, 1),
-		cancel:      make(chan struct{}),
-		manualReset: manualReset,
+		timer: ntobj.NewTimer(manualReset),
 	}
 }
 
 func (t *WaitableTimerHandle) HandleType() string { return "waitable_timer" }
+func (t *WaitableTimerHandle) Waitable() ntobj.Waitable {
+	return t.timer
+}
 
 // Set arms the timer to fire after 'due' from now (or at absolute time if negative Windows FILETIME).
 // period is the recurring period in milliseconds (0 = one-shot).
 func (t *WaitableTimerHandle) Set(due time.Duration, period time.Duration) {
 	t.mu.Lock()
-	// Cancel any existing goroutine
-	select {
-	case t.cancel <- struct{}{}:
-	default:
+	if t.cancel != nil {
+		close(t.cancel)
 	}
-	t.signaled = false
+	cancel := make(chan struct{})
+	t.cancel = cancel
+	ObjMgr.Signal(func() { t.timer.Reset() })
 	t.mu.Unlock()
 
 	go func() {
+		initial := time.NewTimer(due)
+		defer initial.Stop()
 		select {
-		case <-time.After(due):
-		case <-t.cancel:
+		case <-initial.C:
+		case <-cancel:
 			return
 		}
-		t.mu.Lock()
-		t.signaled = true
-		select {
-		case t.ch <- struct{}{}:
-		default:
+		if !t.signalIfCurrent(cancel) {
+			return
 		}
-		t.mu.Unlock()
 		if period > 0 {
 			ticker := time.NewTicker(period)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					t.mu.Lock()
-					t.signaled = true
-					select {
-					case t.ch <- struct{}{}:
-					default:
+					if !t.signalIfCurrent(cancel) {
+						return
 					}
-					t.mu.Unlock()
-				case <-t.cancel:
+				case <-cancel:
 					return
 				}
 			}
@@ -678,61 +785,44 @@ func (t *WaitableTimerHandle) Set(due time.Duration, period time.Duration) {
 	}()
 }
 
+func (t *WaitableTimerHandle) signalIfCurrent(cancel chan struct{}) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cancel != cancel {
+		return false
+	}
+	ObjMgr.Signal(func() { t.timer.Set() })
+	return true
+}
+
 // Cancel disarms the timer.
 func (t *WaitableTimerHandle) Cancel() {
-	select {
-	case t.cancel <- struct{}{}:
-	default:
-	}
 	t.mu.Lock()
-	t.signaled = false
+	if t.cancel != nil {
+		close(t.cancel)
+		t.cancel = nil
+	}
+	ObjMgr.Signal(func() { t.timer.Reset() })
 	t.mu.Unlock()
 }
 
 // IsSignaled returns whether the timer is currently signaled.
 func (t *WaitableTimerHandle) IsSignaled() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.signaled
+	var signaled bool
+	ObjMgr.Read(func() { signaled = t.timer.Peek() })
+	return signaled
 }
 
 // WaitTimeout waits up to d for the timer to fire.
 // Returns WAIT_OBJECT_0=0 or WAIT_TIMEOUT=0x102.
 func (t *WaitableTimerHandle) WaitTimeout(d time.Duration) uint32 {
-	t.mu.Lock()
-	if t.signaled {
-		if !t.manualReset {
-			t.signaled = false
-		}
-		t.mu.Unlock()
-		return 0 // WAIT_OBJECT_0
-	}
-	t.mu.Unlock()
-
-	deadline := time.After(d)
-	for {
-		select {
-		case <-t.ch:
-			t.mu.Lock()
-			t.signaled = true // re-check under lock
-			sig := t.signaled
-			if !t.manualReset {
-				t.signaled = false
-			}
-			t.mu.Unlock()
-			if sig {
-				return 0
-			}
-		case <-deadline:
-			return 0x102 // WAIT_TIMEOUT
-		}
-	}
+	return ObjMgr.Wait([]ntobj.Waitable{t.timer}, false, 0, d)
 }
 
 // namedPipeRegistry is a global registry of named pipe server endpoints.
 var namedPipeRegistry struct {
 	mu    sync.RWMutex
-	pipes map[string]*NamedPipeHandle // normalized name → server handle
+	pipes map[string]*NamedPipeHandle // normalized name -> server handle
 }
 
 func init() {
@@ -889,8 +979,8 @@ type keyedSlot struct {
 type KeyedEventHandle struct {
 	mu        sync.Mutex
 	Name      string
-	waiters   map[uint64][]chan struct{} // key → list of blocked waiters
-	releasers map[uint64][]chan struct{} // key → list of blocked releasers
+	waiters   map[uint64][]chan struct{} // key -> list of blocked waiters
+	releasers map[uint64][]chan struct{} // key -> list of blocked releasers
 }
 
 func NewKeyedEvent(name string) *KeyedEventHandle {
@@ -1111,7 +1201,7 @@ func (v *VEHRegistry) GetAll() []*VEHHandler {
 	return out
 }
 
-// globalMailslots maps name → mailslot.
+// globalMailslots maps name -> mailslot.
 var globalMailslots struct {
 	mu    sync.RWMutex
 	slots map[string]*MailslotHandle
@@ -1143,8 +1233,8 @@ type HandleTable struct {
 
 	// Named object namespace (global across all handles)
 	namedMu sync.RWMutex
-	named   map[string]Handle // normalized name → handle
-	names   map[Handle]string // handle → name (for cleanup on Close)
+	named   map[string]Handle // normalized name -> handle
+	names   map[Handle]string // handle -> name (for cleanup on Close)
 }
 
 // NewHandleTable creates an empty handle table.
@@ -1161,6 +1251,9 @@ func NewHandleTable() *HandleTable {
 
 // Alloc assigns a new handle to the given object.
 func (ht *HandleTable) Alloc(obj HandleObject) Handle {
+	if file, ok := obj.(*FileHandle); ok {
+		file.LockOwner()
+	}
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
 	h := ht.nextID
@@ -1176,24 +1269,163 @@ func (ht *HandleTable) Get(h Handle) HandleObject {
 	return ht.handles[h]
 }
 
-// Close removes a handle from the table and cleans up any named mapping.
-func (ht *HandleTable) Close(h Handle) bool {
-	ht.mu.Lock()
-	if _, ok := ht.handles[h]; !ok {
-		ht.mu.Unlock()
-		return false
+func (ht *HandleTable) ReferenceCount(obj HandleObject) int {
+	ht.mu.RLock()
+	defer ht.mu.RUnlock()
+	count := 0
+	for _, candidate := range ht.handles {
+		if candidate == obj {
+			count++
+		}
 	}
-	delete(ht.handles, h)
-	ht.mu.Unlock()
+	return count
+}
 
-	// Clean up named mapping if this handle was named.
+func (ht *HandleTable) FileOwnerReferenceCount(owner uint64) int {
+	ht.mu.RLock()
+	defer ht.mu.RUnlock()
+	count := 0
+	for _, candidate := range ht.handles {
+		file, ok := candidate.(*FileHandle)
+		if ok && file.LockOwner() == owner {
+			count++
+		}
+	}
+	return count
+}
+
+func (ht *HandleTable) removeName(h Handle) {
 	ht.namedMu.Lock()
 	if name, ok := ht.names[h]; ok {
 		delete(ht.named, name)
 		delete(ht.names, h)
 	}
 	ht.namedMu.Unlock()
-	return true
+}
+
+func (ht *HandleTable) transferName(source, target Handle) {
+	ht.namedMu.Lock()
+	if name, ok := ht.names[source]; ok {
+		delete(ht.names, source)
+		ht.names[target] = name
+		ht.named[name] = target
+	}
+	ht.namedMu.Unlock()
+}
+
+func (ht *HandleTable) Take(h Handle) (
+	HandleObject,
+	int,
+	int,
+	bool,
+) {
+	ht.mu.Lock()
+	obj, ok := ht.handles[h]
+	if !ok {
+		ht.mu.Unlock()
+		return nil, 0, 0, false
+	}
+	delete(ht.handles, h)
+	objectRefs := 0
+	ownerRefs := 0
+	var owner uint64
+	if file, ok := obj.(*FileHandle); ok {
+		owner = file.LockOwner()
+	}
+	for _, candidate := range ht.handles {
+		if candidate == obj {
+			objectRefs++
+		}
+		if owner != 0 {
+			if file, ok := candidate.(*FileHandle); ok && file.LockOwner() == owner {
+				ownerRefs++
+			}
+		}
+	}
+	ht.mu.Unlock()
+	ht.removeName(h)
+	return obj, objectRefs, ownerRefs, true
+}
+
+func (ht *HandleTable) Duplicate(h Handle, closeSource bool) (
+	Handle,
+	HandleObject,
+	bool,
+) {
+	ht.mu.Lock()
+	obj, ok := ht.handles[h]
+	if !ok {
+		ht.mu.Unlock()
+		return 0, nil, false
+	}
+	duplicate := ht.nextID
+	ht.nextID += 4
+	ht.handles[duplicate] = obj
+	if closeSource {
+		delete(ht.handles, h)
+	}
+	ht.mu.Unlock()
+	if closeSource {
+		ht.transferName(h, duplicate)
+	}
+	return duplicate, obj, true
+}
+
+func (ht *HandleTable) Clone(
+	h Handle,
+	closeSource bool,
+	clone func(HandleObject) (HandleObject, bool),
+) (
+	Handle,
+	HandleObject,
+	int,
+	int,
+	bool,
+) {
+	ht.mu.Lock()
+	source, ok := ht.handles[h]
+	if !ok {
+		ht.mu.Unlock()
+		return 0, nil, 0, 0, false
+	}
+	cloned, ok := clone(source)
+	if !ok || cloned == nil {
+		ht.mu.Unlock()
+		return 0, source, 0, 0, false
+	}
+	duplicate := ht.nextID
+	ht.nextID += 4
+	ht.handles[duplicate] = cloned
+	if closeSource {
+		delete(ht.handles, h)
+	}
+	objectRefs := 0
+	ownerRefs := 0
+	var owner uint64
+	if file, ok := source.(*FileHandle); ok {
+		owner = file.LockOwner()
+	}
+	for _, candidate := range ht.handles {
+		if candidate == source {
+			objectRefs++
+		}
+		if owner != 0 {
+			if file, ok := candidate.(*FileHandle); ok && file.LockOwner() == owner {
+				ownerRefs++
+			}
+		}
+	}
+	ht.mu.Unlock()
+	if closeSource {
+		ht.transferName(h, duplicate)
+	}
+	return duplicate, source, objectRefs, ownerRefs, true
+}
+
+// Close removes a handle from the table and cleans up any named mapping.
+func (ht *HandleTable) Close(h Handle) bool {
+	_, _, _, ok := ht.Take(h)
+	return ok
 }
 
 // NormalizeObjectName strips NT object namespace prefixes and lowercases.
@@ -1322,6 +1554,18 @@ func (ht *HandleTable) GetThread(h Handle) *ThreadHandle {
 		return nil
 	}
 	return th
+}
+
+func (ht *HandleTable) ThreadByTID(tid int) *ThreadHandle {
+	ht.mu.RLock()
+	defer ht.mu.RUnlock()
+	for _, object := range ht.handles {
+		thread, ok := object.(*ThreadHandle)
+		if ok && thread.TID == tid {
+			return thread
+		}
+	}
+	return nil
 }
 
 func (ht *HandleTable) SetThreadExitCodeByTID(tid int, exitCode uint32) bool {

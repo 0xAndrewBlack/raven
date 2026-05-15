@@ -1019,16 +1019,15 @@ func presentPrimarySurface(hctx *HandlerCtx, surface *ddraw.Surface) {
 			}
 		}
 	}
-	// Dump first frame for debugging
-	if ddrawFrameDumped == 0 {
+	if dumpPath := os.Getenv("RAVEN_DDRAW_FRAME_DUMP"); dumpPath != "" && ddrawFrameDumped == 0 {
 		ddrawFrameDumped++
-		if f, err := os.Create("/tmp/dxball_frame0.ppm"); err == nil {
+		if f, err := os.Create(dumpPath); err == nil {
 			fmt.Fprintf(f, "P6\n%d %d\n255\n", w.Width, w.Height)
 			for i := 0; i < len(frame); i += 4 {
 				f.Write([]byte{frame[i+2], frame[i+1], frame[i+0]}) // XRGB → RGB
 			}
 			f.Close()
-			ravelog.Logf("[ddraw-dump] saved /tmp/dxball_frame0.ppm\n")
+			ravelog.Logf("[ddraw-dump] saved %s\n", dumpPath)
 		}
 	}
 	if w.TitleBarH == 0 {

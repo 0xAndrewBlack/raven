@@ -1,6 +1,10 @@
 package wl
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestDrawTextAbsClippedDoesNotTouchPixelsOutsideBounds(t *testing.T) {
 	win := NewHeadlessWindow("clip", 32, 20, 0)
@@ -17,5 +21,46 @@ func TestDrawTextAbsClippedDoesNotTouchPixelsOutsideBounds(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestScreenshotWaitsForCompleteFrame(t *testing.T) {
+	win := NewHeadlessWindow("frame", 32, 20, 0)
+	updateStarted := make(chan struct{})
+	releaseUpdate := make(chan struct{})
+	updateDone := make(chan struct{})
+	go func() {
+		win.UpdateFrame(func() {
+			close(updateStarted)
+			<-releaseUpdate
+			win.DrawRectAbs(0, 0, win.Width, win.Height, 0x123456)
+		})
+		close(updateDone)
+	}()
+	<-updateStarted
+
+	screenshotDone := make(chan error, 1)
+	go func() {
+		screenshotDone <- win.Screenshot(filepath.Join(t.TempDir(), "frame.png"))
+	}()
+	select {
+	case err := <-screenshotDone:
+		t.Fatalf("Screenshot completed during an active frame: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseUpdate)
+	select {
+	case <-updateDone:
+	case <-time.After(time.Second):
+		t.Fatal("frame update did not finish")
+	}
+	select {
+	case err := <-screenshotDone:
+		if err != nil {
+			t.Fatalf("Screenshot failed after frame completion: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Screenshot remained blocked after frame completion")
 	}
 }

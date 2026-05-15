@@ -109,6 +109,10 @@ func CallGuestFunction(cpu arch.CPU, mem *mmu.MMU, trampoline *DllMainTrampoline
 	}
 
 	savedCtx := mem.Mmap(0, amd64ContextSize, mmu.PermRead|mmu.PermWrite)
+	if savedCtx == 0 {
+		return 0, fmt.Errorf("allocate guest-call context")
+	}
+	defer mem.Munmap(savedCtx, amd64ContextSize)
 	if err := saveCPUContextToGuest(cpu, mem, savedCtx); err != nil {
 		return 0, err
 	}

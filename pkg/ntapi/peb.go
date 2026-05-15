@@ -271,6 +271,8 @@ type ProcessState struct {
 	ThreadId                 uint32
 	UnhandledExceptionFilter uint64
 	Is32                     bool // PE32 (x86) process
+	guestCallTrampoline      *DllMainTrampoline
+	runtimeSlots             *processRuntimeSlots
 
 	// HeapAlloc/HeapFree are set by registerAutoSynthHandlers to route
 	// RtlAllocateHeap / RtlFreeHeap through the shared bump-allocator.

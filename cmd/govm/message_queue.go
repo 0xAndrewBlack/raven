@@ -4,16 +4,142 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mirkobrombin/Raven/pkg/arch"
 	ravelog "github.com/mirkobrombin/Raven/pkg/log"
+	"github.com/mirkobrombin/Raven/pkg/ntapi"
 )
 
 type messageQueue struct {
-	mu     sync.Mutex
-	items  []queuedMsg
-	wakeup map[arch.CPU]chan struct{}
+	mu      sync.Mutex
+	items   []queuedMsg
+	wakeup  map[arch.CPU]chan struct{}
+	changes map[arch.CPU]uint32
+}
+
+const (
+	qsKey            = uint32(0x0001)
+	qsMouseMove      = uint32(0x0002)
+	qsMouseButton    = uint32(0x0004)
+	qsPostMessage    = uint32(0x0008)
+	qsTimer          = uint32(0x0010)
+	qsPaint          = uint32(0x0020)
+	qsSendMessage    = uint32(0x0040)
+	qsHotkey         = uint32(0x0080)
+	qsAllPostMessage = uint32(0x0100)
+	qsRawInput       = uint32(0x0400)
+	qsTouch          = uint32(0x0800)
+	qsPointer        = uint32(0x1000)
+)
+
+func queuedMessageWakeMask(msg queuedMsg) uint32 {
+	if msg.sent != nil {
+		return qsSendMessage
+	}
+	switch {
+	case msg.message == 0x000F:
+		return qsPaint
+	case msg.message == 0x00FF:
+		return qsRawInput
+	case msg.message >= 0x0100 && msg.message <= 0x0109:
+		return qsKey
+	case msg.message == 0x0113:
+		return qsTimer
+	case msg.message == 0x0200:
+		return qsMouseMove
+	case msg.message >= 0x0201 && msg.message <= 0x020D:
+		return qsMouseButton
+	case msg.message == 0x0312:
+		return qsHotkey
+	case msg.message >= 0x0240 && msg.message <= 0x024F:
+		return qsTouch | qsPointer
+	default:
+		return qsPostMessage | qsAllPostMessage
+	}
+}
+
+type synchronousSendResult struct {
+	lResult uint64
+}
+
+type synchronousSendRequest struct {
+	hwnd    uint64
+	message uint32
+	wParam  uint64
+	lParam  uint64
+	sender  arch.CPU
+	done    chan synchronousSendResult
+	once    sync.Once
+	replied atomic.Bool
+}
+
+func newSynchronousSendRequest(hwnd uint64, message uint32, wParam, lParam uint64) *synchronousSendRequest {
+	return &synchronousSendRequest{
+		hwnd:    hwnd,
+		message: message,
+		wParam:  wParam,
+		lParam:  lParam,
+		done:    make(chan synchronousSendResult, 1),
+	}
+}
+
+func (request *synchronousSendRequest) complete(lResult uint64) {
+	if request == nil {
+		return
+	}
+	request.once.Do(func() {
+		request.done <- synchronousSendResult{lResult: lResult}
+		close(request.done)
+	})
+}
+
+func (request *synchronousSendRequest) reply(lResult uint64) {
+	if request == nil {
+		return
+	}
+	request.replied.Store(true)
+	request.complete(lResult)
+}
+
+func (request *synchronousSendRequest) wait() uint64 {
+	if request == nil {
+		return 0
+	}
+	result, ok := <-request.done
+	if !ok {
+		return 0
+	}
+	return result.lResult
+}
+
+func (request *synchronousSendRequest) waitTimeout(timeout time.Duration) (uint64, bool) {
+	if request == nil {
+		return 0, true
+	}
+	if timeout <= 0 {
+		select {
+		case result, ok := <-request.done:
+			if !ok {
+				return 0, true
+			}
+			return result.lResult, true
+		default:
+			return 0, false
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result, ok := <-request.done:
+		if !ok {
+			return 0, true
+		}
+		return result.lResult, true
+	case <-timer.C:
+		return 0, false
+	}
 }
 
 type messageThreadMetadata struct {
@@ -79,6 +205,9 @@ func (q *messageQueue) enqueue(cpu arch.CPU, messages ...queuedMsg) {
 	if q.wakeup == nil {
 		q.wakeup = make(map[arch.CPU]chan struct{})
 	}
+	if q.changes == nil {
+		q.changes = make(map[arch.CPU]uint32)
+	}
 	wakeup := q.wakeup[cpu]
 	if wakeup == nil {
 		wakeup = make(chan struct{}, 1)
@@ -87,7 +216,57 @@ func (q *messageQueue) enqueue(cpu arch.CPU, messages ...queuedMsg) {
 	for i := range messages {
 		messages[i].cpu = cpu
 		q.items = append(q.items, messages[i])
+		q.changes[cpu] |= queuedMessageWakeMask(messages[i])
 	}
+	select {
+	case wakeup <- struct{}{}:
+	default:
+	}
+	q.mu.Unlock()
+}
+
+func (q *messageQueue) enqueueSynchronous(cpu arch.CPU, request *synchronousSendRequest) bool {
+	if cpu == nil || request == nil {
+		return false
+	}
+	q.enqueue(cpu, queuedMsg{
+		hwnd:    request.hwnd,
+		message: request.message,
+		wParam:  request.wParam,
+		lParam:  request.lParam,
+		sent:    request,
+	})
+	return true
+}
+
+func (q *messageQueue) enqueueBefore(cpu arch.CPU, message queuedMsg, before func(queuedMsg) bool) {
+	if cpu == nil {
+		return
+	}
+	q.mu.Lock()
+	if q.wakeup == nil {
+		q.wakeup = make(map[arch.CPU]chan struct{})
+	}
+	if q.changes == nil {
+		q.changes = make(map[arch.CPU]uint32)
+	}
+	wakeup := q.wakeup[cpu]
+	if wakeup == nil {
+		wakeup = make(chan struct{}, 1)
+		q.wakeup[cpu] = wakeup
+	}
+	message.cpu = cpu
+	index := len(q.items)
+	for i, queued := range q.items {
+		if messageOwnedBy(queued, cpu) && before != nil && before(queued) {
+			index = i
+			break
+		}
+	}
+	q.items = append(q.items, queuedMsg{})
+	copy(q.items[index+1:], q.items[index:])
+	q.items[index] = message
+	q.changes[cpu] |= queuedMessageWakeMask(message)
 	select {
 	case wakeup <- struct{}{}:
 	default:
@@ -100,11 +279,91 @@ func (q *messageQueue) count(cpu arch.CPU) int {
 	defer q.mu.Unlock()
 	count := 0
 	for _, msg := range q.items {
-		if messageOwnedBy(msg, cpu) {
+		if messageOwnedBy(msg, cpu) && msg.sent == nil {
 			count++
 		}
 	}
 	return count
+}
+
+func (q *messageQueue) hasWakeMask(cpu arch.CPU, mask uint32, inputAvailable bool) bool {
+	if cpu == nil || mask == 0 {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.hasWakeMaskLocked(cpu, mask, inputAvailable)
+}
+
+func (q *messageQueue) hasWakeMaskLocked(cpu arch.CPU, mask uint32, inputAvailable bool) bool {
+	available := uint32(0)
+	for _, msg := range q.items {
+		if messageOwnedBy(msg, cpu) {
+			available |= queuedMessageWakeMask(msg)
+		}
+	}
+	available &= mask
+	if inputAvailable {
+		return available != 0
+	}
+	return available&q.changes[cpu] != 0
+}
+
+func (q *messageQueue) waitWakeMask(
+	cpu arch.CPU, mask uint32, inputAvailable bool, timeout time.Duration,
+) bool {
+	if cpu == nil || mask == 0 {
+		if timeout > 0 {
+			time.Sleep(timeout)
+		}
+		return false
+	}
+	q.mu.Lock()
+	if q.hasWakeMaskLocked(cpu, mask, inputAvailable) {
+		q.mu.Unlock()
+		return true
+	}
+	if q.wakeup == nil {
+		q.wakeup = make(map[arch.CPU]chan struct{})
+	}
+	wakeup := q.wakeup[cpu]
+	if wakeup == nil {
+		wakeup = make(chan struct{}, 1)
+		q.wakeup[cpu] = wakeup
+	}
+	select {
+	case <-wakeup:
+	default:
+	}
+	q.mu.Unlock()
+
+	if timeout < 0 {
+		<-wakeup
+		return true
+	}
+	if timeout == 0 {
+		return false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-wakeup:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (q *messageQueue) markWakeMaskSeen(cpu arch.CPU, mask uint32) {
+	if cpu == nil || mask == 0 {
+		return
+	}
+	q.mu.Lock()
+	q.changes[cpu] &^= mask
+	if q.changes[cpu] == 0 {
+		delete(q.changes, cpu)
+	}
+	q.mu.Unlock()
 }
 
 func (q *messageQueue) wait(cpu arch.CPU, timeout time.Duration) bool {
@@ -150,6 +409,9 @@ func (q *messageQueue) contains(match func(queuedMsg) bool) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, msg := range q.items {
+		if msg.sent != nil {
+			continue
+		}
 		if match == nil || match(msg) {
 			return true
 		}
@@ -162,7 +424,7 @@ func (q *messageQueue) prune(cpu arch.CPU, keep func(queuedMsg) bool) {
 	defer q.mu.Unlock()
 	kept := q.items[:0]
 	for _, msg := range q.items {
-		if !messageOwnedBy(msg, cpu) || keep == nil || keep(msg) {
+		if msg.sent != nil || !messageOwnedBy(msg, cpu) || keep == nil || keep(msg) {
 			kept = append(kept, msg)
 		}
 	}
@@ -175,14 +437,21 @@ func (q *messageQueue) removeCPU(cpu arch.CPU) {
 	}
 	q.mu.Lock()
 	kept := q.items[:0]
+	var cancelled []*synchronousSendRequest
 	for _, msg := range q.items {
 		if !messageOwnedBy(msg, cpu) {
 			kept = append(kept, msg)
+		} else if msg.sent != nil {
+			cancelled = append(cancelled, msg.sent)
 		}
 	}
 	q.items = kept
 	delete(q.wakeup, cpu)
+	delete(q.changes, cpu)
 	q.mu.Unlock()
+	for _, request := range cancelled {
+		request.complete(0)
+	}
 }
 
 func (q *messageQueue) deliver(
@@ -194,11 +463,15 @@ func (q *messageQueue) deliver(
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for index, msg := range q.items {
-		if !messageOwnedBy(msg, cpu) || match != nil && !match(msg) {
+		if msg.sent != nil || !messageOwnedBy(msg, cpu) || match != nil && !match(msg) {
 			continue
 		}
 		if write == nil || !write(msg) {
 			return queuedMsg{}, false
+		}
+		q.changes[cpu] &^= queuedMessageWakeMask(msg)
+		if q.changes[cpu] == 0 {
+			delete(q.changes, cpu)
 		}
 		shouldRemove := remove != nil && remove(msg)
 		if traceEnqueue {
@@ -215,6 +488,50 @@ func (q *messageQueue) deliver(
 
 func (q *messageQueue) take(cpu arch.CPU, match func(queuedMsg) bool) (queuedMsg, bool) {
 	return q.deliver(cpu, match, func(queuedMsg) bool { return true }, func(queuedMsg) bool { return true })
+}
+
+func (q *messageQueue) takeSynchronous(cpu arch.CPU) (*synchronousSendRequest, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for index, msg := range q.items {
+		if msg.sent == nil || !messageOwnedBy(msg, cpu) {
+			continue
+		}
+		q.items = append(q.items[:index], q.items[index+1:]...)
+		q.changes[cpu] &^= qsSendMessage
+		for _, remaining := range q.items {
+			if messageOwnedBy(remaining, cpu) && remaining.sent != nil {
+				q.changes[cpu] |= qsSendMessage
+				break
+			}
+		}
+		if q.changes[cpu] == 0 {
+			delete(q.changes, cpu)
+		}
+		return msg.sent, true
+	}
+	return nil, false
+}
+
+func (q *messageQueue) cancelSynchronousSender(cpu arch.CPU) {
+	if cpu == nil {
+		return
+	}
+	q.mu.Lock()
+	kept := q.items[:0]
+	var cancelled []*synchronousSendRequest
+	for _, msg := range q.items {
+		if msg.sent == nil || msg.sent.sender != cpu {
+			kept = append(kept, msg)
+			continue
+		}
+		cancelled = append(cancelled, msg.sent)
+	}
+	q.items = kept
+	q.mu.Unlock()
+	for _, request := range cancelled {
+		request.complete(0)
+	}
 }
 
 type timerKey struct {
@@ -326,9 +643,25 @@ func (s *messageMetadataStore) removeCPU(cpu arch.CPU) {
 
 func (h *HandlerCtx) cleanupMessageCPU(cpu arch.CPU) {
 	h.MsgQueue.removeCPU(cpu)
+	if h.CancelSentMessages != nil {
+		h.CancelSentMessages(cpu)
+	}
 	h.Timers.removeCPU(cpu)
 	h.MessageMetadata.removeCPU(cpu)
 	h.clearWindowsForCPU(cpu)
+	if h.TMPtr != nil && *h.TMPtr != nil {
+		ntapi.ObjMgr.DiscardAPCs(uint64((*h.TMPtr).GetTID(cpu)))
+	}
+	if h.ProcState == nil || h.Mem == nil || cpu == nil {
+		return
+	}
+	teb := cpu.GetTLS()
+	if !h.ProcState.Is32 {
+		if gsCPU, ok := cpu.(interface{ GetGSBase() uint64 }); ok {
+			teb = gsCPU.GetGSBase()
+		}
+	}
+	crtReleaseThreadRuntime(h.Mem, h.ProcState, teb)
 }
 
 func (h *HandlerCtx) defaultMessageCPU() arch.CPU {
@@ -361,6 +694,22 @@ func (h *HandlerCtx) enqueueMessage(cpu arch.CPU, messages ...queuedMsg) {
 		}
 		h.MsgQueue.enqueue(owner, messages[i])
 	}
+}
+
+func (h *HandlerCtx) enqueueMessageBeforePaint(cpu arch.CPU, message queuedMsg) {
+	owner := h.windowCPU(message.hwnd)
+	if owner == nil {
+		owner = cpu
+	}
+	if owner == nil {
+		owner = h.defaultMessageCPU()
+	}
+	if owner == nil {
+		return
+	}
+	h.MsgQueue.enqueueBefore(owner, message, func(queued queuedMsg) bool {
+		return queued.hwnd == message.hwnd && queued.message == 0x000F
+	})
 }
 
 func (h *HandlerCtx) queueCount(cpu arch.CPU) int {

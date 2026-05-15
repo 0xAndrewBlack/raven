@@ -15,6 +15,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 ROOT="$(pwd)"
+source scripts/raven-cache.sh || exit 2
 
 RAVEN="${RAVEN:-}"
 if [[ -z "$RAVEN" ]]; then
@@ -26,7 +27,7 @@ if [[ -z "$RAVEN" ]]; then
 fi
 
 PASS=0; FAIL=0
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "$RAVEN_TMPDIR/regression.XXXXXX")" || exit 2
 trap 'rm -rf "$TMP"' EXIT
 
 # run_case <name> <timeout> <golden-grep-ere> <stdin-or-/dev/null> <args...>

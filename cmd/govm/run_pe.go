@@ -39,6 +39,64 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/x64"
 )
 
+type toolbarItemGeometry struct {
+	left      int32
+	right     int32
+	visible   bool
+	separator bool
+}
+
+func layoutToolbarButtons(toolbar *toolbarState, defaultWidth int32) []toolbarItemGeometry {
+	if toolbar == nil {
+		return nil
+	}
+	if defaultWidth <= 0 {
+		defaultWidth = 24
+	}
+	items := make([]toolbarItemGeometry, len(toolbar.buttons))
+	x := int32(2)
+	for i, button := range toolbar.buttons {
+		separator := button.style&0x01 != 0
+		width := int32(button.width)
+		if width <= 0 {
+			if separator {
+				width = int32(button.iBitmap)
+				if width <= 0 {
+					width = 8
+				}
+			} else {
+				width = defaultWidth
+			}
+		}
+		items[i] = toolbarItemGeometry{
+			left:      x,
+			right:     x + width,
+			visible:   button.state&0x08 == 0,
+			separator: separator,
+		}
+		if items[i].visible {
+			x += width
+		}
+	}
+	return items
+}
+
+func toolbarButtonAt(items []toolbarItemGeometry, x int32) int {
+	for i, item := range items {
+		if item.visible && !item.separator && x >= item.left && x < item.right {
+			return i
+		}
+	}
+	return -1
+}
+
+func toolbarItemRect(items []toolbarItemGeometry, index int) (int32, int32, bool) {
+	if index < 0 || index >= len(items) || !items[index].visible {
+		return 0, 0, false
+	}
+	return items[index].left, items[index].right, true
+}
+
 // runPE runs a Windows PE binary with the NT subsystem.
 func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, traceSyscall bool, enableWayland bool, autoScript, callExport, renderPNG string) {
 	mem := mmu.New()
@@ -201,7 +259,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	// SystemTime (+0x014): KSYSTEM_TIME {LowPart, High1Time, High2Time}.
 	// FILETIME = 100ns units since 1601-01-01.
 	{
-		const epochDiff = uint64(11644473600) * 10000000 // 1970→1601 in 100ns
+		const epochDiff = uint64(11644473600) * 10000000 // 1970->1601 in 100ns
 		ft := uint64(time.Now().UnixNano()/100) + epochDiff
 		mem.Write32(kuserAddr+0x014, uint32(ft))     // LowPart
 		mem.Write32(kuserAddr+0x018, uint32(ft>>32)) // High1Time
@@ -284,7 +342,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	mem.Write8(win32kTramp+2, 0xC1)
 	mem.Write8(win32kTramp+3, 0xC3) // ret
 	mem.Write32(kuserAddr+0x0300, uint32(win32kTramp))
-	ravelog.Logf("[kuser] SystemCall stub at 0x7FFE0300 → trampoline 0x%x\n", win32kTramp)
+	ravelog.Logf("[kuser] SystemCall stub at 0x7FFE0300 -> trampoline 0x%x\n", win32kTramp)
 
 	// Map the gap between stack top (0x7FFD0000) and KUSER_SHARED_DATA (0x7FFE0000).
 	// Some DLLs (kernelbase) access memory in this range.
@@ -414,7 +472,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 			Entry:     synth.BaseAddr,
 		})
 	}
-	// Register forwarding DLL aliases (api-ms-win-crt-* → ucrtbase.dll, etc.) so
+	// Register forwarding DLL aliases (api-ms-win-crt-* -> ucrtbase.dll, etc.) so
 	// that ResolveImports can find and patch their IAT entries correctly.
 	for alias, canonical := range synthAliases {
 		if mod, ok := loadedModules[canonical]; ok {
@@ -426,7 +484,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	for _, synth := range autoSynthDLLs {
 		switch strings.ToLower(synth.Name) {
 		case "shell32.dll":
-			// Map ordinal 165 → SHCreateDirectoryExW or its placeholder
+			// Map ordinal 165 -> SHCreateDirectoryExW or its placeholder
 			for _, name := range []string{"SHCreateDirectoryExW", "ord_165"} {
 				if addr, ok := synth.Exports[name]; ok {
 					synth.ExportOrds[165] = addr
@@ -538,7 +596,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 		CurrentDir:  guestCurrentDir,
 		Environment: guestEnvironment,
 		ProcessId:   1000,
-		ThreadId:    1004,
+		ThreadId:    1,
 		StackBase:   stackTop,
 		StackLimit:  stackTop - stackSize,
 		Is32:        !result.MainModule.Is64,
@@ -921,7 +979,7 @@ func runPE(absPath string, guestArgv []string, sysroot, regFile string, trace, t
 	// Background goroutine to keep KUSER_SHARED_DATA TickCount and SystemTime up-to-date.
 	// Many apps read these directly without calling Win32 APIs.
 	go func() {
-		const epochDiff = uint64(11644473600) * 10000000 // 1970→1601 in 100ns
+		const epochDiff = uint64(11644473600) * 10000000 // 1970->1601 in 100ns
 		const tickMul = uint64(0x0FA00000)               // TickCountMultiplier
 		ticker := time.NewTicker(15 * time.Millisecond)
 		defer ticker.Stop()
@@ -1032,6 +1090,22 @@ func drawMenuBitmapPixels(window *wl.Window, pixels []uint32, sourceWidth, width
 	return true
 }
 
+func waitForAutoWindow(windows func() []*wl.Window, title string, timeout time.Duration) *wl.Window {
+	title = strings.TrimSpace(title)
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, win := range windows() {
+			if strings.EqualFold(win.TitleText(), title) {
+				return win
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 // runAutoScript parses and executes a semicolon-separated automation script.
 // Format: "<delay_sec>:<action>:<args>;..."
 // Actions: screenshot:<path>, click:<x>,<y>, key:<keycode>, chord:<modifier>,<keycode>
@@ -1069,7 +1143,12 @@ func runAutoScript(script string, disp *wl.Display) {
 		})
 	}
 	if disp != nil {
+		deadline := time.Now().Add(15 * time.Second)
 		for len(disp.Windows()) == 0 {
+			if !time.Now().Before(deadline) {
+				ravelog.Logf("[auto] script failed: first window did not appear\n")
+				return
+			}
 			time.Sleep(25 * time.Millisecond)
 		}
 		ravelog.Logf("[auto] first window ready\n")
@@ -1110,7 +1189,7 @@ func runAutoScript(script string, disp *wl.Display) {
 				if err := win.Screenshot(path); err != nil {
 					ravelog.Logf("[auto] screenshot-all %q failed: %v\n", path, err)
 				} else {
-					ravelog.Logf("[auto] screenshot-all saved: %s title=%q\n", path, win.Title)
+					ravelog.Logf("[auto] screenshot-all saved: %s title=%q\n", path, win.TitleText())
 				}
 			}
 		case "click":
@@ -1153,19 +1232,13 @@ func runAutoScript(script string, disp *wl.Display) {
 			}
 			x, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
 			y, _ := strconv.Atoi(strings.TrimSpace(parts[2]))
-			var target *wl.Window
-			for _, win := range disp.Windows() {
-				if strings.EqualFold(win.Title, strings.TrimSpace(parts[0])) {
-					target = win
-					break
-				}
-			}
+			target := waitForAutoWindow(disp.Windows, parts[0], 15*time.Second)
 			if target == nil {
-				ravelog.Logf("[auto] click-title: window %q not found\n", parts[0])
-				continue
+				ravelog.Logf("[auto] script failed: click-title window %q did not appear\n", strings.TrimSpace(parts[0]))
+				return
 			}
 			disp.InjectClickWindow(target, int32(x), int32(y))
-			ravelog.Logf("[auto] click-title %q at (%d,%d)\n", target.Title, x, y)
+			ravelog.Logf("[auto] click-title %q at (%d,%d)\n", target.TitleText(), x, y)
 		case "key":
 			if disp == nil {
 				ravelog.Logf("[auto] key: no display\n")
@@ -1176,6 +1249,7 @@ func runAutoScript(script string, disp *wl.Display) {
 			ravelog.Logf("[auto] key %d\n", code)
 		case "key-title":
 			if disp == nil {
+				ravelog.Logf("[auto] key-title: no display\n")
 				continue
 			}
 			parts := strings.SplitN(cmd.args, ",", 2)
@@ -1184,21 +1258,16 @@ func runAutoScript(script string, disp *wl.Display) {
 				continue
 			}
 			code, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-			var target *wl.Window
-			for _, win := range disp.Windows() {
-				if strings.EqualFold(win.Title, strings.TrimSpace(parts[0])) {
-					target = win
-					break
-				}
-			}
+			target := waitForAutoWindow(disp.Windows, parts[0], 15*time.Second)
 			if target == nil {
-				ravelog.Logf("[auto] key-title: window %q not found\n", parts[0])
-				continue
+				ravelog.Logf("[auto] script failed: key-title window %q did not appear\n", strings.TrimSpace(parts[0]))
+				return
 			}
 			disp.InjectKeyWindow(target, uint32(code))
-			ravelog.Logf("[auto] key-title %q key %d\n", target.Title, code)
+			ravelog.Logf("[auto] key-title %q key %d\n", target.TitleText(), code)
 		case "type-title":
 			if disp == nil {
+				ravelog.Logf("[auto] type-title: no display\n")
 				continue
 			}
 			parts := strings.SplitN(cmd.args, ",", 2)
@@ -1206,36 +1275,25 @@ func runAutoScript(script string, disp *wl.Display) {
 				ravelog.Logf("[auto] type-title: bad args %q\n", cmd.args)
 				continue
 			}
-			var target *wl.Window
-			for _, win := range disp.Windows() {
-				if strings.EqualFold(win.Title, strings.TrimSpace(parts[0])) {
-					target = win
-					break
-				}
-			}
+			target := waitForAutoWindow(disp.Windows, parts[0], 15*time.Second)
 			if target == nil {
-				ravelog.Logf("[auto] type-title: window %q not found\n", parts[0])
-				continue
+				ravelog.Logf("[auto] script failed: type-title window %q did not appear\n", strings.TrimSpace(parts[0]))
+				return
 			}
 			disp.InjectTextWindow(target, parts[1])
-			ravelog.Logf("[auto] type-title %q text=%q\n", target.Title, parts[1])
+			ravelog.Logf("[auto] type-title %q text=%q\n", target.TitleText(), parts[1])
 		case "close-title":
 			if disp == nil {
+				ravelog.Logf("[auto] close-title: no display\n")
 				continue
 			}
-			var target *wl.Window
-			for _, win := range disp.Windows() {
-				if strings.EqualFold(win.Title, strings.TrimSpace(cmd.args)) {
-					target = win
-					break
-				}
-			}
+			target := waitForAutoWindow(disp.Windows, cmd.args, 15*time.Second)
 			if target == nil {
-				ravelog.Logf("[auto] close-title: window %q not found\n", cmd.args)
-				continue
+				ravelog.Logf("[auto] script failed: close-title window %q did not appear\n", strings.TrimSpace(cmd.args))
+				return
 			}
 			disp.InjectCloseWindow(target)
-			ravelog.Logf("[auto] close-title %q\n", target.Title)
+			ravelog.Logf("[auto] close-title %q\n", target.TitleText())
 		case "chord":
 			if disp == nil {
 				ravelog.Logf("[auto] chord: no display\n")
@@ -1274,7 +1332,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// Shared heap free-list (used by kernel32 HeapAlloc/HeapFree AND CRT malloc/free)
 	var heapFreeList []freeBlock
-	heapMmapBlocks := make(map[uint64]uint64) // user ptr → block size
+	heapMmapBlocks := make(map[uint64]uint64) // user ptr -> block size
 	var heapMu sync.Mutex                     // protects heapFreeList, heapMmapBlocks, and TEB bump counter
 	mode32 := !mainModule.Is64
 
@@ -1523,7 +1581,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		return a
 	}
 
-	// INI file cache: hostPath → section(lower) → key(lower) → value
+	// INI file cache: hostPath -> section(lower) -> key(lower) -> value
 	iniCache := map[string]map[string]map[string]string{}
 	iniRead := func(hostPath string) map[string]map[string]string {
 		if c, ok := iniCache[hostPath]; ok {
@@ -1669,7 +1727,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				continue
 			}
 			if vm.Writable {
-				// Sync guest pages → HostBuf slice.
+				// Sync guest pages -> HostBuf slice.
 				if guestData, err := ctx.Mem.ReadBytes(vm.GuestAddr, int(vm.Size)); err == nil {
 					copy(vm.HostBuf, guestData)
 					// Write back to the file if file-backed.
@@ -1719,7 +1777,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		rsrcBase := mainModule.BaseAddr + uint64(mainModule.ResourceDirRVA)
 
-		// Navigate resource directory: Type (RT_STRING=6) → Block ID → Language
+		// Navigate resource directory: Type (RT_STRING=6) -> Block ID -> Language
 		// IMAGE_RESOURCE_DIRECTORY: Characteristics(4) + TimeDateStamp(4) + MajorVersion(2) +
 		//   MinorVersion(2) + NumberOfNamedEntries(2) + NumberOfIdEntries(2) = 16 bytes
 		// IMAGE_RESOURCE_DIRECTORY_ENTRY: Name/ID(4) + OffsetToData(4) = 8 bytes
@@ -1818,7 +1876,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			return 0, false
 		}
 
-		// Navigate: Type(4=MENU) → ID(menuID) → first language
+		// Navigate: Type(4=MENU) -> ID(menuID) -> first language
 		typeDir, isDir := findEntry(rsrcBase, 4) // RT_MENU
 		if !isDir || typeDir == 0 {
 			return nil
@@ -2545,7 +2603,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	}
 
 	// crtStreamWriter returns the appropriate os writer for a CRT FILE* stream.
-	// stderr = base + stride*2, everything else → stdout.
+	// stderr = base + stride*2, everything else -> stdout.
 	crtStreamWriter := func(stream, base uint64, stride uint64) *os.File {
 		if base != 0 && stream == base+stride*2 {
 			return os.Stderr
@@ -2555,6 +2613,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 	// ── Create HandlerCtx (shared state for all extracted DLL handlers) ──
 	guestCallTrampoline := ntapi.AllocTrampoline(mem)
+	if procState != nil {
+		procState.SetGuestCallTrampoline(guestCallTrampoline)
+	}
 	envVars := map[string]string{
 		"PATH":                   "C:\\Windows\\System32;C:\\Windows",
 		"SYSTEMROOT":             "C:\\Windows",
@@ -2649,6 +2710,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// --- msvcrt.dll ---
 	registerMsvcrtHandlers(hctx)
 	registerUcrtHandlers(hctx)
+	registerCRTHandlers(hctx)
 
 	// --- registry helpers (used by kernel32 + advapi32) ---
 	regKeyPath := func(hKey uint64, subKey string) string {
@@ -2779,8 +2841,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	hctx.GdiAlloc = gdiAlloc
 
 	// Menu data structures (types defined earlier near peLoadMenuResource)
-	hctx.Menus = make(map[uint64]*menuData)    // menu handle → menu data
-	hctx.HwndMenuBar = make(map[uint64]uint64) // HWND → menu bar handle
+	hctx.Menus = make(map[uint64]*menuData)    // menu handle -> menu data
+	hctx.HwndMenuBar = make(map[uint64]uint64) // HWND -> menu bar handle
 	// Menu bar interaction state
 	hctx.OpenMenuIdx = -1 // which top-level menu is open (-1 = none)
 	// hctx.OpenMenuHwnd: hctx.OpenMenuHwnd already zero-valued
@@ -2806,7 +2868,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		h := hctx.NextHWND
 		hctx.NextHWND++
 		hctx.HwndOrder = append(hctx.HwndOrder, h)
-		hctx.HwndZOrder = append([]uint64{h}, hctx.HwndZOrder...)
+		hctx.addZOrder(h, false)
 		return h
 	}
 	hctx.HwndAlloc = hwndAlloc
@@ -2817,17 +2879,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 	// hctx.MouseCapture: hctx.MouseCapture already zero-valued
 
 	// WndProc dispatch tables
-	hctx.AtomWndProc = make(map[uint16]uint64)             // class atom → WndProc address
-	hctx.HwndWndProc = make(map[uint64]uint64)             // HWND → WndProc address
-	hctx.ClassNameAtom = make(map[string]uint16)           // class name → atom (for lpClassName string lookups)
-	hctx.ClassMenuHandle = make(map[uint16]uint64)         // class atom → loaded menu handle
-	hctx.ClassBrush = make(map[uint16]uint32)              // class atom → hbrBackground (COLOR_xxx+1 index)
-	hctx.ClassInfo = make(map[uint16]*registeredClassInfo) // class atom → full class info
-	hctx.HwndClassAtom = make(map[uint64]uint16)           // HWND → class atom (for brush lookup)
-	hctx.TrackMouseHwnds = make(map[uint64]uint32)         // HWND → TME flags
+	hctx.AtomWndProc = make(map[uint16]uint64)             // class atom -> WndProc address
+	hctx.HwndWndProc = make(map[uint64]uint64)             // HWND -> WndProc address
+	hctx.ClassNameAtom = make(map[string]uint16)           // class name -> atom (for lpClassName string lookups)
+	hctx.ClassMenuHandle = make(map[uint16]uint64)         // class atom -> loaded menu handle
+	hctx.ClassBrush = make(map[uint16]uint32)              // class atom -> hbrBackground (COLOR_xxx+1 index)
+	hctx.ClassInfo = make(map[uint16]*registeredClassInfo) // class atom -> full class info
+	hctx.HwndClassAtom = make(map[uint64]uint16)           // HWND -> class atom (for brush lookup)
+	hctx.TrackMouseHwnds = make(map[uint64]uint32)         // HWND -> TME flags
 
 	// Built-in window class tracking for Edit, Static, Button, etc.
 	hctx.HwndChildren = make(map[uint64]*controlState)
+	hctx.HwndTopmost = make(map[uint64]bool)
 	hctx.HwndTitle = make(map[uint64]string)
 	// hctx.HwndExplicitlyHidden tracks HWNDs that the guest explicitly hid via
 	// ShowWindow(SW_HIDE). These must NOT be auto-shown when the parent is
@@ -3488,7 +3551,8 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		sort.Slice(controls, func(i, j int) bool { return controls[i] < controls[j] })
 		for _, hwnd := range controls {
-			if !hctx.WinInvalid[hwnd] {
+			eraseRequested := hctx.WinErasePending[hwnd]
+			if !hctx.WinInvalid[hwnd] || eraseRequested {
 				state := hctx.HwndChildren[hwnd]
 				rootState := hctx.HwndChildren[root]
 				if state == nil || rootState == nil {
@@ -3513,7 +3577,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					dc.OriginY = state.y - rootState.y
 					dc.SetClipRect(dc.OriginX, dc.OriginY, dc.OriginX+state.w, dc.OriginY+state.h)
 				}
-				hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x0014, eraseDC.handle, 0))
+				hctx.enqueueMessageBeforePaint(nil, newQueuedMsg(hctx, hwnd, 0x0014, eraseDC.handle, 0))
+				if eraseRequested {
+					delete(hctx.WinErasePending, hwnd)
+				}
 				hctx.QueuePaint(hwnd)
 			}
 		}
@@ -3803,7 +3870,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					hctx.WinInvalid[hwnd] = false
 					delete(hctx.WinErasePending, hwnd)
 					win32.Global.Validate(hwnd)
-					renderOwnedDialog(hctx, root, target)
+					renderOwnedDialog(hctx, root, hctx.windowCPU(hwnd), target)
 					drawOwnerButton(root, hwnd, target)
 				}
 				return 0, true
@@ -3851,11 +3918,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// Snap statusbar to bottom of Wayland window (common control behavior: WM_SIZE repositions it)
 				if wlWindow != nil {
 					sbY := wlWindow.Height + wlWindow.TitleBarH - cs.h
-					if sbY > cs.y {
-						cs.y = sbY
-					} // only snap down, not up
-					cs.x = 0
-					cs.w = wlWindow.Width
+					cs.mutateGeometry(func(geometry *controlGeometry) {
+						if sbY > geometry.y {
+							geometry.y = sbY
+						}
+						geometry.x = 0
+						geometry.w = wlWindow.Width
+					})
 				}
 				// Top edge: etched line (shadow + highlight)
 				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+1, sysColors[16])   // shadow
@@ -3869,6 +3938,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						right := cs.x + rightEdge
 						if rightEdge < 0 {
 							right = cs.x + cs.w
+						}
+						if cs.customDrawItemSkipped(uint64(i)) {
+							left = right
+							continue
 						}
 						// Sunken part area
 						wlWindow.DrawRectAbs(left, cs.y+3, right-1, cs.y+4, sysColors[16])           // top shadow
@@ -4020,6 +4093,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 							if !ok || ty > cs.y+cs.h-2 {
 								continue
 							}
+							if cs.customDrawItemSkipped(h) {
+								ty += itemHeight
+								if ti.expanded {
+									renderTree(ti.children, indent+1)
+								}
+								continue
+							}
 							tx := cs.x + 4 + indent*16
 							// Draw expand/collapse marker if has children
 							if len(ti.children) > 0 {
@@ -4087,6 +4167,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if rowY+rowH > cs.y+cs.h-1 {
 							break
 						}
+						if cs.customDrawItemSkipped(uint64(i)) {
+							rowY += rowH
+							continue
+						}
 						item := lvItem{}
 						if cs.listView.style&0x1000 != 0 {
 							item = listViewFetchVirtualItem(hwnd, cs, i, 0, true)
@@ -4135,6 +4219,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if w <= 0 {
 							w = 80
 						}
+						if cs.customDrawItemSkipped(uint64(i)) {
+							x += w
+							continue
+						}
 						wlWindow.DrawRectAbs(x, cs.y, x+w, cs.y+cs.h, sysColors[15])
 						wlWindow.DrawRectAbs(x+w-1, cs.y+1, x+w, cs.y+cs.h-1, sysColors[16])
 						if item.text != "" {
@@ -4169,6 +4257,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					tabW := menuTextWidth(label) + tabPad*2
 					if tabW < 40 {
 						tabW = 40
+					}
+					if cs.customDrawItemSkipped(uint64(i)) {
+						tx += tabW
+						continue
 					}
 					wlWindow.DrawRectAbs(tx, cs.y, tx+tabW, cs.y+tabH, bgCol)
 					wlWindow.DrawRectAbs(tx, cs.y, tx+1, cs.y+tabH, sysColors[16])
@@ -4265,10 +4357,12 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			// StatusBar auto-sizes to parent width
 			if cs.className == "msctls_statusbar32" && wlWindow != nil {
 				const sbHeight int32 = 20
-				cs.x = 0
-				cs.y = wlWindow.Height + wlWindow.TitleBarH - sbHeight
-				cs.w = wlWindow.Width
-				cs.h = sbHeight
+				cs.mutateGeometry(func(geometry *controlGeometry) {
+					geometry.x = 0
+					geometry.y = wlWindow.Height + wlWindow.TitleBarH - sbHeight
+					geometry.w = wlWindow.Width
+					geometry.h = sbHeight
+				})
 			}
 			// If there's a guest WndProc, let it handle WM_SIZE too
 			if wp, ok := hctx.HwndWndProc[hwnd]; ok && wp != 0 {
@@ -5004,7 +5098,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 8: // SB_SETMINHEIGHT
 				cs.statusMinH = int32(wParam)
 				if cs.statusMinH > 0 {
-					cs.h = cs.statusMinH + 4
+					cs.mutateGeometry(func(geometry *controlGeometry) {
+						geometry.h = cs.statusMinH + 4
+					})
 				}
 				hctx.QueuePaint(hwnd)
 				return 1, true
@@ -6095,6 +6191,47 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			}
 		case "rebarwindow32":
 			const rbFirst = 0x0400
+			applyBandInfo := func(insert bool) {
+				if lParam != 0 {
+					fMask, _ := mem.Read32(lParam + 4)
+					const (
+						rbbimChild     = 0x10
+						rbbimChildSize = 0x20
+					)
+					if fMask&rbbimChild != 0 {
+						is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+						layout := rebarBandInfoOffsets(is32)
+						childHWND, _ := readGuestPointer(mem, lParam+layout.child, is32)
+						childHeight := int32(26)
+						if fMask&rbbimChildSize != 0 {
+							value, _ := mem.Read32(lParam + layout.minChildY)
+							if int32(value) > 0 {
+								childHeight = int32(value)
+							}
+						}
+						if child, ok := hctx.HwndChildren[childHWND]; ok {
+							reparentControl(hctx.HwndChildren, childHWND, hwnd)
+							win32.Global.SetParent(childHWND, hwnd)
+							child.mutateGeometry(func(geometry *controlGeometry) {
+								geometry.w = cs.w
+								if geometry.w <= 0 && wlWindow != nil {
+									geometry.w = wlWindow.Width
+								}
+								geometry.h = childHeight
+								geometry.x = cs.x
+								geometry.y = cs.y
+							})
+						}
+					}
+				}
+				if insert {
+					hctx.RebarBandCounts[hwnd]++
+					cs.mutateGeometry(func(geometry *controlGeometry) {
+						geometry.h = int32(hctx.RebarBandCounts[hwnd]) * 26
+					})
+				}
+				hctx.QueuePaint(hctx.MainHWND)
+			}
 			switch msg {
 			case 0x000F: // WM_PAINT
 				validatePaint()
@@ -6107,71 +6244,43 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				}
 				return 0, true
 			case 0x0005: // WM_SIZE
-				cs.w = int32(lParam & 0xFFFF)
-				cs.h = int32(lParam >> 16)
+				cs.mutateGeometry(func(geometry *controlGeometry) {
+					geometry.w = int32(lParam & 0xFFFF)
+					geometry.h = int32(lParam >> 16)
+				})
 				return 0, true
-			case rbFirst + 1: // RB_INSERTBANDA
-				hctx.RebarBandCounts[hwnd]++
-				// Update rebar height: each band is 26px
-				cs.h = int32(hctx.RebarBandCounts[hwnd]) * 26
-				return 1, true
-			case rbFirst + 10: // RB_INSERTBANDW
-				// Parse REBARBANDINFOW to extract and size the child window.
-				// 64-bit layout: cbSize(4), fMask(4), fStyle(4), clrFore(4), clrBack(4),
-				//   pad(4), lpText(8), cch(4), iImage(4), hwndChild(8), cxMinChild(4), cyMinChild(4), cx(4)
-				if lParam != 0 {
-					fMaskRB, _ := mem.Read32(lParam + 4)
-					const RBBIM_CHILD = 0x10
-					const RBBIM_CHILDSIZE = 0x20
-					if fMaskRB&RBBIM_CHILD != 0 {
-						childHWND, _ := mem.Read64(lParam + 40)
-						cyMinChild := int32(0)
-						if fMaskRB&RBBIM_CHILDSIZE != 0 {
-							cyV, _ := mem.Read32(lParam + 52)
-							cyMinChild = int32(cyV)
-						}
-						if cyMinChild <= 0 {
-							cyMinChild = 26
-						}
-						if csc, ok2 := hctx.HwndChildren[childHWND]; ok2 {
-							csc.w = cs.w
-							if csc.w <= 0 && wlWindow != nil {
-								csc.w = wlWindow.Width
-							}
-							csc.h = cyMinChild
-							csc.x = cs.x
-							csc.y = cs.y
-						}
-					}
+			case 0x0111: // WM_COMMAND
+				if cs.parentHWND != 0 {
+					hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, msg, wParam, lParam))
 				}
-				hctx.RebarBandCounts[hwnd]++
-				cs.h = int32(hctx.RebarBandCounts[hwnd]) * 26
-				// Queue repaint so the toolbar gets drawn after sizing
-				hctx.QueuePaint(hctx.MainHWND)
+				return 0, true
+			case rbFirst + 1, rbFirst + 10: // RB_INSERTBANDA / RB_INSERTBANDW
+				applyBandInfo(true)
+				return 1, true
+			case rbFirst + 6, rbFirst + 11: // RB_SETBANDINFOA / RB_SETBANDINFOW
+				applyBandInfo(false)
 				return 1, true
 			case rbFirst + 12: // RB_GETBANDCOUNT
 				return uint64(hctx.RebarBandCounts[hwnd]), true
-			case rbFirst + 14: // RB_GETBANDINFO / RB_GETBANDINFOA
-				return 1, true
-			case rbFirst + 4: // RB_DELETEBAND
+			case rbFirst + 2: // RB_DELETEBAND
 				if hctx.RebarBandCounts[hwnd] > 0 {
 					hctx.RebarBandCounts[hwnd]--
-					cs.h = int32(hctx.RebarBandCounts[hwnd]) * 26
+					cs.mutateGeometry(func(geometry *controlGeometry) {
+						geometry.h = int32(hctx.RebarBandCounts[hwnd]) * 26
+					})
 				}
 				return 1, true
-			case rbFirst + 6: // RB_GETBARHEIGHT
+			case rbFirst + 27: // RB_GETBARHEIGHT
 				return uint64(cs.h), true
-			case rbFirst + 9: // RB_GETBARINFO
+			case rbFirst + 3: // RB_GETBARINFO
 				return 1, true
-			case rbFirst + 19: // RB_SETBARINFO
+			case rbFirst + 4: // RB_SETBARINFO
 				return 1, true
-			case rbFirst + 25: // RB_GETBANDINFOW
+			case rbFirst + 28, rbFirst + 29: // RB_GETBANDINFOW / RB_GETBANDINFOA
 				return 1, true
-			case rbFirst + 31: // RB_SETBANDINFOW
+			case rbFirst + 23: // RB_SIZETORECT
 				return 1, true
-			case rbFirst + 22: // RB_SIZETORECT
-				return 1, true
-			case rbFirst + 17: // RB_HITTEST
+			case rbFirst + 8: // RB_HITTEST
 				return uint64(0xFFFFFFFF), true // RBHT_NOWHERE
 			default:
 				return 0, true
@@ -6219,12 +6328,19 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case 0x000F: // WM_PAINT
 				validatePaint()
 				if wlWindow != nil {
-					// Draw toolbar background - slightly darker than button face for contrast
-					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, 0xD4D0C8)
-					btnW := cs.tbBtnW
-					if btnW <= 0 {
-						btnW = 23
+					background := uint32(0xD4D0C8)
+					buttonFace := uint32(0xECE9D8)
+					buttonHighlight := uint32(0xFFFFFF)
+					buttonInnerShadow := uint32(0xACA899)
+					buttonOuterShadow := uint32(0x716F64)
+					if effectiveDarkModeForWindow(hwnd, hctx.HwndChildren) {
+						background = darkPalette.Control
+						buttonFace = darkPalette.Input
+						buttonHighlight = darkPalette.Border
+						buttonInnerShadow = darkPalette.Background
+						buttonOuterShadow = 0x00181818
 					}
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, background)
 					btnH := cs.tbBtnH
 					if btnH <= 0 {
 						btnH = 22
@@ -6233,33 +6349,40 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						btnH = cs.h - 2
 					}
 					const padY = int32(2)
-					x := cs.x + 2
 					drawBtn := func(bx, by, bw, bh int32) {
 						// Windows classic raised button: face + 3D border
-						wlWindow.DrawRectAbs(bx, by, bx+bw, by+bh, 0xECE9D8)            // button face
-						wlWindow.DrawRectAbs(bx, by, bx+bw, by+1, 0xFFFFFF)             // top highlight
-						wlWindow.DrawRectAbs(bx, by, bx+1, by+bh, 0xFFFFFF)             // left highlight
-						wlWindow.DrawRectAbs(bx+bw-2, by+1, bx+bw-1, by+bh-1, 0xACA899) // inner right shadow
-						wlWindow.DrawRectAbs(bx+1, by+bh-2, bx+bw-1, by+bh-1, 0xACA899) // inner bottom shadow
-						wlWindow.DrawRectAbs(bx+bw-1, by, bx+bw, by+bh, 0x716F64)       // outer right shadow
-						wlWindow.DrawRectAbs(bx, by+bh-1, bx+bw, by+bh, 0x716F64)       // outer bottom shadow
+						wlWindow.DrawRectAbs(bx, by, bx+bw, by+bh, buttonFace)
+						wlWindow.DrawRectAbs(bx, by, bx+bw, by+1, buttonHighlight)
+						wlWindow.DrawRectAbs(bx, by, bx+1, by+bh, buttonHighlight)
+						wlWindow.DrawRectAbs(bx+bw-2, by+1, bx+bw-1, by+bh-1, buttonInnerShadow)
+						wlWindow.DrawRectAbs(bx+1, by+bh-2, bx+bw-1, by+bh-1, buttonInnerShadow)
+						wlWindow.DrawRectAbs(bx+bw-1, by, bx+bw, by+bh, buttonOuterShadow)
+						wlWindow.DrawRectAbs(bx, by+bh-1, bx+bw, by+bh, buttonOuterShadow)
 					}
 					fallbackKey := toolbarFallbackKey{
 						parent: cs.parentHWND,
 						layout: toolbarLayoutSignature(tb),
 					}
-					for _, btn := range tb.buttons {
-						if btn.state&0x08 != 0 {
+					items := layoutToolbarButtons(tb, cs.tbBtnW)
+					for i, btn := range tb.buttons {
+						item := items[i]
+						if !item.visible {
 							continue
 						}
+						x := cs.x + item.left
+						btnW := item.right - item.left
 						if x >= cs.x+cs.w {
 							break
 						}
-						if btn.style&0x01 != 0 { // TBSTYLE_SEP
-							mid := x + 3
-							wlWindow.DrawRectAbs(mid, cs.y+padY+2, mid+1, cs.y+padY+btnH-2, 0x716F64)
-							wlWindow.DrawRectAbs(mid+1, cs.y+padY+2, mid+2, cs.y+padY+btnH-2, 0xFFFFFF)
-							x += 8
+						if cs.customDrawItemSkipped(uint64(i)) {
+							continue
+						}
+						if item.separator {
+							mid := x + (btnW-2)/2
+							wlWindow.DrawRectAbs(mid, cs.y+padY+2, mid+1, cs.y+padY+btnH-2, buttonOuterShadow)
+							if mid+1 < x+btnW {
+								wlWindow.DrawRectAbs(mid+1, cs.y+padY+2, mid+2, cs.y+padY+btnH-2, buttonHighlight)
+							}
 							continue
 						}
 						drawBtn(x, cs.y+padY, btnW, btnH)
@@ -6329,6 +6452,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						} else if imagePresent && !toolbarIconHasVisiblePixel(pix) {
 							pix = toolbarFallbackIcon(hctx, fallbackKey, iconIdx, iconW, iconH)
 						}
+						if os.Getenv("RAVEN_TRACE_TOOLBAR") != "" {
+							visiblePixels := 0
+							iconColors := make(map[uint32]struct{})
+							for _, pixel := range pix {
+								if pixel>>24 == 0 {
+									continue
+								}
+								visiblePixels++
+								iconColors[pixel&0x00FFFFFF] = struct{}{}
+							}
+							ravelog.Logf(
+								"[toolbar-icon] list=0x%x index=%d pixels=%d visible=%d colors=%d\n",
+								cs.tbImageList,
+								iconIdx,
+								len(pix),
+								visiblePixels,
+								len(iconColors),
+							)
+						}
 						if len(pix) > 0 {
 							offX := x + (btnW-int32(iconW))/2
 							offY := cs.y + padY + (btnH-int32(iconH))/2
@@ -6367,38 +6509,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								}
 							}
 						}
-						x += btnW + 1
 					}
 				}
 				return 0, true
 			case 0x0005: // WM_SIZE
-				cs.w = int32(lParam & 0xFFFF)
-				cs.h = 26 // standard toolbar height
+				cs.mutateGeometry(func(geometry *controlGeometry) {
+					geometry.w = int32(lParam & 0xFFFF)
+					geometry.h = 26
+				})
 				return 0, true
 			case 0x0201: // WM_LBUTTONDOWN - toolbar button click
 				clickX := int32(lParam & 0xFFFF)
-				btnW := cs.tbBtnW
-				if btnW <= 0 {
-					btnW = 23
-				}
-				x := int32(2)
-				for _, btn := range tb.buttons {
-					if btn.state&0x08 != 0 {
-						continue
+				index := toolbarButtonAt(layoutToolbarButtons(tb, cs.tbBtnW), clickX)
+				if index >= 0 {
+					btn := tb.buttons[index]
+					if btn.state&0x0C == 0x04 {
+						// WM_COMMAND: LOWORD=cmdID, HIWORD=1 (BN_CLICKED), lParam=toolbar HWND
+						hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111,
+							uint64(uint16(btn.id))|(1<<16), hwnd))
 					}
-					if btn.style&0x01 != 0 { // TBSTYLE_SEP
-						x += 8
-						continue
-					}
-					if clickX >= x && clickX < x+btnW {
-						if btn.state&0x0C == 0x04 {
-							// WM_COMMAND: LOWORD=cmdID, HIWORD=1 (BN_CLICKED), lParam=toolbar HWND
-							hctx.enqueueMessage(nil, newQueuedMsg(hctx, cs.parentHWND, 0x0111,
-								uint64(uint16(btn.id))|(1<<16), hwnd))
-						}
-						break
-					}
-					x += btnW + 1
 				}
 				return 0, true
 			case wmUser + 1: // TB_ENABLEBUTTON
@@ -6538,7 +6667,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 								}
 								slots[s] = pix
 							}
-							ravelog.Logf("[toolbar] TB_ADDBITMAP GDI surf %dx%d → %d slots (iconW=%d iconH=%d)\n", bw, bh, ns, iw, ih)
+							ravelog.Logf("[toolbar] TB_ADDBITMAP GDI surf %dx%d -> %d slots (iconW=%d iconH=%d)\n", bw, bh, ns, iw, ih)
 							cs.tbBitmapStore = append(cs.tbBitmapStore, slots...)
 						} else {
 							ravelog.Logf("[toolbar] TB_ADDBITMAP HBITMAP 0x%x not found - lazy\n", nID)
@@ -6572,7 +6701,18 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				btnStruct := lParam
 				for i := 0; i < nButtons; i++ {
 					base := btnStruct + uint64(i)*buttonLayout.size
-					tb.buttons = append(tb.buttons, readToolbarButton(base, msg == wmUser+68))
+					button := readToolbarButton(base, msg == wmUser+68)
+					tb.buttons = append(tb.buttons, button)
+					if os.Getenv("RAVEN_TRACE_TOOLBAR") != "" {
+						ravelog.Logf(
+							"[toolbar-button] index=%d bitmap=%d id=%d state=0x%x style=0x%x\n",
+							i,
+							button.iBitmap,
+							button.id,
+							button.state,
+							button.style,
+						)
+					}
 				}
 				syncToolbarCompat(cs)
 				hctx.QueuePaint(hwnd)
@@ -6593,20 +6733,21 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				hctx.QueuePaint(hwnd)
 				return 1, true
 			case wmUser + 30: // TB_BUTTONSTRUCTSIZE
-				return 0, true
+				return 1, true
 			case wmUser + 32: // TB_SETBITMAPSIZE
 				cs.tbBitmapIconW = int32(lParam & 0xFFFF)
 				cs.tbBitmapIconH = int32((lParam >> 16) & 0xFFFF)
 				ravelog.Logf("[toolbar] TB_SETBITMAPSIZE iconW=%d iconH=%d\n", cs.tbBitmapIconW, cs.tbBitmapIconH)
 				return 1, true
 			case wmUser + 33: // TB_AUTOSIZE
-				cs.h = 26
-				// Set width to parent's client width
-				if parent, ok := hctx.HwndChildren[cs.parentHWND]; ok {
-					cs.w = parent.w
-				} else if cs.parentHWND == hctx.MainHWND && wlWindow != nil {
-					cs.w = wlWindow.Width
-				}
+				cs.mutateGeometry(func(geometry *controlGeometry) {
+					geometry.h = 26
+					if parent, ok := hctx.HwndChildren[cs.parentHWND]; ok {
+						geometry.w = parent.w
+					} else if cs.parentHWND == hctx.MainHWND && wlWindow != nil {
+						geometry.w = wlWindow.Width
+					}
+				})
 				return 0, true
 			case wmUser + 31: // TB_SETBUTTONSIZE
 				cs.tbBtnW = int32(lParam & 0xFFFF)
@@ -6644,18 +6785,25 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					ravelog.Logf("[toolbar] TB_SETIMAGELIST h=0x%x count=%d iconW=%d iconH=%d\n",
 						lParam, count, cs.tbBitmapIconW, cs.tbBitmapIconH)
 				}
+				hctx.QueuePaint(hwnd)
 				return old, true
 			case wmUser + 49: // TB_GETIMAGELIST
 				return cs.tbImageList, true
 			case wmUser + 29: // TB_GETITEMRECT
-				if lParam != 0 {
-					btnIdx := int32(wParam)
-					x := btnIdx * 24
-					mem.Write32(lParam, uint32(x))
-					mem.Write32(lParam+4, 0)
-					mem.Write32(lParam+8, uint32(x+24))
-					mem.Write32(lParam+12, 26)
+				if lParam == 0 {
+					return 0, true
 				}
+				left, right, ok := toolbarItemRect(
+					layoutToolbarButtons(tb, cs.tbBtnW),
+					int(int32(wParam)),
+				)
+				if !ok {
+					return 0, true
+				}
+				mem.Write32(lParam, uint32(left))
+				mem.Write32(lParam+4, 0)
+				mem.Write32(lParam+8, uint32(right))
+				mem.Write32(lParam+12, 26)
 				return 1, true
 			case wmUser + 23: // TB_GETBUTTON
 				index := int(int32(wParam))
@@ -6673,13 +6821,22 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case wmUser + 37: // TB_SETPARENT
 				return 0, true
 			case wmUser + 64, wmUser + 66: // TB_SETBUTTONINFOW, TB_SETBUTTONINFOA
-				id := int(int32(wParam))
 				if lParam != 0 {
+					cbSize, _ := mem.Read32(lParam)
 					mask, _ := mem.Read32(lParam + 4)
-					for i := range tb.buttons {
-						if tb.buttons[i].id != id {
-							continue
-						}
+					i := toolbarButtonInfoIndex(tb, int(int32(wParam)), mask)
+					if cbSize != toolbarButtonInfoSize(is32) || i < 0 {
+						return 0, true
+					}
+					if mask&0x0020 != 0 { // TBIF_COMMAND
+						idCommand, _ := mem.Read32(lParam + 8)
+						tb.buttons[i].id = int(int32(idCommand))
+					}
+					if mask&0x0040 != 0 { // TBIF_SIZE
+						width, _ := mem.Read16(lParam + 18)
+						tb.buttons[i].width = int(width)
+					}
+					{
 						if mask&0x0001 != 0 { // TBIF_IMAGE
 							iImage, _ := mem.Read32(lParam + 12)
 							tb.buttons[i].iBitmap = int(int32(iImage))
@@ -6707,7 +6864,6 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						}
 						syncToolbarCompat(cs)
 						hctx.QueuePaint(hwnd)
-						break
 					}
 				}
 				return 1, true
@@ -6715,12 +6871,17 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if lParam == 0 {
 					return uint64(^uint32(0)), true
 				}
-				id := int(int32(wParam))
-				for i, btn := range tb.buttons {
-					if btn.id != id {
-						continue
+				cbSize, _ := mem.Read32(lParam)
+				mask, _ := mem.Read32(lParam + 4)
+				if cbSize != toolbarButtonInfoSize(is32) {
+					return uint64(^uint32(0)), true
+				}
+				i := toolbarButtonInfoIndex(tb, int(int32(wParam)), mask)
+				if i >= 0 {
+					btn := tb.buttons[i]
+					if mask&0x0020 != 0 { // TBIF_COMMAND
+						mem.Write32(lParam+8, uint32(int32(btn.id)))
 					}
-					mask, _ := mem.Read32(lParam + 4)
 					if mask&0x0001 != 0 { // TBIF_IMAGE
 						mem.Write32(lParam+12, uint32(int32(btn.iBitmap)))
 					}
@@ -6729,6 +6890,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 					}
 					if mask&0x0008 != 0 { // TBIF_STYLE
 						mem.Write8(lParam+17, uint8(btn.style))
+					}
+					if mask&0x0040 != 0 { // TBIF_SIZE
+						mem.Write16(lParam+18, uint16(btn.width))
 					}
 					if mask&0x0010 != 0 { // TBIF_LPARAM
 						_ = writeGuestPointer(mem, lParam+buttonInfoLayout.param, btn.param, is32)
@@ -6898,13 +7062,9 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				if lParam != 0 {
 					v, _ := mem.Read32(lParam)
 					ptX := int32(v)
-					const tabPadHT = int32(16)
 					tx := int32(0)
 					for i := 0; i < len(tab.items); i++ {
-						tw := menuTextWidth(tab.items[i].text) + tabPadHT*2
-						if tw < 40 {
-							tw = 40
-						}
+						tw := tabControlItemWidth(tab.items[i].text)
 						if ptX >= tx && ptX < tx+tw {
 							mem.Write32(lParam+8, 0x0001) // TCHT_ONITEM
 							return uint64(i), true
@@ -6916,21 +7076,13 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case tcmFirst + 10: // TCM_GETITEMRECT
 				if lParam != 0 {
 					idx := int(int32(wParam))
-					const tabPadR = int32(16)
 					left := int32(0)
 					for i := 0; i < idx && i < len(tab.items); i++ {
-						tw := menuTextWidth(tab.items[i].text) + tabPadR*2
-						if tw < 40 {
-							tw = 40
-						}
-						left += tw
+						left += tabControlItemWidth(tab.items[i].text)
 					}
 					tw := int32(80) // default
 					if idx >= 0 && idx < len(tab.items) {
-						tw = menuTextWidth(tab.items[idx].text) + tabPadR*2
-						if tw < 40 {
-							tw = 40
-						}
+						tw = tabControlItemWidth(tab.items[idx].text)
 					}
 					mem.Write32(lParam, uint32(left))
 					mem.Write32(lParam+4, 0)
@@ -7013,8 +7165,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 			case 0x0030: // WM_SETFONT
 				return 0, true
 			case 0x0005: // WM_SIZE
-				cs.w = int32(lParam & 0xFFFF)
-				cs.h = int32(lParam >> 16)
+				cs.mutateGeometry(func(geometry *controlGeometry) {
+					geometry.w = int32(lParam & 0xFFFF)
+					geometry.h = int32(lParam >> 16)
+				})
 				return 0, true
 			case 0x000F: // WM_PAINT: draw tab bar strip (not the full client area)
 				validatePaint()
@@ -7023,7 +7177,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				// window, not hardcoded onto the main window. Otherwise the tab
 				// strip leaks onto the main window and the panel never switches.
 				if root, target, isOwnedDialog := topLevelDialogTarget(hctx, hwnd); isOwnedDialog && target != nil {
-					renderOwnedDialog(hctx, root, target)
+					renderOwnedDialog(hctx, root, hctx.windowCPU(hwnd), target)
 					return 0, true
 				}
 				if wlWindow != nil {
@@ -7040,7 +7194,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 						if sel {
 							bgCol = sysColors[5]
 						}
-						tabW := int32(80)
+						tabW := tabControlItemWidth(tab.items[i].text)
 						wlWindow.DrawRectAbs(x, cs.y, x+tabW, cs.y+tabH, bgCol)
 						// tab border
 						wlWindow.DrawRectAbs(x, cs.y, x+1, cs.y+tabH, sysColors[16])
@@ -7057,15 +7211,10 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 				return 0, true
 			case 0x0201: // WM_LBUTTONDOWN - find which tab was hit and notify parent
 				clickX := int32(lParam & 0xFFFF)
-				const tabPad2 = int32(16)
 				tx := int32(0)
 				hitTab := -1
 				for i := 0; i < len(tab.items); i++ {
-					label := tab.items[i].text
-					tw := menuTextWidth(label) + tabPad2*2
-					if tw < 40 {
-						tw = 40
-					}
+					tw := tabControlItemWidth(tab.items[i].text)
 					if clickX >= tx && clickX < tx+tw {
 						hitTab = i
 						break
@@ -7262,27 +7411,46 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 		}
 		return innerBuiltin(hwnd, msg, wParam, lParam)
 	}
-	hctx.PaintTree = func(parentHwnd uint64) {
-		var children []uint64
-		for h, cs := range hctx.HwndChildren {
-			if cs.parentHWND == parentHwnd && cs.visible {
-				children = append(children, h)
+	isEffectivelyVisible := func(hwnd uint64) bool {
+		for hwnd != 0 {
+			state := hctx.HwndChildren[hwnd]
+			if state == nil {
+				return hwnd == hctx.MainHWND
 			}
+			if !state.visible {
+				return false
+			}
+			hwnd = state.parentHWND
 		}
-		sort.Slice(children, func(i, j int) bool { return children[i] < children[j] })
-		for _, h := range children {
+		return true
+	}
+	var paintTreeChildren func(uint64)
+	paintTreeChildren = func(parentHwnd uint64) {
+		for _, h := range childPaintOrder(hctx.HwndChildren, hctx.snapshotZOrder(), parentHwnd) {
+			if !isEffectivelyVisible(h) {
+				continue
+			}
 			cs := hctx.HwndChildren[h]
 			if hctx.WlWindows[h] != nil || (strings.EqualFold(cs.className, "dialog") && cs.parentHWND == hctx.MainHWND) {
 				continue
 			}
 			ravelog.Logf("[paint] paintTree child=0x%x class=%q pos=(%d,%d %dx%d)\n", h, cs.className, cs.x, cs.y, cs.w, cs.h)
 			hctx.BuiltinWndProc(h, 0x000F, 0, 0)
-			hctx.PaintTree(h)
+			paintTreeChildren(h)
 		}
 	}
-	hctx.WindowLongPtr = make(map[uint64]map[int32]uint64) // HWND → index → value
+	hctx.PaintTree = func(parentHwnd uint64) {
+		if hctx.WlWindow == nil {
+			paintTreeChildren(parentHwnd)
+			return
+		}
+		hctx.WlWindow.UpdateFrame(func() {
+			paintTreeChildren(parentHwnd)
+		})
+	}
+	hctx.WindowLongPtr = make(map[uint64]map[int32]uint64) // HWND -> index -> value
 	// Per-window properties: SetPropW / GetPropW
-	hctx.WindowProps = make(map[uint64]map[string]uint64) // HWND → prop name → value
+	hctx.WindowProps = make(map[uint64]map[string]uint64) // HWND -> prop name -> value
 
 	// Scratch page for CREATESTRUCT and similar temporary guest-side structs
 	hctx.ScratchPage = mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite)
@@ -7641,7 +7809,7 @@ func registerAutoSynthHandlers(mem *mmu.MMU, d *ntapi.Dispatcher, dlls []*ntapi.
 
 // autoSynthUnresolved generates synthetic stub DLLs for any DLLs referenced
 // in the main module's imports that aren't already in loadedModules.
-// Returns the synths and a map of alias→canonical DLL names (for IAT patching).
+// Returns the synths and a map of alias->canonical DLL names (for IAT patching).
 func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[string]*loader.PEModule) ([]*ntapi.SynthPE, map[string]string) {
 	// Canonicalize api-ms-win-crt-* and api-ms-win-core-* to their real DLLs so
 	// all their functions share a single SynthPE and a single set of handler IDs.
@@ -7665,8 +7833,8 @@ func autoSynthUnresolved(mem *mmu.MMU, mainMod *loader.PEModule, loaded map[stri
 		}
 	}
 
-	aliases := make(map[string]string)  // original name → canonical name
-	needed := make(map[string][]string) // canonical dll name → function names
+	aliases := make(map[string]string)  // original name -> canonical name
+	needed := make(map[string][]string) // canonical dll name -> function names
 	for _, imp := range mainMod.Imports {
 		dllKey := strings.ToLower(imp.DLLName)
 		if _, ok := loaded[dllKey]; ok {
@@ -7724,10 +7892,10 @@ func patchCRTDataExports(mem *mmu.MMU, mainMod *loader.PEModule, argv []string) 
 
 	// Layout within the data page:
 	// +0x000: command line string (null-terminated)
-	// +0x200: _acmdln pointer (char* → command line string)
+	// +0x200: _acmdln pointer (char* -> command line string)
 	// +0x208: _commode value (int, 0)
 	// +0x210: _fmode value (int, 0)
-	// +0x218: __initenv pointer (char** → null)
+	// +0x218: __initenv pointer (char** -> null)
 	// +0x220: _errno value (int, 0)
 	// +0x228: __mb_cur_max value (int, 1)
 
@@ -7829,7 +7997,7 @@ func patchUnresolvedOrdinals(mem *mmu.MMU, d *ntapi.Dispatcher, mainMod *loader.
 		capturedImp := imp
 		d.RegisterHandler(id, fmt.Sprintf("%s!ord%d", capturedImp.DLLName, capturedImp.Ordinal),
 			func(ctx *ntapi.TrapContext) uint32 {
-				ravelog.Logf("[ordinal] %s!ord%d → 0\n", capturedImp.DLLName, capturedImp.Ordinal)
+				ravelog.Logf("[ordinal] %s!ord%d -> 0\n", capturedImp.DLLName, capturedImp.Ordinal)
 				return 0
 			})
 
@@ -7838,7 +8006,7 @@ func patchUnresolvedOrdinals(mem *mmu.MMU, d *ntapi.Dispatcher, mainMod *loader.
 		} else {
 			mem.Write32Raw(imp.IATSlot, uint32(stubAddr))
 		}
-		ravelog.Logf("[ordinal] patched %s!ord%d IAT=0x%x → stub=0x%x\n",
+		ravelog.Logf("[ordinal] patched %s!ord%d IAT=0x%x -> stub=0x%x\n",
 			imp.DLLName, imp.Ordinal, imp.IATSlot, stubAddr)
 	}
 }
@@ -8304,11 +8472,89 @@ func waitOneWin32(handles *ntapi.HandleTable, h ntapi.Handle, tid uint32, timeou
 			return waitTimeout
 		}
 	case nil:
-		// Unknown or process handle - signal immediately
-		return waitObject0
+		return uint64(ntobj.WaitFailed)
 	default:
 		return waitObject0
 	}
+}
+
+func waitOneExWin32(handles *ntapi.HandleTable, h ntapi.Handle, tid uint32, timeout time.Duration, alertable bool) (uint64, []func()) {
+	if handles.Get(h) == nil {
+		return uint64(ntobj.WaitFailed), nil
+	}
+	if !alertable {
+		return waitOneWin32(handles, h, tid, timeout), nil
+	}
+	if waitable := handles.WaitableFor(h); waitable != nil {
+		result, apcs := ntapi.ObjMgr.WaitEx([]ntobj.Waitable{waitable}, false, uint64(tid), timeout, true)
+		return uint64(result), apcs
+	}
+	return waitAlertablePollWin32(
+		func() uint64 { return waitOneWin32(handles, h, tid, 0) },
+		tid,
+		timeout,
+	)
+}
+
+func waitAlertablePollWin32(check func() uint64, tid uint32, timeout time.Duration) (uint64, []func()) {
+	const (
+		waitTimeout      = uint64(ntobj.WaitTimeout)
+		waitIOCompletion = uint64(ntobj.WaitIOCompletion)
+	)
+	deadline := time.Time{}
+	if timeout >= 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	for {
+		if result := check(); result != waitTimeout {
+			return result, nil
+		}
+
+		waitFor := time.Millisecond
+		if timeout < 0 {
+			waitFor = 10 * time.Millisecond
+		} else {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				result, apcs := ntapi.ObjMgr.WaitEx(nil, false, uint64(tid), 0, true)
+				if uint64(result) == waitIOCompletion {
+					return uint64(result), apcs
+				}
+				return waitTimeout, nil
+			}
+			if remaining < waitFor {
+				waitFor = remaining
+			}
+		}
+
+		result, apcs := ntapi.ObjMgr.WaitEx(nil, false, uint64(tid), waitFor, true)
+		if uint64(result) == waitIOCompletion {
+			return uint64(result), apcs
+		}
+	}
+}
+
+func dispatchAlertableAPCs(tid uint32, queued []func()) {
+	for {
+		for len(queued) > 0 {
+			callback := queued[0]
+			queued = queued[1:]
+			callback()
+		}
+		result, next := ntapi.ObjMgr.WaitEx(nil, false, uint64(tid), 0, true)
+		if result != ntobj.WaitIOCompletion {
+			return
+		}
+		queued = next
+	}
+}
+
+func abortGuestCPU(cpu arch.CPU, err error) {
+	if aborter, ok := cpu.(interface{ Abort(error) }); ok {
+		aborter.Abort(err)
+		return
+	}
+	cpu.Stop()
 }
 
 func readWin32HandleArray(mem *mmu.MMU, address, count uint64, is32 bool) []ntapi.Handle {
@@ -8336,6 +8582,36 @@ func readWin32HandleArray(mem *mmu.MMU, address, count uint64, is32 bool) []ntap
 		result = append(result, ntapi.Handle(value))
 	}
 	return result
+}
+
+func waitMultipleExWin32(handles *ntapi.HandleTable, values []ntapi.Handle, tid uint32, waitAll bool, timeout time.Duration, alertable bool) (uint64, []func()) {
+	if len(values) == 0 {
+		return uint64(ntobj.WaitFailed), nil
+	}
+	for _, handle := range values {
+		if handles.Get(handle) == nil {
+			return uint64(ntobj.WaitFailed), nil
+		}
+	}
+	if !alertable {
+		return waitMultipleFallbackWin32(handles, values, tid, waitAll, timeout), nil
+	}
+	waitables := make([]ntobj.Waitable, 0, len(values))
+	for _, handle := range values {
+		waitable := handles.WaitableFor(handle)
+		if waitable == nil {
+			return waitAlertablePollWin32(
+				func() uint64 {
+					return waitMultipleFallbackWin32(handles, values, tid, waitAll, 0)
+				},
+				tid,
+				timeout,
+			)
+		}
+		waitables = append(waitables, waitable)
+	}
+	result, apcs := ntapi.ObjMgr.WaitEx(waitables, waitAll, uint64(tid), timeout, true)
+	return uint64(result), apcs
 }
 
 func waitMultipleFallbackWin32(handles *ntapi.HandleTable, values []ntapi.Handle, tid uint32, waitAll bool, timeout time.Duration) uint64 {
@@ -8394,6 +8670,8 @@ func waitMultipleFallbackWin32(handles *ntapi.HandleTable, values []ntapi.Handle
 				return waitObject0 + uint64(index)
 			case waitAbandoned0:
 				return waitAbandoned0 + uint64(index)
+			case waitFailed:
+				return waitFailed
 			}
 		}
 		if timeout >= 0 && !time.Now().Before(deadline) {

@@ -2,6 +2,8 @@
 
 package gdi
 
+import "golang.org/x/text/encoding/charmap"
+
 // text.go - GDI text rendering
 // ReactOS reference: win32ss/gdi/ntgdi/freetype.c, text.c
 //
@@ -150,6 +152,21 @@ func textRunesWidth(f *Font, runes []rune, charExtra int32) int32 {
 // opaque=true fills the background rectangle first.
 // ReactOS: NtGdiExtTextOutW → ftGdiExtTextOutW
 func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
+	dc.textOut(x, y, text, opaque, nil, nil, false, nil)
+}
+
+// TextOutANSI renders Windows-1252 bytes while preserving bitmap cell count.
+func (dc *DC) TextOutANSI(x, y int32, text []byte, opaque bool) {
+	decoded, _ := charmap.Windows1252.NewDecoder().Bytes(text)
+	dc.textOut(x, y, string(decoded), opaque, nil, nil, false, text)
+}
+
+// TextOutAdvances renders text using explicit character-cell advances.
+func (dc *DC) TextOutAdvances(x, y int32, text string, opaque bool, advancesX, advancesY []int32) {
+	dc.textOut(x, y, text, opaque, advancesX, advancesY, true, nil)
+}
+
+func (dc *DC) textOut(x, y int32, text string, opaque bool, advancesX, advancesY []int32, logicalCells bool, bitmapGlyphs []byte) {
 	if dc.target().Pix == nil {
 		return
 	}
@@ -163,6 +180,17 @@ func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
 
 	runes := []rune(text)
 	textW, _ := dc.TextExtentStr(text)
+	if len(advancesX) > 0 {
+		textW = 0
+		explicit := len(advancesX)
+		if explicit > len(runes) {
+			explicit = len(runes)
+		}
+		for i := 0; i < explicit; i++ {
+			textW += advancesX[i]
+		}
+		textW += textRunesWidth(f, runes[explicit:], dc.CharExtra)
+	}
 	hAlign := dc.TextAlign & 0x06
 	vAlign := dc.TextAlign & 0x18
 	switch hAlign {
@@ -179,14 +207,27 @@ func (dc *DC) TextOut(x, y int32, text string, opaque bool) {
 	}
 
 	if f.FaceID >= 0 {
-		dc.textOutTTF(x, y, runes, f, opaque)
+		dc.textOutTTF(x, y, runes, f, opaque, advancesX, advancesY)
 	} else {
-		dc.textOutBitmap(x, y, text, opaque)
+		glyphs := bitmapGlyphs
+		if glyphs == nil && logicalCells {
+			glyphs = make([]byte, len(runes))
+			for i, r := range runes {
+				if r >= 32 && r < 127 {
+					glyphs[i] = byte(r)
+				} else {
+					glyphs[i] = '?'
+				}
+			}
+		} else if glyphs == nil {
+			glyphs = []byte(text)
+		}
+		dc.textOutBitmap(x, y, glyphs, opaque, advancesX, advancesY)
 	}
 }
 
 // textOutTTF renders using TrueType rasterized glyphs.
-func (dc *DC) textOutTTF(x, y int32, runes []rune, f *Font, opaque bool) {
+func (dc *DC) textOutTTF(x, y int32, runes []rune, f *Font, opaque bool, advancesX, advancesY []int32) {
 	s := dc.target()
 	cx := x + dc.OriginX
 	cy := y + dc.OriginY
@@ -210,20 +251,36 @@ func (dc *DC) textOutTTF(x, y int32, runes []rune, f *Font, opaque bool) {
 		pixSize = 12
 	}
 
-	for _, r := range runes {
+	for i, r := range runes {
 		g := GlyphFor(f.FaceID, pixSize, r)
+		advanceX := f.AveCharWidth
+		if g != nil {
+			advanceX = g.Advance + dc.CharExtra
+		}
+		if i < len(advancesX) {
+			advanceX = advancesX[i]
+		}
+		advanceY := int32(0)
+		if i < len(advancesY) {
+			advanceY = advancesY[i]
+		}
 		if g == nil {
-			cx += f.AveCharWidth
+			cx += advanceX
+			cy += advanceY
 			continue
 		}
 		if bkOpaque && g.W > 0 {
 			// Fill background rect for this character cell
+			cellWidth := g.Advance
+			if i < len(advancesX) && advanceX > 0 {
+				cellWidth = advanceX
+			}
 			for row := int32(0); row < f.CellHeight; row++ {
 				py := cy + row
 				if py < 0 || py >= s.Height {
 					continue
 				}
-				for col := int32(0); col < g.Advance; col++ {
+				for col := int32(0); col < cellWidth; col++ {
 					px := cx + col
 					if px < 0 || px >= s.Width {
 						continue
@@ -275,12 +332,13 @@ func (dc *DC) textOutTTF(x, y int32, runes []rune, f *Font, opaque bool) {
 				}
 			}
 		}
-		cx += g.Advance + dc.CharExtra
+		cx += advanceX
+		cy += advanceY
 	}
 }
 
 // textOutBitmap renders using the legacy 8×16 bitmap font (ASCII only).
-func (dc *DC) textOutBitmap(x, y int32, text string, opaque bool) {
+func (dc *DC) textOutBitmap(x, y int32, glyphs []byte, opaque bool, advancesX, advancesY []int32) {
 	fgColor := dc.TextColor
 	bgColor := dc.BkColor
 	bkOpaque := opaque || dc.BkMode == 2
@@ -296,7 +354,7 @@ func (dc *DC) textOutBitmap(x, y int32, text string, opaque bool) {
 	cx := x + dc.OriginX
 	cy := y + dc.OriginY
 
-	for _, ch := range []byte(text) {
+	for i, ch := range glyphs {
 		if cx+fontCharW > s.Width {
 			break
 		}
@@ -344,7 +402,14 @@ func (dc *DC) textOutBitmap(x, y int32, text string, opaque bool) {
 				off += 4
 			}
 		}
-		cx += fontCharW + dc.CharExtra
+		advanceX := int32(fontCharW) + dc.CharExtra
+		if i < len(advancesX) {
+			advanceX = advancesX[i]
+		}
+		cx += advanceX
+		if i < len(advancesY) {
+			cy += advancesY[i]
+		}
 	}
 }
 
@@ -384,7 +449,7 @@ func (dc *DC) TextOutW(x, y int32, chars []uint16, opaque bool) {
 		case 8:
 			ay -= f.CellHeight
 		}
-		dc.textOutTTF(ax, ay, runes, f, opaque)
+		dc.textOutTTF(ax, ay, runes, f, opaque, nil, nil)
 		return
 	}
 	// Bitmap fallback: decode to ASCII best-effort

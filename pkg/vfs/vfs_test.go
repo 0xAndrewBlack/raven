@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -34,6 +35,128 @@ func TestOpenAtCreateAndRead(t *testing.T) {
 	}
 	if string(buf[:rn]) != "hello world" {
 		t.Fatalf("Read: got %q", string(buf[:rn]))
+	}
+}
+
+func TestFileBytesSnapshotsConcurrentWrites(t *testing.T) {
+	fs := New()
+	const (
+		path       = "/tmp/snapshot.txt"
+		size       = 4096
+		iterations = 1000
+	)
+	first := make([]byte, size)
+	second := make([]byte, size)
+	for i := range first {
+		first[i] = 'a'
+		second[i] = 'b'
+	}
+	if err := fs.CreateFile(path, first, ModeRead|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := fs.Open(path, O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(fd)
+
+	writerDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < iterations; i++ {
+			data := first
+			if i&1 != 0 {
+				data = second
+			}
+			if _, err := fs.Pwrite(fd, data, 0); err != nil {
+				writerDone <- err
+				return
+			}
+		}
+		writerDone <- nil
+	}()
+
+	for i := 0; i < iterations; i++ {
+		data, err := fs.FileBytes(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != size {
+			t.Fatalf("snapshot length = %d, want %d", len(data), size)
+		}
+		for _, value := range data[1:] {
+			if value != data[0] {
+				t.Fatal("snapshot contains bytes from concurrent writes")
+			}
+		}
+	}
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAccessModesAreEnforced(t *testing.T) {
+	fs := New()
+	const path = "/tmp/access.txt"
+	if err := fs.CreateFile(path, []byte("original"), ModeRead|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+
+	readOnly, err := fs.Open(path, O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(readOnly)
+	if _, err := fs.Write(readOnly, []byte("changed")); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("Write(read-only) error = %v, want EBADF", err)
+	}
+	if _, err := fs.Pwrite(readOnly, []byte("changed"), 0); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("Pwrite(read-only) error = %v, want EBADF", err)
+	}
+	data, err := fs.FileBytes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("read-only write changed data to %q", data)
+	}
+	if _, err := fs.Open(path, O_RDONLY|O_TRUNC); !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("Open(read-only truncate) error = %v, want EACCES", err)
+	}
+	data, err = fs.FileBytes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("read-only truncate changed data to %q", data)
+	}
+
+	writeOnly, err := fs.Open(path, O_WRONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(writeOnly)
+	buf := make([]byte, 8)
+	if _, err := fs.Read(writeOnly, buf); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("Read(write-only) error = %v, want EBADF", err)
+	}
+	if _, err := fs.Pread(writeOnly, buf, 0); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("Pread(write-only) error = %v, want EBADF", err)
+	}
+
+	appendRead, err := fs.Open(path, O_RDWR|O_APPEND)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(appendRead)
+	if _, err := fs.Pwrite(appendRead, []byte("!"), 0); err != nil {
+		t.Fatal(err)
+	}
+	data, err = fs.FileBytes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original!" {
+		t.Fatalf("Pwrite(append) data = %q, want original!", data)
 	}
 }
 
@@ -188,37 +311,147 @@ func TestReadDirConcurrentMutation(t *testing.T) {
 
 func TestDup(t *testing.T) {
 	fs := New()
-	fd, err := fs.OpenAt(-100, "/tmp/dup.txt", O_CREAT|O_RDWR, 0644)
+	if err := fs.CreateFile("/dup.txt", []byte("abcdef"), ModeRead|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := fs.Open("/dup.txt", O_RDONLY)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fs.Write(fd, []byte("data"))
+	defer fs.Close(fd)
+
+	buf := make([]byte, 2)
+	if n, err := fs.Read(fd, buf); err != nil || n != len(buf) || string(buf) != "ab" {
+		t.Fatalf("Read(original): n=%d data=%q err=%v", n, buf, err)
+	}
 
 	fd2, err := fs.Dup(fd)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer fs.Close(fd2)
 	if fd2 == fd {
 		t.Fatal("Dup returned same fd")
 	}
-	// Both fds should share the same node
 	node1 := fs.Stat(fd)
 	node2 := fs.Stat(fd2)
 	if node1.Ino != node2.Ino {
 		t.Fatal("Dup'd fds don't share inode")
 	}
+	if n, err := fs.Read(fd2, buf); err != nil || n != len(buf) || string(buf) != "cd" {
+		t.Fatalf("Read(duplicate): n=%d data=%q err=%v", n, buf, err)
+	}
+	if n, err := fs.Read(fd, buf); err != nil || n != len(buf) || string(buf) != "ef" {
+		t.Fatalf("Read(original after duplicate): n=%d data=%q err=%v", n, buf, err)
+	}
 }
 
 func TestDup3(t *testing.T) {
 	fs := New()
-	// Dup stdout (fd=1) to fd 10
-	err := fs.Dup3(1, 10)
+	if err := fs.CreateFile("/dup3.txt", []byte("abcdef"), ModeRead|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := fs.Open("/dup3.txt", O_RDONLY)
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := fs.Stat(10)
-	if node == nil {
-		t.Fatal("fd 10 not open after Dup3")
+	defer fs.Close(fd)
+
+	buf := make([]byte, 2)
+	if n, err := fs.Read(fd, buf); err != nil || n != len(buf) || string(buf) != "ab" {
+		t.Fatalf("Read(original): n=%d data=%q err=%v", n, buf, err)
+	}
+
+	const duplicateFD = 10
+	if err := fs.Dup3(fd, duplicateFD); err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(duplicateFD)
+	if n, err := fs.Read(duplicateFD, buf); err != nil || n != len(buf) || string(buf) != "cd" {
+		t.Fatalf("Read(duplicate): n=%d data=%q err=%v", n, buf, err)
+	}
+	if n, err := fs.Read(fd, buf); err != nil || n != len(buf) || string(buf) != "ef" {
+		t.Fatalf("Read(original after duplicate): n=%d data=%q err=%v", n, buf, err)
+	}
+}
+
+func TestOpenFilePositionsAreIndependent(t *testing.T) {
+	fs := New()
+	if err := fs.CreateFile("/independent.txt", []byte("abcdef"), ModeRead|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+	first, err := fs.Open("/independent.txt", O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(first)
+	second, err := fs.Open("/independent.txt", O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(second)
+
+	buf := make([]byte, 2)
+	for _, fd := range []int{first, second} {
+		if n, err := fs.Read(fd, buf); err != nil || n != len(buf) || string(buf) != "ab" {
+			t.Fatalf("Read(fd %d): n=%d data=%q err=%v", fd, n, buf, err)
+		}
+	}
+	for _, fd := range []int{first, second} {
+		if n, err := fs.Read(fd, buf); err != nil || n != len(buf) || string(buf) != "cd" {
+			t.Fatalf("Read(fd %d): n=%d data=%q err=%v", fd, n, buf, err)
+		}
+	}
+}
+
+func TestPositionalIORejectsInvalidRanges(t *testing.T) {
+	fs := New()
+	if err := fs.CreateFile("/positional-io.txt", []byte("data"), ModeRead|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := fs.Open("/positional-io.txt", O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(fd)
+
+	const maxInt64 = int64(1<<63 - 1)
+	tests := []struct {
+		name string
+		call func() (int, error)
+	}{
+		{
+			name: "pread negative offset",
+			call: func() (int, error) {
+				return fs.Pread(fd, make([]byte, 1), -1)
+			},
+		},
+		{
+			name: "pread range overflow",
+			call: func() (int, error) {
+				return fs.Pread(fd, make([]byte, 2), maxInt64)
+			},
+		},
+		{
+			name: "pwrite negative offset",
+			call: func() (int, error) {
+				return fs.Pwrite(fd, []byte("x"), -1)
+			},
+		},
+		{
+			name: "pwrite range overflow",
+			call: func() (int, error) {
+				return fs.Pwrite(fd, []byte("xy"), maxInt64)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			n, err := test.call()
+			if n != -1 || !errors.Is(err, syscall.EINVAL) {
+				t.Fatalf("result = %d, %v; want -1, EINVAL", n, err)
+			}
+		})
 	}
 }
 
@@ -238,6 +471,12 @@ func TestPipe2(t *testing.T) {
 	}
 	if string(buf[:n]) != "pipe data" {
 		t.Fatalf("Pipe: got %q", string(buf[:n]))
+	}
+	if _, err := fs.Write(rfd, []byte("wrong end")); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("Write(read end) error = %v, want EBADF", err)
+	}
+	if _, err := fs.Read(wfd, buf); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("Read(write end) error = %v, want EBADF", err)
 	}
 }
 
@@ -299,9 +538,233 @@ func TestStatInode(t *testing.T) {
 	}
 }
 
+func TestFileIdentityVirtualAliases(t *testing.T) {
+	fs := New()
+	firstFD, err := fs.Open("/tmp/identity.txt", O_CREAT|O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(firstFD)
+	secondFD, err := fs.Open("/tmp/identity.txt", O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(secondFD)
+	dupFD, err := fs.Dup(firstFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(dupFD)
+
+	first, ok := fs.FileIdentity(firstFD)
+	if !ok {
+		t.Fatal("FileIdentity rejected virtual regular file")
+	}
+	if first.Host || first.Device != 0 || first.Inode == 0 {
+		t.Fatalf("virtual identity = %#v", first)
+	}
+	for _, fd := range []int{secondFD, dupFD} {
+		identity, ok := fs.FileIdentity(fd)
+		if !ok || identity != first {
+			t.Fatalf("fd %d identity = %#v, %v; want %#v, true", fd, identity, ok, first)
+		}
+	}
+
+	if err := fs.Renameat(-100, "/tmp/identity.txt", -100, "/tmp/renamed.txt"); err != nil {
+		t.Fatal(err)
+	}
+	renamedFD, err := fs.Open("/tmp/renamed.txt", O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(renamedFD)
+	node := fs.Stat(renamedFD)
+	fs.mu.Lock()
+	parent, resolveErr := fs.Resolve("/tmp")
+	if resolveErr == nil {
+		parent.Children["hardlink.txt"] = node
+		node.Nlink++
+	}
+	fs.mu.Unlock()
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	hardlinkFD, err := fs.Open("/tmp/hardlink.txt", O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(hardlinkFD)
+
+	for _, fd := range []int{firstFD, renamedFD, hardlinkFD} {
+		identity, ok := fs.FileIdentity(fd)
+		if !ok || identity != first {
+			t.Fatalf("fd %d identity = %#v, %v after alias change; want %#v, true", fd, identity, ok, first)
+		}
+	}
+}
+
+func TestFileIdentityHostRegularFile(t *testing.T) {
+	const cacheRoot = "/home/user/.cache/raven"
+	if err := os.MkdirAll(cacheRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(cacheRoot, "vfs-file-identity-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("RemoveAll: %v", err)
+		}
+	})
+	path := filepath.Join(dir, "host.txt")
+	alias := filepath.Join(dir, "host-link.txt")
+	if err := os.WriteFile(path, []byte("host"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, alias); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := New()
+	firstFD, err := fs.Open(path, O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(firstFD)
+	aliasFD, err := fs.Open(alias, O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(aliasFD)
+	dupFD, err := fs.Dup(firstFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(dupFD)
+	hostFile, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocatedFD := fs.AllocHostFile(hostFile)
+	defer fs.Close(allocatedFD)
+
+	var stat syscall.Stat_t
+	if err := syscall.Stat(path, &stat); err != nil {
+		t.Fatal(err)
+	}
+	want := FileIdentity{
+		Host:   true,
+		Device: uint64(stat.Dev),
+		Inode:  uint64(stat.Ino),
+	}
+	for _, fd := range []int{firstFD, aliasFD, dupFD, allocatedFD} {
+		identity, ok := fs.FileIdentity(fd)
+		if !ok || identity != want {
+			t.Fatalf("fd %d identity = %#v, %v; want %#v, true", fd, identity, ok, want)
+		}
+	}
+}
+
+func TestFileIdentityRejectsNonRegularDescriptors(t *testing.T) {
+	fs := New()
+	if identity, ok := fs.FileIdentity(9999); ok {
+		t.Fatalf("invalid fd identity = %#v, true", identity)
+	}
+
+	dirFD, err := fs.Open("/tmp", O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(dirFD)
+	deviceFD, err := fs.Open("/dev/null", O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(deviceFD)
+	pipeReadFD, pipeWriteFD, err := fs.Pipe2(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(pipeReadFD)
+	defer fs.Close(pipeWriteFD)
+	socketFD, err := fs.AllocSocket(AF_UNIX, SOCK_STREAM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(socketFD)
+	eventFD := fs.AllocEventFD(0, 0)
+	defer fs.Close(eventFD)
+	dupEventFD, err := fs.Dup(eventFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(dupEventFD)
+	const dup3EventFD = 100
+	if err := fs.Dup3(eventFD, dup3EventFD); err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(dup3EventFD)
+	epollFD := fs.AllocEpoll()
+	defer fs.Close(epollFD)
+	dupEpollFD, err := fs.Dup(epollFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(dupEpollFD)
+	const dup3EpollFD = 200
+	if err := fs.Dup3(epollFD, dup3EpollFD); err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(dup3EpollFD)
+
+	hostPipeRead, hostPipeWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostPipeReadFD := fs.AllocHostFile(hostPipeRead)
+	defer fs.Close(hostPipeReadFD)
+	hostPipeWriteFD := fs.AllocHostFile(hostPipeWrite)
+	defer fs.Close(hostPipeWriteFD)
+	hostDevice, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostDeviceFD := fs.AllocHostFile(hostDevice)
+	defer fs.Close(hostDeviceFD)
+	hostSocket, err := syscall.Socket(AF_UNIX, SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostSocketFD := fs.WrapHostFD(hostSocket, "file-identity-socket")
+	defer fs.Close(hostSocketFD)
+
+	for _, fd := range []int{
+		dirFD,
+		deviceFD,
+		pipeReadFD,
+		pipeWriteFD,
+		socketFD,
+		eventFD,
+		dupEventFD,
+		dup3EventFD,
+		epollFD,
+		dupEpollFD,
+		dup3EpollFD,
+		hostPipeReadFD,
+		hostPipeWriteFD,
+		hostDeviceFD,
+		hostSocketFD,
+	} {
+		if identity, ok := fs.FileIdentity(fd); ok {
+			t.Fatalf("fd %d identity = %#v, true", fd, identity)
+		}
+	}
+}
+
 func TestDevNull(t *testing.T) {
 	fs := New()
-	fd, err := fs.OpenAt(-100, "/dev/null", 0, 0)
+	fd, err := fs.OpenAt(-100, "/dev/null", O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

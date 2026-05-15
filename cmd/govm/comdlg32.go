@@ -1422,7 +1422,7 @@ func registerComdlg32Handlers(hctx *HandlerCtx) {
 					mem.Write32(pPD+layout.flagsOffset, flags)
 				}
 				if hctx.DestroyOwnedDialog != nil {
-					hctx.DestroyOwnedDialog(dlgHWND)
+					hctx.DestroyOwnedDialog(dlgHWND, ctx.CPU)
 				}
 				delete(hctx.HwndChildren, dlgHWND)
 				hctx.PrintDialog = nil

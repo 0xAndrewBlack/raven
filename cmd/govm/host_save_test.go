@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/mirkobrombin/Raven/pkg/vfs"
 )
@@ -40,6 +41,31 @@ func TestFlushHostSavePathPersistsRepeatedSaves(t *testing.T) {
 	}
 }
 
+func TestFlushHostSavePathUsesCaseInsensitiveBinding(t *testing.T) {
+	fs := vfs.New()
+	fs.MkdirAll("/save")
+	if err := fs.CreateFile("/save/Document.txt", []byte("updated"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	hostPath := filepath.Join(t.TempDir(), "Document.txt")
+	if err := os.WriteFile(hostPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hctx := &HandlerCtx{}
+	hctx.bindHostSavePath("/save/Document.txt", hostPath)
+
+	if err := hctx.flushHostSavePath(fs, "/SAVE/DOCUMENT.TXT"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(hostPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "updated" {
+		t.Fatalf("saved content = %q, want updated", got)
+	}
+}
+
 func TestFlushHostSavePathReportsHostWriteFailure(t *testing.T) {
 	fs := vfs.New()
 	fs.MkdirAll("/save")
@@ -50,6 +76,149 @@ func TestFlushHostSavePathReportsHostWriteFailure(t *testing.T) {
 	hctx.bindHostSavePath("/save/document.txt", t.TempDir())
 	if err := hctx.flushHostSavePath(fs, "/save/document.txt"); err == nil {
 		t.Fatal("host write failure was ignored")
+	}
+}
+
+func TestFlushHostFileBuffersPersistsBoundVirtualFile(t *testing.T) {
+	fs := vfs.New()
+	fs.MkdirAll("/save")
+	if err := fs.CreateFile("/save/document.txt", []byte("updated"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := fs.Open("/save/document.txt", vfs.O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close(fd)
+	hostPath := filepath.Join(t.TempDir(), "document.txt")
+	if err := os.WriteFile(hostPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hctx := &HandlerCtx{}
+	hctx.bindHostSavePath("/save/document.txt", hostPath)
+
+	if err := hctx.flushHostFileBuffers(fs, fd, "/save/document.txt"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(hostPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "updated" {
+		t.Fatalf("host data = %q, want updated", data)
+	}
+}
+
+func TestFlushHostFileBuffersSyncsHostBackedFile(t *testing.T) {
+	hostPath := filepath.Join(t.TempDir(), "document.txt")
+	hostFile, err := os.OpenFile(hostPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := vfs.New()
+	fd := fs.AllocHostFile(hostFile)
+	defer fs.Close(fd)
+	if _, err := fs.Write(fd, []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (&HandlerCtx{}).flushHostFileBuffers(fs, fd, hostPath); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(hostPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "updated" {
+		t.Fatalf("host data = %q, want updated", data)
+	}
+}
+
+func TestFlushHostSavePathWaitsForRenameBindingCommit(t *testing.T) {
+	fs := vfs.New()
+	fs.MkdirAll("/save")
+	if err := fs.CreateFile("/save/document.txt", []byte("updated"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	hostDir := t.TempDir()
+	oldHost := filepath.Join(hostDir, "document.txt")
+	newHost := filepath.Join(hostDir, "renamed.txt")
+	if err := os.WriteFile(oldHost, []byte("updated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hctx := &HandlerCtx{}
+	hctx.bindHostSavePath("/save/document.txt", oldHost)
+	hctx.bindHostSavePath("/save/renamed.txt", newHost)
+
+	renamed := make(chan struct{})
+	resumeRename := make(chan struct{})
+	ops := defaultHostSaveRenameOps
+	ops.rename = func(sourcePath, targetPath string, _ bool) error {
+		if err := os.Rename(sourcePath, targetPath); err != nil {
+			return err
+		}
+		close(renamed)
+		<-resumeRename
+		return nil
+	}
+	renameDone := make(chan error, 1)
+	go func() {
+		_, err := hctx.commitHostSaveRenameWithOps(
+			"/save/document.txt",
+			"/save/renamed.txt",
+			vfs.RenameCommitSource{Data: []byte("updated")},
+			hostSaveRenameOptions{},
+			ops,
+		)
+		renameDone <- err
+	}()
+	select {
+	case <-renamed:
+	case err := <-renameDone:
+		t.Fatalf("rename completed before synchronization point: %v", err)
+	}
+
+	flushDone := make(chan error, 1)
+	go func() {
+		flushDone <- hctx.flushHostSavePath(fs, "/save/document.txt")
+	}()
+	select {
+	case err := <-flushDone:
+		t.Fatalf("flush completed before rename binding commit: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(resumeRename)
+	if err := <-renameDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-flushDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldHost); !os.IsNotExist(err) {
+		t.Fatalf("flush recreated the renamed host path: %v", err)
+	}
+	if data, err := os.ReadFile(newHost); err != nil || string(data) != "updated" {
+		t.Fatalf("renamed host data = %q, err=%v", data, err)
+	}
+}
+
+func TestFlushHostSavePathSnapshotsOutsideHostIOLock(t *testing.T) {
+	hostPath := filepath.Join(t.TempDir(), "document.txt")
+	hctx := &HandlerCtx{}
+	hctx.bindHostSavePath("/save/document.txt", hostPath)
+
+	err := hctx.flushHostSavePathWithSnapshot("/save/document.txt", func() ([]byte, error) {
+		if !hctx.HostSaveIOMu.TryLock() {
+			t.Fatal("snapshot ran while HostSaveIOMu was held")
+		}
+		hctx.HostSaveIOMu.Unlock()
+		return []byte("updated"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(hostPath); err != nil || string(data) != "updated" {
+		t.Fatalf("host data = %q, err=%v", data, err)
 	}
 }
 
@@ -244,7 +413,7 @@ func TestCommitHostSaveRenameDoesNotReplaceUnboundHostTarget(t *testing.T) {
 	if _, err := fs.StatPath(-1, oldVFS); err != nil {
 		t.Fatalf("source VFS entry was removed: %v", err)
 	}
-	if _, err := fs.StatPath(-1, newVFS); err == nil {
+	if _, err := fs.Resolve(newVFS); err == nil {
 		t.Fatal("destination VFS entry was created after failed rename")
 	}
 }

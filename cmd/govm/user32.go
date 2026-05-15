@@ -38,6 +38,51 @@ type accelEntry struct {
 	cmd   uint16
 }
 
+type ownedDialogDCState struct {
+	target *wl.Window
+	cpu    arch.CPU
+}
+
+type sentMessagePumpCall struct {
+	originalSP    uint64
+	returnAddress uint64
+	argumentCount int
+	is32          bool
+	arguments     [5]uint64
+	resume        func(*ntapi.TrapContext, *sentMessagePumpCall) uint32
+	waitDeadline  time.Time
+}
+
+type sentMessageInFlight struct {
+	request *synchronousSendRequest
+	pump    *sentMessagePumpCall
+}
+
+type crossThreadSendWait struct {
+	request       *synchronousSendRequest
+	originalSP    uint64
+	returnAddress uint64
+	is32          bool
+}
+
+func sentMessageLoopPump(loopSP, loopPC uint64, is32 bool) *sentMessagePumpCall {
+	wordSize := uint64(8)
+	if is32 {
+		wordSize = 4
+	}
+	if loopSP < wordSize || loopPC == 0 {
+		return nil
+	}
+	return &sentMessagePumpCall{
+		originalSP:    loopSP - wordSize,
+		returnAddress: loopPC,
+		is32:          is32,
+		resume: func(*ntapi.TrapContext, *sentMessagePumpCall) uint32 {
+			return 0
+		},
+	}
+}
+
 const maxAcceleratorEntries = 0x10000
 
 func guestRangeAccessible(mem *mmu.MMU, addr, size uint64, perms uint8) bool {
@@ -456,6 +501,18 @@ func dialogControlWantsKey(control *controlState, vk uint32) bool {
 }
 
 func reorderWindow(order []uint64, hwnd, insertAfter uint64) []uint64 {
+	reordered, _ := reorderWindowGrouped(order, hwnd, insertAfter, nil)
+	return reordered
+}
+
+func insertZOrderAt(order []uint64, index int, hwnd uint64) []uint64 {
+	order = append(order, 0)
+	copy(order[index+1:], order[index:])
+	order[index] = hwnd
+	return order
+}
+
+func reorderWindowGrouped(order []uint64, hwnd, insertAfter uint64, topmost map[uint64]bool) ([]uint64, bool) {
 	index := -1
 	for i, candidate := range order {
 		if candidate == hwnd {
@@ -464,24 +521,65 @@ func reorderWindow(order []uint64, hwnd, insertAfter uint64) []uint64 {
 		}
 	}
 	if index < 0 {
-		return order
+		return order, false
+	}
+	const (
+		hwndTop    = uint64(0)
+		hwndBottom = uint64(1)
+	)
+	hwndTopmost := insertAfter == ^uint64(0) || insertAfter == uint64(^uint32(0))
+	hwndNotTopmost := insertAfter == ^uint64(1) || insertAfter == uint64(^uint32(1))
+	if insertAfter != hwndTop && insertAfter != hwndBottom && !hwndTopmost && !hwndNotTopmost {
+		found := insertAfter == hwnd
+		for _, candidate := range order {
+			if candidate == insertAfter {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return order, false
+		}
 	}
 	order = append(order[:index], order[index+1:]...)
-	if insertAfter == 1 {
-		return append(order, hwnd)
+	if topmost == nil {
+		topmost = make(map[uint64]bool)
 	}
-	if insertAfter == 0 || insertAfter == ^uint64(0) || insertAfter == uint64(^uint32(0)) {
-		return append([]uint64{hwnd}, order...)
+	if insertAfter == hwndBottom {
+		topmost[hwnd] = false
+		return append(order, hwnd), true
+	}
+	if hwndTopmost {
+		topmost[hwnd] = true
+		return insertZOrderAt(order, 0, hwnd), true
+	}
+	topmostEnd := 0
+	for topmostEnd < len(order) && topmost[order[topmostEnd]] {
+		topmostEnd++
+	}
+	if hwndNotTopmost {
+		topmost[hwnd] = false
+		return insertZOrderAt(order, topmostEnd, hwnd), true
+	}
+	if insertAfter == hwndTop || insertAfter == hwnd {
+		target := 0
+		if !topmost[hwnd] {
+			target = topmostEnd
+		}
+		return insertZOrderAt(order, target, hwnd), true
 	}
 	for i, candidate := range order {
 		if candidate == insertAfter {
-			order = append(order, 0)
-			copy(order[i+2:], order[i+1:])
-			order[i+1] = hwnd
-			return order
+			target := i + 1
+			if topmost[hwnd] && !topmost[candidate] {
+				target = topmostEnd
+			} else if !topmost[hwnd] && topmost[candidate] && target < topmostEnd {
+				target = topmostEnd
+			}
+			return insertZOrderAt(order, target, hwnd), true
 		}
 	}
-	return append(order, hwnd)
+	return order, false
 }
 
 func writeMessageMetadata(mem *mmu.MMU, pMsg uint64, is32 bool, messageTime uint32, x, y int32) bool {
@@ -639,6 +737,18 @@ func orderedChildWindows(children map[uint64]*controlState, order []uint64, pare
 	}
 	sort.Slice(unordered, func(i, j int) bool { return unordered[i] > unordered[j] })
 	return append(result, unordered...)
+}
+
+func backToFrontChildWindows(children map[uint64]*controlState, order []uint64, parent uint64) []uint64 {
+	result := orderedChildWindows(children, order, parent)
+	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
+		result[left], result[right] = result[right], result[left]
+	}
+	return result
+}
+
+func childPaintOrder(children map[uint64]*controlState, order []uint64, parent uint64) []uint64 {
+	return backToFrontChildWindows(children, order, parent)
 }
 
 func childWindowAtPoint(children map[uint64]*controlState, order []uint64, parent uint64, x, y int32, flags uint32) uint64 {
@@ -841,10 +951,904 @@ func writeComboBoxInfoForTrap(ctx *ntapi.TrapContext, pInfo, hwnd uint64, width,
 	return writeComboBoxInfo(ctx.Mem, pInfo, hwnd, ctx.State != nil && ctx.State.Is32, width, height, comboType, dropped)
 }
 
+const desktopWindowHandle = uint64(0x00050000)
+
+type windowDisabledRegistry struct {
+	mu     sync.RWMutex
+	values map[uint64]bool
+}
+
+func (r *windowDisabledRegistry) get(hwnd uint64) (bool, bool) {
+	r.mu.RLock()
+	disabled, ok := r.values[hwnd]
+	r.mu.RUnlock()
+	return disabled, ok
+}
+
+func (r *windowDisabledRegistry) set(hwnd uint64, disabled bool) {
+	r.mu.Lock()
+	if r.values == nil {
+		r.values = make(map[uint64]bool)
+	}
+	r.values[hwnd] = disabled
+	r.mu.Unlock()
+}
+
+func (r *windowDisabledRegistry) remove(hwnd uint64) {
+	r.mu.Lock()
+	delete(r.values, hwnd)
+	r.mu.Unlock()
+}
+
+func isRegisteredWindow(hwnd, mainHWND uint64) bool {
+	if hwnd == 0 {
+		return false
+	}
+	if hwnd == desktopWindowHandle || hwnd == mainHWND {
+		return true
+	}
+	return win32.Global.Get(hwnd) != nil
+}
+
+func windowCleanupHandles(root uint64, children map[uint64]*controlState) []uint64 {
+	if root == 0 {
+		return nil
+	}
+	handles := []uint64{root}
+	for hwnd := range children {
+		if hwnd != root && isControlDescendant(children, hwnd, root) {
+			handles = append(handles, hwnd)
+		}
+	}
+	return handles
+}
+
+func pruneDestroyedWindowMessages(queue *messageQueue, root uint64, children map[uint64]*controlState) {
+	if queue == nil || root == 0 {
+		return
+	}
+	queue.mu.Lock()
+	kept := queue.items[:0]
+	for _, message := range queue.items {
+		if message.hwnd != root && !isControlDescendant(children, message.hwnd, root) {
+			kept = append(kept, message)
+		}
+	}
+	queue.items = kept
+	queue.mu.Unlock()
+}
+
+func windowOrAncestorDestroyPending(hwnd uint64, pending map[uint64]bool, children map[uint64]*controlState) bool {
+	for hwnd != 0 {
+		if pending[hwnd] {
+			return true
+		}
+		state := children[hwnd]
+		if state == nil || state.parentHWND == hwnd {
+			return false
+		}
+		hwnd = state.parentHWND
+	}
+	return false
+}
+
+func windowHierarchyVisible(hwnd uint64, children map[uint64]*controlState) bool {
+	for hwnd != 0 {
+		state := children[hwnd]
+		if state == nil {
+			return true
+		}
+		if !state.visible {
+			return false
+		}
+		if state.parentHWND == hwnd {
+			return false
+		}
+		hwnd = state.parentHWND
+	}
+	return true
+}
+
+func windowIsDescendantOrSelf(hwnd, root uint64, children map[uint64]*controlState) bool {
+	for hwnd != 0 {
+		if hwnd == root {
+			return true
+		}
+		state := children[hwnd]
+		if state == nil || state.parentHWND == hwnd {
+			return false
+		}
+		hwnd = state.parentHWND
+	}
+	return false
+}
+
+func isHostBuiltinControlClass(className string) bool {
+	className = strings.ToLower(className)
+	switch className {
+	case "button", "edit", "static", "listbox", "combobox", "comboboxex32",
+		"scrollbar", "mdiclient", "tooltips_class32", "toolbarwindow32",
+		"rebarwindow32", "sysheader32", "syslistview32", "systabcontrol32",
+		"msctls_statusbar32", "msctls_progress32", "msctls_trackbar32",
+		"richedit", "richedit20a", "richedit20w", "richedit50w":
+		return true
+	}
+	return strings.HasPrefix(className, "msctls_")
+}
+
+func overlappingGuestSiblings(
+	hwnd uint64,
+	children map[uint64]*controlState,
+	wndProcs map[uint64]uint64,
+	order []uint64,
+) []uint64 {
+	state := children[hwnd]
+	if state == nil || !isHostBuiltinControlClass(state.className) ||
+		state.style&win32.WS_CLIPSIBLINGS == 0 {
+		return nil
+	}
+	var result []uint64
+	for _, siblingHWND := range orderedChildWindows(children, order, state.parentHWND) {
+		if siblingHWND == hwnd {
+			break
+		}
+		sibling := children[siblingHWND]
+		if sibling == nil ||
+			isHostBuiltinControlClass(sibling.className) || wndProcs[siblingHWND] == 0 ||
+			!windowHierarchyVisible(siblingHWND, children) {
+			continue
+		}
+		if state.x < sibling.x+sibling.w && state.x+state.w > sibling.x &&
+			state.y < sibling.y+sibling.h && state.y+state.h > sibling.y {
+			result = append(result, siblingHWND)
+		}
+	}
+	return result
+}
+
+func childScrollbarRects(state *controlState) (vertical, horizontal, corner win32.Rect, hasVertical, hasHorizontal bool) {
+	if state == nil || state.w <= 0 || state.h <= 0 {
+		return
+	}
+	hasVertical = state.style&win32.WS_VSCROLL != 0
+	hasHorizontal = state.style&win32.WS_HSCROLL != 0
+	if !hasVertical && !hasHorizontal {
+		return
+	}
+	right := state.x + state.w
+	bottom := state.y + state.h
+	clientRight := right
+	clientBottom := bottom
+	if hasVertical {
+		clientRight -= win32.GetSystemMetrics(win32.SM_CXVSCROLL)
+	}
+	if hasHorizontal {
+		clientBottom -= win32.GetSystemMetrics(win32.SM_CYHSCROLL)
+	}
+	if clientRight < state.x {
+		clientRight = state.x
+	}
+	if clientBottom < state.y {
+		clientBottom = state.y
+	}
+	if hasVertical {
+		vertical = win32.Rect{Left: clientRight, Top: state.y, Right: right, Bottom: clientBottom}
+	}
+	if hasHorizontal {
+		horizontal = win32.Rect{Left: state.x, Top: clientBottom, Right: clientRight, Bottom: bottom}
+	}
+	if hasVertical && hasHorizontal {
+		corner = win32.Rect{Left: clientRight, Top: clientBottom, Right: right, Bottom: bottom}
+	}
+	return
+}
+
+func isControlDescendant(children map[uint64]*controlState, hwnd, root uint64) bool {
+	for hwnd != 0 {
+		state := children[hwnd]
+		if state == nil {
+			return false
+		}
+		hwnd = state.parentHWND
+		if hwnd == root {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanupWindowRegistration(hwnd uint64, disabled *windowDisabledRegistry) {
+	disabled.remove(hwnd)
+	win32.Global.Destroy(hwnd)
+}
+
+func cleanupHandlerWindowState(hctx *HandlerCtx, hwnd uint64) {
+	if hctx == nil {
+		return
+	}
+	if hctx.ReleaseDialogPaintDC != nil {
+		hctx.ReleaseDialogPaintDC(hwnd)
+	}
+	hctx.clearWindowCPU(hwnd)
+	if hctx.ClearSubclasses != nil {
+		hctx.ClearSubclasses(hwnd)
+	}
+	clearDarkModeWindowState(hwnd)
+	clearOwnedDialogColor(hwnd)
+	hctx.removeZOrder(hwnd)
+	delete(hctx.HwndChildren, hwnd)
+	delete(hctx.HwndWndProc, hwnd)
+	delete(hctx.HwndTitle, hwnd)
+	delete(hctx.HwndExplicitlyHidden, hwnd)
+	delete(hctx.WindowLongPtr, hwnd)
+	delete(hctx.HwndClassAtom, hwnd)
+	delete(hctx.WindowProps, hwnd)
+	delete(hctx.WinErasePending, hwnd)
+	delete(hctx.WinInvalid, hwnd)
+	delete(win32uWindowRgns, hwnd)
+	delete(win32uLayeredWindows, hwnd)
+	win32.Global.Destroy(hwnd)
+}
+
+func registerGlobalWindow(hwnd uint64, state *controlState) bool {
+	if state == nil || win32.Global.Get(hwnd) != nil {
+		return false
+	}
+	win32.Global.Create(hwnd, state.className, state.x, state.y, state.w, state.h,
+		state.style, state.exStyle, state.parentHWND)
+	return true
+}
+
+func dispatchGuestWindowMessage(hctx *HandlerCtx, hwnd uint64, msg uint32, wParam, lParam uint64) (uint64, bool) {
+	if hctx == nil || hwnd == 0 {
+		return 0, false
+	}
+	wndProc := hctx.HwndWndProc[hwnd]
+	if wndProc == 0 {
+		if atom, ok := hctx.HwndClassAtom[hwnd]; ok {
+			wndProc = hctx.AtomWndProc[atom]
+			if wndProc != 0 {
+				hctx.HwndWndProc[hwnd] = wndProc
+			}
+		}
+	}
+	cpu := hctx.windowCPU(hwnd)
+	if cpu == nil {
+		cpu = hctx.GetCurrentCPU()
+	}
+	if wndProc == 0 || cpu == nil || hctx.GuestCallTrampoline == nil {
+		return 0, false
+	}
+	result, err := ntapi.CallGuestFunction(cpu, hctx.Mem, hctx.GuestCallTrampoline, wndProc,
+		[]uint64{hwnd, uint64(msg), wParam, lParam}, false)
+	return result, err == nil
+}
+
+func clearGuestStruct(mem *mmu.MMU, addr, size uint64) {
+	for offset := uint64(0); offset < size; offset += 4 {
+		_ = mem.Write32(addr+offset, 0)
+	}
+}
+
+func writeCustomDrawStruct(
+	hctx *HandlerCtx,
+	addr, hwnd, hdc uint64,
+	stage uint32,
+	item, itemParam uint64,
+	state uint32,
+	rect [4]int32,
+) {
+	is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+	layout := customDrawOffsets(is32)
+	className := ""
+	if control := hctx.HwndChildren[hwnd]; control != nil {
+		className = control.className
+	}
+	clearGuestStruct(hctx.Mem, addr, customDrawStructureSize(className, is32))
+	if is32 {
+		hctx.Mem.Write32(addr, uint32(hwnd))
+		hctx.Mem.Write32(addr+4, uint32(hctx.HwndChildren[hwnd].ctrlID))
+		hctx.Mem.Write32(addr+8, nmCustomDraw)
+		hctx.Mem.Write32(addr+layout.hdc, uint32(hdc))
+		hctx.Mem.Write32(addr+layout.itemSpec, uint32(item))
+		hctx.Mem.Write32(addr+layout.itemParam, uint32(itemParam))
+	} else {
+		hctx.Mem.Write64(addr, hwnd)
+		hctx.Mem.Write64(addr+8, hctx.HwndChildren[hwnd].ctrlID)
+		hctx.Mem.Write32(addr+16, nmCustomDraw)
+		hctx.Mem.Write64(addr+layout.hdc, hdc)
+		hctx.Mem.Write64(addr+layout.itemSpec, item)
+		hctx.Mem.Write64(addr+layout.itemParam, itemParam)
+	}
+	hctx.Mem.Write32(addr+layout.drawStage, stage)
+	for i := range rect {
+		hctx.Mem.Write32(addr+layout.rect+uint64(i*4), uint32(rect[i]))
+	}
+	hctx.Mem.Write32(addr+layout.itemState, state)
+}
+
+type hostCustomDrawItem struct {
+	key   uint64
+	spec  uint64
+	param uint64
+	state uint32
+	rect  [4]int32
+}
+
+func hostCustomDrawItems(state *controlState) []hostCustomDrawItem {
+	if state == nil {
+		return nil
+	}
+	switch strings.ToLower(state.className) {
+	case "toolbarwindow32":
+		if state.toolbar == nil {
+			return nil
+		}
+		buttonHeight := state.tbBtnH
+		if buttonHeight <= 0 {
+			buttonHeight = 22
+		}
+		if buttonHeight > state.h-2 {
+			buttonHeight = state.h - 2
+		}
+		geometry := layoutToolbarButtons(state.toolbar, state.tbBtnW)
+		items := make([]hostCustomDrawItem, 0, len(state.toolbar.buttons))
+		for index, button := range state.toolbar.buttons {
+			itemGeometry := geometry[index]
+			if !itemGeometry.visible {
+				continue
+			}
+			itemState := uint32(0)
+			if button.state&0x04 == 0 {
+				itemState |= 0x0004 // CDIS_DISABLED
+			}
+			if button.state&0x01 != 0 {
+				itemState |= 0x0008 // CDIS_CHECKED
+			}
+			if button.state&0x02 != 0 {
+				itemState |= 0x0001 // CDIS_SELECTED
+			}
+			items = append(items, hostCustomDrawItem{
+				key:   uint64(index),
+				spec:  uint64(uint32(button.id)),
+				param: button.param,
+				state: itemState,
+				rect:  [4]int32{itemGeometry.left, 2, itemGeometry.right, 2 + buttonHeight},
+			})
+		}
+		return items
+	case "msctls_statusbar32":
+		items := make([]hostCustomDrawItem, 0, len(state.sbParts))
+		left := int32(0)
+		for index, right := range state.sbParts {
+			if right < 0 || right > state.w {
+				right = state.w
+			}
+			items = append(items, hostCustomDrawItem{
+				key:  uint64(index),
+				spec: uint64(index),
+				rect: [4]int32{left, 0, right, state.h},
+			})
+			left = right
+		}
+		return items
+	case "systabcontrol32":
+		if state.tab == nil {
+			return nil
+		}
+		items := make([]hostCustomDrawItem, 0, len(state.tab.items))
+		left := int32(2)
+		for index, tab := range state.tab.items {
+			width := tabControlItemWidth(tab.text)
+			itemState := uint32(0)
+			if index == state.tab.curSel {
+				itemState = 0x0001 // CDIS_SELECTED
+			}
+			items = append(items, hostCustomDrawItem{
+				key:   uint64(index),
+				spec:  uint64(index),
+				param: tab.param,
+				state: itemState,
+				rect:  [4]int32{left, 2, left + width, 24},
+			})
+			left += width
+		}
+		return items
+	case "sysheader32":
+		if state.header != nil {
+			items := make([]hostCustomDrawItem, 0, len(state.header.items))
+			left := int32(0)
+			for index, header := range state.header.items {
+				width := header.width
+				if width <= 0 {
+					width = 80
+				}
+				items = append(items, hostCustomDrawItem{
+					key:   uint64(index),
+					spec:  uint64(index),
+					param: header.param,
+					state: header.state,
+					rect:  [4]int32{left, 0, left + width, state.h},
+				})
+				left += width
+			}
+			return items
+		}
+	case "syslistview32":
+		if state.listView == nil {
+			return nil
+		}
+		count := len(state.listView.items)
+		if state.listView.style&0x1000 != 0 {
+			count = state.listView.virtualCount
+		}
+		items := make([]hostCustomDrawItem, 0, count)
+		const (
+			rowTop    = int32(24)
+			rowHeight = int32(18)
+		)
+		for index := 0; index < count; index++ {
+			top := rowTop + int32(index)*rowHeight
+			if top+rowHeight > state.h-1 {
+				break
+			}
+			item := hostCustomDrawItem{
+				key:  uint64(index),
+				spec: uint64(index),
+				rect: [4]int32{2, top, state.w - 2, top + rowHeight},
+			}
+			if index < len(state.listView.items) {
+				listItem := state.listView.items[index]
+				item.param = listItem.param
+				if listItem.state&0x0002 != 0 {
+					item.state = 0x0001 // CDIS_SELECTED
+				}
+			}
+			items = append(items, item)
+		}
+		return items
+	case "systreeview32":
+		if state.treeView == nil || state.treeView.root == nil {
+			return nil
+		}
+		items := make([]hostCustomDrawItem, 0, len(state.treeViewIndex))
+		top := int32(2)
+		const itemHeight = int32(18)
+		var appendVisible func([]*tvItem)
+		appendVisible = func(treeItems []*tvItem) {
+			for _, treeItem := range treeItems {
+				if treeItem == nil || top+itemHeight > state.h-1 {
+					continue
+				}
+				itemState := uint32(0)
+				if state.treeView.selected == treeItem || treeItem.state&0x0002 != 0 {
+					itemState = 0x0001 // CDIS_SELECTED
+				}
+				items = append(items, hostCustomDrawItem{
+					key:   treeItem.handle,
+					spec:  treeItem.handle,
+					param: treeItem.param,
+					state: itemState,
+					rect:  [4]int32{2, top, state.w - 2, top + itemHeight},
+				})
+				top += itemHeight
+				if treeItem.expanded {
+					appendVisible(treeItem.children)
+				}
+			}
+		}
+		appendVisible(state.treeView.root.children)
+		return items
+	}
+	return nil
+}
+
+type hostCustomDrawSession struct {
+	hctx   *HandlerCtx
+	parent uint64
+	child  uint64
+	addr   uint64
+	hdc    uint64
+	post   bool
+	items  []hostCustomDrawItem
+	skip   map[uint64]struct{}
+}
+
+func beginHostCustomDraw(hctx *HandlerCtx, hwnd uint64, state *controlState) (*hostCustomDrawSession, bool) {
+	if hctx == nil || state == nil || state.parentHWND == 0 || hctx.ScratchAlloc == nil || hctx.AllocScreenDC == nil {
+		return nil, false
+	}
+	switch strings.ToLower(state.className) {
+	case "toolbarwindow32", "rebarwindow32", "msctls_statusbar32", "systabcontrol32",
+		"sysheader32", "syslistview32", "systreeview32":
+	default:
+		return nil, false
+	}
+	hdc, _ := hctx.AllocScreenDC(state.x, state.y)
+	is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+	addr := hctx.ScratchAlloc(customDrawStructureSize(state.className, is32))
+	fullRect := [4]int32{0, 0, state.w, state.h}
+	writeCustomDrawStruct(hctx, addr, hwnd, hdc, cddsPrePaint, 0, 0, 0, fullRect)
+	result, _ := dispatchGuestWindowMessage(hctx, state.parentHWND, 0x004E, state.ctrlID, addr)
+	session := &hostCustomDrawSession{
+		hctx: hctx, parent: state.parentHWND, child: hwnd, addr: addr, hdc: hdc,
+		post: result&cdrfNotifyPostPaint != 0,
+	}
+	skip := result&cdrfSkipDefault != 0
+	if result&cdrfNotifyItemDraw != 0 {
+		for _, item := range hostCustomDrawItems(state) {
+			writeCustomDrawStruct(hctx, addr, hwnd, hdc, cddsItem|cddsPrePaint,
+				item.spec, item.param, item.state, item.rect)
+			itemResult, _ := dispatchGuestWindowMessage(hctx, state.parentHWND, 0x004E, state.ctrlID, addr)
+			if itemResult&cdrfSkipDefault != 0 {
+				if session.skip == nil {
+					session.skip = make(map[uint64]struct{})
+				}
+				session.skip[item.key] = struct{}{}
+			}
+			if itemResult&cdrfNotifyPostPaint != 0 {
+				session.items = append(session.items, item)
+			}
+		}
+	}
+	return session, skip
+}
+
+func (session *hostCustomDrawSession) finish(state *controlState) {
+	if session == nil {
+		return
+	}
+	defer state.setCustomDrawSkipped(nil)
+	for _, item := range session.items {
+		writeCustomDrawStruct(session.hctx, session.addr, session.child, session.hdc,
+			cddsItem|cddsPostPaint, item.spec, item.param, item.state, item.rect)
+		_, _ = dispatchGuestWindowMessage(session.hctx, session.parent, 0x004E, state.ctrlID, session.addr)
+	}
+	if session.post {
+		writeCustomDrawStruct(session.hctx, session.addr, session.child, session.hdc,
+			cddsPostPaint, 0, 0, 0, [4]int32{0, 0, state.w, state.h})
+		_, _ = dispatchGuestWindowMessage(session.hctx, session.parent, 0x004E, state.ctrlID, session.addr)
+	}
+	session.hctx.GdiMgr.DeleteDC(session.hdc)
+}
+
+type hostCtlColor struct {
+	hdc   uint64
+	dc    *gdi.DC
+	brush uint64
+}
+
+func beginHostCtlColor(hctx *HandlerCtx, hwnd uint64, state *controlState) *hostCtlColor {
+	message := ctlColorMessageForClass(state.className)
+	if message == 0 || state.parentHWND == 0 || hctx.AllocScreenDC == nil {
+		return nil
+	}
+	hdc, dc := hctx.AllocScreenDC(state.x, state.y)
+	dc.SetClipRect(state.x, state.y, state.x+state.w, state.y+state.h)
+	brush, _ := dispatchGuestWindowMessage(hctx, state.parentHWND, message, hdc, hwnd)
+	return &hostCtlColor{hdc: hdc, dc: dc, brush: brush}
+}
+
+func (paint *hostCtlColor) finish(hctx *HandlerCtx, state *controlState) {
+	if paint == nil {
+		return
+	}
+	if paint.brush != 0 {
+		fillRectUsingBrushHandle(paint.dc, hctx.GdiMgr, paint.brush, hctx.SysColors, 0, 0, state.w, state.h)
+		switch strings.ToLower(state.className) {
+		case "static":
+			paint.dc.TextOut(2, 2, dialogLabel(state.text), false)
+		case "edit", "richedit20w", "richedit50w":
+			paint.dc.TextOut(4, 4, state.text, false)
+		}
+	}
+	hctx.GdiMgr.DeleteDC(paint.hdc)
+}
+
+func remapWaylandRectForDarkMode(win *wl.Window, left, top, right, bottom int32) {
+	if win == nil {
+		return
+	}
+	surface := gdi.WrapPix(win.Pix, win.Width, win.Height+win.TitleBarH, win.Stride)
+	dc := gdi.NewScreenDC(surface)
+	remapDCRectForDarkMode(dc, left, top, right, bottom)
+}
+
+func waylandRectColorCount(win *wl.Window, left, top, right, bottom int32) int {
+	if win == nil {
+		return 0
+	}
+	if left < 0 {
+		left = 0
+	}
+	if top < 0 {
+		top = 0
+	}
+	if right > win.Width {
+		right = win.Width
+	}
+	if bottom > win.Height+win.TitleBarH {
+		bottom = win.Height + win.TitleBarH
+	}
+	colors := make(map[uint32]struct{})
+	for y := top; y < bottom; y++ {
+		for x := left; x < right; x++ {
+			offset := int(y*win.Width+x) * 4
+			if offset+3 >= len(win.Pix) {
+				continue
+			}
+			color := uint32(win.Pix[offset]) |
+				uint32(win.Pix[offset+1])<<8 |
+				uint32(win.Pix[offset+2])<<16 |
+				uint32(win.Pix[offset+3])<<24
+			colors[color] = struct{}{}
+		}
+	}
+	return len(colors)
+}
+
+func repaintAfterSurfaceResize(hctx *HandlerCtx, hwnd uint64, mainWindow bool, queuePaint func(uint64)) {
+	if hctx == nil {
+		return
+	}
+	if mainWindow {
+		hctx.RepaintBuiltin = true
+	}
+	if queuePaint != nil {
+		queuePaint(hwnd)
+	}
+}
+
+func prepareMainSurfacePaintCommit(hctx *HandlerCtx, hwnd uint64) {
+	if hctx == nil || !hctx.HasBaseFrame {
+		return
+	}
+	if hwnd != hctx.MainHWND {
+		hctx.RepaintBuiltin = true
+	}
+	hctx.FrameReady = true
+}
+
+func writeUAHMenuStruct(hctx *HandlerCtx, addr, menu, hdc uint64) {
+	is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+	layout := uahMenuOffsets(is32)
+	clearGuestStruct(hctx.Mem, addr, layout.size)
+	if is32 {
+		hctx.Mem.Write32(addr, uint32(menu))
+		hctx.Mem.Write32(addr+layout.hdc, uint32(hdc))
+		return
+	}
+	hctx.Mem.Write64(addr, menu)
+	hctx.Mem.Write64(addr+layout.hdc, hdc)
+}
+
+func writeUAHDrawItemStruct(
+	hctx *HandlerCtx,
+	addr, hwnd, hdc uint64,
+	item *menuItem,
+	itemIndex uint32,
+	left, top, right, bottom int32,
+) {
+	is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+	layout := uahDrawItemOffsets(is32)
+	clearGuestStruct(hctx.Mem, addr, layout.size)
+	hctx.Mem.Write32(addr, 1) // ODT_MENU
+	hctx.Mem.Write32(addr+8, itemIndex)
+	if item != nil {
+		hctx.Mem.Write32(addr+4, uint32(item.id))
+		hctx.Mem.Write32(addr+12, item.flags)
+		if is32 {
+			hctx.Mem.Write32(addr+layout.itemData, uint32(item.itemData))
+		} else {
+			hctx.Mem.Write64(addr+layout.itemData, item.itemData)
+		}
+	}
+	if is32 {
+		hctx.Mem.Write32(addr+layout.hwndItem, uint32(hwnd))
+		hctx.Mem.Write32(addr+layout.hdc, uint32(hdc))
+	} else {
+		hctx.Mem.Write64(addr+layout.hwndItem, hwnd)
+		hctx.Mem.Write64(addr+layout.hdc, hdc)
+	}
+	hctx.Mem.Write32(addr+layout.rect, uint32(left))
+	hctx.Mem.Write32(addr+layout.rect+4, uint32(top))
+	hctx.Mem.Write32(addr+layout.rect+8, uint32(right))
+	hctx.Mem.Write32(addr+layout.rect+12, uint32(bottom))
+}
+
+func dispatchUAHMenuMessages(hctx *HandlerCtx, owner, menu uint64, popup *popupMenuState) {
+	if hctx == nil || owner == 0 || menu == 0 || hctx.ScratchAlloc == nil || hctx.AllocScreenDC == nil {
+		return
+	}
+	hdc, _ := hctx.AllocScreenDC(0, 0)
+	defer hctx.GdiMgr.DeleteDC(hdc)
+	is32 := hctx.ProcState != nil && hctx.ProcState.Is32
+	menuLayout := uahMenuOffsets(is32)
+	menuAddr := hctx.ScratchAlloc(menuLayout.size)
+	writeUAHMenuStruct(hctx, menuAddr, menu, hdc)
+	_, _ = dispatchGuestWindowMessage(hctx, owner, wmUAHInitMenu, menu, 0)
+	_, _ = dispatchGuestWindowMessage(hctx, owner, wmUAHDrawMenu, 0, menuAddr)
+	if popup == nil {
+		return
+	}
+	itemLayout := uahDrawItemOffsets(is32)
+	itemAddr := hctx.ScratchAlloc(itemLayout.size)
+	for index := range popup.Items {
+		top := popup.Y + int32(index)*popup.ItemHeight
+		writeUAHDrawItemStruct(hctx, itemAddr, menu, hdc, &popup.Items[index], uint32(index),
+			popup.X, top, popup.X+popup.Width, top+popup.ItemHeight)
+		_, _ = dispatchGuestWindowMessage(hctx, owner, wmUAHDrawMenuItem, 0, itemAddr)
+	}
+}
+
+func changeWindowEnabled(
+	hwnd uint64,
+	enabled, notify bool,
+	setDisabled func(uint64, bool) (bool, bool),
+	send func(uint64, uint32, uint64),
+) (bool, bool) {
+	wasDisabled, present := setDisabled(hwnd, !enabled)
+	if !present {
+		return false, false
+	}
+	if notify && wasDisabled == enabled {
+		if !enabled {
+			send(hwnd, 0x001F, 0) // WM_CANCELMODE
+		}
+		wParam := uint64(0)
+		if enabled {
+			wParam = 1
+		}
+		send(hwnd, 0x000A, wParam) // WM_ENABLE
+	}
+	return wasDisabled, true
+}
+
+type rebarPaintRect struct {
+	left, top, right, bottom int32
+}
+
+func subtractRebarPaintRect(regions []rebarPaintRect, cover rebarPaintRect) []rebarPaintRect {
+	result := make([]rebarPaintRect, 0, len(regions)+3)
+	for _, region := range regions {
+		left := max(region.left, cover.left)
+		top := max(region.top, cover.top)
+		right := min(region.right, cover.right)
+		bottom := min(region.bottom, cover.bottom)
+		if left >= right || top >= bottom {
+			result = append(result, region)
+			continue
+		}
+		if region.top < top {
+			result = append(result, rebarPaintRect{region.left, region.top, region.right, top})
+		}
+		if bottom < region.bottom {
+			result = append(result, rebarPaintRect{region.left, bottom, region.right, region.bottom})
+		}
+		if region.left < left {
+			result = append(result, rebarPaintRect{region.left, top, left, bottom})
+		}
+		if right < region.right {
+			result = append(result, rebarPaintRect{right, top, region.right, bottom})
+		}
+	}
+	return result
+}
+
+func paintRebarUncoveredArea(hctx *HandlerCtx, hwnd uint64, state *controlState, color uint32) {
+	if hctx == nil || hctx.WlWindow == nil || state == nil {
+		return
+	}
+	regions := []rebarPaintRect{{
+		left: state.x, top: state.y,
+		right: state.x + state.w, bottom: state.y + state.h,
+	}}
+	for _, candidate := range hctx.HwndChildren {
+		if candidate == nil || !candidate.visible || !strings.EqualFold(candidate.className, "toolbarwindow32") {
+			continue
+		}
+		if candidate.parentHWND != hwnd && candidate.parentHWND != state.parentHWND {
+			continue
+		}
+		regions = subtractRebarPaintRect(regions, rebarPaintRect{
+			left: candidate.x, top: candidate.y,
+			right: candidate.x + candidate.w, bottom: candidate.y + candidate.h,
+		})
+	}
+	for _, region := range regions {
+		hctx.WlWindow.DrawRectAbs(region.left, region.top, region.right, region.bottom, color)
+	}
+}
+
 func registerUser32Handlers(hctx *HandlerCtx) {
 	allocScreenDC := hctx.AllocScreenDC
 	bitmapHandles := hctx.BitmapHandles
-	builtinWndProc := hctx.BuiltinWndProc
+	setUserLastError := func(ctx *ntapi.TrapContext, value uint32) {
+		if ctx.State == nil {
+			return
+		}
+		offset := uint64(ntapi.TebLastErrorValue)
+		if ctx.State.Is32 {
+			offset = ntapi.Teb32LastErrorValue
+		}
+		ctx.Mem.Write32(ctx.State.TEBAddr+offset, value)
+	}
+	baseBuiltinWndProc := hctx.BuiltinWndProc
+	builtinWndProc := func(hwnd uint64, msg uint32, wParam, lParam uint64) (uint64, bool) {
+		if baseBuiltinWndProc == nil {
+			return 0, false
+		}
+		state := hctx.HwndChildren[hwnd]
+		if msg != 0x000F || state == nil {
+			if state != nil && msg == 0x0005 {
+				if root, target, ownedDialog := topLevelDialogTarget(hctx, hwnd); ownedDialog && target != nil {
+					if normalizeOwnedStatusBar(state, hctx.HwndChildren[root], target.Width, target.Height) {
+						if wnd := win32.Global.Get(hwnd); wnd != nil {
+							win32.Global.UpdatePos(wnd, state.x, state.y, state.w, state.h)
+						}
+						return 0, true
+					}
+				}
+			}
+			return baseBuiltinWndProc(hwnd, msg, wParam, lParam)
+		}
+		if root, target, ownedDialog := topLevelDialogTarget(hctx, hwnd); ownedDialog && target != nil {
+			if normalizeOwnedStatusBar(state, hctx.HwndChildren[root], target.Width, target.Height) {
+				if wnd := win32.Global.Get(hwnd); wnd != nil {
+					win32.Global.UpdatePos(wnd, state.x, state.y, state.w, state.h)
+				}
+			}
+			return baseBuiltinWndProc(hwnd, msg, wParam, lParam)
+		}
+
+		dark := effectiveDarkModeForWindow(hwnd, hctx.HwndChildren)
+		if strings.EqualFold(state.className, "rebarwindow32") {
+			background := hctx.SysColors[15]
+			if dark {
+				background = darkPalette.Control
+			}
+			paintRebarUncoveredArea(hctx, hwnd, state, background)
+		}
+		var ctlColor *hostCtlColor
+		var customDraw *hostCustomDrawSession
+		skipDefault := false
+		if dark {
+			ctlColor = beginHostCtlColor(hctx, hwnd, state)
+		}
+		customDraw, skipDefault = beginHostCustomDraw(hctx, hwnd, state)
+		if customDraw != nil {
+			state.setCustomDrawSkipped(customDraw.skip)
+		}
+		result, handled := uint64(0), true
+		if skipDefault {
+			hctx.WinInvalid[hwnd] = false
+			delete(hctx.WinErasePending, hwnd)
+			win32.Global.Validate(hwnd)
+		} else {
+			result, handled = baseBuiltinWndProc(hwnd, msg, wParam, lParam)
+		}
+		traceToolbar := os.Getenv("RAVEN_TRACE_TOOLBAR") != "" &&
+			strings.EqualFold(state.className, "toolbarwindow32")
+		if traceToolbar {
+			ravelog.Logf("[toolbar-paint-stage] base colors=%d\n",
+				waylandRectColorCount(hctx.WlWindow, state.x, state.y, state.x+state.w, state.y+state.h))
+		}
+		if handled && dark && !strings.EqualFold(state.className, "toolbarwindow32") {
+			remapWaylandRectForDarkMode(hctx.WlWindow, state.x, state.y, state.x+state.w, state.y+state.h)
+		}
+		if traceToolbar {
+			ravelog.Logf("[toolbar-paint-stage] remap colors=%d\n",
+				waylandRectColorCount(hctx.WlWindow, state.x, state.y, state.x+state.w, state.y+state.h))
+		}
+		ctlColor.finish(hctx, state)
+		customDraw.finish(state)
+		if traceToolbar {
+			ravelog.Logf("[toolbar-paint-stage] finish colors=%d\n",
+				waylandRectColorCount(hctx.WlWindow, state.x, state.y, state.x+state.w, state.y+state.h))
+		}
+		return result, handled
+	}
+	hctx.BuiltinWndProc = builtinWndProc
 	clientAreaOrigin := hctx.ClientAreaOrigin
 	commitIfDone := hctx.CommitIfDone
 	d := hctx.Disp
@@ -886,6 +1890,43 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	peLoadMenuResource := hctx.PeLoadMenuResource
 	peLoadRawResource := hctx.PeLoadRawResource
 	peLoadStringW := hctx.PeLoadStringW
+	loadResourceIcon := func(resourceID uint32, desiredWidth, desiredHeight int32) *iconHandleData {
+		decodeResource := func(resourceType, id uint32) *iconHandleData {
+			address, size, ok := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, resourceType, id)
+			if !ok || size == 0 || size > 64<<20 {
+				return nil
+			}
+			data, err := mem.ReadBytes(address, int(size))
+			if err != nil {
+				return nil
+			}
+			icon, ok := decodeIconResource(data)
+			if !ok {
+				return nil
+			}
+			icon.pixels = scaleIconPixels(icon, desiredWidth, desiredHeight)
+			if desiredWidth > 0 {
+				icon.width = desiredWidth
+			}
+			if desiredHeight > 0 {
+				icon.height = desiredHeight
+			}
+			return icon
+		}
+		groupAddress, groupSize, hasGroup := peLoadRawResource(
+			mainModule.BaseAddr, mainModule.ResourceDirRVA, 14, resourceID,
+		)
+		if hasGroup && groupSize > 0 && groupSize <= 1<<20 {
+			if groupData, err := mem.ReadBytes(groupAddress, int(groupSize)); err == nil {
+				if iconID := selectGroupIconResource(groupData, desiredWidth, desiredHeight); iconID != 0 {
+					if icon := decodeResource(3, iconID); icon != nil {
+						return icon
+					}
+				}
+			}
+		}
+		return decodeResource(3, resourceID)
+	}
 	queuePaint := hctx.QueuePaint
 	readGuestString := hctx.ReadGuestString
 	readGuestUTF16 := hctx.ReadGuestUTF16
@@ -896,28 +1937,66 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	windowProps := hctx.WindowProps
 	destroyPending := make(map[uint64]bool)
 	destroyDelivered := make(map[uint64]bool)
-	ownedDCWindows := make(map[uint64]*wl.Window)
+	ownedDCWindows := make(map[uint64]ownedDialogDCState)
+	var ownedDCWindowsMu sync.Mutex
+	ownedPaintCPUs := make(map[uint64][]arch.CPU)
+	var ownedPaintCPUsMu sync.Mutex
 	wlDisplay := hctx.WlDisplay
 	wlWindow := hctx.WlWindow
+	normalizeOwnedStatusGeometry := func(hwnd uint64) {
+		state := hwndChildren[hwnd]
+		if state == nil {
+			return
+		}
+		root, target, owned := topLevelDialogTarget(hctx, hwnd)
+		if !owned || target == nil ||
+			!normalizeOwnedStatusBar(state, hwndChildren[root], target.Width, target.Height) {
+			return
+		}
+		if wnd := win32.Global.Get(hwnd); wnd != nil {
+			win32.Global.UpdatePos(wnd, state.x, state.y, state.w, state.h)
+		}
+	}
+	baseDrawMenuOverlay := hctx.DrawMenuOverlay
+	hctx.DrawMenuOverlay = func() {
+		if baseDrawMenuOverlay == nil {
+			return
+		}
+		baseDrawMenuOverlay()
+		popup := hctx.ActivePopupMenu
+		if popup == nil || !effectiveDarkModeForWindow(popup.OwnerHWND, hctx.HwndChildren) {
+			return
+		}
+		remapWaylandRectForDarkMode(hctx.WlWindow, popup.X, popup.Y,
+			popup.X+popup.Width+2, popup.Y+popup.Height+2)
+		dispatchUAHMenuMessages(hctx, popup.OwnerHWND, popup.Menu, popup)
+	}
+	baseDrawDialogOverlay := hctx.DrawDialogOverlay
+	hctx.DrawDialogOverlay = func() {
+		if baseDrawDialogOverlay == nil {
+			return
+		}
+		baseDrawDialogOverlay()
+		if !hctx.DialogActive || !effectiveDarkModeForWindow(hctx.MainHWND, hctx.HwndChildren) ||
+			hctx.WlWindow == nil {
+			return
+		}
+		const width, height = int32(340), int32(180)
+		left := (hctx.WlWindow.Width - width) / 2
+		top := (hctx.WlWindow.Height + hctx.WlWindow.TitleBarH - height) / 2
+		remapWaylandRectForDarkMode(hctx.WlWindow, left, top, left+width, top+height)
+	}
 
-	hwndDisabled := make(map[uint64]bool)
-	var hwndDisabledMu sync.RWMutex
+	var hwndDisabled windowDisabledRegistry
+	var hwndLifecycleMu sync.Mutex
+	hasWindowSubclass := func(hwnd uint64) bool {
+		return hctx.HasWindowSubclass != nil && hctx.HasWindowSubclass(hwnd)
+	}
 	isKnownWindow := func(hwnd uint64) bool {
-		if hwnd == 0 {
-			return false
-		}
-		if hwnd == 0x00050000 || hwnd == hctx.MainHWND {
-			return true
-		}
-		if _, ok := hwndChildren[hwnd]; ok {
-			return true
-		}
-		return win32.Global.Get(hwnd) != nil
+		return isRegisteredWindow(hwnd, hctx.MainHWND)
 	}
 	isWindowDisabled := func(hwnd uint64) bool {
-		hwndDisabledMu.RLock()
-		disabled, overridden := hwndDisabled[hwnd]
-		hwndDisabledMu.RUnlock()
+		disabled, overridden := hwndDisabled.get(hwnd)
 		if overridden {
 			return disabled
 		}
@@ -927,9 +2006,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if index != win32.GWL_STYLE {
 			return value
 		}
-		hwndDisabledMu.RLock()
-		disabled, overridden := hwndDisabled[hwnd]
-		hwndDisabledMu.RUnlock()
+		disabled, overridden := hwndDisabled.get(hwnd)
 		if !overridden {
 			return value
 		}
@@ -938,18 +2015,16 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		return value &^ uint64(win32.WS_DISABLED)
 	}
-	setWindowDisabled := func(hwnd uint64, disabled bool) bool {
+	setWindowDisabled := func(hwnd uint64, disabled bool) (bool, bool) {
 		wasDisabled, present := win32.Global.SetDisabled(hwnd, disabled)
 		if !present {
 			if !isKnownWindow(hwnd) {
-				return false
+				return false, false
 			}
 			wasDisabled = isWindowDisabled(hwnd)
 		}
-		hwndDisabledMu.Lock()
-		hwndDisabled[hwnd] = disabled
-		hwndDisabledMu.Unlock()
-		return wasDisabled
+		hwndDisabled.set(hwnd, disabled)
+		return wasDisabled, true
 	}
 	hwndWindowRgn := make(map[uint64]uint64)
 	windowCompositionAttributes := make(map[uint64]map[uint32][]byte)
@@ -1050,6 +2125,321 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			hctx.enqueueMessage(cpu, newQueuedMsg(hctx, timer.hwnd, 0x0113, timer.id, timer.proc))
 		}
+	}
+
+	var requestCommit func(bool)
+	const (
+		sentMessageResumeTrampolineID uint32 = 0x3FF8
+		sentMessageWaitTrampolineID   uint32 = 0x3FF7
+	)
+	sentMessageResumeTrampoline := mem.Mmap(0, 4096, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	sentMessageWaitTrampoline := sentMessageResumeTrampoline + 32
+	is32Process := hctx.ProcState != nil && hctx.ProcState.Is32
+	if is32Process {
+		mem.Write8(sentMessageResumeTrampoline+0, 0x50) // PUSH EAX
+		mem.Write8(sentMessageResumeTrampoline+1, 0xB8)
+		mem.Write32(sentMessageResumeTrampoline+2, sentMessageResumeTrampolineID)
+		mem.Write8(sentMessageResumeTrampoline+6, 0x0F)
+		mem.Write8(sentMessageResumeTrampoline+7, 0x01)
+		mem.Write8(sentMessageResumeTrampoline+8, 0xC1)
+		mem.Write8(sentMessageResumeTrampoline+9, 0x83) // ADD ESP, 4
+		mem.Write8(sentMessageResumeTrampoline+10, 0xC4)
+		mem.Write8(sentMessageResumeTrampoline+11, 0x04)
+		mem.Write8(sentMessageResumeTrampoline+12, 0xC3)
+	} else {
+		mem.Write8(sentMessageResumeTrampoline+0, 0x50) // PUSH RAX
+		mem.Write8(sentMessageResumeTrampoline+1, 0xB8)
+		mem.Write32(sentMessageResumeTrampoline+2, sentMessageResumeTrampolineID)
+		mem.Write8(sentMessageResumeTrampoline+6, 0x0F)
+		mem.Write8(sentMessageResumeTrampoline+7, 0x01)
+		mem.Write8(sentMessageResumeTrampoline+8, 0xC1)
+		mem.Write8(sentMessageResumeTrampoline+9, 0x48) // ADD RSP, 8
+		mem.Write8(sentMessageResumeTrampoline+10, 0x83)
+		mem.Write8(sentMessageResumeTrampoline+11, 0xC4)
+		mem.Write8(sentMessageResumeTrampoline+12, 0x08)
+		mem.Write8(sentMessageResumeTrampoline+13, 0xC3)
+	}
+	mem.Write8(sentMessageWaitTrampoline+0, 0xB8)
+	mem.Write32(sentMessageWaitTrampoline+1, sentMessageWaitTrampolineID)
+	mem.Write8(sentMessageWaitTrampoline+5, 0x0F)
+	mem.Write8(sentMessageWaitTrampoline+6, 0x01)
+	mem.Write8(sentMessageWaitTrampoline+7, 0xC1)
+	mem.Write8(sentMessageWaitTrampoline+8, 0xEB)
+	mem.Write8(sentMessageWaitTrampoline+9, 0xF6)
+
+	var sentMessageMu sync.Mutex
+	sentMessagesInFlight := make(map[arch.CPU][]sentMessageInFlight)
+	sentMessageWaits := make(map[arch.CPU][]crossThreadSendWait)
+	pushSentMessage := func(cpu arch.CPU, inFlight sentMessageInFlight) {
+		sentMessageMu.Lock()
+		sentMessagesInFlight[cpu] = append(sentMessagesInFlight[cpu], inFlight)
+		sentMessageMu.Unlock()
+	}
+	popSentMessage := func(cpu arch.CPU) (sentMessageInFlight, bool) {
+		sentMessageMu.Lock()
+		defer sentMessageMu.Unlock()
+		stack := sentMessagesInFlight[cpu]
+		if len(stack) == 0 {
+			return sentMessageInFlight{}, false
+		}
+		inFlight := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if len(stack) == 0 {
+			delete(sentMessagesInFlight, cpu)
+		} else {
+			sentMessagesInFlight[cpu] = stack
+		}
+		return inFlight, true
+	}
+	currentSentMessage := func(cpu arch.CPU) (*synchronousSendRequest, bool) {
+		sentMessageMu.Lock()
+		defer sentMessageMu.Unlock()
+		stack := sentMessagesInFlight[cpu]
+		if len(stack) == 0 {
+			return nil, false
+		}
+		return stack[len(stack)-1].request, true
+	}
+	pushSentMessageWait := func(cpu arch.CPU, wait crossThreadSendWait) {
+		sentMessageMu.Lock()
+		sentMessageWaits[cpu] = append(sentMessageWaits[cpu], wait)
+		sentMessageMu.Unlock()
+	}
+	currentSentMessageWait := func(cpu arch.CPU) (crossThreadSendWait, bool) {
+		sentMessageMu.Lock()
+		defer sentMessageMu.Unlock()
+		stack := sentMessageWaits[cpu]
+		if len(stack) == 0 {
+			return crossThreadSendWait{}, false
+		}
+		return stack[len(stack)-1], true
+	}
+	popSentMessageWait := func(cpu arch.CPU) (crossThreadSendWait, bool) {
+		sentMessageMu.Lock()
+		defer sentMessageMu.Unlock()
+		stack := sentMessageWaits[cpu]
+		if len(stack) == 0 {
+			return crossThreadSendWait{}, false
+		}
+		index := len(stack) - 1
+		wait := stack[index]
+		if index == 0 {
+			delete(sentMessageWaits, cpu)
+		} else {
+			sentMessageWaits[cpu] = stack[:index]
+		}
+		return wait, true
+	}
+	hctx.CancelSentMessages = func(cpu arch.CPU) {
+		hctx.MsgQueue.cancelSynchronousSender(cpu)
+		sentMessageMu.Lock()
+		stack := sentMessagesInFlight[cpu]
+		waits := sentMessageWaits[cpu]
+		delete(sentMessagesInFlight, cpu)
+		delete(sentMessageWaits, cpu)
+		sentMessageMu.Unlock()
+		for _, inFlight := range stack {
+			inFlight.request.complete(0)
+		}
+		for _, wait := range waits {
+			wait.request.complete(0)
+		}
+	}
+
+	captureSentMessagePump := func(
+		ctx *ntapi.TrapContext,
+		arguments [5]uint64,
+		argumentCount int,
+		resume func(*ntapi.TrapContext, *sentMessagePumpCall) uint32,
+	) *sentMessagePumpCall {
+		call := &sentMessagePumpCall{
+			originalSP:    ctx.CPU.GetSP(),
+			argumentCount: argumentCount,
+			is32:          ctx.State != nil && ctx.State.Is32,
+			arguments:     arguments,
+			resume:        resume,
+		}
+		if call.is32 {
+			returnAddress, _ := mem.Read32(call.originalSP)
+			call.returnAddress = uint64(returnAddress)
+		} else {
+			call.returnAddress, _ = mem.Read64(call.originalSP)
+		}
+		return call
+	}
+	resolveSentWndProc := func(hwnd uint64) uint64 {
+		if wndProc := hwndWndProc[hwnd]; wndProc != 0 {
+			return wndProc
+		}
+		if atom := hctx.HwndClassAtom[hwnd]; atom != 0 {
+			if wndProc := hctx.AtomWndProc[atom]; wndProc != 0 {
+				hwndWndProc[hwnd] = wndProc
+				return wndProc
+			}
+		}
+		return 0
+	}
+	var dispatchPendingSentMessage func(*ntapi.TrapContext, *sentMessagePumpCall) bool
+	dispatchPendingSentMessage = func(ctx *ntapi.TrapContext, pump *sentMessagePumpCall) bool {
+		for {
+			request, ok := hctx.MsgQueue.takeSynchronous(ctx.CPU)
+			if !ok {
+				return false
+			}
+			if hctx.windowCPU(request.hwnd) != ctx.CPU {
+				request.complete(0)
+				continue
+			}
+			if !hasWindowSubclass(request.hwnd) {
+				if result, handled := builtinWndProc(
+					request.hwnd, request.message, request.wParam, request.lParam,
+				); handled {
+					if builtinMessageNeedsCommit(request.message) {
+						requestCommit(true)
+					}
+					request.complete(result)
+					continue
+				}
+			}
+			wndProc := resolveSentWndProc(request.hwnd)
+			if wndProc == 0 || hctx.SyncCallWndProc == nil {
+				request.complete(0)
+				continue
+			}
+			pushSentMessage(ctx.CPU, sentMessageInFlight{request: request, pump: pump})
+			if pump != nil {
+				ctx.CPU.SetSP(pump.originalSP)
+			}
+			if traceEnqueue {
+				ravelog.Logf("[send-sync] dispatch owner=%p hwnd=0x%x msg=0x%x wndProc=0x%x sync=0x%x resume=0x%x pumpSP=0x%x return=0x%x\n",
+					ctx.CPU, request.hwnd, request.message, wndProc, hctx.SyncTrampoline,
+					sentMessageResumeTrampoline, pump.originalSP, pump.returnAddress)
+			}
+			syncStack := hctx.syncStack(ctx)
+			*syncStack = append(*syncStack, syncDispatchFrame{
+				retAddr:             sentMessageResumeTrampoline,
+				hwnd:                request.hwnd,
+				returnWndProcResult: true,
+			})
+			hctx.SyncCallWndProc(
+				ctx, wndProc, request.hwnd, request.message,
+				request.wParam, request.lParam, hctx.SyncTrampoline,
+			)
+			if traceEnqueue {
+				ravelog.Logf("[send-sync] redirected pc=0x%x sp=0x%x pcRedirected=%t returnOverridden=%t\n",
+					ctx.CPU.GetPC(), ctx.CPU.GetSP(), ctx.PCRedirected, ctx.ReturnOverridden)
+			}
+			return true
+		}
+	}
+	d.RegisterHandler(sentMessageResumeTrampolineID, "sentMessageResumeTrampoline", func(ctx *ntapi.TrapContext) uint32 {
+		var result uint64
+		if ctx.State != nil && ctx.State.Is32 {
+			value, _ := mem.Read32(ctx.CPU.GetSP())
+			result = uint64(value)
+		} else {
+			result, _ = mem.Read64(ctx.CPU.GetSP())
+		}
+		inFlight, ok := popSentMessage(ctx.CPU)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		inFlight.request.complete(result)
+		if traceEnqueue {
+			ravelog.Logf("[send-sync] complete owner=%p hwnd=0x%x result=0x%x resumeSP=0x%x\n",
+				ctx.CPU, inFlight.request.hwnd, result, ctx.CPU.GetSP())
+		}
+		if inFlight.pump == nil || inFlight.pump.resume == nil {
+			ctx.SetReturn(0)
+			return 0
+		}
+
+		pump := inFlight.pump
+		ctx.CPU.SetSP(pump.originalSP)
+		status := pump.resume(ctx, pump)
+		if ctx.PCRedirected {
+			return status
+		}
+
+		returnSlot := pump.originalSP
+		wordSize := uint64(8)
+		if pump.is32 {
+			wordSize = 4
+			returnSlot += uint64(pump.argumentCount) * 4
+			mem.Write32(returnSlot, uint32(pump.returnAddress))
+		} else {
+			mem.Write64(returnSlot, pump.returnAddress)
+		}
+		ctx.CPU.SetSP(returnSlot - wordSize)
+		if traceEnqueue {
+			ravelog.Logf("[send-sync] resume owner=%p originalSP=0x%x returnSlot=0x%x return=0x%x result=0x%x\n",
+				ctx.CPU, pump.originalSP, returnSlot, pump.returnAddress, ctx.CPU.SyscallNum())
+		}
+		return status
+	})
+	d.RegisterHandler(sentMessageWaitTrampolineID, "sentMessageWaitTrampoline", func(ctx *ntapi.TrapContext) uint32 {
+		wait, ok := currentSentMessageWait(ctx.CPU)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
+		finish := func(result uint64) uint32 {
+			_, _ = popSentMessageWait(ctx.CPU)
+			ctx.SetReturn(result)
+			wordSize := uint64(8)
+			argumentBytes := uint64(0)
+			if wait.is32 {
+				wordSize = 4
+				argumentBytes = 16
+			}
+			ctx.CPU.SetSP(wait.originalSP + wordSize + argumentBytes)
+			ctx.CPU.SetPC(wait.returnAddress)
+			ctx.PCRedirected = true
+			return 0
+		}
+		if result, ready := wait.request.waitTimeout(0); ready {
+			return finish(result)
+		}
+		pump := sentMessageLoopPump(wait.originalSP, sentMessageWaitTrampoline, wait.is32)
+		if dispatchPendingSentMessage(ctx, pump) {
+			return 0
+		}
+		if result, ready := wait.request.waitTimeout(time.Millisecond); ready {
+			return finish(result)
+		}
+		ctx.CPU.SetPC(sentMessageWaitTrampoline)
+		ctx.PCRedirected = true
+		return 0
+	})
+	beginCrossThreadSend := func(ctx *ntapi.TrapContext, request *synchronousSendRequest) bool {
+		if ctx == nil || ctx.CPU == nil || request == nil {
+			return false
+		}
+		originalSP := ctx.CPU.GetSP()
+		is32 := ctx.State != nil && ctx.State.Is32
+		var returnAddress uint64
+		var err error
+		if is32 {
+			var value uint32
+			value, err = mem.Read32(originalSP)
+			returnAddress = uint64(value)
+		} else {
+			returnAddress, err = mem.Read64(originalSP)
+		}
+		if err != nil || returnAddress == 0 {
+			return false
+		}
+		pushSentMessageWait(ctx.CPU, crossThreadSendWait{
+			request:       request,
+			originalSP:    originalSP,
+			returnAddress: returnAddress,
+			is32:          is32,
+		})
+		ctx.CPU.SetPC(sentMessageWaitTrampoline)
+		ctx.ReturnOverridden = true
+		ctx.PCRedirected = true
+		return true
 	}
 
 	mapCursorHandle := func(hCursor uint64) (uint32, string) {
@@ -1289,7 +2679,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		return top
 	}
-	requestCommit := func(repaintBuiltin bool) {
+	requestCommit = func(repaintBuiltin bool) {
 		if wlWindow == nil {
 			return
 		}
@@ -1312,10 +2702,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			if child.parentHWND != parent {
 				continue
 			}
-			child.x += dx
-			child.y += dy
+			_, geometry := child.mutateGeometry(func(geometry *controlGeometry) {
+				geometry.x += dx
+				geometry.y += dy
+			})
 			if wnd := win32.Global.Get(childHWND); wnd != nil {
-				win32.Global.UpdatePos(wnd, child.x, child.y, child.w, child.h)
+				win32.Global.UpdatePos(wnd, geometry.x, geometry.y, geometry.w, geometry.h)
 			}
 			shiftChildWindows(childHWND, dx, dy)
 		}
@@ -1436,19 +2828,27 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 	}
 	ensureOwnedDialogWindow := func(hwnd uint64) *wl.Window {
+		hwndLifecycleMu.Lock()
 		state := hwndChildren[hwnd]
 		const wsChild = uint32(0x40000000)
 		if state == nil || !state.visible || strings.ToLower(state.className) != "dialog" || hwnd == hctx.MainHWND || state.style&wsChild != 0 {
+			hwndLifecycleMu.Unlock()
 			return nil
 		}
+		registered := registerGlobalWindow(hwnd, state)
 		if win := hctx.WlWindows[hwnd]; win != nil {
 			if state.w > 0 && state.h > 0 {
 				win.Resize(state.w, state.h)
 			}
 			wlDisplay.SetWindowTitle(win, state.text)
+			hwndLifecycleMu.Unlock()
 			return win
 		}
 		if wlDisplay == nil || wlWindow == nil || state.w <= 0 || state.h <= 0 {
+			if registered {
+				cleanupWindowRegistration(hwnd, &hwndDisabled)
+			}
+			hwndLifecycleMu.Unlock()
 			return nil
 		}
 		owner := wlWindow
@@ -1465,52 +2865,89 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		win, err := wlDisplay.CreateOwnedWindow(state.text, state.w, state.h, 0, owner)
 		if err != nil {
+			if registered {
+				cleanupWindowRegistration(hwnd, &hwndDisabled)
+			}
 			ravelog.Logf("[dialog-window] create hwnd=0x%x failed: %v\n", hwnd, err)
+			hwndLifecycleMu.Unlock()
 			return nil
 		}
 		hctx.WlWindows[hwnd] = win
 		hctx.WlWindowHWND[win] = hwnd
-		renderOwnedDialog(hctx, hwnd, win)
+		cpu := hctx.windowCPU(hwnd)
+		width, height, title := state.w, state.h, state.text
+		hwndLifecycleMu.Unlock()
+		renderOwnedDialog(hctx, hwnd, cpu, win)
 		queuePaint(hctx.MainHWND)
-		ravelog.Logf("[dialog-window] created hwnd=0x%x size=%dx%d title=%q\n", hwnd, state.w, state.h, state.text)
+		ravelog.Logf("[dialog-window] created hwnd=0x%x size=%dx%d title=%q\n", hwnd, width, height, title)
 		return win
 	}
-	destroyOwnedDialogWindow := func(hwnd uint64) {
+	destroyOwnedDialogWindowForCPU := func(hwnd uint64, cpu arch.CPU) {
+		hwndLifecycleMu.Lock()
 		win := hctx.WlWindows[hwnd]
+		hwndLifecycleMu.Unlock()
 		if win == nil {
 			return
 		}
+		if cpu == nil {
+			cpu = hctx.windowCPU(hwnd)
+		}
+		if cpu == nil {
+			cpu = hctx.GetCurrentCPU()
+		}
+		hctx.DialogSurfaceMu.Lock(cpu)
+		defer hctx.DialogSurfaceMu.Unlock(cpu)
+		hwndLifecycleMu.Lock()
+		if hctx.WlWindows[hwnd] != win {
+			hwndLifecycleMu.Unlock()
+			return
+		}
+
+		ownedDCWindowsMu.Lock()
+		for hdc, state := range ownedDCWindows {
+			if state.target != win {
+				continue
+			}
+			delete(ownedDCWindows, hdc)
+			gdiMgr.DeleteDC(hdc)
+			hctx.DialogSurfaceMu.Unlock(cpu)
+		}
+		ownedDCWindowsMu.Unlock()
+
+		destroyedHandles := make(map[uint64]bool)
+		for _, handle := range windowCleanupHandles(hwnd, hwndChildren) {
+			destroyedHandles[handle] = true
+		}
+		ownedPaintCPUsMu.Lock()
+		for handle, cpus := range ownedPaintCPUs {
+			if !destroyedHandles[handle] {
+				continue
+			}
+			delete(ownedPaintCPUs, handle)
+			for range cpus {
+				hctx.DialogSurfaceMu.Unlock(cpu)
+			}
+		}
+		ownedPaintCPUsMu.Unlock()
+
 		delete(hctx.WlWindowHWND, win)
 		delete(hctx.WlWindows, hwnd)
 		win.Destroy()
+		cleanupWindowRegistration(hwnd, &hwndDisabled)
+		hwndLifecycleMu.Unlock()
 		queuePaint(hctx.MainHWND)
 		ravelog.Logf("[dialog-window] destroyed hwnd=0x%x\n", hwnd)
 	}
+	destroyOwnedDialogWindow := func(hwnd uint64) {
+		destroyOwnedDialogWindowForCPU(hwnd, nil)
+	}
 	cleanupWindowState := func(root uint64) {
-		var handles []uint64
-		for hwnd := range hwndChildren {
-			if hwnd == root || isDialogDescendant(hctx, hwnd, root) {
-				handles = append(handles, hwnd)
-			}
-		}
+		handles := windowCleanupHandles(root, hwndChildren)
 		for _, hwnd := range handles {
-			if hctx.ReleaseDialogPaintDC != nil {
-				hctx.ReleaseDialogPaintDC(hwnd)
-			}
-			hctx.clearWindowCPU(hwnd)
-			delete(hwndChildren, hwnd)
-			delete(hwndWndProc, hwnd)
-			delete(hwndTitle, hwnd)
-			delete(hwndExplicitlyHidden, hwnd)
-			delete(windowLongPtr, hwnd)
-			delete(hctx.HwndClassAtom, hwnd)
-			delete(hctx.WindowProps, hwnd)
-			delete(hctx.WinErasePending, hwnd)
-			delete(hctx.WinInvalid, hwnd)
-			hwndDisabledMu.Lock()
-			delete(hwndDisabled, hwnd)
-			hwndDisabledMu.Unlock()
-			win32.Global.Destroy(hwnd)
+			hwndLifecycleMu.Lock()
+			cleanupHandlerWindowState(hctx, hwnd)
+			hwndDisabled.remove(hwnd)
+			hwndLifecycleMu.Unlock()
 		}
 		if hctx.FocusHwnd != 0 {
 			for _, hwnd := range handles {
@@ -1528,11 +2965,21 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			delete(destroyPending, hwnd)
 		}
 	}
-	destroyWindow := func(hwnd uint64) bool {
+	destroyWindow := func(hwnd uint64, cpu arch.CPU) bool {
 		if destroyPending[hwnd] || (hwndChildren[hwnd] == nil && win32.Global.Get(hwnd) == nil) {
 			return false
 		}
-		destroyOwnedDialogWindow(hwnd)
+		handles := windowCleanupHandles(hwnd, hwndChildren)
+		destroyOwnedDialogWindowForCPU(hwnd, cpu)
+		pruneDestroyedWindowMessages(&hctx.MsgQueue, hwnd, hwndChildren)
+		for _, handle := range handles {
+			if state := hwndChildren[handle]; state != nil {
+				state.visible = false
+			}
+			hctx.WinInvalid[handle] = false
+			delete(hctx.WinErasePending, handle)
+			win32.Global.Validate(handle)
+		}
 		if _, hasWP := hwndWndProc[hwnd]; hasWP {
 			destroyPending[hwnd] = true
 			hctx.enqueueMessage(nil,
@@ -1553,7 +3000,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			dialogRoot = root
 		}
 		if win := ensureOwnedDialogWindow(dialogRoot); win != nil {
-			renderOwnedDialog(hctx, dialogRoot, win)
+			if repaintHostManagedDialog(hctx, dialogRoot, hctx.windowCPU(dialogRoot), win) {
+				return
+			}
+			queuePaint(dialogRoot)
 			return
 		}
 		if hwnd == hctx.MainHWND && wlWindow != nil && hctx.HasBaseFrame {
@@ -1565,7 +3015,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		queuePaint(hwnd)
 	}
 	hctx.RequestWindowRepaint = requestWindowRepaint
-	hctx.DestroyOwnedDialog = destroyOwnedDialogWindow
+	hctx.DestroyOwnedDialog = destroyOwnedDialogWindowForCPU
 	drawAbsHLine := func(x0, x1, y int32, color uint32) {
 		if wlWindow == nil || x1 <= x0 {
 			return
@@ -1695,6 +3145,45 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				drawAbsHLine(thumbLeft, thumbLeft+thumbW, rect.Bottom-3, border)
 				drawAbsVLine(thumbLeft, rect.Top+2, rect.Bottom-2, border)
 				drawAbsVLine(thumbLeft+thumbW-1, rect.Top+2, rect.Bottom-2, border)
+			}
+		}
+	}
+	paintChildScrollbars := func(root uint64) {
+		if wlWindow == nil {
+			return
+		}
+		for hwnd, state := range hwndChildren {
+			if hwnd == hctx.MainHWND || state == nil || !windowHierarchyVisible(hwnd, hwndChildren) ||
+				!windowIsDescendantOrSelf(hwnd, root, hwndChildren) {
+				continue
+			}
+			if _, _, owned := topLevelDialogTarget(hctx, hwnd); owned {
+				continue
+			}
+			vertical, horizontal, corner, hasVertical, hasHorizontal := childScrollbarRects(state)
+			if hasVertical && vertical.Right > vertical.Left && vertical.Bottom > vertical.Top {
+				info := win32.ScrollInfo{}
+				win32.GetScrollInfo(hwnd, win32.SB_VERT, &info, win32.SIF_ALL)
+				drawScrollBar(vertical, true, info)
+			}
+			if hasHorizontal && horizontal.Right > horizontal.Left && horizontal.Bottom > horizontal.Top {
+				info := win32.ScrollInfo{}
+				win32.GetScrollInfo(hwnd, win32.SB_HORZ, &info, win32.SIF_ALL)
+				drawScrollBar(horizontal, false, info)
+			}
+			if hasVertical && hasHorizontal {
+				wlWindow.DrawRectAbs(corner.Left, corner.Top, corner.Right, corner.Bottom, hctx.SysColors[15])
+			}
+			if effectiveDarkModeForWindow(hwnd, hwndChildren) {
+				if hasVertical {
+					remapWaylandRectForDarkMode(wlWindow, vertical.Left, vertical.Top, vertical.Right, vertical.Bottom)
+				}
+				if hasHorizontal {
+					remapWaylandRectForDarkMode(wlWindow, horizontal.Left, horizontal.Top, horizontal.Right, horizontal.Bottom)
+				}
+				if hasVertical && hasHorizontal {
+					remapWaylandRectForDarkMode(wlWindow, corner.Left, corner.Top, corner.Right, corner.Bottom)
+				}
 			}
 		}
 	}
@@ -2154,6 +3643,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			// Initialise GWL_STYLE / GWL_EXSTYLE so GetWindowLong returns correct values.
 			windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
 			win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
+			hctx.placeNewChildAtBottom(hwnd)
 			// Auto-focus first edit control
 			if lClassName == "edit" && hctx.FocusHwnd == 0 {
 				hctx.FocusHwnd = hwnd
@@ -2364,7 +3854,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "DestroyWindow", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		ravelog.Logf("[destroy] DestroyWindow hwnd=0x%x\n", hwnd)
-		if destroyWindow(hwnd) {
+		if destroyWindow(hwnd, ctx.CPU) {
 			ctx.SetReturn(1)
 		} else {
 			ctx.SetReturn(0)
@@ -2418,6 +3908,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			requestWindowRepaint(hwnd)
 		}
 		if isChild {
+			firstShow := !cs.showCalled
 			cs.showCalled = true
 			cs.visible = nCmdShow != 0 // SW_HIDE = 0
 			if nCmdShow == 0 {
@@ -2435,7 +3926,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						delete(paintedThroughHiddenAncestor, candidate)
 					}
 				}
-				destroyOwnedDialogWindow(hwnd)
+				destroyOwnedDialogWindowForCPU(hwnd, ctx.CPU)
 				// Only mark explicitly hidden if the window was actually visible.
 				// SW_HIDE on a never-shown window is a no-op for cascade/auto-show
 				// purposes: a subsequent MoveWindow should still be able to auto-show it.
@@ -2446,7 +3937,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				delete(hwndExplicitlyHidden, hwnd)
 			}
 			// Queue WM_PAINT when a window with a guest WndProc becomes visible
-			if cs.visible && !wasVisible {
+			if cs.visible && (!wasVisible || firstShow) {
 				if wp, ok2 := hwndWndProc[hwnd]; ok2 && wp != 0 {
 					hctx.WinErasePending[hwnd] = true
 					queuePaint(hwnd)
@@ -2593,6 +4084,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hwnd := ctx.Arg(0)
 		ox, oy := clientAreaOrigin(hwnd)
 		root, target, owned := topLevelDialogTarget(hctx, hwnd)
+		if owned && target != nil {
+			hctx.DialogSurfaceMu.Lock(ctx.CPU)
+		}
 		var h uint64
 		var dc *gdi.DC
 		if owned && target != nil {
@@ -2611,7 +4105,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		dc.OriginX = ox
 		dc.OriginY = oy
 		if owned && target != nil {
-			ownedDCWindows[h] = target
+			ownedDCWindowsMu.Lock()
+			ownedDCWindows[h] = ownedDialogDCState{target: target, cpu: ctx.CPU}
+			ownedDCWindowsMu.Unlock()
 		}
 		x0, y0, x1, y1 := absoluteClientRect(hwnd)
 		if owned {
@@ -2630,12 +4126,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hdc := ctx.Arg(1)
 		dc := gdiMgr.GetDC(hdc)
 		dirtyScreen := dc != nil && dc.IsScreen && dc.Dirty
-		ownedTarget := ownedDCWindows[hdc]
+		ownedDCWindowsMu.Lock()
+		ownedState, owned := ownedDCWindows[hdc]
 		delete(ownedDCWindows, hdc)
+		ownedDCWindowsMu.Unlock()
+		if owned {
+			defer hctx.DialogSurfaceMu.Unlock(ownedState.cpu)
+		}
 		gdiMgr.DeleteDC(hdc)
 		if dirtyScreen {
-			if ownedTarget != nil {
-				ownedTarget.Commit()
+			if ownedState.target != nil {
+				ownedState.target.Commit()
 			} else {
 				requestCommit(false)
 			}
@@ -2673,7 +4174,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if nameArg < 0x10000 && mainModule != nil && (hInst == mainModule.BaseAddr || hInst == 0) {
 			_, _, ok := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 14, uint32(nameArg))
 			if ok {
-				ctx.SetReturn(0x00020000 + nameArg)
+				handle := 0x00020000 + nameArg
+				if icon := loadResourceIcon(uint32(nameArg), 32, 32); icon != nil {
+					hctx.storeIcon(handle, icon)
+				}
+				ctx.SetReturn(handle)
 				return 0
 			}
 		}
@@ -2713,12 +4218,20 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				resID := uint32(nameArg)
 				_, _, ok2 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 14 /*RT_GROUP_ICON*/, resID)
 				if ok2 {
-					ctx.SetReturn(0x00020000 + uint64(resID))
+					handle := 0x00020000 + uint64(resID)
+					if icon := loadResourceIcon(resID, int32(ctx.Arg(3)), int32(ctx.Arg(4))); icon != nil {
+						hctx.storeIcon(handle, icon)
+					}
+					ctx.SetReturn(handle)
 					return 0
 				}
 				_, _, ok3 := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 3 /*RT_ICON*/, resID)
 				if ok3 {
-					ctx.SetReturn(0x00020000 + uint64(resID))
+					handle := 0x00020000 + uint64(resID)
+					if icon := loadResourceIcon(resID, int32(ctx.Arg(3)), int32(ctx.Arg(4))); icon != nil {
+						hctx.storeIcon(handle, icon)
+					}
+					ctx.SetReturn(handle)
 					return 0
 				}
 			}
@@ -2744,7 +4257,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		flags := uint32(ctx.Arg(6))
 		const swpNoZOrder = 0x0004
 		if flags&swpNoZOrder == 0 {
-			hctx.HwndZOrder = reorderWindow(hctx.HwndZOrder, hwnd, ctx.Arg(1))
+			if !hctx.reorderZOrder(hwnd, ctx.Arg(1)) {
+				if ctx.State != nil {
+					offset := uint64(ntapi.TebLastErrorValue)
+					if ctx.State.Is32 {
+						offset = ntapi.Teb32LastErrorValue
+					}
+					ctx.Mem.Write32(ctx.State.TEBAddr+offset, 1400) // ERROR_INVALID_WINDOW_HANDLE
+				}
+				ctx.SetReturn(0)
+				return 0
+			}
 		}
 		// Handle main (top-level) window resize - updates the Wayland window
 		if hwnd == hctx.MainHWND && wlWindow != nil {
@@ -2798,28 +4321,30 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			const swpShowWindow = 0x0040
 			const swpHideWindow = 0x0080
 			ox, oy := clientAreaOrigin(ci.parentHWND)
-			prevX, prevY := ci.x, ci.y
-			prevW, prevH := ci.w, ci.h
-			if flags&swpNoMove == 0 {
-				x := int32(ctx.Arg(2))
-				y := int32(ctx.Arg(3))
-				if x >= 0 && x < 0x7FFF {
-					ci.x = x + ox
+			before, geometry := ci.mutateGeometry(func(geometry *controlGeometry) {
+				if flags&swpNoMove == 0 {
+					x := int32(ctx.Arg(2))
+					y := int32(ctx.Arg(3))
+					if x >= 0 && x < 0x7FFF {
+						geometry.x = x + ox
+					}
+					if y >= 0 && y < 0x7FFF {
+						geometry.y = y + oy
+					}
 				}
-				if y >= 0 && y < 0x7FFF {
-					ci.y = y + oy
+				if flags&swpNoSize == 0 {
+					w := int32(ctx.Arg(4))
+					h := int32(ctx.Arg(5))
+					if w > 0 && w < 0x7FFF {
+						geometry.w = w
+					}
+					if h > 0 && h < 0x7FFF {
+						geometry.h = h
+					}
 				}
-			}
-			if flags&swpNoSize == 0 {
-				w := int32(ctx.Arg(4))
-				h := int32(ctx.Arg(5))
-				if w > 0 && w < 0x7FFF {
-					ci.w = w
-				}
-				if h > 0 && h < 0x7FFF {
-					ci.h = h
-				}
-			}
+			})
+			prevX, prevY := before.x, before.y
+			prevW, prevH := before.w, before.h
 			if flags&swpShowWindow != 0 {
 				ci.visible = true
 				syncWindowVisibleStyle(hwnd, true)
@@ -2829,28 +4354,28 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				ci.visible = false
 				syncWindowVisibleStyle(hwnd, false)
 				hwndExplicitlyHidden[hwnd] = true
-				destroyOwnedDialogWindow(hwnd)
+				destroyOwnedDialogWindowForCPU(hwnd, ctx.CPU)
 			}
 			// Auto-show only when the size was explicitly set in this call (SWP_NOSIZE not
 			// set) and the resulting size is non-zero, and the guest never hid the window.
-			if flags&swpNoSize == 0 && ci.w > 0 && ci.h > 0 && ci.style&wsVisible != 0 && !hwndExplicitlyHidden[hwnd] {
+			if flags&swpNoSize == 0 && geometry.w > 0 && geometry.h > 0 && ci.style&wsVisible != 0 && !hwndExplicitlyHidden[hwnd] {
 				ci.visible = true
 			}
-			ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x -> %d,%d %dx%d visible=%v\n", hwnd, ci.className, flags, ci.x, ci.y, ci.w, ci.h, ci.visible)
+			ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x -> %d,%d %dx%d visible=%v\n", hwnd, ci.className, flags, geometry.x, geometry.y, geometry.w, geometry.h, ci.visible)
 			if wnd := win32.Global.Get(hwnd); wnd != nil {
-				win32.Global.UpdatePos(wnd, ci.x, ci.y, ci.w, ci.h)
+				win32.Global.UpdatePos(wnd, geometry.x, geometry.y, geometry.w, geometry.h)
 			}
 			// Queue WM_SIZE / WM_MOVE for windows with a guest WndProc
-			shiftChildWindows(hwnd, ci.x-prevX, ci.y-prevY)
+			shiftChildWindows(hwnd, geometry.x-prevX, geometry.y-prevY)
 			if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
-				if ci.w != prevW || ci.h != prevH {
-					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
+				if geometry.w != prevW || geometry.h != prevH {
+					lParam := uint64(uint16(geometry.w)) | (uint64(uint16(geometry.h)) << 16)
 					hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x0005, 0, lParam))
 				}
-				if ci.x != prevX || ci.y != prevY {
+				if geometry.x != prevX || geometry.y != prevY {
 					// WM_MOVE lParam = MAKELPARAM(x, y) in client-relative coords
-					relX := ci.x - ox
-					relY := ci.y - oy
+					relX := geometry.x - ox
+					relY := geometry.y - oy
 					hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x0003, 0, uint64(uint16(relX))|(uint64(uint16(relY))<<16)))
 				}
 			}
@@ -2942,27 +4467,32 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				continue
 			}
 			if dp.flags&swpNoZOrder == 0 {
-				hctx.HwndZOrder = reorderWindow(hctx.HwndZOrder, dp.hwnd, dp.insertAfter)
+				if !hctx.reorderZOrder(dp.hwnd, dp.insertAfter) {
+					ctx.SetReturn(0)
+					return 0
+				}
 			}
 			ox, oy := clientAreaOrigin(ci.parentHWND)
-			prevX, prevY := ci.x, ci.y
-			prevW, prevH := ci.w, ci.h
+			before, geometry := ci.mutateGeometry(func(geometry *controlGeometry) {
+				if dp.flags&swpNoMove == 0 {
+					geometry.x = dp.x + ox
+					geometry.y = dp.y + oy
+				}
+				if dp.flags&swpNoSize == 0 {
+					geometry.w = dp.w
+					if geometry.w < 0 {
+						geometry.w = 0
+					}
+					geometry.h = dp.h
+					if geometry.h < 0 {
+						geometry.h = 0
+					}
+				}
+			})
+			prevX, prevY := before.x, before.y
+			prevW, prevH := before.w, before.h
 			wasVisible := ci.visible
-			if dp.flags&swpNoMove == 0 {
-				ci.x = dp.x + ox
-				ci.y = dp.y + oy
-			}
-			if dp.flags&swpNoSize == 0 {
-				ci.w = dp.w
-				if ci.w < 0 {
-					ci.w = 0
-				}
-				ci.h = dp.h
-				if ci.h < 0 {
-					ci.h = 0
-				}
-			}
-			ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x -> %d,%d %dx%d\n", dp.hwnd, ci.className, dp.flags, ci.x, ci.y, ci.w, ci.h)
+			ravelog.Logf("[setpos] hwnd=0x%x class=%q flags=0x%x -> %d,%d %dx%d\n", dp.hwnd, ci.className, dp.flags, geometry.x, geometry.y, geometry.w, geometry.h)
 			// Auto-show: sized non-zero -> implicitly visible
 			if dp.flags&swpShowWindow != 0 {
 				ci.visible = true
@@ -2974,22 +4504,22 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				syncWindowVisibleStyle(dp.hwnd, false)
 				hwndExplicitlyHidden[dp.hwnd] = true
 			}
-			if dp.flags&swpNoSize == 0 && ci.w > 0 && ci.h > 0 && ci.style&wsVisible != 0 && !hwndExplicitlyHidden[dp.hwnd] {
+			if dp.flags&swpNoSize == 0 && geometry.w > 0 && geometry.h > 0 && ci.style&wsVisible != 0 && !hwndExplicitlyHidden[dp.hwnd] {
 				ci.visible = true
 			}
 			if wnd := win32.Global.Get(dp.hwnd); wnd != nil {
-				win32.Global.UpdatePos(wnd, ci.x, ci.y, ci.w, ci.h)
+				win32.Global.UpdatePos(wnd, geometry.x, geometry.y, geometry.w, geometry.h)
 			}
 			// Dispatch WM_SIZE / WM_MOVE to children with guest WndProcs
-			shiftChildWindows(dp.hwnd, ci.x-prevX, ci.y-prevY)
+			shiftChildWindows(dp.hwnd, geometry.x-prevX, geometry.y-prevY)
 			if wp, ok2 := hwndWndProc[dp.hwnd]; ok2 && wp != 0 {
-				if ci.w != prevW || ci.h != prevH {
-					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
+				if geometry.w != prevW || geometry.h != prevH {
+					lParam := uint64(uint16(geometry.w)) | (uint64(uint16(geometry.h)) << 16)
 					hctx.enqueueMessage(nil, newQueuedMsg(hctx, dp.hwnd, 0x0005, 0, lParam))
 				}
-				if ci.x != prevX || ci.y != prevY {
-					relX := ci.x - ox
-					relY := ci.y - oy
+				if geometry.x != prevX || geometry.y != prevY {
+					relX := geometry.x - ox
+					relY := geometry.y - oy
 					hctx.enqueueMessage(nil, newQueuedMsg(hctx, dp.hwnd, 0x0003, 0, uint64(uint16(relX))|(uint64(uint16(relY))<<16)))
 				}
 			}
@@ -3042,39 +4572,41 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		if ci, ok := hwndChildren[hwnd]; ok {
 			ox, oy := clientAreaOrigin(ci.parentHWND)
-			prevX, prevY := ci.x, ci.y
-			prevW, prevH := ci.w, ci.h
-			ci.x = newX + ox
-			ci.y = newY + oy
-			if newW > 0 {
-				ci.w = newW
-			}
-			if newH > 0 {
-				ci.h = newH
-			}
-			sizeChanged := ci.w != prevW || ci.h != prevH
+			before, geometry := ci.mutateGeometry(func(geometry *controlGeometry) {
+				geometry.x = newX + ox
+				geometry.y = newY + oy
+				if newW > 0 {
+					geometry.w = newW
+				}
+				if newH > 0 {
+					geometry.h = newH
+				}
+			})
+			prevX, prevY := before.x, before.y
+			prevW, prevH := before.w, before.h
+			sizeChanged := geometry.w != prevW || geometry.h != prevH
 			// Auto-show only if size actually changed to non-zero, and guest never hid it.
-			if sizeChanged && ci.w > 0 && ci.h > 0 && ci.style&wsVisible != 0 && !hwndExplicitlyHidden[hwnd] {
+			if sizeChanged && geometry.w > 0 && geometry.h > 0 && ci.style&wsVisible != 0 && !hwndExplicitlyHidden[hwnd] {
 				ci.visible = true
 			}
 			if wnd := win32.Global.Get(hwnd); wnd != nil {
-				win32.Global.UpdatePos(wnd, ci.x, ci.y, ci.w, ci.h)
+				win32.Global.UpdatePos(wnd, geometry.x, geometry.y, geometry.w, geometry.h)
 			}
-			shiftChildWindows(hwnd, ci.x-prevX, ci.y-prevY)
+			shiftChildWindows(hwnd, geometry.x-prevX, geometry.y-prevY)
 			// Queue WM_SIZE / WM_MOVE for windows with a guest WndProc
 			if wp, ok := hwndWndProc[hwnd]; ok && wp != 0 {
 				if sizeChanged {
-					lParam := uint64(uint16(ci.w)) | (uint64(uint16(ci.h)) << 16)
+					lParam := uint64(uint16(geometry.w)) | (uint64(uint16(geometry.h)) << 16)
 					hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x0005, 0, lParam))
 				}
-				if ci.x != prevX || ci.y != prevY {
-					relX := ci.x - ox
-					relY := ci.y - oy
+				if geometry.x != prevX || geometry.y != prevY {
+					relX := geometry.x - ox
+					relY := geometry.y - oy
 					hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x0003, 0, uint64(uint16(relX))|(uint64(uint16(relY))<<16)))
 				}
 			}
 			// Only repaint if size changed to a valid value (not just a position update).
-			if bRepaint != 0 && sizeChanged && ci.w > 0 && ci.h > 0 {
+			if bRepaint != 0 && sizeChanged && geometry.w > 0 && geometry.h > 0 {
 				hctx.WinErasePending[hwnd] = true
 				queuePaint(hwnd)
 			}
@@ -3088,9 +4620,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if hwnd == hctx.MainHWND && text != "" {
 			hctx.MainTitle = text
 			if wlWindow != nil {
-				wlWindow.Title = text
 				if wlDisplay != nil {
 					wlDisplay.SetWindowTitle(wlWindow, text)
+				} else {
+					wlWindow.SetTitleText(text)
 				}
 			}
 		}
@@ -3399,6 +4932,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hwnd := ctx.Arg(0)
 		pRect := ctx.Arg(1)
 		if pRect != 0 {
+			normalizeOwnedStatusGeometry(hwnd)
 			var left, top, right, bottom int32
 			if ci, ok := hwndChildren[hwnd]; ok {
 				right, bottom = ci.w, ci.h
@@ -3470,13 +5004,28 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		msg := uint32(ctx.Arg(1))
 		wParam := ctx.Arg(2)
 		lParam := ctx.Arg(3)
-		// Built-in controls first
-		if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
-			if builtinMessageNeedsCommit(msg) {
-				requestCommit(true)
+		ownerCPU := hctx.windowCPU(hwnd)
+		if ownerCPU != nil && ownerCPU != ctx.CPU {
+			request := newSynchronousSendRequest(hwnd, msg, wParam, lParam)
+			request.sender = ctx.CPU
+			if !hctx.MsgQueue.enqueueSynchronous(ownerCPU, request) {
+				ctx.SetReturn(0)
+				return 0
 			}
-			ctx.SetReturn(result)
+			if !beginCrossThreadSend(ctx, request) {
+				ctx.SetReturn(request.wait())
+			}
 			return 0
+		}
+		// Built-in controls first
+		if !hasWindowSubclass(hwnd) {
+			if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+				if builtinMessageNeedsCommit(msg) {
+					requestCommit(true)
+				}
+				ctx.SetReturn(result)
+				return 0
+			}
 		}
 		// For guest WndProcs: dispatch synchronously via hctx.SyncStack
 		wp, hasWP := hwndWndProc[hwnd]
@@ -3540,8 +5089,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			return 0
 		}
-		// Fallback: queue for async dispatch (won't return result synchronously)
-		hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, msg, wParam, lParam))
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -3711,6 +5258,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 							}
 							x += tw
 						}
+						if effectiveDarkModeForWindow(hwnd, hwndChildren) {
+							remapWaylandRectForDarkMode(wlWindow, 0, wlWindow.TitleBarH, w, clientTop)
+						}
+						dispatchUAHMenuMessages(hctx, hwnd, menuH, nil)
 
 						// Dropdown overlay drawn later in commitIfDone (after paintTree).
 					}
@@ -4035,6 +5586,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					dc.DrawEdge(curL, curT, curR, curB, 0x000A, 0x000F, hctx.SysColors) // EDGE_SUNKEN|BF_RECT
 				}
 
+				if effectiveDarkModeForWindow(hwnd, hwndChildren) {
+					remapDCRectForDarkMode(dc, 0, 0, winW, curT)
+				}
 				gdiMgr.DeleteDC(hDC)
 			}
 			ctx.SetReturn(0)
@@ -4275,7 +5829,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// WM_CLOSE (0x0010): destroy the window.
 		if msg == 0x0010 {
 			ravelog.Logf("[wm] WM_CLOSE hwnd=0x%x\n", hwnd)
-			destroyWindow(hwnd)
+			destroyWindow(hwnd, ctx.CPU)
 			ctx.SetReturn(0)
 			return 0
 		}
@@ -4286,7 +5840,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		}
 		// WM_ERASEBKGND: fill with class background brush (ReactOS: defwnd.c)
-		if msg == 0x0014 && wlWindow != nil {
+		if msg == 0x0014 {
+			_, _, owned := topLevelDialogTarget(hctx, hwnd)
+			if owned {
+				hctx.DialogSurfaceMu.Lock(ctx.CPU)
+				defer hctx.DialogSurfaceMu.Unlock(ctx.CPU)
+			}
 			bgColor := hctx.SysColors[5] // default COLOR_WINDOW
 			if a, ok := hctx.HwndClassAtom[hwnd]; ok {
 				if brushIdx, ok2 := hctx.ClassBrush[a]; ok2 && brushIdx > 0 && int(brushIdx-1) < len(hctx.SysColors) {
@@ -4294,8 +5853,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 			}
 			if cs, ok := hwndChildren[hwnd]; ok {
-				wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
-			} else if hwnd == hctx.MainHWND {
+				if dc := gdiMgr.GetDC(wParam); dc != nil {
+					dc.FillRect(0, 0, cs.w, cs.h, bgColor)
+				} else if wlWindow != nil {
+					wlWindow.DrawRectAbs(cs.x, cs.y, cs.x+cs.w, cs.y+cs.h, bgColor)
+				}
+			} else if hwnd == hctx.MainHWND && wlWindow != nil {
 				clientTop := getMenuClientTop(hwnd)
 				w := wlWindow.Width
 				h := wlWindow.Height + wlWindow.TitleBarH
@@ -4385,14 +5948,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		hctx.enqueueMessage(nil, newQueuedMsg(hctx, target, 0x0010, 0, 0))
 	}
-	d.RegisterAutoStubHandler(user32, "GetMessageW", func(ctx *ntapi.TrapContext) uint32 {
+	var runGetMessageW func(*ntapi.TrapContext, *sentMessagePumpCall) uint32
+	runGetMessageW = func(ctx *ntapi.TrapContext, pump *sentMessagePumpCall) uint32 {
 		flushDestroyedWindows()
-		pMsg := ctx.Arg(0)
-		hwndFilter := ctx.Arg(1)
-		minMessage := uint32(ctx.Arg(2))
-		maxMessage := uint32(ctx.Arg(3))
+		pMsg := pump.arguments[0]
+		hwndFilter := pump.arguments[1]
+		minMessage := uint32(pump.arguments[2])
+		maxMessage := uint32(pump.arguments[3])
 		if pMsg == 0 || !validMessageFilter(hwndFilter) {
 			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		if dispatchPendingSentMessage(ctx, pump) {
 			return 0
 		}
 
@@ -4421,13 +5988,19 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				if win == nil || target == 0 {
 					return
 				}
-				// Compositor resized the window - resize buffer and post WM_SIZE to guest
-				if win.ResizeIfNeeded() && win == wlWindow {
+				// Compositor resized the window - resize buffer and post WM_SIZE to guest.
+				// Buffer recreation clears every pixel, so the next completed paint must
+				// also re-composite host-rendered controls.
+				resized := win.ResizeIfNeeded()
+				if resized && win == wlWindow {
 					syncScreenSurface()
 				}
 				w := win.Width
 				h := win.Height
 				if target == hctx.MainHWND && hctx.LastPostedMainW == w && hctx.LastPostedMainH == h {
+					if resized {
+						repaintAfterSurfaceResize(hctx, target, true, queuePaint)
+					}
 					return
 				}
 				if target == hctx.MainHWND {
@@ -4442,6 +6015,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				clientW, clientH := getTopLevelClientSize(target)
 				lParam := uint64(uint16(clientW)) | (uint64(uint16(clientH)) << 16)
 				hctx.enqueueMessage(nil, newQueuedMsg(hctx, target, 0x0005, 0, lParam)) // WM_SIZE
+				if resized {
+					repaintAfterSurfaceResize(hctx, target, target == hctx.MainHWND, queuePaint)
+				}
 				return
 			}
 			if evt == wl.EventKey {
@@ -5057,6 +6633,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 
 		dequeueMsg := func() bool {
+			if dispatchPendingSentMessage(ctx, pump) {
+				return true
+			}
 			found := false
 			m, delivered := hctx.MsgQueue.deliver(ctx.CPU,
 				messageMatches(hwndFilter, minMessage, maxMessage),
@@ -5185,14 +6764,24 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 			}
 		}
+	}
+	d.RegisterAutoStubHandler(user32, "GetMessageW", func(ctx *ntapi.TrapContext) uint32 {
+		arguments := [5]uint64{ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)}
+		pump := captureSentMessagePump(ctx, arguments, 4, runGetMessageW)
+		return runGetMessageW(ctx, pump)
 	})
-	d.RegisterAutoStubHandler(user32, "PeekMessageW", func(ctx *ntapi.TrapContext) uint32 {
+
+	var runPeekMessageW func(*ntapi.TrapContext, *sentMessagePumpCall) uint32
+	runPeekMessageW = func(ctx *ntapi.TrapContext, pump *sentMessagePumpCall) uint32 {
 		flushDestroyedWindows()
-		pMsg := ctx.Arg(0)
-		hwndFilter := ctx.Arg(1)
-		minMessage := uint32(ctx.Arg(2))
-		maxMessage := uint32(ctx.Arg(3))
-		remove := ctx.Arg(4)&0x1 != 0 // PM_REMOVE = 0x0001
+		pMsg := pump.arguments[0]
+		hwndFilter := pump.arguments[1]
+		minMessage := uint32(pump.arguments[2])
+		maxMessage := uint32(pump.arguments[3])
+		remove := pump.arguments[4]&0x1 != 0 // PM_REMOVE = 0x0001
+		if dispatchPendingSentMessage(ctx, pump) {
+			return 0
+		}
 
 		checkTimers(ctx.CPU) // fire any expired timers before checking the queue
 
@@ -5216,6 +6805,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		ctx.SetReturn(1)
 		return 0
+	}
+	d.RegisterAutoStubHandler(user32, "PeekMessageW", func(ctx *ntapi.TrapContext) uint32 {
+		arguments := [5]uint64{ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)}
+		pump := captureSentMessagePump(ctx, arguments, 5, runPeekMessageW)
+		return runPeekMessageW(ctx, pump)
 	})
 	d.RegisterAutoStubHandler(user32, "TranslateMessage", func(ctx *ntapi.TrapContext) uint32 {
 		pMsg := ctx.Arg(0)
@@ -5291,9 +6885,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if dispatchTimerCallback(ctx, pMsg, hwnd, message, wParam, lParam) {
 			return 0
 		}
+		if (message == 0x000F || message == 0x0014) &&
+			!windowHierarchyVisible(hwnd, hwndChildren) {
+			hctx.WinInvalid[hwnd] = false
+			delete(hctx.WinErasePending, hwnd)
+			win32.Global.Validate(hwnd)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if message != 0x0002 && message != 0x0082 &&
+			windowOrAncestorDestroyPending(hwnd, destroyPending, hwndChildren) {
+			hctx.WinInvalid[hwnd] = false
+			delete(hctx.WinErasePending, hwnd)
+			win32.Global.Validate(hwnd)
+			ctx.SetReturn(0)
+			return 0
+		}
 
 		// Try built-in control first
-		if _, isChild := hwndChildren[hwnd]; isChild {
+		if _, isChild := hwndChildren[hwnd]; isChild && !hasWindowSubclass(hwnd) {
 			result, handled := builtinWndProc(hwnd, message, wParam, lParam)
 			if os.Getenv("RAVEN_TRACE_CLICK") != "" && message == 0x004E {
 				ravelog.Logf("[notify-dispatch-W] hwnd=0x%x WM_NOTIFY builtinHandled=%v\n", hwnd, handled)
@@ -5629,22 +7239,17 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(1)
 		return 0
 	})
-	updateWindowEnabled := func(hwnd uint64, enabled, notify bool) bool {
-		wasDisabled := setWindowDisabled(hwnd, !enabled)
-		if notify && wasDisabled == enabled {
-			wParam := uint64(0)
-			if enabled {
-				wParam = 1
-			} else {
-				hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x001F, 0, 0)) // WM_CANCELMODE
-			}
-			hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x000A, wParam, 0)) // WM_ENABLE
-		}
-		return wasDisabled
+	updateWindowEnabled := func(hwnd uint64, enabled, notify bool) (bool, bool) {
+		hwndLifecycleMu.Lock()
+		defer hwndLifecycleMu.Unlock()
+		return changeWindowEnabled(hwnd, enabled, notify, setWindowDisabled,
+			func(target uint64, message uint32, wParam uint64) {
+				hctx.enqueueMessage(nil, newQueuedMsg(hctx, target, message, wParam, 0))
+			})
 	}
 	d.RegisterAutoStubHandler(user32, "EnableWindow", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
-		wasDisabled := updateWindowEnabled(hwnd, ctx.Arg(1) != 0, true)
+		wasDisabled, _ := updateWindowEnabled(hwnd, ctx.Arg(1) != 0, true)
 		// Return TRUE if the window was previously disabled
 		if wasDisabled {
 			ctx.SetReturn(1)
@@ -6530,7 +8135,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			mainRect.Right = wlWindow.Width
 			mainRect.Bottom = wlWindow.Height + wlWindow.TitleBarH
 		}
-		ctx.SetReturn(windowFromPoint(hwndChildren, hctx.HwndZOrder, hctx.MainHWND, mainRect, x, y))
+		ctx.SetReturn(windowFromPoint(hwndChildren, hctx.snapshotZOrder(), hctx.MainHWND, mainRect, x, y))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ChildWindowFromPoint", func(ctx *ntapi.TrapContext) uint32 {
@@ -6542,7 +8147,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		child := childWindowAtPoint(hwndChildren, hctx.HwndZOrder, parent, ox+x, oy+y, 0)
+		child := childWindowAtPoint(hwndChildren, hctx.snapshotZOrder(), parent, ox+x, oy+y, 0)
 		if child == 0 {
 			child = parent
 		}
@@ -6562,7 +8167,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if is32 {
 			flagsArg = 3
 		}
-		child := childWindowAtPoint(hwndChildren, hctx.HwndZOrder, parent, ox+x, oy+y, uint32(ctx.Arg(flagsArg)))
+		child := childWindowAtPoint(hwndChildren, hctx.snapshotZOrder(), parent, ox+x, oy+y, uint32(ctx.Arg(flagsArg)))
 		if child == 0 {
 			child = parent
 		}
@@ -6577,7 +8182,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.SetReturn(0)
 			return 0
 		}
-		child := childWindowAtPoint(hwndChildren, hctx.HwndZOrder, parent, ox+x, oy+y,
+		child := childWindowAtPoint(hwndChildren, hctx.snapshotZOrder(), parent, ox+x, oy+y,
 			cwpSkipInvisible|cwpSkipHitTestTransparent|cwpReturnHitTestFallback)
 		if child == 0 {
 			child = parent
@@ -6858,12 +8463,12 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		modalOwners.acquire(hwnd, func() bool {
 			return isWindowDisabled(hwnd)
 		}, func() {
-			updateWindowEnabled(hwnd, false, true)
+			_, _ = updateWindowEnabled(hwnd, false, true)
 		})
 	}
 	restoreModalOwner := func(entry modalDlgEntry) {
 		modalOwners.release(entry.parent, func() {
-			updateWindowEnabled(entry.parent, true, true)
+			_, _ = updateWindowEnabled(entry.parent, true, true)
 		})
 	}
 	isDisabledInput := func(hwnd uint64, message uint32, modalRoot uint64) bool {
@@ -6894,7 +8499,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if !ok {
 			return false
 		}
-		destroyOwnedDialogWindow(hDlg)
+		destroyOwnedDialogWindowForCPU(hDlg, ctx.CPU)
 		cleanupWindowState(hDlg)
 		restoreModalOwner(entry)
 		hctx.FocusHwnd = entry.previousFocus
@@ -7107,14 +8712,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	}
 
 	applyDialogBounds := func(state *controlState, parent uint64, info *dlgInfo) {
-		state.x = int32(info.x) * 2
-		state.y = int32(info.y) * 2
-		state.w = int32(info.cx) * 2
-		state.h = int32(info.cy) * 2
+		x := int32(info.x) * 2
+		y := int32(info.y) * 2
 		if parentState := hwndChildren[parent]; parentState != nil {
-			state.x += parentState.x
-			state.y += parentState.y
+			x += parentState.x
+			y += parentState.y
 		}
+		state.mutateGeometry(func(geometry *controlGeometry) {
+			geometry.x = x
+			geometry.y = y
+			geometry.w = int32(info.cx) * 2
+			geometry.h = int32(info.cy) * 2
+		})
 	}
 
 	registerDialogState := func(hwnd uint64, state *controlState) {
@@ -7124,6 +8733,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			-20: uint64(state.exStyle),
 		}
 		win32.Global.Create(hwnd, state.className, state.x, state.y, state.w, state.h, state.style, state.exStyle, state.parentHWND)
+		if state.style&win32.WS_CHILD != 0 {
+			hctx.placeNewChildAtBottom(hwnd)
+		}
 	}
 
 	// createDlgControls instantiates child controlState entries for every item
@@ -7158,6 +8770,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				-20: uint64(item.extStyle),
 			}
 			win32.Global.Create(child, strings.ToLower(item.class), px, py, pcx, pcy, item.style, item.extStyle, dlgHwnd)
+			hctx.placeNewChildAtBottom(child)
 			if item.title != "" {
 				hwndTitle[child] = item.title
 			}
@@ -7283,7 +8896,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			target := hwndForWaylandWindow(win)
 			if targetBox := messageBoxForHWND(target); targetBox != nil && win != nil {
 				win.ResizeIfNeeded()
-				renderOwnedDialog(hctx, targetBox.hwnd, win)
+				renderOwnedDialog(hctx, targetBox.hwnd, hctx.windowCPU(targetBox.hwnd), win)
 			} else {
 				return false
 			}
@@ -7369,6 +8982,23 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	}
 
 	d.RegisterHandler(modalPumpTrampolineID, "modalPumpTrampoline", func(ctx *ntapi.TrapContext) uint32 {
+		loopSP, loopPC := msgLoopSP, msgLoopPC
+		if box := activeMessageBox(ctx.CPU); box != nil {
+			loopSP = box.pumpSP
+			loopPC = hctx.ModalPumpTrampoline
+		} else if entry, ok := modalDialogs.top(ctx.CPU); ok {
+			loopSP, loopPC = modalDialogLoopTarget(
+				entry.pumpSP,
+				hctx.ModalPumpTrampoline,
+				loopSP,
+				loopPC,
+			)
+		}
+		if pump := sentMessageLoopPump(loopSP, loopPC, ctx.State != nil && ctx.State.Is32); pump != nil {
+			if dispatchPendingSentMessage(ctx, pump) {
+				return 0
+			}
+		}
 		if box := activeMessageBox(ctx.CPU); box != nil {
 			messageBoxPumpMu.Lock()
 			defer messageBoxPumpMu.Unlock()
@@ -7400,10 +9030,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 
 			result := box.result
-			destroyOwnedDialogWindow(box.hwnd)
+			destroyOwnedDialogWindowForCPU(box.hwnd, ctx.CPU)
 			cleanupWindowState(box.hwnd)
 			if popMessageBox(ctx.CPU, box) {
-				updateWindowEnabled(box.owner, true, true)
+				_, _ = updateWindowEnabled(box.owner, true, true)
 			}
 			hctx.FocusHwnd = box.previousFocus
 			hctx.ActiveHwnd = box.owner
@@ -8139,6 +9769,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// ReactOS: win32ss/user/ntuser/cursoricon.c
 		hIcon := ctx.Arg(0)
 		ravelog.Logf("[user32] DestroyIcon hIcon=0x%x\n", hIcon)
+		hctx.deleteIcon(hIcon)
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -8260,6 +9891,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "BeginPaint", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		pPaint := ctx.Arg(1)
+		normalizeOwnedStatusGeometry(hwnd)
 		dirtyRect, dirty := win32.Global.GetUpdateRect(hwnd)
 		if hwnd != 0 {
 			hctx.WinInvalid[hwnd] = false
@@ -8287,9 +9919,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ravelog.Logf("[paint] BeginPaint hwnd=0x%x (hctx.MainHWND)\n", hwnd)
 		}
 		ownedRoot, ownedTarget, owned := topLevelDialogTarget(hctx, hwnd)
+		if owned && ownedTarget != nil {
+			hctx.DialogSurfaceMu.Lock(ctx.CPU)
+			ownedPaintCPUsMu.Lock()
+			ownedPaintCPUs[hwnd] = append(ownedPaintCPUs[hwnd], ctx.CPU)
+			ownedPaintCPUsMu.Unlock()
+		}
 		var hdc uint64
 		var dc *gdi.DC
 		if owned && ownedTarget != nil {
+			if ownedTarget.ResizeIfNeeded() {
+				repaintAfterSurfaceResize(hctx, ownedRoot, false, nil)
+			}
 			oldScreen := gdiMgr.Screen
 			gdiMgr.Screen = gdi.WrapPix(ownedTarget.Pix, ownedTarget.Width, ownedTarget.Height+ownedTarget.TitleBarH, ownedTarget.Stride)
 			if rootState := hwndChildren[ownedRoot]; rootState != nil {
@@ -8300,6 +9941,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			dc.Mgr = nil
 			gdiMgr.Screen = oldScreen
 		} else {
+			if wlWindow != nil && wlWindow.ResizeIfNeeded() {
+				repaintAfterSurfaceResize(hctx, hctx.MainHWND, true, nil)
+			}
+			syncScreenSurface()
 			hdc, dc = allocScreenDC(ox, oy)
 		}
 		dc.OriginX = ox
@@ -8314,7 +9959,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 
 		if wlWindow != nil && hwnd == hctx.MainHWND {
-			wlWindow.ResizeIfNeeded()
 			syncScreenSurface()
 			w, h := wlWindow.Width, wlWindow.Height
 			_ = h
@@ -8355,6 +9999,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 						}
 						x += tw
 					}
+					if effectiveDarkModeForWindow(hwnd, hwndChildren) {
+						remapWaylandRectForDarkMode(wlWindow, 0, wlWindow.TitleBarH, w, clientTop)
+					}
+					dispatchUAHMenuMessages(hctx, hwnd, menuH, nil)
 				}
 			}
 
@@ -8370,9 +10018,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			// Preserve an application-painted background unless invalidation asked
 			// BeginPaint to erase the child with its class brush.
 			bgColor := hctx.SysColors[5]
+			darkScintilla := false
 			if a, ok := hctx.HwndClassAtom[hwnd]; ok {
 				if brushIdx, ok2 := hctx.ClassBrush[a]; ok2 && brushIdx > 0 && int(brushIdx-1) < len(hctx.SysColors) {
 					bgColor = hctx.SysColors[brushIdx-1]
+				}
+			}
+			if effectiveDarkModeForWindow(hwnd, hwndChildren) {
+				if strings.EqualFold(cs.className, "scintilla") {
+					bgColor = darkPalette.Background
+					darkScintilla = true
+				} else {
+					bgColor = darkPalette.Control
 				}
 			}
 			fillTarget := wlWindow
@@ -8384,7 +10041,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					fillY -= rootState.y
 				}
 			}
-			if erase {
+			if erase || darkScintilla {
 				fillTarget.DrawRectAbs(fillX, fillY, fillX+cs.w, fillY+cs.h, bgColor)
 			}
 			// Always give child windows the full client rect as rcPaint.
@@ -8446,7 +10103,30 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "EndPaint", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
 		ravelog.Logf("[paint] EndPaint hwnd=0x%x\n", hwnd)
-		if _, target, owned := topLevelDialogTarget(hctx, hwnd); owned && target != nil {
+		var paintCPU arch.CPU
+		paintLocked := false
+		ownedPaintCPUsMu.Lock()
+		if stack := ownedPaintCPUs[hwnd]; len(stack) != 0 {
+			paintCPU = stack[len(stack)-1]
+			paintLocked = true
+			if len(stack) == 1 {
+				delete(ownedPaintCPUs, hwnd)
+			} else {
+				ownedPaintCPUs[hwnd] = stack[:len(stack)-1]
+			}
+		}
+		ownedPaintCPUsMu.Unlock()
+		if paintLocked {
+			defer hctx.DialogSurfaceMu.Unlock(paintCPU)
+		}
+		if root, target, owned := topLevelDialogTarget(hctx, hwnd); owned && target != nil {
+			if !paintLocked {
+				hctx.DialogSurfaceMu.Lock(ctx.CPU)
+				defer hctx.DialogSurfaceMu.Unlock(ctx.CPU)
+			}
+			if state := hwndChildren[hwnd]; state != nil && hwndWndProc[hwnd] != 0 {
+				captureOwnedControlPaint(state, hwndChildren[root], target)
+			}
 			if !hctx.RenderingDialogCustom {
 				target.Commit()
 			}
@@ -8455,13 +10135,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		if wlWindow != nil {
 			paintTree(hwnd)
-			// Re-commit after any EndPaint once the base frame is established.
-			// Set hctx.RepaintBuiltin so commitIfDone repaints builtin controls
-			// (tab strip, status bar) on top of guest-drawn content (Scintilla).
-			if hctx.HasBaseFrame {
-				hctx.FrameReady = true
-				hctx.RepaintBuiltin = true
+			paintChildScrollbars(hwnd)
+			for _, sibling := range overlappingGuestSiblings(
+				hwnd, hwndChildren, hwndWndProc, hctx.snapshotZOrder(),
+			) {
+				queuePaint(sibling)
 			}
+			prepareMainSurfacePaintCommit(hctx, hwnd)
 			commitIfDone()
 		}
 		ctx.SetReturn(1)
@@ -8724,7 +10404,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				syncDepth:     len(*syncStack),
 			}
 			pushMessageBox(ctx.CPU, box)
-			updateWindowEnabled(owner, false, true)
+			_, _ = updateWindowEnabled(owner, false, true)
 			hctx.FocusHwnd = defaultHWND
 			hctx.ActiveHwnd = dialog
 
@@ -9191,7 +10871,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				keyState[vk] &^= 0x80
 			}
 		}
-		ctx.SetReturn(uint64(uint16(keyStateValue(uint32(vk), true))))
+		value := keyStateValue(uint32(vk), true)
+		ctx.SetReturn(uint64(uint16(value)))
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "GetAsyncKeyState", func(ctx *ntapi.TrapContext) uint32 {
@@ -9283,8 +10964,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 					hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, 0x0005, 0, lParam))
 					queuePaint(hwnd)
 				} else if ci, ok := hwndChildren[hwnd]; ok {
-					ci.w = w
-					ci.h = h
+					ci.mutateGeometry(func(geometry *controlGeometry) {
+						geometry.w = w
+						geometry.h = h
+					})
 				}
 			}
 		}
@@ -9590,8 +11273,8 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		top, _ := mem.Read32(lpRect + 4)
 		right, _ := mem.Read32(lpRect + 8)
 		bottom, _ := mem.Read32(lpRect + 12)
-		color := gdiMgr.BrushColor(hBrush, hctx.SysColors)
-		dc.FillRect(int32(left), int32(top), int32(right), int32(bottom), color)
+		fillRectUsingBrushHandle(dc, gdiMgr, hBrush, hctx.SysColors,
+			int32(left), int32(top), int32(right), int32(bottom))
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -9678,14 +11361,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// GetMessageA: full blocking message loop - mirrors GetMessageW exactly.
 	// The ANSI/Unicode distinction doesn't matter since our queue stores Win32
 	// message structs with already-resolved strings.
-	d.RegisterAutoStubHandler(user32, "GetMessageA", func(ctx *ntapi.TrapContext) uint32 {
+	var runGetMessageA func(*ntapi.TrapContext, *sentMessagePumpCall) uint32
+	runGetMessageA = func(ctx *ntapi.TrapContext, pump *sentMessagePumpCall) uint32 {
 		flushDestroyedWindows()
-		pMsg := ctx.Arg(0)
-		hwndFilter := ctx.Arg(1)
-		minMessage := uint32(ctx.Arg(2))
-		maxMessage := uint32(ctx.Arg(3))
+		pMsg := pump.arguments[0]
+		hwndFilter := pump.arguments[1]
+		minMessage := uint32(pump.arguments[2])
+		maxMessage := uint32(pump.arguments[3])
 		if pMsg == 0 || !validMessageFilter(hwndFilter) {
 			ctx.SetReturn(^uint64(0))
+			return 0
+		}
+		if dispatchPendingSentMessage(ctx, pump) {
 			return 0
 		}
 
@@ -9705,6 +11392,9 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 
 		dequeueA := func() bool {
+			if dispatchPendingSentMessage(ctx, pump) {
+				return true
+			}
 			found := false
 			m, delivered := hctx.MsgQueue.deliver(ctx.CPU,
 				messageMatches(hwndFilter, minMessage, maxMessage),
@@ -9828,6 +11518,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 				}
 			}
 		}
+	}
+	d.RegisterAutoStubHandler(user32, "GetMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		arguments := [5]uint64{ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3)}
+		pump := captureSentMessagePump(ctx, arguments, 4, runGetMessageA)
+		return runGetMessageA(ctx, pump)
 	})
 
 	// LoadCursorA: ANSI wrapper - same as LoadCursorW
@@ -10721,7 +12416,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		hctx.enqueueMessage(ctx.CPU, newQueuedMsg(hctx, 0, 0x0012, exitCode, 0)) // WM_QUIT
 		return 0
 	})
-	for _, fn := range []string{"GetInputState", "GetQueueStatus", "InSendMessage"} {
+	for _, fn := range []string{"GetInputState", "GetQueueStatus"} {
 		fn := fn
 		_ = fn
 		d.RegisterAutoStubHandler(user32, fn, func(ctx *ntapi.TrapContext) uint32 {
@@ -10731,22 +12426,34 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			return 0
 		})
 	}
+	d.RegisterAutoStubHandler(user32, "InSendMessage", func(ctx *ntapi.TrapContext) uint32 {
+		_, active := currentSentMessage(ctx.CPU)
+		if active {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
 	d.RegisterAutoStubHandler(user32, "InSendMessageEx", func(ctx *ntapi.TrapContext) uint32 {
-		// DWORD InSendMessageEx(LPVOID lpReserved)
-		// ReactOS: NtUserGetSendMessageReceiver
-		// Returns ISMEX_NOSEND(0) when the calling thread is not processing a
-		// sent message. We execute everything synchronously in one thread, so
-		// cross-thread SendMessage never happens.
-		ctx.SetReturn(0) // ISMEX_NOSEND
+		request, active := currentSentMessage(ctx.CPU)
+		if !active {
+			ctx.SetReturn(0) // ISMEX_NOSEND
+		} else if request.replied.Load() {
+			ctx.SetReturn(0x9) // ISMEX_SEND | ISMEX_REPLIED
+		} else {
+			ctx.SetReturn(0x1) // ISMEX_SEND
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "ReplyMessage", func(ctx *ntapi.TrapContext) uint32 {
-		// BOOL ReplyMessage(LRESULT lResult)
-		// ReactOS: win32ss/user/ntuser/message.c
-		// Replies to a SendMessage before the handler returns
-		lResult := ctx.Arg(0)
-		ravelog.Logf("[user32] ReplyMessage result=0x%x\n", lResult)
-		ctx.SetReturn(1) // TRUE if called within SendMessage handler
+		request, active := currentSentMessage(ctx.CPU)
+		if !active {
+			ctx.SetReturn(0)
+			return 0
+		}
+		request.reply(ctx.Arg(0))
+		ctx.SetReturn(1)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "QuerySendMessage", func(ctx *ntapi.TrapContext) uint32 {
@@ -10754,45 +12461,164 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(0)
 		return 0
 	})
-	d.RegisterAutoStubHandler(user32, "MsgWaitForMultipleObjects", func(ctx *ntapi.TrapContext) uint32 {
-		// ReactOS: win32ss/user/ntuser/msgqueue.c NtUserMsgWaitForMultipleObjectsEx
+	runMsgWait := func(
+		ctx *ntapi.TrapContext,
+		pump *sentMessagePumpCall,
+		nCount, pHandles, milliseconds, wakeMask uint64,
+		waitAll, alertable, inputAvailableFlag bool,
+	) uint32 {
+		const (
+			waitObject0      = uint64(0)
+			waitTimeout      = uint64(0x102)
+			waitIOCompletion = uint64(0xC0)
+			waitFailed       = uint64(0xFFFFFFFF)
+		)
+		if nCount > 63 || nCount > 0 && pHandles == 0 {
+			setUserLastError(ctx, 87) // ERROR_INVALID_PARAMETER
+			ctx.SetReturn(waitFailed)
+			return 0
+		}
+		values := []ntapi.Handle{}
+		if nCount > 0 {
+			values = readWin32HandleArray(ctx.Mem, pHandles, nCount, ctx.State != nil && ctx.State.Is32)
+			if len(values) != int(nCount) {
+				setUserLastError(ctx, 87)
+				ctx.SetReturn(waitFailed)
+				return 0
+			}
+			for _, handle := range values {
+				if hctx.Handles.Get(handle) == nil {
+					setUserLastError(ctx, 6) // ERROR_INVALID_HANDLE
+					ctx.SetReturn(waitFailed)
+					return 0
+				}
+			}
+		}
+		tid := uint32(1)
+		if hctx.TMPtr != nil && *hctx.TMPtr != nil {
+			tid = uint32((*hctx.TMPtr).GetTID(ctx.CPU))
+		}
+		timeout := msToTimeout(milliseconds)
+		if timeout >= 0 && pump.waitDeadline.IsZero() {
+			pump.waitDeadline = time.Now().Add(timeout)
+		}
+		remaining := func() time.Duration {
+			if timeout < 0 {
+				return -1
+			}
+			value := time.Until(pump.waitDeadline)
+			if value < 0 {
+				return 0
+			}
+			return value
+		}
+		pollHandles := func() uint64 {
+			if len(values) == 0 {
+				return waitTimeout
+			}
+			return waitMultipleFallbackWin32(hctx.Handles, values, tid, waitAll, 0)
+		}
+		for {
+			if dispatchPendingSentMessage(ctx, pump) {
+				return 0
+			}
+			if alertable {
+				result, apcs := ntapi.ObjMgr.WaitEx(nil, false, uint64(tid), 0, true)
+				if uint64(result) == waitIOCompletion {
+					dispatchAlertableAPCs(tid, apcs)
+					ctx.SetReturn(waitIOCompletion)
+					return 0
+				}
+			}
+			waylandInput := false
+			if wlDisplay != nil {
+				evt, _ := wlDisplay.Poll()
+				if evt != wl.EventNone {
+					if dispatchWl != nil {
+						dispatchWl(evt)
+					} else {
+						waylandInput = true
+					}
+				}
+			}
+			inputAvailable := hctx.MsgQueue.hasWakeMask(
+				ctx.CPU, uint32(wakeMask), inputAvailableFlag,
+			) || wakeMask != 0 && waylandInput
+			if !waitAll {
+				result := pollHandles()
+				if result != waitTimeout {
+					if result == waitFailed {
+						setUserLastError(ctx, 6) // ERROR_INVALID_HANDLE
+					}
+					ctx.SetReturn(result)
+					return 0
+				}
+				if inputAvailable {
+					hctx.MsgQueue.markWakeMaskSeen(ctx.CPU, uint32(wakeMask))
+					ctx.SetReturn(waitObject0 + nCount)
+					return 0
+				}
+			} else if inputAvailable {
+				if nCount == 0 {
+					hctx.MsgQueue.markWakeMaskSeen(ctx.CPU, uint32(wakeMask))
+					ctx.SetReturn(waitObject0)
+					return 0
+				}
+				result := pollHandles()
+				if result == waitObject0 {
+					hctx.MsgQueue.markWakeMaskSeen(ctx.CPU, uint32(wakeMask))
+					ctx.SetReturn(waitObject0)
+					return 0
+				}
+				if result != waitTimeout {
+					if result == waitFailed {
+						setUserLastError(ctx, 6)
+					}
+					ctx.SetReturn(result)
+					return 0
+				}
+			}
+			waitFor := remaining()
+			if waitFor == 0 {
+				ctx.SetReturn(waitTimeout)
+				return 0
+			}
+			if waitFor < 0 || waitFor > time.Millisecond {
+				waitFor = time.Millisecond
+			}
+			hctx.MsgQueue.waitWakeMask(
+				ctx.CPU, uint32(wakeMask), inputAvailableFlag, waitFor,
+			)
+		}
+	}
+	var runMsgWaitForMultipleObjects func(*ntapi.TrapContext, *sentMessagePumpCall) uint32
+	runMsgWaitForMultipleObjects = func(ctx *ntapi.TrapContext, pump *sentMessagePumpCall) uint32 {
 		// Args: nCount, pHandles, fWaitAll, dwMilliseconds, dwWakeMask
-		nCount := uint32(ctx.Arg(0))
-		// dwMilliseconds := ctx.Arg(3) // ignored - we return immediately
-		// dwWakeMask := ctx.Arg(4)
-
-		// Check if there are queued messages
-		if hctx.queueCount(ctx.CPU) > 0 {
-			ctx.SetReturn(uint64(nCount)) // WAIT_OBJECT_0 + nCount = "input available"
-			return 0
-		}
-		// No messages - poll Wayland once
-		if wlDisplay != nil {
-			evt, _ := wlDisplay.Poll()
-			if evt != wl.EventNone {
-				ctx.SetReturn(uint64(nCount))
-				return 0
-			}
-		}
-		// Return WAIT_OBJECT_0 (first object signaled) as best-effort
-		ctx.SetReturn(0)
-		return 0
+		return runMsgWait(
+			ctx, pump,
+			pump.arguments[0], pump.arguments[1], pump.arguments[3], pump.arguments[4],
+			pump.arguments[2] != 0, false, false,
+		)
+	}
+	d.RegisterAutoStubHandler(user32, "MsgWaitForMultipleObjects", func(ctx *ntapi.TrapContext) uint32 {
+		arguments := [5]uint64{ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)}
+		pump := captureSentMessagePump(ctx, arguments, 5, runMsgWaitForMultipleObjects)
+		return runMsgWaitForMultipleObjects(ctx, pump)
 	})
+	var runMsgWaitForMultipleObjectsEx func(*ntapi.TrapContext, *sentMessagePumpCall) uint32
+	runMsgWaitForMultipleObjectsEx = func(ctx *ntapi.TrapContext, pump *sentMessagePumpCall) uint32 {
+		// Args: nCount, pHandles, dwMilliseconds, dwWakeMask, dwFlags
+		flags := pump.arguments[4]
+		return runMsgWait(
+			ctx, pump,
+			pump.arguments[0], pump.arguments[1], pump.arguments[2], pump.arguments[3],
+			flags&0x1 != 0, flags&0x2 != 0, flags&0x4 != 0,
+		)
+	}
 	d.RegisterAutoStubHandler(user32, "MsgWaitForMultipleObjectsEx", func(ctx *ntapi.TrapContext) uint32 {
-		nCount := uint32(ctx.Arg(0))
-		if hctx.queueCount(ctx.CPU) > 0 {
-			ctx.SetReturn(uint64(nCount))
-			return 0
-		}
-		if wlDisplay != nil {
-			evt, _ := wlDisplay.Poll()
-			if evt != wl.EventNone {
-				ctx.SetReturn(uint64(nCount))
-				return 0
-			}
-		}
-		ctx.SetReturn(0)
-		return 0
+		arguments := [5]uint64{ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)}
+		pump := captureSentMessagePump(ctx, arguments, 5, runMsgWaitForMultipleObjectsEx)
+		return runMsgWaitForMultipleObjectsEx(ctx, pump)
 	})
 	d.RegisterAutoStubHandler(user32, "WaitMessage", func(ctx *ntapi.TrapContext) uint32 {
 		// BOOL WaitMessage(void) - blocks until message available
@@ -10887,14 +12713,18 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	// empty PeekMessageA calls; after that use a smaller idle gap per click.
 	const autoClickIdleFirst = 500_000 // idle gap before 1st click (post-timers)
 	const autoClickIdleNext = 200_000  // idle gap between subsequent clicks
-	d.RegisterAutoStubHandler(user32, "PeekMessageA", func(ctx *ntapi.TrapContext) uint32 {
+	var runPeekMessageA func(*ntapi.TrapContext, *sentMessagePumpCall) uint32
+	runPeekMessageA = func(ctx *ntapi.TrapContext, pump *sentMessagePumpCall) uint32 {
 		flushDestroyedWindows()
 		// PeekMessageA: identical to PeekMessageW - our messages are internal, no A/W distinction
-		pMsg := ctx.Arg(0)
-		hwndFilter := ctx.Arg(1)
-		minMessage := uint32(ctx.Arg(2))
-		maxMessage := uint32(ctx.Arg(3))
-		remove := ctx.Arg(4)&0x1 != 0
+		pMsg := pump.arguments[0]
+		hwndFilter := pump.arguments[1]
+		minMessage := uint32(pump.arguments[2])
+		maxMessage := uint32(pump.arguments[3])
+		remove := pump.arguments[4]&0x1 != 0
+		if dispatchPendingSentMessage(ctx, pump) {
+			return 0
+		}
 		peekACount++
 		// Dump a stack slice once to find who is calling the drain repeatedly
 		if peekACount == 10 && ctx.State != nil && ctx.State.Is32 {
@@ -11047,6 +12877,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		ctx.SetReturn(1)
 		return 0
+	}
+	d.RegisterAutoStubHandler(user32, "PeekMessageA", func(ctx *ntapi.TrapContext) uint32 {
+		arguments := [5]uint64{ctx.Arg(0), ctx.Arg(1), ctx.Arg(2), ctx.Arg(3), ctx.Arg(4)}
+		pump := captureSentMessagePump(ctx, arguments, 5, runPeekMessageA)
+		return runPeekMessageA(ctx, pump)
 	})
 	d.RegisterAutoStubHandler(user32, "DispatchMessageA", func(ctx *ntapi.TrapContext) uint32 {
 		hctx.SetCurrentCPU(ctx.CPU)
@@ -11060,9 +12895,25 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if dispatchTimerCallback(ctx, pMsg, hwnd, message, wParam, lParam) {
 			return 0
 		}
+		if (message == 0x000F || message == 0x0014) &&
+			!windowHierarchyVisible(hwnd, hwndChildren) {
+			hctx.WinInvalid[hwnd] = false
+			delete(hctx.WinErasePending, hwnd)
+			win32.Global.Validate(hwnd)
+			ctx.SetReturn(0)
+			return 0
+		}
+		if message != 0x0002 && message != 0x0082 &&
+			windowOrAncestorDestroyPending(hwnd, destroyPending, hwndChildren) {
+			hctx.WinInvalid[hwnd] = false
+			delete(hctx.WinErasePending, hwnd)
+			win32.Global.Validate(hwnd)
+			ctx.SetReturn(0)
+			return 0
+		}
 
 		// Try built-in control first
-		if _, isChild := hwndChildren[hwnd]; isChild {
+		if _, isChild := hwndChildren[hwnd]; isChild && !hasWindowSubclass(hwnd) {
 			result, handled := builtinWndProc(hwnd, message, wParam, lParam)
 			if os.Getenv("RAVEN_TRACE_CLICK") != "" && message == 0x004E {
 				ravelog.Logf("[notify-dispatch] DispatchMessageA hwnd=0x%x WM_NOTIFY builtinHandled=%v (handled swallows it before NPP proc)\n", hwnd, handled)
@@ -11135,12 +12986,27 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		msg := uint32(ctx.Arg(1))
 		wParam := ctx.Arg(2)
 		lParam := ctx.Arg(3)
-		if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
-			if builtinMessageNeedsCommit(msg) {
-				requestCommit(true)
+		ownerCPU := hctx.windowCPU(hwnd)
+		if ownerCPU != nil && ownerCPU != ctx.CPU {
+			request := newSynchronousSendRequest(hwnd, msg, wParam, lParam)
+			request.sender = ctx.CPU
+			if !hctx.MsgQueue.enqueueSynchronous(ownerCPU, request) {
+				ctx.SetReturn(0)
+				return 0
 			}
-			ctx.SetReturn(result)
+			if !beginCrossThreadSend(ctx, request) {
+				ctx.SetReturn(request.wait())
+			}
 			return 0
+		}
+		if !hasWindowSubclass(hwnd) {
+			if result, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+				if builtinMessageNeedsCommit(msg) {
+					requestCommit(true)
+				}
+				ctx.SetReturn(result)
+				return 0
+			}
 		}
 		wp, hasWP := hwndWndProc[hwnd]
 		if !hasWP || wp == 0 {
@@ -11179,7 +13045,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			ctx.PCRedirected = true
 			return 0
 		}
-		hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, msg, wParam, lParam))
 		ctx.SetReturn(0)
 		return 0
 	})
@@ -11195,8 +13060,14 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		lpdwResult := ctx.Arg(6)
 
 		var result uint64
-		if res, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
-			result = res
+		if !hasWindowSubclass(hwnd) {
+			if res, handled := builtinWndProc(hwnd, msg, wParam, lParam); handled {
+				result = res
+			} else if hwnd == hctx.MainHWND || hwnd == 0xFFFF || hwnd == 0xFFFFFFFFFFFFFFFF {
+				hctx.enqueueMessage(nil, newQueuedMsg(hctx, hctx.MainHWND, msg, wParam, lParam))
+			} else if _, ok := hwndChildren[hwnd]; ok {
+				hctx.enqueueMessage(nil, newQueuedMsg(hctx, hwnd, msg, wParam, lParam))
+			}
 		} else if hwnd == hctx.MainHWND || hwnd == 0xFFFF || hwnd == 0xFFFFFFFFFFFFFFFF {
 			hctx.enqueueMessage(nil, newQueuedMsg(hctx, hctx.MainHWND, msg, wParam, lParam))
 		} else if _, ok := hwndChildren[hwnd]; ok {
@@ -11491,6 +13362,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// ReactOS: win32ss/user/ntuser/winpos.c
 		hwnd := ctx.Arg(0)
 		if hwnd == hctx.MainHWND || hwndChildren[hwnd] != nil {
+			hctx.reorderZOrder(hwnd, 0)
 			hctx.ActiveHwnd = hwnd
 			queuePaint(hwnd)
 			ctx.SetReturn(1)
@@ -12816,11 +14688,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		}
 		hwnd := hwndAlloc()
 		hctx.setWindowCPU(hwnd, ctx.CPU)
-		hwndChildren[hwnd] = &controlState{
+		registerDialogState(hwnd, &controlState{
 			className:  "dialogbox",
 			parentHWND: hWndParent,
 			visible:    true,
-		}
+		})
 		ravelog.Logf("[dialog] CreateDialogParamA template=%s parent=0x%x dlgProc=0x%x -> hwnd=0x%x\n",
 			templateName, hWndParent, lpDialogFunc, hwnd)
 		ctx.SetReturn(hwnd)
@@ -12829,10 +14701,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamA", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := hwndAlloc()
 		hctx.setWindowCPU(hwnd, ctx.CPU)
-		hwndChildren[hwnd] = &controlState{
+		registerDialogState(hwnd, &controlState{
 			className: "dialogbox",
 			visible:   true,
-		}
+		})
 		ravelog.Logf("[dialog] CreateDialogIndirectParamA -> hwnd=0x%x\n", hwnd)
 		ctx.SetReturn(hwnd)
 		return 0
@@ -12840,10 +14712,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "CreateDialogIndirectParamAorW", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := hwndAlloc()
 		hctx.setWindowCPU(hwnd, ctx.CPU)
-		hwndChildren[hwnd] = &controlState{
+		registerDialogState(hwnd, &controlState{
 			className: "dialogbox",
 			visible:   true,
-		}
+		})
 		ravelog.Logf("[dialog] CreateDialogIndirectParamAorW -> hwnd=0x%x\n", hwnd)
 		ctx.SetReturn(hwnd)
 		return 0
@@ -12951,10 +14823,10 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 	d.RegisterAutoStubHandler(user32, "DialogBoxIndirectParamAorW", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := hwndAlloc()
 		hctx.setWindowCPU(hwnd, ctx.CPU)
-		hwndChildren[hwnd] = &controlState{
+		registerDialogState(hwnd, &controlState{
 			className: "dialogbox",
 			visible:   true,
-		}
+		})
 		ravelog.Logf("[dialog] DialogBoxIndirectParamAorW -> hwnd=0x%x\n", hwnd)
 		ctx.SetReturn(hwnd)
 		return 0
@@ -14090,6 +15962,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 			}
 			windowLongPtr[hwnd] = map[int32]uint64{-16: uint64(style), -20: uint64(dwExStyle)}
 			win32.Global.Create(hwnd, lClassName, cx, cy, cw, ch, style, dwExStyle, parentHwnd)
+			hctx.placeNewChildAtBottom(hwnd)
 			if lClassName == "edit" && hctx.FocusHwnd == 0 {
 				hctx.FocusHwnd = hwnd
 			}
@@ -14408,7 +16281,11 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if nameArg < 0x10000 && mainModule != nil && (hInst == mainModule.BaseAddr || hInst == 0) {
 			_, _, ok := peLoadRawResource(mainModule.BaseAddr, mainModule.ResourceDirRVA, 14 /*RT_GROUP_ICON*/, uint32(nameArg))
 			if ok {
-				ctx.SetReturn(0x00020000 + nameArg)
+				handle := 0x00020000 + nameArg
+				if icon := loadResourceIcon(uint32(nameArg), 32, 32); icon != nil {
+					hctx.storeIcon(handle, icon)
+				}
+				ctx.SetReturn(handle)
 				return 0
 			}
 		}
@@ -14440,7 +16317,13 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		// IMAGE_ICON=1: return dummy icon handle
 		if imgType == 1 {
 			if nameArg < 0x10000 {
-				ctx.SetReturn(0x00020000 + nameArg)
+				handle := 0x00020000 + nameArg
+				if mainModule != nil && (hInst == mainModule.BaseAddr || hInst == 0) {
+					if icon := loadResourceIcon(uint32(nameArg), int32(ctx.Arg(3)), int32(ctx.Arg(4))); icon != nil {
+						hctx.storeIcon(handle, icon)
+					}
+				}
+				ctx.SetReturn(handle)
 			} else {
 				ctx.SetReturn(0x00020001)
 			}
@@ -14480,15 +16363,6 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		ctx.SetReturn(h) // return same handle (shallow copy)
 		return 0
 	})
-	// Icon/Cursor handle table - track created icons with unique handles.
-	// ReactOS: win32ss/user/ntuser/cursoricon.c
-	type iconEntry struct {
-		isIcon bool
-		cx, cy int32
-	}
-	iconTable := map[uint64]*iconEntry{}
-	var nextIconHandle uint64 = 0x00020010
-
 	d.RegisterAutoStubHandler(user32, "CreateIconFromResourceEx", func(ctx *ntapi.TrapContext) uint32 {
 		// HICON CreateIconFromResourceEx(PBYTE presbits, DWORD dwResSize, BOOL fIcon,
 		//   DWORD dwVer, int cxDesired, int cyDesired, UINT Flags)
@@ -14501,18 +16375,31 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		if cyDesired == 0 {
 			cyDesired = 32
 		}
-		nextIconHandle++
-		h := nextIconHandle
-		iconTable[h] = &iconEntry{isIcon: fIcon, cx: cxDesired, cy: cyDesired}
+		var decoded *iconHandleData
+		if data, err := mem.ReadBytes(ctx.Arg(0), int(ctx.Arg(1))); err == nil {
+			if icon, ok := decodeIconResource(data); ok {
+				icon.pixels = scaleIconPixels(icon, cxDesired, cyDesired)
+				icon.width, icon.height = cxDesired, cyDesired
+				decoded = icon
+			}
+		}
+		h := hctx.allocIcon(decoded)
+		ravelog.Logf("[user32] CreateIconFromResourceEx handle=0x%x icon=%v size=%dx%d\n",
+			h, fIcon, cxDesired, cyDesired)
 		ctx.SetReturn(h)
 		return 0
 	})
 	d.RegisterAutoStubHandler(user32, "CreateIconFromResource", func(ctx *ntapi.TrapContext) uint32 {
 		// HICON CreateIconFromResource(PBYTE presbits, DWORD dwResSize, BOOL fIcon, DWORD dwVer)
 		fIcon := ctx.Arg(2) != 0
-		nextIconHandle++
-		h := nextIconHandle
-		iconTable[h] = &iconEntry{isIcon: fIcon, cx: 32, cy: 32}
+		var decoded *iconHandleData
+		if data, err := mem.ReadBytes(ctx.Arg(0), int(ctx.Arg(1))); err == nil {
+			if icon, ok := decodeIconResource(data); ok {
+				decoded = icon
+			}
+		}
+		h := hctx.allocIcon(decoded)
+		ravelog.Logf("[user32] CreateIconFromResource handle=0x%x icon=%v\n", h, fIcon)
 		ctx.SetReturn(h)
 		return 0
 	})
@@ -14521,9 +16408,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		//   const VOID *pvANDPlane, const VOID *pvXORPlane)
 		nw := int32(ctx.Arg(3))
 		nh := int32(ctx.Arg(4))
-		nextIconHandle++
-		h := nextIconHandle
-		iconTable[h] = &iconEntry{isIcon: false, cx: nw, cy: nh}
+		h := hctx.allocIcon(&iconHandleData{width: nw, height: nh})
 		ctx.SetReturn(h)
 		return 0
 	})
@@ -14532,9 +16417,7 @@ func registerUser32Handlers(hctx *HandlerCtx) {
 		//   const BYTE *lpbANDbits, const BYTE *lpbXORbits)
 		nw := int32(ctx.Arg(1))
 		nh := int32(ctx.Arg(2))
-		nextIconHandle++
-		h := nextIconHandle
-		iconTable[h] = &iconEntry{isIcon: true, cx: nw, cy: nh}
+		h := hctx.allocIcon(&iconHandleData{width: nw, height: nh})
 		ctx.SetReturn(h)
 		return 0
 	})

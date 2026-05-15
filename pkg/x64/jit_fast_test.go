@@ -39,8 +39,10 @@ func TestJITFastCacheKeepsUnsupportedAddressDisabled(t *testing.T) {
 	mem := mmu.New()
 	const addr = uint64(0x5000)
 	mem.MapPage(addr, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-	if err := mem.Write8(addr, 0x40); err != nil {
-		t.Fatal(err)
+	for i, value := range []byte{0x0F, 0x0B} {
+		if err := mem.Write8(addr+uint64(i), value); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cpu := New(mem)
 	cpu.Mode32 = true

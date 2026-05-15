@@ -3,6 +3,7 @@
 package main
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +11,253 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 	"github.com/mirkobrombin/Raven/pkg/win32"
 )
+
+func TestIsRegisteredWindowUsesGlobalAuthority(t *testing.T) {
+	const (
+		mainHWND = uint64(0x7f100001)
+		hwnd     = uint64(0x7f100002)
+	)
+	if isRegisteredWindow(0, mainHWND) {
+		t.Fatal("null handle reported as registered")
+	}
+	if !isRegisteredWindow(desktopWindowHandle, mainHWND) {
+		t.Fatal("desktop handle reported as invalid")
+	}
+	if !isRegisteredWindow(mainHWND, mainHWND) {
+		t.Fatal("main window handle reported as invalid")
+	}
+
+	win32.Global.Create(hwnd, "test", 0, 0, 10, 10, 0, 0, 0)
+	if !isRegisteredWindow(hwnd, mainHWND) {
+		t.Fatal("global window reported as invalid")
+	}
+	win32.Global.Destroy(hwnd)
+	if isRegisteredWindow(hwnd, mainHWND) {
+		t.Fatal("destroyed global window reported as registered")
+	}
+}
+
+func TestIsRegisteredWindowConcurrentLifecycle(t *testing.T) {
+	const hwnd = uint64(0x7f100003)
+	defer win32.Global.Destroy(hwnd)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 1000 {
+				_ = isRegisteredWindow(hwnd, 0)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 1000 {
+			win32.Global.Create(hwnd, "test", 0, 0, 10, 10, 0, 0, 0)
+			win32.Global.Destroy(hwnd)
+		}
+	}()
+	close(start)
+	wg.Wait()
+}
+
+func TestOverlappingGuestSiblings(t *testing.T) {
+	const parent = uint64(10)
+	children := map[uint64]*controlState{
+		20: {
+			className:  "SysTabControl32",
+			parentHWND: parent,
+			x:          0,
+			y:          20,
+			w:          200,
+			h:          180,
+			style:      win32.WS_CLIPSIBLINGS,
+			visible:    true,
+		},
+		21: {className: "Scintilla", parentHWND: parent, x: 2, y: 45, w: 196, h: 150, visible: true},
+		22: {className: "Scintilla", parentHWND: parent, x: 210, y: 45, w: 50, h: 50, visible: true},
+		23: {className: "Scintilla", parentHWND: parent, x: 2, y: 45, w: 196, h: 150},
+		24: {className: "Scintilla", parentHWND: 99, x: 2, y: 45, w: 196, h: 150, visible: true},
+		25: {className: "Button", parentHWND: parent, x: 2, y: 45, w: 196, h: 150, visible: true},
+	}
+	wndProcs := map[uint64]uint64{21: 1, 22: 1, 23: 1, 24: 1, 25: 1}
+	order := []uint64{21, 25, 20, 22, 23, 24}
+
+	got := overlappingGuestSiblings(20, children, wndProcs, order)
+	if len(got) != 1 || got[0] != 21 {
+		t.Fatalf("overlapping siblings = %#v, want [21]", got)
+	}
+	children[20].style &^= win32.WS_CLIPSIBLINGS
+	if got := overlappingGuestSiblings(20, children, wndProcs, order); len(got) != 0 {
+		t.Fatalf("siblings without WS_CLIPSIBLINGS = %#v", got)
+	}
+	children[20].style |= win32.WS_CLIPSIBLINGS
+	children[20].className = "Scintilla"
+	if got := overlappingGuestSiblings(20, children, wndProcs, order); len(got) != 0 {
+		t.Fatalf("siblings after custom control paint = %#v", got)
+	}
+}
+
+func TestWindowIsDescendantOrSelf(t *testing.T) {
+	children := map[uint64]*controlState{
+		11: {parentHWND: 10},
+		12: {parentHWND: 11},
+		20: {parentHWND: 21},
+		30: {parentHWND: 30},
+	}
+	for _, test := range []struct {
+		hwnd uint64
+		root uint64
+		want bool
+	}{
+		{hwnd: 10, root: 10, want: true},
+		{hwnd: 12, root: 10, want: true},
+		{hwnd: 12, root: 11, want: true},
+		{hwnd: 11, root: 12, want: false},
+		{hwnd: 20, root: 10, want: false},
+		{hwnd: 30, root: 10, want: false},
+	} {
+		if got := windowIsDescendantOrSelf(test.hwnd, test.root, children); got != test.want {
+			t.Errorf("windowIsDescendantOrSelf(%d, %d) = %t, want %t",
+				test.hwnd, test.root, got, test.want)
+		}
+	}
+}
+
+func TestWindowCleanupIncludesGlobalOnlyRoot(t *testing.T) {
+	const (
+		root    = uint64(0x7f100004)
+		child   = uint64(0x7f100005)
+		sibling = uint64(0x7f100006)
+	)
+	win32.Global.Create(root, "root", 0, 0, 10, 10, 0, 0, 0)
+	defer win32.Global.Destroy(root)
+
+	children := map[uint64]*controlState{
+		child:   {parentHWND: root},
+		sibling: {parentHWND: 0x7f100007},
+	}
+	var disabled windowDisabledRegistry
+	disabled.set(root, true)
+
+	handles := windowCleanupHandles(root, children)
+	found := make(map[uint64]bool, len(handles))
+	for _, hwnd := range handles {
+		found[hwnd] = true
+		cleanupWindowRegistration(hwnd, &disabled)
+	}
+	if !found[root] || !found[child] {
+		t.Fatalf("cleanup handles = %#v, want root and child", handles)
+	}
+	if found[sibling] {
+		t.Fatalf("cleanup handles = %#v, contains unrelated sibling", handles)
+	}
+	if win32.Global.Get(root) != nil {
+		t.Fatal("global-only root survived cleanup")
+	}
+	if _, ok := disabled.get(root); ok {
+		t.Fatal("disabled override survived cleanup")
+	}
+}
+
+func TestRegisterGlobalWindowMakesOwnedDialogKnown(t *testing.T) {
+	const hwnd = uint64(0x7f100008)
+	defer win32.Global.Destroy(hwnd)
+
+	state := &controlState{
+		className:  "dialog",
+		parentHWND: desktopWindowHandle,
+		w:          380,
+		h:          130,
+		visible:    true,
+	}
+	if !registerGlobalWindow(hwnd, state) {
+		t.Fatal("owned dialog was not registered")
+	}
+	if !isRegisteredWindow(hwnd, 0) {
+		t.Fatal("registered owned dialog reported as invalid")
+	}
+	if registerGlobalWindow(hwnd, state) {
+		t.Fatal("existing owned dialog was registered twice")
+	}
+}
+
+func TestRegisterGlobalWindowConcurrentLifecycle(t *testing.T) {
+	const hwnd = uint64(0x7f100009)
+	defer win32.Global.Destroy(hwnd)
+
+	state := &controlState{className: "dialog", w: 380, h: 130, visible: true}
+	var lifecycle sync.Mutex
+	var registered int
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			lifecycle.Lock()
+			if registerGlobalWindow(hwnd, state) {
+				registered++
+			}
+			lifecycle.Unlock()
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if registered != 1 {
+		t.Fatalf("global registrations = %d, want 1", registered)
+	}
+}
+
+func TestChangeWindowEnabledRejectsInvalidHandleWithoutMessages(t *testing.T) {
+	var messages []queuedMsg
+	wasDisabled, present := changeWindowEnabled(
+		0x7f10000a,
+		false,
+		true,
+		func(uint64, bool) (bool, bool) {
+			return false, false
+		},
+		func(hwnd uint64, message uint32, wParam uint64) {
+			messages = append(messages, queuedMsg{hwnd: hwnd, message: message, wParam: wParam})
+		},
+	)
+	if wasDisabled || present {
+		t.Fatalf("invalid result = (wasDisabled:%t present:%t)", wasDisabled, present)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("invalid handle queued messages: %#v", messages)
+	}
+}
+
+func TestChangeWindowEnabledNotifiesValidStateChange(t *testing.T) {
+	var messages []queuedMsg
+	wasDisabled, present := changeWindowEnabled(
+		0x7f10000b,
+		false,
+		true,
+		func(uint64, bool) (bool, bool) {
+			return false, true
+		},
+		func(hwnd uint64, message uint32, wParam uint64) {
+			messages = append(messages, queuedMsg{hwnd: hwnd, message: message, wParam: wParam})
+		},
+	)
+	if wasDisabled || !present {
+		t.Fatalf("valid result = (wasDisabled:%t present:%t)", wasDisabled, present)
+	}
+	if len(messages) != 2 || messages[0].message != 0x001F ||
+		messages[1].message != 0x000A || messages[1].wParam != 0 {
+		t.Fatalf("disable messages = %#v", messages)
+	}
+}
 
 func TestWin32MessageMatches(t *testing.T) {
 	isDescendant := func(hwnd, ancestor uint64) bool {

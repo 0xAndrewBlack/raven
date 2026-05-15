@@ -29,9 +29,11 @@ type UserCallbackCompletion func(cpu *x64.CPU, callbackReturn UserCallbackReturn
 // UserCallbackManager owns nested callback state for each CPU.
 // Its zero value is ready for use.
 type UserCallbackManager struct {
-	mu        sync.Mutex
-	stacks    map[*x64.CPU][]userCallbackState
-	completed map[*x64.CPU][]UserCallbackReturn
+	mu sync.Mutex
+	// cpuSerializers protect architectural state through callback completion.
+	cpuSerializers sync.Map
+	stacks         map[*x64.CPU][]userCallbackState
+	completed      map[*x64.CPU][]UserCallbackReturn
 }
 
 // Begin saves the current CPU state, builds the architecture-specific callback
@@ -50,6 +52,9 @@ func (m *UserCallbackManager) BeginWithCompletion(cpu *x64.CPU, mem *mmu.MMU, di
 	if dispatcher == 0 {
 		return UserCallbackFrame{}, fmt.Errorf("begin user callback: nil dispatcher")
 	}
+
+	unlockCPU := m.lockCPU(cpu)
+	defer unlockCPU()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -91,6 +96,9 @@ func (m *UserCallbackManager) NtCallbackReturn(cpu *x64.CPU, result, resultLengt
 		return UserCallbackReturn{}, fmt.Errorf("NtCallbackReturn: nil CPU")
 	}
 
+	unlockCPU := m.lockCPU(cpu)
+	defer unlockCPU()
+
 	m.mu.Lock()
 
 	stack := m.stacks[cpu]
@@ -129,6 +137,13 @@ func (m *UserCallbackManager) NtCallbackReturn(cpu *x64.CPU, result, resultLengt
 		state.completion(cpu, callbackReturn)
 	}
 	return callbackReturn, nil
+}
+
+func (m *UserCallbackManager) lockCPU(cpu *x64.CPU) func() {
+	value, _ := m.cpuSerializers.LoadOrStore(cpu, new(sync.Mutex))
+	serializer := value.(*sync.Mutex)
+	serializer.Lock()
+	return serializer.Unlock
 }
 
 // TakeReturn removes the oldest completed return for cpu.

@@ -29,6 +29,7 @@ const (
 	StatusObjectNameInvalid    uint32 = 0xC0000033
 	StatusObjectPathNotFound   uint32 = 0xC000003A
 	StatusNotImplemented       uint32 = 0xC0000002
+	StatusAccessViolation      uint32 = 0xC0000005
 	StatusInvalidHandle        uint32 = 0xC0000008
 	StatusInvalidParameter     uint32 = 0xC000000D
 	StatusAccessDenied         uint32 = 0xC0000022
@@ -38,12 +39,18 @@ const (
 	StatusObjectTypeMismatch   uint32 = 0xC0000024
 	StatusObjectNameCollision  uint32 = 0xC0000035
 	StatusKeyNotFound          uint32 = 0xC0000225
+	StatusNotFound             uint32 = 0xC0000225
 	StatusPending              uint32 = 0x00000103
 	StatusTimeout              uint32 = 0x00000102
 	StatusWait0                uint32 = 0x00000000
+	StatusAbandoned            uint32 = 0x00000080
 	StatusAlerted              uint32 = 0x00000101
 	StatusProcessIsTerminating uint32 = 0xC000010A
 	StatusEndOfFile            uint32 = 0xC0000011
+	StatusFileLockConflict     uint32 = 0xC0000054
+	StatusLockNotGranted       uint32 = 0xC0000055
+	StatusRangeNotLocked       uint32 = 0xC000007E
+	StatusCancelled            uint32 = 0xC0000120
 )
 
 // File access and creation flags.
@@ -57,7 +64,11 @@ const (
 
 	fileDirectoryFile         = 0x00000001
 	fileNonDirectoryFile      = 0x00000040
+	fileSynchronousIoAlert    = 0x00000010
 	fileSynchronousIoNonalert = 0x00000020
+	nativeFileFlagOverlapped  = uint32(0x40000000)
+	nativeUseFilePointer      = uint64(0xFFFFFFFFFFFFFFFE)
+	nativeWriteToEndOfFile    = uint64(0xFFFFFFFFFFFFFFFF)
 )
 
 // FileInformationClass values.
@@ -106,6 +117,17 @@ func writeGuestPtr(mem *mmu.MMU, addr, val uint64) {
 		return
 	}
 	mem.Write64(addr, val)
+}
+
+func guestPtrSize(mem *mmu.MMU) uint64 {
+	if mem.Mode32 {
+		return 4
+	}
+	return 8
+}
+
+func validateGuestWrite(mem *mmu.MMU, addr, size uint64) bool {
+	return addr != 0 && mem.ValidateRange(addr, size, mmu.PermWrite) == nil
 }
 
 func signalHandleEvent(ctx *TrapContext, eventHandle Handle) {
@@ -157,10 +179,6 @@ func desiredAccessToOpenFlags(desiredAccess uint32) int {
 func getFileOffset(ctx *TrapContext, fh *FileHandle) uint64 {
 	if fh == nil {
 		return 0
-	}
-	fd := ctx.FS.GetFD(fh.FD)
-	if fd != nil {
-		return uint64(fd.Offset)
 	}
 	off, err := ctx.FS.Lseek(fh.FD, 0, 1)
 	if err != nil || off < 0 {
@@ -266,16 +284,31 @@ func listDirectoryEntries(ctx *TrapContext, fh *FileHandle) []ntDirEntry {
 	return out
 }
 
-func closeHandleObject(ctx *TrapContext, handle Handle, obj HandleObject) {
+func closeHandleObject(
+	ctx *TrapContext,
+	handle Handle,
+	obj HandleObject,
+	objectRefs, ownerRefs int,
+) {
 	switch v := obj.(type) {
 	case *FileHandle:
-		if v.DeletePending && v.Path != "" {
+		CancelNativeIOForHandle(ctx.Handles, handle)
+		if ownerRefs == 0 {
+			FileLocksFor(ctx.FS).ReleaseOwner(v.LockOwner())
+		}
+		if v.DeletePending && v.Path != "" && objectRefs == 0 {
 			_ = ctx.FS.Unlinkat(-1, v.Path, 0)
 		}
-		_ = ctx.FS.Close(v.FD)
+		if objectRefs == 0 {
+			_ = ctx.FS.Close(v.FD)
+		}
 	case *SectionHandle:
-		if v.FileFD >= 0 {
+		if v.FileFD >= 0 && objectRefs == 0 {
 			_ = ctx.FS.Close(v.FileFD)
+		}
+	case *IoCompletionPortHandle:
+		if objectRefs == 0 {
+			v.Close()
 		}
 	}
 	_ = handle
@@ -288,6 +321,7 @@ func cloneHandleObject(ctx *TrapContext, obj HandleObject) (HandleObject, uint32
 		if err != nil {
 			return nil, StatusInvalidHandle
 		}
+		v.completionState()
 		cp := *v
 		cp.FD = newFD
 		return &cp, StatusSuccess
@@ -386,7 +420,21 @@ func handleNtCreateFile(ctx *TrapContext) uint32 {
 		return status
 	}
 
-	fh := &FileHandle{FD: fd, Path: path, Access: desiredAccess}
+	isDirectory := isDir
+	if node := ctx.FS.Stat(fd); node != nil {
+		isDirectory = node.IsDir
+	}
+	var fileFlags uint32
+	if createOpts&(fileSynchronousIoAlert|fileSynchronousIoNonalert) == 0 {
+		fileFlags = 0x40000000 // FILE_FLAG_OVERLAPPED
+	}
+	fh := &FileHandle{
+		FD:          fd,
+		Path:        path,
+		Access:      desiredAccess,
+		Flags:       fileFlags,
+		IsDirectory: isDirectory,
+	}
 	h := ctx.Handles.Alloc(fh)
 	writeGuestPtr(ctx.Mem, handlePtr, uint64(h))
 	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, fileInfo)
@@ -398,22 +446,151 @@ func handleNtOpenFile(ctx *TrapContext) uint32 {
 	return handleNtCreateFile(ctx)
 }
 
+func fileHandleCanReadNative(file *FileHandle) bool {
+	const (
+		genericRead = uint32(0x80000000)
+		genericAll  = uint32(0x10000000)
+		fileRead    = uint32(0x00000001)
+	)
+	return file != nil && file.Access&(genericRead|genericAll|fileRead) != 0
+}
+
+func fileHandleCanWriteNative(file *FileHandle) bool {
+	const (
+		genericWrite = uint32(0x40000000)
+		genericAll   = uint32(0x10000000)
+		fileWrite    = uint32(0x00000002)
+		fileAppend   = uint32(0x00000004)
+	)
+	return file != nil &&
+		file.Access&(genericWrite|genericAll|fileWrite|fileAppend) != 0
+}
+
+func fileHandleAppendOnlyNative(file *FileHandle) bool {
+	const (
+		genericWrite = uint32(0x40000000)
+		genericAll   = uint32(0x10000000)
+		fileWrite    = uint32(0x00000002)
+		fileAppend   = uint32(0x00000004)
+	)
+	if file == nil {
+		return false
+	}
+	canOverwrite := file.Access&(genericWrite|genericAll|fileWrite) != 0
+	return !canOverwrite && file.Access&fileAppend != 0
+}
+
+func nativeFileCurrentOffset(ctx *TrapContext, file *FileHandle) uint64 {
+	offset, err := ctx.FS.Lseek(file.FD, 0, 1)
+	if err != nil || offset < 0 {
+		return 0
+	}
+	return uint64(offset)
+}
+
+func nativeFileIORangeValid(offset, length uint64) bool {
+	const maxFileOffset = uint64(1<<63 - 1)
+	return offset <= maxFileOffset && length <= maxFileOffset-offset
+}
+
+func nativeFileWriteOffset(
+	ctx *TrapContext,
+	file *FileHandle,
+	requested uint64,
+	useCurrent bool,
+) uint64 {
+	const (
+		genericWrite = uint32(0x40000000)
+		genericAll   = uint32(0x10000000)
+		fileWrite    = uint32(0x00000002)
+		fileAppend   = uint32(0x00000004)
+	)
+	canOverwrite := file.Access&(genericWrite|genericAll|fileWrite) != 0
+	if !canOverwrite && file.Access&fileAppend != 0 {
+		if node := ctx.FS.Stat(file.FD); node != nil && node.Size > 0 {
+			return uint64(node.Size)
+		}
+		return 0
+	}
+	if useCurrent {
+		return nativeFileCurrentOffset(ctx, file)
+	}
+	return requested
+}
+
+func withNativeFileRead(
+	ctx *TrapContext,
+	file *FileHandle,
+	start, length uint64,
+	access func(),
+) bool {
+	identity, ok := ctx.FS.FileIdentity(file.FD)
+	if !ok {
+		access()
+		return true
+	}
+	return FileLocksFor(ctx.FS).WithReadAccess(
+		identity,
+		file.LockOwner(),
+		start,
+		length,
+		access,
+	)
+}
+
+func withNativeFileWrite(
+	ctx *TrapContext,
+	file *FileHandle,
+	start, length uint64,
+	access func(),
+) bool {
+	identity, ok := ctx.FS.FileIdentity(file.FD)
+	if !ok {
+		access()
+		return true
+	}
+	return FileLocksFor(ctx.FS).WithWriteAccess(
+		identity,
+		file.LockOwner(),
+		start,
+		length,
+		access,
+	)
+}
+
 func handleNtReadFile(ctx *TrapContext) uint32 {
 	// NtReadFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock*, Buffer, Length, ByteOffset*, Key*)
 	// ReactOS reference: ntoskrnl/io/iomgr/iofunc.c NtReadFile
 	fileHandle := Handle(ctx.Arg(0))
 	eventHandle := Handle(ctx.Arg(1))
-	// Arg(2) = ApcRoutine (ignored)
-	// Arg(3) = ApcContext (ignored)
+	apcRoutine := ctx.Arg(2)
+	apcContext := ctx.Arg(3)
 	ioStatus := ctx.Arg(4)
 	bufAddr := ctx.Arg(5)
 	length := ctx.Arg(6)
 	pByteOffset := ctx.Arg(7)
-	// Arg(8) = Key (ignored)
+	keyAddr := ctx.Arg(8)
+	const maxNativeIOBuffer = uint64(256 << 20)
+	if length > maxNativeIOBuffer {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
+		return StatusInvalidParameter
+	}
+	ioStatusSize := uint64(16)
+	if ctx.Mem.Mode32 {
+		ioStatusSize = 8
+	}
+	if !validateGuestWrite(ctx.Mem, ioStatus, ioStatusSize) {
+		return StatusAccessViolation
+	}
 
 	fh := ctx.Handles.GetFile(fileHandle)
 	if fh == nil {
 		if pipe := ctx.Handles.GetNamedPipe(fileHandle); pipe != nil {
+			if length != 0 &&
+				ctx.Mem.ValidateRange(bufAddr, length, mmu.PermWrite) != nil {
+				writeIOStatus(ctx.Mem, ioStatus, StatusAccessViolation, 0)
+				return StatusAccessViolation
+			}
 			data := make([]byte, length)
 			n := pipe.PipeRead(data)
 			status := uint32(StatusSuccess)
@@ -432,40 +609,126 @@ func handleNtReadFile(ctx *TrapContext) uint32 {
 		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
 		return StatusInvalidHandle
 	}
-
-	// Seek if ByteOffset provided and not special sentinel (0x8000000000000000 = use current pos)
-	if pByteOffset != 0 {
-		offset, _ := ctx.Mem.Read64(pByteOffset)
-		if offset != 0x8000000000000000 && offset != 0xFFFFFFFFFFFFFFFF {
-			buf := make([]byte, length)
-			n, err := ctx.FS.Pread(fh.FD, buf, int64(offset))
-			status := uint32(StatusSuccess)
-			if n == 0 && err != nil {
-				status = StatusEndOfFile
-			}
-			if n > 0 {
-				ctx.Mem.WriteBytes(bufAddr, buf[:n])
-			}
-			writeIOStatus(ctx.Mem, ioStatus, status, uint64(n))
-			signalHandleEvent(ctx, eventHandle)
-			return status
+	if !fileHandleCanReadNative(fh) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessDenied, 0)
+		return StatusAccessDenied
+	}
+	if length != 0 &&
+		ctx.Mem.ValidateRange(bufAddr, length, mmu.PermWrite) != nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessViolation, 0)
+		return StatusAccessViolation
+	}
+	if pByteOffset != 0 &&
+		ctx.Mem.ValidateRange(pByteOffset, 8, mmu.PermRead) != nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessViolation, 0)
+		return StatusAccessViolation
+	}
+	if keyAddr != 0 && ctx.Mem.ValidateRange(keyAddr, 4, mmu.PermRead) != nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessViolation, 0)
+		return StatusAccessViolation
+	}
+	var event *EventHandle
+	if eventHandle != 0 {
+		event = ctx.Handles.GetEvent(eventHandle)
+		if event == nil {
+			writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+			return StatusInvalidHandle
 		}
 	}
 
-	buf := make([]byte, length)
-	n, err := ctx.FS.Read(fh.FD, buf)
-	status := uint32(StatusSuccess)
-	if n == 0 && err != nil {
-		status = StatusEndOfFile
+	useCurrent := true
+	offset := uint64(0)
+	if pByteOffset != 0 {
+		offset, _ = ctx.Mem.Read64(pByteOffset)
+		useCurrent = offset == nativeUseFilePointer
+	}
+	isAsync := fh.Flags&nativeFileFlagOverlapped != 0
+	if useCurrent && isAsync {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
+		return StatusInvalidParameter
+	}
+	lockOffset := offset
+	if useCurrent {
+		lockOffset = nativeFileCurrentOffset(ctx, fh)
+	}
+	if !nativeFileIORangeValid(lockOffset, length) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
+		return StatusInvalidParameter
 	}
 
-	if n > 0 {
-		ctx.Mem.WriteBytes(bufAddr, buf[:n])
+	perform := func() (uint32, uint64) {
+		buf := make([]byte, length)
+		var n int
+		var err error
+		if !withNativeFileRead(ctx, fh, lockOffset, length, func() {
+			if useCurrent {
+				n, err = ctx.FS.Read(fh.FD, buf)
+			} else {
+				n, err = ctx.FS.Pread(fh.FD, buf, int64(offset))
+				if !isAsync {
+					_, seekErr := ctx.FS.Lseek(
+						fh.FD,
+						int64(offset)+int64(n),
+						0,
+					)
+					if err == nil {
+						err = seekErr
+					}
+				}
+			}
+		}) {
+			return StatusFileLockConflict, 0
+		}
+		status := uint32(StatusSuccess)
+		if n == 0 && err != nil {
+			status = StatusEndOfFile
+		}
+		if n > 0 {
+			ctx.Mem.WriteBytes(bufAddr, buf[:n])
+		}
+		return status, uint64(n)
 	}
 
-	writeIOStatus(ctx.Mem, ioStatus, status, uint64(n))
-	signalHandleEvent(ctx, eventHandle)
+	if isAsync {
+		operation := beginNativeIO(
+			ctx,
+			fileHandle,
+			fh,
+			ioStatus,
+			event,
+			apcRoutine,
+			apcContext,
+		)
+		go func() {
+			select {
+			case <-operation.cancel:
+				operation.complete(StatusCancelled, 0)
+				return
+			default:
+			}
+			status, information := perform()
+			select {
+			case <-operation.cancel:
+				operation.complete(StatusCancelled, 0)
+			default:
+				operation.complete(status, information)
+			}
+		}()
+		return StatusPending
+	}
 
+	status, information := perform()
+	completeNativeIOInline(
+		ctx,
+		fileHandle,
+		fh,
+		ioStatus,
+		event,
+		apcRoutine,
+		apcContext,
+		status,
+		information,
+	)
 	return status
 }
 
@@ -474,13 +737,25 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 	// ReactOS reference: ntoskrnl/io/iomgr/iofunc.c NtWriteFile
 	fileHandle := Handle(ctx.Arg(0))
 	eventHandle := Handle(ctx.Arg(1))
-	// Arg(2) = ApcRoutine (ignored)
-	// Arg(3) = ApcContext (ignored)
+	apcRoutine := ctx.Arg(2)
+	apcContext := ctx.Arg(3)
 	ioStatus := ctx.Arg(4)
 	bufAddr := ctx.Arg(5)
 	length := ctx.Arg(6)
 	pByteOffset := ctx.Arg(7)
-	// Arg(8) = Key (ignored)
+	keyAddr := ctx.Arg(8)
+	const maxNativeIOBuffer = uint64(256 << 20)
+	if length > maxNativeIOBuffer {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
+		return StatusInvalidParameter
+	}
+	ioStatusSize := uint64(16)
+	if ctx.Mem.Mode32 {
+		ioStatusSize = 8
+	}
+	if !validateGuestWrite(ctx.Mem, ioStatus, ioStatusSize) {
+		return StatusAccessViolation
+	}
 
 	// Handle standard output/error pseudo-handles
 	if uint64(fileHandle) == 0xFFFFFFF5 || uint64(fileHandle) == 0xFFFFFFF4 {
@@ -520,51 +795,142 @@ func handleNtWriteFile(ctx *TrapContext) uint32 {
 		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
 		return StatusInvalidHandle
 	}
-
-	// Seek if ByteOffset provided
-	if pByteOffset != 0 {
-		offset, _ := ctx.Mem.Read64(pByteOffset)
-		if offset != 0x8000000000000000 && offset != 0xFFFFFFFFFFFFFFFF {
-			data, err := ctx.Mem.ReadBytes(bufAddr, int(length))
-			if err != nil {
-				return StatusInvalidParameter
-			}
-			n, writeErr := ctx.FS.Pwrite(fh.FD, data, int64(offset))
-			if writeErr != nil {
-				return StatusAccessDenied
-			}
-			writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, uint64(n))
-			signalHandleEvent(ctx, eventHandle)
-			return StatusSuccess
+	if !fileHandleCanWriteNative(fh) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessDenied, 0)
+		return StatusAccessDenied
+	}
+	if length != 0 &&
+		ctx.Mem.ValidateRange(bufAddr, length, mmu.PermRead) != nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessViolation, 0)
+		return StatusAccessViolation
+	}
+	if pByteOffset != 0 &&
+		ctx.Mem.ValidateRange(pByteOffset, 8, mmu.PermRead) != nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessViolation, 0)
+		return StatusAccessViolation
+	}
+	if keyAddr != 0 && ctx.Mem.ValidateRange(keyAddr, 4, mmu.PermRead) != nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessViolation, 0)
+		return StatusAccessViolation
+	}
+	var event *EventHandle
+	if eventHandle != 0 {
+		event = ctx.Handles.GetEvent(eventHandle)
+		if event == nil {
+			writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+			return StatusInvalidHandle
 		}
 	}
 
 	data, err := ctx.Mem.ReadBytes(bufAddr, int(length))
 	if err != nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessViolation, 0)
+		return StatusAccessViolation
+	}
+	useCurrent := true
+	offset := uint64(0)
+	writeToEnd := false
+	if pByteOffset != 0 {
+		offset, _ = ctx.Mem.Read64(pByteOffset)
+		useCurrent = offset == nativeUseFilePointer
+		writeToEnd = offset == nativeWriteToEndOfFile
+	}
+	isAsync := fh.Flags&nativeFileFlagOverlapped != 0
+	if useCurrent && isAsync && !fileHandleAppendOnlyNative(fh) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
+		return StatusInvalidParameter
+	}
+	if writeToEnd {
+		offset = 0
+		if node := ctx.FS.Stat(fh.FD); node != nil && node.Size > 0 {
+			offset = uint64(node.Size)
+		}
+		useCurrent = false
+	}
+	lockOffset := nativeFileWriteOffset(ctx, fh, offset, useCurrent)
+	if !nativeFileIORangeValid(lockOffset, length) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidParameter, 0)
 		return StatusInvalidParameter
 	}
 
-	n, writeErr := ctx.FS.Write(fh.FD, data)
-	if writeErr != nil {
-		return StatusAccessDenied
+	perform := func() (uint32, uint64) {
+		var n int
+		var writeErr error
+		if !withNativeFileWrite(ctx, fh, lockOffset, length, func() {
+			if useCurrent {
+				n, writeErr = ctx.FS.Write(fh.FD, data)
+			} else {
+				n, writeErr = ctx.FS.Pwrite(fh.FD, data, int64(offset))
+				if !isAsync {
+					_, seekErr := ctx.FS.Lseek(
+						fh.FD,
+						int64(lockOffset)+int64(n),
+						0,
+					)
+					if writeErr == nil {
+						writeErr = seekErr
+					}
+				}
+			}
+		}) {
+			return StatusFileLockConflict, 0
+		}
+		if writeErr != nil {
+			return StatusAccessDenied, 0
+		}
+		return StatusSuccess, uint64(n)
 	}
 
-	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, uint64(n))
-	signalHandleEvent(ctx, eventHandle)
+	if isAsync {
+		operation := beginNativeIO(
+			ctx,
+			fileHandle,
+			fh,
+			ioStatus,
+			event,
+			apcRoutine,
+			apcContext,
+		)
+		go func() {
+			select {
+			case <-operation.cancel:
+				operation.complete(StatusCancelled, 0)
+				return
+			default:
+			}
+			status, information := perform()
+			select {
+			case <-operation.cancel:
+				operation.complete(StatusCancelled, 0)
+			default:
+				operation.complete(status, information)
+			}
+		}()
+		return StatusPending
+	}
 
-	return StatusSuccess
+	status, information := perform()
+	completeNativeIOInline(
+		ctx,
+		fileHandle,
+		fh,
+		ioStatus,
+		event,
+		apcRoutine,
+		apcContext,
+		status,
+		information,
+	)
+	return status
 }
 
 func handleNtClose(ctx *TrapContext) uint32 {
 	handle := Handle(ctx.Arg(0))
-	obj := ctx.Handles.Get(handle)
-	if obj == nil {
+	obj, objectRefs, ownerRefs, ok := ctx.Handles.Take(handle)
+	if !ok {
 		return StatusInvalidHandle
 	}
-	closeHandleObject(ctx, handle, obj)
-	if !ctx.Handles.Close(handle) {
-		return StatusInvalidHandle
-	}
+	closeHandleObject(ctx, handle, obj, objectRefs, ownerRefs)
 	return StatusSuccess
 }
 
@@ -3209,6 +3575,14 @@ func handleRtlNtStatusToDosError(ctx *TrapContext) uint32 {
 		dosError = 8 // ERROR_NOT_ENOUGH_MEMORY
 	case StatusInvalidParameter:
 		dosError = 87 // ERROR_INVALID_PARAMETER
+	case StatusFileLockConflict, StatusLockNotGranted:
+		dosError = 33 // ERROR_LOCK_VIOLATION
+	case StatusRangeNotLocked:
+		dosError = 158 // ERROR_NOT_LOCKED
+	case StatusPending:
+		dosError = 997 // ERROR_IO_PENDING
+	case StatusCancelled:
+		dosError = 995 // ERROR_OPERATION_ABORTED
 	default:
 		// SXS/activation-context errors → ERROR_SXS_KEY_NOT_FOUND (14007)
 		if status >= 0xC0150000 && status <= 0xC015FFFF {
@@ -3257,24 +3631,31 @@ func handleNtDuplicateObject(ctx *TrapContext) uint32 {
 	_ = ctx.Arg(4) // DesiredAccess
 	_ = ctx.Arg(5) // HandleAttributes
 	options := uint32(ctx.Arg(6))
+	if !validateGuestWrite(ctx.Mem, targetHandlePtr, guestPtrSize(ctx.Mem)) {
+		return StatusAccessViolation
+	}
 
-	obj := ctx.Handles.Get(srcHandle)
-	if obj == nil {
+	status := StatusSuccess
+	closeSource := options&dupCloseSource != 0
+	newHandle, source, objectRefs, ownerRefs, ok := ctx.Handles.Clone(
+		srcHandle,
+		closeSource,
+		func(obj HandleObject) (HandleObject, bool) {
+			var cloned HandleObject
+			cloned, status = cloneHandleObject(ctx, obj)
+			return cloned, status == StatusSuccess
+		},
+	)
+	if !ok {
+		if status != StatusSuccess {
+			return status
+		}
 		return StatusInvalidHandle
 	}
+	writeGuestPtr(ctx.Mem, targetHandlePtr, uint64(newHandle))
 
-	cloned, status := cloneHandleObject(ctx, obj)
-	if status != StatusSuccess {
-		return status
-	}
-	newHandle := ctx.Handles.Alloc(cloned)
-	if targetHandlePtr != 0 {
-		writeGuestPtr(ctx.Mem, targetHandlePtr, uint64(newHandle))
-	}
-
-	if options&dupCloseSource != 0 {
-		closeHandleObject(ctx, srcHandle, obj)
-		ctx.Handles.Close(srcHandle)
+	if closeSource {
+		closeHandleObject(ctx, srcHandle, source, objectRefs, ownerRefs)
 	}
 	_ = options & dupSameAccess
 
@@ -5417,10 +5798,11 @@ func handleRtlRunOnceExecuteOnce(ctx *TrapContext) uint32 { return StatusSuccess
 
 func handleNtCreateIoCompletion(ctx *TrapContext) uint32 {
 	handlePtr := ctx.Arg(0)
-	if handlePtr != 0 {
-		h := ctx.Handles.Alloc(&IoCompletionPortHandle{})
-		ctx.Mem.Write64(handlePtr, uint64(h))
+	if !validateGuestWrite(ctx.Mem, handlePtr, guestPtrSize(ctx.Mem)) {
+		return StatusAccessViolation
 	}
+	h := ctx.Handles.Alloc(&IoCompletionPortHandle{})
+	writeGuestPtr(ctx.Mem, handlePtr, uint64(h))
 	return StatusSuccess
 }
 
@@ -5450,6 +5832,12 @@ func handleNtRemoveIoCompletion(ctx *TrapContext) uint32 {
 	if iocp == nil {
 		return StatusInvalidHandle
 	}
+	ptrSize := guestPtrSize(ctx.Mem)
+	if !validateGuestWrite(ctx.Mem, keyPtr, ptrSize) ||
+		!validateGuestWrite(ctx.Mem, apcPtr, ptrSize) ||
+		!validateGuestWrite(ctx.Mem, ioStatus, ptrSize*2) {
+		return StatusAccessViolation
+	}
 
 	timeout := time.Duration(-1)
 	if timeoutPtr != 0 {
@@ -5472,18 +5860,22 @@ func handleNtRemoveIoCompletion(ctx *TrapContext) uint32 {
 		}
 	}
 
-	pkt, ok := iocp.Remove(timeout)
-	if !ok {
-		if ioStatus != 0 {
-			writeIOStatus(ctx.Mem, ioStatus, StatusTimeout, 0)
+	pkt, removeResult := iocp.RemoveEx(timeout)
+	if removeResult != IoCompletionRemoved {
+		status := StatusTimeout
+		if removeResult == IoCompletionClosed {
+			status = StatusAbandoned
 		}
-		return StatusTimeout
+		if ioStatus != 0 {
+			writeIOStatus(ctx.Mem, ioStatus, status, 0)
+		}
+		return status
 	}
 	if keyPtr != 0 {
-		ctx.Mem.Write64(keyPtr, pkt.CompletionKey)
+		writeGuestPtr(ctx.Mem, keyPtr, pkt.CompletionKey)
 	}
 	if apcPtr != 0 {
-		ctx.Mem.Write64(apcPtr, pkt.Overlapped)
+		writeGuestPtr(ctx.Mem, apcPtr, pkt.Overlapped)
 	}
 	if ioStatus != 0 {
 		writeIOStatus(ctx.Mem, ioStatus, pkt.Status, uint64(pkt.BytesTransferred))
@@ -5503,8 +5895,14 @@ func handleNtRemoveIoCompletionEx(ctx *TrapContext) uint32 {
 	if iocp == nil {
 		return StatusInvalidHandle
 	}
-	if entries == 0 || count == 0 {
+	if count == 0 {
 		return StatusInvalidParameter
+	}
+	ptrSize := guestPtrSize(ctx.Mem)
+	entrySize := ptrSize * 4
+	if !validateGuestWrite(ctx.Mem, entries, uint64(count)*entrySize) ||
+		!validateGuestWrite(ctx.Mem, removedPtr, 4) {
+		return StatusAccessViolation
 	}
 
 	timeout := time.Duration(-1)
@@ -5534,16 +5932,22 @@ func handleNtRemoveIoCompletionEx(ctx *TrapContext) uint32 {
 		if removed == 0 {
 			wait = timeout
 		}
-		pkt, ok := iocp.Remove(wait)
-		if !ok {
+		pkt, removeResult := iocp.RemoveEx(wait)
+		if removeResult != IoCompletionRemoved {
+			if removeResult == IoCompletionClosed && removed == 0 {
+				if removedPtr != 0 {
+					ctx.Mem.Write32(removedPtr, 0)
+				}
+				return StatusAbandoned
+			}
 			break
 		}
 		// FILE_IO_COMPLETION_INFORMATION {KeyContext, ApcContext, IoStatusBlock}
-		base := entries + uint64(removed)*24
-		ctx.Mem.Write64(base+0, pkt.CompletionKey)
-		ctx.Mem.Write64(base+8, pkt.Overlapped)
-		ctx.Mem.Write32(base+16, pkt.Status)
-		ctx.Mem.Write32(base+20, pkt.BytesTransferred)
+		base := entries + uint64(removed)*entrySize
+		writeGuestPtr(ctx.Mem, base, pkt.CompletionKey)
+		writeGuestPtr(ctx.Mem, base+ptrSize, pkt.Overlapped)
+		writeGuestPtr(ctx.Mem, base+ptrSize*2, uint64(pkt.Status))
+		writeGuestPtr(ctx.Mem, base+ptrSize*3, uint64(pkt.BytesTransferred))
 		removed++
 	}
 	if removedPtr != 0 {
@@ -5556,13 +5960,57 @@ func handleNtRemoveIoCompletionEx(ctx *TrapContext) uint32 {
 }
 
 func handleNtCancelIoFile(ctx *TrapContext) uint32 {
+	fileHandle := Handle(ctx.Arg(0))
 	ioStatus := ctx.Arg(1)
+	if ctx.Handles.GetFile(fileHandle) == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+		return StatusInvalidHandle
+	}
+	ioStatusSize := uint64(16)
+	if ctx.Mem.Mode32 {
+		ioStatusSize = 8
+	}
+	if !validateGuestWrite(ctx.Mem, ioStatus, ioStatusSize) {
+		return StatusAccessViolation
+	}
+	nativeIOFor(ctx.Handles).cancelMatching(
+		fileHandle,
+		nativeCurrentThreadID(ctx),
+		true,
+		0,
+	)
 	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
 	return StatusSuccess
 }
 
 func handleNtCancelIoFileEx(ctx *TrapContext) uint32 {
+	fileHandle := Handle(ctx.Arg(0))
+	requestIoStatus := ctx.Arg(1)
 	ioStatus := ctx.Arg(2)
+	if ctx.Handles.GetFile(fileHandle) == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+		return StatusInvalidHandle
+	}
+	ioStatusSize := uint64(16)
+	if ctx.Mem.Mode32 {
+		ioStatusSize = 8
+	}
+	if !validateGuestWrite(ctx.Mem, ioStatus, ioStatusSize) {
+		return StatusAccessViolation
+	}
+	if requestIoStatus != 0 &&
+		ctx.Mem.ValidateRange(requestIoStatus, ioStatusSize, mmu.PermRead) != nil {
+		return StatusAccessViolation
+	}
+	if nativeIOFor(ctx.Handles).cancelMatching(
+		fileHandle,
+		0,
+		false,
+		requestIoStatus,
+	) == 0 {
+		writeIOStatus(ctx.Mem, ioStatus, StatusNotFound, 0)
+		return StatusNotFound
+	}
 	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
 	return StatusSuccess
 }
@@ -5715,8 +6163,199 @@ func handleNtSetInformationObject(ctx *TrapContext) uint32 {
 	}
 }
 
-func handleNtLockFile(ctx *TrapContext) uint32   { return StatusSuccess }
-func handleNtUnlockFile(ctx *TrapContext) uint32 { return StatusSuccess }
+func fileHandleCanLockNative(file *FileHandle) bool {
+	const (
+		genericRead  = uint32(0x80000000)
+		genericWrite = uint32(0x40000000)
+		genericAll   = uint32(0x10000000)
+	)
+	return file != nil && file.Access&(genericRead|genericWrite|genericAll) != 0
+}
+
+func handleNtLockFile(ctx *TrapContext) uint32 {
+	fileHandle := Handle(ctx.Arg(0))
+	eventHandle := Handle(ctx.Arg(1))
+	apcRoutine := ctx.Arg(2)
+	apcContext := ctx.Arg(3)
+	ioStatus := ctx.Arg(4)
+	byteOffset := ctx.Arg(5)
+	lengthAddr := ctx.Arg(6)
+	key := uint32(ctx.Arg(7))
+	failImmediately := ctx.Arg(8) != 0
+	exclusive := ctx.Arg(9) != 0
+
+	file := ctx.Handles.GetFile(fileHandle)
+	if file == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+		return StatusInvalidHandle
+	}
+	if !fileHandleCanLockNative(file) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessDenied, 0)
+		return StatusAccessDenied
+	}
+	ioStatusSize := uint64(16)
+	if ctx.Mem.Mode32 {
+		ioStatusSize = 8
+	}
+	if !validateGuestWrite(ctx.Mem, ioStatus, ioStatusSize) ||
+		byteOffset == 0 || lengthAddr == 0 ||
+		ctx.Mem.ValidateRange(byteOffset, 8, mmu.PermRead) != nil ||
+		ctx.Mem.ValidateRange(lengthAddr, 8, mmu.PermRead) != nil {
+		return StatusAccessViolation
+	}
+	var event *EventHandle
+	if eventHandle != 0 {
+		event = ctx.Handles.GetEvent(eventHandle)
+		if event == nil {
+			writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+			return StatusInvalidHandle
+		}
+	}
+	identity, ok := ctx.FS.FileIdentity(file.FD)
+	if !ok {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+		return StatusInvalidHandle
+	}
+	start, _ := ctx.Mem.Read64(byteOffset)
+	length, _ := ctx.Mem.Read64(lengthAddr)
+	if FileLocksFor(ctx.FS).LockKey(
+		identity,
+		file.LockOwner(),
+		start,
+		length,
+		key,
+		exclusive,
+		false,
+	) {
+		completeNativeIOInline(
+			ctx,
+			fileHandle,
+			file,
+			ioStatus,
+			event,
+			apcRoutine,
+			apcContext,
+			StatusSuccess,
+			0,
+		)
+		return StatusSuccess
+	}
+	if failImmediately {
+		writeIOStatus(ctx.Mem, ioStatus, StatusLockNotGranted, 0)
+		return StatusLockNotGranted
+	}
+
+	const fileFlagOverlapped = uint32(0x40000000)
+	if file.Flags&fileFlagOverlapped == 0 {
+		if !FileLocksFor(ctx.FS).LockKey(
+			identity,
+			file.LockOwner(),
+			start,
+			length,
+			key,
+			exclusive,
+			true,
+		) {
+			writeIOStatus(ctx.Mem, ioStatus, StatusCancelled, 0)
+			return StatusCancelled
+		}
+		completeNativeIOInline(
+			ctx,
+			fileHandle,
+			file,
+			ioStatus,
+			event,
+			apcRoutine,
+			apcContext,
+			StatusSuccess,
+			0,
+		)
+		return StatusSuccess
+	}
+
+	operation := beginNativeIO(
+		ctx,
+		fileHandle,
+		file,
+		ioStatus,
+		event,
+		apcRoutine,
+		apcContext,
+	)
+	owner := file.LockOwner()
+	manager := FileLocksFor(ctx.FS)
+	go func() {
+		if !manager.LockKeyCancelable(
+			identity,
+			owner,
+			start,
+			length,
+			key,
+			exclusive,
+			true,
+			operation.cancel,
+		) {
+			operation.complete(StatusCancelled, 0)
+			return
+		}
+		select {
+		case <-operation.cancel:
+			manager.UnlockKey(identity, owner, start, length, key)
+			operation.complete(StatusCancelled, 0)
+		default:
+			if !operation.complete(StatusSuccess, 0) {
+				manager.UnlockKey(identity, owner, start, length, key)
+			}
+		}
+	}()
+	return StatusPending
+}
+
+func handleNtUnlockFile(ctx *TrapContext) uint32 {
+	fileHandle := Handle(ctx.Arg(0))
+	ioStatus := ctx.Arg(1)
+	byteOffset := ctx.Arg(2)
+	lengthAddr := ctx.Arg(3)
+
+	file := ctx.Handles.GetFile(fileHandle)
+	if file == nil {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+		return StatusInvalidHandle
+	}
+	if !fileHandleCanLockNative(file) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusAccessDenied, 0)
+		return StatusAccessDenied
+	}
+	ioStatusSize := uint64(16)
+	if ctx.Mem.Mode32 {
+		ioStatusSize = 8
+	}
+	if !validateGuestWrite(ctx.Mem, ioStatus, ioStatusSize) ||
+		byteOffset == 0 || lengthAddr == 0 ||
+		ctx.Mem.ValidateRange(byteOffset, 8, mmu.PermRead) != nil ||
+		ctx.Mem.ValidateRange(lengthAddr, 8, mmu.PermRead) != nil {
+		return StatusAccessViolation
+	}
+	identity, ok := ctx.FS.FileIdentity(file.FD)
+	if !ok {
+		writeIOStatus(ctx.Mem, ioStatus, StatusInvalidHandle, 0)
+		return StatusInvalidHandle
+	}
+	start, _ := ctx.Mem.Read64(byteOffset)
+	length, _ := ctx.Mem.Read64(lengthAddr)
+	if !FileLocksFor(ctx.FS).UnlockKey(
+		identity,
+		file.LockOwner(),
+		start,
+		length,
+		uint32(ctx.Arg(4)),
+	) {
+		writeIOStatus(ctx.Mem, ioStatus, StatusRangeNotLocked, 0)
+		return StatusRangeNotLocked
+	}
+	writeIOStatus(ctx.Mem, ioStatus, StatusSuccess, 0)
+	return StatusSuccess
+}
 
 func handleNtCreateMailslotFile(ctx *TrapContext) uint32 {
 	// NtCreateMailslotFile(FileHandle*, DesiredAccess, ObjectAttributes*, IoStatusBlock*,

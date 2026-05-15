@@ -5,6 +5,7 @@ package ntapi
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/mirkobrombin/Raven/pkg/loader"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
@@ -31,6 +32,29 @@ type SynthPE struct {
 	ExportOrds map[uint16]uint64 // export ordinal → guest address of stub
 }
 
+var knownSynthOrdinals = map[string]map[string]uint16{
+	"uxtheme.dll": {
+		"OpenNcThemeData":                      49,
+		"RefreshImmersiveColorPolicyState":     104,
+		"GetIsImmersiveColorUsingHighContrast": 106,
+		"ShouldAppsUseDarkMode":                132,
+		"AllowDarkModeForWindow":               133,
+		"SetPreferredAppMode":                  135,
+		"FlushMenuThemes":                      136,
+		"IsDarkModeAllowedForWindow":           137,
+		"ShouldSystemUseDarkMode":              138,
+	},
+}
+
+func bindKnownSynthOrdinal(synth *SynthPE, funcName string, addr uint64) {
+	if synth == nil || addr == 0 {
+		return
+	}
+	if ordinal, ok := knownSynthOrdinals[strings.ToLower(synth.Name)][funcName]; ok {
+		synth.ExportOrds[ordinal] = addr
+	}
+}
+
 // AddDynamicExport allocates a new trap stub in guest memory and
 // registers it in the synth's export map. Returns the syscall ID
 // for handler registration, or 0 if the function already exists.
@@ -52,6 +76,7 @@ func (s *SynthPE) AddDynamicExport(mem *mmu.MMU, funcName string, id uint32) uin
 	mem.WriteBytes(stubAddr, buf)
 	s.Exports[funcName] = stubAddr
 	s.StubIDs[stubAddr] = id
+	bindKnownSynthOrdinal(s, funcName, stubAddr)
 	return id
 }
 
@@ -1509,6 +1534,32 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 	}
 
 	numExports := uint32(len(exports))
+	exportOrdinals := make([]uint16, len(exports))
+	usedOrdinals := make(map[uint16]bool, len(exports))
+	for i, exportName := range exports {
+		if ordinal, ok := knownSynthOrdinals[strings.ToLower(name)][exportName]; ok {
+			exportOrdinals[i] = ordinal
+			usedOrdinals[ordinal] = true
+		}
+	}
+	var nextOrdinal uint16
+	for i, exportName := range exports {
+		if _, ok := knownSynthOrdinals[strings.ToLower(name)][exportName]; ok {
+			continue
+		}
+		for usedOrdinals[nextOrdinal] {
+			nextOrdinal++
+		}
+		exportOrdinals[i] = nextOrdinal
+		usedOrdinals[nextOrdinal] = true
+		nextOrdinal++
+	}
+	numOrdinalSlots := uint32(0)
+	for _, ordinal := range exportOrdinals {
+		if slots := uint32(ordinal) + 1; slots > numOrdinalSlots {
+			numOrdinalSlots = slots
+		}
+	}
 
 	// Calculate sizes
 	// PE headers: ~512 bytes
@@ -1523,8 +1574,9 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 	for _, n := range exports {
 		nameDataSize += uint64(len(n)) + 1
 	}
+	nameDataSize += uint64(len(name)) + 1
 	edataSize := 40 + // IMAGE_EXPORT_DIRECTORY
-		numExports*4 + // AddressOfFunctions (RVAs)
+		numOrdinalSlots*4 + // AddressOfFunctions (RVAs)
 		numExports*4 + // AddressOfNames (RVAs)
 		numExports*2 + // AddressOfNameOrdinals
 		uint32(nameDataSize)
@@ -1608,21 +1660,21 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 
 		synth.Exports[exportName] = stubAddr
 		synth.StubIDs[stubAddr] = syscallID
-		synth.ExportOrds[uint16(i)] = stubAddr // identity ordinal mapping
+		synth.ExportOrds[exportOrdinals[i]] = stubAddr
 	}
 
 	// --- Write .edata section: export directory ---
 	exportDir := baseAddr + edataRVA
 	funcTableRVA := edataRVA + 40
-	nameTableRVA := funcTableRVA + uint64(numExports)*4
+	nameTableRVA := funcTableRVA + uint64(numOrdinalSlots)*4
 	ordTableRVA := nameTableRVA + uint64(numExports)*4
 	nameStringsRVA := ordTableRVA + uint64(numExports)*2
 
 	// IMAGE_EXPORT_DIRECTORY
-	mem.Write32(exportDir+12, uint32(edataRVA+40+uint64(numExports)*10)) // Name RVA (DLL name, placed after tables)
-	mem.Write32(exportDir+16, 0)                                         // OrdinalBase
-	mem.Write32(exportDir+20, numExports)                                // NumberOfFunctions
-	mem.Write32(exportDir+24, numExports)                                // NumberOfNames
+	mem.Write32(exportDir+12, uint32(nameStringsRVA)) // Name RVA
+	mem.Write32(exportDir+16, 0)                      // OrdinalBase
+	mem.Write32(exportDir+20, numOrdinalSlots)        // NumberOfFunctions
+	mem.Write32(exportDir+24, numExports)             // NumberOfNames
 	mem.Write32(exportDir+28, uint32(funcTableRVA))
 	mem.Write32(exportDir+32, uint32(nameTableRVA))
 	mem.Write32(exportDir+36, uint32(ordTableRVA))
@@ -1637,13 +1689,13 @@ func GenerateSynthDLL(mem *mmu.MMU, name string, exports []string, idBase uint32
 	for i, exportName := range exports {
 		// Function RVA
 		funcRVA := textRVA + uint64(i)*stubSize
-		mem.Write32(baseAddr+funcTableRVA+uint64(i)*4, uint32(funcRVA))
+		mem.Write32(baseAddr+funcTableRVA+uint64(exportOrdinals[i])*4, uint32(funcRVA))
 
 		// Name RVA
 		mem.Write32(baseAddr+nameTableRVA+uint64(i)*4, uint32(nameStrCursor))
 
-		// Ordinal (identity mapping: ordinal[i] = i)
-		mem.Write16(baseAddr+ordTableRVA+uint64(i)*2, uint16(i))
+		// Name ordinal indexes the sparse function table.
+		mem.Write16(baseAddr+ordTableRVA+uint64(i)*2, exportOrdinals[i])
 
 		// Name string
 		mem.WriteBytes(baseAddr+nameStrCursor, append([]byte(exportName), 0))

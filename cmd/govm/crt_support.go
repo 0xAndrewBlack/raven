@@ -41,7 +41,6 @@ type crtSupportState struct {
 	rng         *gorand.Rand
 	locale      string
 	localeObjs  map[uint64]string
-	errnoByTEB  map[uint64]uint64
 	alignedRaw  map[uint64]uint64
 	alignedSize map[uint64]uint64
 	strtok      map[uint64]uint64
@@ -67,7 +66,6 @@ func getCRTSupport(hctx *HandlerCtx) *crtSupportState {
 		rng:         gorand.New(gorand.NewSource(1)),
 		locale:      "C",
 		localeObjs:  map[uint64]string{},
-		errnoByTEB:  map[uint64]uint64{},
 		alignedRaw:  map[uint64]uint64{},
 		alignedSize: map[uint64]uint64{},
 		strtok:      map[uint64]uint64{},
@@ -1246,18 +1244,7 @@ func registerCommonCRTOverrides(hctx *HandlerCtx, synth *ntapi.SynthPE, cfg crtM
 
 	for _, name := range []string{"errno", "_errno"} {
 		d.RegisterAutoStubHandler(synth, name, func(ctx *ntapi.TrapContext) uint32 {
-			teb := uint64(0)
-			if ctx.State != nil {
-				teb = ctx.State.TEBAddr
-			}
-			st.mu.Lock()
-			slot := st.errnoByTEB[teb]
-			if slot == 0 {
-				slot = mem.Mmap(0, 8, mmu.PermRead|mmu.PermWrite)
-				st.errnoByTEB[teb] = slot
-			}
-			st.mu.Unlock()
-			ctx.SetReturn(slot)
+			ctx.SetReturn(crtErrnoAddress(ctx))
 			return 0
 		})
 	}

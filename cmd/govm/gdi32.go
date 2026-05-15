@@ -18,6 +18,7 @@ import (
 	"github.com/mirkobrombin/Raven/pkg/mmu"
 	"github.com/mirkobrombin/Raven/pkg/ntapi"
 	"github.com/mirkobrombin/Raven/pkg/win32"
+	"golang.org/x/text/encoding/charmap"
 )
 
 type printJobState struct {
@@ -110,6 +111,126 @@ func outlineTextMetricSize(is32 bool) uint64 {
 		return 216
 	}
 	return 232
+}
+
+func fillRectUsingBrushHandle(dc *gdi.DC, mgr *gdi.Manager, hBrush uint64, sysColors [31]uint32, left, top, right, bottom int32) {
+	if dc == nil || mgr == nil {
+		return
+	}
+	if hBrush > 31 {
+		if object := mgr.GetObject(hBrush); object != nil && object.Brush != nil {
+			dc.FillRectWithBrush(left, top, right, bottom, object.Brush)
+			return
+		}
+	}
+	dc.FillRect(left, top, right, bottom, mgr.BrushColor(hBrush, sysColors))
+}
+
+func readExtTextAdvances(mem *mmu.MMU, ptr uint64, count int, pdy bool) ([]int32, []int32, bool) {
+	if ptr == 0 || count == 0 {
+		return nil, nil, true
+	}
+	advanceX := make([]int32, count)
+	var advanceY []int32
+	stride := uint64(4)
+	if pdy {
+		advanceY = make([]int32, count)
+		stride = 8
+	}
+	for i := 0; i < count; i++ {
+		value, err := mem.Read32(ptr + uint64(i)*stride)
+		if err != nil {
+			return nil, nil, false
+		}
+		advanceX[i] = int32(value)
+		if pdy {
+			value, err = mem.Read32(ptr + uint64(i)*stride + 4)
+			if err != nil {
+				return nil, nil, false
+			}
+			advanceY[i] = int32(value)
+		}
+	}
+	return advanceX, advanceY, true
+}
+
+func collapseUTF16Advances(chars []uint16, advanceX, advanceY []int32) ([]int32, []int32) {
+	if len(advanceX) == 0 {
+		return nil, nil
+	}
+	collapsedX := make([]int32, 0, len(chars))
+	var collapsedY []int32
+	if len(advanceY) > 0 {
+		collapsedY = make([]int32, 0, len(chars))
+	}
+	for i := 0; i < len(chars); i++ {
+		x := advanceX[i]
+		y := int32(0)
+		if len(advanceY) > 0 {
+			y = advanceY[i]
+		}
+		if chars[i] >= 0xD800 && chars[i] <= 0xDBFF && i+1 < len(chars) &&
+			chars[i+1] >= 0xDC00 && chars[i+1] <= 0xDFFF {
+			i++
+			x += advanceX[i]
+			if len(advanceY) > 0 {
+				y += advanceY[i]
+			}
+		}
+		collapsedX = append(collapsedX, x)
+		if len(advanceY) > 0 {
+			collapsedY = append(collapsedY, y)
+		}
+	}
+	return collapsedX, collapsedY
+}
+
+func decodeExtTextANSI(value []byte) string {
+	decoded, _ := charmap.Windows1252.NewDecoder().Bytes(value)
+	return string(decoded)
+}
+
+func readExtTextANSI(mem *mmu.MMU, ptr uint64, count int) ([]byte, bool) {
+	if count == 0 {
+		return nil, true
+	}
+	if ptr == 0 {
+		return nil, false
+	}
+	value := make([]byte, count)
+	for i := range value {
+		b, err := mem.Read8(ptr + uint64(i))
+		if err != nil {
+			return nil, false
+		}
+		value[i] = b
+	}
+	return value, true
+}
+
+func readExtTextUTF16(mem *mmu.MMU, ptr uint64, count int) ([]uint16, bool) {
+	if count == 0 {
+		return nil, true
+	}
+	if ptr == 0 {
+		return nil, false
+	}
+	value := make([]uint16, count)
+	for i := range value {
+		char, err := mem.Read16(ptr + uint64(i)*2)
+		if err != nil {
+			return nil, false
+		}
+		value[i] = char
+	}
+	return value, true
+}
+
+func extTextANSIText(value []byte, explicitAdvances bool) string {
+	if explicitAdvances {
+		return decodeExtTextANSI(value)
+	}
+	return string(value)
 }
 
 func (a gdiDrawTextAdapter) TextExtent(s string) (w, h int32) {
@@ -992,13 +1113,31 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		lprc := ctx.Arg(4)
 		lpStr := ctx.Arg(5)
 		nLen := int(uint32(ctx.Arg(6)))
+		lpDx := ctx.Arg(7)
 		if nLen > 8192 {
 			ctx.SetReturn(0)
 			return 0
 		}
+		if opts&0x10 != 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		advanceX, advanceY, ok := readExtTextAdvances(mem, lpDx, nLen, opts&0x2000 != 0)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
 		text := ""
-		if lpStr != 0 && nLen > 0 {
-			text = readGuestUTF16N(lpStr, nLen)
+		if nLen > 0 {
+			chars, ok := readExtTextUTF16(mem, lpStr, nLen)
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
+			}
+			text = string(gdi.UTF16ToRunes(chars))
+			if lpDx != 0 {
+				advanceX, advanceY = collapseUTF16Advances(chars, advanceX, advanceY)
+			}
 		}
 		if lprc != 0 {
 			rL, _ := mem.Read32(lprc)
@@ -1038,7 +1177,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 				}
 				dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = x0, y0, x1, y1
 				if len(text) > 0 {
-					dc.TextOut(x, y, text, false)
+					dc.TextOutAdvances(x, y, text, false, advanceX, advanceY)
 				}
 				dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = oldX0, oldY0, oldX1, oldY1
 				ctx.SetReturn(1)
@@ -1046,7 +1185,7 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 			}
 		}
 		if len(text) > 0 {
-			dc.TextOut(x, y, text, false)
+			dc.TextOutAdvances(x, y, text, false, advanceX, advanceY)
 		}
 		ctx.SetReturn(1)
 		return 0
@@ -1124,9 +1263,10 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		top, _ := mem.Read32(lpRect + 4)
 		right, _ := mem.Read32(lpRect + 8)
 		bottom, _ := mem.Read32(lpRect + 12)
-		color := gdiMgr.BrushColor(ctx.Arg(2), hctx.SysColors)
-		ravelog.Logf("[gdi] FillRect dc=0x%x (%d,%d,%d,%d) color=0x%06x\n", ctx.Arg(0), left, top, right, bottom, color)
-		dc.FillRect(int32(left), int32(top), int32(right), int32(bottom), color)
+		hBrush := ctx.Arg(2)
+		ravelog.Logf("[gdi] FillRect dc=0x%x (%d,%d,%d,%d) brush=0x%x\n", ctx.Arg(0), left, top, right, bottom, hBrush)
+		fillRectUsingBrushHandle(dc, gdiMgr, hBrush, hctx.SysColors,
+			int32(left), int32(top), int32(right), int32(bottom))
 		ctx.SetReturn(1)
 		return 0
 	})
@@ -4148,16 +4288,39 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 		lprc := ctx.Arg(4)
 		lpStr := ctx.Arg(5)
 		nLen := int(uint32(ctx.Arg(6)))
+		lpDx := ctx.Arg(7)
+		if nLen > 8192 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		if opts&0x10 != 0 {
+			ctx.SetReturn(0)
+			return 0
+		}
+		advanceX, advanceY, ok := readExtTextAdvances(mem, lpDx, nLen, opts&0x2000 != 0)
+		if !ok {
+			ctx.SetReturn(0)
+			return 0
+		}
 		text := ""
-		if lpStr != 0 && nLen > 0 {
-			buf := make([]byte, nLen)
-			for i := 0; i < nLen; i++ {
-				b, _ := mem.Read8(lpStr + uint64(i))
-				buf[i] = b
+		var ansiBytes []byte
+		if nLen > 0 {
+			var ok bool
+			ansiBytes, ok = readExtTextANSI(mem, lpStr, nLen)
+			if !ok {
+				ctx.SetReturn(0)
+				return 0
 			}
-			text = string(buf)
+			text = extTextANSIText(ansiBytes, lpDx != 0)
 		}
 		ravelog.Logf("[gdi32] ExtTextOutA hdc=0x%x x=%d y=%d opts=0x%x text=%q\n", ctx.Arg(0), x, y, opts, text)
+		drawText := func() {
+			if lpDx == 0 {
+				dc.TextOutANSI(x, y, ansiBytes, false)
+			} else {
+				dc.TextOutAdvances(x, y, text, false, advanceX, advanceY)
+			}
+		}
 		if lprc != 0 {
 			rL, _ := mem.Read32(lprc)
 			rT, _ := mem.Read32(lprc + 4)
@@ -4187,16 +4350,16 @@ func registerGdi32Handlers(hctx *HandlerCtx) {
 					}
 				}
 				dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = x0, y0, x1, y1
-				if len(text) > 0 {
-					dc.TextOut(x, y, text, false)
+				if len(ansiBytes) > 0 {
+					drawText()
 				}
 				dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1 = oldX0, oldY0, oldX1, oldY1
 				ctx.SetReturn(1)
 				return 0
 			}
 		}
-		if len(text) > 0 {
-			dc.TextOut(x, y, text, false)
+		if len(ansiBytes) > 0 {
+			drawText()
 		}
 		ctx.SetReturn(1)
 		return 0

@@ -20,6 +20,15 @@ import (
 // It receives the CPU state and returns an NTSTATUS code.
 type TrapHandler func(ctx *TrapContext) uint32
 
+// SemanticHandler describes a concrete ABI implementation registered for an
+// exported function. It is used by compatibility audits as well as dispatch.
+type SemanticHandler struct {
+	ImplementationID string
+	Signature        string
+	ContractCaseID   string
+	Handler          TrapHandler
+}
+
 // TrapContext provides access to guest CPU state and VM subsystems for handlers.
 type TrapContext struct {
 	CPU     arch.CPU
@@ -193,6 +202,7 @@ type Dispatcher struct {
 	mu               sync.RWMutex
 	handlers         map[uint32]TrapHandler
 	handlersByModule map[string]map[string]TrapHandler
+	semanticByModule map[string]map[string]SemanticHandler
 	nextDynamicID    uint32
 	hprof            *handlerProfiler  // optional hot-handler profiler (RAVEN_PROFILE_HANDLERS)
 	traceStdcall     bool              // log guest-range stdcall cleanups (RAVEN_TRACE_STDCALL)
@@ -216,6 +226,7 @@ func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *Registr
 	d := &Dispatcher{
 		handlers:         make(map[uint32]TrapHandler),
 		handlersByModule: make(map[string]map[string]TrapHandler),
+		semanticByModule: make(map[string]map[string]SemanticHandler),
 		names:            make(map[uint32]string),
 		ntdll:            ntdll,
 		win32u:           win32u,
@@ -257,6 +268,13 @@ func NewDispatcher(mem *mmu.MMU, fs *vfs.VFS, handles *HandleTable, reg *Registr
 	})
 
 	return d
+}
+
+func (d *Dispatcher) ProcessState() *ProcessState {
+	if d == nil || d.ctx == nil {
+		return nil
+	}
+	return d.ctx.State
 }
 
 // SetTrace enables/disables trace logging.
@@ -917,6 +935,10 @@ var win32ArgCounts = map[string]int{
 	"PostMessageW":                4,
 	"SendMessageA":                4,
 	"SendMessageW":                4,
+	"InSendMessage":               0,
+	"InSendMessageEx":             1,
+	"ReplyMessage":                1,
+	"QuerySendMessage":            0,
 	"PostQuitMessage":             1,
 	"DefWindowProcA":              4,
 	"DefWindowProcW":              4,
@@ -1824,6 +1846,50 @@ func (d *Dispatcher) RegisterAutoStubHandler(synth *SynthPE, funcName string, h 
 		return
 	}
 	d.handlers[id] = h
+}
+
+// RegisterSemanticHandler registers a concrete handler together with the ABI
+// and executable contract identity used by compatibility audits.
+func (d *Dispatcher) RegisterSemanticHandler(synth *SynthPE, funcName string, semantic SemanticHandler) {
+	if synth == nil || semantic.Handler == nil || semantic.ImplementationID == "" || semantic.Signature == "" || semantic.ContractCaseID == "" {
+		return
+	}
+	addr, ok := synth.Exports[funcName]
+	if !ok {
+		return
+	}
+	id, ok := synth.StubIDs[addr]
+	if !ok {
+		return
+	}
+	d.RegisterAutoStubHandler(synth, funcName, semantic.Handler)
+	d.mu.Lock()
+	if d.semanticByModule == nil {
+		d.semanticByModule = make(map[string]map[string]SemanticHandler)
+	}
+	module := strings.ToLower(synth.Name)
+	if d.semanticByModule[module] == nil {
+		d.semanticByModule[module] = make(map[string]SemanticHandler)
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(semantic.Signature)), "cdecl") {
+		d.cdeclIDs[id] = true
+	}
+	d.semanticByModule[module][funcName] = semantic
+	d.mu.Unlock()
+}
+
+// SemanticHandlers returns a copy of the concrete semantic registration map.
+func (d *Dispatcher) SemanticHandlers() map[string]map[string]SemanticHandler {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	result := make(map[string]map[string]SemanticHandler, len(d.semanticByModule))
+	for module, handlers := range d.semanticByModule {
+		result[module] = make(map[string]SemanticHandler, len(handlers))
+		for name, handler := range handlers {
+			result[module][name] = handler
+		}
+	}
+	return result
 }
 
 // WrapAutoStubHandler replaces an existing synthetic DLL handler while

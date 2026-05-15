@@ -47,6 +47,40 @@ func TestModalPumpEntrySPPreservesCallbackStack(t *testing.T) {
 	}
 }
 
+func TestSentMessageLoopPumpReturnsToModalStackPE32AndPE64(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		is32     bool
+		wordSize uint64
+	}{
+		{name: "PE32", is32: true, wordSize: 4},
+		{name: "PE64", is32: false, wordSize: 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const (
+				loopSP = uint64(0x9000)
+				loopPC = uint64(0x140001000)
+			)
+			pump := sentMessageLoopPump(loopSP, loopPC, test.is32)
+			if pump == nil {
+				t.Fatal("modal sent-message pump was not created")
+			}
+			if pump.originalSP != loopSP-test.wordSize {
+				t.Fatalf("original SP = %#x, want %#x", pump.originalSP, loopSP-test.wordSize)
+			}
+			if pump.returnAddress != loopPC || pump.is32 != test.is32 || pump.argumentCount != 0 {
+				t.Fatalf("modal sent-message pump = %+v", pump)
+			}
+		})
+	}
+	if sentMessageLoopPump(0, 0x140001000, false) != nil {
+		t.Fatal("zero modal stack produced a sent-message pump")
+	}
+	if sentMessageLoopPump(0x9000, 0, false) != nil {
+		t.Fatal("zero modal return address produced a sent-message pump")
+	}
+}
+
 func TestModalMessageWndProcUsesMessageWindow(t *testing.T) {
 	const (
 		dialog     = uint64(0x5001)
@@ -202,6 +236,24 @@ func TestModalDialogRegistryIsolatesGuestCPUs(t *testing.T) {
 	}
 	if _, ok := dialogs.top(firstCPU); ok {
 		t.Fatal("completed dialog remained on its CPU stack")
+	}
+}
+
+func TestModalDialogRegistryKeepsNestedDialogsWhenOuterEnds(t *testing.T) {
+	cpu := x64.New(mmu.New())
+	var dialogs modalDialogRegistry
+	dialogs.push(cpu, modalDlgEntry{hwnd: 0x5001})
+	dialogs.push(cpu, modalDlgEntry{hwnd: 0x5002})
+	if !dialogs.markEnded(cpu, 0x5001, 6) {
+		t.Fatal("outer dialog was not marked complete")
+	}
+	entry, ok := dialogs.takeEnded(cpu, 0x5001)
+	if !ok || entry.hwnd != 0x5001 || entry.result != 6 {
+		t.Fatalf("completed outer dialog = %+v, present=%t", entry, ok)
+	}
+	top, ok := dialogs.top(cpu)
+	if !ok || top.hwnd != 0x5002 || top.ended {
+		t.Fatalf("nested dialog was lost: %+v, present=%t", top, ok)
 	}
 }
 

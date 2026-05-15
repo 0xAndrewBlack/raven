@@ -253,6 +253,80 @@ func TestUserCallbackManagerConcurrentSameCPU(t *testing.T) {
 	}
 }
 
+func TestUserCallbackManagerSerializesSameCPUThroughCompletion(t *testing.T) {
+	memA, cpuA := newUserCallbackTestCPU(t, false, 0x2200000)
+	memB, cpuB := newUserCallbackTestCPU(t, false, 0x2300000)
+	manager := new(UserCallbackManager)
+	completionStarted := make(chan struct{})
+	releaseCompletion := make(chan struct{})
+
+	if _, err := manager.BeginWithCompletion(cpuA, memA, 0x2210000, 1, nil,
+		func(cpu *x64.CPU, _ UserCallbackReturn) {
+			close(completionStarted)
+			<-releaseCompletion
+			cpu.SetSyscallReturn(0x12345678)
+		}); err != nil {
+		t.Fatal(err)
+	}
+
+	returnDone := make(chan error, 1)
+	go func() {
+		_, err := manager.NtCallbackReturn(cpuA, 0, 0, uint64(StatusSuccess))
+		returnDone <- err
+	}()
+	<-completionStarted
+
+	serializerValue, ok := manager.cpuSerializers.Load(cpuA)
+	if !ok {
+		t.Fatal("same-CPU serializer is missing during completion")
+	}
+	serializer := serializerValue.(*sync.Mutex)
+	if serializer.TryLock() {
+		serializer.Unlock()
+		t.Fatal("same-CPU serializer was released before completion returned")
+	}
+
+	otherCPUStarted := make(chan error, 1)
+	go func() {
+		_, err := manager.Begin(cpuB, memB, 0x2310000, 2, nil)
+		otherCPUStarted <- err
+	}()
+	if err := <-otherCPUStarted; err != nil {
+		t.Fatal(err)
+	}
+
+	sameCPUAttempted := make(chan struct{})
+	sameCPUStarted := make(chan error, 1)
+	go func() {
+		close(sameCPUAttempted)
+		_, err := manager.Begin(cpuA, memA, 0x2220000, 3, nil)
+		sameCPUStarted <- err
+	}()
+	<-sameCPUAttempted
+	select {
+	case err := <-sameCPUStarted:
+		t.Fatalf("same-CPU Begin completed before completion returned: %v", err)
+	default:
+	}
+	close(releaseCompletion)
+	if err := <-returnDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-sameCPUStarted; err != nil {
+		t.Fatal(err)
+	}
+	if callbackReturn, ok := manager.TakeReturn(cpuA); ok {
+		t.Fatalf("completion callback also queued return %+v", callbackReturn)
+	}
+
+	if _, err := manager.NtCallbackReturn(cpuA, 0, 0, uint64(StatusSuccess)); err != nil {
+		t.Fatal(err)
+	}
+	if got := cpuA.Regs[x64.RAX]; got != 0x12345678 {
+		t.Fatalf("restored syscall return = 0x%x, want 0x12345678", got)
+	}
+}
+
 func TestDispatcherNtCallbackReturnContract(t *testing.T) {
 	for _, mode32 := range []bool{false, true} {
 		t.Run(fmt.Sprintf("mode32=%t", mode32), func(t *testing.T) {

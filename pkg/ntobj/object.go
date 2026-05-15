@@ -170,6 +170,14 @@ func (m *Manager) QueueAPC(tid uint64, fn func()) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) DiscardAPCs(tid uint64) int {
+	m.mu.Lock()
+	count := len(m.apcs[tid])
+	delete(m.apcs, tid)
+	m.mu.Unlock()
+	return count
+}
+
 // Wait is WaitEx without alertability (see WaitEx).
 func (m *Manager) Wait(objs []Waitable, waitAll bool, tid uint64, timeout time.Duration) uint32 {
 	r, _ := m.WaitEx(objs, waitAll, tid, timeout, false)
@@ -193,7 +201,11 @@ func (m *Manager) WaitEx(objs []Waitable, waitAll bool, tid uint64, timeout time
 	// A timer broadcasts at the deadline so the timed-out waiter wakes to return.
 	var timer *time.Timer
 	if !infinite {
-		timer = time.AfterFunc(timeout, func() { m.cond.Broadcast() })
+		timer = time.AfterFunc(timeout, func() {
+			m.mu.Lock()
+			m.cond.Broadcast()
+			m.mu.Unlock()
+		})
 		defer timer.Stop()
 	}
 
@@ -235,8 +247,13 @@ func (m *Manager) WaitEx(objs []Waitable, waitAll bool, tid uint64, timeout time
 		// Alertable: a queued user-APC interrupts the wait (WAIT_IO_COMPLETION).
 		if alertable {
 			if q := m.apcs[tid]; len(q) > 0 {
-				delete(m.apcs, tid)
-				return WaitIOCompletion, q
+				callback := q[0]
+				if len(q) == 1 {
+					delete(m.apcs, tid)
+				} else {
+					m.apcs[tid] = q[1:]
+				}
+				return WaitIOCompletion, []func(){callback}
 			}
 		}
 
@@ -278,6 +295,27 @@ func (e *Event) Peek() bool { return e.state }
 
 // Manual reports whether this is a manual-reset event (manager lock held).
 func (e *Event) Manual() bool { return e.manual }
+
+// Timer is a manual-reset or synchronization timer payload. Scheduling lives in
+// the handle layer; state transitions run through Manager.Signal.
+type Timer struct {
+	manual bool
+	state  bool
+}
+
+func NewTimer(manualReset bool) *Timer { return &Timer{manual: manualReset} }
+
+func (t *Timer) signaled(uint64) bool { return t.state }
+func (t *Timer) satisfy(uint64) bool {
+	if !t.manual {
+		t.state = false
+	}
+	return false
+}
+func (t *Timer) Set()         { t.state = true }
+func (t *Timer) Reset()       { t.state = false }
+func (t *Timer) Peek() bool   { return t.state }
+func (t *Timer) Manual() bool { return t.manual }
 
 // Semaphore is a counting semaphore with an upper bound.
 type Semaphore struct {

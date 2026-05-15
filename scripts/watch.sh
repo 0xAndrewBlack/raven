@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # watch.sh - ONE command: build Raven, run the highest gate reached, render to
-# /tmp/raven-final.png (and a live Wayland window if -wayland), then print an
+# ~/.cache/raven/artifacts/raven-final.png (and a live Wayland window if -wayland), then print an
 # result banner "CURRENT CHECK: case - PASS/FAIL" with a client-area pixel
 # assertion on the window's CLIENT area (real content, not just the frame).
 #
@@ -15,18 +15,21 @@
 
 set -u
 cd "$(dirname "$0")/.." || exit 2
+source scripts/raven-cache.sh || exit 2
 SYSROOT="${RAVEN_SYSROOT:-/home/user/reactos-sysroot}"
-PNG=/tmp/raven-final.png
+PNG="$RAVEN_ARTIFACT_ROOT/raven-final.png"
+LOG="$RAVEN_ARTIFACT_ROOT/watch.log"
 
 echo "==> build"
-go build -tags "guest_windows guest_linux" -o /tmp/raven-watch ./cmd/govm || { echo "BUILD FAILED"; exit 2; }
-RV=/tmp/raven-watch
+mkdir -p "$RAVEN_CACHE_ROOT/bin"
+go build -tags "guest_windows guest_linux" -o "$RAVEN_CACHE_ROOT/bin/raven-watch" ./cmd/govm || { echo "BUILD FAILED"; exit 2; }
+RV="$RAVEN_CACHE_ROOT/bin/raven-watch"
 
 # Gates are climbed in order GUI_FIXTURE -> NOTEPAD_CASE -> NOTEPADPP_CASE. The CURRENT gate is the lowest one
 # not yet passing; we run that. (Until GUI_FIXTURE paints, that's GUI_FIXTURE - no point running
 # notepad/npp, which need everything GUI_FIXTURE needs plus CRT/COM.) Override with GATE=.
 NPP=testdata/npp/notepad++.exe
-NP=/tmp/reactos-apps/notepad.exe
+NP="$RAVEN_CACHE_ROOT/reactos-apps/notepad.exe"
 GUI_FIXTURE=testdata/dll_fixture/raven_gui_min.exe
 GATE="${GATE:-GUI_FIXTURE}"
 case "$GATE" in
@@ -36,7 +39,7 @@ case "$GATE" in
 esac
 echo "==> current gate: $GATE ($APP)"
 
-run() { timeout 30 "$RV" "$@" </dev/null 2>/tmp/watch.log; }
+run() { timeout 30 "$RV" "$@" </dev/null 2>"$LOG"; }
 
 rm -f "$PNG"
 run -wayland=false -sysroot "$SYSROOT" -trace-syscall -render-png "$PNG" "$APP"
@@ -47,7 +50,7 @@ fi
 
 # Proxy that the real guest WndProc painted: it issued NtUserBeginPaint.
 painted_syscall=no
-grep -q "NtUserBeginPaint" /tmp/watch.log && painted_syscall=yes
+grep -q "NtUserBeginPaint" "$LOG" && painted_syscall=yes
 
 # Pixel assertion: the client area (below the caption) must contain real content
 # - both the window background fill AND darker text pixels (not a flat frame).

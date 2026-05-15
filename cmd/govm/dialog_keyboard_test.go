@@ -2,7 +2,10 @@
 
 package main
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 
 func TestNextDialogTabItemWrapsAndSkipsUnavailableControls(t *testing.T) {
 	const dialog = uint64(0x5000)
@@ -70,6 +73,136 @@ func TestReorderWindow(t *testing.T) {
 	order = reorderWindow(order, 30, 10)
 	if len(order) != 3 || order[0] != 10 || order[1] != 30 || order[2] != 20 {
 		t.Fatalf("order = %v, want [10 30 20]", order)
+	}
+}
+
+func TestReorderWindowRejectsInvalidInsertAfter(t *testing.T) {
+	order := []uint64{10, 20, 30}
+	reordered, ok := reorderWindowGrouped(order, 30, 99, nil)
+	if ok {
+		t.Fatal("invalid insert-after handle was accepted")
+	}
+	if len(reordered) != 3 || reordered[0] != 10 || reordered[1] != 20 || reordered[2] != 30 {
+		t.Fatalf("order changed after invalid insert-after: %v", reordered)
+	}
+}
+
+func TestReorderWindowNotTopmostStartsNonTopmostGroup(t *testing.T) {
+	order := []uint64{10, 20, 30, 40}
+	topmost := map[uint64]bool{10: true, 20: true, 30: true}
+	reordered, ok := reorderWindowGrouped(order, 30, ^uint64(1), topmost)
+	if !ok {
+		t.Fatal("HWND_NOTOPMOST was rejected")
+	}
+	want := []uint64{10, 20, 30, 40}
+	for i := range want {
+		if reordered[i] != want[i] {
+			t.Fatalf("order = %v, want %v", reordered, want)
+		}
+	}
+	if topmost[30] {
+		t.Fatal("HWND_NOTOPMOST did not clear topmost state")
+	}
+}
+
+func TestHandlerCtxZOrderConcurrentSnapshots(t *testing.T) {
+	hctx := &HandlerCtx{HwndTopmost: make(map[uint64]bool)}
+	for hwnd := uint64(1); hwnd <= 16; hwnd++ {
+		hctx.addZOrder(hwnd, false)
+	}
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for iteration := 0; iteration < 1000; iteration++ {
+				hwnd := uint64((iteration+offset)%16 + 1)
+				hctx.reorderZOrder(hwnd, 0)
+				if got := len(hctx.snapshotZOrder()); got != 16 {
+					t.Errorf("snapshot length = %d, want 16", got)
+					return
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+}
+
+func TestBackToFrontChildWindowsUsesZOrder(t *testing.T) {
+	const parent = uint64(1)
+	children := map[uint64]*controlState{
+		10: {parentHWND: parent},
+		20: {parentHWND: parent},
+		30: {parentHWND: 2},
+	}
+	order := []uint64{10, 30, 20}
+	got := backToFrontChildWindows(children, order, parent)
+	if len(got) != 2 || got[0] != 20 || got[1] != 10 {
+		t.Fatalf("paint order = %v, want [20 10]", got)
+	}
+}
+
+func TestNewChildWindowStartsAtBottomOfSiblingZOrder(t *testing.T) {
+	const (
+		firstParent  = uint64(1)
+		secondParent = uint64(2)
+	)
+	children := map[uint64]*controlState{
+		10: {parentHWND: firstParent},
+		20: {parentHWND: secondParent},
+		30: {parentHWND: firstParent},
+	}
+	hctx := &HandlerCtx{HwndTopmost: make(map[uint64]bool)}
+	hctx.addZOrder(90, true)
+	hctx.addZOrder(10, false)
+	hctx.addZOrder(20, false)
+	hctx.addZOrder(30, false)
+
+	if !hctx.placeNewChildAtBottom(30) {
+		t.Fatal("new child could not be placed at the bottom")
+	}
+
+	order := hctx.snapshotZOrder()
+	got := orderedChildWindows(children, order, firstParent)
+	want := []uint64{10, 30}
+	if len(got) != len(want) {
+		t.Fatalf("first parent z-order = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("first parent z-order = %v, want %v", got, want)
+		}
+	}
+	if got := orderedChildWindows(children, order, secondParent); len(got) != 1 || got[0] != 20 {
+		t.Fatalf("second parent z-order = %v, want [20]", got)
+	}
+	if order[0] != 90 || !hctx.HwndTopmost[90] {
+		t.Fatalf("topmost window lost its group: order=%v topmost=%v", order, hctx.HwndTopmost[90])
+	}
+
+	hctx.addZOrder(40, false)
+	order = hctx.snapshotZOrder()
+	if len(order) < 2 || order[0] != 90 || order[1] != 40 {
+		t.Fatalf("new top-level window did not start above normal windows: %v", order)
+	}
+}
+
+func TestChildPaintOrderUsesZOrderWithoutClassPriority(t *testing.T) {
+	const parent = uint64(1)
+	children := map[uint64]*controlState{
+		10: {parentHWND: parent, className: "ToolbarWindow32"},
+		20: {parentHWND: parent, className: "ReBarWindow32"},
+		30: {parentHWND: parent, className: "Scintilla"},
+	}
+	got := childPaintOrder(children, []uint64{20, 10, 30}, parent)
+	want := []uint64{30, 10, 20}
+	if len(got) != len(want) {
+		t.Fatalf("paint order = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("paint order = %v, want %v", got, want)
+		}
 	}
 }
 

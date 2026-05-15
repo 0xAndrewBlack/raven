@@ -3,6 +3,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 	"sync"
 
@@ -23,6 +24,152 @@ type themeData struct {
 }
 
 var themeGlobal = themeState{nextHandle: 0x5000, themes: make(map[uint32]*themeData)}
+
+type preferredAppMode uint32
+
+const (
+	preferredAppModeDefault preferredAppMode = iota
+	preferredAppModeAllowDark
+	preferredAppModeForceDark
+	preferredAppModeForceLight
+	preferredAppModeMax
+)
+
+const (
+	dwmwaUseImmersiveDarkModeBefore20H1 uint32 = 19
+	dwmwaUseImmersiveDarkMode           uint32 = 20
+)
+
+type windowThemeSelection struct {
+	SubAppName string
+	SubIDList  string
+}
+
+type darkModeState struct {
+	mu                 sync.RWMutex
+	preferredMode      preferredAppMode
+	legacyAppAllowed   bool
+	appsUseDark        bool
+	systemUsesDark     bool
+	windowAllowed      map[uint64]bool
+	windowThemes       map[uint64]windowThemeSelection
+	windowImmersiveDWM map[uint64]bool
+}
+
+var darkModeGlobal = darkModeState{
+	windowAllowed:      make(map[uint64]bool),
+	windowThemes:       make(map[uint64]windowThemeSelection),
+	windowImmersiveDWM: make(map[uint64]bool),
+}
+
+func shouldAppsUseDarkMode() bool {
+	darkModeGlobal.mu.RLock()
+	defer darkModeGlobal.mu.RUnlock()
+	switch darkModeGlobal.preferredMode {
+	case preferredAppModeForceDark:
+		return true
+	case preferredAppModeForceLight:
+		return false
+	default:
+		return darkModeGlobal.appsUseDark
+	}
+}
+
+func darkModeAllowedForApp() bool {
+	darkModeGlobal.mu.RLock()
+	defer darkModeGlobal.mu.RUnlock()
+	if darkModeGlobal.legacyAppAllowed {
+		return true
+	}
+	return darkModeGlobal.preferredMode == preferredAppModeAllowDark ||
+		darkModeGlobal.preferredMode == preferredAppModeForceDark
+}
+
+func shouldSystemUseDarkMode() bool {
+	darkModeGlobal.mu.RLock()
+	defer darkModeGlobal.mu.RUnlock()
+	return darkModeGlobal.systemUsesDark
+}
+
+func darkModeAllowedForWindow(hwnd uint64) bool {
+	darkModeGlobal.mu.RLock()
+	defer darkModeGlobal.mu.RUnlock()
+	return darkModeGlobal.windowAllowed[hwnd]
+}
+
+func windowThemeSelectionFor(hwnd uint64) (windowThemeSelection, bool) {
+	darkModeGlobal.mu.RLock()
+	defer darkModeGlobal.mu.RUnlock()
+	selection, ok := darkModeGlobal.windowThemes[hwnd]
+	return selection, ok
+}
+
+func immersiveDarkModeForWindow(hwnd uint64) (bool, bool) {
+	darkModeGlobal.mu.RLock()
+	defer darkModeGlobal.mu.RUnlock()
+	dark, ok := darkModeGlobal.windowImmersiveDWM[hwnd]
+	return dark, ok
+}
+
+func darkModeRequestedForWindow(hwnd uint64) bool {
+	if dark, ok := immersiveDarkModeForWindow(hwnd); ok && dark {
+		return true
+	}
+	if selection, ok := windowThemeSelectionFor(hwnd); ok {
+		names := strings.ToLower(selection.SubAppName + ";" + selection.SubIDList)
+		if strings.Contains(names, "darkmode") || strings.Contains(names, "dark") {
+			return true
+		}
+	}
+	return darkModeAllowedForWindow(hwnd) && darkModeAllowedForApp() && shouldAppsUseDarkMode()
+}
+
+func effectiveDarkModeForWindow(hwnd uint64, children map[uint64]*controlState) bool {
+	for hwnd != 0 {
+		if darkModeRequestedForWindow(hwnd) {
+			return true
+		}
+		state := children[hwnd]
+		if state == nil || state.parentHWND == hwnd {
+			break
+		}
+		hwnd = state.parentHWND
+	}
+	return false
+}
+
+func clearDarkModeWindowState(hwnd uint64) {
+	darkModeGlobal.mu.Lock()
+	delete(darkModeGlobal.windowAllowed, hwnd)
+	delete(darkModeGlobal.windowThemes, hwnd)
+	delete(darkModeGlobal.windowImmersiveDWM, hwnd)
+	darkModeGlobal.mu.Unlock()
+}
+
+func darkRepaintWindowRoots(hctx *HandlerCtx) []uint64 {
+	if hctx == nil {
+		return nil
+	}
+	roots := make(map[uint64]bool)
+	if hctx.MainHWND != 0 {
+		roots[hctx.MainHWND] = true
+	}
+	for hwnd, state := range hctx.HwndChildren {
+		if root, _, owned := topLevelDialogTarget(hctx, hwnd); owned {
+			roots[root] = true
+			continue
+		}
+		if state != nil && state.parentHWND == 0 {
+			roots[hwnd] = true
+		}
+	}
+	result := make([]uint64, 0, len(roots))
+	for hwnd := range roots {
+		result = append(result, hwnd)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
 
 type bufferedPaintState struct {
 	mu         sync.Mutex
@@ -66,6 +213,76 @@ var themeColors = struct {
 	Border:          0x00D5D5D5,
 	ScrollbarTrack:  0x00F0F0F0,
 	ScrollbarThumb:  0x00CDCDCD,
+}
+
+type darkRenderPalette struct {
+	Background    uint32
+	Control       uint32
+	Input         uint32
+	Border        uint32
+	Text          uint32
+	SecondaryText uint32
+	DisabledText  uint32
+	Highlight     uint32
+	HighlightText uint32
+}
+
+var darkPalette = darkRenderPalette{
+	Background:    0x00202020,
+	Control:       0x002B2B2B,
+	Input:         0x00252525,
+	Border:        0x00656565,
+	Text:          0x00E0E0E0,
+	SecondaryText: 0x00C0C0C0,
+	DisabledText:  0x00808080,
+	Highlight:     0x00404040,
+	HighlightText: 0x00FFFFFF,
+}
+
+func darkThemeColor(color uint32) uint32 {
+	color &= 0x00FFFFFF
+	switch color {
+	case darkPalette.Background, darkPalette.Control, darkPalette.Input, darkPalette.Border,
+		darkPalette.Text, darkPalette.SecondaryText, darkPalette.DisabledText,
+		darkPalette.Highlight, darkPalette.HighlightText:
+		return color
+	}
+	r := int32(color >> 16)
+	g := int32(color >> 8 & 0xFF)
+	b := int32(color & 0xFF)
+	high := max(r, max(g, b))
+	low := min(r, min(g, b))
+	if high-low > 48 {
+		return color
+	}
+	switch {
+	case high >= 245:
+		return darkPalette.Background
+	case high >= 220:
+		return darkPalette.Control
+	case high >= 145:
+		return darkPalette.Border
+	case high <= 32:
+		return darkPalette.Text
+	case high <= 96:
+		return darkPalette.SecondaryText
+	default:
+		return darkPalette.DisabledText
+	}
+}
+
+func remapDCRectForDarkMode(dc *gdi.DC, left, top, right, bottom int32) {
+	if dc == nil || left >= right || top >= bottom {
+		return
+	}
+	for y := top; y < bottom; y++ {
+		for x := left; x < right; x++ {
+			color := dc.GetPixel(x, y)
+			if color != 0xFFFFFFFF {
+				dc.SetPixel(x, y, darkThemeColor(color))
+			}
+		}
+	}
 }
 
 const (
@@ -703,6 +920,76 @@ func writeBool32(mem *mmu.MMU, addr uint64, value bool) {
 	}
 }
 
+func readOptionalThemeString(mem *mmu.MMU, addr uint64) (string, bool) {
+	if addr == 0 {
+		return "", true
+	}
+	chars := make([]uint16, 0, 64)
+	for i := 0; i < 1024; i++ {
+		value, err := mem.Read16(addr + uint64(i)*2)
+		if err != nil {
+			return "", false
+		}
+		if value == 0 {
+			return string(utf16Decode(chars)), true
+		}
+		chars = append(chars, value)
+	}
+	return "", false
+}
+
+func setPreferredDarkAppMode(mode preferredAppMode) preferredAppMode {
+	darkModeGlobal.mu.Lock()
+	defer darkModeGlobal.mu.Unlock()
+	previous := darkModeGlobal.preferredMode
+	if mode < preferredAppModeMax {
+		darkModeGlobal.preferredMode = mode
+		darkModeGlobal.legacyAppAllowed = false
+	}
+	return previous
+}
+
+func allowDarkModeForApp(allow bool) {
+	darkModeGlobal.mu.Lock()
+	darkModeGlobal.legacyAppAllowed = allow
+	if allow {
+		darkModeGlobal.preferredMode = preferredAppModeAllowDark
+	} else {
+		darkModeGlobal.preferredMode = preferredAppModeDefault
+	}
+	darkModeGlobal.mu.Unlock()
+}
+
+func allowDarkModeForWindow(hwnd uint64, allow bool) bool {
+	if hwnd == 0 {
+		return false
+	}
+	darkModeGlobal.mu.Lock()
+	darkModeGlobal.windowAllowed[hwnd] = allow
+	darkModeGlobal.mu.Unlock()
+	return true
+}
+
+func setWindowThemeSelection(hwnd uint64, selection windowThemeSelection) bool {
+	if hwnd == 0 {
+		return false
+	}
+	darkModeGlobal.mu.Lock()
+	darkModeGlobal.windowThemes[hwnd] = selection
+	darkModeGlobal.mu.Unlock()
+	return true
+}
+
+func setImmersiveDarkModeForWindow(hwnd uint64, dark bool) bool {
+	if hwnd == 0 {
+		return false
+	}
+	darkModeGlobal.mu.Lock()
+	darkModeGlobal.windowImmersiveDWM[hwnd] = dark
+	darkModeGlobal.mu.Unlock()
+	return true
+}
+
 func writeThemeString(mem *mmu.MMU, addr uint64, cch uint32, value string) uint32 {
 	if addr == 0 || cch == 0 {
 		return 0
@@ -802,6 +1089,94 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		delete(bufferedPaintGlobal.paints, uint32(handle))
 		bufferedPaintGlobal.mu.Unlock()
 	}
+	registerDarkHandler := func(name string, handler ntapi.TrapHandler) {
+		registerAutoOrDynamicHandler(hctx, uxtheme, name, handler)
+	}
+	requestDarkRepaint := func(hwnd uint64) {
+		if hctx.RequestWindowRepaint != nil && hwnd != 0 {
+			hctx.RequestWindowRepaint(hwnd)
+		}
+	}
+	requestAllDarkRepaint := func() {
+		for _, hwnd := range darkRepaintWindowRoots(hctx) {
+			requestDarkRepaint(hwnd)
+		}
+	}
+
+	registerDarkHandler("OpenNcThemeData", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		className := normalizeThemeClass(readGuestUTF16(ctx.Arg(1)))
+		ctx.SetReturn(allocThemeHandle(hwnd, className))
+		return 0
+	})
+	registerDarkHandler("RefreshImmersiveColorPolicyState", func(ctx *ntapi.TrapContext) uint32 {
+		requestAllDarkRepaint()
+		ctx.SetReturn(0)
+		return 0
+	})
+	registerDarkHandler("GetIsImmersiveColorUsingHighContrast", func(ctx *ntapi.TrapContext) uint32 {
+		_ = ctx.Arg(0)
+		ctx.SetReturn(0)
+		return 0
+	})
+	registerDarkHandler("ShouldAppsUseDarkMode", func(ctx *ntapi.TrapContext) uint32 {
+		if shouldAppsUseDarkMode() {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
+	registerDarkHandler("AllowDarkModeForWindow", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		allow := ctx.Arg(1) != 0
+		previous := darkModeAllowedForWindow(hwnd)
+		if allowDarkModeForWindow(hwnd, allow) {
+			if previous != allow {
+				requestDarkRepaint(hwnd)
+			}
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
+	registerDarkHandler("AllowDarkModeForApp", func(ctx *ntapi.TrapContext) uint32 {
+		allowDarkModeForApp(ctx.Arg(0) != 0)
+		requestAllDarkRepaint()
+		ctx.SetReturn(1)
+		return 0
+	})
+	registerDarkHandler("SetPreferredAppMode", func(ctx *ntapi.TrapContext) uint32 {
+		mode := preferredAppMode(uint32(ctx.Arg(0)))
+		previous := setPreferredDarkAppMode(mode)
+		if mode < preferredAppModeMax && previous != mode {
+			requestAllDarkRepaint()
+		}
+		ctx.SetReturn(uint64(previous))
+		return 0
+	})
+	registerDarkHandler("FlushMenuThemes", func(ctx *ntapi.TrapContext) uint32 {
+		requestDarkRepaint(hctx.MainHWND)
+		ctx.SetReturn(0)
+		return 0
+	})
+	registerDarkHandler("IsDarkModeAllowedForWindow", func(ctx *ntapi.TrapContext) uint32 {
+		if darkModeAllowedForWindow(ctx.Arg(0)) {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
+	registerDarkHandler("ShouldSystemUseDarkMode", func(ctx *ntapi.TrapContext) uint32 {
+		if shouldSystemUseDarkMode() {
+			ctx.SetReturn(1)
+		} else {
+			ctx.SetReturn(0)
+		}
+		return 0
+	})
 
 	d.RegisterAutoStubHandler(uxtheme, "OpenThemeData", func(ctx *ntapi.TrapContext) uint32 {
 		hwnd := ctx.Arg(0)
@@ -830,7 +1205,22 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "SetWindowTheme", func(ctx *ntapi.TrapContext) uint32 {
-		ctx.SetReturn(sOK)
+		hwnd := ctx.Arg(0)
+		subAppName, appOK := readOptionalThemeString(mem, ctx.Arg(1))
+		subIDList, idOK := readOptionalThemeString(mem, ctx.Arg(2))
+		selection := windowThemeSelection{
+			SubAppName: subAppName,
+			SubIDList:  subIDList,
+		}
+		previous, existed := windowThemeSelectionFor(hwnd)
+		if !appOK || !idOK || !setWindowThemeSelection(hwnd, selection) {
+			ctx.SetReturn(eInvalidArg)
+		} else {
+			if !existed || previous != selection {
+				requestDarkRepaint(hwnd)
+			}
+			ctx.SetReturn(sOK)
+		}
 		return 0
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetCurrentThemeName", func(ctx *ntapi.TrapContext) uint32 {
@@ -870,12 +1260,18 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 				prev := [4]int32{dc.ClipX0, dc.ClipY0, dc.ClipX1, dc.ClipY1}
 				dc.SetClipRect(cLeft+dc.OriginX, cTop+dc.OriginY, cRight+dc.OriginX, cBottom+dc.OriginY)
 				drawThemeClassBackground(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), left, top, right, bottom)
+				if td != nil && darkModeRequestedForWindow(td.hwnd) {
+					remapDCRectForDarkMode(dc, left, top, right, bottom)
+				}
 				dc.SetClipRect(prev[0], prev[1], prev[2], prev[3])
 				ctx.SetReturn(sOK)
 				return 0
 			}
 		}
 		drawThemeClassBackground(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), left, top, right, bottom)
+		if td != nil && darkModeRequestedForWindow(td.hwnd) {
+			remapDCRectForDarkMode(dc, left, top, right, bottom)
+		}
 		ctx.SetReturn(sOK)
 		return 0
 	})
@@ -894,6 +1290,9 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 			left, top, right, bottom, ok := readRect(mem, ctx.Arg(4))
 			if ok {
 				drawThemeClassBackground(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), left, top, right, bottom)
+				if td != nil && darkModeRequestedForWindow(td.hwnd) {
+					remapDCRectForDarkMode(dc, left, top, right, bottom)
+				}
 			}
 		}
 		ctx.SetReturn(sOK)
@@ -927,6 +1326,9 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 			left, top, right, bottom = 0, 0, 0, 0
 		}
 		drawThemeTextToDC(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), text, left, top, right, bottom)
+		if td != nil && darkModeRequestedForWindow(td.hwnd) {
+			remapDCRectForDarkMode(dc, left, top, right, bottom)
+		}
 		ctx.SetReturn(sOK)
 		return 0
 	})
@@ -955,6 +1357,9 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 		}
 		if left, top, right, bottom, ok := readRect(mem, ctx.Arg(7)); ok {
 			drawThemeTextToDC(dc, className, int32(ctx.Arg(2)), int32(ctx.Arg(3)), text, left, top, right, bottom)
+			if td != nil && darkModeRequestedForWindow(td.hwnd) {
+				remapDCRectForDarkMode(dc, left, top, right, bottom)
+			}
 		}
 		ctx.SetReturn(sOK)
 		return 0
@@ -988,10 +1393,16 @@ func registerUxthemeHandlers(hctx *HandlerCtx) {
 	})
 	d.RegisterAutoStubHandler(uxtheme, "GetThemeColor", func(ctx *ntapi.TrapContext) uint32 {
 		className := "WINDOW"
-		if td := getThemeInfo(ctx.Arg(0)); td != nil && td.className != "" {
+		td := getThemeInfo(ctx.Arg(0))
+		if td != nil && td.className != "" {
 			className = td.className
 		}
 		fillColor, borderColor, textColor := themePartColors(className, int32(ctx.Arg(1)), int32(ctx.Arg(2)))
+		if td != nil && darkModeRequestedForWindow(td.hwnd) {
+			fillColor = darkThemeColor(fillColor)
+			borderColor = darkThemeColor(borderColor)
+			textColor = darkThemeColor(textColor)
+		}
 		if pColor := ctx.Arg(4); pColor != 0 {
 			color := defaultThemeColor()
 			switch uint32(ctx.Arg(3)) {
@@ -1256,6 +1667,26 @@ func registerDwmapiHandlers(hctx *HandlerCtx) {
 		return 0
 	})
 	d.RegisterAutoStubHandler(dwmapi, "DwmSetWindowAttribute", func(ctx *ntapi.TrapContext) uint32 {
+		hwnd := ctx.Arg(0)
+		attr := uint32(ctx.Arg(1))
+		pvAttr := ctx.Arg(2)
+		cbAttr := uint32(ctx.Arg(3))
+		if attr == dwmwaUseImmersiveDarkModeBefore20H1 || attr == dwmwaUseImmersiveDarkMode {
+			if pvAttr == 0 || cbAttr != 4 {
+				ctx.SetReturn(eInvalidArg)
+				return 0
+			}
+			value, err := mem.Read32(pvAttr)
+			dark := value != 0
+			previous, existed := immersiveDarkModeForWindow(hwnd)
+			if err != nil || !setImmersiveDarkModeForWindow(hwnd, dark) {
+				ctx.SetReturn(eInvalidArg)
+				return 0
+			}
+			if (!existed || previous != dark) && hctx.RequestWindowRepaint != nil {
+				hctx.RequestWindowRepaint(hwnd)
+			}
+		}
 		ctx.SetReturn(sOK)
 		return 0
 	})
@@ -1263,6 +1694,24 @@ func registerDwmapiHandlers(hctx *HandlerCtx) {
 		attr := uint32(ctx.Arg(1))
 		pvAttr := ctx.Arg(2)
 		cbAttr := uint32(ctx.Arg(3))
+		if attr == dwmwaUseImmersiveDarkModeBefore20H1 || attr == dwmwaUseImmersiveDarkMode {
+			if pvAttr == 0 || cbAttr != 4 {
+				ctx.SetReturn(eInvalidArg)
+				return 0
+			}
+			dark, _ := immersiveDarkModeForWindow(ctx.Arg(0))
+			if dark {
+				if err := mem.Write32(pvAttr, 1); err != nil {
+					ctx.SetReturn(eInvalidArg)
+					return 0
+				}
+			} else if err := mem.Write32(pvAttr, 0); err != nil {
+				ctx.SetReturn(eInvalidArg)
+				return 0
+			}
+			ctx.SetReturn(sOK)
+			return 0
+		}
 		if pvAttr != 0 {
 			switch attr {
 			case 1:

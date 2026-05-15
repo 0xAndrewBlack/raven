@@ -98,7 +98,7 @@ func TestJITX87MatchesInterpreter(t *testing.T) {
 			if err := block.Run(&compiler.state); err != nil {
 				t.Fatal(err)
 			}
-			if compiled.fpuST != interpreted.fpuST || compiled.fpuTop != interpreted.fpuTop || compiled.fpuTW != interpreted.fpuTW {
+			if !x87StacksEqual(compiled.fpuST, interpreted.fpuST) || compiled.fpuTop != interpreted.fpuTop || compiled.fpuTW != interpreted.fpuTW {
 				t.Fatalf("compiled FPU state differs: ST=%v top=%d tag=%#x, want ST=%v top=%d tag=%#x",
 					compiled.fpuST, compiled.fpuTop, compiled.fpuTW, interpreted.fpuST, interpreted.fpuTop, interpreted.fpuTW)
 			}
@@ -123,6 +123,369 @@ func TestJITX87MatchesInterpreter(t *testing.T) {
 	}
 }
 
+func TestJITX87FISTM32OutOfRangeParity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		code  []byte
+		value float64
+	}{
+		{"fist-positive", []byte{0xDB, 0x55, 0}, math.Ldexp(1, 31)},
+		{"fist-negative", []byte{0xDB, 0x55, 0}, -math.Ldexp(1, 31) - 1},
+		{"fistp-positive", []byte{0xDB, 0x5D, 0}, math.Ldexp(1, 31)},
+		{"fistp-negative", []byte{0xDB, 0x5D, 0}, -math.Ldexp(1, 31) - 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			interpreted, compiled, interpretedMem, compiledMem := runX87ParityCase(t, test.code, 0, func(cpu *CPU) {
+				cpu.fpuSetST0(test.value)
+				cpu.fpuSW = 0
+			})
+			assertX87Parity(t, compiled, interpreted, compiledMem, interpretedMem)
+			for name, mem := range map[string]*mmu.MMU{"interpreter": interpretedMem, "jit": compiledMem} {
+				got, err := mem.Read32(0x9000)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != 0x80000000 {
+					t.Fatalf("%s result=%#x, want indefinite integer", name, got)
+				}
+			}
+			if interpreted.fpuSW&fpuExcInvalid == 0 || compiled.fpuSW&fpuExcInvalid == 0 {
+				t.Fatalf("invalid exception missing: interpreter=%#x jit=%#x", interpreted.fpuSW, compiled.fpuSW)
+			}
+		})
+	}
+}
+
+func TestJITX87FISTPM64BoundaryParity(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		value       float64
+		wantInvalid bool
+	}{
+		{"largest-valid", math.Nextafter(math.Ldexp(1, 63), 0), false},
+		{"positive-overflow", math.Ldexp(1, 63), true},
+		{"negative-limit", -math.Ldexp(1, 63), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			interpreted, compiled, interpretedMem, compiledMem := runX87ParityCase(t, []byte{0xDF, 0x7D, 0}, 0, func(cpu *CPU) {
+				cpu.fpuSetST0(test.value)
+				cpu.fpuSW = 0
+			})
+			assertX87Parity(t, compiled, interpreted, compiledMem, interpretedMem)
+			if (compiled.fpuSW&fpuExcInvalid != 0) != test.wantInvalid {
+				t.Fatalf("status=%#x, want invalid=%v", compiled.fpuSW, test.wantInvalid)
+			}
+			if test.wantInvalid {
+				got, err := compiledMem.Read64(0x9000)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != 1<<63 {
+					t.Fatalf("result=%#x, want indefinite integer", got)
+				}
+			}
+		})
+	}
+}
+
+func TestJITX87StoreMemoryFaultRestoresFPUState(t *testing.T) {
+	compiled, mem := newX87TestCPU(t, []byte{0xD9, 0x5D, 0}, 0)
+	compiled.Regs[RBP] = 0x9FFF
+	compiled.fpuSetST0(1 + math.Ldexp(1, -30))
+	if err := mem.Write8(0x9FFF, 0xA5); err != nil {
+		t.Fatal(err)
+	}
+	beforeST := compiled.fpuST
+	beforeTop := compiled.fpuTop
+	beforeCW := compiled.fpuCW
+	beforeSW := compiled.fpuSW
+	beforeTW := compiled.fpuTW
+	compiler := NewJITCompiler(compiled, mem)
+	block := compiler.cache.Compile(compiled.RIP)
+	if block == nil {
+		t.Fatal("x87 block was not compiled")
+	}
+	if err := block.Run(&compiler.state); err == nil {
+		t.Fatal("unmapped x87 store did not fault")
+	}
+	if !x87StacksEqual(compiled.fpuST, beforeST) || compiled.fpuTop != beforeTop ||
+		compiled.fpuCW != beforeCW || compiled.fpuSW != beforeSW || compiled.fpuTW != beforeTW {
+		t.Fatalf("fault changed FPU state: ST=%v top=%d cw=%#x sw=%#x tw=%#x",
+			compiled.fpuST, compiled.fpuTop, compiled.fpuCW, compiled.fpuSW, compiled.fpuTW)
+	}
+	if got, err := mem.Read8(0x9FFF); err != nil || got != 0xA5 {
+		t.Fatalf("faulting store changed mapped prefix=%#x err=%v", got, err)
+	}
+}
+
+func TestJITX87EmptyStackControlParity(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		code    []byte
+		wantTop int
+		wantSW  uint16
+	}{
+		{"fxch-st0", []byte{0xD9, 0xC8}, 0, fpuExcInvalid | fpuStackFault},
+		{"fdecstp", []byte{0xD9, 0xF6}, 7, 0},
+		{"fincstp", []byte{0xD9, 0xF7}, 1, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			interpreted, compiled, interpretedMem, compiledMem := runX87ParityCase(t, test.code, 0, func(cpu *CPU) {
+				cpu.fpuCW = 0x037F
+				cpu.fpuSW = 0x0200
+				cpu.fpuTW = 0xFFFF
+			})
+			assertX87Parity(t, compiled, interpreted, compiledMem, interpretedMem)
+			if compiled.fpuTop != test.wantTop || compiled.fpuSW != test.wantSW {
+				t.Fatalf("top=%d status=%#x, want top=%d status=%#x",
+					compiled.fpuTop, compiled.fpuSW, test.wantTop, test.wantSW)
+			}
+		})
+	}
+}
+
+func TestJITX87EmptyFXCHUnmaskedRollback(t *testing.T) {
+	for name, useJIT := range map[string]bool{"interpreter": false, "jit": true} {
+		t.Run(name, func(t *testing.T) {
+			cpu, mem := newX87TestCPU(t, []byte{0xD9, 0xC8}, 0)
+			cpu.fpuCW = 0x037E
+			cpu.fpuSW = 0x0200
+			cpu.fpuTW = 0xFFFF
+			beforeST := cpu.fpuST
+			var err error
+			if useJIT {
+				compiler := NewJITCompiler(cpu, mem)
+				block := compiler.cache.Compile(cpu.RIP)
+				if block == nil {
+					t.Fatal("x87 block was not compiled")
+				}
+				err = block.Run(&compiler.state)
+			} else {
+				err = cpu.step()
+			}
+			if err == nil {
+				t.Fatal("empty FXCH ST(0) did not raise unmasked invalid exception")
+			}
+			if !x87StacksEqual(cpu.fpuST, beforeST) || cpu.fpuTop != 0 || cpu.fpuTW != 0xFFFF {
+				t.Fatalf("unmasked FXCH changed stack: ST=%v top=%d tags=%#x", cpu.fpuST, cpu.fpuTop, cpu.fpuTW)
+			}
+			if cpu.fpuSW != fpuExcInvalid|fpuStackFault|fpuErrorSummary {
+				t.Fatalf("status=%#x, want IE|SF|ES with C1 clear", cpu.fpuSW)
+			}
+		})
+	}
+}
+
+func TestJITX87PrecisionControlParity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		code  []byte
+		setup func(*CPU)
+		check func(*testing.T, *CPU)
+	}{
+		{
+			name: "fadd-pc24",
+			code: []byte{0xD8, 0xC1},
+			setup: func(cpu *CPU) {
+				cpu.fpuSetST0(1)
+				cpu.fpuSetSTi(1, math.Ldexp(1, -30))
+			},
+			check: func(t *testing.T, cpu *CPU) {
+				assertX87Value(t, cpu.fpuST0(), 1)
+				if cpu.fpuSW&fpuExcPrecision == 0 {
+					t.Fatalf("single-precision FADD did not set precision exception: status=%#x", cpu.fpuSW)
+				}
+			},
+		},
+		{
+			name: "f2xm1",
+			code: []byte{0xD9, 0xF0},
+			setup: func(cpu *CPU) {
+				cpu.fpuSetST0(0.5)
+			},
+			check: func(t *testing.T, cpu *CPU) {
+				assertX87Value(t, cpu.fpuST0(), math.Exp2(0.5)-1)
+			},
+		},
+		{
+			name: "fptan",
+			code: []byte{0xD9, 0xF2},
+			setup: func(cpu *CPU) {
+				cpu.fpuSetST0(0.5)
+			},
+			check: func(t *testing.T, cpu *CPU) {
+				assertX87Value(t, cpu.fpuST0(), 1)
+				assertX87Value(t, cpu.fpuSTi(1), math.Tan(0.5))
+			},
+		},
+		{
+			name: "fpatan",
+			code: []byte{0xD9, 0xF3},
+			setup: func(cpu *CPU) {
+				cpu.fpuSetST0(0.5)
+				cpu.fpuSetSTi(1, 0.75)
+			},
+			check: func(t *testing.T, cpu *CPU) {
+				assertX87Value(t, cpu.fpuST0(), math.Atan2(0.75, 0.5))
+			},
+		},
+		{
+			name: "fsincos",
+			code: []byte{0xD9, 0xFB},
+			setup: func(cpu *CPU) {
+				cpu.fpuSetST0(0.5)
+			},
+			check: func(t *testing.T, cpu *CPU) {
+				sine, cosine := math.Sincos(0.5)
+				assertX87Value(t, cpu.fpuST0(), cosine)
+				assertX87Value(t, cpu.fpuSTi(1), sine)
+			},
+		},
+		{
+			name: "fscale",
+			code: []byte{0xD9, 0xFD},
+			setup: func(cpu *CPU) {
+				cpu.fpuSetST0(1 + math.Ldexp(1, -30))
+				cpu.fpuSetSTi(1, 1)
+			},
+			check: func(t *testing.T, cpu *CPU) {
+				assertX87Value(t, cpu.fpuST0(), 2+math.Ldexp(1, -29))
+			},
+		},
+		{
+			name: "fsin",
+			code: []byte{0xD9, 0xFE},
+			setup: func(cpu *CPU) {
+				cpu.fpuSetST0(0.5)
+			},
+			check: func(t *testing.T, cpu *CPU) {
+				assertX87Value(t, cpu.fpuST0(), math.Sin(0.5))
+			},
+		},
+		{
+			name: "fcos",
+			code: []byte{0xD9, 0xFF},
+			setup: func(cpu *CPU) {
+				cpu.fpuSetST0(0.5)
+			},
+			check: func(t *testing.T, cpu *CPU) {
+				assertX87Value(t, cpu.fpuST0(), math.Cos(0.5))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			interpreted, compiled, interpretedMem, compiledMem := runX87ParityCase(t, test.code, 0, func(cpu *CPU) {
+				cpu.fpuCW &^= 3 << 8
+				cpu.fpuSW = 0
+				test.setup(cpu)
+			})
+			assertX87Parity(t, compiled, interpreted, compiledMem, interpretedMem)
+			test.check(t, interpreted)
+			test.check(t, compiled)
+		})
+	}
+}
+
+func TestJITX87FXTRACTSpecialParity(t *testing.T) {
+	signalingNaN := math.Float64frombits(0x7FF0000000000001)
+	quietNaN := math.Float64frombits(0x7FF8000000000001)
+	for _, test := range []struct {
+		name        string
+		value       float64
+		wantSig     float64
+		wantExp     float64
+		wantInvalid bool
+		wantZero    bool
+	}{
+		{"+zero", 0, 0, math.Inf(-1), false, true},
+		{"-zero", math.Copysign(0, -1), math.Copysign(0, -1), math.Inf(-1), false, true},
+		{"+infinity", math.Inf(1), math.Inf(1), math.Inf(1), false, false},
+		{"-infinity", math.Inf(-1), math.Inf(-1), math.Inf(1), false, false},
+		{"quiet-nan", quietNaN, quietNaN, quietNaN, false, false},
+		{"signaling-nan", signalingNaN, quietNaN, quietNaN, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			interpreted, compiled, interpretedMem, compiledMem := runX87ParityCase(t, []byte{0xD9, 0xF4}, 0, func(cpu *CPU) {
+				cpu.fpuSetST0(test.value)
+				cpu.fpuSW = 0x0200
+			})
+			assertX87Parity(t, compiled, interpreted, compiledMem, interpretedMem)
+			for name, cpu := range map[string]*CPU{"interpreter": interpreted, "jit": compiled} {
+				if !x87FloatEqual(cpu.fpuST0(), test.wantSig) || !x87FloatEqual(cpu.fpuSTi(1), test.wantExp) {
+					t.Fatalf("%s significand=%v exponent=%v, want %v and %v",
+						name, cpu.fpuST0(), cpu.fpuSTi(1), test.wantSig, test.wantExp)
+				}
+				if (cpu.fpuSW&fpuExcInvalid != 0) != test.wantInvalid ||
+					(cpu.fpuSW&fpuExcZero != 0) != test.wantZero {
+					t.Fatalf("%s status=%#x, want invalid=%v zero=%v",
+						name, cpu.fpuSW, test.wantInvalid, test.wantZero)
+				}
+				if cpu.fpuSW&0x0200 != 0 {
+					t.Fatalf("%s FXTRACT left C1 set: status=%#x", name, cpu.fpuSW)
+				}
+			}
+		})
+	}
+}
+
+func runX87ParityCase(t *testing.T, code []byte, data uint64, setup func(*CPU)) (*CPU, *CPU, *mmu.MMU, *mmu.MMU) {
+	t.Helper()
+	interpreted, interpretedMem := newX87TestCPU(t, code, data)
+	compiled, compiledMem := newX87TestCPU(t, code, data)
+	setup(interpreted)
+	setup(compiled)
+	if err := interpreted.step(); err != nil {
+		t.Fatal(err)
+	}
+	compiler := NewJITCompiler(compiled, compiledMem)
+	block := compiler.cache.Compile(compiled.RIP)
+	if block == nil {
+		t.Fatal("x87 block was not compiled")
+	}
+	if err := block.Run(&compiler.state); err != nil {
+		t.Fatal(err)
+	}
+	return interpreted, compiled, interpretedMem, compiledMem
+}
+
+func assertX87Parity(t *testing.T, got, want *CPU, gotMem, wantMem *mmu.MMU) {
+	t.Helper()
+	if !x87StacksEqual(got.fpuST, want.fpuST) || got.fpuTop != want.fpuTop || got.fpuTW != want.fpuTW {
+		t.Fatalf("compiled FPU state differs: ST=%v top=%d tag=%#x, want ST=%v top=%d tag=%#x",
+			got.fpuST, got.fpuTop, got.fpuTW, want.fpuST, want.fpuTop, want.fpuTW)
+	}
+	if got.fpuCW != want.fpuCW || got.fpuSW != want.fpuSW {
+		t.Fatalf("compiled FPU control/status=%#x/%#x, want %#x/%#x", got.fpuCW, got.fpuSW, want.fpuCW, want.fpuSW)
+	}
+	if got.Regs[RAX] != want.Regs[RAX] {
+		t.Fatalf("compiled RAX=%#x, want %#x", got.Regs[RAX], want.Regs[RAX])
+	}
+	gotValue, err := gotMem.Read64(0x9000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantValue, err := wantMem.Read64(0x9000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotValue != wantValue {
+		t.Fatalf("memory=%#x, want %#x", gotValue, wantValue)
+	}
+}
+
+func x87StacksEqual(a, b [8]float64) bool {
+	for i := range a {
+		if math.Float64bits(a[i]) != math.Float64bits(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func x87FloatEqual(got, want float64) bool {
+	return math.Float64bits(got) == math.Float64bits(want)
+}
+
 func newX87TestCPU(t *testing.T, instruction []byte, data uint64) (*CPU, *mmu.MMU) {
 	t.Helper()
 	mem := mmu.New()
@@ -144,7 +507,7 @@ func newX87TestCPU(t *testing.T, instruction []byte, data uint64) (*CPU, *mmu.MM
 	cpu.fpuST[0] = 4
 	cpu.fpuST[1] = 2
 	cpu.fpuTop = 0
-	cpu.fpuTW = 0
-	cpu.fpuSW = 0x0102 // pre-set C1 + an exception flag so FNSTSW/CC ops are observable
+	cpu.fpuTW = 0xFFF0
+	cpu.fpuSW = 0x0302 // pre-set C0, C1, and an exception flag
 	return cpu, mem
 }

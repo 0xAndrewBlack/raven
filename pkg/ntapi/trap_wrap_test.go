@@ -70,6 +70,10 @@ func TestDeferWindowStdcallArgCounts(t *testing.T) {
 		"DeferWindowPos":         8,
 		"EndDeferWindowPos":      1,
 		"GetEffectiveClientRect": 3,
+		"InSendMessage":          0,
+		"InSendMessageEx":        1,
+		"QuerySendMessage":       0,
+		"ReplyMessage":           1,
 		"RtlGetNtVersionNumbers": 3,
 	}
 	for name, count := range want {

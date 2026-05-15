@@ -76,7 +76,7 @@ func nativeVsClosure(t *testing.T, code []byte) {
 	if entry == 0 {
 		t.Fatal("native compile rejected a supported block")
 	}
-	gotRegs, gotFlags, gotRIP := runState(func(s *State) { runNative(entry, s) })
+	gotRegs, gotFlags, gotRIP := runState(func(s *State) { runNative(entry, s, nil) })
 
 	if gotRegs != wantRegs {
 		t.Fatalf("regs = %v, want %v", gotRegs, wantRegs)
@@ -360,8 +360,8 @@ func TestJITRegisterShiftBlocks(t *testing.T) {
 		{name: "shl-one", code: []byte{0xD1, 0xE0}, want: 0x00000002, wantCarry: true},
 		{name: "shr-one", code: []byte{0xD1, 0xE8}, want: 0x40000000, wantCarry: true},
 		{name: "sar-one", code: []byte{0xD1, 0xF8}, want: 0xC0000000, wantCarry: true},
-		{name: "rol-one", code: []byte{0xD1, 0xC0}, want: 0x00000003},
-		{name: "ror-one", code: []byte{0xD1, 0xC8}, want: 0xC0000000},
+		{name: "rol-one", code: []byte{0xD1, 0xC0}, want: 0x00000003, wantCarry: true},
+		{name: "ror-one", code: []byte{0xD1, 0xC8}, want: 0xC0000000, wantCarry: true},
 		{name: "shl-immediate", code: []byte{0xC1, 0xE0, 0x02}, want: 0x00000004},
 		{name: "shr-cl", code: []byte{0xD3, 0xE8}, ecx: 3, want: 0x10000000},
 	}

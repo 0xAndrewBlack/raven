@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,8 @@ var defaultHostSaveRenameOps = hostSaveRenameOps{
 }
 
 func (hctx *HandlerCtx) bindHostSavePath(vfsPath, hostPath string) {
+	hctx.HostSaveIOMu.Lock()
+	defer hctx.HostSaveIOMu.Unlock()
 	hctx.HostSaveMu.Lock()
 	defer hctx.HostSaveMu.Unlock()
 	if hctx.HostSavePaths == nil {
@@ -43,6 +46,8 @@ func (hctx *HandlerCtx) bindHostSavePath(vfsPath, hostPath string) {
 }
 
 func (hctx *HandlerCtx) unbindHostSavePath(vfsPath string) {
+	hctx.HostSaveIOMu.Lock()
+	defer hctx.HostSaveIOMu.Unlock()
 	hctx.HostSaveMu.Lock()
 	defer hctx.HostSaveMu.Unlock()
 	cleanPath := strings.TrimSuffix(filepath.ToSlash(filepath.Clean(vfsPath)), "/")
@@ -56,21 +61,77 @@ func (hctx *HandlerCtx) unbindHostSavePath(vfsPath string) {
 }
 
 func (hctx *HandlerCtx) flushHostSavePath(fs *vfs.VFS, vfsPath string) error {
+	return hctx.flushHostSavePathWithSnapshot(vfsPath, func() ([]byte, error) {
+		return fs.FileBytes(vfsPath)
+	})
+}
+
+func (hctx *HandlerCtx) flushHostSavePathWithSnapshot(vfsPath string, snapshot func() ([]byte, error)) error {
 	hctx.HostSaveMu.Lock()
-	hostPath := hctx.HostSavePaths[vfsPath]
+	_, hostPath := hostSaveBindingFold(hctx.HostSavePaths, vfsPath)
 	hctx.HostSaveMu.Unlock()
 	if hostPath == "" {
 		return nil
 	}
-	node, err := fs.StatPath(-1, vfsPath)
+	data, err := snapshot()
+	hctx.HostSaveIOMu.Lock()
+	defer hctx.HostSaveIOMu.Unlock()
+	hctx.HostSaveMu.Lock()
+	_, currentHostPath := hostSaveBindingFold(hctx.HostSavePaths, vfsPath)
+	hctx.HostSaveMu.Unlock()
+	if currentHostPath != hostPath {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if node.IsDir {
-		return fmt.Errorf("save target is a directory")
-	}
-	data := append([]byte(nil), node.Data...)
 	return os.WriteFile(hostPath, data, 0644)
+}
+
+func (hctx *HandlerCtx) flushHostFileBuffers(fs *vfs.VFS, fd int, vfsPath string) error {
+	if hostFile := fs.GetHostFile(fd); hostFile != nil {
+		hctx.HostSaveIOMu.Lock()
+		defer hctx.HostSaveIOMu.Unlock()
+		return hostFile.Sync()
+	}
+	hctx.HostSaveMu.Lock()
+	_, hostPath := hostSaveBindingFold(hctx.HostSavePaths, vfsPath)
+	hctx.HostSaveMu.Unlock()
+	if hostPath == "" {
+		return nil
+	}
+	data, err := fs.FileBytes(vfsPath)
+	hctx.HostSaveIOMu.Lock()
+	defer hctx.HostSaveIOMu.Unlock()
+	hctx.HostSaveMu.Lock()
+	_, currentHostPath := hostSaveBindingFold(hctx.HostSavePaths, vfsPath)
+	hctx.HostSaveMu.Unlock()
+	if currentHostPath != hostPath {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	hostFile, err := os.OpenFile(hostPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	n, writeErr := hostFile.Write(data)
+	if writeErr == nil && n != len(data) {
+		writeErr = io.ErrShortWrite
+	}
+	syncErr := error(nil)
+	if writeErr == nil {
+		syncErr = hostFile.Sync()
+	}
+	closeErr := hostFile.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
 
 func (hctx *HandlerCtx) commitHostSaveRename(srcPath, dstPath string, source vfs.RenameCommitSource, options hostSaveRenameOptions) (vfs.RenameCommitResult, error) {
@@ -78,6 +139,8 @@ func (hctx *HandlerCtx) commitHostSaveRename(srcPath, dstPath string, source vfs
 }
 
 func (hctx *HandlerCtx) commitHostSaveRenameWithOps(srcPath, dstPath string, source vfs.RenameCommitSource, options hostSaveRenameOptions, ops hostSaveRenameOps) (vfs.RenameCommitResult, error) {
+	hctx.HostSaveIOMu.Lock()
+	defer hctx.HostSaveIOMu.Unlock()
 	hctx.HostSaveMu.Lock()
 	srcKey, srcHost := hostSaveBindingFold(hctx.HostSavePaths, srcPath)
 	dstKey, dstHost := hostSaveBindingFold(hctx.HostSavePaths, dstPath)
@@ -181,6 +244,8 @@ func hostSaveMoveErrorCode(err error) uint32 {
 }
 
 func (hctx *HandlerCtx) commitHostSaveReplace(replacedPath, replacementPath, backupPath string, replacedData, replacementData []byte) error {
+	hctx.HostSaveIOMu.Lock()
+	defer hctx.HostSaveIOMu.Unlock()
 	hctx.HostSaveMu.Lock()
 	replacedKey, replacedHost := hostSaveBindingFold(hctx.HostSavePaths, replacedPath)
 	replacementKey, replacementHost := hostSaveBindingFold(hctx.HostSavePaths, replacementPath)

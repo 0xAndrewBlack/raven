@@ -6,6 +6,7 @@ import (
 
 	"github.com/mirkobrombin/Raven/pkg/jit"
 	"github.com/mirkobrombin/Raven/pkg/mmu"
+	"github.com/mirkobrombin/Raven/pkg/x64"
 )
 
 func newTestMMU() *mmu.MMU {
@@ -241,12 +242,12 @@ func TestJIT_MovRegMem(t *testing.T) {
 	// Write value 12345 to memory at 0x5000
 	m.Write64(0x5000, 12345)
 
-	// MOV RBX, 0x5000 (0x48 0xBB 0x00 0x50 0x00 0x00 0x00 0x00 0x00)
-	writeCode(m, 0x4000, []byte{0x48, 0xBB, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00})
+	// MOV RBX, 0x5000
+	writeCode(m, 0x4000, []byte{0x48, 0xBB, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 	// MOV RAX, [RBX] (0x48 0x8B 0x03)
-	writeCode(m, 0x4009, []byte{0x48, 0x8B, 0x03})
+	writeCode(m, 0x400A, []byte{0x48, 0x8B, 0x03})
 	// RET (0xC3)
-	writeCode(m, 0x400C, []byte{0xC3})
+	writeCode(m, 0x400D, []byte{0xC3})
 
 	cache := jit.NewCache(m)
 
@@ -370,31 +371,56 @@ func TestJITMode32PushPopAndAbsoluteAddress(t *testing.T) {
 	}
 }
 
-func TestJITMode32UnsupportedOpcodeRequestsFallback(t *testing.T) {
+func TestJITMode32IncCompiles(t *testing.T) {
 	m := mmu.New()
 	m.MapRange(0x1000, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-	writeCode(m, 0x1000, []byte{0x40})
+	writeCode(m, 0x1000, []byte{0x40, 0xEB, 0xFE})
 	cache := jit.NewCacheMode(m, true)
 	var fn *jit.Block
 	for i := 0; i < jit.CompileThreshold+5; i++ {
 		fn = cache.Lookup(0x1000)
 	}
-	if fn != nil {
-		t.Fatal("fallback-only block was cached as executable")
+	if fn == nil {
+		t.Fatal("INC block was not cached")
+	}
+	regs := [16]uint64{0: 0xFFFFFFFF}
+	rip := uint64(0x1000)
+	flags := uint64(0x203)
+	state := &jit.State{Regs: &regs, RIP: &rip, Rflags: &flags, Mem: m, Mode32: true}
+	if err := fn.Run(state); err != nil {
+		t.Fatal(err)
+	}
+	if regs[0] != 0 || flags&1 == 0 {
+		t.Fatalf("EAX=%#x RFLAGS=%#x", regs[0], flags)
 	}
 }
 
-func TestJITMode32OperandSizeOverrideRequestsFallback(t *testing.T) {
+func TestJITMode32OperandSizeOverrideCompiles(t *testing.T) {
 	m := mmu.New()
 	m.MapRange(0x1000, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-	writeCode(m, 0x1000, []byte{0x66, 0x8B, 0xC1})
+	writeCode(m, 0x1000, []byte{0x66, 0x8B, 0xC1, 0xEB, 0xFE})
 	cache := jit.NewCacheMode(m, true)
 	var block *jit.Block
 	for i := 0; i < jit.CompileThreshold+5; i++ {
 		block = cache.Lookup(0x1000)
 	}
-	if block != nil {
-		t.Fatal("operand-size fallback was cached as executable")
+	if block == nil {
+		t.Fatal("operand-size override did not compile")
+	}
+	regs := [16]uint64{
+		0: 0xAAAAAAAA55555555,
+		1: 0xBBBBBBBB1234CDEF,
+	}
+	flags := uint64(0x202)
+	rip := uint64(0x1000)
+	state := &jit.State{
+		Regs: &regs, RIP: &rip, Rflags: &flags, Mem: m, Mode32: true,
+	}
+	if err := block.Run(state); err != nil {
+		t.Fatal(err)
+	}
+	if regs[0] != 0xAAAAAAAA5555CDEF {
+		t.Fatalf("RAX=%#x", regs[0])
 	}
 }
 
@@ -481,12 +507,554 @@ func TestJITDecodeErrorFallsBackAtInstructionStart(t *testing.T) {
 	regs := [16]uint64{}
 	rip := uint64(0x1FFF)
 	rflags := uint64(2)
-	state := &jit.State{Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m, XMM: &[16][2]uint64{}, Mode32: true}
+	instret := uint64(0)
+	state := &jit.State{
+		Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+		XMM: &[16][2]uint64{}, Instret: &instret, Mode32: true,
+	}
 	if err := block.Run(state); err != nil {
 		t.Fatal(err)
 	}
-	if !state.Fallback || rip != 0x2000 {
-		t.Fatalf("fallback=%v RIP=%#x", state.Fallback, rip)
+	if !state.Fallback || rip != 0x2000 || instret != 1 {
+		t.Fatalf("fallback=%v RIP=%#x instret=%d", state.Fallback, rip, instret)
+	}
+}
+
+func TestJITPE64RIPRelativeMemoryMatchesInstructionEnd(t *testing.T) {
+	const (
+		codeAddr = uint64(0x140001000)
+		dataAddr = uint64(0x140002000)
+	)
+	code := []byte{
+		0x48, 0x8B, 0x05, 0xF9, 0x0F, 0x00, 0x00, // mov rax, [rip+0xff9]
+		0x48, 0x89, 0x1D, 0xFA, 0x0F, 0x00, 0x00, // mov [rip+0xffa], rbx
+		0xF4,
+	}
+	newMemory := func() *mmu.MMU {
+		m := mmu.New()
+		m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+		m.MapRange(dataAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+		for i, opcode := range code {
+			if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := m.Write64(dataAddr, 0x0123456789ABCDEF); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	interpreterMem := newMemory()
+	interpreter := x64.New(interpreterMem)
+	interpreter.Regs[3] = 0xFEDCBA9876543210
+	interpreter.RIP = codeAddr
+	interpreter.Rflags = 2
+	if err := interpreter.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newMemory()
+	cache := jit.NewCache(m)
+	var block *jit.Block
+	for i := 0; i < jit.CompileThreshold+5; i++ {
+		block = cache.Lookup(codeAddr)
+	}
+	if block == nil {
+		t.Fatal("RIP-relative block did not compile")
+	}
+
+	regs := [16]uint64{3: 0xFEDCBA9876543210}
+	rip := codeAddr
+	rflags := uint64(2)
+	instret := uint64(0)
+	state := &jit.State{
+		Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+		XMM: &[16][2]uint64{}, Instret: &instret,
+	}
+	if err := block.Run(state); err != nil {
+		t.Fatal(err)
+	}
+	if regs[0] != 0x0123456789ABCDEF {
+		t.Fatalf("RAX=%#x", regs[0])
+	}
+	if got, err := m.Read64(dataAddr + 8); err != nil || got != regs[3] {
+		t.Fatalf("RIP-relative write=%#x error=%v", got, err)
+	}
+	interpreterWrite, err := interpreterMem.Read64(dataAddr + 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regs != interpreter.Regs || interpreterWrite != regs[3] {
+		t.Fatalf("JIT and interpreter differ: jit=%#v interpreter=%#v", regs, interpreter.Regs)
+	}
+	if !state.Fallback || rip != codeAddr+14 || instret != 2 {
+		t.Fatalf("fallback=%v RIP=%#x instret=%d", state.Fallback, rip, instret)
+	}
+	if interpreter.RIP != codeAddr+15 || interpreter.GetInstret() != instret+1 {
+		t.Fatalf("interpreter RIP=%#x instret=%d", interpreter.RIP, interpreter.GetInstret())
+	}
+}
+
+func TestJITPE64MovWordImmediatePreservesNextInstruction(t *testing.T) {
+	const (
+		codeAddr = uint64(0x14028dda7)
+		dataAddr = uint64(0x20000)
+	)
+	code := []byte{
+		0x66, 0xC7, 0x41, 0x38, 0x01, 0x01, // mov word [rcx+0x38], 0x0101
+		0x44, 0x88, 0x49, 0x3A, // mov byte [rcx+0x3a], r9b
+		0x4C, 0x89, 0x0B, // mov qword [rbx], r9
+		0xF4,
+	}
+	newMemory := func() *mmu.MMU {
+		m := mmu.New()
+		m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+		m.MapRange(dataAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+		for i, opcode := range code {
+			if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return m
+	}
+
+	interpreterMem := newMemory()
+	interpreter := x64.New(interpreterMem)
+	interpreter.Regs[1] = dataAddr
+	interpreter.Regs[3] = dataAddr + 0x100
+	interpreter.Regs[9] = 0xAB
+	interpreter.RIP = codeAddr
+	interpreter.Rflags = 2
+	if err := interpreter.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newMemory()
+	cache := jit.NewCache(m)
+	var block *jit.Block
+	for i := 0; i < jit.CompileThreshold+5; i++ {
+		block = cache.Lookup(codeAddr)
+	}
+	if block == nil {
+		t.Fatal("MOV word immediate block did not compile")
+	}
+
+	regs := [16]uint64{1: dataAddr, 3: dataAddr + 0x100, 9: 0xAB}
+	rip := codeAddr
+	rflags := uint64(2)
+	instret := uint64(0)
+	state := &jit.State{
+		Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+		XMM: &[16][2]uint64{}, Instret: &instret,
+	}
+	if err := block.Run(state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.Fallback || rip != codeAddr+13 || instret != 3 {
+		t.Fatalf("fallback=%v RIP=%#x instret=%d", state.Fallback, rip, instret)
+	}
+
+	remainder := x64.New(m)
+	remainder.Regs = regs
+	remainder.RIP = rip
+	remainder.Rflags = rflags
+	if err := remainder.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if remainder.Regs != interpreter.Regs || remainder.Rflags != interpreter.Rflags {
+		t.Fatalf("JIT and interpreter state differ: jit=%#v interpreter=%#v", remainder.Regs, interpreter.Regs)
+	}
+	for _, addr := range []uint64{dataAddr + 0x38, dataAddr + 0x3a, dataAddr + 0x100} {
+		got, err := m.Read64(addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := interpreterMem.Read64(addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("memory at %#x=%#x, interpreter=%#x", addr, got, want)
+		}
+	}
+	if instret+remainder.GetInstret() != interpreter.GetInstret() {
+		t.Fatalf(
+			"split instret=%d+%d, interpreter=%d",
+			instret, remainder.GetInstret(), interpreter.GetInstret(),
+		)
+	}
+}
+
+func TestJITPE64MovWordImmediateFaultDoesNotRetire(t *testing.T) {
+	const (
+		codeAddr = uint64(0x14028dda7)
+		dataAddr = uint64(0x20000)
+	)
+	m := mmu.New()
+	m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	m.MapRange(dataAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+	code := []byte{0x66, 0xC7, 0x41, 0x38, 0x01, 0x01, 0xF4}
+	for i, opcode := range code {
+		if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.MapPage(dataAddr, mmu.PermRead); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := jit.NewCache(m)
+	var block *jit.Block
+	for i := 0; i < jit.CompileThreshold+5; i++ {
+		block = cache.Lookup(codeAddr)
+	}
+	regs := [16]uint64{1: dataAddr}
+	rip := codeAddr
+	rflags := uint64(2)
+	instret := uint64(0)
+	state := &jit.State{
+		Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+		XMM: &[16][2]uint64{}, Instret: &instret,
+	}
+	if err := block.Run(state); err == nil {
+		t.Fatal("MOV word immediate write fault unexpectedly succeeded")
+	}
+	if rip != codeAddr || instret != 0 {
+		t.Fatalf("RIP=%#x instret=%d", rip, instret)
+	}
+	if got, err := m.Read16(dataAddr + 0x38); err != nil || got != 0 {
+		t.Fatalf("memory=%#x error=%v", got, err)
+	}
+}
+
+func TestJITPE64ALUWordImmediatePreservesNextInstruction(t *testing.T) {
+	const (
+		codeAddr = uint64(0x140198549)
+		dataAddr = uint64(0x20000)
+	)
+	m := mmu.New()
+	m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	m.MapRange(dataAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+	code := []byte{
+		0x66, 0x81, 0x38, 0x69, 0x64, // cmp word [rax], 0x6469
+		0x0F, 0x84, 0x01, 0x00, 0x00, 0x00, // je codeAddr+12
+		0x90,
+		0xF4,
+	}
+	for i, opcode := range code {
+		if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.Write16(dataAddr, 0x6469); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := jit.NewCache(m)
+	var block *jit.Block
+	for i := 0; i < jit.CompileThreshold+5; i++ {
+		block = cache.Lookup(codeAddr)
+	}
+	regs := [16]uint64{0: dataAddr}
+	rip := codeAddr
+	rflags := uint64(2)
+	instret := uint64(0)
+	state := &jit.State{
+		Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+		XMM: &[16][2]uint64{}, Instret: &instret,
+	}
+	if err := block.Run(state); err != nil {
+		t.Fatal(err)
+	}
+	if rip != codeAddr+12 || instret != 2 || rflags&0x40 == 0 {
+		t.Fatalf("RIP=%#x instret=%d RFLAGS=%#x", rip, instret, rflags)
+	}
+
+	interpreterMem := mmu.New()
+	interpreterMem.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	interpreterMem.MapRange(dataAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+	for i, opcode := range code {
+		if err := interpreterMem.Write8(codeAddr+uint64(i), opcode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := interpreterMem.Write16(dataAddr, 0x6469); err != nil {
+		t.Fatal(err)
+	}
+	interpreter := x64.New(interpreterMem)
+	interpreter.Regs[0] = dataAddr
+	interpreter.RIP = codeAddr
+	interpreter.Rflags = 2
+	if err := interpreter.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if regs != interpreter.Regs || rflags != interpreter.Rflags {
+		t.Fatalf("JIT and interpreter differ: flags=%#x/%#x", rflags, interpreter.Rflags)
+	}
+	if interpreter.RIP != codeAddr+13 || interpreter.GetInstret() != instret+1 {
+		t.Fatalf("interpreter RIP=%#x instret=%d", interpreter.RIP, interpreter.GetInstret())
+	}
+}
+
+func TestJITPE64ALUWordImmediateFaultDoesNotRetire(t *testing.T) {
+	const codeAddr = uint64(0x140198549)
+	m := mmu.New()
+	m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	code := []byte{0x66, 0x81, 0x38, 0x69, 0x64, 0xF4}
+	for i, opcode := range code {
+		if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := jit.NewCache(m)
+	var block *jit.Block
+	for i := 0; i < jit.CompileThreshold+5; i++ {
+		block = cache.Lookup(codeAddr)
+	}
+	regs := [16]uint64{0: 0x30000}
+	rip := codeAddr
+	rflags := uint64(0x202)
+	instret := uint64(0)
+	state := &jit.State{
+		Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+		XMM: &[16][2]uint64{}, Instret: &instret,
+	}
+	if err := block.Run(state); err == nil {
+		t.Fatal("CMP word immediate read fault unexpectedly succeeded")
+	}
+	if rip != codeAddr || instret != 0 || rflags != 0x202 {
+		t.Fatalf("RIP=%#x instret=%d RFLAGS=%#x", rip, instret, rflags)
+	}
+}
+
+func TestJITPE64RIPRelativeMemoryFaultsDoNotRetire(t *testing.T) {
+	tests := []struct {
+		name string
+		code []byte
+	}{
+		{
+			name: "read",
+			code: []byte{
+				0x90,
+				0x48, 0x8B, 0x05, 0xF8, 0x1F, 0x00, 0x00,
+				0xEB, 0xFE,
+			},
+		},
+		{
+			name: "write",
+			code: []byte{
+				0x90,
+				0x48, 0x89, 0x05, 0xF8, 0x1F, 0x00, 0x00,
+				0xEB, 0xFE,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const codeAddr = uint64(0x140004000)
+			m := mmu.New()
+			m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+			for i, opcode := range test.code {
+				if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cache := jit.NewCache(m)
+			var block *jit.Block
+			for i := 0; i < jit.CompileThreshold+5; i++ {
+				block = cache.Lookup(codeAddr)
+			}
+			if block == nil {
+				t.Fatal("RIP-relative fault block did not compile")
+			}
+
+			regs := [16]uint64{0: 0x1122334455667788}
+			rip := codeAddr
+			rflags := uint64(2)
+			instret := uint64(0)
+			state := &jit.State{
+				Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+				XMM: &[16][2]uint64{}, Instret: &instret,
+			}
+			if err := block.Run(state); err == nil {
+				t.Fatal("RIP-relative memory fault unexpectedly succeeded")
+			}
+			if rip != codeAddr+1 || instret != 1 {
+				t.Fatalf("RIP=%#x instret=%d", rip, instret)
+			}
+		})
+	}
+}
+
+func TestJITMemoryFaultsDoNotRetire(t *testing.T) {
+	tests := []struct {
+		name        string
+		instruction []byte
+	}{
+		{name: "mov store", instruction: []byte{0x89, 0x03}},
+		{name: "mov immediate store", instruction: []byte{0xC7, 0x03, 0x01, 0x00, 0x00, 0x00}},
+		{name: "alu load", instruction: []byte{0x03, 0x03}},
+		{name: "alu read modify write", instruction: []byte{0x83, 0x03, 0x01}},
+		{name: "movzx load", instruction: []byte{0x0F, 0xB6, 0x03}},
+		{name: "movsx load", instruction: []byte{0x0F, 0xBE, 0x03}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const codeAddr = uint64(0x6000)
+			m := mmu.New()
+			m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+			code := append([]byte{0x90}, test.instruction...)
+			code = append(code, 0xEB, 0xFE)
+			for i, opcode := range code {
+				if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			cache := jit.NewCache(m)
+			var block *jit.Block
+			for i := 0; i < jit.CompileThreshold+5; i++ {
+				block = cache.Lookup(codeAddr)
+			}
+			if block == nil {
+				t.Fatal("memory fault block did not compile")
+			}
+
+			regs := [16]uint64{0: 0x11223344, 3: 0x9000}
+			rip := codeAddr
+			rflags := uint64(0x202)
+			instret := uint64(0)
+			state := &jit.State{
+				Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+				XMM: &[16][2]uint64{}, Instret: &instret,
+			}
+			if err := block.Run(state); err == nil {
+				t.Fatal("unmapped memory access unexpectedly succeeded")
+			}
+			if rip != codeAddr+1 || instret != 1 {
+				t.Fatalf("RIP=%#x instret=%d", rip, instret)
+			}
+			if regs[0] != 0x11223344 || regs[3] != 0x9000 || rflags != 0x202 {
+				t.Fatalf("fault changed state: RAX=%#x RBX=%#x RFLAGS=%#x", regs[0], regs[3], rflags)
+			}
+		})
+	}
+}
+
+func TestJITReadModifyWriteFaultIsAtomic(t *testing.T) {
+	tests := []struct {
+		name        string
+		instruction []byte
+	}{
+		{name: "register source", instruction: []byte{0x01, 0x03}},
+		{name: "immediate source", instruction: []byte{0x83, 0x03, 0x01}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const (
+				codeAddr = uint64(0x17000)
+				dataAddr = uint64(0x19000)
+			)
+			code := append([]byte{0x90}, test.instruction...)
+			code = append(code, 0xF4)
+			newMemory := func() *mmu.MMU {
+				m := mmu.New()
+				m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+				m.MapRange(dataAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+				for i, opcode := range code {
+					if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := m.Write32(dataAddr, 0xffffffff); err != nil {
+					t.Fatal(err)
+				}
+				if err := m.MapPage(dataAddr, mmu.PermRead); err != nil {
+					t.Fatal(err)
+				}
+				return m
+			}
+
+			m := newMemory()
+			cache := jit.NewCache(m)
+			var block *jit.Block
+			for i := 0; i < jit.CompileThreshold+5; i++ {
+				block = cache.Lookup(codeAddr)
+			}
+			if block == nil {
+				t.Fatal("read-modify-write fault block did not compile")
+			}
+
+			regs := [16]uint64{0: 1, 3: dataAddr}
+			rip := codeAddr
+			rflags := uint64(0x202)
+			instret := uint64(0)
+			state := &jit.State{
+				Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+				XMM: &[16][2]uint64{}, Instret: &instret,
+			}
+			if err := block.Run(state); err == nil {
+				t.Fatal("write to read-only memory unexpectedly succeeded")
+			}
+			jitValue, err := m.Read32(dataAddr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rflags != 0x202 || jitValue != 0xffffffff || regs[0] != 1 || regs[3] != dataAddr {
+				t.Fatalf("fault changed state: regs=%#v flags=%#x memory=%#x", regs, rflags, jitValue)
+			}
+			if rip != codeAddr+1 || instret != 1 {
+				t.Fatalf("RIP=%#x instret=%d", rip, instret)
+			}
+		})
+	}
+}
+
+func TestJITPE32MemoryAddressingRemainsAbsoluteAndWrapped(t *testing.T) {
+	const codeAddr = uint64(0x4000)
+	m := mmu.New()
+	m.Mode32 = true
+	m.MapRange(0, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+	m.MapRange(0x2000, mmu.PageSize, mmu.PermRead|mmu.PermWrite)
+	m.MapRange(codeAddr, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
+	code := []byte{
+		0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, // mov eax, [0x2000]
+		0x8B, 0x4B, 0x20, // mov ecx, [ebx+0x20]
+		0xEB, 0xFE,
+	}
+	for i, opcode := range code {
+		if err := m.Write8(codeAddr+uint64(i), opcode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.Write32(0x2000, 0x12345678); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Write32(0x10, 0x89ABCDEF); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := jit.NewCacheMode(m, true)
+	var block *jit.Block
+	for i := 0; i < jit.CompileThreshold+5; i++ {
+		block = cache.Lookup(codeAddr)
+	}
+	if block == nil {
+		t.Fatal("PE32 memory block did not compile")
+	}
+	regs := [16]uint64{3: 0xfffffff0}
+	rip := codeAddr
+	rflags := uint64(2)
+	state := &jit.State{
+		Regs: &regs, RIP: &rip, Rflags: &rflags, Mem: m,
+		XMM: &[16][2]uint64{}, Mode32: true,
+	}
+	if err := block.Run(state); err != nil {
+		t.Fatal(err)
+	}
+	if regs[0] != 0x12345678 || regs[1] != 0x89ABCDEF {
+		t.Fatalf("EAX=%#x ECX=%#x", regs[0], regs[1])
 	}
 }
 
@@ -557,7 +1125,7 @@ func TestJITStackFaultResumesAtFaultingInstruction(t *testing.T) {
 func TestJITInvalidateClearsNegativeCache(t *testing.T) {
 	m := mmu.New()
 	m.MapRange(0x1000, mmu.PageSize, mmu.PermRead|mmu.PermWrite|mmu.PermExecute)
-	writeCode(m, 0x1000, []byte{0x40})
+	writeCode(m, 0x1000, []byte{0x62})
 	cache := jit.NewCacheMode(m, true)
 	for i := 0; i < jit.CompileThreshold+5; i++ {
 		if block := cache.Lookup(0x1000); block != nil {
