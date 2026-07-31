@@ -1149,10 +1149,19 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 find_program(RAVEN_LABWC labwc)
                 find_program(RAVEN_GRIM grim)
                 find_program(RAVEN_WLRCTL wlrctl)
-                execute_process(COMMAND ${Python3_EXECUTABLE} -c "import PIL" RESULT_VARIABLE RAVEN_PIL_RESULT OUTPUT_QUIET ERROR_QUIET)
-                if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_RESULT EQUAL 0
+                # Screenshot analysis needs Pillow; take the first interpreter that provides it.
+                set(RAVEN_PIL_PYTHON "")
+                foreach(CANDIDATE ${Python3_EXECUTABLE} /usr/bin/python3)
+                    if(NOT RAVEN_PIL_PYTHON AND EXISTS ${CANDIDATE})
+                        execute_process(COMMAND ${CANDIDATE} -c "import PIL" RESULT_VARIABLE CANDIDATE_RESULT OUTPUT_QUIET ERROR_QUIET)
+                        if(CANDIDATE_RESULT EQUAL 0)
+                            set(RAVEN_PIL_PYTHON ${CANDIDATE})
+                        endif()
+                    endif()
+                endforeach()
+                if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON
                    AND EXISTS ${PROJECT_SOURCE_DIR}/testdata/winmine/WINMINE.EXE)
-                    add_test(NAME native_minesweeper_workflow COMMAND ${Python3_EXECUTABLE}
+                    add_test(NAME native_minesweeper_workflow COMMAND ${RAVEN_PIL_PYTHON}
                         ${PROJECT_SOURCE_DIR}/scripts/native-minesweeper.py $<TARGET_FILE:raven>
                         ${PROJECT_SOURCE_DIR}/testdata/winmine/WINMINE.EXE ${CMAKE_CURRENT_BINARY_DIR}/minesweeper-evidence)
                     set_tests_properties(native_minesweeper_workflow PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor)
