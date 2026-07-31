@@ -79,17 +79,13 @@ bool NativeDesktop::caps_dispatch(std::string_view name)
 				throw uint32_t(120);
 			if (x < 0 || y < 0 || x >= bitmap->width || y >= bitmap->height || !dc->contains(x, y))
 				throw uint32_t(87);
-			auto pixels = bitmap->address ? process.read_memory(bitmap->address, size_t(bitmap->width) * bitmap->height * 4) : bitmap->bits;
+			const auto pixels = bitmap->pixels();
 			const auto row = bitmap->top_down ? y : bitmap->height - 1 - y;
 			const auto at = (size_t(row) * bitmap->width + size_t(x)) * 4;
 			pixels[at] = uint8_t(color >> 16);
 			pixels[at + 1] = uint8_t(color >> 8);
 			pixels[at + 2] = uint8_t(color);
 			pixels[at + 3] = 0;
-			if (bitmap->address)
-				process.write_memory(bitmap->address, pixels);
-			else
-				bitmap->bits = std::move(pixels);
 			result = color;
 			changed = true;
 		}
@@ -126,7 +122,7 @@ bool NativeDesktop::caps_dispatch(std::string_view name)
 			auto *bitmap = objects.bitmap(dc->bitmap);
 			if (!bitmap || bitmap->depth != 32)
 				throw uint32_t(120);
-			auto pixels = bitmap->address ? process.read_memory(bitmap->address, size_t(bitmap->width) * bitmap->height * 4) : bitmap->bits;
+			const auto pixels = bitmap->pixels();
 			for (uint32_t row = 0; row < height; ++row) {
 				// Bottom-up DIBs count source rows from their last scan line.
 				const int64_t dib_row = top_down ? source_y + row : source_y + (int64_t(height) - 1 - row);
@@ -160,12 +156,6 @@ bool NativeDesktop::caps_dispatch(std::string_view name)
 					pixels[at] = blue; pixels[at + 1] = green; pixels[at + 2] = red; pixels[at + 3] = 0;
 					changed = true;
 				}
-			}
-			if (changed) {
-				if (bitmap->address)
-					process.write_memory(bitmap->address, pixels);
-				else
-					bitmap->bits = std::move(pixels);
 			}
 			result = lines;
 		}

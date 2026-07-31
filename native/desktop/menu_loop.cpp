@@ -97,7 +97,7 @@ void NativeWindows::menu_render(MenuPopup &popup)
 					canvas.set(ax + step, cy + dy, ink);
 		}
 	}
-	popup.pixels = std::move(canvas.pixels);
+	popup.pixels = std::move(canvas.owned);
 }
 
 void NativeWindows::menu_open_popup(uint64_t menu_handle, uint64_t parent, int32_t x, int32_t y)

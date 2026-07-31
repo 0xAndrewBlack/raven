@@ -13,10 +13,16 @@ inline constexpr int color_active_caption = 2, color_inactive_caption = 3, color
 	color_caption_text = 9, color_button_face = 15, color_button_shadow = 16, color_button_highlight = 20, color_dark_shadow = 21,
 	color_light = 22, color_gradient_active = 27, color_gradient_inactive = 28, color_menu_bar = 30, color_inactive_text = 19;
 
-// BGRA pixels of one window surface, edited in host memory and written back once.
+// BGRA pixels of one surface, either owned or viewed in place.
 struct Canvas {
-	std::vector<uint8_t> pixels;
+	std::vector<uint8_t> owned{};
+	uint8_t *pixels;
 	int32_t width, height;
+
+	Canvas(std::vector<uint8_t> storage, int32_t width, int32_t height) : owned(std::move(storage)), pixels(owned.data()), width(width), height(height) {}
+	Canvas(uint8_t *view, int32_t width, int32_t height) : pixels(view), width(width), height(height) {}
+	Canvas(const Canvas &) = delete;
+	Canvas &operator=(const Canvas &) = delete;
 
 	void set(int32_t x, int32_t y, uint32_t rgb)
 	{

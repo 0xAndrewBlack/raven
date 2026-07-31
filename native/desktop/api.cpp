@@ -364,7 +364,8 @@ uint64_t NativeDesktop::get_bits(std::span<const uint64_t> args)
 		return 0;
 	const size_t size = std::min(size_t(count), bitmap->address ? size_t(bitmap->width) * bitmap->height * 4 : bitmap->bits.size());
 	if (bitmap->address) {
-		auto pixels = process.read_memory(bitmap->address,bitmap->top_down ? size : size_t(bitmap->width)*bitmap->height*4);
+		const auto view = bitmap->pixels();
+		std::vector<uint8_t> pixels(view.begin(),view.begin()+static_cast<ptrdiff_t>(bitmap->top_down ? size : size_t(bitmap->width)*bitmap->height*4));
 		if (!bitmap->top_down) {
 			const size_t stride = size_t(bitmap->width)*4;
 			for (size_t y = 0; y < bitmap->height/2; ++y)

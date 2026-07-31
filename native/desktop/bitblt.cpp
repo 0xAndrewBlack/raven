@@ -32,10 +32,15 @@ bool bit_blt(NativeProcess &process,DesktopObjects &objects,std::span<const uint
 	}
 	if (right<=left || bottom<=top || (dc->clip && dc->clip->empty())) return false;
 	// Snapshot before writing: source and destination can be the same bitmap or guest allocation.
-	const auto input=source ? (source->address ? process.read_memory(source->address,size_t(source->width)*source->height*4) : source->bits) : std::vector<uint8_t>{};
-	auto output=destination->address ? process.read_memory(destination->address,size_t(destination->width)*destination->height*4) : destination->bits;
-	if (output.size()!=size_t(destination->width)*destination->height*4 ||
-		(source && input.size()!=size_t(source->width)*source->height*4)) throw uint32_t(120);
+	std::vector<uint8_t> snapshot;
+	std::span<const uint8_t> input;
+	if (source) {
+		if (source==destination) { snapshot.assign(source->pixels().begin(),source->pixels().end()); input=snapshot; }
+		else input=source->pixels();
+	}
+	const auto output=objects.bitmap(dc->bitmap)->pixels();
+	if (output.size()<size_t(destination->width)*destination->height*4 ||
+		(source && input.size()<size_t(source->width)*source->height*4)) throw uint32_t(120);
 	const uint32_t pattern=brush ? ((brush->color & 0xff)<<16) | (brush->color & 0xff00) | ((brush->color>>16)&0xff) : 0;
 	bool changed=false;
 	for (auto y=top;y<bottom;++y) for (auto x=left;x<right;++x) {
@@ -52,10 +57,6 @@ bool bit_blt(NativeProcess &process,DesktopObjects &objects,std::span<const uint
 			output[target+c]=value;
 		}
 		changed=true;
-	}
-	if (changed) {
-		if (destination->address) process.write_memory(destination->address,output);
-		else objects.bitmap(dc->bitmap)->bits=std::move(output);
 	}
 	return changed;
 }

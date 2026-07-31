@@ -5,6 +5,7 @@
 #include "keyboard.h"
 #include <array>
 #include <map>
+#include <set>
 #include "nt/api.h"
 #include "nt/environment.h"
 #include <functional>
@@ -26,7 +27,9 @@ public:
 	bool dispatch(std::string_view name);
 	// user32 entry points that follow the shared registry conventions; every handler runs on the calling guest thread.
 	void register_api(ApiRegistry &registry);
+	// Drawing marks the surface dirty; the next message retrieval presents it, so a burst of primitives costs one frame.
 	void drawing(uint64_t window);
+	void flush_dirty();
 	void shutdown();
 
 private:
@@ -44,6 +47,7 @@ private:
 	// Initial guest thread queue; HWNDs and drawing resources stay in DesktopObjects.
 	std::deque<Message> messages;
 	std::optional<uint32_t> quit;
+	std::set<uint64_t> dirty_roots;
 	std::chrono::steady_clock::time_point deadline;
 	std::function<bool()> yield_hook;
 	std::function<uint64_t(uint64_t,uint64_t)> menu_loader;

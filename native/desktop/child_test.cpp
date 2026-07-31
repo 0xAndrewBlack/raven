@@ -59,7 +59,7 @@ int main(int argc,char **argv)
 		bool injected=false;
 		if (input) presentation.poll=[&](std::chrono::milliseconds) {
 			std::vector<raven::DesktopEvent> events;
-			if (root && frames>=5 && !injected) {
+			if (root && frames>=1 && !injected) {
 				injected=true;
 				for(unsigned i=0;i<4;++i) events.push_back({root,0x110,i & 1 ? 0ULL : 1ULL,0,raven::DesktopEventKind::pointer_button,i<2 ? 6 : 20,i<2 ? 11 : 8});
 			}

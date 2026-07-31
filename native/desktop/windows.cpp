@@ -20,6 +20,7 @@ NativeWindows::NativeWindows(NativeProcess &process, NativeEnvironment &environm
 
 void NativeWindows::shutdown()
 {
+	try { flush_dirty(); } catch (...) {}
 	for (const auto handle : objects.window_handles()) {
 		const auto *window=objects.window(handle);
 		if (handle!=desktop && !window->parent && window->bitmap && presentation.remove) presentation.remove(handle);
@@ -59,10 +60,11 @@ uint64_t NativeWindows::surface_dc(uint64_t handle)
 	if (width>8192 || height>8192 || uint64_t(width)*uint64_t(height)>16*1024*1024)
 		throw uint32_t(87);
 	const auto size=(size_t(width)*size_t(height)*4+4095)&~size_t(4095);
-	const auto address=process.map_memory(size,PROT_READ | PROT_WRITE);
+	const auto shared=std::make_shared<SharedPixels>(size);
+	const auto address=process.map_shared(shared->descriptor(),size);
 	uint64_t bitmap=0,dc=0;
 	try {
-		bitmap=objects.add(DesktopBitmap{uint32_t(width),uint32_t(height),32,{},address,true,true});
+		bitmap=objects.add(DesktopBitmap{uint32_t(width),uint32_t(height),32,{},address,true,true,false,shared});
 		if (!bitmap) throw uint32_t(8);
 		DesktopDC device{bitmap,bitmap,handle};
 		objects.configure_window_dc(handle,device,false);
@@ -80,11 +82,12 @@ void NativeWindows::present(uint64_t handle)
 	handle=objects.window_root(handle);
 	if (!handle) throw uint32_t(1400);
 	if (!presentation.present) throw uint32_t(120);
+	dirty_roots.erase(handle);
 	surface_dc(handle);
 	paint_nonclient(handle);
 	const auto *window=objects.window(handle);
 	const auto *bitmap=objects.bitmap(window->bitmap);
-	const auto pixels=process.read_memory(bitmap->address,size_t(bitmap->width)*bitmap->height*4);
+	const auto pixels=std::span<const uint8_t>(bitmap->pixels().data(),size_t(bitmap->width)*bitmap->height*4);
 	// Host titles use replacement characters; the guest retains every UTF-16 code unit.
 	presentation.present(handle,encode_utf8(window->title,true),bitmap->width,bitmap->height,pixels);
 }
@@ -93,7 +96,16 @@ void NativeWindows::drawing(uint64_t handle)
 {
 	if (handle==desktop) return;
 	const auto *window=objects.window(handle);
-	if (window && objects.window_visible(handle)) present(handle);
+	if (window && objects.window_visible(handle)) dirty_roots.insert(objects.window_root(handle));
+}
+
+void NativeWindows::flush_dirty()
+{
+	const auto roots=std::move(dirty_roots);
+	dirty_roots.clear();
+	if (!presentation.present) return;
+	for (const auto root:roots)
+		if (objects.window(root) && objects.window_visible(root)) present(root);
 }
 
 void NativeWindows::release_surface(uint64_t handle)
@@ -274,6 +286,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 	if ((minimum || maximum) && (minimum>maximum || maximum>0xffff)) throw uint32_t(87);
 	const auto flags=blocking ? 1U : uint32_t(args[4]);
 	if (flags & ~1U) throw uint32_t(120);
+	flush_dirty();
 	for (;;) {
 		if (presentation.poll)
 			for (const auto &event : presentation.poll(std::chrono::milliseconds(0)))

@@ -118,8 +118,12 @@ uint64_t NativeDesktop::allocate_bitmap(uint32_t width,uint32_t height,uint32_t 
 	const size_t bytes=stride*height;
 	uint64_t address=0,bitmap=0;
 	try {
-		if (section) address=process.map_memory((bytes+4095)&~size_t(4095),PROT_READ | PROT_WRITE);
-		bitmap=objects.add(DesktopBitmap{width,height,depth,section ? std::vector<uint8_t>{} : std::vector<uint8_t>(bytes),address,top_down,false,section});
+		std::shared_ptr<SharedPixels> shared;
+		if (section) {
+			shared=std::make_shared<SharedPixels>((bytes+4095)&~size_t(4095));
+			address=process.map_shared(shared->descriptor(),shared->size());
+		}
+		bitmap=objects.add(DesktopBitmap{width,height,depth,section ? std::vector<uint8_t>{} : std::vector<uint8_t>(bytes),address,top_down,false,section,shared});
 	} catch (const std::bad_alloc &) {
 		if (address) process.unmap_memory(address);
 		environment.set_last_error(8); return 0;
@@ -173,7 +177,7 @@ bool NativeDesktop::draw(std::span<const uint64_t> args)
 	if (x0 >= x1 || y0 >= y1)
 		return true;
 	if (dc->clip && dc->clip->empty()) return true;
-	auto pixels = bitmap->address ? process.read_memory(bitmap->address,size_t(bitmap->width)*bitmap->height*4) : bitmap->bits;
+	const auto pixels = bitmap->pixels();
 	bool changed=false;
 	for (auto y = y0; y < y1; ++y)
 		for (auto x = x0; x < x1; ++x) {
@@ -198,10 +202,6 @@ bool NativeDesktop::draw(std::span<const uint64_t> args)
 			}
 		}
 	if (!changed) return true;
-	if (bitmap->address)
-		process.write_memory(bitmap->address,pixels);
-	else
-		bitmap->bits = std::move(pixels);
 	if (dc->window && dc->leased && updated) updated(dc->window);
 	return true;
 }

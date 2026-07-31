@@ -9,22 +9,18 @@ bool fill_rect(NativeProcess &process,DesktopObjects &objects,uint64_t handle,De
 	if (brush_handle && brush_handle<=31) brush_handle=objects.system_brush(int32_t(brush_handle-1));
 	const auto *dc=objects.dc(handle); const auto *brush=objects.brush(brush_handle);
 	if (!dc || !brush) throw uint32_t(brush_handle>0 && brush_handle<=32 ? 120 : 6);
-	const auto *bitmap=objects.bitmap(dc->bitmap);
+	auto *bitmap=objects.bitmap(dc->bitmap);
 	if (!bitmap || bitmap->depth!=32) throw uint32_t(120);
 	const auto left=std::max(int64_t(rect.left)+dc->origin_x,int64_t(0)),top=std::max(int64_t(rect.top)+dc->origin_y,int64_t(0));
 	const auto right=std::min(int64_t(rect.right)+dc->origin_x,int64_t(bitmap->width)),bottom=std::min(int64_t(rect.bottom)+dc->origin_y,int64_t(bitmap->height));
 	if (brush->hollow || right<=left || bottom<=top) return false;
-	auto pixels=bitmap->address ? process.read_memory(bitmap->address,size_t(bitmap->width)*bitmap->height*4) : bitmap->bits;
+	const auto pixels=bitmap->pixels();
 	bool changed=false;
 	for (int64_t y=top;y<bottom;++y) for (int64_t x=left;x<right;++x) {
 		if (!dc->contains(x,y)) continue;
 		const auto row=bitmap->top_down ? size_t(y) : bitmap->height-1-size_t(y);
 		const size_t at=(row*bitmap->width+size_t(x))*4;
 		pixels[at]=uint8_t(brush->color>>16); pixels[at+1]=uint8_t(brush->color>>8); pixels[at+2]=uint8_t(brush->color); pixels[at+3]=0; changed=true;
-	}
-	if (changed) {
-		if (bitmap->address) process.write_memory(bitmap->address,pixels);
-		else objects.bitmap(dc->bitmap)->bits=std::move(pixels);
 	}
 	return changed;
 }

@@ -30,7 +30,7 @@ int main(int argc,char **argv)
 		presentation.poll=[&](std::chrono::milliseconds) {
 			std::vector<raven::DesktopEvent> events;
 			if (input && !injected) {
-				check(window && frames>=6,"input was requested before drawing completed");
+				check(window && frames>=1,"input was requested before drawing completed");
 				injected=true;
 				events.push_back({window,0,0,0,raven::DesktopEventKind::pointer_motion,3,4});
 				events.push_back({window,0,0,0,raven::DesktopEventKind::pointer_motion,19,24});
@@ -38,7 +38,7 @@ int main(int argc,char **argv)
 			return events;
 		};
 		const auto result=raven::run_native_process(modules,entry,argv[1],std::chrono::seconds(10),{},{},presentation);
-		check(result.stop==raven::NativeStop::returned && !result.value && frames>=6 && removed==1,"SDK outer surface workflow failed");
+		check(result.stop==raven::NativeStop::returned && !result.value && frames>=1 && removed==1,"SDK outer surface workflow failed");
 		check(!input || injected,"client input was not delivered");
 		unsigned ink=0;
 		for (unsigned y=0;y<240;++y) for (unsigned x=0;x<320;++x) {

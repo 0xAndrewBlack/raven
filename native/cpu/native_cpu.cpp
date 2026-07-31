@@ -400,6 +400,45 @@ uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address
 	return mapped;
 }
 
+uint64_t NativeProcess::map_shared(int descriptor, size_t size)
+{
+	state->require_stopped();
+	memory_range(0, size, PROT_READ | PROT_WRITE, state->limit());
+	state->mappings.reserve(state->mappings.size() + 1);
+	state->allocations.reserve(state->allocations.size() + 1);
+	const auto path = "/proc/" + std::to_string(getpid()) + "/fd/" + std::to_string(descriptor);
+	std::vector<uint8_t> name(path.begin(), path.end());
+	name.push_back(0);
+	const auto scratch = map_memory(4096, PROT_READ | PROT_WRITE);
+	uint64_t guest_descriptor = uint64_t(-1);
+	try {
+		write_memory(scratch, name);
+		// Reopen only the host-owned memfd; guest code never executes the Linux syscall.
+		guest_descriptor = memory_syscall(SYS_openat, uint64_t(AT_FDCWD), scratch, O_RDWR | O_CLOEXEC);
+		const auto mapped = memory_syscall(SYS_mmap, 0, size, PROT_READ | PROT_WRITE,
+			MAP_SHARED | (state->mode == NativeMode::x86 ? MAP_32BIT : 0), guest_descriptor);
+		if (mapped >= state->limit() || size > state->limit() - mapped) {
+			state->child->stop();
+			throw std::runtime_error("host returned an invalid shared mapping address");
+		}
+		memory_syscall(SYS_close, guest_descriptor, 0);
+		guest_descriptor = uint64_t(-1);
+		unmap_memory(scratch);
+		state->mappings.push_back({mapped, size, 0, PROT_READ | PROT_WRITE});
+		state->allocations.emplace_back(mapped, size);
+		return mapped;
+	} catch (...) {
+		try {
+			if (guest_descriptor != uint64_t(-1))
+				memory_syscall(SYS_close, guest_descriptor, 0);
+			unmap_memory(scratch);
+		} catch (...) {
+			state->child->stop();
+		}
+		throw;
+	}
+}
+
 void NativeProcess::protect_memory(uint64_t address, size_t size, int protection)
 {
 	state->require_stopped();

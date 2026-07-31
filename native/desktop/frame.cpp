@@ -133,9 +133,9 @@ void NativeWindows::paint_nonclient(uint64_t handle)
 	if (!layout.border && !layout.caption_height && !layout.menu_height)
 		return;
 	const auto *bitmap = objects.bitmap(window->bitmap);
-	if (!bitmap || !bitmap->address || bitmap->depth != 32)
+	if (!bitmap || !bitmap->shared || bitmap->depth != 32)
 		return;
-	Canvas canvas{process.read_memory(bitmap->address, size_t(bitmap->width) * bitmap->height * 4), int32_t(bitmap->width), int32_t(bitmap->height)};
+	Canvas canvas{objects.bitmap(window->bitmap)->pixels().data(), int32_t(bitmap->width), int32_t(bitmap->height)};
 	const int32_t width = window->outer.right - window->outer.left, height = window->outer.bottom - window->outer.top;
 	const bool is_active = active == handle;
 	const auto color = [&](int index) { return rgb(objects.system_color(index)); };
@@ -206,7 +206,6 @@ void NativeWindows::paint_nonclient(uint64_t handle)
 			}
 		}
 	}
-	process.write_memory(bitmap->address, canvas.pixels);
 }
 #else
 void NativeWindows::paint_nonclient(uint64_t)

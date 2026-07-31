@@ -95,7 +95,7 @@ bool NativeDesktop::pen_dispatch(std::string_view name)
 					if(std::max(dx,dy)>1048576)throw uint32_t(120);
 					const int64_t sx=x<target_x ? 1 : -1,sy=y<target_y ? 1 : -1;
 					auto error=dx-dy;
-					auto pixels=bitmap->address ? process.read_memory(bitmap->address,size_t(bitmap->width)*bitmap->height*4) : bitmap->bits;
+					const auto pixels=bitmap->pixels();
 					while(x!=target_x || y!=target_y){
 						const auto px=x+dc->origin_x,py=y+dc->origin_y;
 						if(px>=0 && py>=0 && px<bitmap->width && py<bitmap->height && dc->contains(px,py)){
@@ -109,7 +109,6 @@ bool NativeDesktop::pen_dispatch(std::string_view name)
 						if(twice> -dy || (twice== -dy && sx<0)){error-=dy;x+=sx;}
 						if(twice<dx || (twice==dx && sy<0)){error+=dx;y+=sy;}
 					}
-					if(changed){if(bitmap->address)process.write_memory(bitmap->address,pixels);else bitmap->bits=std::move(pixels);}
 				}
 				dc->position_x=target_x;dc->position_y=target_y;result=1;
 				if(changed && dc->window && dc->leased && updated)updated(dc->window);

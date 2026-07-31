@@ -160,6 +160,21 @@ int main(int argc, char **argv)
 						if (std::filesystem::exists(component))
 							modules.add("raven-rtl.dll", read_file(component.c_str()));
 					}
+					// The common controls component stands in for comctl32.dll when the program does not ship its own.
+					if (entry->image.is_64 && !modules.all().contains("comctl32.dll")) {
+						const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "comctl32.dll";
+						const auto imported = std::any_of(modules.all().begin(), modules.all().end(), [](const auto &item) {
+							return std::any_of(item.second->imports.begin(), item.second->imports.end(), [](const auto &symbol) {
+								auto name = symbol.module;
+								for (auto &character : name)
+									if (character >= 'A' && character <= 'Z')
+										character = static_cast<char>(character + ('a' - 'A'));
+								return name == "comctl32.dll" || name == "comctl32";
+							});
+						});
+						if (imported && std::filesystem::exists(component))
+							modules.add("comctl32.dll", read_file(component.c_str()));
+					}
 					raven::DesktopPresentation presentation;
 #ifdef RAVEN_WAYLAND
 					raven::WaylandPresentation backend;

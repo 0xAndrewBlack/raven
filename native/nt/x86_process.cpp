@@ -10,6 +10,7 @@
 #include "registry.h"
 #include "desktop/api.h"
 #include "desktop/windows.h"
+#include "api.h"
 
 #include <algorithm>
 #include <array>
@@ -314,6 +315,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	DesktopObjects desktop_objects;
 	NativeDesktop desktop(process, environment, desktop_objects, resources);
 	NativeWindows windows(process, environment, desktop_objects);
+	// Registry handlers whose arguments carry no pointer-width structures also serve 32-bit programs.
+	ApiRegistry shared_api;
+	windows.register_api(shared_api);
+	const std::array<std::string_view, 1> shared_names{"MoveWindow"};
 	windows.set_deadline(deadline);
 	windows.set_presentation(std::move(presentation));
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
@@ -347,7 +352,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			if (!environment.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
 				!desktop.dispatch(api) && !windows.dispatch(api) && !advapi.dispatch(api) && !profile.dispatch(api) &&
-				!crt.dispatch(api) && !unsupported_library(process, environment, api)) {
+				!crt.dispatch(api) && !unsupported_library(process, environment, api) &&
+				!(std::find(shared_names.begin(), shared_names.end(), api) != shared_names.end() && shared_api.dispatch(process, environment, api))) {
 				std::cerr << "raven: unimplemented native x86 API " << api << '\n';
 				return result;
 			}

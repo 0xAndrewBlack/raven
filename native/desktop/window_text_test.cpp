@@ -46,7 +46,7 @@ int main(int argc,char **argv)
 			check(handle==window && width==16 && height==12 && pixels.size()==16*12*4,"Unicode title changed surface ownership");
 			title=text;++frames;
 		};
-		windows.set_presentation(presentation);windows.drawing(window);
+		windows.set_presentation(presentation);windows.drawing(window);windows.flush_dirty();
 		check(frames==1 && title=="caf\xc3\xa9-\xe4\xb8\xad-\xf0\x9f\x9a\x80","host title is not UTF-8");
 		const auto call=[&](uint32_t message,uint64_t wparam,uint64_t lparam) {
 			const auto function=modules.resolve({"user32.dll","DefWindowProcW",0,false,0});

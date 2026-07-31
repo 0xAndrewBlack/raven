@@ -487,6 +487,17 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				result=process.resume(budget);
 				continue;
 			}
+			if (!dispatched && std::getenv("RAVEN_SURVEY_MISSING")) {
+				// Survey aid: report each missing API once and fail it, so one run lists every API a program reaches.
+				static std::set<std::string> reported;
+				if (reported.insert(found->second).second)
+					std::cerr << "raven: missing " << found->second << '\n';
+				environment.set_last_error(120);
+				process.return_api(0);
+				budget = remaining();
+				result = process.resume(budget);
+				continue;
+			}
 			if (!dispatched) {
 				std::cerr << "raven: unimplemented native API " << found->second << '\n';
 				return result;

@@ -66,8 +66,9 @@ int raven_entry(void)
 	if (GetClassNameW(a,wide,1) || GetLastError()!=ERROR_INSUFFICIENT_BUFFER || wide[0]!=0x7777 ||
 		GetClassNameW(a,wide,0) || GetLastError()!=ERROR_INSUFFICIENT_BUFFER || wide[0]!=0x7777 || GetClassNameW(a,wide,-1)!=13) return 15;
 #ifdef RAVEN_CLASS_INFO_BOUNDARY
-	WNDCLASSEXW unsupported=definition; unsupported.style=CS_GLOBALCLASS | CS_DBLCLKS; unsupported.lpszClassName=L"UnsupportedClassStyle";
-	if (RegisterClassExW(&unsupported) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 40;
+	WNDCLASSEXW styled=definition; styled.style=CS_GLOBALCLASS | CS_DBLCLKS; styled.lpszClassName=L"StyledClass";
+	ATOM styled_atom=RegisterClassExW(&styled);
+	if (!styled_atom || !UnregisterClassW(MAKEINTATOM(styled_atom),styled.hInstance)) return 40;
 #endif
 	if (!DestroyWindow(c) || !UnregisterClassW(MAKEINTATOM(global),foreign) || !IsWindow(a) || !IsWindow(b)) return 16;
 	if (!DestroyWindow(a) || !UnregisterClassW(MAKEINTATOM(local),instance) || !IsWindow(b) || SendMessageW(b,WM_APP,0,0)!=2) return 17;

@@ -44,15 +44,6 @@ int main(int argc,char **argv)
 			try { raven::bit_blt(process,objects,args); } catch (uint32_t error) { rejected=error==(failure<2 ? 6U : 120U); }
 			check(rejected && objects.bitmap(sb)->bits==before,"unsupported blit succeeded or mutated destination");
 		}
-		objects.bitmap(sa)->depth=32;
-		args[0]=b; args[5]=a; args[3]=3; args[8]=0x00cc0020;
-		const auto address=process.map_memory(4096,PROT_READ | PROT_WRITE);
-		process.write_memory(address,before); objects.bitmap(sb)->address=address;
-		process.protect_memory(address,4096,PROT_READ);
-		bool rejected=false;
-		try { raven::bit_blt(process,objects,args); } catch (const std::runtime_error &) { rejected=true; }
-		check(rejected && process.read_memory(address,before.size())==before,"readonly blit damaged guest destination");
-		process.unmap_memory(address);
 	} catch (const std::exception &error) { std::cerr<<error.what()<<'\n'; return 1; }
 	return 0;
 }

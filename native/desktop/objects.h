@@ -3,10 +3,12 @@
 #include "graphics/icon_bitmap.h"
 #include "graphics/icon_group.h"
 #include "region.h"
+#include "shared_pixels.h"
 #include "nonclient.h"
 #include "colors.h"
 #include "menu.h"
 #include <array>
+#include <span>
 #include <memory>
 #include <optional>
 #ifdef RAVEN_SKIA
@@ -37,6 +39,10 @@ struct DesktopBitmap {
 	bool stock = false;
 	// Guest-backed window storage does not imply a public DIB section.
 	bool dib_section = false;
+	// Host view of the guest-visible pixels; guest-backed bitmaps always carry one.
+	std::shared_ptr<SharedPixels> shared{};
+	std::span<uint8_t> pixels() { return shared ? std::span<uint8_t>(shared->data(), shared->size()) : std::span<uint8_t>(bits); }
+	std::span<const uint8_t> pixels() const { return shared ? std::span<const uint8_t>(shared->data(), shared->size()) : std::span<const uint8_t>(bits); }
 };
 
 struct DesktopFont {

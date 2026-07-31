@@ -103,7 +103,7 @@ uint64_t NativeDesktop::text_output(std::span<const uint64_t> args)
 		if(x>=INT32_MIN && x<=INT32_MAX && y>=INT32_MIN && y<=INT32_MAX)
 			mask=objects.text().mask(font->definition,text,bitmap->width,bitmap->height,int32_t(x),int32_t(y),positions);
 	}
-	auto pixels=bitmap->address ? process.read_memory(bitmap->address,size_t(bitmap->width)*bitmap->height*4) : bitmap->bits;
+	const auto pixels=bitmap->pixels();
 	bool changed=false;
 	for(uint32_t row=0;row<bitmap->height;++row)for(uint32_t column=0;column<bitmap->width;++column){
 		if(!dc->contains(column,row))continue;
@@ -119,7 +119,6 @@ uint64_t NativeDesktop::text_output(std::span<const uint64_t> args)
 		pixels[at]=uint8_t(color>>16);pixels[at+1]=uint8_t(color>>8);pixels[at+2]=uint8_t(color);pixels[at+3]=0;changed=true;
 	}
 	if(changed){
-		if(bitmap->address)process.write_memory(bitmap->address,pixels);else bitmap->bits=std::move(pixels);
 		if(dc->window && dc->leased && updated)updated(dc->window);
 	}
 	return 1;

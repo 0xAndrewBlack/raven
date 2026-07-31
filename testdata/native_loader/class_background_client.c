@@ -42,9 +42,11 @@ int raven_entry(void)
 	invalid.hbrBackground=(HBRUSH)32;
 	if (RegisterClassW(&invalid) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 41;
 	HBRUSH retained=CreateSolidBrush(RGB(37,91,173)); invalid.hbrBackground=retained; invalid.style=CS_OWNDC;
-	if (!retained || RegisterClassW(&invalid) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED ||
-		GetObjectW(retained,sizeof(descriptor),&descriptor)!=sizeof(descriptor)) return 42;
-	invalid.style=0;
+	HBRUSH styled_background=CreateSolidBrush(RGB(5,6,7)); invalid.hbrBackground=styled_background;
+	ATOM owndc=styled_background ? RegisterClassW(&invalid) : 0;
+	if (!retained || !owndc || GetObjectW(retained,sizeof(descriptor),&descriptor)!=sizeof(descriptor) ||
+		!UnregisterClassW(MAKEINTATOM(owndc),instance)) return 42;
+	invalid.hbrBackground=retained; invalid.style=0;
 	ATOM registered=RegisterClassW(&invalid);
 	if (!registered || !UnregisterClassW(MAKEINTATOM(registered),instance) || GetObjectW(retained,sizeof(descriptor),&descriptor)) return 43;
 	return 0;
