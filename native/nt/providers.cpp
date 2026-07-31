@@ -38,7 +38,7 @@ std::vector<uint8_t> environment_provider(std::string_view name, uint64_t base)
 }
 
 std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
-	std::span<const std::string_view> exports)
+	std::span<const std::string_view> exports, bool x86)
 {
 	if (exports.empty() || exports.size() > 4096 || name.empty() || name.size() > 63 || name.find('\0') != name.npos ||
 		!std::is_sorted(exports.begin(), exports.end()) || std::adjacent_find(exports.begin(), exports.end()) != exports.end())
@@ -67,26 +67,31 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(0, 0x5a4d, 2);
 	put(0x3c, 0x80);
 	put(0x80, 0x4550);
-	put(0x84, 0x8664, 2);
+	// PE32 headers end 16 bytes earlier: no BaseOfData widening, a 4-byte image base and 224 optional bytes.
+	const size_t count_field = x86 ? 0xf4 : 0x104;
+	const size_t section = x86 ? 0x178 : 0x188;
+	put(0x84, x86 ? 0x14c : 0x8664, 2);
 	put(0x86, 1, 2);
-	put(0x94, 240, 2);
-	put(0x96, 0x2003, 2);
-	put(0x98, 0x20b, 2);
-	put(0xb0, base, 8);
+	put(0x94, x86 ? 224 : 240, 2);
+	put(0x96, x86 ? 0x2103 : 0x2003, 2);
+	put(0x98, x86 ? 0x10b : 0x20b, 2);
+	if (x86 && base > UINT32_MAX - 0x100000)
+		throw std::runtime_error("native x86 provider base exceeds the 32-bit address space");
+	put(x86 ? 0xb4 : 0xb0, base, x86 ? 4 : 8);
 	put(0xb8, 0x1000);
 	put(0xbc, 0x200);
 	put(0xd0, (rva(bytes.size()) + 4095) & ~size_t(4095));
 	put(0xd4, 0x200);
 	put(0xdc, 3, 2);
-	put(0x104, 16);
-	put(0x108, rva(directory));
-	put(0x10c, end - directory);
-	text(0x188, ".api");
-	put(0x190, bytes.size() - 0x200);
-	put(0x194, 0x1000);
-	put(0x198, bytes.size() - 0x200);
-	put(0x19c, 0x200);
-	put(0x1ac, 0x60000020);
+	put(count_field, 16);
+	put(count_field + 4, rva(directory));
+	put(count_field + 8, end - directory);
+	text(section, ".api");
+	put(section + 8, bytes.size() - 0x200);
+	put(section + 12, 0x1000);
+	put(section + 16, bytes.size() - 0x200);
+	put(section + 20, 0x200);
+	put(section + 36, 0x60000020);
 	put(directory + 12, rva(module_name));
 	// Only the independently verified common-controls identity receives a public ordinal.
 	const bool icon_control = name == "comctl32.dll" && exports.size() == 1 && exports[0] == "LoadIconWithScaleDown";

@@ -168,6 +168,8 @@ int main(int argc, char **argv)
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
 						if (inherited_stdio) launch->standard_fds={0,1,2};
 					}
+					if (!entry->image.is_64)
+						return native_result(raven::run_native_process_x86(modules, *entry, bootstrap.string(), timeout, launch),true,inherited_stdio);
 					return native_result(raven::run_native_process(modules, *entry, bootstrap.string(), timeout, source, debug,presentation,launch),true,inherited_stdio);
 				}
 				return native_result(raven::run_native_modules(modules, *entry, bootstrap.string(), std::chrono::seconds(5)));

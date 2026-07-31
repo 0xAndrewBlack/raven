@@ -28,6 +28,10 @@ static uint32_t value(NativeProcess &process, uint64_t address)
 NativeEnvironment::NativeEnvironment(NativeProcess &process, uint64_t image_base,
 	uint32_t process_id, uint32_t thread_id) : process(process)
 {
+	if (process.mode() == NativeMode::x86) {
+		x86_constructor(image_base, process_id, thread_id);
+		return;
+	}
 	auto context = process.context();
 	if (process.active() || context.registers.gs_base || !process_id || !thread_id || !image_base || image_base % 65536)
 		throw std::runtime_error("invalid initial native environment or existing GS environment");
@@ -59,8 +63,41 @@ NativeEnvironment::NativeEnvironment(NativeProcess &process, uint64_t image_base
 	}
 }
 
+void NativeEnvironment::x86_constructor(uint64_t image_base, uint32_t process_id, uint32_t thread_id)
+{
+	if (process.active() || !process_id || !thread_id || !image_base || image_base % 65536 || image_base > UINT32_MAX)
+		throw std::runtime_error("invalid initial native environment");
+	if (process.read_memory(image_base, 2) != std::vector<uint8_t>{0x4d, 0x5a})
+		throw std::runtime_error("native environment requires an image header");
+	const auto [stack_limit, stack_base] = process.stack_bounds();
+	try {
+		process_block = process.map_memory(4096, PROT_READ | PROT_WRITE);
+		thread_block = process.map_memory(8192, PROT_READ | PROT_WRITE);
+		// x86 NT_TIB, CLIENT_ID and the initial TEB/PEB contract fields.
+		field(process, thread_block, UINT32_MAX, 4);
+		field(process, thread_block + 0x04, stack_base, 4);
+		field(process, thread_block + 0x08, stack_limit, 4);
+		field(process, thread_block + 0x18, thread_block, 4);
+		field(process, thread_block + 0x20, process_id, 4);
+		field(process, thread_block + 0x24, thread_id, 4);
+		field(process, thread_block + 0x30, process_block, 4);
+		field(process, process_block + 0x08, image_base, 4);
+		process.set_teb(thread_block);
+	} catch (...) {
+		try {
+			if (thread_block)
+				process.unmap_memory(thread_block);
+			if (process_block)
+				process.unmap_memory(process_block);
+		} catch (...) {}
+		throw;
+	}
+}
+
 void NativeEnvironment::require_current() const
 {
+	if (process.mode() == NativeMode::x86)
+		return;
 	if (process.context().registers.gs_base != thread_block)
 		throw std::runtime_error("native environment is not the current guest thread");
 }
@@ -68,13 +105,13 @@ void NativeEnvironment::require_current() const
 uint32_t NativeEnvironment::last_error() const
 {
 	require_current();
-	return value(process, thread_block + 0x68);
+	return value(process, thread_block + (process.mode() == NativeMode::x86 ? 0x34 : 0x68));
 }
 
 void NativeEnvironment::set_last_error(uint32_t error)
 {
 	require_current();
-	field(process, thread_block + 0x68, error, 4);
+	field(process, thread_block + (process.mode() == NativeMode::x86 ? 0x34 : 0x68), error, 4);
 }
 
 uint64_t NativeEnvironment::prepare_heaps()
@@ -118,8 +155,92 @@ uint64_t NativeEnvironment::process_heap() const
 	return heap;
 }
 
+uint64_t NativeEnvironment::pointer(uint64_t address) const
+{
+	const auto width = process.mode() == NativeMode::x86 ? 4 : 8;
+	const auto bytes = process.read_memory(address, width);
+	uint64_t result = 0;
+	for (size_t index = 0; index < bytes.size(); ++index)
+		result |= uint64_t(bytes[index]) << (index * 8);
+	return result;
+}
+
+void NativeEnvironment::prepare_parameters_x86(const NativeLaunch &launch,std::array<uint64_t,3> standard_handles)
+{
+	if (process.active() || command_line_ansi || process.read_memory(process_block+0x10,4)!=std::vector<uint8_t>(4))
+		throw std::runtime_error("native process parameters are already initialized or running");
+	if (launch.image_path.empty() || launch.image_path.size()>32766 || launch.command_line.size()>32766 ||
+		launch.image_path.find(u'\0')!=launch.image_path.npos || launch.command_line.find(u'\0')!=launch.command_line.npos)
+		throw std::runtime_error("invalid native process image or command line");
+	const auto &title=launch.startup.title ? *launch.startup.title : launch.image_path;
+	if (title.size()>32766 || title.find(u'\0')!=title.npos || launch.startup.runtime_data.size()>65535)
+		throw std::runtime_error("native startup title or runtime data exceeds its ABI bound");
+	// Normalized x86 RTL_USER_PROCESS_PARAMETERS. Empty fields do not grant host resources.
+	const auto ansi=encode_ansi(launch.command_line,launch.ansi_code_page);
+	const auto ansi_title=encode_ansi(title,launch.ansi_code_page);
+	const size_t length=0x400+(launch.image_path.size()+1+launch.command_line.size()+1+title.size()+1)*2+
+		4+ansi.size()+1+ansi_title.size()+1+1+launch.startup.runtime_data.size()+7+68;
+	const size_t capacity=(length+4095)&~size_t(4095);
+	std::vector<uint8_t> bytes(capacity);
+	const auto address=process.map_memory(capacity,PROT_READ | PROT_WRITE);
+	try {
+		const auto put=[&](size_t offset,uint64_t number,size_t width) {
+			for (size_t i=0;i<width;++i) bytes.at(offset+i)=uint8_t(number>>(i*8));
+		};
+		put(0,capacity,4); put(4,length,4); put(8,1,4);
+		for (size_t i=0;i<3;++i) put(0x18+i*4,standard_handles[i],4);
+		size_t cursor=0x400;
+		const auto text=[&](size_t offset,std::u16string_view string) {
+			put(offset,string.size()*2,2); put(offset+2,(string.size()+1)*2,2);
+			put(offset+4,address+cursor,4);
+			for (const auto character : string) { put(cursor,character,2); cursor+=2; }
+			cursor+=2;
+		};
+		text(0x38,launch.image_path); text(0x40,launch.command_line);
+		text(0x70,title);
+		for (const size_t offset : {0x24U,0x30U}) {
+			put(offset+2,2,2); put(offset+4,address+cursor,4);
+		}
+		put(0x7c,address+cursor,4);
+		cursor+=4;
+		const auto command_offset=cursor;
+		std::copy(ansi.begin(),ansi.end(),bytes.begin()+static_cast<ptrdiff_t>(cursor));
+		cursor+=ansi.size()+1;
+		const auto title_offset=cursor;
+		std::copy(ansi_title.begin(),ansi_title.end(),bytes.begin()+static_cast<ptrdiff_t>(cursor));
+		cursor+=ansi_title.size()+1;
+		const auto desktop_offset=cursor++;
+		const auto runtime=launch.startup.runtime_data.empty() ? 0 : address+cursor;
+		std::copy(launch.startup.runtime_data.begin(),launch.startup.runtime_data.end(),bytes.begin()+static_cast<ptrdiff_t>(cursor));
+		cursor+=launch.startup.runtime_data.size();
+		put(0x88,launch.startup.runtime_data.size(),2); put(0x8a,launch.startup.runtime_data.size(),2); put(0x8c,runtime,4);
+		for (size_t i=0;i<7;++i) put(0x4c+i*4,launch.startup.geometry[i],4);
+		put(0x68,launch.startup.flags,4); put(0x6c,launch.startup.show_window,4);
+		cursor=(cursor+7)&~size_t(7);
+		const auto startup_offset=cursor;
+		// STARTUPINFOA.
+		put(cursor,68,4); put(cursor+8,address+desktop_offset,4); put(cursor+12,address+title_offset,4);
+		for (size_t i=0;i<7;++i) put(cursor+16+i*4,launch.startup.geometry[i],4);
+		put(cursor+44,launch.startup.flags,4); put(cursor+48,launch.startup.show_window,2);
+		put(cursor+50,launch.startup.runtime_data.size(),2); put(cursor+52,runtime,4);
+		for (size_t i=0;i<3;++i) put(cursor+56+i*4,standard_handles[i],4);
+		process.write_memory(address,bytes);
+		field(process,process_block+0x10,address,4);
+		command_line_ansi=address+command_offset;
+		ansi_code_page=launch.ansi_code_page;
+		startup_info_ansi=address+startup_offset;
+	} catch (...) {
+		process.unmap_memory(address);
+		throw;
+	}
+}
+
 void NativeEnvironment::prepare_parameters(const NativeLaunch &launch,std::array<uint64_t,3> standard_handles)
 {
+	if (process.mode() == NativeMode::x86) {
+		prepare_parameters_x86(launch,standard_handles);
+		return;
+	}
 	require_current();
 	if (process.active() || command_line_ansi || process.read_memory(process_block+0x20,8)!=std::vector<uint8_t>(8))
 		throw std::runtime_error("native process parameters are already initialized or running");
@@ -196,13 +317,10 @@ bool NativeEnvironment::dispatch(std::string_view name)
 		if (selector<uint32_t(-12) || selector>uint32_t(-10)) {
 			set_last_error(6);process.return_api(UINT64_MAX);return true;
 		}
-		const auto pointer=process.read_memory(process_block+0x20,8);
-		uint64_t parameters=0;
-		for (size_t i=0;i<8;++i) parameters|=uint64_t(pointer[i])<<(i*8);
+		const bool narrow=process.mode()==NativeMode::x86;
+		const auto parameters=pointer(process_block+(narrow ? 0x10 : 0x20));
 		if (!parameters) throw std::runtime_error("native process parameters are not initialized");
-		const auto bytes=process.read_memory(parameters+0x20+(uint32_t(-10)-selector)*8,8);
-		uint64_t handle=0;
-		for (size_t i=0;i<8;++i) handle|=uint64_t(bytes[i])<<(i*8);
+		const auto handle=pointer(parameters+(narrow ? 0x18+(uint32_t(-10)-selector)*4 : 0x20+(uint32_t(-10)-selector)*8));
 		process.return_api(handle);return true;
 	}
 	if (multibyte_information(name)) return true;
@@ -220,14 +338,10 @@ bool NativeEnvironment::dispatch(std::string_view name)
 	if (name=="GetCommandLineW") {
 		require_current();
 		process.api_arguments(0);
-		const auto pointer=process.read_memory(process_block+0x20,8);
-		uint64_t parameters=0;
-		for (size_t i=0;i<8;++i) parameters|=uint64_t(pointer[i])<<(i*8);
+		const bool narrow=process.mode()==NativeMode::x86;
+		const auto parameters=pointer(process_block+(narrow ? 0x10 : 0x20));
 		if (!parameters) throw std::runtime_error("native process parameters are not initialized");
-		const auto buffer=process.read_memory(parameters+0x78,8);
-		uint64_t command=0;
-		for (size_t i=0;i<8;++i) command|=uint64_t(buffer[i])<<(i*8);
-		process.return_api(command);
+		process.return_api(pointer(parameters+(narrow ? 0x44 : 0x78)));
 		return true;
 	}
 	if (name != "GetLastError" && name != "SetLastError" && name != "GetCurrentProcessId" && name != "GetCurrentThreadId")
@@ -240,7 +354,8 @@ bool NativeEnvironment::dispatch(std::string_view name)
 	else if (name == "GetLastError")
 		result = last_error();
 	else
-		result = value(process, thread_block + (name == "GetCurrentProcessId" ? 0x40 : 0x48));
+		result = value(process, thread_block + (process.mode() == NativeMode::x86 ? (name == "GetCurrentProcessId" ? 0x20 : 0x24) :
+			(name == "GetCurrentProcessId" ? 0x40 : 0x48)));
 	process.return_api(result);
 	return true;
 }

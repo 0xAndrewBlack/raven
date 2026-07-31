@@ -53,6 +53,9 @@ private:
 	uint32_t ansi_code_page = 0;
 	uint64_t startup_info_ansi = 0;
 	void require_current() const;
+	void x86_constructor(uint64_t image_base, uint32_t process_id, uint32_t thread_id);
+	void prepare_parameters_x86(const NativeLaunch &launch, std::array<uint64_t,3> standard_handles);
+	uint64_t pointer(uint64_t address) const;
 	bool system_information();
 	bool startup_information(std::string_view name);
 	bool multibyte_information(std::string_view name);
