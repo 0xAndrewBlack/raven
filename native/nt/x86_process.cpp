@@ -3,6 +3,11 @@
 #include "module_api.h"
 #include "resources.h"
 #include "memory.h"
+#include "advapi_api.h"
+#include "msvcrt_api.h"
+#include "prefix.h"
+#include "profile_api.h"
+#include "registry.h"
 #include "desktop/api.h"
 #include "desktop/windows.h"
 
@@ -10,6 +15,7 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 
@@ -18,12 +24,12 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 36> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 38> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"ExitProcess", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0},
 	{"GetFileType", 1}, {"GetLastError", 0}, {"GetModuleFileNameA", 3}, {"GetModuleHandleA", 1},
-	{"GetModuleHandleW", 1}, {"GetProcAddress", 2}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
+	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"GetProcAddress", 2}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
 	{"GetTickCount", 0}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
 	{"OutputDebugStringA", 1}, {"SetLastError", 1}, {"SizeofResource", 2}, {"VirtualAlloc", 4},
 	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WriteFile", 5}, {"lstrcpyW", 2}, {"lstrlenW", 1},
@@ -59,8 +65,27 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 		{"GetWindowExtEx",2},{"IntersectClipRect",5},{"LPtoDP",3},{"LineTo",3},{"MoveToEx",4},{"OffsetRgn",3},
 		{"PtInRegion",3},{"RectInRegion",2},{"SelectClipRgn",2},{"SelectObject",2},{"SetBkColor",2},{"SetBkMode",2},
 		{"SetRectRgn",5},{"SetTextColor",2},{"TextOutW",5},{"LoadIconWithScaleDown",5},
+		// Exports bound for real programs whose behavior is not implemented yet; each stops the process by name.
+		{"CheckMenuItem",3},{"DialogBoxParamW",5},{"EndDialog",2},{"GetDesktopWindow",0},{"GetDlgItemInt",4},
+		{"GetDlgItemTextW",4},{"GetMenuItemRect",4},{"KillTimer",2},{"LoadAcceleratorsW",2},{"LoadCursorW",2},
+		{"LoadIconW",2},{"MessageBoxW",4},{"MoveWindow",6},{"PtInRect",3},{"ReleaseCapture",0},{"SetCapture",1},
+		{"SetDlgItemInt",4},{"SetDlgItemTextW",3},{"SetMenu",2},{"SetRect",5},{"SetTimer",4},{"TranslateAcceleratorW",3},
+		{"WinHelpW",4},{"wsprintfW",0},{"GetDeviceCaps",2},{"SetDIBitsToDevice",12},{"SetLayout",2},{"SetPixel",4},
+		{"SetROP2",2},
 	};
 	return counts;
+}
+
+// Services of libraries Raven does not implement yet fail visibly instead of reporting success.
+bool unsupported_library(NativeProcess &process, NativeEnvironment &environment, std::string_view name)
+{
+	const bool known = name == "PlaySoundW" || name == "ShellAboutW" || name == "InitCommonControlsEx";
+	if (!known)
+		return false;
+	process.api_arguments(0);
+	environment.set_last_error(120);
+	process.return_api(0);
+	return true;
 }
 
 // Guest strings and small kernel32 services that need no shared state.
@@ -177,9 +202,12 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
 		}
 	}
-	const auto add_desktop = [&](const char *dll, std::span<const std::string_view> exports) {
+	const auto add_desktop = [&](const char *dll, std::span<const std::string_view> implemented, std::span<const std::string_view> pending) {
 		if (modules.all().contains(dll))
 			return;
+		std::vector<std::string_view> exports(implemented.begin(), implemented.end());
+		exports.insert(exports.end(), pending.begin(), pending.end());
+		std::sort(exports.begin(), exports.end());
 		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, exports, true)).image_size;
 		const auto base = provider_base(modules, size);
 		auto &provider = modules.add(dll, runtime_provider(dll, base, exports, true), base);
@@ -191,8 +219,38 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
 		}
 	};
-	add_desktop("user32.dll", NativeDesktop::user_exports());
-	add_desktop("gdi32.dll", NativeDesktop::gdi_exports());
+	static constexpr std::array<std::string_view, 24> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
+		"GetDlgItemInt", "GetDlgItemTextW", "GetMenuItemRect", "KillTimer", "LoadAcceleratorsW", "LoadCursorW", "LoadIconW",
+		"MessageBoxW", "MoveWindow", "PtInRect", "ReleaseCapture", "SetCapture", "SetDlgItemInt", "SetDlgItemTextW", "SetMenu",
+		"SetRect", "SetTimer", "TranslateAcceleratorW", "WinHelpW", "wsprintfW"};
+	static constexpr std::array<std::string_view, 5> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2"};
+	add_desktop("user32.dll", NativeDesktop::user_exports(), user_pending);
+	add_desktop("gdi32.dll", NativeDesktop::gdi_exports(), gdi_pending);
+	// Libraries whose argument counts come from their own implementation or the unsupported-service table.
+	const auto add_library = [&](const char *dll, std::span<const std::string_view> exports, std::span<const std::string_view> data,
+		const std::function<uint32_t(std::string_view)> &count) {
+		if (modules.all().contains(dll))
+			return;
+		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, exports, true, data)).image_size;
+		const auto base = provider_base(modules, size);
+		auto &provider = modules.add(dll, runtime_provider(dll, base, exports, true, data), base);
+		provider.runtime_api = true;
+		for (const auto &symbol : provider.exports) {
+			const auto &exported = symbol.names.at(0);
+			if (std::find(data.begin(), data.end(), exported) != data.end())
+				continue;
+			const auto stable = std::find(exports.begin(), exports.end(), exported);
+			traps.emplace(provider.loaded.base() + symbol.address, std::pair{*stable, count(exported) * 4});
+		}
+	};
+	add_library("advapi32.dll", NativeAdvapi::exports(), {}, [](std::string_view name) { return NativeAdvapi::argument_count(name); });
+	add_library("msvcrt.dll", NativeCRT::exports(), NativeCRT::data_exports(), [](std::string_view name) { return uint32_t(0); });
+	static constexpr std::array<std::string_view, 1> winmm_exports{"PlaySoundW"};
+	static constexpr std::array<std::string_view, 1> shell_exports{"ShellAboutW"};
+	static constexpr std::array<std::string_view, 1> controls_exports{"InitCommonControlsEx"};
+	add_library("winmm.dll", winmm_exports, {}, [](std::string_view) { return uint32_t(3); });
+	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
+	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
 	modules.bind_imports();
 	std::vector<LoadedImage *> images;
 	for (const auto &[name, module] : modules.all())
@@ -225,6 +283,12 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	}
 	environment.prepare_parameters(*launch, standard_handles);
 	NativeObjectAPI object_api(process, environment, kernel_objects, deadline);
+	const auto prefix = NativePrefix::from_environment();
+	NativeRegistry registry(prefix.registry_file());
+	NativeAdvapi advapi(process, environment, registry);
+	NativeProfile profile(process, environment, prefix);
+	NativeCRT crt(process, environment);
+	crt.initialize([&](std::string_view name) { return modules.resolve({"msvcrt.dll", std::string(name), 0, false, 0}); });
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativeResources resources(process, environment, modules, entry);
 	NativeMemory memory(process, environment);
@@ -267,14 +331,15 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				return result;
 			const auto api = found->second.first;
 			if (getenv("RAVEN_TRACE_X86")) std::cerr << "api " << api << '\n';
-			if (api == "ExitProcess") {
+			if (api == "ExitProcess" || api == "exit" || api == "_exit") {
 				const auto code = uint32_t(process.api_arguments(1)[0]);
 				process.abandon_call();
 				throw ProcessExit{code, result.instruction};
 			}
 			if (!environment.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
-				!desktop.dispatch(api) && !windows.dispatch(api)) {
+				!desktop.dispatch(api) && !windows.dispatch(api) && !advapi.dispatch(api) && !profile.dispatch(api) &&
+				!crt.dispatch(api) && !unsupported_library(process, environment, api)) {
 				std::cerr << "raven: unimplemented native x86 API " << api << '\n';
 				return result;
 			}
@@ -286,6 +351,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		return result;
 	};
 	windows.set_call(invoke);
+	crt.set_call(invoke);
 	try {
 		const auto result = invoke(entry.loaded.base() + entry.image.entry, {});
 		windows.shutdown();

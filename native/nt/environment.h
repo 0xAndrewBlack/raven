@@ -33,6 +33,8 @@ public:
 	NativeEnvironment(NativeProcess &process, uint64_t image_base, uint32_t process_id, uint32_t thread_id);
 	uint64_t teb() const { return thread_block; }
 	uint64_t peb() const { return process_block; }
+	// Guest address of the ANSI command line, valid once process parameters exist.
+	uint64_t command_line() const { return command_line_ansi; }
 	uint32_t last_error() const;
 	void set_last_error(uint32_t error);
 	uint64_t prepare_heaps();

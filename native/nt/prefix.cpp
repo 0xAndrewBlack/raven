@@ -1,0 +1,60 @@
+#include "prefix.h"
+
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+
+namespace raven {
+
+NativePrefix::NativePrefix(std::filesystem::path root) : directory(std::move(root))
+{
+	if (directory.empty())
+		throw std::runtime_error("native prefix requires a directory");
+	std::filesystem::create_directories(directory / "drive_c" / "windows");
+}
+
+NativePrefix NativePrefix::from_environment()
+{
+	if (const char *configured = std::getenv("RAVEN_PREFIX"); configured && *configured)
+		return NativePrefix(configured);
+	const char *home = std::getenv("HOME");
+	if (!home || !*home)
+		throw std::runtime_error("native prefix needs RAVEN_PREFIX or HOME");
+	return NativePrefix(std::filesystem::path(home) / ".local" / "share" / "raven" / "default");
+}
+
+std::optional<std::filesystem::path> NativePrefix::resolve(std::string_view windows_path) const
+{
+	std::string text(windows_path);
+	for (auto &character : text)
+		if (character == '\\')
+			character = '/';
+	std::filesystem::path base = directory / "drive_c" / "windows";
+	if (text.size() >= 2 && text[1] == ':') {
+		const char drive = char(text[0] | 0x20);
+		if (drive < 'a' || drive > 'z')
+			return std::nullopt;
+		base = directory / (std::string("drive_") + drive);
+		text.erase(0, 2);
+	}
+	if (!text.empty() && text[0] == '/')
+		text.erase(0, 1);
+	if (text.empty())
+		return std::nullopt;
+	std::filesystem::path result = base;
+	size_t start = 0;
+	while (start <= text.size()) {
+		const size_t end = text.find('/', start);
+		const auto part = text.substr(start, end == text.npos ? text.npos : end - start);
+		if (part == "..")
+			return std::nullopt;
+		if (!part.empty() && part != ".")
+			result /= part;
+		if (end == text.npos)
+			break;
+		start = end + 1;
+	}
+	return result;
+}
+
+}

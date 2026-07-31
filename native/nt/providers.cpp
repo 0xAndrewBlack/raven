@@ -38,8 +38,13 @@ std::vector<uint8_t> environment_provider(std::string_view name, uint64_t base)
 }
 
 std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
-	std::span<const std::string_view> exports, bool x86)
+	std::span<const std::string_view> exports, bool x86, std::span<const std::string_view> data_exports)
 {
+	if (!x86 && !data_exports.empty())
+		throw std::runtime_error("native data exports require an x86 provider");
+	for (const auto symbol : data_exports)
+		if (!std::binary_search(exports.begin(), exports.end(), symbol))
+			throw std::runtime_error("native data export is missing from the export table");
 	if (exports.empty() || exports.size() > 4096 || name.empty() || name.size() > 63 || name.find('\0') != name.npos ||
 		!std::is_sorted(exports.begin(), exports.end()) || std::adjacent_find(exports.begin(), exports.end()) != exports.end())
 		throw std::runtime_error("invalid native provider export table");
@@ -54,7 +59,9 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	const size_t name_table = functions + exports.size() * 4;
 	const size_t ordinals = name_table + exports.size() * 4;
 	const size_t module_name = ordinals + exports.size() * 2;
-	const size_t end = module_name + string_size;
+	// Each data export owns one zeroed 16-byte slot after the strings; the section becomes writable for them.
+	const size_t data_start = (module_name + string_size + 15) & ~size_t(15);
+	const size_t end = data_start + data_exports.size() * 16;
 	std::vector<uint8_t> bytes((end + 511) & ~size_t(511));
 	const auto rva = [](size_t offset) { return 0x1000 + offset - 0x200; };
 	const auto put = [&](size_t offset, uint64_t value, size_t width = 4) {
@@ -85,13 +92,14 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(0xdc, 3, 2);
 	put(count_field, 16);
 	put(count_field + 4, rva(directory));
-	put(count_field + 8, end - directory);
+	// Data slots stay outside the export directory range, or loaders would treat them as forwarders.
+	put(count_field + 8, data_start - directory);
 	text(section, ".api");
 	put(section + 8, bytes.size() - 0x200);
 	put(section + 12, 0x1000);
 	put(section + 16, bytes.size() - 0x200);
 	put(section + 20, 0x200);
-	put(section + 36, 0x60000020);
+	put(section + 36, data_exports.empty() ? 0x60000020 : 0xe0000020);
 	put(directory + 12, rva(module_name));
 	// Only the independently verified common-controls identity receives a public ordinal.
 	const bool icon_control = name == "comctl32.dll" && exports.size() == 1 && exports[0] == "LoadIconWithScaleDown";
@@ -107,7 +115,8 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 		const size_t code = 0x200 + index * 16;
 		bytes[code] = 0xcc;
 		bytes[code + 1] = 0xc3;
-		put(functions + index * 4, rva(code));
+		const auto data = std::find(data_exports.begin(), data_exports.end(), exports[index]);
+		put(functions + index * 4, data == data_exports.end() ? rva(code) : rva(data_start + size_t(data - data_exports.begin()) * 16));
 		put(name_table + index * 4, rva(cursor));
 		put(ordinals + index * 2, index, 2);
 		text(cursor, exports[index]);

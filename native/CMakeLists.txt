@@ -72,7 +72,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_BINARY_DIR}/nls-generated/c_1252.nls
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h -P ${NLS_SOURCE}/embed.cmake
         DEPENDS raven-txt2nls ${NLS_SOURCE}/c_1252.txt ${NLS_SOURCE}/embed.cmake VERBATIM)
-    target_sources(raven_cpu PRIVATE nt/nls.cpp nt/multibyte.cpp nt/startup.cpp nt/launch.cpp nt/file.cpp nt/x86_process.cpp ${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h)
+    target_sources(raven_cpu PRIVATE nt/nls.cpp nt/multibyte.cpp nt/startup.cpp nt/launch.cpp nt/file.cpp nt/prefix.cpp nt/registry.cpp nt/advapi_api.cpp nt/msvcrt_api.cpp nt/profile_api.cpp nt/x86_process.cpp ${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h)
     file(SHA256 ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-utf8/decode.inc UTF8_SOURCE_HASH)
     if(NOT UTF8_SOURCE_HASH STREQUAL "5aafb54712b7c21db62bfdf966e5d8852200941643bde751150eb0d55a909524")
         message(FATAL_ERROR "Pinned ReactOS UTF-8 decoder differs")
@@ -1132,9 +1132,31 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     set_tests_properties(native_x86_desktop_${CLIENT} PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
                 endforeach()
                 add_custom_target(x86_desktop_fixtures ALL DEPENDS ${X86_DESKTOP_EXECUTABLES})
+                foreach(PHASE 1 2)
+                    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-registry-${PHASE}.exe
+                        COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin -DRAVEN_PHASE=${PHASE}
+                            -Wl,--entry,_raven_entry,--no-insert-timestamp
+                            -o ${CMAKE_CURRENT_BINARY_DIR}/x86-registry-${PHASE}.exe ${LOADER_SOURCES}/x86_registry_client.c -ladvapi32 -lkernel32
+                        DEPENDS ${LOADER_SOURCES}/x86_registry_client.c VERBATIM)
+                endforeach()
+                add_custom_target(x86_registry_fixtures ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/x86-registry-1.exe ${CMAKE_CURRENT_BINARY_DIR}/x86-registry-2.exe)
+                add_test(NAME native_x86_registry COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-x86-registry.py
+                    $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-registry-1.exe ${CMAKE_CURRENT_BINARY_DIR}/x86-registry-2.exe
+                    ${CMAKE_CURRENT_BINARY_DIR}/registry-prefix)
+                set_tests_properties(native_x86_registry PROPERTIES TIMEOUT 40)
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
+                set(X86_TESTS native_x86_process native_x86_kernel_cli native_x86_resource_cli)
+                foreach(CLIENT ${X86_DESKTOP_CLIENTS})
+                    list(APPEND X86_TESTS native_x86_desktop_${CLIENT})
+                endforeach()
+                # PE32 processes always open a prefix; keep tests out of the user's home directory.
+                foreach(NAME ${X86_TESTS})
+                    if(TEST ${NAME})
+                        set_property(TEST ${NAME} APPEND PROPERTY ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/x86-prefix)
+                    endif()
+                endforeach()
             endif()
             foreach(STATUS 0 73 256)
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/return-${STATUS}.exe
