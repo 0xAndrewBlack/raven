@@ -44,7 +44,7 @@ int main(int argc,char **argv)
 		for (unsigned y=0;y<240;++y) for (unsigned x=0;x<320;++x) {
 			const auto at=(y*320+x)*4;
 			if (x<7 || x>=307 || y<11 || y>=223)
-				check(final[at]==255 && !final[at+1] && !final[at+2],"client drawing damaged the outer border");
+				if (!(final[at]==255 && !final[at+1] && !final[at+2])) { std::cerr<<"border pixel "<<x<<","<<y<<" = "<<unsigned(final[at])<<","<<unsigned(final[at+1])<<","<<unsigned(final[at+2])<<"\n"; check(false,"client drawing damaged the outer border"); }
 			if (final[at]==255 && final[at+1]==255 && final[at+2]==255) ++ink;
 		}
 		check(ink>0,"client text was not presented");

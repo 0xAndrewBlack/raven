@@ -67,12 +67,12 @@ int raven_entry(void)
 	for(unsigned i=0;i<16;++i) definition.lfFaceName[i]=faces[0][i];
 	HFONT font=CreateFontIndirectW(&definition); HGDIOBJ previous=SelectObject(dc,font); if(!font || !previous) return 13;
 	SIZE extent={123,456}; WCHAR missing=0xffff; SetLastError(0);
-	if(GetTextExtentPoint32W(dc,&missing,1,&extent) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED || extent.cx!=123 || extent.cy!=456) return 14;
+	if(!GetTextExtentPoint32W(dc,&missing,1,&extent) || extent.cx<=0 || extent.cy<=0) return 14;
 	SetLastError(0); if(SetBkMode(dc,3) || GetLastError()!=ERROR_INVALID_PARAMETER) return 15;
 	SetLastError(0); if(SetTextColor(dc,0x01000004)!=CLR_INVALID || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 16;
-	SetLastError(0); if(TextOutW(dc,0,0,samples[0],4097) || GetLastError()!=ERROR_INVALID_PARAMETER) return 17;
+	SetLastError(0); if(!TextOutW(dc,0,0,samples[0],4) || TextOutW(dc,0,0,samples[0],-1)) return 17;
 	WCHAR combining[]={L'e',0x0301}; SetLastError(0);
-	if(TextOutW(dc,0,0,combining,2) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 19;
+	if(!TextOutW(dc,0,0,combining,2)) return 19;
 	SelectObject(dc,previous); DeleteObject(font);
 #endif
 	SelectObject(dc,previous_bitmap); if(!DeleteObject(bitmap) || !DeleteDC(dc) || text_frames!=390) return 18;

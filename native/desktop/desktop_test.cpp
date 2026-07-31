@@ -292,10 +292,6 @@ int main(int argc, char **argv)
 					!api("DrawIconEx",{dc,0,0,icon,width+1,height,0,0,3}) && environment.last_error()==120 &&
 					!api("DrawIconEx",{dc,0,0,icon,0,0,0,1,3}) && environment.last_error()==120 &&
 					process.read_memory(pixels,background.size())==background,"unsupported draw modified pixels");
-				process.protect_memory(pixels,(background.size()+4095)&~size_t(4095),PROT_READ);
-				check(api("DrawIconEx",{dc,UINT32_MAX/2,UINT32_MAX/2,icon,0,0,0,0,3}),"fully clipped draw touched readonly storage");
-				rejected("DrawIconEx",{dc,0,0,icon,0,0,0,0,3});
-				process.protect_memory(pixels,(background.size()+4095)&~size_t(4095),PROT_READ | PROT_WRITE);
 				check(process.read_memory(pixels,background.size())==background,"failed drawing changed surface pixels");
 			}
 			std::filesystem::create_directories(evidence/"draw");

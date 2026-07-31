@@ -175,6 +175,21 @@ int main(int argc, char **argv)
 						if (imported && std::filesystem::exists(component))
 							modules.add("comctl32.dll", read_file(component.c_str()));
 					}
+					// The user32 component supplies the built-in control classes and dialog manager to programs that use user32.
+					if (entry->image.is_64 && !modules.all().contains("raven-user32.dll")) {
+						const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-user32.dll";
+						const auto imported = std::any_of(modules.all().begin(), modules.all().end(), [](const auto &item) {
+							return std::any_of(item.second->imports.begin(), item.second->imports.end(), [](const auto &symbol) {
+								auto name = symbol.module;
+								for (auto &character : name)
+									if (character >= 'A' && character <= 'Z')
+										character = static_cast<char>(character + ('a' - 'A'));
+								return name == "user32.dll" || name == "user32";
+							});
+						});
+						if (imported && std::filesystem::exists(component))
+							modules.add("raven-user32.dll", read_file(component.c_str()));
+					}
 					raven::DesktopPresentation presentation;
 #ifdef RAVEN_WAYLAND
 					raven::WaylandPresentation backend;

@@ -32,6 +32,16 @@ public:
 	std::vector<uint8_t> mask(std::span<const uint8_t,92> definition,std::span<const uint16_t> text,
 		uint32_t width,uint32_t height,int32_t x,int32_t y,std::span<const std::array<int32_t,2>> positions={});
 
+	// Windows-shaped services for any logical font and any text: unknown faces fall back to the closest bundled family,
+	// missing glyphs draw the face's replacement glyph, and rendering returns anti-aliased coverage.
+	TextMetrics logical_metrics(std::span<const uint8_t,92> definition);
+	// Cumulative pixel advance after each UTF-16 unit; control characters advance by zero.
+	std::vector<int32_t> logical_advances(std::span<const uint8_t,92> definition,std::span<const uint16_t> text);
+	// Alpha coverage (0..255) of a box [x,x+width) x [y,y+height) in which text starts at left=origin_x, top=origin_y;
+	// offsets, when given, are the x position of each unit relative to origin_x.
+	std::vector<uint8_t> render(std::span<const uint8_t,92> definition,std::span<const uint16_t> text,
+		uint32_t width,uint32_t height,int32_t origin_x,int32_t origin_y,std::span<const int32_t> offsets={});
+
 private:
 	struct State;
 	std::unique_ptr<State> state;

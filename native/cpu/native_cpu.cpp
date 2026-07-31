@@ -312,7 +312,7 @@ std::vector<uint8_t> NativeProcess::read_memory(uint64_t address, size_t size) c
 {
 	state->require_stopped();
 	if (!state->covers(address, size, PROT_READ))
-		throw std::runtime_error("native read exceeds readable guest memory");
+		throw std::runtime_error("native read exceeds readable guest memory" + (std::getenv("RAVEN_TRACE_API") ? " at " + std::to_string(address) + "+" + std::to_string(size) : std::string()));
 	std::vector<uint8_t> result(size);
 	for (size_t offset = 0; offset < size;) {
 		const iovec local{result.data() + offset, size - offset};

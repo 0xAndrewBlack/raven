@@ -15,7 +15,10 @@ import urllib.request
 REVISION = "dacf2a6c47fa562799f9c8a41ab6d5c558556558"
 ARCHIVE_SHA256 = "5373bbbb60541cb2a49e0acb53360e1218d4f5d56c31f9187b341b9fc16daa69"
 PREFIXES = ("sdk/include/", "sdk/lib/pseh/include/", "sdk/tools/hpp/", "sdk/tools/spec2def/", "dll/win32/comctl32/",
-            "win32ss/user/user32/controls/", "win32ss/user/user32/windows/dialog.c")
+            "win32ss/include/", "win32ss/user/user32/", "win32ss/user/rtl/")
+# Upstream user-mode sources of the user32 component, and the exports they define that user32 programs import.
+USER32_SOURCES = ("controls/button.c", "controls/combo.c", "controls/edit.c", "controls/listbox.c", "controls/static.c",
+                  "windows/dialog.c", "windows/draw.c", "windows/font.c", "windows/text.c")
 IDLS = ("shtypes", "commoncontrols")
 
 
@@ -126,12 +129,42 @@ def main():
     run(["x86_64-w64-mingw32-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__", "-D_WIN32_IE=0x0A00",
          "-D__WINESRC__", "-D_M_AMD64", "-I" + str(source / "dll/win32/comctl32"), "-I" + str(generated / "reactos"),
          "-i", source / "dll/win32/comctl32/rsrc.rc", "-o", objects / "comctl32.res.o"])
-    run(["x86_64-w64-mingw32-gcc", "-shared", "-nostdlib", "-Wl,--entry,DllMain,--image-base,0x1a2000000,--no-insert-timestamp",
+    run(["x86_64-w64-mingw32-gcc", "-shared", "-nostdlib", "-Wl,--entry,DllMain,--image-base,0x1f0000000,--no-insert-timestamp",
          "-o", output / "comctl32.dll", *compiled, objects / "comctl32.res.o", output / "comctl32.def",
          "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lntdll", "-limm32", "-lusp10", "-luxtheme", "-lwinmm",
          "-lole32", "-loleaut32", "-lshlwapi", "-luuid", "-lgcc"])
+    # The user32 component: upstream user-mode sources on a bridge that stands in for the kernel services.
+    user_support = repo / "native/upstream/reactos-user32"
+    user_root = source / "win32ss/user/user32"
+    user_includes = [user_support / "shim", source / "win32ss/include", user_root / "include", *includes[1:]]
+    user_flags = ["-O2", "-nostdinc", "-isystem", gcc_include, "-fgnu89-inline", "-w", "-D_WIN32_WINNT=0x600", "-DWINVER=0x600",
+                  "-D__REACTOS__", "-DUNICODE", "-D_UNICODE", "-D_M_AMD64", "-D__ROS_LONG64__", "-DUSE_PSEH",
+                  f"-ffile-prefix-map={source}=reactos", f"-ffile-prefix-map={repo}=raven", f"-ffile-prefix-map={output}=component",
+                  *["-I" + str(path) for path in user_includes]]
+    user_sources = [user_root / name for name in USER32_SOURCES] + [source / "win32ss/user/rtl/text.c",
+                    user_support / "bridge.c", user_support / "register.c", support / "crt.c", support / "debug.c"]
+
+    def compile_user(path):
+        name = "user32_" + (path.parent.name + "_" if path.parent.name in ("windows", "controls", "rtl") else "") + path.stem
+        freestanding = ["-ffreestanding", "-fno-builtin"] if path.name == "crt.c" else []
+        run(["x86_64-w64-mingw32-gcc", "-c", *user_flags, *freestanding, path, "-o", objects / (name + ".o")])
+        return objects / (name + ".o")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        user_objects = list(pool.map(compile_user, user_sources))
+    run([output / "spec2def", "-a=x86_64", "-n=user32.dll", "-d=" + str(output / "user32.def"), user_root / "user32.spec"])
+    public = {match.group(1) for match in re.finditer(r"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s|=|@|$)", (output / "user32.def").read_text(), re.M)}
+    defined = {line.split()[-1] for line in run(["x86_64-w64-mingw32-nm", "-g", "--defined-only", *user_objects]).stdout.splitlines()
+               if len(line.split()) == 3 and line.split()[1] in "TtDdBbRr"}
+    # FrameRect and FillRect keep the measured host behavior (error codes for invalid brushes and device contexts).
+    exported = sorted((public & defined) - {"EXPORTS", "NAME", "FrameRect", "FillRect"})
+    (output / "raven-user32.def").write_text("NAME raven-user32.dll\nEXPORTS\n" + "".join(" " + name + "\n" for name in exported) + " RavenInitControls\n")
+    run(["x86_64-w64-mingw32-gcc", "-shared", "-nostdlib", "-Wl,--entry,DllMain,--image-base,0x1f4000000,--no-insert-timestamp",
+         "-o", output / "raven-user32.dll", *user_objects, output / "raven-user32.def",
+         "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lntdll", "-limm32", "-lusp10", "-lgcc"])
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, commands=records,
-                  component_sha256=hashlib.sha256((output / "comctl32.dll").read_bytes()).hexdigest(),
+                  component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ("comctl32.dll", "raven-user32.dll")},
+                  user32_exports=exported,
                   source_hashes={path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
                                  for path in sorted(source.rglob("*")) if path.is_file() and not path.is_relative_to(overlay)})
     (output / "provenance.json").write_text(json.dumps(result, indent=2) + "\n")

@@ -76,7 +76,7 @@ void DesktopObjects::configure_window_dc(uint64_t handle,DesktopDC &device,bool 
 	const auto x=frame ? record->outer.left : record->x,y=frame ? record->outer.top : record->y;
 	const auto dx=int64_t(x)-root->outer.left,dy=int64_t(y)-root->outer.top;
 	if (dx<INT32_MIN || dx>INT32_MAX || dy<INT32_MIN || dy>INT32_MAX) throw uint32_t(120);
-	device.origin_x=int32_t(dx);device.origin_y=int32_t(dy);
+	device.origin_x=int32_t(dx+device.user_dx);device.origin_y=int32_t(dy+device.user_dy);
 	if (frame && !record->parent) { device.bounds.reset();return; }
 	int64_t left=0,top=0,right=frame ? int64_t(record->outer.right)-x : record->width;
 	int64_t bottom=frame ? int64_t(record->outer.bottom)-y : record->height;

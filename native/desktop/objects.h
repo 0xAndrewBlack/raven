@@ -61,11 +61,31 @@ inline constexpr uint32_t desktop_stock_cursor_count = 140;
 struct DesktopBrush {
 	uint32_t color = 0;
 	bool hollow = false,pending_delete = false;
+	// BS_HATCHED selects a hatch pattern drawn in color; BS_PATTERN and BS_DIBPATTERN carry their own pixels.
+	uint32_t style = 0,hatch = 0;
+	uint32_t pattern_width = 0,pattern_height = 0;
+	// A monochrome pattern stores 0 for the text color and 1 for the background color.
+	bool pattern_mono = false;
+	std::vector<uint32_t> pattern{};
 };
 
 struct DesktopPen {
 	uint32_t color=0;
 	bool hollow=false,pending_delete=false;
+	// PS_* style (0 solid .. 6 inside frame) and width in logical units; geometric pens draw wide lines with round caps.
+	uint32_t style=0;
+	int32_t width=0;
+	bool geometric=false;
+};
+
+// Attributes SaveDC keeps and RestoreDC puts back.
+struct DesktopDCState {
+	uint64_t bitmap=0,font=0,brush=0,pen=0;
+	std::optional<DesktopRegion> clip{},application_clip{};
+	uint32_t text_color=0,background_color=0,background_mode=0,rop2=13,text_align=0,poly_fill=1;
+	int32_t origin_x=0,origin_y=0,position_x=0,position_y=0;
+	std::optional<DesktopRect> bounds{};
+	int32_t brush_org_x=0,brush_org_y=0,window_org_x=0,window_org_y=0,viewport_org_x=0,viewport_org_y=0;
 };
 
 struct DesktopDC {
@@ -86,14 +106,23 @@ struct DesktopDC {
 	int32_t position_x=0,position_y=0;
 	// R2_COPYPEN until SetROP2 changes how pens combine with the destination.
 	uint32_t rop2=13;
+	// TA_LEFT|TA_TOP|TA_NOUPDATECP, ALTERNATE polygon filling, and the origins that shift logical coordinates.
+	uint32_t text_align=0,poly_fill=1;
+	int32_t brush_org_x=0,brush_org_y=0,window_org_x=0,window_org_y=0,viewport_org_x=0,viewport_org_y=0;
+	// Window and viewport origins move logical coordinates; this offset is what they contributed to origin_x and origin_y.
+	int32_t user_dx=0,user_dy=0;
+	// Parts of the window other windows cover; drawing never reaches them.
+	std::optional<DesktopRegion> visible{};
+	std::vector<DesktopDCState> saved{};
 	// Clip coordinates belong to the DC, not its bitmap backing.
 	bool contains(int64_t x,int64_t y) const
 	{
-		x-=origin_x; y-=origin_y;
+		x-=int64_t(origin_x)-user_dx; y-=int64_t(origin_y)-user_dy;
 		if (bounds && (x<bounds->left || y<bounds->top || x>=bounds->right || y>=bounds->bottom)) return false;
 		if (x<INT32_MIN || x>INT32_MAX || y<INT32_MIN || y>INT32_MAX) return false;
 		return (!clip || clip->contains(int32_t(x),int32_t(y))) &&
-			(!application_clip || application_clip->contains(int32_t(x),int32_t(y)));
+			(!application_clip || application_clip->contains(int32_t(x),int32_t(y))) &&
+			(!visible || visible->contains(int32_t(x),int32_t(y)));
 	}
 };
 

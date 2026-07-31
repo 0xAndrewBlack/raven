@@ -183,11 +183,12 @@ void NativeWindows::post_due_timers()
 	for (auto &timer : timers) {
 		if (timer.due > now)
 			continue;
+		const uint32_t kind = timer.system ? 0x118 : 0x113;
 		const bool pending = std::any_of(messages.begin(), messages.end(), [&](const Message &message) {
-			return message.message == 0x113 && message.window == timer.window && message.wparam == timer.id;
+			return message.message == kind && message.window == timer.window && message.wparam == timer.id;
 		});
 		if (!pending && messages.size() < 10000)
-			messages.push_back({timer.window, timer.id, timer.procedure, 0x113, uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()), cursor_x, cursor_y});
+			messages.push_back({timer.window, timer.id, timer.procedure, kind, uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()), cursor_x, cursor_y});
 		timer.due = now + std::chrono::milliseconds(timer.interval);
 	}
 }

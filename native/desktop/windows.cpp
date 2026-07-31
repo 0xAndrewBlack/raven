@@ -1,3 +1,4 @@
+#include <iostream>
 #include "windows.h"
 #include "brush.h"
 #include "nt/nls.h"
@@ -112,6 +113,10 @@ void NativeWindows::release_surface(uint64_t handle)
 {
 	const auto *window=objects.window(handle);
 	if (!window) return;
+	// A surface about to disappear still shows what the guest last drew.
+	if (!window->parent && dirty_roots.contains(handle) && presentation.present && window->bitmap) {
+		try { present(handle); } catch (...) {}
+	}
 	objects.detach_window_dcs(handle);
 	if (focus==handle) focus=0;
 	if (active==handle) active=0;
@@ -175,7 +180,6 @@ void NativeWindows::post(uint64_t window,uint32_t message,uint64_t wparam,uint64
 {
 	if (window==0xffff) throw uint32_t(120);
 	if (window && !objects.window(window)) throw uint32_t(1400);
-	if (message && message!=0x10 && message!=0x12 && message<0x400) throw uint32_t(120);
 	if (messages.size()>=10000) throw uint32_t(1816);
 	messages.push_back({window,wparam,lparam,message,message_time(),cursor_x,cursor_y});
 }
@@ -900,6 +904,7 @@ bool NativeWindows::dispatch(std::string_view name)
 	catch (const std::bad_alloc &) { environment.set_last_error(8); }
 	catch (const std::runtime_error &failure) {
 		const std::string_view message=failure.what();
+		if (std::getenv("RAVEN_TRACE_API")) std::cerr << "raven: " << message << "\n";
 		if (message.find("readable")==message.npos && message.find("writable")==message.npos) throw;
 		environment.set_last_error(998);
 	}

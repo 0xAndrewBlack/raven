@@ -255,8 +255,17 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			provider = &modules.add(name, runtime_provider(name, base, symbols, false, {}, ordinals), base);
 			provider->runtime_api = true;
 		}
+		// A guest component that implements part of user32 receives those calls directly instead of through a trap.
+		if (name == "user32.dll" && provider->runtime_api) {
+			if (const auto overlay = modules.all().find("raven-user32.dll"); overlay != modules.all().end() && !overlay->second->runtime_api)
+				for (auto &symbol : provider->exports)
+					if (!symbol.names.empty() && std::any_of(overlay->second->exports.begin(), overlay->second->exports.end(), [&](const auto &candidate) {
+							return candidate.forwarder.empty() && std::find(candidate.names.begin(), candidate.names.end(), symbol.names.at(0)) != candidate.names.end();
+						}))
+						symbol.forwarder = "raven-user32." + symbol.names.at(0);
+		}
 		for (const auto &symbol : provider->exports)
-			if (symbol.address && !symbol.names.empty())
+			if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty())
 				traps.emplace(provider->loaded.base() + symbol.address, symbol.names.at(0));
 	}
 	const auto nt=modules.all().find("ntdll.dll");
@@ -305,7 +314,15 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			traps.emplace(modules.all().at("vulkan-1.dll")->loaded.base() + symbol.address, symbol.names.at(0));
 #endif
 	modules.bind_imports();
-	const auto order = initialization_order(modules, entry);
+	auto order = initialization_order(modules, entry);
+	// The user32 component registers the built-in classes in its DllMain, before any library that subclasses them.
+	if (const auto controls = modules.all().find("raven-user32.dll"); controls != modules.all().end() && !controls->second->runtime_api) {
+		const auto found = std::find(order.begin(), order.end(), controls->second.get());
+		if (found != order.end()) {
+			order.erase(found);
+			order.insert(order.begin(), controls->second.get());
+		}
+	}
 	std::vector<LoadedImage *> images;
 	for (const auto &[name, module] : modules.all())
 		images.push_back(&module->loaded);
@@ -333,7 +350,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		standard_handles[i]=inherited.value;
 	}
 	environment.prepare_parameters(*launch,standard_handles);
-	ApiRegistry api_registry;
+	ApiRegistry api_registry, desktop_api;
 	NativeLoaderData loader_data(process, environment.peb(), modules, entry);
 	NativeTLS tls(process, environment, order);
 	NativeModuleAPI module_api(process, environment, modules, entry);
@@ -474,7 +491,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			}
 			bool dispatched;
 			try {
-				dispatched = environment.dispatch(found->second) || module_api.dispatch(found->second) || resources.dispatch(found->second) || memory.dispatch(found->second) || object_api.dispatch(found->second) || heap.dispatch(found->second) || desktop.dispatch(found->second) || windows.dispatch(found->second) || api_registry.dispatch(process, environment, found->second)
+				// The generalized desktop services come first so that they replace the older narrow ones.
+				dispatched = desktop_api.dispatch(process, environment, found->second) || environment.dispatch(found->second) || module_api.dispatch(found->second) || resources.dispatch(found->second) || memory.dispatch(found->second) || object_api.dispatch(found->second) || heap.dispatch(found->second) || desktop.dispatch(found->second) || windows.dispatch(found->second) || api_registry.dispatch(process, environment, found->second)
 #ifdef RAVEN_VULKAN
 					|| vulkan.dispatch(found->second)
 #endif
@@ -514,6 +532,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	};
 	const auto prefix = NativePrefix::from_environment();
 	NativePaths paths(prefix);
+	desktop.set_host_files([&paths](std::u16string_view path) -> std::optional<std::vector<uint8_t>> {
+		const auto resolved = paths.resolve(path);
+		if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
+			return std::nullopt;
+		std::ifstream file(resolved->host, std::ios::binary);
+		return std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	});
 	GuestAllocator allocator(memory, heap);
 	NativeThreads threads(process, environment, memory, tls, deadline);
 	threads.set_runner(invoke);
@@ -524,6 +549,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	NativeUnwinder unwinder(process, modules);
 	register_exception_api(api_registry, kernel, unwinder);
 	register_system_api(api_registry, kernel);
+	register_process_api(api_registry, kernel);
 	register_sync_api(api_registry, kernel);
 	register_thread_api(api_registry, kernel);
 	register_text_api(api_registry, kernel);
@@ -533,7 +559,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_shell_api(api_registry, kernel);
 	register_platform_api(api_registry, kernel);
 	register_version_api(api_registry, kernel);
-	windows.register_api(api_registry);
+	windows.register_api(desktop_api);
+	desktop.register_gdi_api(desktop_api);
+	desktop.register_text_api(desktop_api);
+	desktop.register_image_api(desktop_api);
 	NativeRegistry hive(prefix.registry_file());
 	register_registry_api(api_registry, kernel, hive);
 	std::vector<const PEModule *> attached;
@@ -851,6 +880,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	};
 	try {
 		windows.set_call(invoke);
+		desktop.set_call(invoke);
 		heap.initialize(invoke);
 		for (const auto *module : order) {
 			if (module == &entry)

@@ -17,5 +17,7 @@ int compare_fold(std::u16string_view left, std::u16string_view right);
 std::u16string widen_ascii(std::string_view text);
 // ANSI text of the process code page (1252, 437, ...) as UTF-16; unmapped bytes become U+FFFD.
 std::u16string from_ansi(std::string_view text, uint32_t code_page);
+// Inverse of from_ansi; characters the code page lacks become '?'.
+std::string to_ansi(std::u16string_view text, uint32_t code_page);
 
 }

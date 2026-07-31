@@ -102,6 +102,37 @@ private:
 	void register_message_api(ApiRegistry &registry);
 	void register_manager_api(ApiRegistry &registry);
 	void register_menu_api(ApiRegistry &registry);
+	void register_ext_api(ApiRegistry &registry);
+	// Text caret of the input queue: one per thread in Windows, one here. Its rectangle is drawn by inverting pixels.
+	struct Caret {
+		uint64_t window=0;
+		int32_t width=0,height=0,x=0,y=0;
+		int hidden=1;
+		bool drawn=false;
+		std::chrono::steady_clock::time_point next{};
+	};
+	std::optional<Caret> caret;
+	void caret_sync();
+	void caret_idle();
+	// Hooks installed with SetWindowsHookEx, newest first; handles live in their own range.
+	struct Hook { uint64_t handle; int32_t id; uint64_t procedure; };
+	std::vector<Hook> hooks;
+	uint64_t next_hook=0x7e000000;
+	bool has_hook(int32_t id) const;
+	uint64_t call_hooks(int32_t id,int32_t code,uint64_t wparam,uint64_t lparam,uint64_t after=0);
+	// In-process clipboard: each format maps to the global memory handle the owner supplied.
+	std::map<uint32_t,uint64_t> clipboard_data;
+	uint64_t clipboard_window=0,clipboard_owner=0;
+	uint32_t clipboard_sequence=1;
+	std::array<uint8_t,256> vk_state{};
+	struct Tracking { uint64_t window=0; uint32_t flags=0; };
+	Tracking tracking;
+	void track_pointer(uint64_t window);
+	// Persistent guest scratch memory for API handlers that need to pass structures to guest callbacks.
+	uint64_t scratch_base=0;
+	size_t scratch_used=0;
+	uint64_t scratch_allocate(size_t size);
+	std::function<NativeResult(uint64_t,std::span<const uint64_t>)> wait_objects;
 	// Shows, hides, minimizes, maximizes or restores a window; returns whether it was visible before.
 	bool show_window(uint64_t window,uint32_t command);
 	// Moves and resizes a window (screen coordinates for the outer rectangle) with the WM_WINDOWPOSCHANGING/CHANGED protocol.
@@ -117,7 +148,7 @@ private:
 	uint64_t current_cursor=0;
 	// Mouse capture and timers belong to the initial guest thread's input state.
 	uint64_t capture=0;
-	struct Timer { uint64_t window,id,procedure; uint32_t interval; std::chrono::steady_clock::time_point due; };
+	struct Timer { uint64_t window,id,procedure; uint32_t interval; std::chrono::steady_clock::time_point due; bool system=false; };
 	std::vector<Timer> timers;
 	uint64_t next_timer_id=0x1000;
 	void post_due_timers();

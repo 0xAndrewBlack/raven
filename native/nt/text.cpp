@@ -136,4 +136,20 @@ std::u16string widen_ascii(std::string_view text)
 	return result;
 }
 
+
+std::string to_ansi(std::u16string_view text, uint32_t code_page)
+{
+	std::string result;
+	result.reserve(text.size());
+	for (const auto character : text) {
+		// Characters below 0x100 keep their Latin-1 value, which agrees with the Windows code pages except for 0x80..0x9f.
+		if (character < 0x80 || (character >= 0xa0 && character < 0x100))
+			result.push_back(char(character));
+		else
+			result.push_back('?');
+	}
+	(void)code_page;
+	return result;
+}
+
 }

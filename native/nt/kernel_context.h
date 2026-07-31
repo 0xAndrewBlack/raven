@@ -60,5 +60,6 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context);
 void register_thread_api(ApiRegistry &registry, KernelContext &context);
 void register_memory_api(ApiRegistry &registry, KernelContext &context);
 void register_text_api(ApiRegistry &registry, KernelContext &context);
+void register_process_api(ApiRegistry &registry, KernelContext &context);
 
 }

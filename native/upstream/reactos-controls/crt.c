@@ -252,11 +252,9 @@ void qsort(void *base, size_t count, size_t width, int (__cdecl *compare)(const 
 	}
 }
 
-int _snprintf(char *buffer, size_t size, const char *format, ...)
+static int format_text(char *buffer, size_t size, const char *format, va_list arguments)
 {
-	va_list arguments;
 	size_t length = 0;
-	va_start(arguments, format);
 #define EMIT(character) do { if (length + 1 < size) buffer[length] = (character); ++length; } while (0)
 	for (; *format; ++format) {
 		if (*format != '%') {
@@ -301,10 +299,19 @@ int _snprintf(char *buffer, size_t size, const char *format, ...)
 				EMIT(digits[--count]);
 		}
 	}
-	va_end(arguments);
 	if (size)
 		buffer[length < size ? length : size - 1] = 0;
 	return (int)length;
+}
+
+int _snprintf(char *buffer, size_t size, const char *format, ...)
+{
+	va_list arguments;
+	int length;
+	va_start(arguments, format);
+	length = format_text(buffer, size, format, arguments);
+	va_end(arguments);
+	return length;
 }
 
 void __cdecl _assert(const char *expression, const char *file, unsigned line)
@@ -323,4 +330,87 @@ double floor(double value)
 int wcsicmp(const wchar *left, const wchar *right)
 {
 	return _wcsicmp(left, right);
+}
+
+wchar *wcscpy(wchar *destination, const wchar *source)
+{
+	wchar *start = destination;
+	while ((*destination++ = *source++))
+		;
+	return start;
+}
+
+wchar *wcscat(wchar *destination, const wchar *source)
+{
+	wcscpy(destination + wcslen(destination), source);
+	return destination;
+}
+
+wchar towlower(wchar character)
+{
+	if (character >= 'A' && character <= 'Z')
+		return character + 32;
+	if (character >= 0xc0 && character <= 0xde && character != 0xd7)
+		return character + 32;
+	if (character >= 0x391 && character <= 0x3a9)
+		return character + 32;
+	if (character >= 0x410 && character <= 0x42f)
+		return character + 32;
+	return character;
+}
+
+wchar *_wcsupr(wchar *text)
+{
+	for (wchar *cursor = text; *cursor; ++cursor)
+		*cursor = towupper(*cursor);
+	return text;
+}
+
+wchar *_wcslwr(wchar *text)
+{
+	for (wchar *cursor = text; *cursor; ++cursor)
+		*cursor = towlower(*cursor);
+	return text;
+}
+
+unsigned long strtoul(const char *text, char **end, int base)
+{
+	unsigned long value = 0;
+	if ((base == 0 || base == 16) && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+		text += 2;
+		base = 16;
+	} else if (base == 0) {
+		base = text[0] == '0' ? 8 : 10;
+	}
+	for (;; ++text) {
+		int digit = *text >= '0' && *text <= '9' ? *text - '0' :
+			*text >= 'a' && *text <= 'z' ? *text - 'a' + 10 : *text >= 'A' && *text <= 'Z' ? *text - 'A' + 10 : 99;
+		if (digit >= base)
+			break;
+		value = value * base + digit;
+	}
+	if (end)
+		*end = (char *)text;
+	return value;
+}
+
+long strtol(const char *text, char **end, int base)
+{
+	int negative = 0;
+	while (*text == ' ' || (*text >= 9 && *text <= 13))
+		++text;
+	if (*text == '-' || *text == '+')
+		negative = *text++ == '-';
+	long value = (long)strtoul(text, end, base);
+	return negative ? -value : value;
+}
+
+int sprintf(char *buffer, const char *format, ...)
+{
+	va_list arguments;
+	int length;
+	va_start(arguments, format);
+	length = format_text(buffer, 1 << 20, format, arguments);
+	va_end(arguments);
+	return length;
 }

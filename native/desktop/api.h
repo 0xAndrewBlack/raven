@@ -1,6 +1,7 @@
 #pragma once
 
 #include "objects.h"
+#include "nt/api.h"
 #include "nt/environment.h"
 #include "nt/resources.h"
 #include <functional>
@@ -14,12 +15,19 @@ class NativeDesktop {
 public:
 	NativeDesktop(NativeProcess &process, NativeEnvironment &environment, DesktopObjects &objects, NativeResources &resources);
 	bool dispatch(std::string_view name);
+	// GDI entry points that follow the shared registry conventions; they take precedence over the older dispatchers.
+	void register_gdi_api(ApiRegistry &registry);
+	void register_text_api(ApiRegistry &registry);
+	void register_image_api(ApiRegistry &registry);
+	void set_host_files(std::function<std::optional<std::vector<uint8_t>>(std::u16string_view)> read) { read_host_file=std::move(read); }
 	static std::span<const std::string_view> user_exports();
 	static std::span<const std::string_view> gdi_exports();
 	static std::span<const std::string_view> control_exports();
 	// Loads an RT_MENU resource of a module by integer identifier; zero when the resource does not exist.
 	uint64_t menu_resource(uint64_t instance,uint64_t identifier);
 	void set_updated(std::function<void(uint64_t)> notify) { updated=std::move(notify); }
+	// Lets GDI services call guest callbacks such as font enumeration procedures.
+	void set_call(std::function<NativeResult(uint64_t,std::span<const uint64_t>)> call) { invoke=std::move(call); }
 	void set_source(std::function<std::optional<std::vector<uint8_t>>(std::string_view)> read) { source=std::move(read); }
 
 private:
@@ -28,6 +36,8 @@ private:
 	DesktopObjects &objects;
 	NativeResources &resources;
 	std::function<void(uint64_t)> updated;
+	std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke;
+	std::function<std::optional<std::vector<uint8_t>>(std::u16string_view)> read_host_file;
 	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source;
 #ifdef RAVEN_SKIA
 	bool text_dispatch(std::string_view name);
