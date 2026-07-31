@@ -165,6 +165,7 @@ struct NativeProcess::State {
 	uint64_t fs_base = 0;
 	uint32_t pending_cleanup = 0;
 	std::vector<NativeContext> callbacks;
+	std::vector<uint32_t> callback_cleanups;
 	uint64_t stack_top = 0;
 	bool stopped = true;
 	bool active_call = false;
@@ -541,6 +542,7 @@ void NativeProcess::abandon_call()
 		throw std::runtime_error("native abandonment requires a pending API call");
 	// Termination never resumes any suspended guest caller.
 	state->callbacks.clear();
+	state->callback_cleanups.clear();
 	state->active_call=false;
 	state->awaiting_api=false;
 	state->awaiting_syscall=false;
@@ -608,6 +610,8 @@ NativeResult NativeProcess::callback(uint64_t address, std::span<const uint64_t>
 		throw std::runtime_error("native callback exceeds initial nesting limit");
 	const auto saved = context();
 	state->callbacks.push_back(saved);
+	// A nested API trap overwrites the pending stdcall cleanup of the call that was interrupted.
+	state->callback_cleanups.push_back(state->pending_cleanup);
 	try {
 		return begin_call(address, arguments, saved.registers.rsp & ~uint64_t(15), timeout);
 	} catch (...) {
@@ -619,6 +623,8 @@ NativeResult NativeProcess::callback(uint64_t address, std::span<const uint64_t>
 				throw;
 			}
 			state->callbacks.pop_back();
+			state->pending_cleanup = state->callback_cleanups.back();
+			state->callback_cleanups.pop_back();
 			state->awaiting_api = true;
 		} else {
 			state->child->stop();
@@ -754,6 +760,8 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 				throw;
 			}
 			state->callbacks.pop_back();
+			state->pending_cleanup = state->callback_cleanups.back();
+			state->callback_cleanups.pop_back();
 			state->awaiting_api = true;
 		}
 		return {NativeStop::returned, x86 ? registers.rax & 0xffffffff : registers.rax, registers.rip, signal};

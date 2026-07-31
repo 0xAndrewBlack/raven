@@ -1117,6 +1117,21 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 add_test(NAME native_x86_kernel_cli COMMAND raven --run-process --execution=native
                     ${CMAKE_CURRENT_BINARY_DIR}/x86-kernel-client.exe)
                 set_tests_properties(native_x86_kernel_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                # The desktop contracts below are width-neutral; each fixture is the same source the x64 runtime qualifies.
+                set(X86_DESKTOP_CLIENTS default window_text coordinate focus message)
+                foreach(CLIENT ${X86_DESKTOP_CLIENTS})
+                    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-desktop-${CLIENT}.exe
+                        COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
+                            -Wl,--entry,_raven_entry,--no-insert-timestamp
+                            -o ${CMAKE_CURRENT_BINARY_DIR}/x86-desktop-${CLIENT}.exe
+                            ${LOADER_SOURCES}/${CLIENT}_client.c -lkernel32 -luser32 -lgdi32
+                        DEPENDS ${LOADER_SOURCES}/${CLIENT}_client.c VERBATIM)
+                    list(APPEND X86_DESKTOP_EXECUTABLES ${CMAKE_CURRENT_BINARY_DIR}/x86-desktop-${CLIENT}.exe)
+                    add_test(NAME native_x86_desktop_${CLIENT} COMMAND raven --run-process --execution=native
+                        ${CMAKE_CURRENT_BINARY_DIR}/x86-desktop-${CLIENT}.exe)
+                    set_tests_properties(native_x86_desktop_${CLIENT} PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                endforeach()
+                add_custom_target(x86_desktop_fixtures ALL DEPENDS ${X86_DESKTOP_EXECUTABLES})
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)

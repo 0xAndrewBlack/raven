@@ -142,6 +142,13 @@ static void put(std::span<uint8_t> bytes, size_t at, uint64_t value, size_t widt
 	for (size_t byte=0; byte<width; ++byte) bytes[at+byte]=uint8_t(value>>(byte*8));
 }
 
+// Guest MSG: hwnd, message, wParam, lParam, time, pt. Offsets differ between the 32-bit and 64-bit Windows ABIs.
+struct MessageLayout { size_t size, message, wparam, lparam, time, x, y, pointer; };
+static MessageLayout message_layout(bool narrow)
+{
+	return narrow ? MessageLayout{28,4,8,12,16,20,24,4} : MessageLayout{48,8,16,24,32,36,40,8};
+}
+
 static uint32_t message_time()
 {
 	return uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -239,7 +246,9 @@ void NativeWindows::receive(const DesktopEvent &event)
 
 uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 {
-	const auto window=args[1];
+	const auto layout=message_layout(process.mode()==NativeMode::x86);
+	// A 32-bit (HWND)-1 selects thread messages exactly like its 64-bit sign extension.
+	const auto window=process.mode()==NativeMode::x86 && args[1]==UINT32_MAX ? UINT64_MAX : args[1];
 	const auto minimum=uint32_t(args[2]),maximum=uint32_t(args[3]);
 	if (window && window!=UINT64_MAX && !objects.window(window)) throw uint32_t(1400);
 	if ((minimum || maximum) && (minimum>maximum || maximum>0xffff)) throw uint32_t(87);
@@ -255,10 +264,11 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		});
 		if (found!=messages.end() || quit) {
 			const auto value=found!=messages.end() ? *found : Message{0,*quit,0,0x12,message_time(),cursor_x,cursor_y};
-			std::array<uint8_t,48> bytes{};
-			put(bytes,0,value.window,8); put(bytes,8,value.message,4);
-			put(bytes,16,value.wparam,8); put(bytes,24,value.lparam,8); put(bytes,32,value.time,4);
-			put(bytes,36,uint32_t(value.x),4); put(bytes,40,uint32_t(value.y),4);
+			std::vector<uint8_t> bytes(layout.size);
+			put(bytes,0,value.window,layout.pointer); put(bytes,layout.message,value.message,4);
+			put(bytes,layout.wparam,value.wparam,layout.pointer); put(bytes,layout.lparam,value.lparam,layout.pointer);
+			put(bytes,layout.time,value.time,4);
+			put(bytes,layout.x,uint32_t(value.x),4); put(bytes,layout.y,uint32_t(value.y),4);
 			process.write_memory(args[0],bytes);
 			if (value.message==0x100 || value.message==0x101) key_translation=value;
 			if (flags & 1U) { if (found!=messages.end()) messages.erase(found); else quit.reset(); }
@@ -266,8 +276,8 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		}
 		const auto paint=(!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f) ? objects.invalid_window(window) : 0;
 		if (paint) {
-			std::array<uint8_t,48> bytes{};
-			put(bytes,0,paint,8); put(bytes,8,0x0f,4); put(bytes,32,message_time(),4);
+			std::vector<uint8_t> bytes(layout.size);
+			put(bytes,0,paint,layout.pointer); put(bytes,layout.message,0x0f,4); put(bytes,layout.time,message_time(),4);
 			process.write_memory(args[0],bytes);
 			return 1;
 		}
@@ -420,7 +430,9 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 	if (message==6) { if (uint16_t(args[2]) && !uint16_t(args[2]>>16)) set_focus(args[0]); return 0; }
 	if (message==7 || message==8) return 0;
 	if (message==0x81 || message==0x0c) {
-		const auto address=message==0x81 ? read(process.read_memory(args[3],80),56,8) : args[3];
+		const bool narrow=process.mode()==NativeMode::x86;
+		const auto address=message==0x81 ? (narrow ? read(process.read_memory(args[3],48),36,4) :
+			read(process.read_memory(args[3],80),56,8)) : args[3];
 		if (!objects.set_title(args[0],window_text(address))) throw uint32_t(8);
 		if (objects.window_visible(args[0])) present(args[0]);
 		return 1;
@@ -501,13 +513,23 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 	uint64_t scratch=0;
 	try {
 		scratch=process.map_memory(4096,PROT_READ | PROT_WRITE);
-		std::array<uint8_t,96> bytes{};
-		put(bytes,0,args[11],8); put(bytes,8,args[10],8);put(bytes,16,args[9],8);put(bytes,24,args[8],8);
-		put(bytes,32,uint32_t(height),4); put(bytes,36,uint32_t(width),4);
-		put(bytes,40,uint32_t(relative_y),4); put(bytes,44,uint32_t(relative_x),4); put(bytes,48,uint32_t(args[3]),4);
-		put(bytes,56,args[2],8); put(bytes,64,args[1],8);put(bytes,72,ex_style,4);
-		put(bytes,80,uint32_t(x),4); put(bytes,84,uint32_t(y),4);
-		put(bytes,88,uint32_t(x+width),4); put(bytes,92,uint32_t(y+height),4);
+		// CREATESTRUCTW followed by the 16-byte window rectangle used for WM_NCCALCSIZE.
+		const bool narrow=process.mode()==NativeMode::x86;
+		const size_t rect_at=narrow ? 48 : 80;
+		std::vector<uint8_t> bytes(rect_at+16);
+		if (narrow) {
+			put(bytes,0,args[11],4); put(bytes,4,args[10],4);put(bytes,8,args[9],4);put(bytes,12,args[8],4);
+			put(bytes,16,uint32_t(height),4); put(bytes,20,uint32_t(width),4);
+			put(bytes,24,uint32_t(relative_y),4); put(bytes,28,uint32_t(relative_x),4); put(bytes,32,uint32_t(args[3]),4);
+			put(bytes,36,args[2],4); put(bytes,40,args[1],4);put(bytes,44,ex_style,4);
+		} else {
+			put(bytes,0,args[11],8); put(bytes,8,args[10],8);put(bytes,16,args[9],8);put(bytes,24,args[8],8);
+			put(bytes,32,uint32_t(height),4); put(bytes,36,uint32_t(width),4);
+			put(bytes,40,uint32_t(relative_y),4); put(bytes,44,uint32_t(relative_x),4); put(bytes,48,uint32_t(args[3]),4);
+			put(bytes,56,args[2],8); put(bytes,64,args[1],8);put(bytes,72,ex_style,4);
+		}
+		put(bytes,rect_at,uint32_t(x),4); put(bytes,rect_at+4,uint32_t(y),4);
+		put(bytes,rect_at+8,uint32_t(x+width),4); put(bytes,rect_at+12,uint32_t(y+height),4);
 		process.write_memory(scratch,bytes);
 		const auto accepted=send(handle,0x81,0,scratch);
 		if (!objects.window(handle)) { process.unmap_memory(scratch); return 0; }
@@ -516,9 +538,9 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 			release_surface(handle);
 			objects.erase(handle); process.unmap_memory(scratch); return 0;
 		}
-		send(handle,0x83,0,scratch+80);
+		send(handle,0x83,0,scratch+rect_at);
 		if (!objects.window(handle)) { process.unmap_memory(scratch); return 0; }
-		const auto client=process.read_memory(scratch+80,16);
+		const auto client=process.read_memory(scratch+rect_at,16);
 		const auto left=int32_t(uint32_t(read(client,0,4))),top=int32_t(uint32_t(read(client,4,4)));
 		const auto right=uint32_t(read(client,8,4)),bottom=uint32_t(read(client,12,4));
 		if (int64_t(left)-x<INT32_MIN || int64_t(left)-x>INT32_MAX || int64_t(top)-y<INT32_MIN || int64_t(top)-y>INT32_MAX) {
@@ -671,13 +693,14 @@ bool NativeWindows::dispatch(std::string_view name)
 		else if (name=="PostQuitMessage") { quit=uint32_t(args[0]); }
 		else if (name=="PeekMessageW" || name=="GetMessageW") result=retrieve(args,name=="GetMessageW");
 		else if (name=="DispatchMessageW" || name=="TranslateMessage") {
-			const auto bytes=process.read_memory(args[0],48);
-			const auto message=uint32_t(read(bytes,8,4));
+			const auto layout=message_layout(process.mode()==NativeMode::x86);
+			const auto bytes=process.read_memory(args[0],layout.size);
+			const auto message=uint32_t(read(bytes,layout.message,4));
 			if (name=="TranslateMessage") {
 				if (message==0x100 || message==0x101) {
-					if (!key_translation || key_translation->window!=read(bytes,0,8) || key_translation->message!=message ||
-						key_translation->wparam!=read(bytes,16,8) || key_translation->lparam!=read(bytes,24,8) ||
-						key_translation->time!=read(bytes,32,4))
+					if (!key_translation || key_translation->window!=read(bytes,0,layout.pointer) || key_translation->message!=message ||
+						key_translation->wparam!=read(bytes,layout.wparam,layout.pointer) || key_translation->lparam!=read(bytes,layout.lparam,layout.pointer) ||
+						key_translation->time!=read(bytes,layout.time,4))
 						throw std::runtime_error("keyboard translation requires the current retrieved key message");
 					const auto key=*key_translation;
 					if (message==0x100 && key.character) {
@@ -692,26 +715,31 @@ bool NativeWindows::dispatch(std::string_view name)
 					}
 					result=1;
 				} else if (message>=0x100 && message<=0x109) throw uint32_t(120);
-			} else if (read(bytes,0,8)) {
-				if (message==0x113 && read(bytes,24,8)) throw uint32_t(120);
-				result=send(read(bytes,0,8),message,read(bytes,16,8),read(bytes,24,8));
+			} else if (read(bytes,0,layout.pointer)) {
+				if (message==0x113 && read(bytes,layout.lparam,layout.pointer)) throw uint32_t(120);
+				result=send(read(bytes,0,layout.pointer),message,read(bytes,layout.wparam,layout.pointer),read(bytes,layout.lparam,layout.pointer));
 			}
 		}
 		else if (registration) {
 			const bool extended=name=="RegisterClassExW";
-			const auto bytes=process.read_memory(args[0],extended ? 80 : 72);
-			if (extended && read(bytes,0,4)!=80) throw uint32_t(87);
+			const bool narrow=process.mode()==NativeMode::x86;
+			const size_t P=narrow ? 4 : 8;
+			// WNDCLASSW fields follow style at 0; the 32-bit WNDCLASSEXW shifts all of them by its cbSize.
+			const size_t shift=narrow && extended ? 4 : 0;
+			const size_t size=narrow ? (extended ? 48 : 40) : (extended ? 80 : 72);
+			const auto bytes=process.read_memory(args[0],size);
+			if (extended && read(bytes,0,4)!=size) throw uint32_t(87);
 			const auto style=uint32_t(read(bytes,extended ? 4 : 0,4));
-			if ((style & ~0x4000U) || read(bytes,32,8) || read(bytes,40,8) ||
-				read(bytes,56,8) || (extended && read(bytes,72,8)))
+			if ((style & ~0x4000U) || read(bytes,3*P+8+shift,P) || read(bytes,4*P+8+shift,P) ||
+				read(bytes,6*P+8+shift,P) || (extended && read(bytes,8*P+8+shift,P)))
 				throw uint32_t(120);
-			const auto class_extra=int32_t(uint32_t(read(bytes,16,4))),window_extra=int32_t(uint32_t(read(bytes,20,4)));
+			const auto class_extra=int32_t(uint32_t(read(bytes,2*P+shift,4))),window_extra=int32_t(uint32_t(read(bytes,2*P+4+shift,4)));
 			if (class_extra<0 || window_extra<0) throw uint32_t(87);
 			if (class_extra>4096 || window_extra>4096) throw uint32_t(120);
-			const auto background=read(bytes,48,8);
+			const auto background=read(bytes,5*P+8+shift,P);
 			if (background && background>31 && !objects.brush(background)) throw uint32_t(background<=32 ? 120 : 6);
-			const auto procedure=read(bytes,8,8), instance=read(bytes,24,8);
-			auto class_name=text(read(bytes,64,8));
+			const auto procedure=read(bytes,P+shift,P), instance=read(bytes,2*P+8+shift,P);
+			auto class_name=text(read(bytes,7*P+8+shift,P));
 			if (!procedure || class_name.empty()) throw uint32_t(87);
 			if (objects.class_registered(instance,class_name,(style & 0x4000)!=0)) throw uint32_t(1410);
 			const auto id=objects.register_class({std::move(class_name),instance,procedure,background,uint32_t(window_extra),std::vector<uint8_t>(size_t(class_extra)),style});
@@ -731,17 +759,20 @@ bool NativeWindows::dispatch(std::string_view name)
 		else if (name=="BeginPaint") {
 			auto *window=objects.window(args[0]); if (!window) throw uint32_t(1400);
 			if (window->painting) throw uint32_t(170);
-			const auto old=process.read_memory(args[1],72); process.write_memory(args[1],old);
+			const bool narrow=process.mode()==NativeMode::x86;
+			const size_t P=narrow ? 4 : 8;
+			const auto old=process.read_memory(args[1],narrow ? 64 : 72); process.write_memory(args[1],old);
 			const auto paint=start_paint(args[0]);
-			std::array<uint8_t,72> output{};
-			put(output,0,paint.dc,8); put(output,8,paint.erase,4);
-			put(output,12,uint32_t(paint.rect.left),4); put(output,16,uint32_t(paint.rect.top),4);
-			put(output,20,uint32_t(paint.rect.right),4); put(output,24,uint32_t(paint.rect.bottom),4);
+			std::vector<uint8_t> output(old.size());
+			put(output,0,paint.dc,P); put(output,P,paint.erase,4);
+			put(output,P+4,uint32_t(paint.rect.left),4); put(output,P+8,uint32_t(paint.rect.top),4);
+			put(output,P+12,uint32_t(paint.rect.right),4); put(output,P+16,uint32_t(paint.rect.bottom),4);
 			process.write_memory(args[1],output); result=paint.dc;
 		} else if (name=="EndPaint") {
 			auto *window=objects.window(args[0]); if (!window) throw uint32_t(1400);
-			const auto paint=process.read_memory(args[1],72);
-			if (!window->painting || read(paint,0,8)!=window->dc) throw uint32_t(87);
+			const bool narrow=process.mode()==NativeMode::x86;
+			const auto paint=process.read_memory(args[1],narrow ? 64 : 72);
+			if (!window->painting || read(paint,0,narrow ? 4 : 8)!=window->dc) throw uint32_t(87);
 			objects.finish_paint(args[0]);
 			if (objects.window_visible(args[0])) present(args[0]);
 			result=1;

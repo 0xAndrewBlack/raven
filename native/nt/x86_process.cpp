@@ -3,6 +3,8 @@
 #include "module_api.h"
 #include "resources.h"
 #include "memory.h"
+#include "desktop/api.h"
+#include "desktop/windows.h"
 
 #include <algorithm>
 #include <array>
@@ -26,6 +28,40 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 36> kernel32_exports
 	{"OutputDebugStringA", 1}, {"SetLastError", 1}, {"SizeofResource", 2}, {"VirtualAlloc", 4},
 	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WriteFile", 5}, {"lstrcpyW", 2}, {"lstrlenW", 1},
 }};
+
+// stdcall argument counts of the desktop exports, keyed by export name.
+const std::map<std::string_view, uint32_t> &desktop_arguments()
+{
+	static const std::map<std::string_view, uint32_t> counts{
+		{"AdjustWindowRect",3},{"AdjustWindowRectEx",4},{"BeginPaint",2},{"CallWindowProcW",5},{"ClientToScreen",2},
+		{"CopyIcon",1},{"CreateIconFromResourceEx",7},{"CreateWindowExW",12},{"DefWindowProcW",4},{"DestroyIcon",1},
+		{"DestroyMenu",1},{"DestroyWindow",1},{"DispatchMessageW",1},{"DrawIconEx",9},{"EndPaint",2},{"FillRect",3},
+		{"FrameRect",3},{"GetActiveWindow",0},{"GetClassInfoExW",3},{"GetClassInfoW",3},{"GetClassLongA",2},
+		{"GetClassLongPtrA",2},{"GetClassLongPtrW",2},{"GetClassLongW",2},{"GetClassNameA",3},{"GetClassNameW",3},
+		{"GetClientRect",2},{"GetDC",1},{"GetDlgCtrlID",1},{"GetDlgItem",2},{"GetFocus",0},{"GetIconInfo",2},
+		{"GetMenuItemCount",1},{"GetMenuItemID",2},{"GetMessageW",4},{"GetParent",1},{"GetSubMenu",2},{"GetSysColor",1},
+		{"GetSysColorBrush",1},{"GetSystemMetrics",1},{"GetUpdateRect",3},{"GetWindowDC",1},{"GetWindowLongA",2},
+		{"GetWindowLongPtrA",2},{"GetWindowLongPtrW",2},{"GetWindowLongW",2},{"GetWindowRect",2},{"GetWindowTextLengthW",1},
+		{"GetWindowTextW",3},{"InternalGetWindowText",3},{"InvalidateRect",3},{"IsChild",2},{"IsMenu",1},{"IsWindow",1},
+		{"IsWindowUnicode",1},{"IsWindowVisible",1},{"LoadMenuW",2},{"LoadStringW",4},{"LookupIconIdFromDirectoryEx",5},
+		{"MapWindowPoints",4},{"PeekMessageW",5},{"PostMessageW",4},{"PostQuitMessage",1},{"PrivateExtractIconsW",8},
+		{"RegisterClassExW",1},{"RegisterClassW",1},{"ReleaseDC",2},{"ScreenToClient",2},{"SendMessageW",4},
+		{"SetClassLongA",3},{"SetClassLongPtrA",3},{"SetClassLongPtrW",3},{"SetClassLongW",3},{"SetFocus",1},
+		{"SetWindowLongA",3},{"SetWindowLongPtrA",3},{"SetWindowLongPtrW",3},{"SetWindowLongW",3},{"SetWindowTextW",2},
+		{"ShowWindow",2},{"TranslateMessage",1},{"UnregisterClassW",2},{"UpdateWindow",1},{"ValidateRect",2},
+		{"BitBlt",9},{"CombineRgn",4},{"CreateCompatibleBitmap",3},{"CreateCompatibleDC",1},{"CreateDIBSection",6},
+		{"CreateFontIndirectW",1},{"CreatePen",3},{"CreateRectRgn",4},{"CreateSolidBrush",1},{"DPtoLP",3},{"DeleteDC",1},
+		{"DeleteObject",1},{"EqualRgn",2},{"ExcludeClipRect",5},{"ExtTextOutW",8},{"GdiFlush",0},{"GetBitmapBits",3},
+		{"GetBkColor",1},{"GetBkMode",1},{"GetClipBox",2},{"GetClipRgn",2},{"GetCurrentObject",2},
+		{"GetCurrentPositionEx",2},{"GetGraphicsMode",1},{"GetLayout",1},{"GetObjectA",3},{"GetObjectType",1},
+		{"GetObjectW",3},{"GetRgnBox",2},{"GetStockObject",1},{"GetTextColor",1},{"GetTextExtentExPointW",7},
+		{"GetTextExtentPoint32W",4},{"GetTextExtentPointW",4},{"GetTextMetricsW",2},{"GetViewportExtEx",2},
+		{"GetWindowExtEx",2},{"IntersectClipRect",5},{"LPtoDP",3},{"LineTo",3},{"MoveToEx",4},{"OffsetRgn",3},
+		{"PtInRegion",3},{"RectInRegion",2},{"SelectClipRgn",2},{"SelectObject",2},{"SetBkColor",2},{"SetBkMode",2},
+		{"SetRectRgn",5},{"SetTextColor",2},{"TextOutW",5},{"LoadIconWithScaleDown",5},
+	};
+	return counts;
+}
 
 // Guest strings and small kernel32 services that need no shared state.
 bool kernel_string_api(NativeProcess &process, NativeEnvironment &environment, const PEModule &entry,
@@ -117,7 +153,8 @@ uint64_t provider_base(const ModuleSet &modules, uint32_t size)
 }
 
 NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
-	const std::string &bootstrap, std::chrono::milliseconds timeout, std::optional<NativeLaunch> launch)
+	const std::string &bootstrap, std::chrono::milliseconds timeout, std::optional<NativeLaunch> launch,
+	DesktopPresentation presentation)
 {
 	if (timeout.count() <= 0 || entry.image.is_64 || (entry.image.characteristics & 0x2000) ||
 		!std::any_of(modules.all().begin(), modules.all().end(), [&](const auto &item) { return item.second.get() == &entry; }))
@@ -140,6 +177,22 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
 		}
 	}
+	const auto add_desktop = [&](const char *dll, std::span<const std::string_view> exports) {
+		if (modules.all().contains(dll))
+			return;
+		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, exports, true)).image_size;
+		const auto base = provider_base(modules, size);
+		auto &provider = modules.add(dll, runtime_provider(dll, base, exports, true), base);
+		provider.runtime_api = true;
+		for (const auto &symbol : provider.exports) {
+			const auto found = desktop_arguments().find(symbol.names.at(0));
+			if (found == desktop_arguments().end())
+				throw std::runtime_error("native x86 desktop export has no argument count: " + symbol.names.at(0));
+			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
+		}
+	};
+	add_desktop("user32.dll", NativeDesktop::user_exports());
+	add_desktop("gdi32.dll", NativeDesktop::gdi_exports());
 	modules.bind_imports();
 	std::vector<LoadedImage *> images;
 	for (const auto &[name, module] : modules.all())
@@ -194,28 +247,56 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			environment.set_last_error(6);
 		return known;
 	});
-	auto result = process.call(entry.loaded.base() + entry.image.entry, {}, timeout);
-	while (result.stop == NativeStop::api) {
-		const auto found = traps.find(result.value);
-		if (found == traps.end())
-			return result;
-		if (found->second.first == "ExitProcess") {
-			const auto code = uint32_t(process.api_arguments(1)[0]);
-			process.abandon_call();
-			return {NativeStop::exited, code, result.instruction, 0};
+	DesktopObjects desktop_objects;
+	NativeDesktop desktop(process, environment, desktop_objects, resources);
+	NativeWindows windows(process, environment, desktop_objects);
+	windows.set_deadline(deadline);
+	windows.set_presentation(std::move(presentation));
+	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
+	struct ProcessExit { uint32_t code; uint64_t instruction; };
+	const auto remaining = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()); };
+	// Runs one guest call, answering every API trap until the call returns or stops for another reason.
+	const auto invoke = [&](uint64_t address, std::span<const uint64_t> arguments) {
+		auto budget = remaining();
+		if (budget.count() <= 0)
+			return NativeResult{NativeStop::timeout, 0, address, 0};
+		auto result = process.active() ? process.callback(address, arguments, budget) : process.call(address, arguments, budget);
+		while (result.stop == NativeStop::api) {
+			const auto found = traps.find(result.value);
+			if (found == traps.end())
+				return result;
+			const auto api = found->second.first;
+			if (getenv("RAVEN_TRACE_X86")) std::cerr << "api " << api << '\n';
+			if (api == "ExitProcess") {
+				const auto code = uint32_t(process.api_arguments(1)[0]);
+				process.abandon_call();
+				throw ProcessExit{code, result.instruction};
+			}
+			if (!environment.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
+				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
+				!desktop.dispatch(api) && !windows.dispatch(api)) {
+				std::cerr << "raven: unimplemented native x86 API " << api << '\n';
+				return result;
+			}
+			budget = remaining();
+			if (budget.count() <= 0)
+				return NativeResult{NativeStop::timeout, 0, result.instruction, 0};
+			result = process.resume(budget);
 		}
-		const auto api = found->second.first;
-		if (!environment.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
-			!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api)) {
-			std::cerr << "raven: unimplemented native x86 API " << api << '\n';
-			return result;
-		}
-		const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
-		if (remaining.count() <= 0)
-			return {NativeStop::timeout, 0, result.instruction, 0};
-		result = process.resume(remaining);
+		return result;
+	};
+	windows.set_call(invoke);
+	try {
+		const auto result = invoke(entry.loaded.base() + entry.image.entry, {});
+		windows.shutdown();
+		return result;
+	} catch (const ProcessExit &request) {
+		windows.shutdown();
+		return {NativeStop::exited, request.code, request.instruction, 0};
+	} catch (const NativeResult &stopped) {
+		windows.shutdown();
+		return stopped;
 	}
-	return result;
 }
 
 }

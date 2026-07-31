@@ -22,13 +22,15 @@ uint64_t NativeWindows::class_info(std::string_view name,std::span<const uint64_
 	const auto id=atom(args[1],args[0]);
 	const auto *definition=objects.window_class(id); if (!definition) throw uint32_t(1411);
 	const bool extended=name=="GetClassInfoExW";
-	const auto old=process.read_memory(args[2],extended ? 80 : 72);
+	const bool narrow=process.mode()==NativeMode::x86;
+	const size_t P=narrow ? 4 : 8,shift=narrow && extended ? 4 : 0;
+	const auto old=process.read_memory(args[2],narrow ? (extended ? 48 : 40) : (extended ? 80 : 72));
 	std::vector<uint8_t> bytes(old.size());
 	if (extended) std::copy_n(old.begin(),4,bytes.begin());
 	put(bytes,extended ? 4 : 0,definition->style,4);
-	put(bytes,8,definition->procedure,8);
-	put(bytes,16,definition->extra.size(),4); put(bytes,20,definition->window_extra,4);
-	put(bytes,24,args[0],8); put(bytes,48,definition->background,8); put(bytes,64,args[1],8);
+	put(bytes,P+shift,definition->procedure,P);
+	put(bytes,2*P+shift,definition->extra.size(),4); put(bytes,2*P+4+shift,definition->window_extra,4);
+	put(bytes,2*P+8+shift,args[0],P); put(bytes,5*P+8+shift,definition->background,P); put(bytes,7*P+8+shift,args[1],P);
 	process.write_memory(args[2],bytes);
 	return definition->atom;
 }
