@@ -1,0 +1,43 @@
+#include "windows.h"
+#include "canvas.h"
+
+namespace raven {
+
+// Draws the border and edge of every visible child of one top-level surface, as the default non-client paint does.
+void NativeWindows::paint_child_frames(uint64_t root)
+{
+	const auto *top = objects.window(root);
+	if (!top || !top->bitmap)
+		return;
+	auto *bitmap = objects.bitmap(top->bitmap);
+	if (!bitmap || bitmap->depth != 32)
+		return;
+	using namespace paint;
+	Canvas canvas{bitmap->pixels().data(), int32_t(bitmap->width), int32_t(bitmap->height)};
+	const auto color = [&](int index) { return rgb(objects.system_color(index)); };
+	const auto ring = [&](DesktopRect rect, uint32_t top_left, uint32_t bottom_right) {
+		canvas.fill({rect.left, rect.top, rect.right, rect.top + 1}, top_left);
+		canvas.fill({rect.left, rect.top, rect.left + 1, rect.bottom}, top_left);
+		canvas.fill({rect.left, rect.bottom - 1, rect.right, rect.bottom}, bottom_right);
+		canvas.fill({rect.right - 1, rect.top, rect.right, rect.bottom}, bottom_right);
+	};
+	const auto walk = [&](auto &&self, uint64_t parent) -> void {
+		for (const auto handle : objects.child_windows(parent)) {
+			const auto *window = objects.window(handle);
+			if (!window || !window->visible)
+				continue;
+			const DesktopRect rect{window->outer.left - top->outer.left, window->outer.top - top->outer.top,
+				window->outer.right - top->outer.left, window->outer.bottom - top->outer.top};
+			if (window->ex_style & 0x200U)
+				canvas.edge(rect, color(color_button_shadow), color(color_button_highlight), color(color_dark_shadow), color(color_light));
+			else if (window->ex_style & 0x20000U)
+				ring(rect, color(color_button_shadow), color(color_button_highlight));
+			else if (window->style & 0x800000U)
+				ring(rect, color(color_window_frame), color(color_window_frame));
+			self(self, handle);
+		}
+	};
+	walk(walk, root);
+}
+
+}

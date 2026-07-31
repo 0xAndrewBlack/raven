@@ -420,6 +420,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	DesktopObjects desktop_objects;
 	NativeDesktop desktop(process, environment, desktop_objects, resources);
 	desktop.set_source(source);
+	if (const auto component = modules.all().find("raven-user32.dll"); component != modules.all().end() && !component->second->runtime_api)
+		desktop.set_oem_module(component->second->loaded.base());
 	NativeWindows windows(process,environment,desktop_objects);
 	windows.set_deadline(deadline);
 	windows.set_menu_loader([&desktop](uint64_t instance,uint64_t identifier) { return desktop.menu_resource(instance,identifier); });
@@ -519,7 +521,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			}
 			if (tracing) {
 				std::cerr << "api " << found->second << '(' << std::hex;
-				for (const auto value : process.api_arguments(4))
+				// RAVEN_TRACE_ARGS widens the argument list shown (the default is the four register arguments).
+				const char *width = std::getenv("RAVEN_TRACE_ARGS");
+				for (const auto value : process.api_arguments(width ? std::clamp(std::atoi(width), 1, 12) : 4))
 					std::cerr << ' ' << value;
 				std::cerr << std::dec << " )";
 				// The caller shows which guest module and offset asked, which is what a diagnosis needs most.

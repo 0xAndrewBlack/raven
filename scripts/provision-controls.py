@@ -159,8 +159,12 @@ def main():
     # FrameRect and FillRect keep the measured host behavior (error codes for invalid brushes and device contexts).
     exported = sorted((public & defined) - {"EXPORTS", "NAME", "FrameRect", "FillRect"})
     (output / "raven-user32.def").write_text("NAME raven-user32.dll\nEXPORTS\n" + "".join(" " + name + "\n" for name in exported) + " RavenInitControls\n")
+    # The built-in bitmaps, icons, cursors and strings that user32 serves to LoadBitmap and LoadImage without a module.
+    run(["x86_64-w64-mingw32-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__", "-D_WIN32_IE=0x0A00",
+         "-D_M_AMD64", "-I" + str(user_root), "-I" + str(user_root / "include"), "-I" + str(generated / "reactos"),
+         "-i", user_root / "user32.rc", "-o", objects / "user32.res.o"])
     run(["x86_64-w64-mingw32-gcc", "-shared", "-nostdlib", "-Wl,--entry,DllMain,--image-base,0x1f4000000,--no-insert-timestamp",
-         "-o", output / "raven-user32.dll", *user_objects, output / "raven-user32.def",
+         "-o", output / "raven-user32.dll", *user_objects, objects / "user32.res.o", output / "raven-user32.def",
          "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lntdll", "-limm32", "-lusp10", "-lgcc"])
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, commands=records,
                   component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ("comctl32.dll", "raven-user32.dll")},

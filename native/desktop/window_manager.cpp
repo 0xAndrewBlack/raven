@@ -260,12 +260,13 @@ void NativeWindows::place_window(uint64_t handle, DesktopRect outer, uint64_t in
 				shift_window(handle, target.left - old.left, target.top - old.top);
 			if (resized) {
 				window = objects.window(handle);
+				const int32_t client_width = window->width, client_height = window->height;
 				window->outer = target;
 				window->x = target.left;
 				window->y = target.top;
 				window->width = target.right - target.left;
 				window->height = target.bottom - target.top;
-				recalculate_client(handle);
+				recalculate_client(handle, client_width, client_height);
 			}
 		} else {
 			reshape(handle, target);
@@ -415,6 +416,17 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		const int32_t old_x = old_parent ? old_parent->x : 0, old_y = old_parent ? old_parent->y : 0;
 		const auto *new_parent = call[1] ? objects.window(call[1]) : nullptr;
 		const int32_t new_x = new_parent ? new_parent->x : 0, new_y = new_parent ? new_parent->y : 0;
+		// Surfaces belong to the root a window draws on, so a move between roots drops every surface of the subtree.
+		const auto drop_surfaces = [&](auto &&self, uint64_t node) -> void {
+			for (const auto child : objects.child_windows(node))
+				self(self, child);
+			release_surface(node);
+			if (auto *record = objects.window(node))
+				record->bitmap = record->dc = 0;
+		};
+		if (previous != call[1])
+			drop_surfaces(drop_surfaces, call[0]);
+		window = objects.window(call[0]);
 		window->parent = call[1];
 		if (call[1]) window->style = (window->style & ~0x80000000U) | 0x40000000U;
 		else window->style = (window->style & ~0x40000000U) | 0x80000000U;

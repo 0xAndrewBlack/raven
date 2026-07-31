@@ -275,10 +275,10 @@ static void marlett_glyph(std::vector<uint8_t> &alpha,uint32_t stride,int32_t le
 	case '0': box(s/5,s*3/4,s*3/5,s*3/4+std::max(2,thick)); break;
 	case '1': box(s/5,s/5,s*4/5,s/5+std::max(2,thick)); line(s/5,s/5,s/5,s*4/5,1); line(s*4/5-1,s/5,s*4/5-1,s*4/5,1); line(s/5,s*4/5-1,s*4/5-1,s*4/5-1,1); break;
 	case '2': box(s*2/5,s/5,s*4/5,s/5+std::max(2,thick)); line(s*4/5-1,s/5,s*4/5-1,s*3/5,1); line(s/5,s*2/5,s*3/5,s*2/5,2); line(s/5,s*2/5,s/5,s*4/5,1); line(s*3/5-1,s*2/5,s*3/5-1,s*4/5,1); line(s/5,s*4/5-1,s*3/5,s*4/5-1,1); break;
-	case '3': for (int32_t i=0;i<=s/4;++i) line(s*5/8-i,s/2-i,s*5/8-i,s/2+i,1); break;
-	case '4': for (int32_t i=0;i<=s/4;++i) line(s*3/8+i,s/2-i,s*3/8+i,s/2+i,1); break;
-	case '5': for (int32_t i=0;i<=s/4;++i) line(s/2-i,s*5/8-i,s/2+i,s*5/8-i,1); break;
-	case '6': for (int32_t i=0;i<=s/4;++i) line(s/2-i,s*3/8+i,s/2+i,s*3/8+i,1); break;
+	case '3': for (int32_t i=0;i<=s/4;++i) line(s*3/8+i,s/2-i,s*3/8+i,s/2+i,1); break;
+	case '4': for (int32_t i=0;i<=s/4;++i) line(s*5/8-i,s/2-i,s*5/8-i,s/2+i,1); break;
+	case '5': for (int32_t i=0;i<=s/4;++i) line(s/2-i,s*3/8+i,s/2+i,s*3/8+i,1); break;
+	case '6': for (int32_t i=0;i<=s/4;++i) line(s/2-i,s*5/8-i,s/2+i,s*5/8-i,1); break;
 	case 'o': case 'p': case 'x': case 'y':
 		// Size grip: diagonal dotted stripes toward the lower right corner.
 		for (int32_t k=1;k<=3;++k) line(s-1-k*s/4,s-1,s-1,s-1-k*s/4,1);

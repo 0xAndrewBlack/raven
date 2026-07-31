@@ -238,6 +238,7 @@ public:
 	bool delete_pen(uint64_t pen);
 	void update_window_dcs(uint64_t window);
 	void detach_window_dcs(uint64_t window);
+	void attach_window_dcs(uint64_t root,uint64_t bitmap);
 	DesktopWindow *window(uint64_t handle);
 	const DesktopWindow *window(uint64_t handle) const;
 	uint64_t window_root(uint64_t handle) const;

@@ -231,6 +231,16 @@ void DesktopObjects::detach_window_dcs(uint64_t handle)
 		}
 }
 
+// A retained device context follows its window onto the surface that replaces a released one.
+void DesktopObjects::attach_window_dcs(uint64_t root,uint64_t bitmap)
+{
+	for (auto &[identity,object] : objects)
+		if (auto *device=std::get_if<DesktopDC>(&object); device && device->leased && !device->bitmap && device->window && window(device->window) && window_root(device->window)==root) {
+			device->bitmap=device->default_bitmap=bitmap;
+			configure_window_dc(device->window,*device,device->window_frame);
+		}
+}
+
 const DesktopBrush *DesktopObjects::brush(uint64_t handle) const
 {
 	if (handle>=desktop_stock_brush && handle<desktop_stock_brush+stock_brushes.size()) return &stock_brushes[size_t(handle-desktop_stock_brush)];

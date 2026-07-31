@@ -89,6 +89,7 @@ uint64_t NativeWindows::surface_dc(uint64_t handle)
 		dc=objects.add(device);
 		if (!dc) throw uint32_t(8);
 		window=objects.window(handle); window->bitmap=bitmap; window->dc=dc;
+		objects.attach_window_dcs(handle,bitmap);
 		return dc;
 	} catch (...) { if (dc) objects.erase(dc); if (bitmap) objects.erase(bitmap); process.unmap_memory(address); throw; }
 }
@@ -103,9 +104,13 @@ void NativeWindows::present(uint64_t handle)
 	dirty_roots.erase(handle);
 	surface_dc(handle);
 	paint_nonclient(handle);
+	paint_child_frames(handle);
 	paint_scrollbars(handle);
+	// Painting sends messages, and a handler may have destroyed the window.
 	const auto *window=objects.window(handle);
+	if (!window) return;
 	const auto *bitmap=objects.bitmap(window->bitmap);
+	if (!bitmap) return;
 	const auto pixels=std::span<const uint8_t>(bitmap->pixels().data(),size_t(bitmap->width)*bitmap->height*4);
 	// Host titles use replacement characters; the guest retains every UTF-16 code unit.
 	presentation.present(handle,encode_utf8(window->title,true),bitmap->width,bitmap->height,pixels);
@@ -448,8 +453,13 @@ uint64_t NativeWindows::send(uint64_t handle, uint32_t message, uint64_t wparam,
 	const uint64_t arguments[]{handle,message,wparam,lparam};
 	// The desktop window belongs to the system and has no guest procedure.
 	if (!procedure) return default_message(arguments);
+	// RAVEN_TRACE_MSG follows every message delivered to a guest procedure; a value limits it to one window handle.
+	static const char *const trace_message=std::getenv("RAVEN_TRACE_MSG");
+	const bool traced=trace_message && (std::string_view(trace_message)=="1" || std::strtoull(trace_message,nullptr,16)==handle);
+	if (traced) fprintf(stderr,"msg %llx %x %llx %llx\n",(unsigned long long)handle,message,(unsigned long long)wparam,(unsigned long long)lparam);
 	const auto result=invoke(procedure,arguments);
 	if (result.stop!=NativeStop::returned) throw result;
+	if (traced) fprintf(stderr,"msg %llx %x -> %llx\n",(unsigned long long)handle,message,(unsigned long long)result.value);
 	return result.value;
 }
 
@@ -691,6 +701,13 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 			send(handle,0x82,0,0);
 			release_surface(handle);
 			objects.erase(handle); process.unmap_memory(scratch); return 0;
+		}
+		// WM_NCCREATE may already have moved or sized the window, so the frame calculation starts from its current rectangle.
+		{
+			const auto &outer=objects.window(handle)->outer;
+			put(bytes,rect_at,uint32_t(outer.left),4); put(bytes,rect_at+4,uint32_t(outer.top),4);
+			put(bytes,rect_at+8,uint32_t(outer.right),4); put(bytes,rect_at+12,uint32_t(outer.bottom),4);
+			process.write_memory(scratch+rect_at,std::span<const uint8_t>(bytes.data()+rect_at,16));
 		}
 		send(handle,0x83,0,scratch+rect_at);
 		if (!objects.window(handle)) { process.unmap_memory(scratch); return 0; }

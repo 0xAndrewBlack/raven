@@ -1169,6 +1169,8 @@ void NativeDesktop::register_image_api(ApiRegistry &registry)
 		return info + header + (bit_count <= 8 ? uint64_t(colors) * 4 : 0) + (compression == 3 && header == 40 ? 12 : 0);
 	};
 	const auto bitmap_resource = [=, this](ApiCall &call, uint64_t instance, uint64_t name, bool keep_alpha) -> uint64_t {
+		if (!instance && name >= 32700 && name < 32800)
+			instance = oem_module;
 		const auto view = resources.view(instance, 2, name);
 		if (!view)
 			throw uint32_t(1814);

@@ -122,6 +122,7 @@ private:
 	bool scroll_sync_visibility(uint64_t window,int bar,bool allow_disable);
 	void refresh_frame(uint64_t window);
 	void paint_scrollbars(uint64_t root);
+	void paint_child_frames(uint64_t root);
 	void scroll_notify(uint64_t window,int bar,uint32_t code,int32_t position);
 	bool scroll_pointer(uint64_t window,uint64_t hit,uint32_t message,int32_t x,int32_t y);
 	bool scroll_motion(uint32_t message,int32_t x,int32_t y);
@@ -178,7 +179,8 @@ private:
 	std::vector<Timer> timers;
 	uint64_t next_timer_id=0x1000;
 	void post_due_timers();
-	void recalculate_client(uint64_t window);
+	// The previous client size, when the caller has already stored a provisional one, decides whether WM_SIZE is due.
+	void recalculate_client(uint64_t window,int32_t previous_width=-1,int32_t previous_height=-1);
 	void reshape(uint64_t window,DesktopRect outer);
 	uint64_t desktop_window();
 	uint64_t desktop=0;

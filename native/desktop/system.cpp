@@ -99,7 +99,7 @@ uint64_t NativeWindows::desktop_window()
 }
 
 // Re-runs WM_NCCALCSIZE for the current outer rectangle and adopts the client rectangle it answers.
-void NativeWindows::recalculate_client(uint64_t handle)
+void NativeWindows::recalculate_client(uint64_t handle,int32_t previous_width,int32_t previous_height)
 {
 	auto *window = objects.window(handle);
 	if (!window)
@@ -107,7 +107,7 @@ void NativeWindows::recalculate_client(uint64_t handle)
 	const auto scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
 	DesktopRect client{};
 	bool resized = false;
-	int32_t old_width = window->width, old_height = window->height;
+	int32_t old_width = previous_width >= 0 ? previous_width : window->width, old_height = previous_height >= 0 ? previous_height : window->height;
 	try {
 		std::array<uint8_t, 16> bytes{};
 		const int32_t values[4] = {window->outer.left, window->outer.top, window->outer.right, window->outer.bottom};
@@ -120,6 +120,7 @@ void NativeWindows::recalculate_client(uint64_t handle)
 			throw std::runtime_error("window was destroyed during frame calculation");
 		const auto answer = process.read_memory(scratch, 16);
 		client = {int32_t(read_le(answer, 0, 4)), int32_t(read_le(answer, 4, 4)), int32_t(read_le(answer, 8, 4)), int32_t(read_le(answer, 12, 4))};
+		if (std::getenv("RAVEN_TRACE_NC")) fprintf(stderr, "nc %llx outer %d,%d,%d,%d -> %d,%d,%d,%d\n", (unsigned long long)handle, values[0], values[1], values[2], values[3], client.left, client.top, client.right, client.bottom);
 	} catch (...) {
 		process.unmap_memory(scratch);
 		throw;
@@ -149,6 +150,7 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 	const bool moved = window->outer.left != outer.left || window->outer.top != outer.top;
 	const bool resized = window->outer.right - window->outer.left != outer.right - outer.left ||
 		window->outer.bottom - window->outer.top != outer.bottom - outer.top;
+	const int32_t client_width = window->width, client_height = window->height;
 	if (resized && window->bitmap) {
 		// The surface is outer-sized, so a new size needs a new surface and a new host window.
 		const bool visible = window->visible;
@@ -161,7 +163,7 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 		window->y = outer.top;
 		window->width = outer.right - outer.left;
 		window->height = outer.bottom - outer.top;
-		recalculate_client(handle);
+		recalculate_client(handle, client_width, client_height);
 		(void)visible;
 	} else {
 		window->outer = outer;
@@ -169,7 +171,7 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 		window->y = outer.top;
 		window->width = outer.right - outer.left;
 		window->height = outer.bottom - outer.top;
-		recalculate_client(handle);
+		recalculate_client(handle, client_width, client_height);
 	}
 	window = objects.window(handle);
 	if (window && moved)

@@ -28,6 +28,8 @@ public:
 	void set_updated(std::function<void(uint64_t)> notify) { updated=std::move(notify); }
 	// Lets GDI services call guest callbacks such as font enumeration procedures.
 	void set_call(std::function<NativeResult(uint64_t,std::span<const uint64_t>)> call) { invoke=std::move(call); }
+	// Module whose resources answer LoadBitmap/LoadImage requests that name no module (the OEM bitmaps).
+	void set_oem_module(uint64_t base) { oem_module=base; }
 	void set_source(std::function<std::optional<std::vector<uint8_t>>(std::string_view)> read) { source=std::move(read); }
 
 private:
@@ -38,6 +40,7 @@ private:
 	std::function<void(uint64_t)> updated;
 	std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke;
 	std::function<std::optional<std::vector<uint8_t>>(std::u16string_view)> read_host_file;
+	uint64_t oem_module=0;
 	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source;
 #ifdef RAVEN_SKIA
 	bool text_dispatch(std::string_view name);
