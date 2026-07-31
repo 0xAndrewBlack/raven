@@ -31,7 +31,7 @@ NativeObjectResult NativeObjects::create_event(uint32_t access, uint32_t type, b
 	if (handles.size()>=limit || next>UINT32_MAX-4)
 		return {0,0xc000009aU};
 	const auto handle=next;
-	handles.emplace(handle,Handle{std::make_shared<Event>(type,signaled),*mapped});
+	handles.emplace(handle,Handle{std::make_shared<Event>(type,signaled),*mapped,{}});
 	next+=4;
 	return {handle};
 }
@@ -41,6 +41,7 @@ std::pair<std::shared_ptr<NativeObjects::Event>,uint32_t> NativeObjects::event(u
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
 	if (found==handles.end()) return {nullptr,invalid_handle};
+	if (!found->second.event) return {nullptr,0xc0000024U};
 	if ((found->second.access & access)!=access) return {nullptr,denied};
 	return {found->second.event,0};
 }

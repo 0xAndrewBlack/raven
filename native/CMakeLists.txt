@@ -72,7 +72,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_BINARY_DIR}/nls-generated/c_1252.nls
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h -P ${NLS_SOURCE}/embed.cmake
         DEPENDS raven-txt2nls ${NLS_SOURCE}/c_1252.txt ${NLS_SOURCE}/embed.cmake VERBATIM)
-    target_sources(raven_cpu PRIVATE nt/nls.cpp nt/multibyte.cpp nt/startup.cpp nt/launch.cpp ${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h)
+    target_sources(raven_cpu PRIVATE nt/nls.cpp nt/multibyte.cpp nt/startup.cpp nt/launch.cpp nt/file.cpp ${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h)
     file(SHA256 ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-utf8/decode.inc UTF8_SOURCE_HASH)
     if(NOT UTF8_SOURCE_HASH STREQUAL "5aafb54712b7c21db62bfdf966e5d8852200941643bde751150eb0d55a909524")
         message(FATAL_ERROR "Pinned ReactOS UTF-8 decoder differs")
@@ -1081,6 +1081,33 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_dependencies(startup_test startup_info_fixture raven-bootstrap)
         add_test(NAME native_startup_information COMMAND startup_test $<TARGET_FILE:raven-bootstrap> ${CMAKE_CURRENT_BINARY_DIR}/startup-info.exe)
         set_tests_properties(native_startup_information PROPERTIES TIMEOUT 30)
+        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/file-client.exe
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                -Wl,--entry,raven_entry,--no-insert-timestamp
+                -o ${CMAKE_CURRENT_BINARY_DIR}/file-client.exe ${LOADER_SOURCES}/file_client.c -lkernel32
+            DEPENDS ${LOADER_SOURCES}/file_client.c VERBATIM)
+        add_custom_target(file_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/file-client.exe)
+        add_executable(file_test nt/file_test.cpp)
+        target_link_libraries(file_test PRIVATE raven_cpu)
+        add_dependencies(file_test file_fixture raven-bootstrap)
+        add_test(NAME native_standard_files COMMAND file_test $<TARGET_FILE:raven-bootstrap>
+            ${CMAKE_CURRENT_BINARY_DIR}/file-client.exe ${CMAKE_CURRENT_BINARY_DIR}/file-contract.bin)
+        set_tests_properties(native_standard_files PROPERTIES TIMEOUT 15)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            foreach(STATUS 0 73 256)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/return-${STATUS}.exe
+                    COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -DRAVEN_RETURN_STATUS=${STATUS}
+                        -Wl,--entry,raven_entry,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/return-${STATUS}.exe ${LOADER_SOURCES}/return_client.c
+                    DEPENDS ${LOADER_SOURCES}/return_client.c VERBATIM)
+            endforeach()
+            add_custom_target(return_fixtures ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/return-0.exe
+                ${CMAKE_CURRENT_BINARY_DIR}/return-73.exe ${CMAKE_CURRENT_BINARY_DIR}/return-256.exe)
+            add_test(NAME native_process_return_status COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/scripts/native-process-status.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR})
+            set_tests_properties(native_process_return_status PROPERTIES TIMEOUT 30)
+        endif()
         set(PARAMETER_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/parameter-fixtures)
         file(MAKE_DIRECTORY ${PARAMETER_FIXTURES})
         add_custom_command(OUTPUT ${PARAMETER_FIXTURES}/parameters.dll ${PARAMETER_FIXTURES}/parameters.a
@@ -1194,6 +1221,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             endif()
         endif()
         set(DYNAMIC_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/dynamic-fixtures)
+        file(MAKE_DIRECTORY ${DYNAMIC_FIXTURES})
         add_custom_command(OUTPUT ${DYNAMIC_FIXTURES}/tlsprobe.dll ${DYNAMIC_FIXTURES}/tlsprobe.a
             COMMAND ${CMAKE_COMMAND} -E make_directory ${DYNAMIC_FIXTURES}
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -shared -fno-stack-protector

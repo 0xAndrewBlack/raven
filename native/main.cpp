@@ -37,16 +37,17 @@ static std::vector<uint8_t> read_file(const char *path)
 }
 
 #ifdef RAVEN_NATIVE_CPU
-static int native_result(const raven::NativeResult &result)
+static int native_result(const raven::NativeResult &result,bool process_exit=false,bool inherited_stdio=false)
 {
 	if (result.stop==raven::NativeStop::exited) {
 		const auto code=uint32_t(result.value);
-		std::cout << "Native process exited with status " << code << '\n';
+		if (!inherited_stdio) std::cout << "Native process exited with status " << code << '\n';
 		return !code ? 0 : (code & 0xff) ? int(code & 0xff) : 1;
 	}
 	if (result.stop == raven::NativeStop::returned) {
-		std::cout << "Native entry returned " << result.value << " (process initialization not implemented)\n";
-		return 0;
+		if (!inherited_stdio) std::cout << "Native entry returned " << result.value << " (process initialization not implemented)\n";
+		const auto code=uint32_t(result.value);
+		return !process_exit || !code ? 0 : (code & 0xff) ? int(code & 0xff) : 1;
 	}
 	if (result.stop == raven::NativeStop::syscall)
 		std::cerr << "raven: unsupported guest syscall " << result.value;
@@ -88,6 +89,10 @@ int main(int argc, char **argv)
 	if (run_process && argc>first_file && std::string_view(argv[first_file])=="--desktop=wayland") {
 		wayland=true; ++first_file;
 	}
+	bool inherited_stdio=false;
+	if (run_process && argc>first_file && std::string_view(argv[first_file])=="--stdio=inherit") {
+		inherited_stdio=true; ++first_file;
+	}
 	const bool bind_imports = mode == "--bind-imports";
 	int last_file=argc;
 	if (run_process)
@@ -104,7 +109,7 @@ int main(int argc, char **argv)
 			<< "       raven --bind-imports program.exe dependency.dll ...\n"
 			<< "       raven --run-entry --execution=native fixture.exe\n"
 			<< "       raven --run-modules --execution=native fixture.exe dependency.dll ...\n"
-			<< "       raven --run-process --execution=native [--timeout-ms=N] [--desktop=wayland] program.exe [dependency.dll ...] [-- guest-argument ...]\n"
+			<< "       raven --run-process --execution=native [--timeout-ms=N] [--desktop=wayland] [--stdio=inherit] program.exe [dependency.dll ...] [-- guest-argument ...]\n"
 			<< "Complete Windows process initialization is not implemented yet.\n";
 		return 2;
 	}
@@ -156,13 +161,14 @@ int main(int argc, char **argv)
 					if (wayland) throw std::runtime_error("native Wayland presentation was not built");
 #endif
 					std::optional<raven::NativeLaunch> launch;
-					if (last_file<argc) {
+					if (last_file<argc || inherited_stdio) {
 						std::vector<std::string_view> arguments;
 						for (int i=last_file+1;i<argc;++i) arguments.emplace_back(argv[i]);
 						const auto image=raven::launch_utf16(entry->name);
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
+						if (inherited_stdio) launch->standard_fds={0,1,2};
 					}
-					return native_result(raven::run_native_process(modules, *entry, bootstrap.string(), timeout, source, debug,presentation,launch));
+					return native_result(raven::run_native_process(modules, *entry, bootstrap.string(), timeout, source, debug,presentation,launch),true,inherited_stdio);
 				}
 				return native_result(raven::run_native_modules(modules, *entry, bootstrap.string(), std::chrono::seconds(5)));
 #else

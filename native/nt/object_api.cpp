@@ -25,6 +25,7 @@ static void put(std::span<uint8_t> bytes, size_t at, uint64_t value, size_t widt
 static uint32_t error(uint32_t status)
 {
 	if (status==0xc0000008U) return 6;
+	if (status==0xc0000024U) return 6;
 	if (status==0xc0000022U) return 5;
 	if (status==0xc0000005U) return 998;
 	if (status==0xc00000bbU) return 120;
@@ -34,6 +35,7 @@ static uint32_t error(uint32_t status)
 
 bool NativeObjectAPI::dispatch(std::string_view name)
 {
+	if (file_io(name)) return true;
 	const bool nt=name.starts_with("Nt");
 	const bool create=name=="NtCreateEvent" || name=="CreateEventA" || name=="CreateEventW";
 	const bool close=name=="NtClose" || name=="CloseHandle";

@@ -24,6 +24,7 @@ struct NativeLaunch {
 	std::u16string command_line;
 	uint32_t ansi_code_page = 1252;
 	NativeStartup startup{};
+	std::array<int,3> standard_fds{-1,-1,-1};
 };
 
 // Initial x64 thread fields only. Mappings belong to the process and survive this view.
@@ -37,7 +38,8 @@ public:
 	uint64_t prepare_heaps();
 	void publish_process_heap(uint64_t heap);
 	uint64_t process_heap() const;
-	void prepare_parameters(const NativeLaunch &launch);
+	void prepare_parameters(const NativeLaunch &launch,
+		std::array<uint64_t,3> standard_handles={UINT64_MAX,UINT64_MAX,UINT64_MAX});
 	static constexpr uint32_t heap_capacity = 512;
 	bool dispatch(std::string_view name);
 	static std::span<const std::string_view> nt_exports();

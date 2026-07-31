@@ -17,6 +17,7 @@ private:
 	NativeEnvironment &environment;
 	NativeObjects &objects;
 	std::chrono::steady_clock::time_point deadline;
+	bool file_io(std::string_view name);
 };
 
 }

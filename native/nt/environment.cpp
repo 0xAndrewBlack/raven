@@ -118,7 +118,7 @@ uint64_t NativeEnvironment::process_heap() const
 	return heap;
 }
 
-void NativeEnvironment::prepare_parameters(const NativeLaunch &launch)
+void NativeEnvironment::prepare_parameters(const NativeLaunch &launch,std::array<uint64_t,3> standard_handles)
 {
 	require_current();
 	if (process.active() || command_line_ansi || process.read_memory(process_block+0x20,8)!=std::vector<uint8_t>(8))
@@ -142,7 +142,7 @@ void NativeEnvironment::prepare_parameters(const NativeLaunch &launch)
 			for (size_t i=0;i<width;++i) bytes.at(offset+i)=uint8_t(number>>(i*8));
 		};
 		put(0,capacity,4); put(4,length,4); put(8,1,4);
-		for (const size_t offset : {0x20U,0x28U,0x30U}) put(offset,UINT64_MAX,8);
+		for (size_t i=0;i<3;++i) put(0x20+i*8,standard_handles[i],8);
 		size_t cursor=0x400;
 		const auto text=[&](size_t offset,std::u16string_view string) {
 			put(offset,string.size()*2,2); put(offset+2,(string.size()+1)*2,2);
@@ -176,7 +176,7 @@ void NativeEnvironment::prepare_parameters(const NativeLaunch &launch)
 		for (size_t i=0;i<7;++i) put(cursor+32+i*4,launch.startup.geometry[i],4);
 		put(cursor+60,launch.startup.flags,4); put(cursor+64,launch.startup.show_window,2);
 		put(cursor+66,launch.startup.runtime_data.size(),2); put(cursor+72,runtime,8);
-		for (size_t i=0;i<3;++i) put(cursor+80+i*8,UINT64_MAX,8);
+		for (size_t i=0;i<3;++i) put(cursor+80+i*8,standard_handles[i],8);
 		process.write_memory(address,bytes);
 		field(process,process_block+0x20,address,8);
 		command_line_ansi=address+command_offset;
@@ -190,6 +190,21 @@ void NativeEnvironment::prepare_parameters(const NativeLaunch &launch)
 
 bool NativeEnvironment::dispatch(std::string_view name)
 {
+	if (name=="GetStdHandle") {
+		require_current();
+		const auto selector=uint32_t(process.api_arguments(1)[0]);
+		if (selector<uint32_t(-12) || selector>uint32_t(-10)) {
+			set_last_error(6);process.return_api(UINT64_MAX);return true;
+		}
+		const auto pointer=process.read_memory(process_block+0x20,8);
+		uint64_t parameters=0;
+		for (size_t i=0;i<8;++i) parameters|=uint64_t(pointer[i])<<(i*8);
+		if (!parameters) throw std::runtime_error("native process parameters are not initialized");
+		const auto bytes=process.read_memory(parameters+0x20+(uint32_t(-10)-selector)*8,8);
+		uint64_t handle=0;
+		for (size_t i=0;i<8;++i) handle|=uint64_t(bytes[i])<<(i*8);
+		process.return_api(handle);return true;
+	}
 	if (multibyte_information(name)) return true;
 	if (name=="NtQuerySystemInformation")
 		return system_information();

@@ -20,14 +20,14 @@
 
 namespace raven {
 
-static constexpr std::array<std::string_view, 42> names{
+static constexpr std::array<std::string_view, 45> names{
 	"CloseHandle","CreateEventA","CreateEventW","ExitProcess",
 	"FindResourceA", "FindResourceExA", "FindResourceExW", "FindResourceW", "FreeLibrary",
-	"GetACP", "GetCommandLineA", "GetCommandLineW", "GetCurrentProcessId", "GetCurrentThreadId", "GetLastError", "GetModuleHandleA",
-	"GetModuleHandleW", "GetProcAddress", "GetProcessHeap", "GetStartupInfoA", "GetStartupInfoW", "HeapAlloc", "HeapCreate", "HeapDestroy", "HeapFree", "HeapReAlloc", "HeapSize",
+	"GetACP", "GetCommandLineA", "GetCommandLineW", "GetCurrentProcessId", "GetCurrentThreadId", "GetFileType", "GetLastError", "GetModuleHandleA",
+	"GetModuleHandleW", "GetProcAddress", "GetProcessHeap", "GetStartupInfoA", "GetStartupInfoW", "GetStdHandle", "HeapAlloc", "HeapCreate", "HeapDestroy", "HeapFree", "HeapReAlloc", "HeapSize",
 	"LoadLibraryA", "LoadLibraryW", "LoadResource",
 	"LockResource", "MultiByteToWideChar", "RaiseException", "ResetEvent", "SetEvent", "SetLastError", "SizeofResource",
-	"VirtualAlloc", "VirtualFree", "VirtualProtect", "VirtualQuery", "WaitForSingleObject"
+	"VirtualAlloc", "VirtualFree", "VirtualProtect", "VirtualQuery", "WaitForSingleObject", "WriteFile"
 };
 
 std::vector<uint8_t> environment_provider(std::string_view name, uint64_t base)
@@ -247,13 +247,20 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		initial.command_line=u"\""+initial.image_path+u"\"";
 		launch=std::move(initial);
 	}
-	environment.prepare_parameters(*launch);
+	NativeObjects kernel_objects;
+	std::array<uint64_t,3> standard_handles{UINT64_MAX,UINT64_MAX,UINT64_MAX};
+	for (size_t i=0;i<3;++i) {
+		if (launch->standard_fds[i]<0) continue;
+		const auto inherited=kernel_objects.inherit_file(launch->standard_fds[i]);
+		if (inherited.status) throw std::runtime_error("cannot inherit native standard file");
+		standard_handles[i]=inherited.value;
+	}
+	environment.prepare_parameters(*launch,standard_handles);
 	NativeLoaderData loader_data(process, environment.peb(), modules, entry);
 	NativeTLS tls(process, environment, order);
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativeResources resources(process, environment, modules, entry);
 	NativeMemory memory(process,environment);
-	NativeObjects kernel_objects;
 	NativeObjectAPI object_api(process,environment,kernel_objects,deadline);
 	NativeHeap heap(process,environment,modules,entry.image);
 	DesktopObjects desktop_objects;
