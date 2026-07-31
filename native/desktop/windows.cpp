@@ -54,8 +54,9 @@ uint64_t NativeWindows::surface_dc(uint64_t handle)
 		window=objects.window(handle);window->bitmap=bitmap;window->dc=dc;return dc;
 	}
 
-	const auto width=int64_t(window->outer.right)-window->outer.left,height=int64_t(window->outer.bottom)-window->outer.top;
-	if (width<=0 || height<=0 || width>8192 || height>8192 || uint64_t(width)*uint64_t(height)>16*1024*1024)
+	// An empty window still owns a surface, one pixel large; its DCs clip every drawing operation away.
+	const auto width=std::max<int64_t>(int64_t(window->outer.right)-window->outer.left,1),height=std::max<int64_t>(int64_t(window->outer.bottom)-window->outer.top,1);
+	if (width>8192 || height>8192 || uint64_t(width)*uint64_t(height)>16*1024*1024)
 		throw uint32_t(87);
 	const auto size=(size_t(width)*size_t(height)*4+4095)&~size_t(4095);
 	const auto address=process.map_memory(size,PROT_READ | PROT_WRITE);

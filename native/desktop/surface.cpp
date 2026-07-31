@@ -139,9 +139,6 @@ uint64_t NativeDesktop::compatible_bitmap(std::span<const uint64_t> args)
 	const int64_t width=int32_t(uint32_t(args[1])),height=int32_t(uint32_t(args[2]));
 	// Zero extents return the immutable default identity before validating the DC.
 	if (!width || !height) return 0x10000;
-	// A null DC stands for the screen, which is a 32-bit display in this runtime.
-	if (!args[0])
-		return allocate_bitmap(uint32_t(width<0 ? -width : width),uint32_t(height<0 ? -height : height),32,false,true);
 	const auto *dc=objects.dc(args[0]);
 	if (!dc) { environment.set_last_error(87); return 0; }
 	const auto *selected=objects.bitmap(dc->bitmap);

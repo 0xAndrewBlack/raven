@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <elf.h>
 #include <fcntl.h>
@@ -852,6 +854,8 @@ void NativeProcess::return_api(uint64_t value)
 	user_regs_struct registers{};
 	trace(PTRACE_GETREGS, state->child->pid, &registers);
 	if (state->mode == NativeMode::x86) {
+		if (std::getenv("RAVEN_TRACE_X86"))
+			std::fprintf(stderr, "  -> %llx\n", static_cast<unsigned long long>(value & 0xffffffffULL));
 		const auto stack = read_memory(registers.rsp, 4);
 		registers.rip = 0;
 		for (size_t byte = 0; byte < 4; ++byte)
