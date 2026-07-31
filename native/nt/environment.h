@@ -42,6 +42,10 @@ public:
 	uint64_t process_heap() const;
 	void prepare_parameters(const NativeLaunch &launch,
 		std::array<uint64_t,3> standard_handles={UINT64_MAX,UINT64_MAX,UINT64_MAX});
+	// Per-thread TEB for guest threads beyond the first (x64). The block is not current until set_current names it.
+	uint64_t create_thread_block(uint64_t stack_base, uint64_t stack_limit, uint32_t thread_id);
+	void release_thread_block(uint64_t teb);
+	void set_current(uint64_t teb) { thread_block = teb; }
 	static constexpr uint32_t heap_capacity = 512;
 	bool dispatch(std::string_view name);
 	static std::span<const std::string_view> nt_exports();

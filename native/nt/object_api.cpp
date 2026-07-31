@@ -41,7 +41,7 @@ bool NativeObjectAPI::dispatch(std::string_view name)
 	const bool close=name=="NtClose" || name=="CloseHandle";
 	const bool set=name=="NtSetEvent" || name=="SetEvent" || name=="NtResetEvent" || name=="ResetEvent";
 	const bool query=name=="NtQueryEvent";
-	const bool wait=name=="NtWaitForSingleObject" || name=="WaitForSingleObject";
+	const bool wait=name=="NtWaitForSingleObject" || (!cooperative && name=="WaitForSingleObject");
 	if (!create && !close && !set && !query && !wait) return false;
 	const auto args=process.api_arguments(create ? (nt ? 5 : 4) : close ? 1 : set ? (nt ? 2 : 1) : query ? 5 : nt ? 3 : 2);
 	uint32_t status=0;

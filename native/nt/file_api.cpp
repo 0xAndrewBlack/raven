@@ -1,0 +1,822 @@
+#include "kernel_context.h"
+#include "file_objects.h"
+#include "text.h"
+
+#include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+namespace raven {
+
+FileObject::~FileObject()
+{
+	if (descriptor >= 0)
+		::close(descriptor);
+	if (flags & 0x04000000U)
+		::unlink(path.c_str());
+}
+
+namespace {
+
+constexpr uint64_t invalid_handle = UINT64_MAX;
+constexpr uint32_t attribute_readonly = 0x1, attribute_hidden = 0x2, attribute_directory = 0x10, attribute_archive = 0x20,
+	attribute_normal = 0x80, attribute_reparse = 0x400;
+
+uint64_t filetime(const timespec &time)
+{
+	return (uint64_t(time.tv_sec) * 10000000ULL) + uint64_t(time.tv_nsec) / 100 + filetime_epoch_offset;
+}
+
+timespec timespec_from(uint64_t ticks)
+{
+	const uint64_t since_unix = ticks - filetime_epoch_offset;
+	return {time_t(since_unix / 10000000ULL), long(since_unix % 10000000ULL * 100)};
+}
+
+uint32_t attributes_of(const struct stat &metadata, const std::filesystem::path &path)
+{
+	uint32_t attributes = S_ISDIR(metadata.st_mode) ? attribute_directory : attribute_archive;
+	if (S_ISLNK(metadata.st_mode))
+		attributes |= attribute_reparse;
+	if (!(metadata.st_mode & 0222))
+		attributes |= attribute_readonly;
+	const auto name = path.filename().string();
+	if (name.size() > 1 && name[0] == '.' && name != "..")
+		attributes |= attribute_hidden;
+	return attributes;
+}
+
+uint32_t error_of(int error, bool missing_parent = false)
+{
+	switch (error) {
+	case ENOENT: return missing_parent ? 3 : 2;
+	case ENOTDIR: return 3;
+	case EACCES: case EPERM: case EROFS: case EISDIR: return 5;
+	case EEXIST: return 80;
+	case ENOTEMPTY: return 145;
+	case ENOSPC: case EDQUOT: return 112;
+	case EMFILE: case ENFILE: return 4;
+	case ENAMETOOLONG: return 206;
+	case EXDEV: return 17;
+	case EBUSY: case ETXTBSY: return 32;
+	case EINVAL: return 87;
+	case EBADF: return 6;
+	default: return 31;
+	}
+}
+
+// Windows wildcard matching: * and ? against a file name, case-insensitively; "*.*" matches every name.
+bool wildcard(std::u16string_view pattern, std::u16string_view name)
+{
+	if (pattern == u"*.*" || pattern == u"*")
+		return true;
+	size_t p = 0, n = 0, star = std::u16string_view::npos, mark = 0;
+	while (n < name.size()) {
+		if (p < pattern.size() && (pattern[p] == u'?' || pattern[p] == u'>' || equal_fold(pattern.substr(p, 1), name.substr(n, 1)))) {
+			++p;
+			++n;
+		} else if (p < pattern.size() && (pattern[p] == u'*' || pattern[p] == u'<')) {
+			star = p++;
+			mark = n;
+		} else if (star != std::u16string_view::npos) {
+			p = star + 1;
+			n = ++mark;
+		} else {
+			return false;
+		}
+	}
+	while (p < pattern.size() && (pattern[p] == u'*' || pattern[p] == u'<' || pattern[p] == u'.'))
+		++p;
+	return p == pattern.size();
+}
+
+FindObject::Entry entry_of(const std::filesystem::path &path, const std::u16string &name)
+{
+	FindObject::Entry entry{name, attribute_normal, 0, 0, 0, 0};
+	struct stat metadata{};
+	if (::lstat(path.c_str(), &metadata)) {
+		metadata = {};
+		return entry;
+	}
+	struct stat target{};
+	const bool link = S_ISLNK(metadata.st_mode);
+	if (link && !::stat(path.c_str(), &target))
+		metadata = target;
+	entry.attributes = attributes_of(metadata, path);
+	entry.creation = filetime(metadata.st_ctim);
+	entry.access = filetime(metadata.st_atim);
+	entry.write = filetime(metadata.st_mtim);
+	entry.size = S_ISDIR(metadata.st_mode) ? 0 : uint64_t(metadata.st_size);
+	return entry;
+}
+
+void put32(std::vector<uint8_t> &bytes, size_t at, uint32_t value)
+{
+	std::memcpy(bytes.data() + at, &value, 4);
+}
+
+void put64(std::vector<uint8_t> &bytes, size_t at, uint64_t value)
+{
+	std::memcpy(bytes.data() + at, &value, 8);
+}
+
+// WIN32_FIND_DATAW is 592 bytes: attributes, three times, size, two reserved words, a 260-character name and a short name.
+std::vector<uint8_t> find_data(const FindObject::Entry &entry)
+{
+	std::vector<uint8_t> bytes(592);
+	put32(bytes, 0, entry.attributes);
+	put64(bytes, 4, entry.creation);
+	put64(bytes, 12, entry.access);
+	put64(bytes, 20, entry.write);
+	put32(bytes, 28, uint32_t(entry.size >> 32));
+	put32(bytes, 32, uint32_t(entry.size));
+	const auto name = entry.name.substr(0, 259);
+	std::memcpy(bytes.data() + 44, name.data(), name.size() * 2);
+	return bytes;
+}
+
+std::vector<uint8_t> attribute_data(const FindObject::Entry &entry)
+{
+	std::vector<uint8_t> bytes(36);
+	put32(bytes, 0, entry.attributes);
+	put64(bytes, 4, entry.creation);
+	put64(bytes, 12, entry.access);
+	put64(bytes, 20, entry.write);
+	put32(bytes, 28, uint32_t(entry.size >> 32));
+	put32(bytes, 32, uint32_t(entry.size));
+	return bytes;
+}
+
+}
+
+void register_file_api(ApiRegistry &registry, KernelContext &context)
+{
+	auto &paths = context.paths;
+	auto &objects = context.objects;
+	const auto file_of = [&](uint64_t handle) { return objects.object_as<FileObject>(handle); };
+	// Host errors become Windows last errors; a missing parent directory reads as path-not-found.
+	const auto resolve = [&](ApiCall &call, std::u16string_view name) -> std::optional<NativePaths::Resolved> {
+		const auto resolved = paths.resolve(name);
+		if (!resolved)
+			call.set_last_error(name.empty() ? 2 : 123);
+		return resolved;
+	};
+	const auto missing = [&](const NativePaths::Resolved &resolved) { return resolved.parent_exists ? 2U : 3U; };
+
+	registry.add("CreateFileW", 7, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto name = call.wide(call[0]);
+		const uint32_t access = call.u32(1), disposition = call.u32(4), flags = call.u32(5);
+		call.ret(invalid_handle);
+		if (disposition < 1 || disposition > 5) {
+			call.set_last_error(87);
+			return;
+		}
+		if (NativePaths::device(name)) {
+			const int descriptor = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+			const auto made = objects.add_object(std::make_shared<FileObject>(descriptor, access, false, "/dev/null", u"NUL", 0));
+			call.ret(made.status ? invalid_handle : made.value);
+			return;
+		}
+		const auto resolved = resolve(call, name);
+		if (!resolved)
+			return;
+		const bool want_write = access & (0x40000000U | 0x10000000U | 0x2U | 0x4U | 0x10000U);
+		const bool want_read = access & (0x80000000U | 0x10000000U | 0x1U);
+		struct stat metadata{};
+		const bool exists = resolved->exists && !::stat(resolved->host.c_str(), &metadata);
+		if (exists && S_ISDIR(metadata.st_mode)) {
+			if (!(flags & 0x02000000U) || disposition == 1 || disposition == 2 || disposition == 5) {
+				call.set_last_error(disposition == 1 ? 80 : 5);
+				return;
+			}
+			const int descriptor = ::open(resolved->host.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+			if (descriptor < 0) {
+				call.set_last_error(error_of(errno));
+				return;
+			}
+			const auto made = objects.add_object(std::make_shared<FileObject>(descriptor, access, true, resolved->host, paths.full(name), flags));
+			call.ret(made.status ? invalid_handle : made.value);
+			return;
+		}
+		int mode = want_read && want_write ? O_RDWR : want_write ? O_WRONLY : O_RDONLY;
+		if (disposition == 1) {
+			if (exists) {
+				call.set_last_error(80);
+				return;
+			}
+			mode |= O_CREAT | O_EXCL;
+		} else if (disposition == 2) {
+			mode |= O_CREAT;
+			if (want_write)
+				mode |= O_TRUNC;
+		} else if (disposition == 4) {
+			mode |= O_CREAT;
+		} else if (disposition == 5) {
+			if (!want_write) {
+				call.set_last_error(87);
+				return;
+			}
+			if (!exists) {
+				call.set_last_error(missing(*resolved));
+				return;
+			}
+			mode |= O_TRUNC;
+		} else if (!exists) {
+			call.set_last_error(missing(*resolved));
+			return;
+		}
+		if (!exists && !resolved->parent_exists) {
+			call.set_last_error(3);
+			return;
+		}
+		const int descriptor = ::open(resolved->host.c_str(), mode | O_CLOEXEC, 0666);
+		if (descriptor < 0) {
+			call.set_last_error(error_of(errno, !resolved->parent_exists));
+			return;
+		}
+		// CREATE_ALWAYS and OPEN_ALWAYS report an existing file through a successful call with ERROR_ALREADY_EXISTS.
+		call.set_last_error(exists && (disposition == 2 || disposition == 4) ? 183 : 0);
+		if (disposition == 2 && exists && !want_write)
+			::ftruncate(descriptor, 0);
+		const auto made = objects.add_object(std::make_shared<FileObject>(descriptor, access, false, resolved->host, paths.full(name), flags));
+		call.ret(made.status ? invalid_handle : made.value);
+	});
+	registry.add("ReadFile", 5, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file || file->directory || !file->readable()) {
+			call.fail(file && file->directory ? 5 : file ? 5 : 6);
+			return;
+		}
+		if (call[3]) call.store<uint32_t>(call[3], 0);
+		else if (!call[4]) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint8_t> buffer(call.u32(2));
+		ssize_t count;
+		if (call[4] && (file->flags & 0x40000000U)) {
+			const auto offset = call.load<uint64_t>(call[4] + 16);
+			count = ::pread(file->descriptor, buffer.data(), buffer.size(), off_t(offset));
+		} else {
+			do count = ::read(file->descriptor, buffer.data(), buffer.size()); while (count < 0 && errno == EINTR);
+		}
+		if (count < 0) {
+			call.fail(error_of(errno));
+			return;
+		}
+		call.write(call[1], std::span<const uint8_t>(buffer.data(), size_t(count)));
+		if (call[3]) call.store<uint32_t>(call[3], uint32_t(count));
+		if (call[4]) {
+			call.store<uint64_t>(call[4], 0);
+			call.store<uint64_t>(call[4] + 8, uint64_t(count));
+		}
+		call.ret(1);
+	});
+	registry.add("WriteFile", 5, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file || file->directory || !file->writable()) {
+			call.fail(file ? 5 : 6);
+			return;
+		}
+		if (call[3]) call.store<uint32_t>(call[3], 0);
+		else if (!call[4]) {
+			call.fail(87);
+			return;
+		}
+		const auto bytes = call.read(call[1], call.u32(2));
+		ssize_t count;
+		if (call[4] && (file->flags & 0x40000000U)) {
+			const auto offset = call.load<uint64_t>(call[4] + 16);
+			count = ::pwrite(file->descriptor, bytes.data(), bytes.size(), off_t(offset));
+		} else {
+			do count = ::write(file->descriptor, bytes.data(), bytes.size()); while (count < 0 && errno == EINTR);
+		}
+		if (count < 0) {
+			call.fail(error_of(errno));
+			return;
+		}
+		if (call[3]) call.store<uint32_t>(call[3], uint32_t(count));
+		if (call[4]) {
+			call.store<uint64_t>(call[4], 0);
+			call.store<uint64_t>(call[4] + 8, uint64_t(count));
+		}
+		call.ret(1);
+	});
+	registry.add("SetFilePointerEx", 4, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file) {
+			call.fail(6);
+			return;
+		}
+		const auto method = call.u32(3);
+		if (method > 2) {
+			call.fail(87);
+			return;
+		}
+		const off_t position = ::lseek(file->descriptor, off_t(int64_t(call[1])), method == 0 ? SEEK_SET : method == 1 ? SEEK_CUR : SEEK_END);
+		if (position < 0) {
+			call.fail(errno == EINVAL ? 131 : error_of(errno));
+			return;
+		}
+		if (call[2]) call.store<int64_t>(call[2], position);
+		call.ret(1);
+	});
+	registry.add("GetFileSizeEx", 2, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		struct stat metadata{};
+		if (!file || ::fstat(file->descriptor, &metadata)) {
+			call.fail(6);
+			return;
+		}
+		call.store<int64_t>(call[1], metadata.st_size);
+		call.ret(1);
+	});
+	registry.add("GetFileType", 1, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file) {
+			call.fail(6);
+			return;
+		}
+		call.ret(::isatty(file->descriptor) ? 2 : 1);
+	});
+	registry.add("SetEndOfFile", 1, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file || !file->writable()) {
+			call.fail(file ? 5 : 6);
+			return;
+		}
+		const off_t position = ::lseek(file->descriptor, 0, SEEK_CUR);
+		if (position < 0 || ::ftruncate(file->descriptor, position)) {
+			call.fail(error_of(errno));
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("FlushFileBuffers", 1, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file || !file->writable()) {
+			call.fail(file ? 5 : 6);
+			return;
+		}
+		::fsync(file->descriptor);
+		call.ret(1);
+	});
+	registry.add("GetFileTime", 4, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		struct stat metadata{};
+		if (!file || ::fstat(file->descriptor, &metadata)) {
+			call.fail(6);
+			return;
+		}
+		if (call[1]) call.store<uint64_t>(call[1], filetime(metadata.st_ctim));
+		if (call[2]) call.store<uint64_t>(call[2], filetime(metadata.st_atim));
+		if (call[3]) call.store<uint64_t>(call[3], filetime(metadata.st_mtim));
+		call.ret(1);
+	});
+	registry.add("SetFileTime", 4, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file || !file->writable()) {
+			call.fail(file ? 5 : 6);
+			return;
+		}
+		timespec times[2]{{0, UTIME_OMIT}, {0, UTIME_OMIT}};
+		if (call[2]) if (const auto value = call.load<uint64_t>(call[2])) times[0] = timespec_from(value);
+		if (call[3]) if (const auto value = call.load<uint64_t>(call[3])) times[1] = timespec_from(value);
+		if (::futimens(file->descriptor, times)) {
+			call.fail(error_of(errno));
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("GetFileInformationByHandle", 2, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		struct stat metadata{};
+		if (!file || ::fstat(file->descriptor, &metadata)) {
+			call.fail(6);
+			return;
+		}
+		std::vector<uint8_t> bytes(52);
+		put32(bytes, 0, attributes_of(metadata, file->path));
+		put64(bytes, 4, filetime(metadata.st_ctim));
+		put64(bytes, 12, filetime(metadata.st_atim));
+		put64(bytes, 20, filetime(metadata.st_mtim));
+		put32(bytes, 28, uint32_t(metadata.st_dev));
+		put32(bytes, 32, uint32_t(uint64_t(metadata.st_size) >> 32));
+		put32(bytes, 36, uint32_t(metadata.st_size));
+		put32(bytes, 40, uint32_t(metadata.st_nlink));
+		put32(bytes, 44, uint32_t(uint64_t(metadata.st_ino) >> 32));
+		put32(bytes, 48, uint32_t(metadata.st_ino));
+		call.write(call[1], bytes);
+		call.ret(1);
+	});
+	registry.add("GetFinalPathNameByHandleW", 4, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file) {
+			call.fail(6);
+			return;
+		}
+		const auto text = u"\\\\?\\" + file->dos_path;
+		const size_t capacity = call.u32(2);
+		const size_t length = call.put_wide(call[1], text, capacity);
+		call.ret(capacity > length ? length : length + 1);
+	});
+	registry.add("GetFileAttributesW", 1, [&, resolve, missing, file_of](ApiCall &call) {
+		call.ret(UINT32_MAX);
+		const auto name = call.wide(call[0]);
+		const auto resolved = resolve(call, name);
+		struct stat metadata{};
+		if (!resolved)
+			return;
+		if (NativePaths::device(name)) {
+			call.ret(attribute_archive);
+			return;
+		}
+		if (!resolved->exists || ::stat(resolved->host.c_str(), &metadata)) {
+			call.set_last_error(missing(*resolved));
+			return;
+		}
+		call.set_last_error(0);
+		call.ret(attributes_of(metadata, resolved->host));
+	});
+	registry.add("GetFileAttributesExW", 3, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto name = call.wide(call[0]);
+		if (call.u32(1) != 0) {
+			call.fail(87);
+			return;
+		}
+		const auto resolved = resolve(call, name);
+		if (!resolved)
+			return;
+		if (!resolved->exists) {
+			call.set_last_error(missing(*resolved));
+			return;
+		}
+		call.write(call[2], attribute_data(entry_of(resolved->host, u"")));
+		call.ret(1);
+	});
+	registry.add("SetFileAttributesW", 2, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto resolved = resolve(call, call.wide(call[0]));
+		if (!resolved)
+			return;
+		struct stat metadata{};
+		if (!resolved->exists || ::stat(resolved->host.c_str(), &metadata)) {
+			call.set_last_error(missing(*resolved));
+			return;
+		}
+		mode_t mode = metadata.st_mode & 07777;
+		mode = call.u32(1) & attribute_readonly ? mode & ~0222 : mode | 0200;
+		if (::chmod(resolved->host.c_str(), mode)) {
+			call.fail(error_of(errno));
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("CreateDirectoryW", 2, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto resolved = resolve(call, call.wide(call[0]));
+		if (!resolved)
+			return;
+		if (resolved->exists) {
+			call.set_last_error(183);
+			return;
+		}
+		if (::mkdir(resolved->host.c_str(), 0777)) {
+			call.fail(error_of(errno, !resolved->parent_exists));
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("RemoveDirectoryW", 1, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto resolved = resolve(call, call.wide(call[0]));
+		if (!resolved)
+			return;
+		if (::rmdir(resolved->host.c_str())) {
+			call.fail(error_of(errno, !resolved->parent_exists));
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("DeleteFileW", 1, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto resolved = resolve(call, call.wide(call[0]));
+		if (!resolved)
+			return;
+		if (::unlink(resolved->host.c_str())) {
+			call.fail(errno == EISDIR ? 5 : error_of(errno, !resolved->parent_exists));
+			return;
+		}
+		call.ret(1);
+	});
+	const auto copy_file = [&, missing](ApiCall &call, const NativePaths::Resolved &from, const NativePaths::Resolved &to, bool fail_if_exists) {
+		if (!from.exists) {
+			call.set_last_error(missing(from));
+			return;
+		}
+		if (to.exists && fail_if_exists) {
+			call.set_last_error(80);
+			return;
+		}
+		const int source = ::open(from.host.c_str(), O_RDONLY | O_CLOEXEC);
+		if (source < 0) {
+			call.fail(error_of(errno));
+			return;
+		}
+		struct stat metadata{};
+		::fstat(source, &metadata);
+		const int target = ::open(to.host.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, metadata.st_mode & 0777);
+		if (target < 0) {
+			const int error = errno;
+			::close(source);
+			call.fail(error_of(error, !to.parent_exists));
+			return;
+		}
+		std::vector<char> buffer(1 << 16);
+		bool good = true;
+		for (;;) {
+			const ssize_t count = ::read(source, buffer.data(), buffer.size());
+			if (count <= 0) {
+				good = count == 0;
+				break;
+			}
+			if (::write(target, buffer.data(), size_t(count)) != count) {
+				good = false;
+				break;
+			}
+		}
+		const int error = errno;
+		::close(source);
+		::close(target);
+		if (!good) {
+			call.fail(error_of(error));
+			return;
+		}
+		call.ret(1);
+	};
+	registry.add("CopyFileW", 3, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto from = resolve(call, call.wide(call[0]));
+		const auto to = from ? resolve(call, call.wide(call[1])) : std::nullopt;
+		if (from && to)
+			copy_file(call, *from, *to, call.u32(2));
+	});
+	registry.add("CopyFileExW", 6, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto from = resolve(call, call.wide(call[0]));
+		const auto to = from ? resolve(call, call.wide(call[1])) : std::nullopt;
+		if (from && to)
+			copy_file(call, *from, *to, call.u32(5) & 1);
+	});
+	registry.add("MoveFileExW", 3, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto from = resolve(call, call.wide(call[0]));
+		if (!from)
+			return;
+		const auto flags = call.u32(2);
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		const auto to = resolve(call, call.wide(call[1]));
+		if (!to)
+			return;
+		if (!from->exists) {
+			call.set_last_error(missing(*from));
+			return;
+		}
+		if (to->exists && !(flags & 1)) {
+			call.set_last_error(183);
+			return;
+		}
+		if (::rename(from->host.c_str(), to->host.c_str())) {
+			if (errno == EXDEV && (flags & 2)) {
+				copy_file(call, *from, *to, false);
+				if (call.result)
+					::unlink(from->host.c_str());
+				return;
+			}
+			call.fail(error_of(errno, !to->parent_exists));
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("MoveFileW", 2, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto from = resolve(call, call.wide(call[0]));
+		const auto to = from ? resolve(call, call.wide(call[1])) : std::nullopt;
+		if (!from || !to)
+			return;
+		if (!from->exists) {
+			call.set_last_error(missing(*from));
+			return;
+		}
+		if (to->exists) {
+			call.set_last_error(183);
+			return;
+		}
+		if (::rename(from->host.c_str(), to->host.c_str())) {
+			call.fail(error_of(errno, !to->parent_exists));
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("ReplaceFileW", 6, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto replaced = resolve(call, call.wide(call[0]));
+		const auto replacement = resolve(call, call.wide(call[1]));
+		if (!replaced || !replacement)
+			return;
+		if (!replaced->exists) {
+			call.set_last_error(1176);
+			return;
+		}
+		if (!replacement->exists) {
+			call.set_last_error(1177);
+			return;
+		}
+		if (call[2]) {
+			const auto backup = resolve(call, call.wide(call[2]));
+			if (!backup)
+				return;
+			copy_file(call, *replaced, *backup, false);
+			if (!call.result) {
+				call.set_last_error(1175);
+				return;
+			}
+			call.result = 0;
+		}
+		if (::rename(replacement->host.c_str(), replaced->host.c_str())) {
+			call.fail(1175);
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("GetCurrentDirectoryW", 2, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto &text = paths.current();
+		const size_t capacity = call.u32(0);
+		const size_t length = text.size() > 3 ? text.size() : 3;
+		call.put_wide(call[1], text.size() == 2 ? text + u"\\" : text, capacity);
+		call.ret(capacity > length ? length : length + 1);
+	});
+	registry.add("SetCurrentDirectoryW", 1, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		if (!paths.set_current(call.wide(call[0]))) {
+			call.fail(2);
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("GetFullPathNameW", 4, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto name = call.wide(call[0]);
+		if (name.empty()) {
+			call.fail(87);
+			return;
+		}
+		const auto text = paths.full(name);
+		if (text.empty()) {
+			call.fail(123);
+			return;
+		}
+		const size_t capacity = call.u32(1);
+		if (capacity <= text.size()) {
+			call.ret(text.size() + 1);
+			return;
+		}
+		call.put_wide(call[2], text, capacity);
+		if (call[3]) {
+			const auto slash = text.find_last_of(u'\\');
+			call.store<uint64_t>(call[3], slash == text.npos || slash + 1 == text.size() ? 0 : call[2] + (slash + 1) * 2);
+		}
+		call.ret(text.size());
+	});
+	registry.add("GetLongPathNameW", 3, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto name = call.wide(call[0]);
+		const auto resolved = resolve(call, name);
+		if (!resolved)
+			return;
+		if (!resolved->exists) {
+			call.set_last_error(missing(*resolved));
+			return;
+		}
+		const auto text = paths.dos(resolved->host);
+		const size_t capacity = call.u32(2);
+		call.put_wide(call[1], text, capacity);
+		call.ret(capacity > text.size() ? text.size() : text.size() + 1);
+	});
+	registry.add("GetTempPathW", 2, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		auto text = paths.temporary();
+		const size_t capacity = call.u32(0);
+		call.put_wide(call[1], text, capacity);
+		call.ret(capacity > text.size() ? text.size() : text.size() + 1);
+	});
+	registry.add("GetDiskFreeSpaceExW", 4, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto resolved = call[0] ? resolve(call, call.wide(call[0])) : paths.resolve(paths.current());
+		if (!resolved)
+			return;
+		struct statvfs info{};
+		auto path = resolved->host;
+		while (!std::filesystem::exists(path) && path.has_parent_path() && path != path.parent_path())
+			path = path.parent_path();
+		if (::statvfs(path.c_str(), &info)) {
+			call.fail(error_of(errno));
+			return;
+		}
+		if (call[1]) call.store<uint64_t>(call[1], uint64_t(info.f_bavail) * info.f_frsize);
+		if (call[2]) call.store<uint64_t>(call[2], uint64_t(info.f_blocks) * info.f_frsize);
+		if (call[3]) call.store<uint64_t>(call[3], uint64_t(info.f_bfree) * info.f_frsize);
+		call.ret(1);
+	});
+	const auto find_first = [&](ApiCall &call, uint64_t name_argument, uint64_t data_argument) {
+		call.ret(invalid_handle);
+		const auto pattern_text = call.wide(call[name_argument]);
+		const auto path = paths.full(pattern_text);
+		if (path.empty()) {
+			call.set_last_error(123);
+			return;
+		}
+		const auto slash = path.find_last_of(u'\\');
+		const auto directory = path.substr(0, slash == 2 ? 3 : slash);
+		const auto pattern = path.substr(slash + 1);
+		const auto resolved = paths.resolve(directory);
+		if (!resolved || !resolved->exists) {
+			call.set_last_error(3);
+			return;
+		}
+		auto found = std::make_shared<FindObject>();
+		const bool wild = pattern.find_first_of(u"*?<>") != pattern.npos;
+		std::vector<std::u16string> names;
+		if (wild) {
+			DIR *handle = ::opendir(resolved->host.c_str());
+			if (!handle) {
+				call.set_last_error(error_of(errno));
+				return;
+			}
+			while (const auto *item = ::readdir(handle)) {
+				const auto name = from_utf8(item->d_name);
+				if (directory.size() <= 3 && (name == u"." || name == u".."))
+					continue;
+				if (wildcard(pattern, name))
+					names.push_back(name);
+			}
+			::closedir(handle);
+		} else {
+			const auto target = paths.resolve(path);
+			if (target && target->exists)
+				names.push_back(from_utf8(target->host.filename().string()));
+		}
+		std::sort(names.begin(), names.end(), [](const auto &a, const auto &b) { return compare_fold(a, b) < 0; });
+		for (const auto &name : names)
+			found->entries.push_back(entry_of(resolved->host / to_utf8(name), name));
+		if (found->entries.empty()) {
+			call.set_last_error(wild ? 2 : (paths.resolve(path) && paths.resolve(path)->parent_exists ? 2 : 3));
+			return;
+		}
+		call.write(call[data_argument], find_data(found->entries[0]));
+		found->next = 1;
+		const auto made = objects.add_object(found);
+		call.ret(made.status ? invalid_handle : made.value);
+		call.set_last_error(0);
+	};
+	registry.add("FindFirstFileW", 2, [find_first](ApiCall &call) { find_first(call, 0, 1); });
+	registry.add("FindFirstFileExW", 6, [find_first](ApiCall &call) {
+		if (call.u32(1) > 1 || call.u32(3) > 2) {
+			call.fail(87, invalid_handle);
+			return;
+		}
+		find_first(call, 0, 2);
+	});
+	registry.add("FindNextFileW", 2, [&, resolve, missing, file_of, copy_file, find_first](ApiCall &call) {
+		const auto found = objects.object_as<FindObject>(call[0]);
+		if (!found) {
+			call.fail(6);
+			return;
+		}
+		if (found->next >= found->entries.size()) {
+			call.fail(18);
+			return;
+		}
+		call.write(call[1], find_data(found->entries[found->next++]));
+		call.ret(1);
+	});
+	registry.add("FindClose", 1, [&, resolve, missing, file_of, copy_file, find_first](ApiCall &call) {
+		if (!objects.object_as<FindObject>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		objects.close(call[0]);
+		call.ret(1);
+	});
+	registry.add("GetDriveTypeW", 1, [&, resolve, missing, file_of, copy_file, find_first](ApiCall &call) {
+		// DRIVE_FIXED for mapped drives, DRIVE_NO_ROOT_DIR for letters without a mapping.
+		const auto root = call[0] ? paths.resolve(call.wide(call[0])) : paths.resolve(paths.current());
+		call.ret(root && root->exists ? 3 : 1);
+	});
+	registry.add("DuplicateHandle", 7, [&, resolve, missing, file_of, copy_file, find_first](ApiCall &call) {
+		const auto made = objects.duplicate(call[1]);
+		if (made.status) {
+			call.fail(6);
+			return;
+		}
+		call.store<uint64_t>(call[3], made.value);
+		call.ret(1);
+	});
+}
+
+}

@@ -24,6 +24,24 @@ uint64_t NativeHeap::call(std::string_view name, std::span<const uint64_t> argum
 	return result.value;
 }
 
+uint64_t NativeHeap::allocate(uint32_t flags, uint64_t size)
+{
+	const uint64_t arguments[]{environment.process_heap(), flags, size};
+	return call("RtlAllocateHeap", arguments);
+}
+
+bool NativeHeap::release(uint64_t address)
+{
+	const uint64_t arguments[]{environment.process_heap(), 0, address};
+	return uint8_t(call("RtlFreeHeap", arguments)) != 0;
+}
+
+uint64_t NativeHeap::block_size(uint64_t address)
+{
+	const uint64_t arguments[]{environment.process_heap(), 0, address};
+	return call("RtlSizeHeap", arguments);
+}
+
 void NativeHeap::initialize(std::function<NativeResult(uint64_t,std::span<const uint64_t>)> caller)
 {
 	if (!modules.all().contains("raven-rtl.dll")) return;

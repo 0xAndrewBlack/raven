@@ -149,7 +149,7 @@ void NativeTLS::install(const PEModule &module, const std::optional<Template> &i
 		storage = process.map_memory(allocation, PROT_READ | PROT_WRITE);
 		const uint64_t block = (storage + item->alignment - 1) & ~uint64_t(item->alignment - 1);
 		process.write_memory(block, item->bytes);
-		entries.emplace(&module, Entry{slot, item->index, storage, block, item->size, item->callbacks});
+		entries.emplace(&module, Entry{slot, item->index, storage, block, item->size, item->callbacks, item->alignment, item->bytes});
 		put(process, item->index, slot, 4);
 		index_written = true;
 		put(process, vector + uint64_t(slot) * 8, block, 8);
@@ -201,6 +201,43 @@ void NativeTLS::remove(const PEModule &module)
 		total -= entry.size;
 	}
 	entries.erase(found);
+}
+
+void NativeTLS::create_thread(uint64_t teb)
+{
+	if (!vector)
+		return;
+	std::vector<uint64_t> owned;
+	try {
+		const uint64_t slots = process.map_memory((10000 * 8 + 4095) & ~size_t(4095), PROT_READ | PROT_WRITE);
+		owned.push_back(slots);
+		for (const auto &[module, entry] : entries) {
+			if (entry.slot == UINT32_MAX)
+				continue;
+			const size_t allocation = (std::max(entry.size, size_t(1)) + entry.alignment - 1 + 4095) & ~size_t(4095);
+			const uint64_t storage = process.map_memory(allocation, PROT_READ | PROT_WRITE);
+			owned.push_back(storage);
+			const uint64_t block = (storage + entry.alignment - 1) & ~uint64_t(entry.alignment - 1);
+			process.write_memory(block, entry.bytes);
+			put(process, slots + uint64_t(entry.slot) * 8, block, 8);
+		}
+		put(process, teb + 0x58, slots, 8);
+	} catch (...) {
+		for (const auto address : owned)
+			process.unmap_memory(address);
+		throw;
+	}
+	thread_storage[teb] = std::move(owned);
+}
+
+void NativeTLS::release_thread(uint64_t teb)
+{
+	const auto found = thread_storage.find(teb);
+	if (found == thread_storage.end())
+		return;
+	for (const auto address : found->second)
+		process.unmap_memory(address);
+	thread_storage.erase(found);
 }
 
 const std::vector<uint64_t> &NativeTLS::callbacks(const PEModule &module) const

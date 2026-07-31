@@ -1,4 +1,5 @@
 #include "module_api.h"
+#include "apiset.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -49,6 +50,8 @@ uint64_t NativeModuleAPI::module_handle(uint64_t address, bool wide)
 		name.pop_back();
 	else if (name.find('.') == std::string::npos)
 		name += ".dll";
+	if (const auto host = apiset_host(name); !host.empty())
+		name = host;
 	const auto found = modules.all().find(name);
 	if (found == modules.all().end()) {
 		environment.set_last_error(126);
@@ -84,16 +87,17 @@ uint64_t NativeModuleAPI::procedure(uint64_t handle, uint64_t name)
 
 bool NativeModuleAPI::dispatch(std::string_view name)
 {
-	if (name == "LoadLibraryA" || name == "LoadLibraryW") {
+	if (name == "LoadLibraryA" || name == "LoadLibraryW" || name == "LoadLibraryExA" || name == "LoadLibraryExW") {
 		if (!load)
 			return false;
-		const auto address = process.api_arguments(1).at(0);
+		const bool extended = name.starts_with("LoadLibraryEx");
+		const auto address = process.api_arguments(extended ? 3 : 1).at(0);
 		if (!address) {
 			environment.set_last_error(87);
 			process.return_api(0);
 			return true;
 		}
-		const auto decoded = guest_name(address, name == "LoadLibraryW");
+		const auto decoded = guest_name(address, name.ends_with("W"));
 		if (!decoded) {
 			environment.set_last_error(120);
 			process.return_api(0);

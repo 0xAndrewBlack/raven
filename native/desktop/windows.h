@@ -17,6 +17,8 @@ public:
 	void set_call(std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke);
 	void set_presentation(DesktopPresentation presentation);
 	void set_deadline(std::chrono::steady_clock::time_point deadline);
+	// Lets other guest threads run while this one waits for messages; returns true when one ran.
+	void set_yield(std::function<bool()> yield) { yield_hook = std::move(yield); }
 	bool dispatch(std::string_view name);
 	void drawing(uint64_t window);
 	void shutdown();
@@ -37,6 +39,7 @@ private:
 	std::deque<Message> messages;
 	std::optional<uint32_t> quit;
 	std::chrono::steady_clock::time_point deadline;
+	std::function<bool()> yield_hook;
 	uint32_t mouse_buttons=0;
 	int32_t cursor_x=0,cursor_y=0;
 	uint64_t focus=0,active=0;

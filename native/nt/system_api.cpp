@@ -1,0 +1,587 @@
+#include "kernel_context.h"
+#include "text.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cpuid.h>
+#include <cstring>
+#include <ctime>
+#include <map>
+#include <thread>
+#include <unistd.h>
+
+namespace raven {
+
+namespace {
+
+constexpr uint64_t current_process = UINT64_MAX, current_thread = UINT64_MAX - 1;
+
+// Civil date from days since 1970-01-01 (proleptic Gregorian), after Howard Hinnant's public-domain algorithm.
+struct Civil {
+	int year;
+	unsigned month, day;
+};
+
+Civil civil_from_days(int64_t days)
+{
+	days += 719468;
+	const int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+	const unsigned day_of_era = unsigned(days - era * 146097);
+	const unsigned year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+	const int64_t year = int64_t(year_of_era) + era * 400;
+	const unsigned day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+	const unsigned shifted = (5 * day_of_year + 2) / 153;
+	const unsigned day = day_of_year - (153 * shifted + 2) / 5 + 1;
+	const unsigned month = shifted < 10 ? shifted + 3 : shifted - 9;
+	return {int(year + (month <= 2)), month, day};
+}
+
+int64_t days_from_civil(int year, unsigned month, unsigned day)
+{
+	year -= month <= 2;
+	const int64_t era = (year >= 0 ? year : year - 399) / 400;
+	const unsigned year_of_era = unsigned(year - era * 400);
+	const unsigned day_of_year = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + day - 1;
+	const unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+	return era * 146097 + int64_t(day_of_era) - 719468;
+}
+
+// SYSTEMTIME: year, month, weekday, day, hour, minute, second, milliseconds as 16-bit words.
+std::vector<uint8_t> system_time(uint64_t ticks)
+{
+	const uint64_t seconds = ticks / 10000000ULL;
+	const int64_t days = int64_t(seconds / 86400);
+	const auto civil = civil_from_days(days - 134774);
+	const uint16_t fields[8] = {uint16_t(civil.year), uint16_t(civil.month), uint16_t((days + 1) % 7), uint16_t(civil.day),
+		uint16_t(seconds % 86400 / 3600), uint16_t(seconds % 3600 / 60), uint16_t(seconds % 60), uint16_t(ticks / 10000 % 1000)};
+	std::vector<uint8_t> bytes(16);
+	std::memcpy(bytes.data(), fields, 16);
+	return bytes;
+}
+
+std::optional<uint64_t> ticks_from(std::span<const uint8_t> bytes)
+{
+	uint16_t fields[8];
+	std::memcpy(fields, bytes.data(), 16);
+	if (fields[1] < 1 || fields[1] > 12 || fields[3] < 1 || fields[3] > 31 || fields[4] > 23 || fields[5] > 59 || fields[6] > 59 || fields[7] > 999 || fields[0] < 1601)
+		return std::nullopt;
+	static constexpr int month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+	const bool leap = fields[0] % 4 == 0 && (fields[0] % 100 != 0 || fields[0] % 400 == 0);
+	if (fields[3] > month_days[fields[1] - 1] + (fields[1] == 2 && leap))
+		return std::nullopt;
+	const int64_t days = days_from_civil(fields[0], fields[1], fields[3]) + 134774;
+	return (uint64_t(days) * 86400ULL + fields[4] * 3600ULL + fields[5] * 60ULL + fields[6]) * 10000000ULL + fields[7] * 10000ULL;
+}
+
+uint64_t now_ticks()
+{
+	timespec now{};
+	::clock_gettime(CLOCK_REALTIME, &now);
+	return uint64_t(now.tv_sec) * 10000000ULL + uint64_t(now.tv_nsec) / 100 + filetime_epoch_offset;
+}
+
+uint64_t counter_ticks()
+{
+	timespec now{};
+	::clock_gettime(CLOCK_MONOTONIC, &now);
+	return uint64_t(now.tv_sec) * 10000000ULL + uint64_t(now.tv_nsec) / 100;
+}
+
+// Offset of local time from UTC in minutes at a UTC instant, with the zone abbreviation and DST flag.
+struct ZoneInfo {
+	int offset_minutes;
+	bool daylight;
+	std::string name;
+};
+
+ZoneInfo zone_at(time_t instant)
+{
+	tm local{};
+	::localtime_r(&instant, &local);
+	return {int(local.tm_gmtoff / 60), local.tm_isdst > 0, local.tm_zone ? local.tm_zone : "UTC"};
+}
+
+std::map<std::u16string, std::pair<std::u16string, std::u16string>> default_environment(const NativePaths &paths)
+{
+	const auto user = paths.user_name();
+	const auto profile = paths.user_profile();
+	std::map<std::u16string, std::pair<std::u16string, std::u16string>> result;
+	const auto add = [&](std::u16string name, std::u16string value) {
+		auto key = name;
+		for (auto &character : key)
+			character = upper_case(character);
+		result[key] = {std::move(name), std::move(value)};
+	};
+	char host[256]{};
+	::gethostname(host, sizeof host - 1);
+	std::u16string computer = from_utf8(host);
+	for (auto &character : computer)
+		character = upper_case(character);
+	add(u"ALLUSERSPROFILE", u"C:\\ProgramData");
+	add(u"APPDATA", profile + u"\\AppData\\Roaming");
+	add(u"CommonProgramFiles", u"C:\\Program Files\\Common Files");
+	add(u"CommonProgramFiles(x86)", u"C:\\Program Files (x86)\\Common Files");
+	add(u"CommonProgramW6432", u"C:\\Program Files\\Common Files");
+	add(u"COMPUTERNAME", computer.empty() ? u"RAVEN" : computer);
+	add(u"ComSpec", u"C:\\Windows\\system32\\cmd.exe");
+	add(u"HOMEDRIVE", u"C:");
+	add(u"HOMEPATH", u"\\Users\\" + user);
+	add(u"LOCALAPPDATA", profile + u"\\AppData\\Local");
+	add(u"NUMBER_OF_PROCESSORS", widen_ascii(std::to_string(std::max(1U, std::min(64U, std::thread::hardware_concurrency())))));
+	add(u"OS", u"Windows_NT");
+	add(u"Path", u"C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem");
+	add(u"PATHEXT", u".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC");
+	add(u"PROCESSOR_ARCHITECTURE", u"AMD64");
+	add(u"PROCESSOR_LEVEL", u"6");
+	add(u"ProgramData", u"C:\\ProgramData");
+	add(u"ProgramFiles", u"C:\\Program Files");
+	add(u"ProgramFiles(x86)", u"C:\\Program Files (x86)");
+	add(u"ProgramW6432", u"C:\\Program Files");
+	add(u"PUBLIC", u"C:\\Users\\Public");
+	add(u"SystemDrive", u"C:");
+	add(u"SystemRoot", u"C:\\Windows");
+	add(u"TEMP", profile + u"\\AppData\\Local\\Temp");
+	add(u"TMP", profile + u"\\AppData\\Local\\Temp");
+	add(u"USERDOMAIN", computer.empty() ? u"RAVEN" : computer);
+	add(u"USERNAME", user);
+	add(u"USERPROFILE", profile);
+	add(u"windir", u"C:\\Windows");
+	return result;
+}
+
+}
+
+void register_system_api(ApiRegistry &registry, KernelContext &context)
+{
+	auto &process = context.process;
+	auto &environment = context.environment;
+	auto &paths = context.paths;
+	auto &modules = context.modules;
+
+	registry.add("GetSystemTimeAsFileTime", 1, [](ApiCall &call) { call.store<uint64_t>(call[0], now_ticks()); });
+	registry.add("GetSystemTimePreciseAsFileTime", 1, [](ApiCall &call) { call.store<uint64_t>(call[0], now_ticks()); });
+	registry.add("GetSystemTime", 1, [](ApiCall &call) { call.write(call[0], system_time(now_ticks())); });
+	registry.add("GetLocalTime", 1, [](ApiCall &call) {
+		const uint64_t utc = now_ticks();
+		const auto zone = zone_at(time_t((utc - filetime_epoch_offset) / 10000000ULL));
+		call.write(call[0], system_time(utc + int64_t(zone.offset_minutes) * 600000000LL));
+	});
+	registry.add("QueryPerformanceCounter", 1, [](ApiCall &call) {
+		call.store<uint64_t>(call[0], counter_ticks());
+		call.ret(1);
+	});
+	registry.add("QueryPerformanceFrequency", 1, [](ApiCall &call) {
+		call.store<uint64_t>(call[0], 10000000ULL);
+		call.ret(1);
+	});
+	registry.add("GetTickCount64", 0, [](ApiCall &call) { call.ret(counter_ticks() / 10000); });
+	registry.add("GetTickCount", 0, [](ApiCall &call) { call.ret(uint32_t(counter_ticks() / 10000)); });
+	registry.add("FileTimeToSystemTime", 2, [](ApiCall &call) {
+		const auto ticks = call.load<uint64_t>(call[0]);
+		if (ticks > 0x7fffffffffffffffULL) {
+			call.fail(87);
+			return;
+		}
+		call.write(call[1], system_time(ticks));
+		call.ret(1);
+	});
+	registry.add("SystemTimeToFileTime", 2, [](ApiCall &call) {
+		const auto ticks = ticks_from(call.read(call[0], 16));
+		if (!ticks) {
+			call.fail(87);
+			return;
+		}
+		call.store<uint64_t>(call[1], *ticks);
+		call.ret(1);
+	});
+	registry.add("CompareFileTime", 2, [](ApiCall &call) {
+		const auto a = call.load<uint64_t>(call[0]), b = call.load<uint64_t>(call[1]);
+		call.ret(uint32_t(a < b ? -1 : a > b ? 1 : 0));
+	});
+	registry.add("GetTimeZoneInformation", 1, [](ApiCall &call) {
+		const time_t now = ::time(nullptr);
+		tm january{}, july{};
+		const time_t year_start = now - now % (365 * 86400);
+		::localtime_r(&year_start, &january);
+		const time_t middle = year_start + 182 * 86400;
+		::localtime_r(&middle, &july);
+		const auto first = zone_at(year_start), second = zone_at(middle), current = zone_at(now);
+		const int standard = std::min(first.offset_minutes, second.offset_minutes), daylight = std::max(first.offset_minutes, second.offset_minutes);
+		std::vector<uint8_t> bytes(172);
+		const int32_t bias = -standard;
+		std::memcpy(bytes.data(), &bias, 4);
+		const auto standard_name = from_utf8(first.offset_minutes <= second.offset_minutes ? first.name : second.name).substr(0, 31);
+		const auto daylight_name = from_utf8(first.offset_minutes > second.offset_minutes ? first.name : second.name).substr(0, 31);
+		std::memcpy(bytes.data() + 4, standard_name.data(), standard_name.size() * 2);
+		std::memcpy(bytes.data() + 88, daylight_name.data(), daylight_name.size() * 2);
+		const int32_t daylight_bias = standard - daylight;
+		std::memcpy(bytes.data() + 168, &daylight_bias, 4);
+		call.write(call[0], bytes);
+		call.ret(standard == daylight ? 0 : current.daylight ? 2 : 1);
+	});
+	registry.add("SystemTimeToTzSpecificLocalTime", 3, [](ApiCall &call) {
+		const auto ticks = ticks_from(call.read(call[1], 16));
+		if (!ticks) {
+			call.fail(87);
+			return;
+		}
+		int offset;
+		if (call[0])
+			offset = -call.load<int32_t>(call[0]);
+		else
+			offset = zone_at(time_t((*ticks - filetime_epoch_offset) / 10000000ULL)).offset_minutes;
+		call.write(call[2], system_time(*ticks + int64_t(offset) * 600000000LL));
+		call.ret(1);
+	});
+
+	registry.add("GetCurrentProcess", 0, [](ApiCall &call) { call.ret(current_process); });
+	registry.add("GetCurrentThread", 0, [](ApiCall &call) { call.ret(current_thread); });
+	registry.add("IsDebuggerPresent", 0, [](ApiCall &call) { call.ret(0); });
+	registry.add("CheckRemoteDebuggerPresent", 2, [](ApiCall &call) {
+		call.store<uint32_t>(call[1], 0);
+		call.ret(1);
+	});
+	registry.add("IsProcessorFeaturePresent", 1, [](ApiCall &call) {
+		unsigned a = 0, b = 0, c = 0, d = 0;
+		__get_cpuid(1, &a, &b, &c, &d);
+		const unsigned leaf1_ecx = c, leaf1_edx = d;
+		unsigned b7 = 0;
+		if (__get_cpuid_max(0, nullptr) >= 7) {
+			__cpuid_count(7, 0, a, b7, c, d);
+		}
+		bool present;
+		switch (call.u32(0)) {
+		case 2: case 14: present = leaf1_ecx >> 13 & 1; break;
+		case 3: present = leaf1_edx >> 23 & 1; break;
+		case 6: present = leaf1_edx >> 25 & 1; break;
+		case 8: case 9: case 12: case 20: case 22: case 23: present = true; break;
+		case 10: present = leaf1_edx >> 26 & 1; break;
+		case 13: present = leaf1_ecx & 1; break;
+		case 17: present = leaf1_ecx >> 26 & 1; break;
+		case 36: present = leaf1_ecx >> 9 & 1; break;
+		case 37: present = leaf1_ecx >> 19 & 1; break;
+		case 38: present = leaf1_ecx >> 20 & 1; break;
+		case 39: present = leaf1_ecx >> 28 & 1; break;
+		case 40: present = b7 >> 5 & 1; break;
+		default: present = false;
+		}
+		call.ret(present);
+	});
+	const auto system_information = [](ApiCall &call) {
+		std::vector<uint8_t> bytes(48);
+		const uint16_t architecture = 9;
+		std::memcpy(bytes.data(), &architecture, 2);
+		const uint32_t page = 4096, granularity = 65536, processors = std::max(1U, std::min(64U, std::thread::hardware_concurrency())), type = 8664;
+		const uint64_t minimum = 0x10000, maximum = 0x6fffffffffffULL, mask = processors >= 64 ? ~0ULL : (1ULL << processors) - 1;
+		std::memcpy(bytes.data() + 4, &page, 4);
+		std::memcpy(bytes.data() + 8, &minimum, 8);
+		std::memcpy(bytes.data() + 16, &maximum, 8);
+		std::memcpy(bytes.data() + 24, &mask, 8);
+		std::memcpy(bytes.data() + 32, &processors, 4);
+		std::memcpy(bytes.data() + 36, &type, 4);
+		std::memcpy(bytes.data() + 40, &granularity, 4);
+		const uint16_t level = 6;
+		std::memcpy(bytes.data() + 44, &level, 2);
+		call.write(call[0], bytes);
+	};
+	registry.add("GetSystemInfo", 1, system_information);
+	registry.add("GetNativeSystemInfo", 1, system_information);
+	registry.add("GetVersion", 0, [](ApiCall &call) { call.ret(0x4a65000aU); });
+	registry.add("GetVersionExW", 1, [](ApiCall &call) {
+		const auto size = call.load<uint32_t>(call[0]);
+		if (size != 276 && size != 284) {
+			call.fail(122);
+			return;
+		}
+		std::vector<uint8_t> bytes(size);
+		const uint32_t fields[5] = {size, 10, 0, 19045, 2};
+		std::memcpy(bytes.data(), fields, 20);
+		call.write(call[0], bytes);
+		call.ret(1);
+	});
+	registry.add("VerSetConditionMask", 3, [](ApiCall &call) {
+		uint64_t mask = call[0];
+		const uint32_t types = call.u32(1);
+		const uint64_t condition = call[2] & 7;
+		// Each version field owns three bits of the mask; the field index is the position of its flag bit.
+		for (unsigned bit = 0; bit < 8; ++bit)
+			if (types & (1U << bit))
+				mask = (mask & ~(7ULL << (bit * 3))) | (condition << (bit * 3));
+		call.ret(mask);
+	});
+	registry.add("VerifyVersionInfoW", 3, [](ApiCall &call) {
+		const auto info = call.read(call[0], 28);
+		uint32_t requested[5];
+		std::memcpy(requested, info.data(), 20);
+		const uint32_t types = call.u32(1);
+		const uint64_t mask = call[2];
+		// Windows 10 (10.0.19045), no service pack.
+		const uint32_t actual[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+		(void)actual;
+		const auto compare = [&](unsigned bit, uint64_t have, uint64_t want) {
+			switch ((mask >> (bit * 3)) & 7) {
+			case 1: return have == want;
+			case 2: return have > want;
+			case 3: return have >= want;
+			case 4: return have < want;
+			case 5: return have <= want;
+			default: return have == want;
+			}
+		};
+		bool good = true;
+		const bool hierarchical = (types & 3) == 3 && ((mask & 7) == 3 || ((mask >> 3) & 7) == 3);
+		if (hierarchical) {
+			// Major, minor and service pack compare as one ordered tuple when they ask for "at least".
+			const uint64_t have = uint64_t(10) << 32, want = uint64_t(requested[1]) << 32 | requested[2];
+			good = have >= want;
+		} else {
+			if (types & 2) good = good && compare(1, 10, requested[1]);
+			if (types & 1) good = good && compare(0, 0, requested[2]);
+		}
+		if (types & 4) good = good && compare(2, 19045, requested[3]);
+		if (types & 8) good = good && compare(3, 2, requested[4]);
+		if (!good) {
+			call.fail(1150);
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("MulDiv", 3, [](ApiCall &call) {
+		const int64_t a = call.i32(0), b = call.i32(1), c = call.i32(2);
+		if (!c) {
+			call.ret(uint32_t(-1));
+			return;
+		}
+		const int64_t product = a * b, half = (c < 0 ? -c : c) / 2;
+		const bool negative = (product < 0) != (c < 0);
+		const int64_t magnitude = ((product < 0 ? -product : product) + half) / (c < 0 ? -c : c);
+		const int64_t value = negative ? -magnitude : magnitude;
+		call.ret(value > INT32_MAX || value < INT32_MIN ? uint32_t(-1) : uint32_t(int32_t(value)));
+	});
+	registry.add("EncodePointer", 1, [](ApiCall &call) { call.ret(call[0]); });
+	registry.add("DecodePointer", 1, [](ApiCall &call) { call.ret(call[0]); });
+	registry.add("EncodeSystemPointer", 1, [](ApiCall &call) { call.ret(call[0]); });
+	registry.add("DecodeSystemPointer", 1, [](ApiCall &call) { call.ret(call[0]); });
+	registry.add("InitializeSListHead", 1, [](ApiCall &call) { call.write(call[0], std::vector<uint8_t>(16)); });
+	registry.add("SetUnhandledExceptionFilter", 1, [&context](ApiCall &call) {
+		const auto previous = context.unhandled_filter;
+		context.unhandled_filter = call[0];
+		call.ret(previous);
+	});
+	registry.add("SetErrorMode", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("SetThreadErrorMode", 3, [](ApiCall &call) {
+		if (call[2]) call.store<uint32_t>(call[2], 0);
+		call.ret(1);
+	});
+	registry.add("GetApplicationRestartSettings", 4, [](ApiCall &call) { call.fail(0x80070490U, 0x80070490U); });
+	registry.add("RegisterApplicationRestart", 2, [](ApiCall &call) { call.ret(0); });
+	registry.add("UnregisterApplicationRestart", 0, [](ApiCall &call) { call.ret(0); });
+
+	registry.add("GetModuleFileNameW", 3, [&](ApiCall &call) {
+		std::u16string text;
+		const auto base = call[0];
+		if (!base || base == context.entry.loaded.base()) {
+			text = context.launch.image_path;
+		} else {
+			const auto found = std::find_if(modules.all().begin(), modules.all().end(), [&](const auto &item) { return item.second->loaded.base() == base; });
+			if (found == modules.all().end()) {
+				call.fail(6);
+				return;
+			}
+			const auto directory = paths.full(context.launch.image_path);
+			const auto slash = directory.find_last_of(u'\\');
+			text = (found->second->runtime_api ? u"C:\\Windows\\System32\\" : directory.substr(0, slash + 1)) + widen_ascii(found->first);
+		}
+		const size_t capacity = call.u32(2);
+		if (!capacity) {
+			call.fail(122);
+			return;
+		}
+		if (text.size() >= capacity) {
+			call.put_wide(call[1], text.substr(0, capacity - 1), capacity);
+			call.fail(122, capacity);
+			return;
+		}
+		call.put_wide(call[1], text, capacity);
+		call.set_last_error(0);
+		call.ret(text.size());
+	});
+	registry.add("GetModuleHandleExW", 3, [&](ApiCall &call) {
+		const uint32_t flags = call.u32(0);
+		uint64_t handle = 0;
+		if (flags & 4) {
+			for (const auto &[name, module] : modules.all())
+				if (call[1] >= module->loaded.base() && call[1] < module->loaded.base() + module->loaded.data().size())
+					handle = module->loaded.base();
+		} else if (!call[1]) {
+			handle = context.entry.loaded.base();
+		} else {
+			auto name = to_utf8(call.wide(call[1]));
+			for (auto &character : name)
+				character = char(std::tolower(static_cast<unsigned char>(character)));
+			if (name.find('.') == name.npos)
+				name += ".dll";
+			const auto found = modules.all().find(name);
+			if (found != modules.all().end())
+				handle = found->second->loaded.base();
+		}
+		if (!handle) {
+			call.fail(126);
+			return;
+		}
+		if (call[2]) call.store<uint64_t>(call[2], handle);
+		call.ret(1);
+	});
+
+	// Environment variables live in the host process; names compare case-insensitively like Windows.
+	struct Variables {
+		std::map<std::u16string, std::pair<std::u16string, std::u16string>> values;
+	};
+	auto variables = std::make_shared<Variables>();
+	variables->values = default_environment(paths);
+	const auto key_of = [](std::u16string name) {
+		for (auto &character : name)
+			character = upper_case(character);
+		return name;
+	};
+	registry.add("GetEnvironmentVariableW", 3, [variables, key_of](ApiCall &call) {
+		const auto found = variables->values.find(key_of(call.wide(call[0])));
+		if (found == variables->values.end()) {
+			call.fail(203);
+			return;
+		}
+		const auto &value = found->second.second;
+		const size_t capacity = call.u32(2);
+		call.put_wide(call[1], value, capacity);
+		call.ret(capacity > value.size() ? value.size() : value.size() + 1);
+	});
+	registry.add("SetEnvironmentVariableW", 2, [variables, key_of](ApiCall &call) {
+		const auto name = call.wide(call[0]);
+		if (name.empty() || name.find(u'=') != name.npos) {
+			call.fail(87);
+			return;
+		}
+		if (!call[1]) {
+			if (!variables->values.erase(key_of(name))) {
+				call.fail(203);
+				return;
+			}
+		} else {
+			variables->values[key_of(name)] = {name, call.wide(call[1])};
+		}
+		call.ret(1);
+	});
+	registry.add("ExpandEnvironmentStringsW", 3, [variables, key_of](ApiCall &call) {
+		const auto text = call.wide(call[0]);
+		std::u16string result;
+		for (size_t at = 0; at < text.size();) {
+			if (text[at] == u'%') {
+				const auto close = text.find(u'%', at + 1);
+				if (close != text.npos && close > at + 1) {
+					const auto found = variables->values.find(key_of(text.substr(at + 1, close - at - 1)));
+					if (found != variables->values.end()) {
+						result += found->second.second;
+						at = close + 1;
+						continue;
+					}
+					result += text.substr(at, close - at);
+					at = close;
+					continue;
+				}
+			}
+			result.push_back(text[at++]);
+		}
+		const size_t capacity = call.u32(2);
+		call.put_wide(call[1], result, capacity);
+		call.ret(result.size() + 1);
+	});
+	registry.add("GetEnvironmentStringsW", 0, [&, variables](ApiCall &call) {
+		std::u16string block;
+		for (const auto &[key, entry] : variables->values) {
+			block += entry.first + u"=" + entry.second;
+			block.push_back(0);
+		}
+		block.push_back(0);
+		const auto address = context.allocator.allocate(block.size() * 2);
+		if (!address) {
+			call.fail(8);
+			return;
+		}
+		std::vector<uint8_t> bytes(block.size() * 2);
+		std::memcpy(bytes.data(), block.data(), bytes.size());
+		call.write(address, bytes);
+		call.ret(address);
+	});
+	registry.add("FreeEnvironmentStringsW", 1, [&](ApiCall &call) {
+		call.ret(context.allocator.release(call[0]));
+	});
+
+	// TLS and FLS indexes are process-wide; values belong to the thread whose TEB asks.
+	struct Slots {
+		std::vector<bool> used;
+		std::vector<uint64_t> callbacks;
+		std::map<uint64_t, std::vector<uint64_t>> values;
+	};
+	const auto make_slots = [](size_t count) {
+		auto slots = std::make_shared<Slots>();
+		slots->used.assign(count, false);
+		slots->callbacks.assign(count, 0);
+		return slots;
+	};
+	const auto tls = make_slots(1088), fls = make_slots(4080);
+	const auto bind = [&](const char *prefix, std::shared_ptr<Slots> slots, bool callback) {
+		const std::string base = prefix;
+		registry.add(base + "Alloc", callback ? 1 : 0, [&environment, slots, callback](ApiCall &call) {
+			const auto free = std::find(slots->used.begin(), slots->used.end(), false);
+			if (free == slots->used.end()) {
+				call.fail(callback ? 1450 : 8, UINT32_MAX);
+				return;
+			}
+			*free = true;
+			const size_t index = size_t(free - slots->used.begin());
+			slots->callbacks[index] = callback ? call[0] : 0;
+			for (auto &[thread, values] : slots->values)
+				if (index < values.size()) values[index] = 0;
+			call.ret(index);
+			call.set_last_error(0);
+		});
+		registry.add(base + "Free", 1, [slots](ApiCall &call) {
+			const auto index = size_t(call.u32(0));
+			if (index >= slots->used.size() || !slots->used[index]) {
+				call.fail(87);
+				return;
+			}
+			slots->used[index] = false;
+			for (auto &[thread, values] : slots->values)
+				if (index < values.size()) values[index] = 0;
+			call.ret(1);
+		});
+		registry.add(base + "GetValue", 1, [&environment, slots](ApiCall &call) {
+			const auto index = size_t(call.u32(0));
+			if (index >= slots->used.size() || !slots->used[index]) {
+				call.fail(87);
+				return;
+			}
+			auto &values = slots->values[environment.teb()];
+			call.set_last_error(0);
+			call.ret(index < values.size() ? values[index] : 0);
+		});
+		registry.add(base + "SetValue", 2, [&environment, slots](ApiCall &call) {
+			const auto index = size_t(call.u32(0));
+			if (index >= slots->used.size() || !slots->used[index]) {
+				call.fail(87);
+				return;
+			}
+			auto &values = slots->values[environment.teb()];
+			if (values.size() < slots->used.size())
+				values.resize(slots->used.size());
+			values[index] = call[1];
+			call.ret(1);
+		});
+	};
+	bind("Tls", tls, false);
+	bind("Fls", fls, true);
+	(void)process;
+}
+
+}

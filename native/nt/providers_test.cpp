@@ -62,8 +62,18 @@ int main(int argc, char **argv)
 		rejected([&] { raven::run_native_process(modules, entry, argv[1], std::chrono::milliseconds(0)); });
 		const auto result = raven::run_native_process(modules, entry, argv[1], std::chrono::seconds(2));
 		check(result.stop == raven::NativeStop::returned && result.value == 42, "provider placement fixture did not execute");
-		check(modules.all().at("kernel32.dll")->loaded.base() == base + 65536 &&
-			modules.all().at("kernelbase.dll")->loaded.base() == base + 131072, "provider placement overlapped the executable or another provider");
+		// Providers land after the executable and never overlap each other, whatever their export tables weigh.
+		std::vector<std::pair<uint64_t, uint64_t>> ranges;
+		for (const auto &[name, module] : modules.all())
+			ranges.emplace_back(module->loaded.base(), module->loaded.base() + module->loaded.data().size());
+		std::sort(ranges.begin(), ranges.end());
+		bool placed = modules.all().at("kernel32.dll")->loaded.base() >= base + 65536;
+		for (size_t index = 1; index < ranges.size(); ++index)
+			placed = placed && ranges[index - 1].second <= ranges[index].first;
+		if (!placed)
+			for (const auto &range : ranges)
+				std::cerr << std::hex << range.first << ' ' << range.second << '\n';
+		check(placed, "provider placement overlapped the executable or another provider");
 		rejected([&] { modules.resolve({"kernel32.dll", "Unimplemented", 0, false, 0}); });
 		rejected([&] { modules.resolve({"kernel32.dll", "", 1, true, 0}); });
 		raven::ModuleSet supplied;

@@ -32,6 +32,16 @@ struct NativeContext {
 	std::vector<uint8_t> xstate;
 };
 
+// Everything that distinguishes one guest thread from another while the process is stopped between API calls.
+struct NativeThreadState {
+	NativeContext context;
+	std::vector<NativeContext> callbacks;
+	std::vector<uint32_t> callback_cleanups;
+	bool active_call = false, awaiting_api = false, awaiting_syscall = false, debug_print_fault = false;
+	uint32_t pending_cleanup = 0;
+	uint64_t stack_top = 0;
+};
+
 // Images must outlive this stopped/resumable x86-64 Linux process.
 class NativeProcess {
 public:
@@ -67,6 +77,18 @@ public:
 	void set_teb(uint64_t base);
 	void enter_nt_service(uint64_t instruction, uint32_t number);
 	void complete_debug_print(uint64_t instruction);
+	// Address the guest returns to when a host-initiated call finishes.
+	uint64_t return_gate() const;
+	size_t callback_depth() const;
+	// Guest threads share one traced process: the scheduler saves the running thread and loads the next between API calls.
+	NativeThreadState save_thread() const;
+	void load_thread(const NativeThreadState &thread);
+	// A thread that has not started: no active call, its own stack ceiling and TEB (x64 GS base).
+	NativeThreadState new_thread(uint64_t stack_top, uint64_t teb) const;
+	// A fault stop becomes an API-style stop, so host code may run guest callbacks and redirect execution.
+	void enter_fault_dispatch();
+	// Continues the guest at a new context, dropping callbacks nested above depth (exception unwinding abandons them).
+	void redirect(const NativeContext &context, size_t depth);
 	std::vector<uint64_t> api_arguments(size_t count) const;
 	void return_api(uint64_t value);
 

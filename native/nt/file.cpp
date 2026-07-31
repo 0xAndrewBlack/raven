@@ -65,6 +65,8 @@ NativeObjectResult NativeObjects::write_file(uint64_t handle,std::span<const uin
 bool NativeObjectAPI::file_io(std::string_view name)
 {
 	if (name!="GetFileType" && name!="WriteFile") return false;
+	// Files opened through CreateFile are generic kernel objects served by the file API registry.
+	if (objects.object(process.api_arguments(1)[0])) return false;
 	const bool writing=name=="WriteFile";
 	const auto args=process.api_arguments(writing ? 5 : 1);
 	NativeObjectResult result;

@@ -56,7 +56,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     if(NOT NONCLIENT_SOURCE_HASH STREQUAL "dab51515f54adc39af43f088a02afe45a719476408bee3c7bef6113c25b180fc")
         message(FATAL_ERROR "Pinned ReactOS nonclient functions differ")
     endif()
-    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp)
+    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/shlwapi_api.cpp nt/system_api.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp)
     target_include_directories(raven_cpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     set(NLS_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-nls)
     file(SHA256 ${NLS_SOURCE}/txt2nls.cpp NLS_TOOL_HASH)
@@ -909,6 +909,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             if(NOT EXISTS "${RAVEN_RTL_COMPONENT_PATH}")
                 message(FATAL_ERROR "Configured native RTL component does not exist")
             endif()
+            add_custom_command(TARGET raven POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_RTL_COMPONENT_PATH} $<TARGET_FILE_DIR:raven>/raven-rtl.dll)
             set(HEAP_FIXTURE_DIR ${CMAKE_CURRENT_BINARY_DIR}/heap-fixtures)
             set(HEAP_PROBE ${HEAP_FIXTURE_DIR}/heap-probe.dll)
             set(HEAP_CLIENT ${HEAP_FIXTURE_DIR}/client.exe)
@@ -1076,6 +1078,43 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_test(NAME native_guest_arguments_cli COMMAND raven --run-process --execution=native
             ${CMAKE_CURRENT_BINARY_DIR}/arguments.exe -- "" plain "with space" "a\"b" "C:\\tail\\" --)
         set_tests_properties(native_guest_arguments_cli PROPERTIES TIMEOUT 15)
+        # Kernel contract fixtures check their own results and return a distinct non-zero code for each failed expectation.
+        find_program(RAVEN_CLANG clang)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        function(raven_kernel_fixture name source base libraries)
+            set(output ${CMAKE_CURRENT_BINARY_DIR}/${name}.exe)
+            add_custom_command(OUTPUT ${output}
+                COMMAND ${RAVEN_MINGW64} -O1 -nostdlib -fno-stack-protector -fno-builtin -mno-stack-arg-probe
+                    -Wl,--entry,raven_entry,--image-base,${base}
+                    -o ${output} ${LOADER_SOURCES}/${source} ${libraries}
+                DEPENDS ${LOADER_SOURCES}/${source} VERBATIM)
+            add_custom_target(${name}_fixture ALL DEPENDS ${output})
+        endfunction()
+        raven_kernel_fixture(kernel-file kernel_files_client.c 0x1b1000000 "-lkernel32")
+        raven_kernel_fixture(kernel-threads kernel_threads_client.c 0x1b2000000 "-lkernel32")
+        raven_kernel_fixture(kernel-shlwapi kernel_shlwapi_client.c 0x1b4000000 "-lkernel32;-lshlwapi")
+        set(KERNEL_PREFIX ${CMAKE_CURRENT_BINARY_DIR}/kernel-prefix)
+        add_test(NAME native_kernel_files COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-file.exe)
+        add_test(NAME native_kernel_threads COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-threads.exe)
+        add_test(NAME native_kernel_shlwapi COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-shlwapi.exe)
+        set_tests_properties(native_kernel_files native_kernel_threads native_kernel_shlwapi PROPERTIES TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "Native entry returned 0 " ENVIRONMENT RAVEN_PREFIX=${KERNEL_PREFIX})
+        add_test(NAME native_kernel_file_persistence COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check-file-persistence.py ${KERNEL_PREFIX})
+        set_tests_properties(native_kernel_file_persistence PROPERTIES TIMEOUT 15 DEPENDS native_kernel_files)
+        if(RAVEN_CLANG)
+            # The structured-exception fixture needs the compiler's __try support; the program supplies its own scope-table handler.
+            set(SEH_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/kernel-seh.o)
+            add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/kernel-seh.exe
+                COMMAND ${RAVEN_CLANG} --target=x86_64-w64-mingw32 -O0 -fms-extensions -fseh-exceptions -Xclang -fasync-exceptions -Wno-inconsistent-dllimport -fno-stack-protector -mno-stack-arg-probe -c
+                    -o ${SEH_OBJECT} ${LOADER_SOURCES}/kernel_seh_client.c
+                COMMAND ${RAVEN_MINGW64} -nostdlib -Wl,--entry,raven_entry,--image-base,0x1b3000000
+                    -o ${CMAKE_CURRENT_BINARY_DIR}/kernel-seh.exe ${SEH_OBJECT} -lkernel32
+                DEPENDS ${LOADER_SOURCES}/kernel_seh_client.c VERBATIM)
+            add_custom_target(kernel_seh_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/kernel-seh.exe)
+            add_test(NAME native_kernel_seh COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-seh.exe)
+            set_tests_properties(native_kernel_seh PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                ENVIRONMENT RAVEN_PREFIX=${KERNEL_PREFIX})
+        endif()
         add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/startup-info.exe
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -ffreestanding -fno-builtin -fno-stack-protector
                 -Wl,--entry,raven_entry,--image-base,0x18c000000

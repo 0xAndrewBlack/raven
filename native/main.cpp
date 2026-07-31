@@ -5,6 +5,7 @@
 #ifdef RAVEN_NATIVE_CPU
 #include "cpu/native_cpu.h"
 #include "nt/providers.h"
+#include "nt/paths.h"
 #include "nt/launch.h"
 #ifdef RAVEN_WAYLAND
 #include "desktop/wayland.h"
@@ -153,6 +154,12 @@ int main(int argc, char **argv)
 						}
 						std::cerr << '\n';
 					};
+					// The guest heap component ships beside the runtime when the build provisioned it.
+					if (entry->image.is_64 && !modules.all().contains("raven-rtl.dll")) {
+						const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-rtl.dll";
+						if (std::filesystem::exists(component))
+							modules.add("raven-rtl.dll", read_file(component.c_str()));
+					}
 					raven::DesktopPresentation presentation;
 #ifdef RAVEN_WAYLAND
 					raven::WaylandPresentation backend;
@@ -161,10 +168,13 @@ int main(int argc, char **argv)
 					if (wayland) throw std::runtime_error("native Wayland presentation was not built");
 #endif
 					std::optional<raven::NativeLaunch> launch;
-					if (last_file<argc || inherited_stdio) {
+					{
 						std::vector<std::string_view> arguments;
 						for (int i=last_file+1;i<argc;++i) arguments.emplace_back(argv[i]);
-						const auto image=raven::launch_utf16(entry->name);
+						// The guest sees its own executable by a drive-qualified path, like any Windows process.
+						const raven::NativePrefix prefix=raven::NativePrefix::from_environment();
+						const raven::NativePaths paths(prefix);
+						const auto image=paths.dos(std::filesystem::absolute(argv[first_file]));
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
 						if (inherited_stdio) launch->standard_fds={0,1,2};
 					}

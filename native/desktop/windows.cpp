@@ -309,6 +309,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		}
 		if (!blocking) return 0;
 		if (std::chrono::steady_clock::now()>=deadline) throw NativeResult{NativeStop::timeout,0,0,0};
+		if (yield_hook && yield_hook()) continue;
 		if (presentation.poll) {
 			const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(deadline-std::chrono::steady_clock::now());
 			for (const auto &event : presentation.poll(std::min(remaining,std::chrono::milliseconds(20))))

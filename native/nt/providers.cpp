@@ -7,6 +7,13 @@
 #include "memory.h"
 #include "object_api.h"
 #include "heap.h"
+#include "api.h"
+#include "apiset.h"
+#include "text.h"
+#include "kernel_context.h"
+#include "unwind.h"
+#include "prefix.h"
+#include "system_exports.h"
 #include "desktop/api.h"
 #include "desktop/windows.h"
 #ifdef RAVEN_VULKAN
@@ -14,6 +21,8 @@
 #endif
 
 #include <algorithm>
+#include <fstream>
+#include <iostream>
 #include <array>
 #include <stdexcept>
 #include <csignal>
@@ -38,7 +47,8 @@ std::vector<uint8_t> environment_provider(std::string_view name, uint64_t base)
 }
 
 std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
-	std::span<const std::string_view> exports, bool x86, std::span<const std::string_view> data_exports)
+	std::span<const std::string_view> exports, bool x86, std::span<const std::string_view> data_exports,
+	std::span<const std::pair<std::string_view, uint16_t>> ordinal_exports)
 {
 	if (!x86 && !data_exports.empty())
 		throw std::runtime_error("native data exports require an x86 provider");
@@ -54,9 +64,39 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 			throw std::runtime_error("native provider export names exceed policy limit");
 		string_size += symbol.size() + 1;
 	}
+	// Every export owns a slot; public ordinals pin a name to its Windows slot and the other names fill the gaps.
+	std::vector<uint32_t> slot_of(exports.size(), 0);
+	uint32_t slot_count = 0;
+	for (const auto &[exported, ordinal] : ordinal_exports) {
+		const auto found = std::lower_bound(exports.begin(), exports.end(), exported);
+		if (found == exports.end() || *found != exported || !ordinal)
+			throw std::runtime_error("native provider ordinal names an unknown export");
+		auto &slot = slot_of[size_t(found - exports.begin())];
+		if (slot)
+			throw std::runtime_error("native provider ordinal is assigned twice");
+		slot = ordinal;
+		slot_count = std::max<uint32_t>(slot_count, ordinal);
+	}
+	std::vector<bool> taken(size_t(slot_count) + exports.size() + 1, false);
+	for (const auto slot : slot_of)
+		if (slot && taken[slot])
+			throw std::runtime_error("native provider ordinal collides with another export");
+		else if (slot)
+			taken[slot] = true;
+	uint32_t next_slot = 1;
+	for (auto &slot : slot_of)
+		if (!slot) {
+			while (taken[next_slot])
+				++next_slot;
+			slot = next_slot;
+			taken[slot] = true;
+			slot_count = std::max(slot_count, slot);
+		}
+	const bool numbered = !ordinal_exports.empty();
+	const size_t function_count = numbered ? slot_count : exports.size();
 	const size_t directory = 0x200 + exports.size() * 16;
 	const size_t functions = directory + 40;
-	const size_t name_table = functions + exports.size() * 4;
+	const size_t name_table = functions + function_count * 4;
 	const size_t ordinals = name_table + exports.size() * 4;
 	const size_t module_name = ordinals + exports.size() * 2;
 	// Each data export owns one zeroed 16-byte slot after the strings; the section becomes writable for them.
@@ -103,8 +143,8 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(directory + 12, rva(module_name));
 	// Only the independently verified common-controls identity receives a public ordinal.
 	const bool icon_control = name == "comctl32.dll" && exports.size() == 1 && exports[0] == "LoadIconWithScaleDown";
-	put(directory + 16, icon_control ? 381 : 0x10000);
-	put(directory + 20, exports.size());
+	put(directory + 16, numbered ? 1 : icon_control ? 381 : 0x10000);
+	put(directory + 20, function_count);
 	put(directory + 24, exports.size());
 	put(directory + 28, rva(functions));
 	put(directory + 32, rva(name_table));
@@ -116,9 +156,10 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 		bytes[code] = 0xcc;
 		bytes[code + 1] = 0xc3;
 		const auto data = std::find(data_exports.begin(), data_exports.end(), exports[index]);
-		put(functions + index * 4, data == data_exports.end() ? rva(code) : rva(data_start + size_t(data - data_exports.begin()) * 16));
+		const size_t entry = numbered ? slot_of[index] - 1 : index;
+		put(functions + entry * 4, data == data_exports.end() ? rva(code) : rva(data_start + size_t(data - data_exports.begin()) * 16));
 		put(name_table + index * 4, rva(cursor));
-		put(ordinals + index * 2, index, 2);
+		put(ordinals + index * 2, entry, 2);
 		text(cursor, exports[index]);
 		cursor += exports[index].size() + 1;
 	}
@@ -157,6 +198,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		throw std::runtime_error("native process requires an executable graph and positive timeout");
 	for (const auto &[name,module]:modules.all()) validate_native_image(module->image,name);
 	std::vector<std::string_view> native_modules{"kernel32.dll","kernelbase.dll","user32.dll","gdi32.dll","comctl32.dll","ntdll.dll"};
+	for (const auto library : system_library_names())
+		if (std::find(native_modules.begin(), native_modules.end(), library) == native_modules.end())
+			native_modules.push_back(library);
 #ifdef RAVEN_VULKAN
 	native_modules.push_back("vulkan-1.dll");
 #endif
@@ -177,10 +221,25 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			nt_names.push_back(name);
 	}
 	std::sort(nt_names.begin(),nt_names.end());
-	for (const char *name : {"kernel32.dll", "kernelbase.dll", "user32.dll", "gdi32.dll", "comctl32.dll"}) {
-		const auto symbols = std::string_view(name) == "user32.dll" ? NativeDesktop::user_exports() :
-			std::string_view(name) == "gdi32.dll" ? NativeDesktop::gdi_exports() :
-			std::string_view(name) == "comctl32.dll" ? NativeDesktop::control_exports() : std::span<const std::string_view>(names);
+	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.
+	std::vector<std::string> system_modules{"kernel32.dll", "kernelbase.dll", "user32.dll", "gdi32.dll", "comctl32.dll"};
+	for (const auto library : system_library_names())
+		if (std::find(system_modules.begin(), system_modules.end(), library) == system_modules.end())
+			system_modules.emplace_back(library);
+	for (const auto &name : system_modules) {
+		const auto base_symbols = name == "user32.dll" ? NativeDesktop::user_exports() :
+			name == "gdi32.dll" ? NativeDesktop::gdi_exports() :
+			name == "comctl32.dll" ? NativeDesktop::control_exports() :
+			name == "kernel32.dll" || name == "kernelbase.dll" ? std::span<const std::string_view>(names) : std::span<const std::string_view>();
+		const auto library = name == "kernelbase.dll" ? std::string_view("kernel32.dll") : std::string_view(name);
+		std::vector<std::string_view> symbols(base_symbols.begin(), base_symbols.end());
+		const auto listed = system_export_names(library);
+		symbols.insert(symbols.end(), listed.begin(), listed.end());
+		std::sort(symbols.begin(), symbols.end());
+		symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
+		if (symbols.empty())
+			continue;
+		const auto ordinals = system_export_ordinals(library);
 		PEModule *provider = nullptr;
 		const auto found = modules.all().find(name);
 		if (found != modules.all().end()) {
@@ -188,13 +247,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				continue;
 			provider = found->second.get();
 		} else {
-			const auto bytes = runtime_provider(name, 0x180000000ULL, symbols);
+			const auto bytes = runtime_provider(name, 0x180000000ULL, symbols, false, {}, ordinals);
 			const auto base = provider_base(modules, PEImage(bytes).image_size);
-			provider = &modules.add(name, runtime_provider(name, base, symbols), base);
+			provider = &modules.add(name, runtime_provider(name, base, symbols, false, {}, ordinals), base);
 			provider->runtime_api = true;
 		}
 		for (const auto &symbol : provider->exports)
-			traps.emplace(provider->loaded.base() + symbol.address, symbol.names.at(0));
+			if (symbol.address && !symbol.names.empty())
+				traps.emplace(provider->loaded.base() + symbol.address, symbol.names.at(0));
 	}
 	const auto nt=modules.all().find("ntdll.dll");
 	const bool needs_nt=std::any_of(modules.all().begin(),modules.all().end(),[](const auto &item) {
@@ -270,6 +330,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		standard_handles[i]=inherited.value;
 	}
 	environment.prepare_parameters(*launch,standard_handles);
+	ApiRegistry api_registry;
 	NativeLoaderData loader_data(process, environment.peb(), modules, entry);
 	NativeTLS tls(process, environment, order);
 	NativeModuleAPI module_api(process, environment, modules, entry);
@@ -288,20 +349,36 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	VulkanBridge vulkan(process, modules);
 #endif
 	const auto remaining = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()); };
-	struct ProcessExit { uint32_t code; uint64_t instruction; };
 	size_t debug_bytes=0;
+	KernelContext *kernel_ptr=nullptr;
 	const auto invoke = [&](uint64_t address, std::span<const uint64_t> arguments) {
 		auto budget = remaining();
 		if (budget.count() <= 0)
 			return NativeResult{NativeStop::timeout, 0, address, 0};
+		// Level of this loop in the callback nesting; an exception dispatch that redirects the guest resumes at its own level.
+		const size_t level = process.active() ? process.callback_depth() + 1 : 0;
 		auto result = process.active() ? process.callback(address, arguments, budget) : process.call(address, arguments, budget);
 		while (result.stop == NativeStop::api || result.stop == NativeStop::syscall || result.stop==NativeStop::fault) {
 			if (result.stop==NativeStop::fault) {
 				const auto image=modules.all().find("ntdll.dll");
 				if (!debug || image==modules.all().end() || result.signal!=SIGSEGV || result.signal_code!=SI_KERNEL || result.value!=1 ||
 					result.instruction<image->second->loaded.base() || result.instruction-image->second->loaded.base()+4>image->second->image.image_size ||
-					process.read_memory(result.instruction,4)!=std::vector<uint8_t>{0xcd,0x2d,0xcc,0xc3})
+					process.read_memory(result.instruction,4)!=std::vector<uint8_t>{0xcd,0x2d,0xcc,0xc3}) {
+					// A CPU fault is a Windows exception: structured handlers of the faulting frames get the first chance.
+					if (!kernel_ptr || !kernel_ptr->raise_fault || result.signal==0)
+						return result;
+					try {
+						kernel_ptr->raise_fault(result);
+					} catch (const ExecutionRedirected &redirected) {
+						if (redirected.level!=level) throw;
+						budget=remaining();
+						if (budget.count()<=0)
+							return NativeResult{NativeStop::timeout,0,result.instruction,0};
+						result=process.resume(budget);
+						continue;
+					}
 					return result;
+				}
 				const auto context=process.context().registers;
 				const auto length=uint32_t(context.rdx);
 				if (length>512 || length>1024*1024-debug_bytes)
@@ -335,16 +412,35 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				process.abandon_call();
 				throw ProcessExit{code,result.instruction};
 			}
-			if (found != traps.end() && found->second == "RaiseException")
-				return native_raise_exception(process);
-			if (found!=traps.end() && (found->second=="RtlRaiseException" || found->second=="RtlRaiseStatus"))
-				return native_raise_rtl_exception(process,found->second=="RtlRaiseStatus");
-			if (found == traps.end() || (!environment.dispatch(found->second) && !module_api.dispatch(found->second) && !resources.dispatch(found->second) && !memory.dispatch(found->second) && !object_api.dispatch(found->second) && !heap.dispatch(found->second) && !desktop.dispatch(found->second) && !windows.dispatch(found->second)
-#ifdef RAVEN_VULKAN
-				&& !vulkan.dispatch(found->second)
-#endif
-				))
+			if (found!=traps.end() && found->second=="RtlRaiseStatus")
+				return native_raise_rtl_exception(process,true);
+			if (found == traps.end())
 				return result;
+			if (std::getenv("RAVEN_TRACE_API")) {
+				std::cerr << "api " << found->second << '(' << std::hex;
+				for (const auto value : process.api_arguments(4))
+					std::cerr << ' ' << value;
+				std::cerr << std::dec << " )\n";
+			}
+			bool dispatched;
+			try {
+				dispatched = environment.dispatch(found->second) || module_api.dispatch(found->second) || resources.dispatch(found->second) || memory.dispatch(found->second) || object_api.dispatch(found->second) || heap.dispatch(found->second) || desktop.dispatch(found->second) || windows.dispatch(found->second) || api_registry.dispatch(process, environment, found->second)
+#ifdef RAVEN_VULKAN
+					|| vulkan.dispatch(found->second)
+#endif
+					;
+			} catch (const ExecutionRedirected &redirected) {
+				if (redirected.level!=level) throw;
+				budget=remaining();
+				if (budget.count()<=0)
+					return NativeResult{NativeStop::timeout,0,result.instruction,0};
+				result=process.resume(budget);
+				continue;
+			}
+			if (!dispatched) {
+				std::cerr << "raven: unimplemented native API " << found->second << '\n';
+				return result;
+			}
 			budget = remaining();
 			if (budget.count() <= 0)
 				return NativeResult{NativeStop::timeout, 0, result.instruction, 0};
@@ -352,6 +448,24 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		}
 		return result;
 	};
+	const auto prefix = NativePrefix::from_environment();
+	NativePaths paths(prefix);
+	GuestAllocator allocator(memory, heap);
+	NativeThreads threads(process, environment, memory, tls, deadline);
+	threads.set_runner(invoke);
+	object_api.set_cooperative(true);
+	windows.set_yield([&threads] { return threads.live() > 1 && threads.yield(); });
+	KernelContext kernel{process, environment, memory, allocator, kernel_objects, threads, paths, modules, entry, *launch, invoke};
+	kernel_ptr=&kernel;
+	NativeUnwinder unwinder(process, modules);
+	register_exception_api(api_registry, kernel, unwinder);
+	register_system_api(api_registry, kernel);
+	register_sync_api(api_registry, kernel);
+	register_thread_api(api_registry, kernel);
+	register_text_api(api_registry, kernel);
+	register_memory_api(api_registry, kernel);
+	register_file_api(api_registry, kernel);
+	register_shlwapi_api(api_registry, kernel);
 	std::vector<const PEModule *> attached;
 	attached.reserve(order.size());
 	const auto notify_tls = [&](const PEModule &module, uint64_t reason) {
@@ -390,18 +504,40 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (result.stop != NativeStop::returned)
 			throw result;
 	};
+	// Libraries loaded by explicit path keep their host file under the module identity (lower-case file name).
+	std::map<std::string, std::filesystem::path> explicit_files;
 	module_api.set_loader([&](std::string name) -> uint64_t {
 		if (name.empty()) {
 			environment.set_last_error(126);
 			return 0;
 		}
-		for (auto &character : name) {
-			if (static_cast<unsigned char>(character) > 127 || character == '/' || character == '\\' || character == ':') {
-				environment.set_last_error(120);
-				return 0;
-			}
+		for (auto &character : name)
 			if (static_cast<unsigned char>(character) < 32) {
 				environment.set_last_error(87);
+				return 0;
+			}
+		if (name.find_first_of("/\\:") != name.npos) {
+			// A path names its module by file name; Windows system libraries are served natively wherever the path points.
+			const auto slash = name.find_last_of("/\\");
+			auto identity = name.substr(slash == name.npos ? 0 : slash + 1);
+			for (auto &character : identity)
+				if (character >= 'A' && character <= 'Z')
+					character = static_cast<char>(character + ('a' - 'A'));
+			if (identity.find('.') == identity.npos)
+				identity += ".dll";
+			if (!modules.all().contains(identity) && !apiset_host(identity).empty() == false) {
+				const auto resolved = paths.resolve(from_utf8(name));
+				if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host)) {
+					environment.set_last_error(126);
+					return 0;
+				}
+				explicit_files.emplace(identity, resolved->host);
+			}
+			name = identity;
+		}
+		for (auto &character : name) {
+			if (static_cast<unsigned char>(character) > 127) {
+				environment.set_last_error(120);
 				return 0;
 			}
 			if (character >= 'A' && character <= 'Z')
@@ -411,6 +547,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			name.pop_back();
 		else if (name.find('.') == std::string::npos)
 			name += ".dll";
+		if (const auto host = apiset_host(name); !host.empty())
+			name = host;
 		if (loading) {
 			environment.set_last_error(120);
 			return 0;
@@ -457,7 +595,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				throw std::runtime_error("native DLL graph exceeds module limit");
 			if (!source || identity.find_first_of("/\\:") != std::string::npos)
 				throw LoadFailure{126};
-			auto bytes = source(identity);
+			std::optional<std::vector<uint8_t>> bytes;
+			if (const auto explicit_file = explicit_files.find(identity); explicit_file != explicit_files.end()) {
+				std::ifstream stream(explicit_file->second, std::ios::binary);
+				bytes = std::vector<uint8_t>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+			} else {
+				bytes = source(identity);
+			}
 			if (!bytes)
 				throw LoadFailure{126};
 			// Reject unsupported initialization before publishing an image.
@@ -590,6 +734,30 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		}
 		loading = false;
 		return true;
+	});
+	// Thread notifications reach the executable's TLS callbacks first, then every loaded module in load order (reverse on exit).
+	threads.set_notifier([&](uint32_t reason) {
+		const auto notify = [&](const PEModule &module) {
+			if (const auto stopped = notify_tls(module, reason); stopped.stop != NativeStop::returned)
+				throw stopped;
+			if ((module.image.characteristics & 0x2000) && module.image.entry && !module.runtime_api) {
+				const uint64_t arguments[] = {module.loaded.base(), reason, 0};
+				const auto result = invoke(module.loaded.base() + module.image.entry, arguments);
+				if (result.stop != NativeStop::returned)
+					throw result;
+			}
+		};
+		if (reason == 2) {
+			notify(entry);
+			for (const auto *module : attached)
+				if (module != &entry)
+					notify(*module);
+		} else {
+			for (auto module = attached.rbegin(); module != attached.rend(); ++module)
+				if (*module != &entry)
+					notify(**module);
+			notify(entry);
+		}
 	});
 	bool entry_tls_ready=false,cleanup_started=false;
 	const auto exit_result = [&](ProcessExit request) {

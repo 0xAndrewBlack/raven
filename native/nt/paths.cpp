@@ -1,0 +1,223 @@
+#include "paths.h"
+#include "text.h"
+
+#include <cstdlib>
+#include <dirent.h>
+#include <vector>
+
+namespace raven {
+
+namespace {
+
+std::u16string strip_namespace(std::u16string_view path)
+{
+	for (const std::u16string_view prefix : {u"\\\\?\\", u"\\\\.\\", u"\\??\\"})
+		if (path.starts_with(prefix) && path.size() > prefix.size() + 1 && path[prefix.size() + 1] == u':')
+			return std::u16string(path.substr(prefix.size()));
+	return std::u16string(path);
+}
+
+// Looks for an entry that differs from name only by case, so Windows spellings find Linux files.
+std::optional<std::string> case_match(const std::filesystem::path &directory, const std::string &name)
+{
+	std::error_code ignored;
+	if (std::filesystem::exists(directory / name, ignored))
+		return name;
+	const auto wanted = from_utf8(name);
+	DIR *handle = ::opendir(directory.c_str());
+	if (!handle)
+		return std::nullopt;
+	std::optional<std::string> found;
+	while (const auto *entry = ::readdir(handle))
+		if (equal_fold(from_utf8(entry->d_name), wanted)) {
+			found = entry->d_name;
+			break;
+		}
+	::closedir(handle);
+	return found;
+}
+
+}
+
+NativePaths::NativePaths(const NativePrefix &prefix) : prefix(prefix), directory(u"C:\\")
+{
+}
+
+std::optional<std::filesystem::path> NativePaths::drive_root(char16_t letter) const
+{
+	if (letter >= u'A' && letter <= u'Z')
+		letter = char16_t(letter + 32);
+	if (letter < u'a' || letter > u'z')
+		return std::nullopt;
+	if (letter == u'z')
+		return std::filesystem::path("/");
+	auto root = prefix.root() / (std::string("drive_") + char(letter));
+	std::error_code ignored;
+	if (letter != u'c' && !std::filesystem::is_directory(root, ignored))
+		return std::nullopt;
+	return root;
+}
+
+bool NativePaths::device(std::u16string_view path)
+{
+	auto name = strip_namespace(path);
+	if (name.starts_with(u"\\\\.\\"))
+		name.erase(0, 4);
+	const auto slash = name.find_last_of(u"\\/");
+	if (slash != name.npos)
+		return false;
+	const auto dot = name.find(u'.');
+	if (dot != name.npos)
+		name.erase(dot);
+	for (const std::u16string_view candidate : {u"NUL", u"CON", u"PRN", u"AUX", u"CONIN$", u"CONOUT$"})
+		if (equal_fold(name, candidate))
+			return true;
+	if (name.size() == 4 && (equal_fold(name.substr(0, 3), u"COM") || equal_fold(name.substr(0, 3), u"LPT")) && name[3] >= u'1' && name[3] <= u'9')
+		return true;
+	return false;
+}
+
+std::u16string NativePaths::full(std::u16string_view input) const
+{
+	auto text = strip_namespace(input);
+	if (text.empty())
+		return {};
+	for (auto &character : text)
+		if (character == u'/')
+			character = u'\\';
+	std::u16string base;
+	std::u16string_view rest = text;
+	if (text.size() >= 2 && text[1] == u':') {
+		const char16_t letter = upper_case(text[0]);
+		if (letter < u'A' || letter > u'Z')
+			return {};
+		rest = rest.substr(2);
+		if (rest.starts_with(u"\\"))
+			base = std::u16string(1, letter) + u":";
+		else if (upper_case(directory[0]) == letter)
+			base = directory;
+		else
+			base = std::u16string(1, letter) + u":\\";
+	} else if (text.starts_with(u"\\\\")) {
+		return {};
+	} else if (text.starts_with(u"\\")) {
+		base = directory.substr(0, 2);
+	} else {
+		base = directory;
+	}
+	// base is "X:" (rooted rest), "X:\" or "X:\dir..." (relative rest).
+	std::vector<std::u16string> parts;
+	const auto split = [&](std::u16string_view value) {
+		for (size_t start = 0; start <= value.size();) {
+			const auto end = value.find(u'\\', start);
+			const auto part = value.substr(start, end == value.npos ? value.npos : end - start);
+			if (part == u"..") {
+				if (!parts.empty())
+					parts.pop_back();
+			} else if (!part.empty() && part != u".") {
+				parts.emplace_back(part);
+			}
+			if (end == value.npos)
+				break;
+			start = end + 1;
+		}
+	};
+	split(base.substr(base.size() > 2 ? 3 : base.size()));
+	split(rest);
+	std::u16string result = base.substr(0, 2);
+	result[0] = upper_case(result[0]);
+	for (const auto &part : parts)
+		result += u"\\" + part;
+	if (parts.empty() || (!rest.empty() && rest.back() == u'\\' && !parts.empty()))
+		result += u"\\";
+	return result;
+}
+
+std::optional<NativePaths::Resolved> NativePaths::resolve(std::u16string_view input) const
+{
+	const auto path = full(input);
+	if (path.size() < 3)
+		return std::nullopt;
+	auto host = drive_root(path[0]);
+	if (!host)
+		return std::nullopt;
+	Resolved result{*host, true, true};
+	std::u16string_view rest = std::u16string_view(path).substr(3);
+	while (!rest.empty()) {
+		const auto end = rest.find(u'\\');
+		const auto part = rest.substr(0, end);
+		if (!part.empty()) {
+			const auto name = to_utf8(part);
+			const bool last = end == rest.npos || end + 1 == rest.size();
+			if (const auto match = result.exists ? case_match(result.host, name) : std::nullopt)
+				result.host /= *match;
+			else {
+				result.host /= name;
+				if (result.exists)
+					result.exists = false;
+				else
+					result.parent_exists = false;
+				if (!last)
+					result.parent_exists = false;
+			}
+		}
+		if (end == rest.npos)
+			break;
+		rest = rest.substr(end + 1);
+	}
+	return result;
+}
+
+std::u16string NativePaths::user_name() const
+{
+	const char *login = std::getenv("USER");
+	return from_utf8(login && *login ? login : "user");
+}
+
+std::u16string NativePaths::user_profile() const
+{
+	const auto profile = u"C:\\Users\\" + user_name();
+	for (const auto *part : {u"", u"\\AppData\\Roaming", u"\\AppData\\Local\\Temp", u"\\Documents", u"\\Desktop"})
+		if (const auto resolved = resolve(profile + part))
+			std::filesystem::create_directories(resolved->host);
+	return profile;
+}
+
+std::u16string NativePaths::temporary() const
+{
+	return user_profile() + u"\\AppData\\Local\\Temp\\";
+}
+
+bool NativePaths::set_current(std::u16string_view path)
+{
+	const auto resolved = resolve(path);
+	if (!resolved || !resolved->exists || !std::filesystem::is_directory(resolved->host))
+		return false;
+	directory = full(path);
+	return true;
+}
+
+std::u16string NativePaths::dos(const std::filesystem::path &host) const
+{
+	const auto relative = [&](const std::filesystem::path &root) -> std::optional<std::u16string> {
+		const auto text = host.lexically_normal().string();
+		const auto base = root.lexically_normal().string();
+		const auto stripped = base.size() > 1 && base.back() == '/' ? base.substr(0, base.size() - 1) : base;
+		if (stripped == "/" ? text.starts_with("/") : text == stripped || text.starts_with(stripped + "/")) {
+			auto tail = from_utf8(text.substr(stripped == "/" ? 0 : stripped.size()));
+			for (auto &character : tail)
+				if (character == u'/')
+					character = u'\\';
+			return tail.empty() ? u"\\" : tail;
+		}
+		return std::nullopt;
+	};
+	for (char16_t letter = u'a'; letter < u'z'; ++letter)
+		if (const auto root = drive_root(letter))
+			if (const auto tail = relative(*root))
+				return std::u16string(1, char16_t(letter - 32)) + u":" + *tail;
+	const auto tail = relative("/");
+	return u"Z:" + tail.value_or(u"\\");
+}
+
+}

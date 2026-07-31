@@ -46,6 +46,75 @@ std::pair<std::shared_ptr<NativeObjects::Event>,uint32_t> NativeObjects::event(u
 	return {found->second.event,0};
 }
 
+NativeObjectResult NativeObjects::add_object(std::shared_ptr<KernelObject> object)
+{
+	std::lock_guard lock(mutex);
+	if (handles.size()>=limit || next>UINT32_MAX-4)
+		return {0,0xc000009aU};
+	const auto handle=next;
+	handles.emplace(handle,Handle{{},0x1f0003,{},std::move(object)});
+	next+=4;
+	return {handle};
+}
+
+std::shared_ptr<KernelObject> NativeObjects::object(uint64_t handle) const
+{
+	std::lock_guard lock(mutex);
+	const auto found=handles.find(handle);
+	return found==handles.end() ? nullptr : found->second.generic;
+}
+
+int NativeObjects::signaled(uint64_t handle, uint32_t thread) const
+{
+	std::shared_ptr<Event> event;
+	std::shared_ptr<KernelObject> generic;
+	{
+		std::lock_guard lock(mutex);
+		const auto found=handles.find(handle);
+		if (found==handles.end()) return -2;
+		event=found->second.event;
+		generic=found->second.generic;
+	}
+	if (generic) return generic->signaled(thread);
+	if (event) {
+		std::lock_guard lock(event->mutex);
+		return event->signaled ? 1 : 0;
+	}
+	return -1;
+}
+
+void NativeObjects::consume(uint64_t handle, uint32_t thread)
+{
+	std::shared_ptr<Event> event;
+	std::shared_ptr<KernelObject> generic;
+	{
+		std::lock_guard lock(mutex);
+		const auto found=handles.find(handle);
+		if (found==handles.end()) return;
+		event=found->second.event;
+		generic=found->second.generic;
+	}
+	if (generic) generic->consume(thread);
+	else if (event) {
+		std::lock_guard lock(event->mutex);
+		if (event->type==1) event->signaled=false;
+	}
+}
+
+NativeObjectResult NativeObjects::duplicate(uint64_t handle)
+{
+	std::lock_guard lock(mutex);
+	const auto found=handles.find(handle);
+	if (found==handles.end())
+		return {0,invalid_handle};
+	if (handles.size()>=limit || next>UINT32_MAX-4)
+		return {0,0xc000009aU};
+	const auto copy=next;
+	next+=4;
+	handles.emplace(copy,found->second);
+	return {copy};
+}
+
 uint32_t NativeObjects::close(uint64_t handle)
 {
 	std::lock_guard lock(mutex);

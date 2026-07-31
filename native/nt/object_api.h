@@ -10,6 +10,8 @@ public:
 	NativeObjectAPI(NativeProcess &process, NativeEnvironment &environment, NativeObjects &objects,
 		std::chrono::steady_clock::time_point deadline);
 	bool dispatch(std::string_view name);
+	// Waits belong to the thread scheduler once guest threads exist; only the NT variants stay here.
+	void set_cooperative(bool value) { cooperative = value; }
 	static std::span<const std::string_view> nt_exports();
 
 private:
@@ -17,6 +19,7 @@ private:
 	NativeEnvironment &environment;
 	NativeObjects &objects;
 	std::chrono::steady_clock::time_point deadline;
+	bool cooperative = false;
 	bool file_io(std::string_view name);
 };
 

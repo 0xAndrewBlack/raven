@@ -108,6 +108,9 @@ void NativeChild::stop()
 
 int NativeChild::wait()
 {
+	// Guest code usually reaches its next trap within microseconds, so poll hot first and back off only for long-running calls.
+	unsigned polls = 0;
+	std::chrono::microseconds pause{20};
 	for (;;) {
 		int status = 0;
 		const pid_t result = waitpid(pid, &status, WNOHANG);
@@ -118,9 +121,12 @@ int NativeChild::wait()
 		}
 		if (result == -1 && errno != EINTR)
 			throw std::runtime_error("cannot wait for native guest");
+		if (++polls < 4000)
+			continue;
 		if (std::chrono::steady_clock::now() >= deadline)
 			return -1;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(pause);
+		pause = std::min(pause * 2, std::chrono::microseconds(1000));
 	}
 }
 
@@ -169,6 +175,8 @@ struct NativeProcess::State {
 	std::vector<NativeContext> callbacks;
 	std::vector<uint32_t> callback_cleanups;
 	uint64_t stack_top = 0;
+	// The first thread keeps its stack for the life of the process; other threads borrow stack_top while they run.
+	uint64_t initial_stack_top = 0;
 	bool stopped = true;
 	bool active_call = false;
 	bool awaiting_api = false;
@@ -237,6 +245,7 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 	child.syscall(SYS_mprotect, stack + 4096, stack_size, PROT_READ | PROT_WRITE);
 	state->mappings.push_back({stack + 4096, stack_size, 0, PROT_READ | PROT_WRITE});
 	state->stack_top = stack + 4096 + stack_size;
+	state->initial_stack_top = state->stack_top;
 	if (mode == NativeMode::x86) {
 		// 32-bit return addresses cannot name the 64-bit bootstrap gate, so calls return through an INT3 page below 4 GiB.
 		const auto page = child.syscall(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE,
@@ -438,8 +447,8 @@ bool NativeProcess::memory_available(uint64_t address, size_t size) const
 	state->require_stopped();
 	memory_range(address,size,PROT_NONE,state->limit());
 	const auto end = address+size;
-	const auto stack = state->stack_top-1024*1024-4096;
-	if (address < state->stack_top+4096 && stack < end)
+	const auto stack = state->initial_stack_top-1024*1024-4096;
+	if (address < state->initial_stack_top+4096 && stack < end)
 		return false;
 	for (const auto &mapping : state->mappings)
 		if (address < mapping.address+mapping.size && mapping.address < end)
@@ -528,7 +537,7 @@ void NativeProcess::unmap_image(uint64_t address)
 std::pair<uint64_t, uint64_t> NativeProcess::stack_bounds() const
 {
 	state->require_stopped();
-	return {state->stack_top - 1024 * 1024, state->stack_top};
+	return {state->initial_stack_top - 1024 * 1024, state->initial_stack_top};
 }
 
 bool NativeProcess::active() const
@@ -548,6 +557,70 @@ void NativeProcess::abandon_call()
 	state->active_call=false;
 	state->awaiting_api=false;
 	state->awaiting_syscall=false;
+}
+
+uint64_t NativeProcess::return_gate() const
+{
+	return state->mode == NativeMode::x86 ? state->return_gate : state->child->gate;
+}
+
+size_t NativeProcess::callback_depth() const
+{
+	return state->callbacks.size();
+}
+
+NativeThreadState NativeProcess::save_thread() const
+{
+	state->require_stopped();
+	return {context(), state->callbacks, state->callback_cleanups, state->active_call, state->awaiting_api, state->awaiting_syscall,
+		state->debug_print_fault, state->pending_cleanup, state->stack_top};
+}
+
+void NativeProcess::load_thread(const NativeThreadState &thread)
+{
+	state->require_stopped();
+	set_context(thread.context);
+	state->callbacks = thread.callbacks;
+	state->callback_cleanups = thread.callback_cleanups;
+	state->active_call = thread.active_call;
+	state->awaiting_api = thread.awaiting_api;
+	state->awaiting_syscall = thread.awaiting_syscall;
+	state->debug_print_fault = thread.debug_print_fault;
+	state->pending_cleanup = thread.pending_cleanup;
+	state->stack_top = thread.stack_top;
+}
+
+NativeThreadState NativeProcess::new_thread(uint64_t stack_top, uint64_t teb) const
+{
+	state->require_stopped();
+	if (state->mode != NativeMode::x64)
+		throw std::runtime_error("native guest threads are x64 only");
+	NativeThreadState thread{};
+	thread.context = context();
+	thread.context.registers.gs_base = teb;
+	thread.stack_top = stack_top;
+	return thread;
+}
+
+void NativeProcess::enter_fault_dispatch()
+{
+	state->require_stopped();
+	if (!state->active_call || state->awaiting_api || state->awaiting_syscall || state->mode != NativeMode::x64)
+		throw std::runtime_error("native fault dispatch requires a stopped x64 call");
+	state->awaiting_api = true;
+	state->pending_cleanup = 0;
+}
+
+void NativeProcess::redirect(const NativeContext &target, size_t depth)
+{
+	state->require_stopped();
+	if (!state->active_call || !state->awaiting_api || depth > state->callbacks.size())
+		throw std::runtime_error("native redirection requires a pending API call");
+	set_context(target);
+	state->callbacks.resize(depth);
+	state->callback_cleanups.resize(depth);
+	state->awaiting_api = false;
+	state->awaiting_syscall = false;
 }
 
 NativeMode NativeProcess::mode() const

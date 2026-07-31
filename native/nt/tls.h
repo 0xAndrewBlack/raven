@@ -16,6 +16,9 @@ public:
 	void add(const PEModule &module);
 	void remove(const PEModule &module);
 	const std::vector<uint64_t> &callbacks(const PEModule &module) const;
+	// Fresh static TLS for another thread: a slot vector at teb+0x58 and a block per module initialised from its template.
+	void create_thread(uint64_t teb);
+	void release_thread(uint64_t teb);
 
 private:
 	struct Template {
@@ -32,7 +35,11 @@ private:
 		uint64_t block = 0;
 		size_t size = 0;
 		std::vector<uint64_t> callbacks;
+		size_t alignment = 16;
+		std::vector<uint8_t> bytes;
 	};
+	// Storage owned by threads other than the first, released with the thread.
+	std::map<uint64_t, std::vector<uint64_t>> thread_storage;
 	NativeProcess &process;
 	const NativeEnvironment &environment;
 	uint64_t vector = 0;
