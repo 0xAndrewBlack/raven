@@ -47,9 +47,51 @@ std::vector<uint8_t> environment_provider(std::string_view name, uint64_t base)
 	return runtime_provider(name, base, names);
 }
 
+namespace {
+
+// Hot kernel32 services that run as guest machine code on the thread block; the slow path traps at offset 0x30.
+struct FastStub {
+	std::string_view name;
+	std::vector<uint8_t> code;
+};
+
+const std::vector<FastStub> &fast_stubs()
+{
+	static const std::vector<FastStub> stubs = {
+		// mov eax, gs:[0x68]; ret
+		{"GetLastError", {0x65, 0x8b, 0x04, 0x25, 0x68, 0, 0, 0, 0xc3}},
+		// mov gs:[0x68], ecx; ret
+		{"SetLastError", {0x65, 0x89, 0x0c, 0x25, 0x68, 0, 0, 0, 0xc3}},
+		// cmp ecx,64; jae slow; mov ecx,ecx; mov rax,gs:[rcx*8+0x1480]; mov dword gs:[0x68],0; ret
+		{"TlsGetValue", {0x83, 0xf9, 0x40, 0x73, 0x2b, 0x8b, 0xc9, 0x65, 0x48, 0x8b, 0x04, 0xcd, 0x80, 0x14, 0, 0,
+			0x65, 0xc7, 0x04, 0x25, 0x68, 0, 0, 0, 0, 0, 0, 0, 0xc3}},
+		// cmp ecx,64; jae slow; mov ecx,ecx; mov gs:[rcx*8+0x1480],rdx; mov eax,1; ret
+		{"TlsSetValue", {0x83, 0xf9, 0x40, 0x73, 0x2b, 0x8b, 0xc9, 0x65, 0x48, 0x89, 0x14, 0xcd, 0x80, 0x14, 0, 0,
+			0xb8, 1, 0, 0, 0, 0xc3}},
+		// mov rax,gs:[0x17c8]; test rax,rax; jz slow; cmp ecx,4080; jae slow; mov ecx,ecx; mov rax,[rax+rcx*8]; mov dword gs:[0x68],0; ret
+		{"FlsGetValue", {0x65, 0x48, 0x8b, 0x04, 0x25, 0xc8, 0x17, 0, 0, 0x48, 0x85, 0xc0, 0x74, 0x22,
+			0x81, 0xf9, 0xf0, 0x0f, 0, 0, 0x73, 0x1a, 0x8b, 0xc9, 0x48, 0x8b, 0x04, 0xc8,
+			0x65, 0xc7, 0x04, 0x25, 0x68, 0, 0, 0, 0, 0, 0, 0, 0xc3}},
+	};
+	return stubs;
+}
+
+}
+
+// Offset of the slow-path breakpoint inside a fast stub.
+size_t fast_stub_trap_offset(std::string_view module, std::string_view name)
+{
+	if (module != "kernel32.dll" && module != "kernelbase.dll")
+		return 0;
+	for (const auto &stub : fast_stubs())
+		if (stub.name == name)
+			return 0x30;
+	return 0;
+}
+
 std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	std::span<const std::string_view> exports, bool x86, std::span<const std::string_view> data_exports,
-	std::span<const std::pair<std::string_view, uint16_t>> ordinal_exports)
+	std::span<const std::pair<std::string_view, uint16_t>> ordinal_exports, bool fast_paths)
 {
 	if (!x86 && !data_exports.empty())
 		throw std::runtime_error("native data exports require an x86 provider");
@@ -102,7 +144,14 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	const size_t module_name = ordinals + exports.size() * 2;
 	// Each data export owns one zeroed 16-byte slot after the strings; the section becomes writable for them.
 	const size_t data_start = (module_name + string_size + 15) & ~size_t(15);
-	const size_t end = data_start + data_exports.size() * 16;
+	const bool kernel_module = fast_paths && !x86 && (name == "kernel32.dll" || name == "kernelbase.dll");
+	size_t fast_count = 0;
+	if (kernel_module)
+		for (const auto symbol : exports)
+			for (const auto &stub : fast_stubs())
+				fast_count += stub.name == symbol;
+	const size_t fast_start = (data_start + data_exports.size() * 16 + 63) & ~size_t(63);
+	const size_t end = fast_start + fast_count * 64;
 	std::vector<uint8_t> bytes((end + 511) & ~size_t(511));
 	const auto rva = [](size_t offset) { return 0x1000 + offset - 0x200; };
 	const auto put = [&](size_t offset, uint64_t value, size_t width = 4) {
@@ -152,10 +201,19 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(directory + 36, rva(ordinals));
 	text(module_name, name);
 	size_t cursor = module_name + name.size() + 1;
+	size_t fast_next = 0;
 	for (size_t index = 0; index < exports.size(); ++index) {
-		const size_t code = 0x200 + index * 16;
+		size_t code = 0x200 + index * 16;
 		bytes[code] = 0xcc;
 		bytes[code + 1] = 0xc3;
+		if (kernel_module)
+			for (const auto &stub : fast_stubs())
+				if (stub.name == exports[index]) {
+					code = fast_start + fast_next++ * 64;
+					std::copy(stub.code.begin(), stub.code.end(), bytes.begin() + ptrdiff_t(code));
+					bytes[code + 0x30] = 0xcc;
+					bytes[code + 0x31] = 0xc3;
+				}
 		const auto data = std::find(data_exports.begin(), data_exports.end(), exports[index]);
 		const size_t entry = numbered ? slot_of[index] - 1 : index;
 		put(functions + entry * 4, data == data_exports.end() ? rva(code) : rva(data_start + size_t(data - data_exports.begin()) * 16));
@@ -250,9 +308,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				continue;
 			provider = found->second.get();
 		} else {
-			const auto bytes = runtime_provider(name, 0x180000000ULL, symbols, false, {}, ordinals);
+			const auto bytes = runtime_provider(name, 0x180000000ULL, symbols, false, {}, ordinals, true);
 			const auto base = provider_base(modules, PEImage(bytes).image_size);
-			provider = &modules.add(name, runtime_provider(name, base, symbols, false, {}, ordinals), base);
+			provider = &modules.add(name, runtime_provider(name, base, symbols, false, {}, ordinals, true), base);
 			provider->runtime_api = true;
 		}
 		// A guest component that implements part of user32 receives those calls directly instead of through a trap.
@@ -266,7 +324,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		}
 		for (const auto &symbol : provider->exports)
 			if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty())
-				traps.emplace(provider->loaded.base() + symbol.address, symbol.names.at(0));
+				traps.emplace(provider->loaded.base() + symbol.address + (provider->runtime_api ? fast_stub_trap_offset(name, symbol.names.at(0)) : 0), symbol.names.at(0));
 	}
 	const auto nt=modules.all().find("ntdll.dll");
 	const bool needs_nt=std::any_of(modules.all().begin(),modules.all().end(),[](const auto &item) {

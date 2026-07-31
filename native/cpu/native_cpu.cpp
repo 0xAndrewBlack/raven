@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <elf.h>
 #include <fcntl.h>
 #include <map>
@@ -116,8 +117,11 @@ int NativeChild::wait()
 		int status = 0;
 		const pid_t result = waitpid(pid, &status, WNOHANG);
 		if (result == pid) {
-			if (WIFEXITED(status) || WIFSIGNALED(status))
+			if (WIFEXITED(status) || WIFSIGNALED(status)) {
+				if (std::getenv("RAVEN_TRACE_API"))
+					std::cerr << "raven: native guest " << (WIFSIGNALED(status) ? "killed by signal " + std::to_string(WTERMSIG(status)) : "exited with " + std::to_string(WEXITSTATUS(status))) << '\n';
 				pid = -1;
+			}
 			return status;
 		}
 		if (result == -1 && errno != EINTR)
@@ -883,6 +887,16 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		state->stopped = false;
 		status = child.wait();
 		if (status == -1) {
+			if (std::getenv("RAVEN_TRACE_API")) {
+				user_regs_struct where{};
+				if (ptrace(PTRACE_INTERRUPT, child.pid, 0, 0) == 0 || true) {
+					kill(child.pid, SIGSTOP);
+					int ignored = 0;
+					waitpid(child.pid, &ignored, 0);
+					if (ptrace(PTRACE_GETREGS, child.pid, 0, &where) == 0)
+						std::cerr << "raven: guest timeout at rip=0x" << std::hex << where.rip << " rsp=0x" << where.rsp << std::dec << '\n';
+				}
+			}
 			child.stop();
 			return {NativeStop::timeout, 0, 0, 0};
 		}

@@ -86,6 +86,7 @@ void NativeWindows::present(uint64_t handle)
 	dirty_roots.erase(handle);
 	surface_dc(handle);
 	paint_nonclient(handle);
+	paint_scrollbars(handle);
 	const auto *window=objects.window(handle);
 	const auto *bitmap=objects.bitmap(window->bitmap);
 	const auto pixels=std::span<const uint8_t>(bitmap->pixels().data(),size_t(bitmap->width)*bitmap->height*4);
@@ -222,6 +223,8 @@ void NativeWindows::receive(const DesktopEvent &event)
 			(uint64_t(previous)<<30) | (uint64_t(!pressed)<<31);
 		messages.push_back({focus,key.code,flags,pressed ? 0x100U : 0x101U,message_time(),cursor_x,cursor_y,pressed ? key.character : 0});
 		key_down[event.message]=pressed;
+		vk_state[key.code&255]=pressed ? (vk_state[key.code&255] | 0x80) : (vk_state[key.code&255] & 0x7f);
+		if (pressed && !previous && (key.code==0x14 || key.code==0x90 || key.code==0x91)) vk_state[key.code]^=1;
 		return;
 	}
 	if (event.x<INT16_MIN || event.x>INT16_MAX || event.y<INT16_MIN || event.y>INT16_MAX)
@@ -244,8 +247,10 @@ void NativeWindows::receive(const DesktopEvent &event)
 	if (x<INT32_MIN || x>INT32_MAX || y<INT32_MIN || y>INT32_MAX)
 		throw std::runtime_error("guest cursor coordinates overflow");
 	mouse_buttons=buttons; cursor_x=int32_t(x); cursor_y=int32_t(y);
+	if (scroll_drag.window && (message==0x200 || message==0x202 || message==0x201) && scroll_motion(message,int32_t(x),int32_t(y))) return;
 	if (capture && !objects.window(capture)) capture=0;
 	const auto target=capture ? capture : pointer_child(event.window,int32_t(x),int32_t(y));window=objects.window(target);
+	track_pointer(target);
 	const bool inset=window->x!=window->outer.left || window->y!=window->outer.top ||
 		int64_t(window->width)!=int64_t(window->outer.right)-window->outer.left ||
 		int64_t(window->height)!=int64_t(window->outer.bottom)-window->outer.top;
@@ -253,6 +258,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 	const auto hit=!capture && inset && inside ? send(target,0x84,0,uint16_t(x)|(uint64_t(uint16_t(y))<<16)) : 1;
 	window=objects.window(target);
 	if (!window || !objects.window_visible(target) || !hit) return;
+	if ((hit==6 || hit==7) && scroll_pointer(target,hit,message,int32_t(x),int32_t(y))) return;
 	if (hit!=1) { nonclient_pointer(target,hit,message,int32_t(event.x),int32_t(event.y)); return; }
 	if ((message==0x201 || message==0x204 || message==0x207) && window->parent && !(window->ex_style & 4)) {
 		for (auto parent=window->parent;parent;) {
@@ -309,6 +315,18 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 			process.write_memory(args[0],bytes);
 			if (value.message==0x100 || value.message==0x101) key_translation=value;
 			if (flags & 1U) { if (found!=messages.end()) messages.erase(found); else quit.reset(); }
+			if (value.message!=0x12) {
+				// Keyboard and mouse hooks may swallow the message; the get-message hook only observes it.
+				if (has_hook(2) && (value.message>=0x100 && value.message<=0x105) && (flags & 1U) &&
+					call_hooks(2,0,value.wparam,value.lparam)) continue;
+				if (has_hook(7) && value.message>=0x200 && value.message<=0x20e && (flags & 1U)) {
+					std::vector<uint8_t> hook(32);
+					put(hook,0,uint32_t(value.x),4); put(hook,4,uint32_t(value.y),4); put(hook,8,value.window,8); put(hook,16,1,4);
+					const auto at=scratch_allocate(hook.size()); process.write_memory(at,hook);
+					if (call_hooks(7,0,value.message,at)) continue;
+				}
+				if (has_hook(3)) call_hooks(3,0,(flags & 1U) ? 1 : 0,args[0]);
+			}
 			return blocking && value.message==0x12 ? 0 : 1;
 		}
 		// WM_TIMER ranks below input and paint, so it is only generated when neither is waiting.
@@ -327,6 +345,9 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		if (!blocking) return 0;
 		if (std::chrono::steady_clock::now()>=deadline) throw NativeResult{NativeStop::timeout,0,0,0};
 		if (yield_hook && yield_hook()) continue;
+		caret_idle();
+		scroll_idle();
+		flush_dirty();
 		if (presentation.poll) {
 			const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(deadline-std::chrono::steady_clock::now());
 			for (const auto &event : presentation.poll(std::min(remaining,std::chrono::milliseconds(20))))
@@ -513,6 +534,7 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 		return nonclient_hit(*window,int16_t(uint16_t(args[3])),int16_t(uint16_t(args[3]>>16)));
 	if (message==0x84) {
 		const auto x=int16_t(uint16_t(args[3])),y=int16_t(uint16_t(args[3]>>16));
+		if (const auto bar=scroll_hit(*window,x,y)) return bar;
 		return x>=window->outer.left && y>=window->outer.top && x<window->outer.right && y<window->outer.bottom &&
 			x>=window->x && y>=window->y && int64_t(x)<int64_t(window->x)+window->width &&
 			int64_t(y)<int64_t(window->y)+window->height ? 1 : 0;
@@ -531,6 +553,9 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 		const int32_t edges[4]={frame.left,frame.top,frame.right,frame.bottom};
 		for (size_t index=0;index<4;++index)
 			put(rect,index*4,uint32_t(int32_t(read(rect,index*4,4))-edges[index]),4);
+		// Scroll bars sit between the edge and the client area on the right and bottom.
+		if (window->style & 0x200000U) put(rect,8,uint32_t(int32_t(read(rect,8,4))-17),4);
+		if (window->style & 0x100000U) put(rect,12,uint32_t(int32_t(read(rect,12,4))-17),4);
 		process.write_memory(args[3],rect);
 		return 0;
 	}
@@ -547,7 +572,8 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 	if (message==0x20 || message==0x16 || message==0x1c || message==0x24 || message==0x46 || message==0x47 || message==0x4e ||
 		message==0x7f || message==0x80 || (message>=0xa0 && message<=0xa9) || message==0x215 || (message>=0x100 && message<=0x109) ||
 		message==0x111 || message==0x113 || (message>=0x116 && message<=0x120) || message==0x211 || message==0x212) return 0;
-	throw std::runtime_error("unsupported default window message "+std::to_string(message));
+	// Every other message has no default action in DefWindowProc and answers zero.
+	return 0;
 }
 
 uint64_t NativeWindows::create(std::span<const uint64_t> args)
@@ -563,7 +589,14 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 	if (!child && args[8] && (!objects.window(args[8]) || args[8]==UINT64_MAX-2)) throw uint32_t(1400);
 	const auto class_atom=atom(args[1],args[10]);
 	const auto *definition=objects.window_class(class_atom);
-	if (!definition) throw uint32_t(1407);
+	if (!definition) {
+		if (std::getenv("RAVEN_TRACE_API")) {
+			std::string name;
+			try { if (args[1]>0xffff) { const auto text=process.read_memory(args[1],64); for (size_t i=0;i<32 && (text[i*2]|text[i*2+1]);++i) name.push_back(char(text[i*2])); } else name="#"+std::to_string(args[1]); } catch (...) {}
+			std::cerr << "raven: window class not found: " << name << "\n";
+		}
+		throw uint32_t(1407);
+	}
 	auto x=int32_t(args[4]),y=int32_t(args[5]);
 	auto width=int32_t(args[6]),height=int32_t(args[7]);
 	// CW_USEDEFAULT (0x80000000): top-level windows get a cascading position and three quarters of the screen; children get zero.

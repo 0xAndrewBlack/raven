@@ -75,6 +75,8 @@ public:
 	void terminate(const std::shared_ptr<GuestThread> &thread, uint32_t code);
 	void resume(GuestThread &thread);
 	size_t live() const;
+	// Thread blocks of every thread that has not finished.
+	std::vector<uint64_t> thread_blocks() const;
 
 private:
 	NativeProcess &process;

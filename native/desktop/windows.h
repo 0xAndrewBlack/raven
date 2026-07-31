@@ -4,6 +4,7 @@
 #include "presentation.h"
 #include "keyboard.h"
 #include <array>
+#include <chrono>
 #include <map>
 #include <set>
 #include "nt/api.h"
@@ -103,6 +104,25 @@ private:
 	void register_manager_api(ApiRegistry &registry);
 	void register_menu_api(ApiRegistry &registry);
 	void register_ext_api(ApiRegistry &registry);
+	void register_scroll_api(ApiRegistry &registry);
+	// Layout of one non-client scroll bar in screen coordinates.
+	struct ScrollGeometry {
+		DesktopRect bar{},up{},down{},track{},thumb{};
+		bool present=false,vertical=false,has_thumb=false;
+	};
+	ScrollGeometry scroll_geometry(const DesktopWindow &window,int bar) const;
+	int scroll_part_at(const DesktopWindow &window,int bar,int32_t x,int32_t y) const;
+	uint64_t scroll_hit(const DesktopWindow &window,int32_t x,int32_t y) const;
+	bool scroll_sync_visibility(uint64_t window,int bar,bool allow_disable);
+	void refresh_frame(uint64_t window);
+	void paint_scrollbars(uint64_t root);
+	void scroll_notify(uint64_t window,int bar,uint32_t code,int32_t position);
+	bool scroll_pointer(uint64_t window,uint64_t hit,uint32_t message,int32_t x,int32_t y);
+	bool scroll_motion(uint32_t message,int32_t x,int32_t y);
+	void scroll_idle();
+	// The scroll bar being operated with the pointer: which part, and for the thumb where it was grabbed.
+	struct ScrollDrag { uint64_t window=0; int bar=0; int part=0; int32_t grab=0; std::chrono::steady_clock::time_point next{}; };
+	ScrollDrag scroll_drag;
 	// Text caret of the input queue: one per thread in Windows, one here. Its rectangle is drawn by inverting pixels.
 	struct Caret {
 		uint64_t window=0;
@@ -125,6 +145,7 @@ private:
 	uint64_t clipboard_window=0,clipboard_owner=0;
 	uint32_t clipboard_sequence=1;
 	std::array<uint8_t,256> vk_state{};
+	std::map<uint64_t,uint64_t> system_menus;
 	struct Tracking { uint64_t window=0; uint32_t flags=0; };
 	Tracking tracking;
 	void track_pointer(uint64_t window);
@@ -132,7 +153,6 @@ private:
 	uint64_t scratch_base=0;
 	size_t scratch_used=0;
 	uint64_t scratch_allocate(size_t size);
-	std::function<NativeResult(uint64_t,std::span<const uint64_t>)> wait_objects;
 	// Shows, hides, minimizes, maximizes or restores a window; returns whether it was visible before.
 	bool show_window(uint64_t window,uint32_t command);
 	// Moves and resizes a window (screen coordinates for the outer rectangle) with the WM_WINDOWPOSCHANGING/CHANGED protocol.

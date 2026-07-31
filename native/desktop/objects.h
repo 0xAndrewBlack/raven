@@ -160,6 +160,12 @@ struct DesktopMenu {
 	uint64_t parent=0;
 };
 
+// One scroll bar of a window: range, page size, position and which arrows are disabled.
+struct DesktopScroll {
+	int32_t min=0,max=0,pos=0,track=0;
+	uint32_t page=0,disabled=0;
+};
+
 struct DesktopWindow {
 	uint16_t class_id;
 	uint64_t procedure;
@@ -185,6 +191,8 @@ struct DesktopWindow {
 	// Outer rectangle to return to when a maximized or minimized window is restored.
 	DesktopRect restore{};
 	std::map<std::u16string,uint64_t> properties{};
+	// Horizontal and vertical scroll bars (SB_HORZ, SB_VERT).
+	std::array<DesktopScroll,2> scroll{};
 };
 
 class DesktopObjects {

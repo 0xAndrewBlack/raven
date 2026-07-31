@@ -1,5 +1,33 @@
 #include <user32.h>
 
+/* The upstream header turns these public calls into kernel calls, so the bridge reaches the real ones under their import names. */
+extern BOOL WINAPI raven_real_InvalidateRect(HWND, CONST RECT *, BOOL) __asm__("InvalidateRect");
+extern BOOL WINAPI raven_real_InvalidateRgn(HWND, HRGN, BOOL) __asm__("InvalidateRgn");
+extern BOOL WINAPI raven_real_RedrawWindow(HWND, CONST RECT *, HRGN, UINT) __asm__("RedrawWindow");
+extern HDC WINAPI raven_real_GetDC(HWND) __asm__("GetDC");
+extern HDC WINAPI raven_real_GetDCEx(HWND, HRGN, DWORD) __asm__("GetDCEx");
+extern HDC WINAPI raven_real_BeginPaint(HWND, LPPAINTSTRUCT) __asm__("BeginPaint");
+extern BOOL WINAPI raven_real_EndPaint(HWND, CONST PAINTSTRUCT *) __asm__("EndPaint");
+extern HWND WINAPI raven_real_SetFocus(HWND) __asm__("SetFocus");
+extern HWND WINAPI raven_real_SetCapture(HWND) __asm__("SetCapture");
+extern HWND WINAPI raven_real_SetActiveWindow(HWND) __asm__("SetActiveWindow");
+extern HWND WINAPI raven_real_GetForegroundWindow(VOID) __asm__("GetForegroundWindow");
+extern BOOL WINAPI raven_real_SetWindowPos(HWND, HWND, int, int, int, int, UINT) __asm__("SetWindowPos");
+extern BOOL WINAPI raven_real_MoveWindow(HWND, int, int, int, int, BOOL) __asm__("MoveWindow");
+extern BOOL WINAPI raven_real_ShowWindow(HWND, int) __asm__("ShowWindow");
+extern HWND WINAPI raven_real_SetParent(HWND, HWND) __asm__("SetParent");
+extern BOOL WINAPI raven_real_DestroyWindow(HWND) __asm__("DestroyWindow");
+extern BOOL WINAPI raven_real_DestroyMenu(HMENU) __asm__("DestroyMenu");
+extern UINT_PTR WINAPI raven_real_SetTimer(HWND, UINT_PTR, UINT, TIMERPROC) __asm__("SetTimer");
+extern BOOL WINAPI raven_real_KillTimer(HWND, UINT_PTR) __asm__("KillTimer");
+extern UINT_PTR WINAPI raven_real_SetSystemTimer(HWND, UINT_PTR, UINT, TIMERPROC) __asm__("SetSystemTimer");
+extern BOOL WINAPI raven_real_CreateCaret(HWND, HBITMAP, int, int) __asm__("CreateCaret");
+extern BOOL WINAPI raven_real_ShowCaret(HWND) __asm__("ShowCaret");
+extern BOOL WINAPI raven_real_HideCaret(HWND) __asm__("HideCaret");
+extern BOOL WINAPI raven_real_IsClipboardFormatAvailable(UINT) __asm__("IsClipboardFormatAvailable");
+extern BOOL WINAPI raven_real_EmptyClipboard(VOID) __asm__("EmptyClipboard");
+extern BOOL WINAPI raven_real_CloseClipboard(VOID) __asm__("CloseClipboard");
+
 /* Process-wide state and kernel services the upstream control and dialog sources expect, rebuilt on public calls. */
 
 HINSTANCE User32Instance;
@@ -49,57 +77,57 @@ DWORD NTAPI NtUserAlterWindowStyle(HWND window, DWORD index, LONG value)
 
 BOOL NTAPI NtUserInvalidateRect(HWND window, CONST RECT *rectangle, BOOL erase)
 {
-	return InvalidateRect(window, rectangle, erase);
+	return raven_real_InvalidateRect(window, rectangle, erase);
 }
 
 BOOL NTAPI NtUserInvalidateRgn(HWND window, HRGN region, BOOL erase)
 {
-	return InvalidateRgn(window, region, erase);
+	return raven_real_InvalidateRgn(window, region, erase);
 }
 
 BOOL NTAPI NtUserRedrawWindow(HWND window, CONST RECT *rectangle, HRGN region, UINT flags)
 {
-	return RedrawWindow(window, rectangle, region, flags);
+	return raven_real_RedrawWindow(window, rectangle, region, flags);
 }
 
 HDC NTAPI NtUserGetDC(HWND window)
 {
-	return GetDC(window);
+	return raven_real_GetDC(window);
 }
 
 HDC NTAPI NtUserGetDCEx(HWND window, HANDLE region, ULONG flags)
 {
-	return GetDCEx(window, region, flags);
+	return raven_real_GetDCEx(window, region, flags);
 }
 
 HDC NTAPI NtUserBeginPaint(HWND window, PAINTSTRUCT *paint)
 {
-	return BeginPaint(window, paint);
+	return raven_real_BeginPaint(window, paint);
 }
 
 BOOL NTAPI NtUserEndPaint(HWND window, CONST PAINTSTRUCT *paint)
 {
-	return EndPaint(window, paint);
+	return raven_real_EndPaint(window, paint);
 }
 
 HWND NTAPI NtUserSetFocus(HWND window)
 {
-	return SetFocus(window);
+	return raven_real_SetFocus(window);
 }
 
 HWND NTAPI NtUserSetCapture(HWND window)
 {
-	return SetCapture(window);
+	return raven_real_SetCapture(window);
 }
 
 HWND NTAPI NtUserSetActiveWindow(HWND window)
 {
-	return SetActiveWindow(window);
+	return raven_real_SetActiveWindow(window);
 }
 
 HWND NTAPI NtUserGetForegroundWindow(VOID)
 {
-	return GetForegroundWindow();
+	return raven_real_GetForegroundWindow();
 }
 
 /* The upstream header turns ShowScrollBar into a kernel call, so the real function is reached under its import name. */
@@ -112,32 +140,32 @@ DWORD NTAPI NtUserShowScrollBar(HWND window, int bar, DWORD show)
 
 BOOL NTAPI NtUserSetWindowPos(HWND window, HWND after, int x, int y, int width, int height, UINT flags)
 {
-	return SetWindowPos(window, after, x, y, width, height, flags);
+	return raven_real_SetWindowPos(window, after, x, y, width, height, flags);
 }
 
 BOOL NTAPI NtUserMoveWindow(HWND window, int x, int y, int width, int height, BOOL repaint)
 {
-	return MoveWindow(window, x, y, width, height, repaint);
+	return raven_real_MoveWindow(window, x, y, width, height, repaint);
 }
 
 BOOL NTAPI NtUserShowWindow(HWND window, LONG command)
 {
-	return ShowWindow(window, command);
+	return raven_real_ShowWindow(window, command);
 }
 
 HWND NTAPI NtUserSetParent(HWND child, HWND parent)
 {
-	return SetParent(child, parent);
+	return raven_real_SetParent(child, parent);
 }
 
 BOOLEAN NTAPI NtUserDestroyWindow(HWND window)
 {
-	return DestroyWindow(window);
+	return raven_real_DestroyWindow(window);
 }
 
 BOOL NTAPI NtUserDestroyMenu(HMENU menu)
 {
-	return DestroyMenu(menu);
+	return raven_real_DestroyMenu(menu);
 }
 
 BOOL NTAPI NtUserFlashWindowEx(PFLASHWINFO info)
@@ -147,32 +175,32 @@ BOOL NTAPI NtUserFlashWindowEx(PFLASHWINFO info)
 
 UINT_PTR NTAPI NtUserSetTimer(HWND window, UINT_PTR identifier, UINT elapse, TIMERPROC procedure)
 {
-	return SetTimer(window, identifier, elapse, procedure);
+	return raven_real_SetTimer(window, identifier, elapse, procedure);
 }
 
 UINT_PTR NTAPI NtUserSetSystemTimer(HWND window, UINT_PTR identifier, UINT elapse, TIMERPROC procedure)
 {
-	return SetSystemTimer(window, identifier, elapse, procedure);
+	return raven_real_SetSystemTimer(window, identifier, elapse, procedure);
 }
 
 BOOL NTAPI NtUserKillTimer(HWND window, UINT_PTR identifier)
 {
-	return KillTimer(window, identifier);
+	return raven_real_KillTimer(window, identifier);
 }
 
 BOOL NTAPI NtUserCreateCaret(HWND window, HBITMAP bitmap, int width, int height)
 {
-	return CreateCaret(window, bitmap, width, height);
+	return raven_real_CreateCaret(window, bitmap, width, height);
 }
 
 BOOL NTAPI NtUserShowCaret(HWND window)
 {
-	return ShowCaret(window);
+	return raven_real_ShowCaret(window);
 }
 
 BOOL NTAPI NtUserHideCaret(HWND window)
 {
-	return HideCaret(window);
+	return raven_real_HideCaret(window);
 }
 
 BOOL NTAPI NtUserSystemParametersInfo(UINT action, UINT parameter, PVOID value, UINT flags)
@@ -187,17 +215,17 @@ BOOL NTAPI NtUserGetComboBoxInfo(HWND window, PCOMBOBOXINFO info)
 
 BOOL NTAPI NtUserIsClipboardFormatAvailable(UINT format)
 {
-	return IsClipboardFormatAvailable(format);
+	return raven_real_IsClipboardFormatAvailable(format);
 }
 
 BOOL NTAPI NtUserEmptyClipboard(VOID)
 {
-	return EmptyClipboard();
+	return raven_real_EmptyClipboard();
 }
 
 BOOL NTAPI NtUserCloseClipboard(VOID)
 {
-	return CloseClipboard();
+	return raven_real_CloseClipboard();
 }
 
 /* The thread-state queries only feed dialog activation heuristics; this process has one input queue. */
@@ -230,7 +258,7 @@ DWORD_PTR NTAPI NtUserQueryWindow(HWND window, DWORD index)
 {
 	DWORD process = 0;
 	if (index == QUERY_WINDOW_FOREGROUND)
-		return GetForegroundWindow() == GetAncestor(window, GA_ROOT);
+		return raven_real_GetForegroundWindow() == GetAncestor(window, GA_ROOT);
 	if (index == QUERY_WINDOW_UNIQUE_PROCESS_ID) {
 		GetWindowThreadProcessId(window, &process);
 		return process;

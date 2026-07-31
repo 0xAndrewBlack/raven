@@ -8,6 +8,7 @@
 #include <ctime>
 #include <map>
 #include <thread>
+#include <sys/mman.h>
 #include <unistd.h>
 
 namespace raven {
@@ -529,9 +530,38 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		return slots;
 	};
 	const auto tls = make_slots(1088), fls = make_slots(4080);
+	// The thread block mirrors values for the guest-side fast paths of Tls/FlsGetValue (and TlsSetValue).
 	const auto bind = [&](const char *prefix, std::shared_ptr<Slots> slots, bool callback) {
 		const std::string base = prefix;
-		registry.add(base + "Alloc", callback ? 1 : 0, [&environment, slots, callback](ApiCall &call) {
+		const bool is_tls = base == "Tls";
+		const auto mirror_clear = [&context, is_tls](ApiCall &call, size_t index) {
+			const uint64_t zero = 0;
+			for (const auto block : context.threads.thread_blocks()) {
+				if (is_tls && index < 64) {
+					call.process.write_memory(block + 0x1480 + index * 8, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&zero), 8));
+				} else if (!is_tls && index < 4080) {
+					const auto array = call.load<uint64_t>(block + 0x17c8);
+					if (array)
+						call.process.write_memory(array + index * 8, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&zero), 8));
+				}
+			}
+		};
+		const auto mirror_set = [is_tls](ApiCall &call, uint64_t block, size_t index, uint64_t value) {
+			if (is_tls) {
+				if (index < 64)
+					call.store<uint64_t>(block + 0x1480 + index * 8, value);
+				return;
+			}
+			if (index >= 4080)
+				return;
+			auto array = call.load<uint64_t>(block + 0x17c8);
+			if (!array) {
+				array = call.process.map_memory(0x8000, PROT_READ | PROT_WRITE);
+				call.store<uint64_t>(block + 0x17c8, array);
+			}
+			call.store<uint64_t>(array + index * 8, value);
+		};
+		registry.add(base + "Alloc", callback ? 1 : 0, [&environment, slots, callback, mirror_clear](ApiCall &call) {
 			const auto free = std::find(slots->used.begin(), slots->used.end(), false);
 			if (free == slots->used.end()) {
 				call.fail(callback ? 1450 : 8, UINT32_MAX);
@@ -542,10 +572,11 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			slots->callbacks[index] = callback ? call[0] : 0;
 			for (auto &[thread, values] : slots->values)
 				if (index < values.size()) values[index] = 0;
+			mirror_clear(call, index);
 			call.ret(index);
 			call.set_last_error(0);
 		});
-		registry.add(base + "Free", 1, [slots](ApiCall &call) {
+		registry.add(base + "Free", 1, [slots, mirror_clear](ApiCall &call) {
 			const auto index = size_t(call.u32(0));
 			if (index >= slots->used.size() || !slots->used[index]) {
 				call.fail(87);
@@ -554,6 +585,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			slots->used[index] = false;
 			for (auto &[thread, values] : slots->values)
 				if (index < values.size()) values[index] = 0;
+			mirror_clear(call, index);
 			call.ret(1);
 		});
 		registry.add(base + "GetValue", 1, [&environment, slots](ApiCall &call) {
@@ -566,7 +598,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			call.set_last_error(0);
 			call.ret(index < values.size() ? values[index] : 0);
 		});
-		registry.add(base + "SetValue", 2, [&environment, slots](ApiCall &call) {
+		registry.add(base + "SetValue", 2, [&environment, slots, mirror_set](ApiCall &call) {
 			const auto index = size_t(call.u32(0));
 			if (index >= slots->used.size() || !slots->used[index]) {
 				call.fail(87);
@@ -576,6 +608,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			if (values.size() < slots->used.size())
 				values.resize(slots->used.size());
 			values[index] = call[1];
+			mirror_set(call, environment.teb(), index, call[1]);
 			call.ret(1);
 		});
 	};

@@ -35,6 +35,15 @@ size_t NativeThreads::live() const
 	return size_t(std::count_if(threads.begin(), threads.end(), [](const auto &thread) { return thread->state != GuestThread::State::done; }));
 }
 
+std::vector<uint64_t> NativeThreads::thread_blocks() const
+{
+	std::vector<uint64_t> result;
+	for (const auto &thread : threads)
+		if (thread->state != GuestThread::State::done && thread->teb)
+			result.push_back(thread->teb);
+	return result;
+}
+
 std::shared_ptr<GuestThread> NativeThreads::find(uint32_t id) const
 {
 	for (const auto &thread : threads)
