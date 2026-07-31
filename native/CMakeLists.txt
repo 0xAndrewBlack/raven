@@ -140,7 +140,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     target_sources(raven_cpu PRIVATE desktop/window_data.cpp)
     target_sources(raven_cpu PRIVATE desktop/clip.cpp)
     target_sources(raven_cpu PRIVATE desktop/pen.cpp desktop/caps.cpp desktop/load.cpp desktop/accelerator.cpp)
-    target_sources(raven_cpu PRIVATE desktop/frame.cpp)
+    target_sources(raven_cpu PRIVATE desktop/frame.cpp desktop/menu_loop.cpp)
     target_sources(raven_cpu PRIVATE desktop/class_info.cpp desktop/colors.cpp desktop/hierarchy.cpp desktop/menu.cpp desktop/menu_api.cpp desktop/extract.cpp graphics/icon_file.cpp nt/dependencies.cpp)
     target_sources(raven_cpu PRIVATE desktop/region.cpp)
     if(PkgConfig_FOUND)
@@ -1145,6 +1145,18 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-registry-1.exe ${CMAKE_CURRENT_BINARY_DIR}/x86-registry-2.exe
                     ${CMAKE_CURRENT_BINARY_DIR}/registry-prefix)
                 set_tests_properties(native_x86_registry PROPERTIES TIMEOUT 40)
+                # Full application workflow: needs the Wayland presentation backend, the text engine and a headless compositor.
+                find_program(RAVEN_LABWC labwc)
+                find_program(RAVEN_GRIM grim)
+                find_program(RAVEN_WLRCTL wlrctl)
+                execute_process(COMMAND ${Python3_EXECUTABLE} -c "import PIL" RESULT_VARIABLE RAVEN_PIL_RESULT OUTPUT_QUIET ERROR_QUIET)
+                if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_RESULT EQUAL 0
+                   AND EXISTS ${PROJECT_SOURCE_DIR}/testdata/winmine/WINMINE.EXE)
+                    add_test(NAME native_minesweeper_workflow COMMAND ${Python3_EXECUTABLE}
+                        ${PROJECT_SOURCE_DIR}/scripts/native-minesweeper.py $<TARGET_FILE:raven>
+                        ${PROJECT_SOURCE_DIR}/testdata/winmine/WINMINE.EXE ${CMAKE_CURRENT_BINARY_DIR}/minesweeper-evidence)
+                    set_tests_properties(native_minesweeper_workflow PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor)
+                endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)

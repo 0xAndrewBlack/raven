@@ -10,7 +10,8 @@
 
 namespace raven {
 
-enum class DesktopEventKind { message, pointer_motion, pointer_button, keymap, modifiers, keyboard_focus, key };
+// popup_done: the compositor dismissed a popup (for example by a click outside it).
+enum class DesktopEventKind { message, pointer_motion, pointer_button, keymap, modifiers, keyboard_focus, key, popup_done };
 
 struct DesktopEvent {
 	uint64_t window;
@@ -26,6 +27,8 @@ struct DesktopPresentation {
 	std::function<void(uint64_t,std::string_view,uint32_t,uint32_t,std::span<const uint8_t>)> present;
 	std::function<void(uint64_t)> remove;
 	std::function<std::vector<DesktopEvent>(std::chrono::milliseconds)> poll;
+	// Shows or updates a popup anchored at (x, y) of its parent surface, taking a pointer and keyboard grab.
+	std::function<void(uint64_t handle,uint64_t parent,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels)> popup;
 };
 
 }

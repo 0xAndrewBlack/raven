@@ -170,6 +170,7 @@ void NativeWindows::post(uint64_t window,uint32_t message,uint64_t wparam,uint64
 
 void NativeWindows::receive(const DesktopEvent &event)
 {
+	if (menu_event(event)) return;
 	if (event.kind==DesktopEventKind::message) { post(event.window,event.message,event.wparam,event.lparam); return; }
 	if (event.kind==DesktopEventKind::keymap) {
 		if (std::any_of(key_down.begin(),key_down.end(),[](bool down) { return down; }))
@@ -236,7 +237,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 	const auto hit=!capture && inset && inside ? send(target,0x84,0,uint16_t(x)|(uint64_t(uint16_t(y))<<16)) : 1;
 	window=objects.window(target);
 	if (!window || !objects.window_visible(target) || !hit) return;
-	if (hit!=1) throw std::runtime_error("nonclient pointer dispatch requires qualification");
+	if (hit!=1) { nonclient_pointer(target,hit,message,int32_t(event.x),int32_t(event.y)); return; }
 	if ((message==0x201 || message==0x204 || message==0x207) && window->parent && !(window->ex_style & 4)) {
 		for (auto parent=window->parent;parent;) {
 			const auto *ancestor=objects.window(parent);if (!ancestor) break;
@@ -527,7 +528,7 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 	// non-client mouse notices, capture loss, keyboard and timer/command traffic nobody consumed.
 	if (message==0x20 || message==0x16 || message==0x1c || message==0x24 || message==0x46 || message==0x47 || message==0x4e ||
 		message==0x7f || message==0x80 || (message>=0xa0 && message<=0xa9) || message==0x215 || (message>=0x100 && message<=0x109) ||
-		message==0x111 || message==0x113) return 0;
+		message==0x111 || message==0x113 || (message>=0x116 && message<=0x120) || message==0x211 || message==0x212) return 0;
 	throw std::runtime_error("unsupported default window message "+std::to_string(message));
 }
 

@@ -28,10 +28,13 @@ struct WaylandPresentation::State {
 		wl_surface *proxy=nullptr;
 		xdg_surface *shell=nullptr;
 		xdg_toplevel *role=nullptr;
+		xdg_popup *popup=nullptr;
+		bool is_popup=false;
 		bool configured=false, closed=false, resized=false, close_posted=false;
 		uint32_t width=0,height=0;
 		std::vector<std::unique_ptr<Buffer>> buffers;
 		~Surface() {
+			if (popup) xdg_popup_destroy(popup);
 			if (role) xdg_toplevel_destroy(role);
 			if (shell) xdg_surface_destroy(shell);
 			if (proxy) wl_surface_destroy(proxy);
@@ -49,6 +52,8 @@ struct WaylandPresentation::State {
 	uint64_t keyboard_window=0;
 	int32_t pointer_x=0,pointer_y=0;
 	bool input_failed=false;
+	// Serial of the newest input event; popup grabs must quote one.
+	uint32_t last_serial=0;
 	const char *input_error="unsupported native input event or input queue exhaustion";
 	std::vector<DesktopEvent> pending;
 	std::map<uint64_t,std::unique_ptr<Surface>> surfaces;
@@ -102,8 +107,8 @@ struct WaylandPresentation::State {
 			state.pointer=wl_seat_get_pointer(seat);
 			static const auto listener=[] {
 				wl_pointer_listener value{};
-				value.enter=[](void *data,wl_pointer *,uint32_t,wl_surface *surface,wl_fixed_t x,wl_fixed_t y) {
-					auto &state=*static_cast<State *>(data); state.pointer_window=0;
+				value.enter=[](void *data,wl_pointer *,uint32_t serial,wl_surface *surface,wl_fixed_t x,wl_fixed_t y) {
+					auto &state=*static_cast<State *>(data); state.pointer_window=0; state.last_serial=serial;
 					for (const auto &[handle,window] : state.surfaces) if (window->proxy==surface) state.pointer_window=handle;
 					state.pointer_x=coordinate(x); state.pointer_y=coordinate(y); state.pointer_event(DesktopEventKind::pointer_motion);
 				};
@@ -112,7 +117,8 @@ struct WaylandPresentation::State {
 					auto &state=*static_cast<State *>(data); state.pointer_x=coordinate(x); state.pointer_y=coordinate(y);
 					state.pointer_event(DesktopEventKind::pointer_motion);
 				};
-				value.button=[](void *data,wl_pointer *,uint32_t,uint32_t,uint32_t button,uint32_t pressed) {
+				value.button=[](void *data,wl_pointer *,uint32_t serial,uint32_t,uint32_t button,uint32_t pressed) {
+					static_cast<State *>(data)->last_serial=serial;
 					static_cast<State *>(data)->pointer_event(DesktopEventKind::pointer_button,button,pressed);
 				};
 				value.axis=[](void *data,wl_pointer *,uint32_t,uint32_t,wl_fixed_t) { auto &state=*static_cast<State *>(data); state.input_error="unsupported native pointer wheel event"; state.input_failed=true; };
@@ -148,8 +154,9 @@ struct WaylandPresentation::State {
 					auto &state=*static_cast<State *>(data); state.keyboard_window=0;
 					state.keyboard_event({0,0,0,0,DesktopEventKind::keyboard_focus});
 				};
-				value.key=[](void *data,wl_keyboard *,uint32_t,uint32_t,uint32_t key,uint32_t pressed) {
+				value.key=[](void *data,wl_keyboard *,uint32_t serial,uint32_t,uint32_t key,uint32_t pressed) {
 					auto &state=*static_cast<State *>(data);
+					state.last_serial=serial;
 					state.keyboard_event({state.keyboard_window,key,pressed,0,DesktopEventKind::key});
 				};
 				value.modifiers=[](void *data,wl_keyboard *,uint32_t,uint32_t depressed,uint32_t latched,uint32_t locked,uint32_t group) {
@@ -225,6 +232,73 @@ struct WaylandPresentation::State {
 		if (!compositor || !shm || !shell) throw std::runtime_error("Wayland compositor lacks required presentation protocols");
 	}
 
+	void attach_frame(Surface &window,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
+		events(std::chrono::milliseconds(0));
+		std::erase_if(window.buffers,[](const auto &buffer) { return buffer->released; });
+		if (window.buffers.size()>=3) throw std::runtime_error("Wayland presentation buffer limit reached");
+		size_t used=0;
+		for (const auto &[key,surface] : surfaces)
+			for (const auto &buffer : surface->buffers) used+=buffer->size;
+		if (used+pixels.size()>256*1024*1024) throw std::runtime_error("Wayland presentation memory limit reached");
+		auto buffer=std::make_unique<Buffer>(); buffer->size=pixels.size();
+		const int descriptor=int(syscall(SYS_memfd_create,"raven-frame",MFD_CLOEXEC));
+		if (descriptor<0) throw std::runtime_error("Wayland frame descriptor failed");
+		if (ftruncate(descriptor,off_t(buffer->size))<0) { close(descriptor); throw std::runtime_error("Wayland frame sizing failed"); }
+		buffer->pixels=mmap(nullptr,buffer->size,PROT_READ|PROT_WRITE,MAP_SHARED,descriptor,0);
+		if (buffer->pixels==MAP_FAILED) { close(descriptor); throw std::runtime_error("Wayland frame mapping failed"); }
+		std::memcpy(buffer->pixels,pixels.data(),pixels.size());
+		wl_shm_pool *pool=wl_shm_create_pool(shm,descriptor,int32_t(buffer->size)); close(descriptor);
+		buffer->proxy=wl_shm_pool_create_buffer(pool,0,int32_t(width),int32_t(height),int32_t(width*4),WL_SHM_FORMAT_XRGB8888);
+		wl_shm_pool_destroy(pool);
+		static const wl_buffer_listener buffer_listener{[](void *data,wl_buffer *) { static_cast<Buffer *>(data)->released=true; }};
+		wl_buffer_add_listener(buffer->proxy,&buffer_listener,buffer.get());
+		wl_surface_attach(window.proxy,buffer->proxy,0,0);
+		wl_surface_damage(window.proxy,0,0,int32_t(width),int32_t(height));
+		wl_surface_commit(window.proxy); window.buffers.push_back(std::move(buffer)); sync();
+		if (window.closed) throw std::runtime_error("Wayland surface was closed during presentation");
+	}
+
+	void popup_surface(uint64_t handle,uint64_t parent,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
+		if (!handle || !width || !height || width>4096 || height>4096 || pixels.size()!=size_t(width)*height*4)
+			throw std::runtime_error("invalid native Wayland popup frame");
+		connect();
+		auto found=surfaces.find(handle);
+		if (found==surfaces.end()) {
+			const auto owner=surfaces.find(parent);
+			if (owner==surfaces.end()) throw std::runtime_error("Wayland popup has no presented parent surface");
+			auto window=std::make_unique<Surface>();
+			window->width=width; window->height=height; window->is_popup=true;
+			window->proxy=wl_compositor_create_surface(compositor);
+			window->shell=xdg_wm_base_get_xdg_surface(shell,window->proxy);
+			xdg_positioner *positioner=xdg_wm_base_create_positioner(shell);
+			xdg_positioner_set_size(positioner,int32_t(width),int32_t(height));
+			xdg_positioner_set_anchor_rect(positioner,x,y,1,1);
+			xdg_positioner_set_anchor(positioner,XDG_POSITIONER_ANCHOR_TOP_LEFT);
+			xdg_positioner_set_gravity(positioner,XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
+			window->popup=xdg_surface_get_popup(window->shell,owner->second->shell,positioner);
+			xdg_positioner_destroy(positioner);
+			static const xdg_surface_listener surface_listener{[](void *data,xdg_surface *surface,uint32_t serial) {
+				xdg_surface_ack_configure(surface,serial); static_cast<Surface *>(data)->configured=true;
+			}};
+			static const xdg_popup_listener popup_listener{
+				[](void *,xdg_popup *,int32_t,int32_t,int32_t,int32_t) {},
+				[](void *data,xdg_popup *) { static_cast<Surface *>(data)->closed=true; },
+				nullptr};
+			xdg_surface_add_listener(window->shell,&surface_listener,window.get());
+			xdg_popup_add_listener(window->popup,&popup_listener,window.get());
+			if (seat) xdg_popup_grab(window->popup,seat,last_serial);
+			wl_surface_commit(window->proxy);
+			const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+			while (!window->configured && !window->closed && std::chrono::steady_clock::now()<end) events(std::chrono::milliseconds(20));
+			if (!window->configured || window->closed) throw std::runtime_error("Wayland popup configuration failed");
+			found=surfaces.emplace(handle,std::move(window)).first;
+		}
+		auto &window=*found->second;
+		if (!window.is_popup || window.closed || window.width!=width || window.height!=height)
+			throw std::runtime_error("Wayland popup cannot accept this frame");
+		attach_frame(window,width,height,pixels);
+	}
+
 	void present(uint64_t handle,std::string_view title,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
 		if (!handle || !width || !height || width>8192 || height>8192 || uint64_t(width)*height>16*1024*1024 || pixels.size()!=size_t(width)*height*4)
 			throw std::runtime_error("invalid native Wayland frame");
@@ -259,29 +333,7 @@ struct WaylandPresentation::State {
 		auto &window=*found->second;
 		xdg_toplevel_set_title(window.role,std::string(title).c_str());
 		if (window.closed || window.resized || window.width!=width || window.height!=height) throw std::runtime_error("Wayland surface cannot accept this frame");
-		events(std::chrono::milliseconds(0));
-		std::erase_if(window.buffers,[](const auto &buffer) { return buffer->released; });
-		if (window.buffers.size()>=3) throw std::runtime_error("Wayland presentation buffer limit reached");
-		size_t used=0;
-		for (const auto &[key,surface] : surfaces)
-			for (const auto &buffer : surface->buffers) used+=buffer->size;
-		if (used+pixels.size()>256*1024*1024) throw std::runtime_error("Wayland presentation memory limit reached");
-		auto buffer=std::make_unique<Buffer>(); buffer->size=pixels.size();
-		const int descriptor=int(syscall(SYS_memfd_create,"raven-frame",MFD_CLOEXEC));
-		if (descriptor<0) throw std::runtime_error("Wayland frame descriptor failed");
-		if (ftruncate(descriptor,off_t(buffer->size))<0) { close(descriptor); throw std::runtime_error("Wayland frame sizing failed"); }
-		buffer->pixels=mmap(nullptr,buffer->size,PROT_READ|PROT_WRITE,MAP_SHARED,descriptor,0);
-		if (buffer->pixels==MAP_FAILED) { close(descriptor); throw std::runtime_error("Wayland frame mapping failed"); }
-		std::memcpy(buffer->pixels,pixels.data(),pixels.size());
-		wl_shm_pool *pool=wl_shm_create_pool(shm,descriptor,int32_t(buffer->size)); close(descriptor);
-		buffer->proxy=wl_shm_pool_create_buffer(pool,0,int32_t(width),int32_t(height),int32_t(width*4),WL_SHM_FORMAT_XRGB8888);
-		wl_shm_pool_destroy(pool);
-		static const wl_buffer_listener buffer_listener{[](void *data,wl_buffer *) { static_cast<Buffer *>(data)->released=true; }};
-		wl_buffer_add_listener(buffer->proxy,&buffer_listener,buffer.get());
-		wl_surface_attach(window.proxy,buffer->proxy,0,0);
-		wl_surface_damage(window.proxy,0,0,int32_t(width),int32_t(height));
-		wl_surface_commit(window.proxy); window.buffers.push_back(std::move(buffer)); sync();
-		if (window.closed) throw std::runtime_error("Wayland surface was closed during presentation");
+		attach_frame(window,width,height,pixels);
 	}
 };
 
@@ -306,10 +358,14 @@ DesktopPresentation WaylandPresentation::callbacks()
 		for (auto &[handle,surface] : state->surfaces) {
 			if (surface->resized) throw std::runtime_error("Wayland resize requires Windows geometry handling");
 			if (surface->closed && !surface->close_posted) {
-				events.push_back({handle,0x10}); surface->close_posted=true;
+				if (surface->is_popup) events.push_back({handle,0,0,0,DesktopEventKind::popup_done});
+				else events.push_back({handle,0x10});
+				surface->close_posted=true;
 			}
 		}
 		return events;
+	},[this](uint64_t handle,uint64_t parent,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
+		state->popup_surface(handle,parent,x,y,width,height,pixels);
 	}};
 }
 

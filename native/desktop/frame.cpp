@@ -1,4 +1,5 @@
 #include "windows.h"
+#include "canvas.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,105 +7,7 @@
 
 namespace raven {
 
-namespace {
-
-constexpr int color_active_caption = 2, color_inactive_caption = 3, color_menu = 4, color_window_frame = 6, color_menu_text = 7,
-	color_caption_text = 9, color_button_face = 15, color_button_shadow = 16, color_button_highlight = 20, color_dark_shadow = 21,
-	color_light = 22, color_gradient_active = 27, color_gradient_inactive = 28, color_menu_bar = 30, color_inactive_text = 19;
-
-// BGRA pixels of one window surface, edited in host memory and written back once.
-struct Canvas {
-	std::vector<uint8_t> pixels;
-	int32_t width, height;
-
-	void set(int32_t x, int32_t y, uint32_t rgb)
-	{
-		if (x < 0 || y < 0 || x >= width || y >= height)
-			return;
-		const auto at = (size_t(y) * size_t(width) + size_t(x)) * 4;
-		pixels[at] = uint8_t(rgb >> 16);
-		pixels[at + 1] = uint8_t(rgb >> 8);
-		pixels[at + 2] = uint8_t(rgb);
-		pixels[at + 3] = 0;
-	}
-
-	void fill(DesktopRect rect, uint32_t rgb)
-	{
-		for (int32_t y = std::max(rect.top, 0); y < std::min(rect.bottom, height); ++y)
-			for (int32_t x = std::max(rect.left, 0); x < std::min(rect.right, width); ++x)
-				set(x, y, rgb);
-	}
-
-	// Two-pixel raised or sunken bevel inside rect, using four shades like DrawEdge.
-	void edge(DesktopRect rect, uint32_t outer_top_left, uint32_t outer_bottom_right, uint32_t inner_top_left, uint32_t inner_bottom_right)
-	{
-		for (int32_t x = rect.left; x < rect.right; ++x) {
-			set(x, rect.top, outer_top_left);
-			set(x, rect.bottom - 1, outer_bottom_right);
-		}
-		for (int32_t y = rect.top; y < rect.bottom; ++y) {
-			set(rect.left, y, outer_top_left);
-			set(rect.right - 1, y, outer_bottom_right);
-		}
-		set(rect.right - 1, rect.top, outer_bottom_right);
-		set(rect.left, rect.bottom - 1, outer_bottom_right);
-		for (int32_t x = rect.left + 1; x < rect.right - 1; ++x) {
-			set(x, rect.top + 1, inner_top_left);
-			set(x, rect.bottom - 2, inner_bottom_right);
-		}
-		for (int32_t y = rect.top + 1; y < rect.bottom - 1; ++y) {
-			set(rect.left + 1, y, inner_top_left);
-			set(rect.right - 2, y, inner_bottom_right);
-		}
-		set(rect.right - 2, rect.top + 1, inner_bottom_right);
-		set(rect.left + 1, rect.bottom - 2, inner_bottom_right);
-	}
-
-	void blend(const std::vector<uint8_t> &coverage, int32_t mask_width, int32_t x, int32_t y, uint32_t rgb)
-	{
-		const int32_t mask_height = int32_t(coverage.size() / size_t(mask_width));
-		for (int32_t row = 0; row < mask_height; ++row)
-			for (int32_t column = 0; column < mask_width; ++column)
-				if (coverage[size_t(row) * size_t(mask_width) + size_t(column)])
-					set(x + column, y + row, rgb);
-	}
-};
-
-uint32_t mix(uint32_t from, uint32_t to, int64_t step, int64_t steps)
-{
-	if (steps <= 0)
-		return from;
-	uint32_t result = 0;
-	for (int shift = 0; shift <= 16; shift += 8) {
-		const int64_t a = (from >> shift) & 0xff, b = (to >> shift) & 0xff;
-		result |= uint32_t(a + (b - a) * step / steps) << shift;
-	}
-	return result;
-}
-
-// System colors are COLORREF values (0x00BBGGRR), which is also what Canvas stores; no channel swap is needed.
-uint32_t rgb(uint32_t colorref)
-{
-	return colorref;
-}
-
-}
-
-// Fonts of the nonclient area: the qualified sans face at the classic 8 point size.
-static std::array<uint8_t, 92> interface_font()
-{
-	std::array<uint8_t, 92> definition{};
-	const int32_t height = -11;
-	for (size_t byte = 0; byte < 4; ++byte)
-		definition[byte] = uint8_t(uint32_t(height) >> (byte * 8));
-	definition[16] = 0x90;
-	definition[17] = 0x01;
-	definition[26] = 3;
-	const std::string_view name = "Liberation Sans";
-	for (size_t index = 0; index < name.size(); ++index)
-		definition[28 + index * 2] = uint8_t(name[index]);
-	return definition;
-}
+using namespace paint;
 
 NativeWindows::FrameLayout NativeWindows::frame_layout(const DesktopWindow &window) const
 {
@@ -176,65 +79,31 @@ uint64_t NativeWindows::nonclient_hit(const DesktopWindow &window,int32_t x,int3
 	return border;
 }
 
-#ifdef RAVEN_SKIA
-static std::vector<uint16_t> printable(std::u16string_view text)
+void NativeWindows::nonclient_pointer(uint64_t handle,uint64_t hit,uint32_t message,int32_t x,int32_t y)
 {
-	std::vector<uint16_t> result;
-	for (const auto character : text) {
-		const bool supported = (character >= 32 && character <= 126) || (character >= 0x00a0 && character <= 0x024f) ||
-			(character >= 0x0370 && character <= 0x03ff) || (character >= 0x1e00 && character <= 0x1eff);
-		result.push_back(supported ? uint16_t(character) : uint16_t('?'));
-	}
-	return result;
-}
-
-// Draws one line of text and returns its pixel width; underline marks a mnemonic character index.
-static int32_t draw_text(TextRenderer &renderer, Canvas &canvas, std::u16string_view text, int32_t x, int32_t y, uint32_t color,
-	std::optional<size_t> underline = std::nullopt, int32_t limit = INT32_MAX)
-{
-	const auto font = interface_font();
-	auto characters = printable(text);
-	if (characters.empty())
-		return 0;
-	auto extent = renderer.extent(font, characters);
-	if (extent.width > limit) {
-		// Truncate with an ellipsis rather than overdrawing the neighboring control.
-		while (characters.size() > 1 && renderer.extent(font, characters).width + 3 * 3 > limit)
-			characters.pop_back();
-		characters.insert(characters.end(), 3, uint16_t('.'));
-		extent = renderer.extent(font, characters);
-	}
-	const auto metrics = renderer.metrics(font);
-	const int32_t mask_width = extent.width + 2, mask_height = extent.height;
-	const auto coverage = renderer.mask(font, characters, uint32_t(mask_width), uint32_t(mask_height), 0, 0);
-	canvas.blend(coverage, mask_width, x, y, color);
-	if (underline && *underline < characters.size()) {
-		const auto before = renderer.extent(font, std::span<const uint16_t>(characters).first(*underline)).width;
-		const auto glyph = renderer.extent(font, std::span<const uint16_t>(characters).subspan(*underline, 1)).width;
-		for (int32_t offset = 0; offset < glyph; ++offset)
-			canvas.set(x + before + offset, y + metrics.ascent + 1, color);
-	}
-	return extent.width;
-}
-
-// Menu text without ampersand markers; the mnemonic index points into the returned text.
-static std::pair<std::u16string, std::optional<size_t>> menu_label(std::u16string_view text)
-{
-	std::u16string result;
-	std::optional<size_t> mnemonic;
-	for (size_t index = 0; index < text.size(); ++index) {
-		if (text[index] == u'&' && index + 1 < text.size()) {
-			if (text[index + 1] != u'&' && !mnemonic)
-				mnemonic = result.size();
-			++index;
+	// Only primary-button transitions act on the frame so far; hover and other buttons are ignored.
+	const auto *window=objects.window(handle);
+	if (!window) return;
+	constexpr uint64_t menu_hit=5,minimize_hit=8,maximize_hit=9,close_hit=20;
+	if (message==0x201) {
+		pressed_frame_hit=hit; pressed_frame_window=handle;
+		if (hit==menu_hit) {
+			const auto rects=menu_bar_items(*window);
+			for (size_t index=0;index<rects.size();++index)
+				if (x>=rects[index].left && x<rects[index].right) { menu_open_bar(handle,index); break; }
 		}
-		if (text[index] == u'\t')
-			break;
-		result.push_back(text[index]);
+		return;
 	}
-	return {result, mnemonic};
+	if (message==0x202 && pressed_frame_window==handle && pressed_frame_hit==hit) {
+		pressed_frame_hit=0; pressed_frame_window=0;
+		if (hit==close_hit) send(handle,0x112,0xf060,0);
+		else if (hit==minimize_hit) send(handle,0x112,0xf020,0);
+		else if (hit==maximize_hit) send(handle,0x112,0xf030,0);
+	}
+	(void)y;
 }
 
+#ifdef RAVEN_SKIA
 std::vector<DesktopRect> NativeWindows::menu_bar_items(const DesktopWindow &window)
 {
 	std::vector<DesktopRect> rects;

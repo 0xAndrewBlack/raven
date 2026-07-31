@@ -64,6 +64,26 @@ private:
 	// Menu bar item currently shown as pressed, and the window that owns it.
 	std::optional<size_t> open_menu_item;
 	uint64_t open_menu_window=0;
+	uint64_t pressed_frame_hit=0,pressed_frame_window=0;
+	struct MenuPopup {
+		uint64_t handle,menu,parent;
+		int32_t x,y,width,height;
+		std::vector<DesktopRect> items;
+		std::optional<size_t> highlight;
+		std::vector<uint8_t> pixels;
+	};
+	// Open drop-downs, outermost first; handles live in their own range so they never collide with window handles.
+	std::vector<MenuPopup> popups;
+	uint64_t next_popup=0x7b000000;
+	bool menu_active() const { return open_menu_item.has_value() || !popups.empty(); }
+	bool menu_event(const DesktopEvent &event);
+	void menu_open_bar(uint64_t window,size_t index);
+	void menu_open_popup(uint64_t menu,uint64_t parent,int32_t x,int32_t y);
+	void menu_render(MenuPopup &popup);
+	void menu_highlight(size_t level,std::optional<size_t> index);
+	void menu_select(size_t level,size_t index);
+	void menu_close();
+	void nonclient_pointer(uint64_t window,uint64_t hit,uint32_t message,int32_t x,int32_t y);
 	bool system_dispatch(std::string_view name);
 	// Mouse capture and timers belong to the initial guest thread's input state.
 	uint64_t capture=0;
