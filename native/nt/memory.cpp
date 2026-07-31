@@ -29,13 +29,22 @@ static void put(std::span<uint8_t> bytes, size_t at, uint64_t value, size_t widt
 		bytes[at+byte]=uint8_t(value>>(byte*8));
 }
 
-static bool range(uint64_t address, uint64_t size)
+// x86 guests keep Windows' default 2 GiB user range so every allocation stays positive as a signed pointer.
+static constexpr uint64_t x86_user_limit = 0x7fff0000ULL;
+
+static bool range(uint64_t address, uint64_t size, uint64_t user_limit)
 {
-	return size && size<=512*1024*1024 && address<native_user_limit && size<=native_user_limit-address;
+	return size && size<=512*1024*1024 && address<user_limit && size<=user_limit-address;
 }
 
 NativeMemory::NativeMemory(NativeProcess &process, NativeEnvironment &environment, size_t limit)
-	: process(process), environment(environment), limit(limit) {}
+	: process(process), environment(environment), limit(limit)
+{
+	if (process.mode()==NativeMode::x86) {
+		user_limit=x86_user_limit;
+		next=0x20000000ULL;
+	}
+}
 
 std::span<const std::string_view> NativeMemory::nt_exports()
 {
@@ -55,7 +64,7 @@ std::map<uint64_t,NativeMemory::Region>::iterator NativeMemory::region(uint64_t 
 
 NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32_t type, uint32_t access)
 {
-	if (!range(address,size))
+	if (!range(address,size,user_limit))
 		return {0,0,invalid};
 	if (!(type & 0x3000) || (type & ~0x3000U))
 		return {0,0,unsupported};
@@ -80,7 +89,7 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 	if (!address) {
 		selected=next;
 		for (size_t tries=0; tries<10000; ++tries) {
-			if (!range(selected,length))
+			if (!range(selected,length,user_limit))
 				return {0,0,no_memory};
 			if (process.memory_available(selected,length))
 				break;
@@ -136,7 +145,7 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 
 NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_t access)
 {
-	if (!range(address,size))
+	if (!range(address,size,user_limit))
 		return {0,0,invalid};
 	const auto permissions=protection(access);
 	if (permissions<0)

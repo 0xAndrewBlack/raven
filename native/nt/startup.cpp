@@ -10,6 +10,21 @@ bool NativeEnvironment::startup_information(std::string_view name)
 	require_current();
 	const auto args=process.api_arguments(1);
 	if (!startup_info_ansi) throw std::runtime_error("native startup information is not initialized");
+	if (process.mode()==NativeMode::x86) {
+		if (name!="GetStartupInfoA") return false;
+		try {
+			process.write_memory(args[0],process.read_memory(startup_info_ansi,68));
+		} catch (const std::runtime_error &error) {
+			const std::string_view message=error.what();
+			if (message.find("writable")==message.npos) throw;
+			NativeResult fault{NativeStop::exception,0xc0000005U,process.context().registers.rip-1,0};
+			fault.fault_address=args[0];
+			fault.exception_information={1,args[0]};
+			throw fault;
+		}
+		process.return_api(0);
+		return true;
+	}
 	uint64_t fault_address=args[0],access=1;
 	try {
 		if (name=="GetStartupInfoA") {

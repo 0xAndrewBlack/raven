@@ -1,9 +1,14 @@
 #include "providers.h"
 #include "object_api.h"
+#include "module_api.h"
+#include "resources.h"
+#include "memory.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <map>
+#include <iostream>
 #include <stdexcept>
 
 namespace raven {
@@ -11,11 +16,82 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 13> kernel32_exports{{
-	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"ExitProcess", 1}, {"GetCommandLineA", 0},
-	{"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetFileType", 1},
-	{"GetLastError", 0}, {"GetStdHandle", 1}, {"SetLastError", 1}, {"WriteFile", 5},
+constexpr std::array<std::pair<std::string_view, uint32_t>, 36> kernel32_exports{{
+	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"ExitProcess", 1}, {"FindResourceA", 3},
+	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
+	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0},
+	{"GetFileType", 1}, {"GetLastError", 0}, {"GetModuleFileNameA", 3}, {"GetModuleHandleA", 1},
+	{"GetModuleHandleW", 1}, {"GetProcAddress", 2}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
+	{"GetTickCount", 0}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
+	{"OutputDebugStringA", 1}, {"SetLastError", 1}, {"SizeofResource", 2}, {"VirtualAlloc", 4},
+	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WriteFile", 5}, {"lstrcpyW", 2}, {"lstrlenW", 1},
 }};
+
+// Guest strings and small kernel32 services that need no shared state.
+bool kernel_string_api(NativeProcess &process, NativeEnvironment &environment, const PEModule &entry,
+	const NativeLaunch &launch, std::string_view name)
+{
+	if (name == "GetTickCount") {
+		const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch());
+		process.return_api(uint32_t(now.count()));
+		return true;
+	}
+	if (name == "OutputDebugStringA") {
+		process.api_arguments(1);
+		process.return_api(0);
+		return true;
+	}
+	if (name == "lstrlenW" || name == "lstrcpyW") {
+		const bool copy = name == "lstrcpyW";
+		const auto args = process.api_arguments(copy ? 2 : 1);
+		const uint64_t source = args[copy ? 1 : 0];
+		size_t length = 0;
+		try {
+			while (process.read_memory(source + length * 2, 2) != std::vector<uint8_t>{0, 0}) {
+				if (++length > 1024 * 1024)
+					throw std::runtime_error("native string exceeds policy limit");
+			}
+			if (copy)
+				process.write_memory(args[0], process.read_memory(source, length * 2 + 2));
+		} catch (const std::runtime_error &failure) {
+			const std::string_view message = failure.what();
+			if (message.find("readable") == message.npos && message.find("writable") == message.npos)
+				throw;
+			environment.set_last_error(998);
+			process.return_api(0);
+			return true;
+		}
+		process.return_api(copy ? args[0] : length);
+		return true;
+	}
+	if (name == "GetModuleFileNameA") {
+		const auto args = process.api_arguments(3);
+		if (args[0] && args[0] != entry.loaded.base()) {
+			environment.set_last_error(126);
+			process.return_api(0);
+			return true;
+		}
+		std::string path;
+		for (const auto character : launch.image_path)
+			path.push_back(character > 127 ? '?' : char(character));
+		const size_t size = uint32_t(args[2]);
+		if (!size) {
+			environment.set_last_error(122);
+			process.return_api(0);
+			return true;
+		}
+		const bool truncated = path.size() >= size;
+		if (truncated)
+			path.resize(size - 1);
+		path.push_back('\0');
+		process.write_memory(args[1], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(path.data()), path.size()));
+		if (truncated)
+			environment.set_last_error(122);
+		process.return_api(path.size() - 1);
+		return true;
+	}
+	return false;
+}
 
 uint64_t provider_base(const ModuleSet &modules, uint32_t size)
 {
@@ -96,6 +172,28 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	}
 	environment.prepare_parameters(*launch, standard_handles);
 	NativeObjectAPI object_api(process, environment, kernel_objects, deadline);
+	NativeModuleAPI module_api(process, environment, modules, entry);
+	NativeResources resources(process, environment, modules, entry);
+	NativeMemory memory(process, environment);
+	module_api.set_loader([&](std::string name) -> uint64_t {
+		for (auto &character : name)
+			if (character >= 'A' && character <= 'Z')
+				character = static_cast<char>(character + ('a' - 'A'));
+		if (name.find('.') == std::string::npos)
+			name += ".dll";
+		const auto found = modules.all().find(name);
+		if (found == modules.all().end()) {
+			environment.set_last_error(126);
+			return 0;
+		}
+		return found->second->loaded.base();
+	}, [&](uint64_t handle) -> bool {
+		const bool known = std::any_of(modules.all().begin(), modules.all().end(),
+			[&](const auto &item) { return item.second->loaded.base() == handle; });
+		if (!known)
+			environment.set_last_error(6);
+		return known;
+	});
 	auto result = process.call(entry.loaded.base() + entry.image.entry, {}, timeout);
 	while (result.stop == NativeStop::api) {
 		const auto found = traps.find(result.value);
@@ -106,8 +204,12 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			process.abandon_call();
 			return {NativeStop::exited, code, result.instruction, 0};
 		}
-		if (!environment.dispatch(found->second.first) && !object_api.dispatch(found->second.first))
+		const auto api = found->second.first;
+		if (!environment.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
+			!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api)) {
+			std::cerr << "raven: unimplemented native x86 API " << api << '\n';
 			return result;
+		}
 		const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
 		if (remaining.count() <= 0)
 			return {NativeStop::timeout, 0, result.instruction, 0};

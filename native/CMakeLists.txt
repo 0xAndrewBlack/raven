@@ -1108,6 +1108,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -o ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe ${LOADER_SOURCES}/x86_client.c -lkernel32
                     DEPENDS ${LOADER_SOURCES}/x86_client.c VERBATIM)
                 add_custom_target(x86_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-kernel-client.exe
+                    COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
+                        -Wl,--entry,_raven_entry,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/x86-kernel-client.exe ${LOADER_SOURCES}/x86_kernel_client.c -lkernel32
+                    DEPENDS ${LOADER_SOURCES}/x86_kernel_client.c VERBATIM)
+                add_custom_target(x86_kernel_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/x86-kernel-client.exe)
+                add_test(NAME native_x86_kernel_cli COMMAND raven --run-process --execution=native
+                    ${CMAKE_CURRENT_BINARY_DIR}/x86-kernel-client.exe)
+                set_tests_properties(native_x86_kernel_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
@@ -1229,7 +1238,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -Wl,--entry,_raven_entry -o ${RESOURCE_FIXTURES}/client32.exe
                         ${LOADER_SOURCES}/resource_client.c ${RESOURCE_FIXTURES}/resources32.o -lkernel32
                     DEPENDS ${RESOURCE_FIXTURES}/resources.o ${LOADER_SOURCES}/resource_client.c ${LOADER_SOURCES}/resources.rc VERBATIM)
-                add_custom_target(resource_pe32_fixture ALL DEPENDS ${RESOURCE_FIXTURES}/client32.exe)
+                file(MAKE_DIRECTORY ${RESOURCE_FIXTURES}/x86)
+                add_custom_command(OUTPUT ${RESOURCE_FIXTURES}/x86/resources.dll
+                    COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -shared -fno-stack-protector
+                        -Wl,--entry,0 -o ${RESOURCE_FIXTURES}/x86/resources.dll
+                        ${LOADER_SOURCES}/resource_module.c ${RESOURCE_FIXTURES}/resources32.o
+                    DEPENDS ${RESOURCE_FIXTURES}/resources32.o ${LOADER_SOURCES}/resource_module.c VERBATIM)
+                add_custom_target(resource_pe32_fixture ALL DEPENDS ${RESOURCE_FIXTURES}/client32.exe ${RESOURCE_FIXTURES}/x86/resources.dll)
+                add_test(NAME native_x86_resource_cli COMMAND raven --run-process --execution=native
+                    ${RESOURCE_FIXTURES}/client32.exe ${RESOURCE_FIXTURES}/x86/resources.dll)
+                set_tests_properties(native_x86_resource_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
                 add_executable(pe_resources_test pe/resources_test.cpp)
                 target_link_libraries(pe_resources_test PRIVATE raven_pe)
                 add_dependencies(pe_resources_test resource_pe_fixtures resource_pe32_fixture)

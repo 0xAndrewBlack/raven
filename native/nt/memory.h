@@ -40,6 +40,7 @@ private:
 	NativeEnvironment &environment;
 	std::map<uint64_t,Region> regions;
 	uint64_t next = 0x200000000ULL;
+	uint64_t user_limit = native_user_limit;
 	size_t used = 0;
 	size_t limit;
 	std::map<uint64_t,Region>::iterator region(uint64_t address, uint64_t size);
