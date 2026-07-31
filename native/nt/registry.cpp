@@ -1,6 +1,7 @@
 #include "registry.h"
 #include "nls.h"
 
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
 
@@ -215,6 +216,117 @@ uint32_t NativeRegistry::set(uint64_t key, std::u16string_view name, uint32_t ty
 		return 234;
 	keys.at(found->second).values[fold(name)] = Value{std::u16string(name), type, std::vector<uint8_t>(data.begin(), data.end())};
 	save();
+	return 0;
+}
+
+std::vector<std::u16string> NativeRegistry::children(const std::u16string &folded) const
+{
+	std::vector<std::u16string> result;
+	const auto prefix = folded + u'\\';
+	for (auto found = keys.lower_bound(prefix); found != keys.end() && found->first.starts_with(prefix); ++found)
+		if (found->first.find(u'\\', prefix.size()) == found->first.npos)
+			result.push_back(found->first);
+	return result;
+}
+
+uint32_t NativeRegistry::remove_key(uint64_t parent, std::u16string_view path)
+{
+	std::u16string folded, display;
+	if (!resolve(parent, path, folded, display))
+		return bad_handle;
+	if (path.empty())
+		return 5;
+	if (!keys.contains(folded))
+		return file_not_found;
+	// A key with subkeys cannot be deleted; its values go with it.
+	if (!children(folded).empty())
+		return 5;
+	keys.erase(folded);
+	for (auto &[handle, target] : open_keys)
+		if (target == folded)
+			target.clear();
+	save();
+	return 0;
+}
+
+uint32_t NativeRegistry::remove_value(uint64_t key, std::u16string_view name)
+{
+	const auto found = open_keys.find(key);
+	if (found == open_keys.end())
+		return predefined(key) ? 5 : bad_handle;
+	const auto entry = keys.find(found->second);
+	if (entry == keys.end())
+		return key_deleted;
+	if (!entry->second.values.erase(fold(name)))
+		return file_not_found;
+	save();
+	return 0;
+}
+
+uint32_t NativeRegistry::enum_key(uint64_t key, uint32_t index, std::u16string &name) const
+{
+	std::u16string folded;
+	if (predefined(key)) {
+		static const char16_t *const names[] = {u"HKEY_CLASSES_ROOT", u"HKEY_CURRENT_USER", u"HKEY_LOCAL_MACHINE", u"HKEY_USERS"};
+		folded = fold(names[key - 0x80000000ULL]);
+	} else {
+		const auto found = open_keys.find(key);
+		if (found == open_keys.end())
+			return bad_handle;
+		folded = found->second;
+	}
+	if (!keys.contains(folded) && !predefined(key))
+		return key_deleted;
+	const auto subkeys = children(folded);
+	if (index >= subkeys.size())
+		return 259;
+	const auto &display = keys.at(subkeys[index]).path;
+	name = display.substr(display.find_last_of(u'\\') + 1);
+	return 0;
+}
+
+uint32_t NativeRegistry::enum_value(uint64_t key, uint32_t index, std::u16string &name, uint32_t &type, std::vector<uint8_t> &data) const
+{
+	const auto found = open_keys.find(key);
+	if (found == open_keys.end())
+		return predefined(key) ? 259 : bad_handle;
+	const auto entry = keys.find(found->second);
+	if (entry == keys.end())
+		return key_deleted;
+	if (index >= entry->second.values.size())
+		return 259;
+	auto value = entry->second.values.begin();
+	std::advance(value, index);
+	name = value->second.name;
+	type = value->second.type;
+	data = value->second.data;
+	return 0;
+}
+
+uint32_t NativeRegistry::info(uint64_t key, Info &result) const
+{
+	std::u16string folded;
+	if (predefined(key)) {
+		static const char16_t *const names[] = {u"HKEY_CLASSES_ROOT", u"HKEY_CURRENT_USER", u"HKEY_LOCAL_MACHINE", u"HKEY_USERS"};
+		folded = fold(names[key - 0x80000000ULL]);
+	} else {
+		const auto found = open_keys.find(key);
+		if (found == open_keys.end())
+			return bad_handle;
+		folded = found->second;
+	}
+	result = {};
+	for (const auto &child : children(folded)) {
+		++result.subkeys;
+		const auto &display = keys.at(child).path;
+		result.longest_subkey = std::max<uint32_t>(result.longest_subkey, uint32_t(display.size() - display.find_last_of(u'\\') - 1));
+	}
+	if (const auto entry = keys.find(folded); entry != keys.end())
+		for (const auto &[unused, value] : entry->second.values) {
+			++result.values;
+			result.longest_name = std::max<uint32_t>(result.longest_name, uint32_t(value.name.size()));
+			result.longest_data = std::max<uint32_t>(result.longest_data, uint32_t(value.data.size()));
+		}
 	return 0;
 }
 

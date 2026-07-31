@@ -14,9 +14,16 @@ namespace {
 
 constexpr size_t record_size = 152;
 constexpr uint32_t flag_noncontinuable = 1, flag_unwinding = 2, flag_exit_unwind = 4, flag_target_unwind = 0x20, flag_nested = 0x10;
-constexpr uint32_t status_unwind = 0xc0000027U, status_noncontinuable = 0xc0000025U, status_invalid_disposition = 0xc0000026U;
+constexpr uint32_t status_unwind_consolidate = 0x80000029U, status_unwind = 0xc0000027U, status_noncontinuable = 0xc0000025U, status_invalid_disposition = 0xc0000026U;
 // DISPATCHER_CONTEXT is 80 bytes; the fields below are its byte offsets.
 constexpr size_t dispatcher_size = 80;
+
+uint64_t load64(const std::vector<uint8_t> &bytes, size_t at)
+{
+	uint64_t value;
+	std::memcpy(&value, bytes.data() + at, 8);
+	return value;
+}
 
 uint32_t le32(const std::vector<uint8_t> &bytes, size_t at)
 {
@@ -71,6 +78,7 @@ public:
 	Exceptions(KernelContext &context, NativeUnwinder &unwinder) : context(context), unwinder(unwinder), scratch(context) {}
 
 	bool trace = std::getenv("RAVEN_TRACE_SEH") != nullptr;
+	uint64_t trap_gate = 0;
 
 	// Walks the stack from the raising frame; true when a handler resumed execution through `resume`.
 	bool dispatch(std::vector<uint8_t> record, ContextBytes origin, ContextBytes &resume)
@@ -80,9 +88,22 @@ public:
 		const uint64_t dispatcher = scratch.take(dispatcher_size);
 		const uint64_t frame_context = scratch.take(x64_context::size);
 		context.process.write_memory(guest_record, record);
-		active.push_back({origin, context.process.callback_depth()});
+		active.push_back({origin, context.process.callback_depth(), mark});
 		if (trace)
-			std::fprintf(stderr, "seh dispatch begin: code=%x active=%zu depth=%zu\n", le32(record, 0), active.size(), context.process.callback_depth());
+		{
+			std::fprintf(stderr, "seh dispatch begin: code=%x active=%zu depth=%zu params=%x info1=%llx info2=%llx rsp=%llx\n", le32(record, 0), active.size(),
+				context.process.callback_depth(), le32(record, 0x18), (unsigned long long)load64(record, 0x28), (unsigned long long)load64(record, 0x30),
+				(unsigned long long)context_rsp(origin));
+			if (le32(record, 0x18) >= 2) {
+				try {
+					const auto data = context.process.read_memory(load64(record, 0x28), 96);
+					std::fprintf(stderr, "seh object:");
+					for (const auto byte : data) std::fprintf(stderr, " %02x", byte);
+					std::fprintf(stderr, "\n");
+				} catch (const std::runtime_error &) {
+				}
+			}
+		}
 		bool handled = false;
 		ContextBytes current = origin;
 		for (int frames = 0; frames < 1024; ++frames) {
@@ -145,6 +166,12 @@ public:
 	// Handles one exception end to end; either redirects the guest (throwing ExecutionRedirected) or ends the process.
 	[[noreturn]] void raise(std::vector<uint8_t> record, ContextBytes origin, const std::function<NativeResult()> &unhandled)
 	{
+		if (std::getenv("RAVEN_WATCH_EXCEPTION") && le32(record, 0x18) >= 2) {
+			// Diagnosis aid: report every write to the second word of the thrown object.
+			uint64_t object;
+			std::memcpy(&object, record.data() + 0x28, 8);
+			context.process.watch_write(object);
+		}
 		ContextBytes resume;
 		const size_t depth = context.process.callback_depth();
 		if (dispatch(record, origin, resume))
@@ -170,18 +197,30 @@ public:
 			scratch.release(mark);
 		}
 		const uint32_t code = le32(record, 0);
-		std::fprintf(stderr, "raven: unhandled exception %08x at %llx\n", code, (unsigned long long)context_rip(origin));
+		const auto *module = unwinder.module_at(context_rip(origin));
+		std::fprintf(stderr, "raven: unhandled exception %08x at %llx (%s+%llx)\n", code, (unsigned long long)context_rip(origin),
+			module ? module->name.c_str() : "unknown", module ? (unsigned long long)(context_rip(origin) - module->loaded.base()) : 0ULL);
 		throw unhandled();
 	}
 
 	// Execution resumes at the callback nesting where the exception was raised; handler calls above it are abandoned.
-	[[noreturn]] void redirect_to(const ContextBytes &target, size_t depth)
+	[[noreturn]] void redirect_to(const ContextBytes &target, size_t depth, size_t mark = SIZE_MAX)
 	{
 		auto native = context.process.context();
 		apply_context(native, target);
 		context.process.redirect(native, depth);
-		active.clear();
-		scratch.release(0);
+		if (const char *count = std::getenv("RAVEN_STEP_REDIRECT")) {
+			// Diagnosis aid: log the instructions executed right after execution is redirected.
+			static int redirects = 0;
+			if (++redirects == (std::getenv("RAVEN_STEP_NTH") ? std::atoi(std::getenv("RAVEN_STEP_NTH")) : 1))
+				context.process.trace_instructions(size_t(std::atoi(count)), [this](uint64_t rip) {
+					const auto *module = unwinder.module_at(rip);
+					std::fprintf(stderr, "step %s+%llx\n", module ? module->name.c_str() : "?", module ? (unsigned long long)(rip - module->loaded.base()) : (unsigned long long)rip);
+				});
+		}
+		// Guest memory of the dispatches that this jump abandons can be reused; outer dispatches keep theirs.
+		if (mark != SIZE_MAX)
+			scratch.release(mark);
 		throw ExecutionRedirected{depth};
 	}
 
@@ -215,9 +254,10 @@ public:
 	[[noreturn]] void unwind(uint64_t target_frame, uint64_t target_ip, std::vector<uint8_t> record, uint64_t return_value)
 	{
 		put32(record, 4, le32(record, 4) | flag_unwinding | (target_frame ? 0 : flag_exit_unwind));
-		// The outermost dispatch being unwound marks where the callback nesting returns to.
-		const size_t depth = active.empty() ? context.process.callback_depth() : active.front().depth;
+		// Crossing a host callback boundary consumes the dispatch it belongs to; the last one consumed says where execution resumes.
+		size_t depth = context.process.callback_depth();
 		const size_t mark = scratch.mark();
+		size_t resume_mark = mark;
 		const uint64_t guest_record = scratch.take(record_size);
 		const uint64_t dispatcher = scratch.take(dispatcher_size);
 		const uint64_t frame_context = scratch.take(x64_context::size);
@@ -228,6 +268,8 @@ public:
 			if (pc == context.process.return_gate() && !active.empty()) {
 				// The host callback boundary stands in for the dispatcher's own frames: continue from where the exception was raised.
 				current = active.back().origin;
+				depth = active.back().depth;
+				resume_mark = std::min(resume_mark, active.back().mark);
 				active.pop_back();
 				continue;
 			}
@@ -241,6 +283,10 @@ public:
 			ContextBytes next = current;
 			const auto result = unwinder.unwind(2, pc, *function, next);
 			const bool at_target = target_frame && result.establisher == target_frame;
+			if (trace)
+				std::fprintf(stderr, "seh unwind frame: pc=%llx fn=%x..%x establisher=%llx rsp=%llx->%llx handler=%llx%s\n", (unsigned long long)pc, function->begin,
+					function->end, (unsigned long long)result.establisher, (unsigned long long)context_rsp(current), (unsigned long long)context_rsp(next),
+					(unsigned long long)result.handler, at_target ? " TARGET" : "");
 			if (target_frame && result.establisher > target_frame && !at_target) {
 				std::fprintf(stderr, "raven: unwind passed its target frame\n");
 				context.process.abandon_call();
@@ -267,9 +313,12 @@ public:
 				const auto outcome = context.call(result.handler, arguments);
 				if (outcome.stop != NativeStop::returned)
 					throw outcome;
-				// Handlers may adjust the frame's context (nested C++ cleanup does); take it back.
-				if (uint32_t(outcome.value) == 3)
+				// The handler of the target frame owns the context that execution resumes from, and C++ frame handlers
+				// leave the continuation address of the catch block they ran in the dispatcher's TargetIp.
+				if (at_target || uint32_t(outcome.value) == 3)
 					current = context.process.read_memory(frame_context, x64_context::size);
+				if (at_target)
+					target_ip = load64(context.process.read_memory(dispatcher, dispatcher_size), 0x20);
 			}
 			if (at_target) {
 				reached = true;
@@ -277,23 +326,64 @@ public:
 			}
 			current = next;
 		}
-		scratch.release(mark);
 		if (!reached && target_frame) {
 			std::fprintf(stderr, "raven: unwind never reached its target frame\n");
 			context.process.abandon_call();
 			throw ProcessExit{status_invalid_disposition, context_rip(current)};
 		}
+		if (trace)
+			std::fprintf(stderr, "seh resume at %llx (context rip %llx) rsp=%llx\n", (unsigned long long)target_ip, (unsigned long long)context_rip(current),
+				(unsigned long long)context_rsp(current));
+		if (le32(record, 0) == status_unwind_consolidate && trap_gate) {
+			// Run the runtime's callback on the target frame's stack; its return trap resumes execution.
+			const uint64_t callback = load64(record, 0x20);
+			const uint64_t base = (context_rsp(current) - record_size - 0x40) & ~uint64_t(15);
+			context.process.write_memory(base, record);
+			const uint64_t slot = base - 0x20 - 8;
+			std::vector<uint8_t> gate(8);
+			put64(gate, 0, trap_gate);
+			context.process.write_memory(slot, gate);
+			consolidations.push_back({current, slot, depth});
+			auto entry = current;
+			set_context_rip(entry, callback);
+			set_context_rsp(entry, slot);
+			set_context_register(entry, 1, base);
+			redirect_to(entry, depth, resume_mark);
+		}
 		if (target_ip)
 			set_context_rip(current, target_ip);
 		set_context_register(current, 0, return_value);
-		redirect_to(current, depth);
+		redirect_to(current, depth, resume_mark);
 	}
 
 	struct Active {
 		ContextBytes origin;
 		size_t depth;
+		size_t mark;
 	};
 	std::vector<Active> active;
+	// A C++ catch is entered through STATUS_UNWIND_CONSOLIDATE: after unwinding, the runtime's callback runs on the
+	// target frame's stack and returns the address where execution resumes. Each pending callback remembers the frame it belongs to.
+	struct Consolidation {
+		ContextBytes target;
+		uint64_t return_slot;
+		size_t depth;
+	};
+	std::vector<Consolidation> consolidations;
+
+	[[noreturn]] void finish_consolidation(uint64_t continuation)
+	{
+		const uint64_t slot = context_rsp(context_from_process(context.process.context())) - 8;
+		const auto found = std::find_if(consolidations.begin(), consolidations.end(), [slot](const auto &item) { return item.return_slot == slot; });
+		if (found == consolidations.end())
+			throw std::runtime_error("native unwind consolidation returned without a pending catch");
+		auto target = found->target;
+		const size_t depth = found->depth;
+		// Callbacks that never returned (a rethrow left them) are abandoned together with this one.
+		consolidations.erase(found, consolidations.end());
+		set_context_rip(target, continuation);
+		redirect_to(target, depth);
+	}
 
 private:
 	KernelContext &context;
@@ -317,6 +407,7 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 		auto native = context.process.context();
 		auto origin = context_from_process(native);
 		const uint64_t rip = context_rip(origin);
+		context.process.enter_fault_dispatch();
 		const auto code = context.process.read_memory(rip, 2);
 		if (fault.signal == SIGSEGV && code[0] == 0xcd && code[1] == 0x29) {
 			std::fprintf(stderr, "raven: fast fail %llu\n", (unsigned long long)context_register(origin, 1));
@@ -336,9 +427,32 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 		case SIGTRAP: status = 0x80000003U; break;
 		default: break;
 		}
-		context.process.enter_fault_dispatch();
 		auto record = exceptions->new_record(status, 0, rip, parameters);
 		exceptions->raise(std::move(record), std::move(origin), [fault] { return fault; });
+	};
+	context.describe_stack = [&context, &unwinder] {
+		std::string text;
+		try {
+			auto bytes = context_from_process(context.process.context());
+			// Skip the API stub: the first frame is the guest code that called it.
+			unwinder.unwind_leaf(bytes);
+			for (int frame = 0; frame < 24; ++frame) {
+				const uint64_t pc = context_rip(bytes);
+				const auto *module = unwinder.module_at(pc);
+				if (!module)
+					break;
+				char buffer[96];
+				std::snprintf(buffer, sizeof buffer, " %s+%llx", module->name.c_str(), (unsigned long long)(pc - module->loaded.base()));
+				text += buffer;
+				const auto function = unwinder.lookup(pc);
+				if (!function)
+					unwinder.unwind_leaf(bytes);
+				else
+					unwinder.unwind(0, pc, *function, bytes);
+			}
+		} catch (const std::exception &) {
+		}
+		return text;
 	};
 	registry.add("RtlCaptureContext", 1, [exceptions, &context](ApiCall &call) {
 		call.write(call[0], exceptions->caller_context());
@@ -389,7 +503,20 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 		put64(record, 0x10, context_rip(origin));
 		exceptions->raise(std::move(record), std::move(origin), [&context] { return native_raise_rtl_exception(context.process, false); });
 	});
-	registry.add("RtlUnwindEx", 6, [exceptions](ApiCall &call) {
+	registry.add("RtlUnwindEx", 6, [exceptions, &context](ApiCall &call) {
+		if (std::getenv("RAVEN_TRACE_SEH") && call[2]) {
+			// Show the thrown object as the unwinder sees it: it must still be intact here.
+			const auto bytes = call.read(call[2], record_size);
+			const uint64_t object = load64(bytes, 0x28);
+			try {
+				const auto data = call.read(object, 24);
+				std::fprintf(stderr, "seh unwind object %llx:", (unsigned long long)object);
+				for (const auto byte : data) std::fprintf(stderr, " %02x", byte);
+				std::fprintf(stderr, "\n");
+			} catch (const ApiFault &) {
+			}
+		}
+		(void)context;
 		std::vector<uint8_t> record;
 		if (call[2])
 			record = call.read(call[2], record_size);
@@ -408,6 +535,15 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 	const auto restore = [exceptions, &context](ApiCall &call) {
 		exceptions->redirect_to(call.read(call[0], x64_context::size), context.process.callback_depth());
 	};
+	exceptions->trap_gate = 0;
+	try {
+		exceptions->trap_gate = context.modules.resolve({"kernel32.dll", "RcConsolidateFrames", 0, false, 0});
+	} catch (const std::runtime_error &) {
+	}
+	registry.add("RcConsolidateFrames", 0, [exceptions, &context](ApiCall &call) {
+		(void)call;
+		exceptions->finish_consolidation(context.process.context().registers.rax);
+	});
 	registry.add("RtlRestoreContext", 2, restore);
 	registry.add("NtContinue", 2, restore);
 	registry.add("UnhandledExceptionFilter", 1, [](ApiCall &call) { call.ret(0); });

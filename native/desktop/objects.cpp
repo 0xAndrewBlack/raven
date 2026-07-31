@@ -118,6 +118,8 @@ uint64_t DesktopObjects::add(Object object)
 			std::get<DesktopMenu>(objects.at(item.submenu)).parent=handle;
 	next = handle;
 	used += size;
+	if (auto *record=std::get_if<DesktopWindow>(&objects.at(handle)))
+		record->order=++next_order;
 	return handle;
 }
 
@@ -359,7 +361,7 @@ uint16_t DesktopObjects::register_class(DesktopClass definition)
 {
 	const auto size=sizeof(DesktopClass)+definition.name.size()+definition.extra.size();
 	if (definition.name.empty() || !definition.procedure || (definition.background && definition.background>31 && !brush(definition.background)) || class_registered(definition.instance,definition.name,(definition.style & 0x4000)!=0) ||
-		(definition.style & ~0x4000U) || next_class>UINT16_MAX ||
+		next_class>UINT16_MAX ||
 		definition.window_extra>4096 || definition.extra.size()>4096 ||
 		objects.size()+classes.size()>=10000 || size>limit-used)
 		return 0;

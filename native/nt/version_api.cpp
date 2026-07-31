@@ -1,0 +1,255 @@
+#include "kernel_context.h"
+#include "pe/resources.h"
+#include "text.h"
+
+#include <algorithm>
+#include <cstring>
+#include <fstream>
+#include <optional>
+
+namespace raven {
+
+namespace {
+
+constexpr uint32_t rt_version = 16;
+
+void put16(std::vector<uint8_t> &bytes, uint16_t value)
+{
+	bytes.push_back(uint8_t(value));
+	bytes.push_back(uint8_t(value >> 8));
+}
+
+void put32(std::vector<uint8_t> &bytes, uint32_t value)
+{
+	put16(bytes, uint16_t(value));
+	put16(bytes, uint16_t(value >> 16));
+}
+
+void align(std::vector<uint8_t> &bytes)
+{
+	while (bytes.size() % 4)
+		bytes.push_back(0);
+}
+
+// One VS_VERSIONINFO-style node: header, key, optional value, children; lengths are patched when the node ends.
+size_t begin_block(std::vector<uint8_t> &bytes, std::u16string_view key, uint16_t value_length, uint16_t type)
+{
+	align(bytes);
+	const size_t start = bytes.size();
+	put16(bytes, 0);
+	put16(bytes, value_length);
+	put16(bytes, type);
+	for (const auto character : key)
+		put16(bytes, character);
+	put16(bytes, 0);
+	align(bytes);
+	return start;
+}
+
+void end_block(std::vector<uint8_t> &bytes, size_t start)
+{
+	const uint16_t length = uint16_t(bytes.size() - start);
+	bytes[start] = uint8_t(length);
+	bytes[start + 1] = uint8_t(length >> 8);
+}
+
+void string_entry(std::vector<uint8_t> &bytes, std::u16string_view key, std::u16string_view value)
+{
+	const auto start = begin_block(bytes, key, uint16_t(value.size() + 1), 1);
+	for (const auto character : value)
+		put16(bytes, character);
+	put16(bytes, 0);
+	end_block(bytes, start);
+}
+
+// Version resource that Windows system libraries carry; the numbers describe Windows 10 build 19041.
+std::vector<uint8_t> system_version(std::u16string_view name)
+{
+	std::vector<uint8_t> bytes;
+	const auto root = begin_block(bytes, u"VS_VERSION_INFO", 52, 0);
+	put32(bytes, 0xfeef04bd);
+	put32(bytes, 0x10000);
+	put32(bytes, 10U << 16);
+	put32(bytes, (19041U << 16) | 1);
+	put32(bytes, 10U << 16);
+	put32(bytes, (19041U << 16) | 1);
+	put32(bytes, 0x3f);
+	put32(bytes, 0);
+	put32(bytes, 0x40004);
+	put32(bytes, name.ends_with(u".exe") ? 1 : 2);
+	put32(bytes, 0);
+	put32(bytes, 0);
+	put32(bytes, 0);
+	const auto strings = begin_block(bytes, u"StringFileInfo", 0, 1);
+	const auto table = begin_block(bytes, u"040904b0", 0, 1);
+	string_entry(bytes, u"CompanyName", u"Microsoft Corporation");
+	string_entry(bytes, u"FileDescription", name);
+	string_entry(bytes, u"FileVersion", u"10.0.19041.1 (WinBuild.160101.0800)");
+	string_entry(bytes, u"InternalName", name);
+	string_entry(bytes, u"OriginalFilename", name);
+	string_entry(bytes, u"ProductName", u"Microsoft® Windows® Operating System");
+	string_entry(bytes, u"ProductVersion", u"10.0.19041.1");
+	end_block(bytes, table);
+	end_block(bytes, strings);
+	const auto variables = begin_block(bytes, u"VarFileInfo", 0, 1);
+	const auto translation = begin_block(bytes, u"Translation", 4, 0);
+	put16(bytes, 0x0409);
+	put16(bytes, 0x04b0);
+	end_block(bytes, translation);
+	end_block(bytes, variables);
+	end_block(bytes, root);
+	return bytes;
+}
+
+struct Node {
+	size_t start, length;
+	uint16_t value_length, type;
+	std::u16string key;
+	size_t value_offset, value_size, children;
+};
+
+std::optional<Node> read_node(std::span<const uint8_t> block, size_t at, size_t limit)
+{
+	if (at + 6 > limit || at % 4)
+		return std::nullopt;
+	Node node{};
+	node.start = at;
+	node.length = block[at] | block[at + 1] << 8;
+	node.value_length = uint16_t(block[at + 2] | block[at + 3] << 8);
+	node.type = uint16_t(block[at + 4] | block[at + 5] << 8);
+	if (node.length < 6 || at + node.length > limit)
+		return std::nullopt;
+	size_t cursor = at + 6;
+	while (cursor + 1 < at + node.length && (block[cursor] || block[cursor + 1])) {
+		node.key.push_back(char16_t(block[cursor] | block[cursor + 1] << 8));
+		cursor += 2;
+	}
+	cursor += 2;
+	cursor = (cursor + 3) & ~size_t(3);
+	node.value_offset = cursor;
+	node.value_size = node.type == 1 ? size_t(node.value_length) * 2 : node.value_length;
+	node.children = (cursor + node.value_size + 3) & ~size_t(3);
+	if (node.children > at + node.length)
+		node.children = at + node.length;
+	return node;
+}
+
+// Follows a backslash-separated path through nested version blocks; returns the node it names.
+std::optional<Node> find_node(std::span<const uint8_t> block, std::u16string_view path)
+{
+	auto node = read_node(block, 0, block.size());
+	if (!node)
+		return std::nullopt;
+	while (!path.empty() && path.front() == u'\\')
+		path.remove_prefix(1);
+	while (!path.empty()) {
+		const auto end = path.find(u'\\');
+		const auto part = path.substr(0, end);
+		path = end == path.npos ? std::u16string_view() : path.substr(end + 1);
+		bool found = false;
+		size_t at = node->children;
+		while (at + 6 <= node->start + node->length) {
+			const auto child = read_node(block, at, node->start + node->length);
+			if (!child)
+				return std::nullopt;
+			if (equal_fold(child->key, part)) {
+				node = child;
+				found = true;
+				break;
+			}
+			at = (child->start + child->length + 3) & ~size_t(3);
+		}
+		if (!found)
+			return std::nullopt;
+	}
+	return node;
+}
+
+}
+
+void register_version_api(ApiRegistry &registry, KernelContext &context)
+{
+	auto &paths = context.paths;
+	auto &modules = context.modules;
+	// The version resource of a file in the prefix, or a synthesized one for the Windows system libraries.
+	const auto load = [&paths, &modules](ApiCall &call, std::u16string name) -> std::optional<std::vector<uint8_t>> {
+		const auto resolved = paths.resolve(name);
+		if (resolved && resolved->exists && std::filesystem::is_regular_file(resolved->host)) {
+			std::ifstream stream(resolved->host, std::ios::binary);
+			std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+			try {
+				const PEImage image(bytes);
+				for (const auto &resource : image.resources()) {
+					const auto *type = std::get_if<uint32_t>(&resource.type);
+					if (type && *type == rt_version) {
+						const auto data = image.file_span(resource.data_address, resource.size);
+						return std::vector<uint8_t>(data.begin(), data.end());
+					}
+				}
+			} catch (const std::runtime_error &) {
+				call.set_last_error(193);
+				return std::nullopt;
+			}
+			call.set_last_error(1813);
+			return std::nullopt;
+		}
+		auto base = name.substr(name.find_last_of(u"\\/") == name.npos ? 0 : name.find_last_of(u"\\/") + 1);
+		std::string lower = to_utf8(base);
+		for (auto &character : lower)
+			character = char(std::tolower(static_cast<unsigned char>(character)));
+		if (modules.all().contains(lower))
+			return system_version(widen_ascii(lower));
+		call.set_last_error(resolved && !resolved->parent_exists ? 3 : 2);
+		return std::nullopt;
+	};
+	const auto size_of = [load](ApiCall &call) {
+		const auto data = load(call, call.wide(call[0]));
+		if (!data) {
+			call.ret(0);
+			return;
+		}
+		if (call[1]) call.store<uint32_t>(call[1], 0);
+		call.ret(data->size());
+	};
+	registry.add("GetFileVersionInfoSizeW", 2, size_of);
+	registry.add("GetFileVersionInfoSizeExW", 3, [load](ApiCall &call) {
+		const auto data = load(call, call.wide(call[1]));
+		if (call[2]) call.store<uint32_t>(call[2], 0);
+		call.ret(data ? data->size() : 0);
+	});
+	const auto info_of = [load](ApiCall &call, size_t name_index, size_t length_index, size_t data_index) {
+		auto data = load(call, call.wide(call[name_index]));
+		if (!data) {
+			call.ret(0);
+			return;
+		}
+		const size_t capacity = call.u32(length_index);
+		if (capacity < data->size()) {
+			call.fail(122);
+			return;
+		}
+		call.write(call[data_index], *data);
+		call.ret(1);
+	};
+	registry.add("GetFileVersionInfoW", 4, [info_of](ApiCall &call) { info_of(call, 0, 2, 3); });
+	registry.add("GetFileVersionInfoExW", 5, [info_of](ApiCall &call) { info_of(call, 1, 3, 4); });
+	registry.add("VerQueryValueW", 4, [](ApiCall &call) {
+		if (!call[0] || !call[1]) {
+			call.fail(87);
+			return;
+		}
+		const size_t total = call.read(call[0], 2)[0] | call.read(call[0] + 1, 1)[0] << 8;
+		const auto block = call.read(call[0], total);
+		const auto path = call.wide(call[1], 512);
+		const auto node = find_node(block, path);
+		if (!node) {
+			call.fail(1813);
+			return;
+		}
+		if (call[2]) call.store<uint64_t>(call[2], call[0] + node->value_offset);
+		if (call[3]) call.store<uint32_t>(call[3], node->type == 1 ? node->value_length : uint32_t(node->value_size));
+		call.ret(1);
+	});
+}
+
+}

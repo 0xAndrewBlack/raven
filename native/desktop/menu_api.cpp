@@ -5,6 +5,17 @@
 
 namespace raven {
 
+uint64_t NativeDesktop::menu_resource(uint64_t instance,uint64_t identifier)
+{
+	const auto view=resources.view(instance,4,identifier);
+	if (!view || view->size>1024*1024) return 0;
+	try {
+		return objects.load_menu(decode_menu(process.read_memory(view->address,view->size)));
+	} catch (const std::runtime_error &) {
+		return 0;
+	}
+}
+
 bool NativeDesktop::menu_dispatch(std::string_view name)
 {
 	const bool load=name=="LoadMenuW",count=name=="GetMenuItemCount",id=name=="GetMenuItemID",sub=name=="GetSubMenu";

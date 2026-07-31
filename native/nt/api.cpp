@@ -131,8 +131,6 @@ bool ApiRegistry::dispatch(NativeProcess &process, NativeEnvironment &environmen
 	} catch (const ApiFault &) {
 		call.fail(998);
 	}
-	if (std::getenv("RAVEN_TRACE_API"))
-		std::fprintf(stderr, "  -> %llx (error %u)\n", static_cast<unsigned long long>(call.result), call.last_error());
 	process.return_api(call.result);
 	return true;
 }

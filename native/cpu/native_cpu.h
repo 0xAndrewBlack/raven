@@ -4,6 +4,7 @@
 #include "pe/module_set.h"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <sys/user.h>
@@ -80,6 +81,12 @@ public:
 	// Address the guest returns to when a host-initiated call finishes.
 	uint64_t return_gate() const;
 	size_t callback_depth() const;
+	// Diagnostics: RAX after an API result was delivered, without fetching the extended state.
+	uint64_t result_register() const;
+	// Diagnostics: a hardware write watchpoint (eight bytes) that reports as a fault with si_code TRAP_HWBKPT; address zero clears it.
+	void watch_write(uint64_t address);
+	// Diagnostics: single-step the next count instructions of the guest, reporting each instruction pointer to the sink.
+	void trace_instructions(size_t count, std::function<void(uint64_t)> sink);
 	// Guest threads share one traced process: the scheduler saves the running thread and loads the next between API calls.
 	NativeThreadState save_thread() const;
 	void load_thread(const NativeThreadState &thread);

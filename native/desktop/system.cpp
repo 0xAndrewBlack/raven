@@ -196,7 +196,7 @@ bool NativeWindows::system_dispatch(std::string_view name)
 {
 	const bool format = name == "wsprintfW";
 	if (name != "GetDesktopWindow" && name != "PtInRect" && name != "SetRect" && name != "TranslateAcceleratorW" && name != "SetMenu" &&
-		name != "GetMenuItemRect" && name != "CheckMenuItem" && name != "MoveWindow" && name != "SetCapture" &&
+		name != "GetMenuItemRect" && name != "CheckMenuItem" && name != "SetCapture" &&
 		name != "ReleaseCapture" && name != "SetTimer" && name != "KillTimer" && !format)
 		return false;
 	uint64_t result = 0;
@@ -297,18 +297,6 @@ bool NativeWindows::system_dispatch(std::string_view name)
 				result = (found->state & 8) ? 8 : 0;
 				found->state = (found->state & ~8U) | ((uint32_t(args[2]) & 8) ? 8U : 0U);
 			}
-		} else if (name == "MoveWindow") {
-			const auto args = process.api_arguments(6);
-			const auto *window = objects.window(args[0]);
-			if (!window)
-				throw uint32_t(1400);
-			if (window->parent)
-				throw uint32_t(120);
-			const auto x = int32_t(uint32_t(args[1])), y = int32_t(uint32_t(args[2])), width = int32_t(uint32_t(args[3])), height = int32_t(uint32_t(args[4]));
-			if (width < 0 || height < 0 || width > 8192 || height > 8192 || int64_t(x) + width > INT32_MAX || int64_t(y) + height > INT32_MAX)
-				throw uint32_t(87);
-			reshape(args[0], {x, y, x + width, y + height});
-			result = 1;
 		} else if (name == "SetCapture") {
 			const auto args = process.api_arguments(1);
 			if (!objects.window(args[0]))

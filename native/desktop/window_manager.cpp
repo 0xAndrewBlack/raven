@@ -1,0 +1,833 @@
+#include "windows.h"
+#include "nt/text.h"
+
+#include <algorithm>
+#include <cstring>
+#include <sys/mman.h>
+
+namespace raven {
+
+namespace {
+
+constexpr uint32_t ws_minimize = 0x20000000U, ws_maximize = 0x01000000U, ws_disabled = 0x08000000U, ws_visible = 0x10000000U;
+constexpr uint32_t swp_nosize = 1, swp_nomove = 2, swp_nozorder = 4, swp_noredraw = 8, swp_noactivate = 0x10, swp_showwindow = 0x40,
+	swp_hidewindow = 0x80, swp_nosendchanging = 0x400;
+
+struct Layout {
+	size_t size, pointer, flags;
+};
+
+Layout position_layout(bool narrow)
+{
+	return narrow ? Layout{28, 4, 24} : Layout{48, 8, 40};
+}
+
+}
+
+std::vector<uint64_t> NativeWindows::top_level_windows() const
+{
+	std::vector<uint64_t> result;
+	for (const auto handle : objects.child_windows(0))
+		if (handle != desktop)
+			result.push_back(handle);
+	return result;
+}
+
+uint64_t NativeWindows::window_at(int32_t x, int32_t y)
+{
+	auto roots = top_level_windows();
+	for (auto root = roots.rbegin(); root != roots.rend(); ++root) {
+		const auto *record = objects.window(*root);
+		if (record && record->visible && x >= record->outer.left && y >= record->outer.top && x < record->outer.right && y < record->outer.bottom)
+			return pointer_child(*root, x, y);
+	}
+	return 0;
+}
+
+void NativeWindows::shift_window(uint64_t handle, int32_t dx, int32_t dy)
+{
+	auto *window = objects.window(handle);
+	if (!window)
+		return;
+	window->x += dx;
+	window->y += dy;
+	window->outer.left += dx;
+	window->outer.right += dx;
+	window->outer.top += dy;
+	window->outer.bottom += dy;
+	for (const auto child : objects.child_windows(handle))
+		shift_window(child, dx, dy);
+}
+
+void NativeWindows::invalidate_tree(uint64_t handle, bool erase)
+{
+	const auto *window = objects.window(handle);
+	if (!window)
+		return;
+	objects.invalidate(handle, {0, 0, window->width, window->height}, erase);
+	for (const auto child : objects.child_windows(handle))
+		invalidate_tree(child, erase);
+}
+
+bool NativeWindows::enable_window(uint64_t handle, bool enable)
+{
+	auto *window = objects.window(handle);
+	if (!window)
+		throw uint32_t(1400);
+	const bool was_disabled = window->style & ws_disabled;
+	if (was_disabled == !enable)
+		return was_disabled;
+	window->style = enable ? window->style & ~ws_disabled : window->style | ws_disabled;
+	if (!enable) {
+		// A disabled window cannot keep the keyboard or the mouse.
+		if (focus == handle || objects.is_child(handle, focus))
+			set_focus(0);
+		if (capture == handle) {
+			capture = 0;
+			send(handle, 0x215, 0, 0);
+		}
+	}
+	if (objects.window(handle))
+		send(handle, 0x0a, enable, 0);
+	return was_disabled;
+}
+
+bool NativeWindows::show_window(uint64_t handle, uint32_t command)
+{
+	auto *window = objects.window(handle);
+	if (!window)
+		throw uint32_t(1400);
+	const bool previous = window->visible;
+	if (command > 11)
+		throw uint32_t(87);
+	const bool hide = command == 0;
+	const bool minimize = command == 2 || command == 6 || command == 7 || command == 11;
+	const bool maximize = command == 3;
+	const bool activate_it = command == 1 || command == 3 || command == 5 || command == 9 || command == 10 || command == 2;
+	if (!window->parent && (minimize || maximize || command == 9 || command == 1 || command == 10)) {
+		// Maximizing fills the work area; restoring brings back the rectangle remembered when the state first changed.
+		const auto &screen = objects.nonclient_metrics();
+		const bool is_max = window->style & ws_maximize, is_min = window->style & ws_minimize;
+		if (maximize && !is_max) {
+			if (!is_min)
+				window->restore = window->outer;
+			window->style = (window->style & ~ws_minimize) | ws_maximize;
+			const auto frame = adjust_window_rect(objects.nonclient_metrics(), {0, 0, 0, 0}, window->style & ~ws_visible, window->menu != 0, window->ex_style);
+			(void)frame;
+			reshape(handle, {0, 0, screen.screen_x, screen.screen_y});
+		} else if (minimize && !is_min) {
+			if (!is_max)
+				window->restore = window->outer;
+			window->style = (window->style & ~ws_maximize) | ws_minimize;
+		} else if ((command == 9 || command == 1 || command == 10) && (is_max || is_min)) {
+			window->style &= ~(ws_maximize | ws_minimize);
+			const auto target = window->restore.right > window->restore.left ? window->restore : window->outer;
+			if (is_max)
+				reshape(handle, target);
+		}
+		window = objects.window(handle);
+	}
+	const bool show = !hide && !(window->style & ws_minimize && !window->parent);
+	if (show && (!window->parent || objects.window_visible(window->parent)))
+		present(handle);
+	else if ((!show || (window->style & ws_minimize)) && previous && !window->parent && presentation.remove)
+		presentation.remove(handle);
+	window = objects.window(handle);
+	window->visible = !hide;
+	window->style = (window->style & ~ws_visible) | (window->visible ? ws_visible : 0);
+	objects.update_window_dcs(handle);
+	if (show && !objects.invalidate(handle, {0, 0, window->width, window->height}, true))
+		throw uint32_t(8);
+	if (window->visible && !show)
+		objects.update_window_dcs(handle);
+	if (show && !window->parent && activate_it && objects.window(handle) && !(window->ex_style & 0x08000000U))
+		set_focus(handle);
+	window = objects.window(handle);
+	if (!window)
+		throw uint32_t(1400);
+	if (!window->visible && previous && window->parent) {
+		const auto *parent = objects.window(window->parent);
+		objects.invalidate(window->parent, {window->outer.left - parent->x, window->outer.top - parent->y, window->outer.right - parent->x,
+			window->outer.bottom - parent->y}, true);
+	}
+	send(handle, 0x18, window->visible, 0);
+	return previous;
+}
+
+void NativeWindows::place_window(uint64_t handle, DesktopRect outer, uint64_t insert_after, uint32_t flags)
+{
+	auto *window = objects.window(handle);
+	if (!window)
+		throw uint32_t(1400);
+	const auto layout = position_layout(process.mode() == NativeMode::x86);
+	const auto relative = [&](const DesktopRect &rect) {
+		const auto *parent = window->parent ? objects.window(window->parent) : nullptr;
+		const int32_t ox = parent ? parent->x : 0, oy = parent ? parent->y : 0;
+		return DesktopRect{rect.left - ox, rect.top - oy, rect.right - ox, rect.bottom - oy};
+	};
+	// WM_WINDOWPOSCHANGING lets the window veto or adjust the change before it happens.
+	auto requested = relative(outer);
+	uint32_t effective = flags;
+	uint64_t after = insert_after;
+	if (!(flags & swp_nosendchanging)) {
+		const auto scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
+		try {
+			std::vector<uint8_t> bytes(layout.size);
+			const auto store = [&](size_t at, uint64_t value, size_t width) { std::memcpy(bytes.data() + at, &value, width); };
+			store(0, handle, layout.pointer);
+			store(layout.pointer, insert_after, layout.pointer);
+			store(layout.pointer * 2, uint32_t(requested.left), 4);
+			store(layout.pointer * 2 + 4, uint32_t(requested.top), 4);
+			store(layout.pointer * 2 + 8, uint32_t(requested.right - requested.left), 4);
+			store(layout.pointer * 2 + 12, uint32_t(requested.bottom - requested.top), 4);
+			store(layout.flags, flags, 4);
+			process.write_memory(scratch, bytes);
+			send(handle, 0x46, 0, scratch);
+			if (!objects.window(handle)) {
+				process.unmap_memory(scratch);
+				return;
+			}
+			const auto changed = process.read_memory(scratch, layout.size);
+			const auto load = [&](size_t at, size_t width) { uint64_t value = 0; std::memcpy(&value, changed.data() + at, width); return value; };
+			after = load(layout.pointer, layout.pointer);
+			const int32_t x = int32_t(load(layout.pointer * 2, 4)), y = int32_t(load(layout.pointer * 2 + 4, 4));
+			const int32_t width = int32_t(load(layout.pointer * 2 + 8, 4)), height = int32_t(load(layout.pointer * 2 + 12, 4));
+			effective = uint32_t(load(layout.flags, 4));
+			requested = {x, y, x + width, y + height};
+		} catch (...) {
+			process.unmap_memory(scratch);
+			throw;
+		}
+		process.unmap_memory(scratch);
+		window = objects.window(handle);
+		if (!window)
+			return;
+		const auto *parent = window->parent ? objects.window(window->parent) : nullptr;
+		const int32_t ox = parent ? parent->x : 0, oy = parent ? parent->y : 0;
+		outer = {requested.left + ox, requested.top + oy, requested.right + ox, requested.bottom + oy};
+	}
+	if (!(effective & swp_nozorder) && after != UINT64_MAX - 1 + 0) {
+		const bool top = after == 0 || after == UINT64_MAX || after == UINT64_MAX - 1 + 0;
+		if (after == 1)
+			objects.restack(handle, false);
+		else if (top || !objects.window(after))
+			objects.restack(handle, true);
+		else {
+			objects.restack(handle, true);
+			// Insert directly above the named sibling: every sibling above it climbs over this window.
+			const auto *sibling = objects.window(after);
+			auto *self = objects.window(handle);
+			if (sibling && self) {
+				self->order = sibling->order;
+				for (const auto other : objects.child_windows(window->parent))
+					if (other != handle && objects.window(other)->order >= sibling->order && other != after)
+						++objects.window(other)->order;
+				++self->order;
+			}
+		}
+		window = objects.window(handle);
+	}
+	const bool moving = !(effective & swp_nomove), sizing = !(effective & swp_nosize);
+	const DesktopRect old = window->outer;
+	const bool was_visible = objects.window_visible(handle);
+	DesktopRect target = old;
+	if (moving) {
+		target.right = target.left + (old.right - old.left);
+		target.bottom = target.top + (old.bottom - old.top);
+		target.left = outer.left;
+		target.top = outer.top;
+		target.right = target.left + (old.right - old.left);
+		target.bottom = target.top + (old.bottom - old.top);
+	}
+	if (sizing) {
+		target.right = target.left + (outer.right - outer.left);
+		target.bottom = target.top + (outer.bottom - outer.top);
+	}
+	const bool shifted = target.left != old.left || target.top != old.top;
+	const bool resized = target.right - target.left != old.right - old.left || target.bottom - target.top != old.bottom - old.top;
+	if (target.right - target.left < 0 || target.bottom - target.top < 0 || target.right - target.left > 8192 || target.bottom - target.top > 8192)
+		throw uint32_t(87);
+	if (shifted && !resized && !window->parent) {
+		shift_window(handle, target.left - old.left, target.top - old.top);
+	} else if (shifted || resized) {
+		const auto old_client_x = window->x, old_client_y = window->y;
+		if (window->parent && was_visible) {
+			const auto *parent = objects.window(window->parent);
+			objects.invalidate(window->parent, {old.left - parent->x, old.top - parent->y, old.right - parent->x, old.bottom - parent->y}, true);
+		}
+		if (window->parent || !resized) {
+			if (shifted)
+				shift_window(handle, target.left - old.left, target.top - old.top);
+			if (resized) {
+				window = objects.window(handle);
+				window->outer = target;
+				window->x = target.left;
+				window->y = target.top;
+				window->width = target.right - target.left;
+				window->height = target.bottom - target.top;
+				recalculate_client(handle);
+			}
+		} else {
+			reshape(handle, target);
+		}
+		window = objects.window(handle);
+		if (!window)
+			return;
+		const bool client_moved = window->x != old_client_x || window->y != old_client_y;
+		if (window->parent && client_moved && !resized) {
+			// Moving a child in its parent changes where its whole subtree draws.
+			objects.update_window_dcs(handle);
+			const auto *parent = objects.window(window->parent);
+			send(handle, 3, 0, uint16_t(window->x - parent->x) | (uint64_t(uint16_t(window->y - parent->y)) << 16));
+		}
+		window = objects.window(handle);
+		if (window && window->parent && objects.window_visible(handle) && !(effective & swp_noredraw)) {
+			objects.update_window_dcs(handle);
+			invalidate_tree(handle, true);
+		}
+	}
+	window = objects.window(handle);
+	if (!window)
+		return;
+	if (effective & swp_showwindow)
+		show_window(handle, 5);
+	else if (effective & swp_hidewindow)
+		show_window(handle, 0);
+	if (!objects.window(handle))
+		return;
+	// WM_WINDOWPOSCHANGED tells the window what actually happened; the default procedure turns it into WM_MOVE and WM_SIZE.
+	const auto scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
+	try {
+		window = objects.window(handle);
+		const auto rel = relative(window->outer);
+		std::vector<uint8_t> bytes(layout.size);
+		const auto store = [&](size_t at, uint64_t value, size_t width) { std::memcpy(bytes.data() + at, &value, width); };
+		store(0, handle, layout.pointer);
+		store(layout.pointer, after, layout.pointer);
+		store(layout.pointer * 2, uint32_t(rel.left), 4);
+		store(layout.pointer * 2 + 4, uint32_t(rel.top), 4);
+		store(layout.pointer * 2 + 8, uint32_t(rel.right - rel.left), 4);
+		store(layout.pointer * 2 + 12, uint32_t(rel.bottom - rel.top), 4);
+		store(layout.flags, (effective & ~(swp_nomove | swp_nosize)) | (shifted ? 0 : swp_nomove) | (resized ? 0 : swp_nosize), 4);
+		process.write_memory(scratch, bytes);
+		send(handle, 0x47, 0, scratch);
+	} catch (...) {
+		process.unmap_memory(scratch);
+		throw;
+	}
+	process.unmap_memory(scratch);
+}
+
+void NativeWindows::register_manager_api(ApiRegistry &registry)
+{
+	registry.add("FindWindowW", 2, [this](ApiCall &call) {
+		const auto name = call[0] && call[0] > 0xffff ? call.wide(call[0], 256) : std::u16string();
+		const auto title = call[1] ? call.wide(call[1], 4096) : std::u16string();
+		auto roots = top_level_windows();
+		for (auto root = roots.rbegin(); root != roots.rend(); ++root) {
+			const auto *window = objects.window(*root);
+			const auto *definition = window ? objects.window_class(window->class_id) : nullptr;
+			if (!definition || window->destroying)
+				continue;
+			if (!name.empty() && !equal_fold(from_utf8(definition->name), name))
+				continue;
+			if (call[1] && window->title != title)
+				continue;
+			call.ret(*root);
+			return;
+		}
+		call.fail(1400);
+	});
+	registry.add("FindWindowExW", 4, [this](ApiCall &call) {
+		const auto name = call[2] && call[2] > 0xffff ? call.wide(call[2], 256) : std::u16string();
+		const auto title = call[3] ? call.wide(call[3], 4096) : std::u16string();
+		const auto siblings = objects.child_windows(call[0]);
+		bool started = call[1] == 0;
+		for (auto candidate = siblings.rbegin(); candidate != siblings.rend(); ++candidate) {
+			if (!started) {
+				started = *candidate == call[1];
+				continue;
+			}
+			const auto *window = objects.window(*candidate);
+			const auto *definition = window ? objects.window_class(window->class_id) : nullptr;
+			if (!definition || (!name.empty() && !equal_fold(from_utf8(definition->name), name)))
+				continue;
+			if (call[3] && window->title != title)
+				continue;
+			call.ret(*candidate);
+			return;
+		}
+		call.fail(1400);
+	});
+	registry.add("GetAncestor", 2, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		switch (call.u32(1)) {
+		case 1: call.ret(window->parent); break;
+		case 2: call.ret(objects.window_root(call[0])); break;
+		case 3: {
+			auto root = objects.window_root(call[0]);
+			while (objects.window(root) && objects.window(root)->owner && objects.window(objects.window(root)->owner))
+				root = objects.window_root(objects.window(root)->owner);
+			call.ret(root);
+			break;
+		}
+		default: call.fail(87);
+		}
+	});
+	registry.add("GetWindow", 2, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		const auto siblings = objects.child_windows(window->parent);
+		const auto position = std::find(siblings.begin(), siblings.end(), call[0]);
+		switch (call.u32(1)) {
+		case 0: call.ret(siblings.empty() ? 0 : siblings.back()); break;
+		case 1: call.ret(siblings.empty() ? 0 : siblings.front()); break;
+		case 2: call.ret(position == siblings.begin() ? 0 : *(position - 1)); break;
+		case 3: call.ret(position == siblings.end() || position + 1 == siblings.end() ? 0 : *(position + 1)); break;
+		case 4: call.ret(window->owner); break;
+		case 5: {
+			const auto children = objects.child_windows(call[0]);
+			call.ret(children.empty() ? 0 : children.back());
+			break;
+		}
+		default: call.fail(87);
+		}
+	});
+	registry.add("SetParent", 2, [this](ApiCall &call) {
+		auto *window = objects.window(call[0]);
+		if (!window || (call[1] && !objects.window(call[1]))) {
+			call.fail(1400);
+			return;
+		}
+		if (call[1] == call[0] || objects.is_child(call[0], call[1])) {
+			call.fail(87);
+			return;
+		}
+		const auto previous = window->parent;
+		const auto *old_parent = previous ? objects.window(previous) : nullptr;
+		const int32_t old_x = old_parent ? old_parent->x : 0, old_y = old_parent ? old_parent->y : 0;
+		const auto *new_parent = call[1] ? objects.window(call[1]) : nullptr;
+		const int32_t new_x = new_parent ? new_parent->x : 0, new_y = new_parent ? new_parent->y : 0;
+		window->parent = call[1];
+		if (call[1]) window->style = (window->style & ~0x80000000U) | 0x40000000U;
+		else window->style = (window->style & ~0x40000000U) | 0x80000000U;
+		shift_window(call[0], new_x - old_x, new_y - old_y);
+		objects.restack(call[0], true);
+		objects.update_window_dcs(call[0]);
+		call.ret(previous);
+	});
+	registry.add("BringWindowToTop", 1, [this](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		objects.restack(call[0], true);
+		const auto *window = objects.window(call[0]);
+		if (window->parent && objects.window_visible(call[0]))
+			invalidate_tree(call[0], true);
+		call.ret(1);
+	});
+	registry.add("IsIconic", 1, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		call.ret(window && (window->style & ws_minimize));
+	});
+	registry.add("IsZoomed", 1, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		call.ret(window && (window->style & ws_maximize));
+	});
+	registry.add("IsWindowEnabled", 1, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		call.ret(window && !(window->style & ws_disabled));
+	});
+	registry.add("EnableWindow", 2, [this](ApiCall &call) {
+		try {
+			call.ret(enable_window(call[0], call.u32(1)));
+		} catch (const uint32_t &error) {
+			call.fail(error);
+		}
+	});
+	registry.add("GetForegroundWindow", 0, [this](ApiCall &call) { call.ret(active); });
+	registry.add("SetForegroundWindow", 1, [this](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		set_focus(objects.window_root(call[0]));
+		call.ret(1);
+	});
+	registry.add("GetLastActivePopup", 1, [](ApiCall &call) { call.ret(call[0]); });
+	registry.add("SetActiveWindow", 1, [this](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		const auto previous = active;
+		activate(call[0]);
+		call.ret(previous);
+	});
+	registry.add("AttachThreadInput", 3, [](ApiCall &call) { call.ret(1); });
+	registry.add("GetWindowThreadProcessId", 2, [this](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		if (call[1]) call.store<uint32_t>(call[1], 1);
+		call.ret(1);
+	});
+	registry.add("ChildWindowFromPoint", 2, [this](ApiCall &call) {
+		const auto *parent = objects.window(call[0]);
+		if (!parent) {
+			call.fail(1400);
+			return;
+		}
+		const int32_t x = int32_t(call[1]) + parent->x, y = int32_t(call[1] >> 32) + parent->y;
+		uint64_t found = call[0];
+		const auto children = objects.child_windows(call[0]);
+		for (auto child = children.rbegin(); child != children.rend(); ++child) {
+			const auto *record = objects.window(*child);
+			if (record && x >= record->outer.left && y >= record->outer.top && x < record->outer.right && y < record->outer.bottom) {
+				found = *child;
+				break;
+			}
+		}
+		call.ret(found);
+	});
+	registry.add("ChildWindowFromPointEx", 3, [this](ApiCall &call) {
+		const auto *parent = objects.window(call[0]);
+		if (!parent) {
+			call.fail(1400);
+			return;
+		}
+		const int32_t x = int32_t(call[1]) + parent->x, y = int32_t(call[1] >> 32) + parent->y;
+		uint64_t found = call[0];
+		const uint32_t skip = call.u32(2);
+		const auto children = objects.child_windows(call[0]);
+		for (auto child = children.rbegin(); child != children.rend(); ++child) {
+			const auto *record = objects.window(*child);
+			if (!record || x < record->outer.left || y < record->outer.top || x >= record->outer.right || y >= record->outer.bottom)
+				continue;
+			if (((skip & 1) && !record->visible) || ((skip & 2) && (record->style & ws_disabled)) || ((skip & 4) && (record->ex_style & 0x20)))
+				continue;
+			found = *child;
+			break;
+		}
+		call.ret(found);
+	});
+	registry.add("WindowFromPoint", 1, [this](ApiCall &call) { call.ret(window_at(int32_t(call[0]), int32_t(call[0] >> 32))); });
+	const auto enumerate = [this](ApiCall &call, const std::vector<uint64_t> &handles, uint64_t procedure, uint64_t parameter) {
+		for (const auto handle : handles) {
+			if (!objects.window(handle))
+				continue;
+			const uint64_t arguments[] = {handle, parameter};
+			const auto result = invoke(procedure, arguments);
+			if (result.stop != NativeStop::returned)
+				throw result;
+			if (!uint32_t(result.value))
+				break;
+		}
+		call.ret(1);
+	};
+	registry.add("EnumWindows", 2, [this, enumerate](ApiCall &call) {
+		auto roots = top_level_windows();
+		std::reverse(roots.begin(), roots.end());
+		enumerate(call, roots, call[0], call[1]);
+	});
+	registry.add("EnumThreadWindows", 3, [this, enumerate](ApiCall &call) {
+		auto roots = top_level_windows();
+		std::reverse(roots.begin(), roots.end());
+		enumerate(call, roots, call[1], call[2]);
+	});
+	registry.add("EnumChildWindows", 3, [this, enumerate](ApiCall &call) {
+		std::vector<uint64_t> all;
+		const auto collect = [&](auto &&self, uint64_t parent) -> void {
+			auto children = objects.child_windows(parent);
+			std::reverse(children.begin(), children.end());
+			for (const auto child : children) {
+				all.push_back(child);
+				self(self, child);
+			}
+		};
+		collect(collect, call[0]);
+		enumerate(call, all, call[1], call[2]);
+	});
+
+	registry.add("SetPropW", 3, [this](ApiCall &call) {
+		auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		std::u16string key = call[1] <= 0xffff ? u"#" + widen_ascii(std::to_string(call[1])) : call.wide(call[1], 255);
+		for (auto &character : key)
+			character = upper_case(character);
+		window->properties[key] = call[2];
+		call.ret(1);
+	});
+	registry.add("GetPropW", 2, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.ret(0);
+			return;
+		}
+		std::u16string key = call[1] <= 0xffff ? u"#" + widen_ascii(std::to_string(call[1])) : call.wide(call[1], 255);
+		for (auto &character : key)
+			character = upper_case(character);
+		const auto found = window->properties.find(key);
+		call.ret(found == window->properties.end() ? 0 : found->second);
+	});
+	registry.add("RemovePropW", 2, [this](ApiCall &call) {
+		auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		std::u16string key = call[1] <= 0xffff ? u"#" + widen_ascii(std::to_string(call[1])) : call.wide(call[1], 255);
+		for (auto &character : key)
+			character = upper_case(character);
+		const auto found = window->properties.find(key);
+		if (found == window->properties.end()) {
+			call.ret(0);
+			return;
+		}
+		const auto value = found->second;
+		window->properties.erase(found);
+		call.ret(value);
+	});
+
+	registry.add("SetWindowPos", 7, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		const uint32_t flags = call.u32(6);
+		const auto *parent = window->parent ? objects.window(window->parent) : nullptr;
+		const int32_t ox = parent ? parent->x : 0, oy = parent ? parent->y : 0;
+		const int32_t x = call.i32(2), y = call.i32(3), width = call.i32(4), height = call.i32(5);
+		DesktopRect outer{x + ox, y + oy, x + ox + width, y + oy + height};
+		try {
+			place_window(call[0], outer, call[1], flags);
+			call.ret(1);
+		} catch (const uint32_t &error) {
+			call.fail(error);
+		}
+	});
+	registry.add("MoveWindow", 6, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		const auto *parent = window->parent ? objects.window(window->parent) : nullptr;
+		const int32_t ox = parent ? parent->x : 0, oy = parent ? parent->y : 0;
+		const int32_t x = call.i32(1), y = call.i32(2), width = call.i32(3), height = call.i32(4);
+		try {
+			place_window(call[0], {x + ox, y + oy, x + ox + width, y + oy + height}, 0, call.u32(5) ? 0x4 : 0x4 | swp_noredraw);
+			call.ret(1);
+		} catch (const uint32_t &error) {
+			call.fail(error);
+		}
+	});
+	// Deferred positioning collects window changes and applies them in order when the batch ends.
+	struct Deferred {
+		uint64_t window, insert_after;
+		DesktopRect outer;
+		uint32_t flags;
+	};
+	auto batches = std::make_shared<std::map<uint64_t, std::vector<Deferred>>>();
+	auto next_batch = std::make_shared<uint64_t>(0x7d000000);
+	registry.add("BeginDeferWindowPos", 1, [batches, next_batch](ApiCall &call) {
+		const auto handle = ++*next_batch;
+		(*batches)[handle] = {};
+		call.ret(handle);
+	});
+	registry.add("DeferWindowPos", 8, [this, batches](ApiCall &call) {
+		const auto found = batches->find(call[0]);
+		const auto *window = objects.window(call[1]);
+		if (found == batches->end() || !window) {
+			call.fail(window ? 6 : 1400, 0);
+			return;
+		}
+		const auto *parent = window->parent ? objects.window(window->parent) : nullptr;
+		const int32_t ox = parent ? parent->x : 0, oy = parent ? parent->y : 0;
+		found->second.push_back({call[1], call[2], {call.i32(3) + ox, call.i32(4) + oy, call.i32(3) + ox + call.i32(5), call.i32(4) + oy + call.i32(6)}, call.u32(7)});
+		call.ret(call[0]);
+	});
+	registry.add("EndDeferWindowPos", 1, [this, batches](ApiCall &call) {
+		const auto found = batches->find(call[0]);
+		if (found == batches->end()) {
+			call.fail(6);
+			return;
+		}
+		const auto operations = std::move(found->second);
+		batches->erase(found);
+		try {
+			for (const auto &operation : operations)
+				if (objects.window(operation.window))
+					place_window(operation.window, operation.outer, operation.insert_after, operation.flags);
+			call.ret(1);
+		} catch (const uint32_t &error) {
+			call.fail(error);
+		}
+	});
+
+	registry.add("GetWindowPlacement", 2, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		const bool minimized = window->style & ws_minimize, maximized = window->style & ws_maximize;
+		const DesktopRect normal = (minimized || maximized) && window->restore.right > window->restore.left ? window->restore : window->outer;
+		std::vector<uint8_t> bytes(44);
+		const uint32_t fields[11] = {44, 0, uint32_t(minimized ? 2 : maximized ? 3 : window->visible ? 1 : 0), UINT32_MAX, UINT32_MAX, UINT32_MAX,
+			UINT32_MAX, uint32_t(normal.left), uint32_t(normal.top), uint32_t(normal.right), uint32_t(normal.bottom)};
+		std::memcpy(bytes.data(), fields, 44);
+		call.write(call[1], bytes);
+		call.ret(1);
+	});
+	registry.add("SetWindowPlacement", 2, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		const auto bytes = call.read(call[1], 44);
+		uint32_t fields[11];
+		std::memcpy(fields, bytes.data(), 44);
+		if (fields[0] != 44) {
+			call.fail(87);
+			return;
+		}
+		try {
+			const DesktopRect normal{int32_t(fields[7]), int32_t(fields[8]), int32_t(fields[9]), int32_t(fields[10])};
+			objects.window(call[0])->restore = normal;
+			place_window(call[0], normal, 0, 0x4 | swp_noactivate);
+			show_window(call[0], fields[2]);
+			call.ret(1);
+		} catch (const uint32_t &error) {
+			call.fail(error);
+		}
+	});
+	registry.add("DrawMenuBar", 1, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		if (objects.window_visible(call[0]))
+			present(call[0]);
+		call.ret(1);
+	});
+	registry.add("GetUpdateRgn", 3, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window || !objects.region(call[1])) {
+			call.fail(window ? 6 : 1400);
+			return;
+		}
+		objects.replace_region(call[1], window->update);
+		const auto bounds = window->update.bounds();
+		call.ret(window->update.empty() ? 1 : bounds.right - bounds.left == 0 ? 1 : window->update.complexity());
+	});
+	// RedrawWindow (RDW_*): invalidate or validate the window, optionally its children, and optionally paint right away.
+	registry.add("RedrawWindow", 4, [this](ApiCall &call) {
+		const uint64_t handle = call[0] ? call[0] : desktop_window();
+		const auto *window = objects.window(handle);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		const uint32_t flags = call.u32(3);
+		DesktopRect rect{0, 0, window->width, window->height};
+		if (call[1]) {
+			const auto bytes = call.read(call[1], 16);
+			std::memcpy(&rect, bytes.data(), 16);
+		}
+		try {
+			const bool all = flags & 0x80;
+			const auto apply = [&](auto &&self, uint64_t target, DesktopRect area, bool whole) -> void {
+				const auto *record = objects.window(target);
+				if (!record)
+					return;
+				if (whole)
+					area = {0, 0, record->width, record->height};
+				if (flags & 1)
+					objects.invalidate(target, area, flags & 4);
+				else if (flags & 8)
+					objects.validate(target, area);
+				if (all && !(flags & 0x40))
+					for (const auto child : objects.child_windows(target))
+						self(self, child, area, true);
+			};
+			apply(apply, handle, rect, false);
+			if (flags & 0x100) {
+				if (objects.window(handle) && !objects.window(handle)->update.empty())
+					send(handle, 0x0f, 0, 0);
+			}
+			call.ret(1);
+		} catch (const uint32_t &error) {
+			call.fail(error);
+		}
+	});
+	registry.add("ScrollWindow", 5, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.fail(1400);
+			return;
+		}
+		// Scrolling is a copy plus the exposed strip; without a pixel-level copy the whole area is repainted.
+		objects.invalidate(call[0], {0, 0, window->width, window->height}, true);
+		call.ret(1);
+	});
+	registry.add("SetLayeredWindowAttributes", 4, [this](ApiCall &call) {
+		call.ret(objects.window(call[0]) != nullptr);
+	});
+	registry.add("EnumDisplayMonitors", 4, [this](ApiCall &call) {
+		const auto &metrics = objects.nonclient_metrics();
+		const auto rect = process.map_memory(4096, PROT_READ | PROT_WRITE);
+		try {
+			std::vector<uint8_t> bytes(16);
+			const int32_t values[4] = {0, 0, metrics.screen_x, metrics.screen_y};
+			std::memcpy(bytes.data(), values, 16);
+			process.write_memory(rect, bytes);
+			const uint64_t arguments[] = {1, call[0], rect, call[3]};
+			const auto result = invoke(call[2], arguments);
+			if (result.stop != NativeStop::returned)
+				throw result;
+		} catch (...) {
+			process.unmap_memory(rect);
+			throw;
+		}
+		process.unmap_memory(rect);
+		call.ret(1);
+	});
+	registry.add("GetMonitorInfoW", 2, [this](ApiCall &call) {
+		const auto &metrics = objects.nonclient_metrics();
+		const uint32_t size = call.load<uint32_t>(call[1]);
+		if (size != 40 && size != 104) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint8_t> bytes(size);
+		const int32_t values[10] = {int32_t(size), 0, 0, metrics.screen_x, metrics.screen_y, 0, 0, metrics.screen_x, metrics.screen_y, 1};
+		std::memcpy(bytes.data(), values, 40);
+		if (size == 104) {
+			const std::u16string device = u"\\\\.\\DISPLAY1";
+			std::memcpy(bytes.data() + 40, device.data(), device.size() * 2);
+		}
+		call.write(call[1], bytes);
+		call.ret(1);
+	});
+	registry.add("MonitorFromPoint", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("MonitorFromRect", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("MonitorFromWindow", 2, [](ApiCall &call) { call.ret(1); });
+}
+
+}

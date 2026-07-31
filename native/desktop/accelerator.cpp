@@ -7,9 +7,14 @@ uint64_t DesktopObjects::add_accelerators(std::vector<DesktopAccelerator> table)
 	constexpr uint64_t first = 0x7a000000ULL;
 	if (table.empty() || table.size() > 1024 || accelerator_tables.size() >= 1024)
 		return 0;
-	const uint64_t handle = first + accelerator_tables.size() + 1;
+	const uint64_t handle = accelerator_tables.empty() ? first + 1 : accelerator_tables.rbegin()->first + 1;
 	accelerator_tables.emplace(handle, std::move(table));
 	return handle;
+}
+
+bool DesktopObjects::remove_accelerators(uint64_t handle)
+{
+	return accelerator_tables.erase(handle) != 0;
 }
 
 const std::vector<DesktopAccelerator> *DesktopObjects::accelerators(uint64_t handle) const

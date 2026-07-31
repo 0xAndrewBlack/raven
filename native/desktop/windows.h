@@ -4,6 +4,8 @@
 #include "presentation.h"
 #include "keyboard.h"
 #include <array>
+#include <map>
+#include "nt/api.h"
 #include "nt/environment.h"
 #include <functional>
 #include <deque>
@@ -19,7 +21,11 @@ public:
 	void set_deadline(std::chrono::steady_clock::time_point deadline);
 	// Lets other guest threads run while this one waits for messages; returns true when one ran.
 	void set_yield(std::function<bool()> yield) { yield_hook = std::move(yield); }
+	// Resolves the default menu of a window class (module, resource identifier) to a menu handle.
+	void set_menu_loader(std::function<uint64_t(uint64_t,uint64_t)> loader) { menu_loader = std::move(loader); }
 	bool dispatch(std::string_view name);
+	// user32 entry points that follow the shared registry conventions; every handler runs on the calling guest thread.
+	void register_api(ApiRegistry &registry);
 	void drawing(uint64_t window);
 	void shutdown();
 
@@ -40,6 +46,7 @@ private:
 	std::optional<uint32_t> quit;
 	std::chrono::steady_clock::time_point deadline;
 	std::function<bool()> yield_hook;
+	std::function<uint64_t(uint64_t,uint64_t)> menu_loader;
 	uint32_t mouse_buttons=0;
 	int32_t cursor_x=0,cursor_y=0;
 	uint64_t focus=0,active=0;
@@ -88,6 +95,22 @@ private:
 	void menu_close();
 	void nonclient_pointer(uint64_t window,uint64_t hit,uint32_t message,int32_t x,int32_t y);
 	bool system_dispatch(std::string_view name);
+	void register_message_api(ApiRegistry &registry);
+	void register_manager_api(ApiRegistry &registry);
+	void register_menu_api(ApiRegistry &registry);
+	// Shows, hides, minimizes, maximizes or restores a window; returns whether it was visible before.
+	bool show_window(uint64_t window,uint32_t command);
+	// Moves and resizes a window (screen coordinates for the outer rectangle) with the WM_WINDOWPOSCHANGING/CHANGED protocol.
+	void place_window(uint64_t window,DesktopRect outer,uint64_t insert_after,uint32_t flags);
+	void shift_window(uint64_t window,int32_t dx,int32_t dy);
+	std::vector<uint64_t> top_level_windows() const;
+	uint64_t window_at(int32_t x,int32_t y);
+	bool enable_window(uint64_t window,bool enable);
+	void invalidate_tree(uint64_t window,bool erase);
+	// Window messages registered by name (RegisterWindowMessage); ids start at 0xc000 like atoms.
+	std::map<std::u16string,uint32_t> registered_messages;
+	int32_t cursor_count=0;
+	uint64_t current_cursor=0;
 	// Mouse capture and timers belong to the initial guest thread's input state.
 	uint64_t capture=0;
 	struct Timer { uint64_t window,id,procedure; uint32_t interval; std::chrono::steady_clock::time_point due; };

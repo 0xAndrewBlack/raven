@@ -24,10 +24,24 @@ uint64_t DesktopObjects::window_root(uint64_t handle) const
 
 std::vector<uint64_t> DesktopObjects::child_windows(uint64_t parent) const
 {
-	std::vector<uint64_t> result;
+	std::vector<std::pair<uint64_t,uint64_t>> found;
 	for (const auto &[handle,object]:objects)
-		if (const auto *record=std::get_if<DesktopWindow>(&object); record && record->parent==parent) result.push_back(handle);
+		if (const auto *record=std::get_if<DesktopWindow>(&object); record && record->parent==parent) found.emplace_back(record->order,handle);
+	std::sort(found.begin(),found.end());
+	std::vector<uint64_t> result;
+	for (const auto &item:found) result.push_back(item.second);
 	return result;
+}
+
+void DesktopObjects::restack(uint64_t handle,bool top)
+{
+	auto *record=window(handle);
+	if (!record) return;
+	const auto siblings=child_windows(record->parent);
+	if (siblings.empty()) return;
+	if (top) record->order=++next_order;
+	else record->order=window(siblings.front())->order>0 ? window(siblings.front())->order-1 : 0;
+	if (!top && record->order==0) for (const auto sibling:siblings) if (sibling!=handle) ++window(sibling)->order;
 }
 
 bool DesktopObjects::is_child(uint64_t parent,uint64_t child) const

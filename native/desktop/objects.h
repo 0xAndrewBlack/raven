@@ -115,6 +115,8 @@ struct DesktopMenuItem {
 	uint32_t type,state,id;
 	std::u16string text;
 	uint64_t submenu=0;
+	// Owner-draw payload and the check-mark and item bitmaps an application attached.
+	uint64_t data=0,bitmap_checked=0,bitmap_unchecked=0,bitmap_item=0;
 };
 
 struct DesktopMenu {
@@ -142,6 +144,12 @@ struct DesktopWindow {
 	uint32_t ex_style = 0;
 	uint64_t menu = 0;
 	bool client_ready = true;
+	// Owner of a top-level window (a different relation from the parent of a child) and the sibling order, bottom to top.
+	uint64_t owner = 0;
+	uint64_t order = 0;
+	// Outer rectangle to return to when a maximized or minimized window is restored.
+	DesktopRect restore{};
+	std::map<std::u16string,uint64_t> properties{};
 };
 
 class DesktopObjects {
@@ -157,6 +165,7 @@ public:
 	// Accelerator tables live outside the object map; their handles never collide with GDI or window handles.
 	uint64_t add_accelerators(std::vector<DesktopAccelerator> table);
 	const std::vector<DesktopAccelerator> *accelerators(uint64_t handle) const;
+	bool remove_accelerators(uint64_t handle);
 	uint64_t load_menu(const MenuTemplate &definition);
 	const DesktopIcon *icon(uint64_t handle) const;
 	const DesktopBitmap *bitmap(uint64_t handle) const;
@@ -181,7 +190,10 @@ public:
 	DesktopWindow *window(uint64_t handle);
 	const DesktopWindow *window(uint64_t handle) const;
 	uint64_t window_root(uint64_t handle) const;
+	// Children of a window in z-order, bottom to top. Top-level windows are the children of window zero.
 	std::vector<uint64_t> child_windows(uint64_t parent) const;
+	// Moves a window to the top or bottom of its siblings.
+	void restack(uint64_t window,bool top);
 	bool is_child(uint64_t parent,uint64_t child) const;
 	bool window_visible(uint64_t handle) const;
 	void configure_window_dc(uint64_t window,DesktopDC &device,bool frame) const;
@@ -219,6 +231,7 @@ private:
 	uint32_t next_atom = 0xc000;
 	uint32_t next_class = 1;
 	uint64_t next = 0x10000;
+	uint64_t next_order = 0;
 	size_t used = 0;
 	size_t limit;
 	IconDisplay icon_display;

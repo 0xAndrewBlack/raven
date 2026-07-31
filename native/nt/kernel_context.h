@@ -6,6 +6,7 @@
 #include "objects.h"
 #include "paths.h"
 #include "threads.h"
+#include <string>
 #include "pe/module_set.h"
 
 namespace raven {
@@ -39,12 +40,19 @@ struct KernelContext {
 	uint64_t unhandled_filter = 0;
 	// Delivers a CPU fault to the guest's handlers; never returns normally (it redirects or ends the process).
 	std::function<void(const NativeResult &)> raise_fault;
+	// Walks the guest stack with the unwind tables and names each caller as module+offset (diagnostics only).
+	std::function<std::string()> describe_stack;
 };
 
 // Windows FILETIME ticks are 100 ns units since 1601-01-01.
 inline constexpr uint64_t filetime_epoch_offset = 11644473600ULL * 10000000ULL;
 
 void register_exception_api(ApiRegistry &registry, KernelContext &context, class NativeUnwinder &unwinder);
+class NativeRegistry;
+void register_registry_api(ApiRegistry &registry, KernelContext &context, NativeRegistry &hive);
+void register_platform_api(ApiRegistry &registry, KernelContext &context);
+void register_shell_api(ApiRegistry &registry, KernelContext &context);
+void register_version_api(ApiRegistry &registry, KernelContext &context);
 void register_shlwapi_api(ApiRegistry &registry, KernelContext &context);
 void register_file_api(ApiRegistry &registry, KernelContext &context);
 void register_system_api(ApiRegistry &registry, KernelContext &context);

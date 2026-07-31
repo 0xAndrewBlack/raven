@@ -1,4 +1,5 @@
 #include "native_cpu.h"
+#include <cstddef>
 
 #include <algorithm>
 #include <cerrno>
@@ -182,6 +183,8 @@ struct NativeProcess::State {
 	bool awaiting_api = false;
 	bool awaiting_syscall = false;
 	bool debug_print_fault = false;
+	size_t steps_left = 0;
+	std::function<void(uint64_t)> step_sink;
 	void require_stopped() const;
 	bool covers(uint64_t address, size_t size, int protection) const;
 	uint64_t limit() const { return mode == NativeMode::x86 ? 0x100000000ULL : 0x800000000000ULL; }
@@ -564,9 +567,41 @@ uint64_t NativeProcess::return_gate() const
 	return state->mode == NativeMode::x86 ? state->return_gate : state->child->gate;
 }
 
+uint64_t NativeProcess::result_register() const
+{
+	state->require_stopped();
+	user_regs_struct registers{};
+	trace(PTRACE_GETREGS, state->child->pid, &registers);
+	return registers.rax;
+}
+
 size_t NativeProcess::callback_depth() const
 {
 	return state->callbacks.size();
+}
+
+void NativeProcess::trace_instructions(size_t count, std::function<void(uint64_t)> sink)
+{
+	state->require_stopped();
+	state->steps_left = count;
+	state->step_sink = std::move(sink);
+}
+
+void NativeProcess::watch_write(uint64_t address)
+{
+	state->require_stopped();
+	const pid_t pid = state->child->pid;
+	const auto poke = [&](size_t index, uint64_t value) {
+		const long offset = long(offsetof(struct user, u_debugreg)) + long(index * sizeof(unsigned long));
+		if (ptrace(PTRACE_POKEUSER, pid, reinterpret_cast<void *>(offset), reinterpret_cast<void *>(value)) == -1)
+			throw std::runtime_error("cannot program the debug registers");
+	};
+	poke(7, 0);
+	if (!address)
+		return;
+	poke(0, address);
+	// Local enable of slot 0, write trigger (01) and eight-byte length (10 on x86-64, encoded as 0b10).
+	poke(7, 1 | (1ULL << 16) | (2ULL << 18));
 }
 
 NativeThreadState NativeProcess::save_thread() const
@@ -800,20 +835,35 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		throw std::runtime_error("native process has no resumable call or awaits an API response");
 	auto &child = *state->child;
 	child.set_timeout(timeout);
-	// SYSEMU blocks host syscall dispatch; invalid syscall gates can fault first.
-	trace(PTRACE_SYSEMU, child.pid);
-	state->stopped = false;
-	const int status = child.wait();
-	if (status == -1) {
-		child.stop();
-		return {NativeStop::timeout, 0, 0, 0};
-	}
-	if (!WIFSTOPPED(status))
-		throw std::runtime_error("native guest exited outside the runtime boundary");
-	state->stopped = true;
+	int status;
 	user_regs_struct registers{};
-	trace(PTRACE_GETREGS, child.pid, &registers);
-	const int signal = WSTOPSIG(status);
+	int signal;
+	for (;;) {
+		// SYSEMU blocks host syscall dispatch; invalid syscall gates can fault first. Diagnostics may single-step instead.
+		trace(state->steps_left ? PTRACE_SINGLESTEP : PTRACE_SYSEMU, child.pid);
+		state->stopped = false;
+		status = child.wait();
+		if (status == -1) {
+			child.stop();
+			return {NativeStop::timeout, 0, 0, 0};
+		}
+		if (!WIFSTOPPED(status))
+			throw std::runtime_error("native guest exited outside the runtime boundary");
+		state->stopped = true;
+		trace(PTRACE_GETREGS, child.pid, &registers);
+		signal = WSTOPSIG(status);
+		if (state->steps_left && signal == SIGTRAP) {
+			siginfo_t step{};
+			trace(PTRACE_GETSIGINFO, child.pid, &step);
+			if (step.si_code == TRAP_TRACE || step.si_code == 0) {
+				if (state->step_sink)
+					state->step_sink(registers.rip);
+				--state->steps_left;
+				continue;
+			}
+		}
+		break;
+	}
 	if (signal == (SIGTRAP | 0x80)) {
 		state->awaiting_syscall = true;
 		return {NativeStop::syscall, registers.orig_rax, registers.rip, signal};
@@ -822,6 +872,10 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 	siginfo_t info{};
 	trace(PTRACE_GETSIGINFO, child.pid, &info);
 	state->debug_print_fault=signal==SIGSEGV && info.si_code==SI_KERNEL && registers.rax==1;
+	if (signal == SIGTRAP && info.si_code == TRAP_HWBKPT) {
+		// Reading the stop reason is enough; DR6 must be cleared or the next trap reports a stale cause.
+		ptrace(PTRACE_POKEUSER, child.pid, reinterpret_cast<void *>(offsetof(struct user, u_debugreg) + 6 * sizeof(unsigned long)), nullptr);
+	}
 	const bool breakpoint = signal == SIGTRAP && (info.si_code == TRAP_BRKPT || info.si_code == SI_KERNEL);
 	const bool x86 = state->mode == NativeMode::x86;
 	if (breakpoint && registers.rip == (x86 ? state->return_gate : child.gate) + 1) {

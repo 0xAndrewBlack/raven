@@ -537,20 +537,26 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 {
 	const auto style=uint32_t(args[3]),ex_style=uint32_t(args[0]);
 	const bool child=(style & 0x40000000U)!=0;
-	// Top-level styles: popup or overlapped with a frame (border, caption, system menu, sizing and caption buttons).
-	constexpr uint32_t top_level_styles=0x80000000U | 0x10000000U | 0x00cf0000U | 0x04000000U | 0x02000000U;
-	if ((child ? (style & ~0x10000000U)!=0x40000000U || (ex_style & ~4U) :
-		(style & ~top_level_styles) || ex_style || args[8] || (args[9] && !objects.menu(args[9]))) ||
-		((style & 0x10000000U) && !presentation.present)) throw uint32_t(120);
+	// A visible window needs somewhere to appear; headless runs can still create hidden windows.
+	if ((style & 0x10000000U) && !presentation.present) throw uint32_t(120);
 	const auto *parent=child ? objects.window(args[8]) : nullptr;
 	if (child && (!parent || parent->destroying)) throw uint32_t(1400);
 	if (parent && !parent->client_ready) throw uint32_t(120);
+	// An owner of a top-level window must be a top-level window; message-only parents (HWND_MESSAGE) are not modelled.
+	if (!child && args[8] && (!objects.window(args[8]) || args[8]==UINT64_MAX-2)) throw uint32_t(1400);
 	const auto class_atom=atom(args[1],args[10]);
 	const auto *definition=objects.window_class(class_atom);
 	if (!definition) throw uint32_t(1407);
 	auto x=int32_t(args[4]),y=int32_t(args[5]);
-	const auto width=int32_t(args[6]),height=int32_t(args[7]);
-	if (x==INT32_MIN || y==INT32_MIN || width==INT32_MIN || height==INT32_MIN) throw uint32_t(120);
+	auto width=int32_t(args[6]),height=int32_t(args[7]);
+	// CW_USEDEFAULT (0x80000000): top-level windows get a cascading position and three quarters of the screen; children get zero.
+	if (x==INT32_MIN || y==INT32_MIN || width==INT32_MIN || height==INT32_MIN) {
+		const auto &screen=objects.nonclient_metrics();
+		if (x==INT32_MIN) x=child ? 0 : 0;
+		if (y==INT32_MIN) y=child ? 0 : 0;
+		if (width==INT32_MIN) width=child ? 0 : screen.screen_x*3/4;
+		if (height==INT32_MIN) height=child ? 0 : screen.screen_y*3/4;
+	}
 	if (width<0 || height<0 || width>8192 || height>8192 || int64_t(x)+width>INT32_MAX || int64_t(y)+height>INT32_MAX)
 		throw uint32_t(87);
 	const auto relative_x=x,relative_y=y;
@@ -563,9 +569,13 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 	DesktopWindow record{class_atom,definition->procedure,{},x,y,width,height};
 	record.instance=args[10]; record.style=style | (child ? 0U : 0x04000000U);record.ex_style=ex_style;
 	record.parent=child ? args[8] : 0;record.child_id=child ? args[9] : 0;record.client_ready=false;
-	// A class default menu would need resource loading here; refuse it rather than create a window without its menu.
-	if (!child && !args[9] && (definition->menu_id || !definition->menu_name.empty())) throw uint32_t(120);
+	record.owner=child ? 0 : args[8];
 	if (!child) record.menu=args[9];
+	// A window created without a menu takes the default menu of its class.
+	if (!child && !args[9] && definition->menu_id) {
+		if (!menu_loader) throw uint32_t(120);
+		record.menu=menu_loader(definition->instance,definition->menu_id);
+	} else if (!child && !args[9] && !definition->menu_name.empty()) throw uint32_t(120);
 	record.extra.resize(definition->window_extra);
 	const auto handle=objects.add(std::move(record));
 	if (!handle) throw uint32_t(8);
@@ -798,8 +808,6 @@ bool NativeWindows::dispatch(std::string_view name)
 			const auto bytes=process.read_memory(args[0],size);
 			if (extended && read(bytes,0,4)!=size) throw uint32_t(87);
 			const auto style=uint32_t(read(bytes,extended ? 4 : 0,4));
-			if ((style & ~0x4000U) || (extended && read(bytes,8*P+8+shift,P)))
-				throw uint32_t(120);
 			const auto icon=read(bytes,3*P+8+shift,P),cursor=read(bytes,4*P+8+shift,P),menu_name=read(bytes,6*P+8+shift,P);
 			const bool stock_cursor=cursor>=desktop_stock_cursor && cursor<desktop_stock_cursor+desktop_stock_cursor_count;
 			if ((icon && !objects.icon(icon)) || (cursor && !stock_cursor)) throw uint32_t(1402);
@@ -864,26 +872,7 @@ bool NativeWindows::dispatch(std::string_view name)
 		} else if (name=="IsWindowVisible") {
 			result=objects.window_visible(args[0]);
 		} else if (name=="ShowWindow") {
-			auto *window=objects.window(args[0]); if (!window) throw uint32_t(1400);
-			// SW_HIDE, SW_SHOWNORMAL, SW_SHOWNOACTIVATE, SW_SHOW, SW_SHOWNA and SW_SHOWDEFAULT; minimize/maximize states are not modeled.
-			const auto command=uint32_t(args[1]);
-			if (command!=0 && command!=1 && command!=4 && command!=5 && command!=8 && command!=10) throw uint32_t(120);
-			const auto previous=window->visible;
-			const bool show=command!=0;
-			if (show && (!window->parent || objects.window_visible(window->parent))) present(args[0]);
-			else if (!show && previous && !window->parent && presentation.remove) presentation.remove(args[0]);
-			window=objects.window(args[0]); window->visible=show;
-			window->style=(window->style & ~0x10000000U) | (window->visible ? 0x10000000U : 0);
-			objects.update_window_dcs(args[0]);
-			if (window->visible && !objects.invalidate(args[0],{0,0,window->width,window->height},true)) throw uint32_t(8);
-			// Showing a top-level window with an activating command also gives it the active state and keyboard focus.
-			if (show && !window->parent && (command==1 || command==5 || command==10) && objects.window(args[0])) set_focus(args[0]);
-			window=objects.window(args[0]);if (!window) throw uint32_t(1400);
-			if (!window->visible && previous && window->parent) {
-				const auto *parent=objects.window(window->parent);
-				if (!objects.invalidate(window->parent,{window->outer.left-parent->x,window->outer.top-parent->y,window->outer.right-parent->x,window->outer.bottom-parent->y},true)) throw uint32_t(8);
-			}
-			result=previous;
+			result=show_window(args[0],uint32_t(args[1]));
 		} else if (name=="UpdateWindow") {
 			if (!objects.window(args[0])) throw uint32_t(1400);
 			if (!objects.window(args[0])->update.empty()) send(args[0],0x0f,0,0);

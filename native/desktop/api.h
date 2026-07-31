@@ -17,6 +17,8 @@ public:
 	static std::span<const std::string_view> user_exports();
 	static std::span<const std::string_view> gdi_exports();
 	static std::span<const std::string_view> control_exports();
+	// Loads an RT_MENU resource of a module by integer identifier; zero when the resource does not exist.
+	uint64_t menu_resource(uint64_t instance,uint64_t identifier);
 	void set_updated(std::function<void(uint64_t)> notify) { updated=std::move(notify); }
 	void set_source(std::function<std::optional<std::vector<uint8_t>>(std::string_view)> read) { source=std::move(read); }
 

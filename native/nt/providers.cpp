@@ -13,6 +13,7 @@
 #include "kernel_context.h"
 #include "unwind.h"
 #include "prefix.h"
+#include "registry.h"
 #include "system_exports.h"
 #include "desktop/api.h"
 #include "desktop/windows.h"
@@ -235,6 +236,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		std::vector<std::string_view> symbols(base_symbols.begin(), base_symbols.end());
 		const auto listed = system_export_names(library);
 		symbols.insert(symbols.end(), listed.begin(), listed.end());
+		if (library == "kernel32.dll")
+			symbols.push_back("RcConsolidateFrames");
 		std::sort(symbols.begin(), symbols.end());
 		symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
 		if (symbols.empty())
@@ -343,6 +346,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	desktop.set_source(source);
 	NativeWindows windows(process,environment,desktop_objects);
 	windows.set_deadline(deadline);
+	windows.set_menu_loader([&desktop](uint64_t instance,uint64_t identifier) { return desktop.menu_resource(instance,identifier); });
 	windows.set_presentation(std::move(presentation));
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
 #ifdef RAVEN_VULKAN
@@ -364,6 +368,21 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				if (!debug || image==modules.all().end() || result.signal!=SIGSEGV || result.signal_code!=SI_KERNEL || result.value!=1 ||
 					result.instruction<image->second->loaded.base() || result.instruction-image->second->loaded.base()+4>image->second->image.image_size ||
 					process.read_memory(result.instruction,4)!=std::vector<uint8_t>{0xcd,0x2d,0xcc,0xc3}) {
+					if (result.signal==SIGTRAP && result.signal_code==TRAP_HWBKPT) {
+						std::cerr << "watch: write by";
+						if (kernel_ptr && kernel_ptr->describe_stack) {
+							const auto saved=process.context();
+							(void)saved;
+						}
+						const auto rip=process.context().registers.rip;
+						for (const auto &[module_name,module]:modules.all())
+							if (rip>=module->loaded.base() && rip<module->loaded.base()+module->image.image_size)
+								std::cerr << ' ' << module_name << '+' << std::hex << rip-module->loaded.base() << std::dec;
+						std::cerr << '\n';
+						budget=remaining();
+						result=process.resume(budget);
+						continue;
+					}
 					// A CPU fault is a Windows exception: structured handlers of the faulting frames get the first chance.
 					if (!kernel_ptr || !kernel_ptr->raise_fault || result.signal==0)
 						return result;
@@ -416,11 +435,42 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				return native_raise_rtl_exception(process,true);
 			if (found == traps.end())
 				return result;
-			if (std::getenv("RAVEN_TRACE_API")) {
+			// RAVEN_TRACE_API is 1 for every call or a comma-separated list of API names to follow.
+			bool tracing = false;
+			if (const char *selection = std::getenv("RAVEN_TRACE_API")) {
+				const std::string wanted = std::string(",") + selection + ",";
+				tracing = wanted == ",1," || wanted.find("," + found->second + ",") != wanted.npos;
+			}
+			if (tracing) {
 				std::cerr << "api " << found->second << '(' << std::hex;
 				for (const auto value : process.api_arguments(4))
 					std::cerr << ' ' << value;
-				std::cerr << std::dec << " )\n";
+				std::cerr << std::dec << " )";
+				// The caller shows which guest module and offset asked, which is what a diagnosis needs most.
+				const auto stack = process.read_memory(process.context().registers.rsp, 8);
+				uint64_t caller = 0;
+				std::memcpy(&caller, stack.data(), 8);
+				for (const auto &[module_name, module] : modules.all())
+					if (caller >= module->loaded.base() && caller < module->loaded.base() + module->image.image_size)
+						std::cerr << " from " << module_name << '+' << std::hex << caller - module->loaded.base() << std::dec;
+				if (std::getenv("RAVEN_TRACE_STACK") && kernel_ptr && kernel_ptr->describe_stack)
+					std::cerr << " stack:" << kernel_ptr->describe_stack();
+				std::cerr << '\n';
+			}
+			if (const char *spec = std::getenv("RAVEN_STEP")) {
+				// Diagnosis aid: NAME:OCCURRENCE:COUNT single-steps COUNT instructions after the OCCURRENCE-th return of NAME.
+				static std::map<std::string,int> seen;
+				const std::string text(spec);
+				const auto first = text.find(':'), second = text.find(':', first + 1);
+				if (first != text.npos && second != text.npos && found->second == text.substr(0, first) &&
+					++seen[found->second] == std::stoi(text.substr(first + 1, second - first - 1)))
+					process.trace_instructions(size_t(std::stoul(text.substr(second + 1))), [&modules](uint64_t rip) {
+						std::cerr << "step";
+						for (const auto &[module_name, module] : modules.all())
+							if (rip >= module->loaded.base() && rip < module->loaded.base() + module->image.image_size)
+								std::cerr << ' ' << module_name << '+' << std::hex << rip - module->loaded.base() << std::dec;
+						std::cerr << '\n';
+					});
 			}
 			bool dispatched;
 			try {
@@ -441,6 +491,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				std::cerr << "raven: unimplemented native API " << found->second << '\n';
 				return result;
 			}
+			if (tracing)
+				std::cerr << "  -> " << std::hex << process.result_register() << std::dec << " (error " << environment.last_error() << ")\n";
+
 			budget = remaining();
 			if (budget.count() <= 0)
 				return NativeResult{NativeStop::timeout, 0, result.instruction, 0};
@@ -466,6 +519,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_memory_api(api_registry, kernel);
 	register_file_api(api_registry, kernel);
 	register_shlwapi_api(api_registry, kernel);
+	register_shell_api(api_registry, kernel);
+	register_platform_api(api_registry, kernel);
+	register_version_api(api_registry, kernel);
+	windows.register_api(api_registry);
+	NativeRegistry hive(prefix.registry_file());
+	register_registry_api(api_registry, kernel, hive);
 	std::vector<const PEModule *> attached;
 	attached.reserve(order.size());
 	const auto notify_tls = [&](const PEModule &module, uint64_t reason) {
