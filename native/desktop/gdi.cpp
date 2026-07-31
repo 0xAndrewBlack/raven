@@ -32,9 +32,82 @@ DesktopBitmap &require_bitmap(DesktopObjects &objects, DesktopDC &dc)
 	auto *bitmap = objects.bitmap(dc.bitmap);
 	if (!bitmap)
 		throw uint32_t(6);
-	if (bitmap->depth != 32 && bitmap->depth != 1)
+	const auto depth = bitmap->depth;
+	if (depth != 32 && depth != 1 && depth != 4 && depth != 8 && depth != 16 && depth != 24)
 		throw uint32_t(120);
 	return *bitmap;
+}
+
+size_t row_bytes(const DesktopBitmap &bitmap)
+{
+	if (bitmap.stride)
+		return bitmap.stride;
+	return bitmap.depth == 1 ? ((size_t(bitmap.width) + 15) / 16) * 2 : size_t(bitmap.width) * 4;
+}
+
+uint32_t nearest_entry(const std::vector<uint32_t> &palette, uint32_t color)
+{
+	uint32_t best = 0;
+	int64_t best_distance = INT64_MAX;
+	for (uint32_t i = 0; i < palette.size(); ++i) {
+		const int64_t dr = int64_t(color_red(color)) - color_red(palette[i]), dg = int64_t(color_green(color)) - color_green(palette[i]),
+			db = int64_t(color_blue(color)) - color_blue(palette[i]);
+		const int64_t distance = dr * dr + dg * dg + db * db;
+		if (distance < best_distance) {
+			best_distance = distance;
+			best = i;
+		}
+	}
+	return best;
+}
+
+// COLORREF of one pixel of any supported depth.
+uint32_t get_color(const DesktopBitmap &bitmap, const uint8_t *row, int64_t x)
+{
+	switch (bitmap.depth) {
+	case 1: {
+		const unsigned bit = (row[x / 8] >> (7 - x % 8)) & 1;
+		return bitmap.palette.empty() ? (bit ? 0xffffff : 0) : bitmap.palette[bit];
+	}
+	case 4: return bitmap.palette[(row[x / 2] >> (x % 2 ? 0 : 4)) & 15];
+	case 8: return bitmap.palette[row[x]];
+	case 16: {
+		const uint32_t word = row[x * 2] | (uint32_t(row[x * 2 + 1]) << 8);
+		return (((word >> 10) & 31) * 255 / 31) | (((word >> 5) & 31) * 255 / 31) << 8 | ((word & 31) * 255 / 31) << 16;
+	}
+	case 24: return uint32_t(row[x * 3 + 2]) | uint32_t(row[x * 3 + 1]) << 8 | uint32_t(row[x * 3]) << 16;
+	default: return uint32_t(row[x * 4 + 2]) | uint32_t(row[x * 4 + 1]) << 8 | uint32_t(row[x * 4]) << 16;
+	}
+}
+
+void put_color(const DesktopBitmap &bitmap, uint8_t *row, int64_t x, uint32_t color)
+{
+	switch (bitmap.depth) {
+	case 1: {
+		bool bit;
+		if (bitmap.palette.empty())
+			bit = (color_red(color) * 30 + color_green(color) * 59 + color_blue(color) * 11) >= 128 * 100;
+		else
+			bit = nearest_entry(bitmap.palette, color) != 0;
+		const uint8_t mask = uint8_t(0x80 >> (x % 8));
+		row[x / 8] = uint8_t(bit ? (row[x / 8] | mask) : (row[x / 8] & ~mask));
+		return;
+	}
+	case 4: {
+		const uint8_t index = uint8_t(nearest_entry(bitmap.palette, color));
+		row[x / 2] = x % 2 ? uint8_t((row[x / 2] & 0xf0) | index) : uint8_t((row[x / 2] & 0x0f) | index << 4);
+		return;
+	}
+	case 8: row[x] = uint8_t(nearest_entry(bitmap.palette, color)); return;
+	case 16: {
+		const uint32_t word = ((color_red(color) >> 3) << 10) | ((color_green(color) >> 3) << 5) | (color_blue(color) >> 3);
+		row[x * 2] = uint8_t(word); row[x * 2 + 1] = uint8_t(word >> 8);
+		return;
+	}
+	case 24: row[x * 3] = uint8_t(color_blue(color)); row[x * 3 + 1] = uint8_t(color_green(color)); row[x * 3 + 2] = uint8_t(color_red(color)); return;
+	default:
+		row[x * 4] = uint8_t(color_blue(color)); row[x * 4 + 1] = uint8_t(color_green(color)); row[x * 4 + 2] = uint8_t(color_red(color)); row[x * 4 + 3] = 0;
+	}
 }
 
 struct BrushPixel {
@@ -97,18 +170,14 @@ uint8_t *Painter::pixel_pointer(int64_t device_x, int64_t device_y) const
 uint8_t *Painter::row_pointer(int64_t device_y) const
 {
 	const size_t row = bitmap.top_down ? size_t(device_y) : bitmap.height - 1 - size_t(device_y);
-	return bitmap.pixels().data() + row * (bitmap.depth == 32 ? size_t(bitmap.width) * 4 : ((size_t(bitmap.width) + 15) / 16) * 2);
+	return bitmap.pixels().data() + row * row_bytes(bitmap);
 }
 
 uint32_t Painter::read(int64_t x, int64_t y) const
 {
 	if (x < 0 || y < 0 || x >= bitmap.width || y >= bitmap.height)
 		return 0;
-	const auto *row = row_pointer(y);
-	if (bitmap.depth == 1)
-		return (row[x / 8] & (0x80 >> (x % 8))) ? 0xffffff : 0;
-	const auto *pixel = row + size_t(x) * 4;
-	return uint32_t(pixel[2]) | (uint32_t(pixel[1]) << 8) | (uint32_t(pixel[0]) << 16);
+	return get_color(bitmap, row_pointer(y), x);
 }
 
 bool Painter::plot(int64_t x, int64_t y, uint32_t color, uint32_t rop2)
@@ -116,27 +185,22 @@ bool Painter::plot(int64_t x, int64_t y, uint32_t color, uint32_t rop2)
 	if (!visible(x, y))
 		return false;
 	auto *row = row_pointer(y);
-	if (bitmap.depth == 1) {
-		// A monochrome surface keeps white for light colors and black for the rest.
-		const bool white = (color_red(color) * 30 + color_green(color) * 59 + color_blue(color) * 11) >= 128 * 100;
-		auto &byte = row[x / 8];
-		const uint8_t mask = uint8_t(0x80 >> (x % 8));
-		const uint8_t result = combine_raster(rop2, white ? 0xff : 0, (byte & mask) ? 0xff : 0);
-		byte = uint8_t((byte & ~mask) | (result & mask));
-		dirty = true;
-		return true;
-	}
-	auto *pixel = row + size_t(x) * 4;
-	if (rop2 == 13) {
+	if (bitmap.depth == 32 && rop2 == 13) {
+		auto *pixel = row + size_t(x) * 4;
 		pixel[0] = uint8_t(color_blue(color));
 		pixel[1] = uint8_t(color_green(color));
 		pixel[2] = uint8_t(color_red(color));
-	} else {
-		pixel[0] = combine_raster(rop2, uint8_t(color_blue(color)), pixel[0]);
-		pixel[1] = combine_raster(rop2, uint8_t(color_green(color)), pixel[1]);
-		pixel[2] = combine_raster(rop2, uint8_t(color_red(color)), pixel[2]);
+		pixel[3] = 0;
+		dirty = true;
+		return true;
 	}
-	pixel[3] = 0;
+	if (rop2 != 13) {
+		const uint32_t below = get_color(bitmap, row, x);
+		color = combine_raster(rop2, uint8_t(color_red(color)), uint8_t(color_red(below))) |
+			combine_raster(rop2, uint8_t(color_green(color)), uint8_t(color_green(below))) << 8 |
+			combine_raster(rop2, uint8_t(color_blue(color)), uint8_t(color_blue(below))) << 16;
+	}
+	put_color(bitmap, row, x, color);
 	dirty = true;
 	return true;
 }
@@ -382,17 +446,15 @@ struct Source {
 	uint32_t pixel(int64_t x, int64_t y, const DesktopDC &destination, bool destination_mono) const
 	{
 		const size_t row = bitmap->top_down ? size_t(y) : bitmap->height - 1 - size_t(y);
-		const auto pixels = bitmap->pixels();
-		if (bitmap->depth == 1) {
-			const size_t stride = ((size_t(bitmap->width) + 15) / 16) * 2;
-			const bool white = (pixels[row * stride + size_t(x) / 8] >> (7 - x % 8)) & 1;
+		const uint8_t *line = bitmap->pixels().data() + row * row_bytes(*bitmap);
+		const uint32_t color = get_color(*bitmap, line, x);
+		// A monochrome device-dependent source takes the destination's colors; a color source copied to a monochrome
+		// surface turns its background color white and everything else black.
+		if (bitmap->depth == 1 && bitmap->palette.empty()) {
 			if (destination_mono)
-				return white ? 0xffffff : 0;
-			return white ? destination.background_color : destination.text_color;
+				return color;
+			return color ? destination.background_color : destination.text_color;
 		}
-		const auto *p = &pixels[(row * bitmap->width + size_t(x)) * 4];
-		const uint32_t color = uint32_t(p[2]) | uint32_t(p[1]) << 8 | uint32_t(p[0]) << 16;
-		// A color source copied to a monochrome surface turns its background color white and everything else black.
 		if (destination_mono)
 			return color == dc->background_color ? 0xffffff : 0;
 		return color;
@@ -400,7 +462,7 @@ struct Source {
 	const uint8_t *raw(int64_t x, int64_t y) const
 	{
 		const size_t row = bitmap->top_down ? size_t(y) : bitmap->height - 1 - size_t(y);
-		return &bitmap->pixels()[(row * bitmap->width + size_t(x)) * 4];
+		return &bitmap->pixels()[row * row_bytes(*bitmap) + size_t(x) * 4];
 	}
 };
 
@@ -425,7 +487,7 @@ bool blit(DesktopObjects &objects, DesktopDC &destination, int32_t dx, int32_t d
 			throw uint32_t(6);
 		source.dc = source_dc;
 		source.bitmap = objects.bitmap(source_dc->bitmap);
-		if (!source.bitmap || (source.bitmap->depth != 32 && source.bitmap->depth != 1))
+		if (!source.bitmap || !(source.bitmap->depth == 32 || source.bitmap->depth == 1 || source.bitmap->depth == 4 || source.bitmap->depth == 8 || source.bitmap->depth == 16 || source.bitmap->depth == 24))
 			throw uint32_t(120);
 	}
 	if (!dw || !dh)
@@ -452,7 +514,7 @@ bool blit(DesktopObjects &objects, DesktopDC &destination, int32_t dx, int32_t d
 	const DesktopBrush *brush = uses_pattern ? &selected_brush(objects, destination) : nullptr;
 	const int64_t brush_base_x = int64_t(destination.origin_x) - destination.user_dx + destination.brush_org_x;
 	const int64_t brush_base_y = int64_t(destination.origin_y) - destination.user_dy + destination.brush_org_y;
-	const bool destination_mono = painter.bitmap.depth == 1;
+	const bool destination_mono = painter.bitmap.depth == 1 && painter.bitmap.palette.empty();
 	const bool fast_copy = rop == rop_srccopy && uses_source && abs_dw == abs_sw && abs_dh == abs_sh && !flip_x && !flip_y &&
 		source.bitmap->depth == 32 && painter.bitmap.depth == 32;
 	for (int64_t row = 0; row < abs_dh; ++row) {

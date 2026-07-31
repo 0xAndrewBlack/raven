@@ -42,6 +42,8 @@ struct KernelContext {
 	std::function<void(const NativeResult &)> raise_fault;
 	// Walks the guest stack with the unwind tables and names each caller as module+offset (diagnostics only).
 	std::function<std::string()> describe_stack;
+	// True when the window system has input, paint or timer work for the calling thread (MsgWaitForMultipleObjects).
+	std::function<bool()> message_ready;
 };
 
 // Windows FILETIME ticks are 100 ns units since 1601-01-01.

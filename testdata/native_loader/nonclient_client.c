@@ -29,13 +29,9 @@ int raven_entry(void)
 			if (!adjustment_reference[i].ex_style && verify(inputs[j],i,FALSE)) return 3;
 		}
 #ifdef RAVEN_NONCLIENT_BOUNDARY
-	// SM_CXSCREEN and SM_CYSCREEN report the virtual display; every other unmodeled index must stay visibly unsupported.
+	// Display metrics report the virtual display; an unknown index yields zero.
 	if (GetSystemMetrics(SM_CXSCREEN)<=0 || GetSystemMetrics(SM_CYSCREEN)<=0) return 5;
-	const int unsupported[]={-1,13};
-	for (unsigned i=0;i<sizeof(unsupported)/sizeof(unsupported[0]);++i) {
-		SetLastError(0);
-		if (GetSystemMetrics(unsupported[i]) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 4;
-	}
+	if (GetSystemMetrics(SM_CXCURSOR)!=32 || GetSystemMetrics(SM_CXVSCROLL)!=17 || GetSystemMetrics(-1)) return 4;
 #endif
 	return 0;
 }

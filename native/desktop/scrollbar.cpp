@@ -392,10 +392,10 @@ void NativeWindows::paint_scrollbars(uint64_t root)
 				for (int32_t d = 0; d < 4; ++d)
 					for (int32_t w = -(3 - d); w <= 3 - d; ++w)
 						switch (direction) {
-						case 0: canvas.set(cx + w, cy - 2 + d, ink); break;
-						case 1: canvas.set(cx + w, cy + 1 - d, ink); break;
-						case 2: canvas.set(cx - 2 + d, cy + w, ink); break;
-						default: canvas.set(cx + 1 - d, cy + w, ink); break;
+						case 0: canvas.set(cx + w, cy + 1 - d, ink); break;
+						case 1: canvas.set(cx + w, cy - 2 + d, ink); break;
+						case 2: canvas.set(cx + 1 - d, cy + w, ink); break;
+						default: canvas.set(cx - 2 + d, cy + w, ink); break;
 						}
 			};
 			button(geometry.up, geometry.vertical ? 0 : 2, dead || (scroll.disabled & 1));

@@ -36,6 +36,7 @@ void NativeWindows::register_api(ApiRegistry &registry)
 	register_menu_api(registry);
 	register_ext_api(registry);
 	register_scroll_api(registry);
+	register_long_api(registry);
 
 	// Rectangle helpers are pure arithmetic on guest RECTs.
 	registry.add("InflateRect", 3, [](ApiCall &call) {

@@ -1,4 +1,5 @@
 #include "api.h"
+#include <iostream>
 
 #include <algorithm>
 #include <array>
@@ -75,39 +76,82 @@ bool NativeDesktop::delete_bitmap(uint64_t handle)
 
 uint64_t NativeDesktop::create_section(std::span<const uint64_t> args)
 {
-	if (!args[3]) {
-		environment.set_last_error(87);
-		return 0;
-	}
 	std::array<uint8_t,8> output{};
-	process.write_memory(args[3],output);
+	if (args[3]) process.write_memory(args[3],output);
 	if (args[0] && !objects.dc(args[0])) {
 		environment.set_last_error(6);
 		return 0;
 	}
-	if (uint32_t(args[2]) || args[4]) {
+	if (uint32_t(args[2]) > 1 || args[4]) {
 		environment.set_last_error(120);
 		return 0;
 	}
-	const auto header = process.read_memory(args[1],40);
+	const auto header_size = field(process.read_memory(args[1],4),0);
+	if (header_size != 40 && header_size != 108 && header_size != 124) {
+		environment.set_last_error(87);
+		return 0;
+	}
+	const auto header = process.read_memory(args[1],header_size);
 	const auto width = int32_t(field(header,4)), height = int32_t(field(header,8));
-	if (width <= 0 || width > 8192 || !height || height < -8192 || height > 8192 ||
+	const auto bits = field(header,14,2), compression = field(header,16);
+	if (width <= 0 || width > 16384 || !height || height < -16384 || height > 16384 ||
 		size_t(width) * uint32_t(height < 0 ? -height : height) > 16*1024*1024) {
 		environment.set_last_error(87);
 		return 0;
 	}
-	if (field(header,0) != 40 || field(header,12,2) != 1 || field(header,14,2) != 32 ||
-		field(header,16) || field(header,32)) {
-		environment.set_last_error(120);
+	if (std::getenv("RAVEN_TRACE_FAIL")) std::cerr << "dib header size=" << header_size << " w=" << width << " h=" << height << " planes=" << field(header,12,2) << " bits=" << bits << " compression=" << compression << "\n";
+	if (field(header,12,2) != 1 || !(bits == 1 || bits == 4 || bits == 8 || bits == 16 || bits == 24 || bits == 32) ||
+		(compression != 0 && !(compression == 3 && (bits == 16 || bits == 32)))) {
+		environment.set_last_error(87);
 		return 0;
 	}
-	const auto bitmap=allocate_bitmap(uint32_t(width),uint32_t(height<0 ? -height : height),32,true,height<0);
+	std::vector<uint32_t> palette;
+	if (bits <= 8) {
+		uint32_t colors = field(header,32);
+		if (!colors || colors > (1U << bits)) colors = 1U << bits;
+		if (uint32_t(args[2]) == 1) {
+			// DIB_PAL_COLORS entries index the device palette; without one they select evenly spaced grays.
+			for (uint32_t i = 0; i < colors; ++i) { const uint32_t level = bits == 1 ? i * 255 : i * 255 / ((1U << bits) - 1); palette.push_back(level | level << 8 | level << 16); }
+		} else {
+			const auto entries = process.read_memory(args[1] + header_size, size_t(colors) * 4);
+			for (uint32_t i = 0; i < colors; ++i) palette.push_back(uint32_t(entries[i*4+2]) | uint32_t(entries[i*4+1]) << 8 | uint32_t(entries[i*4]) << 16);
+		}
+		while (palette.size() < (1U << bits)) palette.push_back(0);
+	}
+	const auto bitmap=allocate_dib(uint32_t(width),uint32_t(height<0 ? -height : height),bits,height<0,std::move(palette));
 	if (!bitmap) return 0;
 	try {
 		const auto address=objects.bitmap(bitmap)->address;
 		for (size_t byte=0;byte<output.size();++byte) output[byte]=uint8_t(address>>(byte*8));
-		process.write_memory(args[3],output);
+		if (args[3]) process.write_memory(args[3],output);
 	} catch (...) { delete_bitmap(bitmap); throw; }
+	return bitmap;
+}
+
+uint64_t NativeDesktop::allocate_dib(uint32_t width,uint32_t height,uint32_t bits,bool top_down,std::vector<uint32_t> palette)
+{
+	const size_t stride=((size_t(width)*bits+31)/32)*4;
+	if (height>64*1024*1024/stride) { environment.set_last_error(8); return 0; }
+	const size_t bytes=stride*height;
+	uint64_t address=0,bitmap=0;
+	try {
+		auto shared=std::make_shared<SharedPixels>((bytes+4095)&~size_t(4095));
+		address=process.map_shared(shared->descriptor(),shared->size());
+		DesktopBitmap record{width,height,bits,{},address,top_down,false,true,shared};
+		record.stride=uint32_t(stride);
+		record.palette=std::move(palette);
+		bitmap=objects.add(std::move(record));
+	} catch (const std::bad_alloc &) {
+		if (address) process.unmap_memory(address);
+		environment.set_last_error(8); return 0;
+	} catch (...) {
+		if (address) process.unmap_memory(address);
+		throw;
+	}
+	if (!bitmap) {
+		if (address) process.unmap_memory(address);
+		environment.set_last_error(8);
+	}
 	return bitmap;
 }
 

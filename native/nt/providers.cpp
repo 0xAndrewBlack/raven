@@ -13,6 +13,7 @@
 #include "kernel_context.h"
 #include "unwind.h"
 #include "prefix.h"
+#include "profile_api.h"
 #include "registry.h"
 #include "system_exports.h"
 #include "desktop/api.h"
@@ -548,6 +549,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					});
 			}
 			bool dispatched;
+			const auto error_before = std::getenv("RAVEN_TRACE_FAIL") ? environment.last_error() : 0;
+			const auto failure_arguments = std::getenv("RAVEN_TRACE_FAIL") ? process.api_arguments(4) : std::vector<uint64_t>{};
 			try {
 				// The generalized desktop services come first so that they replace the older narrow ones.
 				dispatched = desktop_api.dispatch(process, environment, found->second) || environment.dispatch(found->second) || module_api.dispatch(found->second) || resources.dispatch(found->second) || memory.dispatch(found->second) || object_api.dispatch(found->second) || heap.dispatch(found->second) || desktop.dispatch(found->second) || windows.dispatch(found->second) || api_registry.dispatch(process, environment, found->second)
@@ -580,6 +583,31 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			}
 			if (tracing)
 				std::cerr << "  -> " << std::hex << process.result_register() << std::dec << " (error " << environment.last_error() << ")\n";
+			if (std::getenv("RAVEN_TRACE_FAIL") && environment.last_error() != error_before) {
+				std::cerr << "fail " << found->second << " error " << environment.last_error() << " args";
+				for (const auto value : failure_arguments) std::cerr << ' ' << std::hex << value << std::dec;
+				if (found->second == "CreateWindowExW" && failure_arguments.size() > 1) {
+					std::string class_name;
+					try {
+						if (failure_arguments[1] > 0xffff) {
+							const auto text = process.read_memory(failure_arguments[1], 64);
+							for (size_t i = 0; i < 32 && (text[i * 2] | text[i * 2 + 1]); ++i)
+								class_name.push_back(char(text[i * 2]));
+						} else
+							class_name = "#" + std::to_string(failure_arguments[1]);
+					} catch (...) {}
+					std::cerr << " class=" << class_name;
+				}
+
+				for (const auto &[module_name, module] : modules.all()) {
+					const auto stack = process.read_memory(process.context().registers.rsp, 8);
+					uint64_t caller = 0;
+					std::memcpy(&caller, stack.data(), 8);
+					if (caller >= module->loaded.base() && caller < module->loaded.base() + module->image.image_size)
+						std::cerr << " from " << module_name << '+' << std::hex << caller - module->loaded.base() << std::dec;
+				}
+				std::cerr << '\n';
+			}
 
 			budget = remaining();
 			if (budget.count() <= 0)
@@ -603,6 +631,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	object_api.set_cooperative(true);
 	windows.set_yield([&threads] { return threads.live() > 1 && threads.yield(); });
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, threads, paths, modules, entry, *launch, invoke};
+	kernel.message_ready=[&windows] { return windows.input_ready(); };
 	kernel_ptr=&kernel;
 	NativeUnwinder unwinder(process, modules);
 	register_exception_api(api_registry, kernel, unwinder);
@@ -623,6 +652,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	desktop.register_image_api(desktop_api);
 	NativeRegistry hive(prefix.registry_file());
 	register_registry_api(api_registry, kernel, hive);
+	NativeProfile profile(process, environment, prefix);
+	register_profile_api(api_registry, profile);
 	std::vector<const PEModule *> attached;
 	attached.reserve(order.size());
 	const auto notify_tls = [&](const PEModule &module, uint64_t reason) {

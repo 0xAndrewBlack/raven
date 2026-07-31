@@ -252,18 +252,25 @@ int main(int argc, char **argv)
 		check(!api("CreateCompatibleDC",{1}) && !objects.count(),"invalid source DC created state");
 		rejected("CreateDIBSection",{0,buffer+2048,0,0x400000000000ULL,0,0});
 		rejected("CreateDIBSection",{0,0x400000000000ULL,0,buffer+128,0,0},true);
-		section_header(8193,2);
+		section_header(16385,2);
 		check(!api("CreateDIBSection",{0,buffer+2048,0,buffer+128,0,0}) && environment.last_error()==87 &&
 			!number(process.read_memory(buffer+128,8),0) && !objects.count(),"oversized section created state");
 		section_header(3,2);
 		process.write_memory(buffer+2048+14,std::array<uint8_t,2>{24,0});
-		check(!api("CreateDIBSection",{0,buffer+2048,0,buffer+128,0,0}) && environment.last_error()==120 && !objects.count(),
-			"unsupported section depth succeeded");
+		{
+			const auto section24=api("CreateDIBSection",{0,buffer+2048,0,buffer+128,0,0});
+			check(section24 && objects.bitmap(section24)->depth==24 && objects.bitmap(section24)->stride==12 && objects.bitmap(section24)->dib_section,
+				"24-bit section was not created with its own row layout");
+			check(api("DeleteObject",{section24}),"24-bit section could not be deleted");
+		}
+		process.write_memory(buffer+2048+14,std::array<uint8_t,2>{3,0});
+		check(!api("CreateDIBSection",{0,buffer+2048,0,buffer+128,0,0}) && environment.last_error()==87 && !objects.count(),
+			"invalid section depth succeeded");
 		section_header(3,2);
 		process.protect_memory(buffer,4096,PROT_READ);
 		rejected("CreateDIBSection",{0,buffer+2048,0,buffer+128,0,0});
 		process.protect_memory(buffer,4096,PROT_READ | PROT_WRITE);
-		check(!api("CreateDIBSection",{0,buffer+2048,1,buffer+128,0,0}) && environment.last_error()==120 &&
+		check(!api("CreateDIBSection",{0,buffer+2048,2,buffer+128,0,0}) && environment.last_error()==120 &&
 			!api("CreateDIBSection",{0,buffer+2048,0,buffer+128,1,0}) && environment.last_error()==120 && !objects.count(),
 			"unsupported section mode or shared mapping succeeded");
 		check(!bounded_api("CreateDIBSection",{0,buffer+2048,0,buffer+128,0,0}) && environment.last_error()==8 &&

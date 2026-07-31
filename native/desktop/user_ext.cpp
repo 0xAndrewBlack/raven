@@ -276,6 +276,16 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		call.ret(children.empty() ? 0 : children.back());
 	});
 
+	// Visual styles are not provided: windows have no theme and message filtering never blocks.
+	registry.add("GetWindowTheme", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("ChangeWindowMessageFilterEx", 4, [this](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		call.ret(1);
+	});
+
 	// ---- timers owned by the system (carets, control scrolling) ----
 	registry.add("SetSystemTimer", 4, [this](ApiCall &call) {
 		if (call[0] && !objects.window(call[0])) {

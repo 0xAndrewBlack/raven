@@ -31,6 +31,9 @@ public:
 	// Drawing marks the surface dirty; the next message retrieval presents it, so a burst of primitives costs one frame.
 	void drawing(uint64_t window);
 	void flush_dirty();
+	// Whether a message, paint request or due timer waits for the guest.
+	bool input_ready();
+	void dump_windows();
 	void shutdown();
 
 private:
@@ -49,6 +52,8 @@ private:
 	std::deque<Message> messages;
 	std::optional<uint32_t> quit;
 	std::set<uint64_t> dirty_roots;
+	bool dumped=false;
+	std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
 	std::chrono::steady_clock::time_point deadline;
 	std::function<bool()> yield_hook;
 	std::function<uint64_t(uint64_t,uint64_t)> menu_loader;
@@ -105,6 +110,7 @@ private:
 	void register_menu_api(ApiRegistry &registry);
 	void register_ext_api(ApiRegistry &registry);
 	void register_scroll_api(ApiRegistry &registry);
+	void register_long_api(ApiRegistry &registry);
 	// Layout of one non-client scroll bar in screen coordinates.
 	struct ScrollGeometry {
 		DesktopRect bar{},up{},down{},track{},thumb{};

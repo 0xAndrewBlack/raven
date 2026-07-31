@@ -198,7 +198,7 @@ bool NativeWindows::system_dispatch(std::string_view name)
 	const bool format = name == "wsprintfW";
 	if (name != "GetDesktopWindow" && name != "PtInRect" && name != "SetRect" && name != "TranslateAcceleratorW" && name != "SetMenu" &&
 		name != "GetMenuItemRect" && name != "CheckMenuItem" && name != "SetCapture" &&
-		name != "ReleaseCapture" && name != "SetTimer" && name != "KillTimer" && !format)
+		name != "ReleaseCapture" && name != "SetTimer" && name != "SetCoalescableTimer" && name != "KillTimer" && !format)
 		return false;
 	uint64_t result = 0;
 	try {
@@ -317,8 +317,9 @@ bool NativeWindows::system_dispatch(std::string_view name)
 					send(previous, 0x215, 0, 0);
 			}
 			result = 1;
-		} else if (name == "SetTimer") {
-			const auto args = process.api_arguments(4);
+		} else if (name == "SetTimer" || name == "SetCoalescableTimer") {
+			// The coalescing tolerance is only a hint, so both entry points share one timer.
+			const auto args = process.api_arguments(name == "SetTimer" ? 4 : 5);
 			const auto interval = std::clamp<uint32_t>(uint32_t(args[2]), 10, 0x7fffffff);
 			if (args[0] && !objects.window(args[0]))
 				throw uint32_t(1400);

@@ -87,6 +87,29 @@ void DesktopObjects::configure_window_dc(uint64_t handle,DesktopDC &device,bool 
 		parent=ancestor->parent;
 	}
 	device.bounds=right<=left || bottom<=top ? DesktopRect{} : DesktopRect{int32_t(left),int32_t(top),int32_t(right),int32_t(bottom)};
+	// WS_CLIPCHILDREN keeps drawing off the visible children; WS_CLIPSIBLINGS keeps it off the siblings stacked above.
+	device.visible.reset();
+	const bool clip_children=(record->style & 0x02000000U)!=0,clip_siblings=(record->style & 0x04000000U)!=0 && record->parent;
+	if (clip_children || clip_siblings) {
+		DesktopRegion region;
+		region.add({0,0,int32_t(std::min<int64_t>(frame ? int64_t(record->outer.right)-x : record->width,INT32_MAX)),
+			int32_t(std::min<int64_t>(frame ? int64_t(record->outer.bottom)-y : record->height,INT32_MAX))});
+		const auto cut=[&](const DesktopWindow &other) {
+			if (!other.visible) return;
+			region.subtract({int32_t(int64_t(other.outer.left)-x),int32_t(int64_t(other.outer.top)-y),
+				int32_t(int64_t(other.outer.right)-x),int32_t(int64_t(other.outer.bottom)-y)});
+		};
+		if (clip_children)
+			for (const auto child:child_windows(handle)) if (const auto *other=window(child)) cut(*other);
+		if (clip_siblings) {
+			bool above=false;
+			for (const auto sibling:child_windows(record->parent)) {
+				if (sibling==handle) { above=true; continue; }
+				if (above) if (const auto *other=window(sibling)) cut(*other);
+			}
+		}
+		device.visible=std::move(region);
+	}
 }
 
 bool NativeWindows::tree_dispatch(std::string_view name)

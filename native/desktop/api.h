@@ -66,6 +66,7 @@ private:
 	uint64_t create_section(std::span<const uint64_t> arguments);
 	uint64_t compatible_bitmap(std::span<const uint64_t> arguments);
 	uint64_t allocate_bitmap(uint32_t width,uint32_t height,uint32_t depth,bool section,bool top_down);
+	uint64_t allocate_dib(uint32_t width,uint32_t height,uint32_t bits,bool top_down,std::vector<uint32_t> palette);
 	bool delete_bitmap(uint64_t handle);
 	bool draw(std::span<const uint64_t> arguments);
 	bool fill(std::span<const uint64_t> arguments);

@@ -46,13 +46,10 @@ int raven_entry(void)
 	HWND b=CreateWindowExW(0,MAKEINTATOM(atom),L"second",WS_POPUP,0,0,32,24,NULL,NULL,instance,NULL);
 	if (!a || !b || created!=2 || GetWindowLongPtrW(a,GWLP_USERDATA)!=0x12345 || GetWindowLongPtrW(b,GWLP_USERDATA)) return 2;
 #ifdef RAVEN_WINDOW_DATA_BOUNDARY
-	if (GetWindowLongPtrA(a,GWLP_WNDPROC) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED ||
-		GetClassLongPtrA(a,GCLP_WNDPROC) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 42;
-	if (SetWindowLongPtrA(a,GWLP_WNDPROC,(LONG_PTR)subclass) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED ||
-		GetWindowLongPtrW(a,GWLP_WNDPROC)!=(LONG_PTR)original) return 43;
-	if (SetWindowLongPtrW(a,GWL_STYLE,WS_CHILD) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED ||
-		GetWindowLongPtrW(a,GWL_STYLE)!=(WS_POPUP | WS_CLIPSIBLINGS)) return 44;
-	if (SetClassLongPtrW(a,GCL_CBWNDEXTRA,64) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED || GetClassLongPtrW(a,GCL_CBWNDEXTRA)!=32) return 45;
+	SetLastError(0);
+	if (!GetWindowLongPtrA(a,GWLP_WNDPROC) || GetLastError() || !GetClassLongPtrA(a,GCLP_WNDPROC)) return 42;
+	if (SetWindowLongPtrW(a,GWL_STYLE,WS_CHILD)!=(WS_POPUP | WS_CLIPSIBLINGS) || GetWindowLongPtrW(a,GWL_STYLE)!=WS_CHILD) return 44;
+	if (SetClassLongPtrW(a,GCL_CBWNDEXTRA,64)!=32 || GetClassLongPtrW(a,GCL_CBWNDEXTRA)!=64) return 45;
 	if (!DestroyWindow(a) || !DestroyWindow(b) || !UnregisterClassW(MAKEINTATOM(atom),instance)) return 46;
 	return 0;
 #endif

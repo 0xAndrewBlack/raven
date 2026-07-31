@@ -136,6 +136,59 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("WaitForMultipleObjects", 4, [multiple](ApiCall &call) { multiple(call, false); });
 	registry.add("WaitForMultipleObjectsEx", 5, [multiple](ApiCall &call) { multiple(call, call.u32(4)); });
+	// Waits for handles or for window input: the wait code one past the last handle reports a message.
+	const auto message_wait = [&context, &objects, &threads](ApiCall &call, uint32_t count, uint64_t array, bool all, uint32_t milliseconds) {
+		if (count > 63) {
+			call.fail(87, wait_failed);
+			return;
+		}
+		std::vector<uint64_t> handles(count);
+		for (uint32_t index = 0; index < count; ++index)
+			handles[index] = call.load<uint64_t>(array + index * 8ULL);
+		const uint32_t id = threads.current_id();
+		std::optional<std::chrono::steady_clock::time_point> wake;
+		if (milliseconds != UINT32_MAX)
+			wake = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+		const auto ready = [&]() -> std::optional<uint32_t> {
+			if (context.message_ready && context.message_ready())
+				return count;
+			std::vector<int> states;
+			for (const auto handle : handles)
+				states.push_back(objects.signaled(handle, id));
+			if (all && count && std::all_of(states.begin(), states.end(), [](int s) { return s == 1; })) {
+				for (const auto handle : handles)
+					objects.consume(handle, id);
+				return 0;
+			}
+			if (!all)
+				for (size_t index = 0; index < states.size(); ++index)
+					if (states[index] == 1) {
+						objects.consume(handles[index], id);
+						return uint32_t(index);
+					}
+			return std::nullopt;
+		};
+		for (;;) {
+			if (const auto code = ready()) {
+				call.ret(*code);
+				return;
+			}
+			if (milliseconds == 0 || (wake && std::chrono::steady_clock::now() >= *wake)) {
+				call.ret(wait_timeout);
+				return;
+			}
+			threads.block([&] {
+				if (context.message_ready && context.message_ready())
+					return true;
+				for (const auto handle : handles)
+					if (objects.signaled(handle, id) == 1)
+						return true;
+				return false;
+			}, wake);
+		}
+	};
+	registry.add("MsgWaitForMultipleObjects", 5, [message_wait](ApiCall &call) { message_wait(call, call.u32(0), call[1], call.u32(2), call.u32(3)); });
+	registry.add("MsgWaitForMultipleObjectsEx", 5, [message_wait](ApiCall &call) { message_wait(call, call.u32(0), call[1], call.u32(4) & 1, call.u32(2)); });
 	registry.add("SignalObjectAndWait", 4, [wait, &objects](ApiCall &call) {
 		if (objects.signaled(call[0], 0) == -2) {
 			call.fail(6, wait_failed);

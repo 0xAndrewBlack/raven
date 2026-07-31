@@ -135,7 +135,7 @@ bool NativeWindows::show_window(uint64_t handle, uint32_t command)
 	window = objects.window(handle);
 	window->visible = !hide;
 	window->style = (window->style & ~ws_visible) | (window->visible ? ws_visible : 0);
-	objects.update_window_dcs(handle);
+	objects.update_window_dcs(window->parent ? window->parent : handle);
 	if (show && !objects.invalidate(handle, {0, 0, window->width, window->height}, true))
 		throw uint32_t(8);
 	if (window->visible && !show)
@@ -282,7 +282,7 @@ void NativeWindows::place_window(uint64_t handle, DesktopRect outer, uint64_t in
 		}
 		window = objects.window(handle);
 		if (window && window->parent && objects.window_visible(handle) && !(effective & swp_noredraw)) {
-			objects.update_window_dcs(handle);
+			objects.update_window_dcs(window->parent);
 			invalidate_tree(handle, true);
 		}
 	}
@@ -610,7 +610,7 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		const uint32_t flags = call.u32(6);
 		const auto *parent = window->parent ? objects.window(window->parent) : nullptr;
 		const int32_t ox = parent ? parent->x : 0, oy = parent ? parent->y : 0;
-		const int32_t x = call.i32(2), y = call.i32(3), width = call.i32(4), height = call.i32(5);
+		const int32_t x = call.i32(2), y = call.i32(3), width = std::max(call.i32(4), 0), height = std::max(call.i32(5), 0);
 		DesktopRect outer{x + ox, y + oy, x + ox + width, y + oy + height};
 		try {
 			place_window(call[0], outer, call[1], flags);
@@ -627,7 +627,7 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		}
 		const auto *parent = window->parent ? objects.window(window->parent) : nullptr;
 		const int32_t ox = parent ? parent->x : 0, oy = parent ? parent->y : 0;
-		const int32_t x = call.i32(1), y = call.i32(2), width = call.i32(3), height = call.i32(4);
+		const int32_t x = call.i32(1), y = call.i32(2), width = std::max(call.i32(3), 0), height = std::max(call.i32(4), 0);
 		try {
 			place_window(call[0], {x + ox, y + oy, x + ox + width, y + oy + height}, 0, call.u32(5) ? 0x4 : 0x4 | swp_noredraw);
 			call.ret(1);

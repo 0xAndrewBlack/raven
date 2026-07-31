@@ -63,8 +63,7 @@ int raven_entry(void)
 	if(GetObjectA(font,60,output) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 23;
 	for(unsigned i=0;i<sizeof(output);++i) if(output[i]!=0xcc) return 24;
 	if(GetObjectA(font,28,output)!=28 || !equal(output,&input,28) || GetObjectA(font,0,NULL)!=60) return 25;
-	SetLastError(0);
-	if(GetStockObject(DEFAULT_GUI_FONT) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 26;
+	if(!GetStockObject(DEFAULT_GUI_FONT) || GetStockObject(DEFAULT_GUI_FONT)==GetStockObject(SYSTEM_FIXED_FONT) || !GetStockObject(DC_BRUSH) || !GetStockObject(DC_PEN)) return 26;
 	SetLastError(0);
 	if(GetCurrentObject(dc,OBJ_BITMAP) || GetLastError()!=ERROR_CALL_NOT_IMPLEMENTED) return 35;
 #endif

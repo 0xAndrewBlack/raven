@@ -45,6 +45,16 @@ DesktopObjects::DesktopObjects(size_t limit, IconDisplay display,DesktopMetrics 
 	system_font.definition[27]=34;
 	const std::string_view name="System";
 	for (size_t i=0;i<name.size();++i) system_font.definition[28+i*2]=uint8_t(name[i]);
+	// DEFAULT_GUI_FONT is the 8 point dialog face; the fixed stock font is a 16 pixel monospace cell.
+	const auto font_face=[](DesktopFont &font,const char *face,int32_t height,int32_t weight,uint8_t pitch) {
+		for (auto &byte:font.definition) byte=0;
+		for (size_t i=0;i<4;++i) font.definition[i]=uint8_t(uint32_t(height)>>(i*8));
+		font.definition[16]=uint8_t(weight); font.definition[17]=uint8_t(weight>>8);
+		font.definition[23]=1; font.definition[27]=pitch;
+		for (size_t i=0;face[i];++i) font.definition[28+i*2]=uint8_t(face[i]);
+	};
+	font_face(gui_font,"MS Shell Dlg",-11,400,0x22);
+	font_face(fixed_font,"Courier New",-16,400,0x31);
 }
 
 const DesktopMetrics &DesktopObjects::nonclient_metrics() const { return window_metrics; }
@@ -152,6 +162,8 @@ bool DesktopObjects::erase(uint64_t handle)
 const DesktopFont *DesktopObjects::font(uint64_t handle) const
 {
 	if (handle==desktop_system_font) return &system_font;
+	if (handle==desktop_gui_font) return &gui_font;
+	if (handle==desktop_fixed_font) return &fixed_font;
 	const auto found=objects.find(handle);
 	return found==objects.end() ? nullptr : std::get_if<DesktopFont>(&found->second);
 }
@@ -173,9 +185,23 @@ uint64_t DesktopObjects::select_font(uint64_t handle,uint64_t selected_font)
 	return previous;
 }
 
+uint32_t DesktopObjects::set_dc_brush_color(uint32_t color)
+{
+	const auto previous=stock_brushes[6].color;
+	stock_brushes[6].color=color;
+	return previous;
+}
+
+uint32_t DesktopObjects::set_dc_pen_color(uint32_t color)
+{
+	const auto previous=stock_pens[3].color;
+	stock_pens[3].color=color;
+	return previous;
+}
+
 bool DesktopObjects::delete_font(uint64_t handle)
 {
-	if (handle==desktop_system_font) return true;
+	if (handle==desktop_system_font || handle==desktop_gui_font || handle==desktop_fixed_font) return true;
 	const auto found=objects.find(handle);
 	if (found==objects.end()) return false;
 	auto *record=std::get_if<DesktopFont>(&found->second);

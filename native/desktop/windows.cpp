@@ -1,5 +1,6 @@
 #include <iostream>
 #include "windows.h"
+#include "nt/text.h"
 #include "brush.h"
 #include "nt/nls.h"
 
@@ -19,8 +20,24 @@ static uint64_t read(std::span<const uint8_t> bytes,size_t at,size_t width);
 NativeWindows::NativeWindows(NativeProcess &process, NativeEnvironment &environment, DesktopObjects &objects)
 	: process(process), environment(environment), objects(objects), deadline(std::chrono::steady_clock::now()) {}
 
+void NativeWindows::dump_windows()
+{
+	if (std::getenv("RAVEN_DUMP_WINDOWS")) {
+		for (const auto handle : objects.window_handles()) {
+			const auto *window=objects.window(handle);
+			const auto *definition=objects.window_class(window->class_id);
+			std::cerr << "window " << std::hex << handle << std::dec << " " << (definition ? definition->name : "?") << " parent=" << std::hex << window->parent << std::dec
+				<< " style=" << std::hex << window->style << " ex=" << window->ex_style << std::dec << " visible=" << window->visible
+				<< " outer=" << window->outer.left << "," << window->outer.top << "," << window->outer.right << "," << window->outer.bottom
+				<< " client=" << window->x << "," << window->y << "," << window->width << "x" << window->height
+				<< " title=" << to_utf8(window->title) << "\n";
+		}
+	}
+}
+
 void NativeWindows::shutdown()
 {
+	dump_windows();
 	try { flush_dirty(); } catch (...) {}
 	for (const auto handle : objects.window_handles()) {
 		const auto *window=objects.window(handle);
@@ -99,6 +116,20 @@ void NativeWindows::drawing(uint64_t handle)
 	if (handle==desktop) return;
 	const auto *window=objects.window(handle);
 	if (window && objects.window_visible(handle)) dirty_roots.insert(objects.window_root(handle));
+}
+
+bool NativeWindows::input_ready()
+{
+	flush_dirty();
+	caret_idle();
+	scroll_idle();
+	if (presentation.poll)
+		for (const auto &event : presentation.poll(std::chrono::milliseconds(0)))
+			receive(event);
+	if (!messages.empty() || quit)
+		return true;
+	post_due_timers();
+	return !messages.empty() || objects.invalid_window(0);
 }
 
 void NativeWindows::flush_dirty()
@@ -337,6 +368,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		}
 		const auto paint=(!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f) ? objects.invalid_window(window) : 0;
 		if (paint) {
+			if (std::getenv("RAVEN_TRACE_PAINT")) std::cerr << "paint " << std::hex << paint << std::dec << "\n";
 			std::vector<uint8_t> bytes(layout.size);
 			put(bytes,0,paint,layout.pointer); put(bytes,layout.message,0x0f,4); put(bytes,layout.time,message_time(),4);
 			process.write_memory(args[0],bytes);
@@ -345,6 +377,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		if (!blocking) return 0;
 		if (std::chrono::steady_clock::now()>=deadline) throw NativeResult{NativeStop::timeout,0,0,0};
 		if (yield_hook && yield_hook()) continue;
+		if (std::getenv("RAVEN_DUMP_WINDOWS") && !dumped && std::chrono::steady_clock::now()-started>std::chrono::seconds(9)) { dumped=true; dump_windows(); }
 		caret_idle();
 		scroll_idle();
 		flush_dirty();
@@ -395,6 +428,8 @@ uint64_t NativeWindows::copy_window_text(uint64_t handle,uint64_t output,uint64_
 
 uint16_t NativeWindows::atom(uint64_t name, uint64_t instance)
 {
+	// The predefined system class atoms 0x8000..0x8004 name the classes "#32768".."#32772".
+	if (name>=0x8000 && name<=0x8004) return objects.find_class(instance,"#"+std::to_string(name));
 	if (name && name<=UINT16_MAX) {
 		return objects.find_class(instance,uint16_t(name));
 	}
@@ -685,7 +720,7 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 		if (child) parent_notify(handle,1);
 		if (!objects.window(handle)) return 0;
 		if (style & 0x10000000U) {
-			auto *window=objects.window(handle);window->visible=true;objects.update_window_dcs(handle);
+			auto *window=objects.window(handle);window->visible=true;objects.update_window_dcs(child ? window->parent : handle);
 			if (objects.window_visible(handle)) present(handle);
 			if (!objects.invalidate(handle,{0,0,window->width,window->height},true)) throw uint32_t(8);
 		}

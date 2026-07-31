@@ -41,6 +41,9 @@ struct DesktopBitmap {
 	bool dib_section = false;
 	// Host view of the guest-visible pixels; guest-backed bitmaps always carry one.
 	std::shared_ptr<SharedPixels> shared{};
+	// DIB sections keep the format their creator asked for: bytes per row, and the color table of indexed depths (COLORREF).
+	uint32_t stride = 0;
+	std::vector<uint32_t> palette{};
 	std::span<uint8_t> pixels() { return shared ? std::span<uint8_t>(shared->data(), shared->size()) : std::span<uint8_t>(bits); }
 	std::span<const uint8_t> pixels() const { return shared ? std::span<const uint8_t>(shared->data(), shared->size()) : std::span<const uint8_t>(bits); }
 };
@@ -51,6 +54,8 @@ struct DesktopFont {
 };
 
 inline constexpr uint64_t desktop_system_font = 0xfffe;
+inline constexpr uint64_t desktop_gui_font = 0xfffd;
+inline constexpr uint64_t desktop_fixed_font = 0xfffc;
 inline constexpr uint64_t desktop_stock_brush = 0xfff0;
 inline constexpr uint64_t desktop_system_brush = 0xffc0;
 inline constexpr uint64_t desktop_stock_pen = 0xffb0;
@@ -219,6 +224,9 @@ public:
 	bool select_clip(uint64_t dc,std::optional<DesktopRegion> region);
 	const DesktopFont *font(uint64_t handle) const;
 	uint64_t select_font(uint64_t dc, uint64_t font);
+	// SetDCBrushColor and SetDCPenColor recolor the shared stock DC brush and pen; the previous color is returned.
+	uint32_t set_dc_brush_color(uint32_t color);
+	uint32_t set_dc_pen_color(uint32_t color);
 	bool delete_font(uint64_t font);
 	const DesktopBrush *brush(uint64_t handle) const;
 	uint32_t system_color(int32_t index) const;
@@ -281,10 +289,10 @@ private:
 	DesktopMetrics window_metrics;
 	// Immutable default bitmap identity, shared by all memory DCs in this owner.
 	DesktopBitmap default_bitmap{1,1,1,{0,0},0,true,true};
-	DesktopFont system_font;
+	DesktopFont system_font,gui_font,fixed_font;
 	std::array<DesktopBrush,31> system_brushes{};
-	std::array<DesktopBrush,6> stock_brushes{{{0xffffff},{0xc0c0c0},{0x808080},{0x404040},{0},{0,true}}};
-	std::array<DesktopPen,3> stock_pens{{{0xffffff},{0},{0,true}}};
+	std::array<DesktopBrush,7> stock_brushes{{{0xffffff},{0xc0c0c0},{0x808080},{0x404040},{0},{0,true},{0xffffff}}};
+	std::array<DesktopPen,4> stock_pens{{{0xffffff},{0},{0,true},{0}}};
 	bool font_selected(uint64_t handle) const;
 	bool brush_selected(uint64_t handle) const;
 	bool pen_selected(uint64_t handle) const;

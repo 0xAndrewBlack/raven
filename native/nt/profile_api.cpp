@@ -63,6 +63,22 @@ std::optional<std::u16string> lookup(const std::filesystem::path &file, std::u16
 	return std::nullopt;
 }
 
+
+std::vector<std::u16string> section_names(const std::filesystem::path &file)
+{
+	std::vector<std::u16string> names;
+	std::ifstream input(file, std::ios::binary);
+	std::string line;
+	while (input && std::getline(input, line)) {
+		const auto text = trim(widen(line));
+		if (text.empty() || text[0] != u'[')
+			continue;
+		if (const auto close = text.find(u']'); close != text.npos)
+			names.push_back(trim(text.substr(1, close - 1)));
+	}
+	return names;
+}
+
 }
 
 NativeProfile::NativeProfile(NativeProcess &process, NativeEnvironment &environment, const NativePrefix &prefix)
@@ -83,13 +99,38 @@ std::optional<std::u16string> NativeProfile::text(uint64_t address) const
 	throw std::runtime_error("native profile string exceeds policy limit");
 }
 
-bool NativeProfile::dispatch(std::string_view name)
+bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &args, uint64_t &result)
 {
+	if (name == "GetPrivateProfileSectionNamesW") {
+		std::u16string joined;
+		if (const auto file_name = text(args[2]))
+			if (const auto path = prefix.resolve(encode_utf8(*file_name)))
+				for (const auto &entry : section_names(*path))
+					joined += entry + u'\0';
+		const size_t capacity = uint32_t(args[1]);
+		result = 0;
+		if (capacity >= 2) {
+			// A buffer that is too small is filled and ends in two terminators.
+			const bool fits = joined.size() + 1 <= capacity;
+			if (!fits)
+				joined.resize(capacity - 2);
+			joined.push_back(u'\0');
+			if (!fits)
+				joined.push_back(u'\0');
+			std::vector<uint8_t> bytes;
+			for (const auto character : joined) {
+				bytes.push_back(uint8_t(character));
+				bytes.push_back(uint8_t(character >> 8));
+			}
+			process.write_memory(args[0], bytes);
+			result = fits ? (joined.empty() ? 0 : joined.size() - 1) : capacity - 2;
+		}
+		return true;
+	}
 	const bool integer = name == "GetPrivateProfileIntW";
 	if (!integer && name != "GetPrivateProfileStringW")
 		return false;
-	const auto args = process.api_arguments(integer ? 4 : 6);
-	uint64_t result = 0;
+	result = 0;
 	try {
 		const auto section = text(args[0]), key = text(args[1]), file_name = text(integer ? args[3] : args[5]);
 		std::optional<std::u16string> value;
@@ -131,8 +172,37 @@ bool NativeProfile::dispatch(std::string_view name)
 		environment.set_last_error(998);
 		result = 0;
 	}
+	return true;
+}
+
+bool NativeProfile::dispatch(std::string_view name)
+{
+	const uint32_t count = name == "GetPrivateProfileSectionNamesW" ? 3 : name == "GetPrivateProfileIntW" ? 4 : 6;
+	if (name != "GetPrivateProfileSectionNamesW" && name != "GetPrivateProfileIntW" && name != "GetPrivateProfileStringW")
+		return false;
+	uint64_t result = 0;
+	execute(name, process.api_arguments(count), result);
 	process.return_api(result);
 	return true;
+}
+
+void register_profile_api(ApiRegistry &registry, NativeProfile &profile)
+{
+	registry.add("GetPrivateProfileSectionNamesW", 3, [&profile](ApiCall &call) {
+		uint64_t result = 0;
+		profile.execute("GetPrivateProfileSectionNamesW", {call[0], call[1], call[2]}, result);
+		call.ret(result);
+	});
+	registry.add("GetPrivateProfileIntW", 4, [&profile](ApiCall &call) {
+		uint64_t result = 0;
+		profile.execute("GetPrivateProfileIntW", {call[0], call[1], call[2], call[3]}, result);
+		call.ret(result);
+	});
+	registry.add("GetPrivateProfileStringW", 6, [&profile](ApiCall &call) {
+		uint64_t result = 0;
+		profile.execute("GetPrivateProfileStringW", {call[0], call[1], call[2], call[3], call[4], call[5]}, result);
+		call.ret(result);
+	});
 }
 
 }

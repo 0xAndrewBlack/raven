@@ -336,7 +336,7 @@ uint64_t NativeDesktop::get_object(std::span<const uint64_t> args,bool ansi)
 	std::array<uint8_t, 32> bytes{};
 	put(bytes, 4, bitmap->width);
 	put(bytes, 8, bitmap->height);
-	put(bytes, 12, bitmap->address ? size_t(bitmap->width) * 4 : bitmap->bits.size() / bitmap->height);
+	put(bytes, 12, bitmap->stride ? bitmap->stride : bitmap->address ? size_t(bitmap->width) * 4 : bitmap->bits.size() / bitmap->height);
 	put(bytes, 16, 1, 2);
 	put(bytes, 18, bitmap->depth, 2);
 	put(bytes, 24, bitmap->dib_section ? bitmap->address : 0, 8);
@@ -347,8 +347,8 @@ uint64_t NativeDesktop::get_object(std::span<const uint64_t> args,bool ansi)
 		put(section,36,bitmap->width);
 		put(section,40,bitmap->height);
 		put(section,44,1,2);
-		put(section,46,32,2);
-		put(section,52,size_t(bitmap->width)*bitmap->height*4);
+		put(section,46,bitmap->depth,2);
+		put(section,52,size_t(bitmap->stride ? bitmap->stride : bitmap->width*4)*bitmap->height);
 		process.write_memory(args[2],section);
 		return section.size();
 	}

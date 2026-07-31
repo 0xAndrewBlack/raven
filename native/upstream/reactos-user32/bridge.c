@@ -394,6 +394,18 @@ const char *SPY_GetMsgName(UINT message, HWND window)
 	return "";
 }
 
+/* No input method exists: contexts cannot be created and every composition request reports that. */
+static HIMC WINAPI no_context(HWND window) { return NULL; }
+static BOOL WINAPI no_release(HWND window, HIMC context) { return TRUE; }
+static BOOL WINAPI no_ime(HKL layout) { return FALSE; }
+static LONG WINAPI no_string(HIMC context, DWORD index, LPVOID buffer, DWORD length) { return IMM_ERROR_NODATA; }
+static BOOL WINAPI no_window(HIMC context, LPCOMPOSITIONFORM form) { return FALSE; }
+static BOOL WINAPI no_get_window(HIMC context, LPCOMPOSITIONFORM form) { return FALSE; }
+static BOOL WINAPI no_font(HIMC context, LPLOGFONTW font) { return FALSE; }
+static PINPUTCONTEXT WINAPI no_lock(HIMC context) { return NULL; }
+static BOOL WINAPI no_unlock(HIMC context) { return FALSE; }
+static BOOL WINAPI no_notify(HIMC context, DWORD action, DWORD index, DWORD value) { return FALSE; }
+
 BOOL WINAPI RavenInitControls(VOID);
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
@@ -408,6 +420,16 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 			DeleteObject(pattern);
 		}
 		gpsi->PUSIFlags = PUSIF_KEYBOARDCUES;
+		gImmApiEntries.pImmGetContext = (FN_ImmGetContext)no_context;
+		gImmApiEntries.pImmReleaseContext = (FN_ImmReleaseContext)no_release;
+		gImmApiEntries.pImmIsIME = (FN_ImmIsIME)no_ime;
+		gImmApiEntries.pImmGetCompositionStringW = (FN_ImmGetCompositionStringW)no_string;
+		gImmApiEntries.pImmSetCompositionWindow = (FN_ImmSetCompositionWindow)no_window;
+		gImmApiEntries.pImmGetCompositionWindow = (FN_ImmGetCompositionWindow)no_get_window;
+		gImmApiEntries.pImmSetCompositionFontW = (FN_ImmSetCompositionFontW)no_font;
+		gImmApiEntries.pImmLockIMC = (FN_ImmLockIMC)no_lock;
+		gImmApiEntries.pImmUnlockIMC = (FN_ImmUnlockIMC)no_unlock;
+		gImmApiEntries.pImmNotifyIME = (FN_ImmNotifyIME)no_notify;
 		/* Registering here, ahead of every other library, lets later libraries subclass the built-in classes. */
 		if (!RavenInitControls())
 			return FALSE;

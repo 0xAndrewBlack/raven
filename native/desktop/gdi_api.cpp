@@ -360,6 +360,32 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 		});
 	});
 
+	// ---- stock objects ----
+	registry.add("GetStockObject", 1, [=, this](ApiCall &call) {
+		const uint32_t index = call.u32(0);
+		if (index < 6) call.ret(desktop_stock_brush + index);
+		else if (index <= 8) call.ret(desktop_stock_pen + index - 6);
+		else if (index == 18) call.ret(desktop_stock_brush + 6);
+		else if (index == 19) call.ret(desktop_stock_pen + 3);
+		else if (index == 10 || index == 11 || index == 16) call.ret(desktop_fixed_font);
+		else if (index == 12 || index == 17 || index == 14) call.ret(desktop_gui_font);
+		else if (index == 13) call.ret(desktop_system_font);
+		else if (index == 15) call.ret(0x7fff0001);
+		else call.fail(87);
+	});
+	registry.add("SetDCBrushColor", 2, [=, this](ApiCall &call) {
+		guarded(call, clr_invalid, [&] {
+			require_dc(call, 0);
+			call.ret(objects.set_dc_brush_color(call.u32(1) & 0xffffff));
+		});
+	});
+	registry.add("SetDCPenColor", 2, [=, this](ApiCall &call) {
+		guarded(call, clr_invalid, [&] {
+			require_dc(call, 0);
+			call.ret(objects.set_dc_pen_color(call.u32(1) & 0xffffff));
+		});
+	});
+
 	// ---- brushes and pens ----
 	registry.add("CreateHatchBrush", 2, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {

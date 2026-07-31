@@ -9,6 +9,7 @@
 #include "include/ports/SkFontMgr_empty.h"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include <initializer_list>
 #include <stdexcept>
 
@@ -206,8 +207,92 @@ static std::vector<SkGlyphID> logical_glyphs(const SkFont &font,std::span<const 
 	return result;
 }
 
+
+// The Marlett symbol face is drawn procedurally: frame parts, check marks, arrows and caption glyphs on a square cell.
+static bool is_marlett(std::span<const uint8_t,92> definition)
+{
+	static const char name[]="marlett";
+	for (size_t i=0;i<8;++i) {
+		auto c=field(definition,28+i*2,2);
+		if (c>='A' && c<='Z') c+=32;
+		if (c!=uint32_t(uint8_t(name[i]))) return false;
+	}
+	return true;
+}
+
+static int32_t marlett_size(std::span<const uint8_t,92> definition)
+{
+	const auto height=int32_t(field(definition,0));
+	return std::max<int32_t>(height<0 ? -height : height,4);
+}
+
+static void marlett_glyph(std::vector<uint8_t> &alpha,uint32_t stride,int32_t left,int32_t top,int32_t size,char16_t glyph,uint32_t width,uint32_t height)
+{
+	const auto put=[&](int32_t x,int32_t y) {
+		x+=left; y+=top;
+		if (x>=0 && y>=0 && uint32_t(x)<width && uint32_t(y)<height) alpha[size_t(y)*stride+uint32_t(x)]=255;
+	};
+	const auto box=[&](int32_t x0,int32_t y0,int32_t x1,int32_t y1) { for (int32_t y=y0;y<y1;++y) for (int32_t x=x0;x<x1;++x) put(x,y); };
+	const auto line=[&](int32_t x0,int32_t y0,int32_t x1,int32_t y1,int32_t thickness) {
+		const int32_t dx=std::abs(x1-x0),dy=std::abs(y1-y0),sx=x0<x1 ? 1 : -1,sy=y0<y1 ? 1 : -1;
+		int32_t error=dx-dy;
+		for (;;) {
+			box(x0,y0,x0+thickness,y0+thickness);
+			if (x0==x1 && y0==y1) break;
+			const int32_t twice=2*error;
+			if (twice>-dy) { error-=dy; x0+=sx; }
+			if (twice<dx) { error+=dx; y0+=sy; }
+		}
+	};
+	const int32_t s=size;
+	const int32_t thick=std::max(1,s/8);
+	// Distance of a cell pixel from the circle of the given diameter, used by the radio button rings.
+	const auto ring=[&](int32_t inset,bool upper_left,bool lower_right,bool fill) {
+		const double center=(s-1)/2.0,outer=(s-2*inset)/2.0;
+		for (int32_t y=0;y<s;++y)
+			for (int32_t x=0;x<s;++x) {
+				const double dx=x-center,dy=y-center,distance=std::sqrt(dx*dx+dy*dy);
+				const bool in_disc=distance<=outer-0.2,on_ring=in_disc && distance>outer-1.4;
+				const bool toward_upper_left=(dx+dy)<0;
+				if (fill ? in_disc : (on_ring && (toward_upper_left ? upper_left : lower_right))) put(x,y);
+			}
+	};
+	switch (glyph) {
+	case 'c': line(0,0,s-2,0,1); line(0,0,0,s-2,1); break;
+	case 'd': line(0,s-1,s-1,s-1,1); line(s-1,0,s-1,s-1,1); break;
+	case 'e': line(1,1,s-3,1,1); line(1,1,1,s-3,1); break;
+	case 'f': line(1,s-2,s-2,s-2,1); line(s-2,1,s-2,s-2,1); break;
+	case 'g': box(2,2,s-2,s-2); break;
+	case 'b': line(s/5,s/2,s*2/5,s*7/10,thick); line(s*2/5,s*7/10,s*4/5,s*3/10,thick); break;
+	case 'j': ring(0,false,true,false); break;
+	case 'k': ring(0,true,false,false); break;
+	case 'l': ring(1,false,true,false); break;
+	case 'm': ring(1,true,false,false); break;
+	case 'n': ring(2,false,false,true); break;
+	case 'i': case 'h': ring(s/4,false,false,true); break;
+	case 'a': line(s/5,s/2,s*2/5,s*7/10,thick); line(s*2/5,s*7/10,s*4/5,s*3/10,thick); break;
+	case 'r': line(s/5,s/5,s*4/5-thick,s*4/5-thick,thick); line(s*4/5-thick,s/5,s/5,s*4/5-thick,thick); break;
+	case '0': box(s/5,s*3/4,s*3/5,s*3/4+std::max(2,thick)); break;
+	case '1': box(s/5,s/5,s*4/5,s/5+std::max(2,thick)); line(s/5,s/5,s/5,s*4/5,1); line(s*4/5-1,s/5,s*4/5-1,s*4/5,1); line(s/5,s*4/5-1,s*4/5-1,s*4/5-1,1); break;
+	case '2': box(s*2/5,s/5,s*4/5,s/5+std::max(2,thick)); line(s*4/5-1,s/5,s*4/5-1,s*3/5,1); line(s/5,s*2/5,s*3/5,s*2/5,2); line(s/5,s*2/5,s/5,s*4/5,1); line(s*3/5-1,s*2/5,s*3/5-1,s*4/5,1); line(s/5,s*4/5-1,s*3/5,s*4/5-1,1); break;
+	case '3': for (int32_t i=0;i<=s/4;++i) line(s*5/8-i,s/2-i,s*5/8-i,s/2+i,1); break;
+	case '4': for (int32_t i=0;i<=s/4;++i) line(s*3/8+i,s/2-i,s*3/8+i,s/2+i,1); break;
+	case '5': for (int32_t i=0;i<=s/4;++i) line(s/2-i,s*5/8-i,s/2+i,s*5/8-i,1); break;
+	case '6': for (int32_t i=0;i<=s/4;++i) line(s/2-i,s*3/8+i,s/2+i,s*3/8+i,1); break;
+	case 'o': case 'p': case 'x': case 'y':
+		// Size grip: diagonal dotted stripes toward the lower right corner.
+		for (int32_t k=1;k<=3;++k) line(s-1-k*s/4,s-1,s-1,s-1-k*s/4,1);
+		break;
+	default: break;
+	}
+}
+
 TextMetrics TextRenderer::logical_metrics(std::span<const uint8_t,92> definition)
 {
+	if (is_marlett(definition)) {
+		const auto size=marlett_size(definition);
+		return {size,size,0,0,0,size,size,32,255,31,32,0x32};
+	}
 	// Fonts inside the qualified subset keep their measured OS/2 metrics.
 	try { return metrics(definition); } catch (const uint32_t &) {}
 	auto font=state->logical(definition); SkFontMetrics source; font.getMetrics(&source);
@@ -225,6 +310,12 @@ TextMetrics TextRenderer::logical_metrics(std::span<const uint8_t,92> definition
 
 std::vector<int32_t> TextRenderer::logical_advances(std::span<const uint8_t,92> definition,std::span<const uint16_t> text)
 {
+	if (is_marlett(definition)) {
+		std::vector<int32_t> result;
+		const auto size=marlett_size(definition);
+		for (size_t i=0;i<text.size();++i) result.push_back(int32_t((i+1)*size));
+		return result;
+	}
 	auto font=state->logical(definition);
 	const auto ids=logical_glyphs(font,text);
 	std::vector<SkScalar> widths(ids.size(),0);
@@ -243,6 +334,13 @@ std::vector<uint8_t> TextRenderer::render(std::span<const uint8_t,92> definition
 	uint32_t width,uint32_t height,int32_t origin_x,int32_t origin_y,std::span<const int32_t> offsets)
 {
 	if (!width || !height || width>16384 || height>16384 || uint64_t(width)*height>32*1024*1024) throw uint32_t(87);
+	if (is_marlett(definition)) {
+		std::vector<uint8_t> alpha(size_t(width)*height);
+		const auto size=marlett_size(definition);
+		for (size_t i=0;i<text.size();++i)
+			marlett_glyph(alpha,width,(offsets.empty() ? int32_t(i)*size : offsets[i])+origin_x,origin_y,size,char16_t(text[i]),width,height);
+		return alpha;
+	}
 	auto font=state->logical(definition);
 	const auto ids=logical_glyphs(font,text);
 	std::vector<uint8_t> alpha(size_t(width)*height);
