@@ -55,6 +55,12 @@ const DesktopMenu *DesktopObjects::menu(uint64_t handle) const
 	return found==objects.end() ? nullptr : std::get_if<DesktopMenu>(&found->second);
 }
 
+DesktopMenu *DesktopObjects::edit_menu(uint64_t handle)
+{
+	const auto found=objects.find(handle);
+	return found==objects.end() ? nullptr : std::get_if<DesktopMenu>(&found->second);
+}
+
 uint64_t DesktopObjects::load_menu(const MenuTemplate &definition)
 {
 	const auto load=[&](auto &&self,const std::vector<MenuTemplateItem> &items,uint32_t help,unsigned depth)->uint64_t {
@@ -428,5 +434,13 @@ bool DesktopObjects::selected(uint64_t bitmap) const
 size_t DesktopObjects::count() const { return objects.size(); }
 size_t DesktopObjects::bytes() const { return used; }
 IconDisplay DesktopObjects::display() const { return icon_display; }
+
+#ifdef RAVEN_SKIA
+TextRenderer &DesktopObjects::text()
+{
+	if (!text_engine) text_engine=std::make_unique<TextRenderer>(RAVEN_FONT_DIRECTORY);
+	return *text_engine;
+}
+#endif
 
 }

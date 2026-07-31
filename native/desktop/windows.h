@@ -51,7 +51,28 @@ private:
 	void post(uint64_t window,uint32_t message,uint64_t wparam,uint64_t lparam);
 	uint64_t surface_dc(uint64_t window);
 	bool tree_dispatch(std::string_view name);
+	// Classic frame geometry in window-relative coordinates, derived from AdjustWindowRectEx rules.
+	struct FrameLayout {
+		int32_t border, caption_height, menu_height;
+		bool edge;
+		DesktopRect caption, menu_bar, close, maximize, minimize, icon;
+	};
+	FrameLayout frame_layout(const DesktopWindow &window) const;
+	std::vector<DesktopRect> menu_bar_items(const DesktopWindow &window);
+	void paint_nonclient(uint64_t window);
+	uint64_t nonclient_hit(const DesktopWindow &window,int32_t x,int32_t y) const;
+	// Menu bar item currently shown as pressed, and the window that owns it.
+	std::optional<size_t> open_menu_item;
+	uint64_t open_menu_window=0;
 	bool system_dispatch(std::string_view name);
+	// Mouse capture and timers belong to the initial guest thread's input state.
+	uint64_t capture=0;
+	struct Timer { uint64_t window,id,procedure; uint32_t interval; std::chrono::steady_clock::time_point due; };
+	std::vector<Timer> timers;
+	uint64_t next_timer_id=0x1000;
+	void post_due_timers();
+	void recalculate_client(uint64_t window);
+	void reshape(uint64_t window,DesktopRect outer);
 	uint64_t desktop_window();
 	uint64_t desktop=0;
 	struct Modifiers { bool shift,control,alt; };

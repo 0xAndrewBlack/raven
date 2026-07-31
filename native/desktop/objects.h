@@ -7,7 +7,11 @@
 #include "colors.h"
 #include "menu.h"
 #include <array>
+#include <memory>
 #include <optional>
+#ifdef RAVEN_SKIA
+#include "graphics/text.h"
+#endif
 
 #include <map>
 #include <variant>
@@ -149,6 +153,7 @@ public:
 	uint64_t add(Object object);
 	bool erase(uint64_t handle);
 	const DesktopMenu *menu(uint64_t handle) const;
+	DesktopMenu *edit_menu(uint64_t handle);
 	// Accelerator tables live outside the object map; their handles never collide with GDI or window handles.
 	uint64_t add_accelerators(std::vector<DesktopAccelerator> table);
 	const std::vector<DesktopAccelerator> *accelerators(uint64_t handle) const;
@@ -198,12 +203,19 @@ public:
 	size_t count() const;
 	size_t bytes() const;
 	IconDisplay display() const;
+#ifdef RAVEN_SKIA
+	// One glyph engine serves every GDI and nonclient text operation of the process.
+	TextRenderer &text();
+#endif
 	const DesktopMetrics &nonclient_metrics() const;
 
 private:
 	std::map<uint64_t, Object> objects;
 	std::map<uint16_t,DesktopClass> classes;
 	std::map<uint64_t,std::vector<DesktopAccelerator>> accelerator_tables;
+#ifdef RAVEN_SKIA
+	std::unique_ptr<TextRenderer> text_engine;
+#endif
 	uint32_t next_atom = 0xc000;
 	uint32_t next_class = 1;
 	uint64_t next = 0x10000;

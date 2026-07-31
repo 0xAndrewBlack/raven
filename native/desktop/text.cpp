@@ -32,9 +32,8 @@ bool NativeDesktop::text_dispatch(std::string_view name)
 		}
 		{
 			const auto *font=objects.font(dc->font); if (!font) throw uint32_t(6);
-			if (!text_renderer) text_renderer=std::make_unique<TextRenderer>(RAVEN_FONT_DIRECTORY);
 			if (name=="GetTextMetricsW") {
-				const auto info=text_renderer->metrics(font->definition); std::array<uint8_t,60> bytes{};
+				const auto info=objects.text().metrics(font->definition); std::array<uint8_t,60> bytes{};
 				put(bytes,0,uint32_t(info.height)); put(bytes,4,uint32_t(info.ascent)); put(bytes,8,uint32_t(info.descent));
 				put(bytes,12,uint32_t(info.internal_leading)); put(bytes,16,uint32_t(info.external_leading));
 				put(bytes,20,uint32_t(info.average_width)); put(bytes,24,uint32_t(info.maximum_width)); put(bytes,28,400);
@@ -47,12 +46,12 @@ bool NativeDesktop::text_dispatch(std::string_view name)
 				const auto source=count ? process.read_memory(args[1],size_t(count)*2) : std::vector<uint8_t>{};
 				std::vector<uint16_t> text(size_t(count),0);
 				for (size_t i=0;i<text.size();++i) text[i]=uint16_t(source[i*2]|(uint16_t(source[i*2+1])<<8));
-				const auto extent=text_renderer->extent(font->definition,text);
+				const auto extent=objects.text().extent(font->definition,text);
 				if (name!="GetTextExtentExPointW") {
 					std::array<uint8_t,8> bytes{}; put(bytes,0,uint32_t(extent.width)); put(bytes,4,uint32_t(extent.height));
 					process.write_memory(args[3],bytes); result=1;
 				}else{
-					const auto widths=text_renderer->advances(font->definition,text);size_t fit=widths.size();
+					const auto widths=objects.text().advances(font->definition,text);size_t fit=widths.size();
 					if(args[4]){fit=0;while(fit<widths.size() && uint32_t(widths[fit])<=uint32_t(args[3]))++fit;}
 					process.validate_write_memory(args[6],8);if(args[4])process.validate_write_memory(args[4],4);
 					if(args[5] && !widths.empty())process.validate_write_memory(args[5],widths.size()*4);
@@ -87,10 +86,9 @@ uint64_t NativeDesktop::text_output(std::span<const uint64_t> args)
 	int64_t advance=0;int32_t height=0;
 	if(count){
 		const auto *font=objects.font(dc->font);if(!font)throw uint32_t(6);
-		if(!text_renderer)text_renderer=std::make_unique<TextRenderer>(RAVEN_FONT_DIRECTORY);
 		const auto bytes=process.read_memory(args[5],size_t(count)*2);std::vector<uint16_t> text(count);
 		for(size_t i=0;i<text.size();++i)text[i]=uint16_t(bytes[i*2]|(uint16_t(bytes[i*2+1])<<8));
-		const auto extent=text_renderer->extent(font->definition,text);advance=extent.width;height=extent.height;
+		const auto extent=objects.text().extent(font->definition,text);advance=extent.width;height=extent.height;
 		std::vector<std::array<int32_t,2>> positions;
 		if(args[7]){
 			const auto steps=process.read_memory(args[7],size_t(count)*4);positions.reserve(count);advance=0;
@@ -103,7 +101,7 @@ uint64_t NativeDesktop::text_output(std::span<const uint64_t> args)
 			if(advance<INT32_MIN || advance>INT32_MAX)throw uint32_t(120);
 		}
 		if(x>=INT32_MIN && x<=INT32_MAX && y>=INT32_MIN && y<=INT32_MAX)
-			mask=text_renderer->mask(font->definition,text,bitmap->width,bitmap->height,int32_t(x),int32_t(y),positions);
+			mask=objects.text().mask(font->definition,text,bitmap->width,bitmap->height,int32_t(x),int32_t(y),positions);
 	}
 	auto pixels=bitmap->address ? process.read_memory(bitmap->address,size_t(bitmap->width)*bitmap->height*4) : bitmap->bits;
 	bool changed=false;

@@ -80,6 +80,7 @@ void NativeWindows::present(uint64_t handle)
 	if (!handle) throw uint32_t(1400);
 	if (!presentation.present) throw uint32_t(120);
 	surface_dc(handle);
+	paint_nonclient(handle);
 	const auto *window=objects.window(handle);
 	const auto *bitmap=objects.bitmap(window->bitmap);
 	const auto pixels=process.read_memory(bitmap->address,size_t(bitmap->width)*bitmap->height*4);
@@ -225,12 +226,13 @@ void NativeWindows::receive(const DesktopEvent &event)
 	if (x<INT32_MIN || x>INT32_MAX || y<INT32_MIN || y>INT32_MAX)
 		throw std::runtime_error("guest cursor coordinates overflow");
 	mouse_buttons=buttons; cursor_x=int32_t(x); cursor_y=int32_t(y);
-	const auto target=pointer_child(event.window,int32_t(x),int32_t(y));window=objects.window(target);
+	if (capture && !objects.window(capture)) capture=0;
+	const auto target=capture ? capture : pointer_child(event.window,int32_t(x),int32_t(y));window=objects.window(target);
 	const bool inset=window->x!=window->outer.left || window->y!=window->outer.top ||
 		int64_t(window->width)!=int64_t(window->outer.right)-window->outer.left ||
 		int64_t(window->height)!=int64_t(window->outer.bottom)-window->outer.top;
 	const bool inside=x>=window->outer.left && y>=window->outer.top && x<window->outer.right && y<window->outer.bottom;
-	const auto hit=inset && inside ? send(target,0x84,0,uint16_t(x)|(uint64_t(uint16_t(y))<<16)) : 1;
+	const auto hit=!capture && inset && inside ? send(target,0x84,0,uint16_t(x)|(uint64_t(uint16_t(y))<<16)) : 1;
 	window=objects.window(target);
 	if (!window || !objects.window_visible(target) || !hit) return;
 	if (hit!=1) throw std::runtime_error("nonclient pointer dispatch requires qualification");
@@ -289,6 +291,12 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 			if (value.message==0x100 || value.message==0x101) key_translation=value;
 			if (flags & 1U) { if (found!=messages.end()) messages.erase(found); else quit.reset(); }
 			return blocking && value.message==0x12 ? 0 : 1;
+		}
+		// WM_TIMER ranks below input and paint, so it is only generated when neither is waiting.
+		if (found==messages.end() && !quit) {
+			const auto before=messages.size();
+			if (!objects.invalid_window(window)) post_due_timers();
+			if (messages.size()!=before) continue;
 		}
 		const auto paint=(!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f) ? objects.invalid_window(window) : 0;
 		if (paint) {
@@ -476,6 +484,13 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 		if (changed && target && leased) drawing(target);
 		return 1;
 	}
+	if (message==0x85) {
+		// The frame is repainted from window state each time the surface is presented.
+		if (objects.window_visible(args[0])) present(args[0]);
+		return 0;
+	}
+	if (message==0x84 && !window->parent && (frame_layout(*window).border || frame_layout(*window).caption_height || window->menu))
+		return nonclient_hit(*window,int16_t(uint16_t(args[3])),int16_t(uint16_t(args[3]>>16)));
 	if (message==0x84) {
 		const auto x=int16_t(uint16_t(args[3])),y=int16_t(uint16_t(args[3]>>16));
 		return x>=window->outer.left && y>=window->outer.top && x<window->outer.right && y<window->outer.bottom &&
@@ -499,7 +514,19 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 		process.write_memory(args[3],rect);
 		return 0;
 	}
+	if (message==0x112) {
+		// SC_CLOSE becomes WM_CLOSE; the other system commands need window state transitions that are not modeled.
+		if ((uint32_t(args[2]) & 0xfff0U)==0xf060U) { send(args[0],0x10,0,0); return 0; }
+		return 0;
+	}
+	if (message==0x21) return 1;
+	if (message==0x11) return 1;
 	if (!message || message==1 || message==2 || message==3 || message==5 || message==0x82 || message==0x18) return 0;
+	// Messages whose Windows default is "no action, result 0": cursor, activation notices, window-position notices,
+	// non-client mouse notices, capture loss, keyboard and timer/command traffic nobody consumed.
+	if (message==0x20 || message==0x16 || message==0x1c || message==0x24 || message==0x46 || message==0x47 || message==0x4e ||
+		message==0x7f || message==0x80 || (message>=0xa0 && message<=0xa9) || message==0x215 || (message>=0x100 && message<=0x109) ||
+		message==0x111 || message==0x113) return 0;
 	throw std::runtime_error("unsupported default window message "+std::to_string(message));
 }
 
@@ -571,7 +598,8 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 		if (!objects.window(handle)) { process.unmap_memory(scratch); return 0; }
 		const auto client=process.read_memory(scratch+rect_at,16);
 		const auto left=int32_t(uint32_t(read(client,0,4))),top=int32_t(uint32_t(read(client,4,4)));
-		const auto right=uint32_t(read(client,8,4)),bottom=uint32_t(read(client,12,4));
+		// A window smaller than its frame has an empty client area, not a negative one.
+		const auto right=uint32_t(std::max(int32_t(uint32_t(read(client,8,4))),left)),bottom=uint32_t(std::max(int32_t(uint32_t(read(client,12,4))),top));
 		if (int64_t(left)-x<INT32_MIN || int64_t(left)-x>INT32_MAX || int64_t(top)-y<INT32_MIN || int64_t(top)-y>INT32_MAX) {
 			send(handle,0x82,0,0);
 			throw uint32_t(120);
@@ -745,8 +773,16 @@ bool NativeWindows::dispatch(std::string_view name)
 					result=1;
 				} else if (message>=0x100 && message<=0x109) throw uint32_t(120);
 			} else if (read(bytes,0,layout.pointer)) {
-				if (message==0x113 && read(bytes,layout.lparam,layout.pointer)) throw uint32_t(120);
-				result=send(read(bytes,0,layout.pointer),message,read(bytes,layout.wparam,layout.pointer),read(bytes,layout.lparam,layout.pointer));
+				const auto target=read(bytes,0,layout.pointer);
+				if (message==0x113 && read(bytes,layout.lparam,layout.pointer)) {
+					// A timer with its own callback bypasses the window procedure.
+					if (!invoke) throw std::runtime_error("native window callbacks are not connected");
+					const uint64_t arguments[]{target,0x113,read(bytes,layout.wparam,layout.pointer),read(bytes,layout.time,4)};
+					const auto called=invoke(read(bytes,layout.lparam,layout.pointer),arguments);
+					if (called.stop!=NativeStop::returned) throw called;
+					result=0;
+				} else
+				result=send(target,message,read(bytes,layout.wparam,layout.pointer),read(bytes,layout.lparam,layout.pointer));
 			}
 		}
 		else if (registration) {
@@ -826,14 +862,20 @@ bool NativeWindows::dispatch(std::string_view name)
 			result=objects.window_visible(args[0]);
 		} else if (name=="ShowWindow") {
 			auto *window=objects.window(args[0]); if (!window) throw uint32_t(1400);
-			if (uint32_t(args[1])!=0 && uint32_t(args[1])!=5) throw uint32_t(120);
+			// SW_HIDE, SW_SHOWNORMAL, SW_SHOWNOACTIVATE, SW_SHOW, SW_SHOWNA and SW_SHOWDEFAULT; minimize/maximize states are not modeled.
+			const auto command=uint32_t(args[1]);
+			if (command!=0 && command!=1 && command!=4 && command!=5 && command!=8 && command!=10) throw uint32_t(120);
 			const auto previous=window->visible;
-			if (args[1] && (!window->parent || objects.window_visible(window->parent))) present(args[0]);
-			else if (!args[1] && previous && !window->parent && presentation.remove) presentation.remove(args[0]);
-			window=objects.window(args[0]); window->visible=uint32_t(args[1])!=0;
+			const bool show=command!=0;
+			if (show && (!window->parent || objects.window_visible(window->parent))) present(args[0]);
+			else if (!show && previous && !window->parent && presentation.remove) presentation.remove(args[0]);
+			window=objects.window(args[0]); window->visible=show;
 			window->style=(window->style & ~0x10000000U) | (window->visible ? 0x10000000U : 0);
 			objects.update_window_dcs(args[0]);
 			if (window->visible && !objects.invalidate(args[0],{0,0,window->width,window->height},true)) throw uint32_t(8);
+			// Showing a top-level window with an activating command also gives it the active state and keyboard focus.
+			if (show && !window->parent && (command==1 || command==5 || command==10) && objects.window(args[0])) set_focus(args[0]);
+			window=objects.window(args[0]);if (!window) throw uint32_t(1400);
 			if (!window->visible && previous && window->parent) {
 				const auto *parent=objects.window(window->parent);
 				if (!objects.invalidate(window->parent,{window->outer.left-parent->x,window->outer.top-parent->y,window->outer.right-parent->x,window->outer.bottom-parent->y},true)) throw uint32_t(8);

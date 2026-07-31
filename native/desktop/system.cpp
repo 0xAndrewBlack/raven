@@ -2,7 +2,9 @@
 #include "nt/nls.h"
 
 #include <algorithm>
+#include <array>
 #include <stdexcept>
+#include <sys/mman.h>
 
 namespace raven {
 
@@ -96,10 +98,106 @@ uint64_t NativeWindows::desktop_window()
 	return desktop;
 }
 
+// Re-runs WM_NCCALCSIZE for the current outer rectangle and adopts the client rectangle it answers.
+void NativeWindows::recalculate_client(uint64_t handle)
+{
+	auto *window = objects.window(handle);
+	if (!window)
+		throw uint32_t(1400);
+	const auto scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
+	DesktopRect client{};
+	bool resized = false;
+	int32_t old_width = window->width, old_height = window->height;
+	try {
+		std::array<uint8_t, 16> bytes{};
+		const int32_t values[4] = {window->outer.left, window->outer.top, window->outer.right, window->outer.bottom};
+		for (size_t index = 0; index < 4; ++index)
+			write_le(bytes, index * 4, uint32_t(values[index]), 4);
+		process.write_memory(scratch, bytes);
+		send(handle, 0x83, 0, scratch);
+		window = objects.window(handle);
+		if (!window)
+			throw std::runtime_error("window was destroyed during frame calculation");
+		const auto answer = process.read_memory(scratch, 16);
+		client = {int32_t(read_le(answer, 0, 4)), int32_t(read_le(answer, 4, 4)), int32_t(read_le(answer, 8, 4)), int32_t(read_le(answer, 12, 4))};
+	} catch (...) {
+		process.unmap_memory(scratch);
+		throw;
+	}
+	process.unmap_memory(scratch);
+	// A window too small for its frame has an empty client area, never a negative one.
+	client.right = std::max(client.right, client.left);
+	client.bottom = std::max(client.bottom, client.top);
+	window->x = client.left;
+	window->y = client.top;
+	window->width = client.right - client.left;
+	window->height = client.bottom - client.top;
+	resized = window->width != old_width || window->height != old_height;
+	objects.update_window_dcs(handle);
+	if (resized)
+		send(handle, 5, 0, uint16_t(window->width) | (uint64_t(uint16_t(window->height)) << 16));
+	if (objects.window(handle) && objects.window_visible(handle)) {
+		window = objects.window(handle);
+		objects.invalidate(handle, {0, 0, window->width, window->height}, true);
+		present(handle);
+	}
+}
+
+void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
+{
+	auto *window = objects.window(handle);
+	const bool moved = window->outer.left != outer.left || window->outer.top != outer.top;
+	const bool resized = window->outer.right - window->outer.left != outer.right - outer.left ||
+		window->outer.bottom - window->outer.top != outer.bottom - outer.top;
+	if (resized && window->bitmap) {
+		// The surface is outer-sized, so a new size needs a new surface and a new host window.
+		const bool visible = window->visible;
+		release_surface(handle);
+		window = objects.window(handle);
+		window->bitmap = 0;
+		window->dc = 0;
+		window->outer = outer;
+		window->x = outer.left;
+		window->y = outer.top;
+		window->width = outer.right - outer.left;
+		window->height = outer.bottom - outer.top;
+		recalculate_client(handle);
+		(void)visible;
+	} else {
+		window->outer = outer;
+		window->x = outer.left;
+		window->y = outer.top;
+		window->width = outer.right - outer.left;
+		window->height = outer.bottom - outer.top;
+		recalculate_client(handle);
+	}
+	window = objects.window(handle);
+	if (window && moved)
+		send(handle, 3, 0, uint16_t(window->x) | (uint64_t(uint16_t(window->y)) << 16));
+}
+
+// Queues WM_TIMER for every expired timer; messages already waiting for the same timer are not duplicated.
+void NativeWindows::post_due_timers()
+{
+	const auto now = std::chrono::steady_clock::now();
+	for (auto &timer : timers) {
+		if (timer.due > now)
+			continue;
+		const bool pending = std::any_of(messages.begin(), messages.end(), [&](const Message &message) {
+			return message.message == 0x113 && message.window == timer.window && message.wparam == timer.id;
+		});
+		if (!pending && messages.size() < 10000)
+			messages.push_back({timer.window, timer.id, timer.procedure, 0x113, uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()), cursor_x, cursor_y});
+		timer.due = now + std::chrono::milliseconds(timer.interval);
+	}
+}
+
 bool NativeWindows::system_dispatch(std::string_view name)
 {
 	const bool format = name == "wsprintfW";
-	if (name != "GetDesktopWindow" && name != "PtInRect" && name != "SetRect" && name != "TranslateAcceleratorW" && !format)
+	if (name != "GetDesktopWindow" && name != "PtInRect" && name != "SetRect" && name != "TranslateAcceleratorW" && name != "SetMenu" &&
+		name != "GetMenuItemRect" && name != "CheckMenuItem" && name != "MoveWindow" && name != "SetCapture" &&
+		name != "ReleaseCapture" && name != "SetTimer" && name != "KillTimer" && !format)
 		return false;
 	uint64_t result = 0;
 	try {
@@ -137,6 +235,123 @@ bool NativeWindows::system_dispatch(std::string_view name)
 					break;
 				}
 			}
+		} else if (name == "SetMenu") {
+			const auto args = process.api_arguments(2);
+			auto *window = objects.window(args[0]);
+			if (!window)
+				throw uint32_t(1400);
+			if (window->parent || (args[1] && !objects.menu(args[1])))
+				throw uint32_t(args[1] && !objects.menu(args[1]) ? 1401 : 120);
+			window->menu = args[1];
+			recalculate_client(args[0]);
+			result = 1;
+		} else if (name == "GetMenuItemRect") {
+			const auto args = process.api_arguments(4);
+			const auto *window = objects.window(args[0]);
+			if (!window)
+				throw uint32_t(1400);
+			// Only the menu bar of its own window has a layout; popup menus are not laid out yet.
+			if (args[1] != window->menu || !window->menu)
+				throw uint32_t(120);
+			const auto rects = menu_bar_items(*window);
+			if (uint32_t(args[2]) >= rects.size())
+				throw uint32_t(87);
+			const auto &rect = rects[uint32_t(args[2])];
+			std::array<uint8_t, 16> bytes{};
+			const int32_t values[4] = {window->outer.left + rect.left, window->outer.top + rect.top, window->outer.left + rect.right,
+				window->outer.top + rect.bottom};
+			for (size_t index = 0; index < 4; ++index)
+				write_le(bytes, index * 4, uint32_t(values[index]), 4);
+			process.write_memory(args[3], bytes);
+			result = 1;
+		} else if (name == "CheckMenuItem") {
+			const auto args = process.api_arguments(3);
+			auto *menu = objects.edit_menu(args[0]);
+			if (!menu)
+				throw uint32_t(1401);
+			const bool by_position = uint32_t(args[2]) & 0x400;
+			DesktopMenuItem *found = nullptr;
+			const auto search = [&](auto &&self, DesktopMenu &level) -> void {
+				if (by_position) {
+					if (!found && uint32_t(args[1]) < level.items.size())
+						found = &level.items[uint32_t(args[1])];
+					return;
+				}
+				for (auto &item : level.items) {
+					if (!item.submenu && item.id == uint32_t(args[1])) {
+						found = &item;
+						return;
+					}
+					if (item.submenu)
+						if (auto *child = objects.edit_menu(item.submenu)) {
+							self(self, *child);
+							if (found)
+								return;
+						}
+				}
+			};
+			search(search, *menu);
+			if (!found) {
+				result = UINT32_MAX;
+			} else {
+				result = (found->state & 8) ? 8 : 0;
+				found->state = (found->state & ~8U) | ((uint32_t(args[2]) & 8) ? 8U : 0U);
+			}
+		} else if (name == "MoveWindow") {
+			const auto args = process.api_arguments(6);
+			const auto *window = objects.window(args[0]);
+			if (!window)
+				throw uint32_t(1400);
+			if (window->parent)
+				throw uint32_t(120);
+			const auto x = int32_t(uint32_t(args[1])), y = int32_t(uint32_t(args[2])), width = int32_t(uint32_t(args[3])), height = int32_t(uint32_t(args[4]));
+			if (width < 0 || height < 0 || width > 8192 || height > 8192 || int64_t(x) + width > INT32_MAX || int64_t(y) + height > INT32_MAX)
+				throw uint32_t(87);
+			reshape(args[0], {x, y, x + width, y + height});
+			result = 1;
+		} else if (name == "SetCapture") {
+			const auto args = process.api_arguments(1);
+			if (!objects.window(args[0]))
+				throw uint32_t(1400);
+			result = capture;
+			capture = args[0];
+			if (result && result != args[0] && objects.window(result))
+				send(result, 0x215, 0, args[0]);
+			else if (result && !objects.window(result))
+				result = 0;
+		} else if (name == "ReleaseCapture") {
+			process.api_arguments(0);
+			if (capture) {
+				const auto previous = capture;
+				capture = 0;
+				if (objects.window(previous))
+					send(previous, 0x215, 0, 0);
+			}
+			result = 1;
+		} else if (name == "SetTimer") {
+			const auto args = process.api_arguments(4);
+			const auto interval = std::clamp<uint32_t>(uint32_t(args[2]), 10, 0x7fffffff);
+			if (args[0] && !objects.window(args[0]))
+				throw uint32_t(1400);
+			uint64_t id = args[1];
+			if (!args[0]) {
+				// A thread timer without a window gets a fresh system identifier.
+				id = next_timer_id++;
+			} else if (!id) {
+				throw uint32_t(87);
+			}
+			if (timers.size() >= 1024)
+				throw uint32_t(8);
+			std::erase_if(timers, [&](const Timer &timer) { return timer.window == args[0] && timer.id == id; });
+			timers.push_back({args[0], id, args[3], interval, std::chrono::steady_clock::now() + std::chrono::milliseconds(interval)});
+			result = id;
+		} else if (name == "KillTimer") {
+			const auto args = process.api_arguments(2);
+			const auto before = timers.size();
+			std::erase_if(timers, [&](const Timer &timer) { return timer.window == args[0] && timer.id == args[1]; });
+			if (before == timers.size())
+				throw uint32_t(1814);
+			result = 1;
 		} else if (name == "SetRect") {
 			const auto args = process.api_arguments(5);
 			std::array<uint8_t, 16> bytes{};

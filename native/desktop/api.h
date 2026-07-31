@@ -28,7 +28,6 @@ private:
 	std::function<void(uint64_t)> updated;
 	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source;
 #ifdef RAVEN_SKIA
-	std::unique_ptr<TextRenderer> text_renderer;
 	bool text_dispatch(std::string_view name);
 	uint64_t text_output(std::span<const uint64_t> arguments);
 #endif
