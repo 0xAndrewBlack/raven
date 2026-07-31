@@ -121,9 +121,17 @@ def main():
         if crop_equal(start, after_click, (left + 120, top + 62, left + 160, top + 84)):
             raise RuntimeError("the elapsed-time counter did not start")
 
+        # F2 is an accelerator for New game: the revealed cell must be covered again and the timer reset.
+        # wtype creates a virtual keyboard per call; waiting lets the compositor finish its focus handover so the press is not reported as already held.
+        subprocess.run(["wtype", "-s", "400", "-k", "F2"], env=environment(), check=True, timeout=10)
+        time.sleep(1.5)
+        after_f2 = screenshot(evidence / "02b-after-f2.png")
+        if not crop_equal(start, after_f2, (left + 12, top + 100, left + width - 12, top + height - 12)):
+            raise RuntimeError("F2 did not start a fresh game")
+
         click(left + 24, top + 36)
         menu_image = screenshot(evidence / "03-game-menu.png")
-        if crop_equal(after_click, menu_image, (left, top + 56, left + 160, top + 250)):
+        if crop_equal(after_f2, menu_image, (left, top + 56, left + 160, top + 250)):
             raise RuntimeError("the Game menu did not open")
         # Intermediate is the third entry of the Game menu's difficulty group.
         click(left + 30, top + 100)

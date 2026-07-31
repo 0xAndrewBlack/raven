@@ -83,13 +83,16 @@ KeyboardKey KeyboardMap::decode(uint32_t code) const
 		else if (physical.substr(0,2)=="AB" && position>=1 && position<=10) key.scan=43+position;
 		else if (physical.substr(0,2)=="AE" && position>=1 && position<=10) key.scan=1+position;
 		else if (physical.substr(0,2)=="FK" && position>=1 && position<=12) key.scan=position<=10 ? 58+position : 76+position;
+		else if (code>=1 && code<=88) key.scan=code;
 		else throw std::runtime_error("unsupported physical keyboard position "+std::string(physical)+" (evdev "+std::to_string(code)+")");
 	} else {
 		static constexpr std::string_view names[]{"ESC","TAB","BKSP","RTRN","LFSH","RTSH","LCTL","RCTL","CAPS","SPCE","LEFT","RGHT","UP","DOWN","HOME","END","DELE","LWIN","RWIN","MENU","COMP","NMLK","SCLK"};
 		static constexpr uint32_t scans[]{1,15,14,28,42,54,29,29,58,57,75,77,72,80,71,79,83,91,92,93,93,69,70};
 		bool found=false;
 		for (size_t index=0;index<std::size(names);++index) if (physical==names[index]) { key.scan=scans[index]; found=true; break; }
-		if (!found) throw std::runtime_error("unsupported physical keyboard position "+std::string(physical)+" (evdev "+std::to_string(code)+")");
+		// Layout-independent keymaps (virtual keyboards) name keys arbitrarily; evdev codes up to 88 equal their set-1 scan codes.
+		if (!found && code>=1 && code<=88) key.scan=code;
+		else if (!found) throw std::runtime_error("unsupported physical keyboard position "+std::string(physical)+" (evdev "+std::to_string(code)+")");
 	}
 	if (symbol>='a' && symbol<='z') key.code=symbol-'a'+'A';
 	else if (symbol>='A' && symbol<='Z') key.code=symbol;
