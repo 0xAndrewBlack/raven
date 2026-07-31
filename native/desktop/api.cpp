@@ -420,6 +420,8 @@ bool NativeDesktop::dispatch(std::string_view name)
 	if (color_dispatch(name)) return true;
 	if (clip_dispatch(name)) return true;
 	if (pen_dispatch(name)) return true;
+	if (caps_dispatch(name)) return true;
+	if (load_dispatch(name)) return true;
 	if (extract_dispatch(name)) return true;
 	if (menu_dispatch(name)) return true;
 #ifdef RAVEN_SKIA

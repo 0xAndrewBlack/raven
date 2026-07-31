@@ -38,6 +38,9 @@ private:
 	bool color_dispatch(std::string_view name);
 	bool clip_dispatch(std::string_view name);
 	bool pen_dispatch(std::string_view name);
+	bool caps_dispatch(std::string_view name);
+	bool load_dispatch(std::string_view name);
+	uint64_t scratch=0;
 	uint64_t lookup(std::span<const uint64_t> arguments);
 	uint64_t create(std::span<const uint64_t> arguments);
 	uint64_t create_icon(std::span<const uint8_t> bytes,uint32_t width,uint32_t height,uint32_t flags);

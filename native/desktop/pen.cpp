@@ -6,6 +6,8 @@
 
 namespace raven {
 
+uint8_t combine_raster(uint32_t mode,uint8_t pen,uint8_t destination);
+
 const DesktopPen *DesktopObjects::pen(uint64_t handle) const
 {
 	if (handle>=desktop_stock_pen && handle<desktop_stock_pen+stock_pens.size()) return &stock_pens[size_t(handle-desktop_stock_pen)];
@@ -34,6 +36,28 @@ bool DesktopObjects::delete_pen(uint64_t handle)
 	auto *value=std::get_if<DesktopPen>(&found->second);if(!value)return false;
 	if(!pen_selected(handle))return erase(handle);
 	value->pending_delete=true;return true;
+}
+
+uint8_t combine_raster(uint32_t mode,uint8_t pen,uint8_t destination)
+{
+	switch(mode){
+	case 1: return 0;
+	case 2: return uint8_t(~(pen|destination));
+	case 3: return uint8_t(~pen&destination);
+	case 4: return uint8_t(~pen);
+	case 5: return uint8_t(pen&~destination);
+	case 6: return uint8_t(~destination);
+	case 7: return uint8_t(pen^destination);
+	case 8: return uint8_t(~(pen&destination));
+	case 9: return uint8_t(pen&destination);
+	case 10: return uint8_t(~(pen^destination));
+	case 11: return destination;
+	case 12: return uint8_t(~pen|destination);
+	case 14: return uint8_t(pen|~destination);
+	case 15: return uint8_t(pen|destination);
+	case 16: return 0xff;
+	default: return pen;
+	}
 }
 
 bool NativeDesktop::pen_dispatch(std::string_view name)
@@ -76,7 +100,10 @@ bool NativeDesktop::pen_dispatch(std::string_view name)
 						const auto px=x+dc->origin_x,py=y+dc->origin_y;
 						if(px>=0 && py>=0 && px<bitmap->width && py<bitmap->height && dc->contains(px,py)){
 							const auto row=bitmap->top_down ? py : bitmap->height-1-py;const auto at=(size_t(row)*bitmap->width+size_t(px))*4;
-							pixels[at]=uint8_t(pen->color>>16);pixels[at+1]=uint8_t(pen->color>>8);pixels[at+2]=uint8_t(pen->color);pixels[at+3]=0;changed=true;
+							// Pen channels combine with the destination through the DC's binary raster operation.
+							const uint8_t source[3]={uint8_t(pen->color>>16),uint8_t(pen->color>>8),uint8_t(pen->color)};
+							for(size_t channel=0;channel<3;++channel)pixels[at+channel]=combine_raster(dc->rop2,source[channel],pixels[at+channel]);
+							pixels[at+3]=0;changed=true;
 						}
 						const auto twice=2*error;
 						if(twice> -dy || (twice== -dy && sx<0)){error-=dy;x+=sx;}

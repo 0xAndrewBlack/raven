@@ -44,6 +44,9 @@ inline constexpr uint64_t desktop_system_font = 0xfffe;
 inline constexpr uint64_t desktop_stock_brush = 0xfff0;
 inline constexpr uint64_t desktop_system_brush = 0xffc0;
 inline constexpr uint64_t desktop_stock_pen = 0xffb0;
+// IDC_* identifiers 32512..32651 map onto this block of system cursor handles.
+inline constexpr uint64_t desktop_stock_cursor = 0xfa00;
+inline constexpr uint32_t desktop_stock_cursor_count = 140;
 
 struct DesktopBrush {
 	uint32_t color = 0;
@@ -71,6 +74,8 @@ struct DesktopDC {
 	std::optional<DesktopRegion> application_clip{};
 	uint64_t pen=desktop_stock_pen+1;
 	int32_t position_x=0,position_y=0;
+	// R2_COPYPEN until SetROP2 changes how pens combine with the destination.
+	uint32_t rop2=13;
 	// Clip coordinates belong to the DC, not its bitmap backing.
 	bool contains(int64_t x,int64_t y) const
 	{
@@ -91,6 +96,15 @@ struct DesktopClass {
 	std::vector<uint8_t> extra{};
 	uint32_t style = 0;
 	uint16_t atom = 0;
+	uint64_t icon = 0,cursor = 0;
+	// Default menu resource: an integer identifier, or a name when the identifier is zero.
+	uint32_t menu_id = 0;
+	std::u16string menu_name{};
+};
+
+struct DesktopAccelerator {
+	uint8_t flags;
+	uint16_t key,command;
 };
 
 struct DesktopMenuItem {
@@ -122,6 +136,7 @@ struct DesktopWindow {
 	DesktopRect outer{x,y,int32_t(int64_t(x)+width),int32_t(int64_t(y)+height)};
 	uint64_t parent = 0,child_id = 0;
 	uint32_t ex_style = 0;
+	uint64_t menu = 0;
 	bool client_ready = true;
 };
 
@@ -134,6 +149,9 @@ public:
 	uint64_t add(Object object);
 	bool erase(uint64_t handle);
 	const DesktopMenu *menu(uint64_t handle) const;
+	// Accelerator tables live outside the object map; their handles never collide with GDI or window handles.
+	uint64_t add_accelerators(std::vector<DesktopAccelerator> table);
+	const std::vector<DesktopAccelerator> *accelerators(uint64_t handle) const;
 	uint64_t load_menu(const MenuTemplate &definition);
 	const DesktopIcon *icon(uint64_t handle) const;
 	const DesktopBitmap *bitmap(uint64_t handle) const;
@@ -185,6 +203,7 @@ public:
 private:
 	std::map<uint64_t, Object> objects;
 	std::map<uint16_t,DesktopClass> classes;
+	std::map<uint64_t,std::vector<DesktopAccelerator>> accelerator_tables;
 	uint32_t next_atom = 0xc000;
 	uint32_t next_class = 1;
 	uint64_t next = 0x10000;

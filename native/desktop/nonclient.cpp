@@ -5,6 +5,8 @@ namespace raven {
 int32_t DesktopMetrics::get(int32_t index) const
 {
 	switch (index) {
+	case 0: return screen_x;
+	case 1: return screen_y;
 	case 5: return border_x;
 	case 6: return border_y;
 	case 7: return dialog_x;

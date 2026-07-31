@@ -330,7 +330,15 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			if (found == traps.end())
 				return result;
 			const auto api = found->second.first;
-			if (getenv("RAVEN_TRACE_X86")) std::cerr << "api " << api << '\n';
+			if (getenv("RAVEN_TRACE_X86")) {
+				// Argument words only reflect stdcall exports; cdecl and variadic entries report none.
+				std::cerr << "api " << api << '(' << std::hex;
+				const auto count = found->second.second / 4;
+				if (count)
+					for (const auto value : process.api_arguments(count))
+						std::cerr << ' ' << value;
+				std::cerr << std::dec << " )\n";
+			}
 			if (api == "ExitProcess" || api == "exit" || api == "_exit") {
 				const auto code = uint32_t(process.api_arguments(1)[0]);
 				process.abandon_call();

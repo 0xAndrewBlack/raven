@@ -51,6 +51,11 @@ private:
 	void post(uint64_t window,uint32_t message,uint64_t wparam,uint64_t lparam);
 	uint64_t surface_dc(uint64_t window);
 	bool tree_dispatch(std::string_view name);
+	bool system_dispatch(std::string_view name);
+	uint64_t desktop_window();
+	uint64_t desktop=0;
+	struct Modifiers { bool shift,control,alt; };
+	Modifiers modifier_state() const;
 	void parent_notify(uint64_t window,uint32_t message);
 	void discard_tree(uint64_t window);
 	void reject_tree(uint64_t window);

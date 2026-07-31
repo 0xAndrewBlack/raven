@@ -7,6 +7,8 @@ struct DesktopMetrics {
 	int32_t border_x=1,border_y=1,dialog_x=3,dialog_y=3,frame_x=4,frame_y=4;
 	int32_t caption=26,small_caption=18,menu=19;
 	int32_t button_x=18,button_y=25,small_button_x=17,small_button_y=17;
+	// Virtual screen size; Wayland output geometry is not queried yet.
+	int32_t screen_x=1920,screen_y=1080;
 	int32_t get(int32_t index) const;
 };
 

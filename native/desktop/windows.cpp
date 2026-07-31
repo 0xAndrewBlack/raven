@@ -22,7 +22,7 @@ void NativeWindows::shutdown()
 {
 	for (const auto handle : objects.window_handles()) {
 		const auto *window=objects.window(handle);
-		if (!window->parent && window->bitmap && presentation.remove) presentation.remove(handle);
+		if (handle!=desktop && !window->parent && window->bitmap && presentation.remove) presentation.remove(handle);
 	}
 }
 
@@ -74,6 +74,8 @@ uint64_t NativeWindows::surface_dc(uint64_t handle)
 
 void NativeWindows::present(uint64_t handle)
 {
+	// The desktop is the screen itself; guest drawing on it never becomes a host window.
+	if (handle==desktop) return;
 	handle=objects.window_root(handle);
 	if (!handle) throw uint32_t(1400);
 	if (!presentation.present) throw uint32_t(120);
@@ -87,6 +89,7 @@ void NativeWindows::present(uint64_t handle)
 
 void NativeWindows::drawing(uint64_t handle)
 {
+	if (handle==desktop) return;
 	const auto *window=objects.window(handle);
 	if (window && objects.window_visible(handle)) present(handle);
 }
@@ -244,6 +247,19 @@ void NativeWindows::receive(const DesktopEvent &event)
 	messages.push_back({target,buttons|keyboard_map.mouse_modifiers(),uint16_t(x-window->x)|(uint64_t(uint16_t(y-window->y))<<16),message,message_time(),int32_t(x),int32_t(y)});
 }
 
+NativeWindows::Modifiers NativeWindows::modifier_state() const
+{
+	Modifiers state{false,false,false};
+	for (size_t code=0;code<key_down.size();++code) {
+		if (!key_down[code]) continue;
+		const auto key=keyboard_map.decode(uint32_t(code)).code;
+		state.shift|=key==0x10 || key==0xa0 || key==0xa1;
+		state.control|=key==0x11 || key==0xa2 || key==0xa3;
+		state.alt|=key==0x12 || key==0xa4 || key==0xa5;
+	}
+	return state;
+}
+
 uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 {
 	const auto layout=message_layout(process.mode()==NativeMode::x86);
@@ -346,6 +362,8 @@ uint64_t NativeWindows::send(uint64_t handle, uint32_t message, uint64_t wparam,
 	if (!invoke) throw std::runtime_error("native window callbacks are not connected");
 	const auto procedure=window->procedure;
 	const uint64_t arguments[]{handle,message,wparam,lparam};
+	// The desktop window belongs to the system and has no guest procedure.
+	if (!procedure) return default_message(arguments);
 	const auto result=invoke(procedure,arguments);
 	if (result.stop!=NativeStop::returned) throw result;
 	return result.value;
@@ -472,7 +490,13 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 	}
 	if (message==0x83) {
 		if (args[2]) throw std::runtime_error("unsupported default extended nonclient calculation");
-		const auto rect=process.read_memory(args[3],16); process.write_memory(args[3],rect);
+		auto rect=process.read_memory(args[3],16);
+		// The client area is the window rectangle minus what AdjustWindowRectEx adds for this style.
+		const auto frame=adjust_window_rect(objects.nonclient_metrics(),{0,0,0,0},window->style & ~0x10000000U,window->menu!=0,window->ex_style);
+		const int32_t edges[4]={frame.left,frame.top,frame.right,frame.bottom};
+		for (size_t index=0;index<4;++index)
+			put(rect,index*4,uint32_t(int32_t(read(rect,index*4,4))-edges[index]),4);
+		process.write_memory(args[3],rect);
 		return 0;
 	}
 	if (!message || message==1 || message==2 || message==3 || message==5 || message==0x82 || message==0x18) return 0;
@@ -483,8 +507,10 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 {
 	const auto style=uint32_t(args[3]),ex_style=uint32_t(args[0]);
 	const bool child=(style & 0x40000000U)!=0;
+	// Top-level styles: popup or overlapped with a frame (border, caption, system menu, sizing and caption buttons).
+	constexpr uint32_t top_level_styles=0x80000000U | 0x10000000U | 0x00cf0000U | 0x04000000U | 0x02000000U;
 	if ((child ? (style & ~0x10000000U)!=0x40000000U || (ex_style & ~4U) :
-		(style & ~0x10000000U)!=0x80000000U || ex_style || args[8] || args[9]) ||
+		(style & ~top_level_styles) || ex_style || args[8] || (args[9] && !objects.menu(args[9]))) ||
 		((style & 0x10000000U) && !presentation.present)) throw uint32_t(120);
 	const auto *parent=child ? objects.window(args[8]) : nullptr;
 	if (child && (!parent || parent->destroying)) throw uint32_t(1400);
@@ -507,6 +533,9 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 	DesktopWindow record{class_atom,definition->procedure,{},x,y,width,height};
 	record.instance=args[10]; record.style=style | (child ? 0U : 0x04000000U);record.ex_style=ex_style;
 	record.parent=child ? args[8] : 0;record.child_id=child ? args[9] : 0;record.client_ready=false;
+	// A class default menu would need resource loading here; refuse it rather than create a window without its menu.
+	if (!child && !args[9] && (definition->menu_id || !definition->menu_name.empty())) throw uint32_t(120);
+	if (!child) record.menu=args[9];
 	record.extra.resize(definition->window_extra);
 	const auto handle=objects.add(std::move(record));
 	if (!handle) throw uint32_t(8);
@@ -602,7 +631,7 @@ uint64_t NativeWindows::map_points(uint64_t from,uint64_t to,uint64_t points,uin
 
 bool NativeWindows::dispatch(std::string_view name)
 {
-	if (tree_dispatch(name)) return true;
+	if (tree_dispatch(name) || system_dispatch(name)) return true;
 	const bool data=(name.starts_with("GetWindowLong") || name.starts_with("SetWindowLong") || name.starts_with("GetClassLong") || name.starts_with("SetClassLong"));
 	const bool info=name=="GetClassInfoW" || name=="GetClassInfoExW" || name=="GetClassNameW" || name=="GetClassNameA";
 	const bool registration=name=="RegisterClassExW" || name=="RegisterClassW";
@@ -730,9 +759,11 @@ bool NativeWindows::dispatch(std::string_view name)
 			const auto bytes=process.read_memory(args[0],size);
 			if (extended && read(bytes,0,4)!=size) throw uint32_t(87);
 			const auto style=uint32_t(read(bytes,extended ? 4 : 0,4));
-			if ((style & ~0x4000U) || read(bytes,3*P+8+shift,P) || read(bytes,4*P+8+shift,P) ||
-				read(bytes,6*P+8+shift,P) || (extended && read(bytes,8*P+8+shift,P)))
+			if ((style & ~0x4000U) || (extended && read(bytes,8*P+8+shift,P)))
 				throw uint32_t(120);
+			const auto icon=read(bytes,3*P+8+shift,P),cursor=read(bytes,4*P+8+shift,P),menu_name=read(bytes,6*P+8+shift,P);
+			const bool stock_cursor=cursor>=desktop_stock_cursor && cursor<desktop_stock_cursor+desktop_stock_cursor_count;
+			if ((icon && !objects.icon(icon)) || (cursor && !stock_cursor)) throw uint32_t(1402);
 			const auto class_extra=int32_t(uint32_t(read(bytes,2*P+shift,4))),window_extra=int32_t(uint32_t(read(bytes,2*P+4+shift,4)));
 			if (class_extra<0 || window_extra<0) throw uint32_t(87);
 			if (class_extra>4096 || window_extra>4096) throw uint32_t(120);
@@ -742,17 +773,23 @@ bool NativeWindows::dispatch(std::string_view name)
 			auto class_name=text(read(bytes,7*P+8+shift,P));
 			if (!procedure || class_name.empty()) throw uint32_t(87);
 			if (objects.class_registered(instance,class_name,(style & 0x4000)!=0)) throw uint32_t(1410);
-			const auto id=objects.register_class({std::move(class_name),instance,procedure,background,uint32_t(window_extra),std::vector<uint8_t>(size_t(class_extra)),style});
+			DesktopClass definition{std::move(class_name),instance,procedure,background,uint32_t(window_extra),std::vector<uint8_t>(size_t(class_extra)),style};
+			definition.icon=icon; definition.cursor=cursor;
+			if (menu_name && menu_name<=UINT16_MAX) definition.menu_id=uint32_t(menu_name);
+			else if (menu_name) definition.menu_name=window_text(menu_name);
+			const auto id=objects.register_class(std::move(definition));
 			if (!id) throw uint32_t(8);
 			result=objects.window_class(id)->atom;
 		} else if (creation) result=create(args);
 		else if (name=="SendMessageW") result=send(args[0],uint32_t(args[1]),args[2],args[3]);
 		else if (name=="DestroyWindow") result=destroy(args[0]);
 		else if (name=="GetDC" || name=="GetWindowDC") {
-			surface_dc(args[0]);
-			const auto *window=objects.window(args[0]);
-			DesktopDC device{window->bitmap,window->bitmap,args[0]}; device.leased=true;
-			objects.configure_window_dc(args[0],device,name=="GetWindowDC");
+			// A null window selects the screen, which is the desktop window's surface.
+			const auto target=args[0] ? args[0] : desktop_window();
+			surface_dc(target);
+			const auto *window=objects.window(target);
+			DesktopDC device{window->bitmap,window->bitmap,target}; device.leased=true;
+			objects.configure_window_dc(target,device,name=="GetWindowDC");
 			result=objects.add(device);
 			if (!result) throw uint32_t(8);
 		}
@@ -778,10 +815,11 @@ bool NativeWindows::dispatch(std::string_view name)
 			result=1;
 		}
 		else if (name=="ReleaseDC") {
-			const auto *window=objects.window(args[0]);
+			const auto owner=args[0] ? args[0] : desktop_window();
+			const auto *window=objects.window(owner);
 			const auto *device=objects.dc(args[1]);
 			if (window) {
-				if (!device || !device->leased || device->window!=args[0]) throw uint32_t(1400);
+				if (!device || !device->leased || device->window!=owner) throw uint32_t(1400);
 				result=objects.erase(args[1]);
 			}
 		} else if (name=="IsWindowVisible") {
