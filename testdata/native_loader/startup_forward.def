@@ -1,0 +1,4 @@
+LIBRARY forward.dll
+EXPORTS
+Query=base.Query
+Unused=unavailable.Optional

@@ -1,0 +1,8 @@
+{
+  "oracle": "Wine 10.0~repack-12ubuntu1; public StretchDIBits, 32-bit DIB source, horizontal/vertical footprint probes.",
+  "cases": 5104,
+  "unique_geometries": 2552,
+  "raw_sha256": "1af8ae0c7faa23c9ca5728beb9a10c967e1fb0051befa55edd5823f1afe25ac7",
+  "sha256": "31e1e0944a70ce4f3af7baa3d0794f778f2f3ff1196711644347703530bf9cd0",
+  "scope": "Complete source reduction; differs from single-pixel StretchBlt reference. Windows reference pending."
+}

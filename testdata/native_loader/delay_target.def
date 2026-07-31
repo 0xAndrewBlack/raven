@@ -1,0 +1,4 @@
+LIBRARY delayed.dll
+EXPORTS
+    Named=ReadTLSValue @5
+    Ordinal=WriteTLSValue @9 NONAME

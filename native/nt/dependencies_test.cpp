@@ -1,0 +1,89 @@
+#include "loader.h"
+#include "providers.h"
+
+#include <algorithm>
+#include <array>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <stdexcept>
+
+static void check(bool value,const char *message)
+{
+	if (!value) throw std::runtime_error(message);
+}
+
+static std::vector<uint8_t> read_file(const std::filesystem::path &path)
+{
+	std::ifstream file(path,std::ios::binary|std::ios::ate);
+	check(bool(file) && file.tellg()>0 && file.tellg()<1024*1024,"invalid startup fixture");
+	std::vector<uint8_t> bytes(size_t(file.tellg()));file.seekg(0);
+	check(bool(file.read(reinterpret_cast<char *>(bytes.data()),std::streamsize(bytes.size()))),"short startup fixture");return bytes;
+}
+
+int main(int argc,char **argv)
+{
+	try {
+		check(argc==3 || argc==4,"bootstrap, lifecycle directory and optional PE32 fixture required");
+		const std::filesystem::path directory=argv[2];
+		const auto client=read_file(directory/"client.exe"),base=read_file(directory/"base.dll"),dependent=read_file(directory/"dependent.dll");
+		const std::array<std::string_view,1> native{"kernel32.dll"};
+		for (const bool supplied:{false,true}) {
+			raven::ModuleSet modules;auto &entry=modules.add("client.exe",client);
+			raven::PEModule *existing=nullptr;if (supplied) existing=&modules.add("base.dll",base);
+			std::vector<std::string> queries;
+			const auto source=[&](std::string_view name)->std::optional<std::vector<uint8_t>> {
+				queries.emplace_back(name);
+				if (name=="base.dll") return base;
+				if (name=="dependent.dll") return dependent;
+				throw std::runtime_error("startup queried a native or unrelated module");
+			};
+			const auto result=raven::run_native_process(modules,entry,argv[1],std::chrono::seconds(3),source);
+			check(result.stop==raven::NativeStop::returned && !result.value,"implicit startup or dependency initialization order differs");
+			check(queries.size()==(supplied ? 1 : 2) && modules.all().contains("base.dll") && modules.all().contains("dependent.dll"),"startup queried a dependency more than once");
+			if (supplied) check(modules.all().at("base.dll").get()==existing && existing->bytes==base,"startup replaced an explicitly supplied module");
+		}
+		for (const std::string_view mode:{"missing","malformed","executable","clr","symbol","pe32"}) {
+			if (mode=="pe32" && argc!=4) continue;
+			raven::ModuleSet modules;auto &entry=modules.add("client.exe",client);const auto original=std::vector<uint8_t>(entry.loaded.data().begin(),entry.loaded.data().end());
+			auto bad=dependent;
+			if (mode=="malformed") bad.resize(10);
+			if (mode=="executable") bad=client;
+			if (mode=="pe32") bad=read_file(argv[3]);
+			if (mode=="clr") {
+				uint32_t header=0;for(unsigned i=0;i<4;++i)header|=uint32_t(bad[0x3c+i])<<(i*8);
+				bad[header+24+112+14*8]=1;
+			}
+			if (mode=="symbol") {
+				entry.imports.push_back({"dependent.dll","UnavailableExport",0,false,0});
+			}
+			std::string error;
+			try {
+				raven::load_initial_dependencies(modules,[&](std::string_view name)->std::optional<std::vector<uint8_t>> {
+					if (name=="base.dll") return base;
+					if (name=="dependent.dll" && mode!="missing") return bad;
+					return std::nullopt;
+				},native);
+			} catch (const std::runtime_error &caught) { error=caught.what(); }
+			check(!error.empty() && modules.all().size()==1 && std::equal(original.begin(),original.end(),entry.loaded.data().begin()),"failed initial acquisition retained images or changed the entry");
+			if (mode=="missing") check(error=="missing PE module: dependent.dll","missing startup failed for another reason");
+			if (mode=="symbol") check(error.find("UnavailableExport")!=error.npos,"symbol startup failed for another reason");
+			if (mode=="pe32") check(error.find("PE32")!=error.npos,"PE32 startup failed for another reason");
+			if (mode=="clr") check(error.find("CLR")!=error.npos,"CLR startup failed for another reason");
+		}
+		{
+			raven::ModuleSet modules;auto &entry=modules.add("forward-client.exe",read_file(directory/"forward-client.exe"));
+			std::vector<std::string> queries;
+			const auto result=raven::run_native_process(modules,entry,argv[1],std::chrono::seconds(3),
+				[&](std::string_view name)->std::optional<std::vector<uint8_t>> {
+					queries.emplace_back(name);
+					if (name=="forward.dll") return read_file(directory/"forward.dll");
+					if (name=="base.dll") return base;
+					throw std::runtime_error("inactive startup forwarder was loaded");
+				});
+			check(result.stop==raven::NativeStop::returned && !result.value && queries==std::vector<std::string>({"forward.dll","base.dll"}),"active forwarder acquisition differs");
+		}
+		std::cout<<"Implicit initial dependencies, explicit-module preservation, active forwarders and pre-execution rollback passed\n";
+	} catch (const std::exception &error) { std::cerr<<error.what()<<'\n';return 1; }
+	return 0;
+}

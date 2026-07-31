@@ -1,0 +1,25 @@
+#include <windows.h>
+
+500 MENU
+BEGIN
+	POPUP "&Game"
+	BEGIN
+		MENUITEM "&New\tF2", 510
+		MENUITEM SEPARATOR
+		POPUP "&Levels"
+		BEGIN
+			MENUITEM "Beginner", 521, CHECKED
+			MENUITEM "Expert", 523, GRAYED
+		END
+	END
+	MENUITEM "E&xit", 512
+END
+
+named MENUEX
+BEGIN
+	POPUP "Extended", 700, 0, 0, 1234
+	BEGIN
+		MENUITEM "Wide identifier", 0x12345678
+	END
+	MENUITEM "Last", 901
+END

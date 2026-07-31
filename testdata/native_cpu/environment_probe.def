@@ -1,0 +1,6 @@
+LIBRARY kernel32
+EXPORTS
+    GetLastError @1
+    SetLastError @2
+    GetCurrentProcessId @3
+    GetCurrentThreadId @4

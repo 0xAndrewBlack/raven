@@ -1,0 +1,76 @@
+#pragma once
+
+#include "objects.h"
+#include "presentation.h"
+#include "keyboard.h"
+#include <array>
+#include "nt/environment.h"
+#include <functional>
+#include <deque>
+#include <optional>
+
+namespace raven {
+
+class NativeWindows {
+public:
+	NativeWindows(NativeProcess &process, NativeEnvironment &environment, DesktopObjects &objects);
+	void set_call(std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke);
+	void set_presentation(DesktopPresentation presentation);
+	void set_deadline(std::chrono::steady_clock::time_point deadline);
+	bool dispatch(std::string_view name);
+	void drawing(uint64_t window);
+	void shutdown();
+
+private:
+	NativeProcess &process;
+	NativeEnvironment &environment;
+	DesktopObjects &objects;
+	std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke;
+	DesktopPresentation presentation;
+	struct Message {
+		uint64_t window, wparam, lparam;
+		uint32_t message, time;
+		int32_t x=0,y=0;
+		uint32_t character=0;
+	};
+	// Initial guest thread queue; HWNDs and drawing resources stay in DesktopObjects.
+	std::deque<Message> messages;
+	std::optional<uint32_t> quit;
+	std::chrono::steady_clock::time_point deadline;
+	uint32_t mouse_buttons=0;
+	int32_t cursor_x=0,cursor_y=0;
+	uint64_t focus=0,active=0;
+	bool activating=false,focusing=false;
+	KeyboardMap keyboard_map;
+	std::array<bool,256> key_down{};
+	std::optional<Message> key_translation;
+	void activate(uint64_t window);
+	uint64_t set_focus(uint64_t window);
+	void receive(const DesktopEvent &event);
+	uint64_t retrieve(std::span<const uint64_t> arguments,bool blocking);
+	void post(uint64_t window,uint32_t message,uint64_t wparam,uint64_t lparam);
+	uint64_t surface_dc(uint64_t window);
+	bool tree_dispatch(std::string_view name);
+	void parent_notify(uint64_t window,uint32_t message);
+	void discard_tree(uint64_t window);
+	void reject_tree(uint64_t window);
+	uint64_t pointer_child(uint64_t window,int32_t x,int32_t y);
+	void present(uint64_t window);
+	void release_surface(uint64_t window);
+	DesktopRect update_rect(uint64_t window,uint64_t address);
+	struct PaintStart { uint64_t dc; DesktopRect rect; bool erase; };
+	PaintStart start_paint(uint64_t window);
+	std::string text(uint64_t address);
+	std::u16string window_text(uint64_t address);
+	uint64_t copy_window_text(uint64_t window,uint64_t output,uint64_t capacity);
+	uint16_t atom(uint64_t name, uint64_t instance);
+	uint64_t send(uint64_t window, uint32_t message, uint64_t wparam, uint64_t lparam);
+	uint64_t create(std::span<const uint64_t> arguments);
+	uint64_t map_points(uint64_t from,uint64_t to,uint64_t points,uint32_t count);
+	bool destroy(uint64_t window);
+	uint64_t default_message(std::span<const uint64_t> arguments);
+	uint64_t long_value(std::string_view name,std::span<const uint64_t> arguments);
+	uint64_t class_info(std::string_view name,std::span<const uint64_t> arguments);
+};
+
+}

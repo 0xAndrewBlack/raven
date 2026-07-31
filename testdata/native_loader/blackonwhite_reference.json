@@ -1,0 +1,22 @@
+{
+  "oracle": "Wine 10.0~repack-12ubuntu1, independently compiled public GDI probes; no Wine implementation source used.",
+  "axis_cases": 5104,
+  "unique_geometries": 2552,
+  "formats": [
+    "BGRA32",
+    "monochrome"
+  ],
+  "axes": [
+    "horizontal",
+    "vertical"
+  ],
+  "source_sizes": "1..40,48,64,128,256",
+  "target_sizes": "1..50,64,96,128,192,200,255,256,300",
+  "binary_format": "RBW1,u32 case count; per case u16 source,u16 target, then target pairs u16 begin,u16 end; little endian.",
+  "single_destination": "Pinned Wine omits final source pixel when reducing to one; Windows reference pending.",
+  "sha256": "e0c095d1ed10d69c84d2c9e464b9bb00f5e89bf7533d0353c4b00b0357f77d54",
+  "raw_hashes": {
+    "scan-footprints": "b79344052a268af04ab68b4886fde32f744dcc1735bda44118d026b4bba1f073",
+    "mono-footprints": "b79344052a268af04ab68b4886fde32f744dcc1735bda44118d026b4bba1f073"
+  }
+}

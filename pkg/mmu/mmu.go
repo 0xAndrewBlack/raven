@@ -72,9 +72,10 @@ type l2Table [l2Size]atomic.Pointer[PageEntry]
 // The hot path (Read/Write/Fetch) uses a two-level page table (slice of
 // slices) and a small direct-mapped TLB - no locks, no hash maps.
 type MMU struct {
+	shared   *sharedBacking
 	mu       sync.RWMutex // only for structural mutations (Map/Mmap/Munmap)
 	l1       [l1Size]atomic.Pointer[l2Table]
-	pages    map[uint64]*PageEntry // fallback for MapHostSlice (external Data)
+	pages    map[uint64]*PageEntry // live mappings when shared backing is enabled
 	brkAddr  uint64
 	heapBase uint64
 	// Mode32 constrains Mmap allocations to the lower 4 GB (for PE32).
@@ -113,6 +114,9 @@ func New() *MMU {
 // mapping anything. Native code can then address guest memory as
 // FlatBase()[guestAddr].
 func (m *MMU) EnableFlatBacking() error {
+	if m.shared != nil {
+		return fmt.Errorf("flat and shared backing cannot be enabled together")
+	}
 	if m.flat != nil {
 		return nil
 	}
@@ -146,6 +150,14 @@ func (m *MMU) setPerm(vaddr uint64, perms uint8) {
 // pageData returns a zeroed backing slice for a page at vaddr: a window of
 // the flat region when enabled and in range, a heap slice otherwise.
 func (m *MMU) pageData(vaddr uint64) []byte {
+	if m.shared != nil {
+		data, err := m.shared.page(vaddr)
+		if err != nil {
+			return nil
+		}
+		clear(data)
+		return data
+	}
 	if m.flat != nil && vaddr < 1<<32 {
 		window := m.flat[vaddr : vaddr+PageSize : vaddr+PageSize]
 		if unix.Mprotect(window, unix.PROT_READ|unix.PROT_WRITE) == nil {
@@ -233,6 +245,9 @@ func (m *MMU) storePage(vaddr uint64, pe *PageEntry) {
 	if !ok {
 		return
 	}
+	if m.shared != nil {
+		m.pages[vaddr] = pe
+	}
 	l2 := m.l1[i1].Load()
 	if l2 == nil {
 		candidate := new(l2Table)
@@ -279,6 +294,9 @@ func (m *MMU) getPage(vaddr uint64) *PageEntry {
 
 // removePage removes a page from the two-level table.
 func (m *MMU) removePage(vaddr uint64) {
+	if m.shared != nil {
+		delete(m.pages, vaddr)
+	}
 	m.setPerm(vaddr, 0)
 	i1, i2, ok := pageIndices(vaddr)
 	if !ok {
@@ -319,8 +337,12 @@ func (m *MMU) mapPageLocked(vaddr uint64, perms uint8) error {
 		m.storePage(vaddr, &PageEntry{Data: pe.Data, Perms: perms})
 		return nil
 	}
+	data := m.pageData(vaddr)
+	if data == nil {
+		return fmt.Errorf("allocate shared page at 0x%x: %w", vaddr, m.shared.err)
+	}
 	pe := &PageEntry{
-		Data:  m.pageData(vaddr),
+		Data:  data,
 		Perms: perms,
 	}
 	m.storePage(vaddr, pe)
@@ -929,8 +951,15 @@ func (m *MMU) Mmap(addr, length uint64, perms uint8) uint64 {
 		}
 	}
 	for pg := addr; pg < addr+length; pg += PageSize {
+		data := m.pageData(pg)
+		if data == nil {
+			for rollback := addr; rollback < pg; rollback += PageSize {
+				m.removePage(rollback)
+			}
+			return 0
+		}
 		pe := &PageEntry{
-			Data:  m.pageData(pg),
+			Data:  data,
 			Perms: perms,
 		}
 		m.storePage(pg, pe)

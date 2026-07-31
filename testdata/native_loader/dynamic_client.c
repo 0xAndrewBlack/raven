@@ -1,0 +1,75 @@
+#include <windows.h>
+#include <stdint.h>
+
+typedef DWORD (WINAPI *read_fn)(void);
+typedef DWORD (WINAPI *write_fn)(DWORD);
+
+static BOOL listed(HMODULE module, BOOL expected)
+{
+	uintptr_t peb;
+	__asm__("movq %%gs:0x60,%0" : "=r"(peb));
+	const uintptr_t loader = *(uintptr_t *)(peb + 0x18);
+	if (!loader)
+		return FALSE;
+	for (unsigned offset = 0x10; offset <= 0x30; offset += 0x10) {
+		uintptr_t *head = (uintptr_t *)(loader + offset);
+		uintptr_t *previous = head;
+		unsigned matches = 0, count = 0;
+		for (uintptr_t *link = (uintptr_t *)head[0]; link != head; link = (uintptr_t *)link[0]) {
+			if (++count > 10000 || link[1] != (uintptr_t)previous)
+				return FALSE;
+			const uintptr_t entry = (uintptr_t)link - (offset - 0x10);
+			matches += *(uintptr_t *)(entry + 0x30) == (uintptr_t)module;
+			previous = link;
+		}
+		if (head[1] != (uintptr_t)previous || matches != (unsigned)expected)
+			return FALSE;
+	}
+	return TRUE;
+}
+
+DWORD raven_entry(void)
+{
+	SetLastError(99);
+	if (GetModuleHandleA("tlsprobe.dll"))
+		return 1;
+	HMODULE first = LoadLibraryA("TLSPROBE");
+	if (!first || !listed(first, TRUE))
+		return 2;
+	read_fn read = (read_fn)GetProcAddress(first, "ReadTLSValue");
+	write_fn write = (write_fn)GetProcAddress(first, "WriteTLSValue");
+	read_fn query = (read_fn)GetProcAddress(first, "QueryTLS");
+	if (!read || !write || !query || read() != 19 || !query() || write(91) != 19)
+		return 3;
+	HMODULE second = LoadLibraryW(L"tlsprobe.dll");
+	if (second != first || read() != 91 || !FreeLibrary(first) || read() != 91 || !listed(second, TRUE))
+		return 4;
+	if (!FreeLibrary(second) || GetModuleHandleW(L"tlsprobe.dll") || !listed(second, FALSE))
+		return 5;
+	if (FreeLibrary(second) || GetLastError() != ERROR_MOD_NOT_FOUND)
+		return 6;
+	first = LoadLibraryA("tlsprobe.dll");
+	if (!first)
+		return 7;
+	read = (read_fn)GetProcAddress(first, "ReadTLSValue");
+	if (!read || read() != 19 || !FreeLibrary(first))
+		return 8;
+	HMODULE parent = LoadLibraryA("parent.dll");
+	if (!parent)
+		return 9;
+	query = (read_fn)GetProcAddress(parent, "QueryDependency");
+	if (!query || !query() || !GetModuleHandleA("tlsprobe.dll"))
+		return 10;
+	first = LoadLibraryA("tlsprobe.dll");
+	if (!first || !FreeLibrary(parent) || !GetModuleHandleA("tlsprobe.dll") || !FreeLibrary(first))
+		return 11;
+	if (GetModuleHandleA("parent.dll") || GetModuleHandleA("tlsprobe.dll"))
+		return 12;
+	if (LoadLibraryA("reject.dll") || GetLastError() != ERROR_DLL_INIT_FAILED)
+		return 13;
+	if (GetModuleHandleA("reject.dll") || GetModuleHandleA("tlsprobe.dll"))
+		return 14;
+	if (LoadLibraryA("missing.dll") || GetLastError() != ERROR_MOD_NOT_FOUND)
+		return 15;
+	return 0;
+}

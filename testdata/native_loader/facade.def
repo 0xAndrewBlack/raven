@@ -1,0 +1,4 @@
+LIBRARY facade
+EXPORTS
+	Named=target.Add @1
+	Ordinal="target.#7" @2 NONAME

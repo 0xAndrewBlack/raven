@@ -1,0 +1,293 @@
+#include "pe/pe.h"
+#include "pe/resources.h"
+#include "pe/loaded_image.h"
+#include "pe/module_set.h"
+#ifdef RAVEN_NATIVE_CPU
+#include "cpu/native_cpu.h"
+#include "nt/providers.h"
+#include "nt/launch.h"
+#ifdef RAVEN_WAYLAND
+#include "desktop/wayland.h"
+#endif
+#endif
+
+#include <filesystem>
+#include <charconv>
+#include <chrono>
+#include <string_view>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <stdexcept>
+
+static std::vector<uint8_t> read_file(const char *path)
+{
+	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	if (!file)
+		throw std::runtime_error("cannot open PE file");
+	const auto size = file.tellg();
+	if (size < 0 || size > 1024 * 1024 * 1024)
+		throw std::runtime_error("PE file exceeds inspection size limit");
+	std::vector<uint8_t> bytes(static_cast<size_t>(size));
+	file.seekg(0);
+	if (!file.read(reinterpret_cast<char *>(bytes.data()), size))
+		throw std::runtime_error("cannot read PE file");
+	return bytes;
+}
+
+#ifdef RAVEN_NATIVE_CPU
+static int native_result(const raven::NativeResult &result)
+{
+	if (result.stop==raven::NativeStop::exited) {
+		const auto code=uint32_t(result.value);
+		std::cout << "Native process exited with status " << code << '\n';
+		return !code ? 0 : (code & 0xff) ? int(code & 0xff) : 1;
+	}
+	if (result.stop == raven::NativeStop::returned) {
+		std::cout << "Native entry returned " << result.value << " (process initialization not implemented)\n";
+		return 0;
+	}
+	if (result.stop == raven::NativeStop::syscall)
+		std::cerr << "raven: unsupported guest syscall " << result.value;
+	else if (result.stop == raven::NativeStop::timeout)
+		std::cerr << "raven: native entry timed out";
+	else if (result.stop == raven::NativeStop::api)
+		std::cerr << "raven: unimplemented native process API";
+	else if (result.stop == raven::NativeStop::exception)
+		std::cerr << "raven: structured exception 0x" << std::hex << result.value << " (guest handler dispatch not implemented)";
+	else
+		std::cerr << "raven: native guest fault signal " << result.signal;
+	std::cerr << " at 0x" << std::hex << result.instruction << '\n';
+	return 1;
+}
+#endif
+
+int main(int argc, char **argv)
+{
+	const std::string mode = argc > 1 ? argv[1] : "";
+	const bool dump_image = mode == "--dump-image";
+	const bool map_image = mode == "--map-image" || dump_image;
+	const bool run_entry = mode == "--run-entry";
+	const bool run_modules = mode == "--run-modules";
+	const bool run_process = mode == "--run-process";
+	int first_file=3;
+	auto timeout=std::chrono::milliseconds(5000);
+	bool wayland=false;
+	if (run_process && argc>3 && std::string_view(argv[3]).starts_with("--timeout-ms=")) {
+		const std::string_view value=std::string_view(argv[3]).substr(13);
+		uint64_t milliseconds=0;
+		const auto parsed=std::from_chars(value.data(),value.data()+value.size(),milliseconds);
+		if (parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || milliseconds<1 || milliseconds>86400000) {
+			std::cerr << "raven: native timeout must be 1..86400000 milliseconds\n";
+			return 2;
+		}
+		timeout=std::chrono::milliseconds(milliseconds);
+		first_file=4;
+	}
+	if (run_process && argc>first_file && std::string_view(argv[first_file])=="--desktop=wayland") {
+		wayland=true; ++first_file;
+	}
+	const bool bind_imports = mode == "--bind-imports";
+	int last_file=argc;
+	if (run_process)
+		for (int i=first_file;i<argc;++i)
+			if (std::string_view(argv[i])=="--") { last_file=i;break; }
+	const bool inspect = mode == "--inspect" || mode == "--inspect-imports" || mode == "--inspect-exports" ||
+		mode == "--inspect-delay-imports" || mode == "--inspect-resources";
+	const bool valid = (inspect && argc == 3) || (map_image && (argc == 3 || argc == 4)) ||
+		(run_entry && argc == 4 && std::string(argv[2]) == "--execution=native") || (bind_imports && argc >= 3) ||
+		((run_modules || run_process) && last_file > first_file && std::string(argv[2]) == "--execution=native");
+	if (!valid) {
+		std::cerr << "Usage: raven --inspect|--inspect-imports|--inspect-exports|--inspect-delay-imports|--inspect-resources program.exe\n"
+			<< "       raven --map-image|--dump-image program.exe [base-address]\n"
+			<< "       raven --bind-imports program.exe dependency.dll ...\n"
+			<< "       raven --run-entry --execution=native fixture.exe\n"
+			<< "       raven --run-modules --execution=native fixture.exe dependency.dll ...\n"
+			<< "       raven --run-process --execution=native [--timeout-ms=N] [--desktop=wayland] program.exe [dependency.dll ...] [-- guest-argument ...]\n"
+			<< "Complete Windows process initialization is not implemented yet.\n";
+		return 2;
+	}
+	try {
+		if (bind_imports || run_modules || run_process) {
+			raven::ModuleSet modules;
+			raven::PEModule *entry = nullptr;
+			for (int i = (run_modules || run_process) ? first_file : 2; i < last_file; ++i) {
+				auto bytes = read_file(argv[i]);
+				auto &module = modules.add(std::filesystem::path(argv[i]).filename().string(), std::move(bytes));
+				if (!entry)
+					entry = &module;
+			}
+			if (run_modules || run_process) {
+#ifdef RAVEN_NATIVE_CPU
+				const auto bootstrap = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-bootstrap";
+				if (run_process) {
+					const auto directory = std::filesystem::absolute(argv[first_file]).parent_path();
+					const auto source = [&](std::string_view name) -> std::optional<std::vector<uint8_t>> {
+						std::optional<std::filesystem::path> selected;
+						for (const auto &item : std::filesystem::directory_iterator(directory)) {
+							auto filename = item.path().filename().string();
+							for (auto &character : filename)
+								if (character >= 'A' && character <= 'Z')
+									character = static_cast<char>(character + ('a' - 'A'));
+							if (filename != name || !item.is_regular_file())
+								continue;
+							if (selected)
+								throw std::runtime_error("ambiguous case-insensitive DLL filename");
+							selected = item.path();
+						}
+						if (!selected)
+							return std::nullopt;
+						return read_file(selected->c_str());
+					};
+					const auto debug=[](std::span<const uint8_t> message) {
+						std::cerr << "guest debug: ";
+						for (const auto byte : message) {
+							if ((byte>=32 && byte<127) || byte=='\n' || byte=='\t') std::cerr << char(byte);
+							else std::cerr << "\\x" << std::hex << unsigned(byte) << std::dec;
+						}
+						std::cerr << '\n';
+					};
+					raven::DesktopPresentation presentation;
+#ifdef RAVEN_WAYLAND
+					raven::WaylandPresentation backend;
+					if (wayland) presentation=backend.callbacks();
+#else
+					if (wayland) throw std::runtime_error("native Wayland presentation was not built");
+#endif
+					std::optional<raven::NativeLaunch> launch;
+					if (last_file<argc) {
+						std::vector<std::string_view> arguments;
+						for (int i=last_file+1;i<argc;++i) arguments.emplace_back(argv[i]);
+						const auto image=raven::launch_utf16(entry->name);
+						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
+					}
+					return native_result(raven::run_native_process(modules, *entry, bootstrap.string(), timeout, source, debug,presentation,launch));
+				}
+				return native_result(raven::run_native_modules(modules, *entry, bootstrap.string(), std::chrono::seconds(5)));
+#else
+				throw std::runtime_error("native execution requires an x86-64 Linux host");
+#endif
+			}
+			const auto count = modules.bind_imports();
+			std::cout << "Prepared " << modules.all().size() << " modules and bound " << count
+				<< " imports (DLL initialization not implemented)\n";
+			for (const auto &[name, module] : modules.all()) {
+				for (const auto &symbol : module->imports) {
+					uint64_t value = 0;
+					for (size_t byte = 0; byte < (module->image.is_64 ? 8U : 4U); ++byte)
+						value |= uint64_t(module->loaded.data()[symbol.iat_address + byte]) << (byte * 8);
+					std::cout << name << ':' << symbol.module << '!'
+						<< (symbol.by_ordinal ? "#" + std::to_string(symbol.ordinal) : symbol.name)
+						<< " iat=0x" << std::hex << module->loaded.base() + symbol.iat_address
+						<< " target=0x" << value << std::dec << '\n';
+				}
+			}
+			return 0;
+		}
+		const auto bytes = read_file(argv[run_entry ? 3 : 2]);
+		const raven::PEImage image(bytes);
+		const auto imports = image.imports();
+		if (run_entry) {
+#ifdef RAVEN_NATIVE_CPU
+			raven::LoadedImage loaded(image, image.image_base);
+			const auto bootstrap = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-bootstrap";
+			return native_result(raven::run_native_entry(image, loaded, bootstrap.string(), std::chrono::seconds(5)));
+#else
+			throw std::runtime_error("native execution requires an x86-64 Linux host");
+#endif
+		}
+		if (!dump_image)
+			std::cout << (image.is_64 ? "PE64" : "PE32") << " base=0x" << std::hex << image.image_base
+				<< " entry=0x" << image.entry << " size=0x" << image.image_size
+				<< std::dec << " sections=" << image.sections.size() << " imports=" << imports.size() << '\n';
+		if (mode == "--inspect-resources") {
+			const auto key = [](const raven::ResourceKey &value) {
+				if (const auto *id = std::get_if<uint32_t>(&value)) {
+					std::cout << '#' << *id;
+					return;
+				}
+				std::cout << '"';
+				for (const auto character : std::get<std::u16string>(value)) {
+					if (character >= 32 && character <= 126 && character != '"' && character != '\\')
+						std::cout << static_cast<char>(character);
+					else
+						std::cout << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+							<< uint32_t(character) << std::dec << std::setfill(' ');
+				}
+				std::cout << '"';
+			};
+			for (const auto &resource : image.resources()) {
+				std::cout << "Resource type=";
+				key(resource.type);
+				std::cout << " name=";
+				key(resource.name);
+				std::cout << " language=" << resource.language << " info=0x" << std::hex << resource.entry_address
+					<< " data=0x" << resource.data_address << std::dec << " size=" << resource.size
+					<< " codepage=" << resource.code_page << '\n';
+			}
+			return 0;
+		}
+		if (mode == "--inspect-delay-imports") {
+			for (const auto &descriptor : image.delay_imports()) {
+				std::cout << "Delay module=" << std::quoted(descriptor.module) << " descriptor=0x" << std::hex
+					<< descriptor.descriptor_address << " handle=0x" << descriptor.module_handle_address
+					<< " iat=0x" << descriptor.iat_address << " lookup=0x" << descriptor.lookup_address
+					<< " bound=0x" << descriptor.bound_address << " unload=0x" << descriptor.unload_address
+					<< " timestamp=0x" << descriptor.timestamp << std::dec << '\n';
+				for (const auto &symbol : descriptor.imports)
+					std::cout << descriptor.module << '!' << (symbol.by_ordinal ? "#" +
+						std::to_string(symbol.ordinal) : symbol.name) << " iat=0x" << std::hex
+						<< symbol.iat_address << std::dec << '\n';
+			}
+			return 0;
+		}
+		if (mode == "--inspect-exports") {
+			for (const auto &symbol : image.exports()) {
+				std::cout << symbol.ordinal << " 0x" << std::hex << symbol.address << std::dec
+					<< ' ' << std::quoted(symbol.forwarder);
+				for (const auto &name : symbol.names)
+					std::cout << ' ' << std::quoted(name);
+				std::cout << '\n';
+			}
+			return 0;
+		}
+		if (map_image) {
+			uint64_t base = image.image_base;
+			if (argc == 4) {
+				size_t consumed = 0;
+				base = std::stoull(argv[3], &consumed, 0);
+				if (consumed != std::string(argv[3]).size())
+					throw std::runtime_error("invalid image base argument");
+			}
+			raven::LoadedImage loaded(image, base);
+			if (dump_image) {
+				std::cout.write(reinterpret_cast<const char *>(loaded.data().data()),
+					static_cast<std::streamsize>(loaded.data().size()));
+				if (!std::cout)
+					throw std::runtime_error("cannot write loaded image");
+				return 0;
+			}
+			std::cout << "Shared image base=0x" << std::hex << loaded.base() << std::dec
+				<< " bytes=" << loaded.data().size() << " relocations=" << loaded.relocation_count() << '\n';
+			for (const auto &mapping : loaded.mappings())
+				std::cout << "Mapping address=0x" << std::hex << mapping.address << " size=0x" << mapping.size
+					<< " offset=0x" << mapping.file_offset << std::dec << " protection=" << mapping.protection << '\n';
+			return 0;
+		}
+		std::map<std::string, size_t> modules;
+		for (const auto &import : imports)
+			++modules[import.module];
+		if (std::string(argv[1]) == "--inspect-imports") {
+			for (const auto &import : imports)
+				std::cout << import.module << '!' << (import.by_ordinal ? "#" + std::to_string(import.ordinal) : import.name) << '\n';
+		} else {
+			for (const auto &[module, count] : modules)
+				std::cout << module << ' ' << count << '\n';
+		}
+		return 0;
+	} catch (const std::exception &error) {
+		std::cerr << "raven: " << error.what() << '\n';
+		return 1;
+	}
+}

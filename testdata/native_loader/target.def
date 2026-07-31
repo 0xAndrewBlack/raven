@@ -1,0 +1,3 @@
+LIBRARY target
+EXPORTS
+	Add=target_add @7
