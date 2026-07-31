@@ -13,6 +13,9 @@ namespace raven {
 
 enum class NativeStop { returned, syscall, fault, timeout, api, exception, exited };
 
+// x86 runs 32-bit guest code in host compatibility mode; every guest address stays below 4 GiB.
+enum class NativeMode { x64, x86 };
+
 struct NativeResult {
 	NativeStop stop;
 	uint64_t value;
@@ -33,7 +36,7 @@ struct NativeContext {
 class NativeProcess {
 public:
 	NativeProcess(std::span<LoadedImage *const> images, const std::string &bootstrap,
-		std::chrono::milliseconds setup_timeout);
+		std::chrono::milliseconds setup_timeout, NativeMode mode = NativeMode::x64);
 	~NativeProcess();
 	NativeProcess(const NativeProcess &) = delete;
 	NativeProcess &operator=(const NativeProcess &) = delete;
@@ -57,7 +60,11 @@ public:
 	std::pair<uint64_t, uint64_t> stack_bounds() const;
 	bool active() const;
 	void abandon_call();
-	void add_api_trap(uint64_t address);
+	// callee_cleanup is the stdcall argument byte count an x86 API pops on return; x64 ignores it.
+	void add_api_trap(uint64_t address, uint32_t callee_cleanup = 0);
+	NativeMode mode() const;
+	// x86 only: FS addresses the 4 KiB TEB at base through a host LDT descriptor.
+	void set_teb(uint64_t base);
 	void enter_nt_service(uint64_t instruction, uint32_t number);
 	void complete_debug_print(uint64_t instruction);
 	std::vector<uint64_t> api_arguments(size_t count) const;
@@ -69,6 +76,8 @@ private:
 	uint64_t memory_syscall(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3 = 0,
 		uint64_t a4 = 0, uint64_t a5 = 0);
 	NativeResult begin_call(uint64_t address, std::span<const uint64_t> arguments,
+		uint64_t stack_ceiling, std::chrono::milliseconds timeout);
+	NativeResult begin_x86_call(uint64_t address, std::span<const uint64_t> arguments,
 		uint64_t stack_ceiling, std::chrono::milliseconds timeout);
 };
 

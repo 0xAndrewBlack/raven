@@ -5,6 +5,7 @@
 #include <cstring>
 #include <elf.h>
 #include <fcntl.h>
+#include <map>
 #include <signal.h>
 #include <stdexcept>
 #include <sys/mman.h>
@@ -127,6 +128,9 @@ uint64_t NativeChild::syscall(uint64_t number, uint64_t a1, uint64_t a2, uint64_
 	user_regs_struct registers{};
 	trace(PTRACE_GETREGS, pid, &registers);
 	registers.rip = gate + 1;
+	// The gate is a 64-bit SYSCALL; a compatibility-mode guest is switched out only for this instruction.
+	registers.cs = 0x33;
+	registers.ss = 0x2b;
 	registers.rax = number;
 	registers.orig_rax = uint64_t(-1);
 	registers.rdi = a1;
@@ -154,7 +158,12 @@ struct NativeProcess::State {
 	std::vector<ImageMapping> mappings;
 	std::vector<std::pair<uint64_t, uint64_t>> allocations;
 	std::vector<std::pair<uint64_t, uint64_t>> image_allocations;
-	std::set<uint64_t> api_traps;
+	std::map<uint64_t, uint32_t> api_traps;
+	NativeMode mode = NativeMode::x64;
+	uint64_t return_gate = 0;
+	uint32_t fs_selector = 0;
+	uint64_t fs_base = 0;
+	uint32_t pending_cleanup = 0;
 	std::vector<NativeContext> callbacks;
 	uint64_t stack_top = 0;
 	bool stopped = true;
@@ -164,6 +173,7 @@ struct NativeProcess::State {
 	bool debug_print_fault = false;
 	void require_stopped() const;
 	bool covers(uint64_t address, size_t size, int protection) const;
+	uint64_t limit() const { return mode == NativeMode::x86 ? 0x100000000ULL : 0x800000000000ULL; }
 };
 
 void NativeProcess::State::require_stopped() const
@@ -190,14 +200,17 @@ bool NativeProcess::State::covers(uint64_t address, size_t size, int protection)
 }
 
 NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::string &bootstrap,
-	std::chrono::milliseconds setup_timeout) : state(std::make_unique<State>())
+	std::chrono::milliseconds setup_timeout, NativeMode mode) : state(std::make_unique<State>())
 {
 	if (setup_timeout.count() <= 0)
 		throw std::runtime_error("native execution requires a positive timeout");
+	state->mode = mode;
 	std::vector<int> descriptors;
-	for (const auto *mapped_image : images) {
+	for (auto *mapped_image : images) {
 		if (!mapped_image)
 			throw std::runtime_error("null native image mapping");
+		if (mapped_image->data().size() > state->limit() || mapped_image->base() > state->limit() - mapped_image->data().size())
+			throw std::runtime_error("native image does not fit the guest address space");
 		descriptors.push_back(mapped_image->descriptor());
 	}
 	state->child = std::make_unique<NativeChild>(descriptors, bootstrap, setup_timeout);
@@ -213,11 +226,26 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 		}
 	}
 	const uint64_t stack_size = 1024 * 1024;
+	const uint64_t low_flag = mode == NativeMode::x86 ? MAP_32BIT : 0;
 	const auto stack = child.syscall(SYS_mmap, 0, stack_size + 8192, PROT_NONE,
-		MAP_PRIVATE | MAP_ANONYMOUS, uint64_t(-1));
+		MAP_PRIVATE | MAP_ANONYMOUS | low_flag, uint64_t(-1));
+	if (stack + stack_size + 8192 > state->limit())
+		throw std::runtime_error("host placed the native stack outside the guest address space");
 	child.syscall(SYS_mprotect, stack + 4096, stack_size, PROT_READ | PROT_WRITE);
 	state->mappings.push_back({stack + 4096, stack_size, 0, PROT_READ | PROT_WRITE});
 	state->stack_top = stack + 4096 + stack_size;
+	if (mode == NativeMode::x86) {
+		// 32-bit return addresses cannot name the 64-bit bootstrap gate, so calls return through an INT3 page below 4 GiB.
+		const auto page = child.syscall(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, uint64_t(-1));
+		if (page + 4096 > state->limit())
+			throw std::runtime_error("host placed the native return gate outside the guest address space");
+		state->mappings.push_back({page, 4096, 0, PROT_READ | PROT_WRITE});
+		write_memory(page, std::vector<uint8_t>{0xcc});
+		child.syscall(SYS_mprotect, page, 4096, PROT_READ | PROT_EXEC);
+		state->mappings.back().protection = PROT_READ | PROT_EXEC;
+		state->return_gate = page;
+	}
 	user_regs_struct registers{};
 	trace(PTRACE_GETREGS, child.pid, &registers);
 	registers.rax = registers.rbx = registers.rcx = registers.rdx = registers.rsi = registers.rdi = registers.rbp = 0;
@@ -333,9 +361,8 @@ uint64_t NativeProcess::memory_syscall(uint64_t number, uint64_t a1, uint64_t a2
 	return result;
 }
 
-static void memory_range(uint64_t address, size_t size, int protection)
+static void memory_range(uint64_t address, size_t size, int protection, uint64_t limit)
 {
-	const uint64_t limit = 0x800000000000ULL;
 	if (!size || size % 4096 || size > 1024 * 1024 * 1024 || address % 4096 ||
 		address >= limit || size > limit - address || (protection & ~(PROT_READ | PROT_WRITE | PROT_EXEC)))
 		throw std::runtime_error("invalid native memory range or protection");
@@ -344,12 +371,12 @@ static void memory_range(uint64_t address, size_t size, int protection)
 uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address)
 {
 	state->require_stopped();
-	memory_range(address, size, protection);
+	memory_range(address, size, protection, state->limit());
 	state->mappings.reserve(state->mappings.size() + 1);
 	state->allocations.reserve(state->allocations.size() + 1);
 	const auto mapped = memory_syscall(SYS_mmap, address, size, static_cast<uint64_t>(protection),
-		MAP_PRIVATE | MAP_ANONYMOUS | (address ? MAP_FIXED_NOREPLACE : 0), uint64_t(-1));
-	if ((address && mapped != address) || mapped >= 0x800000000000ULL || size > 0x800000000000ULL - mapped) {
+		MAP_PRIVATE | MAP_ANONYMOUS | (address ? MAP_FIXED_NOREPLACE : state->mode == NativeMode::x86 ? MAP_32BIT : 0), uint64_t(-1));
+	if ((address && mapped != address) || mapped >= state->limit() || size > state->limit() - mapped) {
 		state->child->stop();
 		throw std::runtime_error("host returned an invalid native allocation address");
 	}
@@ -361,7 +388,7 @@ uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address
 void NativeProcess::protect_memory(uint64_t address, size_t size, int protection)
 {
 	state->require_stopped();
-	memory_range(address, size, protection);
+	memory_range(address, size, protection, state->limit());
 	const auto owned = std::find_if(state->allocations.begin(), state->allocations.end(), [&](const auto &allocation) {
 		return address >= allocation.first && address - allocation.first < allocation.second &&
 			size <= allocation.second - (address - allocation.first);
@@ -399,14 +426,14 @@ void NativeProcess::unmap_memory(uint64_t address)
 	const uint64_t end = address + owned->second;
 	memory_syscall(SYS_munmap, address, owned->second);
 	std::erase_if(state->mappings, [&](const auto &mapping) { return mapping.address >= address && mapping.address < end; });
-	std::erase_if(state->api_traps, [&](uint64_t trap) { return trap >= address && trap < end; });
+	std::erase_if(state->api_traps, [&](const auto &trap) { return trap.first >= address && trap.first < end; });
 	state->allocations.erase(owned);
 }
 
 bool NativeProcess::memory_available(uint64_t address, size_t size) const
 {
 	state->require_stopped();
-	memory_range(address,size,PROT_NONE);
+	memory_range(address,size,PROT_NONE,state->limit());
 	const auto end = address+size;
 	const auto stack = state->stack_top-1024*1024-4096;
 	if (address < state->stack_top+4096 && stack < end)
@@ -420,7 +447,7 @@ bool NativeProcess::memory_available(uint64_t address, size_t size) const
 void NativeProcess::discard_memory(uint64_t address, size_t size)
 {
 	state->require_stopped();
-	memory_range(address,size,PROT_NONE);
+	memory_range(address,size,PROT_NONE,state->limit());
 	const auto owned = std::find_if(state->allocations.begin(),state->allocations.end(),[&](const auto &allocation) {
 		return address >= allocation.first && address-allocation.first < allocation.second &&
 			size <= allocation.second-(address-allocation.first);
@@ -435,7 +462,7 @@ void NativeProcess::map_image(LoadedImage &image)
 	state->require_stopped();
 	const auto base = image.base();
 	const auto size = image.data().size();
-	memory_range(base, size, PROT_NONE);
+	memory_range(base, size, PROT_NONE, state->limit());
 	const auto mappings = image.mappings();
 	state->mappings.reserve(state->mappings.size() + mappings.size() + 1);
 	state->image_allocations.reserve(state->image_allocations.size() + 1);
@@ -491,7 +518,7 @@ void NativeProcess::unmap_image(uint64_t address)
 	const uint64_t end = address + owned->second;
 	memory_syscall(SYS_munmap, address, owned->second);
 	std::erase_if(state->mappings, [&](const auto &mapping) { return mapping.address >= address && mapping.address < end; });
-	std::erase_if(state->api_traps, [&](uint64_t trap) { return trap >= address && trap < end; });
+	std::erase_if(state->api_traps, [&](const auto &trap) { return trap.first >= address && trap.first < end; });
 	state->image_allocations.erase(owned);
 }
 
@@ -519,12 +546,47 @@ void NativeProcess::abandon_call()
 	state->awaiting_syscall=false;
 }
 
-void NativeProcess::add_api_trap(uint64_t address)
+NativeMode NativeProcess::mode() const
+{
+	return state->mode;
+}
+
+void NativeProcess::set_teb(uint64_t base)
+{
+	state->require_stopped();
+	if (state->mode != NativeMode::x86 || base > 0xfffff000ULL || base % 4096)
+		throw std::runtime_error("native TEB descriptor requires an x86 process and a page-aligned 32-bit address");
+	// struct user_desc: entry, base, limit, flags (32-bit segment, data, byte granularity, usable).
+	std::vector<uint8_t> descriptor(16);
+	const uint32_t fields[] = {0, uint32_t(base), 0xfff, 0x41};
+	for (size_t index = 0; index < 4; ++index)
+		for (size_t byte = 0; byte < 4; ++byte)
+			descriptor[index * 4 + byte] = uint8_t(fields[index] >> (byte * 8));
+	const auto scratch = map_memory(4096, PROT_READ | PROT_WRITE);
+	try {
+		write_memory(scratch, descriptor);
+		const auto result = memory_syscall(SYS_modify_ldt, 1, scratch, descriptor.size());
+		if (result != 0)
+			throw std::runtime_error("host rejected the native TEB descriptor");
+	} catch (...) {
+		if (state->child->pid != -1)
+			unmap_memory(scratch);
+		throw;
+	}
+	unmap_memory(scratch);
+	// LDT index 0, table indicator 1, requested privilege level 3.
+	state->fs_selector = 7;
+	state->fs_base = base;
+}
+
+void NativeProcess::add_api_trap(uint64_t address, uint32_t callee_cleanup)
 {
 	state->require_stopped();
 	if (!state->covers(address, 1, PROT_EXEC) || read_memory(address, 1)[0] != 0xcc)
 		throw std::runtime_error("native API trap must be an executable INT3");
-	state->api_traps.insert(address);
+	if (state->mode == NativeMode::x86 && (address >= state->limit() || callee_cleanup % 4))
+		throw std::runtime_error("native x86 API trap requires a 32-bit address and dword-aligned cleanup");
+	state->api_traps[address] = callee_cleanup;
 }
 
 NativeResult NativeProcess::call(uint64_t address, std::span<const uint64_t> arguments,
@@ -573,6 +635,8 @@ NativeResult NativeProcess::begin_call(uint64_t address, std::span<const uint64_
 	if (!state->covers(address, 1, PROT_EXEC))
 		throw std::runtime_error("native entry is outside executable image memory");
 	state->child->set_timeout(timeout);
+	if (state->mode == NativeMode::x86)
+		return begin_x86_call(address, arguments, stack_ceiling, timeout);
 	const size_t extra = arguments.size() > 4 ? (arguments.size() - 4) * 8 : 0;
 	const size_t frame_size = ((32 + extra + 15) & ~size_t(15)) + 8;
 	if (stack_ceiling < frame_size)
@@ -598,6 +662,48 @@ NativeResult NativeProcess::begin_call(uint64_t address, std::span<const uint64_
 	registers.eflags = 0x202;
 	registers.rip = address;
 	registers.rsp = rsp;
+	trace(PTRACE_SETREGS, state->child->pid, &registers);
+	state->active_call = true;
+	state->awaiting_api = false;
+	state->awaiting_syscall = false;
+	state->debug_print_fault = false;
+	return resume(timeout);
+}
+
+NativeResult NativeProcess::begin_x86_call(uint64_t address, std::span<const uint64_t> arguments,
+	uint64_t stack_ceiling, std::chrono::milliseconds timeout)
+{
+	if (std::any_of(arguments.begin(), arguments.end(), [](uint64_t value) { return value > UINT32_MAX; }))
+		throw std::runtime_error("native x86 call argument exceeds 32 bits");
+	const uint64_t size = arguments.size() * 4;
+	if (stack_ceiling > state->limit() || stack_ceiling < size + 16)
+		throw std::runtime_error("native call stack address is invalid");
+	// Win32 entry points see ESP+4 on a 16-byte boundary so compiler-aligned locals stay aligned.
+	const uint64_t first_argument = (stack_ceiling - size) & ~uint64_t(15);
+	const uint64_t esp = first_argument - 4;
+	std::vector<uint8_t> frame(4 + size);
+	const auto put = [&](size_t offset, uint64_t value) {
+		for (size_t byte = 0; byte < 4; ++byte)
+			frame[offset + byte] = static_cast<uint8_t>(value >> (byte * 8));
+	};
+	put(0, state->return_gate);
+	for (size_t index = 0; index < arguments.size(); ++index)
+		put(4 + index * 4, arguments[index]);
+	write_memory(esp, frame);
+	user_regs_struct registers{};
+	trace(PTRACE_GETREGS, state->child->pid, &registers);
+	registers.rax = registers.rcx = registers.rdx = 0;
+	registers.orig_rax = uint64_t(-1);
+	registers.eflags = 0x202;
+	registers.rip = address;
+	registers.rsp = esp;
+	registers.cs = 0x23;
+	registers.ss = registers.ds = registers.es = 0x2b;
+	// The host reloads FS bases from thread state on every switch-in, so the selector and the descriptor base must agree.
+	registers.fs = state->fs_selector;
+	registers.fs_base = state->fs_base;
+	registers.gs = 0;
+	registers.gs_base = 0;
 	trace(PTRACE_SETREGS, state->child->pid, &registers);
 	state->active_call = true;
 	state->awaiting_api = false;
@@ -636,7 +742,8 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 	trace(PTRACE_GETSIGINFO, child.pid, &info);
 	state->debug_print_fault=signal==SIGSEGV && info.si_code==SI_KERNEL && registers.rax==1;
 	const bool breakpoint = signal == SIGTRAP && (info.si_code == TRAP_BRKPT || info.si_code == SI_KERNEL);
-	if (breakpoint && registers.rip == child.gate + 1) {
+	const bool x86 = state->mode == NativeMode::x86;
+	if (breakpoint && registers.rip == (x86 ? state->return_gate : child.gate) + 1) {
 		if (state->callbacks.empty()) {
 			state->active_call = false;
 		} else {
@@ -649,10 +756,11 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 			state->callbacks.pop_back();
 			state->awaiting_api = true;
 		}
-		return {NativeStop::returned, registers.rax, registers.rip, signal};
+		return {NativeStop::returned, x86 ? registers.rax & 0xffffffff : registers.rax, registers.rip, signal};
 	}
 	if (breakpoint && state->api_traps.contains(registers.rip - 1)) {
 		state->awaiting_api = true;
+		state->pending_cleanup = state->api_traps.at(registers.rip - 1);
 		return {NativeStop::api, registers.rip - 1, registers.rip, signal};
 	}
 	const uint64_t fault_address = signal == SIGSEGV || signal == SIGBUS || signal == SIGILL || signal == SIGFPE ?
@@ -667,6 +775,16 @@ std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const
 		throw std::runtime_error("native process is not at an API or exceeds argument limit");
 	user_regs_struct registers{};
 	trace(PTRACE_GETREGS, state->child->pid, &registers);
+	if (state->mode == NativeMode::x86) {
+		std::vector<uint64_t> values(count);
+		if (!count)
+			return values;
+		const auto stack = read_memory(registers.rsp + 4, count * 4);
+		for (size_t index = 0; index < count; ++index)
+			for (size_t byte = 0; byte < 4; ++byte)
+				values[index] |= uint64_t(stack[index * 4 + byte]) << (byte * 8);
+		return values;
+	}
 	const uint64_t first[] = {registers.rcx, registers.rdx, registers.r8, registers.r9};
 	std::vector<uint64_t> arguments(count);
 	for (size_t index = 0; index < std::min(count, size_t(4)); ++index)
@@ -686,6 +804,8 @@ std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const
 void NativeProcess::enter_nt_service(uint64_t instruction, uint32_t number)
 {
 	state->require_stopped();
+	if (state->mode != NativeMode::x64)
+		throw std::runtime_error("native NT services are x64 only");
 	if (!state->active_call || state->awaiting_api || !state->awaiting_syscall)
 		throw std::runtime_error("native process is not at a pending syscall service");
 	auto saved=context();
@@ -704,6 +824,8 @@ void NativeProcess::enter_nt_service(uint64_t instruction, uint32_t number)
 void NativeProcess::complete_debug_print(uint64_t instruction)
 {
 	state->require_stopped();
+	if (state->mode != NativeMode::x64)
+		throw std::runtime_error("native debug print services are x64 only");
 	const auto saved=context();
 	if (!state->active_call || state->awaiting_api || state->awaiting_syscall || !state->debug_print_fault ||
 		saved.registers.rip!=instruction || saved.registers.rax!=1 || !state->covers(instruction,4,PROT_EXEC) ||
@@ -721,6 +843,19 @@ void NativeProcess::return_api(uint64_t value)
 		throw std::runtime_error("native process is not awaiting an API result");
 	user_regs_struct registers{};
 	trace(PTRACE_GETREGS, state->child->pid, &registers);
+	if (state->mode == NativeMode::x86) {
+		const auto stack = read_memory(registers.rsp, 4);
+		registers.rip = 0;
+		for (size_t byte = 0; byte < 4; ++byte)
+			registers.rip |= uint64_t(stack[byte]) << (byte * 8);
+		registers.rsp += 4 + state->pending_cleanup;
+		registers.rax = value & 0xffffffff;
+		registers.rdx = value >> 32;
+		registers.orig_rax = uint64_t(-1);
+		trace(PTRACE_SETREGS, state->child->pid, &registers);
+		state->awaiting_api = false;
+		return;
+	}
 	if (registers.rsp > UINT64_MAX - 8)
 		throw std::runtime_error("native API return stack address overflows");
 	const auto stack = read_memory(registers.rsp, 8);
