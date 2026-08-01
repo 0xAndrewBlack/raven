@@ -1,5 +1,6 @@
 #include <vulkan/vulkan.h>
 #include "vulkan_compute_spirv.h"
+#include "vulkan_triangle_spirv.h"
 
 _Static_assert(sizeof(VkInstanceCreateInfo) == 64, "PE64 instance info ABI");
 _Static_assert(sizeof(VkApplicationInfo) == 48, "PE64 application info ABI");
@@ -20,6 +21,8 @@ __declspec(dllexport) uint32_t compute_workflow;
 __declspec(dllexport) uint32_t computed[64];
 __declspec(dllexport) uint32_t image_workflow;
 __declspec(dllexport) uint32_t image_readback[64];
+__declspec(dllexport) uint32_t graphics_workflow;
+__declspec(dllexport) uint32_t rendered[256];
 
 unsigned int raven_entry(void)
 {
@@ -414,6 +417,145 @@ unsigned int raven_entry(void)
 			vkFreeMemory(device, upload_memory, 0);
 			vkFreeMemory(device, download_memory, 0);
 			image_workflow = 1;
+		}
+		{
+			/* A 16x16 target cleared to blue with a red triangle over its upper left half, read back through a buffer. */
+			VkImageCreateInfo image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, 0, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {16, 16, 1}, 1, 1,
+				VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+				VK_SHARING_MODE_EXCLUSIVE, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED};
+			VkBufferCreateInfo buffer_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, 0, 0, 1024, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, 0};
+			VkImage image = VK_NULL_HANDLE;
+			VkImageView view = VK_NULL_HANDLE;
+			VkBuffer readback = VK_NULL_HANDLE;
+			VkDeviceMemory image_memory = VK_NULL_HANDLE, readback_memory = VK_NULL_HANDLE;
+			VkMemoryRequirements requirements, buffer_requirements;
+			uint32_t type = 0xffffffffu, host_type = 0xffffffffu, index, *pixels = 0;
+			VkShaderModuleCreateInfo vertex_info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, 0, 0, sizeof triangle_vertex_words, triangle_vertex_words};
+			VkShaderModuleCreateInfo fragment_info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, 0, 0, sizeof triangle_fragment_words, triangle_fragment_words};
+			VkShaderModule vertex = VK_NULL_HANDLE, fragment = VK_NULL_HANDLE;
+			VkAttachmentDescription attachment = {0, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
+				VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL};
+			VkAttachmentReference reference = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+			VkSubpassDescription subpass = {0, VK_PIPELINE_BIND_POINT_GRAPHICS, 0, 0, 1, &reference, 0, 0, 0, 0};
+			VkRenderPassCreateInfo pass_info = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, 0, 0, 1, &attachment, 1, &subpass, 0, 0};
+			VkRenderPass pass = VK_NULL_HANDLE;
+			VkFramebufferCreateInfo framebuffer_info;
+			VkFramebuffer framebuffer = VK_NULL_HANDLE;
+			VkPipelineLayoutCreateInfo layout_info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, 0, 0, 0, 0, 0, 0};
+			VkPipelineLayout layout = VK_NULL_HANDLE;
+			VkPipeline pipeline = VK_NULL_HANDLE;
+			VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, 0, 0, 0};
+			VkCommandPool pool = VK_NULL_HANDLE;
+			VkCommandBuffer command = VK_NULL_HANDLE;
+			VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			VkBufferImageCopy copy = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {16, 16, 1}};
+			if (vkCreateImage(device, &image_info, 0, &image) != VK_SUCCESS)
+				return 80;
+			vkGetImageMemoryRequirements(device, image, &requirements);
+			for (index = 0; index < 32 && type == 0xffffffffu; ++index)
+				if (requirements.memoryTypeBits & (1u << index))
+					type = index;
+			if (vkCreateBuffer(device, &buffer_info, 0, &readback) != VK_SUCCESS)
+				return 81;
+			vkGetBufferMemoryRequirements(device, readback, &buffer_requirements);
+			for (index = 0; index < memory_properties.memoryTypeCount; ++index)
+				if ((buffer_requirements.memoryTypeBits & (1u << index)) && (memory_properties.memoryTypes[index].propertyFlags &
+					(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+					host_type = index;
+					break;
+				}
+			if (type == 0xffffffffu || host_type == 0xffffffffu)
+				return 82;
+			{
+				VkMemoryAllocateInfo image_allocation = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, requirements.size, type};
+				VkMemoryAllocateInfo host_allocation = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, buffer_requirements.size, host_type};
+				if (vkAllocateMemory(device, &image_allocation, 0, &image_memory) != VK_SUCCESS || vkAllocateMemory(device, &host_allocation, 0, &readback_memory) != VK_SUCCESS)
+					return 83;
+			}
+			if (vkBindImageMemory(device, image, image_memory, 0) != VK_SUCCESS || vkBindBufferMemory(device, readback, readback_memory, 0) != VK_SUCCESS ||
+				vkMapMemory(device, readback_memory, 0, VK_WHOLE_SIZE, 0, (void **)&pixels) != VK_SUCCESS || !pixels)
+				return 84;
+			for (index = 0; index < 256; ++index)
+				pixels[index] = 0x11223344u;
+			{
+				VkImageViewCreateInfo view_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, 0, 0, image, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM,
+					{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY}, range};
+				if (vkCreateImageView(device, &view_info, 0, &view) != VK_SUCCESS)
+					return 85;
+			}
+			if (vkCreateShaderModule(device, &vertex_info, 0, &vertex) != VK_SUCCESS || vkCreateShaderModule(device, &fragment_info, 0, &fragment) != VK_SUCCESS)
+				return 86;
+			if (vkCreateRenderPass(device, &pass_info, 0, &pass) != VK_SUCCESS || !pass)
+				return 87;
+			framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; framebuffer_info.pNext = 0; framebuffer_info.flags = 0;
+			framebuffer_info.renderPass = pass; framebuffer_info.attachmentCount = 1; framebuffer_info.pAttachments = &view;
+			framebuffer_info.width = 16; framebuffer_info.height = 16; framebuffer_info.layers = 1;
+			if (vkCreateFramebuffer(device, &framebuffer_info, 0, &framebuffer) != VK_SUCCESS || vkCreatePipelineLayout(device, &layout_info, 0, &layout) != VK_SUCCESS)
+				return 88;
+			{
+				VkPipelineShaderStageCreateInfo stages[2] = {
+					{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, 0, 0, VK_SHADER_STAGE_VERTEX_BIT, vertex, "main", 0},
+					{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, 0, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fragment, "main", 0}};
+				VkPipelineVertexInputStateCreateInfo vertex_state = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, 0, 0, 0, 0, 0, 0};
+				VkPipelineInputAssemblyStateCreateInfo assembly = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, 0, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE};
+				VkViewport viewport = {0, 0, 16, 16, 0, 1};
+				VkRect2D scissor = {{0, 0}, {16, 16}};
+				VkPipelineViewportStateCreateInfo viewport_state = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, 0, 0, 1, &viewport, 1, &scissor};
+				VkPipelineRasterizationStateCreateInfo raster = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, 0, 0, VK_FALSE, VK_FALSE,
+					VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1.0f};
+				VkPipelineMultisampleStateCreateInfo multisample = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, 0, 0, VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 0, 0, VK_FALSE, VK_FALSE};
+				VkPipelineColorBlendAttachmentState blend_attachment = {VK_FALSE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
+					VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT};
+				VkPipelineColorBlendStateCreateInfo blend = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, 0, 0, VK_FALSE, VK_LOGIC_OP_COPY, 1, &blend_attachment, {0, 0, 0, 0}};
+				VkGraphicsPipelineCreateInfo pipeline_info = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, 0, 0, 2, stages, &vertex_state, &assembly, 0, &viewport_state,
+					&raster, &multisample, 0, &blend, 0, layout, pass, 0, VK_NULL_HANDLE, -1};
+				if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, 0, &pipeline) != VK_SUCCESS || !pipeline)
+					return 89;
+			}
+			if (vkCreateCommandPool(device, &pool_info, 0, &pool) != VK_SUCCESS)
+				return 90;
+			{
+				VkCommandBufferAllocateInfo allocation = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, 0, pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+				VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, 0};
+				VkClearValue clear;
+				VkRenderPassBeginInfo pass_begin;
+				VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+					VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, image, range};
+				VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, 0, 0, 0, 1, &command, 0, 0};
+				clear.color.float32[0] = 0.0f; clear.color.float32[1] = 0.0f; clear.color.float32[2] = 1.0f; clear.color.float32[3] = 1.0f;
+				pass_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; pass_begin.pNext = 0; pass_begin.renderPass = pass; pass_begin.framebuffer = framebuffer;
+				pass_begin.renderArea.offset.x = 0; pass_begin.renderArea.offset.y = 0; pass_begin.renderArea.extent.width = 16; pass_begin.renderArea.extent.height = 16;
+				pass_begin.clearValueCount = 1; pass_begin.pClearValues = &clear;
+				if (vkAllocateCommandBuffers(device, &allocation, &command) != VK_SUCCESS || vkBeginCommandBuffer(command, &begin) != VK_SUCCESS)
+					return 91;
+				vkCmdBeginRenderPass(command, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+				vkCmdDraw(command, 3, 1, 0, 0);
+				vkCmdEndRenderPass(command);
+				vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 0, 0, 1, &barrier);
+				vkCmdCopyImageToBuffer(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &copy);
+				if (vkEndCommandBuffer(command) != VK_SUCCESS || vkQueueSubmit(first, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS || vkQueueWaitIdle(first) != VK_SUCCESS)
+					return 92;
+			}
+			for (index = 0; index < 256; ++index)
+				rendered[index] = pixels[index];
+			/* Pixel (2,2) lies inside the triangle, pixel (14,14) outside it. */
+			if (pixels[2 * 16 + 2] != 0xff0000ffu || pixels[14 * 16 + 14] != 0xffff0000u)
+				return 93;
+			vkUnmapMemory(device, readback_memory);
+			vkDestroyCommandPool(device, pool, 0);
+			vkDestroyPipeline(device, pipeline, 0);
+			vkDestroyPipelineLayout(device, layout, 0);
+			vkDestroyFramebuffer(device, framebuffer, 0);
+			vkDestroyRenderPass(device, pass, 0);
+			vkDestroyShaderModule(device, vertex, 0);
+			vkDestroyShaderModule(device, fragment, 0);
+			vkDestroyImageView(device, view, 0);
+			vkDestroyImage(device, image, 0);
+			vkDestroyBuffer(device, readback, 0);
+			vkFreeMemory(device, image_memory, 0);
+			vkFreeMemory(device, readback_memory, 0);
+			graphics_workflow = 1;
 		}
 		vkDestroyDevice(device, 0);
 		vkDestroyDevice(VK_NULL_HANDLE, 0);

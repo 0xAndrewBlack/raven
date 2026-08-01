@@ -11,6 +11,7 @@ namespace raven {
 std::span<const std::string_view> vulkan_resource_names();
 std::span<const std::string_view> vulkan_compute_names();
 std::span<const std::string_view> vulkan_image_names();
+std::span<const std::string_view> vulkan_graphics_names();
 
 class VulkanBridge {
 public:
@@ -47,11 +48,12 @@ private:
 	struct Fence { VkFence handle; uint64_t device; };
 	std::map<uint64_t, Fence> fences;
 	// Shader modules, descriptor and pipeline objects: one host handle each, owned by a device token.
-	enum class Kind { shader, set_layout, pipeline_layout, pipeline, pool, set, image, image_view, semaphore };
+	enum class Kind { shader, set_layout, pipeline_layout, pipeline, pool, set, image, image_view, semaphore, render_pass, framebuffer };
 	struct Object { uint64_t handle; uint64_t device; Kind kind; uint64_t parent = 0; };
 	std::map<uint64_t, Object> objects;
 	bool dispatch_compute(std::string_view name);
 	bool dispatch_images(std::string_view name);
+	bool dispatch_graphics(std::string_view name);
 	void destroy_object(const VkDevice &device, const Object &object);
 	uint64_t next_handle = 0x5600000000000001ULL;
 	void destroy_device(uint64_t token);

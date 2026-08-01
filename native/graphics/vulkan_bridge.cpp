@@ -28,11 +28,13 @@ static constexpr std::array<std::string_view, 14> names{
 static constexpr std::array<std::string_view, 4> device_names{"vkDestroyDevice", "vkGetDeviceQueue", "vkDeviceWaitIdle", "vkGetDeviceProcAddr"};
 static bool is_device_function(std::string_view symbol)
 {
-	const auto resources = vulkan_resource_names(), compute = vulkan_compute_names(), images = vulkan_image_names();
+	const auto resources = vulkan_resource_names(), compute = vulkan_compute_names(), images = vulkan_image_names(),
+		graphics = vulkan_graphics_names();
 	return std::find(device_names.begin(), device_names.end(), symbol) != device_names.end() ||
 		std::find(resources.begin(), resources.end(), symbol) != resources.end() ||
 		std::find(compute.begin(), compute.end(), symbol) != compute.end() ||
-		std::find(images.begin(), images.end(), symbol) != images.end();
+		std::find(images.begin(), images.end(), symbol) != images.end() ||
+		std::find(graphics.begin(), graphics.end(), symbol) != graphics.end();
 }
 
 static_assert(sizeof(VkInstanceCreateInfo) == 64 && sizeof(VkApplicationInfo) == 48);
@@ -49,6 +51,8 @@ std::span<const std::string_view> VulkanBridge::exports()
 		for (const auto name : vulkan_compute_names())
 			all.push_back(name);
 		for (const auto name : vulkan_image_names())
+			all.push_back(name);
+		for (const auto name : vulkan_graphics_names())
 			all.push_back(name);
 		std::sort(all.begin(), all.end());
 		return all;
@@ -74,7 +78,7 @@ void VulkanBridge::destroy_device(uint64_t token)
 	vkDeviceWaitIdle(found->second.handle);
 	std::erase_if(command_buffers, [&](const auto &item) { return item.second.device == token; });
 	// Pipelines first, then what they were built from; descriptor sets go with their pool.
-	for (const auto kind : {Kind::pipeline, Kind::pool, Kind::pipeline_layout, Kind::set_layout, Kind::shader, Kind::image_view, Kind::image, Kind::semaphore})
+	for (const auto kind : {Kind::pipeline, Kind::framebuffer, Kind::render_pass, Kind::pool, Kind::pipeline_layout, Kind::set_layout, Kind::shader, Kind::image_view, Kind::image, Kind::semaphore})
 		for (auto item = objects.begin(); item != objects.end();)
 			if (item->second.device == token && item->second.kind == kind) {
 				destroy_object(found->second.handle, item->second);
@@ -117,7 +121,7 @@ std::string VulkanBridge::string(uint64_t address)
 
 bool VulkanBridge::dispatch(std::string_view name)
 {
-	if (dispatch_resource(name) || dispatch_compute(name) || dispatch_images(name))
+	if (dispatch_resource(name) || dispatch_compute(name) || dispatch_images(name) || dispatch_graphics(name))
 		return true;
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;

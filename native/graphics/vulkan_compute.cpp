@@ -31,6 +31,8 @@ void VulkanBridge::destroy_object(const VkDevice &device, const Object &object)
 	case Kind::image: vkDestroyImage(device, as_handle<VkImage>(object.handle), nullptr); break;
 	case Kind::image_view: vkDestroyImageView(device, as_handle<VkImageView>(object.handle), nullptr); break;
 	case Kind::semaphore: vkDestroySemaphore(device, as_handle<VkSemaphore>(object.handle), nullptr); break;
+	case Kind::render_pass: vkDestroyRenderPass(device, as_handle<VkRenderPass>(object.handle), nullptr); break;
+	case Kind::framebuffer: vkDestroyFramebuffer(device, as_handle<VkFramebuffer>(object.handle), nullptr); break;
 	}
 }
 
@@ -240,9 +242,9 @@ bool VulkanBridge::dispatch_compute(std::string_view name)
 		}
 	} else if (name == "vkCmdBindPipeline") {
 		const auto &command = command_of(a[0]);
-		if (a[1] != VK_PIPELINE_BIND_POINT_COMPUTE)
-			throw std::runtime_error("only compute pipelines are implemented");
-		vkCmdBindPipeline(command.handle, VK_PIPELINE_BIND_POINT_COMPUTE, as_handle<VkPipeline>(object_of(a[2], command.device, Kind::pipeline).handle));
+		if (a[1] != VK_PIPELINE_BIND_POINT_COMPUTE && a[1] != VK_PIPELINE_BIND_POINT_GRAPHICS)
+			throw std::runtime_error("unsupported Vulkan pipeline bind point");
+		vkCmdBindPipeline(command.handle, VkPipelineBindPoint(a[1]), as_handle<VkPipeline>(object_of(a[2], command.device, Kind::pipeline).handle));
 	} else if (name == "vkCmdBindDescriptorSets") {
 		const auto &command = command_of(a[0]);
 		if (a[1] != VK_PIPELINE_BIND_POINT_COMPUTE || a[6])

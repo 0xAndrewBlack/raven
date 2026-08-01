@@ -91,6 +91,15 @@ int main(int argc, char **argv)
 		const auto readback = field.template operator()<std::array<uint32_t, 64>>("image_readback");
 		for (uint32_t index = 0; index < readback.size(); ++index)
 			check(readback[index] == (0xff000000u | (index * 3u << 16) | (index * 2u << 8) | index), "image round trip returned different texels");
+		check(field.template operator()<uint32_t>("graphics_workflow") == 1, "guest render pass did not complete");
+		const auto rendered = field.template operator()<std::array<uint32_t, 256>>("rendered");
+		for (uint32_t y = 0; y < 16; ++y)
+			for (uint32_t x = 0; x < 16; ++x) {
+				// The triangle covers the pixels whose centres satisfy x + y < 16; the rest keeps the blue clear colour.
+				const double centre_x = x + 0.5, centre_y = y + 0.5;
+				if (centre_x + centre_y < 15.5 || centre_x + centre_y > 16.5)
+					check(rendered[y * 16 + x] == (centre_x + centre_y < 16 ? 0xff0000ffu : 0xffff0000u), "rendered pixel differs from the triangle coverage");
+			}
 		check(field.template operator()<uint32_t>("device_workflow") == 1, "guest logical device workflow did not complete");
 		std::vector<raven::LoadedImage *> images;
 		for (const auto &[name, module] : modules.all())
@@ -147,6 +156,12 @@ int main(int argc, char **argv)
 		rejected("vkCmdPipelineBarrier", forged_barrier);
 		const uint64_t forged_semaphore[] = {0x4321, memory, 0, memory + 512};
 		rejected("vkCreateSemaphore", forged_semaphore);
+		const uint64_t forged_pass[] = {0x7777, memory, 0};
+		rejected("vkCmdBeginRenderPass", forged_pass);
+		const uint64_t forged_draw[] = {0x7777, 3, 1, 0, 0};
+		rejected("vkCmdDraw", forged_draw);
+		const uint64_t forged_framebuffer[] = {0x4321, memory, 0, memory + 512};
+		rejected("vkCreateFramebuffer", forged_framebuffer);
 		const uint64_t forged_command[] = {0x7777, memory};
 		rejected("vkBeginCommandBuffer", forged_command);
 		process.unmap_memory(memory);

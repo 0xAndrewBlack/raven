@@ -68,3 +68,11 @@ vkDestroySemaphore
 vkGetFenceStatus
 vkGetImageMemoryRequirements
 vkGetImageSubresourceLayout
+vkCmdBeginRenderPass
+vkCmdDraw
+vkCmdEndRenderPass
+vkCreateFramebuffer
+vkCreateGraphicsPipelines
+vkCreateRenderPass
+vkDestroyFramebuffer
+vkDestroyRenderPass
