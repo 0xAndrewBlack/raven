@@ -9,7 +9,10 @@ compositor output with grim and requires that:
 - the read-back first frame differs from the last one in the colour the program ramps (frames really change);
 - the captured window contains the read-back last frame, pixel for pixel, at one position (the swap chain content reached the screen).
 
-usage: native-d3d11-present.py RAVEN WINDOW_EXE DXVK_PE64_DIRECTORY WORKDIR
+With the extra argument "gpu" the host's default Vulkan driver is used instead of llvmpipe and the compositor renders with GLES so that it
+offers buffer sharing; the test then also requires DXVK to report a driver other than llvmpipe.
+
+usage: native-d3d11-present.py RAVEN WINDOW_EXE DXVK_PE64_DIRECTORY WORKDIR [gpu]
 """
 
 from pathlib import Path
@@ -22,7 +25,8 @@ import time
 from PIL import Image
 
 SIZE = 256
-RUNTIME = Path(f"/run/user/{os.getuid()}/raven-labwc-runtime")
+GPU = len(sys.argv) > 5 and sys.argv[5] == "gpu"
+RUNTIME = Path(f"/run/user/{os.getuid()}/raven-labwc-{'gpu' if GPU else 'runtime'}")
 
 
 def environment():
@@ -37,7 +41,7 @@ def start_compositor(log):
         (RUNTIME / "wayland-0").unlink(missing_ok=True)
         (RUNTIME / "wayland-0.lock").unlink(missing_ok=True)
     RUNTIME.mkdir(mode=0o700, parents=True, exist_ok=True)
-    env = environment() | {"WLR_BACKENDS": "headless", "WLR_RENDERER": "pixman", "WLR_HEADLESS_OUTPUTS": "1"}
+    env = environment() | {"WLR_BACKENDS": "headless", "WLR_RENDERER": "gles2" if GPU else "pixman", "WLR_HEADLESS_OUTPUTS": "1"}
     process = subprocess.Popen(["labwc"], env=env, stdout=log, stderr=log)
     for _ in range(50):
         if (RUNTIME / "wayland-0").exists():
@@ -65,7 +69,7 @@ def main():
         env = os.environ | environment() | {"RAVEN_PREFIX": str(prefix)}
         env["PATH"] = os.environ["PATH"]
         lavapipe = Path("/usr/share/vulkan/icd.d/lvp_icd.json")
-        if "VK_DRIVER_FILES" not in env and lavapipe.exists():
+        if "VK_DRIVER_FILES" not in env and lavapipe.exists() and not GPU:
             env["VK_DRIVER_FILES"] = str(lavapipe)
         process = subprocess.Popen([str(raven), "--run-process", "--execution=native", "--timeout-ms=100000", "--desktop=wayland", str(run / "window.exe")],
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
@@ -88,6 +92,10 @@ def main():
             if compositor:
                 compositor.terminate()
     drive = prefix / "drive_c"
+    driver = next((line.split(":", 1)[1].strip() for line in (drive / "window_d3d11.log").read_text().splitlines() if line.startswith("info:    Driver")), "")
+    print(f"DXVK reports the driver: {driver}")
+    if GPU and (not driver or "llvmpipe" in driver.lower()):
+        raise SystemExit("the hardware variant ran on a software driver")
     check = subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("check-d3d11-triangle.py")), str(drive / "window_last.raw")],
                            capture_output=True, text=True, timeout=120)
     sys.stdout.write(check.stdout)

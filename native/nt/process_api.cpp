@@ -69,8 +69,7 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		call.process.abandon_call();
 		throw ProcessExit{call.u32(1), 0};
 	});
-	const auto windows_directory = [](ApiCall &call, bool wide) {
-		static const std::string path = "C:\\Windows";
+	const auto directory = [](ApiCall &call, bool wide, const std::string &path) {
 		const size_t capacity = call.u32(1);
 		if (wide) {
 			const auto text = from_utf8(path);
@@ -89,10 +88,13 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(path.size());
 		}
 	};
-	registry.add("GetWindowsDirectoryW", 2, [=](ApiCall &call) { windows_directory(call, true); });
-	registry.add("GetSystemWindowsDirectoryW", 2, [=](ApiCall &call) { windows_directory(call, true); });
-	registry.add("GetWindowsDirectoryA", 2, [=](ApiCall &call) { windows_directory(call, false); });
-	registry.add("GetSystemWindowsDirectoryA", 2, [=](ApiCall &call) { windows_directory(call, false); });
+	const std::string windows = "C:\\Windows", system = "C:\\Windows\\System32";
+	registry.add("GetWindowsDirectoryW", 2, [=](ApiCall &call) { directory(call, true, windows); });
+	registry.add("GetSystemWindowsDirectoryW", 2, [=](ApiCall &call) { directory(call, true, windows); });
+	registry.add("GetWindowsDirectoryA", 2, [=](ApiCall &call) { directory(call, false, windows); });
+	registry.add("GetSystemWindowsDirectoryA", 2, [=](ApiCall &call) { directory(call, false, windows); });
+	registry.add("GetSystemDirectoryW", 2, [=](ApiCall &call) { directory(call, true, system); });
+	registry.add("GetSystemDirectoryA", 2, [=](ApiCall &call) { directory(call, false, system); });
 	registry.add("lstrcatW", 2, [](ApiCall &call) {
 		auto first = call.wide(call[0], 65536);
 		const auto second = call.wide(call[1], 65536);
