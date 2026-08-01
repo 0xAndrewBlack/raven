@@ -25,7 +25,7 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 38> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 39> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"ExitProcess", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0},
@@ -33,7 +33,7 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 38> kernel32_exports
 	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"GetProcAddress", 2}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
 	{"GetTickCount", 0}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
 	{"OutputDebugStringA", 1}, {"SetLastError", 1}, {"SizeofResource", 2}, {"VirtualAlloc", 4},
-	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WriteFile", 5}, {"lstrcpyW", 2}, {"lstrlenW", 1},
+	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WriteFile", 5}, {"_lclose", 1}, {"lstrcpyW", 2}, {"lstrlenW", 1},
 }};
 
 // stdcall argument counts of the desktop exports, keyed by export name.
@@ -93,9 +93,14 @@ bool unsupported_library(NativeProcess &process, NativeEnvironment &environment,
 bool kernel_string_api(NativeProcess &process, NativeEnvironment &environment, const PEModule &entry,
 	const NativeLaunch &launch, std::string_view name)
 {
-	if (name == "GetTickCount") {
+	if (name == "GetTickCount" || name == "timeGetTime") {
 		const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch());
 		process.return_api(uint32_t(now.count()));
+		return true;
+	}
+	if (name == "timeBeginPeriod" || name == "timeEndPeriod") {
+		process.api_arguments(1);
+		process.return_api(0);
 		return true;
 	}
 	if (name == "OutputDebugStringA") {
@@ -246,10 +251,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	};
 	add_library("advapi32.dll", NativeAdvapi::exports(), {}, [](std::string_view name) { return NativeAdvapi::argument_count(name); });
 	add_library("msvcrt.dll", NativeCRT::exports(), NativeCRT::data_exports(), [](std::string_view name) { return uint32_t(0); });
-	static constexpr std::array<std::string_view, 1> winmm_exports{"PlaySoundW"};
+	static constexpr std::array<std::string_view, 4> winmm_exports{"PlaySoundW", "timeBeginPeriod", "timeEndPeriod", "timeGetTime"};
 	static constexpr std::array<std::string_view, 1> shell_exports{"ShellAboutW"};
 	static constexpr std::array<std::string_view, 1> controls_exports{"InitCommonControlsEx"};
-	add_library("winmm.dll", winmm_exports, {}, [](std::string_view) { return uint32_t(3); });
+	add_library("winmm.dll", winmm_exports, {}, [](std::string_view name) { return uint32_t(name == "PlaySoundW" ? 3 : name == "timeGetTime" ? 0 : 1); });
 	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
 	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
 	modules.bind_imports();
