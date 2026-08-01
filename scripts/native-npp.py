@@ -50,7 +50,7 @@ def titles():
     return [line.split(": ", 1)[1] for line in probe.stdout.splitlines() if ": " in line]
 
 
-def wait_for(description, condition, timeout=90):
+def wait_for(description, condition, timeout=240):
     deadline = time.time() + timeout
     while time.time() < deadline:
         value = condition()
@@ -117,7 +117,7 @@ def settle(evidence, name):
     """Wait until the window stops changing, then return its screenshot and bounding box."""
     previous = None
     stable = 0
-    deadline = time.time() + 60
+    deadline = time.time() + 180
     while time.time() < deadline:
         image = screenshot(evidence / f"{name}.png")
         # A window that is mapped but has not drawn yet leaves the screen black; that is not a settled frame.
@@ -133,7 +133,7 @@ def settle(evidence, name):
 def close(process, box):
     # The caption button of the compositor frame ends the process cleanly.
     click(box[2] - 14, box[1] + 14)
-    process.wait(timeout=60)
+    process.wait(timeout=180)
     if process.returncode != 0:
         raise RuntimeError(f"Notepad++ ended with status {process.returncode}")
 

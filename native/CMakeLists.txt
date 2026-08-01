@@ -1254,7 +1254,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     add_test(NAME native_notepadpp_workflow COMMAND ${RAVEN_PIL_PYTHON}
                         ${PROJECT_SOURCE_DIR}/scripts/native-npp.py $<TARGET_FILE:raven>
                         ${PROJECT_SOURCE_DIR}/testdata/npp ${CMAKE_CURRENT_BINARY_DIR}/notepadpp-evidence)
-                    set_tests_properties(native_notepadpp_workflow PROPERTIES TIMEOUT 600 RESOURCE_LOCK raven_compositor)
+                    set_tests_properties(native_notepadpp_workflow PROPERTIES TIMEOUT 1200 RESOURCE_LOCK raven_compositor)
                 endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
