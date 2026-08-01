@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 RUNTIME = Path(f"/run/user/{os.getuid()}/raven-labwc-runtime")
 FIRST = b"Session one line\r\nsecond line, saved by session 1"
@@ -107,6 +107,12 @@ def start(raven, program, prefix, evidence, name):
                             env=env, stdout=output, stderr=output)
 
 
+def same_window(left, right):
+    """Equal apart from something as small as a blinking caret."""
+    changed = ImageChops.difference(left, right).convert("L").point(lambda value: 255 if value > 16 else 0).getbbox()
+    return changed is None or (changed[2] - changed[0]) * (changed[3] - changed[1]) <= 40 * 40
+
+
 def settle(evidence, name):
     """Wait until the window stops changing, then return its screenshot and bounding box."""
     previous = None
@@ -116,7 +122,7 @@ def settle(evidence, name):
         image = screenshot(evidence / f"{name}.png")
         # A window that is mapped but has not drawn yet leaves the screen black; that is not a settled frame.
         drawn = image.point(lambda value: 255 if value > 8 else 0).convert("L").getbbox() is not None
-        stable = stable + 1 if drawn and previous is not None and image.tobytes() == previous.tobytes() else 0
+        stable = stable + 1 if drawn and previous is not None and same_window(image, previous) else 0
         previous = image
         if stable >= 3:
             return image, window_box(image)
@@ -161,7 +167,7 @@ def main():
         wait_for("the saved file", lambda: saved.exists() and saved.read_bytes() == FIRST)
         wait_for("the saved title", lambda: main_window(lambda title: "persist.txt" in title and not title.startswith("*")))
         after, box = settle(evidence, "02-saved")
-        if after.tobytes() == image.tobytes():
+        if same_window(after, image):
             raise RuntimeError("typing did not change the editor")
         close(process, box)
 
