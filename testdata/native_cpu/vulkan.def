@@ -76,3 +76,10 @@ vkCreateGraphicsPipelines
 vkCreateRenderPass
 vkDestroyFramebuffer
 vkDestroyRenderPass
+vkCmdBindIndexBuffer
+vkCmdBindVertexBuffers
+vkCmdDrawIndexed
+vkCmdSetScissor
+vkCmdSetViewport
+vkCreateSampler
+vkDestroySampler

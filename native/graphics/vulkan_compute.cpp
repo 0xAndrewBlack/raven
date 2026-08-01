@@ -33,6 +33,7 @@ void VulkanBridge::destroy_object(const VkDevice &device, const Object &object)
 	case Kind::semaphore: vkDestroySemaphore(device, as_handle<VkSemaphore>(object.handle), nullptr); break;
 	case Kind::render_pass: vkDestroyRenderPass(device, as_handle<VkRenderPass>(object.handle), nullptr); break;
 	case Kind::framebuffer: vkDestroyFramebuffer(device, as_handle<VkFramebuffer>(object.handle), nullptr); break;
+	case Kind::sampler: vkDestroySampler(device, as_handle<VkSampler>(object.handle), nullptr); break;
 	}
 }
 
@@ -214,17 +215,32 @@ bool VulkanBridge::dispatch_compute(std::string_view name)
 			throw std::runtime_error("Vulkan descriptor copies are not implemented");
 		auto writes = records.template operator()<VkWriteDescriptorSet>(a[2], a[1], 16);
 		std::vector<std::vector<VkDescriptorBufferInfo>> buffer_infos(writes.size());
+		std::vector<std::vector<VkDescriptorImageInfo>> image_infos(writes.size());
 		for (size_t index = 0; index < writes.size(); ++index) {
 			auto &write = writes[index];
-			if (write.sType != VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET || write.pNext || write.pImageInfo || write.pTexelBufferView ||
-				!write.pBufferInfo || !write.descriptorCount || write.descriptorCount > 16 ||
-				(write.descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && write.descriptorType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER))
+			const bool buffer_type = write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			const bool image_type = write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || write.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+				write.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER || write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			if (write.sType != VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET || write.pNext || write.pTexelBufferView || !write.descriptorCount ||
+				write.descriptorCount > 16 || (!buffer_type && !image_type) || (buffer_type && (!write.pBufferInfo || write.pImageInfo)) ||
+				(image_type && (!write.pImageInfo || write.pBufferInfo)))
 				throw std::runtime_error("unsupported Vulkan descriptor write");
 			write.dstSet = as_handle<VkDescriptorSet>(object_of(reinterpret_cast<uint64_t>(write.dstSet), a[0], Kind::set).handle);
-			buffer_infos[index] = records.template operator()<VkDescriptorBufferInfo>(reinterpret_cast<uint64_t>(write.pBufferInfo), write.descriptorCount, 16);
-			for (auto &info : buffer_infos[index])
-				info.buffer = buffer_of(reinterpret_cast<uint64_t>(info.buffer), a[0]).handle;
-			write.pBufferInfo = buffer_infos[index].data();
+			if (buffer_type) {
+				buffer_infos[index] = records.template operator()<VkDescriptorBufferInfo>(reinterpret_cast<uint64_t>(write.pBufferInfo), write.descriptorCount, 16);
+				for (auto &info : buffer_infos[index])
+					info.buffer = buffer_of(reinterpret_cast<uint64_t>(info.buffer), a[0]).handle;
+				write.pBufferInfo = buffer_infos[index].data();
+			} else {
+				image_infos[index] = records.template operator()<VkDescriptorImageInfo>(reinterpret_cast<uint64_t>(write.pImageInfo), write.descriptorCount, 16);
+				for (auto &info : image_infos[index]) {
+					if (info.sampler)
+						info.sampler = as_handle<VkSampler>(object_of(reinterpret_cast<uint64_t>(info.sampler), a[0], Kind::sampler).handle);
+					if (info.imageView)
+						info.imageView = as_handle<VkImageView>(object_of(reinterpret_cast<uint64_t>(info.imageView), a[0], Kind::image_view).handle);
+				}
+				write.pImageInfo = image_infos[index].data();
+			}
 		}
 		vkUpdateDescriptorSets(device.handle, uint32_t(writes.size()), writes.data(), 0, nullptr);
 	} else if (name == "vkDestroyShaderModule" || name == "vkDestroyDescriptorSetLayout" || name == "vkDestroyPipelineLayout" ||
@@ -247,13 +263,13 @@ bool VulkanBridge::dispatch_compute(std::string_view name)
 		vkCmdBindPipeline(command.handle, VkPipelineBindPoint(a[1]), as_handle<VkPipeline>(object_of(a[2], command.device, Kind::pipeline).handle));
 	} else if (name == "vkCmdBindDescriptorSets") {
 		const auto &command = command_of(a[0]);
-		if (a[1] != VK_PIPELINE_BIND_POINT_COMPUTE || a[6])
-			throw std::runtime_error("only compute descriptor sets without dynamic offsets are implemented");
+		if ((a[1] != VK_PIPELINE_BIND_POINT_COMPUTE && a[1] != VK_PIPELINE_BIND_POINT_GRAPHICS) || a[6])
+			throw std::runtime_error("only descriptor sets without dynamic offsets are implemented");
 		const auto layout = as_handle<VkPipelineLayout>(object_of(a[2], command.device, Kind::pipeline_layout).handle);
 		std::vector<VkDescriptorSet> sets;
 		for (const auto token : records.template operator()<uint64_t>(a[5], a[4], 16))
 			sets.push_back(as_handle<VkDescriptorSet>(object_of(token, command.device, Kind::set).handle));
-		vkCmdBindDescriptorSets(command.handle, VK_PIPELINE_BIND_POINT_COMPUTE, layout, uint32_t(a[3]), uint32_t(sets.size()), sets.data(), 0, nullptr);
+		vkCmdBindDescriptorSets(command.handle, VkPipelineBindPoint(a[1]), layout, uint32_t(a[3]), uint32_t(sets.size()), sets.data(), 0, nullptr);
 	} else if (name == "vkCmdDispatch") {
 		const auto &command = command_of(a[0]);
 		vkCmdDispatch(command.handle, uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]));

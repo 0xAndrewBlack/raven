@@ -100,6 +100,16 @@ int main(int argc, char **argv)
 				if (centre_x + centre_y < 15.5 || centre_x + centre_y > 16.5)
 					check(rendered[y * 16 + x] == (centre_x + centre_y < 16 ? 0xff0000ffu : 0xffff0000u), "rendered pixel differs from the triangle coverage");
 			}
+		check(field.template operator()<uint32_t>("textured_workflow") == 1, "guest textured quad did not complete");
+		const auto textured = field.template operator()<std::array<uint32_t, 256>>("textured");
+		for (uint32_t y = 0; y < 16; ++y)
+			for (uint32_t x = 0; x < 16; ++x) {
+				// Nearest sampling over a full-target quad: each 8x8 quadrant shows one texel (red, green, blue, white).
+				if ((x % 8) >= 2 && (x % 8) <= 5 && (y % 8) >= 2 && (y % 8) <= 5) {
+					static const uint32_t expected[4] = {0xff0000ffu, 0xff00ff00u, 0xffff0000u, 0xffffffffu};
+					check(textured[y * 16 + x] == expected[(y / 8) * 2 + x / 8], "textured pixel differs from the sampled texel");
+				}
+			}
 		check(field.template operator()<uint32_t>("device_workflow") == 1, "guest logical device workflow did not complete");
 		std::vector<raven::LoadedImage *> images;
 		for (const auto &[name, module] : modules.all())
@@ -162,6 +172,14 @@ int main(int argc, char **argv)
 		rejected("vkCmdDraw", forged_draw);
 		const uint64_t forged_framebuffer[] = {0x4321, memory, 0, memory + 512};
 		rejected("vkCreateFramebuffer", forged_framebuffer);
+		const uint64_t forged_vertex[] = {0x7777, 0, 1, memory, memory};
+		rejected("vkCmdBindVertexBuffers", forged_vertex);
+		const uint64_t forged_index[] = {0x7777, 0x1234, 0, 0};
+		rejected("vkCmdBindIndexBuffer", forged_index);
+		const uint64_t forged_sampler[] = {0x4321, memory, 0, memory + 512};
+		rejected("vkCreateSampler", forged_sampler);
+		const uint64_t forged_viewport[] = {0x7777, 0, 1, memory};
+		rejected("vkCmdSetViewport", forged_viewport);
 		const uint64_t forged_command[] = {0x7777, memory};
 		rejected("vkBeginCommandBuffer", forged_command);
 		process.unmap_memory(memory);

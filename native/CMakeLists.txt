@@ -1037,7 +1037,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     -o ${VULKAN_FIXTURES}/client.exe ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_client.c
                     ${VULKAN_FIXTURES}/vulkan.a
                 DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_client.c
-                    ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_compute_spirv.h ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_triangle_spirv.h ${VULKAN_FIXTURES}/vulkan.a VERBATIM)
+                    ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_compute_spirv.h ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_triangle_spirv.h ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_quad_spirv.h ${VULKAN_FIXTURES}/vulkan.a VERBATIM)
             add_custom_target(vulkan_pe_fixture ALL DEPENDS ${VULKAN_FIXTURES}/client.exe)
             add_executable(vulkan_bridge_test graphics/vulkan_bridge_test.cpp)
             target_link_libraries(vulkan_bridge_test PRIVATE raven_cpu)

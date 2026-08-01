@@ -48,7 +48,7 @@ private:
 	struct Fence { VkFence handle; uint64_t device; };
 	std::map<uint64_t, Fence> fences;
 	// Shader modules, descriptor and pipeline objects: one host handle each, owned by a device token.
-	enum class Kind { shader, set_layout, pipeline_layout, pipeline, pool, set, image, image_view, semaphore, render_pass, framebuffer };
+	enum class Kind { shader, set_layout, pipeline_layout, pipeline, pool, set, image, image_view, semaphore, render_pass, framebuffer, sampler };
 	struct Object { uint64_t handle; uint64_t device; Kind kind; uint64_t parent = 0; };
 	std::map<uint64_t, Object> objects;
 	bool dispatch_compute(std::string_view name);

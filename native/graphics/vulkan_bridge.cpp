@@ -78,7 +78,7 @@ void VulkanBridge::destroy_device(uint64_t token)
 	vkDeviceWaitIdle(found->second.handle);
 	std::erase_if(command_buffers, [&](const auto &item) { return item.second.device == token; });
 	// Pipelines first, then what they were built from; descriptor sets go with their pool.
-	for (const auto kind : {Kind::pipeline, Kind::framebuffer, Kind::render_pass, Kind::pool, Kind::pipeline_layout, Kind::set_layout, Kind::shader, Kind::image_view, Kind::image, Kind::semaphore})
+	for (const auto kind : {Kind::pipeline, Kind::framebuffer, Kind::render_pass, Kind::pool, Kind::pipeline_layout, Kind::set_layout, Kind::shader, Kind::image_view, Kind::sampler, Kind::image, Kind::semaphore})
 		for (auto item = objects.begin(); item != objects.end();)
 			if (item->second.device == token && item->second.kind == kind) {
 				destroy_object(found->second.handle, item->second);

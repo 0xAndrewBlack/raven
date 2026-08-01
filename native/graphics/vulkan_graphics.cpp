@@ -8,9 +8,10 @@
 namespace raven {
 
 // Names are kept in byte order because the guest provider binary searches its export table.
-static constexpr std::array<std::string_view, 8> names{
-	"vkCmdBeginRenderPass", "vkCmdDraw", "vkCmdEndRenderPass", "vkCreateFramebuffer", "vkCreateGraphicsPipelines",
-	"vkCreateRenderPass", "vkDestroyFramebuffer", "vkDestroyRenderPass"
+static constexpr std::array<std::string_view, 15> names{
+	"vkCmdBeginRenderPass", "vkCmdBindIndexBuffer", "vkCmdBindVertexBuffers", "vkCmdDraw", "vkCmdDrawIndexed", "vkCmdEndRenderPass",
+	"vkCmdSetScissor", "vkCmdSetViewport", "vkCreateFramebuffer", "vkCreateGraphicsPipelines", "vkCreateRenderPass", "vkCreateSampler",
+	"vkDestroyFramebuffer", "vkDestroyRenderPass", "vkDestroySampler"
 };
 
 std::span<const std::string_view> vulkan_graphics_names() { return names; }
@@ -22,12 +23,14 @@ bool VulkanBridge::dispatch_graphics(std::string_view name)
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;
 	static const std::map<std::string_view, size_t, std::less<>> words{
-		{"vkCmdBeginRenderPass", 3}, {"vkCmdDraw", 5}, {"vkCmdEndRenderPass", 1}, {"vkCreateFramebuffer", 4}, {"vkCreateGraphicsPipelines", 6},
-		{"vkCreateRenderPass", 4}, {"vkDestroyFramebuffer", 3}, {"vkDestroyRenderPass", 3}};
+		{"vkCmdBeginRenderPass", 3}, {"vkCmdBindIndexBuffer", 4}, {"vkCmdBindVertexBuffers", 5}, {"vkCmdDraw", 5}, {"vkCmdDrawIndexed", 6},
+		{"vkCmdEndRenderPass", 1}, {"vkCmdSetScissor", 4}, {"vkCmdSetViewport", 4}, {"vkCreateFramebuffer", 4}, {"vkCreateGraphicsPipelines", 6},
+		{"vkCreateRenderPass", 4}, {"vkCreateSampler", 4}, {"vkDestroyFramebuffer", 3}, {"vkDestroyRenderPass", 3}, {"vkDestroySampler", 3}};
 	auto a = process.api_arguments(words.at(name));
 	// A 32-bit argument leaves the upper half of its register or stack slot undefined, so those are narrowed before use.
 	static const std::map<std::string_view, std::vector<size_t>, std::less<>> narrow{
-		{"vkCmdBeginRenderPass", {2}}, {"vkCmdDraw", {1, 2, 3, 4}}, {"vkCreateGraphicsPipelines", {2}}};
+		{"vkCmdBeginRenderPass", {2}}, {"vkCmdBindIndexBuffer", {3}}, {"vkCmdBindVertexBuffers", {1, 2}}, {"vkCmdDraw", {1, 2, 3, 4}},
+		{"vkCmdDrawIndexed", {1, 2, 3, 4, 5}}, {"vkCmdSetScissor", {1, 2}}, {"vkCmdSetViewport", {1, 2}}, {"vkCreateGraphicsPipelines", {2}}};
 	if (const auto found = narrow.find(name); found != narrow.end())
 		for (const auto index : found->second)
 			a[index] = uint32_t(a[index]);
@@ -69,6 +72,12 @@ bool VulkanBridge::dispatch_graphics(std::string_view name)
 			store(out, token);
 		}
 		return static_cast<uint32_t>(status);
+	};
+	const auto buffer_of = [&](uint64_t token, uint64_t device) -> Buffer & {
+		const auto found = buffers.find(token);
+		if (found == buffers.end() || found->second.device != device)
+			throw std::runtime_error("invalid Vulkan buffer handle");
+		return found->second;
 	};
 	const auto pointer = [](const void *value) { return reinterpret_cast<uint64_t>(value); };
 	uint64_t result = 0;
@@ -209,11 +218,47 @@ bool VulkanBridge::dispatch_graphics(std::string_view name)
 		VkPipeline pipeline = VK_NULL_HANDLE;
 		const auto status = vkCreateGraphicsPipelines(device.handle, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
 		result = create(Kind::pipeline, a[0], a[5], reinterpret_cast<uint64_t>(pipeline), status);
-	} else if (name == "vkDestroyRenderPass" || name == "vkDestroyFramebuffer") {
+	} else if (name == "vkCreateSampler") {
+		auto &device = device_of(a[0]);
+		no_allocator(a[2]);
+		auto info = load<VkSamplerCreateInfo>(a[1]);
+		if (info.sType != VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO || info.pNext || info.flags)
+			throw std::runtime_error("unsupported Vulkan sampler create info");
+		check_writable(a[3], 8);
+		VkSampler sampler = VK_NULL_HANDLE;
+		const auto status = vkCreateSampler(device.handle, &info, nullptr, &sampler);
+		result = create(Kind::sampler, a[0], a[3], reinterpret_cast<uint64_t>(sampler), status);
+	} else if (name == "vkCmdBindVertexBuffers") {
+		const auto &command = command_of(a[0]);
+		if (!a[2] || a[2] > 16)
+			throw std::runtime_error("unsupported Vulkan vertex buffer count");
+		std::vector<VkBuffer> handles;
+		for (const auto token : records.template operator()<uint64_t>(a[3], a[2], 16))
+			handles.push_back(buffer_of(token, command.device).handle);
+		const auto offsets = records.template operator()<VkDeviceSize>(a[4], a[2], 16);
+		vkCmdBindVertexBuffers(command.handle, uint32_t(a[1]), uint32_t(handles.size()), handles.data(), offsets.data());
+	} else if (name == "vkCmdBindIndexBuffer") {
+		const auto &command = command_of(a[0]);
+		vkCmdBindIndexBuffer(command.handle, buffer_of(a[1], command.device).handle, a[2], VkIndexType(a[3]));
+	} else if (name == "vkCmdDrawIndexed") {
+		vkCmdDrawIndexed(command_of(a[0]).handle, uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), int32_t(a[4]), uint32_t(a[5]));
+	} else if (name == "vkCmdSetViewport") {
+		const auto &command = command_of(a[0]);
+		const auto viewports = records.template operator()<VkViewport>(a[3], a[2], 16);
+		if (viewports.empty())
+			throw std::runtime_error("unsupported Vulkan viewport count");
+		vkCmdSetViewport(command.handle, uint32_t(a[1]), uint32_t(viewports.size()), viewports.data());
+	} else if (name == "vkCmdSetScissor") {
+		const auto &command = command_of(a[0]);
+		const auto scissors = records.template operator()<VkRect2D>(a[3], a[2], 16);
+		if (scissors.empty())
+			throw std::runtime_error("unsupported Vulkan scissor count");
+		vkCmdSetScissor(command.handle, uint32_t(a[1]), uint32_t(scissors.size()), scissors.data());
+	} else if (name == "vkDestroyRenderPass" || name == "vkDestroyFramebuffer" || name == "vkDestroySampler") {
 		auto &device = device_of(a[0]);
 		no_allocator(a[2]);
 		if (a[1]) {
-			const auto kind = name == "vkDestroyRenderPass" ? Kind::render_pass : Kind::framebuffer;
+			const auto kind = name == "vkDestroyRenderPass" ? Kind::render_pass : name == "vkDestroySampler" ? Kind::sampler : Kind::framebuffer;
 			const auto object = object_of(a[1], a[0], kind);
 			destroy_object(device.handle, object);
 			objects.erase(a[1]);
