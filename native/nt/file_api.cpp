@@ -205,6 +205,9 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		int mode = want_read && want_write ? O_RDWR : want_write ? O_WRONLY : O_RDONLY;
+		// FILE_APPEND_DATA without a right to write at a position means every write goes to the end of the file.
+		if ((access & 0x4U) && !(access & (0x40000000U | 0x10000000U | 0x2U)))
+			mode |= O_APPEND;
 		if (disposition == 1) {
 			if (exists) {
 				call.set_last_error(80);

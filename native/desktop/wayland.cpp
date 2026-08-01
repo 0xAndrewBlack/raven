@@ -9,6 +9,9 @@
 #include <set>
 #include <string>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <map>
 #include <poll.h>
 #include <stdexcept>
@@ -196,6 +199,10 @@ struct WaylandPresentation::State {
 				value.key=[](void *data,wl_keyboard *,uint32_t serial,uint32_t,uint32_t key,uint32_t pressed) {
 					auto &state=*static_cast<State *>(data);
 					state.last_serial=serial;
+					if (std::getenv("RAVEN_TRACE_KEYS")) {
+						timespec now{}; clock_gettime(CLOCK_REALTIME,&now);
+						fprintf(stderr,"key %u %s at %lld ns\n",key,pressed ? "down" : "up",(long long)now.tv_sec*1000000000LL+now.tv_nsec);
+					}
 					state.keyboard_event({state.keyboard_window,key,pressed,0,DesktopEventKind::key});
 				};
 				value.modifiers=[](void *data,wl_keyboard *,uint32_t,uint32_t depressed,uint32_t latched,uint32_t locked,uint32_t group) {
