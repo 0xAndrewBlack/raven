@@ -342,7 +342,23 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				if (count)
 					for (const auto value : process.api_arguments(count))
 						std::cerr << ' ' << value;
-				std::cerr << std::dec << " )\n";
+				std::cerr << std::dec << " )";
+				// The names a program resolves at run time are what a diagnosis needs most.
+				if (api == "LoadLibraryA" || api == "LoadLibraryW" || api == "GetProcAddress") {
+					const auto words = process.api_arguments(api == "GetProcAddress" ? 2 : 1);
+					const auto text = words[api == "GetProcAddress" ? 1 : 0];
+					if (text > 0xffff) {
+						try {
+							const bool wide = api == "LoadLibraryW";
+							const auto bytes = process.read_memory(text, 64);
+							std::cerr << " \"";
+							for (size_t at = 0; at + (wide ? 1 : 0) < bytes.size() && bytes[at] && (!wide || at % 2 == 0); at += wide ? 2 : 1)
+								std::cerr << char(bytes[at]);
+							std::cerr << '"';
+						} catch (...) {}
+					}
+				}
+				std::cerr << '\n';
 			}
 			if (api == "ExitProcess" || api == "exit" || api == "_exit") {
 				const auto code = uint32_t(process.api_arguments(1)[0]);
