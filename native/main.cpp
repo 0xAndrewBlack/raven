@@ -187,6 +187,10 @@ int main(int argc, char **argv)
 									if (character >= 'A' && character <= 'Z')
 										character = static_cast<char>(character + ('a' - 'A'));
 								return std::any_of(libraries.begin(), libraries.end(), [&](const char *library) {
+									const std::string_view wanted(library);
+									// A trailing '*' names a family of API set libraries.
+									if (wanted.ends_with('*'))
+										return name.starts_with(wanted.substr(0, wanted.size() - 1));
 									return name == library || name + ".dll" == library;
 								});
 							});
@@ -197,6 +201,7 @@ int main(int argc, char **argv)
 					// The user32 component supplies the built-in control classes and dialog manager to programs that use user32.
 					load_component("raven-user32.dll", {"user32.dll"});
 					load_component("raven-shell.dll", {"comdlg32.dll", "ole32.dll", "shell32.dll"});
+					load_component("ucrtbase.dll", {"ucrtbase.dll", "api-ms-win-crt-*"});
 					raven::DesktopPresentation presentation;
 #ifdef RAVEN_WAYLAND
 					raven::WaylandPresentation backend;

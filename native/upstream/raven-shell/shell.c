@@ -1039,6 +1039,20 @@ BOOL WINAPI GetOpenFileNameW(LPOPENFILENAMEW request) { return classic_dialog(re
 BOOL WINAPI GetSaveFileNameW(LPOPENFILENAMEW request) { return classic_dialog(request, TRUE); }
 DWORD WINAPI CommDlgExtendedError(void) { return 0; }
 
+short WINAPI GetFileTitleW(LPCWSTR file, LPWSTR title, WORD size)
+{
+	const WCHAR *name;
+	size_t length;
+	if (!file || !*file)
+		return -1;
+	name = file_part(file);
+	length = lstrlenW(name);
+	if (!title || length + 1 > size)
+		return (short)(length + 1);
+	lstrcpyW(title, name);
+	return 0;
+}
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 {
 	return TRUE;

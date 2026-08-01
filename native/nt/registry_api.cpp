@@ -67,6 +67,17 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 				put_handle(call, call[4], key);
 			call.ret(status);
 		});
+		registry.add("RegOpenKey" + suffix, 3, [&hive, text_of, put_handle, wide](ApiCall &call) {
+			if (!call[2]) {
+				call.ret(error_invalid_parameter);
+				return;
+			}
+			uint64_t key = 0;
+			const auto status = hive.open(call[0], text_of(call, call[1], wide), key);
+			if (!status)
+				put_handle(call, call[2], key);
+			call.ret(status);
+		});
 		registry.add("RegCreateKeyEx" + suffix, 9, [&hive, text_of, put_handle, wide](ApiCall &call) {
 			if (!call[7]) {
 				call.ret(error_invalid_parameter);

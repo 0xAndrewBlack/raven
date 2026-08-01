@@ -760,6 +760,7 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 	if (!child && !args[9] && definition->menu_id) {
 		if (!menu_loader) throw uint32_t(120);
 		record.menu=menu_loader(definition->instance,definition->menu_id);
+		if (std::getenv("RAVEN_TRACE_API")) std::cerr << "class menu " << definition->menu_id << " instance " << std::hex << definition->instance << " -> " << record.menu << std::dec << "\n";
 	} else if (!child && !args[9] && !definition->menu_name.empty()) throw uint32_t(120);
 	record.extra.resize(definition->window_extra);
 	const auto handle=objects.add(std::move(record));

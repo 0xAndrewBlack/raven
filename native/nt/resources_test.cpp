@@ -88,8 +88,8 @@ int main(int argc, char **argv)
 			"forged resource info was accepted");
 		check(api("LockResource", {entry_data + 1}) == 0 && environment.last_error() == 6,
 			"forged resource data was accepted");
-		check(api("FindResourceW", {0, 101, 10}) == 0 && environment.last_error() == 120,
-			"locale-dependent fallback invented a language");
+		// A neutral lookup over several languages follows the guest locale (en-US), like the thread language of a real system.
+		check(api("FindResourceW", {0, 101, 10}) == entry_info, "neutral lookup did not take the locale language");
 		const auto field = static_cast<size_t>(entry_info - entry.loaded.base());
 		entry.loaded.data()[field + 4] = 2;
 		check(api("SizeofResource", {0, entry_info}) == 2, "live resource metadata was cached");

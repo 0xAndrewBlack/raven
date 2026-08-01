@@ -118,6 +118,15 @@ uint64_t NativeResources::find(uint64_t handle, uint64_t type, uint64_t name, ui
 	}
 	if (!selected && !language && candidates.size() == 1)
 		selected = candidates[0];
+	// A neutral request over several languages takes English, as the guest's default locale is en-US.
+	if (!selected && !language) {
+		const auto english = std::find_if(candidates.begin(), candidates.end(), [](const auto *r) { return r->language == 0x409; });
+		const auto primary = std::find_if(candidates.begin(), candidates.end(), [](const auto *r) { return (r->language & 0x3ffU) == 0x09; });
+		if (english != candidates.end())
+			selected = *english;
+		else if (primary != candidates.end())
+			selected = *primary;
+	}
 	if (!selected) {
 		// Locale-dependent fallback needs thread NLS state; never invent a preferred language.
 		environment.set_last_error(language ? 1815 : 120);

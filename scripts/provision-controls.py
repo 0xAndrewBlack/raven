@@ -177,11 +177,17 @@ def main():
     run(["x86_64-w64-mingw32-gcc", "-c", *shell_flags, shell_support / "shell.c", "-o", shell_objects[0]])
     run(["x86_64-w64-mingw32-gcc", "-c", *shell_flags, "-fno-builtin", support / "crt.c", "-o", shell_objects[1]])
     (output / "raven-shell.def").write_text("NAME raven-shell.dll\nEXPORTS\n CoCreateInstance\n CoGetClassObject\n SHCreateItemFromParsingName\n"
-                                            " GetOpenFileNameW\n GetSaveFileNameW\n CommDlgExtendedError\n")
+                                            " GetOpenFileNameW\n GetSaveFileNameW\n CommDlgExtendedError\n GetFileTitleW\n")
     run(["x86_64-w64-mingw32-gcc", "-shared", "-nostdlib", "-Wl,--entry,DllMain,--image-base,0x1f8000000,--no-insert-timestamp",
          "-o", output / "raven-shell.dll", *shell_objects, output / "raven-shell.def", "-luser32", "-lkernel32", "-lole32", "-luuid", "-lgcc"])
+    # The C runtime component: the Universal CRT entry points programs import from ucrtbase.dll.
+    crt_object = objects / "ucrtbase.o"
+    run(["x86_64-w64-mingw32-gcc", "-c", "-O2", "-w", "-ffreestanding", "-fno-builtin", f"-ffile-prefix-map={repo}=raven",
+         repo / "native/upstream/raven-crt/ucrtbase.c", "-o", crt_object])
+    run(["x86_64-w64-mingw32-gcc", "-shared", "-nostdlib", "-Wl,--entry,DllMain,--image-base,0x1fc000000,--no-insert-timestamp",
+         "-o", output / "ucrtbase.dll", crt_object, "-lkernel32", "-lgcc"])
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, commands=records,
-                  component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ("comctl32.dll", "raven-user32.dll", "raven-shell.dll")},
+                  component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ("comctl32.dll", "raven-user32.dll", "raven-shell.dll", "ucrtbase.dll")},
                   user32_exports=exported,
                   patches={patch.name: hashlib.sha256(patch.read_bytes()).hexdigest() for patch in patches},
                   source_hashes={path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
