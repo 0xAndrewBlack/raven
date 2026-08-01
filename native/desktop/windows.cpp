@@ -284,8 +284,11 @@ void NativeWindows::receive(const DesktopEvent &event)
 		return;
 	}
 	if (event.kind==DesktopEventKind::key) {
-		if (!event.window || objects.window_root(focus)!=event.window || !objects.window(focus) || !objects.window_visible(focus))
-			throw std::runtime_error("keyboard event requires its focused guest window");
+		// A key event for a window that has since closed or lost the focus (a dialog ended by the previous key) goes nowhere.
+		if (!event.window || !focus || !objects.window(focus) || objects.window_root(focus)!=event.window || !objects.window_visible(focus)) {
+			if (event.message<key_down.size()) key_down[event.message]=event.wparam!=0;
+			return;
+		}
 		if (event.wparam>1 || event.message>=key_down.size() || messages.size()>=10000)
 			throw std::runtime_error("invalid native keyboard event or queue exhaustion");
 		const auto key=keyboard_map.decode(event.message);
@@ -537,15 +540,15 @@ uint64_t NativeWindows::set_focus(uint64_t handle)
 	if (handle) activate(handle);
 	const auto previous=focus;
 	if (previous==handle) return previous;
-	if (focusing) throw std::runtime_error("unsupported reentrant focus transition");
-	focusing=true;
+	// A handler may move the focus again; the nested change completes first and the outer one stops when it was superseded.
+	++focusing;
 	try {
 		focus=handle;
 		if (previous && objects.window(previous)) send(previous,8,handle,0);
-		if (handle && objects.window(handle)) send(handle,7,previous,0);
-		focusing=false;
+		if (handle && focus==handle && objects.window(handle)) send(handle,7,previous,0);
+		--focusing;
 		return previous;
-	} catch (...) { focusing=false; throw; }
+	} catch (...) { --focusing; throw; }
 }
 
 bool NativeWindows::destroy(uint64_t handle)
@@ -939,14 +942,15 @@ bool NativeWindows::dispatch(std::string_view name)
 						throw std::runtime_error("keyboard translation requires the current retrieved key message");
 					const auto key=*key_translation;
 					if ((message==0x100 || message==0x104) && key.character) {
+						// Posted character messages are retrieved before input still waiting in the queue.
 						const auto units=key.character>0xffff ? 2U : 1U;
+						const uint32_t kind=message==0x104 ? 0x106U : 0x102U;
 						if (messages.size()>10000-units) throw std::runtime_error("guest character queue limit reached");
 						if (units==2) {
 							const auto value=key.character-0x10000;
-							messages.push_back({key.window,0xd800+(value>>10),key.lparam,message==0x104 ? 0x106U : 0x102U,key.time,key.x,key.y});
-							try { messages.push_back({key.window,0xdc00+(value & 0x3ff),key.lparam,message==0x104 ? 0x106U : 0x102U,key.time,key.x,key.y}); }
-							catch (...) { messages.pop_back(); throw; }
-						} else messages.push_back({key.window,key.character,key.lparam,message==0x104 ? 0x106U : 0x102U,key.time,key.x,key.y});
+							messages.insert(messages.begin(),Message{key.window,0xd800+(value>>10),key.lparam,kind,key.time,key.x,key.y});
+							messages.insert(messages.begin()+1,Message{key.window,0xdc00+(value & 0x3ff),key.lparam,kind,key.time,key.x,key.y});
+						} else messages.insert(messages.begin(),Message{key.window,key.character,key.lparam,kind,key.time,key.x,key.y});
 					}
 					result=1;
 				} else if (message>=0x100 && message<=0x109) throw uint32_t(120);

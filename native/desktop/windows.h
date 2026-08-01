@@ -60,7 +60,8 @@ private:
 	uint32_t mouse_buttons=0;
 	int32_t cursor_x=0,cursor_y=0;
 	uint64_t focus=0,active=0;
-	bool activating=false,focusing=false;
+	bool activating=false;
+	int focusing=0;
 	KeyboardMap keyboard_map;
 	std::array<bool,256> key_down{};
 	std::optional<Message> key_translation;

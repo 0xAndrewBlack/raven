@@ -364,6 +364,33 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("EncodeSystemPointer", 1, [](ApiCall &call) { call.ret(call[0]); });
 	registry.add("DecodeSystemPointer", 1, [](ApiCall &call) { call.ret(call[0]); });
 	registry.add("InitializeSListHead", 1, [](ApiCall &call) { call.write(call[0], std::vector<uint8_t>(16)); });
+	// Singly linked list: the head pointer sits in the first word, the depth in the low 16 bits of the second.
+	registry.add("InterlockedPushEntrySList", 2, [](ApiCall &call) {
+		const auto head = call.load<uint64_t>(call[0]);
+		const auto depth = call.load<uint64_t>(call[0] + 8);
+		call.store<uint64_t>(call[1], head);
+		call.store<uint64_t>(call[0], call[1]);
+		call.store<uint64_t>(call[0] + 8, (depth & ~uint64_t(0xffff)) + 0x10000 + ((depth & 0xffff) + 1) % 0xffff);
+		call.ret(head);
+	});
+	registry.add("InterlockedPopEntrySList", 1, [](ApiCall &call) {
+		const auto head = call.load<uint64_t>(call[0]);
+		if (!head) {
+			call.ret(0);
+			return;
+		}
+		const auto depth = call.load<uint64_t>(call[0] + 8);
+		call.store<uint64_t>(call[0], call.load<uint64_t>(head));
+		call.store<uint64_t>(call[0] + 8, (depth & ~uint64_t(0xffff)) + 0x10000 + (((depth & 0xffff) + 0xfffe) % 0xffff));
+		call.ret(head);
+	});
+	registry.add("InterlockedFlushSList", 1, [](ApiCall &call) {
+		const auto head = call.load<uint64_t>(call[0]);
+		call.store<uint64_t>(call[0], 0);
+		call.store<uint64_t>(call[0] + 8, (call.load<uint64_t>(call[0] + 8) & ~uint64_t(0xffff)) + 0x10000);
+		call.ret(head);
+	});
+	registry.add("QueryDepthSList", 1, [](ApiCall &call) { call.ret(call.load<uint64_t>(call[0] + 8) & 0xffff); });
 	registry.add("SetUnhandledExceptionFilter", 1, [&context](ApiCall &call) {
 		const auto previous = context.unhandled_filter;
 		context.unhandled_filter = call[0];

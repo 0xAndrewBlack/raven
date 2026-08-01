@@ -175,21 +175,28 @@ int main(int argc, char **argv)
 						if (imported && std::filesystem::exists(component))
 							modules.add("comctl32.dll", read_file(component.c_str()));
 					}
-					// The user32 component supplies the built-in control classes and dialog manager to programs that use user32.
-					if (entry->image.is_64 && !modules.all().contains("raven-user32.dll")) {
-						const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-user32.dll";
-						const auto imported = std::any_of(modules.all().begin(), modules.all().end(), [](const auto &item) {
-							return std::any_of(item.second->imports.begin(), item.second->imports.end(), [](const auto &symbol) {
+					// Components that stand in for parts of system libraries are loaded beside the program that imports those libraries.
+					const auto load_component = [&](const char *file, std::initializer_list<const char *> libraries) {
+						if (!entry->image.is_64 || modules.all().contains(file))
+							return;
+						const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / file;
+						const auto imported = std::any_of(modules.all().begin(), modules.all().end(), [&](const auto &item) {
+							return std::any_of(item.second->imports.begin(), item.second->imports.end(), [&](const auto &symbol) {
 								auto name = symbol.module;
 								for (auto &character : name)
 									if (character >= 'A' && character <= 'Z')
 										character = static_cast<char>(character + ('a' - 'A'));
-								return name == "user32.dll" || name == "user32";
+								return std::any_of(libraries.begin(), libraries.end(), [&](const char *library) {
+									return name == library || name + ".dll" == library;
+								});
 							});
 						});
 						if (imported && std::filesystem::exists(component))
-							modules.add("raven-user32.dll", read_file(component.c_str()));
-					}
+							modules.add(file, read_file(component.c_str()));
+					};
+					// The user32 component supplies the built-in control classes and dialog manager to programs that use user32.
+					load_component("raven-user32.dll", {"user32.dll"});
+					load_component("raven-shell.dll", {"comdlg32.dll", "ole32.dll", "shell32.dll"});
 					raven::DesktopPresentation presentation;
 #ifdef RAVEN_WAYLAND
 					raven::WaylandPresentation backend;

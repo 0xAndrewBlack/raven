@@ -314,14 +314,24 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			provider = &modules.add(name, runtime_provider(name, base, symbols, false, {}, ordinals, true), base);
 			provider->runtime_api = true;
 		}
-		// A guest component that implements part of user32 receives those calls directly instead of through a trap.
-		if (name == "user32.dll" && provider->runtime_api) {
-			if (const auto overlay = modules.all().find("raven-user32.dll"); overlay != modules.all().end() && !overlay->second->runtime_api)
+		// A guest component that implements part of a system library receives those calls directly instead of through a trap.
+		if (provider->runtime_api) {
+			struct Overlay { const char *library, *component, *prefix; };
+			static constexpr Overlay overlays[] = {
+				{"user32.dll", "raven-user32.dll", "raven-user32."}, {"comdlg32.dll", "raven-shell.dll", "raven-shell."},
+				{"ole32.dll", "raven-shell.dll", "raven-shell."}, {"shell32.dll", "raven-shell.dll", "raven-shell."}};
+			for (const auto &overlay_rule : overlays) {
+				if (name != overlay_rule.library)
+					continue;
+				const auto overlay = modules.all().find(overlay_rule.component);
+				if (overlay == modules.all().end() || overlay->second->runtime_api)
+					continue;
 				for (auto &symbol : provider->exports)
 					if (!symbol.names.empty() && std::any_of(overlay->second->exports.begin(), overlay->second->exports.end(), [&](const auto &candidate) {
 							return candidate.forwarder.empty() && std::find(candidate.names.begin(), candidate.names.end(), symbol.names.at(0)) != candidate.names.end();
 						}))
-						symbol.forwarder = "raven-user32." + symbol.names.at(0);
+						symbol.forwarder = overlay_rule.prefix + symbol.names.at(0);
+			}
 		}
 		for (const auto &symbol : provider->exports)
 			if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty())

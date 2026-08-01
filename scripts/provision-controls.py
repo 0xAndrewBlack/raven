@@ -18,7 +18,7 @@ PREFIXES = ("sdk/include/", "sdk/lib/pseh/include/", "sdk/tools/hpp/", "sdk/tool
             "win32ss/include/", "win32ss/user/user32/", "win32ss/user/rtl/")
 # Upstream user-mode sources of the user32 component, and the exports they define that user32 programs import.
 USER32_SOURCES = ("controls/button.c", "controls/combo.c", "controls/edit.c", "controls/listbox.c", "controls/static.c",
-                  "windows/dialog.c", "windows/draw.c", "windows/font.c", "windows/text.c")
+                  "windows/dialog.c", "windows/draw.c", "windows/font.c", "windows/messagebox.c", "windows/text.c")
 IDLS = ("shtypes", "commoncontrols")
 
 
@@ -170,8 +170,18 @@ def main():
     run(["x86_64-w64-mingw32-gcc", "-shared", "-nostdlib", "-Wl,--entry,DllMain,--image-base,0x1f4000000,--no-insert-timestamp",
          "-o", output / "raven-user32.dll", *user_objects, objects / "user32.res.o", output / "raven-user32.def",
          "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lntdll", "-limm32", "-lusp10", "-lgcc"])
+    # The shell component is Raven code on the public headers: the file dialogs and the class registry.
+    shell_support = repo / "native/upstream/raven-shell"
+    shell_objects = [objects / "shell.o", objects / "shell_crt.o"]
+    shell_flags = ["-O2", "-w", "-ffreestanding", f"-ffile-prefix-map={repo}=raven"]
+    run(["x86_64-w64-mingw32-gcc", "-c", *shell_flags, shell_support / "shell.c", "-o", shell_objects[0]])
+    run(["x86_64-w64-mingw32-gcc", "-c", *shell_flags, "-fno-builtin", support / "crt.c", "-o", shell_objects[1]])
+    (output / "raven-shell.def").write_text("NAME raven-shell.dll\nEXPORTS\n CoCreateInstance\n CoGetClassObject\n SHCreateItemFromParsingName\n"
+                                            " GetOpenFileNameW\n GetSaveFileNameW\n CommDlgExtendedError\n")
+    run(["x86_64-w64-mingw32-gcc", "-shared", "-nostdlib", "-Wl,--entry,DllMain,--image-base,0x1f8000000,--no-insert-timestamp",
+         "-o", output / "raven-shell.dll", *shell_objects, output / "raven-shell.def", "-luser32", "-lkernel32", "-lole32", "-luuid", "-lgcc"])
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, commands=records,
-                  component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ("comctl32.dll", "raven-user32.dll")},
+                  component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ("comctl32.dll", "raven-user32.dll", "raven-shell.dll")},
                   user32_exports=exported,
                   patches={patch.name: hashlib.sha256(patch.read_bytes()).hexdigest() for patch in patches},
                   source_hashes={path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()

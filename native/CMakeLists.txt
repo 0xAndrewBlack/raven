@@ -911,7 +911,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             endif()
             add_custom_command(TARGET raven POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/comctl32.dll $<TARGET_FILE_DIR:raven>/comctl32.dll
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-user32.dll $<TARGET_FILE_DIR:raven>/raven-user32.dll)
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-user32.dll $<TARGET_FILE_DIR:raven>/raven-user32.dll
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-shell.dll $<TARGET_FILE_DIR:raven>/raven-shell.dll)
         endif()
         set(RAVEN_RTL_COMPONENT_PATH "" CACHE FILEPATH "Pinned guest RTL component built by scripts/provision-rtl.py")
         if(RAVEN_RTL_COMPONENT_PATH)

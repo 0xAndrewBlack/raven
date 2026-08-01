@@ -36,6 +36,16 @@ typedef struct _STRING { USHORT Length; USHORT MaximumLength; PCHAR Buffer; } ST
 #include <ddeml.h>
 #include <dde.h>
 #define ASSERT(condition) ((void)0)
+#define RtlGetProcessHeap() GetProcessHeap()
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(status) ((NTSTATUS)(status) >= 0)
+#endif
+#ifndef ALIGN_UP_BY
+#define ALIGN_UP_BY(address, alignment) (((ULONG_PTR)(address) + (alignment) - 1) & ~((ULONG_PTR)(alignment) - 1))
+#define ALIGN_UP(address, type) ALIGN_UP_BY(address, sizeof(type))
+#define ALIGN_UP_POINTER_BY(pointer, alignment) ((PVOID)ALIGN_UP_BY(pointer, alignment))
+#define ALIGN_UP_POINTER(pointer, type) ((PVOID)ALIGN_UP(pointer, type))
+#endif
 BOOLEAN NTAPI RtlIsThreadWithinLoaderCallout(VOID);
 #include <user32p.h>
 #include <user_x.h>

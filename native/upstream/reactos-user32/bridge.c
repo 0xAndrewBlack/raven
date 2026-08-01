@@ -251,6 +251,55 @@ DWORD_PTR NTAPI NtUserCallOneParam(DWORD_PTR parameter, DWORD routine)
 	return 0;
 }
 
+/* The message box converts its text with this ntdll helper, which the provider does not export. */
+BOOLEAN NTAPI RtlCreateUnicodeStringFromAsciiz(PUNICODE_STRING destination, PCSZ source)
+{
+	int count = MultiByteToWideChar(CP_ACP, 0, source, -1, NULL, 0);
+	WCHAR *buffer;
+	if (count <= 0)
+		return FALSE;
+	buffer = HeapAlloc(GetProcessHeap(), 0, count * sizeof(WCHAR));
+	if (!buffer)
+		return FALSE;
+	MultiByteToWideChar(CP_ACP, 0, source, -1, buffer, count);
+	destination->Buffer = buffer;
+	destination->Length = (USHORT)((count - 1) * sizeof(WCHAR));
+	destination->MaximumLength = (USHORT)(count * sizeof(WCHAR));
+	return TRUE;
+}
+
+VOID NTAPI RtlInitUnicodeString(PUNICODE_STRING destination, PCWSTR source)
+{
+	size_t length = source ? lstrlenW(source) * sizeof(WCHAR) : 0;
+	destination->Buffer = (PWSTR)source;
+	destination->Length = (USHORT)length;
+	destination->MaximumLength = source ? (USHORT)(length + sizeof(WCHAR)) : 0;
+}
+
+VOID NTAPI RtlFreeUnicodeString(PUNICODE_STRING string)
+{
+	if (string->Buffer)
+		HeapFree(GetProcessHeap(), 0, string->Buffer);
+	string->Buffer = NULL;
+	string->Length = string->MaximumLength = 0;
+}
+
+/* No service session exists, so the message box never needs the kernel's hard error path. */
+NTSTATUS NTAPI NtRaiseHardError(NTSTATUS error, ULONG count, ULONG mask, PULONG_PTR parameters, ULONG options, PULONG response)
+{
+	return (NTSTATUS)0xC0000002;
+}
+
+DWORD_PTR NTAPI NtUserCallHwnd(HWND window, DWORD routine)
+{
+	return 0;
+}
+
+BOOL NTAPI NtUserDeleteMenu(HMENU menu, UINT position, UINT flags)
+{
+	return DeleteMenu(menu, position, flags);
+}
+
 DWORD NTAPI NtUserCallHwndParam(HWND window, DWORD_PTR parameter, DWORD routine)
 {
 	/* The dialog manager keeps its per-window state behind a pointer the window system would own. */
