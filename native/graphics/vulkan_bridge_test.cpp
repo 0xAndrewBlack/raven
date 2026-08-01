@@ -1,6 +1,7 @@
 #include "vulkan_bridge.h"
 #include "nt/providers.h"
 
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -47,6 +48,17 @@ int main(int argc, char **argv)
 		const auto devices_status = vkEnumeratePhysicalDevices(reference, &count, devices.data());
 		if (count_status == VK_SUCCESS && devices_status == VK_SUCCESS && count)
 			vkGetPhysicalDeviceProperties(devices[0], &expected);
+		VkPhysicalDeviceMemoryProperties expected_memory{};
+		VkPhysicalDeviceFeatures expected_features{};
+		std::vector<VkQueueFamilyProperties> expected_families;
+		if (count) {
+			vkGetPhysicalDeviceMemoryProperties(devices[0], &expected_memory);
+			vkGetPhysicalDeviceFeatures(devices[0], &expected_features);
+			uint32_t family_total = 0;
+			vkGetPhysicalDeviceQueueFamilyProperties(devices[0], &family_total, nullptr);
+			expected_families.resize(family_total);
+			vkGetPhysicalDeviceQueueFamilyProperties(devices[0], &family_total, expected_families.data());
+		}
 		vkDestroyInstance(reference, nullptr);
 		check(count_status == VK_SUCCESS && devices_status == VK_SUCCESS && count == field.template operator()<uint32_t>("device_count"), "guest physical device count differs from host");
 		const auto observed = field.template operator()<VkPhysicalDeviceProperties>("observed");
@@ -56,6 +68,18 @@ int main(int argc, char **argv)
 			observed.limits.maxImageDimension2D == expected.limits.maxImageDimension2D &&
 			observed.limits.maxMemoryAllocationCount == expected.limits.maxMemoryAllocationCount,
 			"guest physical device properties differ from host");
+		const auto families = field.template operator()<std::array<VkQueueFamilyProperties, 16>>("families");
+		check(field.template operator()<uint32_t>("family_count") == expected_families.size() && !expected_families.empty(), "guest queue family count differs from host");
+		for (size_t index = 0; index < expected_families.size(); ++index)
+			check(families[index].queueFlags == expected_families[index].queueFlags && families[index].queueCount == expected_families[index].queueCount &&
+				families[index].timestampValidBits == expected_families[index].timestampValidBits, "guest queue family differs from host");
+		const auto memory_observed = field.template operator()<VkPhysicalDeviceMemoryProperties>("memory_properties");
+		check(memory_observed.memoryTypeCount == expected_memory.memoryTypeCount && memory_observed.memoryHeapCount == expected_memory.memoryHeapCount &&
+			std::memcmp(memory_observed.memoryTypes, expected_memory.memoryTypes, sizeof(expected_memory.memoryTypes)) == 0 &&
+			std::memcmp(memory_observed.memoryHeaps, expected_memory.memoryHeaps, sizeof(expected_memory.memoryHeaps)) == 0, "guest memory properties differ from host");
+		const auto features_observed = field.template operator()<VkPhysicalDeviceFeatures>("features");
+		check(std::memcmp(&features_observed, &expected_features, sizeof(expected_features)) == 0, "guest device features differ from host");
+		check(field.template operator()<uint32_t>("device_workflow") == 1, "guest logical device workflow did not complete");
 		std::vector<raven::LoadedImage *> images;
 		for (const auto &[name, module] : modules.all())
 			images.push_back(&module->loaded);
@@ -82,8 +106,17 @@ int main(int argc, char **argv)
 		rejected("vkCreateInstance", allocator);
 		const uint64_t bad_output[] = {memory, 0, UINT64_MAX};
 		rejected("vkCreateInstance", bad_output);
+		// Logical devices: forged handles, allocators and unimplemented create-info fields all fail before reaching the driver.
+		const uint64_t forged_device[] = {0x4321, 0, 0, memory};
+		rejected("vkGetDeviceQueue", forged_device);
+		const uint64_t forged_wait[] = {0x4321};
+		rejected("vkDeviceWaitIdle", forged_wait);
+		const uint64_t forged_create[] = {0x1234, memory, 0, memory + 512};
+		rejected("vkCreateDevice", forged_create);
+		const uint64_t forged_proc[] = {0x4321, memory};
+		rejected("vkGetDeviceProcAddr", forged_proc);
 		process.unmap_memory(memory);
-		std::cout << "Guest Vulkan instance, stable physical handles, zero-capacity enumeration and checked negatives match host " << expected.deviceName << '\n';
+		std::cout << "Guest Vulkan instance, logical device, queues, memory and feature queries, stable physical handles, zero-capacity enumeration and checked negatives match host " << expected.deviceName << '\n';
 		return 0;
 	} catch (const std::exception &error) {
 		std::cerr << error.what() << '\n';

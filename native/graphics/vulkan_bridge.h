@@ -21,7 +21,12 @@ private:
 	std::map<uint64_t, VkInstance> instances;
 	struct Physical { VkPhysicalDevice handle; uint64_t instance; };
 	std::map<uint64_t, Physical> physical;
+	struct Device { VkDevice handle; uint64_t physical; };
+	std::map<uint64_t, Device> devices;
+	struct Queue { VkQueue handle; uint64_t device; uint32_t family, index; };
+	std::map<uint64_t, Queue> queues;
 	uint64_t next_handle = 0x5600000000000001ULL;
+	void destroy_device(uint64_t token);
 	std::string string(uint64_t address);
 };
 

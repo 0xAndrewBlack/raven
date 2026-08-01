@@ -6,3 +6,11 @@ vkEnumerateInstanceVersion
 vkEnumeratePhysicalDevices
 vkGetInstanceProcAddr
 vkGetPhysicalDeviceProperties
+vkGetPhysicalDeviceQueueFamilyProperties
+vkGetPhysicalDeviceMemoryProperties
+vkGetPhysicalDeviceFeatures
+vkCreateDevice
+vkDestroyDevice
+vkGetDeviceQueue
+vkDeviceWaitIdle
+vkGetDeviceProcAddr
