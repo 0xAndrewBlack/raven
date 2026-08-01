@@ -136,7 +136,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     endif()
     find_package(Vulkan QUIET)
     if(Vulkan_FOUND)
-        target_sources(raven_cpu PRIVATE graphics/vulkan_bridge.cpp graphics/vulkan_resources.cpp)
+        target_sources(raven_cpu PRIVATE graphics/vulkan_bridge.cpp graphics/vulkan_resources.cpp graphics/vulkan_compute.cpp)
         target_link_libraries(raven_cpu PUBLIC Vulkan::Vulkan)
         target_compile_definitions(raven_cpu PUBLIC RAVEN_VULKAN=1)
     endif()
@@ -1032,12 +1032,12 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan.def VERBATIM)
             add_custom_command(OUTPUT ${VULKAN_FIXTURES}/client.exe
                 COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
-                    -idirafter ${Vulkan_INCLUDE_DIRS}
+                    -idirafter ${Vulkan_INCLUDE_DIRS} -I${PROJECT_SOURCE_DIR}/testdata/native_cpu
                     -Wl,--entry,raven_entry,--image-base,0x18e000000
                     -o ${VULKAN_FIXTURES}/client.exe ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_client.c
                     ${VULKAN_FIXTURES}/vulkan.a
                 DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_client.c
-                    ${VULKAN_FIXTURES}/vulkan.a VERBATIM)
+                    ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_compute_spirv.h ${VULKAN_FIXTURES}/vulkan.a VERBATIM)
             add_custom_target(vulkan_pe_fixture ALL DEPENDS ${VULKAN_FIXTURES}/client.exe)
             add_executable(vulkan_bridge_test graphics/vulkan_bridge_test.cpp)
             target_link_libraries(vulkan_bridge_test PRIVATE raven_cpu)

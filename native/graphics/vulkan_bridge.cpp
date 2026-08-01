@@ -28,9 +28,10 @@ static constexpr std::array<std::string_view, 14> names{
 static constexpr std::array<std::string_view, 4> device_names{"vkDestroyDevice", "vkGetDeviceQueue", "vkDeviceWaitIdle", "vkGetDeviceProcAddr"};
 static bool is_device_function(std::string_view symbol)
 {
-	const auto resources = vulkan_resource_names();
+	const auto resources = vulkan_resource_names(), compute = vulkan_compute_names();
 	return std::find(device_names.begin(), device_names.end(), symbol) != device_names.end() ||
-		std::find(resources.begin(), resources.end(), symbol) != resources.end();
+		std::find(resources.begin(), resources.end(), symbol) != resources.end() ||
+		std::find(compute.begin(), compute.end(), symbol) != compute.end();
 }
 
 static_assert(sizeof(VkInstanceCreateInfo) == 64 && sizeof(VkApplicationInfo) == 48);
@@ -43,6 +44,8 @@ std::span<const std::string_view> VulkanBridge::exports()
 	static const auto merged = [] {
 		std::vector<std::string_view> all(names.begin(), names.end());
 		for (const auto name : vulkan_resource_names())
+			all.push_back(name);
+		for (const auto name : vulkan_compute_names())
 			all.push_back(name);
 		std::sort(all.begin(), all.end());
 		return all;
@@ -67,6 +70,14 @@ void VulkanBridge::destroy_device(uint64_t token)
 	// Resources a guest left behind go before their device, in dependency order.
 	vkDeviceWaitIdle(found->second.handle);
 	std::erase_if(command_buffers, [&](const auto &item) { return item.second.device == token; });
+	// Pipelines first, then what they were built from; descriptor sets go with their pool.
+	for (const auto kind : {Kind::pipeline, Kind::pool, Kind::pipeline_layout, Kind::set_layout, Kind::shader})
+		for (auto item = objects.begin(); item != objects.end();)
+			if (item->second.device == token && item->second.kind == kind) {
+				destroy_object(found->second.handle, item->second);
+				item = objects.erase(item);
+			} else ++item;
+	std::erase_if(objects, [&](const auto &item) { return item.second.device == token; });
 	for (auto item = pools.begin(); item != pools.end();)
 		if (item->second.device == token) { vkDestroyCommandPool(found->second.handle, item->second.handle, nullptr); item = pools.erase(item); } else ++item;
 	for (auto item = fences.begin(); item != fences.end();)
@@ -103,7 +114,7 @@ std::string VulkanBridge::string(uint64_t address)
 
 bool VulkanBridge::dispatch(std::string_view name)
 {
-	if (dispatch_resource(name))
+	if (dispatch_resource(name) || dispatch_compute(name))
 		return true;
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;

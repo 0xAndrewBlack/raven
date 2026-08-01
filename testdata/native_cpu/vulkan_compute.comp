@@ -1,0 +1,11 @@
+#version 450
+// out[i] = in[i] * scale + i, for 64 elements.
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer Input { uint source[]; };
+layout(std430, set = 0, binding = 1) buffer Output { uint target[]; };
+layout(push_constant) uniform Constants { uint scale; } constants;
+void main()
+{
+	uint index = gl_GlobalInvocationID.x;
+	target[index] = source[index] * constants.scale + index;
+}

@@ -32,19 +32,6 @@ void VulkanBridge::check_writable(uint64_t address, size_t size) const
 	process.write_memory(address, process.read_memory(address, size));
 }
 
-template<typename T> T VulkanBridge::load(uint64_t address) const
-{
-	T result{};
-	const auto bytes = process.read_memory(address, sizeof(T));
-	std::memcpy(&result, bytes.data(), sizeof(T));
-	return result;
-}
-
-template<typename T> void VulkanBridge::store(uint64_t address, const T &value) const
-{
-	process.write_memory(address, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&value), sizeof(T)));
-}
-
 void VulkanBridge::shadow_to_device(uint64_t device)
 {
 	for (auto &[token, memory] : memories) {
@@ -90,7 +77,15 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 		{"vkFreeCommandBuffers", 4}, {"vkFreeMemory", 3}, {"vkGetBufferMemoryRequirements", 3}, {"vkInvalidateMappedMemoryRanges", 3},
 		{"vkMapMemory", 6}, {"vkQueueSubmit", 4}, {"vkQueueWaitIdle", 1}, {"vkResetFences", 3}, {"vkUnmapMemory", 2}, {"vkWaitForFences", 5},
 		{"vkGetDeviceMemoryCommitment", 3}, {"vkResetCommandPool", 3}};
-	const auto a = process.api_arguments(words.at(name));
+	auto a = process.api_arguments(words.at(name));
+	// A 32-bit argument leaves the upper half of its register or stack slot undefined, so those are narrowed before use.
+	static const std::map<std::string_view, std::vector<size_t>, std::less<>> narrow{
+		{"vkAllocateMemory", {}}, {"vkMapMemory", {4}}, {"vkFlushMappedMemoryRanges", {1}}, {"vkInvalidateMappedMemoryRanges", {1}},
+		{"vkFreeCommandBuffers", {2}}, {"vkCmdCopyBuffer", {3}}, {"vkQueueSubmit", {1}}, {"vkResetFences", {1}}, {"vkWaitForFences", {1, 3}},
+		{"vkResetCommandPool", {2}}};
+	if (const auto found = narrow.find(name); found != narrow.end())
+		for (const auto index : found->second)
+			a[index] = uint32_t(a[index]);
 	const auto device_of = [&](uint64_t token) -> Device & {
 		const auto found = devices.find(token);
 		if (found == devices.end())
@@ -201,7 +196,8 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 		auto &memory = memory_of(a[1], a[0]);
 		const uint64_t offset = a[2], size = a[3] == VK_WHOLE_SIZE ? memory.size - std::min<uint64_t>(offset, memory.size) : a[3];
 		if (a[4] || memory.host || offset >= memory.size || !size || size > memory.size - offset || size > (256ULL << 20))
-			throw std::runtime_error("unsupported Vulkan memory mapping");
+			throw std::runtime_error("unsupported Vulkan memory mapping (offset " + std::to_string(offset) + ", size " + std::to_string(size) +
+				", memory " + std::to_string(memory.size) + (memory.host ? ", already mapped" : "") + ", flags " + std::to_string(a[4]) + ")");
 		check_writable(a[5], 8);
 		void *host = nullptr;
 		const auto status = vkMapMemory(device.handle, memory.handle, offset, size, 0, &host);

@@ -83,6 +83,10 @@ int main(int argc, char **argv)
 		const auto copied = field.template operator()<std::array<uint8_t, 256>>("copied");
 		for (size_t index = 0; index < copied.size(); ++index)
 			check(copied[index] == uint8_t(index * 7 + 3), "device copied different bytes than the guest wrote");
+		check(field.template operator()<uint32_t>("compute_workflow") == 1, "guest compute dispatch did not complete");
+		const auto computed = field.template operator()<std::array<uint32_t, 64>>("computed");
+		for (uint32_t index = 0; index < computed.size(); ++index)
+			check(computed[index] == (index + 10) * 3 + index, "compute shader produced different values than the specification");
 		check(field.template operator()<uint32_t>("device_workflow") == 1, "guest logical device workflow did not complete");
 		std::vector<raven::LoadedImage *> images;
 		for (const auto &[name, module] : modules.all())
@@ -127,6 +131,12 @@ int main(int argc, char **argv)
 		rejected("vkQueueWaitIdle", forged_queue);
 		const uint64_t forged_map[] = {0x4321, 0x7777, 0, 4096, 0, memory};
 		rejected("vkMapMemory", forged_map);
+		const uint64_t forged_pipeline[] = {0x7777, 1, 0x1234};
+		rejected("vkCmdBindPipeline", forged_pipeline);
+		const uint64_t forged_shader[] = {0x4321, memory, 0, memory + 512};
+		rejected("vkCreateShaderModule", forged_shader);
+		const uint64_t forged_dispatch[] = {0x7777, 1, 1, 1};
+		rejected("vkCmdDispatch", forged_dispatch);
 		const uint64_t forged_command[] = {0x7777, memory};
 		rejected("vkBeginCommandBuffer", forged_command);
 		process.unmap_memory(memory);

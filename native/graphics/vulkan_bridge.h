@@ -2,12 +2,14 @@
 
 #include "cpu/native_cpu.h"
 #include "pe/module_set.h"
+#include <cstring>
 #include <vulkan/vulkan.h>
 
 namespace raven {
 
 // Names of the memory, buffer, command and synchronisation entry points, in byte order.
 std::span<const std::string_view> vulkan_resource_names();
+std::span<const std::string_view> vulkan_compute_names();
 
 class VulkanBridge {
 public:
@@ -43,6 +45,12 @@ private:
 	std::map<uint64_t, CommandBuffer> command_buffers;
 	struct Fence { VkFence handle; uint64_t device; };
 	std::map<uint64_t, Fence> fences;
+	// Shader modules, descriptor and pipeline objects: one host handle each, owned by a device token.
+	enum class Kind { shader, set_layout, pipeline_layout, pipeline, pool, set };
+	struct Object { uint64_t handle; uint64_t device; Kind kind; uint64_t parent = 0; };
+	std::map<uint64_t, Object> objects;
+	bool dispatch_compute(std::string_view name);
+	void destroy_object(const VkDevice &device, const Object &object);
 	uint64_t next_handle = 0x5600000000000001ULL;
 	void destroy_device(uint64_t token);
 	// Copies between a guest shadow and the host mapping behind it, moving only the bytes that changed on one side.
@@ -54,5 +62,18 @@ private:
 	void check_writable(uint64_t address, size_t size) const;
 	std::string string(uint64_t address);
 };
+
+template<typename T> T VulkanBridge::load(uint64_t address) const
+{
+	T result{};
+	const auto bytes = process.read_memory(address, sizeof(T));
+	std::memcpy(&result, bytes.data(), sizeof(T));
+	return result;
+}
+
+template<typename T> void VulkanBridge::store(uint64_t address, const T &value) const
+{
+	process.write_memory(address, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&value), sizeof(T)));
+}
 
 }
