@@ -136,8 +136,14 @@ bool NativeWindows::show_window(uint64_t handle, uint32_t command)
 	window->visible = !hide;
 	window->style = (window->style & ~ws_visible) | (window->visible ? ws_visible : 0);
 	objects.update_window_dcs(window->parent ? window->parent : handle);
-	if (show && !objects.invalidate(handle, {0, 0, window->width, window->height}, true))
-		throw uint32_t(8);
+	if (show) {
+		// Showing a window paints its whole subtree, so the children's update regions are invalidated with it.
+		if (!objects.invalidate(handle, {0, 0, window->width, window->height}, true))
+			throw uint32_t(8);
+		for (const auto child : objects.child_windows(handle))
+			invalidate_tree(child, true);
+		window = objects.window(handle);
+	}
 	if (window->visible && !show)
 		objects.update_window_dcs(handle);
 	if (show && !window->parent && activate_it && objects.window(handle) && !(window->ex_style & 0x08000000U))
@@ -721,8 +727,12 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		try {
 			const DesktopRect normal{int32_t(fields[7]), int32_t(fields[8]), int32_t(fields[9]), int32_t(fields[10])};
 			objects.window(call[0])->restore = normal;
+			// The window becomes visible before it is sized, so its size notifications reach a window that is already shown.
+			if (fields[2] != 0)
+				show_window(call[0], fields[2]);
 			place_window(call[0], normal, 0, 0x4 | swp_noactivate);
-			show_window(call[0], fields[2]);
+			if (fields[2] == 0)
+				show_window(call[0], 0);
 			call.ret(1);
 		} catch (const uint32_t &error) {
 			call.fail(error);

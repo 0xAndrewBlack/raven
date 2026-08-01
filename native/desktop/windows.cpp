@@ -155,6 +155,21 @@ void NativeWindows::release_surface(uint64_t handle)
 		try { present(handle); } catch (...) {}
 	}
 	objects.detach_window_dcs(handle);
+	if (!window->parent) {
+		// Children draw on the root's bitmap through their own surface contexts; those follow it out.
+		const auto drop=[&](auto &&self,uint64_t node) -> void {
+			for (const auto child:objects.child_windows(node)) {
+				self(self,child);
+				objects.detach_window_dcs(child);
+				if (auto *record=objects.window(child)) {
+					if (record->dc) objects.erase(record->dc);
+					record->dc=record->bitmap=0;
+				}
+			}
+		};
+		drop(drop,handle);
+		window=objects.window(handle);
+	}
 	if (focus==handle) focus=0;
 	if (active==handle) active=0;
 	if (!window->parent && window->bitmap && presentation.remove) presentation.remove(handle);
@@ -184,6 +199,13 @@ NativeWindows::PaintStart NativeWindows::start_paint(uint64_t handle)
 	const auto dc=surface_dc(handle);
 	const bool erase=objects.start_paint(handle);
 	const auto rect=objects.dc(dc)->clip->bounds();
+	if (std::getenv("RAVEN_TRACE_PAINT")) {
+		const auto *device=objects.dc(dc);
+		std::cerr << "start " << std::hex << handle << std::dec << " clip " << rect.left << ',' << rect.top << ',' << rect.right << ',' << rect.bottom;
+		if (device->bounds) std::cerr << " bounds " << device->bounds->left << ',' << device->bounds->top << ',' << device->bounds->right << ',' << device->bounds->bottom;
+		if (device->visible) { const auto box = device->visible->bounds(); std::cerr << " visible " << box.left << ',' << box.top << ',' << box.right << ',' << box.bottom; }
+		std::cerr << " erase " << erase << '\n';
+	}
 	const bool pending=erase && !send(handle,0x14,dc,0);
 	if (!objects.window(handle)) throw std::runtime_error("background callback destroyed its painting window");
 	return {dc,rect,pending};
@@ -373,7 +395,13 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		}
 		const auto paint=(!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f) ? objects.invalid_window(window) : 0;
 		if (paint) {
-			if (std::getenv("RAVEN_TRACE_PAINT")) std::cerr << "paint " << std::hex << paint << std::dec << "\n";
+			if (std::getenv("RAVEN_TRACE_PAINT")) {
+				std::cerr << "paint " << std::hex << paint << " pending";
+				for (const auto handle : objects.window_handles())
+					if (const auto *other = objects.window(handle); other && !other->update.empty())
+						std::cerr << ' ' << handle << (objects.window_visible(handle) ? "" : "(hidden)");
+				std::cerr << std::dec << "\n";
+			}
 			std::vector<uint8_t> bytes(layout.size);
 			put(bytes,0,paint,layout.pointer); put(bytes,layout.message,0x0f,4); put(bytes,layout.time,message_time(),4);
 			process.write_memory(args[0],bytes);
@@ -584,6 +612,18 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 			x>=window->x && y>=window->y && int64_t(x)<int64_t(window->x)+window->width &&
 			int64_t(y)<int64_t(window->y)+window->height ? 1 : 0;
 	}
+	if (message==0x317) {
+		// WM_PRINT: the default procedure replays its flags as the erase and client-paint requests.
+		if (args[3] & 0x8) send(args[0],0x14,args[2],0);
+		if (objects.window(args[0]) && (args[3] & 0x4)) send(args[0],0x318,args[2],args[3]);
+		return 0;
+	}
+	if (message==0x318) {
+		// WM_PRINTCLIENT: the default procedure paints the window into the supplied device context.
+		if (args[2]) send(args[0],0x0f,args[2],0);
+		return 0;
+	}
+	if (message==0x0f && args[2]) return 0;
 	if (message==0x0f) {
 		if (window->painting) throw uint32_t(170);
 		start_paint(args[0]); objects.finish_paint(args[0]);
@@ -674,6 +714,8 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 	record.extra.resize(definition->window_extra);
 	const auto handle=objects.add(std::move(record));
 	if (!handle) throw uint32_t(8);
+	// A new child sits below its siblings, so controls created first stay on top of those created later.
+	if (child) objects.restack(handle,false);
 	uint64_t scratch=0;
 	try {
 		scratch=process.map_memory(4096,PROT_READ | PROT_WRITE);
