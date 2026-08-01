@@ -87,6 +87,13 @@ void NativeWindows::nonclient_pointer(uint64_t handle,uint64_t hit,uint32_t mess
 	constexpr uint64_t menu_hit=5,minimize_hit=8,maximize_hit=9,close_hit=20;
 	if (message==0x201) {
 		pressed_frame_hit=hit; pressed_frame_window=handle;
+		// A drag that starts on the caption or a sizing border continues in the compositor (maximized windows do not move).
+		if (presentation.interactive && !(window->style & 0x01000000U)) {
+			// Hit codes 10..17 are the sizing borders: left, right, top, top-left, top-right, bottom, bottom-left, bottom-right.
+			static constexpr uint32_t edges[]{4,8,1,5,9,2,6,10};
+			if (hit==2) { presentation.interactive(handle,0); return; }
+			if (hit>=10 && hit<=17) { presentation.interactive(handle,edges[hit-10]); return; }
+		}
 		if (hit==menu_hit) {
 			const auto rects=menu_bar_items(*window);
 			for (size_t index=0;index<rects.size();++index)

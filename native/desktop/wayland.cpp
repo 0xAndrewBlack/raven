@@ -30,8 +30,8 @@ struct WaylandPresentation::State {
 		xdg_toplevel *role=nullptr;
 		xdg_popup *popup=nullptr;
 		bool is_popup=false;
-		bool configured=false, closed=false, resized=false, close_posted=false;
-		uint32_t width=0,height=0;
+		bool configured=false, closed=false, resized=false, close_posted=false, first_frame=false;
+		uint32_t width=0,height=0,pending_width=0,pending_height=0;
 		std::vector<std::unique_ptr<Buffer>> buffers;
 		~Surface() {
 			if (popup) xdg_popup_destroy(popup);
@@ -316,26 +316,39 @@ struct WaylandPresentation::State {
 			static const xdg_toplevel_listener role_listener{
 				[](void *data,xdg_toplevel *,int32_t width,int32_t height,wl_array *) {
 					auto &window=*static_cast<Surface *>(data);
-					if ((width && uint32_t(width)!=window.width) || (height && uint32_t(height)!=window.height)) window.resized=true;
+					if (width>0 && height>0 && (uint32_t(width)!=window.width || uint32_t(height)!=window.height)) {
+						window.pending_width=uint32_t(width); window.pending_height=uint32_t(height); window.resized=true;
+					}
 				}, [](void *data,xdg_toplevel *) { static_cast<Surface *>(data)->closed=true; },nullptr,nullptr};
 			xdg_surface_add_listener(window->shell,&surface_listener,window.get());
 			xdg_toplevel_add_listener(window->role,&role_listener,window.get());
 			xdg_toplevel_set_title(window->role,std::string(title).c_str());
 			xdg_toplevel_set_app_id(window->role,"raven.native");
+			// The first size is fixed so the compositor places the window; it is released once the first frame is shown.
 			xdg_toplevel_set_min_size(window->role,int32_t(width),int32_t(height));
 			xdg_toplevel_set_max_size(window->role,int32_t(width),int32_t(height));
 			wl_surface_commit(window->proxy);
 			const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);
 			while (!window->configured && !window->closed && !window->resized && std::chrono::steady_clock::now()<end) events(std::chrono::milliseconds(20));
-			if (!window->configured || window->closed || window->resized) throw std::runtime_error("Wayland window configuration failed");
+			window->resized=false;
+			window->first_frame=true;
+			if (!window->configured || window->closed) throw std::runtime_error("Wayland window configuration failed");
 			found=surfaces.emplace(handle,std::move(window)).first;
 		}
 		auto &window=*found->second;
 		xdg_toplevel_set_title(window.role,std::string(title).c_str());
 		// A size the compositor refused to configure (a window larger than the output) is shown clipped rather than failing the frame.
-		window.resized=false;
-		if (window.closed || window.width!=width || window.height!=height) throw std::runtime_error("Wayland surface cannot accept this frame");
+		// A frame of another size is the guest's answer to a resize: the surface follows it.
+		if (window.closed) throw std::runtime_error("Wayland surface cannot accept this frame");
+		if (window.pending_width==width && window.pending_height==height) window.resized=false;
+		window.width=width; window.height=height;
 		attach_frame(window,width,height,pixels);
+		if (window.first_frame) {
+			window.first_frame=false;
+			xdg_toplevel_set_min_size(window.role,0,0);
+			xdg_toplevel_set_max_size(window.role,0,0);
+			wl_surface_commit(window.proxy);
+		}
 	}
 };
 
@@ -358,7 +371,10 @@ DesktopPresentation WaylandPresentation::callbacks()
 		state->events(budget);
 		events.swap(state->pending);
 		for (auto &[handle,surface] : state->surfaces) {
-			surface->resized=false;
+			if (surface->resized && !surface->is_popup) {
+				events.push_back({handle,0,0,0,DesktopEventKind::resize,int32_t(surface->pending_width),int32_t(surface->pending_height)});
+				surface->resized=false;
+			}
 			if (surface->closed && !surface->close_posted) {
 				if (surface->is_popup) events.push_back({handle,0,0,0,DesktopEventKind::popup_done});
 				else events.push_back({handle,0x10});
@@ -368,6 +384,12 @@ DesktopPresentation WaylandPresentation::callbacks()
 		return events;
 	},[this](uint64_t handle,uint64_t parent,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
 		state->popup_surface(handle,parent,x,y,width,height,pixels);
+	},[this](uint64_t handle,uint32_t action) {
+		const auto found=state->surfaces.find(handle);
+		if (found==state->surfaces.end() || !state->seat || found->second->is_popup || !found->second->role) return;
+		if (action==0) xdg_toplevel_move(found->second->role,state->seat,state->last_serial);
+		else xdg_toplevel_resize(found->second->role,state->seat,state->last_serial,action);
+		wl_display_flush(state->display);
 	}};
 }
 

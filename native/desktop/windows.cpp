@@ -172,7 +172,8 @@ void NativeWindows::release_surface(uint64_t handle)
 	}
 	if (focus==handle) focus=0;
 	if (active==handle) active=0;
-	if (!window->parent && window->bitmap && presentation.remove) presentation.remove(handle);
+	// A resize keeps the host window: the next frame has the new size.
+	if (!window->parent && window->bitmap && presentation.remove && !keep_host_window) presentation.remove(handle);
 	const auto bitmap=window->bitmap,dc=window->dc;
 	if (dc) objects.erase(dc);
 	if (bitmap && !window->parent) {
@@ -305,6 +306,18 @@ void NativeWindows::receive(const DesktopEvent &event)
 		messages.push_back({focus,key.code,flags,system ? (pressed ? 0x104U : 0x105U) : (pressed ? 0x100U : 0x101U),message_time(),cursor_x,cursor_y,pressed ? key.character : 0});
 		vk_async[key.code&255]=pressed ? (vk_async[key.code&255] | 0x80) : (vk_async[key.code&255] & 0x7f);
 		if (pressed && !previous && (key.code==0x14 || key.code==0x90 || key.code==0x91)) vk_async[key.code]^=1;
+		return;
+	}
+	if (event.kind==DesktopEventKind::resize) {
+		// The user resized the host window: windows with a sizing border follow it, the others keep their size.
+		const auto *window=objects.window(event.window);
+		if (!window || window->parent || !(window->style & 0x40000U) || (window->style & 0x01000000U) || event.x<=0 || event.y<=0) return;
+		const DesktopRect outer{window->outer.left,window->outer.top,window->outer.left+event.x,window->outer.top+event.y};
+		if (outer.right-outer.left==window->outer.right-window->outer.left && outer.bottom-outer.top==window->outer.bottom-window->outer.top) return;
+		// The compositor already resized the host window, so it stays and receives the next frame at the new size.
+		keep_host_window=true;
+		try { place_window(event.window,outer,0,0x14); } catch (...) { keep_host_window=false; throw; }
+		keep_host_window=false;
 		return;
 	}
 	if (event.x<INT16_MIN || event.x>INT16_MAX || event.y<INT16_MIN || event.y>INT16_MAX)

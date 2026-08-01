@@ -62,6 +62,7 @@ private:
 	uint64_t focus=0,active=0;
 	bool activating=false;
 	int focusing=0;
+	bool keep_host_window=false;
 	KeyboardMap keyboard_map;
 	std::array<bool,256> key_down{};
 	std::optional<Message> key_translation;
