@@ -1365,6 +1365,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/device.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-device)
                     set_tests_properties(native_d3d12_device PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                    add_test(NAME native_d3d12_clear COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-clear.py
+                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/clear.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        ${CMAKE_CURRENT_BINARY_DIR}/d3d12-clear)
+                    set_tests_properties(native_d3d12_clear PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                    if(EXISTS /dev/dri/renderD128)
+                        add_test(NAME native_d3d12_clear_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-clear.py
+                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/clear.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/d3d12-clear-gpu gpu)
+                        set_tests_properties(native_d3d12_clear_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
+                    endif()
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_device_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12.py
                             $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/device.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
