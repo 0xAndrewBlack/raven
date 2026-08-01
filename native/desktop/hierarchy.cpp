@@ -120,7 +120,7 @@ bool NativeWindows::tree_dispatch(std::string_view name)
 	const auto *record=objects.window(args[0]);
 	if (name=="IsChild") result=objects.is_child(args[0],args[1]);
 	else if (!record) environment.set_last_error(1400);
-	else if (name=="GetParent") result=record->parent;
+	else if (name=="GetParent") result=record->parent ? record->parent : (record->style & 0x80000000U) && objects.window(record->owner) ? record->owner : 0;
 	else if (name=="GetDlgCtrlID") result=uint32_t(record->child_id);
 	else for (const auto child:objects.child_windows(args[0]))
 		if (uint32_t(objects.window(child)->child_id)==uint32_t(args[1])) { result=child;break; }
@@ -158,8 +158,12 @@ uint64_t NativeWindows::pointer_child(uint64_t handle,int32_t x,int32_t y)
 	const auto children=objects.child_windows(handle);
 	for (auto child=children.rbegin();child!=children.rend();++child) {
 		const auto *record=objects.window(*child);
-		if (record && objects.window_visible(*child) && x>=record->outer.left && y>=record->outer.top && x<record->outer.right && y<record->outer.bottom)
-			return pointer_child(*child,x,y);
+		if (record && objects.window_visible(*child) && x>=record->outer.left && y>=record->outer.top && x<record->outer.right && y<record->outer.bottom) {
+			const auto inner=pointer_child(*child,x,y);
+			// A window that answers HTTRANSPARENT (a group box) leaves the point to the siblings beneath it.
+			if (inner==*child && int32_t(send(*child,0x84,0,uint16_t(x)|(uint64_t(uint16_t(y))<<16)))==-1) continue;
+			return inner;
+		}
 	}
 	return handle;
 }

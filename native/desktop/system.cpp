@@ -212,7 +212,9 @@ bool NativeWindows::system_dispatch(std::string_view name)
 			const auto bytes = process.read_memory(args[0], 16);
 			const auto left = int32_t(read_le(bytes, 0, 4)), top = int32_t(read_le(bytes, 4, 4));
 			const auto right = int32_t(read_le(bytes, 8, 4)), bottom = int32_t(read_le(bytes, 12, 4));
-			const auto x = int32_t(uint32_t(args[1])), y = int32_t(uint32_t(args[2]));
+			// A 32-bit caller pushes the two coordinates; a 64-bit caller passes the POINT packed in one register.
+			const bool packed = process.mode() != NativeMode::x86;
+			const auto x = int32_t(uint32_t(args[1])), y = packed ? int32_t(uint32_t(args[1] >> 32)) : int32_t(uint32_t(args[2]));
 			result = x >= left && x < right && y >= top && y < bottom;
 		} else if (name == "TranslateAcceleratorW") {
 			const auto args = process.api_arguments(3);

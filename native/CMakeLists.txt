@@ -31,6 +31,13 @@ if(PNG_FOUND)
     add_test(NAME native_png_codec_contract COMMAND png_codec_test
         ${PROJECT_SOURCE_DIR}/testdata/npp/notepad++.exe ${CMAKE_CURRENT_BINARY_DIR}/png-output)
     set_tests_properties(native_png_codec_contract PROPERTIES TIMEOUT 30)
+else()
+    # Tests that decode PNG images need libpng 1.6.59 or newer; without it they are not built, so say so instead of staying silent.
+    message(WARNING "libpng 1.6.59 or newer not found: PNG decoding and the tests that depend on it are disabled. "
+        "Run scripts/provision-libpng.py and configure with the PNG_LIBRARY_RELEASE and PNG_PNG_INCLUDE_DIR it prints.")
+    add_test(NAME native_png_dependent_tests_unavailable COMMAND ${CMAKE_COMMAND} -E echo
+        "libpng 1.6.59 or newer is missing: PNG-dependent tests were not built (see scripts/provision-libpng.py)")
+    set_tests_properties(native_png_dependent_tests_unavailable PROPERTIES SKIP_REGULAR_EXPRESSION "libpng 1.6.59 or newer is missing")
 endif()
 
 add_executable(raven main.cpp)
@@ -914,6 +921,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-user32.dll $<TARGET_FILE_DIR:raven>/raven-user32.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-shell.dll $<TARGET_FILE_DIR:raven>/raven-shell.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/ucrtbase.dll $<TARGET_FILE_DIR:raven>/ucrtbase.dll)
+            set(EDIT_TEXT_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/edit-text.exe)
+            add_custom_command(OUTPUT ${EDIT_TEXT_CLIENT}
+                COMMAND ${RAVEN_MINGW64} -nostdlib
+                    -Wl,--entry,raven_entry,--image-base,0x1da000000,--no-insert-timestamp
+                    -o ${EDIT_TEXT_CLIENT} ${PROJECT_SOURCE_DIR}/testdata/native_loader/edit_text_client.c -lkernel32 -luser32
+                DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/edit_text_client.c VERBATIM)
+            add_custom_target(edit_text_fixture ALL DEPENDS ${EDIT_TEXT_CLIENT})
+            add_test(NAME native_edit_text_contract COMMAND raven --run-process --execution=native ${EDIT_TEXT_CLIENT})
+            set_tests_properties(native_edit_text_contract PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         endif()
         set(RAVEN_RTL_COMPONENT_PATH "" CACHE FILEPATH "Pinned guest RTL component built by scripts/provision-rtl.py")
         if(RAVEN_RTL_COMPONENT_PATH)

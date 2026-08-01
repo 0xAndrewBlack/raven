@@ -11,6 +11,12 @@ static const WCHAR klass[]=L"RavenChildFixture";
 
 static LRESULT CALLBACK proc(HWND window,UINT message,WPARAM wparam,LPARAM lparam)
 {
+	// Windows made only to check ownership stay out of the recorded message rows.
+	if (message==WM_NCCREATE && (LONG_PTR)((CREATESTRUCTW *)lparam)->lpCreateParams>=14) {
+		SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)((CREATESTRUCTW *)lparam)->lpCreateParams);
+		return DefWindowProcW(window,message,wparam,lparam);
+	}
+	if (GetWindowLongPtrW(window,GWLP_USERDATA)>=14) return DefWindowProcW(window,message,wparam,lparam);
 	if (message==WM_NCCREATE) {
 		CREATESTRUCTW *create=(CREATESTRUCTW *)lparam;
 		SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)create->lpCreateParams);
@@ -53,6 +59,14 @@ int raven_entry(void)
 	HWND grandchild=CreateWindowExW(WS_EX_NOPARENTNOTIFY,klass,L"grandchild",WS_CHILD|WS_VISIBLE,-3,4,8,7,child,(HMENU)102,instance,(void *)13);
 	if (!parent || !child || !grandchild || errors) return 2;
 	if (!geometry(parent,100,200,80,60) || !geometry(child,105,206,20,15) || !geometry(grandchild,102,210,8,7)) return 3;
+	{
+		HWND popup=CreateWindowExW(0,klass,L"owned popup",WS_POPUP,0,0,10,10,parent,NULL,instance,(void *)14);
+		HWND overlapped=CreateWindowExW(0,klass,L"owned overlapped",WS_OVERLAPPED,0,0,10,10,parent,NULL,instance,(void *)15);
+		int ok=popup && overlapped && GetParent(popup)==parent && GetWindow(popup,GW_OWNER)==parent && !GetParent(overlapped) && GetWindow(overlapped,GW_OWNER)==parent;
+		if (popup) DestroyWindow(popup);
+		if (overlapped) DestroyWindow(overlapped);
+		if (!ok) return 13;
+	}
 	if (GetParent(parent) || GetParent(child)!=parent || GetParent(grandchild)!=child || !IsChild(parent,grandchild) ||
 		IsChild(child,child) || IsChild(grandchild,parent) || GetDlgItem(parent,101)!=child || GetDlgItem(parent,102) ||
 		GetDlgItem(child,102)!=grandchild || GetDlgCtrlID(grandchild)!=102 || GetMenu(child)!=(HMENU)101 || GetMenu(grandchild)!=(HMENU)102 || GetMenu(parent) || GetWindowLongPtrW(child,GWLP_ID)!=101 ||

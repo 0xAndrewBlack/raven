@@ -6,6 +6,11 @@
 #include <cmath>
 #include <cstring>
 #include <new>
+#include <vector>
+#include <string>
+#include <optional>
+#include <memory>
+#include <map>
 #include <sys/mman.h>
 
 #ifdef RAVEN_SKIA
@@ -511,10 +516,220 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			call.ret(uint32_t(result));
 		});
 	});
-	// Complex-script shaping is not provided; callers fall back to plain GDI text.
-	for (const auto *name : {"ScriptBreak", "ScriptStringAnalyse", "ScriptStringCPtoX", "ScriptStringFree", "ScriptStringGetLogicalWidths",
-			"ScriptStringOut", "ScriptStringXtoCP", "ScriptString_pSize", "ScriptString_pcOutChars"})
-		registry.add(name, 8, [](ApiCall &call) { call.ret(0x80004001); });
+	// ---- Uniscribe subset for left-to-right text ----
+	// A string analysis keeps the advance of every character measured with the font selected when it was made, which is what
+	// the edit control needs for alignment, caret placement and hit testing. Shaping and bidirectional text are not provided.
+	struct ScriptString {
+		uint64_t dc = 0;
+		std::u16string text;
+		std::vector<int32_t> position;
+		uint64_t block = 0;
+	};
+	const auto strings = std::make_shared<std::map<uint64_t, ScriptString>>();
+	const auto next_string = std::make_shared<uint64_t>(0x5c0000);
+	const auto find_string = [strings](uint64_t handle) -> ScriptString * {
+		const auto found = strings->find(handle);
+		return found == strings->end() ? nullptr : &found->second;
+	};
+	registry.add("ScriptStringAnalyse", 13, [=, this](ApiCall &call) {
+		try {
+			auto &dc = require_dc(call, 0);
+			const auto &font = selected_font(dc);
+			const int32_t length = call.i32(2), charset = call.i32(4);
+			const uint32_t flags = call.u32(5);
+			if (length <= 0 || length > 65536 || !call[1] || !call[12]) {
+				call.ret(0x80070057);
+				return;
+			}
+			ScriptString entry;
+			entry.dc = call[0];
+			if (flags & 1) {
+				const auto character = call.read(call[1], 2);
+				entry.text.assign(size_t(length), char16_t(character[0] | (character[1] << 8)));
+			} else {
+				entry.text = widen(call, call[1], length, charset != -1);
+			}
+			const auto cumulative = measured_advances(font.definition, to_units(entry.text));
+			std::vector<int32_t> tabs;
+			int32_t scale = 0, origin = 0;
+			if ((flags & 2) && call[10]) {
+				const auto count = call.load<int32_t>(call[10]);
+				scale = call.load<int32_t>(call[10] + 4);
+				origin = call.load<int32_t>(call[10] + 16);
+				const auto stops = call.load<uint64_t>(call[10] + 8);
+				for (int32_t i = 0; i < count && i < 64 && stops; ++i)
+					tabs.push_back(call.load<int32_t>(stops + uint64_t(i) * 4));
+			}
+			int32_t tab_default = 0;
+			if (flags & 2)
+				tab_default = 8 * std::max(1, int32_t(measured_advances(font.definition, to_units(u"0")).back()));
+			entry.position.assign(1, 0);
+			for (size_t i = 0; i < entry.text.size(); ++i) {
+				const int32_t at = entry.position.back();
+				int32_t advance = cumulative[i] - (i ? cumulative[i - 1] : 0);
+				if ((flags & 2) && entry.text[i] == u'\t') {
+					const auto unit = [&](int32_t value) { return scale ? int32_t(int64_t(value) * scale / 4) : value; };
+					int32_t stop = 0;
+					bool found = false;
+					if (tabs.size() > 1) {
+						for (const auto value : tabs)
+							if (origin + unit(value) > at) { stop = origin + unit(value); found = true; break; }
+					}
+					if (!found) {
+						const int32_t step = tabs.size() == 1 ? std::max(1, unit(tabs[0])) : tab_default;
+						stop = origin + ((at - origin) / step + 1) * step;
+					}
+					advance = std::max(0, stop - at);
+				}
+				entry.position.push_back(at + advance);
+			}
+			entry.block = process.map_memory(4096, PROT_READ | PROT_WRITE);
+			call.store<int32_t>(entry.block, entry.position.back());
+			call.store<int32_t>(entry.block + 4, objects.text().logical_metrics(font.definition).height);
+			call.store<int32_t>(entry.block + 8, int32_t(entry.text.size()));
+			const auto handle = (*next_string)++;
+			strings->emplace(handle, std::move(entry));
+			call.store<uint64_t>(call[12], handle);
+			call.ret(0);
+		} catch (const uint32_t &) {
+			call.ret(0x80070006);
+		}
+	});
+	registry.add("ScriptStringFree", 1, [=, this](ApiCall &call) {
+		if (!call[0]) {
+			call.ret(0x80070057);
+			return;
+		}
+		const auto handle = call.load<uint64_t>(call[0]);
+		const auto found = strings->find(handle);
+		if (found == strings->end()) {
+			call.ret(0x80070057);
+			return;
+		}
+		if (found->second.block)
+			process.unmap_memory(found->second.block);
+		strings->erase(found);
+		call.store<uint64_t>(call[0], 0);
+		call.ret(0);
+	});
+	registry.add("ScriptString_pSize", 1, [=](ApiCall &call) {
+		const auto *entry = find_string(call[0]);
+		call.ret(entry ? entry->block : 0);
+	});
+	registry.add("ScriptString_pcOutChars", 1, [=](ApiCall &call) {
+		const auto *entry = find_string(call[0]);
+		call.ret(entry ? entry->block + 8 : 0);
+	});
+	registry.add("ScriptStringGetLogicalWidths", 2, [=](ApiCall &call) {
+		const auto *entry = find_string(call[0]);
+		if (!entry || !call[1]) {
+			call.ret(0x80070057);
+			return;
+		}
+		for (size_t i = 0; i < entry->text.size(); ++i)
+			call.store<int32_t>(call[1] + i * 4, entry->position[i + 1] - entry->position[i]);
+		call.ret(0);
+	});
+	registry.add("ScriptStringCPtoX", 4, [=](ApiCall &call) {
+		const auto *entry = find_string(call[0]);
+		if (!entry || !call[3]) {
+			call.ret(0x80070057);
+			return;
+		}
+		const int32_t index = call.i32(1);
+		const bool trailing = call.u32(2) != 0;
+		const int32_t count = int32_t(entry->text.size());
+		if (index < 0 || index > count) {
+			call.ret(0x80070057);
+			return;
+		}
+		call.store<int32_t>(call[3], entry->position[size_t(std::min(count, index + (trailing ? 1 : 0)))]);
+		call.ret(0);
+	});
+	registry.add("ScriptStringXtoCP", 4, [=](ApiCall &call) {
+		const auto *entry = find_string(call[0]);
+		if (!entry || !call[2] || !call[3]) {
+			call.ret(0x80070057);
+			return;
+		}
+		const int32_t x = call.i32(1), count = int32_t(entry->text.size());
+		int32_t index = count, trailing = 0;
+		if (x < 0) {
+			index = -1;
+			trailing = 1;
+		} else if (x < entry->position.back()) {
+			for (int32_t i = 0; i < count; ++i)
+				if (x < entry->position[size_t(i) + 1]) {
+					index = i;
+					trailing = x - entry->position[size_t(i)] >= (entry->position[size_t(i) + 1] - entry->position[size_t(i)] + 1) / 2;
+					break;
+				}
+		}
+		call.store<int32_t>(call[2], index);
+		call.store<int32_t>(call[3], trailing);
+		call.ret(0);
+	});
+	registry.add("ScriptStringOut", 8, [=, this](ApiCall &call) {
+		const auto *entry = find_string(call[0]);
+		auto *dc = entry ? objects.dc(entry->dc) : nullptr;
+		if (!dc || !objects.font(dc->font)) {
+			call.ret(0x80070057);
+			return;
+		}
+		const int32_t x = call.i32(1), y = call.i32(2);
+		const uint32_t options = call.u32(3);
+		std::optional<DesktopRect> rect;
+		if (call[4])
+			rect = DesktopRect{call.load<int32_t>(call[4]), call.load<int32_t>(call[4] + 4), call.load<int32_t>(call[4] + 8), call.load<int32_t>(call[4] + 12)};
+		const int32_t count = int32_t(entry->text.size());
+		const int32_t low = std::clamp(call.i32(5), 0, count), high = std::clamp(call.i32(6), 0, count);
+		const bool disabled = call.u32(7) != 0;
+		const auto saved_text = dc->text_color, saved_background = dc->background_color, saved_mode = dc->background_mode;
+		const auto saved_align = dc->text_align;
+		dc->text_align &= ~uint32_t(1 | 2 | 4 | 24);
+		if (disabled)
+			dc->text_color = objects.system_color(17);
+		const auto segment = [&](int32_t from, int32_t to, bool selected) {
+			if (from >= to)
+				return;
+			if (selected && !disabled) {
+				dc->background_color = objects.system_color(13);
+				dc->text_color = objects.system_color(14);
+				dc->background_mode = 2;
+			}
+			draw_run(*dc, x + entry->position[size_t(from)], y, options, rect ? &*rect : nullptr, std::u16string_view(entry->text).substr(size_t(from), size_t(to - from)), {});
+			dc->text_color = disabled ? objects.system_color(17) : saved_text;
+			dc->background_color = saved_background;
+			dc->background_mode = saved_mode;
+		};
+		if (low < high) {
+			segment(0, low, false);
+			segment(low, high, true);
+			segment(high, count, false);
+		} else {
+			segment(0, count, false);
+		}
+		dc->text_color = saved_text;
+		dc->text_align = saved_align;
+		call.ret(0);
+	});
+	// Word and character stops for plain text: every character is a cursor stop and a word starts after white space.
+	registry.add("ScriptBreak", 4, [=](ApiCall &call) {
+		const int32_t length = call.i32(1);
+		if (!call[0] || !call[3] || length <= 0 || length > 65536) {
+			call.ret(0x80070057);
+			return;
+		}
+		const auto text = widen(call, call[0], length, false);
+		std::vector<uint8_t> attributes(static_cast<size_t>(length), 0);
+		for (size_t i = 0; i < text.size(); ++i) {
+			const bool space = text[i] == u' ' || text[i] == u'\t' || text[i] == u'\n' || text[i] == u'\r';
+			const bool start = !space && (!i || text[i - 1] == u' ' || text[i - 1] == u'\t' || text[i - 1] == u'\n' || text[i - 1] == u'\r');
+			attributes[i] = uint8_t((start ? 1 : 0) | (space ? 2 : 0) | 4 | (start ? 8 : 0));
+		}
+		call.write(call[3], attributes);
+		call.ret(0);
+	});
 }
 
 }

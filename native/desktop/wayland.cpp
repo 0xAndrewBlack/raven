@@ -72,6 +72,10 @@ struct WaylandPresentation::State {
 
 	~State() {
 		surfaces.clear();
+		if (data_source) wl_data_source_destroy(data_source);
+		if (selection_offer) wl_data_offer_destroy(selection_offer);
+		if (data_device) wl_data_device_destroy(data_device);
+		if (data_manager) wl_data_device_manager_destroy(data_manager);
 		if (pointer) wl_pointer_destroy(pointer);
 		if (keyboard) wl_keyboard_destroy(keyboard);
 		if (seat) wl_seat_destroy(seat);
