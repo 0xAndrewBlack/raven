@@ -72,6 +72,31 @@ bool KeyboardMap::modifier_active(uint32_t virtual_key) const
 #endif
 }
 
+#ifdef RAVEN_XKB
+// Virtual keyboards describe their keys by the character they type; the US layout position of that character gives its virtual key.
+static uint32_t virtual_key_of_character(uint32_t c)
+{
+	static constexpr std::string_view shifted_digits=")!@#$%^&*(";
+	if (c>='a' && c<='z') return c-'a'+'A';
+	if ((c>='A' && c<='Z') || (c>='0' && c<='9') || c==' ') return c;
+	if (c<128 && shifted_digits.find(char(c))!=std::string_view::npos) return '0'+uint32_t(shifted_digits.find(char(c)));
+	switch (c) {
+	case ';': case ':': return 0xba;
+	case '=': case '+': return 0xbb;
+	case ',': case '<': return 0xbc;
+	case '-': case '_': return 0xbd;
+	case '.': case '>': return 0xbe;
+	case '/': case '?': return 0xbf;
+	case '`': case '~': return 0xc0;
+	case '[': case '{': return 0xdb;
+	case '\\': case '|': return 0xdc;
+	case ']': case '}': return 0xdd;
+	case '\'': case '"': return 0xde;
+	default: return 0xe7;
+	}
+}
+#endif
+
 KeyboardKey KeyboardMap::decode(uint32_t code) const
 {
 #ifdef RAVEN_XKB
@@ -157,6 +182,7 @@ KeyboardKey KeyboardMap::decode(uint32_t code) const
 		case XKB_KEY_KP_Divide: key.code=0x6f; key.scan=53; key.extended=true; break;
 		default:
 			if (symbol>=XKB_KEY_KP_0 && symbol<=XKB_KEY_KP_9) key.code=0x60+symbol-XKB_KEY_KP_0;
+			else if (const auto character=xkb_keysym_to_utf32(symbol)) key.code=virtual_key_of_character(character);
 			else key.code=0;
 	}
 	if (key.scan>127 || key.character>0x10ffff || (key.character>=0xd800 && key.character<=0xdfff))

@@ -37,6 +37,9 @@ typedef struct _STRING { USHORT Length; USHORT MaximumLength; PCHAR Buffer; } ST
 #include <dde.h>
 #define ASSERT(condition) ((void)0)
 #define RtlGetProcessHeap() GetProcessHeap()
+/* The guest heap is reached through the public heap functions. */
+#define RtlAllocateHeap(heap, flags, size) HeapAlloc((heap), (flags), (size))
+#define RtlFreeHeap(heap, flags, pointer) HeapFree((heap), (flags), (pointer))
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(status) ((NTSTATUS)(status) >= 0)
 #endif

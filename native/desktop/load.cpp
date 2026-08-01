@@ -49,12 +49,19 @@ bool NativeDesktop::load_dispatch(std::string_view name)
 	const auto args = process.api_arguments(2);
 	uint64_t result = 0;
 	try {
-		if (!args[0])
-			throw uint32_t(120);
+		uint64_t instance = args[0], icon_name = args[1];
+		if (!instance) {
+			// The system icons come from the user32 component: application, hand, question, exclamation, asterisk, logo.
+			static constexpr uint32_t stock[] = {100, 103, 102, 101, 104, 105, 100};
+			if (!oem_module || icon_name < 32512 || icon_name > 32518)
+				throw uint32_t(120);
+			instance = oem_module;
+			icon_name = stock[icon_name - 32512];
+		}
 		if (!scratch)
 			scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
 		// LoadIcon picks the default icon size of the display, exactly like a zero-sized LoadImage.
-		const uint64_t forwarded[] = {args[0], args[1], 0, 0, scratch};
+		const uint64_t forwarded[] = {instance, icon_name, 0, 0, scratch};
 		const auto status = load_icon(forwarded);
 		if (status) {
 			if ((status & 0xffff0000U) == 0x80070000U)
