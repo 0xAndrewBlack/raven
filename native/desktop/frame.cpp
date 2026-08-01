@@ -120,13 +120,23 @@ std::vector<DesktopRect> NativeWindows::menu_bar_items(const DesktopWindow &wind
 	const auto layout = frame_layout(window);
 	auto &renderer = objects.text();
 	const auto font = interface_font();
+	(void)font;
+	std::vector<int32_t> widths;
+	for (const auto &item : menu->items)
+		widths.push_back(text_width(renderer, menu_label(item.text).first) + 2 * 8);
+	// The first right-justified item and every item after it sit against the right edge of the bar.
+	size_t split = menu->items.size();
+	int32_t trailing = 0;
+	for (size_t index = 0; index < menu->items.size(); ++index)
+		if (menu->items[index].type & 0x4000U) { split = index; break; }
+	for (size_t index = split; index < widths.size(); ++index)
+		trailing += widths[index];
 	int32_t x = layout.menu_bar.left;
-	for (const auto &item : menu->items) {
-		const auto label = menu_label(item.text).first;
-		const auto characters = printable(label);
-		const int32_t width = (characters.empty() ? 0 : renderer.extent(font, characters).width) + 2 * 8;
-		rects.push_back({x, layout.menu_bar.top, x + width, layout.menu_bar.bottom});
-		x += width;
+	for (size_t index = 0; index < widths.size(); ++index) {
+		if (index == split)
+			x = std::max(x, layout.menu_bar.right - trailing);
+		rects.push_back({x, layout.menu_bar.top, x + widths[index], layout.menu_bar.bottom});
+		x += widths[index];
 	}
 	return rects;
 }

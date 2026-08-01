@@ -124,11 +124,43 @@ inline std::vector<uint16_t> printable(std::u16string_view text)
 	return result;
 }
 
+// True when the interface face cannot draw every character, so the text takes the logical path with its fallback faces.
+inline bool needs_fallback(std::u16string_view text)
+{
+	for (const auto character : text)
+		if (!((character >= 32 && character <= 126) || (character >= 0x00a0 && character <= 0x024f) ||
+			(character >= 0x0370 && character <= 0x03ff) || (character >= 0x1e00 && character <= 0x1eff)))
+			return true;
+	return false;
+}
+
+// Pixel width of one line of interface text, using fallback faces for characters the interface face lacks.
+inline int32_t text_width(TextRenderer &renderer, std::u16string_view text)
+{
+	if (text.empty())
+		return 0;
+	if (needs_fallback(text)) {
+		const std::vector<uint16_t> units(text.begin(), text.end());
+		const auto advances = renderer.logical_advances(interface_font(), units);
+		return advances.empty() ? 0 : advances.back();
+	}
+	return renderer.extent(interface_font(), printable(text)).width;
+}
+
 // Draws one line of text and returns its pixel width; underline marks a mnemonic character index.
 inline int32_t draw_text(TextRenderer &renderer, Canvas &canvas, std::u16string_view text, int32_t x, int32_t y, uint32_t color,
 	std::optional<size_t> underline = std::nullopt, int32_t limit = INT32_MAX)
 {
 	const auto font = interface_font();
+	if (needs_fallback(text) && limit == INT32_MAX) {
+		const std::vector<uint16_t> units(text.begin(), text.end());
+		const auto width = text_width(renderer, text);
+		const auto metrics = renderer.logical_metrics(font);
+		const uint32_t box_width = uint32_t(width + 2), box_height = uint32_t(metrics.height);
+		const auto coverage = renderer.render(font, units, box_width, box_height, 0, 0);
+		canvas.blend(coverage, int32_t(box_width), x, y, color);
+		return width;
+	}
 	auto characters = printable(text);
 	if (characters.empty())
 		return 0;
