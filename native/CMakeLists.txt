@@ -1234,6 +1234,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         ${PROJECT_SOURCE_DIR}/testdata/winmine/WINMINE.EXE ${CMAKE_CURRENT_BINARY_DIR}/minesweeper-evidence)
                     set_tests_properties(native_minesweeper_workflow PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor)
                 endif()
+                # Notepad++ across three fresh processes needs the guest controls component, keyboard input and a clipboard reader as well.
+                find_program(RAVEN_WTYPE wtype)
+                find_program(RAVEN_WLPASTE wl-paste)
+                if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_WTYPE AND RAVEN_WLPASTE
+                   AND RAVEN_PIL_PYTHON AND RAVEN_CONTROLS_COMPONENT_DIR AND EXISTS ${PROJECT_SOURCE_DIR}/testdata/npp/notepad++.exe)
+                    add_test(NAME native_notepadpp_workflow COMMAND ${RAVEN_PIL_PYTHON}
+                        ${PROJECT_SOURCE_DIR}/scripts/native-npp.py $<TARGET_FILE:raven>
+                        ${PROJECT_SOURCE_DIR}/testdata/npp ${CMAKE_CURRENT_BINARY_DIR}/notepadpp-evidence)
+                    set_tests_properties(native_notepadpp_workflow PROPERTIES TIMEOUT 600 RESOURCE_LOCK raven_compositor)
+                endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
