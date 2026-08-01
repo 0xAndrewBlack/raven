@@ -205,8 +205,11 @@ void NativeWindows::register_menu_api(ApiRegistry &registry)
 		if (menu->items[where.index].submenu)
 			if (auto *old = objects.edit_menu(menu->items[where.index].submenu))
 				old->parent = 0;
-		menu->items[where.index] = *item;
-		adopt(where.menu, *item);
+		// Replacing an item's text, bitmap or owner keeps its placement at the right edge of the menu bar; only a new MF_HELP adds it.
+		auto replacement = *item;
+		replacement.type |= menu->items[where.index].type & type_right_justify;
+		menu->items[where.index] = replacement;
+		adopt(where.menu, replacement);
 		call.ret(1);
 	});
 	const auto remove = [this, locate](ApiCall &call, bool destroy) {
