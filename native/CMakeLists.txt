@@ -602,6 +602,18 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_custom_target(text_boundary_fixture ALL DEPENDS ${TEXT_BOUNDARY})
             add_test(NAME native_text_boundary COMMAND raven --run-process --execution=native --timeout-ms=30000 ${TEXT_BOUNDARY})
             set_tests_properties(native_text_boundary PROPERTIES TIMEOUT 40 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+            # The fallback faces are optional host fonts, so the test only exists where both are installed.
+            if(EXISTS /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf AND EXISTS /usr/local/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc)
+                set(TEXT_FALLBACK ${CMAKE_CURRENT_BINARY_DIR}/text-fallback.exe)
+                add_custom_command(OUTPUT ${TEXT_FALLBACK}
+                    COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                        -Wl,--entry,raven_entry,--image-base,0x1db000000,--no-insert-timestamp
+                        -o ${TEXT_FALLBACK} ${PROJECT_SOURCE_DIR}/testdata/native_loader/text_fallback_client.c -lgdi32 -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/text_fallback_client.c VERBATIM)
+                add_custom_target(text_fallback_fixture ALL DEPENDS ${TEXT_FALLBACK})
+                add_test(NAME native_text_fallback COMMAND raven --run-process --execution=native --timeout-ms=30000 ${TEXT_FALLBACK})
+                set_tests_properties(native_text_fallback PROPERTIES TIMEOUT 40 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+            endif()
             add_test(NAME native_text_cli COMMAND raven --run-process --execution=native --timeout-ms=30000 ${TEXT_FIXTURE})
             set_tests_properties(native_text_cli PROPERTIES TIMEOUT 40 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
             add_executable(text_client_test desktop/text_client_test.cpp)

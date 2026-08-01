@@ -26,6 +26,8 @@ struct TextRenderer::State {
 	std::array<sk_sp<SkTypeface>,3> faces;
 	// Every bundled style: family (sans, mono, serif) by regular, bold, italic, bold italic.
 	std::array<std::array<sk_sp<SkTypeface>,4>,3> styled;
+	// Optional host faces that supply glyphs the bundled family lacks; only the general (non-qualified) text path uses them.
+	std::vector<sk_sp<SkTypeface>> fallbacks;
 
 	static bool contains_any(const std::string &name,std::initializer_list<const char *> words)
 	{
@@ -111,6 +113,8 @@ TextRenderer::TextRenderer(const std::string &directory) : state(std::make_uniqu
 	for (size_t family=0;family<3;++family)
 		for (size_t style=0;style<3;++style)
 			state->styled[family][style+1]=manager->makeFromFile((directory+"/"+styles[family][style]).c_str());
+	for (const auto *path : {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf","/usr/local/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"})
+		if (auto face=manager->makeFromFile(path)) state->fallbacks.push_back(std::move(face));
 }
 
 TextRenderer::~TextRenderer() = default;
@@ -187,24 +191,50 @@ std::vector<int32_t> TextRenderer::advances(std::span<const uint8_t,92> definiti
 }
 
 
-// The glyphs for UTF-16 text; characters the face lacks use its replacement glyph and controls draw nothing.
-static std::vector<SkGlyphID> logical_glyphs(const SkFont &font,std::span<const uint16_t> text)
+// The glyphs for UTF-16 text; characters the face lacks come from a fallback face when one has them, otherwise they use the
+// replacement glyph, and controls draw nothing.
+struct Resolved {
+	SkGlyphID id=0;
+	int fallback=-1;
+};
+
+static std::vector<Resolved> logical_glyphs(const SkFont &font,std::span<const uint16_t> text,const std::vector<sk_sp<SkTypeface>> &fallbacks)
 {
-	std::vector<SkGlyphID> result(text.size(),0);
+	std::vector<Resolved> result(text.size());
 	std::vector<uint16_t> printable;
 	for (size_t i=0;i<text.size();++i) {
 		const uint16_t c=text[i];
 		printable.push_back(c<32 ? 32 : c);
 	}
-	if (!printable.empty()) {
-		// Surrogate pairs map to one glyph; the second unit keeps glyph 0 so positions stay unit-indexed.
-		for (size_t i=0;i<printable.size();++i) {
-			SkGlyphID id=0;
-			font.textToGlyphs(&printable[i],2,SkTextEncoding::kUTF16,{&id,1});
-			result[i]=id;
+	// Surrogate pairs map to one glyph; the second unit keeps glyph 0 so positions stay unit-indexed.
+	printable.push_back(0);
+	for (size_t i=0;i+1<printable.size();++i) {
+		SkGlyphID id=0;
+		font.textToGlyphs(&printable[i],(printable[i]>=0xd800 && printable[i]<=0xdbff && printable[i+1]>=0xdc00 && printable[i+1]<=0xdfff) ? 4 : 2,SkTextEncoding::kUTF16,{&id,1});
+		result[i].id=id;
+		if (id || text[i]<32 || (text[i]>=0xdc00 && text[i]<=0xdfff)) continue;
+		for (size_t index=0;index<fallbacks.size();++index) {
+			SkFont alternative(fallbacks[index],font.getSize());
+			alternative.textToGlyphs(&printable[i],(printable[i]>=0xd800 && printable[i]<=0xdbff && printable[i+1]>=0xdc00 && printable[i+1]<=0xdfff) ? 4 : 2,SkTextEncoding::kUTF16,{&id,1});
+			if (id) { result[i]={id,int(index)}; break; }
 		}
 	}
 	return result;
+}
+
+// Advance of every resolved glyph in the face that supplies it.
+static std::vector<SkScalar> resolved_widths(const SkFont &font,const std::vector<Resolved> &ids,const std::vector<sk_sp<SkTypeface>> &fallbacks)
+{
+	std::vector<SkScalar> widths(ids.size(),0);
+	for (size_t i=0;i<ids.size();++i) {
+		if (ids[i].fallback<0) {
+			font.getWidths({&ids[i].id,1},{&widths[i],1});
+		} else {
+			SkFont alternative(fallbacks[size_t(ids[i].fallback)],font.getSize());
+			alternative.getWidths({&ids[i].id,1},{&widths[i],1});
+		}
+	}
+	return widths;
 }
 
 
@@ -317,9 +347,8 @@ std::vector<int32_t> TextRenderer::logical_advances(std::span<const uint8_t,92> 
 		return result;
 	}
 	auto font=state->logical(definition);
-	const auto ids=logical_glyphs(font,text);
-	std::vector<SkScalar> widths(ids.size(),0);
-	if (!ids.empty()) font.getWidths(ids,widths);
+	const auto ids=logical_glyphs(font,text,state->fallbacks);
+	const auto widths=resolved_widths(font,ids,state->fallbacks);
 	std::vector<int32_t> result; result.reserve(ids.size());
 	// Prefixes round the running float sum, like the qualified measurement, so widths never drift per glyph.
 	float total=0;
@@ -342,7 +371,7 @@ std::vector<uint8_t> TextRenderer::render(std::span<const uint8_t,92> definition
 		return alpha;
 	}
 	auto font=state->logical(definition);
-	const auto ids=logical_glyphs(font,text);
+	const auto ids=logical_glyphs(font,text,state->fallbacks);
 	std::vector<uint8_t> alpha(size_t(width)*height);
 	SkBitmap bitmap;
 	if (!bitmap.installPixels(SkImageInfo::MakeA8(int(width),int(height)),alpha.data(),width)) throw std::bad_alloc();
@@ -350,15 +379,21 @@ std::vector<uint8_t> TextRenderer::render(std::span<const uint8_t,92> definition
 	SkPaint paint; paint.setColor(SK_ColorBLACK); paint.setAntiAlias(font.getEdging()!=SkFont::Edging::kAlias);
 	SkFontMetrics source; font.getMetrics(&source);
 	const auto baseline=SkScalar(origin_y)+SkScalar(std::lround(-source.fAscent));
-	std::vector<SkScalar> widths(ids.size(),0);
-	if (!ids.empty()) font.getWidths(ids,widths);
+	const auto widths=resolved_widths(font,ids,state->fallbacks);
 	std::vector<SkGlyphID> drawn; std::vector<SkPoint> points;
 	SkScalar cursor=0;
 	for (size_t i=0;i<ids.size();++i) {
 		const SkScalar step=text[i]>=32 && !(text[i]>=0xdc00 && text[i]<=0xdfff) ? SkScalar(std::lround(widths[i])) : 0;
-		if (text[i]>=32 && ids[i]) {
-			drawn.push_back(ids[i]);
-			points.push_back({SkScalar(origin_x)+(offsets.empty() ? cursor : SkScalar(offsets[i])),baseline});
+		const SkPoint at{SkScalar(origin_x)+(offsets.empty() ? cursor : SkScalar(offsets[i])),baseline};
+		if (text[i]>=32 && ids[i].id) {
+			if (ids[i].fallback<0) {
+				drawn.push_back(ids[i].id);
+				points.push_back(at);
+			} else {
+				SkFont alternative(state->fallbacks[size_t(ids[i].fallback)],font.getSize());
+				alternative.setEdging(font.getEdging()); alternative.setHinting(font.getHinting());
+				canvas.drawGlyphs({&ids[i].id,1},{&at,1},{0,0},alternative,paint);
+			}
 		}
 		cursor+=step;
 	}
