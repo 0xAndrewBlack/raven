@@ -1449,6 +1449,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/compute.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-compute-gpu gpu)
                     set_tests_properties(native_d3d11_compute_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
+                add_test(NAME native_d3d11_msaa COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-msaa.py
+                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/msaa.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-msaa)
+                set_tests_properties(native_d3d11_msaa PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                if(EXISTS /dev/dri/renderD128)
+                    add_test(NAME native_d3d11_msaa_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-msaa.py
+                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/msaa.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-msaa-gpu gpu)
+                    set_tests_properties(native_d3d11_msaa_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
+                endif()
                 # Presenting to a window also needs the Wayland backend, an isolated compositor and a capture tool.
                 if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON)
                     add_test(NAME native_d3d11_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-present.py
