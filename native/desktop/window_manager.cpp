@@ -891,6 +891,12 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 	};
 	registry.add("EnumDisplaySettingsW", 3, [=](ApiCall &call) { display_mode(call, 1, 0, 2); });
 	registry.add("EnumDisplaySettingsExW", 4, [=](ApiCall &call) { display_mode(call, 1, 0, 2); });
+	// There is no kernel graphics subsystem behind the host's display: the adapter thunks report that the request is not supported, and
+	// programs that probe them (to size video memory, for instance) fall back to what the graphics API reports.
+	for (const auto *thunk : {"D3DKMTOpenAdapterFromLuid", "D3DKMTOpenAdapterFromGdiDisplayName", "D3DKMTOpenAdapterFromHdc", "D3DKMTCloseAdapter",
+			"D3DKMTQueryAdapterInfo", "D3DKMTQueryVideoMemoryInfo", "D3DKMTEnumAdapters", "D3DKMTEnumAdapters2", "D3DKMTGetDeviceState",
+			"D3DKMTCreateDevice", "D3DKMTDestroyDevice", "D3DKMTWaitForVerticalBlankEvent", "D3DKMTCheckVidPnExclusiveOwnership"})
+		registry.add(thunk, 1, [](ApiCall &call) { call.ret(0xC00000BBU); });
 	// There is no display topology to report: callers fall back to their single-monitor behavior.
 	registry.add("GetDisplayConfigBufferSizes", 3, [](ApiCall &call) {
 		if (call[1]) call.store<uint32_t>(call[1], 0);

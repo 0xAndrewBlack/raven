@@ -33,6 +33,8 @@ struct GuestThread {
 	// Extra start arguments for entry points that take more than one (thread pool callbacks); empty means just the parameter.
 	std::vector<uint64_t> arguments;
 	bool main = false;
+	// Set when the process is ending: the thread leaves through its host frames the next time it runs, so nothing they hold outlives it.
+	bool unwinding = false;
 	struct Apc {
 		uint64_t routine, parameter;
 	};
@@ -74,6 +76,8 @@ public:
 	[[noreturn]] void exit_current(uint32_t code);
 	void terminate(const std::shared_ptr<GuestThread> &thread, uint32_t code);
 	void resume(GuestThread &thread);
+	// Lets every thread that is still blocked or not yet started leave through its host frames; called when the process ends.
+	void unwind_all();
 	size_t live() const;
 	// Thread blocks of every thread that has not finished.
 	std::vector<uint64_t> thread_blocks() const;

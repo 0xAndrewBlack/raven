@@ -102,6 +102,12 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[0], first, first.size() + 1);
 		call.ret(call[0]);
 	});
+	registry.add("lstrcatA", 2, [](ApiCall &call) {
+		auto first = call.narrow(call[0], 65536);
+		first += call.narrow(call[1], 65536);
+		call.put_narrow(call[0], first, first.size() + 1);
+		call.ret(call[0]);
+	});
 
 	// One atom table serves the local and global names; atoms count from 0xc000 and integer atoms pass through.
 	struct Atoms {

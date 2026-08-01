@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Extensions whose commands and structures are marshaled in addition to core Vulkan 1.0 to 1.4.
-EXTENSIONS = """VK_KHR_surface VK_KHR_swapchain VK_KHR_maintenance5 VK_KHR_maintenance6 VK_KHR_maintenance7 VK_KHR_maintenance8 VK_KHR_maintenance9 VK_EXT_extended_dynamic_state3
+EXTENSIONS = """VK_KHR_surface VK_KHR_swapchain VK_KHR_push_descriptor VK_EXT_mutable_descriptor_type VK_VALVE_mutable_descriptor_type VK_EXT_image_sliced_view_of_3d VK_EXT_image_view_min_lod VK_KHR_cooperative_matrix VK_KHR_fragment_shading_rate VK_KHR_calibrated_timestamps VK_KHR_maintenance5 VK_KHR_maintenance6 VK_KHR_maintenance7 VK_KHR_maintenance8 VK_KHR_maintenance9 VK_EXT_extended_dynamic_state3
 VK_EXT_extended_dynamic_state2 VK_EXT_extended_dynamic_state VK_EXT_vertex_input_dynamic_state VK_EXT_depth_clip_enable VK_EXT_robustness2
 VK_EXT_custom_border_color VK_EXT_memory_priority VK_EXT_non_seamless_cube_map VK_KHR_load_store_op_none VK_EXT_conservative_rasterization
 VK_EXT_vertex_attribute_divisor VK_KHR_vertex_attribute_divisor VK_EXT_transform_feedback VK_EXT_line_rasterization VK_KHR_line_rasterization
@@ -34,8 +34,8 @@ FOREIGN = re.compile(r"^(HANDLE|LPCWSTR|DWORD|SECURITY_ATTRIBUTES|HINSTANCE|HWND
 # words of their camel-case names, so that for example "Framebuffer" and "ImageView" are not mistaken for "Frame" and "Vi".
 SKIP_WORDS = set("""Win32 Xlib Xcb Wayland Android Metal Screen DirectFB Ggp Vi Fuchsia Qnx Ohos Display Displays
 FullScreen ImagePipe Sci Cuda Cu Tensor Tensors DataGraph Micromap Micromaps AccelerationStructure AccelerationStructures
-Ray Tracing Opacity Cooperative Optical Flow Video Decode Encode Mesh Tile Tiles Latency Reflex Calibrated
-Keyed Mutex Zircon Hdr Refresh Cycle Past Fault Faults Proc Addr Binary Binaries Slot Window Sparse""".split())
+Ray Tracing Opacity Optical Flow Video Decode Encode Mesh Tile Tiles Latency Reflex
+Keyed Mutex Zircon Hdr Refresh Cycle Past Fault Faults Proc Addr Binary Binaries Slot Window""".split())
 # Words that only matter inside these exact phrases.
 SKIP_PHRASES = ("DescriptorBuffer", "ResourceHeap", "SamplerHeap", "PushData", "OpaqueCapture", "DescriptorSize", "DescriptorSetLayoutSize",
                 "DescriptorSetLayoutBindingOffset", "DescriptorEXT", "DeviceMask", "DeviceGroup", "ShaderObject", "ShadersEXT", "ShaderBinary",
@@ -52,8 +52,7 @@ SKIP_NAMES = {"vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLaye
               "vkCreateSharedSwapchainsKHR", "vkCreateHeadlessSurfaceEXT", "vkGetPhysicalDeviceSurfaceCapabilities2EXT",
               "vkGetPhysicalDeviceSurfacePresentModes2EXT", "vkGetPhysicalDevicePresentRectanglesKHR", "vkWaitForPresentKHR",
               "vkWaitForPresent2KHR", "vkReleaseSwapchainImagesEXT", "vkReleaseSwapchainImagesKHR", "vkGetSwapchainCounterEXT",
-              "vkGetSwapchainStatusKHR", "vkGetDeviceGroupSurfacePresentModes2EXT", "vkSetLocalDimmingAMD",
-              "vkGetPhysicalDeviceSurfaceCapabilities2KHR", "vkGetPhysicalDeviceSurfaceFormats2KHR", "vkCreateSwapchainKHRPlaceholder"}
+              "vkGetSwapchainStatusKHR", "vkGetDeviceGroupSurfacePresentModes2EXT", "vkSetLocalDimmingAMD"}
 
 
 def skipped_command(name):
@@ -69,7 +68,8 @@ class Member:
     def __init__(self, element, structs_text=None):
         self.name = element.find("name").text
         self.type = element.find("type").text
-        text = "".join(element.itertext())
+        # A trailing comment element can contain colons (a member described as a copy of Structure::member); it is not part of the declaration.
+        text = (element.text or "") + "".join("".join(child.itertext()) * (child.tag != "comment") + (child.tail or "") for child in element)
         before = text.split(self.type, 1)[0]
         after = text.split(self.type, 1)[1].split(self.name, 1)
         middle = after[0]

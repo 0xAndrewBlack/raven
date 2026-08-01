@@ -816,6 +816,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					character = static_cast<char>(character + ('a' - 'A'));
 			if (identity.find('.') == std::string::npos)
 				identity += ".dll";
+			// An API set name stands for the library that implements it, as it does for the libraries loaded at startup.
+			if (const auto host = apiset_host(identity); !host.empty()) {
+				if (const auto present = modules.all().find(host); present != modules.all().end()) {
+					modules.add_alias(identity, host);
+					return *present->second;
+				}
+				identity = host;
+			}
 			if (const auto found = modules.all().find(identity); found != modules.all().end())
 				return *found->second;
 			if (modules.all().size() >= 10000)

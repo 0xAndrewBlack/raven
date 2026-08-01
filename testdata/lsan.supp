@@ -1,0 +1,2 @@
+# Allocations made by the software Vulkan driver's own worker threads (llvmpipe) and still held when the process ends.
+leak:libvulkan_lvp.so

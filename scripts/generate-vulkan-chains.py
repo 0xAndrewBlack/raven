@@ -5,7 +5,10 @@ Every structure named VkPhysicalDevice...Features or ...Properties, or Vk...Form
 pNext is a plain block of bytes: it can be copied between guest and host without translating handles. The table pairs each
 structure type value with the size of the host structure.
 
-usage: generate-vulkan-chains.py /usr/include/vulkan/vulkan_core.h native/graphics/vulkan_chain_table.inc
+The structure type value of each structure is read from the registry (the values attribute of its sType member) when its path is given
+as a third argument, and guessed from the structure name otherwise; the guess fails for names with digit suffixes such as 3D.
+
+usage: generate-vulkan-chains.py /usr/include/vulkan/vulkan_core.h native/graphics/vulkan_chain_table.inc [/usr/share/vulkan/registry/vk.xml]
 """
 
 import os
@@ -13,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ElementTree
 
 
 def snake(name):
@@ -21,8 +25,22 @@ def snake(name):
     return text.upper()
 
 
+def registry_types(path):
+    """Structure name to the structure type enumerator named by its sType member."""
+    found = {}
+    for element in ElementTree.parse(path).getroot().iter("type"):
+        if element.get("category") != "struct":
+            continue
+        for member in element.findall("member"):
+            name = member.find("name")
+            if name is not None and name.text == "sType" and member.get("values"):
+                found[element.get("name")] = member.get("values").split(",")[0]
+    return found
+
+
 def main():
     header = open(sys.argv[1]).read()
+    registry = registry_types(sys.argv[3]) if len(sys.argv) > 3 else {}
     enumerators = set(re.findall(r"\b(VK_STRUCTURE_TYPE_[A-Z0-9_]+)\b", header))
     entries = []
     for match in re.finditer(r"typedef struct (Vk\w+) \{(.*?)\} \1;", header, re.S):
@@ -46,7 +64,7 @@ def main():
             re.sub(r"VULKAN(\d)(\d)", r"VULKAN_\1_\2", base),
             re.sub(r"VULKAN(\d)(\d)", r"VULKAN_\1_\2", re.sub(r"(?<=[A-Z])(\d)", r"_\1", base)),
         ]
-        candidate = next((("VK_STRUCTURE_TYPE_" + item + tail) for item in candidates if ("VK_STRUCTURE_TYPE_" + item + tail) in enumerators), None)
+        candidate = registry.get(name) or next((("VK_STRUCTURE_TYPE_" + item + tail) for item in candidates if ("VK_STRUCTURE_TYPE_" + item + tail) in enumerators), None)
         if not candidate:
             continue
         entries.append((candidate, name))

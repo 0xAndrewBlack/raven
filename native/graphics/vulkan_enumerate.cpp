@@ -37,6 +37,42 @@ constexpr Offer device_offers[] = {
 	{"VK_KHR_load_store_op_none", 1, "VK_KHR_load_store_op_none"},
 	{"VK_KHR_maintenance5", 1, "VK_KHR_maintenance5"},
 	{"VK_KHR_maintenance6", 1, "VK_KHR_maintenance6"},
+	// Version 0 reports the version the driver implements. These add features, properties and commands that the generated marshaling
+	// covers; programs that do not ask for them never see a difference.
+	{"VK_EXT_vertex_attribute_divisor", 0, "VK_EXT_vertex_attribute_divisor"},
+	{"VK_KHR_vertex_attribute_divisor", 0, "VK_KHR_vertex_attribute_divisor"},
+	{"VK_EXT_extended_dynamic_state", 0, "VK_EXT_extended_dynamic_state"},
+	{"VK_EXT_extended_dynamic_state2", 0, "VK_EXT_extended_dynamic_state2"},
+	{"VK_EXT_extended_dynamic_state3", 0, "VK_EXT_extended_dynamic_state3"},
+	{"VK_EXT_vertex_input_dynamic_state", 0, "VK_EXT_vertex_input_dynamic_state"},
+	{"VK_EXT_line_rasterization", 0, "VK_EXT_line_rasterization"},
+	{"VK_KHR_line_rasterization", 0, "VK_KHR_line_rasterization"},
+	{"VK_EXT_transform_feedback", 0, "VK_EXT_transform_feedback"},
+	{"VK_EXT_conservative_rasterization", 0, "VK_EXT_conservative_rasterization"},
+	{"VK_EXT_conditional_rendering", 0, "VK_EXT_conditional_rendering"},
+	{"VK_EXT_depth_bias_control", 0, "VK_EXT_depth_bias_control"},
+	{"VK_EXT_fragment_shader_interlock", 0, "VK_EXT_fragment_shader_interlock"},
+	{"VK_EXT_shader_stencil_export", 0, "VK_EXT_shader_stencil_export"},
+	{"VK_EXT_shader_viewport_index_layer", 0, "VK_EXT_shader_viewport_index_layer"},
+	{"VK_EXT_shader_image_atomic_int64", 0, "VK_EXT_shader_image_atomic_int64"},
+	{"VK_EXT_image_view_min_lod", 0, "VK_EXT_image_view_min_lod"},
+	{"VK_EXT_image_sliced_view_of_3d", 0, "VK_EXT_image_sliced_view_of_3d"},
+	{"VK_EXT_mutable_descriptor_type", 0, "VK_EXT_mutable_descriptor_type"},
+	{"VK_VALVE_mutable_descriptor_type", 0, "VK_VALVE_mutable_descriptor_type"},
+	{"VK_KHR_push_descriptor", 0, "VK_KHR_push_descriptor"},
+	{"VK_EXT_pageable_device_local_memory", 0, "VK_EXT_pageable_device_local_memory"},
+	{"VK_EXT_memory_budget", 0, "VK_EXT_memory_budget"},
+	{"VK_KHR_pipeline_library", 0, "VK_KHR_pipeline_library"},
+	{"VK_EXT_graphics_pipeline_library", 0, "VK_EXT_graphics_pipeline_library"},
+	{"VK_KHR_present_id", 0, "VK_KHR_present_id"},
+	{"VK_KHR_calibrated_timestamps", 0, "VK_KHR_calibrated_timestamps"},
+	{"VK_KHR_fragment_shading_rate", 0, "VK_KHR_fragment_shading_rate"},
+	{"VK_KHR_cooperative_matrix", 0, "VK_KHR_cooperative_matrix"},
+	{"VK_EXT_dynamic_rendering_unused_attachments", 0, "VK_EXT_dynamic_rendering_unused_attachments"},
+	{"VK_KHR_dynamic_rendering_local_read", 0, "VK_KHR_dynamic_rendering_local_read"},
+	{"VK_KHR_maintenance7", 0, "VK_KHR_maintenance7"},
+	{"VK_KHR_maintenance8", 0, "VK_KHR_maintenance8"},
+	{"VK_KHR_maintenance9", 0, "VK_KHR_maintenance9"},
 };
 
 std::vector<VkExtensionProperties> host_instance_extensions()
@@ -73,6 +109,10 @@ std::vector<VkExtensionProperties> offered(const std::vector<VkExtensionProperti
 		VkExtensionProperties entry{};
 		std::strncpy(entry.extensionName, offer.name, sizeof entry.extensionName - 1);
 		entry.specVersion = offer.version;
+		if (!offer.version)
+			for (const auto &item : host)
+				if (!std::strcmp(item.extensionName, offer.host))
+					entry.specVersion = item.specVersion;
 		result.push_back(entry);
 	};
 	if (device)

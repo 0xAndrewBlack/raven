@@ -845,9 +845,9 @@ unsigned int raven_entry(void)
 			vkDestroyInstance(second, 0);
 		}
 		{
-			VkExtensionProperties device_extensions[16];
-			uint32_t device_total = 0, device_capacity = 16;
-			if (vkEnumerateDeviceExtensionProperties(devices[0], 0, &device_total, 0) != VK_SUCCESS || device_total > 16)
+			VkExtensionProperties device_extensions[128];
+			uint32_t device_total = 0, device_capacity = 128;
+			if (vkEnumerateDeviceExtensionProperties(devices[0], 0, &device_total, 0) != VK_SUCCESS || device_total > 128)
 				return 134;
 			device_extension_count = device_total;
 			if (device_total && vkEnumerateDeviceExtensionProperties(devices[0], 0, &device_capacity, device_extensions) != VK_SUCCESS)

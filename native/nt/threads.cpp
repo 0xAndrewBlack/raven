@@ -28,7 +28,14 @@ NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environm
 	running = main.get();
 }
 
-NativeThreads::~NativeThreads() = default;
+NativeThreads::~NativeThreads()
+{
+	// Host frames of threads that never finished hold objects that only their unwinding releases; a failure here must not escape.
+	try {
+		unwind_all();
+	} catch (...) {
+	}
+}
 
 size_t NativeThreads::live() const
 {
@@ -99,6 +106,8 @@ void NativeThreads::thread_main(GuestThread &thread)
 {
 	uint32_t code = 0;
 	try {
+		if (thread.unwinding)
+			throw ThreadExit{0};
 		if (notifier)
 			notifier(2);
 		const std::vector<uint64_t> arguments = thread.arguments.empty() ? std::vector<uint64_t>{thread.parameter} : thread.arguments;
@@ -202,6 +211,8 @@ void NativeThreads::switch_to(GuestThread &next)
 	swapcontext(&previous.context, &next.context);
 	// Resumed: whoever switched back already loaded this thread's guest state.
 	reap();
+	if (running->unwinding && !running->main)
+		throw ThreadExit{0};
 	check_pending();
 }
 
@@ -218,8 +229,10 @@ void NativeThreads::schedule()
 				continue;
 			}
 		}
-		if (auto next = pick(true)) {
-			if (next.get() == running) {
+		// The choice is held as a plain pointer: the frame of a thread that is parked for good is freed without unwinding, and an owning
+		// reference kept in it would never be released. The thread list owns every thread.
+		if (GuestThread *next = pick(true).get()) {
+			if (next == running) {
 				running->state = GuestThread::State::running;
 				return;
 			}
@@ -269,7 +282,7 @@ bool NativeThreads::block(std::function<bool()> ready, std::optional<std::chrono
 
 bool NativeThreads::yield()
 {
-	const auto next = pick(false);
+	GuestThread *next = pick(false).get();
 	if (!next)
 		return false;
 	running->state = GuestThread::State::ready;
@@ -288,6 +301,27 @@ void NativeThreads::terminate(const std::shared_ptr<GuestThread> &thread, uint32
 	if (thread.get() == running)
 		exit_current(code);
 	finish(*thread, code);
+}
+
+void NativeThreads::unwind_all()
+{
+	if (!running || !running->main)
+		return;
+	std::vector<std::shared_ptr<GuestThread>> remaining;
+	for (const auto &thread : threads)
+		if (!thread->main && thread->state != GuestThread::State::done) {
+			thread->unwinding = true;
+			thread->ready = nullptr;
+			thread->wake.reset();
+			thread->apcs.clear();
+			thread->suspend_count = 0;
+			thread->state = GuestThread::State::ready;
+			remaining.push_back(thread);
+		}
+	for (const auto &thread : remaining)
+		if (thread->state != GuestThread::State::done)
+			switch_to(*thread);
+	pending = nullptr;
 }
 
 void NativeThreads::resume(GuestThread &thread)

@@ -8,10 +8,10 @@
 namespace raven {
 
 // Names are kept in byte order because the guest provider binary searches its export table.
-static constexpr std::array<std::string_view, 7> names{
+static constexpr std::array<std::string_view, 8> names{
 	"vkGetPhysicalDeviceFeatures2", "vkGetPhysicalDeviceFormatProperties", "vkGetPhysicalDeviceFormatProperties2",
 	"vkGetPhysicalDeviceImageFormatProperties", "vkGetPhysicalDeviceMemoryProperties2", "vkGetPhysicalDeviceProperties2",
-	"vkGetPhysicalDeviceQueueFamilyProperties2"
+	"vkGetPhysicalDeviceQueueFamilyProperties2", "vkGetPhysicalDeviceSparseImageFormatProperties"
 };
 
 std::span<const std::string_view> vulkan_query_names() { return names; }
@@ -80,10 +80,13 @@ bool VulkanBridge::dispatch_queries(std::string_view name)
 {
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;
-	auto a = process.api_arguments(name == "vkGetPhysicalDeviceImageFormatProperties" ? 7 :
+	auto a = process.api_arguments(name == "vkGetPhysicalDeviceSparseImageFormatProperties" ? 8 : name == "vkGetPhysicalDeviceImageFormatProperties" ? 7 :
 		name == "vkGetPhysicalDeviceQueueFamilyProperties2" || name == "vkGetPhysicalDeviceFormatProperties" || name == "vkGetPhysicalDeviceFormatProperties2" ? 3 : 2);
 	if (name == "vkGetPhysicalDeviceFormatProperties" || name == "vkGetPhysicalDeviceFormatProperties2" || name == "vkGetPhysicalDeviceImageFormatProperties")
 		for (size_t index = 1; index < (name == "vkGetPhysicalDeviceImageFormatProperties" ? 6U : 2U); ++index)
+			a[index] = uint32_t(a[index]);
+	if (name == "vkGetPhysicalDeviceSparseImageFormatProperties")
+		for (size_t index = 1; index < 6; ++index)
 			a[index] = uint32_t(a[index]);
 	const auto found = physical.find(a[0]);
 	if (found == physical.end())
@@ -159,6 +162,24 @@ bool VulkanBridge::dispatch_queries(std::string_view name)
 		result = static_cast<uint32_t>(status);
 		if (status == VK_SUCCESS)
 			write(a[6], properties);
+	} else if (name == "vkGetPhysicalDeviceSparseImageFormatProperties") {
+		// (physical device, format, type, samples, usage, tiling, count, properties): the usual count-then-fill pair of calls.
+		if (!a[6])
+			throw std::runtime_error("sparse image format query needs a count");
+		process.write_memory(a[6], process.read_memory(a[6], 4));
+		uint32_t count = read.template operator()<uint32_t>(a[6]);
+		if (a[7]) {
+			if (count > 4096)
+				throw std::runtime_error("sparse image format capacity exceeds limit");
+			process.write_memory(a[7], process.read_memory(a[7], size_t(count) * sizeof(VkSparseImageFormatProperties)));
+		}
+		std::vector<VkSparseImageFormatProperties> properties(a[7] ? count : 0);
+		vkGetPhysicalDeviceSparseImageFormatProperties(handle, VkFormat(a[1]), VkImageType(a[2]), VkSampleCountFlagBits(a[3]),
+			VkImageUsageFlags(a[4]), VkImageTiling(a[5]), &count, a[7] ? properties.data() : nullptr);
+		if (a[7])
+			for (size_t index = 0; index < count && index < properties.size(); ++index)
+				write(a[7] + index * sizeof(VkSparseImageFormatProperties), properties[index]);
+		write(a[6], count);
 	} else if (name == "vkGetPhysicalDeviceQueueFamilyProperties2") {
 		process.write_memory(a[1], process.read_memory(a[1], 4));
 		uint32_t count = 0;
