@@ -248,6 +248,17 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(made.status ? invalid_handle : made.value);
 	});
 	registry.add("ReadFile", 5, [&, resolve, missing, file_of](ApiCall &call) {
+		// The standard handles inherited from the host read straight from their descriptors.
+		if (!file_of(call[0])) {
+			std::vector<uint8_t> buffer(std::min<uint32_t>(call.u32(2), 1 << 20));
+			const auto result = objects.read_file(call[0], buffer);
+			if (!result.status && !call[4]) {
+				call.write(call[1], std::span<const uint8_t>(buffer.data(), size_t(result.value)));
+				if (call[3]) call.store<uint32_t>(call[3], uint32_t(result.value));
+				call.ret(1);
+				return;
+			}
+		}
 		const auto file = file_of(call[0]);
 		if (!file || file->directory || !file->readable()) {
 			call.fail(file && file->directory ? 5 : file ? 5 : 6);
@@ -260,9 +271,12 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		}
 		std::vector<uint8_t> buffer(call.u32(2));
 		ssize_t count;
-		if (call[4] && (file->flags & 0x40000000U)) {
+		if (call[4]) {
+			// An OVERLAPPED offset applies to synchronous handles too, and moves their file pointer after the transfer.
 			const auto offset = call.load<uint64_t>(call[4] + 16);
 			count = ::pread(file->descriptor, buffer.data(), buffer.size(), off_t(offset));
+			if (count >= 0 && !(file->flags & 0x40000000U))
+				::lseek(file->descriptor, off_t(offset + uint64_t(count)), SEEK_SET);
 		} else {
 			do count = ::read(file->descriptor, buffer.data(), buffer.size()); while (count < 0 && errno == EINTR);
 		}
@@ -291,9 +305,12 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		}
 		const auto bytes = call.read(call[1], call.u32(2));
 		ssize_t count;
-		if (call[4] && (file->flags & 0x40000000U)) {
+		if (call[4]) {
 			const auto offset = call.load<uint64_t>(call[4] + 16);
-			count = ::pwrite(file->descriptor, bytes.data(), bytes.size(), off_t(offset));
+			count = offset == UINT64_MAX ? ::write(file->descriptor, bytes.data(), bytes.size())
+				: ::pwrite(file->descriptor, bytes.data(), bytes.size(), off_t(offset));
+			if (count >= 0 && offset != UINT64_MAX && !(file->flags & 0x40000000U))
+				::lseek(file->descriptor, off_t(offset + uint64_t(count)), SEEK_SET);
 		} else {
 			do count = ::write(file->descriptor, bytes.data(), bytes.size()); while (count < 0 && errno == EINTR);
 		}
@@ -327,6 +344,38 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		if (call[2]) call.store<int64_t>(call[2], position);
 		call.ret(1);
 	});
+	// Byte-range locks map to open-file-description locks, so they conflict between handles the way Windows locks do.
+	const auto lock_range = [file_of](ApiCall &call, int kind, uint64_t offset, uint64_t length, bool wait) {
+		const auto file = file_of(call[0]);
+		if (!file) {
+			call.fail(6);
+			return;
+		}
+		struct flock request{};
+		request.l_type = kind;
+		request.l_whence = SEEK_SET;
+		request.l_start = off_t(offset);
+		request.l_len = off_t(length);
+		if (::fcntl(file->descriptor, wait ? F_OFD_SETLKW : F_OFD_SETLK, &request) < 0) {
+			call.fail(errno == EAGAIN || errno == EACCES ? 33 : errno == EINTR ? 995 : error_of(errno));
+			return;
+		}
+		call.ret(1);
+	};
+	registry.add("LockFileEx", 6, [lock_range](ApiCall &call) {
+		const uint64_t offset = call[5] ? call.load<uint32_t>(call[5] + 16) | (uint64_t(call.load<uint32_t>(call[5] + 20)) << 32) : 0;
+		lock_range(call, (call.u32(1) & 2) ? F_WRLCK : F_RDLCK, offset, call.u32(3) | (uint64_t(call.u32(4)) << 32), !(call.u32(1) & 1));
+	});
+	registry.add("UnlockFileEx", 5, [lock_range](ApiCall &call) {
+		const uint64_t offset = call[4] ? call.load<uint32_t>(call[4] + 16) | (uint64_t(call.load<uint32_t>(call[4] + 20)) << 32) : 0;
+		lock_range(call, F_UNLCK, offset, call.u32(2) | (uint64_t(call.u32(3)) << 32), false);
+	});
+	registry.add("LockFile", 5, [lock_range](ApiCall &call) {
+		lock_range(call, F_WRLCK, call.u32(1) | (uint64_t(call.u32(2)) << 32), call.u32(3) | (uint64_t(call.u32(4)) << 32), false);
+	});
+	registry.add("UnlockFile", 5, [lock_range](ApiCall &call) {
+		lock_range(call, F_UNLCK, call.u32(1) | (uint64_t(call.u32(2)) << 32), call.u32(3) | (uint64_t(call.u32(4)) << 32), false);
+	});
 	registry.add("GetFileSizeEx", 2, [&, resolve, missing, file_of](ApiCall &call) {
 		const auto file = file_of(call[0]);
 		struct stat metadata{};
@@ -336,6 +385,17 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.store<int64_t>(call[1], metadata.st_size);
 		call.ret(1);
+	});
+	registry.add("GetFileSize", 2, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		struct stat metadata{};
+		if (!file || ::fstat(file->descriptor, &metadata)) {
+			call.fail(6, 0xffffffffU);
+			return;
+		}
+		if (call[1]) call.store<uint32_t>(call[1], uint32_t(uint64_t(metadata.st_size) >> 32));
+		call.set_last_error(0);
+		call.ret(uint32_t(metadata.st_size));
 	});
 	registry.add("GetFileType", 1, [&, resolve, missing, file_of](ApiCall &call) {
 		const auto file = file_of(call[0]);

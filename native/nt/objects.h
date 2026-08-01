@@ -36,6 +36,8 @@ public:
 	NativeObjects &operator=(const NativeObjects &) = delete;
 	NativeObjectResult create_event(uint32_t access, uint32_t type, bool signaled);
 	NativeObjectResult inherit_file(int descriptor);
+	// Reads from an inherited standard handle; the value is the byte count, zero at the end of the input.
+	NativeObjectResult read_file(uint64_t handle,std::span<uint8_t> into);
 	NativeObjectResult file_type(uint64_t handle) const;
 	NativeObjectResult write_file(uint64_t handle, std::span<const uint8_t> bytes);
 	uint32_t close(uint64_t handle);

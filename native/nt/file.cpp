@@ -47,12 +47,21 @@ NativeObjectResult NativeObjects::file_type(uint64_t handle) const
 	return object ? NativeObjectResult{object->type} : NativeObjectResult{0,0xc0000008U};
 }
 
+NativeObjectResult NativeObjects::read_file(uint64_t handle,std::span<uint8_t> into)
+{
+	const auto object=file(handle);
+	if (!object) return {0,0xc0000008U};
+	ssize_t count;
+	do { count=::read(object->descriptor,into.data(),into.size()); } while (count<0 && errno==EINTR);
+	if (count>=0) return {uint64_t(count)};
+	if (errno==EBADF || errno==EACCES || errno==EISDIR) return {0,0xc0000022U};
+	return {0,0xc0000001U};
+}
+
 NativeObjectResult NativeObjects::write_file(uint64_t handle,std::span<const uint8_t> bytes)
 {
 	const auto object=file(handle);
 	if (!object) return {0,0xc0000008U};
-	// Blocking pipe/terminal writes need cancellation before they can share the runtime deadline.
-	if (object->type!=1) return {0,0xc00000bbU};
 	if (bytes.size()>1024*1024) return {0,0xc00000bbU};
 	ssize_t written;
 	do { written=::write(object->descriptor,bytes.data(),bytes.size()); } while (written<0 && errno==EINTR);
