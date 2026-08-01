@@ -32,6 +32,8 @@ public:
 	// The token of a handle the driver returned: the existing one, or a new one owned by the current device.
 	uint64_t token(H type, uint64_t host);
 	uint64_t new_token(H type, uint64_t host);
+	// The token of an image a swapchain owns: stable across queries, and never destroyed on the guest's behalf.
+	uint64_t swapchain_image_token(H type, uint64_t host);
 	void forget(uint64_t token);
 
 	template<typename T> T *make(size_t count)
@@ -66,7 +68,14 @@ public:
 	double double_argument(const std::array<uint64_t, 4> &registers, const std::vector<uint64_t> &words, size_t index) const;
 	template<typename F> F proc(const char *name)
 	{
-		PFN_vkVoidFunction function = host_device ? vkGetDeviceProcAddr(host_device, name) : vkGetInstanceProcAddr(host_instance, name);
+		const auto lookup = [&](const char *spelling) {
+			return host_device ? vkGetDeviceProcAddr(host_device, spelling) : vkGetInstanceProcAddr(host_instance, spelling);
+		};
+		PFN_vkVoidFunction function = lookup(name);
+		// A command promoted to core is still provided under its extension name by a driver that only has the extension.
+		for (const char *suffix : {"KHR", "EXT"})
+			if (!function)
+				function = lookup((std::string(name) + suffix).c_str());
 		if (!function)
 			throw std::runtime_error(std::string("the driver does not provide ") + name);
 		return reinterpret_cast<F>(function);

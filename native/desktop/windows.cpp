@@ -116,6 +116,34 @@ void NativeWindows::present(uint64_t handle)
 	presentation.present(handle,encode_utf8(window->title,true),bitmap->width,bitmap->height,pixels);
 }
 
+std::optional<HostSurface> NativeWindows::host_surface(uint64_t handle)
+{
+	if (!presentation.host_surface) return std::nullopt;
+	const auto root=objects.window_root(handle);
+	const auto *top=objects.window(root);
+	if (!top || !objects.window(handle)) return std::nullopt;
+	// The host window must exist before anything can stack over it.
+	try { present(root); } catch (...) { return std::nullopt; }
+	top=objects.window(root);
+	if (!top) return std::nullopt;
+	// The client origin sits inside the frame the host window shows; a child adds its offsets within its parents.
+	int32_t x=top->x-top->outer.left,y=top->y-top->outer.top;
+	for (auto node=handle; node!=root;) {
+		const auto *window=objects.window(node);
+		if (!window) return std::nullopt;
+		x+=window->x; y+=window->y; node=window->parent;
+	}
+	const auto *window=objects.window(handle);
+	return presentation.host_surface(root,x,y,uint32_t(std::max(window->width,1)),uint32_t(std::max(window->height,1)));
+}
+
+void NativeWindows::release_host_surface(uint64_t handle)
+{
+	if (!presentation.release_host_surface) return;
+	const auto root=objects.window_root(handle);
+	if (root) presentation.release_host_surface(root);
+}
+
 void NativeWindows::drawing(uint64_t handle)
 {
 	if (handle==desktop) return;

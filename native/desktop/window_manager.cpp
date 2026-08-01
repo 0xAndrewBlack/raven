@@ -854,6 +854,54 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 	registry.add("MonitorFromPoint", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("MonitorFromRect", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("MonitorFromWindow", 2, [](ApiCall &call) { call.ret(1); });
+	// The one display has a single mode, which is the current one; mode numbers above 0 end the enumeration.
+	const auto display_mode = [this](ApiCall &call, size_t mode_index, size_t device_index, size_t output_index) {
+		const auto &metrics = objects.nonclient_metrics();
+		const int32_t mode = call.i32(mode_index);
+		if (call[device_index]) {
+			const auto name = call.wide(call[device_index], 64);
+			if (name != u"\\\\.\\DISPLAY1") {
+				call.fail(0);
+				return;
+			}
+		}
+		if (mode > 0 || mode < -2) {
+			call.fail(0);
+			return;
+		}
+		const uint32_t size = call.load<uint16_t>(call[output_index] + 68);
+		if (size < 188) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint8_t> bytes(size, 0);
+		const std::u16string device = u"\\\\.\\DISPLAY1";
+		std::memcpy(bytes.data(), device.data(), device.size() * 2);
+		const auto put = [&](size_t at, uint64_t value, size_t width) { for (size_t byte = 0; byte < width; ++byte) bytes[at + byte] = uint8_t(value >> (byte * 8)); };
+		put(66, 0x0401, 2);
+		put(68, size, 2);
+		// Position, orientation, bits per pixel, width, height, display flags and refresh rate.
+		put(72, 0x20 | 0x80 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000, 4);
+		put(168, 32, 4);
+		put(172, uint32_t(metrics.screen_x), 4);
+		put(176, uint32_t(metrics.screen_y), 4);
+		put(184, 60, 4);
+		call.write(call[output_index], bytes);
+		call.ret(1);
+	};
+	registry.add("EnumDisplaySettingsW", 3, [=](ApiCall &call) { display_mode(call, 1, 0, 2); });
+	registry.add("EnumDisplaySettingsExW", 4, [=](ApiCall &call) { display_mode(call, 1, 0, 2); });
+	// There is no display topology to report: callers fall back to their single-monitor behavior.
+	registry.add("GetDisplayConfigBufferSizes", 3, [](ApiCall &call) {
+		if (call[1]) call.store<uint32_t>(call[1], 0);
+		if (call[2]) call.store<uint32_t>(call[2], 0);
+		call.ret(50);
+	});
+	registry.add("QueryDisplayConfig", 6, [](ApiCall &call) {
+		if (call[1]) call.store<uint32_t>(call[1], 0);
+		if (call[3]) call.store<uint32_t>(call[3], 0);
+		call.ret(50);
+	});
 }
 
 }

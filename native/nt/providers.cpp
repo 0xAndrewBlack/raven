@@ -440,6 +440,11 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
 #ifdef RAVEN_VULKAN
 	VulkanBridge vulkan(process, modules);
+	vulkan.set_surface_source({[&windows](uint64_t window) -> std::optional<std::pair<void *, void *>> {
+		const auto surface = windows.host_surface(window);
+		if (!surface) return std::nullopt;
+		return std::pair<void *, void *>{surface->display, surface->surface};
+	}, [&windows](uint64_t window) { windows.release_host_surface(window); }});
 #endif
 	const auto remaining = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()); };
 	size_t debug_bytes=0;

@@ -119,6 +119,18 @@ uint64_t Marshal::new_token(H type, uint64_t host_handle)
 	return token_value;
 }
 
+uint64_t Marshal::swapchain_image_token(H, uint64_t host_handle)
+{
+	if (!host_handle)
+		return 0;
+	for (const auto &[key, object] : bridge.objects)
+		if (object.handle == host_handle && object.kind == VulkanBridge::Kind::image && object.borrowed)
+			return key;
+	const auto token_value = bridge.next_handle++;
+	bridge.objects.emplace(token_value, VulkanBridge::Object{host_handle, device_token, VulkanBridge::Kind::image, 0, true});
+	return token_value;
+}
+
 uint64_t Marshal::token(H type, uint64_t host_handle)
 {
 	if (!host_handle)
@@ -143,6 +155,12 @@ uint64_t Marshal::token(H type, uint64_t host_handle)
 
 void Marshal::forget(uint64_t token_value)
 {
+	if (const auto surface = bridge.surface_windows.find(token_value); surface != bridge.surface_windows.end()) {
+		if (bridge.surface_source.release)
+			bridge.surface_source.release(surface->second);
+		bridge.surface_windows.erase(surface);
+	}
+	bridge.templates.erase(token_value);
 	bridge.generic.erase(token_value);
 	bridge.objects.erase(token_value);
 	bridge.buffers.erase(token_value);

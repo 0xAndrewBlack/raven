@@ -3,6 +3,8 @@
 #include "cpu/native_cpu.h"
 #include "pe/module_set.h"
 #include <cstring>
+#include <functional>
+#include <optional>
 #include <vulkan/vulkan.h>
 
 namespace raven {
@@ -11,6 +13,8 @@ namespace raven {
 std::span<const std::string_view> vulkan_resource_names();
 std::span<const std::string_view> vulkan_enumerate_names();
 std::span<const std::string_view> vulkan_query_names();
+// Entry points written by hand on top of the generated ones: Windows surfaces over host windows and updates through descriptor templates.
+std::span<const std::string_view> vulkan_hand_names();
 // Commands marshaled from the Vulkan registry; empty when the registry was not available at build time.
 std::span<const std::string_view> vulkan_generated_names();
 bool vulkan_generated_is_device(std::string_view name);
@@ -23,6 +27,13 @@ public:
 	VulkanBridge &operator=(const VulkanBridge &) = delete;
 	static std::span<const std::string_view> exports();
 	bool dispatch(std::string_view name);
+	// Where a guest window's presentable surface comes from: the host display and surface that sit over the window, or nothing when the
+	// host does not show it. Without a source a guest cannot create surfaces.
+	struct SurfaceSource {
+		std::function<std::optional<std::pair<void *, void *>>(uint64_t window)> create;
+		std::function<void(uint64_t window)> release;
+	};
+	void set_surface_source(SurfaceSource value) { surface_source = std::move(value); }
 
 	friend class Marshal;
 	// Brings the guest's view of mapped memory and the driver's in line before and after work the driver does.
@@ -56,9 +67,18 @@ private:
 	std::map<uint64_t, Fence> fences;
 	// Shader modules, descriptor and pipeline objects: one host handle each, owned by a device token.
 	enum class Kind { shader, set_layout, pipeline_layout, pipeline, pool, set, image, image_view, semaphore, render_pass, framebuffer, sampler };
-	struct Object { uint64_t handle; uint64_t device; Kind kind; uint64_t parent = 0; };
+	struct Object { uint64_t handle; uint64_t device; Kind kind; uint64_t parent = 0; bool borrowed = false; };
 	std::map<uint64_t, Object> objects;
 	bool dispatch_enumerate(std::string_view name);
+	bool dispatch_hand(std::string_view name);
+	SurfaceSource surface_source;
+	// Surface tokens and the guest windows behind them.
+	std::map<uint64_t, uint64_t> surface_windows;
+	// What each descriptor update template writes, for updates that pass handles in raw data.
+	std::map<uint64_t, std::vector<VkDescriptorUpdateTemplateEntry>> templates;
+public:
+	void remember_template(uint64_t token, const VkDescriptorUpdateTemplateCreateInfo *info);
+private:
 	bool dispatch_queries(std::string_view name);
 	// A pNext chain of plain structures mirrored into host memory: the guest address of each element and a host copy of it.
 	struct ChainEntry { uint64_t guest; std::vector<uint8_t> host; };

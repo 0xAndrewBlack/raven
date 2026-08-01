@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Extensions whose commands and structures are marshaled in addition to core Vulkan 1.0 to 1.4.
-EXTENSIONS = """VK_KHR_maintenance5 VK_KHR_maintenance6 VK_KHR_maintenance7 VK_KHR_maintenance8 VK_KHR_maintenance9 VK_EXT_extended_dynamic_state3
+EXTENSIONS = """VK_KHR_surface VK_KHR_swapchain VK_KHR_maintenance5 VK_KHR_maintenance6 VK_KHR_maintenance7 VK_KHR_maintenance8 VK_KHR_maintenance9 VK_EXT_extended_dynamic_state3
 VK_EXT_extended_dynamic_state2 VK_EXT_extended_dynamic_state VK_EXT_vertex_input_dynamic_state VK_EXT_depth_clip_enable VK_EXT_robustness2
 VK_EXT_custom_border_color VK_EXT_memory_priority VK_EXT_non_seamless_cube_map VK_KHR_load_store_op_none VK_EXT_conservative_rasterization
 VK_EXT_vertex_attribute_divisor VK_KHR_vertex_attribute_divisor VK_EXT_transform_feedback VK_EXT_line_rasterization VK_KHR_line_rasterization
@@ -32,8 +32,8 @@ FOREIGN = re.compile(r"^(HANDLE|LPCWSTR|DWORD|SECURITY_ATTRIBUTES|HINSTANCE|HWND
                      r"StdVideo\w+|struct|int|void)$")
 # Commands that belong to platform integration, video, ray tracing and other families the bridge does not offer are matched by whole
 # words of their camel-case names, so that for example "Framebuffer" and "ImageView" are not mistaken for "Frame" and "Vi".
-SKIP_WORDS = set("""Win32 Xlib Xcb Wayland Android Metal Screen DirectFB Ggp Vi Fuchsia Qnx Ohos Display Displays Surface Surfaces Swapchain Swapchains
-Present Presents FullScreen ImagePipe Sci Cuda Cu Tensor Tensors DataGraph Micromap Micromaps AccelerationStructure AccelerationStructures
+SKIP_WORDS = set("""Win32 Xlib Xcb Wayland Android Metal Screen DirectFB Ggp Vi Fuchsia Qnx Ohos Display Displays
+FullScreen ImagePipe Sci Cuda Cu Tensor Tensors DataGraph Micromap Micromaps AccelerationStructure AccelerationStructures
 Ray Tracing Opacity Cooperative Optical Flow Video Decode Encode Mesh Tile Tiles Latency Reflex Calibrated
 Keyed Mutex Zircon Hdr Refresh Cycle Past Fault Faults Proc Addr Binary Binaries Slot Window Sparse""".split())
 # Words that only matter inside these exact phrases.
@@ -46,7 +46,14 @@ SKIP_NAMES = {"vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLaye
               "vkEnumerateDeviceLayerProperties", "vkGetInstanceProcAddr", "vkGetDeviceProcAddr", "vkCreateInstance", "vkDestroyInstance",
               "vkCreateDevice", "vkDestroyDevice", "vkDeviceWaitIdle", "vkAllocateMemory", "vkFreeMemory", "vkMapMemory", "vkUnmapMemory",
               "vkFlushMappedMemoryRanges", "vkInvalidateMappedMemoryRanges", "vkMapMemory2", "vkUnmapMemory2", "vkAllocateCommandBuffers",
-              "vkFreeCommandBuffers", "vkDestroyCommandPool", "vkGetPhysicalDeviceSparseImageFormatProperties"}
+              "vkFreeCommandBuffers", "vkDestroyCommandPool", "vkGetPhysicalDeviceSparseImageFormatProperties",
+              # Presentation beyond the core surface and swapchain commands of VK_KHR_swapchain: shared and headless surfaces, per-present
+              # timing and release, counters, rectangles and the extended capability queries.
+              "vkCreateSharedSwapchainsKHR", "vkCreateHeadlessSurfaceEXT", "vkGetPhysicalDeviceSurfaceCapabilities2EXT",
+              "vkGetPhysicalDeviceSurfacePresentModes2EXT", "vkGetPhysicalDevicePresentRectanglesKHR", "vkWaitForPresentKHR",
+              "vkWaitForPresent2KHR", "vkReleaseSwapchainImagesEXT", "vkReleaseSwapchainImagesKHR", "vkGetSwapchainCounterEXT",
+              "vkGetSwapchainStatusKHR", "vkGetDeviceGroupSurfacePresentModes2EXT", "vkSetLocalDimmingAMD",
+              "vkGetPhysicalDeviceSurfaceCapabilities2KHR", "vkGetPhysicalDeviceSurfaceFormats2KHR", "vkCreateSwapchainKHRPlaceholder"}
 
 
 def skipped_command(name):
@@ -112,8 +119,10 @@ class Registry:
             if proto is None:
                 continue
             name = proto.find("name").text
-            params = [Member(param) for param in command.findall("param")]
-            for param, element in zip(params, command.findall("param")):
+            # A parameter written twice for Vulkan and Vulkan SC counts once: the SC-only spelling is dropped.
+            elements = [item for item in command.findall("param") if item.get("api") != "vulkansc"]
+            params = [Member(param) for param in elements]
+            for param, element in zip(params, elements):
                 param.extern = element.get("externsync")
             self.commands[name] = {"return": proto.find("type").text, "params": params, "element": command}
         self.required_commands, self.required_types = set(), set()
@@ -554,10 +563,16 @@ def emit(registry, selected, state, output, classify_member, declared):
             if base in registry.handles:
                 if length:
                     decl.append(f"\tauto *{v} = a[{i}] ? m.make<{param.type}>({length}) : nullptr;")
-                    post.append(f"\tif (a[{i}] && success) for (size_t k = 0; k < {length}; ++k) m.store<uint64_t>(a[{i}] + k * 8, m.new_token(H::{base}, reinterpret_cast<uint64_t>({v}[k])));")
+                    # Swapchain images belong to the swapchain: the guest sees one stable token per image and never owns the host image.
+                    issue = "swapchain_image_token" if target == "vkGetSwapchainImagesKHR" else "new_token"
+                    post.append(f"\tif (a[{i}] && success) for (size_t k = 0; k < {length}; ++k) m.store<uint64_t>(a[{i}] + k * 8, m.{issue}(H::{base}, reinterpret_cast<uint64_t>({v}[k])));")
                 else:
                     decl.append(f"\t{param.type} {v} = nullptr;\n\tif (!a[{i}]) throw std::runtime_error(\"{target} needs an output handle\");\n\tm.check_writable(a[{i}], 8);")
-                    post.append(f"\tif (success) m.store<uint64_t>(a[{i}], m.new_token(H::{base}, reinterpret_cast<uint64_t>({v})));")
+                    if target == "vkCreateDescriptorUpdateTemplate":
+                        # Updates through a template carry handles at offsets only the template knows, so the entries are kept for them.
+                        post.append(f"\tif (success) {{ const auto token = m.new_token(H::{base}, reinterpret_cast<uint64_t>({v})); m.store<uint64_t>(a[{i}], token); b.remember_template(token, v_pCreateInfo); }}")
+                    else:
+                        post.append(f"\tif (success) m.store<uint64_t>(a[{i}], m.new_token(H::{base}, reinterpret_cast<uint64_t>({v})));")
                 call_args[i] = v if length else f"&{v}"
                 names_map[n] = v
                 continue

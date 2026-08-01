@@ -37,7 +37,16 @@ struct WaylandPresentation::State {
 		bool configured=false, closed=false, resized=false, close_posted=false, first_frame=false;
 		uint32_t width=0,height=0,pending_width=0,pending_height=0;
 		std::vector<std::unique_ptr<Buffer>> buffers;
+		// A surface a graphics driver renders to, stacked over the client area.
+		wl_surface *child=nullptr;
+		wl_subsurface *child_role=nullptr;
+		void drop_child() {
+			if (child_role) wl_subsurface_destroy(child_role);
+			if (child) wl_surface_destroy(child);
+			child_role=nullptr; child=nullptr;
+		}
 		~Surface() {
+			drop_child();
 			if (popup) xdg_popup_destroy(popup);
 			if (role) xdg_toplevel_destroy(role);
 			if (shell) xdg_surface_destroy(shell);
@@ -47,6 +56,7 @@ struct WaylandPresentation::State {
 	wl_display *display=nullptr;
 	wl_registry *registry=nullptr;
 	wl_compositor *compositor=nullptr;
+	wl_subcompositor *subcompositor=nullptr;
 	wl_shm *shm=nullptr;
 	xdg_wm_base *shell=nullptr;
 	wl_seat *seat=nullptr;
@@ -81,6 +91,7 @@ struct WaylandPresentation::State {
 		if (seat) wl_seat_destroy(seat);
 		if (shell) xdg_wm_base_destroy(shell);
 		if (shm) wl_shm_destroy(shm);
+		if (subcompositor) wl_subcompositor_destroy(subcompositor);
 		if (compositor) wl_compositor_destroy(compositor);
 		if (registry) wl_registry_destroy(registry);
 		if (display) { wl_display_flush(display); wl_display_disconnect(display); }
@@ -283,6 +294,7 @@ struct WaylandPresentation::State {
 	static void global(void *data,wl_registry *registry,uint32_t name,const char *interface,uint32_t version) {
 		auto &state=*static_cast<State *>(data);
 		if (!std::strcmp(interface,"wl_compositor")) state.compositor=static_cast<wl_compositor *>(wl_registry_bind(registry,name,&wl_compositor_interface,std::min(version,4U)));
+		else if (!std::strcmp(interface,"wl_subcompositor")) state.subcompositor=static_cast<wl_subcompositor *>(wl_registry_bind(registry,name,&wl_subcompositor_interface,1));
 		else if (!std::strcmp(interface,"wl_shm")) state.shm=static_cast<wl_shm *>(wl_registry_bind(registry,name,&wl_shm_interface,1));
 		else if (!std::strcmp(interface,"wl_seat")) {
 			if (state.seat) { state.input_failed=true; return; }
@@ -411,6 +423,25 @@ struct WaylandPresentation::State {
 		attach_frame(window,width,height,pixels);
 	}
 
+	std::optional<HostSurface> host_surface(uint64_t handle,int32_t x,int32_t y) {
+		const auto found=surfaces.find(handle);
+		if (found==surfaces.end() || found->second->is_popup || !subcompositor) return std::nullopt;
+		auto &window=*found->second;
+		if (!window.child) {
+			window.child=wl_compositor_create_surface(compositor);
+			window.child_role=wl_subcompositor_get_subsurface(subcompositor,window.child,window.proxy);
+			wl_subsurface_set_desync(window.child_role);
+			// Input stays with the window: the driver's surface takes none of it.
+			wl_region *none=wl_compositor_create_region(compositor);
+			wl_surface_set_input_region(window.child,none);
+			wl_region_destroy(none);
+		}
+		wl_subsurface_set_position(window.child_role,x,y);
+		wl_surface_commit(window.proxy);
+		wl_display_flush(display);
+		return HostSurface{display,window.child};
+	}
+
 	void present(uint64_t handle,std::string_view title,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
 		if (!handle || !width || !height || width>8192 || height>8192 || uint64_t(width)*height>16*1024*1024 || pixels.size()!=size_t(width)*height*4)
 			throw std::runtime_error("invalid native Wayland frame");
@@ -503,7 +534,14 @@ DesktopPresentation WaylandPresentation::callbacks()
 		else xdg_toplevel_resize(found->second->role,state->seat,state->last_serial,action);
 		wl_display_flush(state->display);
 	},[this](std::string_view text) { state->publish_text(text); },
-	[this]() { return state->fetch_text(); }};
+	[this]() { return state->fetch_text(); },
+	[this](uint64_t handle,int32_t x,int32_t y,uint32_t,uint32_t) { return state->host_surface(handle,x,y); },
+	[this](uint64_t handle) {
+		const auto found=state->surfaces.find(handle);
+		if (found==state->surfaces.end()) return;
+		found->second->drop_child();
+		if (state->display) wl_display_flush(state->display);
+	}};
 }
 
 }

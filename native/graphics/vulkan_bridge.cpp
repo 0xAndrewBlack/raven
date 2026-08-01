@@ -13,6 +13,9 @@ std::span<const std::string_view> vulkan_generated_names() { return {}; }
 bool vulkan_generated_is_device(std::string_view) { return false; }
 bool VulkanBridge::dispatch_generated(std::string_view) { return false; }
 void VulkanBridge::destroy_generic_objects(uint64_t) {}
+std::span<const std::string_view> vulkan_hand_names() { return {}; }
+bool VulkanBridge::dispatch_hand(std::string_view) { return false; }
+void VulkanBridge::remember_template(uint64_t, const VkDescriptorUpdateTemplateCreateInfo *) {}
 #endif
 
 // The export table of the guest provider is binary searched, so the names stay in byte order.
@@ -60,6 +63,8 @@ std::span<const std::string_view> VulkanBridge::exports()
 			all.push_back(name);
 		for (const auto name : vulkan_generated_names())
 			all.push_back(name);
+		for (const auto name : vulkan_hand_names())
+			all.push_back(name);
 		std::sort(all.begin(), all.end());
 		return all;
 	}();
@@ -77,7 +82,7 @@ void VulkanBridge::destroy_object(const VkDevice &device, const Object &object)
 	case Kind::pipeline: vkDestroyPipeline(device, as_handle<VkPipeline>(object.handle), nullptr); break;
 	case Kind::pool: vkDestroyDescriptorPool(device, as_handle<VkDescriptorPool>(object.handle), nullptr); break;
 	case Kind::set: break;
-	case Kind::image: vkDestroyImage(device, as_handle<VkImage>(object.handle), nullptr); break;
+	case Kind::image: if (!object.borrowed) vkDestroyImage(device, as_handle<VkImage>(object.handle), nullptr); break;
 	case Kind::image_view: vkDestroyImageView(device, as_handle<VkImageView>(object.handle), nullptr); break;
 	case Kind::semaphore: vkDestroySemaphore(device, as_handle<VkSemaphore>(object.handle), nullptr); break;
 	case Kind::render_pass: vkDestroyRenderPass(device, as_handle<VkRenderPass>(object.handle), nullptr); break;
@@ -90,6 +95,8 @@ VulkanBridge::~VulkanBridge()
 {
 	while (!devices.empty())
 		destroy_device(devices.begin()->first);
+	for (const auto &[token, window] : surface_windows)
+		if (surface_source.release) surface_source.release(window);
 	for (const auto &[token, instance] : instances)
 		vkDestroyInstance(instance, nullptr);
 }
@@ -148,7 +155,7 @@ std::string VulkanBridge::string(uint64_t address)
 
 bool VulkanBridge::dispatch(std::string_view name)
 {
-	if (dispatch_resource(name) || dispatch_enumerate(name) || dispatch_queries(name) || dispatch_generated(name))
+	if (dispatch_resource(name) || dispatch_enumerate(name) || dispatch_queries(name) || dispatch_hand(name) || dispatch_generated(name))
 		return true;
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;

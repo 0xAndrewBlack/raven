@@ -20,6 +20,9 @@ public:
 	NativeWindows(NativeProcess &process, NativeEnvironment &environment, DesktopObjects &objects);
 	void set_call(std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke);
 	void set_presentation(DesktopPresentation presentation);
+	// A host surface over the client area of a window for a graphics driver to present into, and its release; null when the host shows no such window.
+	std::optional<HostSurface> host_surface(uint64_t window);
+	void release_host_surface(uint64_t window);
 	void set_deadline(std::chrono::steady_clock::time_point deadline);
 	// Lets other guest threads run while this one waits for messages; returns true when one ran.
 	void set_yield(std::function<bool()> yield) { yield_hook = std::move(yield); }

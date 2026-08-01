@@ -24,8 +24,12 @@ def main():
     for name in ("d3d11.dll", "dxgi.dll", "d3d10core.dll"):
         shutil.copy(dxvk / name, run / name)
     shutil.copy(workload, run / "triangle.exe")
+    env = os.environ | {"RAVEN_PREFIX": str(prefix)}
+    lavapipe = Path("/usr/share/vulkan/icd.d/lvp_icd.json")
+    if "VK_DRIVER_FILES" not in env and lavapipe.exists():
+        env["VK_DRIVER_FILES"] = str(lavapipe)
     result = subprocess.run([str(raven), "--run-process", "--execution=native", "--timeout-ms=250000", str(run / "triangle.exe")],
-                            capture_output=True, text=True, timeout=280, env=os.environ | {"RAVEN_PREFIX": str(prefix)})
+                            capture_output=True, text=True, timeout=280, env=env)
     status = (prefix / "drive_c" / "triangle.txt").read_text() if (prefix / "drive_c" / "triangle.txt").exists() else "missing"
     if result.returncode or status != "OK":
         raise SystemExit(f"workload did not finish: exit {result.returncode}, status {status!r}, {result.stderr[-300:]!r}")
