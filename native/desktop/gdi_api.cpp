@@ -986,7 +986,12 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 					const int64_t image_y = top_down ? sy + image_row : image.height - 1 - (sy + (abs_sh - 1 - image_row));
 					if (image_x < 0 || image_x >= image.width || image_y < 0 || image_y >= image.height)
 						continue;
-					painter.plot(device_x, device_y, colorref(image.pixels[size_t(image_y) * image.width + size_t(image_x)] & 0xffffff), 13);
+					const uint32_t source_pixel = image.pixels[size_t(image_y) * image.width + size_t(image_x)];
+					painter.plot(device_x, device_y, colorref(source_pixel & 0xffffff), 13);
+					// A DIB section keeps the alpha channel of what is copied into it.
+					if (painter.bitmap.dib_section && painter.bitmap.depth == 32 && image.has_alpha)
+						if (auto *target = painter.pixel_pointer(device_x, device_y))
+							target[3] = uint8_t(source_pixel >> 24);
 				}
 			if (painter.changed())
 				touched(dc);
@@ -1060,17 +1065,19 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 				// A bottom-up DIB stores the image's last row first.
 				const size_t out_row = top_down ? row : take - 1 - row;
 				for (uint32_t x = 0; x < bitmap->width; ++x) {
-					uint32_t color;
+					uint32_t color, alpha = 0;
 					if (bitmap->depth == 1) {
 						const size_t source_stride = ((size_t(bitmap->width) + 15) / 16) * 2;
 						color = ((pixels[memory_row * source_stride + x / 8] >> (7 - x % 8)) & 1) ? 0xffffff : 0;
 					} else {
 						const auto *p = &pixels[(memory_row * bitmap->width + x) * 4];
 						color = uint32_t(p[2]) | uint32_t(p[1]) << 8 | uint32_t(p[0]) << 16;
+						alpha = p[3];
 					}
 					auto *target = &output[out_row * stride];
 					if (bit_count == 32) {
-						target[x * 4] = uint8_t(color >> 16); target[x * 4 + 1] = uint8_t(color >> 8); target[x * 4 + 2] = uint8_t(color); target[x * 4 + 3] = 0;
+						// A bitmap that carries an alpha channel hands it back, which image lists use to tell ARGB images from plain ones.
+						target[x * 4] = uint8_t(color >> 16); target[x * 4 + 1] = uint8_t(color >> 8); target[x * 4 + 2] = uint8_t(color); target[x * 4 + 3] = uint8_t(alpha);
 					} else if (bit_count == 24) {
 						target[x * 3] = uint8_t(color >> 16); target[x * 3 + 1] = uint8_t(color >> 8); target[x * 3 + 2] = uint8_t(color);
 					} else if (bit_count == 8) {
@@ -1081,6 +1088,16 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 				}
 			}
 			call.write(call[4], output);
+			// The colour table of an indexed result is part of the answer: black and white, or the grey ramp the indices stand for.
+			if (bit_count <= 8) {
+				const uint32_t entries = bit_count == 1 ? 2 : 256;
+				std::vector<uint8_t> table(entries * 4);
+				for (uint32_t entry = 0; entry < entries; ++entry) {
+					const uint8_t level = bit_count == 1 ? (entry ? 255 : 0) : uint8_t(entry);
+					table[entry * 4] = table[entry * 4 + 1] = table[entry * 4 + 2] = level;
+				}
+				call.write(call[5] + header_size, table);
+			}
 			call.ret(take);
 		});
 	});
