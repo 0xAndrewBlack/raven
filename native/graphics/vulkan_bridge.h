@@ -9,11 +9,11 @@ namespace raven {
 
 // Names of the memory, buffer, command and synchronisation entry points, in byte order.
 std::span<const std::string_view> vulkan_resource_names();
-std::span<const std::string_view> vulkan_compute_names();
-std::span<const std::string_view> vulkan_image_names();
-std::span<const std::string_view> vulkan_graphics_names();
 std::span<const std::string_view> vulkan_enumerate_names();
 std::span<const std::string_view> vulkan_query_names();
+// Commands marshaled from the Vulkan registry; empty when the registry was not available at build time.
+std::span<const std::string_view> vulkan_generated_names();
+bool vulkan_generated_is_device(std::string_view name);
 
 class VulkanBridge {
 public:
@@ -23,6 +23,11 @@ public:
 	VulkanBridge &operator=(const VulkanBridge &) = delete;
 	static std::span<const std::string_view> exports();
 	bool dispatch(std::string_view name);
+
+	friend class Marshal;
+	// Brings the guest's view of mapped memory and the driver's in line before and after work the driver does.
+	void synchronize_to_device(uint64_t device) { shadow_to_device(device); }
+	void synchronize_from_device(uint64_t device) { shadow_from_device(device); }
 
 private:
 	NativeProcess &process;
@@ -53,9 +58,6 @@ private:
 	enum class Kind { shader, set_layout, pipeline_layout, pipeline, pool, set, image, image_view, semaphore, render_pass, framebuffer, sampler };
 	struct Object { uint64_t handle; uint64_t device; Kind kind; uint64_t parent = 0; };
 	std::map<uint64_t, Object> objects;
-	bool dispatch_compute(std::string_view name);
-	bool dispatch_images(std::string_view name);
-	bool dispatch_graphics(std::string_view name);
 	bool dispatch_enumerate(std::string_view name);
 	bool dispatch_queries(std::string_view name);
 	// A pNext chain of plain structures mirrored into host memory: the guest address of each element and a host copy of it.
@@ -68,6 +70,11 @@ private:
 	// Host names for the extension names a guest enables; false when one is not offered to guests.
 	bool host_extension_names(const std::vector<std::string> &guest, bool device, std::vector<std::string> &host) const;
 	void destroy_object(const VkDevice &device, const Object &object);
+	// Objects created by generated commands that no hand-written map owns.
+	struct Generic { uint64_t host; uint8_t type; uint64_t device; };
+	std::map<uint64_t, Generic> generic;
+	bool dispatch_generated(std::string_view name);
+	void destroy_generic_objects(uint64_t device_token);
 	uint64_t next_handle = 0x5600000000000001ULL;
 	void destroy_device(uint64_t token);
 	// Copies between a guest shadow and the host mapping behind it, moving only the bytes that changed on one side.

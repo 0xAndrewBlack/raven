@@ -7,6 +7,14 @@
 
 namespace raven {
 
+#ifndef RAVEN_VULKAN_GENERATED
+// Without the registry at build time no command is marshaled beyond the hand-written ones.
+std::span<const std::string_view> vulkan_generated_names() { return {}; }
+bool vulkan_generated_is_device(std::string_view) { return false; }
+bool VulkanBridge::dispatch_generated(std::string_view) { return false; }
+void VulkanBridge::destroy_generic_objects(uint64_t) {}
+#endif
+
 // The export table of the guest provider is binary searched, so the names stay in byte order.
 static constexpr std::array<std::string_view, 14> names{
 	"vkCreateDevice",
@@ -28,14 +36,11 @@ static constexpr std::array<std::string_view, 14> names{
 static constexpr std::array<std::string_view, 4> device_names{"vkDestroyDevice", "vkGetDeviceQueue", "vkDeviceWaitIdle", "vkGetDeviceProcAddr"};
 static bool is_device_function(std::string_view symbol)
 {
-	const auto resources = vulkan_resource_names(), compute = vulkan_compute_names(), images = vulkan_image_names(),
-		graphics = vulkan_graphics_names(), enumerate = vulkan_enumerate_names();
+	const auto resources = vulkan_resource_names(), enumerate = vulkan_enumerate_names();
 	return std::find(device_names.begin(), device_names.end(), symbol) != device_names.end() ||
 		std::find(resources.begin(), resources.end(), symbol) != resources.end() ||
-		std::find(compute.begin(), compute.end(), symbol) != compute.end() ||
-		std::find(images.begin(), images.end(), symbol) != images.end() ||
-		std::find(graphics.begin(), graphics.end(), symbol) != graphics.end() ||
-		(std::find(enumerate.begin(), enumerate.end(), symbol) != enumerate.end() && symbol.find("Device") != std::string_view::npos);
+		(std::find(enumerate.begin(), enumerate.end(), symbol) != enumerate.end() && symbol.find("Device") != std::string_view::npos) ||
+		vulkan_generated_is_device(symbol);
 }
 
 static_assert(sizeof(VkInstanceCreateInfo) == 64 && sizeof(VkApplicationInfo) == 48);
@@ -49,20 +54,36 @@ std::span<const std::string_view> VulkanBridge::exports()
 		std::vector<std::string_view> all(names.begin(), names.end());
 		for (const auto name : vulkan_resource_names())
 			all.push_back(name);
-		for (const auto name : vulkan_compute_names())
-			all.push_back(name);
-		for (const auto name : vulkan_image_names())
-			all.push_back(name);
-		for (const auto name : vulkan_graphics_names())
-			all.push_back(name);
 		for (const auto name : vulkan_enumerate_names())
 			all.push_back(name);
 		for (const auto name : vulkan_query_names())
+			all.push_back(name);
+		for (const auto name : vulkan_generated_names())
 			all.push_back(name);
 		std::sort(all.begin(), all.end());
 		return all;
 	}();
 	return merged;
+}
+
+template<typename H> static H as_handle(uint64_t value) { return reinterpret_cast<H>(value); }
+
+void VulkanBridge::destroy_object(const VkDevice &device, const Object &object)
+{
+	switch (object.kind) {
+	case Kind::shader: vkDestroyShaderModule(device, as_handle<VkShaderModule>(object.handle), nullptr); break;
+	case Kind::set_layout: vkDestroyDescriptorSetLayout(device, as_handle<VkDescriptorSetLayout>(object.handle), nullptr); break;
+	case Kind::pipeline_layout: vkDestroyPipelineLayout(device, as_handle<VkPipelineLayout>(object.handle), nullptr); break;
+	case Kind::pipeline: vkDestroyPipeline(device, as_handle<VkPipeline>(object.handle), nullptr); break;
+	case Kind::pool: vkDestroyDescriptorPool(device, as_handle<VkDescriptorPool>(object.handle), nullptr); break;
+	case Kind::set: break;
+	case Kind::image: vkDestroyImage(device, as_handle<VkImage>(object.handle), nullptr); break;
+	case Kind::image_view: vkDestroyImageView(device, as_handle<VkImageView>(object.handle), nullptr); break;
+	case Kind::semaphore: vkDestroySemaphore(device, as_handle<VkSemaphore>(object.handle), nullptr); break;
+	case Kind::render_pass: vkDestroyRenderPass(device, as_handle<VkRenderPass>(object.handle), nullptr); break;
+	case Kind::framebuffer: vkDestroyFramebuffer(device, as_handle<VkFramebuffer>(object.handle), nullptr); break;
+	case Kind::sampler: vkDestroySampler(device, as_handle<VkSampler>(object.handle), nullptr); break;
+	}
 }
 
 VulkanBridge::~VulkanBridge()
@@ -82,6 +103,7 @@ void VulkanBridge::destroy_device(uint64_t token)
 	// Resources a guest left behind go before their device, in dependency order.
 	vkDeviceWaitIdle(found->second.handle);
 	std::erase_if(command_buffers, [&](const auto &item) { return item.second.device == token; });
+	destroy_generic_objects(token);
 	// Pipelines first, then what they were built from; descriptor sets go with their pool.
 	for (const auto kind : {Kind::pipeline, Kind::framebuffer, Kind::render_pass, Kind::pool, Kind::pipeline_layout, Kind::set_layout, Kind::shader, Kind::image_view, Kind::sampler, Kind::image, Kind::semaphore})
 		for (auto item = objects.begin(); item != objects.end();)
@@ -126,7 +148,7 @@ std::string VulkanBridge::string(uint64_t address)
 
 bool VulkanBridge::dispatch(std::string_view name)
 {
-	if (dispatch_resource(name) || dispatch_compute(name) || dispatch_images(name) || dispatch_graphics(name) || dispatch_enumerate(name) || dispatch_queries(name))
+	if (dispatch_resource(name) || dispatch_enumerate(name) || dispatch_queries(name) || dispatch_generated(name))
 		return true;
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;

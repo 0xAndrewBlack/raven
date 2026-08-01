@@ -136,7 +136,27 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     endif()
     find_package(Vulkan QUIET)
     if(Vulkan_FOUND)
-        target_sources(raven_cpu PRIVATE graphics/vulkan_bridge.cpp graphics/vulkan_resources.cpp graphics/vulkan_compute.cpp graphics/vulkan_images.cpp graphics/vulkan_graphics.cpp graphics/vulkan_enumerate.cpp graphics/vulkan_queries.cpp)
+        # Commands that no hand-written handler covers are marshaled from the Khronos registry when it is installed.
+        find_file(RAVEN_VK_XML vk.xml PATHS /usr/share/vulkan/registry /usr/local/share/vulkan/registry)
+        find_file(RAVEN_VULKAN_CORE_HEADER vulkan/vulkan_core.h PATHS ${Vulkan_INCLUDE_DIRS} /usr/include)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        set(VULKAN_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/vulkan-generated)
+        if(RAVEN_VK_XML AND RAVEN_VULKAN_CORE_HEADER AND Python3_Interpreter_FOUND)
+            add_custom_command(OUTPUT ${VULKAN_GENERATED_DIR}/vulkan_marshal_generated.inc ${VULKAN_GENERATED_DIR}/vulkan_handle_types.inc
+                    ${VULKAN_GENERATED_DIR}/vulkan_generated_exports.def ${VULKAN_GENERATED_DIR}/vulkan_all_exports.def
+                COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/generate-vulkan-marshal.py ${RAVEN_VK_XML}
+                    ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan.def ${VULKAN_GENERATED_DIR} ${RAVEN_VULKAN_CORE_HEADER}
+                DEPENDS ${PROJECT_SOURCE_DIR}/scripts/generate-vulkan-marshal.py ${RAVEN_VK_XML} ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan.def VERBATIM)
+            add_custom_target(vulkan_marshal_generated DEPENDS ${VULKAN_GENERATED_DIR}/vulkan_marshal_generated.inc)
+            set(VULKAN_GENERATED_SOURCES graphics/vulkan_marshal.cpp graphics/vulkan_generated.cpp)
+        endif()
+        target_sources(raven_cpu PRIVATE graphics/vulkan_bridge.cpp graphics/vulkan_resources.cpp graphics/vulkan_enumerate.cpp graphics/vulkan_queries.cpp)
+        if(VULKAN_GENERATED_SOURCES)
+            target_sources(raven_cpu PRIVATE ${VULKAN_GENERATED_SOURCES})
+            target_include_directories(raven_cpu PRIVATE ${VULKAN_GENERATED_DIR})
+            target_compile_definitions(raven_cpu PUBLIC RAVEN_VULKAN_GENERATED=1)
+            add_dependencies(raven_cpu vulkan_marshal_generated)
+        endif()
         target_link_libraries(raven_cpu PUBLIC Vulkan::Vulkan)
         target_compile_definitions(raven_cpu PUBLIC RAVEN_VULKAN=1)
     endif()
@@ -1035,11 +1055,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         find_program(RAVEN_DLLTOOL x86_64-w64-mingw32-dlltool)
         if(Vulkan_FOUND AND RAVEN_DLLTOOL)
             set(VULKAN_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/vulkan-fixtures)
+            # The import library lists every command the guest provider exports: the hand-written ones and the generated ones.
+            if(VULKAN_GENERATED_SOURCES)
+                set(VULKAN_FIXTURE_DEF ${VULKAN_GENERATED_DIR}/vulkan_all_exports.def)
+            else()
+                set(VULKAN_FIXTURE_DEF ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan.def)
+            endif()
             add_custom_command(OUTPUT ${VULKAN_FIXTURES}/vulkan.a
                 COMMAND ${CMAKE_COMMAND} -E make_directory ${VULKAN_FIXTURES}
-                COMMAND ${RAVEN_DLLTOOL} -d ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan.def
+                COMMAND ${RAVEN_DLLTOOL} -d ${VULKAN_FIXTURE_DEF}
                     -l ${VULKAN_FIXTURES}/vulkan.a
-                DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan.def VERBATIM)
+                DEPENDS ${VULKAN_FIXTURE_DEF} VERBATIM)
             add_custom_command(OUTPUT ${VULKAN_FIXTURES}/client.exe
                 COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector -mno-stack-arg-probe
                     -idirafter ${Vulkan_INCLUDE_DIRS} -I${PROJECT_SOURCE_DIR}/testdata/native_cpu

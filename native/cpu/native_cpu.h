@@ -3,6 +3,7 @@
 #include "pe/loaded_image.h"
 #include "pe/module_set.h"
 
+#include <array>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -99,6 +100,8 @@ public:
 	// Continues the guest at a new context, dropping callbacks nested above depth (exception unwinding abandons them).
 	void redirect(const NativeContext &context, size_t depth);
 	std::vector<uint64_t> api_arguments(size_t count) const;
+	// Low 64 bits of XMM0 to XMM3, where an x64 caller passes the first four floating-point arguments.
+	std::array<uint64_t, 4> api_float_arguments() const;
 	void return_api(uint64_t value);
 
 private:

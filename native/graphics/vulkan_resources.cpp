@@ -9,18 +9,15 @@
 namespace raven {
 
 // Names are kept in byte order because the guest provider binary searches its export table.
-static constexpr std::array<std::string_view, 25> names{
-	"vkAllocateCommandBuffers", "vkAllocateMemory", "vkBeginCommandBuffer", "vkBindBufferMemory", "vkCmdCopyBuffer",
-	"vkCreateBuffer", "vkCreateCommandPool", "vkCreateFence", "vkDestroyBuffer", "vkDestroyCommandPool", "vkDestroyFence",
-	"vkEndCommandBuffer", "vkFlushMappedMemoryRanges", "vkFreeCommandBuffers", "vkFreeMemory", "vkGetBufferMemoryRequirements",
-	"vkInvalidateMappedMemoryRanges", "vkMapMemory", "vkQueueSubmit", "vkQueueWaitIdle", "vkResetFences", "vkUnmapMemory",
-	"vkWaitForFences", "vkGetDeviceMemoryCommitment", "vkResetCommandPool"
+static constexpr std::array<std::string_view, 8> names{
+	"vkAllocateCommandBuffers", "vkDestroyCommandPool", "vkFlushMappedMemoryRanges", "vkFreeCommandBuffers",
+	"vkFreeMemory", "vkInvalidateMappedMemoryRanges", "vkMapMemory", "vkUnmapMemory"
 };
 
 std::span<const std::string_view> vulkan_resource_names()
 {
 	static const auto sorted = [] {
-		std::array<std::string_view, 25> copy = names;
+		std::array<std::string_view, 8> copy = names;
 		std::sort(copy.begin(), copy.end());
 		return copy;
 	}();
@@ -71,18 +68,12 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;
 	static const std::map<std::string_view, size_t, std::less<>> words{
-		{"vkAllocateCommandBuffers", 3}, {"vkAllocateMemory", 4}, {"vkBeginCommandBuffer", 2}, {"vkBindBufferMemory", 4},
-		{"vkCmdCopyBuffer", 5}, {"vkCreateBuffer", 4}, {"vkCreateCommandPool", 4}, {"vkCreateFence", 4}, {"vkDestroyBuffer", 3},
-		{"vkDestroyCommandPool", 3}, {"vkDestroyFence", 3}, {"vkEndCommandBuffer", 1}, {"vkFlushMappedMemoryRanges", 3},
-		{"vkFreeCommandBuffers", 4}, {"vkFreeMemory", 3}, {"vkGetBufferMemoryRequirements", 3}, {"vkInvalidateMappedMemoryRanges", 3},
-		{"vkMapMemory", 6}, {"vkQueueSubmit", 4}, {"vkQueueWaitIdle", 1}, {"vkResetFences", 3}, {"vkUnmapMemory", 2}, {"vkWaitForFences", 5},
-		{"vkGetDeviceMemoryCommitment", 3}, {"vkResetCommandPool", 3}};
+		{"vkAllocateCommandBuffers", 3}, {"vkDestroyCommandPool", 3}, {"vkFlushMappedMemoryRanges", 3},
+		{"vkFreeCommandBuffers", 4}, {"vkFreeMemory", 3}, {"vkInvalidateMappedMemoryRanges", 3}, {"vkMapMemory", 6}, {"vkUnmapMemory", 2}};
 	auto a = process.api_arguments(words.at(name));
 	// A 32-bit argument leaves the upper half of its register or stack slot undefined, so those are narrowed before use.
 	static const std::map<std::string_view, std::vector<size_t>, std::less<>> narrow{
-		{"vkAllocateMemory", {}}, {"vkMapMemory", {4}}, {"vkFlushMappedMemoryRanges", {1}}, {"vkInvalidateMappedMemoryRanges", {1}},
-		{"vkFreeCommandBuffers", {2}}, {"vkCmdCopyBuffer", {3}}, {"vkQueueSubmit", {1}}, {"vkResetFences", {1}}, {"vkWaitForFences", {1, 3}},
-		{"vkResetCommandPool", {2}}};
+		{"vkMapMemory", {4}}, {"vkFlushMappedMemoryRanges", {1}}, {"vkInvalidateMappedMemoryRanges", {1}}, {"vkFreeCommandBuffers", {2}}};
 	if (const auto found = narrow.find(name); found != narrow.end())
 		for (const auto index : found->second)
 			a[index] = uint32_t(a[index]);
@@ -127,53 +118,7 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 		return found->second;
 	};
 	uint64_t result = 0;
-	if (name == "vkCreateBuffer") {
-		auto &device = device_of(a[0]);
-		no_allocator(a[2]);
-		auto info = load<VkBufferCreateInfo>(a[1]);
-		if (info.sType != VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO || info.pNext || info.flags || info.sharingMode != VK_SHARING_MODE_EXCLUSIVE ||
-			info.queueFamilyIndexCount || info.pQueueFamilyIndices || !info.size || info.size > (1ULL << 30))
-			throw std::runtime_error("unsupported Vulkan buffer create info");
-		check_writable(a[3], 8);
-		VkBuffer buffer = VK_NULL_HANDLE;
-		const auto status = vkCreateBuffer(device.handle, &info, nullptr, &buffer);
-		result = static_cast<uint32_t>(status);
-		if (status == VK_SUCCESS) {
-			const auto token = next_handle++;
-			buffers.emplace(token, Buffer{buffer, a[0]});
-			store(a[3], token);
-		}
-	} else if (name == "vkDestroyBuffer") {
-		auto &device = device_of(a[0]);
-		no_allocator(a[2]);
-		if (a[1]) {
-			const auto &buffer = buffer_of(a[1], a[0]);
-			vkDestroyBuffer(device.handle, buffer.handle, nullptr);
-			buffers.erase(a[1]);
-		}
-	} else if (name == "vkGetBufferMemoryRequirements") {
-		auto &device = device_of(a[0]);
-		const auto &buffer = buffer_of(a[1], a[0]);
-		check_writable(a[2], sizeof(VkMemoryRequirements));
-		VkMemoryRequirements requirements{};
-		vkGetBufferMemoryRequirements(device.handle, buffer.handle, &requirements);
-		store(a[2], requirements);
-	} else if (name == "vkAllocateMemory") {
-		auto &device = device_of(a[0]);
-		no_allocator(a[2]);
-		auto info = load<VkMemoryAllocateInfo>(a[1]);
-		if (info.sType != VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO || info.pNext || !info.allocationSize || info.allocationSize > (256ULL << 20))
-			throw std::runtime_error("unsupported Vulkan memory allocate info");
-		check_writable(a[3], 8);
-		VkDeviceMemory memory = VK_NULL_HANDLE;
-		const auto status = vkAllocateMemory(device.handle, &info, nullptr, &memory);
-		result = static_cast<uint32_t>(status);
-		if (status == VK_SUCCESS) {
-			const auto token = next_handle++;
-			memories.emplace(token, Memory{memory, a[0], info.allocationSize});
-			store(a[3], token);
-		}
-	} else if (name == "vkFreeMemory") {
+if (name == "vkFreeMemory") {
 		auto &device = device_of(a[0]);
 		no_allocator(a[2]);
 		if (a[1]) {
@@ -186,11 +131,6 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 			vkFreeMemory(device.handle, memory.handle, nullptr);
 			memories.erase(a[1]);
 		}
-	} else if (name == "vkBindBufferMemory") {
-		auto &device = device_of(a[0]);
-		const auto &buffer = buffer_of(a[1], a[0]);
-		const auto &memory = memory_of(a[2], a[0]);
-		result = static_cast<uint32_t>(vkBindBufferMemory(device.handle, buffer.handle, memory.handle, a[3]));
 	} else if (name == "vkMapMemory") {
 		auto &device = device_of(a[0]);
 		auto &memory = memory_of(a[1], a[0]);
@@ -239,21 +179,6 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 			shadow_to_device(a[0]);
 		else
 			shadow_from_device(a[0]);
-	} else if (name == "vkCreateCommandPool") {
-		auto &device = device_of(a[0]);
-		no_allocator(a[2]);
-		auto info = load<VkCommandPoolCreateInfo>(a[1]);
-		if (info.sType != VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO || info.pNext || (info.flags & ~uint32_t(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)))
-			throw std::runtime_error("unsupported Vulkan command pool create info");
-		check_writable(a[3], 8);
-		VkCommandPool pool = VK_NULL_HANDLE;
-		const auto status = vkCreateCommandPool(device.handle, &info, nullptr, &pool);
-		result = static_cast<uint32_t>(status);
-		if (status == VK_SUCCESS) {
-			const auto token = next_handle++;
-			pools.emplace(token, Pool{pool, a[0]});
-			store(a[3], token);
-		}
 	} else if (name == "vkDestroyCommandPool") {
 		auto &device = device_of(a[0]);
 		no_allocator(a[2]);
@@ -263,10 +188,6 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 			std::erase_if(command_buffers, [&](const auto &item) { return item.second.pool == a[1]; });
 			pools.erase(a[1]);
 		}
-	} else if (name == "vkResetCommandPool") {
-		auto &device = device_of(a[0]);
-		const auto &pool = pool_of(a[1], a[0]);
-		result = static_cast<uint32_t>(vkResetCommandPool(device.handle, pool.handle, VkCommandPoolResetFlags(uint32_t(a[2]))));
 	} else if (name == "vkAllocateCommandBuffers") {
 		auto &device = device_of(a[0]);
 		auto info = load<VkCommandBufferAllocateInfo>(a[1]);
@@ -306,128 +227,7 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 			vkFreeCommandBuffers(device.handle, pool.handle, uint32_t(handles.size()), handles.data());
 		for (const auto token : tokens)
 			command_buffers.erase(token);
-	} else if (name == "vkBeginCommandBuffer") {
-		auto &buffer = command_of(a[0]);
-		auto info = load<VkCommandBufferBeginInfo>(a[1]);
-		if (info.sType != VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO || info.pNext || info.pInheritanceInfo)
-			throw std::runtime_error("unsupported Vulkan command buffer begin info");
-		result = static_cast<uint32_t>(vkBeginCommandBuffer(buffer.handle, &info));
-	} else if (name == "vkEndCommandBuffer") {
-		result = static_cast<uint32_t>(vkEndCommandBuffer(command_of(a[0]).handle));
-	} else if (name == "vkCmdCopyBuffer") {
-		auto &command = command_of(a[0]);
-		const auto &source = buffer_of(a[1], command.device);
-		const auto &target = buffer_of(a[2], command.device);
-		if (!a[3] || a[3] > 64)
-			throw std::runtime_error("unsupported Vulkan buffer copy region count");
-		std::vector<VkBufferCopy> regions(a[3]);
-		for (size_t index = 0; index < regions.size(); ++index)
-			regions[index] = load<VkBufferCopy>(a[4] + index * sizeof(VkBufferCopy));
-		vkCmdCopyBuffer(command.handle, source.handle, target.handle, uint32_t(regions.size()), regions.data());
-	} else if (name == "vkCreateFence") {
-		auto &device = device_of(a[0]);
-		no_allocator(a[2]);
-		auto info = load<VkFenceCreateInfo>(a[1]);
-		if (info.sType != VK_STRUCTURE_TYPE_FENCE_CREATE_INFO || info.pNext || (info.flags & ~uint32_t(VK_FENCE_CREATE_SIGNALED_BIT)))
-			throw std::runtime_error("unsupported Vulkan fence create info");
-		check_writable(a[3], 8);
-		VkFence fence = VK_NULL_HANDLE;
-		const auto status = vkCreateFence(device.handle, &info, nullptr, &fence);
-		result = static_cast<uint32_t>(status);
-		if (status == VK_SUCCESS) {
-			const auto token = next_handle++;
-			fences.emplace(token, Fence{fence, a[0]});
-			store(a[3], token);
 		}
-	} else if (name == "vkDestroyFence") {
-		auto &device = device_of(a[0]);
-		no_allocator(a[2]);
-		if (a[1]) {
-			const auto &fence = fence_of(a[1], a[0]);
-			vkDestroyFence(device.handle, fence.handle, nullptr);
-			fences.erase(a[1]);
-		}
-	} else if (name == "vkResetFences" || name == "vkWaitForFences") {
-		auto &device = device_of(a[0]);
-		if (!a[1] || a[1] > 64)
-			throw std::runtime_error("unsupported Vulkan fence count");
-		std::vector<VkFence> handles;
-		for (uint64_t index = 0; index < a[1]; ++index)
-			handles.push_back(fence_of(load<uint64_t>(a[2] + index * 8), a[0]).handle);
-		if (name == "vkResetFences") {
-			result = static_cast<uint32_t>(vkResetFences(device.handle, uint32_t(handles.size()), handles.data()));
-		} else {
-			const auto status = vkWaitForFences(device.handle, uint32_t(handles.size()), handles.data(), a[3] & 1 ? VK_TRUE : VK_FALSE, a[4]);
-			result = static_cast<uint32_t>(status);
-			if (status == VK_SUCCESS)
-				shadow_from_device(a[0]);
-		}
-	} else if (name == "vkQueueSubmit") {
-		const auto found = queues.find(a[0]);
-		if (found == queues.end())
-			throw std::runtime_error("invalid Vulkan queue handle");
-		const auto device_token = found->second.device;
-		if (a[1] > 16)
-			throw std::runtime_error("too many Vulkan submissions");
-		std::vector<VkSubmitInfo> submits(a[1]);
-		std::vector<std::vector<VkCommandBuffer>> lists(a[1]);
-		std::vector<std::vector<VkSemaphore>> waits(a[1]), signals(a[1]);
-		std::vector<std::vector<VkPipelineStageFlags>> stages(a[1]);
-		const auto semaphore_list = [&](uint64_t address, uint32_t count, std::vector<VkSemaphore> &out) {
-			if (count > 8 || (count && !address))
-				throw std::runtime_error("unsupported Vulkan semaphore count");
-			for (uint32_t item = 0; item < count; ++item) {
-				const auto found_semaphore = objects.find(load<uint64_t>(address + uint64_t(item) * 8));
-				if (found_semaphore == objects.end() || found_semaphore->second.kind != Kind::semaphore || found_semaphore->second.device != device_token)
-					throw std::runtime_error("invalid Vulkan semaphore handle");
-				out.push_back(reinterpret_cast<VkSemaphore>(found_semaphore->second.handle));
-			}
-		};
-		for (size_t index = 0; index < submits.size(); ++index) {
-			submits[index] = load<VkSubmitInfo>(a[2] + index * sizeof(VkSubmitInfo));
-			auto &info = submits[index];
-			if (info.sType != VK_STRUCTURE_TYPE_SUBMIT_INFO || info.pNext || info.commandBufferCount > 64)
-				throw std::runtime_error("unsupported Vulkan submit info");
-			for (uint32_t buffer = 0; buffer < info.commandBufferCount; ++buffer) {
-				const auto &command = command_of(load<uint64_t>(reinterpret_cast<uint64_t>(info.pCommandBuffers) + uint64_t(buffer) * 8));
-				if (command.device != device_token)
-					throw std::runtime_error("Vulkan command buffer belongs to another device");
-				lists[index].push_back(command.handle);
-			}
-			semaphore_list(reinterpret_cast<uint64_t>(info.pWaitSemaphores), info.waitSemaphoreCount, waits[index]);
-			semaphore_list(reinterpret_cast<uint64_t>(info.pSignalSemaphores), info.signalSemaphoreCount, signals[index]);
-			if (info.waitSemaphoreCount) {
-				if (!info.pWaitDstStageMask)
-					throw std::runtime_error("Vulkan wait semaphores need stage masks");
-				for (uint32_t item = 0; item < info.waitSemaphoreCount; ++item)
-					stages[index].push_back(load<uint32_t>(reinterpret_cast<uint64_t>(info.pWaitDstStageMask) + uint64_t(item) * 4));
-			}
-			info.pWaitSemaphores = waits[index].data();
-			info.pWaitDstStageMask = stages[index].data();
-			info.pSignalSemaphores = signals[index].data();
-			info.pCommandBuffers = lists[index].data();
-		}
-		VkFence fence = VK_NULL_HANDLE;
-		if (a[3])
-			fence = fence_of(a[3], device_token).handle;
-		shadow_to_device(device_token);
-		result = static_cast<uint32_t>(vkQueueSubmit(found->second.handle, uint32_t(submits.size()), submits.data(), fence));
-	} else if (name == "vkQueueWaitIdle") {
-		const auto found = queues.find(a[0]);
-		if (found == queues.end())
-			throw std::runtime_error("invalid Vulkan queue handle");
-		const auto status = vkQueueWaitIdle(found->second.handle);
-		result = static_cast<uint32_t>(status);
-		if (status == VK_SUCCESS)
-			shadow_from_device(found->second.device);
-	} else if (name == "vkGetDeviceMemoryCommitment") {
-		auto &device = device_of(a[0]);
-		const auto &memory = memory_of(a[1], a[0]);
-		check_writable(a[2], 8);
-		VkDeviceSize committed = 0;
-		vkGetDeviceMemoryCommitment(device.handle, memory.handle, &committed);
-		store(a[2], committed);
-	}
 	process.return_api(result);
 	return true;
 }

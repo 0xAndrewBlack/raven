@@ -991,6 +991,19 @@ std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const
 	return arguments;
 }
 
+std::array<uint64_t, 4> NativeProcess::api_float_arguments() const
+{
+	state->require_stopped();
+	if (!state->awaiting_api || state->mode != NativeMode::x64)
+		throw std::runtime_error("native process is not at an x64 API call");
+	user_fpregs_struct registers{};
+	trace(PTRACE_GETFPREGS, state->child->pid, &registers);
+	std::array<uint64_t, 4> result{};
+	for (size_t index = 0; index < 4; ++index)
+		std::memcpy(&result[index], reinterpret_cast<const uint8_t *>(registers.xmm_space) + index * 16, 8);
+	return result;
+}
+
 void NativeProcess::enter_nt_service(uint64_t instruction, uint32_t number)
 {
 	state->require_stopped();
