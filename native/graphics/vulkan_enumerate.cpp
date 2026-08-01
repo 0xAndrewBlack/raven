@@ -26,7 +26,18 @@ struct Offer {
 };
 
 constexpr Offer instance_offers[] = {{"VK_KHR_surface", 25, "VK_KHR_surface"}, {"VK_KHR_win32_surface", 6, "VK_KHR_wayland_surface"}};
-constexpr Offer device_offers[] = {{"VK_KHR_swapchain", 70, "VK_KHR_swapchain"}};
+// Besides the swapchain, the extensions offered here only add feature and property structures, so offering them needs no commands.
+constexpr Offer device_offers[] = {
+	{"VK_KHR_swapchain", 70, "VK_KHR_swapchain"},
+	{"VK_EXT_depth_clip_enable", 1, "VK_EXT_depth_clip_enable"},
+	{"VK_EXT_robustness2", 1, "VK_EXT_robustness2"},
+	{"VK_EXT_custom_border_color", 12, "VK_EXT_custom_border_color"},
+	{"VK_EXT_memory_priority", 1, "VK_EXT_memory_priority"},
+	{"VK_EXT_non_seamless_cube_map", 1, "VK_EXT_non_seamless_cube_map"},
+	{"VK_KHR_load_store_op_none", 1, "VK_KHR_load_store_op_none"},
+	{"VK_KHR_maintenance5", 1, "VK_KHR_maintenance5"},
+	{"VK_KHR_maintenance6", 1, "VK_KHR_maintenance6"},
+};
 
 std::vector<VkExtensionProperties> host_instance_extensions()
 {

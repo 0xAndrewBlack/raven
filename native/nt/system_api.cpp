@@ -237,6 +237,14 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 
 	registry.add("GetCurrentProcess", 0, [](ApiCall &call) { call.ret(current_process); });
 	registry.add("GetCurrentThread", 0, [](ApiCall &call) { call.ret(current_thread); });
+	// Locally unique identifiers are handed out from a counter, as Windows does within one boot.
+	registry.add("AllocateLocallyUniqueId", 1, [](ApiCall &call) {
+		static uint64_t next = 0x3e8;
+		const uint64_t value = next++;
+		call.store<uint32_t>(call[0], uint32_t(value));
+		call.store<int32_t>(call[0] + 4, int32_t(value >> 32));
+		call.ret(1);
+	});
 	registry.add("IsDebuggerPresent", 0, [](ApiCall &call) { call.ret(0); });
 	registry.add("CheckRemoteDebuggerPresent", 2, [](ApiCall &call) {
 		call.store<uint32_t>(call[1], 0);
