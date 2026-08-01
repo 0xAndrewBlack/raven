@@ -34,6 +34,13 @@ public:
 	uint64_t new_token(H type, uint64_t host);
 	// The token of an image a swapchain owns: stable across queries, and never destroyed on the guest's behalf.
 	uint64_t swapchain_image_token(H type, uint64_t host);
+	// Host copies of the image descriptors a write refers to: the sampler counts for samplers and combined image samplers, the view for every type but a sampler.
+	VkDescriptorImageInfo *descriptor_image_infos(uint64_t guest, size_t count, VkDescriptorType type);
+	// A write names its descriptors in exactly one of three arrays by type; the pointers of the others are ignored by the driver and
+	// carry whatever the program left in them, so they are never followed.
+	static bool image_descriptor(VkDescriptorType type) { return type == VK_DESCRIPTOR_TYPE_SAMPLER || type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; }
+	static bool buffer_descriptor(VkDescriptorType type) { return type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC || type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC; }
+	static bool texel_descriptor(VkDescriptorType type) { return type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER; }
 	void forget(uint64_t token);
 
 	template<typename T> T *make(size_t count)

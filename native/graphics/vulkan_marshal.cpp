@@ -131,6 +131,25 @@ uint64_t Marshal::swapchain_image_token(H, uint64_t host_handle)
 	return token_value;
 }
 
+VkDescriptorImageInfo *Marshal::descriptor_image_infos(uint64_t guest, size_t count, VkDescriptorType type)
+{
+	auto *result = make<VkDescriptorImageInfo>(count);
+	const bool uses_sampler = type == VK_DESCRIPTOR_TYPE_SAMPLER || type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	const bool uses_view = type != VK_DESCRIPTOR_TYPE_SAMPLER;
+	for (size_t index = 0; index < count; ++index) {
+		auto info = load<VkDescriptorImageInfo>(guest + index * sizeof(VkDescriptorImageInfo));
+		try {
+			info.sampler = uses_sampler ? reinterpret_cast<VkSampler>(host(H::VkSampler, reinterpret_cast<uint64_t>(info.sampler))) : VK_NULL_HANDLE;
+			info.imageView = uses_view ? reinterpret_cast<VkImageView>(host(H::VkImageView, reinterpret_cast<uint64_t>(info.imageView))) : VK_NULL_HANDLE;
+		} catch (const std::runtime_error &error) {
+			throw std::runtime_error(std::string(error.what()) + " in image descriptor " + std::to_string(index) + " of type " + std::to_string(int(type)) +
+				" (sampler " + std::to_string(reinterpret_cast<uint64_t>(info.sampler)) + ", view " + std::to_string(reinterpret_cast<uint64_t>(info.imageView)) + ")");
+		}
+		result[index] = info;
+	}
+	return result;
+}
+
 uint64_t Marshal::token(H type, uint64_t host_handle)
 {
 	if (!host_handle)

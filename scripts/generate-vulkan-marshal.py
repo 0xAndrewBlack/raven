@@ -412,8 +412,15 @@ def emit(registry, selected, state, output, classify_member, declared):
                     body.append(f"if (p->{n}) throw std::runtime_error(\"{name}.{n} has no length\");")
                 else:
                     body.append(f"p->{n} = p->{n} ? m.copy_bytes(reinterpret_cast<uint64_t>(p->{n}), {length}) : nullptr;")
+            elif kind == "handle_array" and name == "VkWriteDescriptorSet" and n == "pTexelBufferView":
+                body.append(f"p->{n} = (p->{n} && Marshal::texel_descriptor(p->descriptorType)) ? m.host_array<{member.type}>(H::{base}, reinterpret_cast<uint64_t>(p->{n}), {length}) : nullptr;")
             elif kind == "handle_array":
                 body.append(f"p->{n} = p->{n} ? m.host_array<{member.type}>(H::{base}, reinterpret_cast<uint64_t>(p->{n}), {length}) : nullptr;")
+            elif kind == "struct_pointer" and name == "VkWriteDescriptorSet" and n == "pBufferInfo":
+                body.append(f"p->{n} = (p->{n} && Marshal::buffer_descriptor(p->descriptorType)) ? decode_array_{base}(m, reinterpret_cast<uint64_t>(p->{n}), {length}) : nullptr;")
+            elif kind == "struct_pointer" and name == "VkWriteDescriptorSet" and n == "pImageInfo":
+                # Which members of an image descriptor are handles depends on the descriptor type; the others are left unset by programs.
+                body.append(f"p->{n} = (p->{n} && Marshal::image_descriptor(p->descriptorType)) ? m.descriptor_image_infos(reinterpret_cast<uint64_t>(p->{n}), {length}, p->descriptorType) : nullptr;")
             elif kind == "struct_pointer":
                 count = length if length else "1"
                 body.append(f"p->{n} = p->{n} ? decode_array_{base}(m, reinterpret_cast<uint64_t>(p->{n}), {count}) : nullptr;")

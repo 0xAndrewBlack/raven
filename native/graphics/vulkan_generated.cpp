@@ -206,8 +206,11 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 					std::memcpy(data.data() + at, &info, sizeof info);
 				} else {
 					auto info = marshal.load<VkDescriptorImageInfo>(guest);
-					info.sampler = reinterpret_cast<VkSampler>(marshal.host(H::VkSampler, reinterpret_cast<uint64_t>(info.sampler)));
-					info.imageView = reinterpret_cast<VkImageView>(marshal.host(H::VkImageView, reinterpret_cast<uint64_t>(info.imageView)));
+					// Only the members the descriptor type reads are handles; the others are not initialised by programs and stay null.
+					const bool uses_sampler = entry.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER || entry.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+					const bool uses_view = entry.descriptorType != VK_DESCRIPTOR_TYPE_SAMPLER;
+					info.sampler = uses_sampler ? reinterpret_cast<VkSampler>(marshal.host(H::VkSampler, reinterpret_cast<uint64_t>(info.sampler))) : VK_NULL_HANDLE;
+					info.imageView = uses_view ? reinterpret_cast<VkImageView>(marshal.host(H::VkImageView, reinterpret_cast<uint64_t>(info.imageView))) : VK_NULL_HANDLE;
 					std::memcpy(data.data() + at, &info, sizeof info);
 				}
 			}
