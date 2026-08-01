@@ -197,6 +197,31 @@ def main():
         close(process, box)
         if saved.read_bytes() != SECOND:
             raise RuntimeError("the file changed during the last session")
+
+        # Session 4: switching to dark mode inside the open Preferences dialog re-themes that dialog as well as the main window.
+        process = start(raven, program, prefix, evidence, "session4")
+        wait_for("the document for the theme switch", lambda: main_window(lambda title: "persist.txt" in title))
+        _, box = settle(evidence, "06-before-theme")
+        click(box[0] + 313, box[1] + 39)
+        click(box[0] + 343, box[1] + 59)
+        wait_for("the Preferences dialog", lambda: "Preferences" in titles())
+        time.sleep(2)
+        click(box[0] + 160, box[1] + 245)
+        time.sleep(1)
+        probe = (box[0] + 810, box[1] + 500)
+        light = screenshot(evidence / "07-preferences-light.png")
+        if min(light.getpixel(probe)) < 200:
+            raise RuntimeError(f"the Preferences dialog is not light before the switch: {light.getpixel(probe)}")
+        click(box[0] + 348, box[1] + 235)
+        deadline = time.time() + 90
+        while True:
+            time.sleep(2)
+            dark = screenshot(evidence / "08-preferences-dark.png")
+            if max(dark.getpixel(probe)) <= 90:
+                break
+            if time.time() > deadline:
+                raise RuntimeError(f"the open Preferences dialog kept its light background: {dark.getpixel(probe)}")
+        close(process, box)
     finally:
         if process is not None and process.poll() is None:
             process.kill()

@@ -789,6 +789,10 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 						self(self, child, area, true);
 			};
 			apply(apply, handle, rect, false);
+			// A null window is the desktop: every top-level window and what it contains is redrawn, owned dialogs included.
+			if (!call[0] && !(flags & 0x40))
+				for (const auto root : top_level_windows())
+					apply(apply, root, rect, true);
 			if (flags & 0x100) {
 				if (objects.window(handle) && !objects.window(handle)->update.empty())
 					send(handle, 0x0f, 0, 0);
