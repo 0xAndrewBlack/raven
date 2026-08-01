@@ -472,6 +472,23 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						result=process.resume(budget);
 						continue;
 					}
+					if (std::getenv("RAVEN_TRACE_FAULT")) {
+						const auto describe=[&](uint64_t at) {
+							for (const auto &[module_name,module]:modules.all())
+								if (at>=module->loaded.base() && at<module->loaded.base()+module->image.image_size)
+									return module_name+"+"+std::to_string(at-module->loaded.base());
+							return std::string("?");
+						};
+						const auto registers=process.context().registers;
+						std::cerr << "fault: signal " << result.signal << " at " << std::hex << result.instruction << " (" << describe(result.instruction) << ")";
+						try {
+							const auto stack=process.read_memory(registers.rsp,16);
+							uint64_t first=0,second=0;
+							std::memcpy(&first,stack.data(),8);std::memcpy(&second,stack.data()+8,8);
+							std::cerr << " [rsp]=" << first << " (" << describe(first) << ") [rsp+8]=" << second << " (" << describe(second) << ")";
+						} catch (...) {}
+						std::cerr << std::dec << '\n';
+					}
 					// A CPU fault is a Windows exception: structured handlers of the faulting frames get the first chance.
 					if (!kernel_ptr || !kernel_ptr->raise_fault || result.signal==0)
 						return result;

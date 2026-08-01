@@ -1,3 +1,4 @@
+#include "apiset.h"
 #include "loader.h"
 
 #include <algorithm>
@@ -33,6 +34,19 @@ void load_initial_dependencies(ModuleSet &modules,
 						if (!message.starts_with("missing PE module: ")) throw;
 						const std::string identity(message.substr(19));
 						if (std::find(native_modules.begin(),native_modules.end(),identity)!=native_modules.end()) break;
+						// A C runtime contract resolves through the runtime component, whichever contract version the module names.
+						if (apiset_host(identity)=="ucrtbase.dll") {
+							if (!modules.all().contains("ucrtbase.dll")) {
+								auto bytes=source("ucrtbase.dll");
+								if (!bytes) throw;
+								const PEImage image(*bytes);validate_native_image(image,"ucrtbase.dll");
+								staged.reserve(staged.size()+1);pending.reserve(pending.size()+1);
+								auto &module=modules.add("ucrtbase.dll",std::move(*bytes));
+								staged.push_back(&module);pending.push_back(&module);
+							}
+							modules.add_alias(identity,"ucrtbase.dll");
+							continue;
+						}
 						if (modules.all().size()>=10000) throw std::runtime_error("native DLL graph exceeds module limit");
 						auto bytes=source(identity);
 						if (!bytes) throw;

@@ -142,6 +142,12 @@ int main(int argc, char **argv)
 								throw std::runtime_error("ambiguous case-insensitive DLL filename");
 							selected = item.path();
 						}
+						// The runtime's own components are found beside the runtime when the program does not ship them.
+						if (!selected && name=="ucrtbase.dll") {
+							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "ucrtbase.dll";
+							if (std::filesystem::exists(component))
+								return read_file(component.c_str());
+						}
 						if (!selected)
 							return std::nullopt;
 						return read_file(selected->c_str());

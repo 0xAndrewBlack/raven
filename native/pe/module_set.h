@@ -31,9 +31,12 @@ public:
 	uint64_t resolve(const PEImport &symbol) const;
 	std::vector<const PEModule *> resolution_path(const PEImport &symbol) const;
 	size_t bind_imports();
+	// Lets imports that name an API set contract resolve through the module that implements it.
+	void add_alias(std::string name, std::string target);
 
 private:
 	std::map<std::string, std::unique_ptr<PEModule>> modules;
+	std::map<std::string, std::string> aliases;
 	uint64_t resolve(std::string module, std::string name, uint32_t ordinal, bool by_ordinal,
 		std::set<std::pair<std::string, uint32_t>> &chain, std::vector<const PEModule *> *path = nullptr) const;
 };

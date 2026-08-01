@@ -19,6 +19,9 @@ struct Adapter {
 	int file_part = -1;
 	// WIN32_FIND_DATA output at this argument.
 	int find_data = -1;
+	// When the flags argument has any of these bits the string argument is not text (an address, for example).
+	int flag_argument = -1;
+	uint32_t flag_mask = 0;
 };
 
 const Adapter adapters[] = {
@@ -50,6 +53,7 @@ const Adapter adapters[] = {
 	{"OpenEventA", {2}},
 	{"OpenSemaphoreA", {2}},
 	{"SearchPathA", {0, 1, 2}, 4, 3, 5},
+	{"GetModuleHandleExA", {1}, -1, -1, -1, -1, 0, 4},
 };
 
 // Guest scratch that is released when the call returns.
@@ -86,8 +90,9 @@ void register_ansi_adapters(ApiRegistry &registry)
 			std::vector<uint64_t> words;
 			for (size_t index = 0; index < arguments; ++index)
 				words.push_back(call[index]);
+			const bool text_arguments = adapter.flag_argument < 0 || !(uint32_t(words[size_t(adapter.flag_argument)]) & adapter.flag_mask);
 			for (const auto index : adapter.strings) {
-				if (index >= words.size() || !words[index])
+				if (!text_arguments || index >= words.size() || !words[index])
 					continue;
 				const auto text = from_ansi(call.narrow(words[index]), ansi_code_page);
 				const auto at = scratch.block((text.size() + 1) * 2);

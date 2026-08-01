@@ -533,9 +533,13 @@ CRT void _invalid_parameter_noinfo_noreturn(void) { ExitProcess(3); }
 typedef struct {
 	HANDLE handle;
 	int index;
+	/* File streams: text mode translates CRLF, reads are buffered, one character can be pushed back. */
+	int text, end_of_file, error, pushed, writable;
+	unsigned char buffer[4096];
+	unsigned buffer_length, buffer_position;
 } Stream;
 
-static Stream streams[3];
+static Stream streams[3] = {{NULL, 0, 0, 0, 0, -1}, {NULL, 1, 0, 0, 0, -1}, {NULL, 2, 0, 0, 0, -1}};
 
 CRT void *__acrt_iob_func(unsigned index)
 {
@@ -547,11 +551,32 @@ CRT void *__acrt_iob_func(unsigned index)
 	return &streams[index];
 }
 
+static void stream_prepare_write(Stream *stream);
+
 static int write_stream(Stream *stream, const char *bytes, size_t count)
 {
 	DWORD written;
 	if (!stream || !count)
 		return 0;
+	stream_prepare_write(stream);
+	if (stream->text) {
+		/* Text mode writes each line feed as a carriage return and a line feed. */
+		char chunk[1024];
+		size_t done = 0;
+		while (done < count) {
+			size_t used = 0;
+			while (done < count && used + 2 <= sizeof chunk) {
+				if (bytes[done] == '\n')
+					chunk[used++] = '\r';
+				chunk[used++] = bytes[done++];
+			}
+			if (!WriteFile(stream->handle, chunk, (DWORD)used, &written, NULL) || written != used) {
+				stream->error = 1;
+				return -1;
+			}
+		}
+		return (int)count;
+	}
 	return WriteFile(stream->handle, bytes, (DWORD)count, &written, NULL) ? (int)written : -1;
 }
 
@@ -856,3 +881,5 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 {
 	return TRUE;
 }
+
+#include "ucrtbase_io.c"

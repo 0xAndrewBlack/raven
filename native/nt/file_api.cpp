@@ -869,7 +869,9 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(root && root->exists ? 3 : 1);
 	});
 	registry.add("DuplicateHandle", 7, [&, resolve, missing, file_of, copy_file, find_first](ApiCall &call) {
-		const auto made = objects.duplicate(call[1]);
+		// The current-thread pseudo handle duplicates into a real handle to the calling thread.
+		const auto made = call[1] == UINT64_MAX - 1 && call[0] == UINT64_MAX ?
+			objects.add_object(std::make_shared<ThreadObject>(context.threads.find(context.threads.current_id()))) : objects.duplicate(call[1]);
 		if (made.status) {
 			call.fail(6);
 			return;

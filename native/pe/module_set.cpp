@@ -73,6 +73,15 @@ PEModule &ModuleSet::add(std::string name, std::vector<uint8_t> bytes, uint64_t 
 	return result;
 }
 
+void ModuleSet::add_alias(std::string name, std::string target)
+{
+	name = module_name(std::move(name));
+	target = module_name(std::move(target));
+	if (modules.contains(name) || !modules.contains(target))
+		throw std::runtime_error("module alias needs a free name and a loaded target");
+	aliases[name] = target;
+}
+
 const std::map<std::string, std::unique_ptr<PEModule>> &ModuleSet::all() const { return modules; }
 
 void ModuleSet::remove(const PEModule &module)
@@ -101,6 +110,8 @@ uint64_t ModuleSet::resolve(std::string module, std::string name, uint32_t ordin
 	std::set<std::pair<std::string, uint32_t>> &chain, std::vector<const PEModule *> *path) const
 {
 	module = module_name(std::move(module));
+	if (const auto alias = aliases.find(module); alias != aliases.end() && !modules.contains(module))
+		module = alias->second;
 	const auto found = modules.find(module);
 	if (found == modules.end())
 		throw std::runtime_error("missing PE module: " + module);
