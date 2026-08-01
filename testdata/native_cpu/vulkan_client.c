@@ -22,6 +22,19 @@ __declspec(dllexport) uint32_t compute_workflow;
 __declspec(dllexport) uint32_t computed[64];
 __declspec(dllexport) uint32_t image_workflow;
 __declspec(dllexport) uint32_t image_readback[64];
+__declspec(dllexport) uint32_t extension_workflow;
+__declspec(dllexport) uint32_t instance_extension_count, instance_layer_count, device_extension_count, surface_offered, swapchain_offered;
+__declspec(dllexport) VkPhysicalDeviceVulkan11Features features11;
+__declspec(dllexport) VkPhysicalDeviceVulkan12Features features12;
+__declspec(dllexport) VkPhysicalDeviceVulkan13Features features13;
+__declspec(dllexport) VkPhysicalDeviceVulkan12Properties properties12;
+__declspec(dllexport) VkPhysicalDeviceProperties properties_two;
+__declspec(dllexport) VkPhysicalDeviceMemoryProperties memory_two;
+__declspec(dllexport) VkFormatProperties format_one;
+__declspec(dllexport) VkFormatProperties format_two;
+__declspec(dllexport) VkImageFormatProperties image_format;
+__declspec(dllexport) uint32_t family_two_count;
+__declspec(dllexport) VkQueueFamilyProperties family_two;
 __declspec(dllexport) uint32_t graphics_workflow;
 __declspec(dllexport) uint32_t rendered[256];
 __declspec(dllexport) uint32_t textured_workflow;
@@ -789,6 +802,77 @@ unsigned int raven_entry(void)
 		vkDestroyDevice(device, 0);
 		vkDestroyDevice(VK_NULL_HANDLE, 0);
 		device_workflow = 1;
+	}
+	{
+		/* Extension and layer enumeration, chained feature and property queries, and an instance created with an offered extension. */
+		VkExtensionProperties extensions[64];
+		VkLayerProperties layers[4];
+		uint32_t total = 0, capacity = 64, layer_total = 0, index;
+		VkPhysicalDeviceFeatures2 features2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &features11};
+		VkPhysicalDeviceProperties2 properties2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &properties12};
+		VkPhysicalDeviceMemoryProperties2 memory2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, 0};
+		VkFormatProperties2 format2 = {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, 0};
+		VkQueueFamilyProperties2 family2 = {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2, 0};
+		const char *wanted[2] = {"VK_KHR_surface", "VK_KHR_win32_surface"};
+		VkInstanceCreateInfo with_extensions = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &application, 0, 0, 0, 0};
+		VkInstance second = VK_NULL_HANDLE;
+		features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES; features11.pNext = &features12;
+		features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES; features12.pNext = &features13;
+		features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES; features13.pNext = 0;
+		properties12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES; properties12.pNext = 0;
+		if (vkEnumerateInstanceExtensionProperties(0, &total, 0) != VK_SUCCESS || total > 64)
+			return 130;
+		instance_extension_count = total;
+		if (total && vkEnumerateInstanceExtensionProperties(0, &capacity, extensions) != VK_SUCCESS && capacity < total)
+			return 131;
+		capacity = 0;
+		if (total && vkEnumerateInstanceExtensionProperties(0, &capacity, extensions) != VK_SUCCESS && total)
+			; /* A zero capacity with an array reports an incomplete result, which is fine. */
+		for (index = 0; index < total; ++index) {
+			const char *name = extensions[index].extensionName;
+			if (name[0] == 'V' && name[3] == 'K' && name[7] == 's' && name[8] == 'u' && name[9] == 'r' && name[10] == 'f' && name[11] == 'a' && name[12] == 'c' && name[13] == 'e' && !name[14])
+				surface_offered = 1;
+		}
+		if (vkEnumerateInstanceLayerProperties(&layer_total, 0) != VK_SUCCESS)
+			return 132;
+		instance_layer_count = layer_total;
+		(void)layers;
+		if (surface_offered) {
+			with_extensions.enabledExtensionCount = 2;
+			with_extensions.ppEnabledExtensionNames = wanted;
+			if (vkCreateInstance(&with_extensions, 0, &second) != VK_SUCCESS || !second)
+				return 133;
+			vkDestroyInstance(second, 0);
+		}
+		{
+			VkExtensionProperties device_extensions[16];
+			uint32_t device_total = 0, device_capacity = 16;
+			if (vkEnumerateDeviceExtensionProperties(devices[0], 0, &device_total, 0) != VK_SUCCESS || device_total > 16)
+				return 134;
+			device_extension_count = device_total;
+			if (device_total && vkEnumerateDeviceExtensionProperties(devices[0], 0, &device_capacity, device_extensions) != VK_SUCCESS)
+				return 135;
+			for (index = 0; index < device_total; ++index)
+				if (device_extensions[index].extensionName[3] == 'K' && device_extensions[index].extensionName[7] == 's' && device_extensions[index].extensionName[8] == 'w')
+					swapchain_offered = 1;
+		}
+		vkGetPhysicalDeviceFeatures2(devices[0], &features2);
+		vkGetPhysicalDeviceProperties2(devices[0], &properties2);
+		properties_two = properties2.properties;
+		vkGetPhysicalDeviceMemoryProperties2(devices[0], &memory2);
+		memory_two = memory2.memoryProperties;
+		vkGetPhysicalDeviceFormatProperties(devices[0], VK_FORMAT_R8G8B8A8_UNORM, &format_one);
+		vkGetPhysicalDeviceFormatProperties2(devices[0], VK_FORMAT_R8G8B8A8_UNORM, &format2);
+		format_two = format2.formatProperties;
+		if (vkGetPhysicalDeviceImageFormatProperties(devices[0], VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &image_format) != VK_SUCCESS)
+			return 136;
+		family_two_count = 1;
+		vkGetPhysicalDeviceQueueFamilyProperties2(devices[0], &family_two_count, &family2);
+		family_two = family2.queueFamilyProperties;
+		if (family_two_count != 1 || !family_two.queueCount || !properties_two.apiVersion)
+			return 137;
+		extension_workflow = 1;
 	}
 	vkDestroyInstance(instance, 0);
 	vkDestroyInstance(VK_NULL_HANDLE, 0);

@@ -29,12 +29,13 @@ static constexpr std::array<std::string_view, 4> device_names{"vkDestroyDevice",
 static bool is_device_function(std::string_view symbol)
 {
 	const auto resources = vulkan_resource_names(), compute = vulkan_compute_names(), images = vulkan_image_names(),
-		graphics = vulkan_graphics_names();
+		graphics = vulkan_graphics_names(), enumerate = vulkan_enumerate_names();
 	return std::find(device_names.begin(), device_names.end(), symbol) != device_names.end() ||
 		std::find(resources.begin(), resources.end(), symbol) != resources.end() ||
 		std::find(compute.begin(), compute.end(), symbol) != compute.end() ||
 		std::find(images.begin(), images.end(), symbol) != images.end() ||
-		std::find(graphics.begin(), graphics.end(), symbol) != graphics.end();
+		std::find(graphics.begin(), graphics.end(), symbol) != graphics.end() ||
+		(std::find(enumerate.begin(), enumerate.end(), symbol) != enumerate.end() && symbol.find("Device") != std::string_view::npos);
 }
 
 static_assert(sizeof(VkInstanceCreateInfo) == 64 && sizeof(VkApplicationInfo) == 48);
@@ -53,6 +54,10 @@ std::span<const std::string_view> VulkanBridge::exports()
 		for (const auto name : vulkan_image_names())
 			all.push_back(name);
 		for (const auto name : vulkan_graphics_names())
+			all.push_back(name);
+		for (const auto name : vulkan_enumerate_names())
+			all.push_back(name);
+		for (const auto name : vulkan_query_names())
 			all.push_back(name);
 		std::sort(all.begin(), all.end());
 		return all;
@@ -121,7 +126,7 @@ std::string VulkanBridge::string(uint64_t address)
 
 bool VulkanBridge::dispatch(std::string_view name)
 {
-	if (dispatch_resource(name) || dispatch_compute(name) || dispatch_images(name) || dispatch_graphics(name))
+	if (dispatch_resource(name) || dispatch_compute(name) || dispatch_images(name) || dispatch_graphics(name) || dispatch_enumerate(name) || dispatch_queries(name))
 		return true;
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;
@@ -157,7 +162,8 @@ bool VulkanBridge::dispatch(std::string_view name)
 		if (arguments[0] && !instances.contains(arguments[0]))
 			throw std::runtime_error("invalid Vulkan instance handle");
 		const auto symbol = string(arguments[1]);
-		const bool global = symbol == "vkCreateInstance" || symbol == "vkEnumerateInstanceVersion" || symbol == "vkGetInstanceProcAddr";
+		const bool global = symbol == "vkCreateInstance" || symbol == "vkEnumerateInstanceVersion" || symbol == "vkGetInstanceProcAddr" ||
+			symbol == "vkEnumerateInstanceExtensionProperties" || symbol == "vkEnumerateInstanceLayerProperties";
 		const auto exported = VulkanBridge::exports();
 		if ((arguments[0] || global) && std::find(exported.begin(), exported.end(), symbol) != exported.end())
 			result = modules.resolve({"vulkan-1.dll", symbol, 0, false, 0});
@@ -170,8 +176,16 @@ bool VulkanBridge::dispatch(std::string_view name)
 	} else if (name == "vkCreateInstance") {
 		auto info = read.template operator()<VkInstanceCreateInfo>(arguments[0]);
 		if (arguments[1] || info.pNext || info.sType != VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO ||
-			info.flags || info.enabledLayerCount || info.enabledExtensionCount)
-			throw std::runtime_error("Vulkan allocator, pNext, flags, layers or extensions are not implemented");
+			info.flags || info.enabledLayerCount || info.enabledExtensionCount > 32)
+			throw std::runtime_error("Vulkan allocator, pNext, flags or layers are not implemented");
+		std::vector<std::string> guest_extensions, host_extensions;
+		for (uint32_t index = 0; index < info.enabledExtensionCount; ++index)
+			guest_extensions.push_back(string(read.template operator()<uint64_t>(reinterpret_cast<uint64_t>(info.ppEnabledExtensionNames) + uint64_t(index) * 8)));
+		if (!host_extension_names(guest_extensions, false, host_extensions))
+			throw std::runtime_error("Vulkan instance extension is not offered");
+		std::vector<const char *> host_pointers;
+		for (const auto &extension : host_extensions)
+			host_pointers.push_back(extension.c_str());
 		VkApplicationInfo application{};
 		std::string application_name, engine_name;
 		if (info.pApplicationInfo) {
@@ -187,7 +201,8 @@ bool VulkanBridge::dispatch(std::string_view name)
 			info.pApplicationInfo = &application;
 		}
 		info.ppEnabledLayerNames = nullptr;
-		info.ppEnabledExtensionNames = nullptr;
+		info.enabledExtensionCount = uint32_t(host_pointers.size());
+		info.ppEnabledExtensionNames = host_pointers.empty() ? nullptr : host_pointers.data();
 		writable(arguments[2], 8);
 		VkInstance instance = VK_NULL_HANDLE;
 		const auto status = vkCreateInstance(&info, nullptr, &instance);
@@ -294,9 +309,20 @@ bool VulkanBridge::dispatch(std::string_view name)
 		if (arguments[2])
 			throw std::runtime_error("Vulkan guest allocation callbacks are not implemented");
 		auto info = read.template operator()<VkDeviceCreateInfo>(arguments[1]);
-		if (info.sType != VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO || info.pNext || info.flags || info.enabledLayerCount ||
-			info.enabledExtensionCount || !info.queueCreateInfoCount || info.queueCreateInfoCount > 16)
-			throw std::runtime_error("Vulkan device pNext, flags, layers or extensions are not implemented");
+		if (info.sType != VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO || info.flags || info.enabledLayerCount ||
+			info.enabledExtensionCount > 32 || !info.queueCreateInfoCount || info.queueCreateInfoCount > 16)
+			throw std::runtime_error("Vulkan device flags or layers are not implemented");
+		// Feature structures chained to the create info are plain blocks of bytes that travel to the driver unchanged.
+		auto device_chain = mirror_chain(reinterpret_cast<uint64_t>(info.pNext), true);
+		info.pNext = link_chain(device_chain);
+		std::vector<std::string> guest_extensions, host_extensions;
+		for (uint32_t index = 0; index < info.enabledExtensionCount; ++index)
+			guest_extensions.push_back(string(read.template operator()<uint64_t>(reinterpret_cast<uint64_t>(info.ppEnabledExtensionNames) + uint64_t(index) * 8)));
+		if (!host_extension_names(guest_extensions, true, host_extensions))
+			throw std::runtime_error("Vulkan device extension is not offered");
+		std::vector<const char *> host_pointers;
+		for (const auto &extension : host_extensions)
+			host_pointers.push_back(extension.c_str());
 		std::vector<VkDeviceQueueCreateInfo> queue_infos(info.queueCreateInfoCount);
 		std::vector<std::vector<float>> priorities(info.queueCreateInfoCount);
 		for (uint32_t index = 0; index < info.queueCreateInfoCount; ++index) {
@@ -317,7 +343,8 @@ bool VulkanBridge::dispatch(std::string_view name)
 		}
 		info.pQueueCreateInfos = queue_infos.data();
 		info.ppEnabledLayerNames = nullptr;
-		info.ppEnabledExtensionNames = nullptr;
+		info.enabledExtensionCount = uint32_t(host_pointers.size());
+		info.ppEnabledExtensionNames = host_pointers.empty() ? nullptr : host_pointers.data();
 		writable(arguments[3], 8);
 		VkDevice device = VK_NULL_HANDLE;
 		const auto status = vkCreateDevice(found->second.handle, &info, nullptr, &device);

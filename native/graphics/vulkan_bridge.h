@@ -12,6 +12,8 @@ std::span<const std::string_view> vulkan_resource_names();
 std::span<const std::string_view> vulkan_compute_names();
 std::span<const std::string_view> vulkan_image_names();
 std::span<const std::string_view> vulkan_graphics_names();
+std::span<const std::string_view> vulkan_enumerate_names();
+std::span<const std::string_view> vulkan_query_names();
 
 class VulkanBridge {
 public:
@@ -54,6 +56,17 @@ private:
 	bool dispatch_compute(std::string_view name);
 	bool dispatch_images(std::string_view name);
 	bool dispatch_graphics(std::string_view name);
+	bool dispatch_enumerate(std::string_view name);
+	bool dispatch_queries(std::string_view name);
+	// A pNext chain of plain structures mirrored into host memory: the guest address of each element and a host copy of it.
+	struct ChainEntry { uint64_t guest; std::vector<uint8_t> host; };
+	std::vector<ChainEntry> mirror_chain(uint64_t first, bool strict) const;
+	// Links the host copies and returns the first one, or null for an empty chain.
+	static void *link_chain(std::vector<ChainEntry> &chain);
+	// Writes what the host filled in back to the guest structures, leaving their sType and pNext alone.
+	void copy_back_chain(const std::vector<ChainEntry> &chain) const;
+	// Host names for the extension names a guest enables; false when one is not offered to guests.
+	bool host_extension_names(const std::vector<std::string> &guest, bool device, std::vector<std::string> &host) const;
 	void destroy_object(const VkDevice &device, const Object &object);
 	uint64_t next_handle = 0x5600000000000001ULL;
 	void destroy_device(uint64_t token);

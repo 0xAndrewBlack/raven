@@ -106,13 +106,29 @@ public:
 		}
 		bool handled = false;
 		ContextBytes current = origin;
+		size_t continuation_cursor = continuation_start;
+		// An exception raised inside a handler continues its search through the dispatcher's frames, which the host callback
+		// boundary stands for, into the context of the exception that the handler was running for.
+		size_t outer = active.size() - 1;
 		for (int frames = 0; frames < 1024; ++frames) {
 			const uint64_t pc = context_rip(current);
 			if (!pc)
 				break;
 			const auto function = unwinder.lookup(pc);
 			if (!function) {
-				// The host callback boundary ends the search: no frames of the guest's caller are on this stack.
+				if (pc == context.process.return_gate() && outer > 0) {
+					current = active[--outer].origin;
+					continue;
+				}
+				// A search raised from a handler that an unwind is running continues in the frames of whoever called the unwind,
+				// then in the contexts of the dispatches that the unwind has already crossed.
+				if (pc == context.process.return_gate() && continuation_cursor < continuation.size()) {
+					current = continuation[continuation_cursor++];
+					continue;
+				}
+				if (trace)
+					std::fprintf(stderr, "seh frame: pc=%llx has no unwind data%s\n", (unsigned long long)pc, pc == context.process.return_gate() ? " (callback boundary)" : "");
+				// With no outer dispatch the boundary ends the search: no frames of the guest's caller are on this stack.
 				if (pc == context.process.return_gate() || !readable(pc))
 					break;
 				unwinder.unwind_leaf(current);
@@ -262,15 +278,31 @@ public:
 		const uint64_t dispatcher = scratch.take(dispatcher_size);
 		const uint64_t frame_context = scratch.take(x64_context::size);
 		ContextBytes current = caller_context();
+		const size_t previous_start = continuation_start, previous_size = continuation.size();
+		size_t outer_cursor = previous_start;
+		continuation_start = continuation.size();
+		continuation.push_back(current);
+		struct Release {
+			std::vector<ContextBytes> &stack;
+			size_t &start, previous_start, previous_size;
+			~Release() { stack.resize(previous_size); start = previous_start; }
+		} release{continuation, continuation_start, previous_start, previous_size};
 		bool reached = false;
 		for (int frames = 0; frames < 1024 && !reached; ++frames) {
 			const uint64_t pc = context_rip(current);
 			if (pc == context.process.return_gate() && !active.empty()) {
 				// The host callback boundary stands in for the dispatcher's own frames: continue from where the exception was raised.
 				current = active.back().origin;
+				continuation.push_back(current);
 				depth = active.back().depth;
 				resume_mark = std::min(resume_mark, active.back().mark);
 				active.pop_back();
+				continue;
+			}
+			// With no dispatch left to cross, an unwind raised from inside another unwind continues through the contexts
+			// that the enclosing unwind recorded.
+			if (pc == context.process.return_gate() && outer_cursor < previous_size) {
+				current = continuation[outer_cursor++];
 				continue;
 			}
 			if (!pc)
@@ -362,6 +394,9 @@ public:
 		size_t mark;
 	};
 	std::vector<Active> active;
+	// The contexts a running unwind was called from and the dispatch contexts it has crossed, in the order a stack walk meets them.
+	std::vector<ContextBytes> continuation;
+	size_t continuation_start = 0;
 	// A C++ catch is entered through STATUS_UNWIND_CONSOLIDATE: after unwinding, the runtime's callback runs on the
 	// target frame's stack and returns the address where execution resumes. Each pending callback remembers the frame it belongs to.
 	struct Consolidation {

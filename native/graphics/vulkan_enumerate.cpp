@@ -1,0 +1,155 @@
+#include "vulkan_bridge.h"
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <stdexcept>
+
+namespace raven {
+
+// Names are kept in byte order because the guest provider binary searches its export table.
+static constexpr std::array<std::string_view, 4> names{
+	"vkEnumerateDeviceExtensionProperties", "vkEnumerateDeviceLayerProperties", "vkEnumerateInstanceExtensionProperties",
+	"vkEnumerateInstanceLayerProperties"
+};
+
+std::span<const std::string_view> vulkan_enumerate_names() { return names; }
+
+namespace {
+
+// Extensions offered to guests: the ones whose commands the bridge implements, under the names Windows programs ask for.
+// The Windows surface extension is served by the host's Wayland surface.
+struct Offer {
+	const char *name;
+	uint32_t version;
+	const char *host;
+};
+
+constexpr Offer instance_offers[] = {{"VK_KHR_surface", 25, "VK_KHR_surface"}, {"VK_KHR_win32_surface", 6, "VK_KHR_wayland_surface"}};
+constexpr Offer device_offers[] = {{"VK_KHR_swapchain", 70, "VK_KHR_swapchain"}};
+
+std::vector<VkExtensionProperties> host_instance_extensions()
+{
+	uint32_t count = 0;
+	vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+	std::vector<VkExtensionProperties> result(count);
+	vkEnumerateInstanceExtensionProperties(nullptr, &count, result.data());
+	result.resize(count);
+	return result;
+}
+
+std::vector<VkExtensionProperties> host_device_extensions(VkPhysicalDevice device)
+{
+	uint32_t count = 0;
+	vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
+	std::vector<VkExtensionProperties> result(count);
+	vkEnumerateDeviceExtensionProperties(device, nullptr, &count, result.data());
+	result.resize(count);
+	return result;
+}
+
+bool has(const std::vector<VkExtensionProperties> &list, const char *name)
+{
+	return std::any_of(list.begin(), list.end(), [&](const auto &item) { return !std::strcmp(item.extensionName, name); });
+}
+
+std::vector<VkExtensionProperties> offered(const std::vector<VkExtensionProperties> &host, bool device)
+{
+	std::vector<VkExtensionProperties> result;
+	const auto add = [&](const Offer &offer) {
+		if (!has(host, offer.host))
+			return;
+		VkExtensionProperties entry{};
+		std::strncpy(entry.extensionName, offer.name, sizeof entry.extensionName - 1);
+		entry.specVersion = offer.version;
+		result.push_back(entry);
+	};
+	if (device)
+		for (const auto &offer : device_offers)
+			add(offer);
+	else
+		for (const auto &offer : instance_offers)
+			add(offer);
+	return result;
+}
+
+}
+
+bool VulkanBridge::host_extension_names(const std::vector<std::string> &guest, bool device, std::vector<std::string> &host) const
+{
+	const auto available = device ? std::vector<VkExtensionProperties>() : host_instance_extensions();
+	for (const auto &name : guest) {
+		bool found = false;
+		for (const auto &offer : device ? std::span<const Offer>(device_offers) : std::span<const Offer>(instance_offers))
+			if (name == offer.name) {
+				found = true;
+				if (std::find(host.begin(), host.end(), offer.host) == host.end())
+					host.push_back(offer.host);
+				// A surface type needs the base surface extension next to it.
+				if (!device && std::strcmp(offer.host, "VK_KHR_surface") && std::find(host.begin(), host.end(), "VK_KHR_surface") == host.end())
+					host.push_back("VK_KHR_surface");
+			}
+		if (!found)
+			return false;
+	}
+	(void)available;
+	return true;
+}
+
+bool VulkanBridge::dispatch_enumerate(std::string_view name)
+{
+	if (std::find(names.begin(), names.end(), name) == names.end())
+		return false;
+	const bool device = name.find("Device") != std::string_view::npos;
+	const bool extensions = name.find("Extension") != std::string_view::npos;
+	const auto a = process.api_arguments(device ? (extensions ? 4 : 3) : (extensions ? 3 : 2));
+	const auto read = [&]<typename T>(uint64_t address) {
+		T result{};
+		const auto bytes = process.read_memory(address, sizeof(T));
+		std::memcpy(&result, bytes.data(), sizeof(T));
+		return result;
+	};
+	const auto write = [&]<typename T>(uint64_t address, const T &value) {
+		process.write_memory(address, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&value), sizeof(T)));
+	};
+	uint64_t result = 0;
+	const size_t count_slot = device ? (extensions ? 2 : 1) : (extensions ? 1 : 0);
+	const size_t array_slot = count_slot + 1;
+	std::vector<VkExtensionProperties> list;
+	if (extensions) {
+		const uint64_t layer_name = a[device ? 1 : 0];
+		if (device && !physical.contains(a[0]))
+			throw std::runtime_error("invalid Vulkan physical device handle");
+		if (layer_name) {
+			// Only the implicit layer-free configuration exists: asking for a layer's extensions names a layer that is not there.
+			result = static_cast<uint32_t>(VK_ERROR_LAYER_NOT_PRESENT);
+			process.return_api(result);
+			return true;
+		}
+		list = offered(device ? host_device_extensions(physical.at(a[0]).handle) : host_instance_extensions(), device);
+	} else if (device && !physical.contains(a[0])) {
+		throw std::runtime_error("invalid Vulkan physical device handle");
+	}
+	// Both layers and extensions follow the usual count-then-fill convention.
+	const auto size = extensions ? sizeof(VkExtensionProperties) : sizeof(VkLayerProperties);
+	process.write_memory(a[count_slot], process.read_memory(a[count_slot], 4));
+	const uint32_t total = extensions ? uint32_t(list.size()) : 0;
+	if (!a[array_slot]) {
+		write(a[count_slot], total);
+	} else {
+		const auto capacity = read.template operator()<uint32_t>(a[count_slot]);
+		if (capacity > 4096)
+			throw std::runtime_error("Vulkan extension capacity exceeds limit");
+		process.write_memory(a[array_slot], process.read_memory(a[array_slot], size_t(capacity) * size));
+		const auto copied = std::min(capacity, total);
+		for (uint32_t index = 0; index < copied; ++index)
+			write(a[array_slot] + uint64_t(index) * size, list[index]);
+		write(a[count_slot], copied);
+		if (copied < total)
+			result = static_cast<uint32_t>(VK_INCOMPLETE);
+	}
+	process.return_api(result);
+	return true;
+}
+
+}

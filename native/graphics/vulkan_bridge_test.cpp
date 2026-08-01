@@ -91,6 +91,50 @@ int main(int argc, char **argv)
 		const auto readback = field.template operator()<std::array<uint32_t, 64>>("image_readback");
 		for (uint32_t index = 0; index < readback.size(); ++index)
 			check(readback[index] == (0xff000000u | (index * 3u << 16) | (index * 2u << 8) | index), "image round trip returned different texels");
+		check(field.template operator()<uint32_t>("extension_workflow") == 1, "guest extension and query workflow did not complete");
+		{
+			// Chained feature and property queries must match what the driver reports for the same device.
+			VkPhysicalDeviceVulkan11Features host11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+			VkPhysicalDeviceVulkan12Features host12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+			VkPhysicalDeviceVulkan13Features host13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+			VkPhysicalDeviceVulkan12Properties host_properties12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+			host11.pNext = &host12; host12.pNext = &host13;
+			VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &host11};
+			VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &host_properties12};
+			VkInstanceCreateInfo reference_info{};
+			reference_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+			VkInstance query_instance = VK_NULL_HANDLE;
+			check(vkCreateInstance(&reference_info, nullptr, &query_instance) == VK_SUCCESS, "host query instance failed");
+			uint32_t query_count = 1;
+			VkPhysicalDevice query_device = VK_NULL_HANDLE;
+			vkEnumeratePhysicalDevices(query_instance, &query_count, &query_device);
+			vkGetPhysicalDeviceFeatures2(query_device, &features2);
+			vkGetPhysicalDeviceProperties2(query_device, &properties2);
+			VkFormatProperties format_reference{};
+			vkGetPhysicalDeviceFormatProperties(query_device, VK_FORMAT_R8G8B8A8_UNORM, &format_reference);
+			VkImageFormatProperties image_reference{};
+			vkGetPhysicalDeviceImageFormatProperties(query_device, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &image_reference);
+			vkDestroyInstance(query_instance, nullptr);
+			const auto features11 = field.template operator()<VkPhysicalDeviceVulkan11Features>("features11");
+			const auto features12 = field.template operator()<VkPhysicalDeviceVulkan12Features>("features12");
+			const auto features13 = field.template operator()<VkPhysicalDeviceVulkan13Features>("features13");
+			check(std::memcmp(reinterpret_cast<const char *>(&features11) + 16, reinterpret_cast<const char *>(&host11) + 16, sizeof(host11) - 16) == 0 &&
+				std::memcmp(reinterpret_cast<const char *>(&features12) + 16, reinterpret_cast<const char *>(&host12) + 16, sizeof(host12) - 16) == 0 &&
+				std::memcmp(reinterpret_cast<const char *>(&features13) + 16, reinterpret_cast<const char *>(&host13) + 16, sizeof(host13) - 16) == 0,
+				"chained feature structures differ from the host");
+			const auto guest_properties12 = field.template operator()<VkPhysicalDeviceVulkan12Properties>("properties12");
+			check(guest_properties12.driverID == host_properties12.driverID && std::strcmp(guest_properties12.driverName, host_properties12.driverName) == 0 &&
+				guest_properties12.maxUpdateAfterBindDescriptorsInAllPools == host_properties12.maxUpdateAfterBindDescriptorsInAllPools,
+				"chained Vulkan 1.2 properties differ from the host");
+			const auto format_one = field.template operator()<VkFormatProperties>("format_one");
+			const auto format_two = field.template operator()<VkFormatProperties>("format_two");
+			check(format_one.optimalTilingFeatures == format_reference.optimalTilingFeatures && format_two.optimalTilingFeatures == format_reference.optimalTilingFeatures &&
+				format_two.linearTilingFeatures == format_reference.linearTilingFeatures, "format properties differ from the host");
+			const auto image_format = field.template operator()<VkImageFormatProperties>("image_format");
+			check(image_format.maxExtent.width == image_reference.maxExtent.width && image_format.maxMipLevels == image_reference.maxMipLevels &&
+				image_format.sampleCounts == image_reference.sampleCounts, "image format properties differ from the host");
+		}
 		check(field.template operator()<uint32_t>("graphics_workflow") == 1, "guest render pass did not complete");
 		const auto rendered = field.template operator()<std::array<uint32_t, 256>>("rendered");
 		for (uint32_t y = 0; y < 16; ++y)
@@ -180,6 +224,12 @@ int main(int argc, char **argv)
 		rejected("vkCreateSampler", forged_sampler);
 		const uint64_t forged_viewport[] = {0x7777, 0, 1, memory};
 		rejected("vkCmdSetViewport", forged_viewport);
+		const uint64_t forged_features2[] = {0x1234, memory};
+		rejected("vkGetPhysicalDeviceFeatures2", forged_features2);
+		const uint64_t forged_extensions[] = {0x1234, 0, memory, 0};
+		rejected("vkEnumerateDeviceExtensionProperties", forged_extensions);
+		const uint64_t forged_format[] = {0x1234, 37, memory};
+		rejected("vkGetPhysicalDeviceFormatProperties", forged_format);
 		const uint64_t forged_command[] = {0x7777, memory};
 		rejected("vkBeginCommandBuffer", forged_command);
 		process.unmap_memory(memory);
