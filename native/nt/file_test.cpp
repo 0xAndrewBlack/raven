@@ -1,3 +1,4 @@
+#include <cstring>
 #include "object_api.h"
 #include "providers.h"
 
@@ -41,8 +42,12 @@ int main(int argc,char **argv)
 		check(descriptors()==before && !limited.count() && limited.inherit_file(-1).status==0xc0000008U,"failed inheritance leaked descriptors");
 		int pipes[2];check(!pipe2(pipes,O_CLOEXEC),"cannot create pipe control");
 		const auto pipe=objects.inherit_file(pipes[1]);
-		check(!pipe.status && objects.file_type(pipe.value).value==3 && objects.write_file(pipe.value,marker).status==0xc00000bbU,
-			"unsupported blocking pipe write reported success");
+		// A pipe write reaches the other end byte for byte (the pipe is empty, so the write cannot block).
+		const auto piped=objects.write_file(pipe.value,marker);
+		uint8_t received[8]{};
+		check(!pipe.status && objects.file_type(pipe.value).value==3 && !piped.status && piped.value==sizeof marker &&
+			read(pipes[0],received,sizeof received)==ssize_t(sizeof marker) && !memcmp(received,marker,sizeof marker),
+			"pipe write did not deliver its bytes");
 		objects.close(pipe.value);close(pipes[0]);close(pipes[1]);
 		const auto readonly=open(argv[3],O_RDONLY | O_CLOEXEC);check(readonly>=0,"cannot open readonly control");
 		const auto read_handle=objects.inherit_file(readonly);close(readonly);
