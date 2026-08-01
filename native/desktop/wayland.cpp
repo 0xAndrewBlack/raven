@@ -86,7 +86,7 @@ struct WaylandPresentation::State {
 		if (display) { wl_display_flush(display); wl_display_disconnect(display); }
 	}
 
-	int64_t wheel_remainder=0;
+	int64_t wheel_remainder=0,horizontal_remainder=0;
 
 	void pointer_event(DesktopEventKind kind,uint32_t button=0,uint32_t pressed=0) {
 		if (!pointer_window && kind==DesktopEventKind::pointer_motion) return;
@@ -141,12 +141,14 @@ struct WaylandPresentation::State {
 				};
 				value.axis=[](void *data,wl_pointer *,uint32_t,uint32_t axis,wl_fixed_t amount) {
 					auto &state=*static_cast<State *>(data);
-					// A vertical notch reports about ten units; scroll down is positive and becomes a negative wheel delta.
-					if (axis!=WL_POINTER_AXIS_VERTICAL_SCROLL || !state.pointer_window) return;
-					state.wheel_remainder-=int64_t(amount)*120/(10*256);
-					const auto delta=int32_t(state.wheel_remainder/120)*120;
-					state.wheel_remainder-=delta;
-					if (delta) state.pointer_event(DesktopEventKind::pointer_wheel,uint32_t(delta));
+					// A notch reports about ten units. Scrolling down is positive and becomes a negative wheel delta; scrolling right keeps its sign.
+					const bool horizontal=axis==WL_POINTER_AXIS_HORIZONTAL_SCROLL;
+					if ((!horizontal && axis!=WL_POINTER_AXIS_VERTICAL_SCROLL) || !state.pointer_window) return;
+					auto &remainder=horizontal ? state.horizontal_remainder : state.wheel_remainder;
+					remainder+=(horizontal ? 1 : -1)*int64_t(amount)*120/(10*256);
+					const auto delta=int32_t(remainder/120)*120;
+					remainder-=delta;
+					if (delta) state.pointer_event(DesktopEventKind::pointer_wheel,uint32_t(delta),horizontal ? 1 : 0);
 				};
 				return value;
 			}();

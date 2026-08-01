@@ -12,7 +12,7 @@
 
 namespace raven {
 
-// pointer_wheel: message carries the signed wheel delta in 1/120 notches, x and y the pointer position.
+// pointer_wheel: message carries the signed wheel delta in 1/120 notches (wparam 1 for the horizontal wheel), x and y the pointer position.
 // popup_done: the compositor dismissed a popup (for example by a click outside it).
 enum class DesktopEventKind { message, pointer_motion, pointer_button, keymap, modifiers, keyboard_focus, key, popup_done, resize, pointer_wheel };
 
