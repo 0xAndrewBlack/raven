@@ -15,6 +15,7 @@
 #include "unwind.h"
 #include "prefix.h"
 #include "profile_api.h"
+#include "runtime_profile.h"
 #include "registry.h"
 #include "system_exports.h"
 #include "desktop/api.h"
@@ -587,6 +588,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					});
 			}
 			bool dispatched;
+			const auto profile_start = RuntimeProfile::instance().enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 			const auto error_before = std::getenv("RAVEN_TRACE_FAIL") ? environment.last_error() : 0;
 			const auto failure_arguments = std::getenv("RAVEN_TRACE_FAIL") ? process.api_arguments(4) : std::vector<uint64_t>{};
 			try {
@@ -604,6 +606,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				result=process.resume(budget);
 				continue;
 			}
+			if (RuntimeProfile::instance().enabled())
+				RuntimeProfile::instance().api(found->second, std::chrono::steady_clock::now() - profile_start);
 			if (!dispatched && std::getenv("RAVEN_SURVEY_MISSING")) {
 				// Survey aid: report each missing API once and fail it, so one run lists every API a program reaches.
 				static std::set<std::string> reported;
@@ -650,7 +654,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			budget = remaining();
 			if (budget.count() <= 0)
 				return NativeResult{NativeStop::timeout, 0, result.instruction, 0};
-			result = process.resume(budget);
+			if (RuntimeProfile::instance().enabled()) {
+				const auto before = std::chrono::steady_clock::now();
+				result = process.resume(budget);
+				RuntimeProfile::instance().guest(std::chrono::steady_clock::now() - before);
+			} else {
+				result = process.resume(budget);
+			}
 		}
 		return result;
 	};

@@ -123,9 +123,19 @@ void NativeThreads::thread_main(GuestThread &thread)
 		pending = std::current_exception();
 	}
 	finish(thread, code);
-	// A finished coroutine never resumes; hand the processor on and stay parked.
-	for (;;)
-		schedule();
+	// A finished coroutine never resumes; hand the processor on and stay parked. What the scheduler throws here (the process deadline)
+	// is for the main thread, which receives it through the pending exception.
+	for (;;) {
+		try {
+			schedule();
+		} catch (...) {
+			pending = std::current_exception();
+			// The main thread rethrows it from its own switch; hand the processor to it directly.
+			auto &main = *threads.front();
+			if (main.state != GuestThread::State::done && &main != running)
+				switch_to(main);
+		}
+	}
 }
 
 void NativeThreads::finish(GuestThread &thread, uint32_t code)

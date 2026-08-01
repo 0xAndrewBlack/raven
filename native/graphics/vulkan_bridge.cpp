@@ -130,7 +130,7 @@ void VulkanBridge::destroy_device(uint64_t token)
 		if (item->second.device == token) {
 			if (item->second.host) {
 				vkUnmapMemory(found->second.handle, item->second.handle);
-				if (item->second.shadow) process.unmap_memory(item->second.shadow);
+				drop_shadow(item->second);
 			}
 			vkFreeMemory(found->second.handle, item->second.handle, nullptr);
 			item = memories.erase(item);

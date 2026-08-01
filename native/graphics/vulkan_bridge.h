@@ -57,6 +57,11 @@ private:
 		VkDeviceMemory handle; uint64_t device; VkDeviceSize size;
 		void *host = nullptr; uint64_t shadow = 0; VkDeviceSize offset = 0, mapped = 0;
 		std::vector<uint8_t> snapshot;
+		// The guest's shadow is a memfd the host maps as well, so comparing it with the driver's mapping never goes through the debugger
+		// interface: `view` is the host's window on the same bytes as the guest address `shadow`.
+		int shadow_file = -1;
+		uint8_t *view = nullptr;
+		size_t view_size = 0;
 	};
 	std::map<uint64_t, Memory> memories;
 	struct Buffer { VkBuffer handle; uint64_t device; };
@@ -105,6 +110,9 @@ private:
 	void destroy_device(uint64_t token);
 	// Copies between a guest shadow and the host mapping behind it, moving only the bytes that changed on one side.
 	void shadow_to_device(uint64_t device);
+	// Maps a shadow the guest and the host share, or releases one.
+	uint64_t make_shadow(Memory &memory, size_t size);
+	void drop_shadow(Memory &memory);
 	void shadow_from_device(uint64_t device);
 	bool dispatch_resource(std::string_view name);
 	template<typename T> T load(uint64_t address) const;

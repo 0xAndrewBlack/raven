@@ -1,10 +1,13 @@
 #include "vulkan_bridge.h"
+#include "nt/runtime_profile.h"
+#include <chrono>
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <stdexcept>
 #include <sys/mman.h>
+#include <unistd.h>
 
 namespace raven {
 
@@ -29,37 +32,112 @@ void VulkanBridge::check_writable(uint64_t address, size_t size) const
 	process.write_memory(address, process.read_memory(address, size));
 }
 
+uint64_t VulkanBridge::make_shadow(Memory &memory, size_t size)
+{
+	const auto rounded = (size + 4095) & ~size_t(4095);
+	const int file = memfd_create("raven-vulkan-shadow", MFD_CLOEXEC);
+	if (file < 0 || ftruncate(file, off_t(rounded)) != 0) {
+		if (file >= 0)
+			close(file);
+		throw std::runtime_error("cannot create a shared Vulkan memory shadow");
+	}
+	void *view = mmap(nullptr, rounded, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
+	if (view == MAP_FAILED) {
+		close(file);
+		throw std::runtime_error("cannot map a shared Vulkan memory shadow");
+	}
+	uint64_t guest = 0;
+	try {
+		guest = process.map_shared(file, rounded);
+	} catch (...) {
+		munmap(view, rounded);
+		close(file);
+		throw;
+	}
+	memory.shadow_file = file;
+	memory.view = static_cast<uint8_t *>(view);
+	memory.view_size = rounded;
+	return guest;
+}
+
+void VulkanBridge::drop_shadow(Memory &memory)
+{
+	if (memory.shadow)
+		process.unmap_memory(memory.shadow);
+	if (memory.view)
+		munmap(memory.view, memory.view_size);
+	if (memory.shadow_file >= 0)
+		close(memory.shadow_file);
+	memory.shadow = 0;
+	memory.view = nullptr;
+	memory.view_size = 0;
+	memory.shadow_file = -1;
+}
+
+namespace {
+
+// Calls visit(first, last) for each run of bytes where a and b differ, comparing a word at a time and looking at single bytes only inside
+// a word that differs.
+template<typename Visit> void each_difference(const uint8_t *a, const uint8_t *b, size_t size, Visit visit)
+{
+	size_t index = 0;
+	while (index < size) {
+		// Whole blocks that are equal (nearly all of a large mapping) are skipped with the library's vectorised comparison.
+		if (index % 4096 == 0 && index + 4096 <= size && std::memcmp(a + index, b + index, 4096) == 0) {
+			index += 4096;
+			continue;
+		}
+		if (index + 8 <= size) {
+			uint64_t left, right;
+			std::memcpy(&left, a + index, 8);
+			std::memcpy(&right, b + index, 8);
+			if (left == right) {
+				index += 8;
+				continue;
+			}
+		}
+		const size_t limit = std::min(size, index + 8);
+		for (; index < limit; ++index)
+			if (a[index] != b[index])
+				visit(index);
+	}
+}
+
+}
+
 void VulkanBridge::shadow_to_device(uint64_t device)
 {
+	const auto started = std::chrono::steady_clock::now();
+	struct Timed {
+		std::chrono::steady_clock::time_point started;
+		~Timed() { if (RuntimeProfile::instance().enabled()) RuntimeProfile::instance().api("(shadow to device)", std::chrono::steady_clock::now() - started); }
+	} timed{started};
 	for (auto &[token, memory] : memories) {
-		if (memory.device != device || !memory.host || !memory.shadow)
+		if (memory.device != device || !memory.host || !memory.view)
 			continue;
-		auto current = process.read_memory(memory.shadow, size_t(memory.mapped));
 		auto *host = static_cast<uint8_t *>(memory.host);
-		for (size_t index = 0; index < current.size(); ++index)
-			if (current[index] != memory.snapshot[index]) {
-				host[index] = current[index];
-				memory.snapshot[index] = current[index];
-			}
+		each_difference(memory.view, memory.snapshot.data(), size_t(memory.mapped), [&](size_t index) {
+			host[index] = memory.view[index];
+			memory.snapshot[index] = memory.view[index];
+		});
 	}
 }
 
 void VulkanBridge::shadow_from_device(uint64_t device)
 {
+	const auto started = std::chrono::steady_clock::now();
+	struct Timed {
+		std::chrono::steady_clock::time_point started;
+		~Timed() { if (RuntimeProfile::instance().enabled()) RuntimeProfile::instance().api("(shadow from device)", std::chrono::steady_clock::now() - started); }
+	} timed{started};
 	for (auto &[token, memory] : memories) {
-		if (memory.device != device || !memory.host || !memory.shadow)
+		if (memory.device != device || !memory.host || !memory.view)
 			continue;
 		const auto *host = static_cast<const uint8_t *>(memory.host);
-		std::vector<uint8_t> current = process.read_memory(memory.shadow, size_t(memory.mapped));
-		bool changed = false;
-		for (size_t index = 0; index < current.size(); ++index)
-			if (host[index] != memory.snapshot[index]) {
-				current[index] = host[index];
-				memory.snapshot[index] = host[index];
-				changed = true;
-			}
-		if (changed)
-			process.write_memory(memory.shadow, current);
+		each_difference(host, memory.snapshot.data(), size_t(memory.mapped), [&](size_t index) {
+			memory.view[index] = host[index];
+			memory.snapshot[index] = host[index];
+		});
 	}
 }
 
@@ -125,8 +203,7 @@ if (name == "vkFreeMemory") {
 			auto &memory = memory_of(a[1], a[0]);
 			if (memory.host) {
 				vkUnmapMemory(device.handle, memory.handle);
-				if (memory.shadow)
-					process.unmap_memory(memory.shadow);
+				drop_shadow(memory);
 			}
 			vkFreeMemory(device.handle, memory.handle, nullptr);
 			memories.erase(a[1]);
@@ -143,10 +220,9 @@ if (name == "vkFreeMemory") {
 		const auto status = vkMapMemory(device.handle, memory.handle, offset, size, 0, &host);
 		result = static_cast<uint32_t>(status);
 		if (status == VK_SUCCESS) {
-			const auto rounded = (size_t(size) + 4095) & ~size_t(4095);
-			const auto shadow = process.map_memory(rounded, PROT_READ | PROT_WRITE);
 			memory.snapshot.assign(static_cast<const uint8_t *>(host), static_cast<const uint8_t *>(host) + size);
-			process.write_memory(shadow, memory.snapshot);
+			const auto shadow = make_shadow(memory, size_t(size));
+			std::memcpy(memory.view, memory.snapshot.data(), memory.snapshot.size());
 			memory.host = host;
 			memory.shadow = shadow;
 			memory.offset = offset;
@@ -160,9 +236,8 @@ if (name == "vkFreeMemory") {
 			throw std::runtime_error("Vulkan memory is not mapped");
 		shadow_to_device(a[0]);
 		vkUnmapMemory(device.handle, memory.handle);
-		process.unmap_memory(memory.shadow);
+		drop_shadow(memory);
 		memory.host = nullptr;
-		memory.shadow = 0;
 		memory.snapshot.clear();
 	} else if (name == "vkFlushMappedMemoryRanges" || name == "vkInvalidateMappedMemoryRanges") {
 		device_of(a[0]);
