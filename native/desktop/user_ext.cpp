@@ -460,13 +460,15 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 	registry.add("ChangeClipboardChain", 2, [](ApiCall &call) { call.ret(1); });
 
 	// ---- keyboard state and layout ----
-	registry.add("GetKeyState", 1, [this](ApiCall &call) {
-		const auto vk = call.u32(0) & 0xff;
+	// The left and right modifier keys share the state of their generic key.
+	const auto generic_key = [](uint32_t vk) { return vk >= 0xa0 && vk <= 0xa5 ? 0x10 + (vk - 0xa0) / 2 : vk; };
+	registry.add("GetKeyState", 1, [this, generic_key](ApiCall &call) {
+		const auto vk = generic_key(call.u32(0) & 0xff);
 		call.ret(uint16_t(((vk_state[vk] & 0x80) ? 0xff80 : 0) | (vk_state[vk] & 1)));
 	});
-	registry.add("GetAsyncKeyState", 1, [this](ApiCall &call) {
-		const auto vk = call.u32(0) & 0xff;
-		call.ret((vk_state[vk] & 0x80) ? 0x8000 : 0);
+	registry.add("GetAsyncKeyState", 1, [this, generic_key](ApiCall &call) {
+		const auto vk = generic_key(call.u32(0) & 0xff);
+		call.ret((vk_async[vk] & 0x80) ? 0x8000 : 0);
 	});
 	registry.add("GetKeyboardState", 1, [this](ApiCall &call) {
 		call.write(call[0], std::span<const uint8_t>(vk_state.data(), vk_state.size()));

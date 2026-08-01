@@ -253,7 +253,21 @@ void NativeWindows::receive(const DesktopEvent &event)
 		keyboard_map.load(event.keymap); key_translation.reset(); return;
 	}
 	if (event.kind==DesktopEventKind::modifiers) {
-		keyboard_map.modifiers(event.message,uint32_t(event.wparam),uint32_t(event.lparam),uint32_t(event.lparam>>32)); return;
+		keyboard_map.modifiers(event.message,uint32_t(event.wparam),uint32_t(event.lparam),uint32_t(event.lparam>>32));
+		// A virtual keyboard reports modifiers without key events; the guest still sees them go down and up.
+		if (focus && objects.window(focus) && messages.size()<9990) {
+			static constexpr uint32_t scans[3]{0x2a,0x1d,0x38};
+			for (uint32_t index=0;index<3;++index) {
+				const uint32_t code=0x10+index;
+				const bool active=keyboard_map.modifier_active(code),down=(vk_async[code] & 0x80)!=0;
+				if (active==down) continue;
+				const bool system=code==0x12 || (vk_async[0x12] & 0x80);
+				vk_async[code]=active ? (vk_async[code] | 0x80) : (vk_async[code] & 0x7f);
+				messages.push_back({focus,code,1 | (uint64_t(scans[index])<<16) | (uint64_t(!active)<<30) | (uint64_t(!active)<<31) | (code==0x12 ? uint64_t(1)<<29 : 0),
+					active ? (system ? 0x104U : 0x100U) : (system ? 0x105U : 0x101U),message_time(),cursor_x,cursor_y,0});
+			}
+		}
+		return;
 	}
 	if (event.kind==DesktopEventKind::keyboard_focus) {
 		std::array<bool,256> initial{};
@@ -276,13 +290,18 @@ void NativeWindows::receive(const DesktopEvent &event)
 			throw std::runtime_error("invalid native keyboard event or queue exhaustion");
 		const auto key=keyboard_map.decode(event.message);
 		const bool pressed=event.wparam!=0,previous=key_down[event.message];
-		if (!pressed && !previous) throw std::runtime_error("keyboard release without a qualified key press");
-		const uint64_t flags=1 | (uint64_t(key.scan)<<16) | (uint64_t(key.extended)<<24) |
-			(uint64_t(previous)<<30) | (uint64_t(!pressed)<<31);
-		messages.push_back({focus,key.code,flags,pressed ? 0x100U : 0x101U,message_time(),cursor_x,cursor_y,pressed ? key.character : 0});
+		if (!pressed && !previous) return;
 		key_down[event.message]=pressed;
-		vk_state[key.code&255]=pressed ? (vk_state[key.code&255] | 0x80) : (vk_state[key.code&255] & 0x7f);
-		if (pressed && !previous && (key.code==0x14 || key.code==0x90 || key.code==0x91)) vk_state[key.code]^=1;
+		if (!key.code) return;
+		const bool modifier=key.code>=0x10 && key.code<=0x12;
+		// A modifier already reported through the keymap state is not announced twice.
+		if (modifier && ((vk_async[key.code] & 0x80)!=0)==pressed) return;
+		const bool system=key.code==0x12 || (vk_async[0x12] & 0x80);
+		const uint64_t flags=1 | (uint64_t(key.scan)<<16) | (uint64_t(key.extended)<<24) | (system && key.code!=0x12 ? uint64_t(1)<<29 : 0) |
+			(key.code==0x12 ? uint64_t(1)<<29 : 0) | (uint64_t(previous)<<30) | (uint64_t(!pressed)<<31);
+		messages.push_back({focus,key.code,flags,system ? (pressed ? 0x104U : 0x105U) : (pressed ? 0x100U : 0x101U),message_time(),cursor_x,cursor_y,pressed ? key.character : 0});
+		vk_async[key.code&255]=pressed ? (vk_async[key.code&255] | 0x80) : (vk_async[key.code&255] & 0x7f);
+		if (pressed && !previous && (key.code==0x14 || key.code==0x90 || key.code==0x91)) vk_async[key.code]^=1;
 		return;
 	}
 	if (event.x<INT16_MIN || event.x>INT16_MAX || event.y<INT16_MIN || event.y>INT16_MAX)
@@ -333,15 +352,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 
 NativeWindows::Modifiers NativeWindows::modifier_state() const
 {
-	Modifiers state{false,false,false};
-	for (size_t code=0;code<key_down.size();++code) {
-		if (!key_down[code]) continue;
-		const auto key=keyboard_map.decode(uint32_t(code)).code;
-		state.shift|=key==0x10 || key==0xa0 || key==0xa1;
-		state.control|=key==0x11 || key==0xa2 || key==0xa3;
-		state.alt|=key==0x12 || key==0xa4 || key==0xa5;
-	}
-	return state;
+	return Modifiers{(vk_state[0x10] & 0x80)!=0,(vk_state[0x11] & 0x80)!=0,(vk_state[0x12] & 0x80)!=0};
 }
 
 uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
@@ -371,7 +382,17 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 			put(bytes,layout.time,value.time,4);
 			put(bytes,layout.x,uint32_t(value.x),4); put(bytes,layout.y,uint32_t(value.y),4);
 			process.write_memory(args[0],bytes);
-			if (value.message==0x100 || value.message==0x101) key_translation=value;
+			if (value.message>=0x100 && value.message<=0x105 && value.message!=0x102 && value.message!=0x103) {
+				key_translation=value;
+				// Key state seen by GetKeyState follows the messages the thread has retrieved, not the physical keys.
+				if (flags & 1U) {
+					const auto code=uint32_t(value.wparam & 255);
+					const bool down=value.message==0x100 || value.message==0x104;
+					const bool repeat=(value.lparam>>30) & 1;
+					vk_state[code]=down ? (vk_state[code] | 0x80) : (vk_state[code] & 0x7f);
+					if (down && !repeat && (code==0x14 || code==0x90 || code==0x91)) vk_state[code]^=1;
+				}
+			}
 			if (flags & 1U) { if (found!=messages.end()) messages.erase(found); else quit.reset(); }
 			if (value.message!=0x12) {
 				// Keyboard and mouse hooks may swallow the message; the get-message hook only observes it.
@@ -911,21 +932,21 @@ bool NativeWindows::dispatch(std::string_view name)
 			const auto bytes=process.read_memory(args[0],layout.size);
 			const auto message=uint32_t(read(bytes,layout.message,4));
 			if (name=="TranslateMessage") {
-				if (message==0x100 || message==0x101) {
+				if (message==0x100 || message==0x101 || message==0x104 || message==0x105) {
 					if (!key_translation || key_translation->window!=read(bytes,0,layout.pointer) || key_translation->message!=message ||
 						key_translation->wparam!=read(bytes,layout.wparam,layout.pointer) || key_translation->lparam!=read(bytes,layout.lparam,layout.pointer) ||
 						key_translation->time!=read(bytes,layout.time,4))
 						throw std::runtime_error("keyboard translation requires the current retrieved key message");
 					const auto key=*key_translation;
-					if (message==0x100 && key.character) {
+					if ((message==0x100 || message==0x104) && key.character) {
 						const auto units=key.character>0xffff ? 2U : 1U;
 						if (messages.size()>10000-units) throw std::runtime_error("guest character queue limit reached");
 						if (units==2) {
 							const auto value=key.character-0x10000;
-							messages.push_back({key.window,0xd800+(value>>10),key.lparam,0x102,key.time,key.x,key.y});
-							try { messages.push_back({key.window,0xdc00+(value & 0x3ff),key.lparam,0x102,key.time,key.x,key.y}); }
+							messages.push_back({key.window,0xd800+(value>>10),key.lparam,message==0x104 ? 0x106U : 0x102U,key.time,key.x,key.y});
+							try { messages.push_back({key.window,0xdc00+(value & 0x3ff),key.lparam,message==0x104 ? 0x106U : 0x102U,key.time,key.x,key.y}); }
 							catch (...) { messages.pop_back(); throw; }
-						} else messages.push_back({key.window,key.character,key.lparam,0x102,key.time,key.x,key.y});
+						} else messages.push_back({key.window,key.character,key.lparam,message==0x104 ? 0x106U : 0x102U,key.time,key.x,key.y});
 					}
 					result=1;
 				} else if (message>=0x100 && message<=0x109) throw uint32_t(120);

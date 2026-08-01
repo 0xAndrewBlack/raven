@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "hash.h"
 #include "kernel_context.h"
 #include "text.h"
@@ -189,6 +190,12 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("CoUninitialize", 0, uninitialize);
 	registry.add("OleUninitialize", 0, uninitialize);
 	registry.add("CoCreateInstance", 5, [](ApiCall &call) {
+		if (std::getenv("RAVEN_TRACE_API")) {
+			const auto bytes = call.read(call[0], 16);
+			std::fprintf(stderr, "com class");
+			for (const auto byte : bytes) std::fprintf(stderr, " %02x", byte);
+			std::fprintf(stderr, "\n");
+		}
 		if (call[4]) call.store<uint64_t>(call[4], 0);
 		call.ret(class_not_registered);
 	});

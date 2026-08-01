@@ -38,6 +38,7 @@ BOOLEAN gfServerProcess;
 Imm32ApiTable gImmApiEntries;
 
 static const WCHAR function_property[] = {'R','a','v','e','n','F','n','i','d',0};
+static const WCHAR dialog_property[] = {'R','a','v','e','n','D','l','g',0};
 
 /* Control and dialog code reads these fields through a window pointer; the values are sampled per call. */
 PWND FASTCALL ValidateHwnd(HWND window)
@@ -55,6 +56,7 @@ PWND FASTCALL ValidateHwnd(HWND window)
 	record->style = (DWORD)GetWindowLongW(window, GWL_STYLE);
 	record->ExStyle = (DWORD)GetWindowLongW(window, GWL_EXSTYLE);
 	record->cbwndExtra = (int)GetClassLongW(window, GCL_CBWNDEXTRA);
+	record->DialogPointer = GetPropW(window, dialog_property);
 	/* Every window follows the Windows 4.0 behavior; dialog windows are recognized by their class procedure. */
 	record->state2 = WNDS2_WIN40COMPAT;
 	GetWindowRect(window, &record->rcWindow);
@@ -251,6 +253,13 @@ DWORD_PTR NTAPI NtUserCallOneParam(DWORD_PTR parameter, DWORD routine)
 
 DWORD NTAPI NtUserCallHwndParam(HWND window, DWORD_PTR parameter, DWORD routine)
 {
+	/* The dialog manager keeps its per-window state behind a pointer the window system would own. */
+	if (routine == HWNDPARAM_ROUTINE_SETDIALOGPOINTER) {
+		if (parameter)
+			SetPropW(window, dialog_property, (HANDLE)parameter);
+		else
+			RemovePropW(window, dialog_property);
+	}
 	return 0;
 }
 

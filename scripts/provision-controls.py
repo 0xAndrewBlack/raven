@@ -61,6 +61,10 @@ def main():
             raise RuntimeError(result.stderr or "controls build command failed: " + " ".join(map(str, command)))
         return result
 
+    # Raven's own corrections to upstream behavior are kept as reviewable patches and recorded in the provenance.
+    patches = sorted((repo / "native/upstream/reactos-controls/patches").glob("*.patch"))
+    for patch in patches:
+        run(["patch", "-p1", "--forward", "--silent", "-i", patch], source)
     generated = output / "generated"
     shutil.rmtree(generated, ignore_errors=True)
     (generated / "psdk").mkdir(parents=True)
@@ -169,6 +173,7 @@ def main():
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, commands=records,
                   component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ("comctl32.dll", "raven-user32.dll")},
                   user32_exports=exported,
+                  patches={patch.name: hashlib.sha256(patch.read_bytes()).hexdigest() for patch in patches},
                   source_hashes={path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
                                  for path in sorted(source.rglob("*")) if path.is_file() and not path.is_relative_to(overlay)})
     (output / "provenance.json").write_text(json.dumps(result, indent=2) + "\n")

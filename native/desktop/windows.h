@@ -151,7 +151,7 @@ private:
 	std::map<uint32_t,uint64_t> clipboard_data;
 	uint64_t clipboard_window=0,clipboard_owner=0;
 	uint32_t clipboard_sequence=1;
-	std::array<uint8_t,256> vk_state{};
+	std::array<uint8_t,256> vk_state{},vk_async{};
 	std::map<uint64_t,uint64_t> system_menus;
 	struct Tracking { uint64_t window=0; uint32_t flags=0; };
 	Tracking tracking;
