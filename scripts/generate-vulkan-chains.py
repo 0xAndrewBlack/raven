@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate the table of Vulkan feature and property structures that can travel in a pNext chain.
+"""Generate the table of Vulkan feature, property and format query structures that can travel in a pNext chain.
 
-Every structure named VkPhysicalDevice...Features or ...Properties (any vendor suffix) whose members hold no pointers except
+Every structure named VkPhysicalDevice...Features or ...Properties, or Vk...Format...Properties (any vendor suffix), whose members hold no pointers except
 pNext is a plain block of bytes: it can be copied between guest and host without translating handles. The table pairs each
 structure type value with the size of the host structure.
 
@@ -27,7 +27,10 @@ def main():
     entries = []
     for match in re.finditer(r"typedef struct (Vk\w+) \{(.*?)\} \1;", header, re.S):
         name, body = match.groups()
-        if not re.match(r"VkPhysicalDevice\w*(Features|Properties)\w*$", name) or "sType" not in body:
+        device_structure = re.match(r"VkPhysicalDevice\w*(Features|Properties)\w*$", name)
+        # Format and image format query results (VkFormatProperties3, external and Ycbcr image format answers) also travel in chains.
+        format_answer = re.match(r"Vk(?!PhysicalDevice|Video)\w*Format\w*Properties\w*$", name) and name not in ("VkFormatProperties2", "VkImageFormatProperties2")
+        if not (device_structure or format_answer) or "sType" not in body:
             continue
         members = [line.strip() for line in body.split(";") if line.strip()]
         if any("*" in member and "pNext" not in member for member in members):

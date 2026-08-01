@@ -1318,6 +1318,27 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_test(NAME native_process_return_status COMMAND ${Python3_EXECUTABLE}
                 ${PROJECT_SOURCE_DIR}/scripts/native-process-status.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR})
             set_tests_properties(native_process_return_status PROPERTIES TIMEOUT 30)
+            add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/wsprintf.exe
+                COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                    -Wl,--entry,raven_entry,--no-insert-timestamp
+                    -o ${CMAKE_CURRENT_BINARY_DIR}/wsprintf.exe ${LOADER_SOURCES}/wsprintf_client.c -luser32 -lkernel32
+                DEPENDS ${LOADER_SOURCES}/wsprintf_client.c VERBATIM)
+            add_custom_target(wsprintf_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wsprintf.exe)
+            add_test(NAME native_wsprintf COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/wsprintf.exe)
+            set_tests_properties(native_wsprintf PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/wsprintf-prefix)
+            # The DXVK 64-bit DLLs are provisioned outside the tree (scripts/provision-graphics.py); the test needs a Vulkan driver too.
+            set(RAVEN_DXVK_PE64_DIR "" CACHE PATH "Directory holding DXVK d3d11.dll, dxgi.dll and d3d10core.dll for 64-bit programs")
+            if(RAVEN_DXVK_PE64_DIR AND EXISTS ${RAVEN_DXVK_PE64_DIR}/d3d11.dll AND TARGET vulkan_bridge_test)
+                set(RAVEN_VULKAN_ICD "")
+                if(EXISTS /usr/share/vulkan/icd.d/lvp_icd.json)
+                    set(RAVEN_VULKAN_ICD VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json)
+                endif()
+                add_test(NAME native_d3d11_triangle COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11.py
+                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/triangle.exe ${RAVEN_DXVK_PE64_DIR}
+                    ${CMAKE_CURRENT_BINARY_DIR}/d3d11-triangle)
+                set_tests_properties(native_d3d11_triangle PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD}")
+            endif()
         endif()
         set(PARAMETER_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/parameter-fixtures)
         file(MAKE_DIRECTORY ${PARAMETER_FIXTURES})

@@ -1,5 +1,6 @@
 #include "windows.h"
 #include "nt/nls.h"
+#include "nt/text.h"
 
 #include <algorithm>
 #include <array>
@@ -197,7 +198,8 @@ void NativeWindows::post_due_timers()
 
 bool NativeWindows::system_dispatch(std::string_view name)
 {
-	const bool format = name == "wsprintfW";
+	const bool ansi = name == "wsprintfA";
+	const bool format = name == "wsprintfW" || ansi;
 	if (name != "GetDesktopWindow" && name != "PtInRect" && name != "SetRect" && name != "TranslateAcceleratorW" && name != "SetMenu" &&
 		name != "GetMenuItemRect" && name != "CheckMenuItem" && name != "SetCapture" &&
 		name != "ReleaseCapture" && name != "SetTimer" && name != "SetCoalescableTimer" && name != "KillTimer" && !format)
@@ -356,7 +358,19 @@ bool NativeWindows::system_dispatch(std::string_view name)
 		} else {
 			// cdecl variadic: count the consumed words from the format string before reading them off the stack.
 			const auto head = process.api_arguments(2);
-			const auto pattern = window_text(head[1]);
+			std::u16string pattern;
+			if (ansi) {
+				std::string narrow;
+				for (size_t index = 0; index < 4096; ++index) {
+					const auto byte = process.read_memory(head[1] + index, 1)[0];
+					if (!byte)
+						break;
+					narrow.push_back(char(byte));
+				}
+				pattern = from_ansi(narrow, 1252);
+			} else {
+				pattern = window_text(head[1]);
+			}
 			size_t words = 0;
 			for (size_t at = 0; at < pattern.size();) {
 				if (pattern[at++] != u'%')
@@ -402,10 +416,13 @@ bool NativeWindows::system_dispatch(std::string_view name)
 				const auto value = take();
 				std::u16string body;
 				if (item->type == 'c' || item->type == 'C') {
-					body.push_back(char16_t(uint16_t(value)));
+					if (ansi && item->type == 'c')
+						body = from_ansi(std::string(1, char(uint8_t(value))), 1252);
+					else
+						body.push_back(char16_t(uint16_t(value)));
 				} else if (item->type == 's' || item->type == 'S') {
 					// %s takes the string width of the function (UTF-16); %S, %hs and %ls swap it.
-					bool wide = item->type == 's';
+					bool wide = (item->type == 's') != ansi;
 					if (item->narrow_size) wide = false;
 					if (item->wide_size) wide = true;
 					if (!value) {
@@ -453,11 +470,19 @@ bool NativeWindows::system_dispatch(std::string_view name)
 			}
 			if (output.size() > 1023)
 				output.resize(1023);
-			std::vector<uint8_t> bytes((output.size() + 1) * 2);
-			for (size_t index = 0; index < output.size(); ++index)
-				write_le(bytes, index * 2, output[index], 2);
+			std::vector<uint8_t> bytes;
+			if (ansi) {
+				const auto narrow = to_ansi(output, 1252);
+				bytes.assign(narrow.begin(), narrow.end());
+				bytes.push_back(0);
+				result = narrow.size();
+			} else {
+				bytes.resize((output.size() + 1) * 2);
+				for (size_t index = 0; index < output.size(); ++index)
+					write_le(bytes, index * 2, output[index], 2);
+				result = output.size();
+			}
 			process.write_memory(head[0], bytes);
-			result = output.size();
 		}
 	} catch (uint32_t error) { environment.set_last_error(error); }
 	catch (const std::runtime_error &failure) {

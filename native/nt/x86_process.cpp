@@ -71,7 +71,7 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 		{"GetDlgItemTextW",4},{"GetMenuItemRect",4},{"KillTimer",2},{"LoadAcceleratorsW",2},{"LoadCursorW",2},
 		{"LoadIconW",2},{"MessageBoxW",4},{"MoveWindow",6},{"PtInRect",3},{"ReleaseCapture",0},{"SetCapture",1},
 		{"SetDlgItemInt",4},{"SetDlgItemTextW",3},{"SetMenu",2},{"SetRect",5},{"SetTimer",4},{"TranslateAcceleratorW",3},
-		{"WinHelpW",4},{"wsprintfW",0},{"GetDeviceCaps",2},{"SetDIBitsToDevice",12},{"SetLayout",2},{"SetPixel",4},
+		{"WinHelpW",4},{"wsprintfW",0},{"wsprintfA",0},{"GetDeviceCaps",2},{"SetDIBitsToDevice",12},{"SetLayout",2},{"SetPixel",4},
 		{"SetROP2",2},
 	};
 	return counts;
@@ -220,10 +220,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
 		}
 	};
-	static constexpr std::array<std::string_view, 24> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
+	static constexpr std::array<std::string_view, 25> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
 		"GetDlgItemInt", "GetDlgItemTextW", "GetMenuItemRect", "KillTimer", "LoadAcceleratorsW", "LoadCursorW", "LoadIconW",
 		"MessageBoxW", "MoveWindow", "PtInRect", "ReleaseCapture", "SetCapture", "SetDlgItemInt", "SetDlgItemTextW", "SetMenu",
-		"SetRect", "SetTimer", "TranslateAcceleratorW", "WinHelpW", "wsprintfW"};
+		"SetRect", "SetTimer", "TranslateAcceleratorW", "WinHelpW", "wsprintfW", "wsprintfA"};
 	static constexpr std::array<std::string_view, 5> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2"};
 	add_desktop("user32.dll", NativeDesktop::user_exports(), user_pending);
 	add_desktop("gdi32.dll", NativeDesktop::gdi_exports(), gdi_pending);
