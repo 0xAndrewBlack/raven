@@ -1,6 +1,8 @@
 /* Direct3D 12 workload with a window: draws the vertex-coloured triangle into the back buffers of a DXGI swap chain on a direct queue and
  * presents sixty frames. The last frame is also copied into a read-back buffer (C:\\window12_last.raw) before it is presented. C:\\window12.txt
- * holds OK once all frames are presented, or the first failing step. The program then keeps presenting the last picture for a capture. */
+ * holds OK once all frames are presented, or the first failing step. The program keeps presenting the last picture for a capture, then
+ * resizes its window and swap chain to 320 by 200, presents again with a different clear colour, writes the read-back of that frame to
+ * C:\\window12_resized.raw and C:\\window12_resized.txt, and keeps it on screen for a second capture. */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d12.h>
@@ -8,6 +10,8 @@
 #include "tri5_shaders.h"
 
 #define SIZE 256
+#define WIDE 320
+#define HIGH 200
 #define FRAMES 60
 #define BUFFERS 2
 
@@ -174,7 +178,7 @@ void __stdcall entry(void)
 	D3D12_VIEWPORT viewport = {0, 0, SIZE, SIZE, 0, 1};
 	D3D12_RECT scissor = {0, 0, SIZE, SIZE};
 	D3D12_VERTEX_BUFFER_VIEW view = {ID3D12Resource_GetGPUVirtualAddress(upload), sizeof vertices, sizeof(struct vertex)};
-	const int total = FRAMES + 150;
+	const int total = FRAMES + 40;
 	for (int frame_number = 0; frame_number < total; ++frame_number) {
 		/* The last counted frame clears to the colour the Direct3D 11 workload uses; earlier frames ramp towards it. */
 		const int counted = frame_number < FRAMES ? frame_number : FRAMES - 1;
@@ -227,6 +231,109 @@ void __stdcall entry(void)
 		pump();
 		if (frame_number >= FRAMES)
 			Sleep(100);
+	}
+	/* Resize: wait for the GPU, release the back buffers, resize the window and the buffers, and draw again at the new size. */
+	RECT bigger = {0, 0, WIDE, HIGH};
+	AdjustWindowRect(&bigger, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
+	SetWindowPos(window, NULL, 0, 0, bigger.right - bigger.left, bigger.bottom - bigger.top, SWP_NOMOVE | SWP_NOZORDER);
+	pump();
+	for (UINT index = 0; index < BUFFERS; ++index)
+		ID3D12Resource_Release(back[index]);
+	CHECK("resize", IDXGISwapChain3_ResizeBuffers(swap, 0, WIDE, HIGH, DXGI_FORMAT_UNKNOWN, 0));
+	for (UINT index = 0; index < BUFFERS; ++index) {
+		CHECK("buffer after resize", IDXGISwapChain3_GetBuffer(swap, index, &IID_ID3D12Resource, (void **)&back[index]));
+		ID3D12Device_CreateRenderTargetView(device, back[index], NULL, rtv[index]);
+	}
+	ID3D12Resource_Release(readback);
+	buffer.Width = (UINT64)WIDE * 4 * HIGH;
+	/* The row pitch of a copy has to be a multiple of 256 bytes. */
+	const UINT wide_pitch = (WIDE * 4 + 255) & ~255u;
+	buffer.Width = (UINT64)wide_pitch * HIGH;
+	CHECK("readback after resize", ID3D12Device_CreateCommittedResource(device, &readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+		NULL, &IID_ID3D12Resource, (void **)&readback));
+	viewport.Width = WIDE;
+	viewport.Height = HIGH;
+	scissor.right = WIDE;
+	scissor.bottom = HIGH;
+	for (int frame_number = 0; frame_number < 40; ++frame_number) {
+		const float color[4] = {0.1f, 0.3f, 0.1f, 1.0f};
+		const UINT index = IDXGISwapChain3_GetCurrentBackBufferIndex(swap);
+		CHECK("reset allocator", ID3D12CommandAllocator_Reset(allocator));
+		CHECK("reset list", ID3D12GraphicsCommandList_Reset(list, allocator, state));
+		barrier(list, back[index], D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, root);
+		ID3D12GraphicsCommandList_RSSetViewports(list, 1, &viewport);
+		ID3D12GraphicsCommandList_RSSetScissorRects(list, 1, &scissor);
+		ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv[index], FALSE, NULL);
+		ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv[index], color, 0, NULL);
+		ID3D12GraphicsCommandList_IASetPrimitiveTopology(list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		ID3D12GraphicsCommandList_IASetVertexBuffers(list, 0, 1, &view);
+		ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
+		if (frame_number == 39) {
+			barrier(list, back[index], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+			D3D12_TEXTURE_COPY_LOCATION destination = {readback, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+			destination.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			destination.PlacedFootprint.Footprint.Width = WIDE;
+			destination.PlacedFootprint.Footprint.Height = HIGH;
+			destination.PlacedFootprint.Footprint.Depth = 1;
+			destination.PlacedFootprint.Footprint.RowPitch = wide_pitch;
+			D3D12_TEXTURE_COPY_LOCATION source = {back[index], D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+			ID3D12GraphicsCommandList_CopyTextureRegion(list, &destination, 0, 0, 0, &source, NULL);
+			barrier(list, back[index], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+		} else {
+			barrier(list, back[index], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+		}
+		CHECK("close", ID3D12GraphicsCommandList_Close(list));
+		ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
+		ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
+		CHECK("present after resize", IDXGISwapChain3_Present(swap, 0, 0));
+		++fence_value;
+		CHECK("signal", ID3D12CommandQueue_Signal(queue, fence, fence_value));
+		CHECK("completion", ID3D12Fence_SetEventOnCompletion(fence, fence_value, event));
+		if (WaitForSingleObject(event, 20000) != WAIT_OBJECT_0)
+			fail("wait", 0);
+		if (frame_number == 39) {
+			void *mapped = NULL;
+			D3D12_RANGE range = {0, (SIZE_T)wide_pitch * HIGH};
+			CHECK("map after resize", ID3D12Resource_Map(readback, 0, &range, &mapped));
+			/* Only the WIDE pixels of each row, tightly packed. */
+			HANDLE f = CreateFileW(L"C:\\window12_resized.raw", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+			DWORD n;
+			for (int row = 0; row < HIGH; ++row)
+				WriteFile(f, (const BYTE *)mapped + (size_t)row * wide_pitch, WIDE * 4, &n, NULL);
+			CloseHandle(f);
+			D3D12_RANGE none = {0, 0};
+			ID3D12Resource_Unmap(readback, 0, &none);
+			write_file(L"C:\\window12_resized.txt", "OK", 2);
+		}
+		pump();
+	}
+	for (int hold = 0; hold < 200; ++hold) {
+		/* Keep presenting the same picture so that a capture finds it. */
+		const UINT index = IDXGISwapChain3_GetCurrentBackBufferIndex(swap);
+		const float color[4] = {0.1f, 0.3f, 0.1f, 1.0f};
+		CHECK("reset allocator", ID3D12CommandAllocator_Reset(allocator));
+		CHECK("reset list", ID3D12GraphicsCommandList_Reset(list, allocator, state));
+		barrier(list, back[index], D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, root);
+		ID3D12GraphicsCommandList_RSSetViewports(list, 1, &viewport);
+		ID3D12GraphicsCommandList_RSSetScissorRects(list, 1, &scissor);
+		ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv[index], FALSE, NULL);
+		ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv[index], color, 0, NULL);
+		ID3D12GraphicsCommandList_IASetPrimitiveTopology(list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		ID3D12GraphicsCommandList_IASetVertexBuffers(list, 0, 1, &view);
+		ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
+		barrier(list, back[index], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+		CHECK("close", ID3D12GraphicsCommandList_Close(list));
+		ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
+		ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
+		IDXGISwapChain3_Present(swap, 0, 0);
+		++fence_value;
+		ID3D12CommandQueue_Signal(queue, fence, fence_value);
+		ID3D12Fence_SetEventOnCompletion(fence, fence_value, event);
+		WaitForSingleObject(event, 20000);
+		pump();
+		Sleep(100);
 	}
 	ExitProcess(0);
 }
