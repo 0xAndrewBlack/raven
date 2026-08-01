@@ -5,6 +5,8 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <optional>
+#include <utility>
 #include <string>
 #include <string_view>
 
@@ -62,6 +64,8 @@ class ApiRegistry {
 public:
 	void add(std::string_view name, uint32_t arguments, ApiHandler handler);
 	bool has(std::string_view name) const { return entries.contains(std::string(name)); }
+	// The handler and word count registered under a name, for adapters that reuse it.
+	std::optional<std::pair<uint32_t,ApiHandler>> find(std::string_view name) const;
 	// Runs the handler for an API trap; false when no handler is registered under this name.
 	bool dispatch(NativeProcess &process, NativeEnvironment &environment, std::string_view name) const;
 

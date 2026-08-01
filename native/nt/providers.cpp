@@ -1,4 +1,5 @@
 #include "providers.h"
+#include "ansi_api.h"
 #include "module_api.h"
 #include "loader.h"
 #include "tls.h"
@@ -667,6 +668,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	desktop.register_image_api(desktop_api);
 	NativeRegistry hive(prefix.registry_file());
 	register_registry_api(api_registry, kernel, hive);
+	register_ansi_adapters(api_registry);
 	NativeProfile profile(process, environment, prefix);
 	register_profile_api(api_registry, profile);
 	std::vector<const PEModule *> attached;

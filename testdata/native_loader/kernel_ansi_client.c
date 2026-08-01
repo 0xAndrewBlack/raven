@@ -1,0 +1,51 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+// The ANSI entry points of the file and environment APIs agree with their wide twins.
+static int same(const char *left,const char *right)
+{
+	while(*left && *left==*right) {++left;++right;}
+	return *left==*right;
+}
+
+static unsigned length(const char *text)
+{
+	unsigned count=0;
+	while(text[count]) ++count;
+	return count;
+}
+
+int raven_entry(void)
+{
+	static const char data[]="ansi payload";
+	char directory[MAX_PATH],path[MAX_PATH],copy[MAX_PATH],full[MAX_PATH],*part=NULL,buffer[64];
+	WIN32_FIND_DATAA found;
+	HANDLE file,search;
+	DWORD written=0,read=0,count;
+	unsigned long long value;
+	count=GetCurrentDirectoryA(MAX_PATH,directory);
+	if (!count || count>=MAX_PATH || length(directory)!=count || directory[1]!=':') return 1;
+	if (!SetEnvironmentVariableA("RAVEN_ANSI_PROBE","probe value") || GetEnvironmentVariableA("RAVEN_ANSI_PROBE",buffer,sizeof buffer)!=11 || !same(buffer,"probe value")) return 2;
+	if (GetEnvironmentVariableA("RAVEN_ANSI_ABSENT",buffer,sizeof buffer) || GetLastError()!=ERROR_ENVVAR_NOT_FOUND) return 3;
+	if (!CreateDirectoryA("ansi-dir",NULL) || (GetFileAttributesA("ansi-dir")&FILE_ATTRIBUTE_DIRECTORY)==0) return 4;
+	file=CreateFileA("ansi-dir\\one.txt",GENERIC_READ|GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
+	if (file==INVALID_HANDLE_VALUE || !WriteFile(file,data,sizeof data-1,&written,NULL) || written!=sizeof data-1) return 5;
+	CloseHandle(file);
+	if (!CopyFileA("ansi-dir\\one.txt","ansi-dir\\two.txt",FALSE) || !MoveFileA("ansi-dir\\two.txt","ansi-dir\\three.txt")) return 6;
+	if (GetFileAttributesA("ansi-dir\\two.txt")!=INVALID_FILE_ATTRIBUTES || GetFileAttributesA("ansi-dir\\three.txt")==INVALID_FILE_ATTRIBUTES) return 7;
+	file=CreateFileA("ansi-dir\\three.txt",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+	if (file==INVALID_HANDLE_VALUE || !ReadFile(file,buffer,sizeof buffer,&read,NULL) || read!=sizeof data-1) return 8;
+	CloseHandle(file);
+	for (value=0;value<read;++value) if (buffer[value]!=data[value]) return 9;
+	count=GetFullPathNameA("ansi-dir\\one.txt",MAX_PATH,full,&part);
+	if (!count || count>=MAX_PATH || !part || !same(part,"one.txt") || full[1]!=':') return 10;
+	search=FindFirstFileA("ansi-dir\\t*.txt",&found);
+	if (search==INVALID_HANDLE_VALUE || !same(found.cFileName,"three.txt") || found.nFileSizeLow!=sizeof data-1 || FindNextFileA(search,&found)) return 11;
+	FindClose(search);
+	if (!DeleteFileA("ansi-dir\\one.txt") || !DeleteFileA("ansi-dir\\three.txt") || !RemoveDirectoryA("ansi-dir")) return 12;
+	if (GetFileAttributesA("ansi-dir")!=INVALID_FILE_ATTRIBUTES) return 13;
+	count=GetModuleFileNameA(NULL,path,MAX_PATH);
+	if (!count || count>=MAX_PATH || length(path)!=count || path[length(path)-1]!='e') return 14;
+	(void)copy;
+	return 0;
+}

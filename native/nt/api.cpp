@@ -120,6 +120,14 @@ void ApiRegistry::add(std::string_view name, uint32_t arguments, ApiHandler hand
 		throw std::runtime_error("native API registered twice: " + std::string(name));
 }
 
+std::optional<std::pair<uint32_t,ApiHandler>> ApiRegistry::find(std::string_view name) const
+{
+	const auto found = entries.find(std::string(name));
+	if (found == entries.end())
+		return std::nullopt;
+	return std::make_pair(found->second.arguments, found->second.handler);
+}
+
 bool ApiRegistry::dispatch(NativeProcess &process, NativeEnvironment &environment, std::string_view name) const
 {
 	const auto found = entries.find(std::string(name));
