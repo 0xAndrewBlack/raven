@@ -320,6 +320,16 @@ void NativeWindows::receive(const DesktopEvent &event)
 		keep_host_window=false;
 		return;
 	}
+	if (event.kind==DesktopEventKind::pointer_wheel) {
+		// The wheel goes to the focus window with the screen position of the pointer.
+		const auto *source=objects.window(event.window);
+		if (!source || !focus || !objects.window(focus) || messages.size()>=10000) return;
+		const auto x=int64_t(source->outer.left)+event.x,y=int64_t(source->outer.top)+event.y;
+		if (x<INT16_MIN || x>INT16_MAX || y<INT16_MIN || y>INT16_MAX) return;
+		const auto delta=uint64_t(uint16_t(int16_t(int32_t(event.message))));
+		messages.push_back({focus,(delta<<16)|mouse_buttons|keyboard_map.mouse_modifiers(),uint16_t(x)|(uint64_t(uint16_t(y))<<16),0x20a,message_time(),int32_t(x),int32_t(y)});
+		return;
+	}
 	if (event.x<INT16_MIN || event.x>INT16_MAX || event.y<INT16_MIN || event.y>INT16_MAX)
 		throw std::runtime_error("pointer coordinates exceed the guest message contract");
 	uint32_t message=0x200,buttons=mouse_buttons;
