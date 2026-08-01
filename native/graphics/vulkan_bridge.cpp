@@ -16,6 +16,7 @@ void VulkanBridge::destroy_generic_objects(uint64_t) {}
 std::span<const std::string_view> vulkan_hand_names() { return {}; }
 bool VulkanBridge::dispatch_hand(std::string_view) { return false; }
 void VulkanBridge::remember_template(uint64_t, const VkDescriptorUpdateTemplateCreateInfo *) {}
+bool VulkanBridge::swapchain_stale(uint64_t) const { return false; }
 #endif
 
 // The export table of the guest provider is binary searched, so the names stay in byte order.

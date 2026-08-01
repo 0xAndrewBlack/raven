@@ -444,7 +444,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		const auto surface = windows.host_surface(window);
 		if (!surface) return std::nullopt;
 		return std::pair<void *, void *>{surface->display, surface->surface};
-	}, [&windows](uint64_t window) { windows.release_host_surface(window); }});
+	}, [&windows](uint64_t window) { windows.release_host_surface(window); },
+		[&windows](uint64_t window) { return windows.client_size(window); }});
 #endif
 	const auto remaining = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()); };
 	size_t debug_bytes=0;

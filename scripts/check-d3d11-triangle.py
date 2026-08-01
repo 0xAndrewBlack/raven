@@ -5,18 +5,20 @@ The reference covers pixel centres with barycentric weights and interpolates the
 edge are skipped because edge coverage rules differ between implementations. Every other pixel must match within 2 of 255, and the
 clear colour must fill everything outside the triangle.
 
-usage: check-d3d11-triangle.py TRIANGLE_RAW
+usage: check-d3d11-triangle.py TRIANGLE_RAW [WIDTH HEIGHT RED GREEN BLUE]
+The defaults are the 256 by 256 frame cleared to (0.1, 0.1, 0.3); the clear colour is given as 0 to 255 values.
 """
 
 import sys
 
-SIZE = 256
-CLEAR = tuple(round(v * 255) for v in (0.1, 0.1, 0.3, 1.0))
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 256
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 256
+CLEAR = tuple(int(v) for v in sys.argv[4:7]) + (255,) if len(sys.argv) > 6 else tuple(round(v * 255) for v in (0.1, 0.1, 0.3, 1.0))
 VERTICES = [((-0.8, -0.8), (255, 0, 0)), ((0.0, 0.8), (0, 0, 255)), ((0.8, -0.8), (0, 255, 0))]
 
 
 def to_pixels(point):
-    return ((point[0] + 1) * 0.5 * SIZE, (1 - point[1]) * 0.5 * SIZE)
+    return ((point[0] + 1) * 0.5 * WIDTH, (1 - point[1]) * 0.5 * HEIGHT)
 
 
 def weights(px, py):
@@ -43,14 +45,14 @@ def edge_distance(px, py):
 
 def main():
     data = open(sys.argv[1], "rb").read()
-    if len(data) != SIZE * SIZE * 4:
-        raise SystemExit(f"expected {SIZE * SIZE * 4} bytes, got {len(data)}")
+    if len(data) != WIDTH * HEIGHT * 4:
+        raise SystemExit(f"expected {WIDTH * HEIGHT * 4} bytes, got {len(data)}")
     inside = outside = skipped = 0
     worst = 0
-    for y in range(SIZE):
-        for x in range(SIZE):
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
             w = weights(x + 0.5, y + 0.5)
-            got = tuple(data[(y * SIZE + x) * 4:(y * SIZE + x) * 4 + 4])
+            got = tuple(data[(y * WIDTH + x) * 4:(y * WIDTH + x) * 4 + 4])
             distance = edge_distance(x + 0.5, y + 0.5)
             if distance < -1.5:
                 expected = CLEAR
@@ -65,7 +67,7 @@ def main():
             worst = max(worst, error)
             if error > 2:
                 raise SystemExit(f"pixel {x},{y}: got {got}, expected {expected}")
-    centre = tuple(data[(SIZE // 2 * SIZE + SIZE // 2) * 4:(SIZE // 2 * SIZE + SIZE // 2) * 4 + 4])
+    centre = tuple(data[(HEIGHT // 2 * WIDTH + WIDTH // 2) * 4:(HEIGHT // 2 * WIDTH + WIDTH // 2) * 4 + 4])
     print(f"triangle matches the reference: {inside} interior pixels, {outside} clear pixels, {skipped} edge pixels skipped, worst error {worst}")
     print(f"corner pixel {tuple(data[0:4])}, centre pixel {centre}")
 

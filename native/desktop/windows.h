@@ -23,6 +23,8 @@ public:
 	// A host surface over the client area of a window for a graphics driver to present into, and its release; null when the host shows no such window.
 	std::optional<HostSurface> host_surface(uint64_t window);
 	void release_host_surface(uint64_t window);
+	// The client area of a window as its swap chains see it; empty for a window that does not exist.
+	std::optional<std::pair<uint32_t,uint32_t>> client_size(uint64_t window);
 	void set_deadline(std::chrono::steady_clock::time_point deadline);
 	// Lets other guest threads run while this one waits for messages; returns true when one ran.
 	void set_yield(std::function<bool()> yield) { yield_hook = std::move(yield); }
@@ -68,6 +70,8 @@ private:
 	bool activating=false;
 	int focusing=0;
 	bool keep_host_window=false;
+	// Roots whose host window carries a surface handed to a graphics driver: such a window must survive a resize.
+	std::set<uint64_t> hosting_surface;
 	KeyboardMap keyboard_map;
 	std::array<bool,256> key_down{};
 	std::optional<Message> key_translation;

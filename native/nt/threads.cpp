@@ -219,7 +219,7 @@ void NativeThreads::switch_to(GuestThread &next)
 void NativeThreads::schedule()
 {
 	for (;;) {
-		if (std::chrono::steady_clock::now() >= deadline)
+		if (!tearing_down && std::chrono::steady_clock::now() >= deadline)
 			throw NativeResult{NativeStop::timeout, 0, 0, 0};
 		// A pending exception from a finished thread is for the main thread alone.
 		if (pending && !running->main) {
@@ -307,6 +307,7 @@ void NativeThreads::unwind_all()
 {
 	if (!running || !running->main)
 		return;
+	tearing_down = true;
 	std::vector<std::shared_ptr<GuestThread>> remaining;
 	for (const auto &thread : threads)
 		if (!thread->main && thread->state != GuestThread::State::done) {

@@ -7,7 +7,9 @@ compositor output with grim and requires that:
 
 - the read-back last frame matches the reference rasterizer (check-d3d11-triangle.py);
 - the read-back first frame differs from the last one in the colour the program ramps (frames really change);
-- the captured window contains the read-back last frame, pixel for pixel, at one position (the swap chain content reached the screen).
+- the captured window contains the read-back last frame, pixel for pixel, at one position (the swap chain content reached the screen);
+- after the program resizes its window and swap chain to 320 by 200, a second capture shows the new, larger frame the GPU rendered
+  (read back with a different clear colour), again pixel for pixel, and the window outside it is not left holding the old picture.
 
 With the extra argument "gpu" the host's default Vulkan driver is used instead of llvmpipe and the compositor renders with GLES so that it
 offers buffer sharing; the test then also requires DXVK to report a driver other than llvmpipe.
@@ -51,9 +53,27 @@ def start_compositor(log):
     raise RuntimeError("isolated compositor did not start")
 
 
-def rgb(raw):
-    image = Image.frombytes("RGBA", (SIZE, SIZE), raw)
+def rgb(raw, width=SIZE, height=SIZE):
+    image = Image.frombytes("RGBA", (width, height), raw)
     return image.convert("RGB")
+
+
+def compare(capture, raw, width, height, label):
+    """Find the frame in the capture by its top-left pixel and require every pixel of it to match."""
+    screen = Image.open(capture).convert("RGB")
+    expected = rgb(raw, width, height)
+    clear = tuple(expected.getpixel((0, 0)))
+    origin = next(((x, y) for y in range(screen.height) for x in range(screen.width) if screen.getpixel((x, y)) == clear), None)
+    if origin is None:
+        raise SystemExit(f"{label}: the compositor output holds no pixel of the clear colour: the swap chain never reached the screen")
+    shown = screen.crop((origin[0], origin[1], origin[0] + width, origin[1] + height))
+    shown_bytes, expected_bytes = shown.tobytes(), expected.tobytes()
+    differing = sum(1 for index in range(0, len(expected_bytes), 3) if shown_bytes[index:index + 3] != expected_bytes[index:index + 3])
+    print(f"{label}: compositor capture at {origin}: {differing} of {width * height} pixels differ from the read-back frame")
+    if differing:
+        shown.save(capture.with_name(label + "-shown.png"))
+        raise SystemExit(f"{label}: the window on screen does not show the frame the GPU rendered")
+    return origin
 
 
 def main():
@@ -83,6 +103,15 @@ def main():
             time.sleep(1)
             capture = work / "capture.png"
             subprocess.run(["grim", str(capture)], env=environment(), check=True, timeout=20)
+            resized_marker = prefix / "drive_c" / "window_resized.txt"
+            deadline = time.time() + 90
+            while time.time() < deadline and process.poll() is None and not resized_marker.exists():
+                time.sleep(0.5)
+            if not resized_marker.exists() or resized_marker.read_text() != "OK":
+                raise SystemExit("the workload did not finish rendering after resizing")
+            time.sleep(1)
+            resized = work / "capture-resized.png"
+            subprocess.run(["grim", str(resized)], env=environment(), check=True, timeout=20)
         finally:
             process.terminate()
             try:
@@ -105,21 +134,14 @@ def main():
     if first[:4] == last[:4]:
         raise SystemExit("the first and last frames have the same clear colour: the frames did not change")
     print(f"first frame corner {tuple(first[:4])}, last frame corner {tuple(last[:4])}")
-    screen = Image.open(capture).convert("RGB")
-    expected = rgb(last)
-    clear = tuple(expected.getpixel((0, 0)))
-    # The top-left client pixel is the first pixel in scan order that has the clear colour.
-    origin = next(((x, y) for y in range(screen.height) for x in range(screen.width) if screen.getpixel((x, y)) == clear), None)
-    if origin is None:
-        raise SystemExit("the compositor output holds no pixel of the clear colour: the swap chain never reached the screen")
-    shown = screen.crop((origin[0], origin[1], origin[0] + SIZE, origin[1] + SIZE))
-    shown_bytes, expected_bytes = shown.tobytes(), expected.tobytes()
-    differing = sum(1 for index in range(0, len(expected_bytes), 3) if shown_bytes[index:index + 3] != expected_bytes[index:index + 3])
-    print(f"compositor capture at {origin}: {differing} of {SIZE * SIZE} pixels differ from the read-back frame")
-    if differing:
-        shown.save(work / "shown.png")
-        raise SystemExit("the window on screen does not show the frame the GPU rendered")
-    print("a Direct3D 11 frame rendered by DXVK and Raven's Vulkan bridge is on screen and matches the GPU read-back")
+    compare(capture, last, SIZE, SIZE, "first window")
+    check = subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("check-d3d11-triangle.py")), str(drive / "window_resized.raw"), "320", "200",
+                            "26", "77", "26"], capture_output=True, text=True, timeout=120)
+    sys.stdout.write(check.stdout)
+    if check.returncode:
+        raise SystemExit(check.stderr.strip() or "resized read-back frame does not match the reference")
+    compare(resized, (drive / "window_resized.raw").read_bytes(), 320, 200, "resized window")
+    print("a Direct3D 11 frame rendered by DXVK and Raven's Vulkan bridge is on screen, matches the GPU read-back, and keeps doing so after a resize")
 
 
 if __name__ == "__main__":

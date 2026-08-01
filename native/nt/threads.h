@@ -93,6 +93,8 @@ private:
 	std::function<void(std::chrono::milliseconds)> poll;
 	std::vector<std::shared_ptr<GuestThread>> threads;
 	GuestThread *running = nullptr;
+	// Set while the process ends: threads leave through their frames and the deadline no longer interrupts them.
+	bool tearing_down = false;
 	uint32_t next_id = 2;
 	// An exception from a non-main thread is carried to the main thread, which owns the process result.
 	std::exception_ptr pending;

@@ -1,7 +1,9 @@
 /* Independent Direct3D 11 workload with a window: renders animated frames into a DXGI swap chain and presents every one of them.
  * Frame number n clears to a colour that depends on n and draws the vertex-coloured triangle of tri.hlsl; the first and the last
- * back buffer are copied to C:\window_first.raw and C:\window_last.raw. The program then keeps the last frame on screen and
- * answering messages for about twenty seconds so that a compositor capture can be compared with the read-back pixels. */
+ * back buffer are copied to C:\window_first.raw and C:\window_last.raw. The program keeps the last frame on screen for a few seconds
+ * so that a compositor capture can be compared with the read-back pixels, then resizes the window and the swap chain to 320 by 200,
+ * renders and presents again, writes the new back buffer to C:\window_resized.raw and C:\window_resized.txt, and keeps that frame
+ * on screen for another capture. */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d11.h>
@@ -9,6 +11,8 @@
 #include "tri_shaders.h"
 
 #define SIZE 256
+#define WIDE 320
+#define HIGH 200
 #define FRAMES 60
 
 struct vertex { float x, y; float r, g, b, a; };
@@ -56,7 +60,7 @@ static void pump(void)
 	}
 }
 
-static void save(ID3D11DeviceContext *context, ID3D11Texture2D *staging, ID3D11Texture2D *back, const wchar_t *path)
+static void save(ID3D11DeviceContext *context, ID3D11Texture2D *staging, ID3D11Texture2D *back, const wchar_t *path, int width, int height)
 {
 	D3D11_MAPPED_SUBRESOURCE mapped;
 	HRESULT hr;
@@ -65,8 +69,8 @@ static void save(ID3D11DeviceContext *context, ID3D11Texture2D *staging, ID3D11T
 		fail("map", hr);
 	HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
 	DWORD n;
-	for (int row = 0; row < SIZE; ++row)
-		WriteFile(f, (const BYTE *)mapped.pData + (size_t)row * mapped.RowPitch, SIZE * 4, &n, NULL);
+	for (int row = 0; row < height; ++row)
+		WriteFile(f, (const BYTE *)mapped.pData + (size_t)row * mapped.RowPitch, (DWORD)width * 4, &n, NULL);
 	CloseHandle(f);
 	ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
 }
@@ -141,17 +145,68 @@ void __stdcall entry(void)
 		ID3D11DeviceContext_ClearRenderTargetView(context, view, clear);
 		ID3D11DeviceContext_Draw(context, 3, 0);
 		if (frame_number == 0)
-			save(context, staging, back, L"C:\\window_first.raw");
+			save(context, staging, back, L"C:\\window_first.raw", SIZE, SIZE);
 		if (frame_number == FRAMES - 1)
-			save(context, staging, back, L"C:\\window_last.raw");
+			save(context, staging, back, L"C:\\window_last.raw", SIZE, SIZE);
 		if (FAILED(hr = IDXGISwapChain_Present(swap, 0, 0)))
 			fail("present", hr);
 		pump();
 	}
 	write_text(L"C:\\window.txt", "OK");
 	/* Keep the last frame up for a capture; the back buffer is redrawn so that each present shows the same picture. */
-	for (int hold = 0; hold < 200; ++hold) {
+	for (int hold = 0; hold < 40; ++hold) {
 		const float clear[4] = {0.1f, 0.1f, 0.3f, 1.0f};
+		ID3D11DeviceContext_ClearRenderTargetView(context, view, clear);
+		ID3D11DeviceContext_Draw(context, 3, 0);
+		IDXGISwapChain_Present(swap, 0, 0);
+		pump();
+		Sleep(100);
+	}
+
+	/* Resize: the client area and the swap chain buffers become WIDE by HIGH. */
+	RECT bigger = {0, 0, WIDE, HIGH};
+	AdjustWindowRect(&bigger, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
+	SetWindowPos(window, NULL, 0, 0, bigger.right - bigger.left, bigger.bottom - bigger.top, SWP_NOMOVE | SWP_NOZORDER);
+	pump();
+	{
+		/* The client area the window reports after the resize is what the swap chain has to follow. */
+		RECT client;
+		char text[32];
+		GetClientRect(window, &client);
+		wsprintfA(text, "%dx%d", (int)(client.right - client.left), (int)(client.bottom - client.top));
+		write_text(L"C:\\window_client.txt", text);
+	}
+	ID3D11DeviceContext_OMSetRenderTargets(context, 0, NULL, NULL);
+	ID3D11RenderTargetView_Release(view);
+	ID3D11Texture2D_Release(back);
+	ID3D11Texture2D_Release(staging);
+	if (FAILED(hr = IDXGISwapChain_ResizeBuffers(swap, 0, WIDE, HIGH, DXGI_FORMAT_UNKNOWN, 0)))
+		fail("resize", hr);
+	if (FAILED(hr = IDXGISwapChain_GetBuffer(swap, 0, &IID_ID3D11Texture2D, (void **)&back)))
+		fail("buffer after resize", hr);
+	td.Width = WIDE;
+	td.Height = HIGH;
+	if (FAILED(hr = ID3D11Device_CreateTexture2D(device, &td, NULL, &staging)))
+		fail("staging after resize", hr);
+	if (FAILED(hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)back, NULL, &view)))
+		fail("view after resize", hr);
+	viewport.Width = WIDE;
+	viewport.Height = HIGH;
+	ID3D11DeviceContext_OMSetRenderTargets(context, 1, &view, NULL);
+	ID3D11DeviceContext_RSSetViewports(context, 1, &viewport);
+	for (int frame_number = 0; frame_number < 10; ++frame_number) {
+		const float clear[4] = {0.1f, 0.3f, 0.1f, 1.0f};
+		ID3D11DeviceContext_ClearRenderTargetView(context, view, clear);
+		ID3D11DeviceContext_Draw(context, 3, 0);
+		if (frame_number == 9)
+			save(context, staging, back, L"C:\\window_resized.raw", WIDE, HIGH);
+		if (FAILED(hr = IDXGISwapChain_Present(swap, 0, 0)))
+			fail("present after resize", hr);
+		pump();
+	}
+	write_text(L"C:\\window_resized.txt", "OK");
+	for (int hold = 0; hold < 200; ++hold) {
+		const float clear[4] = {0.1f, 0.3f, 0.1f, 1.0f};
 		ID3D11DeviceContext_ClearRenderTargetView(context, view, clear);
 		ID3D11DeviceContext_Draw(context, 3, 0);
 		IDXGISwapChain_Present(swap, 0, 0);

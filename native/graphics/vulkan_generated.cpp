@@ -68,6 +68,7 @@ std::span<const std::string_view> vulkan_hand_names()
 {
 	static constexpr std::array<std::string_view, 4> names{"vkCreateWin32SurfaceKHR", "vkGetPhysicalDeviceWin32PresentationSupportKHR",
 		"vkUpdateDescriptorSetWithTemplate", "vkUpdateDescriptorSetWithTemplateKHR"};
+	// The swapchain commands below wrap the generated ones; they are dispatched here first and export under their own names.
 	return names;
 }
 
@@ -115,6 +116,55 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		vkGetPhysicalDeviceQueueFamilyProperties(found->second.handle, &count, families.data());
 		// Presentation goes through the host window the surface is created over; a family can present when it can draw.
 		process.return_api(a[1] < count && (families[a[1]].queueFlags & VK_QUEUE_GRAPHICS_BIT) ? VK_TRUE : VK_FALSE);
+		return true;
+	}
+	// A Windows surface reports the client area of its window as its only extent and a swapchain of another size is out of date.
+	// The Wayland surface behind it has no extent of its own, so the window's size stands in for it.
+	if (name == "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" || name == "vkCreateSwapchainKHR" || name == "vkAcquireNextImageKHR" ||
+		name == "vkQueuePresentKHR") {
+		const auto arguments = process.api_arguments(name == "vkAcquireNextImageKHR" ? 6 : name == "vkCreateSwapchainKHR" ? 4 : 3);
+		std::array<uint64_t, 4> floating{};
+		try { floating = process.api_float_arguments(); } catch (const std::runtime_error &) {}
+		Marshal marshal(*this, process);
+		const auto window_size = [&](uint64_t surface) -> std::optional<std::pair<uint32_t, uint32_t>> {
+			const auto window = surface_windows.find(surface);
+			if (window == surface_windows.end() || !surface_source.size)
+				return std::nullopt;
+			return surface_source.size(window->second);
+		};
+		uint64_t result = 0;
+		if (name == "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") {
+			result = cmd_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(*this, marshal, arguments, floating);
+			if (static_cast<int32_t>(result) == VK_SUCCESS)
+				if (const auto size = window_size(arguments[1])) {
+					// VkSurfaceCapabilitiesKHR: minImageCount, maxImageCount, then currentExtent, minImageExtent and maxImageExtent.
+					for (const uint64_t offset : {8, 16, 24}) {
+						store<uint32_t>(arguments[2] + offset, size->first);
+						store<uint32_t>(arguments[2] + offset + 4, size->second);
+					}
+				}
+		} else if (name == "vkCreateSwapchainKHR") {
+			result = cmd_vkCreateSwapchainKHR(*this, marshal, arguments, floating);
+			if (static_cast<int32_t>(result) == VK_SUCCESS) {
+				// VkSwapchainCreateInfoKHR: surface at 24 and imageExtent at 44.
+				const auto token = load<uint64_t>(arguments[3]);
+				swapchains[token] = {load<uint64_t>(arguments[1] + 24), load<uint32_t>(arguments[1] + 44), load<uint32_t>(arguments[1] + 48)};
+			}
+		} else if (name == "vkAcquireNextImageKHR") {
+			result = swapchain_stale(arguments[1]) ? static_cast<uint32_t>(VK_ERROR_OUT_OF_DATE_KHR)
+				: cmd_vkAcquireNextImageKHR(*this, marshal, arguments, floating);
+		} else {
+			result = cmd_vkQueuePresentKHR(*this, marshal, arguments, floating);
+			if (static_cast<int32_t>(result) == VK_SUCCESS) {
+				// VkPresentInfoKHR: swapchainCount at 32 and pSwapchains at 40.
+				const auto count = load<uint32_t>(arguments[1] + 32);
+				const auto list = load<uint64_t>(arguments[1] + 40);
+				for (uint32_t index = 0; index < count; ++index)
+					if (swapchain_stale(load<uint64_t>(list + uint64_t(index) * 8)))
+						result = static_cast<uint32_t>(VK_SUBOPTIMAL_KHR);
+			}
+		}
+		process.return_api(result);
 		return true;
 	}
 	if (name == "vkUpdateDescriptorSetWithTemplate" || name == "vkUpdateDescriptorSetWithTemplateKHR") {
@@ -167,6 +217,18 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		return true;
 	}
 	return false;
+}
+
+bool VulkanBridge::swapchain_stale(uint64_t swapchain) const
+{
+	const auto found = swapchains.find(swapchain);
+	if (found == swapchains.end() || !surface_source.size)
+		return false;
+	const auto window = surface_windows.find(found->second.surface);
+	if (window == surface_windows.end())
+		return false;
+	const auto size = surface_source.size(window->second);
+	return size && (size->first != found->second.width || size->second != found->second.height);
 }
 
 void VulkanBridge::remember_template(uint64_t token, const VkDescriptorUpdateTemplateCreateInfo *info)

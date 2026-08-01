@@ -32,6 +32,8 @@ public:
 	struct SurfaceSource {
 		std::function<std::optional<std::pair<void *, void *>>(uint64_t window)> create;
 		std::function<void(uint64_t window)> release;
+		// The client area of the window: what a Windows surface reports as its extent.
+		std::function<std::optional<std::pair<uint32_t, uint32_t>>(uint64_t window)> size;
 	};
 	void set_surface_source(SurfaceSource value) { surface_source = std::move(value); }
 
@@ -74,6 +76,10 @@ private:
 	SurfaceSource surface_source;
 	// Surface tokens and the guest windows behind them.
 	std::map<uint64_t, uint64_t> surface_windows;
+	// A swapchain's surface token and the extent it was created with; a surface whose window changed size makes it out of date.
+	struct Swapchain { uint64_t surface; uint32_t width, height; };
+	std::map<uint64_t, Swapchain> swapchains;
+	bool swapchain_stale(uint64_t swapchain) const;
 	// What each descriptor update template writes, for updates that pass handles in raw data.
 	std::map<uint64_t, std::vector<VkDescriptorUpdateTemplateEntry>> templates;
 public:

@@ -153,9 +153,13 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 		window->outer.bottom - window->outer.top != outer.bottom - outer.top;
 	const int32_t client_width = window->width, client_height = window->height;
 	if (resized && window->bitmap) {
-		// The surface is outer-sized, so a new size needs a new surface and a new host window.
+		// The surface is outer-sized, so a new size needs a new surface. A window that carries a graphics driver's surface keeps its host
+		// window, because that surface stays attached to it; any other gets a new host window, which the compositor places afresh.
 		const bool visible = window->visible;
-		release_surface(handle);
+		const bool kept = keep_host_window;
+		keep_host_window = keep_host_window || hosting_surface.contains(handle);
+		try { release_surface(handle); } catch (...) { keep_host_window = kept; throw; }
+		keep_host_window = kept;
 		window = objects.window(handle);
 		window->bitmap = 0;
 		window->dc = 0;

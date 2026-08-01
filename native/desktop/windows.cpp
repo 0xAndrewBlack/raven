@@ -134,13 +134,23 @@ std::optional<HostSurface> NativeWindows::host_surface(uint64_t handle)
 		x+=window->x; y+=window->y; node=window->parent;
 	}
 	const auto *window=objects.window(handle);
-	return presentation.host_surface(root,x,y,uint32_t(std::max(window->width,1)),uint32_t(std::max(window->height,1)));
+	const auto surface=presentation.host_surface(root,x,y,uint32_t(std::max(window->width,1)),uint32_t(std::max(window->height,1)));
+	if (surface) hosting_surface.insert(root);
+	return surface;
+}
+
+std::optional<std::pair<uint32_t,uint32_t>> NativeWindows::client_size(uint64_t handle)
+{
+	const auto *window=objects.window(handle);
+	if (!window) return std::nullopt;
+	return std::pair<uint32_t,uint32_t>{uint32_t(std::max(window->width,1)),uint32_t(std::max(window->height,1))};
 }
 
 void NativeWindows::release_host_surface(uint64_t handle)
 {
 	if (!presentation.release_host_surface) return;
 	const auto root=objects.window_root(handle);
+	hosting_surface.erase(root);
 	if (root) presentation.release_host_surface(root);
 }
 
