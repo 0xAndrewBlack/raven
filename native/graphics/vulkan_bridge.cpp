@@ -26,13 +26,29 @@ static constexpr std::array<std::string_view, 14> names{
 };
 // Entry points reached through a device rather than an instance.
 static constexpr std::array<std::string_view, 4> device_names{"vkDestroyDevice", "vkGetDeviceQueue", "vkDeviceWaitIdle", "vkGetDeviceProcAddr"};
+static bool is_device_function(std::string_view symbol)
+{
+	const auto resources = vulkan_resource_names();
+	return std::find(device_names.begin(), device_names.end(), symbol) != device_names.end() ||
+		std::find(resources.begin(), resources.end(), symbol) != resources.end();
+}
 
 static_assert(sizeof(VkInstanceCreateInfo) == 64 && sizeof(VkApplicationInfo) == 48);
 static_assert(sizeof(VkDeviceCreateInfo) == 72 && sizeof(VkDeviceQueueCreateInfo) == 40 && sizeof(VkQueueFamilyProperties) == 24);
 static_assert(sizeof(VkPhysicalDeviceMemoryProperties) == 520 && sizeof(VkPhysicalDeviceFeatures) == 220);
 static_assert(sizeof(VkPhysicalDeviceProperties) == 824 && offsetof(VkPhysicalDeviceProperties, limits) == 296);
 
-std::span<const std::string_view> VulkanBridge::exports() { return names; }
+std::span<const std::string_view> VulkanBridge::exports()
+{
+	static const auto merged = [] {
+		std::vector<std::string_view> all(names.begin(), names.end());
+		for (const auto name : vulkan_resource_names())
+			all.push_back(name);
+		std::sort(all.begin(), all.end());
+		return all;
+	}();
+	return merged;
+}
 
 VulkanBridge::~VulkanBridge()
 {
@@ -48,6 +64,25 @@ void VulkanBridge::destroy_device(uint64_t token)
 	if (found == devices.end())
 		return;
 	std::erase_if(queues, [&](const auto &item) { return item.second.device == token; });
+	// Resources a guest left behind go before their device, in dependency order.
+	vkDeviceWaitIdle(found->second.handle);
+	std::erase_if(command_buffers, [&](const auto &item) { return item.second.device == token; });
+	for (auto item = pools.begin(); item != pools.end();)
+		if (item->second.device == token) { vkDestroyCommandPool(found->second.handle, item->second.handle, nullptr); item = pools.erase(item); } else ++item;
+	for (auto item = fences.begin(); item != fences.end();)
+		if (item->second.device == token) { vkDestroyFence(found->second.handle, item->second.handle, nullptr); item = fences.erase(item); } else ++item;
+	for (auto item = buffers.begin(); item != buffers.end();)
+		if (item->second.device == token) { vkDestroyBuffer(found->second.handle, item->second.handle, nullptr); item = buffers.erase(item); } else ++item;
+	for (auto item = memories.begin(); item != memories.end();) {
+		if (item->second.device == token) {
+			if (item->second.host) {
+				vkUnmapMemory(found->second.handle, item->second.handle);
+				if (item->second.shadow) process.unmap_memory(item->second.shadow);
+			}
+			vkFreeMemory(found->second.handle, item->second.handle, nullptr);
+			item = memories.erase(item);
+		} else ++item;
+	}
 	vkDestroyDevice(found->second.handle, nullptr);
 	devices.erase(found);
 }
@@ -68,6 +103,8 @@ std::string VulkanBridge::string(uint64_t address)
 
 bool VulkanBridge::dispatch(std::string_view name)
 {
+	if (dispatch_resource(name))
+		return true;
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;
 	const auto words = [&]() -> size_t {
@@ -103,13 +140,14 @@ bool VulkanBridge::dispatch(std::string_view name)
 			throw std::runtime_error("invalid Vulkan instance handle");
 		const auto symbol = string(arguments[1]);
 		const bool global = symbol == "vkCreateInstance" || symbol == "vkEnumerateInstanceVersion" || symbol == "vkGetInstanceProcAddr";
-		if ((arguments[0] || global) && std::find(names.begin(), names.end(), symbol) != names.end())
+		const auto exported = VulkanBridge::exports();
+		if ((arguments[0] || global) && std::find(exported.begin(), exported.end(), symbol) != exported.end())
 			result = modules.resolve({"vulkan-1.dll", symbol, 0, false, 0});
 	} else if (name == "vkGetDeviceProcAddr") {
 		if (!devices.contains(arguments[0]))
 			throw std::runtime_error("invalid Vulkan device handle");
 		const auto symbol = string(arguments[1]);
-		if (std::find(device_names.begin(), device_names.end(), symbol) != device_names.end())
+		if (is_device_function(symbol))
 			result = modules.resolve({"vulkan-1.dll", symbol, 0, false, 0});
 	} else if (name == "vkCreateInstance") {
 		auto info = read.template operator()<VkInstanceCreateInfo>(arguments[0]);
@@ -305,7 +343,10 @@ bool VulkanBridge::dispatch(std::string_view name)
 		const auto found = devices.find(arguments[0]);
 		if (found == devices.end())
 			throw std::runtime_error("invalid Vulkan device handle");
-		result = static_cast<uint32_t>(vkDeviceWaitIdle(found->second.handle));
+		const auto status = vkDeviceWaitIdle(found->second.handle);
+		result = static_cast<uint32_t>(status);
+		if (status == VK_SUCCESS)
+			shadow_from_device(arguments[0]);
 	} else if (name == "vkGetPhysicalDeviceProperties") {
 		const auto found = physical.find(arguments[0]);
 		if (found == physical.end())

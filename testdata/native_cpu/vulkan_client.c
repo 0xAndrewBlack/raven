@@ -12,6 +12,9 @@ __declspec(dllexport) VkQueueFamilyProperties families[16];
 __declspec(dllexport) VkPhysicalDeviceMemoryProperties memory_properties;
 __declspec(dllexport) VkPhysicalDeviceFeatures features;
 __declspec(dllexport) uint32_t device_workflow;
+__declspec(dllexport) uint32_t copy_workflow;
+__declspec(dllexport) uint8_t copied[256];
+__declspec(dllexport) uint32_t copy_fence_waits;
 
 unsigned int raven_entry(void)
 {
@@ -87,6 +90,102 @@ unsigned int raven_entry(void)
 			return 18;
 		if (vkDeviceWaitIdle(device) != VK_SUCCESS)
 			return 19;
+		{
+			VkBufferCreateInfo buffer_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, 0, 0, 256,
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, 0};
+			VkBuffer source = VK_NULL_HANDLE, target = VK_NULL_HANDLE;
+			VkDeviceMemory source_memory = VK_NULL_HANDLE, target_memory = VK_NULL_HANDLE;
+			VkMemoryRequirements requirements;
+			uint32_t type = 0xffffffffu, index;
+			uint8_t *source_data = 0, *target_data = 0;
+			VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, 0, 0, 0};
+			VkCommandPool pool = VK_NULL_HANDLE;
+			VkCommandBuffer command = VK_NULL_HANDLE;
+			VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, 0, 0};
+			VkFence fence = VK_NULL_HANDLE;
+			VkBufferCopy region = {0, 0, 256};
+			VkQueue queue = first;
+			if (vkCreateBuffer(device, &buffer_info, 0, &source) != VK_SUCCESS || vkCreateBuffer(device, &buffer_info, 0, &target) != VK_SUCCESS)
+				return 20;
+			vkGetBufferMemoryRequirements(device, source, &requirements);
+			if (requirements.size < 256)
+				return 21;
+			for (index = 0; index < memory_properties.memoryTypeCount; ++index)
+				if ((requirements.memoryTypeBits & (1u << index)) && (memory_properties.memoryTypes[index].propertyFlags &
+					(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+					type = index;
+					break;
+				}
+			if (type == 0xffffffffu)
+				return 22;
+			{
+				VkMemoryAllocateInfo allocation = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, requirements.size, type};
+				if (vkAllocateMemory(device, &allocation, 0, &source_memory) != VK_SUCCESS || vkAllocateMemory(device, &allocation, 0, &target_memory) != VK_SUCCESS)
+					return 23;
+			}
+			if (vkBindBufferMemory(device, source, source_memory, 0) != VK_SUCCESS || vkBindBufferMemory(device, target, target_memory, 0) != VK_SUCCESS)
+				return 24;
+			if (vkMapMemory(device, source_memory, 0, VK_WHOLE_SIZE, 0, (void **)&source_data) != VK_SUCCESS || !source_data ||
+				vkMapMemory(device, target_memory, 0, VK_WHOLE_SIZE, 0, (void **)&target_data) != VK_SUCCESS || !target_data)
+				return 25;
+			for (index = 0; index < 256; ++index) {
+				source_data[index] = (uint8_t)(index * 7 + 3);
+				target_data[index] = 0xee;
+			}
+			if (vkCreateCommandPool(device, &pool_info, 0, &pool) != VK_SUCCESS)
+				return 26;
+			{
+				VkCommandBufferAllocateInfo allocation = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, 0, pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+				VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, 0};
+				if (vkAllocateCommandBuffers(device, &allocation, &command) != VK_SUCCESS || !command)
+					return 27;
+				if (vkBeginCommandBuffer(command, &begin) != VK_SUCCESS)
+					return 28;
+			}
+			vkCmdCopyBuffer(command, source, target, 1, &region);
+			if (vkEndCommandBuffer(command) != VK_SUCCESS)
+				return 29;
+			if (vkCreateFence(device, &fence_info, 0, &fence) != VK_SUCCESS)
+				return 30;
+			{
+				VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, 0, 0, 0, 1, &command, 0, 0};
+				if (vkQueueSubmit(queue, 1, &submit, fence) != VK_SUCCESS)
+					return 31;
+			}
+			if (vkWaitForFences(device, 1, &fence, VK_TRUE, 10000000000ull) != VK_SUCCESS)
+				return 32;
+			++copy_fence_waits;
+			for (index = 0; index < 256; ++index)
+				if (target_data[index] != (uint8_t)(index * 7 + 3))
+					return 33;
+			for (index = 0; index < 256; ++index)
+				copied[index] = target_data[index];
+			if (vkResetFences(device, 1, &fence) != VK_SUCCESS)
+				return 34;
+			/* A second round trip through the same mappings: the guest changes the source, the device copies it again. */
+			source_data[0] = 0x5a;
+			{
+				VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, 0};
+				VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, 0, 0, 0, 1, &command, 0, 0};
+				if (vkResetCommandPool(device, pool, 0) != VK_SUCCESS || vkBeginCommandBuffer(command, &begin) != VK_SUCCESS)
+					return 35;
+				vkCmdCopyBuffer(command, source, target, 1, &region);
+				if (vkEndCommandBuffer(command) != VK_SUCCESS || vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS || vkQueueWaitIdle(queue) != VK_SUCCESS)
+					return 36;
+			}
+			if (target_data[0] != 0x5a || target_data[1] != (uint8_t)(1 * 7 + 3))
+				return 37;
+			vkUnmapMemory(device, source_memory);
+			vkUnmapMemory(device, target_memory);
+			vkFreeCommandBuffers(device, pool, 1, &command);
+			vkDestroyFence(device, fence, 0);
+			vkDestroyCommandPool(device, pool, 0);
+			vkDestroyBuffer(device, source, 0);
+			vkDestroyBuffer(device, target, 0);
+			vkFreeMemory(device, source_memory, 0);
+			vkFreeMemory(device, target_memory, 0);
+			copy_workflow = 1;
+		}
 		vkDestroyDevice(device, 0);
 		vkDestroyDevice(VK_NULL_HANDLE, 0);
 		device_workflow = 1;

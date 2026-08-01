@@ -79,6 +79,10 @@ int main(int argc, char **argv)
 			std::memcmp(memory_observed.memoryHeaps, expected_memory.memoryHeaps, sizeof(expected_memory.memoryHeaps)) == 0, "guest memory properties differ from host");
 		const auto features_observed = field.template operator()<VkPhysicalDeviceFeatures>("features");
 		check(std::memcmp(&features_observed, &expected_features, sizeof(expected_features)) == 0, "guest device features differ from host");
+		check(field.template operator()<uint32_t>("copy_workflow") == 1 && field.template operator()<uint32_t>("copy_fence_waits") == 1, "guest buffer copy through the device did not complete");
+		const auto copied = field.template operator()<std::array<uint8_t, 256>>("copied");
+		for (size_t index = 0; index < copied.size(); ++index)
+			check(copied[index] == uint8_t(index * 7 + 3), "device copied different bytes than the guest wrote");
 		check(field.template operator()<uint32_t>("device_workflow") == 1, "guest logical device workflow did not complete");
 		std::vector<raven::LoadedImage *> images;
 		for (const auto &[name, module] : modules.all())
@@ -115,6 +119,16 @@ int main(int argc, char **argv)
 		rejected("vkCreateDevice", forged_create);
 		const uint64_t forged_proc[] = {0x4321, memory};
 		rejected("vkGetDeviceProcAddr", forged_proc);
+		const uint64_t forged_buffer[] = {0x4321, 0x7777, memory, 0};
+		rejected("vkCreateBuffer", forged_buffer);
+		const uint64_t forged_submit[] = {0x4321, 1, memory, 0};
+		rejected("vkQueueSubmit", forged_submit);
+		const uint64_t forged_queue[] = {0x4321};
+		rejected("vkQueueWaitIdle", forged_queue);
+		const uint64_t forged_map[] = {0x4321, 0x7777, 0, 4096, 0, memory};
+		rejected("vkMapMemory", forged_map);
+		const uint64_t forged_command[] = {0x7777, memory};
+		rejected("vkBeginCommandBuffer", forged_command);
 		process.unmap_memory(memory);
 		std::cout << "Guest Vulkan instance, logical device, queues, memory and feature queries, stable physical handles, zero-capacity enumeration and checked negatives match host " << expected.deviceName << '\n';
 		return 0;
