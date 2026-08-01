@@ -402,6 +402,36 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 			found = registered_messages.emplace(u"clipboard:" + name, uint32_t(0xc000 + registered_messages.size())).first;
 		call.ret(found->second);
 	});
+	// The name of a registered format; the predefined formats have none.
+	const auto format_name = [this](uint32_t format) -> std::optional<std::u16string> {
+		for (const auto &[key, id] : registered_messages)
+			if (id == format && key.starts_with(u"clipboard:"))
+				return key.substr(10);
+		return std::nullopt;
+	};
+	registry.add("GetClipboardFormatNameW", 3, [format_name](ApiCall &call) {
+		const auto name = format_name(call.u32(0));
+		const int32_t capacity = call.i32(2);
+		if (!name || capacity <= 0) {
+			call.fail(87);
+			return;
+		}
+		const auto text = name->substr(0, size_t(capacity - 1));
+		call.put_wide(call[1], text, size_t(capacity));
+		call.ret(text.size());
+	});
+	registry.add("GetClipboardFormatNameA", 3, [format_name](ApiCall &call) {
+		const auto name = format_name(call.u32(0));
+		const int32_t capacity = call.i32(2);
+		if (!name || capacity <= 0) {
+			call.fail(87);
+			return;
+		}
+		auto text = to_ansi(*name, 1252);
+		text = text.substr(0, size_t(capacity - 1));
+		call.put_narrow(call[1], text, size_t(capacity));
+		call.ret(text.size());
+	});
 	// Text copied by the guest is offered to the host selection when the clipboard closes; text another host client
 	// copied replaces the contents the next time the guest looks, with the line ends converted on both sides.
 	const auto publish_host = [this](ApiCall &call) {
