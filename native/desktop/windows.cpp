@@ -668,7 +668,29 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 		process.write_memory(args[3],rect);
 		return 0;
 	}
+	if (message==0x106) {
+		// A system character reaches the menu through the top-level window, whichever child had the focus.
+		const auto root=objects.window_root(args[0]);
+		if (root) send(root,0x112,0xf100,args[2]);
+		return 0;
+	}
 	if (message==0x112) {
+		if ((uint32_t(args[2]) & 0xfff0U)==0xf100U && window->menu) {
+			// SC_KEYMENU: Alt plus a menu bar mnemonic opens that menu.
+			if (const auto *bar=objects.menu(window->menu)) {
+				const auto fold=[](uint64_t c) { return c>='A' && c<='Z' ? c+32 : c; };
+				const auto wanted=fold(args[3]);
+				for (size_t index=0;index<bar->items.size();++index) {
+					const auto &text=bar->items[index].text;
+					for (size_t at=0;at+1<text.size();++at)
+						if (text[at]==u'&' && text[at+1]!=u'&') {
+							if (fold(text[at+1])==wanted) { menu_open_bar(args[0],index); return 0; }
+							break;
+						}
+				}
+			}
+			return 0;
+		}
 		// SC_CLOSE becomes WM_CLOSE; the other system commands need window state transitions that are not modeled.
 		if ((uint32_t(args[2]) & 0xfff0U)==0xf060U) { send(args[0],0x10,0,0); return 0; }
 		return 0;
