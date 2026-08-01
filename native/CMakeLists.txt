@@ -1345,6 +1345,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_test(NAME native_clipboard_formats COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/clipboard.exe)
             set_tests_properties(native_clipboard_formats PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                 ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/clipboard-prefix)
+            add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/legacy_file.exe
+                COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                    -Wl,--entry,raven_entry,--no-insert-timestamp
+                    -o ${CMAKE_CURRENT_BINARY_DIR}/legacy_file.exe ${LOADER_SOURCES}/legacy_file_client.c -lkernel32
+                DEPENDS ${LOADER_SOURCES}/legacy_file_client.c VERBATIM)
+            add_custom_target(legacy_file_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/legacy_file.exe)
+            add_test(NAME native_legacy_file_api COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/legacy_file.exe)
+            set_tests_properties(native_legacy_file_api PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/legacy-file-prefix)
             # The DXVK 64-bit DLLs are provisioned outside the tree (scripts/provision-graphics.py); the test needs a Vulkan driver too.
             set(RAVEN_DXVK_PE64_DIR "" CACHE PATH "Directory holding DXVK d3d11.dll, dxgi.dll and d3d10core.dll for 64-bit programs")
             if(RAVEN_DXVK_PE64_DIR AND EXISTS ${RAVEN_DXVK_PE64_DIR}/d3d11.dll AND TARGET vulkan_bridge_test)

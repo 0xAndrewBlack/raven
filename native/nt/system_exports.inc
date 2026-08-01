@@ -758,11 +758,12 @@ static constexpr std::string_view kernel32_exports[]{
 	"WriteConsoleOutputCharacterW","WriteConsoleOutputW","WriteConsoleW","WriteFile","WriteFileEx","WriteFileGather",
 	"WritePrivateProfileSectionA","WritePrivateProfileSectionW","WritePrivateProfileStringA","WritePrivateProfileStringW","WritePrivateProfileStructA","WritePrivateProfileStructW",
 	"WriteProcessMemory","WriteProfileSectionA","WriteProfileSectionW","WriteProfileStringA","WriteProfileStringW","WriteTapemark",
-	"ZombifyActCtx","ZombifyActCtxWorker","lstrcat","lstrcatA","lstrcatW","lstrcmp",
-	"lstrcmpA","lstrcmpW","lstrcmpi","lstrcmpiA","lstrcmpiW","lstrcpy",
-	"lstrcpyA","lstrcpyW","lstrcpyn","lstrcpynA","lstrcpynW","lstrlen",
-	"lstrlenA","lstrlenW","uaw_lstrcmpW","uaw_lstrcmpiW","uaw_lstrlenW","uaw_wcschr",
-	"uaw_wcscpy","uaw_wcsicmp","uaw_wcslen","uaw_wcsrchr",
+	"ZombifyActCtx","ZombifyActCtxWorker","_hread","_hwrite","_lclose","_lcreat",
+	"_llseek","_lopen","_lread","_lwrite","lstrcat","lstrcatA",
+	"lstrcatW","lstrcmp","lstrcmpA","lstrcmpW","lstrcmpi","lstrcmpiA",
+	"lstrcmpiW","lstrcpy","lstrcpyA","lstrcpyW","lstrcpyn","lstrcpynA",
+	"lstrcpynW","lstrlen","lstrlenA","lstrlenW","uaw_lstrcmpW","uaw_lstrcmpiW",
+	"uaw_lstrlenW","uaw_wcschr","uaw_wcscpy","uaw_wcsicmp","uaw_wcslen","uaw_wcsrchr",
 };
 static constexpr std::string_view ole32_exports[]{
 	"BindMoniker","CLIPFORMAT_UserFree","CLIPFORMAT_UserFree64","CLIPFORMAT_UserFreeExt","CLIPFORMAT_UserMarshal","CLIPFORMAT_UserMarshal64",

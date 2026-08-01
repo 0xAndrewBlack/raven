@@ -14,7 +14,7 @@ import sys
 LIBRARIES = """advapi32 bcrypt comctl32 comdlg32 crypt32 dbghelp dwmapi gdi32 imm32 kernel32 ole32 oleaut32 psapi
 sensapi setupapi shell32 shlwapi user32 uxtheme version wininet winmm wintrust ws2_32""".split()
 # Real exports whose names begin with an underscore, which the generic filter drops.
-EXTRA = {"comctl32": ["_TrackMouseEvent"]}
+EXTRA = {"comctl32": ["_TrackMouseEvent"], "kernel32": ["_hread", "_hwrite", "_lclose", "_lcreat", "_llseek", "_lopen", "_lread", "_lwrite"]}
 DIRECTORY = Path("/usr/x86_64-w64-mingw32/lib")
 
 

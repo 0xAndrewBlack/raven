@@ -702,6 +702,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	NativeRegistry hive(prefix.registry_file());
 	register_registry_api(api_registry, kernel, hive);
 	register_ansi_adapters(api_registry);
+	register_legacy_file_api(api_registry);
 	NativeProfile profile(process, environment, prefix);
 	register_profile_api(api_registry, profile);
 	std::vector<const PEModule *> attached;

@@ -153,4 +153,48 @@ void register_ansi_adapters(ApiRegistry &registry)
 	}
 }
 
+void register_legacy_file_api(ApiRegistry &registry)
+{
+	constexpr uint64_t file_error = 0xffffffffULL;
+	const auto create = registry.find("CreateFileA"), read = registry.find("ReadFile"), write = registry.find("WriteFile"),
+		seek = registry.find("SetFilePointerEx");
+	if (!create || !read || !write || !seek)
+		return;
+	const auto run = [](const std::pair<uint32_t, ApiHandler> &entry, ApiCall &call, std::vector<uint64_t> words) {
+		words.resize(entry.first, 0);
+		ApiCall inner(call.process, call.environment, std::move(words));
+		entry.second(inner);
+		return inner;
+	};
+	const auto invalid_handle = [](uint64_t value) { return value == UINT64_MAX || uint32_t(value) == 0xffffffffU; };
+	registry.add("_lopen", 2, [=](ApiCall &call) {
+		const uint32_t mode = call.u32(1);
+		const uint32_t access = (mode & 3) == 0 ? 0x80000000U : (mode & 3) == 1 ? 0x40000000U : 0xc0000000U;
+		// Share modes: compatibility and deny none share everything, deny write leaves reading, deny read leaves writing, exclusive shares nothing.
+		const uint32_t share = (mode & 0x70) == 0x10 ? 0 : (mode & 0x70) == 0x20 ? 1 : (mode & 0x70) == 0x30 ? 2 : 3;
+		const auto done = run(*create, call, {call[0], access, share, 0, 3, 0x80, 0});
+		call.ret(invalid_handle(done.result) ? file_error : done.result);
+	});
+	registry.add("_lcreat", 2, [=](ApiCall &call) {
+		const auto done = run(*create, call, {call[0], 0xc0000000U, 0, 0, 2, uint64_t(call.u32(1) & 7) | 0x80, 0});
+		call.ret(invalid_handle(done.result) ? file_error : done.result);
+	});
+	const auto transfer = [=](const std::pair<uint32_t, ApiHandler> &entry, ApiCall &call) {
+		Scratch scratch(call.process);
+		const auto count = scratch.block(8);
+		const auto done = run(entry, call, {call[0], call[1], uint64_t(uint32_t(call.u32(2))), count, 0});
+		call.ret(done.result ? uint64_t(call.load<uint32_t>(count)) : file_error);
+	};
+	registry.add("_lread", 3, [=](ApiCall &call) { transfer(*read, call); });
+	registry.add("_hread", 3, [=](ApiCall &call) { transfer(*read, call); });
+	registry.add("_lwrite", 3, [=](ApiCall &call) { transfer(*write, call); });
+	registry.add("_hwrite", 3, [=](ApiCall &call) { transfer(*write, call); });
+	registry.add("_llseek", 3, [=](ApiCall &call) {
+		Scratch scratch(call.process);
+		const auto position = scratch.block(8);
+		const auto done = run(*seek, call, {call[0], uint64_t(int64_t(call.i32(1))), position, call.u32(2)});
+		call.ret(done.result ? uint64_t(call.load<uint32_t>(position)) : file_error);
+	});
+}
+
 }
