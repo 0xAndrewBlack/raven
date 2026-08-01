@@ -645,6 +645,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	object_api.set_cooperative(true);
 	windows.set_yield([&threads] { return threads.live() > 1 && threads.yield(); });
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, threads, paths, modules, entry, *launch, invoke};
+	windows.set_global_allocator([&allocator](uint64_t size) { return allocator.allocate(size,true); });
 	kernel.message_ready=[&windows] { return windows.input_ready(); };
 	kernel_ptr=&kernel;
 	NativeUnwinder unwinder(process, modules);

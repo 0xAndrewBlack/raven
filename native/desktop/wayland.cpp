@@ -4,6 +4,10 @@
 #include <wayland-client.h>
 #include <algorithm>
 #include <chrono>
+#include <fcntl.h>
+#include <optional>
+#include <set>
+#include <string>
 #include <cstring>
 #include <map>
 #include <poll.h>
@@ -56,6 +60,14 @@ struct WaylandPresentation::State {
 	uint32_t last_serial=0;
 	const char *input_error="unsupported native input event or input queue exhaustion";
 	std::vector<DesktopEvent> pending;
+	// Host selection: text offered by other clients is fetched on demand, text from the guest is served to whoever asks.
+	wl_data_device_manager *data_manager=nullptr;
+	wl_data_device *data_device=nullptr;
+	wl_data_source *data_source=nullptr;
+	std::string source_text;
+	std::map<wl_data_offer *,std::set<std::string>> offer_mimes;
+	wl_data_offer *selection_offer=nullptr;
+	uint64_t selection_counter=0;
 	std::map<uint64_t,std::unique_ptr<Surface>> surfaces;
 
 	~State() {
@@ -183,6 +195,85 @@ struct WaylandPresentation::State {
 		}
 	}
 
+	static constexpr const char *text_mimes[]={"text/plain;charset=utf-8","text/plain;charset=UTF-8","UTF8_STRING","text/plain"};
+
+	void make_data_device() {
+		if (data_device || !data_manager || !seat) return;
+		data_device=wl_data_device_manager_get_data_device(data_manager,seat);
+		static const wl_data_device_listener listener{
+			[](void *data,wl_data_device *,wl_data_offer *offer) {
+				auto &state=*static_cast<State *>(data);
+				state.offer_mimes[offer].clear();
+				static const wl_data_offer_listener offers{[](void *data,wl_data_offer *offer,const char *mime) {
+					static_cast<State *>(data)->offer_mimes[offer].insert(mime);
+				},nullptr,nullptr};
+				wl_data_offer_add_listener(offer,&offers,&state);
+			},
+			nullptr,nullptr,nullptr,nullptr,
+			[](void *data,wl_data_device *,wl_data_offer *offer) {
+				auto &state=*static_cast<State *>(data);
+				if (state.selection_offer && state.selection_offer!=offer) { state.offer_mimes.erase(state.selection_offer); wl_data_offer_destroy(state.selection_offer); }
+				state.selection_offer=offer; ++state.selection_counter;
+			}};
+		wl_data_device_add_listener(data_device,&listener,this);
+	}
+
+	void publish_text(std::string_view text) {
+		if (!data_device || !data_manager) return;
+		if (data_source) { wl_data_source_destroy(data_source); data_source=nullptr; }
+		source_text.assign(text);
+		data_source=wl_data_device_manager_create_data_source(data_manager);
+		static const wl_data_source_listener listener{
+			nullptr,
+			[](void *data,wl_data_source *,const char *,int32_t descriptor) {
+				auto &state=*static_cast<State *>(data);
+				size_t done=0;
+				while (done<state.source_text.size()) {
+					const auto wrote=write(descriptor,state.source_text.data()+done,state.source_text.size()-done);
+					if (wrote<=0) break;
+					done+=size_t(wrote);
+				}
+				close(descriptor);
+			},
+			[](void *data,wl_data_source *source) {
+				auto &state=*static_cast<State *>(data);
+				if (state.data_source==source) state.data_source=nullptr;
+				wl_data_source_destroy(source);
+			},nullptr,nullptr,nullptr};
+		wl_data_source_add_listener(data_source,&listener,this);
+		for (const auto *mime : text_mimes) wl_data_source_offer(data_source,mime);
+		wl_data_device_set_selection(data_device,data_source,last_serial);
+		wl_display_flush(display);
+	}
+
+	std::optional<std::pair<uint64_t,std::string>> fetch_text() {
+		if (!data_device || !selection_offer || data_source) return std::nullopt;
+		const auto known=offer_mimes.find(selection_offer);
+		if (known==offer_mimes.end()) return std::nullopt;
+		const char *mime=nullptr;
+		for (const auto *wanted : text_mimes) if (known->second.contains(wanted)) { mime=wanted; break; }
+		if (!mime) return std::nullopt;
+		int pipes[2];
+		if (pipe2(pipes,O_CLOEXEC)<0) return std::nullopt;
+		wl_data_offer_receive(selection_offer,mime,pipes[1]);
+		close(pipes[1]);
+		wl_display_flush(display);
+		std::string text;
+		const auto limit=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+		for (;;) {
+			pollfd entry{pipes[0],POLLIN,0};
+			const auto left=std::chrono::duration_cast<std::chrono::milliseconds>(limit-std::chrono::steady_clock::now()).count();
+			if (left<=0 || ::poll(&entry,1,int(left))<=0) break;
+			char buffer[4096];
+			const auto count=read(pipes[0],buffer,sizeof buffer);
+			if (count<=0) break;
+			text.append(buffer,size_t(count));
+			if (text.size()>(16U<<20)) break;
+		}
+		close(pipes[0]);
+		return std::make_pair(selection_counter,std::move(text));
+	}
+
 	static void global(void *data,wl_registry *registry,uint32_t name,const char *interface,uint32_t version) {
 		auto &state=*static_cast<State *>(data);
 		if (!std::strcmp(interface,"wl_compositor")) state.compositor=static_cast<wl_compositor *>(wl_registry_bind(registry,name,&wl_compositor_interface,std::min(version,4U)));
@@ -192,6 +283,11 @@ struct WaylandPresentation::State {
 			state.seat=static_cast<wl_seat *>(wl_registry_bind(registry,name,&wl_seat_interface,1));
 			static const wl_seat_listener listener{capabilities,nullptr};
 			wl_seat_add_listener(state.seat,&listener,&state);
+			state.make_data_device();
+		}
+		else if (!std::strcmp(interface,"wl_data_device_manager")) {
+			state.data_manager=static_cast<wl_data_device_manager *>(wl_registry_bind(registry,name,&wl_data_device_manager_interface,std::min(version,3U)));
+			state.make_data_device();
 		}
 		else if (!std::strcmp(interface,"xdg_wm_base")) {
 			state.shell=static_cast<xdg_wm_base *>(wl_registry_bind(registry,name,&xdg_wm_base_interface,1));
@@ -400,7 +496,8 @@ DesktopPresentation WaylandPresentation::callbacks()
 		if (action==0) xdg_toplevel_move(found->second->role,state->seat,state->last_serial);
 		else xdg_toplevel_resize(found->second->role,state->seat,state->last_serial,action);
 		wl_display_flush(state->display);
-	}};
+	},[this](std::string_view text) { state->publish_text(text); },
+	[this]() { return state->fetch_text(); }};
 }
 
 }

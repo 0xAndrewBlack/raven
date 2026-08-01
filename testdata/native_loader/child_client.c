@@ -55,7 +55,7 @@ int raven_entry(void)
 	if (!geometry(parent,100,200,80,60) || !geometry(child,105,206,20,15) || !geometry(grandchild,102,210,8,7)) return 3;
 	if (GetParent(parent) || GetParent(child)!=parent || GetParent(grandchild)!=child || !IsChild(parent,grandchild) ||
 		IsChild(child,child) || IsChild(grandchild,parent) || GetDlgItem(parent,101)!=child || GetDlgItem(parent,102) ||
-		GetDlgItem(child,102)!=grandchild || GetDlgCtrlID(grandchild)!=102 || GetWindowLongPtrW(child,GWLP_ID)!=101 ||
+		GetDlgItem(child,102)!=grandchild || GetDlgCtrlID(grandchild)!=102 || GetMenu(child)!=(HMENU)101 || GetMenu(grandchild)!=(HMENU)102 || GetMenu(parent) || GetWindowLongPtrW(child,GWLP_ID)!=101 ||
 		GetWindowLongPtrW(child,GWLP_HWNDPARENT)!=(LONG_PTR)parent || GetWindowLongW(grandchild,GWL_EXSTYLE)!=WS_EX_NOPARENTNOTIFY) return 4;
 	if (IsWindowVisible(parent) || IsWindowVisible(child) || IsWindowVisible(grandchild)) return 5;
 	ShowWindow(parent,SW_SHOW);

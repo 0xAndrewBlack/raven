@@ -402,20 +402,66 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 			found = registered_messages.emplace(u"clipboard:" + name, uint32_t(0xc000 + registered_messages.size())).first;
 		call.ret(found->second);
 	});
-	registry.add("OpenClipboard", 1, [this](ApiCall &call) {
+	// Text copied by the guest is offered to the host selection when the clipboard closes; text another host client
+	// copied replaces the contents the next time the guest looks, with the line ends converted on both sides.
+	const auto publish_host = [this](ApiCall &call) {
+		if (!presentation.clipboard_publish || clipboard_published == clipboard_sequence)
+			return;
+		clipboard_published = clipboard_sequence;
+		const auto found = clipboard_data.find(13);
+		if (found == clipboard_data.end() || !found->second)
+			return;
+		const auto text = to_utf8(call.wide(found->second));
+		std::string host;
+		for (size_t at = 0; at < text.size(); ++at)
+			if (text[at] != '\r' || at + 1 >= text.size() || text[at + 1] != '\n')
+				host.push_back(text[at]);
+		presentation.clipboard_publish(host);
+	};
+	const auto import_host = [this](ApiCall &call) {
+		if (!presentation.clipboard_fetch || !global_allocator || clipboard_window)
+			return;
+		const auto fetched = presentation.clipboard_fetch();
+		if (!fetched || fetched->first == host_selection)
+			return;
+		host_selection = fetched->first;
+		std::u16string wide;
+		for (const auto character : from_utf8(fetched->second)) {
+			if (character == u'\n' && (wide.empty() || wide.back() != u'\r'))
+				wide.push_back(u'\r');
+			wide.push_back(character);
+		}
+		const auto unicode = global_allocator((wide.size() + 1) * 2), ansi = global_allocator(wide.size() + 1);
+		if (!unicode || !ansi)
+			return;
+		call.write(unicode, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(wide.c_str()), (wide.size() + 1) * 2));
+		std::string narrow;
+		for (const auto character : wide)
+			narrow.push_back(character < 0x100 ? char(character) : '?');
+		call.write(ansi, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(narrow.c_str()), narrow.size() + 1));
+		clipboard_data.clear();
+		clipboard_data[13] = unicode;
+		clipboard_data[1] = ansi;
+		clipboard_owner = 0;
+		++clipboard_sequence;
+		clipboard_published = clipboard_sequence;
+	};
+	registry.add("OpenClipboard", 1, [this, import_host](ApiCall &call) {
 		if (clipboard_window == UINT64_MAX) {
 			call.fail(1418);
 			return;
 		}
+		import_host(call);
 		clipboard_window = call[0] ? call[0] : UINT64_MAX - 1;
 		call.ret(1);
 	});
-	registry.add("CloseClipboard", 0, [this](ApiCall &call) {
+	registry.add("CloseClipboard", 0, [this, publish_host](ApiCall &call) {
 		if (!clipboard_window) {
 			call.fail(1418);
 			return;
 		}
 		clipboard_window = 0;
+		publish_host(call);
 		call.ret(1);
 	});
 	registry.add("EmptyClipboard", 0, [this](ApiCall &call) {
@@ -448,14 +494,15 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		const auto found = clipboard_data.find(call.u32(0));
 		call.ret(found == clipboard_data.end() ? 0 : found->second);
 	});
-	registry.add("IsClipboardFormatAvailable", 1, [this](ApiCall &call) { call.ret(clipboard_data.contains(call.u32(0))); });
-	registry.add("CountClipboardFormats", 0, [this](ApiCall &call) { call.ret(clipboard_data.size()); });
-	registry.add("EnumClipboardFormats", 1, [this](ApiCall &call) {
+	registry.add("IsClipboardFormatAvailable", 1, [this, import_host](ApiCall &call) { import_host(call); call.ret(clipboard_data.contains(call.u32(0))); });
+	registry.add("CountClipboardFormats", 0, [this, import_host](ApiCall &call) { import_host(call); call.ret(clipboard_data.size()); });
+	registry.add("EnumClipboardFormats", 1, [this, import_host](ApiCall &call) {
+		import_host(call);
 		const auto next = clipboard_data.upper_bound(call.u32(0));
 		call.ret(next == clipboard_data.end() ? 0 : next->first);
 	});
 	registry.add("GetClipboardOwner", 0, [this](ApiCall &call) { call.ret(clipboard_owner); });
-	registry.add("GetClipboardSequenceNumber", 0, [this](ApiCall &call) { call.ret(clipboard_sequence); });
+	registry.add("GetClipboardSequenceNumber", 0, [this, import_host](ApiCall &call) { import_host(call); call.ret(clipboard_sequence); });
 	registry.add("SetClipboardViewer", 1, [](ApiCall &call) { call.ret(0); });
 	registry.add("ChangeClipboardChain", 2, [](ApiCall &call) { call.ret(1); });
 

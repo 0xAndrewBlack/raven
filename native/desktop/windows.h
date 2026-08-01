@@ -24,6 +24,8 @@ public:
 	// Lets other guest threads run while this one waits for messages; returns true when one ran.
 	void set_yield(std::function<bool()> yield) { yield_hook = std::move(yield); }
 	// Resolves the default menu of a window class (module, resource identifier) to a menu handle.
+	// Allocates guest global memory for clipboard data that arrives from the host.
+	void set_global_allocator(std::function<uint64_t(uint64_t)> allocator) { global_allocator = std::move(allocator); }
 	void set_menu_loader(std::function<uint64_t(uint64_t,uint64_t)> loader) { menu_loader = std::move(loader); }
 	bool dispatch(std::string_view name);
 	// user32 entry points that follow the shared registry conventions; every handler runs on the calling guest thread.
@@ -153,6 +155,10 @@ private:
 	std::map<uint32_t,uint64_t> clipboard_data;
 	uint64_t clipboard_window=0,clipboard_owner=0;
 	uint32_t clipboard_sequence=1;
+	// Sequence already offered to the host selection and the host selection already imported.
+	uint32_t clipboard_published=0;
+	uint64_t host_selection=0;
+	std::function<uint64_t(uint64_t)> global_allocator;
 	std::array<uint8_t,256> vk_state{},vk_async{};
 	std::map<uint64_t,uint64_t> system_menus;
 	struct Tracking { uint64_t window=0; uint32_t flags=0; };

@@ -292,7 +292,8 @@ void NativeWindows::register_menu_api(ApiRegistry &registry)
 			call.fail(1400);
 			return;
 		}
-		call.ret(window->parent ? 0 : window->menu);
+		// A child window keeps its control identifier in the menu slot, which is what GetMenu reports for it.
+		call.ret(window->parent ? window->child_id : window->menu);
 	});
 	registry.add("SetMenuItemBitmaps", 5, [this, locate](ApiCall &call) {
 		const auto where = locate(call[0], call.u32(1), call.u32(2));
