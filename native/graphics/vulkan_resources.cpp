@@ -371,11 +371,22 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 			throw std::runtime_error("too many Vulkan submissions");
 		std::vector<VkSubmitInfo> submits(a[1]);
 		std::vector<std::vector<VkCommandBuffer>> lists(a[1]);
+		std::vector<std::vector<VkSemaphore>> waits(a[1]), signals(a[1]);
+		std::vector<std::vector<VkPipelineStageFlags>> stages(a[1]);
+		const auto semaphore_list = [&](uint64_t address, uint32_t count, std::vector<VkSemaphore> &out) {
+			if (count > 8 || (count && !address))
+				throw std::runtime_error("unsupported Vulkan semaphore count");
+			for (uint32_t item = 0; item < count; ++item) {
+				const auto found_semaphore = objects.find(load<uint64_t>(address + uint64_t(item) * 8));
+				if (found_semaphore == objects.end() || found_semaphore->second.kind != Kind::semaphore || found_semaphore->second.device != device_token)
+					throw std::runtime_error("invalid Vulkan semaphore handle");
+				out.push_back(reinterpret_cast<VkSemaphore>(found_semaphore->second.handle));
+			}
+		};
 		for (size_t index = 0; index < submits.size(); ++index) {
 			submits[index] = load<VkSubmitInfo>(a[2] + index * sizeof(VkSubmitInfo));
 			auto &info = submits[index];
-			if (info.sType != VK_STRUCTURE_TYPE_SUBMIT_INFO || info.pNext || info.waitSemaphoreCount || info.signalSemaphoreCount ||
-				info.commandBufferCount > 64)
+			if (info.sType != VK_STRUCTURE_TYPE_SUBMIT_INFO || info.pNext || info.commandBufferCount > 64)
 				throw std::runtime_error("unsupported Vulkan submit info");
 			for (uint32_t buffer = 0; buffer < info.commandBufferCount; ++buffer) {
 				const auto &command = command_of(load<uint64_t>(reinterpret_cast<uint64_t>(info.pCommandBuffers) + uint64_t(buffer) * 8));
@@ -383,9 +394,17 @@ bool VulkanBridge::dispatch_resource(std::string_view name)
 					throw std::runtime_error("Vulkan command buffer belongs to another device");
 				lists[index].push_back(command.handle);
 			}
-			info.pWaitSemaphores = nullptr;
-			info.pWaitDstStageMask = nullptr;
-			info.pSignalSemaphores = nullptr;
+			semaphore_list(reinterpret_cast<uint64_t>(info.pWaitSemaphores), info.waitSemaphoreCount, waits[index]);
+			semaphore_list(reinterpret_cast<uint64_t>(info.pSignalSemaphores), info.signalSemaphoreCount, signals[index]);
+			if (info.waitSemaphoreCount) {
+				if (!info.pWaitDstStageMask)
+					throw std::runtime_error("Vulkan wait semaphores need stage masks");
+				for (uint32_t item = 0; item < info.waitSemaphoreCount; ++item)
+					stages[index].push_back(load<uint32_t>(reinterpret_cast<uint64_t>(info.pWaitDstStageMask) + uint64_t(item) * 4));
+			}
+			info.pWaitSemaphores = waits[index].data();
+			info.pWaitDstStageMask = stages[index].data();
+			info.pSignalSemaphores = signals[index].data();
 			info.pCommandBuffers = lists[index].data();
 		}
 		VkFence fence = VK_NULL_HANDLE;

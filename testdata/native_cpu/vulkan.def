@@ -55,3 +55,16 @@ vkDestroyPipeline
 vkDestroyPipelineLayout
 vkDestroyShaderModule
 vkUpdateDescriptorSets
+vkBindImageMemory
+vkCmdCopyBufferToImage
+vkCmdCopyImageToBuffer
+vkCmdPipelineBarrier
+vkCreateImage
+vkCreateImageView
+vkCreateSemaphore
+vkDestroyImage
+vkDestroyImageView
+vkDestroySemaphore
+vkGetFenceStatus
+vkGetImageMemoryRequirements
+vkGetImageSubresourceLayout

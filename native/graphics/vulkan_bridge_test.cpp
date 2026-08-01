@@ -87,6 +87,10 @@ int main(int argc, char **argv)
 		const auto computed = field.template operator()<std::array<uint32_t, 64>>("computed");
 		for (uint32_t index = 0; index < computed.size(); ++index)
 			check(computed[index] == (index + 10) * 3 + index, "compute shader produced different values than the specification");
+		check(field.template operator()<uint32_t>("image_workflow") == 1, "guest image round trip did not complete");
+		const auto readback = field.template operator()<std::array<uint32_t, 64>>("image_readback");
+		for (uint32_t index = 0; index < readback.size(); ++index)
+			check(readback[index] == (0xff000000u | (index * 3u << 16) | (index * 2u << 8) | index), "image round trip returned different texels");
 		check(field.template operator()<uint32_t>("device_workflow") == 1, "guest logical device workflow did not complete");
 		std::vector<raven::LoadedImage *> images;
 		for (const auto &[name, module] : modules.all())
@@ -137,6 +141,12 @@ int main(int argc, char **argv)
 		rejected("vkCreateShaderModule", forged_shader);
 		const uint64_t forged_dispatch[] = {0x7777, 1, 1, 1};
 		rejected("vkCmdDispatch", forged_dispatch);
+		const uint64_t forged_image[] = {0x4321, memory, 0, memory + 512};
+		rejected("vkCreateImage", forged_image);
+		const uint64_t forged_barrier[] = {0x7777, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+		rejected("vkCmdPipelineBarrier", forged_barrier);
+		const uint64_t forged_semaphore[] = {0x4321, memory, 0, memory + 512};
+		rejected("vkCreateSemaphore", forged_semaphore);
 		const uint64_t forged_command[] = {0x7777, memory};
 		rejected("vkBeginCommandBuffer", forged_command);
 		process.unmap_memory(memory);

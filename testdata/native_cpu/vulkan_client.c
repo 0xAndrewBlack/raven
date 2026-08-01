@@ -18,6 +18,8 @@ __declspec(dllexport) uint8_t copied[256];
 __declspec(dllexport) uint32_t copy_fence_waits;
 __declspec(dllexport) uint32_t compute_workflow;
 __declspec(dllexport) uint32_t computed[64];
+__declspec(dllexport) uint32_t image_workflow;
+__declspec(dllexport) uint32_t image_readback[64];
 
 unsigned int raven_entry(void)
 {
@@ -299,6 +301,119 @@ unsigned int raven_entry(void)
 			vkFreeMemory(device, input_memory, 0);
 			vkFreeMemory(device, output_memory, 0);
 			compute_workflow = 1;
+		}
+		{
+			/* A 8x8 image on the device: upload from one buffer, barrier, read back into another, ordered by a semaphore. */
+			VkImageCreateInfo image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, 0, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {8, 8, 1}, 1, 1,
+				VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+				VK_SHARING_MODE_EXCLUSIVE, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED};
+			VkBufferCreateInfo buffer_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, 0, 0, 256,
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, 0};
+			VkImage image = VK_NULL_HANDLE;
+			VkImageView view = VK_NULL_HANDLE;
+			VkBuffer upload = VK_NULL_HANDLE, download = VK_NULL_HANDLE;
+			VkDeviceMemory image_memory = VK_NULL_HANDLE, upload_memory = VK_NULL_HANDLE, download_memory = VK_NULL_HANDLE;
+			VkMemoryRequirements requirements, buffer_requirements;
+			uint32_t type = 0xffffffffu, host_type = 0xffffffffu, index, *upload_data = 0, *download_data = 0;
+			VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, 0, 0, 0};
+			VkCommandPool pool = VK_NULL_HANDLE;
+			VkCommandBuffer commands[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkSemaphoreCreateInfo semaphore_info = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, 0, 0};
+			VkSemaphore semaphore = VK_NULL_HANDLE;
+			VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, 0, 0};
+			VkFence fence = VK_NULL_HANDLE;
+			VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			VkBufferImageCopy copy = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {8, 8, 1}};
+			VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			if (vkCreateImage(device, &image_info, 0, &image) != VK_SUCCESS || !image)
+				return 60;
+			vkGetImageMemoryRequirements(device, image, &requirements);
+			for (index = 0; index < 32 && type == 0xffffffffu; ++index)
+				if (requirements.memoryTypeBits & (1u << index))
+					type = index;
+			if (type == 0xffffffffu)
+				return 61;
+			if (vkCreateBuffer(device, &buffer_info, 0, &upload) != VK_SUCCESS || vkCreateBuffer(device, &buffer_info, 0, &download) != VK_SUCCESS)
+				return 62;
+			vkGetBufferMemoryRequirements(device, upload, &buffer_requirements);
+			for (index = 0; index < memory_properties.memoryTypeCount; ++index)
+				if ((buffer_requirements.memoryTypeBits & (1u << index)) && (memory_properties.memoryTypes[index].propertyFlags &
+					(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+					host_type = index;
+					break;
+				}
+			if (host_type == 0xffffffffu)
+				return 63;
+			{
+				VkMemoryAllocateInfo image_allocation = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, requirements.size, type};
+				VkMemoryAllocateInfo host_allocation = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, buffer_requirements.size, host_type};
+				if (vkAllocateMemory(device, &image_allocation, 0, &image_memory) != VK_SUCCESS || vkAllocateMemory(device, &host_allocation, 0, &upload_memory) != VK_SUCCESS ||
+					vkAllocateMemory(device, &host_allocation, 0, &download_memory) != VK_SUCCESS)
+					return 64;
+			}
+			if (vkBindImageMemory(device, image, image_memory, 0) != VK_SUCCESS || vkBindBufferMemory(device, upload, upload_memory, 0) != VK_SUCCESS ||
+				vkBindBufferMemory(device, download, download_memory, 0) != VK_SUCCESS)
+				return 65;
+			{
+				VkImageViewCreateInfo view_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, 0, 0, image, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM,
+					{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY}, range};
+				if (vkCreateImageView(device, &view_info, 0, &view) != VK_SUCCESS || !view)
+					return 66;
+			}
+			if (vkMapMemory(device, upload_memory, 0, VK_WHOLE_SIZE, 0, (void **)&upload_data) != VK_SUCCESS ||
+				vkMapMemory(device, download_memory, 0, VK_WHOLE_SIZE, 0, (void **)&download_data) != VK_SUCCESS || !upload_data || !download_data)
+				return 67;
+			for (index = 0; index < 64; ++index) {
+				upload_data[index] = 0xff000000u | (index * 3u << 16) | (index * 2u << 8) | index;
+				download_data[index] = 0;
+			}
+			if (vkCreateCommandPool(device, &pool_info, 0, &pool) != VK_SUCCESS || vkCreateSemaphore(device, &semaphore_info, 0, &semaphore) != VK_SUCCESS ||
+				vkCreateFence(device, &fence_info, 0, &fence) != VK_SUCCESS)
+				return 68;
+			{
+				VkCommandBufferAllocateInfo allocation = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, 0, pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 2};
+				VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, 0};
+				VkImageMemoryBarrier to_destination = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, 0, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, image, range};
+				VkImageMemoryBarrier to_source = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, image, range};
+				VkSubmitInfo first_submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, 0, 0, 0, 1, &commands[0], 1, &semaphore};
+				VkSubmitInfo second_submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, 1, &semaphore, &wait_stage, 1, &commands[1], 0, 0};
+				if (vkAllocateCommandBuffers(device, &allocation, commands) != VK_SUCCESS || !commands[0] || !commands[1] || commands[0] == commands[1])
+					return 69;
+				vkBeginCommandBuffer(commands[0], &begin);
+				vkCmdPipelineBarrier(commands[0], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 0, 0, 1, &to_destination);
+				vkCmdCopyBufferToImage(commands[0], upload, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+				vkCmdPipelineBarrier(commands[0], VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 0, 0, 1, &to_source);
+				if (vkEndCommandBuffer(commands[0]) != VK_SUCCESS)
+					return 70;
+				vkBeginCommandBuffer(commands[1], &begin);
+				vkCmdCopyImageToBuffer(commands[1], image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, download, 1, &copy);
+				if (vkEndCommandBuffer(commands[1]) != VK_SUCCESS)
+					return 71;
+				if (vkQueueSubmit(first, 1, &first_submit, VK_NULL_HANDLE) != VK_SUCCESS || vkQueueSubmit(first, 1, &second_submit, fence) != VK_SUCCESS)
+					return 72;
+			}
+			if (vkWaitForFences(device, 1, &fence, VK_TRUE, 10000000000ull) != VK_SUCCESS || vkGetFenceStatus(device, fence) != VK_SUCCESS)
+				return 73;
+			for (index = 0; index < 64; ++index) {
+				image_readback[index] = download_data[index];
+				if (download_data[index] != upload_data[index])
+					return 74;
+			}
+			vkUnmapMemory(device, upload_memory);
+			vkUnmapMemory(device, download_memory);
+			vkDestroyFence(device, fence, 0);
+			vkDestroySemaphore(device, semaphore, 0);
+			vkDestroyCommandPool(device, pool, 0);
+			vkDestroyImageView(device, view, 0);
+			vkDestroyImage(device, image, 0);
+			vkDestroyBuffer(device, upload, 0);
+			vkDestroyBuffer(device, download, 0);
+			vkFreeMemory(device, image_memory, 0);
+			vkFreeMemory(device, upload_memory, 0);
+			vkFreeMemory(device, download_memory, 0);
+			image_workflow = 1;
 		}
 		vkDestroyDevice(device, 0);
 		vkDestroyDevice(VK_NULL_HANDLE, 0);

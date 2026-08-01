@@ -28,6 +28,9 @@ void VulkanBridge::destroy_object(const VkDevice &device, const Object &object)
 	case Kind::pipeline: vkDestroyPipeline(device, as_handle<VkPipeline>(object.handle), nullptr); break;
 	case Kind::pool: vkDestroyDescriptorPool(device, as_handle<VkDescriptorPool>(object.handle), nullptr); break;
 	case Kind::set: break;
+	case Kind::image: vkDestroyImage(device, as_handle<VkImage>(object.handle), nullptr); break;
+	case Kind::image_view: vkDestroyImageView(device, as_handle<VkImageView>(object.handle), nullptr); break;
+	case Kind::semaphore: vkDestroySemaphore(device, as_handle<VkSemaphore>(object.handle), nullptr); break;
 	}
 }
 
