@@ -94,7 +94,8 @@ int main(int argc, char **argv)
 			throw std::runtime_error("bootstrap path required");
 		const auto timeout = std::chrono::seconds(2);
 		{
-			const raven::PEImage image(fixture());
+			const auto fixture_bytes = fixture();
+			const raven::PEImage image(fixture_bytes);
 			check(!image.is_64, "fixture is not PE32");
 			raven::LoadedImage loaded(image, image.image_base);
 			raven::LoadedImage *images[] = {&loaded};
@@ -137,14 +138,16 @@ int main(int argc, char **argv)
 			rejected([&] { process.complete_debug_print(0); });
 		}
 		{
-			const raven::PEImage image(fixture());
+			const auto fixture_bytes = fixture();
+			const raven::PEImage image(fixture_bytes);
 			raven::LoadedImage loaded(image, image.image_base);
 			raven::LoadedImage *images[] = {&loaded};
 			raven::NativeProcess process(images, argv[1], timeout);
 			rejected([&] { process.set_teb(0x10000); });
 		}
 		{
-			const raven::PEImage image(fixture());
+			const auto fixture_bytes = fixture();
+			const raven::PEImage image(fixture_bytes);
 			raven::LoadedImage loaded(image, image.image_base);
 			raven::LoadedImage *images[] = {&loaded};
 			raven::NativeProcess process(images, argv[1], timeout, raven::NativeMode::x86);

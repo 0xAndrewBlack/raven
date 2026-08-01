@@ -11,7 +11,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(RAVEN_SANITIZERS "Enable address and undefined behavior checks" OFF)
 if(RAVEN_SANITIZERS)
-    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    # The Skia library is built without RTTI, so dynamic type checks cannot apply to code that links it.
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
