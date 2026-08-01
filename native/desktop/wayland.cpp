@@ -332,7 +332,9 @@ struct WaylandPresentation::State {
 		}
 		auto &window=*found->second;
 		xdg_toplevel_set_title(window.role,std::string(title).c_str());
-		if (window.closed || window.resized || window.width!=width || window.height!=height) throw std::runtime_error("Wayland surface cannot accept this frame");
+		// A size the compositor refused to configure (a window larger than the output) is shown clipped rather than failing the frame.
+		window.resized=false;
+		if (window.closed || window.width!=width || window.height!=height) throw std::runtime_error("Wayland surface cannot accept this frame");
 		attach_frame(window,width,height,pixels);
 	}
 };
@@ -356,7 +358,7 @@ DesktopPresentation WaylandPresentation::callbacks()
 		state->events(budget);
 		events.swap(state->pending);
 		for (auto &[handle,surface] : state->surfaces) {
-			if (surface->resized) throw std::runtime_error("Wayland resize requires Windows geometry handling");
+			surface->resized=false;
 			if (surface->closed && !surface->close_posted) {
 				if (surface->is_popup) events.push_back({handle,0,0,0,DesktopEventKind::popup_done});
 				else events.push_back({handle,0x10});

@@ -693,6 +693,10 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 		}
 		// SC_CLOSE becomes WM_CLOSE; the other system commands need window state transitions that are not modeled.
 		if ((uint32_t(args[2]) & 0xfff0U)==0xf060U) { send(args[0],0x10,0,0); return 0; }
+		// Size commands change the window state: maximize, minimize and restore.
+		if ((uint32_t(args[2]) & 0xfff0U)==0xf030U) { show_window(args[0],3); return 0; }
+		if ((uint32_t(args[2]) & 0xfff0U)==0xf020U) { show_window(args[0],6); return 0; }
+		if ((uint32_t(args[2]) & 0xfff0U)==0xf120U) { show_window(args[0],9); return 0; }
 		return 0;
 	}
 	if (message==0x21) return 1;
