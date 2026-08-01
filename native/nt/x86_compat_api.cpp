@@ -8,10 +8,14 @@ namespace raven {
 
 namespace {
 
-constexpr std::array<std::pair<std::string_view, uint32_t>, 12> compat_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 28> compat_exports{{
 	{"GetProcessHeap", 0}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3},
 	{"CreateWindowExA", 12}, {"DispatchMessageA", 1}, {"GetMessageA", 4}, {"PeekMessageA", 5},
 	{"RegisterClassA", 1}, {"RegisterClassExA", 1}, {"UnregisterClassA", 2},
+	{"DirectSoundCreate", 3}, {"DirectSoundCreate8", 3},
+	{"GlobalHandle", 1}, {"GetVersionExA", 1}, {"WinExec", 2}, {"GetCurrentProcess", 0}, {"SetHandleCount", 1}, {"GetEnvironmentStrings", 0},
+	{"FreeEnvironmentStringsA", 1}, {"UnhandledExceptionFilter", 1}, {"RtlUnwind", 4}, {"HeapCreate", 3}, {"HeapDestroy", 1},
+	{"ExitWindowsEx", 2}, {"RealizePalette", 1}, {"CreatePalette", 1},
 }};
 
 constexpr uint64_t process_heap_handle = 0x00150000, heap_region = 1 << 20, large_block = 256 << 10, header = 16;
@@ -148,6 +152,64 @@ bool NativeX86Compat::dispatch(std::string_view name)
 		process.write_memory(fresh, process.read_memory(args[2], std::min(old_size, size)));
 		heap_free(args[2]);
 		process.return_api(fresh);
+	} else if (name == "GlobalHandle") {
+		process.return_api(process.api_arguments(1)[0]);
+	} else if (name == "SetHandleCount") {
+		process.return_api(process.api_arguments(1)[0]);
+	} else if (name == "GetCurrentProcess") {
+		process.api_arguments(0);
+		process.return_api(UINT32_MAX);
+	} else if (name == "ExitWindowsEx") {
+		process.api_arguments(2);
+		environment.set_last_error(5);
+		process.return_api(0);
+	} else if (name == "RealizePalette") {
+		process.api_arguments(1);
+		process.return_api(0);
+	} else if (name == "CreatePalette") {
+		// Palettes are not modelled: the program gets a handle that selects and realizes harmlessly.
+		process.api_arguments(1);
+		process.return_api(0x1800);
+	} else if (name == "WinExec") {
+		process.api_arguments(2);
+		process.return_api(2);
+	} else if (name == "HeapCreate") {
+		process.api_arguments(3);
+		process.return_api(process_heap_handle);
+	} else if (name == "HeapDestroy" || name == "FreeEnvironmentStringsA" || name == "UnhandledExceptionFilter") {
+		process.api_arguments(1);
+		process.return_api(1);
+	} else if (name == "RtlUnwind") {
+		process.api_arguments(4);
+		process.return_api(0);
+	} else if (name == "GetEnvironmentStrings") {
+		process.api_arguments(0);
+		// An empty block: two terminators. The environment is not exposed to 32-bit programs.
+		if (!environment_block) {
+			environment_block = heap_alloc(16, true);
+		}
+		process.return_api(environment_block);
+	} else if (name == "GetVersionExA") {
+		const auto args = process.api_arguments(1);
+		const auto size = read_word(process.read_memory(args[0], 4), 0);
+		if (size != 148 && size != 156) {
+			environment.set_last_error(122);
+			process.return_api(0);
+			return true;
+		}
+		std::vector<uint8_t> info(size);
+		write_word(info, 0, size);
+		write_word(info, 4, 10);
+		write_word(info, 12, 19045);
+		write_word(info, 16, 2);
+		process.write_memory(args[0], info);
+		process.return_api(1);
+	} else if (name == "DirectSoundCreate" || name == "DirectSoundCreate8") {
+		// No audio device is modelled: the program is told there is no driver, which games treat as running without sound.
+		const auto args = process.api_arguments(3);
+		if (args[1])
+			process.write_memory(args[1], std::vector<uint8_t>(4));
+		process.return_api(0x88780078U);
 	} else if (name == "RegisterClassA" || name == "RegisterClassExA") {
 		const bool extended = name == "RegisterClassExA";
 		auto args = process.api_arguments(1);

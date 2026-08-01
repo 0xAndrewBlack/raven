@@ -23,7 +23,7 @@ private:
 	// Free blocks by payload size, and the bump region new blocks are cut from.
 	std::map<uint32_t, std::vector<uint64_t>> free_blocks;
 	uint64_t region = 0, region_left = 0;
-	uint64_t scratch = 0;
+	uint64_t scratch = 0, environment_block = 0;
 	size_t scratch_slot = 0;
 	uint64_t heap_alloc(uint32_t size, bool zero);
 	void heap_free(uint64_t address);

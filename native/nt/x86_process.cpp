@@ -11,6 +11,11 @@
 #include "desktop/api.h"
 #include "desktop/windows.h"
 #include "api.h"
+#include "ansi_api.h"
+#include "guest_allocator.h"
+#include "heap.h"
+#include "kernel_context.h"
+#include "paths.h"
 #include "x86_compat_api.h"
 #include "x86_thread_api.h"
 
@@ -20,6 +25,7 @@
 #include <map>
 #include <set>
 #include <functional>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -28,7 +34,7 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 59> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 92> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitProcess", 1}, {"ExitThread", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetExitCodeThread", 2},
@@ -36,6 +42,8 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 59> kernel32_exports
 	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"GetProcAddress", 2}, {"GetProcessHeap", 0}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
 	{"GetTickCount", 0}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3}, {"InitializeCriticalSection", 1}, {"LeaveCriticalSection", 1}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
 	{"OutputDebugStringA", 1}, {"ResetEvent", 1}, {"ResumeThread", 1}, {"SetEvent", 1}, {"SetLastError", 1}, {"SetThreadPriority", 2}, {"SizeofResource", 2}, {"Sleep", 1}, {"SwitchToThread", 0}, {"TryEnterCriticalSection", 1}, {"VirtualAlloc", 4},
+	// Services of the 32-bit CRT era: legacy file calls, global memory, code pages, environment and version queries.
+	{"_lopen", 2}, {"_lcreat", 2}, {"_lread", 3}, {"_lwrite", 3}, {"_llseek", 3}, {"lstrcpyA", 2}, {"lstrlenA", 1}, {"GetWindowsDirectoryA", 2}, {"GlobalHandle", 1}, {"GetVersionExA", 1}, {"WinExec", 2}, {"GlobalUnlock", 1}, {"GlobalFree", 1}, {"GlobalAlloc", 2}, {"SetErrorMode", 1}, {"GlobalLock", 1}, {"GetCurrentProcess", 0}, {"SetHandleCount", 1}, {"GetOEMCP", 0}, {"GetCPInfo", 2}, {"WideCharToMultiByte", 8}, {"DeleteFileA", 1}, {"GetEnvironmentStrings", 0}, {"FreeEnvironmentStringsW", 1}, {"FreeEnvironmentStringsA", 1}, {"UnhandledExceptionFilter", 1}, {"RtlUnwind", 4}, {"HeapCreate", 3}, {"HeapDestroy", 1}, {"TerminateProcess", 2}, {"GetEnvironmentStringsW", 0}, {"GetVersion", 0}, {"GetFileAttributesA", 1},
 	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WaitForSingleObject", 2}, {"WriteFile", 5}, {"_lclose", 1}, {"lstrcpyW", 2}, {"lstrlenW", 1},
 }};
 
@@ -81,6 +89,7 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 		{"UnregisterClassA",2},{"LoadCursorA",2},{"LoadIconA",2},{"GetAsyncKeyState",1},{"SetCursor",1},{"GetCursorPos",1},{"SetCursorPos",2},
 		{"DefWindowProcA",4},{"SendMessageA",4},{"PostMessageA",4},{"SetWindowTextA",2},
 		{"CreateFontA",14},{"ExtTextOutA",8},{"GetDIBits",7},{"GetTextExtentPoint32A",4},{"GetTextMetricsA",2},{"SetDIBits",7},
+		{"ExitWindowsEx",2},{"MessageBoxA",4},{"SetWindowPos",7},{"RealizePalette",1},{"SelectPalette",3},{"PatBlt",6},{"CreatePalette",1},
 	};
 	return counts;
 }
@@ -204,6 +213,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	std::vector<std::string_view> names;
 	for (const auto &[name, arguments] : kernel32_exports)
 		names.push_back(name);
+	std::sort(names.begin(), names.end());
 	std::map<uint64_t, std::pair<std::string_view, uint32_t>> traps;
 	if (!modules.all().contains("kernel32.dll")) {
 		const auto size = PEImage(runtime_provider("kernel32.dll", 0x70000000ULL, names, true)).image_size;
@@ -233,14 +243,16 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
 		}
 	};
-	static constexpr std::array<std::string_view, 42> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
+	static constexpr std::array<std::string_view, 45> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
 		"GetDlgItemInt", "GetDlgItemTextW", "GetMenuItemRect", "KillTimer", "LoadAcceleratorsW", "LoadCursorW", "LoadIconW",
 		"MessageBoxW", "MoveWindow", "PtInRect", "ReleaseCapture", "SetCapture", "SetDlgItemInt", "SetDlgItemTextW", "SetMenu",
 		"SetRect", "SetTimer", "TranslateAcceleratorW", "WinHelpW", "wsprintfW", "wsprintfA", "CreateWindowExA", "DispatchMessageA",
 		"GetMessageA", "PeekMessageA", "RegisterClassA", "RegisterClassExA", "UnregisterClassA", "LoadCursorA", "LoadIconA", "GetAsyncKeyState",
-		"SetCursor", "GetCursorPos", "SetCursorPos", "DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA"};
-	static constexpr std::array<std::string_view, 11> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2",
-		"CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A", "GetTextMetricsA", "SetDIBits"};
+		"SetCursor", "GetCursorPos", "SetCursorPos", "DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA",
+		"ExitWindowsEx", "MessageBoxA", "SetWindowPos"};
+	static constexpr std::array<std::string_view, 15> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2",
+		"CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A", "GetTextMetricsA", "SetDIBits",
+		"RealizePalette", "SelectPalette", "PatBlt", "CreatePalette"};
 	add_desktop("user32.dll", NativeDesktop::user_exports(), user_pending);
 	add_desktop("gdi32.dll", NativeDesktop::gdi_exports(), gdi_pending);
 	// Libraries whose argument counts come from their own implementation or the unsupported-service table.
@@ -266,6 +278,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	static constexpr std::array<std::string_view, 1> shell_exports{"ShellAboutW"};
 	static constexpr std::array<std::string_view, 1> controls_exports{"InitCommonControlsEx"};
 	add_library("winmm.dll", winmm_exports, {}, [](std::string_view name) { return uint32_t(name == "PlaySoundW" ? 3 : name == "timeGetTime" ? 0 : 1); });
+	static constexpr std::array<std::string_view, 2> dsound_exports{"DirectSoundCreate", "DirectSoundCreate8"};
+	add_library("dsound.dll", dsound_exports, {}, [](std::string_view) { return uint32_t(3); });
 	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
 	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
 	modules.bind_imports();
@@ -307,6 +321,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeCRT crt(process, environment);
 	crt.initialize([&](std::string_view name) { return modules.resolve({"msvcrt.dll", std::string(name), 0, false, 0}); });
 	NativeModuleAPI module_api(process, environment, modules, entry);
+	NativePaths paths(prefix);
+	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call_guest;
 	NativeResources resources(process, environment, modules, entry);
 	NativeMemory memory(process, environment);
 	NativeThreads guest_threads(process, environment, memory, nullptr, deadline);
@@ -319,11 +335,63 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		if (name.find('.') == std::string::npos)
 			name += ".dll";
 		const auto found = modules.all().find(name);
-		if (found == modules.all().end()) {
+		if (found != modules.all().end())
+			return found->second->loaded.base();
+		// A library the program wrote or shipped: load it from the guest file system, bind it to the runtime and start it.
+		const auto resolved = paths.resolve(std::u16string(name.begin(), name.end()));
+		if (!resolved || !resolved->exists || !call_guest) {
+			if (getenv("RAVEN_TRACE_X86"))
+				std::cerr << "raven: library file not found: " << name << '\n';
 			environment.set_last_error(126);
 			return 0;
 		}
-		return found->second->loaded.base();
+		PEModule *added = nullptr;
+		bool mapped = false;
+		try {
+			std::ifstream stream(resolved->host, std::ios::binary);
+			std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+			const PEImage image(bytes);
+			if (image.is_64 || !(image.characteristics & 0x2000)) {
+				environment.set_last_error(193);
+				return 0;
+			}
+			const auto identity = resolved->host.filename().string() + "#" + std::to_string(modules.all().size());
+			added = &modules.add(identity, std::move(bytes));
+			std::string missing;
+			for (const auto &symbol : added->imports) {
+				try {
+					modules.resolve(symbol);
+				} catch (const std::runtime_error &) {
+					missing += " " + symbol.module + "!" + (symbol.by_ordinal ? "#" + std::to_string(symbol.ordinal) : symbol.name);
+				}
+			}
+			if (!missing.empty())
+				throw std::runtime_error("unresolved imports:" + missing);
+			modules.bind_imports();
+			process.map_image(added->loaded);
+			mapped = true;
+			if (added->image.entry) {
+				const uint64_t arguments[] = {added->loaded.base(), 1, 0};
+				const auto result = call_guest(added->loaded.base() + added->image.entry, arguments);
+				if (result.stop != NativeStop::returned)
+					throw result;
+				if (!uint32_t(result.value)) {
+					environment.set_last_error(1114);
+					return 0;
+				}
+			}
+			return added->loaded.base();
+		} catch (const NativeResult &) {
+			throw;
+		} catch (const std::exception &failure) {
+			if (getenv("RAVEN_TRACE_X86"))
+				std::cerr << "raven: cannot load " << name << ": " << failure.what() << '\n';
+			// An image that never reached the guest must not stay in the set, or every later import binding would trip over it.
+			if (added && !mapped)
+				modules.remove(*added);
+			environment.set_last_error(126);
+			return 0;
+		}
 	}, [&](uint64_t handle) -> bool {
 		const bool known = std::any_of(modules.all().begin(), modules.all().end(),
 			[&](const auto &item) { return item.second->loaded.base() == handle; });
@@ -344,7 +412,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	// Shared handlers whose arguments are 32-bit words and whose structures carry no pointers.
 	const std::set<std::string_view> shared_names{"MoveWindow", "LoadCursorA", "LoadIconA", "GetAsyncKeyState", "SetCursor", "GetCursorPos", "SetCursorPos",
 		"DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA", "CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A",
-		"GetTextMetricsA", "SetDIBits"};
+		"GetTextMetricsA", "SetDIBits", "MessageBoxA", "SetWindowPos", "SelectPalette", "PatBlt", "_lopen", "_lcreat", "_lread", "_lwrite", "_llseek", "lstrcpyA", "lstrlenA", "GetWindowsDirectoryA",
+		"GlobalUnlock", "GlobalFree", "GlobalAlloc", "SetErrorMode", "GlobalLock", "GetOEMCP", "GetCPInfo", "WideCharToMultiByte", "DeleteFileA",
+		"FreeEnvironmentStringsW", "GetEnvironmentStringsW", "GetVersion", "GetFileAttributesA"};
 	windows.set_deadline(deadline);
 	windows.set_presentation(std::move(presentation));
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
@@ -386,6 +456,18 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				}
 				std::cerr << '\n';
 			}
+			if (api == "TerminateProcess") {
+				const auto words = process.api_arguments(2);
+				if (words[0] != UINT32_MAX) {
+					environment.set_last_error(6);
+					process.return_api(0);
+					budget = remaining();
+					result = process.resume(budget);
+					continue;
+				}
+				process.abandon_call();
+				throw ProcessExit{uint32_t(words[1]), result.instruction};
+			}
 			if (api == "ExitProcess" || api == "exit" || api == "_exit") {
 				const auto code = uint32_t(process.api_arguments(1)[0]);
 				process.abandon_call();
@@ -408,6 +490,18 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	};
 	windows.set_call(invoke);
 	guest_threads.set_runner(invoke);
+	call_guest = invoke;
+	// File, memory, text and system handlers of the shared registry take 32-bit words as well; they get the same process services.
+	NativeHeap guest_heap(process, environment, modules, entry.image);
+	GuestAllocator allocator(memory, guest_heap);
+	KernelContext kernel{process, environment, memory, allocator, kernel_objects, guest_threads, paths, modules, entry, *launch, invoke};
+	register_file_api(shared_api, kernel);
+	register_memory_api(shared_api, kernel);
+	register_text_api(shared_api, kernel);
+	register_system_api(shared_api, kernel);
+	register_process_api(shared_api, kernel);
+	register_ansi_adapters(shared_api);
+	register_legacy_file_api(shared_api);
 	windows.set_yield([&guest_threads] { return guest_threads.live() > 1 && guest_threads.yield(); });
 	crt.set_call(invoke);
 	try {

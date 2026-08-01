@@ -31,6 +31,7 @@ unsigned int raven_entry(void)
 	if (_lopen("C:\\does-not-exist.bin", OF_READ) != HFILE_ERROR)
 		return 10;
 	/* A handle with only FILE_APPEND_DATA adds to the end of the file however often it is reopened. */
+	DeleteFileA("C:\\appended.bin");
 	for (int round = 0; round < 3; ++round) {
 		HANDLE handle = CreateFileA("C:\\appended.bin", FILE_APPEND_DATA, 0, NULL, OPEN_ALWAYS, 0, NULL);
 		DWORD written;
