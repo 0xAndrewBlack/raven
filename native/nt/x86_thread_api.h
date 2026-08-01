@@ -1,0 +1,33 @@
+#pragma once
+
+#include "environment.h"
+#include "objects.h"
+#include "threads.h"
+
+#include <map>
+
+namespace raven {
+
+// Thread and wait services of a 32-bit process: stdcall arguments are read from the guest stack.
+class NativeX86Threads {
+public:
+	NativeX86Threads(NativeProcess &process, NativeEnvironment &environment, NativeObjects &objects, NativeThreads &threads);
+	bool dispatch(std::string_view name);
+	static std::span<const std::pair<std::string_view, uint32_t>> exports();
+
+private:
+	NativeProcess &process;
+	NativeEnvironment &environment;
+	NativeObjects &objects;
+	NativeThreads &threads;
+	std::map<uint64_t, std::shared_ptr<ThreadObject>> handles;
+	struct Section {
+		uint32_t owner = 0;
+		uint32_t depth = 0;
+	};
+	// Critical sections are keyed by guest address: threads switch only inside API calls, so no host lock is needed.
+	std::map<uint64_t, Section> sections;
+	uint32_t wait(uint64_t handle, uint32_t milliseconds);
+};
+
+}

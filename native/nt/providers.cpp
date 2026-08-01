@@ -674,7 +674,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		return std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 	});
 	GuestAllocator allocator(memory, heap);
-	NativeThreads threads(process, environment, memory, tls, deadline);
+	NativeThreads threads(process, environment, memory, &tls, deadline);
 	threads.set_runner(invoke);
 	object_api.set_cooperative(true);
 	windows.set_yield([&threads] { return threads.live() > 1 && threads.yield(); });

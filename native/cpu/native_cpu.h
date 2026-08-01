@@ -94,12 +94,14 @@ public:
 	NativeThreadState save_thread() const;
 	void load_thread(const NativeThreadState &thread);
 	// A thread that has not started: no active call, its own stack ceiling and TEB (x64 GS base).
-	NativeThreadState new_thread(uint64_t stack_top, uint64_t teb) const;
+	NativeThreadState new_thread(uint64_t stack_top, uint64_t teb);
 	// A fault stop becomes an API-style stop, so host code may run guest callbacks and redirect execution.
 	void enter_fault_dispatch();
 	// Continues the guest at a new context, dropping callbacks nested above depth (exception unwinding abandons them).
 	void redirect(const NativeContext &context, size_t depth);
 	std::vector<uint64_t> api_arguments(size_t count) const;
+	// Replaces one stdcall argument word of the pending x86 API call, so an adapter can forward the call to another handler.
+	void set_api_argument(size_t index, uint32_t value);
 	// Low 64 bits of XMM0 to XMM3, where an x64 caller passes the first four floating-point arguments.
 	std::array<uint64_t, 4> api_float_arguments() const;
 	void return_api(uint64_t value);
@@ -107,6 +109,7 @@ public:
 private:
 	struct State;
 	std::unique_ptr<State> state;
+	void install_segment(uint32_t entry, uint64_t base);
 	uint64_t memory_syscall(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3 = 0,
 		uint64_t a4 = 0, uint64_t a5 = 0);
 	NativeResult begin_call(uint64_t address, std::span<const uint64_t> arguments,

@@ -65,8 +65,24 @@ NativeEnvironment::NativeEnvironment(NativeProcess &process, uint64_t image_base
 
 uint64_t NativeEnvironment::create_thread_block(uint64_t stack_base, uint64_t stack_limit, uint32_t thread_id)
 {
-	if (process.mode() != NativeMode::x64 || !thread_id)
-		throw std::runtime_error("native guest threads need an x64 environment and a thread identity");
+	if (!thread_id)
+		throw std::runtime_error("native guest threads need a thread identity");
+	if (process.mode() == NativeMode::x86) {
+		const auto block = process.map_memory(8192, PROT_READ | PROT_WRITE);
+		try {
+			field(process, block, UINT32_MAX, 4);
+			field(process, block + 0x04, stack_base, 4);
+			field(process, block + 0x08, stack_limit, 4);
+			field(process, block + 0x18, block, 4);
+			field(process, block + 0x20, value(process, thread_block + 0x20), 4);
+			field(process, block + 0x24, thread_id, 4);
+			field(process, block + 0x30, process_block, 4);
+		} catch (...) {
+			process.unmap_memory(block);
+			throw;
+		}
+		return block;
+	}
 	const auto teb = process.map_memory(8192, PROT_READ | PROT_WRITE);
 	try {
 		field(process, teb, UINT64_MAX, 8);

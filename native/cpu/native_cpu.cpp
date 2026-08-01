@@ -175,6 +175,7 @@ struct NativeProcess::State {
 	NativeMode mode = NativeMode::x64;
 	uint64_t return_gate = 0;
 	uint32_t fs_selector = 0;
+	uint32_t ldt_entries = 1;
 	uint64_t fs_base = 0;
 	uint32_t pending_cleanup = 0;
 	std::vector<NativeContext> callbacks;
@@ -666,16 +667,26 @@ void NativeProcess::load_thread(const NativeThreadState &thread)
 	state->debug_print_fault = thread.debug_print_fault;
 	state->pending_cleanup = thread.pending_cleanup;
 	state->stack_top = thread.stack_top;
+	if (state->mode == NativeMode::x86) {
+		state->fs_selector = uint32_t(thread.context.registers.fs);
+		state->fs_base = thread.context.registers.fs_base;
+	}
 }
 
-NativeThreadState NativeProcess::new_thread(uint64_t stack_top, uint64_t teb) const
+NativeThreadState NativeProcess::new_thread(uint64_t stack_top, uint64_t teb)
 {
 	state->require_stopped();
-	if (state->mode != NativeMode::x64)
-		throw std::runtime_error("native guest threads are x64 only");
 	NativeThreadState thread{};
 	thread.context = context();
-	thread.context.registers.gs_base = teb;
+	if (state->mode == NativeMode::x86) {
+		// Every thread owns an LDT entry, so a switch only reloads registers.
+		const uint32_t entry = state->ldt_entries++;
+		install_segment(entry, teb);
+		thread.context.registers.fs = entry * 8 + 7;
+		thread.context.registers.fs_base = teb;
+	} else {
+		thread.context.registers.gs_base = teb;
+	}
 	thread.stack_top = stack_top;
 	return thread;
 }
@@ -709,11 +720,19 @@ NativeMode NativeProcess::mode() const
 void NativeProcess::set_teb(uint64_t base)
 {
 	state->require_stopped();
+	install_segment(0, base);
+	// LDT index 0, table indicator 1, requested privilege level 3.
+	state->fs_selector = 7;
+	state->fs_base = base;
+}
+
+void NativeProcess::install_segment(uint32_t entry, uint64_t base)
+{
 	if (state->mode != NativeMode::x86 || base > 0xfffff000ULL || base % 4096)
 		throw std::runtime_error("native TEB descriptor requires an x86 process and a page-aligned 32-bit address");
 	// struct user_desc: entry, base, limit, flags (32-bit segment, data, byte granularity, usable).
 	std::vector<uint8_t> descriptor(16);
-	const uint32_t fields[] = {0, uint32_t(base), 0xfff, 0x41};
+	const uint32_t fields[] = {entry, uint32_t(base), 0xfff, 0x41};
 	for (size_t index = 0; index < 4; ++index)
 		for (size_t byte = 0; byte < 4; ++byte)
 			descriptor[index * 4 + byte] = uint8_t(fields[index] >> (byte * 8));
@@ -729,9 +748,6 @@ void NativeProcess::set_teb(uint64_t base)
 		throw;
 	}
 	unmap_memory(scratch);
-	// LDT index 0, table indicator 1, requested privilege level 3.
-	state->fs_selector = 7;
-	state->fs_base = base;
 }
 
 void NativeProcess::add_api_trap(uint64_t address, uint32_t callee_cleanup)
@@ -956,6 +972,17 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 	const uint64_t fault_address = signal == SIGSEGV || signal == SIGBUS || signal == SIGILL || signal == SIGFPE ?
 		reinterpret_cast<uint64_t>(info.si_addr) : 0;
 	return {NativeStop::fault, registers.rax, registers.rip, signal, fault_address, info.si_code};
+}
+
+void NativeProcess::set_api_argument(size_t index, uint32_t value)
+{
+	state->require_stopped();
+	if (!state->awaiting_api || state->mode != NativeMode::x86 || index > 127)
+		throw std::runtime_error("native argument rewrite requires a pending x86 API call");
+	user_regs_struct registers{};
+	trace(PTRACE_GETREGS, state->child->pid, &registers);
+	const uint8_t bytes[4] = {uint8_t(value), uint8_t(value >> 8), uint8_t(value >> 16), uint8_t(value >> 24)};
+	write_memory(registers.rsp + 4 + index * 4, bytes);
 }
 
 std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const

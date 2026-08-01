@@ -15,7 +15,7 @@ constexpr size_t host_stack_size = 1024 * 1024;
 
 }
 
-NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environment, NativeMemory &memory, NativeTLS &tls,
+NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environment, NativeMemory &memory, NativeTLS *tls,
 	std::chrono::steady_clock::time_point deadline)
 	: process(process), environment(environment), memory(memory), tls(tls), deadline(deadline)
 {
@@ -75,7 +75,8 @@ std::shared_ptr<GuestThread> NativeThreads::create(uint64_t start, uint64_t para
 	thread->id = next_id;
 	next_id += 4;
 	thread->teb = environment.create_thread_block(thread->stack_high, thread->stack_low, thread->id);
-	tls.create_thread(thread->teb);
+	if (tls)
+		tls->create_thread(thread->teb);
 	thread->start = start;
 	thread->parameter = parameter;
 	thread->snapshot = process.new_thread(thread->stack_high - 64, thread->teb);
@@ -149,7 +150,8 @@ void NativeThreads::release_resources(GuestThread &thread)
 {
 	if (thread.main || !thread.teb)
 		return;
-	tls.release_thread(thread.teb);
+	if (tls)
+		tls->release_thread(thread.teb);
 	environment.release_thread_block(thread.teb);
 	thread.teb = 0;
 	if (thread.stack_low) {

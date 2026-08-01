@@ -56,7 +56,7 @@ struct ThreadExit {
 // Cooperative scheduler over one traced process: guest threads switch only inside API calls.
 class NativeThreads {
 public:
-	NativeThreads(NativeProcess &process, NativeEnvironment &environment, NativeMemory &memory, NativeTLS &tls,
+	NativeThreads(NativeProcess &process, NativeEnvironment &environment, NativeMemory &memory, NativeTLS *tls,
 		std::chrono::steady_clock::time_point deadline);
 	~NativeThreads();
 	void set_runner(std::function<NativeResult(uint64_t, std::span<const uint64_t>)> invoke) { run = std::move(invoke); }
@@ -86,7 +86,7 @@ private:
 	NativeProcess &process;
 	NativeEnvironment &environment;
 	NativeMemory &memory;
-	NativeTLS &tls;
+	NativeTLS *tls;
 	std::chrono::steady_clock::time_point deadline;
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> run;
 	std::function<void(uint32_t)> notifier;

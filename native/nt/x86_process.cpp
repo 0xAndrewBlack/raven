@@ -11,11 +11,14 @@
 #include "desktop/api.h"
 #include "desktop/windows.h"
 #include "api.h"
+#include "x86_compat_api.h"
+#include "x86_thread_api.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <map>
+#include <set>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
@@ -25,15 +28,15 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 39> kernel32_exports{{
-	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"ExitProcess", 1}, {"FindResourceA", 3},
+constexpr std::array<std::pair<std::string_view, uint32_t>, 59> kernel32_exports{{
+	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitProcess", 1}, {"ExitThread", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
-	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0},
+	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetExitCodeThread", 2},
 	{"GetFileType", 1}, {"GetLastError", 0}, {"GetModuleFileNameA", 3}, {"GetModuleHandleA", 1},
-	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"GetProcAddress", 2}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
-	{"GetTickCount", 0}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
-	{"OutputDebugStringA", 1}, {"SetLastError", 1}, {"SizeofResource", 2}, {"VirtualAlloc", 4},
-	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WriteFile", 5}, {"_lclose", 1}, {"lstrcpyW", 2}, {"lstrlenW", 1},
+	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"GetProcAddress", 2}, {"GetProcessHeap", 0}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
+	{"GetTickCount", 0}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3}, {"InitializeCriticalSection", 1}, {"LeaveCriticalSection", 1}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
+	{"OutputDebugStringA", 1}, {"ResetEvent", 1}, {"ResumeThread", 1}, {"SetEvent", 1}, {"SetLastError", 1}, {"SetThreadPriority", 2}, {"SizeofResource", 2}, {"Sleep", 1}, {"SwitchToThread", 0}, {"TryEnterCriticalSection", 1}, {"VirtualAlloc", 4},
+	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WaitForSingleObject", 2}, {"WriteFile", 5}, {"_lclose", 1}, {"lstrcpyW", 2}, {"lstrlenW", 1},
 }};
 
 // stdcall argument counts of the desktop exports, keyed by export name.
@@ -73,6 +76,11 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 		{"SetDlgItemInt",4},{"SetDlgItemTextW",3},{"SetMenu",2},{"SetRect",5},{"SetTimer",4},{"TranslateAcceleratorW",3},
 		{"WinHelpW",4},{"wsprintfW",0},{"wsprintfA",0},{"GetDeviceCaps",2},{"SetDIBitsToDevice",12},{"SetLayout",2},{"SetPixel",4},
 		{"SetROP2",2},
+		// ANSI forms and cursor, key and text services served by the compat adapters or the shared registry.
+		{"CreateWindowExA",12},{"DispatchMessageA",1},{"GetMessageA",4},{"PeekMessageA",5},{"RegisterClassA",1},{"RegisterClassExA",1},
+		{"UnregisterClassA",2},{"LoadCursorA",2},{"LoadIconA",2},{"GetAsyncKeyState",1},{"SetCursor",1},{"GetCursorPos",1},{"SetCursorPos",2},
+		{"DefWindowProcA",4},{"SendMessageA",4},{"PostMessageA",4},{"SetWindowTextA",2},
+		{"CreateFontA",14},{"ExtTextOutA",8},{"GetDIBits",7},{"GetTextExtentPoint32A",4},{"GetTextMetricsA",2},{"SetDIBits",7},
 	};
 	return counts;
 }
@@ -225,11 +233,14 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
 		}
 	};
-	static constexpr std::array<std::string_view, 25> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
+	static constexpr std::array<std::string_view, 42> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
 		"GetDlgItemInt", "GetDlgItemTextW", "GetMenuItemRect", "KillTimer", "LoadAcceleratorsW", "LoadCursorW", "LoadIconW",
 		"MessageBoxW", "MoveWindow", "PtInRect", "ReleaseCapture", "SetCapture", "SetDlgItemInt", "SetDlgItemTextW", "SetMenu",
-		"SetRect", "SetTimer", "TranslateAcceleratorW", "WinHelpW", "wsprintfW", "wsprintfA"};
-	static constexpr std::array<std::string_view, 5> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2"};
+		"SetRect", "SetTimer", "TranslateAcceleratorW", "WinHelpW", "wsprintfW", "wsprintfA", "CreateWindowExA", "DispatchMessageA",
+		"GetMessageA", "PeekMessageA", "RegisterClassA", "RegisterClassExA", "UnregisterClassA", "LoadCursorA", "LoadIconA", "GetAsyncKeyState",
+		"SetCursor", "GetCursorPos", "SetCursorPos", "DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA"};
+	static constexpr std::array<std::string_view, 11> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2",
+		"CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A", "GetTextMetricsA", "SetDIBits"};
 	add_desktop("user32.dll", NativeDesktop::user_exports(), user_pending);
 	add_desktop("gdi32.dll", NativeDesktop::gdi_exports(), gdi_pending);
 	// Libraries whose argument counts come from their own implementation or the unsupported-service table.
@@ -298,6 +309,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativeResources resources(process, environment, modules, entry);
 	NativeMemory memory(process, environment);
+	NativeThreads guest_threads(process, environment, memory, nullptr, deadline);
+	NativeX86Threads thread_api(process, environment, kernel_objects, guest_threads);
+	object_api.set_cooperative(true);
 	module_api.set_loader([&](std::string name) -> uint64_t {
 		for (auto &character : name)
 			if (character >= 'A' && character <= 'Z')
@@ -323,7 +337,14 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	// Registry handlers whose arguments carry no pointer-width structures also serve 32-bit programs.
 	ApiRegistry shared_api;
 	windows.register_api(shared_api);
-	const std::array<std::string_view, 1> shared_names{"MoveWindow"};
+	desktop.register_gdi_api(shared_api);
+	desktop.register_text_api(shared_api);
+	desktop.register_image_api(shared_api);
+	NativeX86Compat compat(process, environment, windows);
+	// Shared handlers whose arguments are 32-bit words and whose structures carry no pointers.
+	const std::set<std::string_view> shared_names{"MoveWindow", "LoadCursorA", "LoadIconA", "GetAsyncKeyState", "SetCursor", "GetCursorPos", "SetCursorPos",
+		"DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA", "CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A",
+		"GetTextMetricsA", "SetDIBits"};
 	windows.set_deadline(deadline);
 	windows.set_presentation(std::move(presentation));
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
@@ -370,11 +391,11 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				process.abandon_call();
 				throw ProcessExit{code, result.instruction};
 			}
-			if (!environment.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
+			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !compat.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
 				!desktop.dispatch(api) && !windows.dispatch(api) && !advapi.dispatch(api) && !profile.dispatch(api) &&
 				!crt.dispatch(api) && !unsupported_library(process, environment, api) &&
-				!(std::find(shared_names.begin(), shared_names.end(), api) != shared_names.end() && shared_api.dispatch(process, environment, api))) {
+				!(shared_names.contains(api) && shared_api.dispatch(process, environment, api))) {
 				std::cerr << "raven: unimplemented native x86 API " << api << '\n';
 				return result;
 			}
@@ -386,6 +407,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		return result;
 	};
 	windows.set_call(invoke);
+	guest_threads.set_runner(invoke);
+	windows.set_yield([&guest_threads] { return guest_threads.live() > 1 && guest_threads.yield(); });
 	crt.set_call(invoke);
 	try {
 		const auto result = invoke(entry.loaded.base() + entry.image.entry, {});
