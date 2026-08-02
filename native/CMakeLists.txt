@@ -1625,6 +1625,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d9-window64.exe ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d9-present-x64)
                         set_tests_properties(native_d3d9_present_x64 PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                        # Direct3D 8 reaches the same Vulkan through DXVK's d3d8.dll, which sits on its Direct3D 9.
+                        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/d3d8-window64.exe
+                            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector -fno-builtin
+                                -Wl,--entry,raven_entry,--no-insert-timestamp
+                                -o ${CMAKE_CURRENT_BINARY_DIR}/d3d8-window64.exe ${PROJECT_SOURCE_DIR}/testdata/d3d8/window.c -lkernel32 -luser32
+                            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/d3d8/window.c VERBATIM)
+                        add_custom_target(d3d8_window64_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/d3d8-window64.exe)
+                        add_test(NAME native_d3d8_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d9-present.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d8-window64.exe ${RAVEN_DXVK_PE64_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/d3d8-present)
+                        set_tests_properties(native_d3d8_present PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     endif()
                 endif()
             endif()

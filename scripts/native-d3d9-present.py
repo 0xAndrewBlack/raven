@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Present a Direct3D 9 device through DXVK on Raven to a Wayland window and compare what the compositor shows.
+"""Present a Direct3D 8 or 9 device through DXVK on Raven to a Wayland window and compare what the compositor shows.
 
 testdata/d3d9/window.c, built for 32 or 64 bits, is a program that renders sixty frames with the fixed-function pipeline and presents each one. It reads back
 its first and last back buffers with the GPU. This script runs it on an isolated headless compositor, waits until every frame was presented,
@@ -79,7 +79,8 @@ def main():
     shutil.rmtree(work, ignore_errors=True)
     run, prefix = work / "run", work / "prefix"
     run.mkdir(parents=True)
-    shutil.copy(dxvk / "d3d9.dll", run / "d3d9.dll")
+    for name in ("d3d9.dll", "d3d8.dll"):
+        shutil.copy(dxvk / name, run / name)
     shutil.copy(workload, run / "window.exe")
     with open(work / "compositor.log", "wb") as log:
         compositor = start_compositor(log)
@@ -109,7 +110,8 @@ def main():
             if compositor:
                 compositor.terminate()
     drive = prefix / "drive_c"
-    driver = next((line.split(":", 1)[1].strip() for line in (drive / "window_d3d9.log").read_text().splitlines() if line.startswith("info:    Driver")), "")
+    log = next((path for path in (drive / "window_d3d9.log", drive / "window_d3d8.log") if path.exists() and "Driver" in path.read_text()), drive / "window_d3d9.log")
+    driver = next((line.split(":", 1)[1].strip() for line in log.read_text().splitlines() if line.startswith("info:    Driver")), "")
     print(f"DXVK reports the driver: {driver}")
     if GPU and (not driver or "llvmpipe" in driver.lower()):
         raise SystemExit("the hardware variant ran on a software driver")
@@ -123,7 +125,7 @@ def main():
         raise SystemExit("the first and last frames have the same clear colour: the frames did not change")
     print(f"first frame corner {tuple(first[:3])}, last frame corner {corner}, triangle {center}")
     compare(capture, last, SIZE, SIZE, "window")
-    print("a Direct3D 9 frame rendered by DXVK and Raven's Vulkan bridge is on screen and matches the GPU read-back")
+    print("a Direct3D 8 or 9 frame rendered by DXVK and Raven's Vulkan bridge is on screen and matches the GPU read-back")
 
 
 if __name__ == "__main__":
