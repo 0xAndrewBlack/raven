@@ -16,9 +16,12 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	// Gives hot kernel32 services guest-side fast paths; their slow-path trap sits at a fixed offset inside the stub.
 	bool fast_paths = false);
 // Runs a PE32 process in host compatibility mode; only the API providers listed in x86_process.cpp exist so far.
+// A source of libraries shipped beside the program lets a program import them statically: they are loaded with it, and their entry points run
+// before the program's.
 NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	const std::string &bootstrap, std::chrono::milliseconds timeout, std::optional<NativeLaunch> launch = {},
-	DesktopPresentation presentation = {});
+	DesktopPresentation presentation = {},
+	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source = {});
 NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	const std::string &bootstrap, std::chrono::milliseconds timeout,
 	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source = {},

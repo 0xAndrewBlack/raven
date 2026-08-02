@@ -6,9 +6,9 @@
 
 namespace raven {
 
-void validate_native_image(const PEImage &image,std::string_view name)
+void validate_native_image(const PEImage &image,std::string_view name,bool is_64)
 {
-	if (!image.is_64) throw std::runtime_error("native PE32 execution is not implemented");
+	if (image.is_64!=is_64) throw std::runtime_error(is_64 ? "native PE32 execution is not implemented" : "native x86 process cannot mix PE64 modules: "+std::string(name));
 	if (image.directories[13].address || image.directories[13].size)
 		for (const auto &descriptor:image.delay_imports())
 			if (!(image.file_span(descriptor.descriptor_address,4)[0] & 1))
@@ -19,7 +19,7 @@ void validate_native_image(const PEImage &image,std::string_view name)
 
 void load_initial_dependencies(ModuleSet &modules,
 	const std::function<std::optional<std::vector<uint8_t>>(std::string_view)> &source,
-	std::span<const std::string_view> native_modules)
+	std::span<const std::string_view> native_modules,bool is_64)
 {
 	if (!source) return;
 	std::vector<PEModule *> pending,staged;
@@ -39,7 +39,7 @@ void load_initial_dependencies(ModuleSet &modules,
 							if (!modules.all().contains("ucrtbase.dll")) {
 								auto bytes=source("ucrtbase.dll");
 								if (!bytes) throw;
-								const PEImage image(*bytes);validate_native_image(image,"ucrtbase.dll");
+								const PEImage image(*bytes);validate_native_image(image,"ucrtbase.dll",is_64);
 								staged.reserve(staged.size()+1);pending.reserve(pending.size()+1);
 								auto &module=modules.add("ucrtbase.dll",std::move(*bytes));
 								staged.push_back(&module);pending.push_back(&module);
@@ -50,7 +50,7 @@ void load_initial_dependencies(ModuleSet &modules,
 						if (modules.all().size()>=10000) throw std::runtime_error("native DLL graph exceeds module limit");
 						auto bytes=source(identity);
 						if (!bytes) throw;
-						const PEImage image(*bytes);validate_native_image(image,identity);
+						const PEImage image(*bytes);validate_native_image(image,identity,is_64);
 						if (!(image.characteristics & 0x2000)) throw std::runtime_error("native startup dependency must be a DLL: "+identity);
 						staged.reserve(staged.size()+1);pending.reserve(pending.size()+1);
 						auto &module=modules.add(identity,std::move(*bytes));

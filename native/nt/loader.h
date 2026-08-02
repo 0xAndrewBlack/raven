@@ -9,10 +9,10 @@
 
 namespace raven {
 
-void validate_native_image(const PEImage &image,std::string_view name);
+void validate_native_image(const PEImage &image,std::string_view name,bool is_64=true);
 void load_initial_dependencies(ModuleSet &modules,
 	const std::function<std::optional<std::vector<uint8_t>>(std::string_view)> &source,
-	std::span<const std::string_view> native_modules);
+	std::span<const std::string_view> native_modules,bool is_64=true);
 
 std::vector<const PEModule *> initialization_order(const ModuleSet &modules, const PEModule &entry);
 uint64_t initialize_loader_data(NativeProcess &process, uint64_t peb,

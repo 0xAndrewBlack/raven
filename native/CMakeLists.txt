@@ -1712,6 +1712,30 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d9-present)
                         set_tests_properties(native_d3d9_present PROPERTIES TIMEOUT 480 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     endif()
+                    # The Direct3D 11 workloads built for 32 bits, through the 32-bit DXVK that sits beside them as the program's own libraries.
+                    if(RAVEN_MINGW32 AND RAVEN_DXVK_PE32_DIR AND EXISTS "${RAVEN_DXVK_PE32_DIR}/d3d11.dll" AND TARGET vulkan_thunk32_generated)
+                        foreach(workload triangle geometry tessellation)
+                            add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/d3d11-${workload}32.exe
+                                COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
+                                    -Wl,--entry,_entry@0,--no-insert-timestamp
+                                    -o ${CMAKE_CURRENT_BINARY_DIR}/d3d11-${workload}32.exe ${PROJECT_SOURCE_DIR}/testdata/d3d11/${workload}.c
+                                    -ld3d11 -ldxgi -ldxguid -luuid -luser32 -lkernel32
+                                DEPENDS ${PROJECT_SOURCE_DIR}/testdata/d3d11/${workload}.c ${PROJECT_SOURCE_DIR}/testdata/d3d11/tri_shaders.h
+                                    ${PROJECT_SOURCE_DIR}/testdata/d3d11/gs_shaders.h ${PROJECT_SOURCE_DIR}/testdata/d3d11/tess_shaders.h VERBATIM)
+                            add_custom_target(d3d11_${workload}32_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/d3d11-${workload}32.exe)
+                        endforeach()
+                        add_test(NAME native_x86_d3d11_triangle COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d11-triangle32.exe ${RAVEN_DXVK_PE32_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d11-triangle)
+                        add_test(NAME native_x86_d3d11_geometry COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-geometry.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d11-geometry32.exe ${RAVEN_DXVK_PE32_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d11-geometry)
+                        add_test(NAME native_x86_d3d11_tessellation COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-tessellation.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d11-tessellation32.exe ${RAVEN_DXVK_PE32_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d11-tessellation)
+                        set_tests_properties(native_x86_d3d11_triangle native_x86_d3d11_geometry native_x86_d3d11_tessellation
+                            PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                    endif()
                     # The same workload built for 64 bits, through the 64-bit DXVK.
                     if(RAVEN_MINGW64 AND RAVEN_DXVK_PE64_DIR)
                         add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/d3d9-window64.exe

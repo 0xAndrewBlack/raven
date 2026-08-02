@@ -149,10 +149,21 @@ size_t ModuleSet::bind_imports()
 {
 	struct Binding { PEModule *module; uint32_t address; size_t width; uint64_t value; };
 	std::vector<Binding> bindings;
+	// Every import that cannot be resolved is reported at once, the first one leading, so that a graph is fixed in one pass.
+	std::vector<std::string> unresolved;
 	for (const auto &[name, module] : modules) {
 		const size_t width = module->image.is_64 ? 8 : 4;
 		for (const auto &symbol : module->imports) {
-			const uint64_t value = resolve(symbol);
+			uint64_t value = 0;
+			try {
+				value = resolve(symbol);
+			} catch (const std::runtime_error &failure) {
+				if (std::string_view(failure.what()).starts_with("missing PE ")) {
+					unresolved.emplace_back(failure.what());
+					continue;
+				}
+				throw;
+			}
 			if (width == 4 && value > UINT32_MAX)
 				throw std::runtime_error("PE32 import target exceeds address space");
 			// Import addresses must occupy actual headers or section bytes, not image holes.
@@ -168,6 +179,14 @@ size_t ModuleSet::bind_imports()
 			}
 			bindings.push_back({module.get(), symbol.iat_address, width, value});
 		}
+	}
+	if (!unresolved.empty()) {
+		std::string message = unresolved.front();
+		for (size_t index = 1; index < unresolved.size() && index < 64; ++index)
+			message += (index == 1 ? " (also " : ", ") + unresolved[index].substr(unresolved[index].find(": ") + 2);
+		if (unresolved.size() > 1)
+			message += unresolved.size() > 64 ? ", and more)" : ")";
+		throw std::runtime_error(message);
 	}
 	// Commit only after every import resolves; failed binding leaves all images unchanged.
 	for (const auto &binding : bindings) {

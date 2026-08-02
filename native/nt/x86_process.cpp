@@ -19,6 +19,7 @@
 #include "x86_compat_api.h"
 #include "registry_words.h"
 #include "system_exports.h"
+#include "loader.h"
 #include "x86_loader.h"
 #include "x86_tls.h"
 #ifdef RAVEN_VULKAN_THUNK32
@@ -45,13 +46,13 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 105> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 106> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitProcess", 1}, {"ExitThread", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetExitCodeThread", 2},
 	{"GetFileType", 1}, {"GetLastError", 0}, {"GetModuleFileNameA", 3}, {"GetModuleHandleA", 1},
 	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"GetProcAddress", 2}, {"GetProcessHeap", 0}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
-	{"GetTickCount", 0}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3}, {"InitializeCriticalSection", 1}, {"LeaveCriticalSection", 1}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
+	{"GetTickCount", 0}, {"ProcessIdToSessionId", 2}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3}, {"InitializeCriticalSection", 1}, {"LeaveCriticalSection", 1}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
 	{"OutputDebugStringA", 1}, {"ResetEvent", 1}, {"ResumeThread", 1}, {"SetEvent", 1}, {"SetLastError", 1}, {"SetThreadPriority", 2}, {"SizeofResource", 2}, {"Sleep", 1}, {"SwitchToThread", 0}, {"TryEnterCriticalSection", 1}, {"VirtualAlloc", 4},
 	// Services of the 32-bit CRT era: legacy file calls, global memory, code pages, environment and version queries.
 	{"_lopen", 2}, {"_lcreat", 2}, {"_lread", 3}, {"_lwrite", 3}, {"_llseek", 3}, {"lstrcpyA", 2}, {"lstrlenA", 1}, {"GetWindowsDirectoryA", 2}, {"GlobalHandle", 1}, {"GetVersionExA", 1}, {"WinExec", 2}, {"GlobalUnlock", 1}, {"GlobalFree", 1}, {"GlobalAlloc", 2}, {"SetErrorMode", 1}, {"GlobalLock", 1}, {"GetCurrentProcess", 0}, {"SetHandleCount", 1}, {"GetOEMCP", 0}, {"GetCPInfo", 2}, {"WideCharToMultiByte", 8}, {"DeleteFileA", 1}, {"GetEnvironmentStrings", 0}, {"FreeEnvironmentStringsW", 1}, {"FreeEnvironmentStringsA", 1}, {"UnhandledExceptionFilter", 1}, {"RtlUnwind", 4}, {"HeapCreate", 3}, {"HeapDestroy", 1}, {"TerminateProcess", 2}, {"GetEnvironmentStringsW", 0}, {"GetVersion", 0}, {"GetFileAttributesA", 1},
@@ -91,7 +92,7 @@ constexpr std::string_view shared_allowed[] = {
 	"GetUserDefaultLCID", "GetSystemDefaultLCID", "IsValidCodePage", "SetEnvironmentVariableA", "SetEnvironmentVariableW",
 	"ExpandEnvironmentStringsA", "ExpandEnvironmentStringsW", "CreateMutexA", "CreateMutexW", "ReleaseMutex", "GetFileTime", "SetFileTime",
 	"FileTimeToLocalFileTime", "LocalFileTimeToFileTime", "FileTimeToDosDateTime", "DosDateTimeToFileTime", "GetFileSize", "SetEndOfFile",
-	"GetSystemDirectoryW", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
+	"GetSystemDirectoryW", "GetSystemDirectoryA", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
 	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
 	"SetFileAttributesW", "GetLongPathNameA", "GetLongPathNameW", "GetShortPathNameA", "GetShortPathNameW", "SearchPathA", "SearchPathW",
 	"GetModuleFileNameA", "IsDBCSLeadByte", "IsDBCSLeadByteEx", "GetCPInfoExA", "GetThreadLocale", "SetThreadLocale", "VerifyVersionInfoW",
@@ -185,6 +186,10 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 	for (const auto module : {"user32.dll", "gdi32.dll"})
 		for (const auto &item : host_exports(module))
 			counts.emplace(item.name, item.words);
+	// The display driver thunks each take one pointer to their parameter structure.
+	for (const auto name : system_export_names("gdi32.dll"))
+		if (name.starts_with("D3DKMT"))
+			counts.emplace(name, 1);
 	return counts;
 	}();
 	return counts;
@@ -193,7 +198,14 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 // Services of libraries Raven does not implement yet fail visibly instead of reporting success.
 bool unsupported_library(NativeProcess &process, NativeEnvironment &environment, std::string_view name)
 {
-	const bool known = name == "PlaySoundW" || name == "ShellAboutW" || name == "InitCommonControlsEx";
+	// There is no kernel graphics subsystem behind the host's display: the thunks report that the request is not supported (STATUS_NOT_SUPPORTED).
+	if (name.starts_with("D3DKMT")) {
+		process.api_arguments(0);
+		process.return_api(0xC00000BBU);
+		return true;
+	}
+	const bool known = name == "PlaySoundW" || name == "ShellAboutW" || name == "InitCommonControlsEx" || name == "GetFileVersionInfoA" ||
+		name == "GetFileVersionInfoSizeA" || name == "VerQueryValueA";
 	if (!known)
 		return false;
 	process.api_arguments(0);
@@ -209,6 +221,21 @@ bool kernel_string_api(NativeProcess &process, NativeEnvironment &environment, c
 	if (name == "GetTickCount" || name == "timeGetTime") {
 		const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch());
 		process.return_api(uint32_t(now.count()));
+		return true;
+	}
+	if (name == "ProcessIdToSessionId") {
+		// Only the process itself is known, and it runs in the interactive session.
+		const auto args = process.api_arguments(2);
+		const auto own = process.read_memory(environment.teb() + 0x20, 4);
+		const uint32_t own_id = own[0] | uint32_t(own[1]) << 8 | uint32_t(own[2]) << 16 | uint32_t(own[3]) << 24;
+		if (uint32_t(args[0]) != own_id || !args[1]) {
+			environment.set_last_error(87);
+			process.return_api(0);
+			return true;
+		}
+		const uint8_t session[4] = {1, 0, 0, 0};
+		process.write_memory(args[1], session);
+		process.return_api(1);
 		return true;
 	}
 	if (name == "timeBeginPeriod" || name == "timeEndPeriod") {
@@ -298,7 +325,7 @@ uint64_t provider_base(const ModuleSet &modules, uint32_t size)
 
 NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	const std::string &bootstrap, std::chrono::milliseconds timeout, std::optional<NativeLaunch> launch,
-	DesktopPresentation presentation)
+	DesktopPresentation presentation, std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source)
 {
 	if (timeout.count() <= 0 || entry.image.is_64 || (entry.image.characteristics & 0x2000) ||
 		!std::any_of(modules.all().begin(), modules.all().end(), [&](const auto &item) { return item.second.get() == &entry; }))
@@ -306,6 +333,14 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	for (const auto &[name, module] : modules.all())
 		if (module->image.is_64)
 			throw std::runtime_error("native x86 process cannot mix PE64 modules: " + name);
+	// Libraries the program ships and imports statically join its graph; the runtime's own libraries answer for the system ones.
+	if (source) {
+		std::vector<std::string_view> provided{"kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll", "setupapi.dll", "msvcrt.dll", "winmm.dll",
+			"dsound.dll", "vulkan-1.dll", "shell32.dll", "comctl32.dll", "ntdll.dll", "version.dll"};
+		if (!source("d3d9.dll"))
+			provided.push_back("d3d9.dll");
+		load_initial_dependencies(modules, source, provided, false);
+	}
 	std::vector<std::string_view> names;
 	for (const auto &item : kernel32_table())
 		names.push_back(item.name);
@@ -350,6 +385,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	std::vector<std::string_view> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2",
 		"CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A", "GetTextMetricsA", "SetDIBits",
 		"RealizePalette", "SelectPalette", "PatBlt", "CreatePalette"};
+	for (const auto name : system_export_names("gdi32.dll"))
+		if (name.starts_with("D3DKMT"))
+			gdi_pending.push_back(name);
 	for (const auto &item : host_exports("user32.dll"))
 		user_pending.push_back(item.name);
 	for (const auto &item : host_exports("gdi32.dll"))
@@ -396,6 +434,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	add_library("msvcrt.dll", NativeCRT::exports(), NativeCRT::data_exports(), [](std::string_view name) { return uint32_t(0); });
 	static constexpr std::array<std::string_view, 4> winmm_exports{"PlaySoundW", "timeBeginPeriod", "timeEndPeriod", "timeGetTime"};
 	static constexpr std::array<std::string_view, 1> shell_exports{"ShellAboutW"};
+	// File version resources are not read for 32-bit programs yet: the services fail visibly, as for a file without a version resource.
+	static constexpr std::array<std::string_view, 3> version_exports{"GetFileVersionInfoA", "GetFileVersionInfoSizeA", "VerQueryValueA"};
 	static constexpr std::array<std::string_view, 1> controls_exports{"InitCommonControlsEx"};
 	add_library("winmm.dll", winmm_exports, {}, [](std::string_view name) { return uint32_t(name == "PlaySoundW" ? 3 : name == "timeGetTime" ? 0 : 1); });
 	const auto dsound_methods = NativeX86DirectSound::method_names();
@@ -434,6 +474,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		return uint32_t(0);
 	});
 #endif
+	add_library("version.dll", version_exports, {}, [](std::string_view name) { return uint32_t(name == "GetFileVersionInfoSizeA" ? 2 : 4); });
 	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
 	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
 	modules.bind_imports();
@@ -741,13 +782,29 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		// Images of the startup graph with thread local storage get their blocks, and their callbacks hear about the process starting.
 		for (const auto &[name, module] : modules.all())
 			static_tls.add(*module);
-		for (const auto &[name, module] : modules.all())
-			for (const auto callback : static_tls.callbacks(*module)) {
-				const uint64_t arguments[] = {module->loaded.base(), 1, 0};
+		// Dependencies first, the program last: each image's callbacks, then the entry point of a library that ships with the program.
+		const auto start_image = [&](const PEModule &module) {
+			for (const auto callback : static_tls.callbacks(module)) {
+				const uint64_t arguments[] = {module.loaded.base(), 1, 0};
 				const auto started = invoke(callback, arguments);
 				if (started.stop != NativeStop::returned)
 					throw started;
 			}
+		};
+		for (const auto *module : initialization_order(modules, entry)) {
+			if (module == &entry)
+				continue;
+			start_image(*module);
+			if ((module->image.characteristics & 0x2000) && module->image.entry && !module->runtime_api) {
+				const uint64_t arguments[] = {module->loaded.base(), 1, 0};
+				const auto attached = invoke(module->loaded.base() + module->image.entry, arguments);
+				if (attached.stop != NativeStop::returned)
+					throw attached;
+				if (static_cast<uint32_t>(attached.value) == 0)
+					throw std::runtime_error("DLL_PROCESS_ATTACH failed: " + module->name);
+			}
+		}
+		start_image(entry);
 		const auto result = invoke(entry.loaded.base() + entry.image.entry, {});
 		windows.shutdown();
 		return result;

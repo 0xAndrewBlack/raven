@@ -162,7 +162,8 @@ int main(int argc, char **argv)
 						}
 						// The runtime's own components are found beside the runtime when the program does not ship them.
 						if (!selected && name=="ucrtbase.dll") {
-							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "ucrtbase.dll";
+							// A 32-bit program gets the 32-bit build of the component.
+							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "ucrtbase.dll" : "ucrtbase32.dll");
 							if (std::filesystem::exists(component))
 								return read_file(component.c_str());
 						}
@@ -245,7 +246,7 @@ int main(int argc, char **argv)
 						if (inherited_stdio) launch->standard_fds={0,1,2};
 					}
 					if (!entry->image.is_64)
-						return native_result(raven::run_native_process_x86(modules, *entry, bootstrap.string(), timeout, launch, presentation),true,inherited_stdio);
+						return native_result(raven::run_native_process_x86(modules, *entry, bootstrap.string(), timeout, launch, presentation, source),true,inherited_stdio);
 					return native_result(raven::run_native_process(modules, *entry, bootstrap.string(), timeout, source, debug,presentation,launch),true,inherited_stdio);
 				}
 				return native_result(raven::run_native_modules(modules, *entry, bootstrap.string(), std::chrono::seconds(5)));
