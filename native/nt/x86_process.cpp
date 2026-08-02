@@ -92,7 +92,7 @@ constexpr std::string_view shared_allowed[] = {
 	"GetUserDefaultLCID", "GetSystemDefaultLCID", "IsValidCodePage", "SetEnvironmentVariableA", "SetEnvironmentVariableW",
 	"ExpandEnvironmentStringsA", "ExpandEnvironmentStringsW", "CreateMutexA", "CreateMutexW", "ReleaseMutex", "GetFileTime", "SetFileTime",
 	"FileTimeToLocalFileTime", "LocalFileTimeToFileTime", "FileTimeToDosDateTime", "DosDateTimeToFileTime", "GetFileSize", "SetEndOfFile",
-	"GetSystemDirectoryW", "GetSystemDirectoryA", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
+	"GetWindowLongW", "SetWindowLongW", "GetSystemDirectoryW", "GetSystemDirectoryA", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
 	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
 	"SetFileAttributesW", "GetLongPathNameA", "GetLongPathNameW", "GetShortPathNameA", "GetShortPathNameW", "SearchPathA", "SearchPathW",
 	"GetModuleFileNameA", "IsDBCSLeadByte", "IsDBCSLeadByteEx", "GetCPInfoExA", "GetThreadLocale", "SetThreadLocale", "VerifyVersionInfoW",

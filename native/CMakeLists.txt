@@ -1714,7 +1714,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     endif()
                     # The Direct3D 11 workloads built for 32 bits, through the 32-bit DXVK that sits beside them as the program's own libraries.
                     if(RAVEN_MINGW32 AND RAVEN_DXVK_PE32_DIR AND EXISTS "${RAVEN_DXVK_PE32_DIR}/d3d11.dll" AND TARGET vulkan_thunk32_generated)
-                        foreach(workload triangle geometry tessellation)
+                        foreach(workload triangle geometry tessellation window fullscreen)
                             add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/d3d11-${workload}32.exe
                                 COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
                                     -Wl,--entry,_entry@0,--no-insert-timestamp
@@ -1735,6 +1735,21 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d11-tessellation)
                         set_tests_properties(native_x86_d3d11_triangle native_x86_d3d11_geometry native_x86_d3d11_tessellation
                             PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                        # Presentation to a Wayland window needs the isolated compositor.
+                        add_test(NAME native_x86_d3d11_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-present.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d11-window32.exe ${RAVEN_DXVK_PE32_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d11-present)
+                        set_tests_properties(native_x86_d3d11_present PROPERTIES TIMEOUT 480 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                        if(EXISTS /dev/dri/renderD128)
+                            add_test(NAME native_x86_d3d11_present_gpu COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-present.py
+                                $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d11-window32.exe ${RAVEN_DXVK_PE32_DIR}
+                                ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d11-present-gpu gpu)
+                            set_tests_properties(native_x86_d3d11_present_gpu PROPERTIES TIMEOUT 480 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
+                        endif()
+                        add_test(NAME native_x86_d3d11_fullscreen COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-fullscreen.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d11-fullscreen32.exe ${RAVEN_DXVK_PE32_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d11-fullscreen)
+                        set_tests_properties(native_x86_d3d11_fullscreen PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     endif()
                     # The same workload built for 64 bits, through the 64-bit DXVK.
                     if(RAVEN_MINGW64 AND RAVEN_DXVK_PE64_DIR)

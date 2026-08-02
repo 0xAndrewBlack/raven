@@ -929,6 +929,8 @@ uint64_t NativeWindows::map_points(uint64_t from,uint64_t to,uint64_t points,uin
 bool NativeWindows::dispatch(std::string_view name)
 {
 	if (tree_dispatch(name) || system_dispatch(name)) return true;
+	// A 32-bit program's window data accessors are served by the shared handlers, which apply style changes.
+	if (process.mode()==NativeMode::x86 && (name=="GetWindowLongW" || name=="SetWindowLongW")) return false;
 	const bool data=(name.starts_with("GetWindowLong") || name.starts_with("SetWindowLong") || name.starts_with("GetClassLong") || name.starts_with("SetClassLong"));
 	const bool info=name=="GetClassInfoW" || name=="GetClassInfoExW" || name=="GetClassNameW" || name=="GetClassNameA";
 	const bool registration=name=="RegisterClassExW" || name=="RegisterClassW";

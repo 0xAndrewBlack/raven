@@ -39,8 +39,8 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 				call.ret(narrow(extra_access(window->extra, index, wide ? 8 : 4, write, value)));
 				return;
 			}
-			// Pointer-sized values have no 32-bit accessor on a 64-bit system.
-			if (!wide && (index == -4 || index == -6 || index == -8)) {
+			// Pointer-sized values have no 32-bit accessor on a 64-bit system; on a 32-bit one they are 32 bits wide.
+			if (!wide && process.mode() != NativeMode::x86 && (index == -4 || index == -6 || index == -8)) {
 				call.fail(1413);
 				return;
 			}
@@ -95,6 +95,8 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 			case -16:
 			case -20: {
 				const bool style = index == -16;
+				// The index travels in the message as a signed word of the program's own width.
+				const uint64_t index_word = process.mode() == NativeMode::x86 ? uint64_t(uint32_t(index)) : uint64_t(int64_t(index));
 				const uint32_t previous = style ? window->style : window->ex_style;
 				if (write) {
 					uint32_t next = uint32_t(value);
@@ -104,7 +106,7 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 					std::memcpy(bytes.data(), &previous, 4);
 					std::memcpy(bytes.data() + 4, &next, 4);
 					process.write_memory(scratch, bytes);
-					send(call[0], 0x7c, style ? uint64_t(int64_t(-16)) : uint64_t(int64_t(-20)), scratch);
+					send(call[0], 0x7c, index_word, scratch);
 					if (!objects.window(call[0]))
 						return;
 					const auto changed = process.read_memory(scratch, 8);
@@ -120,7 +122,7 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 					}
 					std::memcpy(bytes.data() + 4, &next, 4);
 					process.write_memory(scratch, bytes);
-					send(call[0], 0x7d, style ? uint64_t(int64_t(-16)) : uint64_t(int64_t(-20)), scratch);
+					send(call[0], 0x7d, index_word, scratch);
 					if (objects.window(call[0]) && objects.window_visible(call[0])) {
 						invalidate_tree(call[0], true);
 						drawing(call[0]);
