@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <elf.h>
 #include <fcntl.h>
 #include <functional>
@@ -169,11 +170,15 @@ uint64_t NativeChild::syscall(uint64_t number, uint64_t a1, uint64_t a2, uint64_
 	registers.r8 = a5;
 	registers.r9 = a6;
 	trace(PTRACE_SETREGS, pid, &registers);
-	// PTRACE_CONT executes only this owned gate, never guest code.
+	// PTRACE_CONT executes only this owned gate, never guest code. A slice left over from the last resume must not end this wait.
+	clear_slice();
 	trace(PTRACE_CONT, pid);
 	const int status = wait();
-	if (status == -1 || !WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP)
-		throw std::runtime_error("native syscall did not reach its trap");
+	if (status == -1 || !WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
+		std::ostringstream detail;
+		detail << "native syscall did not reach its trap (wait status 0x" << std::hex << status << ')';
+		throw std::runtime_error(detail.str());
+	}
 	trace(PTRACE_GETREGS, pid, &registers);
 	if (registers.rip != gate + 4)
 		throw std::runtime_error("native syscall stopped outside its gate");
@@ -944,6 +949,8 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		trace(state->steps_left ? PTRACE_SINGLESTEP : PTRACE_SYSEMU, child.pid);
 		state->stopped = false;
 		status = child.wait();
+		// The slice belongs to this resume only; a later wait for a memory operation of the runtime must not see it expire.
+		child.clear_slice();
 		if (status == -2) {
 			// The guest ran a whole slice without a stop of its own: interrupt it where it is and let another thread have the processor.
 			child.clear_slice();
