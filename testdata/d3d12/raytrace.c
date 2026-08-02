@@ -1,4 +1,8 @@
-/* Built with -DINLINE_QUERY this is the inline ray query variant: no ray tracing pipeline or shader table, a compute shader (rayquery.hlsl)
+/* Built with -DANYHIT this scene has an any hit shader that cuts the triangle and a callable shader that supplies the background (rtanyhit.hlsl);
+ * built with -DPROCEDURAL the geometry is one box and an intersection shader makes a disc of it (rtprocedural.hlsl). The files are
+ * C:\\rtanyhit.* and C:\\rtprocedural.*.
+ *
+ * Built with -DINLINE_QUERY this is the inline ray query variant: no ray tracing pipeline or shader table, a compute shader (rayquery.hlsl)
  * traces with RayQuery, DispatchRays is replaced by Dispatch, and the files are C:\\rayquery.raw and C:\\rayquery.txt.
  *
  * Direct3D 12 ray tracing workload: builds a bottom level acceleration structure with one triangle and a top level one with one instance of it,
@@ -9,7 +13,17 @@
 #define COBJMACROS
 #include <windows.h>
 #include <d3d12.h>
-#ifdef INLINE_QUERY
+#if defined(ANYHIT)
+#include "rtanyhit_shaders.h"
+#define rt_library anyhit_library
+#define OUT_TXT L"C:\\rtanyhit.txt"
+#define OUT_RAW L"C:\\rtanyhit.raw"
+#elif defined(PROCEDURAL)
+#include "rtprocedural_shaders.h"
+#define rt_library procedural_library
+#define OUT_TXT L"C:\\rtprocedural.txt"
+#define OUT_RAW L"C:\\rtprocedural.raw"
+#elif defined(INLINE_QUERY)
 #include "rayquery_shaders.h"
 #define OUT_TXT L"C:\\rayquery.txt"
 #define OUT_RAW L"C:\\rayquery.raw"
@@ -107,12 +121,29 @@ void __stdcall entry(void)
 	upload(vertex_buffer, vertices, sizeof vertices);
 
 	D3D12_RAYTRACING_GEOMETRY_DESC geometry = {0};
-	geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+#if defined(PROCEDURAL)
+	/* One box around the disc: x and y from -0.5 to 0.5, z from -0.1 to 0.1. */
+	static const float box[6] = {-0.5f, -0.5f, -0.1f, 0.5f, 0.5f, 0.1f};
+	ID3D12Resource *box_buffer = make_buffer(D3D12_HEAP_TYPE_UPLOAD, sizeof box, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "box buffer");
+	upload(box_buffer, box, sizeof box);
+	geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
 	geometry.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+	geometry.AABBs.AABBCount = 1;
+	geometry.AABBs.AABBs.StartAddress = ID3D12Resource_GetGPUVirtualAddress(box_buffer);
+	geometry.AABBs.AABBs.StrideInBytes = sizeof box;
+#else
+	geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+#if defined(ANYHIT)
+	/* Not opaque: the any hit shader decides which hits count. */
+	geometry.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+#else
+	geometry.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+#endif
 	geometry.Triangles.VertexBuffer.StartAddress = ID3D12Resource_GetGPUVirtualAddress(vertex_buffer);
 	geometry.Triangles.VertexBuffer.StrideInBytes = 3 * sizeof(float);
 	geometry.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
 	geometry.Triangles.VertexCount = 3;
+#endif
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bottom_inputs = {0};
 	bottom_inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
 	bottom_inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
@@ -173,7 +204,13 @@ void __stdcall entry(void)
 #else
 	/* The pipeline: the library, a triangle hit group around the closest hit shader, the payload and attribute sizes, one level of recursion. */
 	D3D12_DXIL_LIBRARY_DESC library = {{rt_library, sizeof rt_library}, 0, NULL};
+#if defined(PROCEDURAL)
+	D3D12_HIT_GROUP_DESC hit_group = {L"HitGroup", D3D12_HIT_GROUP_TYPE_PROCEDURAL_PRIMITIVE, NULL, L"chit", L"isect"};
+#elif defined(ANYHIT)
+	D3D12_HIT_GROUP_DESC hit_group = {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES, L"ahit", L"chit", NULL};
+#else
 	D3D12_HIT_GROUP_DESC hit_group = {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES, NULL, L"chit", NULL};
+#endif
 	D3D12_RAYTRACING_SHADER_CONFIG shader_config = {4 * sizeof(float), 2 * sizeof(float)};
 	D3D12_RAYTRACING_PIPELINE_CONFIG pipeline_config = {1};
 	D3D12_GLOBAL_ROOT_SIGNATURE global_root = {root};
@@ -191,10 +228,16 @@ void __stdcall entry(void)
 	CHECK("state object properties", ID3D12StateObject_QueryInterface(pipeline, &IID_ID3D12StateObjectProperties, (void **)&properties));
 
 	/* The shader table: the ray generation, miss and hit group records, one 64 byte record each. */
-	ID3D12Resource *table = make_buffer(D3D12_HEAP_TYPE_UPLOAD, 3 * RECORD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "shader table");
-	BYTE records[3 * RECORD] = {0};
+	ID3D12Resource *table = make_buffer(D3D12_HEAP_TYPE_UPLOAD, 4 * RECORD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "shader table");
+	BYTE records[4 * RECORD] = {0};
+#if defined(ANYHIT)
+	static const wchar_t *names[4] = {L"raygen", L"miss", L"HitGroup", L"background"};
+	const int record_count = 4;
+#else
 	static const wchar_t *names[3] = {L"raygen", L"miss", L"HitGroup"};
-	for (int index = 0; index < 3; ++index) {
+	const int record_count = 3;
+#endif
+	for (int index = 0; index < record_count; ++index) {
 		const void *identifier = ID3D12StateObjectProperties_GetShaderIdentifier(properties, names[index]);
 		if (!identifier)
 			fail("shader identifier", index);
@@ -263,6 +306,11 @@ void __stdcall entry(void)
 	dispatch.HitGroupTable.StartAddress = table_address + 2 * RECORD;
 	dispatch.HitGroupTable.SizeInBytes = RECORD;
 	dispatch.HitGroupTable.StrideInBytes = RECORD;
+#if defined(ANYHIT)
+	dispatch.CallableShaderTable.StartAddress = table_address + 3 * RECORD;
+	dispatch.CallableShaderTable.SizeInBytes = RECORD;
+	dispatch.CallableShaderTable.StrideInBytes = RECORD;
+#endif
 	dispatch.Width = SIZE;
 	dispatch.Height = SIZE;
 	dispatch.Depth = 1;

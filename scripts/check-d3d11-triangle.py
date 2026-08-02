@@ -5,9 +5,10 @@ The reference covers pixel centres with barycentric weights and interpolates the
 edge are skipped because edge coverage rules differ between implementations. Every other pixel must match within 2 of 255, and the
 clear colour must fill everything outside the triangle.
 
-usage: check-d3d11-triangle.py TRIANGLE_RAW [WIDTH HEIGHT RED GREEN BLUE [SCALE]]
+usage: check-d3d11-triangle.py TRIANGLE_RAW [WIDTH HEIGHT RED GREEN BLUE [SCALE [CUT]]]
 The defaults are the 256 by 256 frame cleared to (0.1, 0.1, 0.3); the clear colour is given as 0 to 255 values. SCALE multiplies the
-x and y of every vertex, for a program whose geometry shader shrinks the triangle.
+x and y of every vertex, for a program whose geometry shader shrinks the triangle. CUT is the weight of the second vertex above which
+the triangle is gone, for a ray tracing any hit shader that ignores those hits; pixels within 0.03 of that weight are skipped.
 """
 
 import sys
@@ -16,6 +17,8 @@ WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 256
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 256
 CLEAR = tuple(int(v) for v in sys.argv[4:7]) + (255,) if len(sys.argv) > 6 else tuple(round(v * 255) for v in (0.1, 0.1, 0.3, 1.0))
 SCALE = float(sys.argv[7]) if len(sys.argv) > 7 else 1.0
+CUT = float(sys.argv[8]) if len(sys.argv) > 8 else None
+CUT_MARGIN = 0.03
 VERTICES = [((-0.8 * SCALE, -0.8 * SCALE), (255, 0, 0)), ((0.0, 0.8 * SCALE), (0, 0, 255)), ((0.8 * SCALE, -0.8 * SCALE), (0, 255, 0))]
 
 
@@ -60,8 +63,15 @@ def main():
                 expected = CLEAR
                 outside += 1
             elif distance > 1.5:
-                expected = tuple(round(sum(w[i] * VERTICES[i][1][c] for i in range(3))) for c in range(3)) + (255,)
-                inside += 1
+                if CUT is not None and w[1] > CUT - CUT_MARGIN:
+                    if w[1] <= CUT + CUT_MARGIN:
+                        skipped += 1
+                        continue
+                    expected = CLEAR
+                    outside += 1
+                else:
+                    expected = tuple(round(sum(w[i] * VERTICES[i][1][c] for i in range(3))) for c in range(3)) + (255,)
+                    inside += 1
             else:
                 skipped += 1
                 continue
