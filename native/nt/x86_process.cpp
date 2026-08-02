@@ -26,6 +26,7 @@
 #endif
 #include "x86_system_api.h"
 #include "x86_d3d9.h"
+#include "x86_dsound.h"
 #include "x86_thread_api.h"
 
 #include <algorithm>
@@ -397,8 +398,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	static constexpr std::array<std::string_view, 1> shell_exports{"ShellAboutW"};
 	static constexpr std::array<std::string_view, 1> controls_exports{"InitCommonControlsEx"};
 	add_library("winmm.dll", winmm_exports, {}, [](std::string_view name) { return uint32_t(name == "PlaySoundW" ? 3 : name == "timeGetTime" ? 0 : 1); });
-	static constexpr std::array<std::string_view, 2> dsound_exports{"DirectSoundCreate", "DirectSoundCreate8"};
-	add_library("dsound.dll", dsound_exports, {}, [](std::string_view) { return uint32_t(3); });
+	const auto dsound_methods = NativeX86DirectSound::method_names();
+	add_library("dsound.dll", NativeX86DirectSound::entry_names(), {}, [](std::string_view name) { return NativeX86DirectSound::entry_words(name); });
+	add_library("raven-dsound.dll", dsound_methods, {}, [](std::string_view name) { return NativeX86DirectSound::method_words(name); });
 	// A Direct3D 9 library that ships beside the program is the program's choice (DXVK, for one); the built-in one answers otherwise.
 	bool d3d9_beside = false;
 	if (launch) {
@@ -443,13 +445,15 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	for (const auto &[address, api] : traps)
 		process.add_api_trap(address, api.second);
 	NativeEnvironment environment(process, entry.loaded.base(), 1, 1);
-	NativeX86D3D9 direct3d9(process, environment);
+	NativeX86D3D9 direct3d9(process);
+	NativeX86DirectSound directsound(process);
 	{
 		std::map<std::string, uint64_t> method_traps;
 		for (const auto &[address, api] : traps)
-			if (api.first.starts_with("IDirect3D"))
+			if (direct3d9.com().owns(api.first) || directsound.com().owns(api.first))
 				method_traps.emplace(std::string(api.first), address);
-		direct3d9.set_trap_addresses(std::move(method_traps));
+		direct3d9.com().set_trap_addresses(method_traps);
+		directsound.com().set_trap_addresses(std::move(method_traps));
 	}
 	if (!launch) {
 		NativeLaunch initial;
@@ -654,7 +658,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				process.abandon_call();
 				throw ProcessExit{code, result.instruction};
 			}
-			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !system_api.dispatch(api) && !compat.dispatch(api) && !direct3d9.dispatch(api) &&
+			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !system_api.dispatch(api) && !compat.dispatch(api) && !direct3d9.dispatch(api) && !directsound.dispatch(api) &&
 #ifdef RAVEN_VULKAN_THUNK32
 				!vulkan32.dispatch(api) &&
 #endif
@@ -670,6 +674,22 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			if (budget.count() <= 0)
 				return NativeResult{NativeStop::timeout, 0, result.instruction, 0};
 			result = process.resume(budget);
+		}
+		if (result.stop == NativeStop::fault && getenv("RAVEN_TRACE_X86")) {
+			// What a crash needs: the registers, the bytes at the instruction and the top of the stack.
+			const auto context = process.context();
+			const auto &r = context.registers;
+			std::cerr << std::hex << "fault: eip " << uint32_t(r.rip) << " eax " << uint32_t(r.rax) << " ebx " << uint32_t(r.rbx) << " ecx " << uint32_t(r.rcx)
+				<< " edx " << uint32_t(r.rdx) << " esi " << uint32_t(r.rsi) << " edi " << uint32_t(r.rdi) << " ebp " << uint32_t(r.rbp) << " esp "
+				<< uint32_t(r.rsp) << " address " << result.fault_address << "\ncode:";
+			try {
+				for (const auto byte : process.read_memory(r.rip - 64, 96))
+					std::cerr << ' ' << unsigned(byte);
+				std::cerr << "\nstack:";
+				for (const auto byte : process.read_memory(r.rsp, 256))
+					std::cerr << ' ' << unsigned(byte);
+			} catch (...) {}
+			std::cerr << std::dec << '\n';
 		}
 		return result;
 	};

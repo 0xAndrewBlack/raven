@@ -60,7 +60,10 @@ static int native_result(const raven::NativeResult &result,bool process_exit=fal
 		std::cerr << "raven: structured exception 0x" << std::hex << result.value << " (guest handler dispatch not implemented)";
 	else
 		std::cerr << "raven: native guest fault signal " << result.signal;
-	std::cerr << " at 0x" << std::hex << result.instruction << '\n';
+	std::cerr << " at 0x" << std::hex << result.instruction;
+	if (result.stop == raven::NativeStop::fault && result.fault_address)
+		std::cerr << " (address 0x" << result.fault_address << ")";
+	std::cerr << '\n';
 	return 1;
 }
 #endif

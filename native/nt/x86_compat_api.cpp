@@ -8,11 +8,10 @@ namespace raven {
 
 namespace {
 
-constexpr std::array<std::pair<std::string_view, uint32_t>, 28> compat_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 26> compat_exports{{
 	{"GetProcessHeap", 0}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3},
 	{"CreateWindowExA", 12}, {"DispatchMessageA", 1}, {"GetMessageA", 4}, {"PeekMessageA", 5},
 	{"RegisterClassA", 1}, {"RegisterClassExA", 1}, {"UnregisterClassA", 2},
-	{"DirectSoundCreate", 3}, {"DirectSoundCreate8", 3},
 	{"GlobalHandle", 1}, {"GetVersionExA", 1}, {"WinExec", 2}, {"GetCurrentProcess", 0}, {"SetHandleCount", 1}, {"GetEnvironmentStrings", 0},
 	{"FreeEnvironmentStringsA", 1}, {"UnhandledExceptionFilter", 1}, {"RtlUnwind", 4}, {"HeapCreate", 3}, {"HeapDestroy", 1},
 	{"ExitWindowsEx", 2}, {"RealizePalette", 1}, {"CreatePalette", 1},
@@ -204,12 +203,6 @@ bool NativeX86Compat::dispatch(std::string_view name)
 		write_word(info, 16, 2);
 		process.write_memory(args[0], info);
 		process.return_api(1);
-	} else if (name == "DirectSoundCreate" || name == "DirectSoundCreate8") {
-		// No audio device is modelled: the program is told there is no driver, which games treat as running without sound.
-		const auto args = process.api_arguments(3);
-		if (args[1])
-			process.write_memory(args[1], std::vector<uint8_t>(4));
-		process.return_api(0x88780078U);
 	} else if (name == "RegisterClassA" || name == "RegisterClassExA") {
 		const bool extended = name == "RegisterClassExA";
 		auto args = process.api_arguments(1);
