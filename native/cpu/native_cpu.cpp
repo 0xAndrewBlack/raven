@@ -10,6 +10,7 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <map>
+#include <optional>
 #include <signal.h>
 #include <stdexcept>
 #include <sys/mman.h>
@@ -176,6 +177,10 @@ struct NativeProcess::State {
 	uint64_t return_gate = 0;
 	uint32_t fs_selector = 0;
 	uint32_t ldt_entries = 1;
+	// A translated call: arguments and floating point arguments supplied by an adapter, and the result it left.
+	std::optional<std::vector<uint64_t>> translated_words;
+	std::array<uint64_t, 4> translated_floats{};
+	uint64_t translated_result = 0;
 	uint64_t fs_base = 0;
 	uint32_t pending_cleanup = 0;
 	std::vector<NativeContext> callbacks;
@@ -985,9 +990,29 @@ void NativeProcess::set_api_argument(size_t index, uint32_t value)
 	write_memory(registers.rsp + 4 + index * 4, bytes);
 }
 
+void NativeProcess::begin_translated_call(std::vector<uint64_t> words, std::array<uint64_t, 4> floats)
+{
+	if (state->translated_words)
+		throw std::runtime_error("a translated native call is already running");
+	state->translated_words = std::move(words);
+	state->translated_floats = floats;
+	state->translated_result = 0;
+}
+
+uint64_t NativeProcess::end_translated_call()
+{
+	state->translated_words.reset();
+	return state->translated_result;
+}
+
 std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const
 {
 	state->require_stopped();
+	if (state->translated_words) {
+		auto words = *state->translated_words;
+		words.resize(count);
+		return words;
+	}
 	if (!state->awaiting_api || count > 128)
 		throw std::runtime_error("native process is not at an API or exceeds argument limit");
 	user_regs_struct registers{};
@@ -1021,6 +1046,8 @@ std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const
 std::array<uint64_t, 4> NativeProcess::api_float_arguments() const
 {
 	state->require_stopped();
+	if (state->translated_words)
+		return state->translated_floats;
 	if (!state->awaiting_api || state->mode != NativeMode::x64)
 		throw std::runtime_error("native process is not at an x64 API call");
 	user_fpregs_struct registers{};
@@ -1069,6 +1096,10 @@ void NativeProcess::complete_debug_print(uint64_t instruction)
 void NativeProcess::return_api(uint64_t value)
 {
 	state->require_stopped();
+	if (state->translated_words) {
+		state->translated_result = value;
+		return;
+	}
 	if (!state->awaiting_api)
 		throw std::runtime_error("native process is not awaiting an API result");
 	user_regs_struct registers{};

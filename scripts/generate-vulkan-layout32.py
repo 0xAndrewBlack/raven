@@ -21,21 +21,16 @@ marshal = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(marshal)
 
 
-def main():
-    registry = marshal.Registry(sys.argv[1])
-    header_text = Path(sys.argv[2]).read_text()
-    output = Path(sys.argv[3])
-    compiler = sys.argv[4] if len(sys.argv) > 4 else "i686-w64-mingw32-gcc"
-    include = sys.argv[5] if len(sys.argv) > 5 else str(Path(sys.argv[2]).parent.parent)
+def compute_layouts(registry, header_text, compiler, include):
+    """sizeof and offsetof/sizeof of every member of every declared structure, as the 32-bit compiler sees them."""
     declared = set(re.findall(r"\bVk\w+\b", header_text))
     entries = []
     for name, info in sorted(registry.structs.items()):
         if name not in declared:
             continue
-        members = [member for member in info["members"] if not member.bitfield]
-        if any(member.bitfield for member in info["members"]) or any(member.type.startswith("PFN_") and False for member in members):
+        if any(member.bitfield for member in info["members"]):
             continue
-        entries.append((name, members))
+        entries.append((name, info["members"]))
     lines = ["#include <stddef.h>", "#include <stdint.h>", "#define VK_USE_PLATFORM_WIN32_KHR", "#include <windows.h>", "#include <vulkan/vulkan.h>",
              "#include <vulkan/vulkan_win32.h>", "const unsigned layout[] = {0xC0FFEE01u,"]
     index = []
@@ -55,11 +50,11 @@ def main():
         if result.returncode:
             sys.stderr.write(result.stderr[-4000:])
             sys.exit(1)
-        # The table is the only initialised data of the object; its bytes are the values in order.
+        # The table is the only initialised data of the object that starts with the marker; its bytes are the values in order.
         subprocess.run([compiler.replace("gcc", "objcopy"), "-O", "binary", "-j", ".rdata", str(objfile), str(raw)], check=True)
         data = raw.read_bytes()
-        values = [int.from_bytes(data[at:at + 4], "little") for at in range(0, len(data) - len(data) % 4, 4)]
-        values = values[values.index(0xC0FFEE01) + 1:]
+    values = [int.from_bytes(data[at:at + 4], "little") for at in range(0, len(data) - len(data) % 4, 4)]
+    values = values[values.index(0xC0FFEE01) + 1:]
     cursor = 0
     layouts = {}
     for name, kind, member in index:
@@ -71,7 +66,16 @@ def main():
             cursor += 2
     if cursor > len(values):
         sys.exit(f"needed {cursor} values, found {len(values)}")
-    output.write_text(json.dumps(layouts, sort_keys=True, indent=0) + "\n")
+    return layouts
+
+
+def main():
+    registry = marshal.Registry(sys.argv[1])
+    header_text = Path(sys.argv[2]).read_text()
+    compiler = sys.argv[4] if len(sys.argv) > 4 else "i686-w64-mingw32-gcc"
+    include = sys.argv[5] if len(sys.argv) > 5 else str(Path(sys.argv[2]).parent.parent)
+    layouts = compute_layouts(registry, header_text, compiler, include)
+    Path(sys.argv[3]).write_text(json.dumps(layouts, sort_keys=True, indent=0) + "\n")
     print(len(layouts), "structures laid out")
 
 

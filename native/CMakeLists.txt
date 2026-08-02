@@ -151,6 +151,32 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             set(VULKAN_GENERATED_SOURCES graphics/vulkan_marshal.cpp graphics/vulkan_generated.cpp)
         endif()
         target_sources(raven_cpu PRIVATE graphics/vulkan_bridge.cpp graphics/vulkan_resources.cpp graphics/vulkan_enumerate.cpp graphics/vulkan_queries.cpp)
+        # 32-bit programs reach the bridge through tables built with an i686 compiler, which also lays out Vulkan structures for them.
+        find_program(RAVEN_MINGW32_VULKAN i686-w64-mingw32-gcc)
+        if(VULKAN_GENERATED_SOURCES AND RAVEN_MINGW32_VULKAN)
+            get_filename_component(RAVEN_VULKAN_HEADER_DIR ${RAVEN_VULKAN_CORE_HEADER} DIRECTORY)
+            get_filename_component(RAVEN_VULKAN_INCLUDE_ROOT ${RAVEN_VULKAN_HEADER_DIR} DIRECTORY)
+            file(COPY ${RAVEN_VULKAN_HEADER_DIR} DESTINATION ${VULKAN_GENERATED_DIR}/mingw-include)
+            if(EXISTS ${RAVEN_VULKAN_INCLUDE_ROOT}/vk_video)
+                file(COPY ${RAVEN_VULKAN_INCLUDE_ROOT}/vk_video DESTINATION ${VULKAN_GENERATED_DIR}/mingw-include)
+            endif()
+            add_custom_command(OUTPUT ${VULKAN_GENERATED_DIR}/vulkan_thunk32.inc
+                COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/generate-vulkan-thunk32.py ${RAVEN_VK_XML} ${RAVEN_VULKAN_CORE_HEADER}
+                    ${VULKAN_GENERATED_DIR}/vulkan_thunk32.inc ${RAVEN_MINGW32_VULKAN} ${VULKAN_GENERATED_DIR}/mingw-include
+                DEPENDS ${PROJECT_SOURCE_DIR}/scripts/generate-vulkan-thunk32.py ${PROJECT_SOURCE_DIR}/scripts/generate-vulkan-layout32.py
+                    ${PROJECT_SOURCE_DIR}/scripts/generate-vulkan-marshal.py ${RAVEN_VK_XML} VERBATIM)
+            add_custom_target(vulkan_thunk32_generated DEPENDS ${VULKAN_GENERATED_DIR}/vulkan_thunk32.inc)
+            target_sources(raven_cpu PRIVATE graphics/vulkan_thunk32.cpp graphics/vulkan_thunk32_tables.cpp)
+            target_include_directories(raven_cpu PRIVATE ${VULKAN_GENERATED_DIR})
+            target_compile_definitions(raven_cpu PUBLIC RAVEN_VULKAN_THUNK32=1)
+            add_dependencies(raven_cpu vulkan_thunk32_generated)
+            add_executable(vulkan_thunk32_test graphics/vulkan_thunk32_test.cpp graphics/vulkan_thunk32_tables.cpp)
+            target_include_directories(vulkan_thunk32_test PRIVATE ${VULKAN_GENERATED_DIR})
+            target_link_libraries(vulkan_thunk32_test PRIVATE Vulkan::Vulkan)
+            add_dependencies(vulkan_thunk32_test vulkan_thunk32_generated)
+            add_test(NAME native_vulkan_thunk32_tables COMMAND vulkan_thunk32_test)
+            set_tests_properties(native_vulkan_thunk32_tables PROPERTIES TIMEOUT 30)
+        endif()
         if(VULKAN_GENERATED_SOURCES)
             target_sources(raven_cpu PRIVATE ${VULKAN_GENERATED_SOURCES})
             target_include_directories(raven_cpu PRIVATE ${VULKAN_GENERATED_DIR})
@@ -1269,6 +1295,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -o ${CMAKE_CURRENT_BINARY_DIR}/x86-ucrt-client.exe ${LOADER_SOURCES}/x86_ucrt_client.c -lkernel32
                     DEPENDS ${LOADER_SOURCES}/x86_ucrt_client.c VERBATIM)
                 add_custom_target(x86_ucrt_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/x86-ucrt-client.exe x86_ucrt_component)
+                if(TARGET vulkan_thunk32_generated)
+                    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-vulkan-client.exe
+                        COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
+                            -Wl,--entry,_raven_entry,--no-insert-timestamp
+                            -o ${CMAKE_CURRENT_BINARY_DIR}/x86-vulkan-client.exe ${LOADER_SOURCES}/x86_vulkan_client.c -lkernel32
+                        DEPENDS ${LOADER_SOURCES}/x86_vulkan_client.c VERBATIM)
+                    add_custom_target(x86_vulkan_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/x86-vulkan-client.exe)
+                    add_test(NAME native_x86_vulkan_compute COMMAND ${CMAKE_COMMAND} -E env VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+                        $<TARGET_FILE:raven> --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/x86-vulkan-client.exe)
+                    set_tests_properties(native_x86_vulkan_compute PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                endif()
                 set(RAVEN_DXVK_PE32_DIR "" CACHE PATH "Directory holding the 32-bit DXVK libraries (d3d9.dll)")
                 if(RAVEN_DXVK_PE32_DIR AND EXISTS "${RAVEN_DXVK_PE32_DIR}/d3d9.dll")
                     add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-load-client.exe

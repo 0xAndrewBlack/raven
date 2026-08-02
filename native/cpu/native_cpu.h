@@ -102,6 +102,10 @@ public:
 	std::vector<uint64_t> api_arguments(size_t count) const;
 	// Replaces one stdcall argument word of the pending x86 API call, so an adapter can forward the call to another handler.
 	void set_api_argument(size_t index, uint32_t value);
+	// Runs a handler written for x64 argument conventions on behalf of a 32-bit call: api_arguments and api_float_arguments answer from the
+	// given words, and return_api keeps its value for end_translated_call instead of resuming the guest.
+	void begin_translated_call(std::vector<uint64_t> words, std::array<uint64_t, 4> floats);
+	uint64_t end_translated_call();
 	// Low 64 bits of XMM0 to XMM3, where an x64 caller passes the first four floating-point arguments.
 	std::array<uint64_t, 4> api_float_arguments() const;
 	void return_api(uint64_t value);

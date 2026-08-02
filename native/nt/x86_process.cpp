@@ -20,6 +20,9 @@
 #include "registry_words.h"
 #include "system_exports.h"
 #include "x86_loader.h"
+#ifdef RAVEN_VULKAN_THUNK32
+#include "graphics/vulkan_thunk32_engine.h"
+#endif
 #include "x86_system_api.h"
 #include "x86_d3d9.h"
 #include "x86_thread_api.h"
@@ -415,6 +418,19 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		add_library("d3d9.dll", NativeX86D3D9::entry_names(), {}, [](std::string_view) { return uint32_t(1); });
 		add_library("raven-d3d9.dll", d3d9_methods, {}, [](std::string_view name) { return NativeX86D3D9::method_words(name); });
 	}
+#ifdef RAVEN_VULKAN_THUNK32
+	// The Vulkan loader for 32-bit programs: every command the bridge implements, taking 32-bit stdcall arguments.
+	static const auto vulkan_exports = VulkanThunk32::exports(VulkanBridge::exports());
+	std::vector<std::string_view> vulkan_names;
+	for (const auto &item : vulkan_exports)
+		vulkan_names.push_back(item.first);
+	add_library("vulkan-1.dll", vulkan_names, {}, [](std::string_view name) {
+		for (const auto &item : vulkan_exports)
+			if (item.first == name)
+				return item.second;
+		return uint32_t(0);
+	});
+#endif
 	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
 	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
 	modules.bind_imports();
@@ -512,6 +528,17 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	for (const auto name : shared_allowed)
 		shared_names.insert(name);
 	windows.set_deadline(deadline);
+#ifdef RAVEN_VULKAN_THUNK32
+	VulkanBridge vulkan(process, modules);
+	vulkan.set_surface_source({[&windows](uint64_t window) -> std::optional<std::pair<void *, void *>> {
+		const auto surface = windows.host_surface(window);
+		if (!surface)
+			return std::nullopt;
+		return std::pair<void *, void *>{surface->display, surface->surface};
+	}, [&windows](uint64_t window) { windows.release_host_surface(window); },
+		[&windows](uint64_t window) { return windows.client_size(window); }});
+	VulkanThunk32 vulkan32(process, vulkan);
+#endif
 	windows.set_presentation(std::move(presentation));
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
 	struct ProcessExit { uint32_t code; uint64_t instruction; };
@@ -605,7 +632,11 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				process.abandon_call();
 				throw ProcessExit{code, result.instruction};
 			}
-			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !system_api.dispatch(api) && !compat.dispatch(api) && !direct3d9.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
+			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !system_api.dispatch(api) && !compat.dispatch(api) && !direct3d9.dispatch(api) &&
+#ifdef RAVEN_VULKAN_THUNK32
+				!vulkan32.dispatch(api) &&
+#endif
+				 !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
 				!desktop.dispatch(api) && !windows.dispatch(api) && !advapi.dispatch(api) && !profile.dispatch(api) &&
 				!crt.dispatch(api) && !unsupported_library(process, environment, api) &&
