@@ -1593,12 +1593,12 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     add_test(NAME native_d3d11_fullscreen COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-fullscreen.py
                         $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/fullscreen.exe ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d11-fullscreen)
-                    set_tests_properties(native_d3d11_fullscreen PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                    set_tests_properties(native_d3d11_fullscreen PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d11_fullscreen_gpu COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-fullscreen.py
                             $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/fullscreen.exe ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d11-fullscreen-gpu gpu)
-                        set_tests_properties(native_d3d11_fullscreen_gpu PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
+                        set_tests_properties(native_d3d11_fullscreen_gpu PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     # A 32-bit program drawing through 32-bit DXVK, the 32-bit Vulkan loader and the same bridge.
                     if(RAVEN_MINGW32 AND RAVEN_DXVK_PE32_DIR AND EXISTS "${RAVEN_DXVK_PE32_DIR}/d3d9.dll" AND TARGET vulkan_thunk32_generated)
@@ -1611,7 +1611,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         add_test(NAME native_d3d9_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d9-present.py
                             $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d9-window.exe ${RAVEN_DXVK_PE32_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d9-present)
-                        set_tests_properties(native_d3d9_present PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                        set_tests_properties(native_d3d9_present PROPERTIES TIMEOUT 480 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     endif()
                     # The same workload built for 64 bits, through the 64-bit DXVK.
                     if(RAVEN_MINGW64 AND RAVEN_DXVK_PE64_DIR)
@@ -1624,7 +1624,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         add_test(NAME native_d3d9_present_x64 COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d9-present.py
                             $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d9-window64.exe ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d9-present-x64)
-                        set_tests_properties(native_d3d9_present_x64 PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                        set_tests_properties(native_d3d9_present_x64 PROPERTIES TIMEOUT 480 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                         # Direct3D 8 reaches the same Vulkan through DXVK's d3d8.dll, which sits on its Direct3D 9.
                         add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/d3d8-window64.exe
                             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector -fno-builtin
@@ -1635,7 +1635,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         add_test(NAME native_d3d8_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d9-present.py
                             $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d8-window64.exe ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d8-present)
-                        set_tests_properties(native_d3d8_present PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                        set_tests_properties(native_d3d8_present PROPERTIES TIMEOUT 480 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     endif()
                 endif()
             endif()

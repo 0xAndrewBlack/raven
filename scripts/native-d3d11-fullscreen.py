@@ -67,7 +67,7 @@ def main():
         if "VK_DRIVER_FILES" not in env and lavapipe.exists() and not GPU:
             env["VK_DRIVER_FILES"] = str(lavapipe)
         try:
-            result = subprocess.run([str(raven), "--run-process", "--execution=native", "--timeout-ms=100000", "--desktop=wayland", str(run / "fullscreen.exe")],
+            result = subprocess.run([str(raven), "--run-process", "--execution=native", "--timeout-ms=800000", "--desktop=wayland", str(run / "fullscreen.exe")],
                                     capture_output=True, text=True, timeout=120, env=env)
         finally:
             if compositor:

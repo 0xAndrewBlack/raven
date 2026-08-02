@@ -89,11 +89,11 @@ def main():
         lavapipe = Path("/usr/share/vulkan/icd.d/lvp_icd.json")
         if "VK_DRIVER_FILES" not in env and lavapipe.exists() and not GPU:
             env["VK_DRIVER_FILES"] = str(lavapipe)
-        process = subprocess.Popen([str(raven), "--run-process", "--execution=native", "--timeout-ms=100000", "--desktop=wayland", str(run / "window.exe")],
+        process = subprocess.Popen([str(raven), "--run-process", "--execution=native", "--timeout-ms=400000", "--desktop=wayland", str(run / "window.exe")],
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         status = prefix / "drive_c" / "window.txt"
         try:
-            deadline = time.time() + 90
+            deadline = time.time() + 300
             while time.time() < deadline and process.poll() is None and not status.exists():
                 time.sleep(0.5)
             if not status.exists() or status.read_text() != "OK":

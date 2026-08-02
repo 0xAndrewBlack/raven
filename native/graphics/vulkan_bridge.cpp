@@ -96,8 +96,16 @@ VulkanBridge::~VulkanBridge()
 {
 	while (!devices.empty())
 		destroy_device(devices.begin()->first);
-	for (const auto &[token, window] : surface_windows)
+	// Surfaces a program left behind belong to the instance, which still exists here.
+	for (const auto &[token, window] : surface_windows) {
 		if (surface_source.release) surface_source.release(window);
+		const auto found = generic.find(token);
+		if (found == generic.end() || instances.empty())
+			continue;
+		const auto instance = instances.begin()->second;
+		if (const auto destroy = reinterpret_cast<PFN_vkDestroySurfaceKHR>(vkGetInstanceProcAddr(instance, "vkDestroySurfaceKHR")))
+			destroy(instance, reinterpret_cast<VkSurfaceKHR>(found->second.host), nullptr);
+	}
 	for (const auto &[token, instance] : instances)
 		vkDestroyInstance(instance, nullptr);
 }
