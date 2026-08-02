@@ -1,4 +1,5 @@
 #include "windows.h"
+#include "nt/system_exports.h"
 #include "nt/text.h"
 
 #include <algorithm>
@@ -897,6 +898,10 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 			"D3DKMTQueryAdapterInfo", "D3DKMTQueryVideoMemoryInfo", "D3DKMTEnumAdapters", "D3DKMTEnumAdapters2", "D3DKMTGetDeviceState",
 			"D3DKMTCreateDevice", "D3DKMTDestroyDevice", "D3DKMTWaitForVerticalBlankEvent", "D3DKMTCheckVidPnExclusiveOwnership"})
 		registry.add(thunk, 1, [](ApiCall &call) { call.ret(0xC00000BBU); });
+	// The same answer for every other thunk the library exports: each takes one pointer to its parameter structure.
+	for (const auto name : system_export_names("gdi32.dll"))
+		if (name.starts_with("D3DKMT") && !registry.has(name))
+			registry.add(name, 1, [](ApiCall &call) { call.ret(0xC00000BBU); });
 	// There is no display topology to report: callers fall back to their single-monitor behavior.
 	registry.add("GetDisplayConfigBufferSizes", 3, [](ApiCall &call) {
 		if (call[1]) call.store<uint32_t>(call[1], 0);
