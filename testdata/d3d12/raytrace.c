@@ -1,4 +1,8 @@
-/* Built with -DANYHIT this scene has an any hit shader that cuts the triangle and a callable shader that supplies the background (rtanyhit.hlsl);
+/* Built with -DSCENE the structures are richer: one bottom level structure with two triangle geometries, built for compaction and then compacted,
+ * and a top level structure with two instances with different transforms and instance ids (rtscene.hlsl colours a hit by instance and geometry).
+ * Besides C:\\rtscene.raw and C:\\rtscene.txt it writes C:\\rtscene_sizes.txt, the compacted and the full size of the bottom level structure.
+ *
+ * Built with -DANYHIT this scene has an any hit shader that cuts the triangle and a callable shader that supplies the background (rtanyhit.hlsl);
  * built with -DPROCEDURAL the geometry is one box and an intersection shader makes a disc of it (rtprocedural.hlsl). The files are
  * C:\\rtanyhit.* and C:\\rtprocedural.*.
  *
@@ -13,7 +17,12 @@
 #define COBJMACROS
 #include <windows.h>
 #include <d3d12.h>
-#if defined(ANYHIT)
+#if defined(SCENE)
+#include "rtscene_shaders.h"
+#define rt_library scene_library
+#define OUT_TXT L"C:\\rtscene.txt"
+#define OUT_RAW L"C:\\rtscene.raw"
+#elif defined(ANYHIT)
 #include "rtanyhit_shaders.h"
 #define rt_library anyhit_library
 #define OUT_TXT L"C:\\rtanyhit.txt"
@@ -116,11 +125,18 @@ void __stdcall entry(void)
 	CHECK("list 4", ID3D12GraphicsCommandList_QueryInterface(plain, &IID_ID3D12GraphicsCommandList4, (void **)&list));
 
 	/* The triangle of the rasterized workloads, in the plane z = 0. */
+#if defined(SCENE)
+	/* Two triangles in the plane z = 0: one in the lower and one in the upper part of the space the instances are placed in. */
+	static const float vertices[18] = {-0.4f, -0.4f, 0.0f, 0.0f, 0.4f, 0.0f, 0.4f, -0.4f, 0.0f,
+		-0.4f, 0.45f, 0.0f, 0.0f, 0.85f, 0.0f, 0.4f, 0.45f, 0.0f};
+#else
 	static const float vertices[9] = {-0.8f, -0.8f, 0.0f, 0.0f, 0.8f, 0.0f, 0.8f, -0.8f, 0.0f};
+#endif
 	ID3D12Resource *vertex_buffer = make_buffer(D3D12_HEAP_TYPE_UPLOAD, sizeof vertices, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "vertex buffer");
 	upload(vertex_buffer, vertices, sizeof vertices);
 
 	D3D12_RAYTRACING_GEOMETRY_DESC geometry = {0};
+	D3D12_RAYTRACING_GEOMETRY_DESC geometries[2] = {{0}, {0}};
 #if defined(PROCEDURAL)
 	/* One box around the disc: x and y from -0.5 to 0.5, z from -0.1 to 0.1. */
 	static const float box[6] = {-0.5f, -0.5f, -0.1f, 0.5f, 0.5f, 0.1f};
@@ -144,12 +160,27 @@ void __stdcall entry(void)
 	geometry.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
 	geometry.Triangles.VertexCount = 3;
 #endif
+#if defined(SCENE)
+	for (int index = 0; index < 2; ++index) {
+		geometries[index] = geometry;
+		geometries[index].Triangles.VertexBuffer.StartAddress += (UINT64)index * 3 * 3 * sizeof(float);
+	}
+#endif
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bottom_inputs = {0};
 	bottom_inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+#if defined(SCENE)
+	bottom_inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
+	bottom_inputs.NumDescs = 2;
+#else
 	bottom_inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
 	bottom_inputs.NumDescs = 1;
+#endif
 	bottom_inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+#if defined(SCENE)
+	bottom_inputs.pGeometryDescs = geometries;
+#else
 	bottom_inputs.pGeometryDescs = &geometry;
+#endif
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bottom_info = {0};
 	ID3D12Device5_GetRaytracingAccelerationStructurePrebuildInfo(device5, &bottom_inputs, &bottom_info);
 	if (!bottom_info.ResultDataMaxSizeInBytes)
@@ -158,6 +189,19 @@ void __stdcall entry(void)
 	ID3D12Resource *bottom = make_buffer(D3D12_HEAP_TYPE_DEFAULT, bottom_info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, "bottom level buffer");
 
+#if defined(SCENE)
+	/* Two instances: the structure moved left, and the structure at half size moved right; the instance ids are 0 and 1. */
+	D3D12_RAYTRACING_INSTANCE_DESC instance[2] = {{{{0}}}, {{{0}}}};
+	instance[0].Transform[0][0] = instance[0].Transform[1][1] = instance[0].Transform[2][2] = 1.0f;
+	instance[0].Transform[0][3] = -0.5f;
+	instance[0].InstanceID = 0;
+	instance[1].Transform[0][0] = instance[1].Transform[1][1] = instance[1].Transform[2][2] = 0.5f;
+	instance[1].Transform[0][3] = 0.5f;
+	instance[1].InstanceID = 1;
+	instance[0].InstanceMask = instance[1].InstanceMask = 0xff;
+	/* The bottom level address is filled in once the compacted structure exists. */
+	ID3D12Resource *instances = make_buffer(D3D12_HEAP_TYPE_UPLOAD, sizeof instance, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "instance buffer");
+#else
 	D3D12_RAYTRACING_INSTANCE_DESC instance = {0};
 	instance.Transform[0][0] = instance.Transform[1][1] = instance.Transform[2][2] = 1.0f;
 	instance.InstanceMask = 0xff;
@@ -165,10 +209,15 @@ void __stdcall entry(void)
 	ID3D12Resource *instances = make_buffer(D3D12_HEAP_TYPE_UPLOAD, sizeof instance, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "instance buffer");
 	upload(instances, &instance, sizeof instance);
 
+#endif
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS top_inputs = {0};
 	top_inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
 	top_inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+#if defined(SCENE)
+	top_inputs.NumDescs = 2;
+#else
 	top_inputs.NumDescs = 1;
+#endif
 	top_inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
 	top_inputs.InstanceDescs = ID3D12Resource_GetGPUVirtualAddress(instances);
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO top_info = {0};
@@ -281,8 +330,61 @@ void __stdcall entry(void)
 	build.DestAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(bottom);
 	build.Inputs = bottom_inputs;
 	build.ScratchAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(scratch);
+#if defined(SCENE)
+	/* Build the bottom level structure and have the GPU write the size it would have compacted, read that size back, and make the compacted
+	 * copy; the top level structure is then built over the compacted one. */
+	ID3D12Resource *size_buffer = make_buffer(D3D12_HEAP_TYPE_DEFAULT, 8, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "size buffer");
+	ID3D12Resource *size_readback = make_buffer(D3D12_HEAP_TYPE_READBACK, 8, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, "size readback");
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC post = {ID3D12Resource_GetGPUVirtualAddress(size_buffer),
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE};
+	ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(list, &build, 1, &post);
+	uav_barrier(list, bottom);
+	D3D12_RESOURCE_BARRIER to_copy = {D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, D3D12_RESOURCE_BARRIER_FLAG_NONE};
+	to_copy.Transition.pResource = size_buffer;
+	to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+	to_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+	to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+	ID3D12GraphicsCommandList4_ResourceBarrier(list, 1, &to_copy);
+	ID3D12GraphicsCommandList4_CopyBufferRegion(list, size_readback, 0, size_buffer, 0, 8);
+	CHECK("close first", ID3D12GraphicsCommandList4_Close(list));
+	ID3D12Fence *first_fence = NULL;
+	CHECK("first fence", ID3D12Device_CreateFence(device, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&first_fence));
+	ID3D12CommandList *first_lists[] = {(ID3D12CommandList *)list};
+	ID3D12CommandQueue_ExecuteCommandLists(queue, 1, first_lists);
+	CHECK("first signal", ID3D12CommandQueue_Signal(queue, first_fence, 1));
+	HANDLE first_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+	CHECK("first completion", ID3D12Fence_SetEventOnCompletion(first_fence, 1, first_event));
+	if (WaitForSingleObject(first_event, 60000) != WAIT_OBJECT_0)
+		fail("first wait", 0);
+	UINT64 compacted_size = 0;
+	{
+		void *size_mapped = NULL;
+		D3D12_RANGE size_range = {0, 8};
+		CHECK("map size", ID3D12Resource_Map(size_readback, 0, &size_range, &size_mapped));
+		compacted_size = *(const UINT64 *)size_mapped;
+		D3D12_RANGE size_none = {0, 0};
+		ID3D12Resource_Unmap(size_readback, 0, &size_none);
+	}
+	if (!compacted_size || compacted_size > bottom_info.ResultDataMaxSizeInBytes)
+		fail("compacted size", (HRESULT)compacted_size);
+	{
+		char text[64];
+		wsprintfA(text, "%u %u", (unsigned)compacted_size, (unsigned)bottom_info.ResultDataMaxSizeInBytes);
+		write_file(L"C:\\rtscene_sizes.txt", text, (DWORD)lstrlenA(text));
+	}
+	ID3D12Resource *compact = make_buffer(D3D12_HEAP_TYPE_DEFAULT, compacted_size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, "compacted buffer");
+	instance[0].AccelerationStructure = instance[1].AccelerationStructure = ID3D12Resource_GetGPUVirtualAddress(compact);
+	upload(instances, instance, sizeof instance);
+	CHECK("reset allocator", ID3D12CommandAllocator_Reset(allocator));
+	CHECK("reset list", ID3D12GraphicsCommandList4_Reset(list, allocator, NULL));
+	ID3D12GraphicsCommandList4_CopyRaytracingAccelerationStructure(list, ID3D12Resource_GetGPUVirtualAddress(compact),
+		ID3D12Resource_GetGPUVirtualAddress(bottom), D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+	uav_barrier(list, compact);
+#else
 	ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(list, &build, 0, NULL);
 	uav_barrier(list, bottom);
+#endif
 	build.DestAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(top);
 	build.Inputs = top_inputs;
 	ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(list, &build, 0, NULL);
