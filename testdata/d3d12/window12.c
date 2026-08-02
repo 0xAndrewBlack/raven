@@ -1,4 +1,4 @@
-/* Direct3D 12 workload with a window: draws the vertex-coloured triangle into the back buffers of a DXGI swap chain on a direct queue and
+/* Direct3D 12 workload with a window (built a second time with -DSYNC_INTERVAL=1 to present in step with the display): draws the vertex-coloured triangle into the back buffers of a DXGI swap chain on a direct queue and
  * presents sixty frames. The last frame is also copied into a read-back buffer (C:\\window12_last.raw) before it is presented. C:\\window12.txt
  * holds OK once all frames are presented, or the first failing step. The program keeps presenting the last picture for a capture, then
  * resizes its window and swap chain to 320 by 200, presents again with a different clear colour, writes the read-back of that frame to
@@ -9,6 +9,9 @@
 #include <dxgi1_4.h>
 #include "tri5_shaders.h"
 
+#ifndef SYNC_INTERVAL
+#define SYNC_INTERVAL 0
+#endif
 #define SIZE 256
 #define WIDE 320
 #define HIGH 200
@@ -213,7 +216,7 @@ void __stdcall entry(void)
 		CHECK("close", ID3D12GraphicsCommandList_Close(list));
 		ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
 		ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-		CHECK("present", IDXGISwapChain3_Present(swap, 0, 0));
+		CHECK("present", IDXGISwapChain3_Present(swap, SYNC_INTERVAL, 0));
 		++fence_value;
 		CHECK("signal", ID3D12CommandQueue_Signal(queue, fence, fence_value));
 		CHECK("completion", ID3D12Fence_SetEventOnCompletion(fence, fence_value, event));
@@ -286,7 +289,7 @@ void __stdcall entry(void)
 		CHECK("close", ID3D12GraphicsCommandList_Close(list));
 		ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
 		ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-		CHECK("present after resize", IDXGISwapChain3_Present(swap, 0, 0));
+		CHECK("present after resize", IDXGISwapChain3_Present(swap, SYNC_INTERVAL, 0));
 		++fence_value;
 		CHECK("signal", ID3D12CommandQueue_Signal(queue, fence, fence_value));
 		CHECK("completion", ID3D12Fence_SetEventOnCompletion(fence, fence_value, event));
@@ -327,7 +330,7 @@ void __stdcall entry(void)
 		CHECK("close", ID3D12GraphicsCommandList_Close(list));
 		ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
 		ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-		IDXGISwapChain3_Present(swap, 0, 0);
+		IDXGISwapChain3_Present(swap, SYNC_INTERVAL, 0);
 		++fence_value;
 		ID3D12CommandQueue_Signal(queue, fence, fence_value);
 		ID3D12Fence_SetEventOnCompletion(fence, fence_value, event);
