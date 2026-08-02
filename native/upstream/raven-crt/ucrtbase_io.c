@@ -949,24 +949,28 @@ CRT float fmaxf(float a, float b) { return a != a ? b : b != b ? a : a > b ? a :
 CRT float fminf(float a, float b) { return a != a ? b : b != b ? a : a < b ? a : b; }
 CRT long lroundf(float x) { return (long)(x >= 0 ? (double)x + 0.5 : (double)x - 0.5); }
 
-CRT float powf(float x, float y)
+static double raven_pow(double base, double exponent)
 {
-	double base = x, exponent = y;
 	if (exponent == 0 || base == 1)
-		return 1.0f;
+		return 1.0;
 	if (base == 0)
-		return exponent > 0 ? 0.0f : (float)(1.0 / 0.0);
+		return exponent > 0 ? 0.0 : 1.0 / 0.0;
 	if (base < 0) {
 		long long whole = (long long)exponent;
 		if ((double)whole != exponent)
-			return (float)(0.0 / 0.0);
+			return 0.0 / 0.0;
 		double magnitude = raven_exp(exponent * raven_log(-base));
-		return (float)((whole & 1) ? -magnitude : magnitude);
+		return (whole & 1) ? -magnitude : magnitude;
 	}
-	return (float)raven_exp(exponent * raven_log(base));
+	return raven_exp(exponent * raven_log(base));
 }
 
+CRT float powf(float x, float y) { return (float)raven_pow(x, y); }
+CRT double pow(double x, double y) { return raven_pow(x, y); }
+CRT double cos(double x) { return raven_cos(x); }
+
 /* ---- non-local jumps and threads ---- */
+#ifdef __x86_64__
 __asm__(
 	".section .drectve\n"
 	".ascii \" -export:__intrinsic_setjmp -export:longjmp\"\n"
@@ -1030,6 +1034,40 @@ __asm__(
 	"	movq 16(%rcx), %rsp\n"
 	"	jmp *80(%rcx)\n"
 );
+#else
+/* The 32-bit buffer keeps the callee-saved registers, the stack pointer after the return and the return address. */
+__asm__(
+	".section .drectve\n"
+	".ascii \" -export:_setjmp3 -export:longjmp\"\n"
+	".text\n"
+	".globl __setjmp3\n"
+	"__setjmp3:\n"
+	"	movl 4(%esp), %edx\n"
+	"	movl %ebp, 0(%edx)\n"
+	"	movl %ebx, 4(%edx)\n"
+	"	movl %edi, 8(%edx)\n"
+	"	movl %esi, 12(%edx)\n"
+	"	leal 4(%esp), %eax\n"
+	"	movl %eax, 16(%edx)\n"
+	"	movl (%esp), %eax\n"
+	"	movl %eax, 20(%edx)\n"
+	"	xorl %eax, %eax\n"
+	"	ret\n"
+	".globl _longjmp\n"
+	"_longjmp:\n"
+	"	movl 4(%esp), %edx\n"
+	"	movl 8(%esp), %eax\n"
+	"	testl %eax, %eax\n"
+	"	jnz 1f\n"
+	"	movl $1, %eax\n"
+	"1:	movl 0(%edx), %ebp\n"
+	"	movl 4(%edx), %ebx\n"
+	"	movl 8(%edx), %edi\n"
+	"	movl 12(%edx), %esi\n"
+	"	movl 16(%edx), %esp\n"
+	"	jmp *20(%edx)\n"
+);
+#endif
 
 typedef struct {
 	unsigned (__stdcall *function)(void *);

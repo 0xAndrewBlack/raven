@@ -79,7 +79,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_BINARY_DIR}/nls-generated/c_1252.nls
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h -P ${NLS_SOURCE}/embed.cmake
         DEPENDS raven-txt2nls ${NLS_SOURCE}/c_1252.txt ${NLS_SOURCE}/embed.cmake VERBATIM)
-    target_sources(raven_cpu PRIVATE nt/nls.cpp nt/multibyte.cpp nt/startup.cpp nt/launch.cpp nt/file.cpp nt/prefix.cpp nt/registry.cpp nt/advapi_api.cpp nt/msvcrt_api.cpp nt/profile_api.cpp nt/x86_process.cpp nt/x86_thread_api.cpp nt/x86_compat_api.cpp nt/x86_d3d9.cpp ${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h)
+    target_sources(raven_cpu PRIVATE nt/nls.cpp nt/multibyte.cpp nt/startup.cpp nt/launch.cpp nt/file.cpp nt/prefix.cpp nt/registry.cpp nt/advapi_api.cpp nt/msvcrt_api.cpp nt/profile_api.cpp nt/x86_process.cpp nt/x86_thread_api.cpp nt/x86_compat_api.cpp nt/x86_loader.cpp nt/x86_d3d9.cpp ${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h)
     file(SHA256 ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-utf8/decode.inc UTF8_SOURCE_HASH)
     if(NOT UTF8_SOURCE_HASH STREQUAL "5aafb54712b7c21db62bfdf966e5d8852200941643bde751150eb0d55a909524")
         message(FATAL_ERROR "Pinned ReactOS UTF-8 decoder differs")
@@ -1255,6 +1255,23 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -o ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d9-client.exe ${LOADER_SOURCES}/x86_d3d9_client.c -lkernel32
                     DEPENDS ${LOADER_SOURCES}/x86_d3d9_client.c VERBATIM)
                 add_custom_target(x86_d3d9_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d9-client.exe)
+                # The 32-bit C runtime component sits beside the runtime and is loaded when a 32-bit library imports ucrtbase or an API set.
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.dll
+                    COMMAND ${RAVEN_MINGW32} -c -O2 -w -ffreestanding -fno-builtin -ffile-prefix-map=${PROJECT_SOURCE_DIR}=raven
+                        ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase.c -o ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.o
+                    COMMAND ${RAVEN_MINGW32} -shared -nostdlib -Wl,--entry,_DllMain@12,--image-base,0x1fc00000,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.dll ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.o -lkernel32 -lgcc
+                    DEPENDS ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase.c ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase_io.c VERBATIM)
+                add_custom_target(x86_ucrt_component ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.dll)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-ucrt-client.exe
+                    COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
+                        -Wl,--entry,_raven_entry,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/x86-ucrt-client.exe ${LOADER_SOURCES}/x86_ucrt_client.c -lkernel32
+                    DEPENDS ${LOADER_SOURCES}/x86_ucrt_client.c VERBATIM)
+                add_custom_target(x86_ucrt_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/x86-ucrt-client.exe x86_ucrt_component)
+                add_test(NAME native_x86_ucrt COMMAND raven --run-process --execution=native
+                    ${CMAKE_CURRENT_BINARY_DIR}/x86-ucrt-client.exe)
+                set_tests_properties(native_x86_ucrt PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
                 add_test(NAME native_x86_d3d9_objects COMMAND raven --run-process --execution=native
                     ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d9-client.exe)
                 set_tests_properties(native_x86_d3d9_objects PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")

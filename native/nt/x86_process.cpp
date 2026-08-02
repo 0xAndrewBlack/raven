@@ -17,6 +17,7 @@
 #include "kernel_context.h"
 #include "paths.h"
 #include "x86_compat_api.h"
+#include "x86_loader.h"
 #include "x86_d3d9.h"
 #include "x86_thread_api.h"
 
@@ -35,7 +36,7 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 92> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 104> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitProcess", 1}, {"ExitThread", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetExitCodeThread", 2},
@@ -45,6 +46,10 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 92> kernel32_exports
 	{"OutputDebugStringA", 1}, {"ResetEvent", 1}, {"ResumeThread", 1}, {"SetEvent", 1}, {"SetLastError", 1}, {"SetThreadPriority", 2}, {"SizeofResource", 2}, {"Sleep", 1}, {"SwitchToThread", 0}, {"TryEnterCriticalSection", 1}, {"VirtualAlloc", 4},
 	// Services of the 32-bit CRT era: legacy file calls, global memory, code pages, environment and version queries.
 	{"_lopen", 2}, {"_lcreat", 2}, {"_lread", 3}, {"_lwrite", 3}, {"_llseek", 3}, {"lstrcpyA", 2}, {"lstrlenA", 1}, {"GetWindowsDirectoryA", 2}, {"GlobalHandle", 1}, {"GetVersionExA", 1}, {"WinExec", 2}, {"GlobalUnlock", 1}, {"GlobalFree", 1}, {"GlobalAlloc", 2}, {"SetErrorMode", 1}, {"GlobalLock", 1}, {"GetCurrentProcess", 0}, {"SetHandleCount", 1}, {"GetOEMCP", 0}, {"GetCPInfo", 2}, {"WideCharToMultiByte", 8}, {"DeleteFileA", 1}, {"GetEnvironmentStrings", 0}, {"FreeEnvironmentStringsW", 1}, {"FreeEnvironmentStringsA", 1}, {"UnhandledExceptionFilter", 1}, {"RtlUnwind", 4}, {"HeapCreate", 3}, {"HeapDestroy", 1}, {"TerminateProcess", 2}, {"GetEnvironmentStringsW", 0}, {"GetVersion", 0}, {"GetFileAttributesA", 1},
+	// File and clock services of the C runtime component: the shared handlers read 32-bit words; a 64-bit offset takes two.
+	{"CreateFileW", 7}, {"DeleteFileW", 1}, {"GetEnvironmentVariableA", 3}, {"GetFileInformationByHandle", 2}, {"MultiByteToWideChar", 6},
+	{"QueryPerformanceCounter", 1}, {"QueryPerformanceFrequency", 1}, {"ReadFile", 5}, {"SetFilePointer", 4}, {"SetFilePointerEx", 5},
+	{"GetFileSizeEx", 2}, {"FlushFileBuffers", 1},
 	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WaitForSingleObject", 2}, {"WriteFile", 5}, {"_lclose", 1}, {"lstrcpyW", 2}, {"lstrlenW", 1},
 }};
 
@@ -340,70 +345,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeThreads guest_threads(process, environment, memory, nullptr, deadline);
 	NativeX86Threads thread_api(process, environment, kernel_objects, guest_threads);
 	object_api.set_cooperative(true);
+	NativeX86Loader library_loader(process, environment, modules, paths,
+		[&](uint64_t address, std::span<const uint64_t> arguments) { return call_guest(address, arguments); });
 	module_api.set_loader([&](std::string name) -> uint64_t {
-		for (auto &character : name)
-			if (character >= 'A' && character <= 'Z')
-				character = static_cast<char>(character + ('a' - 'A'));
-		if (name.find('.') == std::string::npos)
-			name += ".dll";
-		const auto found = modules.all().find(name);
-		if (found != modules.all().end())
-			return found->second->loaded.base();
-		// A library the program wrote or shipped: load it from the guest file system, bind it to the runtime and start it.
-		const auto resolved = paths.resolve(std::u16string(name.begin(), name.end()));
-		if (!resolved || !resolved->exists || !call_guest) {
-			if (getenv("RAVEN_TRACE_X86"))
-				std::cerr << "raven: library file not found: " << name << '\n';
-			environment.set_last_error(126);
-			return 0;
-		}
-		PEModule *added = nullptr;
-		bool mapped = false;
-		try {
-			std::ifstream stream(resolved->host, std::ios::binary);
-			std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
-			const PEImage image(bytes);
-			if (image.is_64 || !(image.characteristics & 0x2000)) {
-				environment.set_last_error(193);
-				return 0;
-			}
-			const auto identity = resolved->host.filename().string() + "#" + std::to_string(modules.all().size());
-			added = &modules.add(identity, std::move(bytes));
-			std::string missing;
-			for (const auto &symbol : added->imports) {
-				try {
-					modules.resolve(symbol);
-				} catch (const std::runtime_error &) {
-					missing += " " + symbol.module + "!" + (symbol.by_ordinal ? "#" + std::to_string(symbol.ordinal) : symbol.name);
-				}
-			}
-			if (!missing.empty())
-				throw std::runtime_error("unresolved imports:" + missing);
-			modules.bind_imports();
-			process.map_image(added->loaded);
-			mapped = true;
-			if (added->image.entry) {
-				const uint64_t arguments[] = {added->loaded.base(), 1, 0};
-				const auto result = call_guest(added->loaded.base() + added->image.entry, arguments);
-				if (result.stop != NativeStop::returned)
-					throw result;
-				if (!uint32_t(result.value)) {
-					environment.set_last_error(1114);
-					return 0;
-				}
-			}
-			return added->loaded.base();
-		} catch (const NativeResult &) {
-			throw;
-		} catch (const std::exception &failure) {
-			if (getenv("RAVEN_TRACE_X86"))
-				std::cerr << "raven: cannot load " << name << ": " << failure.what() << '\n';
-			// An image that never reached the guest must not stay in the set, or every later import binding would trip over it.
-			if (added && !mapped)
-				modules.remove(*added);
-			environment.set_last_error(126);
-			return 0;
-		}
+		return library_loader.load(std::move(name));
 	}, [&](uint64_t handle) -> bool {
 		const bool known = std::any_of(modules.all().begin(), modules.all().end(),
 			[&](const auto &item) { return item.second->loaded.base() == handle; });
@@ -426,7 +371,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		"DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA", "CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A",
 		"GetTextMetricsA", "SetDIBits", "MessageBoxA", "SetWindowPos", "SelectPalette", "PatBlt", "_lopen", "_lcreat", "_lread", "_lwrite", "_llseek", "lstrcpyA", "lstrlenA", "GetWindowsDirectoryA",
 		"GlobalUnlock", "GlobalFree", "GlobalAlloc", "SetErrorMode", "GlobalLock", "GetOEMCP", "GetCPInfo", "WideCharToMultiByte", "DeleteFileA",
-		"FreeEnvironmentStringsW", "GetEnvironmentStringsW", "GetVersion", "GetFileAttributesA"};
+		"FreeEnvironmentStringsW", "GetEnvironmentStringsW", "GetVersion", "GetFileAttributesA", "CreateFileW", "DeleteFileW",
+		"GetEnvironmentVariableA", "GetFileInformationByHandle", "MultiByteToWideChar", "QueryPerformanceCounter", "QueryPerformanceFrequency", "ReadFile",
+		"SetFilePointer", "GetFileSizeEx", "FlushFileBuffers"};
 	windows.set_deadline(deadline);
 	windows.set_presentation(std::move(presentation));
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
@@ -467,6 +414,21 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 					}
 				}
 				std::cerr << '\n';
+			}
+			if (api == "SetFilePointerEx") {
+				// The 64-bit distance arrives as two words; the shared handler takes it whole.
+				const auto words = process.api_arguments(5);
+				const auto entry = shared_api.find("SetFilePointerEx");
+				if (!entry) {
+					std::cerr << "raven: unimplemented native x86 API " << api << '\n';
+					return result;
+				}
+				ApiCall inner(process, environment, {words[0], uint64_t(int64_t(int32_t(words[2])) << 32 | words[1]), words[3], words[4]});
+				entry->second(inner);
+				process.return_api(inner.result);
+				budget = remaining();
+				result = process.resume(budget);
+				continue;
 			}
 			if (api == "TerminateProcess") {
 				const auto words = process.api_arguments(2);
