@@ -96,6 +96,7 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 			if (created == VK_SUCCESS) {
 				const auto token = marshal.new_token(H::VkSurfaceKHR, reinterpret_cast<uint64_t>(surface));
 				surface_windows.emplace(token, window);
+				surface_instances.emplace(token, a[0]);
 				store<uint64_t>(a[3], token);
 			} else if (surface_source.release) {
 				surface_source.release(window);

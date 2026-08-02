@@ -81,6 +81,8 @@ private:
 	SurfaceSource surface_source;
 	// Surface tokens and the guest windows behind them.
 	std::map<uint64_t, uint64_t> surface_windows;
+	// The instance token each of those surfaces was created from.
+	std::map<uint64_t, uint64_t> surface_instances;
 	// A swapchain's surface token and the extent it was created with; a surface whose window changed size makes it out of date.
 	struct Swapchain { uint64_t surface; uint32_t width, height; };
 	std::map<uint64_t, Swapchain> swapchains;

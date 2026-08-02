@@ -178,6 +178,7 @@ void Marshal::forget(uint64_t token_value)
 		if (bridge.surface_source.release)
 			bridge.surface_source.release(surface->second);
 		bridge.surface_windows.erase(surface);
+		bridge.surface_instances.erase(token_value);
 	}
 	bridge.templates.erase(token_value);
 	bridge.swapchains.erase(token_value);

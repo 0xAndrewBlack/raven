@@ -1542,6 +1542,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                                 ${CMAKE_CURRENT_BINARY_DIR}/d3d12-present-gpu gpu)
                             set_tests_properties(native_d3d12_present_gpu PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
                         endif()
+                        add_test(NAME native_d3d12_fullscreen COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-fullscreen.py
+                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/fullscreen12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/d3d12-fullscreen)
+                        set_tests_properties(native_d3d12_fullscreen PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                        if(EXISTS /dev/dri/renderD128)
+                            add_test(NAME native_d3d12_fullscreen_gpu COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-fullscreen.py
+                                $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/fullscreen12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                                ${CMAKE_CURRENT_BINARY_DIR}/d3d12-fullscreen-gpu gpu)
+                            set_tests_properties(native_d3d12_fullscreen_gpu PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
+                        endif()
                     endif()
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_clear_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-clear.py
