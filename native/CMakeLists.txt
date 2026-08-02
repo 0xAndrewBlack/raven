@@ -1544,6 +1544,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/textured.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-textured-gpu gpu)
                     set_tests_properties(native_d3d11_textured_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
+                add_test(NAME native_d3d11_features COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-features.py
+                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/features.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-features)
+                set_tests_properties(native_d3d11_features PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                if(EXISTS /dev/dri/renderD128)
+                    add_test(NAME native_d3d11_features_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-features.py
+                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/features.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-features-gpu gpu)
+                    set_tests_properties(native_d3d11_features_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
+                endif()
                 add_test(NAME native_d3d11_compute COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-compute.py
                     $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/compute.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-compute)
                 set_tests_properties(native_d3d11_compute PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
