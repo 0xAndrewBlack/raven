@@ -199,6 +199,8 @@ struct NativeProcess::State {
 	std::function<bool()> slice_wanted;
 	std::function<void()> slice_yield;
 	std::optional<std::vector<uint64_t>> translated_words;
+	// How deep in guest callbacks the translated call was made: a callback the handler starts makes real calls of its own.
+	size_t translated_depth = 0;
 	std::array<uint64_t, 4> translated_floats{};
 	uint64_t translated_result = 0;
 	uint64_t fs_base = 0;
@@ -1066,6 +1068,7 @@ void NativeProcess::begin_translated_call(std::vector<uint64_t> words, std::arra
 	if (state->translated_words)
 		throw std::runtime_error("a translated native call is already running");
 	state->translated_words = std::move(words);
+	state->translated_depth = state->callbacks.size();
 	state->translated_floats = floats;
 	state->translated_result = 0;
 }
@@ -1079,7 +1082,7 @@ uint64_t NativeProcess::end_translated_call()
 std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const
 {
 	state->require_stopped();
-	if (state->translated_words) {
+	if (state->translated_words && state->callbacks.size() == state->translated_depth) {
 		auto words = *state->translated_words;
 		words.resize(count);
 		return words;
@@ -1117,7 +1120,7 @@ std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const
 std::array<uint64_t, 4> NativeProcess::api_float_arguments() const
 {
 	state->require_stopped();
-	if (state->translated_words)
+	if (state->translated_words && state->callbacks.size() == state->translated_depth)
 		return state->translated_floats;
 	if (!state->awaiting_api || state->mode != NativeMode::x64)
 		throw std::runtime_error("native process is not at an x64 API call");
@@ -1167,7 +1170,7 @@ void NativeProcess::complete_debug_print(uint64_t instruction)
 void NativeProcess::return_api(uint64_t value)
 {
 	state->require_stopped();
-	if (state->translated_words) {
+	if (state->translated_words && state->callbacks.size() == state->translated_depth) {
 		state->translated_result = value;
 		return;
 	}

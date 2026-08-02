@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Present a Direct3D 9 device through 32-bit DXVK on Raven to a Wayland window and compare what the compositor shows.
+"""Present a Direct3D 9 device through DXVK on Raven to a Wayland window and compare what the compositor shows.
 
-testdata/d3d9/window.exe is a 32-bit program that renders sixty frames with the fixed-function pipeline and presents each one. It reads back
+testdata/d3d9/window.c, built for 32 or 64 bits, is a program that renders sixty frames with the fixed-function pipeline and presents each one. It reads back
 its first and last back buffers with the GPU. This script runs it on an isolated headless compositor, waits until every frame was presented,
 captures the compositor output with grim and requires that:
 
@@ -12,7 +12,7 @@ captures the compositor output with grim and requires that:
 With the extra argument "gpu" the host's default Vulkan driver is used instead of llvmpipe and the compositor renders with GLES so that it
 offers buffer sharing; the test then also requires DXVK to report a driver other than llvmpipe.
 
-usage: native-d3d9-present.py RAVEN WINDOW_EXE DXVK_PE32_DIRECTORY WORKDIR [gpu]
+usage: native-d3d9-present.py RAVEN WINDOW_EXE DXVK_DIRECTORY WORKDIR [gpu]
 """
 
 from pathlib import Path
@@ -123,7 +123,7 @@ def main():
         raise SystemExit("the first and last frames have the same clear colour: the frames did not change")
     print(f"first frame corner {tuple(first[:3])}, last frame corner {corner}, triangle {center}")
     compare(capture, last, SIZE, SIZE, "window")
-    print("a Direct3D 9 frame rendered by 32-bit DXVK and Raven's 32-bit Vulkan bridge is on screen and matches the GPU read-back")
+    print("a Direct3D 9 frame rendered by DXVK and Raven's Vulkan bridge is on screen and matches the GPU read-back")
 
 
 if __name__ == "__main__":

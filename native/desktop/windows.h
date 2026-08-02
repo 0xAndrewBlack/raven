@@ -122,6 +122,7 @@ private:
 	void register_ext_api(ApiRegistry &registry);
 	void register_scroll_api(ApiRegistry &registry);
 	void register_long_api(ApiRegistry &registry);
+	void register_ansi_api(ApiRegistry &registry);
 	// Layout of one non-client scroll bar in screen coordinates.
 	struct ScrollGeometry {
 		DesktopRect bar{},up{},down{},track{},thumb{};

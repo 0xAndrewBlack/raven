@@ -902,6 +902,36 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 	for (const auto name : system_export_names("gdi32.dll"))
 		if (name.starts_with("D3DKMT") && !registry.has(name))
 			registry.add(name, 1, [](ApiCall &call) { call.ret(0xC00000BBU); });
+	// One adapter, and one monitor on it, for programs that ask which display they are on.
+	const auto display_device = [](ApiCall &call, bool wide) {
+		const size_t size = wide ? 840 : 424;
+		if (call.u32(1) != 0 || !call[2] || call.load<uint32_t>(call[2]) != size) {
+			call.ret(0);
+			return;
+		}
+		const bool monitor = call[0] != 0;
+		std::vector<uint8_t> record(size);
+		const auto put = [&](size_t offset, std::string_view text) {
+			for (size_t index = 0; index < text.size(); ++index) {
+				record[offset + index * (wide ? 2 : 1)] = uint8_t(text[index]);
+			}
+		};
+		record[0] = uint8_t(size & 0xff);
+		record[1] = uint8_t(size >> 8);
+		const size_t name = 4, description = wide ? 68 : 36, flags = wide ? 324 : 164, identifier = wide ? 328 : 168;
+		put(name, monitor ? "\\\\.\\DISPLAY1\\Monitor0" : "\\\\.\\DISPLAY1");
+		put(description, monitor ? "Raven Monitor" : "Raven Display");
+		record[flags] = monitor ? 3 : 5;
+		put(identifier, monitor ? "MONITOR\\RAVEN0000" : "PCI\\VEN_1AF4&DEV_1050");
+		call.write(call[2], record);
+		call.ret(1);
+	};
+	registry.add("EnumDisplayDevicesA", 4, [=](ApiCall &call) { display_device(call, false); });
+	registry.add("EnumDisplayDevicesW", 4, [=](ApiCall &call) { display_device(call, true); });
+	// Programs declare how they handle scaling; the host's windows are not scaled by a second layer, so every declaration is accepted.
+	registry.add("SetProcessDPIAware", 0, [](ApiCall &call) { call.ret(1); });
+	registry.add("IsProcessDPIAware", 0, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetProcessDpiAwarenessContext", 1, [](ApiCall &call) { call.ret(1); });
 	// There is no display topology to report: callers fall back to their single-monitor behavior.
 	registry.add("GetDisplayConfigBufferSizes", 3, [](ApiCall &call) {
 		if (call[1]) call.store<uint32_t>(call[1], 0);
