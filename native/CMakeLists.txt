@@ -1548,6 +1548,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/rayquery.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-rayquery)
                     set_tests_properties(native_d3d12_rayquery PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                    add_test(NAME native_d3d12_wave COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-wave.py
+                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/wave.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        ${CMAKE_CURRENT_BINARY_DIR}/d3d12-wave)
+                    set_tests_properties(native_d3d12_wave PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                    if(EXISTS /dev/dri/renderD128)
+                        add_test(NAME native_d3d12_wave_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-wave.py
+                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/wave.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            ${CMAKE_CURRENT_BINARY_DIR}/d3d12-wave-gpu gpu)
+                        set_tests_properties(native_d3d12_wave_gpu PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_LSAN}")
+                    endif()
                     add_test(NAME native_d3d12_textured COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-textured.py
                         $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/textured.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-textured)
