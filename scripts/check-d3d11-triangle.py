@@ -5,8 +5,9 @@ The reference covers pixel centres with barycentric weights and interpolates the
 edge are skipped because edge coverage rules differ between implementations. Every other pixel must match within 2 of 255, and the
 clear colour must fill everything outside the triangle.
 
-usage: check-d3d11-triangle.py TRIANGLE_RAW [WIDTH HEIGHT RED GREEN BLUE]
-The defaults are the 256 by 256 frame cleared to (0.1, 0.1, 0.3); the clear colour is given as 0 to 255 values.
+usage: check-d3d11-triangle.py TRIANGLE_RAW [WIDTH HEIGHT RED GREEN BLUE [SCALE]]
+The defaults are the 256 by 256 frame cleared to (0.1, 0.1, 0.3); the clear colour is given as 0 to 255 values. SCALE multiplies the
+x and y of every vertex, for a program whose geometry shader shrinks the triangle.
 """
 
 import sys
@@ -14,7 +15,8 @@ import sys
 WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 256
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 256
 CLEAR = tuple(int(v) for v in sys.argv[4:7]) + (255,) if len(sys.argv) > 6 else tuple(round(v * 255) for v in (0.1, 0.1, 0.3, 1.0))
-VERTICES = [((-0.8, -0.8), (255, 0, 0)), ((0.0, 0.8), (0, 0, 255)), ((0.8, -0.8), (0, 255, 0))]
+SCALE = float(sys.argv[7]) if len(sys.argv) > 7 else 1.0
+VERTICES = [((-0.8 * SCALE, -0.8 * SCALE), (255, 0, 0)), ((0.0, 0.8 * SCALE), (0, 0, 255)), ((0.8 * SCALE, -0.8 * SCALE), (0, 255, 0))]
 
 
 def to_pixels(point):
