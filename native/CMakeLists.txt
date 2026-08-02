@@ -1484,6 +1484,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d11-geometry-gpu gpu)
                     set_tests_properties(native_d3d11_geometry_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
+                add_test(NAME native_d3d11_tessellation COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-tessellation.py
+                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/tessellation.exe ${RAVEN_DXVK_PE64_DIR}
+                    ${CMAKE_CURRENT_BINARY_DIR}/d3d11-tessellation)
+                set_tests_properties(native_d3d11_tessellation PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                if(EXISTS /dev/dri/renderD128)
+                    add_test(NAME native_d3d11_tessellation_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-tessellation.py
+                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/tessellation.exe ${RAVEN_DXVK_PE64_DIR}
+                        ${CMAKE_CURRENT_BINARY_DIR}/d3d11-tessellation-gpu gpu)
+                    set_tests_properties(native_d3d11_tessellation_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
+                endif()
                 # Direct3D 12 through vkd3d-proton: device creation only (dependency path); needs its own DLL directory.
                 set(RAVEN_VKD3D_PE64_DIR "" CACHE PATH "Directory holding vkd3d-proton d3d12.dll and d3d12core.dll for 64-bit programs")
                 if(RAVEN_VKD3D_PE64_DIR AND EXISTS ${RAVEN_VKD3D_PE64_DIR}/d3d12core.dll)
