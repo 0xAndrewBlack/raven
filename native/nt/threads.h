@@ -62,6 +62,8 @@ public:
 	void set_runner(std::function<NativeResult(uint64_t, std::span<const uint64_t>)> invoke) { run = std::move(invoke); }
 	// Called in a new thread before it starts (reason 2) and after it ends (reason 3): TLS callbacks and DllMain notifications.
 	void set_notifier(std::function<void(uint32_t)> notify) { notifier = std::move(notify); }
+	// From here on a guest runs until it calls the runtime: the process is ending and nothing else should be scheduled behind its back.
+	void stop_time_slicing();
 	// Called with the thread block of a thread that was just made and of one that is being released: static TLS of a 32-bit process.
 	void set_block_hooks(std::function<void(uint64_t)> made, std::function<void(uint64_t)> released)
 	{

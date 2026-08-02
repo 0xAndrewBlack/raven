@@ -752,6 +752,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		windows.shutdown();
 		return result;
 	} catch (const ProcessExit &request) {
+		guest_threads.stop_time_slicing();
 		windows.shutdown();
 		return {NativeStop::exited, request.code, request.instruction, 0};
 	} catch (const NativeResult &stopped) {

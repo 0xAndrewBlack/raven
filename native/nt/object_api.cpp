@@ -1,4 +1,5 @@
 #include "object_api.h"
+#include "threads.h"
 
 #include <array>
 #include <new>
@@ -89,9 +90,25 @@ bool NativeObjectAPI::dispatch(std::string_view name)
 					for (size_t byte=0; byte<8; ++byte) value|=uint64_t(bytes[byte])<<(byte*8);
 					timeout=int64_t(value);
 				} else if (!nt && uint32_t(args[1])!=UINT32_MAX) timeout=-int64_t(uint32_t(args[1]))*10000;
-				const auto waited=objects.wait(args[0],timeout,deadline);
-				if (waited.runtime_timeout) throw NativeResult{NativeStop::timeout,0,process.context().registers.rip,0};
-				status=waited.status;
+				if (threads && nt) {
+					// Waits for what another thread will do: run the others meanwhile. A negative time is relative, in units of 100 ns.
+					std::optional<std::chrono::steady_clock::time_point> wake;
+					if (timeout && *timeout<0) wake=std::chrono::steady_clock::now()+std::chrono::nanoseconds(-*timeout*100);
+					const bool immediate=timeout && *timeout>=0;
+					const uint32_t id=threads->current_id();
+					const uint64_t handle=args[0];
+					for (;;) {
+						const int state=objects.signaled(handle,id);
+						if (state<0) { status=0xc0000008U; break; }
+						if (state==1) { objects.consume(handle,id); status=0; break; }
+						if (immediate || (wake && std::chrono::steady_clock::now()>=*wake)) { status=0x102; break; }
+						threads->block([&] { return objects.signaled(handle,id)==1; },wake);
+					}
+				} else {
+					const auto waited=objects.wait(args[0],timeout,deadline);
+					if (waited.runtime_timeout) throw NativeResult{NativeStop::timeout,0,process.context().registers.rip,0};
+					status=waited.status;
+				}
 			}
 		}
 	} catch (const std::bad_alloc &) { status=0xc000009aU; }

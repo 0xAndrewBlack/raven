@@ -5,6 +5,7 @@ HANDLE LdrpShutdownThreadId;
 static BOOLEAN initialized;
 VOID NTAPI RtlpInitDeferredCriticalSection(VOID);
 VOID NTAPI RtlInitializeHeapManager(VOID);
+extern LARGE_INTEGER RtlpTimeout;
 
 NTSTATUS NTAPI RavenInitializeRTL(PVOID *heaps, ULONG capacity)
 {
@@ -12,6 +13,8 @@ NTSTATUS NTAPI RavenInitializeRTL(PVOID *heaps, ULONG capacity)
 	if (initialized || !heaps || !capacity || capacity>512 || peb->ProcessHeaps!=heaps ||
 		peb->MaximumNumberOfHeaps!=capacity || peb->NumberOfHeaps || peb->ProcessHeap || peb->NtGlobalFlag)
 		return STATUS_INVALID_PARAMETER;
+	// The wait of a thread for a critical section, as the process loader sets it up from the PEB.
+	RtlpTimeout=peb->CriticalSectionTimeout;
 	RtlpInitDeferredCriticalSection();
 	RtlInitializeHeapManager();
 	initialized=TRUE;

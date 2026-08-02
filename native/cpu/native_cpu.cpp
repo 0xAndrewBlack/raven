@@ -9,6 +9,7 @@
 #include <iostream>
 #include <elf.h>
 #include <fcntl.h>
+#include <functional>
 #include <map>
 #include <optional>
 #include <signal.h>
@@ -20,14 +21,22 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <thread>
+#include <execinfo.h>
 #include <unistd.h>
 
 namespace raven {
 
 static void trace(enum __ptrace_request operation, pid_t child, void *data = nullptr)
 {
-	if (ptrace(operation, child, nullptr, data) == -1)
-		throw std::runtime_error("native ptrace: " + std::string(std::strerror(errno)));
+	if (ptrace(operation, child, nullptr, data) == -1) {
+		const int failure = errno;
+		if (std::getenv("RAVEN_BACKTRACE")) {
+			void *frames[32];
+			std::fprintf(stderr, "ptrace request %d on %d failed: %s\n", int(operation), int(child), std::strerror(failure));
+			backtrace_symbols_fd(frames, backtrace(frames, 32), 2);
+		}
+		throw std::runtime_error("native ptrace: " + std::string(std::strerror(failure)));
+	}
 }
 
 class NativeChild {
@@ -43,9 +52,13 @@ public:
 		uint64_t a4 = 0, uint64_t a5 = 0, uint64_t a6 = 0);
 	void stop();
 	void set_timeout(std::chrono::milliseconds timeout);
+	// While a slice is set, wait() returns -2 once it has passed without the guest stopping.
+	void set_slice(std::chrono::milliseconds slice) { slice_end = std::chrono::steady_clock::now() + slice; }
+	void clear_slice() { slice_end.reset(); }
 
 private:
 	std::chrono::steady_clock::time_point deadline;
+	std::optional<std::chrono::steady_clock::time_point> slice_end;
 };
 
 NativeChild::NativeChild(std::span<const int> image_fds, const std::string &bootstrap, std::chrono::milliseconds timeout)
@@ -129,6 +142,8 @@ int NativeChild::wait()
 			throw std::runtime_error("cannot wait for native guest");
 		if (++polls < 4000)
 			continue;
+		if (slice_end && std::chrono::steady_clock::now() >= *slice_end)
+			return -2;
 		if (std::chrono::steady_clock::now() >= deadline)
 			return -1;
 		std::this_thread::sleep_for(pause);
@@ -178,6 +193,11 @@ struct NativeProcess::State {
 	uint32_t fs_selector = 0;
 	uint32_t ldt_entries = 1;
 	// A translated call: arguments and floating point arguments supplied by an adapter, and the result it left.
+	// Time slicing of guest threads: how long one may run before another gets a turn, whether another could use one, and the hand-over.
+	std::chrono::milliseconds slice{0};
+	std::chrono::steady_clock::time_point slice_started = std::chrono::steady_clock::now();
+	std::function<bool()> slice_wanted;
+	std::function<void()> slice_yield;
 	std::optional<std::vector<uint64_t>> translated_words;
 	std::array<uint64_t, 4> translated_floats{};
 	uint64_t translated_result = 0;
@@ -202,8 +222,10 @@ struct NativeProcess::State {
 
 void NativeProcess::State::require_stopped() const
 {
-	if (!stopped || !child || child->pid == -1)
-		throw std::runtime_error("native process is not stopped and alive");
+	if (!child || child->pid == -1)
+		throw std::runtime_error("native process is not stopped and alive (the guest process is gone)");
+	if (!stopped)
+		throw std::runtime_error("native process is not stopped and alive (it is running or a resume ended without a stop)");
 }
 
 bool NativeProcess::State::covers(uint64_t address, size_t size, int protection) const
@@ -672,6 +694,7 @@ void NativeProcess::load_thread(const NativeThreadState &thread)
 	state->debug_print_fault = thread.debug_print_fault;
 	state->pending_cleanup = thread.pending_cleanup;
 	state->stack_top = thread.stack_top;
+	state->slice_started = std::chrono::steady_clock::now();
 	if (state->mode == NativeMode::x86) {
 		state->fs_selector = uint32_t(thread.context.registers.fs);
 		state->fs_base = thread.context.registers.fs_base;
@@ -902,11 +925,49 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 	int status;
 	user_regs_struct registers{};
 	int signal;
+	std::optional<siginfo_t> event_info;
 	for (;;) {
 		// SYSEMU blocks host syscall dispatch; invalid syscall gates can fault first. Diagnostics may single-step instead.
+		const bool slicing = state->slice.count() > 0 && state->slice_yield && state->slice_wanted && state->slice_wanted();
+		// A guest that keeps calling the runtime never has a quiet slice, so the time it has had the processor is checked at every resumption too.
+		if (slicing && std::chrono::steady_clock::now() - state->slice_started >= state->slice) {
+			state->slice_yield();
+			state->slice_started = std::chrono::steady_clock::now();
+		}
+		if (slicing)
+			child.set_slice(state->slice);
+		else
+			child.clear_slice();
+		event_info.reset();
 		trace(state->steps_left ? PTRACE_SINGLESTEP : PTRACE_SYSEMU, child.pid);
 		state->stopped = false;
 		status = child.wait();
+		if (status == -2) {
+			// The guest ran a whole slice without a stop of its own: interrupt it where it is and let another thread have the processor.
+			child.clear_slice();
+			kill(child.pid, SIGSTOP);
+			int interrupted = 0;
+			while (waitpid(child.pid, &interrupted, 0) == -1 && errno == EINTR) {}
+			if (!WIFSTOPPED(interrupted))
+				throw std::runtime_error("native guest exited outside the runtime boundary");
+			if (WSTOPSIG(interrupted) == SIGSTOP) {
+				state->stopped = true;
+				state->slice_yield();
+				state->slice_started = std::chrono::steady_clock::now();
+				continue;
+			}
+			// A stop of the guest's own came first and the interrupt is still pending. Keep what describes that stop, then let the
+			// pending signal be delivered: it arrives before the guest runs another instruction, and a resume without a signal drops it.
+			siginfo_t kept{};
+			trace(PTRACE_GETSIGINFO, child.pid, &kept);
+			event_info = kept;
+			status = interrupted;
+			ptrace(PTRACE_SYSEMU, child.pid, nullptr, nullptr);
+			int drained = 0;
+			while (waitpid(child.pid, &drained, 0) == -1 && errno == EINTR) {}
+			if (!WIFSTOPPED(drained) || WSTOPSIG(drained) != SIGSTOP)
+				throw std::runtime_error("native guest did not stop for the pending interrupt");
+		}
 		if (status == -1) {
 			if (std::getenv("RAVEN_TRACE_API")) {
 				user_regs_struct where{};
@@ -944,7 +1005,10 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 	}
 	state->awaiting_syscall = false;
 	siginfo_t info{};
-	trace(PTRACE_GETSIGINFO, child.pid, &info);
+	if (event_info)
+		info = *event_info;
+	else
+		trace(PTRACE_GETSIGINFO, child.pid, &info);
 	state->debug_print_fault=signal==SIGSEGV && info.si_code==SI_KERNEL && registers.rax==1;
 	if (signal == SIGTRAP && info.si_code == TRAP_HWBKPT) {
 		// Reading the stop reason is enough; DR6 must be cleared or the next trap reports a stale cause.
@@ -988,6 +1052,13 @@ void NativeProcess::set_api_argument(size_t index, uint32_t value)
 	trace(PTRACE_GETREGS, state->child->pid, &registers);
 	const uint8_t bytes[4] = {uint8_t(value), uint8_t(value >> 8), uint8_t(value >> 16), uint8_t(value >> 24)};
 	write_memory(registers.rsp + 4 + index * 4, bytes);
+}
+
+void NativeProcess::set_time_slicing(std::chrono::milliseconds slice, std::function<bool()> wanted, std::function<void()> yield)
+{
+	state->slice = slice;
+	state->slice_wanted = std::move(wanted);
+	state->slice_yield = std::move(yield);
 }
 
 void NativeProcess::begin_translated_call(std::vector<uint64_t> words, std::array<uint64_t, 4> floats)

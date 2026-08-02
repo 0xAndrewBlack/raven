@@ -12,6 +12,8 @@ public:
 	bool dispatch(std::string_view name);
 	// Waits belong to the thread scheduler once guest threads exist; only the NT variants stay here.
 	void set_cooperative(bool value) { cooperative = value; }
+	// With the scheduler, an NT wait that cannot be satisfied lets the other guest threads run until it can be, or its time is up.
+	void set_threads(class NativeThreads *value) { threads = value; }
 	static std::span<const std::string_view> nt_exports();
 
 private:
@@ -20,6 +22,7 @@ private:
 	NativeObjects &objects;
 	std::chrono::steady_clock::time_point deadline;
 	bool cooperative = false;
+	class NativeThreads *threads = nullptr;
 	bool file_io(std::string_view name);
 };
 

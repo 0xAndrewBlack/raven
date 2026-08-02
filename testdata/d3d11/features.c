@@ -160,13 +160,13 @@ void __stdcall entry(void)
 	ID3D11DeviceContext_End(context, (ID3D11Asynchronous *)query);
 	ID3D11DeviceContext_Flush(context);
 
+	/* The result comes from work another thread of DXVK does, and this loop never calls anything that would let that thread run:
+	 * the runtime has to take the processor away from a thread that spins. */
 	UINT64 samples = 0;
 	HRESULT status = S_FALSE;
-	for (int attempt = 0; attempt < 5000 && status == S_FALSE; ++attempt) {
+	const DWORD started = GetTickCount();
+	while (status == S_FALSE && GetTickCount() - started < 60000)
 		status = ID3D11DeviceContext_GetData(context, (ID3D11Asynchronous *)query, &samples, sizeof samples, 0);
-		if (status == S_FALSE)
-			Sleep(1);
-	}
 	if (status != S_OK)
 		fail("query data", status);
 	write_file(L"C:\\features_samples.raw", &samples, sizeof samples);

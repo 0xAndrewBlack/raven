@@ -50,6 +50,8 @@ NativeEnvironment::NativeEnvironment(NativeProcess &process, uint64_t image_base
 		field(process, thread_block + 0x48, thread_id, 8);
 		field(process, thread_block + 0x60, process_block, 8);
 		field(process, process_block + 0x10, image_base, 8);
+		// How long a thread waits for a critical section before the runtime library reports a deadlock: thirty days, relative, in units of 100 ns.
+		field(process, process_block + 0xc0, uint64_t(-int64_t(2592000) * 10000000), 8);
 		context.registers.gs_base = thread_block;
 		process.set_context(context);
 	} catch (...) {
@@ -125,6 +127,7 @@ void NativeEnvironment::x86_constructor(uint64_t image_base, uint32_t process_id
 		field(process, thread_block + 0x24, thread_id, 4);
 		field(process, thread_block + 0x30, process_block, 4);
 		field(process, process_block + 0x08, image_base, 4);
+		field(process, process_block + 0x70, uint64_t(-int64_t(2592000) * 10000000), 8);
 		process.set_teb(thread_block);
 	} catch (...) {
 		try {

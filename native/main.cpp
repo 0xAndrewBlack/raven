@@ -68,8 +68,23 @@ static int native_result(const raven::NativeResult &result,bool process_exit=fal
 }
 #endif
 
+#include <cstdlib>
+#include <exception>
+#include <execinfo.h>
+
+// With RAVEN_BACKTRACE set, an exception nothing catches shows where it came from.
+static void show_backtrace()
+{
+	void *frames[48];
+	const int count = backtrace(frames, 48);
+	backtrace_symbols_fd(frames, count, 2);
+	std::abort();
+}
+
 int main(int argc, char **argv)
 {
+	if (std::getenv("RAVEN_BACKTRACE"))
+		std::set_terminate(show_backtrace);
 	const std::string mode = argc > 1 ? argv[1] : "";
 	const bool dump_image = mode == "--dump-image";
 	const bool map_image = mode == "--map-image" || dump_image;

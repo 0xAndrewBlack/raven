@@ -27,15 +27,24 @@ NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environm
 	main->main = true;
 	threads.push_back(main);
 	running = main.get();
+	// A thread that computes or spins without calling the runtime must not keep the others from running: after a few milliseconds the
+	// guest is interrupted and the next thread gets the processor.
+	process.set_time_slicing(std::chrono::milliseconds(5), [this] { return !tearing_down && live() > 1; }, [this] { yield(); });
 }
 
 NativeThreads::~NativeThreads()
 {
+	process.set_time_slicing(std::chrono::milliseconds(0), nullptr, nullptr);
 	// Host frames of threads that never finished hold objects that only their unwinding releases; a failure here must not escape.
 	try {
 		unwind_all();
 	} catch (...) {
 	}
+}
+
+void NativeThreads::stop_time_slicing()
+{
+	process.set_time_slicing(std::chrono::milliseconds(0), nullptr, nullptr);
 }
 
 size_t NativeThreads::live() const

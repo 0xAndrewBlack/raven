@@ -104,6 +104,9 @@ public:
 	void set_api_argument(size_t index, uint32_t value);
 	// Runs a handler written for x64 argument conventions on behalf of a 32-bit call: api_arguments and api_float_arguments answer from the
 	// given words, and return_api keeps its value for end_translated_call instead of resuming the guest.
+	// Lets a guest that runs for `slice` without stopping be interrupted so that `yield` can give the processor to another thread; `wanted` says
+	// whether there is another thread to give it to.
+	void set_time_slicing(std::chrono::milliseconds slice, std::function<bool()> wanted, std::function<void()> yield);
 	void begin_translated_call(std::vector<uint64_t> words, std::array<uint64_t, 4> floats);
 	uint64_t end_translated_call();
 	// Low 64 bits of XMM0 to XMM3, where an x64 caller passes the first four floating-point arguments.

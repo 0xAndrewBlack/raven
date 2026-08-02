@@ -677,6 +677,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	NativeThreads threads(process, environment, memory, &tls, deadline);
 	threads.set_runner(invoke);
 	object_api.set_cooperative(true);
+	object_api.set_threads(&threads);
 	windows.set_yield([&threads] { return threads.live() > 1 && threads.yield(); });
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, threads, paths, modules, entry, *launch, invoke};
 	windows.set_global_allocator([&allocator](uint64_t size) { return allocator.allocate(size,true); });
@@ -1008,6 +1009,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	});
 	bool entry_tls_ready=false,cleanup_started=false;
 	const auto exit_result = [&](ProcessExit request) {
+		threads.stop_time_slicing();
 		try {
 			if (!cleanup_started) {
 				cleanup_started=true; loading=true;
