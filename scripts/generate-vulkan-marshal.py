@@ -32,7 +32,7 @@ FOREIGN = re.compile(r"^(HANDLE|LPCWSTR|DWORD|SECURITY_ATTRIBUTES|HINSTANCE|HWND
                      r"ANativeWindow|AHardwareBuffer|zx_handle_t|GgpStreamDescriptor|GgpFrameToken|_screen_\w+|NvSciSync\w*|NvSciBuf\w*|"
                      r"IDirectFB\w*|IDirectFBSurface|CAMetalLayer|MTL\w+|IOSurfaceRef|OH_\w+|OHNativeWindow|OHBufferHandle|"
                      r"StdVideo\w+|struct|int|void)$")
-# Commands that belong to platform integration, video, ray tracing and other families the bridge does not offer are matched by whole
+# Commands that belong to platform integration, video and other families the bridge does not offer are matched by whole
 # words of their camel-case names, so that for example "Framebuffer" and "ImageView" are not mistaken for "Frame" and "Vi".
 SKIP_WORDS = set("""Win32 Xlib Xcb Wayland Android Metal Screen DirectFB Ggp Vi Fuchsia Qnx Ohos Display Displays
 FullScreen ImagePipe Sci Cuda Cu Tensor Tensors DataGraph Micromap Micromaps
