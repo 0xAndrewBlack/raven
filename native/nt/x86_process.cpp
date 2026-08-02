@@ -17,6 +17,7 @@
 #include "kernel_context.h"
 #include "paths.h"
 #include "x86_compat_api.h"
+#include "x86_d3d9.h"
 #include "x86_thread_api.h"
 
 #include <algorithm>
@@ -280,6 +281,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	add_library("winmm.dll", winmm_exports, {}, [](std::string_view name) { return uint32_t(name == "PlaySoundW" ? 3 : name == "timeGetTime" ? 0 : 1); });
 	static constexpr std::array<std::string_view, 2> dsound_exports{"DirectSoundCreate", "DirectSoundCreate8"};
 	add_library("dsound.dll", dsound_exports, {}, [](std::string_view) { return uint32_t(3); });
+	const auto d3d9_methods = NativeX86D3D9::method_names();
+	add_library("d3d9.dll", NativeX86D3D9::entry_names(), {}, [](std::string_view) { return uint32_t(1); });
+	add_library("raven-d3d9.dll", d3d9_methods, {}, [](std::string_view name) { return NativeX86D3D9::method_words(name); });
 	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
 	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
 	modules.bind_imports();
@@ -291,6 +295,14 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	for (const auto &[address, api] : traps)
 		process.add_api_trap(address, api.second);
 	NativeEnvironment environment(process, entry.loaded.base(), 1, 1);
+	NativeX86D3D9 direct3d9(process, environment);
+	{
+		std::map<std::string, uint64_t> method_traps;
+		for (const auto &[address, api] : traps)
+			if (api.first.starts_with("IDirect3D"))
+				method_traps.emplace(std::string(api.first), address);
+		direct3d9.set_trap_addresses(std::move(method_traps));
+	}
 	if (!launch) {
 		NativeLaunch initial;
 		for (const char byte : entry.name) {
@@ -473,7 +485,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				process.abandon_call();
 				throw ProcessExit{code, result.instruction};
 			}
-			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !compat.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
+			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !compat.dispatch(api) && !direct3d9.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
 				!desktop.dispatch(api) && !windows.dispatch(api) && !advapi.dispatch(api) && !profile.dispatch(api) &&
 				!crt.dispatch(api) && !unsupported_library(process, environment, api) &&
