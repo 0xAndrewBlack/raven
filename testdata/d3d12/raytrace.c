@@ -1,4 +1,7 @@
-/* Direct3D 12 ray tracing workload: builds a bottom level acceleration structure with one triangle and a top level one with one instance of it,
+/* Built with -DINLINE_QUERY this is the inline ray query variant: no ray tracing pipeline or shader table, a compute shader (rayquery.hlsl)
+ * traces with RayQuery, DispatchRays is replaced by Dispatch, and the files are C:\\rayquery.raw and C:\\rayquery.txt.
+ *
+ * Direct3D 12 ray tracing workload: builds a bottom level acceleration structure with one triangle and a top level one with one instance of it,
  * creates a ray tracing pipeline from rt_shaders.h (see rt.hlsl), traces one orthographic ray per pixel of a 256 by 256 unordered access
  * texture with DispatchRays, copies the texture into a read-back buffer and writes the pixels to C:\raytrace.raw. C:\raytrace.txt holds OK,
  * SKIP when the device reports no ray tracing, or the first failing step. The triangle has the geometry and vertex colours of the
@@ -6,7 +9,15 @@
 #define COBJMACROS
 #include <windows.h>
 #include <d3d12.h>
+#ifdef INLINE_QUERY
+#include "rayquery_shaders.h"
+#define OUT_TXT L"C:\\rayquery.txt"
+#define OUT_RAW L"C:\\rayquery.raw"
+#else
 #include "rt_shaders.h"
+#define OUT_TXT L"C:\\raytrace.txt"
+#define OUT_RAW L"C:\\raytrace.raw"
+#endif
 
 #define SIZE 256
 #define RECORD 64
@@ -31,7 +42,7 @@ static void fail(const char *step, HRESULT hr)
 	text[length++] = ' ';
 	for (int shift = 28; shift >= 0; shift -= 4)
 		text[length++] = "0123456789abcdef"[((unsigned)hr >> shift) & 15];
-	write_file(L"C:\\raytrace.txt", text, (DWORD)length);
+	write_file(OUT_TXT, text, (DWORD)length);
 	ExitProcess(1);
 }
 
@@ -69,8 +80,12 @@ void __stdcall entry(void)
 	CHECK("device", D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void **)&device));
 	D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {0};
 	CHECK("feature options 5", ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof options5));
+#ifdef INLINE_QUERY
+	if (options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1) {
+#else
 	if (options5.RaytracingTier == D3D12_RAYTRACING_TIER_NOT_SUPPORTED) {
-		write_file(L"C:\\raytrace.txt", "SKIP no ray tracing", 19);
+#endif
+		write_file(OUT_TXT, "SKIP no ray tracing", 19);
 		ExitProcess(0);
 	}
 	ID3D12Device5 *device5 = NULL;
@@ -151,6 +166,11 @@ void __stdcall entry(void)
 	CHECK("root signature", ID3D12Device_CreateRootSignature(device, 0, ID3D10Blob_GetBufferPointer(serialized), ID3D10Blob_GetBufferSize(serialized),
 		&IID_ID3D12RootSignature, (void **)&root));
 
+#ifdef INLINE_QUERY
+	D3D12_COMPUTE_PIPELINE_STATE_DESC compute_desc = {root, {rayquery_shader, sizeof rayquery_shader}};
+	ID3D12PipelineState *compute_state = NULL;
+	CHECK("compute pipeline", ID3D12Device_CreateComputePipelineState(device, &compute_desc, &IID_ID3D12PipelineState, (void **)&compute_state));
+#else
 	/* The pipeline: the library, a triangle hit group around the closest hit shader, the payload and attribute sizes, one level of recursion. */
 	D3D12_DXIL_LIBRARY_DESC library = {{rt_library, sizeof rt_library}, 0, NULL};
 	D3D12_HIT_GROUP_DESC hit_group = {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES, NULL, L"chit", NULL};
@@ -182,6 +202,8 @@ void __stdcall entry(void)
 			records[index * RECORD + byte] = ((const BYTE *)identifier)[byte];
 	}
 	upload(table, records, sizeof records);
+
+#endif
 
 	/* The output texture and the two descriptors. */
 	D3D12_HEAP_PROPERTIES default_heap = {D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 1, 1};
@@ -226,6 +248,10 @@ void __stdcall entry(void)
 	ID3D12GraphicsCommandList4_SetDescriptorHeaps(list, 1, &heap);
 	ID3D12GraphicsCommandList4_SetComputeRootSignature(list, root);
 	ID3D12GraphicsCommandList4_SetComputeRootDescriptorTable(list, 0, gpu);
+#ifdef INLINE_QUERY
+	ID3D12GraphicsCommandList4_SetPipelineState(list, compute_state);
+	ID3D12GraphicsCommandList4_Dispatch(list, SIZE / 8, SIZE / 8, 1);
+#else
 	ID3D12GraphicsCommandList4_SetPipelineState1(list, pipeline);
 	const D3D12_GPU_VIRTUAL_ADDRESS table_address = ID3D12Resource_GetGPUVirtualAddress(table);
 	D3D12_DISPATCH_RAYS_DESC dispatch = {0};
@@ -241,6 +267,8 @@ void __stdcall entry(void)
 	dispatch.Height = SIZE;
 	dispatch.Depth = 1;
 	ID3D12GraphicsCommandList4_DispatchRays(list, &dispatch);
+
+#endif
 
 	D3D12_RESOURCE_BARRIER transition = {D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, D3D12_RESOURCE_BARRIER_FLAG_NONE};
 	transition.Transition.pResource = texture;
@@ -271,9 +299,9 @@ void __stdcall entry(void)
 	void *mapped = NULL;
 	D3D12_RANGE range = {0, (SIZE_T)pitch * SIZE};
 	CHECK("map", ID3D12Resource_Map(readback, 0, &range, &mapped));
-	write_file(L"C:\\raytrace.raw", mapped, pitch * SIZE);
+	write_file(OUT_RAW, mapped, pitch * SIZE);
 	D3D12_RANGE none = {0, 0};
 	ID3D12Resource_Unmap(readback, 0, &none);
-	write_file(L"C:\\raytrace.txt", "OK", 2);
+	write_file(OUT_TXT, "OK", 2);
 	ExitProcess(0);
 }
