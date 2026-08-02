@@ -1539,6 +1539,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-tessellation-gpu gpu)
                         set_tests_properties(native_d3d12_tessellation_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
+                    # Ray tracing runs on the software driver only (the development machine's GPU offers none); no ray tracing there skips the test.
+                    add_test(NAME native_d3d12_raytrace COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-raytrace.py
+                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/raytrace.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        ${CMAKE_CURRENT_BINARY_DIR}/d3d12-raytrace)
+                    set_tests_properties(native_d3d12_raytrace PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_textured COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-textured.py
                         $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/textured.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-textured)

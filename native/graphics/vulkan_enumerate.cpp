@@ -73,6 +73,12 @@ constexpr Offer device_offers[] = {
 	{"VK_KHR_maintenance7", 0, "VK_KHR_maintenance7"},
 	{"VK_KHR_maintenance8", 0, "VK_KHR_maintenance8"},
 	{"VK_KHR_maintenance9", 0, "VK_KHR_maintenance9"},
+	// Ray tracing: the device commands only (acceleration structures are built on the device, never with host addresses).
+	{"VK_KHR_deferred_host_operations", 0, "VK_KHR_deferred_host_operations"},
+	{"VK_KHR_acceleration_structure", 0, "VK_KHR_acceleration_structure"},
+	{"VK_KHR_ray_tracing_pipeline", 0, "VK_KHR_ray_tracing_pipeline"},
+	{"VK_KHR_ray_query", 0, "VK_KHR_ray_query"},
+	{"VK_KHR_ray_tracing_maintenance1", 0, "VK_KHR_ray_tracing_maintenance1"},
 };
 
 std::vector<VkExtensionProperties> host_instance_extensions()

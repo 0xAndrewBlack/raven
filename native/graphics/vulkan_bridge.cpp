@@ -349,7 +349,7 @@ bool VulkanBridge::dispatch(std::string_view name)
 			throw std::runtime_error("Vulkan guest allocation callbacks are not implemented");
 		auto info = read.template operator()<VkDeviceCreateInfo>(arguments[1]);
 		if (info.sType != VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO || info.flags || info.enabledLayerCount ||
-			info.enabledExtensionCount > 32 || !info.queueCreateInfoCount || info.queueCreateInfoCount > 16)
+			info.enabledExtensionCount > 96 || !info.queueCreateInfoCount || info.queueCreateInfoCount > 16)
 			throw std::runtime_error("Vulkan device flags or layers are not implemented");
 		// Feature structures chained to the create info are plain blocks of bytes that travel to the driver unchanged.
 		auto device_chain = mirror_chain(reinterpret_cast<uint64_t>(info.pNext), true);

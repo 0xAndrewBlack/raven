@@ -23,7 +23,9 @@ VK_EXT_graphics_pipeline_library VK_KHR_pipeline_library VK_EXT_debug_utils VK_E
 VK_KHR_dynamic_rendering_local_read VK_EXT_dynamic_rendering_unused_attachments VK_EXT_shader_stencil_export VK_KHR_present_id
 VK_EXT_multi_draw VK_EXT_pageable_device_local_memory VK_EXT_memory_budget VK_KHR_get_surface_capabilities2 VK_EXT_attachment_feedback_loop_layout
 VK_EXT_attachment_feedback_loop_dynamic_state VK_EXT_border_color_swizzle VK_EXT_fragment_shader_interlock VK_EXT_sample_locations
-VK_KHR_external_memory VK_KHR_external_semaphore VK_KHR_timeline_semaphore VK_KHR_synchronization2 VK_KHR_dynamic_rendering""".split()
+VK_KHR_external_memory VK_KHR_external_semaphore VK_KHR_timeline_semaphore VK_KHR_synchronization2 VK_KHR_dynamic_rendering
+VK_KHR_deferred_host_operations VK_KHR_acceleration_structure VK_KHR_ray_tracing_pipeline VK_KHR_ray_query VK_KHR_ray_tracing_maintenance1
+VK_KHR_ray_tracing_position_fetch""".split()
 
 # Parameters and members of these types cannot cross the guest/host boundary by copying.
 FOREIGN = re.compile(r"^(HANDLE|LPCWSTR|DWORD|SECURITY_ATTRIBUTES|HINSTANCE|HWND|HMONITOR|wl_\w+|xcb_\w+|Display|Window|VisualID|RROutput|"
@@ -33,8 +35,8 @@ FOREIGN = re.compile(r"^(HANDLE|LPCWSTR|DWORD|SECURITY_ATTRIBUTES|HINSTANCE|HWND
 # Commands that belong to platform integration, video, ray tracing and other families the bridge does not offer are matched by whole
 # words of their camel-case names, so that for example "Framebuffer" and "ImageView" are not mistaken for "Frame" and "Vi".
 SKIP_WORDS = set("""Win32 Xlib Xcb Wayland Android Metal Screen DirectFB Ggp Vi Fuchsia Qnx Ohos Display Displays
-FullScreen ImagePipe Sci Cuda Cu Tensor Tensors DataGraph Micromap Micromaps AccelerationStructure AccelerationStructures
-Ray Tracing Opacity Optical Flow Video Decode Encode Mesh Tile Tiles Latency Reflex
+FullScreen ImagePipe Sci Cuda Cu Tensor Tensors DataGraph Micromap Micromaps
+Opacity Optical Flow Video Decode Encode Mesh Tile Tiles Latency Reflex
 Keyed Mutex Zircon Hdr Refresh Cycle Past Fault Faults Proc Addr Binary Binaries Slot Window""".split())
 # Words that only matter inside these exact phrases.
 SKIP_PHRASES = ("DescriptorBuffer", "ResourceHeap", "SamplerHeap", "PushData", "OpaqueCapture", "DescriptorSize", "DescriptorSetLayoutSize",
@@ -52,7 +54,10 @@ SKIP_NAMES = {"vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLaye
               "vkCreateSharedSwapchainsKHR", "vkCreateHeadlessSurfaceEXT", "vkGetPhysicalDeviceSurfaceCapabilities2EXT",
               "vkGetPhysicalDeviceSurfacePresentModes2EXT", "vkGetPhysicalDevicePresentRectanglesKHR", "vkWaitForPresentKHR",
               "vkWaitForPresent2KHR", "vkReleaseSwapchainImagesEXT", "vkReleaseSwapchainImagesKHR", "vkGetSwapchainCounterEXT",
-              "vkGetSwapchainStatusKHR", "vkGetDeviceGroupSurfacePresentModes2EXT", "vkSetLocalDimmingAMD"}
+              "vkGetSwapchainStatusKHR", "vkGetDeviceGroupSurfacePresentModes2EXT", "vkSetLocalDimmingAMD",
+              # Acceleration structure commands that run on the host take host addresses; the device commands are the ones offered.
+              "vkBuildAccelerationStructuresKHR", "vkCopyAccelerationStructureKHR", "vkCopyAccelerationStructureToMemoryKHR",
+              "vkCopyMemoryToAccelerationStructureKHR", "vkWriteAccelerationStructuresPropertiesKHR"}
 
 
 def skipped_command(name):
@@ -197,6 +202,8 @@ def main():
             if base == "char":
                 return "string"
             if base == "void":
+                if member.name == "pShaderGroupCaptureReplayHandle":
+                    return "null_only"
                 return "bytes" if member.len else None
             if base in registry.handles:
                 return "handle_array" if member.len else None
@@ -215,7 +222,12 @@ def main():
 
     union_cache = {}
 
+    # A device or host address is passed as the device address: the bridge offers the device commands only, never the host ones.
+    ADDRESS_UNIONS = {"VkDeviceOrHostAddressKHR", "VkDeviceOrHostAddressConstKHR", "VkDeviceOrHostAddressConstAliasedKHR"}
+
     def union_plain(name):
+        if name in ADDRESS_UNIONS:
+            return True
         if name not in union_cache:
             union_cache[name] = all(m.pointers == 0 and registry.resolve_struct(m.type) not in registry.handles and
                                     (registry.resolve_struct(m.type) not in registry.structs or struct_ok(registry.resolve_struct(m.type)))
@@ -359,7 +371,7 @@ def emit(registry, selected, state, output, classify_member, declared):
             needs_fix[name] = False
             for member in registry.structs[name]["members"]:
                 kind = kinds_of[name][member.name]
-                if kind in ("pnext", "handle", "string", "bytes", "handle_array", "struct_pointer", "struct_pointer_array", "string_array", "scalar_pointer") or \
+                if kind in ("pnext", "handle", "string", "bytes", "handle_array", "struct_pointer", "struct_pointer_array", "string_array", "scalar_pointer", "null_only") or \
                         (kind == "struct" and fix_needed(registry.resolve_struct(member.type))):
                     needs_fix[name] = True
         return needs_fix[name]
@@ -405,6 +417,8 @@ def emit(registry, selected, state, output, classify_member, declared):
                 body.append(f"p->{n} = reinterpret_cast<{member.type}>(m.host(H::{base}, reinterpret_cast<uint64_t>(p->{n})));")
             elif kind == "struct" and fix_needed(base):
                 body.append(f"fix_{base}(m, &p->{n});")
+            elif kind == "null_only":
+                body.append(f"if (p->{n}) throw std::runtime_error(\"{name}.{n} is not supported\");")
             elif kind == "string":
                 body.append(f"p->{n} = p->{n} ? m.string(m.read_string(reinterpret_cast<uint64_t>(p->{n}))) : nullptr;")
             elif kind == "bytes":
@@ -548,6 +562,13 @@ def emit(registry, selected, state, output, classify_member, declared):
                 if length is None:
                     # a count member of another parameter
                     raise SystemExit(f"cannot evaluate length {param.len} of {target}.{n}")
+            if target == "vkCmdBuildAccelerationStructuresKHR" and n == "ppBuildRangeInfos":
+                # One array of ranges per build info, as long as that info's geometry count.
+                decl.append(f"\tauto **{v}_rows = a[{i}] ? m.make<const VkAccelerationStructureBuildRangeInfoKHR *>({names_map['infoCount']}) : nullptr;\n"
+                            f"\tif ({v}_rows) for (size_t k = 0; k < {names_map['infoCount']}; ++k)\n"
+                            f"\t\t{v}_rows[k] = decode_array_VkAccelerationStructureBuildRangeInfoKHR(m, m.load<uint64_t>(a[{i}] + k * 8), {names_map['pInfos']}[k].geometryCount);")
+                call_args[i] = f"{v}_rows"
+                continue
             if param.const or param.pointers == 2:
                 if base in registry.structs and param.pointers == 1:
                     count = length or "1"
