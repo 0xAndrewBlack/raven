@@ -17,7 +17,10 @@
 #include "kernel_context.h"
 #include "paths.h"
 #include "x86_compat_api.h"
+#include "registry_words.h"
+#include "system_exports.h"
 #include "x86_loader.h"
+#include "x86_system_api.h"
 #include "x86_d3d9.h"
 #include "x86_thread_api.h"
 
@@ -27,6 +30,7 @@
 #include <map>
 #include <set>
 #include <functional>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -36,7 +40,7 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 104> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 105> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitProcess", 1}, {"ExitThread", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetExitCodeThread", 2},
@@ -47,16 +51,92 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 104> kernel32_export
 	// Services of the 32-bit CRT era: legacy file calls, global memory, code pages, environment and version queries.
 	{"_lopen", 2}, {"_lcreat", 2}, {"_lread", 3}, {"_lwrite", 3}, {"_llseek", 3}, {"lstrcpyA", 2}, {"lstrlenA", 1}, {"GetWindowsDirectoryA", 2}, {"GlobalHandle", 1}, {"GetVersionExA", 1}, {"WinExec", 2}, {"GlobalUnlock", 1}, {"GlobalFree", 1}, {"GlobalAlloc", 2}, {"SetErrorMode", 1}, {"GlobalLock", 1}, {"GetCurrentProcess", 0}, {"SetHandleCount", 1}, {"GetOEMCP", 0}, {"GetCPInfo", 2}, {"WideCharToMultiByte", 8}, {"DeleteFileA", 1}, {"GetEnvironmentStrings", 0}, {"FreeEnvironmentStringsW", 1}, {"FreeEnvironmentStringsA", 1}, {"UnhandledExceptionFilter", 1}, {"RtlUnwind", 4}, {"HeapCreate", 3}, {"HeapDestroy", 1}, {"TerminateProcess", 2}, {"GetEnvironmentStringsW", 0}, {"GetVersion", 0}, {"GetFileAttributesA", 1},
 	// File and clock services of the C runtime component: the shared handlers read 32-bit words; a 64-bit offset takes two.
-	{"CreateFileW", 7}, {"DeleteFileW", 1}, {"GetEnvironmentVariableA", 3}, {"GetFileInformationByHandle", 2}, {"MultiByteToWideChar", 6},
+	{"RaiseException", 4}, {"CreateFileW", 7}, {"DeleteFileW", 1}, {"GetEnvironmentVariableA", 3}, {"GetFileInformationByHandle", 2}, {"MultiByteToWideChar", 6},
 	{"QueryPerformanceCounter", 1}, {"QueryPerformanceFrequency", 1}, {"ReadFile", 5}, {"SetFilePointer", 4}, {"SetFilePointerEx", 5},
 	{"GetFileSizeEx", 2}, {"FlushFileBuffers", 1},
 	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WaitForSingleObject", 2}, {"WriteFile", 5}, {"_lclose", 1}, {"lstrcpyW", 2}, {"lstrlenW", 1},
 }};
 
+// Shared-registry handlers that serve 32-bit programs as they are: every argument is one 32-bit word and no structure holds a pointer.
+constexpr std::array shared_exports{
+	NativeX86System::Export{"kernel32.dll", "CreateDirectoryW", 2}, NativeX86System::Export{"kernel32.dll", "CreateFileA", 7},
+	NativeX86System::Export{"kernel32.dll", "CreateFileMappingA", 6}, NativeX86System::Export{"kernel32.dll", "FormatMessageA", 7}, NativeX86System::Export{"kernel32.dll", "GetEnvironmentVariableW", 3},
+	NativeX86System::Export{"kernel32.dll", "GetModuleFileNameW", 3}, NativeX86System::Export{"kernel32.dll", "GetModuleHandleExA", 3},
+	NativeX86System::Export{"kernel32.dll", "GetSystemTimeAsFileTime", 1}, NativeX86System::Export{"kernel32.dll", "GetTempPathA", 2},
+	NativeX86System::Export{"kernel32.dll", "GetTickCount64", 0}, NativeX86System::Export{"kernel32.dll", "LocalFree", 1},
+	NativeX86System::Export{"kernel32.dll", "MapViewOfFile", 5}, NativeX86System::Export{"kernel32.dll", "UnmapViewOfFile", 1},
+	NativeX86System::Export{"user32.dll", "CallWindowProcA", 5}, NativeX86System::Export{"user32.dll", "DestroyCursor", 1},
+	NativeX86System::Export{"user32.dll", "EnumDisplayMonitors", 4}, NativeX86System::Export{"user32.dll", "EnumDisplaySettingsW", 3},
+	NativeX86System::Export{"user32.dll", "GetDCEx", 3}, NativeX86System::Export{"user32.dll", "GetDisplayConfigBufferSizes", 3},
+	NativeX86System::Export{"user32.dll", "GetForegroundWindow", 0}, NativeX86System::Export{"user32.dll", "GetMonitorInfoW", 2},
+	NativeX86System::Export{"user32.dll", "IsIconic", 1}, NativeX86System::Export{"user32.dll", "MonitorFromPoint", 3},
+	NativeX86System::Export{"user32.dll", "OffsetRect", 3}, NativeX86System::Export{"user32.dll", "QueryDisplayConfig", 6},
+	NativeX86System::Export{"gdi32.dll", "CreateBitmap", 5}, NativeX86System::Export{"gdi32.dll", "StretchBlt", 11},
+};
+
+// More shared handlers a 32-bit program may use as they are; their words come from the registry and their library from the public
+// export lists. Anything with a pointer-width structure, a 64-bit argument or a callback into x64 conventions is not here.
+constexpr std::string_view shared_allowed[] = {
+	"WriteFile", "GetFileAttributesW", "GetFullPathNameA", "GetFullPathNameW", "GetCurrentDirectoryA", "GetCurrentDirectoryW",
+	"SetCurrentDirectoryA", "SetCurrentDirectoryW", "FindFirstFileA", "FindFirstFileW", "FindNextFileA", "FindNextFileW", "FindClose",
+	"CreateDirectoryA", "RemoveDirectoryA", "RemoveDirectoryW", "MoveFileA", "MoveFileW", "CopyFileA", "CopyFileW", "GetLocalTime",
+	"GetSystemTime", "lstrcmpA", "lstrcmpW", "lstrcmpiA", "lstrcmpiW", "lstrcpynA", "lstrcatA", "OutputDebugStringW", "IsDebuggerPresent",
+	"GetLogicalDrives", "GetDriveTypeA", "GetVolumeInformationA", "GetVolumeInformationW", "GetDiskFreeSpaceA", "MulDiv", "GetStringTypeW",
+	"GetStringTypeA", "CompareStringA", "CompareStringW", "LCMapStringA", "LCMapStringW", "GetLocaleInfoA", "GetLocaleInfoW",
+	"GetUserDefaultLCID", "GetSystemDefaultLCID", "IsValidCodePage", "SetEnvironmentVariableA", "SetEnvironmentVariableW",
+	"ExpandEnvironmentStringsA", "ExpandEnvironmentStringsW", "CreateMutexA", "CreateMutexW", "ReleaseMutex", "GetFileTime", "SetFileTime",
+	"FileTimeToLocalFileTime", "LocalFileTimeToFileTime", "FileTimeToDosDateTime", "DosDateTimeToFileTime", "GetFileSize", "SetEndOfFile",
+	"GetSystemDirectoryW", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
+	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
+	"SetFileAttributesW", "GetLongPathNameA", "GetLongPathNameW", "GetShortPathNameA", "GetShortPathNameW", "SearchPathA", "SearchPathW",
+	"GetModuleFileNameA", "IsDBCSLeadByte", "IsDBCSLeadByteEx", "GetCPInfoExA", "GetThreadLocale", "SetThreadLocale", "VerifyVersionInfoW",
+	"GetUserNameA", "GetUserNameW", "FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue",
+};
+
+struct NamedWords {
+	std::string_view name;
+	uint32_t words;
+};
+
+// The names a module exports from the host, with the words each takes: the fixed table, the shared handlers and the system services.
+std::vector<NamedWords> host_exports(std::string_view module)
+{
+	std::vector<NamedWords> result;
+	for (const auto &item : shared_exports)
+		if (item.module == module)
+			result.push_back({item.name, item.words});
+	for (const auto &item : NativeX86System::exports())
+		if (item.module == module)
+			result.push_back({item.name, item.words});
+	const auto published = system_export_names(module);
+	for (const auto name : shared_allowed) {
+		const auto words = registry_words(name);
+		const auto duplicate = std::any_of(result.begin(), result.end(), [&](const auto &item) { return item.name == name; });
+		if (words != UINT32_MAX && !duplicate && std::find(published.begin(), published.end(), name) != published.end())
+			result.push_back({name, words});
+	}
+	return result;
+}
+
+const std::vector<NamedWords> &kernel32_table()
+{
+	static const auto table = [] {
+		std::vector<NamedWords> result;
+		for (const auto &[name, words] : kernel32_exports)
+			result.push_back({name, words});
+		for (const auto &item : host_exports("kernel32.dll"))
+			if (std::none_of(result.begin(), result.end(), [&](const auto &fixed) { return fixed.name == item.name; }))
+				result.push_back(item);
+		return result;
+	}();
+	return table;
+}
+
 // stdcall argument counts of the desktop exports, keyed by export name.
 const std::map<std::string_view, uint32_t> &desktop_arguments()
 {
-	static const std::map<std::string_view, uint32_t> counts{
+	static const auto counts = [] {
+	std::map<std::string_view, uint32_t> counts{
 		{"AdjustWindowRect",3},{"AdjustWindowRectEx",4},{"BeginPaint",2},{"CallWindowProcW",5},{"ClientToScreen",2},
 		{"CopyIcon",1},{"CreateIconFromResourceEx",7},{"CreateWindowExW",12},{"DefWindowProcW",4},{"DestroyIcon",1},
 		{"DestroyMenu",1},{"DestroyWindow",1},{"DispatchMessageW",1},{"DrawIconEx",9},{"EndPaint",2},{"FillRect",3},
@@ -97,6 +177,11 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 		{"CreateFontA",14},{"ExtTextOutA",8},{"GetDIBits",7},{"GetTextExtentPoint32A",4},{"GetTextMetricsA",2},{"SetDIBits",7},
 		{"ExitWindowsEx",2},{"MessageBoxA",4},{"SetWindowPos",7},{"RealizePalette",1},{"SelectPalette",3},{"PatBlt",6},{"CreatePalette",1},
 	};
+	for (const auto module : {"user32.dll", "gdi32.dll"})
+		for (const auto &item : host_exports(module))
+			counts.emplace(item.name, item.words);
+	return counts;
+	}();
 	return counts;
 }
 
@@ -217,8 +302,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		if (module->image.is_64)
 			throw std::runtime_error("native x86 process cannot mix PE64 modules: " + name);
 	std::vector<std::string_view> names;
-	for (const auto &[name, arguments] : kernel32_exports)
-		names.push_back(name);
+	for (const auto &item : kernel32_table())
+		names.push_back(item.name);
 	std::sort(names.begin(), names.end());
 	std::map<uint64_t, std::pair<std::string_view, uint32_t>> traps;
 	if (!modules.all().contains("kernel32.dll")) {
@@ -227,9 +312,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		auto &provider = modules.add("kernel32.dll", runtime_provider("kernel32.dll", base, names, true), base);
 		provider.runtime_api = true;
 		for (const auto &symbol : provider.exports) {
-			const auto found = std::find_if(kernel32_exports.begin(), kernel32_exports.end(),
-				[&](const auto &item) { return item.first == symbol.names.at(0); });
-			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
+			const auto found = std::find_if(kernel32_table().begin(), kernel32_table().end(),
+				[&](const auto &item) { return item.name == symbol.names.at(0); });
+			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->name, found->words * 4});
 		}
 	}
 	const auto add_desktop = [&](const char *dll, std::span<const std::string_view> implemented, std::span<const std::string_view> pending) {
@@ -238,6 +323,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		std::vector<std::string_view> exports(implemented.begin(), implemented.end());
 		exports.insert(exports.end(), pending.begin(), pending.end());
 		std::sort(exports.begin(), exports.end());
+		exports.erase(std::unique(exports.begin(), exports.end()), exports.end());
 		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, exports, true)).image_size;
 		const auto base = provider_base(modules, size);
 		auto &provider = modules.add(dll, runtime_provider(dll, base, exports, true), base);
@@ -249,16 +335,20 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
 		}
 	};
-	static constexpr std::array<std::string_view, 45> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
+	std::vector<std::string_view> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
 		"GetDlgItemInt", "GetDlgItemTextW", "GetMenuItemRect", "KillTimer", "LoadAcceleratorsW", "LoadCursorW", "LoadIconW",
 		"MessageBoxW", "MoveWindow", "PtInRect", "ReleaseCapture", "SetCapture", "SetDlgItemInt", "SetDlgItemTextW", "SetMenu",
 		"SetRect", "SetTimer", "TranslateAcceleratorW", "WinHelpW", "wsprintfW", "wsprintfA", "CreateWindowExA", "DispatchMessageA",
 		"GetMessageA", "PeekMessageA", "RegisterClassA", "RegisterClassExA", "UnregisterClassA", "LoadCursorA", "LoadIconA", "GetAsyncKeyState",
 		"SetCursor", "GetCursorPos", "SetCursorPos", "DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA",
 		"ExitWindowsEx", "MessageBoxA", "SetWindowPos"};
-	static constexpr std::array<std::string_view, 15> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2",
+	std::vector<std::string_view> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2",
 		"CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A", "GetTextMetricsA", "SetDIBits",
 		"RealizePalette", "SelectPalette", "PatBlt", "CreatePalette"};
+	for (const auto &item : host_exports("user32.dll"))
+		user_pending.push_back(item.name);
+	for (const auto &item : host_exports("gdi32.dll"))
+		gdi_pending.push_back(item.name);
 	add_desktop("user32.dll", NativeDesktop::user_exports(), user_pending);
 	add_desktop("gdi32.dll", NativeDesktop::gdi_exports(), gdi_pending);
 	// Libraries whose argument counts come from their own implementation or the unsupported-service table.
@@ -278,7 +368,26 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{*stable, count(exported) * 4});
 		}
 	};
-	add_library("advapi32.dll", NativeAdvapi::exports(), {}, [](std::string_view name) { return NativeAdvapi::argument_count(name); });
+	std::vector<std::string_view> advapi_names(NativeAdvapi::exports().begin(), NativeAdvapi::exports().end());
+	for (const auto &item : host_exports("advapi32.dll"))
+		advapi_names.push_back(item.name);
+	std::sort(advapi_names.begin(), advapi_names.end());
+	add_library("advapi32.dll", advapi_names, {}, [](std::string_view name) {
+		for (const auto &item : host_exports("advapi32.dll"))
+			if (item.name == name)
+				return item.words;
+		return NativeAdvapi::argument_count(name);
+	});
+	std::vector<std::string_view> setupapi_names;
+	for (const auto &item : host_exports("setupapi.dll"))
+		setupapi_names.push_back(item.name);
+	std::sort(setupapi_names.begin(), setupapi_names.end());
+	add_library("setupapi.dll", setupapi_names, {}, [](std::string_view name) {
+		for (const auto &item : host_exports("setupapi.dll"))
+			if (item.name == name)
+				return item.words;
+		return uint32_t(0);
+	});
 	add_library("msvcrt.dll", NativeCRT::exports(), NativeCRT::data_exports(), [](std::string_view name) { return uint32_t(0); });
 	static constexpr std::array<std::string_view, 4> winmm_exports{"PlaySoundW", "timeBeginPeriod", "timeEndPeriod", "timeGetTime"};
 	static constexpr std::array<std::string_view, 1> shell_exports{"ShellAboutW"};
@@ -286,9 +395,26 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	add_library("winmm.dll", winmm_exports, {}, [](std::string_view name) { return uint32_t(name == "PlaySoundW" ? 3 : name == "timeGetTime" ? 0 : 1); });
 	static constexpr std::array<std::string_view, 2> dsound_exports{"DirectSoundCreate", "DirectSoundCreate8"};
 	add_library("dsound.dll", dsound_exports, {}, [](std::string_view) { return uint32_t(3); });
+	// A Direct3D 9 library that ships beside the program is the program's choice (DXVK, for one); the built-in one answers otherwise.
+	bool d3d9_beside = false;
+	if (launch) {
+		const auto probe_prefix = NativePrefix::from_environment();
+		const NativePaths probe(probe_prefix);
+		const auto program = probe.resolve(launch->image_path);
+		if (program && program->exists)
+			for (const auto &item : std::filesystem::directory_iterator(program->host.parent_path())) {
+				auto filename = item.path().filename().string();
+				for (auto &character : filename)
+					if (character >= 'A' && character <= 'Z')
+						character = static_cast<char>(character + ('a' - 'A'));
+				d3d9_beside |= filename == "d3d9.dll";
+			}
+	}
 	const auto d3d9_methods = NativeX86D3D9::method_names();
-	add_library("d3d9.dll", NativeX86D3D9::entry_names(), {}, [](std::string_view) { return uint32_t(1); });
-	add_library("raven-d3d9.dll", d3d9_methods, {}, [](std::string_view name) { return NativeX86D3D9::method_words(name); });
+	if (!d3d9_beside) {
+		add_library("d3d9.dll", NativeX86D3D9::entry_names(), {}, [](std::string_view) { return uint32_t(1); });
+		add_library("raven-d3d9.dll", d3d9_methods, {}, [](std::string_view name) { return NativeX86D3D9::method_words(name); });
+	}
 	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
 	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
 	modules.bind_imports();
@@ -344,9 +470,15 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeMemory memory(process, environment);
 	NativeThreads guest_threads(process, environment, memory, nullptr, deadline);
 	NativeX86Threads thread_api(process, environment, kernel_objects, guest_threads);
+	NativeX86System system_api(process, environment, kernel_objects, guest_threads, memory);
 	object_api.set_cooperative(true);
 	NativeX86Loader library_loader(process, environment, modules, paths,
 		[&](uint64_t address, std::span<const uint64_t> arguments) { return call_guest(address, arguments); });
+	if (launch) {
+		const auto separator = launch->image_path.find_last_of(u'\\');
+		if (separator != std::u16string::npos)
+			library_loader.set_application_directory(launch->image_path.substr(0, separator));
+	}
 	module_api.set_loader([&](std::string name) -> uint64_t {
 		return library_loader.load(std::move(name));
 	}, [&](uint64_t handle) -> bool {
@@ -367,13 +499,18 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	desktop.register_image_api(shared_api);
 	NativeX86Compat compat(process, environment, windows);
 	// Shared handlers whose arguments are 32-bit words and whose structures carry no pointers.
-	const std::set<std::string_view> shared_names{"MoveWindow", "LoadCursorA", "LoadIconA", "GetAsyncKeyState", "SetCursor", "GetCursorPos", "SetCursorPos",
+	std::set<std::string_view> shared_names{"MoveWindow", "LoadCursorA", "LoadIconA", "GetAsyncKeyState", "SetCursor", "GetCursorPos", "SetCursorPos",
 		"DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA", "CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A",
 		"GetTextMetricsA", "SetDIBits", "MessageBoxA", "SetWindowPos", "SelectPalette", "PatBlt", "_lopen", "_lcreat", "_lread", "_lwrite", "_llseek", "lstrcpyA", "lstrlenA", "GetWindowsDirectoryA",
 		"GlobalUnlock", "GlobalFree", "GlobalAlloc", "SetErrorMode", "GlobalLock", "GetOEMCP", "GetCPInfo", "WideCharToMultiByte", "DeleteFileA",
 		"FreeEnvironmentStringsW", "GetEnvironmentStringsW", "GetVersion", "GetFileAttributesA", "CreateFileW", "DeleteFileW",
 		"GetEnvironmentVariableA", "GetFileInformationByHandle", "MultiByteToWideChar", "QueryPerformanceCounter", "QueryPerformanceFrequency", "ReadFile",
-		"SetFilePointer", "GetFileSizeEx", "FlushFileBuffers"};
+		"SetFilePointer", "GetFileSizeEx", "FlushFileBuffers",
+		"MonitorFromPoint"};
+	for (const auto &item : shared_exports)
+		shared_names.insert(item.name);
+	for (const auto name : shared_allowed)
+		shared_names.insert(name);
 	windows.set_deadline(deadline);
 	windows.set_presentation(std::move(presentation));
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
@@ -430,6 +567,27 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				result = process.resume(budget);
 				continue;
 			}
+			if (api == "RaiseException") {
+				const auto words = process.api_arguments(4);
+				std::cerr << "raven: unhandled exception 0x" << std::hex << uint32_t(words[0]) << std::dec << " raised by the program\n";
+				process.abandon_call();
+				throw ProcessExit{uint32_t(words[0]), result.instruction};
+			}
+			if (api == "MonitorFromPoint") {
+				// A POINT passed by value is two words here and one packed word in the shared handler.
+				const auto words = process.api_arguments(3);
+				const auto entry = shared_api.find("MonitorFromPoint");
+				if (!entry) {
+					std::cerr << "raven: unimplemented native x86 API " << api << '\n';
+					return result;
+				}
+				ApiCall inner(process, environment, {uint64_t(uint32_t(words[1])) << 32 | uint32_t(words[0]), words[2]});
+				entry->second(inner);
+				process.return_api(inner.result);
+				budget = remaining();
+				result = process.resume(budget);
+				continue;
+			}
 			if (api == "TerminateProcess") {
 				const auto words = process.api_arguments(2);
 				if (words[0] != UINT32_MAX) {
@@ -447,7 +605,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				process.abandon_call();
 				throw ProcessExit{code, result.instruction};
 			}
-			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !compat.dispatch(api) && !direct3d9.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
+			if (!environment.dispatch(api) && !thread_api.dispatch(api) && !system_api.dispatch(api) && !compat.dispatch(api) && !direct3d9.dispatch(api) && !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
 				!desktop.dispatch(api) && !windows.dispatch(api) && !advapi.dispatch(api) && !profile.dispatch(api) &&
 				!crt.dispatch(api) && !unsupported_library(process, environment, api) &&

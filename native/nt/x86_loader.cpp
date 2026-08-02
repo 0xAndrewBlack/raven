@@ -47,7 +47,12 @@ std::optional<std::vector<uint8_t>> NativeX86Loader::read_library(const std::str
 		identity = name;
 		return read_all(component);
 	}
-	const auto resolved = paths.resolve(std::u16string(name.begin(), name.end()));
+	auto resolved = paths.resolve(std::u16string(name.begin(), name.end()));
+	if (name.find_first_of("/\\:") == std::string::npos && !application_directory.empty()) {
+		const auto beside = paths.resolve(application_directory + u"\\" + std::u16string(name.begin(), name.end()));
+		if (beside && beside->exists)
+			resolved = beside;
+	}
 	if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
 		return std::nullopt;
 	identity = lowered(resolved->host.filename().string());
