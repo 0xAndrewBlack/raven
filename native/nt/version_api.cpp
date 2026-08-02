@@ -202,8 +202,22 @@ void register_version_api(ApiRegistry &registry, KernelContext &context)
 		call.set_last_error(resolved && !resolved->parent_exists ? 3 : 2);
 		return std::nullopt;
 	};
-	const auto size_of = [load](ApiCall &call) {
-		const auto data = load(call, call.wide(call[0]));
+	// Names and query paths arrive in the character set of the function; a narrow one is widened one byte per character.
+	const auto name_at = [](ApiCall &call, size_t index, bool ansi) {
+		if (!ansi)
+			return call.wide(call[index]);
+		const auto narrow = call.narrow(call[index]);
+		return std::u16string(narrow.begin(), narrow.end());
+	};
+	// A pointer the guest gets back is as wide as the program's own pointers.
+	const auto store_pointer = [](ApiCall &call, uint64_t address, uint64_t value) {
+		if (call.process.mode() == NativeMode::x86)
+			call.store<uint32_t>(address, uint32_t(value));
+		else
+			call.store<uint64_t>(address, value);
+	};
+	const auto size_of = [load, name_at](ApiCall &call, bool ansi) {
+		const auto data = load(call, name_at(call, 0, ansi));
 		if (!data) {
 			call.ret(0);
 			return;
@@ -211,14 +225,15 @@ void register_version_api(ApiRegistry &registry, KernelContext &context)
 		if (call[1]) call.store<uint32_t>(call[1], 0);
 		call.ret(data->size());
 	};
-	registry.add("GetFileVersionInfoSizeW", 2, size_of);
+	registry.add("GetFileVersionInfoSizeW", 2, [size_of](ApiCall &call) { size_of(call, false); });
+	registry.add("GetFileVersionInfoSizeA", 2, [size_of](ApiCall &call) { size_of(call, true); });
 	registry.add("GetFileVersionInfoSizeExW", 3, [load](ApiCall &call) {
 		const auto data = load(call, call.wide(call[1]));
 		if (call[2]) call.store<uint32_t>(call[2], 0);
 		call.ret(data ? data->size() : 0);
 	});
-	const auto info_of = [load](ApiCall &call, size_t name_index, size_t length_index, size_t data_index) {
-		auto data = load(call, call.wide(call[name_index]));
+	const auto info_of = [load, name_at](ApiCall &call, size_t name_index, size_t length_index, size_t data_index, bool ansi) {
+		auto data = load(call, name_at(call, name_index, ansi));
 		if (!data) {
 			call.ret(0);
 			return;
@@ -231,25 +246,33 @@ void register_version_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[data_index], *data);
 		call.ret(1);
 	};
-	registry.add("GetFileVersionInfoW", 4, [info_of](ApiCall &call) { info_of(call, 0, 2, 3); });
-	registry.add("GetFileVersionInfoExW", 5, [info_of](ApiCall &call) { info_of(call, 1, 3, 4); });
-	registry.add("VerQueryValueW", 4, [](ApiCall &call) {
+	registry.add("GetFileVersionInfoW", 4, [info_of](ApiCall &call) { info_of(call, 0, 2, 3, false); });
+	registry.add("GetFileVersionInfoA", 4, [info_of](ApiCall &call) { info_of(call, 0, 2, 3, true); });
+	registry.add("GetFileVersionInfoExW", 5, [info_of](ApiCall &call) { info_of(call, 1, 3, 4, false); });
+	const auto query = [name_at, store_pointer](ApiCall &call, bool ansi) {
 		if (!call[0] || !call[1]) {
 			call.fail(87);
 			return;
 		}
 		const size_t total = call.read(call[0], 2)[0] | call.read(call[0] + 1, 1)[0] << 8;
 		const auto block = call.read(call[0], total);
-		const auto path = call.wide(call[1], 512);
+		const auto path = ansi ? name_at(call, 1, true) : call.wide(call[1], 512);
+		// The strings of a block are wide; an ANSI caller would need them converted, which is not done, so those queries are refused.
+		if (ansi && path.size() >= 15 && equal_fold(path.substr(0, 15), u"\\StringFileInfo")) {
+			call.fail(120);
+			return;
+		}
 		const auto node = find_node(block, path);
 		if (!node) {
 			call.fail(1813);
 			return;
 		}
-		if (call[2]) call.store<uint64_t>(call[2], call[0] + node->value_offset);
+		if (call[2]) store_pointer(call, call[2], call[0] + node->value_offset);
 		if (call[3]) call.store<uint32_t>(call[3], node->type == 1 ? node->value_length : uint32_t(node->value_size));
 		call.ret(1);
-	});
+	};
+	registry.add("VerQueryValueW", 4, [query](ApiCall &call) { query(call, false); });
+	registry.add("VerQueryValueA", 4, [query](ApiCall &call) { query(call, true); });
 }
 
 }

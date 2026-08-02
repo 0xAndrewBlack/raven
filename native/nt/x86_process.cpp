@@ -92,7 +92,8 @@ constexpr std::string_view shared_allowed[] = {
 	"GetUserDefaultLCID", "GetSystemDefaultLCID", "IsValidCodePage", "SetEnvironmentVariableA", "SetEnvironmentVariableW",
 	"ExpandEnvironmentStringsA", "ExpandEnvironmentStringsW", "CreateMutexA", "CreateMutexW", "ReleaseMutex", "GetFileTime", "SetFileTime",
 	"FileTimeToLocalFileTime", "LocalFileTimeToFileTime", "FileTimeToDosDateTime", "DosDateTimeToFileTime", "GetFileSize", "SetEndOfFile",
-	"GetWindowLongW", "SetWindowLongW", "GetSystemDirectoryW", "GetSystemDirectoryA", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
+	"GetWindowLongW", "SetWindowLongW", "GetFileVersionInfoA", "GetFileVersionInfoExW", "GetFileVersionInfoSizeA", "GetFileVersionInfoSizeExW",
+	"GetFileVersionInfoSizeW", "GetFileVersionInfoW", "VerQueryValueA", "VerQueryValueW", "GetSystemDirectoryW", "GetSystemDirectoryA", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
 	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
 	"SetFileAttributesW", "GetLongPathNameA", "GetLongPathNameW", "GetShortPathNameA", "GetShortPathNameW", "SearchPathA", "SearchPathW",
 	"GetModuleFileNameA", "IsDBCSLeadByte", "IsDBCSLeadByteEx", "GetCPInfoExA", "GetThreadLocale", "SetThreadLocale", "VerifyVersionInfoW",
@@ -204,8 +205,7 @@ bool unsupported_library(NativeProcess &process, NativeEnvironment &environment,
 		process.return_api(0xC00000BBU);
 		return true;
 	}
-	const bool known = name == "PlaySoundW" || name == "ShellAboutW" || name == "InitCommonControlsEx" || name == "GetFileVersionInfoA" ||
-		name == "GetFileVersionInfoSizeA" || name == "VerQueryValueA";
+	const bool known = name == "PlaySoundW" || name == "ShellAboutW" || name == "InitCommonControlsEx";
 	if (!known)
 		return false;
 	process.api_arguments(0);
@@ -434,8 +434,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	add_library("msvcrt.dll", NativeCRT::exports(), NativeCRT::data_exports(), [](std::string_view name) { return uint32_t(0); });
 	static constexpr std::array<std::string_view, 4> winmm_exports{"PlaySoundW", "timeBeginPeriod", "timeEndPeriod", "timeGetTime"};
 	static constexpr std::array<std::string_view, 1> shell_exports{"ShellAboutW"};
-	// File version resources are not read for 32-bit programs yet: the services fail visibly, as for a file without a version resource.
-	static constexpr std::array<std::string_view, 3> version_exports{"GetFileVersionInfoA", "GetFileVersionInfoSizeA", "VerQueryValueA"};
+	// File version resources are read by the shared handlers; the names are in byte order.
+	static constexpr std::array<std::string_view, 8> version_exports{"GetFileVersionInfoA", "GetFileVersionInfoExW", "GetFileVersionInfoSizeA",
+		"GetFileVersionInfoSizeExW", "GetFileVersionInfoSizeW", "GetFileVersionInfoW", "VerQueryValueA", "VerQueryValueW"};
 	static constexpr std::array<std::string_view, 1> controls_exports{"InitCommonControlsEx"};
 	add_library("winmm.dll", winmm_exports, {}, [](std::string_view name) { return uint32_t(name == "PlaySoundW" ? 3 : name == "timeGetTime" ? 0 : 1); });
 	const auto dsound_methods = NativeX86DirectSound::method_names();
@@ -474,7 +475,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		return uint32_t(0);
 	});
 #endif
-	add_library("version.dll", version_exports, {}, [](std::string_view name) { return uint32_t(name == "GetFileVersionInfoSizeA" ? 2 : 4); });
+	add_library("version.dll", version_exports, {}, [](std::string_view name) { return registry_words(name); });
 	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
 	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
 	modules.bind_imports();
@@ -773,6 +774,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_memory_api(shared_api, kernel);
 	register_text_api(shared_api, kernel);
 	register_system_api(shared_api, kernel);
+	register_version_api(shared_api, kernel);
 	register_process_api(shared_api, kernel);
 	register_ansi_adapters(shared_api);
 	register_legacy_file_api(shared_api);
