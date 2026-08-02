@@ -20,6 +20,7 @@
 #include "registry_words.h"
 #include "system_exports.h"
 #include "x86_loader.h"
+#include "x86_tls.h"
 #ifdef RAVEN_VULKAN_THUNK32
 #include "graphics/vulkan_thunk32_engine.h"
 #endif
@@ -484,12 +485,17 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call_guest;
 	NativeResources resources(process, environment, modules, entry);
 	NativeMemory memory(process, environment);
+	// Declared first so that it outlives the threads, which release their blocks through it when they are torn down.
+	NativeX86Tls static_tls(process);
 	NativeThreads guest_threads(process, environment, memory, nullptr, deadline);
 	NativeX86Threads thread_api(process, environment, kernel_objects, guest_threads);
 	NativeX86System system_api(process, environment, kernel_objects, guest_threads, memory);
+	static_tls.attach_main(environment.teb());
+	guest_threads.set_block_hooks([&](uint64_t teb) { static_tls.create_thread(teb); }, [&](uint64_t teb) { static_tls.release_thread(teb); });
 	object_api.set_cooperative(true);
 	NativeX86Loader library_loader(process, environment, modules, paths,
 		[&](uint64_t address, std::span<const uint64_t> arguments) { return call_guest(address, arguments); });
+	library_loader.set_tls(&static_tls);
 	if (launch) {
 		const auto separator = launch->image_path.find_last_of(u'\\');
 		if (separator != std::u16string::npos)
@@ -600,6 +606,22 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				process.abandon_call();
 				throw ProcessExit{uint32_t(words[0]), result.instruction};
 			}
+			if (api == "CreateFontA") {
+				// The face name is an ANSI string; the shared handler takes the wide form of the same call.
+				auto words = process.api_arguments(14);
+				words[13] = compat.widen(words[13]);
+				const auto entry = shared_api.find("CreateFontW");
+				if (!entry) {
+					std::cerr << "raven: unimplemented native x86 API " << api << '\n';
+					return result;
+				}
+				ApiCall inner(process, environment, words);
+				entry->second(inner);
+				process.return_api(inner.result);
+				budget = remaining();
+				result = process.resume(budget);
+				continue;
+			}
 			if (api == "MonitorFromPoint") {
 				// A POINT passed by value is two words here and one packed word in the shared handler.
 				const auto words = process.api_arguments(3);
@@ -640,7 +662,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
 				!desktop.dispatch(api) && !windows.dispatch(api) && !advapi.dispatch(api) && !profile.dispatch(api) &&
 				!crt.dispatch(api) && !unsupported_library(process, environment, api) &&
-				!(shared_names.contains(api) && shared_api.dispatch(process, environment, api))) {
+				!(shared_names.contains(api) && shared_api.dispatch(process, environment, api, true))) {
 				std::cerr << "raven: unimplemented native x86 API " << api << '\n';
 				return result;
 			}
@@ -653,6 +675,34 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	};
 	windows.set_call(invoke);
 	guest_threads.set_runner(invoke);
+	// Threads announce themselves to the images that keep per-thread state: TLS callbacks first, then the library entry points.
+	guest_threads.set_notifier([&](uint32_t reason) {
+		const auto notify = [&](const PEModule &module) {
+			for (const auto callback : static_tls.callbacks(module)) {
+				const uint64_t arguments[] = {module.loaded.base(), reason, 0};
+				const auto result = invoke(callback, arguments);
+				if (result.stop != NativeStop::returned)
+					throw result;
+			}
+			if ((module.image.characteristics & 0x2000) && module.image.entry && !module.runtime_api && &module != &entry) {
+				const uint64_t arguments[] = {module.loaded.base(), reason, 0};
+				const auto result = invoke(module.loaded.base() + module.image.entry, arguments);
+				if (result.stop != NativeStop::returned)
+					throw result;
+			}
+		};
+		if (reason == 2) {
+			notify(entry);
+			for (const auto &[name, module] : modules.all())
+				if (module.get() != &entry)
+					notify(*module);
+		} else {
+			for (const auto &[name, module] : modules.all())
+				if (module.get() != &entry)
+					notify(*module);
+			notify(entry);
+		}
+	});
 	call_guest = invoke;
 	// File, memory, text and system handlers of the shared registry take 32-bit words as well; they get the same process services.
 	NativeHeap guest_heap(process, environment, modules, entry.image);
@@ -668,6 +718,16 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	windows.set_yield([&guest_threads] { return guest_threads.live() > 1 && guest_threads.yield(); });
 	crt.set_call(invoke);
 	try {
+		// Images of the startup graph with thread local storage get their blocks, and their callbacks hear about the process starting.
+		for (const auto &[name, module] : modules.all())
+			static_tls.add(*module);
+		for (const auto &[name, module] : modules.all())
+			for (const auto callback : static_tls.callbacks(*module)) {
+				const uint64_t arguments[] = {module->loaded.base(), 1, 0};
+				const auto started = invoke(callback, arguments);
+				if (started.stop != NativeStop::returned)
+					throw started;
+			}
 		const auto result = invoke(entry.loaded.base() + entry.image.entry, {});
 		windows.shutdown();
 		return result;

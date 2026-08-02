@@ -130,8 +130,17 @@ uint64_t NativeX86Loader::load(std::string name)
 		for (auto item = staged.rbegin(); item != staged.rend(); ++item) {
 			process.map_image((*item)->loaded);
 			mapped = true;
+			if (tls)
+				tls->add(**item);
 		}
 		for (auto item = staged.rbegin(); item != staged.rend(); ++item) {
+			if (tls)
+				for (const auto callback : tls->callbacks(**item)) {
+					const uint64_t arguments[] = {(*item)->loaded.base(), 1, 0};
+					const auto result = call(callback, arguments);
+					if (result.stop != NativeStop::returned)
+						throw result;
+				}
 			if (!(*item)->image.entry)
 				continue;
 			const uint64_t arguments[] = {(*item)->loaded.base(), 1, 0};

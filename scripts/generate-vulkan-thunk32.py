@@ -91,11 +91,25 @@ class Generator:
             return "pointer_struct_pointers"
         return None
 
-    def union_plain(self, name):
-        for member in self.registry.unions[name]["members"]:
-            if member.pointers or self.base(member) in self.registry.structs or self.base(member) in self.registry.handles:
+    def plain(self, name, seen=()):
+        """True when a structure or union holds no pointers, handles or pointer-sized members, so both ABIs lay it out alike."""
+        name = self.registry.resolve_struct(name)
+        if name in seen:
+            return False
+        info = self.registry.structs.get(name) or self.registry.unions.get(name)
+        if info is None:
+            return False
+        for member in info["members"]:
+            base = self.base(member)
+            if member.pointers or member.bitfield or base in self.registry.handles or base in SIZE_T_TYPES or base in OPAQUE_TYPES:
                 return False
+            if base in self.registry.structs or base in self.registry.unions:
+                if not self.plain(base, seen + (name,)):
+                    return False
         return True
+
+    def union_plain(self, name):
+        return self.plain(name)
 
     def struct_supported(self, name):
         name = self.registry.resolve_struct(name)

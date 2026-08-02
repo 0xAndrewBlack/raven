@@ -67,7 +67,8 @@ public:
 	// The handler and word count registered under a name, for adapters that reuse it.
 	std::optional<std::pair<uint32_t,ApiHandler>> find(std::string_view name) const;
 	// Runs the handler for an API trap; false when no handler is registered under this name.
-	bool dispatch(NativeProcess &process, NativeEnvironment &environment, std::string_view name) const;
+	// For a 32-bit caller, the pseudo handles -1 and -2 arrive sign-extended, as the handlers of a 64-bit process expect them.
+	bool dispatch(NativeProcess &process, NativeEnvironment &environment, std::string_view name, bool widen_handles = false) const;
 
 private:
 	struct Entry {

@@ -58,7 +58,7 @@ bool NativeX86Threads::dispatch(std::string_view name)
 	const auto args = process.api_arguments(known->second);
 	if (name == "CreateThread") {
 		const uint32_t flags = uint32_t(args[4]);
-		if (args[0] || (flags & ~uint32_t(0x4))) {
+		if (args[0] || (flags & ~uint32_t(0x4 | 0x10000))) {
 			environment.set_last_error(87);
 			process.return_api(0);
 			return true;

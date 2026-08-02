@@ -128,12 +128,17 @@ std::optional<std::pair<uint32_t,ApiHandler>> ApiRegistry::find(std::string_view
 	return std::make_pair(found->second.arguments, found->second.handler);
 }
 
-bool ApiRegistry::dispatch(NativeProcess &process, NativeEnvironment &environment, std::string_view name) const
+bool ApiRegistry::dispatch(NativeProcess &process, NativeEnvironment &environment, std::string_view name, bool widen_handles) const
 {
 	const auto found = entries.find(std::string(name));
 	if (found == entries.end())
 		return false;
-	ApiCall call(process, environment, process.api_arguments(found->second.arguments));
+	auto words = process.api_arguments(found->second.arguments);
+	if (widen_handles)
+		for (auto &word : words)
+			if (word == 0xffffffffULL || word == 0xfffffffeULL)
+				word |= 0xffffffff00000000ULL;
+	ApiCall call(process, environment, std::move(words));
 	try {
 		found->second.handler(call);
 	} catch (const ApiFault &) {

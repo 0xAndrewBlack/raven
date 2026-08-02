@@ -11,7 +11,8 @@ namespace raven {
 
 namespace {
 
-constexpr size_t host_stack_size = 1024 * 1024;
+// A guest thread runs its API handlers on this stack, drivers included: shader compilation needs far more than a megabyte.
+constexpr size_t host_stack_size = 16 * 1024 * 1024;
 
 }
 
@@ -77,6 +78,8 @@ std::shared_ptr<GuestThread> NativeThreads::create(uint64_t start, uint64_t para
 	thread->teb = environment.create_thread_block(thread->stack_high, thread->stack_low, thread->id);
 	if (tls)
 		tls->create_thread(thread->teb);
+	if (block_made)
+		block_made(thread->teb);
 	thread->start = start;
 	thread->parameter = parameter;
 	thread->snapshot = process.new_thread(thread->stack_high - 64, thread->teb);
@@ -152,6 +155,8 @@ void NativeThreads::release_resources(GuestThread &thread)
 		return;
 	if (tls)
 		tls->release_thread(thread.teb);
+	if (block_released)
+		block_released(thread.teb);
 	environment.release_thread_block(thread.teb);
 	thread.teb = 0;
 	if (thread.stack_low) {

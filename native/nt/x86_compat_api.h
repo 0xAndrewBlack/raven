@@ -14,6 +14,8 @@ class NativeX86Compat {
 public:
 	NativeX86Compat(NativeProcess &process, NativeEnvironment &environment, NativeWindows &windows);
 	bool dispatch(std::string_view name);
+	// A guest ANSI string as UTF-16 in scratch memory that stays valid for a few calls; atoms and null pass through.
+	uint32_t widen(uint64_t address);
 	static std::span<const std::pair<std::string_view, uint32_t>> exports();
 
 private:
@@ -29,7 +31,6 @@ private:
 	void heap_free(uint64_t address);
 	uint32_t block_size(uint64_t address) const;
 	uint64_t scratch_base();
-	uint32_t widen(uint64_t address);
 	bool forward(std::string_view wide_name);
 };
 

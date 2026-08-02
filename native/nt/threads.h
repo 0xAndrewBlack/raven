@@ -62,6 +62,12 @@ public:
 	void set_runner(std::function<NativeResult(uint64_t, std::span<const uint64_t>)> invoke) { run = std::move(invoke); }
 	// Called in a new thread before it starts (reason 2) and after it ends (reason 3): TLS callbacks and DllMain notifications.
 	void set_notifier(std::function<void(uint32_t)> notify) { notifier = std::move(notify); }
+	// Called with the thread block of a thread that was just made and of one that is being released: static TLS of a 32-bit process.
+	void set_block_hooks(std::function<void(uint64_t)> made, std::function<void(uint64_t)> released)
+	{
+		block_made = std::move(made);
+		block_released = std::move(released);
+	}
 	// Host polling used while every guest thread waits; it may make waiting predicates true (window events).
 	void set_idle(std::function<void(std::chrono::milliseconds)> idle) { poll = std::move(idle); }
 
@@ -90,6 +96,7 @@ private:
 	std::chrono::steady_clock::time_point deadline;
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> run;
 	std::function<void(uint32_t)> notifier;
+	std::function<void(uint64_t)> block_made, block_released;
 	std::function<void(std::chrono::milliseconds)> poll;
 	std::vector<std::shared_ptr<GuestThread>> threads;
 	GuestThread *running = nullptr;

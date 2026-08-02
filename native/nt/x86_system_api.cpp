@@ -366,13 +366,35 @@ bool NativeX86System::dispatch(std::string_view name)
 		process.write_memory(args[3], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(path.data()), path.size()));
 		process.return_api(unique & 0xffff);
 	} else if (name == "ChangeDisplaySettingsExW") {
-		process.return_api(UINT32_MAX);
+		// A mode change is accepted without changing anything: the host shows the program's window at its own size.
+		process.return_api(0);
 	} else if (name == "CreateIconIndirect") {
 		fail(50);
 	} else if (name == "DisplayConfigGetDeviceInfo") {
 		process.return_api(50);
 	} else if (name == "EnumDisplayDevicesA") {
-		process.return_api(0);
+		// One adapter, and one monitor on it.
+		if (uint32_t(args[1]) != 0 || !args[2] || read32(args[2]) != 424) {
+			process.return_api(0);
+		} else {
+			std::vector<uint8_t> device(424);
+			const auto text = [&](size_t offset, std::string_view value) { std::copy(value.begin(), value.end(), device.begin() + offset); };
+			device[0] = 424 & 0xff;
+			device[1] = 424 >> 8;
+			if (args[0]) {
+				text(4, "\\\\.\\DISPLAY1\\Monitor0");
+				text(36, "Raven Monitor");
+				device[164] = 3;
+				text(168, "MONITOR\\RAVEN0000");
+			} else {
+				text(4, "\\\\.\\DISPLAY1");
+				text(36, "Raven Display");
+				device[164] = 5;
+				text(168, "PCI\\VEN_1AF4&DEV_1050");
+			}
+			process.write_memory(args[2], device);
+			process.return_api(1);
+		}
 	} else if (name == "SetProcessDPIAware") {
 		process.return_api(1);
 	} else if (name.starts_with("D3DKMT")) {
