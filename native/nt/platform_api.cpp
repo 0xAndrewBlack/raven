@@ -196,11 +196,11 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			for (const auto byte : bytes) std::fprintf(stderr, " %02x", byte);
 			std::fprintf(stderr, "\n");
 		}
-		if (call[4]) call.store<uint64_t>(call[4], 0);
+		if (call[4]) call.store_pointer(call[4], 0);
 		call.ret(class_not_registered);
 	});
 	registry.add("CoGetClassObject", 5, [](ApiCall &call) {
-		if (call[4]) call.store<uint64_t>(call[4], 0);
+		if (call[4]) call.store_pointer(call[4], 0);
 		call.ret(class_not_registered);
 	});
 	registry.add("CLSIDFromProgID", 2, [](ApiCall &call) { call.ret(class_string); });

@@ -31,6 +31,14 @@ uint32_t ApiCall::last_error() const
 	return environment.last_error();
 }
 
+void ApiCall::store_pointer(uint64_t address, uint64_t value) const
+{
+	if (process.mode() == NativeMode::x86)
+		store<uint32_t>(address, uint32_t(value));
+	else
+		store<uint64_t>(address, value);
+}
+
 void ApiCall::set_last_error(uint32_t error)
 {
 	environment.set_last_error(error);

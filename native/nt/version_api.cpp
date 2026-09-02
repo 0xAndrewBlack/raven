@@ -209,13 +209,7 @@ void register_version_api(ApiRegistry &registry, KernelContext &context)
 		const auto narrow = call.narrow(call[index]);
 		return std::u16string(narrow.begin(), narrow.end());
 	};
-	// A pointer the guest gets back is as wide as the program's own pointers.
-	const auto store_pointer = [](ApiCall &call, uint64_t address, uint64_t value) {
-		if (call.process.mode() == NativeMode::x86)
-			call.store<uint32_t>(address, uint32_t(value));
-		else
-			call.store<uint64_t>(address, value);
-	};
+	const auto store_pointer = [](ApiCall &call, uint64_t address, uint64_t value) { call.store_pointer(address, value); };
 	const auto size_of = [load, name_at](ApiCall &call, bool ansi) {
 		const auto data = load(call, name_at(call, 0, ansi));
 		if (!data) {

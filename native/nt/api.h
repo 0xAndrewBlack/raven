@@ -42,6 +42,8 @@ public:
 	{
 		write(address, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&value), sizeof(T)));
 	}
+	// A pointer-sized value for the guest: four bytes for a 32-bit program, eight for a 64-bit one.
+	void store_pointer(uint64_t address, uint64_t value) const;
 	// Zero-terminated guest strings; a string longer than limit characters faults the call.
 	std::u16string wide(uint64_t address, size_t limit = 32768) const;
 	std::string narrow(uint64_t address, size_t limit = 32768) const;

@@ -2,6 +2,7 @@
 #include "nls.h"
 
 #include <fstream>
+#include <vector>
 #include <stdexcept>
 
 namespace raven {
@@ -79,6 +80,97 @@ std::vector<std::u16string> section_names(const std::filesystem::path &file)
 	return names;
 }
 
+
+std::string narrow_line(std::u16string_view value)
+{
+	// The file is read as bytes widened to characters, so it is written the same way; what does not fit a byte becomes a question mark.
+	std::string result;
+	for (const auto character : value)
+		result.push_back(character <= 0xff ? char(character) : '?');
+	return result;
+}
+
+// Sets, replaces or removes a value (or a whole section) in an INI file, keeping every other line as it was.
+bool write_value(const std::filesystem::path &file, std::u16string_view section, const std::u16string *key, const std::u16string *value)
+{
+	std::vector<std::string> lines;
+	bool ends_with_newline = true;
+	{
+		std::ifstream input(file, std::ios::binary);
+		std::string line;
+		while (input && std::getline(input, line)) {
+			if (!line.empty() && line.back() == '\r')
+				line.pop_back();
+			lines.push_back(line);
+		}
+	}
+	const auto wanted_section = fold(section);
+	const auto wanted_key = key ? fold(*key) : std::u16string{};
+	size_t section_start = lines.size(), section_end = lines.size();
+	bool found_section = false;
+	for (size_t index = 0; index < lines.size(); ++index) {
+		const auto text = trim(widen(lines[index]));
+		if (!text.empty() && text[0] == u'[') {
+			const auto close = text.find(u']');
+			const bool match = close != text.npos && fold(trim(text.substr(1, close - 1))) == wanted_section;
+			if (found_section && !match && section_end == lines.size()) {
+				section_end = index;
+				break;
+			}
+			if (match && !found_section) {
+				found_section = true;
+				section_start = index;
+			}
+		}
+	}
+	if (!key) {
+		// No key: the whole section goes.
+		if (!found_section)
+			return true;
+		lines.erase(lines.begin() + static_cast<ptrdiff_t>(section_start), lines.begin() + static_cast<ptrdiff_t>(section_end));
+	} else {
+		bool replaced = false;
+		if (found_section)
+			for (size_t index = section_start + 1; index < section_end; ++index) {
+				const auto text = trim(widen(lines[index]));
+				if (text.empty() || text[0] == u';')
+					continue;
+				const auto equals = text.find(u'=');
+				if (equals == text.npos || fold(trim(text.substr(0, equals))) != wanted_key)
+					continue;
+				if (value) {
+					lines[index] = narrow_line(*key) + "=" + narrow_line(*value);
+				} else {
+					lines.erase(lines.begin() + static_cast<ptrdiff_t>(index));
+				}
+				replaced = true;
+				break;
+			}
+		if (!replaced && value) {
+			const std::string entry = narrow_line(*key) + "=" + narrow_line(*value);
+			if (found_section) {
+				// After the last line of the section that is not blank.
+				size_t at = section_end;
+				while (at > section_start + 1 && trim(widen(lines[at - 1])).empty())
+					--at;
+				lines.insert(lines.begin() + static_cast<ptrdiff_t>(at), entry);
+			} else {
+				if (!lines.empty() && !trim(widen(lines.back())).empty())
+					lines.push_back("");
+				lines.push_back("[" + narrow_line(section) + "]");
+				lines.push_back(entry);
+			}
+		}
+	}
+	std::ofstream output(file, std::ios::binary | std::ios::trunc);
+	if (!output)
+		return false;
+	for (const auto &line : lines)
+		output << line << "\r\n";
+	(void)ends_with_newline;
+	return bool(output);
+}
+
 }
 
 NativeProfile::NativeProfile(NativeProcess &process, NativeEnvironment &environment, const NativePrefix &prefix)
@@ -124,6 +216,36 @@ bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &
 			}
 			process.write_memory(args[0], bytes);
 			result = fits ? (joined.empty() ? 0 : joined.size() - 1) : capacity - 2;
+		}
+		return true;
+	}
+	if (name == "WritePrivateProfileStringW") {
+		result = 0;
+		try {
+			const auto section = text(args[0]), key = text(args[1]), value = text(args[2]), file_name = text(args[3]);
+			if (!section || !file_name) {
+				environment.set_last_error(87);
+				return true;
+			}
+			const auto path = prefix.resolve(encode_utf8(*file_name));
+			if (!path) {
+				environment.set_last_error(123);
+				return true;
+			}
+			if (!std::filesystem::exists(path->parent_path())) {
+				environment.set_last_error(3);
+				return true;
+			}
+			// A missing key removes the section; a missing value removes the key.
+			if (write_value(*path, *section, key ? &*key : nullptr, value ? &*value : nullptr))
+				result = 1;
+			else
+				environment.set_last_error(5);
+		} catch (const std::runtime_error &failure) {
+			const std::string_view message = failure.what();
+			if (message.find("readable") == message.npos && message.find("writable") == message.npos)
+				throw;
+			environment.set_last_error(998);
 		}
 		return true;
 	}
@@ -177,8 +299,8 @@ bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &
 
 bool NativeProfile::dispatch(std::string_view name)
 {
-	const uint32_t count = name == "GetPrivateProfileSectionNamesW" ? 3 : name == "GetPrivateProfileIntW" ? 4 : 6;
-	if (name != "GetPrivateProfileSectionNamesW" && name != "GetPrivateProfileIntW" && name != "GetPrivateProfileStringW")
+	const uint32_t count = name == "GetPrivateProfileSectionNamesW" ? 3 : name == "GetPrivateProfileIntW" || name == "WritePrivateProfileStringW" ? 4 : 6;
+	if (name != "GetPrivateProfileSectionNamesW" && name != "GetPrivateProfileIntW" && name != "GetPrivateProfileStringW" && name != "WritePrivateProfileStringW")
 		return false;
 	uint64_t result = 0;
 	execute(name, process.api_arguments(count), result);
@@ -196,6 +318,11 @@ void register_profile_api(ApiRegistry &registry, NativeProfile &profile)
 	registry.add("GetPrivateProfileIntW", 4, [&profile](ApiCall &call) {
 		uint64_t result = 0;
 		profile.execute("GetPrivateProfileIntW", {call[0], call[1], call[2], call[3]}, result);
+		call.ret(result);
+	});
+	registry.add("WritePrivateProfileStringW", 4, [&profile](ApiCall &call) {
+		uint64_t result = 0;
+		profile.execute("WritePrivateProfileStringW", {call[0], call[1], call[2], call[3]}, result);
 		call.ret(result);
 	});
 	registry.add("GetPrivateProfileStringW", 6, [&profile](ApiCall &call) {

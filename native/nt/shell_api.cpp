@@ -12,7 +12,7 @@ namespace raven {
 namespace {
 
 // Folder locations by CSIDL, relative to the user profile unless the path is absolute.
-std::optional<std::u16string> folder_for(int csidl, const std::u16string &profile)
+std::optional<std::u16string> folder_for(int csidl, const std::u16string &profile, bool wow64 = false)
 {
 	switch (csidl & 0xff) {
 	case 0x00: case 0x10: return profile + u"\\Desktop";
@@ -38,7 +38,11 @@ std::optional<std::u16string> folder_for(int csidl, const std::u16string &profil
 	case 0x23: return std::u16string(u"C:\\ProgramData");
 	case 0x24: return std::u16string(u"C:\\Windows");
 	case 0x25: case 0x29: return std::u16string(u"C:\\Windows\\System32");
-	case 0x26: case 0x2b: return csidl == 0x2b ? std::u16string(u"C:\\Program Files\\Common Files") : std::u16string(u"C:\\Program Files");
+	// A 32-bit program sees the 32-bit program directories, as on a 64-bit Windows.
+	case 0x26: case 0x2b:
+		if (wow64)
+			return csidl == 0x2b ? std::u16string(u"C:\\Program Files (x86)\\Common Files") : std::u16string(u"C:\\Program Files (x86)");
+		return csidl == 0x2b ? std::u16string(u"C:\\Program Files\\Common Files") : std::u16string(u"C:\\Program Files");
 	case 0x27: return profile + u"\\Pictures";
 	case 0x28: return profile;
 	case 0x2a: return std::u16string(u"C:\\Program Files (x86)");
@@ -69,7 +73,7 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 	auto &paths = context.paths;
 	registry.add("SHGetFolderPathW", 5, [&paths](ApiCall &call) {
 		const int csidl = call.i32(1);
-		const auto location = folder_for(csidl, paths.user_profile());
+		const auto location = folder_for(csidl, paths.user_profile(), call.process.mode() == NativeMode::x86);
 		if (!location) {
 			call.ret(0x80070057U);
 			return;
@@ -79,9 +83,56 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[4], *location, 260);
 		call.ret(0);
 	});
+	// A folder location as an item id list. Programs treat it as opaque: one item that carries the path, then the terminating empty item.
+	registry.add("SHGetSpecialFolderLocation", 3, [&paths, &context](ApiCall &call) {
+		if (!call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto location = folder_for(call.i32(1), paths.user_profile(), call.process.mode() == NativeMode::x86);
+		if (!location) {
+			call.ret(0x80070002U);
+			return;
+		}
+		if (const auto resolved = paths.resolve(*location); resolved && (call.i32(1) & 0x8000))
+			std::filesystem::create_directories(resolved->host);
+		const size_t item = 4 + location->size() * 2;
+		const auto address = context.allocator.allocate(item + 2, true);
+		if (!address) {
+			call.ret(0x8007000EU);
+			return;
+		}
+		std::vector<uint8_t> bytes(item + 2, 0);
+		bytes[0] = uint8_t(item);
+		bytes[1] = uint8_t(item >> 8);
+		bytes[2] = 'R';
+		bytes[3] = 'V';
+		std::memcpy(bytes.data() + 4, location->data(), location->size() * 2);
+		call.write(address, bytes);
+		call.store_pointer(call[2], address);
+		call.ret(0);
+	});
+	registry.add("SHGetPathFromIDListW", 2, [](ApiCall &call) {
+		if (!call[0] || !call[1]) {
+			call.ret(0);
+			return;
+		}
+		const auto header = call.read(call[0], 4);
+		const size_t size = header[0] | header[1] << 8;
+		if (size < 4 || size > 4 + 520 || header[2] != 'R' || header[3] != 'V') {
+			call.ret(0);
+			return;
+		}
+		const auto raw = call.read(call[0] + 4, size - 4);
+		std::u16string text;
+		for (size_t index = 0; index + 1 < raw.size(); index += 2)
+			text.push_back(char16_t(raw[index] | raw[index + 1] << 8));
+		call.put_wide(call[1], text, 260);
+		call.ret(1);
+	});
 	registry.add("SHGetSpecialFolderPathW", 4, [&paths](ApiCall &call) {
 		const int csidl = call.i32(2);
-		const auto location = folder_for(csidl, paths.user_profile());
+		const auto location = folder_for(csidl, paths.user_profile(), call.process.mode() == NativeMode::x86);
 		if (!location) {
 			call.ret(0);
 			return;
@@ -188,7 +239,7 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("Shell_NotifyIconW", 2, [](ApiCall &call) { call.fail(5); });
 	registry.add("SHGetFileInfoW", 5, [](ApiCall &call) { call.ret(0); });
 	registry.add("SHCreateItemFromParsingName", 4, [](ApiCall &call) {
-		if (call[3]) call.store<uint64_t>(call[3], 0);
+		if (call[3]) call.store_pointer(call[3], 0);
 		call.ret(0x80070002U);
 	});
 	registry.add("DragQueryFileW", 4, [](ApiCall &call) { call.ret(0); });
@@ -227,11 +278,16 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(child < 0 ? 0 : 42);
 	});
 	registry.add("SHFileOperationW", 1, [&paths](ApiCall &call) {
-		const uint32_t function = call.load<uint32_t>(call[0] + 8);
-		const uint64_t sources = call.load<uint64_t>(call[0] + 16), destinations = call.load<uint64_t>(call[0] + 24);
-		const uint16_t flags = call.load<uint16_t>(call[0] + 32);
+		// SHFILEOPSTRUCTW: owner window, function, source and destination lists, flags, then the aborted flag; the pointers are as wide as the program's.
+		const bool narrow = call.process.mode() == NativeMode::x86;
+		const size_t function_at = narrow ? 4 : 8, sources_at = narrow ? 8 : 16, destinations_at = narrow ? 12 : 24, flags_at = narrow ? 16 : 32,
+			aborted_at = narrow ? 20 : 36;
+		const uint32_t function = call.load<uint32_t>(call[0] + function_at);
+		const uint64_t sources = narrow ? call.load<uint32_t>(call[0] + sources_at) : call.load<uint64_t>(call[0] + sources_at);
+		const uint64_t destinations = narrow ? call.load<uint32_t>(call[0] + destinations_at) : call.load<uint64_t>(call[0] + destinations_at);
+		const uint16_t flags = call.load<uint16_t>(call[0] + flags_at);
 		const auto from = file_list(call, sources), to = file_list(call, destinations);
-		call.store<int32_t>(call[0] + 36, 0);
+		call.store<int32_t>(call[0] + aborted_at, 0);
 		std::error_code error;
 		for (size_t index = 0; index < from.size(); ++index) {
 			const auto source = paths.resolve(from[index]);

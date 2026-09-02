@@ -19,7 +19,7 @@ void validate_native_image(const PEImage &image,std::string_view name,bool is_64
 
 void load_initial_dependencies(ModuleSet &modules,
 	const std::function<std::optional<std::vector<uint8_t>>(std::string_view)> &source,
-	std::span<const std::string_view> native_modules,bool is_64)
+	std::span<const std::string_view> native_modules,bool is_64,bool tolerate_missing)
 {
 	if (!source) return;
 	std::vector<PEModule *> pending,staged;
@@ -49,7 +49,7 @@ void load_initial_dependencies(ModuleSet &modules,
 						}
 						if (modules.all().size()>=10000) throw std::runtime_error("native DLL graph exceeds module limit");
 						auto bytes=source(identity);
-						if (!bytes) throw;
+						if (!bytes) { if (tolerate_missing) break; throw; }
 						const PEImage image(*bytes);validate_native_image(image,identity,is_64);
 						if (!(image.characteristics & 0x2000)) throw std::runtime_error("native startup dependency must be a DLL: "+identity);
 						staged.reserve(staged.size()+1);pending.reserve(pending.size()+1);

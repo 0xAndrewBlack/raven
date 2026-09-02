@@ -89,6 +89,84 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		}
 	};
 	const std::string windows = "C:\\Windows", system = "C:\\Windows\\System32";
+	// Access tokens: the program's own token exists and closes like a handle; no privilege is held, and files carry no access control lists.
+	struct AccessToken : KernelObject {};
+	registry.add("OpenProcessToken", 3, [&context](ApiCall &call) {
+		if (int64_t(call[0]) != -1) {
+			call.fail(6);
+			return;
+		}
+		if (!call[2]) {
+			call.fail(87);
+			return;
+		}
+		const auto made = context.objects.add_object(std::make_shared<AccessToken>());
+		if (made.status) {
+			call.fail(made.status);
+			return;
+		}
+		call.store_pointer(call[2], made.value);
+		call.ret(1);
+	});
+	registry.add("LookupPrivilegeValueW", 3, [](ApiCall &call) {
+		static const std::pair<std::u16string_view, uint32_t> privileges[] = {
+			{u"SeCreateTokenPrivilege", 2}, {u"SeAssignPrimaryTokenPrivilege", 3}, {u"SeLockMemoryPrivilege", 4}, {u"SeIncreaseQuotaPrivilege", 5},
+			{u"SeTcbPrivilege", 7}, {u"SeSecurityPrivilege", 8}, {u"SeTakeOwnershipPrivilege", 9}, {u"SeLoadDriverPrivilege", 10},
+			{u"SeSystemProfilePrivilege", 11}, {u"SeSystemtimePrivilege", 12}, {u"SeProfileSingleProcessPrivilege", 13},
+			{u"SeIncreaseBasePriorityPrivilege", 14}, {u"SeCreatePagefilePrivilege", 15}, {u"SeCreatePermanentPrivilege", 16},
+			{u"SeBackupPrivilege", 17}, {u"SeRestorePrivilege", 18}, {u"SeShutdownPrivilege", 19}, {u"SeDebugPrivilege", 20},
+			{u"SeAuditPrivilege", 21}, {u"SeSystemEnvironmentPrivilege", 22}, {u"SeChangeNotifyPrivilege", 23},
+			{u"SeRemoteShutdownPrivilege", 24}, {u"SeUndockPrivilege", 25}, {u"SeManageVolumePrivilege", 28},
+			{u"SeImpersonatePrivilege", 29}, {u"SeCreateGlobalPrivilege", 30}, {u"SeIncreaseWorkingSetPrivilege", 33},
+			{u"SeTimeZonePrivilege", 34}, {u"SeCreateSymbolicLinkPrivilege", 35}};
+		if (call[0] || !call[1] || !call[2]) {
+			call.fail(call[0] ? 1722 : 87);
+			return;
+		}
+		const auto name = call.wide(call[1], 128);
+		for (const auto &[known, value] : privileges)
+			if (known == name) {
+				call.store<uint32_t>(call[2], value);
+				call.store<uint32_t>(call[2] + 4, 0);
+				call.ret(1);
+				return;
+			}
+		call.fail(1313);
+	});
+	registry.add("AdjustTokenPrivileges", 6, [&context](ApiCall &call) {
+		if (!context.objects.object_as<AccessToken>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		// Nothing is held to enable: with a change requested, the call succeeds but reports that not every privilege was assigned.
+		if (call[5]) call.store<uint32_t>(call[5], 0);
+		const bool change = call[2] && call.load<uint32_t>(call[2]) != 0;
+		call.set_last_error(change && call.u32(1) == 0 ? 1300 : 0);
+		call.ret(1);
+	});
+	registry.add("SetFileSecurityW", 3, [&context](ApiCall &call) {
+		const auto resolved = context.paths.resolve(call.wide(call[0]));
+		if (!resolved) {
+			call.fail(123);
+			return;
+		}
+		if (!resolved->exists) {
+			call.fail(resolved->parent_exists ? 2 : 3);
+			return;
+		}
+		call.ret(1);
+	});
+	// Starting another process is not supported yet: the call fails visibly (ERROR_CALL_NOT_IMPLEMENTED) and starts nothing.
+	registry.add("CreateProcessW", 10, [](ApiCall &call) { call.fail(120); });
+	// The only process handle that exists is the program's own, which is still running while it asks.
+	registry.add("GetExitCodeProcess", 2, [](ApiCall &call) {
+		if (int64_t(call[0]) != -1 || !call[1]) {
+			call.fail(call[1] ? 6 : 87);
+			return;
+		}
+		call.store<uint32_t>(call[1], 259);
+		call.ret(1);
+	});
 	registry.add("GetWindowsDirectoryW", 2, [=](ApiCall &call) { directory(call, true, windows); });
 	registry.add("GetSystemWindowsDirectoryW", 2, [=](ApiCall &call) { directory(call, true, windows); });
 	registry.add("GetWindowsDirectoryA", 2, [=](ApiCall &call) { directory(call, false, windows); });

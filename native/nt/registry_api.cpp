@@ -136,6 +136,25 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		});
 		registry.add("RegDeleteValue" + suffix, 2, [&hive, text_of, wide](ApiCall &call) { call.ret(hive.remove_value(call[0], text_of(call, call[1], wide))); });
 		registry.add("RegDeleteKey" + suffix, 2, [&hive, text_of, wide](ApiCall &call) { call.ret(hive.remove_key(call[0], text_of(call, call[1], wide))); });
+		// The older form: the buffer size is a plain count of characters, not a pointer to one.
+		registry.add("RegEnumKey" + suffix, 4, [&hive, wide](ApiCall &call) {
+			std::u16string name;
+			const auto status = hive.enum_key(call[0], call.u32(1), name);
+			if (status) {
+				call.ret(status);
+				return;
+			}
+			const uint32_t capacity = call.u32(3);
+			const auto narrow = wide ? std::string() : encode_ansi(name, 1252);
+			const size_t length = wide ? name.size() : narrow.size();
+			if (!call[2] || capacity <= length) {
+				call.ret(call[2] ? error_more_data : error_invalid_parameter);
+				return;
+			}
+			if (wide) call.put_wide(call[2], name, capacity);
+			else call.put_narrow(call[2], narrow, capacity);
+			call.ret(0);
+		});
 		registry.add("RegEnumKeyEx" + suffix, 8, [&hive, wide](ApiCall &call) {
 			std::u16string name;
 			const auto status = hive.enum_key(call[0], call.u32(1), name);

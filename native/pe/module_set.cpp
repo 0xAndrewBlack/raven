@@ -150,7 +150,7 @@ size_t ModuleSet::bind_imports()
 	struct Binding { PEModule *module; uint32_t address; size_t width; uint64_t value; };
 	std::vector<Binding> bindings;
 	// Every import that cannot be resolved is reported at once, the first one leading, so that a graph is fixed in one pass.
-	std::vector<std::string> unresolved;
+	std::vector<std::string> unresolved, labels;
 	for (const auto &[name, module] : modules) {
 		const size_t width = module->image.is_64 ? 8 : 4;
 		for (const auto &symbol : module->imports) {
@@ -160,6 +160,7 @@ size_t ModuleSet::bind_imports()
 			} catch (const std::runtime_error &failure) {
 				if (std::string_view(failure.what()).starts_with("missing PE ")) {
 					unresolved.emplace_back(failure.what());
+					labels.push_back(symbol.module + "!" + (symbol.by_ordinal ? "#" + std::to_string(symbol.ordinal) : symbol.name));
 					continue;
 				}
 				throw;
@@ -182,10 +183,12 @@ size_t ModuleSet::bind_imports()
 	}
 	if (!unresolved.empty()) {
 		std::string message = unresolved.front();
-		for (size_t index = 1; index < unresolved.size() && index < 64; ++index)
-			message += (index == 1 ? " (also " : ", ") + unresolved[index].substr(unresolved[index].find(": ") + 2);
-		if (unresolved.size() > 1)
-			message += unresolved.size() > 64 ? ", and more)" : ")";
+		if (unresolved.size() > 1) {
+			message += " (all unresolved:";
+			for (size_t index = 0; index < labels.size() && index < 400; ++index)
+				message += " " + labels[index];
+			message += labels.size() > 400 ? " ...)" : ")";
+		}
 		throw std::runtime_error(message);
 	}
 	// Commit only after every import resolves; failed binding leaves all images unchanged.

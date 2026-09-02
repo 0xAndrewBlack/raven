@@ -769,6 +769,151 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[1], text, capacity);
 		call.ret(capacity > text.size() ? text.size() : text.size() + 1);
 	});
+	// The classic form reports clusters of eight 512-byte sectors, each count clamped to what a 32-bit field holds.
+	registry.add("GetDiskFreeSpaceW", 5, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto resolved = call[0] ? resolve(call, call.wide(call[0])) : paths.resolve(paths.current());
+		if (!resolved)
+			return;
+		struct statvfs info{};
+		auto path = resolved->host;
+		while (!std::filesystem::exists(path) && path.has_parent_path() && path != path.parent_path())
+			path = path.parent_path();
+		if (::statvfs(path.c_str(), &info)) {
+			call.fail(error_of(errno));
+			return;
+		}
+		constexpr uint64_t cluster = 8 * 512;
+		const auto clamp = [](uint64_t value) { return uint32_t(std::min<uint64_t>(value, UINT32_MAX)); };
+		if (call[1]) call.store<uint32_t>(call[1], 8);
+		if (call[2]) call.store<uint32_t>(call[2], 512);
+		if (call[3]) call.store<uint32_t>(call[3], clamp(uint64_t(info.f_bavail) * info.f_frsize / cluster));
+		if (call[4]) call.store<uint32_t>(call[4], clamp(uint64_t(info.f_blocks) * info.f_frsize / cluster));
+		call.ret(1);
+	});
+	// GetTempFileName: a zero unique value picks a free name and creates the file; any other value only forms the name.
+	registry.add("GetTempFileNameW", 4, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto directory = call.wide(call[0]);
+		auto prefix = call.wide(call[1]);
+		if (prefix.size() > 3)
+			prefix.resize(3);
+		const uint32_t requested = call.u32(2) & 0xffff;
+		const auto name_for = [&](uint32_t unique) {
+			static constexpr char digits[] = "0123456789abcdef";
+			std::u16string name = directory;
+			if (name.empty() || (name.back() != u'\\' && name.back() != u'/'))
+				name.push_back(u'\\');
+			name += prefix;
+			bool started = false;
+			for (int shift = 12; shift >= 0; shift -= 4) {
+				const auto digit = (unique >> shift) & 15;
+				if (digit || started || shift == 0) {
+					name.push_back(char16_t(digits[digit]));
+					started = true;
+				}
+			}
+			return name + u".tmp";
+		};
+		uint32_t unique = requested;
+		std::u16string name;
+		if (requested) {
+			name = name_for(unique);
+		} else {
+			static uint32_t counter = 0;
+			for (unsigned tries = 0; tries < 0x10000; ++tries) {
+				unique = ((::getpid() * 7919U) + (++counter) * 31U + tries) & 0xffff;
+				if (!unique)
+					continue;
+				name = name_for(unique);
+				const auto resolved = paths.resolve(name);
+				if (!resolved) {
+					call.fail(123);
+					return;
+				}
+				if (!resolved->parent_exists) {
+					call.fail(3);
+					return;
+				}
+				const int descriptor = ::open(resolved->host.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+				if (descriptor >= 0) {
+					::close(descriptor);
+					break;
+				}
+				if (errno != EEXIST) {
+					call.fail(error_of(errno));
+					return;
+				}
+				name.clear();
+			}
+			if (name.empty()) {
+				call.fail(80);
+				return;
+			}
+		}
+		if (name.size() >= 260) {
+			call.fail(111);
+			return;
+		}
+		call.put_wide(call[3], name, 260);
+		call.ret(unique);
+	});
+	// There are no 8.3 aliases in the prefix, so the short form of an existing path is its own long form.
+	registry.add("GetShortPathNameW", 3, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto text = call.wide(call[0]);
+		const auto resolved = resolve(call, text);
+		if (!resolved)
+			return;
+		if (!resolved->exists) {
+			call.fail(missing(*resolved));
+			return;
+		}
+		const auto full = paths.full(text);
+		const size_t capacity = call.u32(2);
+		call.put_wide(call[1], full, capacity);
+		call.ret(capacity > full.size() ? full.size() : full.size() + 1);
+	});
+	// SearchPath: the program's directory, the current directory, the system directories, then the path named by the caller.
+	registry.add("SearchPathW", 6, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		auto file = call.wide(call[1]);
+		if (file.empty()) {
+			call.fail(87);
+			return;
+		}
+		if (call[2] && file.find(u'.') == std::u16string::npos)
+			file += call.wide(call[2]);
+		std::vector<std::u16string> directories;
+		if (call[0]) {
+			directories.push_back(call.wide(call[0]));
+		} else {
+			const auto &image = context.launch.image_path;
+			const auto slash = image.find_last_of(u'\\');
+			if (slash != std::u16string::npos)
+				directories.push_back(image.substr(0, slash));
+			directories.push_back(paths.current());
+			directories.push_back(u"C:\\Windows\\System32");
+			directories.push_back(u"C:\\Windows");
+		}
+		for (const auto &directory : directories) {
+			std::u16string candidate = directory;
+			if (candidate.empty() || candidate.back() != u'\\')
+				candidate.push_back(u'\\');
+			candidate += file;
+			const auto resolved = paths.resolve(candidate);
+			if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
+				continue;
+			const auto full = paths.full(candidate);
+			const size_t capacity = call.u32(3);
+			if (capacity > full.size()) {
+				call.put_wide(call[4], full, capacity);
+				if (call[5]) {
+					const auto slash = full.find_last_of(u'\\');
+					call.store_pointer(call[5], call[4] + (slash == std::u16string::npos ? 0 : slash + 1) * 2);
+				}
+			}
+			call.ret(capacity > full.size() ? full.size() : full.size() + 1);
+			return;
+		}
+		call.fail(2);
+	});
 	registry.add("GetDiskFreeSpaceExW", 4, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
 		const auto resolved = call[0] ? resolve(call, call.wide(call[0])) : paths.resolve(paths.current());
 		if (!resolved)

@@ -3,7 +3,6 @@
 #include "module_api.h"
 #include "resources.h"
 #include "memory.h"
-#include "advapi_api.h"
 #include "msvcrt_api.h"
 #include "prefix.h"
 #include "profile_api.h"
@@ -46,12 +45,12 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 106> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 109> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitProcess", 1}, {"ExitThread", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetExitCodeThread", 2},
 	{"GetFileType", 1}, {"GetLastError", 0}, {"GetModuleFileNameA", 3}, {"GetModuleHandleA", 1},
-	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"GetProcAddress", 2}, {"GetProcessHeap", 0}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
+	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"WritePrivateProfileStringW", 4}, {"LoadLibraryExA", 3}, {"LoadLibraryExW", 3}, {"GetProcAddress", 2}, {"GetProcessHeap", 0}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
 	{"GetTickCount", 0}, {"ProcessIdToSessionId", 2}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3}, {"InitializeCriticalSection", 1}, {"LeaveCriticalSection", 1}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
 	{"OutputDebugStringA", 1}, {"ResetEvent", 1}, {"ResumeThread", 1}, {"SetEvent", 1}, {"SetLastError", 1}, {"SetThreadPriority", 2}, {"SizeofResource", 2}, {"Sleep", 1}, {"SwitchToThread", 0}, {"TryEnterCriticalSection", 1}, {"VirtualAlloc", 4},
 	// Services of the 32-bit CRT era: legacy file calls, global memory, code pages, environment and version queries.
@@ -92,6 +91,16 @@ constexpr std::string_view shared_allowed[] = {
 	"GetUserDefaultLCID", "GetSystemDefaultLCID", "IsValidCodePage", "SetEnvironmentVariableA", "SetEnvironmentVariableW",
 	"ExpandEnvironmentStringsA", "ExpandEnvironmentStringsW", "CreateMutexA", "CreateMutexW", "ReleaseMutex", "GetFileTime", "SetFileTime",
 	"FileTimeToLocalFileTime", "LocalFileTimeToFileTime", "FileTimeToDosDateTime", "DosDateTimeToFileTime", "GetFileSize", "SetEndOfFile",
+	"IsWindowEnabled", "EnableWindow", "FindWindowExW", "SetForegroundWindow", "GetMessagePos", "OpenClipboard", "EmptyClipboard",
+	"SetClipboardData", "CloseClipboard", "CharNextA", "CharNextW", "CharPrevA", "CharPrevW", "SystemParametersInfoW", "GetSystemMenu",
+	"EnableMenuItem", "AppendMenuW", "CreatePopupMenu", "LoadBitmapW", "LoadImageW",
+	"SHGetSpecialFolderLocation", "SHGetPathFromIDListW", "SHGetFileInfoW", "ShellExecuteW", "SHFileOperationW",
+	"OleInitialize", "OleUninitialize", "CoTaskMemFree", "CoCreateInstance",
+	"GetTempPathW", "CompareFileTime", "MoveFileExW", "lstrcatW", "lstrcpynW", "GetTempFileNameW", "GetDiskFreeSpaceW", "GetExitCodeProcess",
+	"CreateProcessW", "OpenProcessToken", "LookupPrivilegeValueW", "AdjustTokenPrivileges", "SetFileSecurityW",
+	"RegCloseKey", "RegCreateKeyExA", "RegCreateKeyExW", "RegOpenKeyA", "RegOpenKeyW", "RegOpenKeyExA", "RegOpenKeyExW", "RegQueryValueExA",
+	"RegQueryValueExW", "RegSetValueExA", "RegSetValueExW", "RegDeleteKeyA", "RegDeleteKeyW", "RegDeleteValueA", "RegDeleteValueW",
+	"RegEnumKeyA", "RegEnumKeyW", "RegEnumKeyExA", "RegEnumKeyExW", "RegEnumValueA", "RegEnumValueW",
 	"GetWindowLongW", "SetWindowLongW", "GetFileVersionInfoA", "GetFileVersionInfoExW", "GetFileVersionInfoSizeA", "GetFileVersionInfoSizeExW",
 	"GetFileVersionInfoSizeW", "GetFileVersionInfoW", "VerQueryValueA", "VerQueryValueW", "GetSystemDirectoryW", "GetSystemDirectoryA", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
 	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
@@ -151,7 +160,8 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 		{"GetClassLongPtrA",2},{"GetClassLongPtrW",2},{"GetClassLongW",2},{"GetClassNameA",3},{"GetClassNameW",3},
 		{"GetClientRect",2},{"GetDC",1},{"GetDlgCtrlID",1},{"GetDlgItem",2},{"GetFocus",0},{"GetIconInfo",2},
 		{"GetMenuItemCount",1},{"GetMenuItemID",2},{"GetMessageW",4},{"GetParent",1},{"GetSubMenu",2},{"GetSysColor",1},
-		{"GetSysColorBrush",1},{"GetSystemMetrics",1},{"GetUpdateRect",3},{"GetWindowDC",1},{"GetWindowLongA",2},
+		{"GetSysColorBrush",1},{"GetSystemMetrics",1},{"GetUpdateRect",3},{"GetWindowDC",1},{"CheckDlgButton",3},{"MessageBoxIndirectW",1},{"TrackPopupMenu",7},{"DrawTextW",5},{"CreateDialogParamW",5},{"SendMessageTimeoutW",7},
+		{"CreateBrushIndirect",1},{"GetWindowLongA",2},
 		{"GetWindowLongPtrA",2},{"GetWindowLongPtrW",2},{"GetWindowLongW",2},{"GetWindowRect",2},{"GetWindowTextLengthW",1},
 		{"GetWindowTextW",3},{"InternalGetWindowText",3},{"InvalidateRect",3},{"IsChild",2},{"IsMenu",1},{"IsWindow",1},
 		{"IsWindowUnicode",1},{"IsWindowVisible",1},{"LoadMenuW",2},{"LoadStringW",4},{"LookupIconIdFromDirectoryEx",5},
@@ -336,10 +346,11 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	// Libraries the program ships and imports statically join its graph; the runtime's own libraries answer for the system ones.
 	if (source) {
 		std::vector<std::string_view> provided{"kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll", "setupapi.dll", "msvcrt.dll", "winmm.dll",
-			"dsound.dll", "vulkan-1.dll", "shell32.dll", "comctl32.dll", "ntdll.dll", "version.dll"};
+			"dsound.dll", "vulkan-1.dll", "shell32.dll", "comctl32.dll", "ntdll.dll", "version.dll", "ole32.dll"};
 		if (!source("d3d9.dll"))
 			provided.push_back("d3d9.dll");
-		load_initial_dependencies(modules, source, provided, false);
+		// A library that is not there is left for the binder, which names every unresolved import at once.
+		load_initial_dependencies(modules, source, provided, false, true);
 	}
 	std::vector<std::string_view> names;
 	for (const auto &item : kernel32_table())
@@ -381,8 +392,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		"SetRect", "SetTimer", "TranslateAcceleratorW", "WinHelpW", "wsprintfW", "wsprintfA", "CreateWindowExA", "DispatchMessageA",
 		"GetMessageA", "PeekMessageA", "RegisterClassA", "RegisterClassExA", "UnregisterClassA", "LoadCursorA", "LoadIconA", "GetAsyncKeyState",
 		"SetCursor", "GetCursorPos", "SetCursorPos", "DefWindowProcA", "SendMessageA", "PostMessageA", "SetWindowTextA",
-		"ExitWindowsEx", "MessageBoxA", "SetWindowPos"};
-	std::vector<std::string_view> gdi_pending{"GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2",
+		"ExitWindowsEx", "MessageBoxA", "SetWindowPos", "CheckDlgButton", "MessageBoxIndirectW", "TrackPopupMenu", "DrawTextW",
+		"CreateDialogParamW", "SendMessageTimeoutW"};
+	std::vector<std::string_view> gdi_pending{"CreateBrushIndirect", "GetDeviceCaps", "SetDIBitsToDevice", "SetLayout", "SetPixel", "SetROP2",
 		"CreateFontA", "ExtTextOutA", "GetDIBits", "GetTextExtentPoint32A", "GetTextMetricsA", "SetDIBits",
 		"RealizePalette", "SelectPalette", "PatBlt", "CreatePalette"};
 	for (const auto name : system_export_names("gdi32.dll"))
@@ -396,22 +408,34 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	add_desktop("gdi32.dll", NativeDesktop::gdi_exports(), gdi_pending);
 	// Libraries whose argument counts come from their own implementation or the unsupported-service table.
 	const auto add_library = [&](const char *dll, std::span<const std::string_view> exports, std::span<const std::string_view> data,
-		const std::function<uint32_t(std::string_view)> &count) {
+		const std::function<uint32_t(std::string_view)> &count, std::span<const std::pair<std::string_view, uint16_t>> ordinals = {}) {
 		if (modules.all().contains(dll))
 			return;
-		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, exports, true, data)).image_size;
+		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, exports, true, data, ordinals)).image_size;
 		const auto base = provider_base(modules, size);
-		auto &provider = modules.add(dll, runtime_provider(dll, base, exports, true, data), base);
+		auto &provider = modules.add(dll, runtime_provider(dll, base, exports, true, data, ordinals), base);
 		provider.runtime_api = true;
 		for (const auto &symbol : provider.exports) {
-			const auto &exported = symbol.names.at(0);
+			// An export that has only an ordinal is the name the library lists for that ordinal.
+			std::string exported;
+			if (!symbol.names.empty()) {
+				exported = symbol.names.front();
+			} else {
+				const auto found = std::find_if(ordinals.begin(), ordinals.end(), [&](const auto &item) { return item.second == symbol.ordinal; });
+				// A slot that no name and no listed ordinal claims is padding between ordinals.
+				if (found == ordinals.end() || !symbol.address)
+					continue;
+				exported = found->first;
+			}
 			if (std::find(data.begin(), data.end(), exported) != data.end())
 				continue;
 			const auto stable = std::find(exports.begin(), exports.end(), exported);
+			if (stable == exports.end())
+				throw std::runtime_error("native x86 provider export is not in its list: " + std::string(dll) + "!" + exported);
 			traps.emplace(provider.loaded.base() + symbol.address, std::pair{*stable, count(exported) * 4});
 		}
 	};
-	std::vector<std::string_view> advapi_names(NativeAdvapi::exports().begin(), NativeAdvapi::exports().end());
+	std::vector<std::string_view> advapi_names;
 	for (const auto &item : host_exports("advapi32.dll"))
 		advapi_names.push_back(item.name);
 	std::sort(advapi_names.begin(), advapi_names.end());
@@ -419,7 +443,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		for (const auto &item : host_exports("advapi32.dll"))
 			if (item.name == name)
 				return item.words;
-		return NativeAdvapi::argument_count(name);
+		return uint32_t(0);
 	});
 	std::vector<std::string_view> setupapi_names;
 	for (const auto &item : host_exports("setupapi.dll"))
@@ -476,8 +500,36 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	});
 #endif
 	add_library("version.dll", version_exports, {}, [](std::string_view name) { return registry_words(name); });
-	add_library("shell32.dll", shell_exports, {}, [](std::string_view) { return uint32_t(4); });
-	add_library("comctl32.dll", controls_exports, {}, [](std::string_view) { return uint32_t(1); });
+	std::vector<std::string_view> shell_names(shell_exports.begin(), shell_exports.end());
+	shell_names.push_back("SHBrowseForFolderW");
+	for (const auto &item : host_exports("shell32.dll"))
+		shell_names.push_back(item.name);
+	std::sort(shell_names.begin(), shell_names.end());
+	shell_names.erase(std::unique(shell_names.begin(), shell_names.end()), shell_names.end());
+	add_library("shell32.dll", shell_names, {}, [](std::string_view name) {
+		if (name == "SHBrowseForFolderW")
+			return uint32_t(1);
+		for (const auto &item : host_exports("shell32.dll"))
+			if (item.name == name)
+				return item.words;
+		return uint32_t(4);
+	});
+	// The common controls come from the common controls component once it is built for 32 bits; until then these names resolve and fail when called.
+	static constexpr std::array<std::string_view, 5> controls_names{"ImageList_AddMasked", "ImageList_Create", "ImageList_Destroy", "InitCommonControls", "InitCommonControlsEx"};
+	static constexpr std::array<std::pair<std::string_view, uint16_t>, 1> controls_ordinals{{{"InitCommonControls", 17}}};
+	add_library("comctl32.dll", controls_names, {}, [](std::string_view name) {
+		return uint32_t(name == "ImageList_Create" ? 5 : name == "ImageList_AddMasked" ? 3 : name == "ImageList_Destroy" || name == "InitCommonControlsEx" ? 1 : 0);
+	}, controls_ordinals);
+	std::vector<std::string_view> ole_names;
+	for (const auto &item : host_exports("ole32.dll"))
+		ole_names.push_back(item.name);
+	std::sort(ole_names.begin(), ole_names.end());
+	add_library("ole32.dll", ole_names, {}, [](std::string_view name) {
+		for (const auto &item : host_exports("ole32.dll"))
+			if (item.name == name)
+				return item.words;
+		return uint32_t(0);
+	});
 	modules.bind_imports();
 	std::vector<LoadedImage *> images;
 	for (const auto &[name, module] : modules.all())
@@ -522,7 +574,6 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeObjectAPI object_api(process, environment, kernel_objects, deadline);
 	const auto prefix = NativePrefix::from_environment();
 	NativeRegistry registry(prefix.registry_file());
-	NativeAdvapi advapi(process, environment, registry);
 	NativeProfile profile(process, environment, prefix);
 	NativeCRT crt(process, environment);
 	crt.initialize([&](std::string_view name) { return modules.resolve({"msvcrt.dll", std::string(name), 0, false, 0}); });
@@ -706,7 +757,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 #endif
 				 !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
-				!desktop.dispatch(api) && !windows.dispatch(api) && !advapi.dispatch(api) && !profile.dispatch(api) &&
+				!desktop.dispatch(api) && !windows.dispatch(api) && !profile.dispatch(api) &&
 				!crt.dispatch(api) && !unsupported_library(process, environment, api) &&
 				!(shared_names.contains(api) && shared_api.dispatch(process, environment, api, true))) {
 				std::cerr << "raven: unimplemented native x86 API " << api << '\n';
@@ -775,6 +826,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_text_api(shared_api, kernel);
 	register_system_api(shared_api, kernel);
 	register_version_api(shared_api, kernel);
+	register_registry_api(shared_api, kernel, registry);
 	register_process_api(shared_api, kernel);
 	register_ansi_adapters(shared_api);
 	register_legacy_file_api(shared_api);

@@ -939,6 +939,13 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		const uint64_t arguments[] = {call[0], call[1], call[2], call[3]};
 		call.ret(default_message(arguments));
 	});
+	// Wide characters are single units here (surrogate pairs are two characters to these functions, as on Windows).
+	registry.add("CharNextW", 1, [](ApiCall &call) {
+		const auto c = call.load<uint16_t>(call[0]);
+		call.ret(c ? call[0] + 2 : call[0]);
+	});
+	registry.add("CharPrevW", 2, [](ApiCall &call) { call.ret(call[1] > call[0] ? call[1] - 2 : call[0]); });
+	registry.add("CharPrevA", 2, [](ApiCall &call) { call.ret(call[1] > call[0] ? call[1] - 1 : call[0]); });
 	registry.add("CharNextA", 1, [](ApiCall &call) {
 		const auto c = call.load<uint8_t>(call[0]);
 		call.ret(c ? call[0] + 1 : call[0]);
