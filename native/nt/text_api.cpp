@@ -523,6 +523,9 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetSystemDefaultLCID", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("GetUserDefaultLangID", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("GetSystemDefaultLangID", 0, [](ApiCall &call) { call.ret(0x409); });
+	registry.add("GetUserDefaultUILanguage", 0, [](ApiCall &call) { call.ret(0x409); });
+	registry.add("GetSystemDefaultUILanguage", 0, [](ApiCall &call) { call.ret(0x409); });
+	registry.add("GetThreadUILanguage", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("GetThreadLocale", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("SetThreadLocale", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("IsValidLocale", 2, [](ApiCall &call) { call.ret(call.u32(0) == 0x409 || call.u32(0) == 0x400 || call.u32(0) == 0x800); });

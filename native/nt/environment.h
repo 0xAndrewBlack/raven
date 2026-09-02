@@ -25,6 +25,8 @@ struct NativeLaunch {
 	uint32_t ansi_code_page = 1252;
 	NativeStartup startup{};
 	std::array<int,3> standard_fds{-1,-1,-1};
+	// The current directory the program starts in; empty for the default.
+	std::u16string directory;
 };
 
 // Initial x64 thread fields only. Mappings belong to the process and survive this view.

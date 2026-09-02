@@ -347,6 +347,28 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		if (call[2]) call.store<int64_t>(call[2], position);
 		call.ret(1);
 	});
+	// The older form splits the distance in two words; the answer is the low word of the position, and 0xffffffff with a last error on failure.
+	registry.add("SetFilePointer", 4, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file) {
+			call.fail(6, 0xffffffffU);
+			return;
+		}
+		const auto method = call.u32(3);
+		if (method > 2) {
+			call.fail(87, 0xffffffffU);
+			return;
+		}
+		const int64_t distance = call[2] ? int64_t(uint64_t(uint32_t(call.load<int32_t>(call[2]))) << 32 | call.u32(1)) : int64_t(call.i32(1));
+		const off_t position = ::lseek(file->descriptor, off_t(distance), method == 0 ? SEEK_SET : method == 1 ? SEEK_CUR : SEEK_END);
+		if (position < 0) {
+			call.fail(errno == EINVAL ? 131 : error_of(errno), 0xffffffffU);
+			return;
+		}
+		if (call[2]) call.store<int32_t>(call[2], int32_t(uint64_t(position) >> 32));
+		call.set_last_error(0);
+		call.ret(uint32_t(position));
+	});
 	// Byte-range locks map to open-file-description locks, so they conflict between handles the way Windows locks do.
 	const auto lock_range = [file_of](ApiCall &call, int kind, uint64_t offset, uint64_t length, bool wait) {
 		const auto file = file_of(call[0]);

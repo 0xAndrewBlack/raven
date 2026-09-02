@@ -138,18 +138,24 @@ bool NativeX86Compat::dispatch(std::string_view name)
 		process.return_api(heap_alloc(uint32_t(args[2]), args[1] & 0x8));
 	} else if (name == "HeapFree") {
 		const auto args = process.api_arguments(3);
-		if (args[2])
+		if (args[2] && global_block(args[2]))
+			global_release(args[2]);
+		else if (args[2])
 			heap_free(args[2]);
 		process.return_api(1);
 	} else if (name == "HeapSize") {
 		const auto args = process.api_arguments(3);
-		process.return_api(args[2] ? block_size(args[2]) : UINT32_MAX);
+		process.return_api(args[2] && global_block(args[2]) ? uint32_t(global_size(args[2])) : args[2] ? block_size(args[2]) : UINT32_MAX);
 	} else if (name == "HeapReAlloc") {
 		const auto args = process.api_arguments(4);
-		const uint32_t old_size = block_size(args[2]), size = uint32_t(args[3]);
+		const bool global = global_block(args[2]);
+		const uint32_t old_size = global ? uint32_t(global_size(args[2])) : block_size(args[2]), size = uint32_t(args[3]);
 		const auto fresh = heap_alloc(size, args[1] & 0x8);
 		process.write_memory(fresh, process.read_memory(args[2], std::min(old_size, size)));
-		heap_free(args[2]);
+		if (global)
+			global_release(args[2]);
+		else
+			heap_free(args[2]);
 		process.return_api(fresh);
 	} else if (name == "GlobalHandle") {
 		process.return_api(process.api_arguments(1)[0]);

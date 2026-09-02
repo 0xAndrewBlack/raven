@@ -109,10 +109,53 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 	return &added;
 }
 
+std::optional<std::string> NativeX86Loader::path_key(const std::string &name) const
+{
+	std::optional<NativePaths::Resolved> resolved;
+	if (name.find_first_of("/\\:") != std::string::npos)
+		resolved = paths.resolve(std::u16string(name.begin(), name.end()));
+	else if (!application_directory.empty())
+		resolved = paths.resolve(application_directory + u"\\" + std::u16string(name.begin(), name.end()));
+	if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
+		return std::nullopt;
+	return lowered(resolved->host.string());
+}
+
+uint64_t NativeX86Loader::find(const std::string &name) const
+{
+	const auto key = path_key(name);
+	const auto found = key ? held.find(*key) : held.end();
+	return found == held.end() ? 0 : found->second.module->loaded.base();
+}
+
+bool NativeX86Loader::release(uint64_t handle)
+{
+	const auto found = std::find_if(held.begin(), held.end(), [&](const auto &item) { return item.second.module->loaded.base() == handle; });
+	if (found == held.end())
+		return false;
+	if (--found->second.references)
+		return true;
+	const auto module = found->second.module;
+	held.erase(found);
+	if (call && module->image.entry) {
+		const uint64_t arguments[] = {module->loaded.base(), 0, 0};
+		const auto result = call(module->loaded.base() + module->image.entry, arguments);
+		if (result.stop != NativeStop::returned)
+			throw result;
+	}
+	return true;
+}
+
 uint64_t NativeX86Loader::load(std::string name)
 {
 	if (!call)
 		return 0;
+	const auto key = path_key(name);
+	if (key)
+		if (const auto found = held.find(*key); found != held.end()) {
+			++found->second.references;
+			return found->second.module->loaded.base();
+		}
 	staged.clear();
 	const auto existing = modules.all().size();
 	bool mapped = false;
@@ -152,6 +195,8 @@ uint64_t NativeX86Loader::load(std::string name)
 				return 0;
 			}
 		}
+		if (key)
+			held[*key] = {root, 1};
 		return root->loaded.base();
 	} catch (const NativeResult &) {
 		throw;

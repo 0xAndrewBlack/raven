@@ -337,6 +337,43 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 
+	// The interlocked operations act on one 32-bit word of the guest. Guest threads take turns, so the host needs no atomics of its own.
+	registry.add("InterlockedIncrement", 1, [](ApiCall &call) {
+		const auto value = call.load<int32_t>(call[0]) + 1;
+		call.store<int32_t>(call[0], value);
+		call.ret(uint32_t(value));
+	});
+	registry.add("InterlockedDecrement", 1, [](ApiCall &call) {
+		const auto value = call.load<int32_t>(call[0]) - 1;
+		call.store<int32_t>(call[0], value);
+		call.ret(uint32_t(value));
+	});
+	registry.add("InterlockedExchange", 2, [](ApiCall &call) {
+		const auto old = call.load<uint32_t>(call[0]);
+		call.store<uint32_t>(call[0], call.u32(1));
+		call.ret(old);
+	});
+	registry.add("InterlockedExchangeAdd", 2, [](ApiCall &call) {
+		const auto old = call.load<uint32_t>(call[0]);
+		call.store<uint32_t>(call[0], old + call.u32(1));
+		call.ret(old);
+	});
+	registry.add("InterlockedCompareExchange", 3, [](ApiCall &call) {
+		const auto old = call.load<uint32_t>(call[0]);
+		if (old == call.u32(2))
+			call.store<uint32_t>(call[0], call.u32(1));
+		call.ret(old);
+	});
+	// A 64-bit operand is two words on the stack of a 32-bit program, so the value is put together from them.
+	registry.add("InterlockedCompareExchange64", 5, [](ApiCall &call) {
+		const bool narrow = call.pointer_width() == 4;
+		const uint64_t exchange = narrow ? (call[1] & 0xffffffffULL) | call[2] << 32 : call[1];
+		const uint64_t comparand = narrow ? (call[3] & 0xffffffffULL) | call[4] << 32 : call[2];
+		const auto old = call.load<uint64_t>(call[0]);
+		if (old == comparand)
+			call.store<uint64_t>(call[0], exchange);
+		call.ret(old);
+	});
 	// Mutexes and semaphores are kernel objects with optional names shared inside the process.
 	auto names = std::make_shared<std::map<std::u16string, std::shared_ptr<KernelObject>>>();
 	const auto named = [names](ApiCall &call, uint64_t name_address, std::shared_ptr<KernelObject> fresh) -> std::pair<std::shared_ptr<KernelObject>, bool> {

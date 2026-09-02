@@ -7,6 +7,7 @@
 #include "nt/providers.h"
 #include "nt/paths.h"
 #include "nt/launch.h"
+#include "nt/text.h"
 #ifdef RAVEN_WAYLAND
 #include "desktop/wayland.h"
 #endif
@@ -20,6 +21,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <stdexcept>
 
 static std::vector<uint8_t> read_file(const char *path)
@@ -112,6 +114,21 @@ int main(int argc, char **argv)
 	if (run_process && argc>first_file && std::string_view(argv[first_file])=="--stdio=inherit") {
 		inherited_stdio=true; ++first_file;
 	}
+	// A program started by another one carries the command line and the directory its parent chose.
+	std::optional<std::string> command_line_text, directory_text;
+	for (bool more=run_process;more && argc>first_file;) {
+		const std::string_view option=argv[first_file];
+		if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
+		else if (option.starts_with("--directory=")) directory_text=std::string(option.substr(12));
+		else more=false;
+		if (more) ++first_file;
+	}
+	if (run_process) {
+		// What programs it starts inherit: how long they may run and which window system they use.
+		std::string options="--timeout-ms="+std::to_string(timeout.count());
+		if (wayland) options+=" --desktop=wayland";
+		setenv("RAVEN_CHILD_OPTIONS",options.c_str(),1);
+	}
 	const bool bind_imports = mode == "--bind-imports";
 	int last_file=argc;
 	if (run_process)
@@ -185,9 +202,11 @@ int main(int argc, char **argv)
 						if (std::filesystem::exists(component))
 							modules.add("raven-rtl.dll", read_file(component.c_str()));
 					}
+					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
+					const auto component_directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "" : "x86");
 					// The common controls component stands in for comctl32.dll when the program does not ship its own.
-					if (entry->image.is_64 && !modules.all().contains("comctl32.dll")) {
-						const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "comctl32.dll";
+					if (!modules.all().contains("comctl32.dll")) {
+						const auto component = component_directory / "comctl32.dll";
 						const auto imported = std::any_of(modules.all().begin(), modules.all().end(), [](const auto &item) {
 							return std::any_of(item.second->imports.begin(), item.second->imports.end(), [](const auto &symbol) {
 								auto name = symbol.module;
@@ -202,9 +221,9 @@ int main(int argc, char **argv)
 					}
 					// Components that stand in for parts of system libraries are loaded beside the program that imports those libraries.
 					const auto load_component = [&](const char *file, std::initializer_list<const char *> libraries) {
-						if (!entry->image.is_64 || modules.all().contains(file))
+						if (modules.all().contains(file))
 							return;
-						const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / file;
+						const auto component = component_directory / file;
 						const auto imported = std::any_of(modules.all().begin(), modules.all().end(), [&](const auto &item) {
 							return std::any_of(item.second->imports.begin(), item.second->imports.end(), [&](const auto &symbol) {
 								auto name = symbol.module;
@@ -226,7 +245,8 @@ int main(int argc, char **argv)
 					// The user32 component supplies the built-in control classes and dialog manager to programs that use user32.
 					load_component("raven-user32.dll", {"user32.dll"});
 					load_component("raven-shell.dll", {"comdlg32.dll", "ole32.dll", "shell32.dll"});
-					load_component("ucrtbase.dll", {"ucrtbase.dll", "api-ms-win-crt-*"});
+					if (entry->image.is_64)
+						load_component("ucrtbase.dll", {"ucrtbase.dll", "api-ms-win-crt-*"});
 					raven::DesktopPresentation presentation;
 #ifdef RAVEN_WAYLAND
 					raven::WaylandPresentation backend;
@@ -243,6 +263,8 @@ int main(int argc, char **argv)
 						const raven::NativePaths paths(prefix);
 						const auto image=paths.dos(std::filesystem::absolute(argv[first_file]));
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
+						if (command_line_text) launch->command_line=raven::from_utf8(*command_line_text);
+						if (directory_text) launch->directory=raven::from_utf8(*directory_text);
 						if (inherited_stdio) launch->standard_fds={0,1,2};
 					}
 					if (!entry->image.is_64)

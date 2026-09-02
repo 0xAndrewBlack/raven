@@ -39,6 +39,8 @@ public:
 	// Reads from an inherited standard handle; the value is the byte count, zero at the end of the input.
 	NativeObjectResult read_file(uint64_t handle,std::span<uint8_t> into);
 	NativeObjectResult file_type(uint64_t handle) const;
+	// The host descriptor behind an inherited standard handle, -1 for any other handle.
+	int descriptor(uint64_t handle) const;
 	NativeObjectResult write_file(uint64_t handle, std::span<const uint8_t> bytes);
 	uint32_t close(uint64_t handle);
 	// Generic objects share the handle namespace of events and inherited files.

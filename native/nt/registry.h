@@ -45,6 +45,9 @@ private:
 	std::vector<std::u16string> children(const std::u16string &folded) const;
 	void save() const;
 	void load();
+	// The values Windows ships in its hive that programs read to learn where they are and what they run on; added when a hive lacks them.
+	void seed();
+	bool seeding = false;
 };
 
 }

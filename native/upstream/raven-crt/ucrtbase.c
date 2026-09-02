@@ -20,6 +20,12 @@
 #undef iswspace
 #undef iswdigit
 #undef iswalpha
+#undef iswalnum
+#undef iswcntrl
+#undef iswupper
+#undef iswlower
+#undef iswxdigit
+#undef iswpunct
 #undef tolower
 #undef toupper
 #undef towlower
@@ -883,3 +889,4 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 }
 
 #include "ucrtbase_io.c"
+#include "ucrtbase_legacy.c"

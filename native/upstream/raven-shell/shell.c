@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shobjidl.h>
+#include <servprov.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -910,6 +911,8 @@ static HRESULT make_dialog(BOOL save, REFIID iid, void **out)
 	return result;
 }
 
+HRESULT raven_make_shell_link(REFIID iid, void **out);
+
 /* Class registry -------------------------------------------------------------------------------------------- */
 
 HRESULT WINAPI CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *out)
@@ -926,6 +929,8 @@ HRESULT WINAPI CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, 
 		return make_dialog(FALSE, iid, out);
 	if (same_iid(clsid, &CLSID_FileSaveDialog))
 		return make_dialog(TRUE, iid, out);
+	if (same_iid(clsid, &CLSID_ShellLink))
+		return raven_make_shell_link(iid, out);
 	return REGDB_E_CLASSNOTREG;
 }
 
@@ -934,6 +939,23 @@ HRESULT WINAPI CoGetClassObject(REFCLSID clsid, DWORD context, LPVOID server, RE
 	if (out)
 		*out = NULL;
 	return REGDB_E_CLASSNOTREG;
+}
+
+/* shlwapi names this export by its ordinal (176): ask an object for a service through its service provider. */
+HRESULT WINAPI IUnknown_QueryService(IUnknown *object, REFGUID service, REFIID iid, void **out)
+{
+	IServiceProvider *provider;
+	HRESULT result;
+	if (out)
+		*out = NULL;
+	if (!object || !out)
+		return E_FAIL;
+	result = IUnknown_QueryInterface(object, &IID_IServiceProvider, (void **)&provider);
+	if (FAILED(result))
+		return result;
+	result = IServiceProvider_QueryService(provider, service, iid, out);
+	IServiceProvider_Release(provider);
+	return result;
 }
 
 HRESULT WINAPI SHCreateItemFromParsingName(PCWSTR path, IBindCtx *context, REFIID iid, void **out)

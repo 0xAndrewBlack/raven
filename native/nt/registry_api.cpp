@@ -54,38 +54,62 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		std::memcpy(bytes.data(), &value, handle_width);
 		call.write(address, bytes);
 	};
+	// A 32-bit program sees HKEY_LOCAL_MACHINE\SOFTWARE as the Wow6432Node subkey of it, except for the keys both views share.
+	const bool wow64 = context.process.mode() == NativeMode::x86;
+	const auto view = [wow64](uint64_t parent, std::u16string path) {
+		if (!wow64 || parent != 0x80000002ULL)
+			return path;
+		const auto fold = [](std::u16string text) {
+			for (auto &character : text)
+				if (character >= u'a' && character <= u'z')
+					character = char16_t(character - (u'a' - u'A'));
+			return text;
+		};
+		while (!path.empty() && path.front() == u'\\')
+			path.erase(0, 1);
+		const auto first = path.find(u'\\');
+		if (fold(path.substr(0, first)) != u"SOFTWARE")
+			return path;
+		if (first == std::u16string::npos)
+			return path;
+		const auto second_end = path.find(u'\\', first + 1);
+		const auto second = fold(path.substr(first + 1, second_end == std::u16string::npos ? std::u16string::npos : second_end - first - 1));
+		if (second == u"CLASSES" || second == u"WOW6432NODE")
+			return path;
+		return path.substr(0, first + 1) + u"Wow6432Node\\" + path.substr(first + 1);
+	};
 	for (const bool wide : {true, false}) {
 		const std::string suffix = wide ? "W" : "A";
-		registry.add("RegOpenKeyEx" + suffix, 5, [&hive, text_of, put_handle, wide](ApiCall &call) {
+		registry.add("RegOpenKeyEx" + suffix, 5, [&hive, text_of, put_handle, wide, view](ApiCall &call) {
 			if (!call[4]) {
 				call.ret(error_invalid_parameter);
 				return;
 			}
 			uint64_t key = 0;
-			const auto status = hive.open(call[0], text_of(call, call[1], wide), key);
+			const auto status = hive.open(call[0], view(call[0], text_of(call, call[1], wide)), key);
 			if (!status)
 				put_handle(call, call[4], key);
 			call.ret(status);
 		});
-		registry.add("RegOpenKey" + suffix, 3, [&hive, text_of, put_handle, wide](ApiCall &call) {
+		registry.add("RegOpenKey" + suffix, 3, [&hive, text_of, put_handle, wide, view](ApiCall &call) {
 			if (!call[2]) {
 				call.ret(error_invalid_parameter);
 				return;
 			}
 			uint64_t key = 0;
-			const auto status = hive.open(call[0], text_of(call, call[1], wide), key);
+			const auto status = hive.open(call[0], view(call[0], text_of(call, call[1], wide)), key);
 			if (!status)
 				put_handle(call, call[2], key);
 			call.ret(status);
 		});
-		registry.add("RegCreateKeyEx" + suffix, 9, [&hive, text_of, put_handle, wide](ApiCall &call) {
+		registry.add("RegCreateKeyEx" + suffix, 9, [&hive, text_of, put_handle, wide, view](ApiCall &call) {
 			if (!call[7]) {
 				call.ret(error_invalid_parameter);
 				return;
 			}
 			uint64_t key = 0;
 			uint32_t disposition = 0;
-			const auto status = hive.create(call[0], text_of(call, call[1], wide), key, disposition);
+			const auto status = hive.create(call[0], view(call[0], text_of(call, call[1], wide)), key, disposition);
 			if (!status) {
 				put_handle(call, call[7], key);
 				if (call[8]) call.store<uint32_t>(call[8], disposition);
@@ -135,7 +159,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 			call.ret(0);
 		});
 		registry.add("RegDeleteValue" + suffix, 2, [&hive, text_of, wide](ApiCall &call) { call.ret(hive.remove_value(call[0], text_of(call, call[1], wide))); });
-		registry.add("RegDeleteKey" + suffix, 2, [&hive, text_of, wide](ApiCall &call) { call.ret(hive.remove_key(call[0], text_of(call, call[1], wide))); });
+		registry.add("RegDeleteKey" + suffix, 2, [&hive, text_of, wide, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], wide)))); });
 		// The older form: the buffer size is a plain count of characters, not a pointer to one.
 		registry.add("RegEnumKey" + suffix, 4, [&hive, wide](ApiCall &call) {
 			std::u16string name;
@@ -221,7 +245,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 			call.ret(0);
 		});
 	}
-	registry.add("RegDeleteKeyExW", 4, [&hive, text_of](ApiCall &call) { call.ret(hive.remove_key(call[0], text_of(call, call[1], true))); });
+	registry.add("RegDeleteKeyExW", 4, [&hive, text_of, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], true)))); });
 	registry.add("RegCloseKey", 1, [&hive](ApiCall &call) { call.ret(hive.close(call[0])); });
 	registry.add("RegFlushKey", 1, [](ApiCall &call) { call.ret(0); });
 	registry.add("RegNotifyChangeKeyValue", 5, [](ApiCall &call) { call.ret(0); });

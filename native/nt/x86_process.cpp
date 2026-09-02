@@ -45,12 +45,12 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 109> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 110> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitProcess", 1}, {"ExitThread", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetExitCodeThread", 2},
 	{"GetFileType", 1}, {"GetLastError", 0}, {"GetModuleFileNameA", 3}, {"GetModuleHandleA", 1},
-	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"WritePrivateProfileStringW", 4}, {"LoadLibraryExA", 3}, {"LoadLibraryExW", 3}, {"GetProcAddress", 2}, {"GetProcessHeap", 0}, {"GetStartupInfoA", 1}, {"GetStdHandle", 1},
+	{"GetModuleHandleW", 1}, {"GetPrivateProfileIntW", 4}, {"GetPrivateProfileStringW", 6}, {"WritePrivateProfileStringW", 4}, {"LoadLibraryExA", 3}, {"LoadLibraryExW", 3}, {"GetProcAddress", 2}, {"GetProcessHeap", 0}, {"GetStartupInfoA", 1}, {"GetStartupInfoW", 1}, {"GetStdHandle", 1},
 	{"GetTickCount", 0}, {"ProcessIdToSessionId", 2}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3}, {"InitializeCriticalSection", 1}, {"LeaveCriticalSection", 1}, {"LoadLibraryA", 1}, {"LoadLibraryW", 1}, {"LoadResource", 2}, {"LockResource", 1},
 	{"OutputDebugStringA", 1}, {"ResetEvent", 1}, {"ResumeThread", 1}, {"SetEvent", 1}, {"SetLastError", 1}, {"SetThreadPriority", 2}, {"SizeofResource", 2}, {"Sleep", 1}, {"SwitchToThread", 0}, {"TryEnterCriticalSection", 1}, {"VirtualAlloc", 4},
 	// Services of the 32-bit CRT era: legacy file calls, global memory, code pages, environment and version queries.
@@ -88,7 +88,7 @@ constexpr std::string_view shared_allowed[] = {
 	"GetSystemTime", "lstrcmpA", "lstrcmpW", "lstrcmpiA", "lstrcmpiW", "lstrcpynA", "lstrcatA", "OutputDebugStringW", "IsDebuggerPresent",
 	"GetLogicalDrives", "GetDriveTypeA", "GetVolumeInformationA", "GetVolumeInformationW", "GetDiskFreeSpaceA", "MulDiv", "GetStringTypeW",
 	"GetStringTypeA", "CompareStringA", "CompareStringW", "LCMapStringA", "LCMapStringW", "GetLocaleInfoA", "GetLocaleInfoW",
-	"GetUserDefaultLCID", "GetSystemDefaultLCID", "IsValidCodePage", "SetEnvironmentVariableA", "SetEnvironmentVariableW",
+	"GetUserDefaultLCID", "GetSystemDefaultLCID", "GetUserDefaultLangID", "GetSystemDefaultLangID", "GetUserDefaultUILanguage", "GetSystemDefaultUILanguage", "GetThreadUILanguage", "IsValidCodePage", "SetEnvironmentVariableA", "SetEnvironmentVariableW",
 	"ExpandEnvironmentStringsA", "ExpandEnvironmentStringsW", "CreateMutexA", "CreateMutexW", "ReleaseMutex", "GetFileTime", "SetFileTime",
 	"FileTimeToLocalFileTime", "LocalFileTimeToFileTime", "FileTimeToDosDateTime", "DosDateTimeToFileTime", "GetFileSize", "SetEndOfFile",
 	"IsWindowEnabled", "EnableWindow", "FindWindowExW", "SetForegroundWindow", "GetMessagePos", "OpenClipboard", "EmptyClipboard",
@@ -106,7 +106,8 @@ constexpr std::string_view shared_allowed[] = {
 	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
 	"SetFileAttributesW", "GetLongPathNameA", "GetLongPathNameW", "GetShortPathNameA", "GetShortPathNameW", "SearchPathA", "SearchPathW",
 	"GetModuleFileNameA", "IsDBCSLeadByte", "IsDBCSLeadByteEx", "GetCPInfoExA", "GetThreadLocale", "SetThreadLocale", "VerifyVersionInfoW",
-	"GetUserNameA", "GetUserNameW", "FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue",
+	"GetUserNameA", "GetUserNameW", "FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue", "SetDefaultDllDirectories", "AddDllDirectory", "RemoveDllDirectory",
+	"CreateMutexW", "CreateMutexA", "CreateMutexExW", "OpenMutexW", "OpenMutexA", "ReleaseMutex", "CreateSemaphoreW", "CreateSemaphoreA", "CreateSemaphoreExW", "ReleaseSemaphore",
 };
 
 struct NamedWords {
@@ -351,39 +352,113 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			provided.push_back("d3d9.dll");
 		// A library that is not there is left for the binder, which names every unresolved import at once.
 		load_initial_dependencies(modules, source, provided, false, true);
+		// Libraries loaded later, such as installer plug-ins, import the C runtime by name: its component answers for them.
+		if (!modules.all().contains("ucrtbase.dll"))
+			if (auto bytes = source("ucrtbase.dll")) {
+				const PEImage image(*bytes);
+				if (!image.is_64)
+					modules.add("ucrtbase.dll", std::move(*bytes));
+			}
 	}
-	std::vector<std::string_view> names;
-	for (const auto &item : kernel32_table())
-		names.push_back(item.name);
-	std::sort(names.begin(), names.end());
+	// What the graph imports from each system library by name. The runtime answers for all of it: a name that has a handler runs, a name that has
+	// none fails visibly when the program calls it, so a program loads whether or not every function it imports is implemented yet.
+	std::map<std::string, std::set<std::string>> imported_names;
+	{
+		std::set<std::string> system_libraries(system_library_names().begin(), system_library_names().end());
+		system_libraries.insert("usp10.dll");
+		system_libraries.insert("ntdll.dll");
+		for (const auto &[module_name, module] : modules.all())
+			for (const auto &symbol : module->imports) {
+				if (symbol.by_ordinal)
+					continue;
+				auto library = symbol.module;
+				for (auto &character : library)
+					if (character >= 'A' && character <= 'Z')
+						character = static_cast<char>(character + ('a' - 'A'));
+				if (library.find('.') == std::string::npos)
+					library += ".dll";
+				if (system_libraries.contains(library) && !modules.all().contains(library))
+					imported_names[library].insert(symbol.name);
+			}
+	}
+	// A library's own list of names together with the ones the graph imports from it.
+	const auto with_imports = [&](const std::string &library, std::span<const std::string_view> own) {
+		std::vector<std::string_view> merged(own.begin(), own.end());
+		// A library loaded later, such as an installer plug-in, imports names the initial graph never named: every public name binds.
+		const auto published = system_export_names(library);
+		merged.insert(merged.end(), published.begin(), published.end());
+		if (const auto found = imported_names.find(library); found != imported_names.end())
+			for (const auto &name : found->second)
+				merged.push_back(name);
+		std::sort(merged.begin(), merged.end());
+		merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+		return merged;
+	};
+	// The stdcall argument words of a function: the library's own decorated symbol first, then what Raven's tables say.
+	const auto words_of = [](const std::string &library, std::string_view name, uint32_t fallback) {
+		const auto authoritative = system_export_words(library, name);
+		if (authoritative != UINT32_MAX)
+			return authoritative;
+		return fallback;
+	};
+	// A guest component that implements part of a system library receives those calls directly, as for 64-bit programs.
+	const auto overlay = [&](PEModule &provider, std::string_view library) {
+		struct Rule { const char *library, *component, *prefix; };
+		static constexpr Rule rules[] = {{"user32.dll", "raven-user32.dll", "raven-user32."}, {"comdlg32.dll", "raven-shell.dll", "raven-shell."},
+			{"ole32.dll", "raven-shell.dll", "raven-shell."}, {"shell32.dll", "raven-shell.dll", "raven-shell."}, {"msvcrt.dll", "ucrtbase.dll", "ucrtbase."}, {"shlwapi.dll", "raven-shell.dll", "raven-shell."}};
+		for (const auto &rule : rules) {
+			if (library != rule.library)
+				continue;
+			const auto component = modules.all().find(rule.component);
+			if (component == modules.all().end() || component->second->runtime_api)
+				continue;
+			// The startup and exception entry points of msvcrt.dll stay with the runtime, which knows the process.
+			const auto host_crt = std::string_view(rule.library) == "msvcrt.dll" ? NativeCRT::exports() : std::span<const std::string_view>{};
+			for (auto &symbol : provider.exports)
+				if (!symbol.names.empty() && std::find(host_crt.begin(), host_crt.end(), symbol.names.front()) == host_crt.end() &&
+					std::any_of(component->second->exports.begin(), component->second->exports.end(), [&](const auto &candidate) {
+						return candidate.forwarder.empty() && std::find(candidate.names.begin(), candidate.names.end(), symbol.names.front()) != candidate.names.end();
+					}))
+					symbol.forwarder = rule.prefix + symbol.names.front();
+		}
+	};
 	std::map<uint64_t, std::pair<std::string_view, uint32_t>> traps;
 	if (!modules.all().contains("kernel32.dll")) {
+		std::vector<std::string_view> own_names;
+		for (const auto &item : kernel32_table())
+			own_names.push_back(item.name);
+		const auto names = with_imports("kernel32.dll", own_names);
 		const auto size = PEImage(runtime_provider("kernel32.dll", 0x70000000ULL, names, true)).image_size;
 		const auto base = provider_base(modules, size);
 		auto &provider = modules.add("kernel32.dll", runtime_provider("kernel32.dll", base, names, true), base);
 		provider.runtime_api = true;
 		for (const auto &symbol : provider.exports) {
-			const auto found = std::find_if(kernel32_table().begin(), kernel32_table().end(),
-				[&](const auto &item) { return item.name == symbol.names.at(0); });
-			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->name, found->words * 4});
+			const auto &exported = symbol.names.at(0);
+			const auto found = std::find_if(kernel32_table().begin(), kernel32_table().end(), [&](const auto &item) { return item.name == exported; });
+			const auto view = std::find(names.begin(), names.end(), exported);
+			const uint32_t fixed = found != kernel32_table().end() ? found->words : registry_words(exported) != UINT32_MAX ? registry_words(exported) : 0;
+			traps.emplace(provider.loaded.base() + symbol.address, std::pair{*view, words_of("kernel32.dll", exported, fixed) * 4});
 		}
 	}
 	const auto add_desktop = [&](const char *dll, std::span<const std::string_view> implemented, std::span<const std::string_view> pending) {
 		if (modules.all().contains(dll))
 			return;
-		std::vector<std::string_view> exports(implemented.begin(), implemented.end());
-		exports.insert(exports.end(), pending.begin(), pending.end());
-		std::sort(exports.begin(), exports.end());
-		exports.erase(std::unique(exports.begin(), exports.end()), exports.end());
+		std::vector<std::string_view> own(implemented.begin(), implemented.end());
+		own.insert(own.end(), pending.begin(), pending.end());
+		const auto exports = with_imports(dll, own);
 		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, exports, true)).image_size;
 		const auto base = provider_base(modules, size);
 		auto &provider = modules.add(dll, runtime_provider(dll, base, exports, true), base);
 		provider.runtime_api = true;
+		overlay(provider, dll);
 		for (const auto &symbol : provider.exports) {
-			const auto found = desktop_arguments().find(symbol.names.at(0));
-			if (found == desktop_arguments().end())
-				throw std::runtime_error("native x86 desktop export has no argument count: " + symbol.names.at(0));
-			traps.emplace(provider.loaded.base() + symbol.address, std::pair{found->first, found->second * 4});
+			if (!symbol.forwarder.empty())
+				continue;
+			const auto &exported = symbol.names.at(0);
+			const auto view = std::find(exports.begin(), exports.end(), exported);
+			const auto found = desktop_arguments().find(exported);
+			const uint32_t fixed = found != desktop_arguments().end() ? found->second : registry_words(exported) != UINT32_MAX ? registry_words(exported) : 0;
+			traps.emplace(provider.loaded.base() + symbol.address, std::pair{*view, words_of(dll, exported, fixed) * 4});
 		}
 	};
 	std::vector<std::string_view> user_pending{"CheckMenuItem", "DialogBoxParamW", "EndDialog", "GetDesktopWindow",
@@ -411,11 +486,15 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		const std::function<uint32_t(std::string_view)> &count, std::span<const std::pair<std::string_view, uint16_t>> ordinals = {}) {
 		if (modules.all().contains(dll))
 			return;
-		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, exports, true, data, ordinals)).image_size;
+		const auto merged = with_imports(dll, exports);
+		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, merged, true, data, ordinals)).image_size;
 		const auto base = provider_base(modules, size);
-		auto &provider = modules.add(dll, runtime_provider(dll, base, exports, true, data, ordinals), base);
+		auto &provider = modules.add(dll, runtime_provider(dll, base, merged, true, data, ordinals), base);
 		provider.runtime_api = true;
+		overlay(provider, dll);
 		for (const auto &symbol : provider.exports) {
+			if (!symbol.forwarder.empty())
+				continue;
 			// An export that has only an ordinal is the name the library lists for that ordinal.
 			std::string exported;
 			if (!symbol.names.empty()) {
@@ -429,10 +508,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			}
 			if (std::find(data.begin(), data.end(), exported) != data.end())
 				continue;
-			const auto stable = std::find(exports.begin(), exports.end(), exported);
-			if (stable == exports.end())
+			const auto stable = std::find(merged.begin(), merged.end(), exported);
+			if (stable == merged.end())
 				throw std::runtime_error("native x86 provider export is not in its list: " + std::string(dll) + "!" + exported);
-			traps.emplace(provider.loaded.base() + symbol.address, std::pair{*stable, count(exported) * 4});
+			traps.emplace(provider.loaded.base() + symbol.address, std::pair{*stable, words_of(dll, exported, count(exported)) * 4});
 		}
 	};
 	std::vector<std::string_view> advapi_names;
@@ -455,7 +534,15 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				return item.words;
 		return uint32_t(0);
 	});
-	add_library("msvcrt.dll", NativeCRT::exports(), NativeCRT::data_exports(), [](std::string_view name) { return uint32_t(0); });
+	// msvcrt.dll answers for the runtime's own entry points and, through forwarders, for everything the C runtime component implements.
+	std::vector<std::string_view> crt_names(NativeCRT::exports().begin(), NativeCRT::exports().end());
+	if (const auto component = modules.all().find("ucrtbase.dll"); component != modules.all().end())
+		for (const auto &symbol : component->second->exports)
+			if (!symbol.names.empty() && symbol.forwarder.empty())
+				crt_names.push_back(symbol.names.front());
+	std::sort(crt_names.begin(), crt_names.end());
+	crt_names.erase(std::unique(crt_names.begin(), crt_names.end()), crt_names.end());
+	add_library("msvcrt.dll", crt_names, NativeCRT::data_exports(), [](std::string_view name) { return uint32_t(0); });
 	static constexpr std::array<std::string_view, 4> winmm_exports{"PlaySoundW", "timeBeginPeriod", "timeEndPeriod", "timeGetTime"};
 	static constexpr std::array<std::string_view, 1> shell_exports{"ShellAboutW"};
 	// File version resources are read by the shared handlers; the names are in byte order.
@@ -530,6 +617,20 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				return item.words;
 		return uint32_t(0);
 	});
+	// A system library the runtime has no provider for yet is served for the names the graph imports from it, with the shared handlers.
+	std::set<std::string> served;
+	for (const auto &[library, library_names] : imported_names) {
+		(void)library_names;
+		served.insert(library);
+	}
+	for (const auto library : system_library_names())
+		served.insert(std::string(library));
+	for (const auto &library : served) {
+		if (modules.all().contains(library))
+			continue;
+		add_library(library.c_str(), {}, {}, [](std::string_view name) { return registry_words(name) != UINT32_MAX ? registry_words(name) : uint32_t(0); },
+			system_export_ordinals(library));
+	}
 	modules.bind_imports();
 	std::vector<LoadedImage *> images;
 	for (const auto &[name, module] : modules.all())
@@ -579,6 +680,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	crt.initialize([&](std::string_view name) { return modules.resolve({"msvcrt.dll", std::string(name), 0, false, 0}); });
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativePaths paths(prefix);
+	if (!launch->directory.empty())
+		paths.set_current(launch->directory);
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call_guest;
 	NativeResources resources(process, environment, modules, entry);
 	NativeMemory memory(process, environment);
@@ -601,14 +704,20 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	module_api.set_loader([&](std::string name) -> uint64_t {
 		return library_loader.load(std::move(name));
 	}, [&](uint64_t handle) -> bool {
+		if (library_loader.release(handle))
+			return true;
 		const bool known = std::any_of(modules.all().begin(), modules.all().end(),
 			[&](const auto &item) { return item.second->loaded.base() == handle; });
 		if (!known)
 			environment.set_last_error(6);
 		return known;
 	});
+	module_api.set_path_lookup([&](const std::string &path) { return library_loader.find(path); });
 	DesktopObjects desktop_objects;
 	NativeDesktop desktop(process, environment, desktop_objects, resources);
+	// The built-in bitmaps, icons and cursors of user32 live in the component when it is there.
+	if (const auto component = modules.all().find("raven-user32.dll"); component != modules.all().end() && !component->second->runtime_api)
+		desktop.set_oem_module(component->second->loaded.base());
 	NativeWindows windows(process, environment, desktop_objects);
 	// Registry handlers whose arguments carry no pointer-width structures also serve 32-bit programs.
 	ApiRegistry shared_api;
@@ -665,6 +774,25 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 					for (const auto value : process.api_arguments(count))
 						std::cerr << ' ' << value;
 				std::cerr << std::dec << " )";
+				// Window classes and texts are what a diagnosis of a window needs most.
+				{
+					static const std::map<std::string_view, std::vector<size_t>> wide_strings{{"SetWindowTextW", {1}}, {"SetDlgItemTextW", {2}},
+						{"CreateWindowExW", {1, 2}}, {"RegisterClassW", {}}, {"MessageBoxW", {1, 2}}, {"LoadStringW", {}}, {"CreateProcessW", {0, 1, 7}}, {"ShellExecuteW", {1, 2, 3}}, {"LoadLibraryW", {0}}, {"CreateFileW", {0}}, {"GetFileAttributesW", {0}}};
+					if (const auto entry = wide_strings.find(api); entry != wide_strings.end() && !entry->second.empty()) {
+						const auto words = process.api_arguments(found->second.second / 4);
+						for (const auto index : entry->second) {
+							if (index >= words.size() || words[index] <= 0xffff)
+								continue;
+							try {
+								const auto bytes = process.read_memory(words[index], 200);
+								std::cerr << " [" << index << "]=\"";
+								for (size_t at = 0; at + 1 < bytes.size() && (bytes[at] || bytes[at + 1]); at += 2)
+									std::cerr << (bytes[at + 1] == 0 && bytes[at] >= 32 && bytes[at] < 127 ? char(bytes[at]) : '?');
+								std::cerr << '"';
+							} catch (...) {}
+						}
+					}
+				}
 				// The names a program resolves at run time are what a diagnosis needs most.
 				if (api == "LoadLibraryA" || api == "LoadLibraryW" || api == "GetProcAddress") {
 					const auto words = process.api_arguments(api == "GetProcAddress" ? 2 : 1);
@@ -737,8 +865,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			if (api == "TerminateProcess") {
 				const auto words = process.api_arguments(2);
 				if (words[0] != UINT32_MAX) {
-					environment.set_last_error(6);
-					process.return_api(0);
+					const auto entry = shared_api.find("TerminateProcess");
+					ApiCall inner(process, environment, {uint64_t(words[0]), uint64_t(words[1])});
+					entry->second(inner);
+					process.return_api(inner.result);
 					budget = remaining();
 					result = process.resume(budget);
 					continue;
@@ -757,9 +887,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 #endif
 				 !object_api.dispatch(api) && !module_api.dispatch(api) && !resources.dispatch(api) &&
 				!memory.dispatch(api) && !kernel_string_api(process, environment, entry, *launch, api) &&
-				!desktop.dispatch(api) && !windows.dispatch(api) && !profile.dispatch(api) &&
-				!crt.dispatch(api) && !unsupported_library(process, environment, api) &&
-				!(shared_names.contains(api) && shared_api.dispatch(process, environment, api, true))) {
+				!shared_api.dispatch(process, environment, api, true) && !desktop.dispatch(api) && !windows.dispatch(api) && !profile.dispatch(api) &&
+				!crt.dispatch(api) && !unsupported_library(process, environment, api)) {
 				std::cerr << "raven: unimplemented native x86 API " << api << '\n';
 				return result;
 			}
@@ -820,6 +949,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	// File, memory, text and system handlers of the shared registry take 32-bit words as well; they get the same process services.
 	NativeHeap guest_heap(process, environment, modules, entry.image);
 	GuestAllocator allocator(memory, guest_heap);
+	compat.set_global_blocks([&allocator](uint64_t address) { return allocator.size(address); }, [&allocator](uint64_t address) { return allocator.release(address); });
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, guest_threads, paths, modules, entry, *launch, invoke};
 	register_file_api(shared_api, kernel);
 	register_memory_api(shared_api, kernel);
@@ -827,7 +957,40 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_system_api(shared_api, kernel);
 	register_version_api(shared_api, kernel);
 	register_registry_api(shared_api, kernel, registry);
+	register_shell_api(shared_api, kernel);
+	register_shlwapi_api(shared_api, kernel);
+	register_platform_api(shared_api, kernel);
 	register_process_api(shared_api, kernel);
+	register_thread_api(shared_api, kernel);
+	register_security_api(shared_api, kernel);
+	register_child_process_api(shared_api, kernel);
+	register_winsock_api(shared_api, kernel);
+	// A 32-bit program runs under WOW64 on the 64-bit system Raven presents. File system redirection is not done (one System32 exists),
+	// so switching it off and back on changes nothing.
+	shared_api.add("IsWow64Process", 2, [](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		call.store<uint32_t>(call[1], 1);
+		call.ret(1);
+	});
+	shared_api.add("IsWow64Process2", 3, [](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		call.store<uint16_t>(call[1], 0x14c);
+		if (call[2])
+			call.store<uint16_t>(call[2], 0x8664);
+		call.ret(1);
+	});
+	shared_api.add("Wow64DisableWow64FsRedirection", 1, [](ApiCall &call) {
+		if (call[0])
+			call.store<uint32_t>(call[0], 0);
+		call.ret(1);
+	});
+	shared_api.add("Wow64RevertWow64FsRedirection", 1, [](ApiCall &call) { call.ret(1); });
 	register_ansi_adapters(shared_api);
 	register_legacy_file_api(shared_api);
 	windows.set_yield([&guest_threads] { return guest_threads.live() > 1 && guest_threads.yield(); });
@@ -845,7 +1008,16 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 					throw started;
 			}
 		};
-		for (const auto *module : initialization_order(modules, entry)) {
+		auto order = initialization_order(modules, entry);
+		// The user32 component registers the built-in classes in its entry point, before any library that subclasses them.
+		if (const auto controls = modules.all().find("raven-user32.dll"); controls != modules.all().end() && !controls->second->runtime_api) {
+			const auto found = std::find(order.begin(), order.end(), controls->second.get());
+			if (found != order.end()) {
+				order.erase(found);
+				order.insert(order.begin(), controls->second.get());
+			}
+		}
+		for (const auto *module : order) {
 			if (module == &entry)
 				continue;
 			start_image(*module);

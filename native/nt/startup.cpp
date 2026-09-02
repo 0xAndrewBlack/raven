@@ -11,9 +11,21 @@ bool NativeEnvironment::startup_information(std::string_view name)
 	const auto args=process.api_arguments(1);
 	if (!startup_info_ansi) throw std::runtime_error("native startup information is not initialized");
 	if (process.mode()==NativeMode::x86) {
-		if (name!="GetStartupInfoA") return false;
+		if (name!="GetStartupInfoA" && name!="GetStartupInfoW") return false;
 		try {
-			process.write_memory(args[0],process.read_memory(startup_info_ansi,68));
+			auto bytes=process.read_memory(startup_info_ansi,68);
+			if (name=="GetStartupInfoW") {
+				// The wide form names the same desktop and title as the process parameters hold them: wide strings.
+				const auto pointer=process.read_memory(process_block+0x10,4);
+				uint32_t parameters=0;
+				for (size_t i=0;i<4;++i) parameters|=uint32_t(pointer[i])<<(i*8);
+				if (parameters) {
+					const auto fields=process.read_memory(parameters,0x80);
+					std::copy_n(fields.begin()+0x7c,4,bytes.begin()+8);
+					std::copy_n(fields.begin()+0x74,4,bytes.begin()+12);
+				}
+			}
+			process.write_memory(args[0],bytes);
 		} catch (const std::runtime_error &error) {
 			const std::string_view message=error.what();
 			if (message.find("writable")==message.npos) throw;

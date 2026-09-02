@@ -666,6 +666,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	};
 	const auto prefix = NativePrefix::from_environment();
 	NativePaths paths(prefix);
+	if (launch && !launch->directory.empty())
+		paths.set_current(launch->directory);
 	desktop.set_host_files([&paths](std::u16string_view path) -> std::optional<std::vector<uint8_t>> {
 		const auto resolved = paths.resolve(path);
 		if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
@@ -687,6 +689,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_exception_api(api_registry, kernel, unwinder);
 	register_system_api(api_registry, kernel);
 	register_process_api(api_registry, kernel);
+	register_security_api(api_registry, kernel);
+	register_child_process_api(api_registry, kernel);
+	register_winsock_api(api_registry, kernel);
 	register_sync_api(api_registry, kernel);
 	register_thread_api(api_registry, kernel);
 	register_text_api(api_registry, kernel);

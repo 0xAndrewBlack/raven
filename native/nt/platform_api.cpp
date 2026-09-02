@@ -274,6 +274,32 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("SysFreeString", 1, [&context](ApiCall &call) {
 		if (call[0]) context.allocator.release(call[0] - 4);
 	});
+	// A VARIANT is 16 bytes in a 32-bit program and 24 in a 64-bit one: the type, three reserved words and the value, which may hold a pointer.
+	registry.add("VariantInit", 1, [](ApiCall &call) {
+		if (!call[0])
+			return;
+		call.write(call[0], std::vector<uint8_t>(call.pointer_width() == 4 ? 16 : 24));
+	});
+	registry.add("VariantClear", 1, [&context, &registry](ApiCall &call) {
+		constexpr uint16_t vt_bstr = 8, vt_dispatch = 9, vt_unknown = 13, vt_byref = 0x4000, vt_array = 0x2000;
+		if (!call[0]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const uint16_t type = call.load<uint16_t>(call[0]);
+		const auto value = call.load_pointer(call[0] + 8);
+		if (!(type & (vt_byref | vt_array)) && type == vt_bstr && value) {
+			context.allocator.release(value - 4);
+		} else if (!(type & (vt_byref | vt_array)) && (type == vt_dispatch || type == vt_unknown) && value) {
+			// The object is told its reference is gone: Release is the third method of every interface.
+			const auto table = call.load_pointer(value);
+			const auto release = call.load_pointer(table + 2 * call.pointer_width());
+			const uint64_t arguments[] = {value};
+			context.call(release, arguments);
+		}
+		call.write(call[0], std::vector<uint8_t>(2));
+		call.ret(0);
+	});
 	registry.add("SysStringLen", 1, [](ApiCall &call) { call.ret(call[0] ? call.load<uint32_t>(call[0] - 4) / 2 : 0); });
 	registry.add("SysStringByteLen", 1, [](ApiCall &call) { call.ret(call[0] ? call.load<uint32_t>(call[0] - 4) : 0); });
 	// SysReAllocString replaces the string a BSTR variable holds: the new copy is made before the old one is released.
@@ -282,7 +308,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(87);
 			return;
 		}
-		const uint64_t old = call.load<uint64_t>(call[0]);
+		const uint64_t old = call.load_pointer(call[0]);
 		std::vector<uint8_t> bytes;
 		if (call[1]) {
 			const size_t count = counted ? call.u32(2) : call.wide(call[1], 1 << 24).size();
@@ -291,7 +317,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		make_bstr(call, bytes.data(), bytes.size());
 		if (!call.result)
 			return;
-		call.store<uint64_t>(call[0], call.result);
+		call.store_pointer(call[0], call.result);
 		if (old)
 			context.allocator.release(old - 4);
 		call.ret(1);

@@ -44,6 +44,9 @@ public:
 	}
 	// A pointer-sized value for the guest: four bytes for a 32-bit program, eight for a 64-bit one.
 	void store_pointer(uint64_t address, uint64_t value) const;
+	uint64_t load_pointer(uint64_t address) const;
+	// The size of a pointer in the guest: four bytes for a 32-bit program, eight for a 64-bit one.
+	size_t pointer_width() const;
 	// Zero-terminated guest strings; a string longer than limit characters faults the call.
 	std::u16string wide(uint64_t address, size_t limit = 32768) const;
 	std::string narrow(uint64_t address, size_t limit = 32768) const;

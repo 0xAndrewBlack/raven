@@ -51,6 +51,8 @@ int compare_text(const std::string &left, const std::string &right, uint32_t fla
 
 void register_process_api(ApiRegistry &registry, KernelContext &context)
 {
+	// Debug output goes nowhere; the function is cdecl and variadic, so it takes no counted arguments.
+	registry.add("DbgPrint", 0, [](ApiCall &call) { call.ret(0); });
 	registry.add("DisableThreadLibraryCalls", 1, [](ApiCall &call) { call.ret(1); });
 	// No console control events are delivered, so handlers are accepted and never called.
 	registry.add("SetConsoleCtrlHandler", 2, [](ApiCall &call) { call.ret(1); });
@@ -61,14 +63,6 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("CancelIo", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("ReadDirectoryChangesW", 8, [](ApiCall &call) { call.fail(50, 0); });
 	registry.add("FindFirstStreamW", 4, [](ApiCall &call) { call.fail(38, UINT64_MAX); });
-	registry.add("TerminateProcess", 2, [](ApiCall &call) {
-		if (call[0] != current_process) {
-			call.fail(5, 0);
-			return;
-		}
-		call.process.abandon_call();
-		throw ProcessExit{call.u32(1), 0};
-	});
 	const auto directory = [](ApiCall &call, bool wide, const std::string &path) {
 		const size_t capacity = call.u32(1);
 		if (wide) {
@@ -156,17 +150,10 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	});
-	// Starting another process is not supported yet: the call fails visibly (ERROR_CALL_NOT_IMPLEMENTED) and starts nothing.
-	registry.add("CreateProcessW", 10, [](ApiCall &call) { call.fail(120); });
-	// The only process handle that exists is the program's own, which is still running while it asks.
-	registry.add("GetExitCodeProcess", 2, [](ApiCall &call) {
-		if (int64_t(call[0]) != -1 || !call[1]) {
-			call.fail(call[1] ? 6 : 87);
-			return;
-		}
-		call.store<uint32_t>(call[1], 259);
-		call.ret(1);
-	});
+	// The search path for dependent libraries is not restricted by anything Raven resolves, so the request is accepted as it stands.
+	registry.add("SetDefaultDllDirectories", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("AddDllDirectory", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("RemoveDllDirectory", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("GetWindowsDirectoryW", 2, [=](ApiCall &call) { directory(call, true, windows); });
 	registry.add("GetSystemWindowsDirectoryW", 2, [=](ApiCall &call) { directory(call, true, windows); });
 	registry.add("GetWindowsDirectoryA", 2, [=](ApiCall &call) { directory(call, false, windows); });

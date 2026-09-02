@@ -1,32 +1,39 @@
 #include <user32.h>
 
 /* The upstream header turns these public calls into kernel calls, so the bridge reaches the real ones under their import names. */
-extern BOOL WINAPI raven_real_InvalidateRect(HWND, CONST RECT *, BOOL) __asm__("InvalidateRect");
-extern BOOL WINAPI raven_real_InvalidateRgn(HWND, HRGN, BOOL) __asm__("InvalidateRgn");
-extern BOOL WINAPI raven_real_RedrawWindow(HWND, CONST RECT *, HRGN, UINT) __asm__("RedrawWindow");
-extern HDC WINAPI raven_real_GetDC(HWND) __asm__("GetDC");
-extern HDC WINAPI raven_real_GetDCEx(HWND, HRGN, DWORD) __asm__("GetDCEx");
-extern HDC WINAPI raven_real_BeginPaint(HWND, LPPAINTSTRUCT) __asm__("BeginPaint");
-extern BOOL WINAPI raven_real_EndPaint(HWND, CONST PAINTSTRUCT *) __asm__("EndPaint");
-extern HWND WINAPI raven_real_SetFocus(HWND) __asm__("SetFocus");
-extern HWND WINAPI raven_real_SetCapture(HWND) __asm__("SetCapture");
-extern HWND WINAPI raven_real_SetActiveWindow(HWND) __asm__("SetActiveWindow");
-extern HWND WINAPI raven_real_GetForegroundWindow(VOID) __asm__("GetForegroundWindow");
-extern BOOL WINAPI raven_real_SetWindowPos(HWND, HWND, int, int, int, int, UINT) __asm__("SetWindowPos");
-extern BOOL WINAPI raven_real_MoveWindow(HWND, int, int, int, int, BOOL) __asm__("MoveWindow");
-extern BOOL WINAPI raven_real_ShowWindow(HWND, int) __asm__("ShowWindow");
-extern HWND WINAPI raven_real_SetParent(HWND, HWND) __asm__("SetParent");
-extern BOOL WINAPI raven_real_DestroyWindow(HWND) __asm__("DestroyWindow");
-extern BOOL WINAPI raven_real_DestroyMenu(HMENU) __asm__("DestroyMenu");
-extern UINT_PTR WINAPI raven_real_SetTimer(HWND, UINT_PTR, UINT, TIMERPROC) __asm__("SetTimer");
-extern BOOL WINAPI raven_real_KillTimer(HWND, UINT_PTR) __asm__("KillTimer");
-extern UINT_PTR WINAPI raven_real_SetSystemTimer(HWND, UINT_PTR, UINT, TIMERPROC) __asm__("SetSystemTimer");
-extern BOOL WINAPI raven_real_CreateCaret(HWND, HBITMAP, int, int) __asm__("CreateCaret");
-extern BOOL WINAPI raven_real_ShowCaret(HWND) __asm__("ShowCaret");
-extern BOOL WINAPI raven_real_HideCaret(HWND) __asm__("HideCaret");
-extern BOOL WINAPI raven_real_IsClipboardFormatAvailable(UINT) __asm__("IsClipboardFormatAvailable");
-extern BOOL WINAPI raven_real_EmptyClipboard(VOID) __asm__("EmptyClipboard");
-extern BOOL WINAPI raven_real_CloseClipboard(VOID) __asm__("CloseClipboard");
+/* An imported function is named by its import symbol: plain on 64 bits, decorated with the argument bytes on 32. */
+#ifdef _M_IX86
+#define RAVEN_IMPORT(name, bytes) __asm__("_" name "@" #bytes)
+#else
+#define RAVEN_IMPORT(name, bytes) __asm__(name)
+#endif
+
+extern BOOL WINAPI raven_real_InvalidateRect(HWND, CONST RECT *, BOOL) RAVEN_IMPORT("InvalidateRect", 12);
+extern BOOL WINAPI raven_real_InvalidateRgn(HWND, HRGN, BOOL) RAVEN_IMPORT("InvalidateRgn", 12);
+extern BOOL WINAPI raven_real_RedrawWindow(HWND, CONST RECT *, HRGN, UINT) RAVEN_IMPORT("RedrawWindow", 16);
+extern HDC WINAPI raven_real_GetDC(HWND) RAVEN_IMPORT("GetDC", 4);
+extern HDC WINAPI raven_real_GetDCEx(HWND, HRGN, DWORD) RAVEN_IMPORT("GetDCEx", 12);
+extern HDC WINAPI raven_real_BeginPaint(HWND, LPPAINTSTRUCT) RAVEN_IMPORT("BeginPaint", 8);
+extern BOOL WINAPI raven_real_EndPaint(HWND, CONST PAINTSTRUCT *) RAVEN_IMPORT("EndPaint", 8);
+extern HWND WINAPI raven_real_SetFocus(HWND) RAVEN_IMPORT("SetFocus", 4);
+extern HWND WINAPI raven_real_SetCapture(HWND) RAVEN_IMPORT("SetCapture", 4);
+extern HWND WINAPI raven_real_SetActiveWindow(HWND) RAVEN_IMPORT("SetActiveWindow", 4);
+extern HWND WINAPI raven_real_GetForegroundWindow(VOID) RAVEN_IMPORT("GetForegroundWindow", 0);
+extern BOOL WINAPI raven_real_SetWindowPos(HWND, HWND, int, int, int, int, UINT) RAVEN_IMPORT("SetWindowPos", 28);
+extern BOOL WINAPI raven_real_MoveWindow(HWND, int, int, int, int, BOOL) RAVEN_IMPORT("MoveWindow", 24);
+extern BOOL WINAPI raven_real_ShowWindow(HWND, int) RAVEN_IMPORT("ShowWindow", 8);
+extern HWND WINAPI raven_real_SetParent(HWND, HWND) RAVEN_IMPORT("SetParent", 8);
+extern BOOL WINAPI raven_real_DestroyWindow(HWND) RAVEN_IMPORT("DestroyWindow", 4);
+extern BOOL WINAPI raven_real_DestroyMenu(HMENU) RAVEN_IMPORT("DestroyMenu", 4);
+extern UINT_PTR WINAPI raven_real_SetTimer(HWND, UINT_PTR, UINT, TIMERPROC) RAVEN_IMPORT("SetTimer", 16);
+extern BOOL WINAPI raven_real_KillTimer(HWND, UINT_PTR) RAVEN_IMPORT("KillTimer", 8);
+extern UINT_PTR WINAPI raven_real_SetSystemTimer(HWND, UINT_PTR, UINT, TIMERPROC) RAVEN_IMPORT("SetSystemTimer", 16);
+extern BOOL WINAPI raven_real_CreateCaret(HWND, HBITMAP, int, int) RAVEN_IMPORT("CreateCaret", 16);
+extern BOOL WINAPI raven_real_ShowCaret(HWND) RAVEN_IMPORT("ShowCaret", 4);
+extern BOOL WINAPI raven_real_HideCaret(HWND) RAVEN_IMPORT("HideCaret", 4);
+extern BOOL WINAPI raven_real_IsClipboardFormatAvailable(UINT) RAVEN_IMPORT("IsClipboardFormatAvailable", 4);
+extern BOOL WINAPI raven_real_EmptyClipboard(VOID) RAVEN_IMPORT("EmptyClipboard", 0);
+extern BOOL WINAPI raven_real_CloseClipboard(VOID) RAVEN_IMPORT("CloseClipboard", 0);
 
 /* Process-wide state and kernel services the upstream control and dialog sources expect, rebuilt on public calls. */
 
@@ -133,7 +140,7 @@ HWND NTAPI NtUserGetForegroundWindow(VOID)
 }
 
 /* The upstream header turns ShowScrollBar into a kernel call, so the real function is reached under its import name. */
-extern BOOL WINAPI raven_show_scroll_bar(HWND window, int bar, BOOL show) __asm__("ShowScrollBar");
+extern BOOL WINAPI raven_show_scroll_bar(HWND window, int bar, BOOL show) RAVEN_IMPORT("ShowScrollBar", 12);
 
 DWORD NTAPI NtUserShowScrollBar(HWND window, int bar, DWORD show)
 {

@@ -29,6 +29,10 @@ typedef struct _OBJECT_ATTRIBUTES *POBJECT_ATTRIBUTES;
 typedef struct _TEB { char reserved[0x800]; void *Win32ClientInfo[62]; } TEB, *PTEB;
 typedef struct _STRING { USHORT Length; USHORT MaximumLength; PCHAR Buffer; } STRING, *PSTRING;
 #define FASTCALL
+/* The kernel-mode header that defines the page size is not used here; the shared structures only assert against it. */
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 0x1000
+#endif
 #include <ntusrtyp.h>
 #include <ntuser.h>
 #include <controls.h>

@@ -63,7 +63,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     if(NOT NONCLIENT_SOURCE_HASH STREQUAL "dab51515f54adc39af43f088a02afe45a719476408bee3c7bef6113c25b180fc")
         message(FATAL_ERROR "Pinned ReactOS nonclient functions differ")
     endif()
-    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/ansi_api.cpp nt/shlwapi_api.cpp nt/registry_api.cpp nt/shell_api.cpp nt/platform_api.cpp nt/hash.cpp nt/version_api.cpp nt/system_api.cpp nt/process_api.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp desktop/user_api.cpp desktop/window_manager.cpp desktop/window_ansi.cpp desktop/menu_manager.cpp desktop/shared_pixels.cpp desktop/user_ext.cpp desktop/scrollbar.cpp desktop/window_long.cpp desktop/child_frame.cpp desktop/gdi.cpp desktop/gdi_api.cpp desktop/gdi_text.cpp)
+    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/ansi_api.cpp nt/shlwapi_api.cpp nt/registry_api.cpp nt/shell_api.cpp nt/platform_api.cpp nt/hash.cpp nt/version_api.cpp nt/system_api.cpp nt/process_api.cpp nt/security_api.cpp nt/child_api.cpp nt/child_process.cpp nt/winsock_api.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp desktop/user_api.cpp desktop/window_manager.cpp desktop/window_ansi.cpp desktop/menu_manager.cpp desktop/shared_pixels.cpp desktop/user_ext.cpp desktop/scrollbar.cpp desktop/window_long.cpp desktop/child_frame.cpp desktop/gdi.cpp desktop/gdi_api.cpp desktop/gdi_text.cpp)
     target_include_directories(raven_cpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     set(NLS_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-nls)
     file(SHA256 ${NLS_SOURCE}/txt2nls.cpp NLS_TOOL_HASH)
@@ -970,6 +970,20 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_test(NAME native_geometry_boundary COMMAND raven --run-process --execution=native ${GEOMETRY_NEGATIVE})
         set_tests_properties(native_geometry_boundary PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         set(RAVEN_CONTROLS_COMPONENT_DIR "" CACHE PATH "Directory holding the common controls component built by scripts/provision-controls.py")
+        # The same components built for 32-bit programs (scripts/provision-controls.py --arch x86); they sit in a directory beside the runtime.
+        set(RAVEN_CONTROLS32_COMPONENT_DIR "" CACHE PATH "Directory holding the 32-bit components built by scripts/provision-controls.py --arch x86")
+        if(RAVEN_CONTROLS32_COMPONENT_DIR)
+            foreach(component comctl32.dll raven-user32.dll raven-shell.dll)
+                if(NOT EXISTS "${RAVEN_CONTROLS32_COMPONENT_DIR}/${component}")
+                    message(FATAL_ERROR "Configured 32-bit controls component does not exist: ${component}")
+                endif()
+            endforeach()
+            add_custom_command(TARGET raven POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:raven>/x86
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/comctl32.dll $<TARGET_FILE_DIR:raven>/x86/comctl32.dll
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/raven-user32.dll $<TARGET_FILE_DIR:raven>/x86/raven-user32.dll
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/raven-shell.dll $<TARGET_FILE_DIR:raven>/x86/raven-shell.dll)
+        endif()
         if(RAVEN_CONTROLS_COMPONENT_DIR)
             if(NOT EXISTS "${RAVEN_CONTROLS_COMPONENT_DIR}/comctl32.dll")
                 message(FATAL_ERROR "Configured controls component does not exist")
@@ -1306,8 +1320,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     COMMAND ${RAVEN_MINGW32} -c -O2 -w -ffreestanding -fno-builtin -ffile-prefix-map=${PROJECT_SOURCE_DIR}=raven
                         ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase.c -o ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.o
                     COMMAND ${RAVEN_MINGW32} -shared -nostdlib -Wl,--entry,_DllMain@12,--image-base,0x1fc00000,--no-insert-timestamp
-                        -o ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.dll ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.o -lkernel32 -lgcc
-                    DEPENDS ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase.c ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase_io.c VERBATIM)
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.dll ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.o ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase32.def -lkernel32 -lgcc
+                    DEPENDS ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase32.def ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase.c ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase_io.c ${PROJECT_SOURCE_DIR}/native/upstream/raven-crt/ucrtbase_legacy.c VERBATIM)
                 add_custom_target(x86_ucrt_component ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ucrtbase32.dll)
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-ucrt-client.exe
                     COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
@@ -1722,6 +1736,22 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/d3d9-window.exe ${RAVEN_DXVK_PE32_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d9-present)
                         set_tests_properties(native_d3d9_present PROPERTIES TIMEOUT 480 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
+                    endif()
+                    # The built-in controls drawn by a 64-bit and a 32-bit build of the same program must be the same picture.
+                    if(RAVEN_MINGW32 AND RAVEN_MINGW64 AND RAVEN_CONTROLS_COMPONENT_DIR AND RAVEN_CONTROLS32_COMPONENT_DIR)
+                        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/controls-probe64.exe ${CMAKE_CURRENT_BINARY_DIR}/controls-probe32.exe
+                            COMMAND ${RAVEN_MINGW64} -O1 -nostdlib -fno-stack-protector -fno-builtin -mno-stack-arg-probe
+                                -Wl,--entry,raven_entry,--image-base,0x1b9000000
+                                -o ${CMAKE_CURRENT_BINARY_DIR}/controls-probe64.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/controls_probe.c -lkernel32 -luser32 -lgdi32
+                            COMMAND ${RAVEN_MINGW32} -O1 -nostdlib -fno-stack-protector -fno-builtin
+                                -Wl,--entry,_raven_entry,--no-insert-timestamp
+                                -o ${CMAKE_CURRENT_BINARY_DIR}/controls-probe32.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/controls_probe.c -lkernel32 -luser32 -lgdi32
+                            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/controls_probe.c VERBATIM)
+                        add_custom_target(controls_probe_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/controls-probe64.exe ${CMAKE_CURRENT_BINARY_DIR}/controls-probe32.exe)
+                        add_test(NAME native_x86_controls_match COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-controls-probe.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/controls-probe64.exe ${CMAKE_CURRENT_BINARY_DIR}/controls-probe32.exe
+                            ${CMAKE_CURRENT_BINARY_DIR}/controls-match)
+                        set_tests_properties(native_x86_controls_match PROPERTIES TIMEOUT 400 RESOURCE_LOCK raven_compositor)
                     endif()
                     # The Direct3D 11 workloads built for 32 bits, through the 32-bit DXVK that sits beside them as the program's own libraries.
                     if(RAVEN_MINGW32 AND RAVEN_DXVK_PE32_DIR AND EXISTS "${RAVEN_DXVK_PE32_DIR}/d3d11.dll" AND TARGET vulkan_thunk32_generated)

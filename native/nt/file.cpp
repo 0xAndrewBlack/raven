@@ -41,6 +41,12 @@ std::shared_ptr<NativeObjects::File> NativeObjects::file(uint64_t handle) const
 	return found==handles.end() ? nullptr : found->second.file;
 }
 
+int NativeObjects::descriptor(uint64_t handle) const
+{
+	const auto object=file(handle);
+	return object ? object->descriptor : -1;
+}
+
 NativeObjectResult NativeObjects::file_type(uint64_t handle) const
 {
 	const auto object=file(handle);

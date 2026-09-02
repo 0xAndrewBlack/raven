@@ -293,7 +293,7 @@ void NativeThreads::schedule()
 				any = true;
 			}
 		const auto now = std::chrono::steady_clock::now();
-		if (!any && !poll)
+		if (!any && !poll && !(external && external()))
 			throw std::runtime_error("native guest threads deadlocked: every thread waits without a timeout");
 		const auto limit = std::min(wake, deadline);
 		auto slice = std::chrono::duration_cast<std::chrono::milliseconds>(limit > now ? limit - now : std::chrono::nanoseconds(0));

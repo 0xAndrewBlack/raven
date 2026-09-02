@@ -387,6 +387,48 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 	});
 
 	// ---- brushes and pens ----
+	// LOGBRUSH: style, color, then a hatch index or bitmap handle that is as wide as the program's pointers.
+	registry.add("CreateBrushIndirect", 1, [=, this, &registry](ApiCall &call) {
+		guarded(call, 0, [&] {
+			if (!call[0])
+				throw uint32_t(87);
+			const auto style = call.load<uint32_t>(call[0]);
+			const auto color = call.load<uint32_t>(call[0] + 4) & 0xffffff;
+			const uint64_t detail = call.process.mode() == NativeMode::x86 ? call.load<uint32_t>(call[0] + 8) : call.load<uint64_t>(call[0] + 8);
+			DesktopBrush brush;
+			switch (style) {
+			case 0:
+				brush.color = color;
+				break;
+			case 1:
+				brush.hollow = true;
+				break;
+			case 2:
+				if (detail > 5)
+					throw uint32_t(87);
+				brush.color = color;
+				brush.style = 2;
+				brush.hatch = uint32_t(detail);
+				break;
+			case 3: {
+				// A pattern brush takes the bitmap named by the third member.
+				const auto entry = registry.find("CreatePatternBrush");
+				if (!entry)
+					throw uint32_t(120);
+				ApiCall inner(call.process, call.environment, {detail});
+				entry->second(inner);
+				call.ret(inner.result);
+				return;
+			}
+			default:
+				throw uint32_t(120);
+			}
+			const auto handle = objects.add(brush);
+			if (!handle)
+				throw uint32_t(8);
+			call.ret(handle);
+		});
+	});
 	registry.add("CreateHatchBrush", 2, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			if (call.u32(0) > 5)

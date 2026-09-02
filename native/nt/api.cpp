@@ -39,6 +39,16 @@ void ApiCall::store_pointer(uint64_t address, uint64_t value) const
 		store<uint64_t>(address, value);
 }
 
+uint64_t ApiCall::load_pointer(uint64_t address) const
+{
+	return process.mode() == NativeMode::x86 ? uint64_t(load<uint32_t>(address)) : load<uint64_t>(address);
+}
+
+size_t ApiCall::pointer_width() const
+{
+	return process.mode() == NativeMode::x86 ? 4 : 8;
+}
+
 void ApiCall::set_last_error(uint32_t error)
 {
 	environment.set_last_error(error);

@@ -1,3 +1,4 @@
+#include "child_process.h"
 #include "kernel_context.h"
 #include "text.h"
 
@@ -246,28 +247,41 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("DragQueryPoint", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragFinish", 1, [](ApiCall &) {});
 	registry.add("DragAcceptFiles", 2, [](ApiCall &) {});
-	registry.add("ShellExecuteW", 6, [&paths](ApiCall &call) {
-		const auto operation = call[1] ? call.wide(call[1]) : std::u16string(u"open");
-		auto target = call.wide(call[2]);
-		if (!equal_fold(operation, u"open") && !equal_fold(operation, u"edit") && !equal_fold(operation, u"explore")) {
-			call.ret(31);
-			return;
-		}
-		// Only documents, folders and URLs can be handed to the desktop; Windows programs need process creation.
+	// Opens a program, a folder, a document or a URL the way the shell does. The result is the value ShellExecute reports: above 32 on
+	// success, otherwise the error. A program that is started is handed back through `started`.
+	const auto open_target = [&context, &paths](const std::u16string &operation, std::u16string target, const std::u16string &parameters,
+		const std::u16string &directory, std::shared_ptr<ProcessObject> &started) -> uint64_t {
+		if (!equal_fold(operation, u"open") && !equal_fold(operation, u"edit") && !equal_fold(operation, u"explore") && !equal_fold(operation, u"runas"))
+			return 31;
 		std::string argument;
 		const bool url = target.find(u"://") != target.npos || target.starts_with(u"mailto:");
-		if (url) {
-			argument = to_utf8(target);
-		} else if (const auto resolved = paths.resolve(target); resolved && resolved->exists) {
-			const auto extension = std::filesystem::path(resolved->host).extension().string();
-			if (equal_fold(from_utf8(extension), u".exe")) {
-				call.ret(31);
-				return;
+		if (!url) {
+			const auto candidates = target.find_first_of(u"\\/:") != target.npos ? std::vector<std::u16string>{target} :
+				std::vector<std::u16string>{directory.empty() ? paths.current() + u"\\" + target : directory + u"\\" + target, target};
+			const auto resolved = [&]() -> std::optional<NativePaths::Resolved> {
+				for (const auto &candidate : candidates)
+					if (const auto found = paths.resolve(candidate); found && found->exists)
+						return found;
+				return std::nullopt;
+			}();
+			if (!resolved) {
+				// A bare program name is found along the usual program directories, as Windows does for the open verb.
+				uint32_t error = 0;
+				const int standard[3] = {0, 1, 2};
+				started = start_program(context, u"", u"\"" + target + u"\"" + (parameters.empty() ? u"" : u" " + parameters), directory, standard, error);
+				return started ? 42 : error == 2 ? 2 : error == 193 ? 11 : 31;
+			}
+			if (equal_fold(from_utf8(std::filesystem::path(resolved->host).extension().string()), u".exe") && !std::filesystem::is_directory(resolved->host)) {
+				uint32_t error = 0;
+				const int standard[3] = {0, 1, 2};
+				const auto full = paths.dos(resolved->host);
+				started = start_program(context, full, u"\"" + full + u"\"" + (parameters.empty() ? u"" : u" " + parameters),
+					directory.empty() ? full.substr(0, full.find_last_of(u'\\')) : directory, standard, error);
+				return started ? 42 : error == 193 ? 11 : error;
 			}
 			argument = resolved->host.string();
 		} else {
-			call.ret(2);
-			return;
+			argument = to_utf8(target);
 		}
 		const pid_t child = ::fork();
 		if (child == 0) {
@@ -275,7 +289,41 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 			::execlp("xdg-open", "xdg-open", argument.c_str(), static_cast<char *>(nullptr));
 			::_exit(127);
 		}
-		call.ret(child < 0 ? 0 : 42);
+		return child < 0 ? 0 : 42;
+	};
+	registry.add("ShellExecuteW", 6, [open_target](ApiCall &call) {
+		std::shared_ptr<ProcessObject> started;
+		call.ret(open_target(call[1] ? call.wide(call[1]) : std::u16string(u"open"), call[2] ? call.wide(call[2]) : std::u16string(),
+			call[3] ? call.wide(call[3]) : std::u16string(), call[4] ? call.wide(call[4]) : std::u16string(), started));
+	});
+	// SHELLEXECUTEINFOW: the pointers sit after the size, mask and window, each as wide as the program's.
+	registry.add("ShellExecuteExW", 1, [open_target, &context](ApiCall &call) {
+		const size_t width = call.pointer_width();
+		const auto at = [&](size_t index) { return call[0] + 8 + index * width; };
+		if (!call[0] || call.load<uint32_t>(call[0]) < 8 + 13 * width) {
+			call.fail(87);
+			return;
+		}
+		const auto text = [&](size_t index) {
+			const auto pointer = call.load_pointer(at(index));
+			return pointer ? call.wide(pointer) : std::u16string();
+		};
+		const uint32_t mask = call.load<uint32_t>(call[0] + 4);
+		const auto verb = text(1);
+		std::shared_ptr<ProcessObject> started;
+		const auto result = open_target(verb.empty() ? std::u16string(u"open") : verb, text(2), text(3), text(4), started);
+		call.store_pointer(at(6), result);
+		if (result <= 32) {
+			call.fail(uint32_t(result == 31 ? 1155 : result));
+			return;
+		}
+		if (started && (mask & 0x40)) {
+			const auto handle = context.objects.add_object(started);
+			call.store_pointer(at(12), handle.status ? 0 : handle.value);
+		} else if (mask & 0x40) {
+			call.store_pointer(at(12), 0);
+		}
+		call.ret(1);
 	});
 	registry.add("SHFileOperationW", 1, [&paths](ApiCall &call) {
 		// SHFILEOPSTRUCTW: owner window, function, source and destination lists, flags, then the aborted flag; the pointers are as wide as the program's.

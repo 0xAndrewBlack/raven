@@ -72,6 +72,8 @@ public:
 	}
 	// Host polling used while every guest thread waits; it may make waiting predicates true (window events).
 	void set_idle(std::function<void(std::chrono::milliseconds)> idle) { poll = std::move(idle); }
+	// True while something outside the process, such as a child program, can still make a waiting thread's condition true.
+	void set_external(std::function<bool()> pending) { external = std::move(pending); }
 
 	std::shared_ptr<GuestThread> create(uint64_t start, uint64_t parameter, uint64_t stack_size, bool suspended);
 	GuestThread &current() { return *running; }
@@ -100,6 +102,7 @@ private:
 	std::function<void(uint32_t)> notifier;
 	std::function<void(uint64_t)> block_made, block_released;
 	std::function<void(std::chrono::milliseconds)> poll;
+	std::function<bool()> external;
 	std::vector<std::shared_ptr<GuestThread>> threads;
 	GuestThread *running = nullptr;
 	// Set while the process ends: threads leave through their frames and the deadline no longer interrupts them.

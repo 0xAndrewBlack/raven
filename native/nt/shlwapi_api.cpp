@@ -220,6 +220,8 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[0], text, max_path * 4);
 		call.ret(changed);
 	};
+	// Completion lists are drawn by the shell; an edit control without one still works, so enabling it succeeds without a list.
+	registry.add("SHAutoComplete", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("PathRemoveFileSpecW", 1, [edit](ApiCall &call) {
 		edit(call, [](std::u16string &path) {
 			const size_t root = root_length(path);

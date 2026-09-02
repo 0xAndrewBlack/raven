@@ -2,22 +2,31 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 
 namespace raven {
 
 namespace {
 
 #include "system_exports.inc"
+#include "system_arguments.inc"
 
 constexpr std::array<std::pair<std::string_view, uint16_t>, 6> comctl32_ordinals{{
 	{"DefSubclassProc", 413}, {"GetWindowSubclass", 411}, {"InitCommonControls", 17}, {"LoadIconWithScaleDown", 381},
 	{"RemoveWindowSubclass", 412}, {"SetWindowSubclass", 410},
 }};
 constexpr std::array<std::pair<std::string_view, uint16_t>, 1> shell32_ordinals{{{"SHCreateDirectory", 165}}};
-constexpr std::array<std::pair<std::string_view, uint16_t>, 6> oleaut32_ordinals{{
+constexpr std::array<std::pair<std::string_view, uint16_t>, 9> oleaut32_ordinals{{
 	{"SysAllocString", 2}, {"SysAllocStringLen", 4}, {"SysFreeString", 6}, {"SysReAllocString", 3}, {"SysReAllocStringLen", 5},
-	{"SysStringLen", 7},
+	{"SysStringLen", 7}, {"VariantClear", 9}, {"VariantCopy", 10}, {"VariantInit", 8},
 }};
+constexpr std::array<std::pair<std::string_view, uint16_t>, 28> ws2_32_ordinals{{
+	{"__WSAFDIsSet", 151}, {"accept", 1}, {"bind", 2}, {"closesocket", 3}, {"connect", 4}, {"getpeername", 5}, {"getsockname", 6},
+	{"getsockopt", 7}, {"htonl", 8}, {"htons", 9}, {"inet_addr", 11}, {"inet_ntoa", 12}, {"ioctlsocket", 10}, {"listen", 13},
+	{"ntohl", 14}, {"ntohs", 15}, {"recv", 16}, {"recvfrom", 17}, {"select", 18}, {"send", 19}, {"sendto", 20}, {"setsockopt", 21},
+	{"shutdown", 22}, {"socket", 23}, {"WSACleanup", 116}, {"WSAGetLastError", 111}, {"WSASetLastError", 112}, {"WSAStartup", 115},
+}};
+constexpr std::array<std::pair<std::string_view, uint16_t>, 1> shlwapi_ordinals{{{"IUnknown_QueryService", 176}}};
 
 }
 
@@ -37,7 +46,24 @@ std::span<const std::pair<std::string_view, uint16_t>> system_export_ordinals(st
 		return shell32_ordinals;
 	if (dll == "oleaut32.dll")
 		return oleaut32_ordinals;
+	if (dll == "shlwapi.dll")
+		return shlwapi_ordinals;
+	if (dll == "ws2_32.dll")
+		return ws2_32_ordinals;
 	return {};
+}
+
+uint32_t system_export_words(std::string_view dll, std::string_view name)
+{
+	for (const auto &[library, table] : argument_tables) {
+		if (library != dll)
+			continue;
+		const auto found = std::lower_bound(table.begin(), table.end(), name, [](const auto &item, std::string_view wanted) { return item.first < wanted; });
+		if (found != table.end() && found->first == name)
+			return found->second;
+		break;
+	}
+	return std::numeric_limits<uint32_t>::max();
 }
 
 std::span<const std::string_view> system_library_names()

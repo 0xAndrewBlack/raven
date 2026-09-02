@@ -108,6 +108,73 @@ std::string unescape(std::string_view text)
 NativeRegistry::NativeRegistry(std::filesystem::path file) : file(std::move(file))
 {
 	load();
+	seed();
+}
+
+void NativeRegistry::seed()
+{
+	// A hive that already has the program directories keeps whatever it holds.
+	if (keys.contains(fold(u"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion")))
+		return;
+	seeding = true;
+	const auto bytes_of = [](std::u16string_view text) {
+		std::vector<uint8_t> data;
+		for (const auto character : text) {
+			data.push_back(uint8_t(character));
+			data.push_back(uint8_t(character >> 8));
+		}
+		data.push_back(0);
+		data.push_back(0);
+		return data;
+	};
+	const auto text = [&](const char16_t *path, const char16_t *name, std::u16string_view value) {
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		if (create(0x80000002ULL, path, key, disposition))
+			return;
+		set(key, name, 1, bytes_of(value));
+		close(key);
+	};
+	const auto number = [&](const char16_t *path, const char16_t *name, uint32_t value) {
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		if (create(0x80000002ULL, path, key, disposition))
+			return;
+		const uint8_t data[4] = {uint8_t(value), uint8_t(value >> 8), uint8_t(value >> 16), uint8_t(value >> 24)};
+		set(key, name, 4, data);
+		close(key);
+	};
+	// The 64-bit view of the machine hive, and the 32-bit view that 32-bit programs reach through Wow6432Node.
+	for (const bool wow : {false, true}) {
+		const std::u16string root = wow ? u"SOFTWARE\\Wow6432Node" : u"SOFTWARE";
+		const auto files = root + u"\\Microsoft\\Windows\\CurrentVersion";
+		const auto system = root + u"\\Microsoft\\Windows NT\\CurrentVersion";
+		const std::u16string program = wow ? u"C:\\Program Files (x86)" : u"C:\\Program Files";
+		text(files.c_str(), u"ProgramFilesDir", program);
+		text(files.c_str(), u"CommonFilesDir", program + u"\\Common Files");
+		text(files.c_str(), u"ProgramFilesDir (x86)", u"C:\\Program Files (x86)");
+		text(files.c_str(), u"CommonFilesDir (x86)", u"C:\\Program Files (x86)\\Common Files");
+		text(files.c_str(), u"ProgramW6432Dir", u"C:\\Program Files");
+		text(files.c_str(), u"CommonW6432Dir", u"C:\\Program Files\\Common Files");
+		text(files.c_str(), u"ProgramFilesPath", u"%ProgramFiles%");
+		text(files.c_str(), u"DevicePath", u"%SystemRoot%\\inf");
+		text(system.c_str(), u"ProductName", u"Windows 10 Pro");
+		text(system.c_str(), u"EditionID", u"Professional");
+		text(system.c_str(), u"InstallationType", u"Client");
+		text(system.c_str(), u"CurrentVersion", u"6.3");
+		text(system.c_str(), u"CurrentBuild", u"19041");
+		text(system.c_str(), u"CurrentBuildNumber", u"19041");
+		text(system.c_str(), u"DisplayVersion", u"22H2");
+		text(system.c_str(), u"ReleaseId", u"2009");
+		text(system.c_str(), u"SystemRoot", u"C:\\Windows");
+		text(system.c_str(), u"RegisteredOwner", u"User");
+		text(system.c_str(), u"RegisteredOrganization", u"");
+		number(system.c_str(), u"CurrentMajorVersionNumber", 10);
+		number(system.c_str(), u"CurrentMinorVersionNumber", 0);
+		number(system.c_str(), u"UBR", 2364);
+	}
+	seeding = false;
+	save();
 }
 
 bool NativeRegistry::resolve(uint64_t parent, std::u16string_view path, std::u16string &folded, std::u16string &display) const
@@ -332,7 +399,7 @@ uint32_t NativeRegistry::info(uint64_t key, Info &result) const
 
 void NativeRegistry::save() const
 {
-	if (file.empty())
+	if (file.empty() || seeding)
 		return;
 	auto temporary = file;
 	temporary += ".tmp";

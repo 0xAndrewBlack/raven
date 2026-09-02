@@ -10,7 +10,10 @@ NativePrefix::NativePrefix(std::filesystem::path root) : directory(std::move(roo
 {
 	if (directory.empty())
 		throw std::runtime_error("native prefix requires a directory");
-	std::filesystem::create_directories(directory / "drive_c" / "windows");
+	// The folders every Windows installation has, so that programs can put files in the places they expect.
+	for (const char *folder : {"windows", "windows/system32", "Program Files", "Program Files (x86)", "ProgramData/Microsoft/Windows/Start Menu/Programs",
+			"Users/Public/Desktop", "Users/Public/Documents"})
+		std::filesystem::create_directories(directory / "drive_c" / folder);
 }
 
 NativePrefix NativePrefix::from_environment()

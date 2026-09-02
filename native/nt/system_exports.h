@@ -11,6 +11,9 @@ namespace raven {
 std::span<const std::string_view> system_export_names(std::string_view dll);
 // Names that Windows also publishes under a fixed ordinal, which programs may import without a name.
 std::span<const std::pair<std::string_view, uint16_t>> system_export_ordinals(std::string_view dll);
+// The stdcall argument words of a function of a 32-bit system library, from the library's own decorated symbol; UINT32_MAX when it has none
+// (a function that is not stdcall, or that the library does not export).
+uint32_t system_export_words(std::string_view dll, std::string_view name);
 // Every library with a name list, in lower case with its ".dll" suffix.
 std::span<const std::string_view> system_library_names();
 
