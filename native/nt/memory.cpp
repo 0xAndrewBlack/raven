@@ -1,5 +1,8 @@
 #include "memory.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
 #include <array>
 #include <new>
@@ -268,6 +271,13 @@ bool NativeMemory::dispatch(std::string_view name)
 			throw;
 		status=0xc0000005U;
 	}
+	// RAVEN_TRACE_MEMORY lists every virtual memory request with the arguments the program passed and the status it got.
+	static const bool trace=std::getenv("RAVEN_TRACE_MEMORY")!=nullptr;
+	if (trace)
+		std::fprintf(stderr,"mem %.*s [%llx %llx %llx %llx %llx %llx] status %x result %llx\n",int(name.size()),name.data(),
+			(unsigned long long)args[0],(unsigned long long)(args.size()>1 ? args[1] : 0),(unsigned long long)(args.size()>2 ? args[2] : 0),
+			(unsigned long long)(args.size()>3 ? args[3] : 0),(unsigned long long)(args.size()>4 ? args[4] : 0),
+			(unsigned long long)(args.size()>5 ? args[5] : 0),status,(unsigned long long)result);
 	if (!nt && status)
 		environment.set_last_error(status==0xc0000004U ? 24 : error(status));
 	process.return_api(nt ? status : status ? 0 : result);

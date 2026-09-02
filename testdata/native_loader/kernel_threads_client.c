@@ -129,10 +129,10 @@ int raven_entry(void)
 
 	// Sleeping threads wake in time order, not creation order.
 	HANDLE sleepers[3];
-	DWORD delays[3]={60,10,30};
+	DWORD delays[3]={600,100,300};
 	for(int i=0;i<3;++i) sleepers[i]=CreateThread(0,0,ordered,(LPVOID)(ULONG_PTR)delays[i],0,0);
 	CHECK(19,WaitForMultipleObjects(3,sleepers,TRUE,5000)==WAIT_OBJECT_0);
-	CHECK(20,order[0]==10 && order[1]==30 && order[2]==60);
+	CHECK(20,order[0]==100 && order[1]==300 && order[2]==600);
 	for(int i=0;i<3;++i) CloseHandle(sleepers[i]);
 
 	mutex=CreateMutexW(0,TRUE,0);

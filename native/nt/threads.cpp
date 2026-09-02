@@ -29,7 +29,11 @@ NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environm
 	running = main.get();
 	// A thread that computes or spins without calling the runtime must not keep the others from running: after a few milliseconds the
 	// guest is interrupted and the next thread gets the processor.
-	process.set_time_slicing(std::chrono::milliseconds(5), [this] { return !tearing_down && live() > 1; }, [this] { yield(); });
+	// RAVEN_SLICE_MS sets the length of a time slice in milliseconds; zero turns time slicing off.
+	long slice = 5;
+	if (const char *text = std::getenv("RAVEN_SLICE_MS"))
+		slice = std::strtol(text, nullptr, 10);
+	process.set_time_slicing(std::chrono::milliseconds(slice < 0 ? 0 : slice), [this] { return !tearing_down && live() > 1; }, [this] { yield(); });
 }
 
 NativeThreads::~NativeThreads()
@@ -145,8 +149,21 @@ void NativeThreads::thread_main(GuestThread &thread)
 			pending = std::current_exception();
 			// The main thread rethrows it from its own switch; hand the processor to it directly.
 			auto &main = *threads.front();
-			if (main.state != GuestThread::State::done && &main != running)
-				switch_to(main);
+			if (main.state != GuestThread::State::done && &main != running) {
+				try {
+					switch_to(main);
+				} catch (...) {
+					// The guest process is gone (the deadline ended it), so no guest state can be saved or loaded: only the host stack is handed
+					// over, and the main thread ends the run with the pending error.
+					GuestThread &previous = *running;
+					running = &main;
+					if (previous.state == GuestThread::State::running)
+						previous.state = GuestThread::State::ready;
+					main.state = GuestThread::State::running;
+					active_scheduler = this;
+					swapcontext(&previous.context, &main.context);
+				}
+			}
 		}
 	}
 }

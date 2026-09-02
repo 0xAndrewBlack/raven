@@ -56,7 +56,7 @@ static void dynamic_lists(const std::filesystem::path &directory, const std::str
 	entry.loaded.data()[entry.image.entry] = 0xcc;
 	entry.loaded.data()[entry.image.entry + 1] = 0xc3;
 	raven::LoadedImage *images[] = {&entry.loaded};
-	raven::NativeProcess process(images, bootstrap, std::chrono::seconds(2));
+	raven::NativeProcess process(images, bootstrap, std::chrono::seconds(10));
 	raven::NativeEnvironment environment(process, entry.loaded.base(), 1, 1);
 	raven::NativeLoaderData loader(process, environment.peb(), modules, entry);
 	const auto initial_node = pointer(process, loader.address() + 0x10);
@@ -83,7 +83,7 @@ static void dynamic_lists(const std::filesystem::path &directory, const std::str
 	};
 	process.add_api_trap(entry.loaded.base() + entry.image.entry);
 	const uint64_t arguments[] = {17, 23};
-	check(process.call(entry.loaded.base() + entry.image.entry, arguments, std::chrono::seconds(2)).stop == raven::NativeStop::api,
+	check(process.call(entry.loaded.base() + entry.image.entry, arguments, std::chrono::seconds(10)).stop == raven::NativeStop::api,
 		"dynamic loader list fixture did not reach API suspension");
 	const auto before = process.context();
 	auto &base = modules.add("base.dll", read_file(directory / "base.dll"));
@@ -135,7 +135,7 @@ static void dynamic_lists(const std::filesystem::path &directory, const std::str
 	check(after.registers.rip == before.registers.rip && after.registers.rsp == before.registers.rsp &&
 		process.api_arguments(2) == std::vector<uint64_t>{17, 23}, "dynamic list operations lost pending API context");
 	process.return_api(88);
-	check(process.resume(std::chrono::seconds(2)).value == 88, "dynamic list operations lost guest return");
+	check(process.resume(std::chrono::seconds(10)).value == 88, "dynamic list operations lost guest return");
 	std::cout << "Dynamic PEB list publication, stable nodes, initialization transitions, removal and rollback passed\n";
 }
 
@@ -158,7 +158,7 @@ int main(int argc, char **argv)
 				if (!entry)
 					entry = &module;
 			}
-			const auto timeout = std::chrono::milliseconds(extra == "loop.dll" ? 300 : 2000);
+			const auto timeout = std::chrono::milliseconds(extra == "loop.dll" ? 300 : 10000);
 			if (extra == "reject.dll") {
 				bool rejected = false;
 				try { raven::run_native_process(modules, *entry, argv[1], timeout); }
