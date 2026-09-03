@@ -536,14 +536,20 @@ CRT void _invalid_parameter_noinfo(void) {}
 CRT void _invalid_parameter_noinfo_noreturn(void) { ExitProcess(3); }
 
 /* ---- streams ---- */
+/* The record is the size of msvcrt's FILE on x64 (48 bytes), so the table of standard streams is also the array that msvcrt
+   programs index; the read buffer is allocated when a stream first reads. */
+#define STREAM_BUFFER 4096
 typedef struct {
 	HANDLE handle;
 	int index;
 	/* File streams: text mode translates CRLF, reads are buffered, one character can be pushed back. */
 	int text, end_of_file, error, pushed, writable;
-	unsigned char buffer[4096];
+	unsigned char *buffer;
 	unsigned buffer_length, buffer_position;
 } Stream;
+#ifdef __x86_64__
+_Static_assert(sizeof(Stream) == 48, "a stream must have the size of msvcrt's FILE");
+#endif
 
 static Stream streams[3] = {{NULL, 0, 0, 0, 0, -1}, {NULL, 1, 0, 0, 0, -1}, {NULL, 2, 0, 0, 0, -1}};
 
@@ -890,3 +896,4 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 
 #include "ucrtbase_io.c"
 #include "ucrtbase_legacy.c"
+#include "ucrtbase_msvcrt.c"

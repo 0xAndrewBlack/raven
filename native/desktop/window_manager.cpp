@@ -159,6 +159,16 @@ bool NativeWindows::show_window(uint64_t handle, uint32_t command)
 			window->outer.bottom - parent->y}, true);
 	}
 	send(handle, 0x18, window->visible, 0);
+	// The size and position messages an overlapped window did not get while it was created come with its first showing.
+	window = objects.window(handle);
+	if (window && show && window->need_size) {
+		window->need_size = false;
+		const uint64_t kind = (window->style & ws_maximize) ? 2 : (window->style & ws_minimize) ? 1 : 0;
+		send(handle, 5, kind, uint16_t(window->width) | (uint64_t(uint16_t(window->height)) << 16));
+		window = objects.window(handle);
+		if (window)
+			send(handle, 3, 0, uint16_t(window->x) | (uint64_t(uint16_t(window->y)) << 16));
+	}
 	return previous;
 }
 

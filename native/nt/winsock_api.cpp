@@ -3,6 +3,8 @@
 #include "kernel_context.h"
 
 #include <algorithm>
+#include "text.h"
+
 #include <arpa/inet.h>
 #include <array>
 #include <cerrno>
@@ -1705,6 +1707,49 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("ntohl", 1, [](ApiCall &call) { call.ret(__builtin_bswap32(call.u32(0))); });
 
 	// WSADATA differs in field order: the version words come first in both, the rest follows the program's layout.
+	// A numeric address with an optional port ("1.2.3.4:80", "[::1]:80" or a bare address) as a SOCKADDR of the family asked for.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "WSAStringToAddressW" : "WSAStringToAddressA", 5, [wide](ApiCall &call) {
+			const auto text = wide ? to_utf8(call.wide(call[0], 256)) : call.narrow(call[0], 256);
+			const int family = call.i32(1);
+			if (!call[3] || !call[4] || (family != 2 && family != 23)) {
+				call.fail(family != 2 && family != 23 ? 10047U : wsaefault, UINT64_MAX);
+				return;
+			}
+			std::string host = text;
+			unsigned long port = 0;
+			const auto port_of = [&](const std::string &digits) {
+				char *end = nullptr;
+				port = std::strtoul(digits.c_str(), &end, 10);
+				return !digits.empty() && end && !*end && port <= 65535;
+			};
+			bool valid = true;
+			if (family == 23 && !text.empty() && text[0] == '[') {
+				const auto close = text.find(']');
+				valid = close != text.npos && (close + 1 == text.size() || (text[close + 1] == ':' && port_of(text.substr(close + 2))));
+				host = valid ? text.substr(1, close - 1) : std::string();
+			} else if (family == 2 && text.find(':') != text.npos) {
+				const auto colon = text.find(':');
+				valid = port_of(text.substr(colon + 1));
+				host = text.substr(0, colon);
+			}
+			std::vector<uint8_t> address(family == 2 ? 16 : 28, 0);
+			const uint16_t kind = uint16_t(family), network_port = htons(uint16_t(port));
+			std::memcpy(address.data(), &kind, 2);
+			std::memcpy(address.data() + 2, &network_port, 2);
+			if (!valid || ::inet_pton(family == 2 ? AF_INET : AF_INET6, host.c_str(), address.data() + (family == 2 ? 4 : 8)) != 1) {
+				call.fail(wsaeinval, UINT64_MAX);
+				return;
+			}
+			const auto capacity = call.load<int32_t>(call[4]);
+			call.store<int32_t>(call[4], int32_t(address.size()));
+			if (capacity < int32_t(address.size())) {
+				call.fail(wsaefault, UINT64_MAX);
+				return;
+			}
+			call.write(call[3], address);
+			call.ret(0);
+		});
 	registry.add("WSAStartup", 2, [](ApiCall &call) {
 		if (!call[1]) {
 			call.ret(10014);

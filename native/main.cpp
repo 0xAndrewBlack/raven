@@ -215,6 +215,13 @@ int main(int argc, char **argv)
 							selected = item.path();
 						}
 						// The runtime's own components are found beside the runtime when the program does not ship them.
+						// A 64-bit program built against msvcrt.dll gets the C runtime component as that library too: a runtime of its own, as
+						// msvcrt is beside ucrtbase on Windows.
+						if (!selected && name=="msvcrt.dll" && entry->image.is_64) {
+							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "ucrtbase.dll";
+							if (std::filesystem::exists(component))
+								return read_file(component.c_str());
+						}
 						if (!selected && name=="ucrtbase.dll") {
 							// A 32-bit program gets the 32-bit build of the component.
 							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "ucrtbase.dll" : "ucrtbase32.dll");

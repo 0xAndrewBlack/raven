@@ -342,7 +342,11 @@ static int stream_get(Stream *stream)
 	for (;;) {
 		if (stream->buffer_position == stream->buffer_length) {
 			stream->buffer_position = 0;
-			if (!ReadFile(stream->handle, stream->buffer, sizeof stream->buffer, &got, NULL) || !got) {
+			if (!stream->buffer && !(stream->buffer = HeapAlloc(GetProcessHeap(), 0, STREAM_BUFFER))) {
+				stream->error = 1;
+				return -1;
+			}
+			if (!ReadFile(stream->handle, stream->buffer, STREAM_BUFFER, &got, NULL) || !got) {
 				stream->buffer_length = 0;
 				if (GetLastError() != ERROR_BROKEN_PIPE && got == 0 && GetLastError() != 0 && GetLastError() != ERROR_HANDLE_EOF)
 					stream->error = 1;
@@ -476,6 +480,8 @@ CRT int fclose(void *stream)
 		int fd = file->index;
 		discard_read_ahead(file);
 		_close(fd);
+		if (file->buffer)
+			HeapFree(GetProcessHeap(), 0, file->buffer);
 		HeapFree(GetProcessHeap(), 0, file);
 	}
 	return 0;

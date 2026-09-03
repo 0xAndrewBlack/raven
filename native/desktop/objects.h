@@ -200,6 +200,8 @@ struct DesktopWindow {
 	uint32_t ex_style = 0;
 	// SetWindowDisplayAffinity: whether the window asks to be left out of screen captures.
 	uint32_t display_affinity = 0;
+	// An overlapped window created hidden receives WM_SIZE and WM_MOVE when it is first shown rather than while it is created.
+	bool need_size = false;
 	uint64_t menu = 0;
 	bool client_ready = true;
 	// Owner of a top-level window (a different relation from the parent of a child) and the sibling order, bottom to top.

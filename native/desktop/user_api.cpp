@@ -169,18 +169,86 @@ void NativeWindows::register_api(ApiRegistry &registry)
 		call.store<int32_t>(call[0] + 4, cursor_y);
 		call.ret(1);
 	});
+	// Raw input: the mouse (usage page 1, usage 2) is the device that reports; RIDEV_REMOVE ends the registration and
+	// RIDEV_NOLEGACY leaves out the ordinary mouse messages. Keyboards keep their ordinary messages.
+	registry.add("RegisterRawInputDevices", 3, [this](ApiCall &call) {
+		const size_t width = call.pointer_width(), size = width == 4 ? 12 : 16;
+		if (!call[0] || !call.u32(1) || call.u32(2) != size) {
+			call.fail(87);
+			return;
+		}
+		for (uint32_t index = 0; index < call.u32(1); ++index) {
+			const uint64_t entry = call[0] + index * size;
+			const uint16_t page = call.load<uint16_t>(entry), usage = call.load<uint16_t>(entry + 2);
+			const uint32_t flags = call.load<uint32_t>(entry + 4);
+			const uint64_t target = call.load_pointer(entry + 8);
+			if (target && !objects.window(target)) {
+				call.fail(1400);
+				return;
+			}
+			if (page != 1 || usage != 2)
+				continue;
+			if (flags & 1) {
+				raw_mouse = {false, false, raw_mouse.relative};
+				continue;
+			}
+			raw_mouse.registered = true;
+			raw_mouse.no_legacy = (flags & 0x30) == 0x30;
+			raw_mouse.target = target;
+		}
+		call.ret(1);
+	});
+	// RAWINPUT: the header (type, size, device, wParam) and RAWMOUSE (flags, button flags and data, raw buttons, last X and Y, extra).
+	registry.add("GetRawInputData", 5, [this](ApiCall &call) {
+		const size_t width = call.pointer_width(), header = width == 4 ? 16 : 24, total = header + 24;
+		const uint32_t command = call.u32(1);
+		const auto found = raw_reports.find(call[0]);
+		if ((command != 0x10000003U && command != 0x10000005U) || call.u32(4) != header || !call[3] || found == raw_reports.end()) {
+			call.fail(found == raw_reports.end() ? 6 : 87, UINT32_MAX);
+			return;
+		}
+		const size_t size = command == 0x10000005U ? header : total;
+		if (!call[2]) {
+			call.store<uint32_t>(call[3], uint32_t(size));
+			call.ret(0);
+			return;
+		}
+		if (call.load<uint32_t>(call[3]) < size) {
+			call.store<uint32_t>(call[3], uint32_t(size));
+			call.fail(122, UINT32_MAX);
+			return;
+		}
+		std::vector<uint8_t> bytes(size);
+		const auto put = [&](size_t at, uint64_t value, size_t length) { std::memcpy(bytes.data() + at, &value, length); };
+		const auto &report = found->second;
+		put(0, 0, 4);
+		put(4, total, 4);
+		put(8, 1, width);
+		if (size == total) {
+			put(header, 0, 2);
+			put(header + 4, uint16_t(report[2]), 2);
+			put(header + 6, uint16_t(int16_t(report[3])), 2);
+			put(header + 12, uint32_t(report[0]), 4);
+			put(header + 16, uint32_t(report[1]), 4);
+		}
+		call.write(call[2], bytes);
+		call.ret(size);
+	});
 	registry.add("SetCursorPos", 2, [this](ApiCall &call) {
 		cursor_x = call.i32(0);
 		cursor_y = call.i32(1);
+		update_warp_lock(true);
 		call.ret(1);
 	});
 	registry.add("ShowCursor", 1, [this](ApiCall &call) {
 		cursor_count += call.u32(0) ? 1 : -1;
+		update_warp_lock(false);
 		call.ret(uint32_t(cursor_count));
 	});
 	registry.add("SetCursor", 1, [this](ApiCall &call) {
 		const auto previous = current_cursor;
 		current_cursor = call[0];
+		update_warp_lock(false);
 		call.ret(previous);
 	});
 	registry.add("DestroyCursor", 1, [](ApiCall &call) { call.ret(1); });

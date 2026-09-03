@@ -1,0 +1,152 @@
+/* The entry points of the older msvcrt.dll that programs built against it import: startup, the stream table, formatted output to
+ * a stream, signals and the x64 language handler of structured exceptions. The runtime also serves this component as msvcrt.dll to
+ * 64-bit programs, a C runtime of its own as it is on Windows. Included by ucrtbase.c. */
+
+/* The public headers name these through accessor macros; the variables themselves are what msvcrt exports. */
+#undef _fmode
+#undef _commode
+CRT int _fmode;
+CRT int _commode;
+CRT char **__initenv;
+CRT wchar_t **__winitenv;
+
+/* The arguments and environment a msvcrt program's startup code asks for before it calls main. */
+CRT int __getmainargs(int *count, char ***vector, char ***environment_out, int wildcard, void *startup)
+{
+	if (!argument_vector)
+		_configure_narrow_argv(1);
+	if (!environment)
+		_initialize_narrow_environment();
+	*count = argument_count;
+	*vector = argument_vector;
+	*environment_out = environment;
+	__initenv = environment;
+	return 0;
+}
+
+CRT void __set_app_type(int type) {}
+
+/* The standard streams as msvcrt's FILE array: stdin, stdout and stderr follow each other at its 48-byte stride. */
+CRT void *__iob_func(void)
+{
+	int index;
+	for (index = 0; index < 3; ++index)
+		__acrt_iob_func((unsigned)index);
+	return streams;
+}
+
+/* A runtime error the startup code reports: the program ends with the code msvcrt gives it. */
+CRT void _amsg_exit(int code) { _exit(255); }
+
+CRT int vfprintf(void *stream, const char *text, va_list arguments) { return __stdio_common_vfprintf(0, stream, text, NULL, arguments); }
+CRT int vprintf(const char *text, va_list arguments) { return vfprintf(__acrt_iob_func(1), text, arguments); }
+
+CRT int fprintf(void *stream, const char *text, ...)
+{
+	va_list arguments;
+	int result;
+	va_start(arguments, text);
+	result = vfprintf(stream, text, arguments);
+	va_end(arguments);
+	return result;
+}
+
+CRT int printf(const char *text, ...)
+{
+	va_list arguments;
+	int result;
+	va_start(arguments, text);
+	result = vfprintf(__acrt_iob_func(1), text, arguments);
+	va_end(arguments);
+	return result;
+}
+
+/* Signal handlers: kept per signal, called by raise. SIG_DFL (0) ends the program as an abort does, SIG_IGN (1) does nothing. */
+typedef void (__cdecl *signal_handler)(int);
+static signal_handler signal_handlers[23];
+
+CRT signal_handler signal(int number, signal_handler handler)
+{
+	signal_handler previous;
+	if (number < 0 || number >= 23) {
+		*_errno() = 22;
+		return (signal_handler)(ULONG_PTR)-1;
+	}
+	previous = signal_handlers[number];
+	signal_handlers[number] = handler;
+	return previous;
+}
+
+CRT int raise(int number)
+{
+	signal_handler handler;
+	if (number < 0 || number >= 23)
+		return -1;
+	handler = signal_handlers[number];
+	if (handler == (signal_handler)(ULONG_PTR)1)
+		return 0;
+	if (!handler)
+		_exit(3);
+	signal_handlers[number] = NULL;
+	handler(number);
+	return 0;
+}
+
+#ifdef __x86_64__
+/* msvcrt's _setjmp takes the frame to unwind to as the CRT's own one does. */
+__asm__(
+	".section .drectve\n"
+	".ascii \" -export:_setjmp\"\n"
+	".text\n"
+	".globl _setjmp\n"
+	"_setjmp:\n"
+	"	jmp __intrinsic_setjmp\n");
+
+/* The language handler of C structured exceptions: the scope table lists the guarded ranges with their filter, their handler
+ * and, for __finally blocks, no jump target. A dispatch asks the filters; an unwind runs the termination handlers it leaves. */
+typedef struct {
+	DWORD begin, end, handler, target;
+} ScopeRecord;
+
+typedef struct {
+	DWORD count;
+	ScopeRecord records[1];
+} ScopeTable;
+
+CRT EXCEPTION_DISPOSITION __C_specific_handler(EXCEPTION_RECORD *record, void *frame, CONTEXT *context, DISPATCHER_CONTEXT *dispatch)
+{
+	const ScopeTable *table = dispatch->HandlerData;
+	const ULONG64 base = dispatch->ImageBase, pc = dispatch->ControlPc - base;
+	DWORD index;
+	if (record->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) {
+		for (index = dispatch->ScopeIndex; index < table->count; ++index) {
+			const ScopeRecord *scope = &table->records[index];
+			if (pc < scope->begin || pc >= scope->end)
+				continue;
+			if ((record->ExceptionFlags & EXCEPTION_TARGET_UNWIND) && scope->target && scope->target == dispatch->TargetIp - base)
+				break;
+			if (!scope->target) {
+				dispatch->ScopeIndex = index + 1;
+				((void (*)(BOOLEAN, void *))(base + scope->handler))(TRUE, frame);
+			}
+		}
+		return ExceptionContinueSearch;
+	}
+	for (index = dispatch->ScopeIndex; index < table->count; ++index) {
+		const ScopeRecord *scope = &table->records[index];
+		LONG decision = EXCEPTION_EXECUTE_HANDLER;
+		if (pc < scope->begin || pc >= scope->end || !scope->target)
+			continue;
+		if (scope->handler != 1) {
+			EXCEPTION_POINTERS pointers = {record, context};
+			decision = ((LONG (*)(EXCEPTION_POINTERS *, void *))(base + scope->handler))(&pointers, frame);
+		}
+		if (decision < 0)
+			return ExceptionContinueExecution;
+		if (decision > 0)
+			RtlUnwindEx(frame, (void *)(base + scope->target), record, (void *)(ULONG_PTR)record->ExceptionCode, dispatch->ContextRecord,
+				dispatch->HistoryTable);
+	}
+	return ExceptionContinueSearch;
+}
+#endif

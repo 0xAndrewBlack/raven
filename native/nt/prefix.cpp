@@ -1,6 +1,9 @@
 #include "prefix.h"
 
+#include <cctype>
 #include <cstdlib>
+#include <system_error>
+#include <vector>
 #include <stdexcept>
 #include <string>
 
@@ -14,6 +17,23 @@ NativePrefix::NativePrefix(std::filesystem::path root) : directory(std::move(roo
 	for (const char *folder : {"windows", "windows/system32", "Program Files", "Program Files (x86)", "ProgramData/Microsoft/Windows/Start Menu/Programs",
 			"Users/Public/Desktop", "Users/Public/Documents"})
 		std::filesystem::create_directories(directory / "drive_c" / folder);
+	// The Fonts folder holds the installed fonts, as on Windows: links to the host's font files, made once when the folder is new.
+	const auto fonts = directory / "drive_c" / "windows" / "Fonts";
+	std::error_code error;
+	if (std::filesystem::create_directory(fonts, error)) {
+		std::vector<std::filesystem::path> roots{"/usr/share/fonts", "/usr/local/share/fonts"};
+		if (const char *home = std::getenv("HOME"); home && *home)
+			roots.push_back(std::filesystem::path(home) / ".local" / "share" / "fonts");
+		for (const auto &root : roots)
+			for (std::filesystem::recursive_directory_iterator walk(root, std::filesystem::directory_options::follow_directory_symlink, error), end;
+					walk != end; walk.increment(error)) {
+				auto extension = walk->path().extension().string();
+				for (auto &character : extension)
+					character = char(std::tolower(static_cast<unsigned char>(character)));
+				if ((extension == ".ttf" || extension == ".otf" || extension == ".ttc") && walk->is_regular_file(error))
+					std::filesystem::create_symlink(walk->path(), fonts / walk->path().filename(), error);
+			}
+	}
 }
 
 NativePrefix NativePrefix::from_environment()

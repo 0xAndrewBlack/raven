@@ -227,6 +227,20 @@ private:
 	// Window messages registered by name (RegisterWindowMessage); ids start at 0xc000 like atoms.
 	std::map<std::u16string,uint32_t> registered_messages;
 	int32_t cursor_count=0;
+	// Raw mouse input (RegisterRawInputDevices): the window that receives WM_INPUT, whether legacy mouse messages are left out, and the
+	// reports waiting to be read by GetRawInputData under their handle values. Movement is the change of the host pointer position.
+	struct RawMouse { bool registered=false,no_legacy=false,relative=false; uint64_t target=0; bool have_position=false; int64_t x=0,y=0; };
+	RawMouse raw_mouse;
+	// ClipCursor: the rectangle on the screen and the window whose host surface keeps the pointer in it.
+	std::optional<std::array<int32_t,4>> clip_rect;
+	uint64_t clip_window=0;
+	// A program that hides the cursor and keeps putting it back inside its window steers by mouse movement alone; the host cannot move
+	// its pointer, so the pointer is held on that window until the cursor shows again.
+	uint64_t warp_lock_window=0;
+	void update_warp_lock(bool warped);
+	std::map<uint64_t,std::array<int32_t,6>> raw_reports;
+	uint64_t next_raw_report=0x1000;
+	void raw_mouse_input(int64_t dx,int64_t dy,uint32_t button_flags,int16_t wheel);
 	uint64_t current_cursor=0;
 	// Mouse capture and timers belong to the initial guest thread's input state.
 	uint64_t capture=0;

@@ -65,7 +65,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     if(NOT NONCLIENT_SOURCE_HASH STREQUAL "dab51515f54adc39af43f088a02afe45a719476408bee3c7bef6113c25b180fc")
         message(FATAL_ERROR "Pinned ReactOS nonclient functions differ")
     endif()
-    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/ansi_api.cpp nt/shlwapi_api.cpp nt/registry_api.cpp nt/shell_api.cpp nt/platform_api.cpp nt/hash.cpp nt/version_api.cpp nt/system_api.cpp nt/process_api.cpp nt/security_api.cpp nt/child_api.cpp nt/child_process.cpp nt/winsock_api.cpp nt/host_api.cpp nt/pipe.cpp nt/job_api.cpp nt/inherit.cpp nt/handle_channel.cpp nt/elevation.cpp nt/service_api.cpp nt/crypt32_api.cpp nt/process_info_api.cpp nt/font_service.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp desktop/user_api.cpp desktop/window_manager.cpp desktop/window_ansi.cpp desktop/menu_manager.cpp desktop/shared_pixels.cpp desktop/foreign_surface.cpp desktop/user_ext.cpp desktop/scrollbar.cpp desktop/window_long.cpp desktop/child_frame.cpp desktop/gdi.cpp desktop/gdi_api.cpp desktop/gdi_text.cpp)
+    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/ansi_api.cpp nt/shlwapi_api.cpp nt/registry_api.cpp nt/shell_api.cpp nt/platform_api.cpp nt/hash.cpp nt/version_api.cpp nt/system_api.cpp nt/process_api.cpp nt/security_api.cpp nt/child_api.cpp nt/child_process.cpp nt/winsock_api.cpp nt/host_api.cpp nt/pipe.cpp nt/job_api.cpp nt/wave_api.cpp nt/inherit.cpp nt/handle_channel.cpp nt/elevation.cpp nt/service_api.cpp nt/crypt32_api.cpp nt/process_info_api.cpp nt/font_service.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp desktop/user_api.cpp desktop/window_manager.cpp desktop/window_ansi.cpp desktop/menu_manager.cpp desktop/shared_pixels.cpp desktop/foreign_surface.cpp desktop/user_ext.cpp desktop/scrollbar.cpp desktop/window_long.cpp desktop/child_frame.cpp desktop/gdi.cpp desktop/gdi_api.cpp desktop/gdi_text.cpp)
     target_include_directories(raven_cpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     set(NLS_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-nls)
     file(SHA256 ${NLS_SOURCE}/txt2nls.cpp NLS_TOOL_HASH)
@@ -241,8 +241,22 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
                 COMMAND ${WAYLAND_SCANNER} private-code ${XDG_PROTOCOL} ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
                 DEPENDS ${XDG_PROTOCOL} VERBATIM)
+            # The pointer protocols games need: relative motion for raw mouse input, and confinement or locking for ClipCursor.
+            set(RAVEN_POINTER_PROTOCOL_SOURCES)
+            foreach(protocol relative-pointer pointer-constraints)
+                set(PROTOCOL_XML ${WAYLAND_PROTOCOLS_DATA}/unstable/${protocol}/${protocol}-unstable-v1.xml)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-client-protocol.h
+                    COMMAND ${WAYLAND_SCANNER} client-header ${PROTOCOL_XML} ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-client-protocol.h
+                    DEPENDS ${PROTOCOL_XML} VERBATIM)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-protocol.c
+                    COMMAND ${WAYLAND_SCANNER} private-code ${PROTOCOL_XML} ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-protocol.c
+                    DEPENDS ${PROTOCOL_XML} VERBATIM)
+                list(APPEND RAVEN_POINTER_PROTOCOL_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-client-protocol.h
+                    ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-protocol.c)
+            endforeach()
             add_library(raven_wayland STATIC desktop/wayland.cpp
-                ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c)
+                ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
+                ${RAVEN_POINTER_PROTOCOL_SOURCES})
             target_include_directories(raven_wayland PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
             target_link_libraries(raven_wayland PUBLIC PkgConfig::WAYLAND_CLIENT)
             target_compile_options(raven_wayland PRIVATE -Wall -Wextra -Wpedantic -Wconversion)

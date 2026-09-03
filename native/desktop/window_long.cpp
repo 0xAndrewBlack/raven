@@ -241,18 +241,69 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 		call.write(call[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(adjusted), 16));
 		call.ret(1);
 	});
-	// The cursor is never confined here: the clip rectangle is the whole screen, and a confinement request is accepted as one.
+	// The clip rectangle: the whole screen unless the program confined the cursor.
 	registry.add("GetClipCursor", 1, [this](ApiCall &call) {
 		if (!call[0]) {
 			call.fail(87);
 			return;
 		}
 		const auto &screen = objects.nonclient_metrics();
-		const int32_t rect[4] = {0, 0, int32_t(screen.screen_x), int32_t(screen.screen_y)};
-		call.write(call[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(rect), sizeof(rect)));
+		const std::array<int32_t, 4> whole{0, 0, int32_t(screen.screen_x), int32_t(screen.screen_y)};
+		const auto rect = clip_rect.value_or(whole);
+		call.write(call[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(rect.data()), 16));
 		call.ret(1);
 	});
-	registry.add("ClipCursor", 1, [](ApiCall &call) { call.ret(1); });
+	// Confining the cursor keeps the host pointer in the part of the program's window the rectangle covers (holding it still when the
+	// rectangle is a point); the whole screen or no rectangle lets it go.
+	registry.add("ClipCursor", 1, [this](ApiCall &call) {
+		const auto &screen = objects.nonclient_metrics();
+		std::optional<std::array<int32_t, 4>> rect;
+		if (call[0]) {
+			const auto bytes = call.read(call[0], 16);
+			std::array<int32_t, 4> value{};
+			std::memcpy(value.data(), bytes.data(), 16);
+			value[0] = std::max(value[0], 0);
+			value[1] = std::max(value[1], 0);
+			value[2] = std::min(value[2], int32_t(screen.screen_x));
+			value[3] = std::min(value[3], int32_t(screen.screen_y));
+			if (value[2] < value[0] || value[3] < value[1]) {
+				call.fail(87);
+				return;
+			}
+			if (value[0] > 0 || value[1] > 0 || value[2] < int32_t(screen.screen_x) || value[3] < int32_t(screen.screen_y))
+				rect = value;
+		}
+		uint64_t window = 0;
+		if (rect) {
+			// The window that holds the rectangle: the active one when it does, otherwise the first visible top-level window that does.
+			const int32_t cx = ((*rect)[0] + (*rect)[2]) / 2, cy = ((*rect)[1] + (*rect)[3]) / 2;
+			const auto holds = [&](uint64_t handle) {
+				const auto *candidate = objects.window(handle);
+				return candidate && !candidate->parent && objects.window_visible(handle) && cx >= candidate->outer.left &&
+					cx < candidate->outer.right && cy >= candidate->outer.top && cy < candidate->outer.bottom;
+			};
+			if (active && holds(active))
+				window = active;
+			else
+				for (const auto handle : objects.window_handles())
+					if (holds(handle)) {
+						window = handle;
+						break;
+					}
+		}
+		clip_rect = rect;
+		if (presentation.confine) {
+			if (clip_window && clip_window != window)
+				presentation.confine(clip_window, std::nullopt);
+			clip_window = window;
+			if (window) {
+				const auto *target = objects.window(window);
+				presentation.confine(window, std::array<int32_t, 4>{(*rect)[0] - target->outer.left, (*rect)[1] - target->outer.top,
+					(*rect)[2] - target->outer.left, (*rect)[3] - target->outer.top});
+			}
+		}
+		call.ret(1);
+	});
 	// Touch input reaches windows as mouse input here; registering for it changes nothing and succeeds.
 	registry.add("RegisterTouchWindow", 2, [this](ApiCall &call) {
 		if (!objects.window(call[0])) {

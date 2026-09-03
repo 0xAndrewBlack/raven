@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -14,7 +15,9 @@ namespace raven {
 
 // pointer_wheel: message carries the signed wheel delta in 1/120 notches (wparam 1 for the horizontal wheel), x and y the pointer position.
 // popup_done: the compositor dismissed a popup (for example by a click outside it).
-enum class DesktopEventKind { message, pointer_motion, pointer_button, keymap, modifiers, keyboard_focus, key, popup_done, resize, pointer_wheel };
+// pointer_relative: x and y carry the movement of the mouse itself, unaccelerated and not stopped by the screen edges.
+enum class DesktopEventKind { message, pointer_motion, pointer_button, keymap, modifiers, keyboard_focus, key, popup_done, resize, pointer_wheel,
+	pointer_relative };
 
 struct DesktopEvent {
 	uint64_t window;
@@ -48,6 +51,9 @@ struct DesktopPresentation {
 	// when there is no such window. Pointer and keyboard input keep going to the window itself.
 	std::function<std::optional<HostSurface>(uint64_t handle,int32_t x,int32_t y,uint32_t width,uint32_t height)> host_surface;
 	std::function<void(uint64_t handle)> release_host_surface;
+	// Keeps the pointer inside the rectangle (left, top, right, bottom) of the window's frame, or holds it still when the rectangle is a
+	// point; no rectangle lets it go.
+	std::function<void(uint64_t handle,std::optional<std::array<int32_t,4>> rectangle)> confine;
 };
 
 }

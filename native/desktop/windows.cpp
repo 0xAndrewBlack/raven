@@ -270,6 +270,21 @@ void NativeWindows::import_foreign_frames()
 	}
 }
 
+void NativeWindows::update_warp_lock(bool warped)
+{
+	const bool hidden=cursor_count<0;
+	if (warp_lock_window && (!hidden || !objects.window(warp_lock_window) || warp_lock_window!=active)) {
+		if (presentation.confine && clip_window!=warp_lock_window) presentation.confine(warp_lock_window,std::nullopt);
+		warp_lock_window=0;
+	}
+	if (!warped || !hidden || warp_lock_window || !active || !presentation.confine || clip_window==active) return;
+	const auto *window=objects.window(active);
+	if (!window || cursor_x<window->outer.left || cursor_x>=window->outer.right || cursor_y<window->outer.top || cursor_y>=window->outer.bottom) return;
+	const int32_t x=cursor_x-window->outer.left,y=cursor_y-window->outer.top;
+	presentation.confine(active,std::array<int32_t,4>{x,y,x+1,y+1});
+	warp_lock_window=active;
+}
+
 void NativeWindows::flush_dirty()
 {
 	settle_focus_leave(false);
@@ -371,6 +386,18 @@ static uint32_t message_time()
 	return uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+void NativeWindows::raw_mouse_input(int64_t dx,int64_t dy,uint32_t button_flags,int16_t wheel)
+{
+	const auto target=raw_mouse.target && objects.window(raw_mouse.target) ? raw_mouse.target : focus;
+	if (!target || !objects.window(target) || messages.size()>=10000) return;
+	// Reports nobody read are dropped oldest first, as the system discards raw input a program leaves in its queue.
+	while (raw_reports.size()>=1024) raw_reports.erase(raw_reports.begin());
+	const auto handle=next_raw_report++;
+	raw_reports[handle]={int32_t(std::clamp<int64_t>(dx,INT32_MIN,INT32_MAX)),int32_t(std::clamp<int64_t>(dy,INT32_MIN,INT32_MAX)),
+		int32_t(button_flags),int32_t(wheel),0,0};
+	queue({target,0,handle,0xffU,message_time(),cursor_x,cursor_y});
+}
+
 void NativeWindows::post(uint64_t window,uint32_t message,uint64_t wparam,uint64_t lparam)
 {
 	if (window==0xffff) throw uint32_t(120);
@@ -444,7 +471,9 @@ void NativeWindows::settle_focus_leave(bool now)
 
 void NativeWindows::receive(const DesktopEvent &event)
 {
-	if (event.kind!=DesktopEventKind::keyboard_focus) settle_focus_leave(event.kind==DesktopEventKind::key);
+	// A key means one of the program's windows still has the keyboard, so a pending leave did not happen after all.
+	if (event.kind==DesktopEventKind::key) focus_leaving=false;
+	else if (event.kind!=DesktopEventKind::keyboard_focus) settle_focus_leave(false);
 	if (menu_event(event)) return;
 	if (event.kind==DesktopEventKind::message) { post(event.window,event.message,event.wparam,event.lparam); return; }
 	if (event.kind==DesktopEventKind::keymap) {
@@ -479,7 +508,13 @@ void NativeWindows::receive(const DesktopEvent &event)
 			throw std::runtime_error("keyboard focus requires its visible guest window");
 		// The host can give the focus to a window the program hides or destroys before the event is read; there is nothing to focus then.
 		if (event.window && (!objects.window(event.window) || !objects.window(event.window)->visible)) {
-			settle_focus_leave(true);
+			// A popup gone before the compositor focused it does not take the focus either: the program's focus stays.
+			if (focus && objects.window(focus) && objects.window_visible(focus)) {
+				focus_leaving=false;
+				key_down=initial; key_translation.reset();
+			} else {
+				settle_focus_leave(true);
+			}
 			return;
 		}
 		if (!event.window && event.held_keys.empty() && focus) {
@@ -506,9 +541,11 @@ void NativeWindows::receive(const DesktopEvent &event)
 		return;
 	}
 	if (event.kind==DesktopEventKind::key) {
-		// Keys go to the focus window whichever of the program's host windows the compositor reports them on; a key event for a window
-		// that has since closed, or with no focus left (a dialog ended by the previous key), goes nowhere.
-		if (!event.window || !objects.window(event.window) || !focus || !objects.window(focus) || !objects.window_visible(focus)) {
+		// Keys go to the focus window whichever of the program's host windows the compositor reports them on. The compositor sends keys
+		// only to the program that has the keyboard, so a key that comes without a window (the keyboard appeared after the compositor
+		// focused the window and no enter followed) is the program's too. With no focus left (a dialog ended by the previous key), the
+		// key goes nowhere.
+		if (!focus || !objects.window(focus) || !objects.window_visible(focus)) {
 			if (event.message<key_down.size()) key_down[event.message]=event.wparam!=0;
 			return;
 		}
@@ -542,6 +579,12 @@ void NativeWindows::receive(const DesktopEvent &event)
 		keep_host_window=false;
 		return;
 	}
+	if (event.kind==DesktopEventKind::pointer_relative) {
+		// The mouse's own movement: once the host reports it, raw input uses it rather than the change of the pointer position.
+		raw_mouse.relative=true;
+		if (raw_mouse.registered) raw_mouse_input(event.x,event.y,0,0);
+		return;
+	}
 	if (event.kind==DesktopEventKind::pointer_wheel) {
 		// The wheel goes to the focus window with the screen position of the pointer.
 		const auto *source=objects.window(event.window);
@@ -549,6 +592,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 		const auto x=int64_t(source->outer.left)+event.x,y=int64_t(source->outer.top)+event.y;
 		if (x<INT16_MIN || x>INT16_MAX || y<INT16_MIN || y>INT16_MAX) return;
 		const auto delta=uint64_t(uint16_t(int16_t(int32_t(event.message))));
+		if (raw_mouse.registered) raw_mouse_input(0,0,event.wparam ? 0x800 : 0x400,int16_t(int32_t(event.message)));
 		queue({focus,(delta<<16)|mouse_buttons|keyboard_map.mouse_modifiers(),uint16_t(x)|(uint64_t(uint16_t(y))<<16),event.wparam ? 0x20eU : 0x20aU,message_time(),int32_t(x),int32_t(y)});
 		return;
 	}
@@ -571,7 +615,19 @@ void NativeWindows::receive(const DesktopEvent &event)
 	const auto x=int64_t(window->outer.left)+event.x,y=int64_t(window->outer.top)+event.y;
 	if (x<INT32_MIN || x>INT32_MAX || y<INT32_MIN || y>INT32_MAX)
 		throw std::runtime_error("guest cursor coordinates overflow");
+	if (raw_mouse.registered) {
+		// The raw report carries the movement of the host pointer and the buttons that changed: down and up flags for left, right, middle.
+		const int64_t dx=raw_mouse.have_position && !raw_mouse.relative ? x-raw_mouse.x : 0,dy=raw_mouse.have_position && !raw_mouse.relative ? y-raw_mouse.y : 0;
+		raw_mouse.x=x; raw_mouse.y=y; raw_mouse.have_position=true;
+		uint32_t button_flags=0;
+		const uint32_t changed=buttons^mouse_buttons;
+		if (changed & 1) button_flags|=(buttons & 1) ? 0x1 : 0x2;
+		if (changed & 2) button_flags|=(buttons & 2) ? 0x4 : 0x8;
+		if (changed & 16) button_flags|=(buttons & 16) ? 0x10 : 0x20;
+		if (dx || dy || button_flags) raw_mouse_input(dx,dy,button_flags,0);
+	}
 	mouse_buttons=buttons; cursor_x=int32_t(x); cursor_y=int32_t(y);
+	if (raw_mouse.registered && raw_mouse.no_legacy) return;
 	if (scroll_drag.window && (message==0x200 || message==0x202 || message==0x201) && scroll_motion(message,int32_t(x),int32_t(y))) return;
 	if (capture && !objects.window(capture)) capture=0;
 	const auto target=capture ? capture : pointer_child(event.window,int32_t(x),int32_t(y));window=objects.window(target);
@@ -1098,13 +1154,17 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 		process.unmap_memory(scratch); scratch=0;
 		if (!objects.window(handle)) return 0;
 		if (created==UINT64_MAX) { reject_tree(handle);return 0; }
-		const auto *window=objects.window(handle);
-		send(handle,5,0,uint16_t(window->width) | (uint64_t(uint16_t(window->height))<<16));
-		window=objects.window(handle);
-		if (!window) throw uint32_t(1400);
-		send(handle,3,0,uint16_t(child ? int64_t(window->x)-objects.window(args[8])->x : window->x) |
-			(uint64_t(uint16_t(child ? int64_t(window->y)-objects.window(args[8])->y : window->y))<<16));
-		if (!objects.window(handle)) throw uint32_t(1400);
+		auto *window=objects.window(handle);
+		if (!(window->style & 0xc0000000U)) {
+			window->need_size=true;
+		} else {
+			send(handle,5,0,uint16_t(window->width) | (uint64_t(uint16_t(window->height))<<16));
+			window=objects.window(handle);
+			if (!window) throw uint32_t(1400);
+			send(handle,3,0,uint16_t(child ? int64_t(window->x)-objects.window(args[8])->x : window->x) |
+				(uint64_t(uint16_t(child ? int64_t(window->y)-objects.window(args[8])->y : window->y))<<16));
+			if (!objects.window(handle)) throw uint32_t(1400);
+		}
 		if (child) parent_notify(handle,1);
 		if (!objects.window(handle)) return 0;
 		if (const auto *created=objects.window(handle)) publish_window(handle,uint32_t(std::max(created->width,0)),uint32_t(std::max(created->height,0)));

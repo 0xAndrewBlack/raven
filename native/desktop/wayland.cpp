@@ -1,5 +1,7 @@
 #include "wayland.h"
 #include "xdg-shell-client-protocol.h"
+#include "relative-pointer-unstable-v1-client-protocol.h"
+#include "pointer-constraints-unstable-v1-client-protocol.h"
 
 #include <wayland-client.h>
 #include <algorithm>
@@ -65,6 +67,14 @@ struct WaylandPresentation::State {
 	wl_seat *seat=nullptr;
 	wl_pointer *pointer=nullptr;
 	wl_keyboard *keyboard=nullptr;
+	// Relative motion of the mouse and the constraint that keeps the pointer in (or holds it on) one window.
+	zwp_relative_pointer_manager_v1 *relative_manager=nullptr;
+	zwp_relative_pointer_v1 *relative=nullptr;
+	zwp_pointer_constraints_v1 *constraints=nullptr;
+	zwp_confined_pointer_v1 *confined=nullptr;
+	zwp_locked_pointer_v1 *locked=nullptr;
+	int64_t relative_x=0,relative_y=0;
+	uint64_t constrained_window=0;
 	uint64_t pointer_window=0;
 	uint64_t keyboard_window=0;
 	int32_t pointer_x=0,pointer_y=0;
@@ -84,6 +94,10 @@ struct WaylandPresentation::State {
 	std::map<uint64_t,std::unique_ptr<Surface>> surfaces;
 
 	~State() {
+		release_constraint();
+		if (relative) zwp_relative_pointer_v1_destroy(relative);
+		if (relative_manager) zwp_relative_pointer_manager_v1_destroy(relative_manager);
+		if (constraints) zwp_pointer_constraints_v1_destroy(constraints);
 		surfaces.clear();
 		if (data_source) wl_data_source_destroy(data_source);
 		if (selection_offer) wl_data_offer_destroy(selection_offer);
@@ -101,6 +115,47 @@ struct WaylandPresentation::State {
 	}
 
 	int64_t wheel_remainder=0,horizontal_remainder=0;
+
+	void release_constraint() {
+		if (confined) { zwp_confined_pointer_v1_destroy(confined); confined=nullptr; }
+		if (locked) { zwp_locked_pointer_v1_destroy(locked); locked=nullptr; }
+		constrained_window=0;
+	}
+
+	void confine(uint64_t handle,std::optional<std::array<int32_t,4>> rectangle) {
+		release_constraint();
+		const auto found=surfaces.find(handle);
+		if (rectangle && constraints && pointer && found!=surfaces.end() && !found->second->is_popup) {
+			const auto &value=*rectangle;
+			if (value[2]-value[0]<=2 && value[3]-value[1]<=2) {
+				locked=zwp_pointer_constraints_v1_lock_pointer(constraints,found->second->proxy,pointer,nullptr,ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+			} else {
+				wl_region *region=wl_compositor_create_region(compositor);
+				wl_region_add(region,value[0],value[1],std::max(value[2]-value[0],1),std::max(value[3]-value[1],1));
+				confined=zwp_pointer_constraints_v1_confine_pointer(constraints,found->second->proxy,pointer,region,ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+				wl_region_destroy(region);
+			}
+			constrained_window=handle;
+		}
+		if (display) wl_display_flush(display);
+	}
+
+	void watch_relative_motion() {
+		if (relative || !relative_manager || !pointer) return;
+		relative=zwp_relative_pointer_manager_v1_get_relative_pointer(relative_manager,pointer);
+		static const zwp_relative_pointer_v1_listener listener{
+			[](void *data,zwp_relative_pointer_v1 *,uint32_t,uint32_t,wl_fixed_t,wl_fixed_t,wl_fixed_t dx,wl_fixed_t dy) {
+				// The unaccelerated movement in whole units; the fractions add up across reports.
+				auto &state=*static_cast<State *>(data);
+				state.relative_x+=dx; state.relative_y+=dy;
+				const auto x=int32_t(state.relative_x/256),y=int32_t(state.relative_y/256);
+				state.relative_x-=int64_t(x)*256; state.relative_y-=int64_t(y)*256;
+				if ((!x && !y) || state.pending.size()>=10000) return;
+				try { state.pending.push_back({state.pointer_window,0,0,0,DesktopEventKind::pointer_relative,x,y}); }
+				catch (...) { state.input_failed=true; }
+			}};
+		zwp_relative_pointer_v1_add_listener(relative,&listener,this);
+	}
 
 	void pointer_event(DesktopEventKind kind,uint32_t button=0,uint32_t pressed=0) {
 		if (!pointer_window && kind==DesktopEventKind::pointer_motion) return;
@@ -167,7 +222,10 @@ struct WaylandPresentation::State {
 				return value;
 			}();
 			wl_pointer_add_listener(state.pointer,&listener,&state);
+			state.watch_relative_motion();
 		} else if (!(flags & WL_SEAT_CAPABILITY_POINTER) && state.pointer) {
+			state.release_constraint();
+			if (state.relative) { zwp_relative_pointer_v1_destroy(state.relative); state.relative=nullptr; }
 			wl_pointer_destroy(state.pointer); state.pointer=nullptr; state.pointer_window=0;
 		}
 		if ((flags & WL_SEAT_CAPABILITY_KEYBOARD) && !state.keyboard) {
@@ -184,6 +242,7 @@ struct WaylandPresentation::State {
 					}
 					state.keyboard_window=0;
 					for (const auto &[handle,window] : state.surfaces) if (window->proxy==surface) state.keyboard_window=handle;
+					if (std::getenv("RAVEN_TRACE_KEYS")) fprintf(stderr,"keyboard enter %p -> %llx\n",(void *)surface,(unsigned long long)state.keyboard_window);
 					if (!state.keyboard_window) { state.input_error="keyboard entered an unknown native surface"; state.input_failed=true; return; }
 					DesktopEvent event{state.keyboard_window,0,0,0,DesktopEventKind::keyboard_focus};
 					try {
@@ -192,8 +251,9 @@ struct WaylandPresentation::State {
 					} catch (...) { state.input_error="cannot retain native keyboard focus keys"; state.input_failed=true; return; }
 					state.keyboard_event(std::move(event));
 				};
-				value.leave=[](void *data,wl_keyboard *,uint32_t,wl_surface *) {
+				value.leave=[](void *data,wl_keyboard *,uint32_t,wl_surface *surface) {
 					auto &state=*static_cast<State *>(data); state.keyboard_window=0;
+					if (std::getenv("RAVEN_TRACE_KEYS")) fprintf(stderr,"keyboard leave %p\n",(void *)surface);
 					state.keyboard_event({0,0,0,0,DesktopEventKind::keyboard_focus});
 				};
 				value.key=[](void *data,wl_keyboard *,uint32_t serial,uint32_t,uint32_t key,uint32_t pressed) {
@@ -314,6 +374,12 @@ struct WaylandPresentation::State {
 			state.data_manager=static_cast<wl_data_device_manager *>(wl_registry_bind(registry,name,&wl_data_device_manager_interface,std::min(version,3U)));
 			state.make_data_device();
 		}
+		else if (!std::strcmp(interface,"zwp_relative_pointer_manager_v1")) {
+			state.relative_manager=static_cast<zwp_relative_pointer_manager_v1 *>(wl_registry_bind(registry,name,&zwp_relative_pointer_manager_v1_interface,1));
+			state.watch_relative_motion();
+		}
+		else if (!std::strcmp(interface,"zwp_pointer_constraints_v1"))
+			state.constraints=static_cast<zwp_pointer_constraints_v1 *>(wl_registry_bind(registry,name,&zwp_pointer_constraints_v1_interface,1));
 		else if (!std::strcmp(interface,"xdg_wm_base")) {
 			state.shell=static_cast<xdg_wm_base *>(wl_registry_bind(registry,name,&xdg_wm_base_interface,1));
 			static const xdg_wm_base_listener listener{[](void *,xdg_wm_base *base,uint32_t serial) { xdg_wm_base_pong(base,serial); }};
@@ -513,6 +579,7 @@ DesktopPresentation WaylandPresentation::callbacks()
 		if (state->pointer_window==handle) state->pointer_window=0;
 		if (state->keyboard_window==handle) state->keyboard_window=0;
 		std::erase_if(state->pending,[&](const DesktopEvent &event) { return event.window==handle; });
+		if (state->constrained_window==handle) state->release_constraint();
 		if (state->surfaces.erase(handle) && state->display) state->sync();
 	},
 	[this](std::chrono::milliseconds budget) {
@@ -548,7 +615,8 @@ DesktopPresentation WaylandPresentation::callbacks()
 		if (found==state->surfaces.end()) return;
 		found->second->drop_child();
 		if (state->display) wl_display_flush(state->display);
-	}};
+	},
+	[this](uint64_t handle,std::optional<std::array<int32_t,4>> rectangle) { state->confine(handle,rectangle); }};
 }
 
 }
