@@ -4,9 +4,17 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <tuple>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -36,6 +44,11 @@ public:
 	int type = SOCK_STREAM;
 	std::shared_ptr<CompletionPort> port;
 	uint64_t key = 0;
+	// WSAEventSelect: the event to set, the network events asked for, the ones that may be reported again, and the ones recorded
+	// since the program last enumerated them, with their error codes (WSANETWORKEVENTS order).
+	uint64_t select_event = 0;
+	uint32_t select_mask = 0, select_enabled = 0, select_recorded = 0;
+	std::array<int32_t, 10> select_errors{};
 };
 
 constexpr uint32_t wsaeintr = 10004, wsaebadf = 10009, wsaeacces = 10013, wsaefault = 10014, wsaeinval = 10022, wsaemfile = 10024,
@@ -44,6 +57,9 @@ constexpr uint32_t wsaeintr = 10004, wsaebadf = 10009, wsaeacces = 10013, wsaefa
 	wsaeafnosupport = 10047, wsaeaddrinuse = 10048, wsaeaddrnotavail = 10049, wsaenetdown = 10050, wsaenetunreach = 10051,
 	wsaeconnaborted = 10053, wsaeconnreset = 10054, wsaenobufs = 10055, wsaeisconn = 10056, wsaenotconn = 10057, wsaeshutdown = 10058,
 	wsaetimedout = 10060, wsaeconnrefused = 10061, wsaehostunreach = 10065, wsanotinitialised = 10093, wsahost_not_found = 11001;
+constexpr uint64_t status_pending = 0x103, overlapped_error = 0xe0000000;
+constexpr uint32_t wsa_io_incomplete = 996;
+constexpr uint32_t fd_read = 0x1, fd_write = 0x2, fd_oob = 0x4, fd_accept = 0x8, fd_connect = 0x10, fd_close = 0x20;
 
 uint32_t wsa_error(int host)
 {
@@ -119,6 +135,86 @@ void put_address(ApiCall &call, uint64_t address, uint64_t length_address, const
 
 constexpr uint32_t sol_socket_windows = 0xffff;
 
+}
+
+// One TCP endpoint as the host lists it, with the process that holds the socket when it is a process of this runtime.
+struct TcpEntry {
+	bool v6 = false;
+	std::array<uint8_t, 16> local{}, remote{};
+	uint32_t local_port = 0, remote_port = 0, state = 0, pid = 0;
+};
+
+// Linux socket states in /proc/net/tcp order and the MIB_TCP_STATE values Windows reports for them.
+static uint32_t windows_tcp_state(unsigned host)
+{
+	static constexpr uint32_t states[] = {0, 5, 3, 4, 6, 7, 11, 1, 8, 10, 2, 9};
+	return host < std::size(states) ? states[host] : 1;
+}
+
+// The sockets of the processes this user runs, by inode: the owner a TCP table names.
+static std::map<uint64_t, uint32_t> socket_owners()
+{
+	std::map<uint64_t, uint32_t> owners;
+	std::error_code error;
+	for (const auto &process : std::filesystem::directory_iterator("/proc", error)) {
+		const auto name = process.path().filename().string();
+		if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; }))
+			continue;
+		std::error_code inner;
+		for (const auto &descriptor : std::filesystem::directory_iterator(process.path() / "fd", inner)) {
+			char target[64];
+			const auto length = ::readlink(descriptor.path().c_str(), target, sizeof(target) - 1);
+			if (length <= 8)
+				continue;
+			target[length] = 0;
+			uint64_t inode = 0;
+			if (std::sscanf(target, "socket:[%lu]", &inode) == 1)
+				owners.emplace(inode, uint32_t(std::stoul(name)));
+		}
+	}
+	return owners;
+}
+
+static std::vector<TcpEntry> tcp_entries(bool v6)
+{
+	std::vector<TcpEntry> entries;
+	std::ifstream table(v6 ? "/proc/net/tcp6" : "/proc/net/tcp");
+	std::string line;
+	std::getline(table, line);
+	std::map<uint64_t, uint32_t> owners;
+	bool owners_read = false;
+	while (std::getline(table, line)) {
+		std::istringstream fields(line);
+		std::string slot, local, remote, state, queues, timer, retransmits, uid, timeout, inode;
+		if (!(fields >> slot >> local >> remote >> state >> queues >> timer >> retransmits >> uid >> timeout >> inode))
+			continue;
+		TcpEntry entry;
+		entry.v6 = v6;
+		const auto address = [&](const std::string &text, std::array<uint8_t, 16> &out, uint32_t &port) {
+			const auto colon = text.find(':');
+			const auto hex = text.substr(0, colon);
+			// The kernel prints each 32-bit word of the address in host order.
+			for (size_t word = 0; word * 8 < hex.size() && word < 4; ++word) {
+				const uint32_t value = uint32_t(std::stoul(hex.substr(word * 8, 8), nullptr, 16));
+				std::memcpy(out.data() + word * 4, &value, 4);
+			}
+			port = uint32_t(std::stoul(text.substr(colon + 1), nullptr, 16));
+		};
+		address(local, entry.local, entry.local_port);
+		address(remote, entry.remote, entry.remote_port);
+		entry.state = windows_tcp_state(unsigned(std::stoul(state, nullptr, 16)));
+		const uint64_t node = std::stoull(inode);
+		if (node) {
+			if (!owners_read) {
+				owners = socket_owners();
+				owners_read = true;
+			}
+			if (const auto found = owners.find(node); found != owners.end())
+				entry.pid = found->second;
+		}
+		entries.push_back(entry);
+	}
+	return entries;
 }
 
 void register_winsock_api(ApiRegistry &registry, KernelContext &context)
@@ -212,6 +308,12 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		const auto address = host_address(call, call[1], size_t(call.i32(2)));
+		if (std::getenv("RAVEN_TRACE_SOCKETS") && address.size() >= sizeof(sockaddr_in) && reinterpret_cast<const sockaddr *>(address.data())->sa_family == AF_INET) {
+			const auto *target = reinterpret_cast<const sockaddr_in *>(address.data());
+			char text[INET_ADDRSTRLEN] = {};
+			::inet_ntop(AF_INET, &target->sin_addr, text, sizeof(text));
+			std::fprintf(stderr, "raven: socket %llx connects to %s:%u\n", (unsigned long long)call[0], text, unsigned(ntohs(target->sin_port)));
+		}
 		if (::connect(socket->descriptor, reinterpret_cast<const sockaddr *>(address.data()), socklen_t(address.size())) == 0) {
 			call.ret(0);
 			return;
@@ -244,6 +346,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		for (;;) {
 			sockaddr_storage storage{};
 			socklen_t length = sizeof(storage);
+			socket->select_enabled |= fd_accept;
 			const int accepted = ::accept4(socket->descriptor, reinterpret_cast<sockaddr *>(&storage), &length, SOCK_NONBLOCK | SOCK_CLOEXEC);
 			if (accepted >= 0) {
 				const auto made = objects.add_object(std::make_shared<SocketObject>(accepted));
@@ -285,6 +388,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 	const auto receive = [wait_ready, host_flags](ApiCall &call, const std::shared_ptr<SocketObject> &socket, uint64_t buffer, size_t length,
 		uint32_t flags, sockaddr_storage *from, socklen_t *from_length) -> int64_t {
 		std::vector<uint8_t> bytes(std::min<size_t>(length, 1 << 20));
+		// Reading re-enables the readable notification of WSAEventSelect.
+		socket->select_enabled |= fd_read;
 		for (;;) {
 			if (from_length)
 				*from_length = sizeof(sockaddr_storage);
@@ -292,6 +397,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 				reinterpret_cast<sockaddr *>(from), from_length);
 			if (count >= 0) {
 				call.write(buffer, std::span<const uint8_t>(bytes.data(), size_t(count)));
+				if (count > 0 && std::getenv("RAVEN_TRACE_SOCKETS"))
+					std::fprintf(stderr, "raven: socket received %zd bytes: %.*s\n", count, int(std::min<ssize_t>(count, 600)), reinterpret_cast<const char *>(bytes.data()));
 				return count;
 			}
 			if (errno == EINTR)
@@ -310,6 +417,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 	const auto transmit = [wait_ready, host_flags](ApiCall &call, const std::shared_ptr<SocketObject> &socket, uint64_t buffer, size_t length,
 		uint32_t flags, const sockaddr *to, socklen_t to_length) -> int64_t {
 		const auto bytes = call.read(buffer, length);
+		if (std::getenv("RAVEN_TRACE_SOCKETS"))
+			std::fprintf(stderr, "raven: socket sends %zu bytes: %.*s\n", bytes.size(), int(std::min<size_t>(bytes.size(), 600)), reinterpret_cast<const char *>(bytes.data()));
 		size_t sent = 0;
 		while (sent < bytes.size() || bytes.empty()) {
 			const ssize_t count = ::sendto(socket->descriptor, bytes.data() + sent, bytes.size() - sent, host_flags(flags) | MSG_DONTWAIT, to, to_length);
@@ -325,7 +434,9 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 				call.set_last_error(wsa_error(errno));
 				return -1;
 			}
-			// A non-blocking socket reports what it could take; with nothing taken it reports that it would block.
+			// A non-blocking socket reports what it could take; with nothing taken it reports that it would block, and the writable
+			// notification of WSAEventSelect comes again once it can take more.
+			socket->select_enabled |= fd_write;
 			if (socket->guest_nonblocking) {
 				if (sent)
 					break;
@@ -482,7 +593,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			std::memcpy(raw.data(), &value, width);
 			process.write_memory(at, raw);
 		};
-		put(overlapped, status);
+		// The status word holds zero for success and the Windows Sockets error under a marker otherwise; WSAGetOverlappedResult reads it.
+		put(overlapped, status ? (overlapped_error | status) : 0);
 		put(overlapped + width, bytes);
 		const auto handle = [&] {
 			const auto raw = process.read_memory(overlapped + 2 * width + 8, width);
@@ -518,6 +630,13 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 				call.store<uint32_t>(bytes_out, uint32_t(bytes));
 			call.ret(0);
 			return;
+		}
+		// Until it finishes the OVERLAPPED says the operation is pending.
+		{
+			std::vector<uint8_t> pending(transfer.width, 0);
+			const uint64_t value = status_pending;
+			std::memcpy(pending.data(), &value, transfer.width);
+			call.write(transfer.overlapped, pending);
 		}
 		auto shared = std::make_shared<Transfer>(std::move(transfer));
 		reactor.add([shared, attempt, complete]() {
@@ -591,6 +710,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			for (const auto &buffer : buffers_of(call, call[1], call.u32(2))) {
 				const auto bytes = call.read(buffer.address, buffer.length);
 				transfer.outgoing.insert(transfer.outgoing.end(), bytes.begin(), bytes.end());
+				if (std::getenv("RAVEN_TRACE_SOCKETS"))
+					std::fprintf(stderr, "raven: socket sends %zu bytes: %.*s\n", bytes.size(), int(std::min<size_t>(bytes.size(), 600)), reinterpret_cast<const char *>(bytes.data()));
 			}
 			start(call, std::move(transfer), call[3]);
 			return;
@@ -944,7 +1065,9 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			call.store_pointer(entry + 2 * width, packet->status);
 			call.store<uint32_t>(entry + 3 * width, uint32_t(packet->bytes));
 			++removed;
-			packet = wait_packet(port, 0);
+			// The next packet is taken only when there is room for it; one taken and not handed out would be lost.
+			if (removed < call.u32(2))
+				packet = wait_packet(port, 0);
 		}
 		if (!removed) {
 			call.fail(258);
@@ -1081,6 +1204,218 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 
 	constexpr uint32_t fionbio = 0x8004667e, fionread = 0x4004667f, sio_keepalive_vals = 0x98000004, sio_get_extension_function = 0xc8000006;
 	const auto resolve_export = [&context](const char *library, const char *name) { return context.modules.resolve({library, name, 0, false, 0}); };
+	// WSAEventSelect: the sockets are looked at whenever the threads are scheduled; a network event the program asked for is recorded
+	// once until the call that consumes it enables it again, and recording one sets the program's event.
+	auto selected = std::make_shared<std::vector<std::weak_ptr<SocketObject>>>();
+	const auto check_select = [&objects](SocketObject &socket) {
+		if (!socket.select_mask || socket.closed)
+			return;
+		uint32_t found = 0;
+		pollfd entry{socket.descriptor, POLLIN | POLLOUT | POLLPRI, 0};
+		if (::poll(&entry, 1, 0) < 0)
+			return;
+		const auto record = [&](uint32_t event, size_t bit, int32_t error) {
+			if (!(socket.select_mask & event) || !(socket.select_enabled & event))
+				return;
+			socket.select_enabled &= ~event;
+			socket.select_recorded |= event;
+			socket.select_errors[bit] = error;
+			found |= event;
+		};
+		if (socket.connecting) {
+			if (!(entry.revents & (POLLOUT | POLLERR | POLLHUP)))
+				return;
+			socket.connecting = false;
+			int error = 0;
+			socklen_t length = sizeof(error);
+			::getsockopt(socket.descriptor, SOL_SOCKET, SO_ERROR, &error, &length);
+			record(fd_connect, 4, error ? int32_t(wsa_error(error)) : 0);
+			if (error) {
+				record(fd_close, 5, int32_t(wsa_error(error)));
+				if (found && socket.select_event)
+					objects.set_event(socket.select_event, true);
+				return;
+			}
+		}
+		int listening = 0;
+		socklen_t length = sizeof(listening);
+		::getsockopt(socket.descriptor, SOL_SOCKET, SO_ACCEPTCONN, &listening, &length);
+		if (listening) {
+			if (entry.revents & POLLIN)
+				record(fd_accept, 3, 0);
+		} else {
+			if (entry.revents & POLLIN) {
+				char probe;
+				const ssize_t count = ::recv(socket.descriptor, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+				if (count > 0)
+					record(fd_read, 0, 0);
+				else if (count == 0)
+					record(fd_close, 5, 0);
+				else if (errno != EAGAIN && errno != EWOULDBLOCK)
+					record(fd_close, 5, int32_t(wsa_error(errno)));
+			} else if (entry.revents & (POLLHUP | POLLERR)) {
+				record(fd_close, 5, int32_t(wsaeconnreset));
+			}
+			if (entry.revents & POLLPRI)
+				record(fd_oob, 2, 0);
+			if (entry.revents & POLLOUT)
+				record(fd_write, 1, 0);
+		}
+		if (found && socket.select_event)
+			objects.set_event(socket.select_event, true);
+	};
+	const auto check_all = [selected, check_select] {
+		std::erase_if(*selected, [](const auto &weak) { return weak.expired(); });
+		for (const auto &weak : *selected)
+			if (const auto socket = weak.lock())
+				check_select(*socket);
+	};
+	context.threads.add_pump(check_all);
+	context.threads.add_service(check_all);
+	context.threads.add_external([selected] {
+		return std::any_of(selected->begin(), selected->end(), [](const auto &weak) {
+			const auto socket = weak.lock();
+			return socket && socket->select_mask && !socket->closed;
+		});
+	});
+	registry.add("WSAEventSelect", 3, [socket_of, fail, selected, check_select](ApiCall &call) {
+		const auto socket = socket_of(call[0]);
+		if (!socket) {
+			fail(call, wsaenotsock, uint32_t(-1));
+			return;
+		}
+		if (call.u32(2) && !call[1]) {
+			fail(call, wsaeinval, uint32_t(-1));
+			return;
+		}
+		// Selecting events makes the socket non-blocking, and every event may be reported from then on.
+		socket->select_event = call[1];
+		socket->select_mask = call.u32(2);
+		socket->select_enabled = 0x3ff;
+		socket->select_recorded = 0;
+		socket->select_errors = {};
+		socket->guest_nonblocking = true;
+		if (std::none_of(selected->begin(), selected->end(), [&](const auto &weak) { return weak.lock() == socket; }))
+			selected->push_back(socket);
+		check_select(*socket);
+		call.ret(0);
+	});
+	// WSANETWORKEVENTS: the recorded events, then ten error codes indexed by event bit.
+	registry.add("WSAEnumNetworkEvents", 3, [&objects, socket_of, fail, check_select](ApiCall &call) {
+		const auto socket = socket_of(call[0]);
+		if (!socket || !call[2]) {
+			fail(call, socket ? wsaefault : wsaenotsock, uint32_t(-1));
+			return;
+		}
+		check_select(*socket);
+		if (std::getenv("RAVEN_TRACE_SOCKETS"))
+			std::fprintf(stderr, "raven: socket %llx network events %x, connect error %d, close error %d\n", (unsigned long long)call[0],
+				socket->select_recorded, socket->select_errors[4], socket->select_errors[5]);
+		std::vector<uint8_t> bytes(44, 0);
+		std::memcpy(bytes.data(), &socket->select_recorded, 4);
+		std::memcpy(bytes.data() + 4, socket->select_errors.data(), 40);
+		call.write(call[2], bytes);
+		socket->select_recorded = 0;
+		socket->select_errors = {};
+		if (call[1])
+			objects.set_event(call[1], false);
+		call.ret(0);
+	});
+	// The outcome of an overlapped transfer, waited for when the caller asks to.
+	registry.add("WSAGetOverlappedResult", 5, [socket_of, fail, &reactor, &threads](ApiCall &call) {
+		if (!socket_of(call[0]) || !call[1] || !call[2]) {
+			fail(call, socket_of(call[0]) ? wsaefault : wsaenotsock, 0);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		const auto word = [&](uint64_t at) {
+			const auto raw = call.read(at, width);
+			uint64_t value = 0;
+			std::memcpy(&value, raw.data(), width);
+			return value;
+		};
+		if (word(call[1]) == status_pending) {
+			if (!call.u32(3)) {
+				fail(call, wsa_io_incomplete, 0);
+				return;
+			}
+			HostWait waiting;
+			threads.block([&] {
+				reactor.poll();
+				return word(call[1]) != status_pending;
+			}, std::nullopt);
+		}
+		const auto status = word(call[1]);
+		call.store<uint32_t>(call[2], uint32_t(word(call[1] + width)));
+		if (call[4])
+			call.store<uint32_t>(call[4], 0);
+		if (status) {
+			fail(call, (status & overlapped_error) == overlapped_error ? uint32_t(status & 0xffff) : uint32_t(wsaeconnreset), 0);
+			return;
+		}
+		call.ret(1);
+	});
+	// The TCP endpoints of the host with the process that owns each one (iphlpapi): programs check who is on the other end of a
+	// connection to themselves.
+	registry.add("GetExtendedTcpTable", 6, [](ApiCall &call) {
+		constexpr uint32_t af_inet = 2, af_inet6 = 23, insufficient_buffer = 122, invalid_parameter = 87, not_supported = 50;
+		const uint32_t family = call.u32(3), kind = call.u32(4);
+		if (!call[1] || (family != af_inet && family != af_inet6)) {
+			call.ret(invalid_parameter);
+			return;
+		}
+		// TCP_TABLE_BASIC_* (0-2) and TCP_TABLE_OWNER_PID_* (3-5); the module tables are not offered.
+		if (kind > 5) {
+			call.ret(not_supported);
+			return;
+		}
+		const bool v6 = family == af_inet6, owner = kind >= 3;
+		const bool listeners = kind == 0 || kind == 2 || kind == 3 || kind == 5, connections = kind == 0 || kind == 1 || kind == 4 || kind == 5;
+		auto entries = tcp_entries(v6);
+		std::erase_if(entries, [&](const TcpEntry &entry) { return entry.state == 2 ? !listeners : !connections; });
+		if (call.u32(2))
+			std::sort(entries.begin(), entries.end(), [](const TcpEntry &a, const TcpEntry &b) {
+				return std::tie(a.local, a.local_port, a.remote, a.remote_port) < std::tie(b.local, b.local_port, b.remote, b.remote_port);
+			});
+		const size_t row = v6 ? (owner ? 56 : 52) : (owner ? 24 : 20);
+		const uint32_t needed = uint32_t(4 + row * entries.size());
+		const uint32_t capacity = call.load<uint32_t>(call[1]);
+		if (!call[0] || capacity < needed) {
+			call.store<uint32_t>(call[1], needed);
+			call.ret(insufficient_buffer);
+			return;
+		}
+		std::vector<uint8_t> bytes(needed, 0);
+		const auto put = [&](size_t at, uint32_t value) { std::memcpy(bytes.data() + at, &value, 4); };
+		put(0, uint32_t(entries.size()));
+		for (size_t index = 0; index < entries.size(); ++index) {
+			const auto &entry = entries[index];
+			const size_t at = 4 + index * row;
+			const uint32_t local_port = htons(uint16_t(entry.local_port)), remote_port = htons(uint16_t(entry.remote_port));
+			if (!v6) {
+				// MIB_TCPROW(_OWNER_PID): state, local address and port, remote address and port, owner.
+				put(at, entry.state);
+				std::memcpy(bytes.data() + at + 4, entry.local.data(), 4);
+				put(at + 8, local_port);
+				std::memcpy(bytes.data() + at + 12, entry.remote.data(), 4);
+				put(at + 16, entry.state == 2 ? 0 : remote_port);
+				if (owner)
+					put(at + 20, entry.pid);
+			} else {
+				// MIB_TCP6ROW(_OWNER_PID): local address, scope, port, remote address, scope, port, state, owner.
+				std::memcpy(bytes.data() + at, entry.local.data(), 16);
+				put(at + 20, local_port);
+				std::memcpy(bytes.data() + at + 24, entry.remote.data(), 16);
+				put(at + 44, entry.state == 2 ? 0 : remote_port);
+				put(at + 48, entry.state);
+				if (owner)
+					put(at + 52, entry.pid);
+			}
+		}
+		call.write(call[0], bytes);
+		call.store<uint32_t>(call[1], needed);
+		call.ret(0);
+	});
 	registry.add("ioctlsocket", 3, [socket_of, fail](ApiCall &call) {
 		const auto socket = socket_of(call[0]);
 		if (!socket || !call[2]) {

@@ -45,7 +45,10 @@ struct KernelContext {
 	// Walks the guest stack with the unwind tables and names each caller as module+offset (diagnostics only).
 	std::function<std::string()> describe_stack;
 	// True when the window system has input, paint or timer work for the calling thread (MsgWaitForMultipleObjects).
-	std::function<bool()> message_ready;
+	// Whether a message, paint request, sent message or timer waits for the guest thread with this id.
+	std::function<bool(uint32_t)> message_ready;
+	// Takes a reference on the loaded module at this base, or pins it for the life of the process (GetModuleHandleEx).
+	std::function<void(uint64_t, bool)> reference_module;
 	// The environment variables the program has now, as the block a new process receives (set by the system handlers).
 	std::function<std::u16string()> environment_block;
 	// Started operations that finish later, such as overlapped socket transfers.
@@ -60,6 +63,7 @@ inline constexpr uint64_t filetime_epoch_offset = 11644473600ULL * 10000000ULL;
 void register_exception_api(ApiRegistry &registry, KernelContext &context, class NativeUnwinder &unwinder);
 class NativeRegistry;
 void register_registry_api(ApiRegistry &registry, KernelContext &context, NativeRegistry &hive);
+void register_service_api(ApiRegistry &registry, KernelContext &context, NativeRegistry &hive);
 void register_platform_api(ApiRegistry &registry, KernelContext &context);
 void register_shell_api(ApiRegistry &registry, KernelContext &context);
 void register_version_api(ApiRegistry &registry, KernelContext &context);

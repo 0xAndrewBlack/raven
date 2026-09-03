@@ -447,6 +447,25 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			call.ret(add_font(definition));
 		});
 	});
+	registry.add("CreateFontA", 14, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			std::array<uint8_t, 92> definition{};
+			const auto put32 = [&](size_t at, int32_t value) { std::memcpy(definition.data() + at, &value, 4); };
+			put32(0, call.i32(0)); put32(4, call.i32(1)); put32(8, call.i32(2)); put32(12, call.i32(3)); put32(16, call.i32(4));
+			definition[20] = uint8_t(call.u32(5)); definition[21] = uint8_t(call.u32(6)); definition[22] = uint8_t(call.u32(7));
+			definition[23] = uint8_t(call.u32(8)); definition[24] = uint8_t(call.u32(9)); definition[25] = uint8_t(call.u32(10));
+			definition[26] = uint8_t(call.u32(11)); definition[27] = uint8_t(call.u32(12));
+			if (call[13]) {
+				const auto narrow = call.narrow(call[13], 64);
+				const std::u16string face(narrow.begin(), narrow.end());
+				for (size_t i = 0; i < std::min<size_t>(face.size(), 31); ++i) {
+					definition[28 + i * 2] = uint8_t(face[i]);
+					definition[29 + i * 2] = uint8_t(face[i] >> 8);
+				}
+			}
+			call.ret(add_font(definition));
+		});
+	});
 	// The bundled families stand for the common Windows faces; callers see the usual names.
 	registry.add("EnumFontFamiliesExW", 5, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
@@ -501,6 +520,61 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 					}
 					call.write(scratch, record);
 					const uint64_t arguments[] = {scratch, scratch + 348, 4, call[3]};
+					const auto outcome = invoke(call[2], arguments);
+					if (outcome.stop != NativeStop::returned)
+						throw outcome;
+					result = outcome.value;
+					if (!uint32_t(outcome.value))
+						break;
+				}
+			} catch (...) {
+				process.unmap_memory(scratch);
+				throw;
+			}
+			process.unmap_memory(scratch);
+			call.ret(uint32_t(result));
+		});
+	});
+	// The ANSI form hands the callback ENUMLOGFONTEXA records: a 60-byte LOGFONTA, then the full name, the style and the script as bytes.
+	registry.add("EnumFontFamiliesExA", 5, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			require_dc(call, 0);
+			static const char *families[] = {"Arial", "Courier New", "Times New Roman", "MS Shell Dlg", "MS Sans Serif", "Tahoma",
+				"Segoe UI", "Verdana", "Lucida Console", "Consolas"};
+			std::string wanted;
+			if (call[1]) {
+				const auto bytes = call.read(call[1] + 28, 32);
+				for (size_t i = 0; i < 32 && bytes[i]; ++i)
+					wanted.push_back(char(bytes[i]));
+			}
+			if (!call[2]) {
+				call.ret(0);
+				return;
+			}
+			const auto lower = [](std::string text) {
+				for (auto &c : text)
+					if (c >= 'A' && c <= 'Z')
+						c = char(c + 32);
+				return text;
+			};
+			uint64_t result = 1;
+			const auto scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
+			try {
+				for (const auto *family : families) {
+					if (!wanted.empty() && lower(family) != lower(wanted))
+						continue;
+					std::vector<uint8_t> record(512, 0);
+					const int32_t height = -12, weight = 400;
+					std::memcpy(record.data(), &height, 4);
+					std::memcpy(record.data() + 16, &weight, 4);
+					const std::string_view name(family);
+					record[27] = name == "Courier New" || name == "Lucida Console" || name == "Consolas" ? 0x31 : 0x22;
+					std::memcpy(record.data() + 28, family, std::min<size_t>(name.size(), 31));
+					std::memcpy(record.data() + 60, family, std::min<size_t>(name.size(), 63));
+					std::memcpy(record.data() + 124, "Regular", 7);
+					std::memcpy(record.data() + 156, "Western", 7);
+					call.write(scratch, record);
+					const uint64_t arguments[] = {scratch, scratch + 256, 4, call[3]};
 					const auto outcome = invoke(call[2], arguments);
 					if (outcome.stop != NativeStop::returned)
 						throw outcome;

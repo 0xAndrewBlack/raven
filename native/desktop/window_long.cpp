@@ -1,4 +1,5 @@
 #include "windows.h"
+#include "nonclient.h"
 
 #include <algorithm>
 #include <cstring>
@@ -224,6 +225,49 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 	});
 
 	// System metrics: the classic desktop values; the frame values come from the nonclient metrics in use.
+	// The frame a style adds around a client rectangle, at a given DPI: the frame of 96 DPI scaled by the ratio.
+	registry.add("AdjustWindowRectExForDpi", 5, [this](ApiCall &call) {
+		const uint32_t dpi = call.u32(4);
+		if (!call[0] || !dpi) {
+			call.fail(87);
+			return;
+		}
+		const auto bytes = call.read(call[0], 16);
+		int32_t value[4];
+		std::memcpy(value, bytes.data(), 16);
+		const auto frame = adjust_window_rect(objects.nonclient_metrics(), {0, 0, 0, 0}, call.u32(1), call.u32(2) != 0, call.u32(3));
+		const auto scale = [dpi](int32_t extent) { return int32_t((int64_t(extent) * dpi + (extent < 0 ? -48 : 48)) / 96); };
+		const int32_t adjusted[4] = {value[0] + scale(frame.left), value[1] + scale(frame.top), value[2] + scale(frame.right), value[3] + scale(frame.bottom)};
+		call.write(call[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(adjusted), 16));
+		call.ret(1);
+	});
+	// The cursor is never confined here: the clip rectangle is the whole screen, and a confinement request is accepted as one.
+	registry.add("GetClipCursor", 1, [this](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		const auto &screen = objects.nonclient_metrics();
+		const int32_t rect[4] = {0, 0, int32_t(screen.screen_x), int32_t(screen.screen_y)};
+		call.write(call[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(rect), sizeof(rect)));
+		call.ret(1);
+	});
+	registry.add("ClipCursor", 1, [](ApiCall &call) { call.ret(1); });
+	// Touch input reaches windows as mouse input here; registering for it changes nothing and succeeds.
+	registry.add("RegisterTouchWindow", 2, [this](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("UnregisterTouchWindow", 1, [this](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		call.ret(1);
+	});
 	registry.add("GetSystemMetrics", 1, [this](ApiCall &call) {
 		const auto &screen = objects.nonclient_metrics();
 		const int32_t index = call.i32(0);

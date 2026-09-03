@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 namespace raven {
 
@@ -243,6 +244,60 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 		objects.set_access(made.value, call.u32(0) & ~0xf0000000U ? (call.u32(0) & ~0xf0000000U) : 0xf001f);
 		call.ret(made.value);
 	});
+	// atlthunk: a thunk is a few instructions in executable memory that call a window procedure with the window handle replaced by a
+	// value of the program's (the object behind the window). Thunks come from pages kept for them; a freed one is used again.
+	struct ThunkPool {
+		std::vector<uint64_t> free;
+	};
+	auto thunks = std::make_shared<ThunkPool>();
+	constexpr uint64_t thunk_size = 32;
+	registry.add("AtlThunk_AllocateData", 0, [&memory, thunks](ApiCall &call) {
+		if (thunks->free.empty()) {
+			const auto page = memory.allocate(0, 0x10000, 0x3000, 0x40);
+			if (page.status) {
+				call.fail(8, 0);
+				return;
+			}
+			for (uint64_t at = page.address + 0x10000; at > page.address; at -= thunk_size)
+				thunks->free.push_back(at - thunk_size);
+		}
+		const auto thunk = thunks->free.back();
+		thunks->free.pop_back();
+		call.ret(thunk);
+	});
+	registry.add("AtlThunk_InitData", 3, [](ApiCall &call) {
+		std::vector<uint8_t> code;
+		const auto add = [&](std::initializer_list<uint8_t> bytes) { code.insert(code.end(), bytes); };
+		const auto add_word = [&](uint64_t value, size_t size) {
+			for (size_t byte = 0; byte < size; ++byte)
+				code.push_back(uint8_t(value >> (byte * 8)));
+		};
+		if (call.pointer_width() == 8) {
+			// mov rcx, value; mov rax, procedure; jmp rax
+			add({0x48, 0xb9});
+			add_word(call[2], 8);
+			add({0x48, 0xb8});
+			add_word(call[1], 8);
+			add({0xff, 0xe0});
+		} else {
+			// mov dword [esp+4], value; mov eax, procedure; jmp eax
+			add({0xc7, 0x44, 0x24, 0x04});
+			add_word(call[2], 4);
+			add({0xb8});
+			add_word(call[1], 4);
+			add({0xff, 0xe0});
+		}
+		call.write(call[0], code);
+	});
+	registry.add("AtlThunk_DataToCode", 1, [](ApiCall &call) { call.ret(call[0]); });
+	registry.add("AtlThunk_FreeData", 1, [thunks](ApiCall &call) {
+		if (call[0])
+			thunks->free.push_back(call[0]);
+	});
+	// The guest runs as native code on a processor whose instruction cache follows stores, and nothing here caches translated code: a
+	// flush has nothing to do and succeeds.
+	registry.add("FlushInstructionCache", 3, [](ApiCall &call) { call.ret(1); });
+	registry.add("NtFlushInstructionCache", 3, [](ApiCall &call) { call.ret(0); });
 	// SectionBasicInformation: the base address, the allocation attributes and the maximum size of the section.
 	registry.add("NtQuerySection", 5, [&](ApiCall &call) {
 		constexpr uint32_t status_invalid_handle = 0xc0000008U, status_invalid_info_class = 0xc0000003U, status_info_length_mismatch = 0xc0000004U, sec_commit = 0x8000000;

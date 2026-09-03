@@ -17,7 +17,8 @@ import sys
 
 LIBRARIES = """advapi32 bcrypt comctl32 comdlg32 crypt32 dbghelp dwmapi gdi32 imm32 kernel32 ole32 oleaut32 psapi
 sensapi setupapi shell32 shlwapi user32 uxtheme version wininet winmm wintrust ws2_32 wsock32
-bcryptprimitives cfgmgr32 dhcpcsvc dnsapi hid imagehlp iphlpapi ntdll ktmw32 msimg32 mswsock ncrypt netapi32 opengl32 glu32 powrprof pdh runtimeobject winspool ravenhost secur32 shcore userenv wevtapi winhttp wtsapi32""".split()
+bcryptprimitives cfgmgr32 dhcpcsvc dnsapi hid imagehlp iphlpapi ntdll ktmw32 msimg32 mswsock ncrypt netapi32 opengl32 glu32 powrprof pdh runtimeobject winspool ravenhost secur32 shcore userenv wevtapi winhttp wtsapi32
+atlthunk oleacc""".split()
 # Real exports whose names begin with an underscore, which the generic filter drops.
 # The interlocked functions are compiler intrinsics in the import libraries, yet kernel32 exports them and programs import them by name.
 INTERLOCKED = {"InterlockedIncrement": 1, "InterlockedDecrement": 1, "InterlockedExchange": 2, "InterlockedExchangeAdd": 2,
@@ -31,10 +32,13 @@ DIRECTORY = Path("/usr/x86_64-w64-mingw32/lib")
 DIRECTORY32 = Path("/usr/i686-w64-mingw32/lib")
 
 
-# Libraries that are not Windows ones: the host services Raven's own components import.
+# Libraries whose names are listed here rather than read from an import library: the host services Raven's own components import, and
+# Windows libraries mingw-w64 ships no import library for.
 NAMES_ONLY = {"ravenhost": ["RavenFontClose", "RavenFontGlyphs", "RavenFontInfo", "RavenFontMetrics", "RavenFontName", "RavenFontOpen",
                             "RavenFontOutline", "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace"]}
-NAMES_ONLY_WORDS = {"RavenFontClose": 1, "RavenFontGlyphs": 4, "RavenFontInfo": 2, "RavenFontMetrics": 3, "RavenFontName": 4, "RavenFontOpen": 3,
+# atlthunk.dll, the window procedure thunks of Windows 10, has no import library in mingw-w64; its four functions are listed here.
+NAMES_ONLY["atlthunk"] = ["AtlThunk_AllocateData", "AtlThunk_DataToCode", "AtlThunk_FreeData", "AtlThunk_InitData"]
+NAMES_ONLY_WORDS = {"AtlThunk_AllocateData": 0, "AtlThunk_DataToCode": 1, "AtlThunk_FreeData": 1, "AtlThunk_InitData": 3, "RavenFontClose": 1, "RavenFontGlyphs": 4, "RavenFontInfo": 2, "RavenFontMetrics": 3, "RavenFontName": 4, "RavenFontOpen": 3,
                     "RavenFontOutline": 4, "RavenFontRender": 10, "RavenFontScan": 2, "RavenFontTable": 5, "RavenTrace": 1}
 
 

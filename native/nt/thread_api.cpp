@@ -1,5 +1,6 @@
 #include "child_process.h"
 #include "kernel_context.h"
+#include "shared_file.h"
 #include "text.h"
 
 #include <algorithm>
@@ -13,23 +14,75 @@ namespace {
 constexpr uint64_t current_thread_pseudo = UINT64_MAX - 1;
 constexpr uint32_t wait_timeout = 0x102, wait_failed = UINT32_MAX, wait_io_completion = 0xc0, wait_abandoned = 0x80;
 
+// A mutex lives in a block of shared memory when it has a name, so processes of the prefix contend for it; an owner is a process and a thread.
+struct MutexState {
+	std::atomic<uint64_t> owner{0};
+	std::atomic<int32_t> recursion{0};
+};
+
 class MutexObject : public KernelObject {
 public:
-	int signaled(uint32_t thread) const override { return owner == 0 || owner == thread; }
-	void consume(uint32_t thread) override
+	uint64_t me(uint32_t thread) const { return shared ? (uint64_t(::getpid()) << 32) | thread : thread; }
+	int signaled(uint32_t thread) const override
 	{
-		owner = thread;
-		++recursion;
+		const auto holder = state->owner.load();
+		return holder == 0 || holder == me(thread);
 	}
-	uint32_t owner = 0;
-	int recursion = 0;
+	bool try_consume(uint32_t thread) override
+	{
+		const auto self = me(thread);
+		if (state->owner.load() == self) {
+			++state->recursion;
+			return true;
+		}
+		uint64_t free = 0;
+		if (!state->owner.compare_exchange_strong(free, self))
+			return false;
+		state->recursion = 1;
+		return true;
+	}
+	void consume(uint32_t thread) override { try_consume(thread); }
+	MutexState local;
+	MutexState *state = &local;
+	std::shared_ptr<SharedFile> shared;
+};
+
+struct SemaphoreState {
+	std::atomic<int32_t> count{0};
+	int32_t maximum = 0;
 };
 
 class SemaphoreObject : public KernelObject {
 public:
-	int signaled(uint32_t) const override { return count > 0; }
-	void consume(uint32_t) override { --count; }
-	int64_t count = 0, maximum = 0;
+	int signaled(uint32_t) const override { return state->count.load() > 0; }
+	bool try_consume(uint32_t) override
+	{
+		auto current = state->count.load();
+		while (current > 0)
+			if (state->count.compare_exchange_weak(current, current - 1))
+				return true;
+		return false;
+	}
+	void consume(uint32_t thread) override { try_consume(thread); }
+	SemaphoreState local;
+	SemaphoreState *state = &local;
+	std::shared_ptr<SharedFile> shared;
+};
+
+// A named event: its state is shared memory, so a program in another process of the prefix sees it set.
+struct EventState {
+	std::atomic<uint32_t> signaled{0};
+	uint32_t manual = 0;
+};
+
+class SharedEventObject : public KernelObject {
+public:
+	int signaled(uint32_t) const override { return state->signaled.load() ? 1 : 0; }
+	bool try_consume(uint32_t) override { return state->manual || state->signaled.exchange(0) == 1; }
+	void consume(uint32_t thread) override { try_consume(thread); }
+	int set_state(bool value) override { return int(state->signaled.exchange(value ? 1 : 0)); }
+	EventState *state = nullptr;
+	std::shared_ptr<SharedFile> shared;
 };
 
 // A registered wait: the callback runs on a guest thread once the object is signaled or the time runs out.
@@ -108,16 +161,16 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 				}
 			if (all) {
 				if (std::all_of(current.begin(), current.end(), [](int state) { return state == 1; })) {
+					bool taken = true;
 					for (const auto handle : resolved)
-						objects.consume(handle, id);
-					return 0;
+						taken = objects.try_consume(handle, id) && taken;
+					if (taken)
+						return 0;
 				}
 			} else {
 				for (size_t index = 0; index < current.size(); ++index)
-					if (current[index] == 1) {
-						objects.consume(resolved[index], id);
+					if (current[index] == 1 && objects.try_consume(resolved[index], id))
 						return uint32_t(index);
-					}
 			}
 			if (alertable && !threads.current().apcs.empty() && run_apcs())
 				return wait_io_completion;
@@ -161,22 +214,22 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		if (milliseconds != UINT32_MAX)
 			wake = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
 		const auto ready = [&]() -> std::optional<uint32_t> {
-			if (context.message_ready && context.message_ready())
+			if (context.message_ready && context.message_ready(id))
 				return count;
 			std::vector<int> states;
 			for (const auto handle : handles)
 				states.push_back(objects.signaled(handle, id));
 			if (all && count && std::all_of(states.begin(), states.end(), [](int s) { return s == 1; })) {
+				bool taken = true;
 				for (const auto handle : handles)
-					objects.consume(handle, id);
-				return 0;
+					taken = objects.try_consume(handle, id) && taken;
+				if (taken)
+					return 0;
 			}
 			if (!all)
 				for (size_t index = 0; index < states.size(); ++index)
-					if (states[index] == 1) {
-						objects.consume(handles[index], id);
+					if (states[index] == 1 && objects.try_consume(handles[index], id))
 						return uint32_t(index);
-					}
 			return std::nullopt;
 		};
 		for (;;) {
@@ -189,7 +242,7 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 				return;
 			}
 			threads.block([&] {
-				if (context.message_ready && context.message_ready())
+				if (context.message_ready && context.message_ready(id))
 					return true;
 				for (const auto handle : handles)
 					if (objects.signaled(handle, id) == 1)
@@ -417,26 +470,60 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 
-	// Named events are one object per name inside the process; sharing them with other processes is not done yet.
-	registry.add("CreateEventW", 4, [&objects](ApiCall &call) {
+	// Named kernel objects are shared with every process of the prefix, through a block of shared memory; unnamed ones stay in the process.
+	const auto fail_shared = [](ApiCall &call, uint32_t error) { call.fail(error == 8 ? 8 : error, 0); };
+	registry.add("CreateEventW", 4, [&objects, fail_shared](ApiCall &call) {
+		if (!call[3]) {
+			const auto made = objects.create_event(0x1f0003, call.u32(1) ? 0 : 1, call.u32(2) != 0);
+			if (made.status) {
+				call.fail(made.status == 0xc000009aU ? 4 : 87, 0);
+				return;
+			}
+			call.set_last_error(0);
+			call.ret(made.value);
+			return;
+		}
+		const bool manual = call.u32(1) != 0, initial = call.u32(2) != 0;
 		bool existed = false;
-		const auto made = call[3] ? objects.create_named_event(call.wide(call[3], 259), 0x1f0003, call.u32(1) ? 0 : 1, call.u32(2) != 0, existed)
-			: objects.create_event(0x1f0003, call.u32(1) ? 0 : 1, call.u32(2) != 0);
+		uint32_t error = 0;
+		const auto shared = SharedFile::open("event", call.wide(call[3], 259), sizeof(EventState), true, existed, error, [&](void *memory) {
+			auto *state = new (memory) EventState();
+			state->manual = manual;
+			state->signaled = initial ? 1 : 0;
+		});
+		if (!shared) {
+			fail_shared(call, error);
+			return;
+		}
+		auto event = std::make_shared<SharedEventObject>();
+		event->shared = shared;
+		event->state = static_cast<EventState *>(shared->data);
+		const auto made = objects.add_object(event);
 		if (made.status) {
-			call.fail(made.status == 0xc000009aU ? 4 : 87, 0);
+			call.fail(8, 0);
 			return;
 		}
 		call.set_last_error(existed ? 183 : 0);
 		call.ret(made.value);
 	});
-	registry.add("OpenEventW", 3, [&objects](ApiCall &call) {
+	registry.add("OpenEventW", 3, [&objects, fail_shared](ApiCall &call) {
 		if (!call[2]) {
 			call.fail(87, 0);
 			return;
 		}
-		const auto made = objects.open_named_event(call.wide(call[2], 259), 0x1f0003);
+		bool existed = false;
+		uint32_t error = 0;
+		const auto shared = SharedFile::open("event", call.wide(call[2], 259), sizeof(EventState), false, existed, error);
+		if (!shared) {
+			fail_shared(call, error);
+			return;
+		}
+		auto event = std::make_shared<SharedEventObject>();
+		event->shared = shared;
+		event->state = static_cast<EventState *>(shared->data);
+		const auto made = objects.add_object(event);
 		if (made.status) {
-			call.fail(made.status == 0xc0000034U ? 2 : 87, 0);
+			call.fail(8, 0);
 			return;
 		}
 		call.ret(made.value);
@@ -478,54 +565,46 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint64_t>(call[0], exchange);
 		call.ret(old);
 	});
-	// Mutexes and semaphores are kernel objects with optional names shared inside the process.
-	auto names = std::make_shared<std::map<std::u16string, std::shared_ptr<KernelObject>>>();
-	const auto named = [names](ApiCall &call, uint64_t name_address, std::shared_ptr<KernelObject> fresh) -> std::pair<std::shared_ptr<KernelObject>, bool> {
-		if (!name_address)
-			return {fresh, false};
-		auto name = call.wide(name_address, 259);
-		for (auto &character : name)
-			character = upper_case(character);
-		const auto found = names->find(name);
-		if (found != names->end())
-			return {found->second, true};
-		(*names)[name] = fresh;
-		return {fresh, false};
+	// Mutexes and semaphores: with a name they are shared memory the processes of the prefix all map.
+	const auto make_mutex = [&objects, &threads](ApiCall &call, uint64_t name_address, bool owned) {
+		auto mutex = std::make_shared<MutexObject>();
+		bool existed = false;
+		if (name_address) {
+			uint32_t error = 0;
+			mutex->shared = SharedFile::open("mutex", call.wide(name_address, 259), sizeof(MutexState), true, existed, error, [](void *memory) { new (memory) MutexState(); });
+			if (!mutex->shared) {
+				call.fail(error, 0);
+				return;
+			}
+			mutex->state = static_cast<MutexState *>(mutex->shared->data);
+		}
+		if (owned && !existed)
+			mutex->try_consume(threads.current_id());
+		const auto made = objects.add_object(mutex);
+		if (made.status) {
+			call.fail(8);
+			return;
+		}
+		call.set_last_error(existed ? 183 : 0);
+		call.ret(made.value);
 	};
-	registry.add("CreateMutexW", 3, [&objects, named](ApiCall &call) {
+	registry.add("CreateMutexW", 3, [make_mutex](ApiCall &call) { make_mutex(call, call[2], call.u32(1) != 0); });
+	registry.add("CreateMutexExW", 4, [make_mutex](ApiCall &call) { make_mutex(call, call[1], (call.u32(2) & 1) != 0); });
+	registry.add("OpenMutexW", 3, [&objects](ApiCall &call) {
+		if (!call[2]) {
+			call.fail(87);
+			return;
+		}
 		auto mutex = std::make_shared<MutexObject>();
-		const auto [object, existed] = named(call, call[2], mutex);
-		if (call.u32(1) && !existed)
-			std::static_pointer_cast<MutexObject>(object)->consume(1);
-		const auto made = objects.add_object(object);
-		if (made.status) {
-			call.fail(8);
+		bool existed = false;
+		uint32_t error = 0;
+		mutex->shared = SharedFile::open("mutex", call.wide(call[2], 259), sizeof(MutexState), false, existed, error);
+		if (!mutex->shared) {
+			call.fail(error);
 			return;
 		}
-		call.set_last_error(existed ? 183 : 0);
-		call.ret(made.value);
-	});
-	registry.add("CreateMutexExW", 4, [&objects, named](ApiCall &call) {
-		auto mutex = std::make_shared<MutexObject>();
-		const auto [object, existed] = named(call, call[1], mutex);
-		const auto made = objects.add_object(object);
-		if (made.status) {
-			call.fail(8);
-			return;
-		}
-		call.set_last_error(existed ? 183 : 0);
-		call.ret(made.value);
-	});
-	registry.add("OpenMutexW", 3, [&objects, names](ApiCall &call) {
-		auto name = call.wide(call[2], 259);
-		for (auto &character : name)
-			character = upper_case(character);
-		const auto found = names->find(name);
-		if (found == names->end() || !std::dynamic_pointer_cast<MutexObject>(found->second)) {
-			call.fail(2);
-			return;
-		}
-		call.ret(objects.add_object(found->second).value);
+		mutex->state = static_cast<MutexState *>(mutex->shared->data);
+		call.ret(objects.add_object(mutex).value);
 	});
 	registry.add("ReleaseMutex", 1, [&objects, &threads](ApiCall &call) {
 		const auto mutex = objects.object_as<MutexObject>(call[0]);
@@ -533,24 +612,38 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(6);
 			return;
 		}
-		if (mutex->owner != threads.current_id() || mutex->recursion <= 0) {
+		if (mutex->state->owner.load() != mutex->me(threads.current_id()) || mutex->state->recursion.load() <= 0) {
 			call.fail(288);
 			return;
 		}
-		if (--mutex->recursion == 0)
-			mutex->owner = 0;
+		if (--mutex->state->recursion == 0)
+			mutex->state->owner = 0;
 		call.ret(1);
 	});
-	const auto make_semaphore = [&objects, named](ApiCall &call, int64_t initial, int64_t maximum, uint64_t name) {
+	const auto make_semaphore = [&objects](ApiCall &call, int64_t initial, int64_t maximum, uint64_t name) {
 		if (maximum <= 0 || initial < 0 || initial > maximum) {
 			call.fail(87);
 			return;
 		}
 		auto semaphore = std::make_shared<SemaphoreObject>();
-		semaphore->count = initial;
-		semaphore->maximum = maximum;
-		const auto [object, existed] = named(call, name, semaphore);
-		const auto made = objects.add_object(object);
+		bool existed = false;
+		if (name) {
+			uint32_t error = 0;
+			semaphore->shared = SharedFile::open("semaphore", call.wide(name, 259), sizeof(SemaphoreState), true, existed, error, [&](void *memory) {
+				auto *state = new (memory) SemaphoreState();
+				state->count = int32_t(initial);
+				state->maximum = int32_t(maximum);
+			});
+			if (!semaphore->shared) {
+				call.fail(error);
+				return;
+			}
+			semaphore->state = static_cast<SemaphoreState *>(semaphore->shared->data);
+		} else {
+			semaphore->state->count = int32_t(initial);
+			semaphore->state->maximum = int32_t(maximum);
+		}
+		const auto made = objects.add_object(semaphore);
 		if (made.status) {
 			call.fail(8);
 			return;
@@ -560,6 +653,22 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("CreateSemaphoreW", 4, [make_semaphore](ApiCall &call) { make_semaphore(call, call.i32(1), call.i32(2), call[3]); });
 	registry.add("CreateSemaphoreExW", 6, [make_semaphore](ApiCall &call) { make_semaphore(call, call.i32(1), call.i32(2), call[3]); });
+	registry.add("OpenSemaphoreW", 3, [&objects](ApiCall &call) {
+		if (!call[2]) {
+			call.fail(87);
+			return;
+		}
+		auto semaphore = std::make_shared<SemaphoreObject>();
+		bool existed = false;
+		uint32_t error = 0;
+		semaphore->shared = SharedFile::open("semaphore", call.wide(call[2], 259), sizeof(SemaphoreState), false, existed, error);
+		if (!semaphore->shared) {
+			call.fail(error);
+			return;
+		}
+		semaphore->state = static_cast<SemaphoreState *>(semaphore->shared->data);
+		call.ret(objects.add_object(semaphore).value);
+	});
 	registry.add("ReleaseSemaphore", 3, [&objects](ApiCall &call) {
 		const auto semaphore = objects.object_as<SemaphoreObject>(call[0]);
 		const int32_t amount = call.i32(1);
@@ -567,14 +676,19 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(6);
 			return;
 		}
-		if (amount <= 0 || semaphore->count + amount > semaphore->maximum) {
-			call.fail(298);
-			return;
+		auto current = semaphore->state->count.load();
+		for (;;) {
+			if (amount <= 0 || int64_t(current) + amount > semaphore->state->maximum) {
+				call.fail(298);
+				return;
+			}
+			if (semaphore->state->count.compare_exchange_weak(current, current + amount))
+				break;
 		}
-		if (call[2]) call.store<int32_t>(call[2], int32_t(semaphore->count));
-		semaphore->count += amount;
+		if (call[2]) call.store<int32_t>(call[2], current);
 		call.ret(1);
 	});
+
 
 	// Thread pool work items run on short-lived guest threads; waiting on them joins those threads.
 	registry.add("CreateThreadpoolWork", 3, [&objects](ApiCall &call) {
@@ -615,8 +729,8 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			const bool expired = wait->timeout != UINT32_MAX && now >= wait->deadline;
 			if (!signaled && !expired)
 				continue;
-			if (signaled)
-				objects.consume(wait->handle, 0);
+			if (signaled && !objects.try_consume(wait->handle, 0))
+				continue;
 			const auto thread = threads.create(wait->callback, wait->context, 1024 * 1024, false);
 			thread->arguments = {wait->context, signaled ? 0u : 1u};
 			wait->running = thread;

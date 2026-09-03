@@ -213,21 +213,32 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		case 5: with_sid(make_sid(5, {21, 1000, 1000, 1000, 513}), 0, false); break;
 		case 2: {
 			// TOKEN_GROUPS: a count, then SID_AND_ATTRIBUTES entries; one group, the Users of the machine.
-			const auto sid = make_sid(5, {32, 545});
+			const std::vector<std::vector<uint8_t>> sids{make_sid(5, {32, 545}), make_sid(5, {32, 544}), make_sid(1, {0})};
 			const size_t first = width == 4 ? 4 : 8;
-			data.assign(first + record + sid.size(), 0);
-			const uint32_t count = 1, attributes = 7;
+			size_t total = first + record * sids.size();
+			for (const auto &item : sids)
+				total += item.size();
+			data.assign(total, 0);
+			const uint32_t count = uint32_t(sids.size());
 			std::memcpy(data.data(), &count, 4);
-			const uint64_t at = call[2] + first + record;
-			std::memcpy(data.data() + first, &at, width);
-			std::memcpy(data.data() + first + width, &attributes, 4);
-			std::memcpy(data.data() + first + record, sid.data(), sid.size());
+			size_t placed = first + record * sids.size();
+			for (size_t index = 0; index < sids.size(); ++index) {
+				// Users and Everyone: mandatory, enabled by default and enabled. The account is an administrator whose programs run
+				// without elevation, as under User Account Control: Administrators is in the token for denying access only.
+				const uint32_t attributes = index == 1 ? 0x10 : 7;
+				const uint64_t at = call[2] + placed;
+				std::memcpy(data.data() + first + index * record, &at, width);
+				std::memcpy(data.data() + first + index * record + width, &attributes, 4);
+				std::memcpy(data.data() + placed, sids[index].data(), sids[index].size());
+				placed += sids[index].size();
+			}
 			break;
 		}
 		case 8: data = {1, 0, 0, 0}; break;
 		case 9: data = {0, 0, 0, 0}; break;
 		case 12: data = {1, 0, 0, 0}; break;
-		case 18: data = {1, 0, 0, 0}; break;
+		// TokenElevationType: limited, the filtered token of an administrator; TokenElevation: not elevated.
+		case 18: data = {3, 0, 0, 0}; break;
 		case 20: data = {0, 0, 0, 0}; break;
 		case 29: data = {0, 0, 0, 0}; break;
 		case 25: with_sid(make_sid(16, {8192}), 0x60, true); break;

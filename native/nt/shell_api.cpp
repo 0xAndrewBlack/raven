@@ -300,7 +300,9 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 	// The program runs as the host account, which holds administrator rights only when it is root.
 	// The application identity only groups taskbar buttons; there is no taskbar to group them on.
 	registry.add("SetCurrentProcessExplicitAppUserModelID", 1, [](ApiCall &call) { call.ret(0); });
-	registry.add("IsUserAnAdmin", 0, [](ApiCall &call) { call.ret(::geteuid() == 0); });
+	// The account of a prefix is an administrator whose programs run without elevation, so the check answers no as it does under
+	// User Account Control; Raven does not stand for the privileges of the host account.
+	registry.add("IsUserAnAdmin", 0, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragQueryFileW", 4, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragQueryPoint", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragFinish", 1, [](ApiCall &) {});

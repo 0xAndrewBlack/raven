@@ -27,6 +27,9 @@
 
 namespace raven {
 
+// The API the runtime handled last, named when a call is left without its answer.
+extern const char *api_in_progress;
+
 static void trace(enum __ptrace_request operation, pid_t child, void *data = nullptr)
 {
 	if (ptrace(operation, child, nullptr, data) == -1) {
@@ -454,12 +457,25 @@ uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
 		write_memory(scratch, name);
 		// Reopen only the host-owned memfd; guest code never executes the Linux syscall.
 		guest_descriptor = memory_syscall(SYS_openat, uint64_t(AT_FDCWD), scratch, O_RDWR | O_CLOEXEC);
-		const auto mapped = memory_syscall(SYS_mmap, 0, size, PROT_READ | PROT_WRITE,
-			MAP_SHARED | (state->mode == NativeMode::x86 ? MAP_32BIT : 0), guest_descriptor, offset);
-		if (mapped >= state->limit() || size > state->limit() - mapped) {
+		// Windows places views on the 64 KiB allocation granularity and programs round view addresses down to it, so a view starts on
+		// such a boundary: a reservation one granule larger is made, the file is mapped over its aligned part and the slack is returned.
+		constexpr uint64_t granularity = 0x10000;
+		const auto reserved = memory_syscall(SYS_mmap, 0, size + granularity, PROT_NONE,
+			MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (state->mode == NativeMode::x86 ? MAP_32BIT : 0), uint64_t(-1), 0);
+		if (reserved >= state->limit() || size + granularity > state->limit() - reserved) {
 			state->child->stop();
 			throw std::runtime_error("host returned an invalid shared mapping address");
 		}
+		const uint64_t aligned = (reserved + granularity - 1) & ~(granularity - 1);
+		const auto mapped = memory_syscall(SYS_mmap, aligned, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, guest_descriptor, offset);
+		if (mapped != aligned) {
+			state->child->stop();
+			throw std::runtime_error("host returned an invalid shared mapping address");
+		}
+		if (aligned > reserved)
+			memory_syscall(SYS_munmap, reserved, aligned - reserved);
+		if (reserved + size + granularity > aligned + size)
+			memory_syscall(SYS_munmap, aligned + size, reserved + size + granularity - aligned - size);
 		memory_syscall(SYS_close, guest_descriptor, 0);
 		guest_descriptor = uint64_t(-1);
 		unmap_memory(scratch);
@@ -662,6 +678,17 @@ void NativeProcess::abandon_call()
 	state->awaiting_syscall=false;
 }
 
+void NativeProcess::end_call()
+{
+	state->require_stopped();
+	state->callbacks.clear();
+	state->callback_cleanups.clear();
+	state->active_call=false;
+	state->awaiting_api=false;
+	state->awaiting_syscall=false;
+	state->translated_words.reset();
+}
+
 uint64_t NativeProcess::return_gate() const
 {
 	return state->mode == NativeMode::x86 ? state->return_gate : state->child->gate;
@@ -708,7 +735,8 @@ NativeThreadState NativeProcess::save_thread() const
 {
 	state->require_stopped();
 	return {context(), state->callbacks, state->callback_cleanups, state->active_call, state->awaiting_api, state->awaiting_syscall,
-		state->debug_print_fault, state->pending_cleanup, state->stack_top};
+		state->debug_print_fault, state->pending_cleanup, state->stack_top, state->translated_words, state->translated_depth,
+		state->translated_floats, state->translated_result};
 }
 
 void NativeProcess::load_thread(const NativeThreadState &thread)
@@ -723,6 +751,10 @@ void NativeProcess::load_thread(const NativeThreadState &thread)
 	state->debug_print_fault = thread.debug_print_fault;
 	state->pending_cleanup = thread.pending_cleanup;
 	state->stack_top = thread.stack_top;
+	state->translated_words = thread.translated_words;
+	state->translated_depth = thread.translated_depth;
+	state->translated_floats = thread.translated_floats;
+	state->translated_result = thread.translated_result;
 	state->slice_started = std::chrono::steady_clock::now();
 	if (state->mode == NativeMode::x86) {
 		state->fs_selector = uint32_t(thread.context.registers.fs);
@@ -830,8 +862,14 @@ NativeResult NativeProcess::callback(uint64_t address, std::span<const uint64_t>
 	std::chrono::milliseconds timeout)
 {
 	state->require_stopped();
-	if (!state->active_call || !state->awaiting_api)
-		throw std::runtime_error("native callback requires a pending API call");
+	if (!state->active_call || !state->awaiting_api) {
+		if (std::getenv("RAVEN_BACKTRACE")) {
+			void *frames[40];
+			const int count = backtrace(frames, 40);
+			backtrace_symbols_fd(frames, count, 2);
+		}
+		throw std::runtime_error(std::string("native callback requires a pending API call (last API ") + api_in_progress + ")");
+	}
 	if (state->callbacks.size() >= 64)
 		throw std::runtime_error("native callback exceeds initial nesting limit");
 	const auto saved = context();
@@ -947,8 +985,14 @@ NativeResult NativeProcess::begin_x86_call(uint64_t address, std::span<const uin
 NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 {
 	state->require_stopped();
-	if (!state->active_call || state->awaiting_api)
-		throw std::runtime_error("native process has no resumable call or awaits an API response");
+	if (!state->active_call || state->awaiting_api) {
+		if (std::getenv("RAVEN_BACKTRACE")) {
+			void *frames[40];
+			const int count = backtrace(frames, 40);
+			backtrace_symbols_fd(frames, count, 2);
+		}
+		throw std::runtime_error(std::string("native process has no resumable call or awaits an API response (last API ") + api_in_progress + ")");
+	}
 	auto &child = *state->child;
 	child.set_timeout(timeout);
 	int status;

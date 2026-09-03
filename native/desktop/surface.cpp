@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <new>
+#include <stdexcept>
 #include <sys/mman.h>
 
 namespace raven {
@@ -82,7 +83,7 @@ uint64_t NativeDesktop::create_section(std::span<const uint64_t> args)
 		environment.set_last_error(6);
 		return 0;
 	}
-	if (uint32_t(args[2]) > 1 || args[4]) {
+	if (uint32_t(args[2]) > 1) {
 		environment.set_last_error(120);
 		return 0;
 	}
@@ -118,7 +119,7 @@ uint64_t NativeDesktop::create_section(std::span<const uint64_t> args)
 		}
 		while (palette.size() < (1U << bits)) palette.push_back(0);
 	}
-	const auto bitmap=allocate_dib(uint32_t(width),uint32_t(height<0 ? -height : height),bits,height<0,std::move(palette));
+	const auto bitmap=allocate_dib(uint32_t(width),uint32_t(height<0 ? -height : height),bits,height<0,std::move(palette),args[4],uint32_t(args[5]));
 	if (!bitmap) return 0;
 	try {
 		const auto address=objects.bitmap(bitmap)->address;
@@ -128,15 +129,25 @@ uint64_t NativeDesktop::create_section(std::span<const uint64_t> args)
 	return bitmap;
 }
 
-uint64_t NativeDesktop::allocate_dib(uint32_t width,uint32_t height,uint32_t bits,bool top_down,std::vector<uint32_t> palette)
+uint64_t NativeDesktop::allocate_dib(uint32_t width,uint32_t height,uint32_t bits,bool top_down,std::vector<uint32_t> palette,uint64_t section,uint64_t section_offset)
 {
 	const size_t stride=((size_t(width)*bits+31)/32)*4;
 	if (height>64*1024*1024/stride) { environment.set_last_error(8); return 0; }
 	const size_t bytes=stride*height;
 	uint64_t address=0,bitmap=0;
 	try {
-		auto shared=std::make_shared<SharedPixels>((bytes+4095)&~size_t(4095));
-		address=process.map_shared(shared->descriptor(),shared->size());
+		std::shared_ptr<SharedPixels> shared;
+		if (section) {
+			// The pixels live in the section the program made; the caller's offset and the section's size bound them.
+			const auto found=section_source ? section_source(section) : std::nullopt;
+			if (!found) { environment.set_last_error(6); return 0; }
+			if (section_offset>found->second || bytes>found->second-section_offset) { environment.set_last_error(87); return 0; }
+			try { shared=std::make_shared<SharedPixels>(found->first,section_offset,(bytes+4095)&~size_t(4095)); }
+			catch (const std::invalid_argument &) { environment.set_last_error(87); return 0; }
+		} else {
+			shared=std::make_shared<SharedPixels>((bytes+4095)&~size_t(4095));
+		}
+		address=process.map_shared(shared->descriptor(),shared->size(),shared->offset());
 		DesktopBitmap record{width,height,bits,{},address,top_down,false,true,shared};
 		record.stride=uint32_t(stride);
 		record.palette=std::move(palette);

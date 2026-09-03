@@ -271,8 +271,8 @@ int main(int argc, char **argv)
 		rejected("CreateDIBSection",{0,buffer+2048,0,buffer+128,0,0});
 		process.protect_memory(buffer,4096,PROT_READ | PROT_WRITE);
 		check(!api("CreateDIBSection",{0,buffer+2048,2,buffer+128,0,0}) && environment.last_error()==120 &&
-			!api("CreateDIBSection",{0,buffer+2048,0,buffer+128,1,0}) && environment.last_error()==120 && !objects.count(),
-			"unsupported section mode or shared mapping succeeded");
+			!api("CreateDIBSection",{0,buffer+2048,0,buffer+128,1,0}) && environment.last_error()==6 && !objects.count(),
+			"unsupported section mode or a section that is no section succeeded");
 		check(!bounded_api("CreateDIBSection",{0,buffer+2048,0,buffer+128,0,0}) && environment.last_error()==8 &&
 			!number(process.read_memory(buffer+128,8),0) && !budget.count(),"section allocation budget leaked state");
 		const auto draw_icon = [&](uint64_t data, size_t size, const std::string &name, bool negatives) {

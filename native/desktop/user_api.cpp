@@ -124,6 +124,15 @@ void NativeWindows::register_api(ApiRegistry &registry)
 	registry.add("GetMessageTime", 0, [](ApiCall &call) {
 		call.ret(uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()));
 	});
+	// The handles a process holds in the window system: windows, device contexts and drawing objects are one table here.
+	registry.add("GetGuiResources", 2, [this](ApiCall &call) {
+		const auto flags = call.u32(1);
+		if (flags > 4 || flags == 3) {
+			call.fail(87);
+			return;
+		}
+		call.ret(std::max<size_t>(1, objects.count()));
+	});
 	registry.add("GetCursorPos", 1, [this](ApiCall &call) {
 		call.store<int32_t>(call[0], cursor_x);
 		call.store<int32_t>(call[0] + 4, cursor_y);
@@ -161,6 +170,23 @@ void NativeWindows::register_api(ApiRegistry &registry)
 
 void NativeWindows::register_message_api(ApiRegistry &registry)
 {
+	registry.add("RegisterWindowMessageA", 1, [this](ApiCall &call) {
+		const auto narrow = call.narrow(call[0], 255);
+		const std::u16string name(narrow.begin(), narrow.end());
+		if (name.empty()) {
+			call.fail(87);
+			return;
+		}
+		auto found = registered_messages.find(name);
+		if (found == registered_messages.end()) {
+			if (registered_messages.size() >= 0x3fff) {
+				call.fail(8);
+				return;
+			}
+			found = registered_messages.emplace(name, uint32_t(0xc000 + registered_messages.size())).first;
+		}
+		call.ret(found->second);
+	});
 	registry.add("RegisterWindowMessageW", 1, [this](ApiCall &call) {
 		const auto name = call.wide(call[0], 255);
 		if (name.empty()) {

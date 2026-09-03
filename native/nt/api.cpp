@@ -89,6 +89,9 @@ std::vector<uint8_t> ApiCall::read(uint64_t address, size_t size) const
 	} catch (const std::runtime_error &failure) {
 		if (!memory_error(failure))
 			throw;
+		static const bool traced = std::getenv("RAVEN_TRACE_FAIL") != nullptr;
+		if (traced)
+			std::fprintf(stderr, "raven: %s reads %zu bytes at %llx\n", api_in_progress, size, static_cast<unsigned long long>(address));
 		throw ApiFault{};
 	}
 }
@@ -189,6 +192,9 @@ bool ApiRegistry::dispatch(NativeProcess &process, NativeEnvironment &environmen
 	try {
 		found->second.handler(call);
 	} catch (const ApiFault &) {
+		static const bool traced = std::getenv("RAVEN_TRACE_FAIL") != nullptr;
+		if (traced)
+			std::fprintf(stderr, "raven: %s read memory the guest does not own\n", found->first.c_str());
 		call.fail(998);
 	}
 	process.return_api(call.result);

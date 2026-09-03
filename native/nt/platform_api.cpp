@@ -555,13 +555,14 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(0);
 	});
 	registry.add("CheckTokenMembership", 3, [](ApiCall &call) {
-		// Membership in the local Administrators group follows the host account; every other group is not held.
+		// Programs run without elevation: Administrators is held for denying access only, so membership is not reported. The groups
+		// held are Users (S-1-5-32-545) and Everyone (S-1-1-0).
 		const auto count = call.read(call[1] + 1, 1)[0];
-		const auto authority = call.read(call[1] + 2, 6);
-		const bool nt_authority = authority[5] == 5;
-		uint32_t first = count ? call.load<uint32_t>(call[1] + 8) : 0, second = count > 1 ? call.load<uint32_t>(call[1] + 12) : 0;
-		const bool administrators = nt_authority && count == 2 && first == 32 && second == 544;
-		call.store<uint32_t>(call[2], administrators && ::geteuid() == 0);
+		const auto authority = call.read(call[1] + 2, 6)[5];
+		const uint32_t first = count ? call.load<uint32_t>(call[1] + 8) : 0, second = count > 1 ? call.load<uint32_t>(call[1] + 12) : 0;
+		const bool users = authority == 5 && count == 2 && first == 32 && second == 545;
+		const bool everyone = authority == 1 && count == 1 && first == 0;
+		call.store<uint32_t>(call[2], users || everyone);
 		call.ret(1);
 	});
 	registry.add("IsTextUnicode", 3, [](ApiCall &call) {

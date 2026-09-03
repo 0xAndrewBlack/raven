@@ -2567,6 +2567,15 @@ static constexpr std::string_view wtsapi32_exports[]{
 	"WTSVirtualChannelOpen","WTSVirtualChannelOpenEx","WTSVirtualChannelPurgeInput","WTSVirtualChannelPurgeOutput","WTSVirtualChannelQuery","WTSVirtualChannelRead",
 	"WTSVirtualChannelWrite","WTSWaitSystemEvent",
 };
+static constexpr std::string_view atlthunk_exports[]{
+	"AtlThunk_AllocateData","AtlThunk_DataToCode","AtlThunk_FreeData","AtlThunk_InitData",
+};
+static constexpr std::string_view oleacc_exports[]{
+	"AccGetRunningUtilityState","AccNotifyTouchInteraction","AccSetRunningUtilityState","AccessibleChildren","AccessibleObjectFromEvent","AccessibleObjectFromPoint",
+	"AccessibleObjectFromWindow","AccessibleObjectFromWindowTimeout","CreateStdAccessibleObject","CreateStdAccessibleProxyA","CreateStdAccessibleProxyW","GetOleaccVersionInfo",
+	"GetProcessHandleFromHwnd","GetRoleTextA","GetRoleTextW","GetStateTextA","GetStateTextW","LresultFromObject",
+	"ObjectFromLresult","PropMgrClient_LookupProp","WindowFromAccessibleObject",
+};
 static constexpr std::pair<std::string_view, std::span<const std::string_view>> libraries[]{
 	{"advapi32.dll", advapi32_exports},
 	{"bcrypt.dll", bcrypt_exports},
@@ -2619,4 +2628,6 @@ static constexpr std::pair<std::string_view, std::span<const std::string_view>> 
 	{"wevtapi.dll", wevtapi_exports},
 	{"winhttp.dll", winhttp_exports},
 	{"wtsapi32.dll", wtsapi32_exports},
+	{"atlthunk.dll", atlthunk_exports},
+	{"oleacc.dll", oleacc_exports},
 };

@@ -18,7 +18,8 @@ INTERFACES = [
     ("dwrite.h", "IDWriteFont"), ("dwrite_1.h", "IDWriteFont1"), ("dwrite.h", "IDWriteFontFace"), ("dwrite_1.h", "IDWriteFontFace1"),
     ("dwrite.h", "IDWriteFontFile"), ("dwrite.h", "IDWriteLocalizedStrings"), ("dwrite.h", "IDWriteRenderingParams"),
     ("dwrite_1.h", "IDWriteRenderingParams1"), ("dwrite_2.h", "IDWriteRenderingParams2"), ("dwrite.h", "IDWriteGlyphRunAnalysis"), ("dwrite.h", "IDWriteGdiInterop"),
-    ("dwrite_2.h", "IDWriteFontFallback"), ("dwrite.h", "IDWriteFontFileStream"),
+    ("dwrite_2.h", "IDWriteFontFallback"), ("dwrite.h", "IDWriteTextFormat"), ("dwrite.h", "IDWriteTextLayout"),
+    ("dwrite.h", "IDWriteBitmapRenderTarget"), ("dwrite.h", "IDWriteFontFileStream"),
 ]
 
 

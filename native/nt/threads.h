@@ -76,6 +76,9 @@ public:
 	void add_external(std::function<bool()> pending) { externals.push_back(std::move(pending)); }
 	// Runs whenever every thread waits, so work the host does for the guest (finishing started operations) can make a wait succeed.
 	void add_pump(std::function<void()> work) { pumps.push_back(std::move(work)); }
+	// Runs at every scheduling decision, also while threads run: requests from other processes are answered without waiting for idleness.
+	void add_service(std::function<void()> work) { services.push_back(std::move(work)); }
+	void serve() { for (const auto &service : services) service(); }
 
 	std::shared_ptr<GuestThread> create(uint64_t start, uint64_t parameter, uint64_t stack_size, bool suspended);
 	GuestThread &current() { return *running; }
@@ -106,6 +109,7 @@ private:
 	std::function<void(std::chrono::milliseconds)> poll;
 	std::vector<std::function<bool()>> externals;
 	std::vector<std::function<void()>> pumps;
+	std::vector<std::function<void()>> services;
 	std::vector<std::shared_ptr<GuestThread>> threads;
 	GuestThread *running = nullptr;
 	// Set while the process ends: threads leave through their frames and the deadline no longer interrupts them.

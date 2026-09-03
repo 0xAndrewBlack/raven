@@ -381,8 +381,8 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("GetProcessId", 1, [&objects](ApiCall &call) {
-		if (call[0] == current_process) {
-			call.ret(1);
+		if (call[0] == current_process || objects.object_as<SelfProcessObject>(call[0])) {
+			call.ret(uint32_t(::getpid()));
 			return;
 		}
 		const auto child = objects.object_as<ProcessObject>(call[0]);

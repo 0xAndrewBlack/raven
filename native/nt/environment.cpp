@@ -54,6 +54,7 @@ NativeEnvironment::NativeEnvironment(NativeProcess &process, uint64_t image_base
 		field(process, process_block + 0xc0, uint64_t(-int64_t(2592000) * 10000000), 8);
 		context.registers.gs_base = thread_block;
 		process.set_context(context);
+		thread_ids[thread_block] = thread_id;
 	} catch (...) {
 		try {
 			if (thread_block)
@@ -83,6 +84,7 @@ uint64_t NativeEnvironment::create_thread_block(uint64_t stack_base, uint64_t st
 			process.unmap_memory(block);
 			throw;
 		}
+		thread_ids[block] = thread_id;
 		return block;
 	}
 	const auto teb = process.map_memory(8192, PROT_READ | PROT_WRITE);
@@ -98,6 +100,7 @@ uint64_t NativeEnvironment::create_thread_block(uint64_t stack_base, uint64_t st
 		process.unmap_memory(teb);
 		throw;
 	}
+	thread_ids[teb] = thread_id;
 	return teb;
 }
 
@@ -105,6 +108,7 @@ void NativeEnvironment::release_thread_block(uint64_t teb)
 {
 	if (teb == thread_block)
 		throw std::runtime_error("the current native thread block cannot be released");
+	thread_ids.erase(teb);
 	process.unmap_memory(teb);
 }
 
@@ -125,6 +129,7 @@ void NativeEnvironment::x86_constructor(uint64_t image_base, uint32_t process_id
 		field(process, thread_block + 0x18, thread_block, 4);
 		field(process, thread_block + 0x20, process_id, 4);
 		field(process, thread_block + 0x24, thread_id, 4);
+		thread_ids[thread_block] = thread_id;
 		field(process, thread_block + 0x30, process_block, 4);
 		field(process, process_block + 0x08, image_base, 4);
 		field(process, process_block + 0x70, uint64_t(-int64_t(2592000) * 10000000), 8);

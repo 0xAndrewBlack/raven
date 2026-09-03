@@ -7,6 +7,7 @@
 #include <string>
 #include <optional>
 #include <array>
+#include <map>
 
 namespace raven {
 
@@ -53,6 +54,12 @@ public:
 	uint64_t create_thread_block(uint64_t stack_base, uint64_t stack_limit, uint32_t thread_id);
 	void release_thread_block(uint64_t teb);
 	void set_current(uint64_t teb) { thread_block = teb; }
+	// The id of the guest thread whose block is current.
+	uint32_t thread_id() const
+	{
+		const auto found = thread_ids.find(thread_block);
+		return found == thread_ids.end() ? 0 : found->second;
+	}
 	static constexpr uint32_t heap_capacity = 512;
 	bool dispatch(std::string_view name);
 	static std::span<const std::string_view> nt_exports();
@@ -65,6 +72,7 @@ private:
 	uint64_t command_line_ansi = 0;
 	uint32_t ansi_code_page = 0;
 	uint64_t startup_info_ansi = 0;
+	std::map<uint64_t, uint32_t> thread_ids;
 	void require_current() const;
 	void x86_constructor(uint64_t image_base, uint32_t process_id, uint32_t thread_id);
 	void prepare_parameters_x86(const NativeLaunch &launch, std::array<uint64_t,3> standard_handles);

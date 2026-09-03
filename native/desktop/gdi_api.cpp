@@ -156,6 +156,7 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 			state.origin_x = dc.origin_x; state.origin_y = dc.origin_y; state.position_x = dc.position_x; state.position_y = dc.position_y;
 			state.brush_org_x = dc.brush_org_x; state.brush_org_y = dc.brush_org_y; state.window_org_x = dc.window_org_x;
 			state.window_org_y = dc.window_org_y; state.viewport_org_x = dc.viewport_org_x; state.viewport_org_y = dc.viewport_org_y;
+			state.graphics_mode = dc.graphics_mode; state.world = dc.world;
 			dc.saved.push_back(std::move(state));
 			call.ret(dc.saved.size());
 		});
@@ -180,6 +181,68 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 			dc.brush_org_x = state.brush_org_x; dc.brush_org_y = state.brush_org_y; dc.window_org_x = state.window_org_x;
 			dc.window_org_y = state.window_org_y; dc.viewport_org_x = state.viewport_org_x; dc.viewport_org_y = state.viewport_org_y;
 			dc.user_dx = state.viewport_org_x - state.window_org_x; dc.user_dy = state.viewport_org_y - state.window_org_y;
+			dc.graphics_mode = state.graphics_mode; dc.world = state.world;
+			call.ret(1);
+		});
+	});
+	registry.add("SetGraphicsMode", 2, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			const uint32_t mode = call.u32(1);
+			if (mode != 1 && mode != 2)
+				throw uint32_t(87);
+			// Leaving the advanced mode drops a world transform that is not the identity, as Windows refuses to keep one.
+			if (mode == 1 && dc.world != std::array<float, 6>{1, 0, 0, 1, 0, 0})
+				throw uint32_t(87);
+			const auto previous = dc.graphics_mode;
+			dc.graphics_mode = mode;
+			call.ret(previous);
+		});
+	});
+	registry.add("GetGraphicsMode", 1, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] { call.ret(require_dc(call, 0).graphics_mode); });
+	});
+	// XFORM: eM11, eM12, eM21, eM22, eDx, eDy.
+	const auto read_xform = [](ApiCall &call, uint64_t address) {
+		std::array<float, 6> value{};
+		const auto bytes = call.read(address, 24);
+		std::memcpy(value.data(), bytes.data(), 24);
+		return value;
+	};
+	const auto multiply = [](const std::array<float, 6> &a, const std::array<float, 6> &b) {
+		return std::array<float, 6>{a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3], a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+			a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]};
+	};
+	registry.add("SetWorldTransform", 2, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			if (dc.graphics_mode != 2 || !call[1])
+				throw uint32_t(87);
+			dc.world = read_xform(call, call[1]);
+			call.ret(1);
+		});
+	});
+	registry.add("GetWorldTransform", 2, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			if (!call[1])
+				throw uint32_t(87);
+			call.write(call[1], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(dc.world.data()), 24));
+			call.ret(1);
+		});
+	});
+	registry.add("ModifyWorldTransform", 3, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			const uint32_t mode = call.u32(2);
+			if (dc.graphics_mode != 2 || mode < 1 || mode > 3 || (mode != 1 && !call[1]))
+				throw uint32_t(87);
+			if (mode == 1)
+				dc.world = {1, 0, 0, 1, 0, 0};
+			else if (mode == 2)
+				dc.world = multiply(read_xform(call, call[1]), dc.world);
+			else
+				dc.world = multiply(dc.world, read_xform(call, call[1]));
 			call.ret(1);
 		});
 	});
@@ -918,6 +981,48 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 				throw uint32_t(handle > 0 && handle <= 32 ? 120 : 6);
 			Painter painter(objects, dc);
 			painter.fill(rect.left, rect.top, rect.right, rect.bottom, *brush);
+			if (painter.changed())
+				touched(dc);
+			call.ret(1);
+		});
+	});
+	// GradientFill(dc, vertices, vertex count, mesh, mesh count, mode): rectangles blend from the first vertex's color to the second's along one axis.
+	registry.add("GradientFill", 6, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			const uint32_t mode = call.u32(5), vertex_count = call.u32(2), mesh_count = call.u32(4);
+			if (mode > 1 || !call[1] || !call[3] || vertex_count > 4096 || mesh_count > 4096)
+				throw uint32_t(mode > 2 ? 87 : 120);
+			// TRIVERTEX: x, y, then red, green, blue and alpha as 16-bit values.
+			const auto vertices = call.read(call[1], size_t(vertex_count) * 16);
+			const auto mesh = call.read(call[3], size_t(mesh_count) * 8);
+			const auto word = [](const std::vector<uint8_t> &bytes, size_t at, size_t width) {
+				uint32_t value = 0;
+				std::memcpy(&value, bytes.data() + at, width);
+				return value;
+			};
+			Painter painter(objects, dc);
+			for (uint32_t index = 0; index < mesh_count; ++index) {
+				const uint32_t first = word(mesh, index * 8, 4), second = word(mesh, index * 8 + 4, 4);
+				if (first >= vertex_count || second >= vertex_count)
+					throw uint32_t(87);
+				const auto at = [&](uint32_t vertex, size_t field, size_t width) { return word(vertices, vertex * 16 + field, width); };
+				const int32_t left = std::min<int32_t>(int32_t(at(first, 0, 4)), int32_t(at(second, 0, 4))), right = std::max<int32_t>(int32_t(at(first, 0, 4)), int32_t(at(second, 0, 4)));
+				const int32_t top = std::min<int32_t>(int32_t(at(first, 4, 4)), int32_t(at(second, 4, 4))), bottom = std::max<int32_t>(int32_t(at(first, 4, 4)), int32_t(at(second, 4, 4)));
+				const int32_t steps = mode == 0 ? right - left : bottom - top;
+				for (int32_t step = 0; step < steps; ++step) {
+					const auto channel = [&](size_t field) {
+						const double from = at(first, field, 2) >> 8, to = at(second, field, 2) >> 8;
+						return uint32_t(from + (to - from) * (steps > 1 ? double(step) / (steps - 1) : 0.0) + 0.5);
+					};
+					DesktopBrush brush;
+					brush.color = channel(8) | channel(10) << 8 | channel(12) << 16;
+					if (mode == 0)
+						painter.fill(left + step, top, left + step + 1, bottom, brush);
+					else
+						painter.fill(left, top + step, right, top + step + 1, brush);
+				}
+			}
 			if (painter.changed())
 				touched(dc);
 			call.ret(1);

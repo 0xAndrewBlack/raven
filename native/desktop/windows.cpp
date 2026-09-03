@@ -166,13 +166,46 @@ bool NativeWindows::input_ready()
 	flush_dirty();
 	caret_idle();
 	scroll_idle();
+	deliver_pending();
 	if (presentation.poll)
 		for (const auto &event : presentation.poll(std::chrono::milliseconds(0)))
 			receive(event);
-	if (!messages.empty() || quit)
+	serve_sent();
+	const auto me=environment.thread_id();
+	if (queued_for(me) || quits.contains(me))
 		return true;
 	post_due_timers();
-	return !messages.empty() || objects.invalid_window(0);
+	return queued_for(me) || invalid_owned(0);
+}
+
+void NativeWindows::deliver_pending()
+{
+	while (!pending_events.empty()) {
+		const auto event = pending_events.front();
+		pending_events.pop_front();
+		// The window an event was collected for may have been hidden or destroyed before the event could be delivered: such an
+		// event no longer has a target, as one for a surface the host no longer shows.
+		if (event.window && (!objects.window(event.window) || !objects.window(event.window)->visible))
+			continue;
+		receive(event);
+	}
+}
+
+bool NativeWindows::input_pending(uint32_t thread)
+{
+	if (presentation.poll)
+		for (const auto &event : presentation.poll(std::chrono::milliseconds(0)))
+			pending_events.push_back(event);
+	if (!pending_events.empty() || queued_for(thread) || quits.contains(thread) || sent_for(thread))
+		return true;
+	post_due_timers();
+	if (queued_for(thread))
+		return true;
+	for (const auto handle : objects.window_handles()) {
+		const auto *window=objects.window(handle);
+		if (window && !window->update.empty() && objects.window_visible(handle) && (!window->thread || window->thread==thread)) return true;
+	}
+	return false;
 }
 
 void NativeWindows::flush_dirty()
@@ -279,7 +312,60 @@ void NativeWindows::post(uint64_t window,uint32_t message,uint64_t wparam,uint64
 	if (window==0xffff) throw uint32_t(120);
 	if (window && !objects.window(window)) throw uint32_t(1400);
 	if (messages.size()>=10000) throw uint32_t(1816);
-	messages.push_back({window,wparam,lparam,message,message_time(),cursor_x,cursor_y});
+	queue({window,wparam,lparam,message,message_time(),cursor_x,cursor_y});
+}
+
+uint32_t NativeWindows::owner(uint64_t window) const
+{
+	const auto *record=objects.window(window);
+	return record ? record->thread : 0;
+}
+
+void NativeWindows::queue(Message message)
+{
+	if (!message.thread) message.thread=message.window ? owner(message.window) : environment.thread_id();
+	messages.push_back(message);
+}
+
+bool NativeWindows::queued_for(uint32_t thread) const
+{
+	return std::any_of(messages.begin(),messages.end(),[&](const Message &message) { return !message.thread || message.thread==thread; });
+}
+
+bool NativeWindows::sent_for(uint32_t thread) const
+{
+	return std::any_of(sent.begin(),sent.end(),[&](const auto &item) { return item->thread==thread && !item->taken; });
+}
+
+void NativeWindows::serve_sent()
+{
+	const auto me=environment.thread_id();
+	for (;;) {
+		const auto found=std::find_if(sent.begin(),sent.end(),[&](const auto &item) { return item->thread==me && !item->taken; });
+		if (found==sent.end()) return;
+		const auto item=*found;
+		item->taken=true;
+		try {
+			item->result=objects.window(item->window) ? send(item->window,item->message,item->wparam,item->lparam) : 0;
+		} catch (...) {
+			item->done=true;
+			std::erase(sent,item);
+			throw;
+		}
+		item->done=true;
+		std::erase(sent,item);
+	}
+}
+
+uint64_t NativeWindows::invalid_owned(uint64_t filter) const
+{
+	const auto me=environment.thread_id();
+	for (const auto handle : objects.window_handles()) {
+		const auto *window=objects.window(handle);
+		if (!window || window->update.empty() || !objects.window_visible(handle) || (window->thread && window->thread!=me)) continue;
+		if (!filter || filter==handle || objects.is_child(filter,handle)) return handle;
+	}
+	return 0;
 }
 
 void NativeWindows::receive(const DesktopEvent &event)
@@ -302,7 +388,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 				if (active==down) continue;
 				const bool system=code==0x12 || (vk_async[0x12] & 0x80);
 				vk_async[code]=active ? (vk_async[code] | 0x80) : (vk_async[code] & 0x7f);
-				messages.push_back({focus,code,1 | (uint64_t(scans[index])<<16) | (uint64_t(!active)<<30) | (uint64_t(!active)<<31) | (code==0x12 ? uint64_t(1)<<29 : 0),
+				queue({focus,code,1 | (uint64_t(scans[index])<<16) | (uint64_t(!active)<<30) | (uint64_t(!active)<<31) | (code==0x12 ? uint64_t(1)<<29 : 0),
 					active ? (system ? 0x104U : 0x100U) : (system ? 0x105U : 0x101U),message_time(),cursor_x,cursor_y,0});
 			}
 		}
@@ -314,9 +400,11 @@ void NativeWindows::receive(const DesktopEvent &event)
 			if (code>=initial.size() || initial[code]) throw std::runtime_error("invalid initial keyboard key state");
 			initial[code]=true;
 		}
-		if ((!event.window && !event.held_keys.empty()) || (event.window &&
-			(!objects.window(event.window) || !objects.window(event.window)->visible)))
+		if (!event.window && !event.held_keys.empty())
 			throw std::runtime_error("keyboard focus requires its visible guest window");
+		// The host can give the focus to a window the program hides or destroys before the event is read; there is nothing to focus then.
+		if (event.window && (!objects.window(event.window) || !objects.window(event.window)->visible))
+			return;
 		key_down=initial; key_translation.reset();
 		if (!event.window) { set_focus(0); activate(0); }
 		else if (!focus || objects.window_root(focus)!=event.window) set_focus(event.window);
@@ -341,7 +429,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 		const bool system=key.code==0x12 || (vk_async[0x12] & 0x80);
 		const uint64_t flags=1 | (uint64_t(key.scan)<<16) | (uint64_t(key.extended)<<24) | (system && key.code!=0x12 ? uint64_t(1)<<29 : 0) |
 			(key.code==0x12 ? uint64_t(1)<<29 : 0) | (uint64_t(previous)<<30) | (uint64_t(!pressed)<<31);
-		messages.push_back({focus,key.code,flags,system ? (pressed ? 0x104U : 0x105U) : (pressed ? 0x100U : 0x101U),message_time(),cursor_x,cursor_y,pressed ? key.character : 0});
+		queue({focus,key.code,flags,system ? (pressed ? 0x104U : 0x105U) : (pressed ? 0x100U : 0x101U),message_time(),cursor_x,cursor_y,pressed ? key.character : 0});
 		vk_async[key.code&255]=pressed ? (vk_async[key.code&255] | 0x80) : (vk_async[key.code&255] & 0x7f);
 		if (pressed && !previous && (key.code==0x14 || key.code==0x90 || key.code==0x91)) vk_async[key.code]^=1;
 		return;
@@ -365,7 +453,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 		const auto x=int64_t(source->outer.left)+event.x,y=int64_t(source->outer.top)+event.y;
 		if (x<INT16_MIN || x>INT16_MAX || y<INT16_MIN || y>INT16_MAX) return;
 		const auto delta=uint64_t(uint16_t(int16_t(int32_t(event.message))));
-		messages.push_back({focus,(delta<<16)|mouse_buttons|keyboard_map.mouse_modifiers(),uint16_t(x)|(uint64_t(uint16_t(y))<<16),event.wparam ? 0x20eU : 0x20aU,message_time(),int32_t(x),int32_t(y)});
+		queue({focus,(delta<<16)|mouse_buttons|keyboard_map.mouse_modifiers(),uint16_t(x)|(uint64_t(uint16_t(y))<<16),event.wparam ? 0x20eU : 0x20aU,message_time(),int32_t(x),int32_t(y)});
 		return;
 	}
 	if (event.x<INT16_MIN || event.x>INT16_MAX || event.y<INT16_MIN || event.y>INT16_MAX)
@@ -411,7 +499,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 		window=objects.window(target);if (!window || !objects.window_visible(target)) return;
 	}
 	if (messages.size()>=10000) throw std::runtime_error("guest input queue limit reached");
-	messages.push_back({target,buttons|keyboard_map.mouse_modifiers(),uint16_t(x-window->x)|(uint64_t(uint16_t(y-window->y))<<16),message,message_time(),int32_t(x),int32_t(y)});
+	queue({target,buttons|keyboard_map.mouse_modifiers(),uint16_t(x-window->x)|(uint64_t(uint16_t(y-window->y))<<16),message,message_time(),int32_t(x),int32_t(y)});
 }
 
 NativeWindows::Modifiers NativeWindows::modifier_state() const
@@ -430,16 +518,22 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 	const auto flags=blocking ? 1U : uint32_t(args[4]);
 	if (flags & ~1U) throw uint32_t(120);
 	flush_dirty();
+	const auto me=environment.thread_id();
 	for (;;) {
+		deliver_pending();
 		if (presentation.poll)
 			for (const auto &event : presentation.poll(std::chrono::milliseconds(0)))
 				receive(event);
+		// Messages sent from other threads run before anything is retrieved, as they do while a Windows thread pumps its queue.
+		serve_sent();
 		auto found=std::find_if(messages.begin(),messages.end(),[&](const Message &message) {
-			return (!window || (window==UINT64_MAX ? !message.window : message.window==window || objects.is_child(window,message.window))) &&
+			return (!message.thread || message.thread==me) &&
+				(!window || (window==UINT64_MAX ? !message.window : message.window==window || objects.is_child(window,message.window))) &&
 				(message.message==0x12 || (!minimum && !maximum) || (message.message>=minimum && message.message<=maximum));
 		});
-		if (found!=messages.end() || quit) {
-			const auto value=found!=messages.end() ? *found : Message{0,*quit,0,0x12,message_time(),cursor_x,cursor_y};
+		const auto quit=quits.find(me);
+		if (found!=messages.end() || quit!=quits.end()) {
+			const auto value=found!=messages.end() ? *found : Message{0,quit->second,0,0x12,message_time(),cursor_x,cursor_y};
 			std::vector<uint8_t> bytes(layout.size);
 			put(bytes,0,value.window,layout.pointer); put(bytes,layout.message,value.message,4);
 			put(bytes,layout.wparam,value.wparam,layout.pointer); put(bytes,layout.lparam,value.lparam,layout.pointer);
@@ -457,7 +551,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 					if (down && !repeat && (code==0x14 || code==0x90 || code==0x91)) vk_state[code]^=1;
 				}
 			}
-			if (flags & 1U) { if (found!=messages.end()) messages.erase(found); else quit.reset(); }
+			if (flags & 1U) { if (found!=messages.end()) messages.erase(found); else quits.erase(me); }
 			if (value.message!=0x12) {
 				// Keyboard and mouse hooks may swallow the message; the get-message hook only observes it.
 				if (has_hook(2) && (value.message>=0x100 && value.message<=0x105) && (flags & 1U) &&
@@ -473,12 +567,12 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 			return blocking && value.message==0x12 ? 0 : 1;
 		}
 		// WM_TIMER ranks below input and paint, so it is only generated when neither is waiting.
-		if (found==messages.end() && !quit) {
+		if (found==messages.end() && quit==quits.end()) {
 			const auto before=messages.size();
-			if (!objects.invalid_window(window)) post_due_timers();
+			if (!invalid_owned(window)) post_due_timers();
 			if (messages.size()!=before) continue;
 		}
-		const auto paint=(!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f) ? objects.invalid_window(window) : 0;
+		const auto paint=(!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f) ? invalid_owned(window) : 0;
 		if (paint) {
 			if (std::getenv("RAVEN_TRACE_PAINT")) {
 				std::cerr << "paint " << std::hex << paint << " pending";
@@ -499,6 +593,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		caret_idle();
 		scroll_idle();
 		flush_dirty();
+		deliver_pending();
 		if (presentation.poll) {
 			const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(deadline-std::chrono::steady_clock::now());
 			for (const auto &event : presentation.poll(std::min(remaining,std::chrono::milliseconds(20))))
@@ -562,6 +657,18 @@ uint64_t NativeWindows::send(uint64_t handle, uint32_t message, uint64_t wparam,
 	const auto *window=objects.window(handle);
 	if (!window) throw uint32_t(1400);
 	if (!invoke) throw std::runtime_error("native window callbacks are not connected");
+	// A window of another thread runs its procedure on that thread: the message waits in its queue of sent messages, and this thread
+	// answers the messages sent to its own windows while it waits for the result.
+	if (const auto me=environment.thread_id(); window->thread && me && window->thread!=me && block_hook) {
+		auto item=std::make_shared<SentMessage>(SentMessage{handle,message,wparam,lparam,0,window->thread});
+		sent.push_back(item);
+		while (!item->done) {
+			serve_sent();
+			if (item->done) break;
+			block_hook([&] { return item->done || sent_for(me); });
+		}
+		return item->result;
+	}
 	const auto procedure=window->procedure;
 	const uint64_t arguments[]{handle,message,wparam,lparam};
 	// The desktop window belongs to the system and has no guest procedure.
@@ -579,20 +686,28 @@ uint64_t NativeWindows::send(uint64_t handle, uint32_t message, uint64_t wparam,
 void NativeWindows::activate(uint64_t handle)
 {
 	if (handle) handle=objects.window_root(handle);
-	if (active==handle) return;
-	if (activating) throw std::runtime_error("unsupported reentrant window activation");
-	activating=true;
-	try {
-		const auto previous=active;
-		if (previous && objects.window(previous)) {
-			if (!send(previous,0x86,0,handle)) throw std::runtime_error("nonclient activation veto requires Windows qualification");
-			send(previous,6,0,handle);
+	// A window that is activated while another activation is being delivered takes its turn when that one is done.
+	if (activating) { queued_activation=handle; has_queued_activation=true; return; }
+	for (;;) {
+		if (active!=handle) {
+			activating=true;
+			try {
+				const auto previous=active;
+				if (previous && objects.window(previous)) {
+					send(previous,0x86,0,handle);
+					send(previous,6,0,handle);
+				}
+				if (handle && !objects.window(handle)) handle=0;
+				active=handle;
+				if (handle) { send(handle,0x86,1,previous); send(handle,6,1,previous); }
+				activating=false;
+			} catch (...) { activating=false; has_queued_activation=false; throw; }
 		}
-		if (handle && !objects.window(handle)) throw std::runtime_error("activation callback destroyed its target");
-		active=handle;
-		if (handle) { send(handle,0x86,1,previous); send(handle,6,1,previous); }
-		activating=false;
-	} catch (...) { activating=false; throw; }
+		if (!has_queued_activation) return;
+		handle=queued_activation;
+		has_queued_activation=false;
+		if (handle && !objects.window(handle)) handle=0;
+	}
 }
 
 uint64_t NativeWindows::set_focus(uint64_t handle)
@@ -817,6 +932,7 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 	}
 	if (args[2]) window_text(args[2]);
 	DesktopWindow record{class_atom,definition->procedure,{},x,y,width,height};
+	record.thread=environment.thread_id();
 	record.instance=args[10]; record.style=effective_style | (child ? 0U : 0x04000000U);record.ex_style=ex_style;
 	record.parent=child ? args[8] : 0;record.child_id=child ? args[9] : 0;record.client_ready=false;
 	record.owner=child ? 0 : owner_handle;
@@ -942,7 +1058,7 @@ bool NativeWindows::dispatch(std::string_view name)
 	const bool coordinate=name=="ClientToScreen" || name=="ScreenToClient";
 	const bool adjustment=name=="AdjustWindowRect" || name=="AdjustWindowRectEx";
 	if (!adjustment && name!="GetSystemMetrics" && !coordinate && name!="MapWindowPoints" && !info && !data && name!="CallWindowProcW" && !registration && !creation && name!="DestroyWindow" && name!="SendMessageW" && name!="IsWindow" &&
-		name!="IsWindowUnicode" && name!="UnregisterClassW" && name!="ShowWindow" && name!="GetDC" && name!="GetWindowDC" && name!="ReleaseDC" &&
+		name!="IsWindowUnicode" && name!="UnregisterClassW" && name!="ShowWindow" && name!="GetDC" && name!="GetWindowDC" && name!="WindowFromDC" && name!="ReleaseDC" &&
 		name!="UpdateWindow" && name!="IsWindowVisible" && name!="BeginPaint" && name!="EndPaint" &&
 		name!="PostMessageW" && name!="PostThreadMessageW" && name!="PeekMessageW" && name!="GetMessageW" && name!="DispatchMessageW" &&
 		name!="TranslateMessage" && name!="PostQuitMessage" && name!="DefWindowProcW" &&
@@ -1022,9 +1138,13 @@ bool NativeWindows::dispatch(std::string_view name)
 			if (int32_t(args[2])>0) result=copy_window_text(args[0],args[1],uint32_t(args[2]));
 		}
 		else if (name=="PostMessageW") { post(args[0],uint32_t(args[1]),args[2],args[3]); result=1; }
-		// There is one message queue in the process, so a message for a thread is a message with no window in that queue.
-		else if (name=="PostThreadMessageW") { post(0,uint32_t(args[1]),args[2],args[3]); result=1; }
-		else if (name=="PostQuitMessage") { quit=uint32_t(args[0]); }
+		// A message for a thread has no window and goes to that thread's queue.
+		else if (name=="PostThreadMessageW") {
+			if (messages.size()>=10000) throw uint32_t(1816);
+			queue({0,args[2],args[3],uint32_t(args[1]),message_time(),cursor_x,cursor_y,0,uint32_t(args[0])});
+			result=1;
+		}
+		else if (name=="PostQuitMessage") { quits[environment.thread_id()]=uint32_t(args[0]); }
 		else if (name=="PeekMessageW" || name=="GetMessageW") result=retrieve(args,name=="GetMessageW");
 		else if (name=="DispatchMessageW" || name=="TranslateMessage") {
 			const auto layout=message_layout(process.mode()==NativeMode::x86);
@@ -1095,6 +1215,11 @@ bool NativeWindows::dispatch(std::string_view name)
 		} else if (creation) result=create(args);
 		else if (name=="SendMessageW") result=send(args[0],uint32_t(args[1]),args[2],args[3]);
 		else if (name=="DestroyWindow") result=destroy(args[0]);
+		else if (name=="WindowFromDC") {
+			// The window a device context belongs to: a window's own context names it, the screen's names the desktop, any other has none.
+			const auto *device=objects.dc(args[0]);
+			result=device && device->window && objects.window(device->window) ? device->window : 0;
+		}
 		else if (name=="GetDC" || name=="GetWindowDC") {
 			// A null window selects the screen, which is the desktop window's surface.
 			const auto target=args[0] ? args[0] : desktop_window();

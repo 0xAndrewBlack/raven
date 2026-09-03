@@ -364,12 +364,19 @@ bool VulkanBridge::dispatch(std::string_view name)
 			host_pointers.push_back(extension.c_str());
 		std::vector<VkDeviceQueueCreateInfo> queue_infos(info.queueCreateInfoCount);
 		std::vector<std::vector<float>> priorities(info.queueCreateInfoCount);
+		std::vector<decltype(device_chain)> queue_chains;
+		queue_chains.reserve(info.queueCreateInfoCount);
 		for (uint32_t index = 0; index < info.queueCreateInfoCount; ++index) {
 			queue_infos[index] = read.template operator()<VkDeviceQueueCreateInfo>(
 				reinterpret_cast<uint64_t>(info.pQueueCreateInfos) + uint64_t(index) * sizeof(VkDeviceQueueCreateInfo));
 			auto &queue = queue_infos[index];
-			if (queue.sType != VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO || queue.pNext || queue.flags || !queue.queueCount || queue.queueCount > 64)
+			if (queue.sType != VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO || !queue.queueCount || queue.queueCount > 64)
 				throw std::runtime_error("unsupported Vulkan queue create info");
+			// A chain on the queue's create info, such as a global priority request, travels like the device's own.
+			if (queue.pNext) {
+				queue_chains.push_back(mirror_chain(reinterpret_cast<uint64_t>(queue.pNext), true));
+				queue.pNext = link_chain(queue_chains.back());
+			}
 			priorities[index].resize(queue.queueCount);
 			const auto bytes = process.read_memory(reinterpret_cast<uint64_t>(queue.pQueuePriorities), size_t(queue.queueCount) * 4);
 			std::memcpy(priorities[index].data(), bytes.data(), bytes.size());

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "inherit.h"
+#include "handle_channel.h"
 #include "objects.h"
 
 #include <filesystem>
@@ -16,7 +17,8 @@ namespace raven {
 // A process that Raven started for the guest: another instance of the runtime that runs the child program on its own.
 class ProcessObject : public KernelObject {
 public:
-	explicit ProcessObject(pid_t pid) : pid(pid) {}
+	explicit ProcessObject(pid_t pid, bool foreign = false) : pid(pid), foreign(foreign) {}
+	~ProcessObject() override;
 	// Waiting for a process succeeds once it has ended; the host reports that, not another guest thread.
 	int signaled(uint32_t) const override { return exited() ? 1 : 0; }
 	bool exited() const;
@@ -25,8 +27,12 @@ public:
 	// Ends the process the way TerminateProcess does, with the given exit code.
 	void terminate(uint32_t code);
 	const pid_t pid;
+	// A process of the same runtime that is not this one's child (its parent, a sibling): it can be waited for and ended, but nobody reaps it here.
+	const bool foreign;
 	// The file name of the program the process runs, for process listings.
 	std::u16string name;
+	// Where handles go that are duplicated into the process.
+	std::unique_ptr<HandleChannel> channel;
 
 private:
 	void reap() const;
@@ -42,6 +48,8 @@ public:
 	int signaled(uint32_t) const override { return 0; }
 };
 
+// Whether the process id belongs to a running instance of this runtime, the only processes a guest may name that it did not start.
+bool runtime_process_alive(pid_t pid);
 // The children that are still known by their process id, and the ones alive.
 std::shared_ptr<ProcessObject> find_child(pid_t pid);
 std::vector<std::shared_ptr<ProcessObject>> live_children();

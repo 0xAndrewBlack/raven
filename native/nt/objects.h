@@ -25,6 +25,11 @@ public:
 	virtual int signaled(uint32_t thread) const { (void)thread; return -1; }
 	// Runs when a wait succeeds: auto-reset events clear, mutexes change owner, semaphores count down.
 	virtual void consume(uint32_t thread) { (void)thread; }
+	// Takes what a satisfied wait takes, and says whether it still could: an object shared with other processes can lose it to one of them
+	// between the check and the take.
+	virtual bool try_consume(uint32_t thread) { consume(thread); return true; }
+	// Sets or clears an event that lives in this object; the previous state, or -1 when the object is no event.
+	virtual int set_state(bool signaled) { (void)signaled; return -1; }
 	// Describes the object for a process that inherits it; false for objects that cannot be handed to another process.
 	virtual bool describe(InheritedHandle &record) const { (void)record; return false; }
 };
@@ -32,6 +37,8 @@ public:
 class NativeObjects;
 // Rebuilds the handles a creator passed on, each under the value it had there.
 void adopt_inherited(NativeObjects &objects, const std::vector<InheritedHandle> &handles);
+// The object a handle description stands for, built around its descriptor; null for a kind that cannot be handed over.
+std::shared_ptr<KernelObject> object_from_record(const InheritedHandle &record);
 
 // A handle value held for something another part of the runtime owns, such as an open registry key; closing the handle tells the owner.
 class ReservedObject : public KernelObject {
@@ -75,6 +82,8 @@ public:
 	// Waiting state of any handle kind (see KernelObject::signaled); -2 when the handle does not exist.
 	int signaled(uint64_t handle, uint32_t thread) const;
 	void consume(uint64_t handle, uint32_t thread);
+	// Takes what a satisfied wait takes; false when another process took it first.
+	bool try_consume(uint64_t handle, uint32_t thread);
 	// Duplicates a handle onto the same object (DuplicateHandle within the process).
 	// A new handle to the same object; `access` narrows the rights the copy carries (kept for objects whose rights matter, such as sections).
 	NativeObjectResult duplicate(uint64_t handle, std::optional<uint32_t> access = std::nullopt);
@@ -117,6 +126,7 @@ private:
 	uint64_t next = 0x100;
 	// The next free handle value; the caller holds the mutex. Values that inherited handles occupy are skipped.
 	uint64_t take();
+	void arrive(uint64_t handle) const;
 	size_t limit;
 	std::pair<std::shared_ptr<Event>,uint32_t> event(uint64_t handle, uint32_t access) const;
 	std::shared_ptr<File> file(uint64_t handle) const;

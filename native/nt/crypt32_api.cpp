@@ -502,6 +502,12 @@ void register_crypt32_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint64_t>(blob + 8, memory);
 		return true;
 	};
+	// No key storage provider is installed here, so key creation and use fail the way they do on a machine without one; programs fall back.
+	for (const auto &[name, count] : {std::pair<const char *, size_t>{"NCryptOpenStorageProvider", 3}, {"NCryptIsAlgSupported", 3},
+		{"NCryptCreatePersistedKey", 6}, {"NCryptFinalizeKey", 2}, {"NCryptExportKey", 8}, {"NCryptOpenKey", 5}, {"NCryptSignHash", 8},
+		{"NCryptGetProperty", 6}, {"NCryptSetProperty", 5}, {"NCryptDeleteKey", 2}, {"NCryptEnumKeys", 5}})
+		registry.add(name, count, [](ApiCall &call) { call.ret(0x80090029U); });
+	registry.add("NCryptFreeObject", 1, [](ApiCall &call) { call.ret(0); });
 	registry.add("CryptProtectData", 7, [blob_in, blob_out](ApiCall &call) {
 		const auto plain = blob_in(call, call[0]);
 		if (!plain || !call[6]) {

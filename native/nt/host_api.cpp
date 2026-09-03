@@ -1,4 +1,6 @@
+#include "access_token.h"
 #include "kernel_context.h"
+#include "text.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -12,6 +14,7 @@
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <pwd.h>
 #include <unistd.h>
 
 namespace raven {
@@ -471,7 +474,7 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	// What the thread's queue holds: the high word the kinds of message waiting, the low word the ones that arrived since the last call.
 	registry.add("GetQueueStatus", 1, [&context](ApiCall &call) {
 		const uint32_t kinds = call.u32(0) & 0x4ff;
-		call.ret(context.message_ready && context.message_ready() ? uint64_t(kinds) << 16 | kinds : 0);
+		call.ret(context.message_ready && context.message_ready(context.threads.current_id()) ? uint64_t(kinds) << 16 | kinds : 0);
 	});
 	// Power information: the processors with their frequencies from the host, a machine on mains power with no battery, and no sleep states.
 	registry.add("CallNtPowerInformation", 5, [](ApiCall &call) {
@@ -595,6 +598,225 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint32_t>(call[5], 0x0000000f);
 		if (call[6] && call.u32(7))
 			call.put_wide(call[6], u"NTFS", call.u32(7));
+		call.ret(1);
+	});
+	// DPI awareness contexts are the pseudo handles -1 to -5; the process is system DPI aware at 96 dots per inch.
+	const auto awareness_of = [](uint64_t context) -> int32_t {
+		switch (int64_t(context)) {
+		case -1: case -5: return 0;
+		case -2: return 1;
+		case -3: case -4: return 2;
+		default: return -1;
+		}
+	};
+	registry.add("GetAwarenessFromDpiAwarenessContext", 1, [awareness_of](ApiCall &call) { call.ret(uint32_t(awareness_of(call[0]))); });
+	registry.add("AreDpiAwarenessContextsEqual", 2, [awareness_of](ApiCall &call) {
+		const auto first = awareness_of(call[0]), second = awareness_of(call[1]);
+		if (first < 0 || second < 0) {
+			call.fail(87);
+			return;
+		}
+		call.ret(first == second);
+	});
+	registry.add("GetWindowDpiAwarenessContext", 1, [](ApiCall &call) { call.ret(uint64_t(-2)); });
+	registry.add("GetClassWord", 2, [](ApiCall &call) { call.ret(0); });
+	// The cursor is whatever the program set last; none is shown by the host.
+	registry.add("GetCursor", 0, [](ApiCall &call) { call.ret(0); });
+	// The root of a path's volume: the drive letter and a separator.
+	registry.add("GetVolumePathNameW", 3, [](ApiCall &call) {
+		if (!call[0] || !call[1]) {
+			call.fail(87);
+			return;
+		}
+		const auto path = call.wide(call[0], 32768);
+		std::u16string root;
+		if (path.size() >= 2 && path[1] == u':')
+			root = path.substr(0, 2) + u"\\";
+		else
+			root = u"C:\\";
+		if (call.u32(2) <= root.size()) {
+			call.fail(122);
+			return;
+		}
+		call.put_wide(call[1], root, call.u32(2));
+		call.ret(1);
+	});
+	// Writing a crash dump is not provided.
+	registry.add("MiniDumpWriteDump", 7, [](ApiCall &call) { call.fail(120); });
+	// Window event hooks are accepted and never called: the host reports no accessibility events.
+	registry.add("SetWinEventHook", 7, [&objects](ApiCall &call) {
+		const auto made = objects.add_object(std::make_shared<DeviceInfoSet>());
+		if (made.status) {
+			call.fail(8, 0);
+			return;
+		}
+		call.ret(made.value);
+	});
+	registry.add("UnhookWinEvent", 1, [&objects](ApiCall &call) {
+		if (!objects.object_as<DeviceInfoSet>(call[0])) {
+			call.fail(6, 0);
+			return;
+		}
+		objects.close(call[0]);
+		call.ret(1);
+	});
+	// Every process runs in session 1, the interactive one.
+	registry.add("ProcessIdToSessionId", 2, [](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		call.store<uint32_t>(call[1], 1);
+		call.ret(1);
+	});
+	// Library search paths are not restricted by anything Raven resolves, so the request is accepted as it stands.
+	registry.add("SetDllDirectoryW", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetDllDirectoryA", 1, [](ApiCall &call) { call.ret(1); });
+	// A program without a console window has no title to set.
+	registry.add("SetConsoleTitleW", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetConsoleTitleA", 1, [](ApiCall &call) { call.ret(1); });
+	// The interface a packet to an address would leave by: the first adapter that is up and is not the loopback one, else the loopback.
+	const auto best_interface = [](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		uint32_t chosen = 0, loopback = 0;
+		for (const auto &adapter : host_adapters(0)) {
+			if (adapter.status != 1)
+				continue;
+			if (adapter.type == if_type_loopback)
+				loopback = adapter.index;
+			else if (!chosen)
+				chosen = adapter.index;
+		}
+		if (!chosen)
+			chosen = loopback;
+		if (!chosen) {
+			call.ret(1231);
+			return;
+		}
+		call.store<uint32_t>(call[1], chosen);
+		call.ret(0);
+	};
+	registry.add("GetBestInterface", 2, best_interface);
+	registry.add("GetBestInterfaceEx", 2, best_interface);
+	// The class of human interface devices; none is present.
+	registry.add("HidD_GetHidGuid", 1, [](ApiCall &call) {
+		static const uint8_t guid[16] = {0xb2, 0x55, 0x1e, 0x4d, 0x6f, 0xf1, 0xcf, 0x11, 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30};
+		if (call[0])
+			call.write(call[0], std::span<const uint8_t>(guid, 16));
+	});
+	// Device interface notifications are accepted and never sent.
+	registry.add("CM_Register_Notification", 4, [&objects](ApiCall &call) {
+		const auto made = objects.add_object(std::make_shared<DeviceInfoSet>());
+		if (made.status || !call[2]) {
+			call.ret(made.status ? 0x3 : 0x1b);
+			return;
+		}
+		call.store_pointer(call[2], made.value);
+		call.ret(0);
+	});
+	registry.add("CM_Unregister_Notification", 1, [&objects](ApiCall &call) {
+		objects.close(call[0]);
+		call.ret(0);
+	});
+	// The scheduling class of the process, kept as the program sets it; the host does not change how the process is scheduled.
+	auto priority_class = std::make_shared<uint32_t>(0x20);
+	registry.add("GetPriorityClass", 1, [priority_class](ApiCall &call) { call.ret(*priority_class); });
+	registry.add("SetPriorityClass", 2, [priority_class](ApiCall &call) {
+		const uint32_t value = call.u32(1);
+		if (value != 0x20 && value != 0x40 && value != 0x80 && value != 0x100 && value != 0x4000 && value != 0x8000 && value != 0x00100000 && value != 0x00200000) {
+			call.fail(87);
+			return;
+		}
+		*priority_class = value;
+		call.ret(1);
+	});
+	// Prefetching memory is a hint: the pages are the host's to keep.
+	registry.add("PrefetchVirtualMemory", 4, [](ApiCall &call) { call.ret(1); });
+	// Power setting notifications are registered and never sent.
+	registry.add("RegisterPowerSettingNotification", 3, [&objects](ApiCall &call) {
+		const auto made = objects.add_object(std::make_shared<DeviceInfoSet>());
+		if (made.status) {
+			call.fail(8, 0);
+			return;
+		}
+		call.ret(made.value);
+	});
+	registry.add("UnregisterPowerSettingNotification", 1, [&objects](ApiCall &call) {
+		objects.close(call[0]);
+		call.ret(1);
+	});
+	// Remote desktop session queries have no answer here.
+	registry.add("WTSQuerySessionInformationW", 5, [](ApiCall &call) { call.fail(1, 0); });
+	registry.add("WTSFreeMemory", 1, [](ApiCall &) {});
+	// No input method editor is installed.
+	registry.add("ImmGetIMEFileNameW", 3, [](ApiCall &call) { call.ret(0); });
+	registry.add("ImmGetIMEFileNameA", 3, [](ApiCall &call) { call.ret(0); });
+	// A desktop program has no package identity.
+	registry.add("AppPolicyGetThreadInitializationType", 2, [](ApiCall &call) { call.ret(15703); });
+	// The account names the machine knows, with the SIDs they stand for.
+	registry.add("LookupAccountNameW", 7, [&context](ApiCall &call) {
+		auto name = call[1] ? call.wide(call[1], 256) : std::u16string();
+		const auto slash = name.find(u'\\');
+		if (slash != name.npos)
+			name = name.substr(slash + 1);
+		for (auto &character : name)
+			character = char16_t(std::tolower(static_cast<int>(character)));
+		std::vector<uint8_t> sid;
+		uint32_t use = 5;
+		if (name == u"administrators") { sid = make_sid(5, {32, 544}); use = 4; }
+		else if (name == u"users") { sid = make_sid(5, {32, 545}); use = 4; }
+		else if (name == u"everyone") { sid = make_sid(1, {0}); }
+		else if (name == u"system") { sid = make_sid(5, {18}); }
+		else if (name == u"authenticated users") { sid = make_sid(5, {11}); }
+		else if (name == u"local service") { sid = make_sid(5, {19}); }
+		else if (name == u"network service") { sid = make_sid(5, {20}); }
+		else if (name == u"interactive") { sid = make_sid(5, {4}); }
+		else if (name == u"network") { sid = make_sid(5, {2}); }
+		else {
+			const auto user = from_utf8(::getpwuid(::getuid()) ? ::getpwuid(::getuid())->pw_name : "user");
+			std::u16string lower_user = user;
+			for (auto &character : lower_user)
+				character = char16_t(std::tolower(static_cast<int>(character)));
+			if (name.empty() || name == lower_user) {
+				sid = user_sid();
+				use = 1;
+			}
+		}
+		if (sid.empty()) {
+			call.fail(1332, 0);
+			return;
+		}
+		char host[256] = {};
+		::gethostname(host, sizeof(host) - 1);
+		std::string netbios(host);
+		netbios = netbios.substr(0, netbios.find('.'));
+		for (auto &character : netbios)
+			character = char(std::toupper(static_cast<unsigned char>(character)));
+		std::u16string domain;
+		if (use == 4)
+			domain = u"BUILTIN";
+		else if (use == 1)
+			domain = from_utf8(netbios);
+		else if (sid[7] == 5)
+			domain = u"NT AUTHORITY";
+		if (!call[3] || !call[5]) {
+			call.fail(87, 0);
+			return;
+		}
+		const uint32_t sid_capacity = call.load<uint32_t>(call[3]), domain_capacity = call.load<uint32_t>(call[5]);
+		call.store<uint32_t>(call[3], uint32_t(sid.size()));
+		call.store<uint32_t>(call[5], uint32_t(domain.size() + 1));
+		if (!call[2] || sid_capacity < sid.size() || !call[4] || domain_capacity < domain.size() + 1) {
+			call.fail(122, 0);
+			return;
+		}
+		call.write(call[2], sid);
+		call.put_wide(call[4], domain, domain.size() + 1);
+		call.store<uint32_t>(call[6], use);
+		call.store<uint32_t>(call[5], uint32_t(domain.size()));
 		call.ret(1);
 	});
 	// Session change messages are never sent: the registration succeeds and nothing arrives.

@@ -11,6 +11,8 @@
 #include <commdlg.h>
 #include <shobjidl.h>
 #include <servprov.h>
+#include <propsys.h>
+#include <shellapi.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -1073,6 +1075,219 @@ short WINAPI GetFileTitleW(LPCWSTR file, LPWSTR title, WORD size)
 		return (short)(length + 1);
 	lstrcpyW(title, name);
 	return 0;
+}
+
+/* A window's property store: the values a program sets on it (its application id, for one) kept in memory for as long as the process
+   runs. Strings are copied; other values are kept as they are. */
+typedef struct {
+	PROPERTYKEY key;
+	PROPVARIANT value;
+} StoredProperty;
+
+typedef struct {
+	IPropertyStore store;
+	HWND window;
+	StoredProperty *items;
+	DWORD count;
+} WindowStore;
+
+static WindowStore **window_stores;
+static DWORD window_store_count;
+
+static BOOL same_key(const PROPERTYKEY *a, const PROPERTYKEY *b)
+{
+	return InlineIsEqualGUID(&a->fmtid, &b->fmtid) && a->pid == b->pid;
+}
+
+static HRESULT copy_value(PROPVARIANT *to, const PROPVARIANT *from)
+{
+	*to = *from;
+	if (from->vt == VT_LPWSTR && from->pwszVal) {
+		size_t length = (size_t)lstrlenW(from->pwszVal) + 1;
+		to->pwszVal = CoTaskMemAlloc(length * sizeof(WCHAR));
+		if (!to->pwszVal)
+			return E_OUTOFMEMORY;
+		memcpy(to->pwszVal, from->pwszVal, length * sizeof(WCHAR));
+	}
+	return S_OK;
+}
+
+static HRESULT WINAPI store_query(IPropertyStore *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (InlineIsEqualGUID(iid, &IID_IUnknown) || InlineIsEqualGUID(iid, &IID_IPropertyStore)) {
+		*out = self;
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+static ULONG WINAPI store_reference(IPropertyStore *self) { return 1; }
+static HRESULT WINAPI store_count(IPropertyStore *self, DWORD *count)
+{
+	if (!count)
+		return E_POINTER;
+	*count = ((WindowStore *)self)->count;
+	return S_OK;
+}
+static HRESULT WINAPI store_at(IPropertyStore *self, DWORD index, PROPERTYKEY *key)
+{
+	WindowStore *store = (WindowStore *)self;
+	if (!key)
+		return E_POINTER;
+	if (index >= store->count)
+		return E_INVALIDARG;
+	*key = store->items[index].key;
+	return S_OK;
+}
+static HRESULT WINAPI store_get(IPropertyStore *self, REFPROPERTYKEY key, PROPVARIANT *value)
+{
+	WindowStore *store = (WindowStore *)self;
+	DWORD index;
+	if (!key || !value)
+		return E_POINTER;
+	for (index = 0; index < store->count; ++index)
+		if (same_key(&store->items[index].key, key))
+			return copy_value(value, &store->items[index].value);
+	memset(value, 0, sizeof(*value));
+	return S_OK;
+}
+static HRESULT WINAPI store_set(IPropertyStore *self, REFPROPERTYKEY key, REFPROPVARIANT value)
+{
+	WindowStore *store = (WindowStore *)self;
+	StoredProperty *grown;
+	DWORD index;
+	if (!key || !value)
+		return E_POINTER;
+	for (index = 0; index < store->count; ++index)
+		if (same_key(&store->items[index].key, key)) {
+			if (store->items[index].value.vt == VT_LPWSTR)
+				CoTaskMemFree(store->items[index].value.pwszVal);
+			return copy_value(&store->items[index].value, value);
+		}
+	grown = store->items ? HeapReAlloc(GetProcessHeap(), 0, store->items, (store->count + 1) * sizeof(StoredProperty))
+		: HeapAlloc(GetProcessHeap(), 0, sizeof(StoredProperty));
+	if (!grown)
+		return E_OUTOFMEMORY;
+	store->items = grown;
+	store->items[store->count].key = *key;
+	if (FAILED(copy_value(&store->items[store->count].value, value)))
+		return E_OUTOFMEMORY;
+	++store->count;
+	return S_OK;
+}
+static HRESULT WINAPI store_commit(IPropertyStore *self) { return S_OK; }
+
+static IPropertyStoreVtbl store_table = {store_query, store_reference, store_reference, store_count, store_at, store_get, store_set, store_commit};
+
+HRESULT WINAPI SHGetPropertyStoreForWindow(HWND window, REFIID iid, void **out)
+{
+	WindowStore *store = NULL, **grown;
+	DWORD index;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!IsWindow(window))
+		return E_INVALIDARG;
+	for (index = 0; index < window_store_count; ++index)
+		if (window_stores[index]->window == window)
+			store = window_stores[index];
+	if (!store) {
+		store = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WindowStore));
+		grown = window_stores ? HeapReAlloc(GetProcessHeap(), 0, window_stores, (window_store_count + 1) * sizeof(WindowStore *))
+			: HeapAlloc(GetProcessHeap(), 0, sizeof(WindowStore *));
+		if (!store || !grown)
+			return E_OUTOFMEMORY;
+		store->store.lpVtbl = &store_table;
+		store->window = window;
+		window_stores = grown;
+		window_stores[window_store_count++] = store;
+	}
+	return store_query(&store->store, iid, out);
+}
+
+/* Frees what a PROPVARIANT owns and empties it. */
+HRESULT WINAPI PropVariantClear(PROPVARIANT *value)
+{
+	if (!value)
+		return S_OK;
+	switch (value->vt) {
+	case VT_LPWSTR:
+	case VT_LPSTR:
+	case VT_CLSID:
+		CoTaskMemFree(value->pwszVal);
+		break;
+	case VT_BSTR: {
+		HMODULE automation = GetModuleHandleW(L"oleaut32.dll");
+		void (WINAPI *free_string)(BSTR) = automation ? (void (WINAPI *)(BSTR))GetProcAddress(automation, "SysFreeString") : NULL;
+		if (free_string)
+			free_string(value->bstrVal);
+		break;
+	}
+	case VT_UNKNOWN:
+	case VT_DISPATCH:
+		if (value->punkVal)
+			IUnknown_Release(value->punkVal);
+		break;
+	case VT_BLOB:
+		CoTaskMemFree(value->blob.pBlobData);
+		break;
+	default:
+		break;
+	}
+	memset(value, 0, sizeof(*value));
+	return S_OK;
+}
+
+/* There is no taskbar here: it is not auto-hidden, has no position and holds no application bars. */
+UINT_PTR WINAPI SHAppBarMessage(DWORD message, PAPPBARDATA data)
+{
+	switch (message) {
+	case ABM_GETSTATE:
+	case ABM_GETAUTOHIDEBAR:
+	case 11: /* ABM_GETAUTOHIDEBAREX */
+		return 0;
+	default:
+		return FALSE;
+	}
+}
+
+/* The task allocator as an IMalloc: its memory is the memory CoTaskMemAlloc hands out. */
+static HRESULT WINAPI malloc_query(IMalloc *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (InlineIsEqualGUID(iid, &IID_IUnknown) || InlineIsEqualGUID(iid, &IID_IMalloc)) {
+		*out = self;
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+
+static ULONG WINAPI malloc_reference(IMalloc *self) { return 1; }
+static void *WINAPI malloc_alloc(IMalloc *self, SIZE_T bytes) { return CoTaskMemAlloc(bytes); }
+static void *WINAPI malloc_realloc(IMalloc *self, void *memory, SIZE_T bytes) { return CoTaskMemRealloc(memory, bytes); }
+static void WINAPI malloc_free(IMalloc *self, void *memory) { CoTaskMemFree(memory); }
+static SIZE_T WINAPI malloc_size(IMalloc *self, void *memory) { return (SIZE_T)-1; }
+static int WINAPI malloc_did_alloc(IMalloc *self, void *memory) { return -1; }
+static void WINAPI malloc_minimize(IMalloc *self) {}
+
+static IMallocVtbl malloc_table = {malloc_query, malloc_reference, malloc_reference, malloc_alloc, malloc_realloc,
+	malloc_free, malloc_size, malloc_did_alloc, malloc_minimize};
+static IMalloc task_malloc = {&malloc_table};
+
+HRESULT WINAPI CoGetMalloc(DWORD context, LPMALLOC *out)
+{
+	if (!out)
+		return E_POINTER;
+	if (context != MEMCTX_TASK) {
+		*out = NULL;
+		return E_INVALIDARG;
+	}
+	*out = &task_malloc;
+	return S_OK;
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)

@@ -3,6 +3,8 @@
 #include "text.h"
 
 #include <atomic>
+#include <algorithm>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <cerrno>
@@ -15,6 +17,7 @@
 #include <sys/mman.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -29,6 +32,12 @@ std::map<pid_t, std::weak_ptr<ProcessObject>> known;
 
 }
 
+ProcessObject::~ProcessObject()
+{
+	if (channel)
+		remove_child_channel(channel.get());
+}
+
 bool ProcessObject::exited() const
 {
 	reap();
@@ -41,10 +50,33 @@ uint32_t ProcessObject::exit_code() const
 	return code;
 }
 
+bool runtime_process_alive(pid_t pid)
+{
+	if (pid <= 0)
+		return false;
+	std::ifstream stat("/proc/" + std::to_string(pid) + "/stat");
+	std::string text;
+	std::getline(stat, text);
+	const auto close = text.rfind(')');
+	if (close == std::string::npos || close + 2 >= text.size() || text[close + 2] == 'Z' || text[close + 2] == 'X')
+		return false;
+	char mine[4096], theirs[4096];
+	const auto mine_length = ::readlink("/proc/self/exe", mine, sizeof(mine));
+	const auto theirs_length = ::readlink(("/proc/" + std::to_string(pid) + "/exe").c_str(), theirs, sizeof(theirs));
+	return mine_length > 0 && mine_length == theirs_length && std::equal(mine, mine + mine_length, theirs);
+}
+
 void ProcessObject::reap() const
 {
 	if (done)
 		return;
+	if (foreign) {
+		if (!runtime_process_alive(pid)) {
+			done = true;
+			code = 0;
+		}
+		return;
+	}
 	int status = 0;
 	pid_t result;
 	do result = ::waitpid(pid, &status, WNOHANG); while (result < 0 && errno == EINTR);
@@ -164,6 +196,12 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 		owned.push_back(file);
 		arguments.push_back("--inherit-fd=" + std::to_string(pass(file)));
 	}
+	// Handles that are duplicated into the child later travel over a socket pair; the child keeps one end.
+	int channel_pair[2] = {-1, -1};
+	if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel_pair) == 0) {
+		owned.push_back(channel_pair[1]);
+		arguments.push_back("--handle-channel-fd=" + std::to_string(pass(channel_pair[1])));
+	}
 	arguments.push_back("--command-line=" + to_utf8(launch.command_line));
 	arguments.push_back("--directory=" + to_utf8(launch.directory));
 	arguments.push_back(launch.image.string());
@@ -182,6 +220,8 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 		release();
 		if (gate_pair[1] >= 0)
 			::close(gate_pair[1]);
+		if (channel_pair[0] >= 0)
+			::close(channel_pair[0]);
 		posix_spawn_file_actions_destroy(&actions);
 		error = 6;
 	};
@@ -212,6 +252,8 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 	if (status) {
 		if (gate_pair[1] >= 0)
 			::close(gate_pair[1]);
+		if (channel_pair[0] >= 0)
+			::close(channel_pair[0]);
 		error = status == ENOENT ? 2 : status == ENOMEM ? 8 : 5;
 		return nullptr;
 	}
@@ -219,6 +261,10 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 		*launch.gate = gate_pair[1];
 	++live;
 	auto object = std::make_shared<ProcessObject>(child);
+	if (channel_pair[0] >= 0) {
+		object->channel = std::make_unique<HandleChannel>(channel_pair[0], handle_range_to_child);
+		add_child_channel(object->channel.get());
+	}
 	object->name = from_utf8(launch.image.filename().string());
 	{
 		std::lock_guard lock(known_mutex);

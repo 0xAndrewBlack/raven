@@ -298,7 +298,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 			call.fail(8);
 			return;
 		}
-		timers.push_back({call[0], call[1], call[3], interval, std::chrono::steady_clock::now() + std::chrono::milliseconds(interval), true});
+		timers.push_back({call[0], call[1], call[3], interval, std::chrono::steady_clock::now() + std::chrono::milliseconds(interval), true, environment.thread_id()});
 		call.ret(call[1]);
 	});
 	registry.add("KillSystemTimer", 2, [this](ApiCall &call) {

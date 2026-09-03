@@ -42,6 +42,12 @@ struct NativeThreadState {
 	bool active_call = false, awaiting_api = false, awaiting_syscall = false, debug_print_fault = false;
 	uint32_t pending_cleanup = 0;
 	uint64_t stack_top = 0;
+	// A call a handler makes on the guest's behalf with translated arguments belongs to the thread that made it: another thread that
+	// runs meanwhile answers its own calls.
+	std::optional<std::vector<uint64_t>> translated_words;
+	size_t translated_depth = 0;
+	std::array<uint64_t, 4> translated_floats{};
+	uint64_t translated_result = 0;
 };
 
 // Images must outlive this stopped/resumable x86-64 Linux process.
@@ -76,6 +82,9 @@ public:
 	std::pair<uint64_t, uint64_t> stack_bounds() const;
 	bool active() const;
 	void abandon_call();
+	// Drops whatever call the current thread state holds, running or waiting on the runtime: the process is ending and that call
+	// will never be resumed.
+	void end_call();
 	// callee_cleanup is the stdcall argument byte count an x86 API pops on return; x64 ignores it.
 	void add_api_trap(uint64_t address, uint32_t callee_cleanup = 0);
 	NativeMode mode() const;

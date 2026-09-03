@@ -195,7 +195,7 @@ void NativeWindows::post_due_timers()
 			return message.message == kind && message.window == timer.window && message.wparam == timer.id;
 		});
 		if (!pending && messages.size() < 10000)
-			messages.push_back({timer.window, timer.id, timer.procedure, kind, uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()), cursor_x, cursor_y});
+			queue({timer.window, timer.id, timer.procedure, kind, uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()), cursor_x, cursor_y, 0, timer.window ? 0 : timer.thread});
 		timer.due = now + std::chrono::milliseconds(timer.interval);
 	}
 }
@@ -343,7 +343,7 @@ bool NativeWindows::system_dispatch(std::string_view name)
 			if (timers.size() >= 1024)
 				throw uint32_t(8);
 			std::erase_if(timers, [&](const Timer &timer) { return timer.window == args[0] && timer.id == id; });
-			timers.push_back({args[0], id, args[3], interval, std::chrono::steady_clock::now() + std::chrono::milliseconds(interval)});
+			timers.push_back({args[0], id, args[3], interval, std::chrono::steady_clock::now() + std::chrono::milliseconds(interval), false, environment.thread_id()});
 			result = id;
 		} else if (name == "KillTimer") {
 			const auto args = process.api_arguments(2);

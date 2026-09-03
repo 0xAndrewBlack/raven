@@ -453,13 +453,8 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[4], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(result.data()), result.size()));
 		call.ret(result.size());
 	});
-	registry.add("GetStringTypeW", 5, [](ApiCall &call) {
-		const uint32_t kind = call.u32(0);
-		if (!call[1] || !call[4] || (kind != 1 && kind != 2 && kind != 4)) {
-			call.fail(87);
-			return;
-		}
-		const auto text = counted_wide(call, call[1], call.i32(2));
+	// The character classes of a text for CT_CTYPE1, CT_CTYPE2 and CT_CTYPE3.
+	const auto classify = [](uint32_t kind, const std::u16string &text) {
 		static const bool unicode = std::setlocale(LC_CTYPE, "C.UTF-8") != nullptr;
 		(void)unicode;
 		std::vector<uint8_t> bytes(text.size() * 2);
@@ -487,11 +482,37 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 			}
 			std::memcpy(bytes.data() + at * 2, &value, 2);
 		}
-		call.write(call[4], bytes);
+		return bytes;
+	};
+	// GetStringTypeW(kind, text, count, types): four arguments.
+	registry.add("GetStringTypeW", 4, [classify](ApiCall &call) {
+		const uint32_t kind = call.u32(0);
+		if (!call[1] || !call[3] || (kind != 1 && kind != 2 && kind != 4)) {
+			call.fail(87);
+			return;
+		}
+		call.write(call[3], classify(kind, counted_wide(call, call[1], call.i32(2))));
 		call.ret(1);
 	});
-	registry.add("GetStringTypeExW", 5, [](ApiCall &call) {
-		call.fail(120);
+	// GetStringTypeExW(locale, kind, text, count, types) and GetStringTypeA(locale, kind, text, count, types): five.
+	registry.add("GetStringTypeExW", 5, [classify](ApiCall &call) {
+		const uint32_t kind = call.u32(1);
+		if (!call[2] || !call[4] || (kind != 1 && kind != 2 && kind != 4)) {
+			call.fail(87);
+			return;
+		}
+		call.write(call[4], classify(kind, counted_wide(call, call[2], call.i32(3))));
+		call.ret(1);
+	});
+	registry.add("GetStringTypeA", 5, [classify, ansi_page](ApiCall &call) {
+		const uint32_t kind = call.u32(1);
+		if (!call[2] || !call[4] || (kind != 1 && kind != 2 && kind != 4)) {
+			call.fail(87);
+			return;
+		}
+		const auto text = decode_ansi(counted_narrow(call, call[2], call.i32(3)), ansi_page(call.u32(0)));
+		call.write(call[4], classify(kind, text));
+		call.ret(1);
 	});
 
 	registry.add("GetCPInfo", 2, [](ApiCall &call) {

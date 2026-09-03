@@ -1,4 +1,7 @@
 #include "providers.h"
+#include "child_process.h"
+#include "handle_channel.h"
+#include "section.h"
 #include "ansi_api.h"
 #include "module_api.h"
 #include "loader.h"
@@ -24,6 +27,7 @@
 #include "graphics/vulkan_bridge.h"
 #endif
 
+#include <unistd.h>
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -283,7 +287,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			nt_names.push_back(name);
 	}
 	// Natives that the shared API registry implements.
-	for (const auto name : {"NtQuerySection"})
+	for (const auto name : {"NtQuerySection", "NtFlushInstructionCache", "RtlAddGrowableFunctionTable", "RtlGrowFunctionTable", "RtlDeleteGrowableFunctionTable"})
 		if (std::find(nt_names.begin(),nt_names.end(),name)==nt_names.end()) nt_names.push_back(name);
 	std::sort(nt_names.begin(),nt_names.end());
 	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.
@@ -449,7 +453,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	NativeProcess process(images, bootstrap, timeout);
 	for (const auto &[address, name] : traps)
 		process.add_api_trap(address);
-	NativeEnvironment environment(process, entry.loaded.base(), 1, 1);
+	NativeEnvironment environment(process, entry.loaded.base(), uint32_t(::getpid()), 1);
 	if (!launch) {
 		NativeLaunch initial;
 		for (const char byte : entry.name) {
@@ -475,7 +479,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	NativeTLS tls(process, environment, order);
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativeResources resources(process, environment, modules, entry);
-	NativeMemory memory(process,environment);
+	// What a program may commit: 512 MiB by default, as set by RAVEN_COMMIT_LIMIT_MB (large programs, a browser engine for one, need more).
+	const size_t commit_limit=(std::getenv("RAVEN_COMMIT_LIMIT_MB") ? size_t(std::strtoull(std::getenv("RAVEN_COMMIT_LIMIT_MB"),nullptr,10)) : size_t(512))*1024*1024;
+	NativeMemory memory(process,environment,commit_limit);
 	register_images(memory,modules);
 	NativeObjectAPI object_api(process,environment,kernel_objects,deadline);
 	NativeHeap heap(process,environment,modules,entry.image);
@@ -501,6 +507,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	const auto remaining = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()); };
 	size_t debug_bytes=0;
 	KernelContext *kernel_ptr=nullptr;
+	NativeThreads *threads_ptr=nullptr;
+	auto last_service=std::chrono::steady_clock::now();
 	const auto invoke = [&](uint64_t address, std::span<const uint64_t> arguments) {
 		auto budget = remaining();
 		if (budget.count() <= 0)
@@ -641,7 +649,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						std::cerr << '\n';
 					});
 			}
+			// A thread that never waits still answers the other processes, a few times every second at most.
+			if (const auto now = std::chrono::steady_clock::now(); now - last_service >= std::chrono::milliseconds(2)) {
+				last_service = now;
+				if (threads_ptr)
+					threads_ptr->serve();
+			}
 			bool dispatched;
+			api_in_progress = found->second.c_str();
 			const auto profile_start = RuntimeProfile::instance().enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 			const auto error_before = std::getenv("RAVEN_TRACE_FAIL") ? environment.last_error() : 0;
 			const auto failure_arguments = std::getenv("RAVEN_TRACE_FAIL") ? process.api_arguments(4) : std::vector<uint64_t>{};
@@ -720,7 +735,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				result = process.resume(budget);
 				RuntimeProfile::instance().guest(std::chrono::steady_clock::now() - before);
 			} else {
-				result = process.resume(budget);
+				try {
+					result = process.resume(budget);
+				} catch (const std::runtime_error &failure) {
+					// A handler that leaves the call without its answer is named, since the global name may belong to another thread by now.
+					throw std::runtime_error(std::string(failure.what()) + " after " + found->second);
+				}
 			}
 		}
 		return result;
@@ -729,6 +749,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	NativePaths paths(prefix);
 	if (launch && !launch->directory.empty())
 		paths.set_current(launch->directory);
+	desktop.set_section_source([&](uint64_t handle) -> std::optional<std::pair<int, uint64_t>> {
+		const auto section = kernel_objects.object_as<SectionObject>(handle);
+		if (!section || section->descriptor < 0)
+			return std::nullopt;
+		return std::make_pair(section->descriptor, section->size);
+	});
 	desktop.set_host_files([&paths](std::u16string_view path) -> std::optional<std::vector<uint8_t>> {
 		const auto resolved = paths.resolve(path);
 		if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
@@ -739,12 +765,19 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	GuestAllocator allocator(memory, heap);
 	NativeThreads threads(process, environment, memory, &tls, deadline);
 	threads.set_runner(invoke);
+	threads_ptr = &threads;
+	// Other processes ask for handles of this one and send theirs; the scheduler answers them.
+	threads.add_service([&kernel_objects] { receive_handles(kernel_objects); });
 	object_api.set_cooperative(true);
 	object_api.set_threads(&threads);
 	windows.set_yield([&threads] { return threads.live() > 1 && threads.yield(); });
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, threads, paths, modules, entry, *launch, invoke};
 	windows.set_global_allocator([&allocator](uint64_t size) { return allocator.allocate(size,true); });
-	kernel.message_ready=[&windows] { return windows.input_ready(); };
+	kernel.message_ready=[&windows](uint32_t thread) { return windows.input_pending(thread); };
+	windows.set_block([&threads](std::function<bool()> ready) {
+		HostWait waiting;
+		threads.block(std::move(ready), std::nullopt);
+	});
 	kernel_ptr=&kernel;
 	NativeUnwinder unwinder(process, modules);
 	register_exception_api(api_registry, kernel, unwinder);
@@ -774,6 +807,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	desktop.register_image_api(desktop_api);
 	NativeRegistry hive(prefix.registry_file());
 	register_registry_api(api_registry, kernel, hive);
+	register_service_api(api_registry, kernel, hive);
 	register_ansi_adapters(api_registry);
 	register_legacy_file_api(api_registry);
 	NativeProfile profile(process, environment, prefix);
@@ -811,6 +845,15 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		references.emplace(module.get(), 0);
 	}
 	bool loading = false;
+	// The thread that holds the loader: another thread that loads or frees a library meanwhile waits for it, as it would for the
+	// loader lock.
+	uint32_t loading_thread = 0;
+	const auto await_loader = [&] {
+		if (!loading || loading_thread == threads.current_id())
+			return;
+		HostWait waiting;
+		threads.block([&] { return !loading; }, std::nullopt);
+	};
 	struct LoadFailure { uint32_t error; };
 	const auto checked = [](NativeResult result) {
 		if (result.stop != NativeStop::returned)
@@ -818,7 +861,17 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	};
 	// Libraries loaded by explicit path keep their host file under the module identity (lower-case file name).
 	std::map<std::string, std::filesystem::path> explicit_files;
+	kernel.reference_module = [&](uint64_t base, bool pin) {
+		const auto found = std::find_if(references.begin(), references.end(), [&](const auto &item) { return item.first->loaded.base() == base; });
+		if (found == references.end())
+			return;
+		if (pin)
+			pinned.insert(found->first);
+		else if (found->second != UINT64_MAX)
+			++found->second;
+	};
 	module_api.set_loader([&](std::string name) -> uint64_t {
+		await_loader();
 		if (name.empty()) {
 			environment.set_last_error(126);
 			return 0;
@@ -889,6 +942,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		std::vector<Staged> staged;
 		bool guest_started = false;
 		loading = true;
+		loading_thread = threads.current_id();
 		const auto rollback = [&] {
 			for (auto item = attached.rbegin(); item != attached.rend(); ++item)
 				if (std::any_of(staged.begin(), staged.end(), [&](const auto &s) { return s.module == *item && s.attached; }))
@@ -1034,6 +1088,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			throw;
 		}
 	}, [&](uint64_t handle) {
+		await_loader();
 		const auto found = std::find_if(references.begin(), references.end(), [&](const auto &item) { return item.first->loaded.base() == handle; });
 		if (found == references.end() || !found->second) {
 			environment.set_last_error(found == references.end() ? 126 : 120);
@@ -1061,6 +1116,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		}
 		std::vector<const PEModule *> released;
 		loading = true;
+		loading_thread = threads.current_id();
 		for (auto item = attached.rbegin(); item != attached.rend(); ++item)
 			if (!reachable.contains(*item)) {
 				checked(detach(**item, 0));
@@ -1090,14 +1146,17 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					throw result;
 			}
 		};
+		// An entry point may load or free libraries, so the walk goes over a copy and skips a module that is gone by its turn.
+		const auto modules_now = attached;
+		const auto still_attached = [&](const PEModule *module) { return std::find(attached.begin(), attached.end(), module) != attached.end(); };
 		if (reason == 2) {
 			notify(entry);
-			for (const auto *module : attached)
-				if (module != &entry)
+			for (const auto *module : modules_now)
+				if (module != &entry && still_attached(module))
 					notify(*module);
 		} else {
-			for (auto module = attached.rbegin(); module != attached.rend(); ++module)
-				if (*module != &entry)
+			for (auto module = modules_now.rbegin(); module != modules_now.rend(); ++module)
+				if (*module != &entry && still_attached(*module))
 					notify(**module);
 			notify(entry);
 		}

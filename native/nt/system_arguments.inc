@@ -2466,6 +2466,15 @@ static constexpr std::pair<std::string_view, uint8_t> wtsapi32_words[]{
 	{"WTSUnRegisterSessionNotification",1},{"WTSUnRegisterSessionNotificationEx",2},{"WTSVirtualChannelClose",1},{"WTSVirtualChannelOpen",3},{"WTSVirtualChannelOpenEx",3},{"WTSVirtualChannelPurgeInput",1},
 	{"WTSVirtualChannelPurgeOutput",1},{"WTSVirtualChannelQuery",4},{"WTSVirtualChannelRead",5},{"WTSVirtualChannelWrite",4},{"WTSWaitSystemEvent",3},
 };
+static constexpr std::pair<std::string_view, uint8_t> atlthunk_words[]{
+	{"AtlThunk_AllocateData",0},{"AtlThunk_DataToCode",1},{"AtlThunk_FreeData",1},{"AtlThunk_InitData",3},
+};
+static constexpr std::pair<std::string_view, uint8_t> oleacc_words[]{
+	{"AccGetRunningUtilityState",3},{"AccNotifyTouchInteraction",4},{"AccSetRunningUtilityState",3},{"AccessibleChildren",5},{"AccessibleObjectFromEvent",5},{"AccessibleObjectFromPoint",4},
+	{"AccessibleObjectFromWindow",4},{"AccessibleObjectFromWindowTimeout",6},{"CreateStdAccessibleObject",4},{"CreateStdAccessibleProxyA",5},{"CreateStdAccessibleProxyW",5},{"GetOleaccVersionInfo",2},
+	{"GetProcessHandleFromHwnd",1},{"GetRoleTextA",3},{"GetRoleTextW",3},{"GetStateTextA",3},{"GetStateTextW",3},{"LresultFromObject",3},
+	{"ObjectFromLresult",4},{"PropMgrClient_LookupProp",7},{"WindowFromAccessibleObject",2},
+};
 static constexpr std::pair<std::string_view, std::span<const std::pair<std::string_view, uint8_t>>> argument_tables[]{
 	{"advapi32.dll", advapi32_words},
 	{"bcrypt.dll", bcrypt_words},
@@ -2518,4 +2527,6 @@ static constexpr std::pair<std::string_view, std::span<const std::pair<std::stri
 	{"wevtapi.dll", wevtapi_words},
 	{"winhttp.dll", winhttp_words},
 	{"wtsapi32.dll", wtsapi32_words},
+	{"atlthunk.dll", atlthunk_words},
+	{"oleacc.dll", oleacc_words},
 };

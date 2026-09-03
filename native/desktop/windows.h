@@ -11,6 +11,7 @@
 #include "nt/environment.h"
 #include <functional>
 #include <deque>
+#include <memory>
 #include <optional>
 
 namespace raven {
@@ -28,6 +29,8 @@ public:
 	void set_deadline(std::chrono::steady_clock::time_point deadline);
 	// Lets other guest threads run while this one waits for messages; returns true when one ran.
 	void set_yield(std::function<bool()> yield) { yield_hook = std::move(yield); }
+	// Blocks the calling guest thread until the condition holds while the others run (a message sent to another thread's window).
+	void set_block(std::function<void(std::function<bool()>)> block) { block_hook = std::move(block); }
 	// Resolves the default menu of a window class (module, resource identifier) to a menu handle.
 	// Allocates guest global memory for clipboard data that arrives from the host.
 	void set_global_allocator(std::function<uint64_t(uint64_t)> allocator) { global_allocator = std::move(allocator); }
@@ -38,8 +41,11 @@ public:
 	// Drawing marks the surface dirty; the next message retrieval presents it, so a burst of primitives costs one frame.
 	void drawing(uint64_t window);
 	void flush_dirty();
-	// Whether a message, paint request or due timer waits for the guest.
+	// Whether a message, paint request or due timer waits for the guest; host input is delivered to the windows on the way, so this
+	// runs only inside a call of the guest thread.
 	bool input_ready();
+	// The same question for a waiting thread's condition: host input is only collected, and no window procedure runs.
+	bool input_pending(uint32_t thread);
 	void dump_windows();
 	void shutdown();
 
@@ -54,10 +60,30 @@ private:
 		uint32_t message, time;
 		int32_t x=0,y=0;
 		uint32_t character=0;
+		// The guest thread whose queue holds the message; zero for one any thread may take.
+		uint32_t thread=0;
 	};
-	// Initial guest thread queue; HWNDs and drawing resources stay in DesktopObjects.
+	// The posted messages of every guest thread, each marked with the thread that owns it; HWNDs and drawing resources stay in
+	// DesktopObjects.
 	std::deque<Message> messages;
-	std::optional<uint32_t> quit;
+	// Queues a message for the thread that owns its window (the calling thread for a message to no window).
+	void queue(Message message);
+	uint32_t owner(uint64_t window) const;
+	bool queued_for(uint32_t thread) const;
+	// A message sent to a window of another thread waits here until that thread retrieves messages; the sender waits for the result.
+	struct SentMessage { uint64_t window; uint32_t message; uint64_t wparam, lparam, result=0; uint32_t thread; bool taken=false, done=false; };
+	std::deque<std::shared_ptr<SentMessage>> sent;
+	// Runs the messages other threads sent to windows of the calling thread.
+	void serve_sent();
+	bool sent_for(uint32_t thread) const;
+	std::function<void(std::function<bool()>)> block_hook;
+	// A window of the calling thread that needs painting, under the filter window when one is given.
+	uint64_t invalid_owned(uint64_t filter) const;
+	// Host input collected while threads waited, delivered by the next input_ready.
+	std::deque<DesktopEvent> pending_events;
+	void deliver_pending();
+	// PostQuitMessage codes by thread.
+	std::map<uint32_t,uint32_t> quits;
 	std::set<uint64_t> dirty_roots;
 	bool dumped=false;
 	std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
@@ -67,7 +93,8 @@ private:
 	uint32_t mouse_buttons=0;
 	int32_t cursor_x=0,cursor_y=0;
 	uint64_t focus=0,active=0;
-	bool activating=false;
+	bool activating=false,has_queued_activation=false;
+	uint64_t queued_activation=0;
 	int focusing=0;
 	bool keep_host_window=false;
 	// Roots whose host window carries a surface handed to a graphics driver: such a window must survive a resize.
@@ -191,7 +218,7 @@ private:
 	uint64_t current_cursor=0;
 	// Mouse capture and timers belong to the initial guest thread's input state.
 	uint64_t capture=0;
-	struct Timer { uint64_t window,id,procedure; uint32_t interval; std::chrono::steady_clock::time_point due; bool system=false; };
+	struct Timer { uint64_t window,id,procedure; uint32_t interval; std::chrono::steady_clock::time_point due; bool system=false; uint32_t thread=0; };
 	std::vector<Timer> timers;
 	uint64_t next_timer_id=0x1000;
 	void post_due_timers();

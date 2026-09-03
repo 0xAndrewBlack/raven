@@ -23,7 +23,7 @@ std::span<const std::string_view> NativeDesktop::control_exports()
 
 std::span<const std::string_view> NativeDesktop::user_exports()
 {
-	static constexpr std::array<std::string_view, 85> names{
+	static constexpr std::array<std::string_view, 86> names{
 		"AdjustWindowRect", "AdjustWindowRectEx", "BeginPaint", "CallWindowProcW", "ClientToScreen", "CopyIcon", "CreateIconFromResourceEx", "CreateWindowExW", "DefWindowProcW",
 		"DestroyIcon", "DestroyMenu", "DestroyWindow", "DispatchMessageW", "DrawIconEx", "EndPaint", "FillRect", "FrameRect",
 		"GetActiveWindow", "GetClassInfoExW", "GetClassInfoW", "GetClassLongA", "GetClassLongPtrA", "GetClassLongPtrW",
@@ -34,7 +34,7 @@ std::span<const std::string_view> NativeDesktop::user_exports()
 		"PrivateExtractIconsW", "RegisterClassExW", "RegisterClassW", "ReleaseDC", "ScreenToClient", "SendMessageW", "SetClassLongA", "SetClassLongPtrA",
 		"SetClassLongPtrW", "SetClassLongW", "SetFocus", "SetWindowLongA", "SetWindowLongPtrA", "SetWindowLongPtrW",
 		"SetWindowLongW", "SetWindowTextW", "ShowWindow", "TranslateMessage", "UnregisterClassW", "UpdateWindow",
-		"ValidateRect"};
+		"ValidateRect", "WindowFromDC"};
 	return names;
 }
 

@@ -3,6 +3,9 @@
 #include <cstdlib>
 #include <iostream>
 
+#include "api.h"
+#include "shared_file.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -146,7 +149,7 @@ void NativeThreads::thread_main(GuestThread &thread)
 			try {
 				std::rethrow_exception(pending);
 			} catch (const std::exception &error) {
-				std::cerr << "raven: guest thread " << thread.id << " failed: " << error.what() << '\n';
+				std::cerr << "raven: guest thread " << thread.id << " failed in " << api_in_progress << ": " << error.what() << "\n";
 			} catch (...) {
 				std::cerr << "raven: guest thread " << thread.id << " ended with a stop\n";
 			}
@@ -243,11 +246,8 @@ void NativeThreads::check_pending()
 		return;
 	const auto exception = pending;
 	pending = nullptr;
-	// The error that ended another thread ends the process; the call this thread was waiting in will never complete.
-	try {
-		process.abandon_call();
-	} catch (const std::runtime_error &) {
-	}
+	// The error that ended another thread ends the process; the call this thread was in, waiting or running, will never complete.
+	process.end_call();
 	std::rethrow_exception(exception);
 }
 
@@ -274,6 +274,7 @@ void NativeThreads::switch_to(GuestThread &next)
 
 void NativeThreads::schedule()
 {
+	serve();
 	for (;;) {
 		if (!tearing_down && std::chrono::steady_clock::now() >= deadline)
 			throw NativeResult{NativeStop::timeout, 0, 0, 0};
@@ -298,6 +299,7 @@ void NativeThreads::schedule()
 			return;
 		}
 		// Nothing can run: wait for the earliest timeout, letting the host deliver outside events meanwhile.
+		serve();
 		for (const auto &pump : pumps)
 			pump();
 		auto wake = std::chrono::steady_clock::time_point::max();
@@ -312,7 +314,7 @@ void NativeThreads::schedule()
 			throw std::runtime_error("native guest threads deadlocked: every thread waits without a timeout");
 		const auto limit = std::min(wake, deadline);
 		auto slice = std::chrono::duration_cast<std::chrono::milliseconds>(limit > now ? limit - now : std::chrono::nanoseconds(0));
-		slice = std::min(slice, std::chrono::milliseconds(20));
+		slice = std::min(slice, std::chrono::milliseconds(shared_object_count.load() > 0 ? 2 : 20));
 		if (poll)
 			poll(slice);
 		else if (slice.count() > 0)
@@ -340,6 +342,7 @@ bool NativeThreads::block(std::function<bool()> ready, std::optional<std::chrono
 
 bool NativeThreads::yield()
 {
+	serve();
 	GuestThread *next = pick(false).get();
 	if (!next)
 		return false;

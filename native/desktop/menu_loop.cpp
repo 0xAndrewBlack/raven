@@ -191,7 +191,7 @@ void NativeWindows::menu_open_bar(uint64_t window, size_t index)
 		const auto command = item.id;
 		menu_close();
 		if (messages.size() < 10000)
-			messages.push_back({window, command, 0, 0x111, message_time(), cursor_x, cursor_y});
+			queue({window, command, 0, 0x111, message_time(), cursor_x, cursor_y});
 		return;
 	}
 	send(window, 0x117, item.submenu, uint64_t(index));
@@ -255,7 +255,7 @@ void NativeWindows::menu_select(size_t level, size_t index)
 	const auto owner = open_menu_window;
 	menu_close();
 	if (owner && objects.window(owner) && messages.size() < 10000)
-		messages.push_back({owner, item.id, 0, 0x111, message_time(), cursor_x, cursor_y});
+		queue({owner, item.id, 0, 0x111, message_time(), cursor_x, cursor_y});
 }
 
 bool NativeWindows::menu_event(const DesktopEvent &event)

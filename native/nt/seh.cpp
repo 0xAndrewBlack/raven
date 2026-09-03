@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "kernel_context.h"
 #include "exceptions.h"
 #include "unwind.h"
@@ -188,10 +189,74 @@ public:
 			std::memcpy(&object, record.data() + 0x28, 8);
 			context.process.watch_write(object);
 		}
+		// RAVEN_TRACE_EXCEPTIONS names every exception when it is raised, before any handler sees it, with the code addresses on its stack.
+		if (std::getenv("RAVEN_TRACE_EXCEPTIONS")) {
+			const auto *module = unwinder.module_at(context_rip(origin));
+			std::fprintf(stderr, "raven: exception %08x at %llx (%s+%llx) raised\n", le32(record, 0), (unsigned long long)context_rip(origin),
+				module ? module->name.c_str() : "unknown", module ? (unsigned long long)(context_rip(origin) - module->loaded.base()) : 0ULL);
+			uint64_t rsp = 0;
+			std::memcpy(&rsp, origin.data() + 0x98, 8);
+			try {
+				const auto stack = context.process.read_memory(rsp, 0x300);
+				for (size_t at = 0; at + 8 <= stack.size(); at += 8) {
+					uint64_t value = 0;
+					std::memcpy(&value, stack.data() + at, 8);
+					if (const auto *owner = unwinder.module_at(value))
+						std::fprintf(stderr, "raven:   +%zx %s+%llx\n", at, owner->name.c_str(), (unsigned long long)(value - owner->loaded.base()));
+				}
+			} catch (const std::exception &) {
+			}
+		}
 		ContextBytes resume;
 		const size_t depth = context.process.callback_depth();
+		// A vectored handler that answers EXCEPTION_CONTINUE_EXECUTION resumes the program where it stopped, with the context it left.
+		if (!vectored.empty()) {
+			const size_t mark = scratch.mark();
+			const uint64_t guest_record = scratch.take(record_size), guest_context = scratch.take(x64_context::size), pointers = scratch.take(16);
+			context.process.write_memory(guest_record, record);
+			context.process.write_memory(guest_context, origin);
+			std::vector<uint8_t> block(16);
+			put64(block, 0, guest_record);
+			put64(block, 8, guest_context);
+			context.process.write_memory(pointers, block);
+			const auto handlers = vectored;
+			for (const auto &item : handlers) {
+				if (item.after)
+					continue;
+				const uint64_t arguments[] = {pointers};
+				const auto outcome = context.call(item.handler, arguments);
+				if (outcome.stop != NativeStop::returned)
+					throw outcome;
+				if (int32_t(outcome.value) == -1) {
+					resume = context.process.read_memory(guest_context, x64_context::size);
+					scratch.release(mark);
+					redirect_to(resume, depth);
+				}
+			}
+			scratch.release(mark);
+		}
 		if (dispatch(record, origin, resume))
 			redirect_to(resume, depth);
+		// An exception no frame handled goes to the program's last-chance filter, which usually ends the process quietly: with
+		// RAVEN_BACKTRACE set it is named first, with the code addresses on its stack.
+		if (std::getenv("RAVEN_BACKTRACE")) {
+			const auto *module = unwinder.module_at(context_rip(origin));
+			std::fprintf(stderr, "raven: exception %08x at %llx (%s+%llx) reaches the unhandled exception filter\n", le32(record, 0),
+				(unsigned long long)context_rip(origin), module ? module->name.c_str() : "unknown",
+				module ? (unsigned long long)(context_rip(origin) - module->loaded.base()) : 0ULL);
+			uint64_t rsp = 0;
+			std::memcpy(&rsp, origin.data() + 0x98, 8);
+			try {
+				const auto stack = context.process.read_memory(rsp, 0x400);
+				for (size_t at = 0; at + 8 <= stack.size(); at += 8) {
+					uint64_t value = 0;
+					std::memcpy(&value, stack.data() + at, 8);
+					if (const auto *owner = unwinder.module_at(value))
+						std::fprintf(stderr, "raven:   +%zx %s+%llx\n", at, owner->name.c_str(), (unsigned long long)(value - owner->loaded.base()));
+				}
+			} catch (const std::exception &) {
+			}
+		}
 		if (context.unhandled_filter) {
 			const size_t mark = scratch.mark();
 			const uint64_t guest_record = scratch.take(record_size), guest_context = scratch.take(x64_context::size), pointers = scratch.take(16);
@@ -216,6 +281,23 @@ public:
 		const auto *module = unwinder.module_at(context_rip(origin));
 		std::fprintf(stderr, "raven: unhandled exception %08x at %llx (%s+%llx)\n", code, (unsigned long long)context_rip(origin),
 			module ? module->name.c_str() : "unknown", module ? (unsigned long long)(context_rip(origin) - module->loaded.base()) : 0ULL);
+		if (std::getenv("RAVEN_BACKTRACE")) {
+			// Registers and the code addresses found on the stack, which is enough to name the callers of a fault.
+			const auto reg = [&](size_t at) { uint64_t value = 0; std::memcpy(&value, origin.data() + at, 8); return value; };
+			std::fprintf(stderr, "raven: rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx rsp %llx\n", (unsigned long long)reg(0x78),
+				(unsigned long long)reg(0x90), (unsigned long long)reg(0x80), (unsigned long long)reg(0x88), (unsigned long long)reg(0xa8),
+				(unsigned long long)reg(0xb0), (unsigned long long)reg(0x98));
+			try {
+				const auto stack = context.process.read_memory(reg(0x98), 0x800);
+				for (size_t at = 0; at + 8 <= stack.size(); at += 8) {
+					uint64_t value = 0;
+					std::memcpy(&value, stack.data() + at, 8);
+					if (const auto *owner = unwinder.module_at(value))
+						std::fprintf(stderr, "raven:   +%zx %s+%llx\n", at, owner->name.c_str(), (unsigned long long)(value - owner->loaded.base()));
+				}
+			} catch (const std::exception &) {
+			}
+		}
 		throw unhandled();
 	}
 
@@ -396,6 +478,12 @@ public:
 	std::vector<Active> active;
 	// The contexts a running unwind was called from and the dispatch contexts it has crossed, in the order a stack walk meets them.
 	std::vector<ContextBytes> continuation;
+	// Vectored handlers, called before the frames of the stack are searched: a cookie for each, the handler and whether it is a continue handler.
+	struct Vectored {
+		uint64_t cookie, handler;
+		bool after;
+	};
+	std::vector<Vectored> vectored;
 	size_t continuation_start = 0;
 	// A C++ catch is entered through STATUS_UNWIND_CONSOLIDATE: after unwinding, the runtime's callback runs on the
 	// target frame's stack and returns the address where execution resumes. Each pending callback remembers the frame it belongs to.
@@ -582,9 +670,54 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 	registry.add("RtlRestoreContext", 2, restore);
 	registry.add("NtContinue", 2, restore);
 	registry.add("UnhandledExceptionFilter", 1, [](ApiCall &call) { call.ret(0); });
+	const auto add_vectored = [exceptions, &context](ApiCall &call, bool after) {
+		if (!call[1]) {
+			call.fail(87, 0);
+			return;
+		}
+		const auto cookie = context.allocator.allocate(16, true);
+		if (!cookie) {
+			call.fail(8, 0);
+			return;
+		}
+		Exceptions::Vectored item{cookie, call[1], after};
+		// A nonzero first argument puts the handler at the head of the chain.
+		if (call.u32(0) && !after)
+			exceptions->vectored.insert(exceptions->vectored.begin(), item);
+		else
+			exceptions->vectored.push_back(item);
+		call.ret(cookie);
+	};
+	registry.add("AddVectoredExceptionHandler", 2, [add_vectored](ApiCall &call) { add_vectored(call, false); });
+	registry.add("AddVectoredContinueHandler", 2, [add_vectored](ApiCall &call) { add_vectored(call, true); });
+	const auto remove_vectored = [exceptions, &context](ApiCall &call) {
+		auto &list = exceptions->vectored;
+		const auto found = std::find_if(list.begin(), list.end(), [&](const auto &item) { return item.cookie == call[0]; });
+		if (found == list.end()) {
+			call.ret(0);
+			return;
+		}
+		list.erase(found);
+		context.allocator.release(call[0]);
+		call.ret(1);
+	};
+	registry.add("RemoveVectoredExceptionHandler", 1, remove_vectored);
+	registry.add("RemoveVectoredContinueHandler", 1, remove_vectored);
 	registry.add("RtlAddFunctionTable", 3, [](ApiCall &call) { call.ret(1); });
 	registry.add("RtlDeleteFunctionTable", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("RtlInstallFunctionTableCallback", 6, [](ApiCall &call) { call.ret(1); });
+	// A code generator registers the unwind data of the code it emits; the table stands as a handle until the generator deletes it.
+	registry.add("RtlAddGrowableFunctionTable", 6, [](ApiCall &call) {
+		static uint64_t next = 0x7000;
+		if (!call[0]) {
+			call.ret(0xc000000dU);
+			return;
+		}
+		call.store_pointer(call[0], next += 0x10);
+		call.ret(0);
+	});
+	registry.add("RtlGrowFunctionTable", 2, [](ApiCall &call) { call.ret(0); });
+	registry.add("RtlDeleteGrowableFunctionTable", 1, [](ApiCall &call) { call.ret(0); });
 	(void)status_noncontinuable;
 	(void)flag_nested;
 }

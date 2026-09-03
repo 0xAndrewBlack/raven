@@ -1,5 +1,7 @@
 #include "objects.h"
 #include "api.h"
+#include "handle_channel.h"
+#include "shared_file.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +24,19 @@ static std::optional<uint32_t> access_mask(uint32_t access)
 	if (access & ~0xf21f0003U)
 		return std::nullopt;
 	return mapped;
+}
+
+// A handle another process sent has not necessarily been taken in yet; looking its value up is the moment it must be.
+void NativeObjects::arrive(uint64_t handle) const
+{
+	if (handle < handle_range_to_child)
+		return;
+	{
+		std::lock_guard lock(mutex);
+		if (handles.contains(handle))
+			return;
+	}
+	receive_handles(const_cast<NativeObjects &>(*this));
 }
 
 uint64_t NativeObjects::take()
@@ -94,6 +109,7 @@ NativeObjectResult NativeObjects::open_named_event(const std::u16string &name, u
 
 std::pair<std::shared_ptr<NativeObjects::Event>,uint32_t> NativeObjects::event(uint64_t handle, uint32_t access) const
 {
+	arrive(handle);
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
 	if (found==handles.end()) return {nullptr,invalid_handle};
@@ -114,6 +130,7 @@ NativeObjectResult NativeObjects::add_object(std::shared_ptr<KernelObject> objec
 
 std::shared_ptr<KernelObject> NativeObjects::object(uint64_t handle) const
 {
+	arrive(handle);
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
 	return found==handles.end() ? nullptr : found->second.generic;
@@ -121,6 +138,7 @@ std::shared_ptr<KernelObject> NativeObjects::object(uint64_t handle) const
 
 int NativeObjects::signaled(uint64_t handle, uint32_t thread) const
 {
+	arrive(handle);
 	std::shared_ptr<Event> event;
 	std::shared_ptr<KernelObject> generic;
 	{
@@ -140,6 +158,7 @@ int NativeObjects::signaled(uint64_t handle, uint32_t thread) const
 
 void NativeObjects::consume(uint64_t handle, uint32_t thread)
 {
+	arrive(handle);
 	std::shared_ptr<Event> event;
 	std::shared_ptr<KernelObject> generic;
 	{
@@ -156,8 +175,24 @@ void NativeObjects::consume(uint64_t handle, uint32_t thread)
 	}
 }
 
+bool NativeObjects::try_consume(uint64_t handle, uint32_t thread)
+{
+	arrive(handle);
+	std::shared_ptr<KernelObject> generic;
+	{
+		std::lock_guard lock(mutex);
+		const auto found=handles.find(handle);
+		if (found==handles.end()) return false;
+		generic=found->second.generic;
+	}
+	if (generic) return generic->try_consume(thread);
+	consume(handle,thread);
+	return true;
+}
+
 NativeObjectResult NativeObjects::duplicate(uint64_t handle, std::optional<uint32_t> access)
 {
+	arrive(handle);
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
 	if (found==handles.end())
@@ -175,6 +210,7 @@ NativeObjectResult NativeObjects::duplicate(uint64_t handle, std::optional<uint3
 
 uint32_t NativeObjects::access_of(uint64_t handle) const
 {
+	arrive(handle);
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
 	return found==handles.end() ? 0 : found->second.access;
@@ -182,6 +218,7 @@ uint32_t NativeObjects::access_of(uint64_t handle) const
 
 void NativeObjects::set_access(uint64_t handle, uint32_t access)
 {
+	arrive(handle);
 	std::lock_guard lock(mutex);
 	if (const auto found=handles.find(handle); found!=handles.end())
 		found->second.access=access;
@@ -189,6 +226,7 @@ void NativeObjects::set_access(uint64_t handle, uint32_t access)
 
 void NativeObjects::set_inherit(uint64_t handle, bool inherit)
 {
+	arrive(handle);
 	std::lock_guard lock(mutex);
 	if (const auto found=handles.find(handle); found!=handles.end())
 		found->second.inherit=inherit;
@@ -196,6 +234,7 @@ void NativeObjects::set_inherit(uint64_t handle, bool inherit)
 
 bool NativeObjects::inherit(uint64_t handle) const
 {
+	arrive(handle);
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
 	return found!=handles.end() && found->second.inherit;
@@ -222,6 +261,7 @@ bool NativeObjects::adopt(uint64_t handle, std::shared_ptr<KernelObject> object,
 
 uint32_t NativeObjects::close(uint64_t handle)
 {
+	arrive(handle);
 	static const bool traced = std::getenv("RAVEN_TRACE_HANDLES") != nullptr;
 	if (traced) std::fprintf(stderr, "handle %llx closed by %s\n", static_cast<unsigned long long>(handle), api_in_progress);
 	std::shared_ptr<KernelObject> generic;
@@ -252,8 +292,15 @@ void NativeObjects::release_reserved(uint64_t handle)
 		handles.erase(found);
 }
 
+std::atomic<int> shared_object_count{0};
+
 NativeObjectResult NativeObjects::set_event(uint64_t handle, bool signaled)
 {
+	arrive(handle);
+	if (const auto generic=object(handle)) {
+		const auto previous=generic->set_state(signaled);
+		if (previous>=0) return {uint64_t(previous)};
+	}
 	const auto [object,status]=event(handle,2);
 	if (status) return {0,status};
 	std::lock_guard lock(object->mutex);
@@ -275,6 +322,7 @@ NativeObjectResult NativeObjects::set_event(uint64_t handle, bool signaled)
 
 NativeObjectResult NativeObjects::query_event(uint64_t handle)
 {
+	arrive(handle);
 	const auto [object,status]=event(handle,1);
 	if (status) return {0,status};
 	std::lock_guard lock(object->mutex);

@@ -11,6 +11,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+extern char **environ;
+
 namespace raven {
 
 namespace {
@@ -147,6 +149,14 @@ std::map<std::u16string, std::pair<std::u16string, std::u16string>> default_envi
 	add(u"USERNAME", user);
 	add(u"USERPROFILE", profile);
 	add(u"windir", u"C:\\Windows");
+	// A variable of the host named RAVEN_GUEST_<NAME> reaches the program as <NAME>, to configure what runs in the prefix.
+	for (char **entry = environ; entry && *entry; ++entry) {
+		const std::string_view text(*entry);
+		constexpr std::string_view prefix = "RAVEN_GUEST_";
+		const auto equals = text.find('=');
+		if (text.starts_with(prefix) && equals != text.npos && equals > prefix.size())
+			add(from_utf8(std::string(text.substr(prefix.size(), equals - prefix.size()))), from_utf8(std::string(text.substr(equals + 1))));
+	}
 	return result;
 }
 
@@ -227,6 +237,21 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("GetTimeZoneInformation", 1, [zone_information](ApiCall &call) { zone_information(call, false); });
 	registry.add("GetDynamicTimeZoneInformation", 1, [zone_information](ApiCall &call) { zone_information(call, true); });
+	// The reverse of the call below: a local time becomes UTC by taking the zone's offset off.
+	registry.add("TzSpecificLocalTimeToSystemTime", 3, [](ApiCall &call) {
+		const auto ticks = ticks_from(call.read(call[1], 16));
+		if (!ticks) {
+			call.fail(87);
+			return;
+		}
+		int offset;
+		if (call[0])
+			offset = -call.load<int32_t>(call[0]);
+		else
+			offset = zone_at(time_t((*ticks - filetime_epoch_offset) / 10000000ULL)).offset_minutes;
+		call.write(call[2], system_time(*ticks - int64_t(offset) * 600000000LL));
+		call.ret(1);
+	});
 	registry.add("SystemTimeToTzSpecificLocalTime", 3, [](ApiCall &call) {
 		const auto ticks = ticks_from(call.read(call[1], 16));
 		if (!ticks) {
@@ -618,6 +643,9 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(126);
 			return;
 		}
+		// Unless the caller asks for the count to stay as it is, the handle is a reference that FreeLibrary gives back.
+		if (!(flags & 2) && context.reference_module)
+			context.reference_module(handle, flags & 1);
 		if (call[2]) call.store<uint64_t>(call[2], handle);
 		call.ret(1);
 	});

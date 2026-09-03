@@ -6,8 +6,11 @@
 #include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
+#include <cstdio>
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <unistd.h>
 
 namespace raven {
@@ -26,7 +29,7 @@ public:
 	struct Module {
 		uint64_t base;
 		uint32_t size;
-		std::u16string name;
+		std::u16string name, path;
 	};
 	std::vector<Process> processes;
 	std::vector<Module> modules;
@@ -53,6 +56,29 @@ uint64_t filetime_now()
 
 }
 
+// CPU time a running child has used so far, in nanoseconds; 0 once the host no longer lists it.
+static uint64_t child_cpu_nanoseconds(pid_t pid)
+{
+	std::ifstream stat("/proc/" + std::to_string(pid) + "/stat");
+	std::string text;
+	std::getline(stat, text);
+	const auto close = text.rfind(')');
+	if (close == std::string::npos)
+		return 0;
+	std::istringstream fields(text.substr(close + 2));
+	std::string field;
+	uint64_t user = 0, system = 0;
+	for (int index = 3; fields >> field; ++index) {
+		if (index == 14)
+			user = std::strtoull(field.c_str(), nullptr, 10);
+		else if (index == 15) {
+			system = std::strtoull(field.c_str(), nullptr, 10);
+			break;
+		}
+	}
+	return (user + system) * (1000000000ULL / uint64_t(sysconf(_SC_CLK_TCK)));
+}
+
 void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 {
 	auto &objects = context.objects;
@@ -62,7 +88,7 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 
 	registry.add("OpenProcess", 3, [&objects](ApiCall &call) {
 		const uint32_t id = call.u32(2);
-		if (id == 1) {
+		if (id == uint32_t(::getpid())) {
 			const auto made = objects.add_object(std::make_shared<SelfProcessObject>());
 			if (made.status) {
 				call.fail(4, 0);
@@ -71,7 +97,10 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(made.value);
 			return;
 		}
-		const auto child = find_child(pid_t(id));
+		auto child = find_child(pid_t(id));
+		// Any other running instance of the runtime can be named too: the parent that started this process, or a process a sibling started.
+		if (!child && runtime_process_alive(pid_t(id)))
+			child = std::make_shared<ProcessObject>(pid_t(id), true);
 		if (!child) {
 			call.fail(87, 0);
 			return;
@@ -102,7 +131,15 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint16_t>(call[2], 0x8664);
 		call.ret(1);
 	});
-	registry.add("GetProcessTimes", 5, [started, is_self](ApiCall &call) {
+	registry.add("GetProcessTimes", 5, [started, is_self, &objects](ApiCall &call) {
+		if (const auto child = objects.object_as<ProcessObject>(call[0]); child && call[1] && call[2] && call[3] && call[4]) {
+			call.store<uint64_t>(call[1], started);
+			call.store<uint64_t>(call[2], 0);
+			call.store<uint64_t>(call[3], 0);
+			call.store<uint64_t>(call[4], child_cpu_nanoseconds(child->pid) / 100);
+			call.ret(1);
+			return;
+		}
 		if (!is_self(call[0]) || !call[1] || !call[2] || !call[3] || !call[4]) {
 			call.fail(call[1] && is_self(call[0]) ? 87 : 6);
 			return;
@@ -139,7 +176,12 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint64_t>(call[1], uint64_t(cpu.tv_sec) * 1000000000ULL + uint64_t(cpu.tv_nsec));
 		call.ret(1);
 	});
-	registry.add("QueryProcessCycleTime", 2, [is_self](ApiCall &call) {
+	registry.add("QueryProcessCycleTime", 2, [is_self, &objects](ApiCall &call) {
+		if (const auto child = objects.object_as<ProcessObject>(call[0]); child && call[1]) {
+			call.store<uint64_t>(call[1], child_cpu_nanoseconds(child->pid));
+			call.ret(1);
+			return;
+		}
 		if (!call[1] || !is_self(call[0])) {
 			call.fail(call[1] ? 6 : 87);
 			return;
@@ -387,17 +429,46 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 	});
 
 	// Toolhelp: the process and module lists. The processes are this one and the children it started that still run.
-	registry.add("CreateToolhelp32Snapshot", 2, [&objects, module_list](ApiCall &call) {
+	registry.add("CreateToolhelp32Snapshot", 2, [&objects, &context, module_list](ApiCall &call) {
 		const uint32_t flags = call.u32(0);
 		auto snapshot = std::make_shared<Snapshot>();
 		if (flags & 2) {
-			snapshot->processes.push_back({1, 0, u"steam.exe"});
-			for (const auto &child : live_children())
-				snapshot->processes.push_back({uint32_t(child->pid), 1, child->name});
+			// Every running instance of the runtime is a Windows process here: the programs this one started, its parent, and the
+			// processes those started in turn. The name is the program each one runs; its parent is the instance that started it.
+			const auto image = context.launch.image_path;
+			snapshot->processes.push_back({uint32_t(::getpid()), runtime_process_alive(::getppid()) ? uint32_t(::getppid()) : 0, image.substr(image.find_last_of(u'\\') + 1)});
+			std::error_code error;
+			for (const auto &entry : std::filesystem::directory_iterator("/proc", error)) {
+				const auto name = entry.path().filename().string();
+				if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; }))
+					continue;
+				const auto pid = pid_t(std::stol(name));
+				if (pid == ::getpid() || !runtime_process_alive(pid))
+					continue;
+				std::ifstream arguments(entry.path() / "cmdline", std::ios::binary);
+				std::string argument, last;
+				while (std::getline(arguments, argument, '\0'))
+					if (!argument.empty())
+						last = argument;
+				std::ifstream stat(entry.path() / "stat");
+				std::string text;
+				std::getline(stat, text);
+				pid_t parent = 0;
+				if (const auto close = text.rfind(')'); close != std::string::npos)
+					std::sscanf(text.c_str() + close + 2, "%*c %d", &parent);
+				snapshot->processes.push_back({uint32_t(pid), runtime_process_alive(parent) ? uint32_t(parent) : 0,
+					from_utf8(std::filesystem::path(last).filename().string())});
+			}
 		}
 		if (flags & 8)
-			for (const auto *module : module_list())
-				snapshot->modules.push_back({module->loaded.base(), module->image.image_size, from_utf8(module->name)});
+			for (const auto *module : module_list()) {
+				// The program's own path for the executable; the libraries beside it, or the system directory for those the runtime supplies.
+				const auto directory = context.paths.full(context.launch.image_path);
+				const auto name = from_utf8(module->name);
+				const auto path = module == &context.entry ? context.launch.image_path :
+					(module->runtime_api ? u"C:\\Windows\\System32\\" : directory.substr(0, directory.find_last_of(u'\\') + 1)) + name;
+				snapshot->modules.push_back({module->loaded.base(), module->image.image_size, name, path});
+			}
 		const auto made = objects.add_object(snapshot);
 		if (made.status) {
 			call.fail(4, UINT64_MAX);
@@ -492,6 +563,14 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 					std::memcpy(entry.data() + name_at + index * 2, &module.name[index], 2);
 			} else if (name_at + index < entry.size()) {
 				entry[name_at + index] = char(module.name[index]);
+			}
+		}
+		for (size_t index = 0; index < module.path.size() && index < 259; ++index) {
+			if (wide) {
+				if (path_at + index * 2 + 2 <= entry.size())
+					std::memcpy(entry.data() + path_at + index * 2, &module.path[index], 2);
+			} else if (path_at + index < entry.size()) {
+				entry[path_at + index] = char(module.path[index]);
 			}
 		}
 		call.write(call[1], entry);

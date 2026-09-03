@@ -29,6 +29,7 @@
 #include "x86_dsound.h"
 #include "x86_thread_api.h"
 
+#include <unistd.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -82,6 +83,9 @@ constexpr std::array shared_exports{
 // More shared handlers a 32-bit program may use as they are; their words come from the registry and their library from the public
 // export lists. Anything with a pointer-width structure, a 64-bit argument or a callback into x64 conventions is not here.
 constexpr std::string_view shared_allowed[] = {
+	"SetDllDirectoryW", "SetDllDirectoryA", "SetConsoleTitleW", "SetConsoleTitleA", "OpenSCManagerW", "OpenSCManagerA", "OpenServiceW", "OpenServiceA", "CreateServiceW", "CreateServiceA",
+	"CloseServiceHandle", "DeleteService", "ChangeServiceConfigW", "QueryServiceStatus", "QueryServiceStatusEx", "StartServiceW", "ControlService",
+	"StartServiceCtrlDispatcherW", "RegisterServiceCtrlHandlerW", "RegisterServiceCtrlHandlerExW", "SetServiceStatus",
 	"WriteFile", "GetFileAttributesW", "GetFullPathNameA", "GetFullPathNameW", "GetCurrentDirectoryA", "GetCurrentDirectoryW",
 	"SetCurrentDirectoryA", "SetCurrentDirectoryW", "FindFirstFileA", "FindFirstFileW", "FindNextFileA", "FindNextFileW", "FindClose",
 	"CreateDirectoryA", "RemoveDirectoryA", "RemoveDirectoryW", "MoveFileA", "MoveFileW", "CopyFileA", "CopyFileW", "GetLocalTime",
@@ -661,7 +665,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeProcess process(images, bootstrap, timeout, NativeMode::x86);
 	for (const auto &[address, api] : traps)
 		process.add_api_trap(address, api.second);
-	NativeEnvironment environment(process, entry.loaded.base(), 1, 1);
+	NativeEnvironment environment(process, entry.loaded.base(), uint32_t(::getpid()), 1);
 	NativeX86D3D9 direct3d9(process);
 	NativeX86DirectSound directsound(process);
 	{
@@ -707,7 +711,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		paths.set_current(launch->directory);
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call_guest;
 	NativeResources resources(process, environment, modules, entry);
-	NativeMemory memory(process, environment);
+	// What a program may commit: 512 MiB by default, as set by RAVEN_COMMIT_LIMIT_MB (large programs, a browser engine for one, need more).
+	const size_t commit_limit=(std::getenv("RAVEN_COMMIT_LIMIT_MB") ? size_t(std::strtoull(std::getenv("RAVEN_COMMIT_LIMIT_MB"),nullptr,10)) : size_t(512))*1024*1024;
+	NativeMemory memory(process,environment,commit_limit);
 	register_images(memory, modules);
 	// Declared first so that it outlives the threads, which release their blocks through it when they are torn down.
 	NativeX86Tls static_tls(process);
@@ -1027,6 +1033,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_system_api(shared_api, kernel);
 	register_version_api(shared_api, kernel);
 	register_registry_api(shared_api, kernel, registry);
+	register_service_api(shared_api, kernel, registry);
 	register_shell_api(shared_api, kernel);
 	register_shlwapi_api(shared_api, kernel);
 	register_platform_api(shared_api, kernel);

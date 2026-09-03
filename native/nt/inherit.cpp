@@ -95,30 +95,39 @@ std::vector<InheritedHandle> parse_inherited(std::span<const uint8_t> bytes)
 	return handles;
 }
 
+// The object a description stands for, rebuilt around the descriptor that came with it; null for a kind that cannot travel.
+std::shared_ptr<KernelObject> object_from_record(const InheritedHandle &item)
+{
+	if (item.kind == "file") {
+		// The creator keeps the duty to delete a file that closes with its last handle.
+		return std::make_shared<FileObject>(item.descriptor, item.access, item.bits & 1, std::filesystem::path(item.path), item.text, item.flags & ~0x04000000U);
+	}
+	if (item.kind == "pipe") {
+		auto pipe = std::make_shared<PipeObject>(item.descriptor, item.access, item.flags);
+		pipe->connected = true;
+		pipe->message_mode = item.bits & 1;
+		pipe->server = item.bits & 2;
+		pipe->inherit = true;
+		pipe->name = item.text;
+		return pipe;
+	}
+	if (item.kind == "section") {
+		auto section = std::make_shared<SectionObject>();
+		section->descriptor = item.descriptor;
+		section->size = item.size;
+		section->protection = item.access;
+		section->name = item.text;
+		return section;
+	}
+	return nullptr;
+}
+
 // Rebuilds the handles a creator passed on, each under the value it had there.
 void adopt_inherited(NativeObjects &objects, const std::vector<InheritedHandle> &handles)
 {
 	for (const auto &item : handles) {
-		std::shared_ptr<KernelObject> object;
-		if (item.kind == "file") {
-			// The creator keeps the duty to delete a file that closes with its last handle.
-			object = std::make_shared<FileObject>(item.descriptor, item.access, item.bits & 1, std::filesystem::path(item.path), item.text, item.flags & ~0x04000000U);
-		} else if (item.kind == "pipe") {
-			auto pipe = std::make_shared<PipeObject>(item.descriptor, item.access, item.flags);
-			pipe->connected = true;
-			pipe->message_mode = item.bits & 1;
-			pipe->server = item.bits & 2;
-			pipe->inherit = true;
-			pipe->name = item.text;
-			object = pipe;
-		} else if (item.kind == "section") {
-			auto section = std::make_shared<SectionObject>();
-			section->descriptor = item.descriptor;
-			section->size = item.size;
-			section->protection = item.access;
-			section->name = item.text;
-			object = section;
-		} else {
+		const auto object = object_from_record(item);
+		if (!object) {
 			::close(item.descriptor);
 			continue;
 		}

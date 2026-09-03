@@ -86,7 +86,9 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	const std::string windows = "C:\\Windows", system = "C:\\Windows\\System32";
 	// Access tokens: the program's own token exists and closes like a handle; no privilege is held, and files carry no access control lists.
 	registry.add("OpenProcessToken", 3, [&context](ApiCall &call) {
-		if (int64_t(call[0]) != -1 && !context.objects.object_as<SelfProcessObject>(call[0])) {
+		// Every process of the runtime runs as the same host user, so the token of a child or of another instance is this process's own.
+		const auto other = context.objects.object_as<ProcessObject>(call[0]);
+		if (int64_t(call[0]) != -1 && !context.objects.object_as<SelfProcessObject>(call[0]) && !(other && !other->exited())) {
 			call.fail(6);
 			return;
 		}

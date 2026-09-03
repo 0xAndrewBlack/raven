@@ -91,6 +91,8 @@ struct DesktopDCState {
 	int32_t origin_x=0,origin_y=0,position_x=0,position_y=0;
 	std::optional<DesktopRect> bounds{};
 	int32_t brush_org_x=0,brush_org_y=0,window_org_x=0,window_org_y=0,viewport_org_x=0,viewport_org_y=0;
+	uint32_t graphics_mode=1;
+	std::array<float,6> world{1,0,0,1,0,0};
 };
 
 struct DesktopDC {
@@ -116,6 +118,10 @@ struct DesktopDC {
 	int32_t brush_org_x=0,brush_org_y=0,window_org_x=0,window_org_y=0,viewport_org_x=0,viewport_org_y=0;
 	// Window and viewport origins move logical coordinates; this offset is what they contributed to origin_x and origin_y.
 	int32_t user_dx=0,user_dy=0;
+	// GM_COMPATIBLE until SetGraphicsMode; the world transform (XFORM order) is kept for programs that read it back, and drawing
+	// does not apply it.
+	uint32_t graphics_mode=1;
+	std::array<float,6> world{1,0,0,1,0,0};
 	// Parts of the window other windows cover; drawing never reaches them.
 	std::optional<DesktopRegion> visible{};
 	std::vector<DesktopDCState> saved{};
@@ -182,6 +188,8 @@ struct DesktopWindow {
 	bool painting = false, erase_pending = false;
 	DesktopRegion update{};
 	uint64_t instance = 0,userdata = 0;
+	// The guest thread that created the window: its messages go to that thread's queue and its procedure runs on it.
+	uint32_t thread = 0;
 	uint32_t style = 0x84000000;
 	std::vector<uint8_t> extra{};
 	// Client origin and extent stay distinct from the outer window rectangle.

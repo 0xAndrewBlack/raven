@@ -102,7 +102,7 @@ bool NativeObjectAPI::dispatch(std::string_view name)
 					for (;;) {
 						const int state=objects.signaled(handle,id);
 						if (state<0) { status=0xc0000008U; break; }
-						if (state==1) { objects.consume(handle,id); status=0; break; }
+						if (state==1 && objects.try_consume(handle,id)) { status=0; break; }
 						if (immediate || (wake && std::chrono::steady_clock::now()>=*wake)) { status=0x102; break; }
 						threads->block([&] { return objects.signaled(handle,id)==1; },wake);
 					}

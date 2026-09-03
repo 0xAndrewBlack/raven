@@ -40,6 +40,15 @@ private:
 	struct Value { std::u16string name; uint32_t type; std::vector<uint8_t> data; };
 	struct Key { std::u16string path; std::map<std::u16string, Value> values; };
 	std::filesystem::path file;
+	// What the hive file looked like when it was last read or written; another process that changed it makes the next call read it again.
+	struct Stamp {
+		long long seconds = -1, nanoseconds = 0;
+		long long size = -1, inode = -1;
+		bool operator==(const Stamp &other) const = default;
+	};
+	mutable Stamp stamp;
+	Stamp current_stamp() const;
+	void refresh() const;
 	std::map<std::u16string, Key> keys;
 	std::map<uint64_t, std::u16string> open_keys;
 	uint64_t next = 0x300;

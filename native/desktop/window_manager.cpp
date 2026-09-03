@@ -1,4 +1,5 @@
 #include "windows.h"
+#include <unistd.h>
 #include "nt/system_exports.h"
 #include "nt/text.h"
 
@@ -346,6 +347,25 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		}
 		call.fail(1400);
 	});
+	registry.add("FindWindowA", 2, [this](ApiCall &call) {
+		const auto narrow_name = call[0] && call[0] > 0xffff ? call.narrow(call[0], 256) : std::string();
+		const auto narrow_title = call[1] ? call.narrow(call[1], 4096) : std::string();
+		const std::u16string name(narrow_name.begin(), narrow_name.end()), title(narrow_title.begin(), narrow_title.end());
+		auto roots = top_level_windows();
+		for (auto root = roots.rbegin(); root != roots.rend(); ++root) {
+			const auto *window = objects.window(*root);
+			const auto *definition = window ? objects.window_class(window->class_id) : nullptr;
+			if (!definition || window->destroying)
+				continue;
+			if (!name.empty() && !equal_fold(from_utf8(definition->name), name))
+				continue;
+			if (call[1] && window->title != title)
+				continue;
+			call.ret(*root);
+			return;
+		}
+		call.fail(1400);
+	});
 	registry.add("FindWindowExW", 4, [this](ApiCall &call) {
 		const auto name = call[2] && call[2] > 0xffff ? call.wide(call[2], 256) : std::u16string();
 		const auto title = call[3] ? call.wide(call[3], 4096) : std::u16string();
@@ -497,8 +517,9 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 			call.fail(1400);
 			return;
 		}
-		if (call[1]) call.store<uint32_t>(call[1], 1);
-		call.ret(1);
+		if (call[1]) call.store<uint32_t>(call[1], uint32_t(::getpid()));
+		const auto *window = objects.window(call[0]);
+		call.ret(window->thread ? window->thread : environment.thread_id());
 	});
 	registry.add("ChildWindowFromPoint", 2, [this](ApiCall &call) {
 		const auto *parent = objects.window(call[0]);

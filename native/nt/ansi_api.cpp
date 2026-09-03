@@ -53,6 +53,7 @@ const Adapter adapters[] = {
 	{"WaitNamedPipeA", {0}},
 	{"CreateSemaphoreA", {3}},
 	{"CreateFileMappingA", {5}},
+	{"OpenFileMappingA", {2}},
 	{"OpenMutexA", {2}},
 	{"OpenEventA", {2}},
 	{"OpenSemaphoreA", {2}},

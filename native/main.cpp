@@ -7,6 +7,7 @@
 #include "nt/providers.h"
 #include "nt/paths.h"
 #include "nt/launch.h"
+#include "nt/handle_channel.h"
 #include "nt/text.h"
 #ifdef RAVEN_WAYLAND
 #include "desktop/wayland.h"
@@ -76,6 +77,7 @@ static int native_result(const raven::NativeResult &result,bool process_exit=fal
 
 #include <cstdlib>
 #include <cstdio>
+#include <csignal>
 #include <exception>
 #include <execinfo.h>
 
@@ -88,10 +90,23 @@ static void show_backtrace()
 	std::abort();
 }
 
+// With RAVEN_BACKTRACE set, a fault of the runtime itself shows where it happened before the process ends with the signal.
+static void show_fault(int signal)
+{
+	void *frames[48];
+	const int count = backtrace(frames, 48);
+	backtrace_symbols_fd(frames, count, 2);
+	std::signal(signal, SIG_DFL);
+	std::raise(signal);
+}
+
 int main(int argc, char **argv)
 {
-	if (std::getenv("RAVEN_BACKTRACE"))
+	if (std::getenv("RAVEN_BACKTRACE")) {
 		std::set_terminate(show_backtrace);
+		std::signal(SIGSEGV, show_fault);
+		std::signal(SIGBUS, show_fault);
+	}
 	// RAVEN_TRACE_FILE=path sends the diagnostics of every process, a child program's included, to its own file path.<pid>.
 	if (const char *trace = std::getenv("RAVEN_TRACE_FILE")) {
 		const auto name = std::string(trace) + "." + std::to_string(::getpid());
@@ -127,7 +142,7 @@ int main(int argc, char **argv)
 	}
 	// A program started by another one carries the command line and the directory its parent chose.
 	std::optional<std::string> command_line_text, directory_text;
-	int environment_fd=-1,suspended_fd=-1,inherit_fd=-1;
+	int environment_fd=-1,suspended_fd=-1,inherit_fd=-1,handle_channel_fd=-1;
 	for (bool more=run_process;more && argc>first_file;) {
 		const std::string_view option=argv[first_file];
 		if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
@@ -135,6 +150,7 @@ int main(int argc, char **argv)
 		else if (option.starts_with("--environment-fd=")) environment_fd=std::atoi(std::string(option.substr(17)).c_str());
 		else if (option.starts_with("--suspended-fd=")) suspended_fd=std::atoi(std::string(option.substr(15)).c_str());
 		else if (option.starts_with("--inherit-fd=")) inherit_fd=std::atoi(std::string(option.substr(13)).c_str());
+		else if (option.starts_with("--handle-channel-fd=")) handle_channel_fd=std::atoi(std::string(option.substr(20)).c_str());
 		else more=false;
 		if (more) ++first_file;
 	}
@@ -204,6 +220,16 @@ int main(int argc, char **argv)
 							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-dwrite.dll";
 							if (std::filesystem::exists(component))
 								return read_file(component.c_str());
+						}
+						// The Direct3D libraries a Windows installation provides come from RAVEN_D3D_DIRECTORY (a DXVK build of the program's width)
+						// or from beside the runtime.
+						if (!selected && (name=="dxgi.dll" || name=="d3d11.dll" || name=="d3d10core.dll" || name=="d3d9.dll" || name=="d3d8.dll")) {
+							std::vector<std::filesystem::path> places;
+							if (const char *directory = std::getenv("RAVEN_D3D_DIRECTORY")) places.emplace_back(directory);
+							places.emplace_back(std::filesystem::read_symlink("/proc/self/exe").parent_path());
+							for (const auto &place : places)
+								if (std::filesystem::exists(place / name))
+									return read_file((place / name).c_str());
 						}
 						if (!selected)
 							return std::nullopt;
@@ -304,6 +330,7 @@ int main(int argc, char **argv)
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
 						if (command_line_text) launch->command_line=raven::from_utf8(*command_line_text);
 						if (directory_text) launch->directory=raven::from_utf8(*directory_text);
+						if (handle_channel_fd>=0) raven::set_parent_channel(handle_channel_fd);
 						if (inherit_fd>=0) {
 							// The handles the creator passed on arrive as descriptors, described in an anonymous file.
 							std::vector<uint8_t> bytes;

@@ -7,7 +7,7 @@ int raven_entry(void)
 	DWORD count=0;
 	SetLastError(0x1234);
 	if (GetLastError()!=0x1234) ExitProcess(1);
-	if (GetCurrentProcessId()!=1 || GetCurrentThreadId()!=1) ExitProcess(2);
+	if (!GetCurrentProcessId() || GetCurrentThreadId()!=1) ExitProcess(2);
 	const char *command=GetCommandLineA();
 	if (!command || command[0]!='"') ExitProcess(3);
 	HANDLE output=GetStdHandle(STD_OUTPUT_HANDLE);

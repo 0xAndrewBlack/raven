@@ -1,4 +1,7 @@
 #include "registry.h"
+
+#include <sys/stat.h>
+#include <unistd.h>
 #include "nls.h"
 
 #include <algorithm>
@@ -11,8 +14,11 @@ namespace {
 
 constexpr uint32_t file_not_found = 2, bad_handle = 6, invalid_parameter = 87, key_deleted = 1018;
 
+// A predefined key handle is a 32-bit value; a 64-bit program passes it sign-extended.
 bool predefined(uint64_t key)
 {
+	if ((key >> 32) == 0xffffffffULL)
+		key &= 0xffffffffULL;
 	return key >= 0x80000000ULL && key <= 0x80000003ULL;
 }
 
@@ -108,6 +114,7 @@ std::string unescape(std::string_view text)
 NativeRegistry::NativeRegistry(std::filesystem::path file) : file(std::move(file))
 {
 	load();
+	stamp = current_stamp();
 	seed();
 }
 
@@ -183,7 +190,7 @@ bool NativeRegistry::resolve(uint64_t parent, std::u16string_view path, std::u16
 	std::u16string shown;
 	if (predefined(parent)) {
 		static const char16_t *const names[] = {u"HKEY_CLASSES_ROOT", u"HKEY_CURRENT_USER", u"HKEY_LOCAL_MACHINE", u"HKEY_USERS"};
-		shown = names[parent - 0x80000000ULL];
+		shown = names[uint32_t(parent) - 0x80000000U];
 		base = fold(shown);
 	} else {
 		const auto found = open_keys.find(parent);
@@ -210,6 +217,7 @@ bool NativeRegistry::resolve(uint64_t parent, std::u16string_view path, std::u16
 
 uint32_t NativeRegistry::create(uint64_t parent, std::u16string_view path, uint64_t &key, uint32_t &disposition)
 {
+	refresh();
 	std::u16string folded, display;
 	if (!resolve(parent, path, folded, display))
 		return bad_handle;
@@ -239,6 +247,7 @@ uint32_t NativeRegistry::create(uint64_t parent, std::u16string_view path, uint6
 
 uint32_t NativeRegistry::open(uint64_t parent, std::u16string_view path, uint64_t &key)
 {
+	refresh();
 	std::u16string folded, display;
 	if (!resolve(parent, path, folded, display))
 		return bad_handle;
@@ -262,6 +271,7 @@ uint32_t NativeRegistry::close(uint64_t key)
 
 uint32_t NativeRegistry::query(uint64_t key, std::u16string_view name, uint32_t &type, std::vector<uint8_t> &data) const
 {
+	refresh();
 	const auto found = open_keys.find(key);
 	if (found == open_keys.end())
 		return predefined(key) ? file_not_found : bad_handle;
@@ -276,6 +286,7 @@ uint32_t NativeRegistry::query(uint64_t key, std::u16string_view name, uint32_t 
 
 uint32_t NativeRegistry::set(uint64_t key, std::u16string_view name, uint32_t type, std::span<const uint8_t> data)
 {
+	refresh();
 	const auto found = open_keys.find(key);
 	if (found == open_keys.end())
 		return predefined(key) ? 5 : bad_handle;
@@ -300,6 +311,7 @@ std::vector<std::u16string> NativeRegistry::children(const std::u16string &folde
 
 uint32_t NativeRegistry::remove_key(uint64_t parent, std::u16string_view path)
 {
+	refresh();
 	std::u16string folded, display;
 	if (!resolve(parent, path, folded, display))
 		return bad_handle;
@@ -320,6 +332,7 @@ uint32_t NativeRegistry::remove_key(uint64_t parent, std::u16string_view path)
 
 uint32_t NativeRegistry::remove_value(uint64_t key, std::u16string_view name)
 {
+	refresh();
 	const auto found = open_keys.find(key);
 	if (found == open_keys.end())
 		return predefined(key) ? 5 : bad_handle;
@@ -334,10 +347,11 @@ uint32_t NativeRegistry::remove_value(uint64_t key, std::u16string_view name)
 
 uint32_t NativeRegistry::enum_key(uint64_t key, uint32_t index, std::u16string &name) const
 {
+	refresh();
 	std::u16string folded;
 	if (predefined(key)) {
 		static const char16_t *const names[] = {u"HKEY_CLASSES_ROOT", u"HKEY_CURRENT_USER", u"HKEY_LOCAL_MACHINE", u"HKEY_USERS"};
-		folded = fold(names[key - 0x80000000ULL]);
+		folded = fold(names[uint32_t(key) - 0x80000000U]);
 	} else {
 		const auto found = open_keys.find(key);
 		if (found == open_keys.end())
@@ -356,6 +370,7 @@ uint32_t NativeRegistry::enum_key(uint64_t key, uint32_t index, std::u16string &
 
 uint32_t NativeRegistry::enum_value(uint64_t key, uint32_t index, std::u16string &name, uint32_t &type, std::vector<uint8_t> &data) const
 {
+	refresh();
 	const auto found = open_keys.find(key);
 	if (found == open_keys.end())
 		return predefined(key) ? 259 : bad_handle;
@@ -374,10 +389,11 @@ uint32_t NativeRegistry::enum_value(uint64_t key, uint32_t index, std::u16string
 
 uint32_t NativeRegistry::info(uint64_t key, Info &result) const
 {
+	refresh();
 	std::u16string folded;
 	if (predefined(key)) {
 		static const char16_t *const names[] = {u"HKEY_CLASSES_ROOT", u"HKEY_CURRENT_USER", u"HKEY_LOCAL_MACHINE", u"HKEY_USERS"};
-		folded = fold(names[key - 0x80000000ULL]);
+		folded = fold(names[uint32_t(key) - 0x80000000U]);
 	} else {
 		const auto found = open_keys.find(key);
 		if (found == open_keys.end())
@@ -399,12 +415,34 @@ uint32_t NativeRegistry::info(uint64_t key, Info &result) const
 	return 0;
 }
 
+NativeRegistry::Stamp NativeRegistry::current_stamp() const
+{
+	struct stat status{};
+	if (file.empty() || ::stat(file.c_str(), &status))
+		return {};
+	return {status.st_mtim.tv_sec, status.st_mtim.tv_nsec, status.st_size, static_cast<long long>(status.st_ino)};
+}
+
+// Several processes of a prefix share the hive file: a change made by another one is read before this one looks at or changes the hive.
+void NativeRegistry::refresh() const
+{
+	if (file.empty() || seeding)
+		return;
+	const auto now = current_stamp();
+	if (now == stamp)
+		return;
+	auto &self = const_cast<NativeRegistry &>(*this);
+	self.keys.clear();
+	self.load();
+	stamp = now;
+}
+
 void NativeRegistry::save() const
 {
 	if (file.empty() || seeding)
 		return;
 	auto temporary = file;
-	temporary += ".tmp";
+	temporary += "." + std::to_string(::getpid()) + ".tmp";
 	{
 		std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
 		if (!output)
@@ -419,6 +457,7 @@ void NativeRegistry::save() const
 			throw std::runtime_error("cannot write the registry hive");
 	}
 	std::filesystem::rename(temporary, file);
+	stamp = current_stamp();
 }
 
 void NativeRegistry::load()

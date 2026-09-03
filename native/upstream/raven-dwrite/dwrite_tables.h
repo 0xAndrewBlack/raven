@@ -965,6 +965,342 @@ static void *IDWriteFontFallback_table[4] = {
 };
 
 enum {
+	IDWriteTextFormat_QueryInterface = 0,
+	IDWriteTextFormat_AddRef = 1,
+	IDWriteTextFormat_Release = 2,
+	IDWriteTextFormat_SetTextAlignment = 3,
+	IDWriteTextFormat_SetParagraphAlignment = 4,
+	IDWriteTextFormat_SetWordWrapping = 5,
+	IDWriteTextFormat_SetReadingDirection = 6,
+	IDWriteTextFormat_SetFlowDirection = 7,
+	IDWriteTextFormat_SetIncrementalTabStop = 8,
+	IDWriteTextFormat_SetTrimming = 9,
+	IDWriteTextFormat_SetLineSpacing = 10,
+	IDWriteTextFormat_GetTextAlignment = 11,
+	IDWriteTextFormat_GetParagraphAlignment = 12,
+	IDWriteTextFormat_GetWordWrapping = 13,
+	IDWriteTextFormat_GetReadingDirection = 14,
+	IDWriteTextFormat_GetFlowDirection = 15,
+	IDWriteTextFormat_GetIncrementalTabStop = 16,
+	IDWriteTextFormat_GetTrimming = 17,
+	IDWriteTextFormat_GetLineSpacing = 18,
+	IDWriteTextFormat_GetFontCollection = 19,
+	IDWriteTextFormat_GetFontFamilyNameLength = 20,
+	IDWriteTextFormat_GetFontFamilyName = 21,
+	IDWriteTextFormat_GetFontWeight = 22,
+	IDWriteTextFormat_GetFontStyle = 23,
+	IDWriteTextFormat_GetFontStretch = 24,
+	IDWriteTextFormat_GetFontSize = 25,
+	IDWriteTextFormat_GetLocaleNameLength = 26,
+	IDWriteTextFormat_GetLocaleName = 27,
+	IDWriteTextFormat_methods = 28
+};
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_0(void *self) { return unimplemented("IDWriteTextFormat", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_1(void *self) { return unimplemented("IDWriteTextFormat", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_2(void *self) { return unimplemented("IDWriteTextFormat", "Release"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_3(void *self) { return unimplemented("IDWriteTextFormat", "SetTextAlignment"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_4(void *self) { return unimplemented("IDWriteTextFormat", "SetParagraphAlignment"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_5(void *self) { return unimplemented("IDWriteTextFormat", "SetWordWrapping"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_6(void *self) { return unimplemented("IDWriteTextFormat", "SetReadingDirection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_7(void *self) { return unimplemented("IDWriteTextFormat", "SetFlowDirection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_8(void *self) { return unimplemented("IDWriteTextFormat", "SetIncrementalTabStop"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_9(void *self) { return unimplemented("IDWriteTextFormat", "SetTrimming"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_10(void *self) { return unimplemented("IDWriteTextFormat", "SetLineSpacing"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_11(void *self) { return unimplemented("IDWriteTextFormat", "GetTextAlignment"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_12(void *self) { return unimplemented("IDWriteTextFormat", "GetParagraphAlignment"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_13(void *self) { return unimplemented("IDWriteTextFormat", "GetWordWrapping"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_14(void *self) { return unimplemented("IDWriteTextFormat", "GetReadingDirection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_15(void *self) { return unimplemented("IDWriteTextFormat", "GetFlowDirection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_16(void *self) { return unimplemented("IDWriteTextFormat", "GetIncrementalTabStop"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_17(void *self) { return unimplemented("IDWriteTextFormat", "GetTrimming"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_18(void *self) { return unimplemented("IDWriteTextFormat", "GetLineSpacing"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_19(void *self) { return unimplemented("IDWriteTextFormat", "GetFontCollection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_20(void *self) { return unimplemented("IDWriteTextFormat", "GetFontFamilyNameLength"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_21(void *self) { return unimplemented("IDWriteTextFormat", "GetFontFamilyName"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_22(void *self) { return unimplemented("IDWriteTextFormat", "GetFontWeight"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_23(void *self) { return unimplemented("IDWriteTextFormat", "GetFontStyle"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_24(void *self) { return unimplemented("IDWriteTextFormat", "GetFontStretch"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_25(void *self) { return unimplemented("IDWriteTextFormat", "GetFontSize"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_26(void *self) { return unimplemented("IDWriteTextFormat", "GetLocaleNameLength"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextFormat_stub_27(void *self) { return unimplemented("IDWriteTextFormat", "GetLocaleName"); }
+static void *IDWriteTextFormat_table[28] = {
+	(void *)IDWriteTextFormat_stub_0,
+	(void *)IDWriteTextFormat_stub_1,
+	(void *)IDWriteTextFormat_stub_2,
+	(void *)IDWriteTextFormat_stub_3,
+	(void *)IDWriteTextFormat_stub_4,
+	(void *)IDWriteTextFormat_stub_5,
+	(void *)IDWriteTextFormat_stub_6,
+	(void *)IDWriteTextFormat_stub_7,
+	(void *)IDWriteTextFormat_stub_8,
+	(void *)IDWriteTextFormat_stub_9,
+	(void *)IDWriteTextFormat_stub_10,
+	(void *)IDWriteTextFormat_stub_11,
+	(void *)IDWriteTextFormat_stub_12,
+	(void *)IDWriteTextFormat_stub_13,
+	(void *)IDWriteTextFormat_stub_14,
+	(void *)IDWriteTextFormat_stub_15,
+	(void *)IDWriteTextFormat_stub_16,
+	(void *)IDWriteTextFormat_stub_17,
+	(void *)IDWriteTextFormat_stub_18,
+	(void *)IDWriteTextFormat_stub_19,
+	(void *)IDWriteTextFormat_stub_20,
+	(void *)IDWriteTextFormat_stub_21,
+	(void *)IDWriteTextFormat_stub_22,
+	(void *)IDWriteTextFormat_stub_23,
+	(void *)IDWriteTextFormat_stub_24,
+	(void *)IDWriteTextFormat_stub_25,
+	(void *)IDWriteTextFormat_stub_26,
+	(void *)IDWriteTextFormat_stub_27,
+};
+
+enum {
+	IDWriteTextLayout_QueryInterface = 0,
+	IDWriteTextLayout_AddRef = 1,
+	IDWriteTextLayout_Release = 2,
+	IDWriteTextLayout_SetTextAlignment = 3,
+	IDWriteTextLayout_SetParagraphAlignment = 4,
+	IDWriteTextLayout_SetWordWrapping = 5,
+	IDWriteTextLayout_SetReadingDirection = 6,
+	IDWriteTextLayout_SetFlowDirection = 7,
+	IDWriteTextLayout_SetIncrementalTabStop = 8,
+	IDWriteTextLayout_SetTrimming = 9,
+	IDWriteTextLayout_SetLineSpacing = 10,
+	IDWriteTextLayout_GetTextAlignment = 11,
+	IDWriteTextLayout_GetParagraphAlignment = 12,
+	IDWriteTextLayout_GetWordWrapping = 13,
+	IDWriteTextLayout_GetReadingDirection = 14,
+	IDWriteTextLayout_GetFlowDirection = 15,
+	IDWriteTextLayout_GetIncrementalTabStop = 16,
+	IDWriteTextLayout_GetTrimming = 17,
+	IDWriteTextLayout_GetLineSpacing = 18,
+	IDWriteTextLayout_GetFontCollection = 19,
+	IDWriteTextLayout_GetFontFamilyNameLength = 20,
+	IDWriteTextLayout_GetFontFamilyName = 21,
+	IDWriteTextLayout_GetFontWeight = 22,
+	IDWriteTextLayout_GetFontStyle = 23,
+	IDWriteTextLayout_GetFontStretch = 24,
+	IDWriteTextLayout_GetFontSize = 25,
+	IDWriteTextLayout_GetLocaleNameLength = 26,
+	IDWriteTextLayout_GetLocaleName = 27,
+	IDWriteTextLayout_SetMaxWidth = 28,
+	IDWriteTextLayout_SetMaxHeight = 29,
+	IDWriteTextLayout_SetFontCollection = 30,
+	IDWriteTextLayout_SetFontFamilyName = 31,
+	IDWriteTextLayout_SetFontWeight = 32,
+	IDWriteTextLayout_SetFontStyle = 33,
+	IDWriteTextLayout_SetFontStretch = 34,
+	IDWriteTextLayout_SetFontSize = 35,
+	IDWriteTextLayout_SetUnderline = 36,
+	IDWriteTextLayout_SetStrikethrough = 37,
+	IDWriteTextLayout_SetDrawingEffect = 38,
+	IDWriteTextLayout_SetInlineObject = 39,
+	IDWriteTextLayout_SetTypography = 40,
+	IDWriteTextLayout_SetLocaleName = 41,
+	IDWriteTextLayout_GetMaxWidth = 42,
+	IDWriteTextLayout_GetMaxHeight = 43,
+	IDWriteTextLayout_IDWriteTextLayout_GetFontCollection = 44,
+	IDWriteTextLayout_IDWriteTextLayout_GetFontFamilyNameLength = 45,
+	IDWriteTextLayout_IDWriteTextLayout_GetFontFamilyName = 46,
+	IDWriteTextLayout_IDWriteTextLayout_GetFontWeight = 47,
+	IDWriteTextLayout_IDWriteTextLayout_GetFontStyle = 48,
+	IDWriteTextLayout_IDWriteTextLayout_GetFontStretch = 49,
+	IDWriteTextLayout_IDWriteTextLayout_GetFontSize = 50,
+	IDWriteTextLayout_GetUnderline = 51,
+	IDWriteTextLayout_GetStrikethrough = 52,
+	IDWriteTextLayout_GetDrawingEffect = 53,
+	IDWriteTextLayout_GetInlineObject = 54,
+	IDWriteTextLayout_GetTypography = 55,
+	IDWriteTextLayout_IDWriteTextLayout_GetLocaleNameLength = 56,
+	IDWriteTextLayout_IDWriteTextLayout_GetLocaleName = 57,
+	IDWriteTextLayout_Draw = 58,
+	IDWriteTextLayout_GetLineMetrics = 59,
+	IDWriteTextLayout_GetMetrics = 60,
+	IDWriteTextLayout_GetOverhangMetrics = 61,
+	IDWriteTextLayout_GetClusterMetrics = 62,
+	IDWriteTextLayout_DetermineMinWidth = 63,
+	IDWriteTextLayout_HitTestPoint = 64,
+	IDWriteTextLayout_HitTestTextPosition = 65,
+	IDWriteTextLayout_HitTestTextRange = 66,
+	IDWriteTextLayout_methods = 67
+};
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_0(void *self) { return unimplemented("IDWriteTextLayout", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_1(void *self) { return unimplemented("IDWriteTextLayout", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_2(void *self) { return unimplemented("IDWriteTextLayout", "Release"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_3(void *self) { return unimplemented("IDWriteTextLayout", "SetTextAlignment"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_4(void *self) { return unimplemented("IDWriteTextLayout", "SetParagraphAlignment"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_5(void *self) { return unimplemented("IDWriteTextLayout", "SetWordWrapping"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_6(void *self) { return unimplemented("IDWriteTextLayout", "SetReadingDirection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_7(void *self) { return unimplemented("IDWriteTextLayout", "SetFlowDirection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_8(void *self) { return unimplemented("IDWriteTextLayout", "SetIncrementalTabStop"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_9(void *self) { return unimplemented("IDWriteTextLayout", "SetTrimming"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_10(void *self) { return unimplemented("IDWriteTextLayout", "SetLineSpacing"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_11(void *self) { return unimplemented("IDWriteTextLayout", "GetTextAlignment"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_12(void *self) { return unimplemented("IDWriteTextLayout", "GetParagraphAlignment"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_13(void *self) { return unimplemented("IDWriteTextLayout", "GetWordWrapping"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_14(void *self) { return unimplemented("IDWriteTextLayout", "GetReadingDirection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_15(void *self) { return unimplemented("IDWriteTextLayout", "GetFlowDirection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_16(void *self) { return unimplemented("IDWriteTextLayout", "GetIncrementalTabStop"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_17(void *self) { return unimplemented("IDWriteTextLayout", "GetTrimming"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_18(void *self) { return unimplemented("IDWriteTextLayout", "GetLineSpacing"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_19(void *self) { return unimplemented("IDWriteTextLayout", "GetFontCollection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_20(void *self) { return unimplemented("IDWriteTextLayout", "GetFontFamilyNameLength"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_21(void *self) { return unimplemented("IDWriteTextLayout", "GetFontFamilyName"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_22(void *self) { return unimplemented("IDWriteTextLayout", "GetFontWeight"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_23(void *self) { return unimplemented("IDWriteTextLayout", "GetFontStyle"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_24(void *self) { return unimplemented("IDWriteTextLayout", "GetFontStretch"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_25(void *self) { return unimplemented("IDWriteTextLayout", "GetFontSize"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_26(void *self) { return unimplemented("IDWriteTextLayout", "GetLocaleNameLength"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_27(void *self) { return unimplemented("IDWriteTextLayout", "GetLocaleName"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_28(void *self) { return unimplemented("IDWriteTextLayout", "SetMaxWidth"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_29(void *self) { return unimplemented("IDWriteTextLayout", "SetMaxHeight"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_30(void *self) { return unimplemented("IDWriteTextLayout", "SetFontCollection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_31(void *self) { return unimplemented("IDWriteTextLayout", "SetFontFamilyName"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_32(void *self) { return unimplemented("IDWriteTextLayout", "SetFontWeight"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_33(void *self) { return unimplemented("IDWriteTextLayout", "SetFontStyle"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_34(void *self) { return unimplemented("IDWriteTextLayout", "SetFontStretch"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_35(void *self) { return unimplemented("IDWriteTextLayout", "SetFontSize"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_36(void *self) { return unimplemented("IDWriteTextLayout", "SetUnderline"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_37(void *self) { return unimplemented("IDWriteTextLayout", "SetStrikethrough"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_38(void *self) { return unimplemented("IDWriteTextLayout", "SetDrawingEffect"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_39(void *self) { return unimplemented("IDWriteTextLayout", "SetInlineObject"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_40(void *self) { return unimplemented("IDWriteTextLayout", "SetTypography"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_41(void *self) { return unimplemented("IDWriteTextLayout", "SetLocaleName"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_42(void *self) { return unimplemented("IDWriteTextLayout", "GetMaxWidth"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_43(void *self) { return unimplemented("IDWriteTextLayout", "GetMaxHeight"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_44(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetFontCollection"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_45(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetFontFamilyNameLength"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_46(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetFontFamilyName"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_47(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetFontWeight"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_48(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetFontStyle"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_49(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetFontStretch"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_50(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetFontSize"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_51(void *self) { return unimplemented("IDWriteTextLayout", "GetUnderline"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_52(void *self) { return unimplemented("IDWriteTextLayout", "GetStrikethrough"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_53(void *self) { return unimplemented("IDWriteTextLayout", "GetDrawingEffect"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_54(void *self) { return unimplemented("IDWriteTextLayout", "GetInlineObject"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_55(void *self) { return unimplemented("IDWriteTextLayout", "GetTypography"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_56(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetLocaleNameLength"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_57(void *self) { return unimplemented("IDWriteTextLayout", "IDWriteTextLayout_GetLocaleName"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_58(void *self) { return unimplemented("IDWriteTextLayout", "Draw"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_59(void *self) { return unimplemented("IDWriteTextLayout", "GetLineMetrics"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_60(void *self) { return unimplemented("IDWriteTextLayout", "GetMetrics"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_61(void *self) { return unimplemented("IDWriteTextLayout", "GetOverhangMetrics"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_62(void *self) { return unimplemented("IDWriteTextLayout", "GetClusterMetrics"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_63(void *self) { return unimplemented("IDWriteTextLayout", "DetermineMinWidth"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_64(void *self) { return unimplemented("IDWriteTextLayout", "HitTestPoint"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_65(void *self) { return unimplemented("IDWriteTextLayout", "HitTestTextPosition"); }
+static HRESULT STDMETHODCALLTYPE IDWriteTextLayout_stub_66(void *self) { return unimplemented("IDWriteTextLayout", "HitTestTextRange"); }
+static void *IDWriteTextLayout_table[67] = {
+	(void *)IDWriteTextLayout_stub_0,
+	(void *)IDWriteTextLayout_stub_1,
+	(void *)IDWriteTextLayout_stub_2,
+	(void *)IDWriteTextLayout_stub_3,
+	(void *)IDWriteTextLayout_stub_4,
+	(void *)IDWriteTextLayout_stub_5,
+	(void *)IDWriteTextLayout_stub_6,
+	(void *)IDWriteTextLayout_stub_7,
+	(void *)IDWriteTextLayout_stub_8,
+	(void *)IDWriteTextLayout_stub_9,
+	(void *)IDWriteTextLayout_stub_10,
+	(void *)IDWriteTextLayout_stub_11,
+	(void *)IDWriteTextLayout_stub_12,
+	(void *)IDWriteTextLayout_stub_13,
+	(void *)IDWriteTextLayout_stub_14,
+	(void *)IDWriteTextLayout_stub_15,
+	(void *)IDWriteTextLayout_stub_16,
+	(void *)IDWriteTextLayout_stub_17,
+	(void *)IDWriteTextLayout_stub_18,
+	(void *)IDWriteTextLayout_stub_19,
+	(void *)IDWriteTextLayout_stub_20,
+	(void *)IDWriteTextLayout_stub_21,
+	(void *)IDWriteTextLayout_stub_22,
+	(void *)IDWriteTextLayout_stub_23,
+	(void *)IDWriteTextLayout_stub_24,
+	(void *)IDWriteTextLayout_stub_25,
+	(void *)IDWriteTextLayout_stub_26,
+	(void *)IDWriteTextLayout_stub_27,
+	(void *)IDWriteTextLayout_stub_28,
+	(void *)IDWriteTextLayout_stub_29,
+	(void *)IDWriteTextLayout_stub_30,
+	(void *)IDWriteTextLayout_stub_31,
+	(void *)IDWriteTextLayout_stub_32,
+	(void *)IDWriteTextLayout_stub_33,
+	(void *)IDWriteTextLayout_stub_34,
+	(void *)IDWriteTextLayout_stub_35,
+	(void *)IDWriteTextLayout_stub_36,
+	(void *)IDWriteTextLayout_stub_37,
+	(void *)IDWriteTextLayout_stub_38,
+	(void *)IDWriteTextLayout_stub_39,
+	(void *)IDWriteTextLayout_stub_40,
+	(void *)IDWriteTextLayout_stub_41,
+	(void *)IDWriteTextLayout_stub_42,
+	(void *)IDWriteTextLayout_stub_43,
+	(void *)IDWriteTextLayout_stub_44,
+	(void *)IDWriteTextLayout_stub_45,
+	(void *)IDWriteTextLayout_stub_46,
+	(void *)IDWriteTextLayout_stub_47,
+	(void *)IDWriteTextLayout_stub_48,
+	(void *)IDWriteTextLayout_stub_49,
+	(void *)IDWriteTextLayout_stub_50,
+	(void *)IDWriteTextLayout_stub_51,
+	(void *)IDWriteTextLayout_stub_52,
+	(void *)IDWriteTextLayout_stub_53,
+	(void *)IDWriteTextLayout_stub_54,
+	(void *)IDWriteTextLayout_stub_55,
+	(void *)IDWriteTextLayout_stub_56,
+	(void *)IDWriteTextLayout_stub_57,
+	(void *)IDWriteTextLayout_stub_58,
+	(void *)IDWriteTextLayout_stub_59,
+	(void *)IDWriteTextLayout_stub_60,
+	(void *)IDWriteTextLayout_stub_61,
+	(void *)IDWriteTextLayout_stub_62,
+	(void *)IDWriteTextLayout_stub_63,
+	(void *)IDWriteTextLayout_stub_64,
+	(void *)IDWriteTextLayout_stub_65,
+	(void *)IDWriteTextLayout_stub_66,
+};
+
+enum {
+	IDWriteBitmapRenderTarget_QueryInterface = 0,
+	IDWriteBitmapRenderTarget_AddRef = 1,
+	IDWriteBitmapRenderTarget_Release = 2,
+	IDWriteBitmapRenderTarget_DrawGlyphRun = 3,
+	IDWriteBitmapRenderTarget_GetMemoryDC = 4,
+	IDWriteBitmapRenderTarget_GetPixelsPerDip = 5,
+	IDWriteBitmapRenderTarget_SetPixelsPerDip = 6,
+	IDWriteBitmapRenderTarget_GetCurrentTransform = 7,
+	IDWriteBitmapRenderTarget_SetCurrentTransform = 8,
+	IDWriteBitmapRenderTarget_GetSize = 9,
+	IDWriteBitmapRenderTarget_Resize = 10,
+	IDWriteBitmapRenderTarget_methods = 11
+};
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_0(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_1(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_2(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "Release"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_3(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "DrawGlyphRun"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_4(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "GetMemoryDC"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_5(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "GetPixelsPerDip"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_6(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "SetPixelsPerDip"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_7(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "GetCurrentTransform"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_8(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "SetCurrentTransform"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_9(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "GetSize"); }
+static HRESULT STDMETHODCALLTYPE IDWriteBitmapRenderTarget_stub_10(void *self) { return unimplemented("IDWriteBitmapRenderTarget", "Resize"); }
+static void *IDWriteBitmapRenderTarget_table[11] = {
+	(void *)IDWriteBitmapRenderTarget_stub_0,
+	(void *)IDWriteBitmapRenderTarget_stub_1,
+	(void *)IDWriteBitmapRenderTarget_stub_2,
+	(void *)IDWriteBitmapRenderTarget_stub_3,
+	(void *)IDWriteBitmapRenderTarget_stub_4,
+	(void *)IDWriteBitmapRenderTarget_stub_5,
+	(void *)IDWriteBitmapRenderTarget_stub_6,
+	(void *)IDWriteBitmapRenderTarget_stub_7,
+	(void *)IDWriteBitmapRenderTarget_stub_8,
+	(void *)IDWriteBitmapRenderTarget_stub_9,
+	(void *)IDWriteBitmapRenderTarget_stub_10,
+};
+
+enum {
 	IDWriteFontFileStream_QueryInterface = 0,
 	IDWriteFontFileStream_AddRef = 1,
 	IDWriteFontFileStream_Release = 2,

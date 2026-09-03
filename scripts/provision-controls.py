@@ -231,7 +231,7 @@ def main():
     run([triple + "-gcc", "-c", *shell_flags, shell_support / "link.c", "-o", shell_objects[1]])
     run([triple + "-gcc", "-c", *shell_flags, "-fno-builtin", support / "crt.c", "-o", shell_objects[2]])
     shell_defined = decorated(shell_objects)
-    shell_names = ("CoCreateInstance", "CoGetClassObject", "SHCreateItemFromParsingName", "GetOpenFileNameW", "GetSaveFileNameW", "CommDlgExtendedError", "GetFileTitleW", "IUnknown_QueryService")
+    shell_names = ("CoCreateInstance", "CoGetClassObject", "CoGetMalloc", "SHCreateItemFromParsingName", "SHGetPropertyStoreForWindow", "PropVariantClear", "SHAppBarMessage", "GetOpenFileNameW", "GetSaveFileNameW", "CommDlgExtendedError", "GetFileTitleW", "IUnknown_QueryService")
     (output / "raven-shell.def").write_text("NAME raven-shell.dll\nEXPORTS\n" + "".join(definition_line(name, shell_defined.get(name)) for name in shell_names))
     run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{bases['shell']:#x},--no-insert-timestamp", *link_extra,
          "-o", output / "raven-shell.dll", *shell_objects, output / "raven-shell.def", "-luser32", "-lkernel32", "-lole32", "-luuid", "-lgcc"])
@@ -248,7 +248,7 @@ def main():
         run([triple + "-gcc", "-c", *dwrite_flags, dwrite_support / "crt.c", "-o", dwrite_objects[1]])
         (output / "raven-dwrite.def").write_text("NAME raven-dwrite.dll\nEXPORTS\nDWriteCreateFactory\n")
         run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,0x1fb000000,--no-insert-timestamp", *link_extra,
-             "-o", output / "raven-dwrite.dll", *dwrite_objects, output / "raven-dwrite.def", "-L" + str(output), "-lravenhost", "-lkernel32", "-lgcc"])
+             "-o", output / "raven-dwrite.dll", *dwrite_objects, output / "raven-dwrite.def", "-L" + str(output), "-lravenhost", "-lgdi32", "-lkernel32", "-lgcc"])
     if "crt" in wanted:
         # The C runtime component: the Universal CRT entry points programs import from ucrtbase.dll.
         crt_object = objects / "ucrtbase.o"

@@ -30,6 +30,8 @@ public:
 	void set_call(std::function<NativeResult(uint64_t,std::span<const uint64_t>)> call) { invoke=std::move(call); }
 	// Module whose resources answer LoadBitmap/LoadImage requests that name no module (the OEM bitmaps).
 	void set_oem_module(uint64_t base) { oem_module=base; }
+	// The descriptor and size of the section a program created, for DIB sections that live in one.
+	void set_section_source(std::function<std::optional<std::pair<int, uint64_t>>(uint64_t)> find) { section_source=std::move(find); }
 	void set_source(std::function<std::optional<std::vector<uint8_t>>(std::string_view)> read) { source=std::move(read); }
 
 private:
@@ -41,6 +43,7 @@ private:
 	std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke;
 	std::function<std::optional<std::vector<uint8_t>>(std::u16string_view)> read_host_file;
 	uint64_t oem_module=0;
+	std::function<std::optional<std::pair<int, uint64_t>>(uint64_t)> section_source;
 	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source;
 #ifdef RAVEN_SKIA
 	bool text_dispatch(std::string_view name);
@@ -69,7 +72,7 @@ private:
 	uint64_t create_section(std::span<const uint64_t> arguments);
 	uint64_t compatible_bitmap(std::span<const uint64_t> arguments);
 	uint64_t allocate_bitmap(uint32_t width,uint32_t height,uint32_t depth,bool section,bool top_down);
-	uint64_t allocate_dib(uint32_t width,uint32_t height,uint32_t bits,bool top_down,std::vector<uint32_t> palette);
+	uint64_t allocate_dib(uint32_t width,uint32_t height,uint32_t bits,bool top_down,std::vector<uint32_t> palette,uint64_t section=0,uint64_t section_offset=0);
 	bool delete_bitmap(uint64_t handle);
 	bool draw(std::span<const uint64_t> arguments);
 	bool fill(std::span<const uint64_t> arguments);

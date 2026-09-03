@@ -1,4 +1,6 @@
 #include "child_process.h"
+#include "threads.h"
+#include "handle_channel.h"
 #include "pipe.h"
 #include "section.h"
 #include "security_attributes.h"
@@ -296,6 +298,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		call.write(call[1], std::span<const uint8_t>(buffer.data(), size_t(count)));
+		if (std::getenv("RAVEN_TRACE_IO")) std::fprintf(stderr, "read %llx asked %x got %zd\n", static_cast<unsigned long long>(call[0]), call.u32(2), count);
 		if (call[3]) call.store<uint32_t>(call[3], uint32_t(count));
 		if (call[4]) {
 			call.store<uint64_t>(call[4], 0);
@@ -1053,9 +1056,61 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		constexpr uint32_t same_access = 0x2, close_source = 0x1;
 		const bool from_self = call[0] == current || objects.object_as<SelfProcessObject>(call[0]);
 		const bool to_self = call[2] == current || objects.object_as<SelfProcessObject>(call[2]);
-		if (!from_self || !to_self) {
-			// A handle can reach another process only through the channel to it, which carries no handles yet.
-			call.fail(50);
+		// The channel to the process a handle names: a child of this one, or the parent that started it.
+		const auto channel_of = [&](uint64_t handle) -> HandleChannel * {
+			const auto process = objects.object_as<ProcessObject>(handle);
+			if (!process)
+				return nullptr;
+			if (process->channel)
+				return process->channel.get();
+			return process->foreign && process->pid == ::getppid() ? parent_channel() : nullptr;
+		};
+		if (from_self && !to_self) {
+			// A handle for another process travels over the channel to it and has a value there that the sender chose.
+			auto *channel = channel_of(call[2]);
+			const auto object = objects.object(call[1]);
+			InheritedHandle record;
+			if (!channel || !object || !object->describe(record)) {
+				call.fail(50);
+				return;
+			}
+			record.handle_access = objects.access_of(call[1]);
+			const uint64_t value = channel->send(std::move(record), call.u32(5));
+			if (!value) {
+				call.fail(50);
+				return;
+			}
+			if (call[3])
+				call.store_pointer(call[3], value);
+			if ((call.u32(6) & close_source) && call[1] != UINT64_MAX && call[1] != UINT64_MAX - 1)
+				objects.close(call[1]);
+			call.ret(1);
+			return;
+		}
+		if (!from_self) {
+			// A handle of another process is asked for over the channel to it; it can only come to this process.
+			auto *channel = channel_of(call[0]);
+			if (!channel || !to_self) {
+				call.fail(50);
+				return;
+			}
+			uint32_t access = 0;
+			const auto object = channel->fetch(objects, context.threads, call[1], call.u32(6) & close_source, access);
+			if (!object) {
+				call.fail(6);
+				return;
+			}
+			const auto made = objects.add_object(object);
+			if (made.status) {
+				call.fail(4);
+				return;
+			}
+			objects.set_access(made.value, (call.u32(6) & same_access) || !call.u32(4) ? (access ? access : 0x1f0003) : call.u32(4));
+			if (call.u32(5))
+				objects.set_inherit(made.value, true);
+			if (call[3])
+				call.store_pointer(call[3], made.value);
+			call.ret(1);
 			return;
 		}
 		if (!call[3] && !(call.u32(6) & close_source)) {
@@ -1072,6 +1127,8 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			if (wanted & (0x10000000U | 0x02000000U))
 				wanted = held;
 			if (wanted & ~held) {
+				if (std::getenv("RAVEN_TRACE_FAIL"))
+					std::fprintf(stderr, "raven: section handle %llx holds %x, a copy asked for %x\n", (unsigned long long)call[1], held, wanted);
 				call.fail(5);
 				return;
 			}
