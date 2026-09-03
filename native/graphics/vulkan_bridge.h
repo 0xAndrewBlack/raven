@@ -48,7 +48,15 @@ private:
 	std::map<uint64_t, VkInstance> instances;
 	struct Physical { VkPhysicalDevice handle; uint64_t instance; };
 	std::map<uint64_t, Physical> physical;
-	struct Device { VkDevice handle; uint64_t physical; };
+	// A device whose driver imports host memory (VK_EXT_external_memory_host) gives host-visible allocations memory the guest maps
+	// directly: the import alignment, the memory types that are host-visible and the query for the types a host pointer may back.
+	struct Device {
+		VkDevice handle; uint64_t physical;
+		bool host_import = false;
+		VkDeviceSize import_alignment = 0;
+		uint32_t host_visible_types = 0;
+		PFN_vkGetMemoryHostPointerPropertiesEXT host_pointer_properties = nullptr;
+	};
 	std::map<uint64_t, Device> devices;
 	struct Queue { VkQueue handle; uint64_t device; uint32_t family, index; };
 	std::map<uint64_t, Queue> queues;
@@ -62,7 +70,14 @@ private:
 		int shadow_file = -1;
 		uint8_t *view = nullptr;
 		size_t view_size = 0;
+		// Memory the driver imported from a memfd: the host's mapping of it, which the guest maps as well, so both see the same bytes and
+		// nothing is copied when the device works.
+		int import_file = -1;
+		uint8_t *import_host = nullptr;
+		size_t import_size = 0;
 	};
+	// Releases what an imported allocation holds on the host side, after the driver freed the memory.
+	static void release_import(Memory &memory);
 	std::map<uint64_t, Memory> memories;
 	struct Buffer { VkBuffer handle; uint64_t device; };
 	std::map<uint64_t, Buffer> buffers;

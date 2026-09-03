@@ -100,6 +100,8 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("InitializeSRWLock", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
 	registry.add("AcquireSRWLockExclusive", 1, acquire_exclusive);
+	// The guest component takes a free lock itself and asks here, under the ntdll names, only for one that is held.
+	registry.add("RtlAcquireSRWLockExclusive", 1, acquire_exclusive);
 	registry.add("TryAcquireSRWLockExclusive", 1, [](ApiCall &call) {
 		const bool free = !call.load_pointer(call[0]);
 		if (free)
@@ -108,6 +110,7 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("ReleaseSRWLockExclusive", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
 	registry.add("AcquireSRWLockShared", 1, acquire_shared);
+	registry.add("RtlAcquireSRWLockShared", 1, acquire_shared);
 	registry.add("TryAcquireSRWLockShared", 1, [](ApiCall &call) {
 		const auto value = call.load_pointer(call[0]);
 		if (!(value & 1))
@@ -120,11 +123,13 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 			call.store_pointer(call[0], value - 2);
 	});
 
-	// Condition variables keep their waiters host-side, keyed by the variable's address.
+	// Condition variables keep their waiters host-side, keyed by the variable's address. The variable's word holds how many sleep on it,
+	// so a guest can see that a wake has nobody to wake without asking.
 	auto variables = std::make_shared<std::map<uint64_t, std::vector<std::shared_ptr<Waiter>>>>();
 	const auto sleep_on = [&threads, variables](ApiCall &call, std::function<void()> release, std::function<void()> reacquire, uint32_t milliseconds) {
 		auto waiter = std::make_shared<Waiter>();
 		(*variables)[call[0]].push_back(waiter);
+		call.store_pointer(call[0], (*variables)[call[0]].size());
 		release();
 		std::optional<std::chrono::steady_clock::time_point> wake;
 		if (milliseconds != UINT32_MAX)
@@ -132,6 +137,7 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 		threads.block([waiter] { return waiter->woken; }, wake);
 		auto &list = (*variables)[call[0]];
 		list.erase(std::remove(list.begin(), list.end(), waiter), list.end());
+		call.store_pointer(call[0], list.size());
 		reacquire();
 		if (!waiter->woken) {
 			call.fail(1460);
@@ -149,8 +155,9 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("SleepConditionVariableCS", 3, [sleep_on, take, &threads, &context](ApiCall &call) {
 		const uint64_t section = call[1];
-		if (call.pointer_width() == 4) {
-			// A 32-bit section is not laid out in guest memory: leaving and entering it goes through the program's own calls.
+		if (call.pointer_width() == 4 || context.modules.all().contains("raven-rtl.dll")) {
+			// A 32-bit section is not laid out in guest memory, and a 64-bit one belongs to the guest RTL when it is loaded: leaving and
+			// entering it goes through the program's own calls.
 			const auto leave = context.modules.resolve({"kernel32.dll", "LeaveCriticalSection", 0, false, 0});
 			const auto enter = context.modules.resolve({"kernel32.dll", "EnterCriticalSection", 0, false, 0});
 			const uint64_t arguments[] = {section};
@@ -181,6 +188,8 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("WakeConditionVariable", 1, [wake](ApiCall &call) { wake(call, false); });
 	registry.add("WakeAllConditionVariable", 1, [wake](ApiCall &call) { wake(call, true); });
+	registry.add("RtlWakeConditionVariable", 1, [wake](ApiCall &call) { wake(call, false); });
+	registry.add("RtlWakeAllConditionVariable", 1, [wake](ApiCall &call) { wake(call, true); });
 
 	// INIT_ONCE is one word: 0 untouched, 1 running, otherwise the context pointer with low bits 2.
 	registry.add("InitOnceInitialize", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });

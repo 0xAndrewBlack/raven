@@ -137,11 +137,14 @@ void VulkanBridge::destroy_device(uint64_t token)
 		if (item->second.device == token) { vkDestroyBuffer(found->second.handle, item->second.handle, nullptr); item = buffers.erase(item); } else ++item;
 	for (auto item = memories.begin(); item != memories.end();) {
 		if (item->second.device == token) {
-			if (item->second.host) {
+			if (item->second.host && item->second.import_file >= 0) {
+				process.unmap_memory(item->second.shadow);
+			} else if (item->second.host) {
 				vkUnmapMemory(found->second.handle, item->second.handle);
 				drop_shadow(item->second);
 			}
 			vkFreeMemory(found->second.handle, item->second.handle, nullptr);
+			release_import(item->second);
 			item = memories.erase(item);
 		} else ++item;
 	}
@@ -359,6 +362,19 @@ bool VulkanBridge::dispatch(std::string_view name)
 			guest_extensions.push_back(string(read.template operator()<uint64_t>(reinterpret_cast<uint64_t>(info.ppEnabledExtensionNames) + uint64_t(index) * 8)));
 		if (!host_extension_names(guest_extensions, true, host_extensions))
 			throw std::runtime_error("Vulkan device extension is not offered");
+		// Host memory import lets host-visible allocations be memory the guest maps directly; the driver offers it or the bridge copies.
+		bool host_import = false;
+		{
+			uint32_t count = 0;
+			vkEnumerateDeviceExtensionProperties(found->second.handle, nullptr, &count, nullptr);
+			std::vector<VkExtensionProperties> offered(count);
+			vkEnumerateDeviceExtensionProperties(found->second.handle, nullptr, &count, offered.data());
+			for (const auto &extension : offered)
+				if (!std::strcmp(extension.extensionName, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME))
+					host_import = true;
+			if (host_import && std::find(host_extensions.begin(), host_extensions.end(), VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) == host_extensions.end())
+				host_extensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+		}
 		std::vector<const char *> host_pointers;
 		for (const auto &extension : host_extensions)
 			host_pointers.push_back(extension.c_str());
@@ -397,8 +413,23 @@ bool VulkanBridge::dispatch(std::string_view name)
 		result = static_cast<uint32_t>(status);
 		if (status == VK_SUCCESS) {
 			const auto token = next_handle++;
+			Device record{device, arguments[0]};
+			if (host_import) {
+				VkPhysicalDeviceExternalMemoryHostPropertiesEXT import_properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+				VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &import_properties};
+				vkGetPhysicalDeviceProperties2(found->second.handle, &properties);
+				VkPhysicalDeviceMemoryProperties memory_properties{};
+				vkGetPhysicalDeviceMemoryProperties(found->second.handle, &memory_properties);
+				for (uint32_t index = 0; index < memory_properties.memoryTypeCount; ++index)
+					if (memory_properties.memoryTypes[index].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+						record.host_visible_types |= 1U << index;
+				record.import_alignment = std::max<VkDeviceSize>(import_properties.minImportedHostPointerAlignment, 4096);
+				record.host_pointer_properties = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
+					vkGetDeviceProcAddr(device, "vkGetMemoryHostPointerPropertiesEXT"));
+				record.host_import = record.host_pointer_properties && record.import_alignment <= 65536;
+			}
 			try {
-				devices.emplace(token, Device{device, arguments[0]});
+				devices.emplace(token, record);
 				write(arguments[3], token);
 			} catch (...) {
 				devices.erase(token);

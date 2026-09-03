@@ -60,6 +60,17 @@ uint64_t VulkanBridge::make_shadow(Memory &memory, size_t size)
 	return guest;
 }
 
+void VulkanBridge::release_import(Memory &memory)
+{
+	if (memory.import_host)
+		munmap(memory.import_host, memory.import_size);
+	if (memory.import_file >= 0)
+		close(memory.import_file);
+	memory.import_host = nullptr;
+	memory.import_file = -1;
+	memory.import_size = 0;
+}
+
 void VulkanBridge::drop_shadow(Memory &memory)
 {
 	if (memory.shadow)
@@ -201,11 +212,14 @@ if (name == "vkFreeMemory") {
 		no_allocator(a[2]);
 		if (a[1]) {
 			auto &memory = memory_of(a[1], a[0]);
-			if (memory.host) {
+			if (memory.host && memory.import_file >= 0) {
+				process.unmap_memory(memory.shadow);
+			} else if (memory.host) {
 				vkUnmapMemory(device.handle, memory.handle);
 				drop_shadow(memory);
 			}
 			vkFreeMemory(device.handle, memory.handle, nullptr);
+			release_import(memory);
 			memories.erase(a[1]);
 		}
 	} else if (name == "vkMapMemory") {
@@ -216,6 +230,17 @@ if (name == "vkFreeMemory") {
 			throw std::runtime_error("unsupported Vulkan memory mapping (offset " + std::to_string(offset) + ", size " + std::to_string(size) +
 				", memory " + std::to_string(memory.size) + (memory.host ? ", already mapped" : "") + ", flags " + std::to_string(a[4]) + ")");
 		check_writable(a[5], 8);
+		if (memory.import_file >= 0) {
+			// Imported memory: the guest maps the same file the driver reads, so the mapping is the memory itself.
+			const auto guest = process.map_shared(memory.import_file, memory.import_size);
+			memory.host = memory.import_host + offset;
+			memory.shadow = guest;
+			memory.offset = offset;
+			memory.mapped = size;
+			store(a[5], guest + offset);
+			process.return_api(0);
+			return true;
+		}
 		void *host = nullptr;
 		const auto status = vkMapMemory(device.handle, memory.handle, offset, size, 0, &host);
 		result = static_cast<uint32_t>(status);
@@ -234,6 +259,13 @@ if (name == "vkFreeMemory") {
 		auto &memory = memory_of(a[1], a[0]);
 		if (!memory.host)
 			throw std::runtime_error("Vulkan memory is not mapped");
+		if (memory.import_file >= 0) {
+			process.unmap_memory(memory.shadow);
+			memory.shadow = 0;
+			memory.host = nullptr;
+			process.return_api(0);
+			return true;
+		}
 		shadow_to_device(a[0]);
 		vkUnmapMemory(device.handle, memory.handle);
 		drop_shadow(memory);

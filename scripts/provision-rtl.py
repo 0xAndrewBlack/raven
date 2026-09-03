@@ -125,7 +125,8 @@ def main():
     paths = [source / "sdk/lib/rtl" / (name + ".c") for name in
              ("critical", "heap", "heapuser", "heapdbg", "heappage", "bitmap", "bitmap64", "mem", "slist", "error", "appverifier", "avltable", "splaytree")]
     paths += [source / "sdk/lib/crt/mem/memset.c", source / "sdk/lib/crt/mem/memmove.c", source / "sdk/lib/crt/string/wcslen.c",
-              output / "support.c", output / "verifier.c", output / "unicode.c", repo / "native/upstream/reactos-rtl/initialize.c"]
+              output / "support.c", output / "verifier.c", output / "unicode.c", repo / "native/upstream/reactos-rtl/initialize.c",
+              repo / "native/upstream/reactos-rtl/kernel.c"]
 
     def compile(path):
         definitions = [] if path.name in ("support.c", "verifier.c") else ["-D_NTSYSTEM_", "-D_NTDLLBUILD_"]

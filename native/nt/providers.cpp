@@ -290,7 +290,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	}
 	// Natives that the shared API registry implements.
 	for (const auto name : {"NtQuerySection", "NtFlushInstructionCache", "RtlAddGrowableFunctionTable", "RtlGrowFunctionTable", "RtlDeleteGrowableFunctionTable",
-		"NtWriteFile", "RtlNtStatusToDosError", "NtQueryObject", "NtMapViewOfSection", "NtUnmapViewOfSection"})
+		"NtWriteFile", "RtlNtStatusToDosError", "NtQueryObject", "NtMapViewOfSection", "NtUnmapViewOfSection",
+		"RtlAcquireSRWLockExclusive", "RtlAcquireSRWLockShared", "RtlWakeConditionVariable", "RtlWakeAllConditionVariable"})
 		if (std::find(nt_names.begin(),nt_names.end(),name)==nt_names.end()) nt_names.push_back(name);
 	std::sort(nt_names.begin(),nt_names.end());
 	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.
@@ -373,7 +374,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			struct Overlay { const char *library, *component, *prefix; };
 			static constexpr Overlay overlays[] = {
 				{"user32.dll", "raven-user32.dll", "raven-user32."}, {"comdlg32.dll", "raven-shell.dll", "raven-shell."},
-				{"ole32.dll", "raven-shell.dll", "raven-shell."}, {"shell32.dll", "raven-shell.dll", "raven-shell."}};
+				{"ole32.dll", "raven-shell.dll", "raven-shell."}, {"shell32.dll", "raven-shell.dll", "raven-shell."},
+				// The heap, critical sections and the free paths of SRW locks and condition variables run in the guest RTL.
+				{"kernel32.dll", "raven-rtl.dll", "raven-rtl."}, {"kernelbase.dll", "raven-rtl.dll", "raven-rtl."}};
 			for (const auto &overlay_rule : overlays) {
 				if (name != overlay_rule.library)
 					continue;

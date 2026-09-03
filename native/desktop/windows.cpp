@@ -465,6 +465,7 @@ void NativeWindows::settle_focus_leave(bool now)
 {
 	if (!focus_leaving || (!now && std::chrono::steady_clock::now()-focus_left<std::chrono::milliseconds(150))) return;
 	focus_leaving=false;
+	key_down={}; key_translation.reset();
 	set_focus(0);
 	activate(0);
 }
@@ -506,19 +507,32 @@ void NativeWindows::receive(const DesktopEvent &event)
 		}
 		if (!event.window && !event.held_keys.empty())
 			throw std::runtime_error("keyboard focus requires its visible guest window");
+		// The keyboard moving between two windows of the program (a leave of one came just before) can carry a key pressed while it moved:
+		// the compositor reports it as held on arrival and never sends its press. That press is the program's, so it is delivered.
+		const bool moving=focus_leaving;
+		const auto before=key_down;
+		const auto deliver_moving_keys=[&] {
+			if (!moving || !focus || !objects.window(focus)) return;
+			for (size_t code=0;code<initial.size();++code)
+				if (initial[code] && !before[code]) {
+					key_down[code]=false;
+					receive({event.window ? event.window : focus,uint32_t(code),1,0,DesktopEventKind::key});
+				}
+		};
 		// The host can give the focus to a window the program hides or destroys before the event is read; there is nothing to focus then.
 		if (event.window && (!objects.window(event.window) || !objects.window(event.window)->visible)) {
 			// A popup gone before the compositor focused it does not take the focus either: the program's focus stays.
 			if (focus && objects.window(focus) && objects.window_visible(focus)) {
 				focus_leaving=false;
 				key_down=initial; key_translation.reset();
+				deliver_moving_keys();
 			} else {
 				settle_focus_leave(true);
 			}
 			return;
 		}
 		if (!event.window && event.held_keys.empty() && focus) {
-			key_down=initial; key_translation.reset();
+			// The keys the program saw pressed stay recorded until the leave turns out to be real.
 			focus_leaving=true;
 			focus_left=std::chrono::steady_clock::now();
 			return;
@@ -531,6 +545,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 			if (passive && objects.window_root(focus)!=event.window) {
 				focus_leaving=false;
 				key_down=initial; key_translation.reset();
+				deliver_moving_keys();
 				return;
 			}
 		}
@@ -538,6 +553,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 		key_down=initial; key_translation.reset();
 		if (!event.window) { set_focus(0); activate(0); }
 		else if (!focus || objects.window_root(focus)!=event.window) set_focus(event.window);
+		deliver_moving_keys();
 		return;
 	}
 	if (event.kind==DesktopEventKind::key) {

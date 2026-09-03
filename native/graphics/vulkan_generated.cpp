@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace raven {
 
@@ -23,11 +25,60 @@ uint64_t Marshal::allocate_memory(const std::vector<uint64_t> &a)
 		throw std::runtime_error("unsupported Vulkan memory allocation size");
 	check_writable(a[3], 8);
 	VkDeviceMemory memory = VK_NULL_HANDLE;
-	const auto status = vkAllocateMemory(host_device, info, nullptr, &memory);
+	VulkanBridge::Memory record{VK_NULL_HANDLE, a[0], info->allocationSize};
+	// A plain host-visible allocation on a device that imports host memory comes from a memfd the guest will map as it is.
+	const auto &device = bridge.devices.at(a[0]);
+	// Allocation flags and priorities travel along with an import; any other structure (a dedicated allocation, an export) keeps the copy.
+	bool importable = device.host_import && info->memoryTypeIndex < 32 && (device.host_visible_types >> info->memoryTypeIndex & 1);
+	for (auto *next = static_cast<const VkBaseInStructure *>(info->pNext); next && importable; next = next->pNext)
+		importable = next->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO || next->sType == VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT;
+	if (importable) {
+		const size_t size = size_t((info->allocationSize + device.import_alignment - 1) / device.import_alignment * device.import_alignment);
+		const int file = memfd_create("raven-vulkan-memory", MFD_CLOEXEC);
+		void *host = MAP_FAILED;
+		if (file >= 0 && ftruncate(file, off_t(size)) == 0) {
+			// The mapping starts at the alignment the driver asks for: a reservation large enough to hold an aligned window of the file.
+			void *reserve = mmap(nullptr, size + device.import_alignment, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+			if (reserve != MAP_FAILED) {
+				const auto start = (reinterpret_cast<uintptr_t>(reserve) + device.import_alignment - 1) / device.import_alignment * device.import_alignment;
+				host = mmap(reinterpret_cast<void *>(start), size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, file, 0);
+				if (start > reinterpret_cast<uintptr_t>(reserve))
+					munmap(reserve, start - reinterpret_cast<uintptr_t>(reserve));
+				const auto end = reinterpret_cast<uintptr_t>(reserve) + size + device.import_alignment;
+				if (end > start + size)
+					munmap(reinterpret_cast<void *>(start + size), end - (start + size));
+			}
+		}
+		VkMemoryHostPointerPropertiesEXT pointer{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+		if (host != MAP_FAILED && device.host_pointer_properties(host_device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host, &pointer) == VK_SUCCESS &&
+			(pointer.memoryTypeBits >> info->memoryTypeIndex & 1)) {
+			VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, info->pNext,
+				VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host};
+			VkMemoryAllocateInfo imported = *info;
+			imported.pNext = &import;
+			imported.allocationSize = size;
+			if (vkAllocateMemory(host_device, &imported, nullptr, &memory) == VK_SUCCESS) {
+				record.import_file = file;
+				record.import_host = static_cast<uint8_t *>(host);
+				record.import_size = size;
+			}
+		}
+		if (!record.import_host) {
+			memory = VK_NULL_HANDLE;
+			if (host != MAP_FAILED)
+				munmap(host, size);
+			if (file >= 0)
+				close(file);
+		}
+	}
+	const auto status = memory ? VK_SUCCESS : vkAllocateMemory(host_device, info, nullptr, &memory);
 	if (status == VK_SUCCESS) {
 		const auto token_value = bridge.next_handle++;
-		bridge.memories.emplace(token_value, VulkanBridge::Memory{memory, a[0], info->allocationSize});
+		record.handle = memory;
+		bridge.memories.emplace(token_value, record);
 		store<uint64_t>(a[3], token_value);
+	} else {
+		VulkanBridge::release_import(record);
 	}
 	return static_cast<uint32_t>(status);
 }
