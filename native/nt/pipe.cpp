@@ -314,6 +314,11 @@ bool pipe_exists(KernelContext &context, const std::u16string &name)
 
 }
 
+void complete_file_io(KernelContext &context, FileObject &file, uint64_t overlapped, size_t width, uint32_t error, uint64_t bytes)
+{
+	finish_io(context, file.port, file.key, overlapped, width, error, bytes, !(file.skip_port_on_success && !error));
+}
+
 PipeObject::~PipeObject()
 {
 	if (listener && listener->instances)
@@ -730,14 +735,14 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	};
-	registry.add("SetFileCompletionNotificationModes", 2, [pipe_of](ApiCall &call) {
-		const auto pipe = pipe_of(call[0]);
-		if (!pipe || (call.u32(1) & ~3U)) {
-			call.fail(pipe ? error_invalid_parameter : 6);
+	registry.add("SetFileCompletionNotificationModes", 2, [&context](ApiCall &call) {
+		const auto file = context.objects.object_as<FileObject>(call[0]);
+		if (!file || (call.u32(1) & ~3U)) {
+			call.fail(file ? error_invalid_parameter : 6);
 			return;
 		}
-		pipe->skip_port_on_success = call.u32(1) & 1;
-		pipe->skip_event_on_success = call.u32(1) & 2;
+		file->skip_port_on_success = call.u32(1) & 1;
+		file->skip_event_on_success = call.u32(1) & 2;
 		call.ret(1);
 	});
 	registry.add("CancelIoEx", 2, [cancel](ApiCall &call) { cancel(call, call[0], call[1], true); });

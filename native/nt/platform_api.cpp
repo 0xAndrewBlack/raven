@@ -1,6 +1,7 @@
 #include <cstdio>
 #include "elevation.h"
 #include "hash.h"
+#include "host_names.h"
 #include "kernel_context.h"
 
 #include <sys/random.h>
@@ -25,8 +26,15 @@ struct CryptState {
 	uint64_t next = 0x1000;
 };
 
+// COM per thread: how often it was initialized and in which apartment, single-threaded or the multithreaded one.
 struct ComState {
-	std::map<uint64_t, int> initialized;
+	struct Thread {
+		int count = 0;
+		bool multithreaded = false;
+	};
+	std::map<uint64_t, Thread> threads;
+	uint64_t main_sta = 0;
+	int mta_threads = 0;
 };
 
 }
@@ -173,23 +181,93 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 
 	// COM: no class registry exists, so object creation reports "class not registered".
 	auto com = std::make_shared<ComState>();
-	registry.add("CoInitialize", 1, [com, &context](ApiCall &call) {
-		auto &count = com->initialized[context.environment.teb()];
-		call.ret(count++ ? s_false : s_ok);
-	});
-	registry.add("CoInitializeEx", 2, [com, &context](ApiCall &call) {
-		auto &count = com->initialized[context.environment.teb()];
-		call.ret(count++ ? s_false : s_ok);
-	});
-	registry.add("OleInitialize", 1, [com, &context](ApiCall &call) {
-		auto &count = com->initialized[context.environment.teb()];
-		call.ret(count++ ? s_false : s_ok);
-	});
-	const auto uninitialize = [com, &context](ApiCall &) {
-		auto &count = com->initialized[context.environment.teb()];
-		if (count > 0)
-			--count;
+	// A thread joins an apartment on its first initialization; asking for the other kind later fails with RPC_E_CHANGED_MODE.
+	// Programs also read the apartment from the thread's OLE data, which TEB.ReservedForOle points at: its flags word (after two
+	// pointers and the apartment id) has OLETLS_APARTMENTTHREADED (0x80), or OLETLS_MULTITHREADED with OLETLS_DISABLE_OLE1DDE (0x140).
+	const auto ole_flags = [&context](ApiCall &call, uint32_t flags) {
+		const size_t width = call.pointer_width();
+		const uint64_t slot = context.environment.teb() + (width == 4 ? 0xf80 : 0x1758);
+		uint64_t data = call.load_pointer(slot);
+		if (!data) {
+			data = context.allocator.allocate(0x100, true);
+			if (!data)
+				return;
+			call.store_pointer(slot, data);
+		}
+		call.store<uint32_t>(data + 2 * width + 4, flags);
 	};
+	const auto initialize = [com, &context, ole_flags](ApiCall &call, bool multithreaded, bool no_dde) {
+		const uint64_t thread = context.environment.teb();
+		auto &state = com->threads[thread];
+		if (state.count && state.multithreaded != multithreaded) {
+			call.ret(0x80010106U);
+			return;
+		}
+		if (!state.count++) {
+			state.multithreaded = multithreaded;
+			if (multithreaded)
+				++com->mta_threads;
+			else if (!com->main_sta)
+				com->main_sta = thread;
+			ole_flags(call, multithreaded ? 0x140U : no_dde ? 0xc0U : 0x80U);
+			call.ret(s_ok);
+			return;
+		}
+		call.ret(s_false);
+	};
+	registry.add("CoInitialize", 1, [initialize](ApiCall &call) { initialize(call, false, false); });
+	registry.add("CoInitializeEx", 2, [initialize](ApiCall &call) { initialize(call, !(call.u32(1) & 2), call.u32(1) & 4); });
+	registry.add("OleInitialize", 1, [initialize](ApiCall &call) { initialize(call, false, false); });
+	const auto uninitialize = [com, &context, ole_flags](ApiCall &call) {
+		const uint64_t thread = context.environment.teb();
+		auto found = com->threads.find(thread);
+		if (found == com->threads.end() || !found->second.count)
+			return;
+		if (!--found->second.count) {
+			if (found->second.multithreaded)
+				--com->mta_threads;
+			else if (com->main_sta == thread)
+				com->main_sta = 0;
+			com->threads.erase(found);
+			ole_flags(call, 0);
+		}
+	};
+	// Message filters belong to single-threaded apartments; there is no filter before the first one, so the previous one is null.
+	registry.add("CoRegisterMessageFilter", 2, [com, &context](ApiCall &call) {
+		const auto found = com->threads.find(context.environment.teb());
+		if (call[1])
+			call.store_pointer(call[1], 0);
+		if (found == com->threads.end() || !found->second.count || found->second.multithreaded) {
+			call.ret(0x80004021U);
+			return;
+		}
+		call.ret(s_ok);
+	});
+	// APTTYPE: STA 0, MTA 1, main STA 3. A thread that never initialized COM is in the multithreaded apartment implicitly while any
+	// thread of the process holds it (qualifier APTTYPEQUALIFIER_IMPLICIT_MTA).
+	registry.add("CoGetApartmentType", 2, [com, &context](ApiCall &call) {
+		if (!call[0] || !call[1]) {
+			call.ret(e_invalidarg);
+			return;
+		}
+		const uint64_t thread = context.environment.teb();
+		const auto found = com->threads.find(thread);
+		uint32_t type = 0, qualifier = 0;
+		if (found != com->threads.end() && found->second.count) {
+			type = found->second.multithreaded ? 1 : com->main_sta == thread ? 3 : 0;
+		} else if (com->mta_threads) {
+			type = 1;
+			qualifier = 1;
+		} else {
+			call.store<uint32_t>(call[0], 0xffffffffU);
+			call.store<uint32_t>(call[1], 0);
+			call.ret(0x800401f0U);
+			return;
+		}
+		call.store<uint32_t>(call[0], type);
+		call.store<uint32_t>(call[1], qualifier);
+		call.ret(s_ok);
+	});
 	registry.add("CoUninitialize", 0, uninitialize);
 	registry.add("OleUninitialize", 0, uninitialize);
 	registry.add("CoCreateInstance", 5, [](ApiCall &call) {
@@ -341,6 +419,42 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.write(buffer, bytes);
 		return true;
 	};
+	// CryptProtectMemory: the block is mixed in place with a keystream that only this process (flag 0) or every process of the user in
+	// this prefix (flags 1 and 2) can make again. The length must be a whole number of 16-byte blocks.
+	const auto protect_memory = [](ApiCall &call) {
+		const uint64_t length = call.u32(1);
+		const uint32_t scope = call.u32(2);
+		if (!call[0] || length % 16 || scope > 2) {
+			call.fail(87, 0);
+			return;
+		}
+		static const std::vector<uint8_t> process_key = [] {
+			std::vector<uint8_t> key(32);
+			for (size_t done = 0; done < key.size();) {
+				const auto count = ::getrandom(key.data() + done, key.size() - done, 0);
+				if (count > 0)
+					done += size_t(count);
+			}
+			return key;
+		}();
+		const std::string shared_seed = "raven-protect-memory:" + prefix_tag() + ":" + std::to_string(::getuid());
+		auto bytes = call.read(call[0], length);
+		for (uint64_t block = 0; block * 32 < length; ++block) {
+			auto digest = make_digest(0x800c);
+			if (scope == 0)
+				digest->update(process_key);
+			else
+				digest->update(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(shared_seed.data()), shared_seed.size()));
+			digest->update(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&block), sizeof(block)));
+			const auto stream = digest->finish();
+			for (size_t at = 0; at < 32 && block * 32 + at < length; ++at)
+				bytes[block * 32 + at] ^= stream[at];
+		}
+		call.write(call[0], bytes);
+		call.ret(1);
+	};
+	registry.add("CryptProtectMemory", 3, protect_memory);
+	registry.add("CryptUnprotectMemory", 3, protect_memory);
 	registry.add("SystemFunction036", 2, [random_bytes](ApiCall &call) {
 		if (!call[0]) {
 			call.fail(87);
@@ -440,9 +554,10 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("WindowsGetStringLen", 1, [](ApiCall &call) { call.ret(call[0] ? call.load<uint32_t>(call[0] + 4) : 0); });
 	registry.add("WindowsIsStringEmpty", 1, [](ApiCall &call) { call.ret(!call[0] || !call.load<uint32_t>(call[0] + 4)); });
-	// No Windows Runtime class exists here: initialization works, and every activation reports that the class is not registered.
-	registry.add("RoInitialize", 1, [](ApiCall &call) { call.ret(0); });
-	registry.add("RoUninitialize", 0, [](ApiCall &call) { (void)call; });
+	// No Windows Runtime class exists here: initialization joins the thread to a COM apartment like CoInitializeEx (RO_INIT_MULTITHREADED
+	// is 1), and every activation reports that the class is not registered.
+	registry.add("RoInitialize", 1, [initialize](ApiCall &call) { initialize(call, call.u32(0) == 1, true); });
+	registry.add("RoUninitialize", 0, uninitialize);
 	registry.add("RoGetActivationFactory", 3, [](ApiCall &call) {
 		if (call[2])
 			call.store_pointer(call[2], 0);

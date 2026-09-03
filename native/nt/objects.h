@@ -32,6 +32,10 @@ public:
 	virtual int set_state(bool signaled) { (void)signaled; return -1; }
 	// Describes the object for a process that inherits it; false for objects that cannot be handed to another process.
 	virtual bool describe(InheritedHandle &record) const { (void)record; return false; }
+	// The name of the object's type in the object manager (NtQueryObject); empty for objects Windows has no type for.
+	virtual std::u16string_view type_name() const { return {}; }
+	// The access a new handle to the object holds when nothing narrower is asked for.
+	virtual uint32_t default_access() const { return 0x1f0003; }
 };
 
 class NativeObjects;
@@ -43,6 +47,8 @@ std::shared_ptr<KernelObject> object_from_record(const InheritedHandle &record);
 // A handle value held for something another part of the runtime owns, such as an open registry key; closing the handle tells the owner.
 class ReservedObject : public KernelObject {
 public:
+	// The runtime reserves handles for registry keys only.
+	std::u16string_view type_name() const override { return u"Key"; }
 	std::function<void(uint64_t)> on_close;
 };
 
@@ -98,6 +104,8 @@ public:
 	bool adopt(uint64_t handle, std::shared_ptr<KernelObject> object, bool inherit);
 	NativeObjectResult set_event(uint64_t handle, bool signaled);
 	NativeObjectResult query_event(uint64_t handle);
+	// The object manager type of the object behind a handle; nullopt when the handle does not exist.
+	std::optional<std::u16string> type_name(uint64_t handle) const;
 	NativeObjectResult wait(uint64_t handle, std::optional<int64_t> timeout,
 		std::chrono::steady_clock::time_point deadline);
 	size_t count() const;

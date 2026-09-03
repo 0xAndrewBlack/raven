@@ -11,7 +11,9 @@
 
 namespace raven {
 
-inline constexpr uint64_t native_user_limit = 0x700000000000ULL;
+// The end of the user address range of a 64-bit Windows process. The host's own mappings in the guest sit near its top; a request
+// that meets one of them fails as any taken range does.
+inline constexpr uint64_t native_user_limit = 0x7fffffff0000ULL;
 
 struct NativeStartup {
 	std::optional<std::u16string> title;

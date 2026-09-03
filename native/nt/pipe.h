@@ -52,10 +52,6 @@ public:
 	bool overlapped() const { return flags & 0x40000000U; }
 	std::shared_ptr<PipeListener> listener;
 	bool server = false, connected = false, message_mode = false, inherit = false;
-	// FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: a transfer that finishes inside the call does not also queue a completion.
-	bool skip_port_on_success = false, skip_event_on_success = false;
-	std::shared_ptr<CompletionPort> port;
-	uint64_t key = 0;
 	std::u16string name;
 	// The unread rest of a message that did not fit the buffer of the read that took it.
 	std::vector<uint8_t> carry;
@@ -82,5 +78,8 @@ std::optional<std::u16string> pipe_name_of(std::u16string_view path);
 bool open_pipe_client(KernelContext &context, ApiCall &call, std::u16string_view path, uint32_t access, uint32_t flags);
 // ReadFile and WriteFile on a pipe handle; false when the handle is no pipe.
 bool transfer_pipe(KernelContext &context, ApiCall &call, bool reading);
+// Reports an overlapped transfer on a file handle that finished inside the call: the OVERLAPPED gets the status and count, its event is
+// set, and the file's completion port receives a packet unless the handle skips packets for transfers that succeed at once.
+void complete_file_io(KernelContext &context, FileObject &file, uint64_t overlapped, size_t width, uint32_t error, uint64_t bytes);
 
 }

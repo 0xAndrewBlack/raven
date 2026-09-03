@@ -17,6 +17,7 @@ namespace raven {
 // A process that Raven started for the guest: another instance of the runtime that runs the child program on its own.
 class ProcessObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Process"; }
 	explicit ProcessObject(pid_t pid, bool foreign = false) : pid(pid), foreign(foreign) {}
 	~ProcessObject() override;
 	// Waiting for a process succeeds once it has ended; the host reports that, not another guest thread.
@@ -45,6 +46,7 @@ private:
 // The calling process as an object other calls can name: what OpenProcess returns for the process's own id.
 class SelfProcessObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Process"; }
 	int signaled(uint32_t) const override { return 0; }
 };
 
@@ -57,6 +59,7 @@ std::vector<std::shared_ptr<ProcessObject>> live_children();
 // The main thread of a child process: signaled when the process has ended.
 class ChildThreadObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Thread"; }
 	explicit ChildThreadObject(std::shared_ptr<ProcessObject> process) : process(std::move(process)) {}
 	int signaled(uint32_t) const override { return process->exited() ? 1 : 0; }
 	// A thread started suspended waits at a gate; this opens it and returns the suspend count it had.

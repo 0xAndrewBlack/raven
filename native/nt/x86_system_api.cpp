@@ -43,6 +43,7 @@ constexpr std::array exported{
 
 class SemaphoreObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Semaphore"; }
 	int signaled(uint32_t) const override { return count > 0; }
 	void consume(uint32_t) override { --count; }
 	int64_t count = 0, maximum = 0;

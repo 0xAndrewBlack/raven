@@ -305,6 +305,12 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("SetCurrentProcessExplicitAppUserModelID", 1, [](ApiCall &call) { call.ret(0); });
 	// The account of a prefix is an administrator under User Account Control: the check answers yes only in an elevated process.
 	// Raven does not stand for the privileges of the host account.
+	// There are no default-program associations to ask about: the registration object is not available.
+	registry.add("SHCreateAssociationRegistration", 2, [](ApiCall &call) {
+		if (call[1])
+			call.store_pointer(call[1], 0);
+		call.ret(0x80040154U);
+	});
 	registry.add("IsUserAnAdmin", 0, [](ApiCall &call) { call.ret(process_elevated() ? 1 : 0); });
 	registry.add("DragQueryFileW", 4, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragQueryPoint", 2, [](ApiCall &call) { call.ret(0); });

@@ -370,7 +370,7 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("TerminateProcess", 2, [&objects](ApiCall &call) {
 		if (call[0] == current_process) {
 			call.process.abandon_call();
-			throw ProcessExit{call.u32(1), 0};
+			throw ProcessExit{call.u32(1), 0, true};
 		}
 		const auto child = objects.object_as<ProcessObject>(call[0]);
 		if (!child) {

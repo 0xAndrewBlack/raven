@@ -44,6 +44,7 @@ struct GuestThread {
 
 class ThreadObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Thread"; }
 	explicit ThreadObject(std::shared_ptr<GuestThread> thread) : thread(std::move(thread)) {}
 	int signaled(uint32_t) const override { return thread->state == GuestThread::State::done; }
 	std::shared_ptr<GuestThread> thread;

@@ -406,6 +406,53 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 		memory.free(call[0], 0, 0x8000);
 		call.ret(1);
 	});
+	// The native forms map and unmap views of this process through the calls above; the page protection names the view's access.
+	registry.add("NtMapViewOfSection", 10, [&registry, &objects](ApiCall &call) {
+		const auto mapping = objects.object_as<SectionObject>(call[0]);
+		const auto map = registry.find("MapViewOfFile");
+		const bool self = call[1] == UINT64_MAX || (call.pointer_width() == 4 && call[1] == UINT32_MAX);
+		if (!mapping || !map || !call[2] || !call[6]) {
+			call.ret(mapping ? 0xc000000dU : 0xc0000008U);
+			return;
+		}
+		if (!self) {
+			call.ret(0xc0000022U);
+			return;
+		}
+		if (call.load_pointer(call[2])) {
+			// A view at an address of the caller's choosing is not offered.
+			call.ret(0xc0000018U);
+			return;
+		}
+		const uint64_t offset = call[5] ? call.load<uint64_t>(call[5]) : 0;
+		const uint64_t size = call.load_pointer(call[6]);
+		const uint32_t protect = call.u32(9);
+		const uint32_t rights = (protect & 0x44 ? 0x6U : protect & 0x88 ? 0x1U : 0x4U) | (protect & 0xf0 ? 0x20U : 0U);
+		ApiCall inner(call.process, call.environment, {call[0], rights, offset >> 32, offset & 0xffffffffU, size});
+		const uint32_t before = call.last_error();
+		map->second(inner);
+		if (!inner.result) {
+			const uint32_t error = call.last_error();
+			call.set_last_error(before);
+			call.ret(error == 5 ? 0xc0000022U : error == 8 ? 0xc0000017U : error == 6 ? 0xc0000008U : 0xc000000dU);
+			return;
+		}
+		call.store_pointer(call[2], inner.result);
+		call.store_pointer(call[6], size ? size : mapping->size - offset);
+		call.ret(0);
+	});
+	registry.add("NtUnmapViewOfSection", 2, [&registry](ApiCall &call) {
+		const auto unmap = registry.find("UnmapViewOfFile");
+		if (!unmap || !(call[0] == UINT64_MAX || (call.pointer_width() == 4 && call[0] == UINT32_MAX))) {
+			call.ret(0xc0000022U);
+			return;
+		}
+		ApiCall inner(call.process, call.environment, {call[1]});
+		const uint32_t before = call.last_error();
+		unmap->second(inner);
+		call.set_last_error(before);
+		call.ret(inner.result ? 0 : 0xc0000019U);
+	});
 }
 
 }

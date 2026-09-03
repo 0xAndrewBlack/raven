@@ -355,6 +355,152 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		// The name goes to the second argument and its length to the third, as in GetComputerNameW.
 		report_name(call, call.u32(0), true);
 	});
+	// Network accounts: the one account of the prefix, a member of Administrators, on a machine in a workgroup. Buffers come from the
+	// guest allocator and go back through NetApiBufferFree.
+	registry.add("NetUserGetInfo", 4, [&context](ApiCall &call) {
+		const auto user = context.paths.user_name();
+		if (!call[3]) {
+			call.ret(87);
+			return;
+		}
+		call.store_pointer(call[3], 0);
+		const auto asked = call[1] ? call.wide(call[1], 256) : std::u16string();
+		const auto fold = [](std::u16string text) {
+			for (auto &character : text)
+				if (character >= u'a' && character <= u'z')
+					character = char16_t(character - 32);
+			return text;
+		};
+		if (fold(asked) != fold(user)) {
+			call.ret(2221);
+			return;
+		}
+		const uint32_t level = call.u32(2);
+		if (level != 0 && level != 1) {
+			call.ret(124);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		const size_t record = level == 0 ? width : width == 4 ? 32 : 56;
+		const size_t total = record + (user.size() + 1) * 2 + 2;
+		const uint64_t block = context.allocator.allocate(total);
+		if (!block) {
+			call.ret(8);
+			return;
+		}
+		const uint64_t name = block + record, empty = name + (user.size() + 1) * 2;
+		call.put_wide(name, user, user.size() + 1);
+		call.store<uint16_t>(empty, 0);
+		call.store_pointer(block, name);
+		if (level == 1) {
+			const size_t word = width;
+			call.store_pointer(block + word, 0);
+			call.store<uint32_t>(block + 2 * word, 0);
+			call.store<uint32_t>(block + 2 * word + 4, 2);
+			call.store_pointer(block + 2 * word + 8, empty);
+			call.store_pointer(block + 3 * word + 8, empty);
+			call.store<uint32_t>(block + 4 * word + 8, 0x10201);
+			call.store_pointer(block + (width == 4 ? 28 : 48), empty);
+		}
+		call.store_pointer(call[3], block);
+		call.ret(0);
+	});
+	registry.add("NetGetJoinInformation", 3, [&context](ApiCall &call) {
+		if (!call[1] || !call[2]) {
+			call.ret(87);
+			return;
+		}
+		const std::u16string workgroup = u"WORKGROUP";
+		const uint64_t block = context.allocator.allocate((workgroup.size() + 1) * 2);
+		if (!block) {
+			call.ret(8);
+			return;
+		}
+		call.put_wide(block, workgroup, workgroup.size() + 1);
+		call.store_pointer(call[1], block);
+		call.store<uint32_t>(call[2], 2);
+		call.ret(0);
+	});
+	registry.add("NetApiBufferFree", 1, [&context](ApiCall &call) {
+		if (call[0])
+			context.allocator.release(call[0]);
+		call.ret(0);
+	});
+	// A local profile that stays (PT_LOCAL is zero).
+	registry.add("GetProfileType", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87, 0);
+			return;
+		}
+		call.store<uint32_t>(call[0], 0);
+		call.ret(1);
+	});
+	registry.add("CancelIPChangeNotify", 1, [](ApiCall &call) { call.ret(1); });
+	// No enclave technology is present.
+	registry.add("IsEnclaveTypeSupported", 1, [](ApiCall &call) { call.fail(50, 0); });
+	// Logging on as another account needs credentials this machine cannot check.
+	registry.add("LogonUserW", 6, [](ApiCall &call) {
+		if (call[5])
+			call.store_pointer(call[5], 0);
+		call.fail(1326, 0);
+	});
+	registry.add("IsUserCetAvailableInEnvironment", 1, [](ApiCall &call) { call.ret(0); });
+	// Group policy never changes here, so a registration has nothing to signal.
+	registry.add("RegisterGPNotification", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("UnregisterGPNotification", 1, [](ApiCall &call) { call.ret(1); });
+	// Performance counters: there is no counter provider, so a query cannot be made (PDH_CSTATUS_NO_OBJECT).
+	registry.add("PdhOpenQueryW", 3, [](ApiCall &call) {
+		if (call[2])
+			call.store_pointer(call[2], 0);
+		call.ret(0xc0000bb8U);
+	});
+	// The account name: the size counts the terminator, both on the way in and when the buffer is too small.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "GetUserNameW" : "GetUserNameA", 2, [&context, wide](ApiCall &call) {
+			const auto name = context.paths.user_name();
+			if (!call[1]) {
+				call.fail(error_invalid_parameter, 0);
+				return;
+			}
+			const uint32_t capacity = call.load<uint32_t>(call[1]);
+			if (!call[0] || capacity <= name.size()) {
+				call.store<uint32_t>(call[1], uint32_t(name.size() + 1));
+				call.fail(122, 0);
+				return;
+			}
+			if (wide)
+				call.put_wide(call[0], name, capacity);
+			else
+				call.put_narrow(call[0], to_utf8(name), capacity);
+			call.store<uint32_t>(call[1], uint32_t(name.size() + 1));
+			call.ret(1);
+		});
+	// The account in the formats a machine outside a domain has: SAM-compatible (computer\user) and the display name.
+	registry.add("GetUserNameExW", 3, [&context, computer_name](ApiCall &call) {
+		const auto user = context.paths.user_name();
+		std::u16string name;
+		if (call.u32(0) == 2)
+			name = computer_name(0).value_or(u"RAVEN") + u"\\" + user;
+		else if (call.u32(0) == 3)
+			name = user;
+		else {
+			call.fail(1332, 0);
+			return;
+		}
+		if (!call[2]) {
+			call.fail(error_invalid_parameter, 0);
+			return;
+		}
+		const uint32_t capacity = call.load<uint32_t>(call[2]);
+		if (!call[1] || capacity <= name.size()) {
+			call.store<uint32_t>(call[2], uint32_t(name.size() + 1));
+			call.fail(error_more_data, 0);
+			return;
+		}
+		call.put_wide(call[1], name, capacity);
+		call.store<uint32_t>(call[2], uint32_t(name.size()));
+		call.ret(1);
+	});
 	registry.add("GetComputerNameW", 2, [computer_name](ApiCall &call) {
 		const auto name = computer_name(0);
 		if (!call[0] || !call[1]) {

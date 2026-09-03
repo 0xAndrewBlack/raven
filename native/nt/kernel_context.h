@@ -22,6 +22,8 @@ struct ExecutionRedirected {
 struct ProcessExit {
 	uint32_t code;
 	uint64_t instruction;
+	// Terminated rather than exited: no DLL or TLS detach notification runs, as with TerminateProcess and fatal faults on Windows.
+	bool terminated = false;
 };
 
 // Process-wide services that the native kernel32 handlers share; every member outlives the handlers.

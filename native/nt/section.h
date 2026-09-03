@@ -13,6 +13,7 @@ namespace raven {
 // section see each other's writes; a section over a file keeps the older scheme in which views are copies written back when they end.
 class SectionObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Section"; }
 	~SectionObject() override
 	{
 		if (descriptor < 0)

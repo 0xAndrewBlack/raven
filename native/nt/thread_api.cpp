@@ -22,6 +22,7 @@ struct MutexState {
 
 class MutexObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Mutant"; }
 	uint64_t me(uint32_t thread) const { return shared ? (uint64_t(::getpid()) << 32) | thread : thread; }
 	int signaled(uint32_t thread) const override
 	{
@@ -54,6 +55,7 @@ struct SemaphoreState {
 
 class SemaphoreObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Semaphore"; }
 	int signaled(uint32_t) const override { return state->count.load() > 0; }
 	bool try_consume(uint32_t) override
 	{
@@ -77,6 +79,7 @@ struct EventState {
 
 class SharedEventObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Event"; }
 	int signaled(uint32_t) const override { return state->signaled.load() ? 1 : 0; }
 	bool try_consume(uint32_t) override { return state->manual || state->signaled.exchange(0) == 1; }
 	void consume(uint32_t thread) override { try_consume(thread); }

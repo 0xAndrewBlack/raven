@@ -326,7 +326,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		const uint16_t architecture = 9;
 		std::memcpy(bytes.data(), &architecture, 2);
 		const uint32_t page = 4096, granularity = 65536, processors = std::max(1U, std::min(64U, std::thread::hardware_concurrency())), type = 8664;
-		const uint64_t minimum = 0x10000, maximum = 0x6fffffffffffULL, mask = processors >= 64 ? ~0ULL : (1ULL << processors) - 1;
+		const uint64_t minimum = 0x10000, maximum = native_user_limit - 1, mask = processors >= 64 ? ~0ULL : (1ULL << processors) - 1;
 		std::memcpy(bytes.data() + 4, &page, 4);
 		std::memcpy(bytes.data() + 8, &minimum, 8);
 		std::memcpy(bytes.data() + 16, &maximum, 8);
@@ -415,6 +415,34 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		call.write(call[1], bytes);
+		call.ret(1);
+	});
+	// The same topology as fixed-size records: a processor mask, the relationship, then the 16-byte union (core flags, node number).
+	registry.add("GetLogicalProcessorInformation", 2, [processor_mask](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		const size_t width = call.pointer_width(), record = width == 4 ? 24 : 32;
+		const long count = std::max<long>(::sysconf(_SC_NPROCESSORS_ONLN), 1);
+		std::vector<uint8_t> bytes;
+		const auto add = [&](uint32_t kind, uint64_t mask) {
+			std::vector<uint8_t> entry(record);
+			std::memcpy(entry.data(), &mask, width);
+			std::memcpy(entry.data() + width, &kind, 4);
+			bytes.insert(bytes.end(), entry.begin(), entry.end());
+		};
+		for (long index = 0; index < std::min<long>(count, long(width * 8)); ++index)
+			add(0, uint64_t(1) << index);
+		add(1, processor_mask());
+		add(3, processor_mask());
+		const uint32_t capacity = call.load<uint32_t>(call[1]);
+		call.store<uint32_t>(call[1], uint32_t(bytes.size()));
+		if (!call[0] || capacity < bytes.size()) {
+			call.fail(122);
+			return;
+		}
+		call.write(call[0], bytes);
 		call.ret(1);
 	});
 	// The interface language: one preferred language, English (United States), as a list of names that ends with an empty one.

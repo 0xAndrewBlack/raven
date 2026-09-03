@@ -200,7 +200,9 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(directory + 12, rva(module_name));
 	// Only the independently verified common-controls identity receives a public ordinal.
 	const bool icon_control = name == "comctl32.dll" && exports.size() == 1 && exports[0] == "LoadIconWithScaleDown";
-	put(directory + 16, numbered ? 1 : icon_control ? 381 : 0x10000);
+	// Names without a public number take the top of the 16-bit ordinal range, where no program imports by number; ordinals are
+	// words, and code that adds the base to an index in a word must not wrap.
+	put(directory + 16, numbered ? 1 : icon_control ? 381 : uint32_t(0x10000 - function_count));
 	put(directory + 20, function_count);
 	put(directory + 24, exports.size());
 	put(directory + 28, rva(functions));
@@ -287,7 +289,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			nt_names.push_back(name);
 	}
 	// Natives that the shared API registry implements.
-	for (const auto name : {"NtQuerySection", "NtFlushInstructionCache", "RtlAddGrowableFunctionTable", "RtlGrowFunctionTable", "RtlDeleteGrowableFunctionTable"})
+	for (const auto name : {"NtQuerySection", "NtFlushInstructionCache", "RtlAddGrowableFunctionTable", "RtlGrowFunctionTable", "RtlDeleteGrowableFunctionTable",
+		"NtWriteFile", "RtlNtStatusToDosError", "NtQueryObject", "NtMapViewOfSection", "NtUnmapViewOfSection"})
 		if (std::find(nt_names.begin(),nt_names.end(),name)==nt_names.end()) nt_names.push_back(name);
 	std::sort(nt_names.begin(),nt_names.end());
 	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.
@@ -1016,7 +1019,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		};
 		try {
 			auto &root = acquire(name);
-			// Follow only activated import forwarders, not every optional export.
+			// Follow only activated import forwarders, not every optional export. Every missing export is reported before the load fails.
+			bool missing = false;
 			for (size_t index = 0; index < staged.size(); ++index) {
 				for (const auto &symbol : staged[index].module->imports) {
 					acquire(symbol.module);
@@ -1029,9 +1033,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 							if (message.starts_with("missing PE module: "))
 								acquire(std::string(message.substr(19)));
 							else if (message.starts_with("missing PE export: ")) {
-								if (std::getenv("RAVEN_TRACE_API"))
+								if (std::getenv("RAVEN_TRACE_API") || std::getenv("RAVEN_TRACE_FAIL"))
 									std::cerr << "raven: cannot load " << name << ": " << staged[index].module->name << " imports " << message << '\n';
-								throw LoadFailure{127};
+								missing = true;
+								break;
 							}
 							else
 								throw;
@@ -1039,6 +1044,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					}
 				}
 			}
+			if (missing)
+				throw LoadFailure{127};
 			modules.bind_imports();
 			const auto dynamic_order = initialization_order(modules, entry);
 			for (auto &item : staged) {
@@ -1165,7 +1172,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	const auto exit_result = [&](ProcessExit request) {
 		threads.stop_time_slicing();
 		try {
-			if (!cleanup_started) {
+			if (!cleanup_started && !request.terminated) {
 				cleanup_started=true; loading=true;
 				if (entry_tls_ready) {
 					const auto stopped=notify_tls(entry,0);

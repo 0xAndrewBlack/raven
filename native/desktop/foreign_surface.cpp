@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <vector>
+#include <mutex>
 #include <signal.h>
 #include <string>
 
@@ -53,9 +55,33 @@ uint64_t window_handle_base()
 	return uint64_t((uint32_t(::getpid()) % 0x7ef0) + 0x100) << 16;
 }
 
+// Removes what processes that ended without withdrawing their windows left: a window whose owner is gone, and pixels without a window.
+static void sweep_windows(const std::filesystem::path &directory)
+{
+	std::error_code error;
+	std::vector<std::filesystem::path> stale;
+	for (const auto &entry : std::filesystem::directory_iterator(directory, error)) {
+		const auto path = entry.path();
+		if (path.extension() == ".window") {
+			std::ifstream input(path);
+			long owner = 0;
+			if ((input >> owner) && owner > 0 && !(::kill(pid_t(owner), 0) != 0 && errno == ESRCH))
+				continue;
+			stale.push_back(path);
+			stale.push_back(std::filesystem::path(path).replace_extension(".pixels"));
+		} else if (path.extension() == ".pixels" && !std::filesystem::exists(std::filesystem::path(path).replace_extension(".window"), error)) {
+			stale.push_back(path);
+		}
+	}
+	for (const auto &path : stale)
+		std::filesystem::remove(path, error);
+}
+
 void publish_window(uint64_t window, uint32_t width, uint32_t height)
 {
 	const auto directory = window_directory();
+	static std::once_flag swept;
+	std::call_once(swept, [&] { sweep_windows(directory); });
 	const auto final_path = directory / (window_name(window) + ".window");
 	const auto temporary = directory / (window_name(window) + ".window." + std::to_string(::getpid()));
 	{

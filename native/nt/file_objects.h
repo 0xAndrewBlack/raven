@@ -9,9 +9,13 @@
 
 namespace raven {
 
+class CompletionPort;
+
 // An open file or directory; the host descriptor carries the Windows file pointer.
 class FileObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"File"; }
+	uint32_t default_access() const override { return access; }
 	FileObject(int descriptor, uint32_t access, bool directory, std::filesystem::path path, std::u16string dos_path, uint32_t flags)
 		: descriptor(descriptor), access(access), directory(directory), path(std::move(path)), dos_path(std::move(dos_path)), flags(flags) {}
 	~FileObject() override;
@@ -37,6 +41,11 @@ public:
 		return true;
 	}
 	bool readable() const { return access & (0x80000000U | 0x10000000U | 0x1U); }
+	// The completion port the handle is associated with, and the key its packets carry. FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: a
+	// transfer that finishes inside the call does not also queue a completion; the event one does not set the event either.
+	std::shared_ptr<CompletionPort> port;
+	uint64_t key = 0;
+	bool skip_port_on_success = false, skip_event_on_success = false;
 	bool writable() const { return access & (0x40000000U | 0x10000000U | 0x2U | 0x4U); }
 };
 

@@ -29,7 +29,8 @@ int main(int argc, char **argv)
 		check(image.is_64 && image.entry == 0 && image.imports().empty() && image.exports().size() == 45,
 			"provider PE metadata differs");
 		for (const auto &symbol : image.exports())
-			check(symbol.ordinal > UINT16_MAX && symbol.names.size() == 1 && symbol.forwarder.empty(), "provider invented a 16-bit Windows ordinal");
+			check(symbol.ordinal >= 0x10000 - image.exports().size() && symbol.ordinal <= UINT16_MAX && symbol.names.size() == 1 && symbol.forwarder.empty(),
+				"provider numbered a name outside the top of the 16-bit ordinal range");
 		const std::array<std::string_view,1> controls{"LoadIconWithScaleDown"};
 		const auto control_bytes = raven::runtime_provider("comctl32.dll",base,controls);
 		const auto control_exports = raven::PEImage(control_bytes).exports();

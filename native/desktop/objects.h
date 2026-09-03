@@ -198,6 +198,8 @@ struct DesktopWindow {
 	DesktopRect outer{x,y,int32_t(int64_t(x)+width),int32_t(int64_t(y)+height)};
 	uint64_t parent = 0,child_id = 0;
 	uint32_t ex_style = 0;
+	// SetWindowDisplayAffinity: whether the window asks to be left out of screen captures.
+	uint32_t display_affinity = 0;
 	uint64_t menu = 0;
 	bool client_ready = true;
 	// Owner of a top-level window (a different relation from the parent of a child) and the sibling order, bottom to top.

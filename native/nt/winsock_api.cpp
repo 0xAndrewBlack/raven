@@ -32,6 +32,7 @@ namespace {
 // threads, and whether the guest sees blocking behavior is a property of the object.
 class SocketObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"File"; }
 	explicit SocketObject(int descriptor) : descriptor(descriptor) {}
 	~SocketObject() override { ::close(descriptor); }
 	int signaled(uint32_t) const override { return 1; }
@@ -980,20 +981,19 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		}
 		if (call[0] != UINT64_MAX) {
 			const auto socket = socket_of(call[0]);
-			const auto pipe = objects.object_as<PipeObject>(call[0]);
-			if (!socket && !pipe) {
-				// Files cannot yet deliver completions: refuse the association rather than accept one that never reports.
+			const auto file = objects.object_as<FileObject>(call[0]);
+			if (!socket && !file) {
 				if (create)
 					objects.close(handle);
-				call.fail(87, 0);
+				call.fail(6, 0);
 				return;
 			}
 			if (socket) {
 				socket->port = port;
 				socket->key = call[2];
 			} else {
-				pipe->port = port;
-				pipe->key = call[2];
+				file->port = port;
+				file->key = call[2];
 			}
 		}
 		call.ret(handle);

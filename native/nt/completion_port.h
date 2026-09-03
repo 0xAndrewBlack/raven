@@ -19,6 +19,7 @@ struct CompletionPacket {
 // An I/O completion port: a queue of finished operations that threads take from.
 class CompletionPort : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"IoCompletion"; }
 	void post(const CompletionPacket &packet) { packets.push_back(packet); }
 	bool take(CompletionPacket &packet)
 	{

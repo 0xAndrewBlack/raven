@@ -124,7 +124,8 @@ NativeObjectResult NativeObjects::add_object(std::shared_ptr<KernelObject> objec
 	if (handles.size()>=limit || next>UINT32_MAX-4)
 		return {0,0xc000009aU};
 	const auto handle=take();
-	handles.emplace(handle,Handle{{},0x1f0003,{},std::move(object)});
+	const uint32_t access=object->default_access();
+	handles.emplace(handle,Handle{{},access,{},std::move(object)});
 	return {handle};
 }
 
@@ -318,6 +319,18 @@ NativeObjectResult NativeObjects::set_event(uint64_t handle, bool signaled)
 		object->changed.notify_all();
 	}
 	return {uint64_t(previous)};
+}
+
+std::optional<std::u16string> NativeObjects::type_name(uint64_t handle) const
+{
+	arrive(handle);
+	std::lock_guard lock(mutex);
+	const auto found=handles.find(handle);
+	if (found==handles.end()) return std::nullopt;
+	if (found->second.event) return u"Event";
+	if (found->second.file) return u"File";
+	if (found->second.generic) return std::u16string(found->second.generic->type_name());
+	return std::u16string();
 }
 
 NativeObjectResult NativeObjects::query_event(uint64_t handle)

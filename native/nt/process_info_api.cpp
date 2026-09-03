@@ -1,5 +1,6 @@
 #include "access_token.h"
 #include "child_process.h"
+#include "file_objects.h"
 #include "kernel_context.h"
 #include "text.h"
 
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <fstream>
+#include <sys/mman.h>
 #include <map>
 #include <sstream>
 #include <unistd.h>
@@ -40,10 +42,12 @@ public:
 // keep names and which ones the process has selected.
 class WindowStation : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"WindowStation"; }
 	std::u16string name = u"WinSta0";
 };
 class Desktop : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Desktop"; }
 	std::u16string name = u"Default";
 };
 
@@ -77,6 +81,32 @@ static uint64_t child_cpu_nanoseconds(pid_t pid)
 		}
 	}
 	return (user + system) * (1000000000ULL / uint64_t(sysconf(_SC_CLK_TCK)));
+}
+
+// The rights a handle holds as Windows reports them: the generic rights of the request mapped to the specific ones of the object's type.
+static uint32_t granted_access(std::u16string_view type, uint32_t requested)
+{
+	struct Mapping { std::u16string_view type; uint32_t read, write, execute, all; };
+	static constexpr Mapping mappings[] = {
+		{u"File", 0x120089, 0x120116, 0x1200a0, 0x1f01ff}, {u"Section", 0x20005, 0x20002, 0x20008, 0xf001f},
+		{u"Process", 0x20410, 0x20bea, 0x120000, 0x1fffff}, {u"Thread", 0x20048, 0x20037, 0x120000, 0x1fffff},
+		{u"Event", 0x20001, 0x20002, 0x120000, 0x1f0003}, {u"Mutant", 0x20001, 0x20000, 0x120000, 0x1f0001},
+		{u"Semaphore", 0x20001, 0x20002, 0x120000, 0x1f0003}, {u"Key", 0x20019, 0x20006, 0x20019, 0xf003f},
+		{u"Token", 0x20008, 0x200e0, 0x20000, 0xf01ff}, {u"Job", 0x20004, 0x2000b, 0x120000, 0x1f003f},
+		{u"IoCompletion", 0x20001, 0x20002, 0x120000, 0x1f0003}};
+	const auto found = std::find_if(std::begin(mappings), std::end(mappings), [&](const Mapping &item) { return item.type == type; });
+	if (found == std::end(mappings))
+		return requested & 0x01ffffffU;
+	uint32_t granted = requested & 0x00ffffffU;
+	if (requested & (0x10000000U | 0x02000000U))
+		granted |= found->all;
+	if (requested & 0x80000000U)
+		granted |= found->read;
+	if (requested & 0x40000000U)
+		granted |= found->write;
+	if (requested & 0x20000000U)
+		granted |= found->execute;
+	return granted;
 }
 
 void register_process_info_api(ApiRegistry &registry, KernelContext &context)
@@ -614,9 +644,178 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	});
+	// Process information classes: memory priority, commit figures, protection, leap seconds and the machine the process runs as.
+	registry.add("GetProcessInformation", 4, [is_self](ApiCall &call) {
+		if (!is_self(call[0]) && call[0] != UINT32_MAX) {
+			call.fail(5);
+			return;
+		}
+		std::vector<uint8_t> info;
+		const auto put = [&](size_t at, uint64_t value, size_t size) { std::memcpy(info.data() + at, &value, size); };
+		switch (call.u32(1)) {
+		case 0:
+			info.assign(4, 0);
+			put(0, 5, 4);
+			break;
+		case 2: {
+			uint64_t pages = 0, resident = 0;
+			std::ifstream statm("/proc/self/statm");
+			statm >> pages >> resident;
+			info.assign(32, 0);
+			put(0, 8ULL << 30, 8);
+			put(8, pages * 4096, 8);
+			put(16, pages * 4096, 8);
+			put(24, pages * 4096, 8);
+			break;
+		}
+		case 4:
+			info.assign(12, 0);
+			put(0, 1, 4);
+			break;
+		case 7:
+			info.assign(4, 0);
+			put(0, 0xfffffffeU, 4);
+			break;
+		case 8:
+			info.assign(8, 0);
+			break;
+		case 9:
+			info.assign(8, 0);
+			put(0, call.pointer_width() == 4 ? 0x14c : 0x8664, 2);
+			put(4, 3, 4);
+			break;
+		default:
+			call.fail(87);
+			return;
+		}
+		if (!call[2] || call.u32(3) < info.size()) {
+			call.fail(call[2] ? 24 : 87);
+			return;
+		}
+		call.write(call[2], info);
+		call.ret(1);
+	});
+	// The file a mapped address of this process comes from, as an NT device path: the image the address lies in.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "GetMappedFileNameW" : "GetMappedFileNameA", 4, [&registry, &modules, is_self, wide](ApiCall &call) {
+			if (!is_self(call[0])) {
+				call.fail(5);
+				return;
+			}
+			uint64_t base = 0;
+			for (const auto &[name, module] : modules.all())
+				if (call[1] >= module->loaded.base() && call[1] - module->loaded.base() < module->image.image_size)
+					base = module->loaded.base();
+			const auto path_of = registry.find("GetModuleFileNameW");
+			if (!base || !path_of) {
+				call.fail(487);
+				return;
+			}
+			const uint64_t scratch = call.process.map_memory(4096, PROT_READ | PROT_WRITE);
+			ApiCall inner(call.process, call.environment, {base, scratch, 1024});
+			path_of->second(inner);
+			const auto dos = inner.result ? call.wide(scratch, 1024) : std::u16string();
+			call.process.unmap_memory(scratch);
+			if (dos.size() < 3 || dos[1] != u':') {
+				call.fail(487);
+				return;
+			}
+			// Drive C is the first volume, the drives after it follow in letter order.
+			const auto volume = std::to_string(std::max(1, (dos[0] & 0x1f) - 2));
+			const auto device = u"\\Device\\HarddiskVolume" + std::u16string(volume.begin(), volume.end()) + dos.substr(2);
+			const size_t capacity = call.u32(3);
+			if (!capacity) {
+				call.fail(122);
+				return;
+			}
+			if (wide)
+				call.put_wide(call[2], device.substr(0, capacity - 1), capacity);
+			else
+				call.put_narrow(call[2], to_utf8(device.substr(0, capacity - 1)), capacity);
+			call.ret(std::min(device.size(), capacity - 1));
+		});
+	// Reading memory works on this process; another process's memory lies in another host process the runtime does not reach.
+	registry.add("ReadProcessMemory", 5, [is_self](ApiCall &call) {
+		if (call[4])
+			call.store_pointer(call[4], 0);
+		if (!is_self(call[0])) {
+			call.fail(5);
+			return;
+		}
+		try {
+			const auto bytes = call.read(call[1], call[3]);
+			call.write(call[2], bytes);
+		} catch (const ApiFault &) {
+			call.fail(299);
+			return;
+		}
+		if (call[4])
+			call.store_pointer(call[4], call[3]);
+		call.ret(1);
+	});
+	// What the object manager tells about a handle: the basic record, the name (objects here have none), the type and the handle flags.
+	registry.add("NtQueryObject", 5, [&objects](ApiCall &call) {
+		const uint64_t handle = call[0];
+		const size_t width = call.pointer_width();
+		std::optional<std::u16string> type;
+		if (handle == UINT64_MAX || (width == 4 && handle == UINT32_MAX))
+			type = u"Process";
+		else if (handle == UINT64_MAX - 1 || (width == 4 && handle == UINT32_MAX - 1))
+			type = u"Thread";
+		else
+			type = objects.type_name(handle);
+		if (!type) {
+			call.ret(0xc0000008U);
+			return;
+		}
+		const bool pseudo = handle >= UINT64_MAX - 1 || (width == 4 && handle >= UINT32_MAX - 1);
+		std::vector<uint8_t> info;
+		const auto put = [&](size_t at, uint64_t value, size_t size) { std::memcpy(info.data() + at, &value, size); };
+		// A UNICODE_STRING at the start of the record whose text follows the record.
+		const auto counted = [&](size_t record, const std::u16string &text) {
+			info.assign(record + (text.size() + 1) * 2, 0);
+			put(0, text.size() * 2, 2);
+			put(2, (text.size() + 1) * 2, 2);
+			put(width, text.empty() ? 0 : call[2] + record, width);
+			std::memcpy(info.data() + record, text.data(), text.size() * 2);
+		};
+		switch (call.u32(1)) {
+		case 0:
+			info.assign(56, 0);
+			put(0, !pseudo && objects.inherit(handle) ? 2 : 0, 4);
+			put(4, pseudo ? 0x1fffffU : granted_access(*type, objects.access_of(handle)), 4);
+			put(8, 1, 4);
+			put(12, 1, 4);
+			break;
+		case 1:
+			counted(width == 4 ? 8 : 16, u"");
+			break;
+		case 2:
+			counted(width == 4 ? 0x60 : 0x68, *type);
+			break;
+		case 4:
+			info.assign(2, 0);
+			info[0] = !pseudo && objects.inherit(handle) ? 1 : 0;
+			break;
+		default:
+			call.ret(0xc0000003U);
+			return;
+		}
+		if (call[4])
+			call.store<uint32_t>(call[4], uint32_t(info.size()));
+		if (call.u32(3) < info.size() || !call[2]) {
+			call.ret(0xc0000004U);
+			return;
+		}
+		call.write(call[2], info);
+		if (std::getenv("RAVEN_TRACE_API") && info.size() >= 8)
+			std::fprintf(stderr, "raven: NtQueryObject %llx class %u type %s access %08x\n", (unsigned long long)handle, call.u32(1),
+				to_utf8(*type).c_str(), uint32_t(info[4] | info[5] << 8 | info[6] << 16 | uint32_t(info[7]) << 24));
+		call.ret(0);
+	});
 	// kernel32 publishes the psapi functions a second time under a K32 prefix, which is what newer programs import.
 	for (const char *name : {"EnumProcessModules", "EnumProcessModulesEx", "GetModuleBaseNameA", "GetModuleBaseNameW", "GetModuleInformation", "GetProcessMemoryInfo",
-		"GetModuleFileNameExW", "GetModuleFileNameExA", "QueryWorkingSetEx"})
+		"GetModuleFileNameExW", "GetModuleFileNameExA", "QueryWorkingSetEx", "GetMappedFileNameW", "GetMappedFileNameA"})
 		if (const auto entry = registry.find(name))
 			registry.add(std::string("K32") + name, entry->first, entry->second);
 }

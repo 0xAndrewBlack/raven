@@ -122,6 +122,36 @@ void NativeWindows::register_api(ApiRegistry &registry)
 	registry.add("GetCaretBlinkTime", 0, [](ApiCall &call) { call.ret(530); });
 	registry.add("GetKeyboardLayout", 1, [](ApiCall &call) { call.ret(0x04090409); });
 	registry.add("GetMessageExtraInfo", 0, [](ApiCall &call) { call.ret(0); });
+	// The one keyboard layout, US English, by its KLID.
+	registry.add("GetKeyboardLayoutNameW", 1, [](ApiCall &call) {
+		call.put_wide(call[0], u"00000409", 9);
+		call.ret(1);
+	});
+	registry.add("GetKeyboardLayoutNameA", 1, [](ApiCall &call) {
+		call.put_narrow(call[0], "00000409", 9);
+		call.ret(1);
+	});
+	// No accessibility server runs, so there are no standard accessible objects to hand out.
+	registry.add("CreateStdAccessibleObject", 4, [](ApiCall &call) {
+		if (call[3])
+			call.store_pointer(call[3], 0);
+		call.ret(0x80004001U);
+	});
+	// When the user last gave input, in GetTickCount's clock; the session counts as just used.
+	registry.add("GetLastInputInfo", 1, [&registry](ApiCall &call) {
+		if (!call[0] || call.load<uint32_t>(call[0]) != 8) {
+			call.fail(87);
+			return;
+		}
+		uint64_t now = 0;
+		if (const auto ticks = registry.find("GetTickCount")) {
+			ApiCall inner(call.process, call.environment, {});
+			ticks->second(inner);
+			now = inner.result;
+		}
+		call.store<uint32_t>(call[0] + 4, uint32_t(now));
+		call.ret(1);
+	});
 	registry.add("GetMessageTime", 0, [](ApiCall &call) {
 		call.ret(uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()));
 	});

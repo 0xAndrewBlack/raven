@@ -2,6 +2,8 @@
 #include <cstddef>
 
 #include <algorithm>
+#include <cinttypes>
+#include <fstream>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -572,6 +574,17 @@ bool NativeProcess::memory_available(uint64_t address, size_t size) const
 	for (const auto &mapping : state->mappings)
 		if (address < mapping.address+mapping.size && mapping.address < end)
 			return false;
+	// The host maps a few things of its own into the guest near the top of the address space (the loader, vdso, its stack); the
+	// runtime does not track those, so a range up there is checked against the guest's own map.
+	if (end > 0x700000000000ULL) {
+		std::ifstream maps("/proc/" + std::to_string(state->child->pid) + "/maps");
+		std::string line;
+		while (std::getline(maps, line)) {
+			uint64_t first = 0, last = 0;
+			if (std::sscanf(line.c_str(), "%" SCNx64 "-%" SCNx64, &first, &last) == 2 && address < last && first < end)
+				return false;
+		}
+	}
 	return true;
 }
 

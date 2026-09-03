@@ -272,6 +272,7 @@ void NativeWindows::import_foreign_frames()
 
 void NativeWindows::flush_dirty()
 {
+	settle_focus_leave(false);
 	import_foreign_frames();
 	const auto roots=std::move(dirty_roots);
 	dirty_roots.clear();
@@ -431,8 +432,19 @@ uint64_t NativeWindows::invalid_owned(uint64_t filter) const
 	return 0;
 }
 
+// A compositor that moves the keyboard between two windows of the program reports a leave first. The leave waits a moment, so the
+// arrival that follows can be read as the move it is: a popup that never activates does not take the focus from where it was.
+void NativeWindows::settle_focus_leave(bool now)
+{
+	if (!focus_leaving || (!now && std::chrono::steady_clock::now()-focus_left<std::chrono::milliseconds(150))) return;
+	focus_leaving=false;
+	set_focus(0);
+	activate(0);
+}
+
 void NativeWindows::receive(const DesktopEvent &event)
 {
+	if (event.kind!=DesktopEventKind::keyboard_focus) settle_focus_leave(event.kind==DesktopEventKind::key);
 	if (menu_event(event)) return;
 	if (event.kind==DesktopEventKind::message) { post(event.window,event.message,event.wparam,event.lparam); return; }
 	if (event.kind==DesktopEventKind::keymap) {
@@ -466,16 +478,37 @@ void NativeWindows::receive(const DesktopEvent &event)
 		if (!event.window && !event.held_keys.empty())
 			throw std::runtime_error("keyboard focus requires its visible guest window");
 		// The host can give the focus to a window the program hides or destroys before the event is read; there is nothing to focus then.
-		if (event.window && (!objects.window(event.window) || !objects.window(event.window)->visible))
+		if (event.window && (!objects.window(event.window) || !objects.window(event.window)->visible)) {
+			settle_focus_leave(true);
 			return;
+		}
+		if (!event.window && event.held_keys.empty() && focus) {
+			key_down=initial; key_translation.reset();
+			focus_leaving=true;
+			focus_left=std::chrono::steady_clock::now();
+			return;
+		}
+		// Windows never gives the keyboard to a window that does not activate (WS_EX_NOACTIVATE) or to an owned popup without a caption
+		// (a completion list, a menu, a dropdown): the compositor focusing one as it appears leaves the program's focus where it is.
+		if (event.window && focus && objects.window(focus) && objects.window_visible(focus)) {
+			const auto *target=objects.window(event.window);
+			const bool passive=(target->ex_style & 0x08000000U) || ((target->style & 0x80000000U) && target->owner && (target->style & 0x00c00000U)!=0x00c00000U);
+			if (passive && objects.window_root(focus)!=event.window) {
+				focus_leaving=false;
+				key_down=initial; key_translation.reset();
+				return;
+			}
+		}
+		focus_leaving=false;
 		key_down=initial; key_translation.reset();
 		if (!event.window) { set_focus(0); activate(0); }
 		else if (!focus || objects.window_root(focus)!=event.window) set_focus(event.window);
 		return;
 	}
 	if (event.kind==DesktopEventKind::key) {
-		// A key event for a window that has since closed or lost the focus (a dialog ended by the previous key) goes nowhere.
-		if (!event.window || !focus || !objects.window(focus) || objects.window_root(focus)!=event.window || !objects.window_visible(focus)) {
+		// Keys go to the focus window whichever of the program's host windows the compositor reports them on; a key event for a window
+		// that has since closed, or with no focus left (a dialog ended by the previous key), goes nowhere.
+		if (!event.window || !objects.window(event.window) || !focus || !objects.window(focus) || !objects.window_visible(focus)) {
 			if (event.message<key_down.size()) key_down[event.message]=event.wparam!=0;
 			return;
 		}

@@ -1,8 +1,10 @@
 #include "elevation.h"
 #include "access_token.h"
 #include "kernel_context.h"
+#include "text.h"
 
 #include <map>
+#include <optional>
 
 #include <algorithm>
 #include <cstring>
@@ -45,6 +47,202 @@ bool valid_sid(ApiCall &call, uint64_t sid)
 	}
 }
 
+
+// A SID from its string form (S-1-...) or from one of the two-letter names of the security descriptor language.
+std::optional<std::vector<uint8_t>> sid_from_text(std::u16string text)
+{
+	static const std::map<std::u16string, std::u16string> aliases{
+		{u"AN", u"S-1-5-7"}, {u"AO", u"S-1-5-32-548"}, {u"AU", u"S-1-5-11"}, {u"BA", u"S-1-5-32-544"}, {u"BG", u"S-1-5-32-546"},
+		{u"BO", u"S-1-5-32-551"}, {u"BU", u"S-1-5-32-545"}, {u"CG", u"S-1-3-1"}, {u"CO", u"S-1-3-0"}, {u"CY", u"S-1-5-32-569"},
+		{u"ED", u"S-1-5-9"}, {u"HI", u"S-1-16-12288"}, {u"IU", u"S-1-5-4"}, {u"LS", u"S-1-5-19"}, {u"LW", u"S-1-16-4096"},
+		{u"ME", u"S-1-16-8192"}, {u"MP", u"S-1-16-8448"}, {u"NO", u"S-1-5-32-556"}, {u"NS", u"S-1-5-20"}, {u"NU", u"S-1-5-2"},
+		{u"PO", u"S-1-5-32-550"}, {u"PS", u"S-1-5-10"}, {u"PU", u"S-1-5-32-547"}, {u"RC", u"S-1-5-12"}, {u"RD", u"S-1-5-32-555"},
+		{u"RE", u"S-1-5-32-552"}, {u"RU", u"S-1-5-32-554"}, {u"SI", u"S-1-16-16384"}, {u"SO", u"S-1-5-32-549"}, {u"SS", u"S-1-18-2"},
+		{u"SU", u"S-1-5-6"}, {u"SY", u"S-1-5-18"}, {u"WD", u"S-1-1-0"}, {u"WR", u"S-1-5-33"}, {u"OW", u"S-1-3-4"},
+		{u"UD", u"S-1-5-84-0-0-0-0-0"}, {u"AC", u"S-1-15-2-1"}, {u"S1", u"S-1-16-0"}};
+	if (const auto alias = aliases.find(text); alias != aliases.end())
+		text = alias->second;
+	unsigned long long numbers[16];
+	size_t count = 0;
+	if (text.size() < 5 || text[0] != u'S' || text[1] != u'-' || text[2] != u'1' || text[3] != u'-')
+		return std::nullopt;
+	for (size_t at = 4; at < text.size() && count < 16;) {
+		unsigned long long value = 0;
+		size_t digits = 0;
+		while (at < text.size() && text[at] >= u'0' && text[at] <= u'9') {
+			value = value * 10 + (text[at] - u'0');
+			++at;
+			++digits;
+		}
+		if (!digits || (at < text.size() && text[at] != u'-'))
+			return std::nullopt;
+		numbers[count++] = value;
+		if (at < text.size())
+			++at;
+	}
+	if (count < 2 || count > 9)
+		return std::nullopt;
+	std::vector<uint8_t> sid{1, uint8_t(count - 1), 0, 0, 0, 0, 0, 0};
+	for (int index = 0; index < 6; ++index)
+		sid[size_t(2 + index)] = uint8_t(numbers[0] >> (8 * (5 - index)));
+	for (size_t index = 1; index < count; ++index)
+		for (int shift = 0; shift < 32; shift += 8)
+			sid.push_back(uint8_t(numbers[index] >> shift));
+	return sid;
+}
+
+// The access rights of an ACE in the security descriptor language: a number, or a run of two-letter right names.
+std::optional<uint32_t> rights_from_text(std::u16string_view text)
+{
+	if (text.size() > 2 && text[0] == u'0' && (text[1] == u'x' || text[1] == u'X')) {
+		uint32_t value = 0;
+		for (const auto character : text.substr(2)) {
+			const int digit = character >= u'0' && character <= u'9' ? character - u'0' : character >= u'a' && character <= u'f' ? character - u'a' + 10 :
+				character >= u'A' && character <= u'F' ? character - u'A' + 10 : -1;
+			if (digit < 0)
+				return std::nullopt;
+			value = value << 4 | uint32_t(digit);
+		}
+		return value;
+	}
+	static const std::map<std::u16string_view, uint32_t> names{
+		{u"GA", 0x10000000}, {u"GR", 0x80000000}, {u"GW", 0x40000000}, {u"GX", 0x20000000}, {u"RC", 0x20000}, {u"SD", 0x10000},
+		{u"WD", 0x40000}, {u"WO", 0x80000}, {u"RP", 0x10}, {u"WP", 0x20}, {u"CC", 0x1}, {u"DC", 0x2}, {u"LC", 0x4}, {u"SW", 0x8},
+		{u"LO", 0x80}, {u"DT", 0x40}, {u"CR", 0x100}, {u"FA", 0x1f01ff}, {u"FR", 0x120089}, {u"FW", 0x120116}, {u"FX", 0x1200a0},
+		{u"KA", 0xf003f}, {u"KR", 0x20019}, {u"KW", 0x20006}, {u"KX", 0x20019}, {u"NR", 0x2}, {u"NW", 0x1}, {u"NX", 0x4}};
+	uint32_t value = 0;
+	if (text.size() % 2)
+		return std::nullopt;
+	for (size_t at = 0; at < text.size(); at += 2) {
+		const auto found = names.find(text.substr(at, 2));
+		if (found == names.end())
+			return std::nullopt;
+		value |= found->second;
+	}
+	return value;
+}
+
+// An ACL from the part of a descriptor after "D:" or "S:": optional flags (P, AI, AR), then entries in parentheses. The control bits the
+// flags stand for are added to `control`, shifted for a SACL.
+std::optional<std::vector<uint8_t>> acl_from_text(std::u16string_view text, uint16_t &control, bool system)
+{
+	size_t at = 0;
+	while (at < text.size() && text[at] != u'(') {
+		if (text.substr(at, 2) == u"AI") { control |= system ? 0x800 : 0x400; at += 2; }
+		else if (text.substr(at, 2) == u"AR") { control |= system ? 0x200 : 0x100; at += 2; }
+		else if (text[at] == u'P') { control |= system ? 0x2000 : 0x1000; ++at; }
+		else return std::nullopt;
+	}
+	std::vector<uint8_t> entries;
+	uint16_t count = 0;
+	while (at < text.size()) {
+		if (text[at] != u'(')
+			return std::nullopt;
+		const auto close = text.find(u')', at);
+		if (close == text.npos)
+			return std::nullopt;
+		std::vector<std::u16string_view> fields;
+		for (auto rest = text.substr(at + 1, close - at - 1);;) {
+			const auto semicolon = rest.find(u';');
+			fields.push_back(rest.substr(0, semicolon));
+			if (semicolon == rest.npos)
+				break;
+			rest = rest.substr(semicolon + 1);
+		}
+		at = close + 1;
+		if (fields.size() < 6 || !fields[3].empty() || !fields[4].empty())
+			return std::nullopt;
+		static const std::map<std::u16string_view, uint8_t> types{{u"A", 0}, {u"D", 1}, {u"AU", 2}, {u"AL", 3}, {u"ML", 0x11}};
+		static const std::map<std::u16string_view, uint8_t> flag_names{{u"OI", 0x1}, {u"CI", 0x2}, {u"NP", 0x4}, {u"IO", 0x8}, {u"ID", 0x10},
+			{u"SA", 0x40}, {u"FA", 0x80}};
+		const auto type = types.find(fields[0]);
+		if (type == types.end())
+			return std::nullopt;
+		uint8_t flags = 0;
+		if (fields[1].size() % 2)
+			return std::nullopt;
+		for (size_t index = 0; index < fields[1].size(); index += 2) {
+			const auto flag = flag_names.find(fields[1].substr(index, 2));
+			if (flag == flag_names.end())
+				return std::nullopt;
+			flags |= flag->second;
+		}
+		const auto mask = rights_from_text(fields[2]);
+		const auto sid = sid_from_text(std::u16string(fields[5]));
+		if (!mask || !sid)
+			return std::nullopt;
+		const uint16_t size = uint16_t(8 + sid->size());
+		entries.push_back(type->second);
+		entries.push_back(flags);
+		entries.push_back(uint8_t(size));
+		entries.push_back(uint8_t(size >> 8));
+		for (int shift = 0; shift < 32; shift += 8)
+			entries.push_back(uint8_t(*mask >> shift));
+		entries.insert(entries.end(), sid->begin(), sid->end());
+		++count;
+	}
+	const uint16_t size = uint16_t(8 + entries.size());
+	std::vector<uint8_t> acl{2, 0, uint8_t(size), uint8_t(size >> 8), uint8_t(count), uint8_t(count >> 8), 0, 0};
+	acl.insert(acl.end(), entries.begin(), entries.end());
+	return acl;
+}
+
+// A self-relative security descriptor from its string form: owner (O:), group (G:), DACL (D:) and SACL (S:), in any order.
+std::optional<std::vector<uint8_t>> descriptor_from_text(std::u16string_view text)
+{
+	std::vector<uint8_t> owner, group, dacl, sacl;
+	uint16_t control = 0x8000;
+	bool has_dacl = false, has_sacl = false;
+	size_t at = 0;
+	while (at < text.size()) {
+		while (at < text.size() && text[at] == u' ')
+			++at;
+		if (at + 2 > text.size() || text[at + 1] != u':')
+			return std::nullopt;
+		const char16_t part = text[at];
+		at += 2;
+		// A part runs to the next "X:" that starts another part; colons inside entries never follow a single letter at the top level.
+		size_t end = at, depth = 0;
+		while (end < text.size()) {
+			if (text[end] == u'(') ++depth;
+			else if (text[end] == u')') --depth;
+			else if (!depth && end + 1 < text.size() && text[end + 1] == u':' && (text[end] == u'O' || text[end] == u'G' || text[end] == u'D' || text[end] == u'S'))
+				break;
+			++end;
+		}
+		const auto value = text.substr(at, end - at);
+		at = end;
+		if (part == u'O' || part == u'G') {
+			const auto sid = sid_from_text(std::u16string(value));
+			if (!sid)
+				return std::nullopt;
+			(part == u'O' ? owner : group) = *sid;
+		} else if (part == u'D' || part == u'S') {
+			const auto acl = acl_from_text(value, control, part == u'S');
+			if (!acl)
+				return std::nullopt;
+			if (part == u'D') { dacl = *acl; has_dacl = true; control |= 0x4; }
+			else { sacl = *acl; has_sacl = true; control |= 0x10; }
+		} else {
+			return std::nullopt;
+		}
+	}
+	std::vector<uint8_t> result(20, 0);
+	result[0] = 1;
+	const auto place = [&](const std::vector<uint8_t> &part, bool present, size_t field) {
+		if (!present)
+			return;
+		const uint32_t offset = uint32_t(result.size());
+		std::memcpy(result.data() + field, &offset, 4);
+		result.insert(result.end(), part.begin(), part.end());
+	};
+	place(owner, !owner.empty(), 4);
+	place(group, !group.empty(), 8);
+	place(sacl, has_sacl, 12);
+	place(dacl, has_dacl, 16);
+	std::memcpy(result.data() + 2, &control, 2);
+	return result;
+}
 }
 
 void register_security_api(ApiRegistry &registry, KernelContext &context)
@@ -645,52 +843,42 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.store_pointer(call[1], memory);
 		call.ret(1);
 	});
+	// The string form of a security descriptor to a self-relative one in memory the program frees with LocalFree.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "ConvertStringSecurityDescriptorToSecurityDescriptorW" : "ConvertStringSecurityDescriptorToSecurityDescriptorA", 4,
+			[&context, wide](ApiCall &call) {
+				if (!call[0] || !call[2]) {
+					call.fail(87);
+					return;
+				}
+				if (call.u32(1) != 1) {
+					call.fail(1305);
+					return;
+				}
+				const auto text = wide ? call.wide(call[0], 65536) : from_utf8(call.narrow(call[0], 65536));
+				const auto descriptor = descriptor_from_text(text);
+				if (!descriptor) {
+					call.fail(1336);
+					return;
+				}
+				const auto memory = context.allocator.allocate(descriptor->size(), true);
+				if (!memory) {
+					call.fail(8);
+					return;
+				}
+				call.write(memory, *descriptor);
+				call.store_pointer(call[2], memory);
+				if (call[3])
+					call.store<uint32_t>(call[3], uint32_t(descriptor->size()));
+				call.ret(1);
+			});
 	registry.add("ConvertStringSidToSidW", 2, [&context](ApiCall &call) {
-		auto text = call.wide(call[0], 256);
-		// The two-letter names of the security descriptor language stand for well-known SIDs.
-		static const std::map<std::u16string, std::u16string> aliases{
-			{u"AN", u"S-1-5-7"}, {u"AO", u"S-1-5-32-548"}, {u"AU", u"S-1-5-11"}, {u"BA", u"S-1-5-32-544"}, {u"BG", u"S-1-5-32-546"},
-			{u"BO", u"S-1-5-32-551"}, {u"BU", u"S-1-5-32-545"}, {u"CG", u"S-1-3-1"}, {u"CO", u"S-1-3-0"}, {u"CY", u"S-1-5-32-569"},
-			{u"ED", u"S-1-5-9"}, {u"HI", u"S-1-16-12288"}, {u"IU", u"S-1-5-4"}, {u"LS", u"S-1-5-19"}, {u"LW", u"S-1-16-4096"},
-			{u"ME", u"S-1-16-8192"}, {u"MP", u"S-1-16-8448"}, {u"NO", u"S-1-5-32-556"}, {u"NS", u"S-1-5-20"}, {u"NU", u"S-1-5-2"},
-			{u"PO", u"S-1-5-32-550"}, {u"PS", u"S-1-5-10"}, {u"PU", u"S-1-5-32-547"}, {u"RC", u"S-1-5-12"}, {u"RD", u"S-1-5-32-555"},
-			{u"RE", u"S-1-5-32-552"}, {u"RU", u"S-1-5-32-554"}, {u"SI", u"S-1-16-16384"}, {u"SO", u"S-1-5-32-549"}, {u"SS", u"S-1-18-2"},
-			{u"SU", u"S-1-5-6"}, {u"SY", u"S-1-5-18"}, {u"WD", u"S-1-1-0"}, {u"WR", u"S-1-5-33"}, {u"OW", u"S-1-3-4"},
-			{u"UD", u"S-1-5-84-0-0-0-0-0"}};
-		if (const auto alias = aliases.find(text); alias != aliases.end())
-			text = alias->second;
-		unsigned long long numbers[16];
-		size_t count = 0;
-		if (text.size() < 5 || text[0] != u'S' || text[1] != u'-' || text[2] != u'1' || text[3] != u'-') {
+		const auto parsed = sid_from_text(call.wide(call[0], 256));
+		if (!parsed) {
 			call.fail(1337);
 			return;
 		}
-		for (size_t at = 4; at < text.size() && count < 16;) {
-			unsigned long long value = 0;
-			size_t digits = 0;
-			while (at < text.size() && text[at] >= u'0' && text[at] <= u'9') {
-				value = value * 10 + (text[at] - u'0');
-				++at;
-				++digits;
-			}
-			if (!digits || (at < text.size() && text[at] != u'-')) {
-				call.fail(1337);
-				return;
-			}
-			numbers[count++] = value;
-			if (at < text.size())
-				++at;
-		}
-		if (count < 2 || count > 9) {
-			call.fail(1337);
-			return;
-		}
-		std::vector<uint8_t> sid{1, uint8_t(count - 1), 0, 0, 0, 0, 0, 0};
-		for (int index = 0; index < 6; ++index)
-			sid[size_t(2 + index)] = uint8_t(numbers[0] >> (8 * (5 - index)));
-		for (size_t index = 1; index < count; ++index)
-			for (int shift = 0; shift < 32; shift += 8)
-				sid.push_back(uint8_t(numbers[index] >> shift));
+		const auto &sid = *parsed;
 		const auto memory = context.allocator.allocate(sid.size(), true);
 		if (!memory || !call[1]) {
 			call.fail(memory ? 87 : 8);

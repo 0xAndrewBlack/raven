@@ -105,6 +105,10 @@ private:
 	uint64_t queued_activation=0;
 	int focusing=0;
 	bool keep_host_window=false;
+	// The compositor took the keyboard from the program's windows; applied once no window of the program receives it right after.
+	bool focus_leaving=false;
+	std::chrono::steady_clock::time_point focus_left{};
+	void settle_focus_leave(bool now);
 	// Roots whose host window carries a surface handed to a graphics driver: such a window must survive a resize.
 	std::set<uint64_t> hosting_surface;
 	KeyboardMap keyboard_map;

@@ -52,6 +52,9 @@ NativeEnvironment::NativeEnvironment(NativeProcess &process, uint64_t image_base
 		field(process, process_block + 0x10, image_base, 8);
 		// How long a thread waits for a critical section before the runtime library reports a deadlock: thirty days, relative, in units of 100 ns.
 		field(process, process_block + 0xc0, uint64_t(-int64_t(2592000) * 10000000), 8);
+		// The loader lock: a critical section in the rest of the PEB page, free (lock count -1, no owner), named at PEB+0x110.
+		field(process, process_block + 0x800 + 0x08, UINT32_MAX, 4);
+		field(process, process_block + 0x110, process_block + 0x800, 8);
 		context.registers.gs_base = thread_block;
 		process.set_context(context);
 		thread_ids[thread_block] = thread_id;
@@ -133,6 +136,9 @@ void NativeEnvironment::x86_constructor(uint64_t image_base, uint32_t process_id
 		field(process, thread_block + 0x30, process_block, 4);
 		field(process, process_block + 0x08, image_base, 4);
 		field(process, process_block + 0x70, uint64_t(-int64_t(2592000) * 10000000), 8);
+		// The loader lock, as for x64: a free critical section in the PEB page, named at PEB+0xa0.
+		field(process, process_block + 0x800 + 0x04, UINT32_MAX, 4);
+		field(process, process_block + 0xa0, process_block + 0x800, 4);
 		process.set_teb(thread_block);
 	} catch (...) {
 		try {

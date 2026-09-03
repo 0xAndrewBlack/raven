@@ -473,6 +473,30 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 			invalidate_tree(call[0], true);
 		call.ret(1);
 	});
+	registry.add("SetWindowDisplayAffinity", 2, [this](ApiCall &call) {
+		auto *window = objects.window(call[0]);
+		if (!window || window->parent) {
+			call.fail(window ? 87 : 1400);
+			return;
+		}
+		if (call.u32(1) != 0 && call.u32(1) != 1 && call.u32(1) != 0x11) {
+			call.fail(87);
+			return;
+		}
+		window->display_affinity = call.u32(1);
+		call.ret(1);
+	});
+	registry.add("GetWindowDisplayAffinity", 2, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window || !call[1]) {
+			call.fail(window ? 87 : 1400);
+			return;
+		}
+		call.store<uint32_t>(call[1], window->display_affinity);
+		call.ret(1);
+	});
+	// Windows here are never snapped into an arrangement.
+	registry.add("IsWindowArranged", 1, [](ApiCall &call) { call.ret(0); });
 	registry.add("IsIconic", 1, [this](ApiCall &call) {
 		const auto *window = objects.window(call[0]);
 		call.ret(window && (window->style & ws_minimize));

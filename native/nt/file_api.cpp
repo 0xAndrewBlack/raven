@@ -13,6 +13,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
@@ -24,8 +25,12 @@ FileObject::~FileObject()
 {
 	if (descriptor >= 0)
 		::close(descriptor);
-	if (flags & 0x04000000U)
-		::unlink(path.c_str());
+	if (flags & 0x04000000U) {
+		if (directory)
+			::rmdir(path.c_str());
+		else
+			::unlink(path.c_str());
+	}
 }
 
 namespace {
@@ -286,7 +291,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		ssize_t count;
 		if (call[4]) {
 			// An OVERLAPPED offset applies to synchronous handles too, and moves their file pointer after the transfer.
-			const auto offset = call.load<uint64_t>(call[4] + 16);
+			const auto offset = call.load<uint64_t>(call[4] + 2 * call.pointer_width());
 			count = ::pread(file->descriptor, buffer.data(), buffer.size(), off_t(offset));
 			if (count >= 0 && !(file->flags & 0x40000000U))
 				::lseek(file->descriptor, off_t(offset + uint64_t(count)), SEEK_SET);
@@ -300,9 +305,11 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[1], std::span<const uint8_t>(buffer.data(), size_t(count)));
 		if (std::getenv("RAVEN_TRACE_IO")) std::fprintf(stderr, "read %llx asked %x got %zd\n", static_cast<unsigned long long>(call[0]), call.u32(2), count);
 		if (call[3]) call.store<uint32_t>(call[3], uint32_t(count));
-		if (call[4]) {
-			call.store<uint64_t>(call[4], 0);
-			call.store<uint64_t>(call[4] + 8, uint64_t(count));
+		if (call[4] && (file->flags & 0x40000000U)) {
+			complete_file_io(context, *file, call[4], call.pointer_width(), 0, uint64_t(count));
+		} else if (call[4]) {
+			call.store_pointer(call[4], 0);
+			call.store_pointer(call[4] + call.pointer_width(), uint64_t(count));
 		}
 		call.ret(1);
 	});
@@ -322,7 +329,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		const auto bytes = call.read(call[1], call.u32(2));
 		ssize_t count;
 		if (call[4]) {
-			const auto offset = call.load<uint64_t>(call[4] + 16);
+			const auto offset = call.load<uint64_t>(call[4] + 2 * call.pointer_width());
 			count = offset == UINT64_MAX ? ::write(file->descriptor, bytes.data(), bytes.size())
 				: ::pwrite(file->descriptor, bytes.data(), bytes.size(), off_t(offset));
 			if (count >= 0 && offset != UINT64_MAX && !(file->flags & 0x40000000U))
@@ -335,11 +342,70 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		if (call[3]) call.store<uint32_t>(call[3], uint32_t(count));
-		if (call[4]) {
-			call.store<uint64_t>(call[4], 0);
-			call.store<uint64_t>(call[4] + 8, uint64_t(count));
+		if (call[4] && (file->flags & 0x40000000U)) {
+			complete_file_io(context, *file, call[4], call.pointer_width(), 0, uint64_t(count));
+		} else if (call[4]) {
+			call.store_pointer(call[4], 0);
+			call.store_pointer(call[4] + call.pointer_width(), uint64_t(count));
 		}
 		call.ret(1);
+	});
+	// The native write: WriteFile does the work, with an OVERLAPPED that carries the offset when the caller names one, and the outcome
+	// goes to the IO_STATUS_BLOCK as an NTSTATUS. An offset of -1 writes at the end of the file; -2 or none, at the file pointer.
+	registry.add("NtWriteFile", 9, [&registry, file_of](ApiCall &call) {
+		const auto write = registry.find("WriteFile");
+		if (!write || !call[4]) {
+			call.ret(0xc000000dU);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		uint64_t offset = UINT64_MAX;
+		if (call[7]) {
+			const auto requested = call.load<int64_t>(call[7]);
+			if (requested == -1) {
+				const auto file = file_of(call[0]);
+				offset = file ? uint64_t(::lseek(file->descriptor, 0, SEEK_END)) : UINT64_MAX;
+			} else if (requested >= 0) {
+				offset = uint64_t(requested);
+			}
+		}
+		const uint64_t scratch = call.process.map_memory(4096, PROT_READ | PROT_WRITE);
+		struct Unmap {
+			NativeProcess &process;
+			uint64_t address;
+			~Unmap() { try { process.unmap_memory(address); } catch (...) {} }
+		} unmap{call.process, scratch};
+		const uint64_t written = scratch, overlapped = scratch + 64;
+		call.store<uint32_t>(written, 0);
+		// The OVERLAPPED: status and count words, then the offset, then the event, which stays empty.
+		std::vector<uint8_t> block(width * 3 + 8);
+		std::memcpy(block.data() + 2 * width, &offset, 8);
+		call.write(overlapped, block);
+		const bool positioned = offset != UINT64_MAX;
+		ApiCall inner(call.process, call.environment, {call[0], call[5], call[6], positioned ? 0 : written, positioned ? overlapped : 0});
+		const uint32_t before = call.last_error();
+		write->second(inner);
+		const uint64_t count = positioned ? call.load_pointer(overlapped + width) : call.load<uint32_t>(written);
+		uint32_t status = 0;
+		if (!inner.result) {
+			switch (call.last_error()) {
+			case 6: status = 0xc0000008U; break;
+			case 5: status = 0xc0000022U; break;
+			case 87: status = 0xc000000dU; break;
+			case 112: status = 0xc000007fU; break;
+			case 109: case 232: status = 0xc000014bU; break;
+			default: status = 0xc0000001U; break;
+			}
+			call.set_last_error(before);
+		}
+		call.store_pointer(call[4], status);
+		call.store_pointer(call[4] + width, inner.result ? count : 0);
+		if (call[1] && inner.result)
+			if (const auto set = registry.find("SetEvent")) {
+				ApiCall signal(call.process, call.environment, {call[1]});
+				set->second(signal);
+			}
+		call.ret(status);
 	});
 	registry.add("SetFilePointerEx", 4, [&, resolve, missing, file_of](ApiCall &call) {
 		const auto file = file_of(call[0]);
@@ -393,7 +459,18 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		request.l_type = kind;
 		request.l_whence = SEEK_SET;
 		request.l_start = off_t(offset);
-		request.l_len = off_t(length);
+		// A range that reaches past what the host can count (programs lock "everything" with all bits set) runs to the end of the file
+		// and beyond, which is what a zero length asks of the host.
+		request.l_len = offset > uint64_t(INT64_MAX) || length > uint64_t(INT64_MAX) - offset ? 0 : off_t(length);
+		if (offset > uint64_t(INT64_MAX)) {
+			call.fail(87);
+			return;
+		}
+		// An empty range locks nothing and conflicts with nothing.
+		if (!length) {
+			call.ret(1);
+			return;
+		}
 		if (::fcntl(file->descriptor, wait ? F_OFD_SETLKW : F_OFD_SETLK, &request) < 0) {
 			call.fail(errno == EAGAIN || errno == EACCES ? 33 : errno == EINTR ? 995 : error_of(errno));
 			return;
@@ -401,11 +478,11 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	};
 	registry.add("LockFileEx", 6, [lock_range](ApiCall &call) {
-		const uint64_t offset = call[5] ? call.load<uint32_t>(call[5] + 16) | (uint64_t(call.load<uint32_t>(call[5] + 20)) << 32) : 0;
+		const uint64_t offset = call[5] ? call.load<uint64_t>(call[5] + 2 * call.pointer_width()) : 0;
 		lock_range(call, (call.u32(1) & 2) ? F_WRLCK : F_RDLCK, offset, call.u32(3) | (uint64_t(call.u32(4)) << 32), !(call.u32(1) & 1));
 	});
 	registry.add("UnlockFileEx", 5, [lock_range](ApiCall &call) {
-		const uint64_t offset = call[4] ? call.load<uint32_t>(call[4] + 16) | (uint64_t(call.load<uint32_t>(call[4] + 20)) << 32) : 0;
+		const uint64_t offset = call[4] ? call.load<uint64_t>(call[4] + 2 * call.pointer_width()) : 0;
 		lock_range(call, F_UNLCK, offset, call.u32(2) | (uint64_t(call.u32(3)) << 32), false);
 	});
 	registry.add("LockFile", 5, [lock_range](ApiCall &call) {
@@ -511,6 +588,183 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		put32(bytes, 44, uint32_t(uint64_t(metadata.st_ino) >> 32));
 		put32(bytes, 48, uint32_t(metadata.st_ino));
 		call.write(call[1], bytes);
+		call.ret(1);
+	});
+	// The information classes programs set on an open file: times, renaming, deletion on close, the file's length and I/O hints.
+	registry.add("SetFileInformationByHandle", 4, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		if (!file || !call[2]) {
+			call.fail(file ? 87 : 6);
+			return;
+		}
+		const uint32_t size = call.u32(3);
+		const size_t width = call.pointer_width();
+		switch (call.u32(1)) {
+		case 0: {
+			if (size < 36) {
+				call.fail(24);
+				return;
+			}
+			// Zero leaves a time as it is; the change time is the host's to keep.
+			const auto bytes = call.read(call[2], 36);
+			const auto time_at = [&](size_t at) { int64_t value; std::memcpy(&value, bytes.data() + at, 8); return value; };
+			timespec times[2] = {{0, UTIME_OMIT}, {0, UTIME_OMIT}};
+			const auto convert = [](int64_t value, timespec &out) {
+				if (value <= 0)
+					return;
+				const uint64_t unix = uint64_t(value) - filetime_epoch_offset;
+				out = {time_t(unix / 10000000ULL), long(unix % 10000000ULL) * 100};
+			};
+			convert(time_at(8), times[0]);
+			convert(time_at(16), times[1]);
+			if ((times[0].tv_nsec != UTIME_OMIT || times[1].tv_nsec != UTIME_OMIT) && ::futimens(file->descriptor, times)) {
+				call.fail(error_of(errno));
+				return;
+			}
+			call.ret(1);
+			return;
+		}
+		case 3: case 22: {
+			// FILE_RENAME_INFO: the replace flag (a byte, or flags for the Ex class), a root directory handle and the counted new name.
+			const size_t header = width == 4 ? 12 : 20;
+			if (size < header) {
+				call.fail(24);
+				return;
+			}
+			const uint32_t flags = call.u32(1) == 22 ? call.load<uint32_t>(call[2]) : call.load<uint8_t>(call[2]) ? 1U : 0U;
+			const uint32_t length = call.load<uint32_t>(call[2] + (width == 4 ? 8 : 16));
+			if (call.load_pointer(call[2] + width) || length % 2 || header + length > size) {
+				call.fail(87);
+				return;
+			}
+			const auto bytes = call.read(call[2] + header, length);
+			std::u16string name(length / 2, u'\0');
+			std::memcpy(name.data(), bytes.data(), length);
+			const auto target = resolve(call, name);
+			if (!target)
+				return;
+			if (target->exists && !(flags & 1)) {
+				call.fail(183);
+				return;
+			}
+			if (::rename(file->path.c_str(), target->host.c_str())) {
+				call.fail(error_of(errno, !target->parent_exists));
+				return;
+			}
+			file->path = target->host;
+			file->dos_path = paths.dos(target->host);
+			call.ret(1);
+			return;
+		}
+		case 4: case 21: {
+			// Deletion when the last handle closes; POSIX semantics take the name away at once.
+			if (size < (call.u32(1) == 21 ? 4U : 1U)) {
+				call.fail(24);
+				return;
+			}
+			const uint32_t flags = call.u32(1) == 21 ? call.load<uint32_t>(call[2]) : call.load<uint8_t>(call[2]) ? 1U : 0U;
+			if ((flags & 1) && file->directory && !std::filesystem::is_empty(file->path)) {
+				call.fail(145);
+				return;
+			}
+			if ((flags & 3) == 3) {
+				if ((file->directory ? ::rmdir(file->path.c_str()) : ::unlink(file->path.c_str())) && errno != ENOENT) {
+					call.fail(error_of(errno));
+					return;
+				}
+				file->flags &= ~0x04000000U;
+			} else if (flags & 1) {
+				file->flags |= 0x04000000U;
+			} else {
+				file->flags &= ~0x04000000U;
+			}
+			call.ret(1);
+			return;
+		}
+		case 5: case 6: {
+			if (size < 8) {
+				call.fail(24);
+				return;
+			}
+			const auto requested = call.load<int64_t>(call[2]);
+			struct stat metadata{};
+			if (requested < 0 || !file->writable() || ::fstat(file->descriptor, &metadata)) {
+				call.fail(requested < 0 ? 87 : 5);
+				return;
+			}
+			// An allocation size only shortens a file that is longer; the end of file sets the length either way.
+			if ((call.u32(1) == 6 || requested < metadata.st_size) && ::ftruncate(file->descriptor, off_t(requested))) {
+				call.fail(error_of(errno));
+				return;
+			}
+			call.ret(1);
+			return;
+		}
+		case 12:
+			call.ret(1);
+			return;
+		default:
+			call.fail(87);
+			return;
+		}
+	});
+	registry.add("GetFileInformationByHandleEx", 4, [&, resolve, missing, file_of](ApiCall &call) {
+		const auto file = file_of(call[0]);
+		struct stat metadata{};
+		if (!file || ::fstat(file->descriptor, &metadata)) {
+			call.fail(6);
+			return;
+		}
+		std::vector<uint8_t> bytes;
+		switch (call.u32(1)) {
+		case 0:
+			bytes.assign(40, 0);
+			put64(bytes, 0, filetime(metadata.st_ctim));
+			put64(bytes, 8, filetime(metadata.st_atim));
+			put64(bytes, 16, filetime(metadata.st_mtim));
+			put64(bytes, 24, filetime(metadata.st_ctim));
+			put32(bytes, 32, attributes_of(metadata, file->path));
+			break;
+		case 1:
+			bytes.assign(24, 0);
+			put64(bytes, 0, uint64_t(metadata.st_blocks) * 512);
+			put64(bytes, 8, uint64_t(metadata.st_size));
+			put32(bytes, 16, uint32_t(metadata.st_nlink));
+			bytes[20] = (file->flags & 0x04000000U) ? 1 : 0;
+			bytes[21] = S_ISDIR(metadata.st_mode) ? 1 : 0;
+			break;
+		case 2: {
+			// The name without its drive, as the volume knows it.
+			const auto name = file->dos_path.size() >= 2 && file->dos_path[1] == u':' ? file->dos_path.substr(2) : file->dos_path;
+			bytes.assign(4 + name.size() * 2, 0);
+			put32(bytes, 0, uint32_t(name.size() * 2));
+			std::memcpy(bytes.data() + 4, name.data(), name.size() * 2);
+			if (bytes.size() > call.u32(3)) {
+				if (call.u32(3) >= 4)
+					call.write(call[2], std::span<const uint8_t>(bytes.data(), call.u32(3)));
+				call.fail(234);
+				return;
+			}
+			break;
+		}
+		case 9:
+			bytes.assign(8, 0);
+			put32(bytes, 0, attributes_of(metadata, file->path));
+			break;
+		case 18:
+			bytes.assign(24, 0);
+			put64(bytes, 0, uint64_t(metadata.st_dev));
+			put64(bytes, 8, uint64_t(metadata.st_ino));
+			break;
+		default:
+			call.fail(87);
+			return;
+		}
+		if (bytes.size() > call.u32(3)) {
+			call.fail(24);
+			return;
+		}
+		call.write(call[2], bytes);
 		call.ret(1);
 	});
 	registry.add("GetFinalPathNameByHandleW", 4, [&, resolve, missing, file_of](ApiCall &call) {
@@ -1133,6 +1387,10 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 				return;
 			}
 			narrowed = wanted;
+		} else if (!(call.u32(6) & same_access) && call[1] < UINT64_MAX - 1) {
+			// Any other copy holds the rights it asks for; asking for everything gives what the original holds.
+			const uint32_t wanted = call.u32(4);
+			narrowed = wanted & (0x10000000U | 0x02000000U) ? objects.access_of(call[1]) : wanted;
 		}
 		const auto made = call[1] == UINT64_MAX - 1 && call[0] == UINT64_MAX ?
 			objects.add_object(std::make_shared<ThreadObject>(context.threads.find(context.threads.current_id()))) :

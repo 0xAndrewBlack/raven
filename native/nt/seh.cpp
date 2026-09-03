@@ -287,6 +287,13 @@ public:
 			std::fprintf(stderr, "raven: rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx rsp %llx\n", (unsigned long long)reg(0x78),
 				(unsigned long long)reg(0x90), (unsigned long long)reg(0x80), (unsigned long long)reg(0x88), (unsigned long long)reg(0xa8),
 				(unsigned long long)reg(0xb0), (unsigned long long)reg(0x98));
+			std::fprintf(stderr, "raven: rbp %llx r8 %llx r9 %llx r10 %llx r11 %llx r12 %llx r13 %llx r14 %llx r15 %llx\n", (unsigned long long)reg(0xa0),
+				(unsigned long long)reg(0xb8), (unsigned long long)reg(0xc0), (unsigned long long)reg(0xc8), (unsigned long long)reg(0xd0),
+				(unsigned long long)reg(0xd8), (unsigned long long)reg(0xe0), (unsigned long long)reg(0xe8), (unsigned long long)reg(0xf0));
+			// Registers that point at text, which often names what the failing code was looking for.
+			for (const size_t at : {0x78, 0x80, 0x88, 0x90, 0xa0, 0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0, 0xe8, 0xf0})
+				if (const auto text = describe_text(context.process, reg(at)); !text.empty())
+					std::fprintf(stderr, "raven:   register at %zx holds <%s>\n", at, text.c_str());
 			try {
 				const auto stack = context.process.read_memory(reg(0x98), 0x800);
 				for (size_t at = 0; at + 8 <= stack.size(); at += 8) {
@@ -404,7 +411,7 @@ public:
 			if (target_frame && result.establisher > target_frame && !at_target) {
 				std::fprintf(stderr, "raven: unwind passed its target frame\n");
 				context.process.abandon_call();
-				throw ProcessExit{status_invalid_disposition, pc};
+				throw ProcessExit{status_invalid_disposition, pc, true};
 			}
 			if (result.handler) {
 				put32(record, 4, (le32(record, 4) & ~flag_target_unwind) | (at_target ? flag_target_unwind : 0));
@@ -443,7 +450,7 @@ public:
 		if (!reached && target_frame) {
 			std::fprintf(stderr, "raven: unwind never reached its target frame\n");
 			context.process.abandon_call();
-			throw ProcessExit{status_invalid_disposition, context_rip(current)};
+			throw ProcessExit{status_invalid_disposition, context_rip(current), true};
 		}
 		if (trace)
 			std::fprintf(stderr, "seh resume at %llx (context rip %llx) rsp=%llx\n", (unsigned long long)target_ip, (unsigned long long)context_rip(current),
@@ -535,7 +542,7 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 		if (fault.signal == SIGSEGV && code[0] == 0xcd && code[1] == 0x29) {
 			std::fprintf(stderr, "raven: fast fail %llu\n", (unsigned long long)context_register(origin, 1));
 			context.process.abandon_call();
-			throw ProcessExit{0xc0000409U, rip};
+			throw ProcessExit{0xc0000409U, rip, true};
 		}
 		uint32_t status = 0xc0000005U;
 		std::vector<uint64_t> parameters;

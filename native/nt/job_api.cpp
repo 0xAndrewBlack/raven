@@ -19,6 +19,7 @@ constexpr uint32_t info_basic_accounting = 1, info_basic_limit = 2, info_process
 // end processes (killing the members when the job closes, TerminateJobObject).
 class JobObject : public KernelObject {
 public:
+	std::u16string_view type_name() const override { return u"Job"; }
 	~JobObject() override
 	{
 		if (limit_flags & job_limit_kill_on_close)

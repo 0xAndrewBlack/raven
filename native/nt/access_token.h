@@ -8,7 +8,10 @@
 namespace raven {
 
 // The program's own access token: it names the account and holds no privilege.
-class AccessToken : public KernelObject {};
+class AccessToken : public KernelObject {
+public:
+	std::u16string_view type_name() const override { return u"Token"; }
+};
 
 // A SID with the given identifier authority and sub-authorities.
 inline std::vector<uint8_t> make_sid(uint8_t authority, std::initializer_list<uint32_t> parts)
