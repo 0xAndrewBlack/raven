@@ -17,13 +17,16 @@ import sys
 
 LIBRARIES = """advapi32 bcrypt comctl32 comdlg32 crypt32 dbghelp dwmapi gdi32 imm32 kernel32 ole32 oleaut32 psapi
 sensapi setupapi shell32 shlwapi user32 uxtheme version wininet winmm wintrust ws2_32 wsock32
-cfgmgr32 dnsapi hid imagehlp iphlpapi ktmw32 msimg32 mswsock ncrypt netapi32 opengl32 glu32 powrprof pdh winspool secur32 shcore userenv winhttp wtsapi32""".split()
+bcryptprimitives cfgmgr32 dhcpcsvc dnsapi dwrite hid imagehlp iphlpapi ntdll ktmw32 msimg32 mswsock ncrypt netapi32 opengl32 glu32 powrprof pdh runtimeobject winspool secur32 shcore userenv winhttp wtsapi32""".split()
 # Real exports whose names begin with an underscore, which the generic filter drops.
 # The interlocked functions are compiler intrinsics in the import libraries, yet kernel32 exports them and programs import them by name.
 INTERLOCKED = {"InterlockedIncrement": 1, "InterlockedDecrement": 1, "InterlockedExchange": 2, "InterlockedExchangeAdd": 2,
                "InterlockedCompareExchange": 3, "InterlockedCompareExchange64": 5}
-EXTRA = {"ws2_32": ["__WSAFDIsSet", "AcceptEx", "ConnectEx", "DisconnectEx", "GetAcceptExSockaddrs"], "wsock32": ["__WSAFDIsSet"], "comctl32": ["_TrackMouseEvent"], "kernel32": ["_hread", "_hwrite", "_lclose", "_lcreat", "_llseek", "_lopen", "_lread", "_lwrite", "FlsGetValue2", *INTERLOCKED]}
+EXTRA = {"runtimeobject": ["RoActivateInstance", "RoGetActivationFactory", "RoInitialize", "RoUninitialize", "RoOriginateError", "RoOriginateErrorW",
+                           "RoGetAgileReference", "RoRegisterActivationFactories", "RoRevokeActivationFactories", "RoGetApartmentIdentifier"], "ws2_32": ["__WSAFDIsSet", "AcceptEx", "ConnectEx", "DisconnectEx", "GetAcceptExSockaddrs"], "wsock32": ["__WSAFDIsSet"], "comctl32": ["_TrackMouseEvent"], "kernel32": ["_hread", "_hwrite", "_lclose", "_lcreat", "_llseek", "_lopen", "_lread", "_lwrite", "FlsGetValue2", *INTERLOCKED]}
 EXTRA_WORDS = {"kernel32": {**INTERLOCKED, "FlsGetValue2": 1}, "ws2_32": {"__WSAFDIsSet": 2, "AcceptEx": 8, "ConnectEx": 7, "DisconnectEx": 4, "GetAcceptExSockaddrs": 8}, "wsock32": {"__WSAFDIsSet": 2}}
+# Libraries whose file does not end in .dll.
+FILE_NAMES = {"winspool": "winspool.drv"}
 DIRECTORY = Path("/usr/x86_64-w64-mingw32/lib")
 DIRECTORY32 = Path("/usr/i686-w64-mingw32/lib")
 
@@ -65,7 +68,7 @@ def main():
         out.append("};\n")
     out.append("static constexpr std::pair<std::string_view, std::span<const std::string_view>> libraries[]{\n")
     for library in LIBRARIES:
-        out.append(f'\t{{"{library}.dll", {library}_exports}},\n')
+        out.append(f'\t{{"{FILE_NAMES.get(library, library + ".dll")}", {library}_exports}},\n')
     out.append("};\n")
     Path(sys.argv[1]).write_text("".join(out))
     if len(sys.argv) > 2:
@@ -79,7 +82,7 @@ def main():
             arguments.append("};\n")
         arguments.append("static constexpr std::pair<std::string_view, std::span<const std::pair<std::string_view, uint8_t>>> argument_tables[]{\n")
         for library in LIBRARIES:
-            arguments.append(f'\t{{"{library}.dll", {library}_words}},\n')
+            arguments.append(f'\t{{"{FILE_NAMES.get(library, library + ".dll")}", {library}_words}},\n')
         arguments.append("};\n")
         Path(sys.argv[2]).write_text("".join(arguments))
 

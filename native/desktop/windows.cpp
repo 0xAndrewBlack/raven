@@ -776,13 +776,17 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 {
 	const auto style=uint32_t(args[3]),ex_style=uint32_t(args[0]);
 	const bool child=(style & 0x40000000U)!=0;
+	// A message-only window (parent HWND_MESSAGE) only receives messages: it is a top-level window that is never shown.
+	const bool message_only=!child && (args[8]==UINT64_MAX-2 || args[8]==0xfffffffdULL);
+	const uint64_t owner_handle=message_only ? 0 : args[8];
+	const auto effective_style=message_only ? style & ~0x10000000U : style;
 	// A visible window needs somewhere to appear; headless runs can still create hidden windows.
-	if ((style & 0x10000000U) && !presentation.present) throw uint32_t(120);
+	if ((effective_style & 0x10000000U) && !presentation.present) throw uint32_t(120);
 	const auto *parent=child ? objects.window(args[8]) : nullptr;
 	if (child && (!parent || parent->destroying)) throw uint32_t(1400);
 	if (parent && !parent->client_ready) throw uint32_t(120);
 	// An owner of a top-level window must be a top-level window; message-only parents (HWND_MESSAGE) are not modelled.
-	if (!child && args[8] && (!objects.window(args[8]) || args[8]==UINT64_MAX-2)) throw uint32_t(1400);
+	if (!child && owner_handle && !objects.window(owner_handle)) throw uint32_t(1400);
 	const auto class_atom=atom(args[1],args[10]);
 	const auto *definition=objects.window_class(class_atom);
 	if (!definition) {
@@ -813,9 +817,9 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 	}
 	if (args[2]) window_text(args[2]);
 	DesktopWindow record{class_atom,definition->procedure,{},x,y,width,height};
-	record.instance=args[10]; record.style=style | (child ? 0U : 0x04000000U);record.ex_style=ex_style;
+	record.instance=args[10]; record.style=effective_style | (child ? 0U : 0x04000000U);record.ex_style=ex_style;
 	record.parent=child ? args[8] : 0;record.child_id=child ? args[9] : 0;record.client_ready=false;
-	record.owner=child ? 0 : args[8];
+	record.owner=child ? 0 : owner_handle;
 	if (!child) record.menu=args[9];
 	// A window created without a menu takes the default menu of its class.
 	if (!child && !args[9] && definition->menu_id) {
@@ -890,7 +894,7 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 		if (!objects.window(handle)) throw uint32_t(1400);
 		if (child) parent_notify(handle,1);
 		if (!objects.window(handle)) return 0;
-		if (style & 0x10000000U) {
+		if (effective_style & 0x10000000U) {
 			auto *window=objects.window(handle);window->visible=true;objects.update_window_dcs(child ? window->parent : handle);
 			if (objects.window_visible(handle)) present(handle);
 			if (!objects.invalidate(handle,{0,0,window->width,window->height},true)) throw uint32_t(8);

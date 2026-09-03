@@ -296,6 +296,71 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			--thread->suspend_count;
 		call.ret(uint32_t(previous));
 	});
+	// The registers of a thread as a CONTEXT (x64): the control and integer groups, from where the thread stopped.
+	registry.add("GetThreadContext", 2, [thread_from, &threads](ApiCall &call) {
+		if (call.pointer_width() == 4 || !call[1]) {
+			call.fail(call[1] ? 50 : 87);
+			return;
+		}
+		const auto thread = thread_from(call[0]);
+		if (!thread) {
+			call.fail(6);
+			return;
+		}
+		const auto &registers = thread->id == threads.current_id() ? call.process.context().registers : thread->snapshot.context.registers;
+		const uint32_t flags = call.load<uint32_t>(call[1] + 0x30);
+		const auto put = [&](size_t at, uint64_t value) { call.store<uint64_t>(call[1] + at, value); };
+		if (flags & 0x1) {
+			call.store<uint16_t>(call[1] + 0x38, uint16_t(registers.cs));
+			call.store<uint16_t>(call[1] + 0x42, uint16_t(registers.ss));
+			call.store<uint32_t>(call[1] + 0x44, uint32_t(registers.eflags));
+			put(0x98, registers.rsp);
+			put(0xa0, registers.rbp);
+			put(0xf8, registers.rip);
+		}
+		if (flags & 0x2) {
+			put(0x78, registers.rax); put(0x80, registers.rcx); put(0x88, registers.rdx); put(0x90, registers.rbx);
+			put(0xa8, registers.rsi); put(0xb0, registers.rdi);
+			put(0xb8, registers.r8); put(0xc0, registers.r9); put(0xc8, registers.r10); put(0xd0, registers.r11);
+			put(0xd8, registers.r12); put(0xe0, registers.r13); put(0xe8, registers.r14); put(0xf0, registers.r15);
+		}
+		call.ret(1);
+	});
+	// A thread's description is a name the program gives it; it is kept per thread and handed back in memory the program frees with LocalFree.
+	auto descriptions = std::make_shared<std::map<uint32_t, std::u16string>>();
+	registry.add("SetThreadDescription", 2, [thread_from, descriptions](ApiCall &call) {
+		const auto thread = thread_from(call[0]);
+		if (!thread || !call[1]) {
+			call.ret(thread ? 0x80070057U : 0x80070006U);
+			return;
+		}
+		(*descriptions)[thread->id] = call.wide(call[1], 4096);
+		call.ret(0);
+	});
+	registry.add("GetThreadDescription", 2, [thread_from, descriptions, &context](ApiCall &call) {
+		const auto thread = thread_from(call[0]);
+		if (!thread || !call[1]) {
+			call.ret(thread ? 0x80070057U : 0x80070006U);
+			return;
+		}
+		const auto found = descriptions->find(thread->id);
+		const std::u16string text = found == descriptions->end() ? std::u16string() : found->second;
+		const auto memory = context.allocator.allocate((text.size() + 1) * 2, true);
+		if (!memory) {
+			call.ret(0x8007000eU);
+			return;
+		}
+		call.write(memory, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(text.data()), text.size() * 2));
+		call.store_pointer(call[1], memory);
+		call.ret(0);
+	});
+	registry.add("GetThreadPriorityBoost", 2, [](ApiCall &call) {
+		if (call[1])
+			call.store<uint32_t>(call[1], 0);
+		call.ret(1);
+	});
+	registry.add("SetThreadPriorityBoost", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetThreadInformation", 4, [](ApiCall &call) { call.ret(1); });
 	registry.add("GetThreadId", 1, [thread_from](ApiCall &call) {
 		const auto thread = thread_from(call[0]);
 		call.ret(thread ? thread->id : 0);
@@ -319,7 +384,6 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("SetThreadAffinityMask", 2, [](ApiCall &call) { call.ret(1); });
-	registry.add("SetThreadDescription", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("SetThreadStackGuarantee", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("OpenThread", 3, [&threads, &objects, handle_of](ApiCall &call) {
 		const auto thread = threads.find(call.u32(2));

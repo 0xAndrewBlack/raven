@@ -346,6 +346,13 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(random_bytes(call, call[0], call.u32(1)));
 	});
+	// The generator that Chromium asks for by name: it fills the buffer and always reports success.
+	registry.add("ProcessPrng", 2, [random_bytes](ApiCall &call) {
+		if (call[0] && call[1])
+			call.ret(random_bytes(call, call[0], size_t(call[1])));
+		else
+			call.ret(1);
+	});
 	registry.add("BCryptGenRandom", 4, [random_bytes](ApiCall &call) {
 		// Only the system generator exists: the pseudo handle BCRYPT_RNG_ALG_HANDLE (0x81), or no handle with the preferred-generator flag.
 		const bool generator = call[0] == 0x81 || (!call[0] && (call.u32(3) & 2));
@@ -355,6 +362,112 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(random_bytes(call, call[1], call.u32(2)) ? 0 : 0xc0000001U);
 	});
+	// Windows Runtime strings: a string handle points at a header (flags, length, pointer to the characters). A copy owns its characters in the
+	// same block; a reference points at the caller's.
+	const auto make_hstring = [&context](ApiCall &call, uint64_t source, uint32_t length, uint64_t out) -> uint32_t {
+		if (!out)
+			return 0x80070057U;
+		if (!length) {
+			call.store_pointer(out, 0);
+			return 0;
+		}
+		const size_t width = call.pointer_width(), head = 8 + width;
+		const auto block = context.allocator.allocate(head + (size_t(length) + 1) * 2, true);
+		if (!block)
+			return 0x8007000eU;
+		std::vector<uint8_t> image(head + (size_t(length) + 1) * 2);
+		const uint64_t characters = block + head;
+		std::memcpy(image.data() + 4, &length, 4);
+		std::memcpy(image.data() + 8, &characters, width);
+		const auto text = call.read(source, size_t(length) * 2);
+		std::memcpy(image.data() + head, text.data(), text.size());
+		call.write(block, image);
+		call.store_pointer(out, block);
+		return 0;
+	};
+	registry.add("WindowsCreateString", 3, [make_hstring](ApiCall &call) { call.ret(make_hstring(call, call[0], call.u32(1), call[2])); });
+	registry.add("WindowsDuplicateString", 2, [make_hstring](ApiCall &call) {
+		if (!call[0]) {
+			if (call[1])
+				call.store_pointer(call[1], 0);
+			call.ret(0);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		call.ret(make_hstring(call, call.load_pointer(call[0] + 8), call.load<uint32_t>(call[0] + 4), call[1]));
+		(void)width;
+	});
+	registry.add("WindowsCreateStringReference", 4, [](ApiCall &call) {
+		if (!call[2] || !call[3]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		if (!call.u32(1)) {
+			call.store_pointer(call[3], 0);
+			call.ret(0);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		std::vector<uint8_t> header(8 + width);
+		header[0] = 1;
+		const uint32_t length = call.u32(1);
+		std::memcpy(header.data() + 4, &length, 4);
+		const uint64_t source = call[0];
+		std::memcpy(header.data() + 8, &source, width);
+		call.write(call[2], header);
+		call.store_pointer(call[3], call[2]);
+		call.ret(0);
+	});
+	registry.add("WindowsDeleteString", 1, [&context](ApiCall &call) {
+		if (call[0] && !(call.load<uint32_t>(call[0]) & 1))
+			context.allocator.release(call[0]);
+		call.ret(0);
+	});
+	registry.add("WindowsGetStringRawBuffer", 2, [](ApiCall &call) {
+		if (!call[0]) {
+			if (call[1])
+				call.store<uint32_t>(call[1], 0);
+			static const uint16_t empty = 0;
+			(void)empty;
+			call.ret(0);
+			return;
+		}
+		if (call[1])
+			call.store<uint32_t>(call[1], call.load<uint32_t>(call[0] + 4));
+		call.ret(call.load_pointer(call[0] + 8));
+	});
+	registry.add("WindowsGetStringLen", 1, [](ApiCall &call) { call.ret(call[0] ? call.load<uint32_t>(call[0] + 4) : 0); });
+	registry.add("WindowsIsStringEmpty", 1, [](ApiCall &call) { call.ret(!call[0] || !call.load<uint32_t>(call[0] + 4)); });
+	// No Windows Runtime class exists here: initialization works, and every activation reports that the class is not registered.
+	registry.add("RoInitialize", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("RoUninitialize", 0, [](ApiCall &call) { (void)call; });
+	registry.add("RoGetActivationFactory", 3, [](ApiCall &call) {
+		if (call[2])
+			call.store_pointer(call[2], 0);
+		call.ret(0x80040154U);
+	});
+	registry.add("RoActivateInstance", 2, [](ApiCall &call) {
+		if (call[1])
+			call.store_pointer(call[1], 0);
+		call.ret(0x80040154U);
+	});
+	// Event tracing: there is no session to receive events, so registrations succeed and events go nowhere.
+	registry.add("RegisterTraceGuidsW", 8, [](ApiCall &call) {
+		if (call[7])
+			call.store_pointer(call[7], 1);
+		call.ret(0);
+	});
+	registry.add("UnregisterTraceGuids", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("EventRegister", 4, [](ApiCall &call) {
+		if (call[3])
+			call.store<uint64_t>(call[3], 1);
+		call.ret(0);
+	});
+	registry.add("EventUnregister", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("EventSetInformation", 4, [](ApiCall &call) { call.ret(0); });
+	registry.add("EventWriteTransfer", 6, [](ApiCall &call) { call.ret(0); });
+	registry.add("EventEnabled", 2, [](ApiCall &call) { call.ret(0); });
+	registry.add("TraceEvent", 2, [](ApiCall &call) { call.ret(0); });
 	// Proxy discovery: no proxy is configured, so sessions open and every lookup answers "connect directly".
 	struct WinHttpSession : KernelObject {};
 	registry.add("WinHttpOpen", 5, [&context](ApiCall &call) {

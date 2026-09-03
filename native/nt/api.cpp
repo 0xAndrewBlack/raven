@@ -36,15 +36,19 @@ std::string describe_text(NativeProcess &process, uint64_t address)
 	if (address < 0x10000 || address >= 0x800000000000ULL)
 		return {};
 	try {
-		const auto bytes = process.read_memory(address, 120);
+		const auto bytes = process.read_memory(address, 1000);
 		const bool wide = bytes[1] == 0 && bytes[0] >= 32 && bytes[0] < 127 && bytes[2] >= 32 && bytes[2] < 127 && bytes[3] == 0;
 		std::string text;
 		for (size_t at = 0; at < bytes.size(); at += wide ? 2 : 1) {
 			const auto character = bytes[at];
 			if (character == 0 && (!wide || bytes[at + 1] == 0))
 				break;
-			if (character < 32 || character > 126 || (wide && bytes[at + 1]))
-				return {};
+			// Log lines end in a newline: a text may stop at the first character that is not printable.
+			if (character < 32 || character > 126 || (wide && bytes[at + 1])) {
+				if (character == '\r' || character == '\n')
+					break;
+				return text.size() >= 8 ? text : std::string();
+			}
 			text.push_back(char(character));
 		}
 		return text.size() >= 3 ? text : std::string();

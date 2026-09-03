@@ -417,7 +417,7 @@ uint64_t NativeProcess::memory_syscall(uint64_t number, uint64_t a1, uint64_t a2
 
 static void memory_range(uint64_t address, size_t size, int protection, uint64_t limit)
 {
-	if (!size || size % 4096 || size > 1024 * 1024 * 1024 || address % 4096 ||
+	if (!size || size % 4096 || size > (uint64_t(1) << 42) || address % 4096 ||
 		address >= limit || size > limit - address || (protection & ~(PROT_READ | PROT_WRITE | PROT_EXEC)))
 		throw std::runtime_error("invalid native memory range or protection");
 }
@@ -429,7 +429,7 @@ uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address
 	state->mappings.reserve(state->mappings.size() + 1);
 	state->allocations.reserve(state->allocations.size() + 1);
 	const auto mapped = memory_syscall(SYS_mmap, address, size, static_cast<uint64_t>(protection),
-		MAP_PRIVATE | MAP_ANONYMOUS | (address ? MAP_FIXED_NOREPLACE : state->mode == NativeMode::x86 ? MAP_32BIT : 0), uint64_t(-1));
+		MAP_PRIVATE | MAP_ANONYMOUS | (protection == PROT_NONE ? MAP_NORESERVE : 0) | (address ? MAP_FIXED_NOREPLACE : state->mode == NativeMode::x86 ? MAP_32BIT : 0), uint64_t(-1));
 	if ((address && mapped != address) || mapped >= state->limit() || size > state->limit() - mapped) {
 		state->child->stop();
 		throw std::runtime_error("host returned an invalid native allocation address");

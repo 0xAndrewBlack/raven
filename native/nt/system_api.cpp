@@ -372,6 +372,55 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[1], bytes);
 		call.ret(1);
 	});
+	// The interface language: one preferred language, English (United States), as a list of names that ends with an empty one.
+	const auto preferred_languages = [](ApiCall &call) {
+		constexpr uint32_t by_name = 8;
+		const std::u16string text = call.u32(0) & by_name ? u"en-US" : u"0409";
+		std::u16string list = text;
+		list.push_back(u'\0');
+		list.push_back(u'\0');
+		if (!call[1] || !call[3]) {
+			call.fail(87);
+			return;
+		}
+		const uint32_t capacity = call.load<uint32_t>(call[3]);
+		call.store<uint32_t>(call[3], uint32_t(list.size()));
+		call.store<uint32_t>(call[1], 1);
+		if (call[2]) {
+			if (capacity < list.size()) {
+				call.fail(122);
+				return;
+			}
+			call.write(call[2], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(list.data()), list.size() * 2));
+		}
+		call.ret(1);
+	};
+	registry.add("GetThreadPreferredUILanguages", 4, preferred_languages);
+	registry.add("GetUserPreferredUILanguages", 4, preferred_languages);
+	registry.add("GetSystemPreferredUILanguages", 4, preferred_languages);
+	registry.add("GetProcessPreferredUILanguages", 4, preferred_languages);
+	// Power: always on mains power, no battery, nothing to suspend.
+	registry.add("GetSystemPowerStatus", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		// SYSTEM_POWER_STATUS: line status online, battery flag "no battery", unknown life percent and times.
+		std::vector<uint8_t> status(12);
+		status[0] = 1;
+		status[1] = 128;
+		status[2] = 255;
+		const uint32_t unknown = UINT32_MAX;
+		std::memcpy(status.data() + 4, &unknown, 4);
+		std::memcpy(status.data() + 8, &unknown, 4);
+		call.write(call[0], status);
+		call.ret(1);
+	});
+	registry.add("RegisterSuspendResumeNotification", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("UnregisterSuspendResumeNotification", 1, [](ApiCall &call) { call.ret(1); });
+	// Giving pages back changes nothing the program can see here.
+	registry.add("DiscardVirtualMemory", 2, [](ApiCall &call) { call.ret(0); });
+	registry.add("SetProcessDpiAwareness", 1, [](ApiCall &call) { call.ret(0); });
 	registry.add("GetVersionExA", 1, [](ApiCall &call) {
 		const auto size = call.load<uint32_t>(call[0]);
 		if (size != 148 && size != 156) {

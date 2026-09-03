@@ -3,6 +3,8 @@
 #include "text.h"
 
 #include <atomic>
+#include <map>
+#include <mutex>
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
@@ -22,6 +24,8 @@ namespace raven {
 namespace {
 
 std::atomic<int> live{0};
+std::mutex known_mutex;
+std::map<pid_t, std::weak_ptr<ProcessObject>> known;
 
 }
 
@@ -176,7 +180,30 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 	if (launch.gate)
 		*launch.gate = gate_pair[1];
 	++live;
-	return std::make_shared<ProcessObject>(child);
+	auto object = std::make_shared<ProcessObject>(child);
+	object->name = from_utf8(launch.image.filename().string());
+	{
+		std::lock_guard lock(known_mutex);
+		known[child] = object;
+	}
+	return object;
+}
+
+std::shared_ptr<ProcessObject> find_child(pid_t pid)
+{
+	std::lock_guard lock(known_mutex);
+	const auto found = known.find(pid);
+	return found == known.end() ? nullptr : found->second.lock();
+}
+
+std::vector<std::shared_ptr<ProcessObject>> live_children()
+{
+	std::vector<std::shared_ptr<ProcessObject>> result;
+	std::lock_guard lock(known_mutex);
+	for (const auto &[pid, weak] : known)
+		if (const auto object = weak.lock(); object && !object->exited())
+			result.push_back(object);
+	return result;
 }
 
 bool children_running()

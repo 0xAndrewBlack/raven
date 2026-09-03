@@ -1,3 +1,5 @@
+#include "access_token.h"
+#include "child_process.h"
 #include "kernel_context.h"
 #include "text.h"
 
@@ -84,9 +86,8 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	};
 	const std::string windows = "C:\\Windows", system = "C:\\Windows\\System32";
 	// Access tokens: the program's own token exists and closes like a handle; no privilege is held, and files carry no access control lists.
-	struct AccessToken : KernelObject {};
 	registry.add("OpenProcessToken", 3, [&context](ApiCall &call) {
-		if (int64_t(call[0]) != -1) {
+		if (int64_t(call[0]) != -1 && !context.objects.object_as<SelfProcessObject>(call[0])) {
 			call.fail(6);
 			return;
 		}
@@ -150,6 +151,16 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	});
+	// Mitigation policies are all off; asking for one reads zeros and setting one is accepted.
+	registry.add("GetProcessMitigationPolicy", 4, [](ApiCall &call) {
+		if (!call[2]) {
+			call.fail(87);
+			return;
+		}
+		call.write(call[2], std::vector<uint8_t>(call.u32(3)));
+		call.ret(1);
+	});
+	registry.add("SetProcessMitigationPolicy", 3, [](ApiCall &call) { call.ret(1); });
 	// There is no debugger to receive these messages, so they go nowhere, as on Windows without one.
 	registry.add("OutputDebugStringA", 1, [](ApiCall &) {});
 	registry.add("OutputDebugStringW", 1, [](ApiCall &) {});

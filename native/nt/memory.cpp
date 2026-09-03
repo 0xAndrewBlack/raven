@@ -37,7 +37,7 @@ static constexpr uint64_t x86_user_limit = 0x7fff0000ULL;
 
 static bool range(uint64_t address, uint64_t size, uint64_t user_limit)
 {
-	return size && size<=512*1024*1024 && address<user_limit && size<=user_limit-address;
+	return size && address<user_limit && size<=user_limit-address;
 }
 
 NativeMemory::NativeMemory(NativeProcess &process, NativeEnvironment &environment, size_t limit)
@@ -83,10 +83,16 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 			return {0,0,conflict};
 		process.protect_memory(base,length,permissions);
 		const auto first=(base-found->first)/4096;
-		std::fill_n(found->second.pages.begin()+static_cast<ptrdiff_t>(first),length/4096,access);
+		// Only pages that were reserved until now count as new commitment.
+		const uint64_t fresh=(length/4096-found->second.pages.nonzero(first,length/4096))*4096;
+		if (fresh>limit-used)
+			return {0,0,no_memory};
+		found->second.pages.fill(first,length/4096,access);
+		used+=fresh;
 		return {base,length};
 	}
-	if (length>limit-used || regions.size()>=10000)
+	const bool commit_now=type & 0x1000;
+	if ((commit_now && length>limit-used) || regions.size()>=10000)
 		return {0,0,no_memory};
 	uint64_t selected=base;
 	if (!address) {
@@ -103,13 +109,15 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 	}
 	if (!selected || !process.memory_available(selected,length))
 		return {0,0,conflict};
-	const bool commit=type & 0x1000;
-	auto [found,inserted]=regions.emplace(selected,Region{length,access,std::vector<uint32_t>(length/4096,commit ? access : 0)});
+	const bool commit=commit_now;
+	auto [found,inserted]=regions.emplace(selected,Region{length,access,PageMap(length/4096,commit ? access : 0)});
 	if (!inserted)
 		return {0,0,conflict};
 	try { process.map_memory(length,commit ? permissions : PROT_NONE,selected); }
 	catch (...) { regions.erase(found); throw; }
-	used+=length;
+	if (commit)
+		used+=length;
+	reserved_total+=length;
 	if (!address)
 		next=selected+((length+65535)&~uint64_t(65535));
 	return {selected,length};
@@ -127,7 +135,8 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 			return {0,0,invalid};
 		const auto length=found->second.size;
 		process.unmap_memory(address);
-		used-=length;
+		used-=found->second.pages.nonzero(0,found->second.pages.size())*4096;
+		reserved_total-=length;
 		regions.erase(found);
 		return {address,length};
 	}
@@ -142,7 +151,8 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 	process.discard_memory(base,length);
 	process.protect_memory(base,length,PROT_NONE);
 	const auto first=(base-found->first)/4096;
-	std::fill_n(found->second.pages.begin()+static_cast<ptrdiff_t>(first),length/4096,0);
+	used-=found->second.pages.nonzero(first,length/4096)*4096;
+	found->second.pages.fill(first,length/4096,0);
 	return {base,length};
 }
 
@@ -195,12 +205,11 @@ NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_
 	if (found==regions.end())
 		return {0,0,conflict};
 	const auto first=(base-found->first)/4096, count=length/4096;
-	if (std::any_of(found->second.pages.begin()+static_cast<ptrdiff_t>(first),
-		found->second.pages.begin()+static_cast<ptrdiff_t>(first+count),[](auto page) { return !page; }))
+	if (found->second.pages.any_zero(first,count))
 		return {0,0,0xc000002dU};
-	const auto previous=found->second.pages[size_t(first)];
+	const auto previous=found->second.pages.at(first);
 	process.protect_memory(base,length,permissions);
-	std::fill_n(found->second.pages.begin()+static_cast<ptrdiff_t>(first),count,access);
+	found->second.pages.fill(first,count,access);
 	return {base,length,0,previous};
 }
 
@@ -231,10 +240,8 @@ std::optional<std::array<uint8_t,48>> NativeMemory::query(uint64_t address) cons
 	if (address-found->first>=found->second.size)
 		return std::nullopt;
 	const auto first=(address-found->first)/4096;
-	const auto access=found->second.pages[size_t(first)];
-	uint64_t end=first+1;
-	while (end<found->second.pages.size() && found->second.pages[size_t(end)]==access)
-		++end;
+	const auto access=found->second.pages.at(first);
+	const uint64_t end=found->second.pages.run_end(first);
 	std::array<uint8_t,48> bytes{};
 	put(bytes,0,found->first+first*4096); put(bytes,8,found->first);
 	put(bytes,16,found->second.allocation_protection,4); put(bytes,24,(end-first)*4096);

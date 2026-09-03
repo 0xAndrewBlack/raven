@@ -257,6 +257,217 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 			call.ret(0);
 		});
 	}
+	// The native registry calls name keys by object path: \Registry\Machine, or \Registry\User\<account> for the current user, then the key path;
+	// a key handle in the attributes makes the path relative to it.
+	constexpr uint32_t status_not_found = 0xc0000034U, status_denied = 0xc0000022U, status_invalid = 0xc000000dU, status_failure = 0xc0000001U,
+		status_overflow = 0x80000005U, status_too_small = 0xc0000023U;
+	const auto status_of = [](uint32_t win32) -> uint32_t {
+		switch (win32) {
+		case 0: return 0;
+		case 2: case 3: return status_not_found;
+		case 5: return status_denied;
+		case 87: return status_invalid;
+		default: return status_failure;
+		}
+	};
+	struct ObjectKey {
+		uint64_t root = 0;
+		std::u16string path;
+	};
+	const auto object_key = [handle_width](ApiCall &call, uint64_t attributes) -> std::optional<ObjectKey> {
+		if (!attributes)
+			return std::nullopt;
+		const auto root = call.load_pointer(attributes + 8);
+		const auto name = call.load_pointer(attributes + 8 + handle_width);
+		if (!name)
+			return std::nullopt;
+		const auto length = call.load<uint16_t>(name);
+		const auto buffer = call.load_pointer(name + (handle_width == 4 ? 4 : 8));
+		std::u16string text;
+		if (length) {
+			const auto bytes = call.read(buffer, length);
+			text.resize(length / 2);
+			std::memcpy(text.data(), bytes.data(), text.size() * 2);
+		}
+		ObjectKey result{root, text};
+		if (root)
+			return result;
+		const auto fold = [](std::u16string value) {
+			for (auto &character : value)
+				if (character >= u'a' && character <= u'z')
+					character = char16_t(character - (u'a' - u'A'));
+			return value;
+		};
+		auto rest = text;
+		const auto strip = [&](std::u16string_view prefix) {
+			if (fold(rest.substr(0, prefix.size())) != prefix || (rest.size() > prefix.size() && rest[prefix.size()] != u'\\'))
+				return false;
+			rest.erase(0, std::min(rest.size(), prefix.size() + 1));
+			return true;
+		};
+		if (strip(u"\\REGISTRY\\MACHINE")) {
+			result.root = 0x80000002ULL;
+		} else if (strip(u"\\REGISTRY\\USER")) {
+			result.root = 0x80000001ULL;
+			// The first component names the account; the current one is the only one.
+			const auto end = rest.find(u'\\');
+			rest = end == rest.npos ? std::u16string() : rest.substr(end + 1);
+		} else {
+			return std::nullopt;
+		}
+		result.path = rest;
+		return result;
+	};
+	const auto create_key = [&hive, object_key, put_handle, status_of](ApiCall &call, uint64_t attributes, uint64_t out, uint64_t disposition_out) {
+		const auto where = object_key(call, attributes);
+		if (!where || !out) {
+			call.ret(status_invalid);
+			return;
+		}
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		const auto status = hive.create(where->root, where->path, key, disposition);
+		if (!status) {
+			put_handle(call, out, key);
+			if (disposition_out)
+				call.store<uint32_t>(disposition_out, disposition);
+		}
+		call.ret(status_of(status));
+	};
+	registry.add("NtCreateKey", 7, [create_key](ApiCall &call) { create_key(call, call[2], call[0], call[6]); });
+	const auto open_key = [&hive, object_key, put_handle, status_of](ApiCall &call) {
+		const auto where = object_key(call, call[2]);
+		if (!where || !call[0]) {
+			call.ret(status_invalid);
+			return;
+		}
+		uint64_t key = 0;
+		const auto status = hive.open(where->root, where->path, key);
+		if (!status)
+			put_handle(call, call[0], key);
+		call.ret(status_of(status));
+	};
+	registry.add("NtOpenKey", 3, open_key);
+	registry.add("NtOpenKeyEx", 4, open_key);
+	registry.add("NtDeleteKey", 1, [&hive, status_of](ApiCall &call) { call.ret(status_of(hive.remove_key(call[0], u""))); });
+	const auto name_of = [handle_width](ApiCall &call, uint64_t address) {
+		if (!address)
+			return std::u16string();
+		const auto length = call.load<uint16_t>(address);
+		const auto buffer = call.load_pointer(address + (handle_width == 4 ? 4 : 8));
+		std::u16string text(length / 2, u'\0');
+		if (length)
+			std::memcpy(text.data(), call.read(buffer, length).data(), length / 2 * 2);
+		return text;
+	};
+	registry.add("NtDeleteValueKey", 2, [&hive, name_of, status_of](ApiCall &call) { call.ret(status_of(hive.remove_value(call[0], name_of(call, call[1])))); });
+	registry.add("NtSetValueKey", 6, [&hive, name_of, status_of](ApiCall &call) {
+		const uint32_t size = call.u32(5);
+		if (!call[4] && size) {
+			call.ret(status_invalid);
+			return;
+		}
+		call.ret(status_of(hive.set(call[0], name_of(call, call[1]), call.u32(3), size ? call.read(call[4], size) : std::vector<uint8_t>{})));
+	});
+	// KEY_VALUE_*_INFORMATION: the type and sizes come first; the basic form carries the name, the full form the name and the data, the partial one the data.
+	registry.add("NtQueryValueKey", 6, [&hive, name_of, status_of, status_overflow, status_too_small](ApiCall &call) {
+		const auto name = name_of(call, call[1]);
+		uint32_t type = 0;
+		std::vector<uint8_t> data;
+		const auto status = hive.query(call[0], name, type, data);
+		if (status) {
+			call.ret(status_of(status));
+			return;
+		}
+		const uint32_t information = call.u32(2), capacity = call.u32(4);
+		std::vector<uint8_t> out;
+		const auto put32 = [&](uint32_t value) { for (int shift = 0; shift < 32; shift += 8) out.push_back(uint8_t(value >> shift)); };
+		const auto put_name = [&] { for (const auto unit : name) { out.push_back(uint8_t(unit)); out.push_back(uint8_t(unit >> 8)); } };
+		if (information == 0) {
+			put32(0); put32(type); put32(uint32_t(name.size() * 2)); put_name();
+		} else if (information == 1) {
+			const uint32_t data_at = uint32_t(20 + name.size() * 2 + 3) / 4 * 4;
+			put32(0); put32(type); put32(data_at); put32(uint32_t(data.size())); put32(uint32_t(name.size() * 2));
+			put_name();
+			out.resize(data_at);
+			out.insert(out.end(), data.begin(), data.end());
+		} else if (information == 2) {
+			put32(0); put32(type); put32(uint32_t(data.size()));
+			out.insert(out.end(), data.begin(), data.end());
+		} else {
+			call.ret(status_invalid);
+			return;
+		}
+		if (call[5])
+			call.store<uint32_t>(call[5], uint32_t(out.size()));
+		const size_t header = information == 0 ? 12 : information == 1 ? 20 : 12;
+		if (capacity < header) {
+			call.ret(status_too_small);
+			return;
+		}
+		call.write(call[3], std::span<const uint8_t>(out.data(), std::min<size_t>(out.size(), capacity)));
+		call.ret(out.size() > capacity ? status_overflow : 0);
+	});
+	// The key path of the current user in the native namespace; the string belongs to the program, which frees it with RtlFreeUnicodeString.
+	registry.add("RtlFormatCurrentUserKeyPath", 1, [&context](ApiCall &call) {
+		if (!call[0]) {
+			call.ret(status_invalid);
+			return;
+		}
+		const std::u16string path = u"\\REGISTRY\\USER\\S-1-5-21-1000-1000-1000-1000";
+		const auto block = context.allocator.allocate(path.size() * 2 + 2, true);
+		if (!block) {
+			call.ret(0xc0000017U);
+			return;
+		}
+		call.write(block, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(path.data()), path.size() * 2));
+		const size_t width = call.pointer_width();
+		std::vector<uint8_t> text(width == 4 ? 8 : 16);
+		const uint16_t length = uint16_t(path.size() * 2), maximum = uint16_t(length + 2);
+		std::memcpy(text.data(), &length, 2);
+		std::memcpy(text.data() + 2, &maximum, 2);
+		std::memcpy(text.data() + (width == 4 ? 4 : 8), &block, width);
+		call.write(call[0], text);
+		call.ret(0);
+	});
+	registry.add("RtlFreeUnicodeString", 1, [&context](ApiCall &call) {
+		if (!call[0])
+			return;
+		const auto buffer = call.load_pointer(call[0] + (call.pointer_width() == 4 ? 4 : 8));
+		if (buffer)
+			context.allocator.release(buffer);
+	});
+	registry.add("RtlInitUnicodeString", 2, [](ApiCall &call) {
+		if (!call[0])
+			return;
+		size_t length = 0;
+		if (call[1]) {
+			const auto text = call.wide(call[1], 32767);
+			length = text.size() * 2;
+		}
+		const size_t width = call.pointer_width();
+		std::vector<uint8_t> text(width == 4 ? 8 : 16);
+		const uint16_t used = uint16_t(length), maximum = uint16_t(call[1] ? length + 2 : 0);
+		std::memcpy(text.data(), &used, 2);
+		std::memcpy(text.data() + 2, &maximum, 2);
+		const uint64_t source = call[1];
+		std::memcpy(text.data() + (width == 4 ? 4 : 8), &source, width);
+		call.write(call[0], text);
+	});
+	registry.add("RtlGetLastNtStatus", 0, [](ApiCall &call) { call.ret(0); });
+	registry.add("RtlNtStatusToDosError", 1, [](ApiCall &call) {
+		switch (call.u32(0)) {
+		case 0: call.ret(0); break;
+		case 0xc0000034U: case 0xc000003aU: call.ret(2); break;
+		case 0xc0000022U: call.ret(5); break;
+		case 0xc000000dU: call.ret(87); break;
+		case 0xc0000017U: call.ret(8); break;
+		case 0xc0000023U: call.ret(122); break;
+		case 0x80000005U: call.ret(234); break;
+		case 0xc0000008U: call.ret(6); break;
+		default: call.ret(317); break;
+		}
+	});
 	registry.add("RegDeleteKeyExW", 4, [&hive, text_of, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], true)))); });
 	registry.add("RegCloseKey", 1, [&hive](ApiCall &call) { call.ret(hive.close(call[0])); });
 	registry.add("RegFlushKey", 1, [](ApiCall &call) { call.ret(0); });

@@ -288,22 +288,64 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	for (const auto library : system_library_names())
 		if (std::find(system_modules.begin(), system_modules.end(), library) == system_modules.end())
 			system_modules.emplace_back(library);
+	// A number with no name known for it still gets an export, so a program that imports by that number binds, and the call it ends in names the number.
+	std::map<std::string, std::vector<std::pair<std::string_view, uint16_t>>> unknown_ordinals;
+	std::map<std::string, std::vector<std::string>> unknown_names;
+	std::deque<std::string> unknown_storage;
+	for (const auto &[module_name, module] : modules.all())
+		for (const auto &symbol : module->imports) {
+			if (!symbol.by_ordinal)
+				continue;
+			auto library = symbol.module;
+			for (auto &character : library)
+				if (character >= 'A' && character <= 'Z')
+					character = static_cast<char>(character + ('a' - 'A'));
+			if (library.find('.') == library.npos)
+				library += ".dll";
+			const auto known = system_export_ordinals(library);
+			if (std::find(system_modules.begin(), system_modules.end(), library) == system_modules.end() || modules.all().contains(library) ||
+				std::any_of(known.begin(), known.end(), [&](const auto &item) { return item.second == symbol.ordinal; }))
+				continue;
+			const auto text = "Ordinal" + std::to_string(symbol.ordinal);
+			if (std::find(unknown_names[library].begin(), unknown_names[library].end(), text) != unknown_names[library].end())
+				continue;
+			unknown_names[library].push_back(text);
+			unknown_ordinals[library].emplace_back(unknown_storage.emplace_back(text), symbol.ordinal);
+		}
 	for (const auto &name : system_modules) {
-		const auto base_symbols = name == "user32.dll" ? NativeDesktop::user_exports() :
+		const auto base_symbols = name == "ntdll.dll" ? std::span<const std::string_view>(nt_names) : name == "user32.dll" ? NativeDesktop::user_exports() :
 			name == "gdi32.dll" ? NativeDesktop::gdi_exports() :
 			name == "comctl32.dll" ? NativeDesktop::control_exports() :
 			name == "kernel32.dll" || name == "kernelbase.dll" ? std::span<const std::string_view>(names) : std::span<const std::string_view>();
 		const auto library = name == "kernelbase.dll" ? std::string_view("kernel32.dll") : std::string_view(name);
 		std::vector<std::string_view> symbols(base_symbols.begin(), base_symbols.end());
-		const auto listed = system_export_names(library);
+		// ntdll.dll answers for what it implements and what the program imports: a program probing for other functions by name must not
+		// find ones that cannot run, as it does not on a system that lacks them.
+		const auto listed = library == "ntdll.dll" ? std::span<const std::string_view>() : system_export_names(library);
 		symbols.insert(symbols.end(), listed.begin(), listed.end());
+		if (library == "ntdll.dll")
+			for (const auto &[module_name, module] : modules.all())
+				for (const auto &symbol : module->imports) {
+					auto imported = symbol.module;
+					for (auto &character : imported)
+						if (character >= 'A' && character <= 'Z')
+							character = static_cast<char>(character + ('a' - 'A'));
+					if ((imported == "ntdll.dll" || imported == "ntdll") && !symbol.by_ordinal)
+						symbols.push_back(unknown_storage.emplace_back(symbol.name));
+				}
+		if (const auto extra = unknown_ordinals.find(std::string(name)); extra != unknown_ordinals.end())
+			for (const auto &item : extra->second)
+				symbols.push_back(item.first);
 		if (library == "kernel32.dll")
 			symbols.push_back("RcConsolidateFrames");
 		std::sort(symbols.begin(), symbols.end());
 		symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
 		if (symbols.empty())
 			continue;
-		const auto ordinals = system_export_ordinals(library);
+		const auto published_numbers = system_export_ordinals(library);
+		std::vector<std::pair<std::string_view, uint16_t>> ordinals(published_numbers.begin(), published_numbers.end());
+		if (const auto extra = unknown_ordinals.find(std::string(name)); extra != unknown_ordinals.end())
+			ordinals.insert(ordinals.end(), extra->second.begin(), extra->second.end());
 		PEModule *provider = nullptr;
 		const auto found = modules.all().find(name);
 		if (found != modules.all().end()) {
@@ -335,9 +377,11 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						symbol.forwarder = overlay_rule.prefix + symbol.names.at(0);
 			}
 		}
-		for (const auto &symbol : provider->exports)
-			if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty())
-				traps.emplace(provider->loaded.base() + symbol.address + (provider->runtime_api ? fast_stub_trap_offset(name, symbol.names.at(0)) : 0), symbol.names.at(0));
+		// The traps of ntdll.dll are made below, where the Zw names answer as their Nt twins.
+		if (name != "ntdll.dll")
+			for (const auto &symbol : provider->exports)
+				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty())
+					traps.emplace(provider->loaded.base() + symbol.address + (provider->runtime_api ? fast_stub_trap_offset(name, symbol.names.at(0)) : 0), symbol.names.at(0));
 	}
 	const auto nt=modules.all().find("ntdll.dll");
 	const bool needs_nt=std::any_of(modules.all().begin(),modules.all().end(),[](const auto &item) {
@@ -357,7 +401,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	if (modules.all().contains("ntdll.dll"))
 		for (const auto &symbol : modules.all().at("ntdll.dll")->exports)
 			for (const auto &name : symbol.names)
-				if (symbol.address && std::find(nt_names.begin(),nt_names.end(),name)!=nt_names.end() && symbol.forwarder.empty()) {
+				if (symbol.address && (modules.all().at("ntdll.dll")->runtime_api || std::find(nt_names.begin(),nt_names.end(),name)!=nt_names.end()) && symbol.forwarder.empty()) {
 					const auto &image=*modules.all().at("ntdll.dll");
 					if (image.runtime_api) {
 						traps.emplace(image.loaded.base()+symbol.address,name.starts_with("Zw") ? "Nt"+name.substr(2) : name);
@@ -706,6 +750,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_child_process_api(api_registry, kernel);
 	register_winsock_api(api_registry, kernel);
 	register_crypt32_api(api_registry, kernel);
+	register_process_info_api(api_registry, kernel);
 	register_sync_api(api_registry, kernel);
 	register_thread_api(api_registry, kernel);
 	register_text_api(api_registry, kernel);

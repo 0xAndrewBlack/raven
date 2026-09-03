@@ -4,7 +4,10 @@
 
 #include <filesystem>
 #include <string>
+#include <memory>
+#include <string>
 #include <sys/types.h>
+#include <vector>
 #include <unistd.h>
 
 namespace raven {
@@ -21,6 +24,8 @@ public:
 	// Ends the process the way TerminateProcess does, with the given exit code.
 	void terminate(uint32_t code);
 	const pid_t pid;
+	// The file name of the program the process runs, for process listings.
+	std::u16string name;
 
 private:
 	void reap() const;
@@ -29,6 +34,16 @@ private:
 	uint32_t requested = 0;
 	bool killed = false;
 };
+
+// The calling process as an object other calls can name: what OpenProcess returns for the process's own id.
+class SelfProcessObject : public KernelObject {
+public:
+	int signaled(uint32_t) const override { return 0; }
+};
+
+// The children that are still known by their process id, and the ones alive.
+std::shared_ptr<ProcessObject> find_child(pid_t pid);
+std::vector<std::shared_ptr<ProcessObject>> live_children();
 
 // The main thread of a child process: signaled when the process has ended.
 class ChildThreadObject : public KernelObject {

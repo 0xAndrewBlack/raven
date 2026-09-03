@@ -1036,26 +1036,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_child_process_api(shared_api, kernel);
 	register_winsock_api(shared_api, kernel);
 	register_crypt32_api(shared_api, kernel);
+	register_process_info_api(shared_api, kernel);
 	// A 32-bit program runs under WOW64 on the 64-bit system Raven presents. File system redirection is not done (one System32 exists),
 	// so switching it off and back on changes nothing.
-	shared_api.add("IsWow64Process", 2, [](ApiCall &call) {
-		if (!call[1]) {
-			call.fail(87);
-			return;
-		}
-		call.store<uint32_t>(call[1], 1);
-		call.ret(1);
-	});
-	shared_api.add("IsWow64Process2", 3, [](ApiCall &call) {
-		if (!call[1]) {
-			call.fail(87);
-			return;
-		}
-		call.store<uint16_t>(call[1], 0x14c);
-		if (call[2])
-			call.store<uint16_t>(call[2], 0x8664);
-		call.ret(1);
-	});
 	shared_api.add("Wow64DisableWow64FsRedirection", 1, [](ApiCall &call) {
 		if (call[0])
 			call.store<uint32_t>(call[0], 0);
