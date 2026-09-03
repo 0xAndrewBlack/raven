@@ -36,6 +36,51 @@ NativeObjectResult NativeObjects::create_event(uint32_t access, uint32_t type, b
 	return {handle};
 }
 
+NativeObjectResult NativeObjects::create_named_event(const std::u16string &name, uint32_t access, uint32_t type, bool signaled, bool &existed)
+{
+	existed=false;
+	if (type>1)
+		return {0,0xc000000dU};
+	const auto mapped=access_mask(access);
+	if (!mapped)
+		return {0,0xc00000bbU};
+	std::u16string key=name;
+	for (auto &character : key) if (character>=u'a' && character<=u'z') character=char16_t(character-(u'a'-u'A'));
+	std::lock_guard lock(mutex);
+	if (handles.size()>=limit || next>UINT32_MAX-4)
+		return {0,0xc000009aU};
+	std::shared_ptr<Event> shared;
+	if (const auto found=named_events.find(key); found!=named_events.end()) shared=found->second.lock();
+	existed=shared!=nullptr;
+	if (!shared) {
+		shared=std::make_shared<Event>(type,signaled);
+		named_events[key]=shared;
+	}
+	const auto handle=next;
+	handles.emplace(handle,Handle{shared,*mapped,{}});
+	next+=4;
+	return {handle};
+}
+
+NativeObjectResult NativeObjects::open_named_event(const std::u16string &name, uint32_t access)
+{
+	const auto mapped=access_mask(access);
+	if (!mapped)
+		return {0,0xc00000bbU};
+	std::u16string key=name;
+	for (auto &character : key) if (character>=u'a' && character<=u'z') character=char16_t(character-(u'a'-u'A'));
+	std::lock_guard lock(mutex);
+	const auto found=named_events.find(key);
+	const auto shared=found==named_events.end() ? nullptr : found->second.lock();
+	if (!shared) return {0,0xc0000034U};
+	if (handles.size()>=limit || next>UINT32_MAX-4)
+		return {0,0xc000009aU};
+	const auto handle=next;
+	handles.emplace(handle,Handle{shared,*mapped,{}});
+	next+=4;
+	return {handle};
+}
+
 std::pair<std::shared_ptr<NativeObjects::Event>,uint32_t> NativeObjects::event(uint64_t handle, uint32_t access) const
 {
 	std::lock_guard lock(mutex);

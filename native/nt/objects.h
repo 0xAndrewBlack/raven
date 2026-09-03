@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <span>
 #include <cstdint>
 
@@ -35,6 +36,10 @@ public:
 	NativeObjects(const NativeObjects &) = delete;
 	NativeObjects &operator=(const NativeObjects &) = delete;
 	NativeObjectResult create_event(uint32_t access, uint32_t type, bool signaled);
+	// Events that have a name are one object however often they are created or opened: `existed` tells whether the name was taken.
+	NativeObjectResult create_named_event(const std::u16string &name, uint32_t access, uint32_t type, bool signaled, bool &existed);
+	// A new handle for the named event; the status is 0xc0000034 when no such event is alive.
+	NativeObjectResult open_named_event(const std::u16string &name, uint32_t access);
 	NativeObjectResult inherit_file(int descriptor);
 	// Reads from an inherited standard handle; the value is the byte count, zero at the end of the input.
 	NativeObjectResult read_file(uint64_t handle,std::span<uint8_t> into);
@@ -78,6 +83,7 @@ private:
 	struct Handle { std::shared_ptr<Event> event; uint32_t access; std::shared_ptr<File> file; std::shared_ptr<KernelObject> generic = {}; };
 	mutable std::mutex mutex;
 	std::map<uint64_t,Handle> handles;
+	std::map<std::u16string,std::weak_ptr<Event>> named_events;
 	uint64_t next = 0x100;
 	size_t limit;
 	std::pair<std::shared_ptr<Event>,uint32_t> event(uint64_t handle, uint32_t access) const;

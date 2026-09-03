@@ -480,14 +480,36 @@ uint64_t NativeProcess::map_shared(int descriptor, size_t size)
 
 void NativeProcess::protect_memory(uint64_t address, size_t size, int protection)
 {
+	protect_range(address, size, protection, false);
+}
+
+void NativeProcess::protect_image(uint64_t address, size_t size, int protection)
+{
+	protect_range(address, size, protection, true);
+}
+
+void NativeProcess::protect_range(uint64_t address, size_t size, int protection, bool image)
+{
 	state->require_stopped();
 	memory_range(address, size, protection, state->limit());
 	const auto owned = std::find_if(state->allocations.begin(), state->allocations.end(), [&](const auto &allocation) {
 		return address >= allocation.first && address - allocation.first < allocation.second &&
 			size <= allocation.second - (address - allocation.first);
 	});
-	if (owned == state->allocations.end())
+	if (owned == state->allocations.end() && image) {
+		// A program may also protect the pages of an image it was loaded from: they are accepted when mappings cover the whole range.
+		uint64_t cursor = address;
+		while (cursor < address + size) {
+			const auto covering = std::find_if(state->mappings.begin(), state->mappings.end(), [&](const auto &mapping) {
+				return cursor >= mapping.address && cursor < mapping.address + mapping.size;
+			});
+			if (covering == state->mappings.end())
+				throw std::runtime_error("native protection range is outside a dynamic allocation");
+			cursor = covering->address + covering->size;
+		}
+	} else if (owned == state->allocations.end()) {
 		throw std::runtime_error("native protection range is outside a dynamic allocation");
+	}
 	std::vector<ImageMapping> updated;
 	updated.reserve(state->mappings.size() + 2);
 	const uint64_t end = address + size;

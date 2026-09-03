@@ -87,36 +87,37 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	// SRW locks are one pointer-sized word: 1 is exclusive, shared holders count in steps of 2.
 	const auto acquire_exclusive = [&context, &threads](ApiCall &call) {
 		const uint64_t lock = call[0];
-		while (call.load<uint64_t>(lock))
-			threads.block([&context, lock] { return context.process.read_memory(lock, 8) == std::vector<uint8_t>(8, 0); }, std::nullopt);
-		call.store<uint64_t>(lock, 1);
+		const size_t width = call.pointer_width();
+		while (call.load_pointer(lock))
+			threads.block([&context, lock, width] { return context.process.read_memory(lock, width) == std::vector<uint8_t>(width, 0); }, std::nullopt);
+		call.store_pointer(lock, 1);
 	};
 	const auto acquire_shared = [&context, &threads](ApiCall &call) {
 		const uint64_t lock = call[0];
-		while (call.load<uint64_t>(lock) & 1)
+		while (call.load_pointer(lock) & 1)
 			threads.block([&context, lock] { return !(context.process.read_memory(lock, 1)[0] & 1); }, std::nullopt);
-		call.store<uint64_t>(lock, call.load<uint64_t>(lock) + 2);
+		call.store_pointer(lock, call.load_pointer(lock) + 2);
 	};
-	registry.add("InitializeSRWLock", 1, [](ApiCall &call) { call.store<uint64_t>(call[0], 0); });
+	registry.add("InitializeSRWLock", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
 	registry.add("AcquireSRWLockExclusive", 1, acquire_exclusive);
 	registry.add("TryAcquireSRWLockExclusive", 1, [](ApiCall &call) {
-		const bool free = !call.load<uint64_t>(call[0]);
+		const bool free = !call.load_pointer(call[0]);
 		if (free)
-			call.store<uint64_t>(call[0], 1);
+			call.store_pointer(call[0], 1);
 		call.ret(free);
 	});
-	registry.add("ReleaseSRWLockExclusive", 1, [](ApiCall &call) { call.store<uint64_t>(call[0], 0); });
+	registry.add("ReleaseSRWLockExclusive", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
 	registry.add("AcquireSRWLockShared", 1, acquire_shared);
 	registry.add("TryAcquireSRWLockShared", 1, [](ApiCall &call) {
-		const auto value = call.load<uint64_t>(call[0]);
+		const auto value = call.load_pointer(call[0]);
 		if (!(value & 1))
-			call.store<uint64_t>(call[0], value + 2);
+			call.store_pointer(call[0], value + 2);
 		call.ret(!(value & 1));
 	});
 	registry.add("ReleaseSRWLockShared", 1, [](ApiCall &call) {
-		const auto value = call.load<uint64_t>(call[0]);
+		const auto value = call.load_pointer(call[0]);
 		if (value >= 2)
-			call.store<uint64_t>(call[0], value - 2);
+			call.store_pointer(call[0], value - 2);
 	});
 
 	// Condition variables keep their waiters host-side, keyed by the variable's address.
@@ -138,16 +139,24 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	};
-	registry.add("InitializeConditionVariable", 1, [](ApiCall &call) { call.store<uint64_t>(call[0], 0); });
+	registry.add("InitializeConditionVariable", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
 	registry.add("SleepConditionVariableSRW", 4, [sleep_on, acquire_exclusive, acquire_shared](ApiCall &call) {
 		const bool shared = call.u32(3) & 1;
 		const uint64_t lock = call[1];
 		auto sub = ApiCall(call.process, call.environment, {lock});
-		sleep_on(call, [&] { if (shared) { const auto v = call.load<uint64_t>(lock); call.store<uint64_t>(lock, v >= 2 ? v - 2 : 0); } else call.store<uint64_t>(lock, 0); },
+		sleep_on(call, [&] { if (shared) { const auto v = call.load_pointer(lock); call.store_pointer(lock, v >= 2 ? v - 2 : 0); } else call.store_pointer(lock, 0); },
 			[&] { if (shared) acquire_shared(sub); else acquire_exclusive(sub); }, call.u32(2));
 	});
 	registry.add("SleepConditionVariableCS", 3, [sleep_on, take, &threads, &context](ApiCall &call) {
 		const uint64_t section = call[1];
+		if (call.pointer_width() == 4) {
+			// A 32-bit section is not laid out in guest memory: leaving and entering it goes through the program's own calls.
+			const auto leave = context.modules.resolve({"kernel32.dll", "LeaveCriticalSection", 0, false, 0});
+			const auto enter = context.modules.resolve({"kernel32.dll", "EnterCriticalSection", 0, false, 0});
+			const uint64_t arguments[] = {section};
+			sleep_on(call, [&] { context.call(leave, arguments); }, [&] { context.call(enter, arguments); }, call.u32(2));
+			return;
+		}
 		auto sub = ApiCall(call.process, call.environment, {section});
 		int32_t saved = 0;
 		sleep_on(call, [&] {
@@ -174,7 +183,7 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("WakeAllConditionVariable", 1, [wake](ApiCall &call) { wake(call, true); });
 
 	// INIT_ONCE is one word: 0 untouched, 1 running, otherwise the context pointer with low bits 2.
-	registry.add("InitOnceInitialize", 1, [](ApiCall &call) { call.store<uint64_t>(call[0], 0); });
+	registry.add("InitOnceInitialize", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
 	registry.add("InitOnceBeginInitialize", 4, [&context, &threads](ApiCall &call) {
 		const uint32_t flags = call.u32(1);
 		if (flags & ~3U) {
@@ -182,14 +191,14 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		const uint64_t once = call[0];
-		auto state = call.load<uint64_t>(once);
+		auto state = call.load_pointer(once);
 		if ((state & 3) == 1 && !(flags & 1)) {
 			threads.block([&context, once] { return (context.process.read_memory(once, 1)[0] & 3) != 1; }, std::nullopt);
-			state = call.load<uint64_t>(once);
+			state = call.load_pointer(once);
 		}
 		if ((state & 3) == 2) {
 			call.store<int32_t>(call[2], 0);
-			if (call[3]) call.store<uint64_t>(call[3], state & ~3ULL);
+			if (call[3]) call.store_pointer(call[3], state & ~3ULL);
 			call.ret(1);
 			return;
 		}
@@ -197,32 +206,32 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(1627);
 			return;
 		}
-		call.store<uint64_t>(once, 1);
+		call.store_pointer(once, 1);
 		call.store<int32_t>(call[2], 1);
 		call.ret(1);
 	});
 	registry.add("InitOnceComplete", 3, [](ApiCall &call) {
 		const uint32_t flags = call.u32(1);
-		if (call.load<uint64_t>(call[0]) != 1 || (flags & 4 && call[2])) {
+		if (call.load_pointer(call[0]) != 1 || (flags & 4 && call[2])) {
 			call.fail(87);
 			return;
 		}
-		call.store<uint64_t>(call[0], flags & 4 ? 0 : (call[2] & ~3ULL) | 2);
+		call.store_pointer(call[0], flags & 4 ? 0 : (call[2] & ~3ULL) | 2);
 		call.ret(1);
 	});
 	registry.add("InitOnceExecuteOnce", 4, [&](ApiCall &call) {
 		const uint64_t once = call[0];
-		auto state = call.load<uint64_t>(once);
+		auto state = call.load_pointer(once);
 		if ((state & 3) == 1) {
 			threads.block([&context, once] { return (context.process.read_memory(once, 1)[0] & 3) != 1; }, std::nullopt);
-			state = call.load<uint64_t>(once);
+			state = call.load_pointer(once);
 		}
 		if ((state & 3) == 2) {
-			if (call[3]) call.store<uint64_t>(call[3], state & ~3ULL);
+			if (call[3]) call.store_pointer(call[3], state & ~3ULL);
 			call.ret(1);
 			return;
 		}
-		call.store<uint64_t>(once, 1);
+		call.store_pointer(once, 1);
 		const auto scratch = context.allocator.allocate(16);
 		if (!scratch) {
 			call.fail(8);
@@ -232,15 +241,15 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 		const auto result = context.call(call[1], arguments);
 		if (result.stop != NativeStop::returned)
 			throw result;
-		const auto produced = call.load<uint64_t>(scratch);
+		const auto produced = call.load_pointer(scratch);
 		context.allocator.release(scratch);
 		if (!uint32_t(result.value)) {
-			call.store<uint64_t>(once, 0);
+			call.store_pointer(once, 0);
 			call.fail(1627);
 			return;
 		}
-		call.store<uint64_t>(once, (produced & ~3ULL) | 2);
-		if (call[3]) call.store<uint64_t>(call[3], produced);
+		call.store_pointer(once, (produced & ~3ULL) | 2);
+		if (call[3]) call.store_pointer(call[3], produced);
 		call.ret(1);
 	});
 

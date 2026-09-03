@@ -1,5 +1,6 @@
 #include "apiset.h"
 #include "loader.h"
+#include "memory.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -34,6 +35,10 @@ void load_initial_dependencies(ModuleSet &modules,
 						if (!message.starts_with("missing PE module: ")) throw;
 						const std::string identity(message.substr(19));
 						if (std::find(native_modules.begin(),native_modules.end(),identity)!=native_modules.end()) break;
+						// An API set name stands for the system library that implements it; that library is served natively, and alias_api_sets
+						// ties the name to it once the runtime has made it.
+						if (const auto host=apiset_host(identity); !host.empty() && host!="ucrtbase.dll" &&
+							std::find(native_modules.begin(),native_modules.end(),host)!=native_modules.end()) break;
 						// A C runtime contract resolves through the runtime component, whichever contract version the module names.
 						if (apiset_host(identity)=="ucrtbase.dll") {
 							if (!modules.all().contains("ucrtbase.dll")) {
@@ -61,6 +66,41 @@ void load_initial_dependencies(ModuleSet &modules,
 		for (auto item=staged.rbegin();item!=staged.rend();++item) modules.remove(**item);
 		throw;
 	}
+}
+
+void alias_api_sets(ModuleSet &modules)
+{
+	std::vector<std::string> names;
+	for (const auto &[name,module]:modules.all())
+		for (const auto &symbol:module->imports) {
+			auto identity=symbol.module;
+			for (auto &character : identity) if (character>='A' && character<='Z') character=char(character+('a'-'A'));
+			if (identity.find('.')==identity.npos) identity+=".dll";
+			if (!modules.all().contains(identity)) names.push_back(identity);
+		}
+	for (const auto &identity:names) {
+		const auto host=apiset_host(identity);
+		if (!host.empty() && modules.all().contains(host) && !modules.all().contains(identity))
+			modules.add_alias(identity,host);
+	}
+}
+
+void register_image(NativeMemory &memory, const PEModule &module)
+{
+	if (module.runtime_api) return;
+	std::vector<std::pair<std::pair<uint64_t,uint64_t>,uint32_t>> sections;
+	sections.push_back({{0,module.image.headers_size},2});
+	for (const auto &section:module.image.sections) {
+		const bool execute=section.characteristics & 0x20000000U, write=section.characteristics & 0x80000000U;
+		sections.push_back({{section.address,std::max<uint32_t>(section.virtual_size,section.file_size)},execute ? (write ? 0x40U : 0x20U) : write ? 0x04U : 0x02U});
+	}
+	memory.add_image(module.loaded.base(),module.image.image_size,sections);
+}
+
+void register_images(NativeMemory &memory, const ModuleSet &modules)
+{
+	for (const auto &[name,module]:modules.all())
+		register_image(memory,*module);
 }
 
 }

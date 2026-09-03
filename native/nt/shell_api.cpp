@@ -243,6 +243,10 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		if (call[3]) call.store_pointer(call[3], 0);
 		call.ret(0x80070002U);
 	});
+	// The program runs as the host account, which holds administrator rights only when it is root.
+	// The application identity only groups taskbar buttons; there is no taskbar to group them on.
+	registry.add("SetCurrentProcessExplicitAppUserModelID", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("IsUserAnAdmin", 0, [](ApiCall &call) { call.ret(::geteuid() == 0); });
 	registry.add("DragQueryFileW", 4, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragQueryPoint", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragFinish", 1, [](ApiCall &) {});
@@ -268,7 +272,7 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 				// A bare program name is found along the usual program directories, as Windows does for the open verb.
 				uint32_t error = 0;
 				const int standard[3] = {0, 1, 2};
-				started = start_program(context, u"", u"\"" + target + u"\"" + (parameters.empty() ? u"" : u" " + parameters), directory, standard, error);
+				started = start_program(context, u"", u"\"" + target + u"\"" + (parameters.empty() ? u"" : u" " + parameters), directory, standard, context.environment_block ? context.environment_block() : std::u16string(), nullptr, error);
 				return started ? 42 : error == 2 ? 2 : error == 193 ? 11 : 31;
 			}
 			if (equal_fold(from_utf8(std::filesystem::path(resolved->host).extension().string()), u".exe") && !std::filesystem::is_directory(resolved->host)) {
@@ -276,7 +280,7 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 				const int standard[3] = {0, 1, 2};
 				const auto full = paths.dos(resolved->host);
 				started = start_program(context, full, u"\"" + full + u"\"" + (parameters.empty() ? u"" : u" " + parameters),
-					directory.empty() ? full.substr(0, full.find_last_of(u'\\')) : directory, standard, error);
+					directory.empty() ? full.substr(0, full.find_last_of(u'\\')) : directory, standard, context.environment_block ? context.environment_block() : std::u16string(), nullptr, error);
 				return started ? 42 : error == 193 ? 11 : error;
 			}
 			argument = resolved->host.string();

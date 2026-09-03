@@ -5,6 +5,7 @@
 #include "memory.h"
 #include "objects.h"
 #include "paths.h"
+#include "completion_port.h"
 #include "threads.h"
 #include <string>
 #include "pe/module_set.h"
@@ -44,6 +45,10 @@ struct KernelContext {
 	std::function<std::string()> describe_stack;
 	// True when the window system has input, paint or timer work for the calling thread (MsgWaitForMultipleObjects).
 	std::function<bool()> message_ready;
+	// The environment variables the program has now, as the block a new process receives (set by the system handlers).
+	std::function<std::u16string()> environment_block;
+	// Started operations that finish later, such as overlapped socket transfers.
+	std::shared_ptr<Reactor> reactor = std::make_shared<Reactor>();
 };
 
 // Windows FILETIME ticks are 100 ns units since 1601-01-01.
@@ -66,8 +71,9 @@ void register_process_api(ApiRegistry &registry, KernelContext &context);
 void register_security_api(ApiRegistry &registry, KernelContext &context);
 void register_child_process_api(ApiRegistry &registry, KernelContext &context);
 void register_winsock_api(ApiRegistry &registry, KernelContext &context);
+void register_crypt32_api(ApiRegistry &registry, KernelContext &context);
 // Starts the program an application name or command line names, looked up the way Windows does; null with the Windows error otherwise.
 std::shared_ptr<class ProcessObject> start_program(KernelContext &context, const std::u16string &application, const std::u16string &line,
-	const std::u16string &directory, const int (&standard)[3], uint32_t &error);
+	const std::u16string &directory, const int (&standard)[3], const std::u16string &environment, int *gate, uint32_t &error);
 
 }

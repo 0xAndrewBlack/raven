@@ -16,6 +16,9 @@ namespace raven {
 struct ApiFault {};
 
 // One guest call of a native API: argument words, the return value and bounds-checked guest memory.
+// The text a guest pointer addresses when it holds a short run of printable characters, narrow or wide; empty otherwise. For traces.
+std::string describe_text(NativeProcess &process, uint64_t address);
+
 class ApiCall {
 public:
 	ApiCall(NativeProcess &process, NativeEnvironment &environment, std::vector<uint64_t> arguments);

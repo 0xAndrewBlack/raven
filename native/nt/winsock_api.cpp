@@ -1,4 +1,5 @@
 #include "child_process.h"
+#include "completion_port.h"
 #include "kernel_context.h"
 
 #include <algorithm>
@@ -28,7 +29,13 @@ public:
 	int signaled(uint32_t) const override { return 1; }
 	int descriptor;
 	bool guest_nonblocking = false;
+	// Set when the program closed the handle while transfers on it were still pending: they end as aborted.
+	bool closed = false;
+	// A non-blocking connect is under way: select reports its success as writable and its failure as an exception.
+	bool connecting = false;
 	int type = SOCK_STREAM;
+	std::shared_ptr<CompletionPort> port;
+	uint64_t key = 0;
 };
 
 constexpr uint32_t wsaeintr = 10004, wsaebadf = 10009, wsaeacces = 10013, wsaefault = 10014, wsaeinval = 10022, wsaemfile = 10024,
@@ -160,6 +167,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			fail(call, wsaenotsock, UINT64_MAX);
 			return;
 		}
+		socket_of(call[0])->closed = true;
 		objects.close(call[0]);
 		call.ret(0);
 	});
@@ -213,6 +221,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		if (socket->guest_nonblocking) {
+			socket->connecting = true;
 			fail(call, wsaewouldblock);
 			return;
 		}
@@ -383,17 +392,166 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			result.push_back({call.load_pointer(array + index * stride + (width == 4 ? 4 : 8)), call.load<uint32_t>(array + index * stride)});
 		return result;
 	};
-	registry.add("WSARecv", 7, [socket_of, fail, receive, buffers_of](ApiCall &call) {
+	// Overlapped transfers: the work is tried at once; what cannot finish yet waits in the reactor and completes later, reporting through
+	// the OVERLAPPED structure, its event and the completion port the socket belongs to.
+	struct Transfer {
+		std::shared_ptr<SocketObject> socket;
+		bool receiving = false;
+		std::vector<Buffer> buffers;
+		std::vector<uint8_t> outgoing;
+		size_t sent = 0;
+		uint32_t flags = 0;
+		uint64_t from = 0, from_length = 0, flags_out = 0, overlapped = 0;
+		std::vector<uint8_t> to;
+		size_t width = 4;
+	};
+	auto &process = context.process;
+	auto &reactor = *context.reactor;
+	// 0 when the transfer finished (status and bytes are set), 1 when it has to wait.
+	const auto attempt = [&process, host_flags](Transfer &transfer, uint32_t &status, uint64_t &bytes) -> int {
+		auto &socket = *transfer.socket;
+		if (socket.closed) {
+			status = 995;
+			bytes = 0;
+			return 0;
+		}
+		if (transfer.receiving) {
+			size_t total = 0;
+			for (const auto &buffer : transfer.buffers)
+				total += buffer.length;
+			std::vector<uint8_t> data(std::min<size_t>(total, 1 << 20));
+			sockaddr_storage from{};
+			socklen_t from_length = sizeof(from);
+			const ssize_t count = ::recvfrom(socket.descriptor, data.data(), data.size(), (host_flags(transfer.flags) & ~MSG_WAITALL) | MSG_DONTWAIT,
+				transfer.from ? reinterpret_cast<sockaddr *>(&from) : nullptr, transfer.from ? &from_length : nullptr);
+			if (count < 0) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+					return 1;
+				status = wsa_error(errno);
+				bytes = 0;
+				return 0;
+			}
+			size_t offset = 0;
+			for (const auto &buffer : transfer.buffers) {
+				const size_t part = std::min<size_t>(buffer.length, size_t(count) - offset);
+				if (part)
+					process.write_memory(buffer.address, std::span<const uint8_t>(data.data() + offset, part));
+				offset += part;
+			}
+			if (transfer.from) {
+				std::vector<uint8_t> raw(reinterpret_cast<const uint8_t *>(&from), reinterpret_cast<const uint8_t *>(&from) + from_length);
+				if (raw.size() >= 2) {
+					uint16_t family;
+					std::memcpy(&family, raw.data(), 2);
+					family = uint16_t(windows_family(family));
+					std::memcpy(raw.data(), &family, 2);
+				}
+				process.write_memory(transfer.from, raw);
+				if (transfer.from_length) {
+					const uint32_t length = uint32_t(from_length);
+					process.write_memory(transfer.from_length, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&length), 4));
+				}
+			}
+			status = 0;
+			bytes = uint64_t(count);
+			return 0;
+		}
+		while (transfer.sent < transfer.outgoing.size() || transfer.outgoing.empty()) {
+			const ssize_t count = ::sendto(socket.descriptor, transfer.outgoing.data() + transfer.sent, transfer.outgoing.size() - transfer.sent,
+				host_flags(transfer.flags) | MSG_DONTWAIT, transfer.to.empty() ? nullptr : reinterpret_cast<const sockaddr *>(transfer.to.data()),
+				socklen_t(transfer.to.size()));
+			if (count < 0) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+					return 1;
+				status = wsa_error(errno);
+				bytes = transfer.sent;
+				return 0;
+			}
+			transfer.sent += size_t(count);
+			if (socket.type != SOCK_STREAM || transfer.outgoing.empty())
+				break;
+		}
+		status = 0;
+		bytes = transfer.sent;
+		return 0;
+	};
+	// OVERLAPPED: the status and the byte count come first, the event handle after the two offset words.
+	const auto finish = [&process, &objects](const std::shared_ptr<SocketObject> &socket, uint64_t overlapped, size_t width, uint32_t status, uint64_t bytes) {
+		const auto put = [&](uint64_t at, uint64_t value) {
+			std::vector<uint8_t> raw(width);
+			std::memcpy(raw.data(), &value, width);
+			process.write_memory(at, raw);
+		};
+		put(overlapped, status);
+		put(overlapped + width, bytes);
+		const auto handle = [&] {
+			const auto raw = process.read_memory(overlapped + 2 * width + 8, width);
+			uint64_t value = 0;
+			std::memcpy(&value, raw.data(), width);
+			return value;
+		}();
+		if (handle & ~uint64_t(1))
+			objects.set_event(handle & ~uint64_t(1), true);
+		// A handle with its low bit set asks for no completion packet.
+		if (socket->port && !(handle & 1))
+			socket->port->post({bytes, socket->key, overlapped, status});
+	};
+	const auto complete = [finish](const Transfer &transfer, uint32_t status, uint64_t bytes) {
+		finish(transfer.socket, transfer.overlapped, transfer.width, status, bytes);
+	};
+	// Starts a transfer for the WSA calls; returns the call's result (0 or SOCKET_ERROR) with the byte count stored when it finished.
+	const auto start = [attempt, complete, &reactor](ApiCall &call, Transfer transfer, uint64_t bytes_out) {
+		transfer.width = call.pointer_width();
+		uint32_t status = 0;
+		uint64_t bytes = 0;
+		if (!transfer.overlapped) {
+			call.fail(wsaeopnotsupp, UINT32_MAX);
+			return;
+		}
+		if (attempt(transfer, status, bytes) == 0) {
+			if (status) {
+				call.fail(status, UINT32_MAX);
+				return;
+			}
+			complete(transfer, 0, bytes);
+			if (bytes_out)
+				call.store<uint32_t>(bytes_out, uint32_t(bytes));
+			call.ret(0);
+			return;
+		}
+		auto shared = std::make_shared<Transfer>(std::move(transfer));
+		reactor.add([shared, attempt, complete]() {
+			uint32_t result = 0;
+			uint64_t count = 0;
+			if (attempt(*shared, result, count) != 0)
+				return false;
+			complete(*shared, result, count);
+			return true;
+		});
+		call.fail(997, UINT32_MAX);
+	};
+	// Without an OVERLAPPED the call is an ordinary blocking or non-blocking transfer.
+	registry.add("WSARecv", 7, [socket_of, fail, receive, buffers_of, start](ApiCall &call) {
 		const auto socket = socket_of(call[0]);
 		if (!socket) {
 			fail(call, wsaenotsock, UINT32_MAX);
 			return;
 		}
-		if (call[5] || call[6]) {
+		if (call[6]) {
 			fail(call, wsaeopnotsupp, UINT32_MAX);
 			return;
 		}
-		uint32_t flags = call[4] ? call.load<uint32_t>(call[4]) : 0;
+		const uint32_t flags = call[4] ? call.load<uint32_t>(call[4]) : 0;
+		if (call[5]) {
+			Transfer transfer;
+			transfer.socket = socket;
+			transfer.receiving = true;
+			transfer.buffers = buffers_of(call, call[1], call.u32(2));
+			transfer.flags = flags;
+			transfer.overlapped = call[5];
+			start(call, std::move(transfer), call[3]);
+			return;
+		}
 		int64_t total = 0;
 		for (const auto &buffer : buffers_of(call, call[1], call.u32(2))) {
 			if (!buffer.length)
@@ -415,14 +573,26 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint32_t>(call[4], 0);
 		call.ret(0);
 	});
-	registry.add("WSASend", 7, [socket_of, fail, transmit, buffers_of](ApiCall &call) {
+	registry.add("WSASend", 7, [socket_of, fail, transmit, buffers_of, start](ApiCall &call) {
 		const auto socket = socket_of(call[0]);
 		if (!socket) {
 			fail(call, wsaenotsock, UINT32_MAX);
 			return;
 		}
-		if (call[5] || call[6]) {
+		if (call[6]) {
 			fail(call, wsaeopnotsupp, UINT32_MAX);
+			return;
+		}
+		if (call[5]) {
+			Transfer transfer;
+			transfer.socket = socket;
+			transfer.flags = call.u32(4);
+			transfer.overlapped = call[5];
+			for (const auto &buffer : buffers_of(call, call[1], call.u32(2))) {
+				const auto bytes = call.read(buffer.address, buffer.length);
+				transfer.outgoing.insert(transfer.outgoing.end(), bytes.begin(), bytes.end());
+			}
+			start(call, std::move(transfer), call[3]);
 			return;
 		}
 		int64_t total = 0;
@@ -444,13 +614,13 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint32_t>(call[3], uint32_t(total));
 		call.ret(0);
 	});
-	registry.add("WSARecvFrom", 9, [socket_of, fail, receive, buffers_of](ApiCall &call) {
+	registry.add("WSARecvFrom", 9, [socket_of, fail, receive, buffers_of, start](ApiCall &call) {
 		const auto socket = socket_of(call[0]);
 		if (!socket) {
 			fail(call, wsaenotsock, UINT32_MAX);
 			return;
 		}
-		if (call[7] || call[8]) {
+		if (call[8]) {
 			fail(call, wsaeopnotsupp, UINT32_MAX);
 			return;
 		}
@@ -459,10 +629,22 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			fail(call, wsaeinval, UINT32_MAX);
 			return;
 		}
+		const uint32_t flags = call[4] ? call.load<uint32_t>(call[4]) : 0;
+		if (call[7]) {
+			Transfer transfer;
+			transfer.socket = socket;
+			transfer.receiving = true;
+			transfer.buffers = buffers;
+			transfer.flags = flags;
+			transfer.from = call[5];
+			transfer.from_length = call[6];
+			transfer.overlapped = call[7];
+			start(call, std::move(transfer), call[3]);
+			return;
+		}
 		sockaddr_storage from{};
 		socklen_t from_length = sizeof(from);
-		const auto count = receive(call, socket, buffers[0].address, buffers[0].length, call[4] ? call.load<uint32_t>(call[4]) : 0,
-			call[5] ? &from : nullptr, call[5] ? &from_length : nullptr);
+		const auto count = receive(call, socket, buffers[0].address, buffers[0].length, flags, call[5] ? &from : nullptr, call[5] ? &from_length : nullptr);
 		if (count < 0) {
 			call.ret(UINT32_MAX);
 			return;
@@ -475,13 +657,13 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint32_t>(call[4], 0);
 		call.ret(0);
 	});
-	registry.add("WSASendTo", 9, [socket_of, fail, transmit, buffers_of](ApiCall &call) {
+	registry.add("WSASendTo", 9, [socket_of, fail, transmit, buffers_of, start](ApiCall &call) {
 		const auto socket = socket_of(call[0]);
 		if (!socket) {
 			fail(call, wsaenotsock, UINT32_MAX);
 			return;
 		}
-		if (call[7] || call[8]) {
+		if (call[8]) {
 			fail(call, wsaeopnotsupp, UINT32_MAX);
 			return;
 		}
@@ -493,6 +675,19 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		std::vector<uint8_t> to;
 		if (call[5] && call.i32(6) >= 2)
 			to = host_address(call, call[5], size_t(call.i32(6)));
+		if (call[7]) {
+			Transfer transfer;
+			transfer.socket = socket;
+			transfer.flags = call.u32(4);
+			transfer.to = to;
+			transfer.overlapped = call[7];
+			for (const auto &buffer : buffers) {
+				const auto bytes = call.read(buffer.address, buffer.length);
+				transfer.outgoing.insert(transfer.outgoing.end(), bytes.begin(), bytes.end());
+			}
+			start(call, std::move(transfer), call[3]);
+			return;
+		}
 		const auto count = transmit(call, socket, buffers[0].address, buffers[0].length, call.u32(4),
 			to.empty() ? nullptr : reinterpret_cast<const sockaddr *>(to.data()), socklen_t(to.size()));
 		if (count < 0) {
@@ -502,6 +697,255 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		if (call[3])
 			call.store<uint32_t>(call[3], uint32_t(count));
 		call.ret(0);
+	});
+
+	// The extension functions of Winsock are found through WSAIoctl by GUID; each is an export the runtime answers like any other.
+	registry.add("ConnectEx", 7, [socket_of, fail, finish, &reactor](ApiCall &call) {
+		const auto socket = socket_of(call[0]);
+		if (!socket || !call[6] || call.i32(2) < 2) {
+			fail(call, socket ? wsaeinval : wsaenotsock, 0);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		const uint64_t overlapped = call[6];
+		const auto address = host_address(call, call[1], size_t(call.i32(2)));
+		auto data = call[3] && call.u32(4) ? call.read(call[3], call.u32(4)) : std::vector<uint8_t>{};
+		const auto sent_out = call[5];
+		const auto done = [socket, finish, overlapped, width, data = std::move(data)](uint32_t status) {
+			uint64_t bytes = 0;
+			if (!status && !data.empty()) {
+				const ssize_t count = ::send(socket->descriptor, data.data(), data.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+				bytes = count > 0 ? uint64_t(count) : 0;
+			}
+			finish(socket, overlapped, width, status, bytes);
+			return bytes;
+		};
+		if (::connect(socket->descriptor, reinterpret_cast<const sockaddr *>(address.data()), socklen_t(address.size())) == 0) {
+			const auto bytes = done(0);
+			if (sent_out)
+				call.store<uint32_t>(sent_out, uint32_t(bytes));
+			call.ret(1);
+			return;
+		}
+		if (errno != EINPROGRESS) {
+			fail(call, wsa_error(errno), 0);
+			return;
+		}
+		reactor.add([socket, done]() {
+			if (socket->closed) {
+				done(995);
+				return true;
+			}
+			pollfd entry{socket->descriptor, POLLOUT, 0};
+			if (::poll(&entry, 1, 0) <= 0)
+				return false;
+			int error = 0;
+			socklen_t length = sizeof(error);
+			::getsockopt(socket->descriptor, SOL_SOCKET, SO_ERROR, &error, &length);
+			done(error ? wsa_error(error) : 0);
+			return true;
+		});
+		fail(call, 997, 0);
+	});
+	registry.add("AcceptEx", 8, [socket_of, fail, finish, &reactor, &process](ApiCall &call) {
+		const auto listener = socket_of(call[0]);
+		const auto target = socket_of(call[1]);
+		if (!listener || !target || !call[7]) {
+			fail(call, listener && target ? wsaeinval : wsaenotsock, 0);
+			return;
+		}
+		if (call.u32(3)) {
+			// Receiving the first data together with the connection is not done: the call says so.
+			fail(call, wsaeopnotsupp, 0);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		const uint64_t overlapped = call[7], buffer = call[2], local_length = call.u32(4), remote_length = call.u32(5);
+		const auto attempt = [listener, target, &process, buffer, local_length, remote_length]() -> int {
+			sockaddr_storage peer{};
+			socklen_t peer_length = sizeof(peer);
+			const int accepted = ::accept4(listener->descriptor, reinterpret_cast<sockaddr *>(&peer), &peer_length, SOCK_NONBLOCK | SOCK_CLOEXEC);
+			if (accepted < 0)
+				return errno == EAGAIN || errno == EWOULDBLOCK ? -1 : int(wsa_error(errno));
+			::dup3(accepted, target->descriptor, SOCK_CLOEXEC);
+			::close(accepted);
+			const auto write_address = [&](uint64_t at, uint32_t capacity, const sockaddr_storage &storage, socklen_t length) {
+				std::vector<uint8_t> raw(capacity);
+				std::memcpy(raw.data(), &storage, std::min<size_t>(length, capacity));
+				uint16_t family;
+				std::memcpy(&family, raw.data(), 2);
+				family = uint16_t(windows_family(family));
+				std::memcpy(raw.data(), &family, 2);
+				process.write_memory(at, raw);
+			};
+			sockaddr_storage local{};
+			socklen_t local_size = sizeof(local);
+			::getsockname(target->descriptor, reinterpret_cast<sockaddr *>(&local), &local_size);
+			write_address(buffer, local_length, local, local_size);
+			write_address(buffer + local_length, remote_length, peer, peer_length);
+			return 0;
+		};
+		const int first = attempt();
+		if (first == 0) {
+			finish(listener, overlapped, width, 0, 0);
+			call.ret(1);
+			return;
+		}
+		if (first > 0) {
+			fail(call, uint32_t(first), 0);
+			return;
+		}
+		reactor.add([attempt, finish, listener, overlapped, width]() {
+			if (listener->closed) {
+				finish(listener, overlapped, width, 995, 0);
+				return true;
+			}
+			const int result = attempt();
+			if (result < 0)
+				return false;
+			finish(listener, overlapped, width, uint32_t(result), 0);
+			return true;
+		});
+		fail(call, 997, 0);
+	});
+	registry.add("GetAcceptExSockaddrs", 8, [](ApiCall &call) {
+		const uint64_t local = call[0] + call.u32(1), remote = local + call.u32(2);
+		const auto length_of = [&](uint64_t address) {
+			const auto family = call.load<uint16_t>(address);
+			return uint32_t(family == windows_inet6 ? 28 : 16);
+		};
+		if (call[4])
+			call.store_pointer(call[4], local);
+		if (call[5])
+			call.store<uint32_t>(call[5], length_of(local));
+		if (call[6])
+			call.store_pointer(call[6], remote);
+		if (call[7])
+			call.store<uint32_t>(call[7], length_of(remote));
+	});
+	registry.add("DisconnectEx", 4, [socket_of, fail, finish](ApiCall &call) {
+		const auto socket = socket_of(call[0]);
+		if (!socket) {
+			fail(call, wsaenotsock, 0);
+			return;
+		}
+		::shutdown(socket->descriptor, SHUT_RDWR);
+		if (call[1])
+			finish(socket, call[1], call.pointer_width(), 0, 0);
+		call.ret(1);
+	});
+
+	// Completion ports: one queue that overlapped operations report to and worker threads take from.
+	context.threads.set_pump([&reactor] { reactor.poll(); });
+	registry.add("CreateIoCompletionPort", 4, [&objects, socket_of](ApiCall &call) {
+		std::shared_ptr<CompletionPort> port;
+		if (call[1]) {
+			port = objects.object_as<CompletionPort>(call[1]);
+			if (!port) {
+				call.fail(6, 0);
+				return;
+			}
+		}
+		const bool create = !port;
+		uint64_t handle = call[1];
+		if (create) {
+			port = std::make_shared<CompletionPort>();
+			const auto made = objects.add_object(port);
+			if (made.status) {
+				call.fail(4, 0);
+				return;
+			}
+			handle = made.value;
+		}
+		if (call[0] != UINT64_MAX) {
+			const auto socket = socket_of(call[0]);
+			if (!socket) {
+				// Files and pipes cannot yet deliver completions: refuse the association rather than accept one that never reports.
+				if (create)
+					objects.close(handle);
+				call.fail(87, 0);
+				return;
+			}
+			socket->port = port;
+			socket->key = call[2];
+		}
+		call.ret(handle);
+	});
+	registry.add("PostQueuedCompletionStatus", 4, [&objects](ApiCall &call) {
+		const auto port = objects.object_as<CompletionPort>(call[0]);
+		if (!port) {
+			call.fail(6);
+			return;
+		}
+		port->post({call.u32(1), call[2], call[3], 0});
+		call.ret(1);
+	});
+	// Waits for one packet; empty when the time ran out.
+	const auto wait_packet = [&reactor, &threads](const std::shared_ptr<CompletionPort> &port, uint32_t milliseconds) -> std::optional<CompletionPacket> {
+		std::optional<std::chrono::steady_clock::time_point> wake;
+		if (milliseconds != UINT32_MAX)
+			wake = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+		for (;;) {
+			reactor.poll();
+			CompletionPacket packet;
+			if (port->take(packet))
+				return packet;
+			if (milliseconds == 0 || (wake && std::chrono::steady_clock::now() >= *wake))
+				return std::nullopt;
+			HostWait waiting;
+			threads.block([&] { reactor.poll(); return !port->empty(); }, wake);
+		}
+	};
+	registry.add("GetQueuedCompletionStatus", 5, [&objects, wait_packet](ApiCall &call) {
+		const auto port = objects.object_as<CompletionPort>(call[0]);
+		if (!port) {
+			call.fail(6);
+			return;
+		}
+		const auto packet = wait_packet(port, call.u32(4));
+		if (!packet) {
+			if (call[3])
+				call.store_pointer(call[3], 0);
+			call.fail(258);
+			return;
+		}
+		if (call[1])
+			call.store<uint32_t>(call[1], uint32_t(packet->bytes));
+		if (call[2])
+			call.store_pointer(call[2], packet->key);
+		if (call[3])
+			call.store_pointer(call[3], packet->overlapped);
+		if (packet->status) {
+			call.fail(packet->status);
+			return;
+		}
+		call.ret(1);
+	});
+	// OVERLAPPED_ENTRY: the key, the OVERLAPPED pointer, an internal word and the byte count.
+	registry.add("GetQueuedCompletionStatusEx", 6, [&objects, wait_packet](ApiCall &call) {
+		const auto port = objects.object_as<CompletionPort>(call[0]);
+		if (!port || !call[1] || !call.u32(2) || !call[3]) {
+			call.fail(port ? 87 : 6);
+			return;
+		}
+		const size_t width = call.pointer_width(), stride = width == 4 ? 16 : 32;
+		uint32_t removed = 0;
+		auto packet = wait_packet(port, call.u32(4));
+		while (packet && removed < call.u32(2)) {
+			const uint64_t entry = call[1] + removed * stride;
+			call.store_pointer(entry, packet->key);
+			call.store_pointer(entry + width, packet->overlapped);
+			call.store_pointer(entry + 2 * width, packet->status);
+			call.store<uint32_t>(entry + 3 * width, uint32_t(packet->bytes));
+			++removed;
+			packet = wait_packet(port, 0);
+		}
+		if (!removed) {
+			call.fail(258);
+			return;
+		}
+		call.store<uint32_t>(call[3], removed);
+		call.ret(1);
 	});
 
 	registry.add("getsockname", 3, [socket_of, fail](ApiCall &call) {
@@ -629,7 +1073,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(0);
 	});
 
-	constexpr uint32_t fionbio = 0x8004667e, fionread = 0x4004667f, sio_keepalive_vals = 0x98000004;
+	constexpr uint32_t fionbio = 0x8004667e, fionread = 0x4004667f, sio_keepalive_vals = 0x98000004, sio_get_extension_function = 0xc8000006;
+	const auto resolve_export = [&context](const char *library, const char *name) { return context.modules.resolve({library, name, 0, false, 0}); };
 	registry.add("ioctlsocket", 3, [socket_of, fail](ApiCall &call) {
 		const auto socket = socket_of(call[0]);
 		if (!socket || !call[2]) {
@@ -648,7 +1093,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(0);
 	});
-	registry.add("WSAIoctl", 9, [socket_of, fail](ApiCall &call) {
+	registry.add("WSAIoctl", 9, [socket_of, fail, resolve_export](ApiCall &call) {
 		const auto socket = socket_of(call[0]);
 		if (!socket) {
 			fail(call, wsaenotsock);
@@ -666,6 +1111,34 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			int available = 0;
 			::ioctl(socket->descriptor, FIONREAD, &available);
 			call.store<uint32_t>(call[4], uint32_t(available));
+		} else if (code == sio_get_extension_function && call[2] && call.u32(3) >= 16 && call[4] && call.u32(5) >= call.pointer_width()) {
+			static constexpr struct { uint32_t first; uint16_t second, third; uint8_t rest[8]; const char *name; } known[] = {
+				{0x25a207b9, 0xddf3, 0x4660, {0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e}, "ConnectEx"},
+				{0xb5367df1, 0xcbac, 0x11cf, {0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92}, "AcceptEx"},
+				{0xb5367df2, 0xcbac, 0x11cf, {0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92}, "GetAcceptExSockaddrs"},
+				{0x7fda2e11, 0x8630, 0x436f, {0xa0, 0x31, 0xf5, 0x36, 0xa6, 0xee, 0xc1, 0x57}, "DisconnectEx"},
+			};
+			const auto guid = call.read(call[2], 16);
+			const char *name = nullptr;
+			for (const auto &entry : known) {
+				uint32_t first;
+				uint16_t second, third;
+				std::memcpy(&first, guid.data(), 4);
+				std::memcpy(&second, guid.data() + 4, 2);
+				std::memcpy(&third, guid.data() + 6, 2);
+				if (first == entry.first && second == entry.second && third == entry.third && std::memcmp(guid.data() + 8, entry.rest, 8) == 0)
+					name = entry.name;
+			}
+			if (!name) {
+				fail(call, wsaeinval);
+				return;
+			}
+			try {
+				call.store_pointer(call[4], resolve_export("ws2_32.dll", name));
+			} catch (const std::runtime_error &) {
+				fail(call, wsaeopnotsupp);
+				return;
+			}
 		} else if (code == sio_keepalive_vals && call[2] && call.u32(3) >= 12) {
 			const int enabled = call.load<uint32_t>(call[2]) != 0, idle = int(std::max<uint32_t>(call.load<uint32_t>(call[2] + 4) / 1000, 1)),
 				interval = int(std::max<uint32_t>(call.load<uint32_t>(call[2] + 8) / 1000, 1));
@@ -739,7 +1212,19 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			std::vector<uint64_t> kept;
 			for (const auto &item : sets[kind]) {
 				const auto revents = entries[position++].revents;
-				const bool hit = kind == 0 ? (revents & (POLLIN | POLLHUP | POLLERR)) != 0 : kind == 1 ? (revents & (POLLOUT | POLLERR)) != 0 : (revents & POLLPRI) != 0;
+				const auto socket = socket_of(item.handle);
+				const bool connecting = socket && socket->connecting;
+				const bool failed = (revents & (POLLERR | POLLHUP)) != 0;
+				bool hit;
+				if (connecting && kind == 1) {
+					hit = (revents & POLLOUT) != 0 && !failed;
+				} else if (connecting && kind == 2) {
+					hit = failed;
+				} else {
+					hit = kind == 0 ? (revents & (POLLIN | POLLHUP | POLLERR)) != 0 : kind == 1 ? (revents & (POLLOUT | POLLERR)) != 0 : (revents & POLLPRI) != 0;
+				}
+				if (hit && connecting && kind != 0)
+					socket->connecting = false;
 				if (hit)
 					kept.push_back(item.handle);
 			}

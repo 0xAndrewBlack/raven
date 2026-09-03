@@ -1,6 +1,8 @@
 #include <cstdio>
 #include "hash.h"
 #include "kernel_context.h"
+
+#include <sys/random.h>
 #include "text.h"
 
 #include <algorithm>
@@ -99,7 +101,6 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(0);
 	});
 	registry.add("IsDestinationReachableW", 2, [](ApiCall &call) { call.ret(0); });
-	registry.add("CertCloseStore", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("CertFindCertificateInStore", 6, [](ApiCall &call) { call.fail(0x80092004U, 0); });
 	registry.add("CertGetCertificateContextProperty", 4, [](ApiCall &call) { call.fail(0x80092004U, 0); });
 	registry.add("CertGetNameStringW", 6, [](ApiCall &call) { call.ret(0); });
@@ -325,6 +326,92 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("SysReAllocString", 2, [reallocate](ApiCall &call) { reallocate(call, false); });
 	registry.add("SysReAllocStringLen", 3, [reallocate](ApiCall &call) { reallocate(call, true); });
 
+	// Random bytes come from the host: RtlGenRandom (exported from advapi32 as SystemFunction036) and BCryptGenRandom.
+	const auto random_bytes = [](ApiCall &call, uint64_t buffer, size_t length) {
+		std::vector<uint8_t> bytes(length);
+		for (size_t done = 0; done < length;) {
+			const auto count = ::getrandom(bytes.data() + done, length - done, 0);
+			if (count < 0 && errno != EINTR)
+				return false;
+			if (count > 0)
+				done += size_t(count);
+		}
+		call.write(buffer, bytes);
+		return true;
+	};
+	registry.add("SystemFunction036", 2, [random_bytes](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		call.ret(random_bytes(call, call[0], call.u32(1)));
+	});
+	registry.add("BCryptGenRandom", 4, [random_bytes](ApiCall &call) {
+		// Only the system generator exists: the pseudo handle BCRYPT_RNG_ALG_HANDLE (0x81), or no handle with the preferred-generator flag.
+		const bool generator = call[0] == 0x81 || (!call[0] && (call.u32(3) & 2));
+		if (!generator || !call[1]) {
+			call.ret(0xc0000008U);
+			return;
+		}
+		call.ret(random_bytes(call, call[1], call.u32(2)) ? 0 : 0xc0000001U);
+	});
+	// Proxy discovery: no proxy is configured, so sessions open and every lookup answers "connect directly".
+	struct WinHttpSession : KernelObject {};
+	registry.add("WinHttpOpen", 5, [&context](ApiCall &call) {
+		const auto made = context.objects.add_object(std::make_shared<WinHttpSession>());
+		if (made.status) {
+			call.fail(8, 0);
+			return;
+		}
+		call.ret(made.value);
+	});
+	registry.add("WinHttpCloseHandle", 1, [&context](ApiCall &call) {
+		if (!context.objects.object_as<WinHttpSession>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		context.objects.close(call[0]);
+		call.ret(1);
+	});
+	registry.add("WinHttpSetTimeouts", 5, [](ApiCall &call) { call.ret(1); });
+	registry.add("WinHttpGetIEProxyConfigForCurrentUser", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		// WINHTTP_CURRENT_USER_IE_PROXY_CONFIG: auto-detect flag and three string pointers, all empty.
+		call.write(call[0], std::vector<uint8_t>(call.pointer_width() == 4 ? 16 : 32));
+		call.ret(1);
+	});
+	registry.add("WinHttpDetectAutoProxyConfigUrl", 2, [](ApiCall &call) { call.fail(12180); });
+	registry.add("WinHttpGetProxyForUrl", 4, [](ApiCall &call) {
+		if (!call[3]) {
+			call.fail(87);
+			return;
+		}
+		// WINHTTP_PROXY_INFO: the access type (1 is no proxy) and two empty string pointers.
+		std::vector<uint8_t> info(call.pointer_width() == 4 ? 12 : 24);
+		info[0] = 1;
+		call.write(call[3], info);
+		call.ret(1);
+	});
+	// Display scaling: contexts are the small negative values of the Windows API; there is one display scale, so the setting is only remembered.
+	auto dpi_context = std::make_shared<int64_t>(-1);
+	registry.add("IsValidDpiAwarenessContext", 1, [](ApiCall &call) {
+		const auto value = int64_t(call[0]);
+		call.ret(value <= -1 && value >= -5);
+	});
+	registry.add("SetThreadDpiAwarenessContext", 1, [dpi_context](ApiCall &call) {
+		const auto value = call.pointer_width() == 4 ? int64_t(int32_t(call.u32(0))) : int64_t(call[0]);
+		if (value > -1 || value < -5) {
+			call.ret(0);
+			return;
+		}
+		const auto previous = *dpi_context;
+		*dpi_context = value;
+		call.ret(uint64_t(previous));
+	});
+	registry.add("GetThreadDpiAwarenessContext", 0, [dpi_context](ApiCall &call) { call.ret(uint64_t(*dpi_context)); });
 	// advapi32 security helpers that need no token or policy database.
 	registry.add("AllocateAndInitializeSid", 11, [&context](ApiCall &call) {
 		const uint8_t count = uint8_t(call[1]);

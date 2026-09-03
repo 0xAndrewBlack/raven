@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string>
 #include <sys/types.h>
+#include <unistd.h>
 
 namespace raven {
 
@@ -34,8 +35,26 @@ class ChildThreadObject : public KernelObject {
 public:
 	explicit ChildThreadObject(std::shared_ptr<ProcessObject> process) : process(std::move(process)) {}
 	int signaled(uint32_t) const override { return process->exited() ? 1 : 0; }
+	// A thread started suspended waits at a gate; this opens it and returns the suspend count it had.
+	uint32_t resume()
+	{
+		if (gate < 0)
+			return 0;
+		const char open = 1;
+		(void)!::write(gate, &open, 1);
+		::close(gate);
+		gate = -1;
+		return 1;
+	}
+	void hold(int descriptor) { gate = descriptor; }
+	~ChildThreadObject() override
+	{
+		if (gate >= 0)
+			::close(gate);
+	}
 
 private:
+	int gate = -1;
 	std::shared_ptr<ProcessObject> process;
 };
 
@@ -45,6 +64,11 @@ struct ChildLaunch {
 	std::u16string directory;
 	// Descriptors that become the child's standard input, output and error.
 	int standard[3] = {0, 1, 2};
+	// The environment block the child starts with (entries "NAME=VALUE" each ended by a zero, then one more zero).
+	std::u16string environment;
+	// When set, the child waits for a byte on this descriptor's other end before it runs; `gate` receives the end the parent keeps.
+	bool suspended = false;
+	int *gate = nullptr;
 };
 
 // Starts the child; null with the Windows error in `error` when the host could not.

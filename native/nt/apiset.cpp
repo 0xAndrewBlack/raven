@@ -17,13 +17,13 @@ std::string apiset_host(std::string_view name)
 	struct Family {
 		std::string_view prefix, host;
 	};
-	static constexpr std::array<Family, 17> families{{
+	static constexpr std::array<Family, 18> families{{
 		{"api-ms-win-core-registry-", "advapi32.dll"}, {"api-ms-win-security-", "advapi32.dll"}, {"api-ms-win-core-security-", "advapi32.dll"},
 		{"api-ms-win-eventing-", "advapi32.dll"}, {"api-ms-win-core-com-", "ole32.dll"}, {"api-ms-win-core-shlwapi-", "shlwapi.dll"},
 		{"api-ms-win-shell-", "shell32.dll"}, {"api-ms-win-core-shell-", "shell32.dll"}, {"ext-ms-win-ntuser-", "user32.dll"},
 		{"api-ms-win-core-localization-", "kernel32.dll"}, {"api-ms-win-gdi-", "gdi32.dll"}, {"ext-ms-win-gdi-", "gdi32.dll"},
 		{"api-ms-win-core-ntuser-", "user32.dll"}, {"api-ms-win-service-", "advapi32.dll"}, {"api-ms-win-devices-", "setupapi.dll"},
-		{"api-ms-win-core-psapi-", "psapi.dll"}, {"api-ms-win-crt-", "ucrtbase.dll"},
+		{"api-ms-win-core-psapi-", "psapi.dll"}, {"api-ms-win-shcore-", "shcore.dll"}, {"api-ms-win-crt-", "ucrtbase.dll"},
 	}};
 	for (const auto &family : families)
 		if (lower.starts_with(family.prefix))

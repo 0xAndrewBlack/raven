@@ -14,7 +14,7 @@ namespace raven {
 namespace {
 
 constexpr uint64_t current_process = UINT64_MAX;
-constexpr uint32_t create_suspended = 0x4, startf_use_std_handles = 0x100;
+constexpr uint32_t create_suspended = 0x4, create_unicode_environment = 0x400, startf_use_std_handles = 0x100;
 
 // A pipe is a connected pair of sockets with one direction closed on each end, which lets a reader look at bytes without taking them.
 bool make_pipe(int &reader, int &writer)
@@ -46,7 +46,7 @@ std::u16string first_word(std::u16string_view line)
 }
 
 std::shared_ptr<ProcessObject> start_program(KernelContext &context, const std::u16string &application, const std::u16string &line,
-	const std::u16string &directory, const int (&standard)[3], uint32_t &error)
+	const std::u16string &directory, const int (&standard)[3], const std::u16string &environment, int *gate, uint32_t &error)
 {
 	auto &paths = context.paths;
 	const auto name = application.empty() ? first_word(line) : application;
@@ -93,6 +93,9 @@ std::shared_ptr<ProcessObject> start_program(KernelContext &context, const std::
 	launch.command_line = line.empty() ? u"\"" + name + u"\"" : line;
 	launch.directory = directory.empty() ? paths.current() : directory;
 	std::copy(std::begin(standard), std::end(standard), launch.standard);
+	launch.environment = environment;
+	launch.suspended = gate != nullptr;
+	launch.gate = gate;
 	return spawn_child(launch, error);
 }
 
@@ -159,11 +162,6 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 	});
 
 	registry.add("CreateProcessW", 10, [&, descriptor_of](ApiCall &call) {
-		if (call.u32(5) & create_suspended || call[6]) {
-			// A suspended start and a private environment block are not carried to the child yet: say so rather than start it differently.
-			call.fail(50);
-			return;
-		}
 		if (!call[9]) {
 			call.fail(87);
 			return;
@@ -191,14 +189,38 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 					standard[index] = descriptor;
 				}
 		}
+		// The child starts with the environment the caller names, or with the one the caller has now.
+		std::u16string environment;
+		if (call[6]) {
+			const bool wide_block = call.u32(5) & create_unicode_environment;
+			for (uint64_t at = call[6]; environment.size() < 1 << 20;) {
+				const auto chunk = call.read(at, 4096);
+				at += 4096;
+				bool done = false;
+				for (size_t index = 0; index + 1 < chunk.size() + (wide_block ? 0 : 1) && !done; index += wide_block ? 2 : 1) {
+					const char16_t unit = wide_block ? char16_t(chunk[index] | chunk[index + 1] << 8) : char16_t(chunk[index]);
+					environment.push_back(unit);
+					if (unit == 0 && environment.size() >= 2 && environment[environment.size() - 2] == 0)
+						done = true;
+				}
+				if (done)
+					break;
+			}
+		} else if (context.environment_block) {
+			environment = context.environment_block();
+		}
+		int gate = -1;
 		uint32_t error = 0;
-		const auto child = start_program(context, application, line, directory, standard, error);
+		const auto child = start_program(context, application, line, directory, standard, environment, call.u32(5) & create_suspended ? &gate : nullptr, error);
 		if (!child) {
 			call.fail(error);
 			return;
 		}
 		const auto process_handle = objects.add_object(child);
-		const auto thread_handle = objects.add_object(std::make_shared<ChildThreadObject>(child));
+		const auto thread_object = std::make_shared<ChildThreadObject>(child);
+		if (gate >= 0)
+			thread_object->hold(gate);
+		const auto thread_handle = objects.add_object(thread_object);
 		if (process_handle.status || thread_handle.status) {
 			child->terminate(1);
 			call.fail(4);

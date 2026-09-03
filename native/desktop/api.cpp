@@ -23,14 +23,14 @@ std::span<const std::string_view> NativeDesktop::control_exports()
 
 std::span<const std::string_view> NativeDesktop::user_exports()
 {
-	static constexpr std::array<std::string_view, 84> names{
+	static constexpr std::array<std::string_view, 85> names{
 		"AdjustWindowRect", "AdjustWindowRectEx", "BeginPaint", "CallWindowProcW", "ClientToScreen", "CopyIcon", "CreateIconFromResourceEx", "CreateWindowExW", "DefWindowProcW",
 		"DestroyIcon", "DestroyMenu", "DestroyWindow", "DispatchMessageW", "DrawIconEx", "EndPaint", "FillRect", "FrameRect",
 		"GetActiveWindow", "GetClassInfoExW", "GetClassInfoW", "GetClassLongA", "GetClassLongPtrA", "GetClassLongPtrW",
 		"GetClassLongW", "GetClassNameA", "GetClassNameW", "GetClientRect", "GetDC", "GetDlgCtrlID", "GetDlgItem", "GetFocus",
 		 "GetIconInfo", "GetMenuItemCount", "GetMenuItemID", "GetMessageW", "GetParent", "GetSubMenu", "GetSysColor", "GetSysColorBrush", "GetSystemMetrics", "GetUpdateRect", "GetWindowDC", "GetWindowLongA", "GetWindowLongPtrA", "GetWindowLongPtrW",
 		"GetWindowLongW", "GetWindowRect", "GetWindowTextLengthW", "GetWindowTextW", "InternalGetWindowText", "InvalidateRect", "IsChild", "IsMenu", "IsWindow",
-		"IsWindowUnicode", "IsWindowVisible", "LoadMenuW", "LoadStringW", "LookupIconIdFromDirectoryEx", "MapWindowPoints", "PeekMessageW", "PostMessageW", "PostQuitMessage",
+		"IsWindowUnicode", "IsWindowVisible", "LoadMenuW", "LoadStringW", "LookupIconIdFromDirectoryEx", "MapWindowPoints", "PeekMessageW", "PostMessageW", "PostQuitMessage", "PostThreadMessageW",
 		"PrivateExtractIconsW", "RegisterClassExW", "RegisterClassW", "ReleaseDC", "ScreenToClient", "SendMessageW", "SetClassLongA", "SetClassLongPtrA",
 		"SetClassLongPtrW", "SetClassLongW", "SetFocus", "SetWindowLongA", "SetWindowLongPtrA", "SetWindowLongPtrW",
 		"SetWindowLongW", "SetWindowTextW", "ShowWindow", "TranslateMessage", "UnregisterClassW", "UpdateWindow",

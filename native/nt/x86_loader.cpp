@@ -173,6 +173,8 @@ uint64_t NativeX86Loader::load(std::string name)
 		for (auto item = staged.rbegin(); item != staged.rend(); ++item) {
 			process.map_image((*item)->loaded);
 			mapped = true;
+			if (mapped_hook)
+				mapped_hook(**item);
 			if (tls)
 				tls->add(**item);
 		}

@@ -285,6 +285,8 @@ void NativeThreads::schedule()
 			return;
 		}
 		// Nothing can run: wait for the earliest timeout, letting the host deliver outside events meanwhile.
+		if (pump)
+			pump();
 		auto wake = std::chrono::steady_clock::time_point::max();
 		bool any = false;
 		for (const auto &thread : threads)

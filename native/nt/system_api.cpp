@@ -305,8 +305,105 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		std::vector<uint8_t> bytes(size);
 		const uint32_t fields[5] = {size, 10, 0, 19045, 2};
 		std::memcpy(bytes.data(), fields, 20);
+		// The extended block adds the service pack, the suite mask and the product type: a workstation.
+		if (size == 284)
+			bytes[282] = 1;
 		call.write(call[0], bytes);
 		call.ret(1);
+	});
+	// All logical processors form one group of at most 64: the masks of the process and the system are the same.
+	const auto processor_mask = [] {
+		const long count = std::max<long>(::sysconf(_SC_NPROCESSORS_ONLN), 1);
+		return count >= 64 ? ~uint64_t(0) : (uint64_t(1) << count) - 1;
+	};
+	registry.add("GetProcessAffinityMask", 3, [processor_mask](ApiCall &call) {
+		if (!call[1] || !call[2]) {
+			call.fail(87);
+			return;
+		}
+		call.store_pointer(call[1], processor_mask());
+		call.store_pointer(call[2], processor_mask());
+		call.ret(1);
+	});
+	// Affinity is not enforced: the call reports the mask the thread had, which is every processor.
+	registry.add("SetProcessAffinityMask", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetProcessShutdownParameters", 2, [](ApiCall &call) { call.ret(1); });
+	// Processor topology: one package, one core per logical processor, no cache or NUMA records beyond the single node.
+	registry.add("GetLogicalProcessorInformationEx", 3, [processor_mask](ApiCall &call) {
+		constexpr uint32_t core = 0, node = 1, package = 3, all = 0xffff;
+		const uint32_t relationship = call.u32(0);
+		if (relationship != core && relationship != node && relationship != package && relationship != all) {
+			call.fail(87);
+			return;
+		}
+		if (!call[2]) {
+			call.fail(87);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		// Each record: relationship, size, then flags, efficiency class, 20 reserved bytes, the group count and one group affinity.
+		const size_t record = (32 + width + 8 + width - 1) / width * width;
+		const long count = std::max<long>(::sysconf(_SC_NPROCESSORS_ONLN), 1);
+		const auto mask = processor_mask();
+		std::vector<uint8_t> bytes;
+		const auto add = [&](uint32_t kind, uint64_t group_mask) {
+			std::vector<uint8_t> entry(record);
+			std::memcpy(entry.data(), &kind, 4);
+			const uint32_t size = uint32_t(record);
+			std::memcpy(entry.data() + 4, &size, 4);
+			const uint16_t groups = 1;
+			std::memcpy(entry.data() + 30, &groups, 2);
+			std::memcpy(entry.data() + 32, &group_mask, width);
+			bytes.insert(bytes.end(), entry.begin(), entry.end());
+		};
+		if (relationship == core || relationship == all)
+			for (long index = 0; index < std::min<long>(count, 64); ++index)
+				add(core, uint64_t(1) << index);
+		if (relationship == node || relationship == all)
+			add(node, mask);
+		if (relationship == package || relationship == all)
+			add(package, mask);
+		const uint32_t capacity = call[1] ? call.load<uint32_t>(call[2]) : 0;
+		call.store<uint32_t>(call[2], uint32_t(bytes.size()));
+		if (!call[1] || capacity < bytes.size()) {
+			call.fail(122);
+			return;
+		}
+		call.write(call[1], bytes);
+		call.ret(1);
+	});
+	registry.add("GetVersionExA", 1, [](ApiCall &call) {
+		const auto size = call.load<uint32_t>(call[0]);
+		if (size != 148 && size != 156) {
+			call.fail(122);
+			return;
+		}
+		std::vector<uint8_t> bytes(size);
+		const uint32_t fields[5] = {size, 10, 0, 19045, 2};
+		std::memcpy(bytes.data(), fields, 20);
+		if (size == 156)
+			bytes[154] = 1;
+		call.write(call[0], bytes);
+		call.ret(1);
+	});
+	// Windows 10 Pro (PRODUCT_PROFESSIONAL), whatever version the program asks about.
+	registry.add("GetProductInfo", 5, [](ApiCall &call) {
+		if (!call[4]) {
+			call.fail(87);
+			return;
+		}
+		call.store<uint32_t>(call[4], 0x30);
+		call.ret(1);
+	});
+	// One display scale: every monitor reports the standard 96 dots per inch.
+	registry.add("GetDpiForMonitor", 4, [](ApiCall &call) {
+		if (!call[2] || !call[3]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		call.store<uint32_t>(call[2], 96);
+		call.store<uint32_t>(call[3], 96);
+		call.ret(0);
 	});
 	registry.add("VerSetConditionMask", 3, [](ApiCall &call) {
 		uint64_t mask = call[0];
@@ -475,6 +572,36 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	};
 	auto variables = std::make_shared<Variables>();
 	variables->values = default_environment(paths);
+	// A program started by another one begins with the environment its parent chose.
+	if (context.launch.environment) {
+		variables->values.clear();
+		const auto &block = *context.launch.environment;
+		for (size_t at = 0; at < block.size();) {
+			const auto end = block.find(u'\0', at);
+			const auto entry = block.substr(at, end == block.npos ? block.npos : end - at);
+			if (entry.empty())
+				break;
+			// A name may begin with '=' (the per-drive directories), so the separator is looked for after the first character.
+			const auto equals = entry.find(u'=', 1);
+			if (equals != entry.npos) {
+				auto name = entry.substr(0, equals);
+				auto key = name;
+				for (auto &character : key)
+					character = upper_case(character);
+				variables->values[key] = {name, entry.substr(equals + 1)};
+			}
+			at = end == block.npos ? block.size() : end + 1;
+		}
+	}
+	context.environment_block = [variables]() {
+		std::u16string block;
+		for (const auto &[key, entry] : variables->values) {
+			block += entry.first + u"=" + entry.second;
+			block.push_back(u'\0');
+		}
+		block.push_back(u'\0');
+		return block;
+	};
 	const auto key_of = [](std::u16string name) {
 		for (auto &character : name)
 			character = upper_case(character);
@@ -493,7 +620,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("SetEnvironmentVariableW", 2, [variables, key_of](ApiCall &call) {
 		const auto name = call.wide(call[0]);
-		if (name.empty() || name.find(u'=') != name.npos) {
+		// A name may start with '=' (the per-drive current directories such as "=C:") but holds no other '='.
+		if (name.empty() || name.find(u'=', 1) != name.npos) {
 			call.fail(87);
 			return;
 		}
@@ -623,7 +751,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			mirror_clear(call, index);
 			call.ret(1);
 		});
-		registry.add(base + "GetValue", 1, [&environment, slots](ApiCall &call) {
+		const auto get_value = [&environment, slots](ApiCall &call) {
 			const auto index = size_t(call.u32(0));
 			if (index >= slots->used.size() || !slots->used[index]) {
 				call.fail(87);
@@ -632,7 +760,11 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			auto &values = slots->values[environment.teb()];
 			call.set_last_error(0);
 			call.ret(index < values.size() ? values[index] : 0);
-		});
+		};
+		registry.add(base + "GetValue", 1, get_value);
+		// Newer Windows builds publish the fiber-local read under a second name that the C runtime calls.
+		if (!is_tls)
+			registry.add("FlsGetValue2", 1, get_value);
 		registry.add(base + "SetValue", 2, [&environment, slots, mirror_set](ApiCall &call) {
 			const auto index = size_t(call.u32(0));
 			if (index >= slots->used.size() || !slots->used[index]) {

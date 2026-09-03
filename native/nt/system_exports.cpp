@@ -15,7 +15,7 @@ constexpr std::array<std::pair<std::string_view, uint16_t>, 6> comctl32_ordinals
 	{"DefSubclassProc", 413}, {"GetWindowSubclass", 411}, {"InitCommonControls", 17}, {"LoadIconWithScaleDown", 381},
 	{"RemoveWindowSubclass", 412}, {"SetWindowSubclass", 410},
 }};
-constexpr std::array<std::pair<std::string_view, uint16_t>, 1> shell32_ordinals{{{"SHCreateDirectory", 165}}};
+constexpr std::array<std::pair<std::string_view, uint16_t>, 2> shell32_ordinals{{{"IsUserAnAdmin", 680}, {"SHCreateDirectory", 165}}};
 constexpr std::array<std::pair<std::string_view, uint16_t>, 9> oleaut32_ordinals{{
 	{"SysAllocString", 2}, {"SysAllocStringLen", 4}, {"SysFreeString", 6}, {"SysReAllocString", 3}, {"SysReAllocStringLen", 5},
 	{"SysStringLen", 7}, {"VariantClear", 9}, {"VariantCopy", 10}, {"VariantInit", 8},
@@ -25,6 +25,14 @@ constexpr std::array<std::pair<std::string_view, uint16_t>, 28> ws2_32_ordinals{
 	{"getsockopt", 7}, {"htonl", 8}, {"htons", 9}, {"inet_addr", 11}, {"inet_ntoa", 12}, {"ioctlsocket", 10}, {"listen", 13},
 	{"ntohl", 14}, {"ntohs", 15}, {"recv", 16}, {"recvfrom", 17}, {"select", 18}, {"send", 19}, {"sendto", 20}, {"setsockopt", 21},
 	{"shutdown", 22}, {"socket", 23}, {"WSACleanup", 116}, {"WSAGetLastError", 111}, {"WSASetLastError", 112}, {"WSAStartup", 115},
+}};
+// The same sockets, plus the two extension calls that wsock32.dll alone publishes by number.
+constexpr std::array<std::pair<std::string_view, uint16_t>, 30> wsock32_ordinals{{
+	{"__WSAFDIsSet", 151}, {"accept", 1}, {"AcceptEx", 1141}, {"bind", 2}, {"closesocket", 3}, {"connect", 4}, {"GetAcceptExSockaddrs", 1142},
+	{"getpeername", 5}, {"getsockname", 6}, {"getsockopt", 7}, {"htonl", 8}, {"htons", 9}, {"inet_addr", 11}, {"inet_ntoa", 12},
+	{"ioctlsocket", 10}, {"listen", 13}, {"ntohl", 14}, {"ntohs", 15}, {"recv", 16}, {"recvfrom", 17}, {"select", 18}, {"send", 19},
+	{"sendto", 20}, {"setsockopt", 21}, {"shutdown", 22}, {"socket", 23}, {"WSACleanup", 116}, {"WSAGetLastError", 111},
+	{"WSASetLastError", 112}, {"WSAStartup", 115},
 }};
 constexpr std::array<std::pair<std::string_view, uint16_t>, 1> shlwapi_ordinals{{{"IUnknown_QueryService", 176}}};
 
@@ -50,6 +58,8 @@ std::span<const std::pair<std::string_view, uint16_t>> system_export_ordinals(st
 		return shlwapi_ordinals;
 	if (dll == "ws2_32.dll")
 		return ws2_32_ordinals;
+	if (dll == "wsock32.dll")
+		return wsock32_ordinals;
 	return {};
 }
 

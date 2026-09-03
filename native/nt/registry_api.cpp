@@ -102,6 +102,18 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 				put_handle(call, call[2], key);
 			call.ret(status);
 		});
+		registry.add("RegCreateKey" + suffix, 3, [&hive, text_of, put_handle, wide, view](ApiCall &call) {
+			if (!call[2]) {
+				call.ret(error_invalid_parameter);
+				return;
+			}
+			uint64_t key = 0;
+			uint32_t disposition = 0;
+			const auto status = hive.create(call[0], view(call[0], text_of(call, call[1], wide)), key, disposition);
+			if (!status)
+				put_handle(call, call[2], key);
+			call.ret(status);
+		});
 		registry.add("RegCreateKeyEx" + suffix, 9, [&hive, text_of, put_handle, wide, view](ApiCall &call) {
 			if (!call[7]) {
 				call.ret(error_invalid_parameter);

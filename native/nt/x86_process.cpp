@@ -363,14 +363,31 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	// What the graph imports from each system library by name. The runtime answers for all of it: a name that has a handler runs, a name that has
 	// none fails visibly when the program calls it, so a program loads whether or not every function it imports is implemented yet.
 	std::map<std::string, std::set<std::string>> imported_names;
+	std::map<std::string, std::vector<std::pair<std::string_view, uint16_t>>> unknown_ordinals;
+	std::set<std::string> unknown_names;
 	{
 		std::set<std::string> system_libraries(system_library_names().begin(), system_library_names().end());
 		system_libraries.insert("usp10.dll");
 		system_libraries.insert("ntdll.dll");
 		for (const auto &[module_name, module] : modules.all())
 			for (const auto &symbol : module->imports) {
-				if (symbol.by_ordinal)
+				if (symbol.by_ordinal) {
+					// A number with no name known for it still gets an export, so the program binds and the call it ends in names the number.
+					auto library = symbol.module;
+					for (auto &character : library)
+						if (character >= 'A' && character <= 'Z')
+							character = static_cast<char>(character + ('a' - 'A'));
+					if (library.find('.') == std::string::npos)
+						library += ".dll";
+					const auto known = system_export_ordinals(library);
+					if (system_libraries.contains(library) && !modules.all().contains(library) &&
+						std::none_of(known.begin(), known.end(), [&](const auto &item) { return item.second == symbol.ordinal; })) {
+						const auto name = "Ordinal" + std::to_string(symbol.ordinal);
+						imported_names[library].insert(name);
+						unknown_ordinals[library].emplace_back(*unknown_names.insert(name).first, symbol.ordinal);
+					}
 					continue;
+				}
 				auto library = symbol.module;
 				for (auto &character : library)
 					if (character >= 'A' && character <= 'Z')
@@ -487,9 +504,13 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		if (modules.all().contains(dll))
 			return;
 		const auto merged = with_imports(dll, exports);
-		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, merged, true, data, ordinals)).image_size;
+		const auto published_numbers = ordinals.empty() ? system_export_ordinals(dll) : ordinals;
+		std::vector<std::pair<std::string_view, uint16_t>> numbered(published_numbers.begin(), published_numbers.end());
+		if (const auto extra = unknown_ordinals.find(dll); extra != unknown_ordinals.end())
+			numbered.insert(numbered.end(), extra->second.begin(), extra->second.end());
+		const auto size = PEImage(runtime_provider(dll, 0x70000000ULL, merged, true, data, numbered)).image_size;
 		const auto base = provider_base(modules, size);
-		auto &provider = modules.add(dll, runtime_provider(dll, base, merged, true, data, ordinals), base);
+		auto &provider = modules.add(dll, runtime_provider(dll, base, merged, true, data, numbered), base);
 		provider.runtime_api = true;
 		overlay(provider, dll);
 		for (const auto &symbol : provider.exports) {
@@ -500,9 +521,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			if (!symbol.names.empty()) {
 				exported = symbol.names.front();
 			} else {
-				const auto found = std::find_if(ordinals.begin(), ordinals.end(), [&](const auto &item) { return item.second == symbol.ordinal; });
+				const auto found = std::find_if(numbered.begin(), numbered.end(), [&](const auto &item) { return item.second == symbol.ordinal; });
 				// A slot that no name and no listed ordinal claims is padding between ordinals.
-				if (found == ordinals.end() || !symbol.address)
+				if (found == numbered.end() || !symbol.address)
 					continue;
 				exported = found->first;
 			}
@@ -631,6 +652,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		add_library(library.c_str(), {}, {}, [](std::string_view name) { return registry_words(name) != UINT32_MAX ? registry_words(name) : uint32_t(0); },
 			system_export_ordinals(library));
 	}
+	alias_api_sets(modules);
 	modules.bind_imports();
 	std::vector<LoadedImage *> images;
 	for (const auto &[name, module] : modules.all())
@@ -685,6 +707,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call_guest;
 	NativeResources resources(process, environment, modules, entry);
 	NativeMemory memory(process, environment);
+	register_images(memory, modules);
 	// Declared first so that it outlives the threads, which release their blocks through it when they are torn down.
 	NativeX86Tls static_tls(process);
 	NativeThreads guest_threads(process, environment, memory, nullptr, deadline);
@@ -696,6 +719,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeX86Loader library_loader(process, environment, modules, paths,
 		[&](uint64_t address, std::span<const uint64_t> arguments) { return call_guest(address, arguments); });
 	library_loader.set_tls(&static_tls);
+	library_loader.set_mapped([&memory](PEModule &module) { register_image(memory, module); });
 	if (launch) {
 		const auto separator = launch->image_path.find_last_of(u'\\');
 		if (separator != std::u16string::npos)
@@ -774,6 +798,30 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 					for (const auto value : process.api_arguments(count))
 						std::cerr << ' ' << value;
 				std::cerr << std::dec << " )";
+				// RAVEN_TRACE_X86=2 also shows every argument that points at readable text, narrow or wide.
+				if (const char *level = getenv("RAVEN_TRACE_X86"); level && level[0] == '2' && count)
+					for (const auto value : process.api_arguments(count)) {
+						if (value < 0x10000 || value > 0x7fffffffULL)
+							continue;
+						try {
+							const auto bytes = process.read_memory(value, 120);
+							std::string text;
+							const bool wide = bytes[1] == 0 && bytes[0] >= 32 && bytes[0] < 127 && bytes[2] >= 32 && bytes[2] < 127 && bytes[3] == 0;
+							for (size_t at = 0; at < bytes.size(); at += wide ? 2 : 1) {
+								const auto character = bytes[at];
+								if (character == 0 && (!wide || bytes[at + 1] == 0))
+									break;
+								if (character < 32 || character > 126 || (wide && bytes[at + 1])) {
+									text.clear();
+									break;
+								}
+								text.push_back(char(character));
+							}
+							if (text.size() >= 3)
+								std::cerr << " <" << text << '>';
+						} catch (const std::runtime_error &) {
+						}
+					}
 				// Window classes and texts are what a diagnosis of a window needs most.
 				{
 					static const std::map<std::string_view, std::vector<size_t>> wide_strings{{"SetWindowTextW", {1}}, {"SetDlgItemTextW", {2}},
@@ -809,6 +857,23 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 					}
 				}
 				std::cerr << '\n';
+			}
+			if (api == "VerSetConditionMask" || api == "VerifyVersionInfoW") {
+				// The 64-bit condition mask is two words on the stack of a 32-bit program, and the handler takes it whole.
+				const bool set = api == "VerSetConditionMask";
+				const auto words = process.api_arguments(4);
+				const auto entry = shared_api.find(api);
+				if (!entry) {
+					std::cerr << "raven: unimplemented native x86 API " << api << '\n';
+					return result;
+				}
+				const uint64_t mask = (words[set ? 0 : 2] & 0xffffffffULL) | words[set ? 1 : 3] << 32;
+				ApiCall inner(process, environment, set ? std::vector<uint64_t>{mask, words[2], words[3]} : std::vector<uint64_t>{words[0], words[1], mask});
+				entry->second(inner);
+				process.return_api(inner.result);
+				budget = remaining();
+				result = process.resume(budget);
+				continue;
 			}
 			if (api == "SetFilePointerEx") {
 				// The 64-bit distance arrives as two words; the shared handler takes it whole.
@@ -890,7 +955,11 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				!shared_api.dispatch(process, environment, api, true) && !desktop.dispatch(api) && !windows.dispatch(api) && !profile.dispatch(api) &&
 				!crt.dispatch(api) && !unsupported_library(process, environment, api)) {
 				std::cerr << "raven: unimplemented native x86 API " << api << '\n';
-				return result;
+				// RAVEN_CONTINUE_UNIMPLEMENTED lists every missing function of a run: each call fails with ERROR_CALL_NOT_IMPLEMENTED instead.
+				if (!std::getenv("RAVEN_CONTINUE_UNIMPLEMENTED"))
+					return result;
+				environment.set_last_error(120);
+				process.return_api(0);
 			}
 			budget = remaining();
 			if (budget.count() <= 0)
@@ -962,9 +1031,11 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_platform_api(shared_api, kernel);
 	register_process_api(shared_api, kernel);
 	register_thread_api(shared_api, kernel);
+	register_sync_api(shared_api, kernel);
 	register_security_api(shared_api, kernel);
 	register_child_process_api(shared_api, kernel);
 	register_winsock_api(shared_api, kernel);
+	register_crypt32_api(shared_api, kernel);
 	// A 32-bit program runs under WOW64 on the 64-bit system Raven presents. File system redirection is not done (one System32 exists),
 	// so switching it off and back on changes nothing.
 	shared_api.add("IsWow64Process", 2, [](ApiCall &call) {

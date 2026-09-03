@@ -146,8 +146,45 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 	return {base,length};
 }
 
+void NativeMemory::add_image(uint64_t base, uint64_t size, std::span<const std::pair<std::pair<uint64_t,uint64_t>,uint32_t>> sections)
+{
+	images[base]=Image{size,std::vector<std::pair<std::pair<uint64_t,uint64_t>,uint32_t>>(sections.begin(),sections.end()),{}};
+}
+
+uint32_t NativeMemory::Image::access_of(uint64_t offset) const
+{
+	if (const auto found=pages.find(offset & ~uint64_t(4095)); found!=pages.end())
+		return found->second;
+	for (const auto &[range,access] : sections)
+		if (offset>=range.first && offset<range.first+range.second)
+			return access;
+	return 2;
+}
+
+std::map<uint64_t,NativeMemory::Image>::iterator NativeMemory::image_of(uint64_t address, uint64_t size)
+{
+	auto found=images.upper_bound(address);
+	if (found==images.begin())
+		return images.end();
+	--found;
+	if (address-found->first>found->second.size || size>found->second.size-(address-found->first))
+		return images.end();
+	return found;
+}
+
 NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_t access)
 {
+	if (const auto image=image_of(address,size); image!=images.end() && region(address & ~uint64_t(4095),1)==regions.end()) {
+		const auto permissions=protection(access);
+		if (permissions<0)
+			return {0,0,0xc0000045U};
+		const auto base=address & ~uint64_t(4095), length=(size+address-base+4095)&~uint64_t(4095);
+		const auto previous=image->second.access_of(base-image->first);
+		process.protect_image(base,length,permissions);
+		for (uint64_t page=base;page<base+length;page+=4096)
+			image->second.pages[page-image->first]=access;
+		return {base,length,0,previous};
+	}
 	if (!range(address,size,user_limit))
 		return {0,0,invalid};
 	const auto permissions=protection(access);
@@ -169,6 +206,24 @@ NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_
 
 std::optional<std::array<uint8_t,48>> NativeMemory::query(uint64_t address) const
 {
+	if (regions.upper_bound(address)==regions.begin() || [&]{ auto it=regions.upper_bound(address); --it; return address-it->first>=it->second.size; }()) {
+		auto found=images.upper_bound(address);
+		if (found!=images.begin()) {
+			--found;
+			if (address-found->first<found->second.size) {
+				const auto page=(address-found->first)&~uint64_t(4095);
+				const auto access=found->second.access_of(page);
+				uint64_t end=page+4096;
+				while (end<found->second.size && found->second.access_of(end)==access)
+					end+=4096;
+				std::array<uint8_t,48> bytes{};
+				put(bytes,0,found->first+page); put(bytes,8,found->first);
+				put(bytes,16,access,4); put(bytes,24,end-page);
+				put(bytes,32,0x1000,4); put(bytes,36,access,4); put(bytes,40,0x1000000,4);
+				return bytes;
+			}
+		}
+	}
 	auto found=regions.upper_bound(address);
 	if (found==regions.begin())
 		return std::nullopt;

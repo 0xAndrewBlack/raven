@@ -47,6 +47,7 @@ const Adapter adapters[] = {
 	{"ExpandEnvironmentStringsA", {0}, 1, 2},
 	{"GetDriveTypeA", {0}},
 	{"CreateMutexA", {2}},
+	{"CreateEventA", {3}},
 	{"CreateProcessA", {0, 1, 7}},
 	{"CreateSemaphoreA", {3}},
 	{"CreateFileMappingA", {5}},

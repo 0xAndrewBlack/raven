@@ -63,6 +63,8 @@ public:
 	// Host primitives; Windows reservation/commit and PAGE_* semantics belong above this boundary.
 	uint64_t map_memory(size_t size, int protection, uint64_t address = 0);
 	void protect_memory(uint64_t address, size_t size, int protection);
+	// The same for pages of a mapped program image, which the program may protect although it did not allocate them.
+	void protect_image(uint64_t address, size_t size, int protection);
 	void unmap_memory(uint64_t address);
 	// Maps a host-owned memfd into the guest at a fresh address; release it with unmap_memory.
 	uint64_t map_shared(int descriptor, size_t size);
@@ -114,6 +116,7 @@ public:
 	void return_api(uint64_t value);
 
 private:
+	void protect_range(uint64_t address, size_t size, int protection, bool image);
 	struct State;
 	std::unique_ptr<State> state;
 	void install_segment(uint32_t entry, uint64_t base);

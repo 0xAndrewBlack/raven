@@ -9,6 +9,8 @@
 #include <vector>
 #include <cstdlib>
 #include <sstream>
+#include <string>
+#include <sys/mman.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -82,6 +84,41 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 			arguments.push_back(word);
 	}
 	arguments.push_back("--stdio=inherit");
+	int inherited[2] = {-1, -1};
+	if (!launch.environment.empty()) {
+		// The block travels in an anonymous file the child reads once and closes.
+		const int file = ::memfd_create("raven-environment", 0);
+		if (file < 0) {
+			error = 8;
+			return nullptr;
+		}
+		const auto bytes = reinterpret_cast<const char *>(launch.environment.data());
+		const size_t size = launch.environment.size() * 2;
+		for (size_t done = 0; done < size;) {
+			const auto count = ::write(file, bytes + done, size - done);
+			if (count <= 0) {
+				::close(file);
+				error = 8;
+				return nullptr;
+			}
+			done += size_t(count);
+		}
+		::lseek(file, 0, SEEK_SET);
+		inherited[0] = file;
+		arguments.push_back("--environment-fd=" + std::to_string(file));
+	}
+	int gate_pair[2] = {-1, -1};
+	if (launch.suspended) {
+		if (::pipe2(gate_pair, O_CLOEXEC)) {
+			if (inherited[0] >= 0)
+				::close(inherited[0]);
+			error = 8;
+			return nullptr;
+		}
+		// Only the reading end goes to the child; the writing end stays with the parent.
+		::fcntl(gate_pair[0], F_SETFD, 0);
+		arguments.push_back("--suspended-fd=" + std::to_string(gate_pair[0]));
+	}
 	arguments.push_back("--command-line=" + to_utf8(launch.command_line));
 	arguments.push_back("--directory=" + to_utf8(launch.directory));
 	arguments.push_back(launch.image.string());
@@ -90,6 +127,12 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 		argv.push_back(argument.data());
 	argv.push_back(nullptr);
 
+	const auto release_extra = [&] {
+		if (inherited[0] >= 0)
+			::close(inherited[0]);
+		if (gate_pair[0] >= 0)
+			::close(gate_pair[0]);
+	};
 	posix_spawn_file_actions_t actions;
 	posix_spawn_file_actions_init(&actions);
 	// Duplicating onto a descriptor that still has to be read as a source would lose it: move every source out of the way first.
@@ -99,6 +142,9 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 		if (moved[index] < 0) {
 			for (int back = 0; back < index; ++back)
 				::close(moved[back]);
+			release_extra();
+			if (gate_pair[1] >= 0)
+				::close(gate_pair[1]);
 			posix_spawn_file_actions_destroy(&actions);
 			error = 6;
 			return nullptr;
@@ -120,10 +166,15 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 	posix_spawn_file_actions_destroy(&actions);
 	for (int index = 0; index < 3; ++index)
 		::close(moved[index]);
+	release_extra();
 	if (status) {
+		if (gate_pair[1] >= 0)
+			::close(gate_pair[1]);
 		error = status == ENOENT ? 2 : status == ENOMEM ? 8 : 5;
 		return nullptr;
 	}
+	if (launch.gate)
+		*launch.gate = gate_pair[1];
 	++live;
 	return std::make_shared<ProcessObject>(child);
 }

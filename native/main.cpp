@@ -22,6 +22,9 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <cerrno>
+#include <cstring>
+#include <unistd.h>
 #include <stdexcept>
 
 static std::vector<uint8_t> read_file(const char *path)
@@ -116,10 +119,13 @@ int main(int argc, char **argv)
 	}
 	// A program started by another one carries the command line and the directory its parent chose.
 	std::optional<std::string> command_line_text, directory_text;
+	int environment_fd=-1,suspended_fd=-1;
 	for (bool more=run_process;more && argc>first_file;) {
 		const std::string_view option=argv[first_file];
 		if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
 		else if (option.starts_with("--directory=")) directory_text=std::string(option.substr(12));
+		else if (option.starts_with("--environment-fd=")) environment_fd=std::atoi(std::string(option.substr(17)).c_str());
+		else if (option.starts_with("--suspended-fd=")) suspended_fd=std::atoi(std::string(option.substr(15)).c_str());
 		else more=false;
 		if (more) ++first_file;
 	}
@@ -213,7 +219,7 @@ int main(int argc, char **argv)
 								for (auto &character : name)
 									if (character >= 'A' && character <= 'Z')
 										character = static_cast<char>(character + ('a' - 'A'));
-								return name == "comctl32.dll" || name == "comctl32";
+								return name == "comctl32.dll" || name == "comctl32" || name == "user32.dll" || name == "user32";
 							});
 						});
 						if (imported && std::filesystem::exists(component))
@@ -265,7 +271,26 @@ int main(int argc, char **argv)
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
 						if (command_line_text) launch->command_line=raven::from_utf8(*command_line_text);
 						if (directory_text) launch->directory=raven::from_utf8(*directory_text);
+						if (environment_fd>=0) {
+							// The parent's environment block arrives in an anonymous file as UTF-16.
+							std::string bytes;
+							char chunk[4096];
+							for (ssize_t count;(count=::read(environment_fd,chunk,sizeof(chunk)))!=0;) {
+								if (count<0) { if (errno==EINTR) continue; break; }
+								bytes.append(chunk,size_t(count));
+							}
+							::close(environment_fd);
+							std::u16string block(bytes.size()/2,u'\0');
+							std::memcpy(block.data(),bytes.data(),block.size()*2);
+							launch->environment=std::move(block);
+						}
 						if (inherited_stdio) launch->standard_fds={0,1,2};
+					}
+					if (suspended_fd>=0) {
+						// Started suspended: nothing runs until the parent resumes the thread.
+						char open;
+						while (::read(suspended_fd,&open,1)<0 && errno==EINTR) {}
+						::close(suspended_fd);
 					}
 					if (!entry->image.is_64)
 						return native_result(raven::run_native_process_x86(modules, *entry, bootstrap.string(), timeout, launch, presentation, source),true,inherited_stdio);

@@ -150,6 +150,16 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	});
+	// There is no debugger to receive these messages, so they go nowhere, as on Windows without one.
+	registry.add("OutputDebugStringA", 1, [](ApiCall &) {});
+	registry.add("OutputDebugStringW", 1, [](ApiCall &) {});
+	// Handle flags (inherit, protect from close) are not kept: handles reach a child only as its standard handles.
+	registry.add("SetHandleInformation", 3, [](ApiCall &call) { call.ret(1); });
+	registry.add("GetHandleInformation", 2, [](ApiCall &call) {
+		if (call[1])
+			call.store<uint32_t>(call[1], 0);
+		call.ret(1);
+	});
 	// The search path for dependent libraries is not restricted by anything Raven resolves, so the request is accepted as it stands.
 	registry.add("SetDefaultDllDirectories", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("AddDllDirectory", 1, [](ApiCall &call) { call.ret(1); });

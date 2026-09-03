@@ -39,6 +39,8 @@ bool NativeObjectAPI::dispatch(std::string_view name)
 	if (file_io(name)) return true;
 	const bool nt=name.starts_with("Nt");
 	const bool create=name=="NtCreateEvent" || name=="CreateEventA" || name=="CreateEventW";
+	// An event with a name, whether made or opened, is a shared object that the registry handlers keep.
+	if (!nt && create && process.api_arguments(4)[3]) return false;
 	const bool close=name=="NtClose" || name=="CloseHandle" || name=="_lclose";
 	const bool set=name=="NtSetEvent" || name=="SetEvent" || name=="NtResetEvent" || name=="ResetEvent";
 	const bool query=name=="NtQueryEvent";
@@ -53,7 +55,7 @@ bool NativeObjectAPI::dispatch(std::string_view name)
 	try {
 		if (create) {
 			if (nt) writable(args[0],8);
-			if ((nt && args[2]) || (!nt && (args[0] || args[3]))) status=0xc00000bbU;
+			if (nt && args[2]) status=0xc00000bbU;
 			else {
 				const auto made=objects.create_event(nt ? uint32_t(args[1]) : 0x1f0003,
 					nt ? uint32_t(args[3]) : uint32_t(args[1]) ? 0 : 1,nt ? uint8_t(args[4])!=0 : uint32_t(args[2])!=0);

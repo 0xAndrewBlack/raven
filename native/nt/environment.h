@@ -27,6 +27,8 @@ struct NativeLaunch {
 	std::array<int,3> standard_fds{-1,-1,-1};
 	// The current directory the program starts in; empty for the default.
 	std::u16string directory;
+	// The environment the program starts with, as "NAME=VALUE" entries each ended by a zero; absent for the default one.
+	std::optional<std::u16string> environment;
 };
 
 // Initial x64 thread fields only. Mappings belong to the process and survive this view.

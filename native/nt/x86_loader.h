@@ -29,6 +29,8 @@ public:
 	// Where the program lives, in the guest's spelling: a library named without a path is looked for there first.
 	// Images with static thread local storage register there when they are mapped.
 	void set_tls(NativeX86Tls *value) { tls = value; }
+	// Called with each library once it is mapped, so memory services know its pages.
+	void set_mapped(std::function<void(PEModule &)> hook) { mapped_hook = std::move(hook); }
 	void set_application_directory(std::u16string directory) { application_directory = std::move(directory); }
 
 private:
@@ -47,6 +49,7 @@ private:
 	std::optional<std::string> path_key(const std::string &name) const;
 	std::u16string application_directory;
 	NativeX86Tls *tls = nullptr;
+	std::function<void(PEModule &)> mapped_hook;
 	PEModule *bring(const std::string &name);
 	std::optional<std::vector<uint8_t>> read_library(const std::string &name, std::string &identity) const;
 };

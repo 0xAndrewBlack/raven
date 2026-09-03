@@ -1,3 +1,4 @@
+#include "child_process.h"
 #include "kernel_context.h"
 #include "text.h"
 
@@ -279,7 +280,12 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(uint32_t(thread->suspend_count++));
 	});
-	registry.add("ResumeThread", 1, [thread_from](ApiCall &call) {
+	registry.add("ResumeThread", 1, [thread_from, &objects](ApiCall &call) {
+		// The main thread of a child that was started suspended runs when this opens its gate.
+		if (const auto child = objects.object_as<ChildThreadObject>(call[0])) {
+			call.ret(child->resume());
+			return;
+		}
 		const auto thread = thread_from(call[0]);
 		if (!thread) {
 			call.fail(6, UINT32_MAX);
@@ -337,6 +343,30 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 
+	// Named events are one object per name inside the process; sharing them with other processes is not done yet.
+	registry.add("CreateEventW", 4, [&objects](ApiCall &call) {
+		bool existed = false;
+		const auto made = call[3] ? objects.create_named_event(call.wide(call[3], 259), 0x1f0003, call.u32(1) ? 0 : 1, call.u32(2) != 0, existed)
+			: objects.create_event(0x1f0003, call.u32(1) ? 0 : 1, call.u32(2) != 0);
+		if (made.status) {
+			call.fail(made.status == 0xc000009aU ? 4 : 87, 0);
+			return;
+		}
+		call.set_last_error(existed ? 183 : 0);
+		call.ret(made.value);
+	});
+	registry.add("OpenEventW", 3, [&objects](ApiCall &call) {
+		if (!call[2]) {
+			call.fail(87, 0);
+			return;
+		}
+		const auto made = objects.open_named_event(call.wide(call[2], 259), 0x1f0003);
+		if (made.status) {
+			call.fail(made.status == 0xc0000034U ? 2 : 87, 0);
+			return;
+		}
+		call.ret(made.value);
+	});
 	// The interlocked operations act on one 32-bit word of the guest. Guest threads take turns, so the host needs no atomics of its own.
 	registry.add("InterlockedIncrement", 1, [](ApiCall &call) {
 		const auto value = call.load<int32_t>(call[0]) + 1;

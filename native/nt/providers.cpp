@@ -384,6 +384,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		for (const auto &symbol : modules.all().at("vulkan-1.dll")->exports)
 			traps.emplace(modules.all().at("vulkan-1.dll")->loaded.base() + symbol.address, symbol.names.at(0));
 #endif
+	alias_api_sets(modules);
 	modules.bind_imports();
 	auto order = initialization_order(modules, entry);
 	// The user32 component registers the built-in classes in its DllMain, before any library that subclasses them.
@@ -427,6 +428,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativeResources resources(process, environment, modules, entry);
 	NativeMemory memory(process,environment);
+	register_images(memory,modules);
 	NativeObjectAPI object_api(process,environment,kernel_objects,deadline);
 	NativeHeap heap(process,environment,modules,entry.image);
 	DesktopObjects desktop_objects;
@@ -561,6 +563,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				for (const auto value : process.api_arguments(width ? std::clamp(std::atoi(width), 1, 12) : 4))
 					std::cerr << ' ' << value;
 				std::cerr << std::dec << " )";
+				if (std::getenv("RAVEN_TRACE_STRINGS"))
+					for (const auto value : process.api_arguments(4))
+						if (const auto text = describe_text(process, value); !text.empty())
+							std::cerr << " <" << text << '>';
 				// The caller shows which guest module and offset asked, which is what a diagnosis needs most.
 				const auto stack = process.read_memory(process.context().registers.rsp, 8);
 				uint64_t caller = 0;
@@ -621,7 +627,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			}
 			if (!dispatched) {
 				std::cerr << "raven: unimplemented native API " << found->second << '\n';
-				return result;
+				// RAVEN_CONTINUE_UNIMPLEMENTED lists every missing function of a run: each call fails with ERROR_CALL_NOT_IMPLEMENTED instead.
+				if (!std::getenv("RAVEN_CONTINUE_UNIMPLEMENTED"))
+					return result;
+				environment.set_last_error(120);
+				process.return_api(0);
+				budget = remaining();
+				result = process.resume(budget);
+				continue;
 			}
 			if (tracing)
 				std::cerr << "  -> " << std::hex << process.result_register() << std::dec << " (error " << environment.last_error() << ")\n";
@@ -692,6 +705,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_security_api(api_registry, kernel);
 	register_child_process_api(api_registry, kernel);
 	register_winsock_api(api_registry, kernel);
+	register_crypt32_api(api_registry, kernel);
 	register_sync_api(api_registry, kernel);
 	register_thread_api(api_registry, kernel);
 	register_text_api(api_registry, kernel);
@@ -794,11 +808,23 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			name += ".dll";
 		if (const auto host = apiset_host(name); !host.empty())
 			name = host;
+		const auto existing = modules.all().find(name);
+		// A library that is already in the process can be named while another one starts (its initialization often asks for
+		// kernel32): only a library that has to be brought in waits for the first load to finish.
+		if (loading && existing != modules.all().end()) {
+			if (const auto counted = references.find(existing->second.get()); counted != references.end() && counted->second > 0) {
+				++counted->second;
+				return existing->second->loaded.base();
+			}
+			if (existing->second->runtime_api && references.contains(existing->second.get())) {
+				++references.at(existing->second.get());
+				return existing->second->loaded.base();
+			}
+		}
 		if (loading) {
 			environment.set_last_error(120);
 			return 0;
 		}
-		const auto existing = modules.all().find(name);
 		if (existing != modules.all().end()) {
 			auto &count = references.at(existing->second.get());
 			if (count == UINT64_MAX)
@@ -823,7 +849,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				if (item->listed)
 					loader_data.remove(*item->module);
 				if (item->mapped)
-					process.unmap_image(item->module->loaded.base());
+					{ memory.remove_image(item->module->loaded.base()); process.unmap_image(item->module->loaded.base()); }
 				references.erase(item->module);
 				modules.remove(*item->module);
 			}
@@ -846,8 +872,11 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				return *found->second;
 			if (modules.all().size() >= 10000)
 				throw std::runtime_error("native DLL graph exceeds module limit");
-			if (!source || identity.find_first_of("/\\:") != std::string::npos)
+			if (!source || identity.find_first_of("/\\:") != std::string::npos) {
+				if (std::getenv("RAVEN_TRACE_API"))
+					std::cerr << "raven: library not loadable by path: " << identity << '\n';
 				throw LoadFailure{126};
+			}
 			std::optional<std::vector<uint8_t>> bytes;
 			if (const auto explicit_file = explicit_files.find(identity); explicit_file != explicit_files.end()) {
 				std::ifstream stream(explicit_file->second, std::ios::binary);
@@ -855,8 +884,11 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			} else {
 				bytes = source(identity);
 			}
-			if (!bytes)
+			if (!bytes) {
+				if (std::getenv("RAVEN_TRACE_API"))
+					std::cerr << "raven: library file not found: " << identity << '\n';
 				throw LoadFailure{126};
+			}
 			// Reject unsupported initialization before publishing an image.
 			const PEImage image(*bytes);
 			if (!image.is_64)
@@ -889,8 +921,11 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 							const std::string_view message = error.what();
 							if (message.starts_with("missing PE module: "))
 								acquire(std::string(message.substr(19)));
-							else if (message.starts_with("missing PE export: "))
+							else if (message.starts_with("missing PE export: ")) {
+								if (std::getenv("RAVEN_TRACE_API"))
+									std::cerr << "raven: cannot load " << name << ": " << staged[index].module->name << " imports " << message << '\n';
 								throw LoadFailure{127};
+							}
 							else
 								throw;
 						}
@@ -901,6 +936,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			const auto dynamic_order = initialization_order(modules, entry);
 			for (auto &item : staged) {
 				process.map_image(item.module->loaded);
+				register_image(memory, *item.module);
 				item.mapped = true;
 				loader_data.add(*item.module);
 				item.listed = true;
@@ -981,6 +1017,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		for (const auto *module : released) {
 			tls.remove(*module);
 			loader_data.remove(*module);
+			memory.remove_image(module->loaded.base());
 			process.unmap_image(module->loaded.base());
 			references.erase(module);
 			modules.remove(*module);

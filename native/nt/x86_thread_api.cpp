@@ -8,9 +8,9 @@ namespace raven {
 
 namespace {
 
-constexpr std::array<std::pair<std::string_view, uint32_t>, 13> thread_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 15> thread_exports{{
 	{"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitThread", 1}, {"GetExitCodeThread", 2},
-	{"InitializeCriticalSection", 1}, {"LeaveCriticalSection", 1}, {"ResumeThread", 1}, {"SetThreadPriority", 2},
+	{"InitializeCriticalSection", 1}, {"InitializeCriticalSectionAndSpinCount", 2}, {"InitializeCriticalSectionEx", 3}, {"LeaveCriticalSection", 1}, {"ResumeThread", 1}, {"SetThreadPriority", 2},
 	{"Sleep", 1}, {"SwitchToThread", 0}, {"TryEnterCriticalSection", 1}, {"WaitForSingleObject", 2},
 }};
 
@@ -127,6 +127,10 @@ bool NativeX86Threads::dispatch(std::string_view name)
 	} else if (name == "InitializeCriticalSection" || name == "DeleteCriticalSection") {
 		sections.erase(args[0]);
 		process.return_api(0);
+	} else if (name == "InitializeCriticalSectionAndSpinCount" || name == "InitializeCriticalSectionEx") {
+		// Spinning is a hint and the flags only tune allocation: the section is the same, and these forms report success.
+		sections.erase(args[0]);
+		process.return_api(1);
 	} else if (name == "EnterCriticalSection" || name == "TryEnterCriticalSection") {
 		const uint32_t id = threads.current_id();
 		auto &section = sections[args[0]];
