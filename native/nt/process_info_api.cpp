@@ -581,8 +581,42 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("Module32NextW", 2, [module_step](ApiCall &call) { module_step(call, false, true); });
 	registry.add("Module32First", 2, [module_step](ApiCall &call) { module_step(call, true, false); });
 	registry.add("Module32Next", 2, [module_step](ApiCall &call) { module_step(call, false, false); });
+	// The path of a module in this process is the one GetModuleFileName reports; other processes do not expose their modules.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "GetModuleFileNameExW" : "GetModuleFileNameExA", 4, [&registry, is_self, wide](ApiCall &call) {
+			if (!is_self(call[0])) {
+				call.fail(5);
+				return;
+			}
+			const auto entry = registry.find(wide ? "GetModuleFileNameW" : "GetModuleFileNameA");
+			if (!entry) {
+				call.fail(5);
+				return;
+			}
+			ApiCall module_call(call.process, call.environment, {call[1], call[2], call[3]});
+			entry->second(module_call);
+			call.ret(module_call.result);
+		});
+	// Every page the guest can address is resident: the host does not page guest memory out behind its back.
+	registry.add("QueryWorkingSetEx", 3, [is_self](ApiCall &call) {
+		if (!is_self(call[0])) {
+			call.fail(5);
+			return;
+		}
+		const size_t width = call.pointer_width(), count = call.u32(2) / (width * 2);
+		for (size_t index = 0; index < count; ++index) {
+			const uint64_t entry = call[1] + index * width * 2;
+			const uint64_t attributes = 1 | (1ULL << 1 << 4) | (1ULL << 15);
+			if (width == 4)
+				call.store<uint32_t>(entry + 4, uint32_t(attributes));
+			else
+				call.store<uint64_t>(entry + 8, attributes);
+		}
+		call.ret(1);
+	});
 	// kernel32 publishes the psapi functions a second time under a K32 prefix, which is what newer programs import.
-	for (const char *name : {"EnumProcessModules", "EnumProcessModulesEx", "GetModuleBaseNameA", "GetModuleBaseNameW", "GetModuleInformation", "GetProcessMemoryInfo"})
+	for (const char *name : {"EnumProcessModules", "EnumProcessModulesEx", "GetModuleBaseNameA", "GetModuleBaseNameW", "GetModuleInformation", "GetProcessMemoryInfo",
+		"GetModuleFileNameExW", "GetModuleFileNameExA", "QueryWorkingSetEx"})
 		if (const auto entry = registry.find(name))
 			registry.add(std::string("K32") + name, entry->first, entry->second);
 }

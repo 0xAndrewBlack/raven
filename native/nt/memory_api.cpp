@@ -51,7 +51,17 @@ std::string upper_utf8(const std::u16string &name)
 int open_named_section(const std::u16string &name, uint64_t size, bool create, bool &existed, std::string &path, uint32_t &error)
 {
 	existed = false;
-	path = (section_directory() / hex_text(name_hash(upper_utf8(name)))).string();
+	const auto directory = section_directory();
+	path = (directory / hex_text(name_hash(upper_utf8(name)))).string();
+	// Opening and creating take the directory's lock, as SharedFile does: the change of a creator's lock from exclusive to shared
+	// would otherwise let another process find the section unheld and truncate it.
+	const int guard = lock_directory(directory);
+	struct Release {
+		int descriptor;
+		~Release() { if (descriptor >= 0) ::close(descriptor); }
+	} release{guard};
+	static std::once_flag swept;
+	std::call_once(swept, [&] { sweep_directory(directory); });
 	const int descriptor = ::open(path.c_str(), (create ? O_CREAT : 0) | O_RDWR | O_CLOEXEC, 0600);
 	if (descriptor < 0) {
 		error = errno == ENOENT ? 2 : 5;
@@ -175,9 +185,10 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 			}
 			struct stat metadata{};
 			::fstat(mapping->file->descriptor, &metadata);
-			mapping->size = (uint64_t(call.u32(4)) << 32 | call.u32(3)) ? (uint64_t(call.u32(4)) << 32 | call.u32(3)) : uint64_t(metadata.st_size);
+			const uint64_t maximum = uint64_t(call.u32(3)) << 32 | call.u32(4);
+			mapping->size = maximum ? maximum : uint64_t(metadata.st_size);
 		} else {
-			mapping->size = uint64_t(call.u32(4)) << 32 | call.u32(3);
+			mapping->size = uint64_t(call.u32(3)) << 32 | call.u32(4);
 			if (!mapping->size) {
 				call.fail(87);
 				return;

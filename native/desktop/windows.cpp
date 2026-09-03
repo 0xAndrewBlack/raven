@@ -126,14 +126,10 @@ std::optional<HostSurface> NativeWindows::host_surface(uint64_t handle)
 	try { present(root); } catch (...) { return std::nullopt; }
 	top=objects.window(root);
 	if (!top) return std::nullopt;
-	// The client origin sits inside the frame the host window shows; a child adds its offsets within its parents.
-	int32_t x=top->x-top->outer.left,y=top->y-top->outer.top;
-	for (auto node=handle; node!=root;) {
-		const auto *window=objects.window(node);
-		if (!window) return std::nullopt;
-		x+=window->x; y+=window->y; node=window->parent;
-	}
+	// Window positions are on the screen, children's included, so the client origin inside the frame the host window shows is the
+	// window's position less the frame's.
 	const auto *window=objects.window(handle);
+	const int32_t x=window->x-top->outer.left,y=window->y-top->outer.top;
 	const auto surface=presentation.host_surface(root,x,y,uint32_t(std::max(window->width,1)),uint32_t(std::max(window->height,1)));
 	if (surface) hosting_surface.insert(root);
 	return surface;
@@ -208,8 +204,75 @@ bool NativeWindows::input_pending(uint32_t thread)
 	return false;
 }
 
+uint64_t NativeWindows::foreign_dc(uint64_t handle)
+{
+	const auto size=foreign_window_size(handle);
+	if (!size) throw uint32_t(1400);
+	auto &target=foreign_targets[handle];
+	if (!target.surface || target.surface->width!=size->first || target.surface->height!=size->second) {
+		if (target.bitmap) {
+			if (const auto *bitmap=objects.bitmap(target.bitmap); bitmap && bitmap->address) process.unmap_memory(bitmap->address);
+			objects.erase(target.bitmap);
+			target.bitmap=0;
+		}
+		target.surface=ForeignSurface::open_for_drawing(handle,size->first,size->second);
+		if (!target.surface) throw uint32_t(8);
+		const auto &pixels=*target.surface->pixels;
+		const auto address=process.map_shared(pixels.descriptor(),pixels.size(),pixels.offset());
+		DesktopBitmap record{size->first,size->second,32,{},address,true,false,true,target.surface->pixels};
+		record.stride=size->first*4;
+		target.bitmap=objects.add(std::move(record));
+		if (!target.bitmap) { process.unmap_memory(address); throw uint32_t(8); }
+	}
+	DesktopDC device{target.bitmap,target.bitmap,0};
+	device.leased=true; device.foreign=handle;
+	const auto dc=objects.add(device);
+	if (!dc) throw uint32_t(8);
+	return dc;
+}
+
+void NativeWindows::import_foreign_frames()
+{
+	// New frames are looked for at most every 8 ms; a window whose root was drawn over since is given its last frame again, since the
+	// owner's painting of the parent does not leave out the area another process draws.
+	const auto now=std::chrono::steady_clock::now();
+	const bool poll=now-foreign_checked>=std::chrono::milliseconds(8);
+	if (poll) foreign_checked=now;
+	if (!poll && dirty_roots.empty()) return;
+	for (const auto handle : objects.window_handles()) {
+		if (handle<window_handle_base() || handle>window_handle_base()+0xffff) continue;
+		const auto known=foreign_frames.find(handle);
+		const bool redraw=known!=foreign_frames.end() && known->second && dirty_roots.contains(objects.window_root(handle));
+		if (!poll && !redraw) continue;
+		auto &seen=foreign_frames[handle];
+		if (redraw) seen=0;
+		take_foreign_frame(handle,seen,[&](const uint8_t *pixels,uint32_t width,uint32_t height) {
+			const auto root=objects.window_root(handle);
+			if (!root) return;
+			surface_dc(root);
+			const auto *top=objects.window(root);
+			const auto *window=objects.window(handle);
+			const auto *bitmap=top ? objects.bitmap(top->bitmap) : nullptr;
+			if (!window || !bitmap || !bitmap->shared) return;
+			// The client origin inside the root's surface: window positions are on the screen, children's included.
+			const int64_t x=int64_t(window->x)-top->outer.left,y=int64_t(window->y)-top->outer.top;
+			const auto stride=size_t(bitmap->width)*4;
+			auto target=bitmap->shared->data();
+			const auto columns=std::min<int64_t>({int64_t(width),int64_t(window->width),int64_t(bitmap->width)-x});
+			for (int64_t row=0; row<int64_t(height) && row<window->height && y+row<int64_t(bitmap->height); ++row) {
+				if (y+row<0 || x<0 || columns<=0) continue;
+				auto *line=target+size_t(y+row)*stride+size_t(x)*4;
+				std::memcpy(line,pixels+size_t(row)*width*4,size_t(columns)*4);
+				for (int64_t column=0; column<columns; ++column) line[column*4+3]=0xff;
+			}
+			dirty_roots.insert(root);
+		});
+	}
+}
+
 void NativeWindows::flush_dirty()
 {
+	import_foreign_frames();
 	const auto roots=std::move(dirty_roots);
 	dirty_roots.clear();
 	if (!presentation.present) return;
@@ -734,6 +797,7 @@ bool NativeWindows::destroy(uint64_t handle)
 	for (const auto owned:objects.window_handles())
 		if (objects.is_child(handle,owned) && objects.window(owned)->destroying) throw uint32_t(120);
 	window->destroying=true;window->visible=false;window->style&=~0x10000000U;
+	withdraw_window(handle);
 	if (active==handle) activate(0);
 	if (focus==handle || objects.is_child(handle,focus)) set_focus(0);
 	parent_notify(handle,2);
@@ -1010,6 +1074,7 @@ uint64_t NativeWindows::create(std::span<const uint64_t> args)
 		if (!objects.window(handle)) throw uint32_t(1400);
 		if (child) parent_notify(handle,1);
 		if (!objects.window(handle)) return 0;
+		if (const auto *created=objects.window(handle)) publish_window(handle,uint32_t(std::max(created->width,0)),uint32_t(std::max(created->height,0)));
 		if (effective_style & 0x10000000U) {
 			auto *window=objects.window(handle);window->visible=true;objects.update_window_dcs(child ? window->parent : handle);
 			if (objects.window_visible(handle)) present(handle);
@@ -1223,6 +1288,7 @@ bool NativeWindows::dispatch(std::string_view name)
 		else if (name=="GetDC" || name=="GetWindowDC") {
 			// A null window selects the screen, which is the desktop window's surface.
 			const auto target=args[0] ? args[0] : desktop_window();
+			if (!objects.window(target)) { result=foreign_dc(target); process.return_api(result); return true; }
 			surface_dc(target);
 			const auto *window=objects.window(target);
 			DesktopDC device{window->bitmap,window->bitmap,target}; device.leased=true;
@@ -1255,6 +1321,11 @@ bool NativeWindows::dispatch(std::string_view name)
 			const auto owner=args[0] ? args[0] : desktop_window();
 			const auto *window=objects.window(owner);
 			const auto *device=objects.dc(args[1]);
+			// Releasing the context of another process's window hands the frame drawn into it to that process.
+			if (!window && device && device->foreign==owner) {
+				if (const auto found=foreign_targets.find(owner); found!=foreign_targets.end() && found->second.surface) found->second.surface->publish_frame();
+				result=objects.erase(args[1]);
+			}
 			if (window) {
 				if (!device || !device->leased || device->window!=owner) throw uint32_t(1400);
 				result=objects.erase(args[1]);

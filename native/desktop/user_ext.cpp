@@ -815,7 +815,12 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 	registry.add("GetDCEx", 3, [this](ApiCall &call) {
 		const auto target = call[0] ? call[0] : desktop_window();
 		if (!objects.window(target)) {
-			call.fail(1400);
+			// A window of another process: a context over the pixels shared with it.
+			try {
+				call.ret(foreign_dc(target));
+			} catch (uint32_t error) {
+				call.fail(error);
+			}
 			return;
 		}
 		// Device contexts are always window-relative and clipped to the window; region flags narrow them further.

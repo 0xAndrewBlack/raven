@@ -121,6 +121,7 @@ void NativeWindows::register_api(ApiRegistry &registry)
 	registry.add("GetDoubleClickTime", 0, [](ApiCall &call) { call.ret(500); });
 	registry.add("GetCaretBlinkTime", 0, [](ApiCall &call) { call.ret(530); });
 	registry.add("GetKeyboardLayout", 1, [](ApiCall &call) { call.ret(0x04090409); });
+	registry.add("GetMessageExtraInfo", 0, [](ApiCall &call) { call.ret(0); });
 	registry.add("GetMessageTime", 0, [](ApiCall &call) {
 		call.ret(uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()));
 	});

@@ -1,3 +1,4 @@
+#include "elevation.h"
 #include "child_process.h"
 #include "kernel_context.h"
 #include "text.h"
@@ -272,7 +273,9 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 				}
 			}
 		}
-		size_t bytes = arguments.size() * 8 + 8;
+		// The pointer array has the width of the caller's pointers, then the strings follow it in the same block.
+		const size_t width = call.pointer_width();
+		size_t bytes = arguments.size() * width + width;
 		for (const auto &argument : arguments)
 			bytes += (argument.size() + 1) * 2;
 		const auto block = context.allocator.allocate(bytes);
@@ -280,13 +283,13 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(8);
 			return;
 		}
-		uint64_t cursor = block + arguments.size() * 8 + 8;
+		uint64_t cursor = block + arguments.size() * width + width;
 		for (size_t index = 0; index < arguments.size(); ++index) {
-			call.store<uint64_t>(block + index * 8, cursor);
+			call.store_pointer(block + index * width, cursor);
 			call.put_wide(cursor, arguments[index], arguments[index].size() + 1);
 			cursor += (arguments[index].size() + 1) * 2;
 		}
-		call.store<uint64_t>(block + arguments.size() * 8, 0);
+		call.store_pointer(block + arguments.size() * width, 0);
 		if (call[1]) call.store<int32_t>(call[1], int32_t(arguments.size()));
 		call.ret(block);
 	});
@@ -300,9 +303,9 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 	// The program runs as the host account, which holds administrator rights only when it is root.
 	// The application identity only groups taskbar buttons; there is no taskbar to group them on.
 	registry.add("SetCurrentProcessExplicitAppUserModelID", 1, [](ApiCall &call) { call.ret(0); });
-	// The account of a prefix is an administrator whose programs run without elevation, so the check answers no as it does under
-	// User Account Control; Raven does not stand for the privileges of the host account.
-	registry.add("IsUserAnAdmin", 0, [](ApiCall &call) { call.ret(0); });
+	// The account of a prefix is an administrator under User Account Control: the check answers yes only in an elevated process.
+	// Raven does not stand for the privileges of the host account.
+	registry.add("IsUserAnAdmin", 0, [](ApiCall &call) { call.ret(process_elevated() ? 1 : 0); });
 	registry.add("DragQueryFileW", 4, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragQueryPoint", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragFinish", 1, [](ApiCall &) {});

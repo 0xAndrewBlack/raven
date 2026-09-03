@@ -245,7 +245,180 @@ void register_service_api(ApiRegistry &registry, KernelContext &context, NativeR
 		call.write(call[2], bytes);
 		call.ret(1);
 	});
-	registry.add("QueryServiceConfigW", 4, [](ApiCall &call) { call.fail(120); });
+	// QUERY_SERVICE_CONFIG: type, start, error control, then the path, group, tag, dependencies, account and display name, with the
+	// strings after the structure. A service with no account runs as LocalSystem.
+	const auto query_config = [&objects, with_key, &hive](ApiCall &call, bool wide) {
+		const auto service = objects.object_as<ServiceHandle>(call[0]);
+		if (!service) {
+			call.fail(6);
+			return;
+		}
+		uint32_t numbers[3] = {0x10, 3, 1};
+		std::u16string path, account = u"LocalSystem", display = service->name;
+		const bool found = with_key(service->name, false, [&](uint64_t key) {
+			const char16_t *names[] = {u"Type", u"Start", u"ErrorControl"};
+			for (size_t index = 0; index < 3; ++index) {
+				uint32_t type = 0;
+				std::vector<uint8_t> data;
+				if (!hive.query(key, names[index], type, data) && data.size() >= 4)
+					std::memcpy(&numbers[index], data.data(), 4);
+			}
+			const auto text = [&](const char16_t *name, std::u16string &out) {
+				uint32_t type = 0;
+				std::vector<uint8_t> data;
+				if (hive.query(key, name, type, data) || data.size() < 2)
+					return;
+				out.assign(reinterpret_cast<const char16_t *>(data.data()), data.size() / 2);
+				while (!out.empty() && !out.back())
+					out.pop_back();
+			};
+			text(u"ImagePath", path);
+			text(u"ObjectName", account);
+			text(u"DisplayName", display);
+		});
+		if (!found) {
+			call.fail(error_service_does_not_exist);
+			return;
+		}
+		const size_t width = call.pointer_width(), unit = wide ? 2 : 1;
+		const size_t head = width == 8 ? 64 : 36;
+		const std::u16string strings[] = {path, u"", u"", account, display};
+		size_t needed = head;
+		for (const auto &item : strings)
+			needed += (item.size() + 1 + (item.empty() ? 1 : 0)) * unit;
+		if (call[3])
+			call.store<uint32_t>(call[3], uint32_t(needed));
+		if (!call[1] || call.u32(2) < needed) {
+			call.fail(122);
+			return;
+		}
+		std::vector<uint8_t> bytes(needed, 0);
+		std::memcpy(bytes.data(), numbers, 12);
+		// Pointer slots: path, group, dependencies, account, display; the tag word sits between group and dependencies.
+		const size_t slots[] = {width == 8 ? 16u : 12u, width == 8 ? 24u : 16u, width == 8 ? 40u : 24u, width == 8 ? 48u : 28u, width == 8 ? 56u : 32u};
+		size_t at = head;
+		for (size_t index = 0; index < 5; ++index) {
+			const uint64_t address = call[1] + at;
+			std::memcpy(bytes.data() + slots[index], &address, width);
+			if (wide) {
+				std::memcpy(bytes.data() + at, strings[index].data(), strings[index].size() * 2);
+				at += (strings[index].size() + 1 + (strings[index].empty() ? 1 : 0)) * 2;
+			} else {
+				const auto narrow = to_utf8(strings[index]);
+				std::memcpy(bytes.data() + at, narrow.data(), narrow.size());
+				at += narrow.size() + 1 + (strings[index].empty() ? 1 : 0);
+			}
+		}
+		call.write(call[1], bytes);
+		call.ret(1);
+	};
+	registry.add("QueryServiceConfigW", 4, [query_config](ApiCall &call) { query_config(call, true); });
+	registry.add("QueryServiceConfigA", 4, [query_config](ApiCall &call) { query_config(call, false); });
+	// SERVICE_CONFIG_DESCRIPTION keeps the description; the other optional settings (failure actions, delayed start and the like)
+	// are accepted and have no effect here.
+	const auto change_config2 = [&objects, with_key, set_text](ApiCall &call, bool wide) {
+		const auto service = objects.object_as<ServiceHandle>(call[0]);
+		if (!service) {
+			call.fail(6);
+			return;
+		}
+		if (call.u32(1) == 1 && call[2]) {
+			const uint64_t text = call.load_pointer(call[2]);
+			if (text)
+				with_key(service->name, true, [&](uint64_t key) {
+					set_text(key, u"Description", wide ? call.wide(text, 4096) : from_utf8(call.narrow(text, 4096)), 1);
+				});
+		}
+		call.ret(1);
+	};
+	registry.add("ChangeServiceConfig2W", 3, [change_config2](ApiCall &call) { change_config2(call, true); });
+	registry.add("ChangeServiceConfig2A", 3, [change_config2](ApiCall &call) { change_config2(call, false); });
+	// The security of a service is a self-relative descriptor kept with its configuration; a service that never had one set grants
+	// Administrators and LocalSystem every right and everyone else the right to read its state.
+	registry.add("QueryServiceObjectSecurity", 5, [&objects, with_key, &hive](ApiCall &call) {
+		const auto service = objects.object_as<ServiceHandle>(call[0]);
+		if (!service) {
+			call.fail(6);
+			return;
+		}
+		std::vector<uint8_t> descriptor;
+		with_key(service->name, false, [&](uint64_t key) {
+			uint32_t type = 0;
+			hive.query(key, u"Security", type, descriptor);
+		});
+		if (descriptor.empty()) {
+			const auto ace = [](uint32_t mask, std::vector<uint8_t> sid) {
+				std::vector<uint8_t> entry{0, 0, 0, 0};
+				for (int shift = 0; shift < 32; shift += 8)
+					entry.push_back(uint8_t(mask >> shift));
+				entry.insert(entry.end(), sid.begin(), sid.end());
+				entry[2] = uint8_t(entry.size());
+				return entry;
+			};
+			const std::vector<uint8_t> system{1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0};
+			const std::vector<uint8_t> administrators{1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0};
+			const std::vector<uint8_t> everyone{1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0};
+			std::vector<uint8_t> aces;
+			for (const auto &entry : {ace(0xf01ff, system), ace(0xf01ff, administrators), ace(0x2018d, everyone)})
+				aces.insert(aces.end(), entry.begin(), entry.end());
+			std::vector<uint8_t> acl{2, 0, 0, 0, 3, 0, 0, 0};
+			acl[2] = uint8_t((8 + aces.size()) & 0xff);
+			acl[3] = uint8_t((8 + aces.size()) >> 8);
+			acl.insert(acl.end(), aces.begin(), aces.end());
+			// SECURITY_DESCRIPTOR_RELATIVE: revision, control (self-relative, DACL present), owner, group, SACL and DACL offsets.
+			descriptor = {1, 0, 0x04, 0x80};
+			const uint32_t owner = 20, group = owner + uint32_t(system.size()), dacl = group + uint32_t(system.size());
+			for (const uint32_t value : {owner, group, 0u, dacl})
+				for (int shift = 0; shift < 32; shift += 8)
+					descriptor.push_back(uint8_t(value >> shift));
+			descriptor.insert(descriptor.end(), system.begin(), system.end());
+			descriptor.insert(descriptor.end(), system.begin(), system.end());
+			descriptor.insert(descriptor.end(), acl.begin(), acl.end());
+		}
+		if (call[4])
+			call.store<uint32_t>(call[4], uint32_t(descriptor.size()));
+		if (!call[2] || call.u32(3) < descriptor.size()) {
+			call.fail(122);
+			return;
+		}
+		call.write(call[2], descriptor);
+		call.ret(1);
+	});
+	registry.add("SetServiceObjectSecurity", 3, [&objects, with_key, &hive](ApiCall &call) {
+		const auto service = objects.object_as<ServiceHandle>(call[0]);
+		if (!service || !call[2]) {
+			call.fail(service ? 87 : 6);
+			return;
+		}
+		// A descriptor comes self-relative (offsets after the header) or absolute (pointers to its parts); it is kept self-relative.
+		const size_t width = call.pointer_width();
+		const auto head = call.read(call[2], 4);
+		const bool relative = head[3] & 0x80;
+		const auto part_at = [&](size_t index) -> uint64_t {
+			if (relative) {
+				uint32_t offset = 0;
+				std::memcpy(&offset, call.read(call[2] + 4 + index * 4, 4).data(), 4);
+				return offset ? call[2] + offset : 0;
+			}
+			// SECURITY_DESCRIPTOR: revision, padding, control, then the owner, group, SACL and DACL pointers at pointer alignment.
+			return call.load_pointer(call[2] + (width == 8 ? 8 : 4) + index * width);
+		};
+		std::vector<uint8_t> descriptor{head[0], 0, head[2], uint8_t(head[3] | 0x80)};
+		descriptor.resize(20, 0);
+		for (size_t index = 0; index < 4; ++index) {
+			const uint64_t at = part_at(index);
+			if (!at)
+				continue;
+			const auto start = call.read(at, 4);
+			const uint32_t length = index < 2 ? 8 + 4 * uint32_t(start[1]) : uint32_t(start[2] | start[3] << 8);
+			const auto part = call.read(at, length);
+			const uint32_t offset = uint32_t(descriptor.size());
+			std::memcpy(descriptor.data() + 4 + index * 4, &offset, 4);
+			descriptor.insert(descriptor.end(), part.begin(), part.end());
+		}
+		with_key(service->name, true, [&](uint64_t key) { hive.set(key, u"Security", 3, descriptor); });
+		call.ret(1);
+	});
 
 	// Starting a service runs its program; the program reports its state once it calls StartServiceCtrlDispatcher.
 	registry.add("StartServiceW", 3, [&context, &objects, with_key, &hive](ApiCall &call) {

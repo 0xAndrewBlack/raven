@@ -1,5 +1,6 @@
 #include "child_process.h"
 
+#include "elevation.h"
 #include "text.h"
 
 #include <atomic>
@@ -120,6 +121,9 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 			arguments.push_back(word);
 	}
 	arguments.push_back("--stdio=inherit");
+	// A child of an elevated process carries its elevated token.
+	if (process_elevated())
+		arguments.push_back("--elevated");
 
 	// Everything the child receives is a descriptor of the parent that must appear at a number the child expects: the standard handles
 	// at 0 to 2, the rest from 20 up. The parent's own copies are closed once the child exists.

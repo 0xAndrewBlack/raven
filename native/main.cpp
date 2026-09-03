@@ -7,6 +7,7 @@
 #include "nt/providers.h"
 #include "nt/paths.h"
 #include "nt/launch.h"
+#include "nt/elevation.h"
 #include "nt/handle_channel.h"
 #include "nt/text.h"
 #ifdef RAVEN_WAYLAND
@@ -143,6 +144,7 @@ int main(int argc, char **argv)
 	// A program started by another one carries the command line and the directory its parent chose.
 	std::optional<std::string> command_line_text, directory_text;
 	int environment_fd=-1,suspended_fd=-1,inherit_fd=-1,handle_channel_fd=-1;
+	bool elevated=false;
 	for (bool more=run_process;more && argc>first_file;) {
 		const std::string_view option=argv[first_file];
 		if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
@@ -151,6 +153,7 @@ int main(int argc, char **argv)
 		else if (option.starts_with("--suspended-fd=")) suspended_fd=std::atoi(std::string(option.substr(15)).c_str());
 		else if (option.starts_with("--inherit-fd=")) inherit_fd=std::atoi(std::string(option.substr(13)).c_str());
 		else if (option.starts_with("--handle-channel-fd=")) handle_channel_fd=std::atoi(std::string(option.substr(20)).c_str());
+		else if (option=="--elevated") elevated=true;
 		else more=false;
 		if (more) ++first_file;
 	}
@@ -187,8 +190,11 @@ int main(int argc, char **argv)
 			for (int i = (run_modules || run_process) ? first_file : 2; i < last_file; ++i) {
 				auto bytes = read_file(argv[i]);
 				auto &module = modules.add(std::filesystem::path(argv[i]).filename().string(), std::move(bytes));
-				if (!entry)
+				if (!entry) {
 					entry = &module;
+					// A program runs elevated when its manifest asks for it or when the process that started it is elevated.
+					raven::set_process_elevated(elevated || raven::manifest_requests_elevation(module.image));
+				}
 			}
 			if (run_modules || run_process) {
 #ifdef RAVEN_NATIVE_CPU

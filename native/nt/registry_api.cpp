@@ -482,7 +482,8 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		put_handle(call, call[1], 0x80000001ULL);
 		call.ret(0);
 	});
-	registry.add("RegQueryInfoKeyW", 12, [&hive](ApiCall &call) {
+	// The counts are the same in characters for the wide and the ANSI form; the class of a key is always empty here.
+	const auto query_info = [&hive](ApiCall &call) {
 		NativeRegistry::Info info;
 		const auto status = hive.info(call[0], info);
 		if (status) {
@@ -499,7 +500,9 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		if (call[10]) call.store<uint32_t>(call[10], 0);
 		if (call[11]) call.store<uint64_t>(call[11], 0);
 		call.ret(0);
-	});
+	};
+	registry.add("RegQueryInfoKeyW", 12, query_info);
+	registry.add("RegQueryInfoKeyA", 12, query_info);
 	// RegGetValue filters by type (RRF_RT_*), opens the subkey itself and expands REG_EXPAND_SZ unless told not to.
 	registry.add("RegGetValueW", 7, [&hive, &context, text_of](ApiCall &call) {
 		const uint32_t flags = call.u32(3);

@@ -4,11 +4,13 @@
 #include "text.h"
 
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <fcntl.h>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <sys/file.h>
 #include <sys/mman.h>
@@ -19,8 +21,36 @@ namespace raven {
 // The number of shared objects this process holds; waits on them are polled, so the scheduler looks more often while any exists.
 extern std::atomic<int> shared_object_count;
 
+// Holds the lock of a directory of shared object files until the returned descriptor is closed; -1 when the lock file cannot be made.
+inline int lock_directory(const std::filesystem::path &directory)
+{
+	const int guard = ::open((directory / ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+	if (guard >= 0)
+		while (::flock(guard, LOCK_EX) != 0 && errno == EINTR) {}
+	return guard;
+}
+
+// Removes the files of a directory of shared objects that no live process holds: what processes that were killed left behind. The
+// caller holds the directory's lock.
+inline void sweep_directory(const std::filesystem::path &directory)
+{
+	std::error_code error;
+	for (const auto &entry : std::filesystem::directory_iterator(directory, error)) {
+		if (entry.path().filename() == ".lock")
+			continue;
+		const int probe = ::open(entry.path().c_str(), O_RDWR | O_CLOEXEC);
+		if (probe < 0)
+			continue;
+		if (::flock(probe, LOCK_EX | LOCK_NB) == 0)
+			::unlink(entry.path().c_str());
+		::close(probe);
+	}
+}
+
 // The state of a named kernel object that several processes of a prefix share: a small host file every holder maps. A holder keeps a
-// shared lock on the file, which tells a live object from one that a past run left; the last holder removes the file.
+// shared lock on the file, which tells a live object from one that a past run left; the last holder removes the file. Opening, creating
+// and removing objects take one lock of the whole directory in turn: a lock changing from exclusive to shared is briefly released, and
+// another process must not take the object for unheld then and truncate it under its creator.
 class SharedFile {
 public:
 	SharedFile() = default;
@@ -30,6 +60,7 @@ public:
 	{
 		if (data)
 			::munmap(data, size);
+		const int guard = path.empty() ? -1 : lock_directory(std::filesystem::path(path).parent_path());
 		if (descriptor >= 0)
 			::close(descriptor);
 		if (!path.empty()) {
@@ -40,6 +71,8 @@ public:
 				::close(probe);
 			}
 		}
+		if (guard >= 0)
+			::close(guard);
 		if (counted)
 			--shared_object_count;
 	}
@@ -57,12 +90,19 @@ public:
 		auto directory = base / ("raven-objects-" + prefix_tag());
 		std::error_code failure;
 		std::filesystem::create_directories(directory, failure);
+		static std::once_flag swept;
 		auto upper = to_utf8(name);
 		for (auto &character : upper)
 			character = char(std::toupper(static_cast<unsigned char>(character)));
 		auto file = std::make_shared<SharedFile>();
 		file->path = (directory / (std::string(kind) + "-" + hex_text(name_hash(upper)))).string();
 		file->size = size;
+		const int guard = lock_directory(directory);
+		struct Release {
+			int descriptor;
+			~Release() { if (descriptor >= 0) ::close(descriptor); }
+		} release{guard};
+		std::call_once(swept, [&] { sweep_directory(directory); });
 		file->descriptor = ::open(file->path.c_str(), (create ? O_CREAT : 0) | O_RDWR | O_CLOEXEC, 0600);
 		if (file->descriptor < 0) {
 			file->path.clear();
@@ -106,6 +146,7 @@ public:
 	size_t size = 0;
 
 private:
+
 	int descriptor = -1;
 	std::string path;
 	bool counted = false;

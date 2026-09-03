@@ -187,6 +187,19 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("GetTickCount64", 0, [](ApiCall &call) { call.ret(counter_ticks() / 10000); });
 	registry.add("GetTickCount", 0, [](ApiCall &call) { call.ret(uint32_t(counter_ticks() / 10000)); });
+	// winmm timers: the host clock already has millisecond resolution, so periods are accepted and change nothing.
+	registry.add("timeGetTime", 0, [](ApiCall &call) { call.ret(uint32_t(counter_ticks() / 10000)); });
+	registry.add("timeBeginPeriod", 1, [](ApiCall &call) { call.ret(call.u32(0) ? 0 : 97); });
+	registry.add("timeEndPeriod", 1, [](ApiCall &call) { call.ret(call.u32(0) ? 0 : 97); });
+	registry.add("timeGetDevCaps", 2, [](ApiCall &call) {
+		if (!call[0] || call.u32(1) < 8) {
+			call.ret(97);
+			return;
+		}
+		call.store<uint32_t>(call[0], 1);
+		call.store<uint32_t>(call[0] + 4, 1000000);
+		call.ret(0);
+	});
 	registry.add("FileTimeToSystemTime", 2, [](ApiCall &call) {
 		const auto ticks = call.load<uint64_t>(call[0]);
 		if (ticks > 0x7fffffffffffffffULL) {

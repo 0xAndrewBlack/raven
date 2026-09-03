@@ -102,6 +102,8 @@ struct DesktopDC {
 	std::optional<DesktopRegion> clip{};
 	uint64_t font = desktop_system_font;
 	bool leased = false;
+	// A context over the shared pixels of a window another process owns (GetDC of that window); zero otherwise.
+	uint64_t foreign = 0;
 	bool window_frame = false;
 	uint32_t text_color = 0,background_color = 0xffffff,background_mode = 2;
 	uint64_t brush = desktop_stock_brush;
@@ -291,6 +293,8 @@ private:
 	uint32_t next_atom = 0xc000;
 	uint32_t next_class = 1;
 	uint64_t next = 0x10000;
+	// Windows are numbered apart from other objects, under a tag of this process (see foreign_surface.h).
+	uint64_t next_window = 0;
 	uint64_t next_order = 0;
 	size_t used = 0;
 	size_t limit;

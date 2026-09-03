@@ -1,4 +1,5 @@
 #include "objects.h"
+#include "foreign_surface.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -121,12 +122,24 @@ uint64_t DesktopObjects::add(Object object)
 	const auto size = object_size(object);
 	if (size > limit - used || objects.size()+classes.size() >= 10000 || next == UINT32_MAX)
 		return 0;
-	const uint64_t handle = next + 1;
+	uint64_t handle = 0;
+	if (std::holds_alternative<DesktopWindow>(object)) {
+		// A window handle is unique among the processes of the host: its number sits under the tag of this process.
+		const auto base = window_handle_base();
+		for (uint32_t tries = 0; tries < 0xffff && !handle; ++tries) {
+			next_window = next_window % 0xfffe + 1;
+			if (!objects.contains(base + next_window)) handle = base + next_window;
+		}
+		if (!handle) return 0;
+	} else {
+		handle = next + 1;
+		while (objects.contains(handle)) ++handle;
+		next = handle;
+	}
 	objects.emplace(handle, std::move(object));
 	if (const auto *record=menu(handle))
 		for (const auto &item:record->items) if (item.submenu)
 			std::get<DesktopMenu>(objects.at(item.submenu)).parent=handle;
-	next = handle;
 	used += size;
 	if (auto *record=std::get_if<DesktopWindow>(&objects.at(handle)))
 		record->order=++next_order;

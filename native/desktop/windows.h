@@ -1,6 +1,7 @@
 #pragma once
 
 #include "objects.h"
+#include "foreign_surface.h"
 #include "presentation.h"
 #include "keyboard.h"
 #include <array>
@@ -79,6 +80,13 @@ private:
 	std::function<void(std::function<bool()>)> block_hook;
 	// A window of the calling thread that needs painting, under the filter window when one is given.
 	uint64_t invalid_owned(uint64_t filter) const;
+	// Device contexts over windows of other processes, and the frames other processes drew into this process's windows.
+	struct ForeignTarget { std::shared_ptr<ForeignSurface> surface; uint64_t bitmap=0; };
+	std::map<uint64_t,ForeignTarget> foreign_targets;
+	uint64_t foreign_dc(uint64_t window);
+	std::map<uint64_t,uint32_t> foreign_frames;
+	std::chrono::steady_clock::time_point foreign_checked{};
+	void import_foreign_frames();
 	// Host input collected while threads waited, delivered by the next input_ready.
 	std::deque<DesktopEvent> pending_events;
 	void deliver_pending();

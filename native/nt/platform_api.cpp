@@ -1,4 +1,5 @@
 #include <cstdio>
+#include "elevation.h"
 #include "hash.h"
 #include "kernel_context.h"
 
@@ -73,6 +74,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("DwmExtendFrameIntoClientArea", 2, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("DwmFlush", 0, [](ApiCall &call) { call.ret(s_ok); });
+	registry.add("DwmGetCompositionTimingInfo", 2, [](ApiCall &call) { call.ret(0x80263001U); });
 
 	// imm32: there is no input method, so contexts do not exist and composition calls fail.
 	registry.add("ImmGetContext", 1, [](ApiCall &call) { call.ret(0); });
@@ -555,14 +557,15 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(0);
 	});
 	registry.add("CheckTokenMembership", 3, [](ApiCall &call) {
-		// Programs run without elevation: Administrators is held for denying access only, so membership is not reported. The groups
-		// held are Users (S-1-5-32-545) and Everyone (S-1-1-0).
+		// The groups held are Users (S-1-5-32-545) and Everyone (S-1-1-0); Administrators (S-1-5-32-544) counts only in an elevated
+		// process, since without elevation it is held for denying access alone.
 		const auto count = call.read(call[1] + 1, 1)[0];
 		const auto authority = call.read(call[1] + 2, 6)[5];
 		const uint32_t first = count ? call.load<uint32_t>(call[1] + 8) : 0, second = count > 1 ? call.load<uint32_t>(call[1] + 12) : 0;
 		const bool users = authority == 5 && count == 2 && first == 32 && second == 545;
+		const bool administrators = authority == 5 && count == 2 && first == 32 && second == 544 && process_elevated();
 		const bool everyone = authority == 1 && count == 1 && first == 0;
-		call.store<uint32_t>(call[2], users || everyone);
+		call.store<uint32_t>(call[2], users || everyone || administrators);
 		call.ret(1);
 	});
 	registry.add("IsTextUnicode", 3, [](ApiCall &call) {

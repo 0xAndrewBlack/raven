@@ -104,7 +104,7 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		call.store_pointer(call[2], made.value);
 		call.ret(1);
 	});
-	registry.add("LookupPrivilegeValueW", 3, [](ApiCall &call) {
+	const auto lookup_privilege = [](ApiCall &call, bool wide) {
 		static const std::pair<std::u16string_view, uint32_t> privileges[] = {
 			{u"SeCreateTokenPrivilege", 2}, {u"SeAssignPrimaryTokenPrivilege", 3}, {u"SeLockMemoryPrivilege", 4}, {u"SeIncreaseQuotaPrivilege", 5},
 			{u"SeTcbPrivilege", 7}, {u"SeSecurityPrivilege", 8}, {u"SeTakeOwnershipPrivilege", 9}, {u"SeLoadDriverPrivilege", 10},
@@ -119,7 +119,7 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(call[0] ? 1722 : 87);
 			return;
 		}
-		const auto name = call.wide(call[1], 128);
+		const auto name = wide ? call.wide(call[1], 128) : from_utf8(call.narrow(call[1], 128));
 		for (const auto &[known, value] : privileges)
 			if (known == name) {
 				call.store<uint32_t>(call[2], value);
@@ -128,7 +128,9 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 				return;
 			}
 		call.fail(1313);
-	});
+	};
+	registry.add("LookupPrivilegeValueW", 3, [lookup_privilege](ApiCall &call) { lookup_privilege(call, true); });
+	registry.add("LookupPrivilegeValueA", 3, [lookup_privilege](ApiCall &call) { lookup_privilege(call, false); });
 	registry.add("AdjustTokenPrivileges", 6, [&context](ApiCall &call) {
 		if (!context.objects.object_as<AccessToken>(call[0])) {
 			call.fail(6);

@@ -856,23 +856,26 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		process.unmap_memory(rect);
 		call.ret(1);
 	});
-	registry.add("GetMonitorInfoW", 2, [this](ApiCall &call) {
-		const auto &metrics = objects.nonclient_metrics();
-		const uint32_t size = call.load<uint32_t>(call[1]);
-		if (size != 40 && size != 104) {
-			call.fail(87);
-			return;
-		}
-		std::vector<uint8_t> bytes(size);
-		const int32_t values[10] = {int32_t(size), 0, 0, metrics.screen_x, metrics.screen_y, 0, 0, metrics.screen_x, metrics.screen_y, 1};
-		std::memcpy(bytes.data(), values, 40);
-		if (size == 104) {
-			const std::u16string device = u"\\\\.\\DISPLAY1";
-			std::memcpy(bytes.data() + 40, device.data(), device.size() * 2);
-		}
-		call.write(call[1], bytes);
-		call.ret(1);
-	});
+	// MONITORINFO, or MONITORINFOEX with the device name in the caller's character width.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "GetMonitorInfoW" : "GetMonitorInfoA", 2, [this, wide](ApiCall &call) {
+			const auto &metrics = objects.nonclient_metrics();
+			const uint32_t size = call.load<uint32_t>(call[1]);
+			if (size != 40 && size != (wide ? 104 : 72)) {
+				call.fail(87);
+				return;
+			}
+			std::vector<uint8_t> bytes(size);
+			const int32_t values[10] = {int32_t(size), 0, 0, metrics.screen_x, metrics.screen_y, 0, 0, metrics.screen_x, metrics.screen_y, 1};
+			std::memcpy(bytes.data(), values, 40);
+			if (size > 40) {
+				const std::string_view device = "\\\\.\\DISPLAY1";
+				for (size_t index = 0; index < device.size(); ++index)
+					bytes[40 + index * (wide ? 2 : 1)] = uint8_t(device[index]);
+			}
+			call.write(call[1], bytes);
+			call.ret(1);
+		});
 	registry.add("MonitorFromPoint", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("MonitorFromRect", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("MonitorFromWindow", 2, [](ApiCall &call) { call.ret(1); });

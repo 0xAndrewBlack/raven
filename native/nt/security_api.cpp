@@ -1,3 +1,4 @@
+#include "elevation.h"
 #include "access_token.h"
 #include "kernel_context.h"
 
@@ -223,9 +224,9 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			std::memcpy(data.data(), &count, 4);
 			size_t placed = first + record * sids.size();
 			for (size_t index = 0; index < sids.size(); ++index) {
-				// Users and Everyone: mandatory, enabled by default and enabled. The account is an administrator whose programs run
-				// without elevation, as under User Account Control: Administrators is in the token for denying access only.
-				const uint32_t attributes = index == 1 ? 0x10 : 7;
+				// Users and Everyone: mandatory, enabled by default and enabled. The account is an administrator under User Account
+				// Control: Administrators is enabled (and an owner) in an elevated process and held for denying access only otherwise.
+				const uint32_t attributes = index == 1 ? (process_elevated() ? 0xf : 0x10) : 7;
 				const uint64_t at = call[2] + placed;
 				std::memcpy(data.data() + first + index * record, &at, width);
 				std::memcpy(data.data() + first + index * record + width, &attributes, 4);
@@ -237,9 +238,9 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		case 8: data = {1, 0, 0, 0}; break;
 		case 9: data = {0, 0, 0, 0}; break;
 		case 12: data = {1, 0, 0, 0}; break;
-		// TokenElevationType: limited, the filtered token of an administrator; TokenElevation: not elevated.
-		case 18: data = {3, 0, 0, 0}; break;
-		case 20: data = {0, 0, 0, 0}; break;
+		// TokenElevationType: full for an elevated process, limited (the filtered token of an administrator) otherwise; TokenElevation.
+		case 18: data = {process_elevated() ? uint8_t(2) : uint8_t(3), 0, 0, 0}; break;
+		case 20: data = {process_elevated() ? uint8_t(1) : uint8_t(0), 0, 0, 0}; break;
 		case 29: data = {0, 0, 0, 0}; break;
 		case 25: with_sid(make_sid(16, {8192}), 0x60, true); break;
 		case 10: data.assign(56, 0); break;

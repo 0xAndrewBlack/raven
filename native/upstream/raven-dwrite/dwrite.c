@@ -122,9 +122,12 @@ static WCHAR *wdup(const WCHAR *text)
 }
 
 /* ---- the fonts of the system ---- */
+/* A system font is named by its path; a font a program supplies through its own loader has no path and keeps its opened face and file. */
 typedef struct {
 	WCHAR *path, *family, *face, *full, *postscript;
 	DWORD index, weight, style, stretch, flags;
+	struct FaceData *data;
+	IDWriteFontFile *file;
 } FontEntry;
 
 typedef struct {
@@ -291,7 +294,7 @@ static void ensure_system(void)
 }
 
 /* ---- font data: one opened face of a font file ---- */
-typedef struct {
+typedef struct FaceData {
 	LONG refs;
 	DWORD host;
 	BYTE *bytes;
@@ -371,6 +374,10 @@ static FaceData *face_data_for_entry(const FontEntry *entry)
 	static SRWLOCK lock = SRWLOCK_INIT;
 	UINT32 index;
 	FaceData *result = NULL;
+	if (entry->data) {
+		InterlockedIncrement(&entry->data->refs);
+		return entry->data;
+	}
 	AcquireSRWLockExclusive(&lock);
 	for (index = 0; index < 256 && cache[index].entry; ++index)
 		if (cache[index].entry == entry) {
@@ -577,7 +584,7 @@ static IDWriteFontFileStream *make_stream(BYTE *bytes, UINT64 size)
 	return (IDWriteFontFileStream *)stream;
 }
 
-/* The loader of the files of the system: the key is the wide path. */
+/* The loader of the files of the system: the key is the wide path. It is a local file loader, so a program can learn the path back. */
 typedef struct {
 	const IDWriteFontFileLoaderVtbl *vtbl;
 } SystemLoader;
@@ -586,7 +593,7 @@ static HRESULT STDMETHODCALLTYPE loader_query(IDWriteFontFileLoader *self, REFII
 {
 	if (!out)
 		return E_POINTER;
-	if (same_guid(iid, &IID_IUnknown) || same_guid(iid, &IID_IDWriteFontFileLoader)) {
+	if (same_guid(iid, &IID_IUnknown) || same_guid(iid, &IID_IDWriteFontFileLoader) || same_guid(iid, &IID_IDWriteLocalFontFileLoader)) {
 		*out = self;
 		return S_OK;
 	}
@@ -615,17 +622,69 @@ static HRESULT STDMETHODCALLTYPE loader_create_stream(IDWriteFontFileLoader *sel
 	return *stream ? S_OK : E_OUTOFMEMORY;
 }
 
+/* The characters of the path in a key, without the terminator the key may carry. */
+static UINT32 key_path_length(const void *key, UINT32 key_size)
+{
+	const WCHAR *path = key;
+	UINT32 length = key_size / sizeof(WCHAR);
+	while (length && !path[length - 1])
+		--length;
+	return length;
+}
+static HRESULT STDMETHODCALLTYPE loader_path_length(IDWriteLocalFontFileLoader *self, const void *key, UINT32 key_size, UINT32 *length)
+{
+	if (!key || !length)
+		return E_INVALIDARG;
+	*length = key_path_length(key, key_size);
+	return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE loader_path(IDWriteLocalFontFileLoader *self, const void *key, UINT32 key_size, WCHAR *path, UINT32 capacity)
+{
+	UINT32 length;
+	if (!key || !path)
+		return E_INVALIDARG;
+	length = key_path_length(key, key_size);
+	if (capacity <= length)
+		return E_NOT_SUFFICIENT_BUFFER;
+	memcpy(path, key, length * sizeof(WCHAR));
+	path[length] = 0;
+	return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE loader_write_time(IDWriteLocalFontFileLoader *self, const void *key, UINT32 key_size, FILETIME *time)
+{
+	WIN32_FILE_ATTRIBUTE_DATA attributes;
+	UINT32 length;
+	WCHAR *path;
+	BOOL found;
+	if (!key || !time)
+		return E_INVALIDARG;
+	length = key_path_length(key, key_size);
+	path = ALLOC((length + 1) * sizeof(WCHAR));
+	if (!path)
+		return E_OUTOFMEMORY;
+	memcpy(path, key, length * sizeof(WCHAR));
+	found = GetFileAttributesExW(path, GetFileExInfoStandard, &attributes);
+	FREE(path);
+	if (!found)
+		return DWRITE_E_FILENOTFOUND;
+	*time = attributes.ftLastWriteTime;
+	return S_OK;
+}
+
 static void *Loader_table_[7];
 static SystemLoader system_loader;
 
 static IDWriteFontFileLoader *get_system_loader(void)
 {
 	if (!system_loader.vtbl) {
-		/* IUnknown and CreateStreamFromKey: the interface has no more methods. */
+		/* IUnknown, CreateStreamFromKey, then the three path methods of IDWriteLocalFontFileLoader. */
 		Loader_table_[0] = (void *)loader_query;
 		Loader_table_[1] = (void *)loader_add_ref;
 		Loader_table_[2] = (void *)loader_release;
 		Loader_table_[3] = (void *)loader_create_stream;
+		Loader_table_[4] = (void *)loader_path_length;
+		Loader_table_[5] = (void *)loader_path;
+		Loader_table_[6] = (void *)loader_write_time;
 		system_loader.vtbl = (const IDWriteFontFileLoaderVtbl *)Loader_table_;
 	}
 	return (IDWriteFontFileLoader *)&system_loader;
@@ -1287,7 +1346,7 @@ static HRESULT STDMETHODCALLTYPE font_create_face(IDWriteFont *self, IDWriteFont
 	*face = NULL;
 	if (!data)
 		return DWRITE_E_FILENOTFOUND;
-	*face = make_face(data, NULL, DWRITE_FONT_SIMULATIONS_NONE);
+	*face = make_face(data, FONT_OF(self)->entry->file, DWRITE_FONT_SIMULATIONS_NONE);
 	if (!*face) {
 		face_data_release(data);
 		return E_OUTOFMEMORY;
@@ -1608,10 +1667,11 @@ static HRESULT STDMETHODCALLTYPE custom_from_face(IDWriteFontCollection *self, I
 	Face *source = (Face *)face;
 	UINT32 position, entry;
 	*font = NULL;
-	for (position = 0; position < collection->count && source->data->path; ++position)
+	for (position = 0; position < collection->count; ++position)
 		for (entry = 0; entry < collection->families[position].count; ++entry) {
 			FontEntry *candidate = collection->families[position].entries[entry];
-			if (candidate->index == source->data->index && wequal_fold(candidate->path, source->data->path)) {
+			if (candidate->data ? candidate->data == source->data :
+				source->data->path && candidate->index == source->data->index && wequal_fold(candidate->path, source->data->path)) {
 				*font = make_font(candidate, &collection->families[position]);
 				return *font ? S_OK : E_OUTOFMEMORY;
 			}
@@ -1621,6 +1681,28 @@ static HRESULT STDMETHODCALLTYPE custom_from_face(IDWriteFontCollection *self, I
 
 static void *Custom_table_[IDWriteFontCollection_methods];
 
+/* Files the entry under the family of its name, which is made when the collection does not hold it yet. */
+static void custom_add_entry(CustomCollection *collection, FontEntry *entry)
+{
+	FamilyEntry *family = NULL;
+	UINT32 position;
+	for (position = 0; position < collection->count; ++position)
+		if (wequal_fold(collection->families[position].name, entry->family))
+			family = &collection->families[position];
+	if (!family) {
+		FamilyEntry *grown = collection->families ? HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, collection->families, (collection->count + 1) * sizeof(FamilyEntry))
+			: ALLOC(sizeof(FamilyEntry));
+		if (!grown)
+			return;
+		collection->families = grown;
+		family = &collection->families[collection->count++];
+		family->name = wdup(entry->family);
+		family->entries = NULL;
+		family->count = family->capacity = 0;
+	}
+	family_add(family, entry);
+}
+
 /* Puts every system face stored in the file at this path into the collection's families. */
 static void custom_add_path(CustomCollection *collection, const WCHAR *path)
 {
@@ -1628,26 +1710,68 @@ static void custom_add_path(CustomCollection *collection, const WCHAR *path)
 	ensure_system();
 	for (index = 0; index < font_count; ++index) {
 		FontEntry *entry = &font_entries[index];
-		FamilyEntry *family = NULL;
-		UINT32 position;
-		if (!entry->family || !entry->family[0] || !wequal_fold(entry->path, path))
-			continue;
-		for (position = 0; position < collection->count; ++position)
-			if (wequal_fold(collection->families[position].name, entry->family))
-				family = &collection->families[position];
-		if (!family) {
-			FamilyEntry *grown = collection->families ? HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, collection->families, (collection->count + 1) * sizeof(FamilyEntry))
-				: ALLOC(sizeof(FamilyEntry));
-			if (!grown)
-				return;
-			collection->families = grown;
-			family = &collection->families[collection->count++];
-			family->name = wdup(entry->family);
-			family->entries = NULL;
-			family->count = family->capacity = 0;
-		}
-		family_add(family, entry);
+		if (entry->family && entry->family[0] && wequal_fold(entry->path, path))
+			custom_add_entry(collection, entry);
 	}
+}
+
+/* An English name from the face's name table, the typographic one first when the font has it. */
+static WCHAR *face_name(FaceData *data, DWORD preferred, DWORD fallback)
+{
+	char buffer[512];
+	DWORD length = RavenFontName(data->host, preferred, buffer, sizeof(buffer));
+	if (!length || length >= sizeof(buffer))
+		length = RavenFontName(data->host, fallback, buffer, sizeof(buffer));
+	return length && length < sizeof(buffer) ? widen(buffer) : NULL;
+}
+
+/* Opens every face of a file that the program's own loader serves and files each one under its family. Each face owns a copy of the
+   bytes; the entries live as long as the collection, which is never released. */
+static void custom_add_file(CustomCollection *collection, IDWriteFontFile *file)
+{
+	FontFile source = {0};
+	DWORD size = 0, index, faces = 1;
+	BYTE *bytes;
+	const void *key = NULL;
+	if (FAILED(IDWriteFontFile_GetReferenceKey(file, &key, &source.key_size)) || FAILED(IDWriteFontFile_GetLoader(file, &source.loader)))
+		return;
+	source.key = (BYTE *)key;
+	bytes = file_bytes(&source, &size);
+	IDWriteFontFileLoader_Release(source.loader);
+	for (index = 0; bytes && index < faces; ++index) {
+		BYTE *copy = ALLOC(size);
+		FaceData *data;
+		FontEntry *entry;
+		if (!copy)
+			break;
+		memcpy(copy, bytes, size);
+		data = face_data_create(copy, size, index, NULL);
+		if (!data)
+			continue;
+		if (!index && data->info[13] > 1)
+			faces = (DWORD)data->info[13];
+		entry = ALLOC(sizeof(FontEntry));
+		if (!entry) {
+			face_data_release(data);
+			continue;
+		}
+		entry->family = face_name(data, 16, 1);
+		entry->face = face_name(data, 17, 2);
+		entry->full = face_name(data, 4, 4);
+		entry->postscript = face_name(data, 6, 6);
+		entry->index = index;
+		entry->weight = (DWORD)(data->info[12] ? data->info[12] : 400);
+		entry->style = data->info[11] & 2 ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
+		entry->stretch = (DWORD)(data->info[19] >= 1 && data->info[19] <= 9 ? data->info[19] : 5);
+		entry->flags = data->info[11] & 32 ? 1 : 0;
+		entry->data = data;
+		entry->file = file;
+		IDWriteFontFile_AddRef(file);
+		if (entry->family && entry->family[0])
+			custom_add_entry(collection, entry);
+	}
+	if (bytes)
+		FREE(bytes);
 }
 
 static HRESULT STDMETHODCALLTYPE factory_custom_collection(IDWriteFactory2 *self, IDWriteFontCollectionLoader *loader, const void *key, UINT32 key_size,
@@ -1708,7 +1832,7 @@ static HRESULT STDMETHODCALLTYPE factory_custom_collection(IDWriteFactory2 *self
 		if (((FontFile *)file)->vtbl == (const IDWriteFontFileVtbl *)FontFile_table_ && ((FontFile *)file)->loader == get_system_loader())
 			custom_add_path(collection, (const WCHAR *)((FontFile *)file)->key);
 		else
-			unimplemented("IDWriteFontCollection", "fonts from a loader that names no file");
+			custom_add_file(collection, file);
 		IDWriteFontFile_Release(file);
 	}
 	IDWriteFontFileEnumerator_Release(enumerator);
@@ -2361,6 +2485,53 @@ static HRESULT STDMETHODCALLTYPE factory2_glyph_analysis(IDWriteFactory2 *self, 
 	return create_analysis(run, transform, mode, origin_x, origin_y, analysis);
 }
 
+/* ---- number substitution: digits are always shaped as written, so the object only carries its reference count ---- */
+typedef struct {
+	const IDWriteNumberSubstitutionVtbl *vtbl;
+	LONG refs;
+} Substitution;
+
+static HRESULT STDMETHODCALLTYPE substitution_query(IDWriteNumberSubstitution *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (same_guid(iid, &IID_IUnknown) || same_guid(iid, &IID_IDWriteNumberSubstitution)) {
+		InterlockedIncrement(&((Substitution *)self)->refs);
+		*out = self;
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE substitution_add_ref(IDWriteNumberSubstitution *self) { return (ULONG)InterlockedIncrement(&((Substitution *)self)->refs); }
+static ULONG STDMETHODCALLTYPE substitution_release(IDWriteNumberSubstitution *self)
+{
+	LONG left = InterlockedDecrement(&((Substitution *)self)->refs);
+	if (!left)
+		FREE(self);
+	return (ULONG)left;
+}
+
+static const IDWriteNumberSubstitutionVtbl substitution_vtbl = { substitution_query, substitution_add_ref, substitution_release };
+
+static HRESULT STDMETHODCALLTYPE factory_number_substitution(IDWriteFactory2 *self, DWRITE_NUMBER_SUBSTITUTION_METHOD method, const WCHAR *locale,
+	WINBOOL ignore_overrides, IDWriteNumberSubstitution **substitution)
+{
+	Substitution *object;
+	if (!substitution)
+		return E_POINTER;
+	*substitution = NULL;
+	if ((UINT32)method > DWRITE_NUMBER_SUBSTITUTION_METHOD_TRADITIONAL || !locale)
+		return E_INVALIDARG;
+	object = ALLOC(sizeof(Substitution));
+	if (!object)
+		return E_OUTOFMEMORY;
+	object->vtbl = &substitution_vtbl;
+	object->refs = 1;
+	*substitution = (IDWriteNumberSubstitution *)object;
+	return S_OK;
+}
+
 /* The table is the IDWriteFactory3 one: its first methods are those of the earlier factory interfaces, the rest report themselves unimplemented. */
 static void *Factory_table_[IDWriteFactory3_methods];
 
@@ -2388,6 +2559,7 @@ static HRESULT create_factory(REFIID iid, IUnknown **out)
 		Factory_table_[IDWriteFactory_CreateTextFormat] = (void *)factory_create_format;
 		Factory_table_[IDWriteFactory_CreateTextLayout] = (void *)factory_create_layout;
 		Factory_table_[IDWriteFactory_CreateGdiCompatibleTextLayout] = (void *)factory_create_gdi_layout;
+		Factory_table_[IDWriteFactory_CreateNumberSubstitution] = (void *)factory_number_substitution;
 		Factory_table_[IDWriteFactory1_GetEudcFontCollection] = (void *)factory1_eudc;
 		Factory_table_[IDWriteFactory1_IDWriteFactory1_CreateCustomRenderingParams] = (void *)factory1_custom_params;
 		Factory_table_[IDWriteFactory2_GetSystemFontFallback] = (void *)factory2_fallback;

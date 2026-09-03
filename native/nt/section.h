@@ -1,6 +1,7 @@
 #pragma once
 
 #include "file_objects.h"
+#include "shared_file.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -16,8 +17,9 @@ public:
 	{
 		if (descriptor < 0)
 			return;
-		::close(descriptor);
 		// A named section's file goes when nobody else holds it: a fresh lock attempt on the file succeeds only then.
+		const int guard = backing.empty() ? -1 : lock_directory(std::filesystem::path(backing).parent_path());
+		::close(descriptor);
 		if (!backing.empty()) {
 			const int probe = ::open(backing.c_str(), O_RDWR | O_CLOEXEC);
 			if (probe >= 0) {
@@ -26,6 +28,8 @@ public:
 				::close(probe);
 			}
 		}
+		if (guard >= 0)
+			::close(guard);
 	}
 	bool describe(InheritedHandle &record) const override
 	{
