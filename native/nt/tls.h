@@ -38,8 +38,16 @@ private:
 		size_t alignment = 16;
 		std::vector<uint8_t> bytes;
 	};
-	// Storage owned by threads other than the first, released with the thread.
-	std::map<uint64_t, std::vector<uint64_t>> thread_storage;
+	// What a thread other than the first owns: its slot vector, the blocks of its modules by slot, and every mapping to release with it.
+	struct ThreadTLS {
+		uint64_t slots = 0;
+		std::map<uint32_t, uint64_t> blocks;
+		std::vector<uint64_t> owned;
+	};
+	std::map<uint64_t, ThreadTLS> thread_storage;
+	// Gives one thread its block of a module, creating the thread's slot vector when it has none yet.
+	void provision(uint64_t teb, ThreadTLS &thread, const Entry &entry);
+	uint64_t main_teb = 0;
 	NativeProcess &process;
 	const NativeEnvironment &environment;
 	uint64_t vector = 0;

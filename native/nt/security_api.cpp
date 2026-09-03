@@ -1,6 +1,8 @@
 #include "access_token.h"
 #include "kernel_context.h"
 
+#include <map>
+
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -243,6 +245,140 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[2], data);
 		call.ret(1);
 	});
+	// A generic right becomes the specific rights the mapping names for it.
+	registry.add("MapGenericMask", 2, [](ApiCall &call) {
+		if (!call[0] || !call[1]) {
+			call.fail(87);
+			return;
+		}
+		auto mask = call.load<uint32_t>(call[0]);
+		const auto mapping = call.read(call[1], 16);
+		uint32_t specific[4];
+		std::memcpy(specific, mapping.data(), 16);
+		if (mask & 0x80000000U) mask |= specific[0];
+		if (mask & 0x40000000U) mask |= specific[1];
+		if (mask & 0x20000000U) mask |= specific[2];
+		if (mask & 0x10000000U) mask |= specific[3];
+		mask &= ~0xf0000000U;
+		call.store<uint32_t>(call[0], mask);
+	});
+	// Descriptors are not kept: every object answers with the same one, so setting one changes nothing that could be read back.
+	registry.add("SetSecurityInfo", 7, [&objects](ApiCall &call) { call.ret(0); });
+	registry.add("SetNamedSecurityInfoW", 7, [](ApiCall &call) { call.ret(0); });
+	// The access a descriptor grants to the token's account: the entries of its list in order, allow entries adding rights and deny entries
+	// refusing them, for the account, its group, the users of the machine and everyone.
+	registry.add("AccessCheck", 8, [&objects](ApiCall &call) {
+		if (!objects.object_as<AccessToken>(call[1]) || !call[0] || !call[6] || !call[7]) {
+			call.fail(call[0] && call[6] && call[7] ? 6 : 87);
+			return;
+		}
+		uint32_t wanted = call.u32(2);
+		const auto mapping = call.read(call[3], 16);
+		uint32_t specific[4];
+		std::memcpy(specific, mapping.data(), 16);
+		if (wanted & 0x80000000U) wanted |= specific[0];
+		if (wanted & 0x40000000U) wanted |= specific[1];
+		if (wanted & 0x20000000U) wanted |= specific[2];
+		if (wanted & 0x10000000U) wanted |= specific[3];
+		wanted &= ~0xf0000000U;
+		const uint64_t descriptor = call[0];
+		const uint16_t control = call.load<uint16_t>(descriptor + 2);
+		uint64_t acl = 0;
+		if (control & dacl_present) {
+			if (control & 0x8000) {
+				const auto offset = call.load<uint32_t>(descriptor + 16);
+				acl = offset ? descriptor + offset : 0;
+			} else {
+				acl = call.load_pointer(descriptor + layout_of(call).dacl);
+			}
+		}
+		// A descriptor without a list gives everyone everything.
+		uint32_t granted = 0, denied = 0;
+		if (!(control & dacl_present) || !acl) {
+			granted = wanted ? wanted : 0x1f01ffU;
+		} else {
+			const auto header = call.read(acl, acl_header);
+			uint16_t count;
+			std::memcpy(&count, header.data() + 4, 2);
+			uint64_t at = acl + acl_header;
+			const std::vector<std::vector<uint8_t>> mine{user_sid(), make_sid(5, {21, 1000, 1000, 1000, 513}), make_sid(5, {32, 545}), make_sid(1, {0}),
+				make_sid(5, {11}), make_sid(5, {4}), make_sid(5, {1})};
+			for (uint16_t index = 0; index < count; ++index) {
+				const auto entry = call.read(at, 8);
+				uint16_t size;
+				std::memcpy(&size, entry.data() + 2, 2);
+				uint32_t mask;
+				std::memcpy(&mask, entry.data() + 4, 4);
+				if (size < 12 || !valid_sid(call, at + 8)) {
+					at += size ? size : 8;
+					continue;
+				}
+				const auto sid = call.read(at + 8, sid_length(call, at + 8));
+				const bool applies = std::any_of(mine.begin(), mine.end(), [&](const auto &candidate) { return candidate == sid; });
+				if (applies && entry[0] == 0)
+					granted |= mask & ~denied;
+				else if (applies && entry[0] == 1)
+					denied |= mask & ~granted;
+				at += size;
+			}
+		}
+		// MAXIMUM_ALLOWED asks for everything the descriptor grants.
+		const bool maximum = wanted & 0x02000000U;
+		const bool allowed = maximum ? granted != 0 : wanted && (granted & wanted) == wanted;
+		call.store<uint32_t>(call[6], maximum ? granted : allowed ? wanted : 0);
+		call.store<uint32_t>(call[7], allowed);
+		if (!allowed)
+			call.set_last_error(5);
+		call.ret(1);
+	});
+	// A token can be copied and restricted; the copies are accounts of the same kind (the program has one identity and no enforcement
+	// of restrictions), so they answer the same queries as the original.
+	registry.add("DuplicateTokenEx", 6, [&objects](ApiCall &call) {
+		if (!objects.object_as<AccessToken>(call[0]) || !call[5]) {
+			call.fail(call[5] ? 6 : 87);
+			return;
+		}
+		const auto made = objects.add_object(std::make_shared<AccessToken>());
+		if (made.status) {
+			call.fail(8);
+			return;
+		}
+		call.store_pointer(call[5], made.value);
+		call.ret(1);
+	});
+	registry.add("DuplicateToken", 3, [&objects](ApiCall &call) {
+		if (!objects.object_as<AccessToken>(call[0]) || !call[2]) {
+			call.fail(call[2] ? 6 : 87);
+			return;
+		}
+		const auto made = objects.add_object(std::make_shared<AccessToken>());
+		if (made.status) {
+			call.fail(8);
+			return;
+		}
+		call.store_pointer(call[2], made.value);
+		call.ret(1);
+	});
+	registry.add("CreateRestrictedToken", 9, [&objects](ApiCall &call) {
+		if (!objects.object_as<AccessToken>(call[0]) || !call[8]) {
+			call.fail(call[8] ? 6 : 87);
+			return;
+		}
+		const auto made = objects.add_object(std::make_shared<AccessToken>());
+		if (made.status) {
+			call.fail(8);
+			return;
+		}
+		call.store_pointer(call[8], made.value);
+		call.ret(1);
+	});
+	registry.add("SetTokenInformation", 4, [&objects](ApiCall &call) {
+		if (!objects.object_as<AccessToken>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		call.ret(1);
+	});
 	// The SIDs that exist on every system, by their well known names.
 	registry.add("CreateWellKnownSid", 4, [](ApiCall &call) {
 		std::vector<uint8_t> sid;
@@ -279,7 +415,7 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 	});
 	// Every object reports the same descriptor: owned by the account, readable and usable by everyone. It comes as one self-relative block
 	// that the program frees with LocalFree, and the owner, group and ACL pointers point inside it.
-	registry.add("GetSecurityInfo", 8, [&context](ApiCall &call) {
+	const auto security_info = [&context](ApiCall &call) {
 		const uint32_t wanted = call.u32(2);
 		const auto owner = user_sid(), group = make_sid(5, {21, 1000, 1000, 1000, 513}), everyone = make_sid(1, {0});
 		// ACL: the 8 byte header and one access allowed entry (header, mask, SID).
@@ -327,6 +463,19 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		else
 			context.allocator.release(memory);
 		call.ret(0);
+	};
+	registry.add("GetSecurityInfo", 8, security_info);
+	// A file or directory that is not there has no descriptor to give.
+	registry.add("GetNamedSecurityInfoW", 8, [&context, security_info](ApiCall &call) {
+		if (call.u32(1) == 1) {
+			const auto name = call.wide(call[0], 32768);
+			const auto resolved = context.paths.resolve(name);
+			if (!resolved || !resolved->exists) {
+				call.ret(resolved && !resolved->parent_exists ? 3 : 2);
+				return;
+			}
+		}
+		security_info(call);
 	});
 	// Reading a descriptor: the control bits say whether its parts are offsets from its start (self-relative) or pointers.
 	const auto part = [](ApiCall &call, uint64_t descriptor, size_t index) -> uint64_t {
@@ -485,7 +634,19 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("ConvertStringSidToSidW", 2, [&context](ApiCall &call) {
-		const auto text = call.wide(call[0], 256);
+		auto text = call.wide(call[0], 256);
+		// The two-letter names of the security descriptor language stand for well-known SIDs.
+		static const std::map<std::u16string, std::u16string> aliases{
+			{u"AN", u"S-1-5-7"}, {u"AO", u"S-1-5-32-548"}, {u"AU", u"S-1-5-11"}, {u"BA", u"S-1-5-32-544"}, {u"BG", u"S-1-5-32-546"},
+			{u"BO", u"S-1-5-32-551"}, {u"BU", u"S-1-5-32-545"}, {u"CG", u"S-1-3-1"}, {u"CO", u"S-1-3-0"}, {u"CY", u"S-1-5-32-569"},
+			{u"ED", u"S-1-5-9"}, {u"HI", u"S-1-16-12288"}, {u"IU", u"S-1-5-4"}, {u"LS", u"S-1-5-19"}, {u"LW", u"S-1-16-4096"},
+			{u"ME", u"S-1-16-8192"}, {u"MP", u"S-1-16-8448"}, {u"NO", u"S-1-5-32-556"}, {u"NS", u"S-1-5-20"}, {u"NU", u"S-1-5-2"},
+			{u"PO", u"S-1-5-32-550"}, {u"PS", u"S-1-5-10"}, {u"PU", u"S-1-5-32-547"}, {u"RC", u"S-1-5-12"}, {u"RD", u"S-1-5-32-555"},
+			{u"RE", u"S-1-5-32-552"}, {u"RU", u"S-1-5-32-554"}, {u"SI", u"S-1-16-16384"}, {u"SO", u"S-1-5-32-549"}, {u"SS", u"S-1-18-2"},
+			{u"SU", u"S-1-5-6"}, {u"SY", u"S-1-5-18"}, {u"WD", u"S-1-1-0"}, {u"WR", u"S-1-5-33"}, {u"OW", u"S-1-3-4"},
+			{u"UD", u"S-1-5-84-0-0-0-0-0"}};
+		if (const auto alias = aliases.find(text); alias != aliases.end())
+			text = alias->second;
 		unsigned long long numbers[16];
 		size_t count = 0;
 		if (text.size() < 5 || text[0] != u'S' || text[1] != u'-' || text[2] != u'1' || text[3] != u'-') {

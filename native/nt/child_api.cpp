@@ -1,9 +1,11 @@
 #include "child_process.h"
 #include "file_objects.h"
 #include "kernel_context.h"
+#include "security_attributes.h"
 #include "text.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -12,6 +14,12 @@
 namespace raven {
 
 namespace {
+
+// PROC_THREAD_ATTRIBUTE_LIST in this runtime: the capacity and the count, then one entry per attribute holding the attribute, the size of
+// its value and the address of the value, as 64-bit words.
+constexpr size_t attribute_header = 8, attribute_entry = 24;
+constexpr uint64_t attribute_handle_list = 0x20002, attribute_job_list = 0x2000d;
+constexpr uint32_t extended_startup_info = 0x80000;
 
 constexpr uint64_t current_process = UINT64_MAX;
 constexpr uint32_t create_suspended = 0x4, create_unicode_environment = 0x400, startf_use_std_handles = 0x100;
@@ -46,7 +54,8 @@ std::u16string first_word(std::u16string_view line)
 }
 
 std::shared_ptr<ProcessObject> start_program(KernelContext &context, const std::u16string &application, const std::u16string &line,
-	const std::u16string &directory, const int (&standard)[3], const std::u16string &environment, int *gate, uint32_t &error)
+	const std::u16string &directory, const int (&standard)[3], const std::u16string &environment, int *gate, uint32_t &error,
+	std::vector<InheritedHandle> inherited)
 {
 	auto &paths = context.paths;
 	const auto name = application.empty() ? first_word(line) : application;
@@ -96,6 +105,7 @@ std::shared_ptr<ProcessObject> start_program(KernelContext &context, const std::
 	launch.environment = environment;
 	launch.suspended = gate != nullptr;
 	launch.gate = gate;
+	launch.inherited = std::move(inherited);
 	return spawn_child(launch, error);
 }
 
@@ -103,7 +113,7 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 {
 	auto &objects = context.objects;
 	auto &paths = context.paths;
-	context.threads.set_external(host_events_pending);
+	context.threads.add_external(host_events_pending);
 	const auto descriptor_of = [&objects](uint64_t handle) -> int {
 		if (const auto file = objects.object_as<FileObject>(handle))
 			return file->descriptor;
@@ -116,8 +126,18 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(call[0] && call[1] ? 8 : 87);
 			return;
 		}
-		const auto read_end = objects.add_object(std::make_shared<FileObject>(reader, 0x80000000U, false, std::filesystem::path(), std::u16string(), 0));
-		const auto write_end = objects.add_object(std::make_shared<FileObject>(writer, 0x40000000U, false, std::filesystem::path(), std::u16string(), 0));
+		const auto make_end = [&call](int descriptor, uint32_t access) {
+			auto end = std::make_shared<PipeObject>(descriptor, access, 0);
+			end->connected = true;
+			end->inherit = call[2] && call.load<uint32_t>(call[2] + (call.pointer_width() == 8 ? 16 : 8)) != 0;
+			return end;
+		};
+		const auto read_end = objects.add_object(make_end(reader, 0x80000000U));
+		const auto write_end = objects.add_object(make_end(writer, 0x40000000U));
+		if (!read_end.status && !write_end.status && inheritable_handle(call, call[2])) {
+			objects.set_inherit(read_end.value, true);
+			objects.set_inherit(write_end.value, true);
+		}
 		if (read_end.status || write_end.status) {
 			if (!read_end.status)
 				objects.close(read_end.value);
@@ -134,6 +154,10 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		const auto file = objects.object_as<FileObject>(call[0]);
 		if (!file || !file->readable() || file->directory) {
 			call.fail(6);
+			return;
+		}
+		if (const auto pipe = std::dynamic_pointer_cast<PipeObject>(file); pipe && !ensure_pipe_connected(*pipe)) {
+			call.fail(pipe->server ? 536 : 233);
 			return;
 		}
 		int available = 0;
@@ -161,6 +185,44 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 
+	registry.add("InitializeProcThreadAttributeList", 4, [](ApiCall &call) {
+		if (!call[3]) {
+			call.fail(87);
+			return;
+		}
+		const uint32_t count = call.u32(1);
+		const uint64_t needed = attribute_header + count * attribute_entry;
+		const uint64_t capacity = call.load_pointer(call[3]);
+		call.store_pointer(call[3], needed);
+		if (!call[0] || capacity < needed) {
+			call.fail(122);
+			return;
+		}
+		call.store<uint32_t>(call[0], count);
+		call.store<uint32_t>(call[0] + 4, 0);
+		call.ret(1);
+	});
+	registry.add("UpdateProcThreadAttribute", 7, [](ApiCall &call) {
+		if (!call[0] || !call[3] || !call[4]) {
+			call.fail(87);
+			return;
+		}
+		const uint32_t capacity = call.load<uint32_t>(call[0]), count = call.load<uint32_t>(call[0] + 4);
+		if (count >= capacity) {
+			call.fail(122);
+			return;
+		}
+		const uint64_t entry = call[0] + attribute_header + count * attribute_entry;
+		call.store<uint64_t>(entry, call[2]);
+		call.store<uint64_t>(entry + 8, call[4]);
+		call.store<uint64_t>(entry + 16, call[3]);
+		call.store<uint32_t>(call[0] + 4, count + 1);
+		call.ret(1);
+	});
+	registry.add("DeleteProcThreadAttributeList", 1, [](ApiCall &call) {
+		if (call[0])
+			call.store<uint32_t>(call[0] + 4, 0);
+	});
 	registry.add("CreateProcessW", 10, [&, descriptor_of](ApiCall &call) {
 		if (!call[9]) {
 			call.fail(87);
@@ -173,7 +235,7 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		if (call[8]) {
 			// STARTUPINFOW: after the flags come the show command and two reserved fields, then the three standard handles.
 			const size_t width = call.pointer_width();
-			const size_t flags_at = 4 + 3 * width + 28;
+			const size_t flags_at = (4 + width - 1) / width * width + 3 * width + 28;
 			const size_t handles_at = ((flags_at + 8 + width - 1) / width) * width + width;
 			if (call.load<uint32_t>(call[8] + flags_at) & startf_use_std_handles)
 				for (size_t index = 0; index < 3; ++index) {
@@ -188,6 +250,51 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 					}
 					standard[index] = descriptor;
 				}
+		}
+		// Handles the child inherits: the ones the attribute list names, else every inheritable one when the caller asks for inheritance.
+		const size_t width_now = call.pointer_width();
+		std::optional<std::vector<uint64_t>> listed;
+		std::vector<uint64_t> jobs;
+		if ((call.u32(5) & extended_startup_info) && call[8]) {
+			const uint64_t list = call.load_pointer(call[8] + (width_now == 8 ? 104 : 68));
+			if (list) {
+				const uint32_t count = call.load<uint32_t>(list + 4);
+				for (uint32_t index = 0; index < count && index < 64; ++index) {
+					const uint64_t entry = list + attribute_header + index * attribute_entry;
+					const uint64_t attribute = call.load<uint64_t>(entry), size = call.load<uint64_t>(entry + 8), value = call.load<uint64_t>(entry + 16);
+					if (attribute == attribute_handle_list || attribute == attribute_job_list) {
+						std::vector<uint64_t> handles;
+						for (uint64_t at = 0; at + width_now <= size && handles.size() < 4096; at += width_now) {
+							const auto handle = call.load_pointer(value + at);
+							handles.push_back(width_now == 4 && handle == 0xffffffffULL ? UINT64_MAX : handle);
+						}
+						if (attribute == attribute_handle_list)
+							listed = std::move(handles);
+						else
+							jobs = std::move(handles);
+					}
+				}
+			}
+		}
+		std::vector<InheritedHandle> inherited;
+		{
+			const auto candidates = listed ? *listed : call.u32(4) ? objects.inheritable() : std::vector<uint64_t>();
+			for (const auto handle : candidates) {
+				const auto object = objects.object(handle);
+				InheritedHandle record;
+				if (listed && !objects.inherit(handle)) {
+					call.fail(87);
+					return;
+				}
+				if (!object || !object->describe(record)) {
+					if (std::getenv("RAVEN_TRACE_API"))
+						std::fprintf(stderr, "raven: handle %llx cannot be inherited\n", static_cast<unsigned long long>(handle));
+					continue;
+				}
+				record.handle = handle;
+				record.handle_access = objects.access_of(handle);
+				inherited.push_back(std::move(record));
+			}
 		}
 		// The child starts with the environment the caller names, or with the one the caller has now.
 		std::u16string environment;
@@ -211,10 +318,19 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		}
 		int gate = -1;
 		uint32_t error = 0;
-		const auto child = start_program(context, application, line, directory, standard, environment, call.u32(5) & create_suspended ? &gate : nullptr, error);
+		const auto child = start_program(context, application, line, directory, standard, environment, call.u32(5) & create_suspended ? &gate : nullptr, error,
+			std::move(inherited));
 		if (!child) {
 			call.fail(error);
 			return;
+		}
+		for (const auto job : jobs) {
+			uint32_t job_error = 0;
+			if (!assign_to_job(context, job, child, job_error)) {
+				child->terminate(1);
+				call.fail(job_error);
+				return;
+			}
 		}
 		const auto process_handle = objects.add_object(child);
 		const auto thread_object = std::make_shared<ChildThreadObject>(child);

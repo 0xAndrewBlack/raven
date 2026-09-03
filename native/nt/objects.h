@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <deque>
 #include <map>
 #include <memory>
@@ -10,6 +11,9 @@
 #include <string>
 #include <span>
 #include <cstdint>
+#include <vector>
+
+#include "inherit.h"
 
 namespace raven {
 
@@ -21,6 +25,18 @@ public:
 	virtual int signaled(uint32_t thread) const { (void)thread; return -1; }
 	// Runs when a wait succeeds: auto-reset events clear, mutexes change owner, semaphores count down.
 	virtual void consume(uint32_t thread) { (void)thread; }
+	// Describes the object for a process that inherits it; false for objects that cannot be handed to another process.
+	virtual bool describe(InheritedHandle &record) const { (void)record; return false; }
+};
+
+class NativeObjects;
+// Rebuilds the handles a creator passed on, each under the value it had there.
+void adopt_inherited(NativeObjects &objects, const std::vector<InheritedHandle> &handles);
+
+// A handle value held for something another part of the runtime owns, such as an open registry key; closing the handle tells the owner.
+class ReservedObject : public KernelObject {
+public:
+	std::function<void(uint64_t)> on_close;
 };
 
 struct NativeObjectResult {
@@ -48,6 +64,10 @@ public:
 	int descriptor(uint64_t handle) const;
 	NativeObjectResult write_file(uint64_t handle, std::span<const uint8_t> bytes);
 	uint32_t close(uint64_t handle);
+	// Takes a handle value for an owner outside the table; zero when none is free. Closing it runs `on_close`.
+	uint64_t reserve(std::function<void(uint64_t)> on_close);
+	// Forgets a reserved handle without telling the owner (the owner closed it first).
+	void release_reserved(uint64_t handle);
 	// Generic objects share the handle namespace of events and inherited files.
 	NativeObjectResult add_object(std::shared_ptr<KernelObject> object);
 	std::shared_ptr<KernelObject> object(uint64_t handle) const;
@@ -56,7 +76,17 @@ public:
 	int signaled(uint64_t handle, uint32_t thread) const;
 	void consume(uint64_t handle, uint32_t thread);
 	// Duplicates a handle onto the same object (DuplicateHandle within the process).
-	NativeObjectResult duplicate(uint64_t handle);
+	// A new handle to the same object; `access` narrows the rights the copy carries (kept for objects whose rights matter, such as sections).
+	NativeObjectResult duplicate(uint64_t handle, std::optional<uint32_t> access = std::nullopt);
+	uint32_t access_of(uint64_t handle) const;
+	void set_access(uint64_t handle, uint32_t access);
+	// Whether a child process created with handle inheritance receives the handle (HANDLE_FLAG_INHERIT).
+	void set_inherit(uint64_t handle, bool inherit);
+	bool inherit(uint64_t handle) const;
+	// The generic object behind a handle and the handles that are inheritable, for process creation.
+	std::vector<uint64_t> inheritable() const;
+	// Puts an object under a handle value that another process chose; false when the value is taken.
+	bool adopt(uint64_t handle, std::shared_ptr<KernelObject> object, bool inherit);
 	NativeObjectResult set_event(uint64_t handle, bool signaled);
 	NativeObjectResult query_event(uint64_t handle);
 	NativeObjectResult wait(uint64_t handle, std::optional<int64_t> timeout,
@@ -80,11 +110,13 @@ private:
 		File(int descriptor,uint32_t type) : descriptor(descriptor),type(type) {}
 		~File();
 	};
-	struct Handle { std::shared_ptr<Event> event; uint32_t access; std::shared_ptr<File> file; std::shared_ptr<KernelObject> generic = {}; };
+	struct Handle { std::shared_ptr<Event> event; uint32_t access; std::shared_ptr<File> file; std::shared_ptr<KernelObject> generic = {}; bool inherit = false; };
 	mutable std::mutex mutex;
 	std::map<uint64_t,Handle> handles;
 	std::map<std::u16string,std::weak_ptr<Event>> named_events;
 	uint64_t next = 0x100;
+	// The next free handle value; the caller holds the mutex. Values that inherited handles occupy are skipped.
+	uint64_t take();
 	size_t limit;
 	std::pair<std::shared_ptr<Event>,uint32_t> event(uint64_t handle, uint32_t access) const;
 	std::shared_ptr<File> file(uint64_t handle) const;

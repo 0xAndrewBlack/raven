@@ -88,40 +88,81 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 			arguments.push_back(word);
 	}
 	arguments.push_back("--stdio=inherit");
-	int inherited[2] = {-1, -1};
+
+	// Everything the child receives is a descriptor of the parent that must appear at a number the child expects: the standard handles
+	// at 0 to 2, the rest from 20 up. The parent's own copies are closed once the child exists.
+	struct Pass {
+		int source, target;
+	};
+	std::vector<Pass> passes;
+	std::vector<int> owned;
+	int next_target = 20;
+	for (int index = 0; index < 3; ++index)
+		passes.push_back({launch.standard[index], index});
+	const auto pass = [&](int descriptor) {
+		const int target = next_target++;
+		passes.push_back({descriptor, target});
+		return target;
+	};
+	const auto release = [&] {
+		for (const int descriptor : owned)
+			::close(descriptor);
+	};
 	if (!launch.environment.empty()) {
 		// The block travels in an anonymous file the child reads once and closes.
-		const int file = ::memfd_create("raven-environment", 0);
+		const int file = ::memfd_create("raven-environment", MFD_CLOEXEC);
 		if (file < 0) {
 			error = 8;
 			return nullptr;
 		}
+		owned.push_back(file);
 		const auto bytes = reinterpret_cast<const char *>(launch.environment.data());
 		const size_t size = launch.environment.size() * 2;
 		for (size_t done = 0; done < size;) {
 			const auto count = ::write(file, bytes + done, size - done);
 			if (count <= 0) {
-				::close(file);
+				release();
 				error = 8;
 				return nullptr;
 			}
 			done += size_t(count);
 		}
 		::lseek(file, 0, SEEK_SET);
-		inherited[0] = file;
-		arguments.push_back("--environment-fd=" + std::to_string(file));
+		arguments.push_back("--environment-fd=" + std::to_string(pass(file)));
 	}
 	int gate_pair[2] = {-1, -1};
 	if (launch.suspended) {
 		if (::pipe2(gate_pair, O_CLOEXEC)) {
-			if (inherited[0] >= 0)
-				::close(inherited[0]);
+			release();
 			error = 8;
 			return nullptr;
 		}
 		// Only the reading end goes to the child; the writing end stays with the parent.
-		::fcntl(gate_pair[0], F_SETFD, 0);
-		arguments.push_back("--suspended-fd=" + std::to_string(gate_pair[0]));
+		owned.push_back(gate_pair[0]);
+		arguments.push_back("--suspended-fd=" + std::to_string(pass(gate_pair[0])));
+	}
+	std::vector<InheritedHandle> records;
+	for (auto record : launch.inherited) {
+		if (record.descriptor < 0)
+			continue;
+		record.descriptor = pass(record.descriptor);
+		records.push_back(std::move(record));
+	}
+	if (!records.empty()) {
+		const int file = ::memfd_create("raven-handles", MFD_CLOEXEC);
+		const auto bytes = serialize_inherited(records);
+		if (file < 0 || ::write(file, bytes.data(), bytes.size()) != ssize_t(bytes.size())) {
+			if (file >= 0)
+				::close(file);
+			release();
+			if (gate_pair[1] >= 0)
+				::close(gate_pair[1]);
+			error = 8;
+			return nullptr;
+		}
+		::lseek(file, 0, SEEK_SET);
+		owned.push_back(file);
+		arguments.push_back("--inherit-fd=" + std::to_string(pass(file)));
 	}
 	arguments.push_back("--command-line=" + to_utf8(launch.command_line));
 	arguments.push_back("--directory=" + to_utf8(launch.directory));
@@ -131,31 +172,28 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 		argv.push_back(argument.data());
 	argv.push_back(nullptr);
 
-	const auto release_extra = [&] {
-		if (inherited[0] >= 0)
-			::close(inherited[0]);
-		if (gate_pair[0] >= 0)
-			::close(gate_pair[0]);
-	};
 	posix_spawn_file_actions_t actions;
 	posix_spawn_file_actions_init(&actions);
-	// Duplicating onto a descriptor that still has to be read as a source would lose it: move every source out of the way first.
-	int moved[3];
-	for (int index = 0; index < 3; ++index) {
-		moved[index] = ::fcntl(launch.standard[index], F_DUPFD_CLOEXEC, 10);
-		if (moved[index] < 0) {
-			for (int back = 0; back < index; ++back)
-				::close(moved[back]);
-			release_extra();
-			if (gate_pair[1] >= 0)
-				::close(gate_pair[1]);
-			posix_spawn_file_actions_destroy(&actions);
-			error = 6;
+	// Duplicating onto a descriptor that still has to be read as a source would lose it: move every source above all the targets first.
+	std::vector<int> moved;
+	const auto fail_moves = [&] {
+		for (const int descriptor : moved)
+			::close(descriptor);
+		release();
+		if (gate_pair[1] >= 0)
+			::close(gate_pair[1]);
+		posix_spawn_file_actions_destroy(&actions);
+		error = 6;
+	};
+	for (const auto &item : passes) {
+		const int copy = ::fcntl(item.source, F_DUPFD_CLOEXEC, next_target + 16);
+		if (copy < 0) {
+			fail_moves();
 			return nullptr;
 		}
+		moved.push_back(copy);
+		posix_spawn_file_actions_adddup2(&actions, copy, item.target);
 	}
-	for (int index = 0; index < 3; ++index)
-		posix_spawn_file_actions_adddup2(&actions, moved[index], index);
 	posix_spawnattr_t attributes;
 	posix_spawnattr_init(&attributes);
 	sigset_t none, all;
@@ -168,9 +206,9 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 	const int status = ::posix_spawn(&child, self, &actions, &attributes, argv.data(), environ);
 	posix_spawnattr_destroy(&attributes);
 	posix_spawn_file_actions_destroy(&actions);
-	for (int index = 0; index < 3; ++index)
-		::close(moved[index]);
-	release_extra();
+	for (const int descriptor : moved)
+		::close(descriptor);
+	release();
 	if (status) {
 		if (gate_pair[1] >= 0)
 			::close(gate_pair[1]);

@@ -28,9 +28,8 @@ NativeObjectResult NativeObjects::inherit_file(int descriptor)
 	catch (...) { ::close(copy);throw; }
 	std::lock_guard lock(mutex);
 	if (handles.size()>=limit || next>UINT32_MAX-4) return {0,0xc000009aU};
-	const auto handle=next;
+	const auto handle=take();
 	handles.emplace(handle,Handle{{},0,std::move(object)});
-	next+=4;
 	return {handle};
 }
 

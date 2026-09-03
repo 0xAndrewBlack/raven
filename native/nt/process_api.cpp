@@ -62,7 +62,6 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("FreeLibraryWhenCallbackReturns", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("GetProcessVersion", 1, [](ApiCall &call) { call.ret(0x0006000a); });
 	registry.add("FreeResource", 1, [](ApiCall &call) { call.ret(0); });
-	registry.add("CancelIo", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("ReadDirectoryChangesW", 8, [](ApiCall &call) { call.fail(50, 0); });
 	registry.add("FindFirstStreamW", 4, [](ApiCall &call) { call.fail(38, UINT64_MAX); });
 	const auto directory = [](ApiCall &call, bool wide, const std::string &path) {
@@ -164,11 +163,31 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	// There is no debugger to receive these messages, so they go nowhere, as on Windows without one.
 	registry.add("OutputDebugStringA", 1, [](ApiCall &) {});
 	registry.add("OutputDebugStringW", 1, [](ApiCall &) {});
-	// Handle flags (inherit, protect from close) are not kept: handles reach a child only as its standard handles.
-	registry.add("SetHandleInformation", 3, [](ApiCall &call) { call.ret(1); });
-	registry.add("GetHandleInformation", 2, [](ApiCall &call) {
-		if (call[1])
-			call.store<uint32_t>(call[1], 0);
+	// Only the inherit flag is kept: HANDLE_FLAG_INHERIT decides which handles a child created with handle inheritance receives.
+	registry.add("SetHandleInformation", 3, [&context](ApiCall &call) {
+		if (call[0] == UINT64_MAX || call[0] == UINT64_MAX - 1) {
+			call.ret(1);
+			return;
+		}
+		if (context.objects.signaled(call[0], 0) == -2) {
+			call.fail(6);
+			return;
+		}
+		if (call.u32(1) & 1)
+			context.objects.set_inherit(call[0], call.u32(2) & 1);
+		call.ret(1);
+	});
+	registry.add("GetHandleInformation", 2, [&context](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		const bool pseudo = call[0] == UINT64_MAX || call[0] == UINT64_MAX - 1;
+		if (!pseudo && context.objects.signaled(call[0], 0) == -2) {
+			call.fail(6);
+			return;
+		}
+		call.store<uint32_t>(call[1], !pseudo && context.objects.inherit(call[0]) ? 1 : 0);
 		call.ret(1);
 	});
 	// The search path for dependent libraries is not restricted by anything Raven resolves, so the request is accepted as it stands.

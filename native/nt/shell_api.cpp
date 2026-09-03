@@ -52,6 +52,23 @@ std::optional<std::u16string> folder_for(int csidl, const std::u16string &profil
 	}
 }
 
+// The folders a known folder id names, by the first word of the id; those that no CSIDL covers carry their own path.
+struct KnownFolder {
+	uint32_t first;
+	int csidl;
+	const char16_t *path;
+};
+
+constexpr KnownFolder known_folders[] = {
+	{0xb4bfcc3a, 0x10, nullptr}, {0xfdd39ad0, 0x05, nullptr}, {0x374de290, -1, u"%PROFILE%\\Downloads"}, {0x4bd8d571, 0x0d, nullptr},
+	{0x33e28130, 0x27, nullptr}, {0x18989b1d, 0x0e, nullptr}, {0xf1b32785, 0x1c, nullptr}, {0xa520a1a4, -1, u"%PROFILE%\\AppData\\LocalLow"},
+	{0x3eb685db, 0x1a, nullptr}, {0x62ab5d82, 0x23, nullptr}, {0x905e63b6, 0x26, nullptr}, {0x7c5a40ef, 0x2a, nullptr},
+	{0x6d809377, -1, u"C:\\Program Files"}, {0xf7f1ed05, 0x2b, nullptr}, {0xde974d24, 0x2c, nullptr}, {0xf38bf404, 0x24, nullptr},
+	{0x1ac14e77, 0x25, nullptr}, {0xd65231b0, -1, u"C:\\Windows\\SysWOW64"}, {0x5e6c858f, 0x28, nullptr}, {0xfd228cb7, 0x14, nullptr},
+	{0xdfdf76a2, -1, u"C:\\Users\\Public"}, {0x625b53c3, 0x0b, nullptr}, {0xa77f5d77, 0x02, nullptr}, {0xb97d20bb, 0x07, nullptr},
+	{0x352481e8, 0x20, nullptr}, {0x2b0f765d, 0x21, nullptr}, {0xd9dc8a3b, 0x22, nullptr}, {0x4c5c32ff, -1, u"%PROFILE%\\Saved Games"},
+	{0x1777f761, 0x06, nullptr}, {0xa4115719, 0x16, nullptr}, {0x0139d44e, 0x17, nullptr}, {0xae50c081, 0x27, nullptr}};
+
 // The double-NUL terminated file lists of SHFileOperation.
 std::vector<std::u16string> file_list(ApiCall &call, uint64_t address)
 {
@@ -82,6 +99,43 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		if (const auto resolved = paths.resolve(*location); resolved && csidl & 0x8000)
 			std::filesystem::create_directories(resolved->host);
 		call.put_wide(call[4], *location, 260);
+		call.ret(0);
+	});
+	// A known folder id names the folder; the path comes in memory the program frees with CoTaskMemFree.
+	registry.add("SHGetKnownFolderPath", 4, [&paths, &context](ApiCall &call) {
+		if (!call[0] || !call[3]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const uint32_t first = call.load<uint32_t>(call[0]);
+		const bool wow64 = call.process.mode() == NativeMode::x86;
+		std::optional<std::u16string> location;
+		for (const auto &folder : known_folders) {
+			if (folder.first != first)
+				continue;
+			if (folder.csidl >= 0)
+				location = folder_for(folder.csidl, paths.user_profile(), wow64);
+			else {
+				location = std::u16string(folder.path);
+				if (const auto at = location->find(u"%PROFILE%"); at != location->npos)
+					location->replace(at, 9, paths.user_profile());
+			}
+			break;
+		}
+		if (!location) {
+			call.ret(0x80070002U);
+			return;
+		}
+		// KF_FLAG_CREATE makes the directory.
+		if (const auto resolved = paths.resolve(*location); resolved && (call.u32(1) & 0x8000))
+			std::filesystem::create_directories(resolved->host);
+		const auto memory = context.allocator.allocate((location->size() + 1) * 2, true);
+		if (!memory) {
+			call.ret(0x8007000EU);
+			return;
+		}
+		call.put_wide(memory, *location, location->size() + 1);
+		call.store_pointer(call[3], memory);
 		call.ret(0);
 	});
 	// A folder location as an item id list. Programs treat it as opaque: one item that carries the path, then the terminating empty item.

@@ -13,6 +13,7 @@
 #endif
 #endif
 
+#include <set>
 #include <filesystem>
 #include <charconv>
 #include <chrono>
@@ -74,6 +75,7 @@ static int native_result(const raven::NativeResult &result,bool process_exit=fal
 #endif
 
 #include <cstdlib>
+#include <cstdio>
 #include <exception>
 #include <execinfo.h>
 
@@ -90,6 +92,12 @@ int main(int argc, char **argv)
 {
 	if (std::getenv("RAVEN_BACKTRACE"))
 		std::set_terminate(show_backtrace);
+	// RAVEN_TRACE_FILE=path sends the diagnostics of every process, a child program's included, to its own file path.<pid>.
+	if (const char *trace = std::getenv("RAVEN_TRACE_FILE")) {
+		const auto name = std::string(trace) + "." + std::to_string(::getpid());
+		if (!std::freopen(name.c_str(), "w", stderr))
+			return 2;
+	}
 	const std::string mode = argc > 1 ? argv[1] : "";
 	const bool dump_image = mode == "--dump-image";
 	const bool map_image = mode == "--map-image" || dump_image;
@@ -119,13 +127,14 @@ int main(int argc, char **argv)
 	}
 	// A program started by another one carries the command line and the directory its parent chose.
 	std::optional<std::string> command_line_text, directory_text;
-	int environment_fd=-1,suspended_fd=-1;
+	int environment_fd=-1,suspended_fd=-1,inherit_fd=-1;
 	for (bool more=run_process;more && argc>first_file;) {
 		const std::string_view option=argv[first_file];
 		if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
 		else if (option.starts_with("--directory=")) directory_text=std::string(option.substr(12));
 		else if (option.starts_with("--environment-fd=")) environment_fd=std::atoi(std::string(option.substr(17)).c_str());
 		else if (option.starts_with("--suspended-fd=")) suspended_fd=std::atoi(std::string(option.substr(15)).c_str());
+		else if (option.starts_with("--inherit-fd=")) inherit_fd=std::atoi(std::string(option.substr(13)).c_str());
 		else more=false;
 		if (more) ++first_file;
 	}
@@ -190,6 +199,12 @@ int main(int argc, char **argv)
 							if (std::filesystem::exists(component))
 								return read_file(component.c_str());
 						}
+						// DirectWrite is the runtime's own component too: the library name resolves to it.
+						if (!selected && name=="dwrite.dll" && entry->image.is_64) {
+							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-dwrite.dll";
+							if (std::filesystem::exists(component))
+								return read_file(component.c_str());
+						}
 						if (!selected)
 							return std::nullopt;
 						return read_file(selected->c_str());
@@ -210,19 +225,52 @@ int main(int argc, char **argv)
 					}
 					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
 					const auto component_directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "" : "x86");
+					// The libraries the program and the DLLs shipped beside it import, by lowercase file name.
+					const auto imported_libraries = [&] {
+						std::set<std::string> names;
+						std::vector<std::string> pending;
+						const auto lower = [](std::string name) {
+							for (auto &character : name)
+								if (character >= 'A' && character <= 'Z')
+									character = static_cast<char>(character + ('a' - 'A'));
+							if (name.find('.') == name.npos)
+								name += ".dll";
+							return name;
+						};
+						const auto visit = [&](const std::vector<raven::PEImport> &imports) {
+							for (const auto &symbol : imports)
+								if (names.insert(lower(symbol.module)).second)
+									pending.push_back(lower(symbol.module));
+						};
+						for (const auto &item : modules.all())
+							visit(item.second->imports);
+						while (!pending.empty()) {
+							const auto name = pending.back();
+							pending.pop_back();
+							if (const auto bytes = source(name))
+							{
+								const raven::PEImage image(*bytes);
+								visit(image.imports());
+								// A library the program loads lazily still needs its components in place.
+								for (const auto &descriptor : image.delay_imports())
+									visit(descriptor.imports);
+							}
+						}
+						return names;
+					}();
+					const auto imports_any = [&](std::initializer_list<const char *> libraries) {
+						return std::any_of(libraries.begin(), libraries.end(), [&](const char *library) {
+							const std::string_view wanted(library);
+							// A trailing '*' names a family of API set libraries.
+							if (wanted.ends_with('*'))
+								return std::any_of(imported_libraries.begin(), imported_libraries.end(), [&](const auto &name) { return name.starts_with(wanted.substr(0, wanted.size() - 1)); });
+							return imported_libraries.contains(std::string(wanted));
+						});
+					};
 					// The common controls component stands in for comctl32.dll when the program does not ship its own.
 					if (!modules.all().contains("comctl32.dll")) {
 						const auto component = component_directory / "comctl32.dll";
-						const auto imported = std::any_of(modules.all().begin(), modules.all().end(), [](const auto &item) {
-							return std::any_of(item.second->imports.begin(), item.second->imports.end(), [](const auto &symbol) {
-								auto name = symbol.module;
-								for (auto &character : name)
-									if (character >= 'A' && character <= 'Z')
-										character = static_cast<char>(character + ('a' - 'A'));
-								return name == "comctl32.dll" || name == "comctl32" || name == "user32.dll" || name == "user32";
-							});
-						});
-						if (imported && std::filesystem::exists(component))
+						if (imports_any({"comctl32.dll", "user32.dll"}) && std::filesystem::exists(component))
 							modules.add("comctl32.dll", read_file(component.c_str()));
 					}
 					// Components that stand in for parts of system libraries are loaded beside the program that imports those libraries.
@@ -230,22 +278,7 @@ int main(int argc, char **argv)
 						if (modules.all().contains(file))
 							return;
 						const auto component = component_directory / file;
-						const auto imported = std::any_of(modules.all().begin(), modules.all().end(), [&](const auto &item) {
-							return std::any_of(item.second->imports.begin(), item.second->imports.end(), [&](const auto &symbol) {
-								auto name = symbol.module;
-								for (auto &character : name)
-									if (character >= 'A' && character <= 'Z')
-										character = static_cast<char>(character + ('a' - 'A'));
-								return std::any_of(libraries.begin(), libraries.end(), [&](const char *library) {
-									const std::string_view wanted(library);
-									// A trailing '*' names a family of API set libraries.
-									if (wanted.ends_with('*'))
-										return name.starts_with(wanted.substr(0, wanted.size() - 1));
-									return name == library || name + ".dll" == library;
-								});
-							});
-						});
-						if (imported && std::filesystem::exists(component))
+						if (imports_any(libraries) && std::filesystem::exists(component))
 							modules.add(file, read_file(component.c_str()));
 					};
 					// The user32 component supplies the built-in control classes and dialog manager to programs that use user32.
@@ -271,6 +304,17 @@ int main(int argc, char **argv)
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
 						if (command_line_text) launch->command_line=raven::from_utf8(*command_line_text);
 						if (directory_text) launch->directory=raven::from_utf8(*directory_text);
+						if (inherit_fd>=0) {
+							// The handles the creator passed on arrive as descriptors, described in an anonymous file.
+							std::vector<uint8_t> bytes;
+							uint8_t chunk[4096];
+							for (ssize_t count;(count=::read(inherit_fd,chunk,sizeof(chunk)))!=0;) {
+								if (count<0) { if (errno==EINTR) continue; break; }
+								bytes.insert(bytes.end(),chunk,chunk+count);
+							}
+							::close(inherit_fd);
+							launch->inherited=raven::parse_inherited(bytes);
+						}
 						if (environment_fd>=0) {
 							// The parent's environment block arrives in an anonymous file as UTF-16.
 							std::string bytes;

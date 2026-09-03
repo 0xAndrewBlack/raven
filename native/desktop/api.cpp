@@ -41,11 +41,11 @@ std::span<const std::string_view> NativeDesktop::user_exports()
 std::span<const std::string_view> NativeDesktop::gdi_exports()
 {
 #ifdef RAVEN_SKIA
-	static constexpr std::array<std::string_view, 51> names{
-		"BitBlt", "CombineRgn", "CreateCompatibleBitmap", "CreateCompatibleDC", "CreateDIBSection", "CreateFontIndirectW", "CreatePen", "CreateRectRgn", "CreateSolidBrush", "DPtoLP", "DeleteDC", "DeleteObject", "EqualRgn", "ExcludeClipRect", "ExtTextOutW", "GdiFlush", "GetBitmapBits", "GetBkColor", "GetBkMode", "GetClipBox", "GetClipRgn", "GetCurrentObject", "GetCurrentPositionEx", "GetGraphicsMode", "GetLayout", "GetObjectA", "GetObjectType", "GetObjectW", "GetRgnBox", "GetStockObject", "GetTextColor", "GetTextExtentExPointW", "GetTextExtentPoint32W", "GetTextExtentPointW", "GetTextMetricsW", "GetViewportExtEx", "GetWindowExtEx", "IntersectClipRect", "LPtoDP", "LineTo", "MoveToEx", "OffsetRgn", "PtInRegion", "RectInRegion", "SelectClipRgn", "SelectObject", "SetBkColor", "SetBkMode", "SetRectRgn", "SetTextColor", "TextOutW"};
+	static constexpr std::array<std::string_view, 52> names{
+		"BitBlt", "CombineRgn", "CreateCompatibleBitmap", "CreateCompatibleDC", "CreateDCW", "CreateDIBSection", "CreateFontIndirectW", "CreatePen", "CreateRectRgn", "CreateSolidBrush", "DPtoLP", "DeleteDC", "DeleteObject", "EqualRgn", "ExcludeClipRect", "ExtTextOutW", "GdiFlush", "GetBitmapBits", "GetBkColor", "GetBkMode", "GetClipBox", "GetClipRgn", "GetCurrentObject", "GetCurrentPositionEx", "GetGraphicsMode", "GetLayout", "GetObjectA", "GetObjectType", "GetObjectW", "GetRgnBox", "GetStockObject", "GetTextColor", "GetTextExtentExPointW", "GetTextExtentPoint32W", "GetTextExtentPointW", "GetTextMetricsW", "GetViewportExtEx", "GetWindowExtEx", "IntersectClipRect", "LPtoDP", "LineTo", "MoveToEx", "OffsetRgn", "PtInRegion", "RectInRegion", "SelectClipRgn", "SelectObject", "SetBkColor", "SetBkMode", "SetRectRgn", "SetTextColor", "TextOutW"};
 #else
-	static constexpr std::array<std::string_view, 45> names{
-		"BitBlt", "CombineRgn", "CreateCompatibleBitmap", "CreateCompatibleDC", "CreateDIBSection", "CreateFontIndirectW", "CreatePen", "CreateRectRgn", "CreateSolidBrush", "DPtoLP", "DeleteDC", "DeleteObject", "EqualRgn", "ExcludeClipRect", "GdiFlush", "GetBitmapBits", "GetBkColor", "GetBkMode", "GetClipBox", "GetClipRgn", "GetCurrentObject", "GetCurrentPositionEx", "GetGraphicsMode", "GetLayout", "GetObjectA", "GetObjectType", "GetObjectW", "GetRgnBox", "GetStockObject", "GetTextColor", "GetViewportExtEx", "GetWindowExtEx", "IntersectClipRect", "LPtoDP", "LineTo", "MoveToEx", "OffsetRgn", "PtInRegion", "RectInRegion", "SelectClipRgn", "SelectObject", "SetBkColor", "SetBkMode", "SetRectRgn", "SetTextColor"};
+	static constexpr std::array<std::string_view, 46> names{
+		"BitBlt", "CombineRgn", "CreateCompatibleBitmap", "CreateCompatibleDC", "CreateDCW", "CreateDIBSection", "CreateFontIndirectW", "CreatePen", "CreateRectRgn", "CreateSolidBrush", "DPtoLP", "DeleteDC", "DeleteObject", "EqualRgn", "ExcludeClipRect", "GdiFlush", "GetBitmapBits", "GetBkColor", "GetBkMode", "GetClipBox", "GetClipRgn", "GetCurrentObject", "GetCurrentPositionEx", "GetGraphicsMode", "GetLayout", "GetObjectA", "GetObjectType", "GetObjectW", "GetRgnBox", "GetStockObject", "GetTextColor", "GetViewportExtEx", "GetWindowExtEx", "IntersectClipRect", "LPtoDP", "LineTo", "MoveToEx", "OffsetRgn", "PtInRegion", "RectInRegion", "SelectClipRgn", "SelectObject", "SetBkColor", "SetBkMode", "SetRectRgn", "SetTextColor"};
 #endif
 	return names;
 }
@@ -485,6 +485,11 @@ bool NativeDesktop::dispatch(std::string_view name)
 		} else environment.set_last_error(6);
 	} else if (name == "CreateCompatibleDC") {
 		result = create_dc(process.api_arguments(1)[0]);
+	} else if (name == "CreateDCW") {
+		// A display device context is created like a memory DC compatible with the screen; drawing on it stays off screen.
+		const auto args = process.api_arguments(4);
+		(void)args;
+		result = create_dc(0);
 	} else if (name == "DeleteDC") {
 		result = delete_dc(process.api_arguments(1)[0]);
 	} else if (name == "SelectObject") {

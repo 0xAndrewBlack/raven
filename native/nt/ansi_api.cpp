@@ -49,6 +49,8 @@ const Adapter adapters[] = {
 	{"CreateMutexA", {2}},
 	{"CreateEventA", {3}},
 	{"CreateProcessA", {0, 1, 7}},
+	{"CreateNamedPipeA", {0}},
+	{"WaitNamedPipeA", {0}},
 	{"CreateSemaphoreA", {3}},
 	{"CreateFileMappingA", {5}},
 	{"OpenMutexA", {2}},

@@ -43,6 +43,8 @@ std::vector<uint8_t> from_ansi_bytes(std::span<const uint8_t> ansi, uint32_t cod
 void register_registry_api(ApiRegistry &registry, KernelContext &context, NativeRegistry &hive)
 {
 	const uint32_t ansi_page = context.launch.ansi_code_page;
+	// Key handles come from the same space as every other handle, so CloseHandle and NtClose close them too.
+	hive.set_allocator([&objects = context.objects, &hive] { return objects.reserve([&hive](uint64_t key) { hive.close(key); }); });
 	const size_t handle_width = context.process.mode() == NativeMode::x86 ? 4 : 8;
 	const auto text_of = [](ApiCall &call, uint64_t address, bool wide) {
 		if (!address)
@@ -469,7 +471,11 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		}
 	});
 	registry.add("RegDeleteKeyExW", 4, [&hive, text_of, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], true)))); });
-	registry.add("RegCloseKey", 1, [&hive](ApiCall &call) { call.ret(hive.close(call[0])); });
+	registry.add("RegCloseKey", 1, [&hive, &context](ApiCall &call) {
+		const auto status = hive.close(call[0]);
+		context.objects.release_reserved(call[0]);
+		call.ret(status);
+	});
 	registry.add("RegFlushKey", 1, [](ApiCall &call) { call.ret(0); });
 	registry.add("RegNotifyChangeKeyValue", 5, [](ApiCall &call) { call.ret(0); });
 	registry.add("RegOpenCurrentUser", 2, [put_handle](ApiCall &call) {
@@ -495,7 +501,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		call.ret(0);
 	});
 	// RegGetValue filters by type (RRF_RT_*), opens the subkey itself and expands REG_EXPAND_SZ unless told not to.
-	registry.add("RegGetValueW", 7, [&hive, text_of](ApiCall &call) {
+	registry.add("RegGetValueW", 7, [&hive, &context, text_of](ApiCall &call) {
 		const uint32_t flags = call.u32(3);
 		uint64_t key = call[0];
 		uint64_t opened = 0;
@@ -511,8 +517,10 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		uint32_t type = 0;
 		std::vector<uint8_t> data;
 		auto status = hive.query(key, text_of(call, call[2], true), type, data);
-		if (opened)
+		if (opened) {
 			hive.close(opened);
+			context.objects.release_reserved(opened);
+		}
 		if (status) {
 			call.ret(status);
 			return;

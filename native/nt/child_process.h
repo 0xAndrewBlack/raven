@@ -1,5 +1,6 @@
 #pragma once
 
+#include "inherit.h"
 #include "objects.h"
 
 #include <filesystem>
@@ -84,6 +85,8 @@ struct ChildLaunch {
 	// When set, the child waits for a byte on this descriptor's other end before it runs; `gate` receives the end the parent keeps.
 	bool suspended = false;
 	int *gate = nullptr;
+	// Handles the child receives under the values they have in the creator; `descriptor` is the creator's host descriptor behind each.
+	std::vector<InheritedHandle> inherited;
 };
 
 // Starts the child; null with the Windows error in `error` when the host could not.

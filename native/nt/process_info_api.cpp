@@ -128,6 +128,27 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint64_t>(call[4], (uint64_t(cpu.tv_sec) * 1000000000ULL + uint64_t(cpu.tv_nsec)) / 100);
 		call.ret(1);
 	});
+	// Cycle counts are taken as CPU time at a nominal 1 GHz, so one nanosecond is one cycle.
+	registry.add("QueryThreadCycleTime", 2, [](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		timespec cpu{};
+		clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu);
+		call.store<uint64_t>(call[1], uint64_t(cpu.tv_sec) * 1000000000ULL + uint64_t(cpu.tv_nsec));
+		call.ret(1);
+	});
+	registry.add("QueryProcessCycleTime", 2, [is_self](ApiCall &call) {
+		if (!call[1] || !is_self(call[0])) {
+			call.fail(call[1] ? 6 : 87);
+			return;
+		}
+		timespec cpu{};
+		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu);
+		call.store<uint64_t>(call[1], uint64_t(cpu.tv_sec) * 1000000000ULL + uint64_t(cpu.tv_nsec));
+		call.ret(1);
+	});
 	registry.add("GetSystemTimes", 3, [](ApiCall &call) {
 		timespec uptime{};
 		clock_gettime(CLOCK_BOOTTIME, &uptime);

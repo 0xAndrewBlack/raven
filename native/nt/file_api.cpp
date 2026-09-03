@@ -1,3 +1,7 @@
+#include "child_process.h"
+#include "pipe.h"
+#include "section.h"
+#include "security_attributes.h"
 #include "kernel_context.h"
 #include "file_objects.h"
 #include "text.h"
@@ -172,6 +176,8 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("CreateFileW", 7, [&, resolve, missing, file_of](ApiCall &call) {
 		const auto name = call.wide(call[0]);
 		const uint32_t access = call.u32(1), disposition = call.u32(4), flags = call.u32(5);
+		if (open_pipe_client(context, call, name, access, flags))
+			return;
 		call.ret(invalid_handle);
 		if (disposition < 1 || disposition > 5) {
 			call.set_last_error(87);
@@ -180,7 +186,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		if (NativePaths::device(name)) {
 			const int descriptor = ::open("/dev/null", O_RDWR | O_CLOEXEC);
 			const auto made = objects.add_object(std::make_shared<FileObject>(descriptor, access, false, "/dev/null", u"NUL", 0));
-			call.ret(made.status ? invalid_handle : made.value);
+			{ if (!made.status && inheritable_handle(call, optional_argument(call, 3))) objects.set_inherit(made.value, true); call.ret(made.status ? invalid_handle : made.value); }
 			return;
 		}
 		const auto resolved = resolve(call, name);
@@ -201,7 +207,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 				return;
 			}
 			const auto made = objects.add_object(std::make_shared<FileObject>(descriptor, access, true, resolved->host, paths.full(name), flags));
-			call.ret(made.status ? invalid_handle : made.value);
+			{ if (!made.status && inheritable_handle(call, optional_argument(call, 3))) objects.set_inherit(made.value, true); call.ret(made.status ? invalid_handle : made.value); }
 			return;
 		}
 		int mode = want_read && want_write ? O_RDWR : want_write ? O_WRONLY : O_RDONLY;
@@ -248,9 +254,11 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		if (disposition == 2 && exists && !want_write)
 			::ftruncate(descriptor, 0);
 		const auto made = objects.add_object(std::make_shared<FileObject>(descriptor, access, false, resolved->host, paths.full(name), flags));
-		call.ret(made.status ? invalid_handle : made.value);
+		{ if (!made.status && inheritable_handle(call, optional_argument(call, 3))) objects.set_inherit(made.value, true); call.ret(made.status ? invalid_handle : made.value); }
 	});
 	registry.add("ReadFile", 5, [&, resolve, missing, file_of](ApiCall &call) {
+		if (transfer_pipe(context, call, true))
+			return;
 		// The standard handles inherited from the host read straight from their descriptors.
 		if (!file_of(call[0])) {
 			std::vector<uint8_t> buffer(std::min<uint32_t>(call.u32(2), 1 << 20));
@@ -296,6 +304,8 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("WriteFile", 5, [&, resolve, missing, file_of](ApiCall &call) {
+		if (transfer_pipe(context, call, false))
+			return;
 		const auto file = file_of(call[0]);
 		if (!file || file->directory || !file->writable()) {
 			call.fail(file ? 5 : 6);
@@ -428,7 +438,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(6);
 			return;
 		}
-		call.ret(::isatty(file->descriptor) ? 2 : 1);
+		call.ret(objects.object_as<PipeObject>(call[0]) ? 3 : ::isatty(file->descriptor) ? 2 : 1);
 	});
 	registry.add("SetEndOfFile", 1, [&, resolve, missing, file_of](ApiCall &call) {
 		const auto file = file_of(call[0]);
@@ -1001,7 +1011,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[data_argument], find_data(found->entries[0]));
 		found->next = 1;
 		const auto made = objects.add_object(found);
-		call.ret(made.status ? invalid_handle : made.value);
+		{ if (!made.status && inheritable_handle(call, optional_argument(call, 3))) objects.set_inherit(made.value, true); call.ret(made.status ? invalid_handle : made.value); }
 		call.set_last_error(0);
 	};
 	registry.add("FindFirstFileW", 2, [find_first](ApiCall &call) { find_first(call, 0, 1); });
@@ -1038,15 +1048,49 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		const auto root = call[0] ? paths.resolve(call.wide(call[0])) : paths.resolve(paths.current());
 		call.ret(root && root->exists ? 3 : 1);
 	});
-	registry.add("DuplicateHandle", 7, [&, resolve, missing, file_of, copy_file, find_first](ApiCall &call) {
-		// The current-thread pseudo handle duplicates into a real handle to the calling thread.
+	registry.add("DuplicateHandle", 7, [&, resolve, missing, file_of, find_first, copy_file](ApiCall &call) {
+		constexpr uint64_t current = UINT64_MAX;
+		constexpr uint32_t same_access = 0x2, close_source = 0x1;
+		const bool from_self = call[0] == current || objects.object_as<SelfProcessObject>(call[0]);
+		const bool to_self = call[2] == current || objects.object_as<SelfProcessObject>(call[2]);
+		if (!from_self || !to_self) {
+			// A handle can reach another process only through the channel to it, which carries no handles yet.
+			call.fail(50);
+			return;
+		}
+		if (!call[3] && !(call.u32(6) & close_source)) {
+			call.fail(87);
+			return;
+		}
+		// The current-thread pseudo handle duplicates into a real handle to the calling thread; the current-process one into the process itself.
+		std::optional<uint32_t> narrowed;
+		const bool section = objects.object_as<SectionObject>(call[1]) != nullptr;
+		if (section && !(call.u32(6) & same_access)) {
+			// A copy cannot carry rights the original lacks; asking for them is refused.
+			const uint32_t held = objects.access_of(call[1]);
+			uint32_t wanted = call.u32(4);
+			if (wanted & (0x10000000U | 0x02000000U))
+				wanted = held;
+			if (wanted & ~held) {
+				call.fail(5);
+				return;
+			}
+			narrowed = wanted;
+		}
 		const auto made = call[1] == UINT64_MAX - 1 && call[0] == UINT64_MAX ?
-			objects.add_object(std::make_shared<ThreadObject>(context.threads.find(context.threads.current_id()))) : objects.duplicate(call[1]);
+			objects.add_object(std::make_shared<ThreadObject>(context.threads.find(context.threads.current_id()))) :
+			call[1] == UINT64_MAX ? objects.add_object(std::make_shared<SelfProcessObject>()) : objects.duplicate(call[1], narrowed);
 		if (made.status) {
 			call.fail(6);
 			return;
 		}
-		call.store<uint64_t>(call[3], made.value);
+		if (call.u32(5))
+			objects.set_inherit(made.value, true);
+		if (call[3])
+			call.store_pointer(call[3], made.value);
+		// DUPLICATE_CLOSE_SOURCE closes the original whatever else happens.
+		if ((call.u32(6) & close_source) && call[1] != UINT64_MAX && call[1] != UINT64_MAX - 1)
+			objects.close(call[1]);
 		call.ret(1);
 	});
 }

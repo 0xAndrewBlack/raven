@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -20,6 +21,8 @@ public:
 	uint32_t create(uint64_t parent, std::u16string_view path, uint64_t &key, uint32_t &disposition);
 	uint32_t open(uint64_t parent, std::u16string_view path, uint64_t &key);
 	uint32_t close(uint64_t key);
+	// Where key handle values come from: a program's registry keys and kernel objects share one handle space when this names its source.
+	void set_allocator(std::function<uint64_t()> allocator) { allocate = std::move(allocator); }
 	uint32_t query(uint64_t key, std::u16string_view name, uint32_t &type, std::vector<uint8_t> &data) const;
 	uint32_t set(uint64_t key, std::u16string_view name, uint32_t type, std::span<const uint8_t> data);
 	size_t handles() const { return open_keys.size(); }
@@ -40,6 +43,17 @@ private:
 	std::map<std::u16string, Key> keys;
 	std::map<uint64_t, std::u16string> open_keys;
 	uint64_t next = 0x300;
+	std::function<uint64_t()> allocate;
+	uint64_t new_key_handle()
+	{
+		if (allocate)
+			return allocate();
+		if (next > UINT32_MAX - 4)
+			return 0;
+		const auto value = next;
+		next += 4;
+		return value;
+	}
 	bool resolve(uint64_t parent, std::u16string_view path, std::u16string &folded, std::u16string &display) const;
 	// Folded paths of the immediate subkeys of a folded key path, in key order.
 	std::vector<std::u16string> children(const std::u16string &folded) const;

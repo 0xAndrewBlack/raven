@@ -32,6 +32,16 @@ public:
 	int64_t count = 0, maximum = 0;
 };
 
+// A registered wait: the callback runs on a guest thread once the object is signaled or the time runs out.
+class WaitRegistration : public KernelObject {
+public:
+	uint64_t handle = 0, callback = 0, context = 0;
+	uint32_t timeout = 0, flags = 0;
+	std::chrono::steady_clock::time_point deadline;
+	bool active = true;
+	std::shared_ptr<GuestThread> running;
+};
+
 class WorkObject : public KernelObject {
 public:
 	uint64_t callback = 0, parameter = 0;
@@ -593,6 +603,79 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		}, std::nullopt);
 	});
 	registry.add("CloseThreadpoolWork", 1, [&objects](ApiCall &call) { objects.close(call[0]); });
+
+	// Registered waits are checked whenever every thread waits; a satisfied one starts its callback on a new guest thread.
+	auto registrations = std::make_shared<std::vector<std::shared_ptr<WaitRegistration>>>();
+	threads.add_pump([registrations, &objects, &threads] {
+		const auto now = std::chrono::steady_clock::now();
+		for (const auto &wait : *registrations) {
+			if (!wait->active || (wait->running && wait->running->state != GuestThread::State::done))
+				continue;
+			const bool signaled = objects.signaled(wait->handle, 0) == 1;
+			const bool expired = wait->timeout != UINT32_MAX && now >= wait->deadline;
+			if (!signaled && !expired)
+				continue;
+			if (signaled)
+				objects.consume(wait->handle, 0);
+			const auto thread = threads.create(wait->callback, wait->context, 1024 * 1024, false);
+			thread->arguments = {wait->context, signaled ? 0u : 1u};
+			wait->running = thread;
+			if (wait->flags & 0x8)
+				wait->active = false;
+			else
+				wait->deadline = now + std::chrono::milliseconds(wait->timeout);
+		}
+	});
+	threads.add_external([registrations] {
+		return std::any_of(registrations->begin(), registrations->end(), [](const auto &wait) { return wait->active; });
+	});
+	const auto register_wait = [&objects, registrations](ApiCall &call) {
+		if (!call[0] || !call[2]) {
+			call.fail(87, 0);
+			return;
+		}
+		const auto copy = objects.duplicate(call[1]);
+		if (copy.status) {
+			call.fail(6, 0);
+			return;
+		}
+		auto wait = std::make_shared<WaitRegistration>();
+		wait->handle = copy.value;
+		wait->callback = call[2];
+		wait->context = call[3];
+		wait->timeout = call.u32(4);
+		wait->flags = call.u32(5);
+		wait->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait->timeout);
+		const auto made = objects.add_object(wait);
+		if (made.status) {
+			objects.close(copy.value);
+			call.fail(8, 0);
+			return;
+		}
+		registrations->push_back(wait);
+		call.store_pointer(call[0], made.value);
+		call.ret(1);
+	};
+	registry.add("RegisterWaitForSingleObject", 6, register_wait);
+	const auto unregister_wait = [&objects, &threads, registrations](ApiCall &call, bool drain) {
+		const auto wait = objects.object_as<WaitRegistration>(call[0]);
+		if (!wait) {
+			call.fail(6);
+			return;
+		}
+		wait->active = false;
+		// A caller that passes INVALID_HANDLE_VALUE waits for a callback that is still running.
+		if (drain && call[1] == UINT64_MAX && wait->running)
+			threads.block([wait] { return wait->running->state == GuestThread::State::done; }, std::nullopt);
+		registrations->erase(std::remove(registrations->begin(), registrations->end(), wait), registrations->end());
+		objects.close(wait->handle);
+		objects.close(call[0]);
+		if (drain && call[1] && call[1] != UINT64_MAX)
+			objects.set_event(call[1], true);
+		call.ret(1);
+	};
+	registry.add("UnregisterWait", 1, [unregister_wait](ApiCall &call) { unregister_wait(call, false); });
+	registry.add("UnregisterWaitEx", 2, [unregister_wait](ApiCall &call) { unregister_wait(call, true); });
 }
 
 }

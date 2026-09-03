@@ -199,7 +199,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		const auto a = call.load<uint64_t>(call[0]), b = call.load<uint64_t>(call[1]);
 		call.ret(uint32_t(a < b ? -1 : a > b ? 1 : 0));
 	});
-	registry.add("GetTimeZoneInformation", 1, [](ApiCall &call) {
+	const auto zone_information = [](ApiCall &call, bool dynamic) {
 		const time_t now = ::time(nullptr);
 		tm january{}, july{};
 		const time_t year_start = now - now % (365 * 86400);
@@ -208,7 +208,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		::localtime_r(&middle, &july);
 		const auto first = zone_at(year_start), second = zone_at(middle), current = zone_at(now);
 		const int standard = std::min(first.offset_minutes, second.offset_minutes), daylight = std::max(first.offset_minutes, second.offset_minutes);
-		std::vector<uint8_t> bytes(172);
+		// The dynamic form adds a 128-character key name and a flag after the 172 bytes of the plain one.
+		std::vector<uint8_t> bytes(dynamic ? 432 : 172);
 		const int32_t bias = -standard;
 		std::memcpy(bytes.data(), &bias, 4);
 		const auto standard_name = from_utf8(first.offset_minutes <= second.offset_minutes ? first.name : second.name).substr(0, 31);
@@ -217,9 +218,15 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		std::memcpy(bytes.data() + 88, daylight_name.data(), daylight_name.size() * 2);
 		const int32_t daylight_bias = standard - daylight;
 		std::memcpy(bytes.data() + 168, &daylight_bias, 4);
+		if (dynamic) {
+			const auto key_name = from_utf8(first.offset_minutes <= second.offset_minutes ? first.name : second.name).substr(0, 127);
+			std::memcpy(bytes.data() + 172, key_name.data(), key_name.size() * 2);
+		}
 		call.write(call[0], bytes);
 		call.ret(standard == daylight ? 0 : current.daylight ? 2 : 1);
-	});
+	};
+	registry.add("GetTimeZoneInformation", 1, [zone_information](ApiCall &call) { zone_information(call, false); });
+	registry.add("GetDynamicTimeZoneInformation", 1, [zone_information](ApiCall &call) { zone_information(call, true); });
 	registry.add("SystemTimeToTzSpecificLocalTime", 3, [](ApiCall &call) {
 		const auto ticks = ticks_from(call.read(call[1], 16));
 		if (!ticks) {

@@ -17,21 +17,30 @@ import sys
 
 LIBRARIES = """advapi32 bcrypt comctl32 comdlg32 crypt32 dbghelp dwmapi gdi32 imm32 kernel32 ole32 oleaut32 psapi
 sensapi setupapi shell32 shlwapi user32 uxtheme version wininet winmm wintrust ws2_32 wsock32
-bcryptprimitives cfgmgr32 dhcpcsvc dnsapi dwrite hid imagehlp iphlpapi ntdll ktmw32 msimg32 mswsock ncrypt netapi32 opengl32 glu32 powrprof pdh runtimeobject winspool secur32 shcore userenv winhttp wtsapi32""".split()
+bcryptprimitives cfgmgr32 dhcpcsvc dnsapi hid imagehlp iphlpapi ntdll ktmw32 msimg32 mswsock ncrypt netapi32 opengl32 glu32 powrprof pdh runtimeobject winspool ravenhost secur32 shcore userenv wevtapi winhttp wtsapi32""".split()
 # Real exports whose names begin with an underscore, which the generic filter drops.
 # The interlocked functions are compiler intrinsics in the import libraries, yet kernel32 exports them and programs import them by name.
 INTERLOCKED = {"InterlockedIncrement": 1, "InterlockedDecrement": 1, "InterlockedExchange": 2, "InterlockedExchangeAdd": 2,
                "InterlockedCompareExchange": 3, "InterlockedCompareExchange64": 5}
 EXTRA = {"runtimeobject": ["RoActivateInstance", "RoGetActivationFactory", "RoInitialize", "RoUninitialize", "RoOriginateError", "RoOriginateErrorW",
-                           "RoGetAgileReference", "RoRegisterActivationFactories", "RoRevokeActivationFactories", "RoGetApartmentIdentifier"], "ws2_32": ["__WSAFDIsSet", "AcceptEx", "ConnectEx", "DisconnectEx", "GetAcceptExSockaddrs"], "wsock32": ["__WSAFDIsSet"], "comctl32": ["_TrackMouseEvent"], "kernel32": ["_hread", "_hwrite", "_lclose", "_lcreat", "_llseek", "_lopen", "_lread", "_lwrite", "FlsGetValue2", *INTERLOCKED]}
-EXTRA_WORDS = {"kernel32": {**INTERLOCKED, "FlsGetValue2": 1}, "ws2_32": {"__WSAFDIsSet": 2, "AcceptEx": 8, "ConnectEx": 7, "DisconnectEx": 4, "GetAcceptExSockaddrs": 8}, "wsock32": {"__WSAFDIsSet": 2}}
+                           "RoGetAgileReference", "RoRegisterActivationFactories", "RoRevokeActivationFactories", "RoGetApartmentIdentifier"], "ws2_32": ["__WSAFDIsSet", "AcceptEx", "ConnectEx", "DisconnectEx", "GetAcceptExSockaddrs"], "wsock32": ["__WSAFDIsSet"], "comctl32": ["_TrackMouseEvent"], "kernel32": ["QueryUnbiasedInterruptTimePrecise", "QueryInterruptTimePrecise", "_hread", "_hwrite", "_lclose", "_lcreat", "_llseek", "_lopen", "_lread", "_lwrite", "FlsGetValue2", *INTERLOCKED]}
+EXTRA_WORDS = {"kernel32": {**INTERLOCKED, "FlsGetValue2": 1, "QueryUnbiasedInterruptTimePrecise": 1, "QueryInterruptTimePrecise": 1}, "ws2_32": {"__WSAFDIsSet": 2, "AcceptEx": 8, "ConnectEx": 7, "DisconnectEx": 4, "GetAcceptExSockaddrs": 8}, "wsock32": {"__WSAFDIsSet": 2}}
 # Libraries whose file does not end in .dll.
 FILE_NAMES = {"winspool": "winspool.drv"}
 DIRECTORY = Path("/usr/x86_64-w64-mingw32/lib")
 DIRECTORY32 = Path("/usr/i686-w64-mingw32/lib")
 
 
+# Libraries that are not Windows ones: the host services Raven's own components import.
+NAMES_ONLY = {"ravenhost": ["RavenFontClose", "RavenFontGlyphs", "RavenFontInfo", "RavenFontMetrics", "RavenFontName", "RavenFontOpen",
+                            "RavenFontOutline", "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace"]}
+NAMES_ONLY_WORDS = {"RavenFontClose": 1, "RavenFontGlyphs": 4, "RavenFontInfo": 2, "RavenFontMetrics": 3, "RavenFontName": 4, "RavenFontOpen": 3,
+                    "RavenFontOutline": 4, "RavenFontRender": 10, "RavenFontScan": 2, "RavenFontTable": 5, "RavenTrace": 1}
+
+
 def exports(library):
+    if library in NAMES_ONLY:
+        return sorted(NAMES_ONLY[library])
     output = subprocess.run(["x86_64-w64-mingw32-nm", "-g", "--defined-only", str(DIRECTORY / f"lib{library}.a")],
                             check=True, capture_output=True, text=True).stdout
     names = set()
@@ -44,6 +53,8 @@ def exports(library):
 
 def stdcall_words(library):
     """Argument words by function name from the decorated symbols of the 32-bit import library (_Name@bytes)."""
+    if library in NAMES_ONLY:
+        return {name: NAMES_ONLY_WORDS[name] for name in NAMES_ONLY[library]}
     output = subprocess.run(["i686-w64-mingw32-nm", "-g", "--defined-only", str(DIRECTORY32 / f"lib{library}.a")],
                             check=True, capture_output=True, text=True).stdout
     words = {}

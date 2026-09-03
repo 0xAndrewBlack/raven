@@ -6,6 +6,7 @@
 #include "objects.h"
 #include "paths.h"
 #include "completion_port.h"
+#include "pipe.h"
 #include "threads.h"
 #include <string>
 #include "pe/module_set.h"
@@ -49,6 +50,8 @@ struct KernelContext {
 	std::function<std::u16string()> environment_block;
 	// Started operations that finish later, such as overlapped socket transfers.
 	std::shared_ptr<Reactor> reactor = std::make_shared<Reactor>();
+	// Named pipes served by this process and the pipe operations that have not finished.
+	std::shared_ptr<PipeState> pipes = std::make_shared<PipeState>();
 };
 
 // Windows FILETIME ticks are 100 ns units since 1601-01-01.
@@ -71,10 +74,16 @@ void register_process_api(ApiRegistry &registry, KernelContext &context);
 void register_security_api(ApiRegistry &registry, KernelContext &context);
 void register_child_process_api(ApiRegistry &registry, KernelContext &context);
 void register_winsock_api(ApiRegistry &registry, KernelContext &context);
+void register_host_api(ApiRegistry &registry, KernelContext &context);
+void register_job_api(ApiRegistry &registry, KernelContext &context);
 void register_process_info_api(ApiRegistry &registry, KernelContext &context);
 void register_crypt32_api(ApiRegistry &registry, KernelContext &context);
+void register_font_service(ApiRegistry &registry, KernelContext &context);
 // Starts the program an application name or command line names, looked up the way Windows does; null with the Windows error otherwise.
 std::shared_ptr<class ProcessObject> start_program(KernelContext &context, const std::u16string &application, const std::u16string &line,
-	const std::u16string &directory, const int (&standard)[3], const std::u16string &environment, int *gate, uint32_t &error);
+	const std::u16string &directory, const int (&standard)[3], const std::u16string &environment, int *gate, uint32_t &error,
+	std::vector<InheritedHandle> inherited = {});
+// Puts a child process into a job; false with the Windows error otherwise.
+bool assign_to_job(KernelContext &context, uint64_t job, const std::shared_ptr<class ProcessObject> &process, uint32_t &error);
 
 }

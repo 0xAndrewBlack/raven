@@ -1,8 +1,15 @@
+#include "host_names.h"
 #include "kernel_context.h"
-#include "file_objects.h"
+#include "section.h"
+#include "security_attributes.h"
+#include "text.h"
 
 #include <cstring>
+#include <fcntl.h>
+#include <filesystem>
 #include <map>
+#include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -10,19 +17,64 @@ namespace raven {
 
 namespace {
 
-// A file mapping keeps the section name and size; views copy the file in and write it back on unmap.
-class MappingObject : public KernelObject {
-public:
-	std::shared_ptr<FileObject> file;
-	uint64_t size = 0;
-	uint32_t protection = 0;
-};
-
 struct View {
-	std::shared_ptr<MappingObject> mapping;
+	std::shared_ptr<SectionObject> mapping;
 	uint64_t offset = 0, size = 0;
 	bool writable = false;
 };
+
+// Where the named sections of the prefix live: one host file each, held by every process that has the section open.
+std::filesystem::path section_directory()
+{
+	std::filesystem::path base;
+	if (const char *runtime = std::getenv("XDG_RUNTIME_DIR"); runtime && *runtime)
+		base = runtime;
+	else
+		base = NativePrefix::from_environment().root();
+	auto directory = base / ("raven-sections-" + prefix_tag());
+	std::error_code error;
+	std::filesystem::create_directories(directory, error);
+	return directory;
+}
+
+std::string upper_utf8(const std::u16string &name)
+{
+	auto text = to_utf8(name);
+	for (auto &character : text)
+		character = char(std::toupper(static_cast<unsigned char>(character)));
+	return text;
+}
+
+// Opens the host file of a named section and holds a shared lock on it. A creator that finds the file free makes it new; one that finds
+// it held opens the section that exists. The lock is what tells a live section from the file a past run left.
+int open_named_section(const std::u16string &name, uint64_t size, bool create, bool &existed, std::string &path, uint32_t &error)
+{
+	existed = false;
+	path = (section_directory() / hex_text(name_hash(upper_utf8(name)))).string();
+	const int descriptor = ::open(path.c_str(), (create ? O_CREAT : 0) | O_RDWR | O_CLOEXEC, 0600);
+	if (descriptor < 0) {
+		error = errno == ENOENT ? 2 : 5;
+		return -1;
+	}
+	if (::flock(descriptor, LOCK_EX | LOCK_NB) == 0) {
+		if (create) {
+			if (::ftruncate(descriptor, 0) || ::ftruncate(descriptor, off_t(size))) {
+				::close(descriptor);
+				error = 8;
+				return -1;
+			}
+			::flock(descriptor, LOCK_SH);
+			return descriptor;
+		}
+		// Nobody holds the file: the section is gone.
+		::close(descriptor);
+		error = 2;
+		return -1;
+	}
+	::flock(descriptor, LOCK_SH);
+	existed = true;
+	return descriptor;
+}
 
 }
 
@@ -111,7 +163,9 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("HeapCompact", 2, [](ApiCall &call) { call.ret(0x10000); });
 
 	registry.add("CreateFileMappingW", 6, [&](ApiCall &call) {
-		auto mapping = std::make_shared<MappingObject>();
+		auto mapping = std::make_shared<SectionObject>();
+		const auto name = call[5] ? call.wide(call[5], 260) : std::u16string();
+		bool existed = false;
 		if (call[0] != UINT64_MAX) {
 			mapping->file = objects.object_as<FileObject>(call[0]);
 			if (!mapping->file) {
@@ -127,6 +181,26 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 				call.fail(87);
 				return;
 			}
+			if (name.empty()) {
+				mapping->descriptor = ::memfd_create("raven-section", MFD_CLOEXEC);
+				if (mapping->descriptor < 0 || ::ftruncate(mapping->descriptor, off_t(mapping->size))) {
+					call.fail(8);
+					return;
+				}
+			} else {
+				uint32_t error = 0;
+				mapping->descriptor = open_named_section(name, mapping->size, true, existed, mapping->backing, error);
+				if (mapping->descriptor < 0) {
+					call.fail(error);
+					return;
+				}
+				mapping->name = name;
+				if (existed) {
+					struct stat metadata{};
+					::fstat(mapping->descriptor, &metadata);
+					mapping->size = uint64_t(metadata.st_size);
+				}
+			}
 		}
 		mapping->protection = call.u32(2);
 		const auto made = objects.add_object(mapping);
@@ -134,20 +208,101 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(8);
 			return;
 		}
+		// SECTION_ALL_ACCESS: the rights of a section are kept per handle so a copy can give some up.
+		objects.set_access(made.value, 0xf001f);
+		if (inheritable_handle(call, call[1]))
+			objects.set_inherit(made.value, true);
+		call.set_last_error(existed ? 183 : 0);
 		call.ret(made.value);
+	});
+	registry.add("OpenFileMappingW", 3, [&](ApiCall &call) {
+		if (!call[2]) {
+			call.fail(87);
+			return;
+		}
+		auto mapping = std::make_shared<SectionObject>();
+		mapping->name = call.wide(call[2], 260);
+		bool existed = false;
+		uint32_t error = 0;
+		mapping->descriptor = open_named_section(mapping->name, 0, false, existed, mapping->backing, error);
+		if (mapping->descriptor < 0) {
+			call.fail(error);
+			return;
+		}
+		struct stat metadata{};
+		::fstat(mapping->descriptor, &metadata);
+		mapping->size = uint64_t(metadata.st_size);
+		mapping->protection = 4;
+		const auto made = objects.add_object(mapping);
+		if (made.status) {
+			call.fail(8);
+			return;
+		}
+		objects.set_inherit(made.value, call.u32(1) != 0);
+		// An opened section carries the rights the caller asked for.
+		objects.set_access(made.value, call.u32(0) & ~0xf0000000U ? (call.u32(0) & ~0xf0000000U) : 0xf001f);
+		call.ret(made.value);
+	});
+	// SectionBasicInformation: the base address, the allocation attributes and the maximum size of the section.
+	registry.add("NtQuerySection", 5, [&](ApiCall &call) {
+		constexpr uint32_t status_invalid_handle = 0xc0000008U, status_invalid_info_class = 0xc0000003U, status_info_length_mismatch = 0xc0000004U, sec_commit = 0x8000000;
+		const auto mapping = objects.object_as<SectionObject>(call[0]);
+		if (!mapping) {
+			call.ret(status_invalid_handle);
+			return;
+		}
+		if (call.u32(1) != 0) {
+			call.ret(status_invalid_info_class);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		const size_t layout = width == 8 ? 24 : 16;
+		if (call.u32(3) < layout) {
+			call.ret(status_info_length_mismatch);
+			return;
+		}
+		std::vector<uint8_t> bytes(layout, 0);
+		const uint32_t attributes = sec_commit;
+		std::memcpy(bytes.data() + width, &attributes, 4);
+		std::memcpy(bytes.data() + layout - 8, &mapping->size, 8);
+		call.write(call[2], bytes);
+		if (call[4])
+			call.store<uint32_t>(call[4], uint32_t(layout));
+		call.ret(0);
 	});
 	const auto views_owner = std::make_shared<std::map<uint64_t, View>>();
 	auto &views = *views_owner;
 	registry.add("MapViewOfFile", 5, [&, views_owner](ApiCall &call) {
-		const auto mapping = objects.object_as<MappingObject>(call[0]);
+		const auto mapping = objects.object_as<SectionObject>(call[0]);
 		if (!mapping) {
 			call.fail(6);
 			return;
+		}
+		// The handle must carry the right for the kind of view: writing needs the map-write right, reading the map-read right.
+		if (mapping->descriptor >= 0) {
+			const uint32_t need = (call.u32(1) & 0x2) ? 0x2U : 0x4U;
+			if (!(objects.access_of(call[0]) & need)) {
+				call.fail(5);
+				return;
+			}
 		}
 		const uint64_t offset = uint64_t(call.u32(2)) << 32 | call.u32(3);
 		const uint64_t size = call[4] ? call[4] : mapping->size - offset;
 		if (offset > mapping->size || size > mapping->size - offset) {
 			call.fail(87);
+			return;
+		}
+		// A view of shared memory maps the host file itself; the other kind is an allocation the file is read into.
+		if (mapping->descriptor >= 0) {
+			const uint32_t rights = call.u32(1);
+			const uint32_t access = rights & 0x2 ? ((rights & 0x20) ? 0x40 : 0x04) : rights & 0x1 ? 0x08 : (rights & 0x20) ? 0x20 : 0x02;
+			const auto view = memory.map_view(mapping->descriptor, offset, size, access);
+			if (view.status) {
+				call.fail(view.status == 0xc0000017U ? 8 : 87);
+				return;
+			}
+			views[view.address] = {mapping, offset, size, bool(rights & 2)};
+			call.ret(view.address);
 			return;
 		}
 		const auto range = memory.allocate(0, (size + 4095) & ~uint64_t(4095), 0x3000, 4);

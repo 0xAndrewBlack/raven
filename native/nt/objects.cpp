@@ -1,4 +1,8 @@
 #include "objects.h"
+#include "api.h"
+
+#include <cstdio>
+#include <cstdlib>
 
 #include <algorithm>
 #include <limits>
@@ -20,6 +24,16 @@ static std::optional<uint32_t> access_mask(uint32_t access)
 	return mapped;
 }
 
+uint64_t NativeObjects::take()
+{
+	while (handles.contains(next)) next += 4;
+	const auto value = next;
+	next += 4;
+	static const bool traced = std::getenv("RAVEN_TRACE_HANDLES") != nullptr;
+	if (traced) std::fprintf(stderr, "handle %llx made by %s\n", static_cast<unsigned long long>(value), api_in_progress);
+	return value;
+}
+
 NativeObjectResult NativeObjects::create_event(uint32_t access, uint32_t type, bool signaled)
 {
 	if (type>1)
@@ -30,9 +44,8 @@ NativeObjectResult NativeObjects::create_event(uint32_t access, uint32_t type, b
 	std::lock_guard lock(mutex);
 	if (handles.size()>=limit || next>UINT32_MAX-4)
 		return {0,0xc000009aU};
-	const auto handle=next;
+	const auto handle=take();
 	handles.emplace(handle,Handle{std::make_shared<Event>(type,signaled),*mapped,{}});
-	next+=4;
 	return {handle};
 }
 
@@ -56,9 +69,8 @@ NativeObjectResult NativeObjects::create_named_event(const std::u16string &name,
 		shared=std::make_shared<Event>(type,signaled);
 		named_events[key]=shared;
 	}
-	const auto handle=next;
+	const auto handle=take();
 	handles.emplace(handle,Handle{shared,*mapped,{}});
-	next+=4;
 	return {handle};
 }
 
@@ -75,9 +87,8 @@ NativeObjectResult NativeObjects::open_named_event(const std::u16string &name, u
 	if (!shared) return {0,0xc0000034U};
 	if (handles.size()>=limit || next>UINT32_MAX-4)
 		return {0,0xc000009aU};
-	const auto handle=next;
+	const auto handle=take();
 	handles.emplace(handle,Handle{shared,*mapped,{}});
-	next+=4;
 	return {handle};
 }
 
@@ -96,9 +107,8 @@ NativeObjectResult NativeObjects::add_object(std::shared_ptr<KernelObject> objec
 	std::lock_guard lock(mutex);
 	if (handles.size()>=limit || next>UINT32_MAX-4)
 		return {0,0xc000009aU};
-	const auto handle=next;
+	const auto handle=take();
 	handles.emplace(handle,Handle{{},0x1f0003,{},std::move(object)});
-	next+=4;
 	return {handle};
 }
 
@@ -146,7 +156,7 @@ void NativeObjects::consume(uint64_t handle, uint32_t thread)
 	}
 }
 
-NativeObjectResult NativeObjects::duplicate(uint64_t handle)
+NativeObjectResult NativeObjects::duplicate(uint64_t handle, std::optional<uint32_t> access)
 {
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
@@ -154,16 +164,92 @@ NativeObjectResult NativeObjects::duplicate(uint64_t handle)
 		return {0,invalid_handle};
 	if (handles.size()>=limit || next>UINT32_MAX-4)
 		return {0,0xc000009aU};
-	const auto copy=next;
-	next+=4;
-	handles.emplace(copy,found->second);
+	const auto copy=take();
+	// The copy is a new handle: it inherits only when the caller says so.
+	auto duplicate_handle=found->second;
+	duplicate_handle.inherit=false;
+	if (access) duplicate_handle.access=*access;
+	handles.emplace(copy,std::move(duplicate_handle));
 	return {copy};
+}
+
+uint32_t NativeObjects::access_of(uint64_t handle) const
+{
+	std::lock_guard lock(mutex);
+	const auto found=handles.find(handle);
+	return found==handles.end() ? 0 : found->second.access;
+}
+
+void NativeObjects::set_access(uint64_t handle, uint32_t access)
+{
+	std::lock_guard lock(mutex);
+	if (const auto found=handles.find(handle); found!=handles.end())
+		found->second.access=access;
+}
+
+void NativeObjects::set_inherit(uint64_t handle, bool inherit)
+{
+	std::lock_guard lock(mutex);
+	if (const auto found=handles.find(handle); found!=handles.end())
+		found->second.inherit=inherit;
+}
+
+bool NativeObjects::inherit(uint64_t handle) const
+{
+	std::lock_guard lock(mutex);
+	const auto found=handles.find(handle);
+	return found!=handles.end() && found->second.inherit;
+}
+
+std::vector<uint64_t> NativeObjects::inheritable() const
+{
+	std::lock_guard lock(mutex);
+	std::vector<uint64_t> result;
+	for (const auto &[value,handle] : handles)
+		if (handle.inherit)
+			result.push_back(value);
+	return result;
+}
+
+bool NativeObjects::adopt(uint64_t handle, std::shared_ptr<KernelObject> object, bool inherit)
+{
+	std::lock_guard lock(mutex);
+	if (handles.contains(handle))
+		return false;
+	handles.emplace(handle,Handle{{},0x1f0003,{},std::move(object),inherit});
+	return true;
 }
 
 uint32_t NativeObjects::close(uint64_t handle)
 {
+	static const bool traced = std::getenv("RAVEN_TRACE_HANDLES") != nullptr;
+	if (traced) std::fprintf(stderr, "handle %llx closed by %s\n", static_cast<unsigned long long>(handle), api_in_progress);
+	std::shared_ptr<KernelObject> generic;
+	{
+		std::lock_guard lock(mutex);
+		const auto found=handles.find(handle);
+		if (found==handles.end()) return invalid_handle;
+		generic=std::move(found->second.generic);
+		handles.erase(found);
+	}
+	if (const auto reserved=std::dynamic_pointer_cast<ReservedObject>(generic); reserved && reserved->on_close)
+		reserved->on_close(handle);
+	return 0;
+}
+
+uint64_t NativeObjects::reserve(std::function<void(uint64_t)> on_close)
+{
+	auto object=std::make_shared<ReservedObject>();
+	object->on_close=std::move(on_close);
+	const auto made=add_object(object);
+	return made.status ? 0 : made.value;
+}
+
+void NativeObjects::release_reserved(uint64_t handle)
+{
 	std::lock_guard lock(mutex);
-	return handles.erase(handle) ? 0 : invalid_handle;
+	if (const auto found=handles.find(handle); found!=handles.end() && std::dynamic_pointer_cast<ReservedObject>(found->second.generic))
+		handles.erase(found);
 }
 
 NativeObjectResult NativeObjects::set_event(uint64_t handle, bool signaled)

@@ -2,16 +2,28 @@
 
 #ifdef RAVEN_OPENSSL
 #include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
 #include <openssl/x509v3.h>
 #endif
 
+#include "prefix.h"
+
+#include <array>
 #include <chrono>
 #include <cstring>
+#include <fcntl.h>
+#include <fstream>
 #include <map>
 #include <mutex>
+#include <optional>
+#include <span>
+#include <unistd.h>
 
 namespace raven {
 
@@ -22,6 +34,43 @@ namespace {
 constexpr uint32_t error_asn1_bad_tag = 0x8009310b, trust_not_time_valid = 0x1, trust_not_signature_valid = 0x8, trust_revoked = 0x4,
 	trust_untrusted_root = 0x20, trust_partial_chain = 0x10000, trust_self_signed = 0x8;
 constexpr uint32_t store_provider_memory = 2, store_provider_system_a = 9, store_provider_system_w = 10;
+
+constexpr uint32_t error_invalid_data = 13, error_invalid_parameter = 87;
+// A protected blob: the magic, the length of the description in bytes, the description as UTF-16, the IV, the tag and the ciphertext.
+constexpr char protected_magic[4] = {'R', 'V', 'D', 'P'};
+
+// The secret behind CryptProtectData lives in the prefix, so blobs open again in later runs of the same prefix and nowhere else.
+std::array<uint8_t, 32> protection_secret()
+{
+	static std::mutex lock;
+	std::lock_guard guard(lock);
+	const auto path = NativePrefix::from_environment().root() / "dpapi.key";
+	std::array<uint8_t, 32> secret{};
+	{
+		std::ifstream input(path, std::ios::binary);
+		if (input.read(reinterpret_cast<char *>(secret.data()), secret.size()) && size_t(input.gcount()) == secret.size())
+			return secret;
+	}
+	RAND_bytes(secret.data(), int(secret.size()));
+	const int descriptor = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	if (descriptor >= 0) {
+		const auto written = ::write(descriptor, secret.data(), secret.size());
+		::close(descriptor);
+		(void)written;
+	} else if (std::ifstream input(path, std::ios::binary); input.read(reinterpret_cast<char *>(secret.data()), secret.size())) {
+		// Another process of the prefix made the key first.
+	}
+	return secret;
+}
+
+std::array<uint8_t, 32> protection_key(std::span<const uint8_t> entropy)
+{
+	const auto secret = protection_secret();
+	std::array<uint8_t, 32> key{};
+	unsigned int length = 0;
+	HMAC(EVP_sha256(), secret.data(), int(secret.size()), entropy.data(), entropy.size(), key.data(), &length);
+	return key;
+}
 
 using X509Pointer = std::unique_ptr<X509, decltype(&X509_free)>;
 
@@ -424,6 +473,115 @@ void register_crypt32_api(ApiRegistry &registry, KernelContext &context)
 		call.store_pointer(call[7], block);
 		call.ret(1);
 		(void)total;
+	});
+
+	// Data protection: the blob is sealed with AES-256-GCM under a key made from the prefix secret and the optional entropy.
+	const auto blob_in = [](ApiCall &call, uint64_t blob) {
+		const size_t width = call.pointer_width();
+		if (!blob)
+			return std::optional<std::vector<uint8_t>>();
+		const auto size = call.load<uint32_t>(blob);
+		const uint64_t data = width == 4 ? call.load<uint32_t>(blob + 4) : call.load<uint64_t>(blob + 8);
+		if (!size)
+			return std::optional(std::vector<uint8_t>());
+		if (!data)
+			return std::optional<std::vector<uint8_t>>();
+		return std::optional(call.read(data, size));
+	};
+	const auto blob_out = [&context](ApiCall &call, uint64_t blob, std::span<const uint8_t> bytes) {
+		const size_t width = call.pointer_width();
+		const auto memory = context.allocator.allocate(std::max<size_t>(bytes.size(), 1), true);
+		if (!memory)
+			return false;
+		if (!bytes.empty())
+			call.write(memory, bytes);
+		call.store<uint32_t>(blob, uint32_t(bytes.size()));
+		if (width == 4)
+			call.store<uint32_t>(blob + 4, uint32_t(memory));
+		else
+			call.store<uint64_t>(blob + 8, memory);
+		return true;
+	};
+	registry.add("CryptProtectData", 7, [blob_in, blob_out](ApiCall &call) {
+		const auto plain = blob_in(call, call[0]);
+		if (!plain || !call[6]) {
+			call.fail(error_invalid_parameter, 0);
+			return;
+		}
+		const auto entropy = blob_in(call, call[2]).value_or(std::vector<uint8_t>());
+		const auto description = call[1] ? call.wide(call[1]) : std::u16string();
+		const auto key = protection_key(entropy);
+		uint8_t iv[12], tag[16];
+		RAND_bytes(iv, sizeof(iv));
+		std::vector<uint8_t> sealed(plain->size());
+		int length = 0, total = 0;
+		std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+		if (!EVP_EncryptInit_ex(context.get(), EVP_aes_256_gcm(), nullptr, key.data(), iv) ||
+			(!plain->empty() && !EVP_EncryptUpdate(context.get(), sealed.data(), &length, plain->data(), int(plain->size()))) ||
+			!EVP_EncryptFinal_ex(context.get(), sealed.data() + length, &total) || !EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_GCM_GET_TAG, sizeof(tag), tag)) {
+			call.fail(error_invalid_data, 0);
+			return;
+		}
+		std::vector<uint8_t> blob(protected_magic, protected_magic + 4);
+		const uint32_t description_bytes = uint32_t(description.size() * 2);
+		blob.insert(blob.end(), reinterpret_cast<const uint8_t *>(&description_bytes), reinterpret_cast<const uint8_t *>(&description_bytes) + 4);
+		blob.insert(blob.end(), reinterpret_cast<const uint8_t *>(description.data()), reinterpret_cast<const uint8_t *>(description.data()) + description_bytes);
+		blob.insert(blob.end(), iv, iv + sizeof(iv));
+		blob.insert(blob.end(), tag, tag + sizeof(tag));
+		blob.insert(blob.end(), sealed.begin(), sealed.end());
+		if (!blob_out(call, call[6], blob)) {
+			call.fail(8, 0);
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("CryptUnprotectData", 7, [blob_in, blob_out, &context](ApiCall &call) {
+		const auto blob = blob_in(call, call[0]);
+		if (!blob || !call[6]) {
+			call.fail(error_invalid_parameter, 0);
+			return;
+		}
+		if (blob->size() < 4 + 4 + 12 + 16 || std::memcmp(blob->data(), protected_magic, 4)) {
+			call.fail(error_invalid_data, 0);
+			return;
+		}
+		uint32_t description_bytes;
+		std::memcpy(&description_bytes, blob->data() + 4, 4);
+		if (description_bytes % 2 || size_t(8) + description_bytes + 28 > blob->size()) {
+			call.fail(error_invalid_data, 0);
+			return;
+		}
+		const uint8_t *iv = blob->data() + 8 + description_bytes, *tag = iv + 12, *cipher = tag + 16;
+		const size_t cipher_size = blob->size() - (8 + description_bytes + 28);
+		const auto entropy = blob_in(call, call[2]).value_or(std::vector<uint8_t>());
+		const auto key = protection_key(entropy);
+		std::vector<uint8_t> plain(cipher_size);
+		int length = 0, total = 0;
+		std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> cipher_context(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+		if (!EVP_DecryptInit_ex(cipher_context.get(), EVP_aes_256_gcm(), nullptr, key.data(), iv) ||
+			(cipher_size && !EVP_DecryptUpdate(cipher_context.get(), plain.data(), &length, cipher, int(cipher_size))) ||
+			!EVP_CIPHER_CTX_ctrl(cipher_context.get(), EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t *>(tag)) ||
+			EVP_DecryptFinal_ex(cipher_context.get(), plain.data() + length, &total) <= 0) {
+			// Wrong entropy or a changed blob.
+			call.fail(error_invalid_data, 0);
+			return;
+		}
+		if (call[1]) {
+			std::u16string description(description_bytes / 2, u'\0');
+			std::memcpy(description.data(), blob->data() + 8, description_bytes);
+			const auto memory = context.allocator.allocate(description_bytes + 2, true);
+			if (!memory) {
+				call.fail(8, 0);
+				return;
+			}
+			call.put_wide(memory, description, description.size() + 1);
+			call.store_pointer(call[1], memory);
+		}
+		if (!blob_out(call, call[6], plain)) {
+			call.fail(8, 0);
+			return;
+		}
+		call.ret(1);
 	});
 }
 

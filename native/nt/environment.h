@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cpu/native_cpu.h"
+#include "inherit.h"
 
 #include <string_view>
 #include <string>
@@ -29,6 +30,8 @@ struct NativeLaunch {
 	std::u16string directory;
 	// The environment the program starts with, as "NAME=VALUE" entries each ended by a zero; absent for the default one.
 	std::optional<std::u16string> environment;
+	// The handles the program received from the process that created it.
+	std::vector<InheritedHandle> inherited;
 };
 
 // Initial x64 thread fields only. Mappings belong to the process and survive this view.

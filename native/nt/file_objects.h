@@ -23,6 +23,19 @@ public:
 	std::filesystem::path path;
 	std::u16string dos_path;
 	uint32_t flags;
+	bool describe(InheritedHandle &record) const override
+	{
+		if (descriptor < 0)
+			return false;
+		record.kind = "file";
+		record.descriptor = descriptor;
+		record.access = access;
+		record.flags = flags;
+		record.bits = directory ? 1 : 0;
+		record.text = dos_path;
+		record.path = path.string();
+		return true;
+	}
 	bool readable() const { return access & (0x80000000U | 0x10000000U | 0x1U); }
 	bool writable() const { return access & (0x40000000U | 0x10000000U | 0x2U | 0x4U); }
 };

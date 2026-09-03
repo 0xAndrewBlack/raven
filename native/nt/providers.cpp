@@ -282,6 +282,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			"ZwProtectVirtualMemory","ZwQueryPerformanceCounter","ZwQuerySystemInformation","ZwQueryVirtualMemory"})
 			nt_names.push_back(name);
 	}
+	// Natives that the shared API registry implements.
+	for (const auto name : {"NtQuerySection"})
+		if (std::find(nt_names.begin(),nt_names.end(),name)==nt_names.end()) nt_names.push_back(name);
 	std::sort(nt_names.begin(),nt_names.end());
 	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.
 	std::vector<std::string> system_modules{"kernel32.dll", "kernelbase.dll", "user32.dll", "gdi32.dll", "comctl32.dll"};
@@ -458,6 +461,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		launch=std::move(initial);
 	}
 	NativeObjects kernel_objects;
+	adopt_inherited(kernel_objects,launch->inherited);
 	std::array<uint64_t,3> standard_handles{UINT64_MAX,UINT64_MAX,UINT64_MAX};
 	for (size_t i=0;i<3;++i) {
 		if (launch->standard_fds[i]<0) continue;
@@ -749,8 +753,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_security_api(api_registry, kernel);
 	register_child_process_api(api_registry, kernel);
 	register_winsock_api(api_registry, kernel);
+	register_host_api(api_registry, kernel);
+	register_pipe_api(api_registry, kernel);
+	register_job_api(api_registry, kernel);
 	register_crypt32_api(api_registry, kernel);
 	register_process_info_api(api_registry, kernel);
+	register_font_service(api_registry, kernel);
 	register_sync_api(api_registry, kernel);
 	register_thread_api(api_registry, kernel);
 	register_text_api(api_registry, kernel);

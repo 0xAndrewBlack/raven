@@ -836,7 +836,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 	});
 
 	// Completion ports: one queue that overlapped operations report to and worker threads take from.
-	context.threads.set_pump([&reactor] { reactor.poll(); });
+	context.threads.add_pump([&reactor] { reactor.poll(); });
 	registry.add("CreateIoCompletionPort", 4, [&objects, socket_of](ApiCall &call) {
 		std::shared_ptr<CompletionPort> port;
 		if (call[1]) {
@@ -859,15 +859,21 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		}
 		if (call[0] != UINT64_MAX) {
 			const auto socket = socket_of(call[0]);
-			if (!socket) {
-				// Files and pipes cannot yet deliver completions: refuse the association rather than accept one that never reports.
+			const auto pipe = objects.object_as<PipeObject>(call[0]);
+			if (!socket && !pipe) {
+				// Files cannot yet deliver completions: refuse the association rather than accept one that never reports.
 				if (create)
 					objects.close(handle);
 				call.fail(87, 0);
 				return;
 			}
-			socket->port = port;
-			socket->key = call[2];
+			if (socket) {
+				socket->port = port;
+				socket->key = call[2];
+			} else {
+				pipe->port = port;
+				pipe->key = call[2];
+			}
 		}
 		call.ret(handle);
 	});

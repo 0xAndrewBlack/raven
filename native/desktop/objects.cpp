@@ -429,24 +429,27 @@ uint32_t DesktopObjects::unregister_class(uint16_t atom)
 
 uint16_t DesktopObjects::find_class(uint64_t instance, std::string_view name) const
 {
-	uint16_t global=0;
+	uint16_t global=0,any=0;
+	// A window created without a module handle finds the class of whichever module registered it.
 	for (const auto &[id,definition] : classes)
 		if (same_name(definition.name,name)) {
 			if (definition.style & 0x4000) global=id;
 			else if (definition.instance==instance) return id;
+			else if (!instance && !any) any=id;
 		}
-	return global;
+	return global ? global : any;
 }
 
 uint16_t DesktopObjects::find_class(uint64_t instance,uint16_t atom) const
 {
-	uint16_t global=0;
+	uint16_t global=0,any=0;
 	for (const auto &[id,definition] : classes)
 		if (definition.atom==atom) {
 			if (definition.style & 0x4000) global=id;
 			else if (definition.instance==instance) return id;
+			else if (!instance && !any) any=id;
 		}
-	return global;
+	return global ? global : any;
 }
 
 const DesktopClass *DesktopObjects::window_class(uint16_t atom) const

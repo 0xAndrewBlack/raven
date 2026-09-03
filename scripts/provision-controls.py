@@ -39,10 +39,11 @@ def main():
     link_extra = ["-Wl,--kill-at"] if x86 else []
     bases = dict(comctl32=0x1f000000, user32=0x1f400000, shell=0x1f800000, crt=0x1fc00000) if x86 else dict(
         comctl32=0x1f0000000, user32=0x1f4000000, shell=0x1f8000000, crt=0x1fc000000)
-    wanted = {"comctl32", "user32", "shell", "crt"} if args.components == "all" else set(args.components.split(","))
+    wanted = {"comctl32", "user32", "shell", "crt", "dwrite"} if args.components == "all" else set(args.components.split(","))
     if x86:
         # The 32-bit C runtime component is built by the main build; the others are described here.
         wanted.discard("crt")
+        wanted.discard("dwrite")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, TMPDIR=str(output), TMP=str(output), TEMP=str(output))
@@ -183,7 +184,7 @@ def main():
          "-o", output / "comctl32.dll", *compiled, *pseh_objects, objects / "comctl32.res.o", output / "comctl32.def",
          "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lntdll", "-limm32", "-lusp10", "-luxtheme", "-lwinmm",
          "-lole32", "-loleaut32", "-lshlwapi", "-luuid", "-lgcc"])
-    if not wanted & {"user32", "shell", "crt"}:
+    if not wanted & {"user32", "shell", "crt", "dwrite"}:
         print(output / "comctl32.dll")
         return
     # The user32 component: upstream user-mode sources on a bridge that stands in for the kernel services.
@@ -219,7 +220,7 @@ def main():
     run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{bases['user32']:#x},--no-insert-timestamp", *link_extra,
          "-o", output / "raven-user32.dll", *user_objects, *pseh_objects, objects / "user32.res.o", output / "raven-user32.def",
          "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lntdll", "-limm32", "-lusp10", "-lgcc"])
-    if not wanted & {"shell", "crt"}:
+    if not wanted & {"shell", "crt", "dwrite"}:
         print(output / "raven-user32.dll")
         return
     # The shell component is Raven code on the public headers: the file dialogs and the class registry.
@@ -234,6 +235,20 @@ def main():
     (output / "raven-shell.def").write_text("NAME raven-shell.dll\nEXPORTS\n" + "".join(definition_line(name, shell_defined.get(name)) for name in shell_names))
     run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{bases['shell']:#x},--no-insert-timestamp", *link_extra,
          "-o", output / "raven-shell.dll", *shell_objects, output / "raven-shell.def", "-luser32", "-lkernel32", "-lole32", "-luuid", "-lgcc"])
+    if "dwrite" in wanted:
+        # The DirectWrite component: Raven code on the public headers, whose fonts come from the host through ravenhost.dll.
+        dwrite_support = repo / "native/upstream/raven-dwrite"
+        host_names = ["RavenFontClose", "RavenFontGlyphs", "RavenFontInfo", "RavenFontMetrics", "RavenFontName", "RavenFontOpen", "RavenFontOutline",
+                      "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace"]
+        (output / "ravenhost.def").write_text("LIBRARY ravenhost.dll\nEXPORTS\n" + "".join(name + "\n" for name in host_names))
+        run([triple + "-dlltool", "-d", output / "ravenhost.def", "-l", output / "libravenhost.a"])
+        dwrite_objects = [objects / "dwrite.o", objects / "dwrite_crt.o"]
+        dwrite_flags = ["-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-ffreestanding", "-fno-builtin", f"-ffile-prefix-map={repo}=raven"]
+        run([triple + "-gcc", "-c", *dwrite_flags, "-I" + str(dwrite_support), dwrite_support / "dwrite.c", "-o", dwrite_objects[0]])
+        run([triple + "-gcc", "-c", *dwrite_flags, dwrite_support / "crt.c", "-o", dwrite_objects[1]])
+        (output / "raven-dwrite.def").write_text("NAME raven-dwrite.dll\nEXPORTS\nDWriteCreateFactory\n")
+        run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,0x1fb000000,--no-insert-timestamp", *link_extra,
+             "-o", output / "raven-dwrite.dll", *dwrite_objects, output / "raven-dwrite.def", "-L" + str(output), "-lravenhost", "-lkernel32", "-lgcc"])
     if "crt" in wanted:
         # The C runtime component: the Universal CRT entry points programs import from ucrtbase.dll.
         crt_object = objects / "ucrtbase.o"
@@ -243,7 +258,7 @@ def main():
              "-o", output / "ucrtbase.dll", crt_object, "-lkernel32", "-lgcc"])
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, commands=records,
                   component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest()
-                                    for name in ("comctl32.dll", "raven-user32.dll", "raven-shell.dll", "ucrtbase.dll") if (output / name).exists()},
+                                    for name in ("comctl32.dll", "raven-user32.dll", "raven-shell.dll", "raven-dwrite.dll", "ucrtbase.dll") if (output / name).exists()},
                   user32_exports=exported,
                   patches={patch.name: hashlib.sha256(patch.read_bytes()).hexdigest() for patch in patches},
                   source_hashes={path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()

@@ -67,7 +67,7 @@ public:
 	void protect_image(uint64_t address, size_t size, int protection);
 	void unmap_memory(uint64_t address);
 	// Maps a host-owned memfd into the guest at a fresh address; release it with unmap_memory.
-	uint64_t map_shared(int descriptor, size_t size);
+	uint64_t map_shared(int descriptor, size_t size, uint64_t offset = 0);
 	bool memory_available(uint64_t address, size_t size) const;
 	void discard_memory(uint64_t address, size_t size);
 	// Dynamic image mappings share LoadedImage storage; the loader owns initialization and lifetime.
@@ -121,7 +121,7 @@ private:
 	std::unique_ptr<State> state;
 	void install_segment(uint32_t entry, uint64_t base);
 	uint64_t memory_syscall(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3 = 0,
-		uint64_t a4 = 0, uint64_t a5 = 0);
+		uint64_t a4 = 0, uint64_t a5 = 0, uint64_t a6 = 0);
 	NativeResult begin_call(uint64_t address, std::span<const uint64_t> arguments,
 		uint64_t stack_ceiling, std::chrono::milliseconds timeout);
 	NativeResult begin_x86_call(uint64_t address, std::span<const uint64_t> arguments,

@@ -386,7 +386,7 @@ void NativeProcess::validate_write_memory(uint64_t address,size_t size) const
 }
 
 uint64_t NativeProcess::memory_syscall(uint64_t number, uint64_t a1, uint64_t a2,
-	uint64_t a3, uint64_t a4, uint64_t a5)
+	uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6)
 {
 	state->require_stopped();
 	const auto saved = context();
@@ -394,7 +394,7 @@ uint64_t NativeProcess::memory_syscall(uint64_t number, uint64_t a1, uint64_t a2
 	child.set_timeout(std::chrono::seconds(2));
 	uint64_t result = 0;
 	try {
-		result = child.syscall(number, a1, a2, a3, a4, a5);
+		result = child.syscall(number, a1, a2, a3, a4, a5, a6);
 	} catch (...) {
 		try {
 			if (child.pid == -1 || context().registers.rip != child.gate + 4)
@@ -439,7 +439,7 @@ uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address
 	return mapped;
 }
 
-uint64_t NativeProcess::map_shared(int descriptor, size_t size)
+uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
 {
 	state->require_stopped();
 	memory_range(0, size, PROT_READ | PROT_WRITE, state->limit());
@@ -455,7 +455,7 @@ uint64_t NativeProcess::map_shared(int descriptor, size_t size)
 		// Reopen only the host-owned memfd; guest code never executes the Linux syscall.
 		guest_descriptor = memory_syscall(SYS_openat, uint64_t(AT_FDCWD), scratch, O_RDWR | O_CLOEXEC);
 		const auto mapped = memory_syscall(SYS_mmap, 0, size, PROT_READ | PROT_WRITE,
-			MAP_SHARED | (state->mode == NativeMode::x86 ? MAP_32BIT : 0), guest_descriptor);
+			MAP_SHARED | (state->mode == NativeMode::x86 ? MAP_32BIT : 0), guest_descriptor, offset);
 		if (mapped >= state->limit() || size > state->limit() - mapped) {
 			state->child->stop();
 			throw std::runtime_error("host returned an invalid shared mapping address");

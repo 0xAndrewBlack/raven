@@ -90,6 +90,7 @@ NativeTLS::NativeTLS(NativeProcess &process, const NativeEnvironment &environmen
 	std::span<const PEModule *const> order)
 	: process(process), environment(environment)
 {
+	main_teb = environment.teb();
 	if (process.active() || process.context().registers.gs_base != environment.teb() || order.size() > 10000)
 		throw std::runtime_error("invalid static TLS initialization state");
 	if (integer(process, environment.teb() + 0x58, 8))
@@ -117,8 +118,7 @@ NativeTLS::NativeTLS(NativeProcess &process, const NativeEnvironment &environmen
 
 void NativeTLS::validate() const
 {
-	if (process.context().registers.gs_base != environment.teb() ||
-		integer(process, environment.teb() + 0x58, 8) != vector)
+	if (integer(process, main_teb + 0x58, 8) != vector)
 		throw std::runtime_error("native loader TLS vector identity was modified");
 	for (const auto &[module, entry] : entries)
 		if (entry.slot != UINT32_MAX && (integer(process, entry.index, 4) != entry.slot ||
@@ -155,6 +155,9 @@ void NativeTLS::install(const PEModule &module, const std::optional<Template> &i
 		put(process, vector + uint64_t(slot) * 8, block, 8);
 		occupied.set(slot);
 		total += item->size;
+		// Threads that already run get their own copy of the module's block.
+		for (auto &[teb, thread] : thread_storage)
+			provision(teb, thread, entries.at(&module));
 	} catch (...) {
 		entries.erase(&module);
 		if (index_written)
@@ -180,10 +183,10 @@ void NativeTLS::add(const PEModule &module)
 	const auto item = parse(&module, total);
 	const bool new_vector = !vector;
 	if (new_vector && item)
-		process.write_memory(environment.teb() + 0x58, process.read_memory(environment.teb() + 0x58, 8));
+		process.write_memory(main_teb + 0x58, process.read_memory(main_teb + 0x58, 8));
 	install(module, item);
 	if (new_vector && vector)
-		put(process, environment.teb() + 0x58, vector, 8);
+		put(process, main_teb + 0x58, vector, 8);
 }
 
 void NativeTLS::remove(const PEModule &module)
@@ -196,6 +199,13 @@ void NativeTLS::remove(const PEModule &module)
 	if (entry.slot != UINT32_MAX) {
 		process.write_memory(entry.index, process.read_memory(entry.index, 4));
 		put(process, vector + uint64_t(entry.slot) * 8, 0, 8);
+		for (auto &[teb, thread] : thread_storage)
+			if (const auto block = thread.blocks.find(entry.slot); block != thread.blocks.end()) {
+				put(process, thread.slots + uint64_t(entry.slot) * 8, 0, 8);
+				process.unmap_memory(block->second);
+				std::erase(thread.owned, block->second);
+				thread.blocks.erase(block);
+			}
 		process.unmap_memory(entry.allocation);
 		occupied.reset(entry.slot);
 		total -= entry.size;
@@ -203,31 +213,36 @@ void NativeTLS::remove(const PEModule &module)
 	entries.erase(found);
 }
 
+void NativeTLS::provision(uint64_t teb, ThreadTLS &thread, const Entry &entry)
+{
+	if (entry.slot == UINT32_MAX || thread.blocks.contains(entry.slot))
+		return;
+	if (!thread.slots) {
+		thread.slots = process.map_memory((10000 * 8 + 4095) & ~size_t(4095), PROT_READ | PROT_WRITE);
+		thread.owned.push_back(thread.slots);
+		put(process, teb + 0x58, thread.slots, 8);
+	}
+	const size_t allocation = (std::max(entry.size, size_t(1)) + entry.alignment - 1 + 4095) & ~size_t(4095);
+	const uint64_t storage = process.map_memory(allocation, PROT_READ | PROT_WRITE);
+	thread.owned.push_back(storage);
+	const uint64_t block = (storage + entry.alignment - 1) & ~uint64_t(entry.alignment - 1);
+	process.write_memory(block, entry.bytes);
+	put(process, thread.slots + uint64_t(entry.slot) * 8, block, 8);
+	thread.blocks[entry.slot] = storage;
+}
+
 void NativeTLS::create_thread(uint64_t teb)
 {
-	if (!vector)
-		return;
-	std::vector<uint64_t> owned;
+	ThreadTLS thread;
 	try {
-		const uint64_t slots = process.map_memory((10000 * 8 + 4095) & ~size_t(4095), PROT_READ | PROT_WRITE);
-		owned.push_back(slots);
-		for (const auto &[module, entry] : entries) {
-			if (entry.slot == UINT32_MAX)
-				continue;
-			const size_t allocation = (std::max(entry.size, size_t(1)) + entry.alignment - 1 + 4095) & ~size_t(4095);
-			const uint64_t storage = process.map_memory(allocation, PROT_READ | PROT_WRITE);
-			owned.push_back(storage);
-			const uint64_t block = (storage + entry.alignment - 1) & ~uint64_t(entry.alignment - 1);
-			process.write_memory(block, entry.bytes);
-			put(process, slots + uint64_t(entry.slot) * 8, block, 8);
-		}
-		put(process, teb + 0x58, slots, 8);
+		for (const auto &[module, entry] : entries)
+			provision(teb, thread, entry);
 	} catch (...) {
-		for (const auto address : owned)
+		for (const auto address : thread.owned)
 			process.unmap_memory(address);
 		throw;
 	}
-	thread_storage[teb] = std::move(owned);
+	thread_storage[teb] = std::move(thread);
 }
 
 void NativeTLS::release_thread(uint64_t teb)
@@ -235,7 +250,7 @@ void NativeTLS::release_thread(uint64_t teb)
 	const auto found = thread_storage.find(teb);
 	if (found == thread_storage.end())
 		return;
-	for (const auto address : found->second)
+	for (const auto address : found->second.owned)
 		process.unmap_memory(address);
 	thread_storage.erase(found);
 }

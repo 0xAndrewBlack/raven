@@ -215,7 +215,7 @@ uint32_t NativeRegistry::create(uint64_t parent, std::u16string_view path, uint6
 		return bad_handle;
 	if (display.find(u"\\\\") != display.npos)
 		return invalid_parameter;
-	if (next > UINT32_MAX - 4 || open_keys.size() >= 10000)
+	if (open_keys.size() >= 10000)
 		return 8;
 	disposition = 2;
 	// Every ancestor exists once a key does, so enumeration of parents stays consistent.
@@ -229,8 +229,9 @@ uint32_t NativeRegistry::create(uint64_t parent, std::u16string_view path, uint6
 				disposition = 1;
 		}
 	}
-	key = next;
-	next += 4;
+	key = new_key_handle();
+	if (!key)
+		return 8;
 	open_keys.emplace(key, folded);
 	save();
 	return 0;
@@ -243,10 +244,11 @@ uint32_t NativeRegistry::open(uint64_t parent, std::u16string_view path, uint64_
 		return bad_handle;
 	if (!keys.contains(folded))
 		return file_not_found;
-	if (next > UINT32_MAX - 4 || open_keys.size() >= 10000)
+	if (open_keys.size() >= 10000)
 		return 8;
-	key = next;
-	next += 4;
+	key = new_key_handle();
+	if (!key)
+		return 8;
 	open_keys.emplace(key, folded);
 	return 0;
 }

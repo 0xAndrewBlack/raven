@@ -684,6 +684,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		launch = std::move(initial);
 	}
 	NativeObjects kernel_objects;
+	adopt_inherited(kernel_objects, launch->inherited);
 	std::array<uint64_t, 3> standard_handles{UINT64_MAX, UINT64_MAX, UINT64_MAX};
 	for (size_t i = 0; i < 3; ++i) {
 		if (launch->standard_fds[i] < 0)
@@ -1035,8 +1036,12 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_security_api(shared_api, kernel);
 	register_child_process_api(shared_api, kernel);
 	register_winsock_api(shared_api, kernel);
+	register_host_api(shared_api, kernel);
+	register_pipe_api(shared_api, kernel);
+	register_job_api(shared_api, kernel);
 	register_crypt32_api(shared_api, kernel);
 	register_process_info_api(shared_api, kernel);
+	register_font_service(shared_api, kernel);
 	// A 32-bit program runs under WOW64 on the 64-bit system Raven presents. File system redirection is not done (one System32 exists),
 	// so switching it off and back on changes nothing.
 	shared_api.add("Wow64DisableWow64FsRedirection", 1, [](ApiCall &call) {

@@ -23,6 +23,7 @@ set_tests_properties(native_blackonwhite_contract PROPERTIES TIMEOUT 30)
 
 find_package(PNG 1.6.59 QUIET)
 find_package(OpenSSL QUIET)
+find_package(Freetype QUIET)
 if(PNG_FOUND)
     target_sources(raven_pixels PRIVATE graphics/png_codec.cpp)
     target_compile_definitions(raven_pixels PUBLIC RAVEN_PNG=1)
@@ -64,7 +65,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     if(NOT NONCLIENT_SOURCE_HASH STREQUAL "dab51515f54adc39af43f088a02afe45a719476408bee3c7bef6113c25b180fc")
         message(FATAL_ERROR "Pinned ReactOS nonclient functions differ")
     endif()
-    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/ansi_api.cpp nt/shlwapi_api.cpp nt/registry_api.cpp nt/shell_api.cpp nt/platform_api.cpp nt/hash.cpp nt/version_api.cpp nt/system_api.cpp nt/process_api.cpp nt/security_api.cpp nt/child_api.cpp nt/child_process.cpp nt/winsock_api.cpp nt/crypt32_api.cpp nt/process_info_api.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp desktop/user_api.cpp desktop/window_manager.cpp desktop/window_ansi.cpp desktop/menu_manager.cpp desktop/shared_pixels.cpp desktop/user_ext.cpp desktop/scrollbar.cpp desktop/window_long.cpp desktop/child_frame.cpp desktop/gdi.cpp desktop/gdi_api.cpp desktop/gdi_text.cpp)
+    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/ansi_api.cpp nt/shlwapi_api.cpp nt/registry_api.cpp nt/shell_api.cpp nt/platform_api.cpp nt/hash.cpp nt/version_api.cpp nt/system_api.cpp nt/process_api.cpp nt/security_api.cpp nt/child_api.cpp nt/child_process.cpp nt/winsock_api.cpp nt/host_api.cpp nt/pipe.cpp nt/job_api.cpp nt/inherit.cpp nt/crypt32_api.cpp nt/process_info_api.cpp nt/font_service.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp desktop/user_api.cpp desktop/window_manager.cpp desktop/window_ansi.cpp desktop/menu_manager.cpp desktop/shared_pixels.cpp desktop/user_ext.cpp desktop/scrollbar.cpp desktop/window_long.cpp desktop/child_frame.cpp desktop/gdi.cpp desktop/gdi_api.cpp desktop/gdi_text.cpp)
     target_include_directories(raven_cpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     set(NLS_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-nls)
     file(SHA256 ${NLS_SOURCE}/txt2nls.cpp NLS_TOOL_HASH)
@@ -108,6 +109,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     if(OPENSSL_FOUND)
         target_link_libraries(raven_cpu PUBLIC OpenSSL::Crypto)
         target_compile_definitions(raven_cpu PRIVATE RAVEN_OPENSSL=1)
+    endif()
+    # Font files are read and rasterized for the DirectWrite component with FreeType when it is there.
+    if(FREETYPE_FOUND)
+        target_link_libraries(raven_cpu PUBLIC Freetype::Freetype)
+        # The Skia library that some programs link after it needs FreeType too; keep the library whatever the link order drops.
+        target_link_options(raven_cpu INTERFACE LINKER:--no-as-needed)
+        target_compile_definitions(raven_cpu PRIVATE RAVEN_FREETYPE=1)
     endif()
     set(RAVEN_SKIA_SOURCE "" CACHE PATH "Pinned Skia source directory")
     set(RAVEN_SKIA_LIBRARY "" CACHE FILEPATH "Font-enabled CPU Skia library")
@@ -998,6 +1006,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/comctl32.dll $<TARGET_FILE_DIR:raven>/comctl32.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-user32.dll $<TARGET_FILE_DIR:raven>/raven-user32.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-shell.dll $<TARGET_FILE_DIR:raven>/raven-shell.dll
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-dwrite.dll $<TARGET_FILE_DIR:raven>/raven-dwrite.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/ucrtbase.dll $<TARGET_FILE_DIR:raven>/ucrtbase.dll)
             set(EDIT_TEXT_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/edit-text.exe)
             add_custom_command(OUTPUT ${EDIT_TEXT_CLIENT}
@@ -1008,6 +1017,39 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_custom_target(edit_text_fixture ALL DEPENDS ${EDIT_TEXT_CLIENT})
             add_test(NAME native_edit_text_contract COMMAND raven --run-process --execution=native ${EDIT_TEXT_CLIENT})
             set_tests_properties(native_edit_text_contract PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+            # DirectWrite: fonts, a face, metrics, tables, an outline and a rendered glyph run, through the public interfaces.
+            set(DWRITE_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/dwrite-client.exe)
+            add_custom_command(OUTPUT ${DWRITE_CLIENT}
+                COMMAND ${RAVEN_MINGW64} -nostdlib -O1 -fno-builtin -fno-stack-protector
+                    -Wl,--entry,raven_entry,--image-base,0x1dd000000,--no-insert-timestamp
+                    -o ${DWRITE_CLIENT} ${PROJECT_SOURCE_DIR}/testdata/native_loader/dwrite_client.c -ldwrite -lkernel32 -lgcc
+                DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/dwrite_client.c VERBATIM)
+            add_custom_target(dwrite_fixture ALL DEPENDS ${DWRITE_CLIENT})
+            if(FREETYPE_FOUND AND EXISTS "${RAVEN_CONTROLS_COMPONENT_DIR}/raven-dwrite.dll")
+                add_test(NAME native_dwrite COMMAND raven --run-process --execution=native --timeout-ms=20000 ${DWRITE_CLIENT})
+                set_tests_properties(native_dwrite PROPERTIES TIMEOUT 40 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+            endif()
+            # Pipes: overlapped transfers that report to a port, cancellation, message mode, a blocking read on a thread and anonymous pipes.
+            set(PIPE_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/pipe-client.exe)
+            add_custom_command(OUTPUT ${PIPE_CLIENT}
+                COMMAND ${RAVEN_MINGW64} -nostdlib -O1 -fno-builtin -fno-stack-protector
+                    -Wl,--entry,raven_entry,--image-base,0x1de000000,--no-insert-timestamp
+                    -o ${PIPE_CLIENT} ${PROJECT_SOURCE_DIR}/testdata/native_loader/pipe_client.c -lkernel32 -lgcc
+                DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/pipe_client.c VERBATIM)
+            add_custom_target(pipe_fixture ALL DEPENDS ${PIPE_CLIENT})
+            add_test(NAME native_pipes COMMAND raven --run-process --execution=native --timeout-ms=30000 ${PIPE_CLIENT})
+            set_tests_properties(native_pipes PROPERTIES TIMEOUT 40 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+            # Host services: known folders, the computer name, adapters, data protection, security checks and job objects.
+            set(PLATFORM_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/platform-client.exe)
+            add_custom_command(OUTPUT ${PLATFORM_CLIENT}
+                COMMAND ${RAVEN_MINGW64} -nostdlib -O1 -fno-builtin -fno-stack-protector
+                    -Wl,--entry,raven_entry,--image-base,0x1df000000,--no-insert-timestamp
+                    -o ${PLATFORM_CLIENT} ${PROJECT_SOURCE_DIR}/testdata/native_loader/platform_client.c
+                    -lkernel32 -lshell32 -liphlpapi -ladvapi32 -lcrypt32 -lole32 -lws2_32 -lgcc
+                DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/platform_client.c VERBATIM)
+            add_custom_target(platform_fixture ALL DEPENDS ${PLATFORM_CLIENT})
+            add_test(NAME native_platform_services COMMAND raven --run-process --execution=native --timeout-ms=30000 ${PLATFORM_CLIENT})
+            set_tests_properties(native_platform_services PROPERTIES TIMEOUT 40 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
             set(UCRT_IO_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/ucrt-io.exe)
             add_custom_command(OUTPUT ${UCRT_IO_CLIENT}
                 COMMAND ${RAVEN_MINGW64} -nostdlib -O1 -fno-builtin -fno-stack-protector

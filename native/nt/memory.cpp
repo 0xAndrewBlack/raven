@@ -123,6 +123,23 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 	return {selected,length};
 }
 
+NativeMemoryRange NativeMemory::map_view(int descriptor, uint64_t offset, uint64_t size, uint32_t access)
+{
+	const auto permissions=protection(access);
+	if (permissions<0 || !size || (offset & 4095))
+		return {0,0,invalid};
+	const uint64_t length=(size+4095)&~uint64_t(4095);
+	if (length>limit-used || regions.size()>=10000)
+		return {0,0,no_memory};
+	const auto address=process.map_shared(descriptor,length,offset);
+	if (permissions!=(PROT_READ|PROT_WRITE))
+		process.protect_memory(address,length,permissions);
+	regions.emplace(address,Region{length,access,PageMap(length/4096,access)});
+	used+=length;
+	reserved_total+=length;
+	return {address,length};
+}
+
 NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t type)
 {
 	if (type!=0x4000 && type!=0x8000)

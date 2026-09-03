@@ -65,6 +65,9 @@ private:
 	std::vector<uint64_t> arguments;
 };
 
+// The name of the API call being served, for diagnostics.
+extern const char *api_in_progress;
+
 using ApiHandler = std::function<void(ApiCall &)>;
 
 // Name-keyed API handlers. The argument count is the number of words the handler may read.

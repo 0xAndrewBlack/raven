@@ -1,5 +1,8 @@
 #include "threads.h"
 
+#include <cstdlib>
+#include <iostream>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -138,6 +141,16 @@ void NativeThreads::thread_main(GuestThread &thread)
 		code = exit.code;
 	} catch (...) {
 		pending = std::current_exception();
+		// RAVEN_TRACE_API names the thread and the error that ends the process from a thread other than the first.
+		if (std::getenv("RAVEN_TRACE_API")) {
+			try {
+				std::rethrow_exception(pending);
+			} catch (const std::exception &error) {
+				std::cerr << "raven: guest thread " << thread.id << " failed: " << error.what() << '\n';
+			} catch (...) {
+				std::cerr << "raven: guest thread " << thread.id << " ended with a stop\n";
+			}
+		}
 	}
 	finish(thread, code);
 	// A finished coroutine never resumes; hand the processor on and stay parked. What the scheduler throws here (the process deadline)
@@ -285,7 +298,7 @@ void NativeThreads::schedule()
 			return;
 		}
 		// Nothing can run: wait for the earliest timeout, letting the host deliver outside events meanwhile.
-		if (pump)
+		for (const auto &pump : pumps)
 			pump();
 		auto wake = std::chrono::steady_clock::time_point::max();
 		bool any = false;
@@ -295,7 +308,7 @@ void NativeThreads::schedule()
 				any = true;
 			}
 		const auto now = std::chrono::steady_clock::now();
-		if (!any && !poll && !(external && external()))
+		if (!any && !poll && !std::any_of(externals.begin(), externals.end(), [](const auto &pending) { return pending(); }))
 			throw std::runtime_error("native guest threads deadlocked: every thread waits without a timeout");
 		const auto limit = std::min(wake, deadline);
 		auto slice = std::chrono::duration_cast<std::chrono::milliseconds>(limit > now ? limit - now : std::chrono::nanoseconds(0));
