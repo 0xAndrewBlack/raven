@@ -221,11 +221,17 @@ CRT int _fstat64(int fd, void *result)
 }
 
 /* ---- FILE streams ---- */
+/* An opened stream is laid out as msvcrt's _FILEX: the FILE, then the critical section that guards it. Programs built against msvcrt
+   lock a stream by entering the section right after its FILE, so it has to be there and initialized. The standard streams use numbered
+   locks instead. */
+static CRITICAL_SECTION *stream_lock(Stream *stream) { return (CRITICAL_SECTION *)(stream + 1); }
+
 static Stream *new_stream(HANDLE handle, int fd, int text, int writable)
 {
-	Stream *stream = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(Stream));
+	Stream *stream = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(Stream) + sizeof(CRITICAL_SECTION));
 	if (!stream)
 		return NULL;
+	InitializeCriticalSection(stream_lock(stream));
 	stream->handle = handle;
 	stream->index = fd;
 	stream->text = text;
@@ -468,8 +474,17 @@ CRT long long _ftelli64(void *stream)
 CRT long ftell(void *stream) { return (long)_ftelli64(stream); }
 CRT void rewind(void *stream) { fseek(stream, 0, 0); ((Stream *)stream)->error = 0; }
 CRT int setvbuf(void *stream, char *buffer, int mode, size_t size) { return 0; }
-CRT void _lock_file(void *stream) {}
-CRT void _unlock_file(void *stream) {}
+CRT void _lock_file(void *stream)
+{
+	if (stream && ((Stream *)stream)->index > 2)
+		EnterCriticalSection(stream_lock(stream));
+}
+
+CRT void _unlock_file(void *stream)
+{
+	if (stream && ((Stream *)stream)->index > 2)
+		LeaveCriticalSection(stream_lock(stream));
+}
 
 CRT int fclose(void *stream)
 {
@@ -482,6 +497,7 @@ CRT int fclose(void *stream)
 		_close(fd);
 		if (file->buffer)
 			HeapFree(GetProcessHeap(), 0, file->buffer);
+		DeleteCriticalSection(stream_lock(file));
 		HeapFree(GetProcessHeap(), 0, file);
 	}
 	return 0;

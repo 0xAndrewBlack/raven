@@ -39,7 +39,10 @@ def run_once(runtime, raven, wine, game, prefix, work):
         time.sleep(0.5)
         if runtime == "raven":
             env["RAVEN_PREFIX"] = str(prefix)
-            command = [str(raven), "--run-process", "--execution=native", "--timeout-ms=120000", "--desktop=wayland", str(game), "--", "--singleplayer"]
+            # The game reads its resources from its working directory; drive Z is the host's root.
+            directory = "--directory=Z:" + str(game.parent).replace("/", "\\")
+            command = [str(raven), "--run-process", "--execution=native", "--timeout-ms=120000", "--desktop=wayland", directory, str(game), "--",
+                       "--singleplayer"]
         else:
             env |= {"WINEPREFIX": str(prefix), "WINEDEBUG": "-all", "WINEDLLOVERRIDES": "mscoree=;mshtml=;d3d11,dxgi,d3d10core=n"}
             command = [str(wine), str(game), "--singleplayer"]
