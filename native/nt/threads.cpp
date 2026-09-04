@@ -103,7 +103,8 @@ std::shared_ptr<GuestThread> NativeThreads::create(uint64_t start, uint64_t para
 	thread->parameter = parameter;
 	thread->snapshot = process.new_thread(thread->stack_high - 64, thread->teb);
 	thread->suspend_count = suspended ? 1 : 0;
-	thread->host_stack = std::make_unique<char[]>(host_stack_size);
+	// Left uninitialised, so only the pages a handler reaches are ever backed.
+	thread->host_stack = std::make_unique_for_overwrite<char[]>(host_stack_size);
 	getcontext(&thread->context);
 	thread->context.uc_stack.ss_sp = thread->host_stack.get();
 	thread->context.uc_stack.ss_size = host_stack_size;
@@ -315,11 +316,23 @@ void NativeThreads::schedule()
 		const auto limit = std::min(wake, deadline);
 		auto slice = std::chrono::duration_cast<std::chrono::milliseconds>(limit > now ? limit - now : std::chrono::nanoseconds(0));
 		slice = std::min(slice, std::chrono::milliseconds(shared_object_count.load() > 0 ? 2 : 20));
-		if (poll)
+		if (poll) {
 			poll(slice);
-		else if (slice.count() > 0)
-			std::this_thread::sleep_for(slice);
+		} else if (slice.count() > 0) {
+			std::unique_lock hold(idle_lock);
+			idle_signal.wait_for(hold, slice, [this] { return nudged; });
+			nudged = false;
+		}
 	}
+}
+
+void NativeThreads::nudge()
+{
+	{
+		std::lock_guard hold(idle_lock);
+		nudged = true;
+	}
+	idle_signal.notify_one();
 }
 
 bool NativeThreads::block(std::function<bool()> ready, std::optional<std::chrono::steady_clock::time_point> wake)

@@ -123,8 +123,20 @@ public:
 	// Low 64 bits of XMM0 to XMM3, where an x64 caller passes the first four floating-point arguments.
 	std::array<uint64_t, 4> api_float_arguments() const;
 	void return_api(uint64_t value);
+	// Calls the guest makes without stopping: a stub leaves its address and arguments in `block`, which host and guest share, and spins
+	// until the result is there. The handler runs while the guest waits, and answers through api_arguments, api_float_arguments and
+	// return_api as for a trap; it may only read and write guest memory. `stubs` are the addresses of the stubs, each `stub_size` bytes up
+	// to its fallback trap: no other thread is given the processor while one is inside a stub. A stub that has spun for a while without its
+	// answer stops at its breakpoint `wait_offset` bytes in; the call is answered there and the guest resumes after it.
+	void set_served_calls(uint64_t *block, std::vector<uint64_t> stubs, size_t stub_size, size_t wait_offset,
+		std::function<void(uint64_t stub)> handler);
+	// Diagnostics: interrupts a guest that runs without stopping every `period` and reports where it was.
+	void set_guest_sampler(std::chrono::milliseconds period, std::function<void(uint64_t rip)> sampler);
 
 private:
+	bool serve_pending();
+	bool inside_served_stub() const;
+	bool served_wait_trap(uint64_t address) const;
 	void protect_range(uint64_t address, size_t size, int protection, bool image);
 	struct State;
 	std::unique_ptr<State> state;

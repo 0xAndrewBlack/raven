@@ -53,13 +53,20 @@ public:
 	NativeChild &operator=(const NativeChild &) = delete;
 	pid_t pid = -1;
 	uint64_t gate = 0;
-	int wait();
+	// `served` is polled while the guest runs: calls the guest makes without stopping are answered there.
+	int wait(const std::function<bool()> *served = nullptr);
 	uint64_t syscall(uint64_t number, uint64_t a1 = 0, uint64_t a2 = 0, uint64_t a3 = 0,
 		uint64_t a4 = 0, uint64_t a5 = 0, uint64_t a6 = 0);
 	void stop();
 	void set_timeout(std::chrono::milliseconds timeout);
 	// While a slice is set, wait() returns -2 once it has passed without the guest stopping.
-	void set_slice(std::chrono::milliseconds slice) { slice_end = std::chrono::steady_clock::now() + slice; }
+	void set_slice(std::chrono::steady_clock::duration slice) { slice_end = std::chrono::steady_clock::now() + slice; }
+	// Sets a slice that ends at `end` unless one is already running.
+	void ensure_slice(std::chrono::steady_clock::time_point end)
+	{
+		if (!slice_end)
+			slice_end = end;
+	}
 	void clear_slice() { slice_end.reset(); }
 
 private:
@@ -128,12 +135,21 @@ void NativeChild::stop()
 	pid = -1;
 }
 
-int NativeChild::wait()
+int NativeChild::wait(const std::function<bool()> *served)
 {
 	// Guest code usually reaches its next trap within microseconds, so poll hot first and back off only for long-running calls.
 	unsigned polls = 0;
 	std::chrono::microseconds pause{20};
 	for (;;) {
+		// A guest that is being served keeps running, so it is as busy as one that just started; it never stops for its calls, so its
+		// slice is looked at after each of them.
+		if (served && (*served)()) {
+			polls = 0;
+			pause = std::chrono::microseconds(20);
+			if (slice_end && std::chrono::steady_clock::now() >= *slice_end)
+				return -2;
+			continue;
+		}
 		int status = 0;
 		const pid_t result = waitpid(pid, &status, WNOHANG);
 		if (result == pid) {
@@ -153,7 +169,8 @@ int NativeChild::wait()
 		if (std::chrono::steady_clock::now() >= deadline)
 			return -1;
 		std::this_thread::sleep_for(pause);
-		pause = std::min(pause * 2, std::chrono::microseconds(1000));
+		// A guest with served calls waits for this loop to notice them, so it is looked at more often.
+		pause = std::min(pause * 2, std::chrono::microseconds(served ? 100 : 1000));
 	}
 }
 
@@ -227,6 +244,21 @@ struct NativeProcess::State {
 	bool debug_print_fault = false;
 	size_t steps_left = 0;
 	std::function<void(uint64_t)> step_sink;
+	// Calls served while the guest runs: the block the guest's stubs fill, the handler, and whether one is being served now.
+	uint64_t *served_block = nullptr;
+	// Where the served stubs start, in order, and how many bytes each covers before its fallback trap.
+	std::vector<uint64_t> served_stubs;
+	size_t served_stub_size = 0;
+	// The breakpoint a stub reaches when it has waited too long for its answer.
+	size_t served_wait_offset = 0;
+	std::function<void(uint64_t)> served_handler;
+	std::function<bool()> poll_served;
+	bool serving = false;
+	// Diagnostics: where the guest is found running, every sample_period.
+	std::chrono::milliseconds sample_period{0};
+	std::function<void(uint64_t)> sampler;
+	// Where the stack arguments of the call being served start; they are read only when a handler asks for them.
+	uint64_t served_stack = 0;
 	void require_stopped() const;
 	bool covers(uint64_t address, size_t size, int protection) const;
 	uint64_t limit() const { return mode == NativeMode::x86 ? 0x100000000ULL : 0x800000000000ULL; }
@@ -236,7 +268,7 @@ void NativeProcess::State::require_stopped() const
 {
 	if (!child || child->pid == -1)
 		throw std::runtime_error("native process is not stopped and alive (the guest process is gone)");
-	if (!stopped)
+	if (!stopped && !serving)
 		throw std::runtime_error("native process is not stopped and alive (it is running or a resume ended without a stop)");
 }
 
@@ -1016,18 +1048,27 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		// SYSEMU blocks host syscall dispatch; invalid syscall gates can fault first. Diagnostics may single-step instead.
 		const bool slicing = state->slice.count() > 0 && state->slice_yield && state->slice_wanted && state->slice_wanted();
 		// A guest that keeps calling the runtime never has a quiet slice, so the time it has had the processor is checked at every resumption too.
+		// A thread inside a served stub keeps the processor until it leaves it: the block it uses is shared by every thread.
+		std::chrono::steady_clock::duration period = state->slice;
 		if (slicing && std::chrono::steady_clock::now() - state->slice_started >= state->slice) {
-			state->slice_yield();
-			state->slice_started = std::chrono::steady_clock::now();
+			if (inside_served_stub()) {
+				period = std::chrono::microseconds(100);
+			} else {
+				state->slice_yield();
+				state->slice_started = std::chrono::steady_clock::now();
+			}
 		}
-		if (slicing)
-			child.set_slice(state->slice);
+		// Sampling interrupts the guest on its own, shorter period; a thread change still waits for the whole slice.
+		const bool sampling = state->sample_period.count() > 0 && state->sampler;
+		if (slicing || sampling)
+			child.set_slice(slicing && sampling ? std::min<std::chrono::steady_clock::duration>(period, state->sample_period) : slicing ? period :
+				state->sample_period);
 		else
 			child.clear_slice();
 		event_info.reset();
 		trace(state->steps_left ? PTRACE_SINGLESTEP : PTRACE_SYSEMU, child.pid);
 		state->stopped = false;
-		status = child.wait();
+		status = child.wait(state->poll_served ? &state->poll_served : nullptr);
 		// The slice belongs to this resume only; a later wait for a memory operation of the runtime must not see it expire.
 		child.clear_slice();
 		if (status == -2) {
@@ -1040,8 +1081,20 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 				throw std::runtime_error("native guest exited outside the runtime boundary");
 			if (WSTOPSIG(interrupted) == SIGSTOP) {
 				state->stopped = true;
-				state->slice_yield();
-				state->slice_started = std::chrono::steady_clock::now();
+				if (sampling) {
+					user_regs_struct where{};
+					trace(PTRACE_GETREGS, child.pid, &where);
+					state->sampler(where.rip);
+				}
+				// Whether another thread wants the processor is asked again: it may have become ready through a served call meanwhile. When
+				// none does, this thread starts a new slice, so the next served call does not interrupt it at once.
+				const bool wanted = state->slice.count() > 0 && state->slice_yield && state->slice_wanted && state->slice_wanted();
+				if (wanted && std::chrono::steady_clock::now() - state->slice_started >= state->slice && !inside_served_stub()) {
+					state->slice_yield();
+					state->slice_started = std::chrono::steady_clock::now();
+				} else if (!wanted) {
+					state->slice_started = std::chrono::steady_clock::now();
+				}
 				continue;
 			}
 			// A stop of the guest's own came first and the interrupt is still pending. Keep what describes that stop, then let the
@@ -1075,6 +1128,11 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		state->stopped = true;
 		trace(PTRACE_GETREGS, child.pid, &registers);
 		signal = WSTOPSIG(status);
+		// A served stub that waited too long stops on its own breakpoint: its call is answered and it goes on where it stopped.
+		if (signal == SIGTRAP && served_wait_trap(registers.rip - 1)) {
+			serve_pending();
+			continue;
+		}
 		if (state->steps_left && signal == SIGTRAP) {
 			siginfo_t step{};
 			trace(PTRACE_GETSIGINFO, child.pid, &step);
@@ -1149,6 +1207,91 @@ void NativeProcess::set_time_slicing(std::chrono::milliseconds slice, std::funct
 	state->slice_yield = std::move(yield);
 }
 
+void NativeProcess::set_guest_sampler(std::chrono::milliseconds period, std::function<void(uint64_t)> sampler)
+{
+	state->sample_period = period;
+	state->sampler = std::move(sampler);
+}
+
+void NativeProcess::set_served_calls(uint64_t *block, std::vector<uint64_t> stubs, size_t stub_size, size_t wait_offset,
+	std::function<void(uint64_t)> handler)
+{
+	std::sort(stubs.begin(), stubs.end());
+	state->served_wait_offset = wait_offset;
+	state->served_block = block;
+	state->served_stubs = std::move(stubs);
+	state->served_stub_size = stub_size;
+	state->served_handler = std::move(handler);
+	state->poll_served = [this] {
+		if (!serve_pending())
+			return false;
+		// A served call can make another thread ready (a wake) without the guest stopping, so the guest gets a slice to be measured
+		// against if it has none.
+		if (state->slice.count() > 0 && state->slice_yield)
+			state->child->ensure_slice(state->slice_started + state->slice);
+		return true;
+	};
+}
+
+bool NativeProcess::served_wait_trap(uint64_t address) const
+{
+	const auto after = std::upper_bound(state->served_stubs.begin(), state->served_stubs.end(), address);
+	return after != state->served_stubs.begin() && address - *(after - 1) == state->served_wait_offset;
+}
+
+bool NativeProcess::inside_served_stub() const
+{
+	if (state->served_stubs.empty())
+		return false;
+	user_regs_struct registers{};
+	trace(PTRACE_GETREGS, state->child->pid, &registers);
+	const auto after = std::upper_bound(state->served_stubs.begin(), state->served_stubs.end(), registers.rip);
+	return after != state->served_stubs.begin() && registers.rip - *(after - 1) < state->served_stub_size;
+}
+
+bool NativeProcess::serve_pending()
+{
+	uint64_t *block = state->served_block;
+	if (!block)
+		return false;
+	const uint64_t stub = __atomic_load_n(&block[0], __ATOMIC_ACQUIRE);
+	if (!stub)
+		return false;
+	// Block layout: the stub's address, RCX, RDX, R8, R9, RSP, the low halves of XMM0 to XMM3, then the result.
+	std::vector<uint64_t> words{block[1], block[2], block[3], block[4]};
+	const uint64_t stack = block[5] + 40;
+	const std::array<uint64_t, 4> floats{block[6], block[7], block[8], block[9]};
+	auto translated_words = std::move(state->translated_words);
+	const auto translated_depth = state->translated_depth;
+	const auto translated_floats = state->translated_floats;
+	const auto translated_result = state->translated_result;
+	state->translated_words.reset();
+	const bool was_serving = state->serving;
+	const uint64_t was_stack = state->served_stack;
+	state->serving = true;
+	state->served_stack = stack;
+	const auto restore = [&] {
+		state->translated_words = std::move(translated_words);
+		state->translated_depth = translated_depth;
+		state->translated_floats = translated_floats;
+		state->translated_result = translated_result;
+		state->serving = was_serving;
+		state->served_stack = was_stack;
+	};
+	try {
+		begin_translated_call(std::move(words), floats);
+		state->served_handler(stub);
+		block[10] = end_translated_call();
+	} catch (...) {
+		state->translated_words.reset();
+		restore();
+		throw;
+	}
+	restore();
+	__atomic_store_n(&block[0], 0, __ATOMIC_RELEASE);
+	return true;
+}
+
 void NativeProcess::begin_translated_call(std::vector<uint64_t> words, std::array<uint64_t, 4> floats)
 {
 	if (state->translated_words)
@@ -1170,6 +1313,14 @@ std::vector<uint64_t> NativeProcess::api_arguments(size_t count) const
 	state->require_stopped();
 	if (state->translated_words && state->callbacks.size() == state->translated_depth) {
 		auto words = *state->translated_words;
+		if (state->serving && count > words.size() && count <= 128) {
+			const auto stack = read_memory(state->served_stack, (count - words.size()) * 8);
+			for (size_t offset = 0; offset < stack.size(); offset += 8) {
+				uint64_t value = 0;
+				std::memcpy(&value, stack.data() + offset, 8);
+				words.push_back(value);
+			}
+		}
 		words.resize(count);
 		return words;
 	}

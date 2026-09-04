@@ -113,6 +113,8 @@ int main(int argc, char **argv)
 		const auto name = std::string(trace) + "." + std::to_string(::getpid());
 		if (!std::freopen(name.c_str(), "w", stderr))
 			return 2;
+		// A file is fully buffered once opened; diagnostics are read while the process runs, a line at a time.
+		std::setvbuf(stderr, nullptr, _IOLBF, 0);
 	}
 	const std::string mode = argc > 1 ? argv[1] : "";
 	const bool dump_image = mode == "--dump-image";

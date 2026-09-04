@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Compare how fast Raven and Wine present Direct3D 11 frames from the same program on the same compositor and driver.
 
-testdata/d3d11/window.exe renders sixty frames into a swap chain and presents each one without waiting for the display; it writes the
-read-back of the first and of the last frame as files. The time between the two files being written covers 59 presents, so it gives the
+testdata/d3d11/present_rate.exe draws a triangle into a swap chain and presents it without waiting for the display, 2000 times after a
+warm-up, timing those presents with the performance counter; it writes the frame count and the microseconds they took. That gives the
 presentation rate of the whole path (DXVK, the Vulkan driver and the compositor) for a 256 by 256 window. Each runtime runs REPEATS times
 on its own isolated headless compositor and the table shows the median.
 
@@ -40,16 +40,16 @@ def run_once(runtime, raven, wine, program, prefix, work, index):
             env |= {"WINEPREFIX": str(prefix), "WINEDEBUG": "-all", "WINEDLLOVERRIDES": "mscoree=;mshtml=;d3d11,dxgi,d3d10core=n"}
             command = [str(wine), str(program)]
         process = subprocess.Popen(command, env=env, cwd=program.parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        marker = prefix / "drive_c" / "window.txt"
+        marker = prefix / "drive_c" / "present_rate.txt"
         try:
             deadline = time.time() + 120
             while time.time() < deadline and process.poll() is None and not marker.exists():
                 time.sleep(0.05)
-            if not marker.exists():
-                return None
             time.sleep(0.2)
-            first, last = (prefix / "drive_c" / "window_first.raw").stat().st_mtime_ns, (prefix / "drive_c" / "window_last.raw").stat().st_mtime_ns
-            return 59 / ((last - first) / 1e9)
+            fields = marker.read_text().split() if marker.exists() else []
+            if len(fields) != 2 or not fields[0].isdigit():
+                return None
+            return int(fields[0]) / (int(fields[1]) / 1e6)
         finally:
             process.terminate()
             try:
@@ -73,7 +73,7 @@ def main():
     program_dir.mkdir()
     for name in ("d3d11.dll", "dxgi.dll", "d3d10core.dll"):
         shutil.copy(dxvk / name, program_dir / name)
-    shutil.copy(testdata / "d3d11" / "window.exe", program_dir / "window.exe")
+    shutil.copy(testdata / "d3d11" / "present_rate.exe", program_dir / "present_rate.exe")
     warm = work / "wine-warm"
     warm_env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "WINEPREFIX": str(warm), "WINEDEBUG": "-all"}
     subprocess.run([str(wine), "wineboot", "-u"], env=warm_env, capture_output=True, timeout=300)
@@ -85,7 +85,7 @@ def main():
             prefix = work / f"prefix-{runtime}-{index}"
             if runtime == "wine":
                 shutil.copytree(warm, prefix, symlinks=True)
-            rate = run_once(runtime, raven, wine, program_dir / "window.exe", prefix, work, index)
+            rate = run_once(runtime, raven, wine, program_dir / "present_rate.exe", prefix, work, index)
             if rate:
                 rates[runtime].append(rate)
     print(f"{'runtime':8} {'frames per second':>18}  runs")

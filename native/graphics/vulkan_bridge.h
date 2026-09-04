@@ -2,8 +2,10 @@
 
 #include "cpu/native_cpu.h"
 #include "pe/module_set.h"
+#include <atomic>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <vulkan/vulkan.h>
 
@@ -41,10 +43,27 @@ public:
 	// Brings the guest's view of mapped memory and the driver's in line before and after work the driver does.
 	void synchronize_to_device(uint64_t device) { shadow_to_device(device); }
 	void synchronize_from_device(uint64_t device) { shadow_from_device(device); }
+	// How a guest thread waits while the others run: `park` returns once the condition holds, and `wake` may be called from any host
+	// thread to have the scheduler look at the conditions again.
+	void set_blocking(std::function<void(std::function<bool()>)> park_thread, std::function<void()> wake_scheduler)
+	{
+		park = std::move(park_thread);
+		wake = std::move(wake_scheduler);
+	}
+	// Runs a driver call that can take long, such as a present, on a host thread of its own; the guest thread that made it waits for it
+	// while the process's other threads go on, as they do on Windows. When the guest thread is made to leave meanwhile, `cancel` is set
+	// and the call is waited for, since it reads what the thread's frame decoded.
+	VkResult detached(const std::function<VkResult()> &work, std::atomic<bool> *cancel = nullptr);
+	// A wait the driver does with `timeout` in nanoseconds, detached the same way unless it only polls.
+	VkResult detached_wait(const std::function<VkResult(uint64_t slice)> &wait, uint64_t timeout);
 
 private:
 	NativeProcess &process;
 	const ModuleSet &modules;
+	std::function<void(std::function<bool()>)> park;
+	std::function<void()> wake;
+	struct Workers;
+	std::shared_ptr<Workers> workers;
 	std::map<uint64_t, VkInstance> instances;
 	struct Physical { VkPhysicalDevice handle; uint64_t instance; };
 	std::map<uint64_t, Physical> physical;

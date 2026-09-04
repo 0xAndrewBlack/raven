@@ -499,6 +499,10 @@ def emit(registry, selected, state, output, classify_member, declared):
     hooks_pre = {"vkQueueSubmit": "synchronize_to_device", "vkQueueSubmit2": "synchronize_to_device", "vkQueueSubmit2KHR": "synchronize_to_device"}
     hooks_post = {"vkQueueWaitIdle": "synchronize_from_device", "vkWaitForFences": "synchronize_from_device", "vkGetFenceStatus": "synchronize_from_device","vkWaitSemaphores": "synchronize_from_device", "vkWaitSemaphoresKHR": "synchronize_from_device", "vkGetSemaphoreCounterValue": "synchronize_from_device",
                   "vkGetSemaphoreCounterValueKHR": "synchronize_from_device", "vkGetQueryPoolResults": "synchronize_from_device"}
+    # Commands that can keep the driver busy for long: they run on a host thread while the guest's other threads go on.
+    detached = {"vkQueuePresentKHR"}
+    # Waits with a timeout: the driver waits in slices so that a process that ends is not held by a wait nothing will satisfy.
+    detached_waits = {"vkWaitSemaphores", "vkWaitSemaphoresKHR", "vkWaitForFences"}
     for exported, target in sorted(selected.items()):
         info = registry.commands[target]
         params = info["params"]
@@ -636,6 +640,11 @@ def emit(registry, selected, state, output, classify_member, declared):
         call = f"function({', '.join(call_args)})"
         if ret == "void":
             lines.append(f"\t{call};\n\tconst bool success = true;\n\t(void)success;\n\tuint64_t result = 0;")
+        elif ret == "VkResult" and target in detached_waits:
+            sliced = ", ".join("slice" if arg == "v_timeout" else arg for arg in call_args)
+            lines.append(f"\tconst VkResult status = b.detached_wait([&](uint64_t slice) {{ return function({sliced}); }}, v_timeout);\n\tconst bool success = status == VK_SUCCESS || status == VK_INCOMPLETE;\n\tuint64_t result = static_cast<uint32_t>(status);")
+        elif ret == "VkResult" and target in detached:
+            lines.append(f"\tconst VkResult status = b.detached([&] {{ return {call}; }});\n\tconst bool success = status == VK_SUCCESS || status == VK_INCOMPLETE;\n\tuint64_t result = static_cast<uint32_t>(status);")
         elif ret == "VkResult":
             lines.append(f"\tconst VkResult status = {call};\n\tconst bool success = status == VK_SUCCESS || status == VK_INCOMPLETE;\n\tuint64_t result = static_cast<uint32_t>(status);")
         else:

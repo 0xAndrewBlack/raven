@@ -28,6 +28,7 @@
 #endif
 
 #include <unistd.h>
+#include <sys/mman.h>
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -85,9 +86,56 @@ const std::vector<FastStub> &fast_stubs()
 
 }
 
-// Offset of the slow-path breakpoint inside a fast stub.
+// Calls that only read and write guest memory: their stubs leave the arguments in a block the runtime shares with the guest and spin until
+// the answer is there, so the guest never stops for them.
+static bool served_api(std::string_view module, std::string_view name)
+{
+	if (module == "kernel32.dll" || module == "kernelbase.dll")
+		return name == "QueryPerformanceCounter" || name == "QueryPerformanceFrequency" || name == "WakeConditionVariable" ||
+			name == "WakeAllConditionVariable";
+	// Waking marks the sleepers; they run when the scheduler next picks a thread.
+	if (module == "ntdll.dll")
+		return name == "RtlWakeConditionVariable" || name == "RtlWakeAllConditionVariable";
+	if (module != "vulkan-1.dll")
+		return false;
+	static constexpr std::array<std::string_view, 22> recording{
+		"vkAcquireNextImageKHR", "vkAllocateCommandBuffers", "vkAllocateDescriptorSets", "vkBeginCommandBuffer", "vkEndCommandBuffer", "vkFreeCommandBuffers",
+		"vkFreeDescriptorSets", "vkGetFenceStatus", "vkGetSemaphoreCounterValue", "vkGetSemaphoreCounterValueKHR", "vkQueueSubmit",
+		"vkQueueSubmit2", "vkQueueSubmit2KHR", "vkResetCommandBuffer", "vkResetCommandPool", "vkResetDescriptorPool", "vkResetFences",
+		"vkSignalSemaphore", "vkSignalSemaphoreKHR", "vkUpdateDescriptorSetWithTemplate", "vkUpdateDescriptorSetWithTemplateKHR",
+		"vkUpdateDescriptorSets"};
+	return name.starts_with("vkCmd") || std::find(recording.begin(), recording.end(), name) != recording.end();
+}
+
+// A served stub: it loads the block address from the provider's own pointer, which stays zero until the runtime maps the block, stores
+// RCX, RDX, R8, R9, RSP and the low halves of XMM0 to XMM3, publishes its own address and spins until the runtime clears it. After a
+// thousand rounds it stops at a breakpoint instead, which gives the processor to the runtime when the two compete for it.
+static constexpr size_t served_stub_size = 128, served_trap = 0x70, served_wait = 85;
+
+static std::vector<uint8_t> served_stub(int32_t to_pointer)
+{
+	std::vector<uint8_t> code{0x4c, 0x8b, 0x15, 0, 0, 0, 0, 0x4d, 0x85, 0xd2, 0x74, uint8_t(served_trap - 12),
+		0x49, 0x89, 0x4a, 0x08, 0x49, 0x89, 0x52, 0x10, 0x4d, 0x89, 0x42, 0x18, 0x4d, 0x89, 0x4a, 0x20, 0x49, 0x89, 0x62, 0x28,
+		0x66, 0x49, 0x0f, 0x7e, 0x42, 0x30, 0x66, 0x49, 0x0f, 0x7e, 0x4a, 0x38, 0x66, 0x49, 0x0f, 0x7e, 0x52, 0x40, 0x66, 0x49, 0x0f, 0x7e, 0x5a, 0x48,
+		0x4c, 0x8d, 0x1d, 0xc1, 0xff, 0xff, 0xff, 0x4d, 0x89, 0x1a,
+		// mov r11d, 1000; spin: pause; cmp qword [r10], 0; je done; dec r11d; jnz spin; int3; jmp to the compare; nop
+		0x41, 0xbb, 0xe8, 0x03, 0x00, 0x00, 0xf3, 0x90, 0x49, 0x83, 0x3a, 0x00, 0x74, 0x0a, 0x41, 0xff, 0xcb, 0x75, 0xf3, 0xcc, 0xeb, 0xf2,
+		0x66, 0x90,
+		// done: mov rax, [r10+80]; ret
+		0x49, 0x8b, 0x42, 0x50, 0xc3};
+	const int32_t displacement = to_pointer - 7;
+	std::memcpy(code.data() + 3, &displacement, 4);
+	code.resize(served_trap + 2);
+	code[served_trap] = 0xcc;
+	code[served_trap + 1] = 0xc3;
+	return code;
+}
+
+// Offset of the slow-path breakpoint inside a fast or served stub.
 size_t fast_stub_trap_offset(std::string_view module, std::string_view name)
 {
+	if (served_api(module, name))
+		return served_trap;
 	if (module != "kernel32.dll" && module != "kernelbase.dll")
 		return 0;
 	for (const auto &stub : fast_stubs())
@@ -158,7 +206,13 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 			for (const auto &stub : fast_stubs())
 				fast_count += stub.name == symbol;
 	const size_t fast_start = (data_start + data_exports.size() * 16 + 63) & ~size_t(63);
-	const size_t end = fast_start + fast_count * 64;
+	size_t served_count = 0;
+	if (!x86)
+		for (const auto symbol : exports)
+			served_count += served_api(name, symbol);
+	// The block pointer of the served stubs, then the stubs.
+	const size_t served_start = fast_start + fast_count * 64;
+	const size_t end = served_start + (served_count ? 64 + served_count * served_stub_size : 0);
 	std::vector<uint8_t> bytes((end + 511) & ~size_t(511));
 	const auto rva = [](size_t offset) { return 0x1000 + offset - 0x200; };
 	const auto put = [&](size_t offset, uint64_t value, size_t width = 4) {
@@ -210,11 +264,16 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(directory + 36, rva(ordinals));
 	text(module_name, name);
 	size_t cursor = module_name + name.size() + 1;
-	size_t fast_next = 0;
+	size_t fast_next = 0, served_next = 0;
 	for (size_t index = 0; index < exports.size(); ++index) {
 		size_t code = 0x200 + index * 16;
 		bytes[code] = 0xcc;
 		bytes[code + 1] = 0xc3;
+		if (!x86 && served_api(name, exports[index])) {
+			code = served_start + 64 + served_next++ * served_stub_size;
+			const auto stub = served_stub(int32_t(served_start) - int32_t(code));
+			std::copy(stub.begin(), stub.end(), bytes.begin() + ptrdiff_t(code));
+		}
 		if (kernel_module)
 			for (const auto &stub : fast_stubs())
 				if (stub.name == exports[index]) {
@@ -417,7 +476,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				if (symbol.address && (modules.all().at("ntdll.dll")->runtime_api || std::find(nt_names.begin(),nt_names.end(),name)!=nt_names.end()) && symbol.forwarder.empty()) {
 					const auto &image=*modules.all().at("ntdll.dll");
 					if (image.runtime_api) {
-						traps.emplace(image.loaded.base()+symbol.address,name.starts_with("Zw") ? "Nt"+name.substr(2) : name);
+						traps.emplace(image.loaded.base()+symbol.address+fast_stub_trap_offset("ntdll.dll",name),name.starts_with("Zw") ? "Nt"+name.substr(2) : name);
 						continue;
 					}
 					const auto bytes=image.image.file_span(symbol.address,11);
@@ -439,7 +498,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	}
 	if (modules.all().at("vulkan-1.dll")->runtime_api)
 		for (const auto &symbol : modules.all().at("vulkan-1.dll")->exports)
-			traps.emplace(modules.all().at("vulkan-1.dll")->loaded.base() + symbol.address, symbol.names.at(0));
+			traps.emplace(modules.all().at("vulkan-1.dll")->loaded.base() + symbol.address + fast_stub_trap_offset("vulkan-1.dll", symbol.names.at(0)),
+				symbol.names.at(0));
 #endif
 	alias_api_sets(modules);
 	modules.bind_imports();
@@ -784,6 +844,95 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		HostWait waiting;
 		threads.block(std::move(ready), std::nullopt);
 	});
+#ifdef RAVEN_VULKAN
+	vulkan.set_blocking([&threads](std::function<bool()> ready) {
+		HostWait waiting;
+		threads.block(std::move(ready), std::nullopt);
+	}, [&threads] { threads.nudge(); });
+#endif
+	// The block the served stubs of every runtime provider share, and which stub serves which name.
+	const int served_file = memfd_create("raven-served-calls", MFD_CLOEXEC);
+	if (served_file < 0 || ftruncate(served_file, 4096) != 0)
+		throw std::runtime_error("cannot create the served call block");
+	auto *served_block = static_cast<uint64_t *>(mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, served_file, 0));
+	if (served_block == MAP_FAILED)
+		throw std::runtime_error("cannot map the served call block");
+	const uint64_t served_guest = process.map_shared(served_file, 4096);
+	close(served_file);
+	std::map<uint64_t, std::string> served_names;
+	// The pointers live in the module images, which outlast this process: they are cleared when it ends so that another process mapping
+	// the same images starts with its stubs trapping.
+	struct ServedPointers {
+		std::vector<uint8_t *> places;
+		~ServedPointers()
+		{
+			for (auto *place : places)
+				std::memset(place, 0, 8);
+		}
+	} served_pointers;
+	for (const auto &[module_name, module] : modules.all()) {
+		if (!module->runtime_api)
+			continue;
+		for (const auto &symbol : module->exports) {
+			if (!symbol.address || symbol.names.empty() || !symbol.forwarder.empty() || !served_api(module_name, symbol.names.at(0)))
+				continue;
+			auto image = module->loaded.data();
+			int32_t displacement = 0;
+			std::memcpy(&displacement, image.data() + symbol.address + 3, 4);
+			std::memcpy(image.data() + symbol.address + 7 + displacement, &served_guest, 8);
+			served_pointers.places.push_back(image.data() + symbol.address + 7 + displacement);
+			served_names.emplace(module->loaded.base() + symbol.address, symbol.names.at(0));
+		}
+	}
+	std::vector<uint64_t> served_stubs;
+	for (const auto &[stub, name] : served_names)
+		served_stubs.push_back(stub);
+	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, [&, served_names = std::move(served_names)](uint64_t stub) {
+		const auto found = served_names.find(stub);
+		if (found == served_names.end())
+			throw std::runtime_error("a served call came from an unknown stub");
+		api_in_progress = found->second.c_str();
+		const auto profile_start = RuntimeProfile::instance().enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+		const bool dispatched = api_registry.dispatch(process, environment, found->second)
+#ifdef RAVEN_VULKAN
+			|| vulkan.dispatch(found->second)
+#endif
+			;
+		if (!dispatched)
+			throw std::runtime_error("served call " + found->second + " has no handler");
+		if (RuntimeProfile::instance().enabled())
+			RuntimeProfile::instance().api(found->second, std::chrono::steady_clock::now() - profile_start);
+	});
+	// RAVEN_SAMPLE_GUEST=1 reports every five seconds where the guest spent its running time, by module and 256-byte block.
+	if (std::getenv("RAVEN_SAMPLE_GUEST")) {
+		auto samples = std::make_shared<std::map<uint64_t, uint32_t>>();
+		auto reported = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+		process.set_guest_sampler(std::chrono::milliseconds(2), [&modules, samples, reported](uint64_t rip) {
+			++(*samples)[rip & ~uint64_t(255)];
+			if (std::chrono::steady_clock::now() - *reported < std::chrono::seconds(5))
+				return;
+			*reported = std::chrono::steady_clock::now();
+			std::vector<std::pair<uint32_t, uint64_t>> top;
+			uint32_t total = 0;
+			for (const auto &[where, count] : *samples) {
+				top.emplace_back(count, where);
+				total += count;
+			}
+			std::sort(top.rbegin(), top.rend());
+			std::cerr << "samples: " << total << " in the last period\n";
+			for (size_t index = 0; index < std::min<size_t>(top.size(), 15); ++index) {
+				std::string place = "?";
+				for (const auto &[module_name, module] : modules.all())
+					if (top[index].second >= module->loaded.base() && top[index].second < module->loaded.base() + module->image.image_size) {
+						std::ostringstream text;
+						text << module_name << '+' << std::hex << top[index].second - module->loaded.base();
+						place = text.str();
+					}
+				std::cerr << "  " << top[index].first << ' ' << place << '\n';
+			}
+			samples->clear();
+		});
+	}
 	kernel_ptr=&kernel;
 	NativeUnwinder unwinder(process, modules);
 	register_exception_api(api_registry, kernel, unwinder);

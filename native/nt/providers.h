@@ -15,6 +15,9 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	std::span<const std::pair<std::string_view, uint16_t>> ordinal_exports = {},
 	// Gives hot kernel32 services guest-side fast paths; their slow-path trap sits at a fixed offset inside the stub.
 	bool fast_paths = false);
+// Where the breakpoint of a 64-bit provider export sits inside its stub: past the guest-side path of a fast or served stub, at its start
+// otherwise.
+size_t fast_stub_trap_offset(std::string_view module, std::string_view name);
 // Runs a PE32 process in host compatibility mode; only the API providers listed in x86_process.cpp exist so far.
 // A source of libraries shipped beside the program lets a program import them statically: they are loaded with it, and their entry points run
 // before the program's.

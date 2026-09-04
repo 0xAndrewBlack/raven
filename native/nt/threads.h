@@ -6,9 +6,11 @@
 #include "tls.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <ucontext.h>
 #include <vector>
@@ -80,6 +82,8 @@ public:
 	// Runs at every scheduling decision, also while threads run: requests from other processes are answered without waiting for idleness.
 	void add_service(std::function<void()> work) { services.push_back(std::move(work)); }
 	void serve() { for (const auto &service : services) service(); }
+	// Ends the scheduler's idle wait early: called from a host thread that finished work a waiting guest thread looks for.
+	void nudge();
 
 	std::shared_ptr<GuestThread> create(uint64_t start, uint64_t parameter, uint64_t stack_size, bool suspended);
 	GuestThread &current() { return *running; }
@@ -111,6 +115,9 @@ private:
 	std::vector<std::function<bool()>> externals;
 	std::vector<std::function<void()>> pumps;
 	std::vector<std::function<void()>> services;
+	std::mutex idle_lock;
+	std::condition_variable idle_signal;
+	bool nudged = false;
 	std::vector<std::shared_ptr<GuestThread>> threads;
 	GuestThread *running = nullptr;
 	// Set while the process ends: threads leave through their frames and the deadline no longer interrupts them.

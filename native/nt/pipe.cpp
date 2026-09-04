@@ -736,6 +736,10 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	};
 	registry.add("SetFileCompletionNotificationModes", 2, [&context](ApiCall &call) {
+		if (!(call.u32(1) & ~3U) && set_socket_completion_modes(context.objects, call[0], call.u32(1))) {
+			call.ret(1);
+			return;
+		}
 		const auto file = context.objects.object_as<FileObject>(call[0]);
 		if (!file || (call.u32(1) & ~3U)) {
 			call.fail(file ? error_invalid_parameter : 6);

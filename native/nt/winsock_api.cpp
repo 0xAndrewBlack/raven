@@ -47,6 +47,8 @@ public:
 	int type = SOCK_STREAM;
 	std::shared_ptr<CompletionPort> port;
 	uint64_t key = 0;
+	// SetFileCompletionNotificationModes: no packet for a transfer that finishes at once, and no event set for it.
+	bool skip_port_on_success = false, skip_event_on_success = false;
 	// WSAEventSelect: the event to set, the network events asked for, the ones that may be reported again, and the ones recorded
 	// since the program last enumerated them, with their error codes (WSANETWORKEVENTS order).
 	uint64_t select_event = 0;
@@ -148,6 +150,16 @@ struct TcpEntry {
 };
 
 // Linux socket states in /proc/net/tcp order and the MIB_TCP_STATE values Windows reports for them.
+bool set_socket_completion_modes(NativeObjects &objects, uint64_t handle, uint32_t modes)
+{
+	const auto socket = objects.object_as<SocketObject>(handle);
+	if (!socket)
+		return false;
+	socket->skip_port_on_success = modes & 1;
+	socket->skip_event_on_success = modes & 2;
+	return true;
+}
+
 static uint32_t windows_tcp_state(unsigned host)
 {
 	static constexpr uint32_t states[] = {0, 5, 3, 4, 6, 7, 11, 1, 8, 10, 2, 9};
@@ -590,7 +602,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		return 0;
 	};
 	// OVERLAPPED: the status and the byte count come first, the event handle after the two offset words.
-	const auto finish = [&process, &objects](const std::shared_ptr<SocketObject> &socket, uint64_t overlapped, size_t width, uint32_t status, uint64_t bytes) {
+	const auto finish = [&process, &objects](const std::shared_ptr<SocketObject> &socket, uint64_t overlapped, size_t width, uint32_t status, uint64_t bytes,
+		bool at_once) {
 		const auto put = [&](uint64_t at, uint64_t value) {
 			std::vector<uint8_t> raw(width);
 			std::memcpy(raw.data(), &value, width);
@@ -605,14 +618,16 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			std::memcpy(&value, raw.data(), width);
 			return value;
 		}();
-		if (handle & ~uint64_t(1))
+		// A transfer that finished at once with success skips what the completion modes ask to skip.
+		const bool succeeded_at_once = at_once && !status;
+		if ((handle & ~uint64_t(1)) && !(succeeded_at_once && socket->skip_event_on_success))
 			objects.set_event(handle & ~uint64_t(1), true);
 		// A handle with its low bit set asks for no completion packet.
-		if (socket->port && !(handle & 1))
+		if (socket->port && !(handle & 1) && !(succeeded_at_once && socket->skip_port_on_success))
 			socket->port->post({bytes, socket->key, overlapped, status});
 	};
-	const auto complete = [finish](const Transfer &transfer, uint32_t status, uint64_t bytes) {
-		finish(transfer.socket, transfer.overlapped, transfer.width, status, bytes);
+	const auto complete = [finish](const Transfer &transfer, uint32_t status, uint64_t bytes, bool at_once) {
+		finish(transfer.socket, transfer.overlapped, transfer.width, status, bytes, at_once);
 	};
 	// Starts a transfer for the WSA calls; returns the call's result (0 or SOCKET_ERROR) with the byte count stored when it finished.
 	const auto start = [attempt, complete, &reactor](ApiCall &call, Transfer transfer, uint64_t bytes_out) {
@@ -628,7 +643,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 				call.fail(status, UINT32_MAX);
 				return;
 			}
-			complete(transfer, 0, bytes);
+			complete(transfer, 0, bytes, true);
 			if (bytes_out)
 				call.store<uint32_t>(bytes_out, uint32_t(bytes));
 			call.ret(0);
@@ -647,7 +662,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			uint64_t count = 0;
 			if (attempt(*shared, result, count) != 0)
 				return false;
-			complete(*shared, result, count);
+			complete(*shared, result, count, false);
 			return true;
 		});
 		call.fail(997, UINT32_MAX);
@@ -835,17 +850,17 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		const auto address = host_address(call, call[1], size_t(call.i32(2)));
 		auto data = call[3] && call.u32(4) ? call.read(call[3], call.u32(4)) : std::vector<uint8_t>{};
 		const auto sent_out = call[5];
-		const auto done = [socket, finish, overlapped, width, data = std::move(data)](uint32_t status) {
+		const auto done = [socket, finish, overlapped, width, data = std::move(data)](uint32_t status, bool at_once) {
 			uint64_t bytes = 0;
 			if (!status && !data.empty()) {
 				const ssize_t count = ::send(socket->descriptor, data.data(), data.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
 				bytes = count > 0 ? uint64_t(count) : 0;
 			}
-			finish(socket, overlapped, width, status, bytes);
+			finish(socket, overlapped, width, status, bytes, at_once);
 			return bytes;
 		};
 		if (::connect(socket->descriptor, reinterpret_cast<const sockaddr *>(address.data()), socklen_t(address.size())) == 0) {
-			const auto bytes = done(0);
+			const auto bytes = done(0, true);
 			if (sent_out)
 				call.store<uint32_t>(sent_out, uint32_t(bytes));
 			call.ret(1);
@@ -857,7 +872,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		}
 		reactor.add([socket, done]() {
 			if (socket->closed) {
-				done(995);
+				done(995, false);
 				return true;
 			}
 			pollfd entry{socket->descriptor, POLLOUT, 0};
@@ -866,7 +881,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			int error = 0;
 			socklen_t length = sizeof(error);
 			::getsockopt(socket->descriptor, SOL_SOCKET, SO_ERROR, &error, &length);
-			done(error ? wsa_error(error) : 0);
+			done(error ? wsa_error(error) : 0, false);
 			return true;
 		});
 		fail(call, 997, 0);
@@ -911,7 +926,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		};
 		const int first = attempt();
 		if (first == 0) {
-			finish(listener, overlapped, width, 0, 0);
+			finish(listener, overlapped, width, 0, 0, true);
 			call.ret(1);
 			return;
 		}
@@ -921,13 +936,13 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		}
 		reactor.add([attempt, finish, listener, overlapped, width]() {
 			if (listener->closed) {
-				finish(listener, overlapped, width, 995, 0);
+				finish(listener, overlapped, width, 995, 0, false);
 				return true;
 			}
 			const int result = attempt();
 			if (result < 0)
 				return false;
-			finish(listener, overlapped, width, uint32_t(result), 0);
+			finish(listener, overlapped, width, uint32_t(result), 0, false);
 			return true;
 		});
 		fail(call, 997, 0);
@@ -955,7 +970,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		}
 		::shutdown(socket->descriptor, SHUT_RDWR);
 		if (call[1])
-			finish(socket, call[1], call.pointer_width(), 0, 0);
+			finish(socket, call[1], call.pointer_width(), 0, 0, true);
 		call.ret(1);
 	});
 

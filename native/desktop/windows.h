@@ -117,6 +117,12 @@ private:
 	void activate(uint64_t window);
 	uint64_t set_focus(uint64_t window);
 	void receive(const DesktopEvent &event);
+	// Input that arrives while a button press is being placed in the queue (the program runs during its hit test and parent notifications
+	// and may pump): it is taken in after the press, so the program sees the input in the order it happened.
+	bool placing_press=false;
+	void place_pointer(const DesktopEvent &event,uint32_t message,uint32_t buttons,int64_t x,int64_t y);
+	void release_held_input();
+	std::deque<DesktopEvent> held_input;
 	uint64_t retrieve(std::span<const uint64_t> arguments,bool blocking);
 	void post(uint64_t window,uint32_t message,uint64_t wparam,uint64_t lparam);
 	uint64_t surface_dc(uint64_t window);

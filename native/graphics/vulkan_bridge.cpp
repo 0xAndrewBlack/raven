@@ -2,8 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 
 namespace raven {
 
@@ -92,8 +97,104 @@ void VulkanBridge::destroy_object(const VkDevice &device, const Object &object)
 	}
 }
 
+// Host threads for driver calls that block: as many as there are calls in flight, kept for the ones that follow.
+struct VulkanBridge::Workers {
+	std::mutex lock;
+	std::condition_variable signal;
+	std::deque<std::function<void()>> jobs;
+	std::vector<std::thread> threads;
+	size_t idle = 0;
+	bool stopping = false;
+
+	void run(std::function<void()> job)
+	{
+		std::lock_guard hold(lock);
+		jobs.push_back(std::move(job));
+		if (jobs.size() > idle)
+			threads.emplace_back([this] { loop(); });
+		signal.notify_one();
+	}
+
+	void loop()
+	{
+		std::unique_lock hold(lock);
+		for (;;) {
+			++idle;
+			signal.wait(hold, [this] { return stopping || !jobs.empty(); });
+			--idle;
+			if (stopping)
+				return;
+			auto job = std::move(jobs.front());
+			jobs.pop_front();
+			hold.unlock();
+			job();
+			hold.lock();
+		}
+	}
+
+	~Workers()
+	{
+		{
+			std::lock_guard hold(lock);
+			stopping = true;
+		}
+		signal.notify_all();
+		for (auto &thread : threads)
+			thread.join();
+	}
+};
+
+VkResult VulkanBridge::detached(const std::function<VkResult()> &work, std::atomic<bool> *cancel)
+{
+	if (!park)
+		return work();
+	if (!workers)
+		workers = std::make_shared<Workers>();
+	struct Call {
+		VkResult status = VK_SUCCESS;
+		std::atomic<bool> done{false};
+	};
+	const auto call = std::make_shared<Call>();
+	workers->run([call, &work, notify = wake] {
+		call->status = work();
+		call->done.store(true, std::memory_order_release);
+		if (notify)
+			notify();
+	});
+	try {
+		park([&call] { return call->done.load(std::memory_order_acquire); });
+	} catch (...) {
+		if (cancel)
+			cancel->store(true);
+		// The driver reads what this frame decoded, so the frame stays until the call is back.
+		while (!call->done.load(std::memory_order_acquire))
+			std::this_thread::sleep_for(std::chrono::microseconds(100));
+		throw;
+	}
+	return call->status;
+}
+
+VkResult VulkanBridge::detached_wait(const std::function<VkResult(uint64_t)> &wait, uint64_t timeout)
+{
+	if (!park || timeout == 0)
+		return wait(timeout);
+	constexpr uint64_t slice = 50'000'000;
+	std::atomic<bool> cancelled{false};
+	const auto start = std::chrono::steady_clock::now();
+	return detached([&] {
+		for (;;) {
+			const auto spent = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+			const uint64_t left = spent >= timeout ? 0 : timeout - spent;
+			const VkResult status = wait(std::min(left, slice));
+			if (status != VK_TIMEOUT || left <= slice || cancelled.load())
+				return status;
+		}
+	}, &cancelled);
+}
+
 VulkanBridge::~VulkanBridge()
 {
+	workers.reset();
 	while (!devices.empty())
 		destroy_device(devices.begin()->first);
 	// Surfaces a program left behind belong to the instance that created them, if that instance still exists here.

@@ -472,6 +472,11 @@ void NativeWindows::settle_focus_leave(bool now)
 
 void NativeWindows::receive(const DesktopEvent &event)
 {
+	if (placing_press && (event.kind==DesktopEventKind::pointer_motion || event.kind==DesktopEventKind::pointer_button ||
+		event.kind==DesktopEventKind::pointer_wheel || event.kind==DesktopEventKind::pointer_relative || event.kind==DesktopEventKind::key)) {
+		held_input.push_back(event);
+		return;
+	}
 	// A key means one of the program's windows still has the keyboard, so a pending leave did not happen after all.
 	if (event.kind==DesktopEventKind::key) focus_leaving=false;
 	else if (event.kind!=DesktopEventKind::keyboard_focus) settle_focus_leave(false);
@@ -624,6 +629,9 @@ void NativeWindows::receive(const DesktopEvent &event)
 		if (event.wparam>1) throw std::runtime_error("invalid pointer button state");
 		if (event.wparam) buttons|=mask; else { buttons&=~mask; ++message; }
 	}
+	static const bool trace_buttons=std::getenv("RAVEN_TRACE_MSG")!=nullptr;
+	if (trace_buttons && event.kind==DesktopEventKind::pointer_button)
+		fprintf(stderr,"button %x on %llx at %d,%d capture %llx\n",message,(unsigned long long)event.window,event.x,event.y,(unsigned long long)capture);
 	if (!event.window && event.kind==DesktopEventKind::pointer_button) { mouse_buttons=buttons; return; }
 	const auto *window=objects.window(event.window);
 	if (!window || !window->visible) throw std::runtime_error("pointer event targets an unavailable guest window");
@@ -646,7 +654,42 @@ void NativeWindows::receive(const DesktopEvent &event)
 	if (raw_mouse.registered && raw_mouse.no_legacy) return;
 	if (scroll_drag.window && (message==0x200 || message==0x202 || message==0x201) && scroll_motion(message,int32_t(x),int32_t(y))) return;
 	if (capture && !objects.window(capture)) capture=0;
-	const auto target=capture ? capture : pointer_child(event.window,int32_t(x),int32_t(y));window=objects.window(target);
+	// The press is placed before any input read while the program handles the messages sent for it.
+	const bool press=message==0x201 || message==0x204 || message==0x207;
+	if (press && !placing_press) {
+		placing_press=true;
+		try {
+			place_pointer(event,message,buttons,x,y);
+		} catch (...) {
+			placing_press=false;
+			held_input.clear();
+			throw;
+		}
+		release_held_input();
+		return;
+	}
+	place_pointer(event,message,buttons,x,y);
+}
+
+static bool trace_buttons_enabled()
+{
+	static const bool enabled=std::getenv("RAVEN_TRACE_MSG")!=nullptr;
+	return enabled;
+}
+
+void NativeWindows::release_held_input()
+{
+	placing_press=false;
+	while (!held_input.empty()) {
+		const auto next=held_input.front();
+		held_input.pop_front();
+		receive(next);
+	}
+}
+
+void NativeWindows::place_pointer(const DesktopEvent &event,uint32_t message,uint32_t buttons,int64_t x,int64_t y)
+{
+	const auto target=capture ? capture : pointer_child(event.window,int32_t(x),int32_t(y));auto *window=objects.window(target);
 	track_pointer(target);
 	const bool inset=window->x!=window->outer.left || window->y!=window->outer.top ||
 		int64_t(window->width)!=int64_t(window->outer.right)-window->outer.left ||
@@ -654,7 +697,12 @@ void NativeWindows::receive(const DesktopEvent &event)
 	const bool inside=x>=window->outer.left && y>=window->outer.top && x<window->outer.right && y<window->outer.bottom;
 	const auto hit=!capture && inset && inside ? send(target,0x84,0,uint16_t(x)|(uint64_t(uint16_t(y))<<16)) : 1;
 	window=objects.window(target);
+	if (trace_buttons_enabled() && message!=0x200)
+		fprintf(stderr,"button %x target %llx hit %llx visible %d\n",message,(unsigned long long)target,(unsigned long long)hit,
+			window && objects.window_visible(target) ? 1 : 0);
 	if (!window || !objects.window_visible(target) || !hit) return;
+	// Scroll bars and the frame may run a loop of their own that waits for the release, so what was held goes in first.
+	if (hit!=1 && placing_press) release_held_input();
 	if ((hit==6 || hit==7) && scroll_pointer(target,hit,message,int32_t(x),int32_t(y))) return;
 	if (hit!=1) { nonclient_pointer(target,hit,message,int32_t(event.x),int32_t(event.y)); return; }
 	if ((message==0x201 || message==0x204 || message==0x207) && window->parent && !(window->ex_style & 4)) {
@@ -708,6 +756,11 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 			put(bytes,layout.time,value.time,4);
 			put(bytes,layout.x,uint32_t(value.x),4); put(bytes,layout.y,uint32_t(value.y),4);
 			process.write_memory(args[0],bytes);
+			// RAVEN_TRACE_MSG also follows what each retrieval returns, with the filter it was asked with.
+			static const char *const trace_retrieval=std::getenv("RAVEN_TRACE_MSG");
+			if (trace_retrieval)
+				fprintf(stderr,"get %llx %x filter %llx %x-%x %s\n",(unsigned long long)value.window,value.message,(unsigned long long)window,minimum,maximum,
+					(flags & 1U) ? "remove" : "peek");
 			if (value.message>=0x100 && value.message<=0x105 && value.message!=0x102 && value.message!=0x103) {
 				key_translation=value;
 				// Key state seen by GetKeyState follows the messages the thread has retrieved, not the physical keys.
