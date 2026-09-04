@@ -54,6 +54,10 @@ struct DesktopPresentation {
 	// Keeps the pointer inside the rectangle (left, top, right, bottom) of the window's frame, or holds it still when the rectangle is a
 	// point; no rectangle lets it go.
 	std::function<void(uint64_t handle,std::optional<std::array<int32_t,4>> rectangle)> confine;
+	// Shows or updates a program's own popup window (a menu or a list it draws itself) at (x, y) of the surface of the window that owns it.
+	// Windows has no grab: input outside it keeps going where it goes, and the program closes its popup itself.
+	std::function<void(uint64_t handle,uint64_t owner,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels)>
+		owned_popup;
 };
 
 }

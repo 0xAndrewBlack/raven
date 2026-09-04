@@ -39,6 +39,9 @@ struct WaylandPresentation::State {
 		xdg_toplevel *role=nullptr;
 		xdg_popup *popup=nullptr;
 		bool is_popup=false;
+		// Where a popup sits on its parent, and whether it took a grab.
+		int32_t popup_x=0,popup_y=0;
+		bool grabbed=false;
 		bool configured=false, closed=false, resized=false, close_posted=false, first_frame=false;
 		uint32_t width=0,height=0,pending_width=0,pending_height=0;
 		std::vector<std::unique_ptr<Buffer>> buffers;
@@ -455,16 +458,24 @@ struct WaylandPresentation::State {
 		if (window.closed) throw std::runtime_error("Wayland surface was closed during presentation");
 	}
 
-	void popup_surface(uint64_t handle,uint64_t parent,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
+	void popup_surface(uint64_t handle,uint64_t parent,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels,
+		bool grab=true) {
 		if (!handle || !width || !height || width>4096 || height>4096 || pixels.size()!=size_t(width)*height*4)
 			throw std::runtime_error("invalid native Wayland popup frame");
 		connect();
 		auto found=surfaces.find(handle);
+		// A popup that moved or changed size is made again where it now is; one that was a window before becomes a popup.
+		if (found!=surfaces.end() && !grab && (!found->second->is_popup || found->second->popup_x!=x || found->second->popup_y!=y ||
+			found->second->width!=width || found->second->height!=height || found->second->closed)) {
+			surfaces.erase(found);
+			found=surfaces.end();
+		}
 		if (found==surfaces.end()) {
 			const auto owner=surfaces.find(parent);
 			if (owner==surfaces.end()) throw std::runtime_error("Wayland popup has no presented parent surface");
 			auto window=std::make_unique<Surface>();
 			window->width=width; window->height=height; window->is_popup=true;
+			window->popup_x=x; window->popup_y=y; window->grabbed=grab;
 			window->proxy=wl_compositor_create_surface(compositor);
 			window->shell=xdg_wm_base_get_xdg_surface(shell,window->proxy);
 			xdg_positioner *positioner=xdg_wm_base_create_positioner(shell);
@@ -483,7 +494,7 @@ struct WaylandPresentation::State {
 				nullptr};
 			xdg_surface_add_listener(window->shell,&surface_listener,window.get());
 			xdg_popup_add_listener(window->popup,&popup_listener,window.get());
-			if (seat) xdg_popup_grab(window->popup,seat,last_serial);
+			if (seat && grab) xdg_popup_grab(window->popup,seat,last_serial);
 			wl_surface_commit(window->proxy);
 			const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);
 			while (!window->configured && !window->closed && std::chrono::steady_clock::now()<end) events(std::chrono::milliseconds(20));
@@ -520,6 +531,11 @@ struct WaylandPresentation::State {
 			throw std::runtime_error("invalid native Wayland frame");
 		connect();
 		auto found=surfaces.find(handle);
+		// A window shown as a popup until now becomes a window of its own.
+		if (found!=surfaces.end() && found->second->is_popup) {
+			surfaces.erase(found);
+			found=surfaces.end();
+		}
 		if (found==surfaces.end()) {
 			auto window=std::make_unique<Surface>();
 			window->width=width; window->height=height;
@@ -616,7 +632,10 @@ DesktopPresentation WaylandPresentation::callbacks()
 		found->second->drop_child();
 		if (state->display) wl_display_flush(state->display);
 	},
-	[this](uint64_t handle,std::optional<std::array<int32_t,4>> rectangle) { state->confine(handle,rectangle); }};
+	[this](uint64_t handle,std::optional<std::array<int32_t,4>> rectangle) { state->confine(handle,rectangle); },
+	[this](uint64_t handle,uint64_t owner,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
+		state->popup_surface(handle,owner,x,y,width,height,pixels,false);
+	}};
 }
 
 }

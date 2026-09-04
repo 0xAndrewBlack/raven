@@ -112,6 +112,16 @@ void NativeWindows::present(uint64_t handle)
 	const auto *bitmap=objects.bitmap(window->bitmap);
 	if (!bitmap) return;
 	const auto pixels=std::span<const uint8_t>(bitmap->pixels().data(),size_t(bitmap->width)*bitmap->height*4);
+	// A popup without a caption that another window owns (a menu, a drop-down list) opens where the program placed it: as a popup of the
+	// owner's host window, since a host window of its own would be placed by the compositor.
+	const auto owner=window->owner ? objects.window_root(window->owner) : 0;
+	const auto *owning=owner && owner!=handle ? objects.window(owner) : nullptr;
+	if (presentation.owned_popup && owning && objects.window_visible(owner) && (window->style & 0x80000000U) && (window->style & 0x00c00000U)!=0x00c00000U) {
+		try {
+			presentation.owned_popup(handle,owner,window->outer.left-owning->outer.left,window->outer.top-owning->outer.top,bitmap->width,bitmap->height,pixels);
+			return;
+		} catch (const std::exception &) {}
+	}
 	// Host titles use replacement characters; the guest retains every UTF-16 code unit.
 	presentation.present(handle,encode_utf8(window->title,true),bitmap->width,bitmap->height,pixels);
 }
