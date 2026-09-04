@@ -106,8 +106,7 @@ def main():
         return text
 
     support = extract(source / "dll/ntdll/rtl/libsupp.c",
-                      ["RtlpGetMode", "RtlGetCurrentPeb", "RtlDeleteHeapLock", "RtlEnterHeapLock", "RtlTryEnterHeapLock",
-                       "RtlInitializeHeapLock", "RtlLeaveHeapLock", "RtlpSetHeapParameters", "RtlGetNtGlobalFlags"], "#include <ntdll.h>")
+                      ["RtlpGetMode", "RtlGetCurrentPeb", "RtlpSetHeapParameters", "RtlGetNtGlobalFlags"], "#include <ntdll.h>")
     (output / "support.c").write_text(support)
     verifier_path = source / "dll/ntdll/ldr/verifier.c"
     raw = verifier_path.read_text()

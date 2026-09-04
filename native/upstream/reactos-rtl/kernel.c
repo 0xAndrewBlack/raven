@@ -98,6 +98,68 @@ VOID WINAPI RavenEnterCriticalSection(PRTL_CRITICAL_SECTION section) { RtlEnterC
 VOID WINAPI RavenLeaveCriticalSection(PRTL_CRITICAL_SECTION section) { RtlLeaveCriticalSection(section); }
 BOOL WINAPI RavenTryEnterCriticalSection(PRTL_CRITICAL_SECTION section) { return RtlTryEnterCriticalSection(section) ? TRUE : FALSE; }
 
+/* ---- the heap lock: a word taken with one exchange, as an SRW lock is, so a thread that releases it and asks again gets it back at once
+   instead of handing it to a waiter and queueing behind it; a held lock is waited for by the runtime, which sees it become free when the
+   scheduler looks again. The thread that holds it may take it again: the heap code nests its locking. ---- */
+typedef struct {
+	PVOID word;
+	HANDLE owner;
+	LONG recursion;
+} RAVEN_HEAP_LOCK;
+
+C_ASSERT(sizeof(RAVEN_HEAP_LOCK) <= sizeof(HEAP_LOCK));
+
+NTSTATUS NTAPI RtlInitializeHeapLock(IN OUT PHEAP_LOCK *Lock)
+{
+	RtlZeroMemory(*Lock, sizeof(RAVEN_HEAP_LOCK));
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI RtlDeleteHeapLock(IN OUT PHEAP_LOCK Lock)
+{
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI RtlEnterHeapLock(IN OUT PHEAP_LOCK Lock, IN BOOLEAN Exclusive)
+{
+	RAVEN_HEAP_LOCK *lock = (RAVEN_HEAP_LOCK *)Lock;
+	HANDLE self = NtCurrentTeb()->ClientId.UniqueThread;
+	if (lock->owner == self) {
+		lock->recursion++;
+		return STATUS_SUCCESS;
+	}
+	if (InterlockedCompareExchangePointer(&lock->word, (PVOID)1, NULL))
+		RtlAcquireSRWLockExclusive((PRTL_SRWLOCK)&lock->word);
+	lock->owner = self;
+	lock->recursion = 1;
+	return STATUS_SUCCESS;
+}
+
+BOOLEAN NTAPI RtlTryEnterHeapLock(IN OUT PHEAP_LOCK Lock, IN BOOLEAN Exclusive)
+{
+	RAVEN_HEAP_LOCK *lock = (RAVEN_HEAP_LOCK *)Lock;
+	HANDLE self = NtCurrentTeb()->ClientId.UniqueThread;
+	if (lock->owner == self) {
+		lock->recursion++;
+		return TRUE;
+	}
+	if (InterlockedCompareExchangePointer(&lock->word, (PVOID)1, NULL))
+		return FALSE;
+	lock->owner = self;
+	lock->recursion = 1;
+	return TRUE;
+}
+
+NTSTATUS NTAPI RtlLeaveHeapLock(IN OUT PHEAP_LOCK Lock)
+{
+	RAVEN_HEAP_LOCK *lock = (RAVEN_HEAP_LOCK *)Lock;
+	if (--lock->recursion)
+		return STATUS_SUCCESS;
+	lock->owner = NULL;
+	InterlockedExchangePointer(&lock->word, NULL);
+	return STATUS_SUCCESS;
+}
+
 /* ---- SRW locks: one word, 1 when held exclusively, shared holders counting in steps of 2, as the runtime keeps them; a lock that is
    busy is waited for by the runtime, which sees it become free when the scheduler looks again ---- */
 VOID WINAPI RavenInitializeSRWLock(PRTL_SRWLOCK lock) { lock->Ptr = NULL; }

@@ -68,6 +68,10 @@ const std::vector<FastStub> &fast_stubs()
 	static const std::vector<FastStub> stubs = {
 		// mov eax, gs:[0x68]; ret
 		{"GetLastError", {0x65, 0x8b, 0x04, 0x25, 0x68, 0, 0, 0, 0xc3}},
+		// mov eax, gs:[0x48]; ret (the thread's ClientId.UniqueThread)
+		{"GetCurrentThreadId", {0x65, 0x8b, 0x04, 0x25, 0x48, 0, 0, 0, 0xc3}},
+		// mov eax, gs:[0x40]; ret (the thread's ClientId.UniqueProcess)
+		{"GetCurrentProcessId", {0x65, 0x8b, 0x04, 0x25, 0x40, 0, 0, 0, 0xc3}},
 		// mov gs:[0x68], ecx; ret
 		{"SetLastError", {0x65, 0x89, 0x0c, 0x25, 0x68, 0, 0, 0, 0xc3}},
 		// cmp ecx,64; jae slow; mov ecx,ecx; mov rax,gs:[rcx*8+0x1480]; mov dword gs:[0x68],0; ret
