@@ -115,6 +115,21 @@ def main():
     verifier = extract(verifier_path, ["AVrfInternalHeapFreeNotification"], "#include <ntdll.h>\n#include <reactos/verifier.h>")
     (output / "verifier.c").write_text(verifier.replace("\nVOID\nNTAPI\nAVrfInternalHeapFreeNotification",
                                                       "\n" + declarations + "\nVOID\nNTAPI\nAVrfInternalHeapFreeNotification"))
+    # Critical sections wait on the process-wide keyed event, keyed by their address, as on Windows since Vista: an event handle of
+    # their own would be closed by a program that closes a stale handle value, and the lock would then fail to wake its waiters.
+    critical = (source / "sdk/lib/rtl/critical.c").read_text()
+    creation = """        Status = NtCreateEvent(&hNewEvent,
+                               EVENT_ALL_ACCESS,
+                               NULL,
+                               SynchronizationEvent,
+                               FALSE);"""
+    deletion = "    if (CriticalSection->LockSemaphore)\n    {\n        /* In case NtClose fails, return the status */"
+    if creation not in critical or deletion not in critical:
+        raise SystemExit("ReactOS critical.c changed: the keyed event patch no longer applies")
+    critical = critical.replace(creation, "        Status = STATUS_NOT_SUPPORTED;")
+    critical = critical.replace(deletion, "    if (CriticalSection->LockSemaphore && CriticalSection->LockSemaphore != INVALID_HANDLE_VALUE)\n    {\n"
+                                          "        /* In case NtClose fails, return the status */")
+    (output / "critical.c").write_text(critical)
     (output / "unicode.c").write_text(extract(source / "sdk/lib/rtl/unicode.c", ["RtlInitUnicodeString"], "#include <rtl.h>"))
     includes = [generated, source / "sdk/lib/pseh/include", source / "sdk/include/vcruntime", source / "sdk/include/ndk",
                 source / "sdk/include/psdk", source / "sdk/include/crt", source / "sdk/include/ddk",
@@ -122,8 +137,8 @@ def main():
     flags = ["-c", "-O2", "-ffreestanding", "-ffunction-sections", "-fdata-sections", "-fgnu89-inline", "-mcx16",
              "-Wno-incompatible-pointer-types", "-D_NTOSKRNL_", "-DNO_RTL_INLINES", "-D_M_AMD64", "-D__REACTOS__",
              f"-ffile-prefix-map={source}=reactos", f"-ffile-prefix-map={repo}=raven", f"-ffile-prefix-map={output}=component"]
-    paths = [source / "sdk/lib/rtl" / (name + ".c") for name in
-             ("critical", "heap", "heapuser", "heapdbg", "heappage", "bitmap", "bitmap64", "mem", "slist", "error", "appverifier", "avltable", "splaytree")]
+    paths = [output / "critical.c"] + [source / "sdk/lib/rtl" / (name + ".c") for name in
+             ("heap", "heapuser", "heapdbg", "heappage", "bitmap", "bitmap64", "mem", "slist", "error", "appverifier", "avltable", "splaytree")]
     paths += [source / "sdk/lib/crt/mem/memset.c", source / "sdk/lib/crt/mem/memmove.c", source / "sdk/lib/crt/string/wcslen.c",
               output / "support.c", output / "verifier.c", output / "unicode.c", repo / "native/upstream/reactos-rtl/initialize.c",
               repo / "native/upstream/reactos-rtl/kernel.c"]

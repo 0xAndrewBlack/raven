@@ -344,7 +344,10 @@ int main(int argc, char **argv)
 						const auto image=paths.dos(std::filesystem::absolute(argv[first_file]));
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
 						if (command_line_text) launch->command_line=raven::from_utf8(*command_line_text);
+						// A program starts in the directory of the one that started it, as on Windows: without one named, that is the
+						// directory Raven was started in.
 						if (directory_text) launch->directory=raven::from_utf8(*directory_text);
+						else launch->directory=paths.dos(std::filesystem::current_path());
 						if (handle_channel_fd>=0) raven::set_parent_channel(handle_channel_fd);
 						if (inherit_fd>=0) {
 							// The handles the creator passed on arrive as descriptors, described in an anonymous file.

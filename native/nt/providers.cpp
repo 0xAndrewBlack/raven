@@ -668,8 +668,6 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				process.abandon_call();
 				throw ProcessExit{code,result.instruction};
 			}
-			if (found!=traps.end() && found->second=="RtlRaiseStatus")
-				return native_raise_rtl_exception(process,true);
 			if (found == traps.end())
 				return result;
 			// RAVEN_TRACE_API is 1 for every call or a comma-separated list of API names to follow.
@@ -715,6 +713,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						std::cerr << '\n';
 					});
 			}
+			if (found->second=="RtlRaiseStatus")
+				return native_raise_rtl_exception(process,true);
 			// A thread that never waits still answers the other processes, a few times every second at most.
 			if (const auto now = std::chrono::steady_clock::now(); now - last_service >= std::chrono::milliseconds(2)) {
 				last_service = now;
@@ -1324,6 +1324,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	bool entry_tls_ready=false,cleanup_started=false;
 	const auto exit_result = [&](ProcessExit request) {
 		threads.stop_time_slicing();
+		// The other threads end before the libraries are told the process detaches, so none of them runs on what detaching frees.
+		threads.terminate_others(request.code);
 		try {
 			if (!cleanup_started && !request.terminated) {
 				cleanup_started=true; loading=true;

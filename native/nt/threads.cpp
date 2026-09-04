@@ -377,6 +377,13 @@ void NativeThreads::terminate(const std::shared_ptr<GuestThread> &thread, uint32
 	finish(*thread, code);
 }
 
+void NativeThreads::terminate_others(uint32_t code)
+{
+	for (const auto &thread : threads)
+		if (thread.get() != running && thread->state != GuestThread::State::done)
+			finish(*thread, code);
+}
+
 void NativeThreads::unwind_all()
 {
 	if (!running || !running->main)

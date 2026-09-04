@@ -15,6 +15,9 @@ NTSTATUS NTAPI RavenInitializeRTL(PVOID *heaps, ULONG capacity)
 		return STATUS_INVALID_PARAMETER;
 	// The wait of a thread for a critical section, as the process loader sets it up from the PEB.
 	RtlpTimeout=peb->CriticalSectionTimeout;
+	// A PEB without one has the Windows default of thirty days, in 100 ns units and relative.
+	if (!RtlpTimeout.QuadPart)
+		RtlpTimeout.QuadPart=-25920000000000LL;
 	RtlpInitDeferredCriticalSection();
 	RtlInitializeHeapManager();
 	initialized=TRUE;

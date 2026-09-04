@@ -1,7 +1,11 @@
 #include "kernel_context.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <deque>
 #include <map>
+#include <memory>
 
 namespace raven {
 
@@ -283,6 +287,56 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("WakeByAddressSingle", 1, [](ApiCall &) {});
 	registry.add("WakeByAddressAll", 1, [](ApiCall &) {});
+
+	// Keyed events: a release meets one wait on the same key, whichever comes first waiting for the other. Only the process-wide keyed
+	// event (a null handle) exists, which is what critical sections and slim locks use; a key is an address.
+	struct KeyedParty {
+		bool met = false;
+	};
+	auto keyed = std::make_shared<std::map<std::pair<bool, uint64_t>, std::deque<std::shared_ptr<KeyedParty>>>>();
+	const auto rendezvous = [&threads, keyed](ApiCall &call, bool releasing) {
+		constexpr uint32_t success = 0, timeout = 0x102, invalid_handle = 0xc0000008;
+		if (call[0]) {
+			call.ret(invalid_handle);
+			return;
+		}
+		const uint64_t key = call[1];
+		// One who arrived on the other side first is met at once.
+		auto &others = (*keyed)[{!releasing, key}];
+		if (!others.empty()) {
+			others.front()->met = true;
+			others.pop_front();
+			call.ret(success);
+			return;
+		}
+		// The timeout: none waits for ever, a negative one is relative and a positive one absolute, both in 100 ns units.
+		std::optional<std::chrono::steady_clock::time_point> wake;
+		if (call[3]) {
+			const int64_t value = call.load<int64_t>(call[3]);
+			auto delay = std::chrono::nanoseconds(0);
+			if (value < 0) {
+				delay = std::chrono::nanoseconds(-value * 100);
+			} else if (value > 0) {
+				const auto since_epoch = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch());
+				const int64_t now = since_epoch.count() / 100 + int64_t(filetime_epoch_offset);
+				delay = std::chrono::nanoseconds(std::max<int64_t>(0, value - now) * 100);
+			}
+			wake = std::chrono::steady_clock::now() + delay;
+		}
+		auto party = std::make_shared<KeyedParty>();
+		auto &mine = (*keyed)[{releasing, key}];
+		mine.push_back(party);
+		threads.block([party] { return party->met; }, wake);
+		if (!party->met) {
+			auto &list = (*keyed)[{releasing, key}];
+			list.erase(std::remove(list.begin(), list.end(), party), list.end());
+			call.ret(timeout);
+			return;
+		}
+		call.ret(success);
+	};
+	registry.add("NtWaitForKeyedEvent", 4, [rendezvous](ApiCall &call) { rendezvous(call, false); });
+	registry.add("NtReleaseKeyedEvent", 4, [rendezvous](ApiCall &call) { rendezvous(call, true); });
 }
 
 }

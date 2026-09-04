@@ -26,6 +26,31 @@ CRT int __getmainargs(int *count, char ***vector, char ***environment_out, int w
 
 CRT void __set_app_type(int type) {}
 
+/* msvcrt's numbered internal locks, which startup code takes around the exit table: a critical section each, made on first use. */
+#define CRT_LOCKS 64
+static CRITICAL_SECTION crt_locks[CRT_LOCKS];
+static volatile LONG crt_lock_state[CRT_LOCKS];
+
+CRT void _lock(int number)
+{
+	if (number < 0 || number >= CRT_LOCKS)
+		return;
+	/* 0 is untouched, 1 is being made, 2 is ready. */
+	if (InterlockedCompareExchange(&crt_lock_state[number], 1, 0) == 0) {
+		InitializeCriticalSection(&crt_locks[number]);
+		InterlockedExchange(&crt_lock_state[number], 2);
+	}
+	while (crt_lock_state[number] != 2)
+		Sleep(0);
+	EnterCriticalSection(&crt_locks[number]);
+}
+
+CRT void _unlock(int number)
+{
+	if (number >= 0 && number < CRT_LOCKS && crt_lock_state[number] == 2)
+		LeaveCriticalSection(&crt_locks[number]);
+}
+
 /* The standard streams as msvcrt's FILE array: stdin, stdout and stderr follow each other at its 48-byte stride. */
 CRT void *__iob_func(void)
 {

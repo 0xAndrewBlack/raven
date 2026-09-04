@@ -95,6 +95,8 @@ public:
 	bool yield();
 	[[noreturn]] void exit_current(uint32_t code);
 	void terminate(const std::shared_ptr<GuestThread> &thread, uint32_t code);
+	// Ends every thread but the running one where it stands, as ExitProcess does before the libraries are told the process detaches.
+	void terminate_others(uint32_t code);
 	void resume(GuestThread &thread);
 	// Lets every thread that is still blocked or not yet started leave through its host frames; called when the process ends.
 	void unwind_all();

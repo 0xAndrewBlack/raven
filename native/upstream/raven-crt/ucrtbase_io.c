@@ -622,6 +622,8 @@ CRT size_t wcsxfrm(wchar_t *to, const wchar_t *from, size_t count)
 }
 
 CRT int ___mb_cur_max_func(void) { return 1; }
+/* The code page of the locale's multibyte characters: zero is the "C" locale, whose bytes stand for themselves. */
+CRT unsigned int ___lc_codepage_func(void) { return 0; }
 CRT size_t mbrtowc(wchar_t *wide, const char *bytes, size_t count, void *state)
 {
 	if (!bytes)
