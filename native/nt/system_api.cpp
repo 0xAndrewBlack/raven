@@ -83,13 +83,6 @@ uint64_t now_ticks()
 	return uint64_t(now.tv_sec) * 10000000ULL + uint64_t(now.tv_nsec) / 100 + filetime_epoch_offset;
 }
 
-uint64_t counter_ticks()
-{
-	timespec now{};
-	::clock_gettime(CLOCK_MONOTONIC, &now);
-	return uint64_t(now.tv_sec) * 10000000ULL + uint64_t(now.tv_nsec) / 100;
-}
-
 // Offset of local time from UTC in minutes at a UTC instant, with the zone abbreviation and DST flag.
 struct ZoneInfo {
 	int offset_minutes;
@@ -160,6 +153,13 @@ std::map<std::u16string, std::pair<std::u16string, std::u16string>> default_envi
 	return result;
 }
 
+}
+
+uint64_t counter_ticks()
+{
+	timespec now{};
+	::clock_gettime(CLOCK_MONOTONIC, &now);
+	return uint64_t(now.tv_sec) * 10000000ULL + uint64_t(now.tv_nsec) / 100;
 }
 
 void register_system_api(ApiRegistry &registry, KernelContext &context)

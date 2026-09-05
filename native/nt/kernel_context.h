@@ -61,6 +61,8 @@ struct KernelContext {
 
 // Windows FILETIME ticks are 100 ns units since 1601-01-01.
 inline constexpr uint64_t filetime_epoch_offset = 11644473600ULL * 10000000ULL;
+// The performance counter in 100 ns units: the host's monotonic clock, as QueryPerformanceCounter reports it.
+uint64_t counter_ticks();
 
 void register_exception_api(ApiRegistry &registry, KernelContext &context, class NativeUnwinder &unwinder);
 class NativeRegistry;

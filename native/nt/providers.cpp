@@ -29,6 +29,7 @@
 
 #include <unistd.h>
 #include <sys/mman.h>
+#include <x86intrin.h>
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -135,6 +136,48 @@ static std::vector<uint8_t> served_stub(int32_t to_pointer)
 	return code;
 }
 
+// The performance counter is read in the guest once the runtime has published how the processor's time stamp counter relates to it: the
+// stub exported for it is a prelude that computes the count from RDTSC and falls back to its served stub until then. The calibration sits
+// in the served block: the counter value at the base, the count at the base, and the multiplier, a 32.32 fixed-point count per tick of
+// the time stamp counter, written last.
+static bool guest_clock_api(std::string_view module, std::string_view name)
+{
+	return (module == "kernel32.dll" || module == "kernelbase.dll") && name == "QueryPerformanceCounter";
+}
+
+static constexpr size_t clock_prelude_size = 96, clock_calibration = 0x800;
+
+static std::vector<uint8_t> clock_prelude(int32_t to_pointer, int32_t to_served)
+{
+	std::vector<uint8_t> code{
+		// mov r10, [pointer]; test r10, r10; jz served
+		0x4c, 0x8b, 0x15, 0, 0, 0, 0, 0x4d, 0x85, 0xd2, 0x0f, 0x84, 0, 0, 0, 0,
+		// mov r11, [r10 + multiplier]; test r11, r11; jz served
+		0x4d, 0x8b, 0x9a, 0x10, 0x08, 0, 0, 0x4d, 0x85, 0xdb, 0x0f, 0x84, 0, 0, 0, 0,
+		// rdtsc; shl rdx, 32; or rax, rdx; sub rax, [r10 + base counter]; mul r11; shrd rax, rdx, 32; add rax, [r10 + base count]
+		0x0f, 0x31, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd0, 0x49, 0x2b, 0x82, 0x00, 0x08, 0, 0, 0x49, 0xf7, 0xe3, 0x48, 0x0f, 0xac, 0xd0, 0x20,
+		0x49, 0x03, 0x82, 0x08, 0x08, 0, 0,
+		// mov [rcx], rax; mov eax, 1; ret
+		0x48, 0x89, 0x01, 0xb8, 1, 0, 0, 0, 0xc3};
+	const int32_t displacement = to_pointer - 7;
+	std::memcpy(code.data() + 3, &displacement, 4);
+	for (const size_t jump : {size_t(12), size_t(28)}) {
+		const int32_t relative = to_served - int32_t(jump + 4);
+		std::memcpy(code.data() + jump, &relative, 4);
+	}
+	return code;
+}
+
+// Where the served stub behind an export sits: the export itself, or the stub a clock prelude falls back to.
+static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view module, std::string_view name, uint32_t rva)
+{
+	if (!guest_clock_api(module, name))
+		return rva;
+	int32_t relative = 0;
+	std::memcpy(&relative, image.data() + rva + 12, 4);
+	return uint32_t(int64_t(rva) + 16 + relative);
+}
+
 // Offset of the slow-path breakpoint inside a fast or served stub.
 size_t fast_stub_trap_offset(std::string_view module, std::string_view name)
 {
@@ -214,9 +257,14 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	if (!x86)
 		for (const auto symbol : exports)
 			served_count += served_api(name, symbol);
-	// The block pointer of the served stubs, then the stubs.
+	size_t clock_count = 0;
+	if (!x86)
+		for (const auto symbol : exports)
+			clock_count += guest_clock_api(name, symbol);
+	// The block pointer of the served stubs, then the stubs, then the clock preludes.
 	const size_t served_start = fast_start + fast_count * 64;
-	const size_t end = served_start + (served_count ? 64 + served_count * served_stub_size : 0);
+	const size_t clock_start = served_start + (served_count ? 64 + served_count * served_stub_size : 0);
+	const size_t end = clock_start + clock_count * clock_prelude_size;
 	std::vector<uint8_t> bytes((end + 511) & ~size_t(511));
 	const auto rva = [](size_t offset) { return 0x1000 + offset - 0x200; };
 	const auto put = [&](size_t offset, uint64_t value, size_t width = 4) {
@@ -268,7 +316,7 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(directory + 36, rva(ordinals));
 	text(module_name, name);
 	size_t cursor = module_name + name.size() + 1;
-	size_t fast_next = 0, served_next = 0;
+	size_t fast_next = 0, served_next = 0, clock_next = 0;
 	for (size_t index = 0; index < exports.size(); ++index) {
 		size_t code = 0x200 + index * 16;
 		bytes[code] = 0xcc;
@@ -277,6 +325,12 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 			code = served_start + 64 + served_next++ * served_stub_size;
 			const auto stub = served_stub(int32_t(served_start) - int32_t(code));
 			std::copy(stub.begin(), stub.end(), bytes.begin() + ptrdiff_t(code));
+			if (guest_clock_api(name, exports[index])) {
+				const size_t served = code;
+				code = clock_start + clock_next++ * clock_prelude_size;
+				const auto prelude = clock_prelude(int32_t(served_start) - int32_t(code), int32_t(served) - int32_t(code));
+				std::copy(prelude.begin(), prelude.end(), bytes.begin() + ptrdiff_t(code));
+			}
 		}
 		if (kernel_module)
 			for (const auto &stub : fast_stubs())
@@ -354,7 +408,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	// Natives that the shared API registry implements.
 	for (const auto name : {"NtQuerySection", "NtFlushInstructionCache", "RtlAddGrowableFunctionTable", "RtlGrowFunctionTable", "RtlDeleteGrowableFunctionTable",
 		"NtWriteFile", "RtlNtStatusToDosError", "NtQueryObject", "NtMapViewOfSection", "NtUnmapViewOfSection",
-		"RtlAcquireSRWLockExclusive", "RtlAcquireSRWLockShared", "RtlWakeConditionVariable", "RtlWakeAllConditionVariable"})
+		"RtlAcquireSRWLockExclusive", "RtlAcquireSRWLockShared", "RtlWakeConditionVariable", "RtlWakeAllConditionVariable", "RtlWaitOnAddress",
+		"RtlWakeAddressSingle", "RtlWakeAddressAll"})
 		if (std::find(nt_names.begin(),nt_names.end(),name)==nt_names.end()) nt_names.push_back(name);
 	std::sort(nt_names.begin(),nt_names.end());
 	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.
@@ -457,7 +512,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (name != "ntdll.dll")
 			for (const auto &symbol : provider->exports)
 				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty())
-					traps.emplace(provider->loaded.base() + symbol.address + (provider->runtime_api ? fast_stub_trap_offset(name, symbol.names.at(0)) : 0), symbol.names.at(0));
+					traps.emplace(provider->loaded.base() + (provider->runtime_api ? served_stub_rva(provider->loaded.data(), name, symbol.names.at(0), symbol.address) +
+						fast_stub_trap_offset(name, symbol.names.at(0)) : symbol.address), symbol.names.at(0));
 	}
 	const auto nt=modules.all().find("ntdll.dll");
 	const bool needs_nt=std::any_of(modules.all().begin(),modules.all().end(),[](const auto &item) {
@@ -881,11 +937,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			if (!symbol.address || symbol.names.empty() || !symbol.forwarder.empty() || !served_api(module_name, symbol.names.at(0)))
 				continue;
 			auto image = module->loaded.data();
+			const uint32_t stub = served_stub_rva(image, module_name, symbol.names.at(0), symbol.address);
 			int32_t displacement = 0;
-			std::memcpy(&displacement, image.data() + symbol.address + 3, 4);
-			std::memcpy(image.data() + symbol.address + 7 + displacement, &served_guest, 8);
-			served_pointers.places.push_back(image.data() + symbol.address + 7 + displacement);
-			served_names.emplace(module->loaded.base() + symbol.address, symbol.names.at(0));
+			std::memcpy(&displacement, image.data() + stub + 3, 4);
+			std::memcpy(image.data() + stub + 7 + displacement, &served_guest, 8);
+			served_pointers.places.push_back(image.data() + stub + 7 + displacement);
+			served_names.emplace(module->loaded.base() + stub, symbol.names.at(0));
 		}
 	}
 	std::vector<uint64_t> served_stubs;
@@ -906,6 +963,25 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			throw std::runtime_error("served call " + found->second + " has no handler");
 		if (RuntimeProfile::instance().enabled())
 			RuntimeProfile::instance().api(found->second, std::chrono::steady_clock::now() - profile_start);
+	});
+	// The guest reads the performance counter itself once the time stamp counter is calibrated against it over 200 ms: the base is taken
+	// when published, so the guest's count goes on from the runtime's, and the multiplier is written last.
+	struct ClockCalibration {
+		uint64_t counter = __rdtsc(), ticks = counter_ticks();
+		bool published = false;
+	};
+	threads.add_service([served_block, calibration = std::make_shared<ClockCalibration>()] {
+		if (calibration->published || counter_ticks() - calibration->ticks < 2000000)
+			return;
+		const uint64_t counter = __rdtsc(), ticks = counter_ticks();
+		if (counter <= calibration->counter)
+			return;
+		uint64_t *published = served_block + clock_calibration / 8;
+		published[0] = counter;
+		published[1] = ticks;
+		const unsigned __int128 multiplier = (static_cast<unsigned __int128>(ticks - calibration->ticks) << 32) / (counter - calibration->counter);
+		__atomic_store_n(&published[2], static_cast<uint64_t>(multiplier), __ATOMIC_RELEASE);
+		calibration->published = true;
 	});
 	// RAVEN_SAMPLE_GUEST=1 reports every five seconds where the guest spent its running time, by module and 256-byte block.
 	if (std::getenv("RAVEN_SAMPLE_GUEST")) {

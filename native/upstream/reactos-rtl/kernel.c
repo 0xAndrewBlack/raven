@@ -13,6 +13,7 @@ VOID NTAPI RtlAcquireSRWLockExclusive(PRTL_SRWLOCK lock);
 VOID NTAPI RtlAcquireSRWLockShared(PRTL_SRWLOCK lock);
 VOID NTAPI RtlWakeConditionVariable(PRTL_CONDITION_VARIABLE variable);
 VOID NTAPI RtlWakeAllConditionVariable(PRTL_CONDITION_VARIABLE variable);
+NTSTATUS NTAPI RtlWaitOnAddress(volatile VOID *address, PVOID compare, SIZE_T size, PLARGE_INTEGER timeout);
 
 /* ---- the heap: the flags kernel32 accepts, and the error it reports when the heap fails ---- */
 PVOID WINAPI RavenHeapAlloc(HANDLE heap, ULONG flags, SIZE_T size)
@@ -72,8 +73,8 @@ HANDLE WINAPI RavenGetProcessHeap(VOID)
 	return NtCurrentPeb()->ProcessHeap;
 }
 
-/* ---- critical sections: the RTL's own, without spinning, since only one guest thread runs at a time and spinning only delays the
-   owner ---- */
+/* ---- critical sections: laid out and initialized by the RTL, without spinning, since only one guest thread runs at a time and
+   spinning only delays the owner ---- */
 VOID WINAPI RavenInitializeCriticalSection(PRTL_CRITICAL_SECTION section)
 {
 	RtlInitializeCriticalSectionAndSpinCount(section, 0);
@@ -94,9 +95,49 @@ BOOL WINAPI RavenInitializeCriticalSectionEx(PRTL_CRITICAL_SECTION section, ULON
 }
 
 VOID WINAPI RavenDeleteCriticalSection(PRTL_CRITICAL_SECTION section) { RtlDeleteCriticalSection(section); }
-VOID WINAPI RavenEnterCriticalSection(PRTL_CRITICAL_SECTION section) { RtlEnterCriticalSection(section); }
-VOID WINAPI RavenLeaveCriticalSection(PRTL_CRITICAL_SECTION section) { RtlLeaveCriticalSection(section); }
-BOOL WINAPI RavenTryEnterCriticalSection(PRTL_CRITICAL_SECTION section) { return RtlTryEnterCriticalSection(section) ? TRUE : FALSE; }
+
+/* Entering takes LockCount from -1 to 0 with one exchange; a section that is held is waited for on that word, which the runtime's
+   scheduler looks at again on every round. Leaving puts -1 back and hands the section to nobody, so a thread that releases it and asks
+   again gets it back at once, as Windows has done since Vista: handing it to the next waiter would make the threads that share one
+   processor here take turns through the scheduler on every entry. */
+VOID WINAPI RavenEnterCriticalSection(PRTL_CRITICAL_SECTION section)
+{
+	HANDLE self = NtCurrentTeb()->ClientId.UniqueThread;
+	LONG held;
+	if (section->OwningThread == self) {
+		section->RecursionCount++;
+		return;
+	}
+	while (InterlockedCompareExchange(&section->LockCount, 0, -1) != -1) {
+		held = section->LockCount;
+		if (held != -1)
+			RtlWaitOnAddress(&section->LockCount, &held, sizeof(held), NULL);
+	}
+	section->OwningThread = self;
+	section->RecursionCount = 1;
+}
+
+VOID WINAPI RavenLeaveCriticalSection(PRTL_CRITICAL_SECTION section)
+{
+	if (--section->RecursionCount)
+		return;
+	section->OwningThread = NULL;
+	InterlockedExchange(&section->LockCount, -1);
+}
+
+BOOL WINAPI RavenTryEnterCriticalSection(PRTL_CRITICAL_SECTION section)
+{
+	HANDLE self = NtCurrentTeb()->ClientId.UniqueThread;
+	if (section->OwningThread == self) {
+		section->RecursionCount++;
+		return TRUE;
+	}
+	if (InterlockedCompareExchange(&section->LockCount, 0, -1) != -1)
+		return FALSE;
+	section->OwningThread = self;
+	section->RecursionCount = 1;
+	return TRUE;
+}
 
 /* ---- the heap lock: a word taken with one exchange, as an SRW lock is, so a thread that releases it and asks again gets it back at once
    instead of handing it to a waiter and queueing behind it; a held lock is waited for by the runtime, which sees it become free when the

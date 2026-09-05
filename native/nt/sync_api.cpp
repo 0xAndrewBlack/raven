@@ -288,13 +288,44 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("WakeByAddressSingle", 1, [](ApiCall &) {});
 	registry.add("WakeByAddressAll", 1, [](ApiCall &) {});
 
+	// An NT timeout: none waits for ever, a negative one is relative and a positive one absolute, both in 100 ns units.
+	const auto nt_timeout = [](ApiCall &call, uint64_t address) -> std::optional<std::chrono::steady_clock::time_point> {
+		if (!address)
+			return std::nullopt;
+		const int64_t value = call.load<int64_t>(address);
+		auto delay = std::chrono::nanoseconds(0);
+		if (value < 0) {
+			delay = std::chrono::nanoseconds(-value * 100);
+		} else if (value > 0) {
+			const auto since_epoch = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch());
+			const int64_t now = since_epoch.count() / 100 + int64_t(filetime_epoch_offset);
+			delay = std::chrono::nanoseconds(std::max<int64_t>(0, value - now) * 100);
+		}
+		return std::chrono::steady_clock::now() + delay;
+	};
+	// RtlWaitOnAddress: the ntdll form of WaitOnAddress, answering with an NTSTATUS and taking an NT timeout.
+	registry.add("RtlWaitOnAddress", 4, [&context, &threads, nt_timeout](ApiCall &call) {
+		const size_t size = call[2];
+		if (size != 1 && size != 2 && size != 4 && size != 8) {
+			call.ret(0xc000000d);
+			return;
+		}
+		const uint64_t address = call[0];
+		const auto expected = call.read(call[1], size);
+		const bool changed = threads.block([&context, address, size, expected] { return context.process.read_memory(address, size) != expected; },
+			nt_timeout(call, call[3]));
+		call.ret(changed ? 0 : 0x102);
+	});
+	registry.add("RtlWakeAddressSingle", 1, [](ApiCall &) {});
+	registry.add("RtlWakeAddressAll", 1, [](ApiCall &) {});
+
 	// Keyed events: a release meets one wait on the same key, whichever comes first waiting for the other. Only the process-wide keyed
 	// event (a null handle) exists, which is what critical sections and slim locks use; a key is an address.
 	struct KeyedParty {
 		bool met = false;
 	};
 	auto keyed = std::make_shared<std::map<std::pair<bool, uint64_t>, std::deque<std::shared_ptr<KeyedParty>>>>();
-	const auto rendezvous = [&threads, keyed](ApiCall &call, bool releasing) {
+	const auto rendezvous = [&threads, keyed, nt_timeout](ApiCall &call, bool releasing) {
 		constexpr uint32_t success = 0, timeout = 0x102, invalid_handle = 0xc0000008;
 		if (call[0]) {
 			call.ret(invalid_handle);
@@ -309,20 +340,7 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(success);
 			return;
 		}
-		// The timeout: none waits for ever, a negative one is relative and a positive one absolute, both in 100 ns units.
-		std::optional<std::chrono::steady_clock::time_point> wake;
-		if (call[3]) {
-			const int64_t value = call.load<int64_t>(call[3]);
-			auto delay = std::chrono::nanoseconds(0);
-			if (value < 0) {
-				delay = std::chrono::nanoseconds(-value * 100);
-			} else if (value > 0) {
-				const auto since_epoch = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch());
-				const int64_t now = since_epoch.count() / 100 + int64_t(filetime_epoch_offset);
-				delay = std::chrono::nanoseconds(std::max<int64_t>(0, value - now) * 100);
-			}
-			wake = std::chrono::steady_clock::now() + delay;
-		}
+		const auto wake = nt_timeout(call, call[3]);
 		auto party = std::make_shared<KeyedParty>();
 		auto &mine = (*keyed)[{releasing, key}];
 		mine.push_back(party);
