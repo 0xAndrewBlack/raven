@@ -325,13 +325,57 @@ static const std::vector<uint8_t> &tick_prelude()
 	return code;
 }
 
+// The screen's device context for GetDC(NULL), which programs take to read the display resolution and give back at once: the runtime
+// publishes one context, its capabilities as a table indexed by GetDeviceCaps' index and a state word (0 free, 1 taken by a GetDC the
+// guest answered, 2 changed by a call the runtime served); GetDC takes it free with lock cmpxchg, ReleaseDC frees it unless changed, and
+// GetDeviceCaps reads the table. A changed context goes back to the runtime, which releases it and publishes another.
+static constexpr size_t screen_caps = 0x400, screen_dc = 0x600, screen_dc_state = 0x608;
+
+static const std::vector<uint8_t> &screen_get_dc_prelude()
+{
+	// mov r10,[pointer]; test r10,r10; jz slow; test rcx,rcx; jnz slow; xor eax,eax; mov r11d,1; lock cmpxchg [r10+state],r11d; jne slow;
+	// mov rax,[r10+context]; test rax,rax; jz undo; ret; undo: mov dword [r10+state],0; slow: jmp breakpoint
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x30, 0x48, 0x85, 0xc9, 0x75, 0x2b, 0x31, 0xc0, 0x41, 0xbb, 0x01, 0x00, 0x00,
+		0x00, 0xf0, 0x45, 0x0f, 0xb1, 0x9a, 0x08, 0x06, 0x00, 0x00, 0x75, 0x18, 0x49, 0x8b, 0x82, 0x00, 0x06, 0x00, 0x00, 0x48, 0x85, 0xc0, 0x74, 0x01,
+		0xc3, 0x41, 0xc7, 0x82, 0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> &screen_release_dc_prelude()
+{
+	// mov r10,[pointer]; test r10,r10; jz slow; test rcx,rcx; jnz slow; test rdx,rdx; jz slow; cmp rdx,[r10+context]; jne slow;
+	// mov eax,1; xor r11d,r11d; lock cmpxchg [r10+state],r11d; jne slow; ret; slow: jmp breakpoint
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x27, 0x48, 0x85, 0xc9, 0x75, 0x22, 0x48, 0x85, 0xd2, 0x74, 0x1d, 0x49, 0x3b,
+		0x92, 0x00, 0x06, 0x00, 0x00, 0x75, 0x14, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x45, 0x31, 0xdb, 0xf0, 0x45, 0x0f, 0xb1, 0x9a, 0x08, 0x06, 0x00, 0x00,
+		0x75, 0x01, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> &screen_device_caps_prelude()
+{
+	// mov r10,[pointer]; test r10,r10; jz slow; test rcx,rcx; jz slow; cmp rcx,[r10+context]; jne slow; cmp edx,127; ja slow;
+	// mov eax,edx; mov eax,[r10+rax*4+caps]; ret; slow: jmp breakpoint
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x1e, 0x48, 0x85, 0xc9, 0x74, 0x19, 0x49, 0x3b, 0x8a, 0x00, 0x06, 0x00, 0x00,
+		0x75, 0x10, 0x83, 0xfa, 0x7f, 0x77, 0x0b, 0x89, 0xd0, 0x41, 0x8b, 0x84, 0x82, 0x00, 0x04, 0x00, 0x00, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
 static const std::vector<uint8_t> *block_prelude(std::string_view module, std::string_view name)
 {
-	static constexpr std::array<BlockPrelude, 5> preludes{{{"kernel32.dll", "GetTickCount"}, {"kernel32.dll", "GetTickCount64"},
+	static constexpr std::array<BlockPrelude, 5> ticks{{{"kernel32.dll", "GetTickCount"}, {"kernel32.dll", "GetTickCount64"},
 		{"kernelbase.dll", "GetTickCount"}, {"kernelbase.dll", "GetTickCount64"}, {"winmm.dll", "timeGetTime"}}};
-	for (const auto &prelude : preludes)
+	for (const auto &prelude : ticks)
 		if (prelude.module == module && prelude.name == name)
 			return &tick_prelude();
+	if (module == "user32.dll" && name == "GetDC")
+		return &screen_get_dc_prelude();
+	if (module == "user32.dll" && name == "ReleaseDC")
+		return &screen_release_dc_prelude();
+	if (module == "gdi32.dll" && name == "GetDeviceCaps")
+		return &screen_device_caps_prelude();
 	return nullptr;
 }
 
@@ -1051,6 +1095,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			}
 			bool dispatched;
 			api_in_progress = found->second.c_str();
+			windows.screen_dc_use(found->second);
 			const auto profile_start = RuntimeProfile::instance().enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 			static const bool trace_failures = std::getenv("RAVEN_TRACE_FAIL");
 			const auto error_before = trace_failures ? environment.last_error() : 0;
@@ -1234,12 +1279,22 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address)
 					for (const uint64_t piece : {uint64_t(0), uint64_t(served_trap)})
 						served_stubs.push_back(module->loaded.base() + symbol.address + piece);
+	// So must one between taking the screen context and reading which it is.
+	for (const auto &[module_name, module] : modules.all())
+		if (module->runtime_api)
+			for (const auto &symbol : module->exports)
+				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() &&
+					block_prelude(module_name, symbol.names.at(0)) == &screen_get_dc_prelude() &&
+					served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address)
+					served_stubs.push_back(module->loaded.base() + symbol.address);
 	memory.set_commit_block(served_block);
+	windows.set_screen_block(served_block);
 	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, [&, served_names = std::move(served_names)](uint64_t stub) {
 		const auto found = served_names.find(stub);
 		if (found == served_names.end())
 			throw std::runtime_error("a served call came from an unknown stub");
 		api_in_progress = found->second.c_str();
+		windows.screen_dc_use(found->second);
 		const auto profile_start = RuntimeProfile::instance().enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 		const bool dispatched = api_registry.dispatch(process, environment, found->second)
 #ifdef RAVEN_VULKAN

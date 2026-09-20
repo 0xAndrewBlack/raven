@@ -37,6 +37,13 @@ public:
 	void set_global_allocator(std::function<uint64_t(uint64_t)> allocator) { global_allocator = std::move(allocator); }
 	void set_menu_loader(std::function<uint64_t(uint64_t,uint64_t)> loader) { menu_loader = std::move(loader); }
 	bool dispatch(std::string_view name);
+	// The served block where the screen context the guest's GetDC(NULL) takes is published (see the screen preludes), and the
+	// offsets in it of the capability table, the context and its state.
+	static constexpr size_t screen_caps = 0x400, screen_dc = 0x600, screen_dc_state = 0x608;
+	void set_screen_block(uint64_t *block) { screen_block = reinterpret_cast<uint8_t *>(block); }
+	// A call the runtime serves with the published screen context as its first argument may change it: the guest's ReleaseDC then
+	// leaves it to the runtime. Called before every served call.
+	void screen_dc_use(std::string_view name);
 	// user32 entry points that follow the shared registry conventions; every handler runs on the calling guest thread.
 	void register_api(ApiRegistry &registry);
 	// Drawing marks the surface dirty; the next message retrieval presents it, so a burst of primitives costs one frame.
@@ -88,6 +95,11 @@ private:
 	std::chrono::steady_clock::time_point foreign_checked{};
 	uint64_t foreign_stamp=UINT64_MAX;
 	void import_foreign_frames();
+	uint8_t *screen_block=nullptr;
+	// Publishes a free screen context over the desktop window when none is published.
+	void publish_screen_dc(uint64_t desktop);
+	// Withdraws the published context when the runtime releases it; false for any other context.
+	bool withdraw_screen_dc(uint64_t handle);
 	// Host input collected while threads waited, delivered by the next input_ready.
 	std::deque<DesktopEvent> pending_events;
 	void deliver_pending();

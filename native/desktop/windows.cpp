@@ -3,9 +3,11 @@
 #include "nt/text.h"
 #include "brush.h"
 #include "nt/nls.h"
+#include "gdi.h"
 
 #include <array>
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -1292,6 +1294,59 @@ uint64_t NativeWindows::map_points(uint64_t from,uint64_t to,uint64_t points,uin
 	return uint16_t(dx) | (uint32_t(uint16_t(dy))<<16);
 }
 
+void NativeWindows::publish_screen_dc(uint64_t desktop)
+{
+	if (!screen_block)
+		return;
+	auto &published=*reinterpret_cast<uint64_t *>(screen_block+screen_dc);
+	// A published context that is gone (deleted rather than released) is withdrawn, and so is one a caller holds: it stays that
+	// caller's, an ordinary context its ReleaseDC brings to the runtime, and the next GetDC(NULL) in the guest takes a new one.
+	if (const uint64_t current=__atomic_load_n(&published,__ATOMIC_ACQUIRE); current &&
+		(!objects.dc(current) || __atomic_load_n(reinterpret_cast<uint32_t *>(screen_block+screen_dc_state),__ATOMIC_ACQUIRE)))
+		withdraw_screen_dc(current);
+	if (__atomic_load_n(&published,__ATOMIC_ACQUIRE))
+		return;
+	// A context of its own, free: the caller keeps the one it asked for, which a program may hold for its whole life.
+	const auto *window=objects.window(desktop);
+	DesktopDC device{window->bitmap,window->bitmap,desktop}; device.leased=true;
+	objects.configure_window_dc(desktop,device,false);
+	uint64_t handle=0;
+	try { handle=objects.add(device); } catch (...) { return; }
+	if (!handle)
+		return;
+	for (int32_t index=0;index<128;++index) {
+		const uint32_t value=device_caps(objects,*objects.dc(handle),index);
+		std::memcpy(screen_block+screen_caps+size_t(index)*4,&value,4);
+	}
+	__atomic_store_n(reinterpret_cast<uint32_t *>(screen_block+screen_dc_state),uint32_t(0),__ATOMIC_RELEASE);
+	__atomic_store_n(&published,handle,__ATOMIC_RELEASE);
+}
+
+bool NativeWindows::withdraw_screen_dc(uint64_t handle)
+{
+	if (!screen_block || !handle)
+		return false;
+	auto &published=*reinterpret_cast<uint64_t *>(screen_block+screen_dc);
+	if (__atomic_load_n(&published,__ATOMIC_ACQUIRE)!=handle)
+		return false;
+	// The context goes first, so a GetDC that takes the freed state finds none and goes to the runtime.
+	__atomic_store_n(&published,uint64_t(0),__ATOMIC_RELEASE);
+	__atomic_store_n(reinterpret_cast<uint32_t *>(screen_block+screen_dc_state),uint32_t(0),__ATOMIC_RELEASE);
+	return true;
+}
+
+void NativeWindows::screen_dc_use(std::string_view name)
+{
+	if (!screen_block)
+		return;
+	const uint64_t published=__atomic_load_n(reinterpret_cast<uint64_t *>(screen_block+screen_dc),__ATOMIC_ACQUIRE);
+	if (!published || name=="GetDeviceCaps" || name=="ReleaseDC")
+		return;
+	// Only the first argument: the calls that change a context take it there, and the other registers may hold anything.
+	if (process.api_arguments(1)[0]==published)
+		__atomic_store_n(reinterpret_cast<uint32_t *>(screen_block+screen_dc_state),uint32_t(2),__ATOMIC_RELEASE);
+}
+
 bool NativeWindows::dispatch(std::string_view name)
 {
 	if (tree_dispatch(name) || system_dispatch(name)) return true;
@@ -1476,6 +1531,7 @@ bool NativeWindows::dispatch(std::string_view name)
 			objects.configure_window_dc(target,device,name=="GetWindowDC");
 			result=objects.add(device);
 			if (!result) throw uint32_t(8);
+			if (!args[0] && name=="GetDC") publish_screen_dc(target);
 		}
 		else if (name=="BeginPaint") {
 			auto *window=objects.window(args[0]); if (!window) throw uint32_t(1400);
@@ -1510,6 +1566,8 @@ bool NativeWindows::dispatch(std::string_view name)
 			if (window) {
 				if (!device || !device->leased || device->window!=owner) throw uint32_t(1400);
 				result=objects.erase(args[1]);
+				// The published context comes back here once a call changed it; a fresh one takes its place.
+				if (withdraw_screen_dc(args[1])) publish_screen_dc(owner);
 			}
 		} else if (name=="IsWindowVisible") {
 			result=objects.window_visible(args[0]);

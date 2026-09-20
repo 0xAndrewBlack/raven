@@ -753,6 +753,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_custom_target(clock_pe_fixture ALL DEPENDS ${CLOCK_FIXTURE})
         add_test(NAME native_clock_cli COMMAND raven --run-process --execution=native ${CLOCK_FIXTURE})
         set_tests_properties(native_clock_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        set(SCREEN_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/screen-fixture.exe)
+        add_custom_command(OUTPUT ${SCREEN_FIXTURE}
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                -Wl,--entry,raven_entry,--image-base,0x197200000
+                -o ${SCREEN_FIXTURE} ${PROJECT_SOURCE_DIR}/testdata/native_loader/screen_client.c -lgdi32 -luser32 -lkernel32
+            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/screen_client.c VERBATIM)
+        add_custom_target(screen_pe_fixture ALL DEPENDS ${SCREEN_FIXTURE})
+        add_test(NAME native_screen_dc_cli COMMAND raven --run-process --execution=native ${SCREEN_FIXTURE})
+        set_tests_properties(native_screen_dc_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         set(SYSTEM_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/system-fixture.exe)
         add_custom_command(OUTPUT ${SYSTEM_FIXTURE}
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector

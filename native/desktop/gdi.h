@@ -54,6 +54,9 @@ private:
 // The color a brush paints at a pattern position (second value false when the pixel is left alone).
 std::pair<uint32_t, bool> brush_color_at(const DesktopBrush &brush, const DesktopDC &dc, int64_t pattern_x, int64_t pattern_y);
 
+// What GetDeviceCaps answers for a device context; throws a Windows error code when it has no bitmap.
+uint32_t device_caps(const DesktopObjects &objects, const DesktopDC &dc, int32_t index);
+
 // Raster-operation transfer between device contexts (source may be null for pattern operations); true when pixels changed.
 bool blit(DesktopObjects &objects, DesktopDC &destination, int32_t dx, int32_t dy, int32_t dw, int32_t dh, DesktopDC *source_dc,
 	int32_t sx, int32_t sy, int32_t sw, int32_t sh, uint32_t rop);

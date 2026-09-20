@@ -75,7 +75,7 @@ int main(int argc,char **argv)
 		}
 		auto &gdi=*modules.all().at("gdi32.dll");raven::LoadedImage *images[]={&entry.loaded,&gdi.loaded};
 		raven::NativeProcess process(images,argv[1],std::chrono::seconds(3));
-		for(const auto &symbol:gdi.exports)process.add_api_trap(gdi.loaded.base()+symbol.address);
+		for(const auto &symbol:gdi.exports)process.add_api_trap(raven::api_trap_address(gdi,"gdi32.dll",symbol.names.at(0),symbol.address));
 		raven::NativeEnvironment environment(process,entry.loaded.base(),1,1);raven::DesktopObjects objects;
 		raven::NativeResources resources(process,environment,modules,entry);raven::NativeDesktop desktop(process,environment,objects,resources);
 		const auto call=[&](const char *name,std::initializer_list<uint64_t> arguments){

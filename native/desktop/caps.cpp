@@ -18,6 +18,34 @@ uint64_t le(std::span<const uint8_t> bytes, size_t at, size_t width)
 
 }
 
+uint32_t device_caps(const DesktopObjects &objects, const DesktopDC &dc, int32_t index)
+{
+	const auto *bitmap = objects.bitmap(dc.bitmap);
+	if (!bitmap)
+		throw uint32_t(6);
+	const auto &screen = objects.nonclient_metrics();
+	// Screen DCs report the virtual display; memory DCs report the depth of their selected bitmap.
+	const bool screen_dc = dc.window != 0;
+	switch (index) {
+	case 2: return screen_dc ? 1 : 0;                          // TECHNOLOGY: DT_RASDISPLAY or DT_RASPRINTER-free memory
+	case 4: return uint32_t(int64_t(screen.screen_x) * 254 / 960);  // HORZSIZE in mm at 96 dpi
+	case 6: return uint32_t(int64_t(screen.screen_y) * 254 / 960);  // VERTSIZE
+	case 8: return screen_dc ? uint32_t(screen.screen_x) : bitmap->width;
+	case 10: return screen_dc ? uint32_t(screen.screen_y) : bitmap->height;
+	case 12: return screen_dc ? 32 : bitmap->depth;                // BITSPIXEL
+	case 14: return 1;                                            // PLANES
+	case 24: return bitmap->depth > 8 && screen_dc ? uint32_t(-1) : (1U << bitmap->depth); // NUMCOLORS
+	case 38: return 0x1 | 0x8 | 0x80 | 0x200;                      // RC_BITBLT | RC_BITMAP64 | RC_DI_BITMAP | RC_DIBTODEV
+	case 40: case 42: return 36;                                   // ASPECTX / ASPECTY
+	case 44: return 51;                                           // ASPECTXY
+	case 88: case 90: return 96;                                  // LOGPIXELSX / LOGPIXELSY
+	case 104: return 0;                                           // SIZEPALETTE: no palette device
+	case 106: return 0;                                           // NUMRESERVED
+	case 108: return screen_dc ? 24 : bitmap->depth;               // COLORRES
+	default: return 0;
+	}
+}
+
 bool NativeDesktop::caps_dispatch(std::string_view name)
 {
 	const bool caps = name == "GetDeviceCaps", rop = name == "SetROP2", layout = name == "SetLayout";
@@ -36,30 +64,7 @@ bool NativeDesktop::caps_dispatch(std::string_view name)
 		window = dc->window;
 		leased = dc->leased;
 		if (caps) {
-			const auto *bitmap = objects.bitmap(dc->bitmap);
-			if (!bitmap)
-				throw uint32_t(6);
-			const auto &screen = objects.nonclient_metrics();
-			// Screen DCs report the virtual display; memory DCs report the depth of their selected bitmap.
-			const bool screen_dc = dc->window != 0;
-			switch (int32_t(uint32_t(args[1]))) {
-			case 2: result = screen_dc ? 1 : 0; break;                          // TECHNOLOGY: DT_RASDISPLAY or DT_RASPRINTER-free memory
-			case 4: result = uint32_t(int64_t(screen.screen_x) * 254 / 960); break;  // HORZSIZE in mm at 96 dpi
-			case 6: result = uint32_t(int64_t(screen.screen_y) * 254 / 960); break;  // VERTSIZE
-			case 8: result = screen_dc ? uint32_t(screen.screen_x) : bitmap->width; break;
-			case 10: result = screen_dc ? uint32_t(screen.screen_y) : bitmap->height; break;
-			case 12: result = screen_dc ? 32 : bitmap->depth; break;                // BITSPIXEL
-			case 14: result = 1; break;                                            // PLANES
-			case 24: result = bitmap->depth > 8 && screen_dc ? uint32_t(-1) : (1U << bitmap->depth); break; // NUMCOLORS
-			case 38: result = 0x1 | 0x8 | 0x80 | 0x200; break;                      // RC_BITBLT | RC_BITMAP64 | RC_DI_BITMAP | RC_DIBTODEV
-			case 40: case 42: result = 36; break;                                   // ASPECTX / ASPECTY
-			case 44: result = 51; break;                                           // ASPECTXY
-			case 88: case 90: result = 96; break;                                  // LOGPIXELSX / LOGPIXELSY
-			case 104: result = 0; break;                                           // SIZEPALETTE: no palette device
-			case 106: result = 0; break;                                           // NUMRESERVED
-			case 108: result = screen_dc ? 24 : bitmap->depth; break;               // COLORRES
-			default: result = 0; break;
-			}
+			result = device_caps(objects, *dc, int32_t(uint32_t(args[1])));
 		} else if (rop) {
 			const auto mode = uint32_t(args[1]);
 			if (mode < 1 || mode > 16)

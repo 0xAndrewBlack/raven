@@ -43,7 +43,7 @@ int main(int argc,char **argv)
 		if(result.stop!=raven::NativeStop::returned || result.value)std::cerr<<"drawing SDK stop="<<int(result.stop)<<" value="<<result.value<<'\n';
 		check(result.stop==raven::NativeStop::returned && !result.value,"drawing SDK contract differs");
 		auto &gdi=*modules.all().at("gdi32.dll");raven::LoadedImage *images[]={&entry.loaded,&gdi.loaded};
-		raven::NativeProcess process(images,argv[1],std::chrono::seconds(3));for(const auto &symbol:gdi.exports)process.add_api_trap(gdi.loaded.base()+symbol.address);
+		raven::NativeProcess process(images,argv[1],std::chrono::seconds(3));for(const auto &symbol:gdi.exports)process.add_api_trap(raven::api_trap_address(gdi,"gdi32.dll",symbol.names.at(0),symbol.address));
 		raven::NativeEnvironment environment(process,entry.loaded.base(),1,1);raven::NativeResources resources(process,environment,modules,entry);
 		raven::DesktopObjects objects;raven::NativeDesktop desktop(process,environment,objects,resources);
 		const auto call=[&](const char *name,std::initializer_list<uint64_t> arguments){
