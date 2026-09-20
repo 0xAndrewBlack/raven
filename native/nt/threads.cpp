@@ -342,6 +342,34 @@ void NativeThreads::schedule()
 	}
 }
 
+std::chrono::steady_clock::time_point NativeThreads::idle_until(std::chrono::steady_clock::time_point limit) const
+{
+	bool unannounced = poll || std::any_of(externals.begin(), externals.end(), [](const auto &pending) { return pending(); });
+	for (const auto &thread : threads)
+		if (thread.get() != running && thread->state == GuestThread::State::waiting && thread->suspend_count == 0) {
+			if (thread->wake)
+				limit = std::min(limit, *thread->wake);
+			else
+				unannounced = true;
+		} else if (thread.get() != running && thread->state == GuestThread::State::ready) {
+			return std::chrono::steady_clock::now();
+		}
+	return unannounced ? std::min(limit, std::chrono::steady_clock::now() + std::chrono::milliseconds(20)) : limit;
+}
+
+void NativeThreads::idle_descriptors(std::vector<pollfd> &descriptors) const
+{
+	descriptors.push_back({wake, POLLIN, 0});
+	if (watched)
+		watched(descriptors);
+}
+
+void NativeThreads::drain_wake()
+{
+	uint64_t drained = 0;
+	while (::read(wake, &drained, sizeof drained) > 0) {}
+}
+
 void NativeThreads::nudge()
 {
 	const uint64_t one = 1;

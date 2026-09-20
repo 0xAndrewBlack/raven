@@ -683,7 +683,8 @@ DesktopPresentation WaylandPresentation::callbacks()
 	[this](uint64_t handle,std::optional<std::array<int32_t,4>> rectangle) { state->confine(handle,rectangle); },
 	[this](uint64_t handle,uint64_t owner,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
 		state->popup_surface(handle,owner,x,y,width,height,pixels,false);
-	}};
+	},
+	[this] { return state->display ? wl_display_get_fd(state->display) : -1; }};
 }
 
 }

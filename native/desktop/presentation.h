@@ -58,6 +58,9 @@ struct DesktopPresentation {
 	// Windows has no grab: input outside it keeps going where it goes, and the program closes its popup itself.
 	std::function<void(uint64_t handle,uint64_t owner,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels)>
 		owned_popup;
+	// The descriptor that becomes readable when events arrive, for a caller that waits on it with others and then polls without
+	// waiting; -1 while there is none.
+	std::function<int()> descriptor;
 };
 
 }

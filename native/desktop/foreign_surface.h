@@ -43,5 +43,8 @@ private:
 bool take_foreign_frame(uint64_t window, uint32_t &seen, const std::function<void(const uint8_t *, uint32_t, uint32_t)> &use);
 // Changes whenever another process starts or stops drawing into a window of the prefix (its pixels file is made or removed).
 uint64_t foreign_frames_stamp();
+// A descriptor that becomes readable when that may have happened, for a waiter to sleep on; drain it once woken. -1 without one.
+int foreign_frames_descriptor();
+void drain_foreign_frames_descriptor();
 
 }

@@ -4,6 +4,7 @@
 #include "foreign_surface.h"
 #include "presentation.h"
 #include "keyboard.h"
+#include <poll.h>
 #include <array>
 #include <chrono>
 #include <map>
@@ -30,6 +31,15 @@ public:
 	void set_deadline(std::chrono::steady_clock::time_point deadline);
 	// Lets other guest threads run while this one waits for messages; returns true when one ran.
 	void set_yield(std::function<bool()> yield) { yield_hook = std::move(yield); }
+	// How a thread waiting for messages sleeps when every other thread waits too: until the time `until` allows for the other threads,
+	// on their descriptors besides the display's, then `drain` takes back what woke it (see NativeThreads::idle_until).
+	void set_idle_sources(std::function<std::chrono::steady_clock::time_point(std::chrono::steady_clock::time_point)> until,
+		std::function<void(std::vector<pollfd> &)> descriptors, std::function<void()> drain)
+	{
+		idle_until = std::move(until);
+		idle_descriptors = std::move(descriptors);
+		idle_drain = std::move(drain);
+	}
 	// Blocks the calling guest thread until the condition holds while the others run (a message sent to another thread's window).
 	void set_block(std::function<void(std::function<bool()>)> block) { block_hook = std::move(block); }
 	// Resolves the default menu of a window class (module, resource identifier) to a menu handle.
@@ -122,6 +132,11 @@ private:
 	std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
 	std::chrono::steady_clock::time_point deadline;
 	std::function<bool()> yield_hook;
+	std::function<std::chrono::steady_clock::time_point(std::chrono::steady_clock::time_point)> idle_until;
+	std::function<void(std::vector<pollfd> &)> idle_descriptors;
+	std::function<void()> idle_drain;
+	// Sleeps until the display, another thread or the next timer, caret blink or scroll repeat needs this thread.
+	void wait_idle(std::chrono::steady_clock::time_point deadline);
 	std::function<uint64_t(uint64_t,uint64_t)> menu_loader;
 	uint32_t mouse_buttons=0;
 	int32_t cursor_x=0,cursor_y=0;

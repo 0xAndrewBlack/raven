@@ -836,12 +836,42 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		scroll_idle();
 		flush_dirty();
 		deliver_pending();
-		if (presentation.poll) {
+		if (presentation.poll && presentation.descriptor && idle_until && presentation.descriptor()>=0) {
+			wait_idle(deadline);
+		} else if (presentation.poll) {
 			const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(deadline-std::chrono::steady_clock::now());
 			for (const auto &event : presentation.poll(std::min(remaining,std::chrono::milliseconds(20))))
 				receive(event);
 		} else std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
+}
+
+void NativeWindows::wait_idle(std::chrono::steady_clock::time_point deadline)
+{
+	const auto now=std::chrono::steady_clock::now();
+	auto until=std::min(deadline,now+std::chrono::seconds(1));
+	for (const auto &timer : timers) until=std::min(until,timer.due);
+	if (caret && caret->hidden<=0) until=std::min(until,caret->next);
+	if (scroll_drag.window) until=std::min(until,scroll_drag.next);
+	// Windows another process draws into are looked at as often as before; one starting to draw shows in the windows directory.
+	if (std::any_of(foreign_frames.begin(),foreign_frames.end(),[](const auto &frame) { return frame.second!=0; }))
+		until=std::min(until,foreign_checked+std::chrono::milliseconds(8));
+	if (!pending_events.empty() || !dirty_roots.empty()) until=now;
+	until=idle_until(until);
+	if (until>now) {
+		std::vector<pollfd> descriptors{{presentation.descriptor(),POLLIN,0},{foreign_frames_descriptor(),POLLIN,0}};
+		idle_descriptors(descriptors);
+		const auto left=std::chrono::duration_cast<std::chrono::nanoseconds>(until-now).count();
+		const timespec timeout{left/1000000000,left%1000000000};
+		::ppoll(descriptors.data(),descriptors.size(),&timeout,nullptr);
+		idle_drain();
+		if (descriptors[1].revents & POLLIN) {
+			drain_foreign_frames_descriptor();
+			foreign_checked={};
+		}
+	}
+	for (const auto &event : presentation.poll(std::chrono::milliseconds(0)))
+		receive(event);
 }
 
 std::string NativeWindows::text(uint64_t address)

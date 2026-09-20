@@ -17,6 +17,7 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -175,6 +176,26 @@ uint64_t foreign_frames_stamp()
 	if (::stat(window_directory().c_str(), &status) != 0)
 		return 0;
 	return uint64_t(status.st_mtim.tv_sec) * 1000000000ULL + uint64_t(status.st_mtim.tv_nsec);
+}
+
+int foreign_frames_descriptor()
+{
+	static const int descriptor = [] {
+		const int watch = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+		if (watch >= 0 && ::inotify_add_watch(watch, window_directory().c_str(), IN_CREATE | IN_MOVED_TO | IN_DELETE) < 0) {
+			::close(watch);
+			return -1;
+		}
+		return watch;
+	}();
+	return descriptor;
+}
+
+void drain_foreign_frames_descriptor()
+{
+	alignas(inotify_event) char events[4096];
+	const int descriptor = foreign_frames_descriptor();
+	while (descriptor >= 0 && ::read(descriptor, events, sizeof events) > 0) {}
 }
 
 bool take_foreign_frame(uint64_t window, uint32_t &seen, const std::function<void(const uint8_t *, uint32_t, uint32_t)> &use)
