@@ -69,6 +69,24 @@ int raven_entry(void)
 		return 12;
 	if (!GetClientRect(window, &client) || client.right <= 0 || client.right > 420 || client.bottom <= 0 || client.bottom > 330)
 		return 13;
+	/* Ancestry, focus and resolution. */
+	HWND child = CreateWindowExW(0, L"RavenWindowState", L"child", WS_CHILD, 0, 0, 50, 50, window, NULL, type.hInstance, NULL);
+	HWND grandchild = CreateWindowExW(0, L"RavenWindowState", L"grandchild", WS_CHILD, 0, 0, 10, 10, child, NULL, type.hInstance, NULL);
+	HWND other = CreateWindowExW(0, L"RavenWindowState", L"other", WS_OVERLAPPEDWINDOW, 0, 0, 50, 50, NULL, NULL, type.hInstance, NULL);
+	if (!child || !grandchild || !other)
+		return 15;
+	if (!IsChild(window, child) || !IsChild(window, grandchild) || !IsChild(child, grandchild) || IsChild(grandchild, window) ||
+		IsChild(window, window) || IsChild(window, other) || IsChild(NULL, child) || IsChild(window, NULL))
+		return 16;
+	SetFocus(child);
+	if (GetFocus() != child)
+		return 17;
+	SetFocus(other);
+	if (GetFocus() != other)
+		return 18;
+	if (GetDpiForWindow(window) != 96)
+		return 19;
+	DestroyWindow(other);
 	if (!DestroyWindow(window) || IsWindow(window) || GetWindowLongPtrW(window, GWLP_USERDATA) || GetLastError() != ERROR_INVALID_WINDOW_HANDLE)
 		return 14;
 	return 0;

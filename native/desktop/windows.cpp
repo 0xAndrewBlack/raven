@@ -1381,6 +1381,7 @@ static void window_fields(const DesktopWindow &window,uint8_t *record)
 	put(48,window.style); put(52,window.ex_style);
 	put(56,window.width); put(60,window.height);
 	put(64,window.outer.left); put(68,window.outer.top); put(72,window.outer.right); put(76,window.outer.bottom);
+	put(88,window.parent);
 	// Extra bytes beyond the record are read by the runtime.
 	const bool extra=window.extra.size()<=NativeWindows::window_extra_bytes;
 	put(80,uint32_t(extra ? window.extra.size() : 0));
@@ -1459,7 +1460,12 @@ void NativeWindows::publish_windows()
 		alignas(8) uint8_t fields[window_record];
 		window_fields(*window,fields);
 		const size_t extra=window->extra.size()<=window_extra_bytes ? window->extra.size() : 0;
-		if (std::memcmp(fields+8,record+8,76) || (extra && std::memcmp(fields+160,record+160,extra))) publish_window_record(handle,window);
+		if (std::memcmp(fields+8,record+8,76) || std::memcmp(fields+88,record+88,8) || (extra && std::memcmp(fields+160,record+160,extra)))
+			publish_window_record(handle,window);
+	}
+	if (screen_block) {
+		__atomic_store_n(reinterpret_cast<uint64_t *>(screen_block+focus_window),focus,__ATOMIC_RELEASE);
+		__atomic_store_n(reinterpret_cast<uint64_t *>(screen_block+focus_published),uint64_t(1),__ATOMIC_RELEASE);
 	}
 	if (!api_depth) watched.clear();
 }
