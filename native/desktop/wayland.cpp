@@ -5,6 +5,7 @@
 
 #include <wayland-client.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <fcntl.h>
 #include <optional>
@@ -30,6 +31,7 @@ struct WaylandPresentation::State {
 		wl_buffer *proxy=nullptr;
 		void *pixels=MAP_FAILED;
 		size_t size=0;
+		uint32_t width=0,height=0;
 		bool released=false;
 		~Buffer() { if (proxy) wl_buffer_destroy(proxy); if (pixels!=MAP_FAILED) munmap(pixels,size); }
 	};
@@ -45,6 +47,8 @@ struct WaylandPresentation::State {
 		bool configured=false, closed=false, resized=false, close_posted=false, first_frame=false;
 		uint32_t width=0,height=0,pending_width=0,pending_height=0;
 		std::vector<std::unique_ptr<Buffer>> buffers;
+		// The buffer of the last commit, whose pixels are what the compositor shows.
+		Buffer *shown=nullptr;
 		// A surface a graphics driver renders to, stacked over the client area.
 		wl_surface *child=nullptr;
 		wl_subsurface *child_role=nullptr;
@@ -432,29 +436,73 @@ struct WaylandPresentation::State {
 		if (!compositor || !shm || !shell) throw std::runtime_error("Wayland compositor lacks required presentation protocols");
 	}
 
+	// The rectangle of a frame that differs from the one shown, empty when they match.
+	static std::array<int32_t,4> changed_area(const Buffer &shown,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
+		const size_t stride=size_t(width)*4;
+		const auto *old=static_cast<const uint8_t *>(shown.pixels);
+		uint32_t top=0,bottom=height;
+		while (top<height && !std::memcmp(old+top*stride,pixels.data()+top*stride,stride)) ++top;
+		if (top==height) return {0,0,0,0};
+		while (bottom>top && !std::memcmp(old+(bottom-1)*stride,pixels.data()+(bottom-1)*stride,stride)) --bottom;
+		uint32_t left=width,right=0;
+		for (uint32_t y=top;y<bottom;++y) {
+			const auto *a=old+y*stride,*b=pixels.data()+y*stride;
+			uint32_t x=0;
+			while (x<left && !std::memcmp(a+x*4,b+x*4,4)) ++x;
+			left=std::min(left,x);
+			x=width;
+			while (x>right && !std::memcmp(a+(x-1)*4,b+(x-1)*4,4)) --x;
+			right=std::max(right,x);
+		}
+		return {int32_t(left),int32_t(top),int32_t(right-left),int32_t(bottom-top)};
+	}
+
 	void attach_frame(Surface &window,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
 		events(std::chrono::milliseconds(0));
-		std::erase_if(window.buffers,[](const auto &buffer) { return buffer->released; });
-		if (window.buffers.size()>=3) throw std::runtime_error("Wayland presentation buffer limit reached");
-		size_t used=0;
-		for (const auto &[key,surface] : surfaces)
-			for (const auto &buffer : surface->buffers) used+=buffer->size;
-		if (used+pixels.size()>256*1024*1024) throw std::runtime_error("Wayland presentation memory limit reached");
-		auto buffer=std::make_unique<Buffer>(); buffer->size=pixels.size();
-		const int descriptor=int(syscall(SYS_memfd_create,"raven-frame",MFD_CLOEXEC));
-		if (descriptor<0) throw std::runtime_error("Wayland frame descriptor failed");
-		if (ftruncate(descriptor,off_t(buffer->size))<0) { close(descriptor); throw std::runtime_error("Wayland frame sizing failed"); }
-		buffer->pixels=mmap(nullptr,buffer->size,PROT_READ|PROT_WRITE,MAP_SHARED,descriptor,0);
-		if (buffer->pixels==MAP_FAILED) { close(descriptor); throw std::runtime_error("Wayland frame mapping failed"); }
-		std::memcpy(buffer->pixels,pixels.data(),pixels.size());
-		wl_shm_pool *pool=wl_shm_create_pool(shm,descriptor,int32_t(buffer->size)); close(descriptor);
-		buffer->proxy=wl_shm_pool_create_buffer(pool,0,int32_t(width),int32_t(height),int32_t(width*4),WL_SHM_FORMAT_XRGB8888);
-		wl_shm_pool_destroy(pool);
-		static const wl_buffer_listener buffer_listener{[](void *data,wl_buffer *) { static_cast<Buffer *>(data)->released=true; }};
-		wl_buffer_add_listener(buffer->proxy,&buffer_listener,buffer.get());
-		wl_surface_attach(window.proxy,buffer->proxy,0,0);
-		wl_surface_damage(window.proxy,0,0,int32_t(width),int32_t(height));
-		wl_surface_commit(window.proxy); window.buffers.push_back(std::move(buffer)); sync();
+		// Released buffers of this size are reused; the compositor only repaints what changed since the shown frame.
+		std::array<int32_t,4> damage{0,0,int32_t(width),int32_t(height)};
+		const bool same_size=window.shown && window.shown->width==width && window.shown->height==height;
+		if (same_size) {
+			damage=changed_area(*window.shown,width,height,pixels);
+			if (!damage[2]) {
+				wl_surface_commit(window.proxy);
+				return;
+			}
+		}
+		std::erase_if(window.buffers,[&](const auto &buffer) {
+			return buffer->released && buffer.get()!=window.shown && (buffer->width!=width || buffer->height!=height);
+		});
+		Buffer *target=nullptr;
+		size_t pending=0;
+		for (const auto &buffer : window.buffers) {
+			if (buffer->released && buffer.get()!=window.shown && !target) target=buffer.get();
+			else if (!buffer->released) ++pending;
+		}
+		if (!target) {
+			if (pending>=3) throw std::runtime_error("Wayland presentation buffer limit reached");
+			size_t used=0;
+			for (const auto &[key,surface] : surfaces)
+				for (const auto &buffer : surface->buffers) used+=buffer->size;
+			if (used+pixels.size()>256*1024*1024) throw std::runtime_error("Wayland presentation memory limit reached");
+			auto buffer=std::make_unique<Buffer>(); buffer->size=pixels.size(); buffer->width=width; buffer->height=height;
+			const int descriptor=int(syscall(SYS_memfd_create,"raven-frame",MFD_CLOEXEC));
+			if (descriptor<0) throw std::runtime_error("Wayland frame descriptor failed");
+			if (ftruncate(descriptor,off_t(buffer->size))<0) { close(descriptor); throw std::runtime_error("Wayland frame sizing failed"); }
+			buffer->pixels=mmap(nullptr,buffer->size,PROT_READ|PROT_WRITE,MAP_SHARED,descriptor,0);
+			if (buffer->pixels==MAP_FAILED) { close(descriptor); throw std::runtime_error("Wayland frame mapping failed"); }
+			wl_shm_pool *pool=wl_shm_create_pool(shm,descriptor,int32_t(buffer->size)); close(descriptor);
+			buffer->proxy=wl_shm_pool_create_buffer(pool,0,int32_t(width),int32_t(height),int32_t(width*4),WL_SHM_FORMAT_XRGB8888);
+			wl_shm_pool_destroy(pool);
+			static const wl_buffer_listener buffer_listener{[](void *data,wl_buffer *) { static_cast<Buffer *>(data)->released=true; }};
+			wl_buffer_add_listener(buffer->proxy,&buffer_listener,buffer.get());
+			target=buffer.get();
+			window.buffers.push_back(std::move(buffer));
+		}
+		std::memcpy(target->pixels,pixels.data(),pixels.size());
+		target->released=false;
+		wl_surface_attach(window.proxy,target->proxy,0,0);
+		wl_surface_damage(window.proxy,damage[0],damage[1],damage[2],damage[3]);
+		wl_surface_commit(window.proxy); window.shown=target; sync();
 		if (window.closed) throw std::runtime_error("Wayland surface was closed during presentation");
 	}
 
