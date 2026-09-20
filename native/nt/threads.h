@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <ucontext.h>
+#include <poll.h>
 #include <vector>
 
 namespace raven {
@@ -77,6 +78,8 @@ public:
 	}
 	// Host polling used while every guest thread waits; it may make waiting predicates true (window events).
 	void set_idle(std::function<void(std::chrono::milliseconds)> idle) { poll = std::move(idle); }
+	// Adds the descriptors whose readiness can make a waiting thread's condition true; the idle wait sleeps on them.
+	void set_watched(std::function<void(std::vector<pollfd> &)> descriptors) { watched = std::move(descriptors); }
 	// True while something outside the process, such as a child program, can still make a waiting thread's condition true.
 	void add_external(std::function<bool()> pending) { externals.push_back(std::move(pending)); }
 	// Runs whenever every thread waits, so work the host does for the guest (finishing started operations) can make a wait succeed.
@@ -119,9 +122,9 @@ private:
 	std::vector<std::function<bool()>> externals;
 	std::vector<std::function<void()>> pumps;
 	std::vector<std::function<void()>> services;
-	std::mutex idle_lock;
-	std::condition_variable idle_signal;
-	bool nudged = false;
+	// Written to end the idle wait: by nudge() and by the thread that sees other processes change shared objects.
+	int wake = -1;
+	std::function<void(std::vector<pollfd> &)> watched;
 	std::vector<std::shared_ptr<GuestThread>> threads;
 	GuestThread *running = nullptr;
 	// Set while the process ends: threads leave through their frames and the deadline no longer interrupts them.

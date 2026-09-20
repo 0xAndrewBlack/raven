@@ -6,20 +6,89 @@
 #include <atomic>
 #include <cerrno>
 #include <cctype>
+#include <climits>
 #include <fcntl.h>
 #include <filesystem>
 #include <functional>
+#include <linux/futex.h>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <thread>
 #include <unistd.h>
 
 namespace raven {
 
 // The number of shared objects this process holds; waits on them are polled, so the scheduler looks more often while any exists.
 extern std::atomic<int> shared_object_count;
+
+// The directory that holds the shared objects of the prefix.
+inline std::filesystem::path shared_objects_directory()
+{
+	std::filesystem::path base;
+	if (const char *runtime = std::getenv("XDG_RUNTIME_DIR"); runtime && *runtime)
+		base = runtime;
+	else
+		base = NativePrefix::from_environment().root();
+	return base / ("raven-objects-" + prefix_tag());
+}
+
+// A word every process of the prefix maps and bumps when it changes a shared object another process may be waiting for: an idle process
+// sleeps until it changes instead of looking at its shared objects every few milliseconds. Null when it cannot be made.
+inline std::atomic<uint32_t> *shared_changes()
+{
+	static std::atomic<uint32_t> *word = [] () -> std::atomic<uint32_t> * {
+		const auto directory = shared_objects_directory();
+		std::error_code failure;
+		std::filesystem::create_directories(directory, failure);
+		const int descriptor = ::open((directory / ".changes").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+		if (descriptor < 0)
+			return nullptr;
+		if (::ftruncate(descriptor, 4096) != 0) {
+			::close(descriptor);
+			return nullptr;
+		}
+		void *mapped = ::mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
+		::close(descriptor);
+		return mapped == MAP_FAILED ? nullptr : static_cast<std::atomic<uint32_t> *>(mapped);
+	}();
+	return word;
+}
+
+inline void announce_shared_change()
+{
+	if (auto *word = shared_changes()) {
+		word->fetch_add(1);
+		::syscall(SYS_futex, word, FUTEX_WAKE, INT32_MAX, nullptr, nullptr, 0);
+	}
+}
+
+// The eventfd of the process's scheduler, written whenever the shared word changes.
+inline std::atomic<int> shared_change_listener{-1};
+
+// Starts, once, the thread that waits for changes to the shared word and wakes the scheduler.
+inline void listen_shared_changes()
+{
+	static std::once_flag started;
+	std::call_once(started, [] {
+		auto *word = shared_changes();
+		if (!word)
+			return;
+		std::thread([word] {
+			for (;;) {
+				const uint32_t seen = word->load();
+				::syscall(SYS_futex, word, FUTEX_WAIT, seen, nullptr, nullptr, 0);
+				if (const int descriptor = shared_change_listener.load(); descriptor >= 0) {
+					const uint64_t one = 1;
+					[[maybe_unused]] const auto written = ::write(descriptor, &one, sizeof one);
+				}
+			}
+		}).detach();
+	});
+}
 
 // Holds the lock of a directory of shared object files until the returned descriptor is closed; -1 when the lock file cannot be made.
 inline int lock_directory(const std::filesystem::path &directory)
@@ -36,7 +105,7 @@ inline void sweep_directory(const std::filesystem::path &directory)
 {
 	std::error_code error;
 	for (const auto &entry : std::filesystem::directory_iterator(directory, error)) {
-		if (entry.path().filename() == ".lock")
+		if (entry.path().filename() == ".lock" || entry.path().filename() == ".changes")
 			continue;
 		const int probe = ::open(entry.path().c_str(), O_RDWR | O_CLOEXEC);
 		if (probe < 0)
@@ -82,12 +151,8 @@ public:
 		const std::function<void(void *)> &init = {})
 	{
 		existed = false;
-		std::filesystem::path base;
-		if (const char *runtime = std::getenv("XDG_RUNTIME_DIR"); runtime && *runtime)
-			base = runtime;
-		else
-			base = NativePrefix::from_environment().root();
-		auto directory = base / ("raven-objects-" + prefix_tag());
+		listen_shared_changes();
+		auto directory = shared_objects_directory();
 		std::error_code failure;
 		std::filesystem::create_directories(directory, failure);
 		static std::once_flag swept;

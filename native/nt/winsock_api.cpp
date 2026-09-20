@@ -657,6 +657,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			call.write(transfer.overlapped, pending);
 		}
 		auto shared = std::make_shared<Transfer>(std::move(transfer));
+		const int descriptor = shared->socket->descriptor;
+		const short events = shared->receiving ? POLLIN : POLLOUT;
 		reactor.add([shared, attempt, complete]() {
 			uint32_t result = 0;
 			uint64_t count = 0;
@@ -664,7 +666,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 				return false;
 			complete(*shared, result, count, false);
 			return true;
-		});
+		}, descriptor, events);
 		call.fail(997, UINT32_MAX);
 	};
 	// Without an OVERLAPPED the call is an ordinary blocking or non-blocking transfer.
@@ -883,7 +885,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			::getsockopt(socket->descriptor, SOL_SOCKET, SO_ERROR, &error, &length);
 			done(error ? wsa_error(error) : 0, false);
 			return true;
-		});
+		}, socket->descriptor, short(POLLOUT));
 		fail(call, 997, 0);
 	});
 	registry.add("AcceptEx", 8, [socket_of, fail, finish, &reactor, &process](ApiCall &call) {
@@ -944,7 +946,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 				return false;
 			finish(listener, overlapped, width, uint32_t(result), 0, false);
 			return true;
-		});
+		}, listener->descriptor, short(POLLIN));
 		fail(call, 997, 0);
 	});
 	registry.add("GetAcceptExSockaddrs", 8, [](ApiCall &call) {

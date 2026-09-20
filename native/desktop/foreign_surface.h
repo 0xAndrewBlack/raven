@@ -41,5 +41,7 @@ private:
 // Owner side: when another process finished a new frame for the window, hands its pixels (32-bit rows, top down) to `use` and returns
 // true; `seen` remembers the last frame taken.
 bool take_foreign_frame(uint64_t window, uint32_t &seen, const std::function<void(const uint8_t *, uint32_t, uint32_t)> &use);
+// Changes whenever another process starts or stops drawing into a window of the prefix (its pixels file is made or removed).
+uint64_t foreign_frames_stamp();
 
 }

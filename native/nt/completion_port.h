@@ -6,6 +6,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <poll.h>
 #include <vector>
 
 namespace raven {
@@ -40,14 +41,19 @@ private:
 class Reactor {
 public:
 	using Operation = std::function<bool()>;
-	// A pending operation counts as work only the host can finish, so waiting threads are not taken for deadlocked.
-	void add(Operation operation) { operations.push_back({std::move(operation), std::make_unique<HostWait>()}); }
+	// A pending operation counts as work only the host can finish, so waiting threads are not taken for deadlocked. The descriptor and
+	// events it waits for, when it names them, let an idle process sleep until the operation can go on instead of trying it again and
+	// again.
+	void add(Operation operation, int descriptor = -1, short events = 0)
+	{
+		operations.emplace_back(Pending{std::move(operation), descriptor, events}, std::make_unique<HostWait>());
+	}
 	// Gives every pending operation a chance to finish; true when any did.
 	bool poll()
 	{
 		bool finished = false;
 		for (size_t index = 0; index < operations.size();) {
-			if (operations[index].first()) {
+			if (operations[index].first.run()) {
 				operations.erase(operations.begin() + ptrdiff_t(index));
 				finished = true;
 			} else {
@@ -57,9 +63,21 @@ public:
 		return finished;
 	}
 	size_t pending() const { return operations.size(); }
+	// The descriptors pending operations wait on.
+	void watch(std::vector<pollfd> &descriptors) const
+	{
+		for (const auto &[operation, wait] : operations)
+			if (operation.descriptor >= 0)
+				descriptors.push_back({operation.descriptor, operation.events, 0});
+	}
 
 private:
-	std::vector<std::pair<Operation, std::unique_ptr<HostWait>>> operations;
+	struct Pending {
+		Operation run;
+		int descriptor;
+		short events;
+	};
+	std::vector<std::pair<Pending, std::unique_ptr<HostWait>>> operations;
 };
 
 }

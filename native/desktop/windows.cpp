@@ -249,11 +249,20 @@ void NativeWindows::import_foreign_frames()
 	const bool poll=now-foreign_checked>=std::chrono::milliseconds(8);
 	if (poll) foreign_checked=now;
 	if (!poll && dirty_roots.empty()) return;
+	// Only windows another process has drawn into are looked at on every poll; all of them only when the set of drawn windows changed.
+	bool every=false;
+	if (poll) {
+		const auto stamp=foreign_frames_stamp();
+		every=stamp!=foreign_stamp;
+		foreign_stamp=stamp;
+	}
 	for (const auto handle : objects.window_handles()) {
 		if (handle<window_handle_base() || handle>window_handle_base()+0xffff) continue;
 		const auto known=foreign_frames.find(handle);
-		const bool redraw=known!=foreign_frames.end() && known->second && dirty_roots.contains(objects.window_root(handle));
+		const bool drawn=known!=foreign_frames.end() && known->second;
+		const bool redraw=drawn && dirty_roots.contains(objects.window_root(handle));
 		if (!poll && !redraw) continue;
+		if (poll && !redraw && !every && !drawn) continue;
 		auto &seen=foreign_frames[handle];
 		if (redraw) seen=0;
 		take_foreign_frame(handle,seen,[&](const uint8_t *pixels,uint32_t width,uint32_t height) {

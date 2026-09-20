@@ -257,7 +257,7 @@ void start_overlapped(KernelContext &context, ApiCall &call, const std::shared_p
 		state.pending.erase(std::remove(state.pending.begin(), state.pending.end(), io), state.pending.end());
 		finish_io(context, port, key, overlapped, width, error, bytes);
 		return true;
-	});
+	}, pipe->descriptor, short(shared->reading ? POLLIN : POLLOUT));
 	call.fail(error_io_pending);
 }
 
@@ -527,7 +527,7 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 			state.pending.erase(std::remove(state.pending.begin(), state.pending.end(), io), state.pending.end());
 			finish_io(context, port, key, overlapped, width, error, 0);
 			return true;
-		});
+		}, pipe->listener ? pipe->listener->descriptor : -1, short(POLLIN));
 		call.fail(error_io_pending);
 	});
 	registry.add("DisconnectNamedPipe", 1, [pipe_of](ApiCall &call) {

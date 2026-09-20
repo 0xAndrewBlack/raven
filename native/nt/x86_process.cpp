@@ -1045,6 +1045,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	GuestAllocator allocator(memory, guest_heap);
 	compat.set_global_blocks([&allocator](uint64_t address) { return allocator.size(address); }, [&allocator](uint64_t address) { return allocator.release(address); });
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, guest_threads, paths, modules, entry, *launch, invoke};
+	guest_threads.set_watched([reactor = kernel.reactor](std::vector<pollfd> &descriptors) { reactor->watch(descriptors); });
 	register_file_api(shared_api, kernel);
 	register_memory_api(shared_api, kernel);
 	register_text_api(shared_api, kernel);

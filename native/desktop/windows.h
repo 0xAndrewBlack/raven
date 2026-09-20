@@ -86,6 +86,7 @@ private:
 	uint64_t foreign_dc(uint64_t window);
 	std::map<uint64_t,uint32_t> foreign_frames;
 	std::chrono::steady_clock::time_point foreign_checked{};
+	uint64_t foreign_stamp=UINT64_MAX;
 	void import_foreign_frames();
 	// Host input collected while threads waited, delivered by the next input_ready.
 	std::deque<DesktopEvent> pending_events;

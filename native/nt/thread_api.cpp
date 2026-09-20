@@ -83,7 +83,13 @@ public:
 	int signaled(uint32_t) const override { return state->signaled.load() ? 1 : 0; }
 	bool try_consume(uint32_t) override { return state->manual || state->signaled.exchange(0) == 1; }
 	void consume(uint32_t thread) override { try_consume(thread); }
-	int set_state(bool value) override { return int(state->signaled.exchange(value ? 1 : 0)); }
+	int set_state(bool value) override
+	{
+		const int previous = int(state->signaled.exchange(value ? 1 : 0));
+		if (value)
+			announce_shared_change();
+		return previous;
+	}
 	EventState *state = nullptr;
 	std::shared_ptr<SharedFile> shared;
 };
@@ -619,8 +625,11 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(288);
 			return;
 		}
-		if (--mutex->state->recursion == 0)
+		if (--mutex->state->recursion == 0) {
 			mutex->state->owner = 0;
+			if (mutex->shared)
+				announce_shared_change();
+		}
 		call.ret(1);
 	});
 	const auto make_semaphore = [&objects](ApiCall &call, int64_t initial, int64_t maximum, uint64_t name) {
@@ -688,6 +697,8 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			if (semaphore->state->count.compare_exchange_weak(current, current + amount))
 				break;
 		}
+		if (semaphore->shared)
+			announce_shared_change();
 		if (call[2]) call.store<int32_t>(call[2], current);
 		call.ret(1);
 	});

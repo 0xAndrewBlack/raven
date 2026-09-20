@@ -10,8 +10,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <poll.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 
 namespace raven {
 
@@ -40,16 +43,23 @@ NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environm
 	if (const char *text = std::getenv("RAVEN_SLICE_MS"))
 		slice = std::strtol(text, nullptr, 10);
 	process.set_time_slicing(std::chrono::milliseconds(slice < 0 ? 0 : slice), [this] { return !tearing_down && live() > 1; }, [this] { yield(); });
+	wake = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (wake < 0)
+		throw std::runtime_error("cannot create the scheduler's wake descriptor");
+	shared_change_listener = wake;
 }
 
 NativeThreads::~NativeThreads()
 {
+	if (shared_change_listener == wake)
+		shared_change_listener = -1;
 	process.set_time_slicing(std::chrono::milliseconds(0), nullptr, nullptr);
 	// Host frames of threads that never finished hold objects that only their unwinding releases; a failure here must not escape.
 	try {
 		unwind_all();
 	} catch (...) {
 	}
+	::close(wake);
 }
 
 void NativeThreads::stop_time_slicing()
@@ -315,24 +325,27 @@ void NativeThreads::schedule()
 			throw std::runtime_error("native guest threads deadlocked: every thread waits without a timeout");
 		const auto limit = std::min(wake, deadline);
 		auto slice = std::chrono::duration_cast<std::chrono::milliseconds>(limit > now ? limit - now : std::chrono::nanoseconds(0));
-		slice = std::min(slice, std::chrono::milliseconds(shared_object_count.load() > 0 ? 2 : 20));
+		// The process sleeps until a host thread nudges it, another process changes a shared object, a pending operation's descriptor is
+		// ready or the earliest timeout; conditions nothing announces, such as a child process ending, are looked at every 20 ms.
+		slice = std::min(slice, std::chrono::milliseconds(20));
 		if (poll) {
 			poll(slice);
 		} else if (slice.count() > 0) {
-			std::unique_lock hold(idle_lock);
-			idle_signal.wait_for(hold, slice, [this] { return nudged; });
-			nudged = false;
+			std::vector<pollfd> descriptors{{this->wake, POLLIN, 0}};
+			if (watched)
+				watched(descriptors);
+			const timespec timeout{slice.count() / 1000, (slice.count() % 1000) * 1000000};
+			::ppoll(descriptors.data(), descriptors.size(), &timeout, nullptr);
+			uint64_t drained = 0;
+			while (::read(this->wake, &drained, sizeof drained) > 0) {}
 		}
 	}
 }
 
 void NativeThreads::nudge()
 {
-	{
-		std::lock_guard hold(idle_lock);
-		nudged = true;
-	}
-	idle_signal.notify_one();
+	const uint64_t one = 1;
+	[[maybe_unused]] const auto written = ::write(wake, &one, sizeof one);
 }
 
 bool NativeThreads::block(std::function<bool()> ready, std::optional<std::chrono::steady_clock::time_point> wake)

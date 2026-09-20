@@ -27,16 +27,20 @@ namespace {
 constexpr size_t header_size = 4096;
 constexpr uint32_t surface_magic = 0x52574653;
 
-std::filesystem::path window_directory()
+// The directory is the same for the whole life of the process; it is made the first time it is asked for.
+const std::filesystem::path &window_directory()
 {
-	std::filesystem::path base;
-	if (const char *runtime = std::getenv("XDG_RUNTIME_DIR"); runtime && *runtime)
-		base = runtime;
-	else
-		base = NativePrefix::from_environment().root();
-	auto directory = base / ("raven-windows-" + prefix_tag());
-	std::error_code error;
-	std::filesystem::create_directories(directory, error);
+	static const std::filesystem::path directory = [] {
+		std::filesystem::path base;
+		if (const char *runtime = std::getenv("XDG_RUNTIME_DIR"); runtime && *runtime)
+			base = runtime;
+		else
+			base = NativePrefix::from_environment().root();
+		auto made = base / ("raven-windows-" + prefix_tag());
+		std::error_code error;
+		std::filesystem::create_directories(made, error);
+		return made;
+	}();
 	return directory;
 }
 
@@ -52,7 +56,8 @@ std::string window_name(uint64_t window)
 uint64_t window_handle_base()
 {
 	// Sixteen bits of window number under a tag from the process id; the tag stays clear of the low handles other objects use.
-	return uint64_t((uint32_t(::getpid()) % 0x7ef0) + 0x100) << 16;
+	static const uint64_t base = uint64_t((uint32_t(::getpid()) % 0x7ef0) + 0x100) << 16;
+	return base;
 }
 
 // Removes what processes that ended without withdrawing their windows left: a window whose owner is gone, and pixels without a window.
@@ -162,6 +167,14 @@ void ForeignSurface::publish_frame()
 	header[1] = width;
 	header[2] = height;
 	std::atomic_ref<uint32_t>(header[3]).fetch_add(1, std::memory_order_release);
+}
+
+uint64_t foreign_frames_stamp()
+{
+	struct stat status{};
+	if (::stat(window_directory().c_str(), &status) != 0)
+		return 0;
+	return uint64_t(status.st_mtim.tv_sec) * 1000000000ULL + uint64_t(status.st_mtim.tv_nsec);
 }
 
 bool take_foreign_frame(uint64_t window, uint32_t &seen, const std::function<void(const uint8_t *, uint32_t, uint32_t)> &use)
