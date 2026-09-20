@@ -492,17 +492,22 @@ uint64_t NativeProcess::memory_syscall(uint64_t number, uint64_t a1, uint64_t a2
 	uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6)
 {
 	state->require_stopped();
-	const auto saved = context();
+	// A Linux system call leaves the extended processor state alone, so only the general registers the gate uses are kept.
 	auto &child = *state->child;
+	user_regs_struct saved{};
+	trace(PTRACE_GETREGS, child.pid, &saved);
 	child.set_timeout(std::chrono::seconds(2));
 	uint64_t result = 0;
 	try {
 		result = child.syscall(number, a1, a2, a3, a4, a5, a6);
 	} catch (...) {
 		try {
-			if (child.pid == -1 || context().registers.rip != child.gate + 4)
+			user_regs_struct where{};
+			if (child.pid != -1)
+				trace(PTRACE_GETREGS, child.pid, &where);
+			if (child.pid == -1 || where.rip != child.gate + 4)
 				throw std::runtime_error("native memory operation lost its gate");
-			set_context(saved);
+			trace(PTRACE_SETREGS, child.pid, &saved);
 		} catch (...) {
 			child.stop();
 			throw;
@@ -510,7 +515,7 @@ uint64_t NativeProcess::memory_syscall(uint64_t number, uint64_t a1, uint64_t a2
 		throw;
 	}
 	try {
-		set_context(saved);
+		trace(PTRACE_SETREGS, child.pid, &saved);
 	} catch (...) {
 		child.stop();
 		throw;
