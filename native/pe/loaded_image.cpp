@@ -161,6 +161,11 @@ std::span<uint8_t> LoadedImage::data()
 	return {storage, size};
 }
 
+std::span<const uint8_t> LoadedImage::data() const
+{
+	return {storage, size};
+}
+
 std::vector<ImageMapping> LoadedImage::mappings() const
 {
 	std::vector<ImageMapping> result;

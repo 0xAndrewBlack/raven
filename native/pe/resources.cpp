@@ -9,7 +9,7 @@
 namespace raven {
 
 std::vector<PEResource> read_resources(PEDirectory directory,
-	std::span<const uint8_t> bytes, uint32_t image_size)
+	std::span<const uint8_t> bytes, uint32_t image_size, std::vector<std::pair<size_t, size_t>> *read)
 {
 	if (!directory.address && !directory.size)
 		return {};
@@ -19,6 +19,8 @@ std::vector<PEResource> read_resources(PEDirectory directory,
 	const auto range = [&](size_t offset, size_t size) {
 		if (offset > bytes.size() || size > bytes.size() - offset)
 			throw std::runtime_error("PE resource metadata exceeds directory");
+		if (read)
+			read->emplace_back(offset, size);
 	};
 	const auto number = [&](size_t offset, size_t width) {
 		range(offset, width);

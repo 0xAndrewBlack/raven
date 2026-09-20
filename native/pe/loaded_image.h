@@ -19,6 +19,7 @@ public:
 	LoadedImage(const LoadedImage &) = delete;
 	LoadedImage &operator=(const LoadedImage &) = delete;
 	std::span<uint8_t> data();
+	std::span<const uint8_t> data() const;
 	std::vector<ImageMapping> mappings() const;
 	int descriptor() const;
 	uint64_t base() const;

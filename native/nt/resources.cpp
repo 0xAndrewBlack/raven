@@ -1,6 +1,7 @@
 #include "resources.h"
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 
 namespace raven {
@@ -20,16 +21,47 @@ const PEModule *NativeResources::module(uint64_t handle)
 	return nullptr;
 }
 
-std::vector<PEResource> NativeResources::resources(const PEModule &image) const
+const std::vector<PEResource> &NativeResources::resources(const PEModule &image) const
 {
+	auto &cached = parsed[&image];
 	const auto directory = image.image.directories[2];
-	if (!directory.address && !directory.size)
-		return {};
+	if (!directory.address && !directory.size) {
+		cached = {};
+		return cached.resources;
+	}
 	if (directory.size > 16 * 1024 * 1024)
 		throw std::runtime_error("native resource directory exceeds initial policy limit");
+	// The image the runtime maps for the guest is the live one, guest changes included.
+	const auto live = image.loaded.data();
+	if (cached.valid && uint64_t(directory.address) + directory.size <= live.size()) {
+		size_t at = 0;
+		bool same = true;
+		for (const auto &[offset, size] : cached.read) {
+			if (std::memcmp(live.data() + directory.address + offset, cached.bytes.data() + at, size)) {
+				same = false;
+				break;
+			}
+			at += size;
+		}
+		if (same)
+			return cached.resources;
+	}
 	// Read the live image, including guest changes, through the existing permission boundary.
 	const auto bytes = process.read_memory(image.loaded.base() + directory.address, directory.size);
-	return read_resources(directory, bytes, image.image.image_size);
+	cached = {};
+	std::vector<std::pair<size_t, size_t>> read;
+	cached.resources = read_resources(directory, bytes, image.image.image_size, &read);
+	// The parse reads a few bytes at a time; touching and overlapping parts are joined so that a lookup compares a few long runs.
+	std::sort(read.begin(), read.end());
+	for (const auto &[offset, size] : read)
+		if (!cached.read.empty() && offset <= cached.read.back().first + cached.read.back().second)
+			cached.read.back().second = std::max(cached.read.back().second, offset + size - cached.read.back().first);
+		else
+			cached.read.emplace_back(offset, size);
+	for (const auto &[offset, size] : cached.read)
+		cached.bytes.insert(cached.bytes.end(), bytes.begin() + ptrdiff_t(offset), bytes.begin() + ptrdiff_t(offset + size));
+	cached.valid = true;
+	return cached.resources;
 }
 
 std::optional<ResourceKey> NativeResources::key(uint64_t address, bool wide)
@@ -90,7 +122,7 @@ uint64_t NativeResources::find(uint64_t handle, uint64_t type, uint64_t name, ui
 	const auto name_key = key(name, wide);
 	if (!type_key || !name_key)
 		return 0;
-	const auto data = resources(*image);
+	const auto &data = resources(*image);
 	std::vector<const PEResource *> candidates;
 	bool has_type = false;
 	for (const auto &resource : data)

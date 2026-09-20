@@ -18,8 +18,9 @@ struct PEResource {
 	uint32_t code_page;
 };
 
-// Directory offsets are relative to the resource root; payload RVAs are image-relative.
+// Directory offsets are relative to the resource root; payload RVAs are image-relative. When `read` is given, it receives every
+// range of the directory the parse read, as offset and size.
 std::vector<PEResource> read_resources(PEDirectory directory,
-	std::span<const uint8_t> bytes, uint32_t image_size);
+	std::span<const uint8_t> bytes, uint32_t image_size, std::vector<std::pair<size_t, size_t>> *read = nullptr);
 
 }
