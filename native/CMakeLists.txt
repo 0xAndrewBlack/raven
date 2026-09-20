@@ -735,6 +735,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_custom_target(memory_pe_fixture ALL DEPENDS ${MEMORY_FIXTURE})
         add_test(NAME native_memory_cli COMMAND raven --run-process --execution=native ${MEMORY_FIXTURE})
         set_tests_properties(native_memory_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        set(STRING_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/string-fixture.exe)
+        add_custom_command(OUTPUT ${STRING_FIXTURE}
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                -Wl,--entry,raven_entry,--image-base,0x197000000
+                -o ${STRING_FIXTURE} ${PROJECT_SOURCE_DIR}/testdata/native_loader/string_client.c -lkernel32
+            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/string_client.c VERBATIM)
+        add_custom_target(string_pe_fixture ALL DEPENDS ${STRING_FIXTURE})
+        add_test(NAME native_string_cli COMMAND raven --run-process --execution=native ${STRING_FIXTURE})
+        set_tests_properties(native_string_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         set(SYSTEM_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/system-fixture.exe)
         add_custom_command(OUTPUT ${SYSTEM_FIXTURE}
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
