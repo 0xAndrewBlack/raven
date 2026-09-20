@@ -136,6 +136,7 @@ public:
 	void set_guest_sampler(std::chrono::milliseconds period, std::function<void(uint64_t rip)> sampler);
 
 private:
+	void install_seccomp();
 	bool serve_pending();
 	bool inside_served_stub() const;
 	bool served_wait_trap(uint64_t address) const;

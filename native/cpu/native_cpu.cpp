@@ -21,6 +21,10 @@
 #include <signal.h>
 #include <stdexcept>
 #include <sys/mman.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <sys/user.h>
@@ -305,6 +309,9 @@ struct NativeProcess::State {
 	bool active_call = false;
 	bool awaiting_api = false;
 	bool awaiting_syscall = false;
+	// The guest's own system calls stop it through a seccomp filter instead of system call emulation: only those of the runtime's gate
+	// run, every other one stops the guest before it runs, as emulation did.
+	bool seccomp = false;
 	bool debug_print_fault = false;
 	size_t steps_left = 0;
 	std::function<void(uint64_t)> step_sink;
@@ -401,6 +408,8 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 		state->mappings.at(page).protection = PROT_READ | PROT_EXEC;
 		state->return_gate = page;
 	}
+	if (mode == NativeMode::x64 && std::getenv("RAVEN_SECCOMP"))
+		install_seccomp();
 	user_regs_struct registers{};
 	trace(PTRACE_GETREGS, child.pid, &registers);
 	registers.rax = registers.rbx = registers.rcx = registers.rdx = registers.rsi = registers.rdi = registers.rbp = 0;
@@ -413,6 +422,40 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 }
 
 NativeProcess::~NativeProcess() = default;
+
+void NativeProcess::install_seccomp()
+{
+	auto &child = *state->child;
+	// The filter: an x86-64 system call whose instruction pointer is the one after the gate's SYSCALL runs; any other stops the guest
+	// for the runtime (SECCOMP_RET_TRACE), which then skips it as it skipped emulated ones.
+	const uint64_t after_gate = child.gate + 3;
+	const sock_filter program[] = {
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, arch)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 4),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, instruction_pointer)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, uint32_t(after_gate), 0, 2),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, instruction_pointer) + 4),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, uint32_t(after_gate >> 32), 1, 0),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+	};
+	const auto page = child.syscall(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, uint64_t(-1));
+	std::vector<uint8_t> bytes(sizeof program + 16);
+	std::memcpy(bytes.data() + 16, program, sizeof program);
+	const uint16_t count = sizeof program / sizeof program[0];
+	const uint64_t filter = page + 16;
+	std::memcpy(bytes.data(), &count, 2);
+	std::memcpy(bytes.data() + 8, &filter, 8);
+	const iovec local{bytes.data(), bytes.size()};
+	const iovec remote{reinterpret_cast<void *>(page), bytes.size()};
+	if (process_vm_writev(child.pid, &local, 1, &remote, 1, 0) != ssize_t(bytes.size()))
+		throw std::runtime_error("cannot write the native seccomp filter");
+	child.syscall(SYS_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+	child.syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, page);
+	child.syscall(SYS_munmap, page, 4096);
+	trace(PTRACE_SETOPTIONS, child.pid, reinterpret_cast<void *>(PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACESECCOMP));
+	state->seccomp = true;
+}
 
 NativeContext NativeProcess::context() const
 {
@@ -1175,7 +1218,7 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		else
 			child.clear_slice();
 		event_info.reset();
-		trace(state->steps_left ? PTRACE_SINGLESTEP : PTRACE_SYSEMU, child.pid);
+		trace(state->steps_left ? PTRACE_SINGLESTEP : state->seccomp ? PTRACE_CONT : PTRACE_SYSEMU, child.pid);
 		state->stopped = false;
 		status = child.wait(state->poll_served ? &state->poll_served : nullptr);
 		// The slice belongs to this resume only; a later wait for a memory operation of the runtime must not see it expire.
@@ -1213,7 +1256,7 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 			event_info = kept;
 			status = interrupted;
 			forget_registers();
-			ptrace(PTRACE_SYSEMU, child.pid, nullptr, nullptr);
+			ptrace(state->seccomp ? PTRACE_CONT : PTRACE_SYSEMU, child.pid, nullptr, nullptr);
 			int drained = 0;
 			while (waitpid(child.pid, &drained, 0) == -1 && errno == EINTR) {}
 			if (!WIFSTOPPED(drained) || WSTOPSIG(drained) != SIGSTOP)
@@ -1238,6 +1281,8 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		state->stopped = true;
 		trace(PTRACE_GETREGS, child.pid, &registers);
 		signal = WSTOPSIG(status);
+		if (state->seccomp && signal == SIGTRAP && (status >> 16) == PTRACE_EVENT_SECCOMP)
+			signal = SIGTRAP | 0x80;
 		// A served stub that waited too long stops on its own breakpoint: its call is answered and it goes on where it stopped.
 		if (signal == SIGTRAP && served_wait_trap(registers.rip - 1)) {
 			serve_pending();
