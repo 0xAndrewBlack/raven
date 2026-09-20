@@ -69,6 +69,8 @@ public:
 	// handle's low ten bits.
 	static constexpr size_t bitmap_records=1024, bitmap_record=48;
 	void set_bitmap_table(uint8_t *table);
+	// GetSystemMetrics for indexes below 128, then GetSysColor for indexes below 64, as 32-bit values; both are fixed for the process.
+	void set_system_table(uint8_t *table);
 	void publish_windows();
 	void api_entered() { ++api_depth; }
 	void api_left() { --api_depth; }

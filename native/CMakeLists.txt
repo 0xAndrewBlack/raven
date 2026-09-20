@@ -802,7 +802,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_custom_command(OUTPUT ${PURE_FIXTURE}
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
                 -Wl,--entry,raven_entry,--image-base,0x197700000
-                -o ${PURE_FIXTURE} ${PROJECT_SOURCE_DIR}/testdata/native_loader/pure_client.c -luxtheme -lshlwapi -luser32 -lkernel32
+                -o ${PURE_FIXTURE} ${PROJECT_SOURCE_DIR}/testdata/native_loader/pure_client.c -luxtheme -lshlwapi -lgdi32 -luser32 -lkernel32
             DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/pure_client.c VERBATIM)
         add_custom_target(pure_pe_fixture ALL DEPENDS ${PURE_FIXTURE})
         add_test(NAME native_pure_cli COMMAND raven --run-process --execution=native ${PURE_FIXTURE})

@@ -23,6 +23,62 @@ uint64_t extra_access(std::vector<uint8_t> &bytes, int32_t index, size_t width, 
 
 }
 
+uint32_t system_metric(const DesktopMetrics &screen, int32_t index)
+{
+	switch (index) {
+	case 0: return uint32_t(screen.screen_x);
+	case 1: return uint32_t(screen.screen_y);
+	case 2: case 3: case 9: case 10: case 20: case 21: return 17;
+	case 4: return uint32_t(screen.caption);
+	case 5: case 6: return uint32_t(screen.border_x);
+	case 7: return uint32_t(screen.dialog_x);
+	case 8: return uint32_t(screen.dialog_y);
+	case 11: case 12: case 13: case 14: return 32;
+	case 15: return uint32_t(screen.menu);
+	case 16: return uint32_t(screen.screen_x);
+	case 17: return uint32_t(screen.screen_y - screen.caption);
+	case 19: return 1;
+	case 22: case 23: case 41: case 44: case 63: case 67: case 70: case 73: case 74: case 82: case 86: case 87: case 88: case 89: return 0;
+	case 28: return 136;
+	case 29: return 39;
+	case 30: return uint32_t(screen.button_x);
+	case 31: return uint32_t(screen.button_y);
+	case 32: return uint32_t(screen.frame_x);
+	case 33: return uint32_t(screen.frame_y);
+	case 34: return 136;
+	case 35: return 39;
+	case 36: case 37: case 68: case 69: return 4;
+	case 38: case 39: return 75;
+	case 40: return 0;
+	case 42: return 0;
+	case 43: return 3;
+	case 45: case 46: return 2;
+	case 47: case 48: return 160;
+	case 49: case 50: return 16;
+	case 51: return uint32_t(screen.small_caption);
+	case 52: return uint32_t(screen.small_button_x);
+	case 53: return uint32_t(screen.small_button_y);
+	case 54: return uint32_t(screen.small_button_x);
+	case 55: return uint32_t(screen.menu);
+	case 56: return 8;
+	case 57: return 160;
+	case 58: return 24;
+	case 59: case 61: return uint32_t(screen.screen_x + 8);
+	case 60: case 62: return uint32_t(screen.screen_y + 8);
+	case 71: case 72: return 15;
+	case 75: case 91: return 1;
+	case 76: case 77: return 0;
+	case 78: return uint32_t(screen.screen_x);
+	case 79: return uint32_t(screen.screen_y);
+	case 80: case 81: return 1;
+	case 83: case 84: return 1;
+	case 92: return 0;
+	case 97: return 0;
+	case 0x1000: case 0x2000: case 0x2001: return 0;
+	default: return 0;
+	}
+}
+
 // Window and class data access: every documented index, for both widths and both character sets.
 void NativeWindows::register_long_api(ApiRegistry &registry)
 {
@@ -319,62 +375,7 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 		}
 		call.ret(1);
 	});
-	registry.add("GetSystemMetrics", 1, [this](ApiCall &call) {
-		const auto &screen = objects.nonclient_metrics();
-		const int32_t index = call.i32(0);
-		switch (index) {
-		case 0: call.ret(uint32_t(screen.screen_x)); return;
-		case 1: call.ret(uint32_t(screen.screen_y)); return;
-		case 2: case 3: case 9: case 10: case 20: case 21: call.ret(17); return;
-		case 4: call.ret(uint32_t(screen.caption)); return;
-		case 5: case 6: call.ret(uint32_t(screen.border_x)); return;
-		case 7: call.ret(uint32_t(screen.dialog_x)); return;
-		case 8: call.ret(uint32_t(screen.dialog_y)); return;
-		case 11: case 12: case 13: case 14: call.ret(32); return;
-		case 15: call.ret(uint32_t(screen.menu)); return;
-		case 16: call.ret(uint32_t(screen.screen_x)); return;
-		case 17: call.ret(uint32_t(screen.screen_y - screen.caption)); return;
-		case 19: call.ret(1); return;
-		case 22: case 23: case 41: case 44: case 63: case 67: case 70: case 73: case 74: case 82: case 86: case 87: case 88: case 89: call.ret(0); return;
-		case 28: call.ret(136); return;
-		case 29: call.ret(39); return;
-		case 30: call.ret(uint32_t(screen.button_x)); return;
-		case 31: call.ret(uint32_t(screen.button_y)); return;
-		case 32: call.ret(uint32_t(screen.frame_x)); return;
-		case 33: call.ret(uint32_t(screen.frame_y)); return;
-		case 34: call.ret(136); return;
-		case 35: call.ret(39); return;
-		case 36: case 37: case 68: case 69: call.ret(4); return;
-		case 38: case 39: call.ret(75); return;
-		case 40: call.ret(0); return;
-		case 42: call.ret(0); return;
-		case 43: call.ret(3); return;
-		case 45: case 46: call.ret(2); return;
-		case 47: case 48: call.ret(160); return;
-		case 49: case 50: call.ret(16); return;
-		case 51: call.ret(uint32_t(screen.small_caption)); return;
-		case 52: call.ret(uint32_t(screen.small_button_x)); return;
-		case 53: call.ret(uint32_t(screen.small_button_y)); return;
-		case 54: call.ret(uint32_t(screen.small_button_x)); return;
-		case 55: call.ret(uint32_t(screen.menu)); return;
-		case 56: call.ret(8); return;
-		case 57: call.ret(160); return;
-		case 58: call.ret(24); return;
-		case 59: case 61: call.ret(uint32_t(screen.screen_x + 8)); return;
-		case 60: case 62: call.ret(uint32_t(screen.screen_y + 8)); return;
-		case 71: case 72: call.ret(15); return;
-		case 75: case 91: call.ret(1); return;
-		case 76: case 77: call.ret(0); return;
-		case 78: call.ret(uint32_t(screen.screen_x)); return;
-		case 79: call.ret(uint32_t(screen.screen_y)); return;
-		case 80: case 81: call.ret(1); return;
-		case 83: case 84: call.ret(1); return;
-		case 92: call.ret(0); return;
-		case 97: call.ret(0); return;
-		case 0x1000: case 0x2000: case 0x2001: call.ret(0); return;
-		default: call.ret(0); return;
-		}
-	});
+	registry.add("GetSystemMetrics", 1, [this](ApiCall &call) { call.ret(system_metric(objects.nonclient_metrics(), call.i32(0))); });
 }
 
 }

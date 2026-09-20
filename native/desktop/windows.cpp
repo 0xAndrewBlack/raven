@@ -1655,6 +1655,18 @@ void NativeWindows::publish_bitmaps()
 	if (!api_depth) watched_bitmaps.clear();
 }
 
+void NativeWindows::set_system_table(uint8_t *table)
+{
+	for (int32_t index=0;index<128;++index) {
+		const uint32_t value=system_metric(objects.nonclient_metrics(),index);
+		std::memcpy(table+size_t(index)*4,&value,4);
+	}
+	for (int32_t index=0;index<64;++index) {
+		const uint32_t value=objects.system_color(index);
+		std::memcpy(table+512+size_t(index)*4,&value,4);
+	}
+}
+
 void NativeWindows::screen_dc_use(std::string_view name)
 {
 	if (!screen_block)

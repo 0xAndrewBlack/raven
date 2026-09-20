@@ -12,6 +12,9 @@ struct DesktopMetrics {
 	int32_t get(int32_t index) const;
 };
 
+// What GetSystemMetrics answers for an index.
+uint32_t system_metric(const DesktopMetrics &screen, int32_t index);
+
 DesktopRect adjust_window_rect(const DesktopMetrics &metrics,DesktopRect rect,uint32_t style,bool menu,uint32_t ex_style);
 
 }

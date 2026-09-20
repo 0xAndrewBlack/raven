@@ -673,6 +673,35 @@ static const std::vector<uint8_t> &file_name_prelude()
 	return code;
 }
 
+// CallWindowProc calls the procedure it is given with the other four arguments, as the runtime does: the guest moves them down a
+// register and jumps to it, so the procedure returns to the caller. A null procedure goes to the runtime.
+static const std::vector<uint8_t> &call_procedure_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x48, 0x85, 0xc9, 0x74, 0x13, 0x48, 0x89, 0xc8, 0x48, 0x89, 0xd1, 0x4c, 0x89, 0xc2, 0x4d, 0x89, 0xc8, 0x4c, 0x8b, 0x4c, 0x24, 0x28, 0xff, 0xe0, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+// GetSystemMetrics and GetSysColor, which do not change while the process runs, read from the table the runtime writes once (see
+// NativeWindows::set_system_table) for indexes below 128 and 64.
+static constexpr size_t system_pointer = 0x730;
+
+static const std::vector<uint8_t> &system_metrics_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x1b, 0x4d, 0x8b, 0x9a, 0x30, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x0f,
+		0x81, 0xf9, 0x80, 0x00, 0x00, 0x00, 0x73, 0x07, 0x89, 0xc8, 0x41, 0x8b, 0x04, 0x83, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> &system_colors_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x1c, 0x4d, 0x8b, 0x9a, 0x30, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x10,
+		0x83, 0xf9, 0x40, 0x73, 0x0b, 0x89, 0xc8, 0x41, 0x8b, 0x84, 0x83, 0x00, 0x02, 0x00, 0x00, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
 static const std::vector<uint8_t> *block_prelude(std::string_view module, std::string_view name)
 {
 	static constexpr std::array<BlockPrelude, 5> ticks{{{"kernel32.dll", "GetTickCount"}, {"kernel32.dll", "GetTickCount64"},
@@ -692,6 +721,12 @@ static const std::vector<uint8_t> *block_prelude(std::string_view module, std::s
 		return &file_name_prelude();
 	if (module == "uxtheme.dll" && name == "GetWindowTheme")
 		return &window_theme_prelude();
+	if (module == "user32.dll" && name == "GetSystemMetrics")
+		return &system_metrics_prelude();
+	if (module == "user32.dll" && name == "GetSysColor")
+		return &system_colors_prelude();
+	if (module == "user32.dll" && (name == "CallWindowProcW" || name == "CallWindowProcA"))
+		return &call_procedure_prelude();
 	if (module == "user32.dll" && name == "OffsetRect")
 		return &offset_rect_prelude();
 	if (module == "user32.dll" && name == "SetRect")
@@ -1677,7 +1712,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		"the focus prelude reads what NativeWindows publishes");
 	// The window table the window preludes read, mapped into the guest and published in the served block.
 	const size_t windows_size = NativeWindows::window_records * NativeWindows::window_record, table_size = windows_size + 8192 +
-		NativeWindows::menu_area + NativeWindows::bitmap_records * NativeWindows::bitmap_record;
+		NativeWindows::menu_area + NativeWindows::bitmap_records * NativeWindows::bitmap_record + 4096;
 	const int table_file = memfd_create("raven-window-table", MFD_CLOEXEC);
 	if (table_file < 0 || ftruncate(table_file, off_t(table_size)) != 0)
 		throw std::runtime_error("cannot create the window table");
@@ -1702,6 +1737,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	const size_t bitmaps_at = windows_size + 8192 + NativeWindows::menu_area;
 	windows.set_bitmap_table(table + bitmaps_at);
 	__atomic_store_n(&served_block[bitmap_pointer / 8], table_guest + bitmaps_at, __ATOMIC_RELEASE);
+	// The system metrics and colors follow the bitmap table.
+	const size_t system_at = bitmaps_at + NativeWindows::bitmap_records * NativeWindows::bitmap_record;
+	windows.set_system_table(table + system_at);
+	__atomic_store_n(&served_block[system_pointer / 8], table_guest + system_at, __ATOMIC_RELEASE);
 	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, [&, served_names = std::move(served_names)](uint64_t stub) {
 		const auto found = served_names.find(stub);
 		if (found == served_names.end())

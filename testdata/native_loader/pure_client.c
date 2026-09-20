@@ -6,6 +6,11 @@
 
 LPWSTR WINAPI PathFindFileNameW(LPCWSTR path);
 
+static LRESULT CALLBACK echo(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+	return (LRESULT)window + message * 3 + (LRESULT)wparam * 5 + lparam * 7;
+}
+
 static int rect_is(const RECT *rect, LONG left, LONG top, LONG right, LONG bottom)
 {
 	return rect->left == left && rect->top == top && rect->right == right && rect->bottom == bottom;
@@ -43,5 +48,19 @@ int raven_entry(void)
 			return 30 + (int)index;
 	if (GetWindowTheme(NULL) || GetWindowTheme((HWND)0x12345))
 		return 40;
+	if (CallWindowProcW(echo, (HWND)11, 13, 17, 19) != 11 + 13 * 3 + 17 * 5 + 19 * 7 || CallWindowProcA(echo, (HWND)1, 2, 3, 4) != 1 + 6 + 15 + 28)
+		return 41;
+	SetLastError(0);
+	if (CallWindowProcW(NULL, (HWND)1, 2, 3, 4) || GetLastError() != ERROR_INVALID_PARAMETER)
+		return 42;
+	HDC screen = GetDC(NULL);
+	if (GetSystemMetrics(SM_CXVSCROLL) != 17 || GetSystemMetrics(SM_CXICON) != 32 || GetSystemMetrics(SM_CMOUSEBUTTONS) != 3 ||
+		GetSystemMetrics(200) != 0 || GetSystemMetrics(SM_CXSCREEN) != GetDeviceCaps(screen, HORZRES) || GetSystemMetrics(-1) != 0)
+		return 43;
+	ReleaseDC(NULL, screen);
+	LOGBRUSH brush;
+	if (GetObjectW(GetSysColorBrush(COLOR_WINDOW), sizeof brush, &brush) != sizeof brush || brush.lbColor != GetSysColor(COLOR_WINDOW) ||
+		GetSysColor(500) != 0)
+		return 44;
 	return 0;
 }
