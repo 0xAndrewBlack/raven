@@ -789,6 +789,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_custom_target(menu_position_pe_fixture ALL DEPENDS ${MENU_POSITION_FIXTURE})
         add_test(NAME native_menu_position_cli COMMAND raven --run-process --execution=native ${MENU_POSITION_FIXTURE})
         set_tests_properties(native_menu_position_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        set(BITMAP_OBJECT_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/bitmap-object-fixture.exe)
+        add_custom_command(OUTPUT ${BITMAP_OBJECT_FIXTURE}
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                -Wl,--entry,raven_entry,--image-base,0x197600000
+                -o ${BITMAP_OBJECT_FIXTURE} ${PROJECT_SOURCE_DIR}/testdata/native_loader/bitmap_object_client.c -lgdi32 -lkernel32
+            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/bitmap_object_client.c VERBATIM)
+        add_custom_target(bitmap_object_pe_fixture ALL DEPENDS ${BITMAP_OBJECT_FIXTURE})
+        add_test(NAME native_bitmap_object_cli COMMAND raven --run-process --execution=native ${BITMAP_OBJECT_FIXTURE})
+        set_tests_properties(native_bitmap_object_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         set(SYSTEM_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/system-fixture.exe)
         add_custom_command(OUTPUT ${SYSTEM_FIXTURE}
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector

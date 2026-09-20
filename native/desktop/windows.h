@@ -65,6 +65,10 @@ public:
 	// bits, then the blocks: an item of 32 bytes each (type, state, identifier, text length, submenu, text offset) and their texts.
 	static constexpr size_t menu_slots=1024, menu_blocks=0x4000, menu_area=512*1024;
 	void set_menu_table(uint8_t *table);
+	// The bitmap table GetObject reads for bitmaps: 1024 records of 48 bytes (handle, flags with 1 for a DIB section, BITMAP) at the
+	// handle's low ten bits.
+	static constexpr size_t bitmap_records=1024, bitmap_record=48;
+	void set_bitmap_table(uint8_t *table);
 	void publish_windows();
 	void api_entered() { ++api_depth; }
 	void api_left() { --api_depth; }
@@ -129,6 +133,10 @@ private:
 	void publish_menu(uint64_t handle,const DesktopMenu *menu);
 	bool menu_matches(uint64_t handle,const DesktopMenu &menu) const;
 	void publish_menus();
+	uint8_t *bitmap_table=nullptr;
+	std::vector<std::pair<uint64_t,const DesktopBitmap *>> watched_bitmaps;
+	void publish_bitmap(uint64_t handle,const DesktopBitmap *bitmap);
+	void publish_bitmaps();
 	std::vector<std::pair<uint64_t,const DesktopWindow *>> watched;
 	// Publishes a free screen context over the desktop window when none is published.
 	void publish_screen_dc(uint64_t desktop);

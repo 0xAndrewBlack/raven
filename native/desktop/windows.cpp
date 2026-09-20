@@ -1368,7 +1368,7 @@ bool NativeWindows::withdraw_screen_dc(uint64_t handle)
 void NativeWindows::set_window_table(uint8_t *table)
 {
 	window_table=table;
-	objects.touched_overflow()=true;
+	objects.touched_windows().overflow=true;
 	publish_windows();
 }
 
@@ -1426,8 +1426,8 @@ void NativeWindows::publish_windows()
 {
 	if (!window_table)
 		return;
-	auto &touched=objects.touched_windows();
-	if (objects.touched_overflow()) {
+	auto &touched=objects.touched_windows().handles;
+	if (objects.touched_windows().overflow) {
 		std::memset(window_table,0,window_records*window_record);
 		watched.clear();
 		for (const auto handle : objects.window_handles()) {
@@ -1435,7 +1435,7 @@ void NativeWindows::publish_windows()
 			publish_window_record(handle,window);
 			watched.emplace_back(handle,window);
 		}
-		objects.touched_overflow()=false;
+		objects.touched_windows().overflow=false;
 		touched.clear();
 	}
 	// Windows handed out since the guest last ran are written whole; they stay watched while the call that touched them goes on.
@@ -1464,6 +1464,7 @@ void NativeWindows::publish_windows()
 			publish_window_record(handle,window);
 	}
 	publish_menus();
+	publish_bitmaps();
 	if (screen_block) {
 		__atomic_store_n(reinterpret_cast<uint64_t *>(screen_block+focus_window),focus,__ATOMIC_RELEASE);
 		__atomic_store_n(reinterpret_cast<uint64_t *>(screen_block+focus_published),uint64_t(1),__ATOMIC_RELEASE);
@@ -1474,7 +1475,7 @@ void NativeWindows::publish_windows()
 void NativeWindows::set_menu_table(uint8_t *table)
 {
 	menu_table=table;
-	objects.touched_menus_overflow()=true;
+	objects.touched_menus().overflow=true;
 	publish_menus();
 }
 
@@ -1555,13 +1556,13 @@ void NativeWindows::publish_menus()
 {
 	if (!menu_table)
 		return;
-	auto &touched=objects.touched_menus();
-	if (objects.touched_menus_overflow()) {
+	auto &touched=objects.touched_menus().handles;
+	if (objects.touched_menus().overflow) {
 		std::memset(menu_table,0,menu_blocks);
 		menu_used=menu_blocks;
 		watched_menus.clear();
 		for (const auto handle : objects.menu_handles()) publish_menu(handle,objects.menu(handle));
-		objects.touched_menus_overflow()=false;
+		objects.touched_menus().overflow=false;
 		touched.clear();
 	}
 	// As with windows: menus handed out since the guest last ran are written again, and stay watched while the call goes on.
@@ -1580,6 +1581,78 @@ void NativeWindows::publish_menus()
 	for (const auto &[handle,menu] : watched_menus)
 		if (!menu_matches(handle,*menu)) publish_menu(handle,menu);
 	if (!api_depth) watched_menus.clear();
+}
+
+void NativeWindows::set_bitmap_table(uint8_t *table)
+{
+	bitmap_table=table;
+	objects.touched_bitmaps().overflow=true;
+	publish_bitmaps();
+}
+
+// What GetObject answers for a bitmap in 32 bytes (see NativeDesktop::get_object).
+static std::array<uint8_t,32> bitmap_fields_of(const DesktopBitmap &bitmap)
+{
+	std::array<uint8_t,32> bytes{};
+	const auto put=[&](size_t offset,auto value) { std::memcpy(bytes.data()+offset,&value,sizeof(value)); };
+	put(4,int32_t(bitmap.width));
+	put(8,int32_t(bitmap.height));
+	put(12,uint32_t(bitmap.stride ? bitmap.stride : bitmap.address ? size_t(bitmap.width)*4 : bitmap.bits.size()/bitmap.height));
+	put(16,uint16_t(1));
+	put(18,uint16_t(bitmap.depth));
+	put(24,uint64_t(bitmap.dib_section ? bitmap.address : 0));
+	return bytes;
+}
+
+void NativeWindows::publish_bitmap(uint64_t handle,const DesktopBitmap *bitmap)
+{
+	auto *record=bitmap_table+(handle%bitmap_records)*bitmap_record;
+	uint64_t occupant=0;
+	std::memcpy(&occupant,record,8);
+	if (!bitmap || !bitmap->height) {
+		if (occupant==handle) std::memset(record,0,8);
+		return;
+	}
+	// Two bitmaps whose handles share the low bits: the first keeps the record and the other is answered by the runtime.
+	if (occupant && occupant!=handle && objects.bitmap(occupant))
+		return;
+	const auto fields=bitmap_fields_of(*bitmap);
+	const uint64_t flags=bitmap->dib_section ? 1 : 0;
+	if (occupant==handle && !std::memcmp(record+8,&flags,8) && !std::memcmp(record+16,fields.data(),fields.size()))
+		return;
+	std::memset(record,0,8);
+	std::memcpy(record+8,&flags,8);
+	std::memcpy(record+16,fields.data(),fields.size());
+	std::memcpy(record,&handle,8);
+}
+
+void NativeWindows::publish_bitmaps()
+{
+	if (!bitmap_table)
+		return;
+	auto &touched=objects.touched_bitmaps();
+	if (touched.overflow) {
+		std::memset(bitmap_table,0,bitmap_records*bitmap_record);
+		watched_bitmaps.clear();
+		for (const auto handle : objects.bitmap_handles()) publish_bitmap(handle,std::as_const(objects).bitmap(handle));
+		touched.overflow=false;
+		touched.handles.clear();
+	}
+	// As with windows: bitmaps handed out since the guest last ran are written again, and stay watched while the call goes on.
+	for (const auto handle : touched.handles) {
+		const auto *bitmap=std::as_const(objects).bitmap(handle);
+		publish_bitmap(handle,bitmap);
+		const auto found=std::find_if(watched_bitmaps.begin(),watched_bitmaps.end(),[&](const auto &item) { return item.first==handle; });
+		if (found!=watched_bitmaps.end()) {
+			if (bitmap) found->second=bitmap;
+			else watched_bitmaps.erase(found);
+		} else if (bitmap) {
+			watched_bitmaps.emplace_back(handle,bitmap);
+		}
+	}
+	touched.handles.clear();
+	for (const auto &[handle,bitmap] : watched_bitmaps) publish_bitmap(handle,bitmap);
+	if (!api_depth) watched_bitmaps.clear();
 }
 
 void NativeWindows::screen_dc_use(std::string_view name)

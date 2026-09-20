@@ -569,6 +569,21 @@ static const std::vector<uint8_t> &menu_string_prelude()
 	return code;
 }
 
+// GetObject on a bitmap, read from the bitmap table the runtime keeps (see NativeWindows::publish_bitmaps): the size with no buffer,
+// nothing for a buffer under 32 bytes, else the BITMAP. A DIB section asked for its DIBSECTION, or another object, goes to the runtime.
+static constexpr size_t bitmap_pointer = 0x728;
+
+static const std::vector<uint8_t> &bitmap_object_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x64, 0x4d, 0x8b, 0x9a, 0x28, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x58,
+		0x48, 0x85, 0xc9, 0x74, 0x53, 0x89, 0xc8, 0x25, 0xff, 0x03, 0x00, 0x00, 0x6b, 0xc0, 0x30, 0x49, 0x01, 0xc3, 0x49, 0x3b, 0x0b, 0x75, 0x41, 0xb8,
+		0x20, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xc0, 0x74, 0x33, 0x83, 0xfa, 0x20, 0x7c, 0x2f, 0x41, 0xf7, 0x43, 0x08, 0x01, 0x00, 0x00, 0x00, 0x74, 0x05,
+		0x83, 0xfa, 0x68, 0x7d, 0x23, 0x4d, 0x8b, 0x53, 0x10, 0x4d, 0x89, 0x10, 0x4d, 0x8b, 0x53, 0x18, 0x4d, 0x89, 0x50, 0x08, 0x4d, 0x8b, 0x53, 0x20,
+		0x4d, 0x89, 0x50, 0x10, 0x4d, 0x8b, 0x53, 0x28, 0x4d, 0x89, 0x50, 0x18, 0xc3, 0x31, 0xc0, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
 static const std::vector<uint8_t> *block_prelude(std::string_view module, std::string_view name)
 {
 	static constexpr std::array<BlockPrelude, 5> ticks{{{"kernel32.dll", "GetTickCount"}, {"kernel32.dll", "GetTickCount64"},
@@ -582,6 +597,8 @@ static const std::vector<uint8_t> *block_prelude(std::string_view module, std::s
 		return &nt_commit_prelude();
 	if (module == "ntdll.dll" && (name == "NtFreeVirtualMemory" || name == "ZwFreeVirtualMemory"))
 		return &nt_decommit_prelude();
+	if (module == "gdi32.dll" && (name == "GetObjectW" || name == "GetObjectA"))
+		return &bitmap_object_prelude();
 	if (module == "user32.dll" && name == "GetDC")
 		return &screen_get_dc_prelude();
 	if (module == "user32.dll" && name == "ReleaseDC")
@@ -1557,7 +1574,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		"the focus prelude reads what NativeWindows publishes");
 	// The window table the window preludes read, mapped into the guest and published in the served block.
 	const size_t windows_size = NativeWindows::window_records * NativeWindows::window_record, table_size = windows_size + 8192 +
-		NativeWindows::menu_area;
+		NativeWindows::menu_area + NativeWindows::bitmap_records * NativeWindows::bitmap_record;
 	const int table_file = memfd_create("raven-window-table", MFD_CLOEXEC);
 	if (table_file < 0 || ftruncate(table_file, off_t(table_size)) != 0)
 		throw std::runtime_error("cannot create the window table");
@@ -1578,6 +1595,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	// The menu table follows the locale table.
 	windows.set_menu_table(table + windows_size + 8192);
 	__atomic_store_n(&served_block[menu_pointer / 8], table_guest + windows_size + 8192, __ATOMIC_RELEASE);
+	// The bitmap table follows the menu table.
+	const size_t bitmaps_at = windows_size + 8192 + NativeWindows::menu_area;
+	windows.set_bitmap_table(table + bitmaps_at);
+	__atomic_store_n(&served_block[bitmap_pointer / 8], table_guest + bitmaps_at, __ATOMIC_RELEASE);
 	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, [&, served_names = std::move(served_names)](uint64_t stub) {
 		const auto found = served_names.find(stub);
 		if (found == served_names.end())
