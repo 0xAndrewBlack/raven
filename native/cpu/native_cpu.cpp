@@ -17,6 +17,7 @@
 #include <ctime>
 #include <mutex>
 #include <map>
+#include <set>
 #include <optional>
 #include <signal.h>
 #include <stdexcept>
@@ -283,6 +284,8 @@ struct NativeProcess::State {
 	std::vector<std::pair<uint64_t, uint64_t>> allocations;
 	std::vector<std::pair<uint64_t, uint64_t>> image_allocations;
 	std::map<uint64_t, uint32_t> api_traps;
+	// 64-bit API breakpoints followed by RET: their calls return through it, without the runtime popping the return address.
+	std::set<uint64_t> returning_traps;
 	NativeMode mode = NativeMode::x64;
 	uint64_t return_gate = 0;
 	uint32_t fs_selector = 0;
@@ -745,6 +748,7 @@ void NativeProcess::unmap_memory(uint64_t address)
 	memory_syscall(SYS_munmap, address, owned->second);
 	state->mappings.erase(state->mappings.lower_bound(address), state->mappings.lower_bound(end));
 	std::erase_if(state->api_traps, [&](const auto &trap) { return trap.first >= address && trap.first < end; });
+	std::erase_if(state->returning_traps, [&](const uint64_t trap) { return trap >= address && trap < end; });
 	state->allocations.erase(owned);
 }
 
@@ -848,6 +852,7 @@ void NativeProcess::unmap_image(uint64_t address)
 	memory_syscall(SYS_munmap, address, owned->second);
 	state->mappings.erase(state->mappings.lower_bound(address), state->mappings.lower_bound(end));
 	std::erase_if(state->api_traps, [&](const auto &trap) { return trap.first >= address && trap.first < end; });
+	std::erase_if(state->returning_traps, [&](const uint64_t trap) { return trap >= address && trap < end; });
 	state->image_allocations.erase(owned);
 }
 
@@ -1045,6 +1050,10 @@ void NativeProcess::add_api_trap(uint64_t address, uint32_t callee_cleanup)
 	if (state->mode == NativeMode::x86 && (address >= state->limit() || callee_cleanup % 4))
 		throw std::runtime_error("native x86 API trap requires a 32-bit address and dword-aligned cleanup");
 	state->api_traps[address] = callee_cleanup;
+	if (state->mode != NativeMode::x86 && state->covers(address + 1, 1, PROT_EXEC) && read_memory(address + 1, 1)[0] == 0xc3)
+		state->returning_traps.insert(address);
+	else
+		state->returning_traps.erase(address);
 }
 
 NativeResult NativeProcess::call(uint64_t address, std::span<const uint64_t> arguments,
@@ -1309,8 +1318,12 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 	}
 	state->awaiting_syscall = false;
 	siginfo_t info{};
+	const bool x86 = state->mode == NativeMode::x86;
+	// A trap right after the gate or an API breakpoint is that breakpoint: the stop reason is known without asking for it.
 	if (event_info)
 		info = *event_info;
+	else if (signal == SIGTRAP && (registers.rip == (x86 ? state->return_gate : child.gate) + 1 || state->api_traps.contains(registers.rip - 1)))
+		info.si_code = SI_KERNEL;
 	else
 		trace(PTRACE_GETSIGINFO, child.pid, &info);
 	state->debug_print_fault=signal==SIGSEGV && info.si_code==SI_KERNEL && registers.rax==1;
@@ -1319,7 +1332,6 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		ptrace(PTRACE_POKEUSER, child.pid, reinterpret_cast<void *>(offsetof(struct user, u_debugreg) + 6 * sizeof(unsigned long)), nullptr);
 	}
 	const bool breakpoint = signal == SIGTRAP && (info.si_code == TRAP_BRKPT || info.si_code == SI_KERNEL);
-	const bool x86 = state->mode == NativeMode::x86;
 	if (breakpoint && registers.rip == (x86 ? state->return_gate : child.gate) + 1) {
 		if (state->callbacks.empty()) {
 			state->active_call = false;
@@ -1590,6 +1602,14 @@ void NativeProcess::return_api(uint64_t value)
 		registers.rsp += 4 + state->pending_cleanup;
 		registers.rax = value & 0xffffffff;
 		registers.rdx = value >> 32;
+		registers.orig_rax = uint64_t(-1);
+		trace(PTRACE_SETREGS, state->child->pid, &registers);
+		state->awaiting_api = false;
+		return;
+	}
+	// Stopped right after a breakpoint that a RET follows: the guest returns by itself.
+	if (state->returning_traps.contains(registers.rip - 1)) {
+		registers.rax = value;
 		registers.orig_rax = uint64_t(-1);
 		trace(PTRACE_SETREGS, state->child->pid, &registers);
 		state->awaiting_api = false;
