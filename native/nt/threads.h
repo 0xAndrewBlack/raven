@@ -39,6 +39,8 @@ struct GuestThread {
 	bool unwinding = false;
 	struct Apc {
 		uint64_t routine, parameter;
+		// A completion routine takes its three arguments from here instead of the single parameter.
+		std::vector<uint64_t> arguments;
 	};
 	std::deque<Apc> apcs;
 	int priority = 0;

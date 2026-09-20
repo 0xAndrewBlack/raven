@@ -935,6 +935,23 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				result = process.resume(budget);
 				continue;
 			}
+			if (api == "DuplicateHandle") {
+				// A handle that crosses to or from another process goes through the shared handler, which owns the channels to other
+				// processes; the pseudo handles are widened to their 64-bit values for it.
+				auto words = process.api_arguments(7);
+				if (words[0] != UINT32_MAX || words[2] != UINT32_MAX) {
+					for (const size_t index : {0, 1, 2})
+						if (words[index] >= 0xfffffffaULL)
+							words[index] |= 0xffffffff00000000ULL;
+					const auto entry = shared_api.find("DuplicateHandle");
+					ApiCall inner(process, environment, words);
+					entry->second(inner);
+					process.return_api(inner.result);
+					budget = remaining();
+					result = process.resume(budget);
+					continue;
+				}
+			}
 			if (api == "TerminateProcess") {
 				const auto words = process.api_arguments(2);
 				if (words[0] != UINT32_MAX) {

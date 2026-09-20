@@ -13,6 +13,9 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <functional>
+#include <csignal>
+#include <ctime>
+#include <mutex>
 #include <map>
 #include <optional>
 #include <signal.h>
@@ -135,23 +138,68 @@ void NativeChild::stop()
 	pid = -1;
 }
 
+// The tracer thread's wake-up while it is blocked waiting for the guest: a one-shot timer that interrupts waitpid with a signal whose
+// handler does nothing. The timer is disarmed as soon as the wait returns and the signal is never blocked, so it cannot stay pending and
+// interrupt anything else.
+static void interrupt_wait(int) {}
+
+static timer_t wait_timer()
+{
+	static thread_local std::optional<timer_t> timer;
+	if (timer)
+		return *timer;
+	static std::once_flag installed;
+	std::call_once(installed, [] {
+		struct sigaction action{};
+		action.sa_handler = interrupt_wait;
+		sigemptyset(&action.sa_mask);
+		if (sigaction(SIGRTMIN + 5, &action, nullptr) == -1)
+			throw std::runtime_error("cannot install the guest wait alarm");
+	});
+	sigevent event{};
+	event.sigev_notify = SIGEV_THREAD_ID;
+	event.sigev_signo = SIGRTMIN + 5;
+	event._sigev_un._tid = gettid();
+	timer_t created;
+	if (timer_create(CLOCK_MONOTONIC, &event, &created) == -1)
+		throw std::runtime_error("cannot create the guest wait alarm");
+	timer = created;
+	return created;
+}
+
 int NativeChild::wait(const std::function<bool()> *served)
 {
-	// Guest code usually reaches its next trap within microseconds, so poll hot first and back off only for long-running calls.
+	// Guest code usually reaches its next trap within microseconds, so it is polled first; a guest that runs longer is waited for
+	// asleep, which leaves the processor to it. A served call made meanwhile ends in a trap, which wakes the wait.
 	unsigned polls = 0;
-	std::chrono::microseconds pause{20};
 	for (;;) {
 		// A guest that is being served keeps running, so it is as busy as one that just started; it never stops for its calls, so its
 		// slice is looked at after each of them.
 		if (served && (*served)()) {
 			polls = 0;
-			pause = std::chrono::microseconds(20);
 			if (slice_end && std::chrono::steady_clock::now() >= *slice_end)
 				return -2;
 			continue;
 		}
 		int status = 0;
-		const pid_t result = waitpid(pid, &status, WNOHANG);
+		pid_t result = waitpid(pid, &status, WNOHANG);
+		if (result == 0 && ++polls >= 200) {
+			const auto now = std::chrono::steady_clock::now();
+			if (slice_end && now >= *slice_end)
+				return -2;
+			if (now >= deadline)
+				return -1;
+			const auto until = slice_end ? std::min(*slice_end, deadline) : deadline;
+			const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(until - now).count();
+			itimerspec alarm{};
+			alarm.it_value.tv_sec = left / 1000000000;
+			alarm.it_value.tv_nsec = left % 1000000000;
+			const timer_t timer = wait_timer();
+			timer_settime(timer, 0, &alarm, nullptr);
+			result = waitpid(pid, &status, 0);
+			const itimerspec off{};
+			timer_settime(timer, 0, &off, nullptr);
+		}
 		if (result == pid) {
 			if (WIFEXITED(status) || WIFSIGNALED(status)) {
 				if (std::getenv("RAVEN_TRACE_API"))
@@ -162,15 +210,6 @@ int NativeChild::wait(const std::function<bool()> *served)
 		}
 		if (result == -1 && errno != EINTR)
 			throw std::runtime_error("cannot wait for native guest");
-		if (++polls < 4000)
-			continue;
-		if (slice_end && std::chrono::steady_clock::now() >= *slice_end)
-			return -2;
-		if (std::chrono::steady_clock::now() >= deadline)
-			return -1;
-		std::this_thread::sleep_for(pause);
-		// A guest with served calls waits for this loop to notice them, so it is looked at more often.
-		pause = std::min(pause * 2, std::chrono::microseconds(served ? 100 : 1000));
 	}
 }
 
@@ -459,14 +498,36 @@ static void memory_range(uint64_t address, size_t size, int protection, uint64_t
 		throw std::runtime_error("invalid native memory range or protection");
 }
 
+// MAP_32BIT only reaches the 1 GiB window that also holds the images, so 32-bit allocations take the lowest free 64 KiB aligned gap
+// of the child's own address space and are then mapped there without replacing anything.
+static uint64_t low_gap(pid_t pid, uint64_t size, uint64_t limit)
+{
+	std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
+	constexpr uint64_t granularity = 0x10000;
+	uint64_t candidate = granularity;
+	std::string line;
+	while (std::getline(maps, line)) {
+		const auto dash = line.find('-');
+		const uint64_t start = std::stoull(line.substr(0, dash), nullptr, 16);
+		const uint64_t end = std::stoull(line.substr(dash + 1), nullptr, 16);
+		if (start >= limit)
+			break;
+		if (start >= candidate && start - candidate >= size)
+			return candidate;
+		candidate = std::max(candidate, (end + granularity - 1) & ~(granularity - 1));
+	}
+	return candidate < limit && limit - candidate >= size ? candidate : 0;
+}
+
 uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address)
 {
 	state->require_stopped();
 	memory_range(address, size, protection, state->limit());
 	state->mappings.reserve(state->mappings.size() + 1);
 	state->allocations.reserve(state->allocations.size() + 1);
-	const auto mapped = memory_syscall(SYS_mmap, address, size, static_cast<uint64_t>(protection),
-		MAP_PRIVATE | MAP_ANONYMOUS | (protection == PROT_NONE ? MAP_NORESERVE : 0) | (address ? MAP_FIXED_NOREPLACE : state->mode == NativeMode::x86 ? MAP_32BIT : 0), uint64_t(-1));
+	const auto hint = address ? address : state->mode == NativeMode::x86 ? low_gap(state->child->pid, size, state->limit()) : 0;
+	const auto mapped = memory_syscall(SYS_mmap, hint, size, static_cast<uint64_t>(protection),
+		MAP_PRIVATE | MAP_ANONYMOUS | (protection == PROT_NONE ? MAP_NORESERVE : 0) | (hint ? MAP_FIXED_NOREPLACE : 0), uint64_t(-1));
 	if ((address && mapped != address) || mapped >= state->limit() || size > state->limit() - mapped) {
 		state->child->stop();
 		throw std::runtime_error("host returned an invalid native allocation address");
@@ -494,8 +555,9 @@ uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
 		// Windows places views on the 64 KiB allocation granularity and programs round view addresses down to it, so a view starts on
 		// such a boundary: a reservation one granule larger is made, the file is mapped over its aligned part and the slack is returned.
 		constexpr uint64_t granularity = 0x10000;
-		const auto reserved = memory_syscall(SYS_mmap, 0, size + granularity, PROT_NONE,
-			MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (state->mode == NativeMode::x86 ? MAP_32BIT : 0), uint64_t(-1), 0);
+		const auto hint = state->mode == NativeMode::x86 ? low_gap(state->child->pid, size + granularity, state->limit()) : 0;
+		const auto reserved = memory_syscall(SYS_mmap, hint, size + granularity, PROT_NONE,
+			MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (hint ? MAP_FIXED_NOREPLACE : 0), uint64_t(-1), 0);
 		if (reserved >= state->limit() || size + granularity > state->limit() - reserved) {
 			state->child->stop();
 			throw std::runtime_error("host returned an invalid shared mapping address");

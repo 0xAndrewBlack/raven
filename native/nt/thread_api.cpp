@@ -125,7 +125,7 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		while (!me.apcs.empty()) {
 			const auto apc = me.apcs.front();
 			me.apcs.pop_front();
-			const uint64_t arguments[] = {apc.parameter};
+			const auto arguments = apc.arguments.empty() ? std::vector<uint64_t>{apc.parameter} : apc.arguments;
 			const auto result = context.call(apc.routine, arguments);
 			if (result.stop != NativeStop::returned)
 				throw result;

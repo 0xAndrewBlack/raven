@@ -350,6 +350,23 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	});
+	// The completion forms: the transfer is done at once and the routine runs as an APC of the calling thread at its next alertable wait,
+	// with the error, the byte count and the OVERLAPPED. A transfer that fails at once queues nothing.
+	const auto transfer_ex = [&registry, &context](ApiCall &call, const char *name) {
+		const auto transfer = registry.find(name);
+		ApiCall inner(call.process, call.environment, {call[0], call[1], call[2], 0, call[3]});
+		transfer->second(inner);
+		if (!inner.result) {
+			call.ret(0);
+			return;
+		}
+		const auto bytes = call.load_pointer(call[3] + call.pointer_width());
+		context.threads.current().apcs.push_back({call[4], 0, {0, bytes, call[3]}});
+		call.set_last_error(0);
+		call.ret(1);
+	};
+	registry.add("ReadFileEx", 5, [transfer_ex](ApiCall &call) { transfer_ex(call, "ReadFile"); });
+	registry.add("WriteFileEx", 5, [transfer_ex](ApiCall &call) { transfer_ex(call, "WriteFile"); });
 	// The native write: WriteFile does the work, with an OVERLAPPED that carries the offset when the caller names one, and the outcome
 	// goes to the IO_STATUS_BLOCK as an NTSTATUS. An offset of -1 writes at the end of the file; -2 or none, at the file pointer.
 	registry.add("NtWriteFile", 9, [&registry, file_of](ApiCall &call) {

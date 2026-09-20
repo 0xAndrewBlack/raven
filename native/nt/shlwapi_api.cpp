@@ -341,6 +341,34 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		const size_t root = root_length(path);
 		call.ret(root ? call[0] + root * 2 : 0);
 	});
+	// The PathCch forms report through an HRESULT: E_INVALIDARG for a missing argument or root, and the strsafe overflow code when the
+	// result does not fit the buffer.
+	registry.add("PathCchSkipRoot", 2, [](ApiCall &call) {
+		const size_t root = call[0] && call[1] ? root_length(call.wide(call[0])) : 0;
+		if (!root) {
+			call.ret(0x80070057U);
+			return;
+		}
+		call.store_pointer(call[1], call[0] + root * 2);
+		call.ret(0);
+	});
+	registry.add("PathCchCombineEx", 5, [](ApiCall &call) {
+		if (!call[0] || !call[1] || call[1] > 32768 || (!call[2] && !call[3])) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto directory = call[2] ? call.wide(call[2]) : std::u16string();
+		const auto file = call[3] ? call.wide(call[3]) : std::u16string();
+		const auto combined = absolute(file) && !(separator(file[0]) && !is_unc_root(file)) ? file : join(directory, file);
+		const auto result = canonical(combined);
+		if (result.size() >= call[1]) {
+			call.store<uint16_t>(call[0], 0);
+			call.ret(0x8007007aU);
+			return;
+		}
+		call.put_wide(call[0], result, call[1]);
+		call.ret(0);
+	});
 	registry.add("PathAddBackslashW", 1, [](ApiCall &call) {
 		auto path = call.wide(call[0], max_path * 4);
 		if (path.empty() || separator(path.back())) {

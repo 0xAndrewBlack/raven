@@ -39,13 +39,14 @@
 
 namespace raven {
 
-static constexpr std::array<std::string_view, 45> names{
+// PathCchCombineEx and PathCchSkipRoot live in kernelbase.dll on Windows and are not in the import libraries the public lists come from.
+static constexpr std::array<std::string_view, 47> names{
 	"CloseHandle","CreateEventA","CreateEventW","ExitProcess",
 	"FindResourceA", "FindResourceExA", "FindResourceExW", "FindResourceW", "FreeLibrary",
 	"GetACP", "GetCommandLineA", "GetCommandLineW", "GetCurrentProcessId", "GetCurrentThreadId", "GetFileType", "GetLastError", "GetModuleHandleA",
 	"GetModuleHandleW", "GetProcAddress", "GetProcessHeap", "GetStartupInfoA", "GetStartupInfoW", "GetStdHandle", "HeapAlloc", "HeapCreate", "HeapDestroy", "HeapFree", "HeapReAlloc", "HeapSize",
 	"LoadLibraryA", "LoadLibraryW", "LoadResource",
-	"LockResource", "MultiByteToWideChar", "RaiseException", "ResetEvent", "SetEvent", "SetLastError", "SizeofResource",
+	"LockResource", "MultiByteToWideChar", "PathCchCombineEx", "PathCchSkipRoot", "RaiseException", "ResetEvent", "SetEvent", "SetLastError", "SizeofResource",
 	"VirtualAlloc", "VirtualFree", "VirtualProtect", "VirtualQuery", "WaitForSingleObject", "WriteFile"
 };
 
@@ -1226,6 +1227,23 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				bytes = std::vector<uint8_t>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 			} else {
 				bytes = source(identity);
+			}
+			// A library loaded by path finds its dependencies in its own directory, as LOAD_WITH_ALTERED_SEARCH_PATH and a DLL directory
+			// set to that folder do on Windows; programs that unpack themselves to a temporary folder rely on it.
+			for (auto file = explicit_files.begin(); !bytes && file != explicit_files.end(); ++file) {
+				std::error_code error;
+				for (const auto &entry : std::filesystem::directory_iterator(file->second.parent_path(), error)) {
+					auto candidate = entry.path().filename().string();
+					for (auto &character : candidate)
+						if (character >= 'A' && character <= 'Z')
+							character = static_cast<char>(character + ('a' - 'A'));
+					if (candidate != identity || !entry.is_regular_file(error))
+						continue;
+					std::ifstream stream(entry.path(), std::ios::binary);
+					bytes = std::vector<uint8_t>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+					explicit_files.emplace(identity, entry.path());
+					break;
+				}
 			}
 			if (!bytes) {
 				if (std::getenv("RAVEN_TRACE_API"))
