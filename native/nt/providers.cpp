@@ -378,9 +378,12 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	return bytes;
 }
 
+// The native API providers sit high in the address space, as Windows places its system libraries: the low default bases are what
+// programs' own libraries ask for (0x180000000 for most 64-bit DLLs), and a library that finds its base taken is relocated in every
+// process that loads it. The host keeps its own mappings above 0x700000000000.
 static uint64_t provider_base(const ModuleSet &modules, uint32_t size)
 {
-	uint64_t base = 0x180000000ULL;
+	uint64_t base = 0x6fff00000000ULL;
 	for (;;) {
 		bool overlap = false;
 		for (const auto &[name, module] : modules.all()) {
