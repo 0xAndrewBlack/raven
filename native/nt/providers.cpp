@@ -999,7 +999,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				return result;
 			// RAVEN_TRACE_API is 1 for every call or a comma-separated list of API names to follow.
 			bool tracing = false;
-			if (const char *selection = std::getenv("RAVEN_TRACE_API")) {
+			static const char *const trace_selection = std::getenv("RAVEN_TRACE_API");
+			if (const char *selection = trace_selection) {
 				const std::string wanted = std::string(",") + selection + ",";
 				tracing = wanted == ",1," || wanted.find("," + found->second + ",") != wanted.npos;
 			}
@@ -1051,8 +1052,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			bool dispatched;
 			api_in_progress = found->second.c_str();
 			const auto profile_start = RuntimeProfile::instance().enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-			const auto error_before = std::getenv("RAVEN_TRACE_FAIL") ? environment.last_error() : 0;
-			const auto failure_arguments = std::getenv("RAVEN_TRACE_FAIL") ? process.api_arguments(4) : std::vector<uint64_t>{};
+			static const bool trace_failures = std::getenv("RAVEN_TRACE_FAIL");
+			const auto error_before = trace_failures ? environment.last_error() : 0;
+			const auto failure_arguments = trace_failures ? process.api_arguments(4) : std::vector<uint64_t>{};
 			try {
 				// The generalized desktop services come first so that they replace the older narrow ones.
 				dispatched = desktop_api.dispatch(process, environment, found->second) || environment.dispatch(found->second) || module_api.dispatch(found->second) || resources.dispatch(found->second) || memory.dispatch(found->second) || object_api.dispatch(found->second) || heap.dispatch(found->second) || desktop.dispatch(found->second) || windows.dispatch(found->second) || api_registry.dispatch(process, environment, found->second)
@@ -1094,7 +1096,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			}
 			if (tracing)
 				std::cerr << "  -> " << std::hex << process.result_register() << std::dec << " (error " << environment.last_error() << ")\n";
-			if (std::getenv("RAVEN_TRACE_FAIL") && environment.last_error() != error_before) {
+			if (trace_failures && environment.last_error() != error_before) {
 				std::cerr << "fail " << found->second << " error " << environment.last_error() << " args";
 				for (const auto value : failure_arguments) std::cerr << ' ' << std::hex << value << std::dec;
 				if (found->second == "CreateWindowExW" && failure_arguments.size() > 1) {

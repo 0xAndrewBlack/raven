@@ -48,7 +48,7 @@ private:
 			total_calls += row.second.first;
 			total_ns += row.second.second;
 		}
-		std::cerr << "profile: " << total_calls << " API calls served in " << total_ns / 1000000 << " ms; guest ran " << resumes
+		std::cerr << std::dec << "profile: " << total_calls << " API calls served in " << total_ns / 1000000 << " ms; guest ran " << resumes
 			<< " times for " << resume_ns / 1000000 << " ms in total\n";
 		for (size_t index = 0; index < rows.size() && index < 25; ++index)
 			std::cerr << "profile: " << rows[index].first << " calls=" << rows[index].second.first << " ms=" << rows[index].second.second / 1000000
