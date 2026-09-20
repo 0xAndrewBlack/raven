@@ -419,12 +419,16 @@ NativeContext NativeProcess::context() const
 	state->require_stopped();
 	NativeContext result{};
 	trace(PTRACE_GETREGS, state->child->pid, &result.registers);
-	result.xstate.resize(65536);
+	// The size of the extended state is the processor's, the same for every read: it is learned once, and later reads take a buffer of
+	// exactly that size instead of zeroing 64 KiB for each thread switch.
+	static size_t xstate_size = 0;
+	result.xstate.resize(xstate_size ? xstate_size : 65536);
 	iovec buffer{result.xstate.data(), result.xstate.size()};
 	if (ptrace(PTRACE_GETREGSET, state->child->pid, reinterpret_cast<void *>(NT_X86_XSTATE), &buffer) == -1)
 		throw std::runtime_error("host cannot expose native XSTATE");
-	if (buffer.iov_len < 512 || buffer.iov_len >= result.xstate.size())
+	if (buffer.iov_len < 512 || (xstate_size ? buffer.iov_len != xstate_size : buffer.iov_len >= result.xstate.size()))
 		throw std::runtime_error("invalid native XSTATE size");
+	xstate_size = buffer.iov_len;
 	result.xstate.resize(buffer.iov_len);
 	return result;
 }
@@ -432,19 +436,18 @@ NativeContext NativeProcess::context() const
 void NativeProcess::set_context(const NativeContext &context)
 {
 	state->require_stopped();
-	const auto previous = this->context();
-	if (context.xstate.size() != previous.xstate.size())
-		throw std::runtime_error("native XSTATE size does not match the host");
+	// The general registers go first: if the extended state is then refused, they are put back, and nothing has changed.
+	user_regs_struct previous{};
+	trace(PTRACE_GETREGS, state->child->pid, &previous);
+	trace(PTRACE_SETREGS, state->child->pid, const_cast<user_regs_struct *>(&context.registers));
 	iovec buffer{const_cast<uint8_t *>(context.xstate.data()), context.xstate.size()};
-	if (ptrace(PTRACE_SETREGSET, state->child->pid, reinterpret_cast<void *>(NT_X86_XSTATE), &buffer) == -1)
-		throw std::runtime_error("cannot restore native XSTATE");
-	try {
-		trace(PTRACE_SETREGS, state->child->pid, const_cast<user_regs_struct *>(&context.registers));
-	} catch (...) {
-		iovec rollback{const_cast<uint8_t *>(previous.xstate.data()), previous.xstate.size()};
-		if (ptrace(PTRACE_SETREGSET, state->child->pid, reinterpret_cast<void *>(NT_X86_XSTATE), &rollback) == -1)
+	if (ptrace(PTRACE_SETREGSET, state->child->pid, reinterpret_cast<void *>(NT_X86_XSTATE), &buffer) == -1 || buffer.iov_len != context.xstate.size()) {
+		try {
+			trace(PTRACE_SETREGS, state->child->pid, &previous);
+		} catch (...) {
 			state->child->stop();
-		throw;
+		}
+		throw std::runtime_error("cannot restore native XSTATE");
 	}
 }
 
