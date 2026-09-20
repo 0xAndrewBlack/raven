@@ -195,9 +195,48 @@ static std::vector<uint8_t> clock_prelude(int32_t to_pointer, int32_t to_served)
 	return code;
 }
 
-// Where the served stub behind an export sits: the export itself, or the stub a clock prelude falls back to.
+// Committing pages that are already open in the guest is done by the guest itself: the runtime publishes the open ranges in the served
+// block, and the prelude of VirtualAlloc logs a read-write commit that falls in one of them there instead of stopping; the runtime takes
+// the log into its accounting before its next memory operation. Anything else jumps to the export's breakpoint.
+static bool guest_commit_api(std::string_view module, std::string_view name)
+{
+	return (module == "kernel32.dll" || module == "kernelbase.dll") && name == "VirtualAlloc";
+}
+
+static constexpr size_t commit_prelude_size = 192, commit_jump = 37;
+
+static std::vector<uint8_t> commit_prelude(int32_t to_pointer, int32_t to_trap)
+{
+	// mov r10,[pointer]; test r10,r10; jz slow; test rcx,rcx; jz slow; test rdx,rdx; jz slow; cmp r8d,MEM_COMMIT; jne slow;
+	// cmp r9d,PAGE_READWRITE; je main; slow: jmp trap; restore: mov r8d,MEM_COMMIT; mov r9d,PAGE_READWRITE; jmp slow;
+	// main: rax = first page, r11 = end page; jbe slow; look through the open ranges at commit_windows for one holding [rax, r11),
+	// take a log slot with lock xadd at commit_log, store the range there and return rax; a full log or no range goes back to restore.
+	std::vector<uint8_t> code{0x4c, 0x8b, 0x15, 0, 0, 0, 0, 0x4d, 0x85, 0xd2, 0x74, 0x19, 0x48, 0x85, 0xc9, 0x74, 0x14, 0x48, 0x85, 0xd2,
+		0x74, 0x0f, 0x41, 0x81, 0xf8, 0x00, 0x10, 0x00, 0x00, 0x75, 0x06, 0x41, 0x83, 0xf9, 0x04, 0x74, 0x13, 0xe9, 0, 0, 0, 0, 0x41,
+		0xb8, 0x00, 0x10, 0x00, 0x00, 0x41, 0xb9, 0x04, 0x00, 0x00, 0x00, 0xeb, 0xed, 0x48, 0x89, 0xc8, 0x48, 0x25, 0x00, 0xf0, 0xff,
+		0xff, 0x4c, 0x8d, 0x9c, 0x11, 0xff, 0x0f, 0x00, 0x00, 0x49, 0x81, 0xe3, 0x00, 0xf0, 0xff, 0xff, 0x49, 0x39, 0xc3, 0x76, 0xd0,
+		0x45, 0x8b, 0x82, 0x00, 0x0a, 0x00, 0x00, 0x4d, 0x8d, 0x8a, 0x08, 0x0a, 0x00, 0x00, 0x45, 0x85, 0xc0, 0x74, 0xc2, 0x49, 0x3b,
+		0x01, 0x72, 0x30, 0x4d, 0x3b, 0x59, 0x08, 0x77, 0x2a, 0x41, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xf0, 0x45, 0x0f, 0xc1, 0x82, 0x10,
+		0x0b, 0x00, 0x00, 0x41, 0x83, 0xf8, 0x30, 0x73, 0xa2, 0x49, 0xc1, 0xe0, 0x04, 0x4b, 0x89, 0x84, 0x02, 0x18, 0x0b, 0x00, 0x00,
+		0x4f, 0x89, 0x9c, 0x02, 0x20, 0x0b, 0x00, 0x00, 0xc3, 0x49, 0x83, 0xc1, 0x10, 0x41, 0xff, 0xc8, 0xeb, 0xbd};
+	static_assert(NativeMemory::commit_windows == 0xa00 && NativeMemory::commit_log == 0xb10 && NativeMemory::commit_window_count == 16 &&
+		NativeMemory::commit_log_count == 48, "the commit prelude's offsets are written into its code");
+	const int32_t displacement = to_pointer - 7;
+	std::memcpy(code.data() + 3, &displacement, 4);
+	const int32_t relative = to_trap - int32_t(commit_jump + 5);
+	std::memcpy(code.data() + commit_jump + 1, &relative, 4);
+	return code;
+}
+
+// Where the served stub behind an export sits: the export itself, or the stub a clock prelude falls back to; for a commit prelude, the
+// breakpoint it falls back to.
 static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view module, std::string_view name, uint32_t rva)
 {
+	if (guest_commit_api(module, name)) {
+		int32_t relative = 0;
+		std::memcpy(&relative, image.data() + rva + commit_jump + 1, 4);
+		return uint32_t(int64_t(rva) + commit_jump + 5 + relative);
+	}
 	if (!guest_clock_api(module, name))
 		return rva;
 	int32_t relative = 0;
@@ -288,10 +327,15 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	if (!x86)
 		for (const auto symbol : exports)
 			clock_count += guest_clock_api(name, symbol);
-	// The block pointer of the served stubs, then the stubs, then the clock preludes.
+	size_t commit_count = 0;
+	if (!x86 && served_count)
+		for (const auto symbol : exports)
+			commit_count += guest_commit_api(name, symbol);
+	// The block pointer of the served stubs, then the stubs, then the clock preludes, then the commit preludes.
 	const size_t served_start = fast_start + fast_count * 64;
 	const size_t clock_start = served_start + (served_count ? 64 + served_count * served_stub_size : 0);
-	const size_t end = clock_start + clock_count * clock_prelude_size;
+	const size_t commit_start = clock_start + clock_count * clock_prelude_size;
+	const size_t end = commit_start + commit_count * commit_prelude_size;
 	std::vector<uint8_t> bytes((end + 511) & ~size_t(511));
 	const auto rva = [](size_t offset) { return 0x1000 + offset - 0x200; };
 	const auto put = [&](size_t offset, uint64_t value, size_t width = 4) {
@@ -343,7 +387,7 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(directory + 36, rva(ordinals));
 	text(module_name, name);
 	size_t cursor = module_name + name.size() + 1;
-	size_t fast_next = 0, served_next = 0, clock_next = 0;
+	size_t fast_next = 0, served_next = 0, clock_next = 0, commit_next = 0;
 	for (size_t index = 0; index < exports.size(); ++index) {
 		size_t code = 0x200 + index * 16;
 		bytes[code] = 0xcc;
@@ -358,6 +402,12 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 				const auto prelude = clock_prelude(int32_t(served_start) - int32_t(code), int32_t(served) - int32_t(code));
 				std::copy(prelude.begin(), prelude.end(), bytes.begin() + ptrdiff_t(code));
 			}
+		}
+		if (!x86 && served_count && guest_commit_api(name, exports[index])) {
+			const size_t trap = code;
+			code = commit_start + commit_next++ * commit_prelude_size;
+			const auto prelude = commit_prelude(int32_t(served_start) - int32_t(code), int32_t(trap) - int32_t(code));
+			std::copy(prelude.begin(), prelude.end(), bytes.begin() + ptrdiff_t(code));
 		}
 		if (kernel_module)
 			for (const auto &stub : fast_stubs())
@@ -977,6 +1027,16 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	std::vector<uint64_t> served_stubs;
 	for (const auto &[stub, name] : served_names)
 		served_stubs.push_back(stub);
+	// A thread inside a commit prelude must not lose the processor between taking a log slot and filling it: the prelude counts as a
+	// served stub for the scheduler, in two pieces as it is longer than one.
+	for (const auto &[module_name, module] : modules.all())
+		if (module->runtime_api)
+			for (const auto &symbol : module->exports)
+				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() && guest_commit_api(module_name, symbol.names.at(0)) &&
+					served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address)
+					for (const uint64_t piece : {uint64_t(0), uint64_t(served_trap)})
+						served_stubs.push_back(module->loaded.base() + symbol.address + piece);
+	memory.set_commit_block(served_block);
 	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, [&, served_names = std::move(served_names)](uint64_t stub) {
 		const auto found = served_names.find(stub);
 		if (found == served_names.end())

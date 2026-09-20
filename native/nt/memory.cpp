@@ -56,6 +56,56 @@ std::span<const std::string_view> NativeMemory::nt_exports()
 	return names;
 }
 
+void NativeMemory::settle()
+{
+	if (!commit_block)
+		return;
+	auto *count=reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(commit_block)+commit_log);
+	const uint32_t logged=std::min<uint32_t>(*count,commit_log_count);
+	const uint64_t *entries=commit_block+(commit_log+8)/8;
+	for (uint32_t index=0; index<logged; ++index) {
+		const uint64_t base=entries[index*2], end=entries[index*2+1];
+		const auto found=end>base ? region(base,end-base) : regions.end();
+		if (found==regions.end())
+			continue;
+		const auto first=(base-found->first)/4096, pages=(end-base)/4096;
+		used+=(pages-found->second.pages.nonzero(first,pages))*4096;
+		found->second.pages.fill(first,pages,4);
+	}
+	*count=0;
+}
+
+void NativeMemory::open_window(uint64_t from, uint64_t to)
+{
+	if (!commit_block)
+		return;
+	uint64_t *windows=commit_block+commit_windows/8;
+	if (windows[0]<commit_window_count) {
+		window_next=windows[0];
+		windows[0]+=1;
+	} else {
+		window_next=(window_next+1)%commit_window_count;
+	}
+	windows[1+window_next*2]=from;
+	windows[2+window_next*2]=to;
+}
+
+void NativeMemory::close_windows(uint64_t from, uint64_t to)
+{
+	if (!commit_block)
+		return;
+	uint64_t *windows=commit_block+commit_windows/8;
+	for (uint64_t index=0; index<windows[0];) {
+		if (windows[1+index*2]<to && from<windows[2+index*2]) {
+			windows[1+index*2]=windows[1+(windows[0]-1)*2];
+			windows[2+index*2]=windows[2+(windows[0]-1)*2];
+			windows[0]-=1;
+		} else {
+			++index;
+		}
+	}
+}
+
 std::map<uint64_t,NativeMemory::Region>::iterator NativeMemory::region(uint64_t address, uint64_t size)
 {
 	auto found=regions.upper_bound(address);
@@ -67,6 +117,7 @@ std::map<uint64_t,NativeMemory::Region>::iterator NativeMemory::region(uint64_t 
 
 NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32_t type, uint32_t access)
 {
+	settle();
 	if (!range(address,size,user_limit))
 		return {0,0,invalid};
 	if (!(type & 0x3000) || (type & ~0x3000U))
@@ -97,7 +148,10 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 				while (to<window_end && !found->second.pages.at((to-found->first)/4096))
 					to+=4096;
 			}
+			close_windows(from,to);
 			process.protect_memory(from,to-from,permissions);
+			if (permissions==(PROT_READ|PROT_WRITE))
+				open_window(from,to);
 		}
 		// Only pages that were reserved until now count as new commitment.
 		const uint64_t fresh=(length/4096-found->second.pages.nonzero(first,length/4096))*4096;
@@ -141,6 +195,7 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 
 NativeMemoryRange NativeMemory::map_view(int descriptor, uint64_t offset, uint64_t size, uint32_t access)
 {
+	settle();
 	const auto permissions=protection(access);
 	if (permissions<0 || !size || (offset & 4095))
 		return {0,0,invalid};
@@ -158,6 +213,7 @@ NativeMemoryRange NativeMemory::map_view(int descriptor, uint64_t offset, uint64
 
 NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t type)
 {
+	settle();
 	if (type!=0x4000 && type!=0x8000)
 		return {0,0,unsupported};
 	const auto found=region(address,size);
@@ -167,6 +223,7 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 		if (size || address!=found->first)
 			return {0,0,invalid};
 		const auto length=found->second.size;
+		close_windows(address,address+length);
 		process.unmap_memory(address);
 		used-=found->second.pages.nonzero(0,found->second.pages.size())*4096;
 		reserved_total-=length;
@@ -181,6 +238,7 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 	const auto base=address & ~uint64_t(4095), length=(size+address-base+4095)&~uint64_t(4095);
 	if (region(base,length)==regions.end())
 		return {0,0,conflict};
+	close_windows(base,base+length);
 	process.discard_memory(base,length);
 	process.protect_memory(base,length,PROT_NONE);
 	const auto first=(base-found->first)/4096;
@@ -217,6 +275,7 @@ std::map<uint64_t,NativeMemory::Image>::iterator NativeMemory::image_of(uint64_t
 
 NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_t access)
 {
+	settle();
 	if (const auto image=image_of(address,size); image!=images.end() && region(address & ~uint64_t(4095),1)==regions.end()) {
 		const auto permissions=protection(access);
 		if (permissions<0)
@@ -241,6 +300,7 @@ NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_
 	if (found->second.pages.any_zero(first,count))
 		return {0,0,0xc000002dU};
 	const auto previous=found->second.pages.at(first);
+	close_windows(base,base+length);
 	process.protect_memory(base,length,permissions);
 	found->second.pages.fill(first,count,access);
 	return {base,length,0,previous};
@@ -248,6 +308,8 @@ NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_
 
 std::optional<std::array<uint8_t,48>> NativeMemory::query(uint64_t address) const
 {
+	// The guest's own commits count before anything is reported; the accounting is the only thing that changes.
+	const_cast<NativeMemory *>(this)->settle();
 	if (regions.upper_bound(address)==regions.begin() || [&]{ auto it=regions.upper_bound(address); --it; return address-it->first>=it->second.size; }()) {
 		auto found=images.upper_bound(address);
 		if (found!=images.begin()) {

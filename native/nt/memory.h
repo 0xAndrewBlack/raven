@@ -39,6 +39,11 @@ public:
 	// The address space held by reservations; commitment is counted separately and is what the limit applies to.
 	size_t bytes() const { return reserved_total; }
 	size_t count() const { return regions.size(); }
+	// Where in the served block the open ranges and the guest's commit log sit, as byte offsets, and how many entries each holds: the
+	// ranges a count and then start and end pairs, the log a 32-bit count and then the start and end of each read-write commit.
+	static constexpr size_t commit_windows = 0xa00, commit_window_count = 16, commit_log = 0xb10, commit_log_count = 48;
+	// The served block the guest shares with the runtime; read-write commits that fall in pages already open are then done by the guest.
+	void set_commit_block(uint64_t *block) { commit_block = block; }
 
 private:
 	// The access of every page of a region as runs of equal pages, so a reservation of terabytes costs a few entries.
@@ -107,6 +112,12 @@ private:
 	size_t used = 0, reserved_total = 0;
 	size_t limit;
 	std::map<uint64_t,Region>::iterator region(uint64_t address, uint64_t size);
+	// Takes the guest's logged commits into the accounting; every operation that reads or changes it does this first.
+	void settle();
+	void open_window(uint64_t from, uint64_t to);
+	void close_windows(uint64_t from, uint64_t to);
+	uint64_t *commit_block = nullptr;
+	size_t window_next = 0;
 };
 
 }
