@@ -82,6 +82,25 @@ int raven_entry(void)
 	if (VirtualAlloc(pool+0x5000,4096,MEM_COMMIT,PAGE_READWRITE)!=pool+0x5000 || pool[0x5000] ||
 		VirtualQuery(pool+0x5000,&info,sizeof(info))!=sizeof(info) || info.State!=MEM_COMMIT)
 		return 19;
+	/* The same through NtAllocateVirtualMemory, which rounds the base and size it is given and writes them back. */
+	void *native=pool+0x7123;
+	size=0x1000;
+	if (NtAllocateVirtualMemory((HANDLE)-1,&native,0,&size,MEM_COMMIT,PAGE_READWRITE)!=0 || native!=pool+0x7000 || size!=0x2000 ||
+		pool[0x7000] || pool[0x8fff])
+		return 21;
+	pool[0x8fff]=3;
+	if (VirtualQuery(pool+0x7000,&info,sizeof(info))!=sizeof(info) || info.State!=MEM_COMMIT || info.Protect!=PAGE_READWRITE ||
+		info.RegionSize!=0x2000 || VirtualQuery(pool+0x9000,&info,sizeof(info))!=sizeof(info) || info.State!=MEM_RESERVE)
+		return 22;
+	void *gone=pool+0x7800;
+	size=0x900;
+	if (NtFreeVirtualMemory((HANDLE)-1,&gone,&size,MEM_DECOMMIT)!=0 || gone!=pool+0x7000 || size!=0x2000 ||
+		VirtualQuery(pool+0x7000,&info,sizeof(info))!=sizeof(info) || info.State!=MEM_RESERVE || info.RegionSize<0x2000)
+		return 23;
+	size=0x1000;
+	native=pool+0x8000;
+	if (NtAllocateVirtualMemory((HANDLE)-1,&native,0,&size,MEM_COMMIT,PAGE_READWRITE)!=0 || pool[0x8fff])
+		return 24;
 	if (!VirtualFree(pool,0,MEM_RELEASE))
 		return 20;
 	phase=4;
