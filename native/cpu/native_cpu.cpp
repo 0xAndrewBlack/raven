@@ -35,8 +35,25 @@ namespace raven {
 // The API the runtime handled last, named when a call is left without its answer.
 extern const char *api_in_progress;
 
+// The registers of the stopped guest, read once per stop: serving one call read them several times, and each read is a system call.
+// Anything that can change them (writing them, resuming the guest, the guest stopping again) drops the copy.
+static thread_local pid_t registers_of = -1;
+static thread_local user_regs_struct cached_registers;
+
+static void forget_registers()
+{
+	registers_of = -1;
+}
+
 static void trace(enum __ptrace_request operation, pid_t child, void *data = nullptr)
 {
+	if (operation == PTRACE_GETREGS && registers_of == child) {
+		std::memcpy(data, &cached_registers, sizeof cached_registers);
+		return;
+	}
+	if (operation != PTRACE_GETREGS && operation != PTRACE_GETSIGINFO && operation != PTRACE_GETREGSET && operation != PTRACE_PEEKTEXT &&
+		operation != PTRACE_PEEKDATA && operation != PTRACE_PEEKUSER)
+		forget_registers();
 	if (ptrace(operation, child, nullptr, data) == -1) {
 		const int failure = errno;
 		if (std::getenv("RAVEN_BACKTRACE")) {
@@ -45,6 +62,10 @@ static void trace(enum __ptrace_request operation, pid_t child, void *data = nul
 			backtrace_symbols_fd(frames, backtrace(frames, 32), 2);
 		}
 		throw std::runtime_error("native ptrace: " + std::string(std::strerror(failure)));
+	}
+	if (operation == PTRACE_GETREGS) {
+		std::memcpy(&cached_registers, data, sizeof cached_registers);
+		registers_of = child;
 	}
 }
 
@@ -135,6 +156,7 @@ void NativeChild::stop()
 	kill(pid, SIGKILL);
 	int status = 0;
 	while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+	forget_registers();
 	pid = -1;
 }
 
@@ -201,6 +223,7 @@ int NativeChild::wait(const std::function<bool()> *served)
 			timer_settime(timer, 0, &off, nullptr);
 		}
 		if (result == pid) {
+			forget_registers();
 			if (WIFEXITED(status) || WIFSIGNALED(status)) {
 				if (std::getenv("RAVEN_TRACE_API"))
 					std::cerr << "raven: native guest " << (WIFSIGNALED(status) ? "killed by signal " + std::to_string(WTERMSIG(status)) : "exited with " + std::to_string(WEXITSTATUS(status))) << '\n';
@@ -298,6 +321,8 @@ struct NativeProcess::State {
 	std::function<void(uint64_t)> sampler;
 	// Where the stack arguments of the call being served start; they are read only when a handler asks for them.
 	uint64_t served_stack = 0;
+	// The mapping the last covering check found: mappings never overlap, and reads and writes mostly fall in the one they used before.
+	mutable size_t covered = 0;
 	void require_stopped() const;
 	bool covers(uint64_t address, size_t size, int protection) const;
 	uint64_t limit() const { return mode == NativeMode::x86 ? 0x100000000ULL : 0x800000000000ULL; }
@@ -316,13 +341,15 @@ bool NativeProcess::State::covers(uint64_t address, size_t size, int protection)
 	if (size > UINT64_MAX - address)
 		return false;
 	const uint64_t end = address + size;
+	const auto holds = [&](const ImageMapping &mapping) {
+		return address >= mapping.address && address - mapping.address < mapping.size && (mapping.protection & protection) == protection;
+	};
 	while (address < end) {
-		const auto found = std::find_if(mappings.begin(), mappings.end(), [&](const auto &mapping) {
-			return address >= mapping.address && address - mapping.address < mapping.size &&
-				(mapping.protection & protection) == protection;
-		});
+		auto found = covered < mappings.size() && holds(mappings[covered]) ? mappings.begin() + std::ptrdiff_t(covered) :
+			std::find_if(mappings.begin(), mappings.end(), holds);
 		if (found == mappings.end())
 			return false;
+		covered = size_t(found - mappings.begin());
 		address = std::min(end, found->address + found->size);
 	}
 	return true;
@@ -1165,6 +1192,7 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 			trace(PTRACE_GETSIGINFO, child.pid, &kept);
 			event_info = kept;
 			status = interrupted;
+			forget_registers();
 			ptrace(PTRACE_SYSEMU, child.pid, nullptr, nullptr);
 			int drained = 0;
 			while (waitpid(child.pid, &drained, 0) == -1 && errno == EINTR) {}

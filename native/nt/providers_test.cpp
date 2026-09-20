@@ -80,10 +80,11 @@ int main(int argc, char **argv)
 		raven::ModuleSet supplied;
 		auto &other_entry = supplied.add("program.exe", bytes, base);
 		auto &original = supplied.add("kernel32.dll", raven::environment_provider("kernel32.dll", base + 65536), base + 65536);
-		const auto original_bytes = original.bytes;
+		const std::span<const uint8_t> original_view = original.bytes;
+		const std::vector<uint8_t> original_bytes(original_view.begin(), original_view.end());
 		check(raven::run_native_process(supplied, other_entry, argv[1], std::chrono::seconds(2)).value == 42,
 			"supplied-module graph did not execute");
-		check(supplied.all().at("kernel32.dll").get() == &original && original.bytes == original_bytes,
+		check(supplied.all().at("kernel32.dll").get() == &original && std::ranges::equal(std::span<const uint8_t>(original.bytes), original_bytes),
 			"runtime replaced a supplied DLL");
 		std::cout << "Original native provider PE exports, placement, supplied DLL preservation and unsupported symbol/ordinal contracts passed\n";
 		return 0;

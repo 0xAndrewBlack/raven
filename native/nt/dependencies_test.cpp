@@ -41,7 +41,7 @@ int main(int argc,char **argv)
 			const auto result=raven::run_native_process(modules,entry,argv[1],std::chrono::seconds(3),source);
 			check(result.stop==raven::NativeStop::returned && !result.value,"implicit startup or dependency initialization order differs");
 			check(queries.size()==(supplied ? 1 : 2) && modules.all().contains("base.dll") && modules.all().contains("dependent.dll"),"startup queried a dependency more than once");
-			if (supplied) check(modules.all().at("base.dll").get()==existing && existing->bytes==base,"startup replaced an explicitly supplied module");
+			if (supplied) check(modules.all().at("base.dll").get()==existing && std::ranges::equal(std::span<const uint8_t>(existing->bytes),base),"startup replaced an explicitly supplied module");
 		}
 		for (const std::string_view mode:{"missing","malformed","executable","clr","symbol","pe32"}) {
 			if (mode=="pe32" && argc!=4) continue;

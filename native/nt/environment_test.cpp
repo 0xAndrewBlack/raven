@@ -176,7 +176,8 @@ int main(int argc, char **argv)
 		process.protect_memory(text,4096,PROT_READ | PROT_WRITE);
 		process.unmap_memory(text);
 		raven::ModuleSet runtime;
-		auto &runtime_entry = runtime.add(entry->name, entry->bytes, entry->loaded.base());
+		const std::span<const uint8_t> entry_bytes = entry->bytes;
+		auto &runtime_entry = runtime.add(entry->name, std::vector<uint8_t>(entry_bytes.begin(), entry_bytes.end()), entry->loaded.base());
 		for (size_t run = 0; run < 2; ++run) {
 			const auto executed = raven::run_native_process(runtime, runtime_entry, argv[1], std::chrono::seconds(2));
 			check(executed.stop == raven::NativeStop::returned && executed.value == 0,

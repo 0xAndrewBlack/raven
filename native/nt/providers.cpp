@@ -101,6 +101,13 @@ const std::vector<FastStub> &fast_stubs()
 		{"FlsGetValue", {0x65, 0x48, 0x8b, 0x04, 0x25, 0xc8, 0x17, 0, 0, 0x48, 0x85, 0xc0, 0x74, 0x22,
 			0x81, 0xf9, 0xf0, 0x0f, 0, 0, 0x73, 0x1a, 0x8b, 0xc9, 0x48, 0x8b, 0x04, 0xc8,
 			0x65, 0xc7, 0x04, 0x25, 0x68, 0, 0, 0, 0, 0, 0, 0, 0xc3}},
+		// The same without touching the last error, as the second form does.
+		{"FlsGetValue2", {0x65, 0x48, 0x8b, 0x04, 0x25, 0xc8, 0x17, 0, 0, 0x48, 0x85, 0xc0, 0x74, 0x22,
+			0x81, 0xf9, 0xf0, 0x0f, 0, 0, 0x73, 0x1a, 0x8b, 0xc9, 0x48, 0x8b, 0x04, 0xc8, 0xc3}},
+		// A one-time initialization that has completed answers in the guest; any other state is served.
+		// mov rax,[rcx]; mov r10,rax; and r10,3; cmp r10,2; jne slow; test r9,r9; jz done; and rax,-4; mov [r9],rax; done: mov eax,1; ret
+		{"InitOnceExecuteOnce", {0x48, 0x8b, 0x01, 0x49, 0x89, 0xc2, 0x49, 0x83, 0xe2, 0x03, 0x49, 0x83, 0xfa, 0x02, 0x75, 0x20,
+			0x4d, 0x85, 0xc9, 0x74, 0x07, 0x48, 0x83, 0xe0, 0xfc, 0x49, 0x89, 0x01, 0xb8, 1, 0, 0, 0, 0xc3}},
 	};
 	return stubs;
 }
@@ -1235,11 +1242,11 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					std::cerr << "raven: library not loadable by path: " << identity << '\n';
 				throw LoadFailure{126};
 			}
-			std::optional<std::vector<uint8_t>> bytes;
+			std::optional<ModuleBytes> bytes;
 			if (const auto explicit_file = explicit_files.find(identity); explicit_file != explicit_files.end()) {
-				bytes = read_host_file(explicit_file->second);
-			} else {
-				bytes = source(identity);
+				bytes = ModuleBytes::map(explicit_file->second);
+			} else if (auto read = source(identity)) {
+				bytes.emplace(std::move(*read));
 			}
 			// A library loaded by path finds its dependencies in its own directory, as LOAD_WITH_ALTERED_SEARCH_PATH and a DLL directory
 			// set to that folder do on Windows; programs that unpack themselves to a temporary folder rely on it.
@@ -1252,7 +1259,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 							character = static_cast<char>(character + ('a' - 'A'));
 					if (candidate != identity || !entry.is_regular_file(error))
 						continue;
-					bytes = read_host_file(entry.path());
+					bytes = ModuleBytes::map(entry.path());
 					explicit_files.emplace(identity, entry.path());
 					break;
 				}

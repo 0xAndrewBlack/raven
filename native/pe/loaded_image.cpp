@@ -31,19 +31,29 @@ LoadedImage::LoadedImage(const PEImage &image, uint64_t base)
 	try {
 		if (ftruncate(fd, static_cast<off_t>(size)) != 0)
 			throw std::system_error(errno, std::generic_category(), "size PE backing file");
+		// The contents go in through the descriptor: copying them through the mapping took a page fault for every page of a library
+		// of hundreds of megabytes, in every process that loads it.
+		const auto put = [&](std::span<const uint8_t> source, uint64_t offset) {
+			for (size_t done = 0; done < source.size();) {
+				const auto written = pwrite(fd, source.data() + done, source.size() - done, static_cast<off_t>(offset + done));
+				if (written < 0 && errno == EINTR)
+					continue;
+				if (written <= 0)
+					throw std::system_error(errno, std::generic_category(), "fill PE backing file");
+				done += size_t(written);
+			}
+		};
+		put(image.file_span(0, image.headers_size), 0);
+		for (const auto &section : image.sections)
+			if (section.file_size)
+				put(image.file_span(section.address, section.file_size), section.address);
 		void *mapping = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 		if (mapping == MAP_FAILED)
 			throw std::system_error(errno, std::generic_category(), "map PE backing file");
 		storage = static_cast<uint8_t *>(mapping);
-		const auto headers = image.file_span(0, image.headers_size);
-		std::copy(headers.begin(), headers.end(), storage);
 		for (size_t page = 0; page * page_size < image.headers_size; ++page)
 			protections[page] = PROT_READ;
 		for (const auto &section : image.sections) {
-			if (section.file_size) {
-				const auto source = image.file_span(section.address, section.file_size);
-				std::copy(source.begin(), source.end(), storage + section.address);
-			}
 			int protection = PROT_NONE;
 			if (section.characteristics & 0x40000000)
 				protection |= PROT_READ;

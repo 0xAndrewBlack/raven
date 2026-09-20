@@ -2,17 +2,39 @@
 
 #include "loaded_image.h"
 
+#include <filesystem>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <unordered_map>
 
 namespace raven {
 
+// The file a module comes from: bytes held in memory, or a read-only mapping of the host file. A mapping shares its pages with every
+// process that loads the same library, where reading a library of hundreds of megabytes into each of them cost seconds.
+class ModuleBytes {
+public:
+	ModuleBytes(std::vector<uint8_t> bytes) : owned(std::move(bytes)), view(owned) {}
+	// A move keeps the vector's buffer, which the view names; a copy would not.
+	ModuleBytes(ModuleBytes &&) = default;
+	ModuleBytes &operator=(ModuleBytes &&) = default;
+	ModuleBytes(const ModuleBytes &) = delete;
+	ModuleBytes &operator=(const ModuleBytes &) = delete;
+	static std::optional<ModuleBytes> map(const std::filesystem::path &path);
+	operator std::span<const uint8_t>() const { return view; }
+
+private:
+	ModuleBytes() = default;
+	std::vector<uint8_t> owned;
+	std::shared_ptr<const void> mapping;
+	std::span<const uint8_t> view;
+};
+
 struct PEModule {
-	PEModule(std::string name, std::vector<uint8_t> bytes, uint64_t base);
+	PEModule(std::string name, ModuleBytes bytes, uint64_t base);
 	std::string name;
-	std::vector<uint8_t> bytes;
+	ModuleBytes bytes;
 	PEImage image;
 	LoadedImage loaded;
 	std::vector<PEImport> imports;
@@ -26,8 +48,8 @@ struct PEModule {
 class ModuleSet {
 public:
 	// Keep a free preferred base; relocate colliding images into graph-owned space.
-	PEModule &add(std::string name, std::vector<uint8_t> bytes);
-	PEModule &add(std::string name, std::vector<uint8_t> bytes, uint64_t base);
+	PEModule &add(std::string name, ModuleBytes bytes);
+	PEModule &add(std::string name, ModuleBytes bytes, uint64_t base);
 	// The process loader must release guest mappings and references before erasing an image.
 	void remove(const PEModule &module);
 	const std::map<std::string, std::unique_ptr<PEModule>> &all() const;

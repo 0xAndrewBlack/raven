@@ -371,6 +371,23 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(view.address);
 			return;
 		}
+		// A view that can only be read is the file itself, as on Windows: a program that maps a library of hundreds of megabytes to
+		// read it would otherwise have the whole file copied into its memory. A view the program may write, or one past the end of the
+		// file, is copied as before.
+		if (mapping->file && !(call.u32(1) & 0x3)) {
+			struct stat status{};
+			if (::fstat(mapping->file->descriptor, &status) == 0 && offset + size <= uint64_t(status.st_size)) {
+				try {
+					const auto view = memory.map_view(mapping->file->descriptor, offset, size, call.u32(1) & 0x20 ? 0x20 : 0x02);
+					if (!view.status) {
+						views[view.address] = {mapping, offset, size, false};
+						call.ret(view.address);
+						return;
+					}
+				} catch (const std::runtime_error &) {
+				}
+			}
+		}
 		const auto range = memory.allocate(0, (size + 4095) & ~uint64_t(4095), 0x3000, 4);
 		if (range.status) {
 			call.fail(8);

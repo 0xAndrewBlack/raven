@@ -2,7 +2,11 @@
 
 #include <algorithm>
 #include <charconv>
+#include <fcntl.h>
 #include <stdexcept>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace raven {
 
@@ -21,8 +25,27 @@ static std::string module_name(std::string name)
 	return name;
 }
 
-PEModule::PEModule(std::string name, std::vector<uint8_t> bytes, uint64_t base)
-	: name(std::move(name)), bytes(std::move(bytes)), image(this->bytes), loaded(image, base),
+std::optional<ModuleBytes> ModuleBytes::map(const std::filesystem::path &path)
+{
+	const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+	if (descriptor < 0)
+		return std::nullopt;
+	struct stat status{};
+	void *address = MAP_FAILED;
+	if (::fstat(descriptor, &status) == 0 && status.st_size > 0)
+		address = ::mmap(nullptr, size_t(status.st_size), PROT_READ, MAP_PRIVATE, descriptor, 0);
+	::close(descriptor);
+	if (address == MAP_FAILED)
+		return std::nullopt;
+	const size_t size = size_t(status.st_size);
+	ModuleBytes result;
+	result.mapping = std::shared_ptr<const void>(address, [size](const void *mapped) { ::munmap(const_cast<void *>(mapped), size); });
+	result.view = {static_cast<const uint8_t *>(address), size};
+	return result;
+}
+
+PEModule::PEModule(std::string name, ModuleBytes bytes, uint64_t base)
+	: name(std::move(name)), bytes(std::move(bytes)), image(std::span<const uint8_t>(this->bytes)), loaded(image, base),
 	imports(image.imports()), exports(image.exports())
 {
 	for (size_t index = 0; index < exports.size(); ++index)
@@ -30,7 +53,7 @@ PEModule::PEModule(std::string name, std::vector<uint8_t> bytes, uint64_t base)
 			export_names.emplace(export_name, index);
 }
 
-PEModule &ModuleSet::add(std::string name, std::vector<uint8_t> bytes)
+PEModule &ModuleSet::add(std::string name, ModuleBytes bytes)
 {
 	const PEImage image(bytes);
 	const uint64_t limit = image.is_64 ? 0x800000000000ULL : 0x100000000ULL;
@@ -60,7 +83,7 @@ PEModule &ModuleSet::add(std::string name, std::vector<uint8_t> bytes)
 	return add(std::move(name), std::move(bytes), base);
 }
 
-PEModule &ModuleSet::add(std::string name, std::vector<uint8_t> bytes, uint64_t base)
+PEModule &ModuleSet::add(std::string name, ModuleBytes bytes, uint64_t base)
 {
 	name = module_name(std::move(name));
 	if (modules.contains(name))
