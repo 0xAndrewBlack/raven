@@ -32,6 +32,8 @@ struct WaylandPresentation::State {
 		void *pixels=MAP_FAILED;
 		size_t size=0;
 		uint32_t width=0,height=0;
+		// What changed since this buffer last received a frame (left, top, right, bottom): only that part is copied into it again.
+		std::array<int32_t,4> stale{0,0,0,0};
 		bool released=false;
 		~Buffer() { if (proxy) wl_buffer_destroy(proxy); if (pixels!=MAP_FAILED) munmap(pixels,size); }
 	};
@@ -485,6 +487,7 @@ struct WaylandPresentation::State {
 				for (const auto &buffer : surface->buffers) used+=buffer->size;
 			if (used+pixels.size()>256*1024*1024) throw std::runtime_error("Wayland presentation memory limit reached");
 			auto buffer=std::make_unique<Buffer>(); buffer->size=pixels.size(); buffer->width=width; buffer->height=height;
+			buffer->stale={0,0,int32_t(width),int32_t(height)};
 			const int descriptor=int(syscall(SYS_memfd_create,"raven-frame",MFD_CLOEXEC));
 			if (descriptor<0) throw std::runtime_error("Wayland frame descriptor failed");
 			if (ftruncate(descriptor,off_t(buffer->size))<0) { close(descriptor); throw std::runtime_error("Wayland frame sizing failed"); }
@@ -498,7 +501,22 @@ struct WaylandPresentation::State {
 			target=buffer.get();
 			window.buffers.push_back(std::move(buffer));
 		}
-		std::memcpy(target->pixels,pixels.data(),pixels.size());
+		for (const auto &buffer : window.buffers) {
+			auto &stale=buffer->stale;
+			const std::array<int32_t,4> changed{damage[0],damage[1],damage[0]+damage[2],damage[1]+damage[3]};
+			stale=stale[2]<=stale[0] ? changed : std::array<int32_t,4>{std::min(stale[0],changed[0]),std::min(stale[1],changed[1]),
+				std::max(stale[2],changed[2]),std::max(stale[3],changed[3])};
+		}
+		{
+			const auto &stale=target->stale;
+			const size_t stride=size_t(width)*4,from=size_t(stale[0])*4,length=size_t(stale[2]-stale[0])*4;
+			if (stale[0]==0 && stale[2]==int32_t(width))
+				std::memcpy(static_cast<uint8_t *>(target->pixels)+size_t(stale[1])*stride,pixels.data()+size_t(stale[1])*stride,size_t(stale[3]-stale[1])*stride);
+			else
+				for (int32_t y=stale[1];y<stale[3];++y)
+					std::memcpy(static_cast<uint8_t *>(target->pixels)+size_t(y)*stride+from,pixels.data()+size_t(y)*stride+from,length);
+			target->stale={0,0,0,0};
+		}
 		target->released=false;
 		wl_surface_attach(window.proxy,target->proxy,0,0);
 		wl_surface_damage(window.proxy,damage[0],damage[1],damage[2],damage[3]);
