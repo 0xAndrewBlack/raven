@@ -70,7 +70,10 @@ public:
 	static constexpr size_t bitmap_records=1024, bitmap_record=48;
 	void set_bitmap_table(uint8_t *table);
 	// GetSystemMetrics for indexes below 128, then GetSysColor for indexes below 64, as 32-bit values; both are fixed for the process.
+	// At 1024 the accelerator tables: a count, then their handles.
 	void set_system_table(uint8_t *table);
+	// In the served block: bit 0 when the flags are published, bit 1 while a message filter hook is installed; then the desktop window.
+	static constexpr size_t loop_flags=0x738, desktop_handle=0x740;
 	void publish_windows();
 	void api_entered() { ++api_depth; }
 	void api_left() { --api_depth; }
@@ -138,6 +141,7 @@ private:
 	bool menu_matches(uint64_t handle,const DesktopMenu &menu) const;
 	void publish_menus();
 	uint8_t *bitmap_table=nullptr;
+	uint8_t *system_table=nullptr;
 	std::vector<std::pair<uint64_t,const DesktopBitmap *>> watched_bitmaps;
 	void publish_bitmap(uint64_t handle,const DesktopBitmap *bitmap);
 	void publish_bitmaps();

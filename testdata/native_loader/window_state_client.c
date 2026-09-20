@@ -6,6 +6,11 @@
 
 static int size_seen, size_failed;
 
+static LRESULT CALLBACK message_filter(int code, WPARAM wparam, LPARAM lparam)
+{
+	return code == 0x1234 ? 77 : 0;
+}
+
 static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
 	if (message == WM_SIZE) {
@@ -86,6 +91,25 @@ int raven_entry(void)
 		return 18;
 	if (GetDpiForWindow(window) != 96)
 		return 19;
+	/* The message loop's helpers on messages they leave alone. */
+	MSG message = {window, WM_MOUSEMOVE, 0, 0, 0, {0, 0}};
+	for (int round = 0; round < 3; ++round) {
+		if (TranslateMessage(&message) || CallMsgFilterW(&message, 0x1234) || !GetDesktopWindow() || GetDesktopWindow() != GetDesktopWindow())
+			return 20;
+	}
+	HHOOK hook = SetWindowsHookExW(WH_MSGFILTER, message_filter, NULL, GetCurrentThreadId());
+	if (!hook || CallMsgFilterW(&message, 0x1234) != 77 || !UnhookWindowsHookEx(hook) || CallMsgFilterW(&message, 0x1234))
+		return 21;
+	ACCEL keys[] = {{FVIRTKEY | FCONTROL, 'S', 900}};
+	HACCEL table = CreateAcceleratorTableW(keys, 1);
+	SetLastError(0);
+	if (!table || TranslateAcceleratorW(window, table, &message) || GetLastError())
+		return 22;
+	if (!DestroyAcceleratorTable(table) || TranslateAcceleratorW(window, table, &message) || GetLastError() != ERROR_INVALID_WINDOW_HANDLE)
+		return 23;
+	SetLastError(0);
+	if (TranslateAcceleratorW(window, NULL, &message) || GetLastError() != ERROR_INVALID_WINDOW_HANDLE)
+		return 24;
 	DestroyWindow(other);
 	if (!DestroyWindow(window) || IsWindow(window) || GetWindowLongPtrW(window, GWLP_USERDATA) || GetLastError() != ERROR_INVALID_WINDOW_HANDLE)
 		return 14;

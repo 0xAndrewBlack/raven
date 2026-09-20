@@ -1466,7 +1466,18 @@ void NativeWindows::publish_windows()
 	}
 	publish_menus();
 	publish_bitmaps();
+	if (system_table) {
+		const auto tables=objects.accelerator_handles();
+		const uint32_t count=tables.size()<=64 ? uint32_t(tables.size()) : UINT32_MAX;
+		std::memset(system_table+1024,0,4);
+		if (count!=UINT32_MAX) std::memcpy(system_table+1032,tables.data(),tables.size()*8);
+		std::memcpy(system_table+1024,&count,4);
+	}
 	if (screen_block) {
+		const uint32_t flags=1U | (has_hook(-1) ? 2U : 0U);
+		std::memcpy(screen_block+loop_flags,&flags,4);
+		const uint64_t shown_desktop=desktop && std::as_const(objects).window(desktop) ? desktop : 0;
+		std::memcpy(screen_block+desktop_handle,&shown_desktop,8);
 		__atomic_store_n(reinterpret_cast<uint64_t *>(screen_block+focus_window),focus,__ATOMIC_RELEASE);
 		__atomic_store_n(reinterpret_cast<uint64_t *>(screen_block+focus_published),uint64_t(1),__ATOMIC_RELEASE);
 	}
@@ -1658,6 +1669,7 @@ void NativeWindows::publish_bitmaps()
 
 void NativeWindows::set_system_table(uint8_t *table)
 {
+	system_table=table;
 	for (int32_t index=0;index<128;++index) {
 		const uint32_t value=system_metric(objects.nonclient_metrics(),index);
 		std::memcpy(table+size_t(index)*4,&value,4);

@@ -74,6 +74,13 @@ DesktopMenu *DesktopObjects::edit_menu(uint64_t handle)
 	return record;
 }
 
+std::vector<uint64_t> DesktopObjects::accelerator_handles() const
+{
+	std::vector<uint64_t> result;
+	for (const auto &[handle,table] : accelerator_tables) result.push_back(handle);
+	return result;
+}
+
 std::vector<uint64_t> DesktopObjects::bitmap_handles() const
 {
 	std::vector<uint64_t> result;

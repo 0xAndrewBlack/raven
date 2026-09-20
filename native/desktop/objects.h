@@ -252,6 +252,7 @@ public:
 	uint64_t add_accelerators(std::vector<DesktopAccelerator> table);
 	const std::vector<DesktopAccelerator> *accelerators(uint64_t handle) const;
 	bool remove_accelerators(uint64_t handle);
+	std::vector<uint64_t> accelerator_handles() const;
 	uint64_t load_menu(const MenuTemplate &definition);
 	const DesktopIcon *icon(uint64_t handle) const;
 	const DesktopBitmap *bitmap(uint64_t handle) const;
