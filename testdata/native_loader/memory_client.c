@@ -64,5 +64,26 @@ int raven_entry(void)
 	if (!implicit || *implicit || !VirtualFree(implicit,0,MEM_RELEASE))
 		return 14;
 	phase=3;
+	/* Single pages committed one after another in a large reservation, then decommitted and committed again: the later ones may be
+	 * done without the runtime seeing the call, and the state they leave must still be what Windows reports. */
+	BYTE *pool=VirtualAlloc(NULL,1<<20,MEM_RESERVE,PAGE_READWRITE);
+	if (!pool || VirtualAlloc(pool+0x3000,4096,MEM_COMMIT,PAGE_READWRITE)!=pool+0x3000)
+		return 15;
+	pool[0x3000]=1;
+	if (VirtualAlloc(pool+0x5100,100,MEM_COMMIT,PAGE_READWRITE)!=pool+0x5000 || pool[0x5000] || pool[0x5fff])
+		return 16;
+	pool[0x5000]=2;
+	if (VirtualQuery(pool+0x5000,&info,sizeof(info))!=sizeof(info) || info.State!=MEM_COMMIT || info.Protect!=PAGE_READWRITE ||
+		info.RegionSize!=4096 || VirtualQuery(pool+0x4000,&info,sizeof(info))!=sizeof(info) || info.State!=MEM_RESERVE || info.Protect)
+		return 17;
+	if (!VirtualFree(pool+0x5000,4096,MEM_DECOMMIT) || VirtualQuery(pool+0x5000,&info,sizeof(info))!=sizeof(info) ||
+		info.State!=MEM_RESERVE || pool[0x3000]!=1)
+		return 18;
+	if (VirtualAlloc(pool+0x5000,4096,MEM_COMMIT,PAGE_READWRITE)!=pool+0x5000 || pool[0x5000] ||
+		VirtualQuery(pool+0x5000,&info,sizeof(info))!=sizeof(info) || info.State!=MEM_COMMIT)
+		return 19;
+	if (!VirtualFree(pool,0,MEM_RELEASE))
+		return 20;
+	phase=4;
 	return 0;
 }
