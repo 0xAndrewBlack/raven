@@ -40,7 +40,8 @@ public:
 	size_t bytes() const { return reserved_total; }
 	size_t count() const { return regions.size(); }
 	// Where in the served block the open ranges and the guest's commit log sit, as byte offsets, and how many entries each holds: the
-	// ranges a count and then start and end pairs, the log a 32-bit count and then the start and end of each read-write commit.
+	// ranges a count and then start and end pairs, the log a 32-bit count and then the start and end of each read-write commit, or of
+	// each decommit with the start's low bit set.
 	static constexpr size_t commit_windows = 0xa00, commit_window_count = 48, commit_log = 0xd10, commit_log_count = 32;
 	// The served block the guest shares with the runtime; read-write commits that fall in pages already open are then done by the guest.
 	void set_commit_block(uint64_t *block) { commit_block = block; }

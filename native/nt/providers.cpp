@@ -195,15 +195,53 @@ static std::vector<uint8_t> clock_prelude(int32_t to_pointer, int32_t to_served)
 	return code;
 }
 
-// Committing pages that are already open in the guest is done by the guest itself: the runtime publishes the open ranges in the served
-// block, and the prelude of VirtualAlloc logs a read-write commit that falls in one of them there instead of stopping; the runtime takes
-// the log into its accounting before its next memory operation. Anything else jumps to the export's breakpoint.
-static bool guest_commit_api(std::string_view module, std::string_view name)
+// Committing and decommitting pages that are already open in the guest is done by the guest itself: the runtime publishes the open
+// ranges in the served block, and the preludes of VirtualAlloc and VirtualFree log a read-write commit, or a small decommit, that falls in
+// one of them there instead of stopping; the runtime takes the log into its accounting before its next memory operation. A decommit
+// zeroes its pages in place and leaves them open, as the runtime does for pages inside a range. Anything else jumps to the export's
+// breakpoint.
+enum class GuestMemoryApi { none, commit, decommit };
+
+static GuestMemoryApi guest_memory_api(std::string_view module, std::string_view name)
 {
-	return (module == "kernel32.dll" || module == "kernelbase.dll") && name == "VirtualAlloc";
+	if (module != "kernel32.dll" && module != "kernelbase.dll")
+		return GuestMemoryApi::none;
+	return name == "VirtualAlloc" ? GuestMemoryApi::commit : name == "VirtualFree" ? GuestMemoryApi::decommit : GuestMemoryApi::none;
 }
 
-static constexpr size_t commit_prelude_size = 192, commit_jump = 37;
+static bool guest_commit_api(std::string_view module, std::string_view name)
+{
+	return guest_memory_api(module, name) != GuestMemoryApi::none;
+}
+
+static constexpr size_t commit_prelude_size = 192;
+
+static size_t commit_jump(GuestMemoryApi kind)
+{
+	return kind == GuestMemoryApi::commit ? 37 : 31;
+}
+
+// mov r10,[pointer]; test r10,r10; jz slow; test rcx,rcx; jz slow; test rdx,rdx; jz slow; cmp r8d,MEM_DECOMMIT; je main; slow: jmp trap;
+// restore: mov r8d,MEM_DECOMMIT; jmp slow; main: cmp rdx,256 KiB; ja slow; rax = first page, r11 = end page; look through the open
+// ranges for one holding [rax, r11), take a log slot with lock xadd, zero the pages with rep stosb (keeping rdi), store the range with
+// its low bit set and return TRUE; a full log or no range goes back to restore.
+static std::vector<uint8_t> decommit_prelude(int32_t to_pointer, int32_t to_trap)
+{
+	std::vector<uint8_t> code{0x4c, 0x8b, 0x15, 0, 0, 0, 0, 0x4d, 0x85, 0xd2, 0x74, 0x13, 0x48, 0x85, 0xc9, 0x74, 0x0e, 0x48, 0x85, 0xd2,
+		0x74, 0x09, 0x41, 0x81, 0xf8, 0x00, 0x40, 0x00, 0x00, 0x74, 0x0d, 0xe9, 0, 0, 0, 0, 0x41, 0xb8, 0x00, 0x40, 0x00, 0x00,
+		0xeb, 0xf3, 0x48, 0x81, 0xfa, 0x00, 0x00, 0x04, 0x00, 0x77, 0xea, 0x48, 0x89, 0xc8, 0x48, 0x25, 0x00, 0xf0, 0xff, 0xff, 0x4c,
+		0x8d, 0x9c, 0x11, 0xff, 0x0f, 0x00, 0x00, 0x49, 0x81, 0xe3, 0x00, 0xf0, 0xff, 0xff, 0x45, 0x8b, 0x82, 0x00, 0x0a, 0x00, 0x00,
+		0x4d, 0x8d, 0x8a, 0x08, 0x0a, 0x00, 0x00, 0x45, 0x85, 0xc0, 0x74, 0xc4, 0x49, 0x3b, 0x01, 0x72, 0x4b, 0x4d, 0x3b, 0x59, 0x08,
+		0x77, 0x45, 0x41, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xf0, 0x45, 0x0f, 0xc1, 0x82, 0x10, 0x0d, 0x00, 0x00, 0x41, 0x83, 0xf8, 0x20,
+		0x73, 0xa4, 0x49, 0xc1, 0xe0, 0x04, 0x57, 0x48, 0x89, 0xc7, 0x49, 0x89, 0xc1, 0x4c, 0x89, 0xd9, 0x48, 0x29, 0xc1, 0x31, 0xc0,
+		0xf3, 0xaa, 0x5f, 0x49, 0x83, 0xc9, 0x01, 0x4f, 0x89, 0x8c, 0x02, 0x18, 0x0d, 0x00, 0x00, 0x4f, 0x89, 0x9c, 0x02, 0x20, 0x0d,
+		0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x49, 0x83, 0xc1, 0x10, 0x41, 0xff, 0xc8, 0xeb, 0xa2};
+	const int32_t displacement = to_pointer - 7;
+	std::memcpy(code.data() + 3, &displacement, 4);
+	const int32_t relative = to_trap - int32_t(commit_jump(GuestMemoryApi::decommit) + 5);
+	std::memcpy(code.data() + commit_jump(GuestMemoryApi::decommit) + 1, &relative, 4);
+	return code;
+}
 
 static std::vector<uint8_t> commit_prelude(int32_t to_pointer, int32_t to_trap)
 {
@@ -223,8 +261,8 @@ static std::vector<uint8_t> commit_prelude(int32_t to_pointer, int32_t to_trap)
 		NativeMemory::commit_log_count == 32, "the commit prelude's offsets are written into its code");
 	const int32_t displacement = to_pointer - 7;
 	std::memcpy(code.data() + 3, &displacement, 4);
-	const int32_t relative = to_trap - int32_t(commit_jump + 5);
-	std::memcpy(code.data() + commit_jump + 1, &relative, 4);
+	const int32_t relative = to_trap - int32_t(commit_jump(GuestMemoryApi::commit) + 5);
+	std::memcpy(code.data() + commit_jump(GuestMemoryApi::commit) + 1, &relative, 4);
 	return code;
 }
 
@@ -232,10 +270,10 @@ static std::vector<uint8_t> commit_prelude(int32_t to_pointer, int32_t to_trap)
 // breakpoint it falls back to.
 static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view module, std::string_view name, uint32_t rva)
 {
-	if (guest_commit_api(module, name)) {
+	if (const auto kind = guest_memory_api(module, name); kind != GuestMemoryApi::none) {
 		int32_t relative = 0;
-		std::memcpy(&relative, image.data() + rva + commit_jump + 1, 4);
-		return uint32_t(int64_t(rva) + commit_jump + 5 + relative);
+		std::memcpy(&relative, image.data() + rva + commit_jump(kind) + 1, 4);
+		return uint32_t(int64_t(rva) + commit_jump(kind) + 5 + relative);
 	}
 	if (!guest_clock_api(module, name))
 		return rva;
@@ -406,7 +444,9 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 		if (!x86 && served_count && guest_commit_api(name, exports[index])) {
 			const size_t trap = code;
 			code = commit_start + commit_next++ * commit_prelude_size;
-			const auto prelude = commit_prelude(int32_t(served_start) - int32_t(code), int32_t(trap) - int32_t(code));
+			const auto prelude = guest_memory_api(name, exports[index]) == GuestMemoryApi::commit ?
+				commit_prelude(int32_t(served_start) - int32_t(code), int32_t(trap) - int32_t(code)) :
+				decommit_prelude(int32_t(served_start) - int32_t(code), int32_t(trap) - int32_t(code));
 			std::copy(prelude.begin(), prelude.end(), bytes.begin() + ptrdiff_t(code));
 		}
 		if (kernel_module)

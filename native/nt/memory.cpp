@@ -64,13 +64,21 @@ void NativeMemory::settle()
 	const uint32_t logged=std::min<uint32_t>(*count,commit_log_count);
 	const uint64_t *entries=commit_block+(commit_log+8)/8;
 	for (uint32_t index=0; index<logged; ++index) {
-		const uint64_t base=entries[index*2], end=entries[index*2+1];
+		// A start with its low bit set is a decommit, done by the guest on pages it keeps open.
+		const bool decommit=entries[index*2] & 1;
+		const uint64_t base=entries[index*2] & ~uint64_t(1), end=entries[index*2+1];
 		const auto found=end>base ? region(base,end-base) : regions.end();
 		if (found==regions.end())
 			continue;
 		const auto first=(base-found->first)/4096, pages=(end-base)/4096;
-		used+=(pages-found->second.pages.nonzero(first,pages))*4096;
-		found->second.pages.fill(first,pages,4);
+		const auto committed=found->second.pages.nonzero(first,pages);
+		if (decommit) {
+			used-=committed*4096;
+			found->second.pages.fill(first,pages,0);
+		} else {
+			used+=(pages-committed)*4096;
+			found->second.pages.fill(first,pages,4);
+		}
 	}
 	*count=0;
 }
