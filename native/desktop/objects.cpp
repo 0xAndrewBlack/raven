@@ -172,6 +172,7 @@ uint64_t DesktopObjects::add(Object object)
 	}
 	if (std::holds_alternative<DesktopMenu>(objects.at(handle))) menus_touched.touch(handle);
 	if (std::holds_alternative<DesktopBitmap>(objects.at(handle))) bitmaps_touched.touch(handle);
+	if (std::holds_alternative<DesktopDC>(objects.at(handle))) dcs_touched.touch(handle);
 	return handle;
 }
 
@@ -184,6 +185,7 @@ bool DesktopObjects::erase(uint64_t handle)
 	if (std::holds_alternative<DesktopWindow>(found->second)) windows_touched.touch(handle);
 	if (std::holds_alternative<DesktopMenu>(found->second)) menus_touched.touch(handle);
 	if (std::holds_alternative<DesktopBitmap>(found->second)) bitmaps_touched.touch(handle);
+	if (std::holds_alternative<DesktopDC>(found->second)) dcs_touched.touch(handle);
 	if (const auto *menu=std::get_if<DesktopMenu>(&found->second)) {
 		if (menu->parent) return false;
 		for (const auto &item:menu->items) if (item.submenu) {
@@ -347,7 +349,24 @@ DesktopBitmap *DesktopObjects::bitmap(uint64_t handle)
 DesktopDC *DesktopObjects::dc(uint64_t handle)
 {
 	const auto found = objects.find(handle);
+	auto *record = found == objects.end() ? nullptr : std::get_if<DesktopDC>(&found->second);
+	if (record)
+		dcs_touched.touch(handle);
+	return record;
+}
+
+const DesktopDC *DesktopObjects::dc(uint64_t handle) const
+{
+	const auto found = objects.find(handle);
 	return found == objects.end() ? nullptr : std::get_if<DesktopDC>(&found->second);
+}
+
+std::vector<uint64_t> DesktopObjects::dc_handles() const
+{
+	std::vector<uint64_t> result;
+	for (const auto &[handle,object] : objects)
+		if (std::holds_alternative<DesktopDC>(object)) result.push_back(handle);
+	return result;
 }
 
 DesktopWindow *DesktopObjects::window(uint64_t handle)

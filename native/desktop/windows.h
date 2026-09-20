@@ -72,6 +72,12 @@ public:
 	// GetSystemMetrics for indexes below 128, then GetSysColor for indexes below 64, as 32-bit values; both are fixed for the process.
 	// At 1024 the accelerator tables: a count, then their handles.
 	void set_system_table(uint8_t *table);
+	// The device context attributes the guest sets and reads itself: a log of the contexts it changed (a count, then up to 64 handles),
+	// then from 4096 a slot of 32 bytes for each context at its handle's low ten bits (handle, text color, background color and mode,
+	// text alignment). The runtime takes the log before it serves a call and writes the contexts it touched before the guest runs again.
+	static constexpr size_t dc_slots=1024, dc_slot=32, dc_slots_at=4096, dc_table_size=dc_slots_at+dc_slots*dc_slot;
+	void set_dc_table(uint8_t *table);
+	void apply_dc_log();
 	// In the served block: bit 0 when the flags are published, bit 1 while a message filter hook is installed; then the desktop window.
 	static constexpr size_t loop_flags=0x738, desktop_handle=0x740;
 	void publish_windows();
@@ -142,6 +148,10 @@ private:
 	void publish_menus();
 	uint8_t *bitmap_table=nullptr;
 	uint8_t *system_table=nullptr;
+	uint8_t *dc_table=nullptr;
+	std::vector<std::pair<uint64_t,const DesktopDC *>> watched_dcs;
+	void publish_dc(uint64_t handle,const DesktopDC *dc);
+	void publish_dcs();
 	std::vector<std::pair<uint64_t,const DesktopBitmap *>> watched_bitmaps;
 	void publish_bitmap(uint64_t handle,const DesktopBitmap *bitmap);
 	void publish_bitmaps();

@@ -1466,6 +1466,7 @@ void NativeWindows::publish_windows()
 	}
 	publish_menus();
 	publish_bitmaps();
+	publish_dcs();
 	if (system_table) {
 		const auto tables=objects.accelerator_handles();
 		const uint32_t count=tables.size()<=64 ? uint32_t(tables.size()) : UINT32_MAX;
@@ -1678,6 +1679,85 @@ void NativeWindows::set_system_table(uint8_t *table)
 		const uint32_t value=objects.system_color(index);
 		std::memcpy(table+512+size_t(index)*4,&value,4);
 	}
+}
+
+void NativeWindows::set_dc_table(uint8_t *table)
+{
+	dc_table=table;
+	objects.touched_dcs().overflow=true;
+	publish_dcs();
+}
+
+void NativeWindows::apply_dc_log()
+{
+	if (!dc_table)
+		return;
+	uint32_t count=0;
+	std::memcpy(&count,dc_table,4);
+	for (uint32_t index=0;index<std::min<uint32_t>(count,64);++index) {
+		uint64_t handle=0;
+		std::memcpy(&handle,dc_table+8+size_t(index)*8,8);
+		const auto *slot=dc_table+dc_slots_at+(handle%dc_slots)*dc_slot;
+		uint64_t occupant=0;
+		std::memcpy(&occupant,slot,8);
+		auto *device=occupant==handle ? objects.dc(handle) : nullptr;
+		if (!device)
+			continue;
+		std::memcpy(&device->text_color,slot+8,4);
+		std::memcpy(&device->background_color,slot+12,4);
+		std::memcpy(&device->background_mode,slot+16,4);
+		std::memcpy(&device->text_align,slot+20,4);
+	}
+	std::memset(dc_table,0,4);
+}
+
+void NativeWindows::publish_dc(uint64_t handle,const DesktopDC *device)
+{
+	auto *slot=dc_table+dc_slots_at+(handle%dc_slots)*dc_slot;
+	uint64_t occupant=0;
+	std::memcpy(&occupant,slot,8);
+	if (!device) {
+		if (occupant==handle) std::memset(slot,0,8);
+		return;
+	}
+	// Two contexts whose handles share the low bits: the first keeps the slot and the other is answered by the runtime.
+	if (occupant && occupant!=handle && objects.dc(occupant))
+		return;
+	const uint32_t fields[4]={device->text_color,device->background_color,device->background_mode,device->text_align};
+	if (occupant==handle && !std::memcmp(slot+8,fields,16))
+		return;
+	std::memset(slot,0,8);
+	std::memcpy(slot+8,fields,16);
+	std::memcpy(slot,&handle,8);
+}
+
+void NativeWindows::publish_dcs()
+{
+	if (!dc_table)
+		return;
+	auto &touched=objects.touched_dcs();
+	if (touched.overflow) {
+		std::memset(dc_table+dc_slots_at,0,dc_slots*dc_slot);
+		watched_dcs.clear();
+		for (const auto handle : objects.dc_handles()) publish_dc(handle,std::as_const(objects).dc(handle));
+		touched.overflow=false;
+		touched.handles.clear();
+	}
+	// As with windows: contexts handed out since the guest last ran are written again, and stay watched while the call goes on.
+	for (const auto handle : touched.handles) {
+		const auto *device=std::as_const(objects).dc(handle);
+		publish_dc(handle,device);
+		const auto found=std::find_if(watched_dcs.begin(),watched_dcs.end(),[&](const auto &item) { return item.first==handle; });
+		if (found!=watched_dcs.end()) {
+			if (device) found->second=device;
+			else watched_dcs.erase(found);
+		} else if (device) {
+			watched_dcs.emplace_back(handle,device);
+		}
+	}
+	touched.handles.clear();
+	for (const auto &[handle,device] : watched_dcs) publish_dc(handle,device);
+	if (!api_depth) watched_dcs.clear();
 }
 
 void NativeWindows::screen_dc_use(std::string_view name)

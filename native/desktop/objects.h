@@ -258,6 +258,7 @@ public:
 	const DesktopBitmap *bitmap(uint64_t handle) const;
 	DesktopBitmap *bitmap(uint64_t handle);
 	DesktopDC *dc(uint64_t handle);
+	const DesktopDC *dc(uint64_t handle) const;
 	const DesktopRegion *region(uint64_t handle) const;
 	bool replace_region(uint64_t handle,DesktopRegion region);
 	bool select_clip(uint64_t dc,std::optional<DesktopRegion> region);
@@ -296,8 +297,10 @@ public:
 	TouchedHandles &touched_windows() { return windows_touched; }
 	TouchedHandles &touched_menus() { return menus_touched; }
 	TouchedHandles &touched_bitmaps() { return bitmaps_touched; }
+	TouchedHandles &touched_dcs() { return dcs_touched; }
 	std::vector<uint64_t> menu_handles() const;
 	std::vector<uint64_t> bitmap_handles() const;
+	std::vector<uint64_t> dc_handles() const;
 	uint64_t window_root(uint64_t handle) const;
 	// Children of a window in z-order, bottom to top. Top-level windows are the children of window zero.
 	std::vector<uint64_t> child_windows(uint64_t parent) const;
@@ -331,7 +334,7 @@ public:
 	const DesktopMetrics &nonclient_metrics() const;
 
 private:
-	TouchedHandles windows_touched{}, menus_touched{}, bitmaps_touched{};
+	TouchedHandles windows_touched{}, menus_touched{}, bitmaps_touched{}, dcs_touched{};
 	std::map<uint64_t, Object> objects;
 	std::map<uint16_t,DesktopClass> classes;
 	std::map<uint64_t,std::vector<DesktopAccelerator>> accelerator_tables;
