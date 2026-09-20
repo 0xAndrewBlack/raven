@@ -306,6 +306,28 @@ std::u16string insert_arguments(std::u16string_view text, const std::vector<std:
 
 }
 
+std::vector<uint8_t> locale_table()
+{
+	std::vector<uint8_t> table(locale_table_entries * 8, 0xff);
+	std::u16string pool;
+	for (uint32_t index = 0; index < locale_table_entries; ++index) {
+		const auto text = locale_text(index < 0x80 ? index : 0x1000 + index - 0x80);
+		if (!text)
+			continue;
+		const uint16_t offset = uint16_t(pool.size()), length = uint16_t(text->size());
+		const uint32_t number = as_number(*text);
+		std::memcpy(table.data() + index * 8, &offset, 2);
+		std::memcpy(table.data() + index * 8 + 2, &length, 2);
+		std::memcpy(table.data() + index * 8 + 4, &number, 4);
+		pool += *text;
+		pool += u'\0';
+	}
+	const size_t start = table.size();
+	table.resize(start + pool.size() * 2);
+	std::memcpy(table.data() + start, pool.data(), pool.size() * 2);
+	return table;
+}
+
 void register_text_api(ApiRegistry &registry, KernelContext &context)
 {
 	auto &memory = context.memory;
@@ -579,7 +601,8 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		if (type & locale_return_number) {
-			if (capacity < 4) {
+			// The capacity counts characters: two wide ones hold the number.
+			if (capacity < (wide ? 2 : 4)) {
 				call.fail(122);
 				return;
 			}

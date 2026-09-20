@@ -771,6 +771,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_custom_target(window_state_pe_fixture ALL DEPENDS ${WINDOW_STATE_FIXTURE})
         add_test(NAME native_window_state_cli COMMAND raven --run-process --execution=native ${WINDOW_STATE_FIXTURE})
         set_tests_properties(native_window_state_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        set(LOCALE_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/locale-fixture.exe)
+        add_custom_command(OUTPUT ${LOCALE_FIXTURE}
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                -Wl,--entry,raven_entry,--image-base,0x197400000
+                -o ${LOCALE_FIXTURE} ${PROJECT_SOURCE_DIR}/testdata/native_loader/locale_client.c -lkernel32
+            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/locale_client.c VERBATIM)
+        add_custom_target(locale_pe_fixture ALL DEPENDS ${LOCALE_FIXTURE})
+        add_test(NAME native_locale_cli COMMAND raven --run-process --execution=native ${LOCALE_FIXTURE})
+        set_tests_properties(native_locale_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         set(SYSTEM_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/system-fixture.exe)
         add_custom_command(OUTPUT ${SYSTEM_FIXTURE}
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector

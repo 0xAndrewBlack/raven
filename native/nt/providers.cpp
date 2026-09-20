@@ -434,6 +434,25 @@ static const std::vector<uint8_t> &window_outer_prelude()
 	return code;
 }
 
+// Locale information, which the runtime answers by type alone: the guest reads it from the table the runtime publishes once (see
+// locale_table), through the served block. A type with flags beyond LOCALE_RETURN_NUMBER and LOCALE_NOUSEROVERRIDE, one without
+// text, a buffer too small or a null buffer goes to the runtime.
+static constexpr size_t locale_pointer = 0x708;
+
+static const std::vector<uint8_t> &locale_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x0f, 0x84, 0x94, 0x00, 0x00, 0x00, 0x4d, 0x8b, 0x9a, 0x08, 0x07, 0x00, 0x00, 0x4d,
+		0x85, 0xdb, 0x0f, 0x84, 0x84, 0x00, 0x00, 0x00, 0x89, 0xd0, 0x25, 0xff, 0xff, 0xff, 0x5f, 0x3d, 0x80, 0x00, 0x00, 0x00, 0x72, 0x0f, 0x2d, 0x00,
+		0x10, 0x00, 0x00, 0x83, 0xf8, 0x10, 0x73, 0x6c, 0x05, 0x80, 0x00, 0x00, 0x00, 0x45, 0x0f, 0xb7, 0x14, 0xc3, 0x41, 0x81, 0xfa, 0xff, 0xff, 0x00,
+		0x00, 0x74, 0x59, 0xf7, 0xc2, 0x00, 0x00, 0x00, 0x20, 0x75, 0x38, 0x41, 0x0f, 0xb7, 0x44, 0xc3, 0x02, 0xff, 0xc0, 0x45, 0x85, 0xc9, 0x74, 0x2a,
+		0x78, 0x42, 0x41, 0x39, 0xc1, 0x72, 0x3d, 0x4d, 0x85, 0xc0, 0x74, 0x38, 0x4f, 0x8d, 0x94, 0x53, 0x80, 0x04, 0x00, 0x00, 0x89, 0xc1, 0x66, 0x41,
+		0x8b, 0x12, 0x66, 0x41, 0x89, 0x10, 0x49, 0x83, 0xc2, 0x02, 0x49, 0x83, 0xc0, 0x02, 0xff, 0xc9, 0x75, 0xec, 0xc3, 0x41, 0x83, 0xf9, 0x02, 0x7c,
+		0x13, 0x4d, 0x85, 0xc0, 0x74, 0x0e, 0x41, 0x8b, 0x44, 0xc3, 0x04, 0x41, 0x89, 0x00, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3, 0xe9, 0x00, 0x00, 0x00,
+		0x00};
+	return code;
+}
+
 static const std::vector<uint8_t> *block_prelude(std::string_view module, std::string_view name)
 {
 	static constexpr std::array<BlockPrelude, 5> ticks{{{"kernel32.dll", "GetTickCount"}, {"kernel32.dll", "GetTickCount64"},
@@ -441,6 +460,8 @@ static const std::vector<uint8_t> *block_prelude(std::string_view module, std::s
 	for (const auto &prelude : ticks)
 		if (prelude.module == module && prelude.name == name)
 			return &tick_prelude();
+	if ((module == "kernel32.dll" || module == "kernelbase.dll") && (name == "GetLocaleInfoEx" || name == "GetLocaleInfoW"))
+		return &locale_prelude();
 	if (module == "user32.dll" && name == "GetDC")
 		return &screen_get_dc_prelude();
 	if (module == "user32.dll" && name == "ReleaseDC")
@@ -1386,7 +1407,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	memory.set_commit_block(served_block);
 	windows.set_screen_block(served_block);
 	// The window table the window preludes read, mapped into the guest and published in the served block.
-	const size_t table_size = NativeWindows::window_records * NativeWindows::window_record;
+	const size_t windows_size = NativeWindows::window_records * NativeWindows::window_record, table_size = windows_size + 8192;
 	const int table_file = memfd_create("raven-window-table", MFD_CLOEXEC);
 	if (table_file < 0 || ftruncate(table_file, off_t(table_size)) != 0)
 		throw std::runtime_error("cannot create the window table");
@@ -1398,6 +1419,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	windows.set_window_table(table);
 	process.set_resume_hook([&windows] { windows.publish_windows(); });
 	__atomic_store_n(&served_block[window_table / 8], table_guest, __ATOMIC_RELEASE);
+	// The locale table follows the window table.
+	const auto locales = locale_table();
+	if (locales.size() > table_size - windows_size)
+		throw std::runtime_error("the locale table does not fit its page");
+	std::memcpy(table + windows_size, locales.data(), locales.size());
+	__atomic_store_n(&served_block[locale_pointer / 8], table_guest + windows_size, __ATOMIC_RELEASE);
 	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, [&, served_names = std::move(served_names)](uint64_t stub) {
 		const auto found = served_names.find(stub);
 		if (found == served_names.end())

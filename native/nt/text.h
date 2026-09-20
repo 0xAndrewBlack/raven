@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace raven {
 
@@ -19,5 +20,11 @@ std::u16string widen_ascii(std::string_view text);
 std::u16string from_ansi(std::string_view text, uint32_t code_page);
 // Inverse of from_ansi; characters the code page lacks become '?'.
 std::string to_ansi(std::u16string_view text, uint32_t code_page);
+
+// What GetLocaleInfo answers, for the guest to read: an entry of 8 bytes for each type below 0x80 and then for 0x1000 to 0x100f (the
+// offset of its text in characters, or 0xffff for a type without one, the length without the terminator and the text as a number),
+// then the texts, each with its terminator.
+constexpr uint32_t locale_table_entries = 0x90;
+std::vector<uint8_t> locale_table();
 
 }
