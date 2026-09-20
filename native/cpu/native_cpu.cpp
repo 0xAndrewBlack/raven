@@ -621,6 +621,21 @@ uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
 	}
 }
 
+bool NativeProcess::has_protection(uint64_t address, size_t size, int protection) const
+{
+	const uint64_t end = address + size;
+	while (address < end) {
+		const auto after = state->mappings.upper_bound(address);
+		if (after == state->mappings.begin())
+			return false;
+		const auto &mapping = std::prev(after)->second;
+		if (address - mapping.address >= mapping.size || mapping.protection != protection)
+			return false;
+		address = mapping.address + mapping.size;
+	}
+	return true;
+}
+
 void NativeProcess::protect_memory(uint64_t address, size_t size, int protection)
 {
 	protect_range(address, size, protection, false);

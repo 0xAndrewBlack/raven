@@ -81,8 +81,24 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 		const auto found=region(base,length);
 		if (found==regions.end())
 			return {0,0,conflict};
-		process.protect_memory(base,length,permissions);
 		const auto first=(base-found->first)/4096;
+		// Programs such as a browser's allocators commit a few pages at a time, one block after the next, and each change of the guest's
+		// protection stops it. Read-write commits therefore also open the neighbouring pages that are only reserved, up to the 64 KiB
+		// granule around them; they stay reserved here, and committing them later changes nothing in the guest. Commits that fill
+		// whole granules, as a WebAssembly memory grows, open nothing more, and pages committed otherwise are never touched.
+		if (!process.has_protection(base,length,permissions)) {
+			uint64_t from=base, to=base+length;
+			if (permissions==(PROT_READ|PROT_WRITE)) {
+				const uint64_t region_end=found->first+found->second.size;
+				const uint64_t window_start=std::max(found->first,base & ~uint64_t(65535));
+				const uint64_t window_end=std::min(region_end,(base+length+65535) & ~uint64_t(65535));
+				while (from>window_start && !found->second.pages.at((from-4096-found->first)/4096))
+					from-=4096;
+				while (to<window_end && !found->second.pages.at((to-found->first)/4096))
+					to+=4096;
+			}
+			process.protect_memory(from,to-from,permissions);
+		}
 		// Only pages that were reserved until now count as new commitment.
 		const uint64_t fresh=(length/4096-found->second.pages.nonzero(first,length/4096))*4096;
 		if (fresh>limit-used)
