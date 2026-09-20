@@ -544,7 +544,11 @@ static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view
 
 uint64_t api_trap_address(const PEModule &provider, std::string_view module, std::string_view name, uint32_t address)
 {
-	return provider.loaded.base() + served_stub_rva(provider.loaded.data(), module, name, address) + fast_stub_trap_offset(module, name);
+	// An export that is its own breakpoint has no stub in front of it: a provider built without guest-side paths.
+	const auto image = provider.loaded.data();
+	if (address < image.size() && image[address] == 0xcc)
+		return provider.loaded.base() + address;
+	return provider.loaded.base() + served_stub_rva(image, module, name, address) + fast_stub_trap_offset(module, name);
 }
 
 // Offset of the slow-path breakpoint inside a fast or served stub.
@@ -908,9 +912,11 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				continue;
 			provider = found->second.get();
 		} else {
-			const auto bytes = runtime_provider(name, 0x180000000ULL, symbols, false, {}, ordinals, true);
+			// RAVEN_NO_GUEST_PATHS builds the providers without the paths the guest answers itself, for comparing the two.
+			static const bool guest_paths = !std::getenv("RAVEN_NO_GUEST_PATHS");
+			const auto bytes = runtime_provider(name, 0x180000000ULL, symbols, false, {}, ordinals, guest_paths);
 			const auto base = provider_base(modules, PEImage(bytes).image_size);
-			provider = &modules.add(name, runtime_provider(name, base, symbols, false, {}, ordinals, true), base);
+			provider = &modules.add(name, runtime_provider(name, base, symbols, false, {}, ordinals, guest_paths), base);
 			provider->runtime_api = true;
 		}
 		// A guest component that implements part of a system library receives those calls directly instead of through a trap.
@@ -938,8 +944,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (name != "ntdll.dll")
 			for (const auto &symbol : provider->exports)
 				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty())
-					traps.emplace(provider->loaded.base() + (provider->runtime_api ? served_stub_rva(provider->loaded.data(), name, symbol.names.at(0), symbol.address) +
-						fast_stub_trap_offset(name, symbol.names.at(0)) : symbol.address), symbol.names.at(0));
+					traps.emplace(provider->runtime_api ? api_trap_address(*provider, name, symbol.names.at(0), symbol.address) :
+						provider->loaded.base() + symbol.address, symbol.names.at(0));
 	}
 	const auto nt=modules.all().find("ntdll.dll");
 	const bool needs_nt=std::any_of(modules.all().begin(),modules.all().end(),[](const auto &item) {
