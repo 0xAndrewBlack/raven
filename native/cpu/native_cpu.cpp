@@ -286,6 +286,9 @@ struct NativeProcess::State {
 	std::map<uint64_t, uint32_t> api_traps;
 	// 64-bit API breakpoints followed by RET: their calls return through it, without the runtime popping the return address.
 	std::set<uint64_t> returning_traps;
+	// The guest page add_api_trap last read, for the traps next to each other that follow; cleared whenever guest memory changes.
+	std::vector<uint8_t> trap_page;
+	uint64_t trap_page_address = 0;
 	NativeMode mode = NativeMode::x64;
 	uint64_t return_gate = 0;
 	uint32_t fs_selector = 0;
@@ -518,6 +521,7 @@ std::vector<uint8_t> NativeProcess::read_memory(uint64_t address, size_t size) c
 
 void NativeProcess::write_memory(uint64_t address, std::span<const uint8_t> bytes)
 {
+	state->trap_page.clear();
 	validate_write_memory(address,bytes.size());
 	for (size_t offset = 0; offset < bytes.size();) {
 		const iovec local{const_cast<uint8_t *>(bytes.data() + offset), bytes.size() - offset};
@@ -601,6 +605,7 @@ static uint64_t low_gap(pid_t pid, uint64_t size, uint64_t limit)
 
 uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address)
 {
+	state->trap_page.clear();
 	state->require_stopped();
 	memory_range(address, size, protection, state->limit());
 	state->allocations.reserve(state->allocations.size() + 1);
@@ -618,6 +623,7 @@ uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address
 
 uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
 {
+	state->trap_page.clear();
 	state->require_stopped();
 	memory_range(0, size, PROT_READ | PROT_WRITE, state->limit());
 	state->allocations.reserve(state->allocations.size() + 1);
@@ -685,6 +691,7 @@ bool NativeProcess::has_protection(uint64_t address, size_t size, int protection
 
 void NativeProcess::protect_memory(uint64_t address, size_t size, int protection)
 {
+	state->trap_page.clear();
 	protect_range(address, size, protection, false);
 }
 
@@ -738,6 +745,7 @@ void NativeProcess::protect_range(uint64_t address, size_t size, int protection,
 
 void NativeProcess::unmap_memory(uint64_t address)
 {
+	state->trap_page.clear();
 	state->require_stopped();
 	const auto owned = std::find_if(state->allocations.begin(), state->allocations.end(), [&](const auto &allocation) {
 		return allocation.first == address;
@@ -1045,12 +1053,21 @@ void NativeProcess::install_segment(uint32_t entry, uint64_t base)
 void NativeProcess::add_api_trap(uint64_t address, uint32_t callee_cleanup)
 {
 	state->require_stopped();
-	if (!state->covers(address, 1, PROT_EXEC) || read_memory(address, 1)[0] != 0xcc)
+	// Traps are registered by the thousand, mostly next to each other: the page around one is read once for those that follow.
+	const auto byte_at = [&](uint64_t at) {
+		const uint64_t page = at & ~uint64_t(4095);
+		if (page != state->trap_page_address || state->trap_page.empty()) {
+			state->trap_page = read_memory(page, state->covers(page, 4096, PROT_EXEC) ? 4096 : size_t(at - page + 1));
+			state->trap_page_address = page;
+		}
+		return at - page < state->trap_page.size() ? state->trap_page[at - page] : read_memory(at, 1)[0];
+	};
+	if (!state->covers(address, 1, PROT_EXEC) || byte_at(address) != 0xcc)
 		throw std::runtime_error("native API trap must be an executable INT3");
 	if (state->mode == NativeMode::x86 && (address >= state->limit() || callee_cleanup % 4))
 		throw std::runtime_error("native x86 API trap requires a 32-bit address and dword-aligned cleanup");
 	state->api_traps[address] = callee_cleanup;
-	if (state->mode != NativeMode::x86 && state->covers(address + 1, 1, PROT_EXEC) && read_memory(address + 1, 1)[0] == 0xc3)
+	if (state->mode != NativeMode::x86 && state->covers(address + 1, 1, PROT_EXEC) && byte_at(address + 1) == 0xc3)
 		state->returning_traps.insert(address);
 	else
 		state->returning_traps.erase(address);
