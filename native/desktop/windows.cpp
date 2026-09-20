@@ -1463,11 +1463,123 @@ void NativeWindows::publish_windows()
 		if (std::memcmp(fields+8,record+8,76) || std::memcmp(fields+88,record+88,8) || (extra && std::memcmp(fields+160,record+160,extra)))
 			publish_window_record(handle,window);
 	}
+	publish_menus();
 	if (screen_block) {
 		__atomic_store_n(reinterpret_cast<uint64_t *>(screen_block+focus_window),focus,__ATOMIC_RELEASE);
 		__atomic_store_n(reinterpret_cast<uint64_t *>(screen_block+focus_published),uint64_t(1),__ATOMIC_RELEASE);
 	}
 	if (!api_depth) watched.clear();
+}
+
+void NativeWindows::set_menu_table(uint8_t *table)
+{
+	menu_table=table;
+	objects.touched_menus_overflow()=true;
+	publish_menus();
+}
+
+static size_t menu_block_size(const DesktopMenu &menu)
+{
+	size_t size=menu.items.size()*32;
+	for (const auto &item : menu.items) size+=item.text.size()*2;
+	return (size+7)&~size_t(7);
+}
+
+void NativeWindows::publish_menu(uint64_t handle,const DesktopMenu *menu)
+{
+	auto *slot=menu_table+(handle%menu_slots)*16;
+	uint64_t occupant=0;
+	std::memcpy(&occupant,slot,8);
+	if (!menu) {
+		if (occupant==handle) std::memset(slot,0,8);
+		return;
+	}
+	// Two menus whose handles share the low bits: the first keeps the slot and the other is answered by the runtime.
+	if (occupant && occupant!=handle && objects.menu(occupant))
+		return;
+	std::memset(slot,0,8);
+	const size_t size=menu_block_size(*menu);
+	if (menu->items.size()>4096 || size>menu_area-menu_blocks)
+		return;
+	if (menu_used+size>menu_area) {
+		// The blocks are full of old copies: every menu is written again from the start.
+		std::memset(menu_table,0,menu_blocks);
+		menu_used=menu_blocks;
+		for (const auto other : objects.menu_handles())
+			if (const auto *record=objects.menu(other); record && menu_used+menu_block_size(*record)<=menu_area) publish_menu(other,record);
+		return;
+	}
+	auto *block=menu_table+menu_used;
+	uint32_t text=uint32_t(menu_used+menu->items.size()*32);
+	for (const auto &item : menu->items) {
+		const uint32_t fields[4]={item.type,item.state,item.id,uint32_t(item.text.size())};
+		std::memcpy(block,fields,16);
+		std::memcpy(block+16,&item.submenu,8);
+		std::memcpy(block+24,&text,4);
+		std::memset(block+28,0,4);
+		std::memcpy(menu_table+text,item.text.data(),item.text.size()*2);
+		text+=uint32_t(item.text.size()*2);
+		block+=32;
+	}
+	const uint32_t place[2]={uint32_t(menu_used),uint32_t(menu->items.size())};
+	std::memcpy(slot+8,place,8);
+	menu_used+=size;
+	std::memcpy(slot,&handle,8);
+}
+
+bool NativeWindows::menu_matches(uint64_t handle,const DesktopMenu &menu) const
+{
+	const auto *slot=menu_table+(handle%menu_slots)*16;
+	uint64_t occupant=0;
+	uint32_t place[2]={};
+	std::memcpy(&occupant,slot,8);
+	std::memcpy(place,slot+8,8);
+	if (occupant!=handle) return true;
+	if (place[1]!=menu.items.size()) return false;
+	const auto *block=menu_table+place[0];
+	for (const auto &item : menu.items) {
+		uint32_t fields[4]={},text=0;
+		uint64_t submenu=0;
+		std::memcpy(fields,block,16);
+		std::memcpy(&submenu,block+16,8);
+		std::memcpy(&text,block+24,4);
+		if (fields[0]!=item.type || fields[1]!=item.state || fields[2]!=item.id || fields[3]!=item.text.size() || submenu!=item.submenu ||
+			std::memcmp(menu_table+text,item.text.data(),item.text.size()*2))
+			return false;
+		block+=32;
+	}
+	return true;
+}
+
+void NativeWindows::publish_menus()
+{
+	if (!menu_table)
+		return;
+	auto &touched=objects.touched_menus();
+	if (objects.touched_menus_overflow()) {
+		std::memset(menu_table,0,menu_blocks);
+		menu_used=menu_blocks;
+		watched_menus.clear();
+		for (const auto handle : objects.menu_handles()) publish_menu(handle,objects.menu(handle));
+		objects.touched_menus_overflow()=false;
+		touched.clear();
+	}
+	// As with windows: menus handed out since the guest last ran are written again, and stay watched while the call goes on.
+	for (const auto handle : touched) {
+		const auto *menu=objects.menu(handle);
+		publish_menu(handle,menu);
+		const auto found=std::find_if(watched_menus.begin(),watched_menus.end(),[&](const auto &item) { return item.first==handle; });
+		if (found!=watched_menus.end()) {
+			if (menu) found->second=menu;
+			else watched_menus.erase(found);
+		} else if (menu) {
+			watched_menus.emplace_back(handle,menu);
+		}
+	}
+	touched.clear();
+	for (const auto &[handle,menu] : watched_menus)
+		if (!menu_matches(handle,*menu)) publish_menu(handle,menu);
+	if (!api_depth) watched_menus.clear();
 }
 
 void NativeWindows::screen_dc_use(std::string_view name)

@@ -69,7 +69,17 @@ const DesktopMenu *DesktopObjects::menu(uint64_t handle) const
 DesktopMenu *DesktopObjects::edit_menu(uint64_t handle)
 {
 	const auto found=objects.find(handle);
-	return found==objects.end() ? nullptr : std::get_if<DesktopMenu>(&found->second);
+	auto *record=found==objects.end() ? nullptr : std::get_if<DesktopMenu>(&found->second);
+	if (record) touch_menu(handle);
+	return record;
+}
+
+std::vector<uint64_t> DesktopObjects::menu_handles() const
+{
+	std::vector<uint64_t> result;
+	for (const auto &[handle,object] : objects)
+		if (std::holds_alternative<DesktopMenu>(object)) result.push_back(handle);
+	return result;
 }
 
 uint64_t DesktopObjects::load_menu(const MenuTemplate &definition)
@@ -145,6 +155,7 @@ uint64_t DesktopObjects::add(Object object)
 		record->order=++next_order;
 		touch_window(handle);
 	}
+	if (std::holds_alternative<DesktopMenu>(objects.at(handle))) touch_menu(handle);
 	return handle;
 }
 
@@ -155,6 +166,7 @@ bool DesktopObjects::erase(uint64_t handle)
 		return false;
 	if (std::holds_alternative<DesktopWindow>(found->second) && !child_windows(handle).empty()) return false;
 	if (std::holds_alternative<DesktopWindow>(found->second)) touch_window(handle);
+	if (std::holds_alternative<DesktopMenu>(found->second)) touch_menu(handle);
 	if (const auto *menu=std::get_if<DesktopMenu>(&found->second)) {
 		if (menu->parent) return false;
 		for (const auto &item:menu->items) if (item.submenu) {

@@ -283,6 +283,10 @@ public:
 	std::vector<uint64_t> &touched_windows() { return touched; }
 	// Set when more windows were touched than are recorded: every window may have changed.
 	bool &touched_overflow() { return overflow; }
+	// Menus handed out for change, added or erased, for the guest's menu table, as windows are for its window table.
+	std::vector<uint64_t> &touched_menus() { return menus_touched; }
+	bool &touched_menus_overflow() { return menus_overflow; }
+	std::vector<uint64_t> menu_handles() const;
 	uint64_t window_root(uint64_t handle) const;
 	// Children of a window in z-order, bottom to top. Top-level windows are the children of window zero.
 	std::vector<uint64_t> child_windows(uint64_t parent) const;
@@ -318,6 +322,14 @@ public:
 private:
 	std::vector<uint64_t> touched{};
 	bool overflow=false;
+	std::vector<uint64_t> menus_touched{};
+	bool menus_overflow=false;
+	void touch_menu(uint64_t handle)
+	{
+		if (!menus_touched.empty() && menus_touched.back()==handle) return;
+		if (menus_touched.size()<4096) menus_touched.push_back(handle);
+		else menus_overflow=true;
+	}
 	void touch_window(uint64_t handle)
 	{
 		if (!touched.empty() && touched.back()==handle) return;

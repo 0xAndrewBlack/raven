@@ -61,6 +61,10 @@ public:
 	// The focus window, published in the served block with the table: a flag, then the handle.
 	static constexpr size_t focus_published=0x710, focus_window=0x718;
 	void set_window_table(uint8_t *table);
+	// The menu table the guest's menu preludes read: 1024 slots of 16 bytes (handle, block offset, item count) at the handle's low ten
+	// bits, then the blocks: an item of 32 bytes each (type, state, identifier, text length, submenu, text offset) and their texts.
+	static constexpr size_t menu_slots=1024, menu_blocks=0x4000, menu_area=512*1024;
+	void set_menu_table(uint8_t *table);
 	void publish_windows();
 	void api_entered() { ++api_depth; }
 	void api_left() { --api_depth; }
@@ -119,6 +123,12 @@ private:
 	uint8_t *window_table=nullptr;
 	unsigned api_depth=0;
 	void publish_window_record(uint64_t handle,const DesktopWindow *window);
+	uint8_t *menu_table=nullptr;
+	size_t menu_used=menu_blocks;
+	std::vector<std::pair<uint64_t,const DesktopMenu *>> watched_menus;
+	void publish_menu(uint64_t handle,const DesktopMenu *menu);
+	bool menu_matches(uint64_t handle,const DesktopMenu &menu) const;
+	void publish_menus();
 	std::vector<std::pair<uint64_t,const DesktopWindow *>> watched;
 	// Publishes a free screen context over the desktop window when none is published.
 	void publish_screen_dc(uint64_t desktop);
