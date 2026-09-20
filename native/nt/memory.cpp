@@ -80,6 +80,13 @@ void NativeMemory::open_window(uint64_t from, uint64_t to)
 	if (!commit_block)
 		return;
 	uint64_t *windows=commit_block+commit_windows/8;
+	// An allocator works through its reservation in order, so a range that touches one already open is joined to it.
+	for (uint64_t index=0; index<windows[0]; ++index)
+		if (windows[1+index*2]<=to && from<=windows[2+index*2]) {
+			windows[1+index*2]=std::min(windows[1+index*2],from);
+			windows[2+index*2]=std::max(windows[2+index*2],to);
+			return;
+		}
 	if (windows[0]<commit_window_count) {
 		window_next=windows[0];
 		windows[0]+=1;
@@ -88,6 +95,17 @@ void NativeMemory::open_window(uint64_t from, uint64_t to)
 	}
 	windows[1+window_next*2]=from;
 	windows[2+window_next*2]=to;
+}
+
+bool NativeMemory::window_holds(uint64_t from, uint64_t to) const
+{
+	if (!commit_block)
+		return false;
+	const uint64_t *windows=commit_block+commit_windows/8;
+	for (uint64_t index=0; index<windows[0]; ++index)
+		if (windows[1+index*2]<=from && to<=windows[2+index*2])
+			return true;
+	return false;
 }
 
 void NativeMemory::close_windows(uint64_t from, uint64_t to)
@@ -134,15 +152,17 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 			return {0,0,conflict};
 		const auto first=(base-found->first)/4096;
 		// Programs such as a browser's allocators commit a few pages at a time, one block after the next, and each change of the guest's
-		// protection stops it. Read-write commits therefore also open the neighbouring pages that are only reserved, up to the 64 KiB
-		// granule around them; they stay reserved here, and committing them later changes nothing in the guest. Commits that fill
-		// whole granules, as a WebAssembly memory grows, open nothing more, and pages committed otherwise are never touched.
+		// protection stops it. Read-write commits of part of a 64 KiB granule therefore also open the neighbouring pages that are only
+		// reserved, up to the 1 MiB around them; they stay reserved here, and committing them later changes nothing in the guest.
+		// Commits of whole granules, as a WebAssembly memory grows with guard pages after it, open nothing more, and pages committed
+		// otherwise are never touched.
+		const uint64_t granule=((base | length) & 65535) ? uint64_t(1) << 20 : 4096;
 		if (!process.has_protection(base,length,permissions)) {
 			uint64_t from=base, to=base+length;
 			if (permissions==(PROT_READ|PROT_WRITE)) {
 				const uint64_t region_end=found->first+found->second.size;
-				const uint64_t window_start=std::max(found->first,base & ~uint64_t(65535));
-				const uint64_t window_end=std::min(region_end,(base+length+65535) & ~uint64_t(65535));
+				const uint64_t window_start=std::max(found->first,base & ~(granule-1));
+				const uint64_t window_end=std::min(region_end,(base+length+granule-1) & ~(granule-1));
 				while (from>window_start && !found->second.pages.at((from-4096-found->first)/4096))
 					from-=4096;
 				while (to<window_end && !found->second.pages.at((to-found->first)/4096))
@@ -152,6 +172,17 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 			process.protect_memory(from,to-from,permissions);
 			if (permissions==(PROT_READ|PROT_WRITE))
 				open_window(from,to);
+		} else if (permissions==(PROT_READ|PROT_WRITE)) {
+			// Already open: its granule's open pages are published again, as the range that held them may have been dropped.
+			const uint64_t region_end=found->first+found->second.size;
+			const uint64_t window_start=std::max(found->first,base & ~(granule-1));
+			const uint64_t window_end=std::min(region_end,(base+length+granule-1) & ~(granule-1));
+			uint64_t from=base, to=base+length;
+			while (from>window_start && process.has_protection(from-4096,4096,permissions))
+				from-=4096;
+			while (to<window_end && process.has_protection(to,4096,permissions))
+				to+=4096;
+			open_window(from,to);
 		}
 		// Only pages that were reserved until now count as new commitment.
 		const uint64_t fresh=(length/4096-found->second.pages.nonzero(first,length/4096))*4096;
@@ -238,9 +269,16 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 	const auto base=address & ~uint64_t(4095), length=(size+address-base+4095)&~uint64_t(4095);
 	if (region(base,length)==regions.end())
 		return {0,0,conflict};
-	close_windows(base,base+length);
-	process.discard_memory(base,length);
-	process.protect_memory(base,length,PROT_NONE);
+	// Pages inside an open range keep it: they are emptied, so a later commit finds them zeroed, and stay readable and writable, as the
+	// pages opened around a commit are. Allocators decommit and commit the same pages over and over, and the next commit is then
+	// done by the guest. Pages outside one become inaccessible again.
+	if (window_holds(base,base+length) && process.has_protection(base,length,PROT_READ|PROT_WRITE)) {
+		process.discard_memory(base,length);
+	} else {
+		close_windows(base,base+length);
+		process.discard_memory(base,length);
+		process.protect_memory(base,length,PROT_NONE);
+	}
 	const auto first=(base-found->first)/4096;
 	used-=found->second.pages.nonzero(first,length/4096)*4096;
 	found->second.pages.fill(first,length/4096,0);
