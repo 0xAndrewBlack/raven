@@ -273,7 +273,9 @@ uint64_t NativeChild::syscall(uint64_t number, uint64_t a1, uint64_t a2, uint64_
 
 struct NativeProcess::State {
 	std::unique_ptr<NativeChild> child;
-	std::vector<ImageMapping> mappings;
+	// The guest's own mappings by start address; they never overlap. A program such as a browser makes thousands of them, and every
+	// read, write and protection change looks one up.
+	std::map<uint64_t, ImageMapping> mappings;
 	std::vector<std::pair<uint64_t, uint64_t>> allocations;
 	std::vector<std::pair<uint64_t, uint64_t>> image_allocations;
 	std::map<uint64_t, uint32_t> api_traps;
@@ -321,8 +323,6 @@ struct NativeProcess::State {
 	std::function<void(uint64_t)> sampler;
 	// Where the stack arguments of the call being served start; they are read only when a handler asks for them.
 	uint64_t served_stack = 0;
-	// The mapping the last covering check found: mappings never overlap, and reads and writes mostly fall in the one they used before.
-	mutable size_t covered = 0;
 	void require_stopped() const;
 	bool covers(uint64_t address, size_t size, int protection) const;
 	uint64_t limit() const { return mode == NativeMode::x86 ? 0x100000000ULL : 0x800000000000ULL; }
@@ -341,16 +341,14 @@ bool NativeProcess::State::covers(uint64_t address, size_t size, int protection)
 	if (size > UINT64_MAX - address)
 		return false;
 	const uint64_t end = address + size;
-	const auto holds = [&](const ImageMapping &mapping) {
-		return address >= mapping.address && address - mapping.address < mapping.size && (mapping.protection & protection) == protection;
-	};
 	while (address < end) {
-		auto found = covered < mappings.size() && holds(mappings[covered]) ? mappings.begin() + std::ptrdiff_t(covered) :
-			std::find_if(mappings.begin(), mappings.end(), holds);
-		if (found == mappings.end())
+		auto found = mappings.upper_bound(address);
+		if (found == mappings.begin())
 			return false;
-		covered = size_t(found - mappings.begin());
-		address = std::min(end, found->address + found->size);
+		const auto &mapping = std::prev(found)->second;
+		if (address - mapping.address >= mapping.size || (mapping.protection & protection) != protection)
+			return false;
+		address = std::min(end, mapping.address + mapping.size);
 	}
 	return true;
 }
@@ -378,7 +376,7 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 			throw std::runtime_error("host does not support exact non-replacing guest mappings");
 		for (const auto &mapping : mapped_image->mappings()) {
 			child.syscall(SYS_mprotect, mapping.address, mapping.size, static_cast<uint64_t>(mapping.protection));
-			state->mappings.push_back(mapping);
+			state->mappings.insert_or_assign(mapping.address, mapping);
 		}
 	}
 	const uint64_t stack_size = 1024 * 1024;
@@ -388,7 +386,7 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 	if (stack + stack_size + 8192 > state->limit())
 		throw std::runtime_error("host placed the native stack outside the guest address space");
 	child.syscall(SYS_mprotect, stack + 4096, stack_size, PROT_READ | PROT_WRITE);
-	state->mappings.push_back({stack + 4096, stack_size, 0, PROT_READ | PROT_WRITE});
+	state->mappings.insert_or_assign(stack + 4096, ImageMapping{stack + 4096, stack_size, 0, PROT_READ | PROT_WRITE});
 	state->stack_top = stack + 4096 + stack_size;
 	state->initial_stack_top = state->stack_top;
 	if (mode == NativeMode::x86) {
@@ -397,10 +395,10 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 			MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, uint64_t(-1));
 		if (page + 4096 > state->limit())
 			throw std::runtime_error("host placed the native return gate outside the guest address space");
-		state->mappings.push_back({page, 4096, 0, PROT_READ | PROT_WRITE});
+		state->mappings.insert_or_assign(page, ImageMapping{page, 4096, 0, PROT_READ | PROT_WRITE});
 		write_memory(page, std::vector<uint8_t>{0xcc});
 		child.syscall(SYS_mprotect, page, 4096, PROT_READ | PROT_EXEC);
-		state->mappings.back().protection = PROT_READ | PROT_EXEC;
+		state->mappings.at(page).protection = PROT_READ | PROT_EXEC;
 		state->return_gate = page;
 	}
 	user_regs_struct registers{};
@@ -555,7 +553,6 @@ uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address
 {
 	state->require_stopped();
 	memory_range(address, size, protection, state->limit());
-	state->mappings.reserve(state->mappings.size() + 1);
 	state->allocations.reserve(state->allocations.size() + 1);
 	const auto hint = address ? address : state->mode == NativeMode::x86 ? low_gap(state->child->pid, size, state->limit()) : 0;
 	const auto mapped = memory_syscall(SYS_mmap, hint, size, static_cast<uint64_t>(protection),
@@ -564,7 +561,7 @@ uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address
 		state->child->stop();
 		throw std::runtime_error("host returned an invalid native allocation address");
 	}
-	state->mappings.push_back({mapped, size, 0, protection});
+	state->mappings.insert_or_assign(mapped, ImageMapping{mapped, size, 0, protection});
 	state->allocations.emplace_back(mapped, size);
 	return mapped;
 }
@@ -573,7 +570,6 @@ uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
 {
 	state->require_stopped();
 	memory_range(0, size, PROT_READ | PROT_WRITE, state->limit());
-	state->mappings.reserve(state->mappings.size() + 1);
 	state->allocations.reserve(state->allocations.size() + 1);
 	const auto path = "/proc/" + std::to_string(getpid()) + "/fd/" + std::to_string(descriptor);
 	std::vector<uint8_t> name(path.begin(), path.end());
@@ -607,7 +603,7 @@ uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
 		memory_syscall(SYS_close, guest_descriptor, 0);
 		guest_descriptor = uint64_t(-1);
 		unmap_memory(scratch);
-		state->mappings.push_back({mapped, size, 0, PROT_READ | PROT_WRITE});
+		state->mappings.insert_or_assign(mapped, ImageMapping{mapped, size, 0, PROT_READ | PROT_WRITE});
 		state->allocations.emplace_back(mapped, size);
 		return mapped;
 	} catch (...) {
@@ -644,34 +640,35 @@ void NativeProcess::protect_range(uint64_t address, size_t size, int protection,
 		// A program may also protect the pages of an image it was loaded from: they are accepted when mappings cover the whole range.
 		uint64_t cursor = address;
 		while (cursor < address + size) {
-			const auto covering = std::find_if(state->mappings.begin(), state->mappings.end(), [&](const auto &mapping) {
-				return cursor >= mapping.address && cursor < mapping.address + mapping.size;
-			});
-			if (covering == state->mappings.end())
+			const auto after = state->mappings.upper_bound(cursor);
+			if (after == state->mappings.begin() || cursor - std::prev(after)->second.address >= std::prev(after)->second.size)
 				throw std::runtime_error("native protection range is outside a dynamic allocation");
-			cursor = covering->address + covering->size;
+			cursor = std::prev(after)->second.address + std::prev(after)->second.size;
 		}
 	} else if (owned == state->allocations.end()) {
 		throw std::runtime_error("native protection range is outside a dynamic allocation");
 	}
-	std::vector<ImageMapping> updated;
-	updated.reserve(state->mappings.size() + 2);
+	// Only the mappings the range touches are split; they are replaced once the guest's protection has changed.
 	const uint64_t end = address + size;
-	for (const auto &mapping : state->mappings) {
+	auto first_touched = state->mappings.upper_bound(address);
+	if (first_touched != state->mappings.begin() && std::prev(first_touched)->second.address + std::prev(first_touched)->second.size > address)
+		--first_touched;
+	auto past_touched = first_touched;
+	std::vector<ImageMapping> pieces;
+	for (; past_touched != state->mappings.end() && past_touched->second.address < end; ++past_touched) {
+		const auto &mapping = past_touched->second;
 		const uint64_t last = mapping.address + mapping.size;
-		if (last <= address || mapping.address >= end) {
-			updated.push_back(mapping);
-			continue;
-		}
 		if (mapping.address < address)
-			updated.push_back({mapping.address, address - mapping.address, 0, mapping.protection});
+			pieces.push_back({mapping.address, address - mapping.address, 0, mapping.protection});
 		const uint64_t first = std::max(mapping.address, address);
-		updated.push_back({first, std::min(last, end) - first, 0, protection});
+		pieces.push_back({first, std::min(last, end) - first, 0, protection});
 		if (last > end)
-			updated.push_back({end, last - end, 0, mapping.protection});
+			pieces.push_back({end, last - end, 0, mapping.protection});
 	}
 	memory_syscall(SYS_mprotect, address, size, static_cast<uint64_t>(protection));
-	state->mappings.swap(updated);
+	state->mappings.erase(first_touched, past_touched);
+	for (const auto &piece : pieces)
+		state->mappings.insert_or_assign(piece.address, piece);
 }
 
 void NativeProcess::unmap_memory(uint64_t address)
@@ -684,7 +681,7 @@ void NativeProcess::unmap_memory(uint64_t address)
 		throw std::runtime_error("native release requires a dynamic allocation base");
 	const uint64_t end = address + owned->second;
 	memory_syscall(SYS_munmap, address, owned->second);
-	std::erase_if(state->mappings, [&](const auto &mapping) { return mapping.address >= address && mapping.address < end; });
+	state->mappings.erase(state->mappings.lower_bound(address), state->mappings.lower_bound(end));
 	std::erase_if(state->api_traps, [&](const auto &trap) { return trap.first >= address && trap.first < end; });
 	state->allocations.erase(owned);
 }
@@ -697,7 +694,7 @@ bool NativeProcess::memory_available(uint64_t address, size_t size) const
 	const auto stack = state->initial_stack_top-1024*1024-4096;
 	if (address < state->initial_stack_top+4096 && stack < end)
 		return false;
-	for (const auto &mapping : state->mappings)
+	for (const auto &[start, mapping] : state->mappings)
 		if (address < mapping.address+mapping.size && mapping.address < end)
 			return false;
 	// The host maps a few things of its own into the guest near the top of the address space (the loader, vdso, its stack); the
@@ -734,7 +731,6 @@ void NativeProcess::map_image(LoadedImage &image)
 	const auto size = image.data().size();
 	memory_range(base, size, PROT_NONE, state->limit());
 	const auto mappings = image.mappings();
-	state->mappings.reserve(state->mappings.size() + mappings.size() + 1);
 	state->image_allocations.reserve(state->image_allocations.size() + 1);
 	const auto path = "/proc/" + std::to_string(getpid()) + "/fd/" + std::to_string(image.descriptor());
 	std::vector<uint8_t> name(path.begin(), path.end());
@@ -760,7 +756,8 @@ void NativeProcess::map_image(LoadedImage &image)
 		descriptor = uint64_t(-1);
 		unmap_memory(scratch);
 		scratch = 0;
-		state->mappings.insert(state->mappings.end(), mappings.begin(), mappings.end());
+		for (const auto &mapping : mappings)
+			state->mappings.insert_or_assign(mapping.address, mapping);
 		state->image_allocations.emplace_back(base, size);
 	} catch (...) {
 		try {
@@ -787,7 +784,7 @@ void NativeProcess::unmap_image(uint64_t address)
 		throw std::runtime_error("native image release requires a dynamically mapped image base");
 	const uint64_t end = address + owned->second;
 	memory_syscall(SYS_munmap, address, owned->second);
-	std::erase_if(state->mappings, [&](const auto &mapping) { return mapping.address >= address && mapping.address < end; });
+	state->mappings.erase(state->mappings.lower_bound(address), state->mappings.lower_bound(end));
 	std::erase_if(state->api_traps, [&](const auto &trap) { return trap.first >= address && trap.first < end; });
 	state->image_allocations.erase(owned);
 }
