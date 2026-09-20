@@ -39,6 +39,21 @@
 
 namespace raven {
 
+// A whole host file in one read: libraries such as a browser's main DLL run to hundreds of megabytes, and reading them a character at
+// a time through a stream iterator cost seconds in every process that loads them.
+static std::vector<uint8_t> read_host_file(const std::filesystem::path &path)
+{
+	std::ifstream stream(path, std::ios::binary | std::ios::ate);
+	const auto size = stream ? stream.tellg() : std::streampos(-1);
+	if (size <= 0)
+		return {};
+	std::vector<uint8_t> bytes(static_cast<size_t>(size));
+	stream.seekg(0);
+	if (!stream.read(reinterpret_cast<char *>(bytes.data()), size))
+		bytes.resize(static_cast<size_t>(stream.gcount()));
+	return bytes;
+}
+
 // PathCchCombineEx and PathCchSkipRoot live in kernelbase.dll on Windows and are not in the import libraries the public lists come from.
 static constexpr std::array<std::string_view, 47> names{
 	"CloseHandle","CreateEventA","CreateEventW","ExitProcess",
@@ -886,8 +901,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		const auto resolved = paths.resolve(path);
 		if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
 			return std::nullopt;
-		std::ifstream file(resolved->host, std::ios::binary);
-		return std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		return read_host_file(resolved->host);
 	});
 	GuestAllocator allocator(memory, heap);
 	NativeThreads threads(process, environment, memory, &tls, deadline);
@@ -1223,8 +1237,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			}
 			std::optional<std::vector<uint8_t>> bytes;
 			if (const auto explicit_file = explicit_files.find(identity); explicit_file != explicit_files.end()) {
-				std::ifstream stream(explicit_file->second, std::ios::binary);
-				bytes = std::vector<uint8_t>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+				bytes = read_host_file(explicit_file->second);
 			} else {
 				bytes = source(identity);
 			}
@@ -1239,8 +1252,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 							character = static_cast<char>(character + ('a' - 'A'));
 					if (candidate != identity || !entry.is_regular_file(error))
 						continue;
-					std::ifstream stream(entry.path(), std::ios::binary);
-					bytes = std::vector<uint8_t>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+					bytes = read_host_file(entry.path());
 					explicit_files.emplace(identity, entry.path());
 					break;
 				}

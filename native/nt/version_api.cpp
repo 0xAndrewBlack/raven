@@ -175,8 +175,13 @@ void register_version_api(ApiRegistry &registry, KernelContext &context)
 	const auto load = [&paths, &modules](ApiCall &call, std::u16string name) -> std::optional<std::vector<uint8_t>> {
 		const auto resolved = paths.resolve(name);
 		if (resolved && resolved->exists && std::filesystem::is_regular_file(resolved->host)) {
-			std::ifstream stream(resolved->host, std::ios::binary);
-			std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+			// One read of the whole file: a stream iterator takes seconds over a library of hundreds of megabytes.
+			std::ifstream stream(resolved->host, std::ios::binary | std::ios::ate);
+			const auto size = stream.tellg();
+			std::vector<uint8_t> bytes(size > 0 ? static_cast<size_t>(size) : 0);
+			stream.seekg(0);
+			if (size > 0 && !stream.read(reinterpret_cast<char *>(bytes.data()), size))
+				bytes.resize(static_cast<size_t>(stream.gcount()));
 			try {
 				const PEImage image(bytes);
 				for (const auto &resource : image.resources()) {

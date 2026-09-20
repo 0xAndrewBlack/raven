@@ -20,8 +20,15 @@ std::string lowered(std::string text)
 
 std::vector<uint8_t> read_all(const std::filesystem::path &path)
 {
-	std::ifstream stream(path, std::ios::binary);
-	return std::vector<uint8_t>((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+	std::ifstream stream(path, std::ios::binary | std::ios::ate);
+	const auto size = stream ? stream.tellg() : std::streampos(-1);
+	if (size <= 0)
+		return {};
+	std::vector<uint8_t> bytes(static_cast<size_t>(size));
+	stream.seekg(0);
+	if (!stream.read(reinterpret_cast<char *>(bytes.data()), size))
+		bytes.resize(static_cast<size_t>(stream.gcount()));
+	return bytes;
 }
 
 bool trace()

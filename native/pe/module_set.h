@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <unordered_map>
 
 namespace raven {
 
@@ -16,6 +17,8 @@ struct PEModule {
 	LoadedImage loaded;
 	std::vector<PEImport> imports;
 	std::vector<PEExport> exports;
+	// The first export that carries each name: imports are resolved by name, thousands of them for a large library.
+	std::unordered_map<std::string, size_t> export_names;
 	bool runtime_api = false;
 };
 

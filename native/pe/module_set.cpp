@@ -23,7 +23,12 @@ static std::string module_name(std::string name)
 
 PEModule::PEModule(std::string name, std::vector<uint8_t> bytes, uint64_t base)
 	: name(std::move(name)), bytes(std::move(bytes)), image(this->bytes), loaded(image, base),
-	imports(image.imports()), exports(image.exports()) {}
+	imports(image.imports()), exports(image.exports())
+{
+	for (size_t index = 0; index < exports.size(); ++index)
+		for (const auto &export_name : exports[index].names)
+			export_names.emplace(export_name, index);
+}
 
 PEModule &ModuleSet::add(std::string name, std::vector<uint8_t> bytes)
 {
@@ -118,10 +123,16 @@ uint64_t ModuleSet::resolve(std::string module, std::string name, uint32_t ordin
 	const auto &target = *found->second;
 	if (path)
 		path->push_back(&target);
-	const auto exported = std::find_if(target.exports.begin(), target.exports.end(), [&](const auto &entry) {
-		return by_ordinal ? entry.ordinal == ordinal :
-			std::find(entry.names.begin(), entry.names.end(), name) != entry.names.end();
-	});
+	auto exported = target.exports.end();
+	if (by_ordinal)
+		exported = std::find_if(target.exports.begin(), target.exports.end(), [&](const auto &entry) { return entry.ordinal == ordinal; });
+	else if (const auto named = target.export_names.find(name); named != target.export_names.end())
+		exported = target.exports.begin() + std::ptrdiff_t(named->second);
+	else
+		// An export added after the module was built is not indexed.
+		exported = std::find_if(target.exports.begin(), target.exports.end(), [&](const auto &entry) {
+			return std::find(entry.names.begin(), entry.names.end(), name) != entry.names.end();
+		});
 	if (exported == target.exports.end() || !exported->address)
 		throw std::runtime_error("missing PE export: " + module + "!" + (by_ordinal ? "#" + std::to_string(ordinal) : name));
 	if (!chain.emplace(module, exported->ordinal).second || chain.size() > 256)
