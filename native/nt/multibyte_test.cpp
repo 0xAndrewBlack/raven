@@ -40,7 +40,12 @@ int main(int argc,char **argv)
 		auto &kernel=*modules.all().at("kernel32.dll");
 		raven::LoadedImage *images[]={&entry.loaded,&kernel.loaded};
 		raven::NativeProcess process(images,argv[1],std::chrono::seconds(5));
-		const auto function=modules.resolve({"kernel32.dll","MultiByteToWideChar",0,false,0});process.add_api_trap(function);
+		// The runtime's own conversion is under test: the call goes to the breakpoint behind the guest-side prelude of plain text.
+		const auto exported=std::find_if(kernel.exports.begin(),kernel.exports.end(),[](const auto &symbol) {
+			return std::find(symbol.names.begin(),symbol.names.end(),"MultiByteToWideChar")!=symbol.names.end();
+		});
+		check(exported!=kernel.exports.end(),"conversion export missing");
+		const auto function=raven::api_trap_address(kernel,"kernel32.dll","MultiByteToWideChar",exported->address);process.add_api_trap(function);
 		raven::NativeEnvironment environment(process,entry.loaded.base(),1,1);
 		raven::NativeLaunch launch;launch.image_path=u"client.exe";launch.command_line=u"client.exe";environment.prepare_parameters(launch);
 		const auto page=process.map_memory(8192,PROT_READ|PROT_WRITE);process.protect_memory(page+4096,4096,PROT_NONE);

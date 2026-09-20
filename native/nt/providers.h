@@ -18,6 +18,8 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 // Where the breakpoint of a 64-bit provider export sits inside its stub: past the guest-side path of a fast or served stub, at its start
 // otherwise.
 size_t fast_stub_trap_offset(std::string_view module, std::string_view name);
+// The breakpoint a 64-bit provider export ends in when the runtime serves it: behind a guest-side prelude when the export has one.
+uint64_t api_trap_address(const PEModule &provider, std::string_view module, std::string_view name, uint32_t address);
 // Runs a PE32 process in host compatibility mode; only the API providers listed in x86_process.cpp exist so far.
 // A source of libraries shipped beside the program lets a program import them statically: they are loaded with it, and their entry points run
 // before the program's.
