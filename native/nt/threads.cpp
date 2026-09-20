@@ -324,17 +324,17 @@ void NativeThreads::schedule()
 		if (!any && !poll && !std::any_of(externals.begin(), externals.end(), [](const auto &pending) { return pending(); }))
 			throw std::runtime_error("native guest threads deadlocked: every thread waits without a timeout");
 		const auto limit = std::min(wake, deadline);
-		auto slice = std::chrono::duration_cast<std::chrono::milliseconds>(limit > now ? limit - now : std::chrono::nanoseconds(0));
 		// The process sleeps until a host thread nudges it, another process changes a shared object, a pending operation's descriptor is
-		// ready or the earliest timeout; conditions nothing announces, such as a child process ending, are looked at every 20 ms.
-		slice = std::min(slice, std::chrono::milliseconds(20));
+		// ready or the earliest timeout, to the nanosecond: a wait cut to whole milliseconds would spin through its last one. Conditions
+		// nothing announces, such as a child process ending, are looked at every 20 ms.
+		const auto slice = std::min<std::chrono::nanoseconds>(limit > now ? limit - now : std::chrono::nanoseconds(0), std::chrono::milliseconds(20));
 		if (poll) {
-			poll(slice);
+			poll(std::chrono::ceil<std::chrono::milliseconds>(slice));
 		} else if (slice.count() > 0) {
 			std::vector<pollfd> descriptors{{this->wake, POLLIN, 0}};
 			if (watched)
 				watched(descriptors);
-			const timespec timeout{slice.count() / 1000, (slice.count() % 1000) * 1000000};
+			const timespec timeout{slice.count() / 1000000000, slice.count() % 1000000000};
 			::ppoll(descriptors.data(), descriptors.size(), &timeout, nullptr);
 			uint64_t drained = 0;
 			while (::read(this->wake, &drained, sizeof drained) > 0) {}
