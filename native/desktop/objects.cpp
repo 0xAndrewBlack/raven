@@ -141,8 +141,10 @@ uint64_t DesktopObjects::add(Object object)
 		for (const auto &item:record->items) if (item.submenu)
 			std::get<DesktopMenu>(objects.at(item.submenu)).parent=handle;
 	used += size;
-	if (auto *record=std::get_if<DesktopWindow>(&objects.at(handle)))
+	if (auto *record=std::get_if<DesktopWindow>(&objects.at(handle))) {
 		record->order=++next_order;
+		touch_window(handle);
+	}
 	return handle;
 }
 
@@ -152,6 +154,7 @@ bool DesktopObjects::erase(uint64_t handle)
 	if (found == objects.end())
 		return false;
 	if (std::holds_alternative<DesktopWindow>(found->second) && !child_windows(handle).empty()) return false;
+	if (std::holds_alternative<DesktopWindow>(found->second)) touch_window(handle);
 	if (const auto *menu=std::get_if<DesktopMenu>(&found->second)) {
 		if (menu->parent) return false;
 		for (const auto &item:menu->items) if (item.submenu) {
@@ -318,7 +321,9 @@ DesktopDC *DesktopObjects::dc(uint64_t handle)
 DesktopWindow *DesktopObjects::window(uint64_t handle)
 {
 	const auto found=objects.find(handle);
-	return found==objects.end() ? nullptr : std::get_if<DesktopWindow>(&found->second);
+	auto *record=found==objects.end() ? nullptr : std::get_if<DesktopWindow>(&found->second);
+	if (record) touch_window(handle);
+	return record;
 }
 
 std::vector<uint64_t> DesktopObjects::window_handles() const

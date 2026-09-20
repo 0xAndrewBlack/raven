@@ -277,8 +277,12 @@ public:
 	void update_window_dcs(uint64_t window);
 	void detach_window_dcs(uint64_t window);
 	void attach_window_dcs(uint64_t root,uint64_t bitmap);
+	// A window handed out for change is recorded, so what the guest reads of it can follow (see NativeWindows::publish_windows).
 	DesktopWindow *window(uint64_t handle);
 	const DesktopWindow *window(uint64_t handle) const;
+	std::vector<uint64_t> &touched_windows() { return touched; }
+	// Set when more windows were touched than are recorded: every window may have changed.
+	bool &touched_overflow() { return overflow; }
 	uint64_t window_root(uint64_t handle) const;
 	// Children of a window in z-order, bottom to top. Top-level windows are the children of window zero.
 	std::vector<uint64_t> child_windows(uint64_t parent) const;
@@ -312,6 +316,14 @@ public:
 	const DesktopMetrics &nonclient_metrics() const;
 
 private:
+	std::vector<uint64_t> touched{};
+	bool overflow=false;
+	void touch_window(uint64_t handle)
+	{
+		if (!touched.empty() && touched.back()==handle) return;
+		if (touched.size()<4096) touched.push_back(handle);
+		else overflow=true;
+	}
 	std::map<uint64_t, Object> objects;
 	std::map<uint16_t,DesktopClass> classes;
 	std::map<uint64_t,std::vector<DesktopAccelerator>> accelerator_tables;

@@ -1335,6 +1335,105 @@ bool NativeWindows::withdraw_screen_dc(uint64_t handle)
 	return true;
 }
 
+void NativeWindows::set_window_table(uint8_t *table)
+{
+	window_table=table;
+	objects.touched_overflow()=true;
+	publish_windows();
+}
+
+// The fixed part of a window's record: everything but its handle and properties.
+static void window_fields(const DesktopWindow &window,uint8_t *record)
+{
+	const auto put=[&](size_t offset,auto value) { std::memcpy(record+offset,&value,sizeof(value)); };
+	put(8,window.userdata); put(16,window.procedure); put(24,window.instance);
+	put(32,window.parent ? window.parent : window.owner); put(40,window.child_id);
+	put(48,window.style); put(52,window.ex_style);
+	put(56,window.width); put(60,window.height);
+	put(64,window.outer.left); put(68,window.outer.top); put(72,window.outer.right); put(76,window.outer.bottom);
+	// Extra bytes beyond the record are read by the runtime.
+	const bool extra=window.extra.size()<=NativeWindows::window_extra_bytes;
+	put(80,uint32_t(extra ? window.extra.size() : 0));
+	if (extra && !window.extra.empty()) std::memcpy(record+160,window.extra.data(),window.extra.size());
+}
+
+void NativeWindows::publish_window_record(uint64_t handle,const DesktopWindow *window)
+{
+	auto *record=window_table+(handle%window_records)*window_record;
+	const auto put=[&](size_t offset,auto value) { std::memcpy(record+offset,&value,sizeof(value)); };
+	uint64_t occupant=0;
+	std::memcpy(&occupant,record,8);
+	if (!window) {
+		if (occupant==handle) put(0,uint64_t(0));
+		return;
+	}
+	// Two windows whose handles share the low bits: the first keeps the record and the other is answered by the runtime.
+	if (occupant && occupant!=handle && std::as_const(objects).window(occupant))
+		return;
+	put(0,uint64_t(0));
+	window_fields(*window,record);
+	// Properties named by an atom are keyed "#" and its number in decimal; up to four of them travel with the record.
+	uint32_t count=0;
+	for (const auto &[key,value] : window->properties) {
+		if (key.size()<2 || key.size()>6 || key[0]!=u'#' || (key[1]==u'0' && key.size()>2)) continue;
+		uint64_t atom=0;
+		bool digits=true;
+		for (size_t index=1;index<key.size() && digits;++index) {
+			digits=key[index]>=u'0' && key[index]<=u'9';
+			atom=atom*10+uint64_t(key[index]-u'0');
+		}
+		if (!digits || atom>0xffff) continue;
+		if (count==4) { count=UINT32_MAX; break; }
+		put(96+size_t(count)*16,atom); put(104+size_t(count)*16,value);
+		++count;
+	}
+	put(84,count);
+	put(0,handle);
+}
+
+void NativeWindows::publish_windows()
+{
+	if (!window_table)
+		return;
+	auto &touched=objects.touched_windows();
+	if (objects.touched_overflow()) {
+		std::memset(window_table,0,window_records*window_record);
+		watched.clear();
+		for (const auto handle : objects.window_handles()) {
+			const auto *window=std::as_const(objects).window(handle);
+			publish_window_record(handle,window);
+			watched.emplace_back(handle,window);
+		}
+		objects.touched_overflow()=false;
+		touched.clear();
+	}
+	// Windows handed out since the guest last ran are written whole; they stay watched while the call that touched them goes on.
+	for (const auto handle : touched) {
+		const auto *window=std::as_const(objects).window(handle);
+		publish_window_record(handle,window);
+		const auto found=std::find_if(watched.begin(),watched.end(),[&](const auto &item) { return item.first==handle; });
+		if (found!=watched.end()) {
+			if (window) found->second=window;
+			else watched.erase(found);
+		} else if (window) {
+			watched.emplace_back(handle,window);
+		}
+	}
+	touched.clear();
+	// A watched window may have been changed through a pointer taken before the guest last ran: its fields are compared again.
+	for (const auto &[handle,window] : watched) {
+		auto *record=window_table+(handle%window_records)*window_record;
+		uint64_t occupant=0;
+		std::memcpy(&occupant,record,8);
+		if (occupant!=handle) continue;
+		alignas(8) uint8_t fields[window_record];
+		window_fields(*window,fields);
+		const size_t extra=window->extra.size()<=window_extra_bytes ? window->extra.size() : 0;
+		if (std::memcmp(fields+8,record+8,76) || (extra && std::memcmp(fields+160,record+160,extra))) publish_window_record(handle,window);
+	}
+	if (!api_depth) watched.clear();
+}
+
 void NativeWindows::screen_dc_use(std::string_view name)
 {
 	if (!screen_block)

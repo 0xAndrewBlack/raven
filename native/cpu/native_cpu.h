@@ -132,6 +132,8 @@ public:
 	// answer stops at its breakpoint `wait_offset` bytes in; the call is answered there and the guest resumes after it.
 	void set_served_calls(uint64_t *block, std::vector<uint64_t> stubs, size_t stub_size, size_t wait_offset,
 		std::function<void(uint64_t stub)> handler);
+	// Runs before the guest runs again: before every resumption and before a served call is answered.
+	void set_resume_hook(std::function<void()> hook);
 	// Diagnostics: interrupts a guest that runs without stopping every `period` and reports where it was.
 	void set_guest_sampler(std::chrono::milliseconds period, std::function<void(uint64_t rip)> sampler);
 

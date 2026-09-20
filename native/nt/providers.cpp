@@ -363,6 +363,77 @@ static const std::vector<uint8_t> &screen_device_caps_prelude()
 	return code;
 }
 
+// Window state the guest reads from the window table the runtime keeps (see NativeWindows::publish_windows), found through the served
+// block: the record at the handle's low nine bits, when it is that window's. GetWindowLong and GetWindowLongPtr answer the extra bytes
+// the record holds and the indexes the runtime answers, GetPropW the properties named by an atom when the record holds all of them,
+// IsWindow and IsWindowUnicode a window of this process, GetClientRect and GetWindowRect its rectangles. A window without a record,
+// another index or a null pointer goes to the runtime.
+static constexpr size_t window_table = 0x700;
+
+static const std::vector<uint8_t> &window_long_ptr_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x0f, 0x84, 0x82, 0x00, 0x00, 0x00, 0x4d, 0x8b, 0x9a, 0x00, 0x07, 0x00, 0x00, 0x4d,
+		0x85, 0xdb, 0x74, 0x76, 0x48, 0x85, 0xc9, 0x74, 0x71, 0x89, 0xc8, 0x25, 0xff, 0x01, 0x00, 0x00, 0xc1, 0xe0, 0x08, 0x49, 0x01, 0xc3, 0x49, 0x3b,
+		0x0b, 0x75, 0x5f, 0x85, 0xd2, 0x78, 0x15, 0x89, 0xd0, 0x4c, 0x8d, 0x50, 0x08, 0x45, 0x3b, 0x53, 0x50, 0x77, 0x4f, 0x49, 0x8b, 0x84, 0x03, 0xa0,
+		0x00, 0x00, 0x00, 0xc3, 0x83, 0xfa, 0xeb, 0x75, 0x05, 0x49, 0x8b, 0x43, 0x08, 0xc3, 0x83, 0xfa, 0xfc, 0x75, 0x05, 0x49, 0x8b, 0x43, 0x10, 0xc3,
+		0x83, 0xfa, 0xfa, 0x75, 0x05, 0x49, 0x8b, 0x43, 0x18, 0xc3, 0x83, 0xfa, 0xf8, 0x75, 0x05, 0x49, 0x8b, 0x43, 0x20, 0xc3, 0x83, 0xfa, 0xf4, 0x75,
+		0x05, 0x49, 0x8b, 0x43, 0x28, 0xc3, 0x83, 0xfa, 0xf0, 0x75, 0x05, 0x41, 0x8b, 0x43, 0x30, 0xc3, 0x83, 0xfa, 0xec, 0x75, 0x05, 0x41, 0x8b, 0x43,
+		0x34, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> &window_long_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x64, 0x4d, 0x8b, 0x9a, 0x00, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x58,
+		0x48, 0x85, 0xc9, 0x74, 0x53, 0x89, 0xc8, 0x25, 0xff, 0x01, 0x00, 0x00, 0xc1, 0xe0, 0x08, 0x49, 0x01, 0xc3, 0x49, 0x3b, 0x0b, 0x75, 0x41, 0x85,
+		0xd2, 0x78, 0x15, 0x89, 0xd0, 0x4c, 0x8d, 0x50, 0x04, 0x45, 0x3b, 0x53, 0x50, 0x77, 0x31, 0x41, 0x8b, 0x84, 0x03, 0xa0, 0x00, 0x00, 0x00, 0xc3,
+		0x83, 0xfa, 0xeb, 0x75, 0x05, 0x41, 0x8b, 0x43, 0x08, 0xc3, 0x83, 0xfa, 0xf4, 0x75, 0x05, 0x41, 0x8b, 0x43, 0x28, 0xc3, 0x83, 0xfa, 0xf0, 0x75,
+		0x05, 0x41, 0x8b, 0x43, 0x30, 0xc3, 0x83, 0xfa, 0xec, 0x75, 0x05, 0x41, 0x8b, 0x43, 0x34, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> &window_property_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x52, 0x4d, 0x8b, 0x9a, 0x00, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x46,
+		0x48, 0x85, 0xc9, 0x74, 0x41, 0x89, 0xc8, 0x25, 0xff, 0x01, 0x00, 0x00, 0xc1, 0xe0, 0x08, 0x49, 0x01, 0xc3, 0x49, 0x3b, 0x0b, 0x75, 0x2f, 0x48,
+		0x81, 0xfa, 0xff, 0xff, 0x00, 0x00, 0x77, 0x26, 0x41, 0x8b, 0x43, 0x54, 0x83, 0xf8, 0x04, 0x77, 0x1d, 0x4d, 0x8d, 0x53, 0x60, 0x85, 0xc0, 0x74,
+		0x0d, 0x49, 0x3b, 0x12, 0x74, 0x0b, 0x49, 0x83, 0xc2, 0x10, 0xff, 0xc8, 0xeb, 0xef, 0x31, 0xc0, 0xc3, 0x49, 0x8b, 0x42, 0x08, 0xc3, 0xe9, 0x00,
+		0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> &window_exists_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x29, 0x4d, 0x8b, 0x9a, 0x00, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x1d,
+		0x48, 0x85, 0xc9, 0x74, 0x18, 0x89, 0xc8, 0x25, 0xff, 0x01, 0x00, 0x00, 0xc1, 0xe0, 0x08, 0x49, 0x01, 0xc3, 0x49, 0x3b, 0x0b, 0x75, 0x06, 0xb8,
+		0x01, 0x00, 0x00, 0x00, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> &window_client_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x3d, 0x4d, 0x8b, 0x9a, 0x00, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x31,
+		0x48, 0x85, 0xc9, 0x74, 0x2c, 0x89, 0xc8, 0x25, 0xff, 0x01, 0x00, 0x00, 0xc1, 0xe0, 0x08, 0x49, 0x01, 0xc3, 0x49, 0x3b, 0x0b, 0x75, 0x1a, 0x48,
+		0x85, 0xd2, 0x74, 0x15, 0x48, 0xc7, 0x02, 0x00, 0x00, 0x00, 0x00, 0x49, 0x8b, 0x43, 0x38, 0x48, 0x89, 0x42, 0x08, 0xb8, 0x01, 0x00, 0x00, 0x00,
+		0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> &window_outer_prelude()
+{
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x3d, 0x4d, 0x8b, 0x9a, 0x00, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x31,
+		0x48, 0x85, 0xc9, 0x74, 0x2c, 0x89, 0xc8, 0x25, 0xff, 0x01, 0x00, 0x00, 0xc1, 0xe0, 0x08, 0x49, 0x01, 0xc3, 0x49, 0x3b, 0x0b, 0x75, 0x1a, 0x48,
+		0x85, 0xd2, 0x74, 0x15, 0x49, 0x8b, 0x43, 0x40, 0x48, 0x89, 0x02, 0x49, 0x8b, 0x43, 0x48, 0x48, 0x89, 0x42, 0x08, 0xb8, 0x01, 0x00, 0x00, 0x00,
+		0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
 static const std::vector<uint8_t> *block_prelude(std::string_view module, std::string_view name)
 {
 	static constexpr std::array<BlockPrelude, 5> ticks{{{"kernel32.dll", "GetTickCount"}, {"kernel32.dll", "GetTickCount64"},
@@ -376,6 +447,20 @@ static const std::vector<uint8_t> *block_prelude(std::string_view module, std::s
 		return &screen_release_dc_prelude();
 	if (module == "gdi32.dll" && name == "GetDeviceCaps")
 		return &screen_device_caps_prelude();
+	if (module != "user32.dll")
+		return nullptr;
+	if (name == "GetWindowLongPtrW" || name == "GetWindowLongPtrA")
+		return &window_long_ptr_prelude();
+	if (name == "GetWindowLongW" || name == "GetWindowLongA")
+		return &window_long_prelude();
+	if (name == "GetPropW")
+		return &window_property_prelude();
+	if (name == "IsWindow" || name == "IsWindowUnicode")
+		return &window_exists_prelude();
+	if (name == "GetClientRect")
+		return &window_client_prelude();
+	if (name == "GetWindowRect")
+		return &window_outer_prelude();
 	return nullptr;
 }
 
@@ -531,8 +616,8 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	size_t block_size = 0;
 	if (fast_paths && !x86)
 		for (const auto symbol : exports)
-			if (block_prelude(name, symbol))
-				block_size += 128;
+			if (const auto *prelude = block_prelude(name, symbol))
+				block_size += (prelude->size() + 63) & ~size_t(63);
 	// The block pointer of the served stubs and the block preludes, then the stubs, then the clock preludes, then the commit preludes.
 	const size_t served_start = fast_start + fast_count * 64;
 	const size_t clock_start = served_start + (served_count || block_size ? 64 + served_count * served_stub_size : 0);
@@ -615,7 +700,7 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 		if (const auto *prelude = fast_paths && !x86 ? block_prelude(name, exports[index]) : nullptr) {
 			const size_t trap = code;
 			code = blocks_next;
-			blocks_next += 128;
+			blocks_next += (prelude->size() + 63) & ~size_t(63);
 			auto bytes_of = *prelude;
 			const int32_t displacement = int32_t(served_start) - int32_t(code) - 7;
 			std::memcpy(bytes_of.data() + 3, &displacement, 4);
@@ -662,6 +747,15 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 // The native API providers sit high in the address space, as Windows places its system libraries: the low default bases are what
 // programs' own libraries ask for (0x180000000 for most 64-bit DLLs), and a library that finds its base taken is relocated in every
 // process that loads it. The host keeps its own mappings above 0x700000000000.
+// A call the runtime is serving: the windows it touches stay touched until the outermost one returns.
+struct WindowCallScope {
+	NativeWindows &windows;
+	explicit WindowCallScope(NativeWindows &windows) : windows(windows) { windows.api_entered(); }
+	~WindowCallScope() { windows.api_left(); }
+	WindowCallScope(const WindowCallScope &) = delete;
+	WindowCallScope &operator=(const WindowCallScope &) = delete;
+};
+
 static uint64_t provider_base(const ModuleSet &modules, uint32_t size)
 {
 	uint64_t base = 0x6fff00000000ULL;
@@ -1101,6 +1195,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			const auto error_before = trace_failures ? environment.last_error() : 0;
 			const auto failure_arguments = trace_failures ? process.api_arguments(4) : std::vector<uint64_t>{};
 			try {
+				const WindowCallScope window_scope(windows);
 				// The generalized desktop services come first so that they replace the older narrow ones.
 				dispatched = desktop_api.dispatch(process, environment, found->second) || environment.dispatch(found->second) || module_api.dispatch(found->second) || resources.dispatch(found->second) || memory.dispatch(found->second) || object_api.dispatch(found->second) || heap.dispatch(found->second) || desktop.dispatch(found->second) || windows.dispatch(found->second) || api_registry.dispatch(process, environment, found->second)
 #ifdef RAVEN_VULKAN
@@ -1279,22 +1374,37 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address)
 					for (const uint64_t piece : {uint64_t(0), uint64_t(served_trap)})
 						served_stubs.push_back(module->loaded.base() + symbol.address + piece);
-	// So must one between taking the screen context and reading which it is.
+	// So must one between taking the screen context and reading which it is, or reading a window's record.
 	for (const auto &[module_name, module] : modules.all())
 		if (module->runtime_api)
 			for (const auto &symbol : module->exports)
-				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() &&
-					block_prelude(module_name, symbol.names.at(0)) == &screen_get_dc_prelude() &&
-					served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address)
-					served_stubs.push_back(module->loaded.base() + symbol.address);
+				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() && module_name == "user32.dll")
+					if (const auto *prelude = block_prelude(module_name, symbol.names.at(0)); prelude && prelude != &screen_release_dc_prelude() &&
+						served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address)
+						for (uint64_t piece = 0; piece < prelude->size(); piece += served_stub_size)
+							served_stubs.push_back(module->loaded.base() + symbol.address + piece);
 	memory.set_commit_block(served_block);
 	windows.set_screen_block(served_block);
+	// The window table the window preludes read, mapped into the guest and published in the served block.
+	const size_t table_size = NativeWindows::window_records * NativeWindows::window_record;
+	const int table_file = memfd_create("raven-window-table", MFD_CLOEXEC);
+	if (table_file < 0 || ftruncate(table_file, off_t(table_size)) != 0)
+		throw std::runtime_error("cannot create the window table");
+	auto *table = static_cast<uint8_t *>(mmap(nullptr, table_size, PROT_READ | PROT_WRITE, MAP_SHARED, table_file, 0));
+	if (table == MAP_FAILED)
+		throw std::runtime_error("cannot map the window table");
+	const uint64_t table_guest = process.map_shared(table_file, table_size);
+	close(table_file);
+	windows.set_window_table(table);
+	process.set_resume_hook([&windows] { windows.publish_windows(); });
+	__atomic_store_n(&served_block[window_table / 8], table_guest, __ATOMIC_RELEASE);
 	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, [&, served_names = std::move(served_names)](uint64_t stub) {
 		const auto found = served_names.find(stub);
 		if (found == served_names.end())
 			throw std::runtime_error("a served call came from an unknown stub");
 		api_in_progress = found->second.c_str();
 		windows.screen_dc_use(found->second);
+		const WindowCallScope window_scope(windows);
 		const auto profile_start = RuntimeProfile::instance().enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 		const bool dispatched = api_registry.dispatch(process, environment, found->second)
 #ifdef RAVEN_VULKAN

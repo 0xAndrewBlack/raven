@@ -44,6 +44,14 @@ public:
 	// A call the runtime serves with the published screen context as its first argument may change it: the guest's ReleaseDC then
 	// leaves it to the runtime. Called before every served call.
 	void screen_dc_use(std::string_view name);
+	// The window table the guest's window preludes read: a record of 256 bytes for each window, at its handle's low nine bits, and
+	// the offsets in a record. The runtime brings the records of the windows it touched up to date before the guest runs again; a
+	// window changed by a call stays touched until the outermost call in progress returns, as the call may change it after a callback.
+	static constexpr size_t window_records=512, window_record=256, window_extra_bytes=96;
+	void set_window_table(uint8_t *table);
+	void publish_windows();
+	void api_entered() { ++api_depth; }
+	void api_left() { --api_depth; }
 	// user32 entry points that follow the shared registry conventions; every handler runs on the calling guest thread.
 	void register_api(ApiRegistry &registry);
 	// Drawing marks the surface dirty; the next message retrieval presents it, so a burst of primitives costs one frame.
@@ -96,6 +104,10 @@ private:
 	uint64_t foreign_stamp=UINT64_MAX;
 	void import_foreign_frames();
 	uint8_t *screen_block=nullptr;
+	uint8_t *window_table=nullptr;
+	unsigned api_depth=0;
+	void publish_window_record(uint64_t handle,const DesktopWindow *window);
+	std::vector<std::pair<uint64_t,const DesktopWindow *>> watched;
 	// Publishes a free screen context over the desktop window when none is published.
 	void publish_screen_dc(uint64_t desktop);
 	// Withdraws the published context when the runtime releases it; false for any other context.

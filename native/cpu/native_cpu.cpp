@@ -323,6 +323,7 @@ struct NativeProcess::State {
 	// The breakpoint a stub reaches when it has waited too long for its answer.
 	size_t served_wait_offset = 0;
 	std::function<void(uint64_t)> served_handler;
+	std::function<void()> resume_hook;
 	std::function<bool()> poll_served;
 	bool serving = false;
 	// Diagnostics: where the guest is found running, every sample_period.
@@ -1218,6 +1219,8 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		else
 			child.clear_slice();
 		event_info.reset();
+		if (state->resume_hook)
+			state->resume_hook();
 		trace(state->steps_left ? PTRACE_SINGLESTEP : state->seccomp ? PTRACE_CONT : PTRACE_SYSEMU, child.pid);
 		state->stopped = false;
 		status = child.wait(state->poll_served ? &state->poll_served : nullptr);
@@ -1443,8 +1446,15 @@ bool NativeProcess::serve_pending()
 		throw;
 	}
 	restore();
+	if (state->resume_hook)
+		state->resume_hook();
 	__atomic_store_n(&block[0], 0, __ATOMIC_RELEASE);
 	return true;
+}
+
+void NativeProcess::set_resume_hook(std::function<void()> hook)
+{
+	state->resume_hook = std::move(hook);
 }
 
 void NativeProcess::begin_translated_call(std::vector<uint64_t> words, std::array<uint64_t, 4> floats)
