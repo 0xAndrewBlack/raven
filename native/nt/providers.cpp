@@ -307,6 +307,34 @@ static const GuestPrelude *string_prelude(std::string_view module, std::string_v
 	return nullptr;
 }
 
+// Services the guest answers from what the runtime publishes in the served block. The millisecond clocks are the performance counter
+// divided by 10000, read from the time stamp counter once the runtime has published its calibration, as QueryPerformanceCounter is.
+// Each loads the block pointer first, as the served stubs do, and ends in a jump to the export's breakpoint.
+struct BlockPrelude {
+	std::string_view module, name;
+};
+
+static const std::vector<uint8_t> &tick_prelude()
+{
+	// mov r10,[pointer]; test r10,r10; jz slow; mov r11,[r10+multiplier]; test r11,r11; jz slow; rdtsc; the count as in the clock
+	// prelude; xor edx,edx; mov ecx,10000; div rcx; ret; slow: jmp breakpoint
+	static const std::vector<uint8_t> code{
+		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x36, 0x4d, 0x8b, 0x9a, 0x10, 0x08, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x2a,
+		0x0f, 0x31, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd0, 0x49, 0x2b, 0x82, 0x00, 0x08, 0x00, 0x00, 0x49, 0xf7, 0xe3, 0x48, 0x0f, 0xac, 0xd0, 0x20,
+		0x49, 0x03, 0x82, 0x08, 0x08, 0x00, 0x00, 0x31, 0xd2, 0xb9, 0x10, 0x27, 0x00, 0x00, 0x48, 0xf7, 0xf1, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
+	return code;
+}
+
+static const std::vector<uint8_t> *block_prelude(std::string_view module, std::string_view name)
+{
+	static constexpr std::array<BlockPrelude, 5> preludes{{{"kernel32.dll", "GetTickCount"}, {"kernel32.dll", "GetTickCount64"},
+		{"kernelbase.dll", "GetTickCount"}, {"kernelbase.dll", "GetTickCount64"}, {"winmm.dll", "timeGetTime"}}};
+	for (const auto &prelude : preludes)
+		if (prelude.module == module && prelude.name == name)
+			return &tick_prelude();
+	return nullptr;
+}
+
 static size_t string_prelude_slot(const GuestPrelude &prelude)
 {
 	return (prelude.code.size() + 63) & ~size_t(63);
@@ -339,6 +367,14 @@ static std::vector<uint8_t> commit_prelude(int32_t to_pointer, int32_t to_trap)
 // breakpoint it falls back to.
 static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view module, std::string_view name, uint32_t rva)
 {
+	// A provider built without guest-side paths has the breakpoint at the export itself.
+	if (rva < image.size() && image[rva] == 0xcc)
+		return rva;
+	if (const auto *prelude = block_prelude(module, name)) {
+		int32_t relative = 0;
+		std::memcpy(&relative, image.data() + rva + prelude->size() - 4, 4);
+		return uint32_t(int64_t(rva) + prelude->size() + relative);
+	}
 	if (const auto *prelude = string_prelude(module, name)) {
 		int32_t relative = 0;
 		std::memcpy(&relative, image.data() + rva + prelude->code.size() - 4, 4);
@@ -448,9 +484,14 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	if (!x86 && served_count)
 		for (const auto symbol : exports)
 			commit_count += guest_commit_api(name, symbol);
-	// The block pointer of the served stubs, then the stubs, then the clock preludes, then the commit preludes.
+	size_t block_size = 0;
+	if (fast_paths && !x86)
+		for (const auto symbol : exports)
+			if (block_prelude(name, symbol))
+				block_size += 128;
+	// The block pointer of the served stubs and the block preludes, then the stubs, then the clock preludes, then the commit preludes.
 	const size_t served_start = fast_start + fast_count * 64;
-	const size_t clock_start = served_start + (served_count ? 64 + served_count * served_stub_size : 0);
+	const size_t clock_start = served_start + (served_count || block_size ? 64 + served_count * served_stub_size : 0);
 	const size_t commit_start = clock_start + clock_count * clock_prelude_size;
 	const size_t strings_start = commit_start + commit_count * commit_prelude_size;
 	size_t strings_size = 0;
@@ -458,7 +499,8 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 		for (const auto symbol : exports)
 			if (const auto *prelude = string_prelude(name, symbol))
 				strings_size += string_prelude_slot(*prelude);
-	const size_t end = strings_start + strings_size;
+	const size_t blocks_start = strings_start + strings_size;
+	const size_t end = blocks_start + block_size;
 	std::vector<uint8_t> bytes((end + 511) & ~size_t(511));
 	const auto rva = [](size_t offset) { return 0x1000 + offset - 0x200; };
 	const auto put = [&](size_t offset, uint64_t value, size_t width = 4) {
@@ -510,7 +552,7 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	put(directory + 36, rva(ordinals));
 	text(module_name, name);
 	size_t cursor = module_name + name.size() + 1;
-	size_t fast_next = 0, served_next = 0, clock_next = 0, commit_next = 0, strings_next = strings_start;
+	size_t fast_next = 0, served_next = 0, clock_next = 0, commit_next = 0, strings_next = strings_start, blocks_next = blocks_start;
 	for (size_t index = 0; index < exports.size(); ++index) {
 		size_t code = 0x200 + index * 16;
 		bytes[code] = 0xcc;
@@ -525,6 +567,17 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 				const auto prelude = clock_prelude(int32_t(served_start) - int32_t(code), int32_t(served) - int32_t(code));
 				std::copy(prelude.begin(), prelude.end(), bytes.begin() + ptrdiff_t(code));
 			}
+		}
+		if (const auto *prelude = fast_paths && !x86 ? block_prelude(name, exports[index]) : nullptr) {
+			const size_t trap = code;
+			code = blocks_next;
+			blocks_next += 128;
+			auto bytes_of = *prelude;
+			const int32_t displacement = int32_t(served_start) - int32_t(code) - 7;
+			std::memcpy(bytes_of.data() + 3, &displacement, 4);
+			const int32_t relative = int32_t(trap) - int32_t(code + bytes_of.size());
+			std::memcpy(bytes_of.data() + bytes_of.size() - 4, &relative, 4);
+			std::copy(bytes_of.begin(), bytes_of.end(), bytes.begin() + ptrdiff_t(code));
 		}
 		if (const auto *prelude = kernel_module ? string_prelude(name, exports[index]) : nullptr) {
 			const size_t trap = code;
@@ -1147,6 +1200,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (!module->runtime_api)
 			continue;
 		for (const auto &symbol : module->exports) {
+			if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() && block_prelude(module_name, symbol.names.at(0)) &&
+				served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address) {
+				auto image = module->loaded.data();
+				int32_t displacement = 0;
+				std::memcpy(&displacement, image.data() + symbol.address + 3, 4);
+				std::memcpy(image.data() + symbol.address + 7 + displacement, &served_guest, 8);
+				served_pointers.places.push_back(image.data() + symbol.address + 7 + displacement);
+			}
 			if (!symbol.address || symbol.names.empty() || !symbol.forwarder.empty() || !served_api(module_name, symbol.names.at(0)))
 				continue;
 			auto image = module->loaded.data();
