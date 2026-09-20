@@ -1023,6 +1023,7 @@ bool NativeWindows::destroy(uint64_t handle)
 		}
 	}
 	release_surface(handle);
+	painted_frames.erase(handle);
 	return objects.erase(handle);
 }
 

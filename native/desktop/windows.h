@@ -126,6 +126,8 @@ private:
 	uint64_t foreign_stamp=UINT64_MAX;
 	void import_foreign_frames();
 	uint8_t *screen_block=nullptr;
+	// What each top-level window's frame was last drawn from (see paint_nonclient).
+	std::map<uint64_t,std::u16string> painted_frames;
 	uint8_t *window_table=nullptr;
 	unsigned api_depth=0;
 	void publish_window_record(uint64_t handle,const DesktopWindow *window);

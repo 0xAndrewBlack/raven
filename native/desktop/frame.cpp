@@ -152,9 +152,29 @@ void NativeWindows::paint_nonclient(uint64_t handle)
 	const auto *bitmap = objects.bitmap(window->bitmap);
 	if (!bitmap || !bitmap->shared || bitmap->depth != 32)
 		return;
-	Canvas canvas{objects.bitmap(window->bitmap)->pixels().data(), int32_t(bitmap->width), int32_t(bitmap->height)};
 	const int32_t width = window->outer.right - window->outer.left, height = window->outer.bottom - window->outer.top;
 	const bool is_active = active == handle;
+	// The frame is drawn again only when something it shows changed; guest drawing stays inside the client area.
+	{
+		std::u16string key;
+		const auto add = [&](uint64_t value) { key.append(reinterpret_cast<const char16_t *>(&value), 4); };
+		add(window->bitmap); add(uint64_t(bitmap->width) << 32 | bitmap->height); add(uint64_t(uint32_t(width)) << 32 | uint32_t(height));
+		add(uint64_t(window->style) << 32 | window->ex_style); add(is_active); add(window->menu);
+		add(open_menu_item && open_menu_window == handle ? *open_menu_item + 1 : 0);
+		key += window->title;
+		key += u'\0';
+		if (const auto *menu = objects.menu(window->menu))
+			for (const auto &item : menu->items) {
+				add(uint64_t(item.type) << 32 | item.state);
+				key += item.text;
+				key += u'\0';
+			}
+		auto &painted = painted_frames[handle];
+		if (painted == key)
+			return;
+		painted = std::move(key);
+	}
+	Canvas canvas{objects.bitmap(window->bitmap)->pixels().data(), int32_t(bitmap->width), int32_t(bitmap->height)};
 	const auto color = [&](int index) { return rgb(objects.system_color(index)); };
 	if (layout.border) {
 		// The ring first takes the frame color, then the bevel is laid over its outer two pixels.
