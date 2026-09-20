@@ -7,6 +7,7 @@
 #include "nonclient.h"
 #include "colors.h"
 #include "menu.h"
+#include <algorithm>
 #include <array>
 #include <span>
 #include <memory>
@@ -136,6 +137,29 @@ struct DesktopDC {
 		return (!clip || clip->contains(int32_t(x),int32_t(y))) &&
 			(!application_clip || application_clip->contains(int32_t(x),int32_t(y))) &&
 			(!visible || visible->contains(int32_t(x),int32_t(y)));
+	}
+	// The device pixels of [x0,x1) x [y0,y1) that pass contains(), as rectangles, so a caller can skip the per-pixel test.
+	std::vector<DesktopRect> paintable(int64_t x0,int64_t y0,int64_t x1,int64_t y1) const
+	{
+		const int64_t dx=int64_t(origin_x)-user_dx, dy=int64_t(origin_y)-user_dy;
+		x0-=dx; x1-=dx; y0-=dy; y1-=dy;
+		if (bounds) {
+			x0=std::max<int64_t>(x0,bounds->left); y0=std::max<int64_t>(y0,bounds->top);
+			x1=std::min<int64_t>(x1,bounds->right); y1=std::min<int64_t>(y1,bounds->bottom);
+		}
+		x0=std::max<int64_t>(x0,INT32_MIN); y0=std::max<int64_t>(y0,INT32_MIN);
+		x1=std::min<int64_t>(x1,INT32_MAX); y1=std::min<int64_t>(y1,INT32_MAX);
+		if (x0>=x1 || y0>=y1) return {};
+		DesktopRegion area;
+		area.add({int32_t(x0),int32_t(y0),int32_t(x1),int32_t(y1)});
+		for (const auto *region : {&clip,&application_clip,&visible})
+			if (*region) area.combine(area,**region,1);
+		auto result=area.rectangles();
+		for (auto &rect : result) {
+			rect.left=int32_t(rect.left+dx); rect.right=int32_t(rect.right+dx);
+			rect.top=int32_t(rect.top+dy); rect.bottom=int32_t(rect.bottom+dy);
+		}
+		return result;
 	}
 };
 

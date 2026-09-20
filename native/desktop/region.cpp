@@ -121,6 +121,18 @@ bool DesktopRegion::contains(int32_t x,int32_t y) const
 	(void)x; (void)y; return false;
 #endif
 }
+std::vector<DesktopRect> DesktopRegion::rectangles() const
+{
+	std::vector<DesktopRect> result;
+#ifdef RAVEN_PIXMAN
+	if (!state) return result;
+	int count=0;
+	const auto *boxes=pixman_region32_rectangles(&state->region,&count);
+	result.reserve(size_t(count));
+	for (int i=0;i<count;++i) result.push_back({boxes[i].x1,boxes[i].y1,boxes[i].x2,boxes[i].y2});
+#endif
+	return result;
+}
 DesktopRect DesktopRegion::bounds() const
 {
 #ifdef RAVEN_PIXMAN

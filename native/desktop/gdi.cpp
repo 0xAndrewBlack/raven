@@ -215,18 +215,33 @@ void Painter::fill(int64_t left, int64_t top, int64_t right, int64_t bottom, con
 		return;
 	const int64_t base_x = int64_t(dc.origin_x) - dc.user_dx + dc.brush_org_x, base_y = int64_t(dc.origin_y) - dc.user_dy + dc.brush_org_y;
 	const bool solid = brush.style == 0 && brush.pattern.empty();
-	for (int64_t y = y0; y < y1; ++y)
-		for (int64_t x = x0; x < x1; ++x) {
-			if (!dc.contains(x, y))
-				continue;
-			if (solid) {
-				plot(x, y, brush.color, dc.rop2);
-				continue;
+	for (const auto &area : dc.paintable(x0, y0, x1, y1)) {
+		if (solid && dc.rop2 == 13 && bitmap.depth == 32) {
+			// The common solid copy writes the first row of each visible rectangle and repeats it.
+			const size_t bytes = size_t(area.right - area.left) * 4;
+			auto *first = row_pointer(area.top) + size_t(area.left) * 4;
+			for (size_t i = 0; i < bytes; i += 4) {
+				first[i] = uint8_t(color_blue(brush.color));
+				first[i + 1] = uint8_t(color_green(brush.color));
+				first[i + 2] = uint8_t(color_red(brush.color));
+				first[i + 3] = 0;
 			}
-			const auto pixel = brush_pixel(brush, dc, x - base_x, y - base_y);
-			if (pixel.paint)
-				plot(x, y, pixel.color, dc.rop2);
+			for (int64_t y = area.top + 1; y < area.bottom; ++y)
+				std::memcpy(row_pointer(y) + size_t(area.left) * 4, first, bytes);
+			dirty = true;
+			continue;
 		}
+		for (int64_t y = area.top; y < area.bottom; ++y)
+			for (int64_t x = area.left; x < area.right; ++x) {
+				if (solid) {
+					plot(x, y, brush.color, dc.rop2);
+					continue;
+				}
+				const auto pixel = brush_pixel(brush, dc, x - base_x, y - base_y);
+				if (pixel.paint)
+					plot(x, y, pixel.color, dc.rop2);
+			}
+	}
 }
 
 void Painter::stamp(int64_t x, int64_t y, const DesktopPen &pen)
@@ -517,6 +532,10 @@ bool blit(DesktopObjects &objects, DesktopDC &destination, int32_t dx, int32_t d
 	const bool destination_mono = painter.bitmap.depth == 1 && painter.bitmap.palette.empty();
 	const bool fast_copy = rop == rop_srccopy && uses_source && abs_dw == abs_sw && abs_dh == abs_sh && !flip_x && !flip_y &&
 		source.bitmap->depth == 32 && painter.bitmap.depth == 32;
+	std::vector<DesktopRect> copy_areas;
+	if (fast_copy)
+		copy_areas = destination.paintable(dest_left + destination.origin_x, dest_top + destination.origin_y,
+			dest_left + destination.origin_x + abs_dw, dest_top + destination.origin_y + abs_dh);
 	for (int64_t row = 0; row < abs_dh; ++row) {
 		const int64_t device_y = dest_top + row + destination.origin_y;
 		if (device_y < 0 || device_y >= painter.bitmap.height)
@@ -525,6 +544,22 @@ bool blit(DesktopObjects &objects, DesktopDC &destination, int32_t dx, int32_t d
 		const int64_t source_y = src_top + (flip_y ? abs_sh - 1 - source_row_index : source_row_index);
 		if (uses_source && (source_y < 0 || source_y >= source.bitmap->height))
 			continue;
+		if (fast_copy) {
+			// A straight copy moves the visible part of each row at once.
+			const int64_t device_left = dest_left + destination.origin_x;
+			const int64_t first = std::max<int64_t>({0, -device_left, -src_left});
+			const int64_t last = std::min<int64_t>({abs_dw, painter.bitmap.width - device_left, source.bitmap->width - src_left});
+			for (const auto &area : copy_areas) {
+				if (device_y < area.top || device_y >= area.bottom)
+					continue;
+				const int64_t from = std::max<int64_t>(device_left + first, area.left), to = std::min<int64_t>(device_left + last, area.right);
+				if (from >= to)
+					continue;
+				std::memcpy(painter.pixel_pointer(from, device_y), source.raw(src_left + (from - device_left), source_y), size_t(to - from) * 4);
+				painter.mark();
+			}
+			continue;
+		}
 		for (int64_t column = 0; column < abs_dw; ++column) {
 			const int64_t device_x = dest_left + column + destination.origin_x;
 			if (device_x < 0 || device_x >= painter.bitmap.width || !painter.visible(device_x, device_y))
@@ -552,7 +587,6 @@ bool blit(DesktopObjects &objects, DesktopDC &destination, int32_t dx, int32_t d
 				painter.mark();
 				continue;
 			}
-			(void)fast_copy;
 			const uint32_t destination_color = painter.read(device_x, device_y);
 			uint32_t source_color = uses_source ? source.pixel(source_x, source_y, destination, destination_mono) : 0;
 			uint32_t pattern_color = 0;

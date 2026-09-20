@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace raven {
 struct DesktopRect { int32_t left=0,top=0,right=0,bottom=0; };
@@ -20,6 +21,8 @@ public:
 	bool equals(const DesktopRegion &other) const;
 	bool empty() const;
 	bool contains(int32_t x,int32_t y) const;
+	// The region as disjoint rectangles, banded top to bottom.
+	std::vector<DesktopRect> rectangles() const;
 	DesktopRect bounds() const;
 	size_t bytes() const;
 private:
