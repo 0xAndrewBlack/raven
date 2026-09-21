@@ -218,6 +218,51 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint64_t>(call[1], *ticks);
 		call.ret(1);
 	});
+	// Local file times differ from UTC by the zone's offset now, whatever the date converted, as Windows does.
+	registry.add("FileTimeToLocalFileTime", 2, [](ApiCall &call) {
+		const int64_t offset = int64_t(zone_at(::time(nullptr)).offset_minutes) * 600000000LL;
+		call.store<uint64_t>(call[1], uint64_t(int64_t(call.load<uint64_t>(call[0])) + offset));
+		call.ret(1);
+	});
+	registry.add("LocalFileTimeToFileTime", 2, [](ApiCall &call) {
+		const int64_t offset = int64_t(zone_at(::time(nullptr)).offset_minutes) * 600000000LL;
+		call.store<uint64_t>(call[1], uint64_t(int64_t(call.load<uint64_t>(call[0])) - offset));
+		call.ret(1);
+	});
+	// MS-DOS dates count years from 1980 in bits 9-15, then the month and the day; times hold hours, minutes and seconds halved.
+	registry.add("DosDateTimeToFileTime", 3, [](ApiCall &call) {
+		const uint16_t date = uint16_t(call.u32(0)), time = uint16_t(call.u32(1));
+		const uint16_t fields[8] = {uint16_t(1980 + (date >> 9)), uint16_t((date >> 5) & 15), 0, uint16_t(date & 31), uint16_t(time >> 11),
+			uint16_t((time >> 5) & 63), uint16_t((time & 31) * 2), 0};
+		std::vector<uint8_t> bytes(16);
+		std::memcpy(bytes.data(), fields, 16);
+		const auto ticks = ticks_from(bytes);
+		if (!ticks) {
+			call.fail(87);
+			return;
+		}
+		call.store<uint64_t>(call[2], *ticks);
+		call.ret(1);
+	});
+	registry.add("FileTimeToDosDateTime", 3, [](ApiCall &call) {
+		const auto ticks = call.load<uint64_t>(call[0]);
+		if (ticks > 0x7fffffffffffffffULL) {
+			call.fail(87);
+			return;
+		}
+		const auto bytes = system_time(ticks);
+		uint16_t fields[8];
+		std::memcpy(fields, bytes.data(), 16);
+		if (fields[0] < 1980 || fields[0] > 2107) {
+			call.fail(87);
+			return;
+		}
+		if (call[1])
+			call.store<uint16_t>(call[1], uint16_t((fields[0] - 1980) << 9 | fields[1] << 5 | fields[3]));
+		if (call[2])
+			call.store<uint16_t>(call[2], uint16_t(fields[4] << 11 | fields[5] << 5 | fields[6] / 2));
+		call.ret(1);
+	});
 	registry.add("CompareFileTime", 2, [](ApiCall &call) {
 		const auto a = call.load<uint64_t>(call[0]), b = call.load<uint64_t>(call[1]);
 		call.ret(uint32_t(a < b ? -1 : a > b ? 1 : 0));
@@ -355,6 +400,21 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			bytes[282] = 1;
 		call.write(call[0], bytes);
 		call.ret(1);
+	});
+	// The version as ntdll reports it, the same Windows 10 workstation; the extended block is filled when the caller sized for it.
+	registry.add("RtlGetVersion", 1, [](ApiCall &call) {
+		const auto size = call.load<uint32_t>(call[0]);
+		if (size < 276) {
+			call.ret(0xc000000dU);
+			return;
+		}
+		std::vector<uint8_t> bytes(size >= 284 ? 284 : 276);
+		const uint32_t fields[5] = {size, 10, 0, 19045, 2};
+		std::memcpy(bytes.data(), fields, 20);
+		if (bytes.size() == 284)
+			bytes[282] = 1;
+		call.write(call[0], bytes);
+		call.ret(0);
 	});
 	// All logical processors form one group of at most 64: the masks of the process and the system are the same.
 	const auto processor_mask = [] {

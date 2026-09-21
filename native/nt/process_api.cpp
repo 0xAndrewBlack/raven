@@ -85,7 +85,7 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(path.size());
 		}
 	};
-	const std::string windows = "C:\\Windows", system = "C:\\Windows\\System32";
+	const std::string windows = "C:\\Windows", system = "C:\\Windows\\System32", wow64 = "C:\\Windows\\SysWOW64";
 	// Access tokens: the program's own token exists and closes like a handle; no privilege is held, and files carry no access control lists.
 	registry.add("OpenProcessToken", 3, [&context](ApiCall &call) {
 		// Every process of the runtime runs as the same host user, so the token of a child or of another instance is this process's own.
@@ -206,6 +206,9 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetSystemWindowsDirectoryA", 2, [=](ApiCall &call) { directory(call, false, windows); });
 	registry.add("GetSystemDirectoryW", 2, [=](ApiCall &call) { directory(call, true, system); });
 	registry.add("GetSystemDirectoryA", 2, [=](ApiCall &call) { directory(call, false, system); });
+	// The 64-bit system Raven presents keeps its 32-bit libraries in SysWOW64, whichever width asks.
+	registry.add("GetSystemWow64DirectoryW", 2, [=](ApiCall &call) { directory(call, true, wow64); });
+	registry.add("GetSystemWow64DirectoryA", 2, [=](ApiCall &call) { directory(call, false, wow64); });
 	registry.add("lstrcatW", 2, [](ApiCall &call) {
 		auto first = call.wide(call[0], 65536);
 		const auto second = call.wide(call[1], 65536);

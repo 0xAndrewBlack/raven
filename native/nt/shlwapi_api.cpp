@@ -26,6 +26,38 @@ size_t file_name_start(std::u16string_view path)
 	return start;
 }
 
+// The scheme of a URL: a letter, then letters, digits, '+', '-' or '.', before a colon. A single letter is a drive, not a scheme.
+size_t scheme_length(std::u16string_view text)
+{
+	size_t at = 0;
+	const auto letter = [](char16_t c) { return (c >= u'a' && c <= u'z') || (c >= u'A' && c <= u'Z'); };
+	while (at < text.size() && (letter(text[at]) || (at && ((text[at] >= u'0' && text[at] <= u'9') || text[at] == u'+' || text[at] == u'-' ||
+		text[at] == u'.'))))
+		++at;
+	return at >= 2 && at < text.size() && text[at] == u':' ? at : 0;
+}
+
+// What UrlIs tells of a text: a URL, an opaque one (nothing hierarchical after the scheme), a file URL, a directory.
+bool url_is(std::u16string_view text, uint32_t kind)
+{
+	const size_t scheme = scheme_length(text);
+	switch (kind) {
+	case 0:
+		return scheme;
+	case 1:
+		return scheme && (scheme + 1 == text.size() || !separator(text[scheme + 1]));
+	case 3: {
+		std::u16string lower(text.substr(0, scheme));
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](char16_t c) { return c >= u'A' && c <= u'Z' ? char16_t(c + 32) : c; });
+		return lower == u"file";
+	}
+	case 5:
+		return !text.empty() && separator(text.back());
+	default:
+		return false;
+	}
+}
+
 size_t extension_start(std::u16string_view path)
 {
 	const size_t name = file_name_start(path);
@@ -314,6 +346,23 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		const auto path = call.wide(call[0]);
 		call.ret(path.empty() || !(root_length(path) > 0));
 	});
+	// The path cut back to its root, "C:\" or "\\server\share\"; a path without one is emptied and fails.
+	registry.add("PathStripToRootW", 1, [](ApiCall &call) {
+		const auto path = call.wide(call[0]);
+		const size_t root = root_length(path);
+		call.put_wide(call[0], path.substr(0, root), root + 1);
+		call.ret(root > 0);
+	});
+	registry.add("PathStripToRootA", 1, [](ApiCall &call) {
+		const auto path = call.narrow(call[0]);
+		const size_t root = root_length(widen_ascii(path));
+		call.put_narrow(call[0], path.substr(0, root), root + 1);
+		call.ret(root > 0);
+	});
+	registry.add("UrlIsW", 2, [](ApiCall &call) { call.ret(call[0] && url_is(call.wide(call[0]), call.u32(1))); });
+	registry.add("UrlIsA", 2, [](ApiCall &call) { call.ret(call[0] && url_is(widen_ascii(call.narrow(call[0])), call.u32(1))); });
+	registry.add("PathIsURLW", 1, [](ApiCall &call) { call.ret(call[0] && url_is(call.wide(call[0]), 0)); });
+	registry.add("PathIsURLA", 1, [](ApiCall &call) { call.ret(call[0] && url_is(widen_ascii(call.narrow(call[0])), 0)); });
 	registry.add("PathIsRootW", 1, [](ApiCall &call) {
 		const auto path = call.wide(call[0]);
 		call.ret(!path.empty() && root_length(path) == path.size());

@@ -14,7 +14,6 @@
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <pwd.h>
 #include <unistd.h>
 
 namespace raven {
@@ -501,32 +500,34 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint32_t>(call[2], uint32_t(name.size()));
 		call.ret(1);
 	});
+	// A buffer too small for the name, or none, gets the size it needs and ERROR_BUFFER_OVERFLOW (GetComputerNameEx answers ERROR_MORE_DATA).
 	registry.add("GetComputerNameW", 2, [computer_name](ApiCall &call) {
 		const auto name = computer_name(0);
-		if (!call[0] || !call[1]) {
+		if (!call[1]) {
 			call.fail(error_invalid_parameter, 0);
 			return;
 		}
 		const uint32_t capacity = call.load<uint32_t>(call[1]);
-		if (capacity <= name->size()) {
+		if (!call[0] || capacity <= name->size()) {
 			call.store<uint32_t>(call[1], uint32_t(name->size() + 1));
-			call.fail(error_more_data, 0);
+			call.fail(111, 0);
 			return;
 		}
 		call.put_wide(call[0], *name, capacity);
 		call.store<uint32_t>(call[1], uint32_t(name->size()));
 		call.ret(1);
 	});
+	// A buffer too small for the name, or none, gets the size it needs and ERROR_BUFFER_OVERFLOW (GetComputerNameEx answers ERROR_MORE_DATA).
 	registry.add("GetComputerNameA", 2, [computer_name](ApiCall &call) {
 		const auto name = computer_name(0);
-		if (!call[0] || !call[1]) {
+		if (!call[1]) {
 			call.fail(error_invalid_parameter, 0);
 			return;
 		}
 		const uint32_t capacity = call.load<uint32_t>(call[1]);
-		if (capacity <= name->size()) {
+		if (!call[0] || capacity <= name->size()) {
 			call.store<uint32_t>(call[1], uint32_t(name->size() + 1));
-			call.fail(error_more_data, 0);
+			call.fail(111, 0);
 			return;
 		}
 		call.put_narrow(call[0], std::string(name->begin(), name->end()), capacity);
@@ -922,7 +923,8 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		else if (name == u"interactive") { sid = make_sid(5, {4}); }
 		else if (name == u"network") { sid = make_sid(5, {2}); }
 		else {
-			const auto user = from_utf8(::getpwuid(::getuid()) ? ::getpwuid(::getuid())->pw_name : "user");
+			// The user is the one GetUserName names.
+			const auto user = context.paths.user_name();
 			std::u16string lower_user = user;
 			for (auto &character : lower_user)
 				character = char16_t(std::tolower(static_cast<int>(character)));
