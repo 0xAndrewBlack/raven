@@ -29,6 +29,18 @@ uint64_t NativeDesktop::create_dc(uint64_t source)
 	return dc;
 }
 
+void NativeDesktop::apply_deferred(uint32_t operation, uint64_t handle)
+{
+	if (operation == 1) {
+		if (const auto *icon = objects.icon(handle); icon && !icon->shared)
+			objects.erase(handle);
+	} else if (operation == 2) {
+		delete_dc(handle);
+	} else if (operation == 3) {
+		delete_bitmap(handle);
+	}
+}
+
 bool NativeDesktop::delete_dc(uint64_t handle)
 {
 	const auto *dc = objects.dc(handle);
@@ -60,7 +72,7 @@ uint64_t NativeDesktop::select(uint64_t handle, uint64_t bitmap_handle)
 		return 0;
 	}
 	const auto previous = dc->bitmap;
-	dc->bitmap = bitmap_handle;
+	objects.reselect(*dc, bitmap_handle);
 	return previous;
 }
 

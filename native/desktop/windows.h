@@ -78,11 +78,17 @@ public:
 	static constexpr size_t dc_slots=1024, dc_slot=32, dc_slots_at=4096, dc_table_size=dc_slots_at+dc_slots*dc_slot;
 	void set_dc_table(uint8_t *table);
 	void apply_dc_log();
+	// Releases the guest answers itself and leaves for the runtime: a log page (a count, then from 16 up to 255 entries of a handle
+	// and an operation) and the set of valid icons (a handle at each handle's low ten bits). The guest takes a handle out of its tables
+	// as it logs it; the runtime carries the log out before it serves a call and does not publish logged handles again until then.
+	static constexpr size_t deferred_entries=255, icon_slots=1024;
+	void set_deferred_tables(uint8_t *log,uint8_t *icons);
+	void take_deferred(const std::function<void(uint32_t,uint64_t)> &apply);
 	// In the served block: bit 0 when the flags are published, bit 1 while a message filter hook is installed; then the desktop window.
 	static constexpr size_t loop_flags=0x738, desktop_handle=0x740;
 	void publish_windows();
 	void api_entered() { ++api_depth; }
-	void api_left() { --api_depth; }
+	void api_left();
 	// user32 entry points that follow the shared registry conventions; every handler runs on the calling guest thread.
 	void register_api(ApiRegistry &registry);
 	// Drawing marks the surface dirty; the next message retrieval presents it, so a burst of primitives costs one frame.
@@ -135,27 +141,41 @@ private:
 	uint64_t foreign_stamp=UINT64_MAX;
 	void import_foreign_frames();
 	uint8_t *screen_block=nullptr;
+	// A table entry handed out while calls were in progress, with the depth of the outermost of them: it is compared again before the
+	// guest runs until that call returns, as the call may change it through a pointer it took before a callback.
+	template<class T> struct WatchedItem { uint64_t first; const T *second; unsigned depth; };
 	// What each top-level window's frame was last drawn from (see paint_nonclient).
 	std::map<uint64_t,std::u16string> painted_frames;
 	uint8_t *window_table=nullptr;
 	unsigned api_depth=0;
+	// Whether what is written now is watched (see WatchedItem): not when written for a call that just returned.
+	bool watching=true;
 	void publish_window_record(uint64_t handle,const DesktopWindow *window);
 	uint8_t *menu_table=nullptr;
 	size_t menu_used=menu_blocks;
-	std::vector<std::pair<uint64_t,const DesktopMenu *>> watched_menus;
+	// Where each menu's block was written and how much room it has there.
+	std::map<uint64_t,std::pair<uint32_t,size_t>> menu_capacity;
+	std::vector<WatchedItem<DesktopMenu>> watched_menus;
 	void publish_menu(uint64_t handle,const DesktopMenu *menu);
 	bool menu_matches(uint64_t handle,const DesktopMenu &menu) const;
 	void publish_menus();
 	uint8_t *bitmap_table=nullptr;
 	uint8_t *system_table=nullptr;
 	uint8_t *dc_table=nullptr;
-	std::vector<std::pair<uint64_t,const DesktopDC *>> watched_dcs;
+	uint8_t *deferred_log=nullptr,*icon_table=nullptr;
+	std::vector<uint64_t> deferred_pending;
+	bool deferred(uint64_t handle) const { return std::find(deferred_pending.begin(),deferred_pending.end(),handle)!=deferred_pending.end(); }
+	void publish_icons();
+	// The accelerator tables, the loop flags, the desktop and focus windows.
+	void publish_words();
+	uint64_t published_accelerators=UINT64_MAX;
+	std::vector<WatchedItem<DesktopDC>> watched_dcs;
 	void publish_dc(uint64_t handle,const DesktopDC *dc);
 	void publish_dcs();
-	std::vector<std::pair<uint64_t,const DesktopBitmap *>> watched_bitmaps;
-	void publish_bitmap(uint64_t handle,const DesktopBitmap *bitmap);
+	std::vector<WatchedItem<DesktopBitmap>> watched_bitmaps;
+	void publish_bitmap(uint64_t handle,const DesktopBitmap *bitmap,bool touched);
 	void publish_bitmaps();
-	std::vector<std::pair<uint64_t,const DesktopWindow *>> watched;
+	std::vector<WatchedItem<DesktopWindow>> watched;
 	// Publishes a free screen context over the desktop window when none is published.
 	void publish_screen_dc(uint64_t desktop);
 	// Withdraws the published context when the runtime releases it; false for any other context.
@@ -183,6 +203,12 @@ private:
 	uint64_t queued_activation=0;
 	int focusing=0;
 	bool keep_host_window=false;
+	// A top-level window's surface released while it is resized, kept for the new size when it fits: making a surface maps fresh pages
+	// into both processes.
+	struct SpareSurface { std::shared_ptr<SharedPixels> pixels; uint64_t address=0; size_t size=0; };
+	std::map<uint64_t,SpareSurface> spare_surfaces;
+	bool resizing=false;
+	void drop_spare_surface(uint64_t handle);
 	// The compositor took the keyboard from the program's windows; applied once no window of the program receives it right after.
 	bool focus_leaving=false;
 	std::chrono::steady_clock::time_point focus_left{};

@@ -160,8 +160,10 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 		const bool visible = window->visible;
 		const bool kept = keep_host_window;
 		keep_host_window = keep_host_window || hosting_surface.contains(handle);
-		try { release_surface(handle); } catch (...) { keep_host_window = kept; throw; }
+		resizing = true;
+		try { release_surface(handle); } catch (...) { keep_host_window = kept; resizing = false; throw; }
 		keep_host_window = kept;
+		resizing = false;
 		window = objects.window(handle);
 		window->bitmap = 0;
 		window->dc = 0;

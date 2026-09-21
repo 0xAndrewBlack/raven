@@ -9,12 +9,15 @@ uint64_t DesktopObjects::add_accelerators(std::vector<DesktopAccelerator> table)
 		return 0;
 	const uint64_t handle = accelerator_tables.empty() ? first + 1 : accelerator_tables.rbegin()->first + 1;
 	accelerator_tables.emplace(handle, std::move(table));
+	++accelerator_version;
 	return handle;
 }
 
 bool DesktopObjects::remove_accelerators(uint64_t handle)
 {
-	return accelerator_tables.erase(handle) != 0;
+	const bool removed = accelerator_tables.erase(handle) != 0;
+	accelerator_version += removed;
+	return removed;
 }
 
 const std::vector<DesktopAccelerator> *DesktopObjects::accelerators(uint64_t handle) const

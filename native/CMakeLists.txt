@@ -816,6 +816,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_custom_target(dc_attribute_pe_fixture ALL DEPENDS ${DC_ATTRIBUTE_FIXTURE})
         add_test(NAME native_dc_attribute_cli COMMAND raven --run-process --execution=native ${DC_ATTRIBUTE_FIXTURE})
         set_tests_properties(native_dc_attribute_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        set(RELEASE_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/release-fixture.exe)
+        add_custom_command(OUTPUT ${RELEASE_FIXTURE}
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
+                -Wl,--entry,raven_entry,--image-base,0x197900000
+                -o ${RELEASE_FIXTURE} ${PROJECT_SOURCE_DIR}/testdata/native_loader/release_client.c -lgdi32 -luser32 -lkernel32
+            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/release_client.c VERBATIM)
+        add_custom_target(release_pe_fixture ALL DEPENDS ${RELEASE_FIXTURE})
+        add_test(NAME native_release_cli COMMAND raven --run-process --execution=native ${RELEASE_FIXTURE})
+        set_tests_properties(native_release_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         set(SYSTEM_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/system-fixture.exe)
         add_custom_command(OUTPUT ${SYSTEM_FIXTURE}
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector

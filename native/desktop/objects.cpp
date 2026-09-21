@@ -172,7 +172,11 @@ uint64_t DesktopObjects::add(Object object)
 	}
 	if (std::holds_alternative<DesktopMenu>(objects.at(handle))) menus_touched.touch(handle);
 	if (std::holds_alternative<DesktopBitmap>(objects.at(handle))) bitmaps_touched.touch(handle);
-	if (std::holds_alternative<DesktopDC>(objects.at(handle))) dcs_touched.touch(handle);
+	if (const auto *device = std::get_if<DesktopDC>(&objects.at(handle))) {
+		dcs_touched.touch(handle);
+		count_selection(device->bitmap, 1);
+	}
+	if (std::holds_alternative<DesktopIcon>(objects.at(handle))) icons_touched.touch(handle);
 	return handle;
 }
 
@@ -186,6 +190,7 @@ bool DesktopObjects::erase(uint64_t handle)
 	if (std::holds_alternative<DesktopMenu>(found->second)) menus_touched.touch(handle);
 	if (std::holds_alternative<DesktopBitmap>(found->second)) bitmaps_touched.touch(handle);
 	if (std::holds_alternative<DesktopDC>(found->second)) dcs_touched.touch(handle);
+	if (std::holds_alternative<DesktopIcon>(found->second)) icons_touched.touch(handle);
 	if (const auto *menu=std::get_if<DesktopMenu>(&found->second)) {
 		if (menu->parent) return false;
 		for (const auto &item:menu->items) if (item.submenu) {
@@ -194,6 +199,7 @@ bool DesktopObjects::erase(uint64_t handle)
 		}
 	}
 	const auto *device=std::get_if<DesktopDC>(&found->second);
+	if (device) count_selection(device->bitmap, -1);
 	const auto previous_font=device ? device->font : 0;
 	const auto previous_brush=device ? device->brush : 0;
 	const auto previous_pen=device ? device->pen : 0;
@@ -272,6 +278,7 @@ void DesktopObjects::detach_window_dcs(uint64_t handle)
 		if (auto *device=std::get_if<DesktopDC>(&object); device && device->window==handle && device->leased) {
 			const auto previous=object_size(object);
 			// A retained DC keeps selected objects, but no longer owns a drawable surface.
+			count_selection(device->bitmap, -1);
 			device->bitmap=device->default_bitmap=0;
 			device->bounds=DesktopRect{}; device->clip.reset();
 			used-=previous-object_size(object);
@@ -284,6 +291,7 @@ void DesktopObjects::attach_window_dcs(uint64_t root,uint64_t bitmap)
 	for (auto &[identity,object] : objects)
 		if (auto *device=std::get_if<DesktopDC>(&object); device && device->leased && !device->bitmap && device->window && window(device->window) && window_root(device->window)==root) {
 			device->bitmap=device->default_bitmap=bitmap;
+			count_selection(bitmap, 1);
 			configure_window_dc(device->window,*device,device->window_frame);
 		}
 }
@@ -359,6 +367,14 @@ const DesktopDC *DesktopObjects::dc(uint64_t handle) const
 {
 	const auto found = objects.find(handle);
 	return found == objects.end() ? nullptr : std::get_if<DesktopDC>(&found->second);
+}
+
+std::vector<uint64_t> DesktopObjects::icon_handles() const
+{
+	std::vector<uint64_t> result;
+	for (const auto &[handle,object] : objects)
+		if (std::holds_alternative<DesktopIcon>(object)) result.push_back(handle);
+	return result;
 }
 
 std::vector<uint64_t> DesktopObjects::dc_handles() const
@@ -535,10 +551,14 @@ DesktopClass *DesktopObjects::window_class(uint16_t atom)
 
 bool DesktopObjects::selected(uint64_t bitmap) const
 {
-	for (const auto &[handle, object] : objects)
-		if (const auto *dc = std::get_if<DesktopDC>(&object); dc && dc->bitmap == bitmap)
-			return true;
-	return false;
+	return selections.contains(bitmap);
+}
+
+void DesktopObjects::reselect(DesktopDC &dc, uint64_t bitmap)
+{
+	count_selection(dc.bitmap, -1);
+	dc.bitmap = bitmap;
+	count_selection(bitmap, 1);
 }
 
 size_t DesktopObjects::count() const { return objects.size(); }

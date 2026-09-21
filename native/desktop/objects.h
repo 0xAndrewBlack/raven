@@ -253,6 +253,8 @@ public:
 	const std::vector<DesktopAccelerator> *accelerators(uint64_t handle) const;
 	bool remove_accelerators(uint64_t handle);
 	std::vector<uint64_t> accelerator_handles() const;
+	// Changes whenever an accelerator table is made or destroyed.
+	uint64_t accelerators_version() const { return accelerator_version; }
 	uint64_t load_menu(const MenuTemplate &definition);
 	const DesktopIcon *icon(uint64_t handle) const;
 	const DesktopBitmap *bitmap(uint64_t handle) const;
@@ -287,6 +289,13 @@ public:
 		std::vector<uint64_t> handles{};
 		// Set when more were touched than are recorded: every one may have changed.
 		bool overflow=false;
+		// The handles touched, each once.
+		std::vector<uint64_t> &settled()
+		{
+			std::sort(handles.begin(), handles.end());
+			handles.erase(std::unique(handles.begin(), handles.end()), handles.end());
+			return handles;
+		}
 		void touch(uint64_t handle)
 		{
 			if (!handles.empty() && handles.back()==handle) return;
@@ -298,9 +307,11 @@ public:
 	TouchedHandles &touched_menus() { return menus_touched; }
 	TouchedHandles &touched_bitmaps() { return bitmaps_touched; }
 	TouchedHandles &touched_dcs() { return dcs_touched; }
+	TouchedHandles &touched_icons() { return icons_touched; }
 	std::vector<uint64_t> menu_handles() const;
 	std::vector<uint64_t> bitmap_handles() const;
 	std::vector<uint64_t> dc_handles() const;
+	std::vector<uint64_t> icon_handles() const;
 	uint64_t window_root(uint64_t handle) const;
 	// Children of a window in z-order, bottom to top. Top-level windows are the children of window zero.
 	std::vector<uint64_t> child_windows(uint64_t parent) const;
@@ -324,6 +335,8 @@ public:
 	const DesktopClass *window_class(uint16_t atom) const;
 	DesktopClass *window_class(uint16_t atom);
 	bool selected(uint64_t bitmap) const;
+	// Selects a bitmap into a context, keeping count of the contexts each bitmap is selected into.
+	void reselect(DesktopDC &dc, uint64_t bitmap);
 	size_t count() const;
 	size_t bytes() const;
 	IconDisplay display() const;
@@ -334,10 +347,20 @@ public:
 	const DesktopMetrics &nonclient_metrics() const;
 
 private:
-	TouchedHandles windows_touched{}, menus_touched{}, bitmaps_touched{}, dcs_touched{};
+	TouchedHandles windows_touched{}, menus_touched{}, bitmaps_touched{}, dcs_touched{}, icons_touched{};
+	// How many contexts each bitmap is selected into.
+	std::map<uint64_t,uint32_t> selections;
+	void count_selection(uint64_t bitmap, int change)
+	{
+		if (!bitmap) return;
+		auto &count = selections[bitmap];
+		count = uint32_t(int64_t(count) + change);
+		if (!count) selections.erase(bitmap);
+	}
 	std::map<uint64_t, Object> objects;
 	std::map<uint16_t,DesktopClass> classes;
 	std::map<uint64_t,std::vector<DesktopAccelerator>> accelerator_tables;
+	uint64_t accelerator_version=0;
 #ifdef RAVEN_SKIA
 	std::unique_ptr<TextRenderer> text_engine;
 #endif
