@@ -100,6 +100,13 @@ PEImage::PEImage(std::span<const uint8_t> bytes) : bytes(bytes)
 		PESection section{std::string(name.begin(), end), read32(bytes, offset + 12),
 			read32(bytes, offset + 8), read32(bytes, offset + 20),
 			read32(bytes, offset + 16), read32(bytes, offset + 36)};
+		// Windows maps a section's virtual size and copies no more of its raw data than that size fills: self-extracting setups keep
+		// their payload as raw data far past the virtual size of their last section.
+		if (section.virtual_size) {
+			const uint64_t mapped = (uint64_t(section.virtual_size) + section_alignment - 1) / section_alignment * section_alignment;
+			if (section.file_size > mapped)
+				section.file_size = uint32_t(mapped);
+		}
 		const uint32_t extent = std::max(section.virtual_size, section.file_size);
 		require_range(section.address, extent, image_size);
 		if (section.address % section_alignment || (extent && section.address < headers_size))
