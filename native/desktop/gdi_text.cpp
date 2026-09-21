@@ -732,9 +732,10 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			int32_t scale = 0, origin = 0;
 			if ((flags & 2) && call[10]) {
 				const auto count = call.load<int32_t>(call[10]);
+				// SCRIPT_TABDEF: the count, the scale, the stops' address and the origin, after the address at the program's width.
 				scale = call.load<int32_t>(call[10] + 4);
-				origin = call.load<int32_t>(call[10] + 16);
-				const auto stops = call.load<uint64_t>(call[10] + 8);
+				origin = call.load<int32_t>(call[10] + 8 + call.pointer_width());
+				const auto stops = call.load_pointer(call[10] + 8);
 				for (int32_t i = 0; i < count && i < 64 && stops; ++i)
 					tabs.push_back(call.load<int32_t>(stops + uint64_t(i) * 4));
 			}
@@ -767,7 +768,7 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			call.store<int32_t>(entry.block + 8, int32_t(entry.text.size()));
 			const auto handle = (*next_string)++;
 			strings->emplace(handle, std::move(entry));
-			call.store<uint64_t>(call[12], handle);
+			call.store_pointer(call[12], handle);
 			call.ret(0);
 		} catch (const uint32_t &) {
 			call.ret(0x80070006);
@@ -778,7 +779,7 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			call.ret(0x80070057);
 			return;
 		}
-		const auto handle = call.load<uint64_t>(call[0]);
+		const auto handle = call.load_pointer(call[0]);
 		const auto found = strings->find(handle);
 		if (found == strings->end()) {
 			call.ret(0x80070057);
@@ -787,7 +788,7 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		if (found->second.block)
 			process.unmap_memory(found->second.block);
 		strings->erase(found);
-		call.store<uint64_t>(call[0], 0);
+		call.store_pointer(call[0], 0);
 		call.ret(0);
 	});
 	registry.add("ScriptString_pSize", 1, [=](ApiCall &call) {
@@ -817,7 +818,8 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		const int32_t index = call.i32(1);
 		const bool trailing = call.u32(2) != 0;
 		const int32_t count = int32_t(entry->text.size());
-		if (index < 0 || index > count) {
+		// The trailing edge of the position before the first character is where the string starts, as the edit control asks.
+		if (index < -1 || index > count || (index == -1 && !trailing)) {
 			call.ret(0x80070057);
 			return;
 		}
