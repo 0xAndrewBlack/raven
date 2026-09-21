@@ -89,6 +89,7 @@ void register_host_api(ApiRegistry &registry, KernelContext &context);
 void register_job_api(ApiRegistry &registry, KernelContext &context);
 // winmm wave output through the host sound server.
 void register_wave_api(ApiRegistry &registry, KernelContext &context);
+void register_mmio_api(ApiRegistry &registry, KernelContext &context);
 void register_process_info_api(ApiRegistry &registry, KernelContext &context);
 void register_crypt32_api(ApiRegistry &registry, KernelContext &context);
 void register_font_service(ApiRegistry &registry, KernelContext &context);

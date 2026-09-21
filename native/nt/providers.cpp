@@ -2027,6 +2027,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_pipe_api(api_registry, kernel);
 	register_job_api(api_registry, kernel);
 	register_wave_api(api_registry, kernel);
+	register_mmio_api(api_registry, kernel);
 	register_crypt32_api(api_registry, kernel);
 	register_process_info_api(api_registry, kernel);
 	register_font_service(api_registry, kernel);

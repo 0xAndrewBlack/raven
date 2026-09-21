@@ -1073,6 +1073,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_shlwapi_api(shared_api, kernel);
 	register_platform_api(shared_api, kernel);
 	register_actctx_api(shared_api, kernel);
+	register_mmio_api(shared_api, kernel);
 	register_process_api(shared_api, kernel);
 	register_thread_api(shared_api, kernel);
 	register_sync_api(shared_api, kernel);
