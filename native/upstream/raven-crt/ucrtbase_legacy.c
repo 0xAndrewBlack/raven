@@ -49,6 +49,15 @@ CRT wchar_t *_wcsdup(const wchar_t *text)
 	return copy;
 }
 
+/* The C library's own generator, as msvcrt has it: a linear congruence whose high bits give 15-bit numbers, seeded per program. */
+static unsigned long random_state = 1;
+CRT void srand(unsigned int seed) { random_state = seed; }
+CRT int rand(void)
+{
+	random_state = random_state * 214013 + 2531011;
+	return (int)((random_state >> 16) & 0x7fff);
+}
+
 CRT void *bsearch(const void *key, const void *base, size_t count, size_t size, int (__cdecl *compare)(const void *, const void *))
 {
 	const char *low = base;
