@@ -1239,6 +1239,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     ${fixture}/actctx/actctx.exe)
                 set_tests_properties(native_activation_contexts_${installer_arch} PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                     ENVIRONMENT RAVEN_PREFIX=${fixture}/actctx-prefix)
+                # Settings from the registry: a run switches the visual styles off as the control panel does, the next run starts without them.
+                add_custom_command(OUTPUT ${fixture}/settings.exe
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/settings.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/settings_client.c -luxtheme -ladvapi32 -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/settings_client.c VERBATIM)
+                add_custom_target(settings_fixture_${installer_arch} ALL DEPENDS ${fixture}/settings.exe)
+                add_test(NAME native_settings_reset_${installer_arch} COMMAND ${CMAKE_COMMAND} -E rm -rf ${fixture}/settings-prefix)
+                add_test(NAME native_settings_${installer_arch} COMMAND sh -c "unset RAVEN_THEME; \"$1\" --run-process --execution=native --timeout-ms=60000 \"$2\" -- --write && unset RAVEN_THEME && \"$1\" --run-process --execution=native --timeout-ms=60000 \"$2\"" settings $<TARGET_FILE:raven> ${fixture}/settings.exe)
+                set_tests_properties(native_settings_reset_${installer_arch} PROPERTIES FIXTURES_SETUP settings_${installer_arch})
+                set_tests_properties(native_settings_${installer_arch} PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED settings_${installer_arch}
+                    PASS_REGULAR_EXPRESSION "Native entry returned 0 .*Native entry returned 0 " ENVIRONMENT RAVEN_PREFIX=${fixture}/settings-prefix)
                 # msiexec found by name in the system directory, installing and removing the package from the command line.
                 add_test(NAME native_msiexec_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/msiexec-client.exe)
                 set_tests_properties(native_msiexec_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "

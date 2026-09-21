@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 
 namespace raven {
 
@@ -38,6 +39,39 @@ std::vector<uint8_t> from_ansi_bytes(std::span<const uint8_t> ansi, uint32_t cod
 	return bytes;
 }
 
+}
+
+// The settings the control panel keeps in the prefix registry take effect as the process starts: the runtime options under
+// HKCU\Software\Raven\Environment, and the visual styles switched off as Windows records it (ThemeManager ThemeActive "0"). What the
+// environment already sets wins over the registry.
+void apply_registry_settings(NativeRegistry &hive)
+{
+	const auto text = [](const std::vector<uint8_t> &data) {
+		std::u16string value(data.size() / 2, u'\0');
+		std::memcpy(value.data(), data.data(), value.size() * 2);
+		while (!value.empty() && !value.back())
+			value.pop_back();
+		return to_utf8(value);
+	};
+	uint64_t key = 0;
+	if (!hive.open(0x80000001, u"Software\\Raven\\Environment", key)) {
+		std::u16string name;
+		uint32_t type = 0;
+		std::vector<uint8_t> data;
+		for (uint32_t index = 0; !hive.enum_value(key, index, name, type, data); ++index) {
+			const auto variable = to_utf8(name);
+			if ((type == 1 || type == 2) && variable.starts_with("RAVEN_"))
+				::setenv(variable.c_str(), text(data).c_str(), 0);
+		}
+		hive.close(key);
+	}
+	if (!hive.open(0x80000001, u"Software\\Microsoft\\Windows\\CurrentVersion\\ThemeManager", key)) {
+		uint32_t type = 0;
+		std::vector<uint8_t> data;
+		if (!hive.query(key, u"ThemeActive", type, data) && type == 1 && text(data) == "0")
+			::setenv("RAVEN_THEME", "classic", 0);
+		hive.close(key);
+	}
 }
 
 void register_registry_api(ApiRegistry &registry, KernelContext &context, NativeRegistry &hive)

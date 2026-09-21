@@ -708,6 +708,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeObjectAPI object_api(process, environment, kernel_objects, deadline);
 	const auto prefix = NativePrefix::from_environment();
 	NativeRegistry registry(prefix.registry_file());
+	apply_registry_settings(registry);
 	NativeProfile profile(process, environment, prefix);
 	NativeCRT crt(process, environment);
 	crt.initialize([&](std::string_view name) { return modules.resolve({"msvcrt.dll", std::string(name), 0, false, 0}); });

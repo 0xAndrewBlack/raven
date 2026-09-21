@@ -67,6 +67,7 @@ uint64_t counter_ticks();
 void register_exception_api(ApiRegistry &registry, KernelContext &context, class NativeUnwinder &unwinder);
 class NativeRegistry;
 void register_registry_api(ApiRegistry &registry, KernelContext &context, NativeRegistry &hive);
+void apply_registry_settings(NativeRegistry &hive);
 void register_service_api(ApiRegistry &registry, KernelContext &context, NativeRegistry &hive);
 void register_platform_api(ApiRegistry &registry, KernelContext &context);
 void register_shell_api(ApiRegistry &registry, KernelContext &context);
