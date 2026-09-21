@@ -2,6 +2,7 @@
 #include "nls.h"
 
 #include <fstream>
+#include <iterator>
 #include <vector>
 #include <stdexcept>
 
@@ -35,17 +36,66 @@ std::u16string trim(std::u16string value)
 	return value;
 }
 
-// First matching value, or nullopt when the file, section or key is absent.
-std::optional<std::u16string> lookup(const std::filesystem::path &file, std::u16string_view section, std::u16string_view key)
+// The file's lines, trimmed: UTF-16 after a byte order mark, as Windows writes Unicode profiles, otherwise bytes widened to characters.
+std::optional<std::vector<std::u16string>> read_lines(const std::filesystem::path &file)
 {
 	std::ifstream input(file, std::ios::binary);
 	if (!input)
 		return std::nullopt;
+	const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	std::u16string content;
+	if (bytes.size() >= 2 && uint8_t(bytes[0]) == 0xff && uint8_t(bytes[1]) == 0xfe) {
+		for (size_t index = 2; index + 1 < bytes.size(); index += 2)
+			content.push_back(char16_t(uint8_t(bytes[index]) | uint8_t(bytes[index + 1]) << 8));
+	} else {
+		content = widen(bytes);
+	}
+	std::vector<std::u16string> lines;
+	size_t start = 0;
+	while (start <= content.size()) {
+		auto end = content.find(u'\n', start);
+		if (end == content.npos)
+			end = content.size();
+		lines.push_back(trim(content.substr(start, end - start)));
+		start = end + 1;
+	}
+	return lines;
+}
+
+// The lines of one section that are not comments, in file order.
+std::optional<std::vector<std::u16string>> section_lines(const std::filesystem::path &file, std::u16string_view section)
+{
+	const auto lines = read_lines(file);
+	if (!lines)
+		return std::nullopt;
+	const auto wanted = fold(section);
+	std::optional<std::vector<std::u16string>> result;
+	bool inside = false;
+	for (const auto &text : *lines) {
+		if (text.empty() || text[0] == u';')
+			continue;
+		if (text[0] == u'[') {
+			const auto close = text.find(u']');
+			inside = close != text.npos && fold(trim(text.substr(1, close - 1))) == wanted;
+			if (inside && !result)
+				result.emplace();
+			continue;
+		}
+		if (inside)
+			result->push_back(text);
+	}
+	return result;
+}
+
+// First matching value, or nullopt when the file, section or key is absent.
+std::optional<std::u16string> lookup(const std::filesystem::path &file, std::u16string_view section, std::u16string_view key)
+{
+	const auto lines = read_lines(file);
+	if (!lines)
+		return std::nullopt;
 	const auto wanted_section = fold(section), wanted_key = fold(key);
 	bool inside = false;
-	std::string line;
-	while (std::getline(input, line)) {
-		const auto text = trim(widen(line));
+	for (const auto &text : *lines) {
 		if (text.empty() || text[0] == u';')
 			continue;
 		if (text[0] == u'[') {
@@ -68,10 +118,7 @@ std::optional<std::u16string> lookup(const std::filesystem::path &file, std::u16
 std::vector<std::u16string> section_names(const std::filesystem::path &file)
 {
 	std::vector<std::u16string> names;
-	std::ifstream input(file, std::ios::binary);
-	std::string line;
-	while (input && std::getline(input, line)) {
-		const auto text = trim(widen(line));
+	for (const auto &text : read_lines(file).value_or(std::vector<std::u16string>{})) {
 		if (text.empty() || text[0] != u'[')
 			continue;
 		if (const auto close = text.find(u']'); close != text.npos)
@@ -191,32 +238,47 @@ std::optional<std::u16string> NativeProfile::text(uint64_t address) const
 	throw std::runtime_error("native profile string exceeds policy limit");
 }
 
+// Writes strings that each end in a terminator, then one more; a buffer that is too small is filled and ends in two terminators. The
+// result counts the characters written without the last terminator.
+uint64_t NativeProfile::put_list(uint64_t address, size_t capacity, const std::vector<std::u16string> &entries) const
+{
+	std::u16string joined;
+	for (const auto &entry : entries)
+		joined += entry + u'\0';
+	if (capacity < 2)
+		return 0;
+	const bool fits = joined.size() + 1 <= capacity;
+	if (!fits)
+		joined.resize(capacity - 2);
+	joined.push_back(u'\0');
+	if (!fits)
+		joined.push_back(u'\0');
+	std::vector<uint8_t> bytes;
+	for (const auto character : joined) {
+		bytes.push_back(uint8_t(character));
+		bytes.push_back(uint8_t(character >> 8));
+	}
+	process.write_memory(address, bytes);
+	return fits ? (joined.empty() ? 0 : joined.size() - 1) : capacity - 2;
+}
+
 bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &args, uint64_t &result)
 {
 	if (name == "GetPrivateProfileSectionNamesW") {
-		std::u16string joined;
+		std::vector<std::u16string> names;
 		if (const auto file_name = text(args[2]))
 			if (const auto path = prefix.resolve(encode_utf8(*file_name)))
-				for (const auto &entry : section_names(*path))
-					joined += entry + u'\0';
-		const size_t capacity = uint32_t(args[1]);
-		result = 0;
-		if (capacity >= 2) {
-			// A buffer that is too small is filled and ends in two terminators.
-			const bool fits = joined.size() + 1 <= capacity;
-			if (!fits)
-				joined.resize(capacity - 2);
-			joined.push_back(u'\0');
-			if (!fits)
-				joined.push_back(u'\0');
-			std::vector<uint8_t> bytes;
-			for (const auto character : joined) {
-				bytes.push_back(uint8_t(character));
-				bytes.push_back(uint8_t(character >> 8));
-			}
-			process.write_memory(args[0], bytes);
-			result = fits ? (joined.empty() ? 0 : joined.size() - 1) : capacity - 2;
-		}
+				names = section_names(*path);
+		result = put_list(args[0], uint32_t(args[1]), names);
+		return true;
+	}
+	// Every key=value line of a section.
+	if (name == "GetPrivateProfileSectionW") {
+		std::vector<std::u16string> lines;
+		if (const auto section = text(args[0]), file_name = text(args[3]); section && file_name)
+			if (const auto path = prefix.resolve(encode_utf8(*file_name)))
+				lines = section_lines(*path, *section).value_or(std::vector<std::u16string>{});
+		result = put_list(args[1], uint32_t(args[2]), lines);
 		return true;
 	}
 	if (name == "WritePrivateProfileStringW") {
@@ -255,6 +317,20 @@ bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &
 	result = 0;
 	try {
 		const auto section = text(args[0]), key = text(args[1]), file_name = text(integer ? args[3] : args[5]);
+		// Without a section the names of the sections come back, and without a key the names of the section's keys.
+		if (!integer && (!section || !key)) {
+			std::vector<std::u16string> names;
+			if (file_name)
+				if (const auto path = prefix.resolve(encode_utf8(*file_name))) {
+					if (!section)
+						names = section_names(*path);
+					else
+						for (const auto &line : section_lines(*path, *section).value_or(std::vector<std::u16string>{}))
+							names.push_back(trim(line.substr(0, line.find(u'='))));
+				}
+			result = put_list(args[3], uint32_t(args[4]), names);
+			return true;
+		}
 		std::optional<std::u16string> value;
 		if (section && key && file_name)
 			if (const auto path = prefix.resolve(encode_utf8(*file_name)))
@@ -299,8 +375,10 @@ bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &
 
 bool NativeProfile::dispatch(std::string_view name)
 {
-	const uint32_t count = name == "GetPrivateProfileSectionNamesW" ? 3 : name == "GetPrivateProfileIntW" || name == "WritePrivateProfileStringW" ? 4 : 6;
-	if (name != "GetPrivateProfileSectionNamesW" && name != "GetPrivateProfileIntW" && name != "GetPrivateProfileStringW" && name != "WritePrivateProfileStringW")
+	const uint32_t count = name == "GetPrivateProfileSectionNamesW" ? 3 : name == "GetPrivateProfileIntW" || name == "WritePrivateProfileStringW" ||
+		name == "GetPrivateProfileSectionW" ? 4 : 6;
+	if (name != "GetPrivateProfileSectionNamesW" && name != "GetPrivateProfileIntW" && name != "GetPrivateProfileStringW" && name != "WritePrivateProfileStringW" &&
+		name != "GetPrivateProfileSectionW")
 		return false;
 	uint64_t result = 0;
 	execute(name, process.api_arguments(count), result);
@@ -313,6 +391,11 @@ void register_profile_api(ApiRegistry &registry, NativeProfile &profile)
 	registry.add("GetPrivateProfileSectionNamesW", 3, [&profile](ApiCall &call) {
 		uint64_t result = 0;
 		profile.execute("GetPrivateProfileSectionNamesW", {call[0], call[1], call[2]}, result);
+		call.ret(result);
+	});
+	registry.add("GetPrivateProfileSectionW", 4, [&profile](ApiCall &call) {
+		uint64_t result = 0;
+		profile.execute("GetPrivateProfileSectionW", {call[0], call[1], call[2], call[3]}, result);
 		call.ret(result);
 	});
 	registry.add("GetPrivateProfileIntW", 4, [&profile](ApiCall &call) {
