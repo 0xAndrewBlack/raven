@@ -1329,7 +1329,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		"RtlWakeAddressSingle", "RtlWakeAddressAll",
 		// What the runtime's own components import from ntdll, which they need whether a program loads them at start or later.
 		"DbgPrint", "NtCancelIoFile", "NtCreateSection", "NtFsControlFile", "NtReadFile", "RtlCreateUnicodeStringFromAsciiz", "RtlFreeHeap",
-		"RtlFreeUnicodeString", "RtlGetVersion", "RtlIpv6AddressToStringExW", "RtlIpv6StringToAddressW", "RtlLengthSid"})
+		"RtlFreeUnicodeString", "RtlGetVersion", "RtlIpv6AddressToStringExW", "RtlIpv6StringToAddressW", "RtlLengthSid", "RtlUnicodeToMultiByteN",
+		"RtlUnicodeToMultiByteSize", "RtlIsTextUnicode", "RtlImageNtHeader", "NtDeleteKey",
+		// The unwinding of 64-bit frames, which libraries built with their own exception handling import.
+		"RtlCaptureContext", "RtlLookupFunctionEntry", "RtlPcToFileHeader", "RtlVirtualUnwind", "RtlUnwindEx"})
 		if (std::find(nt_names.begin(),nt_names.end(),name)==nt_names.end()) nt_names.push_back(name);
 	std::sort(nt_names.begin(),nt_names.end());
 	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.

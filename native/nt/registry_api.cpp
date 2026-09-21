@@ -476,6 +476,73 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		if (buffer)
 			context.allocator.release(buffer);
 	});
+	// A counted string of its own, its buffer from the process heap that RtlFreeUnicodeString returns it to.
+	registry.add("RtlCreateUnicodeStringFromAsciiz", 2, [&context, ansi_page](ApiCall &call) {
+		const auto text = from_ansi(call.narrow(call[1]), ansi_page);
+		const auto block = text.size() < 32767 ? context.allocator.allocate(text.size() * 2 + 2, true) : 0;
+		if (!block) {
+			call.ret(0);
+			return;
+		}
+		call.write(block, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(text.data()), text.size() * 2));
+		const size_t width = call.pointer_width();
+		std::vector<uint8_t> counted(width == 4 ? 8 : 16);
+		const uint16_t length = uint16_t(text.size() * 2), maximum = uint16_t(length + 2);
+		std::memcpy(counted.data(), &length, 2);
+		std::memcpy(counted.data() + 2, &maximum, 2);
+		std::memcpy(counted.data() + (width == 4 ? 4 : 8), &block, width);
+		call.write(call[0], counted);
+		call.ret(1);
+	});
+	// UTF-16 to the ANSI code page, as many bytes as fit; and the bytes the whole text needs.
+	registry.add("RtlUnicodeToMultiByteN", 5, [ansi_page](ApiCall &call) {
+		const auto bytes = call.read(call[3], call.u32(4) & ~1U);
+		std::u16string text(bytes.size() / 2, u'\0');
+		std::memcpy(text.data(), bytes.data(), text.size() * 2);
+		auto narrow = to_ansi(text, ansi_page);
+		narrow.resize(std::min<size_t>(narrow.size(), call.u32(1)));
+		call.write(call[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(narrow.data()), narrow.size()));
+		if (call[2])
+			call.store<uint32_t>(call[2], uint32_t(narrow.size()));
+		call.ret(0);
+	});
+	registry.add("RtlUnicodeToMultiByteSize", 3, [ansi_page](ApiCall &call) {
+		const auto bytes = call.read(call[1], call.u32(2) & ~1U);
+		std::u16string text(bytes.size() / 2, u'\0');
+		std::memcpy(text.data(), bytes.data(), text.size() * 2);
+		call.store<uint32_t>(call[0], uint32_t(to_ansi(text, ansi_page).size()));
+		call.ret(0);
+	});
+	// Whether a buffer reads as UTF-16: a byte order mark says so, otherwise text whose odd bytes are mostly zero, as Latin text in
+	// UTF-16 is. The tests asked for are answered with the ones that held.
+	registry.add("RtlIsTextUnicode", 3, [](ApiCall &call) {
+		const auto bytes = call.read(call[0], std::min<uint32_t>(call.u32(1), 65536));
+		constexpr uint32_t statistics = 0x0002, signature = 0x0008, reverse_signature = 0x0080, odd_length = 0x0200;
+		uint32_t held = 0;
+		if (bytes.size() >= 2 && bytes[0] == 0xff && bytes[1] == 0xfe)
+			held |= signature;
+		if (bytes.size() >= 2 && bytes[0] == 0xfe && bytes[1] == 0xff)
+			held |= reverse_signature;
+		if (bytes.size() % 2)
+			held |= odd_length;
+		size_t zero_high = 0;
+		for (size_t at = 1; at < bytes.size(); at += 2)
+			zero_high += bytes[at] == 0;
+		if (bytes.size() >= 2 && zero_high * 2 > bytes.size() / 2)
+			held |= statistics;
+		const uint32_t asked = call[2] ? call.load<uint32_t>(call[2]) : 0xffffffffU;
+		if (call[2])
+			call.store<uint32_t>(call[2], held & asked);
+		call.ret((held & (signature | statistics) & asked) && !(held & (reverse_signature | odd_length)) ? 1 : 0);
+	});
+	registry.add("RtlImageNtHeader", 1, [](ApiCall &call) {
+		if (!call[0] || call.load<uint16_t>(call[0]) != 0x5a4d) {
+			call.ret(0);
+			return;
+		}
+		const uint64_t headers = call[0] + call.load<uint32_t>(call[0] + 0x3c);
+		call.ret(call.load<uint32_t>(headers) == 0x4550 ? headers : 0);
+	});
 	registry.add("RtlInitUnicodeString", 2, [](ApiCall &call) {
 		if (!call[0])
 			return;
