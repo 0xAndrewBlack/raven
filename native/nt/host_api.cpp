@@ -500,6 +500,9 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint32_t>(call[2], uint32_t(name.size()));
 		call.ret(1);
 	});
+	// The machine is in a workgroup, not a domain: its directory object has no name, as on a Windows computer that joined none.
+	registry.add("GetComputerObjectNameW", 3, [](ApiCall &call) { call.fail(1351, 0); });
+	registry.add("GetComputerObjectNameA", 3, [](ApiCall &call) { call.fail(1351, 0); });
 	// A buffer too small for the name, or none, gets the size it needs and ERROR_BUFFER_OVERFLOW (GetComputerNameEx answers ERROR_MORE_DATA).
 	registry.add("GetComputerNameW", 2, [computer_name](ApiCall &call) {
 		const auto name = computer_name(0);
