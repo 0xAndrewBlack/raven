@@ -1142,6 +1142,29 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 add_test(NAME native_msi_install_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/msi-install.exe)
                 set_tests_properties(native_msi_install_${installer_arch} PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                     ENVIRONMENT RAVEN_PREFIX=${fixture}/install-prefix)
+                # DLL custom actions run in the custom action server of the package's width: an immediate one records a property, a deferred
+                # one fails on request and the installer rolls the installation back.
+                if(installer_arch STREQUAL x86)
+                    set(action_link -Wl,--entry,_DllMain@12,--kill-at,--no-insert-timestamp)
+                else()
+                    set(action_link -Wl,--entry,DllMain,--no-insert-timestamp)
+                endif()
+                file(MAKE_DIRECTORY ${fixture}/custom)
+                add_custom_command(OUTPUT ${fixture}/custom/custom.msi ${fixture}/custom/msi-custom.exe
+                    COMMAND ${installer_compiler} -O2 -nostdlib -shared -fno-stack-protector ${action_link}
+                        -o ${fixture}/custom/msi_action.dll ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_action.c -lmsi -ladvapi32 -lkernel32
+                    COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_payload.txt ${fixture}/custom/msi_payload.txt
+                    COMMAND ${RAVEN_WIXL} -a ${installer_arch} -o ${fixture}/custom/custom.msi ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_custom.wxs
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/custom/msi-custom.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_custom_client.c -lmsi -ladvapi32 -lkernel32
+                    WORKING_DIRECTORY ${fixture}/custom
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_action.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_custom.wxs
+                        ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_custom_client.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_payload.txt VERBATIM)
+                add_custom_target(msi_custom_fixture_${installer_arch} ALL DEPENDS ${fixture}/custom/custom.msi ${fixture}/custom/msi-custom.exe)
+                add_test(NAME native_msi_custom_actions_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=120000
+                    ${fixture}/custom/msi-custom.exe)
+                set_tests_properties(native_msi_custom_actions_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${fixture}/custom-prefix)
                 # msiexec found by name in the system directory, installing and removing the package from the command line.
                 add_test(NAME native_msiexec_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/msiexec-client.exe)
                 set_tests_properties(native_msiexec_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
