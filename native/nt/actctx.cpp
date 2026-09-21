@@ -173,7 +173,7 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::parse(std::strin
 				root.files.push_back(attributes["name"]);
 		} else if (element == "assemblyidentity" && !closing) {
 			Assembly identity{attributes["name"], attributes["version"], lowered(attributes["processorarchitecture"]), lowered(attributes["publickeytoken"]),
-				{}, {}, {}};
+				{}, {}, {}, {}};
 			if (in_dependency) {
 				if (auto resolved = resolve(identity))
 					root.dependencies.push_back(std::move(*resolved));
@@ -184,6 +184,8 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::parse(std::strin
 				root.architecture = identity.architecture;
 				root.token = identity.token;
 			}
+		} else if (element == "supportedos" && !closing && attributes.contains("id")) {
+			root.supported_os.push_back(lowered(attributes["id"]));
 		} else if (element == "windowclass" && !closing && !self_closing && in_file && !in_dependency) {
 			const auto close = text.find('<', at);
 			if (close == text.npos)
@@ -231,6 +233,20 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::resolve(const As
 			best = std::move(candidate);
 	}
 	return best;
+}
+
+ActivationContexts::Version ActivationContexts::reported_version() const
+{
+	const auto context = contexts.find(process_default);
+	if (context != contexts.end()) {
+		const auto &supported = context->second.root.supported_os;
+		const auto names = [&](std::string_view id) { return std::find(supported.begin(), supported.end(), id) != supported.end(); };
+		if (names("{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"))
+			return {10, 0, 19045};
+		if (names("{1f676c76-80e1-4239-95bb-83d0f6d0da78}"))
+			return {6, 3, 9600};
+	}
+	return {6, 2, 9200};
 }
 
 uint64_t ActivationContexts::create(Context context)

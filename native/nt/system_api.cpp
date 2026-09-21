@@ -1,4 +1,5 @@
 #include "kernel_context.h"
+#include "actctx.h"
 #include "text.h"
 
 #include <algorithm>
@@ -385,7 +386,11 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("GetSystemInfo", 1, system_information);
 	registry.add("GetNativeSystemInfo", 1, system_information);
-	registry.add("GetVersion", 0, [](ApiCall &call) { call.ret(0x4a65000aU); });
+	// GetVersion and GetVersionEx report what the program's manifest declares it supports, as Windows does; RtlGetVersion tells the truth.
+	registry.add("GetVersion", 0, [](ApiCall &call) {
+		const auto version = activation_contexts().reported_version();
+		call.ret(version.major | version.minor << 8 | version.build << 16);
+	});
 	registry.add("GetVersionExW", 1, [](ApiCall &call) {
 		const auto size = call.load<uint32_t>(call[0]);
 		if (size != 276 && size != 284) {
@@ -393,7 +398,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		std::vector<uint8_t> bytes(size);
-		const uint32_t fields[5] = {size, 10, 0, 19045, 2};
+		const auto version = activation_contexts().reported_version();
+		const uint32_t fields[5] = {size, version.major, version.minor, version.build, 2};
 		std::memcpy(bytes.data(), fields, 20);
 		// The extended block adds the service pack, the suite mask and the product type: a workstation.
 		if (size == 284)
@@ -569,7 +575,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		std::vector<uint8_t> bytes(size);
-		const uint32_t fields[5] = {size, 10, 0, 19045, 2};
+		const auto version = activation_contexts().reported_version();
+		const uint32_t fields[5] = {size, version.major, version.minor, version.build, 2};
 		std::memcpy(bytes.data(), fields, 20);
 		if (size == 156)
 			bytes[154] = 1;
@@ -611,9 +618,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		std::memcpy(requested, info.data(), 20);
 		const uint32_t types = call.u32(1);
 		const uint64_t mask = call[2];
-		// Windows 10 (10.0.19045), no service pack.
-		const uint32_t actual[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-		(void)actual;
+		// The version the program's manifest makes Windows report, with no service pack.
+		const auto version = activation_contexts().reported_version();
 		const auto compare = [&](unsigned bit, uint64_t have, uint64_t want) {
 			switch ((mask >> (bit * 3)) & 7) {
 			case 1: return have == want;
@@ -628,13 +634,13 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		const bool hierarchical = (types & 3) == 3 && ((mask & 7) == 3 || ((mask >> 3) & 7) == 3);
 		if (hierarchical) {
 			// Major, minor and service pack compare as one ordered tuple when they ask for "at least".
-			const uint64_t have = uint64_t(10) << 32, want = uint64_t(requested[1]) << 32 | requested[2];
+			const uint64_t have = uint64_t(version.major) << 32 | version.minor, want = uint64_t(requested[1]) << 32 | requested[2];
 			good = have >= want;
 		} else {
-			if (types & 2) good = good && compare(1, 10, requested[1]);
-			if (types & 1) good = good && compare(0, 0, requested[2]);
+			if (types & 2) good = good && compare(1, version.major, requested[1]);
+			if (types & 1) good = good && compare(0, version.minor, requested[2]);
 		}
-		if (types & 4) good = good && compare(2, 19045, requested[3]);
+		if (types & 4) good = good && compare(2, version.build, requested[3]);
 		if (types & 8) good = good && compare(3, 2, requested[4]);
 		if (!good) {
 			call.fail(1150);

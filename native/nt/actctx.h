@@ -21,6 +21,8 @@ public:
 		std::map<std::string, bool> classes;
 		std::vector<std::string> files;
 		std::vector<Assembly> dependencies;
+		// The operating systems the manifest's compatibility section names, as lower-case GUIDs.
+		std::vector<std::string> supported_os;
 	};
 	struct Context {
 		Assembly root;
@@ -45,6 +47,10 @@ public:
 	// context's assembly declares the class. Lookups ask for the name an assembly the current context depends on gives it.
 	std::optional<std::string> registered_name(uint32_t thread, std::string_view name) const;
 	std::optional<std::string> lookup_name(uint32_t thread, std::string_view name) const;
+	// The version GetVersionEx and VerifyVersionInfo report to the process, as Windows 10 and later do: 10.0 for a program whose manifest
+	// supports Windows 10, 6.3 for one that supports Windows 8.1, and 6.2 for every other program.
+	struct Version { uint32_t major, minor, build; };
+	Version reported_version() const;
 	std::function<uint32_t()> current_thread;
 	bool wide_process = true;
 
