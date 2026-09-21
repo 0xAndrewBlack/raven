@@ -1937,6 +1937,25 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             PASS_REGULAR_EXPRESSION "PASS: ")
                     endforeach()
                 endif()
+                # The DirectX End-User Runtimes of June 2010 (directx_Jun2010_redist.exe in the same directory), unpacked and installed as a
+                # game's setup does (scripts/native-directx-redist.py); a program of each width then uses what they installed.
+                if(TARGET raven_wayland AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_PIL_PYTHON AND RAVEN_REDIST_DIRECTORY AND RAVEN_MINGW32
+                   AND EXISTS ${RAVEN_REDIST_DIRECTORY}/directx_Jun2010_redist.exe)
+                    set(directx_fixtures ${CMAKE_CURRENT_BINARY_DIR}/directx-fixtures)
+                    add_custom_command(OUTPUT ${directx_fixtures}/directx-check64.exe ${directx_fixtures}/directx-check32.exe
+                        COMMAND ${CMAKE_COMMAND} -E make_directory ${directx_fixtures}
+                        COMMAND ${RAVEN_MINGW64} -O1 -nostdlib -fno-stack-protector -fno-builtin -mno-stack-arg-probe -Wl,--entry,raven_entry
+                            -o ${directx_fixtures}/directx-check64.exe ${LOADER_SOURCES}/directx_check.c -lkernel32
+                        COMMAND ${RAVEN_MINGW32} -O1 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,_raven_entry
+                            -o ${directx_fixtures}/directx-check32.exe ${LOADER_SOURCES}/directx_check.c -lkernel32
+                        DEPENDS ${LOADER_SOURCES}/directx_check.c VERBATIM)
+                    add_custom_target(directx_check_fixtures ALL DEPENDS ${directx_fixtures}/directx-check64.exe ${directx_fixtures}/directx-check32.exe)
+                    add_test(NAME native_redist_directx_jun2010 COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-directx-redist.py
+                        $<TARGET_FILE:raven> ${RAVEN_REDIST_DIRECTORY}/directx_Jun2010_redist.exe ${directx_fixtures}/directx-check64.exe
+                        ${directx_fixtures}/directx-check32.exe ${CMAKE_CURRENT_BINARY_DIR}/directx-redist-evidence)
+                    set_tests_properties(native_redist_directx_jun2010 PROPERTIES TIMEOUT 3600 RESOURCE_LOCK raven_compositor
+                        PASS_REGULAR_EXPRESSION "PASS: ")
+                endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
