@@ -914,6 +914,8 @@ static HRESULT make_dialog(BOOL save, REFIID iid, void **out)
 }
 
 HRESULT raven_make_shell_link(REFIID iid, void **out);
+HRESULT raven_create_registered(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, void **out);
+HRESULT raven_registered_class_object(REFCLSID clsid, DWORD context, REFIID iid, void **out);
 
 /* Class registry -------------------------------------------------------------------------------------------- */
 
@@ -925,22 +927,21 @@ HRESULT WINAPI CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, 
 		*out = NULL;
 	if (!out)
 		return E_POINTER;
-	if (outer)
-		return CLASS_E_NOAGGREGATION;
 	if (same_iid(clsid, &CLSID_FileOpenDialog))
-		return make_dialog(FALSE, iid, out);
+		return outer ? CLASS_E_NOAGGREGATION : make_dialog(FALSE, iid, out);
 	if (same_iid(clsid, &CLSID_FileSaveDialog))
-		return make_dialog(TRUE, iid, out);
+		return outer ? CLASS_E_NOAGGREGATION : make_dialog(TRUE, iid, out);
 	if (same_iid(clsid, &CLSID_ShellLink))
-		return raven_make_shell_link(iid, out);
-	return REGDB_E_CLASSNOTREG;
+		return outer ? CLASS_E_NOAGGREGATION : raven_make_shell_link(iid, out);
+	/* Any other class is served by the library the registry names for it. */
+	return raven_create_registered(clsid, outer, context, iid, out);
 }
 
 HRESULT WINAPI CoGetClassObject(REFCLSID clsid, DWORD context, LPVOID server, REFIID iid, LPVOID *out)
 {
-	if (out)
-		*out = NULL;
-	return REGDB_E_CLASSNOTREG;
+	if (!out)
+		return E_INVALIDARG;
+	return raven_registered_class_object(clsid, context, iid, out);
 }
 
 /* shlwapi names this export by its ordinal (176): ask an object for a service through its service provider. */
