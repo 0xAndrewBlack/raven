@@ -1352,9 +1352,11 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("GetDriveTypeW", 1, [&, resolve, missing, file_of, copy_file, find_first](ApiCall &call) {
-		// DRIVE_FIXED for mapped drives, DRIVE_NO_ROOT_DIR for letters without a mapping.
-		const auto root = call[0] ? paths.resolve(call.wide(call[0])) : paths.resolve(paths.current());
-		call.ret(root && root->exists ? 3 : 1);
+		// DRIVE_FIXED for the prefix's drives, DRIVE_NO_ROOT_DIR for letters without a mapping. Z: shows the host's whole file system, a
+		// share rather than a disk of this machine: DRIVE_REMOTE, so installers looking for the fixed disk with the most room stay off it.
+		const auto name = call[0] ? paths.full(call.wide(call[0])) : paths.current();
+		const auto root = paths.resolve(name);
+		call.ret(!root || !root->exists ? 1 : !name.empty() && upper_case(name[0]) == u'Z' ? 4 : 3);
 	});
 	registry.add("DuplicateHandle", 7, [&, resolve, missing, file_of, find_first, copy_file](ApiCall &call) {
 		constexpr uint64_t current = UINT64_MAX;
