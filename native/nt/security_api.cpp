@@ -530,8 +530,11 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			uint16_t count;
 			std::memcpy(&count, header.data() + 4, 2);
 			uint64_t at = acl + acl_header;
-			const std::vector<std::vector<uint8_t>> mine{user_sid(), make_sid(5, {21, 1000, 1000, 1000, 513}), make_sid(5, {32, 545}), make_sid(1, {0}),
+			std::vector<std::vector<uint8_t>> mine{user_sid(), make_sid(5, {21, 1000, 1000, 1000, 513}), make_sid(5, {32, 545}), make_sid(1, {0}),
 				make_sid(5, {11}), make_sid(5, {4}), make_sid(5, {1})};
+			// Administrators grants access only to an elevated token; the filtered token holds it for denying.
+			if (process_elevated())
+				mine.push_back(make_sid(5, {32, 544}));
 			for (uint16_t index = 0; index < count; ++index) {
 				const auto entry = call.read(at, 8);
 				uint16_t size;

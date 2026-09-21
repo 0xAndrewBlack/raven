@@ -197,7 +197,7 @@ int main(int argc, char **argv)
 				if (!entry) {
 					entry = &module;
 					// A program runs elevated when its manifest asks for it or when the process that started it is elevated.
-					raven::set_process_elevated(elevated || raven::manifest_requests_elevation(module.image));
+					raven::set_process_elevated(elevated || raven::manifest_requests_elevation(module.image, std::filesystem::path(argv[i]).filename().string()));
 				}
 			}
 			if (run_modules || run_process) {

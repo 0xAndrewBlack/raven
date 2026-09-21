@@ -2,6 +2,7 @@
 
 #include "pe/resources.h"
 
+#include <string>
 #include <string_view>
 
 namespace raven {
@@ -12,7 +13,7 @@ bool elevated = false;
 
 }
 
-bool manifest_requests_elevation(const PEImage &image)
+bool manifest_requests_elevation(const PEImage &image, std::string_view file_name)
 {
 	for (const auto &resource : image.resources()) {
 		if (resource.type != ResourceKey{uint32_t(24)} || !resource.size)
@@ -32,6 +33,17 @@ bool manifest_requests_elevation(const PEImage &image)
 		const auto level = text.substr(attribute + 7, end - attribute - 7);
 		return level == "requireAdministrator" || level == "highestAvailable";
 	}
+	// Installer detection: a 32-bit program that states no execution level and is named like a setup program is taken for an installer
+	// and starts elevated.
+	if (image.is_64)
+		return false;
+	std::string name(file_name);
+	for (auto &character : name)
+		if (character >= 'A' && character <= 'Z')
+			character = char(character + ('a' - 'A'));
+	for (const std::string_view word : {"setup", "install", "update", "patch", "upgrad"})
+		if (name.find(word) != name.npos)
+			return true;
 	return false;
 }
 
