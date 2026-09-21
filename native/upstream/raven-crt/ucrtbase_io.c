@@ -537,6 +537,8 @@ CRT void _aligned_free(void *block) { if (block) HeapFree(GetProcessHeap(), 0, (
 
 CRT char *_strdup(const char *text)
 {
+	if (!text)
+		return NULL;
 	size_t length = strlen(text) + 1;
 	char *copy = malloc(length);
 	if (copy)
