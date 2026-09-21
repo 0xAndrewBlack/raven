@@ -223,7 +223,14 @@ int main(int argc, char **argv)
 						}
 						return selected;
 					};
+					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
+					const auto component_directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "" : "x86");
 					const auto source = [&](std::string_view name) -> std::optional<std::vector<uint8_t>> {
+						// The Windows Installer and the libraries it installs with are the runtime's components, whatever copies a program
+						// ships or an installer leaves in the system directory.
+						if (name == "msi.dll" || name == "cabinet.dll" || name == "sxs.dll")
+							if (const auto component = component_directory / name; std::filesystem::exists(component))
+								return read_file(component.c_str());
 						std::optional<std::filesystem::path> selected = find_file(directory, name);
 						// The runtime's own components are found beside the runtime when the program does not ship them.
 						// A 64-bit program built against msvcrt.dll gets the C runtime component as that library too: a runtime of its own, as
@@ -278,8 +285,6 @@ int main(int argc, char **argv)
 						if (std::filesystem::exists(component))
 							modules.add("raven-rtl.dll", read_file(component.c_str()));
 					}
-					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
-					const auto component_directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "" : "x86");
 					// The libraries the program and the DLLs shipped beside it import, by lowercase file name.
 					const auto imported_libraries = [&] {
 						std::set<std::string> names;
@@ -339,6 +344,8 @@ int main(int argc, char **argv)
 					// The user32 component supplies the built-in control classes and dialog manager to programs that use user32.
 					load_component("raven-user32.dll", {"user32.dll"});
 					load_component("raven-shell.dll", {"comdlg32.dll", "ole32.dll", "shell32.dll"});
+					// Structured storage, the compound files installer packages are made of.
+					load_component("raven-storage.dll", {"ole32.dll"});
 					if (entry->image.is_64)
 						load_component("ucrtbase.dll", {"ucrtbase.dll", "api-ms-win-crt-*"});
 					raven::DesktopPresentation presentation;

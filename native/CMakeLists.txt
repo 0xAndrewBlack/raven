@@ -1087,6 +1087,53 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_custom_target(geometry_negative_fixture ALL DEPENDS ${GEOMETRY_NEGATIVE})
         add_test(NAME native_geometry_boundary COMMAND raven --run-process --execution=native ${GEOMETRY_NEGATIVE})
         set_tests_properties(native_geometry_boundary PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        # The Windows Installer components (scripts/provision-installer.py): msi, cabinet, sxs and structured storage, for each program width.
+        set(RAVEN_INSTALLER_COMPONENT_DIR "" CACHE PATH "Directory holding the installer components built by scripts/provision-installer.py")
+        set(RAVEN_INSTALLER32_COMPONENT_DIR "" CACHE PATH "Directory holding the 32-bit installer components built by scripts/provision-installer.py --arch x86")
+        find_program(RAVEN_WIXL wixl)
+        find_program(RAVEN_MINGW32_INSTALLER i686-w64-mingw32-gcc)
+        set(MSI_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/msi-fixtures)
+        foreach(width 64 32)
+            if(width STREQUAL 64)
+                set(installer_dir ${RAVEN_INSTALLER_COMPONENT_DIR})
+                set(installer_target $<TARGET_FILE_DIR:raven>)
+                set(installer_compiler ${RAVEN_MINGW64})
+                set(installer_entry raven_entry)
+                set(installer_arch x64)
+            else()
+                set(installer_dir ${RAVEN_INSTALLER32_COMPONENT_DIR})
+                set(installer_target $<TARGET_FILE_DIR:raven>/x86)
+                set(installer_compiler ${RAVEN_MINGW32_INSTALLER})
+                set(installer_entry _raven_entry)
+                set(installer_arch x86)
+            endif()
+            if(NOT installer_dir)
+                continue()
+            endif()
+            foreach(component msi.dll cabinet.dll sxs.dll raven-storage.dll)
+                if(NOT EXISTS "${installer_dir}/${component}")
+                    message(FATAL_ERROR "Configured installer component does not exist: ${installer_dir}/${component}")
+                endif()
+                add_custom_command(TARGET raven POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E make_directory ${installer_target}
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${installer_dir}/${component} ${installer_target}/${component})
+            endforeach()
+            # A package made by wixl, read back as a database: tables, SQL views and the summary information stream.
+            if(RAVEN_WIXL AND installer_compiler)
+                set(fixture ${MSI_FIXTURES}/${installer_arch})
+                add_custom_command(OUTPUT ${fixture}/basic.msi ${fixture}/msi-database.exe
+                    COMMAND ${CMAKE_COMMAND} -E make_directory ${fixture}
+                    COMMAND ${RAVEN_WIXL} -a ${installer_arch} -o ${fixture}/basic.msi msi_basic.wxs
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/msi-database.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_database_client.c -lmsi -lkernel32
+                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/testdata/native_loader
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_basic.wxs ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_payload.txt ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_database_client.c VERBATIM)
+                add_custom_target(msi_database_fixture_${installer_arch} ALL DEPENDS ${fixture}/basic.msi ${fixture}/msi-database.exe)
+                add_test(NAME native_msi_database_${installer_arch} COMMAND raven --run-process --execution=native ${fixture}/msi-database.exe)
+                set_tests_properties(native_msi_database_${installer_arch} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${fixture}/prefix)
+            endif()
+        endforeach()
         set(RAVEN_CONTROLS_COMPONENT_DIR "" CACHE PATH "Directory holding the common controls component built by scripts/provision-controls.py")
         # The same components built for 32-bit programs (scripts/provision-controls.py --arch x86); they sit in a directory beside the runtime.
         set(RAVEN_CONTROLS32_COMPONENT_DIR "" CACHE PATH "Directory holding the 32-bit components built by scripts/provision-controls.py --arch x86")
