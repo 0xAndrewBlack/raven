@@ -1,5 +1,6 @@
 #include <iostream>
 #include "windows.h"
+#include "nt/actctx.h"
 #include "nt/text.h"
 #include "brush.h"
 #include "nt/nls.h"
@@ -944,6 +945,11 @@ uint16_t NativeWindows::atom(uint64_t name, uint64_t instance)
 		return objects.find_class(instance,uint16_t(name));
 	}
 	auto value=text(name);
+	// A class an assembly of the thread's activation context declares is first looked for under its versioned name.
+	auto &contexts=activation_contexts();
+	if (contexts.current_thread)
+		if (const auto versioned=contexts.lookup_name(contexts.current_thread(),value))
+			if (const auto found=objects.find_class(instance,*versioned)) return found;
 	for (auto &character : value)
 		if (character>='A' && character<='Z') character=char(character+('a'-'A'));
 	return objects.find_class(instance,value);
@@ -2062,6 +2068,9 @@ bool NativeWindows::dispatch(std::string_view name)
 			const auto procedure=read(bytes,P+shift,P), instance=read(bytes,2*P+8+shift,P);
 			auto class_name=text(read(bytes,7*P+8+shift,P));
 			if (!procedure || class_name.empty()) throw uint32_t(87);
+			// Inside an activation context whose assembly declares the class, it registers under its versioned name.
+			if (auto &contexts=activation_contexts(); contexts.current_thread)
+				if (auto versioned=contexts.registered_name(contexts.current_thread(),class_name)) class_name=std::move(*versioned);
 			if (objects.class_registered(instance,class_name,(style & 0x4000)!=0)) throw uint32_t(1410);
 			DesktopClass definition{std::move(class_name),instance,procedure,background,uint32_t(window_extra),std::vector<uint8_t>(size_t(class_extra)),style};
 			definition.icon=icon; definition.cursor=cursor;

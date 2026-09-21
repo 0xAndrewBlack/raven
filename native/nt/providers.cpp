@@ -15,6 +15,7 @@
 #include "apiset.h"
 #include "text.h"
 #include "kernel_context.h"
+#include "actctx.h"
 #include "unwind.h"
 #include "prefix.h"
 #include "profile_api.h"
@@ -2037,6 +2038,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_shlwapi_api(api_registry, kernel);
 	register_shell_api(api_registry, kernel);
 	register_platform_api(api_registry, kernel);
+	register_actctx_api(api_registry, kernel);
 	register_version_api(api_registry, kernel);
 	windows.register_api(desktop_api);
 	desktop.register_gdi_api(desktop_api);

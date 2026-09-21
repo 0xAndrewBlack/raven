@@ -366,19 +366,6 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	for (const auto *name : {"GlobalGetAtomNameW", "GetAtomNameW"})
 		registry.add(name, 3, atom_name);
 
-	// Activation contexts only select side-by-side manifests; every program runs against one fixed set of libraries.
-	registry.add("CreateActCtxW", 1, [](ApiCall &call) { call.ret(0x7e000001); });
-	registry.add("ActivateActCtx", 2, [](ApiCall &call) {
-		if (call[1])
-			call.store<uint64_t>(call[1], 1);
-		call.ret(1);
-	});
-	registry.add("DeactivateActCtx", 2, [](ApiCall &call) { call.ret(1); });
-	registry.add("ReleaseActCtx", 1, [](ApiCall &call) { call.ret(0); });
-	registry.add("GetCurrentActCtx", 1, [](ApiCall &call) {
-		call.store<uint64_t>(call[0], 0);
-		call.ret(1);
-	});
 	registry.add("IsBadReadPtr", 2, [](ApiCall &call) { call.ret(!accessible(call, call[0], call[1], false)); });
 	registry.add("IsBadWritePtr", 2, [](ApiCall &call) { call.ret(!accessible(call, call[0], call[1], true)); });
 	registry.add("IsBadCodePtr", 1, [](ApiCall &call) { call.ret(!accessible(call, call[0], 1, false)); });

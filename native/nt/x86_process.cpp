@@ -15,6 +15,7 @@
 #include "guest_allocator.h"
 #include "heap.h"
 #include "kernel_context.h"
+#include "actctx.h"
 #include "paths.h"
 #include "x86_compat_api.h"
 #include "registry_words.h"
@@ -1070,6 +1071,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_shell_api(shared_api, kernel);
 	register_shlwapi_api(shared_api, kernel);
 	register_platform_api(shared_api, kernel);
+	register_actctx_api(shared_api, kernel);
 	register_process_api(shared_api, kernel);
 	register_thread_api(shared_api, kernel);
 	register_sync_api(shared_api, kernel);
