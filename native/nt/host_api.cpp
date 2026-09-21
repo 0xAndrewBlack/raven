@@ -988,69 +988,81 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("ImmGetIMEFileNameA", 3, [](ApiCall &call) { call.ret(0); });
 	// A desktop program has no package identity.
 	registry.add("AppPolicyGetThreadInitializationType", 2, [](ApiCall &call) { call.ret(15703); });
-	// The account names the machine knows, with the SIDs they stand for.
-	registry.add("LookupAccountNameW", 7, [&context](ApiCall &call) {
-		auto name = call[1] ? call.wide(call[1], 256) : std::u16string();
-		const auto slash = name.find(u'\\');
-		if (slash != name.npos)
-			name = name.substr(slash + 1);
-		for (auto &character : name)
-			character = char16_t(std::tolower(static_cast<int>(character)));
+	// The accounts the machine knows: their names, the SIDs they stand for, how each is used and the domain that holds it. The user is the
+	// one GetUserName names, in the machine's own domain.
+	struct Account {
+		std::u16string name, domain;
 		std::vector<uint8_t> sid;
-		uint32_t use = 5;
-		if (name == u"administrators") { sid = make_sid(5, {32, 544}); use = 4; }
-		else if (name == u"users") { sid = make_sid(5, {32, 545}); use = 4; }
-		else if (name == u"everyone") { sid = make_sid(1, {0}); }
-		else if (name == u"system") { sid = make_sid(5, {18}); }
-		else if (name == u"authenticated users") { sid = make_sid(5, {11}); }
-		else if (name == u"local service") { sid = make_sid(5, {19}); }
-		else if (name == u"network service") { sid = make_sid(5, {20}); }
-		else if (name == u"interactive") { sid = make_sid(5, {4}); }
-		else if (name == u"network") { sid = make_sid(5, {2}); }
-		else {
-			// The user is the one GetUserName names.
-			const auto user = context.paths.user_name();
-			std::u16string lower_user = user;
-			for (auto &character : lower_user)
-				character = char16_t(std::tolower(static_cast<int>(character)));
-			if (name.empty() || name == lower_user) {
-				sid = user_sid();
-				use = 1;
-			}
-		}
-		if (sid.empty()) {
-			call.fail(1332, 0);
-			return;
-		}
+		uint32_t use;
+	};
+	const auto accounts = [&context]() {
 		char host[256] = {};
 		::gethostname(host, sizeof(host) - 1);
 		std::string netbios(host);
 		netbios = netbios.substr(0, netbios.find('.'));
 		for (auto &character : netbios)
 			character = char(std::toupper(static_cast<unsigned char>(character)));
-		std::u16string domain;
-		if (use == 4)
-			domain = u"BUILTIN";
-		else if (use == 1)
-			domain = from_utf8(netbios);
-		else if (sid[7] == 5)
-			domain = u"NT AUTHORITY";
+		return std::vector<Account>{{u"Administrators", u"BUILTIN", make_sid(5, {32, 544}), 4}, {u"Users", u"BUILTIN", make_sid(5, {32, 545}), 4},
+			{u"Everyone", u"", make_sid(1, {0}), 5}, {u"SYSTEM", u"NT AUTHORITY", make_sid(5, {18}), 5},
+			{u"Authenticated Users", u"NT AUTHORITY", make_sid(5, {11}), 5}, {u"LOCAL SERVICE", u"NT AUTHORITY", make_sid(5, {19}), 5},
+			{u"NETWORK SERVICE", u"NT AUTHORITY", make_sid(5, {20}), 5}, {u"INTERACTIVE", u"NT AUTHORITY", make_sid(5, {4}), 5},
+			{u"NETWORK", u"NT AUTHORITY", make_sid(5, {2}), 5}, {context.paths.user_name(), from_utf8(netbios), user_sid(), 1}};
+	};
+	// Both lookups fill a SID or name and the domain the same way: sizes first, then the text when the buffers hold it.
+	const auto answer = [](ApiCall &call, const Account &account, bool by_name) {
+		const size_t first = by_name ? account.sid.size() : account.name.size() + 1;
 		if (!call[3] || !call[5]) {
 			call.fail(87, 0);
 			return;
 		}
-		const uint32_t sid_capacity = call.load<uint32_t>(call[3]), domain_capacity = call.load<uint32_t>(call[5]);
-		call.store<uint32_t>(call[3], uint32_t(sid.size()));
-		call.store<uint32_t>(call[5], uint32_t(domain.size() + 1));
-		if (!call[2] || sid_capacity < sid.size() || !call[4] || domain_capacity < domain.size() + 1) {
+		const uint32_t first_capacity = call.load<uint32_t>(call[3]), domain_capacity = call.load<uint32_t>(call[5]);
+		call.store<uint32_t>(call[3], uint32_t(first));
+		call.store<uint32_t>(call[5], uint32_t(account.domain.size() + 1));
+		if (!call[2] || first_capacity < first || !call[4] || domain_capacity < account.domain.size() + 1) {
 			call.fail(122, 0);
 			return;
 		}
-		call.write(call[2], sid);
-		call.put_wide(call[4], domain, domain.size() + 1);
-		call.store<uint32_t>(call[6], use);
-		call.store<uint32_t>(call[5], uint32_t(domain.size()));
+		if (by_name)
+			call.write(call[2], account.sid);
+		else {
+			call.put_wide(call[2], account.name, account.name.size() + 1);
+			call.store<uint32_t>(call[3], uint32_t(account.name.size()));
+		}
+		call.put_wide(call[4], account.domain, account.domain.size() + 1);
+		call.store<uint32_t>(call[6], account.use);
+		call.store<uint32_t>(call[5], uint32_t(account.domain.size()));
 		call.ret(1);
+	};
+	registry.add("LookupAccountNameW", 7, [accounts, answer](ApiCall &call) {
+		auto name = call[1] ? call.wide(call[1], 256) : std::u16string();
+		const auto slash = name.find(u'\\');
+		if (slash != name.npos)
+			name = name.substr(slash + 1);
+		const auto known = accounts();
+		// No name at all is the user's own account.
+		const auto found = std::find_if(known.begin(), known.end(), [&](const Account &account) {
+			return name.empty() ? account.use == 1 : equal_fold(account.name, name);
+		});
+		if (found == known.end()) {
+			call.fail(1332, 0);
+			return;
+		}
+		answer(call, *found, true);
+	});
+	registry.add("LookupAccountSidW", 7, [accounts, answer](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87, 0);
+			return;
+		}
+		const auto header = call.read(call[1], 2);
+		const auto sid = call.read(call[1], 8 + size_t(header[1]) * 4);
+		const auto known = accounts();
+		const auto found = std::find_if(known.begin(), known.end(), [&](const Account &account) { return account.sid == sid; });
+		if (found == known.end()) {
+			call.fail(1332, 0);
+			return;
+		}
+		answer(call, *found, false);
 	});
 	// Session change messages are never sent: the registration succeeds and nothing arrives.
 	registry.add("WTSRegisterSessionNotification", 2, [](ApiCall &call) { call.ret(1); });
