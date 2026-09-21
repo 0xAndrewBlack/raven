@@ -1956,6 +1956,23 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     set_tests_properties(native_redist_directx_jun2010 PROPERTIES TIMEOUT 3600 RESOURCE_LOCK raven_compositor
                         PASS_REGULAR_EXPRESSION "PASS: ")
                 endif()
+                # OpenAL (oalinst.exe in the same directory), installed silent as games run it (scripts/native-openal-redist.py).
+                if(TARGET raven_wayland AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_PIL_PYTHON AND RAVEN_REDIST_DIRECTORY AND RAVEN_MINGW32
+                   AND EXISTS ${RAVEN_REDIST_DIRECTORY}/oalinst.exe)
+                    set(openal_fixtures ${CMAKE_CURRENT_BINARY_DIR}/openal-fixtures)
+                    add_custom_command(OUTPUT ${openal_fixtures}/openal-check64.exe ${openal_fixtures}/openal-check32.exe
+                        COMMAND ${CMAKE_COMMAND} -E make_directory ${openal_fixtures}
+                        COMMAND ${RAVEN_MINGW64} -O1 -nostdlib -fno-stack-protector -fno-builtin -mno-stack-arg-probe -Wl,--entry,raven_entry
+                            -o ${openal_fixtures}/openal-check64.exe ${LOADER_SOURCES}/openal_check.c -lkernel32
+                        COMMAND ${RAVEN_MINGW32} -O1 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,_raven_entry
+                            -o ${openal_fixtures}/openal-check32.exe ${LOADER_SOURCES}/openal_check.c -lkernel32
+                        DEPENDS ${LOADER_SOURCES}/openal_check.c VERBATIM)
+                    add_custom_target(openal_check_fixtures ALL DEPENDS ${openal_fixtures}/openal-check64.exe ${openal_fixtures}/openal-check32.exe)
+                    add_test(NAME native_redist_openal COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-openal-redist.py
+                        $<TARGET_FILE:raven> ${RAVEN_REDIST_DIRECTORY}/oalinst.exe ${openal_fixtures}/openal-check64.exe
+                        ${openal_fixtures}/openal-check32.exe ${CMAKE_CURRENT_BINARY_DIR}/openal-redist-evidence)
+                    set_tests_properties(native_redist_openal PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor PASS_REGULAR_EXPRESSION "PASS: ")
+                endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
