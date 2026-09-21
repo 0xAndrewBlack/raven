@@ -387,7 +387,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("ReleaseStgMedium", 1, [](ApiCall &) {});
 	registry.add("OleFlushClipboard", 0, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("OleGetClipboard", 1, [](ApiCall &call) {
-		if (call[0]) call.store<uint64_t>(call[0], 0);
+		if (call[0]) call.store_pointer(call[0], 0);
 		call.ret(e_notimpl);
 	});
 
@@ -739,7 +739,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		call.write(block, sid);
-		call.store<uint64_t>(call[10], block);
+		call.store_pointer(call[10], block);
 		call.ret(1);
 	});
 	registry.add("FreeSid", 1, [&context](ApiCall &call) {
@@ -784,7 +784,26 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("CryptAcquireContextW", 5, [crypt](ApiCall &call) {
 		const auto handle = crypt->next++;
 		crypt->providers[handle] = true;
-		call.store<uint64_t>(call[0], handle);
+		call.store_pointer(call[0], handle);
+		call.ret(1);
+	});
+	// CryptGenRandom(provider, length, buffer): random bytes from the host's generator.
+	registry.add("CryptGenRandom", 3, [crypt](ApiCall &call) {
+		const uint32_t length = call.u32(1);
+		if (!crypt->providers.contains(call[0]) || (length && !call[2]) || length > (64u << 20)) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint8_t> bytes(length);
+		for (size_t done = 0; done < bytes.size();) {
+			const auto got = ::getrandom(bytes.data() + done, bytes.size() - done, 0);
+			if (got <= 0) {
+				call.fail(0x80090020U);
+				return;
+			}
+			done += size_t(got);
+		}
+		call.write(call[2], bytes);
 		call.ret(1);
 	});
 	registry.add("CryptReleaseContext", 2, [crypt](ApiCall &call) {
@@ -844,7 +863,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		}
 		const auto handle = crypt->next++;
 		crypt->hashes[handle] = std::move(digest);
-		call.store<uint64_t>(call[4], handle);
+		call.store_pointer(call[4], handle);
 		call.ret(1);
 	});
 	registry.add("CryptHashData", 4, [crypt](ApiCall &call) {

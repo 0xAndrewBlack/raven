@@ -737,6 +737,44 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		return mask;
 	};
 	registry.add("GetLogicalDrives", 0, [drives](ApiCall &call) { call.ret(drives()); });
+	// QueryDosDevice: each drive of the prefix is a volume device, \Device\HarddiskVolumeN in letter order; without a name, the list of
+	// the drives' device names.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "QueryDosDeviceW" : "QueryDosDeviceA", 3, [drives, wide](ApiCall &call) {
+			const uint32_t mask = drives(), capacity = call.u32(2);
+			std::u16string result;
+			if (!call[0]) {
+				for (char16_t letter = u'A'; letter <= u'Z'; ++letter)
+					if (mask & (1u << (letter - u'A')))
+						result += std::u16string{letter, u':', 0};
+			} else {
+				const auto name = wide ? call.wide(call[0], 64) : widen_ascii(call.narrow(call[0], 64));
+				const char16_t letter = name.size() == 2 && name[1] == u':' ? char16_t(name[0] & ~0x20) : 0;
+				if (!letter || letter < u'A' || letter > u'Z' || !(mask & (1u << (letter - u'A')))) {
+					call.fail(2);
+					return;
+				}
+				uint32_t number = 1;
+				for (char16_t other = u'A'; other < letter; ++other)
+					if (mask & (1u << (other - u'A')))
+						++number;
+				result = u"\\Device\\HarddiskVolume" + widen_ascii(std::to_string(number)) + std::u16string(1, 0);
+			}
+			result.push_back(0);
+			if (capacity < result.size()) {
+				call.fail(122);
+				return;
+			}
+			if (wide) {
+				std::vector<uint8_t> bytes(result.size() * 2);
+				std::memcpy(bytes.data(), result.data(), bytes.size());
+				call.write(call[1], bytes);
+			} else {
+				std::vector<uint8_t> bytes(result.begin(), result.end());
+				call.write(call[1], bytes);
+			}
+			call.ret(result.size());
+		});
 	registry.add("GetLogicalDriveStringsW", 2, [drives](ApiCall &call) {
 		std::u16string text;
 		const uint32_t mask = drives();
