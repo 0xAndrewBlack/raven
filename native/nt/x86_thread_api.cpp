@@ -132,12 +132,12 @@ bool NativeX86Threads::dispatch(std::string_view name)
 			threads.block([] { return false; }, wake);
 		}
 		process.return_api(0);
-	} else if (name == "InitializeCriticalSection" || name == "DeleteCriticalSection") {
+	} else if (name == "DeleteCriticalSection") {
 		sections.erase(args[0]);
 		process.return_api(0);
-	} else if (name == "InitializeCriticalSectionAndSpinCount" || name == "InitializeCriticalSectionEx") {
-		// Spinning is a hint and the flags only tune allocation: the section is the same, and these forms report success. Programs that
-		// force debug data find it at DebugInfo, the first word.
+	} else if (name == "InitializeCriticalSection" || name == "InitializeCriticalSectionAndSpinCount" || name == "InitializeCriticalSectionEx") {
+		// Spinning is a hint and the flags only tune allocation: the section is the same, and the forms that answer report success. Every
+		// section has debug data at DebugInfo, the first word, where libraries write the name of the lock as on Windows.
 		if (name == "InitializeCriticalSectionEx" && (uint32_t(args[2]) & ~0x1f000000U)) {
 			environment.set_last_error(87);
 			process.return_api(0);
@@ -148,7 +148,7 @@ bool NativeX86Threads::dispatch(std::string_view name)
 			section_debug = process.map_memory(4096, PROT_READ | PROT_WRITE);
 		const uint32_t debug = uint32_t(section_debug);
 		process.write_memory(args[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&debug), 4));
-		process.return_api(1);
+		process.return_api(name == "InitializeCriticalSection" ? 0 : 1);
 	} else if (name == "EnterCriticalSection" || name == "TryEnterCriticalSection") {
 		const uint32_t id = threads.current_id();
 		auto &section = sections[args[0]];
