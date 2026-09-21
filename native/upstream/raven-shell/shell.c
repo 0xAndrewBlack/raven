@@ -16,44 +16,9 @@
 #include <string.h>
 #include <stddef.h>
 
-#define ID_PATH 0x101
-#define ID_LIST 0x102
-#define ID_NAME 0x104
-#define ID_TYPE 0x106
-#define ID_UP 0x107
-#define ID_PATH_LABEL 0x108
-#define ID_NAME_LABEL 0x109
-#define ID_TYPE_LABEL 0x10a
+#include "shell.h"
 
-#define MAX_FILTERS 32
-#define MAX_RESULTS 64
-#define MAX_CHECKS 4
-#define ID_CHECK 0x120
-
-typedef struct {
-	WCHAR name[64];
-	WCHAR spec[256];
-} Filter;
-
-typedef struct {
-	BOOL save;
-	DWORD options; /* FOS_* values; the classic flags are translated by the callers */
-	WCHAR title[128];
-	WCHAR ok_label[32];
-	WCHAR name_label[32];
-	Filter filters[MAX_FILTERS];
-	UINT filter_count;
-	UINT filter_index; /* one based */
-	WCHAR dir[MAX_PATH];
-	WCHAR name[MAX_PATH];
-	WCHAR defext[16];
-	WCHAR result[MAX_PATH];
-	BOOL has_result;
-	struct { DWORD id; BOOL checked; WCHAR label[64]; } checks[MAX_CHECKS];
-	UINT check_count;
-} DialogState;
-
-static void copy_text(WCHAR *to, size_t capacity, const WCHAR *from)
+void copy_text(WCHAR *to, size_t capacity, const WCHAR *from)
 {
 	size_t length = from ? lstrlenW(from) : 0;
 	if (length >= capacity)
@@ -96,7 +61,7 @@ static BOOL is_separator(WCHAR c)
 }
 
 /* Joins a directory and a name with a single separator. */
-static void join_path(WCHAR *out, size_t capacity, const WCHAR *dir, const WCHAR *name)
+void join_path(WCHAR *out, size_t capacity, const WCHAR *dir, const WCHAR *name)
 {
 	size_t length;
 	copy_text(out, capacity, dir);
@@ -107,12 +72,12 @@ static void join_path(WCHAR *out, size_t capacity, const WCHAR *dir, const WCHAR
 		lstrcatW(out, name);
 }
 
-static BOOL is_absolute(const WCHAR *path)
+BOOL is_absolute(const WCHAR *path)
 {
 	return is_separator(path[0]) || (path[0] && path[1] == L':');
 }
 
-static const WCHAR *file_part(const WCHAR *path)
+const WCHAR *file_part(const WCHAR *path)
 {
 	const WCHAR *last = path;
 	for (; *path; ++path)
@@ -121,7 +86,7 @@ static const WCHAR *file_part(const WCHAR *path)
 	return last;
 }
 
-static void parent_directory(WCHAR *dir)
+void parent_directory(WCHAR *dir)
 {
 	size_t length = lstrlenW(dir);
 	while (length > 3 && is_separator(dir[length - 1]))
@@ -162,7 +127,7 @@ static BOOL match_pattern(const WCHAR *pattern, const WCHAR *name)
 }
 
 /* A filter specification is a semicolon separated list of patterns. */
-static BOOL match_spec(const WCHAR *spec, const WCHAR *name)
+BOOL match_spec(const WCHAR *spec, const WCHAR *name)
 {
 	WCHAR one[128];
 	while (*spec) {
@@ -178,321 +143,6 @@ static BOOL match_spec(const WCHAR *spec, const WCHAR *name)
 		spec += length;
 	}
 	return FALSE;
-}
-
-typedef struct {
-	WCHAR name[MAX_PATH];
-	BOOL directory;
-} Entry;
-
-static int compare_entries(const void *left, const void *right)
-{
-	const Entry *a = left, *b = right;
-	if (a->directory != b->directory)
-		return a->directory ? -1 : 1;
-	return lstrcmpiW(a->name, b->name);
-}
-
-static const WCHAR *active_spec(const DialogState *state, const WCHAR *override)
-{
-	if (override && override[0])
-		return override;
-	if (state->filter_count && state->filter_index >= 1 && state->filter_index <= state->filter_count)
-		return state->filters[state->filter_index - 1].spec;
-	return L"*";
-}
-
-static WCHAR typed_spec[128];
-
-static void refresh_list(HWND dialog, DialogState *state)
-{
-	WCHAR pattern[MAX_PATH + 4];
-	WIN32_FIND_DATAW found;
-	HANDLE search;
-	Entry *entries = NULL;
-	size_t count = 0, capacity = 0, index;
-	HWND list = GetDlgItem(dialog, ID_LIST);
-	const WCHAR *spec = active_spec(state, typed_spec);
-	BOOL folders_only = (state->options & FOS_PICKFOLDERS) != 0;
-	SendMessageW(list, LB_RESETCONTENT, 0, 0);
-	SetDlgItemTextW(dialog, ID_PATH, state->dir);
-	join_path(pattern, MAX_PATH + 4, state->dir, L"*");
-	search = FindFirstFileW(pattern, &found);
-	if (search != INVALID_HANDLE_VALUE) {
-		do {
-			BOOL directory = (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-			if (!lstrcmpW(found.cFileName, L".") || !lstrcmpW(found.cFileName, L".."))
-				continue;
-			if ((found.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) && !directory)
-				continue;
-			if (!directory && (folders_only || !match_spec(spec, found.cFileName)))
-				continue;
-			if (count == capacity) {
-				Entry *grown;
-				capacity = capacity ? capacity * 2 : 64;
-				grown = HeapAlloc(GetProcessHeap(), 0, capacity * sizeof(Entry));
-				if (!grown)
-					break;
-				if (entries) {
-					memcpy(grown, entries, count * sizeof(Entry));
-					HeapFree(GetProcessHeap(), 0, entries);
-				}
-				entries = grown;
-			}
-			copy_text(entries[count].name, MAX_PATH, found.cFileName);
-			entries[count++].directory = directory;
-		} while (FindNextFileW(search, &found));
-		FindClose(search);
-	}
-	if (count > 1)
-		qsort(entries, count, sizeof(Entry), compare_entries);
-	for (index = 0; index < count; ++index) {
-		WCHAR label[MAX_PATH + 2];
-		if (entries[index].directory) {
-			label[0] = L'[';
-			copy_text(label + 1, MAX_PATH, entries[index].name);
-			lstrcatW(label, L"]");
-		} else {
-			copy_text(label, MAX_PATH, entries[index].name);
-		}
-		SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)label);
-	}
-	if (entries)
-		HeapFree(GetProcessHeap(), 0, entries);
-}
-
-static void navigate(HWND dialog, DialogState *state, const WCHAR *dir)
-{
-	copy_text(state->dir, MAX_PATH, dir);
-	typed_spec[0] = 0;
-	refresh_list(dialog, state);
-}
-
-static void say(HWND owner, const DialogState *state, const WCHAR *text, UINT flags)
-{
-	MessageBoxW(owner, text, state->title[0] ? state->title : L"File", flags);
-}
-
-static BOOL accept(HWND dialog, DialogState *state)
-{
-	WCHAR text[MAX_PATH], full[MAX_PATH + 16];
-	DWORD attributes;
-	BOOL folders = (state->options & FOS_PICKFOLDERS) != 0;
-	GetDlgItemTextW(dialog, ID_NAME, text, MAX_PATH);
-	if (!text[0]) {
-		if (!folders)
-			return FALSE;
-		copy_text(state->result, MAX_PATH, state->dir);
-		return TRUE;
-	}
-	if (lstrlenW(text) >= 2 && text[0] == L'"') {
-		size_t length = lstrlenW(text);
-		if (text[length - 1] == L'"')
-			text[length - 1] = 0;
-		memmove(text, text + 1, (lstrlenW(text) + 1) * sizeof(WCHAR));
-	}
-	if (is_absolute(text))
-		copy_text(full, MAX_PATH, text);
-	else
-		join_path(full, MAX_PATH, state->dir, text);
-	if (wcschr(text, L'*') || wcschr(text, L'?')) {
-		copy_text(typed_spec, 128, file_part(text));
-		refresh_list(dialog, state);
-		return FALSE;
-	}
-	attributes = GetFileAttributesW(full);
-	if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-		if (folders) {
-			copy_text(state->result, MAX_PATH, full);
-			return TRUE;
-		}
-		SetDlgItemTextW(dialog, ID_NAME, L"");
-		navigate(dialog, state, full);
-		return FALSE;
-	}
-	if (!folders && state->save && !wcschr(file_part(full), L'.')) {
-		/* The default extension, else the extension of the selected file type (a pattern like "*.txt"). */
-		WCHAR extension[16];
-		const WCHAR *spec = active_spec(state, NULL);
-		copy_text(extension, 16, state->defext);
-		if (!extension[0] && spec[0] == L'*' && spec[1] == L'.' && spec[2] && spec[2] != L'*' && spec[2] != L'?') {
-			size_t length = 0;
-			while (spec[2 + length] && spec[2 + length] != L';' && spec[2 + length] != L'*' && spec[2 + length] != L'?' && length < 15)
-				extension[length] = spec[2 + length], ++length;
-			extension[length] = 0;
-		}
-		if (extension[0] && lstrlenW(full) + lstrlenW(extension) + 2 < MAX_PATH) {
-			size_t length = lstrlenW(full);
-			full[length] = L'.';
-			copy_text(full + length + 1, 16, extension);
-			attributes = GetFileAttributesW(full);
-		}
-	}
-	if (state->save) {
-		if (attributes != INVALID_FILE_ATTRIBUTES && (state->options & FOS_OVERWRITEPROMPT)) {
-			WCHAR message[MAX_PATH + 80];
-			copy_text(message, MAX_PATH + 80, file_part(full));
-			lstrcatW(message, L" already exists.\nDo you want to replace it?");
-			if (MessageBoxW(dialog, message, state->title[0] ? state->title : L"Save", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
-				return FALSE;
-		}
-	} else if (attributes == INVALID_FILE_ATTRIBUTES && (state->options & FOS_FILEMUSTEXIST)) {
-		WCHAR message[MAX_PATH + 80];
-		copy_text(message, MAX_PATH + 80, file_part(full));
-		lstrcatW(message, L"\nFile not found.\nCheck the file name and try again.");
-		say(dialog, state, message, MB_OK | MB_ICONWARNING);
-		return FALSE;
-	}
-	copy_text(state->result, MAX_PATH, full);
-	return TRUE;
-}
-
-static INT_PTR CALLBACK dialog_proc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam)
-{
-	DialogState *state = (DialogState *)GetWindowLongPtrW(dialog, DWLP_USER);
-	switch (message) {
-	case WM_INITDIALOG: {
-		UINT index;
-		state = (DialogState *)lparam;
-		SetWindowLongPtrW(dialog, DWLP_USER, (LONG_PTR)state);
-		if (state->ok_label[0])
-			SetDlgItemTextW(dialog, IDOK, state->ok_label);
-		if (state->name_label[0])
-			SetDlgItemTextW(dialog, ID_NAME_LABEL, state->name_label);
-		for (index = 0; index < state->filter_count; ++index)
-			SendDlgItemMessageW(dialog, ID_TYPE, CB_ADDSTRING, 0, (LPARAM)state->filters[index].name);
-		if (state->filter_count) {
-			if (state->filter_index < 1 || state->filter_index > state->filter_count)
-				state->filter_index = 1;
-			SendDlgItemMessageW(dialog, ID_TYPE, CB_SETCURSEL, state->filter_index - 1, 0);
-		} else {
-			EnableWindow(GetDlgItem(dialog, ID_TYPE), FALSE);
-		}
-		for (index = 0; index < state->check_count; ++index)
-			CheckDlgButton(dialog, ID_CHECK + index, state->checks[index].checked ? BST_CHECKED : BST_UNCHECKED);
-		SetDlgItemTextW(dialog, ID_NAME, state->name);
-		typed_spec[0] = 0;
-		refresh_list(dialog, state);
-		return TRUE; /* the dialog manager focuses the first tab stop, the file name field, with its text selected */
-	}
-	case WM_COMMAND:
-		if (!state)
-			return FALSE;
-		switch (LOWORD(wparam)) {
-		case IDOK:
-			if (accept(dialog, state)) {
-				UINT check;
-				for (check = 0; check < state->check_count; ++check)
-					state->checks[check].checked = IsDlgButtonChecked(dialog, ID_CHECK + check) == BST_CHECKED;
-				state->has_result = TRUE;
-				EndDialog(dialog, IDOK);
-			}
-			return TRUE;
-		case IDCANCEL:
-			EndDialog(dialog, IDCANCEL);
-			return TRUE;
-		case ID_UP: {
-			WCHAR dir[MAX_PATH];
-			copy_text(dir, MAX_PATH, state->dir);
-			parent_directory(dir);
-			navigate(dialog, state, dir);
-			return TRUE;
-		}
-		case ID_TYPE:
-			if (HIWORD(wparam) == CBN_SELCHANGE) {
-				LRESULT selected = SendDlgItemMessageW(dialog, ID_TYPE, CB_GETCURSEL, 0, 0);
-				if (selected >= 0)
-					state->filter_index = (UINT)selected + 1;
-				typed_spec[0] = 0;
-				refresh_list(dialog, state);
-			}
-			return TRUE;
-		case ID_LIST:
-			if (HIWORD(wparam) == LBN_SELCHANGE || HIWORD(wparam) == LBN_DBLCLK) {
-				WCHAR label[MAX_PATH + 2];
-				LRESULT selected = SendDlgItemMessageW(dialog, ID_LIST, LB_GETCURSEL, 0, 0);
-				if (selected < 0 || SendDlgItemMessageW(dialog, ID_LIST, LB_GETTEXT, (WPARAM)selected, (LPARAM)label) < 0)
-					return TRUE;
-				if (label[0] == L'[') {
-					WCHAR dir[MAX_PATH];
-					label[lstrlenW(label) - 1] = 0;
-					if (HIWORD(wparam) == LBN_DBLCLK) {
-						join_path(dir, MAX_PATH, state->dir, label + 1);
-						navigate(dialog, state, dir);
-					}
-				} else {
-					SetDlgItemTextW(dialog, ID_NAME, label);
-					if (HIWORD(wparam) == LBN_DBLCLK)
-						SendMessageW(dialog, WM_COMMAND, IDOK, 0);
-				}
-			}
-			return TRUE;
-		}
-		return FALSE;
-	}
-	return FALSE;
-}
-
-/* Template assembly ----------------------------------------------------------------------------------------- */
-
-typedef struct {
-	WORD *at;
-	WORD *base;
-} Template;
-
-static void put_word(Template *t, WORD value) { *t->at++ = value; }
-static void put_dword(Template *t, DWORD value) { put_word(t, (WORD)value); put_word(t, (WORD)(value >> 16)); }
-static void align(Template *t) { if (((ULONG_PTR)t->at - (ULONG_PTR)t->base) & 2) put_word(t, 0); }
-static void put_text(Template *t, const WCHAR *text) { while (*text) put_word(t, *text++); put_word(t, 0); }
-
-static void put_item(Template *t, DWORD style, short x, short y, short cx, short cy, WORD id, WORD klass, const WCHAR *text)
-{
-	align(t);
-	put_dword(t, style | WS_CHILD | WS_VISIBLE);
-	put_dword(t, 0);
-	put_word(t, (WORD)x); put_word(t, (WORD)y); put_word(t, (WORD)cx); put_word(t, (WORD)cy);
-	put_word(t, id);
-	put_word(t, 0xffff); put_word(t, klass);
-	put_text(t, text ? text : L"");
-	put_word(t, 0);
-}
-
-static BOOL run_dialog(HWND owner, DialogState *state)
-{
-	WORD *buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096);
-	Template t;
-	INT_PTR answer;
-	if (!buffer)
-		return FALSE;
-	t.at = t.base = buffer;
-	put_dword(&t, DS_MODALFRAME | DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE);
-	put_dword(&t, 0);
-	put_word(&t, (WORD)(10 + state->check_count)); /* control count */
-	put_word(&t, 0); put_word(&t, 0); put_word(&t, 300); put_word(&t, (WORD)(184 + 14 * state->check_count));
-	put_word(&t, 0); put_word(&t, 0);
-	put_text(&t, state->title[0] ? state->title : (state->save ? L"Save As" : L"Open"));
-	put_word(&t, 8);
-	put_text(&t, L"MS Shell Dlg");
-	put_item(&t, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 56, 140, 170, 12, ID_NAME, 0x0081, L"");
-	put_item(&t, SS_LEFT, 8, 8, 40, 10, ID_PATH_LABEL, 0x0082, (state->options & FOS_PICKFOLDERS) ? L"Folder:" : L"Look in:");
-	put_item(&t, WS_BORDER | SS_NOPREFIX | SS_ENDELLIPSIS, 48, 6, 190, 12, ID_PATH, 0x0082, L"");
-	put_item(&t, WS_TABSTOP | BS_PUSHBUTTON, 244, 5, 48, 14, ID_UP, 0x0080, L"Up");
-	put_item(&t, WS_BORDER | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY, 8, 24, 284, 110, ID_LIST, 0x0083, L"");
-	put_item(&t, SS_LEFT, 8, 142, 44, 10, ID_NAME_LABEL, 0x0082, L"File name:");
-	put_item(&t, WS_TABSTOP | BS_DEFPUSHBUTTON, 234, 139, 58, 14, IDOK, 0x0080, state->save ? L"Save" : L"Open");
-	put_item(&t, SS_LEFT, 8, 162, 44, 10, ID_TYPE_LABEL, 0x0082, (state->options & FOS_PICKFOLDERS) ? L"" : L"Files of type:");
-	put_item(&t, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 56, 160, 170, 80, ID_TYPE, 0x0085, L"");
-	put_item(&t, WS_TABSTOP | BS_PUSHBUTTON, 234, 159, 58, 14, IDCANCEL, 0x0080, L"Cancel");
-	{
-		UINT check;
-		for (check = 0; check < state->check_count; ++check)
-			put_item(&t, WS_TABSTOP | BS_AUTOCHECKBOX, 8, (short)(180 + 14 * check), 220, 12, (WORD)(ID_CHECK + check), 0x0080, state->checks[check].label);
-	}
-	if (!state->dir[0])
-		GetCurrentDirectoryW(MAX_PATH, state->dir);
-	answer = DialogBoxIndirectParamW(GetModuleHandleW(NULL), (LPCDLGTEMPLATEW)buffer, owner, dialog_proc, (LPARAM)state);
-	HeapFree(GetProcessHeap(), 0, buffer);
-	return answer == IDOK && state->has_result;
 }
 
 /* Shell items ----------------------------------------------------------------------------------------------- */
@@ -822,11 +472,12 @@ static HRESULT STDMETHODCALLTYPE fd_get_results(void *self, IShellItemArray **ar
 		return E_OUTOFMEMORY;
 	created->vtbl = &array_vtbl;
 	created->refs = 1;
-	created->count = 1;
-	if (FAILED(make_item(state->result, &created->items[0]))) {
-		HeapFree(GetProcessHeap(), 0, created);
-		return E_OUTOFMEMORY;
-	}
+	/* Every chosen file, or the one result of a dialog that chose a single path. */
+	for (created->count = 0; created->count < (state->result_count ? state->result_count : 1); ++created->count)
+		if (FAILED(make_item(state->result_count ? state->results[created->count] : state->result, &created->items[created->count]))) {
+			IShellItemArray_Release((IShellItemArray *)created);
+			return E_OUTOFMEMORY;
+		}
 	*array = (IShellItemArray *)created;
 	return S_OK;
 }
@@ -1017,6 +668,8 @@ static BOOL classic_dialog(OPENFILENAMEW *request, BOOL save)
 		state->options |= FOS_PATHMUSTEXIST;
 	if (request->Flags & OFN_OVERWRITEPROMPT)
 		state->options |= FOS_OVERWRITEPROMPT;
+	if (request->Flags & OFN_ALLOWMULTISELECT)
+		state->options |= FOS_ALLOWMULTISELECT;
 	load_classic_filters(state, request->lpstrFilter);
 	state->filter_index = request->nFilterIndex ? request->nFilterIndex : 1;
 	copy_text(state->title, 128, request->lpstrTitle);
@@ -1035,7 +688,31 @@ static BOOL classic_dialog(OPENFILENAMEW *request, BOOL save)
 	}
 	copy_text(state->defext, 16, request->lpstrDefExt);
 	accepted = run_dialog(request->hwndOwner, state);
-	if (accepted) {
+	if (accepted && state->result_count > 1) {
+		/* Several files: the folder, then each name, each ended by a null and the list by another. */
+		WCHAR *out = request->lpstrFile;
+		size_t needed = lstrlenW(state->dir) + 2, at;
+		UINT index;
+		for (index = 0; index < state->result_count; ++index)
+			needed += lstrlenW(file_part(state->results[index])) + 1;
+		if (!out || needed > request->nMaxFile) {
+			if (out && request->nMaxFile >= 2)
+				*(WORD *)out = (WORD)needed;
+			accepted = FALSE;
+			SetLastError(ERROR_INSUFFICIENT_BUFFER);
+		} else {
+			lstrcpyW(out, state->dir);
+			at = lstrlenW(out) + 1;
+			request->nFileOffset = (WORD)at;
+			request->nFileExtension = 0;
+			for (index = 0; index < state->result_count; ++index) {
+				lstrcpyW(out + at, file_part(state->results[index]));
+				at += lstrlenW(out + at) + 1;
+			}
+			out[at] = 0;
+			request->nFilterIndex = state->filter_index;
+		}
+	} else if (accepted) {
 		size_t length = lstrlenW(state->result);
 		if (!request->lpstrFile || length + 1 > request->nMaxFile) {
 			request->nMaxFile = (DWORD)(length + 1);
