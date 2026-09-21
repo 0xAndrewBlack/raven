@@ -1250,6 +1250,12 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 set_tests_properties(native_settings_reset_${installer_arch} PROPERTIES FIXTURES_SETUP settings_${installer_arch})
                 set_tests_properties(native_settings_${installer_arch} PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED settings_${installer_arch}
                     PASS_REGULAR_EXPRESSION "Native entry returned 0 .*Native entry returned 0 " ENVIRONMENT RAVEN_PREFIX=${fixture}/settings-prefix)
+                # What a Visual C++ redistributable leaves for programs, checked by the redistributable workflow below.
+                add_custom_command(OUTPUT ${fixture}/redist-check.exe
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/redist-check.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/redist_check.c -ladvapi32 -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/redist_check.c VERBATIM)
+                add_custom_target(redist_check_fixture_${installer_arch} ALL DEPENDS ${fixture}/redist-check.exe)
                 # msiexec found by name in the system directory, installing and removing the package from the command line.
                 add_test(NAME native_msiexec_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/msiexec-client.exe)
                 set_tests_properties(native_msiexec_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
@@ -1764,6 +1770,24 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         ${PROJECT_SOURCE_DIR}/testdata/npp ${CMAKE_CURRENT_BINARY_DIR}/notepadpp-evidence)
                     set_tests_properties(native_notepadpp_workflow PROPERTIES TIMEOUT 1200 RESOURCE_LOCK raven_compositor)
                 endif()
+                # The Visual C++ 2015-2022 redistributables, downloaded from Microsoft into RAVEN_REDIST_DIRECTORY: installed with their progress
+                # window from a fresh prefix, checked from a program, installed again and removed.
+                set(RAVEN_REDIST_DIRECTORY "" CACHE PATH "Directory holding vc_redist.x64.exe and vc_redist.x86.exe as Microsoft publishes them")
+                foreach(redist_arch x64 x86)
+                    set(redist_folder system32)
+                    if(redist_arch STREQUAL x86)
+                        set(redist_folder syswow64)
+                    endif()
+                    if(TARGET raven_wayland AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_PIL_PYTHON AND RAVEN_REDIST_DIRECTORY
+                       AND EXISTS ${RAVEN_REDIST_DIRECTORY}/vc_redist.${redist_arch}.exe AND TARGET redist_check_fixture_${redist_arch})
+                        add_test(NAME native_vcredist_2022_${redist_arch} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-redist.py
+                            $<TARGET_FILE:raven> ${RAVEN_REDIST_DIRECTORY}/vc_redist.${redist_arch}.exe
+                            ${CMAKE_CURRENT_BINARY_DIR}/msi-fixtures/${redist_arch}/redist-check.exe ${redist_folder}
+                            ${CMAKE_CURRENT_BINARY_DIR}/vcredist-${redist_arch}-evidence)
+                        set_tests_properties(native_vcredist_2022_${redist_arch} PROPERTIES TIMEOUT 1800 RESOURCE_LOCK raven_compositor
+                            PASS_REGULAR_EXPRESSION "PASS: installed")
+                    endif()
+                endforeach()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
