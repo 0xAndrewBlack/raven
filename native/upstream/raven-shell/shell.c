@@ -1241,6 +1241,119 @@ HRESULT WINAPI PropVariantClear(PROPVARIANT *value)
 	return S_OK;
 }
 
+/* The size of one element of a counted vector of fixed-size values; zero for element types that own memory or are not known. */
+static SIZE_T vector_element(VARTYPE type)
+{
+	switch (type) {
+	case VT_I1:
+	case VT_UI1:
+		return 1;
+	case VT_I2:
+	case VT_UI2:
+	case VT_BOOL:
+		return 2;
+	case VT_I4:
+	case VT_UI4:
+	case VT_R4:
+	case VT_ERROR:
+		return 4;
+	case VT_I8:
+	case VT_UI8:
+	case VT_R8:
+	case VT_CY:
+	case VT_DATE:
+	case VT_FILETIME:
+		return 8;
+	case VT_CLSID:
+		return sizeof(CLSID);
+	default:
+		return 0;
+	}
+}
+
+/* A copy of memory from the task allocator; NULL stays NULL. */
+static void *task_copy(const void *source, SIZE_T size)
+{
+	void *copy;
+	if (!source)
+		return NULL;
+	if ((copy = CoTaskMemAlloc(size ? size : 1)))
+		memcpy(copy, source, size);
+	return copy;
+}
+
+/* Copies a PROPVARIANT with what it owns: strings, blobs, class identifiers and vectors are duplicated, interfaces referenced again. */
+HRESULT WINAPI PropVariantCopy(PROPVARIANT *target, const PROPVARIANT *source)
+{
+	BOOL failed = FALSE;
+	if (!target || !source)
+		return E_INVALIDARG;
+	*target = *source;
+	switch (source->vt) {
+	case VT_LPWSTR:
+		target->pwszVal = task_copy(source->pwszVal, source->pwszVal ? (lstrlenW(source->pwszVal) + 1) * sizeof(WCHAR) : 0);
+		failed = source->pwszVal && !target->pwszVal;
+		break;
+	case VT_LPSTR:
+		target->pszVal = task_copy(source->pszVal, source->pszVal ? lstrlenA(source->pszVal) + 1 : 0);
+		failed = source->pszVal && !target->pszVal;
+		break;
+	case VT_CLSID:
+		target->puuid = task_copy(source->puuid, sizeof(CLSID));
+		failed = source->puuid && !target->puuid;
+		break;
+	case VT_BLOB:
+		target->blob.pBlobData = task_copy(source->blob.pBlobData, source->blob.cbSize);
+		failed = source->blob.pBlobData && !target->blob.pBlobData;
+		break;
+	case VT_BSTR: {
+		HMODULE automation = LoadLibraryW(L"oleaut32.dll");
+		BSTR (WINAPI *copy_string)(LPCSTR, UINT) = automation ? (BSTR (WINAPI *)(LPCSTR, UINT))GetProcAddress(automation, "SysAllocStringByteLen") : NULL;
+		if (source->bstrVal) {
+			if (!copy_string)
+				return E_OUTOFMEMORY;
+			target->bstrVal = copy_string((LPCSTR)source->bstrVal, ((const UINT *)source->bstrVal)[-1]);
+			failed = !target->bstrVal;
+		}
+		break;
+	}
+	case VT_UNKNOWN:
+	case VT_DISPATCH:
+		if (source->punkVal)
+			IUnknown_AddRef(source->punkVal);
+		break;
+	default:
+		if (source->vt & VT_VECTOR) {
+			const VARTYPE element = source->vt & ~VT_VECTOR;
+			const ULONG count = source->cac.cElems;
+			if (element == VT_LPWSTR || element == VT_LPSTR) {
+				target->calpwstr.pElems = CoTaskMemAlloc(count ? count * sizeof(LPWSTR) : 1);
+				failed = !target->calpwstr.pElems;
+				for (ULONG index = 0; !failed && index < count; ++index) {
+					const void *text = source->calpwstr.pElems[index];
+					const SIZE_T size = !text ? 0 : element == VT_LPWSTR ? (lstrlenW(text) + 1) * sizeof(WCHAR) : lstrlenA(text) + 1;
+					target->calpwstr.pElems[index] = task_copy(text, size);
+					failed = text && !target->calpwstr.pElems[index];
+				}
+				break;
+			}
+			const SIZE_T size = vector_element(element);
+			if (!size)
+				return DISP_E_BADVARTYPE;
+			target->cac.pElems = task_copy(source->cac.pElems, count * size);
+			failed = source->cac.pElems && !target->cac.pElems;
+		} else if (source->vt & (VT_ARRAY | VT_BYREF)) {
+			return DISP_E_BADVARTYPE;
+		}
+		break;
+	}
+	if (failed) {
+		memset(target, 0, sizeof(*target));
+		return E_OUTOFMEMORY;
+	}
+	return S_OK;
+}
+
 /* There is no taskbar here: it is not auto-hidden, has no position and holds no application bars. */
 UINT_PTR WINAPI SHAppBarMessage(DWORD message, PAPPBARDATA data)
 {
