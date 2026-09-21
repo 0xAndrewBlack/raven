@@ -177,3 +177,6 @@ CRT EXCEPTION_DISPOSITION __C_specific_handler(EXCEPTION_RECORD *record, void *f
 	return ExceptionContinueSearch;
 }
 #endif
+
+/* The drives that exist, one bit per letter from A. */
+CRT unsigned long _getdrives(void) { return GetLogicalDrives(); }
