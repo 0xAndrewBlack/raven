@@ -252,6 +252,10 @@ void register_wave_api(ApiRegistry &registry, KernelContext &context)
 	});
 
 	registry.add("waveOutGetNumDevs", 0, [](ApiCall &call) { call.ret(1); });
+	// There is no capture device: recording programs hear that none exists.
+	registry.add("waveInGetNumDevs", 0, [](ApiCall &call) { call.ret(0); });
+	for (const auto *name : {"waveInGetDevCapsW", "waveInGetDevCapsA"})
+		registry.add(name, 3, [](ApiCall &call) { call.ret(mmsyserr_baddeviceid); });
 	for (const bool wide : {true, false})
 		registry.add(wide ? "waveOutGetDevCapsW" : "waveOutGetDevCapsA", 3, [wide](ApiCall &call) {
 			if (call[0] != 0 && call[0] != wave_mapper && uint32_t(call[0]) != uint32_t(wave_mapper)) {
