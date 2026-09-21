@@ -1,3 +1,24 @@
 EXPORTS
 	??2@YAPAXI@Z = raven_operator_new
 	??3@YAXPAX@Z = raven_operator_delete
+	_CxxThrowException = raven_cxx_throw@8
+	__CxxFrameHandler = raven_cxx_frame_handler
+	__CxxFrameHandler2 = raven_cxx_frame_handler
+	__CxxFrameHandler3 = raven_cxx_frame_handler
+	??1type_info@@UAE@XZ = raven_type_info_destroy
+	?name@type_info@@QBEPBDXZ = raven_type_info_name
+	?raw_name@type_info@@QBEPBDXZ = raven_type_info_raw_name
+	??8type_info@@QBEHABV0@@Z = raven_type_info_equal
+	??9type_info@@QBEHABV0@@Z = raven_type_info_unequal
+	?before@type_info@@QBEHABV0@@Z = raven_type_info_before
+	??0exception@@QAE@XZ = raven_exception_construct
+	??0exception@@QAE@ABQBD@Z = raven_exception_construct_message
+	??0exception@@QAE@ABQBDH@Z = raven_exception_construct_message_shared
+	??0exception@@QAE@ABV0@@Z = raven_exception_copy
+	??1exception@@UAE@XZ = raven_exception_destroy
+	??4exception@@QAEAAV0@ABV0@@Z = raven_exception_assign
+	?what@exception@@UBEPBDXZ = raven_exception_what
+	??_Eexception@@UAEPAXI@Z = raven_exception_delete
+	??_7exception@@6B@ = raven_exception_vtable DATA
+	raven_raise_exception = raven_raise_exception@16
+	raven_unwind = raven_unwind@16

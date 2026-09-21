@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <iostream>
 #include <sys/mman.h>
 
 namespace raven {
@@ -181,8 +182,27 @@ bool NativeX86Compat::dispatch(std::string_view name)
 	} else if (name == "HeapCreate") {
 		process.api_arguments(3);
 		process.return_api(process_heap_handle);
-	} else if (name == "HeapDestroy" || name == "FreeEnvironmentStringsA" || name == "UnhandledExceptionFilter") {
+	} else if (name == "HeapDestroy" || name == "FreeEnvironmentStringsA") {
 		process.api_arguments(1);
+		process.return_api(1);
+	} else if (name == "UnhandledExceptionFilter") {
+		// The last chance for an exception nothing handled: it is named, and the process ends as its handler asks.
+		const auto args = process.api_arguments(1);
+		try {
+			const auto record = read_word(process.read_memory(args[0], 4), 0);
+			const auto bytes = process.read_memory(record, 32);
+			std::cerr << "raven: unhandled exception 0x" << std::hex << read_word(bytes, 0) << " at 0x" << read_word(bytes, 12) << std::dec;
+			// A C++ exception names the type thrown, as the compiler decorated it.
+			if (read_word(bytes, 0) == 0xe06d7363 && read_word(bytes, 16) >= 3) {
+				const auto info = read_word(process.read_memory(record + 28, 4), 0);
+				const auto types = read_word(process.read_memory(info + 12, 4), 0);
+				const auto type = read_word(process.read_memory(read_word(process.read_memory(types + 4, 4), 0) + 4, 4), 0);
+				const auto name = process.read_memory(type + 8, 64);
+				std::cerr << " of type " << std::string(reinterpret_cast<const char *>(name.data()), strnlen(reinterpret_cast<const char *>(name.data()), 64));
+			}
+			std::cerr << '\n';
+		} catch (...) {
+		}
 		process.return_api(1);
 	} else if (name == "RtlUnwind") {
 		process.api_arguments(4);

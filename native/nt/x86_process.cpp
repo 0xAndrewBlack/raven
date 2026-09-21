@@ -915,6 +915,25 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				result = process.resume(budget);
 				continue;
 			}
+			// Exceptions are dispatched in the program, along the frames its threads register, by the C runtime component: the call goes
+			// on there with the same arguments, so handlers that resume elsewhere, as a C++ catch does, never return to the runtime.
+			if (api == "RaiseException" || api == "RtlUnwind")
+				if (const auto component = modules.all().find("ucrtbase.dll"); component != modules.all().end()) {
+					const std::string_view wanted = api == "RaiseException" ? "raven_raise_exception" : "raven_unwind";
+					const auto &exports = component->second->exports;
+					const auto found = std::find_if(exports.begin(), exports.end(), [&](const auto &symbol) {
+						return std::find(symbol.names.begin(), symbol.names.end(), wanted) != symbol.names.end();
+					});
+					if (found != exports.end()) {
+						auto native = process.context();
+						native.registers.rip = component->second->loaded.base() + found->address;
+						native.registers.orig_rax = uint64_t(-1);
+						process.redirect(native, process.callback_depth());
+						budget = remaining();
+						result = process.resume(budget);
+						continue;
+					}
+				}
 			if (api == "RaiseException") {
 				const auto words = process.api_arguments(4);
 				std::cerr << "raven: unhandled exception 0x" << std::hex << uint32_t(words[0]) << std::dec << " raised by the program\n";

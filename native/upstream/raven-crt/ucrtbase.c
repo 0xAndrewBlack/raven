@@ -963,3 +963,4 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 #include "ucrtbase_legacy.c"
 #include "ucrtbase_msvcrt.c"
 #include "ucrtbase_cpp.c"
+#include "ucrtbase_cxx.c"
