@@ -1,5 +1,6 @@
 #include "profile_api.h"
 #include "nls.h"
+#include "paths.h"
 
 #include <fstream>
 #include <iterator>
@@ -262,12 +263,22 @@ uint64_t NativeProfile::put_list(uint64_t address, size_t capacity, const std::v
 	return fits ? (joined.empty() ? 0 : joined.size() - 1) : capacity - 2;
 }
 
+std::optional<std::filesystem::path> NativeProfile::locate(const std::u16string &file_name) const
+{
+	// A name without a full path is a file of the Windows directory. Names match whatever their case, as the file system's do.
+	const bool full = (file_name.size() >= 2 && file_name[1] == u':') || file_name.starts_with(u"\\") || file_name.starts_with(u"/");
+	const auto resolved = NativePaths(prefix).resolve(full ? file_name : u"C:\\Windows\\" + file_name);
+	if (!resolved)
+		return std::nullopt;
+	return resolved->host;
+}
+
 bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &args, uint64_t &result)
 {
 	if (name == "GetPrivateProfileSectionNamesW") {
 		std::vector<std::u16string> names;
 		if (const auto file_name = text(args[2]))
-			if (const auto path = prefix.resolve(encode_utf8(*file_name)))
+			if (const auto path = locate(*file_name))
 				names = section_names(*path);
 		result = put_list(args[0], uint32_t(args[1]), names);
 		return true;
@@ -276,7 +287,7 @@ bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &
 	if (name == "GetPrivateProfileSectionW") {
 		std::vector<std::u16string> lines;
 		if (const auto section = text(args[0]), file_name = text(args[3]); section && file_name)
-			if (const auto path = prefix.resolve(encode_utf8(*file_name)))
+			if (const auto path = locate(*file_name))
 				lines = section_lines(*path, *section).value_or(std::vector<std::u16string>{});
 		result = put_list(args[1], uint32_t(args[2]), lines);
 		return true;
@@ -289,7 +300,7 @@ bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &
 				environment.set_last_error(87);
 				return true;
 			}
-			const auto path = prefix.resolve(encode_utf8(*file_name));
+			const auto path = locate(*file_name);
 			if (!path) {
 				environment.set_last_error(123);
 				return true;
@@ -321,7 +332,7 @@ bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &
 		if (!integer && (!section || !key)) {
 			std::vector<std::u16string> names;
 			if (file_name)
-				if (const auto path = prefix.resolve(encode_utf8(*file_name))) {
+				if (const auto path = locate(*file_name)) {
 					if (!section)
 						names = section_names(*path);
 					else
@@ -333,7 +344,7 @@ bool NativeProfile::execute(std::string_view name, const std::vector<uint64_t> &
 		}
 		std::optional<std::u16string> value;
 		if (section && key && file_name)
-			if (const auto path = prefix.resolve(encode_utf8(*file_name)))
+			if (const auto path = locate(*file_name))
 				value = lookup(*path, *section, *key);
 		if (integer) {
 			result = uint32_t(args[2]);

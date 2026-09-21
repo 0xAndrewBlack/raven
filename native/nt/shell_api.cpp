@@ -71,12 +71,21 @@ constexpr KnownFolder known_folders[] = {
 	{0x1777f761, 0x06, nullptr}, {0xa4115719, 0x16, nullptr}, {0x0139d44e, 0x17, nullptr}, {0xae50c081, 0x27, nullptr}};
 
 // The double-NUL terminated file lists of SHFileOperation.
-std::vector<std::u16string> file_list(ApiCall &call, uint64_t address)
+// A list of names each ended by a zero and the list by one more, wide or in the ANSI code page.
+std::vector<std::u16string> file_list(ApiCall &call, uint64_t address, bool ansi = false)
 {
 	std::vector<std::u16string> result;
 	if (!address)
 		return result;
 	for (;;) {
+		if (ansi) {
+			const auto item = call.narrow(address, 32768);
+			if (item.empty())
+				return result;
+			address += item.size() + 1;
+			result.push_back(from_ansi(item, 0));
+			continue;
+		}
 		auto item = call.wide(address, 32768);
 		if (item.empty())
 			return result;
@@ -394,7 +403,7 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	});
-	registry.add("SHFileOperationW", 1, [&paths](ApiCall &call) {
+	const auto file_operation = [&paths](ApiCall &call, bool ansi) {
 		// SHFILEOPSTRUCTW: owner window, function, source and destination lists, flags, then the aborted flag; the pointers are as wide as the program's.
 		const bool narrow = call.process.mode() == NativeMode::x86;
 		const size_t function_at = narrow ? 4 : 8, sources_at = narrow ? 8 : 16, destinations_at = narrow ? 12 : 24, flags_at = narrow ? 16 : 32,
@@ -403,7 +412,7 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		const uint64_t sources = narrow ? call.load<uint32_t>(call[0] + sources_at) : call.load<uint64_t>(call[0] + sources_at);
 		const uint64_t destinations = narrow ? call.load<uint32_t>(call[0] + destinations_at) : call.load<uint64_t>(call[0] + destinations_at);
 		const uint16_t flags = call.load<uint16_t>(call[0] + flags_at);
-		const auto from = file_list(call, sources), to = file_list(call, destinations);
+		const auto from = file_list(call, sources, ansi), to = file_list(call, destinations, ansi);
 		call.store<int32_t>(call[0] + aborted_at, 0);
 		std::error_code error;
 		for (size_t index = 0; index < from.size(); ++index) {
@@ -442,7 +451,10 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 			}
 		}
 		call.ret(0);
-	});
+	};
+	// The ANSI form lists its names in the program's code page; the structure is the same.
+	registry.add("SHFileOperationW", 1, [file_operation](ApiCall &call) { file_operation(call, false); });
+	registry.add("SHFileOperationA", 1, [file_operation](ApiCall &call) { file_operation(call, true); });
 }
 
 }

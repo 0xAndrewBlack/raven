@@ -1,6 +1,9 @@
 #include "ansi_api.h"
 #include "text.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include <sys/mman.h>
 
 namespace raven {
@@ -22,6 +25,8 @@ struct Adapter {
 	// When the flags argument has any of these bits the string argument is not text (an address, for example).
 	int flag_argument = -1;
 	uint32_t flag_mask = 0;
+	// The buffer holds a list: strings each ended by a zero, the list by one more, as the profile calls return keys and sections.
+	bool list = false;
 };
 
 const Adapter adapters[] = {
@@ -45,6 +50,11 @@ const Adapter adapters[] = {
 	{"GetLongPathNameA", {0}, 1, 2},
 	{"GetShortPathNameA", {0}, 1, 2},
 	{"ExpandEnvironmentStringsA", {0}, 1, 2},
+	{"GetPrivateProfileStringA", {0, 1, 2, 5}, 3, 4, -1, -1, -1, 0, true},
+	{"GetPrivateProfileSectionA", {0, 3}, 1, 2, -1, -1, -1, 0, true},
+	{"GetPrivateProfileSectionNamesA", {2}, 0, 1, -1, -1, -1, 0, true},
+	{"GetPrivateProfileIntA", {0, 1, 3}},
+	{"WritePrivateProfileStringA", {0, 1, 2, 3}},
 	{"GetDriveTypeA", {0}},
 	{"GetDiskFreeSpaceA", {0}},
 	{"GetDiskFreeSpaceExA", {0}},
@@ -130,19 +140,29 @@ void register_ansi_adapters(ApiRegistry &registry)
 			ApiCall inner(call.process, call.environment, words);
 			handler(inner);
 			call.ret(inner.result);
-			if (wide_buffer && inner.result && inner.result < capacity) {
+			if (adapter.list && wide_buffer && capacity) {
+				// The list as it stands, its terminators included, in the program's code page.
+				const auto raw = call.read(wide_buffer, (std::min<size_t>(inner.result, capacity - 1) + 1) * 2);
+				std::u16string text(raw.size() / 2, u'\0');
+				std::memcpy(text.data(), raw.data(), text.size() * 2);
+				auto narrow = to_ansi(text, ansi_code_page);
+				narrow.resize(std::min<size_t>(narrow.size(), capacity));
+				call.write(narrow_buffer, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(narrow.data()), narrow.size()));
+				call.ret(inner.result);
+			} else if (wide_buffer && inner.result && inner.result < capacity) {
 				const auto text = call.wide(wide_buffer, capacity);
 				const auto narrow = to_ansi(text, ansi_code_page);
 				call.put_narrow(narrow_buffer, narrow, capacity);
 				call.ret(narrow.size());
 				if (file_part) {
 					// The wide handler points into its own buffer; the same character of the narrow copy is what the caller gets.
-					const auto part = call.load<uint64_t>(wide_part);
+					// The part is a pointer of the program's width: a 32-bit program's ends after four bytes.
+					const auto part = call.load_pointer(wide_part);
 					if (part >= wide_buffer && part < wide_buffer + (uint64_t(capacity) + 1) * 2)
-						call.store<uint64_t>(file_part, narrow_buffer +
+						call.store_pointer(file_part, narrow_buffer +
 							to_ansi(std::u16string_view(text).substr(0, size_t((part - wide_buffer) / 2)), ansi_code_page).size());
 					else
-						call.store<uint64_t>(file_part, 0);
+						call.store_pointer(file_part, 0);
 				}
 			}
 			if (find_wide && inner.result) {
@@ -165,7 +185,8 @@ void register_legacy_file_api(ApiRegistry &registry)
 {
 	constexpr uint64_t file_error = 0xffffffffULL;
 	const auto create = registry.find("CreateFileA"), read = registry.find("ReadFile"), write = registry.find("WriteFile"),
-		seek = registry.find("SetFilePointerEx");
+		seek = registry.find("SetFilePointerEx"), full_path = registry.find("GetFullPathNameA"), remove = registry.find("DeleteFileA"),
+		attributes = registry.find("GetFileAttributesA"), close = registry.find("CloseHandle");
 	if (!create || !read || !write || !seek)
 		return;
 	const auto run = [](const std::pair<uint32_t, ApiHandler> &entry, ApiCall &call, std::vector<uint64_t> words) {
@@ -183,6 +204,60 @@ void register_legacy_file_api(ApiRegistry &registry)
 		const auto done = run(*create, call, {call[0], access, share, 0, 3, 0x80, 0});
 		call.ret(invalid_handle(done.result) ? file_error : done.result);
 	});
+	// OpenFile: a file by name with the access and sharing bits of _lopen, created, tested for existence or deleted as the style asks; the
+	// OFSTRUCT receives the full path and the error, if any.
+	if (full_path && remove && attributes)
+		registry.add("OpenFile", 3, [=](ApiCall &call) {
+			constexpr uint32_t parse = 0x100, erase = 0x200, create_new = 0x1000, exist = 0x4000;
+			const uint32_t style = call.u32(2);
+			Scratch scratch(call.process);
+			const auto path = scratch.block(128);
+			const auto resolved = run(*full_path, call, {call[0], 128, path, 0});
+			std::vector<uint8_t> record(136, 0);
+			record[0] = 136;
+			record[1] = 1;
+			const auto text = resolved.result && resolved.result < 128 ? call.read(path, size_t(resolved.result)) : std::vector<uint8_t>{};
+			std::copy(text.begin(), text.end(), record.begin() + 8);
+			const auto finish = [&](uint64_t value, uint32_t error) {
+				record[2] = uint8_t(error);
+				record[3] = uint8_t(error >> 8);
+				if (call[1])
+					call.write(call[1], record);
+				if (error)
+					call.set_last_error(error);
+				call.ret(value);
+			};
+			if (style & parse) {
+				finish(0, 0);
+				return;
+			}
+			if (style & erase) {
+				const auto done = run(*remove, call, {path});
+				finish(done.result ? 1 : file_error, done.result ? 0 : 2);
+				return;
+			}
+			// A test for existence opens nothing: the file's attributes say whether it is there.
+			if ((style & exist) && !(style & create_new)) {
+				const auto done = run(*attributes, call, {path});
+				finish(uint32_t(done.result) == 0xffffffffU ? file_error : 1, uint32_t(done.result) == 0xffffffffU ? 2 : 0);
+				return;
+			}
+			const uint32_t mode = style & 3, sharing = style & 0x70;
+			const uint32_t access = mode == 0 ? 0x80000000U : mode == 1 ? 0x40000000U : 0xc0000000U;
+			const uint32_t share = sharing == 0x10 ? 0 : sharing == 0x20 ? 1 : sharing == 0x30 ? 2 : 3;
+			const auto done = run(*create, call, {path, (style & create_new) ? 0xc0000000U : access, share, 0, (style & create_new) ? 2U : 3U, 0x80, 0});
+			if (invalid_handle(done.result)) {
+				finish(file_error, done.last_error() ? done.last_error() : 2);
+				return;
+			}
+			// A file created only to be there is closed again, where the closing handler is a shared one.
+			if ((style & exist) && close) {
+				run(*close, call, {done.result});
+				finish(1, 0);
+				return;
+			}
+			finish(done.result, 0);
+		});
 	registry.add("_lcreat", 2, [=](ApiCall &call) {
 		const auto done = run(*create, call, {call[0], 0xc0000000U, 0, 0, 2, uint64_t(call.u32(1) & 7) | 0x80, 0});
 		call.ret(invalid_handle(done.result) ? file_error : done.result);

@@ -19,6 +19,7 @@ private:
 	NativeEnvironment &environment;
 	const NativePrefix &prefix;
 	std::optional<std::u16string> text(uint64_t address) const;
+	std::optional<std::filesystem::path> locate(const std::u16string &file_name) const;
 	uint64_t put_list(uint64_t address, size_t capacity, const std::vector<std::u16string> &entries) const;
 };
 

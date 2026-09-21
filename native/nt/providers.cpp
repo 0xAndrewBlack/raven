@@ -2053,10 +2053,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	apply_registry_settings(hive);
 	register_registry_api(api_registry, kernel, hive);
 	register_service_api(api_registry, kernel, hive);
-	register_ansi_adapters(api_registry);
-	register_legacy_file_api(api_registry);
 	NativeProfile profile(process, environment, prefix);
 	register_profile_api(api_registry, profile);
+	register_ansi_adapters(api_registry);
+	register_legacy_file_api(api_registry);
 	std::vector<const PEModule *> attached;
 	attached.reserve(order.size());
 	const auto notify_tls = [&](const PEModule &module, uint64_t reason) {

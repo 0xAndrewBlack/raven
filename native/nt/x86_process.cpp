@@ -1125,6 +1125,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	// The older switch: a boolean that turns redirection on or off.
 	shared_api.add("Wow64EnableWow64FsRedirection", 1, [&paths](ApiCall &call) {
 		paths.redirect((call.u32(0) & 0xff) != 0);
+	register_profile_api(shared_api, profile);
 		call.ret(1);
 	});
 	register_ansi_adapters(shared_api);
