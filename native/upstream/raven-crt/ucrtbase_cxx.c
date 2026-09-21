@@ -3,9 +3,10 @@
  * frames the thread registered: each frame's handler is asked in turn, and the C++ frame handler finds the catch block that takes the
  * object, unwinds the frames above it, runs the block and resumes the function after it. Included by ucrtbase.c. */
 
-typedef void (__cdecl *exit_function)(void);
+/* The handlers' type is the headers' _onexit_t, which returns an int nobody reads. */
+typedef int (__cdecl *exit_function)(void);
 
-CRT exit_function _onexit(exit_function function) { return _crt_atexit(function) ? NULL : function; }
+CRT exit_function _onexit(exit_function function) { return _crt_atexit((void (__cdecl *)(void))function) ? NULL : function; }
 
 /* A library's own table of exit handlers, from *begin to *end, grows by one. */
 CRT exit_function __dllonexit(exit_function function, exit_function **begin, exit_function **end)
