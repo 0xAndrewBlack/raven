@@ -312,6 +312,18 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(call.read(call[0], 1)[0] == 1);
 	});
+	// A SID with its authority and room for the count of parts asked for; the parts themselves are the caller's to fill.
+	registry.add("InitializeSid", 3, [](ApiCall &call) {
+		if (!call[0] || !call[1] || call.u32(2) > 15) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint8_t> header{1, uint8_t(call.u32(2))};
+		const auto authority = call.read(call[1], 6);
+		header.insert(header.end(), authority.begin(), authority.end());
+		call.write(call[0], header);
+		call.ret(1);
+	});
 	registry.add("GetLengthSid", 1, [](ApiCall &call) { call.ret(sid_length(call, call[0])); });
 	registry.add("IsValidSid", 1, [](ApiCall &call) { call.ret(valid_sid(call, call[0])); });
 	registry.add("EqualSid", 2, [](ApiCall &call) {
@@ -756,10 +768,15 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetSecurityDescriptorSacl", 4, [acl_part](ApiCall &call) { acl_part(call, 2, sacl_present, sacl_defaulted); });
 	registry.add("GetSecurityDescriptorDacl", 4, [acl_part](ApiCall &call) { acl_part(call, 3, dacl_present, dacl_defaulted); });
 	registry.add("GetSecurityDescriptorLength", 1, [part](ApiCall &call) {
-		// A self-relative descriptor ends where its last part ends; an absolute one is only its header.
+		// A self-relative descriptor ends where its last part ends; an absolute one counts its header and every part it points to, as
+		// much as the self-relative copy of it needs.
 		const auto control = call.load<uint16_t>(call[0] + 2);
 		if (!(control & 0x8000)) {
-			call.ret(layout_of(call).size);
+			uint64_t total = layout_of(call).size;
+			for (size_t index = 0; index < 4; ++index)
+				if (const auto at = part(call, call[0], index))
+					total += index < 2 ? 8 + 4 * uint64_t(call.read(at + 1, 1)[0]) : call.load<uint16_t>(at + 2);
+			call.ret(total);
 			return;
 		}
 		uint64_t end = 20;
@@ -1020,6 +1037,49 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.write(memory, acl);
 		call.store_pointer(call[3], memory);
 		call.ret(0);
+	});
+	// AddAce: ready-made entries go into the list at a position, or at its end for MAXDWORD, and the entries after them move up.
+	registry.add("AddAce", 5, [](ApiCall &call) {
+		if (!call[0] || !call[3]) {
+			call.fail(87);
+			return;
+		}
+		const auto header = call.read(call[0], acl_header);
+		uint16_t size, count;
+		std::memcpy(&size, header.data() + 2, 2);
+		std::memcpy(&count, header.data() + 4, 2);
+		std::vector<uint32_t> offsets;
+		uint32_t used = acl_header;
+		for (uint16_t index = 0; index < count; ++index) {
+			offsets.push_back(used);
+			uint16_t entry_size;
+			std::memcpy(&entry_size, call.read(call[0] + used + 2, 2).data(), 2);
+			used += entry_size;
+		}
+		const auto added = call.read(call[3], call.u32(4));
+		uint16_t added_count = 0;
+		for (size_t at = 0; at + 4 <= added.size();) {
+			uint16_t entry_size;
+			std::memcpy(&entry_size, added.data() + at + 2, 2);
+			if (entry_size < 4 || at + entry_size > added.size()) {
+				call.fail(87);
+				return;
+			}
+			at += entry_size;
+			++added_count;
+		}
+		if (used + added.size() > size) {
+			call.fail(1344);
+			return;
+		}
+		const uint32_t index = call.u32(2);
+		const uint32_t at = index >= count ? used : offsets[index];
+		auto moved = call.read(call[0] + at, used - at);
+		std::vector<uint8_t> tail(added.begin(), added.end());
+		tail.insert(tail.end(), moved.begin(), moved.end());
+		call.write(call[0] + at, tail);
+		call.store<uint16_t>(call[0] + 4, uint16_t(count + added_count));
+		call.ret(1);
 	});
 	registry.add("AddAccessAllowedAce", 4, [add_ace](ApiCall &call) { add_ace(call, 0); });
 	registry.add("AddAccessDeniedAce", 4, [add_ace](ApiCall &call) { add_ace(call, 1); });
