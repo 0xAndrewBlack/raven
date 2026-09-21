@@ -760,8 +760,8 @@ void NativeProcess::unmap_memory(uint64_t address)
 	const uint64_t end = address + owned->second;
 	memory_syscall(SYS_munmap, address, owned->second);
 	state->mappings.erase(state->mappings.lower_bound(address), state->mappings.lower_bound(end));
-	std::erase_if(state->api_traps, [&](const auto &trap) { return trap.first >= address && trap.first < end; });
-	std::erase_if(state->returning_traps, [&](const uint64_t trap) { return trap >= address && trap < end; });
+	state->api_traps.erase(state->api_traps.lower_bound(address), state->api_traps.lower_bound(end));
+	state->returning_traps.erase(state->returning_traps.lower_bound(address), state->returning_traps.lower_bound(end));
 	state->allocations.erase(owned);
 }
 
@@ -864,8 +864,8 @@ void NativeProcess::unmap_image(uint64_t address)
 	const uint64_t end = address + owned->second;
 	memory_syscall(SYS_munmap, address, owned->second);
 	state->mappings.erase(state->mappings.lower_bound(address), state->mappings.lower_bound(end));
-	std::erase_if(state->api_traps, [&](const auto &trap) { return trap.first >= address && trap.first < end; });
-	std::erase_if(state->returning_traps, [&](const uint64_t trap) { return trap >= address && trap < end; });
+	state->api_traps.erase(state->api_traps.lower_bound(address), state->api_traps.lower_bound(end));
+	state->returning_traps.erase(state->returning_traps.lower_bound(address), state->returning_traps.lower_bound(end));
 	state->image_allocations.erase(owned);
 }
 
