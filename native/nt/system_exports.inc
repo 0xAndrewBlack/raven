@@ -2576,30 +2576,6 @@ static constexpr std::string_view oleacc_exports[]{
 	"GetProcessHandleFromHwnd","GetRoleTextA","GetRoleTextW","GetStateTextA","GetStateTextW","LresultFromObject",
 	"ObjectFromLresult","PropMgrClient_LookupProp","WindowFromAccessibleObject",
 };
-static constexpr std::string_view urlmon_exports[]{
-	"AsyncGetClassBits","AsyncInstallDistributionUnit","BindAsyncMoniker","CAuthenticateHostUI_CreateInstance","CDLGetLongPathNameA","CDLGetLongPathNameW",
-	"CORPolicyProvider","CoGetClassObjectFromURL","CoInstall","CoInternetCanonicalizeIUri","CoInternetCombineIUri","CoInternetCombineUrl",
-	"CoInternetCombineUrlEx","CoInternetCompareUrl","CoInternetCreateSecurityManager","CoInternetCreateZoneManager","CoInternetFeatureSettingsChanged","CoInternetGetMobileBrowserAppCompatMode",
-	"CoInternetGetMobileBrowserForceDesktopMode","CoInternetGetProtocolFlags","CoInternetGetSecurityUrl","CoInternetGetSecurityUrlEx","CoInternetGetSession","CoInternetIsFeatureEnabled",
-	"CoInternetIsFeatureEnabledForIUri","CoInternetIsFeatureEnabledForUrl","CoInternetIsFeatureZoneElevationEnabled","CoInternetParseIUri","CoInternetParseUrl","CoInternetQueryInfo",
-	"CoInternetSetFeatureEnabled","CoInternetSetMobileBrowserAppCompatMode","CoInternetSetMobileBrowserForceDesktopMode","CompareSecurityIds","CompatFlagsFromClsid","CopyBindInfo",
-	"CopyStgMedium","CreateAsyncBindCtx","CreateAsyncBindCtxEx","CreateFormatEnumerator","CreateIUriBuilder","CreateURLMoniker",
-	"CreateURLMonikerEx","CreateURLMonikerEx2","CreateUri","CreateUriFromMultiByteString","CreateUriPriv","CreateUriWithFragment",
-	"DllCanUnloadNow","DllGetClassObject","DllInstall","DllRegisterServer","DllRegisterServerEx","DllUnregisterServer",
-	"Extract","FaultInIEFeature","FileBearsMarkOfTheWeb","FindMediaType","FindMediaTypeClass","FindMimeFromData",
-	"GetAddSitesFileUrl","GetClassFileOrMime","GetClassURL","GetComponentIDFromCLSSPEC","GetIDNFlagsForUri","GetIUriPriv",
-	"GetIUriPriv2","GetLabelsFromNamedHost","GetMarkOfTheWeb","GetPortFromUrlScheme","GetPropertyFromName","GetPropertyName",
-	"GetSoftwareUpdateInfo","GetUrlmonThreadNotificationHwnd","GetZoneFromAlternateDataStreamEx","HlinkGoBack","HlinkGoForward","HlinkNavigateMoniker",
-	"HlinkNavigateString","HlinkSimpleNavigateToMoniker","HlinkSimpleNavigateToString","IECompatLogCSSFix","IEGetUserPrivateNamespaceName","IEInstallScope",
-	"InstallFlash","IntlPercentEncodeNormalize","IsAsyncMoniker","IsDWORDProperty","IsIntranetAvailable","IsJITInProgress",
-	"IsLoggingEnabledA","IsLoggingEnabledW","IsStringProperty","IsValidURL","MkParseDisplayNameEx","ObtainUserAgentString",
-	"PrivateCoInstall","QueryAssociations","QueryClsidAssociation","RegisterBindStatusCallback","RegisterFormatEnumerator","RegisterMediaTypeClass",
-	"RegisterMediaTypes","RegisterWebPlatformPermanentSecurityManager","ReleaseBindInfo","RestrictHTTP2","RevokeBindStatusCallback","RevokeFormatEnumerator",
-	"SetAccessForIEAppContainer","SetSoftwareUpdateAdvertisementState","ShouldDisplayPunycodeForUri","ShouldShowIntranetWarningSecband","ShowTrustAlertDialog","URLDownloadA",
-	"URLDownloadToCacheFileA","URLDownloadToCacheFileW","URLDownloadToFileA","URLDownloadToFileW","URLDownloadW","URLOpenBlockingStreamA",
-	"URLOpenBlockingStreamW","URLOpenPullStreamA","URLOpenPullStreamW","URLOpenStreamA","URLOpenStreamW","UnregisterWebPlatformPermanentSecurityManager",
-	"UrlMkBuildVersion","UrlMkGetSessionOption","UrlMkSetSessionOption","UrlmonCleanupCurrentThread","WriteHitLogging","ZonesReInit",
-};
 static constexpr std::string_view odbccp32_exports[]{
 	"ODBCCPlApplet","SQLConfigDataSource","SQLConfigDataSourceW","SQLConfigDriver","SQLConfigDriverW","SQLCreateDataSource",
 	"SQLCreateDataSourceEx","SQLCreateDataSourceExW","SQLCreateDataSourceW","SQLGetAvailableDrivers","SQLGetAvailableDriversW","SQLGetConfigMode",
@@ -2666,6 +2642,5 @@ static constexpr std::pair<std::string_view, std::span<const std::string_view>> 
 	{"wtsapi32.dll", wtsapi32_exports},
 	{"atlthunk.dll", atlthunk_exports},
 	{"oleacc.dll", oleacc_exports},
-	{"urlmon.dll", urlmon_exports},
 	{"odbccp32.dll", odbccp32_exports},
 };

@@ -2475,29 +2475,6 @@ static constexpr std::pair<std::string_view, uint8_t> oleacc_words[]{
 	{"GetProcessHandleFromHwnd",1},{"GetRoleTextA",3},{"GetRoleTextW",3},{"GetStateTextA",3},{"GetStateTextW",3},{"LresultFromObject",3},
 	{"ObjectFromLresult",4},{"PropMgrClient_LookupProp",7},{"WindowFromAccessibleObject",2},
 };
-static constexpr std::pair<std::string_view, uint8_t> urlmon_words[]{
-	{"AsyncGetClassBits",11},{"AsyncInstallDistributionUnit",9},{"BindAsyncMoniker",5},{"CAuthenticateHostUI_CreateInstance",3},{"CDLGetLongPathNameA",3},{"CDLGetLongPathNameW",3},
-	{"CORPolicyProvider",1},{"CoGetClassObjectFromURL",10},{"CoInstall",5},{"CoInternetCanonicalizeIUri",3},{"CoInternetCombineIUri",5},{"CoInternetCombineUrl",7},
-	{"CoInternetCombineUrlEx",5},{"CoInternetCompareUrl",3},{"CoInternetCreateSecurityManager",3},{"CoInternetCreateZoneManager",3},{"CoInternetGetMobileBrowserAppCompatMode",1},{"CoInternetGetMobileBrowserForceDesktopMode",1},
-	{"CoInternetGetProtocolFlags",3},{"CoInternetGetSecurityUrl",4},{"CoInternetGetSecurityUrlEx",4},{"CoInternetGetSession",3},{"CoInternetIsFeatureEnabled",2},{"CoInternetIsFeatureEnabledForIUri",4},
-	{"CoInternetIsFeatureEnabledForUrl",4},{"CoInternetIsFeatureZoneElevationEnabled",4},{"CoInternetParseIUri",7},{"CoInternetParseUrl",7},{"CoInternetQueryInfo",7},{"CoInternetSetFeatureEnabled",3},
-	{"CoInternetSetMobileBrowserAppCompatMode",1},{"CoInternetSetMobileBrowserForceDesktopMode",1},{"CompareSecurityIds",5},{"CompatFlagsFromClsid",3},{"CopyBindInfo",2},{"CopyStgMedium",2},
-	{"CreateAsyncBindCtx",4},{"CreateAsyncBindCtxEx",6},{"CreateFormatEnumerator",3},{"CreateIUriBuilder",4},{"CreateURLMoniker",3},{"CreateURLMonikerEx",4},
-	{"CreateURLMonikerEx2",4},{"CreateUri",4},{"CreateUriFromMultiByteString",6},{"CreateUriPriv",8},{"CreateUriWithFragment",5},{"Extract",2},
-	{"FaultInIEFeature",4},{"FileBearsMarkOfTheWeb",2},{"FindMediaType",2},{"FindMediaTypeClass",4},{"FindMimeFromData",8},{"GetAddSitesFileUrl",1},
-	{"GetClassFileOrMime",7},{"GetClassURL",2},{"GetComponentIDFromCLSSPEC",2},{"GetIDNFlagsForUri",1},{"GetIUriPriv",2},{"GetIUriPriv2",2},
-	{"GetLabelsFromNamedHost",5},{"GetMarkOfTheWeb",4},{"GetPortFromUrlScheme",2},{"GetPropertyFromName",2},{"GetPropertyName",1},{"GetSoftwareUpdateInfo",2},
-	{"GetUrlmonThreadNotificationHwnd",0},{"GetZoneFromAlternateDataStreamEx",2},{"HlinkGoBack",1},{"HlinkGoForward",1},{"HlinkNavigateMoniker",2},{"HlinkNavigateString",2},
-	{"HlinkSimpleNavigateToMoniker",8},{"HlinkSimpleNavigateToString",8},{"IECompatLogCSSFix",3},{"IEDllLoader",2},{"IEGetUserPrivateNamespaceName",0},{"IEInstallScope",1},
-	{"IntlPercentEncodeNormalize",4},{"IsAsyncMoniker",1},{"IsDWORDProperty",1},{"IsLoggingEnabledA",1},{"IsLoggingEnabledW",1},{"IsStringProperty",1},
-	{"IsValidURL",3},{"MkParseDisplayNameEx",4},{"ObtainUserAgentString",3},{"PrivateCoInstall",5},{"QueryAssociations",4},{"QueryClsidAssociation",3},
-	{"RegisterBindStatusCallback",4},{"RegisterFormatEnumerator",3},{"RegisterMediaTypeClass",5},{"RegisterMediaTypes",3},{"RegisterWebPlatformPermanentSecurityManager",1},{"ReleaseBindInfo",1},
-	{"ResetUrlmonLanguageData",0},{"RestrictHTTP2",1},{"RevokeBindStatusCallback",2},{"RevokeFormatEnumerator",2},{"SetAccessForIEAppContainer",3},{"SetSoftwareUpdateAdvertisementState",4},
-	{"ShouldDisplayPunycodeForUri",1},{"ShouldShowIntranetWarningSecband",1},{"ShowTrustAlertDialog",4},{"URLDownloadA",5},{"URLDownloadToCacheFileA",6},{"URLDownloadToCacheFileW",6},
-	{"URLDownloadToFileA",5},{"URLDownloadToFileW",5},{"URLDownloadW",5},{"URLOpenBlockingStreamA",5},{"URLOpenBlockingStreamW",5},{"URLOpenPullStreamA",4},
-	{"URLOpenPullStreamW",4},{"URLOpenStreamA",4},{"URLOpenStreamW",4},{"UnregisterWebPlatformPermanentSecurityManager",0},{"UrlMkGetSessionOption",5},{"UrlMkSetSessionOption",4},
-	{"UrlmonCleanupCurrentThread",0},{"WriteHitLogging",1},{"ZonesReInit",1},
-};
 static constexpr std::pair<std::string_view, uint8_t> odbccp32_words[]{
 	{"ODBC___GetSetupProc",1},{"SQLConfigDataSource",4},{"SQLConfigDataSourceW",4},{"SQLConfigDriver",7},{"SQLConfigDriverW",7},{"SQLCreateDataSource",2},
 	{"SQLCreateDataSourceW",2},{"SQLGetAvailableDrivers",4},{"SQLGetAvailableDriversW",4},{"SQLGetConfigMode",1},{"SQLGetInstalledDrivers",3},{"SQLGetInstalledDriversW",3},
@@ -2563,6 +2540,5 @@ static constexpr std::pair<std::string_view, std::span<const std::pair<std::stri
 	{"wtsapi32.dll", wtsapi32_words},
 	{"atlthunk.dll", atlthunk_words},
 	{"oleacc.dll", oleacc_words},
-	{"urlmon.dll", urlmon_words},
 	{"odbccp32.dll", odbccp32_words},
 };

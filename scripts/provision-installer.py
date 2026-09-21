@@ -19,16 +19,19 @@ PREFIXES = ("sdk/include/", "sdk/lib/pseh/", "sdk/tools/hpp/", "sdk/tools/spec2d
             "dll/win32/cabinet/", "dll/win32/msi/", "dll/win32/sxs/", "dll/win32/ole32/", "dll/win32/coml2/",
             "base/system/msiexec/", "dll/win32/rpcrt4/", "sdk/lib/3rdparty/libxml2/", "sdk/lib/3rdparty/libwin-iconv/", "dll/3rdparty/libxslt/",
             "dll/win32/msxml3/", "dll/win32/stdole2.tlb/", "base/system/regsvr32/",
-            "dll/win32/atl/", "dll/win32/atl100/", "dll/win32/oleaut32/")
+            "dll/win32/atl/", "dll/win32/atl100/", "dll/win32/oleaut32/", "dll/3rdparty/libpng/", "dll/3rdparty/libjpeg/", "dll/3rdparty/libtiff/",
+            "dll/win32/propsys/", "dll/win32/mlang/", "dll/win32/windowscodecs/", "dll/win32/gdiplus/", "sdk/lib/getopt/", "dll/win32/urlmon/", "dll/win32/combase/")
 # Interface headers the installer sources include, generated from the public IDL files with what they import.
 IDLS = ("objidlbase", "commoncontrols", "fusion", "msxml2", "oaidl", "ocidl", "objidl", "unknwn", "wtypes", "propidl", "urlmon", "shobjidl", "servprov", "docobj", "oleidl",
         "exdisp", "activscp", "shldisp", "mshtml", "xmldom", "imnact", "msctf", "shtypes", "oleacc", "comcat", "mscoree", "wincodec", "dispex",
-        "atliface", "winsxs", "msxml6", "msxml", "xmldso", "objsafe", "mshtmhst", "mshtmdid", "httprequest", "xmlparser", "asptlb", "perhist", "hlink", "mimeinfo")
+        "atliface", "winsxs", "msxml6", "msxml", "xmldso", "objsafe", "mshtmhst", "mshtmdid", "httprequest", "xmlparser", "asptlb", "perhist", "hlink", "mimeinfo", "mlang", "wincodec", "wincodecsdk", "propsys", "structuredquery", "dxgiformat", "dxgicommon", "dxgitype")
 ZLIB = ("adler32.c", "crc32.c", "deflate.c", "inflate.c", "inffast.c", "inftrees.c", "trees.c", "zutil.c")
-# The structured storage of ole32 and its base layer, coml2: compound files, their streams and property sets.
-STORAGE = ("ole32/storage32.c", "ole32/stg_prop.c", "ole32/stg_stream.c", "ole32/filelockbytes.c", "ole32/dictionary.c",
+# The structured storage of ole32 and its base layer, coml2: compound files, their streams and property sets; and the bind contexts monikers
+# are bound with and the streams over global memory.
+STORAGE = ("ole32/bindctx.c", "combase/hglobalstream.c", "ole32/storage32.c", "ole32/stg_prop.c", "ole32/stg_stream.c", "ole32/filelockbytes.c", "ole32/dictionary.c",
            "coml2/memlockbytes.c", "coml2/stg_prop.c", "coml2/storage32.c")
-COMPONENTS = ("cabinet.dll", "sxs.dll", "rpcrt4.dll", "msi.dll", "raven-storage.dll", "msiexec.exe", "libxslt.dll", "msxml3.dll", "regsvr32.exe", "atl100.dll", "oleaut32.dll")
+COMPONENTS = ("cabinet.dll", "sxs.dll", "rpcrt4.dll", "msi.dll", "raven-storage.dll", "msiexec.exe", "libxslt.dll", "msxml3.dll", "regsvr32.exe", "atl100.dll", "oleaut32.dll", "libpng.dll", "libjpeg.dll",
+              "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll")
 
 
 def main():
@@ -117,12 +120,18 @@ def main():
         if name in idls or not path.exists():
             return
         idls.add(name)
-        for dependency in re.findall(r'import\s+"([^"]+)\.idl"', path.read_text()):
+        for dependency in re.findall(r'import\s+"([^"]+)\.idl"', path.read_text(errors="replace")):
             idl(dependency)
         run([*widl, "-h", "-H", generated / "psdk" / (name + ".h"), path])
 
     for name in IDLS:
         idl(name)
+    # Every other public interface header too, as the components include many of them; one widl cannot read is left out.
+    for path in sorted((source / "sdk/include/psdk").glob("*.idl")):
+        try:
+            idl(path.stem)
+        except RuntimeError:
+            pass
     # The version headers are configure-time templates upstream; the component pins their values.
     version = (source / "sdk/include/reactos/version.h.cmake").read_text()
     for key, value in (("KERNEL_VERSION_MAJOR", "0"), ("KERNEL_VERSION_MINOR", "4"), ("KERNEL_VERSION_PATCH_LEVEL", "17"), ("COPYRIGHT_YEAR", "2026")):
@@ -244,6 +253,7 @@ def main():
          "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(msi_root), "-i", msi_root / "msi.rc", "-o", objects / "msi.res.o"])
     msi.append(objects / "msi.res.o")
     msi.append(objects / "installer_support.o")
+    msi.append(compile(source / "sdk/lib/3rdparty/libwine/dll_register.c", "msi_dll_register", ["-I" + str(msi_root)]))
     link("msi.dll", bases["msi"], [*msi, *debug], output / "msi.def",
          ["-L" + str(output), "-lsxs", "-lcabinet", "-lrpcrt4", *[f"-l{library}" for library in ("advapi32", "comctl32", "gdi32", "ole32", "oleaut32", "shell32",
           "shlwapi", "urlmon", "user32", "version", "wininet", "imagehlp", "msvcrt", "kernel32", "ntdll", "odbccp32", "crypt32",
@@ -281,7 +291,8 @@ def main():
                  "-I" + str(xml_root / "include"), "-I" + str(xml_root), "-I" + str(iconv_root), "-I" + str(zlib_include)]
     # The C runtime's mathematics, which mingw's msvcrt import library would bring in as static code of its own.
     (output / "crtmath.def").write_text("LIBRARY msvcrt.dll\nEXPORTS\n" + "".join(" " + name + "\n" for name in
-                                        ("floor", "ceil", "fabs", "fmod", "log", "log10", "exp", "pow")))
+                                        ("floor", "ceil", "fabs", "fmod", "log", "log10", "exp", "pow", "sqrt", "atan", "atan2", "tan",
+                                         "floorf", "ceilf", "_hypot")))
     run([triple + "-dlltool", "-d", output / "crtmath.def", "-l", output / "libcrtmath.a"])
     xml = [compile(iconv_root / "win_iconv.c", "iconv_win_iconv", xml_flags, wine_module=False)]
     xml_sources = sorted(path for path in xml_root.glob("*.c"))
@@ -350,9 +361,92 @@ def main():
     run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__", "-D__WINESRC__",
          "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(oleaut_root), "-I" + str(generated), "-i", oleaut_root / "oleaut32.rc", "-o", objects / "oleaut32.res.o"])
     oleaut.append(objects / "oleaut32.res.o")
+    # The imaging component is loaded when a picture first needs it, as the ReactOS build delay-loads it: programs that never decode a
+    # picture do not load it and the libraries behind it.
+    oleaut.append(compile(support / "codecs.c", "oleaut32_codecs"))
     link("oleaut32.dll", bases["oleaut"], [*oleaut, objects / "installer_support.o", *debug], output / "oleaut32.def",
          ["-L" + str(output), "-lrpcrt4", "-lcrtmath", *[f"-l{library}" for library in ("ole32", "user32", "gdi32", "advapi32", "comctl32", "urlmon",
           "msvcrt", "kernel32", "ntdll", "uuid", "gcc", "kernel32", "msvcrt")]])
+    # The libraries below follow one pattern: the sources their ReactOS build lists, compiled with its definitions, a definition file from
+    # their specification and the libraries they import. Their base addresses count down from below the ones above.
+    next_base = [0x1c4000000 if not x86 else 0x1c400000]
+
+    def listed_sources(root):
+        text = (root / "CMakeLists.txt").read_text()
+        names = []
+        for block in re.findall(r"list\(APPEND SOURCE(.*?)\)", text, re.S)[:1]:
+            names += [token for token in block.split() if token.endswith(".c") and not token.startswith(("#", "$"))]
+        return [root / name for name in names]
+
+    def library(name, root, extra_flags=(), libraries=(), wine_module=True, sources=None, objects_more=(), helpers=(), rc=None, interfaces=()):
+        stem = Path(name).stem
+        spec = next(root.glob("*.spec"))
+        run([output / "spec2def", spec_arch, "-n=" + name, "-d=" + str(output / (stem + ".def")), "-s=" + str(generated / (stem + "_stubs.c")), spec])
+        flags_here = [*extra_flags, "-I" + str(root)]
+        parts = sources if sources is not None else listed_sources(root)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            built = list(pool.map(lambda path: compile(path, stem + "_" + path.stem.replace(".", "_"), flags_here, wine_module), parts))
+        built.append(compile(generated / (stem + "_stubs.c"), stem + "_stubs", flags_here, wine_module))
+        # The identifiers of the public interfaces it names, which mingw-w64's uuid library does not all have.
+        for interface in interfaces:
+            run([*widl, "-u", "-U", generated / (interface + "_i.c"), source / "sdk/include/psdk" / (interface + ".idl")])
+            built.append(compile(generated / (interface + "_i.c"), stem + "_" + interface + "_i", flags_here, wine_module))
+        for helper in helpers:
+            built.append(compile(source / "sdk/lib/3rdparty/libwine" / helper, stem + "_" + Path(helper).stem, flags_here))
+        if rc:
+            run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__", "-D__WINESRC__",
+                 "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(root), "-I" + str(generated), "-i", root / rc, "-o", objects / (stem + ".res.o")])
+            built.append(objects / (stem + ".res.o"))
+        next_base[0] -= 0x400000 if x86 else 0x4000000
+        link(name, next_base[0], [*built, *objects_more, objects / "installer_support.o", *debug], output / (stem + ".def"),
+             ["-L" + str(output), "-lcrtmath", *[f"-l{library}" for library in (*libraries, "msvcrt", "kernel32", "ntdll", "uuid", "gcc", "kernel32", "msvcrt")]],
+             output / ("lib" + stem + ".a"))
+
+    plain = ["-U__WINESRC__", "-U_WINE", "-D_CRT_DECLARE_NONSTDC_NAMES=1", "-D_DLL", "-DWIN32", "-D_WINDOWS"]
+    entry_object = compile(support / "dllmain.c", "plain_dllmain")
+    libs = source / "sdk/include/reactos/libs"
+    library("libpng.dll", source / "dll/3rdparty/libpng", [*plain, "-DNDEBUG=", "-DPNG_BUILD_DLL", "-I" + str(libs / "libpng"), "-I" + str(zlib_include)],
+            wine_module=False, objects_more=[*zlib, entry_object])
+    library("libjpeg.dll", source / "dll/3rdparty/libjpeg", [*plain, "-D_MBCS", "-DJPEG_DLL", "-Dmain=mainptr", "-I" + str(libs / "libjpeg")], wine_module=False,
+            objects_more=[entry_object])
+    library("libtiff.dll", source / "dll/3rdparty/libtiff", [*plain, "-DNDEBUG=", "-DUSE_WIN32_FILEIO", "-DTIF_PLATFORM_CONSOLE", "-I" + str(libs / "libtiff"),
+            "-I" + str(libs / "libjpeg"), "-I" + str(zlib_include)], ["libjpeg", "user32"], wine_module=False, objects_more=[*zlib, entry_object])
+    registration = ("register.c", "dll_register.c", "dll_canunload.c")
+    library("propsys.dll", source / "dll/win32/propsys", ["-D_PROPSYS_"], ["ole32", "oleaut32"], helpers=registration[:2], rc="propsys.rc")
+    library("mlang.dll", source / "dll/win32/mlang", ["-DCOM_NO_WINDOWS_H", "-D_CRT_NON_CONFORMING_SWPRINTFS"], ["gdi32", "advapi32", "oleaut32"],
+            helpers=registration[:2], rc="mlang.rc", interfaces=("mlang",))
+    # windowscodecs.dll: the imaging component; its interfaces' proxies register through a script widl writes from the IDL.
+    codecs_root = source / "dll/win32/windowscodecs"
+    codecs_widl = [*widl, "-I", codecs_root]
+    run([*codecs_widl, "-h", "-H", generated / "windowscodecs_wincodec.h", codecs_root / "windowscodecs_wincodec.idl"])
+    run([*codecs_widl, "-p", "-P", generated / "windowscodecs_wincodec_p.c", codecs_root / "windowscodecs_wincodec.idl"])
+    run([*codecs_widl, "-r", "-o", generated / "windowscodecs_wincodec_r.rgs", codecs_root / "windowscodecs_wincodec.idl"])
+    run([*widl, "--dlldata-only", "--dlldata=" + str(generated / "windowscodecs_dlldata.c"), "windowscodecs_wincodec"])
+    (generated / "windowscodecs_r.rc").write_text("1 WINE_REGISTRY windowscodecs_wincodec_r.rgs\n")
+    run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-D__REACTOS__", "-D__WINESRC__", "-D_M_IX86" if x86 else "-D_M_AMD64",
+         "-I" + str(generated), "-i", generated / "windowscodecs_r.rc", "-o", objects / "windowscodecs_r.res.o"])
+    codecs_flags = ["-DENTRY_PREFIX=WIC_", "-DPROXY_DELEGATION", "-DWINE_REGISTER_DLL", "-I" + str(libs / "libpng"), "-I" + str(libs / "libjpeg"),
+                    "-I" + str(libs / "libtiff"), "-I" + str(zlib_include)]
+    library("windowscodecs.dll", codecs_root, codecs_flags, ["libjpeg", "libpng", "libtiff", "ole32", "oleaut32", "rpcrt4", "shlwapi", "user32", "gdi32",
+            "advapi32", "propsys"], sources=[*listed_sources(codecs_root), codecs_root / "bitmap.c", codecs_root / "guid.c",
+            generated / "windowscodecs_wincodec_p.c", generated / "windowscodecs_dlldata.c"], objects_more=[objects / "windowscodecs_r.res.o"],
+            helpers=("register.c",), rc="version.rc")
+    gdiplus_root = source / "dll/win32/gdiplus"
+    library("gdiplus.dll", gdiplus_root, ["-D_USE_MATH_DEFINES", "-U_WIN32_WINNT", "-D_WIN32_WINNT=0x601", "-UWINVER", "-DWINVER=0x601"], ["mlang", "shlwapi", "oleaut32", "ole32", "user32", "gdi32", "windowscodecs"],
+            sources=[*listed_sources(gdiplus_root), gdiplus_root / "guid.c"], rc="gdiplus.rc")
+    # urlmon.dll: URLs and monikers, the protocols behind them and the interfaces' proxies, registered like the imaging component's.
+    urlmon_root = source / "dll/win32/urlmon"
+    urlmon_widl = [*widl, "-I", urlmon_root]
+    run([*urlmon_widl, "-h", "-H", generated / "urlmon_urlmon.h", urlmon_root / "urlmon_urlmon.idl"])
+    run([*urlmon_widl, "-p", "-P", generated / "urlmon_urlmon_p.c", urlmon_root / "urlmon_urlmon.idl"])
+    run([*urlmon_widl, "-r", "-o", generated / "urlmon_urlmon_r.rgs", urlmon_root / "urlmon_urlmon.idl"])
+    run([*widl, "--dlldata-only", "--dlldata=" + str(generated / "urlmon_dlldata.c"), "urlmon_urlmon"])
+    # The setup information its resources carry, in the UTF-16 the ReactOS build converts it to.
+    (generated / "urlmon_utf16.inf").write_bytes("\ufeff".encode("utf-16-le") + (urlmon_root / "urlmon.inf").read_text().encode("utf-16-le"))
+    library("urlmon.dll", urlmon_root, ["-D_URLMON_", "-DENTRY_PREFIX=URLMON_", "-DPROXY_DELEGATION", "-DWINE_REGISTER_DLL", "-include",
+            str(urlmon_root / "clsid.h")], ["rpcrt4", "propsys", "ole32", "oleaut32", "shlwapi", "shell32", "wininet", "user32", "advapi32"],
+            sources=[*listed_sources(urlmon_root), generated / "urlmon_urlmon_p.c", generated / "urlmon_dlldata.c"], helpers=("register.c",), rc="urlmon.rc",
+            objects_more=[compile(support / "setup.c", "urlmon_setup")])
     # regsvr32.exe: registers the classes a library serves, as installers and the runtime's own prefix setup run it.
     regsvr32_root = source / "base/system/regsvr32"
     regsvr32 = [compile(regsvr32_root / "regsvr32.c", "regsvr32_regsvr32", ["-DUNICODE", "-D_UNICODE", "-I" + str(regsvr32_root)], wine_module=False),

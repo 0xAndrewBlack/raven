@@ -43,14 +43,6 @@ const GUID IID_IActiveScriptParse64 = {0xc7ef7658, 0xe1ee, 0x480e, {0x97, 0xea, 
 const GUID IID_IActiveScriptParse32 = {0xbb1a2ae2, 0xa4f9, 0x11cf, {0x8f, 0x20, 0x00, 0x80, 0x5f, 0x2c, 0xd0, 0x64}};
 #endif
 
-/* No Windows Imaging Component: pictures in the formats it decodes are refused rather than converted. */
-HRESULT WINAPI WICConvertBitmapSource(const GUID *format, void *source, void **converted)
-{
-	if (converted)
-		*converted = NULL;
-	return 0x88982f81; /* WINCODEC_ERR_UNSUPPORTEDOPERATION */
-}
-
 int __cdecl wine_dbg_printf(const char *format, ...)
 {
 	return 0;

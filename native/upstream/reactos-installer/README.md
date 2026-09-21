@@ -8,19 +8,32 @@ programs and, with `--arch x86`, for 32-bit ones:
 
 - `msi.dll` (`dll/win32/msi`): the installer engine, its SQL and condition grammars
   (bison) and the RPC stubs of its custom action server (widl);
+- `msiexec.exe` (`base/system/msiexec`) and `regsvr32.exe` (`base/system/regsvr32`),
+  which each prefix also keeps in its system directories;
 - `cabinet.dll` (`dll/win32/cabinet`, on `sdk/lib/3rdparty/zlib`);
 - `sxs.dll` (`dll/win32/sxs`): the side-by-side assembly cache;
+- `rpcrt4.dll` (`dll/win32/rpcrt4`): remote procedure calls over local named pipes;
 - `raven-storage.dll`: the structured storage of `dll/win32/ole32` and
-  `dll/win32/coml2`, the compound files packages are made of. The runtime's ole32
-  hands those exports to it.
+  `dll/win32/coml2`, the compound files packages are made of, with the bind contexts of
+  ole32 and the global memory streams of `dll/win32/combase`. The runtime's ole32 hands
+  those exports to it;
+- `oleaut32.dll` (`dll/win32/oleaut32`): automation, variants and type libraries;
+- `msxml3.dll` (`dll/win32/msxml3`, on `sdk/lib/3rdparty/libxml2` and
+  `dll/3rdparty/libxslt`) and `atl100.dll` (`dll/win32/atl100`);
+- `urlmon.dll` (`dll/win32/urlmon`): URLs, monikers and the protocols behind them;
+- the imaging stack: `windowscodecs.dll`, `gdiplus.dll`, `propsys.dll`, `mlang.dll`
+  and `libpng.dll`, `libjpeg.dll`, `libtiff.dll` (`dll/3rdparty`).
 
-The runtime takes `msi.dll`, `cabinet.dll` and `sxs.dll` from beside itself whatever
-copies a program ships or an installer leaves in the system directory.
+The runtime takes these libraries from beside itself whatever copies a program ships or
+an installer leaves in the system directory. Each new prefix registers the classes of
+`msxml3.dll`, `windowscodecs.dll`, `mlang.dll` and `propsys.dll` through `regsvr32`.
 
 Raven's corrections to upstream behavior live in `patches/` and are applied before the
-build. `support.c` and `storage.c` are Raven code: they answer the compatibility
-database, binary file patches and the class key helper the sources expect from
-libraries Raven does not ship. Binary patches of installed files are not applied yet.
+build. `support.c`, `storage.c`, `codecs.c`, `setup.c`, `dllmain.c`, `entry.c` and
+`entry_wide.c` are Raven code: they answer the compatibility database, binary file
+patches, the class key helper and the delay-loaded imports the sources expect from
+libraries Raven does not ship, and give the programs and plain libraries their entry
+points. Binary patches of installed files are not applied yet.
 The build records every command, the hash of each extracted source and of each
 component in `provenance.json`.
 
