@@ -840,14 +840,21 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				// Window classes and texts are what a diagnosis of a window needs most.
 				{
 					static const std::map<std::string_view, std::vector<size_t>> wide_strings{{"SetWindowTextW", {1}}, {"SetDlgItemTextW", {2}},
-						{"CreateWindowExW", {1, 2}}, {"RegisterClassW", {}}, {"MessageBoxW", {1, 2}}, {"LoadStringW", {}}, {"CreateProcessW", {0, 1, 7}}, {"ShellExecuteW", {1, 2, 3}}, {"LoadLibraryW", {0}}, {"CreateFileW", {0}}, {"GetFileAttributesW", {0}}};
+						{"CreateWindowExW", {1, 2}}, {"RegisterClassW", {}}, {"MessageBoxW", {1, 2}}, {"LoadStringW", {}}, {"CreateProcessW", {0, 1, 7}}, {"ShellExecuteW", {1, 2, 3}}, {"LoadLibraryW", {0}}, {"CreateFileW", {0}}, {"GetFileAttributesW", {0}},
+						{"PathIsURLW", {0}}, {"PathSearchAndQualifyW", {0}}, {"UrlApplySchemeW", {0}}, {"GetFullPathNameW", {0}}};
 					if (const auto entry = wide_strings.find(api); entry != wide_strings.end() && !entry->second.empty()) {
 						const auto words = process.api_arguments(found->second.second / 4);
 						for (const auto index : entry->second) {
 							if (index >= words.size() || words[index] <= 0xffff)
 								continue;
 							try {
-								const auto bytes = process.read_memory(words[index], 200);
+								// A whole path when the memory holds one; a string near the end of its page is read shorter.
+								std::vector<uint8_t> bytes;
+								try {
+									bytes = process.read_memory(words[index], 520);
+								} catch (const std::runtime_error &) {
+									bytes = process.read_memory(words[index], 200);
+								}
 								std::cerr << " [" << index << "]=\"";
 								for (size_t at = 0; at + 1 < bytes.size() && (bytes[at] || bytes[at + 1]); at += 2)
 									std::cerr << (bytes[at + 1] == 0 && bytes[at] >= 32 && bytes[at] < 127 ? char(bytes[at]) : '?');
