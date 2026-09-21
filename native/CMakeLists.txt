@@ -1274,6 +1274,27 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -o ${fixture}/redist-check.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/redist_check.c -ladvapi32 -lkernel32
                     DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/redist_check.c VERBATIM)
                 add_custom_target(redist_check_fixture_${installer_arch} ALL DEPENDS ${fixture}/redist-check.exe)
+                # A protected system: an installer writes its own kernel32 and msvcr120 into the system directory; both files are accepted and
+                # their version reads as written, kernel32 stays the system's library and the redistributable loads from the new file.
+                if(installer_arch STREQUAL x86)
+                    set(library_entry _DllMain@12)
+                else()
+                    set(library_entry DllMain)
+                endif()
+                file(MAKE_DIRECTORY ${fixture}/protect)
+                add_custom_command(OUTPUT ${fixture}/protect/protect.exe ${fixture}/protect/fake-library.dll
+                    COMMAND ${resource_compiler} -O coff -i ${PROJECT_SOURCE_DIR}/testdata/native_loader/fake_library.rc -o ${fixture}/protect/fake_library_res.o
+                    COMMAND ${installer_compiler} -O2 -shared -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${library_entry},--no-insert-timestamp
+                        -o ${fixture}/protect/fake-library.dll ${PROJECT_SOURCE_DIR}/testdata/native_loader/fake_library.c ${fixture}/protect/fake_library_res.o
+                        -lkernel32
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/protect/protect.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/protect_client.c -lversion -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/fake_library.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/fake_library.rc
+                        ${PROJECT_SOURCE_DIR}/testdata/native_loader/protect_client.c VERBATIM)
+                add_custom_target(protect_fixture_${installer_arch} ALL DEPENDS ${fixture}/protect/protect.exe)
+                add_test(NAME native_protected_system_${installer_arch} COMMAND sh -c "rm -rf \"$3\" && RAVEN_PREFIX=\"$3\" \"$1\" --run-process --execution=native --timeout-ms=60000 \"$2\" -- --install && RAVEN_PREFIX=\"$3\" \"$1\" --run-process --execution=native --timeout-ms=60000 \"$2\"" protect $<TARGET_FILE:raven> ${fixture}/protect/protect.exe ${fixture}/protect-prefix)
+                set_tests_properties(native_protected_system_${installer_arch} PROPERTIES TIMEOUT 120
+                    PASS_REGULAR_EXPRESSION "Native entry returned 0 .*Native entry returned 0 ")
                 # Programs built against each Visual C++ runtime from 2005 to 2013: the 2005 and 2008 ones name their side-by-side assembly
                 # in the manifest, the later ones find their library in the system directory.
                 if(installer_arch STREQUAL x86)
