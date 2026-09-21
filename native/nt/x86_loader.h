@@ -51,7 +51,7 @@ private:
 	NativeX86Tls *tls = nullptr;
 	std::function<void(PEModule &)> mapped_hook;
 	PEModule *bring(const std::string &name);
-	std::optional<std::vector<uint8_t>> read_library(const std::string &name, std::string &identity) const;
+	std::optional<std::vector<uint8_t>> read_library(const std::string &name, std::string &identity, std::filesystem::path &file) const;
 };
 
 }

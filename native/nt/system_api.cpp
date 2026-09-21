@@ -712,7 +712,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 				return;
 			}
 			text = found->second->runtime_api ? u"C:\\Windows\\System32\\" + widen_ascii(found->first) :
-				paths.library_location(context.launch.image_path, widen_ascii(found->first), context.entry.image.is_64);
+				!found->second->file.empty() ? paths.dos(found->second->file) : paths.library_location(context.launch.image_path, widen_ascii(found->first), context.entry.image.is_64);
 		}
 		const size_t capacity = call.u32(2);
 		if (!capacity) {

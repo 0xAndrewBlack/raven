@@ -46,7 +46,7 @@ NativeX86Loader::NativeX86Loader(NativeProcess &process, NativeEnvironment &envi
 {
 }
 
-std::optional<std::vector<uint8_t>> NativeX86Loader::read_library(const std::string &name, std::string &identity) const
+std::optional<std::vector<uint8_t>> NativeX86Loader::read_library(const std::string &name, std::string &identity, std::filesystem::path &file) const
 {
 	// The runtime's own components come from beside it, in their 32-bit builds.
 	if (std::find(std::begin(runtime_components), std::end(runtime_components), name) != std::end(runtime_components)) {
@@ -78,6 +78,7 @@ std::optional<std::vector<uint8_t>> NativeX86Loader::read_library(const std::str
 	if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
 		return std::nullopt;
 	identity = lowered(resolved->host.filename().string());
+	file = resolved->host;
 	return read_all(resolved->host);
 }
 
@@ -107,7 +108,8 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 			return bring(base);
 	}
 	std::string identity;
-	auto bytes = read_library(name, identity);
+	std::filesystem::path file;
+	auto bytes = read_library(name, identity, file);
 	if (!bytes) {
 		if (trace())
 			std::cerr << "raven: library file not found: " << requested << '\n';
@@ -122,6 +124,7 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 	if (modules.all().contains(identity))
 		identity += "#" + std::to_string(modules.all().size());
 	auto &added = modules.add(identity, std::move(*bytes));
+	added.file = file;
 	staged.push_back(&added);
 	std::string missing;
 	for (const auto &symbol : added.imports) {

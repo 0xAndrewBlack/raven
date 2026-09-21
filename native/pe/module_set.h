@@ -42,6 +42,8 @@ struct PEModule {
 	// The first export that carries each name: imports are resolved by name, thousands of them for a large library.
 	std::unordered_map<std::string, size_t> export_names;
 	bool runtime_api = false;
+	// The host file a library loaded from a folder of the program's came from; empty for the runtime's own and for libraries found by name.
+	std::filesystem::path file;
 };
 
 // Owns module bytes and shared images. Resolves only explicitly supplied modules.

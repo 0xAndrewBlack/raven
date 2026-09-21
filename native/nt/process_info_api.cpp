@@ -495,7 +495,7 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 				// The program's own path for the executable; the libraries beside it, or the system directory for those the runtime supplies.
 				const auto name = from_utf8(module->name);
 				const auto path = module == &context.entry ? context.launch.image_path : module->runtime_api ? u"C:\\Windows\\System32\\" + name :
-					context.paths.library_location(context.launch.image_path, name, context.entry.image.is_64);
+					!module->file.empty() ? context.paths.dos(module->file) : context.paths.library_location(context.launch.image_path, name, context.entry.image.is_64);
 				snapshot->modules.push_back({module->loaded.base(), module->image.image_size, name, path});
 			}
 		const auto made = objects.add_object(snapshot);

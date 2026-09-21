@@ -2224,8 +2224,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				throw LoadFailure{126};
 			}
 			std::optional<ModuleBytes> bytes;
+			std::filesystem::path origin;
 			if (const auto explicit_file = explicit_files.find(identity); explicit_file != explicit_files.end()) {
 				bytes = ModuleBytes::map(explicit_file->second);
+				origin = explicit_file->second;
 			} else if (auto read = source(identity)) {
 				bytes.emplace(std::move(*read));
 			}
@@ -2241,6 +2243,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					if (candidate != identity || !entry.is_regular_file(error))
 						continue;
 					bytes = ModuleBytes::map(entry.path());
+					origin = entry.path();
 					explicit_files.emplace(identity, entry.path());
 					break;
 				}
@@ -2264,6 +2267,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				throw LoadFailure{120};
 			staged.reserve(staged.size() + 1);
 			auto &module = modules.add(identity, std::move(*bytes));
+			module.file = origin;
 			staged.push_back({&module});
 			references.emplace(&module, 0);
 			return module;

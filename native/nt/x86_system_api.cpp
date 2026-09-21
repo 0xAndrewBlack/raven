@@ -22,7 +22,7 @@ constexpr std::array exported{
 	Export{"kernel32.dll", "CreateSemaphoreW", 4}, Export{"kernel32.dll", "ReleaseSemaphore", 3},
 	Export{"kernel32.dll", "WaitForMultipleObjects", 4}, Export{"kernel32.dll", "WaitForSingleObjectEx", 3},
 	Export{"kernel32.dll", "GetCurrentThread", 0}, Export{"kernel32.dll", "GetThreadPriority", 1}, Export{"kernel32.dll", "SuspendThread", 1},
-	Export{"kernel32.dll", "GetThreadContext", 2}, Export{"kernel32.dll", "SetThreadContext", 2}, Export{"kernel32.dll", "OpenProcess", 3},
+	Export{"kernel32.dll", "GetThreadContext", 2}, Export{"kernel32.dll", "SetThreadContext", 2},
 	Export{"kernel32.dll", "DeviceIoControl", 8}, Export{"kernel32.dll", "GetProcessAffinityMask", 3},
 	Export{"kernel32.dll", "SetProcessAffinityMask", 2}, Export{"kernel32.dll", "GetSystemInfo", 1}, Export{"kernel32.dll", "VirtualQuery", 3},
 	Export{"kernel32.dll", "GetTempFileNameA", 4}, Export{"kernel32.dll", "DuplicateHandle", 7},
@@ -299,8 +299,6 @@ bool NativeX86System::dispatch(std::string_view name)
 		}
 	} else if (name == "GetThreadContext" || name == "SetThreadContext") {
 		fail(50);
-	} else if (name == "OpenProcess") {
-		fail(5);
 	} else if (name == "DeviceIoControl") {
 		fail(1);
 	} else if (name == "GetProcessAffinityMask") {
