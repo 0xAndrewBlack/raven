@@ -48,6 +48,8 @@ public:
 	int descriptor = -1;
 	uint64_t size = 0;
 	uint32_t protection = 0;
+	// Made with SEC_IMAGE over a file holding a PE image, whose headers NtQuerySection describes.
+	bool image = false;
 	std::u16string name;
 	std::string backing;
 };

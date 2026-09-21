@@ -310,11 +310,111 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("FlushInstructionCache", 3, [](ApiCall &call) { call.ret(1); });
 	registry.add("NtFlushInstructionCache", 3, [](ApiCall &call) { call.ret(0); });
 	// SectionBasicInformation: the base address, the allocation attributes and the maximum size of the section.
-	registry.add("NtQuerySection", 5, [&](ApiCall &call) {
-		constexpr uint32_t status_invalid_handle = 0xc0000008U, status_invalid_info_class = 0xc0000003U, status_info_length_mismatch = 0xc0000004U, sec_commit = 0x8000000;
+	// The PE headers of an image section's file: the machine, the subsystem and the rest SectionImageInformation reports.
+	const auto image_headers = [](const SectionObject &mapping) -> std::optional<std::vector<uint8_t>> {
+		if (!mapping.file)
+			return std::nullopt;
+		std::vector<uint8_t> head(4096);
+		const ssize_t count = ::pread(mapping.file->descriptor, head.data(), head.size(), 0);
+		if (count < 64 || head[0] != 'M' || head[1] != 'Z')
+			return std::nullopt;
+		head.resize(size_t(count));
+		uint32_t offset;
+		std::memcpy(&offset, head.data() + 60, 4);
+		if (uint64_t(offset) + 24 + 96 > head.size() || std::memcmp(head.data() + offset, "PE\0\0", 4))
+			return std::nullopt;
+		return std::vector<uint8_t>(head.begin() + offset, head.end());
+	};
+	// A section over a file or over memory; SEC_IMAGE (0x1000000) asks for a file holding a PE image.
+	registry.add("NtCreateSection", 7, [&, image_headers](ApiCall &call) {
+		constexpr uint32_t status_invalid_handle = 0xc0000008U, status_no_memory = 0xc0000017U, status_invalid_parameter = 0xc000000dU,
+			status_not_mz = 0xc000012fU, sec_image = 0x1000000;
+		auto mapping = std::make_shared<SectionObject>();
+		const uint64_t maximum = call[3] ? call.load<uint64_t>(call[3]) : 0;
+		if (call[6]) {
+			mapping->file = objects.object_as<FileObject>(call[6]);
+			if (!mapping->file) {
+				call.ret(status_invalid_handle);
+				return;
+			}
+			struct stat metadata{};
+			::fstat(mapping->file->descriptor, &metadata);
+			mapping->size = maximum ? maximum : uint64_t(metadata.st_size);
+			mapping->image = (call.u32(5) & sec_image) != 0;
+			if (mapping->image && !image_headers(*mapping)) {
+				call.ret(status_not_mz);
+				return;
+			}
+		} else {
+			mapping->size = maximum;
+			if (!mapping->size || (call.u32(5) & sec_image)) {
+				call.ret(status_invalid_parameter);
+				return;
+			}
+			mapping->descriptor = ::memfd_create("raven-section", MFD_CLOEXEC);
+			if (mapping->descriptor < 0 || ::ftruncate(mapping->descriptor, off_t(mapping->size))) {
+				call.ret(status_no_memory);
+				return;
+			}
+		}
+		mapping->protection = call.u32(4);
+		const auto made = objects.add_object(mapping);
+		if (made.status) {
+			call.ret(status_no_memory);
+			return;
+		}
+		objects.set_access(made.value, call.u32(1) ? call.u32(1) : 0xf001f);
+		call.store_pointer(call[0], made.value);
+		call.ret(0);
+	});
+	registry.add("NtQuerySection", 5, [&, image_headers](ApiCall &call) {
+		constexpr uint32_t status_invalid_handle = 0xc0000008U, status_invalid_info_class = 0xc0000003U, status_info_length_mismatch = 0xc0000004U, sec_commit = 0x8000000,
+			status_section_not_image = 0xc0000049U;
 		const auto mapping = objects.object_as<SectionObject>(call[0]);
 		if (!mapping) {
 			call.ret(status_invalid_handle);
+			return;
+		}
+		// SectionImageInformation: the entry point, the stack sizes, the subsystem, the characteristics and the machine of the image.
+		if (call.u32(1) == 1) {
+			const auto headers = mapping->image ? image_headers(*mapping) : std::nullopt;
+			if (!headers) {
+				call.ret(status_section_not_image);
+				return;
+			}
+			const size_t width = call.pointer_width(), layout = width == 8 ? 0x40 : 0x30;
+			if (call.u32(3) < layout) {
+				call.ret(status_info_length_mismatch);
+				return;
+			}
+			const auto &pe = *headers;
+			const auto read16 = [&](size_t at) { uint16_t value; std::memcpy(&value, pe.data() + at, 2); return value; };
+			const auto read32 = [&](size_t at) { uint32_t value; std::memcpy(&value, pe.data() + at, 4); return value; };
+			const auto read64 = [&](size_t at) { uint64_t value; std::memcpy(&value, pe.data() + at, 8); return value; };
+			const size_t optional = 24;
+			const bool wide = read16(optional) == 0x20b;
+			const uint64_t base = wide ? read64(optional + 24) : read32(optional + 28);
+			const uint64_t reserve = wide ? read64(optional + 72) : read32(optional + 72);
+			const uint64_t commit = wide ? read64(optional + 80) : read32(optional + 76);
+			std::vector<uint8_t> bytes(layout, 0);
+			const auto put = [&](size_t at, uint64_t value, size_t size) { std::memcpy(bytes.data() + at, &value, size); };
+			put(0, base + read32(optional + 16), width);
+			put(width * 2, reserve, width);
+			put(width * 3, commit, width);
+			const size_t after = width * 4;
+			put(after, read16(optional + 68), 4);
+			put(after + 4, read16(optional + 50), 2);
+			put(after + 6, read16(optional + 48), 2);
+			put(after + 12, read16(22), 2);
+			put(after + 14, read16(optional + 70), 2);
+			put(after + 16, read16(4), 2);
+			put(after + 18, read32(optional + 4) != 0, 1);
+			put(after + 24, mapping->size, 4);
+			put(after + 28, read32(optional + 64), 4);
+			call.write(call[2], bytes);
+			if (call[4])
+				call.store<uint32_t>(call[4], uint32_t(layout));
+			call.ret(0);
 			return;
 		}
 		if (call.u32(1) != 0) {
