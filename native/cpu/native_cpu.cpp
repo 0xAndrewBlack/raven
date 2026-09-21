@@ -487,6 +487,11 @@ void NativeProcess::set_context(const NativeContext &context)
 {
 	state->require_stopped();
 	// The general registers go first: if the extended state is then refused, they are put back, and nothing has changed.
+	// A context saved for a callback carries the general registers alone.
+	if (context.xstate.empty()) {
+		trace(PTRACE_SETREGS, state->child->pid, const_cast<user_regs_struct *>(&context.registers));
+		return;
+	}
 	user_regs_struct previous{};
 	trace(PTRACE_GETREGS, state->child->pid, &previous);
 	trace(PTRACE_SETREGS, state->child->pid, const_cast<user_regs_struct *>(&context.registers));
@@ -1096,7 +1101,10 @@ NativeResult NativeProcess::callback(uint64_t address, std::span<const uint64_t>
 	}
 	if (state->callbacks.size() >= 64)
 		throw std::runtime_error("native callback exceeds initial nesting limit");
-	const auto saved = context();
+	// The procedure called keeps the nonvolatile vector and control registers, as the calling convention requires, and the volatile
+	// ones are the API call's to change: the general registers are all that has to come back.
+	NativeContext saved{};
+	trace(PTRACE_GETREGS, state->child->pid, &saved.registers);
 	state->callbacks.push_back(saved);
 	// A nested API trap overwrites the pending stdcall cleanup of the call that was interrupted.
 	state->callback_cleanups.push_back(state->pending_cleanup);
