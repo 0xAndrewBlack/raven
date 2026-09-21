@@ -1175,6 +1175,53 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     ${fixture}/custom/msi-custom.exe)
                 set_tests_properties(native_msi_custom_actions_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                     ENVIRONMENT RAVEN_PREFIX=${fixture}/custom-prefix)
+                # The XML document object through COM: the prefix registers the component's classes, the program finds and makes one.
+                add_custom_command(OUTPUT ${fixture}/msxml.exe
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/msxml.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/msxml_client.c -lole32 -loleaut32 -luuid -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/msxml_client.c VERBATIM)
+                add_custom_target(msxml_fixture_${installer_arch} ALL DEPENDS ${fixture}/msxml.exe)
+                add_test(NAME native_msxml_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/msxml.exe)
+                set_tests_properties(native_msxml_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${fixture}/msxml-prefix)
+                # Pictures through the imaging component and GDI+, as bootstrappers load their themes: decoded, converted and made a bitmap.
+                add_custom_command(OUTPUT ${fixture}/imaging.exe
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/imaging.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/imaging_client.c -lwindowscodecs -lgdiplus -lole32 -luuid -lgdi32
+                        -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/imaging_client.c VERBATIM)
+                add_custom_target(imaging_fixture_${installer_arch} ALL DEPENDS ${fixture}/imaging.exe)
+                add_test(NAME native_imaging_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/imaging.exe)
+                set_tests_properties(native_imaging_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${fixture}/imaging-prefix)
+                # Messages from the program's own message table, with inserts from a va_list, as installers write their logs.
+                string(REGEX REPLACE "gcc$" "windmc" message_compiler ${installer_compiler})
+                string(REGEX REPLACE "gcc$" "windres" resource_compiler ${installer_compiler})
+                file(MAKE_DIRECTORY ${fixture}/format)
+                add_custom_command(OUTPUT ${fixture}/format.exe
+                    COMMAND ${message_compiler} -h ${fixture}/format -r ${fixture}/format ${PROJECT_SOURCE_DIR}/testdata/native_loader/format_messages.mc
+                    COMMAND ${resource_compiler} -O coff -I ${fixture}/format -i ${fixture}/format/format_messages.rc -o ${fixture}/format/messages.o
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/format.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/format_client.c ${fixture}/format/messages.o -lkernel32
+                    WORKING_DIRECTORY ${fixture}/format
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/format_client.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/format_messages.mc VERBATIM)
+                add_custom_target(format_fixture_${installer_arch} ALL DEPENDS ${fixture}/format.exe)
+                add_test(NAME native_format_message_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/format.exe)
+                set_tests_properties(native_format_message_${installer_arch} PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${fixture}/format-prefix)
+                # A library loaded by path from a folder of the program's names that path, and a child process opens the parent to watch it.
+                file(MAKE_DIRECTORY ${fixture}/module-path/plugins)
+                add_custom_command(OUTPUT ${fixture}/module-path/module-path.exe ${fixture}/module-path/plugins/module_plugin.dll
+                    COMMAND ${installer_compiler} -O2 -nostdlib -shared -fno-stack-protector ${action_link}
+                        -o ${fixture}/module-path/plugins/module_plugin.dll ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_plugin.c -lkernel32
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/module-path/module-path.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_path_client.c -luser32 -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_plugin.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_path_client.c VERBATIM)
+                add_custom_target(module_path_fixture_${installer_arch} ALL DEPENDS ${fixture}/module-path/module-path.exe)
+                add_test(NAME native_module_path_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000
+                    ${fixture}/module-path/module-path.exe)
+                set_tests_properties(native_module_path_${installer_arch} PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${fixture}/module-path-prefix)
                 # msiexec found by name in the system directory, installing and removing the package from the command line.
                 add_test(NAME native_msiexec_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/msiexec-client.exe)
                 set_tests_properties(native_msiexec_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
