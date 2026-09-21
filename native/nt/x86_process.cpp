@@ -292,11 +292,9 @@ bool kernel_string_api(NativeProcess &process, NativeEnvironment &environment, c
 	}
 	if (name == "GetModuleFileNameA") {
 		const auto args = process.api_arguments(3);
-		if (args[0] && args[0] != entry.loaded.base()) {
-			environment.set_last_error(126);
-			process.return_api(0);
-			return true;
-		}
+		// The file of a library is the shared handlers' answer, which know where each module came from.
+		if (args[0] && args[0] != entry.loaded.base())
+			return false;
 		std::string path;
 		for (const auto character : launch.image_path)
 			path.push_back(character > 127 ? '?' : char(character));
@@ -1125,9 +1123,9 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	// The older switch: a boolean that turns redirection on or off.
 	shared_api.add("Wow64EnableWow64FsRedirection", 1, [&paths](ApiCall &call) {
 		paths.redirect((call.u32(0) & 0xff) != 0);
-	register_profile_api(shared_api, profile);
 		call.ret(1);
 	});
+	register_profile_api(shared_api, profile);
 	register_ansi_adapters(shared_api);
 	register_legacy_file_api(shared_api);
 	windows.set_yield([&guest_threads] { return guest_threads.live() > 1 && guest_threads.yield(); });
