@@ -296,6 +296,8 @@ private:
 		int32_t width=0,height=0,x=0,y=0;
 		int hidden=1;
 		bool drawn=false;
+		// Shaped by a monochrome bitmap of zeros, which leaves every pixel as it is when the caret is inverted with it.
+		bool blank=false;
 		std::chrono::steady_clock::time_point next{};
 	};
 	std::optional<Caret> caret;

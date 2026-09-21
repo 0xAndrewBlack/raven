@@ -175,6 +175,10 @@ void NativeWindows::caret_sync()
 	const bool want = caret->hidden <= 0 && objects.window_visible(caret->window);
 	if (want == caret->drawn)
 		return;
+	if (caret->blank) {
+		caret->drawn = want;
+		return;
+	}
 	const auto dc = surface_dc(caret->window);
 	auto *device = objects.dc(dc);
 	if (!device)
@@ -200,6 +204,10 @@ void NativeWindows::caret_idle()
 	if (now < caret->next)
 		return;
 	caret->next = now + std::chrono::milliseconds(530);
+	if (caret->blank) {
+		caret->drawn = !caret->drawn;
+		return;
+	}
 	// Blink: invert the rectangle in place without changing the show count.
 	const auto dc = surface_dc(caret->window);
 	auto *device = objects.dc(dc);
@@ -320,7 +328,10 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		int32_t width = call.i32(2), height = call.i32(3);
 		if (width <= 0) width = 1;
 		if (height <= 0) height = 16;
-		caret = Caret{call[0], width, height, 0, 0, 1, false, std::chrono::steady_clock::now() + std::chrono::milliseconds(530)};
+		caret = Caret{call[0], width, height, 0, 0, 1, false, false, std::chrono::steady_clock::now() + std::chrono::milliseconds(530)};
+		if (call[1] > 1)
+			if (const auto *shape = objects.bitmap(call[1]); shape && shape->depth == 1 && !shape->shared && !shape->address)
+				caret->blank = std::all_of(shape->bits.begin(), shape->bits.end(), [](uint8_t byte) { return byte == 0; });
 		call.ret(1);
 	});
 	registry.add("DestroyCaret", 0, [this](ApiCall &call) {

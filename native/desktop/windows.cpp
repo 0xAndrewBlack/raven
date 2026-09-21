@@ -876,7 +876,7 @@ void NativeWindows::wait_idle(std::chrono::steady_clock::time_point deadline)
 	const auto now=std::chrono::steady_clock::now();
 	auto until=std::min(deadline,now+std::chrono::seconds(1));
 	for (const auto &timer : timers) until=std::min(until,timer.due);
-	if (caret && caret->hidden<=0) until=std::min(until,caret->next);
+	if (caret && caret->hidden<=0 && !caret->blank) until=std::min(until,caret->next);
 	if (scroll_drag.window) until=std::min(until,scroll_drag.next);
 	// Windows another process draws into are looked at as often as before; one starting to draw shows in the windows directory.
 	if (std::any_of(foreign_frames.begin(),foreign_frames.end(),[](const auto &frame) { return frame.second!=0; }))
