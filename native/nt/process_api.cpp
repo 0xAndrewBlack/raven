@@ -2,6 +2,7 @@
 #include "child_process.h"
 #include "kernel_context.h"
 #include "text.h"
+#include "pe/resources.h"
 
 #include <algorithm>
 #include <cstring>
@@ -64,6 +65,71 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("FreeLibraryWhenCallbackReturns", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("GetProcessVersion", 1, [](ApiCall &call) { call.ret(0x0006000a); });
 	registry.add("FreeResource", 1, [](ApiCall &call) { call.ret(0); });
+	// The names of a module's resources of one type, each handed to the program's callback until it answers FALSE: identifiers as they are,
+	// names as strings in memory that lasts for the call.
+	const auto enumerate_names = [&context](ApiCall &call, bool wide) {
+		const uint64_t base = call[0] ? call[0] : context.entry.loaded.base();
+		const auto module = std::find_if(context.modules.all().begin(), context.modules.all().end(),
+			[&](const auto &item) { return item.second->loaded.base() == base; });
+		if (module == context.modules.all().end()) {
+			call.fail(1812);
+			return;
+		}
+		const auto &image = *module->second;
+		const auto directory = image.image.directories[2];
+		if (!directory.address) {
+			call.fail(1812);
+			return;
+		}
+		const auto key_of = [&](uint64_t value) -> ResourceKey {
+			if (value < 0x10000)
+				return uint32_t(value);
+			auto text = wide ? call.wide(value, 256) : from_utf8(call.narrow(value, 256));
+			for (auto &character : text)
+				if (character >= u'a' && character <= u'z')
+					character = char16_t(character - 32);
+			return text;
+		};
+		const auto type = key_of(call[1]);
+		std::vector<ResourceKey> names;
+		const auto bytes = call.read(base + directory.address, directory.size);
+		for (const auto &resource : read_resources(directory, bytes, image.image.image_size))
+			if (resource.type == type && std::find(names.begin(), names.end(), resource.name) == names.end())
+				names.push_back(resource.name);
+		if (names.empty()) {
+			call.fail(1813);
+			return;
+		}
+		for (const auto &name : names) {
+			uint64_t argument = 0, text = 0;
+			if (const auto *number = std::get_if<uint32_t>(&name)) {
+				argument = *number;
+			} else {
+				const auto &string = std::get<std::u16string>(name);
+				std::vector<uint8_t> bytes;
+				if (wide) {
+					bytes.resize((string.size() + 1) * 2);
+					std::memcpy(bytes.data(), string.data(), string.size() * 2);
+				} else {
+					const auto narrow = to_utf8(string);
+					bytes.assign(narrow.begin(), narrow.end());
+					bytes.push_back(0);
+				}
+				text = context.allocator.allocate(bytes.size());
+				call.write(text, bytes);
+				argument = text;
+			}
+			const uint64_t arguments[] = {base, call[1], argument, call[3]};
+			const auto result = context.call(call[2], arguments);
+			if (text)
+				context.allocator.release(text);
+			if (!uint32_t(result.value))
+				break;
+		}
+		call.ret(1);
+	};
+	registry.add("EnumResourceNamesW", 4, [enumerate_names](ApiCall &call) { enumerate_names(call, true); });
+	registry.add("EnumResourceNamesA", 4, [enumerate_names](ApiCall &call) { enumerate_names(call, false); });
 	registry.add("ReadDirectoryChangesW", 8, [](ApiCall &call) { call.fail(50, 0); });
 	registry.add("FindFirstStreamW", 4, [](ApiCall &call) { call.fail(38, UINT64_MAX); });
 	const auto directory = [](ApiCall &call, bool wide, const std::string &path) {
