@@ -16,6 +16,7 @@
 #include "heap.h"
 #include "kernel_context.h"
 #include "actctx.h"
+#include "child_process.h"
 #include "paths.h"
 #include "x86_compat_api.h"
 #include "registry_words.h"
@@ -1106,6 +1107,11 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_ansi_adapters(shared_api);
 	register_legacy_file_api(shared_api);
 	windows.set_yield([&guest_threads] { return guest_threads.live() > 1 && guest_threads.yield(); });
+	// A message sent to a window of another thread waits for that thread to run its procedure.
+	windows.set_block([&guest_threads](std::function<bool()> ready) {
+		HostWait waiting;
+		guest_threads.block(std::move(ready), std::nullopt);
+	});
 	crt.set_call(invoke);
 	try {
 		// Images of the startup graph with thread local storage get their blocks, and their callbacks hear about the process starting.
