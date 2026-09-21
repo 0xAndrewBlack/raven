@@ -76,8 +76,12 @@ LoadedImage::LoadedImage(const PEImage &image, uint64_t base)
 void LoadedImage::relocate(const PEImage &image)
 {
 	const auto directory = image.directories[5];
-	if ((image.characteristics & 1) || !directory.address || !directory.size)
+	if ((image.characteristics & 1) || !directory.address || !directory.size) {
+		// A library of resources alone, with no code to run, no imports and no thread data, holds no address to fix: it works anywhere.
+		if (!image.entry && !image.directories[1].address && !image.directories[9].address && !image.directories[13].address)
+			return;
 		throw std::runtime_error("PE image has no relocation table for the requested base");
+	}
 	const auto table = image.file_span(directory.address, directory.size);
 	const size_t width = image.is_64 ? 8 : 4;
 	const auto inside = [&](const auto &section, uint64_t location) {
