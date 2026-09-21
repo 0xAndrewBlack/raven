@@ -1919,6 +1919,24 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         endif()
                     endforeach()
                 endif()
+                if(matrix_ready)
+                    foreach(package ${matrix_packages})
+                        string(REPLACE ".exe" "" package_name ${package})
+                        string(REPLACE "." "_" package_name ${package_name})
+                        add_test(NAME native_redist_alone_${package_name} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-redist-matrix.py
+                            $<TARGET_FILE:raven> ${RAVEN_REDIST_DIRECTORY} ${CMAKE_CURRENT_BINARY_DIR}/msi-fixtures
+                            ${CMAKE_CURRENT_BINARY_DIR}/redist-matrix-evidence/${package_name} alone ${package})
+                        set_tests_properties(native_redist_alone_${package_name} PROPERTIES TIMEOUT 1800 RESOURCE_LOCK raven_compositor
+                            PASS_REGULAR_EXPRESSION "PASS: ")
+                    endforeach()
+                    foreach(order forward backward)
+                        add_test(NAME native_redist_together_${order} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-redist-matrix.py
+                            $<TARGET_FILE:raven> ${RAVEN_REDIST_DIRECTORY} ${CMAKE_CURRENT_BINARY_DIR}/msi-fixtures
+                            ${CMAKE_CURRENT_BINARY_DIR}/redist-matrix-evidence/together-${order} together ${order})
+                        set_tests_properties(native_redist_together_${order} PROPERTIES TIMEOUT 7200 RESOURCE_LOCK raven_compositor
+                            PASS_REGULAR_EXPRESSION "PASS: ")
+                    endforeach()
+                endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
