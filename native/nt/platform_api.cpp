@@ -41,31 +41,8 @@ struct ComState {
 
 void register_platform_api(ApiRegistry &registry, KernelContext &context)
 {
-	// uxtheme: visual styles are not provided, so every themed drawing path reports "no theme" and apps use classic drawing.
-	registry.add("IsThemeActive", 0, [](ApiCall &call) { call.ret(0); });
-	registry.add("IsAppThemed", 0, [](ApiCall &call) { call.ret(0); });
-	registry.add("OpenThemeData", 2, [](ApiCall &call) { call.fail(e_handle, 0); });
-	registry.add("OpenThemeDataEx", 3, [](ApiCall &call) { call.fail(e_handle, 0); });
-	registry.add("CloseThemeData", 1, [](ApiCall &call) { call.ret(call[0] ? e_handle : s_ok); });
-	registry.add("SetWindowTheme", 3, [](ApiCall &call) { call.ret(s_ok); });
-	registry.add("EnableThemeDialogTexture", 2, [](ApiCall &call) { call.ret(s_ok); });
+	// uxtheme: the visual styles are the window manager's (desktop/theme.cpp); buffered painting draws straight to the target.
 	registry.add("EnableTheming", 1, [](ApiCall &call) { call.ret(s_ok); });
-	registry.add("GetThemeAppProperties", 0, [](ApiCall &call) { call.ret(0); });
-	registry.add("IsThemeBackgroundPartiallyTransparent", 3, [](ApiCall &call) { call.ret(0); });
-	registry.add("DrawThemeBackground", 6, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("DrawThemeBackgroundEx", 6, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("DrawThemeParentBackground", 3, [](ApiCall &call) { call.ret(e_fail); });
-	registry.add("DrawThemeText", 9, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("DrawThemeTextEx", 9, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("GetThemeBackgroundContentRect", 6, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("GetThemePartSize", 7, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("GetThemeFont", 6, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("GetThemeColor", 5, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("GetThemeMetric", 6, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("GetThemeInt", 5, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("GetThemeTransitionDuration", 6, [](ApiCall &call) { call.ret(e_handle); });
-	registry.add("BufferedPaintInit", 0, [](ApiCall &call) { call.ret(s_ok); });
-	registry.add("BufferedPaintUnInit", 0, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("BeginBufferedPaint", 5, [](ApiCall &call) { call.ret(0); });
 	registry.add("EndBufferedPaint", 2, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("BeginBufferedAnimation", 8, [](ApiCall &call) { call.ret(0); });

@@ -1,5 +1,6 @@
 #include "windows.h"
 #include "canvas.h"
+#include "shapes.h"
 
 #include <algorithm>
 #include <cstring>
@@ -376,6 +377,40 @@ void NativeWindows::paint_scrollbars(uint64_t root)
 				continue;
 			const auto &scroll = window->scroll[size_t(bar)];
 			const bool dead = !scrollable(scroll) || scroll.disabled == 3;
+			if (themed()) {
+				// Windows 11: a light bar, small solid arrows and a rounded thumb narrower than the bar.
+				struct Surface {
+					Canvas &canvas;
+					void blend(int64_t x, int64_t y, uint32_t ink, double alpha)
+					{
+						if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height)
+							return;
+						const auto *pixel = canvas.pixels + (size_t(y) * size_t(canvas.width) + size_t(x)) * 4;
+						const uint32_t below = uint32_t(pixel[2]) | uint32_t(pixel[1]) << 8 | uint32_t(pixel[0]) << 16;
+						canvas.set(int32_t(x), int32_t(y), alpha >= 0.998 ? ink : shapes::mix(below, ink, alpha));
+					}
+				} surface{canvas};
+				shapes::Shapes<Surface> shapes{surface};
+				const uint32_t ground = 0xf9f9f9, ink = 0x868686, faint = 0xc5c5c5;
+				canvas.fill(shifted(geometry.bar), ground);
+				const auto arrow = [&](DesktopRect rect, char direction, bool disabled) {
+					const auto r = shifted(rect);
+					if (r.right > r.left && r.bottom > r.top)
+						shapes.triangle((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, 7, direction, disabled ? faint : ink);
+				};
+				arrow(geometry.up, geometry.vertical ? 'u' : 'l', dead || (scroll.disabled & 1));
+				arrow(geometry.down, geometry.vertical ? 'd' : 'r', dead || (scroll.disabled & 2));
+				if (geometry.has_thumb && !dead) {
+					const auto r = shifted(geometry.thumb);
+					const bool held = scroll_drag.window == handle && scroll_drag.bar == bar && scroll_drag.part == Part::thumb;
+					const uint32_t pill = held ? 0x5a5a5a : 0x868686;
+					if (geometry.vertical)
+						shapes.rounded((r.left + r.right) / 2.0 - 3, r.top + 2, (r.left + r.right) / 2.0 + 3, r.bottom - 2, 3, pill, std::nullopt);
+					else
+						shapes.rounded(r.left + 2, (r.top + r.bottom) / 2.0 - 3, r.right - 2, (r.top + r.bottom) / 2.0 + 3, 3, pill, std::nullopt);
+				}
+				continue;
+			}
 			// Track: checkerboard of face and highlight, like the classic dithered scroll bar background.
 			const auto track = shifted(geometry.track);
 			for (int32_t y = track.top; y < track.bottom; ++y)
@@ -408,7 +443,8 @@ void NativeWindows::paint_scrollbars(uint64_t root)
 		}
 		// Where both bars meet, the corner box takes the face color.
 		if ((window->style & ws_hscroll) && (window->style & ws_vscroll))
-			canvas.fill(shifted({window->x + window->width, window->y + window->height, window->x + window->width + arrow_size, window->y + window->height + arrow_size}), color(color_button_face));
+			canvas.fill(shifted({window->x + window->width, window->y + window->height, window->x + window->width + arrow_size, window->y + window->height + arrow_size}),
+				themed() ? 0xf9f9f9 : color(color_button_face));
 	}
 }
 

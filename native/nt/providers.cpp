@@ -882,7 +882,11 @@ static const std::vector<uint8_t> *block_prelude(std::string_view module, std::s
 		return &muldiv_prelude();
 	if ((module == "shlwapi.dll" || module == "kernelbase.dll") && name == "PathFindFileNameW")
 		return &file_name_prelude();
-	if (module == "uxtheme.dll" && name == "GetWindowTheme")
+	// Without visual styles no window has a theme, and the answer needs no trip to the runtime.
+	if (module == "uxtheme.dll" && name == "GetWindowTheme" && [] {
+			const char *chosen = std::getenv("RAVEN_THEME");
+			return chosen && std::string_view(chosen) == "classic";
+		}())
 		return &window_theme_prelude();
 	if (module == "user32.dll" && name == "TranslateMessage")
 		return &translate_message_prelude();

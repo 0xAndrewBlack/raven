@@ -284,8 +284,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		call.ret(children.empty() ? 0 : children.back());
 	});
 
-	// Visual styles are not provided: windows have no theme and message filtering never blocks.
-	registry.add("GetWindowTheme", 1, [](ApiCall &call) { call.ret(0); });
+	// Message filtering never blocks.
 	registry.add("ChangeWindowMessageFilterEx", 4, [this](ApiCall &call) {
 		if (!objects.window(call[0])) {
 			call.fail(1400);

@@ -103,6 +103,9 @@ def main_window(expected):
 def start(raven, program, prefix, evidence, name):
     output = (evidence / f"{name}.log").open("wb")
     env = environment() | {"RAVEN_PREFIX": str(prefix)}
+    # The visual style the run asks for reaches the program, so the classic look can be checked as well as the default one.
+    if "RAVEN_THEME" in os.environ:
+        env["RAVEN_THEME"] = os.environ["RAVEN_THEME"]
     return subprocess.Popen([str(raven), "--run-process", "--execution=native", "--timeout-ms=600000", "--desktop=wayland", str(program)],
                             env=env, stdout=output, stderr=output)
 

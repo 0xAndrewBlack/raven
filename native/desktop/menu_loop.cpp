@@ -1,5 +1,6 @@
 #include "windows.h"
 #include "canvas.h"
+#include "shapes.h"
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +43,11 @@ void NativeWindows::menu_render(MenuPopup &popup)
 		return;
 	const auto color = [&](int index) { return rgb(objects.system_color(index)); };
 	Canvas canvas{std::vector<uint8_t>(size_t(popup.width) * size_t(popup.height) * 4), popup.width, popup.height};
+	if (themed()) {
+		menu_render_modern(popup, *menu, canvas);
+		popup.pixels = std::move(canvas.owned);
+		return;
+	}
 	canvas.fill({0, 0, popup.width, popup.height}, color(4));
 	canvas.edge({0, 0, popup.width, popup.height}, color(22), color(21), color(20), color(16));
 	auto &renderer = objects.text();
@@ -100,6 +106,61 @@ void NativeWindows::menu_render(MenuPopup &popup)
 	popup.pixels = std::move(canvas.owned);
 }
 
+// A Windows 11 menu: a light surface with a thin border, items highlighted on a rounded shape inset from the edges, thin separators,
+// and the check, the radio dot and the submenu chevron drawn with antialiasing.
+void NativeWindows::menu_render_modern(MenuPopup &popup, const DesktopMenu &menu, Canvas &canvas)
+{
+	struct Surface {
+		Canvas &canvas;
+		void blend(int64_t x, int64_t y, uint32_t ink, double alpha)
+		{
+			if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height)
+				return;
+			const auto *pixel = canvas.pixels + (size_t(y) * size_t(canvas.width) + size_t(x)) * 4;
+			const uint32_t below = uint32_t(pixel[2]) | uint32_t(pixel[1]) << 8 | uint32_t(pixel[0]) << 16;
+			canvas.set(int32_t(x), int32_t(y), alpha >= 0.998 ? ink : shapes::mix(below, ink, alpha));
+		}
+	} surface{canvas};
+	shapes::Shapes<Surface> shapes{surface};
+	canvas.fill({0, 0, popup.width, popup.height}, 0xf9f9f9);
+	shapes.rounded(0, 0, popup.width, popup.height, 0, std::nullopt, 0xd6d6d6);
+	auto &renderer = objects.text();
+	const auto metrics = renderer.metrics(interface_font());
+	for (size_t index = 0; index < menu.items.size() && index < popup.items.size(); ++index) {
+		const auto &item = menu.items[index];
+		const auto rect = popup.items[index];
+		if (item.type & type_separator) {
+			const int32_t y = rect.top + (rect.bottom - rect.top) / 2;
+			canvas.fill({rect.left + 4, y, rect.right - 4, y + 1}, 0xe5e5e5);
+			continue;
+		}
+		const bool selected = popup.highlight && *popup.highlight == index;
+		const bool enabled = is_enabled(item);
+		if (selected)
+			shapes.rounded(rect.left + 3, rect.top + 1, rect.right - 3, rect.bottom - 1, 4, enabled ? 0xefefef : 0xf4f4f4, std::nullopt);
+		const uint32_t ink = enabled ? 0x1a1a1a : 0xa0a0a0;
+		const auto [text, accelerator] = split_tab(item.text);
+		const auto [label, mnemonic] = menu_label(text);
+		const int32_t text_top = rect.top + (rect.bottom - rect.top - metrics.height) / 2;
+		draw_text(renderer, canvas, label, rect.left + gutter + 6, text_top, ink, mnemonic);
+		if (!accelerator.empty()) {
+			const auto width = renderer.extent(interface_font(), printable(accelerator)).width;
+			draw_text(renderer, canvas, accelerator, rect.right - arrow_width - width, text_top, enabled ? 0x606060 : 0xa0a0a0);
+		}
+		const double cy = (rect.top + rect.bottom) / 2.0, cx = rect.left + 14.0;
+		if (item.state & item_checked) {
+			if (item.type & type_radio) {
+				shapes.circle(cx, cy, 3, ink, std::nullopt);
+			} else {
+				shapes.segment(cx - 4, cy, cx - 1.5, cy + 3, 1.2, ink);
+				shapes.segment(cx - 1.5, cy + 3, cx + 4, cy - 3.5, 1.2, ink);
+			}
+		}
+		if (item.submenu)
+			shapes.chevron(rect.right - 12.0, cy, 8, 'r', ink);
+	}
+}
+
 void NativeWindows::menu_open_popup(uint64_t menu_handle, uint64_t parent, int32_t x, int32_t y)
 {
 	const auto *menu = objects.menu(menu_handle);
@@ -110,7 +171,8 @@ void NativeWindows::menu_open_popup(uint64_t menu_handle, uint64_t parent, int32
 	auto &renderer = objects.text();
 	const auto font = interface_font();
 	const auto metrics = renderer.metrics(font);
-	const int32_t item_height = metrics.height + 5;
+	// Windows 11 spaces its menu items wider than the classic menus.
+	const int32_t item_height = metrics.height + (themed() ? 13 : 5);
 	int32_t label_width = 0, accelerator_width = 0, total = popup_border;
 	std::vector<DesktopRect> rects;
 	for (const auto &item : menu->items) {

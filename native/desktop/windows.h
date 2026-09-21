@@ -18,6 +18,9 @@
 
 namespace raven {
 
+namespace paint { struct Canvas; }
+
+
 class NativeWindows {
 public:
 	NativeWindows(NativeProcess &process, NativeEnvironment &environment, DesktopObjects &objects);
@@ -239,11 +242,16 @@ private:
 	FrameLayout frame_layout(const DesktopWindow &window) const;
 	std::vector<DesktopRect> menu_bar_items(const DesktopWindow &window);
 	void paint_nonclient(uint64_t window);
+	void paint_modern_frame(uint64_t handle,const DesktopWindow &window,const FrameLayout &layout,paint::Canvas &canvas,bool is_active,int32_t width,
+		int32_t height);
 	uint64_t nonclient_hit(const DesktopWindow &window,int32_t x,int32_t y) const;
 	// Menu bar item currently shown as pressed, and the window that owns it.
 	std::optional<size_t> open_menu_item;
 	uint64_t open_menu_window=0;
 	uint64_t pressed_frame_hit=0,pressed_frame_window=0;
+	// The caption button under the pointer, which the Windows 11 frame lights up.
+	uint64_t hovered_frame_hit=0,hovered_frame_window=0;
+	void hover_frame(uint64_t window,uint64_t hit);
 	struct MenuPopup {
 		uint64_t handle,menu,parent;
 		int32_t x,y,width,height;
@@ -259,6 +267,7 @@ private:
 	void menu_open_bar(uint64_t window,size_t index);
 	void menu_open_popup(uint64_t menu,uint64_t parent,int32_t x,int32_t y);
 	void menu_render(MenuPopup &popup);
+	void menu_render_modern(MenuPopup &popup,const DesktopMenu &menu,paint::Canvas &canvas);
 	void menu_highlight(size_t level,std::optional<size_t> index);
 	void menu_select(size_t level,size_t index);
 	void menu_close();
@@ -271,6 +280,14 @@ private:
 	void register_scroll_api(ApiRegistry &registry);
 	void register_long_api(ApiRegistry &registry);
 	void register_ansi_api(ApiRegistry &registry);
+	void register_theme_api(ApiRegistry &registry);
+	// Visual styles: on unless RAVEN_THEME=classic; the open theme handles with their class, the theme each window opened last, and the
+	// windows SetWindowTheme took out of the styles.
+	bool themed() const;
+	std::map<uint64_t, std::string> themes;
+	std::map<uint64_t, uint64_t> window_themes;
+	std::set<uint64_t> unthemed_windows;
+	uint64_t next_theme = 0x7a000001;
 	// Layout of one non-client scroll bar in screen coordinates.
 	struct ScrollGeometry {
 		DesktopRect bar{},up{},down{},track{},thumb{};

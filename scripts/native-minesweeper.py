@@ -92,6 +92,9 @@ def main():
     log = (evidence / "compositor.log").open("wb")
     compositor = start_compositor(log)
     env = environment() | {"RAVEN_PREFIX": str(prefix)}
+    # The visual style the run asks for reaches the program, so the classic look can be checked as well as the default one.
+    if "RAVEN_THEME" in os.environ:
+        env["RAVEN_THEME"] = os.environ["RAVEN_THEME"]
     output = (evidence / "raven.log").open("wb")
     process = subprocess.Popen([str(raven), "--run-process", "--execution=native", "--timeout-ms=180000",
                                 "--desktop=wayland", str(program)], env=env, stdout=output, stderr=output)
@@ -133,8 +136,8 @@ def main():
         menu_image = screenshot(evidence / "03-game-menu.png")
         if crop_equal(after_f2, menu_image, (left, top + 56, left + 160, top + 250)):
             raise RuntimeError("the Game menu did not open")
-        # Intermediate is the third entry of the Game menu's difficulty group.
-        click(left + 30, top + 100)
+        # Intermediate is the third entry of the Game menu's difficulty group; Windows 11 menus space their items wider than classic ones.
+        click(left + 30, top + (100 if os.environ.get("RAVEN_THEME") == "classic" else 120))
         time.sleep(2)
         resized, box2 = wait_for_window(evidence, "04-intermediate.png")
         width2, height2 = box2[2] - box2[0], box2[3] - box2[1]

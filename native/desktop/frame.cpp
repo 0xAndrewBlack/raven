@@ -1,5 +1,6 @@
 #include "windows.h"
 #include "canvas.h"
+#include "shapes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,15 +25,18 @@ NativeWindows::FrameLayout NativeWindows::frame_layout(const DesktopWindow &wind
 	const int32_t border = layout.border;
 	layout.caption = {border, border, width - border, border + std::max(layout.caption_height - 1, 0)};
 	layout.menu_bar = {border, border + layout.caption_height, width - border, border + layout.caption_height + layout.menu_height};
-	const int32_t button_height = std::max(layout.caption.bottom - layout.caption.top - 4, 0);
-	const int32_t button_width = std::min(metrics.button_x, std::max(layout.caption.right - layout.caption.left, 0));
-	int32_t cursor = layout.caption.right - 2;
+	// Windows 11 caption buttons are 46 pixels wide and fill the caption; the classic ones are bevelled boxes inside it.
+	const bool modern = themed();
+	const int32_t inset = modern ? 0 : 2;
+	const int32_t button_height = std::max(layout.caption.bottom - layout.caption.top - 2 * inset + (modern ? 1 : 0), 0);
+	const int32_t button_width = std::min(modern ? 46 : metrics.button_x, std::max(layout.caption.right - layout.caption.left, 0));
+	int32_t cursor = layout.caption.right - inset;
 	layout.close = layout.maximize = layout.minimize = {0, 0, 0, 0};
 	if (layout.caption_height && (style & 0x80000U)) {
-		layout.close = {cursor - button_width, layout.caption.top + 2, cursor, layout.caption.top + 2 + button_height};
-		cursor = layout.close.left - 2;
+		layout.close = {cursor - button_width, layout.caption.top + inset, cursor, layout.caption.top + inset + button_height};
+		cursor = layout.close.left - inset;
 		if (style & 0x30000U) {
-			layout.maximize = {cursor - button_width, layout.caption.top + 2, cursor, layout.caption.top + 2 + button_height};
+			layout.maximize = {cursor - button_width, layout.caption.top + inset, cursor, layout.caption.top + inset + button_height};
 			layout.minimize = {layout.maximize.left - button_width, layout.maximize.top, layout.maximize.left, layout.maximize.bottom};
 			// WS_MINIMIZEBOX or WS_MAXIMIZEBOX alone leaves the other button visible but disabled in Windows.
 			if (!(style & 0x20000U) && !(style & 0x10000U))
@@ -79,12 +83,32 @@ uint64_t NativeWindows::nonclient_hit(const DesktopWindow &window,int32_t x,int3
 	return border;
 }
 
+void NativeWindows::hover_frame(uint64_t handle,uint64_t hit)
+{
+	if (hovered_frame_window==handle && hovered_frame_hit==hit)
+		return;
+	const auto previous=hovered_frame_window;
+	hovered_frame_window=hit ? handle : 0;
+	hovered_frame_hit=hit;
+	if (!themed())
+		return;
+	if (previous && previous!=handle && objects.window(previous))
+		refresh_frame(previous);
+	if (objects.window(handle))
+		refresh_frame(handle);
+}
+
 void NativeWindows::nonclient_pointer(uint64_t handle,uint64_t hit,uint32_t message,int32_t x,int32_t y)
 {
 	// Only primary-button transitions act on the frame so far; hover and other buttons are ignored.
 	const auto *window=objects.window(handle);
 	if (!window) return;
 	constexpr uint64_t menu_hit=5,minimize_hit=8,maximize_hit=9,close_hit=20;
+	if (message==0x200) {
+		// The caption button under the pointer lights up in the Windows 11 frame.
+		hover_frame(handle,hit==minimize_hit || hit==maximize_hit || hit==close_hit ? hit : 0);
+		return;
+	}
 	if (message==0x201) {
 		pressed_frame_hit=hit; pressed_frame_window=handle;
 		// A drag that starts on the caption or a sizing border continues in the compositor (maximized windows do not move).
@@ -161,6 +185,8 @@ void NativeWindows::paint_nonclient(uint64_t handle)
 		add(window->bitmap); add(uint64_t(bitmap->width) << 32 | bitmap->height); add(uint64_t(uint32_t(width)) << 32 | uint32_t(height));
 		add(uint64_t(window->style) << 32 | window->ex_style); add(is_active); add(window->menu);
 		add(open_menu_item && open_menu_window == handle ? *open_menu_item + 1 : 0);
+		add(hovered_frame_window == handle ? hovered_frame_hit : 0);
+		add(themed());
 		key += window->title;
 		key += u'\0';
 		if (const auto *menu = objects.menu(window->menu))
@@ -176,6 +202,10 @@ void NativeWindows::paint_nonclient(uint64_t handle)
 	}
 	Canvas canvas{objects.bitmap(window->bitmap)->pixels().data(), int32_t(bitmap->width), int32_t(bitmap->height)};
 	const auto color = [&](int index) { return rgb(objects.system_color(index)); };
+	if (themed()) {
+		paint_modern_frame(handle, *window, layout, canvas, is_active, width, height);
+		return;
+	}
 	if (layout.border) {
 		// The ring first takes the frame color, then the bevel is laid over its outer two pixels.
 		const DesktopRect all{0, 0, width, height};
@@ -241,6 +271,100 @@ void NativeWindows::paint_nonclient(uint64_t handle)
 			} else {
 				draw_text(renderer, canvas, label, rect.left + 8, rect.top + (rect.bottom - rect.top - metrics.height) / 2, color(color_menu_text), mnemonic);
 			}
+		}
+	}
+}
+namespace {
+
+// The frame's pixels as a surface for the antialiased shapes.
+struct CanvasSurface {
+	Canvas &canvas;
+	void blend(int64_t x, int64_t y, uint32_t color, double alpha)
+	{
+		if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height)
+			return;
+		const auto *pixel = canvas.pixels + (size_t(y) * size_t(canvas.width) + size_t(x)) * 4;
+		const uint32_t below = uint32_t(pixel[2]) | uint32_t(pixel[1]) << 8 | uint32_t(pixel[0]) << 16;
+		canvas.set(int32_t(x), int32_t(y), alpha >= 0.998 ? color : shapes::mix(below, color, alpha));
+	}
+};
+
+constexpr uint32_t shade(uint32_t r, uint32_t g, uint32_t b) { return r | g << 8 | b << 16; }
+
+}
+
+// The Windows 11 frame: a light caption that continues into the sizing border and the menu bar, a thin outline, the title in dark text,
+// flat caption buttons with line glyphs that light up under the pointer, red for close, and the open menu item on a rounded highlight.
+void NativeWindows::paint_modern_frame(uint64_t handle, const DesktopWindow &window, const FrameLayout &layout, Canvas &canvas, bool is_active, int32_t width,
+	int32_t height)
+{
+	CanvasSurface surface{canvas};
+	shapes::Shapes<CanvasSurface> shapes{surface};
+	const uint32_t title = is_active ? shade(0xef, 0xf4, 0xf9) : shade(0xf3, 0xf3, 0xf3);
+	const uint32_t ink = is_active ? shade(0x1a, 0x1a, 0x1a) : shade(0x8a, 0x8a, 0x8a);
+	const int32_t client_top = layout.border + layout.caption_height + layout.menu_height;
+	// The ring, the caption and the menu bar share one surface color.
+	canvas.fill({0, 0, width, client_top}, title);
+	canvas.fill({0, client_top, layout.border, height}, title);
+	canvas.fill({width - layout.border, client_top, width, height}, title);
+	canvas.fill({0, height - layout.border, width, height}, title);
+	if (layout.border)
+		shapes.rounded(0, 0, width, height, 0, std::nullopt, is_active ? shade(0xb9, 0xbf, 0xc7) : shade(0xd2, 0xd2, 0xd2));
+	if (layout.caption_height) {
+		auto &renderer = objects.text();
+		const int32_t text_left = layout.caption.left + (window.style & 0x80000U ? 22 : 8);
+		int32_t text_right = layout.caption.right - 8;
+		for (const auto &button : {layout.minimize, layout.maximize, layout.close})
+			if (button.right > button.left)
+				text_right = std::min(text_right, button.left - 8);
+		const auto metrics = renderer.metrics(interface_font());
+		draw_text(renderer, canvas, window.title, text_left, layout.caption.top + (layout.caption.bottom - layout.caption.top - metrics.height) / 2,
+			ink, std::nullopt, text_right - text_left);
+		const bool maximized = (window.style & 0x01000000U) != 0;
+		const auto button = [&](DesktopRect rect, uint64_t hit) {
+			if (rect.right <= rect.left)
+				return;
+			const bool hot = hovered_frame_window == handle && hovered_frame_hit == hit;
+			const bool pressed = hot && pressed_frame_window == handle && pressed_frame_hit == hit;
+			uint32_t glyph = ink;
+			if (hot && hit == 20) {
+				canvas.fill(rect, pressed ? shade(0xc8, 0x3c, 0x30) : shade(0xc4, 0x2b, 0x1c));
+				glyph = shade(0xff, 0xff, 0xff);
+			} else if (hot) {
+				canvas.fill(rect, pressed ? shade(0xdc, 0xe0, 0xe5) : shade(0xe3, 0xe7, 0xec));
+			}
+			const double cx = (rect.left + rect.right) / 2.0, cy = (rect.top + rect.bottom) / 2.0;
+			if (hit == 20) {
+				shapes.segment(cx - 5, cy - 5, cx + 5, cy + 5, 1, glyph);
+				shapes.segment(cx + 5, cy - 5, cx - 5, cy + 5, 1, glyph);
+			} else if (hit == 9 && maximized) {
+				shapes.rounded(cx - 5, cy - 3, cx + 3, cy + 5, 1, std::nullopt, glyph);
+				shapes.segment(cx - 3, cy - 5, cx + 5, cy - 5, 1, glyph);
+				shapes.segment(cx + 5, cy - 5, cx + 5, cy + 3, 1, glyph);
+			} else if (hit == 9) {
+				shapes.rounded(cx - 5, cy - 5, cx + 5, cy + 5, 1, std::nullopt, glyph);
+			} else {
+				shapes.segment(cx - 5, cy, cx + 5, cy, 1, glyph);
+			}
+		};
+		button(layout.close, 20);
+		button(layout.maximize, 9);
+		button(layout.minimize, 8);
+	}
+	if (layout.menu_height) {
+		auto &renderer = objects.text();
+		const auto metrics = renderer.metrics(interface_font());
+		const auto *menu = objects.menu(window.menu);
+		const auto rects = menu_bar_items(window);
+		for (size_t index = 0; menu && index < rects.size() && index < menu->items.size(); ++index) {
+			const auto &rect = rects[index];
+			if (rect.right > layout.menu_bar.right)
+				break;
+			const auto [label, mnemonic] = menu_label(menu->items[index].text);
+			if (open_menu_item && open_menu_window == handle && *open_menu_item == index)
+				shapes.rounded(rect.left + 1, rect.top + 2, rect.right - 1, rect.bottom - 2, 4, shade(0xe0, 0xe4, 0xea), std::nullopt);
+			draw_text(renderer, canvas, label, rect.left + 8, rect.top + (rect.bottom - rect.top - metrics.height) / 2,
+				(menu->items[index].state & 3) ? shade(0xa0, 0xa0, 0xa0) : shade(0x1a, 0x1a, 0x1a), mnemonic);
 		}
 	}
 }

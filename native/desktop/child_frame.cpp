@@ -28,7 +28,12 @@ void NativeWindows::paint_child_frames(uint64_t root)
 				continue;
 			const DesktopRect rect{window->outer.left - top->outer.left, window->outer.top - top->outer.top,
 				window->outer.right - top->outer.left, window->outer.bottom - top->outer.top};
-			if (window->ex_style & 0x200U)
+			// With visual styles the sunken edges become the thin light borders of Windows 11 fields and lists.
+			if (themed() && (window->ex_style & 0x20200U || window->style & 0x800000U)) {
+				ring(rect, 0xd5d5d5, 0xd5d5d5);
+				if (window->ex_style & 0x200U)
+					ring({rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1}, 0xffffff, 0xffffff);
+			} else if (window->ex_style & 0x200U)
 				canvas.edge(rect, color(color_button_shadow), color(color_button_highlight), color(color_dark_shadow), color(color_light));
 			else if (window->ex_style & 0x20000U)
 				ring(rect, color(color_button_shadow), color(color_button_highlight));
