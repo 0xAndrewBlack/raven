@@ -318,39 +318,47 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(*desktop_now);
 	});
-	registry.add("GetUserObjectInformationW", 5, [&objects](ApiCall &call) {
-		const auto named = objects.object_as<WindowStation>(call[0]);
-		const auto desktop = objects.object_as<Desktop>(call[0]);
-		if (!named && !desktop) {
-			call.fail(6);
-			return;
-		}
-		std::vector<uint8_t> data;
-		switch (call.u32(1)) {
-		case 1: {
-			data.assign(12, 0);
-			data[8] = 1;
-			break;
-		}
-		case 2: case 3: {
-			const std::u16string text = call.u32(1) == 2 ? (named ? named->name : desktop->name) : named ? u"WindowStation" : u"Desktop";
-			data.resize((text.size() + 1) * 2);
-			std::memcpy(data.data(), text.data(), text.size() * 2);
-			break;
-		}
-		default:
-			call.fail(87);
-			return;
-		}
-		if (call[4])
-			call.store<uint32_t>(call[4], uint32_t(data.size()));
-		if (!call[2] || call.u32(3) < data.size()) {
-			call.fail(122);
-			return;
-		}
-		call.write(call[2], data);
-		call.ret(1);
-	});
+	// The names come back as wide or ANSI text by the form called.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "GetUserObjectInformationW" : "GetUserObjectInformationA", 5, [&objects, wide](ApiCall &call) {
+			const auto named = objects.object_as<WindowStation>(call[0]);
+			const auto desktop = objects.object_as<Desktop>(call[0]);
+			if (!named && !desktop) {
+				call.fail(6);
+				return;
+			}
+			std::vector<uint8_t> data;
+			switch (call.u32(1)) {
+			case 1: {
+				data.assign(12, 0);
+				data[8] = 1;
+				break;
+			}
+			case 2: case 3: {
+				const std::u16string text = call.u32(1) == 2 ? (named ? named->name : desktop->name) : named ? u"WindowStation" : u"Desktop";
+				if (wide) {
+					data.resize((text.size() + 1) * 2);
+					std::memcpy(data.data(), text.data(), text.size() * 2);
+				} else {
+					const auto narrow = to_utf8(text);
+					data.assign(narrow.begin(), narrow.end());
+					data.push_back(0);
+				}
+				break;
+			}
+			default:
+				call.fail(87);
+				return;
+			}
+			if (call[4])
+				call.store<uint32_t>(call[4], uint32_t(data.size()));
+			if (!call[2] || call.u32(3) < data.size()) {
+				call.fail(122);
+				return;
+			}
+			call.write(call[2], data);
+			call.ret(1);
+		});
 
 	// The module list of the program: the executable first, then the libraries, as psapi reports them.
 	const auto module_list = [&modules, &context]() {
