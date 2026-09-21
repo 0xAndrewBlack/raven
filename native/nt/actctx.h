@@ -2,6 +2,7 @@
 
 #include "kernel_context.h"
 
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <optional>
@@ -23,6 +24,8 @@ public:
 		std::vector<Assembly> dependencies;
 		// The operating systems the manifest's compatibility section names, as lower-case GUIDs.
 		std::vector<std::string> supported_os;
+		// The assembly's folder in the side-by-side store, named like its manifest there; empty for a program's own manifest.
+		std::string folder;
 	};
 	struct Context {
 		Assembly root;
@@ -32,6 +35,14 @@ public:
 
 	// The runtime services the contexts need: guest memory, the prefix's paths and which thread is calling.
 	void attach(KernelContext &kernel);
+	// Before the process exists, as its first libraries are found: the host folder of the side-by-side store's manifests, the
+	// program's width and its own manifest.
+	void prepare(const std::filesystem::path &manifests, bool wide, std::string_view program_manifest);
+	// The side-by-side folder that serves a library named alone: an assembly the context in effect depends on, directly or through
+	// another, declares the file. The loader looks there before any other place, as Windows redirects it.
+	std::optional<std::filesystem::path> library_folder(std::string_view name) const;
+	// The place in a context of the assembly that declares a library: 1 is the context's own manifest, its dependencies follow.
+	std::optional<uint32_t> library_roster(uint64_t handle, std::string_view name) const;
 	// Parses a manifest's text; dependencies resolve through the WinSxS manifests of the prefix for the process's architecture.
 	std::optional<Assembly> parse(std::string_view text, bool wide) const;
 	uint64_t create(Context context);
@@ -56,10 +67,13 @@ public:
 
 private:
 	KernelContext *kernel = nullptr;
+	std::filesystem::path manifests;
+	std::optional<Assembly> program;
 	std::map<uint64_t, Context> contexts;
 	std::map<uint32_t, std::vector<std::pair<uint64_t, uint64_t>>> stacks;
 	uint64_t next_handle = 0x7e000001, next_cookie = 1, process_default = 0;
 	std::optional<Assembly> resolve(const Assembly &identity) const;
+	const Assembly *declaring(const Assembly &root, std::string_view name, uint32_t &index) const;
 };
 
 ActivationContexts &activation_contexts();

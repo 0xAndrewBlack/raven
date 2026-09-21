@@ -1,4 +1,5 @@
 #include "paths.h"
+#include "actctx.h"
 #include "text.h"
 #include "system_exports.h"
 
@@ -205,6 +206,9 @@ std::u16string NativePaths::library_location(std::u16string_view image_path, std
 		lower.push_back(character >= u'A' && character <= u'Z' ? char(character + 32) : char(character));
 	if (std::find(std::begin(runtime_components), std::end(runtime_components), lower) != std::end(runtime_components))
 		return system_directory(wide) + u"\\" + std::u16string(name);
+	// A library a side-by-side assembly of the program's context declares comes from the assembly's folder.
+	if (const auto folder = activation_contexts().library_folder(lower))
+		return dos(*folder) + u"\\" + std::u16string(name);
 	const auto program = full(image_path);
 	auto beside = program.substr(0, program.find_last_of(u'\\') + 1);
 	beside += name;

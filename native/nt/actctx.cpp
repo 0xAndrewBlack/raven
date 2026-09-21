@@ -83,6 +83,7 @@ void ActivationContexts::attach(KernelContext &context)
 	current_thread = [&context] { return context.threads.current_id(); };
 	// The common controls' manifests: comctl32 creates its contexts from them and registers its version 6 classes inside.
 	if (const auto store = context.paths.resolve(u"C:\\Windows\\WinSxS\\Manifests")) {
+		manifests = store->host;
 		std::error_code error;
 		std::filesystem::create_directories(store->host, error);
 		for (const auto *architecture : {"amd64", "x86"})
@@ -173,7 +174,7 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::parse(std::strin
 				root.files.push_back(attributes["name"]);
 		} else if (element == "assemblyidentity" && !closing) {
 			Assembly identity{attributes["name"], attributes["version"], lowered(attributes["processorarchitecture"]), lowered(attributes["publickeytoken"]),
-				{}, {}, {}, {}};
+				{}, {}, {}, {}, {}};
 			if (in_dependency) {
 				if (auto resolved = resolve(identity))
 					root.dependencies.push_back(std::move(*resolved));
@@ -208,16 +209,13 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::parse(std::strin
 // that keeps the major version asked for, as the publisher policies of the system assemblies redirect.
 std::optional<ActivationContexts::Assembly> ActivationContexts::resolve(const Assembly &identity) const
 {
-	if (!kernel || identity.name.empty())
-		return std::nullopt;
-	const auto store = kernel->paths.resolve(u"C:\\Windows\\WinSxS\\Manifests");
-	if (!store || !store->exists)
+	std::error_code error;
+	if (manifests.empty() || identity.name.empty() || !std::filesystem::is_directory(manifests, error))
 		return std::nullopt;
 	const std::string architecture = identity.architecture.empty() || identity.architecture == "*" ? (wide_process ? "amd64" : "x86") : identity.architecture;
 	const auto wanted = version_parts(identity.version);
 	std::optional<Assembly> best;
-	std::error_code error;
-	for (const auto &entry : std::filesystem::directory_iterator(store->host, error)) {
+	for (const auto &entry : std::filesystem::directory_iterator(manifests, error)) {
 		const auto file = lowered(entry.path().filename().string());
 		if (!file.ends_with(".manifest") || !file.starts_with(architecture + "_" + lowered(identity.name) + "_"))
 			continue;
@@ -229,10 +227,56 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::resolve(const As
 		const auto version = version_parts(candidate->version);
 		if (!wanted.empty() && wanted[0] && version[0] != wanted[0])
 			continue;
-		if (!best || version > version_parts(best->version))
+		if (!best || version > version_parts(best->version)) {
+			candidate->folder = entry.path().stem().string();
 			best = std::move(candidate);
+		}
 	}
 	return best;
+}
+
+void ActivationContexts::prepare(const std::filesystem::path &store, bool wide, std::string_view program_manifest)
+{
+	manifests = store;
+	wide_process = wide;
+	program = program_manifest.empty() ? std::nullopt : parse(program_manifest, false);
+}
+
+const ActivationContexts::Assembly *ActivationContexts::declaring(const Assembly &root, std::string_view name, uint32_t &index) const
+{
+	const auto wanted = lowered(name);
+	for (const auto &dependency : root.dependencies) {
+		++index;
+		if (!dependency.folder.empty())
+			for (const auto &file : dependency.files)
+				if (lowered(file) == wanted)
+					return &dependency;
+		if (const auto *found = declaring(dependency, name, index))
+			return found;
+	}
+	return nullptr;
+}
+
+std::optional<std::filesystem::path> ActivationContexts::library_folder(std::string_view name) const
+{
+	const Assembly *root = program ? &*program : nullptr;
+	if (kernel && current_thread) {
+		const auto context = contexts.find(current(current_thread()));
+		root = context == contexts.end() ? nullptr : &context->second.root;
+	}
+	uint32_t index = 1;
+	if (const auto *assembly = root ? declaring(*root, name, index) : nullptr)
+		return manifests.parent_path() / assembly->folder;
+	return std::nullopt;
+}
+
+std::optional<uint32_t> ActivationContexts::library_roster(uint64_t handle, std::string_view name) const
+{
+	const auto context = contexts.find(handle);
+	uint32_t index = 1;
+	if (context != contexts.end() && declaring(context->second.root, name, index))
+		return index;
+	return std::nullopt;
 }
 
 ActivationContexts::Version ActivationContexts::reported_version() const
@@ -458,7 +502,37 @@ void register_actctx_api(ApiRegistry &registry, KernelContext &context)
 		call.store_pointer(call[4] + width, 0);
 		call.ret(1);
 	});
-	registry.add("FindActCtxSectionStringW", 5, [](ApiCall &call) { call.fail(14007); });
+	// FindActCtxSectionStringW answers the library redirection section: a library an assembly of the context in effect declares, with the
+	// context and the assembly's place in it. The other sections have no entries.
+	registry.add("FindActCtxSectionStringW", 5, [&context, &contexts, thread, redirection = std::make_shared<uint64_t>(0)](ApiCall &call) {
+		constexpr uint32_t library_section = 2, return_context = 1;
+		const auto handle = contexts.current(thread());
+		const auto index = call.u32(2) == library_section && call[3] && call[4] ? contexts.library_roster(handle, to_utf8(call.wide(call[3], 260)))
+			: std::nullopt;
+		if (!index) {
+			call.fail(14007);
+			return;
+		}
+		// The entry is an ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION without a path: the library is in its assembly's folder.
+		if (!*redirection) {
+			*redirection = context.allocator.allocate(20);
+			call.store<uint32_t>(*redirection, 20);
+		}
+		const size_t width = call.pointer_width();
+		const size_t size = std::min<size_t>(call.load<uint32_t>(call[4]), width == 4 ? 64 : 112);
+		if (size > 4)
+			call.write(call[4] + 4, std::vector<uint8_t>(size - 4, 0));
+		call.store<uint32_t>(call[4] + 4, 1);
+		call.store_pointer(call[4] + 8, *redirection);
+		call.store<uint32_t>(call[4] + 8 + width, 20);
+		if (call.u32(0) & return_context) {
+			call.store_pointer(call[4] + 8 + width * 6, handle);
+			if (auto *found = contexts.find(handle))
+				++found->references;
+		}
+		call.store<uint32_t>(call[4] + 8 + width * 7, *index);
+		call.ret(1);
+	});
 	registry.add("FindActCtxSectionGuid", 5, [](ApiCall &call) { call.fail(14007); });
 }
 

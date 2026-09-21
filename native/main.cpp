@@ -7,6 +7,7 @@
 #include "nt/providers.h"
 #include "nt/paths.h"
 #include "nt/launch.h"
+#include "nt/actctx.h"
 #include "nt/elevation.h"
 #include "nt/handle_channel.h"
 #include "nt/text.h"
@@ -265,6 +266,18 @@ int main(int argc, char **argv)
 					}
 					// The libraries installed for every program, in the system directory of the program's width.
 					const auto system_directory = prefix.root() / "drive_c" / "windows" / (entry->image.is_64 ? "system32" : "syswow64");
+					// The program's own manifest names the side-by-side assemblies its libraries come from; it is read from the file, as the
+					// first libraries are found before the process exists.
+					{
+						std::string manifest;
+						for (const auto &resource : entry->image.resources())
+							if (resource.type == raven::ResourceKey{uint32_t(24)} && resource.name == raven::ResourceKey{uint32_t(1)} && resource.size < 1024 * 1024) {
+								const auto bytes = entry->image.file_span(resource.data_address, resource.size);
+								manifest.assign(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+								break;
+							}
+						raven::activation_contexts().prepare(prefix.root() / "drive_c" / "windows" / "WinSxS" / "Manifests", entry->image.is_64, manifest);
+					}
 					// A library of the other width is passed over, as the Windows loader goes on searching past it.
 					const auto find_file = [&](const std::filesystem::path &folder, std::string_view name) {
 						std::optional<std::filesystem::path> selected;
@@ -298,6 +311,11 @@ int main(int argc, char **argv)
 						if (std::find(std::begin(raven::runtime_components), std::end(raven::runtime_components), name) != std::end(raven::runtime_components))
 							if (const auto component = component_directory / name; std::filesystem::exists(component))
 								return read_file(component.c_str());
+						// A library an assembly of the context in effect declares comes from that assembly's folder before any other place, as
+						// Windows redirects it.
+						if (const auto folder = raven::activation_contexts().library_folder(name))
+							if (const auto redirected = find_file(*folder, name))
+								return read_file(redirected->c_str());
 						std::optional<std::filesystem::path> selected = find_file(directory, name);
 						// The runtime's own components are found beside the runtime when the program does not ship them.
 						// A 64-bit program built against msvcrt.dll gets the C runtime component as that library too: a runtime of its own, as

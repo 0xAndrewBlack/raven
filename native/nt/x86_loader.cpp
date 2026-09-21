@@ -1,4 +1,5 @@
 #include "x86_loader.h"
+#include "actctx.h"
 
 #include "apiset.h"
 #include "system_exports.h"
@@ -64,6 +65,17 @@ std::optional<std::vector<uint8_t>> NativeX86Loader::read_library(const std::str
 		identity = name;
 		return read_all(component);
 	}
+	// A name alone that an assembly of the context in effect declares comes from that assembly's folder, as Windows redirects it.
+	if (name.find_first_of("/\\:") == std::string::npos)
+		if (const auto folder = activation_contexts().library_folder(name)) {
+			std::error_code error;
+			for (const auto &entry : std::filesystem::directory_iterator(*folder, error))
+				if (lowered(entry.path().filename().string()) == name && entry.is_regular_file(error)) {
+					identity = name;
+					file = entry.path();
+					return read_all(entry.path());
+				}
+		}
 	// A name alone is looked for beside the program, then in the system directory, then in the current directory.
 	auto resolved = paths.resolve(std::u16string(name.begin(), name.end()));
 	if (name.find_first_of("/\\:") == std::string::npos) {
