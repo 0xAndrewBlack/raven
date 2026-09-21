@@ -24,6 +24,46 @@ CRT int _wcsnicmp(const wchar_t *a, const wchar_t *b, size_t count)
 	return 0;
 }
 
+CRT wchar_t *_wcslwr(wchar_t *text)
+{
+	for (wchar_t *at = text; *at; ++at)
+		*at = towlower(*at);
+	return text;
+}
+
+CRT wchar_t *_wcsupr(wchar_t *text)
+{
+	for (wchar_t *at = text; *at; ++at)
+		*at = towupper(*at);
+	return text;
+}
+
+CRT wchar_t *_wcsdup(const wchar_t *text)
+{
+	size_t size = (wcslen(text) + 1) * sizeof(wchar_t);
+	wchar_t *copy = malloc(size);
+	if (copy)
+		memcpy(copy, text, size);
+	return copy;
+}
+
+CRT void *bsearch(const void *key, const void *base, size_t count, size_t size, int (__cdecl *compare)(const void *, const void *))
+{
+	const char *low = base;
+	while (count) {
+		const char *middle = low + (count / 2) * size;
+		const int order = compare(key, middle);
+		if (!order)
+			return (void *)middle;
+		if (order > 0) {
+			low = middle + size;
+			count -= count / 2 + 1;
+		} else
+			count /= 2;
+	}
+	return NULL;
+}
+
 /* The count of characters a formatted string takes, with the historic rule: when the text does not fit, no terminator is
  * written and the result is -1. */
 CRT int _vsnprintf(char *buffer, size_t count, const char *text, va_list arguments)
@@ -56,6 +96,17 @@ CRT int _snprintf(char *buffer, size_t count, const char *text, ...)
 	int result;
 	va_start(arguments, text);
 	result = _vsnprintf(buffer, count, text, arguments);
+	va_end(arguments);
+	return result;
+}
+
+/* The unbounded form: the caller sized the buffer. */
+CRT int sprintf(char *buffer, const char *text, ...)
+{
+	va_list arguments;
+	int result;
+	va_start(arguments, text);
+	result = __stdio_common_vsprintf(0, buffer, (size_t)-1, text, NULL, arguments);
 	va_end(arguments);
 	return result;
 }
