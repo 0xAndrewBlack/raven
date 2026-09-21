@@ -22,15 +22,21 @@ programs and, with `--arch x86`, for 32-bit ones:
   `dll/3rdparty/libxslt`) and `atl100.dll` (`dll/win32/atl100`);
 - `urlmon.dll` (`dll/win32/urlmon`): URLs, monikers and the protocols behind them;
 - the imaging stack: `windowscodecs.dll`, `gdiplus.dll`, `propsys.dll`, `mlang.dll`
-  and `libpng.dll`, `libjpeg.dll`, `libtiff.dll` (`dll/3rdparty`).
+  and `libpng.dll`, `libjpeg.dll`, `libtiff.dll` (`dll/3rdparty`);
+- `advpack.dll` (`dll/win32/advpack`): the setup helpers IExpress packages and the
+  DirectX setup run INF files through;
+- `raven-setupapi.dll` (`dll/win32/setupapi`, with the LZ expansion functions of
+  `dll/win32/kernel32/wine/lzexpand.c`): setup information files, file queues and
+  cabinets, which the runtime's `setupapi.dll` hands to it; device management reaches
+  the plug and play service through the RPC client widl writes from `pnp.idl`.
 
 The runtime takes these libraries from beside itself whatever copies a program ships or
 an installer leaves in the system directory. Each new prefix registers the classes of
 `msxml3.dll`, `windowscodecs.dll`, `mlang.dll` and `propsys.dll` through `regsvr32`.
 
 Raven's corrections to upstream behavior live in `patches/` and are applied before the
-build. `support.c`, `storage.c`, `codecs.c`, `setup.c`, `dllmain.c`, `entry.c` and
-`entry_wide.c` are Raven code: they answer the compatibility database, binary file
+build. `support.c`, `storage.c`, `codecs.c`, `setup.c`, `printers.c`, `dllmain.c`, `entry.c`
+and `entry_wide.c` are Raven code: they answer the compatibility database, binary file
 patches, the class key helper and the delay-loaded imports the sources expect from
 libraries Raven does not ship, and give the programs and plain libraries their entry
 points. Binary patches of installed files are not applied yet.

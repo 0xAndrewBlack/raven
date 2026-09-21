@@ -432,7 +432,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	const auto overlay = [&](PEModule &provider, std::string_view library) {
 		struct Rule { const char *library, *component, *prefix; };
 		static constexpr Rule rules[] = {{"user32.dll", "raven-user32.dll", "raven-user32."}, {"comdlg32.dll", "raven-shell.dll", "raven-shell."},
-			{"ole32.dll", "raven-shell.dll", "raven-shell."}, {"shell32.dll", "raven-shell.dll", "raven-shell."}, {"msvcrt.dll", "ucrtbase.dll", "ucrtbase."}, {"shlwapi.dll", "raven-shell.dll", "raven-shell."},
+			{"ole32.dll", "raven-shell.dll", "raven-shell."}, {"shell32.dll", "raven-shell.dll", "raven-shell."}, {"msvcrt.dll", "ucrtbase.dll", "ucrtbase."}, {"shlwapi.dll", "raven-shell.dll", "raven-shell."}, {"setupapi.dll", "raven-setupapi.dll", "raven-setupapi."},
 			{"ole32.dll", "raven-storage.dll", "raven-storage."}};
 		for (const auto &rule : rules) {
 			if (library != rule.library)

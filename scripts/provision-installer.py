@@ -20,7 +20,7 @@ PREFIXES = ("sdk/include/", "sdk/lib/pseh/", "sdk/tools/hpp/", "sdk/tools/spec2d
             "base/system/msiexec/", "dll/win32/rpcrt4/", "sdk/lib/3rdparty/libxml2/", "sdk/lib/3rdparty/libwin-iconv/", "dll/3rdparty/libxslt/",
             "dll/win32/msxml3/", "dll/win32/stdole2.tlb/", "base/system/regsvr32/",
             "dll/win32/atl/", "dll/win32/atl100/", "dll/win32/oleaut32/", "dll/3rdparty/libpng/", "dll/3rdparty/libjpeg/", "dll/3rdparty/libtiff/",
-            "dll/win32/propsys/", "dll/win32/mlang/", "dll/win32/windowscodecs/", "dll/win32/gdiplus/", "sdk/lib/getopt/", "dll/win32/urlmon/", "dll/win32/combase/", "dll/win32/riched20/", "dll/win32/msvfw32/")
+            "dll/win32/propsys/", "dll/win32/mlang/", "dll/win32/windowscodecs/", "dll/win32/gdiplus/", "sdk/lib/getopt/", "dll/win32/urlmon/", "dll/win32/combase/", "dll/win32/riched20/", "dll/win32/msvfw32/", "dll/win32/advpack/", "dll/win32/setupapi/", "dll/win32/kernel32/wine/lzexpand.c")
 # Interface headers the installer sources include, generated from the public IDL files with what they import.
 IDLS = ("objidlbase", "commoncontrols", "fusion", "msxml2", "oaidl", "ocidl", "objidl", "unknwn", "wtypes", "propidl", "urlmon", "shobjidl", "servprov", "docobj", "oleidl",
         "exdisp", "activscp", "shldisp", "mshtml", "xmldom", "imnact", "msctf", "shtypes", "oleacc", "comcat", "mscoree", "wincodec", "dispex",
@@ -31,7 +31,7 @@ ZLIB = ("adler32.c", "crc32.c", "deflate.c", "inflate.c", "inffast.c", "inftrees
 STORAGE = ("ole32/bindctx.c", "combase/hglobalstream.c", "ole32/storage32.c", "ole32/stg_prop.c", "ole32/stg_stream.c", "ole32/filelockbytes.c", "ole32/dictionary.c",
            "coml2/memlockbytes.c", "coml2/stg_prop.c", "coml2/storage32.c")
 COMPONENTS = ("cabinet.dll", "sxs.dll", "rpcrt4.dll", "msi.dll", "raven-storage.dll", "msiexec.exe", "libxslt.dll", "msxml3.dll", "regsvr32.exe", "atl100.dll", "oleaut32.dll", "libpng.dll", "libjpeg.dll",
-              "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll", "riched20.dll", "msvfw32.dll")
+              "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll", "riched20.dll", "msvfw32.dll", "advpack.dll", "raven-setupapi.dll")
 
 
 def main():
@@ -386,7 +386,7 @@ def main():
         parts = sources if sources is not None else listed_sources(root)
         with ThreadPoolExecutor(max_workers=2) as pool:
             built = list(pool.map(lambda path: compile(path, stem + "_" + path.stem.replace(".", "_"), flags_here, wine_module), parts))
-        built.append(compile(generated / (stem + "_stubs.c"), stem + "_stubs", flags_here, wine_module))
+        built.append(compile(generated / (stem + "_stubs.c"), stem + "_spec_stubs", flags_here, wine_module))
         # The identifiers of the public interfaces it names, which mingw-w64's uuid library does not all have.
         for interface in interfaces:
             run([*widl, "-u", "-U", generated / (interface + "_i.c"), source / "sdk/include/psdk" / (interface + ".idl")])
@@ -455,6 +455,29 @@ def main():
     # resource script also names a manifest the ReactOS build generates.
     (generated / "msvfw32.rc").write_text('#include "msvideo_private.h"\n#pragma code_page(65001)\n#include "lang/msvfw32_En.rc"\n')
     library("msvfw32.dll", source / "dll/win32/msvfw32", [], ["winmm", "comctl32", "user32", "gdi32", "advapi32"], rc=generated / "msvfw32.rc")
+    # advpack.dll: the setup helpers of Internet Explorer's time, which IExpress packages and DirectX setup ask whether the user is an
+    # administrator and run INF files through.
+    library("advpack.dll", source / "dll/win32/advpack", [], ["ole32", "setupapi", "version", "advapi32"], rc="advpack.rc")
+    # raven-setupapi.dll: the setup API, which the runtime's setupapi.dll hands its setup information files, file queues and cabinets to;
+    # device management reaches the plug and play service through the RPC client widl writes.
+    setupapi_root = source / "dll/win32/setupapi"
+    run([*widl, "-I", source / "sdk/include/reactos/idl", "-h", "-H", generated / "pnp_c.h", "-c", "-C", generated / "pnp_c.c",
+         source / "sdk/include/reactos/idl/pnp.idl"])
+    # Its icons and English strings: the shared resource script also names a manifest the ReactOS build generates.
+    (generated / "setupapi.rc").write_text("#include <windef.h>\n#include <winuser.h>\n" + "".join(f'#include "{setupapi_root / name}"\n' for name in
+                                           ("resource.h", "res/icons_res.rc")) + f'#pragma code_page(65001)\n#include "{setupapi_root / "lang/en-US.rc"}"\n')
+    # The LZ expansion functions it copies files with are kernel32's on Windows; they are built into its image, with the public headers in
+    # place of kernel32's private one.
+    (generated / "lzexpand").mkdir(exist_ok=True)
+    (generated / "lzexpand/k32.h").write_text("#include <stdarg.h>\n#include <string.h>\n#include <ctype.h>\n#include <windef.h>\n#include <winbase.h>\n"
+                                              "#include <winnls.h>\n#include <stdio.h>\n#include <wine/debug.h>\n#include <wine/unicode.h>\nWINE_DEFAULT_DEBUG_CHANNEL(lzexpand);\n")
+    # It is a ReactOS module, which reaches the native headers rather than Wine's.
+    library("raven-setupapi.dll", setupapi_root, ["-U__WINESRC__", "-U_WINE", "-D_SETUPAPI_", "-D_CFGMGR32_", "-D_SETUPAPI_VER=0x0502", "-I" + str(source / "sdk/include/reactos/idl"),
+            "-I" + str(generated)], ["rpcrt4", "gdi32", "comctl32", "advapi32", "user32", "version", "comdlg32", "shell32", "wintrust"],
+            wine_module=False, sources=[*listed_sources(setupapi_root), generated / "pnp_c.c"], rc=generated / "setupapi.rc",
+            objects_more=[compile(support / "printers.c", "setupapi_printers"),
+                          compile(source / "dll/win32/kernel32/wine/lzexpand.c", "setupapi_lzexpand", ["-I" + str(generated / "lzexpand")],
+                                  wine_module=False)])
     # regsvr32.exe: registers the classes a library serves, as installers and the runtime's own prefix setup run it.
     regsvr32_root = source / "base/system/regsvr32"
     regsvr32 = [compile(regsvr32_root / "regsvr32.c", "regsvr32_regsvr32", ["-DUNICODE", "-D_UNICODE", "-I" + str(regsvr32_root)], wine_module=False),
