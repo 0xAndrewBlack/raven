@@ -486,6 +486,61 @@ CRT int vsprintf(char *buffer, const char *text, va_list arguments)
 	return __stdio_common_vsprintf(0, buffer, (size_t)-1, text, NULL, arguments);
 }
 
+/* The narrow number reader, through the wide one. */
+__asm__(".section .drectve\n\t.ascii \" -export:strtod=raven_strtod\"\n\t.text");
+double raven_wcstod(const wchar_t *text, wchar_t **end);
+double raven_strtod(const char *text, char **end)
+{
+	wchar_t wide[128];
+	size_t length = 0;
+	wchar_t *wide_end;
+	while (text[length] && length < 127) {
+		wide[length] = (unsigned char)text[length];
+		++length;
+	}
+	wide[length] = 0;
+	double value = raven_wcstod(wide, &wide_end);
+	if (end)
+		*end = (char *)text + (wide_end - wide);
+	return value;
+}
+
+CRT double atof(const char *text) { return raven_strtod(text, NULL); }
+
+/* ---- calendar time ---- */
+
+/* The UTC calendar fields of a time in seconds since 1970, in msvcrt's struct tm; the result lives in one buffer, as msvcrt's does. */
+typedef struct {
+	int second, minute, hour, day, month, year, weekday, yearday, daylight;
+} RavenTime;
+
+CRT RavenTime *_gmtime64(const long long *time)
+{
+	static RavenTime result;
+	if (!time || *time < 0)
+		return NULL;
+	long long days = *time / 86400, rest = *time % 86400;
+	result.hour = (int)(rest / 3600);
+	result.minute = (int)(rest / 60 % 60);
+	result.second = (int)(rest % 60);
+	result.weekday = (int)((days + 4) % 7);
+	/* Days to the civil date, counting eras of 400 years from 0000-03-01. */
+	long long z = days + 719468, era = z / 146097, offset = z - era * 146097;
+	long long year_of_era = (offset - offset / 1460 + offset / 36524 - offset / 146096) / 365;
+	long long day_of_year = offset - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+	long long month_index = (5 * day_of_year + 2) / 153;
+	int day = (int)(day_of_year - (153 * month_index + 2) / 5 + 1), month = (int)(month_index < 10 ? month_index + 3 : month_index - 9);
+	long long year = year_of_era + era * 400 + (month <= 2);
+	static const int before[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+	const int leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+	result.day = day;
+	result.month = month - 1;
+	result.year = (int)(year - 1900);
+	result.yearday = before[month - 1] + day - 1 + (leap && month > 2);
+	result.daylight = 0;
+	return &result;
+}
+
 /* ---- floating point classes ---- */
 
 CRT int _isnan(double x) { return x != x; }

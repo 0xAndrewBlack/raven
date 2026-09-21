@@ -1025,6 +1025,77 @@ CRT double fmod(double x, double y)
 	return x < 0 ? -rest : rest;
 }
 
+/* The square root and the arc tangents come from the processor: SSE2 on 64 bits, the x87 unit for the rest. */
+CRT double sqrt(double x)
+{
+	double root;
+#ifdef __x86_64__
+	__asm__("sqrtsd %1, %0" : "=x"(root) : "x"(x));
+#else
+	__asm__("fsqrt" : "=t"(root) : "0"(x));
+#endif
+	return root;
+}
+
+CRT double atan2(double y, double x)
+{
+	long double result;
+	__asm__("fpatan" : "=t"(result) : "0"((long double)x), "u"((long double)y) : "st(1)");
+	return (double)result;
+}
+
+CRT double atan(double x) { return atan2(x, 1.0); }
+
+CRT double tan(double x)
+{
+	long double result, one;
+	__asm__("fptan" : "=t"(one), "=u"(result) : "0"((long double)x));
+	(void)one;
+	return (double)result;
+}
+
+CRT double _hypot(double x, double y)
+{
+	x = fabs(x);
+	y = fabs(y);
+	double larger = x > y ? x : y, smaller = x > y ? y : x;
+	if (larger == 0 || larger == 1.0 / 0.0)
+		return larger;
+	double ratio = smaller / larger;
+	return larger * sqrt(1 + ratio * ratio);
+}
+
+/* The mantissa in [0.5, 1) and the power of two; and the fraction with the whole part apart, both with the sign of x. */
+CRT double frexp(double x, int *exponent)
+{
+	union { double d; unsigned long long bits; } value = {x};
+	int raw = (int)((value.bits >> 52) & 0x7ff);
+	*exponent = 0;
+	if (x == 0 || x != x || raw == 0x7ff)
+		return x;
+	if (!raw) {
+		value.d = x * 18014398509481984.0; /* 2^54 */
+		raw = (int)((value.bits >> 52) & 0x7ff);
+		*exponent = -54;
+	}
+	*exponent += raw - 1022;
+	value.bits = (value.bits & 0x800fffffffffffffULL) | 0x3fe0000000000000ULL;
+	return value.d;
+}
+
+CRT double modf(double x, double *whole)
+{
+	if (!(x > -4503599627370496.0 && x < 4503599627370496.0)) {
+		*whole = x;
+		return x != x ? x : (x < 0 ? -0.0 : 0.0);
+	}
+	*whole = (double)(long long)x;
+	return x - *whole;
+}
+
+CRT float floorf(float x) { return (float)floor(x); }
+CRT float ceilf(float x) { return (float)ceil(x); }
+
 CRT double log(double x) { return raven_log(x); }
 CRT double log10(double x) { return raven_log(x) / 2.30258509299404568402; }
 CRT double exp(double x) { return raven_exp(x); }
@@ -1102,7 +1173,7 @@ __asm__(
 /* The 32-bit buffer keeps the callee-saved registers, the stack pointer after the return and the return address. */
 __asm__(
 	".section .drectve\n"
-	".ascii \" -export:_setjmp3 -export:longjmp\"\n"
+	".ascii \" -export:_setjmp3 -export:_setjmp=_setjmp3 -export:longjmp\"\n"
 	".text\n"
 	".globl __setjmp3\n"
 	"__setjmp3:\n"
