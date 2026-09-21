@@ -332,6 +332,69 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		});
 	};
 	registry.add("GetTextMetricsW", 2, [=](ApiCall &call) { text_metrics(call, false); });
+	// The font file's own tables are not handed out yet: GDI_ERROR, as Windows answers for fonts that have none, so shaping goes on without
+	// the font's OpenType features.
+	registry.add("GetFontData", 5, [](ApiCall &call) { call.fail(1, 0xffffffffU); });
+	// GetOutlineTextMetricsW(dc, size, OUTLINETEXTMETRICW): the text metrics inside, the em square at the font's pixel size so scaled
+	// values read as pixels, the underline and strikeout lines, and the names after the structure, which its name fields locate.
+	registry.add("GetOutlineTextMetricsW", 3, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			const auto &font = selected_font(dc);
+			const auto info = objects.text().logical_metrics(font.definition);
+			const size_t width = call.pointer_width(), base = width == 4 ? 216 : 232;
+			std::u16string face;
+			for (size_t at = 28; at + 1 < font.definition.size() && face.size() < 32; at += 2) {
+				const char16_t character = char16_t(font.definition[at] | font.definition[at + 1] << 8);
+				if (!character)
+					break;
+				face.push_back(character);
+			}
+			const std::u16string names[4] = {face, face, u"Regular", face};
+			size_t total = base;
+			for (const auto &name : names)
+				total += (name.size() + 1) * 2;
+			if (!call[2]) {
+				call.ret(total);
+				return;
+			}
+			if (call.u32(1) < total)
+				throw uint32_t(87);
+			std::vector<uint8_t> bytes(total, 0);
+			const auto put32 = [&](size_t at, int32_t value) { std::memcpy(bytes.data() + at, &value, 4); };
+			put32(0, int32_t(total));
+			put32(4, info.height); put32(8, info.ascent); put32(12, info.descent); put32(16, info.internal_leading);
+			put32(20, info.external_leading); put32(24, info.average_width); put32(28, info.maximum_width);
+			uint32_t weight;
+			std::memcpy(&weight, font.definition.data() + 16, 4);
+			put32(32, int32_t(weight ? weight : 400));
+			put32(40, 96); put32(44, 96);
+			const uint16_t characters[4] = {info.first, info.last, info.default_character, info.break_character};
+			std::memcpy(bytes.data() + 48, characters, 8);
+			bytes[56] = font.definition[20]; bytes[57] = font.definition[21]; bytes[58] = font.definition[22]; bytes[59] = info.pitch;
+			bytes[60] = font.definition[23];
+			const int32_t em = std::max<int32_t>(info.height - info.internal_leading, 1);
+			put32(76, (weight >= 700 ? 0x20 : 0) | (font.definition[20] ? 1 : 0) | 0x40);
+			put32(84, 1); put32(96, em);
+			put32(100, info.ascent); put32(104, -info.descent); put32(108, info.external_leading);
+			put32(112, em * 7 / 10); put32(116, em / 2);
+			put32(120, 0); put32(124, info.ascent); put32(128, info.maximum_width); put32(132, -info.descent);
+			put32(136, info.ascent); put32(140, -info.descent); put32(144, info.external_leading); put32(148, 9);
+			put32(152, em * 2 / 3); put32(156, em * 2 / 3); put32(160, 0); put32(164, em / 7);
+			put32(168, em * 2 / 3); put32(172, em * 2 / 3); put32(176, 0); put32(180, em * 3 / 8);
+			const int32_t line = std::max(1, em / 14);
+			put32(184, line); put32(188, em * 3 / 10); put32(192, line); put32(196, -std::max(1, em / 10));
+			size_t at = base;
+			for (size_t index = 0; index < 4; ++index) {
+				const uint64_t offset = at;
+				std::memcpy(bytes.data() + 200 + index * width, &offset, width);
+				std::memcpy(bytes.data() + at, names[index].data(), names[index].size() * 2);
+				at += (names[index].size() + 1) * 2;
+			}
+			call.write(call[2], bytes);
+			call.ret(total);
+		});
+	});
 	registry.add("GetTextMetricsA", 2, [=](ApiCall &call) { text_metrics(call, true); });
 	registry.add("GetCharWidthW", 4, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
@@ -367,6 +430,47 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			call.ret(1);
 		});
 	});
+	// Glyph indices are the UTF-16 units themselves: a font's glyph for a character is named by the character, which ExtTextOutW with
+	// ETO_GLYPH_INDEX draws and the glyph measurements below measure.
+	for (const bool narrow : {false, true})
+		registry.add(narrow ? "GetGlyphIndicesA" : "GetGlyphIndicesW", 5, [=, this](ApiCall &call) {
+			guarded(call, 0xffffffffU, [&] {
+				require_dc(call, 0);
+				const int32_t count = call.i32(2);
+				if (count < 0 || !call[1] || !call[3])
+					throw uint32_t(87);
+				const auto text = widen(call, call[1], count, narrow);
+				std::vector<uint8_t> bytes(text.size() * 2);
+				std::memcpy(bytes.data(), text.data(), bytes.size());
+				call.write(call[3], bytes);
+				call.ret(uint32_t(text.size()));
+			});
+		});
+	// GetCharABCWidthsI(dc, first glyph, count, glyph array, ABC) and GetCharWidthI(dc, first glyph, count, glyph array, widths).
+	for (const bool abc : {true, false})
+		registry.add(abc ? "GetCharABCWidthsI" : "GetCharWidthI", 5, [=, this](ApiCall &call) {
+			guarded(call, 0, [&] {
+				auto &dc = require_dc(call, 0);
+				const auto &font = selected_font(dc);
+				const uint32_t first = call.u32(1), count = call.u32(2);
+				if (!call[4] || count > 65536)
+					throw uint32_t(87);
+				for (uint32_t index = 0; index < count; ++index) {
+					const uint16_t unit = call[3] ? call.load<uint16_t>(call[3] + uint64_t(index) * 2) : uint16_t(first + index);
+					const auto advance = measured_advances(font.definition, std::span<const uint16_t>(&unit, 1));
+					const int32_t width = advance.empty() ? 0 : advance[0];
+					if (abc) {
+						const uint64_t at = call[4] + uint64_t(index) * 12;
+						call.store<int32_t>(at, 0);
+						call.store<uint32_t>(at + 4, uint32_t(width));
+						call.store<int32_t>(at + 8, 0);
+					} else {
+						call.store<int32_t>(call[4] + uint64_t(index) * 4, width);
+					}
+				}
+				call.ret(1);
+			});
+		});
 	registry.add("GetCharWidthInfo", 2, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			require_dc(call, 0);
@@ -741,6 +845,183 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		}
 		call.store<int32_t>(call[2], index);
 		call.store<int32_t>(call[3], trailing);
+		call.ret(0);
+	});
+	// The item, shape and place calls of Uniscribe for text that runs left to right in one script: one item, one glyph per character
+	// whose index is the character itself, and the advances the font gives. The script cache keeps the font a device context had, so
+	// the calls that receive no device context still know it, as on Windows.
+	const auto cached_font = [=, this](ApiCall &call, uint64_t dc_handle, uint64_t cache) -> const DesktopFont * {
+		if (const auto *dc = dc_handle ? objects.dc(dc_handle) : nullptr; dc && objects.font(dc->font)) {
+			if (cache)
+				call.store_pointer(cache, dc->font);
+			return objects.font(dc->font);
+		}
+		return cache ? objects.font(call.load_pointer(cache)) : nullptr;
+	};
+	const auto glyph_advances = [=](const DesktopFont &font, const std::u16string &text) {
+		const auto cumulative = measured_advances(font.definition, to_units(text));
+		std::vector<int32_t> advances(text.size());
+		for (size_t index = 0; index < text.size() && index < cumulative.size(); ++index)
+			advances[index] = cumulative[index] - (index ? cumulative[index - 1] : 0);
+		return advances;
+	};
+	// ScriptItemize(text, count, item capacity, control, state, SCRIPT_ITEM, item count): one item and the end marker after it.
+	registry.add("ScriptItemize", 7, [](ApiCall &call) {
+		const int32_t count = call.i32(1), capacity = call.i32(2);
+		if (!call[0] || count <= 0 || !call[5]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		if (capacity < 2) {
+			call.ret(0x8007000eU);
+			return;
+		}
+		const std::vector<uint8_t> items(16, 0);
+		call.write(call[5], items);
+		call.store<int32_t>(call[5] + 8, count);
+		if (call[6])
+			call.store<int32_t>(call[6], 1);
+		call.ret(0);
+	});
+	// ScriptShape(dc, cache, text, count, glyph capacity, analysis, glyphs, clusters, visual attributes, glyph count).
+	registry.add("ScriptShape", 10, [=](ApiCall &call) {
+		const int32_t count = call.i32(3), capacity = call.i32(4);
+		if (!call[2] || count <= 0 || !call[6] || !call[7] || !call[8] || !call[9]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		if (!cached_font(call, call[0], call[1])) {
+			call.ret(0x8000000aU);
+			return;
+		}
+		if (capacity < count) {
+			call.ret(0x8007000eU);
+			return;
+		}
+		const auto text = call.read(call[2], size_t(count) * 2);
+		std::vector<uint8_t> clusters(size_t(count) * 2), attributes(size_t(count) * 2);
+		for (int32_t index = 0; index < count; ++index) {
+			clusters[size_t(index) * 2] = uint8_t(index);
+			clusters[size_t(index) * 2 + 1] = uint8_t(index >> 8);
+			// SCRIPT_VISATTR: every glyph starts its cluster; a space stretches as a blank when text is justified.
+			const char16_t character = char16_t(text[size_t(index) * 2] | text[size_t(index) * 2 + 1] << 8);
+			attributes[size_t(index) * 2] = uint8_t(0x10 | (character == u' ' ? 4 : 2));
+		}
+		call.write(call[6], text);
+		call.write(call[7], clusters);
+		call.write(call[8], attributes);
+		call.store<int32_t>(call[9], count);
+		call.ret(0);
+	});
+	// ScriptPlace(dc, cache, glyphs, count, visual attributes, analysis, advances, offsets, ABC).
+	registry.add("ScriptPlace", 9, [=](ApiCall &call) {
+		const int32_t count = call.i32(3);
+		const auto *font = cached_font(call, call[0], call[1]);
+		if (!call[2] || count <= 0 || !call[6]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		if (!font) {
+			call.ret(0x8000000aU);
+			return;
+		}
+		const auto bytes = call.read(call[2], size_t(count) * 2);
+		std::u16string text(size_t(count), u'\0');
+		std::memcpy(text.data(), bytes.data(), bytes.size());
+		const auto advances = glyph_advances(*font, text);
+		int64_t total = 0;
+		for (int32_t index = 0; index < count; ++index) {
+			call.store<int32_t>(call[6] + uint64_t(index) * 4, advances[size_t(index)]);
+			total += advances[size_t(index)];
+		}
+		if (call[7])
+			call.write(call[7], std::vector<uint8_t>(size_t(count) * 8, 0));
+		if (call[8]) {
+			call.store<int32_t>(call[8], 0);
+			call.store<uint32_t>(call[8] + 4, uint32_t(total));
+			call.store<int32_t>(call[8] + 8, 0);
+		}
+		call.ret(0);
+	});
+	// ScriptTextOut(dc, cache, x, y, options, rect, analysis, reserved, reserved, glyphs, count, advances, justified advances, offsets).
+	registry.add("ScriptTextOut", 14, [=, this](ApiCall &call) {
+		auto *dc = objects.dc(call[0]);
+		const int32_t count = call.i32(10);
+		if (!dc || !objects.font(dc->font) || !call[9] || count <= 0 || !call[11]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto bytes = call.read(call[9], size_t(count) * 2);
+		std::u16string text(size_t(count), u'\0');
+		std::memcpy(text.data(), bytes.data(), bytes.size());
+		std::vector<int32_t> deltas(static_cast<size_t>(count));
+		for (int32_t index = 0; index < count; ++index)
+			deltas[size_t(index)] = call.load<int32_t>((call[12] ? call[12] : call[11]) + uint64_t(index) * 4);
+		std::optional<DesktopRect> rect;
+		if (call[5])
+			rect = DesktopRect{call.load<int32_t>(call[5]), call.load<int32_t>(call[5] + 4), call.load<int32_t>(call[5] + 8), call.load<int32_t>(call[5] + 12)};
+		draw_run(*dc, call.i32(2), call.i32(3), call.u32(4) & 6, rect ? &*rect : nullptr, text, deltas);
+		call.ret(0);
+	});
+	// ScriptCPtoX(position, trailing, characters, glyphs, clusters, visual attributes, advances, analysis, x).
+	registry.add("ScriptCPtoX", 9, [](ApiCall &call) {
+		const int32_t position = call.i32(0), count = call.i32(2);
+		if (!call[6] || !call[8] || count < 0) {
+			call.ret(0x80070057U);
+			return;
+		}
+		int32_t x = 0;
+		for (int32_t index = 0; index < std::min(position, count); ++index)
+			x += call.load<int32_t>(call[6] + uint64_t(index) * 4);
+		if (call.u32(1) && position >= 0 && position < count)
+			x += call.load<int32_t>(call[6] + uint64_t(position) * 4);
+		call.store<int32_t>(call[8], x);
+		call.ret(0);
+	});
+	// ScriptXtoCP(x, characters, glyphs, clusters, visual attributes, advances, analysis, position, trailing).
+	registry.add("ScriptXtoCP", 9, [](ApiCall &call) {
+		const int32_t x = call.i32(0), count = call.i32(1);
+		if (!call[5] || !call[7] || !call[8] || count < 0) {
+			call.ret(0x80070057U);
+			return;
+		}
+		int32_t position = count, trailing = 0, start = 0;
+		if (x < 0) {
+			position = -1;
+			trailing = 1;
+		} else {
+			for (int32_t index = 0; index < count; ++index) {
+				const int32_t advance = call.load<int32_t>(call[5] + uint64_t(index) * 4);
+				if (x < start + advance) {
+					position = index;
+					trailing = x - start >= (advance + 1) / 2;
+					break;
+				}
+				start += advance;
+			}
+		}
+		call.store<int32_t>(call[7], position);
+		call.store<int32_t>(call[8], trailing);
+		call.ret(0);
+	});
+	// ScriptLayout(runs, levels, visual to logical, logical to visual): left to right runs keep their order.
+	registry.add("ScriptLayout", 4, [](ApiCall &call) {
+		const int32_t runs = call.i32(0);
+		if (runs < 0 || !call[1]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		for (int32_t index = 0; index < runs; ++index) {
+			if (call[2])
+				call.store<int32_t>(call[2] + uint64_t(index) * 4, index);
+			if (call[3])
+				call.store<int32_t>(call[3] + uint64_t(index) * 4, index);
+		}
+		call.ret(0);
+	});
+	registry.add("ScriptFreeCache", 1, [](ApiCall &call) {
+		if (call[0])
+			call.store_pointer(call[0], 0);
 		call.ret(0);
 	});
 	registry.add("ScriptStringOut", 8, [=, this](ApiCall &call) {

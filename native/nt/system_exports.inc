@@ -2588,6 +2588,16 @@ static constexpr std::string_view odbccp32_exports[]{
 	"SQLValidDSN","SQLValidDSNW","SQLWriteDSNToIni","SQLWriteDSNToIniW","SQLWriteFileDSN","SQLWriteFileDSNW",
 	"SQLWritePrivateProfileString","SQLWritePrivateProfileStringW","SelectTransDlg",
 };
+static constexpr std::string_view usp10_exports[]{
+	"LpkPresent","ScriptApplyDigitSubstitution","ScriptApplyLogicalWidth","ScriptBreak","ScriptCPtoX","ScriptCacheGetHeight",
+	"ScriptFreeCache","ScriptGetCMap","ScriptGetFontAlternateGlyphs","ScriptGetFontFeatureTags","ScriptGetFontLanguageTags","ScriptGetFontProperties",
+	"ScriptGetFontScriptTags","ScriptGetGlyphABCWidth","ScriptGetLogicalWidths","ScriptGetProperties","ScriptIsComplex","ScriptItemize",
+	"ScriptItemizeOpenType","ScriptJustify","ScriptLayout","ScriptPlace","ScriptPlaceOpenType","ScriptPositionSingleGlyph",
+	"ScriptRecordDigitSubstitution","ScriptShape","ScriptShapeOpenType","ScriptStringAnalyse","ScriptStringCPtoX","ScriptStringFree",
+	"ScriptStringGetLogicalWidths","ScriptStringGetOrder","ScriptStringOut","ScriptStringValidate","ScriptStringXtoCP","ScriptString_pLogAttr",
+	"ScriptString_pSize","ScriptString_pcOutChars","ScriptSubstituteSingleGlyph","ScriptTextOut","ScriptXtoCP","UspAllocCache",
+	"UspAllocTemp","UspFreeMem",
+};
 static constexpr std::pair<std::string_view, std::span<const std::string_view>> libraries[]{
 	{"advapi32.dll", advapi32_exports},
 	{"bcrypt.dll", bcrypt_exports},
@@ -2643,4 +2653,5 @@ static constexpr std::pair<std::string_view, std::span<const std::string_view>> 
 	{"atlthunk.dll", atlthunk_exports},
 	{"oleacc.dll", oleacc_exports},
 	{"odbccp32.dll", odbccp32_exports},
+	{"usp10.dll", usp10_exports},
 };

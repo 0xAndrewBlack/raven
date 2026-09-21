@@ -961,6 +961,8 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 			call.ret(1);
 		});
 	});
+	// msimg32's AlphaBlend is gdi32's GdiAlphaBlend under its older name.
+	registry.add("AlphaBlend", 11, [&registry](ApiCall &call) { registry.find("GdiAlphaBlend")->second(call); });
 	registry.add("PatBlt", 6, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			auto &destination = require_dc(call, 0);

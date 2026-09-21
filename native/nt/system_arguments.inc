@@ -2486,6 +2486,16 @@ static constexpr std::pair<std::string_view, uint8_t> odbccp32_words[]{
 	{"SQLRemoveTranslatorW",2},{"SQLSetConfigMode",1},{"SQLValidDSN",1},{"SQLValidDSNW",1},{"SQLWriteDSNToIni",2},{"SQLWriteDSNToIniW",2},
 	{"SQLWriteFileDSN",4},{"SQLWriteFileDSNW",4},{"SQLWritePrivateProfileString",4},{"SQLWritePrivateProfileStringW",4},
 };
+static constexpr std::pair<std::string_view, uint8_t> usp10_words[]{
+	{"LpkPresent",0},{"ScriptApplyDigitSubstitution",3},{"ScriptApplyLogicalWidth",9},{"ScriptBreak",4},{"ScriptCPtoX",9},{"ScriptCacheGetHeight",3},
+	{"ScriptFreeCache",1},{"ScriptGetCMap",6},{"ScriptGetFontAlternateGlyphs",10},{"ScriptGetFontFeatureTags",8},{"ScriptGetFontLanguageTags",7},{"ScriptGetFontProperties",3},
+	{"ScriptGetFontScriptTags",6},{"ScriptGetGlyphABCWidth",4},{"ScriptGetLogicalWidths",7},{"ScriptGetProperties",2},{"ScriptIsComplex",3},{"ScriptItemize",7},
+	{"ScriptItemizeOpenType",8},{"ScriptJustify",6},{"ScriptLayout",4},{"ScriptPlace",9},{"ScriptPlaceOpenType",18},{"ScriptPositionSingleGlyph",13},
+	{"ScriptRecordDigitSubstitution",2},{"ScriptShape",10},{"ScriptShapeOpenType",16},{"ScriptStringAnalyse",13},{"ScriptStringCPtoX",4},{"ScriptStringFree",1},
+	{"ScriptStringGetLogicalWidths",2},{"ScriptStringGetOrder",2},{"ScriptStringOut",8},{"ScriptStringValidate",1},{"ScriptStringXtoCP",4},{"ScriptString_pLogAttr",1},
+	{"ScriptString_pSize",1},{"ScriptString_pcOutChars",1},{"ScriptSubstituteSingleGlyph",9},{"ScriptTextOut",14},{"ScriptXtoCP",9},{"UspAllocCache",2},
+	{"UspAllocTemp",2},{"UspFreeMem",1},
+};
 static constexpr std::pair<std::string_view, std::span<const std::pair<std::string_view, uint8_t>>> argument_tables[]{
 	{"advapi32.dll", advapi32_words},
 	{"bcrypt.dll", bcrypt_words},
@@ -2541,4 +2551,5 @@ static constexpr std::pair<std::string_view, std::span<const std::pair<std::stri
 	{"atlthunk.dll", atlthunk_words},
 	{"oleacc.dll", oleacc_words},
 	{"odbccp32.dll", odbccp32_words},
+	{"usp10.dll", usp10_words},
 };
