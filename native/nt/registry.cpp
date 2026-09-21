@@ -169,8 +169,8 @@ void NativeRegistry::seed()
 		text(system.c_str(), u"EditionID", u"Professional");
 		text(system.c_str(), u"InstallationType", u"Client");
 		text(system.c_str(), u"CurrentVersion", u"6.3");
-		text(system.c_str(), u"CurrentBuild", u"19041");
-		text(system.c_str(), u"CurrentBuildNumber", u"19041");
+		text(system.c_str(), u"CurrentBuild", u"19045");
+		text(system.c_str(), u"CurrentBuildNumber", u"19045");
 		text(system.c_str(), u"DisplayVersion", u"22H2");
 		text(system.c_str(), u"ReleaseId", u"2009");
 		text(system.c_str(), u"SystemRoot", u"C:\\Windows");
@@ -179,6 +179,22 @@ void NativeRegistry::seed()
 		number(system.c_str(), u"CurrentMajorVersionNumber", 10);
 		number(system.c_str(), u"CurrentMinorVersionNumber", 0);
 		number(system.c_str(), u"UBR", 2364);
+	}
+	// The services every Windows installation has: the Windows Installer, started on demand, which installers stop and start.
+	{
+		const auto service = u"SYSTEM\\CurrentControlSet\\Services\\msiserver";
+		text(service, u"DisplayName", u"Windows Installer");
+		text(service, u"Description", u"Adds, modifies, and removes applications provided as a Windows Installer (*.msi, *.msp) package.");
+		text(service, u"ObjectName", u"LocalSystem");
+		number(service, u"Type", 0x10);
+		number(service, u"Start", 3);
+		number(service, u"ErrorControl", 1);
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		if (!create(0x80000002ULL, service, key, disposition)) {
+			set(key, u"ImagePath", 2, bytes_of(u"%systemroot%\\system32\\msiexec.exe /V"));
+			close(key);
+		}
 	}
 	seeding = false;
 	save();
