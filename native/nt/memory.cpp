@@ -45,7 +45,7 @@ NativeMemory::NativeMemory(NativeProcess &process, NativeEnvironment &environmen
 {
 	if (process.mode()==NativeMode::x86) {
 		user_limit=x86_user_limit;
-		next=0x20000000ULL;
+		next=floor=0x20000000ULL;
 	}
 }
 
@@ -205,14 +205,22 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 		return {0,0,no_memory};
 	uint64_t selected=base;
 	if (!address) {
+		// The search starts after the last range handed out; at the top of the address space it goes on once from the bottom, over
+		// the ranges freed since, as a 32-bit program that starts and ends many threads frees their stacks there.
 		selected=next;
-		for (size_t tries=0; tries<10000; ++tries) {
-			if (!range(selected,length,user_limit))
-				return {0,0,no_memory};
+		bool wrapped=false;
+		for (size_t tries=0; tries<20000; ++tries) {
+			if (!range(selected,length,user_limit)) {
+				if (wrapped)
+					return {0,0,no_memory};
+				wrapped=true;
+				selected=floor;
+				continue;
+			}
 			if (process.memory_available(selected,length))
 				break;
 			selected+=((length+65535)&~uint64_t(65535));
-			if (tries==9999)
+			if (tries==19999)
 				return {0,0,no_memory};
 		}
 	}

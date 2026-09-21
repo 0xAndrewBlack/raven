@@ -108,7 +108,8 @@ private:
 	NativeEnvironment &environment;
 	std::map<uint64_t,Image> images;
 	std::map<uint64_t,Region> regions;
-	uint64_t next = 0x200000000ULL;
+	// Where searches for free space begin: after the last range handed out, and from the floor once the top is reached.
+	uint64_t next = 0x200000000ULL, floor = 0x200000000ULL;
 	uint64_t user_limit = native_user_limit;
 	size_t used = 0, reserved_total = 0;
 	size_t limit;
