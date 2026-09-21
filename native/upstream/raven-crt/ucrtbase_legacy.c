@@ -40,6 +40,8 @@ CRT wchar_t *_wcsupr(wchar_t *text)
 
 CRT wchar_t *_wcsdup(const wchar_t *text)
 {
+	if (!text)
+		return NULL;
 	size_t size = (wcslen(text) + 1) * sizeof(wchar_t);
 	wchar_t *copy = malloc(size);
 	if (copy)
