@@ -970,7 +970,22 @@ static double raven_cos(double x)
 	return sum;
 }
 
+static double raven_sin(double x)
+{
+	static const double two_pi = 6.28318530717958647692;
+	double r, term, sum;
+	long long turns = (long long)(x / two_pi + (x >= 0 ? 0.5 : -0.5));
+	r = x - (double)turns * two_pi;
+	term = sum = r;
+	for (int n = 1; n < 14; ++n) {
+		term *= -r * r / ((2 * n) * (2 * n + 1));
+		sum += term;
+	}
+	return sum;
+}
+
 CRT float cosf(float x) { return (float)raven_cos(x); }
+CRT float sinf(float x) { return (float)raven_sin(x); }
 CRT float fmaxf(float a, float b) { return a != a ? b : b != b ? a : a > b ? a : b; }
 CRT float fminf(float a, float b) { return a != a ? b : b != b ? a : a < b ? a : b; }
 CRT long lroundf(float x) { return (long)(x >= 0 ? (double)x + 0.5 : (double)x - 0.5); }
@@ -981,6 +996,17 @@ static double raven_pow(double base, double exponent)
 		return 1.0;
 	if (base == 0)
 		return exponent > 0 ? 0.0 : 1.0 / 0.0;
+	/* A whole exponent multiplies by squaring, which keeps powers of small whole numbers exact. */
+	if (exponent >= -1024 && exponent <= 1024 && (double)(int)exponent == exponent) {
+		int count = (int)exponent;
+		double result = 1.0, factor = base;
+		for (unsigned left = (unsigned)(count < 0 ? -count : count); left; left >>= 1) {
+			if (left & 1)
+				result *= factor;
+			factor *= factor;
+		}
+		return count < 0 ? 1.0 / result : result;
+	}
 	if (base < 0) {
 		long long whole = (long long)exponent;
 		if ((double)whole != exponent)
@@ -1103,6 +1129,77 @@ CRT double exp(double x) { return raven_exp(x); }
 CRT float powf(float x, float y) { return (float)raven_pow(x, y); }
 CRT double pow(double x, double y) { return raven_pow(x, y); }
 CRT double cos(double x) { return raven_cos(x); }
+CRT double sin(double x) { return raven_sin(x); }
+CRT float sqrtf(float x) { return (float)sqrt(x); }
+
+/* The inverse functions through atan2, which keeps both ends exact; outside [-1, 1] the result is not a number. */
+CRT double asin(double x) { return x < -1 || x > 1 ? (x - x) / (x - x) : atan2(x, sqrt((1 - x) * (1 + x))); }
+CRT double acos(double x) { return x < -1 || x > 1 ? (x - x) / (x - x) : atan2(sqrt((1 - x) * (1 + x)), x); }
+
+/* The hyperbolic functions from the exponential; near zero, where the difference of exponentials loses its digits, from their series. */
+CRT double sinh(double x)
+{
+	if (x > -0.5 && x < 0.5) {
+		const double square = x * x;
+		return x * (1 + square / 6 * (1 + square / 20 * (1 + square / 42 * (1 + square / 72))));
+	}
+	const double grown = raven_exp(x);
+	return (grown - 1 / grown) / 2;
+}
+
+CRT double cosh(double x)
+{
+	const double grown = raven_exp(x);
+	return (grown + 1 / grown) / 2;
+}
+
+CRT double tanh(double x)
+{
+	if (x > 20)
+		return 1;
+	if (x < -20)
+		return -1;
+	if (x > -0.5 && x < 0.5)
+		return sinh(x) / cosh(x);
+	const double grown = raven_exp(2 * x);
+	return (grown - 1) / (grown + 1);
+}
+
+CRT float asinf(float x) { return (float)asin(x); }
+CRT float acosf(float x) { return (float)acos(x); }
+CRT float atanf(float x) { return (float)atan(x); }
+CRT float atan2f(float y, float x) { return (float)atan2(y, x); }
+CRT float tanf(float x) { return (float)tan(x); }
+CRT float fmodf(float x, float y) { return (float)fmod(x, y); }
+
+CRT float modff(float x, float *whole)
+{
+	double part;
+	const double fraction = modf(x, &part);
+	*whole = (float)part;
+	return (float)fraction;
+}
+
+#ifdef __i386__
+/* The x87 forms the 32-bit compiler calls: the arguments on the floating point stack, the first one deeper, and the result left there. */
+#define ONE_ARGUMENT(name) \
+	".globl __CI" #name "\n__CI" #name ":\n	subl $8, %esp\n	fstpl (%esp)\n	call _" #name "\n	addl $8, %esp\n	ret\n"
+#define TWO_ARGUMENTS(name) \
+	".globl __CI" #name "\n__CI" #name ":\n	subl $16, %esp\n	fstpl 8(%esp)\n	fstpl (%esp)\n	call _" #name "\n	addl $16, %esp\n	ret\n"
+__asm__(
+	".section .drectve\n"
+	".ascii \" -export:_ftol -export:_CIsqrt -export:_CIsin -export:_CIcos -export:_CItan -export:_CIatan -export:_CIexp -export:_CIlog -export:_CIlog10\"\n"
+	".ascii \" -export:_CIasin -export:_CIacos -export:_CIsinh -export:_CIcosh -export:_CItanh -export:_CIpow -export:_CIatan2 -export:_CIfmod\"\n"
+	".text\n"
+	ONE_ARGUMENT(sqrt) ONE_ARGUMENT(sin) ONE_ARGUMENT(cos) ONE_ARGUMENT(tan) ONE_ARGUMENT(atan) ONE_ARGUMENT(exp) ONE_ARGUMENT(log)
+	ONE_ARGUMENT(log10) ONE_ARGUMENT(asin) ONE_ARGUMENT(acos) ONE_ARGUMENT(sinh) ONE_ARGUMENT(cosh) ONE_ARGUMENT(tanh) TWO_ARGUMENTS(pow)
+	TWO_ARGUMENTS(atan2) TWO_ARGUMENTS(fmod)
+	/* _ftol: the value on the floating point stack, truncated towards zero, in edx:eax. */
+	".globl __ftol\n__ftol:\n	subl $12, %esp\n	fnstcw 8(%esp)\n	movw 8(%esp), %ax\n	orw $0x0c00, %ax\n	movw %ax, 10(%esp)\n"
+	"	fldcw 10(%esp)\n	fistpll (%esp)\n	fldcw 8(%esp)\n	movl (%esp), %eax\n	movl 4(%esp), %edx\n	addl $12, %esp\n	ret\n");
+#undef ONE_ARGUMENT
+#undef TWO_ARGUMENTS
+#endif
 
 /* ---- non-local jumps and threads ---- */
 #ifdef __x86_64__

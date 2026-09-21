@@ -562,6 +562,217 @@ CRT RavenTime *_gmtime64(const long long *time)
 CRT int _isnan(double x) { return x != x; }
 CRT int _finite(double x) { return x == x && x - x == 0; }
 
+/* The class of a value, as the _FPCLASS_ bits name it: signalling or quiet NaN, then infinite, normal, denormal or zero by sign. */
+CRT int _fpclass(double x)
+{
+	union { double d; unsigned long long bits; } value = {x};
+	const int negative = (int)(value.bits >> 63);
+	const unsigned exponent = (unsigned)(value.bits >> 52) & 0x7ff;
+	const unsigned long long fraction = value.bits & 0xfffffffffffffULL;
+	if (exponent == 0x7ff)
+		return fraction ? ((fraction >> 51) ? 0x2 : 0x1) : (negative ? 0x4 : 0x200);
+	if (exponent)
+		return negative ? 0x8 : 0x100;
+	if (fraction)
+		return negative ? 0x10 : 0x80;
+	return negative ? 0x20 : 0x40;
+}
+
+/* The exception flags the floating point unit has raised, as _SW_ bits, which reading them clears: the SSE unit's on 64 bits, the x87's on
+ * 32 bits. */
+CRT unsigned int _clearfp(void)
+{
+	unsigned int raised;
+#ifdef __x86_64__
+	unsigned int state;
+	__asm__ volatile ("stmxcsr %0" : "=m"(state));
+	raised = state & 0x3f;
+	state &= ~0x3fU;
+	__asm__ volatile ("ldmxcsr %0" : : "m"(state));
+#else
+	unsigned short status;
+	__asm__ volatile ("fnstsw %0\n\tfnclex" : "=m"(status));
+	raised = status & 0x3f;
+#endif
+	return ((raised & 0x01) ? 0x10 : 0) | ((raised & 0x02) ? 0x80000 : 0) | ((raised & 0x04) ? 0x08 : 0) | ((raised & 0x08) ? 0x04 : 0) |
+		((raised & 0x10) ? 0x02 : 0) | ((raised & 0x20) ? 0x01 : 0);
+}
+
+CRT unsigned int _control87(unsigned int value, unsigned int mask) { return _controlfp(value, mask); }
+
+/* ---- the older conversions and helpers of msvcrt ---- */
+
+/* An unsigned value in a radix from 2 to 36, with a minus sign when asked. */
+static char *digits_of(unsigned long long value, int negative, char *to, int radix)
+{
+	char reversed[72];
+	int count = 0, at = 0;
+	if (radix < 2 || radix > 36) {
+		*to = 0;
+		return to;
+	}
+	do {
+		const int digit = (int)(value % (unsigned)radix);
+		reversed[count++] = (char)(digit < 10 ? '0' + digit : 'a' + digit - 10);
+		value /= (unsigned)radix;
+	} while (value);
+	if (negative)
+		to[at++] = '-';
+	while (count)
+		to[at++] = reversed[--count];
+	to[at] = 0;
+	return to;
+}
+
+/* A negative number is signed in base ten only; in other bases its bits are written as they are. */
+CRT char *_itoa(int value, char *to, int radix)
+{
+	return radix == 10 && value < 0 ? digits_of(0ULL - (unsigned long long)(long long)value, 1, to, radix) :
+		digits_of(radix == 10 ? (unsigned long long)value : (unsigned int)value, 0, to, radix);
+}
+
+CRT char *_ultoa(unsigned long value, char *to, int radix) { return digits_of(value, 0, to, radix); }
+CRT unsigned long long _strtoui64(const char *text, char **end, int base) { return strtoull(text, end, base); }
+
+CRT int isleadbyte(int character) { return IsDBCSLeadByte((BYTE)character); }
+
+/* The characters of a multibyte string, a lead byte and its trail counting as one. */
+CRT size_t _mbstrlen(const char *text)
+{
+	size_t count = 0;
+	for (; *text; ++count)
+		text += IsDBCSLeadByte((BYTE)*text) && text[1] ? 2 : 1;
+	return count;
+}
+
+/* The character before `current`, found by walking from the start, since a trail byte can look like a lead byte. */
+CRT unsigned char *_mbsdec(const unsigned char *start, const unsigned char *current)
+{
+	const unsigned char *at = start, *previous = NULL;
+	if (current <= start)
+		return NULL;
+	while (at < current) {
+		previous = at;
+		at += IsDBCSLeadByte(*at) && at[1] ? 2 : 1;
+	}
+	return (unsigned char *)previous;
+}
+
+CRT int wctomb(char *to, wchar_t character)
+{
+	BOOL lost = FALSE;
+	int length;
+	if (!to)
+		return 0;
+	length = WideCharToMultiByte(CP_ACP, 0, &character, 1, to, 5, NULL, &lost);
+	if (!length || lost) {
+		*_errno() = 42;
+		return -1;
+	}
+	return length;
+}
+
+/* Up to `count` bytes of the ANSI form of a wide string; without a buffer, the bytes the whole of it takes. */
+CRT size_t wcstombs(char *to, const wchar_t *text, size_t count)
+{
+	BOOL lost = FALSE;
+	const int needed = WideCharToMultiByte(CP_ACP, 0, text, -1, NULL, 0, NULL, &lost);
+	char *whole;
+	if (!needed || lost) {
+		*_errno() = 42;
+		return (size_t)-1;
+	}
+	if (!to)
+		return (size_t)needed - 1;
+	whole = malloc((size_t)needed);
+	if (!whole)
+		return (size_t)-1;
+	WideCharToMultiByte(CP_ACP, 0, text, -1, whole, needed, NULL, NULL);
+	if (count > (size_t)needed - 1) {
+		memcpy(to, whole, (size_t)needed);
+		count = (size_t)needed - 1;
+	} else {
+		memcpy(to, whole, count);
+	}
+	free(whole);
+	return count;
+}
+
+CRT int _vscprintf(const char *text, va_list arguments) { return __stdio_common_vsprintf(0, NULL, 0, text, NULL, arguments); }
+
+/* The local time as hh:mm:ss, and the local date as mm/dd/yy. */
+CRT char *_strtime(char *to)
+{
+	SYSTEMTIME now;
+	GetLocalTime(&now);
+	sprintf(to, "%02u:%02u:%02u", now.wHour, now.wMinute, now.wSecond);
+	return to;
+}
+
+CRT char *_strdate(char *to)
+{
+	SYSTEMTIME now;
+	GetLocalTime(&now);
+	sprintf(to, "%02u/%02u/%02u", now.wMonth, now.wDay, now.wYear % 100);
+	return to;
+}
+
+/* A name for a temporary file that does not exist yet, in the folder TMP names, else in the one given, else the system's temporary folder. */
+CRT char *_tempnam(const char *folder, const char *prefix)
+{
+	char base[MAX_PATH];
+	DWORD length = GetEnvironmentVariableA("TMP", base, MAX_PATH);
+	if (!length || length >= MAX_PATH || GetFileAttributesA(base) == INVALID_FILE_ATTRIBUTES) {
+		if (folder && GetFileAttributesA(folder) != INVALID_FILE_ATTRIBUTES)
+			lstrcpynA(base, folder, MAX_PATH);
+		else if (!GetTempPathA(MAX_PATH, base))
+			return NULL;
+	}
+	length = (DWORD)strlen(base);
+	if (length && base[length - 1] != '\\' && base[length - 1] != '/')
+		base[length++] = '\\', base[length] = 0;
+	for (unsigned number = GetTickCount() & 0xffff, tries = 0; tries < 65536; ++number, ++tries) {
+		char *name = malloc(length + (prefix ? strlen(prefix) : 0) + 16);
+		if (!name)
+			return NULL;
+		sprintf(name, "%s%s%x", base, prefix ? prefix : "", number & 0xffff);
+		if (GetFileAttributesA(name) == INVALID_FILE_ATTRIBUTES)
+			return name;
+		free(name);
+	}
+	return NULL;
+}
+
+/* A descriptor is a terminal when the handle behind it is a character device. */
+CRT int _isatty(int fd)
+{
+	const intptr_t handle = _get_osfhandle(fd);
+	return handle != -1 && GetFileType((HANDLE)handle) == FILE_TYPE_CHAR ? 0x40 : 0;
+}
+
+/* There is no command interpreter: system says so for a null command, and fails for any other. */
+CRT int system(const char *command)
+{
+	if (!command)
+		return 0;
+	*_errno() = 2;
+	return -1;
+}
+
+/* The low-level I/O table msvcrt's own inline code reads: every slot names a descriptor that is not open. */
+static unsigned char closed_descriptors[4096];
+void *raven_pioinfo[64] = {
+#define CLOSED closed_descriptors, closed_descriptors, closed_descriptors, closed_descriptors, closed_descriptors, closed_descriptors, \
+	closed_descriptors, closed_descriptors
+	CLOSED, CLOSED, CLOSED, CLOSED, CLOSED, CLOSED, CLOSED, CLOSED
+#undef CLOSED
+};
+struct { intptr_t handle; char flags, pipe; } raven_badioinfo = {-1, 0, 10};
+__asm__(".section .drectve\n\t.ascii \" -export:__pioinfo=raven_pioinfo,DATA -export:__badioinfo=raven_badioinfo,DATA\"\n\t.text");
+
+/* The filter msvcrt's startup code runs exceptions through: without signal handlers installed, every exception goes on to the next frame. */
+CRT int _XcptFilter(unsigned long code, EXCEPTION_POINTERS *pointers) { return EXCEPTION_CONTINUE_SEARCH; }
+
 /* ---- the file system, as msvcrt's POSIX names see it ---- */
 
 CRT int _access(const char *path, int mode)
@@ -703,3 +914,8 @@ CRT int __wgetmainargs(int *count, wchar_t ***vector, wchar_t ***environment_out
 
 CRT void *raven_operator_new(size_t size) { return malloc(size); }
 CRT void raven_operator_delete(void *block) { free(block); }
+#ifdef __x86_64__
+/* The same operators under their 64-bit decorated names, scalar and array. */
+__asm__(".section .drectve\n\t.ascii \" -export:??2@YAPEAX_K@Z=raven_operator_new -export:??_U@YAPEAX_K@Z=raven_operator_new\"\n"
+	"\t.ascii \" -export:??3@YAXPEAX@Z=raven_operator_delete -export:??_V@YAXPEAX@Z=raven_operator_delete\"\n\t.text");
+#endif

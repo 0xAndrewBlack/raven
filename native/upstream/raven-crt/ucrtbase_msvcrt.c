@@ -180,3 +180,6 @@ CRT EXCEPTION_DISPOSITION __C_specific_handler(EXCEPTION_RECORD *record, void *f
 
 /* The drives that exist, one bit per letter from A. */
 CRT unsigned long _getdrives(void) { return GetLogicalDrives(); }
+
+/* Whether a byte begins a double-byte character in the program's code page. */
+CRT int _ismbblead(unsigned int character) { return IsDBCSLeadByte((BYTE)character); }

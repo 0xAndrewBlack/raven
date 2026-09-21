@@ -447,6 +447,8 @@ CRT void _set_app_type(int type) {}
 CRT int _set_new_mode(int mode) { return 0; }
 CRT int _configthreadlocale(int mode) { return 0; }
 CRT int _controlfp_s(unsigned int *current, unsigned int value, unsigned int mask) { if (current) *current = 0; return 0; }
+/* The control word programs start with: round to nearest, 53-bit precision, every exception masked. */
+CRT unsigned int _controlfp(unsigned int value, unsigned int mask) { return 0x9001f; }
 CRT void __setusermatherr(void *handler) {}
 CRT int _crt_atexit(void (__cdecl *function)(void));
 

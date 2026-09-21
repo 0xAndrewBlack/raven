@@ -92,6 +92,12 @@ CRT size_t strcspn(const char *text, const char *reject)
 	return length;
 }
 
+CRT char *strpbrk(const char *text, const char *accept)
+{
+	const size_t length = strcspn(text, accept);
+	return text[length] ? (char *)text + length : NULL;
+}
+
 CRT size_t __strncnt(const char *text, size_t count) { return strnlen(text, count); }
 
 /* The secure forms fail when the result does not fit, and leave an empty string. */
