@@ -17,7 +17,7 @@ REVISION = "dacf2a6c47fa562799f9c8a41ab6d5c558556558"
 ARCHIVE_SHA256 = "5373bbbb60541cb2a49e0acb53360e1218d4f5d56c31f9187b341b9fc16daa69"
 PREFIXES = ("sdk/include/", "sdk/lib/pseh/", "sdk/tools/hpp/", "sdk/tools/spec2def/", "sdk/lib/3rdparty/zlib/", "sdk/lib/3rdparty/libwine/",
             "dll/win32/cabinet/", "dll/win32/msi/", "dll/win32/sxs/", "dll/win32/ole32/", "dll/win32/coml2/",
-            "base/system/msiexec/")
+            "base/system/msiexec/", "dll/win32/rpcrt4/")
 # Interface headers the installer sources include, generated from the public IDL files with what they import.
 IDLS = ("objidlbase", "commoncontrols", "fusion", "msxml2", "oaidl", "ocidl", "objidl", "unknwn", "wtypes", "propidl", "urlmon", "shobjidl", "servprov", "docobj", "oleidl",
         "exdisp", "activscp", "shldisp", "mshtml", "xmldom", "imnact", "msctf", "shtypes", "oleacc", "comcat", "mscoree", "wincodec", "dispex",
@@ -26,7 +26,7 @@ ZLIB = ("adler32.c", "crc32.c", "deflate.c", "inflate.c", "inffast.c", "inftrees
 # The structured storage of ole32 and its base layer, coml2: compound files, their streams and property sets.
 STORAGE = ("ole32/storage32.c", "ole32/stg_prop.c", "ole32/stg_stream.c", "ole32/filelockbytes.c", "ole32/dictionary.c",
            "coml2/memlockbytes.c", "coml2/stg_prop.c", "coml2/storage32.c")
-COMPONENTS = ("cabinet.dll", "sxs.dll", "msi.dll", "raven-storage.dll", "msiexec.exe")
+COMPONENTS = ("cabinet.dll", "sxs.dll", "rpcrt4.dll", "msi.dll", "raven-storage.dll", "msiexec.exe")
 
 
 def main():
@@ -40,8 +40,8 @@ def main():
     spec_arch = "-a=i386" if x86 else "-a=x86_64"
     entry_point = "_DllMain@12" if x86 else "DllMain"
     link_extra = ["-Wl,--kill-at"] if x86 else []
-    bases = dict(cabinet=0x1e000000, sxs=0x1e200000, msi=0x1e400000, storage=0x1ec00000) if x86 else dict(
-        cabinet=0x1e0000000, sxs=0x1e2000000, msi=0x1e4000000, storage=0x1ec000000)
+    bases = dict(cabinet=0x1e000000, sxs=0x1e200000, rpcrt4=0x1d800000, msi=0x1e400000, storage=0x1ec00000) if x86 else dict(
+        cabinet=0x1e0000000, sxs=0x1e2000000, rpcrt4=0x1d8000000, msi=0x1e4000000, storage=0x1ec000000)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, TMPDIR=str(output), TMP=str(output), TEMP=str(output))
@@ -141,7 +141,7 @@ def main():
     # A function the headers do not declare would return a truncated int: none is allowed. The sources use the old CRT names, which the
     # oldnames library supplies upstream.
     flags = ["-O2", "-nostdinc", "-isystem", gcc_include, "-fgnu89-inline", "-Werror=implicit-function-declaration", "-Werror=int-conversion",
-             "-Dwcsdup=_wcsdup", "-Dwcsicmp=_wcsicmp", "-Dwcsnicmp=_wcsnicmp", "-Dwcsupr=_wcsupr", "-Dwcslwr=_wcslwr",
+             "-Dwcsdup=_wcsdup", "-Dwcsicmp=_wcsicmp", "-Dwcsnicmp=_wcsnicmp", "-Dwcsupr=_wcsupr", "-Dwcslwr=_wcslwr", "-Dstrdup=_strdup", "-Dstricmp=_stricmp", "-Dstrnicmp=_strnicmp",
              "-D_WIN32_WINNT=0x600", "-DWINVER=0x600", "-D_WIN32_IE=0x0A00", "-D__REACTOS__", "-DUNICODE", "-D_UNICODE",
              "-D_M_IX86" if x86 else "-D_M_AMD64", "-D__WINESRC__", "-D_WINE", *([] if x86 else ["-D__ROS_LONG64__"]),
              # 32-bit handlers read the exception through the frame based PSEH of ReactOS, as the guarded blocks themselves do.
@@ -163,7 +163,7 @@ def main():
         # A 32-bit import library keeps the stdcall decorations its callers link against, for the plain names the library exports.
         if implib and x86:
             stdcall = output / (Path(name).stem + "-import.def")
-            stdcall.write_text(re.sub(r"^(\s*)(\w+)=\2(@\d+)", r"\1\2\3", Path(definition).read_text(), flags=re.M))
+            stdcall.write_text(re.sub(r"^(\s*)(\w+)=\w+(@\d+)", r"\1\2\3", Path(definition).read_text(), flags=re.M))
             run([triple + "-dlltool", "-d", stdcall, "-l", implib, "-k"])
 
     debug = compile(repo / "native/upstream/reactos-controls/debug.c", "debug")
@@ -198,6 +198,24 @@ def main():
     sxs.append(compile(generated / "sxs_stubs.c", "sxs_stubs"))
     link("sxs.dll", bases["sxs"], [*sxs, *debug], output / "sxs.def", ["-loleaut32", "-lole32", "-lmsvcrt", "-lkernel32", "-lntdll", "-luuid", "-lgcc"],
          output / "libsxs.a")
+    compile(support / "support.c", "installer_support")
+    # rpcrt4.dll: remote procedure calls, which the installer's custom action server speaks over local pipes, with the NDR engine.
+    rpc_root = source / "dll/win32/rpcrt4"
+    run([*widl, "-I", rpc_root, "-c", "-C", generated / "epm_c.c", "-h", "-H", generated / "epm_c.h", rpc_root / "epm.idl"])
+    run([*widl, "-I", rpc_root, "-Oicf", "-p", "-P", generated / "ndr_types_p.c", "-h", "-H", generated / "ndr_types.h", rpc_root / "ndr_types.idl"])
+    run([*widl, "--dlldata-only", "--dlldata=" + str(generated / "proxy.dlldata.c"), "ndr_types"])
+    run([output / "spec2def", spec_arch, "-n=rpcrt4.dll", "-d=" + str(output / "rpcrt4.def"), "-s=" + str(generated / "rpcrt4_stubs.c"), rpc_root / "rpcrt4.spec"])
+    rpc_flags = ["-D_RPCRT4_", "-DCOM_NO_WINDOWS_H", "-D_CRT_NON_CONFORMING_SWPRINTFS", "-DMSWMSG", "-I" + str(rpc_root)]
+    rpc_sources = [rpc_root / name for name in ("cproxy.c", "cpsf.c", "cstub.c", "ndr_clientserver.c", "ndr_contexthandle.c", "ndr_es.c",
+                   "ndr_fullpointer.c", "ndr_marshall.c", "ndr_ole.c", "ndr_stubless.c", "ros_extra.c", "rpc_assoc.c", "rpc_async.c", "rpc_binding.c",
+                   "rpc_epmap.c", "rpc_message.c", "rpcrt4_main.c", "rpc_server.c", "rpc_transport.c", "thunks.c", "unix_func.c", "ndr_typelib.c")] + [
+                   generated / name for name in ("epm_c.c", "ndr_types_p.c", "proxy.dlldata.c", "rpcrt4_stubs.c")]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rpc = list(pool.map(lambda path: compile(path, "rpcrt4_" + path.stem.replace(".", "_"), rpc_flags), rpc_sources))
+    rpc.append(compile(source / "sdk/lib/3rdparty/libwine/register.c", "rpcrt4_register", ["-I" + str(rpc_root)]))
+    link("rpcrt4.dll", bases["rpcrt4"], [*rpc, objects / "installer_support.o", *debug], output / "rpcrt4.def",
+         [*[f"-l{library}" for library in ("advapi32", "ws2_32", "iphlpapi", "wininet", "secur32", "user32", "ole32", "oleaut32", "msvcrt",
+          "kernel32", "ntdll", "uuid", "gcc", "kernel32", "msvcrt")]], output / "librpcrt4.a")
     # msi.dll: the Windows Installer engine, its SQL and condition grammars, and the RPC stubs of its custom action server.
     msi_root = source / "dll/win32/msi"
     run(["bison", "-o", generated / "cond.tab.c", "-d", msi_root / "cond.y"])
@@ -223,10 +241,10 @@ def main():
     run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__", "-D__WINESRC__",
          "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(msi_root), "-i", msi_root / "msi.rc", "-o", objects / "msi.res.o"])
     msi.append(objects / "msi.res.o")
-    msi.append(compile(support / "support.c", "installer_support"))
+    msi.append(objects / "installer_support.o")
     link("msi.dll", bases["msi"], [*msi, *debug], output / "msi.def",
-         ["-L" + str(output), "-lsxs", "-lcabinet", *[f"-l{library}" for library in ("advapi32", "comctl32", "gdi32", "ole32", "oleaut32", "shell32",
-          "shlwapi", "rpcrt4", "urlmon", "user32", "version", "wininet", "imagehlp", "msvcrt", "kernel32", "ntdll", "odbccp32", "crypt32",
+         ["-L" + str(output), "-lsxs", "-lcabinet", "-lrpcrt4", *[f"-l{library}" for library in ("advapi32", "comctl32", "gdi32", "ole32", "oleaut32", "shell32",
+          "shlwapi", "urlmon", "user32", "version", "wininet", "imagehlp", "msvcrt", "kernel32", "ntdll", "odbccp32", "crypt32",
           "wintrust", "uuid", "gcc")]])
     # raven-storage.dll: what ole32 exports of structured storage, which the runtime's ole32 hands to it.
     ole_root = source / "dll/win32/ole32"

@@ -242,9 +242,9 @@ int main(int argc, char **argv)
 					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
 					const auto component_directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "" : "x86");
 					const auto source = [&](std::string_view name) -> std::optional<std::vector<uint8_t>> {
-						// The Windows Installer and the libraries it installs with are the runtime's components, whatever copies a program
+						// The Windows Installer, the libraries it installs with and remote procedure calls are the runtime's components, whatever copies a program
 						// ships or an installer leaves in the system directory.
-						if (name == "msi.dll" || name == "cabinet.dll" || name == "sxs.dll")
+						if (name == "msi.dll" || name == "cabinet.dll" || name == "sxs.dll" || name == "rpcrt4.dll")
 							if (const auto component = component_directory / name; std::filesystem::exists(component))
 								return read_file(component.c_str());
 						std::optional<std::filesystem::path> selected = find_file(directory, name);
