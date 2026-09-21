@@ -394,6 +394,10 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		std::memcpy(bytes.data() + 44, &level, 2);
 		call.write(call[0], bytes);
 	};
+	// The processor state the system saves for threads: the x87 and SSE registers; programs then take the paths that need no more.
+	registry.add("GetEnabledXStateFeatures", 0, [](ApiCall &call) { call.ret(3); });
+	// The number of file handles a process may have is no longer limited: the request is answered as asked.
+	registry.add("SetHandleCount", 1, [](ApiCall &call) { call.ret(call.u32(0)); });
 	registry.add("GetSystemInfo", 1, system_information);
 	registry.add("GetNativeSystemInfo", 1, system_information);
 	// GetVersion and GetVersionEx report what the program's manifest declares it supports, as Windows does; RtlGetVersion tells the truth.
