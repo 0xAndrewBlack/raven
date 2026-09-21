@@ -128,8 +128,8 @@ void NativeWindows::nonclient_pointer(uint64_t handle,uint64_t hit,uint32_t mess
 	if (message==0x202 && pressed_frame_window==handle && pressed_frame_hit==hit) {
 		pressed_frame_hit=0; pressed_frame_window=0;
 		if (hit==close_hit) send(handle,0x112,0xf060,0);
-		else if (hit==minimize_hit) send(handle,0x112,0xf020,0);
-		else if (hit==maximize_hit) send(handle,0x112,0xf030,0);
+		else if (hit==minimize_hit && (window->style & 0x20000U)) send(handle,0x112,0xf020,0);
+		else if (hit==maximize_hit && (window->style & 0x10000U)) send(handle,0x112,0xf030,0);
 	}
 	(void)y;
 }
@@ -324,9 +324,11 @@ void NativeWindows::paint_modern_frame(uint64_t handle, const DesktopWindow &win
 		const auto button = [&](DesktopRect rect, uint64_t hit) {
 			if (rect.right <= rect.left)
 				return;
-			const bool hot = hovered_frame_window == handle && hovered_frame_hit == hit;
+			// A button the window's style leaves out is shown greyed beside the one it has, and does nothing.
+			const bool enabled = hit == 20 || (window.style & (hit == 9 ? 0x10000U : 0x20000U));
+			const bool hot = enabled && hovered_frame_window == handle && hovered_frame_hit == hit;
 			const bool pressed = hot && pressed_frame_window == handle && pressed_frame_hit == hit;
-			uint32_t glyph = ink;
+			uint32_t glyph = enabled ? ink : shade(0xc4, 0xc4, 0xc4);
 			if (hot && hit == 20) {
 				canvas.fill(rect, pressed ? shade(0xc8, 0x3c, 0x30) : shade(0xc4, 0x2b, 0x1c));
 				glyph = shade(0xff, 0xff, 0xff);
