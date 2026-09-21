@@ -1,10 +1,12 @@
 #include "kernel_context.h"
 #include "nls.h"
 #include "text.h"
+#include "pe/resources.h"
 
 #include <algorithm>
 #include <cstring>
 #include <cwctype>
+#include <functional>
 #include <map>
 
 namespace raven {
@@ -247,7 +249,9 @@ std::optional<std::u16string> system_message(uint32_t id)
 }
 
 // Replaces %1..%99 (with optional !printf! formats), %n, %r, %t, %% and %0 in a message template.
-std::u16string insert_arguments(std::u16string_view text, const std::vector<std::u16string> &inserts, const std::vector<uint64_t> &raw)
+// The inserts of a message: %1 to %99, each with an optional printf format between exclamation marks, which `argument` turns into
+// text; and the escapes %n, %r, %t, %0 and a doubled character.
+std::u16string insert_arguments(std::u16string_view text, const std::function<std::u16string(unsigned, std::u16string_view)> &argument)
 {
 	std::u16string result;
 	for (size_t at = 0; at < text.size(); ++at) {
@@ -261,7 +265,7 @@ std::u16string insert_arguments(std::u16string_view text, const std::vector<std:
 			unsigned index = 0;
 			while (end < text.size() && text[end] >= u'0' && text[end] <= u'9' && index < 100)
 				index = index * 10 + (text[end++] - u'0');
-			std::u16string format;
+			std::u16string_view format;
 			if (end < text.size() && text[end] == u'!') {
 				const auto close = text.find(u'!', end + 1);
 				if (close != text.npos) {
@@ -269,21 +273,8 @@ std::u16string insert_arguments(std::u16string_view text, const std::vector<std:
 					end = close + 1;
 				}
 			}
-			if (index >= 1 && index <= inserts.size()) {
-				if (format.empty() || format == u"s")
-					result += inserts[index - 1];
-				else {
-					const char16_t kind = format.back();
-					const uint64_t value = raw[index - 1];
-					if (kind == u'd' || kind == u'i') result += widen_ascii(std::to_string(int32_t(value)));
-					else if (kind == u'u') result += widen_ascii(std::to_string(uint32_t(value)));
-					else if (kind == u'x' || kind == u'X') {
-						char digits[17];
-						std::snprintf(digits, sizeof digits, kind == u'x' ? "%x" : "%X", uint32_t(value));
-						result += widen_ascii(digits);
-					} else result += inserts[index - 1];
-				}
-			}
+			if (index >= 1 && index <= 99)
+				result += argument(index, format);
 			at = end - 1;
 		} else if (next == u'n') {
 			result += u"\r\n";
@@ -302,6 +293,61 @@ std::u16string insert_arguments(std::u16string_view text, const std::vector<std:
 		}
 	}
 	return result;
+}
+
+// The text of message `id` in a module's message table, the RT_MESSAGETABLE resource named 1: blocks of consecutive identifiers, each
+// pointing at entries that carry their length and whether they are UTF-16. The language asked for is preferred, any other serves.
+std::optional<std::u16string> module_message(KernelContext &context, uint64_t base, uint32_t id, uint32_t language)
+{
+	const PEModule *image = !base || base == context.entry.loaded.base() ? &context.entry : nullptr;
+	for (auto found = context.modules.all().begin(); !image && found != context.modules.all().end(); ++found)
+		if (found->second->loaded.base() == base)
+			image = found->second.get();
+	if (!image || image->runtime_api)
+		return std::nullopt;
+	const auto directory = image->image.directories[2];
+	if (!directory.address || !directory.size || directory.size > 16 * 1024 * 1024)
+		return std::nullopt;
+	const auto resources = read_resources(directory, context.process.read_memory(image->loaded.base() + directory.address, directory.size),
+		image->image.image_size);
+	const PEResource *table = nullptr;
+	for (const auto &resource : resources)
+		if (resource.type == ResourceKey(uint32_t(11)) && resource.name == ResourceKey(uint32_t(1)) &&
+			(!table || (language && resource.language == language)))
+			table = &resource;
+	if (!table || table->size < 4)
+		return std::nullopt;
+	const auto data = context.process.read_memory(image->loaded.base() + table->data_address, table->size);
+	const auto word = [&](size_t at) -> uint32_t {
+		if (at + 4 > data.size())
+			return 0;
+		return uint32_t(data[at]) | uint32_t(data[at + 1]) << 8 | uint32_t(data[at + 2]) << 16 | uint32_t(data[at + 3]) << 24;
+	};
+	const uint32_t blocks = word(0);
+	for (uint32_t block = 0; block < blocks && 4 + size_t(block + 1) * 12 <= data.size(); ++block) {
+		const uint32_t low = word(4 + block * 12), high = word(8 + block * 12);
+		if (id < low || id > high)
+			continue;
+		size_t at = word(12 + block * 12);
+		for (uint32_t skip = low; skip < id && at + 4 <= data.size(); ++skip)
+			at += uint16_t(word(at));
+		if (at + 4 > data.size())
+			return std::nullopt;
+		const size_t length = uint16_t(word(at)), flags = uint16_t(word(at) >> 16);
+		if (length < 4 || at + length > data.size())
+			return std::nullopt;
+		std::u16string text;
+		if (flags & 1) {
+			for (size_t offset = at + 4; offset + 1 < at + length; offset += 2)
+				text.push_back(char16_t(data[offset] | data[offset + 1] << 8));
+		} else {
+			text = decode_ansi(std::string_view(reinterpret_cast<const char *>(data.data() + at + 4), length - 4), 0);
+		}
+		while (!text.empty() && !text.back())
+			text.pop_back();
+		return text;
+	}
+	return std::nullopt;
 }
 
 }
@@ -420,6 +466,21 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("CompareStringEx", 9, [](ApiCall &call) {
 		const auto left = counted_wide(call, call[2], call.i32(3)), right = counted_wide(call, call[4], call.i32(5));
 		call.ret(uint32_t(collate(left, right, call.u32(1)) + 2));
+	});
+	// Code unit by code unit, optionally after upper-casing both, as file systems and the registry compare names.
+	registry.add("CompareStringOrdinal", 5, [](ApiCall &call) {
+		if (!call[0] || !call[2]) {
+			call.fail(87);
+			return;
+		}
+		auto left = counted_wide(call, call[0], call.i32(1)), right = counted_wide(call, call[2], call.i32(3));
+		if (call.u32(4)) {
+			for (auto &character : left)
+				character = upper_case(character);
+			for (auto &character : right)
+				character = upper_case(character);
+		}
+		call.ret(left < right ? 1 : left == right ? 2 : 3);
 	});
 	const auto map_string = [](ApiCall &call, uint32_t flags, std::u16string text, uint64_t destination, int32_t capacity) {
 		if (flags & 0x100) for (auto &character : text) character = fold_case(character);
@@ -694,78 +755,95 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetTimeFormatW", 6, [format_date_time](ApiCall &call) { format_date_time(call, false, 1, 2, 3, 4, 5); });
 	registry.add("GetTimeFormatEx", 6, [format_date_time](ApiCall &call) { format_date_time(call, false, 1, 2, 3, 4, 5); });
 
-	registry.add("FormatMessageW", 7, [&](ApiCall &call) {
+	// The message comes from the text given, a module's message table or the system's; its inserts from an array of arguments or from the
+	// caller's va_list, one pointer-wide slot each.
+	const auto format_message = [&](ApiCall &call, bool wide) {
 		const uint32_t flags = call.u32(0);
-		std::u16string text;
-		if (flags & 0x400) {
-			text = call.wide(call[1]);
-		} else if (flags & 0x1000) {
-			const auto found = system_message(call.u32(2));
-			if (!found) {
+		std::optional<std::u16string> text;
+		if (flags & 0x400)
+			text = wide ? call.wide(call[1]) : decode_ansi(call.narrow(call[1]), 0);
+		else {
+			if (flags & 0x800)
+				text = module_message(context, call[1], call.u32(2), call.u32(3));
+			if (!text && (flags & 0x1000))
+				text = system_message(call.u32(2));
+			if (!text && !(flags & 0x1800)) {
+				call.fail(87);
+				return;
+			}
+			if (!text) {
 				call.fail(317);
 				return;
 			}
-			text = *found;
-		} else {
-			call.fail(1812);
-			return;
 		}
 		if (!(flags & 0x200)) {
-			std::vector<std::u16string> inserts;
-			std::vector<uint64_t> raw;
-			if (call[6]) {
-				// Without an argument array the inserts follow as a va_list; only an explicit array is read here.
-				if (flags & 0x2000) {
-					for (unsigned index = 0; index < 99; ++index) {
-						uint64_t value = 0;
-						try { value = call.load<uint64_t>(call[6] + index * 8); } catch (const ApiFault &) { break; }
-						raw.push_back(value);
-						inserts.push_back(value ? [&] { try { return call.wide(value, 4096); } catch (const ApiFault &) { return std::u16string(); } }() : u"");
-						if (index >= 8) break;
+			const size_t width = call.pointer_width();
+			uint64_t arguments = 0;
+			if (call[6])
+				arguments = flags & 0x2000 ? call[6] : call.load_pointer(call[6]);
+			text = insert_arguments(*text, [&](unsigned index, std::u16string_view format) -> std::u16string {
+				if (!arguments)
+					return u"";
+				uint64_t value = 0;
+				try {
+					value = width == 4 ? call.load<uint32_t>(arguments + (index - 1) * 4) : call.load<uint64_t>(arguments + (index - 1) * 8);
+				} catch (const ApiFault &) {
+					return u"";
+				}
+				const char16_t kind = format.empty() ? u's' : format.back();
+				if (kind == u's' || kind == u'S') {
+					// A string is wide in the wide call unless the format says h; S swaps the width.
+					const bool narrow = format.find(u'h') != format.npos || (format.find(u'l') == format.npos && (wide == (kind == u'S')));
+					if (!value)
+						return u"(null)";
+					try {
+						return narrow ? decode_ansi(call.narrow(value, 32768), 0) : call.wide(value, 32768);
+					} catch (const ApiFault &) {
+						return u"";
 					}
 				}
-			}
-			text = insert_arguments(text, inserts, raw);
+				if (kind == u'c' || kind == u'C')
+					return std::u16string(1, char16_t(value));
+				char digits[32];
+				const auto spec = to_utf8(std::u16string(format));
+				const bool large = spec.find("I64") != spec.npos || spec.find("ll") != spec.npos;
+				std::string pattern = "%";
+				pattern += spec.substr(0, spec.size() - 1);
+				for (const char *size : {"I64", "ll", "l", "h", "I32"})
+					if (const auto found = pattern.find(size); found != pattern.npos)
+						pattern.erase(found, std::strlen(size));
+				pattern += large ? "ll" : "";
+				pattern += char(kind);
+				if (large)
+					std::snprintf(digits, sizeof digits, pattern.c_str(), (unsigned long long)value);
+				else if (kind == u'd' || kind == u'i')
+					std::snprintf(digits, sizeof digits, pattern.c_str(), int32_t(value));
+				else
+					std::snprintf(digits, sizeof digits, pattern.c_str(), uint32_t(value));
+				return widen_ascii(digits);
+			});
 		}
-		const uint32_t width = flags & 0xff;
-		if (width && width != 0xff) {
-			(void)width;
-		}
-		if (flags & 0x100) {
-			const auto address = context.allocator.allocate((text.size() + 1) * 2, false);
-			if (!address) {
-				call.fail(8);
+		if (wide) {
+			if (flags & 0x100) {
+				const auto address = context.allocator.allocate((text->size() + 1) * 2, false);
+				if (!address) {
+					call.fail(8);
+					return;
+				}
+				call.put_wide(address, *text, text->size() + 1);
+				call.store_pointer(call[4], address);
+				call.ret(text->size());
 				return;
 			}
-			call.put_wide(address, text, text.size() + 1);
-			call.store<uint64_t>(call[4], address);
-			call.ret(text.size());
-			return;
-		}
-		const size_t capacity = call.u32(5);
-		if (capacity <= text.size()) {
-			call.fail(122);
-			return;
-		}
-		call.put_wide(call[4], text, capacity);
-		call.ret(text.size());
-	});
-	registry.add("FormatMessageA", 7, [&](ApiCall &call) {
-		const uint32_t flags = call.u32(0);
-		std::u16string text;
-		if (flags & 0x400) text = from_utf8(call.narrow(call[1]));
-		else if (flags & 0x1000) {
-			const auto found = system_message(call.u32(2));
-			if (!found) {
-				call.fail(317);
+			if (call.u32(5) <= text->size()) {
+				call.fail(122);
 				return;
 			}
-			text = *found;
-		} else {
-			call.fail(1812);
+			call.put_wide(call[4], *text, call.u32(5));
+			call.ret(text->size());
 			return;
 		}
-		const auto narrow = to_utf8(text);
+		const auto narrow = to_utf8(*text);
 		if (flags & 0x100) {
 			const auto address = context.allocator.allocate(narrow.size() + 1, false);
 			if (!address) {
@@ -773,7 +851,7 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 				return;
 			}
 			call.put_narrow(address, narrow, narrow.size() + 1);
-			call.store<uint64_t>(call[4], address);
+			call.store_pointer(call[4], address);
 			call.ret(narrow.size());
 			return;
 		}
@@ -783,7 +861,9 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.put_narrow(call[4], narrow, call.u32(5));
 		call.ret(narrow.size());
-	});
+	};
+	registry.add("FormatMessageW", 7, [format_message](ApiCall &call) { format_message(call, true); });
+	registry.add("FormatMessageA", 7, [format_message](ApiCall &call) { format_message(call, false); });
 }
 
 }
