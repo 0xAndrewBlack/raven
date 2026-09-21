@@ -35,10 +35,16 @@ std::u16string launch_command_line(std::u16string_view image,std::span<const std
 {
 	if (image.empty() || image.size()>32764 || image.find(u'"')!=image.npos || image.find(u'\0')!=image.npos)
 		throw std::runtime_error("invalid native command-line image identity");
-	// argv[0] uses pathname quoting; later arguments escape backslashes before quotes.
+	// argv[0] uses pathname quoting; later arguments are quoted only when they are empty or hold a space, a tab or a quote, as Windows
+	// programs write them, and then escape backslashes before quotes. Programs that pass their own command line on rely on it.
 	std::u16string result=u"\""+std::u16string(image)+u"\"";
 	for (const auto argument : arguments) {
 		const auto text=launch_utf16(argument);
+		if (!text.empty() && text.find_first_of(u" \t\"")==text.npos) {
+			result+=u" "+text;
+			if (result.size()>32766) throw std::runtime_error("native command line exceeds the UTF-16 limit");
+			continue;
+		}
 		result+=u" \"";
 		size_t slashes=0;
 		for (const auto character : text) {

@@ -5,7 +5,8 @@ int raven_entry(void)
 {
 	// The program is named by its drive-qualified path; only the arguments after it are fixed.
 	const WCHAR image[]=L"arguments.exe\"";
-	const WCHAR expected[]=L" \"\" \"plain\" \"with space\" \"a\\\"b\" \"C:\\tail\\\\\" \"--\"";
+	// Arguments are quoted only when they need it, as Windows programs write them.
+	const WCHAR expected[]=L" \"\" plain \"with space\" \"a\\\"b\" C:\\tail\\ --";
 	const WCHAR *command=GetCommandLineW();
 	unsigned at=0;
 	if(command[at++]!=L'"') return 1;

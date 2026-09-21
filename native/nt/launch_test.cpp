@@ -15,7 +15,7 @@ int main(int argc,char **argv)
 	try {
 		const std::vector<std::string_view> arguments{"","plain","with space","with\ttab","a\"b","C:\\tail\\","\\\"","--","\xc3\xa9\xe4\xb8\xad\xf0\x9f\x99\x82"};
 		const auto command=raven::launch_command_line(u"program.exe",arguments);
-		check(command==u"\"program.exe\" \"\" \"plain\" \"with space\" \"with\ttab\" \"a\\\"b\" \"C:\\tail\\\\\" \"\\\\\\\"\" \"--\" \"\u00e9\u4e2d\U0001f642\"",
+		check(command==u"\"program.exe\" \"\" plain \"with space\" \"with\ttab\" \"a\\\"b\" C:\\tail\\ \"\\\\\\\"\" -- \u00e9\u4e2d\U0001f642",
 			"Windows command-line quoting differs");
 		check(raven::launch_command_line(u"C:\\path\\",{})==u"\"C:\\path\\\"","argv zero incorrectly escaped pathname backslashes");
 		check(raven::launch_utf16("\xc3\xa9\xe4\xb8\xad\xf0\x9f\x99\x82")==u"\u00e9\u4e2d\U0001f642","UTF-8 launch scalars changed");
