@@ -155,7 +155,6 @@ private:
 	size_t menu_used=menu_blocks;
 	// Where each menu's block was written and how much room it has there.
 	std::map<uint64_t,std::pair<uint32_t,size_t>> menu_capacity;
-	std::vector<WatchedItem<DesktopMenu>> watched_menus;
 	void publish_menu(uint64_t handle,const DesktopMenu *menu);
 	bool menu_matches(uint64_t handle,const DesktopMenu &menu) const;
 	void publish_menus();

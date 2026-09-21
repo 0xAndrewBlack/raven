@@ -1458,7 +1458,7 @@ void NativeWindows::publish_windows()
 	const auto idle=[](auto &touched) { return touched.handles.empty() && !touched.overflow; };
 	if (!logged && deferred_pending.empty() && idle(objects.touched_windows()) && idle(objects.touched_menus()) &&
 		idle(objects.touched_bitmaps()) && idle(objects.touched_dcs()) && idle(objects.touched_icons()) && watched.empty() &&
-		watched_menus.empty() && watched_bitmaps.empty() && watched_dcs.empty()) {
+		watched_bitmaps.empty() && watched_dcs.empty()) {
 		publish_words();
 		return;
 	}
@@ -1621,27 +1621,15 @@ void NativeWindows::publish_menus()
 		std::memset(menu_table,0,menu_blocks);
 		menu_used=menu_blocks;
 		menu_capacity.clear();
-		watched_menus.clear();
 		for (const auto handle : objects.menu_handles()) publish_menu(handle,objects.menu(handle));
 		objects.touched_menus().overflow=false;
 		touched.clear();
 	}
-	// As with windows: menus handed out since the guest last ran are written again, and stay watched while the call goes on.
-	for (const auto handle : objects.touched_menus().settled()) {
-		const auto *menu=objects.menu(handle);
-		publish_menu(handle,menu);
-		const auto found=std::find_if(watched_menus.begin(),watched_menus.end(),[&](const auto &item) { return item.first==handle; });
-		if (found!=watched_menus.end()) {
-			if (menu) { found->second=menu; found->depth=std::min(found->depth,api_depth); }
-			else watched_menus.erase(found);
-		} else if (menu && watching) {
-			watched_menus.push_back({handle,menu,api_depth});
-		}
-	}
+	// Menus handed out since the guest last ran are written again. None is watched as windows are: the calls that change menus never run
+	// the guest while they hold one.
+	for (const auto handle : objects.touched_menus().settled())
+		publish_menu(handle,objects.menu(handle));
 	touched.clear();
-	for ([[maybe_unused]] const auto &[handle,menu,depth] : watched_menus)
-		if (!menu_matches(handle,*menu)) publish_menu(handle,menu);
-	if (!api_depth) watched_menus.clear();
 }
 
 void NativeWindows::set_bitmap_table(uint8_t *table)
@@ -1900,7 +1888,6 @@ void NativeWindows::api_left()
 	// What the returning call touched no longer needs watching for it.
 	const auto outlived=[&](const auto &item) { return item.depth>api_depth; };
 	std::erase_if(watched,outlived);
-	std::erase_if(watched_menus,outlived);
 	std::erase_if(watched_bitmaps,outlived);
 	std::erase_if(watched_dcs,outlived);
 }
