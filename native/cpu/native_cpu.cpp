@@ -100,6 +100,7 @@ public:
 
 private:
 	std::chrono::steady_clock::time_point deadline;
+	std::chrono::steady_clock::time_point last_served{};
 	std::optional<std::chrono::steady_clock::time_point> slice_end;
 };
 
@@ -196,21 +197,23 @@ static timer_t wait_timer()
 
 int NativeChild::wait(const std::function<bool()> *served)
 {
-	// Guest code usually reaches its next trap within microseconds, so it is polled first; a guest that runs longer is waited for
-	// asleep, which leaves the processor to it. A served call made meanwhile ends in a trap, which wakes the wait.
+	// A guest that has just had served calls answered is polled for a while, since the next one is answered sooner that way than at the
+	// breakpoint its stub reaches when nobody answers. Any other is waited for asleep at once: polling costs the runtime processor time on
+	// every stop and gains it nothing. A served call made meanwhile ends in a trap, which wakes the wait.
 	unsigned polls = 0;
 	for (;;) {
 		// A guest that is being served keeps running, so it is as busy as one that just started; it never stops for its calls, so its
 		// slice is looked at after each of them.
 		if (served && (*served)()) {
 			polls = 0;
+			last_served = std::chrono::steady_clock::now();
 			if (slice_end && std::chrono::steady_clock::now() >= *slice_end)
 				return -2;
 			continue;
 		}
 		int status = 0;
 		pid_t result = waitpid(pid, &status, WNOHANG);
-		if (result == 0 && ++polls >= 200) {
+		if (result == 0 && ++polls >= (std::chrono::steady_clock::now() - last_served < std::chrono::milliseconds(5) ? 200U : 1U)) {
 			const auto now = std::chrono::steady_clock::now();
 			if (slice_end && now >= *slice_end)
 				return -2;
