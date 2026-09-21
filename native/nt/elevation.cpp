@@ -2,6 +2,7 @@
 
 #include "pe/resources.h"
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 
@@ -43,6 +44,28 @@ bool manifest_requests_elevation(const PEImage &image, std::string_view file_nam
 			character = char(character + ('a' - 'A'));
 	for (const std::string_view word : {"setup", "install", "update", "patch", "upgrad"})
 		if (name.find(word) != name.npos)
+			return true;
+	return false;
+}
+
+bool installer_like(const PEImage &image, std::string_view file_name)
+{
+	if (manifest_requests_elevation(image, file_name))
+		return true;
+	std::string name(file_name);
+	for (auto &character : name)
+		if (character >= 'A' && character <= 'Z')
+			character = char(character + ('a' - 'A'));
+	for (const std::string_view word : {"setup", "install", "uninst", "update", "patch", "redist"})
+		if (name.find(word) != name.npos)
+			return true;
+	if (name == "msiexec.exe")
+		return true;
+	// A WiX bundle keeps its manifest in a section of its own; an IExpress package keeps its cabinet as a resource.
+	if (std::any_of(image.sections.begin(), image.sections.end(), [](const auto &section) { return section.name == ".wixburn"; }))
+		return true;
+	for (const auto &resource : image.resources())
+		if (resource.type == ResourceKey{uint32_t(10)} && resource.name == ResourceKey{std::u16string(u"CABINET")})
 			return true;
 	return false;
 }

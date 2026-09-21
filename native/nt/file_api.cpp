@@ -6,6 +6,7 @@
 #include "security_attributes.h"
 #include "kernel_context.h"
 #include "file_objects.h"
+#include "restart.h"
 #include "text.h"
 
 #include <algorithm>
@@ -972,10 +973,26 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			copy_file(call, *from, *to, call.u32(5) & 1);
 	});
 	registry.add("MoveFileExW", 3, [&, resolve, missing, file_of, copy_file](ApiCall &call) {
+		const auto flags = call.u32(2);
+		// MOVEFILE_DELAY_UNTIL_REBOOT: the move, or the deletion when no target is named, waits for the next start of Windows, which
+		// `raven --reboot` stands for.
+		if (flags & 4) {
+			const auto from_name = paths.full(call.wide(call[0]));
+			const auto to_name = call[1] ? paths.full(call.wide(call[1])) : std::u16string();
+			if (from_name.empty() || (call[1] && to_name.empty())) {
+				call.fail(123);
+				return;
+			}
+			if (!queue_pending_rename(NativePrefix::from_environment(), from_name, to_name, flags & 1)) {
+				call.fail(5);
+				return;
+			}
+			call.ret(1);
+			return;
+		}
 		const auto from = resolve(call, call.wide(call[0]));
 		if (!from)
 			return;
-		const auto flags = call.u32(2);
 		if (!call[1]) {
 			call.fail(87);
 			return;

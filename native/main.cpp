@@ -9,6 +9,8 @@
 #include "nt/launch.h"
 #include "nt/actctx.h"
 #include "nt/elevation.h"
+#include "nt/restart.h"
+#include "nt/snapshot.h"
 #include "nt/handle_channel.h"
 #include "nt/text.h"
 #include "nt/system_exports.h"
@@ -120,6 +122,31 @@ int main(int argc, char **argv)
 		std::setvbuf(stderr, nullptr, _IOLBF, 0);
 	}
 	const std::string mode = argc > 1 ? argv[1] : "";
+	// A restart of Windows: the moves and deletions installers left for it, then the programs that run once at the next logon.
+	if (mode == "--reboot") {
+		const auto done = raven::simulate_restart(raven::NativePrefix::from_environment(), std::filesystem::read_symlink("/proc/self/exe"));
+		std::cout << "restarted: " << done << " pending operations and programs ran\n";
+		return 0;
+	}
+	// Snapshots of the prefix: taken by hand, listed, and restored, the newest unless one is named.
+	if (mode == "--snapshot-prefix" || mode == "--restore-prefix" || mode == "--list-snapshots") {
+		const auto prefix = raven::NativePrefix::from_environment().root();
+		try {
+			if (mode == "--snapshot-prefix") {
+				std::cout << raven::take_snapshot(prefix, argc > 2 ? argv[2] : "manual").filename().string() << '\n';
+			} else if (mode == "--restore-prefix") {
+				const auto kept = raven::restore_snapshot(prefix, argc > 2 ? std::optional<std::string>(argv[2]) : std::nullopt);
+				std::cout << "restored; what the prefix held before is the snapshot " << kept.filename().string() << '\n';
+			} else {
+				for (const auto &snapshot : raven::list_snapshots(prefix))
+					std::cout << snapshot.filename().string() << '\n';
+			}
+		} catch (const std::exception &failure) {
+			std::cerr << "raven: " << failure.what() << '\n';
+			return 1;
+		}
+		return 0;
+	}
 	const bool dump_image = mode == "--dump-image";
 	const bool map_image = mode == "--map-image" || dump_image;
 	const bool run_entry = mode == "--run-entry";
@@ -262,6 +289,18 @@ int main(int argc, char **argv)
 							}
 							if (registered)
 								std::ofstream(marker) << stamp;
+						}
+					}
+					// Before an installation the prefix is kept as a snapshot, which `raven --restore-prefix` brings back: for a program that looks
+					// like an installer and that no other program started. The ten newest of these snapshots are kept.
+					const bool started_alone = !command_line_text && handle_channel_fd < 0;
+					const auto program_name = std::filesystem::path(argv[first_file]).filename().string();
+					if (started_alone && !std::getenv("RAVEN_PREFIX_SETUP") && !std::getenv("RAVEN_NO_SNAPSHOT") && raven::installer_like(entry->image, program_name)) {
+						try {
+							raven::take_snapshot(prefix.root(), "install-" + std::filesystem::path(program_name).stem().string());
+							raven::prune_snapshots(prefix.root(), "-install-", 10);
+						} catch (const std::exception &failure) {
+							std::cerr << "raven: no snapshot of the prefix before the installation: " << failure.what() << '\n';
 						}
 					}
 					// The libraries installed for every program, in the system directory of the program's width.
