@@ -1256,6 +1256,25 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -o ${fixture}/redist-check.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/redist_check.c -ladvapi32 -lkernel32
                     DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/redist_check.c VERBATIM)
                 add_custom_target(redist_check_fixture_${installer_arch} ALL DEPENDS ${fixture}/redist-check.exe)
+                # Programs built against the Visual C++ 2005 and 2008 runtimes, which name their side-by-side assembly in the manifest.
+                if(installer_arch STREQUAL x86)
+                    set(sxs_outputs)
+                    foreach(sxs_version 8 9)
+                        add_custom_command(OUTPUT ${fixture}/sxs-vc${sxs_version}0.exe
+                            COMMAND ${resource_compiler} -O coff -i ${PROJECT_SOURCE_DIR}/testdata/native_loader/sxs_crt_vc${sxs_version}0.rc
+                                -o ${fixture}/sxs_crt_vc${sxs_version}0_res.o
+                            COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                                "-DCRT_NAME=L\"msvcr${sxs_version}0.dll\"" "-DCRT_VERSION=\"${sxs_version}\""
+                                -o ${fixture}/sxs-vc${sxs_version}0.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/sxs_crt_check.c
+                                ${fixture}/sxs_crt_vc${sxs_version}0_res.o -lmsvcr${sxs_version}0 -luser32 -lkernel32
+                            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/testdata/native_loader
+                            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/sxs_crt_check.c
+                                ${PROJECT_SOURCE_DIR}/testdata/native_loader/sxs_crt_vc${sxs_version}0.manifest
+                                ${PROJECT_SOURCE_DIR}/testdata/native_loader/sxs_crt_vc${sxs_version}0.rc VERBATIM)
+                        list(APPEND sxs_outputs ${fixture}/sxs-vc${sxs_version}0.exe)
+                    endforeach()
+                    add_custom_target(sxs_crt_fixture ALL DEPENDS ${sxs_outputs})
+                endif()
                 # msiexec found by name in the system directory, installing and removing the package from the command line.
                 add_test(NAME native_msiexec_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/msiexec-client.exe)
                 set_tests_properties(native_msiexec_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
@@ -1788,6 +1807,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             PASS_REGULAR_EXPRESSION "PASS: installed")
                     endif()
                 endforeach()
+                # The Visual C++ 2005 and 2008 redistributables (vc2005_x86.exe and vc2008_x86.exe in the same directory) in one prefix: each
+                # program built against one of the runtimes loads its own from WinSxS, before and after the older package goes over the newer.
+                if(TARGET raven_wayland AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_PIL_PYTHON AND RAVEN_REDIST_DIRECTORY AND TARGET sxs_crt_fixture
+                   AND EXISTS ${RAVEN_REDIST_DIRECTORY}/vc2005_x86.exe AND EXISTS ${RAVEN_REDIST_DIRECTORY}/vc2008_x86.exe)
+                    add_test(NAME native_vcredist_legacy_x86 COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-legacy-redist.py
+                        $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/vcredist-legacy-evidence
+                        ${RAVEN_REDIST_DIRECTORY}/vc2005_x86.exe ${CMAKE_CURRENT_BINARY_DIR}/msi-fixtures/x86/sxs-vc80.exe
+                        ${RAVEN_REDIST_DIRECTORY}/vc2008_x86.exe ${CMAKE_CURRENT_BINARY_DIR}/msi-fixtures/x86/sxs-vc90.exe)
+                    set_tests_properties(native_vcredist_legacy_x86 PROPERTIES TIMEOUT 1800 RESOURCE_LOCK raven_compositor
+                        PASS_REGULAR_EXPRESSION "PASS: installed side by side")
+                endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
