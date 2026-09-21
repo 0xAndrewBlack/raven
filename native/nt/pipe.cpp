@@ -56,6 +56,7 @@ uint32_t status_of(uint32_t error)
 	case error_not_connected: return 0xc00000b0U;
 	case error_no_data: return 0xc00000b1U;
 	case error_pipe_listening: return 0xc00000b3U;
+	case error_more_data: return 0x80000005U;
 	default: return 0xc0070000U | (error & 0xffff);
 	}
 }
@@ -69,6 +70,7 @@ uint32_t error_of_status(uint64_t status)
 	case 0xc00000b0U: return error_not_connected;
 	case 0xc00000b1U: return error_no_data;
 	case 0xc00000b3U: return error_pipe_listening;
+	case 0x80000005U: return error_more_data;
 	default:
 		if ((uint32_t(status) & 0xffff0000U) == 0xc0070000U)
 			return uint32_t(status) & 0xffff;
@@ -91,12 +93,14 @@ uint64_t get_word(NativeProcess &process, uint64_t at, size_t width)
 }
 
 // OVERLAPPED: the status and the byte count come first, the event handle after the two offset words.
+// A native call names its event apart from the IO_STATUS_BLOCK it passes as the overlapped words: that event stands in for the one an
+// OVERLAPPED would hold.
 void finish_io(KernelContext &context, const std::shared_ptr<CompletionPort> &port, uint64_t key, uint64_t overlapped, size_t width, uint32_t error, uint64_t bytes,
-	bool report = true)
+	bool report = true, uint64_t event = UINT64_MAX)
 {
 	put_word(context.process, overlapped, status_of(error), width);
 	put_word(context.process, overlapped + width, bytes, width);
-	const uint64_t handle = get_word(context.process, overlapped + 2 * width + 8, width);
+	const uint64_t handle = event != UINT64_MAX ? event : get_word(context.process, overlapped + 2 * width + 8, width);
 	if (handle & ~uint64_t(1))
 		context.objects.set_event(handle & ~uint64_t(1), true);
 	// A handle with its low bit set asks for no completion packet.
@@ -208,29 +212,30 @@ uint32_t blocking(KernelContext &context, PipeObject &pipe, Transfer &transfer, 
 }
 
 // The transfer behind ReadFile and WriteFile for overlapped handles: it runs at once when it can and finishes later otherwise.
-void start_overlapped(KernelContext &context, ApiCall &call, const std::shared_ptr<PipeObject> &pipe, Transfer transfer, uint64_t overlapped, uint64_t counted)
+// How a transfer on an overlapped pipe started: finished at once, with an error or none and its count, or pending until the reactor
+// finishes it into the overlapped words.
+struct Started {
+	bool pending = false;
+	uint32_t error = 0;
+	uint64_t bytes = 0;
+};
+
+Started start_overlapped(KernelContext &context, size_t width, const std::shared_ptr<PipeObject> &pipe, Transfer transfer, uint64_t overlapped,
+	uint64_t event = UINT64_MAX)
 {
-	const size_t width = call.pointer_width();
 	put_word(context.process, overlapped, status_pending, width);
 	put_word(context.process, overlapped + width, 0, width);
+	const bool native = event != UINT64_MAX;
 	uint32_t error = 0;
 	uint64_t bytes = 0;
 	if (attempt(context, *pipe, transfer, error, bytes) == 0) {
 		// A failure found at the start is reported by the call; only a transfer that ran is queued as completed.
 		if (error && error != error_more_data) {
 			put_word(context.process, overlapped, status_of(error), width);
-			call.fail(error);
-			return;
+			return {false, error, 0};
 		}
-		finish_io(context, pipe->port, pipe->key, overlapped, width, error, bytes, !pipe->skip_port_on_success);
-		if (counted)
-			call.store<uint32_t>(counted, uint32_t(bytes));
-		if (error) {
-			call.fail(error);
-			return;
-		}
-		call.ret(1);
-		return;
+		finish_io(context, pipe->port, pipe->key, overlapped, width, error, bytes, !native && !pipe->skip_port_on_success, event);
+		return {false, error, bytes};
 	}
 	auto io = std::make_shared<PendingIo>();
 	io->pipe = pipe;
@@ -240,7 +245,7 @@ void start_overlapped(KernelContext &context, ApiCall &call, const std::shared_p
 	const auto port = pipe->port;
 	const auto key = pipe->key;
 	auto &state = *context.pipes;
-	context.reactor->add([&context, &state, io, shared, port, key, width, overlapped]() {
+	context.reactor->add([&context, &state, io, shared, port, key, width, overlapped, native, event]() {
 		const auto pipe = io->pipe.lock();
 		uint32_t error = 0;
 		uint64_t bytes = 0;
@@ -255,10 +260,10 @@ void start_overlapped(KernelContext &context, ApiCall &call, const std::shared_p
 		if (!finished)
 			return false;
 		state.pending.erase(std::remove(state.pending.begin(), state.pending.end(), io), state.pending.end());
-		finish_io(context, port, key, overlapped, width, error, bytes);
+		finish_io(context, port, key, overlapped, width, error, bytes, !native, event);
 		return true;
 	}, pipe->descriptor, short(shared->reading ? POLLIN : POLLOUT));
-	call.fail(error_io_pending);
+	return {true, 0, 0};
 }
 
 std::shared_ptr<PipeObject> make_client(int descriptor, uint32_t access, uint32_t flags, int type, const std::u16string &name)
@@ -402,7 +407,17 @@ bool transfer_pipe(KernelContext &context, ApiCall &call, bool reading)
 	if (!reading)
 		transfer.outgoing = call.read(call[1], transfer.size);
 	if (asynchronous) {
-		start_overlapped(context, call, pipe, std::move(transfer), overlapped, counted);
+		const auto started = start_overlapped(context, call.pointer_width(), pipe, std::move(transfer), overlapped);
+		if (started.pending) {
+			call.fail(error_io_pending);
+			return true;
+		}
+		if (counted && (!started.error || started.error == error_more_data))
+			call.store<uint32_t>(counted, uint32_t(started.bytes));
+		if (started.error)
+			call.fail(started.error);
+		else
+			call.ret(1);
 		return true;
 	}
 	if (counted)
@@ -417,6 +432,49 @@ bool transfer_pipe(KernelContext &context, ApiCall &call, bool reading)
 		return true;
 	}
 	call.ret(1);
+	return true;
+}
+
+bool native_pipe_transfer(KernelContext &context, ApiCall &call, bool reading)
+{
+	const auto pipe = context.objects.object_as<PipeObject>(call[0]);
+	if (!pipe)
+		return false;
+	const size_t width = call.pointer_width();
+	const uint64_t event = call[1], status_block = call[4];
+	if (!status_block) {
+		call.ret(0xc000000dU);
+		return true;
+	}
+	if (reading ? !pipe->readable() : !pipe->writable()) {
+		call.ret(0xc0000022U);
+		return true;
+	}
+	ensure_pipe_connected(*pipe);
+	if (!pipe->connected) {
+		call.ret(status_of(pipe->server ? error_pipe_listening : error_not_connected));
+		return true;
+	}
+	Transfer transfer;
+	transfer.reading = reading;
+	transfer.buffer = call[5];
+	transfer.size = call.u32(6);
+	if (!reading)
+		transfer.outgoing = call.read(call[5], transfer.size);
+	if (event)
+		context.objects.set_event(event, false);
+	if (pipe->overlapped()) {
+		const auto started = start_overlapped(context, width, pipe, std::move(transfer), status_block, event);
+		call.ret(started.pending ? status_pending : status_of(started.error));
+		return true;
+	}
+	uint64_t bytes = 0;
+	const uint32_t error = blocking(context, *pipe, transfer, bytes);
+	put_word(context.process, status_block, status_of(error), width);
+	put_word(context.process, status_block + width, bytes, width);
+	if (event)
+		context.objects.set_event(event, true);
+	call.ret(status_of(error));
 	return true;
 }
 
@@ -750,6 +808,76 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("CancelIoEx", 2, [cancel](ApiCall &call) { cancel(call, call[0], call[1], true); });
+	// The native cancels: every transfer the handle has pending, or the one whose IO_STATUS_BLOCK is named; the outcome as an NTSTATUS.
+	const auto native_cancel = [&context, pipe_of](ApiCall &call, uint64_t handle, uint64_t status_block, uint64_t outcome) {
+		const auto pipe = pipe_of(handle);
+		if (!pipe) {
+			call.ret(0xc0000008U);
+			return;
+		}
+		bool found = false;
+		for (const auto &io : context.pipes->pending)
+			if (io->pipe.lock() == pipe && (!status_block || io->overlapped == status_block)) {
+				io->cancelled = true;
+				found = true;
+			}
+		context.reactor->poll();
+		if (outcome) {
+			put_word(context.process, outcome, 0, call.pointer_width());
+			put_word(context.process, outcome + call.pointer_width(), 0, call.pointer_width());
+		}
+		call.ret(found || !status_block ? 0 : 0xc0000225U);
+	};
+	registry.add("NtCancelIoFile", 2, [native_cancel](ApiCall &call) { native_cancel(call, call[0], 0, call[1]); });
+	registry.add("NtCancelIoFileEx", 3, [native_cancel](ApiCall &call) { native_cancel(call, call[0], call[1], call[2]); });
+	// FSCTL_PIPE_LISTEN, ConnectNamedPipe as the native call makes it: the event and the IO_STATUS_BLOCK report a client that arrives.
+	registry.add("NtFsControlFile", 10, [&context, pipe_of](ApiCall &call) {
+		constexpr uint32_t fsctl_pipe_listen = 0x110008, status_invalid_device_request = 0xc0000010U, status_pipe_connected = 0xc00000b2U;
+		const auto pipe = pipe_of(call[0]);
+		const size_t width = call.pointer_width();
+		const uint64_t event = call[1], status_block = call[4];
+		if (!pipe || !pipe->server || call.u32(5) != fsctl_pipe_listen || !status_block) {
+			call.ret(status_invalid_device_request);
+			return;
+		}
+		if (event)
+			context.objects.set_event(event, false);
+		if (pipe->connected || ensure_pipe_connected(*pipe)) {
+			put_word(context.process, status_block, status_pipe_connected, width);
+			put_word(context.process, status_block + width, 0, width);
+			call.ret(status_pipe_connected);
+			return;
+		}
+		if (!pipe->overlapped()) {
+			HostWait waiting;
+			context.threads.block([pipe] { return ensure_pipe_connected(*pipe); }, std::nullopt);
+			put_word(context.process, status_block, 0, width);
+			put_word(context.process, status_block + width, 0, width);
+			if (event)
+				context.objects.set_event(event, true);
+			call.ret(0);
+			return;
+		}
+		put_word(context.process, status_block, status_pending, width);
+		put_word(context.process, status_block + width, 0, width);
+		auto io = std::make_shared<PendingIo>();
+		io->pipe = pipe;
+		io->overlapped = status_block;
+		context.pipes->pending.push_back(io);
+		auto &state = *context.pipes;
+		context.reactor->add([&context, &state, io, width, status_block, event]() {
+			const auto pipe = io->pipe.lock();
+			uint32_t error = 0;
+			if (io->cancelled || !pipe)
+				error = error_aborted;
+			else if (!ensure_pipe_connected(*pipe))
+				return false;
+			state.pending.erase(std::remove(state.pending.begin(), state.pending.end(), io), state.pending.end());
+			finish_io(context, nullptr, 0, status_block, width, error, 0, false, event);
+			return true;
+		}, pipe->listener ? pipe->listener->descriptor : -1, short(POLLIN));
+		call.ret(status_pending);
+	});
 	registry.add("CancelIo", 1, [cancel](ApiCall &call) { cancel(call, call[0], 0, false); });
 }
 

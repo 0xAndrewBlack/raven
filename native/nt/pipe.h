@@ -78,6 +78,8 @@ std::optional<std::u16string> pipe_name_of(std::u16string_view path);
 bool open_pipe_client(KernelContext &context, ApiCall &call, std::u16string_view path, uint32_t access, uint32_t flags);
 // ReadFile and WriteFile on a pipe handle; false when the handle is no pipe.
 bool transfer_pipe(KernelContext &context, ApiCall &call, bool reading);
+// NtReadFile and NtWriteFile on a pipe handle, with their event and IO_STATUS_BLOCK; false when the handle is no pipe.
+bool native_pipe_transfer(KernelContext &context, ApiCall &call, bool reading);
 // Reports an overlapped transfer on a file handle that finished inside the call: the OVERLAPPED gets the status and count, its event is
 // set, and the file's completion port receives a packet unless the handle skips packets for transfers that succeed at once.
 void complete_file_io(KernelContext &context, FileObject &file, uint64_t overlapped, size_t width, uint32_t error, uint64_t bytes);

@@ -369,10 +369,13 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("ReadFileEx", 5, [transfer_ex](ApiCall &call) { transfer_ex(call, "ReadFile"); });
 	registry.add("WriteFileEx", 5, [transfer_ex](ApiCall &call) { transfer_ex(call, "WriteFile"); });
-	// The native write: WriteFile does the work, with an OVERLAPPED that carries the offset when the caller names one, and the outcome
-	// goes to the IO_STATUS_BLOCK as an NTSTATUS. An offset of -1 writes at the end of the file; -2 or none, at the file pointer.
-	registry.add("NtWriteFile", 9, [&registry, file_of](ApiCall &call) {
-		const auto write = registry.find("WriteFile");
+	// The native transfers: ReadFile or WriteFile does the work, with an OVERLAPPED that carries the offset when the caller names one,
+	// and the outcome goes to the IO_STATUS_BLOCK as an NTSTATUS. An offset of -1 writes at the end of the file; -2 or none, at the file
+	// pointer. A pipe answers with its own transfers, which may stay pending until the event the caller named is set.
+	const auto native_transfer = [&registry, &context, file_of](ApiCall &call, bool reading) {
+		if (native_pipe_transfer(context, call, reading))
+			return;
+		const auto write = registry.find(reading ? "ReadFile" : "WriteFile");
 		if (!write || !call[4]) {
 			call.ret(0xc000000dU);
 			return;
@@ -381,7 +384,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		uint64_t offset = UINT64_MAX;
 		if (call[7]) {
 			const auto requested = call.load<int64_t>(call[7]);
-			if (requested == -1) {
+			if (requested == -1 && !reading) {
 				const auto file = file_of(call[0]);
 				offset = file ? uint64_t(::lseek(file->descriptor, 0, SEEK_END)) : UINT64_MAX;
 			} else if (requested >= 0) {
@@ -425,7 +428,9 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 				set->second(signal);
 			}
 		call.ret(status);
-	});
+	};
+	registry.add("NtWriteFile", 9, [native_transfer](ApiCall &call) { native_transfer(call, false); });
+	registry.add("NtReadFile", 9, [native_transfer](ApiCall &call) { native_transfer(call, true); });
 	registry.add("SetFilePointerEx", 4, [&, resolve, missing, file_of](ApiCall &call) {
 		const auto file = file_of(call[0]);
 		if (!file) {
