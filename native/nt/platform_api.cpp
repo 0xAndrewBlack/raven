@@ -345,12 +345,8 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[1], *bytes);
 		call.ret(0);
 	});
-	registry.add("StringFromGUID2", 3, [](ApiCall &call) {
-		if (call.u32(2) < 39) {
-			call.ret(0);
-			return;
-		}
-		const auto bytes = call.read(call[0], 16);
+	// The registry form of a GUID, "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}", from its sixteen bytes.
+	const auto guid_text = [](const std::vector<uint8_t> &bytes) {
 		static constexpr int order[16] = {3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11};
 		char text[40];
 		int at = 0;
@@ -365,9 +361,29 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		for (size_t index = 12; index < 16; ++index)
 			at += std::snprintf(text + at, 3, "%02X", bytes[index]);
 		text[at++] = '}';
-		call.put_wide(call[1], widen_ascii(std::string_view(text, size_t(at))), 39);
+		return widen_ascii(std::string_view(text, size_t(at)));
+	};
+	registry.add("StringFromGUID2", 3, [guid_text](ApiCall &call) {
+		if (call.u32(2) < 39) {
+			call.ret(0);
+			return;
+		}
+		call.put_wide(call[1], guid_text(call.read(call[0], 16)), 39);
 		call.ret(39);
 	});
+	// The same text in memory from the task allocator, which the caller frees with CoTaskMemFree.
+	for (const char *name : {"StringFromCLSID", "StringFromIID"})
+		registry.add(name, 2, [&context, guid_text](ApiCall &call) {
+			const auto memory = context.allocator.allocate(39 * sizeof(char16_t), false);
+			if (!memory) {
+				call.store_pointer(call[1], 0);
+				call.ret(0x8007000eU);
+				return;
+			}
+			call.put_wide(memory, guid_text(call.read(call[0], 16)), 39);
+			call.store_pointer(call[1], memory);
+			call.ret(0);
+		});
 	registry.add("CoTaskMemAlloc", 1, [&context](ApiCall &call) { call.ret(context.allocator.allocate(call[0], false)); });
 	registry.add("CoTaskMemFree", 1, [&context](ApiCall &call) {
 		if (call[0]) context.allocator.release(call[0]);
