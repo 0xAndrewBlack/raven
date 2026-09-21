@@ -37,7 +37,7 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint64_t>(call[0] + spin_count, call[1] & 0x00ffffff);
 	});
 	registry.add("InitializeCriticalSectionEx", 3, [initialize](ApiCall &call) {
-		if (call.u32(2) & ~0x03000000U) {
+		if (call.u32(2) & ~0x1f000000U) {
 			call.fail(87);
 			return;
 		}

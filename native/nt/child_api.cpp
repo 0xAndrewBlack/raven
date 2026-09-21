@@ -392,6 +392,13 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(uint32_t(child->pid));
 	});
+	// Every process runs as the same host user, so a process created for a token is created as any other.
+	registry.add("CreateProcessAsUserW", 11, [&registry](ApiCall &call) {
+		const auto create = registry.find("CreateProcessW");
+		ApiCall inner(call.process, call.environment, {call[1], call[2], call[3], call[4], call[5], call[6], call[7], call[8], call[9], call[10]});
+		create->second(inner);
+		call.ret(inner.result);
+	});
 	// A child has no message queue the parent could watch; it counts as idle from the start.
 	registry.add("WaitForInputIdle", 2, [&objects](ApiCall &call) {
 		if (!objects.object_as<ProcessObject>(call[0])) {

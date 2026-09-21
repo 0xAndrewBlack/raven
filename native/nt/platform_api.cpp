@@ -323,6 +323,18 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[1], *bytes);
 		call.ret(0);
 	});
+	// A random GUID of version 4 with the RFC 4122 variant, as CoCreateGuid makes.
+	registry.add("CoCreateGuid", 1, [](ApiCall &call) {
+		std::vector<uint8_t> bytes(16);
+		if (!call[0] || ::getrandom(bytes.data(), bytes.size(), 0) != ssize_t(bytes.size())) {
+			call.ret(0x80070057U);
+			return;
+		}
+		bytes[7] = uint8_t((bytes[7] & 0x0f) | 0x40);
+		bytes[8] = uint8_t((bytes[8] & 0x3f) | 0x80);
+		call.write(call[0], bytes);
+		call.ret(0);
+	});
 	registry.add("IIDFromString", 2, [parse_guid](ApiCall &call) {
 		const auto text = call[0] ? call.wide(call[0], 64) : std::u16string();
 		const auto bytes = text.empty() ? std::optional(std::vector<uint8_t>(16)) : parse_guid(text);

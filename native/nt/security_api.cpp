@@ -335,6 +335,23 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[1], call.read(call[2], length));
 		call.ret(1);
 	});
+	// The ntdll forms of the same: lengths and checks as they are, equality as a boolean, copies with an NTSTATUS.
+	registry.add("RtlLengthSid", 1, [](ApiCall &call) { call.ret(sid_length(call, call[0])); });
+	registry.add("RtlValidSid", 1, [](ApiCall &call) { call.ret(valid_sid(call, call[0])); });
+	registry.add("RtlEqualSid", 2, [](ApiCall &call) {
+		const auto length = sid_length(call, call[0]);
+		call.ret(valid_sid(call, call[0]) && valid_sid(call, call[1]) && length == sid_length(call, call[1]) &&
+			call.read(call[0], length) == call.read(call[1], length));
+	});
+	registry.add("RtlCopySid", 3, [](ApiCall &call) {
+		const auto length = sid_length(call, call[2]);
+		if (call.u32(0) < length) {
+			call.ret(0xc0000023U);
+			return;
+		}
+		call.write(call[1], call.read(call[2], length));
+		call.ret(0);
+	});
 	// An access control list is a header followed by its entries: the size of the whole, and how many entries it holds.
 	registry.add("InitializeAcl", 3, [](ApiCall &call) {
 		const uint32_t length = call.u32(1);
@@ -389,7 +406,9 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 	};
 	// Token information: the account is one fixed user in the Users group at medium integrity, not elevated, in session 1.
 	registry.add("GetTokenInformation", 5, [&objects](ApiCall &call) {
-		if (!objects.object_as<AccessToken>(call[0])) {
+		// The pseudo handles of the process token, the thread token and the thread's effective token name the program's own token.
+		const int32_t pseudo = int32_t(uint32_t(call[0]));
+		if ((pseudo < -6 || pseudo > -4) && !objects.object_as<AccessToken>(call[0])) {
 			call.fail(6);
 			return;
 		}
@@ -754,6 +773,41 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			end = std::max(end, offset + size);
 		}
 		call.ret(end);
+	});
+	// The descriptor packed into one block: a 20-byte header whose four offsets lead to the owner, the group, the SACL and the DACL
+	// that follow it, in that order.
+	registry.add("MakeSelfRelativeSD", 3, [part](ApiCall &call) {
+		if (!call[0] || !call[2]) {
+			call.fail(87);
+			return;
+		}
+		const auto control = call.load<uint16_t>(call[0] + 2);
+		if (control & 0x8000) {
+			call.fail(1361);
+			return;
+		}
+		std::vector<uint8_t> block(20);
+		block[0] = 1;
+		const uint16_t packed = uint16_t(control | 0x8000);
+		std::memcpy(block.data() + 2, &packed, 2);
+		for (size_t index = 0; index < 4; ++index) {
+			const auto at = part(call, call[0], index);
+			if (!at)
+				continue;
+			const uint32_t size = index < 2 ? 8 + 4 * uint32_t(call.read(at + 1, 1)[0]) : call.load<uint16_t>(at + 2);
+			const uint32_t offset = uint32_t(block.size());
+			std::memcpy(block.data() + 4 + 4 * index, &offset, 4);
+			const auto bytes = call.read(at, size);
+			block.insert(block.end(), bytes.begin(), bytes.end());
+		}
+		const uint32_t capacity = call.load<uint32_t>(call[2]);
+		call.store<uint32_t>(call[2], uint32_t(block.size()));
+		if (!call[1] || capacity < block.size()) {
+			call.fail(122);
+			return;
+		}
+		call.write(call[1], block);
+		call.ret(1);
 	});
 	registry.add("IsValidAcl", 1, [](ApiCall &call) {
 		if (!call[0]) {

@@ -87,7 +87,9 @@ BOOL WINAPI RavenInitializeCriticalSectionAndSpinCount(PRTL_CRITICAL_SECTION sec
 
 BOOL WINAPI RavenInitializeCriticalSectionEx(PRTL_CRITICAL_SECTION section, ULONG spin, ULONG flags)
 {
-	if (flags & ~0x03000000U) {
+	/* The flags Windows knows: no debug data, dynamic spin, static initialization, resource type and forced debug data; the
+	   section always gets its debug data here, which callers that force it write their name into. */
+	if (flags & ~0x1f000000U) {
 		LAST_ERROR = ERROR_INVALID_PARAMETER;
 		return FALSE;
 	}
