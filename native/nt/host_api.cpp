@@ -726,6 +726,30 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			call.store_pointer(call[1], 0x04090409);
 		call.ret(1);
 	});
+	// The drives the prefix has: C: and Z: always, and any other letter with a folder behind it. GetLogicalDriveStrings lists their roots.
+	const auto drives = [&context] {
+		uint32_t mask = 0;
+		for (char16_t letter = u'A'; letter <= u'Z'; ++letter) {
+			const std::u16string root{letter, u':', u'\\'};
+			if (const auto resolved = context.paths.resolve(root); resolved && resolved->exists)
+				mask |= 1u << (letter - u'A');
+		}
+		return mask;
+	};
+	registry.add("GetLogicalDrives", 0, [drives](ApiCall &call) { call.ret(drives()); });
+	registry.add("GetLogicalDriveStringsW", 2, [drives](ApiCall &call) {
+		std::u16string text;
+		const uint32_t mask = drives();
+		for (char16_t letter = u'A'; letter <= u'Z'; ++letter)
+			if (mask & (1u << (letter - u'A')))
+				text += std::u16string{letter, u':', u'\\', 0};
+		if (call.u32(0) <= text.size()) {
+			call.ret(text.size() + 1);
+			return;
+		}
+		call.put_wide(call[1], text, text.size() + 1);
+		call.ret(text.size());
+	});
 	// A drive's volume: the prefix keeps the files, so every drive reports one NTFS volume.
 	registry.add("GetVolumeInformationW", 8, [&context](ApiCall &call) {
 		if (call[0]) {
