@@ -22,6 +22,8 @@ public:
 	// Synchronous file handles are always signaled.
 	int signaled(uint32_t) const override { return 1; }
 	int descriptor;
+	// A writable description of the same file for the byte-range locks of a handle opened only for reading, opened on first use.
+	int lock_descriptor = -1;
 	uint32_t access;
 	bool directory;
 	std::filesystem::path path;

@@ -25,6 +25,8 @@ FileObject::~FileObject()
 {
 	if (descriptor >= 0)
 		::close(descriptor);
+	if (lock_descriptor >= 0)
+		::close(lock_descriptor);
 	if (flags & 0x04000000U) {
 		if (directory)
 			::rmdir(path.c_str());
@@ -472,6 +474,17 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(6);
 			return;
 		}
+		// Windows locks a range exclusively through a handle opened only for reading; the host takes a write lock only on a writable
+		// description, so such a handle locks through one of its own, and where none can be opened an exclusive lock becomes a shared one.
+		int target = file->descriptor;
+		if (const int mode = ::fcntl(target, F_GETFL); mode >= 0 && (mode & O_ACCMODE) == O_RDONLY) {
+			if (file->lock_descriptor < 0)
+				file->lock_descriptor = ::open(("/proc/self/fd/" + std::to_string(file->descriptor)).c_str(), O_RDWR | O_CLOEXEC);
+			if (file->lock_descriptor >= 0)
+				target = file->lock_descriptor;
+			else if (kind == F_WRLCK)
+				kind = F_RDLCK;
+		}
 		struct flock request{};
 		request.l_type = kind;
 		request.l_whence = SEEK_SET;
@@ -488,7 +501,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(1);
 			return;
 		}
-		if (::fcntl(file->descriptor, wait ? F_OFD_SETLKW : F_OFD_SETLK, &request) < 0) {
+		if (::fcntl(target, wait ? F_OFD_SETLKW : F_OFD_SETLK, &request) < 0) {
 			call.fail(errno == EAGAIN || errno == EACCES ? 33 : errno == EINTR ? 995 : error_of(errno));
 			return;
 		}
