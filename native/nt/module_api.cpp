@@ -2,6 +2,8 @@
 #include "apiset.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <iostream>
 #include <stdexcept>
 
 namespace raven {
@@ -81,6 +83,8 @@ uint64_t NativeModuleAPI::procedure(uint64_t handle, uint64_t name)
 		return modules.resolve({found->first, symbol, static_cast<uint16_t>(ordinal ? name : 0), ordinal, 0});
 	} catch (const std::runtime_error &error) {
 		const std::string_view message = error.what();
+		if (std::getenv("RAVEN_TRACE_FAIL"))
+			std::cerr << "raven: GetProcAddress " << found->first << ' ' << (ordinal ? "#" + std::to_string(name) : symbol) << " fails: " << message << '\n';
 		if (message.starts_with("missing PE export:"))
 			environment.set_last_error(127);
 		else if (message.starts_with("missing PE module:"))
