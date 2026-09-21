@@ -991,6 +991,44 @@ static double raven_pow(double base, double exponent)
 	return raven_exp(exponent * raven_log(base));
 }
 
+/* Values from 2^52 up, infinities and NaN have no fraction: they are their own floor and ceiling. */
+CRT double floor(double x)
+{
+	if (!(x > -4503599627370496.0 && x < 4503599627370496.0))
+		return x;
+	double whole = (double)(long long)x;
+	return whole > x ? whole - 1 : whole;
+}
+
+CRT double ceil(double x)
+{
+	if (!(x > -4503599627370496.0 && x < 4503599627370496.0))
+		return x;
+	double whole = (double)(long long)x;
+	return whole < x ? whole + 1 : whole;
+}
+
+CRT double fabs(double x) { return x < 0 || (x == 0 && 1 / x < 0) ? -x : x; }
+
+/* The remainder with the sign of x: multiples of y, doubled while they fit, come off exactly. */
+CRT double fmod(double x, double y)
+{
+	double rest = fabs(x), step = fabs(y);
+	if (y == 0 || x != x || y != y || rest == 1.0 / 0.0)
+		return 0.0 / 0.0;
+	while (rest >= step) {
+		double part = step;
+		while (part <= rest / 2)
+			part *= 2;
+		rest -= part;
+	}
+	return x < 0 ? -rest : rest;
+}
+
+CRT double log(double x) { return raven_log(x); }
+CRT double log10(double x) { return raven_log(x) / 2.30258509299404568402; }
+CRT double exp(double x) { return raven_exp(x); }
+
 CRT float powf(float x, float y) { return (float)raven_pow(x, y); }
 CRT double pow(double x, double y) { return raven_pow(x, y); }
 CRT double cos(double x) { return raven_cos(x); }

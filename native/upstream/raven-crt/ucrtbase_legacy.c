@@ -155,6 +155,27 @@ CRT int _snwprintf(wchar_t *buffer, size_t count, const wchar_t *text, ...)
 	return result;
 }
 
+/* msvcrt's own swprintf takes no count: the caller sized the buffer. */
+CRT int swprintf(wchar_t *buffer, const wchar_t *text, ...)
+{
+	va_list arguments;
+	int result;
+	va_start(arguments, text);
+	result = __stdio_common_vswprintf(0, buffer, (size_t)-1 / sizeof(wchar_t), text, NULL, arguments);
+	va_end(arguments);
+	return result;
+}
+
+CRT int wprintf(const wchar_t *text, ...)
+{
+	va_list arguments;
+	int result;
+	va_start(arguments, text);
+	result = __stdio_common_vfwprintf(0, __acrt_iob_func(1), text, NULL, arguments);
+	va_end(arguments);
+	return result;
+}
+
 /* ---- wide scanning ---- */
 
 static int scan_digit(wchar_t c, int base)
@@ -163,7 +184,8 @@ static int scan_digit(wchar_t c, int base)
 	return value < base ? value : -1;
 }
 
-static int scan_wide(const wchar_t *input, const wchar_t *format, va_list arguments)
+/* Scans wide text; with narrow set, %s, %c and %[ without a size store narrow strings, as sscanf's do. */
+static int scan_wide(const wchar_t *input, const wchar_t *format, va_list arguments, int narrow_strings)
 {
 	const wchar_t *start = input;
 	int assigned = 0, converted_any = 0;
@@ -258,10 +280,77 @@ static int scan_wide(const wchar_t *input, const wchar_t *format, va_list argume
 				++assigned;
 			}
 			converted_any = 1;
+		} else if (c == 'e' || c == 'f' || c == 'g' || c == 'E' || c == 'G') {
+			/* A decimal number with an optional exponent: digits scaled by powers of ten. */
+			int remaining = width ? width : 1 << 30, negative = 0, digits = 0, exponent = 0, exponent_negative = 0;
+			double value = 0, scale = 1;
+			if (remaining > 0 && (*input == '-' || *input == '+')) {
+				negative = *input++ == '-';
+				--remaining;
+			}
+			while (remaining > 0 && *input >= '0' && *input <= '9') {
+				value = value * 10 + (*input++ - '0');
+				--remaining;
+				++digits;
+			}
+			if (remaining > 0 && *input == '.') {
+				++input;
+				--remaining;
+				while (remaining > 0 && *input >= '0' && *input <= '9') {
+					scale /= 10;
+					value += (*input++ - '0') * scale;
+					--remaining;
+					++digits;
+				}
+			}
+			if (!digits)
+				return assigned;
+			if (remaining > 1 && (*input == 'e' || *input == 'E') && ((input[1] >= '0' && input[1] <= '9') || input[1] == '-' || input[1] == '+')) {
+				++input;
+				--remaining;
+				if (*input == '-' || *input == '+') {
+					exponent_negative = *input++ == '-';
+					--remaining;
+				}
+				while (remaining > 0 && *input >= '0' && *input <= '9') {
+					exponent = exponent * 10 + (*input++ - '0');
+					--remaining;
+				}
+				while (exponent-- > 0)
+					value = exponent_negative ? value / 10 : value * 10;
+			}
+			if (negative)
+				value = -value;
+			if (!suppress) {
+				if (size > 0)
+					*va_arg(arguments, double *) = value;
+				else
+					*va_arg(arguments, float *) = (float)value;
+				++assigned;
+			}
+			converted_any = 1;
+		} else if (c == 'p') {
+			unsigned long long value = 0;
+			int digits = 0, digit;
+			if (input[0] == '0' && (input[1] == 'x' || input[1] == 'X'))
+				input += 2;
+			while ((digit = scan_digit(*input, 16)) >= 0) {
+				value = value * 16 + (unsigned)digit;
+				++input;
+				++digits;
+			}
+			if (!digits)
+				return assigned;
+			if (!suppress) {
+				*va_arg(arguments, void **) = (void *)(uintptr_t)value;
+				++assigned;
+			}
+			converted_any = 1;
 		} else if (c == 's') {
 			int remaining = width ? width : 1 << 30;
-			wchar_t *wide = !suppress && size >= 0 ? va_arg(arguments, wchar_t *) : NULL;
-			char *narrow = !suppress && size < 0 ? va_arg(arguments, char *) : NULL;
+			const int narrow_target = size < 0 || (narrow_strings && size == 0);
+			wchar_t *wide = !suppress && !narrow_target ? va_arg(arguments, wchar_t *) : NULL;
+			char *narrow = !suppress && narrow_target ? va_arg(arguments, char *) : NULL;
 			size_t written = 0;
 			while (remaining-- > 0 && *input && !iswspace(*input)) {
 				if (wide)
@@ -279,8 +368,9 @@ static int scan_wide(const wchar_t *input, const wchar_t *format, va_list argume
 			converted_any = 1;
 		} else if (c == 'c') {
 			int remaining = width ? width : 1;
-			wchar_t *wide = !suppress && size >= 0 ? va_arg(arguments, wchar_t *) : NULL;
-			char *narrow = !suppress && size < 0 ? va_arg(arguments, char *) : NULL;
+			const int narrow_target = size < 0 || (narrow_strings && size == 0);
+			wchar_t *wide = !suppress && !narrow_target ? va_arg(arguments, wchar_t *) : NULL;
+			char *narrow = !suppress && narrow_target ? va_arg(arguments, char *) : NULL;
 			size_t written = 0;
 			while (remaining-- > 0 && *input) {
 				if (wide)
@@ -297,8 +387,9 @@ static int scan_wide(const wchar_t *input, const wchar_t *format, va_list argume
 		} else if (c == '[') {
 			int invert = 0, remaining = width ? width : 1 << 30;
 			const wchar_t *set, *end;
-			wchar_t *wide = !suppress && size >= 0 ? va_arg(arguments, wchar_t *) : NULL;
-			char *narrow = !suppress && size < 0 ? va_arg(arguments, char *) : NULL;
+			const int narrow_target = size < 0 || (narrow_strings && size == 0);
+			wchar_t *wide = !suppress && !narrow_target ? va_arg(arguments, wchar_t *) : NULL;
+			char *narrow = !suppress && narrow_target ? va_arg(arguments, char *) : NULL;
 			size_t written = 0;
 			if (*format == '^') {
 				invert = 1;
@@ -348,17 +439,167 @@ static int scan_wide(const wchar_t *input, const wchar_t *format, va_list argume
 	return assigned;
 }
 
-CRT int vswscanf(const wchar_t *input, const wchar_t *format, va_list arguments) { return scan_wide(input, format, arguments); }
+CRT int vswscanf(const wchar_t *input, const wchar_t *format, va_list arguments) { return scan_wide(input, format, arguments, 0); }
 
 CRT int swscanf(const wchar_t *input, const wchar_t *format, ...)
 {
 	va_list arguments;
 	int result;
 	va_start(arguments, format);
-	result = scan_wide(input, format, arguments);
+	result = scan_wide(input, format, arguments, 0);
 	va_end(arguments);
 	return result;
 }
+
+/* ---- narrow scanning ---- */
+
+/* sscanf reads through the wide scanner: the text and the format widen, narrow strings come back narrow. */
+CRT int vsscanf(const char *input, const char *format, va_list arguments)
+{
+	size_t input_length = strlen(input), format_length = strlen(format);
+	wchar_t *wide_input = malloc((input_length + 1) * sizeof(wchar_t)), *wide_format = malloc((format_length + 1) * sizeof(wchar_t));
+	int result = SCAN_END;
+	if (wide_input && wide_format) {
+		for (size_t at = 0; at <= input_length; ++at)
+			wide_input[at] = (unsigned char)input[at];
+		for (size_t at = 0; at <= format_length; ++at)
+			wide_format[at] = (unsigned char)format[at];
+		result = scan_wide(wide_input, wide_format, arguments, 1);
+	}
+	free(wide_input);
+	free(wide_format);
+	return result;
+}
+
+CRT int sscanf(const char *input, const char *format, ...)
+{
+	va_list arguments;
+	int result;
+	va_start(arguments, format);
+	result = vsscanf(input, format, arguments);
+	va_end(arguments);
+	return result;
+}
+
+CRT int vsprintf(char *buffer, const char *text, va_list arguments)
+{
+	return __stdio_common_vsprintf(0, buffer, (size_t)-1, text, NULL, arguments);
+}
+
+/* ---- floating point classes ---- */
+
+CRT int _isnan(double x) { return x != x; }
+CRT int _finite(double x) { return x == x && x - x == 0; }
+
+/* ---- the file system, as msvcrt's POSIX names see it ---- */
+
+CRT int _access(const char *path, int mode)
+{
+	DWORD attributes = GetFileAttributesA(path);
+	if (attributes == INVALID_FILE_ATTRIBUTES) {
+		*_errno() = 2;
+		return -1;
+	}
+	if ((mode & 2) && (attributes & FILE_ATTRIBUTE_READONLY) && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+		*_errno() = 13;
+		return -1;
+	}
+	return 0;
+}
+
+CRT int _mkdir(const char *path)
+{
+	if (CreateDirectoryA(path, NULL))
+		return 0;
+	*_errno() = GetLastError() == ERROR_ALREADY_EXISTS ? 17 : 2;
+	return -1;
+}
+
+CRT char *_getcwd(char *buffer, int size)
+{
+	DWORD length = GetCurrentDirectoryA(0, NULL);
+	if (!length)
+		return NULL;
+	if (!buffer) {
+		if ((DWORD)size < length)
+			size = (int)length;
+		buffer = malloc((size_t)size);
+		if (!buffer)
+			return NULL;
+	} else if ((DWORD)size < length) {
+		*_errno() = 34;
+		return NULL;
+	}
+	GetCurrentDirectoryA((DWORD)size, buffer);
+	return buffer;
+}
+
+/* msvcrt's struct _stat: 32-bit times on 32 bits, 64-bit ones on 64 bits. */
+typedef struct {
+	unsigned int dev;
+	unsigned short ino, mode;
+	short nlink, uid, gid;
+	unsigned int rdev;
+	long size;
+#ifdef _WIN64
+	long long access_time, modify_time, change_time;
+#else
+	long access_time, modify_time, change_time;
+#endif
+} RavenStat;
+
+static long long unix_seconds(FILETIME time)
+{
+	unsigned long long ticks = ((unsigned long long)time.dwHighDateTime << 32) | time.dwLowDateTime;
+	return (long long)(ticks / 10000000ULL) - 11644473600LL;
+}
+
+static int fill_stat(const WIN32_FILE_ATTRIBUTE_DATA *data, RavenStat *out)
+{
+	memset(out, 0, sizeof *out);
+	/* Directories and files, readable by everyone, writable unless marked read-only. */
+	out->mode = (unsigned short)(((data->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 0x4000 | 0111 : 0x8000) | 0444 |
+		((data->dwFileAttributes & FILE_ATTRIBUTE_READONLY) ? 0 : 0222));
+	out->nlink = 1;
+	out->size = (long)data->nFileSizeLow;
+	out->access_time = unix_seconds(data->ftLastAccessTime);
+	out->modify_time = unix_seconds(data->ftLastWriteTime);
+	out->change_time = unix_seconds(data->ftCreationTime);
+	return 0;
+}
+
+CRT int _stat(const char *path, RavenStat *out)
+{
+	WIN32_FILE_ATTRIBUTE_DATA data;
+	if (!GetFileAttributesExA(path, GetFileExInfoStandard, &data)) {
+		*_errno() = 2;
+		return -1;
+	}
+	return fill_stat(&data, out);
+}
+
+CRT int _wstat(const wchar_t *path, RavenStat *out)
+{
+	WIN32_FILE_ATTRIBUTE_DATA data;
+	if (!GetFileAttributesExW(path, GetFileExInfoStandard, &data)) {
+		*_errno() = 2;
+		return -1;
+	}
+	return fill_stat(&data, out);
+}
+
+CRT long long _time64(long long *result)
+{
+	FILETIME now;
+	GetSystemTimeAsFileTime(&now);
+	long long seconds = unix_seconds(now);
+	if (result)
+		*result = seconds;
+	return seconds;
+}
+
+CRT int ferror(void *stream) { return stream ? ((Stream *)stream)->error : 0; }
+CRT int feof(void *stream) { return stream ? ((Stream *)stream)->end_of_file : 0; }
 
 /* ---- time and startup ---- */
 

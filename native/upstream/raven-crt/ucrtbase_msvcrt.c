@@ -51,7 +51,9 @@ CRT void _unlock(int number)
 		LeaveCriticalSection(&crt_locks[number]);
 }
 
-/* The standard streams as msvcrt's FILE array: stdin, stdout and stderr follow each other at its 48-byte stride. */
+/* The standard streams as msvcrt's FILE array: stdin, stdout and stderr follow each other at its 48-byte stride. msvcrt exports the
+ * array itself as _iob too, for code that names the streams through it. */
+__asm__(".section .drectve\n\t.ascii \" -export:_iob=streams,DATA\"\n\t.text");
 CRT void *__iob_func(void)
 {
 	int index;

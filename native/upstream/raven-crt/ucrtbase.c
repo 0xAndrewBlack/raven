@@ -342,6 +342,71 @@ CRT long wcstol(const wchar_t *text, wchar_t **end, int base)
 	return value;
 }
 
+CRT unsigned long wcstoul(const wchar_t *text, wchar_t **end, int base)
+{
+	char narrow[64];
+	size_t index = 0;
+	char *narrow_end;
+	unsigned long value;
+	while (text[index] && text[index] < 128 && index < 63)
+		narrow[index] = (char)text[index], ++index;
+	narrow[index] = 0;
+	value = strtoul(narrow, &narrow_end, base);
+	if (end)
+		*end = (wchar_t *)text + (narrow_end - narrow);
+	return value;
+}
+
+CRT size_t wcsspn(const wchar_t *text, const wchar_t *accepted)
+{
+	size_t length = 0;
+	while (text[length] && wcschr(accepted, text[length]))
+		++length;
+	return length;
+}
+
+/* A decimal number with an optional exponent, its digits scaled by powers of ten; no digits read nothing. The headers define wcstod
+ * inline, so the function has a name of its own and is exported as wcstod. */
+__asm__(".section .drectve\n\t.ascii \" -export:wcstod=raven_wcstod\"\n\t.text");
+double raven_wcstod(const wchar_t *text, wchar_t **end)
+{
+	const wchar_t *at = text;
+	int negative = 0, digits = 0;
+	double value = 0, scale = 1;
+	while (*at == ' ' || (*at >= 9 && *at <= 13))
+		++at;
+	if (*at == '-' || *at == '+')
+		negative = *at++ == '-';
+	while (*at >= '0' && *at <= '9')
+		value = value * 10 + (*at++ - '0'), ++digits;
+	if (*at == '.') {
+		++at;
+		while (*at >= '0' && *at <= '9') {
+			scale /= 10;
+			value += (*at++ - '0') * scale;
+			++digits;
+		}
+	}
+	if (!digits) {
+		if (end)
+			*end = (wchar_t *)text;
+		return 0;
+	}
+	if ((*at == 'e' || *at == 'E') && ((at[1] >= '0' && at[1] <= '9') || ((at[1] == '-' || at[1] == '+') && at[2] >= '0' && at[2] <= '9'))) {
+		int exponent = 0, exponent_negative = 0;
+		++at;
+		if (*at == '-' || *at == '+')
+			exponent_negative = *at++ == '-';
+		while (*at >= '0' && *at <= '9')
+			exponent = exponent * 10 + (*at++ - '0');
+		while (exponent-- > 0)
+			value = exponent_negative ? value / 10 : value * 10;
+	}
+	if (end)
+		*end = (wchar_t *)at;
+	return negative ? -value : value;
+}
+
 CRT int _wtoi(const wchar_t *text) { return (int)wcstol(text, NULL, 10); }
 
 /* ---- heap ---- */
@@ -551,7 +616,7 @@ typedef struct {
 _Static_assert(sizeof(Stream) == 48, "a stream must have the size of msvcrt's FILE");
 #endif
 
-static Stream streams[3] = {{NULL, 0, 0, 0, 0, -1}, {NULL, 1, 0, 0, 0, -1}, {NULL, 2, 0, 0, 0, -1}};
+Stream streams[3] = {{NULL, 0, 0, 0, 0, -1}, {NULL, 1, 0, 0, 0, -1}, {NULL, 2, 0, 0, 0, -1}};
 
 CRT void *__acrt_iob_func(unsigned index)
 {
