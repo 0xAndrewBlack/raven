@@ -341,6 +341,11 @@ bool NativeX86System::dispatch(std::string_view name)
 		if (made.status) {
 			fail(6);
 		} else {
+			// The copy is inherited by child processes when asked, and DUPLICATE_CLOSE_SOURCE closes the original.
+			if (args[5])
+				objects.set_inherit(made.value, true);
+			if ((args[6] & 1) && args[1] < 0xfffffffaULL)
+				objects.close(args[1]);
 			if (args[3])
 				write32(args[3], uint32_t(made.value));
 			process.return_api(1);

@@ -431,6 +431,22 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("NtWriteFile", 9, [native_transfer](ApiCall &call) { native_transfer(call, false); });
 	registry.add("NtReadFile", 9, [native_transfer](ApiCall &call) { native_transfer(call, true); });
+	// No file is encrypted: decrypting one that exists has nothing to do, and encryption is not offered.
+	const auto decrypt = [&, resolve](ApiCall &call, bool wide) {
+		const auto name = wide ? call.wide(call[0]) : from_utf8(call.narrow(call[0]));
+		const auto resolved = resolve(call, name);
+		if (!resolved)
+			return;
+		if (!resolved->exists) {
+			call.fail(2);
+			return;
+		}
+		call.ret(1);
+	};
+	registry.add("DecryptFileW", 2, [decrypt](ApiCall &call) { decrypt(call, true); });
+	registry.add("DecryptFileA", 2, [decrypt](ApiCall &call) { decrypt(call, false); });
+	registry.add("EncryptFileW", 1, [](ApiCall &call) { call.fail(50); });
+	registry.add("EncryptFileA", 1, [](ApiCall &call) { call.fail(50); });
 	registry.add("SetFilePointerEx", 4, [&, resolve, missing, file_of](ApiCall &call) {
 		const auto file = file_of(call[0]);
 		if (!file) {
