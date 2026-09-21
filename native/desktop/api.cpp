@@ -182,7 +182,8 @@ uint64_t NativeDesktop::load_icon(std::span<const uint64_t> args)
 	const uint32_t invalid = 0x80070057U;
 	if (!args[4])
 		return invalid;
-	std::array<uint8_t,8> output{};
+	// The icon handle goes back in a word as wide as the program's pointers.
+	std::vector<uint8_t> output(process.mode()==NativeMode::x86 ? 4 : 8);
 	process.write_memory(args[4],output);
 	const auto width = int32_t(uint32_t(args[2])), height = int32_t(uint32_t(args[3]));
 	if (!args[1] || width < 0 || height < 0)
@@ -222,7 +223,7 @@ uint64_t NativeDesktop::load_icon(std::span<const uint64_t> args)
 	const auto icon = create(std::array<uint64_t,7>{data->address,data->size,1,0x30000,uint32_t(width),uint32_t(height),0});
 	if (!icon)
 		return failure();
-	put(output,0,icon,8);
+	put(output,0,icon,output.size());
 	try { process.write_memory(args[4],output); }
 	catch (...) { objects.erase(icon); throw; }
 	return 0;
@@ -329,28 +330,28 @@ uint64_t NativeDesktop::get_object(std::span<const uint64_t> args,bool ansi)
 	const auto *bitmap = objects.bitmap(args[0]);
 	if (!bitmap)
 		return 0;
+	// BITMAP ends with the bits pointer, as wide as the program's pointers; DIBSECTION follows it with the header, the masks, the section
+	// handle and its offset.
+	const bool narrow = process.mode() == NativeMode::x86;
+	const size_t pointer = narrow ? 4 : 8, plain = narrow ? 24 : 32, extended = narrow ? 84 : 104;
 	if (!args[2])
-		return 32;
-	if (int32_t(uint32_t(args[1])) < 32)
+		return plain;
+	if (int32_t(uint32_t(args[1])) < int32_t(plain))
 		return 0;
-	std::array<uint8_t, 32> bytes{};
+	std::vector<uint8_t> bytes(bitmap->dib_section && int32_t(uint32_t(args[1])) >= int32_t(extended) ? extended : plain);
 	put(bytes, 4, bitmap->width);
 	put(bytes, 8, bitmap->height);
 	put(bytes, 12, bitmap->stride ? bitmap->stride : bitmap->address ? size_t(bitmap->width) * 4 : bitmap->bits.size() / bitmap->height);
 	put(bytes, 16, 1, 2);
 	put(bytes, 18, bitmap->depth, 2);
-	put(bytes, 24, bitmap->dib_section ? bitmap->address : 0, 8);
-	if (bitmap->dib_section && int32_t(uint32_t(args[1])) >= 104) {
-		std::array<uint8_t,104> section{};
-		std::copy(bytes.begin(),bytes.end(),section.begin());
-		put(section,32,40);
-		put(section,36,bitmap->width);
-		put(section,40,bitmap->height);
-		put(section,44,1,2);
-		put(section,46,bitmap->depth,2);
-		put(section,52,size_t(bitmap->stride ? bitmap->stride : bitmap->width*4)*bitmap->height);
-		process.write_memory(args[2],section);
-		return section.size();
+	put(bytes, plain - pointer, bitmap->dib_section ? bitmap->address : 0, pointer);
+	if (bytes.size() == extended) {
+		put(bytes, plain, 40);
+		put(bytes, plain + 4, bitmap->width);
+		put(bytes, plain + 8, bitmap->height);
+		put(bytes, plain + 12, 1, 2);
+		put(bytes, plain + 14, bitmap->depth, 2);
+		put(bytes, plain + 20, size_t(bitmap->stride ? bitmap->stride : bitmap->width*4)*bitmap->height);
 	}
 	process.write_memory(args[2], bytes);
 	return bytes.size();

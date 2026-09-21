@@ -89,7 +89,8 @@ bool NativeDesktop::delete_bitmap(uint64_t handle)
 
 uint64_t NativeDesktop::create_section(std::span<const uint64_t> args)
 {
-	std::array<uint8_t,8> output{};
+	// The bits pointer the program gets back is as wide as its pointers: a 32-bit program keeps other data in the four bytes after it.
+	std::vector<uint8_t> output(process.mode()==NativeMode::x86 ? 4 : 8);
 	if (args[3]) process.write_memory(args[3],output);
 	if (args[0] && !objects.dc(args[0])) {
 		environment.set_last_error(6);
