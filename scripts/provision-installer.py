@@ -126,6 +126,11 @@ def main():
         version = version.replace("@" + key + "@", value)
     (generated / "version.h").write_text(version)
     (generated / "reactos/version.h").write_text(version)
+    buildno = (source / "sdk/include/reactos/buildno.h.cmake").read_text()
+    for key, value in (("KERNEL_VERSION_BUILD", "custom"), ("REVISION", REVISION[:7]), ("KERNEL_VERSION", "0.4.17-dev"), ("COMMIT_HASH", REVISION),
+                       ("REACTOS_DLL_VERSION_MAJOR", "42"), ("DLL_VERSION_STR", "42.4.17-dev"), ("CMAKE_C_COMPILER_ID", "GNU"), ("CMAKE_C_COMPILER_VERSION", "13")):
+        buildno = buildno.replace("@" + key + "@", value)
+    (generated / "reactos/buildno.h").write_text(buildno)
     # The Wine-compat header overlay sits one directory below its psdk siblings upstream; Wine modules see it first.
     overlay = source / "sdk/include/reactos/wine"
     shutil.copytree(source / "sdk/include/wine", overlay, dirs_exist_ok=True)
@@ -209,6 +214,14 @@ def main():
     with ThreadPoolExecutor(max_workers=2) as pool:
         msi = list(pool.map(lambda path: compile(path, "msi_" + path.stem, msi_flags, wine_module=False), msi_sources))
     msi.append(compile(source / "sdk/lib/3rdparty/libwine/register.c", "wine_register", ["-I" + str(msi_root)]))
+    # Its strings, bitmaps, registration script and version: installers check that version before they run.
+    wrapper = output / "resource-preprocessor.sh"
+    wrapper.write_text("#!/bin/sh\nexec " + triple + "-gcc -E -xc -DRC_INVOKED -nostdinc -isystem " + gcc_include + " " +
+                       " ".join("-I" + str(path) for path in [msi_root, *includes, generated / "reactos"] if path != overlay) + ' -w "$@"\n')
+    wrapper.chmod(0o755)
+    run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__", "-D__WINESRC__",
+         "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(msi_root), "-i", msi_root / "msi.rc", "-o", objects / "msi.res.o"])
+    msi.append(objects / "msi.res.o")
     msi.append(compile(support / "support.c", "installer_support"))
     link("msi.dll", bases["msi"], [*msi, *debug], output / "msi.def",
          ["-L" + str(output), "-lsxs", "-lcabinet", *[f"-l{library}" for library in ("advapi32", "comctl32", "gdi32", "ole32", "oleaut32", "shell32",
