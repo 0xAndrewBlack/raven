@@ -2123,7 +2123,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					character = static_cast<char>(character + ('a' - 'A'));
 			if (identity.find('.') == identity.npos)
 				identity += ".dll";
-			if (!modules.all().contains(identity) && !apiset_host(identity).empty() == false) {
+			// A library named by its path in the system directory is looked for as by its name, as Windows finds its own there.
+			auto folder = slash == name.npos ? std::string() : name.substr(0, slash);
+			for (auto &character : folder)
+				if (character >= 'A' && character <= 'Z')
+					character = static_cast<char>(character + ('a' - 'A'));
+			const bool system_folder = folder == "c:\\windows\\system32" || folder == "c:\\windows\\syswow64";
+			if (!system_folder && !modules.all().contains(identity) && !apiset_host(identity).empty() == false) {
 				const auto resolved = paths.resolve(from_utf8(name));
 				if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host)) {
 					environment.set_last_error(126);

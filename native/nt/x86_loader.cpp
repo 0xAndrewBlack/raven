@@ -1,7 +1,9 @@
 #include "x86_loader.h"
 
 #include "apiset.h"
+#include "system_exports.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -46,6 +48,14 @@ NativeX86Loader::NativeX86Loader(NativeProcess &process, NativeEnvironment &envi
 
 std::optional<std::vector<uint8_t>> NativeX86Loader::read_library(const std::string &name, std::string &identity) const
 {
+	// The runtime's own components come from beside it, in their 32-bit builds.
+	if (std::find(std::begin(runtime_components), std::end(runtime_components), name) != std::end(runtime_components)) {
+		const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "x86" / name;
+		if (std::filesystem::exists(component)) {
+			identity = name;
+			return read_all(component);
+		}
+	}
 	// The C runtime comes from the runtime's own directory, in its 32-bit build.
 	if (name == "ucrtbase.dll") {
 		const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "ucrtbase32.dll";
@@ -86,10 +96,16 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 	}
 	if (const auto found = modules.all().find(name); found != modules.all().end())
 		return found->second.get();
-	// A system library named by its path is the runtime's, as it is by its name.
-	if (const auto slash = name.find_last_of("/\\:"); slash != std::string::npos)
-		if (const auto found = modules.all().find(name.substr(slash + 1)); found != modules.all().end() && found->second->runtime_api)
+	// A system library named by its path is the runtime's, as it is by its name; any library named by its path in the system directory is
+	// looked for as by its name, so a program that loads comctl32.dll from System32 gets the one the runtime has.
+	if (const auto slash = name.find_last_of("/\\:"); slash != std::string::npos) {
+		const auto base = name.substr(slash + 1);
+		if (const auto found = modules.all().find(base); found != modules.all().end() && found->second->runtime_api)
 			return found->second.get();
+		const auto folder = name.substr(0, slash);
+		if (folder == "c:\\windows\\system32" || folder == "c:\\windows\\syswow64")
+			return bring(base);
+	}
 	std::string identity;
 	auto bytes = read_library(name, identity);
 	if (!bytes) {
