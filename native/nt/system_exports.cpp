@@ -35,6 +35,14 @@ constexpr std::array<std::pair<std::string_view, uint16_t>, 30> wsock32_ordinals
 	{"WSASetLastError", 112}, {"WSAStartup", 115},
 }};
 constexpr std::array<std::pair<std::string_view, uint16_t>, 1> shlwapi_ordinals{{{"IUnknown_QueryService", 176}}};
+// DirectSound's functions keep the numbers of its first release, which programs import them by.
+constexpr std::array<std::pair<std::string_view, uint16_t>, 12> dsound_ordinals{{
+	{"DirectSoundCreate", 1}, {"DirectSoundEnumerateA", 2}, {"DirectSoundEnumerateW", 3}, {"DllCanUnloadNow", 4}, {"DllGetClassObject", 5},
+	{"DirectSoundCaptureCreate", 6}, {"DirectSoundCaptureEnumerateA", 7}, {"DirectSoundCaptureEnumerateW", 8}, {"GetDeviceID", 9},
+	{"DirectSoundFullDuplexCreate", 10}, {"DirectSoundCreate8", 11}, {"DirectSoundCaptureCreate8", 12},
+}};
+// The system file checker's catalog functions have numbers and no names.
+constexpr std::array<std::pair<std::string_view, uint16_t>, 2> sfc_ordinals{{{"SfpInstallCatalog", 8}, {"SfpDeleteCatalog", 9}}};
 
 }
 
@@ -60,6 +68,10 @@ std::span<const std::pair<std::string_view, uint16_t>> system_export_ordinals(st
 		return ws2_32_ordinals;
 	if (dll == "wsock32.dll")
 		return wsock32_ordinals;
+	if (dll == "dsound.dll")
+		return dsound_ordinals;
+	if (dll == "sfc.dll")
+		return sfc_ordinals;
 	return {};
 }
 

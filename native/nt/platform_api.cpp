@@ -3,6 +3,7 @@
 #include "hash.h"
 #include "host_names.h"
 #include "kernel_context.h"
+#include "system_exports.h"
 
 #include <sys/random.h>
 #include "text.h"
@@ -41,6 +42,57 @@ struct ComState {
 
 void register_platform_api(ApiRegistry &registry, KernelContext &context)
 {
+	// System file protection: the system's own libraries in the system directories are protected, as Windows protects them, and
+	// installers leave them alone; the runtime serves them whatever file is there.
+	registry.add("SfcIsFileProtected", 2, [](ApiCall &call) {
+		std::u16string path = call[1] ? call.wide(call[1]) : u"";
+		for (auto &character : path)
+			character = character == u'/' ? u'\\' : character >= u'A' && character <= u'Z' ? char16_t(character + 32) : character;
+		const auto split = path.find_last_of(u'\\');
+		const auto folder = split == path.npos ? std::u16string() : path.substr(0, split);
+		std::string name;
+		for (const auto character : path.substr(split == path.npos ? 0 : split + 1))
+			name.push_back(character < 0x80 ? char(character) : '?');
+		const bool system = folder.ends_with(u"\\windows\\system32") || folder.ends_with(u"\\windows\\syswow64");
+		const auto names = system_library_names();
+		const bool protected_file = system && std::find(names.begin(), names.end(), name) != names.end();
+		if (!protected_file)
+			call.set_last_error(2);
+		call.ret(protected_file ? 1 : 0);
+	});
+	registry.add("SfcGetNextProtectedFile", 2, [](ApiCall &call) { call.fail(259, 0); });
+	// Catalogs of signatures go to the catalog database, which the runtime does not keep: their files are trusted by their own signatures.
+	registry.add("SfpInstallCatalog", 2, [](ApiCall &call) { call.ret(0); });
+	registry.add("SfpDeleteCatalog", 1, [](ApiCall &call) { call.ret(0); });
+	// DirectSound where the runtime has no sound device to give: Windows without an audio device answers so, and programs go on silent.
+	// The 32-bit runtime's own DirectSound answers its entry points before these do.
+	constexpr uint32_t no_driver = 0x88780078U;
+	for (const auto *name : {"DirectSoundCreate", "DirectSoundCreate8", "DirectSoundCaptureCreate", "DirectSoundCaptureCreate8"})
+		registry.add(name, 3, [](ApiCall &call) {
+			if (call[1])
+				call.store_pointer(call[1], 0);
+			call.ret(no_driver);
+		});
+	for (const auto *name : {"DirectSoundEnumerateA", "DirectSoundEnumerateW", "DirectSoundCaptureEnumerateA", "DirectSoundCaptureEnumerateW"})
+		registry.add(name, 2, [](ApiCall &call) { call.ret(0); });
+	registry.add("DirectSoundFullDuplexCreate", 10, [](ApiCall &call) {
+		for (const size_t index : {6, 7, 8})
+			if (call[index])
+				call.store_pointer(call[index], 0);
+		call.ret(no_driver);
+	});
+	registry.add("GetDeviceID", 2, [](ApiCall &call) { call.ret(no_driver); });
+	// System Restore is off, as on a Windows installation without restore points: the status says the service is disabled.
+	for (const auto *name : {"SRSetRestorePointA", "SRSetRestorePointW", "SRSetRestorePoint"})
+		registry.add(name, 2, [](ApiCall &call) {
+			constexpr uint32_t service_disabled = 1058;
+			if (call[1]) {
+				call.store<uint32_t>(call[1], service_disabled);
+				call.store<uint64_t>(call[1] + 4, 0);
+			}
+			call.set_last_error(service_disabled);
+			call.ret(0);
+		});
 	// uxtheme: the visual styles are the window manager's (desktop/theme.cpp); buffered painting draws straight to the target.
 	registry.add("EnableTheming", 1, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("BeginBufferedPaint", 5, [](ApiCall &call) { call.ret(0); });

@@ -1432,6 +1432,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						}))
 						symbol.forwarder = overlay_rule.prefix + symbol.names.at(0);
 			}
+			// The structured exception handler of C code, which kernel32 publishes for compilers that import it from there, is the C
+			// runtime's.
+			if (name == "kernel32.dll")
+				if (const auto runtime = modules.all().find("ucrtbase.dll"); runtime != modules.all().end() && !runtime->second->runtime_api)
+					for (auto &symbol : provider->exports)
+						if (!symbol.names.empty() && symbol.names.at(0) == "__C_specific_handler")
+							symbol.forwarder = "ucrtbase.__C_specific_handler";
 		}
 		// The traps of ntdll.dll are made below, where the Zw names answer as their Nt twins.
 		if (name != "ntdll.dll")

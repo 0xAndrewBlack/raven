@@ -759,13 +759,13 @@ static constexpr std::string_view kernel32_exports[]{
 	"WriteConsoleOutputAttribute","WriteConsoleOutputCharacterA","WriteConsoleOutputCharacterW","WriteConsoleOutputW","WriteConsoleW","WriteFile",
 	"WriteFileEx","WriteFileGather","WritePrivateProfileSectionA","WritePrivateProfileSectionW","WritePrivateProfileStringA","WritePrivateProfileStringW",
 	"WritePrivateProfileStructA","WritePrivateProfileStructW","WriteProcessMemory","WriteProfileSectionA","WriteProfileSectionW","WriteProfileStringA",
-	"WriteProfileStringW","WriteTapemark","ZombifyActCtx","ZombifyActCtxWorker","_hread","_hwrite",
-	"_lclose","_lcreat","_llseek","_lopen","_lread","_lwrite",
-	"lstrcat","lstrcatA","lstrcatW","lstrcmp","lstrcmpA","lstrcmpW",
-	"lstrcmpi","lstrcmpiA","lstrcmpiW","lstrcpy","lstrcpyA","lstrcpyW",
-	"lstrcpyn","lstrcpynA","lstrcpynW","lstrlen","lstrlenA","lstrlenW",
-	"uaw_lstrcmpW","uaw_lstrcmpiW","uaw_lstrlenW","uaw_wcschr","uaw_wcscpy","uaw_wcsicmp",
-	"uaw_wcslen","uaw_wcsrchr",
+	"WriteProfileStringW","WriteTapemark","ZombifyActCtx","ZombifyActCtxWorker","__C_specific_handler","_hread",
+	"_hwrite","_lclose","_lcreat","_llseek","_lopen","_lread",
+	"_lwrite","lstrcat","lstrcatA","lstrcatW","lstrcmp","lstrcmpA",
+	"lstrcmpW","lstrcmpi","lstrcmpiA","lstrcmpiW","lstrcpy","lstrcpyA",
+	"lstrcpyW","lstrcpyn","lstrcpynA","lstrcpynW","lstrlen","lstrlenA",
+	"lstrlenW","uaw_lstrcmpW","uaw_lstrcmpiW","uaw_lstrlenW","uaw_wcschr","uaw_wcscpy",
+	"uaw_wcsicmp","uaw_wcslen","uaw_wcsrchr",
 };
 static constexpr std::string_view ole32_exports[]{
 	"BindMoniker","CLIPFORMAT_UserFree","CLIPFORMAT_UserFree64","CLIPFORMAT_UserFreeExt","CLIPFORMAT_UserMarshal","CLIPFORMAT_UserMarshal64",
@@ -2598,6 +2598,14 @@ static constexpr std::string_view usp10_exports[]{
 	"ScriptString_pSize","ScriptString_pcOutChars","ScriptSubstituteSingleGlyph","ScriptTextOut","ScriptXtoCP","UspAllocCache",
 	"UspAllocTemp","UspFreeMem",
 };
+static constexpr std::string_view sfc_exports[]{
+	"SRSetRestorePoint","SRSetRestorePointA","SRSetRestorePointW","SfcGetNextProtectedFile","SfcIsFileProtected","SfcWLEventLogoff",
+	"SfcWLEventLogon","SfpDeleteCatalog","SfpInstallCatalog","SfpVerifyFile",
+};
+static constexpr std::string_view dsound_exports[]{
+	"DirectSoundCaptureCreate","DirectSoundCaptureCreate8","DirectSoundCaptureEnumerateA","DirectSoundCaptureEnumerateW","DirectSoundCreate","DirectSoundCreate8",
+	"DirectSoundEnumerateA","DirectSoundEnumerateW","DirectSoundFullDuplexCreate","DllCanUnloadNow","DllGetClassObject","GetDeviceID",
+};
 static constexpr std::pair<std::string_view, std::span<const std::string_view>> libraries[]{
 	{"advapi32.dll", advapi32_exports},
 	{"bcrypt.dll", bcrypt_exports},
@@ -2654,4 +2662,6 @@ static constexpr std::pair<std::string_view, std::span<const std::string_view>> 
 	{"oleacc.dll", oleacc_exports},
 	{"odbccp32.dll", odbccp32_exports},
 	{"usp10.dll", usp10_exports},
+	{"sfc.dll", sfc_exports},
+	{"dsound.dll", dsound_exports},
 };

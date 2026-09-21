@@ -2496,6 +2496,14 @@ static constexpr std::pair<std::string_view, uint8_t> usp10_words[]{
 	{"ScriptString_pSize",1},{"ScriptString_pcOutChars",1},{"ScriptSubstituteSingleGlyph",9},{"ScriptTextOut",14},{"ScriptXtoCP",9},{"UspAllocCache",2},
 	{"UspAllocTemp",2},{"UspFreeMem",1},
 };
+static constexpr std::pair<std::string_view, uint8_t> sfc_words[]{
+	{"SRSetRestorePoint",2},{"SRSetRestorePointA",2},{"SRSetRestorePointW",2},{"SfcGetNextProtectedFile",2},{"SfcIsFileProtected",2},{"SfcWLEventLogoff",1},
+	{"SfcWLEventLogon",1},{"SfpDeleteCatalog",1},{"SfpInstallCatalog",2},{"SfpVerifyFile",3},
+};
+static constexpr std::pair<std::string_view, uint8_t> dsound_words[]{
+	{"DirectSoundCaptureCreate",3},{"DirectSoundCaptureCreate8",3},{"DirectSoundCaptureEnumerateA",2},{"DirectSoundCaptureEnumerateW",2},{"DirectSoundCreate",3},{"DirectSoundCreate8",3},
+	{"DirectSoundEnumerateA",2},{"DirectSoundEnumerateW",2},{"DirectSoundFullDuplexCreate",10},{"GetDeviceID",2},
+};
 static constexpr std::pair<std::string_view, std::span<const std::pair<std::string_view, uint8_t>>> argument_tables[]{
 	{"advapi32.dll", advapi32_words},
 	{"bcrypt.dll", bcrypt_words},
@@ -2552,4 +2560,6 @@ static constexpr std::pair<std::string_view, std::span<const std::pair<std::stri
 	{"oleacc.dll", oleacc_words},
 	{"odbccp32.dll", odbccp32_words},
 	{"usp10.dll", usp10_words},
+	{"sfc.dll", sfc_words},
+	{"dsound.dll", dsound_words},
 };
