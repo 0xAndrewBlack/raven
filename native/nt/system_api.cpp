@@ -867,6 +867,16 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[1], result, capacity);
 		call.ret(result.size() + 1);
 	});
+	// The environment of any token is this user's: the expansion is ExpandEnvironmentStrings', answered as TRUE or FALSE.
+	registry.add("ExpandEnvironmentStringsForUserW", 4, [&registry](ApiCall &call) {
+		ApiCall inner(call.process, call.environment, {call[1], call[2], call[3]});
+		registry.find("ExpandEnvironmentStringsW")->second(inner);
+		if (inner.result > call.u32(3)) {
+			call.fail(122, 0);
+			return;
+		}
+		call.ret(1);
+	});
 	registry.add("GetEnvironmentStringsW", 0, [&, variables](ApiCall &call) {
 		std::u16string block;
 		for (const auto &[key, entry] : variables->values) {
