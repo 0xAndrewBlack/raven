@@ -330,6 +330,28 @@ uint32_t NativeRegistry::remove_key(uint64_t parent, std::u16string_view path)
 	return 0;
 }
 
+uint32_t NativeRegistry::remove_tree(uint64_t parent, std::u16string_view path)
+{
+	refresh();
+	std::u16string folded, display;
+	if (!resolve(parent, path, folded, display))
+		return bad_handle;
+	const auto found = keys.find(folded);
+	if (found == keys.end())
+		return file_not_found;
+	const auto prefix = folded + u'\\';
+	keys.erase(keys.lower_bound(prefix), std::find_if(keys.lower_bound(prefix), keys.end(), [&](const auto &item) { return !item.first.starts_with(prefix); }));
+	if (path.empty())
+		keys[folded].values.clear();
+	else
+		keys.erase(folded);
+	for (auto &[handle, target] : open_keys)
+		if ((target == folded && !path.empty()) || target.starts_with(prefix))
+			target.clear();
+	save();
+	return 0;
+}
+
 uint32_t NativeRegistry::remove_value(uint64_t key, std::u16string_view name)
 {
 	refresh();

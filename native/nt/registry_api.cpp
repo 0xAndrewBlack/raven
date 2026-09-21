@@ -56,10 +56,13 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		std::memcpy(bytes.data(), &value, handle_width);
 		call.write(address, bytes);
 	};
-	// A 32-bit program sees HKEY_LOCAL_MACHINE\SOFTWARE as the Wow6432Node subkey of it, except for the keys both views share.
+	// A 32-bit program sees HKEY_LOCAL_MACHINE\SOFTWARE as the Wow6432Node subkey of it, except for the keys both views share; the key
+	// SOFTWARE itself opens as that subkey, so that what is opened below it stays in the view. KEY_WOW64_64KEY (0x100) asks for the
+	// 64-bit view from either width and KEY_WOW64_32KEY (0x200) for the 32-bit one.
 	const bool wow64 = context.process.mode() == NativeMode::x86;
-	const auto view = [wow64](uint64_t parent, std::u16string path) {
-		if (!wow64 || parent != 0x80000002ULL)
+	const auto view = [wow64](uint64_t parent, std::u16string path, uint32_t access = 0) {
+		const bool redirect = (access & 0x200) || (wow64 && !(access & 0x100));
+		if (!redirect || parent != 0x80000002ULL)
 			return path;
 		const auto fold = [](std::u16string text) {
 			for (auto &character : text)
@@ -72,8 +75,8 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		const auto first = path.find(u'\\');
 		if (fold(path.substr(0, first)) != u"SOFTWARE")
 			return path;
-		if (first == std::u16string::npos)
-			return path;
+		if (first == std::u16string::npos || first + 1 == path.size())
+			return path.substr(0, first) + u"\\Wow6432Node";
 		const auto second_end = path.find(u'\\', first + 1);
 		const auto second = fold(path.substr(first + 1, second_end == std::u16string::npos ? std::u16string::npos : second_end - first - 1));
 		if (second == u"CLASSES" || second == u"WOW6432NODE")
@@ -88,7 +91,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 				return;
 			}
 			uint64_t key = 0;
-			const auto status = hive.open(call[0], view(call[0], text_of(call, call[1], wide)), key);
+			const auto status = hive.open(call[0], view(call[0], text_of(call, call[1], wide), call.u32(3)), key);
 			if (!status)
 				put_handle(call, call[4], key);
 			call.ret(status);
@@ -123,7 +126,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 			}
 			uint64_t key = 0;
 			uint32_t disposition = 0;
-			const auto status = hive.create(call[0], view(call[0], text_of(call, call[1], wide)), key, disposition);
+			const auto status = hive.create(call[0], view(call[0], text_of(call, call[1], wide), call.u32(5)), key, disposition);
 			if (!status) {
 				put_handle(call, call[7], key);
 				if (call[8]) call.store<uint32_t>(call[8], disposition);
@@ -470,7 +473,13 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		default: call.ret(317); break;
 		}
 	});
-	registry.add("RegDeleteKeyExW", 4, [&hive, text_of, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], true)))); });
+	registry.add("RegDeleteTreeW", 2, [&hive, text_of, view](ApiCall &call) {
+		call.ret(hive.remove_tree(call[0], call[1] ? view(call[0], text_of(call, call[1], true)) : std::u16string()));
+	});
+	registry.add("RegDeleteTreeA", 2, [&hive, text_of, view](ApiCall &call) {
+		call.ret(hive.remove_tree(call[0], call[1] ? view(call[0], text_of(call, call[1], false)) : std::u16string()));
+	});
+	registry.add("RegDeleteKeyExW", 4, [&hive, text_of, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], true), call.u32(2)))); });
 	registry.add("RegCloseKey", 1, [&hive, &context](ApiCall &call) {
 		const auto status = hive.close(call[0]);
 		context.objects.release_reserved(call[0]);

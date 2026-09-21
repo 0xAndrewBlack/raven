@@ -29,6 +29,8 @@ public:
 	// Enumeration, deletion and statistics for the advapi32 surface; names sort case-insensitively like the real hive.
 	uint32_t remove_key(uint64_t parent, std::u16string_view path);
 	uint32_t remove_value(uint64_t key, std::u16string_view name);
+	// A key with everything below it; an empty path empties the open key of its subkeys and values but keeps it.
+	uint32_t remove_tree(uint64_t parent, std::u16string_view path);
 	uint32_t enum_key(uint64_t key, uint32_t index, std::u16string &name) const;
 	uint32_t enum_value(uint64_t key, uint32_t index, std::u16string &name, uint32_t &type, std::vector<uint8_t> &data) const;
 	struct Info {
