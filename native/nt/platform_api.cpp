@@ -285,7 +285,77 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(class_not_registered);
 	});
 	registry.add("CLSIDFromProgID", 2, [](ApiCall &call) { call.ret(class_string); });
-	registry.add("CLSIDFromString", 2, [](ApiCall &call) { call.ret(class_string); });
+	// A GUID in its registry form, "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}", as the 16 bytes of the structure; nothing for any other text.
+	const auto parse_guid = [](std::u16string_view text) -> std::optional<std::vector<uint8_t>> {
+		static constexpr size_t digits[16][2] = {{7, 1}, {5, 1}, {3, 1}, {1, 1}, {12, 1}, {10, 1}, {17, 1}, {15, 1}, {20, 1}, {22, 1}, {25, 1}, {27, 1},
+			{29, 1}, {31, 1}, {33, 1}, {35, 1}};
+		if (text.size() != 38 || text[0] != u'{' || text[37] != u'}' || text[9] != u'-' || text[14] != u'-' || text[19] != u'-' || text[24] != u'-')
+			return std::nullopt;
+		const auto nibble = [](char16_t c) -> int {
+			if (c >= u'0' && c <= u'9') return c - u'0';
+			if (c >= u'a' && c <= u'f') return c - u'a' + 10;
+			if (c >= u'A' && c <= u'F') return c - u'A' + 10;
+			return -1;
+		};
+		std::vector<uint8_t> bytes(16);
+		for (size_t index = 0; index < 16; ++index) {
+			const int high = nibble(text[digits[index][0]]), low = nibble(text[digits[index][0] + digits[index][1]]);
+			if (high < 0 || low < 0)
+				return std::nullopt;
+			bytes[index] = uint8_t(high << 4 | low);
+		}
+		return bytes;
+	};
+	// An empty or null text is the null class; a text that is not a GUID would be a program identifier, which no registered class answers.
+	registry.add("CLSIDFromString", 2, [parse_guid](ApiCall &call) {
+		const auto text = call[0] ? call.wide(call[0], 64) : std::u16string();
+		if (text.empty()) {
+			call.write(call[1], std::vector<uint8_t>(16));
+			call.ret(0);
+			return;
+		}
+		const auto bytes = parse_guid(text);
+		if (!bytes) {
+			call.write(call[1], std::vector<uint8_t>(16));
+			call.ret(class_string);
+			return;
+		}
+		call.write(call[1], *bytes);
+		call.ret(0);
+	});
+	registry.add("IIDFromString", 2, [parse_guid](ApiCall &call) {
+		const auto text = call[0] ? call.wide(call[0], 64) : std::u16string();
+		const auto bytes = text.empty() ? std::optional(std::vector<uint8_t>(16)) : parse_guid(text);
+		if (!bytes) {
+			call.ret(0x80070057U);
+			return;
+		}
+		call.write(call[1], *bytes);
+		call.ret(0);
+	});
+	registry.add("StringFromGUID2", 3, [](ApiCall &call) {
+		if (call.u32(2) < 39) {
+			call.ret(0);
+			return;
+		}
+		const auto bytes = call.read(call[0], 16);
+		static constexpr int order[16] = {3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11};
+		char text[40];
+		int at = 0;
+		text[at++] = '{';
+		for (const int index : order) {
+			if (index < 0) {
+				text[at++] = '-';
+				continue;
+			}
+			at += std::snprintf(text + at, 3, "%02X", bytes[size_t(index)]);
+		}
+		for (size_t index = 12; index < 16; ++index)
+			at += std::snprintf(text + at, 3, "%02X", bytes[index]);
+		text[at++] = '}';
+		call.put_wide(call[1], widen_ascii(std::string_view(text, size_t(at))), 39);
+		call.ret(39);
+	});
 	registry.add("CoTaskMemAlloc", 1, [&context](ApiCall &call) { call.ret(context.allocator.allocate(call[0], false)); });
 	registry.add("CoTaskMemFree", 1, [&context](ApiCall &call) {
 		if (call[0]) context.allocator.release(call[0]);
@@ -715,6 +785,51 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("CryptReleaseContext", 2, [crypt](ApiCall &call) {
 		crypt->providers.erase(call[0]);
 		call.ret(1);
+	});
+	// advapi32's MD5 keeps its state in the caller's MD5_CTX: the bit count (two words), the four state words, the pending bytes and
+	// the digest, at offsets 0, 8, 24 and 88.
+	registry.add("MD5Init", 1, [](ApiCall &call) {
+		std::vector<uint8_t> context(104);
+		const uint32_t initial[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
+		std::memcpy(context.data() + 8, initial, 16);
+		call.write(call[0], context);
+	});
+	const auto md5_feed = [](std::vector<uint8_t> &context, std::span<const uint8_t> data) {
+		uint64_t bits;
+		std::memcpy(&bits, context.data(), 8);
+		size_t filled = size_t(bits >> 3) & 63;
+		bits += uint64_t(data.size()) * 8;
+		std::memcpy(context.data(), &bits, 8);
+		std::array<uint32_t, 4> state;
+		std::memcpy(state.data(), context.data() + 8, 16);
+		for (const auto byte : data) {
+			context[24 + filled++] = byte;
+			if (filled == 64) {
+				md5_block(state, context.data() + 24);
+				filled = 0;
+			}
+		}
+		std::memcpy(context.data() + 8, state.data(), 16);
+	};
+	registry.add("MD5Update", 3, [md5_feed](ApiCall &call) {
+		auto context = call.read(call[0], 104);
+		md5_feed(context, call.read(call[1], call.u32(2)));
+		call.write(call[0], context);
+	});
+	registry.add("MD5Final", 1, [md5_feed](ApiCall &call) {
+		auto context = call.read(call[0], 104);
+		uint64_t bits;
+		std::memcpy(&bits, context.data(), 8);
+		const size_t filled = size_t(bits >> 3) & 63;
+		// 0x80, zeros up to 56 bytes into a block, then the bit count before the padding.
+		std::vector<uint8_t> padding(filled < 56 ? 56 - filled : 120 - filled);
+		padding[0] = 0x80;
+		md5_feed(context, padding);
+		std::vector<uint8_t> length(8);
+		std::memcpy(length.data(), &bits, 8);
+		md5_feed(context, length);
+		std::memcpy(context.data() + 88, context.data() + 8, 16);
+		call.write(call[0], context);
 	});
 	registry.add("CryptCreateHash", 5, [crypt](ApiCall &call) {
 		auto digest = make_digest(call.u32(1));
