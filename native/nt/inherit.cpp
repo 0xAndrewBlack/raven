@@ -4,6 +4,7 @@
 #include "kernel_context.h"
 #include "pipe.h"
 #include "section.h"
+#include "threads.h"
 
 #include <cstring>
 #include <stdexcept>
@@ -111,6 +112,8 @@ std::shared_ptr<KernelObject> object_from_record(const InheritedHandle &item)
 		pipe->name = item.text;
 		return pipe;
 	}
+	if (item.kind == "thread")
+		return std::make_shared<RemoteThreadObject>(item.descriptor);
 	if (item.kind == "section") {
 		auto section = std::make_shared<SectionObject>();
 		section->descriptor = item.descriptor;

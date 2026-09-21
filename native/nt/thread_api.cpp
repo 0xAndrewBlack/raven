@@ -196,7 +196,14 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("WaitForSingleObject", 2, [wait](ApiCall &call) { call.ret(wait(call, {call[0]}, false, call.u32(1), false)); });
 	registry.add("WaitForSingleObjectEx", 3, [wait](ApiCall &call) { call.ret(wait(call, {call[0]}, false, call.u32(1), call.u32(2))); });
-	const auto multiple = [wait](ApiCall &call, bool alertable) {
+	// A handle array holds handles of the program's width; the 32-bit pseudo handles widen to the values the 64-bit side knows them by.
+	const auto handle_at = [](ApiCall &call, uint64_t array, uint32_t index) -> uint64_t {
+		if (call.pointer_width() == 8)
+			return call.load<uint64_t>(array + index * 8ULL);
+		const uint32_t value = call.load<uint32_t>(array + index * 4ULL);
+		return value >= 0xfffffffaU ? uint64_t(int64_t(int32_t(value))) : value;
+	};
+	const auto multiple = [wait, handle_at](ApiCall &call, bool alertable) {
 		const uint32_t count = call.u32(0);
 		if (count > 64 || !call[1]) {
 			call.fail(87, wait_failed);
@@ -204,20 +211,20 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		}
 		std::vector<uint64_t> handles(count);
 		for (uint32_t index = 0; index < count; ++index)
-			handles[index] = call.load<uint64_t>(call[1] + index * 8ULL);
+			handles[index] = handle_at(call, call[1], index);
 		call.ret(wait(call, handles, call.u32(2), call.u32(3), alertable));
 	};
 	registry.add("WaitForMultipleObjects", 4, [multiple](ApiCall &call) { multiple(call, false); });
 	registry.add("WaitForMultipleObjectsEx", 5, [multiple](ApiCall &call) { multiple(call, call.u32(4)); });
 	// Waits for handles or for window input: the wait code one past the last handle reports a message.
-	const auto message_wait = [&context, &objects, &threads](ApiCall &call, uint32_t count, uint64_t array, bool all, uint32_t milliseconds) {
+	const auto message_wait = [&context, &objects, &threads, handle_at](ApiCall &call, uint32_t count, uint64_t array, bool all, uint32_t milliseconds) {
 		if (count > 63) {
 			call.fail(87, wait_failed);
 			return;
 		}
 		std::vector<uint64_t> handles(count);
 		for (uint32_t index = 0; index < count; ++index)
-			handles[index] = call.load<uint64_t>(array + index * 8ULL);
+			handles[index] = handle_at(call, array, index);
 		const uint32_t id = threads.current_id();
 		std::optional<std::chrono::steady_clock::time_point> wake;
 		if (milliseconds != UINT32_MAX)
@@ -326,7 +333,24 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("ExitThread", 1, [&threads](ApiCall &call) { threads.exit_current(call.u32(0)); });
 	registry.add("FreeLibraryAndExitThread", 2, [&threads](ApiCall &call) { threads.exit_current(call.u32(1)); });
-	registry.add("GetExitCodeThread", 2, [thread_from](ApiCall &call) {
+	// A work item runs on a thread of its own, whose handle nobody keeps.
+	registry.add("QueueUserWorkItem", 3, [&registry, &objects](ApiCall &call) {
+		const auto create = registry.find("CreateThread");
+		ApiCall inner(call.process, call.environment, {0, 0, call[0], call[1], 0, 0});
+		create->second(inner);
+		if (!inner.result) {
+			call.ret(0);
+			return;
+		}
+		objects.close(inner.result);
+		call.ret(1);
+	});
+	registry.add("GetExitCodeThread", 2, [thread_from, &objects](ApiCall &call) {
+		if (const auto remote = objects.object_as<RemoteThreadObject>(call[0])) {
+			call.store<uint32_t>(call[1], remote->code().value_or(259));
+			call.ret(1);
+			return;
+		}
 		const auto thread = thread_from(call[0]);
 		if (!thread) {
 			call.fail(6);

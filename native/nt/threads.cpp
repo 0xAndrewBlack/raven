@@ -1,10 +1,12 @@
 #include "threads.h"
 
 #include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
 
 #include "api.h"
 #include "shared_file.h"
+#include "inherit.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -200,6 +202,47 @@ void NativeThreads::finish(GuestThread &thread, uint32_t code)
 	thread.exit_code = code;
 	thread.state = GuestThread::State::done;
 	thread.ready = nullptr;
+	for (const int report : thread.exit_reports) {
+		[[maybe_unused]] const auto written = ::write(report, &code, sizeof code);
+		::close(report);
+	}
+	thread.exit_reports.clear();
+}
+
+bool ThreadObject::describe(InheritedHandle &record) const
+{
+	int ends[2];
+	if (::pipe2(ends, O_CLOEXEC))
+		return false;
+	if (thread->state == GuestThread::State::done) {
+		[[maybe_unused]] const auto written = ::write(ends[1], &thread->exit_code, sizeof thread->exit_code);
+		::close(ends[1]);
+	} else {
+		thread->exit_reports.push_back(ends[1]);
+	}
+	record.kind = "thread";
+	record.descriptor = ends[0];
+	record.size = thread->id;
+	return true;
+}
+
+RemoteThreadObject::~RemoteThreadObject()
+{
+	if (descriptor >= 0)
+		::close(descriptor);
+}
+
+std::optional<uint32_t> RemoteThreadObject::code() const
+{
+	if (ended || descriptor < 0)
+		return ended;
+	pollfd watch{descriptor, POLLIN, 0};
+	if (::poll(&watch, 1, 0) <= 0)
+		return std::nullopt;
+	uint32_t value = 0;
+	// A process that ended without reporting the thread leaves nothing to read: its threads ended with it.
+	ended = ::read(descriptor, &value, sizeof value) == ssize_t(sizeof value) ? value : 1;
+	return ended;
 }
 
 void NativeThreads::release_resources(GuestThread &thread)

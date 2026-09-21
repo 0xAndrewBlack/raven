@@ -1,4 +1,5 @@
 #include "providers.h"
+#include "handle_channel.h"
 #include "object_api.h"
 #include "module_api.h"
 #include "resources.h"
@@ -723,6 +724,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	// Declared first so that it outlives the threads, which release their blocks through it when they are torn down.
 	NativeX86Tls static_tls(process);
 	NativeThreads guest_threads(process, environment, memory, nullptr, deadline);
+	// Other processes ask for handles of this one and send theirs; the scheduler answers them.
+	guest_threads.add_service([&kernel_objects] { receive_handles(kernel_objects); });
 	NativeX86Threads thread_api(process, environment, kernel_objects, guest_threads);
 	NativeX86System system_api(process, environment, kernel_objects, guest_threads, memory);
 	static_tls.attach_main(environment.teb());

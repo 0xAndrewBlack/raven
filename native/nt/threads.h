@@ -45,6 +45,8 @@ struct GuestThread {
 	};
 	std::deque<Apc> apcs;
 	int priority = 0;
+	// Pipes to the processes that hold a handle to this thread: each gets the exit code when the thread ends.
+	std::vector<int> exit_reports;
 };
 
 class ThreadObject : public KernelObject {
@@ -52,7 +54,24 @@ public:
 	std::u16string_view type_name() const override { return u"Thread"; }
 	explicit ThreadObject(std::shared_ptr<GuestThread> thread) : thread(std::move(thread)) {}
 	int signaled(uint32_t) const override { return thread->state == GuestThread::State::done; }
+	// A handle that goes to another process carries a pipe the thread's end is reported on.
+	bool describe(InheritedHandle &record) const override;
 	std::shared_ptr<GuestThread> thread;
+};
+
+// A thread of another process: it has ended when its process wrote the exit code to the pipe, or closed the pipe by ending itself.
+class RemoteThreadObject : public KernelObject {
+public:
+	explicit RemoteThreadObject(int descriptor) : descriptor(descriptor) {}
+	~RemoteThreadObject() override;
+	std::u16string_view type_name() const override { return u"Thread"; }
+	int signaled(uint32_t) const override { return code().has_value(); }
+	// The exit code once the thread has ended.
+	std::optional<uint32_t> code() const;
+
+private:
+	int descriptor;
+	mutable std::optional<uint32_t> ended;
 };
 
 struct ThreadExit {

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <sys/mman.h>
 
 namespace raven {
 
@@ -79,7 +80,6 @@ bool NativeX86Threads::dispatch(std::string_view name)
 			process.return_api(0);
 			return true;
 		}
-		handles[made.value] = object;
 		if (args[5]) {
 			const uint32_t id = thread->id;
 			process.write_memory(args[5], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&id), 4));
@@ -88,31 +88,39 @@ bool NativeX86Threads::dispatch(std::string_view name)
 	} else if (name == "ExitThread") {
 		threads.exit_current(uint32_t(args[0]));
 	} else if (name == "GetExitCodeThread") {
-		const auto found = handles.find(args[0]);
-		if (found == handles.end()) {
+		// A thread of another process reports through the pipe its process writes the exit code to.
+		if (const auto remote = objects.object_as<RemoteThreadObject>(args[0])) {
+			const uint32_t code = remote->code().value_or(still_active);
+			process.write_memory(args[1], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&code), 4));
+			process.return_api(1);
+			return true;
+		}
+		// The handle table says what the handle is now: a value can be reused after the thread it named was closed.
+		const auto object = objects.object_as<ThreadObject>(args[0]);
+		if (!object) {
 			environment.set_last_error(6);
 			process.return_api(0);
 			return true;
 		}
-		const auto &thread = *found->second->thread;
+		const auto &thread = *object->thread;
 		const uint32_t code = thread.state == GuestThread::State::done ? thread.exit_code : still_active;
 		process.write_memory(args[1], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&code), 4));
 		process.return_api(1);
 	} else if (name == "ResumeThread") {
-		const auto found = handles.find(args[0]);
-		if (found == handles.end()) {
+		const auto object = objects.object_as<ThreadObject>(args[0]);
+		if (!object) {
 			environment.set_last_error(6);
 			process.return_api(UINT32_MAX);
 			return true;
 		}
-		const auto previous = found->second->thread->suspend_count;
-		threads.resume(*found->second->thread);
+		const auto previous = object->thread->suspend_count;
+		threads.resume(*object->thread);
 		process.return_api(uint32_t(previous));
 	} else if (name == "SetThreadPriority") {
-		const auto found = handles.find(args[0]);
-		if (found != handles.end())
-			found->second->thread->priority = int32_t(args[1]);
-		process.return_api(found != handles.end());
+		const auto object = objects.object_as<ThreadObject>(args[0]);
+		if (object)
+			object->thread->priority = int32_t(args[1]);
+		process.return_api(object != nullptr);
 	} else if (name == "Sleep") {
 		const uint32_t milliseconds = uint32_t(args[0]);
 		if (!milliseconds) {
@@ -128,8 +136,18 @@ bool NativeX86Threads::dispatch(std::string_view name)
 		sections.erase(args[0]);
 		process.return_api(0);
 	} else if (name == "InitializeCriticalSectionAndSpinCount" || name == "InitializeCriticalSectionEx") {
-		// Spinning is a hint and the flags only tune allocation: the section is the same, and these forms report success.
+		// Spinning is a hint and the flags only tune allocation: the section is the same, and these forms report success. Programs that
+		// force debug data find it at DebugInfo, the first word.
+		if (name == "InitializeCriticalSectionEx" && (uint32_t(args[2]) & ~0x1f000000U)) {
+			environment.set_last_error(87);
+			process.return_api(0);
+			return true;
+		}
 		sections.erase(args[0]);
+		if (!section_debug)
+			section_debug = process.map_memory(4096, PROT_READ | PROT_WRITE);
+		const uint32_t debug = uint32_t(section_debug);
+		process.write_memory(args[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&debug), 4));
 		process.return_api(1);
 	} else if (name == "EnterCriticalSection" || name == "TryEnterCriticalSection") {
 		const uint32_t id = threads.current_id();

@@ -20,13 +20,14 @@ private:
 	NativeEnvironment &environment;
 	NativeObjects &objects;
 	NativeThreads &threads;
-	std::map<uint64_t, std::shared_ptr<ThreadObject>> handles;
 	struct Section {
 		uint32_t owner = 0;
 		uint32_t depth = 0;
 	};
 	// Critical sections are keyed by guest address: threads switch only inside API calls, so no host lock is needed.
 	std::map<uint64_t, Section> sections;
+	// The debug data every section points at: callers that force it write the section's name there.
+	uint64_t section_debug = 0;
 	uint32_t wait(uint64_t handle, uint32_t milliseconds);
 };
 
