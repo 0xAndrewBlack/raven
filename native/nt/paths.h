@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace raven {
 
@@ -32,13 +33,23 @@ public:
 	// C:\Users\<user>, created on first use together with AppData\Roaming and AppData\Local\Temp.
 	std::u16string user_profile() const;
 	std::u16string temporary() const;
+	// Where a program of the given width finds the system's libraries: System32, or SysWOW64 for a 32-bit program.
+	static std::u16string system_directory(bool wide) { return wide ? u"C:\\Windows\\System32" : u"C:\\Windows\\SysWOW64"; }
+	// The file a library loaded by name came from, in the loader's search order: beside the program, then in the system directory.
+	std::u16string library_location(std::u16string_view image_path, std::u16string_view name, bool wide) const;
+	// A 32-bit program sees SysWOW64 where it names System32, and System32 where it names Sysnative, while redirection is on.
+	void set_wow64(bool enabled) { wow64 = enabled; }
+	// Turns redirection on or off and tells whether it was on.
+	bool redirect(bool enabled) { return std::exchange(redirecting, enabled); }
 	// True for the DOS device names that are not files (NUL, CON, ...), optionally behind \\.\ or \\?\.
 	static bool device(std::u16string_view path);
 
 private:
 	const NativePrefix &prefix;
 	std::u16string directory;
+	bool wow64 = false, redirecting = true;
 	std::optional<std::filesystem::path> drive_root(char16_t letter) const;
+	std::u16string redirected(std::u16string path) const;
 };
 
 }

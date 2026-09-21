@@ -1452,6 +1452,27 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 add_test(NAME native_x86_version COMMAND raven --run-process --execution=native
                     ${CMAKE_CURRENT_BINARY_DIR}/x86-version-client.exe)
                 set_tests_properties(native_x86_version PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                # The installer of a 32-bit redistributable library, whose system directory is SysWOW64.
+                set(REDIST32_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/redist-fixtures32)
+                add_custom_command(OUTPUT ${REDIST32_FIXTURES}/payload/ravenredist.dll ${REDIST32_FIXTURES}/ravenredist.a
+                    COMMAND ${CMAKE_COMMAND} -E make_directory ${REDIST32_FIXTURES}/payload
+                    COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -shared -fno-stack-protector -Wl,--entry,_DllMain@12
+                        -Wl,--out-implib,${REDIST32_FIXTURES}/ravenredist.a
+                        -o ${REDIST32_FIXTURES}/payload/ravenredist.dll ${LOADER_SOURCES}/redist_payload.c
+                    DEPENDS ${LOADER_SOURCES}/redist_payload.c VERBATIM)
+                add_custom_command(OUTPUT ${REDIST32_FIXTURES}/redist-importer.exe
+                    COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -Wl,--entry,_raven_entry,--no-insert-timestamp
+                        -o ${REDIST32_FIXTURES}/redist-importer.exe ${LOADER_SOURCES}/redist_importer.c ${REDIST32_FIXTURES}/ravenredist.a
+                    DEPENDS ${LOADER_SOURCES}/redist_importer.c ${REDIST32_FIXTURES}/ravenredist.a VERBATIM)
+                add_custom_command(OUTPUT ${REDIST32_FIXTURES}/redist-install.exe
+                    COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,_raven_entry,--no-insert-timestamp
+                        -o ${REDIST32_FIXTURES}/redist-install.exe ${LOADER_SOURCES}/redist_install_client.c -lkernel32
+                    DEPENDS ${LOADER_SOURCES}/redist_install_client.c VERBATIM)
+                add_custom_target(redist32_fixtures ALL DEPENDS ${REDIST32_FIXTURES}/payload/ravenredist.dll ${REDIST32_FIXTURES}/redist-importer.exe
+                    ${REDIST32_FIXTURES}/redist-install.exe)
+                add_test(NAME native_x86_redist_system_directory COMMAND raven --run-process --execution=native ${REDIST32_FIXTURES}/redist-install.exe)
+                set_tests_properties(native_x86_redist_system_directory PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/redist-prefix32)
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-d3d9-client.exe
                     COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
                         -Wl,--entry,_raven_entry,--no-insert-timestamp
@@ -2142,6 +2163,27 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         set_tests_properties(native_dynamic_loader_contract PROPERTIES TIMEOUT 15)
         add_test(NAME native_dynamic_loader_cli COMMAND raven --run-process --execution=native ${DYNAMIC_FIXTURES}/client.exe)
         set_tests_properties(native_dynamic_loader_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        # An installer puts a redistributable library in the system directory and copies over system libraries.
+        set(REDIST_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/redist-fixtures)
+        add_custom_command(OUTPUT ${REDIST_FIXTURES}/payload/ravenredist.dll ${REDIST_FIXTURES}/ravenredist.a
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${REDIST_FIXTURES}/payload
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -shared -fno-stack-protector -Wl,--entry,DllMain
+                -Wl,--out-implib,${REDIST_FIXTURES}/ravenredist.a
+                -o ${REDIST_FIXTURES}/payload/ravenredist.dll ${LOADER_SOURCES}/redist_payload.c
+            DEPENDS ${LOADER_SOURCES}/redist_payload.c VERBATIM)
+        add_custom_command(OUTPUT ${REDIST_FIXTURES}/redist-importer.exe
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector -Wl,--entry,raven_entry
+                -o ${REDIST_FIXTURES}/redist-importer.exe ${LOADER_SOURCES}/redist_importer.c ${REDIST_FIXTURES}/ravenredist.a
+            DEPENDS ${LOADER_SOURCES}/redist_importer.c ${REDIST_FIXTURES}/ravenredist.a VERBATIM)
+        add_custom_command(OUTPUT ${REDIST_FIXTURES}/redist-install.exe
+            COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,raven_entry
+                -o ${REDIST_FIXTURES}/redist-install.exe ${LOADER_SOURCES}/redist_install_client.c -lkernel32
+            DEPENDS ${LOADER_SOURCES}/redist_install_client.c VERBATIM)
+        add_custom_target(redist_fixtures ALL DEPENDS ${REDIST_FIXTURES}/payload/ravenredist.dll ${REDIST_FIXTURES}/redist-importer.exe
+            ${REDIST_FIXTURES}/redist-install.exe)
+        add_test(NAME native_redist_system_directory COMMAND raven --run-process --execution=native ${REDIST_FIXTURES}/redist-install.exe)
+        set_tests_properties(native_redist_system_directory PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+            ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/redist-prefix)
         set(TLS_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/tls-fixtures)
         set(TLS_FILES)
         foreach(TLS_VARIANT standard aligned collision)

@@ -10,6 +10,7 @@
 #include "nt/elevation.h"
 #include "nt/handle_channel.h"
 #include "nt/text.h"
+#include "nt/system_exports.h"
 #ifdef RAVEN_WAYLAND
 #include "desktop/wayland.h"
 #endif
@@ -203,19 +204,27 @@ int main(int argc, char **argv)
 				const auto bootstrap = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-bootstrap";
 				if (run_process) {
 					const auto directory = std::filesystem::absolute(argv[first_file]).parent_path();
-					const auto source = [&](std::string_view name) -> std::optional<std::vector<uint8_t>> {
+					const raven::NativePrefix prefix=raven::NativePrefix::from_environment();
+					// The libraries installed for every program, in the system directory of the program's width.
+					const auto system_directory = prefix.root() / "drive_c" / "windows" / (entry->image.is_64 ? "system32" : "syswow64");
+					const auto find_file = [](const std::filesystem::path &folder, std::string_view name) {
 						std::optional<std::filesystem::path> selected;
-						for (const auto &item : std::filesystem::directory_iterator(directory)) {
-							auto filename = item.path().filename().string();
+						std::error_code error;
+						for (std::filesystem::directory_iterator walk(folder, error), end; walk != end; walk.increment(error)) {
+							auto filename = walk->path().filename().string();
 							for (auto &character : filename)
 								if (character >= 'A' && character <= 'Z')
 									character = static_cast<char>(character + ('a' - 'A'));
-							if (filename != name || !item.is_regular_file())
+							if (filename != name || !walk->is_regular_file())
 								continue;
 							if (selected)
 								throw std::runtime_error("ambiguous case-insensitive DLL filename");
-							selected = item.path();
+							selected = walk->path();
 						}
+						return selected;
+					};
+					const auto source = [&](std::string_view name) -> std::optional<std::vector<uint8_t>> {
+						std::optional<std::filesystem::path> selected = find_file(directory, name);
 						// The runtime's own components are found beside the runtime when the program does not ship them.
 						// A 64-bit program built against msvcrt.dll gets the C runtime component as that library too: a runtime of its own, as
 						// msvcrt is beside ucrtbase on Windows.
@@ -246,6 +255,11 @@ int main(int argc, char **argv)
 								if (std::filesystem::exists(place / name))
 									return read_file((place / name).c_str());
 						}
+						// Then the system directory, where installers put the libraries programs share. The system's own libraries are the
+						// runtime's whatever files there carry their names.
+						const auto system_names = raven::system_library_names();
+						if (!selected && std::find(system_names.begin(), system_names.end(), name) == system_names.end())
+							selected = find_file(system_directory, name);
 						if (!selected)
 							return std::nullopt;
 						return read_file(selected->c_str());
@@ -339,7 +353,6 @@ int main(int argc, char **argv)
 						std::vector<std::string_view> arguments;
 						for (int i=last_file+1;i<argc;++i) arguments.emplace_back(argv[i]);
 						// The guest sees its own executable by a drive-qualified path, like any Windows process.
-						const raven::NativePrefix prefix=raven::NativePrefix::from_environment();
 						const raven::NativePaths paths(prefix);
 						const auto image=paths.dos(std::filesystem::absolute(argv[first_file]));
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};

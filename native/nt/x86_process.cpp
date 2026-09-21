@@ -351,8 +351,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			throw std::runtime_error("native x86 process cannot mix PE64 modules: " + name);
 	// Libraries the program ships and imports statically join its graph; the runtime's own libraries answer for the system ones.
 	if (source) {
+		// The system's libraries are the runtime's whatever copies the program ships or an installer left in the system directory.
 		std::vector<std::string_view> provided{"kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll", "setupapi.dll", "msvcrt.dll", "winmm.dll",
 			"dsound.dll", "vulkan-1.dll", "shell32.dll", "comctl32.dll", "ntdll.dll", "version.dll", "ole32.dll"};
+		provided.insert(provided.end(), system_library_names().begin(), system_library_names().end());
 		if (!source("d3d9.dll"))
 			provided.push_back("d3d9.dll");
 		// A library that is not there is left for the binder, which names every unresolved import at once.
@@ -708,6 +710,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	crt.initialize([&](std::string_view name) { return modules.resolve({"msvcrt.dll", std::string(name), 0, false, 0}); });
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativePaths paths(prefix);
+	paths.set_wow64(true);
 	if (!launch->directory.empty())
 		paths.set_current(launch->directory);
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call_guest;
@@ -1068,14 +1071,18 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_crypt32_api(shared_api, kernel);
 	register_process_info_api(shared_api, kernel);
 	register_font_service(shared_api, kernel);
-	// A 32-bit program runs under WOW64 on the 64-bit system Raven presents. File system redirection is not done (one System32 exists),
-	// so switching it off and back on changes nothing.
-	shared_api.add("Wow64DisableWow64FsRedirection", 1, [](ApiCall &call) {
+	// A 32-bit program runs under WOW64 on the 64-bit system Raven presents, its System32 being SysWOW64 until it switches redirection
+	// off. The value it keeps for the switch back is 1 when redirection was on.
+	shared_api.add("Wow64DisableWow64FsRedirection", 1, [&paths](ApiCall &call) {
+		const bool was = paths.redirect(false);
 		if (call[0])
-			call.store<uint32_t>(call[0], 0);
+			call.store<uint32_t>(call[0], was ? 1 : 0);
 		call.ret(1);
 	});
-	shared_api.add("Wow64RevertWow64FsRedirection", 1, [](ApiCall &call) { call.ret(1); });
+	shared_api.add("Wow64RevertWow64FsRedirection", 1, [&paths](ApiCall &call) {
+		paths.redirect(call[0] != 0);
+		call.ret(1);
+	});
 	register_ansi_adapters(shared_api);
 	register_legacy_file_api(shared_api);
 	windows.set_yield([&guest_threads] { return guest_threads.live() > 1 && guest_threads.yield(); });

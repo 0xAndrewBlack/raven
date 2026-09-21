@@ -643,9 +643,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 				call.fail(6);
 				return;
 			}
-			const auto directory = paths.full(context.launch.image_path);
-			const auto slash = directory.find_last_of(u'\\');
-			text = (found->second->runtime_api ? u"C:\\Windows\\System32\\" : directory.substr(0, slash + 1)) + widen_ascii(found->first);
+			text = found->second->runtime_api ? u"C:\\Windows\\System32\\" + widen_ascii(found->first) :
+				paths.library_location(context.launch.image_path, widen_ascii(found->first), context.entry.image.is_64);
 		}
 		const size_t capacity = call.u32(2);
 		if (!capacity) {

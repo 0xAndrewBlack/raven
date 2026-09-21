@@ -54,9 +54,14 @@ std::optional<std::vector<uint8_t>> NativeX86Loader::read_library(const std::str
 		identity = name;
 		return read_all(component);
 	}
+	// A name alone is looked for beside the program, then in the system directory, then in the current directory.
 	auto resolved = paths.resolve(std::u16string(name.begin(), name.end()));
-	if (name.find_first_of("/\\:") == std::string::npos && !application_directory.empty()) {
-		const auto beside = paths.resolve(application_directory + u"\\" + std::u16string(name.begin(), name.end()));
+	if (name.find_first_of("/\\:") == std::string::npos) {
+		const auto system = paths.resolve(NativePaths::system_directory(false) + u"\\" + std::u16string(name.begin(), name.end()));
+		if (system && system->exists)
+			resolved = system;
+		const auto beside = application_directory.empty() ? std::nullopt :
+			paths.resolve(application_directory + u"\\" + std::u16string(name.begin(), name.end()));
 		if (beside && beside->exists)
 			resolved = beside;
 	}
@@ -81,6 +86,10 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 	}
 	if (const auto found = modules.all().find(name); found != modules.all().end())
 		return found->second.get();
+	// A system library named by its path is the runtime's, as it is by its name.
+	if (const auto slash = name.find_last_of("/\\:"); slash != std::string::npos)
+		if (const auto found = modules.all().find(name.substr(slash + 1)); found != modules.all().end() && found->second->runtime_api)
+			return found->second.get();
 	std::string identity;
 	auto bytes = read_library(name, identity);
 	if (!bytes) {

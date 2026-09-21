@@ -133,9 +133,36 @@ std::u16string NativePaths::full(std::u16string_view input) const
 	return result;
 }
 
+std::u16string NativePaths::redirected(std::u16string path) const
+{
+	if (!wow64 || !redirecting)
+		return path;
+	const auto lower = [](std::u16string_view text) {
+		std::u16string result(text);
+		for (auto &character : result)
+			if (character >= u'A' && character <= u'Z')
+				character = char16_t(character + (u'a' - u'A'));
+		return result;
+	};
+	const auto under = [&](std::u16string_view folder) {
+		return path.size() >= folder.size() && lower(std::u16string_view(path).substr(0, folder.size())) == folder &&
+			(path.size() == folder.size() || path[folder.size()] == u'\\');
+	};
+	if (under(u"c:\\windows\\sysnative"))
+		return u"C:\\Windows\\System32" + path.substr(20);
+	if (!under(u"c:\\windows\\system32"))
+		return path;
+	// The folders Windows leaves shared between the two widths.
+	for (const auto folder : {u"c:\\windows\\system32\\catroot", u"c:\\windows\\system32\\catroot2", u"c:\\windows\\system32\\driverstore",
+			u"c:\\windows\\system32\\drivers\\etc", u"c:\\windows\\system32\\logfiles", u"c:\\windows\\system32\\spool"})
+		if (under(folder))
+			return path;
+	return u"C:\\Windows\\SysWOW64" + path.substr(19);
+}
+
 std::optional<NativePaths::Resolved> NativePaths::resolve(std::u16string_view input) const
 {
-	const auto path = full(input);
+	const auto path = redirected(full(input));
 	if (path.size() < 3)
 		return std::nullopt;
 	auto host = drive_root(path[0]);
@@ -166,6 +193,20 @@ std::optional<NativePaths::Resolved> NativePaths::resolve(std::u16string_view in
 		rest = rest.substr(end + 1);
 	}
 	return result;
+}
+
+std::u16string NativePaths::library_location(std::u16string_view image_path, std::u16string_view name, bool wide) const
+{
+	const auto program = full(image_path);
+	auto beside = program.substr(0, program.find_last_of(u'\\') + 1);
+	beside += name;
+	if (const auto found = resolve(beside); found && found->exists)
+		return beside;
+	auto system = system_directory(wide) + u"\\";
+	system += name;
+	if (const auto found = resolve(system); found && found->exists)
+		return system;
+	return beside;
 }
 
 std::u16string NativePaths::user_name() const
