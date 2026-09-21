@@ -29,8 +29,9 @@ const std::vector<PEResource> &NativeResources::resources(const PEModule &image)
 		cached = {};
 		return cached.resources;
 	}
-	if (directory.size > 16 * 1024 * 1024)
-		throw std::runtime_error("native resource directory exceeds initial policy limit");
+	// Self-extracting packages carry their whole payload as resources: the directory may be as large as the image that holds it.
+	if (uint64_t(directory.address) + directory.size > image.image.image_size)
+		throw std::runtime_error("native resource directory lies outside its image");
 	// The image the runtime maps for the guest is the live one, guest changes included.
 	const auto live = image.loaded.data();
 	if (cached.valid && uint64_t(directory.address) + directory.size <= live.size()) {
