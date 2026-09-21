@@ -642,6 +642,12 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		const auto found = text.find(char16_t(call[1]));
 		call.ret(found == text.npos ? 0 : call[0] + found * 2);
 	});
+	// The first character of the string that is one of the set's.
+	registry.add("StrPBrkW", 2, [](ApiCall &call) {
+		const auto text = call.wide(call[0]), set = call.wide(call[1]);
+		const auto found = text.find_first_of(set);
+		call.ret(found == text.npos || set.empty() ? 0 : call[0] + found * 2);
+	});
 	registry.add("StrRChrW", 3, [](ApiCall &call) {
 		const auto text = call.wide(call[0]);
 		const auto end = call[1] ? std::min<size_t>((call[1] - call[0]) / 2, text.size()) : text.size();
