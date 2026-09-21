@@ -20,7 +20,7 @@ PREFIXES = ("sdk/include/", "sdk/lib/pseh/", "sdk/tools/hpp/", "sdk/tools/spec2d
             "base/system/msiexec/", "dll/win32/rpcrt4/", "sdk/lib/3rdparty/libxml2/", "sdk/lib/3rdparty/libwin-iconv/", "dll/3rdparty/libxslt/",
             "dll/win32/msxml3/", "dll/win32/stdole2.tlb/", "base/system/regsvr32/",
             "dll/win32/atl/", "dll/win32/atl100/", "dll/win32/oleaut32/", "dll/3rdparty/libpng/", "dll/3rdparty/libjpeg/", "dll/3rdparty/libtiff/",
-            "dll/win32/propsys/", "dll/win32/mlang/", "dll/win32/windowscodecs/", "dll/win32/gdiplus/", "sdk/lib/getopt/", "dll/win32/urlmon/", "dll/win32/combase/")
+            "dll/win32/propsys/", "dll/win32/mlang/", "dll/win32/windowscodecs/", "dll/win32/gdiplus/", "sdk/lib/getopt/", "dll/win32/urlmon/", "dll/win32/combase/", "dll/win32/riched20/")
 # Interface headers the installer sources include, generated from the public IDL files with what they import.
 IDLS = ("objidlbase", "commoncontrols", "fusion", "msxml2", "oaidl", "ocidl", "objidl", "unknwn", "wtypes", "propidl", "urlmon", "shobjidl", "servprov", "docobj", "oleidl",
         "exdisp", "activscp", "shldisp", "mshtml", "xmldom", "imnact", "msctf", "shtypes", "oleacc", "comcat", "mscoree", "wincodec", "dispex",
@@ -31,7 +31,7 @@ ZLIB = ("adler32.c", "crc32.c", "deflate.c", "inflate.c", "inffast.c", "inftrees
 STORAGE = ("ole32/bindctx.c", "combase/hglobalstream.c", "ole32/storage32.c", "ole32/stg_prop.c", "ole32/stg_stream.c", "ole32/filelockbytes.c", "ole32/dictionary.c",
            "coml2/memlockbytes.c", "coml2/stg_prop.c", "coml2/storage32.c")
 COMPONENTS = ("cabinet.dll", "sxs.dll", "rpcrt4.dll", "msi.dll", "raven-storage.dll", "msiexec.exe", "libxslt.dll", "msxml3.dll", "regsvr32.exe", "atl100.dll", "oleaut32.dll", "libpng.dll", "libjpeg.dll",
-              "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll")
+              "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll", "riched20.dll")
 
 
 def main():
@@ -447,6 +447,10 @@ def main():
             str(urlmon_root / "clsid.h")], ["rpcrt4", "propsys", "ole32", "oleaut32", "shlwapi", "shell32", "wininet", "user32", "advapi32"],
             sources=[*listed_sources(urlmon_root), generated / "urlmon_urlmon_p.c", generated / "urlmon_dlldata.c"], helpers=("register.c",), rc="urlmon.rc",
             objects_more=[compile(support / "setup.c", "urlmon_setup")])
+    # riched20.dll: the rich edit control, with the type library of its text object model that its resources carry.
+    riched_root = source / "dll/win32/riched20"
+    run([*widl, "-I", riched_root, "-L", generated, "-t", "-T", generated / "riched_tom.tlb", riched_root / "riched_tom.idl"])
+    library("riched20.dll", riched_root, [], ["ole32", "oleaut32", "usp10", "imm32", "user32", "gdi32"], rc="version.rc")
     # regsvr32.exe: registers the classes a library serves, as installers and the runtime's own prefix setup run it.
     regsvr32_root = source / "base/system/regsvr32"
     regsvr32 = [compile(regsvr32_root / "regsvr32.c", "regsvr32_regsvr32", ["-DUNICODE", "-D_UNICODE", "-I" + str(regsvr32_root)], wine_module=False),

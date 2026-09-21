@@ -19,6 +19,6 @@ std::span<const std::string_view> system_library_names();
 // The system libraries the runtime ships as guest components beside itself (in x86/ for 32-bit programs), which are loaded from there
 // whatever copies a program ships or an installer leaves in the system directory.
 inline constexpr std::string_view runtime_components[]{"msi.dll", "cabinet.dll", "sxs.dll", "rpcrt4.dll", "msxml3.dll", "libxslt.dll", "atl100.dll",
-	"libpng.dll", "libjpeg.dll", "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll"};
+	"libpng.dll", "libjpeg.dll", "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll", "riched20.dll"};
 
 }
