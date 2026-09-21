@@ -501,7 +501,18 @@ uint64_t NativeWindows::invalid_owned(uint64_t filter) const
 	for (const auto handle : objects.window_handles()) {
 		const auto *window=std::as_const(objects).window(handle);
 		if (!window || window->update.empty() || !objects.window_visible(handle) || (window->thread && window->thread!=me)) continue;
-		if (!filter || filter==handle || objects.is_child(filter,handle)) return handle;
+		if (filter && filter!=handle && !objects.is_child(filter,handle)) continue;
+		// Parents paint before their children, as Windows orders WM_PAINT: a child may lie under what its parent draws, and handles
+		// come back in any order once windows are destroyed and made again.
+		uint64_t chosen=handle;
+		for (auto parent=window->parent;parent && parent!=filter;) {
+			const auto *above=std::as_const(objects).window(parent);
+			if (!above) break;
+			if (!above->update.empty() && objects.window_visible(parent) && (!above->thread || above->thread==me)) chosen=parent;
+			parent=above->parent;
+		}
+		if (filter && chosen!=handle && filter!=chosen && !objects.is_child(filter,chosen)) chosen=handle;
+		return chosen;
 	}
 	return 0;
 }
@@ -2116,7 +2127,20 @@ bool NativeWindows::dispatch(std::string_view name)
 			const bool narrow=process.mode()==NativeMode::x86;
 			const auto paint=process.read_memory(args[1],narrow ? 64 : 72);
 			if (!window->painting || read(paint,0,narrow ? 4 : 8)!=window->dc) throw uint32_t(87);
+			// A parent without WS_CLIPCHILDREN may have drawn over its children: they draw again on top, as the children on Windows show.
+			std::optional<DesktopRect> painted;
+			if (!(window->style & 0x02000000U))
+				if (const auto *device=objects.dc(window->dc); device && device->clip) painted=device->clip->bounds();
 			objects.finish_paint(args[0]);
+			if (painted)
+				if (const auto *owner=objects.window(args[0]))
+					for (const auto child : objects.child_windows(args[0])) {
+						const auto *inner=objects.window(child);
+						if (!inner || !inner->visible) continue;
+						const DesktopRect inside{std::max(painted->left+owner->x,inner->x)-inner->x,std::max(painted->top+owner->y,inner->y)-inner->y,
+							std::min(painted->right+owner->x,inner->x+inner->width)-inner->x,std::min(painted->bottom+owner->y,inner->y+inner->height)-inner->y};
+						if (inside.left<inside.right && inside.top<inside.bottom) objects.invalidate(child,inside,true);
+					}
 			if (objects.window_visible(args[0])) present(args[0]);
 			result=1;
 		}
