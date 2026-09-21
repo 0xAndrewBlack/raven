@@ -1178,7 +1178,9 @@ NativeResult NativeProcess::begin_call(uint64_t address, std::span<const uint64_
 NativeResult NativeProcess::begin_x86_call(uint64_t address, std::span<const uint64_t> arguments,
 	uint64_t stack_ceiling, std::chrono::milliseconds timeout)
 {
-	if (std::any_of(arguments.begin(), arguments.end(), [](uint64_t value) { return value > UINT32_MAX; }))
+	// A negative 32-bit value the handlers widened, such as a pseudo handle or a message's -1, goes back as its low half.
+	const auto fits = [](uint64_t value) { return value <= UINT32_MAX || (int64_t(value) < 0 && int64_t(value) >= INT32_MIN); };
+	if (!std::all_of(arguments.begin(), arguments.end(), fits))
 		throw std::runtime_error("native x86 call argument exceeds 32 bits");
 	const uint64_t size = arguments.size() * 4;
 	if (stack_ceiling > state->limit() || stack_ceiling < size + 16)
