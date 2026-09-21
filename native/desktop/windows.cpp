@@ -498,7 +498,7 @@ uint64_t NativeWindows::invalid_owned(uint64_t filter) const
 {
 	const auto me=environment.thread_id();
 	for (const auto handle : objects.window_handles()) {
-		const auto *window=objects.window(handle);
+		const auto *window=std::as_const(objects).window(handle);
 		if (!window || window->update.empty() || !objects.window_visible(handle) || (window->thread && window->thread!=me)) continue;
 		if (!filter || filter==handle || objects.is_child(filter,handle)) return handle;
 	}

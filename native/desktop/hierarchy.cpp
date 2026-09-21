@@ -25,8 +25,8 @@ uint64_t DesktopObjects::window_root(uint64_t handle) const
 std::vector<uint64_t> DesktopObjects::child_windows(uint64_t parent) const
 {
 	std::vector<std::pair<uint64_t,uint64_t>> found;
-	for (const auto &[handle,object]:objects)
-		if (const auto *record=std::get_if<DesktopWindow>(&object); record && record->parent==parent) found.emplace_back(record->order,handle);
+	for (const auto handle:window_set)
+		if (const auto *record=window(handle); record && record->parent==parent) found.emplace_back(record->order,handle);
 	std::sort(found.begin(),found.end());
 	std::vector<uint64_t> result;
 	for (const auto &item:found) result.push_back(item.second);

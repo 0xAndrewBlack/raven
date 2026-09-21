@@ -17,6 +17,7 @@
 #endif
 
 #include <map>
+#include <set>
 #include <variant>
 #include <string>
 #include <string_view>
@@ -350,6 +351,8 @@ private:
 	TouchedHandles windows_touched{}, menus_touched{}, bitmaps_touched{}, dcs_touched{}, icons_touched{};
 	// How many contexts each bitmap is selected into.
 	std::map<uint64_t,uint32_t> selections;
+	// The windows among the objects, in handle order.
+	std::set<uint64_t> window_set;
 	void count_selection(uint64_t bitmap, int change)
 	{
 		if (!bitmap) return;
