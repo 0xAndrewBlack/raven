@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <memory>
+#include <set>
 
 namespace raven {
 
@@ -170,6 +172,45 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		call.store_pointer(call[2], made.value);
+		call.ret(1);
+	});
+	// Impersonation: a thread that impersonates has a token of its own, which is the process's identity again, since every process runs as
+	// the same host user. Threads that do not impersonate have none, and OpenThreadToken tells them ERROR_NO_TOKEN.
+	const auto impersonating = std::make_shared<std::set<uint32_t>>();
+	registry.add("ImpersonateSelf", 1, [impersonating](ApiCall &call) {
+		impersonating->insert(call.environment.thread_id());
+		call.ret(1);
+	});
+	registry.add("ImpersonateLoggedOnUser", 1, [impersonating](ApiCall &call) {
+		impersonating->insert(call.environment.thread_id());
+		call.ret(1);
+	});
+	registry.add("RevertToSelf", 0, [impersonating](ApiCall &call) {
+		impersonating->erase(call.environment.thread_id());
+		call.ret(1);
+	});
+	registry.add("SetThreadToken", 2, [impersonating](ApiCall &call) {
+		if (call[1])
+			impersonating->insert(call.environment.thread_id());
+		else
+			impersonating->erase(call.environment.thread_id());
+		call.ret(1);
+	});
+	registry.add("OpenThreadToken", 4, [&context, impersonating](ApiCall &call) {
+		if (!call[3]) {
+			call.fail(87);
+			return;
+		}
+		if (!impersonating->contains(call.environment.thread_id())) {
+			call.fail(1008);
+			return;
+		}
+		const auto made = context.objects.add_object(std::make_shared<AccessToken>());
+		if (made.status) {
+			call.fail(made.status);
+			return;
+		}
+		call.store_pointer(call[3], made.value);
 		call.ret(1);
 	});
 	const auto lookup_privilege = [](ApiCall &call, bool wide) {
