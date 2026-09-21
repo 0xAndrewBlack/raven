@@ -356,6 +356,10 @@ void NativeThreads::schedule()
 		serve();
 		for (const auto &pump : pumps)
 			pump();
+		// What the services and pumps finished, such as a pipe read that sets an event, may have made a thread ready: it runs now rather
+		// than after the next sleep.
+		if (pick(true))
+			continue;
 		auto wake = std::chrono::steady_clock::time_point::max();
 		bool any = false;
 		for (const auto &thread : threads)
