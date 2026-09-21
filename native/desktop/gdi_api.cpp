@@ -1147,6 +1147,29 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 			call.ret(uint64_t(abs_dh));
 		});
 	});
+	// CreateDIBitmap: a device bitmap of the header's size, filled from the bits when CBM_INIT asks for it.
+	registry.add("CreateDIBitmap", 6, [&registry, this](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(87);
+			return;
+		}
+		const int32_t width = call.load<int32_t>(call[1] + 4), height = call.load<int32_t>(call[1] + 8);
+		if (width <= 0 || !height) {
+			call.fail(87);
+			return;
+		}
+		const uint32_t rows = uint32_t(height < 0 ? -height : height);
+		const uint64_t bitmap = allocate_bitmap(uint32_t(width), rows, 32, false, true);
+		if (!bitmap) {
+			call.fail(8);
+			return;
+		}
+		if ((call.u32(2) & 4) && call[3] && call[4]) {
+			ApiCall fill(call.process, call.environment, {call[0], bitmap, 0, rows, call[3], call[4], call[5]});
+			registry.find("SetDIBits")->second(fill);
+		}
+		call.ret(bitmap);
+	});
 	registry.add("SetDIBits", 7, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			auto *bitmap = objects.bitmap(call[1]);
