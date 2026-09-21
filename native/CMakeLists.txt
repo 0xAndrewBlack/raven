@@ -2386,6 +2386,34 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             set_tests_properties(native_delay_loader_contract PROPERTIES TIMEOUT 15)
             add_test(NAME native_delay_loader_cli COMMAND raven --run-process --execution=native ${DELAY_FIXTURES}/client.exe)
             set_tests_properties(native_delay_loader_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+            # C++ exceptions with the Microsoft compiler's tables against the runtime's msvcrt.dll, in both widths: clang emits them for the
+            # Windows targets, lld-link links the program; the 32-bit import library keeps the stdcall decoration of _CxxThrowException.
+            find_program(RAVEN_DLLTOOL32 i686-w64-mingw32-dlltool)
+            if(RAVEN_CLANG AND RAVEN_MINGW32 AND RAVEN_DLLTOOL32)
+                execute_process(COMMAND ${RAVEN_MINGW64} -print-file-name=libmsvcrt.a
+                    OUTPUT_VARIABLE RAVEN_MSVCRT_IMPORT OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+                execute_process(COMMAND ${RAVEN_MINGW32} -print-file-name=libkernel32.a
+                    OUTPUT_VARIABLE RAVEN_KERNEL32_IMPORT32 OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+                set(CXX_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/cxx-fixtures)
+                add_custom_command(OUTPUT ${CXX_FIXTURES}/cxx-exceptions64.exe ${CXX_FIXTURES}/cxx-exceptions32.exe
+                    COMMAND ${CMAKE_COMMAND} -E make_directory ${CXX_FIXTURES}
+                    COMMAND ${RAVEN_CLANG} --target=x86_64-pc-windows-msvc -O1 -fexceptions -fcxx-exceptions -c
+                        ${LOADER_SOURCES}/cxx_exceptions_client.cpp -o ${CXX_FIXTURES}/client64.obj
+                    COMMAND ${RAVEN_LLD_LINK} /nologo /entry:raven_entry /subsystem:console /nodefaultlib /out:${CXX_FIXTURES}/cxx-exceptions64.exe
+                        ${CXX_FIXTURES}/client64.obj ${RAVEN_MSVCRT_IMPORT} ${RAVEN_KERNEL32_IMPORT}
+                    COMMAND ${RAVEN_DLLTOOL32} -k -d ${LOADER_SOURCES}/cxx_msvcrt32.def -l ${CXX_FIXTURES}/msvcrt32.lib
+                    COMMAND ${RAVEN_CLANG} --target=i686-pc-windows-msvc -O1 -fexceptions -fcxx-exceptions -c
+                        ${LOADER_SOURCES}/cxx_exceptions_client.cpp -o ${CXX_FIXTURES}/client32.obj
+                    COMMAND ${RAVEN_LLD_LINK} /nologo /entry:raven_entry /subsystem:console /nodefaultlib /safeseh:no
+                        /out:${CXX_FIXTURES}/cxx-exceptions32.exe ${CXX_FIXTURES}/client32.obj ${CXX_FIXTURES}/msvcrt32.lib ${RAVEN_KERNEL32_IMPORT32}
+                    DEPENDS ${LOADER_SOURCES}/cxx_exceptions_client.cpp ${LOADER_SOURCES}/cxx_msvcrt32.def VERBATIM)
+                add_custom_target(cxx_exception_fixtures ALL DEPENDS ${CXX_FIXTURES}/cxx-exceptions64.exe ${CXX_FIXTURES}/cxx-exceptions32.exe)
+                foreach(width 64 32)
+                    add_test(NAME native_cxx_exceptions_x${width} COMMAND raven --run-process --execution=native ${CXX_FIXTURES}/cxx-exceptions${width}.exe)
+                    set_tests_properties(native_cxx_exceptions_x${width} PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                        ENVIRONMENT RAVEN_PREFIX=${KERNEL_PREFIX})
+                endforeach()
+            endif()
         endif()
         find_program(RAVEN_WINDRES x86_64-w64-mingw32-windres)
         find_program(RAVEN_MINGW32 i686-w64-mingw32-gcc)

@@ -23,9 +23,12 @@ CRT exit_function __dllonexit(exit_function function, exit_function **begin, exi
 	return function;
 }
 
+/* Member functions take the object in ECX on 32 bits; on 64 bits they are ordinary functions. */
 #ifdef __i386__
-
 #define THISCALL __attribute__((thiscall))
+#else
+#define THISCALL
+#endif
 
 #define CXX_EXCEPTION 0xe06d7363
 #define CXX_MAGIC_FIRST 0x19930520
@@ -38,9 +41,25 @@ CRT exit_function __dllonexit(exit_function function, exit_function **begin, exi
 #define TYPE_VIRTUAL_BASE 4
 #define UNWINDING (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)
 
-/* The tables the compiler emits, as 32-bit programs lay them out. */
+/* A type's descriptor, and where a base class lies in an object of a derived one, as both widths lay them out. */
 typedef struct { const void *vtable; char *name; char mangled[1]; } cxx_type;
 typedef struct { int this_offset, base_offset, base_entry; } cxx_offsets;
+
+static void *adjusted(const cxx_offsets *offsets, void *object)
+{
+	char *at = object;
+	if (!at)
+		return NULL;
+	if (offsets->base_offset >= 0) {
+		at += offsets->base_offset;
+		at += *(int *)(*(char **)at + offsets->base_entry);
+	}
+	return at + offsets->this_offset;
+}
+
+#ifdef __i386__
+
+/* The tables the compiler emits, as 32-bit programs lay them out. */
 typedef struct { unsigned flags; const cxx_type *type; cxx_offsets offsets; unsigned size; void *copy; } cxx_catchable;
 typedef struct { int count; const cxx_catchable *types[1]; } cxx_catchables;
 typedef struct { unsigned flags; void *destructor; void *forward; const cxx_catchables *catchable; } cxx_throw_info;
@@ -88,22 +107,35 @@ __asm__(".text\n"
 	"jmp *%eax\n");
 void raven_resume_function(cxx_frame *frame, void *address) __attribute__((noreturn));
 
-/* The exception a catch block is handling on each thread, which a rethrow sends on. */
+/* The catch blocks running on each thread, innermost first: the frame each belongs to, the stack pointer its function had before any
+ * of its catch blocks ran, and the exception, which a rethrow sends on. */
+typedef struct cxx_active {
+	cxx_frame *frame;
+	void *stack;
+	EXCEPTION_RECORD *record;
+	struct cxx_active *outer;
+} cxx_active;
 static DWORD current_slot = TLS_OUT_OF_INDEXES;
 
-static EXCEPTION_RECORD *current_exception(void)
+static cxx_active *current_catch(void)
 {
 	return current_slot == TLS_OUT_OF_INDEXES ? NULL : TlsGetValue(current_slot);
 }
 
-static void set_current_exception(EXCEPTION_RECORD *record)
+static EXCEPTION_RECORD *current_exception(void)
+{
+	const cxx_active *active = current_catch();
+	return active ? active->record : NULL;
+}
+
+static void set_current_catch(cxx_active *active)
 {
 	if (current_slot == TLS_OUT_OF_INDEXES) {
 		DWORD slot = TlsAlloc();
 		if (InterlockedCompareExchange((LONG *)&current_slot, (LONG)slot, (LONG)TLS_OUT_OF_INDEXES) != (LONG)TLS_OUT_OF_INDEXES)
 			TlsFree(slot);
 	}
-	TlsSetValue(current_slot, record);
+	TlsSetValue(current_slot, active);
 }
 
 /* Calls the unwind actions of a function from its current state back to the state asked for, destroying what was built since. */
@@ -152,18 +184,6 @@ static void unwind_frames(cxx_registration *target, EXCEPTION_RECORD *record)
 	record->ExceptionFlags &= ~EXCEPTION_UNWINDING;
 }
 
-static void *adjusted(const cxx_offsets *offsets, void *object)
-{
-	char *at = object;
-	if (!at)
-		return NULL;
-	if (offsets->base_offset >= 0) {
-		at += offsets->base_offset;
-		at += *(int *)(*(char **)at + offsets->base_entry);
-	}
-	return at + offsets->this_offset;
-}
-
 /* The type of the thrown object that a catch block takes, by name as the compiler decorates it. */
 static const cxx_catchable *caught_type(const cxx_throw_info *info, const cxx_catch *block)
 {
@@ -210,10 +230,18 @@ static void run_catch(EXCEPTION_RECORD *record, cxx_frame *frame, const cxx_func
 	unwind_frames(&frame->link, record);
 	unwind_function(frame, function, try_block->start);
 	frame->state = try_block->end + 1;
-	EXCEPTION_RECORD *previous = current_exception();
-	set_current_exception(record);
+	/* Catch blocks of this frame and of the frames below it, which the unwind abandoned, are over. The block may keep its own stack
+	 * pointer where the function keeps its own: the function's, from before its first catch block, comes back before it goes on. */
+	cxx_active *outer = current_catch();
+	void *stack = ((void **)frame)[-1];
+	for (; outer && (char *)outer->frame <= (char *)frame; outer = outer->outer)
+		if (outer->frame == frame)
+			stack = outer->stack;
+	cxx_active active = {frame, stack, record, outer};
+	set_current_catch(&active);
 	void *resume = raven_call_with_frame(block->handler, &frame->ebp);
-	set_current_exception(previous);
+	((void **)frame)[-1] = stack;
+	set_current_catch(outer);
 	if (info && info->destructor && object)
 		((void (THISCALL *)(void *))info->destructor)(object);
 	raven_resume_function(frame, resume);
@@ -350,16 +378,275 @@ void __stdcall raven_cxx_throw(void *object, const cxx_throw_info *info)
 	abort();
 }
 
-CRT int _purecall(void)
+#endif
+
+#ifdef __x86_64__
+
+/* The tables the compiler emits for 64-bit programs: the same tables with 32-bit offsets from the image's base in place of pointers. */
+typedef struct { unsigned flags, type; cxx_offsets offsets; unsigned size, copy; } cxx_catchable;
+typedef struct { int count; unsigned types[1]; } cxx_catchables;
+typedef struct { unsigned flags, destructor, forward, catchable; } cxx_throw_info;
+typedef struct { int previous; unsigned action; } cxx_unwind;
+typedef struct { unsigned flags, type; int offset; unsigned handler, frame; } cxx_catch;
+typedef struct { int start, end, catch_level, count; unsigned catches; } cxx_try;
+typedef struct { unsigned ip; int state; } cxx_ip_state;
+typedef struct { unsigned magic; int unwind_count; unsigned unwind; unsigned try_count; unsigned tries; unsigned ip_count; unsigned ip_map;
+	int unwind_help; unsigned expected; unsigned flags; } cxx_function;
+
+#define EXCEPTION_TARGET_UNWIND 0x20
+#define STATUS_UNWIND_CONSOLIDATE 0x80000029
+
+/* What a catch is entered with, in the parameters of the consolidating unwind: the callback, the function's frame, the catch block, the
+ * state the function is unwound to, and the exception: its object, its type's description and the base of the image that describes it. */
+enum { CATCH_CALLBACK, CATCH_FRAME, CATCH_BLOCK, CATCH_STATE, CATCH_OBJECT, CATCH_INFO, CATCH_BASE, CATCH_PARAMETERS };
+
+/* The catch blocks running on each thread, innermost first: the frame of the function each belongs to, the state that function was
+ * unwound to, and the exception, which a rethrow sends on. While its catch block runs, the function's frame is reached only through the
+ * block, and it is in that state whatever address it was left at. */
+typedef struct cxx_active {
+	ULONG64 frame;
+	int state;
+	void *object;
+	const cxx_throw_info *info;
+	ULONG_PTR base;
+	struct cxx_active *outer;
+} cxx_active;
+static DWORD current_slot = TLS_OUT_OF_INDEXES;
+
+static cxx_active *current_exception(void)
 {
-	ExitProcess(255);
-	return 0;
+	return current_slot == TLS_OUT_OF_INDEXES ? NULL : TlsGetValue(current_slot);
 }
+
+static void set_current_exception(cxx_active *exception)
+{
+	if (current_slot == TLS_OUT_OF_INDEXES) {
+		DWORD slot = TlsAlloc();
+		if (InterlockedCompareExchange((LONG *)&current_slot, (LONG)slot, (LONG)TLS_OUT_OF_INDEXES) != (LONG)TLS_OUT_OF_INDEXES)
+			TlsFree(slot);
+	}
+	TlsSetValue(current_slot, exception);
+}
+
+static const cxx_active *active_catch(ULONG64 frame)
+{
+	for (const cxx_active *item = current_exception(); item; item = item->outer)
+		if (item->frame == frame)
+			return item;
+	return NULL;
+}
+
+/* A part of a function the compiler moved out of it, an unwind action or a catch block, runs with the function's frame in RDX. */
+typedef void *(*funclet)(ULONG64, ULONG64);
+
+/* The state of a function at an address of its code: the last entry of its map at or before the address. */
+static int state_at(const cxx_function *function, ULONG64 base, ULONG64 pc)
+{
+	const cxx_ip_state *map = (const cxx_ip_state *)(base + function->ip_map);
+	int state = -1;
+	for (unsigned index = 0; index < function->ip_count && base + map[index].ip <= pc; ++index)
+		state = map[index].state;
+	return state;
+}
+
+/* Calls the unwind actions of a function from its current state back to the state asked for, destroying what was built since. */
+static void unwind_function(ULONG64 frame, ULONG64 base, const cxx_function *function, int state, int target)
+{
+	const cxx_unwind *map = (const cxx_unwind *)(base + function->unwind);
+	while (state > target && state >= 0 && state < function->unwind_count) {
+		const cxx_unwind *entry = &map[state];
+		state = entry->previous;
+		if (entry->action)
+			((funclet)(base + entry->action))(0, frame);
+	}
+}
+
+/* The type of the thrown object that a catch block takes, by name as the compiler decorates it. */
+static const cxx_catchable *caught_type(const cxx_throw_info *info, ULONG64 thrown_base, const cxx_type *wanted, unsigned catch_flags)
+{
+	const cxx_catchables *types = (const cxx_catchables *)(thrown_base + info->catchable);
+	for (int index = 0; index < types->count; ++index) {
+		const cxx_catchable *type = (const cxx_catchable *)(thrown_base + types->types[index]);
+		const cxx_type *described = (const cxx_type *)(thrown_base + type->type);
+		if (wanted != described && strcmp(wanted->mangled, described->mangled))
+			continue;
+		if (((info->flags & CATCH_CONST) && !(catch_flags & CATCH_CONST)) || ((info->flags & CATCH_VOLATILE) && !(catch_flags & CATCH_VOLATILE)))
+			continue;
+		return type;
+	}
+	return NULL;
+}
+
+/* The catch block's own copy of the object, or a reference to it, where the block finds it in the function's frame. */
+static void copy_object(void *object, ULONG64 frame, const cxx_catch *block, const cxx_catchable *type, ULONG64 thrown_base)
+{
+	char *to = (char *)(frame + block->offset);
+	if (block->flags & CATCH_REFERENCE) {
+		*(void **)to = adjusted(&type->offsets, object);
+	} else if (type->flags & TYPE_SIMPLE) {
+		memmove(to, object, type->size);
+		if (type->size == sizeof(void *))
+			*(void **)to = adjusted(&type->offsets, *(void **)to);
+	} else if (type->copy) {
+		if (type->flags & TYPE_VIRTUAL_BASE)
+			((void (*)(void *, void *, int))(thrown_base + type->copy))(to, adjusted(&type->offsets, object), 1);
+		else
+			((void (*)(void *, void *))(thrown_base + type->copy))(to, adjusted(&type->offsets, object));
+	} else {
+		memmove(to, adjusted(&type->offsets, object), type->size);
+	}
+}
+
+/* Runs on the catching function's stack once the frames above it are gone: the block runs with the exception current, then the object
+ * is destroyed and the function goes on where the block says. */
+static ULONG64 run_catch(EXCEPTION_RECORD *record)
+{
+	const ULONG_PTR *parameters = record->ExceptionInformation;
+	/* Catch blocks of this frame and of the frames below it, which the unwind abandoned, are over. */
+	cxx_active *outer = current_exception();
+	while (outer && outer->frame <= parameters[CATCH_FRAME])
+		outer = outer->outer;
+	cxx_active exception = {parameters[CATCH_FRAME], (int)parameters[CATCH_STATE], (void *)parameters[CATCH_OBJECT],
+		(const cxx_throw_info *)parameters[CATCH_INFO], parameters[CATCH_BASE], outer};
+	set_current_exception(&exception);
+	void *resume = ((funclet)parameters[CATCH_BLOCK])(0, parameters[CATCH_FRAME]);
+	set_current_exception(exception.outer);
+	if (exception.info && exception.info->destructor && exception.object)
+		((void (*)(void *))(exception.base + exception.info->destructor))(exception.object);
+	return (ULONG64)resume;
+}
+
+EXCEPTION_DISPOSITION raven_cxx_frame_handler(EXCEPTION_RECORD *record, ULONG64 frame, CONTEXT *context, DISPATCHER_CONTEXT *dispatch)
+{
+	const ULONG64 base = dispatch->ImageBase;
+	const cxx_function *function = (const cxx_function *)(base + *(const unsigned *)dispatch->HandlerData);
+	const unsigned magic = function->magic & 0x1fffffff;
+	if (magic < CXX_MAGIC_FIRST || magic > CXX_MAGIC_LAST)
+		return ExceptionContinueSearch;
+	int state = state_at(function, base, dispatch->ControlPc);
+	const cxx_try *tries = (const cxx_try *)(base + function->tries);
+	/* A catch block is a part of its function with a frame of its own, which keeps the function's frame where the block's description
+	 * says; what it built is its own, and what the function built before is the function's. */
+	const cxx_try *running = NULL;
+	for (unsigned index = 0; index < function->try_count && !running; ++index) {
+		const cxx_catch *catches = (const cxx_catch *)(base + tries[index].catches);
+		for (int choice = 0; choice < tries[index].count; ++choice)
+			if (catches[choice].handler == dispatch->FunctionEntry->BeginAddress) {
+				frame = *(const ULONG64 *)(frame + catches[choice].frame);
+				running = &tries[index];
+				break;
+			}
+	}
+	const cxx_active *active = running ? NULL : active_catch(frame);
+	if (active)
+		state = active->state;
+	if (record->ExceptionFlags & UNWINDING) {
+		/* The catching function keeps what it built before the try block; every other function loses all it built, and a catch block
+		 * what it built itself. */
+		int target = running ? running->end : -1;
+		if (!running && (record->ExceptionFlags & EXCEPTION_TARGET_UNWIND) && record->ExceptionCode == STATUS_UNWIND_CONSOLIDATE &&
+			record->NumberParameters >= CATCH_PARAMETERS && record->ExceptionInformation[CATCH_CALLBACK] == (ULONG_PTR)run_catch)
+			target = (int)record->ExceptionInformation[CATCH_STATE];
+		unwind_function(frame, base, function, state, target);
+		return ExceptionContinueSearch;
+	}
+	/* The catch blocks of a function whose own catch block is running were offered to the exception from that block's frame. */
+	if (active)
+		return ExceptionContinueSearch;
+	const BOOL cxx = record->ExceptionCode == CXX_EXCEPTION && record->NumberParameters >= 4 &&
+		record->ExceptionInformation[0] >= CXX_MAGIC_FIRST && record->ExceptionInformation[0] <= CXX_MAGIC_LAST;
+	/* Functions compiled for synchronous exceptions only catch what C++ throws. */
+	if (!cxx && magic >= CXX_MAGIC_LAST && (function->flags & FUNCTION_SYNCHRONOUS))
+		return ExceptionContinueSearch;
+	void *object = cxx ? (void *)record->ExceptionInformation[1] : NULL;
+	const cxx_throw_info *info = cxx ? (const cxx_throw_info *)record->ExceptionInformation[2] : NULL;
+	const ULONG64 thrown_base = cxx ? record->ExceptionInformation[3] : 0;
+	for (unsigned index = 0; index < function->try_count; ++index) {
+		const cxx_try *try_block = &tries[index];
+		if (state < try_block->start || state > try_block->end)
+			continue;
+		const cxx_catch *catches = (const cxx_catch *)(base + try_block->catches);
+		for (int choice = 0; choice < try_block->count; ++choice) {
+			const cxx_catch *block = &catches[choice];
+			const cxx_type *wanted = block->type ? (const cxx_type *)(base + block->type) : NULL;
+			const cxx_catchable *type = NULL;
+			if (wanted && wanted->mangled[0]) {
+				if (!info || !info->catchable || !(type = caught_type(info, thrown_base, wanted, block->flags)))
+					continue;
+				if (block->offset)
+					copy_object(object, frame, block, type, thrown_base);
+			}
+			/* The frames above go, the function's own actions back to the try block run, and the catch block runs on its stack. */
+			EXCEPTION_RECORD consolidate = {0};
+			consolidate.ExceptionCode = STATUS_UNWIND_CONSOLIDATE;
+			consolidate.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+			consolidate.NumberParameters = CATCH_PARAMETERS;
+			consolidate.ExceptionInformation[CATCH_CALLBACK] = (ULONG_PTR)run_catch;
+			consolidate.ExceptionInformation[CATCH_FRAME] = frame;
+			consolidate.ExceptionInformation[CATCH_BLOCK] = base + block->handler;
+			consolidate.ExceptionInformation[CATCH_STATE] = (ULONG_PTR)(LONG_PTR)try_block->start;
+			consolidate.ExceptionInformation[CATCH_OBJECT] = (ULONG_PTR)object;
+			consolidate.ExceptionInformation[CATCH_INFO] = (ULONG_PTR)info;
+			consolidate.ExceptionInformation[CATCH_BASE] = thrown_base;
+			RtlUnwindEx((void *)frame, (void *)dispatch->ControlPc, &consolidate, NULL, dispatch->ContextRecord, dispatch->HistoryTable);
+		}
+	}
+	return ExceptionContinueSearch;
+}
+
+/* throw: the object, its type's description and the image that holds it; with neither, the exception the current catch block handles
+ * goes on. */
+void raven_cxx_throw(void *object, const cxx_throw_info *info)
+{
+	ULONG_PTR parameters[4] = {CXX_MAGIC_FIRST, (ULONG_PTR)object, (ULONG_PTR)info, 0};
+	if (!object && !info) {
+		const cxx_active *current = current_exception();
+		if (!current)
+			abort();
+		parameters[1] = (ULONG_PTR)current->object;
+		parameters[2] = (ULONG_PTR)current->info;
+		parameters[3] = current->base;
+	} else {
+		void *image = NULL;
+		RtlPcToFileHeader((void *)info, &image);
+		parameters[3] = (ULONG_PTR)image;
+	}
+	RaiseException(CXX_EXCEPTION, EXCEPTION_NONCONTINUABLE, 4, parameters);
+	abort();
+}
+
+/* The names 64-bit programs import these by, with the members of type_info and std::exception below. */
+__asm__(".section .drectve\n"
+	".ascii \" -export:_CxxThrowException=raven_cxx_throw -export:__CxxFrameHandler=raven_cxx_frame_handler\"\n"
+	".ascii \" -export:__CxxFrameHandler2=raven_cxx_frame_handler -export:__CxxFrameHandler3=raven_cxx_frame_handler\"\n"
+	".ascii \" -export:??1type_info@@UEAA@XZ=raven_type_info_destroy -export:?name@type_info@@QEBAPEBDXZ=raven_type_info_name\"\n"
+	".ascii \" -export:?raw_name@type_info@@QEBAPEBDXZ=raven_type_info_raw_name -export:??8type_info@@QEBAHAEBV0@@Z=raven_type_info_equal\"\n"
+	".ascii \" -export:??9type_info@@QEBAHAEBV0@@Z=raven_type_info_unequal -export:?before@type_info@@QEBAHAEBV0@@Z=raven_type_info_before\"\n"
+	".ascii \" -export:??0exception@@QEAA@XZ=raven_exception_construct -export:??0exception@@QEAA@AEBQEBD@Z=raven_exception_construct_message\"\n"
+	".ascii \" -export:??0exception@@QEAA@AEBQEBDH@Z=raven_exception_construct_message_shared -export:??0exception@@QEAA@AEBV0@@Z=raven_exception_copy\"\n"
+	".ascii \" -export:??1exception@@UEAA@XZ=raven_exception_destroy -export:??4exception@@QEAAAEAV0@AEBV0@@Z=raven_exception_assign\"\n"
+	".ascii \" -export:?what@exception@@UEBAPEBDXZ=raven_exception_what -export:??_Eexception@@UEAAPEAXI@Z=raven_exception_delete\"\n"
+	".ascii \" -export:??_7exception@@6B@=raven_exception_vtable,DATA -export:?terminate@@YAXXZ=terminate\"\n"
+	".ascii \" -export:??_7type_info@@6B@=raven_type_info_vtable,DATA\"\n"
+	".text");
+
+#endif
 
 /* type_info: its decorated name, and the readable one made from it on demand. */
 typedef struct { const void *vtable; char *name; char mangled[1]; } type_info;
 
 void THISCALL raven_type_info_destroy(type_info *self) { free(self->name); }
+
+/* The deleting destructor of type_info, the one entry of its table of virtual functions, which every type descriptor points to. */
+void *THISCALL raven_type_info_delete(type_info *self, unsigned flags)
+{
+	raven_type_info_destroy(self);
+	if (flags & 1)
+		free(self);
+	return self;
+}
+
+const void *const raven_type_info_vtable[] = {(const void *)raven_type_info_delete};
 const char *THISCALL raven_type_info_raw_name(const type_info *self) { return self->mangled; }
 const char *THISCALL raven_type_info_name(type_info *self) { return self->mangled; }
 int THISCALL raven_type_info_equal(const type_info *self, const type_info *other) { return !strcmp(self->mangled, other->mangled); }
@@ -453,4 +740,9 @@ void *THISCALL raven_exception_delete(exception_object *self, unsigned flags)
 	return self;
 }
 
-#endif
+/* A pure virtual function called through an object under construction or destruction ends the process. */
+CRT int _purecall(void)
+{
+	ExitProcess(255);
+	return 0;
+}

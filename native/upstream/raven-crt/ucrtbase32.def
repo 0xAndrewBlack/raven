@@ -6,6 +6,7 @@ EXPORTS
 	__CxxFrameHandler2 = raven_cxx_frame_handler
 	__CxxFrameHandler3 = raven_cxx_frame_handler
 	??1type_info@@UAE@XZ = raven_type_info_destroy
+	??_7type_info@@6B@ = raven_type_info_vtable DATA
 	?name@type_info@@QBEPBDXZ = raven_type_info_name
 	?raw_name@type_info@@QBEPBDXZ = raven_type_info_raw_name
 	??8type_info@@QBEHABV0@@Z = raven_type_info_equal
@@ -22,3 +23,4 @@ EXPORTS
 	??_7exception@@6B@ = raven_exception_vtable DATA
 	raven_raise_exception = raven_raise_exception@16
 	raven_unwind = raven_unwind@16
+	?terminate@@YAXXZ = terminate

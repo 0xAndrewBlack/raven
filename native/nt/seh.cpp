@@ -117,6 +117,12 @@ public:
 				break;
 			const auto function = unwinder.lookup(pc);
 			if (!function) {
+				// A catch block's callback returns through the consolidation gate: the frames beyond it are those of the function
+				// whose catch block is running, from where it was unwound to.
+				if (const auto *pending = consolidation_returning_to(pc, current)) {
+					current = pending->target;
+					continue;
+				}
 				if (pc == context.process.return_gate() && outer > 0) {
 					current = active[--outer].origin;
 					continue;
@@ -367,6 +373,8 @@ public:
 		const uint64_t dispatcher = scratch.take(dispatcher_size);
 		const uint64_t frame_context = scratch.take(x64_context::size);
 		ContextBytes current = caller_context();
+		// The deepest stack in use: what the frames being unwound left there, the thrown object among it, stays intact below the target.
+		const uint64_t deepest = context_rsp(current);
 		const size_t previous_start = continuation_start, previous_size = continuation.size();
 		size_t outer_cursor = previous_start;
 		continuation_start = continuation.size();
@@ -398,6 +406,12 @@ public:
 				break;
 			const auto function = unwinder.lookup(pc);
 			if (!function) {
+				// Unwinding past a catch block's callback abandons that catch: its function's frame follows.
+				if (const auto *pending = consolidation_returning_to(pc, current)) {
+					current = pending->target;
+					consolidations.erase(consolidations.begin() + (pending - consolidations.data()), consolidations.end());
+					continue;
+				}
 				unwinder.unwind_leaf(current);
 				continue;
 			}
@@ -456,9 +470,10 @@ public:
 			std::fprintf(stderr, "seh resume at %llx (context rip %llx) rsp=%llx\n", (unsigned long long)target_ip, (unsigned long long)context_rip(current),
 				(unsigned long long)context_rsp(current));
 		if (le32(record, 0) == status_unwind_consolidate && trap_gate) {
-			// Run the runtime's callback on the target frame's stack; its return trap resumes execution.
+			// Run the runtime's callback below every frame the exception went through, as Windows runs it from inside the unwind: the
+			// catch block may still read the thrown object where the throw left it. Its return trap resumes execution.
 			const uint64_t callback = load64(record, 0x20);
-			const uint64_t base = (context_rsp(current) - record_size - 0x40) & ~uint64_t(15);
+			const uint64_t base = (std::min(context_rsp(current), deepest) - record_size - 0x40) & ~uint64_t(15);
 			context.process.write_memory(base, record);
 			const uint64_t slot = base - 0x20 - 8;
 			std::vector<uint8_t> gate(8);
@@ -500,6 +515,16 @@ public:
 		size_t depth;
 	};
 	std::vector<Consolidation> consolidations;
+
+	// The pending catch whose callback returns to the consolidation gate from this context, if any.
+	const Consolidation *consolidation_returning_to(uint64_t pc, const ContextBytes &frame) const
+	{
+		if (!trap_gate || pc != trap_gate)
+			return nullptr;
+		const uint64_t slot = context_rsp(frame) - 8;
+		const auto found = std::find_if(consolidations.begin(), consolidations.end(), [slot](const auto &item) { return item.return_slot == slot; });
+		return found == consolidations.end() ? nullptr : &*found;
+	}
 
 	[[noreturn]] void finish_consolidation(uint64_t continuation)
 	{
