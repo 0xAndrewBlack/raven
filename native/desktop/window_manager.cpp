@@ -19,9 +19,10 @@ struct Layout {
 	size_t size, pointer, flags;
 };
 
+// WINDOWPOS: two handles, the position and size as four ints, then the flags; 64-bit programs pad it to 40 bytes.
 Layout position_layout(bool narrow)
 {
-	return narrow ? Layout{28, 4, 24} : Layout{48, 8, 40};
+	return narrow ? Layout{28, 4, 24} : Layout{40, 8, 32};
 }
 
 }
