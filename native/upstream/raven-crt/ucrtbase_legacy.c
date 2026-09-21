@@ -31,6 +31,22 @@ CRT wchar_t *_wcslwr(wchar_t *text)
 	return text;
 }
 
+CRT char *_strlwr(char *text)
+{
+	for (char *at = text; *at; ++at)
+		if (*at >= 'A' && *at <= 'Z')
+			*at = (char)(*at + 32);
+	return text;
+}
+
+CRT char *_strupr(char *text)
+{
+	for (char *at = text; *at; ++at)
+		if (*at >= 'a' && *at <= 'z')
+			*at = (char)(*at - 32);
+	return text;
+}
+
 CRT wchar_t *_wcsupr(wchar_t *text)
 {
 	for (wchar_t *at = text; *at; ++at)
