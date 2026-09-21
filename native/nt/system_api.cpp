@@ -549,6 +549,14 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[0], status);
 		call.ret(1);
 	});
+	// What a thread asks of power management, which has nothing to keep awake here: the previous state comes back, and a continuous request
+	// stays until the next one replaces it.
+	registry.add("SetThreadExecutionState", 1, [state = std::make_shared<uint32_t>(0x80000000U)](ApiCall &call) {
+		const uint32_t flags = call.u32(0), previous = *state;
+		if (flags & 0x80000000U)
+			*state = flags;
+		call.ret(previous);
+	});
 	registry.add("RegisterSuspendResumeNotification", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("UnregisterSuspendResumeNotification", 1, [](ApiCall &call) { call.ret(1); });
 	// Giving pages back changes nothing the program can see here.
