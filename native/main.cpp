@@ -211,7 +211,7 @@ int main(int argc, char **argv)
 					{
 						const auto runtime = std::filesystem::read_symlink("/proc/self/exe").parent_path();
 						for (const auto &[from, folder] : {std::pair{runtime, "system32"}, std::pair{runtime / "x86", "syswow64"}})
-							for (const char *program : {"msiexec.exe", "regsvr32.exe"}) {
+							for (const char *program : {"msiexec.exe", "regsvr32.exe", "control.exe"}) {
 								std::error_code error;
 								const auto source_file = from / program, target = prefix.root() / "drive_c" / "windows" / folder / program;
 								if (!std::filesystem::exists(source_file, error))

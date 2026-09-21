@@ -239,6 +239,13 @@ def main():
     (output / "raven-shell.def").write_text("NAME raven-shell.dll\nEXPORTS\n" + "".join(definition_line(name, shell_defined.get(name)) for name in shell_names))
     run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{bases['shell']:#x},--no-insert-timestamp", *link_extra,
          "-o", output / "raven-shell.dll", *shell_objects, output / "raven-shell.def", "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lole32", "-luuid", "-lgcc"])
+    # control.exe: the control panel, a program on the public headers that asks for the common controls 6 in its manifest.
+    control_support = repo / "native/upstream/raven-control"
+    control_objects = [objects / "control.o", objects / "control_res.o"]
+    run([triple + "-gcc", "-c", "-O2", "-Wall", "-fno-builtin", f"-ffile-prefix-map={repo}=raven", control_support / "control.c", "-o", control_objects[0]])
+    run([triple + "-windres", "-O", "coff", "-I" + str(control_support), "-i", control_support / "control.rc", "-o", control_objects[1]])
+    run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp", *link_extra,
+         "-o", output / "control.exe", *control_objects, shell_objects[3], "-luser32", "-lgdi32", "-ladvapi32", "-lcomctl32", "-lkernel32", "-lgcc"])
     if "dwrite" in wanted:
         # The DirectWrite component: Raven code on the public headers, whose fonts come from the host through ravenhost.dll.
         dwrite_support = repo / "native/upstream/raven-dwrite"
