@@ -29,6 +29,7 @@
 #include <cerrno>
 #include <cstring>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <stdexcept>
 
 static std::vector<uint8_t> read_file(const char *path)
@@ -210,7 +211,7 @@ int main(int argc, char **argv)
 					{
 						const auto runtime = std::filesystem::read_symlink("/proc/self/exe").parent_path();
 						for (const auto &[from, folder] : {std::pair{runtime, "system32"}, std::pair{runtime / "x86", "syswow64"}})
-							for (const char *program : {"msiexec.exe"}) {
+							for (const char *program : {"msiexec.exe", "regsvr32.exe"}) {
 								std::error_code error;
 								const auto source_file = from / program, target = prefix.root() / "drive_c" / "windows" / folder / program;
 								if (!std::filesystem::exists(source_file, error))
@@ -220,10 +221,52 @@ int main(int argc, char **argv)
 									continue;
 								std::filesystem::copy_file(source_file, target, std::filesystem::copy_options::overwrite_existing, error);
 							}
+						// The classes the runtime's components serve are registered in the prefix, as Windows ships them registered: regsvr32 runs
+						// for each width when the components changed since the prefix last registered them. The runs themselves skip this step.
+						const char *servers[] = {"msxml3.dll"};
+						std::string stamp;
+						for (const auto &from : {runtime, runtime / "x86"})
+							for (const char *server : servers) {
+								std::error_code error;
+								const auto file = from / server;
+								if (std::filesystem::exists(file, error))
+									stamp += file.string() + " " + std::to_string(std::filesystem::file_size(file, error)) + " " +
+										std::to_string(std::filesystem::last_write_time(file, error).time_since_epoch().count()) + "\n";
+							}
+						const auto marker = prefix.root() / "drive_c" / "windows" / "raven-registered.txt";
+						std::string recorded;
+						if (std::ifstream input(marker); input)
+							recorded.assign(std::istreambuf_iterator<char>(input), {});
+						if (!std::getenv("RAVEN_PREFIX_SETUP") && !stamp.empty() && stamp != recorded) {
+							// The prefix counts as registered only when every registration succeeded; a failed one is tried again next time.
+							bool registered = true;
+							for (const char *folder : {"system32", "syswow64"}) {
+								const auto program = prefix.root() / "drive_c" / "windows" / folder / "regsvr32.exe";
+								if (!std::filesystem::exists(program))
+									continue;
+								for (const char *server : servers) {
+									const pid_t child = ::fork();
+									if (child == 0) {
+										::setenv("RAVEN_PREFIX_SETUP", "1", 1);
+										const std::string self = std::filesystem::read_symlink("/proc/self/exe").string(), path = program.string();
+										::execl(self.c_str(), self.c_str(), "--run-process", "--execution=native", "--timeout-ms=60000", path.c_str(), "--", "/s",
+											server, static_cast<char *>(nullptr));
+										::_exit(127);
+									}
+									int status = 0;
+									if (child > 0)
+										while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+									registered = registered && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+								}
+							}
+							if (registered)
+								std::ofstream(marker) << stamp;
+						}
 					}
 					// The libraries installed for every program, in the system directory of the program's width.
 					const auto system_directory = prefix.root() / "drive_c" / "windows" / (entry->image.is_64 ? "system32" : "syswow64");
-					const auto find_file = [](const std::filesystem::path &folder, std::string_view name) {
+					// A library of the other width is passed over, as the Windows loader goes on searching past it.
+					const auto find_file = [&](const std::filesystem::path &folder, std::string_view name) {
 						std::optional<std::filesystem::path> selected;
 						std::error_code error;
 						for (std::filesystem::directory_iterator walk(folder, error), end; walk != end; walk.increment(error)) {
@@ -237,6 +280,14 @@ int main(int argc, char **argv)
 								throw std::runtime_error("ambiguous case-insensitive DLL filename");
 							selected = walk->path();
 						}
+						if (selected) {
+							try {
+								if (raven::PEImage(read_file(selected->c_str())).is_64 != entry->image.is_64)
+									selected.reset();
+							} catch (const std::exception &) {
+								selected.reset();
+							}
+						}
 						return selected;
 					};
 					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
@@ -244,7 +295,7 @@ int main(int argc, char **argv)
 					const auto source = [&](std::string_view name) -> std::optional<std::vector<uint8_t>> {
 						// The Windows Installer, the libraries it installs with and remote procedure calls are the runtime's components, whatever copies a program
 						// ships or an installer leaves in the system directory.
-						if (name == "msi.dll" || name == "cabinet.dll" || name == "sxs.dll" || name == "rpcrt4.dll")
+						if (std::find(std::begin(raven::runtime_components), std::end(raven::runtime_components), name) != std::end(raven::runtime_components))
 							if (const auto component = component_directory / name; std::filesystem::exists(component))
 								return read_file(component.c_str());
 						std::optional<std::filesystem::path> selected = find_file(directory, name);
@@ -362,6 +413,10 @@ int main(int argc, char **argv)
 					load_component("raven-shell.dll", {"comdlg32.dll", "ole32.dll", "shell32.dll"});
 					// Structured storage, the compound files installer packages are made of.
 					load_component("raven-storage.dll", {"ole32.dll"});
+					// Automation (variants, safe arrays, BSTRs, type libraries) is the component's for every program: libraries loaded later, such
+					// as the XML component, use it as much as the program does.
+					if (const auto automation = component_directory / "oleaut32.dll"; !modules.all().contains("oleaut32.dll") && std::filesystem::exists(automation))
+						modules.add("oleaut32.dll", read_file(automation.c_str()));
 					if (entry->image.is_64)
 						load_component("ucrtbase.dll", {"ucrtbase.dll", "api-ms-win-crt-*"});
 					raven::DesktopPresentation presentation;

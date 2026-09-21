@@ -1,6 +1,8 @@
 #include "paths.h"
 #include "text.h"
+#include "system_exports.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <dirent.h>
 #include <vector>
@@ -197,6 +199,12 @@ std::optional<NativePaths::Resolved> NativePaths::resolve(std::u16string_view in
 
 std::u16string NativePaths::library_location(std::u16string_view image_path, std::u16string_view name, bool wide) const
 {
+	// The runtime's components stand where Windows keeps them, in the system directory, whatever folder serves them here.
+	std::string lower;
+	for (const auto character : name)
+		lower.push_back(character >= u'A' && character <= u'Z' ? char(character + 32) : char(character));
+	if (std::find(std::begin(runtime_components), std::end(runtime_components), lower) != std::end(runtime_components))
+		return system_directory(wide) + u"\\" + std::u16string(name);
 	const auto program = full(image_path);
 	auto beside = program.substr(0, program.find_last_of(u'\\') + 1);
 	beside += name;

@@ -43,7 +43,26 @@ const GUID IID_IActiveScriptParse64 = {0xc7ef7658, 0xe1ee, 0x480e, {0x97, 0xea, 
 const GUID IID_IActiveScriptParse32 = {0xbb1a2ae2, 0xa4f9, 0x11cf, {0x8f, 0x20, 0x00, 0x80, 0x5f, 0x2c, 0xd0, 0x64}};
 #endif
 
+/* No Windows Imaging Component: pictures in the formats it decodes are refused rather than converted. */
+HRESULT WINAPI WICConvertBitmapSource(const GUID *format, void *source, void **converted)
+{
+	if (converted)
+		*converted = NULL;
+	return 0x88982f81; /* WINCODEC_ERR_UNSUPPORTEDOPERATION */
+}
+
 int __cdecl wine_dbg_printf(const char *format, ...)
 {
 	return 0;
 }
+
+int __cdecl wine_dbg_log(int class, void *channel, const char *function, const char *format, ...)
+{
+	return 0;
+}
+
+/* Interfaces and a class the XML component names that mingw-w64's uuid library leaves out. */
+const GUID CLSID_HTMLDocument = {0x25336920, 0x03f9, 0x11cf, {0x8f, 0xd0, 0x00, 0xaa, 0x00, 0x68, 0x6f, 0x13}};
+const GUID IID_IDispatchEx = {0xa6ef9860, 0xc720, 0x11d0, {0x93, 0x37, 0x00, 0xa0, 0xc9, 0x0d, 0xca, 0xa9}};
+const GUID IID_IObjectIdentity = {0xca04b7e6, 0x0d21, 0x11d1, {0x8c, 0xc5, 0x00, 0xc0, 0x4f, 0xc2, 0xb0, 0x85}};
+const GUID IID_IPersistHistory = {0x91a565c1, 0xe38f, 0x11d0, {0x94, 0xbf, 0x00, 0xa0, 0xc9, 0x05, 0x5c, 0xbf}};

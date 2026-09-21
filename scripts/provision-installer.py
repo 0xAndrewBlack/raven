@@ -17,16 +17,18 @@ REVISION = "dacf2a6c47fa562799f9c8a41ab6d5c558556558"
 ARCHIVE_SHA256 = "5373bbbb60541cb2a49e0acb53360e1218d4f5d56c31f9187b341b9fc16daa69"
 PREFIXES = ("sdk/include/", "sdk/lib/pseh/", "sdk/tools/hpp/", "sdk/tools/spec2def/", "sdk/lib/3rdparty/zlib/", "sdk/lib/3rdparty/libwine/",
             "dll/win32/cabinet/", "dll/win32/msi/", "dll/win32/sxs/", "dll/win32/ole32/", "dll/win32/coml2/",
-            "base/system/msiexec/", "dll/win32/rpcrt4/")
+            "base/system/msiexec/", "dll/win32/rpcrt4/", "sdk/lib/3rdparty/libxml2/", "sdk/lib/3rdparty/libwin-iconv/", "dll/3rdparty/libxslt/",
+            "dll/win32/msxml3/", "dll/win32/stdole2.tlb/", "base/system/regsvr32/",
+            "dll/win32/atl/", "dll/win32/atl100/", "dll/win32/oleaut32/")
 # Interface headers the installer sources include, generated from the public IDL files with what they import.
 IDLS = ("objidlbase", "commoncontrols", "fusion", "msxml2", "oaidl", "ocidl", "objidl", "unknwn", "wtypes", "propidl", "urlmon", "shobjidl", "servprov", "docobj", "oleidl",
         "exdisp", "activscp", "shldisp", "mshtml", "xmldom", "imnact", "msctf", "shtypes", "oleacc", "comcat", "mscoree", "wincodec", "dispex",
-        "atliface", "winsxs")
+        "atliface", "winsxs", "msxml6", "msxml", "xmldso", "objsafe", "mshtmhst", "mshtmdid", "httprequest", "xmlparser", "asptlb", "perhist", "hlink", "mimeinfo")
 ZLIB = ("adler32.c", "crc32.c", "deflate.c", "inflate.c", "inffast.c", "inftrees.c", "trees.c", "zutil.c")
 # The structured storage of ole32 and its base layer, coml2: compound files, their streams and property sets.
 STORAGE = ("ole32/storage32.c", "ole32/stg_prop.c", "ole32/stg_stream.c", "ole32/filelockbytes.c", "ole32/dictionary.c",
            "coml2/memlockbytes.c", "coml2/stg_prop.c", "coml2/storage32.c")
-COMPONENTS = ("cabinet.dll", "sxs.dll", "rpcrt4.dll", "msi.dll", "raven-storage.dll", "msiexec.exe")
+COMPONENTS = ("cabinet.dll", "sxs.dll", "rpcrt4.dll", "msi.dll", "raven-storage.dll", "msiexec.exe", "libxslt.dll", "msxml3.dll", "regsvr32.exe", "atl100.dll", "oleaut32.dll")
 
 
 def main():
@@ -40,8 +42,8 @@ def main():
     spec_arch = "-a=i386" if x86 else "-a=x86_64"
     entry_point = "_DllMain@12" if x86 else "DllMain"
     link_extra = ["-Wl,--kill-at"] if x86 else []
-    bases = dict(cabinet=0x1e000000, sxs=0x1e200000, rpcrt4=0x1d800000, msi=0x1e400000, storage=0x1ec00000) if x86 else dict(
-        cabinet=0x1e0000000, sxs=0x1e2000000, rpcrt4=0x1d8000000, msi=0x1e4000000, storage=0x1ec000000)
+    bases = dict(cabinet=0x1e000000, sxs=0x1e200000, rpcrt4=0x1d800000, msi=0x1e400000, storage=0x1ec00000, xslt=0x1d400000, msxml=0x1d000000, atl=0x1cc00000, oleaut=0x1c800000) if x86 else dict(
+        cabinet=0x1e0000000, sxs=0x1e2000000, rpcrt4=0x1d8000000, msi=0x1e4000000, storage=0x1ec000000, xslt=0x1d4000000, msxml=0x1d0000000, atl=0x1cc000000, oleaut=0x1c8000000)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, TMPDIR=str(output), TMP=str(output), TEMP=str(output))
@@ -107,7 +109,7 @@ def main():
     run(["clang", "-O1", "-w", source / "sdk/tools/spec2def/spec2def.c", "-o", output / "spec2def"])
     for name in ("winnt", "ntdef", "devioctl"):
         run([output / "hpp", name + ".template.h", generated / "psdk" / (name + ".h")], source / "sdk/include/xdk")
-    widl = ["widl", "-m32" if x86 else "-m64", "-I", source / "sdk/include/psdk", "-I", source / "sdk/include", "-I", generated / "psdk"]
+    widl = ["widl", "-m32" if x86 else "-m64", "-D__REACTOS__", "-I", source / "sdk/include/psdk", "-I", source / "sdk/include", "-I", generated / "psdk"]
     idls = set()
 
     def idl(name):
@@ -272,6 +274,94 @@ def main():
     run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp",
          "-o", output / "msiexec.exe", *msiexec, objects / "msiexec.res.o", objects / "installer_support.o", *debug, "-L" + str(output),
          *[f"-l{library}" for library in ("msi", "user32", "advapi32", "ole32", "comctl32", "msvcrt", "kernel32", "ntdll", "uuid", "gcc")]])
+    # msxml3.dll: the XML document object model installers and their bootstrappers parse their manifests with, on libxml2 and libxslt.
+    xml_root = source / "sdk/lib/3rdparty/libxml2"
+    iconv_root = source / "sdk/lib/3rdparty/libwin-iconv"
+    xml_flags = ["-U__WINESRC__", "-U_WINE", "-D_CRT_DECLARE_NONSTDC_NAMES=1", "-D__MINGW32__", "-D_DLL", "-D__USE_CRTIMP", "-DLIBXML_STATIC", "-D_REENTRANT", "-D_MBCS", "-D_WINDOWS", "-DWIN32", "-DHAVE_CONFIG_H", "-DICONV_CONST=const",
+                 "-I" + str(xml_root / "include"), "-I" + str(xml_root), "-I" + str(iconv_root), "-I" + str(zlib_include)]
+    # The C runtime's mathematics, which mingw's msvcrt import library would bring in as static code of its own.
+    (output / "crtmath.def").write_text("LIBRARY msvcrt.dll\nEXPORTS\n" + "".join(" " + name + "\n" for name in
+                                        ("floor", "ceil", "fabs", "fmod", "log", "log10", "exp", "pow")))
+    run([triple + "-dlltool", "-d", output / "crtmath.def", "-l", output / "libcrtmath.a"])
+    xml = [compile(iconv_root / "win_iconv.c", "iconv_win_iconv", xml_flags, wine_module=False)]
+    xml_sources = sorted(path for path in xml_root.glob("*.c"))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        xml += list(pool.map(lambda path: compile(path, "libxml2_" + path.stem, xml_flags, wine_module=False), xml_sources))
+    xslt_root = source / "dll/3rdparty/libxslt"
+    xslt_flags = [*xml_flags, "-DHAVE_WIN32_THREADS", "-I" + str(xslt_root), "-I" + str(source / "sdk/include/reactos/libs/libxslt"), "-I" + str(source / "sdk/include/reactos/libs")]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        xslt = list(pool.map(lambda path: compile(path, "libxslt_" + path.stem, xslt_flags, wine_module=False), sorted(xslt_root.glob("*.c"))))
+    run([output / "spec2def", spec_arch, "-n=libxslt.dll", "-d=" + str(output / "libxslt.def"), xslt_root / "libxslt.spec"])
+    link("libxslt.dll", bases["xslt"], [*xslt, *xml, *zlib, *debug], output / "libxslt.def", ["-L" + str(output), "-lcrtmath", "-lws2_32", "-lmsvcrt", "-lkernel32", "-lgcc", "-lkernel32", "-lmsvcrt"],
+         output / "liblibxslt.a")
+    msxml_root = source / "dll/win32/msxml3"
+    run(["bison", "-p", "xslpattern_", "-o", generated / "xslpattern.tab.c", "-d", msxml_root / "xslpattern.y"])
+    # The scanner reads the buffer it is given: no standard stream, whose data msvcrt exports and the runtime's C library does not.
+    run(["flex", "--nostdinit", "-o", generated / "xslpattern.yy.c", msxml_root / "xslpattern.l"])
+    for name in ("xmlparser", "msxml3_v1"):
+        run([*widl, "-I", msxml_root, "-h", "-H", generated / (name + ".h"), msxml_root / (name + ".idl")])
+    run([output / "spec2def", spec_arch, "-n=msxml3.dll", "-d=" + str(output / "msxml3.def"), "-s=" + str(generated / "msxml3_stubs.c"), msxml_root / "msxml3.spec"])
+    msxml_flags = ["-D_DLL", "-D_WINE", "-DLIBXML_STATIC", "-DCOM_NO_WINDOWS_H", "-DHAVE_LIBXML2", "-DHAVE_LIBXSLT", "-I" + str(msxml_root), "-I" + str(xml_root / "include"),
+                   "-I" + str(source / "sdk/include/reactos/libs/libxslt"), "-I" + str(source / "sdk/include/reactos/libs"), "-I" + str(xslt_root)]
+    msxml_sources = sorted(msxml_root.glob("*.c")) + [generated / name for name in ("xslpattern.tab.c", "xslpattern.yy.c", "msxml3_stubs.c")]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        msxml = list(pool.map(lambda path: compile(path, "msxml3_" + path.stem.replace(".", "_"), msxml_flags), msxml_sources))
+    msxml.append(compile(source / "sdk/lib/3rdparty/libwine/register.c", "msxml3_register", ["-I" + str(msxml_root)]))
+    msxml.append(compile(source / "sdk/lib/3rdparty/libwine/dll_register.c", "msxml3_dll_register", ["-I" + str(msxml_root)]))
+    # Its registration scripts and type library, which DllRegisterServer writes into the registry; the library imports stdole2's.
+    run([*widl, "-t", "-T", generated / "stdole2.tlb", source / "dll/win32/stdole2.tlb/std_ole_v2.idl"])
+    run([*widl, "-I", msxml_root, "-L", generated, "-t", "-T", generated / "msxml3_v1.tlb", msxml_root / "msxml3_v1.idl"])
+    run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__", "-D__WINESRC__",
+         "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(msxml_root), "-I" + str(generated), "-i", msxml_root / "version.rc", "-o", objects / "msxml3.res.o"])
+    msxml.append(objects / "msxml3.res.o")
+    link("msxml3.dll", bases["msxml"], [*msxml, *xml, *zlib, objects / "installer_support.o", *debug], output / "msxml3.def",
+         ["-Wl,--disable-auto-import", "-L" + str(output), "-llibxslt", "-lcrtmath", *[f"-l{library}" for library in ("urlmon", "ws2_32", "shlwapi", "oleaut32", "ole32", "user32", "msvcrt",
+          "kernel32", "ntdll", "uuid", "gcc", "kernel32", "msvcrt")]])
+    # atl100.dll: the ATL registrar, which reads the registration scripts libraries register their classes with.
+    atl_root, atl100_root = source / "dll/win32/atl", source / "dll/win32/atl100"
+    run([*widl, "-I", atl_root, "-h", "-H", generated / "atl_classes.h", atl_root / "atl_classes.idl"])
+    run([output / "spec2def", spec_arch, "-n=atl100.dll", "-d=" + str(output / "atl100.def"), "-s=" + str(generated / "atl100_stubs.c"), atl100_root / "atl100.spec"])
+    atl_flags = ["-D_ATL_VER=_ATL_VER_100", "-I" + str(atl100_root), "-I" + str(atl_root)]
+    atl = [compile(atl_root / name, "atl100_" + Path(name).stem, atl_flags) for name in ("atl.c", "atl_ax.c", "registrar.c")]
+    atl.append(compile(generated / "atl100_stubs.c", "atl100_stubs"))
+    run([*widl, "-u", "-U", generated / "atliface_i.c", source / "sdk/include/psdk/atliface.idl"])
+    atl.append(compile(generated / "atliface_i.c", "atl100_atliface_i"))
+    link("atl100.dll", bases["atl"], [*atl, objects / "installer_support.o", *debug], output / "atl100.def",
+         [*[f"-l{library}" for library in ("ole32", "oleaut32", "user32", "gdi32", "advapi32", "shlwapi", "msvcrt", "kernel32", "ntdll", "uuid",
+          "gcc", "kernel32", "msvcrt")]])
+    # oleaut32.dll: automation, variants, safe arrays and type libraries, with the proxies of its interfaces.
+    oleaut_root = source / "dll/win32/oleaut32"
+    oleaut_widl = [*widl, "-I", oleaut_root]
+    for name in ("oleaut32_oaidl", "oleaut32_ocidl"):
+        run([*oleaut_widl, "-h", "-H", generated / (name + ".h"), oleaut_root / (name + ".idl")])
+        run([*oleaut_widl, "-p", "-P", generated / (name + "_p.c"), oleaut_root / (name + ".idl")])
+    run([*widl, "--dlldata-only", "--dlldata=" + str(generated / "oleaut32_dlldata.c"), "oleaut32_oaidl", "oleaut32_ocidl"])
+    run([output / "spec2def", spec_arch, "-n=oleaut32.dll", "-d=" + str(output / "oleaut32.def"), "-s=" + str(generated / "oleaut32_stubs.c"),
+         oleaut_root / "oleaut32.spec"])
+    oleaut_flags = ["-D_OLEAUT32_", "-DPROXY_DELEGATION", "-DWINE_REGISTER_DLL", "-DENTRY_PREFIX=OLEAUTPS_", "-DPROXY_CLSID=CLSID_PSFactoryBuffer",
+                    "-I" + str(oleaut_root)]
+    oleaut_sources = [oleaut_root / name for name in ("connpt.c", "dispatch.c", "hash.c", "oleaut.c", "olefont.c", "olepicture.c", "olepropframe.c",
+                      "recinfo.c", "safearray.c", "thunks.c", "typelib.c", "usrmarshal.c", "varformat.c", "variant.c", "vartype.c")] + [
+                      generated / name for name in ("oleaut32_stubs.c", "oleaut32_dlldata.c", "oleaut32_oaidl_p.c", "oleaut32_ocidl_p.c")]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        oleaut = list(pool.map(lambda path: compile(path, "oleaut32_" + path.stem, oleaut_flags), oleaut_sources))
+    oleaut.append(compile(source / "sdk/lib/3rdparty/libwine/register.c", "oleaut32_register", ["-I" + str(oleaut_root)]))
+    oleaut.append(compile(source / "sdk/lib/3rdparty/libwine/dll_canunload.c", "oleaut32_canunload", ["-I" + str(oleaut_root)]))
+    run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__", "-D__WINESRC__",
+         "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(oleaut_root), "-I" + str(generated), "-i", oleaut_root / "oleaut32.rc", "-o", objects / "oleaut32.res.o"])
+    oleaut.append(objects / "oleaut32.res.o")
+    link("oleaut32.dll", bases["oleaut"], [*oleaut, objects / "installer_support.o", *debug], output / "oleaut32.def",
+         ["-L" + str(output), "-lrpcrt4", "-lcrtmath", *[f"-l{library}" for library in ("ole32", "user32", "gdi32", "advapi32", "comctl32", "urlmon",
+          "msvcrt", "kernel32", "ntdll", "uuid", "gcc", "kernel32", "msvcrt")]])
+    # regsvr32.exe: registers the classes a library serves, as installers and the runtime's own prefix setup run it.
+    regsvr32_root = source / "base/system/regsvr32"
+    regsvr32 = [compile(regsvr32_root / "regsvr32.c", "regsvr32_regsvr32", ["-DUNICODE", "-D_UNICODE", "-I" + str(regsvr32_root)], wine_module=False),
+                compile(support / "entry_wide.c", "regsvr32_entry")]
+    run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__",
+         "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(regsvr32_root), "-i", regsvr32_root / "regsvr32.rc", "-o", objects / "regsvr32.res.o"])
+    run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp",
+         "-o", output / "regsvr32.exe", *regsvr32, objects / "regsvr32.res.o", *debug,
+         *[f"-l{library}" for library in ("user32", "shell32", "ole32", "msvcrt", "kernel32", "ntdll", "gcc", "kernel32")]])
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, arch=args.arch, commands=records,
                   component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in COMPONENTS},
                   storage_exports=exported,
