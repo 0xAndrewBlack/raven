@@ -809,6 +809,26 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			call.put_wide(call[6], u"NTFS", call.u32(7));
 		call.ret(1);
 	});
+	registry.add("GetVolumeInformationA", 8, [&context](ApiCall &call) {
+		if (call[0]) {
+			const auto root = context.paths.resolve(widen_ascii(call.narrow(call[0], 260)));
+			if (!root || !root->exists) {
+				call.fail(3);
+				return;
+			}
+		}
+		if (call[1] && call.u32(2))
+			call.put_narrow(call[1], "", call.u32(2));
+		if (call[3])
+			call.store<uint32_t>(call[3], 0x52415645);
+		if (call[4])
+			call.store<uint32_t>(call[4], 255);
+		if (call[5])
+			call.store<uint32_t>(call[5], 0x0000000f);
+		if (call[6] && call.u32(7))
+			call.put_narrow(call[6], "NTFS", call.u32(7));
+		call.ret(1);
+	});
 	// DPI awareness contexts are the pseudo handles -1 to -5; the process is system DPI aware at 96 dots per inch.
 	const auto awareness_of = [](uint64_t context) -> int32_t {
 		switch (int64_t(context)) {
