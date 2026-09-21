@@ -54,5 +54,10 @@ typedef struct _STRING { USHORT Length; USHORT MaximumLength; PCHAR Buffer; } ST
 #define ALIGN_UP_POINTER(pointer, type) ((PVOID)ALIGN_UP(pointer, type))
 #endif
 BOOLEAN NTAPI RtlIsThreadWithinLoaderCallout(VOID);
+/* The string helpers the bridge answers: without these prototypes a 32-bit caller would call them as cdecl and lose the stack the
+   stdcall bridge pops. */
+BOOLEAN NTAPI RtlCreateUnicodeStringFromAsciiz(PUNICODE_STRING destination, PCSZ source);
+VOID NTAPI RtlInitUnicodeString(PUNICODE_STRING destination, PCWSTR source);
+VOID NTAPI RtlFreeUnicodeString(PUNICODE_STRING string);
 #include <user32p.h>
 #include <user_x.h>
