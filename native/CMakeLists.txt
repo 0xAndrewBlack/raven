@@ -65,7 +65,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     if(NOT NONCLIENT_SOURCE_HASH STREQUAL "dab51515f54adc39af43f088a02afe45a719476408bee3c7bef6113c25b180fc")
         message(FATAL_ERROR "Pinned ReactOS nonclient functions differ")
     endif()
-    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/ansi_api.cpp nt/shlwapi_api.cpp nt/registry_api.cpp nt/shell_api.cpp nt/platform_api.cpp nt/hash.cpp nt/version_api.cpp nt/system_api.cpp nt/process_api.cpp nt/actctx.cpp nt/security_api.cpp nt/child_api.cpp nt/child_process.cpp nt/winsock_api.cpp nt/host_api.cpp nt/pipe.cpp nt/job_api.cpp nt/wave_api.cpp nt/mmio_api.cpp nt/inherit.cpp nt/handle_channel.cpp nt/elevation.cpp nt/service_api.cpp nt/crypt32_api.cpp nt/process_info_api.cpp nt/font_service.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp desktop/user_api.cpp desktop/window_manager.cpp desktop/window_ansi.cpp desktop/menu_manager.cpp desktop/shared_pixels.cpp desktop/foreign_surface.cpp desktop/user_ext.cpp desktop/scrollbar.cpp desktop/window_long.cpp desktop/child_frame.cpp desktop/gdi.cpp desktop/gdi_api.cpp desktop/gdi_text.cpp desktop/theme.cpp)
+    add_library(raven_cpu STATIC cpu/native_cpu.cpp nt/environment.cpp nt/system.cpp nt/providers.cpp nt/api.cpp nt/unwind.cpp nt/seh.cpp nt/apiset.cpp nt/system_exports.cpp nt/text.cpp nt/paths.cpp nt/file_api.cpp nt/ansi_api.cpp nt/shlwapi_api.cpp nt/registry_api.cpp nt/shell_api.cpp nt/platform_api.cpp nt/hash.cpp nt/version_api.cpp nt/system_api.cpp nt/process_api.cpp nt/actctx.cpp nt/security_api.cpp nt/child_api.cpp nt/child_process.cpp nt/winsock_api.cpp nt/host_api.cpp nt/pipe.cpp nt/job_api.cpp nt/wave_api.cpp nt/mmio_api.cpp nt/inherit.cpp nt/handle_channel.cpp nt/elevation.cpp nt/service_api.cpp nt/crypt32_api.cpp nt/authenticode.cpp nt/process_info_api.cpp nt/font_service.cpp nt/sync_api.cpp nt/threads.cpp nt/thread_api.cpp nt/text_api.cpp nt/memory_api.cpp nt/guest_allocator.cpp nt/module_api.cpp nt/loader.cpp nt/tls.cpp nt/exceptions.cpp nt/resources.cpp nt/memory.cpp nt/objects.cpp nt/object_api.cpp nt/heap.cpp desktop/objects.cpp desktop/nonclient.cpp desktop/api.cpp desktop/surface.cpp desktop/windows.cpp desktop/system.cpp desktop/user_api.cpp desktop/window_manager.cpp desktop/window_ansi.cpp desktop/menu_manager.cpp desktop/shared_pixels.cpp desktop/foreign_surface.cpp desktop/user_ext.cpp desktop/scrollbar.cpp desktop/window_long.cpp desktop/child_frame.cpp desktop/gdi.cpp desktop/gdi_api.cpp desktop/gdi_text.cpp desktop/theme.cpp)
     target_include_directories(raven_cpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     set(NLS_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-nls)
     file(SHA256 ${NLS_SOURCE}/txt2nls.cpp NLS_TOOL_HASH)
@@ -94,6 +94,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     if(NOT DECOMPOSITION_HASH STREQUAL "dc36d1023c7fcd96043122aae2854b6f67febb7debfe4be8780aadbb5a9ba30b")
         message(FATAL_ERROR "Pinned CP1252 decompositions differ")
     endif()
+    add_executable(authenticode_test nt/authenticode_test.cpp)
+    target_link_libraries(authenticode_test PRIVATE raven_cpu)
     add_executable(launch_test nt/launch_test.cpp)
     target_link_libraries(launch_test PRIVATE raven_cpu)
     add_test(NAME native_launch_arguments_contract COMMAND launch_test)
@@ -1087,6 +1089,22 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_custom_target(geometry_negative_fixture ALL DEPENDS ${GEOMETRY_NEGATIVE})
         add_test(NAME native_geometry_boundary COMMAND raven --run-process --execution=native ${GEOMETRY_NEGATIVE})
         set_tests_properties(native_geometry_boundary PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        # The code signing roots Windows trusts (scripts/provision-roots.py), beside the runtime in roots/: signatures of installers and
+        # their packages are checked against them.
+        set(RAVEN_ROOT_CERTIFICATE_DIRECTORY "" CACHE PATH "Directory holding the root certificates downloaded by scripts/provision-roots.py")
+        if(RAVEN_ROOT_CERTIFICATE_DIRECTORY)
+            file(GLOB root_certificates ${RAVEN_ROOT_CERTIFICATE_DIRECTORY}/*.crt)
+            set(root_copies)
+            foreach(certificate ${root_certificates})
+                get_filename_component(certificate_name ${certificate} NAME)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/roots/${certificate_name}
+                    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/roots
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${certificate} ${CMAKE_CURRENT_BINARY_DIR}/roots/${certificate_name}
+                    DEPENDS ${certificate} VERBATIM)
+                list(APPEND root_copies ${CMAKE_CURRENT_BINARY_DIR}/roots/${certificate_name})
+            endforeach()
+            add_custom_target(root_certificates ALL DEPENDS ${root_copies})
+        endif()
         # The Windows Installer components (scripts/provision-installer.py): msi, cabinet, sxs and structured storage, for each program width.
         set(RAVEN_INSTALLER_COMPONENT_DIR "" CACHE PATH "Directory holding the installer components built by scripts/provision-installer.py")
         set(RAVEN_INSTALLER32_COMPONENT_DIR "" CACHE PATH "Directory holding the 32-bit installer components built by scripts/provision-installer.py --arch x86")
@@ -1792,6 +1810,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 # The Visual C++ 2015-2022 redistributables, downloaded from Microsoft into RAVEN_REDIST_DIRECTORY: installed with their progress
                 # window from a fresh prefix, checked from a program, installed again and removed.
                 set(RAVEN_REDIST_DIRECTORY "" CACHE PATH "Directory holding vc_redist.x64.exe and vc_redist.x86.exe as Microsoft publishes them")
+                # Authenticode on the redistributables as Microsoft signs them, against the roots Windows trusts: each must verify, a changed
+                # copy must not.
+                if(RAVEN_REDIST_DIRECTORY AND RAVEN_ROOT_CERTIFICATE_DIRECTORY AND EXISTS ${RAVEN_REDIST_DIRECTORY}/vc_redist.x64.exe
+                   AND EXISTS ${RAVEN_REDIST_DIRECTORY}/vc2013_x64.exe AND EXISTS ${RAVEN_REDIST_DIRECTORY}/vc2010_x86.exe
+                   AND EXISTS ${RAVEN_REDIST_DIRECTORY}/vc2005_x86.exe)
+                    add_test(NAME native_authenticode COMMAND authenticode_test ${RAVEN_REDIST_DIRECTORY}/vc_redist.x64.exe
+                        ${RAVEN_REDIST_DIRECTORY}/vc2013_x64.exe ${RAVEN_REDIST_DIRECTORY}/vc2010_x86.exe ${RAVEN_REDIST_DIRECTORY}/vc2005_x86.exe)
+                    set_tests_properties(native_authenticode PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "PASS: signatures verified")
+                endif()
                 foreach(redist_arch x64 x86)
                     set(redist_folder system32)
                     if(redist_arch STREQUAL x86)

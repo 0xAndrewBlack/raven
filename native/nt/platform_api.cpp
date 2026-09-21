@@ -17,7 +17,7 @@ namespace raven {
 namespace {
 
 constexpr uint32_t e_fail = 0x80004005U, e_handle = 0x80070006U, e_invalidarg = 0x80070057U, e_notimpl = 0x80004001U, s_ok = 0, s_false = 1;
-constexpr uint32_t class_not_registered = 0x80040154U, class_string = 0x800401f3U, no_signature = 0x800b0100U;
+constexpr uint32_t class_not_registered = 0x80040154U, class_string = 0x800401f3U;
 
 // A CryptoAPI provider or hash handle is a small integer into these tables.
 struct CryptState {
@@ -81,20 +81,12 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("ImmSetOpenStatus", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("ImmGetConversionStatus", 3, [](ApiCall &call) { call.ret(0); });
 
-	// Network and trust services: no signatures are verifiable and no network is reported.
-	registry.add("WinVerifyTrust", 3, [](ApiCall &call) { call.ret(no_signature); });
+	// Network and certificate services: no network is reported, and certificates are found nowhere else than where crypt32 keeps them.
 	registry.add("IsNetworkAlive", 1, [](ApiCall &call) {
 		if (call[0]) call.store<uint32_t>(call[0], 0);
 		call.ret(0);
 	});
 	registry.add("IsDestinationReachableW", 2, [](ApiCall &call) { call.ret(0); });
-	registry.add("CertFindCertificateInStore", 6, [](ApiCall &call) { call.fail(0x80092004U, 0); });
-	registry.add("CertGetCertificateContextProperty", 4, [](ApiCall &call) { call.fail(0x80092004U, 0); });
-	registry.add("CertGetNameStringW", 6, [](ApiCall &call) { call.ret(0); });
-	registry.add("CertNameToStrW", 5, [](ApiCall &call) { call.ret(0); });
-	registry.add("CryptQueryObject", 11, [](ApiCall &call) { call.fail(0x80092009U, 0); });
-	registry.add("CryptMsgGetParam", 5, [](ApiCall &call) { call.fail(0x80091004U, 0); });
-	registry.add("CryptMsgClose", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("ImageNtHeader", 1, [](ApiCall &call) {
 		const auto offset = call.load<uint32_t>(call[0] + 0x3c);
 		call.ret(call[0] + offset);
