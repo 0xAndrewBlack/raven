@@ -368,6 +368,16 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(present);
 	});
 	const auto system_information = [](ApiCall &call) {
+		// A 32-bit program sees the 36-byte layout and its own address range; GetNativeSystemInfo still names the x64 processor.
+		if (call.pointer_width() == 4) {
+			const uint32_t processors = std::max(1U, std::min(32U, std::thread::hardware_concurrency()));
+			const uint32_t mask = processors >= 32 ? ~0U : (1U << processors) - 1;
+			const uint32_t fields[9] = {9, 4096, 0x10000, 0x7ffeffff, mask, processors, 8664, 65536, 6};
+			std::vector<uint8_t> bytes(36);
+			std::memcpy(bytes.data(), fields, sizeof fields);
+			call.write(call[0], bytes);
+			return;
+		}
 		std::vector<uint8_t> bytes(48);
 		const uint16_t architecture = 9;
 		std::memcpy(bytes.data(), &architecture, 2);
