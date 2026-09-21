@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <sys/stat.h>
 
 namespace raven {
@@ -359,6 +360,119 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		call.put_narrow(call[0], path.substr(0, root), root + 1);
 		call.ret(root > 0);
 	});
+	// %XX sequences become the characters they stand for; URL_DONT_UNESCAPE_EXTRA_INFO keeps what follows '?' or '#' as it is, and
+	// URL_UNESCAPE_INPLACE writes over the URL itself.
+	const auto unescape = [](std::u16string url, uint32_t flags) {
+		std::u16string result;
+		const auto digit = [](char16_t c) { return c >= u'0' && c <= u'9' ? c - u'0' : c >= u'a' && c <= u'f' ? c - u'a' + 10 : c >= u'A' && c <= u'F' ? c - u'A' + 10 : -1; };
+		bool rest = false;
+		for (size_t at = 0; at < url.size(); ++at) {
+			if ((flags & 0x02000000U) && (url[at] == u'?' || url[at] == u'#'))
+				rest = true;
+			if (!rest && url[at] == u'%' && at + 2 < url.size() + 0 && digit(url[at + 1]) >= 0 && digit(url[at + 2]) >= 0) {
+				result.push_back(char16_t(digit(url[at + 1]) * 16 + digit(url[at + 2])));
+				at += 2;
+			} else {
+				result.push_back(url[at]);
+			}
+		}
+		return result;
+	};
+	const auto url_unescape = [unescape](ApiCall &call, bool wide) {
+		const auto url = wide ? call.wide(call[0]) : widen_ascii(call.narrow(call[0]));
+		const auto result = unescape(url, call.u32(3));
+		const auto store = [&](uint64_t address, size_t capacity) {
+			if (wide)
+				call.put_wide(address, result, capacity);
+			else
+				call.put_narrow(address, std::string(result.begin(), result.end()), capacity);
+		};
+		if (call.u32(3) & 0x00100000U) {
+			store(call[0], result.size() + 1);
+			call.ret(0);
+			return;
+		}
+		if (!call[1] || !call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const uint32_t capacity = call.load<uint32_t>(call[2]);
+		if (capacity <= result.size()) {
+			call.store<uint32_t>(call[2], uint32_t(result.size() + 1));
+			call.ret(0x80004003U);
+			return;
+		}
+		store(call[1], capacity);
+		call.store<uint32_t>(call[2], uint32_t(result.size()));
+		call.ret(0);
+	};
+	// A bare name is looked for as SearchPath finds programs; anything else becomes a full path. Both write at most the given length.
+	registry.add("PathSearchAndQualifyW", 3, [&registry](ApiCall &call) {
+		const auto path = call.wide(call[0]);
+		if (path.find_first_of(u"\\/:") == std::u16string::npos)
+			if (const auto search = registry.find("SearchPathW")) {
+				ApiCall inner(call.process, call.environment, {0, call[0], 0, call[2], call[1], 0});
+				search->second(inner);
+				if (inner.result && inner.result < call.u32(2)) {
+					call.ret(1);
+					return;
+				}
+			}
+		const auto full = registry.find("GetFullPathNameW");
+		ApiCall inner(call.process, call.environment, {call[0], call[2], call[1], 0});
+		full->second(inner);
+		call.ret(inner.result && inner.result < call.u32(2));
+	});
+	// A scheme for text that has none: a Windows path becomes a file URL (URL_APPLY_GUESSFILE), "www." and "ftp." names get their scheme
+	// (URL_APPLY_GUESSSCHEME), anything else http (URL_APPLY_DEFAULT). Text that has a scheme already is left as it is (S_FALSE).
+	const auto apply_scheme = [](std::u16string text, uint32_t flags) -> std::optional<std::u16string> {
+		if (scheme_length(text) && !(flags & 8))
+			return std::nullopt;
+		const bool drive = text.size() >= 2 && text[1] == u':' && ((text[0] >= u'a' && text[0] <= u'z') || (text[0] >= u'A' && text[0] <= u'Z'));
+		if ((flags & 4) && (drive || (text.size() >= 2 && separator(text[0]) && separator(text[1])))) {
+			std::u16string url = drive ? u"file:///" : u"file:";
+			for (const auto character : text)
+				url.push_back(character == u'\\' ? u'/' : character);
+			return url;
+		}
+		if (flags & 2) {
+			std::u16string lower(text.substr(0, 4));
+			for (auto &character : lower)
+				if (character >= u'A' && character <= u'Z')
+					character = char16_t(character + 32);
+			if (lower == u"www.")
+				return u"http://" + text;
+			if (lower == u"ftp.")
+				return u"ftp://" + text;
+		}
+		if (flags & 1)
+			return u"http://" + text;
+		return std::nullopt;
+	};
+	const auto url_apply_scheme = [apply_scheme](ApiCall &call, bool wide) {
+		const auto text = wide ? call.wide(call[0]) : widen_ascii(call.narrow(call[0]));
+		const auto result = apply_scheme(text, call.u32(3));
+		if (!result) {
+			call.ret(1);
+			return;
+		}
+		const uint32_t capacity = call.load<uint32_t>(call[2]);
+		if (capacity <= result->size()) {
+			call.store<uint32_t>(call[2], uint32_t(result->size() + 1));
+			call.ret(0x80004003U);
+			return;
+		}
+		if (wide)
+			call.put_wide(call[1], *result, capacity);
+		else
+			call.put_narrow(call[1], std::string(result->begin(), result->end()), capacity);
+		call.store<uint32_t>(call[2], uint32_t(result->size()));
+		call.ret(0);
+	};
+	registry.add("UrlApplySchemeW", 4, [url_apply_scheme](ApiCall &call) { url_apply_scheme(call, true); });
+	registry.add("UrlApplySchemeA", 4, [url_apply_scheme](ApiCall &call) { url_apply_scheme(call, false); });
+	registry.add("UrlUnescapeW", 4, [url_unescape](ApiCall &call) { url_unescape(call, true); });
+	registry.add("UrlUnescapeA", 4, [url_unescape](ApiCall &call) { url_unescape(call, false); });
 	registry.add("UrlIsW", 2, [](ApiCall &call) { call.ret(call[0] && url_is(call.wide(call[0]), call.u32(1))); });
 	registry.add("UrlIsA", 2, [](ApiCall &call) { call.ret(call[0] && url_is(widen_ascii(call.narrow(call[0])), call.u32(1))); });
 	registry.add("PathIsURLW", 1, [](ApiCall &call) { call.ret(call[0] && url_is(call.wide(call[0]), 0)); });
@@ -584,6 +698,25 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(copy, text, text.size() + 1);
 		call.ret(copy);
 	});
+	// The wide copy of a string in memory from the task allocator, which the caller frees with CoTaskMemFree.
+	for (const bool wide : {false, true})
+		registry.add(wide ? "SHStrDupW" : "SHStrDupA", 2, [&context, wide](ApiCall &call) {
+			if (!call[0] || !call[1]) {
+				if (call[1])
+					call.store_pointer(call[1], 0);
+				call.ret(0x80070057U);
+				return;
+			}
+			const auto text = wide ? call.wide(call[0]) : widen_ascii(call.narrow(call[0]));
+			const auto copy = context.allocator.allocate((text.size() + 1) * 2, false);
+			call.store_pointer(call[1], copy);
+			if (!copy) {
+				call.ret(0x8007000eU);
+				return;
+			}
+			call.put_wide(copy, text, text.size() + 1);
+			call.ret(0);
+		});
 	registry.add("StrFormatByteSizeW", 3, [](ApiCall &call) {
 		const uint64_t value = call[0];
 		static constexpr const char *units[] = {" bytes", " KB", " MB", " GB", " TB", " PB", " EB"};
