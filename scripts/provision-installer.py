@@ -16,7 +16,8 @@ import urllib.request
 REVISION = "dacf2a6c47fa562799f9c8a41ab6d5c558556558"
 ARCHIVE_SHA256 = "5373bbbb60541cb2a49e0acb53360e1218d4f5d56c31f9187b341b9fc16daa69"
 PREFIXES = ("sdk/include/", "sdk/lib/pseh/", "sdk/tools/hpp/", "sdk/tools/spec2def/", "sdk/lib/3rdparty/zlib/", "sdk/lib/3rdparty/libwine/",
-            "dll/win32/cabinet/", "dll/win32/msi/", "dll/win32/sxs/", "dll/win32/ole32/", "dll/win32/coml2/")
+            "dll/win32/cabinet/", "dll/win32/msi/", "dll/win32/sxs/", "dll/win32/ole32/", "dll/win32/coml2/",
+            "base/system/msiexec/")
 # Interface headers the installer sources include, generated from the public IDL files with what they import.
 IDLS = ("objidlbase", "commoncontrols", "fusion", "msxml2", "oaidl", "ocidl", "objidl", "unknwn", "wtypes", "propidl", "urlmon", "shobjidl", "servprov", "docobj", "oleidl",
         "exdisp", "activscp", "shldisp", "mshtml", "xmldom", "imnact", "msctf", "shtypes", "oleacc", "comcat", "mscoree", "wincodec", "dispex",
@@ -25,7 +26,7 @@ ZLIB = ("adler32.c", "crc32.c", "deflate.c", "inflate.c", "inffast.c", "inftrees
 # The structured storage of ole32 and its base layer, coml2: compound files, their streams and property sets.
 STORAGE = ("ole32/storage32.c", "ole32/stg_prop.c", "ole32/stg_stream.c", "ole32/filelockbytes.c", "ole32/dictionary.c",
            "coml2/memlockbytes.c", "coml2/stg_prop.c", "coml2/storage32.c")
-COMPONENTS = ("cabinet.dll", "sxs.dll", "msi.dll", "raven-storage.dll")
+COMPONENTS = ("cabinet.dll", "sxs.dll", "msi.dll", "raven-storage.dll", "msiexec.exe")
 
 
 def main():
@@ -243,6 +244,16 @@ def main():
         " " + name + ("@" + str(defined[name]) if x86 and defined[name] is not None else "") + "\n" for name in exported))
     link("raven-storage.dll", bases["storage"], [*storage, *debug], output / "raven-storage.def",
          ["-lole32", "-loleaut32", "-ladvapi32", "-luser32", "-lmsvcrt", "-lkernel32", "-lntdll", "-luuid", "-lgcc"])
+    # msiexec.exe: the command line of the installer, which installers and the shell start for packages.
+    msiexec_root = source / "base/system/msiexec"
+    msiexec = [compile(msiexec_root / name, "msiexec_" + Path(name).stem, ["-I" + str(msiexec_root)], wine_module=False)
+               for name in ("msiexec.c", "service.c")]
+    msiexec.append(compile(support / "entry.c", "msiexec_entry"))
+    run([triple + "-windres", "--preprocessor=" + str(wrapper), "-O", "coff", "-DLANGUAGE_EN_US", "-D__REACTOS__",
+         "-D_M_IX86" if x86 else "-D_M_AMD64", "-I" + str(msiexec_root), "-i", msiexec_root / "rsrc.rc", "-o", objects / "msiexec.res.o"])
+    run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp",
+         "-o", output / "msiexec.exe", *msiexec, objects / "msiexec.res.o", objects / "installer_support.o", *debug, "-L" + str(output),
+         *[f"-l{library}" for library in ("msi", "user32", "advapi32", "ole32", "comctl32", "msvcrt", "kernel32", "ntdll", "uuid", "gcc")]])
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, arch=args.arch, commands=records,
                   component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in COMPONENTS},
                   storage_exports=exported,

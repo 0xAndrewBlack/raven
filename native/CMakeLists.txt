@@ -1110,7 +1110,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             if(NOT installer_dir)
                 continue()
             endif()
-            foreach(component msi.dll cabinet.dll sxs.dll raven-storage.dll)
+            foreach(component msi.dll cabinet.dll sxs.dll raven-storage.dll msiexec.exe)
                 if(NOT EXISTS "${installer_dir}/${component}")
                     message(FATAL_ERROR "Configured installer component does not exist: ${installer_dir}/${component}")
                 endif()
@@ -1121,17 +1121,20 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             # A package made by wixl, read back as a database: tables, SQL views and the summary information stream; then installed.
             if(RAVEN_WIXL AND installer_compiler)
                 set(fixture ${MSI_FIXTURES}/${installer_arch})
-                add_custom_command(OUTPUT ${fixture}/basic.msi ${fixture}/msi-database.exe ${fixture}/msi-install.exe
+                add_custom_command(OUTPUT ${fixture}/basic.msi ${fixture}/msi-database.exe ${fixture}/msi-install.exe ${fixture}/msiexec-client.exe
                     COMMAND ${CMAKE_COMMAND} -E make_directory ${fixture}
                     COMMAND ${RAVEN_WIXL} -a ${installer_arch} -o ${fixture}/basic.msi msi_basic.wxs
                     COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
                         -o ${fixture}/msi-database.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_database_client.c -lmsi -lkernel32
                     COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
                         -o ${fixture}/msi-install.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_install_client.c -lmsi -ladvapi32 -lkernel32
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/msiexec-client.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/msiexec_client.c -lmsi -lkernel32
                     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/testdata/native_loader
                     DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_basic.wxs ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_payload.txt ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_database_client.c
-                        ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_install_client.c VERBATIM)
-                add_custom_target(msi_database_fixture_${installer_arch} ALL DEPENDS ${fixture}/basic.msi ${fixture}/msi-database.exe ${fixture}/msi-install.exe)
+                        ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_install_client.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/msiexec_client.c VERBATIM)
+                add_custom_target(msi_database_fixture_${installer_arch} ALL DEPENDS ${fixture}/basic.msi ${fixture}/msi-database.exe ${fixture}/msi-install.exe
+                    ${fixture}/msiexec-client.exe)
                 add_test(NAME native_msi_database_${installer_arch} COMMAND raven --run-process --execution=native ${fixture}/msi-database.exe)
                 set_tests_properties(native_msi_database_${installer_arch} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                     ENVIRONMENT RAVEN_PREFIX=${fixture}/prefix)
@@ -1139,6 +1142,10 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 add_test(NAME native_msi_install_${installer_arch} COMMAND raven --run-process --execution=native ${fixture}/msi-install.exe)
                 set_tests_properties(native_msi_install_${installer_arch} PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                     ENVIRONMENT RAVEN_PREFIX=${fixture}/install-prefix)
+                # msiexec found by name in the system directory, installing and removing the package from the command line.
+                add_test(NAME native_msiexec_${installer_arch} COMMAND raven --run-process --execution=native ${fixture}/msiexec-client.exe)
+                set_tests_properties(native_msiexec_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${fixture}/msiexec-prefix)
             endif()
         endforeach()
         set(RAVEN_CONTROLS_COMPONENT_DIR "" CACHE PATH "Directory holding the common controls component built by scripts/provision-controls.py")

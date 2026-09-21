@@ -205,6 +205,22 @@ int main(int argc, char **argv)
 				if (run_process) {
 					const auto directory = std::filesystem::absolute(argv[first_file]).parent_path();
 					const raven::NativePrefix prefix=raven::NativePrefix::from_environment();
+					// The system's own programs the runtime ships, in the system directory of each width as Windows has them; a copy that is
+					// missing or differs from the runtime's is put back.
+					{
+						const auto runtime = std::filesystem::read_symlink("/proc/self/exe").parent_path();
+						for (const auto &[from, folder] : {std::pair{runtime, "system32"}, std::pair{runtime / "x86", "syswow64"}})
+							for (const char *program : {"msiexec.exe"}) {
+								std::error_code error;
+								const auto source_file = from / program, target = prefix.root() / "drive_c" / "windows" / folder / program;
+								if (!std::filesystem::exists(source_file, error))
+									continue;
+								if (std::filesystem::exists(target, error) && std::filesystem::file_size(target, error) == std::filesystem::file_size(source_file, error) &&
+									std::filesystem::last_write_time(target, error) >= std::filesystem::last_write_time(source_file, error))
+									continue;
+								std::filesystem::copy_file(source_file, target, std::filesystem::copy_options::overwrite_existing, error);
+							}
+					}
 					// The libraries installed for every program, in the system directory of the program's width.
 					const auto system_directory = prefix.root() / "drive_c" / "windows" / (entry->image.is_64 ? "system32" : "syswow64");
 					const auto find_file = [](const std::filesystem::path &folder, std::string_view name) {
