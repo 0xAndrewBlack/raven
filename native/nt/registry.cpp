@@ -179,6 +179,16 @@ void NativeRegistry::seed()
 		number(system.c_str(), u"CurrentMajorVersionNumber", 10);
 		number(system.c_str(), u"CurrentMinorVersionNumber", 0);
 		number(system.c_str(), u"UBR", 2364);
+		// DirectX 9.0c, which Windows 10 reports as its DirectX version and the DirectX redistributable checks before it installs.
+		const auto directx = root + u"\\Microsoft\\DirectX";
+		text(directx.c_str(), u"Version", u"4.09.00.0904");
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		if (!create(0x80000002ULL, directx, key, disposition)) {
+			const uint8_t installed[8] = {0, 0, 0, 9, 0, 0, 0, 0};
+			set(key, u"InstalledVersion", 3, installed);
+			close(key);
+		}
 	}
 	// The services every Windows installation has: the Windows Installer, started on demand, which installers stop and start.
 	{
