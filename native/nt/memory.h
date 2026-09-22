@@ -45,6 +45,8 @@ public:
 	static constexpr size_t commit_windows = 0xa00, commit_window_count = 48, commit_log = 0xd10, commit_log_count = 32;
 	// The served block the guest shares with the runtime; read-write commits that fall in pages already open are then done by the guest.
 	void set_commit_block(uint64_t *block) { commit_block = block; }
+	// Zeroes committed memory, as a block given out again must read when it was asked for zeroed.
+	void clear(uint64_t address, uint64_t size);
 
 private:
 	// The access of every page of a region as runs of equal pages, so a reservation of terabytes costs a few entries.

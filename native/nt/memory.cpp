@@ -40,6 +40,11 @@ static bool range(uint64_t address, uint64_t size, uint64_t user_limit)
 	return size && address<user_limit && size<=user_limit-address;
 }
 
+void NativeMemory::clear(uint64_t address, uint64_t size)
+{
+	process.write_memory(address, std::vector<uint8_t>(size));
+}
+
 NativeMemory::NativeMemory(NativeProcess &process, NativeEnvironment &environment, size_t limit)
 	: process(process), environment(environment), limit(limit)
 {
