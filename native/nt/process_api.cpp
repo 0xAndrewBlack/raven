@@ -273,9 +273,17 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("SetProcessMitigationPolicy", 3, [](ApiCall &call) { call.ret(1); });
-	// There is no debugger to receive these messages, so they go nowhere, as on Windows without one.
-	registry.add("OutputDebugStringA", 1, [](ApiCall &) {});
-	registry.add("OutputDebugStringW", 1, [](ApiCall &) {});
+	// There is no debugger to receive these messages, so they go nowhere, as on Windows without one; RAVEN_TRACE_DEBUG plays the debugger
+	// and prints them.
+	static const bool debugger = std::getenv("RAVEN_TRACE_DEBUG") != nullptr;
+	registry.add("OutputDebugStringA", 1, [](ApiCall &call) {
+		if (debugger && call[0])
+			std::fprintf(stderr, "debug: %s", call.narrow(call[0]).c_str());
+	});
+	registry.add("OutputDebugStringW", 1, [](ApiCall &call) {
+		if (debugger && call[0])
+			std::fprintf(stderr, "debug: %s", to_utf8(call.wide(call[0])).c_str());
+	});
 	// Only the inherit flag is kept: HANDLE_FLAG_INHERIT decides which handles a child created with handle inheritance receives.
 	registry.add("SetHandleInformation", 3, [&context](ApiCall &call) {
 		if (call[0] == UINT64_MAX || call[0] == UINT64_MAX - 1) {

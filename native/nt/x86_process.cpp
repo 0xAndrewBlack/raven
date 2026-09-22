@@ -262,7 +262,8 @@ bool kernel_string_api(NativeProcess &process, NativeEnvironment &environment, c
 		process.return_api(0);
 		return true;
 	}
-	if (name == "OutputDebugStringA") {
+	// The shared handler prints the message when the runtime plays the debugger.
+	if (name == "OutputDebugStringA" && !std::getenv("RAVEN_TRACE_DEBUG")) {
 		process.api_arguments(1);
 		process.return_api(0);
 		return true;

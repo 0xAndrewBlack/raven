@@ -193,8 +193,12 @@ bool ApiRegistry::dispatch(NativeProcess &process, NativeEnvironment &environmen
 		found->second.handler(call);
 	} catch (const ApiFault &) {
 		static const bool traced = std::getenv("RAVEN_TRACE_FAIL") != nullptr;
-		if (traced)
-			std::fprintf(stderr, "raven: %s read memory the guest does not own\n", found->first.c_str());
+		if (traced) {
+			std::fprintf(stderr, "raven: %s read memory the guest does not own, arguments", found->first.c_str());
+			for (size_t index = 0; index < found->second.arguments; ++index)
+				std::fprintf(stderr, " %llx", (unsigned long long)call[index]);
+			std::fprintf(stderr, "\n");
+		}
 		call.fail(998);
 	}
 	process.return_api(call.result);
