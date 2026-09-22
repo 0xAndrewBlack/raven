@@ -62,6 +62,11 @@ CRT void *__iob_func(void)
 	return streams;
 }
 
+CRT void *__p__iob(void) { return __iob_func(); }
+/* The environment the startup code hands main, and the multibyte width, as the pointers msvcrt's accessors return. */
+CRT char ***__p___initenv(void) { return __p__environ(); }
+CRT int *__p___mb_cur_max(void) { return &raven_mb_cur_max; }
+
 /* A runtime error the startup code reports: the program ends with the code msvcrt gives it. */
 CRT void _amsg_exit(int code) { _exit(255); }
 

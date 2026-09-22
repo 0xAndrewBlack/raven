@@ -182,6 +182,18 @@ CRT int swprintf(wchar_t *buffer, const wchar_t *text, ...)
 	return result;
 }
 
+CRT int vfwprintf(void *stream, const wchar_t *text, va_list arguments) { return __stdio_common_vfwprintf(0, stream, text, NULL, arguments); }
+
+CRT int fwprintf(void *stream, const wchar_t *text, ...)
+{
+	va_list arguments;
+	int result;
+	va_start(arguments, text);
+	result = vfwprintf(stream, text, arguments);
+	va_end(arguments);
+	return result;
+}
+
 CRT int wprintf(const wchar_t *text, ...)
 {
 	va_list arguments;

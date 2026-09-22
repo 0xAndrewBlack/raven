@@ -653,6 +653,18 @@ CRT size_t mbrtowc(wchar_t *wide, const char *bytes, size_t count, void *state)
 	return bytes[0] ? 1 : 0;
 }
 CRT size_t mbrlen(const char *bytes, size_t count, void *state) { return mbrtowc(NULL, bytes, count, state); }
+/* The older form: the bytes the character takes, zero for the terminator, -1 when they are not a character. */
+CRT int mbtowc(wchar_t *wide, const char *bytes, size_t count)
+{
+	if (!bytes)
+		return 0;
+	const size_t taken = mbrtowc(wide, bytes, count, NULL);
+	return taken == (size_t)-1 || taken == (size_t)-2 ? -1 : (int)taken;
+}
+
+/* The bytes a multibyte character can take in the "C" locale, as a variable older programs read directly. */
+int raven_mb_cur_max = 1;
+__asm__(".section .drectve\n\t.ascii \" -export:__mb_cur_max=raven_mb_cur_max,DATA\"\n\t.text");
 CRT size_t mbsrtowcs(wchar_t *to, const char **from, size_t count, void *state)
 {
 	size_t done = 0;

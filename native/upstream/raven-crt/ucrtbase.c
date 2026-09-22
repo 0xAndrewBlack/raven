@@ -409,6 +409,23 @@ double raven_wcstod(const wchar_t *text, wchar_t **end)
 
 CRT int _wtoi(const wchar_t *text) { return (int)wcstol(text, NULL, 10); }
 
+CRT long long _wcstoi64(const wchar_t *text, wchar_t **end, int base)
+{
+	char narrow[64];
+	size_t index = 0;
+	char *narrow_end;
+	long long value;
+	while (text[index] && text[index] < 128 && index < 63)
+		narrow[index] = (char)text[index], ++index;
+	narrow[index] = 0;
+	value = _strtoi64(narrow, &narrow_end, base);
+	if (end)
+		*end = (wchar_t *)text + (narrow_end - narrow);
+	return value;
+}
+
+CRT long long _wtoi64(const wchar_t *text) { return _wcstoi64(text, NULL, 10); }
+
 /* ---- heap ---- */
 CRT void *malloc(size_t size) { return HeapAlloc(GetProcessHeap(), 0, size ? size : 1); }
 CRT void *calloc(size_t count, size_t size) { return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, count * size ? count * size : 1); }
