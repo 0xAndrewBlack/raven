@@ -774,7 +774,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		// Unless the caller asks for the count to stay as it is, the handle is a reference that FreeLibrary gives back.
 		if (!(flags & 2) && context.reference_module)
 			context.reference_module(handle, flags & 1);
-		if (call[2]) call.store<uint64_t>(call[2], handle);
+		// The handle is a pointer of the program's width: a 32-bit program keeps four bytes there.
+		if (call[2]) call.store_pointer(call[2], handle);
 		call.ret(1);
 	});
 
