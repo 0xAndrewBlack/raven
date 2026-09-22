@@ -11,6 +11,8 @@ namespace raven {
 namespace {
 
 constexpr size_t max_path = 260;
+// The text the searching functions look through may be a whole document: it is read to its end, however long.
+constexpr size_t whole_text = size_t(1) << 30;
 
 bool separator(char16_t character)
 {
@@ -624,12 +626,12 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(uint32_t(compare_fold(call.wide(call[0]).substr(0, count), call.wide(call[1]).substr(0, count))));
 	});
 	registry.add("StrStrW", 2, [](ApiCall &call) {
-		const auto text = call.wide(call[0]), needle = call.wide(call[1]);
+		const auto text = call.wide(call[0], whole_text), needle = call.wide(call[1]);
 		const auto found = text.find(needle);
 		call.ret(found == text.npos ? 0 : call[0] + found * 2);
 	});
 	registry.add("StrStrIW", 2, [](ApiCall &call) {
-		const auto text = call.wide(call[0]), needle = call.wide(call[1]);
+		const auto text = call.wide(call[0], whole_text), needle = call.wide(call[1]);
 		for (size_t at = 0; at + needle.size() <= text.size(); ++at)
 			if (equal_fold(std::u16string_view(text).substr(at, needle.size()), needle)) {
 				call.ret(call[0] + at * 2);
@@ -638,18 +640,23 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(0);
 	});
 	registry.add("StrChrW", 2, [](ApiCall &call) {
-		const auto text = call.wide(call[0]);
+		const auto text = call.wide(call[0], whole_text);
 		const auto found = text.find(char16_t(call[1]));
 		call.ret(found == text.npos ? 0 : call[0] + found * 2);
 	});
 	// The first character of the string that is one of the set's.
 	registry.add("StrPBrkW", 2, [](ApiCall &call) {
-		const auto text = call.wide(call[0]), set = call.wide(call[1]);
+		// Without a string or a set there is nothing to find.
+		if (!call[0] || !call[1]) {
+			call.ret(0);
+			return;
+		}
+		const auto text = call.wide(call[0], whole_text), set = call.wide(call[1]);
 		const auto found = text.find_first_of(set);
 		call.ret(found == text.npos || set.empty() ? 0 : call[0] + found * 2);
 	});
 	registry.add("StrRChrW", 3, [](ApiCall &call) {
-		const auto text = call.wide(call[0]);
+		const auto text = call.wide(call[0], whole_text);
 		const auto end = call[1] ? std::min<size_t>((call[1] - call[0]) / 2, text.size()) : text.size();
 		const auto found = text.substr(0, end).rfind(char16_t(call[2]));
 		call.ret(found == text.npos ? 0 : call[0] + found * 2);

@@ -273,9 +273,16 @@ bool kernel_string_api(NativeProcess &process, NativeEnvironment &environment, c
 		const uint64_t source = args[copy ? 1 : 0];
 		size_t length = 0;
 		try {
-			while (process.read_memory(source + length * 2, 2) != std::vector<uint8_t>{0, 0}) {
-				if (++length > 1024 * 1024)
-					throw std::runtime_error("native string exceeds policy limit");
+			// The characters up to the terminator, read a page at a time: text that runs into unreadable memory fails as Windows' guarded
+			// copy does.
+			for (bool ended = false; !ended;) {
+				const uint64_t at = source + length * 2;
+				const auto block = process.read_memory(at, std::max<uint64_t>(2, (4096 - (at & 4095)) & ~uint64_t(1)));
+				for (size_t index = 0; index + 1 < block.size(); index += 2, ++length)
+					if (!block[index] && !block[index + 1]) {
+						ended = true;
+						break;
+					}
 			}
 			if (copy)
 				process.write_memory(args[0], process.read_memory(source, length * 2 + 2));
