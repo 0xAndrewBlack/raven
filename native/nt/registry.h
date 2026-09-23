@@ -16,7 +16,8 @@ class NativeRegistry {
 public:
 	// A registry that never touches the host file system.
 	NativeRegistry() = default;
-	// Loads the hive file when present and rewrites it atomically after every change.
+	// Loads the hive file when present. Each change is appended to it as a record, which every process of the prefix reads after what it
+	// read before; the file is written again whole, atomically, once the records outgrow the hive they change.
 	explicit NativeRegistry(std::filesystem::path file);
 	uint32_t create(uint64_t parent, std::u16string_view path, uint64_t &key, uint32_t &disposition);
 	uint32_t open(uint64_t parent, std::u16string_view path, uint64_t &key);
@@ -70,6 +71,12 @@ private:
 	std::vector<std::u16string> children(const std::u16string &folded) const;
 	void save() const;
 	void load();
+	// The hive file's records from `from` on: each applies to the keys in the order the file holds them. The size read is returned.
+	long long replay(long long from);
+	void apply(const std::string &record);
+	// Appends the records of one change under the prefix's lock, after reading what other processes appended first.
+	void journal(const std::string &records);
+	mutable long long loaded = 0, compacted = 0;
 	// The values Windows ships in its hive that programs read to learn where they are and what they run on; added when a hive lacks them.
 	void seed();
 	void register_runtime_classes();

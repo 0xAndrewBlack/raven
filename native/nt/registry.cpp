@@ -1,5 +1,7 @@
 #include "registry.h"
 
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "nls.h"
@@ -320,12 +322,14 @@ uint32_t NativeRegistry::create(uint64_t parent, std::u16string_view path, uint6
 		return 8;
 	disposition = 2;
 	// Every ancestor exists once a key does, so enumeration of parents stays consistent.
+	std::string records;
 	size_t end = 0;
 	while (end != folded.npos) {
 		end = folded.find(u'\\', end + 1);
 		const auto partial = folded.substr(0, end);
 		if (!keys.contains(partial)) {
 			keys.emplace(partial, Key{display.substr(0, end), {}});
+			records += "K\t" + escape(display.substr(0, end)) + '\n';
 			if (partial == folded)
 				disposition = 1;
 		}
@@ -334,7 +338,8 @@ uint32_t NativeRegistry::create(uint64_t parent, std::u16string_view path, uint6
 	if (!key)
 		return 8;
 	open_keys.emplace(key, folded);
-	save();
+	if (!records.empty())
+		journal(records);
 	return 0;
 }
 
@@ -387,8 +392,10 @@ uint32_t NativeRegistry::set(uint64_t key, std::u16string_view name, uint32_t ty
 		return key_deleted;
 	if (data.size() > 1024 * 1024)
 		return 234;
-	keys.at(found->second).values[fold(name)] = Value{std::u16string(name), type, std::vector<uint8_t>(data.begin(), data.end())};
-	save();
+	auto &target = keys.at(found->second);
+	target.values[fold(name)] = Value{std::u16string(name), type, std::vector<uint8_t>(data.begin(), data.end())};
+	journal("V\t" + escape(target.path) + '\t' + escape(std::u16string(name)) + '\t' + std::to_string(type) + '\t' +
+		hex(std::vector<uint8_t>(data.begin(), data.end())) + '\n');
 	return 0;
 }
 
@@ -415,11 +422,12 @@ uint32_t NativeRegistry::remove_key(uint64_t parent, std::u16string_view path)
 	// A key with subkeys cannot be deleted; its values go with it.
 	if (!children(folded).empty())
 		return 5;
+	const auto shown = keys.at(folded).path;
 	keys.erase(folded);
 	for (auto &[handle, target] : open_keys)
 		if (target == folded)
 			target.clear();
-	save();
+	journal("X\t" + escape(shown) + "\t1\n");
 	return 0;
 }
 
@@ -433,6 +441,7 @@ uint32_t NativeRegistry::remove_tree(uint64_t parent, std::u16string_view path)
 	if (found == keys.end())
 		return file_not_found;
 	const auto prefix = folded + u'\\';
+	const auto shown = found->second.path;
 	keys.erase(keys.lower_bound(prefix), std::find_if(keys.lower_bound(prefix), keys.end(), [&](const auto &item) { return !item.first.starts_with(prefix); }));
 	if (path.empty())
 		keys[folded].values.clear();
@@ -441,7 +450,7 @@ uint32_t NativeRegistry::remove_tree(uint64_t parent, std::u16string_view path)
 	for (auto &[handle, target] : open_keys)
 		if ((target == folded && !path.empty()) || target.starts_with(prefix))
 			target.clear();
-	save();
+	journal("X\t" + escape(shown) + (path.empty() ? "\t0\n" : "\t1\n"));
 	return 0;
 }
 
@@ -456,7 +465,7 @@ uint32_t NativeRegistry::remove_value(uint64_t key, std::u16string_view name)
 		return key_deleted;
 	if (!entry->second.values.erase(fold(name)))
 		return file_not_found;
-	save();
+	journal("Y\t" + escape(entry->second.path) + '\t' + escape(std::u16string(name)) + '\n');
 	return 0;
 }
 
@@ -547,8 +556,13 @@ void NativeRegistry::refresh() const
 	if (now == stamp)
 		return;
 	auto &self = const_cast<NativeRegistry &>(*this);
-	self.keys.clear();
-	self.load();
+	// Records appended to the same file are read from where reading stopped; a file written again whole is read from its start.
+	if (now.inode == stamp.inode && now.size >= loaded && loaded > 0)
+		self.replay(loaded);
+	else {
+		self.keys.clear();
+		self.load();
+	}
 	stamp = now;
 }
 
@@ -573,33 +587,106 @@ void NativeRegistry::save() const
 	}
 	std::filesystem::rename(temporary, file);
 	stamp = current_stamp();
+	loaded = compacted = stamp.size;
+}
+
+void NativeRegistry::journal(const std::string &records)
+{
+	if (file.empty() || seeding)
+		return;
+	// A process that compacts the hive renames a new file over it, so the file locked must still be the one the path names.
+	int descriptor = -1;
+	struct stat opened{};
+	for (;;) {
+		descriptor = ::open(file.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+		if (descriptor < 0)
+			throw std::runtime_error("cannot write the registry hive");
+		::flock(descriptor, LOCK_EX);
+		struct stat named{};
+		if (!::fstat(descriptor, &opened) && !::stat(file.c_str(), &named) && opened.st_ino == named.st_ino)
+			break;
+		::flock(descriptor, LOCK_UN);
+		::close(descriptor);
+	}
+	// A hive compacted since it was last read holds every change in a new order, so it is read again from its start.
+	if (stamp.inode && static_cast<long long>(opened.st_ino) != stamp.inode) {
+		keys.clear();
+		loaded = 0;
+	}
+	// What the other processes appended comes first in the file and this change after it: reading their records and then these again
+	// leaves the keys as every process that reads the file sees them.
+	size_t written = 0;
+	while (written < records.size()) {
+		const auto done = ::write(descriptor, records.data() + written, records.size() - written);
+		if (done <= 0)
+			break;
+		written += size_t(done);
+	}
+	replay(loaded);
+	stamp = current_stamp();
+	if (written == records.size() && stamp.size > 4 * 1024 * 1024 && stamp.size > 3 * compacted)
+		save();
+	::flock(descriptor, LOCK_UN);
+	::close(descriptor);
+	if (written != records.size())
+		throw std::runtime_error("cannot write the registry hive");
 }
 
 void NativeRegistry::load()
 {
 	if (file.empty() || !std::filesystem::exists(file))
 		return;
+	loaded = compacted = replay(0);
+}
+
+long long NativeRegistry::replay(long long from)
+{
 	std::ifstream input(file, std::ios::binary);
+	input.seekg(from);
 	std::string line;
-	while (std::getline(input, line)) {
-		std::vector<std::string> fields;
-		size_t start = 0;
-		for (size_t tab; (tab = line.find('\t', start)) != line.npos; start = tab + 1)
-			fields.push_back(line.substr(start, tab - start));
-		fields.push_back(line.substr(start));
-		if (fields[0] == "K" && fields.size() == 2) {
-			const auto path = decode_utf8(unescape(fields[1]));
-			keys.emplace(fold(path), Key{path, {}});
-		} else if (fields[0] == "V" && fields.size() == 5) {
-			const auto path = decode_utf8(unescape(fields[1]));
-			const auto name = decode_utf8(unescape(fields[2]));
-			const auto found = keys.find(fold(path));
-			if (found == keys.end())
-				throw std::runtime_error("registry hive value precedes its key");
+	long long position = from;
+	// Only whole lines count: a record another process is still writing is read the next time.
+	while (std::getline(input, line) && !input.eof()) {
+		position += (long long)line.size() + 1;
+		apply(line);
+	}
+	loaded = position;
+	return position;
+}
+
+void NativeRegistry::apply(const std::string &line)
+{
+	std::vector<std::string> fields;
+	size_t start = 0;
+	for (size_t tab; (tab = line.find('\t', start)) != line.npos; start = tab + 1)
+		fields.push_back(line.substr(start, tab - start));
+	fields.push_back(line.substr(start));
+	if (fields[0] == "K" && fields.size() == 2) {
+		const auto path = decode_utf8(unescape(fields[1]));
+		keys.emplace(fold(path), Key{path, {}});
+	} else if (fields[0] == "V" && fields.size() == 5) {
+		const auto path = decode_utf8(unescape(fields[1]));
+		const auto name = decode_utf8(unescape(fields[2]));
+		const auto found = keys.find(fold(path));
+		// A value set by a process that had not yet read another one's deletion of the key is lost with the key, as on Windows.
+		if (found != keys.end())
 			found->second.values[fold(name)] = Value{name, uint32_t(std::stoul(fields[3])), unhex(fields[4])};
-		} else if (!line.empty()) {
-			throw std::runtime_error("registry hive contains an unknown record");
-		}
+	} else if (fields[0] == "Y" && fields.size() == 3) {
+		// A value deleted.
+		if (const auto found = keys.find(fold(decode_utf8(unescape(fields[1])))); found != keys.end())
+			found->second.values.erase(fold(decode_utf8(unescape(fields[2]))));
+	} else if (fields[0] == "X" && fields.size() == 3) {
+		// A key deleted with everything below it, or emptied ("0") when it stays.
+		const auto folded = fold(decode_utf8(unescape(fields[1])));
+		const auto prefix = folded + u'\\';
+		keys.erase(keys.lower_bound(prefix), std::find_if(keys.lower_bound(prefix), keys.end(), [&](const auto &item) { return !item.first.starts_with(prefix); }));
+		if (fields[2] == "0") {
+			if (const auto found = keys.find(folded); found != keys.end())
+				found->second.values.clear();
+		} else
+			keys.erase(folded);
+	} else if (!line.empty()) {
+		throw std::runtime_error("registry hive contains an unknown record");
 	}
 }
 
