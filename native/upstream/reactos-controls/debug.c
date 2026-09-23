@@ -223,6 +223,10 @@ int __cdecl ros_dbg_log(enum __wine_debug_class class, struct __wine_debug_chann
 	const char *function, const int line, const char *text, ...)
 {
 	static const char *const classes[] = {"fixme", "err", "warn", "trace"};
+	/* ReactOS's macros only look at the channel's static flags before they get here: the channels RAVEN_COMPONENT_DEBUG names are the
+	 * only ones that print, so a component left alone costs nothing. */
+	if (!channel_enabled(channel->name))
+		return 0;
 	char buffer[1024];
 	Out out = {buffer, sizeof buffer, 0};
 	const char *prefix = wine_dbg_sprintf("%s:%s:%s ", (unsigned)class < 4 ? classes[class] : "?", channel->name, function);
