@@ -1989,6 +1989,24 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         ${openal_fixtures}/openal-check32.exe ${CMAKE_CURRENT_BINARY_DIR}/openal-redist-evidence)
                     set_tests_properties(native_redist_openal PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor PASS_REGULAR_EXPRESSION "PASS: ")
                 endif()
+                # The .NET Framework 4.8 from Microsoft's offline installer (scripts/native-dotnet.py): the message Windows shows without a
+                # runtime, then the framework installed through our msiexec, a console program and a WinForms window built with Mono's mcs.
+                set(RAVEN_NETFX_INSTALLER "" CACHE FILEPATH "ndp48-x86-x64-allos-enu.exe as Microsoft publishes it")
+                find_program(RAVEN_MCS mcs)
+                if(TARGET raven_wayland AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON AND RAVEN_MCS AND RAVEN_NETFX_INSTALLER
+                   AND EXISTS ${RAVEN_NETFX_INSTALLER})
+                    set(dotnet_fixtures ${CMAKE_CURRENT_BINARY_DIR}/dotnet-fixtures)
+                    add_custom_command(OUTPUT ${dotnet_fixtures}/hello64.exe ${dotnet_fixtures}/forms64.exe
+                        COMMAND ${CMAKE_COMMAND} -E make_directory ${dotnet_fixtures}
+                        COMMAND ${RAVEN_MCS} -sdk:4.5 -platform:x64 -out:${dotnet_fixtures}/hello64.exe ${PROJECT_SOURCE_DIR}/testdata/dotnet/hello.cs
+                        COMMAND ${RAVEN_MCS} -sdk:4.5 -platform:x64 -target:winexe -r:System.Windows.Forms.dll -r:System.Drawing.dll
+                            -out:${dotnet_fixtures}/forms64.exe ${PROJECT_SOURCE_DIR}/testdata/dotnet/forms.cs
+                        DEPENDS ${PROJECT_SOURCE_DIR}/testdata/dotnet/hello.cs ${PROJECT_SOURCE_DIR}/testdata/dotnet/forms.cs VERBATIM)
+                    add_custom_target(dotnet_fixtures ALL DEPENDS ${dotnet_fixtures}/hello64.exe ${dotnet_fixtures}/forms64.exe)
+                    add_test(NAME native_dotnet_framework48 COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-dotnet.py
+                        $<TARGET_FILE:raven> ${RAVEN_NETFX_INSTALLER} ${dotnet_fixtures} ${CMAKE_CURRENT_BINARY_DIR}/dotnet-evidence)
+                    set_tests_properties(native_dotnet_framework48 PROPERTIES TIMEOUT 3600 RESOURCE_LOCK raven_compositor PASS_REGULAR_EXPRESSION "PASS: ")
+                endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/scripts/native-x86-process.py $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/x86-client.exe)
                 set_tests_properties(native_x86_process PROPERTIES TIMEOUT 30)
