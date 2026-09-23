@@ -37,6 +37,8 @@ ProcessObject::~ProcessObject()
 {
 	if (channel)
 		remove_child_channel(channel.get());
+	if (exit_file >= 0)
+		::close(exit_file);
 }
 
 bool ProcessObject::exited() const
@@ -89,8 +91,12 @@ void ProcessObject::reap() const
 		code = 0;
 	else if (killed)
 		code = requested;
-	else if (WIFEXITED(status))
+	else if (WIFEXITED(status)) {
 		code = uint32_t(WEXITSTATUS(status));
+		uint32_t whole = 0;
+		if (exit_file >= 0 && ::pread(exit_file, &whole, sizeof whole, 0) == ssize_t(sizeof whole))
+			code = whole;
+	}
 	else
 		code = 0xc0000005U;
 }
@@ -200,6 +206,14 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 		owned.push_back(file);
 		arguments.push_back("--inherit-fd=" + std::to_string(pass(file)));
 	}
+	// The child writes its exit code into a file both share.
+	const int exit_file = ::memfd_create("raven-exit", MFD_CLOEXEC);
+	const int exit_kept = exit_file < 0 ? -1 : ::fcntl(exit_file, F_DUPFD_CLOEXEC, 0);
+	if (exit_kept >= 0) {
+		owned.push_back(exit_file);
+		arguments.push_back("--exit-code-fd=" + std::to_string(pass(exit_file)));
+	} else if (exit_file >= 0)
+		::close(exit_file);
 	// Handles that are duplicated into the child later travel over a socket pair; the child keeps one end.
 	int channel_pair[2] = {-1, -1};
 	if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel_pair) == 0) {
@@ -226,6 +240,8 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 			::close(gate_pair[1]);
 		if (channel_pair[0] >= 0)
 			::close(channel_pair[0]);
+		if (exit_kept >= 0)
+			::close(exit_kept);
 		posix_spawn_file_actions_destroy(&actions);
 		error = 6;
 	};
@@ -258,6 +274,8 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 			::close(gate_pair[1]);
 		if (channel_pair[0] >= 0)
 			::close(channel_pair[0]);
+		if (exit_kept >= 0)
+			::close(exit_kept);
 		error = status == ENOENT ? 2 : status == ENOMEM ? 8 : 5;
 		return nullptr;
 	}
@@ -265,6 +283,7 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 		*launch.gate = gate_pair[1];
 	++live;
 	auto object = std::make_shared<ProcessObject>(child);
+	object->exit_file = exit_kept;
 	if (channel_pair[0] >= 0) {
 		object->channel = std::make_unique<HandleChannel>(channel_pair[0], handle_range_to_child);
 		add_child_channel(object->channel.get());

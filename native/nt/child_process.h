@@ -34,6 +34,8 @@ public:
 	std::u16string name;
 	// Where handles go that are duplicated into the process.
 	std::unique_ptr<HandleChannel> channel;
+	// The file the process leaves its whole 32-bit exit code in; a host exit status keeps only the low byte of it.
+	int exit_file = -1;
 
 private:
 	void reap() const;

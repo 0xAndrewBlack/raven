@@ -31,6 +31,7 @@
 #include <optional>
 #include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <stdexcept>
@@ -51,16 +52,28 @@ static std::vector<uint8_t> read_file(const char *path)
 }
 
 #ifdef RAVEN_NATIVE_CPU
+// A program started by another one leaves its whole exit code here for the parent; the host exit status keeps only its low byte.
+static int exit_code_fd=-1;
+
+static void leave_exit_code(uint32_t code)
+{
+	if (exit_code_fd>=0)
+		[[maybe_unused]] const auto written=::pwrite(exit_code_fd,&code,sizeof code,0);
+}
+
 static int native_result(const raven::NativeResult &result,bool process_exit=false,bool inherited_stdio=false)
 {
 	if (result.stop==raven::NativeStop::exited) {
 		const auto code=uint32_t(result.value);
+		leave_exit_code(code);
 		if (!inherited_stdio) std::cout << "Native process exited with status " << code << '\n';
 		return !code ? 0 : (code & 0xff) ? int(code & 0xff) : 1;
 	}
 	if (result.stop == raven::NativeStop::returned) {
 		if (!inherited_stdio) std::cout << "Native entry returned " << result.value << " (process initialization not implemented)\n";
 		const auto code=uint32_t(result.value);
+		if (process_exit)
+			leave_exit_code(code);
 		return !process_exit || !code ? 0 : (code & 0xff) ? int(code & 0xff) : 1;
 	}
 	if (result.stop == raven::NativeStop::syscall)
@@ -185,6 +198,12 @@ int main(int argc, char **argv)
 		else if (option.starts_with("--suspended-fd=")) suspended_fd=std::atoi(std::string(option.substr(15)).c_str());
 		else if (option.starts_with("--inherit-fd=")) inherit_fd=std::atoi(std::string(option.substr(13)).c_str());
 		else if (option.starts_with("--handle-channel-fd=")) handle_channel_fd=std::atoi(std::string(option.substr(20)).c_str());
+#ifdef RAVEN_NATIVE_CPU
+		else if (option.starts_with("--exit-code-fd=")) {
+			exit_code_fd=std::atoi(std::string(option.substr(15)).c_str());
+			::fcntl(exit_code_fd,F_SETFD,FD_CLOEXEC);
+		}
+#endif
 		else if (option=="--elevated") elevated=true;
 		else more=false;
 		if (more) ++first_file;

@@ -1,7 +1,9 @@
 #include <windows.h>
+#include <lzexpand.h>
 
 /* A library loaded by its full path from a folder beside the program reports that path as its file name, so it finds the files it ships
-   with; and a process it starts can open it to wait on it, as a bootstrapper's elevated half watches the half that started it. */
+   with; and a process it starts can open it to wait on it, as a bootstrapper's elevated half watches the half that started it. The
+   child's exit code reaches the parent whole, as an installer's 1603 does. */
 
 static int child(const WCHAR *digits)
 {
@@ -12,7 +14,7 @@ static int child(const WCHAR *digits)
 	if (!process)
 		return 20;
 	CloseHandle(process);
-	return 0;
+	return 1603;
 }
 
 int raven_entry(void)
@@ -48,5 +50,5 @@ int raven_entry(void)
 		return 6;
 	CloseHandle(started.hThread);
 	CloseHandle(started.hProcess);
-	return code ? 7 : 0;
+	return code == 1603 ? 0 : 7;
 }
