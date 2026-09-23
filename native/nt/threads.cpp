@@ -433,11 +433,32 @@ bool NativeThreads::block(std::function<bool()> ready, std::optional<std::chrono
 	me.ready = std::move(ready);
 	me.wake = wake;
 	me.state = GuestThread::State::waiting;
+	// The condition reads the waiting frame: it goes with the wait, also when an error or the end of the process leaves the frame.
+	struct Leave {
+		GuestThread &thread;
+		~Leave()
+		{
+			thread.ready = nullptr;
+			thread.wake.reset();
+		}
+	} leave{me};
+	// RAVEN_TRACE_WAITS names the waits that last longer than a quarter of a second: the API and how long it kept its thread.
+	static const bool traced = std::getenv("RAVEN_TRACE_WAITS") != nullptr;
+	const auto began = std::chrono::steady_clock::now();
+	const char *api = api_in_progress;
 	schedule();
 	const bool satisfied = me.ready && me.ready();
-	me.ready = nullptr;
-	me.wake.reset();
 	me.state = GuestThread::State::running;
+	if (traced) {
+		const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count();
+		if (waited >= 250)
+		{
+			static const auto started = began;
+			std::fprintf(stderr, "raven: at %lld ms thread %u waited %lld ms in %s (%s)\n",
+				(long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count(), me.id,
+				(long long)waited, api, satisfied ? "woken" : "timed out");
+		}
+	}
 	return satisfied;
 }
 

@@ -219,6 +219,18 @@ CRT short _dclass(double x)
 }
 CRT short _ldclass(double x) { return _dclass(x); }
 
+/* The same classification of a float. */
+CRT short _fdclass(float x)
+{
+	union { float value; unsigned bits; } v = {x};
+	const unsigned exponent = (v.bits >> 23) & 0xff, fraction = v.bits & ((1U << 23) - 1);
+	if (exponent == 0xff)
+		return fraction ? 2 : 1;
+	if (!exponent)
+		return fraction ? -2 : 0;
+	return -1;
+}
+
 CRT wint_t btowc(int c)
 {
 	char byte = (char)c;

@@ -407,6 +407,13 @@ double raven_wcstod(const wchar_t *text, wchar_t **end)
 	return negative ? -value : value;
 }
 
+/* wcstod narrowed to a float. */
+__asm__(".section .drectve\n\t.ascii \" -export:wcstof=raven_wcstof\"\n\t.text");
+float raven_wcstof(const wchar_t *text, wchar_t **end)
+{
+	return (float)raven_wcstod(text, end);
+}
+
 CRT int _wtoi(const wchar_t *text) { return (int)wcstol(text, NULL, 10); }
 
 CRT long long _wcstoi64(const wchar_t *text, wchar_t **end, int base)

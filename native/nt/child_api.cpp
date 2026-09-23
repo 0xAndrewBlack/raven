@@ -368,7 +368,8 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("TerminateProcess", 2, [&objects](ApiCall &call) {
-		if (call[0] == current_process) {
+		// A handle OpenProcess gave for this process ends it as the pseudo handle does (Process.Kill on itself).
+		if (call[0] == current_process || objects.object_as<SelfProcessObject>(call[0])) {
 			call.process.abandon_call();
 			throw ProcessExit{call.u32(1), 0, true};
 		}
@@ -379,6 +380,14 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		}
 		child->terminate(call.u32(1));
 		call.ret(1);
+	});
+	// RaiseFailFastException ends the process at once, with no handler run, its status the exception code (STATUS_FAIL_FAST_EXCEPTION
+	// without a record).
+	registry.add("RaiseFailFastException", 3, [](ApiCall &call) {
+		const uint32_t code = call[0] ? call.load<uint32_t>(call[0]) : 0xc0000602U;
+		std::fprintf(stderr, "raven: fail fast exception %x\n", code);
+		call.process.abandon_call();
+		throw ProcessExit{code, 0, true};
 	});
 	registry.add("GetProcessId", 1, [&objects](ApiCall &call) {
 		if (call[0] == current_process || objects.object_as<SelfProcessObject>(call[0])) {

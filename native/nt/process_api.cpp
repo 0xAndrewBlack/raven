@@ -5,7 +5,9 @@
 #include "pe/resources.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <map>
 #include <memory>
 #include <set>
@@ -52,10 +54,123 @@ int compare_text(const std::string &left, const std::string &right, uint32_t fla
 	return left.size() == right.size() ? 2 : left.size() < right.size() ? 1 : 3;
 }
 
+// printf formatting of a guest format string with a 64-bit va_list: every argument takes an eight-byte slot, doubles as their bits.
+std::string format_guest(ApiCall &call, uint64_t format, uint64_t arguments)
+{
+	const auto text = call.narrow(format, 4096);
+	std::string out;
+	const auto next = [&]() {
+		const uint64_t value = call.load<uint64_t>(arguments);
+		arguments += 8;
+		return value;
+	};
+	for (size_t at = 0; at < text.size(); ++at) {
+		if (text[at] != '%') {
+			out += text[at];
+			continue;
+		}
+		std::string spec = "%";
+		++at;
+		while (at < text.size() && std::strchr("-+ #0", text[at]))
+			spec += text[at++];
+		if (at < text.size() && text[at] == '*') {
+			spec += std::to_string(int32_t(next()));
+			++at;
+		}
+		while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at])))
+			spec += text[at++];
+		if (at < text.size() && text[at] == '.') {
+			spec += text[at++];
+			if (at < text.size() && text[at] == '*') {
+				spec += std::to_string(int32_t(next()));
+				++at;
+			}
+			while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at])))
+				spec += text[at++];
+		}
+		int longs = 0;
+		bool wide = false;
+		while (at < text.size() && std::strchr("hlLIwzjt", text[at])) {
+			if (text[at] == 'l' || text[at] == 'w')
+				++longs, wide = true;
+			if (text[at] == 'I' && text.compare(at, 3, "I64") == 0)
+				longs = 2, at += 2;
+			else if (text[at] == 'I' && text.compare(at, 3, "I32") == 0)
+				at += 2;
+			else if (text[at] == 'z' || text[at] == 'j' || text[at] == 't' || text[at] == 'I')
+				longs = 2;
+			++at;
+		}
+		if (at >= text.size())
+			break;
+		const char conversion = text[at];
+		char buffer[512];
+		switch (conversion) {
+		case 'd': case 'i': {
+			const uint64_t value = next();
+			const long long number = longs >= 2 ? (long long)value : (long long)int32_t(value);
+			std::snprintf(buffer, sizeof buffer, (spec + "lld").c_str(), number);
+			out += buffer;
+			break;
+		}
+		case 'u': case 'x': case 'X': case 'o': {
+			const uint64_t value = next();
+			std::snprintf(buffer, sizeof buffer, (spec + "ll" + conversion).c_str(), (unsigned long long)(longs >= 2 ? value : uint32_t(value)));
+			out += buffer;
+			break;
+		}
+		case 'p':
+			std::snprintf(buffer, sizeof buffer, "%016llX", (unsigned long long)next());
+			out += buffer;
+			break;
+		case 'c':
+			out += char(next());
+			break;
+		case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A': {
+			const uint64_t bits = next();
+			double value;
+			std::memcpy(&value, &bits, 8);
+			std::snprintf(buffer, sizeof buffer, (spec + conversion).c_str(), value);
+			out += buffer;
+			break;
+		}
+		case 's': case 'S': {
+			const uint64_t address = next();
+			std::string value = !address ? "(null)" : (conversion == 'S') != wide ? to_utf8(call.wide(address, 4096)) : call.narrow(address, 4096);
+			if (conversion == 'S' && wide)
+				value = call.narrow(address, 4096);
+			std::snprintf(buffer, sizeof buffer, (spec + "s").c_str(), value.c_str());
+			out += buffer;
+			break;
+		}
+		case '%':
+			out += '%';
+			break;
+		default:
+			out += spec;
+			out += conversion;
+		}
+	}
+	return out;
+}
+
 }
 
 void register_process_api(ApiRegistry &registry, KernelContext &context)
 {
+	// _vsnprintf(buffer, count, format, arguments): at most count characters; -1 when the text did not fit, with count of it written.
+	registry.add("_vsnprintf", 4, [](ApiCall &call) {
+		const auto text = format_guest(call, call[2], call[3]);
+		const size_t count = call[1];
+		std::vector<uint8_t> bytes(text.begin(), text.end());
+		if (bytes.size() < count)
+			bytes.push_back(0);
+		if (bytes.size() > count)
+			bytes.resize(count);
+		if (call[0] && !bytes.empty())
+			call.write(call[0], bytes);
+		call.ret(text.size() < count ? uint64_t(text.size()) : uint64_t(-1));
+	});
 	// Debug output goes nowhere; the function is cdecl and variadic, so it takes no counted arguments.
 	registry.add("DbgPrint", 0, [](ApiCall &call) { call.ret(0); });
 	registry.add("DbgPrintEx", 0, [](ApiCall &call) { call.ret(0); });

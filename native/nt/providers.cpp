@@ -1362,7 +1362,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		"DbgPrintEx", "DbgPrompt", "RtlVerifyVersionInfo", "RtlInitializeBitMap", "RtlSetBits", "RtlClearBits", "RtlSetAllBits",
 		"RtlClearAllBits", "RtlAreBitsClear", "RtlAreBitsSet", "RtlFindClearBits", "RtlFindClearBitsAndSet", "RtlNumberOfSetBits",
 		"RtlInitializeSListHead", "RtlInterlockedPushEntrySList", "RtlInterlockedPopEntrySList", "RtlInterlockedFlushSList",
-		"RtlQueryDepthSList"})
+		"RtlQueryDepthSList",
+		// What Wine's builds of the Direct3D 10.1 and Direct2D libraries import from ntdll.
+		"_vsnprintf"})
 		if (std::find(nt_names.begin(),nt_names.end(),name)==nt_names.end()) nt_names.push_back(name);
 	std::sort(nt_names.begin(),nt_names.end());
 	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.
@@ -2491,7 +2493,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		threads.terminate_others(request.code);
 		try {
 			if (!cleanup_started && !request.terminated) {
-				cleanup_started=true; loading=true;
+				// Detaching counts as a load of this thread's own: a library that frees or loads another in its detach goes on at once
+				// instead of waiting for a load no other thread will finish.
+				cleanup_started=true; loading=true; loading_thread=threads.current_id();
 				if (entry_tls_ready) {
 					const auto stopped=notify_tls(entry,0);
 					if (stopped.stop!=NativeStop::returned) { windows.shutdown(); return stopped; }

@@ -127,6 +127,22 @@ static void format(Out *out, const char *text, va_list arguments)
 		case 'p':
 			put_number(out, (ULONG_PTR)va_arg(arguments, void *), 0, 16, 0, sizeof(void *) * 2, 1);
 			break;
+		case 'f':
+		case 'g':
+		case 'e': {
+			/* Two decimals, which is what the traces need of coordinates and sizes; beyond the range of an int only the sign and digits fit. */
+			double value = va_arg(arguments, double);
+			const int negative = value < 0;
+			if (negative)
+				value = -value;
+			if (value > 2000000000.0)
+				value = 2000000000.0;
+			const int whole = (int)value, hundredths = (int)((value - whole) * 100.0 + 0.5);
+			put_number(out, (unsigned)(whole + hundredths / 100), negative, 10, 0, 0, 0);
+			put(out, '.');
+			put_number(out, (unsigned)(hundredths % 100), 0, 10, 0, 2, 1);
+			break;
+		}
 		case 'c':
 			put(out, (char)va_arg(arguments, int));
 			break;
