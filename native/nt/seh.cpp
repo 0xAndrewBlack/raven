@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <optional>
+#include <unordered_map>
 #include <iostream>
 
 namespace raven {
@@ -47,6 +50,16 @@ void put64(std::vector<uint8_t> &bytes, size_t at, uint64_t value)
 class Scratch {
 public:
 	explicit Scratch(KernelContext &context) : context(context) {}
+	// Gives the memory back, once the thread that used it has ended.
+	void free()
+	{
+		if (base)
+			context.memory.free(base, 0, 0x8000);
+		base = 0;
+		top = 0;
+	}
+	Scratch(const Scratch &) = delete;
+	Scratch &operator=(const Scratch &) = delete;
 	uint64_t take(size_t size)
 	{
 		if (!base) {
@@ -76,28 +89,35 @@ private:
 
 class Exceptions {
 public:
-	Exceptions(KernelContext &context, NativeUnwinder &unwinder) : context(context), unwinder(unwinder), scratch(context) {}
+	Exceptions(KernelContext &context, NativeUnwinder &unwinder) : context(context), unwinder(unwinder) {}
+	// Where a hardware fault's dispatcher frame put the exception's CONTEXT and record on the faulting thread's stack, as Windows does
+	// below the faulting stack pointer; the next raise takes them (see raise_fault).
+	struct StackFrame {
+		uint64_t context, record;
+	};
+	// The address of the RaiseException stub, where the exceptions it raises seem to come from.
+	uint64_t raise_stub = 0;
 
 	bool trace = std::getenv("RAVEN_TRACE_SEH") != nullptr;
 	uint64_t trap_gate = 0;
 
 	// Walks the stack from the raising frame; true when a handler resumed execution through `resume`.
-	bool dispatch(std::vector<uint8_t> record, ContextBytes origin, ContextBytes &resume)
+	bool dispatch(std::vector<uint8_t> record, ContextBytes origin, ContextBytes &resume, std::optional<StackFrame> on_stack = std::nullopt)
 	{
-		const size_t mark = scratch.mark();
-		const uint64_t guest_record = scratch.take(record_size);
-		const uint64_t dispatcher = scratch.take(dispatcher_size);
-		const uint64_t frame_context = scratch.take(x64_context::size);
+		const size_t mark = mine().scratch.mark();
+		const uint64_t guest_record = on_stack ? on_stack->record : mine().scratch.take(record_size);
+		const uint64_t dispatcher = mine().scratch.take(dispatcher_size);
+		const uint64_t frame_context = mine().scratch.take(x64_context::size);
 		// As RtlDispatchException passes them: the handler's ContextRecord is the context the exception happened in, which execution
 		// resumes from when a handler continues it, and DispatcherContext->ContextRecord is the frame's context unwound to its caller.
-		const uint64_t exception_context = scratch.take(x64_context::size);
+		const uint64_t exception_context = on_stack ? on_stack->context : mine().scratch.take(x64_context::size);
 		context.process.write_memory(guest_record, record);
 		context.process.write_memory(exception_context, origin);
-		active.push_back({origin, context.process.callback_depth(), mark});
+		mine().active.push_back({origin, context.process.callback_depth(), mark});
 		if (trace)
 		{
-			std::fprintf(stderr, "seh dispatch begin: code=%x active=%zu depth=%zu params=%x info1=%llx info2=%llx rsp=%llx\n", le32(record, 0), active.size(),
-				context.process.callback_depth(), le32(record, 0x18), (unsigned long long)load64(record, 0x28), (unsigned long long)load64(record, 0x30),
+			std::fprintf(stderr, "seh dispatch begin: code=%x active=%zu depth=%zu scratch=%zx params=%x info1=%llx info2=%llx rsp=%llx\n", le32(record, 0), mine().active.size(),
+				context.process.callback_depth(), mine().scratch.mark(), le32(record, 0x18), (unsigned long long)load64(record, 0x28), (unsigned long long)load64(record, 0x30),
 				(unsigned long long)context_rsp(origin));
 			if (le32(record, 0x18) >= 2) {
 				try {
@@ -111,19 +131,19 @@ public:
 		}
 		bool handled = false;
 		ContextBytes current = origin;
-		size_t continuation_cursor = continuation_start;
+		size_t continuation_cursor = mine().continuation_start;
 		// An exception raised inside a handler continues its search through the dispatcher's frames, which the host callback
 		// boundary stands for, into the context of the exception that the handler was running for.
-		size_t outer = active.size() - 1;
+		size_t outer = mine().active.size() - 1;
 		// The callback nesting of the frames being searched: past the return gate of a callback that no dispatch made, the search goes
 		// on in the frames of the API call that made it, as Windows searches past a window procedure into the caller of DispatchMessage.
-		size_t level = active.back().depth;
+		size_t level = mine().active.back().depth;
 		for (int frames = 0; frames < 1024; ++frames) {
 			const uint64_t pc = context_rip(current);
 			if (!pc)
 				break;
 			const auto function = unwinder.lookup(pc);
-			if (!function && pc == context.process.return_gate() && outer == 0 && continuation_cursor >= continuation.size() && level > 0) {
+			if (!function && pc == context.process.return_gate() && outer == 0 && continuation_cursor >= mine().continuation.size() && level > 0) {
 				current = context_from_process(context.process.callback_origin(--level));
 				if (trace)
 					std::fprintf(stderr, "seh frame: callback boundary, continuing at level %zu from %llx\n", level, (unsigned long long)context_rip(current));
@@ -137,14 +157,14 @@ public:
 					continue;
 				}
 				if (pc == context.process.return_gate() && outer > 0) {
-					current = active[--outer].origin;
-					level = active[outer].depth;
+					current = mine().active[--outer].origin;
+					level = mine().active[outer].depth;
 					continue;
 				}
 				// A search raised from a handler that an unwind is running continues in the frames of whoever called the unwind,
 				// then in the contexts of the dispatches that the unwind has already crossed.
-				if (pc == context.process.return_gate() && continuation_cursor < continuation.size()) {
-					current = continuation[continuation_cursor++];
+				if (pc == context.process.return_gate() && continuation_cursor < mine().continuation.size()) {
+					current = mine().continuation[continuation_cursor++];
 					continue;
 				}
 				if (trace)
@@ -172,30 +192,47 @@ public:
 				put64(descriptor, 0x30, result.handler);
 				put64(descriptor, 0x38, result.handler_data);
 				put64(descriptor, 0x40, 0);
-				context.process.write_memory(dispatcher, descriptor);
-				if (trace)
-					std::fprintf(stderr, "seh: pc=%llx handler=%llx frame=%llx\n", (unsigned long long)pc, (unsigned long long)result.handler, (unsigned long long)result.establisher);
-				const uint64_t arguments[] = {guest_record, result.establisher, exception_context, dispatcher};
-				const auto outcome = context.call(result.handler, arguments);
-				if (outcome.stop != NativeStop::returned)
-					throw outcome;
-				const uint32_t disposition = uint32_t(outcome.value);
-				if (disposition == 0) {
-					if (le32(record, 4) & flag_noncontinuable)
-						throw std::runtime_error("native exception handler continued a noncontinuable exception");
-					resume = context.process.read_memory(exception_context, x64_context::size);
-					handled = true;
-					break;
+				bool repeat = true;
+				while (repeat && !handled) {
+					repeat = false;
+					const uint64_t handler = load64(descriptor, 0x30), establisher = load64(descriptor, 0x18);
+					context.process.write_memory(dispatcher, descriptor);
+					if (trace)
+						std::fprintf(stderr, "seh: pc=%llx handler=%llx frame=%llx\n", (unsigned long long)load64(descriptor, 0), (unsigned long long)handler,
+							(unsigned long long)establisher);
+					const uint64_t arguments[] = {guest_record, establisher, exception_context, dispatcher};
+					const auto outcome = context.call(handler, arguments);
+					if (outcome.stop != NativeStop::returned)
+						throw outcome;
+					const uint32_t disposition = uint32_t(outcome.value);
+					if (disposition == 0) {
+						if (le32(record, 4) & flag_noncontinuable)
+							throw std::runtime_error("native exception handler continued a noncontinuable exception");
+						resume = context.process.read_memory(exception_context, x64_context::size);
+						handled = true;
+					} else if (disposition == 3) {
+						// A collided unwind: the handler belongs to a frame that stands for another dispatch, such as the stub that
+						// the .NET runtime raises a fault from, and has copied that dispatch's state into the dispatcher context. The
+						// search goes on with that frame's handler and, after it, from the frame's caller the context describes.
+						descriptor = context.process.read_memory(dispatcher, dispatcher_size);
+						next = context.process.read_memory(load64(descriptor, 0x28), x64_context::size);
+						context.process.write_memory(frame_context, next);
+						put64(descriptor, 0x28, frame_context);
+						repeat = true;
+					} else if (disposition != 1 && disposition != 2) {
+						throw std::runtime_error("native exception handler at " + std::to_string(handler) + " for pc " + std::to_string(pc) +
+							" returned the invalid disposition " + std::to_string(disposition));
+					}
 				}
-				if (disposition != 1 && disposition != 2)
-					throw std::runtime_error("native exception handler returned an invalid disposition");
+				if (handled)
+					break;
 			}
 			current = next;
 		}
 		if (trace)
-			std::fprintf(stderr, "seh dispatch end: handled=%d active=%zu\n", handled, active.size());
-		active.pop_back();
-		scratch.release(mark);
+			std::fprintf(stderr, "seh dispatch end: handled=%d active=%zu\n", handled, mine().active.size());
+		mine().active.pop_back();
+		mine().scratch.release(mark);
 		return handled;
 	}
 
@@ -218,6 +255,8 @@ public:
 	// Handles one exception end to end; either redirects the guest (throwing ExecutionRedirected) or ends the process.
 	[[noreturn]] void raise(std::vector<uint8_t> record, ContextBytes origin, const std::function<NativeResult()> &unhandled)
 	{
+		const auto on_stack = mine().fault_frame;
+		mine().fault_frame.reset();
 		if (std::getenv("RAVEN_WATCH_EXCEPTION") && le32(record, 0x18) >= 2) {
 			// Diagnosis aid: report every write to the second word of the thrown object.
 			uint64_t object;
@@ -247,8 +286,9 @@ public:
 		const size_t depth = context.process.callback_depth();
 		// A vectored handler that answers EXCEPTION_CONTINUE_EXECUTION resumes the program where it stopped, with the context it left.
 		if (!vectored.empty()) {
-			const size_t mark = scratch.mark();
-			const uint64_t guest_record = scratch.take(record_size), guest_context = scratch.take(x64_context::size), pointers = scratch.take(16);
+			const size_t mark = mine().scratch.mark();
+			const uint64_t guest_record = on_stack ? on_stack->record : mine().scratch.take(record_size);
+			const uint64_t guest_context = on_stack ? on_stack->context : mine().scratch.take(x64_context::size), pointers = mine().scratch.take(16);
 			context.process.write_memory(guest_record, record);
 			context.process.write_memory(guest_context, origin);
 			std::vector<uint8_t> block(16);
@@ -265,13 +305,13 @@ public:
 					throw outcome;
 				if (int32_t(outcome.value) == -1) {
 					resume = context.process.read_memory(guest_context, x64_context::size);
-					scratch.release(mark);
+					mine().scratch.release(mark);
 					redirect_to(resume, depth);
 				}
 			}
-			scratch.release(mark);
+			mine().scratch.release(mark);
 		}
-		if (dispatch(record, origin, resume))
+		if (dispatch(record, origin, resume, on_stack))
 			redirect_to(resume, depth);
 		// An exception no frame handled goes to the program's last-chance filter, which usually ends the process quietly: with
 		// RAVEN_BACKTRACE set it is named first, with the code addresses on its stack.
@@ -295,8 +335,8 @@ public:
 			}
 		}
 		if (context.unhandled_filter) {
-			const size_t mark = scratch.mark();
-			const uint64_t guest_record = scratch.take(record_size), guest_context = scratch.take(x64_context::size), pointers = scratch.take(16);
+			const size_t mark = mine().scratch.mark();
+			const uint64_t guest_record = mine().scratch.take(record_size), guest_context = mine().scratch.take(x64_context::size), pointers = mine().scratch.take(16);
 			context.process.write_memory(guest_record, record);
 			context.process.write_memory(guest_context, origin);
 			std::vector<uint8_t> block(16);
@@ -309,10 +349,10 @@ public:
 				throw outcome;
 			if (int32_t(outcome.value) == -1) {
 				resume = context.process.read_memory(guest_context, x64_context::size);
-				scratch.release(mark);
+				mine().scratch.release(mark);
 				redirect_to(resume, depth);
 			}
-			scratch.release(mark);
+			mine().scratch.release(mark);
 		}
 		const uint32_t code = le32(record, 0);
 		const auto *module = unwinder.module_at(context_rip(origin));
@@ -346,8 +386,17 @@ public:
 	}
 
 	// Execution resumes at the callback nesting where the exception was raised; handler calls above it are abandoned.
-	[[noreturn]] void redirect_to(const ContextBytes &target, size_t depth, size_t mark = SIZE_MAX)
+	[[noreturn]] void redirect_to(const ContextBytes &given, size_t depth, size_t mark = SIZE_MAX)
 	{
+		auto target = given;
+		// Continuing an exception RaiseException raised returns from RaiseException to its caller.
+		if (raise_stub && context_rip(target) == raise_stub) {
+			uint64_t rip = 0;
+			const auto top = context.process.read_memory(context_rsp(target), 8);
+			std::memcpy(&rip, top.data(), 8);
+			set_context_rip(target, rip);
+			set_context_rsp(target, context_rsp(target) + 8);
+		}
 		auto native = context.process.context();
 		apply_context(native, target);
 		context.process.redirect(native, depth);
@@ -362,13 +411,42 @@ public:
 		}
 		// Guest memory of the dispatches that this jump abandons can be reused; outer dispatches keep theirs. Dispatches begun at or above
 		// the nesting execution resumes at are over: their host frames are left by the jump.
-		if (mark != SIZE_MAX)
-			scratch.release(mark);
-		while (!active.empty() && active.back().depth >= depth)
-			active.pop_back();
+		auto &state = mine();
+		size_t abandoned = SIZE_MAX;
+		while (!state.active.empty() && state.active.back().depth >= depth) {
+			abandoned = std::min(abandoned, state.active.back().mark);
+			state.active.pop_back();
+		}
+		while (!state.unwinds.empty() && state.unwinds.back().depth >= depth) {
+			abandoned = std::min(abandoned, state.unwinds.back().mark);
+			state.unwinds.pop_back();
+		}
+		// Catch blocks whose frames lie below the stack the jump goes to were left by it, as a rethrow leaves the catch it runs in.
+		std::erase_if(state.consolidations, [&](const auto &pending) {
+			if (pending.return_slot >= context_rsp(target))
+				return false;
+			abandoned = std::min(abandoned, pending.mark);
+			return true;
+		});
+		if (!state.consolidations.empty() && state.consolidations.back().return_slot == context_rsp(target)) {
+			// Entering a catch block: what the jump abandons goes back when the block returns.
+			auto &entering = state.consolidations.back();
+			entering.mark = std::min(entering.mark, abandoned);
+		} else {
+			// A jump that no unwind ended, such as the .NET runtime's restore of the context after a catch, leaves the memory of
+			// the dispatches and unwinds it abandons too; the records of catch blocks still running stay.
+			if (abandoned != SIZE_MAX) {
+				size_t floor = abandoned;
+				for (const auto &pending : state.consolidations)
+					floor = std::max(floor, pending.end);
+				mark = std::min(mark, floor);
+			}
+			if (mark != SIZE_MAX)
+				state.scratch.release(std::min(mark, state.scratch.mark()));
+		}
 		if (trace)
-			std::fprintf(stderr, "seh redirect to %llx at nesting %zu of %zu\n", (unsigned long long)context_rip(target), depth,
-				context.process.callback_depth());
+			std::fprintf(stderr, "seh redirect to %llx at nesting %zu of %zu, scratch %zx, %zu dispatches\n", (unsigned long long)context_rip(target), depth,
+				context.process.callback_depth(), state.scratch.mark(), state.active.size());
 		throw ExecutionRedirected{depth};
 	}
 
@@ -406,39 +484,41 @@ public:
 		put32(record, 4, le32(record, 4) | flag_unwinding | (target_frame ? 0 : flag_exit_unwind));
 		// Crossing a host callback boundary consumes the dispatch it belongs to; the last one consumed says where execution resumes.
 		size_t depth = context.process.callback_depth();
-		const size_t mark = scratch.mark();
+		const size_t mark = mine().scratch.mark();
 		size_t resume_mark = mark;
-		const uint64_t guest_record = caller_record ? caller_record : scratch.take(record_size);
-		const uint64_t dispatcher = scratch.take(dispatcher_size);
-		const uint64_t frame_context = scratch.take(x64_context::size);
+		mine().unwinds.push_back({{}, depth, mark});
+		const uint64_t guest_record = caller_record ? caller_record : mine().scratch.take(record_size);
+		const uint64_t dispatcher = mine().scratch.take(dispatcher_size);
+		const uint64_t frame_context = mine().scratch.take(x64_context::size);
 		ContextBytes current = caller_context();
 		// The deepest stack in use: what the frames being unwound left there, the thrown object among it, stays intact below the target.
 		const uint64_t deepest = context_rsp(current);
-		const size_t previous_start = continuation_start, previous_size = continuation.size();
+		const size_t previous_start = mine().continuation_start, previous_size = mine().continuation.size();
 		size_t outer_cursor = previous_start;
-		continuation_start = continuation.size();
-		continuation.push_back(current);
+		mine().continuation_start = mine().continuation.size();
+		mine().continuation.push_back(current);
 		struct Release {
 			std::vector<ContextBytes> &stack;
 			size_t &start, previous_start, previous_size;
 			~Release() { stack.resize(previous_size); start = previous_start; }
-		} release{continuation, continuation_start, previous_start, previous_size};
+		} release{mine().continuation, mine().continuation_start, previous_start, previous_size};
 		bool reached = false;
 		for (int frames = 0; frames < 1024 && !reached; ++frames) {
 			const uint64_t pc = context_rip(current);
-			if (pc == context.process.return_gate() && !active.empty()) {
+			if (pc == context.process.return_gate() && !mine().active.empty()) {
 				// The host callback boundary stands in for the dispatcher's own frames: continue from where the exception was raised.
-				current = active.back().origin;
-				continuation.push_back(current);
-				depth = active.back().depth;
-				resume_mark = std::min(resume_mark, active.back().mark);
-				active.pop_back();
+				current = mine().active.back().origin;
+				mine().continuation.push_back(current);
+				depth = mine().active.back().depth;
+				resume_mark = std::min(resume_mark, mine().active.back().mark);
+				mine().unwinds.back().mark = resume_mark;
+				mine().active.pop_back();
 				continue;
 			}
 			// With no dispatch left to cross, an unwind raised from inside another unwind continues through the contexts
 			// that the enclosing unwind recorded.
 			if (pc == context.process.return_gate() && outer_cursor < previous_size) {
-				current = continuation[outer_cursor++];
+				current = mine().continuation[outer_cursor++];
 				continue;
 			}
 			// Past the return gate of a callback that no dispatch made, the frames are those of the API call that made it; execution
@@ -454,7 +534,7 @@ public:
 				// Unwinding past a catch block's callback abandons that catch: its function's frame follows.
 				if (const auto *pending = consolidation_returning_to(pc, current)) {
 					current = pending->target;
-					consolidations.erase(consolidations.begin() + (pending - consolidations.data()), consolidations.end());
+					mine().consolidations.erase(mine().consolidations.begin() + (pending - mine().consolidations.data()), mine().consolidations.end());
 					continue;
 				}
 				unwinder.unwind_leaf(current);
@@ -511,6 +591,10 @@ public:
 			context.process.abandon_call();
 			throw ProcessExit{status_invalid_disposition, context_rip(current), true};
 		}
+		// Dispatches the unwind never crossed, because their handler's frames lead straight back to the raise, end with it as well.
+		for (const auto &item : mine().active)
+			if (item.depth >= depth)
+				resume_mark = std::min(resume_mark, item.mark);
 		if (trace)
 			std::fprintf(stderr, "seh resume at %llx (context rip %llx) rsp=%llx\n", (unsigned long long)target_ip, (unsigned long long)context_rip(current),
 				(unsigned long long)context_rsp(current));
@@ -526,7 +610,7 @@ public:
 			context.process.write_memory(slot, gate);
 			// The records of the dispatch stay where they are while the catch block runs: a rethrow inside it reaches the exception it
 			// handles through them, as on Windows, where they are still on the stack. They are released when the callback returns.
-			consolidations.push_back({current, slot, depth, resume_mark});
+			mine().consolidations.push_back({current, slot, depth, resume_mark, mine().scratch.mark()});
 			auto entry = current;
 			set_context_rip(entry, callback);
 			set_context_rsp(entry, slot);
@@ -544,16 +628,12 @@ public:
 		size_t depth;
 		size_t mark;
 	};
-	std::vector<Active> active;
-	// The contexts a running unwind was called from and the dispatch contexts it has crossed, in the order a stack walk meets them.
-	std::vector<ContextBytes> continuation;
 	// Vectored handlers, called before the frames of the stack are searched: a cookie for each, the handler and whether it is a continue handler.
 	struct Vectored {
 		uint64_t cookie, handler;
 		bool after;
 	};
 	std::vector<Vectored> vectored;
-	size_t continuation_start = 0;
 	// A C++ catch is entered through STATUS_UNWIND_CONSOLIDATE: after unwinding, the runtime's callback runs on the
 	// target frame's stack and returns the address where execution resumes. Each pending callback remembers the frame it belongs to.
 	struct Consolidation {
@@ -561,8 +641,41 @@ public:
 		uint64_t return_slot;
 		size_t depth;
 		size_t mark;
+		// Where the scratch memory in use when the catch began ends.
+		size_t end;
 	};
-	std::vector<Consolidation> consolidations;
+	// What one thread's exceptions are in the middle of. Threads take turns anywhere, inside a handler's callback too, so every
+	// dispatch, unwind and pending catch belongs to the thread that started it, with its own scratch memory.
+	struct ThreadState {
+		explicit ThreadState(KernelContext &context) : scratch(context) {}
+		std::optional<StackFrame> fault_frame;
+		std::vector<Active> active;
+		// The unwinds under way, with the start of the scratch memory each will give back, the dispatches it crossed included.
+		std::vector<Active> unwinds;
+		// The contexts a running unwind was called from and the dispatch contexts it has crossed, in the order a stack walk meets them.
+		std::vector<ContextBytes> continuation;
+		size_t continuation_start = 0;
+		std::vector<Consolidation> consolidations;
+		Scratch scratch;
+	};
+
+	ThreadState &mine() const
+	{
+		const uint32_t id = context.threads.current_id();
+		auto found = threads.find(id);
+		if (found != threads.end())
+			return *found->second;
+		// The states of threads that have ended go with them.
+		std::erase_if(threads, [this](const auto &item) {
+			if (context.threads.find(item.first))
+				return false;
+			if (trace)
+				std::fprintf(stderr, "seh: thread %u state released\n", item.first);
+			item.second->scratch.free();
+			return true;
+		});
+		return *threads.emplace(id, std::make_unique<ThreadState>(context)).first->second;
+	}
 
 	// The pending catch whose callback returns to the consolidation gate from this context, if any.
 	const Consolidation *consolidation_returning_to(uint64_t pc, const ContextBytes &frame) const
@@ -570,28 +683,28 @@ public:
 		if (!trap_gate || pc != trap_gate)
 			return nullptr;
 		const uint64_t slot = context_rsp(frame) - 8;
-		const auto found = std::find_if(consolidations.begin(), consolidations.end(), [slot](const auto &item) { return item.return_slot == slot; });
-		return found == consolidations.end() ? nullptr : &*found;
+		const auto found = std::find_if(mine().consolidations.begin(), mine().consolidations.end(), [slot](const auto &item) { return item.return_slot == slot; });
+		return found == mine().consolidations.end() ? nullptr : &*found;
 	}
 
-	[[noreturn]] void finish_consolidation(uint64_t continuation)
+	[[noreturn]] void finish_consolidation(uint64_t resume_ip)
 	{
 		const uint64_t slot = context_rsp(context_from_process(context.process.context())) - 8;
-		const auto found = std::find_if(consolidations.begin(), consolidations.end(), [slot](const auto &item) { return item.return_slot == slot; });
-		if (found == consolidations.end())
+		const auto found = std::find_if(mine().consolidations.begin(), mine().consolidations.end(), [slot](const auto &item) { return item.return_slot == slot; });
+		if (found == mine().consolidations.end())
 			throw std::runtime_error("native unwind consolidation returned without a pending catch");
 		auto target = found->target;
 		const size_t depth = found->depth, mark = found->mark;
 		// Callbacks that never returned (a rethrow left them) are abandoned together with this one.
-		consolidations.erase(found, consolidations.end());
-		set_context_rip(target, continuation);
+		mine().consolidations.erase(found, mine().consolidations.end());
+		set_context_rip(target, resume_ip);
 		redirect_to(target, depth, mark);
 	}
 
 private:
 	KernelContext &context;
 	NativeUnwinder &unwinder;
-	Scratch scratch;
+	mutable std::unordered_map<uint32_t, std::unique_ptr<ThreadState>> threads;
 	bool readable(uint64_t address) const
 	{
 		try {
@@ -650,6 +763,19 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 		default: break;
 		}
 		auto record = exceptions->new_record(status, 0, rip, parameters);
+		// As KiUserExceptionDispatcher finds them: the CONTEXT on a 16-byte boundary below the faulting stack pointer and the record above
+		// it, and the handlers' calls below both. The .NET runtime turns a fault in managed code into an exception from these.
+		const uint64_t frame = (context_rsp(origin) - 0x40 - x64_context::size - ((record_size + 15) & ~size_t(15))) & ~uint64_t(15);
+		try {
+			context.process.write_memory(frame, origin);
+			context.process.write_memory(frame + x64_context::size, record);
+			auto lowered = native;
+			lowered.registers.rsp = frame - 8;
+			context.process.set_context(lowered);
+			exceptions->mine().fault_frame = Exceptions::StackFrame{frame, frame + x64_context::size};
+		} catch (const std::runtime_error &) {
+			// A stack that cannot take the frame (overflow): the exception goes out from the dispatcher's own memory.
+		}
 		exceptions->raise(std::move(record), std::move(origin), [fault] { return fault; });
 	};
 	context.describe_stack = [&context, &unwinder] {
@@ -733,7 +859,11 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 		std::vector<uint64_t> parameters(count);
 		for (uint32_t index = 0; call[3] && index < count; ++index)
 			parameters[index] = call.load<uint64_t>(call[3] + index * 8ULL);
-		auto origin = exceptions->caller_context();
+		// The exception comes from inside RaiseException, as on Windows, where both its address and the captured context name the system
+		// library and not the caller: the .NET runtime takes a fault reported inside its own code for a fatal one. The search reaches the
+		// caller by unwinding the stub as a leaf, and a handler that continues returns there (see redirect_to).
+		auto origin = context_from_process(context.process.context());
+		exceptions->raise_stub = context_rip(origin);
 		auto record = exceptions->new_record(call.u32(0), call.u32(1) & flag_noncontinuable, context_rip(origin), parameters);
 		exceptions->raise(std::move(record), std::move(origin), [&context] { return native_raise_exception(context.process); });
 	});
