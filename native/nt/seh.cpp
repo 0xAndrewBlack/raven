@@ -266,8 +266,11 @@ public:
 		// RAVEN_TRACE_EXCEPTIONS names every exception when it is raised, before any handler sees it, with the code addresses on its stack.
 		if (std::getenv("RAVEN_TRACE_EXCEPTIONS")) {
 			const auto *module = unwinder.module_at(context_rip(origin));
-			std::fprintf(stderr, "raven: exception %08x at %llx (%s+%llx) raised\n", le32(record, 0), (unsigned long long)context_rip(origin),
-				module ? module->name.c_str() : "unknown", module ? (unsigned long long)(context_rip(origin) - module->loaded.base()) : 0ULL);
+			static const auto started = std::chrono::steady_clock::now();
+			std::fprintf(stderr, "raven: exception %08x at %llx (%s+%llx) raised on thread %u at %lld ms\n", le32(record, 0),
+				(unsigned long long)context_rip(origin), module ? module->name.c_str() : "unknown",
+				module ? (unsigned long long)(context_rip(origin) - module->loaded.base()) : 0ULL, unsigned(context.threads.current_id()),
+				(long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count());
 			uint64_t rsp = 0;
 			std::memcpy(&rsp, origin.data() + 0x98, 8);
 			describe_record(record, rsp);
