@@ -2559,6 +2559,7 @@ static HRESULT create_factory(REFIID iid, IUnknown **out)
 		Factory_table_[IDWriteFactory_CreateTextFormat] = (void *)factory_create_format;
 		Factory_table_[IDWriteFactory_CreateTextLayout] = (void *)factory_create_layout;
 		Factory_table_[IDWriteFactory_CreateGdiCompatibleTextLayout] = (void *)factory_create_gdi_layout;
+		Factory_table_[IDWriteFactory_CreateEllipsisTrimmingSign] = (void *)factory_ellipsis_sign;
 		Factory_table_[IDWriteFactory_CreateNumberSubstitution] = (void *)factory_number_substitution;
 		Factory_table_[IDWriteFactory1_GetEudcFontCollection] = (void *)factory1_eudc;
 		Factory_table_[IDWriteFactory1_IDWriteFactory1_CreateCustomRenderingParams] = (void *)factory1_custom_params;

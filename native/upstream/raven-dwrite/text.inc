@@ -1050,6 +1050,88 @@ static HRESULT STDMETHODCALLTYPE factory_create_gdi_layout(IDWriteFactory2 *self
 	return layout_from_format(text, length, format, width, height, ppd, TRUE, natural, layout);
 }
 
+/* ---- the ellipsis trimming sign: an inline object that measures and draws U+2026 in the format it was made for ---- */
+typedef struct {
+	const IDWriteInlineObjectVtbl *vtbl;
+	LONG refs;
+	IDWriteTextLayout *layout;
+} TrimmingSign;
+
+#define SIGN_OF(self) ((TrimmingSign *)(self))
+
+static HRESULT STDMETHODCALLTYPE sign_query(IDWriteInlineObject *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (same_guid(iid, &IID_IUnknown) || same_guid(iid, &IID_IDWriteInlineObject)) {
+		InterlockedIncrement(&SIGN_OF(self)->refs);
+		*out = self;
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE sign_add_ref(IDWriteInlineObject *self) { return (ULONG)InterlockedIncrement(&SIGN_OF(self)->refs); }
+static ULONG STDMETHODCALLTYPE sign_release(IDWriteInlineObject *self)
+{
+	const LONG refs = InterlockedDecrement(&SIGN_OF(self)->refs);
+	if (!refs) {
+		IDWriteTextLayout_Release(SIGN_OF(self)->layout);
+		FREE(self);
+	}
+	return (ULONG)refs;
+}
+static HRESULT STDMETHODCALLTYPE sign_draw(IDWriteInlineObject *self, void *context, IDWriteTextRenderer *renderer, FLOAT x, FLOAT y, WINBOOL sideways,
+	WINBOOL rtl, IUnknown *effect)
+{
+	return IDWriteTextLayout_Draw(SIGN_OF(self)->layout, context, renderer, x, y);
+}
+static HRESULT STDMETHODCALLTYPE sign_metrics(IDWriteInlineObject *self, DWRITE_INLINE_OBJECT_METRICS *metrics)
+{
+	DWRITE_TEXT_METRICS text;
+	DWRITE_LINE_METRICS line;
+	UINT32 lines = 0;
+	HRESULT result = IDWriteTextLayout_GetMetrics(SIGN_OF(self)->layout, &text);
+	if (FAILED(result))
+		return result;
+	metrics->width = text.widthIncludingTrailingWhitespace;
+	metrics->height = text.height;
+	metrics->baseline = SUCCEEDED(IDWriteTextLayout_GetLineMetrics(SIGN_OF(self)->layout, &line, 1, &lines)) && lines ? line.baseline : text.height;
+	metrics->supportsSideways = FALSE;
+	return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE sign_overhang(IDWriteInlineObject *self, DWRITE_OVERHANG_METRICS *overhangs)
+{
+	memset(overhangs, 0, sizeof(*overhangs));
+	return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE sign_breaks(IDWriteInlineObject *self, DWRITE_BREAK_CONDITION *before, DWRITE_BREAK_CONDITION *after)
+{
+	*before = *after = DWRITE_BREAK_CONDITION_NEUTRAL;
+	return S_OK;
+}
+
+static const IDWriteInlineObjectVtbl sign_vtbl = {sign_query, sign_add_ref, sign_release, sign_draw, sign_metrics, sign_overhang, sign_breaks};
+
+static HRESULT STDMETHODCALLTYPE factory_ellipsis_sign(IDWriteFactory2 *self, IDWriteTextFormat *format, IDWriteInlineObject **out)
+{
+	static const WCHAR ellipsis[] = {0x2026, 0};
+	TrimmingSign *sign;
+	HRESULT result;
+	if (!format || !out)
+		return E_INVALIDARG;
+	if (!(sign = ALLOC(sizeof(*sign))))
+		return E_OUTOFMEMORY;
+	if (FAILED(result = layout_from_format(ellipsis, 1, format, 1e6f, 1e6f, 1.0f, FALSE, FALSE, &sign->layout))) {
+		FREE(sign);
+		return result;
+	}
+	sign->vtbl = &sign_vtbl;
+	sign->refs = 1;
+	*out = (IDWriteInlineObject *)sign;
+	return S_OK;
+}
+
 /* ---- the bitmap render target ---- */
 typedef struct {
 	const IDWriteBitmapRenderTargetVtbl *vtbl;

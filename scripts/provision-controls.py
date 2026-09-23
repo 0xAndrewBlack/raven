@@ -39,11 +39,13 @@ def main():
     link_extra = ["-Wl,--kill-at"] if x86 else []
     bases = dict(comctl32=0x1f000000, user32=0x1f400000, shell=0x1f800000, crt=0x1fc00000) if x86 else dict(
         comctl32=0x1f0000000, user32=0x1f4000000, shell=0x1f8000000, crt=0x1fc000000)
-    wanted = {"comctl32", "user32", "shell", "crt", "dwrite"} if args.components == "all" else set(args.components.split(","))
+    wanted = {"comctl32", "user32", "shell", "crt", "dwrite", "d2d1", "uianimation"} if args.components == "all" else set(args.components.split(","))
     if x86:
         # The 32-bit C runtime component is built by the main build; the others are described here.
         wanted.discard("crt")
         wanted.discard("dwrite")
+        wanted.discard("d2d1")
+        wanted.discard("uianimation")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, TMPDIR=str(output), TMP=str(output), TEMP=str(output))
@@ -184,7 +186,7 @@ def main():
          "-o", output / "comctl32.dll", *compiled, *pseh_objects, objects / "comctl32.res.o", output / "comctl32.def",
          "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lntdll", "-limm32", "-lusp10", "-luxtheme", "-lwinmm",
          "-lole32", "-loleaut32", "-lshlwapi", "-luuid", "-lgcc"])
-    if not wanted & {"user32", "shell", "crt", "dwrite"}:
+    if not wanted & {"user32", "shell", "crt", "dwrite", "d2d1", "uianimation"}:
         print(output / "comctl32.dll")
         return
     # The user32 component: upstream user-mode sources on a bridge that stands in for the kernel services.
@@ -196,7 +198,7 @@ def main():
                   f"-ffile-prefix-map={source}=reactos", f"-ffile-prefix-map={repo}=raven", f"-ffile-prefix-map={output}=component",
                   *["-I" + str(path) for path in user_includes]]
     user_sources = [user_root / name for name in USER32_SOURCES] + [source / "win32ss/user/rtl/text.c",
-                    user_support / "bridge.c", user_support / "register.c", support / "crt.c", support / "debug.c"]
+                    user_support / "bridge.c", user_support / "register.c", user_support / "scrollbar_control.c", support / "crt.c", support / "debug.c"]
 
     def compile_user(path):
         name = "user32_" + (path.parent.name + "_" if path.parent.name in ("windows", "controls", "rtl") else "") + path.stem
@@ -220,7 +222,7 @@ def main():
     run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{bases['user32']:#x},--no-insert-timestamp", *link_extra,
          "-o", output / "raven-user32.dll", *user_objects, *pseh_objects, objects / "user32.res.o", output / "raven-user32.def",
          "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lntdll", "-limm32", "-lusp10", "-lgcc"])
-    if not wanted & {"shell", "crt", "dwrite"}:
+    if not wanted & {"shell", "crt", "dwrite", "d2d1", "uianimation"}:
         print(output / "raven-user32.dll")
         return
     # The shell component is Raven code on the public headers: the file dialogs and the class registry.
@@ -235,7 +237,7 @@ def main():
     run([triple + "-gcc", "-c", *shell_flags, shell_support / "dialog.c", "-o", shell_objects[5]])
     shell_defined = decorated(shell_objects)
     shell_names = ("CoCreateInstance", "CoGetClassObject", "CoGetMalloc", "SHCreateItemFromParsingName", "SHGetPropertyStoreForWindow", "PropVariantClear", "SHAppBarMessage", "GetOpenFileNameW", "GetSaveFileNameW", "CommDlgExtendedError", "GetFileTitleW", "IUnknown_QueryService", "CLSIDFromProgID",
-                   "SHCreateStreamOnFileA", "SHCreateStreamOnFileW", "SHCreateStreamOnFileEx", "PropVariantCopy")
+                   "SHCreateStreamOnFileA", "SHCreateStreamOnFileW", "SHCreateStreamOnFileEx", "PropVariantCopy", "CoGetContextToken", "CoGetObjectContext")
     (output / "raven-shell.def").write_text("NAME raven-shell.dll\nEXPORTS\n" + "".join(definition_line(name, shell_defined.get(name)) for name in shell_names))
     run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{bases['shell']:#x},--no-insert-timestamp", *link_extra,
          "-o", output / "raven-shell.dll", *shell_objects, output / "raven-shell.def", "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lole32", "-luuid", "-lgcc"])
@@ -246,13 +248,16 @@ def main():
     run([triple + "-windres", "-O", "coff", "-I" + str(control_support), "-i", control_support / "control.rc", "-o", control_objects[1]])
     run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp", *link_extra,
          "-o", output / "control.exe", *control_objects, shell_objects[3], "-luser32", "-lgdi32", "-ladvapi32", "-lcomctl32", "-lkernel32", "-lgcc"])
+    if wanted & {"dwrite", "d2d1", "uianimation"}:
+        # The host services the DirectWrite and Direct2D components call: fonts measured and rasterized with FreeType, surfaces drawn with Skia.
+        host_names = ["RavenFontClose", "RavenFontGlyphs", "RavenFontInfo", "RavenFontMetrics", "RavenFontName", "RavenFontOpen", "RavenFontOutline",
+                      "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace", "RavenCanvasCreate", "RavenCanvasDestroy", "RavenCanvasDraw",
+                      "RavenCanvasPixels", "RavenCanvasSize", "RavenPathCombine", "RavenPathWiden"]
+        (output / "ravenhost.def").write_text("LIBRARY ravenhost.dll\nEXPORTS\n" + "".join(name + "\n" for name in host_names))
+        run([triple + "-dlltool", "-d", output / "ravenhost.def", "-l", output / "libravenhost.a"])
     if "dwrite" in wanted:
         # The DirectWrite component: Raven code on the public headers, whose fonts come from the host through ravenhost.dll.
         dwrite_support = repo / "native/upstream/raven-dwrite"
-        host_names = ["RavenFontClose", "RavenFontGlyphs", "RavenFontInfo", "RavenFontMetrics", "RavenFontName", "RavenFontOpen", "RavenFontOutline",
-                      "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace"]
-        (output / "ravenhost.def").write_text("LIBRARY ravenhost.dll\nEXPORTS\n" + "".join(name + "\n" for name in host_names))
-        run([triple + "-dlltool", "-d", output / "ravenhost.def", "-l", output / "libravenhost.a"])
         dwrite_objects = [objects / "dwrite.o", objects / "dwrite_crt.o"]
         dwrite_flags = ["-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-ffreestanding", "-fno-builtin", f"-ffile-prefix-map={repo}=raven"]
         run([triple + "-gcc", "-c", *dwrite_flags, "-I" + str(dwrite_support), dwrite_support / "dwrite.c", "-o", dwrite_objects[0]])
@@ -260,6 +265,33 @@ def main():
         (output / "raven-dwrite.def").write_text("NAME raven-dwrite.dll\nEXPORTS\nDWriteCreateFactory\n")
         run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,0x1fb000000,--no-insert-timestamp", *link_extra,
              "-o", output / "raven-dwrite.dll", *dwrite_objects, output / "raven-dwrite.def", "-L" + str(output), "-lravenhost", "-lgdi32", "-lkernel32", "-lgcc"])
+    if "d2d1" in wanted:
+        # The Direct2D component: Raven code on the public headers; surfaces live with the host and are drawn with Skia through ravenhost.dll,
+        # text comes from the DirectWrite component and pictures from the imaging component.
+        d2d1_support = repo / "native/upstream/raven-d2d1"
+        d2d1_objects = [objects / "d2d1.o", objects / "d2d1_crt.o"]
+        d2d1_flags = ["-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-ffreestanding", "-fno-builtin", "-fno-math-errno",
+                      f"-ffile-prefix-map={repo}=raven"]
+        run([triple + "-gcc", "-c", *d2d1_flags, "-I" + str(d2d1_support), d2d1_support / "d2d1.c", "-o", d2d1_objects[0]])
+        run([triple + "-gcc", "-c", *d2d1_flags, repo / "native/upstream/raven-dwrite/crt.c", "-o", d2d1_objects[1]])
+        (output / "raven-d2d1.def").write_text("NAME raven-d2d1.dll\nEXPORTS\n" + "".join(name + "\n" for name in (
+            "D2D1ComputeMaximumScaleFactor", "D2D1ConvertColorSpace", "D2D1CreateDevice", "D2D1CreateDeviceContext", "D2D1CreateFactory",
+            "D2D1InvertMatrix", "D2D1IsMatrixInvertible", "D2D1MakeRotateMatrix", "D2D1MakeSkewMatrix", "D2D1SinCos", "D2D1Tan", "D2D1Vec3Length")))
+        run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,0x1fa000000,--no-insert-timestamp", *link_extra,
+             "-o", output / "raven-d2d1.dll", *d2d1_objects, output / "raven-d2d1.def", "-L" + str(output), "-lravenhost", "-ldwrite",
+             "-lwindowscodecs", "-luser32", "-lgdi32", "-lkernel32", "-lgcc"])
+    if "uianimation" in wanted:
+        # The Windows Animation component: Raven code on the public headers, the classes UIAnimation.dll registers.
+        animation_support = repo / "native/upstream/raven-uianimation"
+        animation_objects = [objects / "uianimation.o", objects / "uianimation_crt.o"]
+        animation_flags = ["-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-ffreestanding", "-fno-builtin", "-fno-math-errno",
+                           f"-ffile-prefix-map={repo}=raven"]
+        run([triple + "-gcc", "-c", *animation_flags, "-I" + str(animation_support), animation_support / "uianimation.c", "-o", animation_objects[0]])
+        run([triple + "-gcc", "-c", *animation_flags, repo / "native/upstream/raven-dwrite/crt.c", "-o", animation_objects[1]])
+        (output / "raven-uianimation.def").write_text("NAME raven-uianimation.dll\nEXPORTS\nDllCanUnloadNow PRIVATE\nDllGetClassObject PRIVATE\n")
+        run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,0x1f9000000,--no-insert-timestamp", *link_extra,
+             "-o", output / "raven-uianimation.dll", *animation_objects, output / "raven-uianimation.def", "-L" + str(output), "-lravenhost",
+             "-luuid", "-lkernel32", "-lgcc"])
     if "crt" in wanted:
         # The C runtime component: the Universal CRT entry points programs import from ucrtbase.dll.
         crt_object = objects / "ucrtbase.o"
@@ -269,7 +301,9 @@ def main():
              "-o", output / "ucrtbase.dll", crt_object, "-lkernel32", "-lgcc"])
     result = dict(revision=REVISION, archive_sha256=ARCHIVE_SHA256, commands=records,
                   component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest()
-                                    for name in ("comctl32.dll", "raven-user32.dll", "raven-shell.dll", "raven-dwrite.dll", "ucrtbase.dll") if (output / name).exists()},
+                                    for name in ("comctl32.dll", "raven-user32.dll", "raven-shell.dll", "raven-dwrite.dll", "raven-d2d1.dll", "raven-uianimation.dll",
+                                                 "ucrtbase.dll")
+                                    if (output / name).exists()},
                   user32_exports=exported,
                   patches={patch.name: hashlib.sha256(patch.read_bytes()).hexdigest() for patch in patches},
                   source_hashes={path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
