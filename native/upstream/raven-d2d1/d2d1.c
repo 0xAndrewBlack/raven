@@ -53,6 +53,19 @@ static HRESULT unimplemented(const char *interface_name, const char *method)
 
 #include "d2d1_tables.h"
 
+/* The kind of pixel of a WIC bitmap a render target draws into: 1 for 8bppAlpha, 2 for 8bppGray (both a byte a pixel), 4 for 32 bits. */
+static UINT wic_depth(IWICBitmap *wic)
+{
+	WICPixelFormatGUID format;
+	if (FAILED(IWICBitmap_GetPixelFormat(wic, &format)))
+		return 4;
+	if (!memcmp(&format, &GUID_WICPixelFormat8bppAlpha, sizeof(format)))
+		return 1;
+	if (!memcmp(&format, &GUID_WICPixelFormat8bppGray, sizeof(format)))
+		return 2;
+	return 4;
+}
+
 /* The headers leave this one out. */
 DEFINE_GUID(IID_ID2D1HwndRenderTarget, 0x2cd90698, 0x12e2, 0x11dc, 0x9f, 0xed, 0x00, 0x11, 0x43, 0xa0, 0x55, 0xf9);
 
@@ -1359,6 +1372,7 @@ static HRESULT STDMETHODCALLTYPE bitmap_GetSurface(void *iface, IDXGISurface **s
 
 /* Pixels in the format of the bitmap: four bytes each, blue first, premultiplied unless the format says alpha is ignored. Programs
  * hand over 32-bit formats; other formats are refused. */
+
 static HRESULT STDMETHODCALLTYPE bitmap_CopyFromMemory(void *iface, const D2D1_RECT_U *rect, const void *data, UINT32 pitch)
 {
 	struct bitmap *self = iface;
@@ -1367,6 +1381,25 @@ static HRESULT STDMETHODCALLTYPE bitmap_CopyFromMemory(void *iface, const D2D1_R
 		area = *rect;
 	if (area.right <= area.left || area.bottom <= area.top)
 		return S_OK;
+	if (self->format.format == DXGI_FORMAT_A8_UNORM) {
+		/* An alpha-only bitmap gives a byte a pixel: the host keeps it as black with that alpha. */
+		const UINT32 width = area.right - area.left, height = area.bottom - area.top;
+		BYTE *copy = ALLOC((size_t)width * height * 4);
+		UINT32 row, column;
+		if (!copy)
+			return E_OUTOFMEMORY;
+		for (row = 0; row < height; ++row) {
+			const BYTE *from = (const BYTE *)data + (size_t)row * pitch;
+			BYTE *to = copy + (size_t)row * width * 4;
+			for (column = 0; column < width; ++column) {
+				to[column * 4] = to[column * 4 + 1] = to[column * 4 + 2] = 0;
+				to[column * 4 + 3] = from[column];
+			}
+		}
+		RavenCanvasPixels(self->surface, (INT32)area.left, (INT32)area.top, width, height, copy, width * 4, 1);
+		FREE(copy);
+		return S_OK;
+	}
 	if (self->format.alphaMode == D2D1_ALPHA_MODE_IGNORE) {
 		/* The alpha byte means nothing: the host keeps the pixels opaque. */
 		const UINT32 width = area.right - area.left, height = area.bottom - area.top;
@@ -1420,13 +1453,21 @@ static HRESULT STDMETHODCALLTYPE bitmap_CopyFromBitmap(void *iface, const D2D1_P
 static HRESULT STDMETHODCALLTYPE bitmap_Map(void *iface, D2D1_MAP_OPTIONS options, D2D1_MAPPED_RECT *mapped)
 {
 	struct bitmap *self = iface;
+	const BOOL alpha = self->format.format == DXGI_FORMAT_A8_UNORM;
 	if (self->mapped)
 		return D2DERR_WRONG_STATE;
-	self->mapped_pitch = self->pixels.width * 4;
-	if (!(self->mapped = ALLOC((size_t)self->mapped_pitch * self->pixels.height)))
+	/* The mapping is laid out as the format is: four bytes a pixel, or one for an alpha-only bitmap. */
+	self->mapped_pitch = self->pixels.width * (alpha ? 1 : 4);
+	if (!(self->mapped = ALLOC((size_t)self->pixels.width * 4 * self->pixels.height)))
 		return E_OUTOFMEMORY;
-	if (!(options & D2D1_MAP_OPTIONS_DISCARD))
-		RavenCanvasPixels(self->surface, 0, 0, self->pixels.width, self->pixels.height, self->mapped, self->mapped_pitch, 0);
+	if (!(options & D2D1_MAP_OPTIONS_DISCARD)) {
+		RavenCanvasPixels(self->surface, 0, 0, self->pixels.width, self->pixels.height, self->mapped, self->pixels.width * 4, 0);
+		if (alpha) {
+			UINT32 index;
+			for (index = 0; index < self->pixels.width * self->pixels.height; ++index)
+				self->mapped[index] = self->mapped[index * 4 + 3];
+		}
+	}
 	self->map_options = options;
 	mapped->pitch = self->mapped_pitch;
 	mapped->bits = self->mapped;
@@ -1439,7 +1480,7 @@ static HRESULT STDMETHODCALLTYPE bitmap_Unmap(void *iface)
 	if (!self->mapped)
 		return D2DERR_WRONG_STATE;
 	if (self->map_options & D2D1_MAP_OPTIONS_WRITE)
-		RavenCanvasPixels(self->surface, 0, 0, self->pixels.width, self->pixels.height, self->mapped, self->mapped_pitch, 1);
+		bitmap_CopyFromMemory(self, NULL, self->mapped, self->mapped_pitch);
 	FREE(self->mapped);
 	self->mapped = NULL;
 	return S_OK;
@@ -1842,6 +1883,8 @@ struct target {
 	D2D1_TAG tag1, tag2;
 	IDWriteRenderingParams *params;
 	BOOL drawing;
+	/* Whether Direct2D drew since the target last handed its pixels on: a WIC bitmap is written back only then. */
+	BOOL drawn;
 	HRESULT error;
 	UINT32 pushed;
 	D2D1_PIXEL_FORMAT format;
@@ -1948,6 +1991,7 @@ static void send(struct target *self, const struct command *command, const struc
 {
 	if (!self->bitmap)
 		return;
+	self->drawn = TRUE;
 	if (!RavenCanvasDraw(self->bitmap->surface, command, data ? data->data : NULL, data ? (DWORD)data->size : 0) && !self->error)
 		self->error = D2DERR_INVALID_CALL;
 }
@@ -2055,6 +2099,72 @@ static void STDMETHODCALLTYPE target_FillGeometry(void *iface, ID2D1Geometry *ge
 		draw_path(target_of(iface), &((struct geometry *)geometry)->path, brush, FALSE, 0, NULL);
 }
 
+/* ---- geometry realizations: a geometry kept ready to fill or to stroke; it is drawn again from the geometry each time ---- */
+struct realization {
+	struct object base;
+	struct geometry *geometry;
+	BOOL stroked;
+	float width;
+	ID2D1StrokeStyle *style;
+};
+
+static void realization_destroy(struct object *base)
+{
+	struct realization *self = (struct realization *)base;
+	IUnknown_Release((IUnknown *)self->geometry);
+	if (self->style)
+		IUnknown_Release((IUnknown *)self->style);
+}
+
+static void **realization_table;
+static const GUID *const realization_iids[] = {&IID_ID2D1Resource, &IID_ID2D1GeometryRealization};
+
+static HRESULT make_realization(void *iface, ID2D1Geometry *geometry, BOOL stroked, float width, ID2D1StrokeStyle *style,
+	ID2D1GeometryRealization **out)
+{
+	struct realization *self;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!geometry)
+		return E_INVALIDARG;
+	if (!realization_table) {
+		realization_table = make_table(ID2D1GeometryRealization_table, ID2D1GeometryRealization_methods);
+		set_resource(realization_table);
+	}
+	if (!(self = ALLOC(sizeof(*self))))
+		return E_OUTOFMEMORY;
+	object_init(&self->base, realization_table, realization_destroy, realization_iids, 2, target_of(iface)->factory);
+	self->geometry = (struct geometry *)geometry;
+	IUnknown_AddRef((IUnknown *)geometry);
+	self->stroked = stroked;
+	self->width = width;
+	self->style = style;
+	if (style)
+		IUnknown_AddRef((IUnknown *)style);
+	*out = (ID2D1GeometryRealization *)self;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE context_CreateFilledGeometryRealization(void *iface, ID2D1Geometry *geometry, FLOAT tolerance,
+	ID2D1GeometryRealization **out)
+{
+	return make_realization(iface, geometry, FALSE, 0, NULL, out);
+}
+
+static HRESULT STDMETHODCALLTYPE context_CreateStrokedGeometryRealization(void *iface, ID2D1Geometry *geometry, FLOAT tolerance,
+	FLOAT width, ID2D1StrokeStyle *style, ID2D1GeometryRealization **out)
+{
+	return make_realization(iface, geometry, TRUE, width, style, out);
+}
+
+static void STDMETHODCALLTYPE context_DrawGeometryRealization(void *iface, ID2D1GeometryRealization *realization, ID2D1Brush *brush)
+{
+	const struct realization *self = (const struct realization *)realization;
+	if (self)
+		draw_path(target_of(iface), &self->geometry->path, brush, self->stroked, self->width, self->style);
+}
+
 /* A bitmap into a destination rectangle (by default its size in device-independent pixels) from a part of it (by default all). */
 static void draw_bitmap(struct target *self, struct bitmap *bitmap, const D2D1_RECT_F *destination, float opacity, UINT32 interpolation,
 	const D2D1_RECT_F *source)
@@ -2099,6 +2209,9 @@ static void STDMETHODCALLTYPE target_DrawBitmap1(void *iface, ID2D1Bitmap *bitma
 	draw_bitmap(target_of(iface), (struct bitmap *)bitmap, destination, opacity, interpolation, source);
 }
 
+struct effect;
+static struct effect *effect_of_image(ID2D1Image *image);
+
 /* DrawImage of a bitmap at an offset; images that are not bitmaps (effects, command lists) draw nothing here. */
 static void STDMETHODCALLTYPE target_DrawImage(void *iface, ID2D1Image *image, const D2D1_POINT_2F *offset, const D2D1_RECT_F *rect,
 	D2D1_INTERPOLATION_MODE interpolation, D2D1_COMPOSITE_MODE mode)
@@ -2108,7 +2221,8 @@ static void STDMETHODCALLTYPE target_DrawImage(void *iface, ID2D1Image *image, c
 	struct bitmap *b;
 	D2D1_RECT_F destination, source;
 	if (!image || FAILED(IUnknown_QueryInterface((IUnknown *)image, &IID_ID2D1Bitmap, (void **)&bitmap))) {
-		unimplemented("ID2D1DeviceContext", "DrawImage of an image that is not a bitmap");
+		if (!effect_of_image(image))
+			unimplemented("ID2D1DeviceContext", "DrawImage of an image that is not a bitmap");
 		return;
 	}
 	b = (struct bitmap *)bitmap;
@@ -2151,22 +2265,58 @@ static void STDMETHODCALLTYPE target_FillOpacityMask(void *iface, ID2D1Bitmap *m
 		FREE(data.data);
 		return;
 	}
-	if (destination) {
-		/* The mask is stretched to the destination through the transform. */
+	{
+		/* The part of the mask the source names (by default all of it) is stretched to the destination (by default the mask's size at
+		 * the origin) through the transform. */
+		const UINT32 full_width = bitmap->pixels.width, full_height = bitmap->pixels.height;
+		UINT32 left = 0, top = 0, width = full_width, height = full_height, row;
 		D2D1_MATRIX_3X2_F stretch = identity, m = world(self);
-		stretch._11 = (destination->right - destination->left) / bitmap->pixels.width;
-		stretch._22 = (destination->bottom - destination->top) / bitmap->pixels.height;
-		stretch._31 = destination->left;
-		stretch._32 = destination->top;
+		if (source) {
+			const float x0 = source->left < 0 ? 0 : source->left, y0 = source->top < 0 ? 0 : source->top;
+			const float x1 = source->right > full_width ? full_width : source->right, y1 = source->bottom > full_height ? full_height : source->bottom;
+			if (x1 <= x0 || y1 <= y0) {
+				FREE(pixels);
+				FREE(data.data);
+				return;
+			}
+			left = (UINT32)x0;
+			top = (UINT32)y0;
+			width = (UINT32)(x1 + 0.5f) - left;
+			height = (UINT32)(y1 + 0.5f) - top;
+			if (!width || !height || left + width > full_width || top + height > full_height) {
+				FREE(pixels);
+				FREE(data.data);
+				return;
+			}
+			for (row = 0; row < height; ++row)
+				memmove(pixels + (size_t)row * width, pixels + (size_t)(top + row) * full_width + left, width);
+		}
+		if (destination) {
+			stretch._11 = (destination->right - destination->left) / width;
+			stretch._22 = (destination->bottom - destination->top) / height;
+			stretch._31 = destination->left;
+			stretch._32 = destination->top;
+		} else {
+			stretch._11 = (float)full_width / width;
+			stretch._22 = (float)full_height / height;
+		}
 		m = multiply(&stretch, &m);
 		put_matrix(command.transform, &m);
+		command.mask_width = width;
+		command.mask_height = height;
+		count = width * height;
 	}
-	command.mask_width = bitmap->pixels.width;
-	command.mask_height = bitmap->pixels.height;
 	bytes_add(&data, pixels, count);
 	send(self, &command, &data);
 	FREE(pixels);
 	FREE(data.data);
+}
+
+/* ID2D1DeviceContext::FillOpacityMask: the same, without the content kind the render target form takes. */
+static void STDMETHODCALLTYPE context_FillOpacityMask(void *iface, ID2D1Bitmap *mask, ID2D1Brush *brush, const D2D1_RECT_F *destination,
+	const D2D1_RECT_F *source)
+{
+	target_FillOpacityMask(iface, mask, brush, D2D1_OPACITY_MASK_CONTENT_GRAPHICS, destination, source);
 }
 
 static void STDMETHODCALLTYPE target_SetTransform(void *iface, const D2D1_MATRIX_3X2_F *m) { target_of(iface)->transform = *m; }
@@ -2309,6 +2459,35 @@ static void STDMETHODCALLTYPE target_RestoreDrawingState(void *iface, ID2D1Drawi
 	target_SetTextRenderingParams(iface, state->params);
 }
 
+/* A WIC target starts from the bitmap's pixels, and takes them again at each BeginDraw, as the program may have written the bitmap itself
+ * in between (Paint.NET renders brush masks on the CPU into the bitmap of a target it then draws on); an 8-bit bitmap gives the alpha or
+ * the grey of each pixel. */
+static void read_wic(struct target *self)
+{
+	UINT width = 0, height = 0, depth, bytes;
+	BYTE *pixels;
+	IWICBitmap_GetSize(self->wic, &width, &height);
+	if (!self->bitmap || width != self->bitmap->pixels.width || height != self->bitmap->pixels.height)
+		return;
+	depth = wic_depth(self->wic);
+	bytes = depth == 4 ? 4 : 1;
+	if (!(pixels = ALLOC((size_t)width * height * 4)))
+		return;
+	if (SUCCEEDED(IWICBitmap_CopyPixels(self->wic, NULL, width * bytes, width * height * bytes, pixels))) {
+		if (depth != 4) {
+			UINT index = width * height;
+			const BOOL alpha = depth == 1;
+			while (index--) {
+				const BYTE value = pixels[index];
+				pixels[index * 4] = pixels[index * 4 + 1] = pixels[index * 4 + 2] = alpha ? 0 : value;
+				pixels[index * 4 + 3] = alpha ? value : 255;
+			}
+		}
+		RavenCanvasPixels(self->bitmap->surface, 0, 0, width, height, pixels, width * 4, 1);
+	}
+	FREE(pixels);
+}
+
 /* What a finished frame turns into: the window's pixels, the bound device context's, the Direct3D texture's or the WIC bitmap's. */
 static void present(struct target *self)
 {
@@ -2317,6 +2496,10 @@ static void present(struct target *self)
 	const UINT32 width = bitmap ? bitmap->pixels.width : 0, height = bitmap ? bitmap->pixels.height : 0;
 	if (!bitmap || (self->kind != TARGET_HWND && self->kind != TARGET_DC && self->kind != TARGET_WIC && !bitmap->dxgi))
 		return;
+	/* A WIC bitmap nothing was drawn on keeps what the program wrote into it. */
+	if (self->kind == TARGET_WIC && !self->drawn)
+		return;
+	self->drawn = FALSE;
 	if (!(pixels = ALLOC((size_t)width * height * 4)))
 		return;
 	RavenCanvasPixels(bitmap->surface, 0, 0, width, height, pixels, width * 4, 0);
@@ -2339,15 +2522,25 @@ static void present(struct target *self)
 	} else if (self->kind == TARGET_WIC && self->wic) {
 		WICRect rect = {0, 0, (INT)width, (INT)height};
 		IWICBitmapLock *lock = NULL;
+		const UINT depth = wic_depth(self->wic);
 		if (SUCCEEDED(IWICBitmap_Lock(self->wic, &rect, WICBitmapLockWrite, &lock))) {
-			UINT stride = 0, size = 0, row;
+			UINT stride = 0, size = 0, row, column;
 			BYTE *data = NULL;
 			IWICBitmapLock_GetStride(lock, &stride);
 			IWICBitmapLock_GetDataPointer(lock, &size, &data);
-			for (row = 0; data && row < height && (size_t)row * stride + width * 4 <= size; ++row)
-				memcpy(data + (size_t)row * stride, pixels + (size_t)row * width * 4, width * 4);
+			for (row = 0; data && row < height && (size_t)row * stride + width * (depth == 4 ? 4 : 1) <= size; ++row) {
+				const BYTE *from = pixels + (size_t)row * width * 4;
+				BYTE *to = data + (size_t)row * stride;
+				if (depth == 4)
+					memcpy(to, from, width * 4);
+				else
+					/* An 8-bit target keeps the alpha (A8, the format of DXGI_FORMAT_A8_UNORM targets) or the grey level. */
+					for (column = 0; column < width; ++column)
+						to[column] = depth == 1 ? from[column * 4 + 3] : from[column * 4];
+			}
 			IWICBitmapLock_Release(lock);
-		}
+		} else
+			unimplemented("IWICBitmap", "Lock for writing failed, so the frame");
 	} else if (bitmap->dxgi) {
 		/* The texture behind the surface takes the pixels through its device's immediate context; RGBA textures get their red and blue
 		 * swapped on the way. */
@@ -2419,6 +2612,9 @@ static void STDMETHODCALLTYPE target_BeginDraw(void *iface)
 	self->error = S_OK;
 	if (self->kind == TARGET_DC && self->dc && self->bitmap)
 		read_bound_dc(self);
+	if (self->kind == TARGET_WIC && self->wic)
+		read_wic(self);
+	self->drawn = FALSE;
 }
 
 static HRESULT STDMETHODCALLTYPE target_EndDraw(void *iface, D2D1_TAG *tag1, D2D1_TAG *tag2)
@@ -3140,13 +3336,578 @@ static BOOL STDMETHODCALLTYPE context_IsBufferPrecisionSupported(void *iface, D2
 	return precision == D2D1_BUFFER_PRECISION_8BPC_UNORM || precision == D2D1_BUFFER_PRECISION_8BPC_UNORM_SRGB;
 }
 
+/* ---- a program's own effects ----
+ * RegisterEffectFromString names an effect's custom properties in XML and binds each to a getter and a setter on the object the program's
+ * factory makes. The registration is kept so that CreateEffect makes that object and routes the property values through the bindings. */
+enum { REGISTERED_EFFECTS = 64, EFFECT_PROPERTIES = 32 };
+
+/* D2D1_PROPERTY_BINDING and its functions, as d2d1effectauthor.h lays them out. */
+typedef HRESULT (CALLBACK *property_setter)(IUnknown *effect, const BYTE *data, UINT32 size);
+typedef HRESULT (CALLBACK *property_getter)(const IUnknown *effect, BYTE *data, UINT32 size, UINT32 *actual);
+
+struct property_binding {
+	const WCHAR *name;
+	property_setter set;
+	property_getter get;
+};
+
+struct effect_property {
+	WCHAR *name;
+	property_setter set;
+	property_getter get;
+};
+
+struct registered_effect {
+	CLSID clsid;
+	PD2D1_EFFECT_FACTORY factory;
+	struct effect_property properties[EFFECT_PROPERTIES];
+	UINT32 property_count;
+};
+
+static struct registered_effect registered_effects[REGISTERED_EFFECTS];
+static UINT32 registered_effect_count;
+static CRITICAL_SECTION registered_lock;
+static LONG registered_lock_ready;
+
+static void lock_registered(void)
+{
+	if (!InterlockedCompareExchange(&registered_lock_ready, 1, 0))
+		InitializeCriticalSection(&registered_lock);
+	EnterCriticalSection(&registered_lock);
+}
+
+static struct registered_effect *find_registered(REFCLSID clsid)
+{
+	UINT32 index;
+	for (index = 0; index < registered_effect_count; ++index)
+		if (same_guid(&registered_effects[index].clsid, clsid))
+			return &registered_effects[index];
+	return NULL;
+}
+
+static int wide_equal(const WCHAR *a, const WCHAR *b)
+{
+	while (*a && *a == *b) {
+		++a;
+		++b;
+	}
+	return *a == *b;
+}
+
+static size_t wide_length(const WCHAR *text)
+{
+	size_t length = 0;
+	while (text[length])
+		++length;
+	return length;
+}
+
+/* Whether text starts with prefix. */
+static int wide_starts(const WCHAR *text, const WCHAR *prefix)
+{
+	while (*prefix && *text == *prefix) {
+		++text;
+		++prefix;
+	}
+	return !*prefix;
+}
+
+static WCHAR *wide_copy(const WCHAR *text, size_t length)
+{
+	WCHAR *copy = ALLOC((length + 1) * sizeof(WCHAR));
+	if (copy) {
+		memcpy(copy, text, length * sizeof(WCHAR));
+		copy[length] = 0;
+	}
+	return copy;
+}
+
+/* The custom properties are the <Property> elements directly inside <Effect>, in order, other than the ones that describe the effect. */
+static void parse_effect_properties(struct registered_effect *effect, const WCHAR *xml)
+{
+	static const WCHAR *const described[] = {L"DisplayName", L"Author", L"Category", L"Description"};
+	int depth = 0;
+	const WCHAR *at;
+	for (at = xml; *at; ++at) {
+		if (at[0] == '<' && at[1] == '/' && wide_starts(at + 2, L"Property")) {
+			--depth;
+			continue;
+		}
+		if (at[0] != '<' || !wide_starts(at + 1, L"Property") || (at[9] != ' ' && at[9] != '\t' && at[9] != '\r' && at[9] != '\n'))
+			continue;
+		{
+			const WCHAR *end = at, *name = NULL;
+			size_t length = 0;
+			int closed;
+			while (*end && *end != '>')
+				++end;
+			closed = end > at && end[-1] == '/';
+			for (name = at; name < end; ++name)
+				if (wide_starts(name, L"name=") && (name[5] == '\'' || name[5] == '"')) {
+					const WCHAR quote = name[5];
+					name += 6;
+					while (name + length < end && name[length] != quote)
+						++length;
+					break;
+				}
+			if (depth == 0 && name < end && length) {
+				WCHAR *copy = wide_copy(name, length);
+				UINT32 index;
+				int skip = 0;
+				for (index = 0; copy && index < sizeof(described) / sizeof(described[0]); ++index)
+					skip |= wide_equal(copy, described[index]);
+				if (copy && !skip && effect->property_count < EFFECT_PROPERTIES)
+					effect->properties[effect->property_count++].name = copy;
+				else
+					FREE(copy);
+			}
+			if (!closed)
+				++depth;
+			at = end;
+			if (!*at)
+				break;
+		}
+	}
+}
+
+static HRESULT register_effect(REFCLSID clsid, const WCHAR *xml, const D2D1_PROPERTY_BINDING *given, UINT32 count, PD2D1_EFFECT_FACTORY factory)
+{
+	const struct property_binding *bindings = (const struct property_binding *)given;
+	struct registered_effect *effect;
+	UINT32 index, property;
+	if (!clsid || !xml || !factory || (count && !bindings))
+		return E_INVALIDARG;
+	lock_registered();
+	if (!(effect = find_registered(clsid))) {
+		if (registered_effect_count == REGISTERED_EFFECTS) {
+			LeaveCriticalSection(&registered_lock);
+			return E_OUTOFMEMORY;
+		}
+		effect = &registered_effects[registered_effect_count++];
+		memset(effect, 0, sizeof(*effect));
+		effect->clsid = *clsid;
+		effect->factory = factory;
+		parse_effect_properties(effect, xml);
+		for (index = 0; index < count; ++index)
+			for (property = 0; property < effect->property_count; ++property)
+				if (bindings[index].name && wide_equal(bindings[index].name, effect->properties[property].name)) {
+					effect->properties[property].set = bindings[index].set;
+					effect->properties[property].get = bindings[index].get;
+				}
+	}
+	LeaveCriticalSection(&registered_lock);
+	return S_OK;
+}
+
+/* ---- effects ----
+ * An effect keeps its inputs and the values set on its properties, and gives out one image as its output. What an effect computes is not
+ * run here: its output draws nothing, which leaves what is under it, and its bounds are those of its first input. A program's own effects
+ * (RegisterEffectFromString) are created the same way, so a program that draws through them keeps going. */
+enum { EFFECT_INPUTS = 16, EFFECT_VALUES = 64 };
+
+struct effect_value {
+	UINT32 index, size;
+	BYTE *data;
+};
+
+struct effect;
+
+struct effect_image {
+	struct object base;
+	struct effect *effect;
+};
+
+struct effect {
+	struct object base;
+	/* ID2D1Resource, which an effect also is: its methods share the slots of the property methods, so it is a table of its own. */
+	void **resource;
+	struct effect_image *output;
+	ID2D1Image *inputs[EFFECT_INPUTS];
+	UINT32 input_count;
+	struct effect_value values[EFFECT_VALUES];
+	UINT32 value_count;
+	/* For a program's own effect: the object its factory made, which the property bindings act on, and the registration. */
+	IUnknown *impl;
+	const struct registered_effect *registered;
+};
+
+static const GUID *const effect_iids[] = {&IID_ID2D1Properties, &IID_ID2D1Effect};
+static const GUID *const effect_image_iids[] = {&IID_ID2D1Resource, &IID_ID2D1Image};
+static void **effect_table, **effect_image_table;
+
+static void effect_image_destroy(struct object *base)
+{
+	(void)base;
+}
+
+static void effect_destroy(struct object *base)
+{
+	struct effect *self = (struct effect *)base;
+	UINT32 index;
+	for (index = 0; index < EFFECT_INPUTS; ++index)
+		if (self->inputs[index])
+			IUnknown_Release((IUnknown *)self->inputs[index]);
+	for (index = 0; index < self->value_count; ++index)
+		FREE(self->values[index].data);
+	if (self->output) {
+		self->output->effect = NULL;
+		object_Release(self->output);
+	}
+	if (self->impl)
+		IUnknown_Release(self->impl);
+}
+
+static struct effect_value *effect_value_at(struct effect *self, UINT32 index)
+{
+	UINT32 at;
+	for (at = 0; at < self->value_count; ++at)
+		if (self->values[at].index == index)
+			return &self->values[at];
+	return NULL;
+}
+
+/* The custom property at an index, for a program's own effect. */
+static const struct effect_property *effect_property_at(const struct effect *self, UINT32 index)
+{
+	return self->registered && index < self->registered->property_count ? &self->registered->properties[index] : NULL;
+}
+
+static UINT32 STDMETHODCALLTYPE effect_GetPropertyCount(void *iface)
+{
+	const struct effect *self = iface;
+	return self->registered ? self->registered->property_count : 0;
+}
+
+static HRESULT STDMETHODCALLTYPE effect_GetPropertyName(void *iface, UINT32 index, WCHAR *name, UINT32 count)
+{
+	const struct effect_property *property = effect_property_at(iface, index);
+	size_t length;
+	if (name && count)
+		name[0] = 0;
+	if (!property)
+		return D2DERR_INVALID_PROPERTY;
+	length = wide_length(property->name);
+	if (!name || count <= length)
+		return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+	memcpy(name, property->name, (length + 1) * sizeof(WCHAR));
+	return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE effect_GetPropertyNameLength(void *iface, UINT32 index)
+{
+	const struct effect_property *property = effect_property_at(iface, index);
+	return property ? (UINT32)wide_length(property->name) : 0;
+}
+
+static D2D1_PROPERTY_TYPE STDMETHODCALLTYPE effect_GetType(void *iface, UINT32 index) { return D2D1_PROPERTY_TYPE_UNKNOWN; }
+
+static UINT32 STDMETHODCALLTYPE effect_GetPropertyIndex(void *iface, const WCHAR *name)
+{
+	const struct effect *self = iface;
+	UINT32 index;
+	for (index = 0; name && self->registered && index < self->registered->property_count; ++index)
+		if (wide_equal(self->registered->properties[index].name, name))
+			return index;
+	return UINT_MAX;
+}
+
+static HRESULT STDMETHODCALLTYPE effect_SetValue(void *iface, UINT32 index, D2D1_PROPERTY_TYPE type, const BYTE *data, UINT32 size);
+static HRESULT STDMETHODCALLTYPE effect_GetValue(void *iface, UINT32 index, D2D1_PROPERTY_TYPE type, BYTE *data, UINT32 size);
+
+static HRESULT STDMETHODCALLTYPE effect_SetValueByName(void *iface, const WCHAR *name, D2D1_PROPERTY_TYPE type, const BYTE *data, UINT32 size)
+{
+	const UINT32 index = effect_GetPropertyIndex(iface, name);
+	return index == UINT_MAX ? S_OK : effect_SetValue(iface, index, type, data, size);
+}
+
+static HRESULT STDMETHODCALLTYPE effect_SetValue(void *iface, UINT32 index, D2D1_PROPERTY_TYPE type, const BYTE *data, UINT32 size)
+{
+	struct effect *self = iface;
+	struct effect_value *value = effect_value_at(self, index);
+	const struct effect_property *property = effect_property_at(self, index);
+	BYTE *copy;
+	if (size && !data)
+		return E_INVALIDARG;
+	if (property && property->set && self->impl)
+		return property->set(self->impl, data, size);
+	if (!value) {
+		if (self->value_count == EFFECT_VALUES)
+			return E_OUTOFMEMORY;
+		value = &self->values[self->value_count++];
+		value->index = index;
+		value->size = 0;
+		value->data = NULL;
+	}
+	if (!(copy = ALLOC(size ? size : 1)))
+		return E_OUTOFMEMORY;
+	if (size)
+		memcpy(copy, data, size);
+	FREE(value->data);
+	value->data = copy;
+	value->size = size;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE effect_GetValueByName(void *iface, const WCHAR *name, D2D1_PROPERTY_TYPE type, BYTE *data, UINT32 size)
+{
+	const UINT32 index = effect_GetPropertyIndex(iface, name);
+	if (index != UINT_MAX)
+		return effect_GetValue(iface, index, type, data, size);
+	if (data && size)
+		memset(data, 0, size);
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE effect_GetValue(void *iface, UINT32 index, D2D1_PROPERTY_TYPE type, BYTE *data, UINT32 size)
+{
+	const struct effect *self = iface;
+	const struct effect_value *value = effect_value_at(iface, index);
+	const struct effect_property *property = effect_property_at(self, index);
+	if (size && !data)
+		return E_INVALIDARG;
+	if (property && property->get && self->impl) {
+		UINT32 actual = 0;
+		return property->get(self->impl, data, size, &actual);
+	}
+	if (size)
+		memset(data, 0, size);
+	if (value)
+		memcpy(data, value->data, value->size < size ? value->size : size);
+	return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE effect_GetValueSize(void *iface, UINT32 index)
+{
+	const struct effect *self = iface;
+	const struct effect_value *value = effect_value_at(iface, index);
+	const struct effect_property *property = effect_property_at(self, index);
+	if (property && property->get && self->impl) {
+		UINT32 actual = 0;
+		property->get(self->impl, NULL, 0, &actual);
+		return actual;
+	}
+	return value ? value->size : 0;
+}
+
+static HRESULT STDMETHODCALLTYPE effect_GetSubProperties(void *iface, UINT32 index, ID2D1Properties **out)
+{
+	if (out)
+		*out = NULL;
+	return D2DERR_NO_SUBPROPERTIES;
+}
+
+static void STDMETHODCALLTYPE effect_SetInput(void *iface, UINT32 index, ID2D1Image *input, BOOL invalidate)
+{
+	struct effect *self = iface;
+	if (index >= EFFECT_INPUTS)
+		return;
+	if (input)
+		IUnknown_AddRef((IUnknown *)input);
+	if (self->inputs[index])
+		IUnknown_Release((IUnknown *)self->inputs[index]);
+	self->inputs[index] = input;
+	if (index >= self->input_count)
+		self->input_count = index + 1;
+}
+
+static HRESULT STDMETHODCALLTYPE effect_SetInputCount(void *iface, UINT32 count)
+{
+	struct effect *self = iface;
+	UINT32 index;
+	if (count > EFFECT_INPUTS)
+		return E_INVALIDARG;
+	for (index = count; index < EFFECT_INPUTS; ++index)
+		if (self->inputs[index]) {
+			IUnknown_Release((IUnknown *)self->inputs[index]);
+			self->inputs[index] = NULL;
+		}
+	self->input_count = count;
+	return S_OK;
+}
+
+static void STDMETHODCALLTYPE effect_GetInput(void *iface, UINT32 index, ID2D1Image **input)
+{
+	struct effect *self = iface;
+	*input = index < EFFECT_INPUTS ? self->inputs[index] : NULL;
+	if (*input)
+		IUnknown_AddRef((IUnknown *)*input);
+}
+
+static UINT32 STDMETHODCALLTYPE effect_GetInputCount(void *iface)
+{
+	return ((struct effect *)iface)->input_count;
+}
+
+static void STDMETHODCALLTYPE effect_GetOutput(void *iface, ID2D1Image **output)
+{
+	struct effect *self = iface;
+	*output = (ID2D1Image *)self->output;
+	object_AddRef(self->output);
+}
+
+static void **effect_resource_table;
+
+static struct effect *effect_of(void *iface)
+{
+	return *(void ***)iface == effect_resource_table ? CONTAINER(iface, struct effect, resource) : iface;
+}
+
+static HRESULT STDMETHODCALLTYPE effect_QueryInterface(void *iface, REFIID riid, void **out)
+{
+	struct effect *self = effect_of(iface);
+	void *found = NULL;
+	if (!out)
+		return E_POINTER;
+	if (same_guid(riid, &IID_IUnknown) || any_guid(riid, effect_iids, 2))
+		found = self;
+	else if (same_guid(riid, &IID_ID2D1Resource))
+		found = &self->resource;
+	else if (same_guid(riid, &IID_ID2D1Image)) {
+		/* An effect answers for the image it gives out, as Direct2D's effects do: a program draws the effect where an image goes. */
+		object_AddRef(self->output);
+		*out = self->output;
+		return S_OK;
+	}
+	*out = found;
+	if (!found)
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->base.refs);
+	return S_OK;
+}
+
+static ULONG STDMETHODCALLTYPE effect_AddRef(void *iface)
+{
+	return object_AddRef(effect_of(iface));
+}
+
+static ULONG STDMETHODCALLTYPE effect_Release(void *iface)
+{
+	return object_Release(effect_of(iface));
+}
+
+static void STDMETHODCALLTYPE effect_GetFactory(void *iface, ID2D1Factory **factory)
+{
+	object_GetFactory(effect_of(iface), factory);
+}
+
+static HRESULT make_effect(IUnknown *factory, ID2D1Effect **out)
+{
+	struct effect *self;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!effect_table) {
+		effect_table = make_table(ID2D1Properties_table, ID2D1Properties_methods + 5);
+		effect_table[0] = (void *)effect_QueryInterface;
+		effect_table[1] = (void *)effect_AddRef;
+		effect_table[2] = (void *)effect_Release;
+		effect_resource_table = ALLOC(4 * sizeof(void *));
+		effect_resource_table[0] = (void *)effect_QueryInterface;
+		effect_resource_table[1] = (void *)effect_AddRef;
+		effect_resource_table[2] = (void *)effect_Release;
+		effect_resource_table[3] = (void *)effect_GetFactory;
+		effect_table[ID2D1Properties_GetPropertyCount_slot] = (void *)effect_GetPropertyCount;
+		effect_table[ID2D1Properties_GetPropertyName_slot] = (void *)effect_GetPropertyName;
+		effect_table[ID2D1Properties_GetPropertyNameLength_slot] = (void *)effect_GetPropertyNameLength;
+		effect_table[ID2D1Properties_GetType_slot] = (void *)effect_GetType;
+		effect_table[ID2D1Properties_GetPropertyIndex_slot] = (void *)effect_GetPropertyIndex;
+		effect_table[ID2D1Properties_SetValueByName_slot] = (void *)effect_SetValueByName;
+		effect_table[ID2D1Properties_SetValue_slot] = (void *)effect_SetValue;
+		effect_table[ID2D1Properties_GetValueByName_slot] = (void *)effect_GetValueByName;
+		effect_table[ID2D1Properties_GetValue_slot] = (void *)effect_GetValue;
+		effect_table[ID2D1Properties_GetValueSize_slot] = (void *)effect_GetValueSize;
+		effect_table[ID2D1Properties_GetSubProperties_slot] = (void *)effect_GetSubProperties;
+		effect_table[ID2D1Properties_methods] = (void *)effect_SetInput;
+		effect_table[ID2D1Properties_methods + 1] = (void *)effect_SetInputCount;
+		effect_table[ID2D1Properties_methods + 2] = (void *)effect_GetInput;
+		effect_table[ID2D1Properties_methods + 3] = (void *)effect_GetInputCount;
+		effect_table[ID2D1Properties_methods + 4] = (void *)effect_GetOutput;
+		effect_image_table = ALLOC(4 * sizeof(void *));
+		set_resource(effect_image_table);
+	}
+	if (!(self = ALLOC(sizeof(*self))))
+		return E_OUTOFMEMORY;
+	memset(self, 0, sizeof(*self));
+	if (!(self->output = ALLOC(sizeof(*self->output)))) {
+		FREE(self);
+		return E_OUTOFMEMORY;
+	}
+	object_init(&self->output->base, effect_image_table, effect_image_destroy, effect_image_iids, 2, factory);
+	self->output->effect = self;
+	object_init(&self->base, effect_table, effect_destroy, effect_iids, 2, factory);
+	self->resource = effect_resource_table;
+	*out = (ID2D1Effect *)self;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE context_CreateEffect(void *iface, REFCLSID clsid, ID2D1Effect **effect)
+{
+	struct target *self = target_of(iface);
+	const struct registered_effect *registered;
+	IUnknown *impl = NULL;
+	HRESULT result;
+	if (!clsid)
+		return E_INVALIDARG;
+	lock_registered();
+	registered = find_registered(clsid);
+	LeaveCriticalSection(&registered_lock);
+	{
+		/* RAVEN_TRACE_DWRITE names the effects a program creates, as the trace names what is not implemented. */
+		static const char digits[] = "0123456789abcdef";
+		char text[80] = "d2d1: CreateEffect ";
+		const BYTE *bytes = (const BYTE *)clsid;
+		size_t at = 19, index;
+		for (index = 0; index < 16; ++index) {
+			text[at++] = digits[bytes[index] >> 4];
+			text[at++] = digits[bytes[index] & 15];
+		}
+		text[at++] = registered ? '+' : '-';
+		text[at] = 0;
+		RavenTrace(text);
+	}
+	/* A program's own effect starts with the object its factory makes. */
+	if (registered && FAILED(result = registered->factory(&impl)))
+		return result;
+	if (FAILED(result = make_effect(self->factory, effect))) {
+		if (impl)
+			IUnknown_Release(impl);
+		return result;
+	}
+	((struct effect *)*effect)->impl = impl;
+	((struct effect *)*effect)->registered = registered;
+	return S_OK;
+}
+
+/* The image an effect gives out, when the image is one: an effect's output reaches back to its effect while the effect lives. */
+static struct effect *effect_of_image(ID2D1Image *image)
+{
+	struct effect_image *output = (struct effect_image *)image;
+	if (!image)
+		return NULL;
+	/* The effect itself stands for its output, as an effect answers for ID2D1Image. */
+	if (effect_table && *(void ***)image == effect_table)
+		return (struct effect *)image;
+	return effect_image_table && output->base.vtbl == effect_image_table ? output->effect : NULL;
+}
+
 /* The bounds of an image: a bitmap's size in device-independent pixels, then through the transform for the world bounds. */
 static HRESULT STDMETHODCALLTYPE context_GetImageLocalBounds(void *iface, ID2D1Image *image, D2D1_RECT_F *bounds)
 {
 	ID2D1Bitmap *bitmap = NULL;
 	struct bitmap *b;
-	if (!image || FAILED(IUnknown_QueryInterface((IUnknown *)image, &IID_ID2D1Bitmap, (void **)&bitmap)))
-		return unimplemented("ID2D1DeviceContext", "GetImageLocalBounds of an image that is not a bitmap");
+	if (!image || !bounds)
+		return E_INVALIDARG;
+	if (FAILED(IUnknown_QueryInterface((IUnknown *)image, &IID_ID2D1Bitmap, (void **)&bitmap))) {
+		/* An effect's output covers what its first input covers; with no input, nothing. */
+		const struct effect *effect = effect_of_image(image);
+		if (effect && effect->inputs[0])
+			return context_GetImageLocalBounds(iface, effect->inputs[0], bounds);
+		if (!effect)
+			unimplemented("ID2D1DeviceContext", "GetImageLocalBounds of an image that is neither a bitmap nor an effect's output");
+		/* What draws nothing here covers nothing. */
+		bounds->left = bounds->top = bounds->right = bounds->bottom = 0;
+		return S_OK;
+	}
 	b = (struct bitmap *)bitmap;
 	bounds->left = bounds->top = 0;
 	bounds->right = b->pixels.width * 96.0f / b->dpi_x;
@@ -3488,13 +4249,7 @@ static HRESULT STDMETHODCALLTYPE factory_CreateWicBitmapRenderTarget(void *iface
 		target_Release(target);
 		return hr;
 	}
-	/* The bitmap's present pixels are the starting point. */
-	{
-		BYTE *pixels = ALLOC((size_t)width * height * 4);
-		if (pixels && SUCCEEDED(IWICBitmap_CopyPixels(wic, NULL, width * 4, width * height * 4, pixels)))
-			RavenCanvasPixels(target->bitmap->surface, 0, 0, width, height, pixels, width * 4, 1);
-		FREE(pixels);
-	}
+	read_wic(target);
 	*out = (ID2D1RenderTarget *)target;
 	return S_OK;
 }
@@ -3521,12 +4276,42 @@ static HRESULT STDMETHODCALLTYPE factory_CreateDevice(void *iface, IDXGIDevice *
 	return make_device(iface, (IUnknown *)dxgi, out);
 }
 
-/* Effects of the program's own: their registration is answered so that the program goes on; creating one is not available. */
-static HRESULT STDMETHODCALLTYPE factory_RegisterEffect(void *iface, REFCLSID clsid, const void *xml, const D2D1_PROPERTY_BINDING *bindings,
+/* Effects of the program's own: the registration is kept for CreateEffect (see register_effect). */
+static HRESULT STDMETHODCALLTYPE factory_RegisterEffectFromString(void *iface, REFCLSID clsid, const WCHAR *xml, const D2D1_PROPERTY_BINDING *bindings,
 	UINT32 count, PD2D1_EFFECT_FACTORY effect_factory)
 {
-	unimplemented("ID2D1Factory1", "RegisterEffect (accepted, effects are not run)");
-	return S_OK;
+	return register_effect(clsid, xml, bindings, count, effect_factory);
+}
+
+static HRESULT STDMETHODCALLTYPE factory_RegisterEffectFromStream(void *iface, REFCLSID clsid, IStream *stream, const D2D1_PROPERTY_BINDING *bindings,
+	UINT32 count, PD2D1_EFFECT_FACTORY effect_factory)
+{
+	/* The stream holds the XML in UTF-8 or UTF-16 with a byte order mark; it is read whole and widened when it is not UTF-16. */
+	char *bytes;
+	WCHAR *xml;
+	ULONG read = 0, total = 0, capacity = 65536;
+	HRESULT result;
+	if (!stream)
+		return E_INVALIDARG;
+	if (!(bytes = ALLOC(capacity + 2)))
+		return E_OUTOFMEMORY;
+	while (total < capacity && SUCCEEDED(IStream_Read(stream, bytes + total, capacity - total, &read)) && read)
+		total += read;
+	bytes[total] = bytes[total + 1] = 0;
+	if (total >= 2 && (BYTE)bytes[0] == 0xff && (BYTE)bytes[1] == 0xfe) {
+		result = register_effect(clsid, (const WCHAR *)(bytes + 2), bindings, count, effect_factory);
+	} else {
+		const int length = MultiByteToWideChar(CP_UTF8, 0, bytes, -1, NULL, 0);
+		if (!(xml = ALLOC((length ? length : 1) * sizeof(WCHAR)))) {
+			FREE(bytes);
+			return E_OUTOFMEMORY;
+		}
+		MultiByteToWideChar(CP_UTF8, 0, bytes, -1, xml, length);
+		result = register_effect(clsid, xml, bindings, count, effect_factory);
+		FREE(xml);
+	}
+	FREE(bytes);
+	return result;
 }
 static HRESULT STDMETHODCALLTYPE factory_UnregisterEffect(void *iface, REFCLSID clsid) { return S_OK; }
 static HRESULT STDMETHODCALLTYPE factory_GetRegisteredEffects(void *iface, CLSID *effects, UINT32 capacity, UINT32 *returned, UINT32 *registered)
@@ -3568,6 +4353,10 @@ static void set_target(void **table)
 	table[ID2D1DeviceContext5_DrawGeometry_slot] = (void *)target_DrawGeometry;
 	table[ID2D1DeviceContext5_FillGeometry_slot] = (void *)target_FillGeometry;
 	table[ID2D1DeviceContext5_FillOpacityMask_slot] = (void *)target_FillOpacityMask;
+	table[ID2D1DeviceContext5_FillOpacityMask_91_slot] = (void *)context_FillOpacityMask;
+	table[ID2D1DeviceContext5_CreateFilledGeometryRealization_slot] = (void *)context_CreateFilledGeometryRealization;
+	table[ID2D1DeviceContext5_CreateStrokedGeometryRealization_slot] = (void *)context_CreateStrokedGeometryRealization;
+	table[ID2D1DeviceContext5_DrawGeometryRealization_slot] = (void *)context_DrawGeometryRealization;
 	table[ID2D1DeviceContext5_DrawBitmap_slot] = (void *)target_DrawBitmap;
 	table[ID2D1DeviceContext5_DrawText_slot] = (void *)target_DrawText;
 	table[ID2D1DeviceContext5_DrawTextLayout_slot] = (void *)target_DrawTextLayout;
@@ -3613,6 +4402,7 @@ static void set_context(void **table)
 	table[ID2D1DeviceContext5_IsDxgiFormatSupported_slot] = (void *)context_IsDxgiFormatSupported;
 	table[ID2D1DeviceContext5_IsBufferPrecisionSupported_slot] = (void *)context_IsBufferPrecisionSupported;
 	table[ID2D1DeviceContext5_GetImageLocalBounds_slot] = (void *)context_GetImageLocalBounds;
+	table[ID2D1DeviceContext5_CreateEffect_slot] = (void *)context_CreateEffect;
 	table[ID2D1DeviceContext5_GetImageWorldBounds_slot] = (void *)context_GetImageWorldBounds;
 	table[ID2D1DeviceContext5_GetDevice_slot] = (void *)context_GetDevice;
 	table[ID2D1DeviceContext5_SetTarget_slot] = (void *)context_SetTarget;
@@ -3697,8 +4487,8 @@ static void build_tables(void)
 	factory_table[ID2D1Factory7_CreateStrokeStyle_18_slot] = (void *)factory_CreateStrokeStyle1;
 	factory_table[ID2D1Factory7_CreatePathGeometry_19_slot] = (void *)factory_CreatePathGeometry;
 	factory_table[ID2D1Factory7_CreateDrawingStateBlock_20_slot] = (void *)factory_CreateDrawingStateBlock1;
-	factory_table[ID2D1Factory7_RegisterEffectFromStream_slot] = (void *)factory_RegisterEffect;
-	factory_table[ID2D1Factory7_RegisterEffectFromString_slot] = (void *)factory_RegisterEffect;
+	factory_table[ID2D1Factory7_RegisterEffectFromStream_slot] = (void *)factory_RegisterEffectFromStream;
+	factory_table[ID2D1Factory7_RegisterEffectFromString_slot] = (void *)factory_RegisterEffectFromString;
 	factory_table[ID2D1Factory7_UnregisterEffect_slot] = (void *)factory_UnregisterEffect;
 	factory_table[ID2D1Factory7_GetRegisteredEffects_slot] = (void *)factory_GetRegisteredEffects;
 	factory_table[ID2D1Factory7_CreateDevice_27_slot] = (void *)factory_CreateDevice;

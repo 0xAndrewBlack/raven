@@ -33,6 +33,178 @@ __declspec(dllimport) DWORD WINAPI RavenFontTable(DWORD font, DWORD tag, DWORD o
 __declspec(dllimport) DWORD WINAPI RavenFontName(DWORD font, DWORD name_id, char *buffer, DWORD capacity);
 __declspec(dllimport) void WINAPI RavenTrace(const char *text);
 
+/* ---- what the host answers about a font, kept: each glyph of each line of text would otherwise cross into the runtime, tens of
+ * thousands of times a second while a program redraws its text. Font handles are never reused, so a handle names the same font for
+ * the life of the process. Each cache is a table indexed by a hash, and a newer answer takes the place of an older one. ---- */
+static SRWLOCK font_cache_lock = SRWLOCK_INIT;
+
+static UINT32 font_hash(UINT32 a, UINT32 b, UINT32 c)
+{
+	UINT32 hash = a * 0x9e3779b1u ^ b * 0x85ebca77u ^ c * 0xc2b2ae3du;
+	return hash ^ (hash >> 15);
+}
+
+typedef struct { DWORD font, glyph; INT32 metrics[7]; } MetricsEntry;
+#define METRICS_SLOTS 8192
+static MetricsEntry *metrics_cache;
+
+/* Design metrics do not depend on the size: they are kept for good. */
+static DWORD cached_metrics(DWORD font, DWORD glyph, INT32 *out)
+{
+	MetricsEntry *entry;
+	DWORD found = 0;
+	AcquireSRWLockShared(&font_cache_lock);
+	entry = metrics_cache ? &metrics_cache[font_hash(font, glyph, 0) & (METRICS_SLOTS - 1)] : NULL;
+	if (entry && entry->font == font && entry->glyph == glyph) {
+		memcpy(out, entry->metrics, sizeof(entry->metrics));
+		found = 1;
+	}
+	ReleaseSRWLockShared(&font_cache_lock);
+	if (found)
+		return 1;
+	if (!RavenFontMetrics(font, glyph, out))
+		return 0;
+	AcquireSRWLockExclusive(&font_cache_lock);
+	if (!metrics_cache)
+		metrics_cache = ALLOC(METRICS_SLOTS * sizeof(MetricsEntry));
+	if (metrics_cache) {
+		entry = &metrics_cache[font_hash(font, glyph, 0) & (METRICS_SLOTS - 1)];
+		entry->font = font;
+		entry->glyph = glyph;
+		memcpy(entry->metrics, out, sizeof(entry->metrics));
+	}
+	ReleaseSRWLockExclusive(&font_cache_lock);
+	return 1;
+}
+
+typedef struct { DWORD font; UINT32 codepoint; UINT16 glyph; } GlyphEntry;
+#define GLYPH_SLOTS 8192
+static GlyphEntry *glyph_cache;
+
+/* The glyphs of characters: only the ones not seen before go to the runtime, in one call. */
+static DWORD cached_glyphs(DWORD font, const UINT32 *codepoints, DWORD count, UINT16 *glyphs)
+{
+	UINT32 *missing;
+	UINT16 *found;
+	DWORD index, misses = 0, result = 1;
+	BOOL *known = ALLOC(count * sizeof(BOOL));
+	if (!known)
+		return RavenFontGlyphs(font, codepoints, count, glyphs);
+	AcquireSRWLockShared(&font_cache_lock);
+	for (index = 0; index < count; ++index) {
+		const GlyphEntry *entry = glyph_cache ? &glyph_cache[font_hash(font, codepoints[index], 1) & (GLYPH_SLOTS - 1)] : NULL;
+		if (font && entry && entry->font == font && entry->codepoint == codepoints[index]) {
+			glyphs[index] = entry->glyph;
+			known[index] = TRUE;
+		} else
+			++misses;
+	}
+	ReleaseSRWLockShared(&font_cache_lock);
+	if (!misses) {
+		FREE(known);
+		return 1;
+	}
+	missing = ALLOC(misses * sizeof(UINT32));
+	found = ALLOC(misses * sizeof(UINT16));
+	if (!missing || !found) {
+		FREE(missing);
+		FREE(found);
+		FREE(known);
+		return RavenFontGlyphs(font, codepoints, count, glyphs);
+	}
+	for (index = 0, misses = 0; index < count; ++index)
+		if (!known[index])
+			missing[misses++] = codepoints[index];
+	if (!RavenFontGlyphs(font, missing, misses, found))
+		result = 0;
+	else {
+		AcquireSRWLockExclusive(&font_cache_lock);
+		if (!glyph_cache)
+			glyph_cache = ALLOC(GLYPH_SLOTS * sizeof(GlyphEntry));
+		for (index = 0, misses = 0; index < count; ++index) {
+			if (known[index])
+				continue;
+			glyphs[index] = found[misses++];
+			if (glyph_cache) {
+				GlyphEntry *entry = &glyph_cache[font_hash(font, codepoints[index], 1) & (GLYPH_SLOTS - 1)];
+				entry->font = font;
+				entry->codepoint = codepoints[index];
+				entry->glyph = glyphs[index];
+			}
+		}
+		ReleaseSRWLockExclusive(&font_cache_lock);
+	}
+	FREE(missing);
+	FREE(found);
+	FREE(known);
+	return result;
+}
+
+typedef struct {
+	DWORD font, glyph, mode, size;
+	INT32 em16, shift_x16, shift_y16, matrix[4], bounds[4];
+	BOOL has_matrix, used;
+	BYTE *pixels;
+} RenderEntry;
+#define RENDER_SLOTS 4096
+#define RENDER_LARGEST 16384
+static RenderEntry *render_cache;
+
+/* A rendered glyph for its size, transform, mode and fraction of a pixel, with its bounds; bitmaps up to 16 KiB are kept. The answer is
+ * the runtime's: the size of the bitmap and its bounds always, its pixels when the buffer is large enough. */
+static DWORD cached_render(DWORD font, DWORD glyph, INT32 em16, const INT32 *matrix, DWORD mode, void *buffer, DWORD capacity, INT32 *bounds,
+	INT32 shift_x16, INT32 shift_y16)
+{
+	const UINT32 hash = font_hash(font, glyph, (UINT32)em16 ^ (UINT32)shift_x16 * 31u ^ (UINT32)shift_y16 * 131u ^ mode * 7919u);
+	RenderEntry *entry;
+	DWORD size = 0;
+	BOOL hit = FALSE;
+	AcquireSRWLockShared(&font_cache_lock);
+	entry = render_cache ? &render_cache[hash & (RENDER_SLOTS - 1)] : NULL;
+	if (entry && entry->used && entry->font == font && entry->glyph == glyph && entry->em16 == em16 && entry->mode == mode &&
+		entry->shift_x16 == shift_x16 && entry->shift_y16 == shift_y16 && entry->has_matrix == (matrix != NULL) &&
+		(!matrix || !memcmp(entry->matrix, matrix, sizeof(entry->matrix))) && (entry->pixels || !entry->size || !buffer || capacity < entry->size)) {
+		size = entry->size;
+		memcpy(bounds, entry->bounds, sizeof(entry->bounds));
+		if (buffer && capacity >= size && size)
+			memcpy(buffer, entry->pixels, size);
+		hit = TRUE;
+	}
+	ReleaseSRWLockShared(&font_cache_lock);
+	if (hit)
+		return size;
+	size = RavenFontRender(font, glyph, em16, matrix, mode, buffer, capacity, bounds, shift_x16, shift_y16);
+	if (size > RENDER_LARGEST || (size && (!buffer || capacity < size)))
+		return size;
+	AcquireSRWLockExclusive(&font_cache_lock);
+	if (!render_cache)
+		render_cache = ALLOC(RENDER_SLOTS * sizeof(RenderEntry));
+	if (render_cache) {
+		BYTE *pixels = size ? ALLOC(size) : NULL;
+		entry = &render_cache[hash & (RENDER_SLOTS - 1)];
+		if (!size || pixels) {
+			FREE(entry->pixels);
+			entry->pixels = pixels;
+			if (pixels)
+				memcpy(pixels, buffer, size);
+			entry->font = font;
+			entry->glyph = glyph;
+			entry->mode = mode;
+			entry->size = size;
+			entry->em16 = em16;
+			entry->shift_x16 = shift_x16;
+			entry->shift_y16 = shift_y16;
+			entry->has_matrix = matrix != NULL;
+			if (matrix)
+				memcpy(entry->matrix, matrix, sizeof(entry->matrix));
+			memcpy(entry->bounds, bounds, sizeof(entry->bounds));
+			entry->used = TRUE;
+		}
+	}
+	ReleaseSRWLockExclusive(&font_cache_lock);
+	return size;
+}
+
 static HRESULT unimplemented(const char *interface_name, const char *method)
 {
 	char text[160];
@@ -941,7 +1113,7 @@ static HRESULT STDMETHODCALLTYPE face_design_metrics(IDWriteFontFace *self, cons
 	UINT32 index;
 	for (index = 0; index < count; ++index) {
 		INT32 raw[7] = {0};
-		if (!RavenFontMetrics(face->data->host, glyphs[index], raw)) {
+		if (!cached_metrics(face->data->host, glyphs[index], raw)) {
 			memset(&metrics[index], 0, sizeof(metrics[index]));
 			continue;
 		}
@@ -959,7 +1131,7 @@ static HRESULT STDMETHODCALLTYPE face_glyph_indices(IDWriteFontFace *self, const
 {
 	if (!count)
 		return S_OK;
-	return RavenFontGlyphs(FACE_OF(self)->data->host, codepoints, count, glyphs) ? S_OK : E_FAIL;
+	return cached_glyphs(FACE_OF(self)->data->host, codepoints, count, glyphs) ? S_OK : E_FAIL;
 }
 static UINT32 swap_tag(UINT32 tag)
 {
@@ -1055,7 +1227,7 @@ static HRESULT STDMETHODCALLTYPE face_outline(IDWriteFontFace *self, FLOAT em, c
 			pen += advances[index];
 		else {
 			INT32 raw[7] = {0};
-			if (RavenFontMetrics(face->data->host, glyphs[index], raw))
+			if (cached_metrics(face->data->host, glyphs[index], raw))
 				pen += (float)raw[1] * scale;
 		}
 	}
@@ -1124,7 +1296,7 @@ static HRESULT STDMETHODCALLTYPE face1_design_advances(IDWriteFontFace1 *self, U
 	UINT32 index;
 	for (index = 0; index < count; ++index) {
 		INT32 raw[7] = {0};
-		RavenFontMetrics(face->data->host, glyphs[index], raw);
+		cached_metrics(face->data->host, glyphs[index], raw);
 		advances[index] = raw[1];
 	}
 	return S_OK;
@@ -1335,7 +1507,7 @@ static HRESULT STDMETHODCALLTYPE font_has_character(IDWriteFont *self, UINT32 va
 	*exists = FALSE;
 	if (!data)
 		return E_FAIL;
-	RavenFontGlyphs(data->host, &value, 1, &glyph);
+	cached_glyphs(data->host, &value, 1, &glyph);
 	*exists = glyph != 0;
 	face_data_release(data);
 	return S_OK;
@@ -1988,7 +2160,7 @@ static DWORD render_glyph(Analysis *analysis, UINT32 index, DWRITE_TEXTURE_TYPE 
 {
 	float x = analysis->positions[index * 2], y = analysis->positions[index * 2 + 1];
 	INT32 whole_x = (INT32)(x < 0 ? x - 0.999f : x), whole_y = (INT32)(y < 0 ? y - 0.999f : y);
-	DWORD size = RavenFontRender(analysis->data->host, analysis->glyphs[index], fixed(analysis->em), analysis->has_matrix ? analysis->matrix : NULL,
+	DWORD size = cached_render(analysis->data->host, analysis->glyphs[index], fixed(analysis->em), analysis->has_matrix ? analysis->matrix : NULL,
 		host_mode(analysis, type), buffer, capacity, bounds, fixed(x - (float)whole_x), fixed(y - (float)whole_y));
 	if (size || bounds[2] > bounds[0] || bounds[3] > bounds[1]) {
 		bounds[0] += whole_x;
@@ -2154,7 +2326,7 @@ static HRESULT create_analysis(const DWRITE_GLYPH_RUN *run, const DWRITE_MATRIX 
 			pen += run->glyphAdvances[index];
 		else {
 			INT32 raw[7] = {0};
-			if (RavenFontMetrics(face->data->host, run->glyphIndices[index], raw))
+			if (cached_metrics(face->data->host, run->glyphIndices[index], raw))
 				pen += (float)raw[1] * run->fontEmSize / (float)face->data->info[0];
 		}
 	}
@@ -2258,7 +2430,7 @@ static BOOL entry_has(FontEntry *entry, UINT32 codepoint)
 	UINT16 glyph = 0;
 	if (!data)
 		return FALSE;
-	RavenFontGlyphs(data->host, &codepoint, 1, &glyph);
+	cached_glyphs(data->host, &codepoint, 1, &glyph);
 	face_data_release(data);
 	return glyph != 0;
 }
@@ -2354,6 +2526,7 @@ static IDWriteFontFallback *get_fallback(void)
 }
 
 #include "text.inc"
+#include "analyzer.inc"
 
 /* ---- the factory ---- */
 typedef struct {
@@ -2545,6 +2718,7 @@ static HRESULT create_factory(REFIID iid, IUnknown **out)
 		Factory_table_[IDWriteFactory_GetSystemFontCollection] = (void *)factory_system_collection;
 		Factory_table_[IDWriteFactory_CreateCustomFontCollection] = (void *)factory_custom_collection;
 		Factory_table_[IDWriteFactory_RegisterFontCollectionLoader] = (void *)factory_register_loader;
+		Factory_table_[IDWriteFactory_CreateTextAnalyzer] = (void *)factory_text_analyzer;
 		Factory_table_[IDWriteFactory_UnregisterFontCollectionLoader] = (void *)factory_register_loader;
 		Factory_table_[IDWriteFactory_CreateFontFileReference] = (void *)factory_file_reference;
 		Factory_table_[IDWriteFactory_CreateCustomFontFileReference] = (void *)factory_custom_file_reference;
