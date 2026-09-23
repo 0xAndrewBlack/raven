@@ -10,12 +10,21 @@ namespace raven {
 void validate_native_image(const PEImage &image,std::string_view name,bool is_64)
 {
 	if (image.is_64!=is_64) throw std::runtime_error(is_64 ? "native PE32 execution is not implemented" : "native x86 process cannot mix PE64 modules: "+std::string(name));
+	// Managed code is the runtime's to start; a runtime header that does not hold IMAGE_COR20_HEADER is no image Windows would load.
+	const auto &runtime=image.directories[14];
+	if ((runtime.address || runtime.size) && (!runtime.address || runtime.size<72))
+		throw std::runtime_error("native image has a malformed runtime header: "+std::string(name));
 	if (image.directories[13].address || image.directories[13].size)
 		for (const auto &descriptor:image.delay_imports())
 			if (!(image.file_span(descriptor.descriptor_address,4)[0] & 1))
 				throw std::runtime_error("native legacy-VA delay helper execution is not implemented: "+std::string(name));
-	if (image.directories[14].address || image.directories[14].size)
-		throw std::runtime_error("native process requires unsupported CLR initialization: "+std::string(name));
+}
+
+uint64_t program_start(const ModuleSet &modules, const PEModule &entry)
+{
+	if (entry.image.directories[14].address && entry.image.directories[14].size)
+		return modules.resolve(PEImport{"mscoree.dll", "_CorExeMain", 0, false, 0});
+	return entry.loaded.base() + entry.image.entry;
 }
 
 void load_initial_dependencies(ModuleSet &modules,
@@ -26,8 +35,13 @@ void load_initial_dependencies(ModuleSet &modules,
 	std::vector<PEModule *> pending,staged;
 	for (const auto &[name,module]:modules.all()) pending.push_back(module.get());
 	try {
-		for (size_t index=0;index<pending.size();++index)
-			for (const auto &symbol:pending[index]->imports)
+		for (size_t index=0;index<pending.size();++index) {
+			// A .NET image starts in the runtime's shim, which the loader brings in whether or not the image imports it, as Windows does
+			// for programs whose native imports it leaves out.
+			auto symbols=pending[index]->imports;
+			if (pending[index]->image.directories[14].address && pending[index]->image.directories[14].size)
+				symbols.push_back(PEImport{"mscoree.dll","_CorExeMain",0,false,0});
+			for (const auto &symbol:symbols)
 				for (;;) {
 					try { modules.resolve(symbol);break; }
 					catch (const std::runtime_error &error) {
@@ -62,6 +76,7 @@ void load_initial_dependencies(ModuleSet &modules,
 						staged.push_back(&module);pending.push_back(&module);
 					}
 				}
+		}
 	} catch (...) {
 		for (auto item=staged.rbegin();item!=staged.rend();++item) modules.remove(**item);
 		throw;

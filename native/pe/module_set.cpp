@@ -46,7 +46,7 @@ std::optional<ModuleBytes> ModuleBytes::map(const std::filesystem::path &path)
 
 PEModule::PEModule(std::string name, ModuleBytes bytes, uint64_t base)
 	: name(std::move(name)), bytes(std::move(bytes)), image(std::span<const uint8_t>(this->bytes)), loaded(image, base),
-	imports(image.imports()), exports(image.exports())
+	imports(image.il_only() ? std::vector<PEImport>{} : image.imports()), exports(image.exports())
 {
 	for (size_t index = 0; index < exports.size(); ++index)
 		for (const auto &export_name : exports[index].names)

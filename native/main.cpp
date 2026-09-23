@@ -221,6 +221,8 @@ int main(int argc, char **argv)
 			raven::PEModule *entry = nullptr;
 			for (int i = (run_modules || run_process) ? first_file : 2; i < last_file; ++i) {
 				auto bytes = read_file(argv[i]);
+				if (!entry && run_process)
+					raven::widen_il_only_image(bytes);
 				auto &module = modules.add(std::filesystem::path(argv[i]).filename().string(), std::move(bytes));
 				if (!entry) {
 					entry = &module;
@@ -234,12 +236,12 @@ int main(int argc, char **argv)
 				if (run_process) {
 					const auto directory = std::filesystem::absolute(argv[first_file]).parent_path();
 					const raven::NativePrefix prefix=raven::NativePrefix::from_environment();
-					// The system's own programs the runtime ships, in the system directory of each width as Windows has them; a copy that is
-					// missing or differs from the runtime's is put back.
+					// The system's own programs and libraries the runtime ships, in the system directory of each width as Windows has them; a
+					// copy that is missing or differs from the runtime's is put back.
 					{
 						const auto runtime = std::filesystem::read_symlink("/proc/self/exe").parent_path();
 						for (const auto &[from, folder] : {std::pair{runtime, "system32"}, std::pair{runtime / "x86", "syswow64"}})
-							for (const char *program : {"msiexec.exe", "regsvr32.exe", "control.exe"}) {
+							for (const char *program : {"msiexec.exe", "regsvr32.exe", "control.exe", "mscoree.dll", "riched20.dll", "msftedit.dll"}) {
 								std::error_code error;
 								const auto source_file = from / program, target = prefix.root() / "drive_c" / "windows" / folder / program;
 								if (!std::filesystem::exists(source_file, error))
@@ -370,9 +372,10 @@ int main(int argc, char **argv)
 							if (std::filesystem::exists(component))
 								return read_file(component.c_str());
 						}
-						// DirectWrite is the runtime's own component too: the library name resolves to it.
-						if (!selected && name=="dwrite.dll" && entry->image.is_64) {
-							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-dwrite.dll";
+						// DirectWrite, Direct2D and Windows Animation are the runtime's own components too: the library names resolve to them.
+						if (!selected && (name=="dwrite.dll" || name=="d2d1.dll" || name=="uianimation.dll") && entry->image.is_64) {
+							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() /
+								(name=="dwrite.dll" ? "raven-dwrite.dll" : name=="d2d1.dll" ? "raven-d2d1.dll" : "raven-uianimation.dll");
 							if (std::filesystem::exists(component))
 								return read_file(component.c_str());
 						}
@@ -442,8 +445,10 @@ int main(int argc, char **argv)
 						}
 						return names;
 					}();
+					// A .NET program reaches every system library through its runtime, which loads them as it needs them: it gets every component.
+					const bool managed = entry->image.directories[14].address && entry->image.directories[14].size;
 					const auto imports_any = [&](std::initializer_list<const char *> libraries) {
-						return std::any_of(libraries.begin(), libraries.end(), [&](const char *library) {
+						return managed || std::any_of(libraries.begin(), libraries.end(), [&](const char *library) {
 							const std::string_view wanted(library);
 							// A trailing '*' names a family of API set libraries.
 							if (wanted.ends_with('*'))

@@ -52,13 +52,15 @@ PEImage::PEImage(std::span<const uint8_t> bytes) : bytes(bytes)
 	if (magic != 0x10b && magic != 0x20b)
 		throw std::runtime_error("unsupported PE optional header");
 	is_64 = magic == 0x20b;
-	if (machine != (is_64 ? 0x8664 : 0x14c))
+	// A PE32+ header on an x86 machine is a .NET image built for any CPU in the form a 64-bit process loads it (widen_il_only_image).
+	if (machine != (is_64 ? 0x8664 : 0x14c) && !(is_64 && machine == 0x14c))
 		throw std::runtime_error("unsupported or inconsistent PE architecture");
 	const size_t directory_offset = is_64 ? 112 : 96;
 	if (optional_size < directory_offset)
 		throw std::runtime_error("truncated PE optional header");
 	entry = read32(bytes, optional + 16);
 	image_base = read_le(bytes, optional + (is_64 ? 24 : 28), is_64 ? 8 : 4);
+	stack_reserve = read_le(bytes, optional + 72, is_64 ? 8 : 4);
 	heap_reserve = read_le(bytes, optional + (is_64 ? 88 : 80), is_64 ? 8 : 4);
 	heap_commit = read_le(bytes, optional + (is_64 ? 96 : 84), is_64 ? 8 : 4);
 	section_alignment = read32(bytes, optional + 32);
@@ -87,6 +89,9 @@ PEImage::PEImage(std::span<const uint8_t> bytes) : bytes(bytes)
 			require_range(directories[i].address, directories[i].size,
 				i == 4 ? bytes.size() : image_size);
 	}
+	// Only a .NET image comes as a PE32+ header on an x86 machine.
+	if (is_64 && machine == 0x14c && !directories[14].address)
+		throw std::runtime_error("unsupported or inconsistent PE architecture");
 	const size_t table = optional + optional_size;
 	if (count == 0 || count > 96)
 		throw std::runtime_error("invalid PE section count");
@@ -157,6 +162,14 @@ std::string PEImage::string_at(uint32_t rva) const
 	if (end == data.end())
 		throw std::runtime_error("unterminated PE string");
 	return std::string(data.begin(), end);
+}
+
+bool PEImage::il_only() const
+{
+	const auto directory = directories[14];
+	if (!directory.address || directory.size < 20)
+		return false;
+	return read32(file_span(directory.address, 20), 16) & 1;
 }
 
 std::vector<PEImport> PEImage::imports() const
@@ -338,6 +351,66 @@ std::vector<PEExport> PEImage::exports() const
 		result[ordinal].names.push_back(std::move(name));
 	}
 	return result;
+}
+
+bool widen_il_only_image(std::vector<uint8_t> &file)
+{
+	if (file.size() < 0x40 || file[0] != 'M' || file[1] != 'Z')
+		return false;
+	const size_t header = read32(file, 0x3c);
+	if (header > file.size() || file.size() - header < 24 + 224 || read32(file, header) != 0x4550)
+		return false;
+	const size_t optional = header + 24;
+	const uint32_t optional_size = uint32_t(read_le(file, header + 20, 2)), sections = uint32_t(read_le(file, header + 6, 2));
+	if (read_le(file, optional, 2) != 0x10b || optional_size < 224 || read_le(file, header + 4, 2) != 0x14c || read32(file, optional + 92) < 15)
+		return false;
+	// The runtime header (directory 14): flags 1 (IL only) without 2 (32-bit required) or 0x20000 (32-bit preferred).
+	const uint32_t runtime = read32(file, optional + 96 + 14 * 8);
+	uint32_t flags = 0;
+	bool found = false;
+	for (uint32_t index = 0; index < sections && !found; ++index) {
+		const size_t entry = optional + optional_size + size_t(index) * 40;
+		if (entry + 40 > file.size())
+			return false;
+		const uint32_t address = read32(file, entry + 12), size = std::max(read32(file, entry + 8), read32(file, entry + 16)), raw = read32(file, entry + 20);
+		if (runtime >= address && runtime - address < size && size_t(raw) + (runtime - address) + 20 <= file.size()) {
+			flags = read32(file, size_t(raw) + (runtime - address) + 16);
+			found = true;
+		}
+	}
+	if (!found || !(flags & 1) || (flags & 0x20002))
+		return false;
+	// The PE32+ optional header is 16 bytes longer: the section table moves down by as much, into the headers' padding.
+	const size_t table_end = optional + optional_size + size_t(sections) * 40, headers = read32(file, optional + 60);
+	if (table_end + 16 > headers || headers > file.size())
+		return false;
+	for (uint32_t index = 0; index < sections; ++index)
+		if (read32(file, optional + optional_size + size_t(index) * 40 + 20) && read32(file, optional + optional_size + size_t(index) * 40 + 20) < table_end + 16)
+			return false;
+	std::vector<uint8_t> widened(240 + (optional_size - 224), 0);
+	const auto put = [&](size_t at, uint64_t value, size_t width) {
+		for (size_t byte = 0; byte < width; ++byte)
+			widened[at + byte] = uint8_t(value >> (byte * 8));
+	};
+	std::copy(file.begin() + long(optional), file.begin() + long(optional) + 24, widened.begin());
+	put(0, 0x20b, 2);
+	put(24, read32(file, optional + 28), 8);
+	std::copy(file.begin() + long(optional) + 32, file.begin() + long(optional) + 72, widened.begin() + 32);
+	put(72, read32(file, optional + 72), 8);
+	put(80, read32(file, optional + 76), 8);
+	put(88, read32(file, optional + 80), 8);
+	put(96, read32(file, optional + 84), 8);
+	put(104, read32(file, optional + 88), 4);
+	put(108, read32(file, optional + 92), 4);
+	std::copy(file.begin() + long(optional) + 96, file.begin() + long(optional) + optional_size, widened.begin() + 112);
+	std::vector<uint8_t> table(file.begin() + long(optional + optional_size), file.begin() + long(table_end));
+	std::fill(file.begin() + long(optional), file.begin() + long(table_end + 16), 0);
+	std::copy(widened.begin(), widened.end(), file.begin() + long(optional));
+	std::copy(table.begin(), table.end(), file.begin() + long(optional + widened.size()));
+	// The machine stays the one the file names: the runtime tells an image built for any CPU by its x86 machine and IL-only flag.
+	file[header + 20] = uint8_t(widened.size());
+	file[header + 21] = uint8_t(widened.size() >> 8);
+	return true;
 }
 
 }

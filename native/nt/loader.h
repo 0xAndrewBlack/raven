@@ -10,6 +10,9 @@
 namespace raven {
 
 void validate_native_image(const PEImage &image,std::string_view name,bool is_64=true);
+// Where a program starts: a .NET program, whose image has a runtime header, at mscoree.dll's _CorExeMain, as Windows starts it whatever
+// its entry point says; any other at its entry point.
+uint64_t program_start(const ModuleSet &modules, const PEModule &entry);
 class NativeMemory;
 // Tells the memory manager where the program images are and how their sections are protected.
 void register_images(NativeMemory &memory, const ModuleSet &modules);

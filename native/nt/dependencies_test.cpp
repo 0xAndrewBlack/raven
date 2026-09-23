@@ -1,3 +1,4 @@
+#include <string>
 #include "loader.h"
 #include "providers.h"
 
@@ -8,7 +9,7 @@
 #include <iostream>
 #include <stdexcept>
 
-static void check(bool value,const char *message)
+static void check(bool value,const std::string &message)
 {
 	if (!value) throw std::runtime_error(message);
 }
@@ -65,11 +66,11 @@ int main(int argc,char **argv)
 					return std::nullopt;
 				},native);
 			} catch (const std::runtime_error &caught) { error=caught.what(); }
-			check(!error.empty() && modules.all().size()==1 && std::equal(original.begin(),original.end(),entry.loaded.data().begin()),"failed initial acquisition retained images or changed the entry");
+			check(!error.empty() && modules.all().size()==1 && std::equal(original.begin(),original.end(),entry.loaded.data().begin()),"failed initial acquisition retained images or changed the entry ("+std::string(mode)+": "+(error.empty() ? "no error" : error)+")");
 			if (mode=="missing") check(error=="missing PE module: dependent.dll","missing startup failed for another reason");
 			if (mode=="symbol") check(error.find("UnavailableExport")!=error.npos,"symbol startup failed for another reason");
 			if (mode=="pe32") check(error.find("PE32")!=error.npos,"PE32 startup failed for another reason");
-			if (mode=="clr") check(error.find("CLR")!=error.npos,"CLR startup failed for another reason");
+			if (mode=="clr") check(error.find("runtime header")!=error.npos,"CLR startup failed for another reason");
 		}
 		{
 			raven::ModuleSet modules;auto &entry=modules.add("forward-client.exe",read_file(directory/"forward-client.exe"));

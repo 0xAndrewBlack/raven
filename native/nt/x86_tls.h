@@ -16,6 +16,8 @@ public:
 	void attach_main(uint64_t teb) { create_thread(teb); }
 	// Registers an image that is mapped in the guest and has a TLS directory; images without one are ignored.
 	void add(PEModule &module);
+	// Forgets an image that is leaving the process; its index stays taken, as the blocks of running threads still hold it.
+	void remove(const PEModule &module) { templates.erase(&module); }
 	// The callbacks of an image's TLS directory, in order.
 	std::vector<uint64_t> callbacks(const PEModule &module) const;
 	void create_thread(uint64_t teb);

@@ -225,6 +225,7 @@ uint64_t NativeX86Loader::load(std::string name)
 			if (tls)
 				tls->add(**item);
 		}
+		std::vector<PEModule *> attached;
 		for (auto item = staged.rbegin(); item != staged.rend(); ++item) {
 			if (tls)
 				for (const auto callback : tls->callbacks(**item)) {
@@ -240,9 +241,26 @@ uint64_t NativeX86Loader::load(std::string name)
 			if (result.stop != NativeStop::returned)
 				throw result;
 			if (!uint32_t(result.value)) {
+				// A library that refuses to start leaves the process with what it brought, as on Windows: the ones that started are told
+				// they are detached, then every new image goes, so that the next load of that name starts it again.
+				for (auto done = attached.rbegin(); done != attached.rend(); ++done) {
+					const uint64_t detach[] = {(*done)->loaded.base(), 0, 0};
+					const auto detached = call((*done)->loaded.base() + (*done)->image.entry, detach);
+					if (detached.stop != NativeStop::returned)
+						throw detached;
+				}
+				for (auto gone = staged.rbegin(); gone != staged.rend(); ++gone) {
+					if (tls)
+						tls->remove(**gone);
+					if (unmapped_hook)
+						unmapped_hook(**gone);
+					process.unmap_image((*gone)->loaded.base());
+					modules.remove(**gone);
+				}
 				environment.set_last_error(1114);
 				return 0;
 			}
+			attached.push_back(*item);
 		}
 		if (key)
 			held[*key] = {root, 1};

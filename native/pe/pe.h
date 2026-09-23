@@ -57,6 +57,9 @@ public:
 	explicit PEImage(std::span<const uint8_t> bytes);
 	std::span<const uint8_t> file_span(uint32_t rva, size_t size) const;
 	std::vector<PEImport> imports() const;
+	// A .NET image with no native code (COMIMAGE_FLAGS_ILONLY): it runs from the runtime's entry, and its one native import, of that
+	// entry, is the runtime's to check rather than the loader's to bind.
+	bool il_only() const;
 	std::vector<PEDelayImport> delay_imports() const;
 	std::vector<PEExport> exports() const;
 	std::vector<PEResource> resources() const;
@@ -65,6 +68,7 @@ public:
 	uint16_t machine;
 	uint16_t characteristics;
 	uint64_t image_base;
+	uint64_t stack_reserve;
 	uint64_t heap_reserve;
 	uint64_t heap_commit;
 	uint32_t image_size;
@@ -79,5 +83,10 @@ private:
 	std::span<const uint8_t> bytes;
 	std::string string_at(uint32_t rva) const;
 };
+
+// A .NET program built for any CPU (a PE32 file with only IL code, neither 32BITREQUIRED nor 32BITPREFERRED) runs as a 64-bit process,
+// as on 64-bit Windows: its headers are rewritten in place to the PE32+ form the loader of such a process expects. Its import data stays
+// as it was, for the runtime to check. True when the file was rewritten.
+bool widen_il_only_image(std::vector<uint8_t> &file);
 
 }
