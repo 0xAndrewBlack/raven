@@ -344,6 +344,14 @@ bool draw(uint32_t handle, const Command &command, std::span<const uint8_t> data
 		paint.setAntiAlias(command.antialias != 0);
 		const SkRect from = SkRect::MakeXYWH(command.source[0], command.source[1], command.source[2], command.source[3]);
 		canvas.setMatrix(transform);
+		// A source rectangle reaching past the bitmap repeats its edge pixels there, as Direct2D draws it: a program fills a tile from a
+		// one-pixel bitmap this way. Skia would cut the source to the bitmap and shrink the destination with it.
+		if (!SkRect::Make(image->bounds()).contains(from) && !from.isEmpty()) {
+			const SkMatrix mapping = SkMatrix::RectToRect(from, rect);
+			paint.setShader(image->makeShader(SkTileMode::kClamp, SkTileMode::kClamp, sampling(command.interpolation), &mapping));
+			canvas.drawRect(rect, paint);
+			return true;
+		}
 		canvas.drawImageRect(image, from, rect, sampling(command.interpolation), &paint, SkCanvas::kFast_SrcRectConstraint);
 		return true;
 	}

@@ -5,6 +5,7 @@
 #include "brush.h"
 #include "nt/nls.h"
 #include "gdi.h"
+#include "canvas.h"
 
 #include <array>
 #include <algorithm>
@@ -114,15 +115,19 @@ void NativeWindows::present(uint64_t handle, bool force)
 	if (!handle) throw uint32_t(1400);
 	if (!presentation.present) throw uint32_t(120);
 	dirty_roots.erase(handle);
-	// The compositor does not show a window's controls as empty rectangles: while a visible child of the same thread still waits for its
-	// WM_PAINT, the frame is put off, for at most a quarter of a second, so that the controls appear painted with their parent. A surface
-	// about to go, as the process ends or the window loses it, shows what was drawn on it at once (force).
+	// The compositor does not show a window or its controls as empty rectangles: while the window or a visible child of the same thread
+	// still waits for its first WM_PAINT, the frame is put off, for at most a quarter of a second (two seconds before the window first
+	// shows, as a program can take that long to paint it), so that everything appears painted together. A window that has painted once
+	// already shows its old content, so a program redrawing continuously, as while the user draws, is never held back. A surface about to
+	// go, as the process ends or the window loses it, shows what was drawn on it at once (force).
 	if (auto *waiting=force ? nullptr : objects.window(handle)) {
 		const auto me=environment.thread_id();
-		bool pending=false;
+		// The window itself waiting for its first WM_PAINT is held back the same way: it would show as an unpainted, black surface.
+		bool pending=!waiting->painted && !waiting->update.empty() && (!waiting->thread || waiting->thread==me);
 		for (const auto other : objects.window_handles()) {
+			if (pending) break;
 			const auto *candidate=std::as_const(objects).window(other);
-			if (candidate && other!=handle && !candidate->update.empty() && objects.is_child(handle,other) &&
+			if (candidate && other!=handle && !candidate->painted && !candidate->update.empty() && objects.is_child(handle,other) &&
 				objects.window_visible(other) && (!candidate->thread || candidate->thread==me)) {
 				pending=true;
 				break;
@@ -131,12 +136,13 @@ void NativeWindows::present(uint64_t handle, bool force)
 		const auto now=std::chrono::steady_clock::now();
 		if (pending) {
 			if (!waiting->present_waiting) waiting->present_waiting=now;
-			if (now-*waiting->present_waiting<std::chrono::milliseconds(250)) {
+			if (now-*waiting->present_waiting<std::chrono::milliseconds(waiting->presented ? 250 : 2000)) {
 				dirty_roots.insert(handle);
 				return;
 			}
 		}
 		waiting->present_waiting.reset();
+		waiting->presented=true;
 	}
 	surface_dc(handle);
 	paint_nonclient(handle);
@@ -147,12 +153,37 @@ void NativeWindows::present(uint64_t handle, bool force)
 	if (!window) return;
 	const auto *bitmap=objects.bitmap(window->bitmap);
 	if (!bitmap) return;
-	const auto pixels=std::span<const uint8_t>(bitmap->pixels().data(),size_t(bitmap->width)*bitmap->height*4);
-	// A popup without a caption that another window owns (a menu, a drop-down list) opens where the program placed it: as a popup of the
-	// owner's host window, since a host window of its own would be placed by the compositor.
+	auto pixels=std::span<const uint8_t>(bitmap->pixels().data(),size_t(bitmap->width)*bitmap->height*4);
+	// The frame extended into the client area shows through what the program painted black there, black with no alpha to GDI, as the
+	// Windows compositor shows its frame, and the compositor draws the caption buttons over it when the client area covers the caption.
+	std::vector<uint8_t> glazed;
+	if (window->glass) {
+		glazed.assign(pixels.begin(),pixels.end());
+		const int32_t width=int32_t(bitmap->width),height=int32_t(bitmap->height);
+		const int32_t left=std::max(window->x-window->outer.left,0),top=std::max(window->y-window->outer.top,0);
+		const int32_t right=std::min(width,left+window->width),bottom=std::min(height,top+window->height);
+		const auto &margins=*window->glass;
+		const bool whole=margins[0]<0 || margins[1]<0 || margins[2]<0 || margins[3]<0;
+		paint::Canvas canvas{glazed.data(),width,height};
+		const uint32_t title=caption_color(active==handle);
+		for (int32_t y=top;y<bottom;++y)
+			for (int32_t x=left;x<right;++x) {
+				if (!whole && x>=left+margins[0] && x<right-margins[1] && y>=top+margins[2] && y<bottom-margins[3])
+					continue;
+				const auto *pixel=glazed.data()+(size_t(y)*width+x)*4;
+				if (!pixel[0] && !pixel[1] && !pixel[2])
+					canvas.set(x,y,title);
+			}
+		const auto layout=frame_layout(*window);
+		if (themed() && layout.close.right>layout.close.left && top<=layout.close.top)
+			paint_caption_buttons(handle,*window,layout,canvas,active==handle);
+		pixels=glazed;
+	}
+	// A popup without a caption that another window owns (a menu, a drop-down list), or an owned tool window (a palette), opens where the
+	// program placed it: as a popup of the owner's host window, since a host window of its own would be placed by the compositor.
 	const auto owner=window->owner ? objects.window_root(window->owner) : 0;
 	const auto *owning=owner && owner!=handle ? objects.window(owner) : nullptr;
-	if (presentation.owned_popup && owning && objects.window_visible(owner) && (window->style & 0x80000000U) && (window->style & 0x00c00000U)!=0x00c00000U) {
+	if (presentation.owned_popup && owning && shown_on_owner(*window)) {
 		try {
 			presentation.owned_popup(handle,owner,window->outer.left-owning->outer.left,window->outer.top-owning->outer.top,bitmap->width,bitmap->height,pixels);
 			return;
@@ -522,7 +553,12 @@ void NativeWindows::serve_sent()
 uint64_t NativeWindows::invalid_owned(uint64_t filter) const
 {
 	const auto me=environment.thread_id();
-	for (const auto handle : objects.window_handles()) {
+	// The search starts after the window painted last and goes round: a window invalidated with every pointer move (a status bar
+	// showing the position) would otherwise be found first each time, and the others, the canvas the pointer draws on among them,
+	// would wait for as long as the moves go on.
+	auto handles=objects.window_handles();
+	std::stable_partition(handles.begin(),handles.end(),[&](uint64_t handle) { return handle>paint_cursor; });
+	for (const auto handle : handles) {
 		const auto *window=std::as_const(objects).window(handle);
 		if (!window || window->update.empty() || !objects.window_visible(handle) || (window->thread && window->thread!=me)) continue;
 		if (filter && filter!=handle && !objects.is_child(filter,handle)) continue;
@@ -714,7 +750,7 @@ void NativeWindows::receive(const DesktopEvent &event)
 	static const bool trace_buttons=std::getenv("RAVEN_TRACE_MSG")!=nullptr;
 	if (trace_buttons && event.kind==DesktopEventKind::pointer_button)
 		fprintf(stderr,"button %x on %llx at %d,%d capture %llx\n",message,(unsigned long long)event.window,event.x,event.y,(unsigned long long)capture);
-	if (!event.window && event.kind==DesktopEventKind::pointer_button) { mouse_buttons=buttons; return; }
+	if (!event.window && event.kind==DesktopEventKind::pointer_button) { mouse_buttons=buttons; mouse_keys(vk_async,buttons); return; }
 	const auto *window=objects.window(event.window);
 	if (!window || !window->visible) throw std::runtime_error("pointer event targets an unavailable guest window");
 	if (messages.size()>=10000) throw std::runtime_error("guest input queue limit reached");
@@ -733,7 +769,19 @@ void NativeWindows::receive(const DesktopEvent &event)
 		if (dx || dy || button_flags) raw_mouse_input(dx,dy,button_flags,0);
 	}
 	mouse_buttons=buttons; cursor_x=int32_t(x); cursor_y=int32_t(y);
+	mouse_keys(vk_async,buttons);
 	if (raw_mouse.registered && raw_mouse.no_legacy) return;
+	if (frame_drag.window) {
+		// The drag of a tool window's caption follows the pointer until the button goes up, wherever the pointer is over the program.
+		if (!objects.window(frame_drag.window) || !(buttons & 1)) {
+			frame_drag.window=0;
+		} else if (message==0x200) {
+			const int32_t dx=int32_t(x)-frame_drag.start_x,dy=int32_t(y)-frame_drag.start_y;
+			const auto &origin=frame_drag.origin;
+			place_window(frame_drag.window,{origin.left+dx,origin.top+dy,origin.right+dx,origin.bottom+dy},0,0x1 | 0x4 | 0x10);
+			return;
+		}
+	}
 	if (scroll_drag.window && (message==0x200 || message==0x202 || message==0x201) && scroll_motion(message,int32_t(x),int32_t(y))) return;
 	if (capture && !objects.window(capture)) capture=0;
 	// The press is placed before any input read while the program handles the messages sent for it.
@@ -757,6 +805,14 @@ static bool trace_buttons_enabled()
 {
 	static const bool enabled=std::getenv("RAVEN_TRACE_MSG")!=nullptr;
 	return enabled;
+}
+
+bool NativeWindows::shown_on_owner(const DesktopWindow &window) const
+{
+	const auto owner=window.owner ? objects.window_root(window.owner) : 0;
+	if (!owner || window.parent || !objects.window_visible(owner))
+		return false;
+	return ((window.style & 0x80000000U) && (window.style & 0x00c00000U)!=0x00c00000U) || (window.ex_style & 0x80U);
 }
 
 void NativeWindows::release_held_input()
@@ -797,7 +853,18 @@ void NativeWindows::place_pointer(const DesktopEvent &event,uint32_t message,uin
 		window=objects.window(target);if (!window || !objects.window_visible(target)) return;
 	}
 	if (messages.size()>=10000) throw std::runtime_error("guest input queue limit reached");
-	queue({target,buttons|keyboard_map.mouse_modifiers(),uint16_t(x-window->x)|(uint64_t(uint16_t(y-window->y))<<16),message,message_time(),int32_t(x),int32_t(y)});
+	const Message input{target,buttons|keyboard_map.mouse_modifiers(),uint16_t(x-window->x)|(uint64_t(uint16_t(y-window->y))<<16),message,message_time(),
+		int32_t(x),int32_t(y)};
+	// As on Windows, a move the program has not retrieved yet is replaced by the newer one rather than queued after it: a program slow
+	// to handle each move (a paint program drawing along the pointer) would otherwise fall ever further behind and never reach WM_PAINT.
+	if (message==0x200 && !messages.empty() && messages.back().message==0x200 && messages.back().window==target &&
+		messages.back().wparam==input.wparam) {
+		const auto thread=messages.back().thread;
+		messages.back()=input;
+		messages.back().thread=thread;
+		return;
+	}
+	queue(input);
 }
 
 NativeWindows::Modifiers NativeWindows::modifier_state() const
@@ -854,6 +921,9 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 					if (down && !repeat && (code==0x14 || code==0x90 || code==0x91)) vk_state[code]^=1;
 				}
 			}
+			// The buttons seen by GetKeyState likewise follow the pointer messages retrieved.
+			if ((flags & 1U) && ((value.message>=0x200 && value.message<=0x20e) || (value.message>=0x2a0 && value.message<=0x2a3)))
+				mouse_keys(vk_state,value.wparam);
 			if (flags & 1U) { if (found!=messages.end()) messages.erase(found); else quits.erase(me); }
 			if (value.message!=0x12) {
 				// Keyboard and mouse hooks may swallow the message; the get-message hook only observes it.
@@ -872,7 +942,9 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		// WM_TIMER ranks below input and paint, so it is only generated when neither is waiting.
 		if (found==messages.end() && quit==quits.end()) {
 			const auto before=messages.size();
-			if (!invalid_owned(window)) post_due_timers();
+			// A paint waiting holds the timers back only from a retrieval that would take it.
+			const bool paint_eligible=(!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f);
+			if (!paint_eligible || !invalid_owned(window)) post_due_timers();
 			if (messages.size()!=before) continue;
 		}
 		const auto paint=(!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f) ? invalid_owned(window) : 0;
@@ -884,6 +956,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 						std::cerr << ' ' << handle << (objects.window_visible(handle) ? "" : "(hidden)");
 				std::cerr << std::dec << "\n";
 			}
+			paint_cursor=paint;
 			std::vector<uint8_t> bytes(layout.size);
 			put(bytes,0,paint,layout.pointer); put(bytes,layout.message,0x0f,4); put(bytes,layout.time,message_time(),4);
 			process.write_memory(args[0],bytes);
@@ -1171,7 +1244,7 @@ uint64_t NativeWindows::default_message(std::span<const uint64_t> args)
 		return 0;
 	}
 	if (message==0x83) {
-		if (args[2]) throw std::runtime_error("unsupported default extended nonclient calculation");
+		// The extended form (NCCALCSIZE_PARAMS) starts with the proposed window rectangle, which becomes the client rectangle.
 		auto rect=process.read_memory(args[3],16);
 		// The client area is the window rectangle minus what AdjustWindowRectEx adds for this style.
 		const auto frame=adjust_window_rect(objects.nonclient_metrics(),{0,0,0,0},window->style & ~0x10000000U,window->menu!=0,window->ex_style);
@@ -2057,12 +2130,13 @@ bool NativeWindows::dispatch(std::string_view name)
 			const auto message=uint32_t(read(bytes,layout.message,4));
 			if (name=="TranslateMessage") {
 				if (message==0x100 || message==0x101 || message==0x104 || message==0x105) {
-					if (!key_translation || key_translation->window!=read(bytes,0,layout.pointer) || key_translation->message!=message ||
-						key_translation->wparam!=read(bytes,layout.wparam,layout.pointer) || key_translation->lparam!=read(bytes,layout.lparam,layout.pointer) ||
-						key_translation->time!=read(bytes,layout.time,4))
-						throw std::runtime_error("keyboard translation requires the current retrieved key message");
-					const auto key=*key_translation;
-					if ((message==0x100 || message==0x104) && key.character) {
+					// The character comes with the key message the thread retrieved last. Another key message (one the program made, or an
+					// earlier one it kept) is accepted as Windows accepts it, without a character to post.
+					const bool current=key_translation && key_translation->window==read(bytes,0,layout.pointer) && key_translation->message==message &&
+						key_translation->wparam==read(bytes,layout.wparam,layout.pointer) && key_translation->lparam==read(bytes,layout.lparam,layout.pointer) &&
+						key_translation->time==read(bytes,layout.time,4);
+					const auto key=current ? *key_translation : Message{};
+					if (current && (message==0x100 || message==0x104) && key.character) {
 						// Posted character messages are retrieved before input still waiting in the queue.
 						const auto units=key.character>0xffff ? 2U : 1U;
 						const uint32_t kind=message==0x104 ? 0x106U : 0x102U;
@@ -2157,9 +2231,10 @@ bool NativeWindows::dispatch(std::string_view name)
 			const bool narrow=process.mode()==NativeMode::x86;
 			const auto paint=process.read_memory(args[1],narrow ? 64 : 72);
 			if (!window->painting || read(paint,0,narrow ? 4 : 8)!=window->dc) throw uint32_t(87);
-			// A parent without WS_CLIPCHILDREN may have drawn over its children: they draw again on top, as the children on Windows show.
+			// A parent without WS_CLIPCHILDREN, or with WS_EX_COMPOSITED, may have drawn over its children: they draw again on top, as the
+			// children on Windows show.
 			std::optional<DesktopRect> painted;
-			if (!(window->style & 0x02000000U))
+			if (!(window->style & 0x02000000U) || (window->ex_style & 0x02000000U))
 				if (const auto *device=objects.dc(window->dc); device && device->clip) painted=device->clip->bounds();
 			objects.finish_paint(args[0]);
 			if (painted)
@@ -2171,6 +2246,16 @@ bool NativeWindows::dispatch(std::string_view name)
 							std::min(painted->right+owner->x,inner->x+inner->width)-inner->x,std::min(painted->bottom+owner->y,inner->y+inner->height)-inner->y};
 						if (inside.left<inside.right && inside.top<inside.bottom) objects.invalidate(child,inside,true);
 					}
+			// WS_EX_COMPOSITED paints the whole tree in one pass, from the bottom up: the children it covered paint now, before the frame
+			// is shown, so that no frame shows the parent over unpainted children.
+			if (painted && (window=objects.window(args[0])) && (window->ex_style & 0x02000000U)) {
+				const auto me=environment.thread_id();
+				for (const auto child : objects.child_windows(args[0])) {
+					const auto *inner=objects.window(child);
+					if (inner && inner->visible && !inner->update.empty() && !inner->painting && (!inner->thread || inner->thread==me))
+						send(child,0x0f,0,0);
+				}
+			}
 			if (objects.window_visible(args[0])) present(args[0]);
 			result=1;
 		}

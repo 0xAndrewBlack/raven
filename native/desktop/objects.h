@@ -227,6 +227,12 @@ struct DesktopWindow {
 	DesktopRegion update{};
 	// Since when a top-level window has waited for its controls' paint before the compositor shows it (see NativeWindows::present).
 	std::optional<std::chrono::steady_clock::time_point> present_waiting{};
+	// Whether the window has been shown on the screen once: until then it waits longer for its first paint.
+	bool presented = false;
+	// Whether the window has ever finished a WM_PAINT: one that has not shows nothing of its own yet.
+	bool painted = false;
+	// The frame extended into the client area by DwmExtendFrameIntoClientArea: left, right, top and bottom widths, a negative one for all of it.
+	std::optional<std::array<int32_t,4>> glass{};
 	uint64_t instance = 0,userdata = 0;
 	// The guest thread that created the window: its messages go to that thread's queue and its procedure runs on it.
 	uint32_t thread = 0;

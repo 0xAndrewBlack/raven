@@ -461,7 +461,7 @@ void DesktopObjects::finish_paint(uint64_t handle)
 {
 	auto *record=window(handle); auto *device=record ? dc(record->dc) : nullptr;
 	if (!record || !device || !record->painting || !device->clip) throw std::runtime_error("invalid paint completion");
-	used-=device->clip->bytes(); device->clip.reset(); record->painting=false;
+	used-=device->clip->bytes(); device->clip.reset(); record->painting=false; record->painted=true;
 	select_clip(record->dc,std::nullopt);
 	select_font(record->dc,desktop_system_font);
 	select_brush(record->dc,desktop_stock_brush);

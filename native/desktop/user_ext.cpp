@@ -918,6 +918,20 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		}
 		call.ret(send_ansi(call, call[0], 0x0d, call[2], call[1]));
 	});
+	registry.add("TrackPopupMenu", 7, [=, this](ApiCall &call) {
+		try {
+			call.ret(track_popup_menu(call[0], call.u32(1), call.i32(2), call.i32(3), call[5]));
+		} catch (const uint32_t &error) {
+			call.fail(error);
+		}
+	});
+	registry.add("TrackPopupMenuEx", 6, [=, this](ApiCall &call) {
+		try {
+			call.ret(track_popup_menu(call[0], call.u32(1), call.i32(2), call.i32(3), call[4]));
+		} catch (const uint32_t &error) {
+			call.fail(error);
+		}
+	});
 	registry.add("GetWindowTextLengthA", 1, [=, this](ApiCall &call) { call.ret(send(call[0], 0x0e, 0, 0)); });
 	registry.add("GetDlgItemTextA", 4, [=, this](ApiCall &call) {
 		const auto child = [&]() -> uint64_t {

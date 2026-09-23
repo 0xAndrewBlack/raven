@@ -316,8 +316,59 @@ void NativeWindows::menu_select(size_t level, size_t index)
 	}
 	const auto owner = open_menu_window;
 	menu_close();
-	if (owner && objects.window(owner) && messages.size() < 10000)
+	if (menu_tracking)
+		tracked_command = item.id;
+	else if (owner && objects.window(owner) && messages.size() < 10000)
 		queue({owner, item.id, 0, 0x111, message_time(), cursor_x, cursor_y});
+}
+
+uint64_t NativeWindows::track_popup_menu(uint64_t menu, uint32_t flags, int32_t x, int32_t y, uint64_t window)
+{
+	const auto root = objects.window_root(window);
+	const auto *top = objects.window(root);
+	if (!objects.menu(menu) || !top)
+		throw uint32_t(1401);
+	if (menu_active() || menu_tracking)
+		throw uint32_t(1456);
+	// TrackPopupMenu runs its own loop until the menu closes, as Windows does: the owner learns the menu loop started and the menu
+	// is about to show, and the popup opens at the screen point given, on the owner's host window.
+	open_menu_window = window;
+	send(window, 0x211, 1, 0);
+	if (!(flags & 0x80))
+		send(window, 0x117, menu, 0);
+	top = objects.window(root);
+	if (!top || !objects.menu(menu)) {
+		open_menu_window = 0;
+		return 0;
+	}
+	present(root);
+	menu_tracking = true;
+	tracked_command = 0;
+	try {
+		menu_open_popup(menu, root, x - top->outer.left, y - top->outer.top);
+		while (!popups.empty()) {
+			serve_sent();
+			flush_dirty();
+			deliver_pending();
+			if (!presentation.poll)
+				break;
+			for (const auto &event : presentation.poll(std::chrono::milliseconds(20)))
+				receive(event);
+		}
+	} catch (...) {
+		menu_tracking = false;
+		menu_close();
+		throw;
+	}
+	menu_tracking = false;
+	menu_close();
+	const auto command = tracked_command;
+	// TPM_RETURNCMD answers the command itself; otherwise it reaches the owner as WM_COMMAND and the answer is only whether one was chosen.
+	if (flags & 0x100)
+		return command;
+	if (command && !(flags & 0x80) && objects.window(window) && messages.size() < 10000)
+		queue({window, command, 0, 0x111, message_time(), cursor_x, cursor_y});
+	return command ? 1 : 0;
 }
 
 bool NativeWindows::menu_event(const DesktopEvent &event)
@@ -496,6 +547,7 @@ void NativeWindows::menu_open_bar(uint64_t, size_t) {}
 void NativeWindows::menu_highlight(size_t, std::optional<size_t>) {}
 void NativeWindows::menu_select(size_t, size_t) {}
 bool NativeWindows::menu_event(const DesktopEvent &) { return false; }
+uint64_t NativeWindows::track_popup_menu(uint64_t, uint32_t, int32_t, int32_t, uint64_t) { throw uint32_t(120); }
 
 #endif
 

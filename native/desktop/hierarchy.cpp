@@ -87,9 +87,10 @@ void DesktopObjects::configure_window_dc(uint64_t handle,DesktopDC &device,bool 
 		parent=ancestor->parent;
 	}
 	device.bounds=right<=left || bottom<=top ? DesktopRect{} : DesktopRect{int32_t(left),int32_t(top),int32_t(right),int32_t(bottom)};
-	// WS_CLIPCHILDREN keeps drawing off the visible children; WS_CLIPSIBLINGS keeps it off the siblings stacked above.
+	// WS_CLIPCHILDREN keeps drawing off the visible children; WS_CLIPSIBLINGS keeps it off the siblings stacked above. A window with
+	// WS_EX_COMPOSITED paints under its children, which then paint over it, as Windows paints such a tree from the bottom up.
 	device.visible.reset();
-	const bool clip_children=(record->style & 0x02000000U)!=0,clip_siblings=(record->style & 0x04000000U)!=0 && record->parent;
+	const bool clip_children=(record->style & 0x02000000U)!=0 && !(record->ex_style & 0x02000000U),clip_siblings=(record->style & 0x04000000U)!=0 && record->parent;
 	if (clip_children || clip_siblings) {
 		DesktopRegion region;
 		region.add({0,0,int32_t(std::min<int64_t>(frame ? int64_t(record->outer.right)-x : record->width,INT32_MAX)),

@@ -283,12 +283,13 @@ void NativeWindows::place_window(uint64_t handle, DesktopRect outer, uint64_t in
 			if (resized) {
 				window = objects.window(handle);
 				const int32_t client_width = window->width, client_height = window->height;
+				const std::pair<int32_t, int32_t> laid_out{target.left + window->x - window->outer.left, target.top + window->y - window->outer.top};
 				window->outer = target;
 				window->x = target.left;
 				window->y = target.top;
 				window->width = target.right - target.left;
 				window->height = target.bottom - target.top;
-				recalculate_client(handle, client_width, client_height);
+				recalculate_client(handle, client_width, client_height, laid_out);
 			}
 		} else {
 			reshape(handle, target);
@@ -312,6 +313,13 @@ void NativeWindows::place_window(uint64_t handle, DesktopRect outer, uint64_t in
 	window = objects.window(handle);
 	if (!window)
 		return;
+	// SWP_FRAMECHANGED asks the window for its client area again, as a program that draws its own frame does after it changes.
+	if ((effective & 0x20) && !(shifted || resized)) {
+		recalculate_client(handle);
+		window = objects.window(handle);
+		if (!window)
+			return;
+	}
 	if (effective & swp_showwindow)
 		show_window(handle, 5);
 	else if (effective & swp_hidewindow)
@@ -891,6 +899,48 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		if (call[1]) call.store<uint32_t>(call[1], found->second[0]);
 		if (call[2]) call.store<uint8_t>(call[2], uint8_t(found->second[1]));
 		if (call[3]) call.store<uint32_t>(call[3], found->second[2]);
+		call.ret(1);
+	});
+	// The compositor shows the frame through the client area within these margins, wherever the program left it black (see present).
+	registry.add("DwmExtendFrameIntoClientArea", 2, [this](ApiCall &call) {
+		auto *window = objects.window(call[0]);
+		if (!window || !call[1]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		std::array<int32_t, 4> margins{};
+		for (size_t index = 0; index < 4; ++index)
+			margins[index] = int32_t(call.load<uint32_t>(call[1] + index * 4));
+		if (std::getenv("RAVEN_TRACE_NC"))
+			std::fprintf(stderr, "glass %llx margins %d %d %d %d\n", (unsigned long long)call[0], margins[0], margins[1], margins[2], margins[3]);
+		if (margins == std::array<int32_t, 4>{})
+			window->glass.reset();
+		else
+			window->glass = margins;
+		drawing(call[0]);
+		call.ret(0);
+	});
+	// The compositor answers the hit test of the caption buttons it draws over an extended frame; every other message is the program's.
+	registry.add("DwmDefWindowProc", 5, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window || !window->glass || call.u32(1) != 0x84 || !themed()) {
+			call.ret(0);
+			return;
+		}
+		const auto layout = frame_layout(*window);
+		const int32_t x = int16_t(call[3] & 0xffff) - window->outer.left, y = int16_t((call[3] >> 16) & 0xffff) - window->outer.top;
+		if (window->y - window->outer.top > layout.close.top) {
+			call.ret(0);
+			return;
+		}
+		const auto inside = [&](DesktopRect rect) { return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom; };
+		const uint64_t hit = inside(layout.close) ? 20 : inside(layout.maximize) ? 9 : inside(layout.minimize) ? 8 : 0;
+		if (!hit) {
+			call.ret(0);
+			return;
+		}
+		if (call[4])
+			call.store_pointer(call[4], hit);
 		call.ret(1);
 	});
 	registry.add("EnumDisplayMonitors", 4, [this](ApiCall &call) {

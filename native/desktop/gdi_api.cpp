@@ -231,22 +231,26 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 			call.ret(1);
 		});
 	});
-	// GetTransform(dc, which, XFORM): world to page (0x203) is the world transform; page to device (0x304) is the identity, as for the
-	// MM_TEXT mapping these device contexts keep; world to device (0x204) is their product and device to world (0x402) its inverse.
+	// GetTransform(dc, which, XFORM): world to page (0x203) is the world transform; page to device (0x304) moves the window origin onto the
+	// viewport origin, the whole MM_TEXT mapping these device contexts keep; world to device (0x204) is their product and device to world
+	// (0x402) its inverse. GDI+ reads world to device to place what it draws on a context whose origin a program moved.
 	registry.add("GetTransform", 3, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			auto &dc = require_dc(call, 0);
 			const uint32_t which = call.u32(1);
 			if (!call[2] || (which != 0x203 && which != 0x304 && which != 0x204 && which != 0x402))
 				throw uint32_t(87);
-			std::array<float, 6> result = which == 0x304 ? std::array<float, 6>{1, 0, 0, 1, 0, 0} : dc.world;
+			const float dx = float(dc.viewport_org_x - dc.window_org_x), dy = float(dc.viewport_org_y - dc.window_org_y);
+			const auto &w = dc.world;
+			std::array<float, 6> result = which == 0x203 ? w : which == 0x304 ? std::array<float, 6>{1, 0, 0, 1, dx, dy} :
+				std::array<float, 6>{w[0], w[1], w[2], w[3], w[4] + dx, w[5] + dy};
 			if (which == 0x402) {
-				const auto &w = dc.world;
-				const float determinant = w[0] * w[3] - w[1] * w[2];
+				const auto t = result;
+				const float determinant = t[0] * t[3] - t[1] * t[2];
 				if (determinant == 0)
 					throw uint32_t(87);
-				result = {w[3] / determinant, -w[1] / determinant, -w[2] / determinant, w[0] / determinant,
-					(w[2] * w[5] - w[3] * w[4]) / determinant, (w[1] * w[4] - w[0] * w[5]) / determinant};
+				result = {t[3] / determinant, -t[1] / determinant, -t[2] / determinant, t[0] / determinant,
+					(t[2] * t[5] - t[3] * t[4]) / determinant, (t[1] * t[4] - t[0] * t[5]) / determinant};
 			}
 			call.write(call[2], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(result.data()), 24));
 			call.ret(1);

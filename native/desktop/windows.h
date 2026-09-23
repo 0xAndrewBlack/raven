@@ -135,6 +135,8 @@ private:
 	std::function<void(std::function<bool()>)> block_hook;
 	// A window of the calling thread that needs painting, under the filter window when one is given.
 	uint64_t invalid_owned(uint64_t filter) const;
+	// The window the last WM_PAINT went to; the next search for one starts after it.
+	uint64_t paint_cursor=0;
 	// Device contexts over windows of other processes, and the frames other processes drew into this process's windows.
 	struct ForeignTarget { std::shared_ptr<ForeignSurface> surface; uint64_t bitmap=0; };
 	std::map<uint64_t,ForeignTarget> foreign_targets;
@@ -226,6 +228,11 @@ private:
 	// Input that arrives while a button press is being placed in the queue (the program runs during its hit test and parent notifications
 	// and may pump): it is taken in after the press, so the program sees the input in the order it happened.
 	bool placing_press=false;
+	// A tool window shown as a popup of its owner is moved by the program's side, as the compositor moves only toplevels: the window
+	// whose caption is being dragged, where the pointer started and where the window was then.
+	struct FrameDrag { uint64_t window=0; int32_t start_x=0,start_y=0; DesktopRect origin{}; } frame_drag;
+	// True when the window appears as a popup of its owner's host window rather than as a host window of its own.
+	bool shown_on_owner(const DesktopWindow &window) const;
 	void place_pointer(const DesktopEvent &event,uint32_t message,uint32_t buttons,int64_t x,int64_t y);
 	void release_held_input();
 	std::deque<DesktopEvent> held_input;
@@ -244,6 +251,9 @@ private:
 	void paint_nonclient(uint64_t window);
 	void paint_modern_frame(uint64_t handle,const DesktopWindow &window,const FrameLayout &layout,paint::Canvas &canvas,bool is_active,int32_t width,
 		int32_t height);
+	// The surface color of the Windows 11 caption, which also fills the frame a program extends into its client area.
+	uint32_t caption_color(bool is_active) const;
+	void paint_caption_buttons(uint64_t handle,const DesktopWindow &window,const FrameLayout &layout,paint::Canvas &canvas,bool is_active);
 	uint64_t nonclient_hit(const DesktopWindow &window,int32_t x,int32_t y) const;
 	// Menu bar item currently shown as pressed, and the window that owns it.
 	std::optional<size_t> open_menu_item;
@@ -271,6 +281,10 @@ private:
 	void menu_highlight(size_t level,std::optional<size_t> index);
 	void menu_select(size_t level,size_t index);
 	void menu_close();
+	// A menu TrackPopupMenu shows waits for its answer: the command chosen is kept here instead of being posted.
+	bool menu_tracking=false;
+	uint64_t tracked_command=0;
+	uint64_t track_popup_menu(uint64_t menu,uint32_t flags,int32_t x,int32_t y,uint64_t window);
 	void nonclient_pointer(uint64_t window,uint64_t hit,uint32_t message,int32_t x,int32_t y);
 	bool system_dispatch(std::string_view name);
 	void register_message_api(ApiRegistry &registry);
@@ -335,6 +349,13 @@ private:
 	uint64_t host_selection=0;
 	std::function<uint64_t(uint64_t)> global_allocator;
 	std::array<uint8_t,256> vk_state{},vk_async{};
+	// The mouse buttons count as keys too (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1 and 2), from the MK_ flags of a pointer message.
+	static void mouse_keys(std::array<uint8_t,256> &state,uint64_t buttons)
+	{
+		static constexpr std::pair<uint32_t,uint32_t> keys[]={{0x01,0x01},{0x02,0x02},{0x04,0x10},{0x05,0x20},{0x06,0x40}};
+		for (const auto &[code,flag] : keys)
+			state[code]=(buttons & flag) ? (state[code] | 0x80) : (state[code] & 0x7f);
+	}
 	std::map<uint64_t,uint64_t> system_menus;
 	struct Tracking { uint64_t window=0; uint32_t flags=0; };
 	Tracking tracking;
@@ -377,7 +398,9 @@ private:
 	uint64_t next_timer_id=0x1000;
 	void post_due_timers();
 	// The previous client size, when the caller has already stored a provisional one, decides whether WM_SIZE is due.
-	void recalculate_client(uint64_t window,int32_t previous_width=-1,int32_t previous_height=-1);
+	// Children keep their place in the client area: when its origin moves they move with it. origin is where they were laid out against,
+	// the client origin before the call unless the caller already moved the window.
+	void recalculate_client(uint64_t window,int32_t previous_width=-1,int32_t previous_height=-1,std::optional<std::pair<int32_t,int32_t>> origin={});
 	void reshape(uint64_t window,DesktopRect outer);
 	uint64_t desktop_window();
 	uint64_t desktop=0;

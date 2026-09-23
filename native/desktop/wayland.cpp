@@ -663,6 +663,12 @@ struct WaylandPresentation::State {
 		xdg_toplevel_set_title(window.role,std::string(title).c_str());
 		// A size the compositor refused to configure (a window larger than the output) is shown clipped rather than failing the frame.
 		// A frame of another size is the guest's answer to a resize: the surface follows it.
+		// The compositor's close is a request: once the program has it (WM_CLOSE), a window it keeps, asking to save its work for
+		// instance, goes on showing its frames.
+		if (window.closed && window.close_posted) {
+			window.closed=false;
+			window.close_posted=false;
+		}
 		if (window.closed) throw std::runtime_error("Wayland surface cannot accept this frame");
 		if (window.pending_width==width && window.pending_height==height) window.resized=false;
 		window.width=width; window.height=height;

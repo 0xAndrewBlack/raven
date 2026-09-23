@@ -100,22 +100,35 @@ uint64_t NativeWindows::desktop_window()
 }
 
 // Re-runs WM_NCCALCSIZE for the current outer rectangle and adopts the client rectangle it answers.
-void NativeWindows::recalculate_client(uint64_t handle,int32_t previous_width,int32_t previous_height)
+void NativeWindows::recalculate_client(uint64_t handle,int32_t previous_width,int32_t previous_height,std::optional<std::pair<int32_t,int32_t>> origin)
 {
 	auto *window = objects.window(handle);
 	if (!window)
 		throw uint32_t(1400);
+	const auto laid_out = origin ? *origin : std::pair<int32_t,int32_t>{window->x, window->y};
 	const auto scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
 	DesktopRect client{};
 	bool resized = false;
 	int32_t old_width = previous_width >= 0 ? previous_width : window->width, old_height = previous_height >= 0 ? previous_height : window->height;
 	try {
-		std::array<uint8_t, 16> bytes{};
-		const int32_t values[4] = {window->outer.left, window->outer.top, window->outer.right, window->outer.bottom};
+		// The extended form Windows sends after creation: NCCALCSIZE_PARAMS holds the new window rectangle, the old one and the old client
+		// rectangle, then a pointer to the WINDOWPOS that follows it. A program that draws its own frame answers only this form.
+		const bool narrow = process.mode() == NativeMode::x86;
+		const size_t pointer = narrow ? 4 : 8, position = 48 + pointer;
+		std::vector<uint8_t> bytes(position + (narrow ? 28 : 40));
+		const int32_t values[12] = {window->outer.left, window->outer.top, window->outer.right, window->outer.bottom,
+			window->outer.left, window->outer.top, window->outer.right, window->outer.bottom,
+			window->x, window->y, window->x + window->width, window->y + window->height};
+		for (size_t index = 0; index < 12; ++index)
+			write_le(std::span<uint8_t>(bytes), index * 4, uint32_t(values[index]), 4);
+		write_le(std::span<uint8_t>(bytes), 48, scratch + position, pointer);
+		write_le(std::span<uint8_t>(bytes), position, handle, pointer);
+		const int32_t place[4] = {window->outer.left, window->outer.top, window->outer.right - window->outer.left, window->outer.bottom - window->outer.top};
 		for (size_t index = 0; index < 4; ++index)
-			write_le(bytes, index * 4, uint32_t(values[index]), 4);
+			write_le(std::span<uint8_t>(bytes), position + pointer * 2 + index * 4, uint32_t(place[index]), 4);
+		write_le(std::span<uint8_t>(bytes), position + pointer * 2 + 16, 0x20 | 0x4 | 0x10, 4);
 		process.write_memory(scratch, bytes);
-		send(handle, 0x83, 0, scratch);
+		send(handle, 0x83, 1, scratch);
 		window = objects.window(handle);
 		if (!window)
 			throw std::runtime_error("window was destroyed during frame calculation");
@@ -134,6 +147,9 @@ void NativeWindows::recalculate_client(uint64_t handle,int32_t previous_width,in
 	window->y = client.top;
 	window->width = client.right - client.left;
 	window->height = client.bottom - client.top;
+	if (client.left != laid_out.first || client.top != laid_out.second)
+		for (const auto child : objects.child_windows(handle))
+			shift_window(child, client.left - laid_out.first, client.top - laid_out.second);
 	resized = window->width != old_width || window->height != old_height;
 	objects.update_window_dcs(handle);
 	if (resized)
@@ -154,6 +170,8 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 	const bool resized = window->outer.right - window->outer.left != outer.right - outer.left ||
 		window->outer.bottom - window->outer.top != outer.bottom - outer.top;
 	const int32_t client_width = window->width, client_height = window->height;
+	// Where the children were laid out: the client origin before the change, which they follow wherever the client area goes.
+	const std::pair<int32_t, int32_t> laid_out{window->x, window->y};
 	if (resized && window->bitmap) {
 		// The surface is outer-sized, so a new size needs a new surface. A window that carries a graphics driver's surface keeps its host
 		// window, because that surface stays attached to it; any other gets a new host window, which the compositor places afresh.
@@ -172,7 +190,7 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 		window->y = outer.top;
 		window->width = outer.right - outer.left;
 		window->height = outer.bottom - outer.top;
-		recalculate_client(handle, client_width, client_height);
+		recalculate_client(handle, client_width, client_height, laid_out);
 		(void)visible;
 	} else {
 		window->outer = outer;
@@ -180,7 +198,7 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 		window->y = outer.top;
 		window->width = outer.right - outer.left;
 		window->height = outer.bottom - outer.top;
-		recalculate_client(handle, client_width, client_height);
+		recalculate_client(handle, client_width, client_height, laid_out);
 	}
 	window = objects.window(handle);
 	if (window && moved)
