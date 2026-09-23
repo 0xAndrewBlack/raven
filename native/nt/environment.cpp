@@ -2,9 +2,12 @@
 #include "nls.h"
 
 #include <array>
+#include <chrono>
+#include <string_view>
 #include <algorithm>
 #include <stdexcept>
 #include <sys/mman.h>
+#include <unistd.h>
 
 namespace raven {
 
@@ -25,6 +28,47 @@ static uint32_t value(NativeProcess &process, uint64_t address)
 	return result;
 }
 
+// KUSER_SHARED_DATA, the page Windows maps read-only at 0x7ffe0000 in every process: programs and installers read the version of
+// Windows, the system folder and the processor count straight from it. The values agree with what GetVersionEx answers; the clock
+// fields hold the time the process started, as the page is not kept current.
+static void map_shared_user_data(NativeProcess &process)
+{
+	constexpr uint64_t page = 0x7ffe0000;
+	try {
+		process.read_memory(page, 4);
+		return;
+	} catch (...) {}
+	process.map_memory(4096, PROT_READ | PROT_WRITE, page);
+	using namespace std::chrono;
+	const auto since_1601 = uint64_t(duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count() / 100) + 116444736000000000ULL;
+	const auto uptime = uint64_t(duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count() / 100);
+	const auto ticks = uptime / 10000;
+	field(process, page + 0x00, uint32_t(ticks), 4);
+	field(process, page + 0x04, 0x0fa00000, 4);
+	const auto system_time = [&](uint64_t at, uint64_t value) {
+		field(process, at, uint32_t(value), 4);
+		field(process, at + 4, uint32_t(value >> 32), 4);
+		field(process, at + 8, uint32_t(value >> 32), 4);
+	};
+	system_time(page + 0x08, uptime);
+	system_time(page + 0x14, since_1601);
+	field(process, page + 0x2c, 0x14c, 2);
+	field(process, page + 0x2e, 0x8664, 2);
+	const std::u16string_view root = u"C:\\Windows";
+	for (size_t index = 0; index < root.size(); ++index)
+		field(process, page + 0x30 + index * 2, root[index], 2);
+	field(process, page + 0x260, 19045, 4);
+	field(process, page + 0x264, 1, 4);
+	field(process, page + 0x268, 1, 1);
+	field(process, page + 0x26c, 10, 4);
+	field(process, page + 0x270, 0, 4);
+	field(process, page + 0x2d0, 0x100, 4);
+	field(process, page + 0x2e8, sysconf(_SC_PHYS_PAGES), 4);
+	system_time(page + 0x320, ticks);
+	field(process, page + 0x3c0, std::max<long>(1, sysconf(_SC_NPROCESSORS_ONLN)), 4);
+	process.protect_memory(page, 4096, PROT_READ);
+}
+
 NativeEnvironment::NativeEnvironment(NativeProcess &process, uint64_t image_base,
 	uint32_t process_id, uint32_t thread_id) : process(process)
 {
@@ -39,12 +83,15 @@ NativeEnvironment::NativeEnvironment(NativeProcess &process, uint64_t image_base
 		throw std::runtime_error("native environment requires an image header");
 	const auto [stack_limit, stack_base] = process.stack_bounds();
 	try {
+		map_shared_user_data(process);
 		process_block = process.map_memory(4096, PROT_READ | PROT_WRITE);
 		thread_block = process.map_memory(8192, PROT_READ | PROT_WRITE);
 		// x64 NT_TIB, CLIENT_ID and the initial TEB/PEB contract fields.
 		field(process, thread_block, UINT64_MAX, 8);
 		field(process, thread_block + 0x08, stack_base, 8);
 		field(process, thread_block + 0x10, stack_limit, 8);
+		// DeallocationStack: the bottom of the stack's allocation, where a runtime that measures its stack finds its end.
+		field(process, thread_block + 0x1478, stack_limit, 8);
 		field(process, thread_block + 0x30, thread_block, 8);
 		field(process, thread_block + 0x40, process_id, 8);
 		field(process, thread_block + 0x48, thread_id, 8);
@@ -79,6 +126,8 @@ uint64_t NativeEnvironment::create_thread_block(uint64_t stack_base, uint64_t st
 			field(process, block, UINT32_MAX, 4);
 			field(process, block + 0x04, stack_base, 4);
 			field(process, block + 0x08, stack_limit, 4);
+			// DeallocationStack: a thread's stack is allocated with one guard page below its limit.
+			field(process, block + 0xe0c, stack_limit - 4096, 4);
 			field(process, block + 0x18, block, 4);
 			field(process, block + 0x20, value(process, thread_block + 0x20), 4);
 			field(process, block + 0x24, thread_id, 4);
@@ -95,6 +144,7 @@ uint64_t NativeEnvironment::create_thread_block(uint64_t stack_base, uint64_t st
 		field(process, teb, UINT64_MAX, 8);
 		field(process, teb + 0x08, stack_base, 8);
 		field(process, teb + 0x10, stack_limit, 8);
+		field(process, teb + 0x1478, stack_limit - 4096, 8);
 		field(process, teb + 0x30, teb, 8);
 		field(process, teb + 0x40, value(process, thread_block + 0x40), 8);
 		field(process, teb + 0x48, thread_id, 8);
@@ -123,12 +173,14 @@ void NativeEnvironment::x86_constructor(uint64_t image_base, uint32_t process_id
 		throw std::runtime_error("native environment requires an image header");
 	const auto [stack_limit, stack_base] = process.stack_bounds();
 	try {
+		map_shared_user_data(process);
 		process_block = process.map_memory(4096, PROT_READ | PROT_WRITE);
 		thread_block = process.map_memory(8192, PROT_READ | PROT_WRITE);
 		// x86 NT_TIB, CLIENT_ID and the initial TEB/PEB contract fields.
 		field(process, thread_block, UINT32_MAX, 4);
 		field(process, thread_block + 0x04, stack_base, 4);
 		field(process, thread_block + 0x08, stack_limit, 4);
+		field(process, thread_block + 0xe0c, stack_limit, 4);
 		field(process, thread_block + 0x18, thread_block, 4);
 		field(process, thread_block + 0x20, process_id, 4);
 		field(process, thread_block + 0x24, thread_id, 4);

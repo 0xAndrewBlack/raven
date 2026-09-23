@@ -151,6 +151,8 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 	settle();
 	if (!range(address,size,user_limit))
 		return {0,0,invalid};
+	// MEM_TOP_DOWN only asks for the highest free address; any free address serves the program as well.
+	type&=~0x100000U;
 	if (!(type & 0x3000) || (type & ~0x3000U))
 		return {0,0,unsupported};
 	const auto permissions=protection(access);
@@ -388,11 +390,38 @@ std::optional<std::array<uint8_t,48>> NativeMemory::query(uint64_t address) cons
 		}
 	}
 	auto found=regions.upper_bound(address);
+	// Address space that nothing holds is free, up to the next reservation or image, as Windows reports it to programs that look for room.
+	// The stack the first thread starts on is the exception: committed read-write memory of its own allocation, which a runtime that
+	// measures its stack finds from any address in it.
+	const auto free_space=[&]() -> std::optional<std::array<uint8_t,48>> {
+		const uint64_t page=address&~uint64_t(4095);
+		if (page<0x10000 || page>=user_limit)
+			return std::nullopt;
+		const auto [stack_low,stack_high]=process.stack_bounds();
+		if (page>=stack_low && page<stack_high) {
+			std::array<uint8_t,48> bytes{};
+			put(bytes,0,page); put(bytes,8,stack_low);
+			put(bytes,16,4,4); put(bytes,24,stack_high-page);
+			put(bytes,32,0x1000,4); put(bytes,36,4,4); put(bytes,40,0x20000,4);
+			return bytes;
+		}
+		uint64_t end=user_limit;
+		if (page<stack_low)
+			end=stack_low;
+		if (const auto next_region=regions.upper_bound(address); next_region!=regions.end())
+			end=std::min(end,next_region->first);
+		if (const auto next_image=images.upper_bound(address); next_image!=images.end())
+			end=std::min(end,next_image->first);
+		std::array<uint8_t,48> bytes{};
+		put(bytes,0,page); put(bytes,24,end-page);
+		put(bytes,32,0x10000,4); put(bytes,36,1,4);
+		return bytes;
+	};
 	if (found==regions.begin())
-		return std::nullopt;
+		return free_space();
 	--found;
 	if (address-found->first>=found->second.size)
-		return std::nullopt;
+		return free_space();
 	const auto first=(address-found->first)/4096;
 	const auto access=found->second.pages.at(first);
 	const uint64_t end=found->second.pages.run_end(first);

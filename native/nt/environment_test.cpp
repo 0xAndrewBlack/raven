@@ -61,6 +61,10 @@ int main(int argc, char **argv)
 		check(loader_rejected && process.read_memory(wrong_peb + 0x18, 8) == std::vector<uint8_t>(8),
 			"mismatched PEB received a loader graph");
 		process.unmap_memory(wrong_peb);
+		// KUSER_SHARED_DATA: Windows 10.0.19045, a workstation, read-only to the program.
+		const auto shared = process.read_memory(0x7ffe0260, 20);
+		check(shared[0] == 0x65 && shared[1] == 0x4a && shared[4] == 1 && shared[12] == 10 && shared[16] == 0 &&
+			process.has_protection(0x7ffe0000, 4096, PROT_READ), "shared user data does not name Windows 10 22H2");
 		check(environment.last_error() == 0, "initial LastError is not zero");
 		environment.set_last_error(55);
 		const auto heap_list=environment.prepare_heaps();

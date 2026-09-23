@@ -54,7 +54,7 @@ struct NativeThreadState {
 class NativeProcess {
 public:
 	NativeProcess(std::span<LoadedImage *const> images, const std::string &bootstrap,
-		std::chrono::milliseconds setup_timeout, NativeMode mode = NativeMode::x64);
+		std::chrono::milliseconds setup_timeout, NativeMode mode = NativeMode::x64, uint64_t stack_reserve = 1024 * 1024);
 	~NativeProcess();
 	NativeProcess(const NativeProcess &) = delete;
 	NativeProcess &operator=(const NativeProcess &) = delete;
@@ -97,6 +97,9 @@ public:
 	// Address the guest returns to when a host-initiated call finishes.
 	uint64_t return_gate() const;
 	size_t callback_depth() const;
+	// The guest's registers at the API call that started the callback at this nesting index (0 is the outermost), with the current
+	// extended state: where a stack walk continues past the callback's return gate.
+	NativeContext callback_origin(size_t index) const;
 	// Diagnostics: RAX after an API result was delivered, without fetching the extended state.
 	uint64_t result_register() const;
 	// Diagnostics: a hardware write watchpoint (eight bytes) that reports as a fault with si_code TRAP_HWBKPT; address zero clears it.

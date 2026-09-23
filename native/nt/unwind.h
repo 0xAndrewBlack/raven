@@ -3,6 +3,8 @@
 #include "cpu/native_cpu.h"
 #include "pe/module_set.h"
 
+#include <array>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -41,15 +43,35 @@ public:
 	struct Result {
 		uint64_t handler = 0, handler_data = 0, establisher = 0;
 	};
+	// Where the callee saved each nonvolatile register it restores, as KNONVOLATILE_CONTEXT_POINTERS lists them: XMM0 to XMM15, then
+	// RAX to R15 in CONTEXT order.
+	using ContextPointers = std::array<uint64_t, 32>;
 	// Moves the context from the callee's frame to its caller's; handler_type is UNW_FLAG_EHANDLER (1) or UNW_FLAG_UHANDLER (2).
-	Result unwind(uint32_t handler_type, uint64_t pc, const FunctionEntry &function, ContextBytes &context) const;
+	// The stack addresses the saved registers come from are recorded in pointers when it is given.
+	Result unwind(uint32_t handler_type, uint64_t pc, const FunctionEntry &function, ContextBytes &context,
+		ContextPointers *pointers = nullptr) const;
 	// A function without unwind data is a leaf: its caller's return address is on top of the stack.
 	void unwind_leaf(ContextBytes &context) const;
+
+	// Function tables of code a generator emits outside any module: an array of RUNTIME_FUNCTION entries relative to a base
+	// (RtlAddFunctionTable), or a range whose entries a callback in the program finds (RtlInstallFunctionTableCallback).
+	struct DynamicTable {
+		uint64_t identifier = 0, base = 0, length = 0;
+		uint64_t entries = 0, count = 0;
+		uint64_t callback = 0, context = 0;
+	};
+	void add_table(const DynamicTable &table) { tables.push_back(table); }
+	bool remove_table(uint64_t identifier);
+	// Calls a function of the program with two arguments and returns what it returns; the callbacks of function tables run this way.
+	void set_guest_call(std::function<uint64_t(uint64_t, uint64_t, uint64_t)> call) { guest_call = std::move(call); }
 
 private:
 	NativeProcess &process;
 	const ModuleSet &modules;
-	bool epilogue(uint64_t pc, ContextBytes &context) const;
+	std::vector<DynamicTable> tables;
+	std::function<uint64_t(uint64_t, uint64_t, uint64_t)> guest_call;
+	std::optional<FunctionEntry> lookup_dynamic(uint64_t pc) const;
+	bool epilogue(uint64_t pc, ContextBytes &context, ContextPointers *pointers) const;
 };
 
 }

@@ -28,7 +28,8 @@ PVOID NTAPI RavenCreateHeap(ULONG flags, PVOID base, SIZE_T reserve, SIZE_T comm
 	PVOID lock, PRTL_HEAP_PARAMETERS parameters)
 {
 	PPEB peb=NtCurrentPeb();
-	if (!initialized || (flags & ~7U) || peb->NtGlobalFlag) {
+	// HEAP_NO_SERIALIZE, HEAP_GROWABLE, HEAP_GENERATE_EXCEPTIONS and HEAP_CREATE_ENABLE_EXECUTE, whose pages are committed executable.
+	if (!initialized || (flags & ~(7U | HEAP_CREATE_ENABLE_EXECUTE)) || peb->NtGlobalFlag) {
 		RtlSetLastWin32ErrorAndNtStatusFromNtStatus(STATUS_NOT_SUPPORTED);
 		return NULL;
 	}

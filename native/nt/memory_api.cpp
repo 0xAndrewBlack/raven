@@ -24,6 +24,94 @@ struct View {
 	bool writable = false;
 };
 
+// A section made with SEC_IMAGE maps its file as the loader lays a program out: the headers, then each section at its own address with
+// the access its characteristics give, relocated by the difference from the base the image asks for. Nothing in it runs; a runtime that
+// reads its libraries this way only finds its data where the headers say. Returns the view's size, or 0 when the file is no image.
+uint64_t map_image(ApiCall &call, NativeMemory &memory, int descriptor, uint64_t &address)
+{
+	struct stat status{};
+	if (::fstat(descriptor, &status) != 0)
+		return 0;
+	const uint64_t file_size = uint64_t(status.st_size);
+	const auto read_at = [&](uint64_t offset, size_t size) {
+		std::vector<uint8_t> bytes(size);
+		if (offset > file_size || size > file_size - offset || ::pread(descriptor, bytes.data(), size, off_t(offset)) != ssize_t(size))
+			bytes.clear();
+		return bytes;
+	};
+	const auto u16 = [](const std::vector<uint8_t> &bytes, size_t at) { return uint32_t(bytes[at] | bytes[at + 1] << 8); };
+	const auto u32 = [](const std::vector<uint8_t> &bytes, size_t at) {
+		return uint32_t(bytes[at]) | uint32_t(bytes[at + 1]) << 8 | uint32_t(bytes[at + 2]) << 16 | uint32_t(bytes[at + 3]) << 24;
+	};
+	const auto dos = read_at(0, 64);
+	if (dos.empty() || dos[0] != 'M' || dos[1] != 'Z')
+		return 0;
+	const uint64_t header = u32(dos, 0x3c);
+	const auto nt = read_at(header, 24);
+	if (nt.empty() || u32(nt, 0) != 0x4550)
+		return 0;
+	const uint32_t count = u16(nt, 6), optional_size = u16(nt, 20);
+	const auto optional = read_at(header + 24, optional_size);
+	if (optional.size() < 96)
+		return 0;
+	const bool wide = u16(optional, 0) == 0x20b;
+	if (!wide && u16(optional, 0) != 0x10b)
+		return 0;
+	const uint64_t preferred = wide ? uint64_t(u32(optional, 24)) | uint64_t(u32(optional, 28)) << 32 : u32(optional, 28);
+	const uint64_t image_size = (uint64_t(u32(optional, 56)) + 4095) & ~uint64_t(4095);
+	const uint64_t headers_size = std::min<uint64_t>(u32(optional, 60), file_size);
+	const size_t directories = wide ? 112 : 96;
+	const uint32_t relocations = optional.size() >= directories + 48 ? u32(optional, directories + 40) : 0;
+	const uint32_t relocations_size = optional.size() >= directories + 48 ? u32(optional, directories + 44) : 0;
+	const auto table = read_at(header + 24 + optional_size, size_t(count) * 40);
+	if (!image_size || (count && table.empty()))
+		return 0;
+	const auto range = memory.allocate(0, image_size, 0x3000, 4);
+	if (range.status)
+		return 0;
+	address = range.address;
+	call.write(address, read_at(0, headers_size));
+	for (uint32_t index = 0; index < count; ++index) {
+		const size_t entry = size_t(index) * 40;
+		const uint64_t virtual_address = u32(table, entry + 12), raw_size = u32(table, entry + 16), raw = u32(table, entry + 20);
+		const uint64_t virtual_size = u32(table, entry + 8) ? u32(table, entry + 8) : raw_size;
+		const uint64_t length = std::min({raw_size, virtual_size, file_size > raw ? file_size - raw : 0});
+		if (virtual_address < image_size && length)
+			call.write(address + virtual_address, read_at(raw, std::min(length, image_size - virtual_address)));
+	}
+	// Base relocations: blocks of a page address, their size and 16-bit entries whose top four bits name the kind.
+	const uint64_t delta = address - preferred;
+	if (delta && relocations && relocations_size && relocations < image_size && relocations_size <= image_size - relocations) {
+		const auto blocks = call.read(address + relocations, relocations_size);
+		for (size_t at = 0; at + 8 <= blocks.size();) {
+			const uint32_t page = u32(blocks, at), size = u32(blocks, at + 4);
+			if (size < 8 || size > blocks.size() - at)
+				break;
+			for (size_t item = at + 8; item + 2 <= at + size; item += 2) {
+				const uint32_t value = u16(blocks, item), kind = value >> 12;
+				const uint64_t target = address + page + (value & 0xfff);
+				if (kind == 10 && page + (value & 0xfff) + 8 <= image_size)
+					call.store<uint64_t>(target, call.load<uint64_t>(target) + delta);
+				else if (kind == 3 && page + (value & 0xfff) + 4 <= image_size)
+					call.store<uint32_t>(target, uint32_t(call.load<uint32_t>(target) + delta));
+			}
+			at += size;
+		}
+	}
+	memory.protect(address, (headers_size + 4095) & ~uint64_t(4095), 2);
+	for (uint32_t index = 0; index < count; ++index) {
+		const size_t entry = size_t(index) * 40;
+		const uint64_t virtual_address = u32(table, entry + 12);
+		const uint64_t virtual_size = u32(table, entry + 8) ? u32(table, entry + 8) : u32(table, entry + 16);
+		const uint32_t characteristics = u32(table, entry + 36);
+		const bool execute = characteristics & 0x20000000U, write = characteristics & 0x80000000U;
+		const uint32_t access = execute ? (write ? 0x40 : 0x20) : write ? 0x04 : 0x02;
+		if (virtual_address < image_size && virtual_size)
+			memory.protect(address + virtual_address, std::min((virtual_size + 4095) & ~uint64_t(4095), image_size - virtual_address), access);
+	}
+	return image_size;
+}
+
 // Where the named sections of the prefix live: one host file each, held by every process that has the section open.
 std::filesystem::path section_directory()
 {
@@ -168,6 +256,23 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 		std::memcpy(bytes.data() + 8, values, 56);
 		call.write(call[0], bytes);
 		call.ret(1);
+	});
+	// MEMORYSTATUS: the same figures in SIZE_T fields; a 32-bit program sees them capped as Windows caps them, at 4 GiB less a byte for
+	// memory and at its 2 GiB address space.
+	registry.add("GlobalMemoryStatus", 1, [](ApiCall &call) {
+		const size_t width = call.pointer_width();
+		const uint64_t cap = width == 4 ? 0xffffffffULL : UINT64_MAX;
+		const uint64_t values[] = {16ULL << 30, 8ULL << 30, 32ULL << 30, 16ULL << 30,
+			width == 4 ? 0x7ffe0000ULL : 0x7fffffe0000ULL, width == 4 ? 0x7fe00000ULL : 0x7fffff00000ULL};
+		std::vector<uint8_t> bytes(8 + 6 * width);
+		const uint32_t length = uint32_t(bytes.size()), load = 20;
+		std::memcpy(bytes.data(), &length, 4);
+		std::memcpy(bytes.data() + 4, &load, 4);
+		for (size_t index = 0; index < 6; ++index) {
+			const uint64_t value = std::min(values[index], cap);
+			std::memcpy(bytes.data() + 8 + index * width, &value, width);
+		}
+		call.write(call[0], bytes);
 	});
 	registry.add("HeapSetInformation", 4, [](ApiCall &call) { call.ret(1); });
 	registry.add("HeapValidate", 3, [](ApiCall &call) { call.ret(1); });
@@ -471,6 +576,17 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(view.address);
 			return;
 		}
+		if (mapping->file && (mapping->protection & 0x1000000U)) {
+			uint64_t address = 0;
+			const uint64_t image_size = map_image(call, memory, mapping->file->descriptor, address);
+			if (!image_size) {
+				call.fail(193);
+				return;
+			}
+			views[address] = {mapping, 0, image_size, false};
+			call.ret(address);
+			return;
+		}
 		// A view that can only be read is the file itself, as on Windows: a program that maps a library of hundreds of megabytes to
 		// read it would otherwise have the whole file copied into its memory. A view the program may write, or one past the end of the
 		// file, is copied as before.
@@ -501,6 +617,18 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 		}
 		views[range.address] = {mapping, offset, size, bool(call.u32(1) & 2)};
 		call.ret(range.address);
+	});
+	// A view at an address of the caller's choosing is not offered, as NtMapViewOfSection below: the request fails as on Windows when
+	// the address is taken (ERROR_INVALID_ADDRESS), and a program that asked for a preferred address maps the view anywhere instead.
+	registry.add("MapViewOfFileEx", 6, [&registry](ApiCall &call) {
+		if (call[5]) {
+			call.fail(487);
+			return;
+		}
+		const auto map = registry.find("MapViewOfFile");
+		ApiCall inner(call.process, call.environment, {call[0], call[1], call[2], call[3], call[4]});
+		map->second(inner);
+		call.ret(inner.result);
 	});
 	const auto write_back = [&](uint64_t address, ApiCall &call) {
 		const auto found = views.find(address);

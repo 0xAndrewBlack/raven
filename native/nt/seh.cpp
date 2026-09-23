@@ -88,7 +88,11 @@ public:
 		const uint64_t guest_record = scratch.take(record_size);
 		const uint64_t dispatcher = scratch.take(dispatcher_size);
 		const uint64_t frame_context = scratch.take(x64_context::size);
+		// As RtlDispatchException passes them: the handler's ContextRecord is the context the exception happened in, which execution
+		// resumes from when a handler continues it, and DispatcherContext->ContextRecord is the frame's context unwound to its caller.
+		const uint64_t exception_context = scratch.take(x64_context::size);
 		context.process.write_memory(guest_record, record);
+		context.process.write_memory(exception_context, origin);
 		active.push_back({origin, context.process.callback_depth(), mark});
 		if (trace)
 		{
@@ -111,11 +115,20 @@ public:
 		// An exception raised inside a handler continues its search through the dispatcher's frames, which the host callback
 		// boundary stands for, into the context of the exception that the handler was running for.
 		size_t outer = active.size() - 1;
+		// The callback nesting of the frames being searched: past the return gate of a callback that no dispatch made, the search goes
+		// on in the frames of the API call that made it, as Windows searches past a window procedure into the caller of DispatchMessage.
+		size_t level = active.back().depth;
 		for (int frames = 0; frames < 1024; ++frames) {
 			const uint64_t pc = context_rip(current);
 			if (!pc)
 				break;
 			const auto function = unwinder.lookup(pc);
+			if (!function && pc == context.process.return_gate() && outer == 0 && continuation_cursor >= continuation.size() && level > 0) {
+				current = context_from_process(context.process.callback_origin(--level));
+				if (trace)
+					std::fprintf(stderr, "seh frame: callback boundary, continuing at level %zu from %llx\n", level, (unsigned long long)context_rip(current));
+				continue;
+			}
 			if (!function) {
 				// A catch block's callback returns through the consolidation gate: the frames beyond it are those of the function
 				// whose catch block is running, from where it was unwound to.
@@ -125,6 +138,7 @@ public:
 				}
 				if (pc == context.process.return_gate() && outer > 0) {
 					current = active[--outer].origin;
+					level = active[outer].depth;
 					continue;
 				}
 				// A search raised from a handler that an unwind is running continues in the frames of whoever called the unwind,
@@ -147,8 +161,7 @@ public:
 				std::fprintf(stderr, "seh frame: pc=%llx function=%x..%x unwind=%x handler=%llx\n", (unsigned long long)pc, function->begin, function->end,
 					function->unwind, (unsigned long long)result.handler);
 			if (result.handler) {
-				std::vector<uint8_t> frame = current;
-				context.process.write_memory(frame_context, frame);
+				context.process.write_memory(frame_context, next);
 				std::vector<uint8_t> descriptor(dispatcher_size);
 				put64(descriptor, 0, pc);
 				put64(descriptor, 8, function->image_base);
@@ -162,7 +175,7 @@ public:
 				context.process.write_memory(dispatcher, descriptor);
 				if (trace)
 					std::fprintf(stderr, "seh: pc=%llx handler=%llx frame=%llx\n", (unsigned long long)pc, (unsigned long long)result.handler, (unsigned long long)result.establisher);
-				const uint64_t arguments[] = {guest_record, result.establisher, frame_context, dispatcher};
+				const uint64_t arguments[] = {guest_record, result.establisher, exception_context, dispatcher};
 				const auto outcome = context.call(result.handler, arguments);
 				if (outcome.stop != NativeStop::returned)
 					throw outcome;
@@ -170,7 +183,7 @@ public:
 				if (disposition == 0) {
 					if (le32(record, 4) & flag_noncontinuable)
 						throw std::runtime_error("native exception handler continued a noncontinuable exception");
-					resume = context.process.read_memory(frame_context, x64_context::size);
+					resume = context.process.read_memory(exception_context, x64_context::size);
 					handled = true;
 					break;
 				}
@@ -184,6 +197,22 @@ public:
 		active.pop_back();
 		scratch.release(mark);
 		return handled;
+	}
+
+	// What a trace says of an exception beyond its code: the address an access violation touched, or the parameters of any other kind
+	// that is not a C++ throw, such as the HRESULT of a .NET exception.
+	static void describe_record(const std::vector<uint8_t> &record, uint64_t rsp)
+	{
+		const uint32_t code = le32(record, 0), count = std::min<uint32_t>(le32(record, 0x18), 15);
+		if (code == 0xc0000005U && count >= 2) {
+			std::fprintf(stderr, "raven:   %s %llx with rsp %llx\n", load64(record, 0x20) == 1 ? "writing" : load64(record, 0x20) == 8 ? "running" :
+				"reading", (unsigned long long)load64(record, 0x28), (unsigned long long)rsp);
+		} else if (code != 0xc0000005U && code != 0xe06d7363U && count) {
+			std::fprintf(stderr, "raven:   parameters");
+			for (uint32_t index = 0; index < count; ++index)
+				std::fprintf(stderr, " %llx", (unsigned long long)load64(record, 0x20 + index * 8));
+			std::fprintf(stderr, "\n");
+		}
 	}
 
 	// Handles one exception end to end; either redirects the guest (throwing ExecutionRedirected) or ends the process.
@@ -202,6 +231,7 @@ public:
 				module ? module->name.c_str() : "unknown", module ? (unsigned long long)(context_rip(origin) - module->loaded.base()) : 0ULL);
 			uint64_t rsp = 0;
 			std::memcpy(&rsp, origin.data() + 0x98, 8);
+			describe_record(record, rsp);
 			try {
 				const auto stack = context.process.read_memory(rsp, 0x300);
 				for (size_t at = 0; at + 8 <= stack.size(); at += 8) {
@@ -252,6 +282,7 @@ public:
 				module ? (unsigned long long)(context_rip(origin) - module->loaded.base()) : 0ULL);
 			uint64_t rsp = 0;
 			std::memcpy(&rsp, origin.data() + 0x98, 8);
+			describe_record(record, rsp);
 			try {
 				const auto stack = context.process.read_memory(rsp, 0x400);
 				for (size_t at = 0; at + 8 <= stack.size(); at += 8) {
@@ -329,9 +360,15 @@ public:
 					std::fprintf(stderr, "step %s+%llx\n", module ? module->name.c_str() : "?", module ? (unsigned long long)(rip - module->loaded.base()) : (unsigned long long)rip);
 				});
 		}
-		// Guest memory of the dispatches that this jump abandons can be reused; outer dispatches keep theirs.
+		// Guest memory of the dispatches that this jump abandons can be reused; outer dispatches keep theirs. Dispatches begun at or above
+		// the nesting execution resumes at are over: their host frames are left by the jump.
 		if (mark != SIZE_MAX)
 			scratch.release(mark);
+		while (!active.empty() && active.back().depth >= depth)
+			active.pop_back();
+		if (trace)
+			std::fprintf(stderr, "seh redirect to %llx at nesting %zu of %zu\n", (unsigned long long)context_rip(target), depth,
+				context.process.callback_depth());
 		throw ExecutionRedirected{depth};
 	}
 
@@ -362,14 +399,16 @@ public:
 	}
 
 	// Second pass: runs termination handlers frame by frame up to the target, then resumes there.
-	[[noreturn]] void unwind(uint64_t target_frame, uint64_t target_ip, std::vector<uint8_t> record, uint64_t return_value)
+	// The caller's own record, when it gave one, is the one every handler sees and whose flags change, as on Windows: a runtime knows its
+	// exception again in the second pass by that record's address.
+	[[noreturn]] void unwind(uint64_t target_frame, uint64_t target_ip, std::vector<uint8_t> record, uint64_t return_value, uint64_t caller_record = 0)
 	{
 		put32(record, 4, le32(record, 4) | flag_unwinding | (target_frame ? 0 : flag_exit_unwind));
 		// Crossing a host callback boundary consumes the dispatch it belongs to; the last one consumed says where execution resumes.
 		size_t depth = context.process.callback_depth();
 		const size_t mark = scratch.mark();
 		size_t resume_mark = mark;
-		const uint64_t guest_record = scratch.take(record_size);
+		const uint64_t guest_record = caller_record ? caller_record : scratch.take(record_size);
 		const uint64_t dispatcher = scratch.take(dispatcher_size);
 		const uint64_t frame_context = scratch.take(x64_context::size);
 		ContextBytes current = caller_context();
@@ -400,6 +439,12 @@ public:
 			// that the enclosing unwind recorded.
 			if (pc == context.process.return_gate() && outer_cursor < previous_size) {
 				current = continuation[outer_cursor++];
+				continue;
+			}
+			// Past the return gate of a callback that no dispatch made, the frames are those of the API call that made it; execution
+			// resumes at that nesting, abandoning the callback.
+			if (pc == context.process.return_gate() && depth > 0) {
+				current = context_from_process(context.process.callback_origin(--depth));
 				continue;
 			}
 			if (!pc)
@@ -479,12 +524,14 @@ public:
 			std::vector<uint8_t> gate(8);
 			put64(gate, 0, trap_gate);
 			context.process.write_memory(slot, gate);
-			consolidations.push_back({current, slot, depth});
+			// The records of the dispatch stay where they are while the catch block runs: a rethrow inside it reaches the exception it
+			// handles through them, as on Windows, where they are still on the stack. They are released when the callback returns.
+			consolidations.push_back({current, slot, depth, resume_mark});
 			auto entry = current;
 			set_context_rip(entry, callback);
 			set_context_rsp(entry, slot);
 			set_context_register(entry, 1, base);
-			redirect_to(entry, depth, resume_mark);
+			redirect_to(entry, depth);
 		}
 		if (target_ip)
 			set_context_rip(current, target_ip);
@@ -513,6 +560,7 @@ public:
 		ContextBytes target;
 		uint64_t return_slot;
 		size_t depth;
+		size_t mark;
 	};
 	std::vector<Consolidation> consolidations;
 
@@ -533,11 +581,11 @@ public:
 		if (found == consolidations.end())
 			throw std::runtime_error("native unwind consolidation returned without a pending catch");
 		auto target = found->target;
-		const size_t depth = found->depth;
+		const size_t depth = found->depth, mark = found->mark;
 		// Callbacks that never returned (a rethrow left them) are abandoned together with this one.
 		consolidations.erase(found, consolidations.end());
 		set_context_rip(target, continuation);
-		redirect_to(target, depth);
+		redirect_to(target, depth, mark);
 	}
 
 private:
@@ -558,14 +606,33 @@ private:
 void register_exception_api(ApiRegistry &registry, KernelContext &context, NativeUnwinder &unwinder)
 {
 	auto exceptions = std::make_shared<Exceptions>(context, unwinder);
-	context.raise_fault = [exceptions, &context](const NativeResult &fault) {
+	context.raise_fault = [exceptions, &context, &unwinder](const NativeResult &fault) {
 		auto native = context.process.context();
 		auto origin = context_from_process(native);
 		const uint64_t rip = context_rip(origin);
 		context.process.enter_fault_dispatch();
-		const auto code = context.process.read_memory(rip, 2);
+		// A jump to unreadable memory faults where no instruction can be read: it is an ordinary access violation, never a fast fail.
+		std::vector<uint8_t> code(2, 0);
+		try {
+			code = context.process.read_memory(rip, 2);
+		} catch (const std::runtime_error &) {
+		}
 		if (fault.signal == SIGSEGV && code[0] == 0xcd && code[1] == 0x29) {
-			std::fprintf(stderr, "raven: fast fail %llu\n", (unsigned long long)context_register(origin, 1));
+			const auto *module = unwinder.module_at(rip);
+			std::fprintf(stderr, "raven: fast fail %llu at %s+%llx\n", (unsigned long long)context_register(origin, 1),
+				module ? module->name.c_str() : "unknown", module ? (unsigned long long)(rip - module->loaded.base()) : (unsigned long long)rip);
+			// The code addresses on the stack name who gave up, which RAVEN_BACKTRACE shows.
+			if (std::getenv("RAVEN_BACKTRACE"))
+				try {
+					const auto stack = context.process.read_memory(context_rsp(origin), 0x400);
+					for (size_t at = 0; at + 8 <= stack.size(); at += 8) {
+						uint64_t value = 0;
+						std::memcpy(&value, stack.data() + at, 8);
+						if (const auto *owner = unwinder.module_at(value))
+							std::fprintf(stderr, "raven:   +%zx %s+%llx\n", at, owner->name.c_str(), (unsigned long long)(value - owner->loaded.base()));
+					}
+				} catch (const std::exception &) {
+				}
 			context.process.abandon_call();
 			throw ProcessExit{0xc0000409U, rip, true};
 		}
@@ -631,14 +698,32 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 		std::memcpy(&function.end, entry.data() + 4, 4);
 		std::memcpy(&function.unwind, entry.data() + 8, 4);
 		function.image_base = call[1];
+		// Code a generator emitted belongs to no module: its unwind data is read from the program's memory.
 		function.module = unwinder.module_at(call[1]);
-		if (!function.module) {
-			call.fail(87);
-			return;
-		}
 		auto bytes = call.read(call[4], x64_context::size);
-		const auto result = unwinder.unwind(call.u32(0), call[2], function, bytes);
+		// KNONVOLATILE_CONTEXT_POINTERS: the entries of the registers this frame restores are replaced, the others kept.
+		NativeUnwinder::ContextPointers pointers{};
+		if (call[7]) {
+			const auto table = call.read(call[7], sizeof pointers);
+			std::memcpy(pointers.data(), table.data(), sizeof pointers);
+		}
+		const auto before = bytes;
+		const auto result = unwinder.unwind(call.u32(0), call[2], function, bytes, call[7] ? &pointers : nullptr);
+		if (std::getenv("RAVEN_TRACE_SEH")) {
+			std::fprintf(stderr, "seh virtual unwind: pc=%llx base=%llx fn=%x..%x unwind=%x rip %llx->%llx rsp %llx->%llx rbp %llx->%llx info",
+				(unsigned long long)call[2], (unsigned long long)call[1], function.begin, function.end, function.unwind,
+				(unsigned long long)context_rip(before), (unsigned long long)context_rip(bytes), (unsigned long long)context_rsp(before),
+				(unsigned long long)context_rsp(bytes), (unsigned long long)context_register(before, 5), (unsigned long long)context_register(bytes, 5));
+			try {
+				for (const auto byte : call.read(call[1] + function.unwind, 24))
+					std::fprintf(stderr, " %02x", byte);
+			} catch (...) {
+			}
+			std::fprintf(stderr, "\n");
+		}
 		call.write(call[4], bytes);
+		if (call[7])
+			call.write(call[7], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(pointers.data()), sizeof pointers));
 		if (call[5]) call.store<uint64_t>(call[5], result.handler_data);
 		if (call[6]) call.store<uint64_t>(call[6], result.establisher);
 		call.ret(result.handler);
@@ -677,7 +762,7 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 			record = call.read(call[2], record_size);
 		else
 			record = exceptions->new_record(status_unwind, 0, 0, {});
-		exceptions->unwind(call[0], call[1], std::move(record), call[3]);
+		exceptions->unwind(call[0], call[1], std::move(record), call[3], call[2]);
 	});
 	registry.add("RtlUnwind", 4, [exceptions](ApiCall &call) {
 		std::vector<uint8_t> record;
@@ -685,10 +770,16 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 			record = call.read(call[2], record_size);
 		else
 			record = exceptions->new_record(status_unwind, 0, 0, {});
-		exceptions->unwind(call[0], call[1], std::move(record), call[3]);
+		exceptions->unwind(call[0], call[1], std::move(record), call[3], call[2]);
 	});
+	// The context resumes at the callback nesting its stack belongs to: callbacks begun from deeper in the stack than its frame, such as the
+	// handler calls of a dispatch that a runtime leaves this way for a catch block, are abandoned.
 	const auto restore = [exceptions, &context](ApiCall &call) {
-		exceptions->redirect_to(call.read(call[0], x64_context::size), context.process.callback_depth());
+		const auto target = call.read(call[0], x64_context::size);
+		size_t depth = context.process.callback_depth();
+		while (depth > 0 && context.process.callback_origin(depth - 1).registers.rsp <= context_rsp(target))
+			--depth;
+		exceptions->redirect_to(target, depth);
 	};
 	exceptions->trap_gate = 0;
 	try {
@@ -735,9 +826,36 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 	};
 	registry.add("RemoveVectoredExceptionHandler", 1, remove_vectored);
 	registry.add("RemoveVectoredContinueHandler", 1, remove_vectored);
-	registry.add("RtlAddFunctionTable", 3, [](ApiCall &call) { call.ret(1); });
-	registry.add("RtlDeleteFunctionTable", 1, [](ApiCall &call) { call.ret(1); });
-	registry.add("RtlInstallFunctionTableCallback", 6, [](ApiCall &call) { call.ret(1); });
+	// Function tables of generated code: the unwinder reads them from the program's memory, and calls a table's callback from there to
+	// find the entry of an address, as a runtime that compiles code registers its code heaps.
+	unwinder.set_guest_call([&context](uint64_t function, uint64_t first, uint64_t second) {
+		const uint64_t arguments[] = {first, second};
+		const auto outcome = context.call(function, arguments);
+		if (outcome.stop != NativeStop::returned)
+			throw outcome;
+		return outcome.value;
+	});
+	registry.add("RtlAddFunctionTable", 3, [&unwinder](ApiCall &call) {
+		if (!call[0] || !call.u32(1)) {
+			call.ret(0);
+			return;
+		}
+		uint64_t length = 0;
+		for (uint32_t index = 0; index < call.u32(1); ++index)
+			length = std::max<uint64_t>(length, call.load<uint32_t>(call[0] + index * 12ULL + 4));
+		unwinder.add_table({call[0], call[2], length, call[0], call.u32(1), 0, 0});
+		call.ret(1);
+	});
+	registry.add("RtlDeleteFunctionTable", 1, [&unwinder](ApiCall &call) { call.ret(unwinder.remove_table(call[0])); });
+	// The identifier of a callback table has its two low bits set, which tells it apart from the address of an entry array.
+	registry.add("RtlInstallFunctionTableCallback", 6, [&unwinder](ApiCall &call) {
+		if ((call[0] & 3) != 3 || !call[3] || !call[2]) {
+			call.ret(0);
+			return;
+		}
+		unwinder.add_table({call[0], call[1], call.u32(2), 0, 0, call[3], call[4]});
+		call.ret(1);
+	});
 	// A code generator registers the unwind data of the code it emits; the table stands as a handle until the generator deletes it.
 	registry.add("RtlAddGrowableFunctionTable", 6, [](ApiCall &call) {
 		static uint64_t next = 0x7000;

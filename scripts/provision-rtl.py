@@ -129,6 +129,20 @@ def main():
     critical = critical.replace(deletion, "    if (CriticalSection->LockSemaphore && CriticalSection->LockSemaphore != INVALID_HANDLE_VALUE)\n    {\n"
                                           "        /* In case NtClose fails, return the status */")
     (output / "critical.c").write_text(critical)
+    # A heap created with HEAP_CREATE_ENABLE_EXECUTE holds code, as the .NET runtime's compiler puts its stubs there: its blocks are committed
+    # executable, as on Windows. ReactOS commits every heap page read-write.
+    heap = (source / "sdk/lib/rtl/heap.c").read_text()
+    commit = "MEM_COMMIT,\n"
+    for function, flags in (("RtlpFindAndCommitPages(PHEAP Heap,", "Heap->Flags"), ("RtlpExtendHeap(PHEAP Heap,", "Heap->Flags"),
+                            ("RtlCreateHeap(ULONG Flags,", "Flags"), ("RtlAllocateHeap(IN PVOID HeapPtr,", "Heap->Flags")):
+        start = heap.find("\n" + function)
+        at = heap.find(commit, start) if start >= 0 else -1
+        protection = heap.find("PAGE_READWRITE);", at) if at >= 0 else -1
+        if protection < 0 or heap[at + len(commit):protection].strip():
+            raise SystemExit(f"ReactOS heap.c changed: the executable heap patch no longer applies to {function}")
+        heap = heap[:protection] + f"(({flags}) & HEAP_CREATE_ENABLE_EXECUTE ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE));" + \
+            heap[protection + len("PAGE_READWRITE);"):]
+    (output / "heap.c").write_text(heap)
     (output / "unicode.c").write_text(extract(source / "sdk/lib/rtl/unicode.c", ["RtlInitUnicodeString"], "#include <rtl.h>"))
     includes = [generated, source / "sdk/lib/pseh/include", source / "sdk/include/vcruntime", source / "sdk/include/ndk",
                 source / "sdk/include/psdk", source / "sdk/include/crt", source / "sdk/include/ddk",
@@ -136,8 +150,8 @@ def main():
     flags = ["-c", "-O2", "-ffreestanding", "-ffunction-sections", "-fdata-sections", "-fgnu89-inline", "-mcx16",
              "-Wno-incompatible-pointer-types", "-D_NTOSKRNL_", "-DNO_RTL_INLINES", "-D_M_AMD64", "-D__REACTOS__",
              f"-ffile-prefix-map={source}=reactos", f"-ffile-prefix-map={repo}=raven", f"-ffile-prefix-map={output}=component"]
-    paths = [output / "critical.c"] + [source / "sdk/lib/rtl" / (name + ".c") for name in
-             ("heap", "heapuser", "heapdbg", "heappage", "bitmap", "bitmap64", "mem", "slist", "error", "appverifier", "avltable", "splaytree")]
+    paths = [output / "critical.c", output / "heap.c"] + [source / "sdk/lib/rtl" / (name + ".c") for name in
+             ("heapuser", "heapdbg", "heappage", "bitmap", "bitmap64", "mem", "slist", "error", "appverifier", "avltable", "splaytree")]
     paths += [source / "sdk/lib/crt/mem/memset.c", source / "sdk/lib/crt/mem/memmove.c", source / "sdk/lib/crt/string/wcslen.c",
               output / "support.c", output / "verifier.c", output / "unicode.c", repo / "native/upstream/reactos-rtl/initialize.c",
               repo / "native/upstream/reactos-rtl/kernel.c"]

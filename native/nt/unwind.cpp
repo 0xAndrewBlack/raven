@@ -107,10 +107,60 @@ const PEModule *NativeUnwinder::module_at(uint64_t address) const
 	return nullptr;
 }
 
+bool NativeUnwinder::remove_table(uint64_t identifier)
+{
+	const auto found = std::find_if(tables.begin(), tables.end(), [&](const auto &table) { return table.identifier == identifier; });
+	if (found == tables.end())
+		return false;
+	tables.erase(found);
+	return true;
+}
+
+std::optional<FunctionEntry> NativeUnwinder::lookup_dynamic(uint64_t pc) const
+{
+	for (auto table = tables.rbegin(); table != tables.rend(); ++table) {
+		if (pc < table->base || pc - table->base >= table->length)
+			continue;
+		uint64_t address = 0;
+		if (table->callback) {
+			if (!guest_call)
+				return std::nullopt;
+			address = guest_call(table->callback, pc, table->context);
+		} else {
+			const uint32_t rva = uint32_t(pc - table->base);
+			size_t low = 0, high = table->count;
+			while (low < high && !address) {
+				const size_t middle = (low + high) / 2;
+				const auto row = process.read_memory(table->entries + middle * 12, 8);
+				uint32_t begin, end;
+				std::memcpy(&begin, row.data(), 4);
+				std::memcpy(&end, row.data() + 4, 4);
+				if (rva < begin)
+					high = middle;
+				else if (rva >= end)
+					low = middle + 1;
+				else
+					address = table->entries + middle * 12;
+			}
+		}
+		if (!address)
+			return std::nullopt;
+		const auto row = process.read_memory(address, 12);
+		FunctionEntry entry{address, 0, 0, 0, table->base, nullptr};
+		std::memcpy(&entry.begin, row.data(), 4);
+		std::memcpy(&entry.end, row.data() + 4, 4);
+		std::memcpy(&entry.unwind, row.data() + 8, 4);
+		return entry;
+	}
+	return std::nullopt;
+}
+
 std::optional<FunctionEntry> NativeUnwinder::lookup(uint64_t pc) const
 {
 	const auto *module = module_at(pc);
-	if (!module || module->runtime_api)
+	if (!module)
+		return lookup_dynamic(pc);
+	if (module->runtime_api)
 		return std::nullopt;
 	const auto &table = module->image.directories[3];
 	if (!table.address || table.size < 12)
@@ -131,8 +181,17 @@ std::optional<FunctionEntry> NativeUnwinder::lookup(uint64_t pc) const
 			high = middle;
 		else if (rva >= row[1])
 			low = middle + 1;
-		else
-			return FunctionEntry{base + table.address + middle * 12, row[0], row[1], row[2], base, module};
+		else {
+			// An entry whose unwind data has its low bit set stands for another entry of the table, the function's primary one.
+			size_t at = table.address + middle * 12;
+			for (int hops = 0; hops < 4 && (row[2] & 1); ++hops) {
+				at = row[2] & ~uint32_t(1);
+				if (at + 12 > data.size())
+					return std::nullopt;
+				std::memcpy(row, data.data() + at, 12);
+			}
+			return FunctionEntry{base + at, row[0], row[1], row[2], base, module};
+		}
 	}
 	return std::nullopt;
 }
@@ -145,7 +204,7 @@ void NativeUnwinder::unwind_leaf(ContextBytes &context) const
 }
 
 // Emulates the rest of a function epilogue (add/lea rsp, pops, ret or tail jump) when pc sits inside one.
-bool NativeUnwinder::epilogue(uint64_t pc, ContextBytes &context) const
+bool NativeUnwinder::epilogue(uint64_t pc, ContextBytes &context, ContextPointers *pointers) const
 {
 	std::vector<uint8_t> code;
 	try {
@@ -212,6 +271,8 @@ bool NativeUnwinder::epilogue(uint64_t pc, ContextBytes &context) const
 		} else {
 			const uint64_t rsp = context_rsp(context);
 			set_context_register(context, step.reg, read64(process, rsp));
+			if (pointers)
+				(*pointers)[16 + step.reg] = rsp;
 			set_context_rsp(context, rsp + 8);
 		}
 	}
@@ -219,30 +280,41 @@ bool NativeUnwinder::epilogue(uint64_t pc, ContextBytes &context) const
 	return true;
 }
 
-NativeUnwinder::Result NativeUnwinder::unwind(uint32_t handler_type, uint64_t pc, const FunctionEntry &function, ContextBytes &context) const
+NativeUnwinder::Result NativeUnwinder::unwind(uint32_t handler_type, uint64_t pc, const FunctionEntry &function, ContextBytes &context,
+	ContextPointers *pointers) const
 {
 	Result result{};
-	auto &mutable_module = const_cast<PEModule &>(*function.module);
-	const auto image = mutable_module.loaded.data();
 	const uint64_t base = function.image_base;
-	uint32_t unwind_rva = function.unwind;
+	// Unwind data at an offset from the image base: in the loaded image of a module, or in the program's memory for code a generator
+	// emitted and described through a function table.
+	const auto load = [&](uint64_t rva, size_t size) {
+		if (!function.module)
+			return process.read_memory(base + rva, size);
+		const auto image = const_cast<PEModule &>(*function.module).loaded.data();
+		if (rva > image.size() || size > image.size() - rva)
+			throw std::runtime_error("native unwind data lies outside its image");
+		return std::vector<uint8_t>(image.begin() + rva, image.begin() + rva + size);
+	};
 	const uint64_t prolog_offset = pc - (base + function.begin);
 	result.establisher = context_rsp(context);
 	const auto original = context;
-	const uint8_t *first = image.data() + unwind_rva;
-	if (unwind_rva + 4 > image.size())
-		throw std::runtime_error("native unwind data lies outside its image");
+	const auto first = load(function.unwind, 4);
 	const uint32_t frame_register = first[3] & 15, frame_offset = (first[3] >> 4) * 16u;
 	const uint8_t prolog_size = first[1];
 	bool in_prolog = prolog_offset < prolog_size;
-	if (!in_prolog && epilogue(pc, context)) {
+	if (!in_prolog && epilogue(pc, context, pointers)) {
 		result.establisher = frame_register ? context_register(original, frame_register) - frame_offset : context_rsp(original);
 		return result;
 	}
 	uint64_t limit = in_prolog ? prolog_offset : UINT64_MAX;
 	uint64_t setfp_offset = UINT64_MAX;
-	const uint8_t *info = first;
+	uint64_t info_rva = function.unwind;
 	for (int depth = 0; depth < 32; ++depth) {
+		const auto header = load(info_rva, 4);
+		// The codes, padded to an even count, then a handler and its data or the parent function's entry.
+		const size_t padded = (size_t(header[2]) + 1) & ~size_t(1);
+		const auto record = load(info_rva, 4 + padded * 2 + ((header[0] >> 3) & 7 ? 12 : 0));
+		const uint8_t *info = record.data();
 		const uint8_t version = info[0] & 7, flags = info[0] >> 3, count = info[2];
 		(void)version;
 		const uint32_t frame_reg = info[3] & 15, frame_off = (info[3] >> 4) * 16u;
@@ -258,6 +330,8 @@ NativeUnwinder::Result NativeUnwinder::unwind(uint32_t handler_type, uint64_t pc
 				if (applies) {
 					const uint64_t rsp = context_rsp(context);
 					set_context_register(context, op_info, read64(process, rsp));
+					if (pointers)
+						(*pointers)[16 + op_info] = rsp;
 					set_context_rsp(context, rsp + 8);
 				}
 				break;
@@ -279,13 +353,21 @@ NativeUnwinder::Result NativeUnwinder::unwind(uint32_t handler_type, uint64_t pc
 				break;
 			case 4:
 				used = 2;
-				if (applies)
-					set_context_register(context, op_info, read64(process, context_rsp(context) + uint64_t(word(1)) * 8));
+				if (applies) {
+					const uint64_t slot = context_rsp(context) + uint64_t(word(1)) * 8;
+					set_context_register(context, op_info, read64(process, slot));
+					if (pointers)
+						(*pointers)[16 + op_info] = slot;
+				}
 				break;
 			case 5:
 				used = 3;
-				if (applies)
-					set_context_register(context, op_info, read64(process, context_rsp(context) + dword(1)));
+				if (applies) {
+					const uint64_t slot = context_rsp(context) + dword(1);
+					set_context_register(context, op_info, read64(process, slot));
+					if (pointers)
+						(*pointers)[16 + op_info] = slot;
+				}
 				break;
 			case 6:
 				used = 2;
@@ -296,15 +378,21 @@ NativeUnwinder::Result NativeUnwinder::unwind(uint32_t handler_type, uint64_t pc
 			case 8:
 				used = 2;
 				if (applies) {
-					const auto bytes = process.read_memory(context_rsp(context) + uint64_t(word(1)) * 16, 16);
+					const uint64_t slot = context_rsp(context) + uint64_t(word(1)) * 16;
+					const auto bytes = process.read_memory(slot, 16);
 					std::memcpy(context.data() + xmm_base + op_info * 16, bytes.data(), 16);
+					if (pointers)
+						(*pointers)[op_info] = slot;
 				}
 				break;
 			case 9:
 				used = 3;
 				if (applies) {
-					const auto bytes = process.read_memory(context_rsp(context) + dword(1), 16);
+					const uint64_t slot = context_rsp(context) + dword(1);
+					const auto bytes = process.read_memory(slot, 16);
 					std::memcpy(context.data() + xmm_base + op_info * 16, bytes.data(), 16);
+					if (pointers)
+						(*pointers)[op_info] = slot;
 				}
 				break;
 			case 10:
@@ -319,13 +407,17 @@ NativeUnwinder::Result NativeUnwinder::unwind(uint32_t handler_type, uint64_t pc
 			}
 			slot += used;
 		}
-		const size_t padded = (size_t(count) + 1) & ~size_t(1);
 		const uint8_t *tail = codes + padded * 2;
 		if (flags & 4) {
 			// Chained unwind data continues in the parent function's own record, whose prolog has always completed.
 			uint32_t parent[3];
 			std::memcpy(parent, tail, 12);
-			info = image.data() + parent[2];
+			// The parent may itself stand for another entry, as table entries with the low bit set do.
+			for (int hops = 0; hops < 4 && (parent[2] & 1); ++hops) {
+				const auto entry = load(parent[2] & ~uint32_t(1), 12);
+				std::memcpy(parent, entry.data(), 12);
+			}
+			info_rva = parent[2];
 			limit = UINT64_MAX;
 			continue;
 		}
@@ -333,7 +425,7 @@ NativeUnwinder::Result NativeUnwinder::unwind(uint32_t handler_type, uint64_t pc
 			uint32_t handler_rva;
 			std::memcpy(&handler_rva, tail, 4);
 			result.handler = base + handler_rva;
-			result.handler_data = base + uint64_t(tail + 4 - image.data());
+			result.handler_data = base + info_rva + 4 + padded * 2 + 4;
 		}
 		break;
 	}

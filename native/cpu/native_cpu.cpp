@@ -314,6 +314,7 @@ struct NativeProcess::State {
 	uint64_t stack_top = 0;
 	// The first thread keeps its stack for the life of the process; other threads borrow stack_top while they run.
 	uint64_t initial_stack_top = 0;
+	uint64_t initial_stack_size = 1024 * 1024;
 	bool stopped = true;
 	bool active_call = false;
 	bool awaiting_api = false;
@@ -371,7 +372,7 @@ bool NativeProcess::State::covers(uint64_t address, size_t size, int protection)
 }
 
 NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::string &bootstrap,
-	std::chrono::milliseconds setup_timeout, NativeMode mode) : state(std::make_unique<State>())
+	std::chrono::milliseconds setup_timeout, NativeMode mode, uint64_t stack_reserve) : state(std::make_unique<State>())
 {
 	if (setup_timeout.count() <= 0)
 		throw std::runtime_error("native execution requires a positive timeout");
@@ -396,7 +397,9 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 			state->mappings.insert_or_assign(mapping.address, mapping);
 		}
 	}
-	const uint64_t stack_size = 1024 * 1024;
+	// The first thread's stack is as large as the program's headers reserve, as Windows makes it, from 1 MiB to 64 MiB.
+	const uint64_t stack_size = std::clamp<uint64_t>((stack_reserve + 0xffff) & ~uint64_t(0xffff), 1024 * 1024, 64 * 1024 * 1024);
+	state->initial_stack_size = stack_size;
 	const uint64_t low_flag = mode == NativeMode::x86 ? MAP_32BIT : 0;
 	const auto stack = child.syscall(SYS_mmap, 0, stack_size + 8192, PROT_NONE,
 		MAP_PRIVATE | MAP_ANONYMOUS | low_flag, uint64_t(-1));
@@ -773,7 +776,7 @@ bool NativeProcess::memory_available(uint64_t address, size_t size) const
 	state->require_stopped();
 	memory_range(address,size,PROT_NONE,state->limit());
 	const auto end = address+size;
-	const auto stack = state->initial_stack_top-1024*1024-4096;
+	const auto stack = state->initial_stack_top-state->initial_stack_size-4096;
 	if (address < state->initial_stack_top+4096 && stack < end)
 		return false;
 	for (const auto &[start, mapping] : state->mappings)
@@ -875,7 +878,7 @@ void NativeProcess::unmap_image(uint64_t address)
 std::pair<uint64_t, uint64_t> NativeProcess::stack_bounds() const
 {
 	state->require_stopped();
-	return {state->initial_stack_top - 1024 * 1024, state->initial_stack_top};
+	return {state->initial_stack_top - state->initial_stack_size, state->initial_stack_top};
 }
 
 bool NativeProcess::active() const
@@ -924,6 +927,16 @@ uint64_t NativeProcess::result_register() const
 size_t NativeProcess::callback_depth() const
 {
 	return state->callbacks.size();
+}
+
+NativeContext NativeProcess::callback_origin(size_t index) const
+{
+	state->require_stopped();
+	if (index >= state->callbacks.size())
+		throw std::runtime_error("native callback origin beyond the nesting");
+	NativeContext origin = state->callbacks[index];
+	origin.xstate = context().xstate;
+	return origin;
 }
 
 void NativeProcess::trace_instructions(size_t count, std::function<void(uint64_t)> sink)
