@@ -302,15 +302,115 @@ static void unhandled(EXCEPTION_RECORD *record, CONTEXT *context)
 	ExitProcess(record->ExceptionCode);
 }
 
-/* Raises the exception along the thread's frames; a frame that takes it never returns here, and one that continues execution of a
- * continuable exception returns to the caller. */
+
+/* Vectored handlers: AddVectoredExceptionHandler and AddVectoredContinueHandler put a handler first or last on their list, and the
+ * cookie that removes it is its entry. Exception handlers hear of an exception before any frame of the stack; continue handlers when
+ * execution is about to go on. */
+typedef struct vectored {
+	struct vectored *next;
+	PVECTORED_EXCEPTION_HANDLER handler;
+	BOOL after;
+} vectored;
+static vectored *volatile vectored_handlers;
+static volatile LONG vectored_lock;
+
+static void lock_vectored(void)
+{
+	while (InterlockedExchange(&vectored_lock, 1))
+		Sleep(0);
+}
+
+static void unlock_vectored(void)
+{
+	InterlockedExchange(&vectored_lock, 0);
+}
+
+static void *add_vectored(ULONG first, PVECTORED_EXCEPTION_HANDLER handler, BOOL after)
+{
+	vectored *entry = HeapAlloc(GetProcessHeap(), 0, sizeof *entry);
+	if (!entry)
+		return NULL;
+	entry->handler = handler;
+	entry->after = after;
+	entry->next = NULL;
+	lock_vectored();
+	vectored *volatile *at = &vectored_handlers;
+	if (!first)
+		while (*at)
+			at = &(*at)->next;
+	entry->next = *at;
+	*at = entry;
+	unlock_vectored();
+	return entry;
+}
+
+void *__stdcall raven_add_vectored_exception(ULONG first, PVECTORED_EXCEPTION_HANDLER handler)
+{
+	return add_vectored(first, handler, FALSE);
+}
+
+void *__stdcall raven_add_vectored_continue(ULONG first, PVECTORED_EXCEPTION_HANDLER handler)
+{
+	return add_vectored(first, handler, TRUE);
+}
+
+ULONG __stdcall raven_remove_vectored(void *cookie)
+{
+	lock_vectored();
+	for (vectored *volatile *at = &vectored_handlers; *at; at = &(*at)->next)
+		if (*at == cookie) {
+			vectored *entry = *at;
+			*at = entry->next;
+			unlock_vectored();
+			HeapFree(GetProcessHeap(), 0, entry);
+			return 1;
+		}
+	unlock_vectored();
+	return 0;
+}
+
+/* Runs the handlers of one list in order; TRUE when one of them continues execution. The list may change while a handler runs, so each
+ * step takes the next entry under the lock. */
+static BOOL call_vectored(EXCEPTION_RECORD *record, CONTEXT *context, BOOL after)
+{
+	EXCEPTION_POINTERS pointers = {record, context};
+	lock_vectored();
+	vectored *entry = vectored_handlers;
+	while (entry) {
+		if (entry->after != after) {
+			entry = entry->next;
+			continue;
+		}
+		PVECTORED_EXCEPTION_HANDLER handler = entry->handler;
+		unlock_vectored();
+		if (handler(&pointers) == EXCEPTION_CONTINUE_EXECUTION)
+			return TRUE;
+		lock_vectored();
+		vectored *next = vectored_handlers;
+		while (next && next != entry)
+			next = next->next;
+		entry = next ? next->next : NULL;
+	}
+	unlock_vectored();
+	return FALSE;
+}
+
+/* Raises the exception: the vectored handlers first, then along the thread's frames; a frame that takes it never returns here, and a
+ * handler that continues execution of a continuable exception returns to the caller after the continue handlers ran. */
 static void dispatch(EXCEPTION_RECORD *record, CONTEXT *context)
 {
 	void *dispatcher = NULL;
+	const BOOL continuable = !(record->ExceptionFlags & EXCEPTION_NONCONTINUABLE);
+	if (call_vectored(record, context, FALSE) && continuable) {
+		call_vectored(record, context, TRUE);
+		return;
+	}
 	for (cxx_registration *frame = frame_list(); frame && frame != (cxx_registration *)-1; frame = frame->next) {
 		const int disposition = call_handler(frame, record, context, &dispatcher);
-		if (disposition == ExceptionContinueExecution && !(record->ExceptionFlags & EXCEPTION_NONCONTINUABLE))
+		if (disposition == ExceptionContinueExecution && continuable) {
+			call_vectored(record, context, TRUE);
 			return;
+		}
 	}
 	unhandled(record, context);
 }

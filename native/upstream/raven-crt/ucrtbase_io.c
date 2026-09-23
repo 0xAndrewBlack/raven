@@ -1138,6 +1138,41 @@ CRT double log(double x) { return raven_log(x); }
 CRT double log10(double x) { return raven_log(x) / 2.30258509299404568402; }
 CRT double exp(double x) { return raven_exp(x); }
 
+/* e^x - 1 and log(1 + x) near zero, where the plain forms lose every digit: the rounding error of the inner step is divided back out
+ * (Kahan's method), so the result keeps the precision of exp and log. */
+CRT double expm1(double x)
+{
+	if (x != x || x == 0)
+		return x;
+	double u = raven_exp(x);
+	if (u == 1)
+		return x;
+	if (u - 1 == -1)
+		return -1;
+	if (u == 1.0 / 0.0)
+		return u;
+	return (u - 1) * x / raven_log(u);
+}
+
+CRT double log1p(double x)
+{
+	if (x != x || x == 0)
+		return x;
+	double u = 1 + x;
+	if (u == 1)
+		return x;
+	if (u == 0)
+		return -1.0 / 0.0;
+	if (u < 0)
+		return (x - x) / (x - x);
+	return raven_log(u) * x / (u - 1);
+}
+
+CRT float expm1f(float x) { return (float)expm1(x); }
+CRT float log1pf(float x) { return (float)log1p(x); }
+CRT long double expm1l(long double x) { return expm1((double)x); }
+CRT long double log1pl(long double x) { return log1p((double)x); }
+
 CRT float powf(float x, float y) { return (float)raven_pow(x, y); }
 CRT double pow(double x, double y) { return raven_pow(x, y); }
 CRT double cos(double x) { return raven_cos(x); }

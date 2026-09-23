@@ -568,6 +568,126 @@ HRESULT raven_make_shell_link(REFIID iid, void **out);
 HRESULT raven_create_registered(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, void **out);
 HRESULT raven_registered_class_object(REFCLSID clsid, DWORD context, REFIID iid, void **out);
 
+/* Taskbar list ---------------------------------------------------------------------------------------------- */
+
+/* The taskbar's buttons, progress, overlays and thumbnail toolbars belong to the desktop, which shows none of them for a guest: the
+ * object takes every request and has nothing to change. */
+typedef struct {
+	ITaskbarList4 face;
+	LONG refs;
+} TaskbarObject;
+
+static HRESULT STDMETHODCALLTYPE tl_query(ITaskbarList4 *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (same_iid(iid, &IID_IUnknown) || same_iid(iid, &IID_ITaskbarList) || same_iid(iid, &IID_ITaskbarList2) ||
+		same_iid(iid, &IID_ITaskbarList3) || same_iid(iid, &IID_ITaskbarList4)) {
+		*out = self;
+		InterlockedIncrement(&((TaskbarObject *)self)->refs);
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE tl_add_ref(ITaskbarList4 *self) { return InterlockedIncrement(&((TaskbarObject *)self)->refs); }
+static ULONG STDMETHODCALLTYPE tl_release(ITaskbarList4 *self)
+{
+	const LONG refs = InterlockedDecrement(&((TaskbarObject *)self)->refs);
+	if (!refs)
+		HeapFree(GetProcessHeap(), 0, self);
+	return refs;
+}
+static HRESULT STDMETHODCALLTYPE tl_init(ITaskbarList4 *self) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_window(ITaskbarList4 *self, HWND window) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_fullscreen(ITaskbarList4 *self, HWND window, BOOL fullscreen) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_progress(ITaskbarList4 *self, HWND window, ULONGLONG done, ULONGLONG total) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_state(ITaskbarList4 *self, HWND window, TBPFLAG flags) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_pair(ITaskbarList4 *self, HWND tab, HWND window) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_active(ITaskbarList4 *self, HWND tab, HWND window, DWORD reserved) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_buttons(ITaskbarList4 *self, HWND window, UINT count, LPTHUMBBUTTON buttons) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_images(ITaskbarList4 *self, HWND window, HIMAGELIST images) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_overlay(ITaskbarList4 *self, HWND window, HICON icon, LPCWSTR description) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_tooltip(ITaskbarList4 *self, HWND window, LPCWSTR tip) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_clip(ITaskbarList4 *self, HWND window, RECT *clip) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE tl_properties(ITaskbarList4 *self, HWND tab, STPFLAG flags) { return S_OK; }
+
+static ITaskbarList4Vtbl taskbar_vtbl = {tl_query, tl_add_ref, tl_release, tl_init, tl_window, tl_window, tl_window, tl_window,
+	tl_fullscreen, tl_progress, tl_state, tl_pair, tl_window, tl_pair, tl_active, tl_buttons, tl_buttons, tl_images, tl_overlay,
+	tl_tooltip, tl_clip, tl_properties};
+
+static HRESULT make_taskbar_list(REFIID iid, void **out)
+{
+	TaskbarObject *list = HeapAlloc(GetProcessHeap(), 0, sizeof *list);
+	if (!list)
+		return E_OUTOFMEMORY;
+	list->face.lpVtbl = &taskbar_vtbl;
+	list->refs = 1;
+	const HRESULT result = tl_query(&list->face, iid, out);
+	tl_release(&list->face);
+	return result;
+}
+
+/* The classes this component serves itself, which CoCreateInstance makes directly and CoGetClassObject through a class factory. */
+static HRESULT make_builtin(REFCLSID clsid, REFIID iid, void **out, BOOL *served)
+{
+	*served = TRUE;
+	if (same_iid(clsid, &CLSID_FileOpenDialog))
+		return make_dialog(FALSE, iid, out);
+	if (same_iid(clsid, &CLSID_FileSaveDialog))
+		return make_dialog(TRUE, iid, out);
+	if (same_iid(clsid, &CLSID_ShellLink))
+		return raven_make_shell_link(iid, out);
+	if (same_iid(clsid, &CLSID_TaskbarList))
+		return make_taskbar_list(iid, out);
+	*served = FALSE;
+	return REGDB_E_CLASSNOTREG;
+}
+
+typedef struct {
+	IClassFactory face;
+	LONG refs;
+	CLSID clsid;
+} BuiltinFactory;
+
+static HRESULT STDMETHODCALLTYPE bf_query(IClassFactory *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (same_iid(iid, &IID_IUnknown) || same_iid(iid, &IID_IClassFactory)) {
+		*out = self;
+		InterlockedIncrement(&((BuiltinFactory *)self)->refs);
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE bf_add_ref(IClassFactory *self) { return InterlockedIncrement(&((BuiltinFactory *)self)->refs); }
+static ULONG STDMETHODCALLTYPE bf_release(IClassFactory *self)
+{
+	const LONG refs = InterlockedDecrement(&((BuiltinFactory *)self)->refs);
+	if (!refs)
+		HeapFree(GetProcessHeap(), 0, self);
+	return refs;
+}
+static HRESULT STDMETHODCALLTYPE bf_create(IClassFactory *self, IUnknown *outer, REFIID iid, void **out)
+{
+	BOOL served;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	return outer ? CLASS_E_NOAGGREGATION : make_builtin(&((BuiltinFactory *)self)->clsid, iid, out, &served);
+}
+static HRESULT STDMETHODCALLTYPE bf_lock(IClassFactory *self, BOOL lock) { return S_OK; }
+static IClassFactoryVtbl builtin_factory_vtbl = {bf_query, bf_add_ref, bf_release, bf_create, bf_lock};
+
+static BOOL builtin_class(REFCLSID clsid)
+{
+	return same_iid(clsid, &CLSID_FileOpenDialog) || same_iid(clsid, &CLSID_FileSaveDialog) || same_iid(clsid, &CLSID_ShellLink) ||
+		same_iid(clsid, &CLSID_TaskbarList);
+}
+
+
 /* Class registry -------------------------------------------------------------------------------------------- */
 
 HRESULT WINAPI CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *out)
@@ -578,12 +698,10 @@ HRESULT WINAPI CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, 
 		*out = NULL;
 	if (!out)
 		return E_POINTER;
-	if (same_iid(clsid, &CLSID_FileOpenDialog))
-		return outer ? CLASS_E_NOAGGREGATION : make_dialog(FALSE, iid, out);
-	if (same_iid(clsid, &CLSID_FileSaveDialog))
-		return outer ? CLASS_E_NOAGGREGATION : make_dialog(TRUE, iid, out);
-	if (same_iid(clsid, &CLSID_ShellLink))
-		return outer ? CLASS_E_NOAGGREGATION : raven_make_shell_link(iid, out);
+	if (builtin_class(clsid)) {
+		BOOL served;
+		return outer ? CLASS_E_NOAGGREGATION : make_builtin(clsid, iid, out, &served);
+	}
 	/* Any other class is served by the library the registry names for it. */
 	return raven_create_registered(clsid, outer, context, iid, out);
 }
@@ -592,6 +710,17 @@ HRESULT WINAPI CoGetClassObject(REFCLSID clsid, DWORD context, LPVOID server, RE
 {
 	if (!out)
 		return E_INVALIDARG;
+	if (builtin_class(clsid)) {
+		BuiltinFactory *factory = HeapAlloc(GetProcessHeap(), 0, sizeof *factory);
+		if (!factory)
+			return E_OUTOFMEMORY;
+		factory->face.lpVtbl = &builtin_factory_vtbl;
+		factory->refs = 1;
+		factory->clsid = *clsid;
+		const HRESULT result = bf_query(&factory->face, iid, out);
+		bf_release(&factory->face);
+		return result;
+	}
 	return raven_registered_class_object(clsid, context, iid, out);
 }
 

@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <objbase.h>
+#include <ctxtcall.h>
 
 typedef HRESULT (WINAPI *class_object_function)(REFCLSID, REFIID, void **);
 
@@ -92,4 +93,88 @@ HRESULT WINAPI CLSIDFromProgID(LPCOLESTR identifier, LPCLSID clsid)
 		return CO_E_CLASSSTRING;
 	}
 	return S_OK;
+}
+
+/* The object context of an apartment, whose pointer is also its token: a runtime compares tokens to know whether two calls come from the
+ * same context and asks the object to run a call in it. Every call here already runs in its own context, so a callback runs at once.
+ * The multithreaded apartment is one context for all its threads; each single-threaded apartment has its own, kept for the process. */
+typedef struct object_context {
+	IContextCallback callback;
+	DWORD thread;
+	struct object_context *next;
+} object_context;
+
+static HRESULT WINAPI context_query(IContextCallback *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (InlineIsEqualGUID(iid, &IID_IUnknown) || InlineIsEqualGUID(iid, &IID_IContextCallback)) {
+		*out = self;
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+
+static ULONG WINAPI context_reference(IContextCallback *self) { return 1; }
+
+static HRESULT WINAPI context_call(IContextCallback *self, PFNCONTEXTCALL callback, ComCallData *data, REFIID iid, int method,
+	IUnknown *reserved)
+{
+	return callback ? callback(data) : E_INVALIDARG;
+}
+
+static IContextCallbackVtbl context_table = {context_query, context_reference, context_reference, context_call};
+static object_context multithreaded_context = {{&context_table}, 0, NULL};
+static object_context *volatile apartment_contexts;
+
+/* The caller's context, or CO_E_NOTINITIALIZED for a thread in no apartment. */
+static HRESULT current_context(object_context **out)
+{
+	APTTYPE type;
+	APTTYPEQUALIFIER qualifier;
+	const HRESULT result = CoGetApartmentType(&type, &qualifier);
+	if (FAILED(result))
+		return result;
+	if (type == APTTYPE_MTA) {
+		*out = &multithreaded_context;
+		return S_OK;
+	}
+	const DWORD thread = GetCurrentThreadId();
+	for (object_context *context = apartment_contexts; context; context = context->next)
+		if (context->thread == thread) {
+			*out = context;
+			return S_OK;
+		}
+	object_context *context = HeapAlloc(GetProcessHeap(), 0, sizeof *context);
+	if (!context)
+		return E_OUTOFMEMORY;
+	context->callback.lpVtbl = &context_table;
+	context->thread = thread;
+	do
+		context->next = apartment_contexts;
+	while (InterlockedCompareExchangePointer((void *volatile *)&apartment_contexts, context, context->next) != context->next);
+	*out = context;
+	return S_OK;
+}
+
+HRESULT WINAPI CoGetContextToken(ULONG_PTR *token)
+{
+	object_context *context;
+	if (!token)
+		return E_POINTER;
+	const HRESULT result = current_context(&context);
+	if (SUCCEEDED(result))
+		*token = (ULONG_PTR)context;
+	return result;
+}
+
+HRESULT WINAPI CoGetObjectContext(REFIID iid, void **out)
+{
+	object_context *context;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	const HRESULT result = current_context(&context);
+	return FAILED(result) ? result : context_query(&context->callback, iid, out);
 }

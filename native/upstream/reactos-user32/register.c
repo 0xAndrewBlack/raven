@@ -1,5 +1,7 @@
 #include <user32.h>
 
+LRESULT WINAPI RavenScrollBarProcW(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
+
 /* Registers the built-in window classes whose window procedures live in this component. */
 
 BOOL WINAPI RavenInitControls(VOID)
@@ -24,5 +26,14 @@ BOOL WINAPI RavenInitControls(VOID)
 		if (!RegisterClassExW(&definition))
 			return FALSE;
 	}
-	return TRUE;
+	/* The scroll bar control, which this component implements itself. */
+	ZeroMemory(&definition, sizeof definition);
+	definition.cbSize = sizeof definition;
+	definition.style = CS_DBLCLKS | CS_VREDRAW | CS_HREDRAW | CS_PARENTDC | CS_GLOBALCLASS;
+	definition.lpfnWndProc = RavenScrollBarProcW;
+	definition.cbWndExtra = sizeof(void *);
+	definition.hInstance = User32Instance;
+	definition.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+	definition.lpszClassName = L"ScrollBar";
+	return RegisterClassExW(&definition) != 0;
 }

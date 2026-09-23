@@ -25,6 +25,7 @@ extern BOOL WINAPI raven_real_ShowWindow(HWND, int) RAVEN_IMPORT("ShowWindow", 8
 extern HWND WINAPI raven_real_SetParent(HWND, HWND) RAVEN_IMPORT("SetParent", 8);
 extern BOOL WINAPI raven_real_DestroyWindow(HWND) RAVEN_IMPORT("DestroyWindow", 4);
 extern BOOL WINAPI raven_real_DestroyMenu(HMENU) RAVEN_IMPORT("DestroyMenu", 4);
+extern BOOL WINAPI raven_real_DeleteMenu(HMENU, UINT, UINT) RAVEN_IMPORT("DeleteMenu", 12);
 extern UINT_PTR WINAPI raven_real_SetTimer(HWND, UINT_PTR, UINT, TIMERPROC) RAVEN_IMPORT("SetTimer", 16);
 extern BOOL WINAPI raven_real_KillTimer(HWND, UINT_PTR) RAVEN_IMPORT("KillTimer", 8);
 extern UINT_PTR WINAPI raven_real_SetSystemTimer(HWND, UINT_PTR, UINT, TIMERPROC) RAVEN_IMPORT("SetSystemTimer", 16);
@@ -304,7 +305,7 @@ DWORD_PTR NTAPI NtUserCallHwnd(HWND window, DWORD routine)
 
 BOOL NTAPI NtUserDeleteMenu(HMENU menu, UINT position, UINT flags)
 {
-	return DeleteMenu(menu, position, flags);
+	return raven_real_DeleteMenu(menu, position, flags);
 }
 
 DWORD NTAPI NtUserCallHwndParam(HWND window, DWORD_PTR parameter, DWORD routine)

@@ -31,7 +31,7 @@ ZLIB = ("adler32.c", "crc32.c", "deflate.c", "inflate.c", "inffast.c", "inftrees
 STORAGE = ("ole32/bindctx.c", "combase/hglobalstream.c", "ole32/storage32.c", "ole32/stg_prop.c", "ole32/stg_stream.c", "ole32/filelockbytes.c", "ole32/dictionary.c",
            "coml2/memlockbytes.c", "coml2/stg_prop.c", "coml2/storage32.c")
 COMPONENTS = ("cabinet.dll", "sxs.dll", "rpcrt4.dll", "msi.dll", "raven-storage.dll", "msiexec.exe", "libxslt.dll", "msxml3.dll", "regsvr32.exe", "atl100.dll", "oleaut32.dll", "libpng.dll", "libjpeg.dll",
-              "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll", "riched20.dll", "msvfw32.dll", "advpack.dll", "raven-setupapi.dll")
+              "libtiff.dll", "propsys.dll", "mlang.dll", "windowscodecs.dll", "gdiplus.dll", "urlmon.dll", "riched20.dll", "msftedit.dll", "msvfw32.dll", "advpack.dll", "raven-setupapi.dll")
 
 
 def main():
@@ -451,6 +451,14 @@ def main():
     riched_root = source / "dll/win32/riched20"
     run([*widl, "-I", riched_root, "-L", generated, "-t", "-T", generated / "riched_tom.tlb", riched_root / "riched_tom.idl"])
     library("riched20.dll", riched_root, [], ["ole32", "oleaut32", "usp10", "imm32", "user32", "gdi32"], rc="version.rc")
+    # msftedit.dll: the newer rich edit library, which imports riched20.dll and passes every export on to it.
+    (output / "msftedit.def").write_text("LIBRARY msftedit.dll\nEXPORTS\n" + "".join(
+        f"\t{name} = riched20.{name}{' DATA' if name.startswith('IID_') else ''}\n" for name in ("CreateTextServices", "IID_IRichEditOle",
+        "IID_IRichEditOleCallback", "IID_ITextHost", "IID_ITextHost2", "IID_ITextServices", "REExtendedRegisterClass", "RichEdit10ANSIWndProc",
+        "RichEditANSIWndProc")))
+    next_base[0] -= 0x400000 if x86 else 0x4000000
+    link("msftedit.dll", next_base[0], [compile(support / "msftedit.c", "msftedit", plain, False)], output / "msftedit.def",
+         ["-L" + str(output), *[f"-l{library}" for library in ("riched20", "kernel32", "gcc")]])
     # msvfw32.dll: video for Windows, which the animation control opens its clips through. Its English strings only: the shared ReactOS
     # resource script also names a manifest the ReactOS build generates.
     (generated / "msvfw32.rc").write_text('#include "msvideo_private.h"\n#pragma code_page(65001)\n#include "lang/msvfw32_En.rc"\n')

@@ -23,4 +23,7 @@ EXPORTS
 	??_7exception@@6B@ = raven_exception_vtable DATA
 	raven_raise_exception = raven_raise_exception@16
 	raven_unwind = raven_unwind@16
+	raven_add_vectored_exception = raven_add_vectored_exception@8
+	raven_add_vectored_continue = raven_add_vectored_continue@8
+	raven_remove_vectored = raven_remove_vectored@4
 	?terminate@@YAXXZ = terminate

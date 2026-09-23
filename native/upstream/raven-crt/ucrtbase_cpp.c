@@ -38,6 +38,47 @@ CRT int strcpy_s(char *to, size_t size, const char *from)
 	return 0;
 }
 
+/* Bounded appends: the destination must hold a terminated string, and the whole result must fit, or the destination is emptied. */
+CRT int strcat_s(char *to, size_t size, const char *from)
+{
+	size_t used = 0, length;
+	if (!to || !size)
+		return 22;
+	while (used < size && to[used])
+		++used;
+	if (used == size || !from) {
+		to[0] = 0;
+		return 22;
+	}
+	length = strlen(from);
+	if (used + length >= size) {
+		to[0] = 0;
+		return 34;
+	}
+	memcpy(to + used, from, length + 1);
+	return 0;
+}
+
+CRT int wcscat_s(wchar_t *to, size_t size, const wchar_t *from)
+{
+	size_t used = 0, length;
+	if (!to || !size)
+		return 22;
+	while (used < size && to[used])
+		++used;
+	if (used == size || !from) {
+		to[0] = 0;
+		return 22;
+	}
+	length = wcslen(from);
+	if (used + length >= size) {
+		to[0] = 0;
+		return 34;
+	}
+	memcpy(to + used, from, (length + 1) * sizeof(wchar_t));
+	return 0;
+}
+
 CRT int wcscpy_s(wchar_t *to, size_t size, const wchar_t *from)
 {
 	size_t length;
