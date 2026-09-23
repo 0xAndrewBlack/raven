@@ -116,6 +116,69 @@ NativeRegistry::NativeRegistry(std::filesystem::path file) : file(std::move(file
 	load();
 	stamp = current_stamp();
 	seed();
+	register_runtime_classes();
+}
+
+// The .NET runtime's classes that Windows registers with the system's mscoree in both registry views: the metadata dispensers, the
+// runtime hosts, the meta host and strong names, which programs and the Framework's own libraries create through COM. A hive that lacks
+// them, a new one or one made before they were registered, gets them.
+void NativeRegistry::register_runtime_classes()
+{
+	static constexpr const char16_t *classes[] = {u"{E5CB7A31-7512-11D2-89CE-0080C792E5D8}", u"{1EC2DE53-75CC-11D2-9775-00A0C9B4D50C}",
+		u"{CB2F6723-AB3A-11D2-9C40-00C04FA30A3E}", u"{90F1A06E-7712-4762-86B5-7A5EBA6BDB02}", u"{9280188D-0E8E-4867-B30C-7FA83884E8DE}",
+		u"{B79B0ACD-F5CD-409B-B5A5-A16244610B92}"};
+	register_animation_classes();
+	for (const bool wow : {false, true})
+		for (const auto *clsid : classes) {
+			const std::u16string path = std::u16string(wow ? u"Wow6432Node\\CLSID\\" : u"CLSID\\") + clsid + u"\\InprocServer32";
+			if (keys.contains(fold(u"HKEY_CLASSES_ROOT\\" + path)))
+				continue;
+			uint64_t key = 0;
+			uint32_t disposition = 0;
+			if (create(0x80000000ULL, path, key, disposition))
+				continue;
+			const auto store = [&](const char16_t *name, std::u16string_view value) {
+				std::vector<uint8_t> data;
+				for (const auto character : value) {
+					data.push_back(uint8_t(character));
+					data.push_back(uint8_t(character >> 8));
+				}
+				data.insert(data.end(), {0, 0});
+				set(key, name, 1, data);
+			};
+			store(u"", wow ? u"C:\\Windows\\SysWOW64\\mscoree.dll" : u"C:\\Windows\\System32\\mscoree.dll");
+			store(u"ThreadingModel", u"Both");
+			close(key);
+		}
+}
+
+// The Windows Animation classes of UIAnimation.dll (the manager, the transition library, the transition factory and the timer), which the runtime's own component
+// serves to 64-bit programs.
+void NativeRegistry::register_animation_classes()
+{
+	static constexpr const char16_t *classes[] = {u"{4C1FC63A-695C-47E8-A339-1A194BE3D0B8}", u"{1D6322AD-AA85-4EF5-A828-86D71067D145}",
+		u"{BFCD4A0C-06B6-4384-B768-0DAA792C380E}", u"{8A9B1CDD-FCD7-419C-8B44-42FD17DB1887}"};
+	for (const auto *clsid : classes) {
+		const std::u16string path = std::u16string(u"CLSID\\") + clsid + u"\\InprocServer32";
+		if (keys.contains(fold(u"HKEY_CLASSES_ROOT\\" + path)))
+			continue;
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		if (create(0x80000000ULL, path, key, disposition))
+			continue;
+		const auto store = [&](const char16_t *name, std::u16string_view value) {
+			std::vector<uint8_t> data;
+			for (const auto character : value) {
+				data.push_back(uint8_t(character));
+				data.push_back(uint8_t(character >> 8));
+			}
+			data.insert(data.end(), {0, 0});
+			set(key, name, 1, data);
+		};
+		store(u"", u"C:\\Windows\\System32\\UIAnimation.dll");
+		store(u"ThreadingModel", u"Both");
+		close(key);
+	}
 }
 
 void NativeRegistry::seed()
@@ -179,6 +242,10 @@ void NativeRegistry::seed()
 		number(system.c_str(), u"CurrentMajorVersionNumber", 10);
 		number(system.c_str(), u"CurrentMinorVersionNumber", 0);
 		number(system.c_str(), u"UBR", 2364);
+		// Where the .NET Framework's versions live, which the system's mscoree finds the installed runtime under: each registry view names
+		// the Framework of its width.
+		text((root + u"\\Microsoft\\.NETFramework").c_str(), u"InstallRoot", wow ? u"C:\\Windows\\Microsoft.NET\\Framework\\" :
+			u"C:\\Windows\\Microsoft.NET\\Framework64\\");
 		// DirectX 9.0c, which Windows 10 reports as its DirectX version and the DirectX redistributable checks before it installs.
 		const auto directx = root + u"\\Microsoft\\DirectX";
 		text(directx.c_str(), u"Version", u"4.09.00.0904");

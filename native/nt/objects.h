@@ -36,6 +36,8 @@ public:
 	virtual std::u16string_view type_name() const { return {}; }
 	// The access a new handle to the object holds when nothing narrower is asked for.
 	virtual uint32_t default_access() const { return 0x1f0003; }
+	// When the object turns signaled by itself, as a timer does at its due time; a waiter wakes then to look again.
+	virtual std::optional<std::chrono::steady_clock::time_point> wakes_at() const { return std::nullopt; }
 };
 
 class NativeObjects;

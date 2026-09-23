@@ -22,10 +22,108 @@ constexpr uint32_t class_not_registered = 0x80040154U, class_string = 0x800401f3
 
 // A CryptoAPI provider or hash handle is a small integer into these tables.
 struct CryptState {
+	struct Key {
+		std::vector<uint32_t> modulus;
+		uint32_t exponent;
+		size_t length;
+		std::vector<uint8_t> blob;
+	};
 	std::map<uint64_t, bool> providers;
 	std::map<uint64_t, std::unique_ptr<Digest>> hashes;
+	std::map<uint64_t, Key> keys;
+	// Where each provider's enumeration of algorithms has got to.
+	std::map<uint64_t, size_t> enumeration;
 	uint64_t next = 0x1000;
 };
+
+// RSA public keys and signature checks for CryptImportKey and CryptVerifySignature. Numbers are little-endian 32-bit words; the only
+// operation needed is s^e mod n with the public exponent, so multiplication and a shift-and-subtract remainder are enough.
+using Words = std::vector<uint32_t>;
+
+Words words_from_bytes(std::span<const uint8_t> little_endian)
+{
+	Words value((little_endian.size() + 3) / 4);
+	for (size_t at = 0; at < little_endian.size(); ++at)
+		value[at / 4] |= uint32_t(little_endian[at]) << (at % 4 * 8);
+	return value;
+}
+
+// The remainder of value by modulus, one bit of the quotient at a time.
+Words remainder(const Words &value, const Words &modulus)
+{
+	size_t bits = modulus.size() * 32;
+	while (bits && !(modulus[(bits - 1) / 32] >> ((bits - 1) % 32) & 1))
+		--bits;
+	Words rest(modulus.size() + 1);
+	const auto less = [&](const Words &left) {
+		for (size_t at = left.size(); at-- > 0;) {
+			const uint32_t right = at < modulus.size() ? modulus[at] : 0;
+			if (left[at] != right)
+				return left[at] < right;
+		}
+		return false;
+	};
+	for (size_t bit = value.size() * 32; bit-- > 0;) {
+		uint32_t carry = value[bit / 32] >> (bit % 32) & 1;
+		for (auto &word : rest) {
+			const uint32_t next = word >> 31;
+			word = word << 1 | carry;
+			carry = next;
+		}
+		if (!less(rest)) {
+			uint64_t borrow = 0;
+			for (size_t at = 0; at < rest.size(); ++at) {
+				const uint64_t difference = uint64_t(rest[at]) - (at < modulus.size() ? modulus[at] : 0) - borrow;
+				rest[at] = uint32_t(difference);
+				borrow = difference >> 63;
+			}
+		}
+	}
+	rest.resize(modulus.size());
+	return rest;
+}
+
+Words multiply_mod(const Words &left, const Words &right, const Words &modulus)
+{
+	Words product(left.size() + right.size());
+	for (size_t i = 0; i < left.size(); ++i) {
+		uint64_t carry = 0;
+		for (size_t j = 0; j < right.size(); ++j) {
+			const uint64_t sum = uint64_t(left[i]) * right[j] + product[i + j] + carry;
+			product[i + j] = uint32_t(sum);
+			carry = sum >> 32;
+		}
+		product[i + right.size()] = uint32_t(carry);
+	}
+	return remainder(product, modulus);
+}
+
+Words power_mod(const Words &base, uint32_t exponent, const Words &modulus)
+{
+	Words result(modulus.size());
+	result[0] = 1;
+	result = remainder(result, modulus);
+	for (int bit = 31; bit >= 0; --bit) {
+		result = multiply_mod(result, result, modulus);
+		if (exponent >> bit & 1)
+			result = multiply_mod(result, base, modulus);
+	}
+	return result;
+}
+
+// The DER prefix of a PKCS #1 DigestInfo for a digest of each length: MD5, SHA-1, SHA-256, SHA-384 and SHA-512.
+std::vector<uint8_t> digest_info(size_t size)
+{
+	switch (size) {
+	case 16: return {0x30, 0x20, 0x30, 0x0c, 0x06, 0x08, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x05, 0x05, 0x00, 0x04, 0x10};
+	case 20: return {0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14};
+	case 32: return {0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
+	case 48: return {0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30};
+	case 64: return {0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40};
+	default: return {};
+	}
+}
+
 
 // COM per thread: how often it was initialized and in which apartment, single-threaded or the multithreaded one.
 struct ComState {
@@ -111,6 +209,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("DwmExtendFrameIntoClientArea", 2, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("DwmFlush", 0, [](ApiCall &call) { call.ret(s_ok); });
+	registry.add("DwmInvalidateIconicBitmaps", 1, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("DwmGetCompositionTimingInfo", 2, [](ApiCall &call) { call.ret(0x80263001U); });
 
 	// imm32: there is no input method, so contexts do not exist and composition calls fail.
@@ -287,6 +386,30 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.store<uint32_t>(call[0], type);
 		call.store<uint32_t>(call[1], qualifier);
+		call.ret(s_ok);
+	});
+	// CoWaitForMultipleHandles(flags, timeout, count, handles, index): a wait for one handle (or, with COWAIT_WAITALL, all) that may be
+	// alertable (COWAIT_ALERTABLE). S_OK with the handle's index, or RPC_S_CALLPENDING when the time runs out. The messages of a
+	// single-threaded apartment are not pumped meanwhile.
+	registry.add("CoWaitForMultipleHandles", 5, [&registry](ApiCall &call) {
+		if (!call[3] || !call[4] || !call.u32(2) || (call.u32(0) & ~7U)) {
+			call.ret(e_invalidarg);
+			return;
+		}
+		const auto wait = registry.find("WaitForMultipleObjectsEx");
+		ApiCall inner(call.process, call.environment, {call.u32(2), call[3], call.u32(0) & 1, call.u32(1), (call.u32(0) & 2) ? 1U : 0U});
+		wait->second(inner);
+		const uint32_t result = uint32_t(inner.result);
+		if (result == 0x102) {
+			call.ret(0x80010115U);
+			return;
+		}
+		if (result == 0xffffffffU) {
+			call.ret(0x80070000U | (call.last_error() & 0xffff));
+			return;
+		}
+		// The index is the wait's own answer: the handle's position, WAIT_ABANDONED_0 plus it or WAIT_IO_COMPLETION.
+		call.store<uint32_t>(call[4], result);
 		call.ret(s_ok);
 	});
 	registry.add("CoUninitialize", 0, uninitialize);
@@ -673,6 +796,30 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("WindowsGetStringLen", 1, [](ApiCall &call) { call.ret(call[0] ? call.load<uint32_t>(call[0] + 4) : 0); });
 	registry.add("WindowsIsStringEmpty", 1, [](ApiCall &call) { call.ret(!call[0] || !call.load<uint32_t>(call[0] + 4)); });
+	// Two strings in code unit order, a null string being the empty one.
+	registry.add("WindowsCompareStringOrdinal", 3, [](ApiCall &call) {
+		const auto text = [&](uint64_t handle) {
+			if (!handle)
+				return std::u16string();
+			const uint32_t length = call.load<uint32_t>(handle + 4);
+			const auto bytes = call.read(call.load_pointer(handle + 8), size_t(length) * 2);
+			std::u16string value(length, u'\0');
+			std::memcpy(value.data(), bytes.data(), bytes.size());
+			return value;
+		};
+		if (!call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const int order = text(call[0]).compare(text(call[1]));
+		call.store<int32_t>(call[2], order < 0 ? -1 : order > 0 ? 1 : 0);
+		call.ret(0);
+	});
+	// Without Windows Runtime metadata, a language exception has nowhere to go, and type names and namespaces resolve to nothing.
+	registry.add("RoOriginateLanguageException", 3, [](ApiCall &call) { call.ret(0); });
+	registry.add("RoParseTypeName", 3, [](ApiCall &call) { call.ret(0x80004001U); });
+	registry.add("RoResolveNamespace", 7, [](ApiCall &call) { call.ret(0x80004001U); });
+	registry.add("RoGetParameterizedTypeInstanceIID", 5, [](ApiCall &call) { call.ret(0x80004001U); });
 	// No Windows Runtime class exists here: initialization joins the thread to a COM apartment like CoInitializeEx (RO_INIT_MULTITHREADED
 	// is 1), and every activation reports that the class is not registered.
 	registry.add("RoInitialize", 1, [initialize](ApiCall &call) { initialize(call, call.u32(0) == 1, true); });
@@ -705,6 +852,76 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("EventEnabled", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("TraceEvent", 2, [](ApiCall &call) { call.ret(0); });
 	// Proxy discovery: no proxy is configured, so sessions open and every lookup answers "connect directly".
+	// The event log: a source opens, and what a program reports there goes nowhere, as no one reads it; RAVEN_TRACE_DEBUG prints it, which
+	// is often the reason a program gave up.
+	struct EventSource : KernelObject {};
+	registry.add("RegisterEventSourceW", 2, [&context](ApiCall &call) {
+		const auto made = context.objects.add_object(std::make_shared<EventSource>());
+		if (made.status) {
+			call.fail(8, 0);
+			return;
+		}
+		call.ret(made.value);
+	});
+	registry.add("DeregisterEventSource", 1, [&context](ApiCall &call) {
+		if (!context.objects.object_as<EventSource>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		context.objects.close(call[0]);
+		call.ret(1);
+	});
+	registry.add("ReportEventW", 9, [&context](ApiCall &call) {
+		if (!context.objects.object_as<EventSource>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		static const bool shown = std::getenv("RAVEN_TRACE_DEBUG") != nullptr;
+		if (shown)
+			for (uint32_t index = 0; index < (call.u32(5) & 0xffff) && call[7]; ++index)
+				if (const uint64_t text = call.load_pointer(call[7] + index * call.pointer_width()))
+					std::fprintf(stderr, "event: %s\n", to_utf8(call.wide(text, size_t(1) << 20)).c_str());
+		call.ret(1);
+	});
+	// No error object is set for the thread.
+	registry.add("GetErrorInfo", 2, [](ApiCall &call) {
+		if (call[1])
+			call.store_pointer(call[1], 0);
+		call.ret(1);
+	});
+	registry.add("SetErrorInfo", 2, [](ApiCall &call) { call.ret(0); });
+	// One NUMA node holds every processor.
+	registry.add("GetNumaHighestNodeNumber", 1, [](ApiCall &call) {
+		if (call[0])
+			call.store<uint32_t>(call[0], 0);
+		call.ret(1);
+	});
+	// Private namespaces: a boundary describes who shares one, and the objects a program names inside it behave as named objects do.
+	struct PrivateNamespace : KernelObject {};
+	registry.add("CreateBoundaryDescriptorW", 2, [&context](ApiCall &call) { call.ret(context.allocator.allocate(64, true)); });
+	registry.add("AddSIDToBoundaryDescriptor", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("AddIntegrityLabelToBoundaryDescriptor", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("DeleteBoundaryDescriptor", 1, [&context](ApiCall &call) {
+		if (call[0])
+			context.allocator.release(call[0]);
+	});
+	for (const auto *name : {"CreatePrivateNamespaceW", "OpenPrivateNamespaceW"})
+		registry.add(name, std::string_view(name).starts_with("Create") ? 3 : 2, [&context](ApiCall &call) {
+			const auto made = context.objects.add_object(std::make_shared<PrivateNamespace>());
+			if (made.status) {
+				call.fail(8, 0);
+				return;
+			}
+			call.ret(made.value);
+		});
+	registry.add("ClosePrivateNamespace", 2, [&context](ApiCall &call) {
+		if (!context.objects.object_as<PrivateNamespace>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		context.objects.close(call[0]);
+		call.ret(1);
+	});
 	struct WinHttpSession : KernelObject {};
 	registry.add("WinHttpOpen", 5, [&context](ApiCall &call) {
 		const auto made = context.objects.add_object(std::make_shared<WinHttpSession>());
@@ -937,6 +1154,199 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		auto value = found->second->clone()->finish();
+		const uint32_t capacity = call.load<uint32_t>(call[3]);
+		call.store<uint32_t>(call[3], uint32_t(value.size()));
+		if (!call[2]) {
+			call.ret(1);
+			return;
+		}
+		if (capacity < value.size()) {
+			call.fail(234);
+			return;
+		}
+		call.write(call[2], value);
+		call.ret(1);
+	});
+	// PUBLICKEYBLOB of an RSA key: BLOBHEADER (type 6, version, algorithm), RSAPUBKEY ("RSA1", bit length, exponent), then the modulus,
+	// least significant byte first. Private and session keys are not imported.
+	registry.add("CryptImportKey", 6, [crypt](ApiCall &call) {
+		if (!crypt->providers.contains(call[0])) {
+			call.fail(6);
+			return;
+		}
+		const auto blob = call.read(call[1], call.u32(2));
+		uint32_t magic = 0, bits = 0, exponent = 0;
+		if (blob.size() >= 20) {
+			std::memcpy(&magic, blob.data() + 8, 4);
+			std::memcpy(&bits, blob.data() + 12, 4);
+			std::memcpy(&exponent, blob.data() + 16, 4);
+		}
+		if (blob.size() < 20 || blob[0] != 6 || magic != 0x31415352U || !bits || bits % 8 || blob.size() < 20 + bits / 8 || !exponent) {
+			call.fail(0x8009000aU);
+			return;
+		}
+		const auto handle = crypt->next++;
+		crypt->keys[handle] = {words_from_bytes(std::span(blob).subspan(20, bits / 8)), exponent, bits / 8,
+			std::vector<uint8_t>(blob.begin(), blob.begin() + 20 + bits / 8)};
+		call.store_pointer(call[5], handle);
+		call.ret(1);
+	});
+	// A public key goes out as the PUBLICKEYBLOB it came in as; a null buffer asks for the length.
+	registry.add("CryptExportKey", 6, [crypt](ApiCall &call) {
+		const auto key = crypt->keys.find(call[0]);
+		if (key == crypt->keys.end()) {
+			call.fail(6);
+			return;
+		}
+		if (call.u32(2) != 6 || call[1]) {
+			call.fail(0x8009000aU);
+			return;
+		}
+		const auto &blob = key->second.blob;
+		const uint32_t capacity = call.load<uint32_t>(call[5]);
+		call.store<uint32_t>(call[5], uint32_t(blob.size()));
+		if (!call[4]) {
+			call.ret(1);
+			return;
+		}
+		if (capacity < blob.size()) {
+			call.fail(234);
+			return;
+		}
+		call.write(call[4], blob);
+		call.ret(1);
+	});
+	registry.add("CryptDestroyKey", 1, [crypt](ApiCall &call) {
+		if (!crypt->keys.erase(call[0]))
+			call.fail(6);
+		else
+			call.ret(1);
+	});
+	// A PKCS #1 v1.5 signature of the hash, least significant byte first as CryptoAPI writes it; CRYPT_NOHASHOID signs the bare digest.
+	const auto verify_signature = [crypt](ApiCall &call) {
+		const auto hash = crypt->hashes.find(call[0]);
+		const auto key = crypt->keys.find(call[3]);
+		if (hash == crypt->hashes.end() || key == crypt->keys.end()) {
+			call.fail(6);
+			return;
+		}
+		const auto signature = call.read(call[1], call.u32(2));
+		if (signature.size() != key->second.length) {
+			call.fail(0x80090006U);
+			return;
+		}
+		const auto message = power_mod(words_from_bytes(signature), key->second.exponent, key->second.modulus);
+		std::vector<uint8_t> encoded(key->second.length);
+		for (size_t at = 0; at < encoded.size(); ++at)
+			encoded[encoded.size() - 1 - at] = uint8_t(message[at / 4] >> (at % 4 * 8));
+		const auto digest = hash->second->clone()->finish();
+		auto expected = (call.u32(5) & 1) ? std::vector<uint8_t>() : digest_info(digest.size());
+		expected.insert(expected.end(), digest.begin(), digest.end());
+		bool valid = encoded.size() >= expected.size() + 11 && encoded[0] == 0 && encoded[1] == 1;
+		const size_t separator = encoded.size() - expected.size() - 1;
+		for (size_t at = 2; valid && at < separator; ++at)
+			valid = encoded[at] == 0xff;
+		valid = valid && encoded[separator] == 0 && std::equal(expected.begin(), expected.end(), encoded.begin() + separator + 1);
+		if (!valid) {
+			call.fail(0x80090006U);
+			return;
+		}
+		call.ret(1);
+	};
+	registry.add("CryptVerifySignatureW", 6, verify_signature);
+	registry.add("CryptVerifySignatureA", 6, verify_signature);
+	// The providers CryptAcquireContext opens for each type when it is given no name: the base RSA provider and the AES one.
+	registry.add("CryptGetDefaultProviderW", 5, [](ApiCall &call) {
+		const uint32_t type = call.u32(0);
+		const std::u16string name = type == 1 ? u"Microsoft Base Cryptographic Provider v1.0" : type == 24 ?
+			u"Microsoft Enhanced RSA and AES Cryptographic Provider" : u"";
+		if (name.empty() || call[1] || !call[4]) {
+			call.fail(name.empty() ? 0x80090017U : 87);
+			return;
+		}
+		const uint32_t needed = uint32_t(name.size() + 1) * 2, capacity = call.load<uint32_t>(call[4]);
+		call.store<uint32_t>(call[4], needed);
+		if (!call[3]) {
+			call.ret(1);
+			return;
+		}
+		if (capacity < needed) {
+			call.fail(234);
+			return;
+		}
+		call.put_wide(call[3], name, name.size() + 1);
+		call.ret(1);
+	});
+	// FIPS mode is off, as on a Windows that has not been told to enforce it.
+	registry.add("BCryptGetFipsAlgorithmMode", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.ret(0xc000000dU);
+			return;
+		}
+		call.store<uint8_t>(call[0], 0);
+		call.ret(0);
+	});
+	// CryptGetProvParam(provider, parameter, data, length, flags): the algorithms the provider offers, one per call from CRYPT_FIRST on
+	// (PP_ENUMALGS as PROV_ENUMALGS, PP_ENUMALGS_EX as PROV_ENUMALGS_EX) until ERROR_NO_MORE_ITEMS, and its name, version, kind and key
+	// pairs. Without a buffer the length needed.
+	registry.add("CryptGetProvParam", 5, [crypt](ApiCall &call) {
+		if (!crypt->providers.contains(call[0]) || !call[3]) {
+			call.fail(call[3] ? 6 : 87);
+			return;
+		}
+		struct Algorithm {
+			uint32_t id, length, minimum, maximum, protocols;
+			const char *name, *long_name;
+		};
+		static constexpr Algorithm algorithms[] = {{0x6602, 128, 40, 128, 0, "RC2", "RSA Data Security's RC2"},
+			{0x6801, 128, 40, 128, 0, "RC4", "RSA Data Security's RC4"}, {0x6601, 56, 56, 56, 1, "DES", "Data Encryption Standard (DES)"},
+			{0x6609, 112, 112, 112, 0, "3DES TWO KEY", "Two Key Triple DES"}, {0x6603, 168, 168, 168, 0, "3DES", "Three Key Triple DES"},
+			{0x8004, 160, 160, 160, 0x30, "SHA-1", "Secure Hash Algorithm (SHA-1)"}, {0x8003, 128, 128, 128, 0x30, "MD5", "Message Digest 5 (MD5)"},
+			{0x800c, 256, 256, 256, 0, "SHA-256", "Secure Hash Algorithm (SHA-256)"}, {0x800d, 384, 384, 384, 0, "SHA-384", "Secure Hash Algorithm (SHA-384)"},
+			{0x800e, 512, 512, 512, 0, "SHA-512", "Secure Hash Algorithm (SHA-512)"}, {0x2400, 1024, 384, 16384, 0x30, "RSA_SIGN", "RSA Signature"},
+			{0xa400, 1024, 384, 16384, 0x30, "RSA_KEYX", "RSA Key Exchange"}, {0x660e, 128, 128, 128, 0, "AES 128", "Advanced Encryption Standard (AES) 128 bit"},
+			{0x660f, 192, 192, 192, 0, "AES 192", "Advanced Encryption Standard (AES) 192 bit"},
+			{0x6610, 256, 256, 256, 0, "AES 256", "Advanced Encryption Standard (AES) 256 bit"}};
+		std::vector<uint8_t> value;
+		const auto put = [&](size_t at, uint32_t word) { std::memcpy(value.data() + at, &word, 4); };
+		const auto text = [&](size_t at, const char *name, size_t capacity) {
+			std::memcpy(value.data() + at, name, std::min(std::strlen(name) + 1, capacity));
+		};
+		const uint32_t parameter = call.u32(1);
+		if (parameter == 1 || parameter == 22) {
+			auto &position = crypt->enumeration[call[0]];
+			if (call.u32(4) & 1)
+				position = 0;
+			if (position >= std::size(algorithms)) {
+				call.fail(259);
+				return;
+			}
+			const auto &algorithm = algorithms[position];
+			if (parameter == 1) {
+				value.assign(32, 0);
+				put(0, algorithm.id); put(4, algorithm.length); put(8, uint32_t(std::strlen(algorithm.name) + 1));
+				text(12, algorithm.name, 20);
+			} else {
+				value.assign(88, 0);
+				put(0, algorithm.id); put(4, algorithm.length); put(8, algorithm.minimum); put(12, algorithm.maximum);
+				put(16, algorithm.protocols); put(20, uint32_t(std::strlen(algorithm.name) + 1)); text(24, algorithm.name, 20);
+				put(44, uint32_t(std::strlen(algorithm.long_name) + 1)); text(48, algorithm.long_name, 40);
+			}
+			if (call[2])
+				++position;
+		} else if (parameter == 4) {
+			const std::string name = "Microsoft Enhanced RSA and AES Cryptographic Provider";
+			value.assign(name.begin(), name.end());
+			value.push_back(0);
+		} else if (parameter == 6 || parameter == 36) {
+			value.assign(1, 0);
+		} else if (parameter == 3 || parameter == 5 || parameter == 16 || parameter == 39) {
+			value.assign(4, 0);
+			put(0, parameter == 3 ? 2 : parameter == 5 ? 0x200 : parameter == 16 ? 24 : 3);
+		} else {
+			call.fail(0x80090009U);
+			return;
+		}
 		const uint32_t capacity = call.load<uint32_t>(call[3]);
 		call.store<uint32_t>(call[3], uint32_t(value.size()));
 		if (!call[2]) {

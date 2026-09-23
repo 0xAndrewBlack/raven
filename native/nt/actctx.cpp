@@ -117,7 +117,7 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::parse(std::strin
 {
 	const auto text = manifest_text(bytes);
 	Assembly root;
-	bool identified = false, in_dependency = false, in_file = false;
+	bool identified = false, in_dependency = false, in_file = false, assembly = false;
 	size_t at = 0;
 	while ((at = text.find('<', at)) != text.npos) {
 		if (text.compare(at, 4, "<!--") == 0) {
@@ -166,6 +166,8 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::parse(std::strin
 			attributes[key] = std::string(tag.substr(open + 1, close - open - 1));
 			scan = close + 1;
 		}
+		if (element == "assembly" && !closing)
+			assembly = true;
 		if (element == "dependentassembly")
 			in_dependency = !closing && !self_closing;
 		else if (element == "file") {
@@ -200,7 +202,8 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::parse(std::strin
 				root.classes[lowered(name)] = lowered(attributes["versioned"]) != "no";
 		}
 	}
-	if (!identified && root.dependencies.empty())
+	// A program's manifest may leave out its own identity and still say which versions of Windows it supports.
+	if (!assembly || (!identified && root.dependencies.empty() && root.supported_os.empty() && root.classes.empty()))
 		return std::nullopt;
 	return root;
 }
@@ -377,8 +380,9 @@ void register_actctx_api(ApiRegistry &registry, KernelContext &context)
 	auto &contexts = activation_contexts();
 	contexts.attach(context);
 	const auto thread = [&context] { return context.threads.current_id(); };
-	// CreateActCtxW(ACTCTXW): a manifest file, or a manifest resource of a module named by path or handle.
-	registry.add("CreateActCtxW", 1, [&context, &contexts](ApiCall &call) {
+	// CreateActCtxW(ACTCTXW): a manifest file, or a manifest resource of a module named by path or handle. CreateActCtxA takes the same
+	// structure with its source path in the ANSI code page.
+	const auto create = [&context, &contexts](ApiCall &call, bool ansi) {
 		const bool narrow = call.pointer_width() == 4;
 		const size_t size = narrow ? 32 : 56;
 		if (!call[0]) {
@@ -396,7 +400,7 @@ void register_actctx_api(ApiRegistry &registry, KernelContext &context)
 		const uint64_t resource_name = word(narrow ? 20 : 32, narrow ? 4 : 8);
 		const uint64_t module = word(narrow ? 28 : 48, narrow ? 4 : 8);
 		std::string manifest;
-		std::u16string path = source ? call.wide(source, 1024) : std::u16string();
+		std::u16string path = !source ? std::u16string() : ansi ? from_ansi(call.narrow(source, 1024), 1252) : call.wide(source, 1024);
 		const bool from_resource = (flags & 0x8) || (flags & 0x80);
 		if (from_resource) {
 			// The resource of a loaded module, read from its image; RT_MANIFEST with the name asked for, else the first one.
@@ -446,7 +450,9 @@ void register_actctx_api(ApiRegistry &registry, KernelContext &context)
 		if (flags & 0x10)
 			contexts.set_process_default(handle);
 		call.ret(handle);
-	});
+	};
+	registry.add("CreateActCtxW", 1, [create](ApiCall &call) { create(call, false); });
+	registry.add("CreateActCtxA", 1, [create](ApiCall &call) { create(call, true); });
 	registry.add("AddRefActCtx", 1, [&contexts](ApiCall &call) {
 		if (auto *found = contexts.find(call[0]))
 			++found->references;

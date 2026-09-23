@@ -49,7 +49,7 @@ namespace raven {
 namespace {
 
 // stdcall argument counts for every API the x86 process runner can dispatch.
-constexpr std::array<std::pair<std::string_view, uint32_t>, 110> kernel32_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 115> kernel32_exports{{
 	{"CloseHandle", 1}, {"CreateEventA", 4}, {"CreateEventW", 4}, {"CreateThread", 6}, {"DeleteCriticalSection", 1}, {"EnterCriticalSection", 1}, {"ExitProcess", 1}, {"ExitThread", 1}, {"FindResourceA", 3},
 	{"FindResourceExA", 4}, {"FindResourceExW", 4}, {"FindResourceW", 3}, {"FreeLibrary", 1}, {"GetACP", 0},
 	{"GetCommandLineA", 0}, {"GetCommandLineW", 0}, {"GetCurrentProcessId", 0}, {"GetCurrentThreadId", 0}, {"GetExitCodeThread", 2},
@@ -60,7 +60,8 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 110> kernel32_export
 	// Services of the 32-bit CRT era: legacy file calls, global memory, code pages, environment and version queries.
 	{"_lopen", 2}, {"_lcreat", 2}, {"_lread", 3}, {"_lwrite", 3}, {"_llseek", 3}, {"lstrcpyA", 2}, {"lstrlenA", 1}, {"GetWindowsDirectoryA", 2}, {"GlobalHandle", 1}, {"GetVersionExA", 1}, {"WinExec", 2}, {"GlobalUnlock", 1}, {"GlobalFree", 1}, {"GlobalAlloc", 2}, {"SetErrorMode", 1}, {"GlobalLock", 1}, {"GetCurrentProcess", 0}, {"SetHandleCount", 1}, {"GetOEMCP", 0}, {"GetCPInfo", 2}, {"WideCharToMultiByte", 8}, {"DeleteFileA", 1}, {"GetEnvironmentStrings", 0}, {"FreeEnvironmentStringsW", 1}, {"FreeEnvironmentStringsA", 1}, {"UnhandledExceptionFilter", 1}, {"RtlUnwind", 4}, {"HeapCreate", 3}, {"HeapDestroy", 1}, {"TerminateProcess", 2}, {"GetEnvironmentStringsW", 0}, {"GetVersion", 0}, {"GetFileAttributesA", 1},
 	// File and clock services of the C runtime component: the shared handlers read 32-bit words; a 64-bit offset takes two.
-	{"RaiseException", 4}, {"CreateFileW", 7}, {"DeleteFileW", 1}, {"GetEnvironmentVariableA", 3}, {"GetFileInformationByHandle", 2}, {"MultiByteToWideChar", 6},
+	{"RaiseException", 4}, {"AddVectoredExceptionHandler", 2}, {"AddVectoredContinueHandler", 2}, {"RemoveVectoredExceptionHandler", 1},
+	{"RemoveVectoredContinueHandler", 1}, {"GlobalMemoryStatus", 1}, {"CreateFileW", 7}, {"DeleteFileW", 1}, {"GetEnvironmentVariableA", 3}, {"GetFileInformationByHandle", 2}, {"MultiByteToWideChar", 6},
 	{"QueryPerformanceCounter", 1}, {"QueryPerformanceFrequency", 1}, {"ReadFile", 5}, {"SetFilePointer", 4}, {"SetFilePointerEx", 5},
 	{"GetFileSizeEx", 2}, {"FlushFileBuffers", 1},
 	{"VirtualFree", 3}, {"VirtualProtect", 4}, {"WaitForSingleObject", 2}, {"WriteFile", 5}, {"_lclose", 1}, {"lstrcpyW", 2}, {"lstrlenW", 1},
@@ -87,7 +88,7 @@ constexpr std::array shared_exports{
 // export lists. Anything with a pointer-width structure, a 64-bit argument or a callback into x64 conventions is not here.
 constexpr std::string_view shared_allowed[] = {
 	"SetDllDirectoryW", "SetDllDirectoryA", "SetConsoleTitleW", "SetConsoleTitleA", "OpenSCManagerW", "OpenSCManagerA", "OpenServiceW", "OpenServiceA", "CreateServiceW", "CreateServiceA",
-	"CloseServiceHandle", "DeleteService", "ChangeServiceConfigW", "ChangeServiceConfig2W", "ChangeServiceConfig2A", "QueryServiceConfigW", "QueryServiceConfigA",
+	"CloseServiceHandle", "DeleteService", "ChangeServiceConfigW", "ChangeServiceConfig2W", "ChangeServiceConfig2A", "QueryServiceConfigW", "QueryServiceConfigA", "GetServiceDisplayNameW", "GetServiceDisplayNameA",
 	"QueryServiceObjectSecurity", "SetServiceObjectSecurity", "RegQueryInfoKeyA", "RegQueryInfoKeyW", "LookupPrivilegeValueA", "QueryServiceStatus", "QueryServiceStatusEx", "StartServiceW", "ControlService",
 	"StartServiceCtrlDispatcherW", "RegisterServiceCtrlHandlerW", "RegisterServiceCtrlHandlerExW", "SetServiceStatus",
 	"WriteFile", "GetFileAttributesW", "GetFullPathNameA", "GetFullPathNameW", "GetCurrentDirectoryA", "GetCurrentDirectoryW",
@@ -102,9 +103,9 @@ constexpr std::string_view shared_allowed[] = {
 	"IsWindowEnabled", "EnableWindow", "FindWindowExW", "SetForegroundWindow", "GetMessagePos", "OpenClipboard", "EmptyClipboard",
 	"SetClipboardData", "CloseClipboard", "CharNextA", "CharNextW", "CharPrevA", "CharPrevW", "SystemParametersInfoW", "GetSystemMenu",
 	"EnableMenuItem", "AppendMenuW", "CreatePopupMenu", "LoadBitmapW", "LoadImageW",
-	"SHGetSpecialFolderLocation", "SHGetPathFromIDListW", "SHGetFileInfoW", "ShellExecuteW", "SHFileOperationW",
+	"SHGetSpecialFolderLocation", "SHGetPathFromIDListW", "SHGetFileInfoW", "SHGetFileInfoA", "ShellExecuteW", "SHFileOperationW",
 	"OleInitialize", "OleUninitialize", "CoTaskMemFree", "CoCreateInstance",
-	"GetTempPathW", "CompareFileTime", "MoveFileExW", "lstrcatW", "lstrcpynW", "GetTempFileNameW", "GetDiskFreeSpaceW", "GetExitCodeProcess",
+	"GetTempPathW", "CompareFileTime", "MoveFileExW", "lstrcatW", "lstrcpynW", "GetTempFileNameW", "GetTempFileNameA", "GetDiskFreeSpaceW", "GetExitCodeProcess",
 	"CreateProcessW", "OpenProcessToken", "LookupPrivilegeValueW", "AdjustTokenPrivileges", "SetFileSecurityW",
 	"RegCloseKey", "RegCreateKeyExA", "RegCreateKeyExW", "RegOpenKeyA", "RegOpenKeyW", "RegOpenKeyExA", "RegOpenKeyExW", "RegQueryValueExA",
 	"RegQueryValueExW", "RegSetValueExA", "RegSetValueExW", "RegDeleteKeyA", "RegDeleteKeyW", "RegDeleteValueA", "RegDeleteValueW",
@@ -439,7 +440,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		struct Rule { const char *library, *component, *prefix; };
 		static constexpr Rule rules[] = {{"user32.dll", "raven-user32.dll", "raven-user32."}, {"comdlg32.dll", "raven-shell.dll", "raven-shell."},
 			{"ole32.dll", "raven-shell.dll", "raven-shell."}, {"shell32.dll", "raven-shell.dll", "raven-shell."}, {"msvcrt.dll", "ucrtbase.dll", "ucrtbase."}, {"shlwapi.dll", "raven-shell.dll", "raven-shell."}, {"setupapi.dll", "raven-setupapi.dll", "raven-setupapi."},
-			{"ole32.dll", "raven-storage.dll", "raven-storage."}};
+			{"ole32.dll", "raven-storage.dll", "raven-storage."}, {"combase.dll", "raven-shell.dll", "raven-shell."}};
 		for (const auto &rule : rules) {
 			if (library != rule.library)
 				continue;
@@ -675,7 +676,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	for (const auto &[name, module] : modules.all())
 		images.push_back(&module->loaded);
 	const auto deadline = std::chrono::steady_clock::now() + timeout;
-	NativeProcess process(images, bootstrap, timeout, NativeMode::x86);
+	NativeProcess process(images, bootstrap, timeout, NativeMode::x86, entry.image.stack_reserve);
 	for (const auto &[address, api] : traps)
 		process.add_api_trap(address, api.second);
 	NativeEnvironment environment(process, entry.loaded.base(), uint32_t(::getpid()), 1);
@@ -744,6 +745,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 		[&](uint64_t address, std::span<const uint64_t> arguments) { return call_guest(address, arguments); });
 	library_loader.set_tls(&static_tls);
 	library_loader.set_mapped([&memory](PEModule &module) { register_image(memory, module); });
+	library_loader.set_unmapped([&memory](PEModule &module) { memory.remove_image(module.loaded.base()); });
 	if (launch) {
 		const auto separator = launch->image_path.find_last_of(u'\\');
 		if (separator != std::u16string::npos)
@@ -921,11 +923,16 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				result = process.resume(budget);
 				continue;
 			}
-			// Exceptions are dispatched in the program, along the frames its threads register, by the C runtime component: the call goes
-			// on there with the same arguments, so handlers that resume elsewhere, as a C++ catch does, never return to the runtime.
-			if (api == "RaiseException" || api == "RtlUnwind")
+			// Exceptions are dispatched in the program, by its vectored handlers and along the frames its threads register, by the C runtime
+			// component: the call goes on there with the same arguments, so handlers that resume elsewhere, as a C++ catch does, never return
+			// to the runtime. The vectored handler lists live there too.
+			static const std::map<std::string_view, std::string_view> in_runtime{{"RaiseException", "raven_raise_exception"},
+				{"RtlUnwind", "raven_unwind"}, {"AddVectoredExceptionHandler", "raven_add_vectored_exception"},
+				{"AddVectoredContinueHandler", "raven_add_vectored_continue"}, {"RemoveVectoredExceptionHandler", "raven_remove_vectored"},
+				{"RemoveVectoredContinueHandler", "raven_remove_vectored"}};
+			if (const auto routed = in_runtime.find(api); routed != in_runtime.end())
 				if (const auto component = modules.all().find("ucrtbase.dll"); component != modules.all().end()) {
-					const std::string_view wanted = api == "RaiseException" ? "raven_raise_exception" : "raven_unwind";
+					const std::string_view wanted = routed->second;
 					const auto &exports = component->second->exports;
 					const auto found = std::find_if(exports.begin(), exports.end(), [&](const auto &symbol) {
 						return std::find(symbol.names.begin(), symbol.names.end(), wanted) != symbol.names.end();
@@ -1184,7 +1191,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			}
 		}
 		start_image(entry);
-		const auto result = invoke(entry.loaded.base() + entry.image.entry, {});
+		const auto result = invoke(program_start(modules, entry), {});
 		windows.shutdown();
 		return result;
 	} catch (const ProcessExit &request) {

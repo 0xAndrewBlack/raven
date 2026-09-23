@@ -594,6 +594,13 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		::fsync(file->descriptor);
 		call.ret(1);
 	});
+	// Files of a prefix lie on a host file system that answers no device or file system control codes: the caller hears that the
+	// function is not supported, as from a volume whose driver lacks it, and nothing comes back.
+	registry.add("DeviceIoControl", 8, [](ApiCall &call) {
+		if (call[6])
+			call.store<uint32_t>(call[6], 0);
+		call.fail(1);
+	});
 	registry.add("GetFileTime", 4, [&, resolve, missing, file_of](ApiCall &call) {
 		const auto file = file_of(call[0]);
 		struct stat metadata{};

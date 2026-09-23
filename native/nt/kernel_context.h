@@ -93,6 +93,7 @@ void register_mmio_api(ApiRegistry &registry, KernelContext &context);
 void register_process_info_api(ApiRegistry &registry, KernelContext &context);
 void register_crypt32_api(ApiRegistry &registry, KernelContext &context);
 void register_font_service(ApiRegistry &registry, KernelContext &context);
+void register_canvas_service(ApiRegistry &registry, KernelContext &context);
 // Starts the program an application name or command line names, looked up the way Windows does; null with the Windows error otherwise.
 std::shared_ptr<class ProcessObject> start_program(KernelContext &context, const std::u16string &application, const std::u16string &line,
 	const std::u16string &directory, const int (&standard)[3], const std::u16string &environment, int *gate, uint32_t &error,

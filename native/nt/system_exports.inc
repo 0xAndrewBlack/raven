@@ -2470,8 +2470,9 @@ static constexpr std::string_view winspool_exports[]{
 	"XcvDataW",
 };
 static constexpr std::string_view ravenhost_exports[]{
-	"RavenFontClose","RavenFontGlyphs","RavenFontInfo","RavenFontMetrics","RavenFontName","RavenFontOpen",
-	"RavenFontOutline","RavenFontRender","RavenFontScan","RavenFontTable","RavenTrace",
+	"RavenCanvasCreate","RavenCanvasDestroy","RavenCanvasDraw","RavenCanvasPixels","RavenCanvasSize","RavenFontClose",
+	"RavenFontGlyphs","RavenFontInfo","RavenFontMetrics","RavenFontName","RavenFontOpen","RavenFontOutline",
+	"RavenFontRender","RavenFontScan","RavenFontTable","RavenPathCombine","RavenPathWiden","RavenTrace",
 };
 static constexpr std::string_view secur32_exports[]{
 	"AcceptSecurityContext","AcquireCredentialsHandleA","AcquireCredentialsHandleW","AddCredentialsA","AddCredentialsW","AddSecurityPackageA",
@@ -2606,6 +2607,50 @@ static constexpr std::string_view dsound_exports[]{
 	"DirectSoundCaptureCreate","DirectSoundCaptureCreate8","DirectSoundCaptureEnumerateA","DirectSoundCaptureEnumerateW","DirectSoundCreate","DirectSoundCreate8",
 	"DirectSoundEnumerateA","DirectSoundEnumerateW","DirectSoundFullDuplexCreate","DllCanUnloadNow","DllGetClassObject","GetDeviceID",
 };
+static constexpr std::string_view combase_exports[]{
+	"CLSIDFromString","CoCreateGuid","CoCreateInstance","CoDecrementMTAUsage","CoGetApartmentType","CoGetMalloc",
+	"CoIncrementMTAUsage","CoInitializeEx","CoTaskMemAlloc","CoTaskMemFree","CoTaskMemRealloc","CoUninitialize",
+	"GetErrorInfo","RoActivateInstance","RoGetActivationFactory","RoGetParameterizedTypeInstanceIID","RoInitialize","RoOriginateError",
+	"RoOriginateErrorW","RoOriginateLanguageException","RoParseTypeName","RoResolveNamespace","RoUninitialize","SetErrorInfo",
+	"StringFromGUID2","WindowsCompareStringOrdinal","WindowsCreateString","WindowsCreateStringReference","WindowsDeleteString","WindowsDuplicateString",
+	"WindowsGetStringLen","WindowsGetStringRawBuffer","WindowsIsStringEmpty",
+};
+static constexpr std::string_view wer_exports[]{
+	"WerAddExcludedApplication","WerFreeString","WerRemoveExcludedApplication","WerReportAddDump","WerReportAddFile","WerReportCloseHandle",
+	"WerReportCreate","WerReportSetParameter","WerReportSetUIOption","WerReportSubmit","WerStoreClose","WerStoreGetFirstReportKey",
+	"WerStoreGetNextReportKey","WerStoreGetReportCount","WerStoreGetSizeOnDisk","WerStoreOpen","WerStorePurge","WerStoreQueryReportMetadataV1",
+	"WerStoreQueryReportMetadataV2","WerStoreQueryReportMetadataV3","WerStoreUploadReport","WerSysprepCleanup","WerSysprepGeneralize","WerSysprepSpecialize",
+	"WerUnattendedSetup","WerpAddAppCompatData","WerpAddFile","WerpAddMemoryBlock","WerpAddRegisteredDataToReport","WerpAddSecondaryParameter",
+	"WerpAddTextToReport","WerpArchiveReport","WerpCancelResponseDownload","WerpCancelUpload","WerpCloseStore","WerpCreateMachineStore",
+	"WerpDeleteReport","WerpDestroyWerString","WerpDownloadResponse","WerpDownloadResponseTemplate","WerpEnumerateStoreNext","WerpEnumerateStoreStart",
+	"WerpExtractReportFiles","WerpGetBucketId","WerpGetDynamicParameter","WerpGetEventType","WerpGetFileByIndex","WerpGetFilePathByIndex",
+	"WerpGetNumFiles","WerpGetNumSecParams","WerpGetNumSigParams","WerpGetReportConsent","WerpGetReportFinalConsent","WerpGetReportFlags",
+	"WerpGetReportInformation","WerpGetReportTime","WerpGetReportType","WerpGetResponseId","WerpGetResponseUrl","WerpGetSecParamByIndex",
+	"WerpGetSigParamByIndex","WerpGetStoreLocation","WerpGetStoreType","WerpGetTextFromReport","WerpGetUIParamByIndex","WerpGetUploadTime",
+	"WerpGetWerStringData","WerpIsDisabled","WerpIsTransportAvailable","WerpLoadReport","WerpOpenMachineArchive","WerpOpenMachineQueue",
+	"WerpOpenUserArchive","WerpOpenUserQueue","WerpPromtUser","WerpReportCancel","WerpRestartApplication","WerpSetCallBack",
+	"WerpSetDynamicParameter","WerpSetEventName","WerpSetReportFlags","WerpSetReportInformation","WerpSetReportTime","WerpSetReportUploadContextToken",
+	"WerpShowNXNotification","WerpShowSecondLevelConsent","WerpShowUpsellUI","WerpSubmitReportFromStore","WerpSvcReportFromMachineQueue",
+};
+static constexpr std::string_view uiautomationcore_exports[]{
+	"DockPattern_SetDockPosition","ExpandCollapsePattern_Collapse","ExpandCollapsePattern_Expand","GridPattern_GetItem","InitializeChannelBasedConnectionForProviderProxy","InvokePattern_Invoke",
+	"ItemContainerPattern_FindItemByProperty","LegacyIAccessiblePattern_DoDefaultAction","LegacyIAccessiblePattern_GetIAccessible","LegacyIAccessiblePattern_Select","LegacyIAccessiblePattern_SetValue","MultipleViewPattern_GetViewName",
+	"MultipleViewPattern_SetCurrentView","RangeValuePattern_SetValue","ScrollItemPattern_ScrollIntoView","ScrollPattern_Scroll","ScrollPattern_SetScrollPercent","SelectionItemPattern_AddToSelection",
+	"SelectionItemPattern_RemoveFromSelection","SelectionItemPattern_Select","SynchronizedInputPattern_Cancel","SynchronizedInputPattern_StartListening","TextPattern_GetSelection","TextPattern_GetVisibleRanges",
+	"TextPattern_RangeFromChild","TextPattern_RangeFromPoint","TextPattern_get_DocumentRange","TextPattern_get_SupportedTextSelection","TextRange_AddToSelection","TextRange_Clone",
+	"TextRange_Compare","TextRange_CompareEndpoints","TextRange_ExpandToEnclosingUnit","TextRange_FindAttribute","TextRange_FindText","TextRange_GetAttributeValue",
+	"TextRange_GetBoundingRectangles","TextRange_GetChildren","TextRange_GetEnclosingElement","TextRange_GetText","TextRange_Move","TextRange_MoveEndpointByRange",
+	"TextRange_MoveEndpointByUnit","TextRange_RemoveFromSelection","TextRange_ScrollIntoView","TextRange_Select","TogglePattern_Toggle","TransformPattern_Move",
+	"TransformPattern_Resize","TransformPattern_Rotate","UiaAddEvent","UiaClientsAreListening","UiaDisconnectAllProviders","UiaDisconnectProvider",
+	"UiaEventAddWindow","UiaEventRemoveWindow","UiaFind","UiaGetErrorDescription","UiaGetPatternProvider","UiaGetPropertyValue",
+	"UiaGetReservedMixedAttributeValue","UiaGetReservedNotSupportedValue","UiaGetRootNode","UiaGetRuntimeId","UiaGetUpdatedCache","UiaHPatternObjectFromVariant",
+	"UiaHTextRangeFromVariant","UiaHUiaNodeFromVariant","UiaHasServerSideProvider","UiaHostProviderFromHwnd","UiaIAccessibleFromProvider","UiaLookupId",
+	"UiaNavigate","UiaNodeFromFocus","UiaNodeFromHandle","UiaNodeFromPoint","UiaNodeFromProvider","UiaNodeRelease",
+	"UiaPatternRelease","UiaProviderForNonClient","UiaProviderFromIAccessible","UiaRaiseActiveTextPositionChangedEvent","UiaRaiseAsyncContentLoadedEvent","UiaRaiseAutomationEvent",
+	"UiaRaiseAutomationPropertyChangedEvent","UiaRaiseChangesEvent","UiaRaiseNotificationEvent","UiaRaiseStructureChangedEvent","UiaRaiseTextEditTextChangedEvent","UiaRegisterProviderCallback",
+	"UiaRemoveEvent","UiaReturnRawElementProvider","UiaSetFocus","UiaTextRangeRelease","ValuePattern_SetValue","VirtualizedItemPattern_Realize",
+	"WindowPattern_Close","WindowPattern_SetWindowVisualState","WindowPattern_WaitForInputIdle",
+};
 static constexpr std::pair<std::string_view, std::span<const std::string_view>> libraries[]{
 	{"advapi32.dll", advapi32_exports},
 	{"bcrypt.dll", bcrypt_exports},
@@ -2664,4 +2709,7 @@ static constexpr std::pair<std::string_view, std::span<const std::string_view>> 
 	{"usp10.dll", usp10_exports},
 	{"sfc.dll", sfc_exports},
 	{"dsound.dll", dsound_exports},
+	{"combase.dll", combase_exports},
+	{"wer.dll", wer_exports},
+	{"uiautomationcore.dll", uiautomationcore_exports},
 };

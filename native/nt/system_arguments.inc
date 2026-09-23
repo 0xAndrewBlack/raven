@@ -2376,8 +2376,9 @@ static constexpr std::pair<std::string_view, uint8_t> winspool_words[]{
 	{"XcvDataW",8},
 };
 static constexpr std::pair<std::string_view, uint8_t> ravenhost_words[]{
-	{"RavenFontClose",1},{"RavenFontGlyphs",4},{"RavenFontInfo",2},{"RavenFontMetrics",3},{"RavenFontName",4},{"RavenFontOpen",3},
-	{"RavenFontOutline",4},{"RavenFontRender",10},{"RavenFontScan",2},{"RavenFontTable",5},{"RavenTrace",1},
+	{"RavenCanvasCreate",2},{"RavenCanvasDestroy",1},{"RavenCanvasDraw",4},{"RavenCanvasPixels",8},{"RavenCanvasSize",2},{"RavenFontClose",1},
+	{"RavenFontGlyphs",4},{"RavenFontInfo",2},{"RavenFontMetrics",3},{"RavenFontName",4},{"RavenFontOpen",3},{"RavenFontOutline",4},
+	{"RavenFontRender",10},{"RavenFontScan",2},{"RavenFontTable",5},{"RavenPathCombine",8},{"RavenPathWiden",7},{"RavenTrace",1},
 };
 static constexpr std::pair<std::string_view, uint8_t> secur32_words[]{
 	{"AcceptSecurityContext",9},{"AcquireCredentialsHandleA",9},{"AcquireCredentialsHandleW",9},{"AddCredentialsA",8},{"AddCredentialsW",8},{"AddSecurityPackageA",2},
@@ -2504,6 +2505,50 @@ static constexpr std::pair<std::string_view, uint8_t> dsound_words[]{
 	{"DirectSoundCaptureCreate",3},{"DirectSoundCaptureCreate8",3},{"DirectSoundCaptureEnumerateA",2},{"DirectSoundCaptureEnumerateW",2},{"DirectSoundCreate",3},{"DirectSoundCreate8",3},
 	{"DirectSoundEnumerateA",2},{"DirectSoundEnumerateW",2},{"DirectSoundFullDuplexCreate",10},{"GetDeviceID",2},
 };
+static constexpr std::pair<std::string_view, uint8_t> combase_words[]{
+	{"CLSIDFromString",2},{"CoCreateGuid",1},{"CoCreateInstance",5},{"CoDecrementMTAUsage",1},{"CoGetApartmentType",2},{"CoGetMalloc",2},
+	{"CoIncrementMTAUsage",1},{"CoInitializeEx",2},{"CoTaskMemAlloc",1},{"CoTaskMemFree",1},{"CoTaskMemRealloc",2},{"CoUninitialize",0},
+	{"GetErrorInfo",2},{"RoActivateInstance",2},{"RoGetActivationFactory",3},{"RoGetParameterizedTypeInstanceIID",5},{"RoInitialize",1},{"RoOriginateError",2},
+	{"RoOriginateErrorW",3},{"RoOriginateLanguageException",3},{"RoParseTypeName",3},{"RoResolveNamespace",7},{"RoUninitialize",0},{"SetErrorInfo",2},
+	{"StringFromGUID2",3},{"WindowsCompareStringOrdinal",3},{"WindowsCreateString",3},{"WindowsCreateStringReference",4},{"WindowsDeleteString",1},{"WindowsDuplicateString",2},
+	{"WindowsGetStringLen",1},{"WindowsGetStringRawBuffer",2},{"WindowsIsStringEmpty",1},
+};
+static constexpr std::pair<std::string_view, uint8_t> wer_words[]{
+	{"WerAddExcludedApplication",2},{"WerFreeString",1},{"WerRemoveExcludedApplication",2},{"WerReportAddDump",7},{"WerReportAddFile",4},{"WerReportCloseHandle",1},
+	{"WerReportCreate",4},{"WerReportSetParameter",4},{"WerReportSetUIOption",3},{"WerReportSubmit",4},{"WerStoreClose",1},{"WerStoreGetFirstReportKey",2},
+	{"WerStoreGetNextReportKey",2},{"WerStoreGetReportCount",2},{"WerStoreGetSizeOnDisk",2},{"WerStoreOpen",2},{"WerStorePurge",0},{"WerStoreQueryReportMetadataV1",3},
+	{"WerStoreQueryReportMetadataV2",3},{"WerStoreQueryReportMetadataV3",3},{"WerStoreUploadReport",4},{"WerSysprepCleanup",0},{"WerSysprepGeneralize",0},{"WerSysprepSpecialize",0},
+	{"WerUnattendedSetup",0},{"WerpAddAppCompatData",3},{"WerpAddFile",6},{"WerpAddMemoryBlock",3},{"WerpAddRegisteredDataToReport",2},{"WerpAddSecondaryParameter",3},
+	{"WerpAddTextToReport",3},{"WerpArchiveReport",5},{"WerpCancelResponseDownload",1},{"WerpCancelUpload",1},{"WerpCloseStore",1},{"WerpCreateMachineStore",0},
+	{"WerpDeleteReport",2},{"WerpDestroyWerString",1},{"WerpDownloadResponse",7},{"WerpDownloadResponseTemplate",3},{"WerpEnumerateStoreNext",2},{"WerpEnumerateStoreStart",1},
+	{"WerpExtractReportFiles",3},{"WerpGetBucketId",2},{"WerpGetDynamicParameter",4},{"WerpGetEventType",2},{"WerpGetFileByIndex",6},{"WerpGetFilePathByIndex",3},
+	{"WerpGetNumFiles",2},{"WerpGetNumSecParams",2},{"WerpGetNumSigParams",2},{"WerpGetReportConsent",3},{"WerpGetReportFinalConsent",2},{"WerpGetReportFlags",2},
+	{"WerpGetReportInformation",2},{"WerpGetReportTime",2},{"WerpGetReportType",2},{"WerpGetResponseId",3},{"WerpGetResponseUrl",2},{"WerpGetSecParamByIndex",4},
+	{"WerpGetSigParamByIndex",4},{"WerpGetStoreLocation",3},{"WerpGetStoreType",2},{"WerpGetTextFromReport",3},{"WerpGetUIParamByIndex",3},{"WerpGetUploadTime",2},
+	{"WerpGetWerStringData",1},{"WerpIsDisabled",2},{"WerpIsTransportAvailable",0},{"WerpLoadReport",4},{"WerpOpenMachineArchive",2},{"WerpOpenMachineQueue",2},
+	{"WerpOpenUserArchive",2},{"WerpOpenUserQueue",2},{"WerpPromtUser",4},{"WerpReportCancel",1},{"WerpRestartApplication",5},{"WerpSetCallBack",3},
+	{"WerpSetDynamicParameter",4},{"WerpSetEventName",2},{"WerpSetReportFlags",2},{"WerpSetReportInformation",2},{"WerpSetReportTime",2},{"WerpSetReportUploadContextToken",2},
+	{"WerpShowNXNotification",1},{"WerpShowSecondLevelConsent",3},{"WerpShowUpsellUI",2},{"WerpSubmitReportFromStore",7},{"WerpSvcReportFromMachineQueue",2},
+};
+static constexpr std::pair<std::string_view, uint8_t> uiautomationcore_words[]{
+	{"DockPattern_SetDockPosition",2},{"ExpandCollapsePattern_Collapse",1},{"ExpandCollapsePattern_Expand",1},{"GridPattern_GetItem",4},{"InitializeChannelBasedConnectionForProviderProxy",3},{"InvokePattern_Invoke",1},
+	{"ItemContainerPattern_FindItemByProperty",8},{"LegacyIAccessiblePattern_DoDefaultAction",1},{"LegacyIAccessiblePattern_GetIAccessible",2},{"LegacyIAccessiblePattern_Select",2},{"LegacyIAccessiblePattern_SetValue",2},{"MultipleViewPattern_GetViewName",3},
+	{"MultipleViewPattern_SetCurrentView",2},{"RangeValuePattern_SetValue",3},{"ScrollItemPattern_ScrollIntoView",1},{"ScrollPattern_Scroll",3},{"ScrollPattern_SetScrollPercent",5},{"SelectionItemPattern_AddToSelection",1},
+	{"SelectionItemPattern_RemoveFromSelection",1},{"SelectionItemPattern_Select",1},{"SynchronizedInputPattern_Cancel",1},{"SynchronizedInputPattern_StartListening",2},{"TextPattern_GetSelection",2},{"TextPattern_GetVisibleRanges",2},
+	{"TextPattern_RangeFromChild",3},{"TextPattern_RangeFromPoint",6},{"TextPattern_get_DocumentRange",2},{"TextPattern_get_SupportedTextSelection",2},{"TextRange_AddToSelection",1},{"TextRange_Clone",2},
+	{"TextRange_Compare",3},{"TextRange_CompareEndpoints",5},{"TextRange_ExpandToEnclosingUnit",2},{"TextRange_FindAttribute",8},{"TextRange_FindText",5},{"TextRange_GetAttributeValue",3},
+	{"TextRange_GetBoundingRectangles",2},{"TextRange_GetChildren",2},{"TextRange_GetEnclosingElement",2},{"TextRange_GetText",3},{"TextRange_Move",4},{"TextRange_MoveEndpointByRange",4},
+	{"TextRange_MoveEndpointByUnit",5},{"TextRange_RemoveFromSelection",1},{"TextRange_ScrollIntoView",2},{"TextRange_Select",1},{"TogglePattern_Toggle",1},{"TransformPattern_Move",5},
+	{"TransformPattern_Resize",5},{"TransformPattern_Rotate",3},{"UiaAddEvent",8},{"UiaClientsAreListening",0},{"UiaDisconnectAllProviders",0},{"UiaDisconnectProvider",1},
+	{"UiaEventAddWindow",2},{"UiaEventRemoveWindow",2},{"UiaFind",6},{"UiaGetErrorDescription",1},{"UiaGetPatternProvider",3},{"UiaGetPropertyValue",3},
+	{"UiaGetReservedMixedAttributeValue",1},{"UiaGetReservedNotSupportedValue",1},{"UiaGetRootNode",1},{"UiaGetRuntimeId",2},{"UiaGetUpdatedCache",6},{"UiaHPatternObjectFromVariant",2},
+	{"UiaHTextRangeFromVariant",2},{"UiaHUiaNodeFromVariant",2},{"UiaHasServerSideProvider",1},{"UiaHostProviderFromHwnd",2},{"UiaIAccessibleFromProvider",4},{"UiaLookupId",2},
+	{"UiaNavigate",6},{"UiaNodeFromFocus",3},{"UiaNodeFromHandle",2},{"UiaNodeFromPoint",7},{"UiaNodeFromProvider",2},{"UiaNodeRelease",1},
+	{"UiaPatternRelease",1},{"UiaProviderForNonClient",4},{"UiaProviderFromIAccessible",4},{"UiaRaiseActiveTextPositionChangedEvent",2},{"UiaRaiseAsyncContentLoadedEvent",4},{"UiaRaiseAutomationEvent",2},
+	{"UiaRaiseAutomationPropertyChangedEvent",10},{"UiaRaiseChangesEvent",3},{"UiaRaiseNotificationEvent",5},{"UiaRaiseStructureChangedEvent",4},{"UiaRaiseTextEditTextChangedEvent",3},{"UiaRegisterProviderCallback",1},
+	{"UiaRemoveEvent",1},{"UiaReturnRawElementProvider",4},{"UiaSetFocus",1},{"UiaTextRangeRelease",1},{"ValuePattern_SetValue",2},{"VirtualizedItemPattern_Realize",1},
+	{"WindowPattern_Close",1},{"WindowPattern_SetWindowVisualState",2},{"WindowPattern_WaitForInputIdle",3},
+};
 static constexpr std::pair<std::string_view, std::span<const std::pair<std::string_view, uint8_t>>> argument_tables[]{
 	{"advapi32.dll", advapi32_words},
 	{"bcrypt.dll", bcrypt_words},
@@ -2562,4 +2607,7 @@ static constexpr std::pair<std::string_view, std::span<const std::pair<std::stri
 	{"usp10.dll", usp10_words},
 	{"sfc.dll", sfc_words},
 	{"dsound.dll", dsound_words},
+	{"combase.dll", combase_words},
+	{"wer.dll", wer_words},
+	{"uiautomationcore.dll", uiautomationcore_words},
 };

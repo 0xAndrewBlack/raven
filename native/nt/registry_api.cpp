@@ -613,14 +613,16 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 	};
 	registry.add("RegQueryInfoKeyW", 12, query_info);
 	registry.add("RegQueryInfoKeyA", 12, query_info);
-	// RegGetValue filters by type (RRF_RT_*), opens the subkey itself and expands REG_EXPAND_SZ unless told not to.
-	registry.add("RegGetValueW", 7, [&hive, &context, text_of](ApiCall &call) {
+	// RegGetValue filters by type (RRF_RT_*), opens the subkey itself in the caller's registry view (RRF_SUBKEY_WOW6464KEY and
+	// RRF_SUBKEY_WOW6432KEY choose one) and expands REG_EXPAND_SZ unless told not to.
+	registry.add("RegGetValueW", 7, [&hive, &context, text_of, view](ApiCall &call) {
 		const uint32_t flags = call.u32(3);
 		uint64_t key = call[0];
 		uint64_t opened = 0;
 		const auto subkey = text_of(call, call[1], true);
 		if (!subkey.empty()) {
-			const auto status = hive.open(key, subkey, opened);
+			const uint32_t access = (flags & 0x10000 ? 0x100 : 0) | (flags & 0x20000 ? 0x200 : 0);
+			const auto status = hive.open(key, view(key, subkey, access), opened);
 			if (status) {
 				call.ret(status);
 				return;

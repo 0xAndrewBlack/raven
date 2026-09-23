@@ -146,6 +146,9 @@ std::optional<Node> find_node(std::span<const uint8_t> block, std::u16string_vie
 		const auto end = path.find(u'\\');
 		const auto part = path.substr(0, end);
 		path = end == path.npos ? std::u16string_view() : path.substr(end + 1);
+		// Doubled separators name nothing, as Windows reads them: the .NET Framework writes its queries with them.
+		if (part.empty())
+			continue;
 		bool found = false;
 		size_t at = node->children;
 		while (at + 6 <= node->start + node->length) {

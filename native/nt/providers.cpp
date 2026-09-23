@@ -1332,7 +1332,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		"RtlFreeUnicodeString", "RtlGetVersion", "RtlIpv6AddressToStringExW", "RtlIpv6StringToAddressW", "RtlLengthSid", "RtlUnicodeToMultiByteN",
 		"RtlUnicodeToMultiByteSize", "RtlIsTextUnicode", "RtlImageNtHeader", "NtDeleteKey",
 		// The unwinding of 64-bit frames, which libraries built with their own exception handling import.
-		"RtlCaptureContext", "RtlLookupFunctionEntry", "RtlPcToFileHeader", "RtlVirtualUnwind", "RtlUnwindEx"})
+		"RtlCaptureContext", "RtlLookupFunctionEntry", "RtlPcToFileHeader", "RtlVirtualUnwind", "RtlUnwindEx",
+		// What the .NET runtime imports from ntdll: the function tables of the code it compiles, and the restoring of a context.
+		"VerSetConditionMask", "RtlInstallFunctionTableCallback", "RtlAddFunctionTable", "RtlDeleteFunctionTable", "RtlRestoreContext",
+		// What the native layer of WPF imports from ntdll.
+		"DbgPrintEx", "DbgPrompt", "RtlVerifyVersionInfo", "RtlInitializeBitMap", "RtlSetBits", "RtlClearBits", "RtlSetAllBits",
+		"RtlClearAllBits", "RtlAreBitsClear", "RtlAreBitsSet", "RtlFindClearBits", "RtlFindClearBitsAndSet", "RtlNumberOfSetBits",
+		"RtlInitializeSListHead", "RtlInterlockedPushEntrySList", "RtlInterlockedPopEntrySList", "RtlInterlockedFlushSList",
+		"RtlQueryDepthSList"})
 		if (std::find(nt_names.begin(),nt_names.end(),name)==nt_names.end()) nt_names.push_back(name);
 	std::sort(nt_names.begin(),nt_names.end());
 	// Every Windows system library that a program may import gets a provider; names without a handler stop visibly when called.
@@ -1417,7 +1424,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				{"user32.dll", "raven-user32.dll", "raven-user32."}, {"comdlg32.dll", "raven-shell.dll", "raven-shell."},
 				{"ole32.dll", "raven-shell.dll", "raven-shell."}, {"shell32.dll", "raven-shell.dll", "raven-shell."},
 				{"shlwapi.dll", "raven-shell.dll", "raven-shell."}, {"setupapi.dll", "raven-setupapi.dll", "raven-setupapi."},
-				{"ole32.dll", "raven-storage.dll", "raven-storage."},
+				{"ole32.dll", "raven-storage.dll", "raven-storage."}, {"combase.dll", "raven-shell.dll", "raven-shell."},
 				// The heap, critical sections and the free paths of SRW locks and condition variables run in the guest RTL.
 				{"kernel32.dll", "raven-rtl.dll", "raven-rtl."}, {"kernelbase.dll", "raven-rtl.dll", "raven-rtl."}};
 			for (const auto &overlay_rule : overlays) {
@@ -1508,7 +1515,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	for (const auto &[name, module] : modules.all())
 		images.push_back(&module->loaded);
 	const auto deadline = std::chrono::steady_clock::now() + timeout;
-	NativeProcess process(images, bootstrap, timeout);
+	NativeProcess process(images, bootstrap, timeout, NativeMode::x64, entry.image.stack_reserve);
 	for (const auto &[address, name] : traps)
 		process.add_api_trap(address);
 	NativeEnvironment environment(process, entry.loaded.base(), uint32_t(::getpid()), 1);
@@ -1780,6 +1787,21 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					} catch (...) {}
 					std::cerr << " class=" << class_name;
 				}
+				// Calls that take a name first say which name failed.
+				static constexpr std::string_view named[] = {"LoadLibraryExW", "LoadLibraryW", "CreateFileW", "GetFileAttributesW",
+					"GetFileAttributesExW", "FindFirstFileW", "FindFirstFileExW", "CreateDirectoryW", "DeleteFileW", "OpenEventW", "OpenMutexW",
+					"CreateFileMappingW", "OpenFileMappingW"};
+				const bool name_first = std::find(std::begin(named), std::end(named), found->second) != std::end(named);
+				const size_t name_index = found->second == "CreateFileMappingW" ? 5 : found->second.starts_with("Open") ? 2 : 0;
+				if (name_first && failure_arguments.size() > name_index && failure_arguments[name_index] > 0xffff) {
+					std::string text;
+					try {
+						const auto raw = process.read_memory(failure_arguments[name_index], 240);
+						for (size_t i = 0; i < 120 && (raw[i * 2] | raw[i * 2 + 1]); ++i)
+							text.push_back(raw[i * 2 + 1] ? '?' : char(raw[i * 2]));
+					} catch (...) {}
+					std::cerr << " name=" << text;
+				}
 
 				for (const auto &[module_name, module] : modules.all()) {
 					const auto stack = process.read_memory(process.context().registers.rsp, 8);
@@ -2045,6 +2067,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_crypt32_api(api_registry, kernel);
 	register_process_info_api(api_registry, kernel);
 	register_font_service(api_registry, kernel);
+	register_canvas_service(api_registry, kernel);
 	register_sync_api(api_registry, kernel);
 	register_thread_api(api_registry, kernel);
 	register_text_api(api_registry, kernel);
@@ -2176,21 +2199,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (const auto host = apiset_host(name); !host.empty())
 			name = host;
 		const auto existing = modules.all().find(name);
-		// A library that is already in the process can be named while another one starts (its initialization often asks for
-		// kernel32): only a library that has to be brought in waits for the first load to finish.
-		if (loading && existing != modules.all().end()) {
-			if (const auto counted = references.find(existing->second.get()); counted != references.end() && counted->second > 0) {
-				++counted->second;
-				return existing->second->loaded.base();
-			}
-			if (existing->second->runtime_api && references.contains(existing->second.get())) {
-				++references.at(existing->second.get());
-				return existing->second->loaded.base();
-			}
-		}
-		if (loading) {
-			environment.set_last_error(120);
-			return 0;
+		// Other threads waited above, so a load already under way is this thread's own: a library starting up loads another, as
+		// Windows lets it. A library that is in the process already, even one the outer load has not started yet, is handed back.
+		const bool nested = loading;
+		if (nested && existing != modules.all().end() && references.contains(existing->second.get())) {
+			++references.at(existing->second.get());
+			return existing->second->loaded.base();
 		}
 		if (existing != modules.all().end()) {
 			auto &count = references.at(existing->second.get());
@@ -2285,7 +2299,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				for (const auto &descriptor : image.delay_imports())
 					if (!(image.file_span(descriptor.descriptor_address, 4)[0] & 1))
 						throw LoadFailure{120};
-			if (image.directories[14].address || image.directories[14].size)
+			// Mixed managed and native code starts through its entry point like any library, which hands it to the runtime; an image
+			// of managed code alone is the runtime's to map.
+			if (image.il_only())
 				throw LoadFailure{120};
 			staged.reserve(staged.size() + 1);
 			auto &module = modules.add(identity, std::move(*bytes));
@@ -2355,20 +2371,20 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				loader_data.initialized(*module);
 			}
 			++references.at(&root);
-			loading = false;
+			loading = nested;
 			return root.loaded.base();
 		} catch (const NativeResult &) {
 			// A fault or timeout is terminal; never execute extra guest cleanup.
 			throw;
 		} catch (const LoadFailure &failure) {
 			rollback();
-			loading = false;
+			loading = nested;
 			environment.set_last_error(failure.error);
 			return 0;
 		} catch (...) {
 			if (!guest_started)
 				rollback();
-			loading = false;
+			loading = nested;
 			throw;
 		}
 	}, [&](uint64_t handle) {
@@ -2500,7 +2516,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (tls_result.stop != NativeStop::returned)
 			return tls_result;
 		entry_tls_ready=true;
-		const auto result = invoke(entry.loaded.base() + entry.image.entry, {});
+		const auto result = invoke(program_start(modules, entry), {});
 		if (result.stop != NativeStop::returned)
 			return result;
 		cleanup_started=true; loading=true;

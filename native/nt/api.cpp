@@ -200,6 +200,9 @@ bool ApiRegistry::dispatch(NativeProcess &process, NativeEnvironment &environmen
 			std::fprintf(stderr, "\n");
 		}
 		call.fail(998);
+	} catch (const uint32_t &error) {
+		// The window and drawing layers report a bad handle or argument by throwing the Windows error: the call fails with it.
+		call.fail(error);
 	}
 	process.return_api(call.result);
 	return true;

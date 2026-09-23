@@ -9,10 +9,10 @@ namespace raven {
 
 namespace {
 
-constexpr std::array<std::pair<std::string_view, uint32_t>, 26> compat_exports{{
+constexpr std::array<std::pair<std::string_view, uint32_t>, 28> compat_exports{{
 	{"GetProcessHeap", 0}, {"HeapAlloc", 3}, {"HeapFree", 3}, {"HeapReAlloc", 4}, {"HeapSize", 3},
 	{"CreateWindowExA", 12}, {"DispatchMessageA", 1}, {"GetMessageA", 4}, {"PeekMessageA", 5},
-	{"RegisterClassA", 1}, {"RegisterClassExA", 1}, {"UnregisterClassA", 2},
+	{"RegisterClassA", 1}, {"RegisterClassExA", 1}, {"UnregisterClassA", 2}, {"GetClassInfoA", 3}, {"GetClassInfoExA", 3},
 	{"GlobalHandle", 1}, {"GetVersionExA", 1}, {"WinExec", 2}, {"GetCurrentProcess", 0}, {"SetHandleCount", 1}, {"GetEnvironmentStrings", 0},
 	{"FreeEnvironmentStringsA", 1}, {"UnhandledExceptionFilter", 1}, {"RtlUnwind", 4}, {"HeapCreate", 3}, {"HeapDestroy", 1},
 	{"ExitWindowsEx", 2}, {"RealizePalette", 1}, {"CreatePalette", 1},
@@ -253,6 +253,21 @@ bool NativeX86Compat::dispatch(std::string_view name)
 		return forward("GetMessageW");
 	} else if (name == "DispatchMessageA") {
 		return forward("DispatchMessageW");
+	} else if (name == "GetClassInfoA" || name == "GetClassInfoExA") {
+		// The wide handler fills the same layout; the class name it leaves there is the widened copy, so the program's own string goes
+		// back in its place.
+		const bool extended = name == "GetClassInfoExA";
+		const auto args = process.api_arguments(3);
+		const uint32_t wide = widen(args[1]);
+		process.set_api_argument(1, wide);
+		const bool handled = forward(extended ? "GetClassInfoExW" : "GetClassInfoW");
+		const uint64_t field = args[2] + (extended ? 40 : 36);
+		if (handled && args[2] && wide != args[1] && read_word(process.read_memory(field, 4), 0) == wide) {
+			std::vector<uint8_t> original(4);
+			write_word(original, 0, uint32_t(args[1]));
+			process.write_memory(field, original);
+		}
+		return handled;
 	} else if (name == "UnregisterClassA") {
 		const auto args = process.api_arguments(2);
 		process.set_api_argument(0, widen(args[0]));

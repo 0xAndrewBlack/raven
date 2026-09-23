@@ -25,7 +25,7 @@ constexpr std::array exported{
 	Export{"kernel32.dll", "GetThreadContext", 2}, Export{"kernel32.dll", "SetThreadContext", 2},
 	Export{"kernel32.dll", "DeviceIoControl", 8}, Export{"kernel32.dll", "GetProcessAffinityMask", 3},
 	Export{"kernel32.dll", "SetProcessAffinityMask", 2}, Export{"kernel32.dll", "GetSystemInfo", 1}, Export{"kernel32.dll", "VirtualQuery", 3},
-	Export{"kernel32.dll", "GetTempFileNameA", 4}, Export{"kernel32.dll", "DuplicateHandle", 7},
+	Export{"kernel32.dll", "DuplicateHandle", 7},
 	Export{"user32.dll", "ChangeDisplaySettingsExW", 5}, Export{"user32.dll", "CreateIconIndirect", 1},
 	Export{"user32.dll", "DisplayConfigGetDeviceInfo", 1}, Export{"user32.dll", "EnumDisplayDevicesA", 4},
 	Export{"user32.dll", "SetProcessDPIAware", 0},
@@ -227,6 +227,10 @@ bool NativeX86System::dispatch(std::string_view name)
 			tls_used[index] = false;
 			for (auto &[thread, values] : tls_values)
 				values.erase(index);
+			if (index < 64) {
+				const uint32_t zero = 0;
+				process.write_memory(environment.teb() + 0xe10 + index * 4, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&zero), 4));
+			}
 			process.return_api(1);
 		}
 	} else if (name == "TlsGetValue") {
@@ -245,6 +249,13 @@ bool NativeX86System::dispatch(std::string_view name)
 			fail(87);
 		} else {
 			tls_values[threads.current_id()][index] = uint32_t(args[1]);
+			// The first 64 slots also live in the thread's TEB, TlsSlots at 0xe10, where code that reads its slot through fs: finds them, as
+			// the .NET runtime's thread lookups do.
+			if (index < 64) {
+				const auto value = uint32_t(args[1]);
+				process.write_memory(environment.teb() + 0xe10 + index * 4,
+					std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&value), 4));
+			}
 			process.return_api(1);
 		}
 	} else if (name == "CreateSemaphoreA" || name == "CreateSemaphoreW") {
@@ -348,27 +359,6 @@ bool NativeX86System::dispatch(std::string_view name)
 				write32(args[3], uint32_t(made.value));
 			process.return_api(1);
 		}
-	} else if (name == "GetTempFileNameA") {
-		const auto text = [&](uint64_t address) {
-			std::string result;
-			for (size_t index = 0; index < 260; ++index) {
-				const char character = char(process.read_memory(address + index, 1)[0]);
-				if (!character)
-					break;
-				result.push_back(character);
-			}
-			return result;
-		};
-		auto directory = text(args[0]);
-		if (!directory.empty() && directory.back() != '\\')
-			directory.push_back('\\');
-		const uint32_t unique = uint32_t(args[2]) ? uint32_t(args[2]) : unique_counter++;
-		char suffix[16];
-		std::snprintf(suffix, sizeof suffix, "%x.tmp", unique & 0xffff);
-		auto path = directory + text(args[1]).substr(0, 3) + suffix;
-		path.push_back('\0');
-		process.write_memory(args[3], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(path.data()), path.size()));
-		process.return_api(unique & 0xffff);
 	} else if (name == "ChangeDisplaySettingsExW") {
 		// A mode change is accepted without changing anything: the host shows the program's window at its own size.
 		process.return_api(0);

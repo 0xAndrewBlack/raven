@@ -314,6 +314,49 @@ void register_service_api(ApiRegistry &registry, KernelContext &context, NativeR
 	};
 	registry.add("QueryServiceConfigW", 4, [query_config](ApiCall &call) { query_config(call, true); });
 	registry.add("QueryServiceConfigA", 4, [query_config](ApiCall &call) { query_config(call, false); });
+	// GetServiceDisplayName(manager, name, buffer, characters): the service's DisplayName, or its own name when it has none. The count
+	// comes back without the terminator; a buffer too small learns the length it needs.
+	const auto display_name = [&objects, &hive, with_key](ApiCall &call, bool wide) {
+		if (!objects.object_as<ServiceManager>(call[0]) || !call[1] || !call[3]) {
+			call.fail(call[1] && call[3] ? 6 : 87, 0);
+			return;
+		}
+		const auto name = wide ? call.wide(call[1], 256) : from_utf8(call.narrow(call[1], 256));
+		std::u16string display;
+		const bool found = with_key(name, false, [&](uint64_t key) {
+			uint32_t type = 0;
+			std::vector<uint8_t> data;
+			if (!hive.query(key, u"DisplayName", type, data) && data.size() >= 2) {
+				display.assign(reinterpret_cast<const char16_t *>(data.data()), data.size() / 2);
+				while (!display.empty() && !display.back())
+					display.pop_back();
+			}
+		});
+		if (!found) {
+			call.fail(error_service_does_not_exist, 0);
+			return;
+		}
+		if (display.empty())
+			display = name;
+		const auto narrow = to_utf8(display);
+		const size_t length = wide ? display.size() : narrow.size();
+		if (!call[2] || call.u32(3) <= length) {
+			call.store<uint32_t>(call[3], uint32_t(length));
+			call.fail(122, 0);
+			return;
+		}
+		if (wide)
+			call.put_wide(call[2], display, display.size() + 1);
+		else {
+			std::vector<uint8_t> bytes(narrow.begin(), narrow.end());
+			bytes.push_back(0);
+			call.write(call[2], bytes);
+		}
+		call.store<uint32_t>(call[3], uint32_t(length));
+		call.ret(1);
+	};
+	registry.add("GetServiceDisplayNameW", 4, [display_name](ApiCall &call) { display_name(call, true); });
+	registry.add("GetServiceDisplayNameA", 4, [display_name](ApiCall &call) { display_name(call, false); });
 	// SERVICE_CONFIG_DESCRIPTION keeps the description; the other optional settings (failure actions, delayed start and the like)
 	// are accepted and have no effect here.
 	const auto change_config2 = [&objects, with_key, set_text](ApiCall &call, bool wide) {

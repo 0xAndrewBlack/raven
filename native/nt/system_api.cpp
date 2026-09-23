@@ -598,6 +598,14 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	// Windows 10 Pro (PRODUCT_PROFESSIONAL), whatever version the program asks about.
+	// A program in the prefix runs outside any app package: the package queries answer APPMODEL_ERROR_NO_PACKAGE, with no length.
+	for (const char *name : {"GetCurrentPackageFullName", "GetCurrentPackageFamilyName", "GetCurrentPackageId", "GetCurrentPackagePath",
+			"GetCurrentApplicationUserModelId"})
+		registry.add(name, 2, [](ApiCall &call) {
+			if (call[0])
+				call.store<uint32_t>(call[0], 0);
+			call.ret(15700);
+		});
 	registry.add("GetProductInfo", 5, [](ApiCall &call) {
 		if (!call[4]) {
 			call.fail(87);
@@ -626,14 +634,14 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 				mask = (mask & ~(7ULL << (bit * 3))) | (condition << (bit * 3));
 		call.ret(mask);
 	});
-	registry.add("VerifyVersionInfoW", 3, [](ApiCall &call) {
+	const auto verify_version = [](ApiCall &call, bool native) -> bool {
 		const auto info = call.read(call[0], 28);
 		uint32_t requested[5];
 		std::memcpy(requested, info.data(), 20);
 		const uint32_t types = call.u32(1);
 		const uint64_t mask = call[2];
-		// The version the program's manifest makes Windows report, with no service pack.
-		const auto version = activation_contexts().reported_version();
+		// The version the program's manifest makes Windows report, with no service pack; the native call compares the real one.
+		const auto version = native ? ActivationContexts::Version{10, 0, 19045} : activation_contexts().reported_version();
 		const auto compare = [&](unsigned bit, uint64_t have, uint64_t want) {
 			switch ((mask >> (bit * 3)) & 7) {
 			case 1: return have == want;
@@ -656,11 +664,29 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		}
 		if (types & 4) good = good && compare(2, version.build, requested[3]);
 		if (types & 8) good = good && compare(3, 2, requested[4]);
-		if (!good) {
+		return good;
+	};
+	registry.add("VerifyVersionInfoW", 3, [verify_version](ApiCall &call) {
+		if (!verify_version(call, false)) {
 			call.fail(1150);
 			return;
 		}
 		call.ret(1);
+	});
+	// The native form answers STATUS_REVISION_MISMATCH where the Win32 one fails with ERROR_OLD_WIN_VERSION.
+	registry.add("RtlVerifyVersionInfo", 3, [verify_version](ApiCall &call) { call.ret(verify_version(call, true) ? 0 : 0xc0000059U); });
+	// kernel32's memory exports: moving, filling and clearing a block of the program's memory.
+	registry.add("RtlMoveMemory", 3, [](ApiCall &call) {
+		if (call[2])
+			call.write(call[0], call.read(call[1], size_t(call[2])));
+	});
+	registry.add("RtlFillMemory", 3, [](ApiCall &call) {
+		if (call[1])
+			call.write(call[0], std::vector<uint8_t>(size_t(call[1]), uint8_t(call[2])));
+	});
+	registry.add("RtlZeroMemory", 2, [](ApiCall &call) {
+		if (call[1])
+			call.write(call[0], std::vector<uint8_t>(size_t(call[1]), 0));
 	});
 	registry.add("MulDiv", 3, [](ApiCall &call) {
 		const int64_t a = call.i32(0), b = call.i32(1), c = call.i32(2);
@@ -706,15 +732,112 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(head);
 	});
 	registry.add("QueryDepthSList", 1, [](ApiCall &call) { call.ret(call.load<uint64_t>(call[0] + 8) & 0xffff); });
+	// ntdll's names for the same lists.
+	for (const auto &[native, win32] : {std::pair{"RtlInitializeSListHead", "InitializeSListHead"},
+			{"RtlInterlockedPushEntrySList", "InterlockedPushEntrySList"}, {"RtlInterlockedPopEntrySList", "InterlockedPopEntrySList"},
+			{"RtlInterlockedFlushSList", "InterlockedFlushSList"}, {"RtlQueryDepthSList", "QueryDepthSList"}})
+		if (const auto entry = registry.find(win32); entry && !registry.has(native))
+			registry.add(native, entry->first, entry->second);
+	// RTL_BITMAP: the number of bits, then a pointer of the program's width to the words that hold them, lowest bit first.
+	const auto bitmap = [](ApiCall &call) {
+		const uint32_t size = call.load<uint32_t>(call[0]);
+		const uint64_t buffer = call.load_pointer(call[0] + call.pointer_width());
+		return std::pair{size, buffer};
+	};
+	const auto get_bit = [](ApiCall &call, uint64_t buffer, uint32_t index) {
+		return (call.load<uint32_t>(buffer + (index / 32) * 4) >> (index % 32)) & 1;
+	};
+	const auto put_bits = [](ApiCall &call, uint64_t buffer, uint32_t start, uint32_t count, bool value) {
+		for (uint32_t index = start; index < start + count; ++index) {
+			const uint64_t word = buffer + (index / 32) * 4;
+			const uint32_t bits = call.load<uint32_t>(word), mask = 1U << (index % 32);
+			call.store<uint32_t>(word, value ? bits | mask : bits & ~mask);
+		}
+	};
+	registry.add("RtlInitializeBitMap", 3, [](ApiCall &call) {
+		call.store<uint32_t>(call[0], call.u32(2));
+		call.store_pointer(call[0] + call.pointer_width(), call[1]);
+	});
+	registry.add("RtlSetBits", 3, [bitmap, put_bits](ApiCall &call) {
+		const auto [size, buffer] = bitmap(call);
+		if (uint64_t(call.u32(1)) + call.u32(2) <= size)
+			put_bits(call, buffer, call.u32(1), call.u32(2), true);
+	});
+	registry.add("RtlClearBits", 3, [bitmap, put_bits](ApiCall &call) {
+		const auto [size, buffer] = bitmap(call);
+		if (uint64_t(call.u32(1)) + call.u32(2) <= size)
+			put_bits(call, buffer, call.u32(1), call.u32(2), false);
+	});
+	registry.add("RtlSetAllBits", 1, [bitmap, put_bits](ApiCall &call) {
+		const auto [size, buffer] = bitmap(call);
+		put_bits(call, buffer, 0, size, true);
+	});
+	registry.add("RtlClearAllBits", 1, [bitmap, put_bits](ApiCall &call) {
+		const auto [size, buffer] = bitmap(call);
+		put_bits(call, buffer, 0, size, false);
+	});
+	const auto run_of = [get_bit](ApiCall &call, uint64_t buffer, uint32_t start, uint32_t count, uint32_t value) {
+		for (uint32_t index = start; index < start + count; ++index)
+			if (get_bit(call, buffer, index) != value)
+				return false;
+		return true;
+	};
+	registry.add("RtlAreBitsClear", 3, [bitmap, run_of](ApiCall &call) {
+		const auto [size, buffer] = bitmap(call);
+		call.ret(uint64_t(call.u32(1)) + call.u32(2) <= size && run_of(call, buffer, call.u32(1), call.u32(2), 0));
+	});
+	registry.add("RtlAreBitsSet", 3, [bitmap, run_of](ApiCall &call) {
+		const auto [size, buffer] = bitmap(call);
+		call.ret(uint64_t(call.u32(1)) + call.u32(2) <= size && run_of(call, buffer, call.u32(1), call.u32(2), 1));
+	});
+	// The first run of clear bits of the length asked for, looked for from the hint on and then from the start; ~0 when there is none.
+	const auto find_clear = [bitmap, run_of](ApiCall &call) -> uint32_t {
+		const auto [size, buffer] = bitmap(call);
+		const uint32_t count = call.u32(1), hint = call.u32(2) < size ? call.u32(2) : 0;
+		if (!count || count > size)
+			return count ? UINT32_MAX : hint;
+		for (const auto [from, to] : {std::pair{hint, size}, std::pair{0U, hint + count < size ? hint + count : size}})
+			for (uint32_t start = from; start + count <= to; ++start)
+				if (run_of(call, buffer, start, count, 0))
+					return start;
+		return UINT32_MAX;
+	};
+	registry.add("RtlFindClearBits", 3, [find_clear](ApiCall &call) { call.ret(find_clear(call)); });
+	registry.add("RtlFindClearBitsAndSet", 3, [bitmap, find_clear, put_bits](ApiCall &call) {
+		const uint32_t found = find_clear(call);
+		if (found != UINT32_MAX && call.u32(1))
+			put_bits(call, bitmap(call).second, found, call.u32(1), true);
+		call.ret(found);
+	});
+	registry.add("RtlNumberOfSetBits", 1, [bitmap, get_bit](ApiCall &call) {
+		const auto [size, buffer] = bitmap(call);
+		uint32_t count = 0;
+		for (uint32_t index = 0; index < size; ++index)
+			count += get_bit(call, buffer, index);
+		call.ret(count);
+	});
 	registry.add("SetUnhandledExceptionFilter", 1, [&context](ApiCall &call) {
 		const auto previous = context.unhandled_filter;
 		context.unhandled_filter = call[0];
 		call.ret(previous);
 	});
 	registry.add("SetErrorMode", 1, [](ApiCall &call) { call.ret(0); });
-	registry.add("SetThreadErrorMode", 3, [](ApiCall &call) {
-		if (call[2]) call.store<uint32_t>(call[2], 0);
+	// Each thread keeps the error mode it sets, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX and SEM_NOOPENFILEERRORBOX, and starts with none.
+	const auto thread_modes = std::make_shared<std::map<uint64_t, uint32_t>>();
+	registry.add("SetThreadErrorMode", 2, [thread_modes](ApiCall &call) {
+		if (call.u32(0) & ~0x8003U) {
+			call.fail(87);
+			return;
+		}
+		auto &mode = (*thread_modes)[call.environment.teb()];
+		if (call[1])
+			call.store<uint32_t>(call[1], mode);
+		mode = call.u32(0);
 		call.ret(1);
+	});
+	registry.add("GetThreadErrorMode", 0, [thread_modes](ApiCall &call) {
+		const auto found = thread_modes->find(call.environment.teb());
+		call.ret(found == thread_modes->end() ? 0 : found->second);
 	});
 	registry.add("GetApplicationRestartSettings", 4, [](ApiCall &call) { call.fail(0x80070490U, 0x80070490U); });
 	registry.add("RegisterApplicationRestart", 2, [](ApiCall &call) { call.ret(0); });

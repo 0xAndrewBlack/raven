@@ -58,6 +58,9 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 {
 	// Debug output goes nowhere; the function is cdecl and variadic, so it takes no counted arguments.
 	registry.add("DbgPrint", 0, [](ApiCall &call) { call.ret(0); });
+	registry.add("DbgPrintEx", 0, [](ApiCall &call) { call.ret(0); });
+	// No kernel debugger answers a prompt: nothing is read.
+	registry.add("DbgPrompt", 3, [](ApiCall &call) { call.ret(0); });
 	registry.add("DisableThreadLibraryCalls", 1, [](ApiCall &call) { call.ret(1); });
 	// No console control events are delivered, so handlers are accepted and never called.
 	registry.add("SetConsoleCtrlHandler", 2, [](ApiCall &call) { call.ret(1); });

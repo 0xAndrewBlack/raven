@@ -26,9 +26,10 @@ const std::map<uint32_t, std::u16string> &locale_strings()
 			{0x1b, u"0"}, {0x1c, u"0"}, {0x1d, u"/"}, {0x1e, u":"}, {0x1f, u"M/d/yyyy"}, {0x20, u"dddd, MMMM d, yyyy"},
 			{0x21, u"0"}, {0x22, u"1"}, {0x23, u"0"}, {0x24, u"0"}, {0x25, u"0"}, {0x26, u"1"}, {0x27, u"1"}, {0x28, u"AM"},
 			{0x29, u"PM"}, {0x1001, u"English"}, {0x1002, u"United States"}, {0x1003, u"h:mm:ss tt"}, {0x1004, u"1252"},
-			{0x1005, u"437"}, {0x1006, u"437"}, {0x1007, u"1"}, {0x1008, u"1"}, {0x1009, u"6"}, {0x100c, u"6"},
-			{0x100d, u"0"}, {0x59, u"en"}, {0x5a, u"US"}, {0x5b, u"ENU"}, {0x5c, u"en-US"}, {0x5d, u"USA"}, {0x66, u"en-US"},
-			{0x6e, u"."}, {0x74, u"0"}, {0x75, u"0"}, {0x1000, u"0409"}, {0x4a, u"+"}, {0x4b, u"-"}, {0x50, u"-"},
+			{0x1005, u"437"}, {0x1006, u"437"}, {0x1007, u"1"}, {0x1008, u"1"}, {0x1009, u"1"}, {0x100b, u"0"}, {0x100c, u"6"},
+			{0x100d, u"0"}, {0x100a, u"1"}, {0x1010, u"1"}, {0x1011, u"10000"}, {0x1012, u"037"}, {0x1014, u"1"}, {0x59, u"en"}, {0x5a, u"US"}, {0x5b, u"ENU"}, {0x5c, u"en-US"}, {0x5d, u"USA"}, {0x66, u"en-US"},
+			{0x6e, u"."}, {0x74, u"0"}, {0x75, u"0"}, {0x1000, u"0409"}, {0x4a, u"+"}, {0x4b, u"-"}, {0x50, u""}, {0x51, u"-"},
+			{0x52, u"3"}, {0x53, u"0"}, {0x54, u"1"}, {0x55, u"0"}, {0x56, u"1"}, {0x57, u"0"},
 		};
 		static constexpr const char16_t *days[] = {u"Monday", u"Tuesday", u"Wednesday", u"Thursday", u"Friday", u"Saturday", u"Sunday"};
 		static constexpr const char16_t *months[] = {u"January", u"February", u"March", u"April", u"May", u"June", u"July", u"August",
@@ -41,6 +42,12 @@ const std::map<uint32_t, std::u16string> &locale_strings()
 			t[0x38 + index] = months[index];
 			t[0x44 + index] = std::u16string(months[index]).substr(0, 3);
 		}
+		// The fields Windows Vista and later added, which the .NET runtime reads for its cultures: not-a-number and the infinities, the
+		// scripts, the parent culture, reading order, percent signs, the month-day and short time patterns, the OpenType tag and the sort.
+		for (const auto &[type, text] : std::initializer_list<std::pair<uint32_t, const char16_t *>>{{0x69, u"NaN"}, {0x6a, u"\u221e"},
+			{0x6b, u"-\u221e"}, {0x6c, u"Latn;"}, {0x6d, u"en"}, {0x70, u"0"}, {0x71, u"0"}, {0x76, u"%"}, {0x77, u"\u2030"},
+			{0x78, u"MMMM d"}, {0x79, u"h:mm tt"}, {0x7a, u"ENG "}, {0x7b, u"en-US"}})
+			t.emplace(type, text);
 		return t;
 	}();
 	return table;
@@ -357,6 +364,9 @@ std::vector<uint8_t> locale_table()
 	std::vector<uint8_t> table(locale_table_entries * 8, 0xff);
 	std::u16string pool;
 	for (uint32_t index = 0; index < locale_table_entries; ++index) {
+		// The locale's own name and its parent's depend on the locale asked for, which the served block does not read: the runtime answers.
+		if (index == 0x5c || index == 0x6d)
+			continue;
 		const auto text = locale_text(index < 0x80 ? index : 0x1000 + index - 0x80);
 		if (!text)
 			continue;
@@ -467,6 +477,41 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		const auto left = counted_wide(call, call[2], call.i32(3)), right = counted_wide(call, call[4], call.i32(5));
 		call.ret(uint32_t(collate(left, right, call.u32(1)) + 2));
 	});
+	// Where one text occurs in another, as the comparison flags make them equal: FIND_STARTSWITH and FIND_ENDSWITH test only the start
+	// or the end, FIND_FROMEND looks for the last occurrence. The index is returned and the length found stored; -1 when it is not there.
+	const auto find_string = [](ApiCall &call, uint32_t flags, size_t source_at, size_t value_at, uint64_t found_at) {
+		if (!call[source_at] || !call[value_at]) {
+			call.fail(87, uint64_t(int64_t(-1)));
+			return;
+		}
+		const auto source = counted_wide(call, call[source_at], call.i32(source_at + 1));
+		const auto value = counted_wide(call, call[value_at], call.i32(value_at + 1));
+		const uint32_t compare = flags & ~0xf00000U;
+		const auto matches = [&](size_t at) { return collate(source.substr(at, value.size()), value, compare) == 0; };
+		int64_t index = -1;
+		if (value.size() <= source.size()) {
+			const size_t last = source.size() - value.size();
+			if (flags & 0x100000U)
+				index = matches(0) ? 0 : -1;
+			else if (flags & 0x200000U)
+				index = matches(last) ? int64_t(last) : -1;
+			else if (flags & 0x800000U) {
+				for (size_t at = last + 1; at-- > 0 && index < 0;)
+					if (matches(at))
+						index = int64_t(at);
+			} else {
+				for (size_t at = 0; at <= last && index < 0; ++at)
+					if (matches(at))
+						index = int64_t(at);
+			}
+		}
+		if (index >= 0 && found_at)
+			call.store<uint32_t>(found_at, uint32_t(value.size()));
+		call.set_last_error(0);
+		call.ret(uint64_t(index));
+	};
+	registry.add("FindNLSString", 7, [find_string](ApiCall &call) { find_string(call, call.u32(1), 2, 4, call[6]); });
+	registry.add("FindNLSStringEx", 10, [find_string](ApiCall &call) { find_string(call, call.u32(1), 2, 4, call[6]); });
 	// Code unit by code unit, optionally after upper-casing both, as file systems and the registry compare names.
 	registry.add("CompareStringOrdinal", 5, [](ApiCall &call) {
 		if (!call[0] || !call[2]) {
@@ -619,6 +664,7 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetConsoleOutputCP", 0, [](ApiCall &call) { call.ret(437); });
 	registry.add("GetConsoleCP", 0, [](ApiCall &call) { call.ret(437); });
 	registry.add("GetConsoleMode", 2, [](ApiCall &call) { call.fail(6); });
+	registry.add("GetConsoleScreenBufferInfo", 2, [](ApiCall &call) { call.fail(6); });
 	registry.add("SetConsoleMode", 2, [](ApiCall &call) { call.fail(6); });
 	registry.add("WriteConsoleW", 5, [](ApiCall &call) { call.fail(6); });
 	registry.add("ReadConsoleW", 5, [](ApiCall &call) { call.fail(6); });
@@ -686,9 +732,61 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 			call.put_narrow(buffer, to_utf8(*text), size_t(capacity));
 		call.ret(needed);
 	};
+	// VerLanguageName(language, buffer, characters): the name Windows gives a language identifier in its own English interface, as
+	// version resources name the language of their strings. The count leaves out the terminator.
+	const auto language_name = [](ApiCall &call, bool wide) {
+		static const std::map<uint32_t, std::u16string_view> names{
+			{0x0000, u"Language Neutral"}, {0x0401, u"Arabic (Saudi Arabia)"}, {0x0405, u"Czech (Czech Republic)"}, {0x0406, u"Danish (Denmark)"},
+			{0x0407, u"German (Germany)"}, {0x0408, u"Greek (Greece)"}, {0x0409, u"English (United States)"}, {0x040a, u"Spanish (Spain, Traditional Sort)"},
+			{0x040b, u"Finnish (Finland)"}, {0x040c, u"French (France)"}, {0x040d, u"Hebrew (Israel)"}, {0x040e, u"Hungarian (Hungary)"},
+			{0x0410, u"Italian (Italy)"}, {0x0411, u"Japanese (Japan)"}, {0x0412, u"Korean (Korea)"}, {0x0413, u"Dutch (Netherlands)"},
+			{0x0414, u"Norwegian, Bokm\u00e5l (Norway)"}, {0x0415, u"Polish (Poland)"}, {0x0416, u"Portuguese (Brazil)"},
+			{0x0419, u"Russian (Russia)"}, {0x041b, u"Slovak (Slovakia)"}, {0x041d, u"Swedish (Sweden)"}, {0x041f, u"Turkish (Turkey)"},
+			{0x0422, u"Ukrainian (Ukraine)"}, {0x0423, u"Belarusian (Belarus)"}, {0x0424, u"Slovenian (Slovenia)"}, {0x0427, u"Lithuanian (Lithuania)"},
+			{0x0429, u"Persian (Iran)"}, {0x0439, u"Hindi (India)"}, {0x0804, u"Chinese (Simplified, PRC)"}, {0x0404, u"Chinese (Traditional, Taiwan)"},
+			{0x0809, u"English (United Kingdom)"}, {0x0816, u"Portuguese (Portugal)"}, {0x0c0a, u"Spanish (Spain, International Sort)"},
+			{0x0807, u"German (Switzerland)"}, {0x080c, u"French (Belgium)"}, {0x0c0c, u"French (Canada)"}, {0x0418, u"Romanian (Romania)"},
+			{0x041a, u"Croatian (Croatia)"}, {0x0402, u"Bulgarian (Bulgaria)"}, {0x041e, u"Thai (Thailand)"}, {0x042a, u"Vietnamese (Vietnam)"}};
+		const auto found = names.find(call.u32(0) & 0xffff);
+		const std::u16string name(found == names.end() ? u"Language Neutral" : found->second);
+		const size_t capacity = call.u32(2);
+		if (wide) {
+			if (call[1] && capacity)
+				call.put_wide(call[1], name, capacity);
+			call.ret(call[1] && capacity ? std::min(name.size(), capacity - 1) : name.size());
+		} else {
+			const auto narrow = to_utf8(name);
+			if (call[1] && capacity)
+				call.put_narrow(call[1], narrow, capacity);
+			call.ret(call[1] && capacity ? std::min(narrow.size(), capacity - 1) : narrow.size());
+		}
+	};
+	registry.add("VerLanguageNameW", 3, [language_name](ApiCall &call) { language_name(call, true); });
+	registry.add("VerLanguageNameA", 3, [language_name](ApiCall &call) { language_name(call, false); });
 	registry.add("GetLocaleInfoW", 4, [locale_info](ApiCall &call) { locale_info(call, call.u32(1), call[2], call.i32(3), true); });
 	registry.add("GetLocaleInfoA", 4, [locale_info](ApiCall &call) { locale_info(call, call.u32(1), call[2], call.i32(3), false); });
-	registry.add("GetLocaleInfoEx", 4, [locale_info](ApiCall &call) { locale_info(call, call.u32(1), call[2], call.i32(3), true); });
+	// GetLocaleInfoEx answers for the one locale there is, en-US, and for its neutral form "en", whose name is its own and whose parent is
+	// the invariant culture: a culture's chain of parents ends there.
+	registry.add("GetLocaleInfoEx", 4, [locale_info](ApiCall &call) {
+		const auto name = call[0] ? call.wide(call[0], 85) : std::u16string();
+		const uint32_t type = call.u32(1) & ~0x80000000U;
+		const bool neutral = !name.empty() && name.find(u'-') == name.npos && name.front() != u'!';
+		if (neutral && (type == 0x5c || type == 0x6d)) {
+			const std::u16string text = type == 0x5c ? name : u"";
+			if (!call.i32(3)) {
+				call.ret(text.size() + 1);
+				return;
+			}
+			if (size_t(call.i32(3)) < text.size() + 1) {
+				call.fail(122);
+				return;
+			}
+			call.put_wide(call[2], text, size_t(call.i32(3)));
+			call.ret(text.size() + 1);
+			return;
+		}
+		locale_info(call, call.u32(1), call[2], call.i32(3), true);
+	});
 	registry.add("EnumSystemLocalesW", 2, [&](ApiCall &call) {
 		const auto scratch = memory.allocate(0, 4096, 0x3000, 4);
 		if (scratch.status) {
@@ -705,6 +803,154 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		if (result.stop != NativeStop::returned)
 			throw result;
 		call.ret(1);
+	});
+
+	// The Gregorian calendar of en-US, the one calendar the locale has: each kind of calendar data with every value Windows lists for
+	// it, the preferred one first. The flags above the kind (no user override, ANSI code page, number, genitive names) are set aside.
+	const auto calendar_values = [](uint32_t type) -> std::vector<std::u16string> {
+		static constexpr const char16_t *days[] = {u"Monday", u"Tuesday", u"Wednesday", u"Thursday", u"Friday", u"Saturday", u"Sunday"};
+		static constexpr const char16_t *months[] = {u"January", u"February", u"March", u"April", u"May", u"June", u"July", u"August",
+			u"September", u"October", u"November", u"December"};
+		type &= 0x0fffffff;
+		if (type >= 7 && type <= 13)
+			return {days[type - 7]};
+		if (type >= 14 && type <= 20)
+			return {std::u16string(days[type - 14]).substr(0, 3)};
+		if (type >= 21 && type <= 33)
+			return {type == 33 ? u"" : months[type - 21]};
+		if (type >= 34 && type <= 46)
+			return {type == 46 ? u"" : std::u16string(months[type - 34]).substr(0, 3)};
+		if (type >= 0x31 && type <= 0x37)
+			return {std::u16string(days[type - 0x31]).substr(0, 2)};
+		switch (type) {
+		case 1: return {u"1"};
+		case 2: return {u"Gregorian Calendar"};
+		case 3: return {u"0"};
+		case 4: case 0x3b: return {u"A.D."};
+		case 5: return {u"M/d/yyyy", u"M/d/yy", u"MM/dd/yy", u"MM/dd/yyyy", u"yy/MM/dd", u"yyyy-MM-dd", u"dd-MMM-yy"};
+		case 6: return {u"dddd, MMMM d, yyyy", u"MMMM d, yyyy", u"dddd, d MMMM, yyyy", u"d MMMM, yyyy"};
+		case 0x2f: return {u"MMMM yyyy"};
+		case 0x30: return {u"2049"};
+		case 0x38: return {u"MMMM d"};
+		case 0x39: case 0x3c: return {u"AD"};
+		case 0x3a: return {u"dddd, MMMM d"};
+		default: return {};
+		}
+	};
+	// EnumCalendarInfoExEx(routine, locale, calendar, reserved, type, parameter): the routine hears each value with the calendar's number
+	// until it answers FALSE.
+	registry.add("EnumCalendarInfoExEx", 6, [&, calendar_values](ApiCall &call) {
+		const uint32_t calendar = call.u32(2);
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		if (calendar != 1 && calendar != UINT32_MAX) {
+			call.ret(1);
+			return;
+		}
+		const auto scratch = memory.allocate(0, 4096, 0x3000, 4);
+		if (scratch.status) {
+			call.fail(8);
+			return;
+		}
+		for (const auto &value : calendar_values(call.u32(4))) {
+			std::vector<uint8_t> bytes((value.size() + 1) * 2);
+			std::memcpy(bytes.data(), value.data(), value.size() * 2);
+			call.write(scratch.address, bytes);
+			const uint64_t arguments[] = {scratch.address, 1, 0, call[5]};
+			const auto result = context.call(call[0], arguments);
+			if (result.stop != NativeStop::returned) {
+				memory.free(scratch.address, 0, 0x8000);
+				throw result;
+			}
+			if (!uint32_t(result.value))
+				break;
+		}
+		memory.free(scratch.address, 0, 0x8000);
+		call.ret(1);
+	});
+	// Hands each string to an enumeration routine with the extra arguments after it, until the routine answers FALSE.
+	const auto enumerate = [&](ApiCall &call, uint64_t routine, const std::vector<std::u16string> &values, std::vector<uint64_t> after) {
+		const auto scratch = memory.allocate(0, 4096, 0x3000, 4);
+		if (scratch.status) {
+			call.fail(8);
+			return;
+		}
+		for (const auto &value : values) {
+			std::vector<uint8_t> bytes((value.size() + 1) * 2);
+			std::memcpy(bytes.data(), value.data(), value.size() * 2);
+			call.write(scratch.address, bytes);
+			std::vector<uint64_t> arguments{scratch.address};
+			arguments.insert(arguments.end(), after.begin(), after.end());
+			const auto result = context.call(routine, arguments);
+			if (result.stop != NativeStop::returned) {
+				memory.free(scratch.address, 0, 0x8000);
+				throw result;
+			}
+			if (!uint32_t(result.value))
+				break;
+		}
+		memory.free(scratch.address, 0, 0x8000);
+		call.ret(1);
+	};
+	// EnumTimeFormatsEx(routine, locale, flags, parameter): the long time formats, or without seconds (TIME_NOSECONDS) the short ones.
+	registry.add("EnumTimeFormatsEx", 4, [enumerate](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		const bool short_form = call.u32(2) & 2;
+		enumerate(call, call[0], short_form ? std::vector<std::u16string>{u"h:mm tt", u"hh:mm tt", u"H:mm", u"HH:mm"} :
+			std::vector<std::u16string>{u"h:mm:ss tt", u"hh:mm:ss tt", u"H:mm:ss", u"HH:mm:ss"}, {call[3]});
+	});
+	// EnumDateFormatsExEx(routine, locale, flags, parameter): DATE_SHORTDATE, DATE_LONGDATE, DATE_YEARMONTH or DATE_MONTHDAY, each with
+	// the calendar's number.
+	registry.add("EnumDateFormatsExEx", 4, [enumerate, calendar_values](ApiCall &call) {
+		const uint32_t flags = call.u32(2);
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		const uint32_t type = flags & 2 ? 6 : flags & 8 ? 0x2f : flags & 0x80 ? 0x38 : 5;
+		enumerate(call, call[0], calendar_values(type), {1, call[3]});
+	});
+	// GetCalendarInfo: the first value of a kind, or with CAL_RETURN_NUMBER its number in `value`.
+	const auto calendar_info = [calendar_values](ApiCall &call, uint32_t calendar, uint32_t type, uint64_t buffer, int32_t capacity, uint64_t value) {
+		const auto values = calendar_values(type);
+		if (calendar != 1 || values.empty()) {
+			call.fail(87);
+			return;
+		}
+		if (type & 0x20000000) {
+			if (!value) {
+				call.fail(87);
+				return;
+			}
+			uint32_t number = 0;
+			for (const auto character : values[0])
+				number = number * 10 + uint32_t(character - u'0');
+			call.store<uint32_t>(value, number);
+			call.ret(2);
+			return;
+		}
+		const size_t needed = values[0].size() + 1;
+		if (!capacity) {
+			call.ret(needed);
+			return;
+		}
+		if (size_t(capacity) < needed) {
+			call.fail(122);
+			return;
+		}
+		call.put_wide(buffer, values[0], size_t(capacity));
+		call.ret(needed);
+	};
+	registry.add("GetCalendarInfoEx", 7, [calendar_info](ApiCall &call) {
+		calendar_info(call, call.u32(1), call.u32(3), call[4], call.i32(5), call[6]);
+	});
+	registry.add("GetCalendarInfoW", 6, [calendar_info](ApiCall &call) {
+		calendar_info(call, call.u32(1), call.u32(2), call[3], call.i32(4), call[5]);
 	});
 
 	const auto format_date_time = [](ApiCall &call, bool date, uint64_t flags_index, uint64_t time_index, uint64_t format_index,

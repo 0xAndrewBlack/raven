@@ -77,6 +77,47 @@ struct EventState {
 	uint32_t manual = 0;
 };
 
+// A waitable timer: signaled from its due time on, a notification timer until it is set again, a synchronization timer until one
+// wait takes it. A periodic timer moves its due time on by its period each time it fires.
+class WaitableTimerObject : public KernelObject {
+public:
+	explicit WaitableTimerObject(bool manual) : manual(manual) {}
+	std::u16string_view type_name() const override { return u"Timer"; }
+	int signaled(uint32_t) const override
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (due && now >= *due) {
+			state = true;
+			if (period.count() > 0) {
+				while (*due <= now)
+					*due += period;
+			} else {
+				due.reset();
+			}
+		}
+		return state ? 1 : 0;
+	}
+	void consume(uint32_t) override
+	{
+		if (!manual)
+			state = false;
+	}
+	std::optional<std::chrono::steady_clock::time_point> wakes_at() const override { return due; }
+	void set(std::chrono::steady_clock::time_point when, std::chrono::milliseconds every)
+	{
+		state = false;
+		due = when;
+		period = every;
+	}
+	void cancel() { due.reset(); }
+
+private:
+	bool manual;
+	mutable bool state = false;
+	mutable std::optional<std::chrono::steady_clock::time_point> due;
+	std::chrono::milliseconds period{0};
+};
+
 class SharedEventObject : public KernelObject {
 public:
 	std::u16string_view type_name() const override { return u"Event"; }
@@ -185,13 +226,19 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 				return wait_io_completion;
 			if (milliseconds == 0 || (wake && std::chrono::steady_clock::now() >= *wake))
 				return wait_timeout;
+			// A timer among the handles turns signaled at its due time with nobody announcing it: the wait looks again then.
+			auto until = wake;
+			for (const auto handle : resolved)
+				if (const auto object = objects.object(handle))
+					if (const auto due = object->wakes_at(); due && (!until || *due < *until))
+						until = due;
 			threads.block([&] {
 				const auto now = states();
 				if (alertable && !threads.current().apcs.empty())
 					return true;
 				return all ? std::all_of(now.begin(), now.end(), [](int state) { return state == 1; }) :
 					std::any_of(now.begin(), now.end(), [](int state) { return state == 1; });
-			}, wake);
+			}, until);
 		}
 	};
 	registry.add("WaitForSingleObject", 2, [wait](ApiCall &call) { call.ret(wait(call, {call[0]}, false, call.u32(1), false)); });
@@ -257,6 +304,8 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 				call.ret(wait_timeout);
 				return;
 			}
+			// Input reaches the queue from the host, so a thread that waits for it is waiting on the host, never deadlocked.
+			HostWait waiting;
 			threads.block([&] {
 				if (context.message_ready && context.message_ready(id))
 					return true;
@@ -269,6 +318,11 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("MsgWaitForMultipleObjects", 5, [message_wait](ApiCall &call) { message_wait(call, call.u32(0), call[1], call.u32(2), call.u32(3)); });
 	registry.add("MsgWaitForMultipleObjectsEx", 5, [message_wait](ApiCall &call) { message_wait(call, call.u32(0), call[1], call.u32(4) & 1, call.u32(2)); });
+	// WaitMessage: the thread sleeps until a message arrives in its queue, as a wait on no objects with no timeout.
+	registry.add("WaitMessage", 0, [message_wait](ApiCall &call) {
+		message_wait(call, 0, 0, false, UINT32_MAX);
+		call.ret(1);
+	});
 	registry.add("SignalObjectAndWait", 4, [wait, &objects](ApiCall &call) {
 		if (objects.signaled(call[0], 0) == -2) {
 			call.fail(6, wait_failed);
@@ -457,6 +511,42 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("SetThreadPriorityBoost", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("SetThreadInformation", 4, [](ApiCall &call) { call.ret(1); });
+	// NtQueryInformationThread(thread, class, buffer, length, written): THREAD_BASIC_INFORMATION (class 0) with the thread's TEB and
+	// client id, and whether I/O is pending for it (ThreadIsIoPending, 16), which it never is when asked.
+	registry.add("NtQueryInformationThread", 5, [thread_from](ApiCall &call) {
+		const auto thread = thread_from(call[0]);
+		if (!thread) {
+			call.ret(0xc0000008U);
+			return;
+		}
+		const uint32_t type = call.u32(1);
+		const size_t width = call.pointer_width();
+		std::vector<uint8_t> value;
+		if (type == 0) {
+			value.assign(width == 8 ? 48 : 28, 0);
+			const auto put = [&](size_t at, uint64_t word, size_t size) { std::memcpy(value.data() + at, &word, size); };
+			put(0, thread->state == GuestThread::State::done ? 0 : 0x103, 4);
+			put(width == 8 ? 8 : 4, thread->teb, width);
+			put(width == 8 ? 16 : 8, ::getpid(), width);
+			put(width == 8 ? 24 : 12, thread->id, width);
+			put(width == 8 ? 32 : 16, 1, width);
+			put(width == 8 ? 40 : 20, 8, 4);
+			put(width == 8 ? 44 : 24, 8, 4);
+		} else if (type == 16) {
+			value.assign(4, 0);
+		} else {
+			call.ret(0xc0000003U);
+			return;
+		}
+		if (call.u32(3) != value.size()) {
+			call.ret(0xc0000004U);
+			return;
+		}
+		call.write(call[2], value);
+		if (call[4])
+			call.store<uint32_t>(call[4], uint32_t(value.size()));
+		call.ret(0);
+	});
 	registry.add("GetThreadId", 1, [thread_from](ApiCall &call) {
 		const auto thread = thread_from(call[0]);
 		call.ret(thread ? thread->id : 0);
@@ -503,6 +593,100 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 
+	// Waitable timers live in the process; a named one is found again by its name while a handle to it is open. A completion routine
+	// is accepted and not run: the timer still signals its waiters.
+	auto named_timers = std::make_shared<std::map<std::u16string, std::weak_ptr<WaitableTimerObject>>>();
+	const auto create_timer = [&objects, named_timers](ApiCall &call, std::u16string name, bool manual, uint32_t access) {
+		if (!name.empty())
+			if (const auto found = named_timers->find(name); found != named_timers->end())
+				if (const auto timer = found->second.lock()) {
+					const auto made = objects.add_object(timer);
+					if (made.status) {
+						call.fail(8, 0);
+						return;
+					}
+					call.set_last_error(183);
+					call.ret(made.value);
+					return;
+				}
+		auto timer = std::make_shared<WaitableTimerObject>(manual);
+		const auto made = objects.add_object(timer);
+		if (made.status) {
+			call.fail(8, 0);
+			return;
+		}
+		if (access)
+			objects.set_access(made.value, access);
+		if (!name.empty())
+			(*named_timers)[name] = timer;
+		call.set_last_error(0);
+		call.ret(made.value);
+	};
+	const auto text = [](ApiCall &call, uint64_t address, bool wide) {
+		return !address ? std::u16string() : wide ? call.wide(address, 259) : from_utf8(call.narrow(address, 259));
+	};
+	registry.add("CreateWaitableTimerW", 3, [create_timer, text](ApiCall &call) { create_timer(call, text(call, call[2], true), call.u32(1) != 0, 0); });
+	registry.add("CreateWaitableTimerA", 3, [create_timer, text](ApiCall &call) { create_timer(call, text(call, call[2], false), call.u32(1) != 0, 0); });
+	// CreateWaitableTimerEx(attributes, name, flags, access): CREATE_WAITABLE_TIMER_MANUAL_RESET is 1; the high resolution flag needs
+	// nothing more here.
+	registry.add("CreateWaitableTimerExW", 4, [create_timer, text](ApiCall &call) {
+		create_timer(call, text(call, call[1], true), call.u32(2) & 1, call.u32(3));
+	});
+	registry.add("CreateWaitableTimerExA", 4, [create_timer, text](ApiCall &call) {
+		create_timer(call, text(call, call[1], false), call.u32(2) & 1, call.u32(3));
+	});
+	const auto open_timer = [&objects, named_timers](ApiCall &call, std::u16string name) {
+		const auto found = named_timers->find(name);
+		const auto timer = found == named_timers->end() ? nullptr : found->second.lock();
+		if (!timer) {
+			call.fail(2, 0);
+			return;
+		}
+		const auto made = objects.add_object(timer);
+		if (made.status) {
+			call.fail(8, 0);
+			return;
+		}
+		call.ret(made.value);
+	};
+	registry.add("OpenWaitableTimerW", 3, [open_timer, text](ApiCall &call) { open_timer(call, text(call, call[2], true)); });
+	registry.add("OpenWaitableTimerA", 3, [open_timer, text](ApiCall &call) { open_timer(call, text(call, call[2], false)); });
+	// SetWaitableTimer(timer, due, period, routine, argument, resume): a negative due time is relative, in units of 100 ns; a positive one
+	// is an absolute FILETIME in UTC.
+	const auto set_timer = [&objects](ApiCall &call) {
+		const auto timer = objects.object_as<WaitableTimerObject>(call[0]);
+		if (!timer || !call[1]) {
+			call.fail(timer ? 87 : 6);
+			return;
+		}
+		const auto due = call.load<int64_t>(call[1]);
+		auto when = std::chrono::steady_clock::now();
+		if (due < 0) {
+			when += std::chrono::microseconds(-due / 10);
+		} else {
+			using namespace std::chrono;
+			const auto now_1601 = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count() + 11644473600000000LL;
+			const auto ahead = due / 10 - now_1601;
+			if (ahead > 0)
+				when += microseconds(ahead);
+		}
+		const auto period = call.i32(2);
+		timer->set(when, std::chrono::milliseconds(period > 0 ? period : 0));
+		call.set_last_error(0);
+		call.ret(1);
+	};
+	registry.add("SetWaitableTimer", 6, set_timer);
+	registry.add("SetWaitableTimerEx", 7, set_timer);
+	registry.add("CancelWaitableTimer", 1, [&objects](ApiCall &call) {
+		const auto timer = objects.object_as<WaitableTimerObject>(call[0]);
+		if (!timer) {
+			call.fail(6);
+			return;
+		}
+		timer->cancel();
+		call.ret(1);
+	});
+
 	// Named kernel objects are shared with every process of the prefix, through a block of shared memory; unnamed ones stay in the process.
 	const auto fail_shared = [](ApiCall &call, uint32_t error) { call.fail(error == 8 ? 8 : error, 0); };
 	registry.add("CreateEventW", 4, [&objects, fail_shared](ApiCall &call) {
@@ -538,6 +722,29 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.set_last_error(existed ? 183 : 0);
 		call.ret(made.value);
+	});
+	// Memory resource notifications are manual-reset events that the system sets while memory is low or high. Memory here is never short,
+	// so the high-memory one is set and the low-memory one never is.
+	registry.add("CreateMemoryResourceNotification", 1, [&objects](ApiCall &call) {
+		if (call.u32(0) > 1) {
+			call.fail(87, 0);
+			return;
+		}
+		const auto made = objects.create_event(0x100001, 0, call.u32(0) == 1);
+		if (made.status) {
+			call.fail(8, 0);
+			return;
+		}
+		call.ret(made.value);
+	});
+	registry.add("QueryMemoryResourceNotification", 2, [&objects](ApiCall &call) {
+		const int state = objects.signaled(call[0], 0);
+		if (state < 0 || !call[1]) {
+			call.fail(state == -2 ? 6 : 87);
+			return;
+		}
+		call.store<uint32_t>(call[1], state ? 1 : 0);
+		call.ret(1);
 	});
 	registry.add("OpenEventW", 3, [&objects, fail_shared](ApiCall &call) {
 		if (!call[2]) {

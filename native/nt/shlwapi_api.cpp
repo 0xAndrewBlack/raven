@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <optional>
+#include <vector>
 #include <sys/stat.h>
 
 namespace raven {
@@ -471,6 +472,298 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint32_t>(call[2], uint32_t(result->size()));
 		call.ret(0);
 	};
+	// The standard form of a URL. A Windows path becomes a file URL, "file:///C:/dir/name" with forward slashes, or with
+	// URL_FILE_USE_PATHURL "file://C:\dir\name"; the scheme is written in lower case; "." and ".." steps of the path are resolved unless
+	// URL_DONT_SIMPLIFY; URL_UNESCAPE decodes %XX sequences and URL_ESCAPE_SPACES_ONLY writes spaces as %20.
+	const auto canonicalize = [unescape](std::u16string text, uint32_t flags) {
+		const bool drive = text.size() >= 2 && text[1] == u':' && ((text[0] >= u'a' && text[0] <= u'z') || (text[0] >= u'A' && text[0] <= u'Z'));
+		const bool unc = text.size() >= 2 && separator(text[0]) && separator(text[1]);
+		const bool path_url = flags & 0x00010000U;
+		std::u16string url;
+		size_t path_start = 0;
+		if (!scheme_length(text) && (drive || unc)) {
+			url = path_url ? u"file://" : drive ? u"file:///" : u"file:";
+			path_start = url.size();
+			for (const auto character : text)
+				url.push_back(path_url ? (character == u'/' ? u'\\' : character) : character == u'\\' ? u'/' : character);
+		} else {
+			url = text;
+			const size_t scheme = scheme_length(url);
+			for (size_t at = 0; at < scheme; ++at)
+				if (url[at] >= u'A' && url[at] <= u'Z')
+					url[at] = char16_t(url[at] + 32);
+			path_start = scheme ? scheme + 1 : 0;
+			while (path_start < url.size() && path_start < scheme + 3 && url[path_start] == u'/')
+				++path_start;
+			if (scheme && url.compare(0, scheme, u"file") == 0 && path_url) {
+				std::u16string path = url.substr(path_start);
+				for (auto &character : path)
+					if (character == u'/')
+						character = u'\\';
+				url = u"file://" + path;
+				path_start = 7;
+			}
+		}
+		if (!(flags & 0x08000000U)) {
+			const char16_t slash = path_url ? u'\\' : u'/';
+			const size_t end = std::min(url.size(), url.find_first_of(u"?#", path_start));
+			std::vector<std::u16string> steps;
+			size_t at = path_start;
+			while (at <= end) {
+				size_t next = url.find(slash, at);
+				if (next == std::u16string::npos || next > end)
+					next = end;
+				const auto step = url.substr(at, next - at);
+				if (step == u"..") {
+					if (steps.size() > 1)
+						steps.pop_back();
+				} else if (step != u".") {
+					steps.push_back(step);
+				}
+				at = next + 1;
+			}
+			std::u16string path;
+			for (size_t index = 0; index < steps.size(); ++index) {
+				if (index)
+					path.push_back(slash);
+				path += steps[index];
+			}
+			url = url.substr(0, path_start) + path + url.substr(end);
+		}
+		if (flags & 0x10000000U)
+			url = unescape(url, flags);
+		if (flags & 0x04000000U) {
+			std::u16string escaped;
+			for (const auto character : url)
+				escaped += character == u' ' ? std::u16string(u"%20") : std::u16string(1, character);
+			url = escaped;
+		}
+		return url;
+	};
+	const auto url_canonicalize = [canonicalize](ApiCall &call, bool wide) {
+		if (!call[0] || !call[1] || !call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto text = wide ? call.wide(call[0]) : widen_ascii(call.narrow(call[0]));
+		const auto result = canonicalize(text, call.u32(3));
+		const uint32_t capacity = call.load<uint32_t>(call[2]);
+		if (capacity <= result.size()) {
+			call.store<uint32_t>(call[2], uint32_t(result.size() + 1));
+			call.ret(0x80004003U);
+			return;
+		}
+		if (wide)
+			call.put_wide(call[1], result, capacity);
+		else
+			call.put_narrow(call[1], std::string(result.begin(), result.end()), capacity);
+		call.store<uint32_t>(call[2], uint32_t(result.size()));
+		call.ret(0);
+	};
+	// A relative URL joined to a base: one with a scheme of its own stands alone, one that starts with a slash replaces the base's path
+	// after its host, anything else replaces the base's last step. The result is canonicalized with the same flags.
+	const auto url_combine = [canonicalize](ApiCall &call, bool wide) {
+		if (!call[0] || !call[1] || !call[3]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto text = [&](uint64_t address) { return wide ? call.wide(address) : widen_ascii(call.narrow(address)); };
+		const uint32_t flags = call.u32(4);
+		const auto relative = text(call[1]);
+		std::u16string joined;
+		// A full Windows path, "C:\..." or "\\server\...", is a file URL of its own.
+		const bool drive = relative.size() >= 2 && relative[1] == u':' && ((relative[0] >= u'a' && relative[0] <= u'z') || (relative[0] >= u'A' && relative[0] <= u'Z'));
+		const bool unc = relative.size() >= 2 && separator(relative[0]) && separator(relative[1]);
+		if (scheme_length(relative) || drive || unc)
+			joined = relative;
+		else {
+			const auto base = canonicalize(text(call[0]), flags & ~0x14000000U);
+			const char16_t slash = (flags & 0x00010000U) ? u'\\' : u'/';
+			size_t path = scheme_length(base);
+			path = path ? path + 1 : 0;
+			if (base.compare(path, 2, u"//") == 0) {
+				const size_t host_end = base.find_first_of(u"/\\", path + 2);
+				path = host_end == std::u16string::npos ? base.size() : host_end;
+				if (base.compare(0, 8, u"file:///") == 0)
+					path = base.find_first_of(u"/\\", 8) == std::u16string::npos ? base.size() : base.find_first_of(u"/\\", 8);
+			}
+			if (relative.empty())
+				joined = base;
+			else if (separator(relative[0]))
+				joined = base.substr(0, path) + relative;
+			else {
+				const size_t end = std::min(base.size(), base.find_first_of(u"?#"));
+				const size_t last = base.find_last_of(u"/\\", end ? end - 1 : 0);
+				joined = (last == std::u16string::npos || last < path ? base.substr(0, end) + slash : base.substr(0, last + 1)) + relative;
+			}
+		}
+		const auto result = canonicalize(joined, flags);
+		const uint32_t capacity = call.load<uint32_t>(call[3]);
+		if (!call[2] || capacity <= result.size()) {
+			call.store<uint32_t>(call[3], uint32_t(result.size() + 1));
+			call.ret(0x80004003U);
+			return;
+		}
+		if (wide)
+			call.put_wide(call[2], result, capacity);
+		else
+			call.put_narrow(call[2], std::string(result.begin(), result.end()), capacity);
+		call.store<uint32_t>(call[3], uint32_t(result.size()));
+		call.ret(0);
+	};
+	registry.add("UrlCombineW", 5, [url_combine](ApiCall &call) { url_combine(call, true); });
+	registry.add("UrlCombineA", 5, [url_combine](ApiCall &call) { url_combine(call, false); });
+	// Writes a result into a caller's buffer whose length in characters is behind a pointer, as the Url* functions do: too small a
+	// buffer gets the length needed, terminator included, and E_POINTER.
+	const auto put_url = [](ApiCall &call, bool wide, uint64_t buffer, uint64_t length, const std::u16string &result) {
+		const uint32_t capacity = call.load<uint32_t>(length);
+		if (!buffer || capacity <= result.size()) {
+			call.store<uint32_t>(length, uint32_t(result.size() + 1));
+			call.ret(0x80004003U);
+			return;
+		}
+		if (wide)
+			call.put_wide(buffer, result, capacity);
+		else
+			call.put_narrow(buffer, std::string(result.begin(), result.end()), capacity);
+		call.store<uint32_t>(length, uint32_t(result.size()));
+		call.ret(0);
+	};
+	// Characters a URL cannot hold as they are become %XX: controls, spaces, non-ASCII and " # % < > [ \ ] ^ ` { | } after the scheme and
+	// host. '%' itself only with URL_ESCAPE_PERCENT; URL_ESCAPE_SPACES_ONLY escapes nothing else; URL_ESCAPE_SEGMENT_ONLY takes the
+	// whole text as one path segment, so '/', '?' and '#' are escaped too. What follows '?' or '#' is left alone otherwise.
+	const auto url_escape = [put_url](ApiCall &call, bool wide) {
+		if (!call[0] || !call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto url = wide ? call.wide(call[0]) : widen_ascii(call.narrow(call[0]));
+		const uint32_t flags = call.u32(3);
+		const bool segment = flags & 0x00002000U, spaces = flags & 0x04000000U, percent = flags & 0x00001000U;
+		size_t start = 0;
+		if (!segment) {
+			start = scheme_length(url);
+			start = start ? start + 1 : 0;
+			if (url.compare(start, 2, u"//") == 0) {
+				const size_t host = url.find(u'/', start + 2);
+				start = host == std::u16string::npos ? url.size() : host;
+			}
+		}
+		std::u16string result = url.substr(0, start);
+		bool rest = false;
+		for (size_t at = start; at < url.size(); ++at) {
+			const char16_t character = url[at];
+			if (!segment && (character == u'?' || character == u'#'))
+				rest = true;
+			const bool unsafe = spaces ? character == u' ' : character <= u' ' || character >= 0x7f ||
+				std::u16string_view(u"\"<>[\\]^`{|}").find(character) != std::u16string_view::npos ||
+				(percent && character == u'%') || (segment && std::u16string_view(u"/?#").find(character) != std::u16string_view::npos);
+			if (rest || !unsafe || character > 0xff) {
+				result.push_back(character);
+				continue;
+			}
+			static constexpr char hex[] = "0123456789ABCDEF";
+			result += u'%';
+			result += char16_t(hex[character >> 4]);
+			result += char16_t(hex[character & 15]);
+		}
+		if (flags & 0x00080000U) {
+			call.put_wide(call[0], result, result.size() + 1);
+			call.ret(0);
+			return;
+		}
+		put_url(call, wide, call[1], call[2], result);
+	};
+	// One part of a URL "scheme://user:password@host:port/path?query": URL_PART_SCHEME, _HOSTNAME, _USERNAME, _PASSWORD, _PORT or _QUERY.
+	// URL_PARTFLAG_KEEPSCHEME puts the scheme and a colon before the part. A part the URL does not have is empty, with S_FALSE.
+	const auto url_get_part = [put_url](ApiCall &call, bool wide) {
+		if (!call[0] || !call[1] || !call[2] || call.u32(3) < 1 || call.u32(3) > 6) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto url = wide ? call.wide(call[0]) : widen_ascii(call.narrow(call[0]));
+		const size_t scheme = scheme_length(url);
+		if (!scheme) {
+			call.ret(0x80070057U);
+			return;
+		}
+		std::u16string part;
+		const uint32_t which = call.u32(3);
+		if (which == 1)
+			part = url.substr(0, scheme);
+		else if (which == 6) {
+			const size_t query = url.find(u'?');
+			if (query != std::u16string::npos)
+				part = url.substr(query + 1, url.find(u'#', query) == std::u16string::npos ? std::u16string::npos : url.find(u'#', query) - query - 1);
+		} else if (url.compare(scheme + 1, 2, u"//") == 0) {
+			const size_t start = scheme + 3;
+			const size_t end = std::min(url.size(), url.find_first_of(u"/\\?#", start));
+			const auto authority = url.substr(start, end - start);
+			const size_t at = authority.rfind(u'@');
+			const auto credentials = at == std::u16string::npos ? std::u16string() : authority.substr(0, at);
+			const auto host = at == std::u16string::npos ? authority : authority.substr(at + 1);
+			const size_t colon = host.find(u':'), separator = credentials.find(u':');
+			if (which == 2)
+				part = host.substr(0, colon);
+			else if (which == 5 && colon != std::u16string::npos)
+				part = host.substr(colon + 1);
+			else if (which == 3)
+				part = credentials.substr(0, separator);
+			else if (which == 4 && separator != std::u16string::npos)
+				part = credentials.substr(separator + 1);
+		}
+		if ((call.u32(4) & 1) && which != 1 && !part.empty())
+			part = url.substr(0, scheme) + u":" + part;
+		put_url(call, wide, call[1], call[2], part);
+		if (part.empty() && call.result == 0)
+			call.ret(1);
+	};
+	registry.add("UrlGetPartW", 5, [url_get_part](ApiCall &call) { url_get_part(call, true); });
+	registry.add("UrlGetPartA", 5, [url_get_part](ApiCall &call) { url_get_part(call, false); });
+	registry.add("UrlEscapeW", 4, [url_escape](ApiCall &call) { url_escape(call, true); });
+	registry.add("UrlEscapeA", 4, [url_escape](ApiCall &call) { url_escape(call, false); });
+	// The Windows path a file URL names: "file:///C:/dir/a%20b" is "C:\dir\a b", "file://server/share" is "\\server\share" and
+	// "file://C:\dir" is "C:\dir". A URL of another scheme is not a path.
+	const auto path_from_url = [unescape, put_url](ApiCall &call, bool wide) {
+		if (!call[0] || !call[1] || !call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto url = wide ? call.wide(call[0]) : widen_ascii(call.narrow(call[0]));
+		std::u16string lower = url.substr(0, 5);
+		for (auto &character : lower)
+			if (character >= u'A' && character <= u'Z')
+				character = char16_t(character + 32);
+		if (lower != u"file:") {
+			call.ret(0x80070057U);
+			return;
+		}
+		std::u16string rest = unescape(url.substr(5), 0);
+		for (auto &character : rest)
+			if (character == u'/')
+				character = u'\\';
+		size_t slashes = 0;
+		while (slashes < rest.size() && rest[slashes] == u'\\')
+			++slashes;
+		const auto body = rest.substr(slashes);
+		const bool drive = body.size() >= 2 && (body[1] == u':' || body[1] == u'|');
+		std::u16string path;
+		if (drive) {
+			path = body;
+			path[1] = u':';
+		} else if (slashes == 2 && body.compare(0, 10, u"localhost\\") == 0) {
+			path = body.substr(10);
+		} else if (slashes >= 2) {
+			path = u"\\\\" + body;
+		} else {
+			path = rest;
+		}
+		put_url(call, wide, call[1], call[2], path);
+	};
+	registry.add("PathCreateFromUrlW", 4, [path_from_url](ApiCall &call) { path_from_url(call, true); });
+	registry.add("PathCreateFromUrlA", 4, [path_from_url](ApiCall &call) { path_from_url(call, false); });
+	registry.add("UrlCanonicalizeW", 4, [url_canonicalize](ApiCall &call) { url_canonicalize(call, true); });
+	registry.add("UrlCanonicalizeA", 4, [url_canonicalize](ApiCall &call) { url_canonicalize(call, false); });
 	registry.add("UrlApplySchemeW", 4, [url_apply_scheme](ApiCall &call) { url_apply_scheme(call, true); });
 	registry.add("UrlApplySchemeA", 4, [url_apply_scheme](ApiCall &call) { url_apply_scheme(call, false); });
 	registry.add("UrlUnescapeW", 4, [url_unescape](ApiCall &call) { url_unescape(call, true); });

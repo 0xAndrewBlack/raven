@@ -305,6 +305,7 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 	// The shell cannot show a tray icon or resolve file associations yet; callers see an honest failure.
 	registry.add("Shell_NotifyIconW", 2, [](ApiCall &call) { call.fail(5); });
 	registry.add("SHGetFileInfoW", 5, [](ApiCall &call) { call.ret(0); });
+	registry.add("SHGetFileInfoA", 5, [](ApiCall &call) { call.ret(0); });
 	registry.add("SHCreateItemFromParsingName", 4, [](ApiCall &call) {
 		if (call[3]) call.store_pointer(call[3], 0);
 		call.ret(0x80070002U);

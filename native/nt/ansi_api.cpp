@@ -92,6 +92,8 @@ private:
 
 }
 
+void register_temp_file_name(ApiRegistry &registry);
+
 void register_ansi_adapters(ApiRegistry &registry)
 {
 	for (const auto &adapter : adapters) {
@@ -179,6 +181,34 @@ void register_ansi_adapters(ApiRegistry &registry)
 			}
 		});
 	}
+	register_temp_file_name(registry);
+}
+
+// GetTempFileNameA: the wide twin creates the file; its answer is the unique number, and the name goes back in the program's code page
+// into a buffer of MAX_PATH characters.
+void register_temp_file_name(ApiRegistry &registry)
+{
+	const auto base = registry.find("GetTempFileNameW");
+	if (!base || registry.has("GetTempFileNameA"))
+		return;
+	registry.add("GetTempFileNameA", 4, [handler = base->second](ApiCall &call) {
+		Scratch scratch(call.process);
+		std::vector<uint64_t> words{call[0], call[1], call[2], 0};
+		for (const size_t index : {size_t(0), size_t(1)}) {
+			if (!words[index])
+				continue;
+			const auto text = from_ansi(call.narrow(words[index]), ansi_code_page);
+			const auto at = scratch.block((text.size() + 1) * 2);
+			call.write(at, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(text.c_str()), (text.size() + 1) * 2));
+			words[index] = at;
+		}
+		words[3] = scratch.block(261 * 2);
+		ApiCall inner(call.process, call.environment, words);
+		handler(inner);
+		call.ret(inner.result);
+		if (inner.result && call[3])
+			call.put_narrow(call[3], to_ansi(call.wide(words[3], 260), ansi_code_page), 260);
+	});
 }
 
 void register_legacy_file_api(ApiRegistry &registry)

@@ -7,6 +7,7 @@
 #include <optional>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -885,6 +886,39 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.store_pointer(call[2], call[0] + at);
 		call.ret(1);
 	});
+	// The entries after the one removed move down over it; the list holds one entry less.
+	registry.add("DeleteAce", 2, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		const auto header = call.read(call[0], 8);
+		uint16_t size, count;
+		std::memcpy(&size, header.data() + 2, 2);
+		std::memcpy(&count, header.data() + 4, 2);
+		if (call.u32(1) >= count) {
+			call.fail(87);
+			return;
+		}
+		uint32_t at = 8, removed = 0, end = 8;
+		for (uint32_t index = 0; index < count; ++index) {
+			uint16_t entry;
+			std::memcpy(&entry, call.read(call[0] + end + 2, 2).data(), 2);
+			if (index == call.u32(1)) {
+				at = end;
+				removed = entry;
+			}
+			end += entry;
+		}
+		if (end > size) {
+			call.fail(1336);
+			return;
+		}
+		const auto rest = call.read(call[0] + at + removed, end - at - removed);
+		call.write(call[0] + at, rest);
+		call.store<uint16_t>(call[0] + 4, uint16_t(count - 1));
+		call.ret(1);
+	});
 	registry.add("GetSidSubAuthorityCount", 1, [](ApiCall &call) { call.ret(call[0] + 1); });
 	registry.add("GetSidIdentifierAuthority", 1, [](ApiCall &call) { call.ret(call[0] + 2); });
 	registry.add("GetSidSubAuthority", 2, [](ApiCall &call) { call.ret(call[0] + 8 + 4 * uint64_t(call.u32(1))); });
@@ -946,6 +980,121 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 					call.store<uint32_t>(call[3], uint32_t(descriptor->size()));
 				call.ret(1);
 			});
+	// A security descriptor, self-relative or absolute, in its string form: the parts the information flags ask for (owner 1, group 2,
+	// DACL 4, SACL 8), with the two-letter names Windows writes for well-known accounts and rights.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "ConvertSecurityDescriptorToStringSecurityDescriptorW" : "ConvertSecurityDescriptorToStringSecurityDescriptorA", 5,
+			[&context, wide](ApiCall &call) {
+				if (!call[0] || !call[3]) {
+					call.fail(87);
+					return;
+				}
+				if (call.u32(1) != 1) {
+					call.fail(1305);
+					return;
+				}
+				const uint64_t descriptor = call[0];
+				const auto header = call.read(descriptor, 4);
+				const uint16_t control = uint16_t(header[2] | header[3] << 8);
+				const bool relative = control & 0x8000;
+				const size_t width = call.pointer_width();
+				const auto part = [&](size_t index) -> uint64_t {
+					if (relative) {
+						const uint32_t offset = call.load<uint32_t>(descriptor + 4 + index * 4);
+						return offset ? descriptor + offset : 0;
+					}
+					return call.load_pointer(descriptor + (width == 8 ? 8 : 4) + index * width);
+				};
+				static const std::map<std::string, std::string> names{
+					{"S-1-5-7", "AN"}, {"S-1-5-32-548", "AO"}, {"S-1-5-11", "AU"}, {"S-1-5-32-544", "BA"}, {"S-1-5-32-546", "BG"},
+					{"S-1-5-32-551", "BO"}, {"S-1-5-32-545", "BU"}, {"S-1-3-1", "CG"}, {"S-1-3-0", "CO"}, {"S-1-5-9", "ED"},
+					{"S-1-16-12288", "HI"}, {"S-1-5-4", "IU"}, {"S-1-5-19", "LS"}, {"S-1-16-4096", "LW"}, {"S-1-16-8192", "ME"},
+					{"S-1-5-32-556", "NO"}, {"S-1-5-20", "NS"}, {"S-1-5-2", "NU"}, {"S-1-5-32-550", "PO"}, {"S-1-5-10", "PS"},
+					{"S-1-5-32-547", "PU"}, {"S-1-5-12", "RC"}, {"S-1-5-32-555", "RD"}, {"S-1-5-32-552", "RE"}, {"S-1-5-32-554", "RU"},
+					{"S-1-16-16384", "SI"}, {"S-1-5-32-549", "SO"}, {"S-1-5-6", "SU"}, {"S-1-5-18", "SY"}, {"S-1-1-0", "WD"},
+					{"S-1-5-33", "WR"}, {"S-1-3-4", "OW"}, {"S-1-15-2-1", "AC"}};
+				const auto sid_text = [&](uint64_t sid) {
+					const auto bytes = call.read(sid, sid_length(call, sid));
+					uint64_t authority = 0;
+					for (int index = 2; index < 8; ++index)
+						authority = authority << 8 | bytes[size_t(index)];
+					std::string text = "S-1-" + std::to_string(authority);
+					for (size_t index = 0; index < bytes[1]; ++index) {
+						uint32_t value;
+						std::memcpy(&value, bytes.data() + 8 + index * 4, 4);
+						text += "-" + std::to_string(value);
+					}
+					const auto name = names.find(text);
+					return name == names.end() ? text : name->second;
+				};
+				static const std::pair<uint32_t, const char *> rights[] = {{0x1f01ff, "FA"}, {0x120089, "FR"}, {0x120116, "FW"},
+					{0x1200a0, "FX"}, {0xf003f, "KA"}, {0x20019, "KR"}, {0x20006, "KW"}, {0x10000000, "GA"}, {0x80000000, "GR"},
+					{0x40000000, "GW"}, {0x20000000, "GX"}};
+				const auto acl_text = [&](uint64_t acl, uint16_t protect, uint16_t requested, uint16_t inherited) {
+					std::string text;
+					if (control & protect) text += "P";
+					if (control & requested) text += "AR";
+					if (control & inherited) text += "AI";
+					if (!acl)
+						return text + "NO_ACCESS_CONTROL";
+					const uint16_t count = call.load<uint16_t>(acl + 4);
+					uint64_t entry = acl + 8;
+					for (uint16_t index = 0; index < count; ++index) {
+						const auto head = call.read(entry, 8);
+						const uint16_t size = uint16_t(head[2] | head[3] << 8);
+						uint32_t mask;
+						std::memcpy(&mask, head.data() + 4, 4);
+						static const std::map<uint8_t, const char *> types{{0, "A"}, {1, "D"}, {2, "AU"}, {3, "AL"}, {0x11, "ML"}};
+						const auto type = types.find(head[0]);
+						text += "(";
+						text += type == types.end() ? "A" : type->second;
+						text += ";";
+						static const std::pair<uint8_t, const char *> flags[] = {{0x1, "OI"}, {0x2, "CI"}, {0x4, "NP"}, {0x8, "IO"},
+							{0x10, "ID"}, {0x40, "SA"}, {0x80, "FA"}};
+						for (const auto &[bit, flag] : flags)
+							if (head[1] & bit)
+								text += flag;
+						text += ";";
+						const auto right = std::find_if(std::begin(rights), std::end(rights), [&](const auto &item) { return item.first == mask; });
+						if (right != std::end(rights))
+							text += right->second;
+						else {
+							char hex[16];
+							std::snprintf(hex, sizeof hex, "0x%x", mask);
+							text += hex;
+						}
+						text += ";;;" + sid_text(entry + 8) + ")";
+						if (size < 8)
+							break;
+						entry += size;
+					}
+					return text;
+				};
+				const uint32_t information = call.u32(2);
+				std::string text;
+				if ((information & 1) && part(0)) text += "O:" + sid_text(part(0));
+				if ((information & 2) && part(1)) text += "G:" + sid_text(part(1));
+				if ((information & 4) && (control & 0x4)) text += "D:" + acl_text(part(3), 0x1000, 0x100, 0x400);
+				if ((information & 8) && (control & 0x10)) text += "S:" + acl_text(part(2), 0x2000, 0x200, 0x800);
+				const size_t unit = wide ? 2 : 1;
+				const auto memory = context.allocator.allocate((text.size() + 1) * unit, true);
+				if (!memory) {
+					call.fail(8);
+					return;
+				}
+				std::vector<uint8_t> bytes((text.size() + 1) * unit, 0);
+				for (size_t index = 0; index < text.size(); ++index)
+					bytes[index * unit] = uint8_t(text[index]);
+				call.write(memory, bytes);
+				call.store_pointer(call[3], memory);
+				if (call[4])
+					call.store<uint32_t>(call[4], uint32_t(text.size() + 1));
+				call.ret(1);
+			});
+	// RtlEncryptMemory and RtlDecryptMemory (SystemFunction040 and 041) keep a buffer unreadable to other processes while it sits in
+	// memory; a process of the prefix is not visible to the others, so the bytes stay as they are and both directions succeed.
+	registry.add("SystemFunction040", 3, [](ApiCall &call) { call.ret(0); });
+	registry.add("SystemFunction041", 3, [](ApiCall &call) { call.ret(0); });
 	registry.add("ConvertStringSidToSidW", 2, [&context](ApiCall &call) {
 		const auto parsed = sid_from_text(call.wide(call[0], 256));
 		if (!parsed) {

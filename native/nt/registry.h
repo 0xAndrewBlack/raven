@@ -72,6 +72,8 @@ private:
 	void load();
 	// The values Windows ships in its hive that programs read to learn where they are and what they run on; added when a hive lacks them.
 	void seed();
+	void register_runtime_classes();
+	void register_animation_classes();
 	bool seeding = false;
 };
 

@@ -626,6 +626,17 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		const uint32_t kinds = call.u32(0) & 0x4ff;
 		call.ret(context.message_ready && context.message_ready(context.threads.current_id()) ? uint64_t(kinds) << 16 | kinds : 0);
 	});
+	// Whether input waits in the thread's queue: the queue tells whether any message waits, which is what the callers look at it for.
+	registry.add("GetInputState", 0, [&context](ApiCall &call) {
+		call.ret(context.message_ready && context.message_ready(context.threads.current_id()) ? 1 : 0);
+	});
+	// Whether the message being handled was sent from another thread that waits for the reply: the window procedures of a program run
+	// on the thread that sent to them, so the answer is no (ISMEX_NOSEND).
+	registry.add("InSendMessage", 0, [](ApiCall &call) { call.ret(0); });
+	// The message filter that keeps lower integrity processes out: the prefix has no integrity levels, so every change is accepted
+	// (the per-window form is with the window functions).
+	registry.add("ChangeWindowMessageFilter", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("InSendMessageEx", 1, [](ApiCall &call) { call.ret(0); });
 	// Power information: the processors with their frequencies from the host, a machine on mains power with no battery, and no sleep states.
 	registry.add("CallNtPowerInformation", 5, [](ApiCall &call) {
 		constexpr uint32_t status_success = 0, status_buffer_too_small = 0xc0000023U, status_invalid_parameter = 0xc000000dU;
@@ -986,8 +997,48 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	// No input method editor is installed.
 	registry.add("ImmGetIMEFileNameW", 3, [](ApiCall &call) { call.ret(0); });
 	registry.add("ImmGetIMEFileNameA", 3, [](ApiCall &call) { call.ret(0); });
-	// A desktop program has no package identity.
-	registry.add("AppPolicyGetThreadInitializationType", 2, [](ApiCall &call) { call.ret(15703); });
+	// The policies of a desktop program, which has no package: each call succeeds and names the classic desktop's behaviour, as the
+	// AppPolicy* enumerations number it.
+	static constexpr std::pair<const char *, uint32_t> policies[] = {{"AppPolicyGetThreadInitializationType", 0}, {"AppPolicyGetClrCompat", 1},
+		{"AppPolicyGetWindowingModel", 2}, {"AppPolicyGetProcessTerminationMethod", 0}, {"AppPolicyGetShowDeveloperDiagnostic", 1},
+		{"AppPolicyGetCreateFileAccess", 0}, {"AppPolicyGetLifecycleManagement", 0}, {"AppPolicyGetMediaFoundationCodecLoading", 0}};
+	for (const auto &[name, value] : policies)
+		registry.add(name, 2, [value](ApiCall &call) {
+			if (!call[1]) {
+				call.ret(87);
+				return;
+			}
+			call.store<uint32_t>(call[1], value);
+			call.ret(0);
+		});
+	// Error reporting takes the modules a runtime names for its crash reports, the blocks and files to add to one and the programs to leave
+	// out of them; no report is ever sent, so each registration succeeds with S_OK and keeps nothing.
+	for (const auto name : {"WerRegisterRuntimeExceptionModule", "WerUnregisterRuntimeExceptionModule", "WerRegisterMemoryBlock",
+			"WerUnregisterMemoryBlock", "WerRegisterFile", "WerUnregisterFile", "WerSetFlags", "WerAddExcludedApplication",
+			"WerRemoveExcludedApplication"})
+		registry.add(name, 2, [](ApiCall &call) { call.ret(0); });
+	// The guest's threads take turns on one host thread, so every write is seen by all of them before the call returns.
+	registry.add("FlushProcessWriteBuffers", 0, [](ApiCall &) {});
+	// UI Automation: no assistive client is listening on this desktop, so providers are never asked for, events go nowhere and every
+	// notification succeeds; a window that answers WM_GETOBJECT with a provider gets nothing back.
+	registry.add("UiaClientsAreListening", 0, [](ApiCall &call) { call.ret(0); });
+	registry.add("UiaReturnRawElementProvider", 4, [](ApiCall &call) { call.ret(0); });
+	registry.add("UiaLookupId", 2, [](ApiCall &call) { call.ret(0); });
+	for (const auto name : {"UiaRaiseAutomationEvent", "UiaRaiseAutomationPropertyChangedEvent", "UiaRaiseStructureChangedEvent",
+			"UiaRaiseNotificationEvent", "UiaRaiseAsyncContentLoadedEvent", "UiaRaiseTextEditTextChangedEvent", "UiaRaiseChangesEvent",
+			"UiaRaiseActiveTextPositionChangedEvent", "UiaDisconnectProvider", "UiaDisconnectAllProviders"})
+		registry.add(name, 0, [](ApiCall &call) { call.ret(0); });
+	// The objects that stand for "not supported" and "mixed" values and the providers of window frames belong to a client side that is
+	// not there: the request is not implemented, as for a system without UI Automation.
+	for (const auto name : {"UiaGetReservedNotSupportedValue", "UiaGetReservedMixedAttributeValue", "UiaHostProviderFromHwnd",
+			"UiaProviderFromIAccessible"})
+		registry.add(name, 0, [name](ApiCall &call) {
+			const size_t out = std::string_view(name) == "UiaHostProviderFromHwnd" ? 1 : std::string_view(name) == "UiaProviderFromIAccessible" ? 3 : 0;
+			const auto arguments = call.process.api_arguments(out + 1);
+			if (arguments[out])
+				call.store_pointer(arguments[out], 0);
+			call.ret(0x80004001U);
+		});
 	// The accounts the machine knows: their names, the SIDs they stand for, how each is used and the domain that holds it. The user is the
 	// one GetUserName names, in the machine's own domain.
 	struct Account {
@@ -1063,6 +1114,129 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		answer(call, *found, false);
+	});
+	// The local security authority: a policy handle for the lookups, which translate account names to SIDs from the same accounts.
+	registry.add("LsaOpenPolicy", 4, [](ApiCall &call) {
+		if (!call[3]) {
+			call.ret(0xc000000dU);
+			return;
+		}
+		call.store_pointer(call[3], 0x15a0);
+		call.ret(0);
+	});
+	registry.add("LsaClose", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("LsaFreeMemory", 1, [&context](ApiCall &call) {
+		if (call[0])
+			context.allocator.release(call[0]);
+		call.ret(0);
+	});
+	registry.add("LsaNtStatusToWinError", 1, [](ApiCall &call) {
+		const uint32_t status = call.u32(0);
+		call.ret(status == 0 ? 0 : status == 0xc0000073U ? 1332 : status == 0x107 ? 1332 : status == 0xc0000022U ? 5 : status == 0xc000000dU ? 87 :
+			status == 0xc0000017U ? 8 : 317);
+	});
+	// LsaLookupNames2(policy, flags, count, names, domains, sids): LSA_TRANSLATED_SID2 for each name, "account" or "domain\account", and
+	// the LSA_REFERENCED_DOMAIN_LIST of the domains they belong to, each in memory LsaFreeMemory gives back. STATUS_SOME_NOT_MAPPED or
+	// STATUS_NONE_MAPPED when names are not known.
+	registry.add("LsaLookupNames2", 6, [&context, accounts](ApiCall &call) {
+		const uint32_t count = call.u32(2);
+		if (!call[3] || !call[4] || !call[5] || !count || count > 1000) {
+			call.ret(0xc000000dU);
+			return;
+		}
+		const size_t width = call.pointer_width(), text_size = width == 8 ? 16 : 8, translated_size = width == 8 ? 24 : 16;
+		const size_t trust_size = text_size + width;
+		const auto known = accounts();
+		std::vector<const Account *> found(count, nullptr);
+		std::vector<std::u16string> domains;
+		std::vector<std::vector<uint8_t>> domain_sids;
+		std::vector<int32_t> domain_of(count, -1);
+		for (uint32_t index = 0; index < count; ++index) {
+			const uint64_t entry = call[3] + index * uint64_t(text_size);
+			const uint16_t length = call.load<uint16_t>(entry);
+			const uint64_t buffer = width == 8 ? call.load<uint64_t>(entry + 8) : call.load<uint32_t>(entry + 4);
+			std::u16string name;
+			if (buffer && length) {
+				const auto bytes = call.read(buffer, length & ~1U);
+				for (size_t at = 0; at + 1 < bytes.size(); at += 2)
+					name.push_back(char16_t(bytes[at] | bytes[at + 1] << 8));
+			}
+			const auto slash = name.find(u'\\');
+			const auto account_name = slash == name.npos ? name : name.substr(slash + 1);
+			const auto match = std::find_if(known.begin(), known.end(), [&](const Account &account) {
+				return equal_fold(account.name, account_name) && (slash == name.npos || equal_fold(account.domain, name.substr(0, slash)));
+			});
+			if (match == known.end())
+				continue;
+			found[index] = &*match;
+			if (match->domain.empty())
+				continue;
+			const auto known_domain = std::find_if(domains.begin(), domains.end(), [&](const auto &domain) { return equal_fold(domain, match->domain); });
+			domain_of[index] = int32_t(known_domain - domains.begin());
+			if (known_domain == domains.end()) {
+				domains.push_back(match->domain);
+				// The domain's SID is the account's without its last part.
+				auto sid = match->sid;
+				if (sid.size() > 8 && sid[1] > 0) {
+					sid[1] = uint8_t(sid[1] - 1);
+					sid.resize(sid.size() - 4);
+				}
+				domain_sids.push_back(std::move(sid));
+			}
+		}
+		// The domain list: its header, the entries, then their names and SIDs.
+		size_t domain_bytes = 16 + domains.size() * trust_size;
+		for (size_t index = 0; index < domains.size(); ++index)
+			domain_bytes += (domains[index].size() + 1) * 2 + domain_sids[index].size();
+		size_t sid_bytes = count * translated_size;
+		for (const auto *account : found)
+			if (account)
+				sid_bytes += account->sid.size();
+		const uint64_t domain_block = context.allocator.allocate(domain_bytes, true), sid_block = context.allocator.allocate(sid_bytes, true);
+		if (!domain_block || !sid_block) {
+			if (domain_block) context.allocator.release(domain_block);
+			if (sid_block) context.allocator.release(sid_block);
+			call.ret(0xc0000017U);
+			return;
+		}
+		const auto pointer_at = [&](uint64_t address, uint64_t value) {
+			if (width == 8) call.store<uint64_t>(address, value);
+			else call.store<uint32_t>(address, uint32_t(value));
+		};
+		call.store<uint32_t>(domain_block, uint32_t(domains.size()));
+		pointer_at(domain_block + (width == 8 ? 8 : 4), domains.empty() ? 0 : domain_block + 16);
+		uint64_t cursor = domain_block + 16 + domains.size() * trust_size;
+		for (size_t index = 0; index < domains.size(); ++index) {
+			const uint64_t entry = domain_block + 16 + index * trust_size;
+			call.store<uint16_t>(entry, uint16_t(domains[index].size() * 2));
+			call.store<uint16_t>(entry + 2, uint16_t((domains[index].size() + 1) * 2));
+			pointer_at(entry + (width == 8 ? 8 : 4), cursor);
+			call.put_wide(cursor, domains[index], domains[index].size() + 1);
+			cursor += (domains[index].size() + 1) * 2;
+			pointer_at(entry + text_size, cursor);
+			call.write(cursor, domain_sids[index]);
+			cursor += domain_sids[index].size();
+		}
+		cursor = sid_block + count * translated_size;
+		uint32_t mapped = 0;
+		for (uint32_t index = 0; index < count; ++index) {
+			const uint64_t entry = sid_block + index * translated_size;
+			const size_t after_use = width == 8 ? 8 : 4;
+			if (!found[index]) {
+				call.store<uint32_t>(entry, 8);
+				call.store<int32_t>(entry + after_use + width, -1);
+				continue;
+			}
+			++mapped;
+			call.store<uint32_t>(entry, found[index]->use);
+			pointer_at(entry + after_use, cursor);
+			call.write(cursor, found[index]->sid);
+			cursor += found[index]->sid.size();
+			call.store<int32_t>(entry + after_use + width, domain_of[index]);
+		}
+		pointer_at(call[4], domain_block);
+		pointer_at(call[5], sid_block);
+		call.ret(mapped == count ? 0 : mapped ? 0x107 : 0xc0000073U);
 	});
 	// Session change messages are never sent: the registration succeeds and nothing arrives.
 	registry.add("WTSRegisterSessionNotification", 2, [](ApiCall &call) { call.ret(1); });
