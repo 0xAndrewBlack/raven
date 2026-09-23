@@ -256,7 +256,9 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 		guarded(call, 0, [&] {
 			auto &dc = require_dc(call, 0);
 			const uint32_t mode = call.u32(2);
-			if (dc.graphics_mode != 2 || mode < 1 || mode > 3 || (mode != 1 && !call[1]))
+			// Resetting to the identity takes no matrix and changes nothing a compatible-mode context could use; the other modes need
+			// GM_ADVANCED.
+			if (mode < 1 || mode > 3 || (mode != 1 && (dc.graphics_mode != 2 || !call[1])))
 				throw uint32_t(87);
 			if (mode == 1)
 				dc.world = {1, 0, 0, 1, 0, 0};
