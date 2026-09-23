@@ -96,7 +96,7 @@ public:
 	void register_api(ApiRegistry &registry);
 	// Drawing marks the surface dirty; the next message retrieval presents it, so a burst of primitives costs one frame.
 	void drawing(uint64_t window);
-	void flush_dirty();
+	void flush_dirty(bool force = false);
 	// Whether a message, paint request or due timer waits for the guest; host input is delivered to the windows on the way, so this
 	// runs only inside a call of the guest thread.
 	bool input_ready();
@@ -387,7 +387,7 @@ private:
 	void discard_tree(uint64_t window);
 	void reject_tree(uint64_t window);
 	uint64_t pointer_child(uint64_t window,int32_t x,int32_t y);
-	void present(uint64_t window);
+	void present(uint64_t window, bool force = false);
 	void release_surface(uint64_t window);
 	DesktopRect update_rect(uint64_t window,uint64_t address);
 	struct PaintStart { uint64_t dc; DesktopRect rect; bool erase; };

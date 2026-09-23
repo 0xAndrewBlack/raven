@@ -41,7 +41,7 @@ void NativeWindows::dump_windows()
 void NativeWindows::shutdown()
 {
 	dump_windows();
-	try { flush_dirty(); } catch (...) {}
+	try { flush_dirty(true); } catch (...) {}
 	for (const auto handle : objects.window_handles()) {
 		const auto *window=objects.window(handle);
 		if (handle!=desktop && !window->parent && window->bitmap && presentation.remove) presentation.remove(handle);
@@ -106,7 +106,7 @@ uint64_t NativeWindows::surface_dc(uint64_t handle)
 	} catch (...) { if (dc) objects.erase(dc); if (bitmap) objects.erase(bitmap); process.unmap_memory(address); throw; }
 }
 
-void NativeWindows::present(uint64_t handle)
+void NativeWindows::present(uint64_t handle, bool force)
 {
 	// The desktop is the screen itself; guest drawing on it never becomes a host window.
 	if (handle==desktop) return;
@@ -114,6 +114,30 @@ void NativeWindows::present(uint64_t handle)
 	if (!handle) throw uint32_t(1400);
 	if (!presentation.present) throw uint32_t(120);
 	dirty_roots.erase(handle);
+	// The compositor does not show a window's controls as empty rectangles: while a visible child of the same thread still waits for its
+	// WM_PAINT, the frame is put off, for at most a quarter of a second, so that the controls appear painted with their parent. A surface
+	// about to go, as the process ends or the window loses it, shows what was drawn on it at once (force).
+	if (auto *waiting=force ? nullptr : objects.window(handle)) {
+		const auto me=environment.thread_id();
+		bool pending=false;
+		for (const auto other : objects.window_handles()) {
+			const auto *candidate=std::as_const(objects).window(other);
+			if (candidate && other!=handle && !candidate->update.empty() && objects.is_child(handle,other) &&
+				objects.window_visible(other) && (!candidate->thread || candidate->thread==me)) {
+				pending=true;
+				break;
+			}
+		}
+		const auto now=std::chrono::steady_clock::now();
+		if (pending) {
+			if (!waiting->present_waiting) waiting->present_waiting=now;
+			if (now-*waiting->present_waiting<std::chrono::milliseconds(250)) {
+				dirty_roots.insert(handle);
+				return;
+			}
+		}
+		waiting->present_waiting.reset();
+	}
 	surface_dc(handle);
 	paint_nonclient(handle);
 	paint_child_frames(handle);
@@ -316,7 +340,7 @@ void NativeWindows::update_warp_lock(bool warped)
 	warp_lock_window=active;
 }
 
-void NativeWindows::flush_dirty()
+void NativeWindows::flush_dirty(bool force)
 {
 	settle_focus_leave(false);
 	import_foreign_frames();
@@ -324,7 +348,7 @@ void NativeWindows::flush_dirty()
 	dirty_roots.clear();
 	if (!presentation.present) return;
 	for (const auto root:roots)
-		if (objects.window(root) && objects.window_visible(root)) present(root);
+		if (objects.window(root) && objects.window_visible(root)) present(root, force);
 }
 
 void NativeWindows::release_surface(uint64_t handle)
@@ -333,7 +357,7 @@ void NativeWindows::release_surface(uint64_t handle)
 	if (!window) return;
 	// A surface about to disappear still shows what the guest last drew.
 	if (!window->parent && dirty_roots.contains(handle) && presentation.present && window->bitmap) {
-		try { present(handle); } catch (...) {}
+		try { present(handle, true); } catch (...) {}
 	}
 	objects.detach_window_dcs(handle);
 	if (!window->parent) {

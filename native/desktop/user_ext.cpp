@@ -965,11 +965,9 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		const auto c = call.load<uint8_t>(call[0]);
 		call.ret(c ? call[0] + 1 : call[0]);
 	});
-	registry.add("AppPolicyGetProcessTerminationMethod", 2, [](ApiCall &call) {
-		if (call[1])
-			call.store<uint32_t>(call[1], 0);
-		call.ret(0);
-	});
+	// System-wide hot keys belong to the desktop, which delivers none to a guest: each registration is accepted and no WM_HOTKEY arrives.
+	registry.add("RegisterHotKey", 4, [](ApiCall &call) { call.ret(1); });
+	registry.add("UnregisterHotKey", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("SystemParametersInfoA", 4, [](ApiCall &call) { call.ret(1); });
 	registry.add("SystemParametersInfoW", 4, [this](ApiCall &call) {
 		const uint32_t action = call.u32(0), parameter = call.u32(1);

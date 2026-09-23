@@ -332,11 +332,143 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		});
 	};
 	registry.add("GetTextMetricsW", 2, [=](ApiCall &call) { text_metrics(call, false); });
-	// The font file's own tables are not handed out yet: GDI_ERROR, as Windows answers for fonts that have none, so shaping goes on without
-	// the font's OpenType features.
-	registry.add("GetFontData", 5, [](ApiCall &call) { call.fail(1, 0xffffffffU); });
-	// GetOutlineTextMetricsW(dc, size, OUTLINETEXTMETRICW): the text metrics inside, the em square at the font's pixel size so scaled
-	// values read as pixels, the underline and strikeout lines, and the names after the structure, which its name fields locate.
+	// GetTextFaceW(dc, count, buffer): the face name of the font selected into the device context, cut to the buffer; without a buffer
+	// the length it needs. Both count the terminating null.
+	registry.add("GetTextFaceW", 3, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			const auto &font = selected_font(dc);
+			std::u16string face;
+			for (size_t at = 28; at + 1 < font.definition.size() && at < 28 + 64; at += 2) {
+				const char16_t character = char16_t(font.definition[at] | font.definition[at + 1] << 8);
+				if (!character)
+					break;
+				face.push_back(character);
+			}
+			// The face actually used, as Windows names it: the dialog aliases become the fonts the substitution table gives them, a face
+			// the system enumerates keeps its own name, and any other comes out as the default face.
+			const auto lower = [](std::u16string text) {
+				for (auto &character : text)
+					if (character >= u'A' && character <= u'Z')
+						character = char16_t(character + 32);
+				return text;
+			};
+			static const char16_t *const families[] = {u"Arial", u"Courier New", u"Times New Roman", u"MS Sans Serif", u"Tahoma", u"Segoe UI",
+				u"Verdana", u"Lucida Console", u"Consolas", u"Microsoft Sans Serif"};
+			if (lower(face) == u"ms shell dlg")
+				face = u"Microsoft Sans Serif";
+			else if (lower(face) == u"ms shell dlg 2")
+				face = u"Tahoma";
+			else {
+				const auto found = std::find_if(std::begin(families), std::end(families), [&](const char16_t *family) { return lower(family) == lower(face); });
+				face = found == std::end(families) ? u"Arial" : *found;
+			}
+			if (!call[2]) {
+				call.ret(face.size() + 1);
+				return;
+			}
+			const int32_t count = call.i32(1);
+			if (count <= 0) {
+				call.fail(87);
+				return;
+			}
+			face.resize(std::min(face.size(), size_t(count - 1)));
+			call.put_wide(call[2], face, face.size() + 1);
+			call.ret(face.size() + 1);
+		});
+	});
+	// GetGlyphOutlineW(dc, character, format, GLYPHMETRICS, size, buffer, MAT2): the metrics of a character of the selected font and its
+	// bitmap, rendered as text draws it: GGO_METRICS (0), GGO_BITMAP (1, a bit per pixel) and GGO_GRAY2, GRAY4 and GRAY8 (4, 5, 6: 4, 16
+	// and 64 levels a byte), rows padded to four bytes. Glyph indices, outlines and transforms other than the identity are not drawn:
+	// GDI_ERROR, as for a font that cannot give them.
+	registry.add("GetGlyphOutlineW", 7, [=, this](ApiCall &call) {
+		guarded(call, 0xffffffffU, [&] {
+			auto &dc = require_dc(call, 0);
+			const uint32_t format = call.u32(2);
+			if (!call[3] || (format & 0x80) || (format != 0 && format != 1 && format != 4 && format != 5 && format != 6))
+				throw uint32_t(87);
+			if (call[6]) {
+				const auto matrix = call.read(call[6], 16);
+				const std::array<uint8_t, 16> identity{0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0};
+				if (!std::equal(identity.begin(), identity.end(), matrix.begin()))
+					throw uint32_t(120);
+			}
+			const auto &font = selected_font(dc);
+			const auto info = objects.text().logical_metrics(font.definition);
+			const uint16_t character = uint16_t(call.u32(1));
+			const auto advance = objects.text().logical_advances(font.definition, std::span<const uint16_t>(&character, 1));
+			const int32_t cell = advance.empty() ? 0 : advance.back();
+			const int32_t pad = std::max(4, info.height / 2);
+			const uint32_t width = uint32_t(cell + 2 * pad), height = uint32_t(std::max(1, info.ascent + info.descent));
+			const auto coverage = objects.text().render(font.definition, std::span<const uint16_t>(&character, 1), width, height, pad, 0);
+			int32_t left = int32_t(width), right = -1, top = int32_t(height), bottom = -1;
+			for (uint32_t y = 0; y < height; ++y)
+				for (uint32_t x = 0; x < width; ++x)
+					if (coverage[size_t(y) * width + x]) {
+						left = std::min(left, int32_t(x)); right = std::max(right, int32_t(x));
+						top = std::min(top, int32_t(y)); bottom = std::max(bottom, int32_t(y));
+					}
+			const bool empty = right < 0;
+			const uint32_t box_width = empty ? 1 : uint32_t(right - left + 1), box_height = empty ? 1 : uint32_t(bottom - top + 1);
+			std::vector<uint8_t> metrics(20, 0);
+			const auto put32 = [&](size_t at, int32_t value) { std::memcpy(metrics.data() + at, &value, 4); };
+			put32(0, int32_t(box_width)); put32(4, int32_t(box_height));
+			put32(8, empty ? 0 : left - pad); put32(12, empty ? 0 : info.ascent - top);
+			const int16_t increment = int16_t(cell), none = 0;
+			std::memcpy(metrics.data() + 16, &increment, 2); std::memcpy(metrics.data() + 18, &none, 2);
+			call.write(call[3], metrics);
+			if (format == 0) {
+				call.ret(1);
+				return;
+			}
+			const uint32_t levels = format == 4 ? 4 : format == 5 ? 16 : 64;
+			const uint32_t stride = format == 1 ? ((box_width + 31) / 32) * 4 : (box_width + 3) & ~3U;
+			std::vector<uint8_t> bitmap(empty ? 0 : size_t(stride) * box_height, 0);
+			for (uint32_t y = 0; !empty && y < box_height; ++y)
+				for (uint32_t x = 0; x < box_width; ++x) {
+					const uint8_t value = coverage[size_t(top + y) * width + uint32_t(left) + x];
+					if (format == 1) {
+						if (value >= 128)
+							bitmap[size_t(y) * stride + x / 8] |= uint8_t(0x80 >> (x % 8));
+					} else {
+						bitmap[size_t(y) * stride + x] = uint8_t((value * levels + 127) / 255);
+					}
+				}
+			if (!call[5] || !call.u32(4)) {
+				call.ret(bitmap.size());
+				return;
+			}
+			if (call.u32(4) < bitmap.size())
+				throw uint32_t(122);
+			call.write(call[5], bitmap);
+			call.ret(bitmap.size());
+		});
+	});
+	// GetFontData(dc, table, offset, buffer, size): a table of the font file the selected font uses, its tag in file order (the bytes of
+	// "hhea" as they read); without a buffer the length from the offset. The whole file (table 0) is not handed out: GDI_ERROR, as for a
+	// table the font does not have.
+	registry.add("GetFontData", 5, [=, this](ApiCall &call) {
+		guarded(call, 0xffffffffU, [&] {
+			auto &dc = require_dc(call, 0);
+			const uint32_t tag = call.u32(1);
+			const auto table = tag ? objects.text().logical_table(selected_font(dc).definition, __builtin_bswap32(tag)) : std::vector<uint8_t>{};
+			const uint32_t offset = call.u32(2);
+			if (table.empty() || offset > table.size()) {
+				call.fail(1, 0xffffffffU);
+				return;
+			}
+			const size_t available = table.size() - offset;
+			if (!call[3] || !call.u32(4)) {
+				call.ret(available);
+				return;
+			}
+			const size_t count = std::min<size_t>(available, call.u32(4));
+			call.write(call[3], std::span<const uint8_t>(table.data() + offset, count));
+			call.ret(count);
+		});
+	});
+	// GetOutlineTextMetricsW(dc, size, OUTLINETEXTMETRICW): the text metrics inside, the em square of the font's design units, the
+	// underline and strikeout lines in pixels, and the names after the structure, which its name fields locate.
 	registry.add("GetOutlineTextMetricsW", 3, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			auto &dc = require_dc(call, 0);
@@ -358,7 +490,8 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 				call.ret(total);
 				return;
 			}
-			if (call.u32(1) < total)
+			// A buffer that only holds the structure, as GDI+ passes, gets the structure; the names that do not fit are left out.
+			if (call.u32(1) < base)
 				throw uint32_t(87);
 			std::vector<uint8_t> bytes(total, 0);
 			const auto put32 = [&](size_t at, int32_t value) { std::memcpy(bytes.data() + at, &value, 4); };
@@ -375,7 +508,8 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			bytes[60] = font.definition[23];
 			const int32_t em = std::max<int32_t>(info.height - info.internal_leading, 1);
 			put32(76, (weight >= 700 ? 0x20 : 0) | (font.definition[20] ? 1 : 0) | 0x40);
-			put32(84, 1); put32(96, em);
+			const uint32_t design_em = objects.text().logical_units_per_em(font.definition);
+			put32(84, 1); put32(96, design_em ? int32_t(design_em) : em);
 			put32(100, info.ascent); put32(104, -info.descent); put32(108, info.external_leading);
 			put32(112, em * 7 / 10); put32(116, em / 2);
 			put32(120, 0); put32(124, info.ascent); put32(128, info.maximum_width); put32(132, -info.descent);
@@ -391,8 +525,9 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 				std::memcpy(bytes.data() + at, names[index].data(), names[index].size() * 2);
 				at += (names[index].size() + 1) * 2;
 			}
+			bytes.resize(std::min<size_t>(total, call.u32(1)));
 			call.write(call[2], bytes);
-			call.ret(total);
+			call.ret(bytes.size());
 		});
 	});
 	registry.add("GetTextMetricsA", 2, [=](ApiCall &call) { text_metrics(call, true); });
@@ -575,7 +710,7 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		guarded(call, 0, [&] {
 			require_dc(call, 0);
 			static const char16_t *families[] = {u"Arial", u"Courier New", u"Times New Roman", u"MS Shell Dlg", u"MS Sans Serif", u"Tahoma",
-				u"Segoe UI", u"Verdana", u"Lucida Console", u"Consolas"};
+				u"Segoe UI", u"Verdana", u"Lucida Console", u"Consolas", u"Microsoft Sans Serif"};
 			std::u16string wanted;
 			if (call[1]) {
 				const auto bytes = call.read(call[1] + 28, 64);
@@ -639,12 +774,47 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			call.ret(uint32_t(result));
 		});
 	});
+	// EnumFontFamiliesW and EnumFontFamiliesA(dc, family, procedure, parameter): the extended form for that family, or for every family
+	// when none is named, in any character set.
+	const auto enumerate_families = [=, this, &registry](ApiCall &call, bool ansi) {
+		guarded(call, 0, [&] {
+			const auto extended = registry.find(ansi ? "EnumFontFamiliesExA" : "EnumFontFamiliesExW");
+			const size_t size = ansi ? 60 : 92;
+			std::vector<uint8_t> logical(size, 0);
+			logical[23] = 1;
+			if (call[1]) {
+				if (ansi) {
+					const auto face = call.narrow(call[1], 32);
+					std::memcpy(logical.data() + 28, face.data(), std::min<size_t>(face.size(), 31));
+				} else {
+					const auto face = call.wide(call[1], 32);
+					for (size_t i = 0; i < std::min<size_t>(face.size(), 31); ++i) {
+						logical[28 + i * 2] = uint8_t(face[i]);
+						logical[29 + i * 2] = uint8_t(face[i] >> 8);
+					}
+				}
+			}
+			const auto block = process.map_memory(4096, PROT_READ | PROT_WRITE);
+			try {
+				call.write(block, logical);
+				ApiCall inner(call.process, call.environment, {call[0], block, call[2], call[3], 0});
+				extended->second(inner);
+				process.unmap_memory(block);
+				call.ret(inner.result);
+			} catch (...) {
+				process.unmap_memory(block);
+				throw;
+			}
+		});
+	};
+	registry.add("EnumFontFamiliesW", 4, [enumerate_families](ApiCall &call) { enumerate_families(call, false); });
+	registry.add("EnumFontFamiliesA", 4, [enumerate_families](ApiCall &call) { enumerate_families(call, true); });
 	// The ANSI form hands the callback ENUMLOGFONTEXA records: a 60-byte LOGFONTA, then the full name, the style and the script as bytes.
 	registry.add("EnumFontFamiliesExA", 5, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			require_dc(call, 0);
 			static const char *families[] = {"Arial", "Courier New", "Times New Roman", "MS Shell Dlg", "MS Sans Serif", "Tahoma",
-				"Segoe UI", "Verdana", "Lucida Console", "Consolas"};
+				"Segoe UI", "Verdana", "Lucida Console", "Consolas", "Microsoft Sans Serif"};
 			std::string wanted;
 			if (call[1]) {
 				const auto bytes = call.read(call[1] + 28, 32);

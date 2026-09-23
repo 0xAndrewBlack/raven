@@ -360,6 +360,9 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 		}
 		call.ret(1);
 	});
+	// The feedback shown for pen and touch, and which gestures a window wants: input arrives as mouse input, so the settings are accepted.
+	registry.add("SetWindowFeedbackSetting", 5, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetGestureConfig", 5, [](ApiCall &call) { call.ret(1); });
 	// Touch input reaches windows as mouse input here; registering for it changes nothing and succeeds.
 	registry.add("RegisterTouchWindow", 2, [this](ApiCall &call) {
 		if (!objects.window(call[0])) {

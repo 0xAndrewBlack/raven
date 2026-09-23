@@ -4,6 +4,9 @@
 #include "nt/text.h"
 
 #include <algorithm>
+#include <array>
+#include <map>
+#include <memory>
 #include <cstring>
 #include <sys/mman.h>
 
@@ -869,8 +872,26 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		objects.invalidate(call[0], {0, 0, window->width, window->height}, true);
 		call.ret(1);
 	});
-	registry.add("SetLayeredWindowAttributes", 4, [this](ApiCall &call) {
-		call.ret(objects.window(call[0]) != nullptr);
+	// Layered window attributes are kept per window for GetLayeredWindowAttributes; the compositor draws windows opaque.
+	auto layered = std::make_shared<std::map<uint64_t, std::array<uint32_t, 3>>>();
+	registry.add("SetLayeredWindowAttributes", 4, [this, layered](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		(*layered)[call[0]] = {call.u32(1), call.u32(2) & 0xff, call.u32(3)};
+		call.ret(1);
+	});
+	registry.add("GetLayeredWindowAttributes", 4, [this, layered](ApiCall &call) {
+		const auto found = layered->find(call[0]);
+		if (!objects.window(call[0]) || found == layered->end()) {
+			call.fail(objects.window(call[0]) ? 87 : 1400);
+			return;
+		}
+		if (call[1]) call.store<uint32_t>(call[1], found->second[0]);
+		if (call[2]) call.store<uint8_t>(call[2], uint8_t(found->second[1]));
+		if (call[3]) call.store<uint32_t>(call[3], found->second[2]);
+		call.ret(1);
 	});
 	registry.add("EnumDisplayMonitors", 4, [this](ApiCall &call) {
 		const auto &metrics = objects.nonclient_metrics();

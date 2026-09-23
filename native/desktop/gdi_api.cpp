@@ -231,6 +231,27 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 			call.ret(1);
 		});
 	});
+	// GetTransform(dc, which, XFORM): world to page (0x203) is the world transform; page to device (0x304) is the identity, as for the
+	// MM_TEXT mapping these device contexts keep; world to device (0x204) is their product and device to world (0x402) its inverse.
+	registry.add("GetTransform", 3, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			const uint32_t which = call.u32(1);
+			if (!call[2] || (which != 0x203 && which != 0x304 && which != 0x204 && which != 0x402))
+				throw uint32_t(87);
+			std::array<float, 6> result = which == 0x304 ? std::array<float, 6>{1, 0, 0, 1, 0, 0} : dc.world;
+			if (which == 0x402) {
+				const auto &w = dc.world;
+				const float determinant = w[0] * w[3] - w[1] * w[2];
+				if (determinant == 0)
+					throw uint32_t(87);
+				result = {w[3] / determinant, -w[1] / determinant, -w[2] / determinant, w[0] / determinant,
+					(w[2] * w[5] - w[3] * w[4]) / determinant, (w[1] * w[4] - w[0] * w[5]) / determinant};
+			}
+			call.write(call[2], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(result.data()), 24));
+			call.ret(1);
+		});
+	});
 	registry.add("ModifyWorldTransform", 3, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			auto &dc = require_dc(call, 0);
@@ -684,47 +705,239 @@ void NativeDesktop::register_gdi_api(ApiRegistry &registry)
 			adopt(std::move(region), call);
 		});
 	});
+	// The pixels closed polygons cover, row by row at pixel centres: ALTERNATE (even_odd) or WINDING filling over the edges of all of
+	// them together, each polygon closed back to its first point.
+	const auto fill_polygons = [](const std::vector<std::vector<std::array<double, 2>>> &polygons, bool even_odd) {
+		double min_y = INFINITY, max_y = -INFINITY;
+		for (const auto &polygon : polygons)
+			for (const auto &point : polygon) {
+				min_y = std::min(min_y, point[1]);
+				max_y = std::max(max_y, point[1]);
+			}
+		DesktopRegion region;
+		if (!(min_y < max_y))
+			return region;
+		if (max_y - min_y > 16384)
+			throw uint32_t(120);
+		for (int32_t y = int32_t(std::floor(min_y)); y < int32_t(std::ceil(max_y)); ++y) {
+			std::vector<std::pair<double, int>> crossings;
+			const double center = y + 0.5;
+			for (const auto &points : polygons)
+				for (size_t i = 0; i < points.size(); ++i) {
+					const auto &a = points[i], &b = points[(i + 1) % points.size()];
+					if (a[1] == b[1] || center < std::min(a[1], b[1]) || center >= std::max(a[1], b[1]))
+						continue;
+					const double t = (center - a[1]) / (b[1] - a[1]);
+					crossings.push_back({a[0] + t * (b[0] - a[0]), b[1] > a[1] ? 1 : -1});
+				}
+			std::sort(crossings.begin(), crossings.end());
+			int winding = 0;
+			for (size_t i = 0; i + 1 < crossings.size(); ++i) {
+				winding += crossings[i].second;
+				if (!(even_odd ? i % 2 == 0 : winding != 0))
+					continue;
+				const int32_t from = int32_t(std::ceil(crossings[i].first - 0.5)), to = int32_t(std::ceil(crossings[i + 1].first - 0.5));
+				if (to > from)
+					region.add({from, y, to, y + 1});
+			}
+		}
+		return region;
+	};
 	registry.add("CreatePolygonRgn", 3, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			const int32_t count = call.i32(1);
 			if (count < 3 || count > 65536)
 				throw uint32_t(87);
-			std::vector<Point> points;
-			for (int32_t i = 0; i < count; ++i)
-				points.push_back(read_point(call, call[0] + uint64_t(i) * 8));
-			int32_t min_y = INT32_MAX, max_y = INT32_MIN;
-			for (const auto &point : points) {
-				min_y = std::min(min_y, point.y);
-				max_y = std::max(max_y, point.y);
+			std::vector<std::array<double, 2>> points;
+			for (int32_t i = 0; i < count; ++i) {
+				const auto point = read_point(call, call[0] + uint64_t(i) * 8);
+				points.push_back({double(point.x), double(point.y)});
 			}
-			if (int64_t(max_y) - min_y > 16384)
-				throw uint32_t(120);
-			DesktopRegion region;
-			const bool even_odd = call.u32(2) != 2;
-			for (int32_t y = min_y; y < max_y; ++y) {
-				std::vector<std::pair<double, int>> crossings;
-				for (size_t i = 0; i < points.size(); ++i) {
-					const auto &a = points[i], &b = points[(i + 1) % points.size()];
-					if (a.y == b.y)
-						continue;
-					const double center = y + 0.5;
-					if (center < std::min(a.y, b.y) || center >= std::max(a.y, b.y))
-						continue;
-					const double t = (center - a.y) / (double(b.y) - a.y);
-					crossings.push_back({a.x + t * (double(b.x) - a.x), b.y > a.y ? 1 : -1});
+			adopt(fill_polygons({points}, call.u32(2) != 2), call);
+		});
+	});
+	// ---- paths ----
+	// BeginPath opens a bracket in which PolyDraw records figures instead of drawing; EndPath closes it, AbortPath drops it.
+	registry.add("BeginPath", 1, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			require_dc(call, 0).path = DesktopDC::Path{};
+			call.ret(1);
+		});
+	});
+	registry.add("EndPath", 1, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			if (!dc.path || !dc.path->open)
+				throw uint32_t(1003);
+			dc.path->open = false;
+			call.ret(1);
+		});
+	});
+	registry.add("AbortPath", 1, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			require_dc(call, 0).path.reset();
+			call.ret(1);
+		});
+	});
+	registry.add("CloseFigure", 1, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			if (!dc.path || !dc.path->open || dc.path->figures.empty())
+				throw uint32_t(1003);
+			// The next point starts a figure of its own.
+			dc.path->figures.push_back({});
+			call.ret(1);
+		});
+	});
+	// PolyDraw(dc, points, types, count): PT_MOVETO (6) starts a figure, PT_LINETO (2) and three PT_BEZIERTO (4) points extend it, and
+	// PT_CLOSEFIGURE (1) on a point closes it. Inside a path bracket the figures are recorded; outside they are stroked with the pen.
+	registry.add("PolyDraw", 4, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			const int32_t count = call.i32(3);
+			if (count < 0 || count > 65536 || (count && (!call[1] || !call[2])))
+				throw uint32_t(87);
+			const auto types = call.read(call[2], size_t(count));
+			std::vector<std::vector<std::array<double, 2>>> figures;
+			std::array<double, 2> current{double(dc.position_x), double(dc.position_y)};
+			bool closed = true;
+			const auto point_at = [&](int32_t index) {
+				const auto point = read_point(call, call[1] + uint64_t(index) * 8);
+				return std::array<double, 2>{double(point.x), double(point.y)};
+			};
+			const auto extend = [&](const std::array<double, 2> &point) {
+				if (closed)
+					figures.push_back({current});
+				closed = false;
+				figures.back().push_back(point);
+				current = point;
+			};
+			for (int32_t index = 0; index < count; ++index) {
+				const uint8_t type = types[size_t(index)] & ~1;
+				if (type == 6) {
+					current = point_at(index);
+					closed = true;
+				} else if (type == 2) {
+					extend(point_at(index));
+				} else if (type == 4 && index + 2 < count && (types[size_t(index) + 1] & ~1) == 4 && (types[size_t(index) + 2] & ~1) == 4) {
+					// A cubic Bezier from the current point, flattened into short lines.
+					const auto start = current, first = point_at(index), second = point_at(index + 1), end = point_at(index + 2);
+					for (int step = 1; step <= 16; ++step) {
+						const double t = step / 16.0, u = 1 - t;
+						extend({u * u * u * start[0] + 3 * u * u * t * first[0] + 3 * u * t * t * second[0] + t * t * t * end[0],
+							u * u * u * start[1] + 3 * u * u * t * first[1] + 3 * u * t * t * second[1] + t * t * t * end[1]});
+					}
+					index += 2;
+				} else {
+					throw uint32_t(87);
 				}
-				std::sort(crossings.begin(), crossings.end());
-				int winding = 0;
-				for (size_t i = 0; i + 1 < crossings.size(); ++i) {
-					winding += crossings[i].second;
-					if (!(even_odd ? i % 2 == 0 : winding != 0))
-						continue;
-					const int32_t from = int32_t(std::ceil(crossings[i].first - 0.5)), to = int32_t(std::ceil(crossings[i + 1].first - 0.5));
-					if (to > from)
-						region.add({from, y, to, y + 1});
+				if ((types[size_t(index)] & 1) && !closed && !figures.empty()) {
+					current = figures.back().front();
+					if (!dc.path || !dc.path->open)
+						figures.back().push_back(current);
+					closed = true;
 				}
 			}
-			adopt(std::move(region), call);
+			dc.position_x = int32_t(std::lround(current[0]));
+			dc.position_y = int32_t(std::lround(current[1]));
+			if (dc.path && dc.path->open) {
+				if (!dc.path->figures.empty() && dc.path->figures.back().empty())
+					dc.path->figures.pop_back();
+				for (auto &figure : figures)
+					dc.path->figures.push_back(std::move(figure));
+				call.ret(1);
+				return;
+			}
+			Painter painter(objects, dc);
+			for (const auto &figure : figures) {
+				std::vector<std::pair<int32_t, int32_t>> points;
+				for (const auto &point : figure)
+					points.push_back({int32_t(std::lround(point[0])), int32_t(std::lround(point[1]))});
+				painter.polyline(points, selected_pen(objects, dc), false);
+			}
+			if (painter.changed())
+				touched(dc);
+			call.ret(1);
+		});
+	});
+	// FillPath, StrokePath and StrokeAndFillPath(dc): the closed path filled with the brush as the polygon fill mode says, its figures
+	// outlined, closed, with the pen, or both; the path is used up.
+	const auto draw_path = [=, this](ApiCall &call, bool fill, bool stroke) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			if (!dc.path || dc.path->open)
+				throw uint32_t(1003);
+			const auto figures = std::move(dc.path->figures);
+			dc.path.reset();
+			Painter painter(objects, dc);
+			if (fill) {
+				const auto &brush = selected_brush(objects, dc);
+				for (const auto &box : fill_polygons(figures, dc.poly_fill != 2).rectangles())
+					painter.fill(box.left, box.top, box.right, box.bottom, brush);
+			}
+			if (stroke)
+				for (const auto &figure : figures) {
+					std::vector<std::pair<int32_t, int32_t>> points;
+					for (const auto &point : figure)
+						points.push_back({int32_t(std::lround(point[0])), int32_t(std::lround(point[1]))});
+					if (points.size() > 1)
+						painter.polyline(points, selected_pen(objects, dc), true);
+				}
+			if (painter.changed())
+				touched(dc);
+			call.ret(1);
+		});
+	};
+	registry.add("FillPath", 1, [draw_path](ApiCall &call) { draw_path(call, true, false); });
+	registry.add("StrokePath", 1, [draw_path](ApiCall &call) { draw_path(call, false, true); });
+	registry.add("StrokeAndFillPath", 1, [draw_path](ApiCall &call) { draw_path(call, true, true); });
+	// PathToRegion(dc): the region the closed path covers in device coordinates, filled as the polygon fill mode says; the path is used up.
+	registry.add("PathToRegion", 1, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			if (!dc.path || dc.path->open)
+				throw uint32_t(1003);
+			auto figures = std::move(dc.path->figures);
+			dc.path.reset();
+			const double dx = double(dc.viewport_org_x) - dc.window_org_x, dy = double(dc.viewport_org_y) - dc.window_org_y;
+			for (auto &figure : figures)
+				for (auto &point : figure) {
+					point[0] += dx;
+					point[1] += dy;
+				}
+			adopt(fill_polygons(figures, dc.poly_fill != 2), call);
+		});
+	});
+	// SelectClipPath(dc, mode): the closed path becomes the clipping region, combined with the clipping the program set as
+	// ExtSelectClipRgn combines; the path is used up.
+	registry.add("SelectClipPath", 2, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			auto &dc = require_dc(call, 0);
+			const auto mode = call.u32(1);
+			if (mode < 1 || mode > 5)
+				throw uint32_t(87);
+			if (!dc.path || dc.path->open)
+				throw uint32_t(1003);
+			auto figures = std::move(dc.path->figures);
+			dc.path.reset();
+			const double dx = double(dc.viewport_org_x) - dc.window_org_x, dy = double(dc.viewport_org_y) - dc.window_org_y;
+			for (auto &figure : figures)
+				for (auto &point : figure) {
+					point[0] += dx;
+					point[1] += dy;
+				}
+			auto region = fill_polygons(figures, dc.poly_fill != 2);
+			std::optional<DesktopRegion> value;
+			if (mode == 5 || !dc.application_clip) {
+				value = std::move(region);
+			} else {
+				DesktopRegion next;
+				next.combine(*dc.application_clip, region, mode);
+				value = std::move(next);
+			}
+			if (!objects.select_clip(call[0], std::move(value)))
+				throw uint32_t(8);
+			call.ret(1);
 		});
 	});
 	registry.add("ExtCreateRegion", 3, [=, this](ApiCall &call) {
@@ -1535,11 +1748,58 @@ void NativeDesktop::register_image_api(ApiRegistry &registry)
 			}
 		});
 	});
+	// CreateIcon(instance, width, height, planes, bits per pixel, AND bits, XOR bits): a monochrome mask whose rows are padded to words,
+	// and the color image in the same top-down rows, at 32 bits per pixel or as a second monochrome plane.
+	registry.add("CreateIcon", 7, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			const uint32_t width = call.u32(1), height = call.u32(2), depth = uint32_t(uint8_t(call.u32(3))) * uint32_t(uint8_t(call.u32(4)));
+			if (!width || !height || width > 1024 || height > 1024 || !call[5] || !call[6] || (depth != 1 && depth != 32))
+				throw uint32_t(87);
+			const size_t mask_stride = ((size_t(width) + 15) / 16) * 2;
+			const auto and_bits = call.read(call[5], mask_stride * height);
+			const auto xor_bits = call.read(call[6], depth == 32 ? size_t(width) * height * 4 : mask_stride * height);
+			DesktopIcon icon{};
+			icon.monochrome = depth == 1;
+			icon.shared = false;
+			auto &image = icon.image;
+			image.color.width = width;
+			image.color.height = height;
+			image.color.rgba.assign(size_t(width) * height * 4, 0);
+			image.and_mask.assign(size_t(width) * height, 0);
+			bool any_alpha = false;
+			for (uint32_t y = 0; y < height; ++y)
+				for (uint32_t x = 0; x < width; ++x) {
+					const bool transparent = (and_bits[y * mask_stride + x / 8] >> (7 - x % 8)) & 1;
+					const size_t at = (size_t(y) * width + x) * 4;
+					if (depth == 32) {
+						const auto *p = &xor_bits[at];
+						image.color.rgba[at] = p[2];
+						image.color.rgba[at + 1] = p[1];
+						image.color.rgba[at + 2] = p[0];
+						image.color.rgba[at + 3] = p[3];
+						any_alpha = any_alpha || p[3];
+					} else {
+						const uint8_t level = ((xor_bits[y * mask_stride + x / 8] >> (7 - x % 8)) & 1) ? 255 : 0;
+						image.color.rgba[at] = image.color.rgba[at + 1] = image.color.rgba[at + 2] = level;
+					}
+					image.and_mask[size_t(y) * width + x] = transparent;
+				}
+			image.has_alpha = any_alpha;
+			if (!any_alpha)
+				for (size_t i = 0; i < image.and_mask.size(); ++i)
+					image.color.rgba[i * 4 + 3] = image.and_mask[i] ? 0 : 255;
+			const auto handle = objects.add(std::move(icon));
+			if (!handle)
+				throw uint32_t(8);
+			call.ret(handle);
+		});
+	});
 	registry.add("CreateIconIndirect", 1, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
+			// ICONINFO: fIcon, the cursor hotspot, then the mask and color bitmaps at the program's pointer width.
 			const auto is_icon = call.load<uint32_t>(call[0]);
-			const auto mask_handle = call.load<uint64_t>(call[0] + 16), color_handle = call.load<uint64_t>(call[0] + 24);
-			(void)is_icon;
+			const size_t width = call.pointer_width();
+			const auto mask_handle = call.load_pointer(call[0] + (width == 8 ? 16 : 12)), color_handle = call.load_pointer(call[0] + (width == 8 ? 24 : 16));
 			const auto *mask = objects.bitmap(mask_handle);
 			const auto *color = objects.bitmap(color_handle);
 			if (!mask || !color || color->depth != 32)
@@ -1547,6 +1807,9 @@ void NativeDesktop::register_image_api(ApiRegistry &registry)
 			DesktopIcon icon{};
 			icon.monochrome = false;
 			icon.shared = false;
+			icon.cursor = !is_icon;
+			icon.hotspot_x = int32_t(call.load<uint32_t>(call[0] + 4));
+			icon.hotspot_y = int32_t(call.load<uint32_t>(call[0] + 8));
 			auto &image = icon.image;
 			image.color.width = color->width;
 			image.color.height = color->height;

@@ -199,8 +199,14 @@ int main(int argc, char **argv)
 		check(!api("CreateIconFromResourceEx", {buffer, sizeof(color_icon), 1, 0x30000, 8193, 2, 0}) && environment.last_error() == 87 &&
 			!api("CreateIconFromResourceEx", {buffer, sizeof(color_icon), 1, 0x30000, 8192, 8192, 0}) && environment.last_error() == 87 && !objects.count(),
 			"oversized output created an icon");
-		check(!api("CreateIconFromResourceEx", {buffer, sizeof(color_icon), 0, 0x30000, 0, 0, 0}) && environment.last_error() == 120,
-			"unsupported cursor silently succeeded");
+		// A cursor's resource is its hot spot, two words, then the same bitmap.
+		std::vector<uint8_t> cursor_resource{1, 0, 2, 0};
+		cursor_resource.insert(cursor_resource.end(), std::begin(color_icon), std::end(color_icon));
+		process.write_memory(buffer, cursor_resource);
+		const auto cursor = api("CreateIconFromResourceEx", {buffer, cursor_resource.size(), 0, 0x30000, 0, 0, 0});
+		check(cursor && objects.icon(cursor)->cursor && objects.icon(cursor)->hotspot_x == 1 && objects.icon(cursor)->hotspot_y == 2 &&
+			objects.icon(cursor)->image.color.width == 3 && api("DestroyIcon", {cursor}) && !objects.count(), "cursor resource differs");
+		process.write_memory(buffer, color_icon);
 		check(!api("CreateIconFromResourceEx", {buffer, sizeof(color_icon), 1, 0x30000, 0, 0, 0x40}) && environment.last_error() == 120,
 			"unsupported metrics silently succeeded");
 		rejected("CreateIconFromResourceEx", {0x400000000000ULL, sizeof(color_icon), 1, 0x30000, 0, 0, 0});

@@ -58,14 +58,14 @@ bool NativeDesktop::clip_dispatch(std::string_view name)
 	const bool points=name=="DPtoLP" || name=="LPtoDP";
 	const bool query=name=="GetRgnBox" || name=="GetClipBox" || name=="GetClipRgn" || name=="GetLayout";
 	if (!rect && !points && !query && name!="CombineRgn" && name!="EqualRgn" && name!="OffsetRgn" &&
-		name!="PtInRegion" && name!="RectInRegion" && name!="SelectClipRgn") return false;
+		name!="PtInRegion" && name!="RectInRegion" && name!="SelectClipRgn" && name!="ExtSelectClipRgn" && name!="GetRegionData") return false;
 #ifndef RAVEN_PIXMAN
 	if (!points && name!="GetLayout") {
 		environment.set_last_error(120);process.return_api(name=="GetClipRgn" ? UINT32_MAX : 0);return true;
 	}
 #endif
 	const auto args=process.api_arguments(name=="GetLayout" ? 1 : rect ? (name=="CreateRectRgn" ? 4 : 5) :
-		name=="CombineRgn" ? 4 : points || name=="OffsetRgn" || name=="PtInRegion" ? 3 : 2);
+		name=="CombineRgn" ? 4 : points || name=="OffsetRgn" || name=="PtInRegion" || name=="ExtSelectClipRgn" || name=="GetRegionData" ? 3 : 2);
 	uint64_t result=0;
 	try {
 		const auto put_rect=[&](uint64_t output,DesktopRect box) {
@@ -105,6 +105,25 @@ bool NativeDesktop::clip_dispatch(std::string_view name)
 		else if (name=="RectInRegion") {
 			const auto &source=required_region(args[0]);const auto box=read_rect(args[1]);
 			auto value=rectangle(box[0],box[1],box[2],box[3]);value.combine(value,source,1);result=!value.empty();
+		} else if (name=="GetRegionData") {
+			// RGNDATA: the header (its size, RDH_RECTANGLES, the count, the rectangles' size, the bounds), then the rectangles. Without a
+			// buffer the size needed; a buffer too small gets nothing.
+			const auto &value=required_region(args[0]);const auto rectangles=value.rectangles();
+			const uint64_t size=32+16*uint64_t(rectangles.size());
+			if (!args[2]) result=size;
+			else if (uint32_t(args[1])<size) throw uint32_t(234);
+			else {
+				std::vector<uint8_t> bytes(size);
+				const auto put=[&](size_t at,uint32_t word){for(size_t b=0;b<4;++b)bytes[at+b]=uint8_t(word>>(b*8));};
+				const auto box=value.empty() ? DesktopRect{0,0,0,0} : value.bounds();
+				put(0,32);put(4,1);put(8,uint32_t(rectangles.size()));put(12,uint32_t(16*rectangles.size()));
+				put(16,uint32_t(box.left));put(20,uint32_t(box.top));put(24,uint32_t(box.right));put(28,uint32_t(box.bottom));
+				for(size_t i=0;i<rectangles.size();++i){
+					put(32+i*16,uint32_t(rectangles[i].left));put(36+i*16,uint32_t(rectangles[i].top));
+					put(40+i*16,uint32_t(rectangles[i].right));put(44+i*16,uint32_t(rectangles[i].bottom));
+				}
+				process.write_memory(args[2],bytes);result=size;
+			}
 		} else if (name=="GetRgnBox") {
 			const auto &value=required_region(args[0]);put_rect(args[1],value.bounds());result=value.complexity();
 		} else {
@@ -133,6 +152,23 @@ bool NativeDesktop::clip_dispatch(std::string_view name)
 					result=box.right<=box.left || box.bottom<=box.top ? 1 : combined->complexity();
 				}
 				put_rect(args[1],box);
+			} else if (name=="ExtSelectClipRgn") {
+				// RGN_AND, RGN_OR, RGN_XOR and RGN_DIFF combine the region with the current clipping, the whole visible surface when
+				// there is none; RGN_COPY selects it as SelectClipRgn does, and no region with RGN_COPY removes the clipping.
+				const auto mode=uint32_t(args[2]);
+				if (mode<1 || mode>5 || (!args[1] && mode!=5)) throw uint32_t(87);
+				std::optional<DesktopRegion> value;
+				if (args[1]) {
+					const auto &region=required_region(args[1]);
+					if (mode==5) value=region;
+					else {
+						DesktopRegion next;
+						next.combine(device->application_clip ? *device->application_clip : visibility(objects,*device),region,mode);
+						value=std::move(next);
+					}
+				}
+				result=value ? value->complexity() : 2;
+				if (!objects.select_clip(args[0],std::move(value))) throw uint32_t(8);
 			} else if (name=="SelectClipRgn") {
 				std::optional<DesktopRegion> value;
 				if (args[1]) {

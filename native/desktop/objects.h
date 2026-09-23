@@ -9,6 +9,7 @@
 #include "menu.h"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <span>
 #include <memory>
 #include <optional>
@@ -28,6 +29,9 @@ struct DesktopIcon {
 	IconBitmap image;
 	bool monochrome;
 	bool shared;
+	// A cursor's hot spot, the point that follows the mouse; an icon's is its centre.
+	bool cursor = false;
+	uint32_t hotspot_x = 0, hotspot_y = 0;
 };
 
 struct DesktopBitmap {
@@ -126,6 +130,13 @@ struct DesktopDC {
 	// does not apply it.
 	uint32_t graphics_mode=1;
 	std::array<float,6> world{1,0,0,1,0,0};
+	// The path a BeginPath bracket records: its figures as logical points, each closed when it becomes a region. Open while the
+	// bracket lasts; EndPath closes it for PathToRegion.
+	struct Path {
+		bool open=true;
+		std::vector<std::vector<std::array<double,2>>> figures;
+	};
+	std::optional<Path> path{};
 	// Parts of the window other windows cover; drawing never reaches them.
 	std::optional<DesktopRegion> visible{};
 	std::vector<DesktopDCState> saved{};
@@ -214,6 +225,8 @@ struct DesktopWindow {
 	bool visible = false;
 	bool painting = false, erase_pending = false;
 	DesktopRegion update{};
+	// Since when a top-level window has waited for its controls' paint before the compositor shows it (see NativeWindows::present).
+	std::optional<std::chrono::steady_clock::time_point> present_waiting{};
 	uint64_t instance = 0,userdata = 0;
 	// The guest thread that created the window: its messages go to that thread's queue and its procedure runs on it.
 	uint32_t thread = 0;
@@ -258,6 +271,7 @@ public:
 	uint64_t accelerators_version() const { return accelerator_version; }
 	uint64_t load_menu(const MenuTemplate &definition);
 	const DesktopIcon *icon(uint64_t handle) const;
+	DesktopIcon *icon(uint64_t handle);
 	const DesktopBitmap *bitmap(uint64_t handle) const;
 	DesktopBitmap *bitmap(uint64_t handle);
 	DesktopDC *dc(uint64_t handle);

@@ -118,7 +118,7 @@ uint64_t NativeDesktop::create(std::span<const uint64_t> args)
 	const auto flags = uint32_t(args[6]);
 	const auto width = int32_t(uint32_t(args[4]));
 	const auto height = int32_t(uint32_t(args[5]));
-	if (!uint32_t(args[2]) || version != 0x30000 || (flags & ~0x8000U)) {
+	if (version != 0x30000 || (flags & ~0x8000U)) {
 		environment.set_last_error(120);
 		return 0;
 	}
@@ -128,7 +128,20 @@ uint64_t NativeDesktop::create(std::span<const uint64_t> args)
 		return 0;
 	}
 	const auto bytes = process.read_memory(args[0], size);
-	return create_icon(bytes,uint32_t(width),uint32_t(height),flags);
+	if (uint32_t(args[2]))
+		return create_icon(bytes,uint32_t(width),uint32_t(height),flags);
+	// A cursor's resource starts with its hot spot, two words, before the bitmap an icon's has.
+	if (bytes.size() < 8) {
+		environment.set_last_error(13);
+		return 0;
+	}
+	const auto handle = create_icon(std::span<const uint8_t>(bytes).subspan(4),uint32_t(width),uint32_t(height),flags);
+	if (auto *cursor = handle ? objects.icon(handle) : nullptr) {
+		cursor->cursor = true;
+		cursor->hotspot_x = uint32_t(bytes[0] | bytes[1] << 8);
+		cursor->hotspot_y = uint32_t(bytes[2] | bytes[3] << 8);
+	}
+	return handle;
 }
 
 uint64_t NativeDesktop::create_icon(std::span<const uint8_t> bytes,uint32_t width,uint32_t height,uint32_t flags)
@@ -274,9 +287,9 @@ bool NativeDesktop::info(uint64_t handle, uint64_t output)
 			return false;
 		}
 		std::array<uint8_t, 32> bytes{};
-		put(bytes, 0, 1);
-		put(bytes, 4, icon->image.color.width / 2);
-		put(bytes, 8, icon->image.color.height / 2);
+		put(bytes, 0, icon->cursor ? 0 : 1);
+		put(bytes, 4, icon->cursor ? icon->hotspot_x : icon->image.color.width / 2);
+		put(bytes, 8, icon->cursor ? icon->hotspot_y : icon->image.color.height / 2);
 		put(bytes, 16, mask, 8);
 		put(bytes, 24, color, 8);
 		process.write_memory(output, bytes);

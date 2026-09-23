@@ -338,6 +338,24 @@ TextMetrics TextRenderer::logical_metrics(std::span<const uint8_t,92> definition
 		rounded(average),rounded(maximum),32,255,31,32,uint8_t(fixed ? 0x36 : 0x27)};
 }
 
+std::vector<uint8_t> TextRenderer::logical_table(std::span<const uint8_t,92> definition,uint32_t tag)
+{
+	if (is_marlett(definition)) return {};
+	const auto font=state->logical(definition);
+	const auto *face=font.getTypeface();
+	const size_t size=face ? face->getTableSize(tag) : 0;
+	std::vector<uint8_t> bytes(size);
+	if (size && face->getTableData(tag,0,size,bytes.data())!=size) bytes.clear();
+	return bytes;
+}
+
+uint32_t TextRenderer::logical_units_per_em(std::span<const uint8_t,92> definition)
+{
+	if (is_marlett(definition)) return 0;
+	const auto font=state->logical(definition);
+	return font.getTypeface() ? uint32_t(font.getTypeface()->getUnitsPerEm()) : 0;
+}
+
 std::vector<int32_t> TextRenderer::logical_advances(std::span<const uint8_t,92> definition,std::span<const uint16_t> text)
 {
 	if (is_marlett(definition)) {

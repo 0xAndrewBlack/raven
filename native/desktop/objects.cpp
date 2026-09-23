@@ -339,6 +339,11 @@ const DesktopIcon *DesktopObjects::icon(uint64_t handle) const
 	return found == objects.end() ? nullptr : std::get_if<DesktopIcon>(&found->second);
 }
 
+DesktopIcon *DesktopObjects::icon(uint64_t handle)
+{
+	return const_cast<DesktopIcon *>(std::as_const(*this).icon(handle));
+}
+
 const DesktopBitmap *DesktopObjects::bitmap(uint64_t handle) const
 {
 	if (handle == 0x10000)

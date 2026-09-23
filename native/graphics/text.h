@@ -35,6 +35,11 @@ public:
 	// Windows-shaped services for any logical font and any text: unknown faces fall back to the closest bundled family,
 	// missing glyphs draw the face's replacement glyph, and rendering returns anti-aliased coverage.
 	TextMetrics logical_metrics(std::span<const uint8_t,92> definition);
+	// One table of the face a logical font uses, as GetFontData hands it out (tag in the file's byte order, 'OS/2' is 0x4f532f32);
+	// empty when the face has no such table.
+	std::vector<uint8_t> logical_table(std::span<const uint8_t,92> definition,uint32_t tag);
+	// The design units per em of that face, from its head table; 0 for the symbol face that has none.
+	uint32_t logical_units_per_em(std::span<const uint8_t,92> definition);
 	// Cumulative pixel advance after each UTF-16 unit; control characters advance by zero.
 	std::vector<int32_t> logical_advances(std::span<const uint8_t,92> definition,std::span<const uint16_t> text);
 	// Alpha coverage (0..255) of a box [x,x+width) x [y,y+height) in which text starts at left=origin_x, top=origin_y;
