@@ -51,6 +51,13 @@ uint32_t NativeX86Threads::wait(uint64_t handle, uint32_t milliseconds)
 	}
 }
 
+void NativeX86Threads::mirror_section(uint64_t address, const Section &section)
+{
+	// LockCount is -1 while the section is free and -2 while a thread holds it; RecursionCount and OwningThread follow it.
+	const uint32_t fields[3] = {section.depth ? 0xfffffffeU : UINT32_MAX, section.depth, section.depth ? section.owner : 0};
+	process.write_memory(address + 4, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(fields), sizeof fields));
+}
+
 bool NativeX86Threads::dispatch(std::string_view name)
 {
 	const auto known = std::find_if(thread_exports.begin(), thread_exports.end(), [&](const auto &item) { return item.first == name; });
@@ -146,8 +153,9 @@ bool NativeX86Threads::dispatch(std::string_view name)
 		sections.erase(args[0]);
 		if (!section_debug)
 			section_debug = process.map_memory(4096, PROT_READ | PROT_WRITE);
-		const uint32_t debug = uint32_t(section_debug);
-		process.write_memory(args[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&debug), 4));
+		// The fields Windows keeps: DebugInfo, LockCount (-1 when free), RecursionCount, OwningThread, LockSemaphore and SpinCount.
+		const uint32_t fields[6] = {uint32_t(section_debug), UINT32_MAX, 0, 0, 0, name == "InitializeCriticalSection" ? 0U : uint32_t(args[1])};
+		process.write_memory(args[0], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(fields), sizeof fields));
 		process.return_api(name == "InitializeCriticalSection" ? 0 : 1);
 	} else if (name == "EnterCriticalSection" || name == "TryEnterCriticalSection") {
 		const uint32_t id = threads.current_id();
@@ -161,11 +169,13 @@ bool NativeX86Threads::dispatch(std::string_view name)
 			threads.block([&section, id] { return section.owner == 0 || section.owner == id; }, std::nullopt);
 		section.owner = id;
 		++section.depth;
+		mirror_section(args[0], section);
 		process.return_api(1);
 	} else if (name == "LeaveCriticalSection") {
 		auto &section = sections[args[0]];
 		if (section.depth > 0 && --section.depth == 0)
 			section.owner = 0;
+		mirror_section(args[0], section);
 		process.return_api(0);
 	} else if (name == "SwitchToThread") {
 		process.return_api(threads.yield());

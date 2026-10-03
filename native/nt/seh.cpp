@@ -905,6 +905,10 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 			record = exceptions->new_record(status_unwind, 0, 0, {});
 		exceptions->unwind(call[0], call[1], std::move(record), call[3], call[2]);
 	});
+	// _local_unwind, which the 64-bit kernel32 publishes for compilers: the unwind of a function to a target of its own, with no record.
+	registry.add("_local_unwind", 2, [exceptions](ApiCall &call) {
+		exceptions->unwind(call[0], call[1], exceptions->new_record(status_unwind, 0, 0, {}), 0, 0);
+	});
 	// The context resumes at the callback nesting its stack belongs to: callbacks begun from deeper in the stack than its frame, such as the
 	// handler calls of a dispatch that a runtime leaves this way for a catch block, are abandoned.
 	const auto restore = [exceptions, &context](ApiCall &call) {

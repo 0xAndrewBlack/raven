@@ -18,7 +18,7 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 28> compat_exports{{
 	{"ExitWindowsEx", 2}, {"RealizePalette", 1}, {"CreatePalette", 1},
 }};
 
-constexpr uint64_t process_heap_handle = 0x00150000, heap_region = 1 << 20, large_block = 256 << 10, header = 16;
+constexpr uint64_t process_heap_handle = 0x00150000, executable_heap_handle = 0x00160000, heap_region = 1 << 20, large_block = 256 << 10, header = 16;
 constexpr size_t slot_bytes = 2048, slot_count = 4;
 
 uint32_t read_word(const std::vector<uint8_t> &bytes, size_t offset)
@@ -49,18 +49,22 @@ uint32_t NativeX86Compat::block_size(uint64_t address) const
 	return read_word(process.read_memory(address - header, 4), 0);
 }
 
-uint64_t NativeX86Compat::heap_alloc(uint32_t size, bool zero)
+uint64_t NativeX86Compat::heap_alloc(uint32_t size, bool zero, bool executable)
 {
 	const uint32_t payload = (std::max<uint32_t>(size, 1) + 15) & ~uint32_t(15);
+	const int protection = PROT_READ | PROT_WRITE | (executable ? PROT_EXEC : 0);
+	// The header holds the payload size and the arena the block goes back to.
+	std::vector<uint8_t> prefix(header);
+	write_word(prefix, 0, payload);
+	write_word(prefix, 4, executable ? 1 : 0);
 	if (payload > large_block) {
 		const uint64_t length = (uint64_t(payload) + header + 4095) & ~uint64_t(4095);
-		const auto base = process.map_memory(length, PROT_READ | PROT_WRITE);
-		std::vector<uint8_t> prefix(header);
-		write_word(prefix, 0, payload);
+		const auto base = process.map_memory(length, protection);
 		process.write_memory(base, prefix);
 		return base + header;
 	}
-	auto &list = free_blocks[payload];
+	auto &arena = arenas[executable ? 1 : 0];
+	auto &list = arena.free_blocks[payload];
 	uint64_t address = 0;
 	if (!list.empty()) {
 		address = list.back();
@@ -69,16 +73,14 @@ uint64_t NativeX86Compat::heap_alloc(uint32_t size, bool zero)
 			process.write_memory(address, std::vector<uint8_t>(payload));
 		return address;
 	}
-	if (region_left < payload + header) {
-		region = process.map_memory(heap_region, PROT_READ | PROT_WRITE);
-		region_left = heap_region;
+	if (arena.region_left < payload + header) {
+		arena.region = process.map_memory(heap_region, protection);
+		arena.region_left = heap_region;
 	}
-	std::vector<uint8_t> prefix(header);
-	write_word(prefix, 0, payload);
-	process.write_memory(region, prefix);
-	address = region + header;
-	region += payload + header;
-	region_left -= payload + header;
+	process.write_memory(arena.region, prefix);
+	address = arena.region + header;
+	arena.region += payload + header;
+	arena.region_left -= payload + header;
 	return address;
 }
 
@@ -89,7 +91,8 @@ void NativeX86Compat::heap_free(uint64_t address)
 		process.unmap_memory(address - header);
 		return;
 	}
-	free_blocks[payload].push_back(address);
+	const bool executable = read_word(process.read_memory(address - header + 4, 4), 0) == 1;
+	arenas[executable ? 1 : 0].free_blocks[payload].push_back(address);
 }
 
 uint64_t NativeX86Compat::scratch_base()
@@ -136,7 +139,7 @@ bool NativeX86Compat::dispatch(std::string_view name)
 		process.return_api(process_heap_handle);
 	} else if (name == "HeapAlloc") {
 		const auto args = process.api_arguments(3);
-		process.return_api(heap_alloc(uint32_t(args[2]), args[1] & 0x8));
+		process.return_api(heap_alloc(uint32_t(args[2]), args[1] & 0x8, uint32_t(args[0]) == executable_heap_handle));
 	} else if (name == "HeapFree") {
 		const auto args = process.api_arguments(3);
 		if (args[2] && global_block(args[2]))
@@ -151,7 +154,7 @@ bool NativeX86Compat::dispatch(std::string_view name)
 		const auto args = process.api_arguments(4);
 		const bool global = global_block(args[2]);
 		const uint32_t old_size = global ? uint32_t(global_size(args[2])) : block_size(args[2]), size = uint32_t(args[3]);
-		const auto fresh = heap_alloc(size, args[1] & 0x8);
+		const auto fresh = heap_alloc(size, args[1] & 0x8, uint32_t(args[0]) == executable_heap_handle);
 		process.write_memory(fresh, process.read_memory(args[2], std::min(old_size, size)));
 		if (global)
 			global_release(args[2]);
@@ -180,8 +183,9 @@ bool NativeX86Compat::dispatch(std::string_view name)
 		process.api_arguments(2);
 		process.return_api(2);
 	} else if (name == "HeapCreate") {
-		process.api_arguments(3);
-		process.return_api(process_heap_handle);
+		// Every heap shares the process heap's arena, except those whose blocks must run code.
+		const auto args = process.api_arguments(3);
+		process.return_api(args[0] & 0x40000 ? executable_heap_handle : process_heap_handle);
 	} else if (name == "HeapDestroy" || name == "FreeEnvironmentStringsA") {
 		process.api_arguments(1);
 		process.return_api(1);

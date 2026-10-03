@@ -30,15 +30,19 @@ private:
 	NativeProcess &process;
 	NativeEnvironment &environment;
 	NativeWindows &windows;
-	// Free blocks by payload size, and the bump region new blocks are cut from.
-	std::map<uint32_t, std::vector<uint64_t>> free_blocks;
-	uint64_t region = 0, region_left = 0;
+	// Free blocks by payload size, and the bump region new blocks are cut from: one arena for the process heap and every heap made like
+	// it, one whose memory runs code for the heaps made with HEAP_CREATE_ENABLE_EXECUTE.
+	struct Arena {
+		std::map<uint32_t, std::vector<uint64_t>> free_blocks;
+		uint64_t region = 0, region_left = 0;
+	};
+	Arena arenas[2];
 	uint64_t scratch = 0, environment_block = 0;
 	size_t scratch_slot = 0;
 	std::function<uint64_t(uint64_t)> global_size;
 	std::function<bool(uint64_t)> global_release;
 	bool global_block(uint64_t address) const { return global_size && global_size(address) != UINT64_MAX; }
-	uint64_t heap_alloc(uint32_t size, bool zero);
+	uint64_t heap_alloc(uint32_t size, bool zero, bool executable = false);
 	void heap_free(uint64_t address);
 	uint32_t block_size(uint64_t address) const;
 	uint64_t scratch_base();
