@@ -1196,6 +1196,26 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     ${fixture}/custom/msi-custom.exe)
                 set_tests_properties(native_msi_custom_actions_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                     ENVIRONMENT RAVEN_PREFIX=${fixture}/custom-prefix)
+                # A 64-bit package whose action library is 32-bit, as many real ones are: the action runs in the 32-bit custom action server.
+                if(installer_arch STREQUAL x64 AND RAVEN_MINGW32_INSTALLER AND RAVEN_INSTALLER32_COMPONENT_DIR)
+                    file(MAKE_DIRECTORY ${fixture}/wow64)
+                    add_custom_command(OUTPUT ${fixture}/wow64/custom.msi ${fixture}/wow64/msi-custom.exe
+                        COMMAND ${RAVEN_MINGW32_INSTALLER} -O2 -nostdlib -shared -fno-stack-protector -Wl,--entry,_DllMain@12,--kill-at,--no-insert-timestamp
+                            -o ${fixture}/wow64/msi_action.dll ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_action.c -lmsi -ladvapi32 -lkernel32
+                        COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_payload.txt ${fixture}/wow64/msi_payload.txt
+                        COMMAND ${RAVEN_WIXL} -a x64 -o ${fixture}/wow64/custom.msi ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_custom.wxs
+                        COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -DACTION_VIEW=KEY_WOW64_32KEY
+                            -Wl,--entry,${installer_entry},--no-insert-timestamp -o ${fixture}/wow64/msi-custom.exe
+                            ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_custom_client.c -lmsi -ladvapi32 -lkernel32
+                        WORKING_DIRECTORY ${fixture}/wow64
+                        DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_action.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_custom.wxs
+                            ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_custom_client.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/msi_payload.txt VERBATIM)
+                    add_custom_target(msi_wow64_custom_fixture ALL DEPENDS ${fixture}/wow64/custom.msi ${fixture}/wow64/msi-custom.exe)
+                    add_test(NAME native_msi_wow64_custom_actions COMMAND raven --run-process --execution=native --timeout-ms=120000
+                        ${fixture}/wow64/msi-custom.exe)
+                    set_tests_properties(native_msi_wow64_custom_actions PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                        ENVIRONMENT RAVEN_PREFIX=${fixture}/wow64-prefix)
+                endif()
                 # The XML document object through COM: the prefix registers the component's classes, the program finds and makes one.
                 add_custom_command(OUTPUT ${fixture}/msxml.exe
                     COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp

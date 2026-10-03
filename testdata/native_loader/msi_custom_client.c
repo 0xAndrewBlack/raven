@@ -6,6 +6,11 @@
    records it in the registry; the deferred one, on request, fails the installation, and the installer rolls back the file it had put in
    place and leaves the product unregistered. */
 
+/* An action library of the other width writes through that width's view of the registry, as a 32-bit one does on 64-bit Windows. */
+#ifndef ACTION_VIEW
+#define ACTION_VIEW 0
+#endif
+
 static const WCHAR product[] = L"{3F6A2B1C-8D4E-4A7B-9C1D-2E3F4A5B6C7D}";
 static const WCHAR component[] = L"{6B5A4C3D-2E1F-4A0B-9C8D-7E6F5A4B3C2D}";
 
@@ -19,7 +24,7 @@ static BOOL same(const WCHAR *a, const WCHAR *b)
 static void remove_marker(void)
 {
 	HKEY key;
-	if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\RavenSample", 0, KEY_SET_VALUE, &key)) {
+	if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\RavenSample", 0, KEY_SET_VALUE | ACTION_VIEW, &key)) {
 		RegDeleteValueW(key, L"FromCustomAction");
 		RegCloseKey(key);
 	}
@@ -45,7 +50,7 @@ int raven_entry(void)
 		return 100 + (int)(result % 100);
 	HKEY key;
 	DWORD size = sizeof value, type = 0;
-	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\RavenSample", 0, KEY_READ, &key) ||
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\RavenSample", 0, KEY_READ | ACTION_VIEW, &key) ||
 		RegQueryValueExW(key, L"FromCustomAction", NULL, &type, (BYTE *)value, &size) || type != REG_SZ || !same(value, L"from-the-command-line"))
 		return 2;
 	RegCloseKey(key);

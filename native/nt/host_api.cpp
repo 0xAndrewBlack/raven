@@ -1018,6 +1018,11 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			"WerUnregisterMemoryBlock", "WerRegisterFile", "WerUnregisterFile", "WerSetFlags", "WerAddExcludedApplication",
 			"WerRemoveExcludedApplication"})
 		registry.add(name, 2, [](ApiCall &call) { call.ret(0); });
+	// Binding writes the addresses of a program's imports into its file ahead of time, which only spares the loader work; the loader here
+	// resolves every import when it loads the image, so an image left unbound is as good as a bound one (Windows Installer binds the
+	// programs a package names in its BindImage table).
+	registry.add("BindImage", 3, [](ApiCall &call) { call.ret(1); });
+	registry.add("BindImageEx", 5, [](ApiCall &call) { call.ret(1); });
 	// The guest's threads take turns on one host thread, so every write is seen by all of them before the call returns.
 	registry.add("FlushProcessWriteBuffers", 0, [](ApiCall &) {});
 	// UI Automation: no assistive client is listening on this desktop, so providers are never asked for, events go nowhere and every

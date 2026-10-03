@@ -96,7 +96,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 	const bool wow64 = context.process.mode() == NativeMode::x86;
 	const auto view = [wow64](uint64_t parent, std::u16string path, uint32_t access = 0) {
 		const bool redirect = (access & 0x200) || (wow64 && !(access & 0x100));
-		if (!redirect || parent != 0x80000002ULL)
+		if (!redirect || uint32_t(parent) != 0x80000002U)
 			return path;
 		const auto fold = [](std::u16string text) {
 			for (auto &character : text)
