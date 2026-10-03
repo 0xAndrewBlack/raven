@@ -44,8 +44,8 @@ std::optional<ModuleBytes> ModuleBytes::map(const std::filesystem::path &path)
 	return result;
 }
 
-PEModule::PEModule(std::string name, ModuleBytes bytes, uint64_t base)
-	: name(std::move(name)), bytes(std::move(bytes)), image(std::span<const uint8_t>(this->bytes)), loaded(image, base),
+PEModule::PEModule(std::string name, ModuleBytes bytes, uint64_t base, bool relocated)
+	: name(std::move(name)), bytes(std::move(bytes)), image(std::span<const uint8_t>(this->bytes)), loaded(image, base, relocated),
 	imports(image.il_only() ? std::vector<PEImport>{} : image.imports()), exports(image.exports())
 {
 	for (size_t index = 0; index < exports.size(); ++index)
@@ -88,17 +88,31 @@ PEModule &ModuleSet::add(std::string name, ModuleBytes bytes, uint64_t base)
 	name = module_name(std::move(name));
 	if (modules.contains(name))
 		throw std::runtime_error("duplicate PE module: " + name);
-	auto module = std::make_unique<PEModule>(name, std::move(bytes), base);
+	auto module = std::make_unique<PEModule>(name, std::move(bytes), base, !adding_data);
 	for (const auto &[key, previous] : modules) {
 		if (base < previous->loaded.base() + previous->loaded.data().size() &&
 			previous->loaded.base() < base + module->loaded.data().size())
 			throw std::runtime_error("overlapping PE module addresses: " + name + " and " + key);
-		if (module->image.is_64 != previous->image.is_64)
+		if (module->image.is_64 != previous->image.is_64 && !adding_data && !data_names.contains(key))
 			throw std::runtime_error("mixed PE32/PE64 module graph");
 	}
 	auto &result = *module;
 	modules.emplace(name, std::move(module));
 	return result;
+}
+
+PEModule &ModuleSet::add_data(std::string name, ModuleBytes bytes)
+{
+	adding_data = true;
+	try {
+		auto &module = add(std::move(name), std::move(bytes));
+		adding_data = false;
+		data_names.insert(module.name);
+		return module;
+	} catch (...) {
+		adding_data = false;
+		throw;
+	}
 }
 
 void ModuleSet::add_alias(std::string name, std::string target)
@@ -117,6 +131,7 @@ void ModuleSet::remove(const PEModule &module)
 	const auto found = modules.find(module.name);
 	if (found == modules.end() || found->second.get() != &module)
 		throw std::runtime_error("PE removal requires an owned module");
+	data_names.erase(found->first);
 	modules.erase(found);
 }
 

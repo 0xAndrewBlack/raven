@@ -32,7 +32,7 @@ private:
 };
 
 struct PEModule {
-	PEModule(std::string name, ModuleBytes bytes, uint64_t base);
+	PEModule(std::string name, ModuleBytes bytes, uint64_t base, bool relocated = true);
 	std::string name;
 	ModuleBytes bytes;
 	PEImage image;
@@ -54,6 +54,8 @@ public:
 	PEModule &add(std::string name, ModuleBytes bytes, uint64_t base);
 	// The process loader must release guest mappings and references before erasing an image.
 	void remove(const PEModule &module);
+	// An image mapped only to be read, as a data file or for its resources: it may have the other width, and nothing resolves through it.
+	PEModule &add_data(std::string name, ModuleBytes bytes);
 	const std::map<std::string, std::unique_ptr<PEModule>> &all() const;
 	uint64_t resolve(const PEImport &symbol) const;
 	std::vector<const PEModule *> resolution_path(const PEImport &symbol) const;
@@ -64,6 +66,8 @@ public:
 private:
 	std::map<std::string, std::unique_ptr<PEModule>> modules;
 	std::map<std::string, std::string> aliases;
+	std::set<std::string> data_names;
+	bool adding_data = false;
 	uint64_t resolve(std::string module, std::string name, uint32_t ordinal, bool by_ordinal,
 		std::set<std::pair<std::string, uint32_t>> &chain, std::vector<const PEModule *> *path = nullptr) const;
 };

@@ -752,7 +752,8 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			library_loader.set_application_directory(launch->image_path.substr(0, separator));
 	}
 	module_api.set_loader([&](std::string name) -> uint64_t {
-		return library_loader.load(std::move(name));
+		// DONT_RESOLVE_DLL_REFERENCES and the data file and resource flags map the library without starting it.
+		return library_loader.load(std::move(name), module_api.load_flags() & 0x63);
 	}, [&](uint64_t handle) -> bool {
 		if (library_loader.release(handle))
 			return true;
@@ -873,6 +874,15 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 							} catch (...) {}
 						}
 					}
+				}
+				// The caller, as the module and offset the return address falls in.
+				try {
+					const auto stack = process.read_memory(process.context().registers.rsp, 4);
+					const uint64_t caller = uint64_t(stack[0]) | uint64_t(stack[1]) << 8 | uint64_t(stack[2]) << 16 | uint64_t(stack[3]) << 24;
+					for (const auto &[module_name, module] : modules.all())
+						if (caller >= module->loaded.base() && caller < module->loaded.base() + module->image.image_size)
+							std::cerr << " from " << module_name << '+' << std::hex << caller - module->loaded.base() << std::dec;
+				} catch (const std::runtime_error &) {
 				}
 				// The names a program resolves at run time are what a diagnosis needs most.
 				if (api == "LoadLibraryA" || api == "LoadLibraryW" || api == "GetProcAddress") {

@@ -12,7 +12,7 @@ namespace raven {
 
 static constexpr size_t page_size = 4096;
 
-LoadedImage::LoadedImage(const PEImage &image, uint64_t base)
+LoadedImage::LoadedImage(const PEImage &image, uint64_t base, bool relocated)
 	: size(image.image_size), address(base)
 {
 	const uint64_t limit = image.is_64 ? 0x800000000000ULL : 0x100000000ULL;
@@ -65,7 +65,7 @@ LoadedImage::LoadedImage(const PEImage &image, uint64_t base)
 			for (size_t page = section.address / page_size; page * page_size < end; ++page)
 				protections.at(page) |= protection;
 		}
-		if (base != image.image_base)
+		if (base != image.image_base && relocated)
 			relocate(image);
 	} catch (...) {
 		release();

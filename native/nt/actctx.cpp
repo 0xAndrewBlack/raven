@@ -273,6 +273,30 @@ std::optional<std::filesystem::path> ActivationContexts::library_folder(std::str
 	return std::nullopt;
 }
 
+std::optional<ActivationContexts::Assembly> ActivationContexts::module_manifest(const PEImage &image) const
+{
+	const auto directory = image.directories[2];
+	if (!directory.address || !directory.size || directory.size > 16 * 1024 * 1024)
+		return std::nullopt;
+	try {
+		for (const auto &resource : read_resources(directory, image.file_span(directory.address, directory.size), image.image_size))
+			if (resource.type == ResourceKey(uint32_t(24)) && resource.name == ResourceKey(uint32_t(2)) && resource.size < 1024 * 1024) {
+				const auto bytes = image.file_span(resource.data_address, resource.size);
+				return parse(std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()), false);
+			}
+	} catch (const std::runtime_error &) {
+	}
+	return std::nullopt;
+}
+
+std::optional<std::filesystem::path> ActivationContexts::assembly_folder(const Assembly &root, std::string_view name) const
+{
+	uint32_t index = 1;
+	if (const auto *assembly = declaring(root, name, index))
+		return manifests.parent_path() / assembly->folder;
+	return std::nullopt;
+}
+
 std::optional<uint32_t> ActivationContexts::library_roster(uint64_t handle, std::string_view name) const
 {
 	const auto context = contexts.find(handle);

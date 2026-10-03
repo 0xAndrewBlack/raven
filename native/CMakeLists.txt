@@ -1256,7 +1256,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     COMMAND ${installer_compiler} -O2 -nostdlib -shared -fno-stack-protector ${action_link}
                         -o ${fixture}/module-path/plugins/module_plugin.dll ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_plugin.c -lkernel32
                     COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
-                        -o ${fixture}/module-path/module-path.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_path_client.c -luser32 -lkernel32
+                        -o ${fixture}/module-path/module-path.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_path_client.c -llz32 -luser32 -lkernel32
                     DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_plugin.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/module_path_client.c VERBATIM)
                 add_custom_target(module_path_fixture_${installer_arch} ALL DEPENDS ${fixture}/module-path/module-path.exe)
                 add_test(NAME native_module_path_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000

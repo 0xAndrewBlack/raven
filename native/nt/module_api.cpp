@@ -1,3 +1,4 @@
+#include <cstring>
 #include "module_api.h"
 #include "apiset.h"
 
@@ -101,7 +102,8 @@ bool NativeModuleAPI::dispatch(std::string_view name)
 		if (!load)
 			return false;
 		const bool extended = name.starts_with("LoadLibraryEx");
-		const auto address = process.api_arguments(extended ? 3 : 1).at(0);
+		const auto arguments = process.api_arguments(extended ? 3 : 1);
+		const auto address = arguments.at(0);
 		if (!address) {
 			environment.set_last_error(87);
 			process.return_api(0);
@@ -112,8 +114,57 @@ bool NativeModuleAPI::dispatch(std::string_view name)
 			environment.set_last_error(120);
 			process.return_api(0);
 		} else {
-			process.return_api(load(*decoded));
+			flags = extended ? uint32_t(arguments.at(2)) : 0;
+			const auto loaded = load(*decoded);
+			flags = 0;
+			process.return_api(loaded);
 		}
+		return true;
+	}
+	// ResolveDelayLoadedAPI(base, descriptor, dll hook, system hook, thunk, flags): the library of a delay-load descriptor is loaded on
+	// first use and its handle kept where the descriptor says; the function the thunk stands for is resolved by name or ordinal from
+	// the matching entry of the name table and written into the thunk.
+	if (name == "ResolveDelayLoadedAPI") {
+		if (!load)
+			return false;
+		const auto arguments = process.api_arguments(6);
+		const uint64_t base = arguments[0], thunk = arguments[4];
+		const auto read32 = [&](uint64_t address) {
+			const auto bytes = process.read_memory(address, 4);
+			return uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
+		};
+		const auto read64 = [&](uint64_t address) {
+			const auto bytes = process.read_memory(address, 8);
+			uint64_t value = 0;
+			std::memcpy(&value, bytes.data(), 8);
+			return value;
+		};
+		const auto descriptor = arguments[1];
+		const uint32_t name_rva = read32(descriptor + 4), handle_rva = read32(descriptor + 8), table_rva = read32(descriptor + 12),
+			names_rva = read32(descriptor + 16);
+		uint64_t handle = handle_rva ? read64(base + handle_rva) : 0;
+		if (!handle) {
+			const auto library = guest_name(base + name_rva, false);
+			handle = library ? load(*library) : 0;
+			if (handle && handle_rva) {
+				std::vector<uint8_t> bytes(8);
+				std::memcpy(bytes.data(), &handle, 8);
+				process.write_memory(base + handle_rva, bytes);
+			}
+		}
+		uint64_t result = 0;
+		if (handle) {
+			const uint64_t entry = read64(base + names_rva + (thunk - (base + table_rva)));
+			result = procedure(handle, entry >> 63 ? (entry & 0xffff) : base + uint32_t(entry) + 2);
+		}
+		if (result) {
+			std::vector<uint8_t> bytes(8);
+			std::memcpy(bytes.data(), &result, 8);
+			process.write_memory(thunk, bytes);
+		} else if (!handle) {
+			environment.set_last_error(126);
+		}
+		process.return_api(result);
 		return true;
 	}
 	if (name == "FreeLibrary") {

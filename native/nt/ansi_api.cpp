@@ -308,6 +308,43 @@ void register_legacy_file_api(ApiRegistry &registry)
 		const auto done = run(*seek, call, {call[0], uint64_t(int64_t(call.i32(1))), position, call.u32(2)});
 		call.ret(done.result ? uint64_t(call.load<uint32_t>(position)) : file_error);
 	});
+	// The LZ functions read files packed by COMPRESS.EXE and plain files alike. Plain files are what Raven reads, type libraries and the
+	// data of setups among them: the handle of a plain file is its file handle, read and moved in as with _lread and _llseek, and LZClose
+	// closes it as _lclose does. The file opens with the access and sharing of the style's OF_ bits; the OFSTRUCT keeps the error, if any.
+	const auto lz_open = [=](ApiCall &call, uint64_t name) {
+		const uint32_t style = call.u32(2), mode = style & 3, sharing = style & 0x70;
+		const uint32_t access = mode == 0 ? 0x80000000U : mode == 1 ? 0x40000000U : 0xc0000000U;
+		const uint32_t share = sharing == 0x10 ? 0 : sharing == 0x20 ? 1 : sharing == 0x30 ? 2 : 3;
+		const auto done = run(*create, call, {name, access, share, 0, 3, 0x80, 0});
+		const bool failed = invalid_handle(done.result);
+		const uint32_t error = failed ? (done.last_error() ? done.last_error() : 2) : 0;
+		if (call[1]) {
+			std::vector<uint8_t> record(136, 0);
+			record[0] = 136;
+			record[1] = 1;
+			record[2] = uint8_t(error);
+			record[3] = uint8_t(error >> 8);
+			const auto text = call.narrow(name);
+			std::copy_n(text.begin(), std::min<size_t>(text.size(), 127), record.begin() + 8);
+			call.write(call[1], record);
+		}
+		call.ret(failed ? file_error : done.result);
+	};
+	registry.add("LZOpenFileA", 3, [=](ApiCall &call) { lz_open(call, call[0]); });
+	registry.add("LZOpenFileW", 3, [=](ApiCall &call) {
+		Scratch scratch(call.process);
+		const auto name = scratch.block(261);
+		call.put_narrow(name, to_ansi(call.wide(call[0], 260), ansi_code_page), 260);
+		lz_open(call, name);
+	});
+	registry.add("LZInit", 1, [](ApiCall &call) { call.ret(call[0]); });
+	registry.add("LZRead", 3, [=](ApiCall &call) { transfer(*read, call); });
+	registry.add("LZSeek", 3, [=](ApiCall &call) {
+		Scratch scratch(call.process);
+		const auto position = scratch.block(8);
+		const auto done = run(*seek, call, {call[0], uint64_t(int64_t(call.i32(1))), position, call.u32(2)});
+		call.ret(done.result ? uint64_t(call.load<uint32_t>(position)) : file_error);
+	});
 }
 
 }

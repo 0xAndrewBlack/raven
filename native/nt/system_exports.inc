@@ -760,12 +760,12 @@ static constexpr std::string_view kernel32_exports[]{
 	"WriteFileEx","WriteFileGather","WritePrivateProfileSectionA","WritePrivateProfileSectionW","WritePrivateProfileStringA","WritePrivateProfileStringW",
 	"WritePrivateProfileStructA","WritePrivateProfileStructW","WriteProcessMemory","WriteProfileSectionA","WriteProfileSectionW","WriteProfileStringA",
 	"WriteProfileStringW","WriteTapemark","ZombifyActCtx","ZombifyActCtxWorker","__C_specific_handler","_hread",
-	"_hwrite","_lclose","_lcreat","_llseek","_lopen","_lread",
-	"_lwrite","lstrcat","lstrcatA","lstrcatW","lstrcmp","lstrcmpA",
-	"lstrcmpW","lstrcmpi","lstrcmpiA","lstrcmpiW","lstrcpy","lstrcpyA",
-	"lstrcpyW","lstrcpyn","lstrcpynA","lstrcpynW","lstrlen","lstrlenA",
-	"lstrlenW","uaw_lstrcmpW","uaw_lstrcmpiW","uaw_lstrlenW","uaw_wcschr","uaw_wcscpy",
-	"uaw_wcsicmp","uaw_wcslen","uaw_wcsrchr",
+	"_hwrite","_lclose","_lcreat","_llseek","_local_unwind","_lopen",
+	"_lread","_lwrite","lstrcat","lstrcatA","lstrcatW","lstrcmp",
+	"lstrcmpA","lstrcmpW","lstrcmpi","lstrcmpiA","lstrcmpiW","lstrcpy",
+	"lstrcpyA","lstrcpyW","lstrcpyn","lstrcpynA","lstrcpynW","lstrlen",
+	"lstrlenA","lstrlenW","uaw_lstrcmpW","uaw_lstrcmpiW","uaw_lstrlenW","uaw_wcschr",
+	"uaw_wcscpy","uaw_wcsicmp","uaw_wcslen","uaw_wcsrchr",
 };
 static constexpr std::string_view ole32_exports[]{
 	"BindMoniker","CLIPFORMAT_UserFree","CLIPFORMAT_UserFree64","CLIPFORMAT_UserFreeExt","CLIPFORMAT_UserMarshal","CLIPFORMAT_UserMarshal64",
@@ -2651,6 +2651,16 @@ static constexpr std::string_view uiautomationcore_exports[]{
 	"UiaRemoveEvent","UiaReturnRawElementProvider","UiaSetFocus","UiaTextRangeRelease","ValuePattern_SetValue","VirtualizedItemPattern_Realize",
 	"WindowPattern_Close","WindowPattern_SetWindowVisualState","WindowPattern_WaitForInputIdle",
 };
+static constexpr std::string_view lz32_exports[]{
+	"CopyLZFile","GetExpandedNameA","GetExpandedNameW","LZClose","LZCloseFile","LZCopy",
+	"LZCreateFileW","LZDone","LZInit","LZOpenFileA","LZOpenFileW","LZRead",
+	"LZSeek","LZStart",
+};
+static constexpr std::string_view loadperf_exports[]{
+	"BackupPerfRegistryToFileW","InstallPerfDllA","InstallPerfDllW","LoadPerfCounterTextStringsA","LoadPerfCounterTextStringsW","LpAcquireInstallationMutex",
+	"LpReleaseInstallationMutex","RestorePerfRegistryFromFileW","SetServiceAsTrustedA","SetServiceAsTrustedW","UnloadPerfCounterTextStringsA","UnloadPerfCounterTextStringsW",
+	"UpdatePerfNameFilesA","UpdatePerfNameFilesW",
+};
 static constexpr std::pair<std::string_view, std::span<const std::string_view>> libraries[]{
 	{"advapi32.dll", advapi32_exports},
 	{"bcrypt.dll", bcrypt_exports},
@@ -2712,4 +2722,6 @@ static constexpr std::pair<std::string_view, std::span<const std::string_view>> 
 	{"combase.dll", combase_exports},
 	{"wer.dll", wer_exports},
 	{"uiautomationcore.dll", uiautomationcore_exports},
+	{"lz32.dll", lz32_exports},
+	{"loadperf.dll", loadperf_exports},
 };

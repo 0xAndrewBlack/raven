@@ -2,6 +2,7 @@
 #include "actctx.h"
 
 #include "apiset.h"
+#include "text.h"
 #include "system_exports.h"
 
 #include <algorithm>
@@ -128,8 +129,16 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 		environment.set_last_error(126);
 		return nullptr;
 	}
-	const PEImage image(*bytes);
-	if (image.is_64 || !(image.characteristics & 0x2000)) {
+	// A file that is no program image at all, a type library tried as a resource module first, is ERROR_BAD_EXE_FORMAT.
+	std::optional<PEImage> parsed;
+	try {
+		parsed.emplace(*bytes);
+	} catch (const std::runtime_error &) {
+		environment.set_last_error(193);
+		return nullptr;
+	}
+	const PEImage &image = *parsed;
+	if (image.is_64 || (!(image.characteristics & 0x2000) && !(mapping_only && staged.empty()))) {
 		environment.set_last_error(193);
 		return nullptr;
 	}
@@ -138,9 +147,24 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 	auto &added = modules.add(identity, std::move(*bytes));
 	added.file = file;
 	staged.push_back(&added);
+	if (mapping_only && staged.size() == 1) {
+		added.imports.clear();
+		return &added;
+	}
 	std::string missing;
+	// A library's own manifest names the side-by-side assemblies its imports come from, the C runtime of its compiler most often.
+	// Its context is the one in effect while it and the libraries it brings in start, which the C runtime checks it was found by.
+	const auto own = activation_contexts().module_manifest(added.image);
+	const uint64_t context = own ? activation_contexts().create({*own, {}}) : importer_context;
+	if (context)
+		entry_contexts[&added] = context;
+	const auto outer = importer_context;
+	importer_context = context;
 	for (const auto &symbol : added.imports) {
 		const auto dependency = lowered(symbol.module);
+		if (own && !modules.all().contains(dependency))
+			if (const auto folder = activation_contexts().assembly_folder(*own, dependency))
+				bring(lowered(to_utf8(paths.dos(*folder))) + "\\" + dependency);
 		if (!modules.all().contains(dependency) && !bring(dependency)) {
 			missing += " " + symbol.module + "!";
 			continue;
@@ -151,6 +175,7 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 			missing += " " + symbol.module + "!" + (symbol.by_ordinal ? "#" + std::to_string(symbol.ordinal) : symbol.name);
 		}
 	}
+	importer_context = outer;
 	if (!missing.empty())
 		throw std::runtime_error("unresolved imports in " + identity + ":" + missing);
 	return &added;
@@ -183,8 +208,9 @@ bool NativeX86Loader::release(uint64_t handle)
 	if (--found->second.references)
 		return true;
 	const auto module = found->second.module;
+	const bool mapped_only = found->second.mapped_only;
 	held.erase(found);
-	if (call && module->image.entry) {
+	if (call && module->image.entry && !mapped_only) {
 		const uint64_t arguments[] = {module->loaded.base(), 0, 0};
 		const auto result = call(module->loaded.base() + module->image.entry, arguments);
 		if (result.stop != NativeStop::returned)
@@ -193,7 +219,7 @@ bool NativeX86Loader::release(uint64_t handle)
 	return true;
 }
 
-uint64_t NativeX86Loader::load(std::string name)
+uint64_t NativeX86Loader::load(std::string name, bool only_map)
 {
 	if (!call)
 		return 0;
@@ -204,6 +230,9 @@ uint64_t NativeX86Loader::load(std::string name)
 			return found->second.module->loaded.base();
 		}
 	staged.clear();
+	entry_contexts.clear();
+	importer_context = 0;
+	mapping_only = only_map;
 	const auto existing = modules.all().size();
 	bool mapped = false;
 	try {
@@ -227,17 +256,23 @@ uint64_t NativeX86Loader::load(std::string name)
 		}
 		std::vector<PEModule *> attached;
 		for (auto item = staged.rbegin(); item != staged.rend(); ++item) {
-			if (tls)
+			if (tls && !(only_map && *item == root))
 				for (const auto callback : tls->callbacks(**item)) {
 					const uint64_t arguments[] = {(*item)->loaded.base(), 1, 0};
 					const auto result = call(callback, arguments);
 					if (result.stop != NativeStop::returned)
 						throw result;
 				}
-			if (!(*item)->image.entry)
+			if (!(*item)->image.entry || (only_map && *item == root))
 				continue;
 			const uint64_t arguments[] = {(*item)->loaded.base(), 1, 0};
+			auto &contexts = activation_contexts();
+			const auto context = entry_contexts.find(*item);
+			const uint32_t thread = contexts.current_thread ? contexts.current_thread() : 0;
+			const auto cookie = context == entry_contexts.end() ? 0 : contexts.activate(thread, context->second);
 			const auto result = call((*item)->loaded.base() + (*item)->image.entry, arguments);
+			if (cookie)
+				contexts.deactivate(thread, cookie);
 			if (result.stop != NativeStop::returned)
 				throw result;
 			if (!uint32_t(result.value)) {
@@ -263,7 +298,7 @@ uint64_t NativeX86Loader::load(std::string name)
 			attached.push_back(*item);
 		}
 		if (key)
-			held[*key] = {root, 1};
+			held[*key] = {root, 1, only_map};
 		return root->loaded.base();
 	} catch (const NativeResult &) {
 		throw;

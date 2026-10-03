@@ -14,7 +14,8 @@ struct ImageMapping {
 // Owns shared storage; guest mappings must stop using its descriptor before destruction.
 class LoadedImage {
 public:
-	LoadedImage(const PEImage &image, uint64_t base);
+	// An image mapped only to be read keeps its contents as they are wherever it lands: nothing in it runs.
+	LoadedImage(const PEImage &image, uint64_t base, bool relocated = true);
 	~LoadedImage();
 	LoadedImage(const LoadedImage &) = delete;
 	LoadedImage &operator=(const LoadedImage &) = delete;

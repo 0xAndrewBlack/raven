@@ -2143,6 +2143,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		return NativeResult{NativeStop::returned, 0, 0, 0};
 	};
 	std::set<const PEModule *> pinned;
+	size_t data_serial = 0;
+	std::set<const PEModule *> apart_modules;
 	std::map<const PEModule *, uint64_t> references;
 	for (const auto &[name, module] : modules.all()) {
 		pinned.insert(module.get());
@@ -2176,6 +2178,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	};
 	module_api.set_loader([&](std::string name) -> uint64_t {
 		await_loader();
+		// DONT_RESOLVE_DLL_REFERENCES maps the library alone: its imports are not followed and it is not started, so even an image of
+		// managed code alone loads, as the runtime of .NET 2.0 loads its class library. A library loaded as a data file or for its
+		// resources is mapped the same way, whatever its width and even when it is a program, and stays out of the loader's list.
+		const uint32_t flags = module_api.load_flags();
+		const bool as_data = flags & 0x62;
+		const bool unresolved = (flags & 1) || as_data;
 		if (name.empty()) {
 			environment.set_last_error(126);
 			return 0;
@@ -2206,7 +2214,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					environment.set_last_error(126);
 					return 0;
 				}
-				explicit_files.emplace(identity, resolved->host);
+				// The file named now is the one to load, even where a library of the same name came from another folder before.
+				explicit_files.insert_or_assign(identity, resolved->host);
 			}
 			name = identity;
 		}
@@ -2315,34 +2324,81 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					std::cerr << "raven: library file not found: " << identity << '\n';
 				throw LoadFailure{126};
 			}
-			// Reject unsupported initialization before publishing an image.
-			const PEImage image(*bytes);
-			if (!image.is_64)
+			// A file that is no program image at all, a type library tried as a resource module first, is ERROR_BAD_EXE_FORMAT.
+			std::optional<PEImage> parsed;
+			try {
+				parsed.emplace(*bytes);
+			} catch (const std::runtime_error &) {
 				throw LoadFailure{193};
-			if (!(image.characteristics & 0x2000))
+			}
+			// Reject unsupported initialization before publishing an image.
+			const PEImage &image = *parsed;
+			const bool only_mapped = unresolved && staged.empty();
+			// An image of the other width maps only as data, or when it holds managed code alone, as a 64-bit process maps the 32-bit form
+			// of a class library for the runtime; either stays apart from the libraries that run.
+			const bool apart = only_mapped && (as_data || (!image.is_64 && image.il_only()));
+			if (!image.is_64 && !apart)
+				throw LoadFailure{193};
+			if (!(image.characteristics & 0x2000) && !only_mapped)
 				throw LoadFailure{120};
-			if (image.directories[13].address || image.directories[13].size)
+			if ((image.directories[13].address || image.directories[13].size) && !only_mapped)
 				for (const auto &descriptor : image.delay_imports())
 					if (!(image.file_span(descriptor.descriptor_address, 4)[0] & 1))
 						throw LoadFailure{120};
 			// Mixed managed and native code starts through its entry point like any library, which hands it to the runtime; an image
-			// of managed code alone is the runtime's to map.
-			if (image.il_only())
+			// of managed code alone is the runtime's to map, unless it is only mapped.
+			if (image.il_only() && !(unresolved && staged.empty()))
 				throw LoadFailure{120};
 			staged.reserve(staged.size() + 1);
-			auto &module = modules.add(identity, std::move(*bytes));
+			// A library read as data takes a name of its own, so that nothing loaded later resolves imports through it.
+			auto &module = apart ? modules.add_data(identity + "#data" + std::to_string(++data_serial), std::move(*bytes)) :
+				modules.add(identity, std::move(*bytes));
+			if (apart)
+				apart_modules.insert(&module);
 			module.file = origin;
 			staged.push_back({&module});
 			references.emplace(&module, 0);
 			return module;
 		};
+		std::map<const PEModule *, uint64_t> entry_contexts;
 		try {
 			auto &root = acquire(name);
+			if (unresolved && staged.size() == 1 && staged.front().module == &root)
+				root.imports.clear();
 			// Follow only activated import forwarders, not every optional export. Every missing export is reported before the load fails.
 			bool missing = false;
 			for (size_t index = 0; index < staged.size(); ++index) {
+				// A library's own manifest names the side-by-side assemblies its imports come from, the C runtime of its compiler most often.
+				// Its context is the one in effect while it and the libraries it brings in start, which the C runtime checks it was found by.
+				const auto own = activation_contexts().module_manifest(staged[index].module->image);
+				uint64_t context = own ? activation_contexts().create({*own, {}}) : 0;
+				if (const auto inherited = entry_contexts.find(staged[index].module); !context && inherited != entry_contexts.end())
+					context = inherited->second;
+				if (context)
+					entry_contexts[staged[index].module] = context;
 				for (const auto &symbol : staged[index].module->imports) {
-					acquire(symbol.module);
+					if (own)
+						if (const auto folder = activation_contexts().assembly_folder(*own, symbol.module)) {
+							auto wanted = symbol.module;
+							for (auto &character : wanted)
+								if (character >= 'A' && character <= 'Z')
+									character = static_cast<char>(character + ('a' - 'A'));
+							std::error_code error;
+							if (!modules.all().contains(wanted) && !explicit_files.contains(wanted))
+								for (const auto &entry : std::filesystem::directory_iterator(*folder, error)) {
+									auto candidate = entry.path().filename().string();
+									for (auto &character : candidate)
+										if (character >= 'A' && character <= 'Z')
+											character = static_cast<char>(character + ('a' - 'A'));
+									if (candidate == wanted && entry.is_regular_file(error)) {
+										explicit_files.emplace(wanted, entry.path());
+										break;
+									}
+								}
+						}
+					auto &dependency = acquire(symbol.module);
+					if (context)
+						entry_contexts.emplace(&dependency, context);
 					for (;;) {
 						try {
 							modules.resolve(symbol);
@@ -2371,6 +2427,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				process.map_image(item.module->loaded);
 				register_image(memory, *item.module);
 				item.mapped = true;
+				if (apart_modules.contains(item.module))
+					continue;
 				loader_data.add(*item.module);
 				item.listed = true;
 				tls.add(*item.module);
@@ -2382,10 +2440,18 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				if (found == staged.end())
 					continue;
 				guest_started = true;
+				// A library only mapped is never told it is attached, nor later that it is detached.
+				if (unresolved && module == &root)
+					continue;
 				checked(notify_tls(*module, 1));
 				if (module->image.entry) {
 					const uint64_t arguments[] = {module->loaded.base(), 1, 0};
+					const auto context = entry_contexts.find(module);
+					const auto thread = threads.current_id();
+					const auto cookie = context == entry_contexts.end() ? 0 : activation_contexts().activate(thread, context->second);
 					const auto result = invoke(module->loaded.base() + module->image.entry, arguments);
+					if (cookie)
+						activation_contexts().deactivate(thread, cookie);
 					checked(result);
 					if (!static_cast<uint32_t>(result.value)) {
 						checked(detach(*module, 0));

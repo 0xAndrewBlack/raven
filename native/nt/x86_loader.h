@@ -19,8 +19,9 @@ class NativeX86Loader {
 public:
 	NativeX86Loader(NativeProcess &process, NativeEnvironment &environment, ModuleSet &modules, const NativePaths &paths,
 		std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call);
-	// The base of the loaded library, or zero with the last error set.
-	uint64_t load(std::string name);
+	// The base of the loaded library, or zero with the last error set. A library only mapped, as DONT_RESOLVE_DLL_REFERENCES asks, has
+	// its imports left alone and is never started or told it is detached.
+	uint64_t load(std::string name, bool only_map = false);
 	// The base of a library already loaded from this path, zero when there is none; it takes no reference.
 	uint64_t find(const std::string &name) const;
 	// Gives one reference back; at the last one the library is told its process is done with it and a later load starts it afresh.
@@ -41,9 +42,14 @@ private:
 	const NativePaths &paths;
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call;
 	std::vector<PEModule *> staged;
+	// The activation context each new library starts in: its own manifest's, else the one of the library that imported it.
+	std::map<const PEModule *, uint64_t> entry_contexts;
+	uint64_t importer_context = 0;
+	bool mapping_only = false;
 	struct Held {
 		PEModule *module;
 		size_t references;
+		bool mapped_only = false;
 	};
 	// Libraries loaded from a file, by the lower case host path they were read from.
 	std::map<std::string, Held> held;

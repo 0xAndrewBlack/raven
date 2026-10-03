@@ -40,6 +40,22 @@ int raven_entry(void)
 	int (*answer)(void) = (int (*)(void))GetProcAddress(plugin, "plugin_answer");
 	if (!answer || answer() != 42)
 		return 4;
+	/* A file that is no program image, as a type library tried as a resource module first, fails to load with ERROR_BAD_EXE_FORMAT. */
+	lstrcpyW(slash + 1, L"plugins\\notes.tlb");
+	HANDLE notes = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	DWORD written = 0;
+	if (notes == INVALID_HANDLE_VALUE || !WriteFile(notes, "not a program", 13, &written, NULL))
+		return 8;
+	CloseHandle(notes);
+	if (LoadLibraryExW(path, NULL, LOAD_LIBRARY_AS_DATAFILE) || GetLastError() != ERROR_BAD_EXE_FORMAT)
+		return 9;
+	/* The type library loader reads such a file through the LZ functions, which give a plain file as it is. */
+	OFSTRUCT record;
+	char text[4] = {0};
+	INT packed = LZOpenFileW(path, &record, OF_READ);
+	if (packed < 0 || LZSeek(packed, 4, 0) != 4 || LZRead(packed, text, 3) != 3 || text[0] != 'a' || text[2] != 'p')
+		return 10;
+	LZClose(packed);
 	wsprintfW(command, L"\"%s\" --c %u", self, GetCurrentProcessId());
 	STARTUPINFOW startup = {sizeof startup};
 	PROCESS_INFORMATION started;

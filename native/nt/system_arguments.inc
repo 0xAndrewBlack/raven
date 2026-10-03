@@ -2549,6 +2549,14 @@ static constexpr std::pair<std::string_view, uint8_t> uiautomationcore_words[]{
 	{"UiaRemoveEvent",1},{"UiaReturnRawElementProvider",4},{"UiaSetFocus",1},{"UiaTextRangeRelease",1},{"ValuePattern_SetValue",2},{"VirtualizedItemPattern_Realize",1},
 	{"WindowPattern_Close",1},{"WindowPattern_SetWindowVisualState",2},{"WindowPattern_WaitForInputIdle",3},
 };
+static constexpr std::pair<std::string_view, uint8_t> lz32_words[]{
+	{"CopyLZFile",2},{"GetExpandedNameA",2},{"GetExpandedNameW",2},{"LZClose",1},{"LZCopy",2},{"LZDone",0},
+	{"LZInit",1},{"LZOpenFileA",3},{"LZOpenFileW",3},{"LZRead",3},{"LZSeek",3},{"LZStart",0},
+};
+static constexpr std::pair<std::string_view, uint8_t> loadperf_words[]{
+	{"BackupPerfRegistryToFileW",2},{"InstallPerfDllA",3},{"InstallPerfDllW",3},{"LoadPerfCounterTextStringsA",2},{"LoadPerfCounterTextStringsW",2},{"RestorePerfRegistryFromFileW",2},
+	{"SetServiceAsTrustedA",2},{"SetServiceAsTrustedW",2},{"UnloadPerfCounterTextStringsA",2},{"UnloadPerfCounterTextStringsW",2},{"UpdatePerfNameFilesA",4},{"UpdatePerfNameFilesW",4},
+};
 static constexpr std::pair<std::string_view, std::span<const std::pair<std::string_view, uint8_t>>> argument_tables[]{
 	{"advapi32.dll", advapi32_words},
 	{"bcrypt.dll", bcrypt_words},
@@ -2610,4 +2618,6 @@ static constexpr std::pair<std::string_view, std::span<const std::pair<std::stri
 	{"combase.dll", combase_words},
 	{"wer.dll", wer_words},
 	{"uiautomationcore.dll", uiautomationcore_words},
+	{"lz32.dll", lz32_words},
+	{"loadperf.dll", loadperf_words},
 };

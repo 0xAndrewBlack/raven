@@ -41,7 +41,7 @@ bool NativeObjectAPI::dispatch(std::string_view name)
 	const bool create=name=="NtCreateEvent" || name=="CreateEventA" || name=="CreateEventW";
 	// An event with a name, whether made or opened, is a shared object that the registry handlers keep.
 	if (!nt && create && process.api_arguments(4)[3]) return false;
-	const bool close=name=="NtClose" || name=="CloseHandle" || name=="_lclose";
+	const bool close=name=="NtClose" || name=="CloseHandle" || name=="_lclose" || name=="LZClose";
 	const bool set=name=="NtSetEvent" || name=="SetEvent" || name=="NtResetEvent" || name=="ResetEvent";
 	const bool query=name=="NtQueryEvent";
 	const bool wait=name=="NtWaitForSingleObject" || (!cooperative && name=="WaitForSingleObject");
@@ -120,7 +120,7 @@ bool NativeObjectAPI::dispatch(std::string_view name)
 		status=0xc0000005U;
 	}
 	if (!nt && status && !(wait && status==0x102)) environment.set_last_error(error(status));
-	if (name=="_lclose") { process.return_api(status ? 0xffffffffU : 0U); return true; }
+	if (name=="_lclose" || name=="LZClose") { process.return_api(status && name=="_lclose" ? 0xffffffffU : 0U); return true; }
 	process.return_api(nt ? status : wait ? status==0 ? 0 : status==0x102 ? 0x102 : UINT32_MAX : status ? 0 : result);
 	return true;
 }

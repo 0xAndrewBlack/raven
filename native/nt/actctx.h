@@ -41,6 +41,10 @@ public:
 	// The side-by-side folder that serves a library named alone: an assembly the context in effect depends on, directly or through
 	// another, declares the file. The loader looks there before any other place, as Windows redirects it.
 	std::optional<std::filesystem::path> library_folder(std::string_view name) const;
+	// The manifest a library carries for the libraries it imports itself, resource 2 of type RT_MANIFEST, and the side-by-side folder
+	// an assembly it depends on serves a library from: the loader looks there for that library's imports, as Windows does.
+	std::optional<Assembly> module_manifest(const PEImage &image) const;
+	std::optional<std::filesystem::path> assembly_folder(const Assembly &root, std::string_view name) const;
 	// The place in a context of the assembly that declares a library: 1 is the context's own manifest, its dependencies follow.
 	std::optional<uint32_t> library_roster(uint64_t handle, std::string_view name) const;
 	// Parses a manifest's text; dependencies resolve through the WinSxS manifests of the prefix for the process's architecture.
