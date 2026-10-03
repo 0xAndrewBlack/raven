@@ -421,7 +421,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[0], bytes);
 		call.ret(1);
 	});
-	// The version as ntdll reports it, the same Windows 10 workstation; the extended block is filled when the caller sized for it.
+	// The version as ntdll reports it, Windows 10 unless a compatibility layer says otherwise; the extended block is filled when the
+	// caller sized for it.
 	registry.add("RtlGetVersion", 1, [](ApiCall &call) {
 		const auto size = call.load<uint32_t>(call[0]);
 		if (size < 276) {
@@ -429,7 +430,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		std::vector<uint8_t> bytes(size >= 284 ? 284 : 276);
-		const uint32_t fields[5] = {size, 10, 0, 19045, 2};
+		const auto version = activation_contexts().system_version();
+		const uint32_t fields[5] = {size, version.major, version.minor, version.build, 2};
 		std::memcpy(bytes.data(), fields, 20);
 		if (bytes.size() == 284)
 			bytes[282] = 1;
@@ -659,7 +661,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		const uint32_t types = call.u32(1);
 		const uint64_t mask = call[2];
 		// The version the program's manifest makes Windows report, with no service pack; the native call compares the real one.
-		const auto version = native ? ActivationContexts::Version{10, 0, 19045} : activation_contexts().reported_version();
+		const auto version = native ? activation_contexts().system_version() : activation_contexts().reported_version();
 		const auto compare = [&](unsigned bit, uint64_t have, uint64_t want) {
 			switch ((mask >> (bit * 3)) & 7) {
 			case 1: return have == want;
@@ -947,6 +949,9 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			at = end == block.npos ? block.size() : end + 1;
 		}
 	}
+	// The compatibility layer a program was started with changes the version Windows reports to it.
+	if (const auto layer = variables->values.find(u"__COMPAT_LAYER"); layer != variables->values.end())
+		activation_contexts().set_compatibility_layer(layer->second.second);
 	context.environment_block = [variables]() {
 		std::u16string block;
 		for (const auto &[key, entry] : variables->values) {

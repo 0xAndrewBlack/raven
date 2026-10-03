@@ -59,9 +59,14 @@ public:
 	std::optional<std::string> registered_name(uint32_t thread, std::string_view name) const;
 	std::optional<std::string> lookup_name(uint32_t thread, std::string_view name) const;
 	// The version GetVersionEx and VerifyVersionInfo report to the process, as Windows 10 and later do: 10.0 for a program whose manifest
-	// supports Windows 10, 6.3 for one that supports Windows 8.1, and 6.2 for every other program.
+	// supports Windows 10, 6.3 for one that supports Windows 8.1, and 6.2 for every other program. A compatibility layer the process was
+	// started with (__COMPAT_LAYER, as the compatibility engine reads it) reports the version of the Windows it names instead.
 	struct Version { uint32_t major, minor, build; };
 	Version reported_version() const;
+	// The real version, which RtlGetVersion reports whatever the manifest says; a compatibility layer changes this one too, as it
+	// rewrites the version fields of the process environment block that the call reads.
+	Version system_version() const { return layer_version ? *layer_version : Version{10, 0, 19045}; }
+	void set_compatibility_layer(std::u16string_view layers);
 	std::function<uint32_t()> current_thread;
 	bool wide_process = true;
 
@@ -72,6 +77,7 @@ private:
 	std::map<uint64_t, Context> contexts;
 	std::map<uint32_t, std::vector<std::pair<uint64_t, uint64_t>>> stacks;
 	uint64_t next_handle = 0x7e000001, next_cookie = 1, process_default = 0;
+	std::optional<Version> layer_version;
 	std::optional<Assembly> resolve(const Assembly &identity) const;
 	const Assembly *declaring(const Assembly &root, std::string_view name, uint32_t &index) const;
 };

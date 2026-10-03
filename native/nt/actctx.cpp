@@ -282,8 +282,36 @@ std::optional<uint32_t> ActivationContexts::library_roster(uint64_t handle, std:
 	return std::nullopt;
 }
 
+void ActivationContexts::set_compatibility_layer(std::u16string_view layers)
+{
+	// The layers are names separated by spaces, after an optional "~" or "!"; the first that names a version of Windows decides.
+	static const std::pair<std::string_view, Version> versions[] = {{"WIN2000", {5, 0, 2195}}, {"WINXP", {5, 1, 2600}},
+		{"WINXPSP1", {5, 1, 2600}}, {"WINXPSP2", {5, 1, 2600}}, {"WINXPSP3", {5, 1, 2600}}, {"WINSRV03SP1", {5, 2, 3790}},
+		{"WINSRV03SP2", {5, 2, 3790}}, {"VISTARTM", {6, 0, 6000}}, {"VISTASP1", {6, 0, 6001}}, {"VISTASP2", {6, 0, 6002}},
+		{"WIN7RTM", {6, 1, 7600}}, {"WIN7SP1", {6, 1, 7601}}, {"WIN8RTM", {6, 2, 9200}}, {"WIN81RTM", {6, 3, 9600}}};
+	std::string name;
+	const auto decide = [&] {
+		for (const auto &[layer, version] : versions)
+			if (name == layer && !layer_version)
+				layer_version = version;
+		name.clear();
+	};
+	for (const auto character : layers) {
+		if (character == u' ' || character == u'\t') {
+			decide();
+			continue;
+		}
+		if ((character == u'~' || character == u'!') && name.empty())
+			continue;
+		name.push_back(character >= u'a' && character <= u'z' ? char(character - 32) : char(character < 128 ? character : '?'));
+	}
+	decide();
+}
+
 ActivationContexts::Version ActivationContexts::reported_version() const
 {
+	if (layer_version)
+		return *layer_version;
 	const auto context = contexts.find(process_default);
 	if (context != contexts.end()) {
 		const auto &supported = context->second.root.supported_os;
