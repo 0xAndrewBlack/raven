@@ -376,6 +376,68 @@ void register_service_api(ApiRegistry &registry, KernelContext &context, NativeR
 	};
 	registry.add("ChangeServiceConfig2W", 3, [change_config2](ApiCall &call) { change_config2(call, true); });
 	registry.add("ChangeServiceConfig2A", 3, [change_config2](ApiCall &call) { change_config2(call, false); });
+	// The optional settings read back: the description that was kept, no failure actions and no delayed start. A buffer too small
+	// learns the size it needs.
+	const auto query_config2 = [&objects, &hive, with_key](ApiCall &call, bool wide) {
+		const auto service = objects.object_as<ServiceHandle>(call[0]);
+		if (!service || !call[4]) {
+			call.fail(service ? 87 : 6);
+			return;
+		}
+		const size_t pointer = call.pointer_width();
+		std::vector<uint8_t> block;
+		std::optional<size_t> text_slot;
+		std::vector<uint8_t> text;
+		switch (call.u32(1)) {
+		case 1: {
+			std::u16string description;
+			with_key(service->name, false, [&](uint64_t key) {
+				uint32_t type = 0;
+				std::vector<uint8_t> data;
+				if (!hive.query(key, u"Description", type, data) && data.size() >= 2) {
+					description.assign(reinterpret_cast<const char16_t *>(data.data()), data.size() / 2);
+					while (!description.empty() && !description.back())
+						description.pop_back();
+				}
+			});
+			block.resize(pointer);
+			if (wide) {
+				text.resize((description.size() + 1) * 2);
+				std::memcpy(text.data(), description.data(), description.size() * 2);
+			} else {
+				const auto narrow = to_utf8(description);
+				text.assign(narrow.begin(), narrow.end());
+				text.push_back(0);
+			}
+			text_slot = 0;
+			break;
+		}
+		case 2:
+			block.resize(pointer == 8 ? 40 : 20);
+			break;
+		case 3:
+			block.resize(4);
+			break;
+		default:
+			call.fail(124);
+			return;
+		}
+		const size_t needed = block.size() + text.size();
+		call.store<uint32_t>(call[4], uint32_t(needed));
+		if (!call[2] || call.u32(3) < needed) {
+			call.fail(122);
+			return;
+		}
+		if (text_slot) {
+			const uint64_t address = call[2] + block.size();
+			std::memcpy(block.data() + *text_slot, &address, pointer);
+		}
+		block.insert(block.end(), text.begin(), text.end());
+		call.write(call[2], block);
+		call.ret(1);
+	};
+	registry.add("QueryServiceConfig2W", 5, [query_config2](ApiCall &call) { query_config2(call, true); });
+	registry.add("QueryServiceConfig2A", 5, [query_config2](ApiCall &call) { query_config2(call, false); });
 	// The security of a service is a self-relative descriptor kept with its configuration; a service that never had one set grants
 	// Administrators and LocalSystem every right and everyone else the right to read its state.
 	registry.add("QueryServiceObjectSecurity", 5, [&objects, with_key, &hive](ApiCall &call) {

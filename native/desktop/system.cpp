@@ -224,8 +224,12 @@ void NativeWindows::post_due_timers()
 
 bool NativeWindows::system_dispatch(std::string_view name)
 {
-	const bool ansi = name == "wsprintfA";
-	const bool format = name == "wsprintfW" || ansi;
+	const bool ansi = name == "wsprintfA" || name == "wnsprintfA" || name == "wvsprintfA" || name == "wvnsprintfA";
+	// wnsprintf takes the buffer's size in characters before the format and never writes past it; the wv forms take their arguments
+	// from a va_list, a pointer to them in memory.
+	const bool bounded = name == "wnsprintfA" || name == "wnsprintfW" || name == "wvnsprintfA" || name == "wvnsprintfW";
+	const bool listed = name.starts_with("wv");
+	const bool format = name == "wsprintfW" || name == "wsprintfA" || name == "wvsprintfW" || name == "wvsprintfA" || bounded;
 	if (name != "GetDesktopWindow" && name != "PtInRect" && name != "SetRect" && name != "TranslateAcceleratorW" && name != "SetMenu" &&
 		name != "GetMenuItemRect" && name != "CheckMenuItem" && name != "SetCapture" &&
 		name != "ReleaseCapture" && name != "SetTimer" && name != "SetCoalescableTimer" && name != "KillTimer" && !format)
@@ -383,19 +387,20 @@ bool NativeWindows::system_dispatch(std::string_view name)
 			result = 1;
 		} else {
 			// cdecl variadic: count the consumed words from the format string before reading them off the stack.
-			const auto head = process.api_arguments(2);
+			const size_t first = bounded ? 2 : 1;
+			const auto head = process.api_arguments(first + 1);
 			std::u16string pattern;
 			if (ansi) {
 				std::string narrow;
 				for (size_t index = 0; index < 4096; ++index) {
-					const auto byte = process.read_memory(head[1] + index, 1)[0];
+					const auto byte = process.read_memory(head[first] + index, 1)[0];
 					if (!byte)
 						break;
 					narrow.push_back(char(byte));
 				}
 				pattern = from_ansi(narrow, 1252);
 			} else {
-				pattern = window_text(head[1]);
+				pattern = window_text(head[first]);
 			}
 			size_t words = 0;
 			for (size_t at = 0; at < pattern.size();) {
@@ -412,9 +417,15 @@ bool NativeWindows::system_dispatch(std::string_view name)
 			}
 			if (words > 64)
 				throw uint32_t(87);
-			const auto args = process.api_arguments(2 + words);
-			size_t next = 2;
-			const auto take = [&] { return args[next++]; };
+			const auto args = process.api_arguments(first + 1 + (listed ? 1 : words));
+			size_t next = first + 1;
+			const size_t slot = process.mode() == NativeMode::x86 ? 4 : 8;
+			const auto take = [&]() -> uint64_t {
+				if (!listed)
+					return args[next++];
+				const auto bytes = process.read_memory(args[first + 1] + (next++ - first - 1) * slot, slot);
+				return read_le(bytes, 0, slot);
+			};
 			std::u16string output;
 			for (size_t at = 0; at < pattern.size();) {
 				const auto c = pattern[at++];
@@ -494,8 +505,11 @@ bool NativeWindows::system_dispatch(std::string_view name)
 					body.insert(item->left ? body.end() : body.begin(), u' ');
 				output += body;
 			}
-			if (output.size() > 1023)
-				output.resize(1023);
+			const int64_t capacity = bounded ? int64_t(int32_t(uint32_t(head[1]))) : 1024;
+			if (capacity <= 0)
+				throw uint32_t(87);
+			if (int64_t(output.size()) > capacity - 1)
+				output.resize(size_t(capacity - 1));
 			std::vector<uint8_t> bytes;
 			if (ansi) {
 				const auto narrow = to_ansi(output, 1252);

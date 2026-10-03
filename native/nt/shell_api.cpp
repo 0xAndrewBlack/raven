@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -393,6 +394,8 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		const auto result = open_target(verb.empty() ? std::u16string(u"open") : verb, text(2), text(3), text(4), started);
 		call.store_pointer(at(6), result);
 		if (result <= 32) {
+			if (std::getenv("RAVEN_TRACE_FAIL"))
+				std::cerr << "raven: ShellExecuteEx " << to_utf8(text(2)) << ' ' << to_utf8(text(3)) << " fails: " << result << '\n';
 			call.fail(uint32_t(result == 31 ? 1155 : result));
 			return;
 		}

@@ -234,6 +234,8 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("ImmAssociateContextEx", 3, [](ApiCall &call) { call.ret(0); });
 	registry.add("ImmGetDefaultIMEWnd", 1, [](ApiCall &call) { call.ret(0); });
 	registry.add("ImmIsIME", 1, [](ApiCall &call) { call.ret(0); });
+	// Turning input methods off for a thread succeeds: there are none to turn off.
+	registry.add("ImmDisableIME", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("ImmGetCompositionStringW", 4, [](ApiCall &call) { call.ret(uint32_t(-1)); });
 	registry.add("ImmSetCompositionStringW", 6, [](ApiCall &call) { call.ret(0); });
 	registry.add("ImmSetCompositionWindow", 2, [](ApiCall &call) { call.ret(0); });
@@ -868,32 +870,34 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	// The event log: a source opens, and what a program reports there goes nowhere, as no one reads it; RAVEN_TRACE_DEBUG prints it, which
 	// is often the reason a program gave up.
 	struct EventSource : KernelObject {};
-	registry.add("RegisterEventSourceW", 2, [&context](ApiCall &call) {
-		const auto made = context.objects.add_object(std::make_shared<EventSource>());
-		if (made.status) {
-			call.fail(8, 0);
-			return;
-		}
-		call.ret(made.value);
-	});
+	for (const bool wide : {true, false}) {
+		registry.add(wide ? "RegisterEventSourceW" : "RegisterEventSourceA", 2, [&context](ApiCall &call) {
+			const auto made = context.objects.add_object(std::make_shared<EventSource>());
+			if (made.status) {
+				call.fail(8, 0);
+				return;
+			}
+			call.ret(made.value);
+		});
+		registry.add(wide ? "ReportEventW" : "ReportEventA", 9, [&context, wide](ApiCall &call) {
+			if (!context.objects.object_as<EventSource>(call[0])) {
+				call.fail(6);
+				return;
+			}
+			static const bool shown = std::getenv("RAVEN_TRACE_DEBUG") != nullptr;
+			if (shown)
+				for (uint32_t index = 0; index < (call.u32(5) & 0xffff) && call[7]; ++index)
+					if (const uint64_t text = call.load_pointer(call[7] + index * call.pointer_width()))
+						std::fprintf(stderr, "event: %s\n", wide ? to_utf8(call.wide(text, size_t(1) << 20)).c_str() : call.narrow(text, size_t(1) << 20).c_str());
+			call.ret(1);
+		});
+	}
 	registry.add("DeregisterEventSource", 1, [&context](ApiCall &call) {
 		if (!context.objects.object_as<EventSource>(call[0])) {
 			call.fail(6);
 			return;
 		}
 		context.objects.close(call[0]);
-		call.ret(1);
-	});
-	registry.add("ReportEventW", 9, [&context](ApiCall &call) {
-		if (!context.objects.object_as<EventSource>(call[0])) {
-			call.fail(6);
-			return;
-		}
-		static const bool shown = std::getenv("RAVEN_TRACE_DEBUG") != nullptr;
-		if (shown)
-			for (uint32_t index = 0; index < (call.u32(5) & 0xffff) && call[7]; ++index)
-				if (const uint64_t text = call.load_pointer(call[7] + index * call.pointer_width()))
-					std::fprintf(stderr, "event: %s\n", to_utf8(call.wide(text, size_t(1) << 20)).c_str());
 		call.ret(1);
 	});
 	// No error object is set for the thread.

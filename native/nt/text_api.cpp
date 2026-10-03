@@ -668,6 +668,8 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("SetConsoleMode", 2, [](ApiCall &call) { call.fail(6); });
 	registry.add("WriteConsoleW", 5, [](ApiCall &call) { call.fail(6); });
 	registry.add("ReadConsoleW", 5, [](ApiCall &call) { call.fail(6); });
+	// No console has a window of its own, as for a process without a console.
+	registry.add("GetConsoleWindow", 0, [](ApiCall &call) { call.ret(0); });
 
 	registry.add("GetUserDefaultLCID", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("GetSystemDefaultLCID", 0, [](ApiCall &call) { call.ret(0x409); });

@@ -1291,6 +1291,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 set_tests_properties(native_settings_reset_${installer_arch} PROPERTIES FIXTURES_SETUP settings_${installer_arch})
                 set_tests_properties(native_settings_${installer_arch} PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED settings_${installer_arch}
                     PASS_REGULAR_EXPRESSION "Native entry returned 0 .*Native entry returned 0 " ENVIRONMENT RAVEN_PREFIX=${fixture}/settings-prefix)
+                # What the setups of older frameworks rely on: executable heaps, read-only folders, the ANSI event log, the 64-bit .NET switch,
+                # unquoted program paths, service settings, critical section fields, data file loads and bounded formatting.
+                add_custom_command(OUTPUT ${fixture}/legacy.exe
+                    COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
+                        -o ${fixture}/legacy.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/legacy_client.c -lshlwapi -ladvapi32 -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/legacy_client.c VERBATIM)
+                add_custom_target(legacy_fixture_${installer_arch} ALL DEPENDS ${fixture}/legacy.exe)
+                add_test(NAME native_legacy_setup_services_${installer_arch} COMMAND raven --run-process --execution=native --timeout-ms=60000 ${fixture}/legacy.exe)
+                set_tests_properties(native_legacy_setup_services_${installer_arch} PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${fixture}/legacy-prefix)
                 # What a Visual C++ redistributable leaves for programs, checked by the redistributable workflow below.
                 add_custom_command(OUTPUT ${fixture}/redist-check.exe
                     COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp

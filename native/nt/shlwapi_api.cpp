@@ -24,8 +24,9 @@ bool separator(char16_t character)
 size_t file_name_start(std::u16string_view path)
 {
 	size_t start = 0;
-	for (size_t at = 0; at < path.size(); ++at)
-		if (separator(path[at]) || (path[at] == u':' && at == 1))
+	// A separator or colon starts the name only when a name follows it: "C:" and "C:\" are their own file names, as Windows answers.
+	for (size_t at = 0; at + 1 < path.size(); ++at)
+		if ((separator(path[at]) || path[at] == u':') && !separator(path[at + 1]))
 			start = at + 1;
 	return start;
 }
@@ -64,10 +65,12 @@ bool url_is(std::u16string_view text, uint32_t kind)
 
 size_t extension_start(std::u16string_view path)
 {
-	const size_t name = file_name_start(path);
+	// The last dot after the last separator, a trailing one included.
 	size_t dot = std::u16string_view::npos;
-	for (size_t at = name; at < path.size(); ++at)
-		if (path[at] == u'.')
+	for (size_t at = 0; at < path.size(); ++at)
+		if (separator(path[at]) || (path[at] == u':' && at == 1))
+			dot = std::u16string_view::npos;
+		else if (path[at] == u'.')
 			dot = at;
 	return dot == std::u16string_view::npos ? path.size() : dot;
 }

@@ -666,6 +666,31 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		call.write(call[5], data);
 		call.ret(0);
 	});
+	// Whether .NET programs run as 64-bit ones on 64-bit Windows: the system reads it from Enable64Bit of the framework's key, and the
+	// framework's setup turns it on through SetComPlusPackageInstallStatus. Only bit 0 has a meaning.
+	registry.add("GetComPlusPackageInstallStatus", 0, [&hive](ApiCall &call) {
+		uint64_t key = 0;
+		uint32_t type = 0, status = 1;
+		std::vector<uint8_t> data;
+		if (!hive.open(0x80000002ULL, u"SOFTWARE\\Microsoft\\.NETFramework", key)) {
+			if (!hive.query(key, u"Enable64Bit", type, data) && type == 4 && data.size() == 4)
+				std::memcpy(&status, data.data(), 4);
+			hive.close(key);
+		}
+		call.ret(status);
+	});
+	registry.add("SetComPlusPackageInstallStatus", 1, [&hive](ApiCall &call) {
+		const uint32_t status = call.u32(0);
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		if (status & ~1U || hive.create(0x80000002ULL, u"SOFTWARE\\Microsoft\\.NETFramework", key, disposition)) {
+			call.fail(87);
+			return;
+		}
+		hive.set(key, u"Enable64Bit", 4, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&status), 4));
+		hive.close(key);
+		call.ret(1);
+	});
 	(void)error_no_more_items;
 	(void)error_file_not_found;
 }

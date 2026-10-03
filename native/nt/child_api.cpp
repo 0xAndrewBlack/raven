@@ -58,34 +58,50 @@ std::shared_ptr<ProcessObject> start_program(KernelContext &context, const std::
 	std::vector<InheritedHandle> inherited)
 {
 	auto &paths = context.paths;
-	const auto name = application.empty() ? first_word(line) : application;
-	if (name.empty()) {
+	// Without an application name, an unquoted command line names its program by its first blank-separated words: Windows tries the
+	// shortest run of words first and takes the first that is a file, so a path with spaces runs without quotes.
+	std::vector<std::u16string> names;
+	if (!application.empty())
+		names.push_back(application);
+	else if (const auto start = line.find_first_not_of(u" \t"); start != line.npos && line[start] != u'"') {
+		for (auto end = line.find_first_of(u" \t", start); end != line.npos; end = line.find_first_of(u" \t", end + 1))
+			names.emplace_back(line.substr(start, end - start));
+		names.emplace_back(line.substr(start));
+		while (!names.back().empty() && (names.back().back() == u' ' || names.back().back() == u'\t'))
+			names.back().pop_back();
+	} else
+		names.push_back(first_word(line));
+	if (names.front().empty()) {
 		error = 87;
 		return nullptr;
 	}
 	const auto own_directory = context.launch.image_path.substr(0, std::max<size_t>(context.launch.image_path.find_last_of(u'\\'), 0));
-	std::vector<std::u16string> candidates;
-	const bool qualified = name.find_first_of(u"\\/:") != name.npos;
-	const bool extension = name.find(u'.') != name.npos;
-	const auto add = [&](std::u16string path) {
-		candidates.push_back(path);
-		if (!extension)
-			candidates.push_back(path + u".exe");
-	};
-	if (qualified) {
-		add(name);
-	} else {
-		add(own_directory + u"\\" + name);
-		add(paths.current() + u"\\" + name);
-		add(u"C:\\Windows\\System32\\" + name);
-		add(u"C:\\Windows\\" + name);
-	}
-	std::optional<NativePaths::Resolved> image;
-	for (const auto &candidate : candidates)
-		if (const auto resolved = paths.resolve(candidate); resolved && resolved->exists && std::filesystem::is_regular_file(resolved->host)) {
-			image = resolved;
-			break;
+	const auto find = [&](const std::u16string &name) -> std::optional<NativePaths::Resolved> {
+		std::vector<std::u16string> candidates;
+		const bool qualified = name.find_first_of(u"\\/:") != name.npos;
+		const bool extension = name.find(u'.', name.find_last_of(u"\\/") == name.npos ? 0 : name.find_last_of(u"\\/")) != name.npos;
+		const auto add = [&](std::u16string path) {
+			candidates.push_back(path);
+			if (!extension)
+				candidates.push_back(path + u".exe");
+		};
+		if (qualified) {
+			add(name);
+		} else {
+			add(own_directory + u"\\" + name);
+			add(paths.current() + u"\\" + name);
+			add(u"C:\\Windows\\System32\\" + name);
+			add(u"C:\\Windows\\" + name);
 		}
+		for (const auto &candidate : candidates)
+			if (const auto resolved = paths.resolve(candidate); resolved && resolved->exists && std::filesystem::is_regular_file(resolved->host))
+				return resolved;
+		return std::nullopt;
+	};
+	std::optional<NativePaths::Resolved> image;
+	for (const auto &name : names)
+		if ((image = find(name)))
+			break;
 	if (!image) {
 		error = 2;
 		return nullptr;
@@ -99,7 +115,7 @@ std::shared_ptr<ProcessObject> start_program(KernelContext &context, const std::
 	}
 	ChildLaunch launch;
 	launch.image = image->host;
-	launch.command_line = line.empty() ? u"\"" + name + u"\"" : line;
+	launch.command_line = line.empty() ? u"\"" + names.front() + u"\"" : line;
 	launch.directory = directory.empty() ? paths.current() : directory;
 	std::copy(std::begin(standard), std::end(standard), launch.standard);
 	launch.environment = environment;

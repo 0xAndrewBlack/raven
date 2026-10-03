@@ -880,6 +880,12 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			call.set_last_error(missing(*resolved));
 			return;
 		}
+		// The read-only flag of a folder does not stop files being made inside it: the shell sets it on the folders it customizes, so a
+		// folder keeps its permissions.
+		if (S_ISDIR(metadata.st_mode)) {
+			call.ret(1);
+			return;
+		}
 		mode_t mode = metadata.st_mode & 07777;
 		mode = call.u32(1) & attribute_readonly ? mode & ~0222 : mode | 0200;
 		if (::chmod(resolved->host.c_str(), mode)) {
@@ -1109,7 +1115,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[2], text, capacity);
 		if (call[3]) {
 			const auto slash = text.find_last_of(u'\\');
-			call.store<uint64_t>(call[3], slash == text.npos || slash + 1 == text.size() ? 0 : call[2] + (slash + 1) * 2);
+			call.store_pointer(call[3], slash == text.npos || slash + 1 == text.size() ? 0 : call[2] + (slash + 1) * 2);
 		}
 		call.ret(text.size());
 	});
