@@ -8,7 +8,10 @@ public Windows headers. It supplies what the system libraries of the guest canno
   template assembled in memory and shown by the dialog manager of the user32 component;
 - shell items (`IShellItem`, `IShellItemArray`) and `SHCreateItemFromParsingName`;
 - the class registry behind `CoCreateInstance`, which creates the file dialog classes.
+- `ExtractIconExW` and `ExtractIconW`: the icons of a program, a library or an .ico file, at the system's large and small sizes.
+- UI Automation's reserved "not supported" and "mixed attribute" values, one object each for the process.
+- the task allocator, through `CoGetMalloc` and the shell's `SHGetMalloc`.
 
-Its exports replace the same-named exports of `comdlg32.dll`, `ole32.dll` and `shell32.dll` for programs
-that import those libraries. Setting `RAVEN_TRACE_SHELL` to a guest file path appends one line per
+Its exports replace the same-named exports of `comdlg32.dll`, `ole32.dll`, `shell32.dll` and `uiautomationcore.dll`
+for programs that import those libraries. Setting `RAVEN_TRACE_SHELL` to a guest file path appends one line per
 interface request and dialog call to that file.

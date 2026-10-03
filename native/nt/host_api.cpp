@@ -853,13 +853,14 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		}
 	};
 	registry.add("GetAwarenessFromDpiAwarenessContext", 1, [awareness_of](ApiCall &call) { call.ret(uint32_t(awareness_of(call[0]))); });
+	// Two contexts are equal when they are the same context, not when they share an awareness: per-monitor aware and its second version,
+	// unaware and unaware with GDI scaling, are different contexts (WPF tells them apart to keep the bounds of each display per context).
 	registry.add("AreDpiAwarenessContextsEqual", 2, [awareness_of](ApiCall &call) {
-		const auto first = awareness_of(call[0]), second = awareness_of(call[1]);
-		if (first < 0 || second < 0) {
+		if (awareness_of(call[0]) < 0 || awareness_of(call[1]) < 0) {
 			call.fail(87);
 			return;
 		}
-		call.ret(first == second);
+		call.ret(int64_t(call[0]) == int64_t(call[1]));
 	});
 	registry.add("GetWindowDpiAwarenessContext", 1, [](ApiCall &call) { call.ret(uint64_t(-2)); });
 	registry.add("GetClassWord", 2, [](ApiCall &call) { call.ret(0); });
@@ -1028,8 +1029,9 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			"UiaRaiseNotificationEvent", "UiaRaiseAsyncContentLoadedEvent", "UiaRaiseTextEditTextChangedEvent", "UiaRaiseChangesEvent",
 			"UiaRaiseActiveTextPositionChangedEvent", "UiaDisconnectProvider", "UiaDisconnectAllProviders"})
 		registry.add(name, 0, [](ApiCall &call) { call.ret(0); });
-	// The objects that stand for "not supported" and "mixed" values and the providers of window frames belong to a client side that is
-	// not there: the request is not implemented, as for a system without UI Automation.
+	// The providers of window frames belong to a client side that is not there: the request is not implemented, as for a system without
+	// UI Automation. The objects that stand for "not supported" and "mixed" values come from the shell component; without it they are
+	// answered the same way.
 	for (const auto name : {"UiaGetReservedNotSupportedValue", "UiaGetReservedMixedAttributeValue", "UiaHostProviderFromHwnd",
 			"UiaProviderFromIAccessible"})
 		registry.add(name, 0, [name](ApiCall &call) {

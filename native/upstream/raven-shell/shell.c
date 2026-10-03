@@ -1173,6 +1173,136 @@ UINT_PTR WINAPI SHAppBarMessage(DWORD message, PAPPBARDATA data)
 	}
 }
 
+/* The icons of a program or library are its RT_GROUP_ICON resources, counted in the order the resources list them; a negative index
+ * names a resource identifier instead. An .ico file holds a single icon. */
+struct icon_search {
+	int wanted, seen;
+	LPWSTR found;
+};
+
+static BOOL CALLBACK icon_group(HMODULE module, LPCWSTR type, LPWSTR name, LONG_PTR context)
+{
+	struct icon_search *search = (struct icon_search *)context;
+	if (search->wanted >= 0 && search->seen++ == search->wanted) {
+		search->found = name;
+		return FALSE;
+	}
+	if (search->wanted < 0)
+		++search->seen;
+	return TRUE;
+}
+
+static BOOL icon_file(LPCWSTR file)
+{
+	const size_t length = wcslen(file);
+	return length > 4 && !lstrcmpiW(file + length - 4, L".ico");
+}
+
+UINT WINAPI ExtractIconExW(LPCWSTR file, int index, HICON *large, HICON *small, UINT count)
+{
+	HMODULE module;
+	struct icon_search search = {-1, 0, NULL};
+	UINT made = 0;
+	if (!file)
+		return 0;
+	if (icon_file(file)) {
+		if (index == -1 && !large && !small)
+			return GetFileAttributesW(file) == INVALID_FILE_ATTRIBUTES ? 0 : 1;
+		if (index != 0 || !count)
+			return 0;
+		if (large)
+			*large = LoadImageW(NULL, file, IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE);
+		if (small)
+			*small = LoadImageW(NULL, file, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
+		return (large && *large) || (small && *small) ? 1 : 0;
+	}
+	if (!(module = LoadLibraryExW(file, NULL, LOAD_LIBRARY_AS_DATAFILE)))
+		return 0;
+	if (index == -1 && !large && !small) {
+		EnumResourceNamesW(module, (LPCWSTR)RT_GROUP_ICON, icon_group, (LONG_PTR)&search);
+		FreeLibrary(module);
+		return (UINT)search.seen;
+	}
+	for (; made < count; ++made) {
+		LPCWSTR name;
+		HICON big = NULL, little = NULL;
+		if (index < 0) {
+			name = MAKEINTRESOURCEW(-index);
+			if (made)
+				break;
+		} else {
+			search.wanted = index + (int)made;
+			search.seen = 0;
+			search.found = NULL;
+			EnumResourceNamesW(module, (LPCWSTR)RT_GROUP_ICON, icon_group, (LONG_PTR)&search);
+			if (!search.found)
+				break;
+			name = search.found;
+		}
+		if (large)
+			big = LoadImageW(module, name, IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
+		if (small)
+			little = LoadImageW(module, name, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+		if ((large && !big) || (small && !little)) {
+			if (big)
+				DestroyIcon(big);
+			if (little)
+				DestroyIcon(little);
+			break;
+		}
+		if (large)
+			large[made] = big;
+		if (small)
+			small[made] = little;
+	}
+	FreeLibrary(module);
+	return made;
+}
+
+HICON WINAPI ExtractIconW(HINSTANCE instance, LPCWSTR file, UINT index)
+{
+	HICON icon = NULL;
+	if (index == UINT_MAX)
+		return (HICON)(UINT_PTR)ExtractIconExW(file, -1, NULL, NULL, 0);
+	return ExtractIconExW(file, (int)index, &icon, NULL, 1) ? icon : NULL;
+}
+
+/* UI Automation's reserved values: two objects of the process that stand for a property a provider does not support and for a text
+ * attribute that changes across a range. Clients compare against them by identity, so each is one object that lives as long as the
+ * process does. */
+static HRESULT WINAPI reserved_query(IUnknown *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (same_iid(iid, &IID_IUnknown)) {
+		*out = self;
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+static ULONG WINAPI reserved_reference(IUnknown *self) { return 1; }
+
+static const IUnknownVtbl reserved_vtbl = { reserved_query, reserved_reference, reserved_reference };
+static IUnknown reserved_not_supported = { (IUnknownVtbl *)&reserved_vtbl };
+static IUnknown reserved_mixed = { (IUnknownVtbl *)&reserved_vtbl };
+
+HRESULT WINAPI UiaGetReservedNotSupportedValue(IUnknown **value)
+{
+	if (!value)
+		return E_INVALIDARG;
+	*value = &reserved_not_supported;
+	return S_OK;
+}
+
+HRESULT WINAPI UiaGetReservedMixedAttributeValue(IUnknown **value)
+{
+	if (!value)
+		return E_INVALIDARG;
+	*value = &reserved_mixed;
+	return S_OK;
+}
+
 /* The task allocator as an IMalloc: its memory is the memory CoTaskMemAlloc hands out. */
 static HRESULT WINAPI malloc_query(IMalloc *self, REFIID iid, void **out)
 {
@@ -1208,6 +1338,12 @@ HRESULT WINAPI CoGetMalloc(DWORD context, LPMALLOC *out)
 	}
 	*out = &task_malloc;
 	return S_OK;
+}
+
+/* The shell hands out the same task allocator. */
+HRESULT WINAPI SHGetMalloc(LPMALLOC *out)
+{
+	return CoGetMalloc(MEMCTX_TASK, out);
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)

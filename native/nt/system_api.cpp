@@ -581,7 +581,25 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("UnregisterSuspendResumeNotification", 1, [](ApiCall &call) { call.ret(1); });
 	// Giving pages back changes nothing the program can see here.
 	registry.add("DiscardVirtualMemory", 2, [](ApiCall &call) { call.ret(0); });
-	registry.add("SetProcessDpiAwareness", 1, [](ApiCall &call) { call.ret(0); });
+	// The display is 96 dpi and every process counts as aware of it (IsProcessDPIAware): the awareness a process asks for is kept and
+	// read back, PROCESS_SYSTEM_DPI_AWARE until it asks.
+	auto dpi_awareness = std::make_shared<uint32_t>(1);
+	registry.add("SetProcessDpiAwareness", 1, [dpi_awareness](ApiCall &call) {
+		if (call.u32(0) > 2) {
+			call.ret(0x80070057U);
+			return;
+		}
+		*dpi_awareness = call.u32(0);
+		call.ret(0);
+	});
+	registry.add("GetProcessDpiAwareness", 2, [dpi_awareness](ApiCall &call) {
+		if (!call[1]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		call.store<uint32_t>(call[1], *dpi_awareness);
+		call.ret(0);
+	});
 	registry.add("GetVersionExA", 1, [](ApiCall &call) {
 		const auto size = call.load<uint32_t>(call[0]);
 		if (size != 148 && size != 156) {

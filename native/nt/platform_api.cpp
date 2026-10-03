@@ -200,17 +200,30 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("BufferedPaintStopAllAnimations", 1, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("BufferedPaintRenderAnimation", 2, [](ApiCall &call) { call.ret(0); });
 
-	// dwmapi: no compositor interface; attribute requests are accepted and ignored.
+	// dwmapi: attribute requests are accepted and ignored; the frame extended into the client area is the desktop's (window_manager.cpp).
 	registry.add("DwmSetWindowAttribute", 4, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("DwmGetWindowAttribute", 4, [](ApiCall &call) { call.ret(e_invalidarg); });
+	// Composition is always on since Windows 8.
 	registry.add("DwmIsCompositionEnabled", 1, [](ApiCall &call) {
-		call.store<uint32_t>(call[0], 0);
+		call.store<uint32_t>(call[0], 1);
 		call.ret(s_ok);
 	});
-	registry.add("DwmExtendFrameIntoClientArea", 2, [](ApiCall &call) { call.ret(s_ok); });
+	// A hint that a window shows content WPF's renderer draws: the compositor here needs none, and WPF ignores the answer.
+	registry.add("DwmAttachMilContent", 1, [](ApiCall &call) { call.ret(s_ok); });
+	registry.add("DwmDetachMilContent", 1, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("DwmFlush", 0, [](ApiCall &call) { call.ret(s_ok); });
+	// GdiEntry13 is DdQueryDisplaySettingsUniqueness: a count the display driver raises on each mode change, which the Direct3D 9
+	// runtime compares to notice one. The display here keeps its mode, so the count stays the same.
+	registry.add("GdiEntry13", 0, [](ApiCall &call) { call.ret(1); });
 	registry.add("DwmInvalidateIconicBitmaps", 1, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("DwmGetCompositionTimingInfo", 2, [](ApiCall &call) { call.ret(0x80263001U); });
+
+	// loadperf, what lodctr and unlodctr run on: the names and help texts of a service's performance counters. No counters are kept
+	// here, so adding and removing them succeeds and changes nothing.
+	for (const char *name : {"LoadPerfCounterTextStringsA", "LoadPerfCounterTextStringsW", "UnloadPerfCounterTextStringsA", "UnloadPerfCounterTextStringsW"})
+		registry.add(name, 2, [](ApiCall &call) { call.ret(0); });
+	for (const char *name : {"InstallPerfDllA", "InstallPerfDllW"})
+		registry.add(name, 3, [](ApiCall &call) { call.ret(0); });
 
 	// imm32: there is no input method, so contexts do not exist and composition calls fail.
 	registry.add("ImmGetContext", 1, [](ApiCall &call) { call.ret(0); });
