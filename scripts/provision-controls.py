@@ -248,6 +248,21 @@ def main():
     run([triple + "-windres", "-O", "coff", "-I" + str(control_support), "-i", control_support / "control.rc", "-o", control_objects[1]])
     run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp", *link_extra,
          "-o", output / "control.exe", *control_objects, shell_objects[3], "-luser32", "-lgdi32", "-ladvapi32", "-lcomctl32", "-lkernel32", "-lgcc"])
+    # dism.exe: the feature servicing tool, as far as turning on the .NET Framework 3.5 from a local package; a console program.
+    dism_support = repo / "native/upstream/raven-dism"
+    run([triple + "-gcc", "-c", "-O2", "-Wall", "-fno-builtin", f"-ffile-prefix-map={repo}=raven", dism_support / "dism.c", "-o", objects / "dism.o"])
+    # As on Windows, the tool asks to run as an administrator, and so do the installers it starts.
+    run([triple + "-windres", "-O", "coff", "-I" + str(dism_support), "-i", dism_support / "dism.rc", "-o", objects / "dism_res.o"])
+    run([triple + "-gcc", "-nostdlib", "-mconsole", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp", *link_extra,
+         "-o", output / "dism.exe", objects / "dism.o", objects / "dism_res.o", shell_objects[3], "-ladvapi32", "-lkernel32", "-lgcc"])
+    # fondue.exe: Windows Features on Demand, which offers the .NET Framework 3.5 to a program that needs it and has dism.exe install it.
+    run([triple + "-gcc", "-c", "-O2", "-Wall", "-fno-builtin", f"-ffile-prefix-map={repo}=raven", dism_support / "fondue.c", "-o", objects / "fondue.o"])
+    run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp", *link_extra,
+         "-o", output / "fondue.exe", objects / "fondue.o", shell_objects[3], "-lcomdlg32", "-luser32", "-ladvapi32", "-lkernel32", "-lgcc"])
+    # regedit.exe: the Registry Editor as setup programs run it, importing .reg files with /s.
+    run([triple + "-gcc", "-c", "-O2", "-Wall", "-fno-builtin", f"-ffile-prefix-map={repo}=raven", dism_support / "regedit.c", "-o", objects / "regedit.o"])
+    run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp", *link_extra,
+         "-o", output / "regedit.exe", objects / "regedit.o", shell_objects[3], "-ladvapi32", "-lkernel32", "-lgcc"])
     if wanted & {"dwrite", "d2d1", "uianimation"}:
         # The host services the DirectWrite and Direct2D components call: fonts measured and rasterized with FreeType, surfaces drawn with Skia.
         host_names = ["RavenFontClose", "RavenFontGlyphs", "RavenFontInfo", "RavenFontMetrics", "RavenFontName", "RavenFontOpen", "RavenFontOutline",

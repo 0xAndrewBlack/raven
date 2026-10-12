@@ -255,14 +255,18 @@ int main(int argc, char **argv)
 				if (run_process) {
 					const auto directory = std::filesystem::absolute(argv[first_file]).parent_path();
 					const raven::NativePrefix prefix=raven::NativePrefix::from_environment();
-					// The system's own programs and libraries the runtime ships, in the system directory of each width as Windows has them; a
+					// The system's own programs, libraries and tables the runtime ships, in the system directory of each width as Windows has them; a
 					// copy that is missing or differs from the runtime's is put back.
 					{
 						const auto runtime = std::filesystem::read_symlink("/proc/self/exe").parent_path();
 						for (const auto &[from, folder] : {std::pair{runtime, "system32"}, std::pair{runtime / "x86", "syswow64"}})
-							for (const char *program : {"msiexec.exe", "regsvr32.exe", "control.exe", "mscoree.dll", "riched20.dll", "msftedit.dll"}) {
+							for (const char *program : {"msiexec.exe", "regsvr32.exe", "control.exe", "dism.exe", "fondue.exe", "regedit.exe", "mscoree.dll", "riched20.dll",
+									"msftedit.dll", "l_intl.nls"}) {
 								std::error_code error;
-								const auto source_file = from / program, target = prefix.root() / "drive_c" / "windows" / folder / program;
+								// The 64-bit Registry Editor lives in the Windows folder itself.
+								const bool windows_folder = std::string_view(program) == "regedit.exe" && std::string_view(folder) == "system32";
+								const auto source_file = from / program,
+									target = windows_folder ? prefix.root() / "drive_c" / "windows" / program : prefix.root() / "drive_c" / "windows" / folder / program;
 								if (!std::filesystem::exists(source_file, error))
 									continue;
 								if (std::filesystem::exists(target, error) && std::filesystem::file_size(target, error) == std::filesystem::file_size(source_file, error) &&

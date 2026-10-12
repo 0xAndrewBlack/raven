@@ -81,6 +81,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_BINARY_DIR}/nls-generated/c_1252.nls
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h -P ${NLS_SOURCE}/embed.cmake
         DEPENDS raven-txt2nls ${NLS_SOURCE}/c_1252.txt ${NLS_SOURCE}/embed.cmake VERBATIM)
+    # The case tables of l_intl.nls, which the .NET Framework 2.0 runtime maps from the system directory of either width.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_FOUND)
+        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/l_intl.nls ${CMAKE_CURRENT_BINARY_DIR}/x86/l_intl.nls
+            COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/generate-intl-nls.py ${CMAKE_CURRENT_BINARY_DIR}/l_intl.nls
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/x86
+            COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/l_intl.nls ${CMAKE_CURRENT_BINARY_DIR}/x86/l_intl.nls
+            DEPENDS ${PROJECT_SOURCE_DIR}/scripts/generate-intl-nls.py VERBATIM)
+        add_custom_target(intl_nls ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/l_intl.nls ${CMAKE_CURRENT_BINARY_DIR}/x86/l_intl.nls)
+    endif()
     target_sources(raven_cpu PRIVATE nt/nls.cpp nt/multibyte.cpp nt/startup.cpp nt/launch.cpp nt/file.cpp nt/prefix.cpp nt/registry.cpp nt/advapi_api.cpp nt/msvcrt_api.cpp nt/profile_api.cpp nt/x86_process.cpp nt/x86_thread_api.cpp nt/x86_compat_api.cpp nt/x86_loader.cpp nt/x86_system_api.cpp nt/registry_words.cpp nt/x86_tls.cpp nt/x86_com.cpp nt/x86_dsound.cpp nt/x86_d3d9.cpp ${CMAKE_CURRENT_BINARY_DIR}/nls-generated/nls-cp1252.h)
     file(SHA256 ${CMAKE_CURRENT_SOURCE_DIR}/upstream/reactos-utf8/decode.inc UTF8_SOURCE_HASH)
     if(NOT UTF8_SOURCE_HASH STREQUAL "5aafb54712b7c21db62bfdf966e5d8852200941643bde751150eb0d55a909524")
@@ -1406,7 +1416,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/comctl32.dll $<TARGET_FILE_DIR:raven>/x86/comctl32.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/raven-user32.dll $<TARGET_FILE_DIR:raven>/x86/raven-user32.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/raven-shell.dll $<TARGET_FILE_DIR:raven>/x86/raven-shell.dll
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/control.exe $<TARGET_FILE_DIR:raven>/x86/control.exe)
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/control.exe $<TARGET_FILE_DIR:raven>/x86/control.exe
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS32_COMPONENT_DIR}/regedit.exe $<TARGET_FILE_DIR:raven>/x86/regedit.exe)
         endif()
         if(RAVEN_CONTROLS_COMPONENT_DIR)
             if(NOT EXISTS "${RAVEN_CONTROLS_COMPONENT_DIR}/comctl32.dll")
@@ -1417,6 +1428,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-user32.dll $<TARGET_FILE_DIR:raven>/raven-user32.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-shell.dll $<TARGET_FILE_DIR:raven>/raven-shell.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/control.exe $<TARGET_FILE_DIR:raven>/control.exe
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/dism.exe $<TARGET_FILE_DIR:raven>/dism.exe
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/fondue.exe $<TARGET_FILE_DIR:raven>/fondue.exe
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/regedit.exe $<TARGET_FILE_DIR:raven>/regedit.exe
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-dwrite.dll $<TARGET_FILE_DIR:raven>/raven-dwrite.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-d2d1.dll $<TARGET_FILE_DIR:raven>/raven-d2d1.dll
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAVEN_CONTROLS_COMPONENT_DIR}/raven-uianimation.dll $<TARGET_FILE_DIR:raven>/raven-uianimation.dll
@@ -2020,21 +2034,29 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     set_tests_properties(native_redist_openal PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor PASS_REGULAR_EXPRESSION "PASS: ")
                 endif()
                 # The .NET Framework 4.8 from Microsoft's offline installer (scripts/native-dotnet.py): the message Windows shows without a
-                # runtime, then the framework installed through our msiexec, a console program and a WinForms window built with Mono's mcs.
+                # runtime, then the framework installed through our msiexec, a console program and a WinForms window built with Mono's mcs, and a WPF
+                # window the script compiles against the WPF assemblies the framework installed. With the XNA 4.0 redistributable and the .NET 3.5
+                # SP1 package given, XNA is installed and checked, and .NET 3.5 is enabled through dism.exe after Features on Demand asked for it.
                 set(RAVEN_NETFX_INSTALLER "" CACHE FILEPATH "ndp48-x86-x64-allos-enu.exe as Microsoft publishes it")
+                set(RAVEN_XNA_INSTALLER "" CACHE FILEPATH "xnafx40_redist.msi, the XNA Framework 4.0 redistributable, installed after the framework when given")
+                set(RAVEN_NETFX35_PACKAGE "" CACHE FILEPATH "dotnetfx35.exe, the .NET Framework 3.5 SP1 full package, enabled through dism.exe when given")
                 find_program(RAVEN_MCS mcs)
                 if(TARGET raven_wayland AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON AND RAVEN_MCS AND RAVEN_NETFX_INSTALLER
                    AND EXISTS ${RAVEN_NETFX_INSTALLER})
                     set(dotnet_fixtures ${CMAKE_CURRENT_BINARY_DIR}/dotnet-fixtures)
-                    add_custom_command(OUTPUT ${dotnet_fixtures}/hello64.exe ${dotnet_fixtures}/forms64.exe
+                    add_custom_command(OUTPUT ${dotnet_fixtures}/hello64.exe ${dotnet_fixtures}/forms64.exe ${dotnet_fixtures}/xna64.exe ${dotnet_fixtures}/hello20.exe
                         COMMAND ${CMAKE_COMMAND} -E make_directory ${dotnet_fixtures}
                         COMMAND ${RAVEN_MCS} -sdk:4.5 -platform:x64 -out:${dotnet_fixtures}/hello64.exe ${PROJECT_SOURCE_DIR}/testdata/dotnet/hello.cs
                         COMMAND ${RAVEN_MCS} -sdk:4.5 -platform:x64 -target:winexe -r:System.Windows.Forms.dll -r:System.Drawing.dll
                             -out:${dotnet_fixtures}/forms64.exe ${PROJECT_SOURCE_DIR}/testdata/dotnet/forms.cs
-                        DEPENDS ${PROJECT_SOURCE_DIR}/testdata/dotnet/hello.cs ${PROJECT_SOURCE_DIR}/testdata/dotnet/forms.cs VERBATIM)
-                    add_custom_target(dotnet_fixtures ALL DEPENDS ${dotnet_fixtures}/hello64.exe ${dotnet_fixtures}/forms64.exe)
+                        COMMAND ${RAVEN_MCS} -sdk:4.5 -platform:x64 -out:${dotnet_fixtures}/xna64.exe ${PROJECT_SOURCE_DIR}/testdata/dotnet/xna.cs
+                        COMMAND ${RAVEN_MCS} -sdk:2 -platform:x64 -out:${dotnet_fixtures}/hello20.exe ${PROJECT_SOURCE_DIR}/testdata/dotnet/hello.cs
+                        DEPENDS ${PROJECT_SOURCE_DIR}/testdata/dotnet/hello.cs ${PROJECT_SOURCE_DIR}/testdata/dotnet/forms.cs
+                            ${PROJECT_SOURCE_DIR}/testdata/dotnet/xna.cs VERBATIM)
+                    add_custom_target(dotnet_fixtures ALL DEPENDS ${dotnet_fixtures}/hello64.exe ${dotnet_fixtures}/forms64.exe ${dotnet_fixtures}/xna64.exe
+                        ${dotnet_fixtures}/hello20.exe)
                     add_test(NAME native_dotnet_framework48 COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-dotnet.py
-                        $<TARGET_FILE:raven> ${RAVEN_NETFX_INSTALLER} ${dotnet_fixtures} ${CMAKE_CURRENT_BINARY_DIR}/dotnet-evidence)
+                        $<TARGET_FILE:raven> ${RAVEN_NETFX_INSTALLER} ${dotnet_fixtures} ${CMAKE_CURRENT_BINARY_DIR}/dotnet-evidence "${RAVEN_XNA_INSTALLER}" "${RAVEN_NETFX35_PACKAGE}")
                     set_tests_properties(native_dotnet_framework48 PROPERTIES TIMEOUT 3600 RESOURCE_LOCK raven_compositor PASS_REGULAR_EXPRESSION "PASS: ")
                 endif()
                 add_test(NAME native_x86_process COMMAND ${Python3_EXECUTABLE}
