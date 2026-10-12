@@ -6,7 +6,8 @@
    takes new files, the ANSI event log calls answer, the 64-bit .NET switch keeps the value it was given, a program whose path has
    spaces starts from a command line that does not quote it, a service's optional settings read back as they were set, a critical
    section shows its owner where code that tests it inline looks, a program of either width loads as a data file, wnsprintf stops at
-   the size it is given, regedit /s imports registration entries in both of their formats, and lodctr's library takes counter names. */
+   the size it is given, regedit /s imports registration entries in both of their formats, lodctr's library takes counter names, and
+   a process of the services' session sees its window station is not visible. */
 
 static int run_from_heap(void)
 {
@@ -315,9 +316,18 @@ static int counter_names(void)
 int raven_entry(void)
 {
 	const WCHAR *line = GetCommandLineW();
-	for (const WCHAR *at = line; *at; ++at)
+	for (const WCHAR *at = line; *at; ++at) {
 		if (at[0] == L'-' && at[1] == L'-' && at[2] == L'c' && at[3] == L'h')
 			return 77;
+		/* Started in the services' session, as the custom actions of an installer are: the window station is not visible. */
+		if (at[0] == L'-' && at[1] == L'-' && at[2] == L's' && at[3] == L'e') {
+			USEROBJECTFLAGS flags = {0};
+			DWORD needed = 0;
+			if (!GetUserObjectInformationW(GetProcessWindowStation(), UOI_FLAGS, &flags, sizeof flags, &needed))
+				return 120;
+			return flags.dwFlags & WSF_VISIBLE ? 121 : 0;
+		}
+	}
 	int result;
 	if ((result = run_from_heap()) || (result = read_only_folder()) || (result = event_log()) || (result = complus_switch()) ||
 		(result = unquoted_path()) || (result = service_settings()) || (result = section_fields()) || (result = data_files()) ||

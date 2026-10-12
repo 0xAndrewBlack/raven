@@ -130,6 +130,9 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 	// A child of an elevated process carries its elevated token.
 	if (process_elevated())
 		arguments.push_back("--elevated");
+	// So does a child of a process in the services' session.
+	if (process_noninteractive())
+		arguments.push_back("--noninteractive");
 
 	// Everything the child receives is a descriptor of the parent that must appear at a number the child expects: the standard handles
 	// at 0 to 2, the rest from 20 up. The parent's own copies are closed once the child exists.

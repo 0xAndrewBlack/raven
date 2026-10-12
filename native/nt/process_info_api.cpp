@@ -1,5 +1,6 @@
 #include "access_token.h"
 #include "child_process.h"
+#include "elevation.h"
 #include "file_objects.h"
 #include "kernel_context.h"
 #include "text.h"
@@ -330,8 +331,9 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 			std::vector<uint8_t> data;
 			switch (call.u32(1)) {
 			case 1: {
+				// USEROBJECTFLAGS: the window station is visible (WSF_VISIBLE) except to a process in the services' session.
 				data.assign(12, 0);
-				data[8] = 1;
+				data[8] = named && process_noninteractive() ? 0 : 1;
 				break;
 			}
 			case 2: case 3: {

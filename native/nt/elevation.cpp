@@ -11,6 +11,7 @@ namespace raven {
 namespace {
 
 bool elevated = false;
+bool noninteractive = false;
 
 }
 
@@ -78,6 +79,16 @@ void set_process_elevated(bool value)
 bool process_elevated()
 {
 	return elevated;
+}
+
+void set_process_noninteractive(bool value)
+{
+	noninteractive = value;
+}
+
+bool process_noninteractive()
+{
+	return noninteractive;
 }
 
 }

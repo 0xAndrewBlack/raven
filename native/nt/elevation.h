@@ -16,5 +16,9 @@ bool installer_like(const PEImage &image, std::string_view file_name);
 // Whether this process runs elevated: its program asked for it, or the process that started it was elevated.
 void set_process_elevated(bool elevated);
 bool process_elevated();
+// Whether this process runs in the session services run in, as the Windows Installer server and the custom actions it starts do: its
+// window station is not visible, so programs that look first show no dialog nobody could answer.
+void set_process_noninteractive(bool noninteractive);
+bool process_noninteractive();
 
 }

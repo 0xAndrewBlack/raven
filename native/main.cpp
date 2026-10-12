@@ -189,7 +189,7 @@ int main(int argc, char **argv)
 	// A program started by another one carries the command line and the directory its parent chose.
 	std::optional<std::string> command_line_text, directory_text;
 	int environment_fd=-1,suspended_fd=-1,inherit_fd=-1,handle_channel_fd=-1;
-	bool elevated=false;
+	bool elevated=false,noninteractive=false;
 	for (bool more=run_process;more && argc>first_file;) {
 		const std::string_view option=argv[first_file];
 		if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
@@ -205,6 +205,7 @@ int main(int argc, char **argv)
 		}
 #endif
 		else if (option=="--elevated") elevated=true;
+		else if (option=="--noninteractive") noninteractive=true;
 		else more=false;
 		if (more) ++first_file;
 	}
@@ -247,6 +248,14 @@ int main(int argc, char **argv)
 					entry = &module;
 					// A program runs elevated when its manifest asks for it or when the process that started it is elevated.
 					raven::set_process_elevated(elevated || raven::manifest_requests_elevation(module.image, std::filesystem::path(argv[i]).filename().string()));
+					// The Windows Installer server, which msiexec runs as with -Embedding, works in the services' session, and so do the
+					// custom actions it starts.
+					auto program = std::filesystem::path(argv[i]).filename().string();
+					for (auto &character : program)
+						if (character >= 'A' && character <= 'Z')
+							character = char(character + ('a' - 'A'));
+					raven::set_process_noninteractive(noninteractive || (program == "msiexec.exe" && command_line_text &&
+						command_line_text->find("-Embedding") != std::string::npos));
 				}
 			}
 			if (run_modules || run_process) {
