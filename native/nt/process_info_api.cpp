@@ -115,7 +115,10 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 	auto &objects = context.objects;
 	auto &modules = context.modules;
 	const uint64_t started = filetime_now();
-	const auto is_self = [&objects](uint64_t handle) { return handle == current_process || objects.object_as<SelfProcessObject>(handle) != nullptr; };
+	// A 32-bit program passes the current process handle as the 32-bit -1, which reaches here without its sign.
+	const auto is_self = [&objects](uint64_t handle) {
+		return handle == current_process || handle == 0xffffffffU || objects.object_as<SelfProcessObject>(handle) != nullptr;
+	};
 
 	registry.add("OpenProcess", 3, [&objects](ApiCall &call) {
 		const uint32_t id = call.u32(2);
