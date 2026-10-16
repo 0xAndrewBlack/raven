@@ -42,7 +42,7 @@ int raven_entry(void)
 	if (!IntersectRect(&first, &first, &second) || !rect_is(&first, 5, 7, 15, 45))
 		return 25;
 	static const struct { const WCHAR *path; unsigned skip; } names[] = {{L"C:\\dir\\file.txt", 7}, {L"a/b", 2}, {L"C:file", 2},
-		{L"file", 0}, {L"dir\\", 4}, {L"ab:c", 0}, {L"\\\\server\\share\\x", 15}, {L"", 0}};
+		{L"file", 0}, {L"dir\\", 0}, {L"ab:c", 3}, {L"\\\\server\\share\\x", 15}, {L"", 0}, {L"C:", 0}, {L"C:\\", 0}};
 	for (unsigned index = 0; index < sizeof names / sizeof names[0]; ++index)
 		if (PathFindFileNameW(names[index].path) != names[index].path + names[index].skip)
 			return 30 + (int)index;
