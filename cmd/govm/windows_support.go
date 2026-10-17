@@ -372,7 +372,7 @@ func runPE(absPath string, guestArgv []string, sysroot, winePrefix, regFile stri
 		if sysroot != "" {
 			sysroots = append(sysroots, sysroot)
 		}
-		modules, loadedModules, dllLoadOrder = loadBYODLLs(mem, sysroots, result.MainModule, modules, loadedModules)
+		modules, loadedModules, dllLoadOrder = loadBYODLLs(mem, sysroots, winePrefix, result.MainModule, modules, loadedModules)
 		// Pre-initialize ucrtbase's internal debug channel table to prevent
 		// infinite recursion in __wine_dbg_get_channel_flags. The function at
 		// ucrtbase+0x3d680 checks a table of 48-byte entries in .bss; entry 17
@@ -6309,7 +6309,7 @@ func patchUnresolvedOrdinals(mem *mmu.MMU, d *ntapi.Dispatcher, mainMod *loader.
 // Returns updated module info, loaded modules map, and DLL load order (for DllMain).
 // Uses two-pass loading: first map all DLLs into memory, then resolve imports.
 // This handles circular dependencies (e.g. user32 ↔ gdi32).
-func loadBYODLLs(mem *mmu.MMU, sysroots []string, mainMod *loader.PEModule,
+func loadBYODLLs(mem *mmu.MMU, sysroots []string, winePrefix string, mainMod *loader.PEModule,
 	modules []ntapi.ModuleInfo, loaded map[string]*loader.PEModule) ([]ntapi.ModuleInfo, map[string]*loader.PEModule, []*loader.PEModule) {
 
 	var loadOrder []*loader.PEModule
@@ -6350,7 +6350,7 @@ func loadBYODLLs(mem *mmu.MMU, sysroots []string, mainMod *loader.PEModule,
 			continue
 		}
 
-		dllPath := findDLL(sysroots, dllName)
+		dllPath := findDLL(sysroots, dllName, winePrefix)
 		if dllPath == "" {
 			continue
 		}
@@ -6423,10 +6423,63 @@ func topoSortDLLs(dlls []*loader.PEModule, loaded map[string]*loader.PEModule) [
 	return result
 }
 
+// dllWineAllowlist lists the DLLs permitted to load from the Wine prefix.
+// Other system DLLs use the Go implementations or the Windows sysroot.
+var dllWineAllowlist = map[string]bool{
+	// DirectX / Graphics helpers (no syscall Linux, no wineserver)
+	"d3d9.dll": true, "d3d10.dll": true, "d3d11.dll": true, "d3d12.dll": true,
+	"ddraw.dll": true, "dxgi.dll": true, "dinput.dll": true, "dinput8.dll": true,
+	"dsound.dll": true, "d3dx9_24.dll": true, "d3dx9_25.dll": true, "d3dx9_26.dll": true,
+	"d3dx9_27.dll": true, "d3dx9_28.dll": true, "d3dx9_29.dll": true, "d3dx9_30.dll": true,
+	"d3dx9_31.dll": true, "d3dx9_32.dll": true, "d3dx9_33.dll": true, "d3dx9_34.dll": true,
+	"d3dx9_35.dll": true, "d3dx9_36.dll": true, "d3dx9_37.dll": true, "d3dx9_38.dll": true,
+	"d3dx9_39.dll": true, "d3dx9_40.dll": true, "d3dx9_41.dll": true, "d3dx9_42.dll": true,
+	"d3dx9_43.dll": true, "d3dx10_33.dll": true, "d3dx10_34.dll": true, "d3dx10_35.dll": true,
+	"d3dx10_36.dll": true, "d3dx10_37.dll": true, "d3dx10_38.dll": true, "d3dx10_39.dll": true,
+	"d3dx10_40.dll": true, "d3dx10_41.dll": true, "d3dx10_42.dll": true, "d3dx10_43.dll": true,
+	"d3dx11_42.dll": true, "d3dx11_43.dll": true, "d3dcompiler_33.dll": true,
+	"d3dcompiler_34.dll": true, "d3dcompiler_35.dll": true, "d3dcompiler_36.dll": true,
+	"d3dcompiler_37.dll": true, "d3dcompiler_38.dll": true, "d3dcompiler_39.dll": true,
+	"d3dcompiler_40.dll": true, "d3dcompiler_41.dll": true, "d3dcompiler_42.dll": true,
+	"d3dcompiler_43.dll": true, "d3dcompiler_46.dll": true, "d3dcompiler_47.dll": true,
+	"x3daudio1_0.dll": true, "x3daudio1_1.dll": true, "x3daudio1_2.dll": true,
+	"x3daudio1_3.dll": true, "x3daudio1_4.dll": true, "x3daudio1_5.dll": true,
+	"x3daudio1_6.dll": true, "x3daudio1_7.dll": true,
+	"xaudio2_0.dll": true, "xaudio2_1.dll": true, "xaudio2_2.dll": true,
+	"xaudio2_3.dll": true, "xaudio2_4.dll": true, "xaudio2_5.dll": true,
+	"xaudio2_6.dll": true, "xaudio2_7.dll": true, "xaudio2_8.dll": true, "xaudio2_9.dll": true,
+	"xapofx1_0.dll": true, "xapofx1_1.dll": true, "xapofx1_2.dll": true, "xapofx1_3.dll": true,
+	"xapofx1_4.dll": true, "xapofx1_5.dll": true,
+	"xinput1_1.dll": true, "xinput1_2.dll": true, "xinput1_3.dll": true, "xinput1_4.dll": true,
+	"xinput9_1_0.dll": true,
+	"dxdiagn.dll": true, "dmband.dll": true, "dmime.dll": true, "dmloader.dll": true,
+	"dmscript.dll": true, "dmstyle.dll": true, "dmsynth.dll": true, "dmusic.dll": true,
+	"dmusic32.dll": true, "dplay.dll": true, "dplayx.dll": true, "dpnet.dll": true,
+	"dpnhpast.dll": true, "dpnsvr.exe": true,
+
+	// Utility / pure computation
+	"version.dll": true, "msimg32.dll": true, "shfolder.dll": true,
+	"winhttp.dll": true, "wininet.dll": true, "urlmon.dll": true,
+	"mlang.dll": true, "msxml3.dll": true, "msxml6.dll": true,
+	"riched20.dll": true, "riched32.dll": true,
+	"usp10.dll": true, "l3codecx.ax": true, "mciqtz32.dll": true,
+	"quartz.dll": true, "msacm32.dll": true, "midimap.dll": true,
+	"devenum.dll": true, "msdmo.dll": true, "msvidc32.dll": true,
+	"iyuv_32.dll": true, "msrle32.dll": true, "msyuv.dll": true,
+	"mpeg2data.ax": true, "msctf.dll": true,
+	"glu32.dll": true, "opengl32.dll": true, "winegstreamer.dll": true,
+}
+
 // findDLL searches for a DLL file across multiple sysroot directories.
 // Checks each sysroot in order: sysroot/name, sysroot/System32/name, etc.
-func findDLL(sysroots []string, name string) string {
-	for _, sysroot := range sysroots {
+// When winePrefix is the first sysroot, only DLLs in dllWineAllowlist are loaded from it.
+// This avoids loading Wine system DLLs (kernel32, ucrtbase, etc.) that depend on wineserver.
+func findDLL(sysroots []string, name string, winePrefix string) string {
+	for i, sysroot := range sysroots {
+		// Primo sysroot = winePrefix: carica solo allowlist
+		if winePrefix != "" && i == 0 && !dllWineAllowlist[strings.ToLower(name)] {
+			continue
+		}
 		candidates := []string{
 			filepath.Join(sysroot, name),
 			filepath.Join(sysroot, "System32", name),
