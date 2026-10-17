@@ -15,7 +15,9 @@ constexpr std::array<std::pair<std::string_view, uint16_t>, 6> comctl32_ordinals
 	{"DefSubclassProc", 413}, {"GetWindowSubclass", 411}, {"InitCommonControls", 17}, {"LoadIconWithScaleDown", 381},
 	{"RemoveWindowSubclass", 412}, {"SetWindowSubclass", 410},
 }};
-constexpr std::array<std::pair<std::string_view, uint16_t>, 2> shell32_ordinals{{{"IsUserAnAdmin", 680}, {"SHCreateDirectory", 165}}};
+constexpr std::array<std::pair<std::string_view, uint16_t>, 4> shell32_ordinals{{
+	{"IsUserAnAdmin", 680}, {"OpenRegStream", 85}, {"SHCloneSpecialIDList", 89}, {"SHCreateDirectory", 165},
+}};
 constexpr std::array<std::pair<std::string_view, uint16_t>, 9> oleaut32_ordinals{{
 	{"SysAllocString", 2}, {"SysAllocStringLen", 4}, {"SysFreeString", 6}, {"SysReAllocString", 3}, {"SysReAllocStringLen", 5},
 	{"SysStringLen", 7}, {"VariantClear", 9}, {"VariantCopy", 10}, {"VariantInit", 8},
@@ -34,7 +36,7 @@ constexpr std::array<std::pair<std::string_view, uint16_t>, 30> wsock32_ordinals
 	{"sendto", 20}, {"setsockopt", 21}, {"shutdown", 22}, {"socket", 23}, {"WSACleanup", 116}, {"WSAGetLastError", 111},
 	{"WSASetLastError", 112}, {"WSAStartup", 115},
 }};
-constexpr std::array<std::pair<std::string_view, uint16_t>, 1> shlwapi_ordinals{{{"IUnknown_QueryService", 176}}};
+constexpr std::array<std::pair<std::string_view, uint16_t>, 2> shlwapi_ordinals{{{"IUnknown_QueryService", 176}, {"IsOS", 437}}};
 // DirectSound's functions keep the numbers of its first release, which programs import them by.
 constexpr std::array<std::pair<std::string_view, uint16_t>, 12> dsound_ordinals{{
 	{"DirectSoundCreate", 1}, {"DirectSoundEnumerateA", 2}, {"DirectSoundEnumerateW", 3}, {"DllCanUnloadNow", 4}, {"DllGetClassObject", 5},

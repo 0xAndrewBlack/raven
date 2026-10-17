@@ -259,6 +259,20 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[0], text, max_path * 4);
 		call.ret(changed);
 	};
+	// The system the shell reports is a Windows 10 Pro workstation; a 32-bit program also learns that it runs under WOW64, which installers
+	// read before they turn to the 64-bit registry view and program folder.
+	registry.add("IsOS", 1, [](ApiCall &call) {
+		switch (call.u32(0)) {
+		case 1: case 2: case 3: case 5: case 7: case 8: case 17: case 18: case 20: case 26: case 27:
+			call.ret(1);
+			break;
+		case 30:
+			call.ret(call.pointer_width() == 4);
+			break;
+		default:
+			call.ret(0);
+		}
+	});
 	// Completion lists are drawn by the shell; an edit control without one still works, so enabling it succeeds without a list.
 	registry.add("SHAutoComplete", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("PathRemoveFileSpecW", 1, [edit](ApiCall &call) {

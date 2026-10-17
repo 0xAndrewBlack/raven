@@ -313,6 +313,34 @@ static int counter_names(void)
 	return GetConsoleWindow() ? 112 : 0;
 }
 
+/* Installers take some shell functions by number: shell32 89 and 85, shlwapi 437. A number the system does not publish finds nothing. Under
+ * WOW64 a 32-bit setup learns so from IsOS and IsWow64Process, and turns to the 64-bit program folder. */
+static int system_numbers(void)
+{
+	HMODULE shell = LoadLibraryW(L"shell32.dll"), light = LoadLibraryW(L"shlwapi.dll");
+	if (!shell || !light)
+		return 130;
+	FARPROC clone = GetProcAddress(shell, (LPCSTR)89), stream = GetProcAddress(shell, (LPCSTR)85);
+	if (!clone || clone != GetProcAddress(shell, "SHCloneSpecialIDList") || !stream || stream != GetProcAddress(shell, "OpenRegStream"))
+		return 131;
+	if (GetProcAddress(shell, (LPCSTR)300) || GetProcAddress(light, (LPCSTR)300))
+		return 132;
+	BOOL (WINAPI *is_os)(DWORD) = (BOOL (WINAPI *)(DWORD))(void *)GetProcAddress(light, (LPCSTR)437);
+	const BOOL wow64 = sizeof(void *) == 4;
+	BOOL process_wow64 = !wow64;
+	if (!is_os || is_os != (BOOL (WINAPI *)(DWORD))(void *)GetProcAddress(light, "IsOS") || !is_os(1) || is_os(29) || !is_os(30) != !wow64)
+		return 133;
+	if (!IsWow64Process(GetCurrentProcess(), &process_wow64) || !process_wow64 != !wow64)
+		return 134;
+	void *(WINAPI *clone_list)(HWND, int, BOOL) = (void *(WINAPI *)(HWND, int, BOOL))(void *)clone;
+	BOOL (WINAPI *list_path)(const void *, WCHAR *) = (BOOL (WINAPI *)(const void *, WCHAR *))(void *)GetProcAddress(shell, "SHGetPathFromIDListW");
+	WCHAR path[MAX_PATH] = L"";
+	void *list = clone_list(NULL, 0x26, FALSE);
+	if (!list || !list_path || !list_path(list, path) || lstrcmpiW(path, wow64 ? L"C:\\Program Files (x86)" : L"C:\\Program Files"))
+		return 135;
+	return clone_list(NULL, 0x7f, FALSE) ? 136 : 0;
+}
+
 int raven_entry(void)
 {
 	const WCHAR *line = GetCommandLineW();
@@ -331,7 +359,8 @@ int raven_entry(void)
 	int result;
 	if ((result = run_from_heap()) || (result = read_only_folder()) || (result = event_log()) || (result = complus_switch()) ||
 		(result = unquoted_path()) || (result = service_settings()) || (result = section_fields()) || (result = data_files()) ||
-		(result = bounded_format()) || (result = registration_entries()) || (result = counter_names()))
+		(result = bounded_format()) || (result = registration_entries()) || (result = counter_names()) ||
+		(result = system_numbers()))
 		return result;
 	return 0;
 }

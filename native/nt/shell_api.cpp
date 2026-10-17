@@ -150,24 +150,17 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(0);
 	});
 	// A folder location as an item id list. Programs treat it as opaque: one item that carries the path, then the terminating empty item.
-	registry.add("SHGetSpecialFolderLocation", 3, [&paths, &context](ApiCall &call) {
-		if (!call[2]) {
-			call.ret(0x80070057U);
-			return;
-		}
-		const auto location = folder_for(call.i32(1), paths.user_profile(), call.process.mode() == NativeMode::x86);
-		if (!location) {
-			call.ret(0x80070002U);
-			return;
-		}
-		if (const auto resolved = paths.resolve(*location); resolved && (call.i32(1) & 0x8000))
+	// The list address, zero when the folder is unknown, or the error the call returns.
+	const auto folder_list = [&paths, &context](ApiCall &call, int csidl, bool create) -> std::pair<uint64_t, uint32_t> {
+		const auto location = folder_for(csidl, paths.user_profile(), call.process.mode() == NativeMode::x86);
+		if (!location)
+			return {0, 0x80070002U};
+		if (const auto resolved = paths.resolve(*location); resolved && create)
 			std::filesystem::create_directories(resolved->host);
 		const size_t item = 4 + location->size() * 2;
 		const auto address = context.allocator.allocate(item + 2, true);
-		if (!address) {
-			call.ret(0x8007000EU);
-			return;
-		}
+		if (!address)
+			return {0, 0x8007000EU};
 		std::vector<uint8_t> bytes(item + 2, 0);
 		bytes[0] = uint8_t(item);
 		bytes[1] = uint8_t(item >> 8);
@@ -175,8 +168,21 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		bytes[3] = 'V';
 		std::memcpy(bytes.data() + 4, location->data(), location->size() * 2);
 		call.write(address, bytes);
-		call.store_pointer(call[2], address);
-		call.ret(0);
+		return {address, 0};
+	};
+	registry.add("SHGetSpecialFolderLocation", 3, [folder_list](ApiCall &call) {
+		if (!call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto [address, status] = folder_list(call, call.i32(1), call.i32(1) & 0x8000);
+		if (address)
+			call.store_pointer(call[2], address);
+		call.ret(status);
+	});
+	// The older form of the same call, which shell32 publishes by number: it answers the list itself, or no list when the folder is unknown.
+	registry.add("SHCloneSpecialIDList", 3, [folder_list](ApiCall &call) {
+		call.ret(folder_list(call, call.i32(1) & 0xff, call.i32(2) || (call.i32(1) & 0x8000)).first);
 	});
 	registry.add("SHGetPathFromIDListW", 2, [](ApiCall &call) {
 		if (!call[0] || !call[1]) {

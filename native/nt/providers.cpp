@@ -1099,13 +1099,16 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 		slot = ordinal;
 		slot_count = std::max<uint32_t>(slot_count, ordinal);
 	}
-	std::vector<bool> taken(size_t(slot_count) + exports.size() + 1, false);
+	// The other names take numbers above every public one Windows gives these libraries, so a program that asks for a number Raven does
+	// not publish gets no function rather than an unrelated one.
+	const uint32_t first_free = slot_count ? std::max<uint32_t>(slot_count + 1, 1024) : 1;
+	std::vector<bool> taken(size_t(first_free) + exports.size() + 1, false);
 	for (const auto slot : slot_of)
 		if (slot && taken[slot])
 			throw std::runtime_error("native provider ordinal collides with another export");
 		else if (slot)
 			taken[slot] = true;
-	uint32_t next_slot = 1;
+	uint32_t next_slot = first_free;
 	for (auto &slot : slot_of)
 		if (!slot) {
 			while (taken[next_slot])

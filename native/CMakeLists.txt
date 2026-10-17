@@ -1302,7 +1302,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 set_tests_properties(native_settings_${installer_arch} PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED settings_${installer_arch}
                     PASS_REGULAR_EXPRESSION "Native entry returned 0 .*Native entry returned 0 " ENVIRONMENT RAVEN_PREFIX=${fixture}/settings-prefix)
                 # What the setups of older frameworks rely on: executable heaps, read-only folders, the ANSI event log, the 64-bit .NET switch,
-                # unquoted program paths, service settings, critical section fields, data file loads and bounded formatting.
+                # unquoted program paths, service settings, critical section fields, data file loads, bounded formatting and the shell functions
+                # installers take by number.
                 add_custom_command(OUTPUT ${fixture}/legacy.exe
                     COMMAND ${installer_compiler} -O2 -nostdlib -fno-stack-protector -fno-builtin -Wl,--entry,${installer_entry},--no-insert-timestamp
                         -o ${fixture}/legacy.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/legacy_client.c -lshlwapi -luser32 -ladvapi32 -lkernel32
