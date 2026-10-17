@@ -253,6 +253,9 @@ var ntapiExports = []string{
 	"NtWriteFileGather",
 	"NtWriteVirtualMemory",
 	"NtYieldExecution",
+	"__wine_dbg_header",
+	"__wine_dbg_get_channel_flags",
+	"__wine_dbg_output",
 	// Zw* aliases for key NT functions
 	"ZwAllocateUuids",
 	"ZwCreateKeyedEvent",

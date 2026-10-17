@@ -3576,6 +3576,11 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 			ctx.SetReturn(0)
 			return 0
 		}
+		// Fallback: cerca nei moduli reali caricati (BYODLL/Wine)
+		if addr, ok := ctx.Disp.FindExport(hModule, funcName); ok {
+			ctx.SetReturn(addr)
+			return 0
+		}
 		ravelog.Logf("[win32] GetProcAddress(0x%x, %q) → not found\n", hModule, funcName)
 		ctx.SetReturn(0)
 		return 0
@@ -17179,10 +17184,6 @@ func registerKernel32HandlersForSynth(hctx *HandlerCtx, kernel32 *ntapi.SynthPE)
 		return runKernel32TrivialHandler(ctx, "wine_get_dos_file_name", 8, 0)
 	})
 	d.RegisterAutoStubHandler(kernel32, "wine_get_unix_file_name", func(ctx *ntapi.TrapContext) uint32 {
-		// Wine internal: converts DOS path → Unix path. Return NULL since
-		// we don't have a Wine-style path mapping.
-		ravelog.Logf("[kernel32] wine_get_unix_file_name called (not supported)\n")
-		ctx.SetReturn(0)
-		return 0
+		return runKernel32TrivialHandler(ctx, "wine_get_unix_file_name", 1, 0)
 	})
 }

@@ -17,6 +17,7 @@ func main() {
 	trace := flag.Bool("trace", false, "enable instruction trace to stderr")
 	memMB := flag.Int("mem", 256, "guest memory limit in MiB (advisory)")
 	sysroot := flag.String("sysroot", "", "path to Windows system DLL directory (for PE mode)")
+	winePrefix := flag.String("wine-prefix", "", "path to Wine prefix (e.g. /path/to/runner/lib/wine/x86_64-windows or lib32/wine/i386-windows) to load real Wine PE DLLs alongside synthetic ones")
 	regFile := flag.String("registry", "", "path to registry hive JSON file (for PE mode)")
 	cpuprof := flag.String("cpuprofile", "", "write CPU profile to file")
 	wayland := flag.Bool("wayland", true, "enable Wayland passthrough (use --wayland=false for headless)")
@@ -67,7 +68,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Rebuild with: go build -tags guest_windows\n")
 			os.Exit(1)
 		}
-		runPE(absPath, guestArgv, *sysroot, *regFile, *trace, *wayland, *autoScript)
+		runPE(absPath, guestArgv, *sysroot, *winePrefix, *regFile, *trace, *wayland, *autoScript)
 	} else {
 		if !hasLinuxSupport() {
 			fmt.Fprintf(os.Stderr, "Error: Linux guest support is not compiled into this binary.\n")

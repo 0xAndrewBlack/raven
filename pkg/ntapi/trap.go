@@ -258,7 +258,15 @@ func (d *Dispatcher) loadNlsFile(codePage uint32) ([]byte, error) {
 	return data, nil
 }
 
-// RegisterModuleExports registers a loaded module's exports for LdrGetProcedureAddress.
+// FindExport cerca un export per nome in moduleExports (BYODLL reali).
+func (d *Dispatcher) FindExport(baseAddr uint64, funcName string) (uint64, bool) {
+	if exports, ok := d.moduleExports[baseAddr]; ok {
+		if addr, ok := exports[funcName]; ok {
+			return addr, true
+		}
+	}
+	return 0, false
+}
 func (d *Dispatcher) RegisterModuleExports(baseAddr uint64, exports map[string]uint64, ordExports map[uint16]uint64) {
 	if len(exports) > 0 {
 		d.moduleExports[baseAddr] = exports
