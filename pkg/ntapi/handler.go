@@ -8241,3 +8241,11 @@ func handleNtAreMappedFilesTheSame(ctx *TrapContext) uint32 {
 	}
 	return 0xC0000002 // STATUS_NOT_SAME_DEVICE
 }
+
+// __wine_unix_call_dispatcher returns STATUS_NOT_IMPLEMENTED.
+// Wine DLLs call this function to request Linux backend services.
+// The requested functionality is unavailable without the Wine backend.
+func handleWineUnixCallDispatcher(ctx *TrapContext) uint32 {
+	ctx.SetReturn(0xC0000002) // STATUS_NOT_IMPLEMENTED
+	return StatusSuccess
+}

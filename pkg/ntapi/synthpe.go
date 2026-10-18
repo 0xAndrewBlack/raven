@@ -256,6 +256,7 @@ var ntapiExports = []string{
 	"__wine_dbg_header",
 	"__wine_dbg_get_channel_flags",
 	"__wine_dbg_output",
+	"__wine_unix_call_dispatcher",
 	// Zw* aliases for key NT functions
 	"ZwAllocateUuids",
 	"ZwCreateKeyedEvent",

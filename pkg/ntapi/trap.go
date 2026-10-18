@@ -1922,6 +1922,7 @@ func (d *Dispatcher) registerNtapiHandlers() {
 	d.register(idOf("NtReleaseMutant"), "NtReleaseMutant", handleNtReleaseMutant)
 	d.register(idOf("NtDelayExecution"), "NtDelayExecution", handleNtDelayExecution)
 	d.register(idOf("NtYieldExecution"), "NtYieldExecution", handleNtYieldExecution)
+	d.register(idOf("__wine_unix_call_dispatcher"), "__wine_unix_call_dispatcher", handleWineUnixCallDispatcher)
 	d.register(idOf("NtQueryPerformanceCounter"), "NtQueryPerformanceCounter", handleNtQueryPerformanceCounter)
 	d.register(idOf("NtQuerySystemTime"), "NtQuerySystemTime", handleNtQuerySystemTime)
 	// Keyed Events (used by SRW locks, condition variables, critical section fallback)
