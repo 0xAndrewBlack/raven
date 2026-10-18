@@ -8,17 +8,17 @@ target_compile_options(raven_pixels PRIVATE -Wall -Wextra -Wpedantic -Wconversio
 add_executable(icon_bitmap_test graphics/icon_bitmap_test.cpp)
 target_link_libraries(icon_bitmap_test PRIVATE raven_pixels raven_pe)
 add_test(NAME native_icon_dib_contract COMMAND icon_bitmap_test
-    ${PROJECT_SOURCE_DIR}/testdata/npp/notepad++.exe ${CMAKE_CURRENT_BINARY_DIR}/icon-output)
+    ${RAVEN_TESTDATA_DIR}/npp/notepad++.exe ${CMAKE_CURRENT_BINARY_DIR}/icon-output)
 set_tests_properties(native_icon_dib_contract PROPERTIES TIMEOUT 30)
 add_executable(icon_group_test graphics/icon_group_test.cpp)
 target_link_libraries(icon_group_test PRIVATE raven_pixels raven_pe)
-add_test(NAME native_icon_group_contract COMMAND icon_group_test ${PROJECT_SOURCE_DIR}/testdata/npp/notepad++.exe)
+add_test(NAME native_icon_group_contract COMMAND icon_group_test ${RAVEN_TESTDATA_DIR}/npp/notepad++.exe)
 set_tests_properties(native_icon_group_contract PROPERTIES TIMEOUT 30)
 add_executable(stretch_test graphics/stretch_test.cpp)
 target_include_directories(stretch_test PRIVATE ${PROJECT_SOURCE_DIR}/testdata/native_loader)
 target_link_libraries(stretch_test PRIVATE raven_pixels)
 add_test(NAME native_blackonwhite_contract COMMAND stretch_test
-    ${PROJECT_SOURCE_DIR}/testdata/native_loader/blackonwhite_reference.bin)
+    ${RAVEN_TESTDATA_DIR}/native_loader/blackonwhite_reference.bin)
 set_tests_properties(native_blackonwhite_contract PROPERTIES TIMEOUT 30)
 
 find_package(PNG 1.6.59 QUIET)
@@ -31,7 +31,7 @@ if(PNG_FOUND)
     add_executable(png_codec_test graphics/png_codec_test.cpp)
     target_link_libraries(png_codec_test PRIVATE raven_pixels raven_pe)
     add_test(NAME native_png_codec_contract COMMAND png_codec_test
-        ${PROJECT_SOURCE_DIR}/testdata/npp/notepad++.exe ${CMAKE_CURRENT_BINARY_DIR}/png-output)
+        ${RAVEN_TESTDATA_DIR}/npp/notepad++.exe ${CMAKE_CURRENT_BINARY_DIR}/png-output)
     set_tests_properties(native_png_codec_contract PROPERTIES TIMEOUT 30)
 else()
     # Tests that decode PNG images need libpng 1.6.59 or newer; without it they are not built, so say so instead of staying silent.
@@ -113,7 +113,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     target_include_directories(raven_cpu PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/nls-generated)
     add_executable(nls_test nt/nls_test.cpp)
     target_link_libraries(nls_test PRIVATE raven_cpu)
-    add_test(NAME native_ansi_code_page COMMAND nls_test ${PROJECT_SOURCE_DIR}/testdata/native_loader/cp1252_reference.bin)
+    add_test(NAME native_ansi_code_page COMMAND nls_test ${RAVEN_TESTDATA_DIR}/native_loader/cp1252_reference.bin)
     set_tests_properties(native_ansi_code_page PROPERTIES TIMEOUT 15)
     target_sources(raven_cpu PRIVATE desktop/brush.cpp desktop/bitblt.cpp)
     target_link_libraries(raven_cpu PUBLIC raven_pe raven_pixels)
@@ -139,7 +139,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         set(FONT_FILES LiberationSans-Regular.ttf LiberationMono-Regular.ttf LiberationSerif-Regular.ttf)
         set(FONT_HASHES bade59d822652f76e6941aa87b40a87c13d1cc70db98ededb5011127efafd1d3
             5883330d94debd992952cd8f0571b225f478c2d797d3f36c7521b0a5c9bde0f2
-            9caef765d2e891c10dd73658894f01e660fe0c1c83e0bda7d6edf561d8f623d4)
+            9caef765d2e891c10dd73658894f01e660fe0c1c83e0bda7d6edf561d8f623d4 CACHE STRING "SHA-256 of the qualified Sans, Mono and Serif fonts")
         foreach(INDEX RANGE 0 2)
             list(GET FONT_FILES ${INDEX} FONT_FILE)
             list(GET FONT_HASHES ${INDEX} FONT_HASH)
@@ -499,8 +499,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector -fno-builtin
                 -Wl,--entry,raven_entry,--image-base,0x1c7000000,--no-insert-timestamp
                 -o ${EXTRACT_FIXTURES}/client.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/extract_client.c -luser32 -lgdi32 -lkernel32
-            COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/testdata/native_loader/icon_resources.ico ${EXTRACT_FIXTURES}/icons.ico
-            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/extract_client.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/extract_reference.h ${PROJECT_SOURCE_DIR}/testdata/native_loader/icon_resources.ico VERBATIM)
+            COMMAND ${CMAKE_COMMAND} -E copy ${RAVEN_TESTDATA_DIR}/native_loader/icon_resources.ico ${EXTRACT_FIXTURES}/icons.ico
+            DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/extract_client.c ${PROJECT_SOURCE_DIR}/testdata/native_loader/extract_reference.h ${RAVEN_TESTDATA_DIR}/native_loader/icon_resources.ico VERBATIM)
         add_custom_target(extract_pe_fixtures ALL DEPENDS ${EXTRACT_FIXTURES}/client.exe ${EXTRACT_FIXTURES}/icons.ico)
         add_executable(extract_test desktop/extract_test.cpp)
         target_link_libraries(extract_test PRIVATE raven_cpu)
@@ -1538,7 +1538,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             set(DESKTOP_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/desktop-fixtures)
             add_custom_command(OUTPUT ${DESKTOP_FIXTURES}/client.exe ${DESKTOP_FIXTURES}/icons.dll
                 COMMAND ${CMAKE_COMMAND} -E make_directory ${DESKTOP_FIXTURES}
-                COMMAND ${RAVEN_WINDRES} -I ${PROJECT_SOURCE_DIR}/testdata/native_loader
+                COMMAND ${RAVEN_WINDRES} -I ${RAVEN_TESTDATA_DIR}/native_loader -I ${PROJECT_SOURCE_DIR}/testdata/native_loader
                     ${PROJECT_SOURCE_DIR}/testdata/native_loader/icon_resources.rc ${DESKTOP_FIXTURES}/resources.o
                 COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector
                     -Wl,--entry,raven_entry,--image-base,0x193000000
@@ -1550,7 +1550,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/icon_client.c
                     ${PROJECT_SOURCE_DIR}/testdata/native_loader/icon_module.c
                     ${PROJECT_SOURCE_DIR}/testdata/native_loader/icon_resources.rc
-                    ${PROJECT_SOURCE_DIR}/testdata/native_loader/icon_resources.ico
+                    ${RAVEN_TESTDATA_DIR}/native_loader/icon_resources.ico
                     ${PROJECT_SOURCE_DIR}/testdata/native_loader/icon_data.h VERBATIM)
             add_custom_target(desktop_pe_fixtures ALL DEPENDS ${DESKTOP_FIXTURES}/client.exe ${DESKTOP_FIXTURES}/icons.dll)
             add_executable(desktop_test desktop/desktop_test.cpp)
@@ -1558,7 +1558,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             target_link_libraries(desktop_test PRIVATE raven_cpu)
             add_dependencies(desktop_test desktop_pe_fixtures raven-bootstrap)
             add_test(NAME native_desktop_icon_contract COMMAND desktop_test $<TARGET_FILE:raven-bootstrap> ${DESKTOP_FIXTURES}
-                ${PROJECT_SOURCE_DIR}/testdata/npp/notepad++.exe ${CMAKE_CURRENT_BINARY_DIR}/desktop-output)
+                ${RAVEN_TESTDATA_DIR}/npp/notepad++.exe ${CMAKE_CURRENT_BINARY_DIR}/desktop-output)
             set_tests_properties(native_desktop_icon_contract PROPERTIES TIMEOUT 120)
             add_test(NAME native_desktop_icon_cli COMMAND raven --run-process --execution=native ${DESKTOP_FIXTURES}/client.exe)
             set_tests_properties(native_desktop_icon_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
@@ -1917,20 +1917,24 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     endif()
                 endforeach()
                 if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON
-                   AND EXISTS ${PROJECT_SOURCE_DIR}/testdata/winmine/WINMINE.EXE)
+                   AND EXISTS "${RAVEN_MINESWEEPER}")
                     add_test(NAME native_minesweeper_workflow COMMAND ${RAVEN_PIL_PYTHON}
                         ${PROJECT_SOURCE_DIR}/scripts/native-minesweeper.py $<TARGET_FILE:raven>
-                        ${PROJECT_SOURCE_DIR}/testdata/winmine/WINMINE.EXE ${CMAKE_CURRENT_BINARY_DIR}/minesweeper-evidence)
+                        "${RAVEN_MINESWEEPER}" ${CMAKE_CURRENT_BINARY_DIR}/minesweeper-evidence)
                     set_tests_properties(native_minesweeper_workflow PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor)
+                elseif(NOT EXISTS "${RAVEN_MINESWEEPER}")
+                    add_test(NAME native_minesweeper_workflow COMMAND ${CMAKE_COMMAND} -E echo
+                        "SKIP: set RAVEN_MINESWEEPER to a user-supplied Minesweeper executable")
+                    set_tests_properties(native_minesweeper_workflow PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
                 endif()
                 # Notepad++ across three fresh processes needs the guest controls component, keyboard input and a clipboard reader as well.
                 find_program(RAVEN_WTYPE wtype)
                 find_program(RAVEN_WLPASTE wl-paste)
                 if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_WTYPE AND RAVEN_WLPASTE
-                   AND RAVEN_PIL_PYTHON AND RAVEN_CONTROLS_COMPONENT_DIR AND EXISTS ${PROJECT_SOURCE_DIR}/testdata/npp/notepad++.exe)
+                   AND RAVEN_PIL_PYTHON AND RAVEN_CONTROLS_COMPONENT_DIR AND EXISTS ${RAVEN_TESTDATA_DIR}/npp/notepad++.exe)
                     add_test(NAME native_notepadpp_workflow COMMAND ${RAVEN_PIL_PYTHON}
                         ${PROJECT_SOURCE_DIR}/scripts/native-npp.py $<TARGET_FILE:raven>
-                        ${PROJECT_SOURCE_DIR}/testdata/npp ${CMAKE_CURRENT_BINARY_DIR}/notepadpp-evidence)
+                        ${RAVEN_TESTDATA_DIR}/npp ${CMAKE_CURRENT_BINARY_DIR}/notepadpp-evidence)
                     set_tests_properties(native_notepadpp_workflow PROPERTIES TIMEOUT 1200 RESOURCE_LOCK raven_compositor)
                 endif()
                 # The Visual C++ 2015-2022 redistributables, downloaded from Microsoft into RAVEN_REDIST_DIRECTORY: installed with their progress
@@ -2135,32 +2139,32 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     set(RAVEN_VULKAN_ICD VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json)
                 endif()
                 add_test(NAME native_d3d11_triangle COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11.py
-                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/triangle.exe ${RAVEN_DXVK_PE64_DIR}
+                    $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/triangle.exe ${RAVEN_DXVK_PE64_DIR}
                     ${CMAKE_CURRENT_BINARY_DIR}/d3d11-triangle)
                 # The software driver's worker threads hold allocations at exit; leak checking still covers everything else.
                 set(RAVEN_LSAN LSAN_OPTIONS=suppressions=${PROJECT_SOURCE_DIR}/testdata/lsan.supp)
                 set_tests_properties(native_d3d11_triangle PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 add_test(NAME native_d3d11_deferred COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11.py
-                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/deferred.exe ${RAVEN_DXVK_PE64_DIR}
+                    $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/deferred.exe ${RAVEN_DXVK_PE64_DIR}
                     ${CMAKE_CURRENT_BINARY_DIR}/d3d11-deferred)
                 set_tests_properties(native_d3d11_deferred PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 add_test(NAME native_d3d11_geometry COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-geometry.py
-                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/geometry.exe ${RAVEN_DXVK_PE64_DIR}
+                    $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/geometry.exe ${RAVEN_DXVK_PE64_DIR}
                     ${CMAKE_CURRENT_BINARY_DIR}/d3d11-geometry)
                 set_tests_properties(native_d3d11_geometry PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 if(EXISTS /dev/dri/renderD128)
                     add_test(NAME native_d3d11_geometry_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-geometry.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/geometry.exe ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/geometry.exe ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d11-geometry-gpu gpu)
                     set_tests_properties(native_d3d11_geometry_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
                 add_test(NAME native_d3d11_tessellation COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-tessellation.py
-                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/tessellation.exe ${RAVEN_DXVK_PE64_DIR}
+                    $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/tessellation.exe ${RAVEN_DXVK_PE64_DIR}
                     ${CMAKE_CURRENT_BINARY_DIR}/d3d11-tessellation)
                 set_tests_properties(native_d3d11_tessellation PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 if(EXISTS /dev/dri/renderD128)
                     add_test(NAME native_d3d11_tessellation_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-tessellation.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/tessellation.exe ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/tessellation.exe ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d11-tessellation-gpu gpu)
                     set_tests_properties(native_d3d11_tessellation_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
@@ -2168,204 +2172,204 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 set(RAVEN_VKD3D_PE64_DIR "" CACHE PATH "Directory holding vkd3d-proton d3d12.dll and d3d12core.dll for 64-bit programs")
                 if(RAVEN_VKD3D_PE64_DIR AND EXISTS ${RAVEN_VKD3D_PE64_DIR}/d3d12core.dll)
                     add_test(NAME native_d3d12_device COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/device.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/device.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-device)
                     set_tests_properties(native_d3d12_device PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_clear COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-clear.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/clear.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/clear.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-clear)
                     set_tests_properties(native_d3d12_clear PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_draw COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-draw.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/draw.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/draw.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-draw)
                     set_tests_properties(native_d3d12_draw PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_bundle COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-bundle.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/bundle.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/bundle.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-bundle)
                     set_tests_properties(native_d3d12_bundle PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_bundle_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-bundle.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/bundle.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/bundle.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-bundle-gpu gpu)
                         set_tests_properties(native_d3d12_bundle_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     add_test(NAME native_d3d12_geometry COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-stages.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/geometry12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/geometry12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-geometry)
                     set_tests_properties(native_d3d12_geometry PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_geometry_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-stages.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/geometry12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/geometry12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-geometry-gpu gpu)
                         set_tests_properties(native_d3d12_geometry_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     add_test(NAME native_d3d12_tessellation COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-stages.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/tessellation12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/tessellation12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-tessellation)
                     set_tests_properties(native_d3d12_tessellation PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_tessellation_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-stages.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/tessellation12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/tessellation12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-tessellation-gpu gpu)
                         set_tests_properties(native_d3d12_tessellation_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     # Ray tracing runs on the software driver only (the development machine's GPU offers none); no ray tracing there skips the test.
                     add_test(NAME native_d3d12_raytrace COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-raytrace.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/raytrace.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/raytrace.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-raytrace)
                     set_tests_properties(native_d3d12_raytrace PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_rayquery COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-raytrace.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/rayquery.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/rayquery.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-rayquery)
                     set_tests_properties(native_d3d12_rayquery PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_rtanyhit COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-raytrace.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/rtanyhit.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/rtanyhit.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-rtanyhit)
                     set_tests_properties(native_d3d12_rtanyhit PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_rtprocedural COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-raytrace.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/rtprocedural.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/rtprocedural.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-rtprocedural)
                     set_tests_properties(native_d3d12_rtprocedural PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_rtscene COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-raytrace.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/rtscene.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/rtscene.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-rtscene)
                     set_tests_properties(native_d3d12_rtscene PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     add_test(NAME native_d3d12_wave COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-wave.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/wave.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/wave.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-wave)
                     set_tests_properties(native_d3d12_wave PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_wave_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-wave.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/wave.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/wave.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-wave-gpu gpu)
                         set_tests_properties(native_d3d12_wave_gpu PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     add_test(NAME native_d3d12_textured COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-textured.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/textured.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/textured.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-textured)
                     set_tests_properties(native_d3d12_textured PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_textured_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-textured.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/textured.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/textured.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-textured-gpu gpu)
                         set_tests_properties(native_d3d12_textured_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     add_test(NAME native_d3d12_features COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-features.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/features.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/features.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-features)
                     set_tests_properties(native_d3d12_features PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_features_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-features.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/features.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/features.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-features-gpu gpu)
                         set_tests_properties(native_d3d12_features_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     add_test(NAME native_d3d12_compute COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-compute.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/compute.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/compute.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d12-compute)
                     set_tests_properties(native_d3d12_compute PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_compute_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-compute.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/compute.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/compute.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-compute-gpu gpu)
                         set_tests_properties(native_d3d12_compute_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_draw_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-draw.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/draw.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/draw.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-draw-gpu gpu)
                         set_tests_properties(native_d3d12_draw_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON)
                         add_test(NAME native_d3d12_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-present.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/window12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/window12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-present)
                         set_tests_properties(native_d3d12_present PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                         if(EXISTS /dev/dri/renderD128)
                             add_test(NAME native_d3d12_present_gpu COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-present.py
-                                $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/window12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                                $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/window12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                                 ${CMAKE_CURRENT_BINARY_DIR}/d3d12-present-gpu gpu)
                             set_tests_properties(native_d3d12_present_gpu PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
                         endif()
                         add_test(NAME native_d3d12_present_vsync COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-present.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/window12_vsync.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/window12_vsync.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-present-vsync)
                         set_tests_properties(native_d3d12_present_vsync PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                         add_test(NAME native_d3d12_fullscreen COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-fullscreen.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/fullscreen12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/fullscreen12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-fullscreen)
                         set_tests_properties(native_d3d12_fullscreen PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                         if(EXISTS /dev/dri/renderD128)
                             add_test(NAME native_d3d12_fullscreen_gpu COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-fullscreen.py
-                                $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/fullscreen12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                                $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/fullscreen12.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                                 ${CMAKE_CURRENT_BINARY_DIR}/d3d12-fullscreen-gpu gpu)
                             set_tests_properties(native_d3d12_fullscreen_gpu PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
                         endif()
                     endif()
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_clear_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12-clear.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/clear.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/clear.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-clear-gpu gpu)
                         set_tests_properties(native_d3d12_clear_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d12_device_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d12.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d12/device.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d12/device.exe ${RAVEN_VKD3D_PE64_DIR} ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d12-device-gpu gpu)
                         set_tests_properties(native_d3d12_device_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                 endif()
                 add_test(NAME native_d3d11_textured COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-textured.py
-                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/textured.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-textured)
+                    $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/textured.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-textured)
                 set_tests_properties(native_d3d11_textured PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 if(EXISTS /dev/dri/renderD128)
                     add_test(NAME native_d3d11_textured_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-textured.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/textured.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-textured-gpu gpu)
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/textured.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-textured-gpu gpu)
                     set_tests_properties(native_d3d11_textured_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
                 add_test(NAME native_d3d11_features COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-features.py
-                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/features.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-features)
+                    $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/features.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-features)
                 set_tests_properties(native_d3d11_features PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 if(EXISTS /dev/dri/renderD128)
                     add_test(NAME native_d3d11_features_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-features.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/features.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-features-gpu gpu)
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/features.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-features-gpu gpu)
                     set_tests_properties(native_d3d11_features_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
                 add_test(NAME native_d3d11_compute COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-compute.py
-                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/compute.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-compute)
+                    $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/compute.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-compute)
                 set_tests_properties(native_d3d11_compute PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 if(EXISTS /dev/dri/renderD128)
                     add_test(NAME native_d3d11_compute_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-compute.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/compute.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-compute-gpu gpu)
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/compute.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-compute-gpu gpu)
                     set_tests_properties(native_d3d11_compute_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
                 add_test(NAME native_d3d11_msaa COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-msaa.py
-                    $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/msaa.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-msaa)
+                    $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/msaa.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-msaa)
                 set_tests_properties(native_d3d11_msaa PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 if(EXISTS /dev/dri/renderD128)
                     add_test(NAME native_d3d11_msaa_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-msaa.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/msaa.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-msaa-gpu gpu)
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/msaa.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-msaa-gpu gpu)
                     set_tests_properties(native_d3d11_msaa_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
                 endif()
                 # Presenting to a window also needs the Wayland backend, an isolated compositor and a capture tool.
                 if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON)
                     add_test(NAME native_d3d11_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-present.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/window.exe ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/window.exe ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d11-present)
                     set_tests_properties(native_d3d11_present PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d11_present_gpu COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-present.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/window.exe ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/window.exe ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d11-present-gpu gpu)
                         set_tests_properties(native_d3d11_present_gpu PROPERTIES TIMEOUT 240 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
                     endif()
                     add_test(NAME native_d3d11_fullscreen COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-fullscreen.py
-                        $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/fullscreen.exe ${RAVEN_DXVK_PE64_DIR}
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/fullscreen.exe ${RAVEN_DXVK_PE64_DIR}
                         ${CMAKE_CURRENT_BINARY_DIR}/d3d11-fullscreen)
                     set_tests_properties(native_d3d11_fullscreen PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                     if(EXISTS /dev/dri/renderD128)
                         add_test(NAME native_d3d11_fullscreen_gpu COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-fullscreen.py
-                            $<TARGET_FILE:raven> ${PROJECT_SOURCE_DIR}/testdata/d3d11/fullscreen.exe ${RAVEN_DXVK_PE64_DIR}
+                            $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/fullscreen.exe ${RAVEN_DXVK_PE64_DIR}
                             ${CMAKE_CURRENT_BINARY_DIR}/d3d11-fullscreen-gpu gpu)
                         set_tests_properties(native_d3d11_fullscreen_gpu PROPERTIES TIMEOUT 900 RESOURCE_LOCK raven_compositor ENVIRONMENT "${RAVEN_LSAN}")
                     endif()

@@ -41,6 +41,7 @@ def run_once(runtime, raven, wine, program, prefix, work, index):
             command = [str(wine), str(program)]
         process = subprocess.Popen(command, env=env, cwd=program.parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         marker = prefix / "drive_c" / "present_rate.txt"
+        marker.unlink(missing_ok=True)
         try:
             deadline = time.time() + 120
             while time.time() < deadline and process.poll() is None and not marker.exists():
@@ -77,7 +78,9 @@ def main():
     warm = work / "wine-warm"
     warm_env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "WINEPREFIX": str(warm), "WINEDEBUG": "-all"}
     subprocess.run([str(wine), "wineboot", "-u"], env=warm_env, capture_output=True, timeout=300)
-    server = Path("/usr/lib/x86_64-linux-gnu/wine/wineserver")
+    server = wine.with_name("wineserver")
+    if not server.exists():
+        server = Path("/usr/lib/x86_64-linux-gnu/wine/wineserver")
     subprocess.run([str(server), "-k"], env=warm_env, capture_output=True, timeout=60)
     rates = {"raven": [], "wine": []}
     for runtime in ("raven", "wine"):

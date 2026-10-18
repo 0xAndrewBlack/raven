@@ -24,7 +24,8 @@ import time
 
 TICKS = os.sysconf("SC_CLK_TCK")
 # Wine's server sits in the library directory on Debian style installations.
-WINESERVER = next((str(path) for path in (Path("/usr/lib/wine/wineserver"), Path("/usr/lib/x86_64-linux-gnu/wine/wineserver"))
+WINE = os.environ.get("RAVEN_BENCH_WINE", "wine")
+WINESERVER = os.environ.get("RAVEN_BENCH_WINESERVER") or next((str(path) for path in (Path("/usr/lib/wine/wineserver"), Path("/usr/lib/x86_64-linux-gnu/wine/wineserver"))
                    if path.exists()), "wineserver")
 
 JS_PAGE = """<!doctype html><title>JS waiting</title><script>
@@ -111,7 +112,7 @@ def main():
     runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     for name in ("wayland-0", "wayland-0.lock"):
         (runtime_dir / name).unlink(missing_ok=True)
-    base = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "TMPDIR": os.environ.get("TMPDIR", str(work)), "XDG_RUNTIME_DIR": str(runtime_dir),
+    base = {"PATH": str(Path(WINE).parent) + ":/usr/bin:/bin", "HOME": os.environ["HOME"], "TMPDIR": os.environ.get("TMPDIR", str(work)), "XDG_RUNTIME_DIR": str(runtime_dir),
             "WAYLAND_DISPLAY": "wayland-0", "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/lvp_icd.json", "LP_NUM_THREADS": "2"}
     compositor = subprocess.Popen(["labwc"], env=base | {"WLR_BACKENDS": "headless", "WLR_RENDERER": "pixman", "WLR_HEADLESS_OUTPUTS": "1"},
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -123,27 +124,30 @@ def main():
         programs = work / "programs"
         if not programs.exists():
             programs.mkdir()
-            shutil.copy(testdata / "notepad.exe", programs / "notepad.exe")
+            if (testdata / "notepad.exe").exists():
+                shutil.copy(testdata / "notepad.exe", programs / "notepad.exe")
             shutil.copytree(testdata / "npp", programs / "npp")
-            shutil.copytree(testdata / "winmine", programs / "winmine")
-            shutil.copytree(chrome, programs / "chrome")
+            if (testdata / "winmine").exists():
+                shutil.copytree(testdata / "winmine", programs / "winmine")
+            if chrome.is_dir():
+                shutil.copytree(chrome, programs / "chrome")
             (programs / "classicube").mkdir()
-            shutil.copy(classicube, programs / "classicube" / "ClassiCube.exe")
+            if classicube.is_file():
+                shutil.copy(classicube, programs / "classicube" / "ClassiCube.exe")
             for name, page in (("load.html", LOAD_PAGE), ("js.html", JS_PAGE), ("canvas.html", CANVAS_PAGE)):
                 (programs / name).write_text(page)
         # Wine: a prefix that is initialised and draws through its Wayland driver; DXVK serves Direct3D as it does for Raven.
         wine_prefix = work / "wine-prefix"
         wine_env = base | {"WINEPREFIX": str(wine_prefix), "WINEDEBUG": "-all", "WINEDLLOVERRIDES": "mscoree=;mshtml=;d3d11,dxgi,d3d10core=n"}
         if not wine_prefix.exists():
-            subprocess.run(["wine", "wineboot", "-u"], env=wine_env, capture_output=True, timeout=300)
-            subprocess.run(["wine", "reg", "add", "HKCU\\Software\\Wine\\Drivers", "/v", "Graphics", "/d", "wayland", "/f"], env=wine_env,
+            subprocess.run([WINE, "wineboot", "-u"], env=wine_env, capture_output=True, timeout=300)
+            subprocess.run([WINE, "reg", "add", "HKCU\\Software\\Wine\\Drivers", "/v", "Graphics", "/d", "wayland", "/f"], env=wine_env,
                            capture_output=True, timeout=120)
             subprocess.run([WINESERVER, "-w"], env=wine_env, capture_output=True, timeout=120)
         for name in ("d3d11.dll", "dxgi.dll", "d3d10core.dll"):
             shutil.copy(dxvk / name, programs / "classicube" / name)
         raven_prefix = work / "raven-prefix"
-        raven_env = base | {"RAVEN_PREFIX": str(raven_prefix), "RAVEN_D3D_DIRECTORY": str(dxvk), "RAVEN_COMMIT_LIMIT_MB": "4096",
-                            "RAVEN_CONTINUE_UNIMPLEMENTED": "1"}
+        raven_env = base | {"RAVEN_PREFIX": str(raven_prefix), "RAVEN_D3D_DIRECTORY": str(dxvk), "RAVEN_COMMIT_LIMIT_MB": "4096"}
 
         # Both runtimes map the host's root to drive Z.
         def page(name):
@@ -176,13 +180,13 @@ def main():
                             command += ["--"] + arguments
                         env = raven_env | {key: value}
                     else:
-                        command = ["wine", str(program)] + arguments
+                        command = [WINE, str(program)] + arguments
                         env = wine_env | {key: value}
                     start = time.perf_counter()
                     process = subprocess.Popen(command, env=env, cwd=str(program.parent), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                                start_new_session=True)
                     shown, measured = None, None
-                    while time.perf_counter() - start < 300:
+                    while time.perf_counter() - start < float(os.environ.get("RAVEN_BENCH_TIMEOUT", "300")):
                         matches = [title for title in titles(base) if re.search(ready, title)]
                         if matches:
                             shown = time.perf_counter() - start
