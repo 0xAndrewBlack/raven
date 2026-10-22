@@ -1,5 +1,10 @@
 //go:build guest_windows
 
+// SPDX-License-Identifier: MIT AND LGPL-2.1-or-later AND GPL-2.0-or-later
+// Copyright (C) 2003 ReactOS Team
+// Derived from ReactOS win32ss/user/user32/windows/nonclient.c and windows/defwnd.c.
+// Upstream: https://github.com/reactos/reactos/tree/dacf2a6c47fa562799f9c8a41ab6d5c558556558
+
 package main
 
 import (

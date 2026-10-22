@@ -1,5 +1,10 @@
 //go:build guest_windows
 
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 1998-2001 ReactOS Team
+// Derived from ReactOS win32ss/user/user32/windows/rect.c.
+// Upstream: https://github.com/reactos/reactos/tree/dacf2a6c47fa562799f9c8a41ab6d5c558556558
+
 package win32
 
 // Rect operations - ported from ReactOS win32ss/user/user32/windows/rect.c

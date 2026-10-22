@@ -1,5 +1,10 @@
 //go:build guest_windows
 
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Copyright (C) 2003 ReactOS Team
+// Derived from ReactOS win32ss/user/user32/windows/nonclient.c.
+// Upstream: https://github.com/reactos/reactos/tree/dacf2a6c47fa562799f9c8a41ab6d5c558556558
+
 package win32
 
 // Non-client area helpers - ported from ReactOS

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2016 Bigelow & Holmes Inc. All rights reserved.
+// Bitmap glyphs derived from Go Mono; see LICENSE-Go-Mono in this directory.
+// Source: golang.org/x/image/font/gofont/ttfs/Go-Mono.ttf
+
 package wl
 
 // font8x16 is a bitmap font for ASCII 32-126. Each glyph is 8x16.

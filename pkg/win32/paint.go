@@ -1,5 +1,10 @@
 //go:build guest_windows
 
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 1998-2001 ReactOS Team
+// Derived from ReactOS win32ss/user/user32/windows/paint.c.
+// Upstream: https://github.com/reactos/reactos/tree/dacf2a6c47fa562799f9c8a41ab6d5c558556558
+
 package win32
 
 // Paint cycle helpers - ported from ReactOS
@@ -63,18 +68,18 @@ func EndPaint(hwnd uint64) {}
 // triggers an immediate WM_PAINT via UpdateWindow semantics.
 // Flags mirror the RDW_* constants (subset implemented).
 const (
-	RDW_INVALIDATE    = 0x0001
-	RDW_INTERNALPAINT = 0x0002
-	RDW_ERASE         = 0x0004
-	RDW_VALIDATE      = 0x0008
+	RDW_INVALIDATE      = 0x0001
+	RDW_INTERNALPAINT   = 0x0002
+	RDW_ERASE           = 0x0004
+	RDW_VALIDATE        = 0x0008
 	RDW_NOINTERNALPAINT = 0x0010
-	RDW_NOERASE       = 0x0020
-	RDW_NOCHILDREN    = 0x0040
-	RDW_ALLCHILDREN   = 0x0080
-	RDW_UPDATENOW     = 0x0100
-	RDW_ERASENOW      = 0x0200
-	RDW_FRAME         = 0x0400
-	RDW_NOFRAME       = 0x0800
+	RDW_NOERASE         = 0x0020
+	RDW_NOCHILDREN      = 0x0040
+	RDW_ALLCHILDREN     = 0x0080
+	RDW_UPDATENOW       = 0x0100
+	RDW_ERASENOW        = 0x0200
+	RDW_FRAME           = 0x0400
+	RDW_NOFRAME         = 0x0800
 )
 
 func RedrawWindow(hwnd uint64, rect *Rect, flags uint32) bool {

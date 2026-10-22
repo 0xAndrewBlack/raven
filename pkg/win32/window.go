@@ -1,5 +1,11 @@
 //go:build guest_windows
 
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright: see COPYING in the ReactOS source root.
+// Upstream programmers: Casper S. Hornstrup and Katayama Hirofumi MZ.
+// Derived from ReactOS win32ss/user/user32/windows/window.c.
+// Upstream: https://github.com/reactos/reactos/tree/dacf2a6c47fa562799f9c8a41ab6d5c558556558
+
 // Package win32 provides a user32-compatible Win32 window management layer.
 // Ported from ReactOS win32ss/user/user32/windows/.
 package win32
