@@ -77,6 +77,10 @@ def main():
         fetch(output)
     if args.data_only:
         return
+    startup = output / "benchmark/startup.exe"
+    startup.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([args.cc, "-O2", "-nostdlib", "-fno-stack-protector", "-Wl,--entry,entry,--no-insert-timestamp",
+                    "-o", str(startup), str(source / "benchmark/startup.c"), "-lkernel32"], env=env, check=True)
     workloads = [("d3d11", path.stem, path.name, []) for path in sorted((source / "d3d11").glob("*.c"))]
     workloads += [("d3d12", path.stem, path.name, []) for path in sorted((source / "d3d12").glob("*.c")) if path.stem != "stages"]
     workloads += [("d3d12", name, "stages.c", ["-D" + define]) for name, define in (

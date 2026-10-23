@@ -89,13 +89,22 @@ def main():
                     env["WINEPREFIX"] = str(prefix)
                     command = [str(wine)] + program_args
                 try:
-                    samples.append(isolated(command, env, stdin_text, str(program.parent)))
+                    sample = isolated(command, env, stdin_text, str(program.parent))
+                    verified = sample[3] == 0
+                    if name == "sqlite":
+                        verified = verified and "8000000" in sample[4].splitlines()
+                    elif name == "d3d11":
+                        marker = prefix / "drive_c/triangle.txt"
+                        pixels = prefix / "drive_c/triangle.raw"
+                        verified = (verified and marker.is_file() and marker.read_text().strip() == "OK" and
+                                    pixels.is_file() and pixels.stat().st_size == 256 * 256 * 4)
+                    samples.append((*sample, verified))
                 finally:
                     if runtime == "wine":
                         subprocess.run([str(server), "-k"], env=env, capture_output=True, timeout=60)
-            ok = [s for s in samples if s[3] == 0]
+            ok = [s for s in samples if s[5]]
             if not ok:
-                rows.append((name, runtime, None, None, None, f"failed: exit {samples[-1][3]}: {samples[-1][4][-120:]!r}"))
+                rows.append((name, runtime, None, None, None, f"did not run to a verified result: exit {samples[-1][3]}: {samples[-1][4][-120:]!r}"))
                 continue
             rows.append((name, runtime, statistics.median(s[0] for s in ok), statistics.median(s[1] for s in ok), statistics.median(s[2] for s in ok),
                          f"{len(ok)}/{repeats} runs ok"))
