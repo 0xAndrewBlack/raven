@@ -1,0 +1,157 @@
+{
+  "cli": {
+    "startup": {
+      "Raven": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 2.5589103550009895,
+        "cpu_seconds": 2.471508,
+        "rss_mib": 36.41796875
+      },
+      "Wine 11.0": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 3.771150063999812,
+        "cpu_seconds": 0.007456,
+        "rss_mib": 11.734375
+      },
+      "Soda 11.0-32 exp.": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 1.1495076559986046,
+        "cpu_seconds": 0.010499999999999999,
+        "rss_mib": 11.90625
+      }
+    },
+    "sqlite": {
+      "Raven": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 5.195191724000324,
+        "cpu_seconds": 5.115231,
+        "rss_mib": 36.16796875
+      },
+      "Wine 11.0": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 6.317764276998787,
+        "cpu_seconds": 2.515648,
+        "rss_mib": 11.80859375
+      },
+      "Soda 11.0-32 exp.": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 2.9803541199980828,
+        "cpu_seconds": 2.234241,
+        "rss_mib": 11.95703125
+      }
+    },
+    "d3d11": {
+      "Raven": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 2.9876985350019822,
+        "cpu_seconds": 2.832915,
+        "rss_mib": 120.0
+      },
+      "Wine 11.0": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 4.670139654001105,
+        "cpu_seconds": 0.11771899999999999,
+        "rss_mib": 105.53515625
+      },
+      "Soda 11.0-32 exp.": {
+        "samples": 0,
+        "attempts": 3,
+        "value": null
+      }
+    }
+  },
+  "apps": {
+    "notepad++": {
+      "Raven": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 0.7288174789973709,
+        "cpu_seconds": 0.65,
+        "rss_mib": 91.94921875
+      },
+      "Wine 11.0": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 0.9443304249980429,
+        "cpu_seconds": 0.67,
+        "rss_mib": 209.5703125
+      },
+      "Soda 11.0-32 exp.": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 0.9453229739992821,
+        "cpu_seconds": 0.6600000000000001,
+        "rss_mib": 234.97265625
+      }
+    },
+    "classicube": {
+      "Raven": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 0.10579607099862187,
+        "cpu_seconds": 0.08,
+        "rss_mib": 46.8359375
+      },
+      "Wine 11.0": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 0.4692752990013105,
+        "cpu_seconds": 0.23,
+        "rss_mib": 178.87890625
+      },
+      "Soda 11.0-32 exp.": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 0.36898007999843685,
+        "cpu_seconds": 0.16000000000000003,
+        "rss_mib": 202.79296875
+      }
+    }
+  },
+  "frames": {
+    "d3d11-present": {
+      "Raven": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 698.0108435984553
+      },
+      "Wine 11.0": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 863.3032659194203
+      },
+      "Soda 11.0-32 exp.": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 772.5933331376096
+      }
+    }
+  },
+  "games": {
+    "ClassiCube 1.3.8 singleplayer": {
+      "Raven": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 17
+      },
+      "Wine 11.0": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 61
+      },
+      "Soda 11.0-32 exp.": {
+        "samples": 3,
+        "attempts": 3,
+        "value": 61
+      }
+    }
+  }
+}
