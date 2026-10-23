@@ -2038,13 +2038,13 @@ bool NativeWindows::dispatch(std::string_view name)
 	if (!adjustment && name!="GetSystemMetrics" && !coordinate && name!="MapWindowPoints" && !info && !data && name!="CallWindowProcW" && !registration && !creation && name!="DestroyWindow" && name!="SendMessageW" && name!="IsWindow" &&
 		name!="IsWindowUnicode" && name!="UnregisterClassW" && name!="ShowWindow" && name!="GetDC" && name!="GetWindowDC" && name!="WindowFromDC" && name!="ReleaseDC" &&
 		name!="UpdateWindow" && name!="IsWindowVisible" && name!="BeginPaint" && name!="EndPaint" &&
-		name!="PostMessageW" && name!="PostThreadMessageW" && name!="PeekMessageW" && name!="GetMessageW" && name!="DispatchMessageW" &&
+		name!="PostMessageW" && name!="SendNotifyMessageW" && name!="PostThreadMessageW" && name!="PeekMessageW" && name!="GetMessageW" && name!="DispatchMessageW" &&
 		name!="TranslateMessage" && name!="PostQuitMessage" && name!="DefWindowProcW" &&
 		name!="GetWindowTextW" && name!="InternalGetWindowText" && name!="GetWindowTextLengthW" && name!="SetWindowTextW" &&
 		name!="GetFocus" && name!="SetFocus" && name!="GetActiveWindow" && name!="GetClientRect" && name!="GetWindowRect" &&
 		name!="InvalidateRect" && name!="ValidateRect" && name!="GetUpdateRect") return false;
 	const auto args=process.api_arguments(adjustment ? (name=="AdjustWindowRectEx" ? 4 : 3) : coordinate ? 2 : name=="MapWindowPoints" ? 4 : info ? 3 : data ? (name.starts_with("Set") ? 3 : 2) : name=="CallWindowProcW" ? 5 : registration ? 1 : creation ? 12 : name=="SendMessageW" ? 4 :
-		name=="PostMessageW" || name=="PostThreadMessageW" || name=="GetMessageW" || name=="DefWindowProcW" ? 4 : name=="PeekMessageW" ? 5 :
+		name=="PostMessageW" || name=="SendNotifyMessageW" || name=="PostThreadMessageW" || name=="GetMessageW" || name=="DefWindowProcW" ? 4 : name=="PeekMessageW" ? 5 :
 		name=="GetWindowTextW" || name=="InternalGetWindowText" || name=="InvalidateRect" || name=="GetUpdateRect" ? 3 :
 		name=="SetWindowTextW" || name=="GetClientRect" || name=="GetWindowRect" || name=="ValidateRect" ? 2 :
 		name=="UnregisterClassW" || name=="ShowWindow" || name=="ReleaseDC" || name=="BeginPaint" || name=="EndPaint" ? 2 : 1);
@@ -2116,6 +2116,12 @@ bool NativeWindows::dispatch(std::string_view name)
 			if (int32_t(args[2])>0) result=copy_window_text(args[0],args[1],uint32_t(args[2]));
 		}
 		else if (name=="PostMessageW") { post(args[0],uint32_t(args[1]),args[2],args[3]); result=1; }
+		// A notification does not wait for the receiver: a broadcast, such as a changed setting announced to every window, needs no
+		// delivery here since no other program's windows listen; one window gets it in its queue.
+		else if (name=="SendNotifyMessageW") {
+			if (args[0]!=0xffff && args[0]!=0xffffffffffffffffULL) post(args[0],uint32_t(args[1]),args[2],args[3]);
+			result=1;
+		}
 		// A message for a thread has no window and goes to that thread's queue.
 		else if (name=="PostThreadMessageW") {
 			if (messages.size()>=10000) throw uint32_t(1816);

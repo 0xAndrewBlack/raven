@@ -112,6 +112,18 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[4], *location, 260);
 		call.ret(0);
 	});
+	registry.add("SHGetFolderPathA", 5, [&paths](ApiCall &call) {
+		const int csidl = call.i32(1);
+		const auto location = folder_for(csidl, paths.user_profile(), call.process.mode() == NativeMode::x86);
+		if (!location) {
+			call.ret(0x80070057U);
+			return;
+		}
+		if (const auto resolved = paths.resolve(*location); resolved && csidl & 0x8000)
+			std::filesystem::create_directories(resolved->host);
+		call.put_narrow(call[4], to_ansi(*location, 1252), 260);
+		call.ret(0);
+	});
 	// A known folder id names the folder; the path comes in memory the program frees with CoTaskMemFree.
 	registry.add("SHGetKnownFolderPath", 4, [&paths, &context](ApiCall &call) {
 		if (!call[0] || !call[3]) {
@@ -233,6 +245,20 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		std::error_code error;
 		std::filesystem::create_directories(resolved->host, error);
 		call.ret(error ? 5 : 0);
+	});
+	// The shell's change notifications refresh Explorer windows, which this desktop does not have; announcing a change does nothing.
+	registry.add("SHChangeNotify", 4, [](ApiCall &call) { call.ret(0); });
+	// A folder on a local disk is ready for writing once it exists; SHPPFW_DIRCREATE makes it first.
+	registry.add("SHPathPrepareForWriteW", 4, [&paths](ApiCall &call) {
+		const auto resolved = call[2] ? paths.resolve(call.wide(call[2])) : std::nullopt;
+		if (!resolved) {
+			call.ret(0x80070003U);
+			return;
+		}
+		std::error_code error;
+		if (call.u32(3) & 1)
+			std::filesystem::create_directories(resolved->host, error);
+		call.ret(std::filesystem::is_directory(resolved->host, error) ? 0 : 0x80070003U);
 	});
 	registry.add("CommandLineToArgvW", 2, [&context](ApiCall &call) {
 		const auto line = call.wide(call[0]);
@@ -361,8 +387,10 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 				uint32_t error = 0;
 				const int standard[3] = {0, 1, 2};
 				const auto full = paths.dos(resolved->host);
+				request_child_elevation(equal_fold(operation, u"runas"));
 				started = start_program(context, full, u"\"" + full + u"\"" + (parameters.empty() ? u"" : u" " + parameters),
 					directory.empty() ? full.substr(0, full.find_last_of(u'\\')) : directory, standard, context.environment_block ? context.environment_block() : std::u16string(), nullptr, error);
+				request_child_elevation(false);
 				return started ? 42 : error == 193 ? 11 : error;
 			}
 			argument = resolved->host.string();

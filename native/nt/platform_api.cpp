@@ -218,6 +218,34 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("DwmInvalidateIconicBitmaps", 1, [](ApiCall &call) { call.ret(s_ok); });
 	registry.add("DwmGetCompositionTimingInfo", 2, [](ApiCall &call) { call.ret(0x80263001U); });
 
+	// Ghosting replaces a hung window with a frame the user can move; it is not drawn here, so turning it off changes nothing. Reasons that
+	// hold back a shutdown are kept by Windows only for its shutdown screen, which this desktop does not show.
+	registry.add("DisableProcessWindowsGhosting", 0, [](ApiCall &call) { call.ret(0); });
+	registry.add("ShutdownBlockReasonCreate", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("ShutdownBlockReasonDestroy", 1, [](ApiCall &call) { call.ret(1); });
+
+	// Owned pop-ups are shown and hidden with their owner by the window manager here already, and a logical palette has nothing to
+	// realize on a true colour display; both succeed. Non-client areas are scaled with the window's DPI by the frame drawing itself.
+	registry.add("ShowOwnedPopups", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("UnrealizeObject", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("EnableNonClientDpiScaling", 1, [](ApiCall &call) { call.ret(1); });
+
+	// A clipboard listener is told when the clipboard changes; registering one succeeds, and a window not registered cannot be removed.
+	registry.add("AddClipboardFormatListener", 1, [](ApiCall &call) { call.ret(call[0] ? 1 : 0); });
+	registry.add("RemoveClipboardFormatListener", 1, [](ApiCall &call) { call.ret(call[0] ? 1 : 0); });
+
+	// mpr, the network provider router: the machine has no network drives or shares, so enumeration finds no network and a drive or
+	// path has no remote connection, the answers Windows gives on a machine that is not connected.
+	for (const char *name : {"WNetOpenEnumW", "WNetOpenEnumA"})
+		registry.add(name, 5, [](ApiCall &call) { call.ret(1222); });
+	for (const char *name : {"WNetEnumResourceW", "WNetEnumResourceA"})
+		registry.add(name, 4, [](ApiCall &call) { call.ret(6); });
+	registry.add("WNetCloseEnum", 1, [](ApiCall &call) { call.ret(6); });
+	for (const char *name : {"WNetGetConnectionW", "WNetGetConnectionA"})
+		registry.add(name, 3, [](ApiCall &call) { call.ret(2250); });
+	for (const char *name : {"WNetGetUniversalNameW", "WNetGetUniversalNameA"})
+		registry.add(name, 4, [](ApiCall &call) { call.ret(2250); });
+
 	// loadperf, what lodctr and unlodctr run on: the names and help texts of a service's performance counters. No counters are kept
 	// here, so adding and removing them succeeds and changes nothing.
 	for (const char *name : {"LoadPerfCounterTextStringsA", "LoadPerfCounterTextStringsW", "UnloadPerfCounterTextStringsA", "UnloadPerfCounterTextStringsW"})

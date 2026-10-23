@@ -25,7 +25,7 @@ constexpr std::array exported{
 	Export{"kernel32.dll", "GetThreadContext", 2}, Export{"kernel32.dll", "SetThreadContext", 2},
 	Export{"kernel32.dll", "DeviceIoControl", 8}, Export{"kernel32.dll", "GetProcessAffinityMask", 3},
 	Export{"kernel32.dll", "SetProcessAffinityMask", 2}, Export{"kernel32.dll", "GetSystemInfo", 1}, Export{"kernel32.dll", "VirtualQuery", 3},
-	Export{"kernel32.dll", "DuplicateHandle", 7},
+	Export{"kernel32.dll", "DuplicateHandle", 7}, Export{"kernel32.dll", "VirtualQueryEx", 4}, Export{"kernel32.dll", "SetProcessDEPPolicy", 1},
 	Export{"user32.dll", "ChangeDisplaySettingsExW", 5}, Export{"user32.dll", "CreateIconIndirect", 1},
 	Export{"user32.dll", "DisplayConfigGetDeviceInfo", 1}, Export{"user32.dll", "EnumDisplayDevicesA", 4},
 	Export{"user32.dll", "SetProcessDPIAware", 0},
@@ -328,9 +328,15 @@ bool NativeX86System::dispatch(std::string_view name)
 				info[index * 4 + byte] = uint8_t(fields[index] >> (byte * 8));
 		process.write_memory(args[0], info);
 		process.return_api(0);
-	} else if (name == "VirtualQuery") {
-		const auto region = memory.query(args[0]);
-		if (!region || args[2] < 28) {
+	} else if (name == "VirtualQuery" || name == "VirtualQueryEx") {
+		// VirtualQueryEx answers for the program itself; another process's memory is not reachable from here.
+		const bool other = name == "VirtualQueryEx" && args[0] != 0xffffffffULL;
+		const auto address = name == "VirtualQuery" ? args[0] : args[1], buffer = name == "VirtualQuery" ? args[1] : args[2];
+		const auto length = name == "VirtualQuery" ? args[2] : args[3];
+		const auto region = other ? std::nullopt : memory.query(address);
+		if (other) {
+			fail(5);
+		} else if (!region || length < 28) {
 			fail(87);
 		} else {
 			const auto &raw = *region;
@@ -340,9 +346,12 @@ bool NativeX86System::dispatch(std::string_view name)
 			for (size_t index = 0; index < 7; ++index)
 				for (size_t byte = 0; byte < 4; ++byte)
 					info[index * 4 + byte] = uint8_t(fields[index] >> (byte * 8));
-			process.write_memory(args[1], info);
+			process.write_memory(buffer, info);
 			process.return_api(28);
 		}
+	} else if (name == "SetProcessDEPPolicy") {
+		// Data execution prevention is always on for these programs, as on 64-bit Windows; asking for it succeeds.
+		process.return_api(1);
 	} else if (name == "DuplicateHandle") {
 		// The current-thread pseudo handle duplicates into a real handle to the calling thread.
 		const auto made = args[1] == 0xfffffffeULL ? objects.add_object(std::make_shared<ThreadObject>(threads.find(threads.current_id())))

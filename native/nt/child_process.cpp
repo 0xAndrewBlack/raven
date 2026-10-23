@@ -128,7 +128,7 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 	}
 	arguments.push_back("--stdio=inherit");
 	// A child of an elevated process carries its elevated token.
-	if (process_elevated())
+	if (process_elevated() || child_elevation_requested_now())
 		arguments.push_back("--elevated");
 	// So does a child of a process in the services' session.
 	if (process_noninteractive())

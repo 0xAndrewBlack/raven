@@ -680,6 +680,11 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetThreadUILanguage", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("GetThreadLocale", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("SetThreadLocale", 1, [](ApiCall &call) { call.ret(1); });
+	// The default locales stand for the user's and the system's, both US English here; a language without a sublanguage takes its default.
+	registry.add("ConvertDefaultLocale", 1, [](ApiCall &call) {
+		const uint32_t locale = call.u32(0);
+		call.ret(locale == 0 || locale == 0x400 || locale == 0x800 ? 0x409 : (locale & 0xfc00) ? locale : locale | 0x400);
+	});
 	registry.add("IsValidLocale", 2, [](ApiCall &call) { call.ret(call.u32(0) == 0x409 || call.u32(0) == 0x400 || call.u32(0) == 0x800); });
 	const auto locale_name = [](ApiCall &call, uint64_t buffer, int32_t capacity) {
 		const std::u16string name = u"en-US";

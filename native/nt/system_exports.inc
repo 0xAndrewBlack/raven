@@ -2661,6 +2661,27 @@ static constexpr std::string_view loadperf_exports[]{
 	"LpReleaseInstallationMutex","RestorePerfRegistryFromFileW","SetServiceAsTrustedA","SetServiceAsTrustedW","UnloadPerfCounterTextStringsA","UnloadPerfCounterTextStringsW",
 	"UpdatePerfNameFilesA","UpdatePerfNameFilesW",
 };
+static constexpr std::string_view mpr_exports[]{
+	"DoBroadcastSystemMessage","DoCommandLinePrompt","DoPasswordDialog","DoProfileErrorDialog","I_MprSaveConn","MultinetGetConnectionPerformanceA",
+	"MultinetGetConnectionPerformanceW","MultinetGetErrorTextA","MultinetGetErrorTextW","RestoreConnectionA0","ShowReconnectDialog","ShowReconnectDialogEnd",
+	"ShowReconnectDialogUI","WNetAddConnection2A","WNetAddConnection2W","WNetAddConnection3A","WNetAddConnection3W","WNetAddConnection4A",
+	"WNetAddConnection4W","WNetAddConnectionA","WNetAddConnectionW","WNetCancelConnection2A","WNetCancelConnection2W","WNetCancelConnectionA",
+	"WNetCancelConnectionW","WNetClearConnections","WNetCloseEnum","WNetConnectionDialog","WNetConnectionDialog1A","WNetConnectionDialog1W",
+	"WNetConnectionDialog2","WNetDirectoryNotifyA","WNetDirectoryNotifyW","WNetDisconnectDialog","WNetDisconnectDialog1A","WNetDisconnectDialog1W",
+	"WNetDisconnectDialog2","WNetEnumResourceA","WNetEnumResourceW","WNetFMXEditPerm","WNetFMXGetPermCaps","WNetFMXGetPermHelp",
+	"WNetFormatNetworkNameA","WNetFormatNetworkNameW","WNetGetConnection2A","WNetGetConnection2W","WNetGetConnection3A","WNetGetConnection3W",
+	"WNetGetConnectionA","WNetGetConnectionW","WNetGetDirectoryTypeA","WNetGetDirectoryTypeW","WNetGetHomeDirectoryW","WNetGetLastErrorA",
+	"WNetGetLastErrorW","WNetGetNetworkInformationA","WNetGetNetworkInformationW","WNetGetPropertyTextA","WNetGetPropertyTextW","WNetGetProviderNameA",
+	"WNetGetProviderNameW","WNetGetProviderTypeA","WNetGetProviderTypeW","WNetGetResourceInformationA","WNetGetResourceInformationW","WNetGetResourceParentA",
+	"WNetGetResourceParentW","WNetGetSearchDialog","WNetGetUniversalNameA","WNetGetUniversalNameW","WNetGetUserA","WNetGetUserW",
+	"WNetLogonNotify","WNetOpenEnumA","WNetOpenEnumW","WNetPasswordChangeNotify","WNetPropertyDialogA","WNetPropertyDialogW",
+	"WNetRestoreAllConnectionsW","WNetRestoreConnection2W","WNetRestoreConnectionW","WNetRestoreSingleConnectionW","WNetSetConnectionA","WNetSetConnectionW",
+	"WNetSetLastErrorA","WNetSetLastErrorW","WNetSupportGlobalEnum","WNetUseConnection4A","WNetUseConnection4W","WNetUseConnectionA",
+	"WNetUseConnectionW",
+};
+static constexpr std::string_view shfolder_exports[]{
+	"SHGetFolderPathA","SHGetFolderPathW",
+};
 static constexpr std::pair<std::string_view, std::span<const std::string_view>> libraries[]{
 	{"advapi32.dll", advapi32_exports},
 	{"bcrypt.dll", bcrypt_exports},
@@ -2724,4 +2745,6 @@ static constexpr std::pair<std::string_view, std::span<const std::string_view>> 
 	{"uiautomationcore.dll", uiautomationcore_exports},
 	{"lz32.dll", lz32_exports},
 	{"loadperf.dll", loadperf_exports},
+	{"mpr.dll", mpr_exports},
+	{"shfolder.dll", shfolder_exports},
 };

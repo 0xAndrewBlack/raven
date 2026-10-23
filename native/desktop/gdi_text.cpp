@@ -725,6 +725,11 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 				call.ret(0);
 				return;
 			}
+			// A process without a way to call back into its code, as 32-bit programs are here, enumerates no family rather than fail.
+			if (!invoke) {
+				call.ret(1);
+				return;
+			}
 			const auto lower = [](std::u16string text) {
 				for (auto &c : text)
 					if (c >= 'A' && c <= 'Z')
@@ -808,6 +813,8 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		});
 	};
 	registry.add("EnumFontFamiliesW", 4, [enumerate_families](ApiCall &call) { enumerate_families(call, false); });
+	// EnumFontsW is the older form with the same records and callback.
+	registry.add("EnumFontsW", 4, [enumerate_families](ApiCall &call) { enumerate_families(call, false); });
 	registry.add("EnumFontFamiliesA", 4, [enumerate_families](ApiCall &call) { enumerate_families(call, true); });
 	// The ANSI form hands the callback ENUMLOGFONTEXA records: a 60-byte LOGFONTA, then the full name, the style and the script as bytes.
 	registry.add("EnumFontFamiliesExA", 5, [=, this](ApiCall &call) {

@@ -12,6 +12,7 @@ namespace {
 
 bool elevated = false;
 bool noninteractive = false;
+bool child_elevation_requested = false;
 
 }
 
@@ -89,6 +90,16 @@ void set_process_noninteractive(bool value)
 bool process_noninteractive()
 {
 	return noninteractive;
+}
+
+void request_child_elevation(bool value)
+{
+	child_elevation_requested = value;
+}
+
+bool child_elevation_requested_now()
+{
+	return child_elevation_requested;
 }
 
 }

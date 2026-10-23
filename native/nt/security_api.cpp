@@ -1111,6 +1111,60 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.store_pointer(call[1], memory);
 		call.ret(1);
 	});
+	// The trustee names programs give by name: the account itself and the well-known groups.
+	const auto named_sid = [](std::u16string name) -> std::vector<uint8_t> {
+		for (auto &c : name)
+			if (c >= u'a' && c <= u'z')
+				c = char16_t(c - 32);
+		if (name.starts_with(u"BUILTIN\\") || name.starts_with(u"NT AUTHORITY\\"))
+			name = name.substr(name.find(u'\\') + 1);
+		if (name == u"EVERYONE")
+			return make_sid(1, {0});
+		if (name == u"CURRENT_USER")
+			return user_sid();
+		if (name == u"USERS")
+			return make_sid(5, {32, 545});
+		if (name == u"ADMINISTRATORS")
+			return make_sid(5, {32, 544});
+		if (name == u"SYSTEM")
+			return make_sid(5, {18});
+		return {};
+	};
+	// BuildSecurityDescriptorW: a self-relative descriptor in memory LocalFree releases. Its DACL is the null one, which grants every
+	// access; the entries a program lists are not turned into access rules, which no other user of this machine could test anyway.
+	registry.add("BuildSecurityDescriptorW", 9, [&context](ApiCall &call) {
+		if (!call[7] || !call[8]) {
+			call.ret(87);
+			return;
+		}
+		std::vector<uint8_t> descriptor(20, 0);
+		descriptor[0] = 1;
+		const uint16_t control = 0x8000 | 0x4;
+		std::memcpy(descriptor.data() + 2, &control, 2);
+		const auto memory = context.allocator.allocate(descriptor.size(), true);
+		if (!memory) {
+			call.ret(8);
+			return;
+		}
+		call.write(memory, descriptor);
+		call.store<uint32_t>(call[7], uint32_t(descriptor.size()));
+		call.store_pointer(call[8], memory);
+		call.ret(0);
+	});
+	// EXPLICIT_ACCESS_W with a trustee given by name: the permissions, the mode, the inheritance, then the TRUSTEE_W.
+	registry.add("BuildExplicitAccessWithNameW", 5, [](ApiCall &call) {
+		if (!call[0])
+			return;
+		const size_t width = call.pointer_width(), trustee_at = width == 4 ? 12 : 16;
+		std::vector<uint8_t> entry(trustee_at + (width == 4 ? 20 : 32));
+		const uint32_t fields[3] = {call.u32(2), call.u32(3), call.u32(4)};
+		std::memcpy(entry.data(), fields, 12);
+		const uint32_t form = 1;
+		std::memcpy(entry.data() + trustee_at + (width == 4 ? 8 : 12), &form, 4);
+		const uint64_t name = call[1];
+		std::memcpy(entry.data() + trustee_at + (width == 4 ? 16 : 24), &name, width);
+		call.write(call[0], entry);
+	});
 	// Building an ACL from explicit entries: each entry grants or denies a mask to a trustee named by its SID.
 	registry.add("BuildTrusteeWithSidW", 2, [](ApiCall &call) {
 		if (!call[0])
@@ -1121,7 +1175,7 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		std::memcpy(trustee.data() + (width == 4 ? 16 : 24), &sid, width);
 		call.write(call[0], trustee);
 	});
-	registry.add("SetEntriesInAclW", 4, [&context](ApiCall &call) {
+	registry.add("SetEntriesInAclW", 4, [&context, named_sid](ApiCall &call) {
 		const uint32_t count = call.u32(0);
 		if (!call[3] || (count && !call[1])) {
 			call.ret(87);
@@ -1155,8 +1209,8 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			std::vector<uint8_t> sid;
 			if (form == 0 && valid_sid(call, name))
 				sid = call.read(name, sid_length(call, name));
-			else if (form == 1 && call.wide(name, 64) == u"Everyone")
-				sid = make_sid(1, {0});
+			else if (form == 1 && (sid = named_sid(call.wide(name, 64))).size())
+				;
 			else {
 				call.ret(1332);
 				return;

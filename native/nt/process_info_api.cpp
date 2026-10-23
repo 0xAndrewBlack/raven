@@ -165,6 +165,16 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint16_t>(call[2], 0x8664);
 		call.ret(1);
 	});
+	// The machine runs x64 programs in user and kernel mode and 32-bit x86 ones in the WOW64 container; nothing else.
+	registry.add("GetMachineTypeAttributes", 2, [](ApiCall &call) {
+		if (!call[1]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const uint16_t machine = uint16_t(call.u32(0));
+		call.store<uint32_t>(call[1], machine == 0x8664 ? 3 : machine == 0x14c ? 5 : 0);
+		call.ret(0);
+	});
 	registry.add("GetProcessTimes", 5, [started, is_self, &objects](ApiCall &call) {
 		if (const auto child = objects.object_as<ProcessObject>(call[0]); child && call[1] && call[2] && call[3] && call[4]) {
 			call.store<uint64_t>(call[1], started);

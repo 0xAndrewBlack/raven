@@ -115,7 +115,9 @@ constexpr std::string_view shared_allowed[] = {
 	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
 	"SetFileAttributesW", "GetLongPathNameA", "GetLongPathNameW", "GetShortPathNameA", "GetShortPathNameW", "SearchPathA", "SearchPathW",
 	"GetModuleFileNameA", "IsDBCSLeadByte", "IsDBCSLeadByteEx", "GetCPInfoExA", "GetThreadLocale", "SetThreadLocale", "VerifyVersionInfoW",
-	"GetUserNameA", "GetUserNameW", "FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue", "SetDefaultDllDirectories", "AddDllDirectory", "RemoveDllDirectory",
+	"GetUserNameA", "GetUserNameW", "FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue", "SetDefaultDllDirectories", "AddDllDirectory", "RemoveDllDirectory", "SetSearchPathMode", "GetLargePageMinimum", "ConvertDefaultLocale", "GetMachineTypeAttributes", "SHGetFolderPathW", "SHGetFolderPathA", "SHChangeNotify", "SHPathPrepareForWriteW", "ShowOwnedPopups",
+	"UnrealizeObject", "EnableNonClientDpiScaling", "EnumFontsW", "DisableProcessWindowsGhosting", "ShutdownBlockReasonCreate", "ShutdownBlockReasonDestroy", "WNetOpenEnumW", "WNetOpenEnumA", "WNetEnumResourceW", "WNetEnumResourceA", "WNetCloseEnum", "WNetGetConnectionW",
+	"WNetGetConnectionA", "WNetGetUniversalNameW", "WNetGetUniversalNameA", "SetSearchPathMode",
 	"CreateMutexW", "CreateMutexA", "CreateMutexExW", "OpenMutexW", "OpenMutexA", "ReleaseMutex", "CreateSemaphoreW", "CreateSemaphoreA", "CreateSemaphoreExW", "ReleaseSemaphore",
 };
 
@@ -175,7 +177,7 @@ const std::map<std::string_view, uint32_t> &desktop_arguments()
 		{"GetWindowLongPtrA",2},{"GetWindowLongPtrW",2},{"GetWindowLongW",2},{"GetWindowRect",2},{"GetWindowTextLengthW",1},
 		{"GetWindowTextW",3},{"InternalGetWindowText",3},{"InvalidateRect",3},{"IsChild",2},{"IsMenu",1},{"IsWindow",1},
 		{"IsWindowUnicode",1},{"IsWindowVisible",1},{"LoadMenuW",2},{"LoadStringW",4},{"LookupIconIdFromDirectoryEx",5},
-		{"MapWindowPoints",4},{"PeekMessageW",5},{"PostMessageW",4},{"PostQuitMessage",1},{"PrivateExtractIconsW",8},
+		{"MapWindowPoints",4},{"PeekMessageW",5},{"PostMessageW",4},{"SendNotifyMessageW",4},{"PostQuitMessage",1},{"PrivateExtractIconsW",8},
 		{"RegisterClassExW",1},{"RegisterClassW",1},{"ReleaseDC",2},{"ScreenToClient",2},{"SendMessageW",4},
 		{"SetClassLongA",3},{"SetClassLongPtrA",3},{"SetClassLongPtrW",3},{"SetClassLongW",3},{"SetFocus",1},
 		{"SetWindowLongA",3},{"SetWindowLongPtrA",3},{"SetWindowLongPtrW",3},{"SetWindowLongW",3},{"SetWindowTextW",2},

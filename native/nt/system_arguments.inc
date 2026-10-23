@@ -2557,6 +2557,24 @@ static constexpr std::pair<std::string_view, uint8_t> loadperf_words[]{
 	{"BackupPerfRegistryToFileW",2},{"InstallPerfDllA",3},{"InstallPerfDllW",3},{"LoadPerfCounterTextStringsA",2},{"LoadPerfCounterTextStringsW",2},{"RestorePerfRegistryFromFileW",2},
 	{"SetServiceAsTrustedA",2},{"SetServiceAsTrustedW",2},{"UnloadPerfCounterTextStringsA",2},{"UnloadPerfCounterTextStringsW",2},{"UpdatePerfNameFilesA",4},{"UpdatePerfNameFilesW",4},
 };
+static constexpr std::pair<std::string_view, uint8_t> mpr_words[]{
+	{"MultinetGetConnectionPerformanceA",2},{"MultinetGetConnectionPerformanceW",2},{"RestoreConnectionA0",2},{"WNetAddConnection2A",4},{"WNetAddConnection2W",4},{"WNetAddConnection3A",5},
+	{"WNetAddConnection3W",5},{"WNetAddConnection4A",7},{"WNetAddConnection4W",7},{"WNetAddConnectionA",3},{"WNetAddConnectionW",3},{"WNetCancelConnection2A",3},
+	{"WNetCancelConnection2W",3},{"WNetCancelConnectionA",2},{"WNetCancelConnectionW",2},{"WNetClearConnections",1},{"WNetCloseEnum",1},{"WNetConnectionDialog",2},
+	{"WNetConnectionDialog1A",1},{"WNetConnectionDialog1W",1},{"WNetConnectionDialog2",4},{"WNetDirectoryNotifyA",3},{"WNetDirectoryNotifyW",3},{"WNetDisconnectDialog",2},
+	{"WNetDisconnectDialog1A",1},{"WNetDisconnectDialog1W",1},{"WNetDisconnectDialog2",4},{"WNetEnumResourceA",4},{"WNetEnumResourceW",4},{"WNetFMXEditPerm",3},
+	{"WNetFMXGetPermCaps",1},{"WNetFMXGetPermHelp",6},{"WNetFormatNetworkNameA",6},{"WNetFormatNetworkNameW",6},{"WNetGetConnection2A",3},{"WNetGetConnection2W",3},
+	{"WNetGetConnectionA",3},{"WNetGetConnectionW",3},{"WNetGetDirectoryTypeA",3},{"WNetGetDirectoryTypeW",3},{"WNetGetFormatNameProc",1},{"WNetGetLastErrorA",5},
+	{"WNetGetLastErrorW",5},{"WNetGetNetworkInformationA",2},{"WNetGetNetworkInformationW",2},{"WNetGetPropertyTextA",6},{"WNetGetPropertyTextW",6},{"WNetGetProviderNameA",3},
+	{"WNetGetProviderNameW",3},{"WNetGetResourceInformationA",4},{"WNetGetResourceInformationW",4},{"WNetGetResourceParentA",3},{"WNetGetResourceParentW",3},{"WNetGetSearchDialog",1},
+	{"WNetGetUniversalNameA",4},{"WNetGetUniversalNameW",4},{"WNetGetUserA",3},{"WNetGetUserW",3},{"WNetLogonNotify",9},{"WNetOpenEnumA",5},
+	{"WNetOpenEnumW",5},{"WNetPasswordChangeNotify",8},{"WNetPropertyDialogA",5},{"WNetPropertyDialogW",5},{"WNetRestoreConnection",2},{"WNetSetConnectionA",3},
+	{"WNetSetConnectionW",3},{"WNetSetLastErrorA",3},{"WNetSetLastErrorW",3},{"WNetSupportGlobalEnum",1},{"WNetUseConnection4A",10},{"WNetUseConnection4W",10},
+	{"WNetUseConnectionA",8},{"WNetUseConnectionW",8},
+};
+static constexpr std::pair<std::string_view, uint8_t> shfolder_words[]{
+	{"SHGetFolderPathA",5},{"SHGetFolderPathW",5},
+};
 static constexpr std::pair<std::string_view, std::span<const std::pair<std::string_view, uint8_t>>> argument_tables[]{
 	{"advapi32.dll", advapi32_words},
 	{"bcrypt.dll", bcrypt_words},
@@ -2620,4 +2638,6 @@ static constexpr std::pair<std::string_view, std::span<const std::pair<std::stri
 	{"uiautomationcore.dll", uiautomationcore_words},
 	{"lz32.dll", lz32_words},
 	{"loadperf.dll", loadperf_words},
+	{"mpr.dll", mpr_words},
+	{"shfolder.dll", shfolder_words},
 };

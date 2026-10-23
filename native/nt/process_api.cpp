@@ -433,6 +433,18 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("SetDefaultDllDirectories", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("AddDllDirectory", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("RemoveDllDirectory", 1, [](ApiCall &call) { call.ret(1); });
+	// Safe search mode moves the current directory after the system ones for SearchPath; Raven's search already finds the same files, so a
+	// valid request (enable or disable, perhaps permanent) is accepted and anything else is refused as Windows refuses it.
+	registry.add("SetSearchPathMode", 1, [](ApiCall &call) {
+		const uint32_t flags = call.u32(0), mode = flags & 0x10001U;
+		if ((flags & ~0x18001U) || (mode != 0x1U && mode != 0x10000U)) {
+			call.fail(87);
+			return;
+		}
+		call.ret(1);
+	});
+	// The DEP policy is a 32-bit process setting; a 64-bit process always runs with it, and Windows refuses to change it.
+	registry.add("SetProcessDEPPolicy", 1, [](ApiCall &call) { call.fail(50); });
 	registry.add("GetWindowsDirectoryW", 2, [=](ApiCall &call) { directory(call, true, windows); });
 	registry.add("GetSystemWindowsDirectoryW", 2, [=](ApiCall &call) { directory(call, true, windows); });
 	registry.add("GetWindowsDirectoryA", 2, [=](ApiCall &call) { directory(call, false, windows); });

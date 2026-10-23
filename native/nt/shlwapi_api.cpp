@@ -984,6 +984,41 @@ void register_shlwapi_api(ApiRegistry &registry, KernelContext &context)
 			value = std::min<int64_t>(value * 10 + (text[at] - u'0'), 0x7fffffffLL + 1);
 		call.ret(uint32_t(int32_t(negative ? -value : value)));
 	});
+	// StrToIntExW and StrToInt64ExW: leading blanks, a sign, then decimal digits, or 0x and hexadecimal ones with STIF_SUPPORT_HEX. FALSE
+	// when no digit follows; the value goes out at the width the function names.
+	const auto number = [](ApiCall &call, size_t width) {
+		const auto text = call.wide(call[0]);
+		size_t at = 0;
+		while (at < text.size() && (text[at] == u' ' || text[at] == u'\t'))
+			++at;
+		bool negative = false;
+		if (at < text.size() && (text[at] == u'-' || text[at] == u'+'))
+			negative = text[at++] == u'-';
+		const bool hex = (call.u32(1) & 1) && at + 1 < text.size() && text[at] == u'0' && (text[at + 1] | 0x20) == u'x';
+		if (hex)
+			at += 2;
+		uint64_t value = 0;
+		size_t digits = 0;
+		for (; at < text.size(); ++at, ++digits) {
+			const char16_t c = text[at], lower = char16_t(c | 0x20);
+			const int digit = c >= u'0' && c <= u'9' ? c - u'0' : hex && lower >= u'a' && lower <= u'f' ? lower - u'a' + 10 : -1;
+			if (digit < 0)
+				break;
+			value = value * (hex ? 16 : 10) + uint64_t(digit);
+		}
+		if (!digits || !call[2]) {
+			call.ret(0);
+			return;
+		}
+		const uint64_t result = negative ? uint64_t(0) - value : value;
+		if (width == 8)
+			call.store<uint64_t>(call[2], result);
+		else
+			call.store<uint32_t>(call[2], uint32_t(result));
+		call.ret(1);
+	};
+	registry.add("StrToIntExW", 3, [number](ApiCall &call) { number(call, 4); });
+	registry.add("StrToInt64ExW", 3, [number](ApiCall &call) { number(call, 8); });
 	registry.add("StrTrimW", 2, [](ApiCall &call) {
 		auto text = call.wide(call[0]);
 		const auto trim = call.wide(call[1]);

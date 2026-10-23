@@ -1132,6 +1132,9 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(0);
 	});
 	registry.add("LsaClose", 1, [](ApiCall &call) { call.ret(0); });
+	// Granting or removing account rights needs an administrator; the user programs run as is not one, so Windows denies it as here.
+	registry.add("LsaAddAccountRights", 4, [](ApiCall &call) { call.ret(0xc0000022U); });
+	registry.add("LsaRemoveAccountRights", 5, [](ApiCall &call) { call.ret(0xc0000022U); });
 	registry.add("LsaFreeMemory", 1, [&context](ApiCall &call) {
 		if (call[0])
 			context.allocator.release(call[0]);

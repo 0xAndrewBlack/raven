@@ -20,5 +20,9 @@ bool process_elevated();
 // window station is not visible, so programs that look first show no dialog nobody could answer.
 void set_process_noninteractive(bool noninteractive);
 bool process_noninteractive();
+// Whether the next program this process starts runs elevated although this one is not: the runas verb asks User Account Control for
+// it, and the administrator the account is consents.
+void request_child_elevation(bool requested);
+bool child_elevation_requested_now();
 
 }

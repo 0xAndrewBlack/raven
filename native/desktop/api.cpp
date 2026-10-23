@@ -23,18 +23,19 @@ std::span<const std::string_view> NativeDesktop::control_exports()
 
 std::span<const std::string_view> NativeDesktop::user_exports()
 {
-	static constexpr std::array<std::string_view, 86> names{
-		"AdjustWindowRect", "AdjustWindowRectEx", "BeginPaint", "CallWindowProcW", "ClientToScreen", "CopyIcon", "CreateIconFromResourceEx", "CreateWindowExW", "DefWindowProcW",
-		"DestroyIcon", "DestroyMenu", "DestroyWindow", "DispatchMessageW", "DrawIconEx", "EndPaint", "FillRect", "FrameRect",
-		"GetActiveWindow", "GetClassInfoExW", "GetClassInfoW", "GetClassLongA", "GetClassLongPtrA", "GetClassLongPtrW",
-		"GetClassLongW", "GetClassNameA", "GetClassNameW", "GetClientRect", "GetDC", "GetDlgCtrlID", "GetDlgItem", "GetFocus",
-		 "GetIconInfo", "GetMenuItemCount", "GetMenuItemID", "GetMessageW", "GetParent", "GetSubMenu", "GetSysColor", "GetSysColorBrush", "GetSystemMetrics", "GetUpdateRect", "GetWindowDC", "GetWindowLongA", "GetWindowLongPtrA", "GetWindowLongPtrW",
-		"GetWindowLongW", "GetWindowRect", "GetWindowTextLengthW", "GetWindowTextW", "InternalGetWindowText", "InvalidateRect", "IsChild", "IsMenu", "IsWindow",
-		"IsWindowUnicode", "IsWindowVisible", "LoadMenuW", "LoadStringW", "LookupIconIdFromDirectoryEx", "MapWindowPoints", "PeekMessageW", "PostMessageW", "PostQuitMessage", "PostThreadMessageW",
-		"PrivateExtractIconsW", "RegisterClassExW", "RegisterClassW", "ReleaseDC", "ScreenToClient", "SendMessageW", "SetClassLongA", "SetClassLongPtrA",
-		"SetClassLongPtrW", "SetClassLongW", "SetFocus", "SetWindowLongA", "SetWindowLongPtrA", "SetWindowLongPtrW",
-		"SetWindowLongW", "SetWindowTextW", "ShowWindow", "TranslateMessage", "UnregisterClassW", "UpdateWindow",
-		"ValidateRect", "WindowFromDC"};
+	static constexpr std::array<std::string_view, 87> names{
+		"AdjustWindowRect", "AdjustWindowRectEx", "BeginPaint", "CallWindowProcW", "ClientToScreen", "CopyIcon", "CreateIconFromResourceEx", "CreateWindowExW",
+		"DefWindowProcW", "DestroyIcon", "DestroyMenu", "DestroyWindow", "DispatchMessageW", "DrawIconEx", "EndPaint", "FillRect",
+		"FrameRect", "GetActiveWindow", "GetClassInfoExW", "GetClassInfoW", "GetClassLongA", "GetClassLongPtrA", "GetClassLongPtrW", "GetClassLongW",
+		"GetClassNameA", "GetClassNameW", "GetClientRect", "GetDC", "GetDlgCtrlID", "GetDlgItem", "GetFocus", "GetIconInfo",
+		"GetMenuItemCount", "GetMenuItemID", "GetMessageW", "GetParent", "GetSubMenu", "GetSysColor", "GetSysColorBrush", "GetSystemMetrics",
+		"GetUpdateRect", "GetWindowDC", "GetWindowLongA", "GetWindowLongPtrA", "GetWindowLongPtrW", "GetWindowLongW", "GetWindowRect", "GetWindowTextLengthW",
+		"GetWindowTextW", "InternalGetWindowText", "InvalidateRect", "IsChild", "IsMenu", "IsWindow", "IsWindowUnicode", "IsWindowVisible",
+		"LoadMenuW", "LoadStringW", "LookupIconIdFromDirectoryEx", "MapWindowPoints", "PeekMessageW", "PostMessageW", "PostQuitMessage", "PostThreadMessageW",
+		"PrivateExtractIconsW", "RegisterClassExW", "RegisterClassW", "ReleaseDC", "ScreenToClient", "SendMessageW", "SendNotifyMessageW", "SetClassLongA",
+		"SetClassLongPtrA", "SetClassLongPtrW", "SetClassLongW", "SetFocus", "SetWindowLongA", "SetWindowLongPtrA", "SetWindowLongPtrW", "SetWindowLongW",
+		"SetWindowTextW", "ShowWindow", "TranslateMessage", "UnregisterClassW", "UpdateWindow", "ValidateRect", "WindowFromDC",
+	};
 	return names;
 }
 
@@ -286,13 +287,15 @@ bool NativeDesktop::info(uint64_t handle, uint64_t output)
 			environment.set_last_error(8);
 			return false;
 		}
+		// ICONINFO holds its two bitmap handles at the program's pointer width: 20 bytes for a 32-bit program, 32 for a 64-bit one.
+		const bool narrow = process.mode() == NativeMode::x86;
 		std::array<uint8_t, 32> bytes{};
 		put(bytes, 0, icon->cursor ? 0 : 1);
 		put(bytes, 4, icon->cursor ? icon->hotspot_x : icon->image.color.width / 2);
 		put(bytes, 8, icon->cursor ? icon->hotspot_y : icon->image.color.height / 2);
-		put(bytes, 16, mask, 8);
-		put(bytes, 24, color, 8);
-		process.write_memory(output, bytes);
+		put(bytes, narrow ? 12 : 16, mask, narrow ? 4 : 8);
+		put(bytes, narrow ? 16 : 24, color, narrow ? 4 : 8);
+		process.write_memory(output, std::span<const uint8_t>(bytes.data(), narrow ? 20 : 32));
 	} catch (...) {
 		objects.erase(mask);
 		objects.erase(color);

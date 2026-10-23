@@ -399,6 +399,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	// The number of file handles a process may have is no longer limited: the request is answered as asked.
 	registry.add("SetHandleCount", 1, [](ApiCall &call) { call.ret(call.u32(0)); });
 	registry.add("GetSystemInfo", 1, system_information);
+	// Large pages are 2 MiB on x64, as Windows reports; programs use the size only after they hold the lock-pages privilege.
+	registry.add("GetLargePageMinimum", 0, [](ApiCall &call) { call.ret(0x200000); });
 	registry.add("GetNativeSystemInfo", 1, system_information);
 	// GetVersion and GetVersionEx report what the program's manifest declares it supports, as Windows does; RtlGetVersion tells the truth.
 	registry.add("GetVersion", 0, [](ApiCall &call) {
