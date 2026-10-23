@@ -25,7 +25,7 @@ import time
 TICKS = os.sysconf("SC_CLK_TCK")
 # Wine's server sits in the library directory on Debian style installations.
 WINE = os.environ.get("RAVEN_BENCH_WINE", "wine")
-WINESERVER = os.environ.get("RAVEN_BENCH_WINESERVER") or next((str(path) for path in (Path("/usr/lib/wine/wineserver"), Path("/usr/lib/x86_64-linux-gnu/wine/wineserver"))
+WINESERVER = os.environ.get("RAVEN_BENCH_WINESERVER") or next((str(path) for path in (Path(WINE).with_name("wineserver"), Path("/usr/lib/wine/wineserver"), Path("/usr/lib/x86_64-linux-gnu/wine/wineserver"))
                    if path.exists()), "wineserver")
 
 JS_PAGE = """<!doctype html><title>JS waiting</title><script>

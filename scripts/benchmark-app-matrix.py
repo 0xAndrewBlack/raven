@@ -26,7 +26,7 @@ native_redist = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(native_redist)
 
 WINE = os.environ.get("RAVEN_BENCH_WINE", "wine")
-WINESERVER = os.environ.get("RAVEN_BENCH_WINESERVER") or next((str(path) for path in (Path("/usr/lib/wine/wineserver"), Path("/usr/lib/x86_64-linux-gnu/wine/wineserver"))
+WINESERVER = os.environ.get("RAVEN_BENCH_WINESERVER") or next((str(path) for path in (Path(WINE).with_name("wineserver"), Path("/usr/lib/wine/wineserver"), Path("/usr/lib/x86_64-linux-gnu/wine/wineserver"))
                    if path.exists()), "wineserver")
 
 # The case, the installer and how it runs silently (an MSI goes through msiexec), the program it installs, and the words the title of

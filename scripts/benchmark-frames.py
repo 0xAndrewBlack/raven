@@ -39,9 +39,9 @@ def run_once(runtime, raven, wine, program, prefix, work, index):
         else:
             env |= {"WINEPREFIX": str(prefix), "WINEDEBUG": "-all", "WINEDLLOVERRIDES": "mscoree=;mshtml=;d3d11,dxgi,d3d10core=n"}
             command = [str(wine), str(program)]
-        process = subprocess.Popen(command, env=env, cwd=program.parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         marker = prefix / "drive_c" / "present_rate.txt"
         marker.unlink(missing_ok=True)
+        process = subprocess.Popen(command, env=env, cwd=program.parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             deadline = time.time() + 120
             while time.time() < deadline and process.poll() is None and not marker.exists():

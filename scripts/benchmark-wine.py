@@ -104,7 +104,7 @@ def main():
         if wall is None:
             print(f"{name:9} {runtime:6} {'-':>8} {'-':>8} {'-':>9}  {note}")
         else:
-            print(f"{name:9} {runtime:6} {wall:8.2f} {cpu:8.2f} {rss:9.1f}  {note}")
+            print(f"{name:9} {runtime:6} {wall:8.4f} {cpu:8.4f} {rss:9.1f}  {note}")
 
 
 if __name__ == "__main__":
