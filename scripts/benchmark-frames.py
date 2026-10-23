@@ -10,6 +10,7 @@ usage: benchmark-frames.py RAVEN WINE TESTDATA DXVK_PE64_DIRECTORY WORKDIR [REPE
 """
 
 from pathlib import Path
+import json
 import os
 import shutil
 import statistics
@@ -43,7 +44,7 @@ def run_once(runtime, raven, wine, program, prefix, work, index):
         marker.unlink(missing_ok=True)
         process = subprocess.Popen(command, env=env, cwd=program.parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            deadline = time.time() + 120
+            deadline = time.time() + float(os.environ.get("RAVEN_BENCH_TIMEOUT", "120"))
             while time.time() < deadline and process.poll() is None and not marker.exists():
                 time.sleep(0.05)
             time.sleep(0.2)
@@ -83,14 +84,17 @@ def main():
         server = Path("/usr/lib/x86_64-linux-gnu/wine/wineserver")
     subprocess.run([str(server), "-k"], env=warm_env, capture_output=True, timeout=60)
     rates = {"raven": [], "wine": []}
+    measurements = []
     for runtime in ("raven", "wine"):
         for index in range(repeats):
             prefix = work / f"prefix-{runtime}-{index}"
             if runtime == "wine":
                 shutil.copytree(warm, prefix, symlinks=True)
             rate = run_once(runtime, raven, wine, program_dir / "present_rate.exe", prefix, work, index)
+            measurements.append(dict(runtime=runtime, trial=index + 1, frames_per_second=rate))
             if rate:
                 rates[runtime].append(rate)
+    (work / "samples.json").write_text(json.dumps(measurements, indent=2) + "\n")
     print(f"{'runtime':8} {'frames per second':>18}  runs")
     for runtime, values in rates.items():
         print(f"{runtime:8} {statistics.median(values):18.1f}  {len(values)}/{repeats}" if values else f"{runtime:8} {'-':>18}  0/{repeats}")

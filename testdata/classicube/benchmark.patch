@@ -1,0 +1,52 @@
+diff --git a/src/Game.c b/src/Game.c
+--- a/src/Game.c
++++ b/src/Game.c
+@@ -1,3 +1,6 @@
++#ifdef CC_BENCH_FPS
++#include <stdio.h>
++#endif
+ #include "Game.h"
+ #include "Block.h"
+ #include "World.h"
+@@ -820,6 +823,25 @@
+ 	if (Game_ScreenshotRequested) Game_TakeScreenshot();
+ 	Gfx_EndFrame();
+ 	if (gfx_minFrameMs != 0.0f) LimitFPS();
++#ifdef CC_BENCH_FPS
++	if (World.Blocks) {
++		/* Frames between 5 and 15 seconds after the first one go to bench_fps.txt; then the program exits. */
++		static cc_uint64 bench_first;
++		static int bench_frames;
++		cc_uint64 now = Stopwatch_Measure();
++		int ms;
++		if (!bench_first) bench_first = now;
++		ms = Stopwatch_ElapsedMS(bench_first, now);
++		if (ms >= 5000 && ms < 15000) bench_frames++;
++		if (ms >= 15000) {
++			FILE* config = fopen("bench_config.txt", "w");
++			if (config) { fprintf(config, "%d %d %d %d %d %d", World.Seed, World.Width, World.Height, World.Length, Game.Width, Game.Height); fclose(config); }
++			FILE* file = fopen("bench_fps.txt", "w");
++			if (file) { fprintf(file, "%d", bench_frames / 10); fclose(file); }
++			Process_Exit(0);
++		}
++	}
++#endif
+ }
+ 
+ void Game_Free(void) {
+diff --git a/src/Server.c b/src/Server.c
+--- a/src/Server.c
++++ b/src/Server.c
+@@ -148,8 +148,12 @@
+ 	gen = &NotchyGen;
+ #endif
+ 
++#ifdef CC_BENCH_FPS
++	seed = 1;
++#else
+ 	Random_SeedFromCurrentTime(&rnd);
+ 	seed = Random_Next(&rnd, Int32_MaxValue);
++#endif
+ 
+ 	Gen_Start(gen, seed, horSize, verSize, horSize);
+ }

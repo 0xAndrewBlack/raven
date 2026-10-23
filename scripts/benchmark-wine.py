@@ -10,10 +10,11 @@ Workloads:
   sqlite    sqlite3.exe computing a recursive query over several million rows (CPU bound)
   d3d11     testdata/d3d11/triangle.exe through DXVK on lavapipe (graphics API throughput and start up cost)
 
-usage: benchmark-wine.py RAVEN WINE_BINARY TESTDATA DXVK_PE64_DIRECTORY STARTUP_EXE WORKDIR [REPEATS]
+usage: benchmark-wine.py RAVEN WINE_BINARY TESTDATA DXVK_PE64_DIRECTORY STARTUP_EXE WORKDIR [REPEATS] [WORKLOAD...]
 """
 
 from pathlib import Path
+import json
 import os
 import resource
 import shutil
@@ -33,14 +34,25 @@ def isolated(command, env, stdin_text=None, cwd=None):
         "start=time.perf_counter()\n"
         "p=subprocess.Popen(spec['command'],env=spec['env'],cwd=spec['cwd'],stdin=subprocess.PIPE if spec['stdin'] else subprocess.DEVNULL,"
         "stdout=subprocess.PIPE,stderr=subprocess.STDOUT)\n"
-        "out,_=p.communicate(spec['stdin'].encode() if spec['stdin'] else None,timeout=600)\n"
+        "timed_out=False\n"
+        "try:\n"
+        " out,_=p.communicate(spec['stdin'].encode() if spec['stdin'] else None,timeout=spec['timeout'])\n"
+        "except subprocess.TimeoutExpired:\n"
+        " timed_out=True\n"
+        " p.kill()\n"
+        " try:\n"
+        "  out,_=p.communicate(timeout=10)\n"
+        " except subprocess.TimeoutExpired as error:\n"
+        "  out=error.output or b''\n"
+        "  p.stdout.close()\n"
+        "  p.wait()\n"
         "wall=time.perf_counter()-start\n"
         "r=resource.getrusage(resource.RUSAGE_CHILDREN)\n"
-        "print(json.dumps({'wall':wall,'cpu':r.ru_utime+r.ru_stime,'rss':r.ru_maxrss/1024.0,'code':p.returncode,'out':out.decode(errors='replace')[-400:]}))\n"
+        "print(json.dumps({'wall':wall,'cpu':r.ru_utime+r.ru_stime,'rss':r.ru_maxrss/1024.0,'code':124 if timed_out else p.returncode,'out':('timeout: ' if timed_out else '')+out.decode(errors='replace')[-400:]}))\n"
     )
-    import json
-    spec = json.dumps({"command": command, "env": env, "stdin": stdin_text, "cwd": cwd})
-    result = subprocess.run([sys.executable, "-I", "-c", code], input=spec, capture_output=True, text=True, timeout=700)
+    timeout = float(os.environ.get("RAVEN_BENCH_COMMAND_TIMEOUT", "600"))
+    spec = json.dumps({"command": command, "env": env, "stdin": stdin_text, "cwd": cwd, "timeout": timeout})
+    result = subprocess.run([sys.executable, "-I", "-c", code], input=spec, capture_output=True, text=True, timeout=timeout + 100)
     data = json.loads(result.stdout.strip().splitlines()[-1])
     return data["wall"], data["cpu"], data["rss"], data["code"], data["out"]
 
@@ -48,13 +60,14 @@ def isolated(command, env, stdin_text=None, cwd=None):
 def main():
     raven, wine, testdata, dxvk, startup, work = (Path(value).resolve() for value in sys.argv[1:7])
     repeats = int(sys.argv[7]) if len(sys.argv) > 7 else 5
+    selected = set(sys.argv[8:])
     # Wine's server sits beside the launcher or, on Debian style installations, in the library directory.
     server = next((path for path in (wine.with_name("wineserver"), Path("/usr/lib/x86_64-linux-gnu/wine/wineserver"), Path("/usr/lib/wine/wineserver"))
                    if path.exists()), wine.with_name("wineserver"))
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     lavapipe = "/usr/share/vulkan/icd.d/lvp_icd.json"
-    base = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "TMPDIR": os.environ.get("TMPDIR", str(work)), "VK_DRIVER_FILES": lavapipe,
+    base = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "TMPDIR": os.environ.get("TMPDIR", str(work)), "VK_DRIVER_FILES": lavapipe, "LP_NUM_THREADS": "2",
             "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000"), "WINEDEBUG": "-all", "WINEDLLOVERRIDES": "mscoree=;mshtml=;d3d11,dxgi,d3d10core=n"}
     d3d = work / "d3d"
     d3d.mkdir()
@@ -69,8 +82,10 @@ def main():
     warm_env = dict(base, WINEPREFIX=str(warm))
     subprocess.run([str(wine), "wineboot", "-u"], env=warm_env, capture_output=True, timeout=300)
     subprocess.run([str(server), "-k"], env=warm_env, capture_output=True, timeout=60)
-    rows = []
-    for name, program, stdin_text in (("startup", work / "startup.exe", None), ("sqlite", sqlite, QUERY), ("d3d11", d3d / "triangle.exe", None)):
+    rows, measurements = [], []
+    for name, program in (("startup", work / "startup.exe"), ("sqlite", sqlite), ("d3d11", d3d / "triangle.exe")):
+        if selected and name not in selected:
+            continue
         for runtime in ("raven", "wine"):
             samples = []
             for index in range(repeats):
@@ -79,17 +94,17 @@ def main():
                 if runtime == "wine":
                     shutil.copytree(warm, prefix, symlinks=True)
                 env = dict(base)
-                program_args = [str(program)] + ([":memory:"] if name == "sqlite" else [])
+                program_args = [str(program)] + ([":memory:", QUERY] if name == "sqlite" else [])
                 if runtime == "raven":
                     env["RAVEN_PREFIX"] = str(prefix)
-                    command = [str(raven), "--run-process", "--execution=native", "--timeout-ms=500000"] + (["--stdio=inherit"] if stdin_text else []) + [str(program)]
+                    command = [str(raven), "--run-process", "--execution=native", "--timeout-ms=500000"] + (["--stdio=inherit"] if name == "sqlite" else []) + [str(program)]
                     if name == "sqlite":
-                        command += ["--", ":memory:"]
+                        command += ["--", ":memory:", QUERY]
                 else:
                     env["WINEPREFIX"] = str(prefix)
                     command = [str(wine)] + program_args
                 try:
-                    sample = isolated(command, env, stdin_text, str(program.parent))
+                    sample = isolated(command, env, None, str(program.parent))
                     verified = sample[3] == 0
                     if name == "sqlite":
                         verified = verified and "8000000" in sample[4].splitlines()
@@ -99,6 +114,8 @@ def main():
                         verified = (verified and marker.is_file() and marker.read_text().strip() == "OK" and
                                     pixels.is_file() and pixels.stat().st_size == 256 * 256 * 4)
                     samples.append((*sample, verified))
+                    measurements.append(dict(workload=name, runtime=runtime, trial=index + 1, wall=sample[0], cpu=sample[1],
+                                             rss_mib=sample[2], exit_code=sample[3], output=sample[4], verified=verified))
                 finally:
                     if runtime == "wine":
                         subprocess.run([str(server), "-k"], env=env, capture_output=True, timeout=60)
@@ -108,6 +125,7 @@ def main():
                 continue
             rows.append((name, runtime, statistics.median(s[0] for s in ok), statistics.median(s[1] for s in ok), statistics.median(s[2] for s in ok),
                          f"{len(ok)}/{repeats} runs ok"))
+    (work / "samples.json").write_text(json.dumps(measurements, indent=2) + "\n")
     print(f"{'workload':9} {'runtime':6} {'wall s':>8} {'cpu s':>8} {'peak MiB':>9}  note")
     for name, runtime, wall, cpu, rss, note in rows:
         if wall is None:

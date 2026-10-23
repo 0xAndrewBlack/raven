@@ -3,8 +3,8 @@
 
 Every run starts the program under one runtime on a headless labwc of its own (Wine through its Wayland driver) and polls the compositor's
 window list until the window the workload waits for appears; the wall time is that delay. Each process of a run carries a marker in its
-environment, so the CPU time and memory of everything the run started (Wine's server and Raven's child processes included) are summed from
-/proc when the window appears, and those processes alone are stopped afterwards. Each workload runs once unmeasured to warm the prefix and
+environment, so CPU time and resident memory are summed from /proc for marked processes still alive when the window appears.
+Those processes alone are stopped afterwards. Each workload runs once unmeasured to warm the prefix and
 caches, then REPEATS times; the table shows medians.
 
 Chrome also runs two pages that report through the page title: a JavaScript workload (milliseconds, lower is better) and a canvas animation
@@ -14,6 +14,7 @@ usage: benchmark-apps.py RAVEN TESTDATA CHROME_APPLICATION_DIR CLASSICUBE_EXE DX
 """
 
 from pathlib import Path
+import json
 import os
 import re
 import shutil
@@ -165,7 +166,7 @@ def main():
             ("chrome-js", programs / "chrome" / "chrome.exe", chrome_flags + [page("js.html")], r"^JS \d+", r"^JS (\d+)"),
             ("chrome-canvas", programs / "chrome" / "chrome.exe", chrome_flags + [page("canvas.html")], r"^Canvas \d+", r"^Canvas (\d+)"),
         ]
-        rows = []
+        rows, measurements = [], []
         for name, program, arguments, ready, result in workloads:
             if selected and name not in selected:
                 continue
@@ -197,6 +198,8 @@ def main():
                             break
                         time.sleep(0.05)
                     cpu, memory = usage(marked(marker))
+                    measurements.append(dict(workload=name, runtime=runtime, trial=index, warmup=index == 0,
+                                             window_seconds=shown, cpu=cpu, rss_mib=memory, result=measured))
                     stop(marker)
                     process.wait(timeout=30)
                     if runtime == "wine":
@@ -211,7 +214,8 @@ def main():
                 rows.append((name, runtime, statistics.median(s[0] for s in samples), statistics.median(s[1] for s in samples),
                              statistics.median(s[2] for s in samples), result_value, f"{len(samples)}/{repeats} runs"))
                 print(rows[-1], flush=True)
-        print(f"{'workload':14} {'runtime':6} {'window s':>9} {'cpu s':>8} {'peak MiB':>9} {'result':>9}  note")
+        (work / "samples.json").write_text(json.dumps(measurements, indent=2) + "\n")
+        print(f"{'workload':14} {'runtime':6} {'window s':>9} {'cpu s':>8} {'RSS MiB':>9} {'result':>9}  note")
         for name, runtime, wall, cpu, memory, value, note in rows:
             if wall is None:
                 print(f"{name:14} {runtime:6} {'-':>9} {'-':>8} {'-':>9} {'-':>9}  {note}")
