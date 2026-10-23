@@ -4,62 +4,62 @@
       "Raven": {
         "samples": 3,
         "attempts": 3,
-        "value": 2.5589103550009895,
-        "cpu_seconds": 2.471508,
-        "rss_mib": 36.41796875
+        "value": 0.03952483399916673,
+        "cpu_seconds": 0.040212,
+        "rss_mib": 28.4375
       },
       "Wine 11.0": {
         "samples": 3,
         "attempts": 3,
-        "value": 3.771150063999812,
-        "cpu_seconds": 0.007456,
-        "rss_mib": 11.734375
+        "value": 3.6958551179995993,
+        "cpu_seconds": 0.0052959999999999995,
+        "rss_mib": 11.89453125
       },
       "Soda 11.0-32 exp.": {
         "samples": 3,
         "attempts": 3,
-        "value": 1.1495076559986046,
-        "cpu_seconds": 0.010499999999999999,
-        "rss_mib": 11.90625
+        "value": 0.7128296039991255,
+        "cpu_seconds": 0.005137999999999999,
+        "rss_mib": 11.8984375
       }
     },
     "sqlite": {
       "Raven": {
         "samples": 3,
         "attempts": 3,
-        "value": 5.195191724000324,
-        "cpu_seconds": 5.115231,
-        "rss_mib": 36.16796875
+        "value": 1.6120238959993003,
+        "cpu_seconds": 1.6116609999999998,
+        "rss_mib": 32.58203125
       },
       "Wine 11.0": {
         "samples": 3,
         "attempts": 3,
-        "value": 6.317764276998787,
-        "cpu_seconds": 2.515648,
-        "rss_mib": 11.80859375
+        "value": 5.321688007003104,
+        "cpu_seconds": 1.5592599999999999,
+        "rss_mib": 12.1953125
       },
       "Soda 11.0-32 exp.": {
         "samples": 3,
         "attempts": 3,
-        "value": 2.9803541199980828,
-        "cpu_seconds": 2.234241,
-        "rss_mib": 11.95703125
+        "value": 2.2688280080001277,
+        "cpu_seconds": 1.532846,
+        "rss_mib": 12.12890625
       }
     },
     "d3d11": {
       "Raven": {
         "samples": 3,
         "attempts": 3,
-        "value": 2.9876985350019822,
-        "cpu_seconds": 2.832915,
-        "rss_mib": 120.0
+        "value": 0.1287860330012336,
+        "cpu_seconds": 0.136066,
+        "rss_mib": 120.796875
       },
       "Wine 11.0": {
         "samples": 3,
         "attempts": 3,
-        "value": 4.670139654001105,
-        "cpu_seconds": 0.11771899999999999,
-        "rss_mib": 105.53515625
+        "value": 4.35100267999951,
+        "cpu_seconds": 0.060969999999999996,
+        "rss_mib": 105.66796875
       },
       "Soda 11.0-32 exp.": {
         "samples": 0,
@@ -121,36 +121,36 @@
       "Raven": {
         "samples": 3,
         "attempts": 3,
-        "value": 698.0108435984553
+        "value": 2392.098420497413
       },
       "Wine 11.0": {
         "samples": 3,
         "attempts": 3,
-        "value": 863.3032659194203
+        "value": 1818.5223778271204
       },
       "Soda 11.0-32 exp.": {
         "samples": 3,
         "attempts": 3,
-        "value": 772.5933331376096
+        "value": 1682.6079750570193
       }
     }
   },
   "games": {
     "ClassiCube 1.3.8 singleplayer": {
       "Raven": {
-        "samples": 3,
-        "attempts": 3,
-        "value": 17
+        "samples": 4,
+        "attempts": 4,
+        "value": 93.0
       },
       "Wine 11.0": {
-        "samples": 3,
-        "attempts": 3,
-        "value": 61
+        "samples": 4,
+        "attempts": 4,
+        "value": 90.0
       },
       "Soda 11.0-32 exp.": {
-        "samples": 3,
-        "attempts": 3,
-        "value": 61
+        "samples": 4,
+        "attempts": 4,
+        "value": 84.5
       }
     }
   }
