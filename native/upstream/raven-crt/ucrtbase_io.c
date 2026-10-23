@@ -742,6 +742,43 @@ CRT char *strerror(int code)
 	}
 }
 
+/* _putenv takes "NAME=value" and sets the variable in the process environment that getenv reads; an empty value removes it. */
+CRT int _putenv_s(const char *name, const char *value)
+{
+	if (!name || !*name || !value)
+		return 22;
+	return SetEnvironmentVariableA(name, *value ? value : NULL) || !*value ? 0 : 22;
+}
+
+CRT int _wputenv_s(const wchar_t *name, const wchar_t *value)
+{
+	if (!name || !*name || !value)
+		return 22;
+	return SetEnvironmentVariableW(name, *value ? value : NULL) || !*value ? 0 : 22;
+}
+
+CRT int _putenv(const char *assignment)
+{
+	const char *equals = assignment ? strchr(assignment, '=') : NULL;
+	char name[1024];
+	if (!equals || equals == assignment || (size_t)(equals - assignment) >= sizeof(name))
+		return -1;
+	memcpy(name, assignment, (size_t)(equals - assignment));
+	name[equals - assignment] = 0;
+	return _putenv_s(name, equals + 1) ? -1 : 0;
+}
+
+CRT int _wputenv(const wchar_t *assignment)
+{
+	const wchar_t *equals = assignment ? wcschr(assignment, L'=') : NULL;
+	wchar_t name[1024];
+	if (!equals || equals == assignment || (size_t)(equals - assignment) >= sizeof(name) / sizeof(*name))
+		return -1;
+	memcpy(name, assignment, (size_t)(equals - assignment) * sizeof(wchar_t));
+	name[equals - assignment] = 0;
+	return _wputenv_s(name, equals + 1) ? -1 : 0;
+}
+
 CRT char *getenv(const char *name)
 {
 	static struct { char *name, *value; } cache[64];

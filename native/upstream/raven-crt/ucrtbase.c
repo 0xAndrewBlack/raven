@@ -630,19 +630,25 @@ CRT void _invalid_parameter_noinfo_noreturn(void) { ExitProcess(3); }
 /* The record is the size of msvcrt's FILE on x64 (48 bytes), so the table of standard streams is also the array that msvcrt
    programs index; the read buffer is allocated when a stream first reads. */
 #define STREAM_BUFFER 4096
+/* The fields sit where msvcrt's FILE keeps its own: programs built against msvcrt read and write through getc and putc macros that
+   take the next byte at the pointer while the count stays above zero. The pointer is always null and the count zero here, so those
+   macros call _filbuf and _flsbuf for every byte, and the index sits where msvcrt keeps the descriptor. */
 typedef struct {
-	HANDLE handle;
-	int index;
+	char *macro_pointer;
+	int macro_count;
 	/* File streams: text mode translates CRLF, reads are buffered, one character can be pushed back. */
-	int text, end_of_file, error, pushed, writable;
+	int pushed;
 	unsigned char *buffer;
+	unsigned char text, end_of_file, error, writable;
+	int index;
+	HANDLE handle;
 	unsigned buffer_length, buffer_position;
 } Stream;
 #ifdef __x86_64__
 _Static_assert(sizeof(Stream) == 48, "a stream must have the size of msvcrt's FILE");
 #endif
 
-Stream streams[3] = {{NULL, 0, 0, 0, 0, -1}, {NULL, 1, 0, 0, 0, -1}, {NULL, 2, 0, 0, 0, -1}};
+Stream streams[3] = {{.index = 0, .pushed = -1}, {.index = 1, .pushed = -1}, {.index = 2, .pushed = -1}};
 
 CRT void *__acrt_iob_func(unsigned index)
 {
@@ -695,7 +701,8 @@ CRT int putchar(int c) { return fputc(c, __acrt_iob_func(1)); }
 CRT int puts(const char *text) { return fputs(text, __acrt_iob_func(1)) < 0 || putchar('\n') < 0 ? -1 : 0; }
 CRT int fflush(void *stream) { return 0; }
 CRT int _fileno(void *stream) { return stream ? ((Stream *)stream)->index : -1; }
-CRT intptr_t _get_osfhandle(int fd) { return fd >= 0 && fd <= 2 ? (intptr_t)streams[fd].handle : -1; }
+static intptr_t descriptor_handle(int fd);
+CRT intptr_t _get_osfhandle(int fd) { return descriptor_handle(fd); }
 
 /* ---- formatted output ---- */
 typedef struct {
@@ -980,8 +987,12 @@ CRT int __stdio_common_vsnprintf_s(unsigned long long options, char *buffer, siz
 	return __stdio_common_vsprintf(options, buffer, count < size ? count + 1 : size, text, locale, arguments);
 }
 
+static void msvcrt_attach(void);
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 {
+	if (reason == DLL_PROCESS_ATTACH)
+		msvcrt_attach();
 	return TRUE;
 }
 
@@ -990,3 +1001,4 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 #include "ucrtbase_msvcrt.c"
 #include "ucrtbase_cpp.c"
 #include "ucrtbase_cxx.c"
+#include "ucrtbase_more.c"

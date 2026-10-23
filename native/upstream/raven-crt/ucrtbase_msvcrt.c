@@ -9,6 +9,22 @@ CRT int _fmode;
 CRT int _commode;
 CRT char **__initenv;
 CRT wchar_t **__winitenv;
+#undef __argc
+#undef __argv
+CRT int __argc;
+CRT char **__argv;
+/* The command line, which the startup code of older programs reads straight from these variables. */
+CRT char *_acmdln;
+CRT wchar_t *_wcmdln;
+
+static void msvcrt_attach(void)
+{
+	_acmdln = (char *)GetCommandLineA();
+	_wcmdln = GetCommandLineW();
+}
+
+/* The startup code of programs built by MinGW-w64 against msvcrt asks the runtime to set up the numeric locale fields; they already are. */
+CRT int __lconv_init(void) { return 0; }
 
 /* The arguments and environment a msvcrt program's startup code asks for before it calls main. */
 CRT int __getmainargs(int *count, char ***vector, char ***environment_out, int wildcard, void *startup)
@@ -17,8 +33,8 @@ CRT int __getmainargs(int *count, char ***vector, char ***environment_out, int w
 		_configure_narrow_argv(1);
 	if (!environment)
 		_initialize_narrow_environment();
-	*count = argument_count;
-	*vector = argument_vector;
+	*count = __argc = argument_count;
+	*vector = __argv = argument_vector;
 	*environment_out = environment;
 	__initenv = environment;
 	return 0;
