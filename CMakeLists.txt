@@ -21,6 +21,13 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(RAVEN_FIXTURE_CC x86_64-w64-mingw32-gcc)
 set(RAVEN_TESTDATA_DIR "${CMAKE_BINARY_DIR}/testdata" CACHE PATH "Generated and downloaded test fixtures")
 set(RAVEN_MINESWEEPER "" CACHE FILEPATH "Optional user-supplied Minesweeper executable")
+file(GLOB_RECURSE RAVEN_FIXTURE_INPUTS CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/testdata/d3d11/*.c ${PROJECT_SOURCE_DIR}/testdata/d3d11/*.h
+    ${PROJECT_SOURCE_DIR}/testdata/d3d12/*.c ${PROJECT_SOURCE_DIR}/testdata/d3d12/*.h
+    ${PROJECT_SOURCE_DIR}/testdata/d3d9test/*.c ${PROJECT_SOURCE_DIR}/testdata/benchmark/*.c
+    ${PROJECT_SOURCE_DIR}/testdata/native_loader/*.hex)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/scripts/provision-fixtures.py ${RAVEN_FIXTURE_INPUTS})
 if(RAVEN_FIXTURE_CC)
     set(FIXTURE_ARGUMENTS --cc ${RAVEN_FIXTURE_CC})
 else()
