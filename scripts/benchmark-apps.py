@@ -170,6 +170,9 @@ def main():
         for name, program, arguments, ready, result in workloads:
             if selected and name not in selected:
                 continue
+            if not program.is_file():
+                rows.extend((name, runtime, None, None, None, None, "did not run: input absent") for runtime in ("raven", "wine"))
+                continue
             for runtime in ("raven", "wine"):
                 samples = []
                 for index in range(repeats + 1):

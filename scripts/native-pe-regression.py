@@ -163,7 +163,7 @@ def main():
     parser.add_argument("--llvm-readobj", type=Path, required=True)
     parser.add_argument("--graphics", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--fixture", type=Path, action="append", default=[])
+    parser.add_argument("--fixture", type=Path, action="append", default=[], help="Additional user-supplied PE input; may be repeated")
     parser.add_argument("--images", action="store_true", help="Compare every loaded byte at preferred and alternate bases")
     parser.add_argument("--exports", action="store_true", help="Compare export ordinals, names, addresses and forwarders")
     args = parser.parse_args()
@@ -173,7 +173,6 @@ def main():
              for component, package in manifest.items()
              for architecture in package["architectures"]
              for dll in package["dlls"]]
-    paths += [repo / "testdata/winmine/WINMINE.EXE", repo / "testdata/notepad.exe"]
     paths += args.fixture
     results = []
     try:
