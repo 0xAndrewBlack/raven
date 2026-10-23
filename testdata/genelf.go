@@ -5,20 +5,29 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 func main() {
-	if err := generateHello("testdata/hello.rv64"); err != nil {
+	output := "build/testdata"
+	if len(os.Args) > 1 {
+		output = os.Args[1]
+	}
+	if err := os.MkdirAll(output, 0755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println("wrote testdata/hello.rv64")
+	if err := generateHello(filepath.Join(output, "hello.rv64")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println("wrote", filepath.Join(output, "hello.rv64"))
 
-	if err := generateExit42("testdata/exit42.rv64"); err != nil {
+	if err := generateExit42(filepath.Join(output, "exit42.rv64")); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println("wrote testdata/exit42.rv64")
+	fmt.Println("wrote", filepath.Join(output, "exit42.rv64"))
 }
 
 // --- ELF64 structures (little-endian, RISC-V) ---

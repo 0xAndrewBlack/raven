@@ -61,6 +61,7 @@ def main():
     parser.add_argument("--cc", default="x86_64-w64-mingw32-gcc")
     parser.add_argument("--skip-downloads", action="store_true")
     parser.add_argument("--data-only", action="store_true")
+    parser.add_argument("--legacy", action="store_true", help="also build the earlier DLL, latency, RISC-V and Wayland fixtures")
     args = parser.parse_args()
     source = Path(__file__).resolve().parents[1] / "testdata"
     output = args.output.resolve()
@@ -99,6 +100,25 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([args.cc, "-O2", "-o", str(target), str(source / "d3d9test/d3d9test.c"),
                         "-ld3d9", "-luser32", "-lgdi32"], env=env, check=True)
+    if args.legacy:
+        dlls = output / "dll_fixture"
+        dlls.mkdir(exist_ok=True)
+        for name in ("raven_min", "raven_win32k"):
+            subprocess.run([args.cc, "-O0", "-shared", "-nostdlib", "-fno-stack-protector",
+                            "-Wl,--entry,_DllMainCRTStartup,--no-insert-timestamp", "-o", str(dlls / (name + ".dll")),
+                            str(source / "dll_fixture" / (name + ".c"))], env=env, check=True)
+        subprocess.run(["i686-w64-mingw32-gcc", "-nostdlib", "-fno-stack-protector", "-Wl,--entry,_raven_entry,--no-insert-timestamp",
+                        "-o", str(dlls / "raven_gui_min.exe"), str(source / "dll_fixture/raven_gui_min.c"),
+                        "-luser32", "-lgdi32", "-lkernel32"], env=env, check=True)
+        (output / "latency").mkdir(exist_ok=True)
+        subprocess.run([args.cc, "-O2", "-nostdlib", "-fno-stack-protector", "-Wl,--entry,entry,--no-insert-timestamp",
+                        "-o", str(output / "latency/latency.exe"), str(source / "latency/latency.c"),
+                        "-luser32", "-lkernel32"], env=env, check=True)
+        subprocess.run(["go", "run", str(source / "genelf.go"), str(output)], env=env | {"GO111MODULE": "off"}, check=True)
+        (output / "webserver").mkdir(exist_ok=True)
+        subprocess.run(["go", "build", "-trimpath", "-o", str(output / "webserver/webserver_rv64"),
+                        str(source / "webserver/main.go")], env=env | {"GOOS": "linux", "GOARCH": "riscv64", "GO111MODULE": "off"}, check=True)
+        subprocess.run(["make", "-C", str(source.parent), "-j1", "BUILD_DIR=" + str(output / "wayland")], env=env, check=True)
 
 
 if __name__ == "__main__":

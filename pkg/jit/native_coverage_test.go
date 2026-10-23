@@ -329,6 +329,12 @@ func TestNativeJITCoverageReport(t *testing.T) {
 	if os.Getenv("RAVEN_NATIVE_JIT_COVERAGE") != "1" {
 		t.Skip("set RAVEN_NATIVE_JIT_COVERAGE=1 for real-binary coverage")
 	}
+	if findFixture("testdata/games/DXBall.EXE") == "" {
+		t.Skip("set RAVEN_DXBALL to a user-supplied DX-Ball executable")
+	}
+	if findFixture("testdata/npp/notepad++.exe") == "" {
+		t.Skip("set RAVEN_TESTDATA_DIR to the provisioned fixture directory")
+	}
 	maxStarts := *nativeCoverageMaxStarts
 	if value := os.Getenv("RAVEN_NATIVE_JIT_MAX_STARTS"); value != "" {
 		v, err := strconv.Atoi(value)
@@ -437,6 +443,19 @@ func collectNativeCoverage(maxStarts int, hotnessPath string) (nativeCoverageRep
 }
 
 func findFixture(path string) string {
+	if path == "testdata/games/DXBall.EXE" {
+		if supplied := os.Getenv("RAVEN_DXBALL"); supplied != "" {
+			if info, err := os.Stat(supplied); err == nil && !info.IsDir() {
+				return supplied
+			}
+		}
+	}
+	if root := os.Getenv("RAVEN_TESTDATA_DIR"); root != "" {
+		candidate := filepath.Join(root, strings.TrimPrefix(path, "testdata/"))
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		return ""

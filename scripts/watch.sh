@@ -16,6 +16,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 source scripts/raven-cache.sh || exit 2
+FIXTURES="${RAVEN_TESTDATA_DIR:-$PWD/build/testdata}"
 SYSROOT="${RAVEN_SYSROOT:-/home/user/reactos-sysroot}"
 PNG="$RAVEN_ARTIFACT_ROOT/raven-final.png"
 LOG="$RAVEN_ARTIFACT_ROOT/watch.log"
@@ -28,9 +29,9 @@ RV="$RAVEN_CACHE_ROOT/bin/raven-watch"
 # Gates are climbed in order GUI_FIXTURE -> NOTEPAD_CASE -> NOTEPADPP_CASE. The CURRENT gate is the lowest one
 # not yet passing; we run that. (Until GUI_FIXTURE paints, that's GUI_FIXTURE - no point running
 # notepad/npp, which need everything GUI_FIXTURE needs plus CRT/COM.) Override with GATE=.
-NPP=testdata/npp/notepad++.exe
+NPP="$FIXTURES/npp/notepad++.exe"
 NP="$RAVEN_CACHE_ROOT/reactos-apps/notepad.exe"
-GUI_FIXTURE=testdata/dll_fixture/raven_gui_min.exe
+GUI_FIXTURE="$FIXTURES/dll_fixture/raven_gui_min.exe"
 GATE="${GATE:-GUI_FIXTURE}"
 case "$GATE" in
   NOTEPADPP_CASE) APP="$NPP" ;;

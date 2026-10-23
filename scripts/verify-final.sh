@@ -21,6 +21,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 2
 ROOT="$(pwd)"
 source scripts/raven-cache.sh || exit 2
+FIXTURES="${RAVEN_TESTDATA_DIR:-$PWD/build/testdata}"
 SYSROOT="${RAVEN_SYSROOT:-/home/user/reactos-sysroot}"
 RUN_DIR="$(mktemp -d "$RAVEN_TMPDIR/verify-final.XXXXXX")" || exit 2
 trap 'rm -rf "$RUN_DIR"' EXIT
@@ -77,7 +78,7 @@ fi
 
 # --- 4b. GUI_FIXTURE fixture: real user32+gdi32 GUI (no CRT/COM) ---
 say "4b. GUI_FIXTURE fixture - raven_gui_min.exe on REAL user32/gdi32"
-GUI=testdata/dll_fixture/raven_gui_min.exe
+GUI="$FIXTURES/dll_fixture/raven_gui_min.exe"
 gui_state="n/a"
 if [ -f "$GUI" ] && [ -d "$SYSROOT" ]; then
   timeout 25 "$RAVEN_VF" -wayland=false -sysroot "$SYSROOT" -trace-syscall \
@@ -103,7 +104,7 @@ render_real="n/a"
 # (guest issues real numbered win32k syscalls → pkg/gfx → PNG). NOTE: this
 # exercises the win32k engine + display path, NOT the real ReactOS gdi32.
 timeout 25 "$RAVEN_VF" -wayland=false -call-export demo -render-png "$PNG" \
-  testdata/dll_fixture/raven_win32k.dll </dev/null >"$RUN_DIR/png.out" 2>&1
+  "$FIXTURES/dll_fixture/raven_win32k.dll" </dev/null >"$RUN_DIR/png.out" 2>&1
 if [ -f "$PNG" ]; then
   echo "  wrote $PNG ($(file -b "$PNG" 2>/dev/null | cut -c1-40))"
   render_real="engine-only"
@@ -113,7 +114,7 @@ fi
 if [ "${WAYLAND:-0}" = 1 ]; then
   echo "  (opening live Wayland window - close it to continue)"
   timeout 20 "$RAVEN_VF" -wayland=true -call-export demo \
-    testdata/dll_fixture/raven_win32k.dll </dev/null >/dev/null 2>&1 || true
+    "$FIXTURES/dll_fixture/raven_win32k.dll" </dev/null >/dev/null 2>&1 || true
 fi
 
 # --- 6. verification summary ---

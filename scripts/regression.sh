@@ -16,6 +16,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 2
 ROOT="$(pwd)"
 source scripts/raven-cache.sh || exit 2
+FIXTURES="${RAVEN_TESTDATA_DIR:-$ROOT/build/testdata}"
 
 RAVEN="${RAVEN:-}"
 if [[ -z "$RAVEN" ]]; then
@@ -59,21 +60,25 @@ run_case() {
 echo "==> running regression cases"
 
 # 1. RISC-V ELF: prints a known string.
-run_case hello_rv64    20 "Hello, Tech VM!"        /dev/null testdata/hello.rv64
+run_case hello_rv64    20 "Hello, Tech VM!"        /dev/null "$FIXTURES/hello.rv64"
 
 # 2. RISC-V ELF: loads and runs to completion without crashing.
-run_case exit42_rv64   20 "\[loader\] ELF Type"   /dev/null testdata/exit42.rv64
+run_case exit42_rv64   20 "\[loader\] ELF Type"   /dev/null "$FIXTURES/exit42.rv64"
 
 # 3. Windows PE CLI: SQLite evaluates a query correctly (SELECT 2+2 -> 4).
 printf 'SELECT 2+2;\n.quit\n' > "$TMP/sql.in"
-run_case sqlite_select 30 "sqlite> *4"            "$TMP/sql.in" testdata/sqlite3.exe
+run_case sqlite_select 30 "sqlite> *4"            "$TMP/sql.in" "$FIXTURES/sqlite3.exe"
 
 # 4. Windows PE GUI: Notepad runs the message loop and exits cleanly.
-run_case notepad_run   25 "\[win32\] exit\(0\)"   /dev/null testdata/notepad.exe
+if [[ -n "${RAVEN_NOTEPAD:-}" && -f "$RAVEN_NOTEPAD" ]]; then
+  run_case notepad_run 25 "\[win32\] exit\(0\)" /dev/null "$RAVEN_NOTEPAD"
+else
+  echo "  SKIP  notepad_run: set RAVEN_NOTEPAD to a user-supplied executable"
+fi
 
 # 5-7. DLL export check: load a real (non-synthetic) PE DLL, run DllMain, call an
 #      export end-to-end, recover the correct return value.
-FIX=testdata/dll_fixture/raven_min.dll
+FIX="$FIXTURES/dll_fixture/raven_min.dll"
 run_case dll_add       20 "raven_add => 42"       /dev/null -call-export raven_add:20,22  "$FIX"
 run_case dll_magic     20 "raven_magic => 10794"  /dev/null -call-export raven_magic       "$FIX"
 run_case dll_sum3      20 "raven_sum3 => 6"        /dev/null -call-export raven_sum3:1,2,3  "$FIX"
@@ -83,7 +88,7 @@ run_case dll_double    20 "raven_double => 42"     /dev/null -call-export raven_
 # 8. Win32k syscall check: a real DLL issues a NUMBER-INDEXED win32k syscall
 #    (mov r10,rcx; mov eax,idx; syscall) that reaches the winmgr engine and
 #    returns the created HWND - the path real gdi32/user32 use.
-W32K=testdata/dll_fixture/raven_win32k.dll
+W32K="$FIXTURES/dll_fixture/raven_win32k.dll"
 run_case win32k_syscall 20 "nt_create => 65552" /dev/null -call-export nt_create:0x10000000,30,40,0x00C80064 "$W32K"
 
 echo "==> $PASS passed, $FAIL failed"
